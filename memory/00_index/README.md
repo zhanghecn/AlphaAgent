@@ -16,6 +16,7 @@
 - `03_data/`: Datafeed、Database、DataManager、历史数据/实时行情路径。
 - `04_a_share/`: A 股相关网关、数据源、策略/选股能力边界。
 - `05_runtime/`: 运行方式、调试方式、环境状态。
+- `06_requirements/`: 用户需求、策略思想、产品路线。
 - `09_decisions/`: 和用户确认过的决策、取舍、待办。
 
 ## 维护原则
