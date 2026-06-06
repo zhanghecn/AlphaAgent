@@ -44,6 +44,7 @@ read this file and verify against the local code/docs when needed.
     or XT data examples.
 - `tests/`: pytest tests.
 - `pyproject.toml`: project metadata and dependencies.
+- `requirements/`: product requirements and requirement analysis documents.
 - `memory/`: local project map maintained for future conversations.
 
 ## Current Environment Snapshot
@@ -155,8 +156,8 @@ writing tutorials, or adding data/strategy code, read:
 - `memory/03_data/data_flow.md`
 - `memory/04_a_share/capability_map.md`
 - `memory/05_runtime/run_debug.md`
-- `memory/06_requirements/alphaagent_requirement_map.md`
 - `memory/09_decisions/decisions.md`
+- `requirements/alphaagent_requirement_map.md`
 
 Memory folders:
 
@@ -166,8 +167,9 @@ Memory folders:
 - `memory/03_data/`: datafeed, database, DataManager, realtime/historical data paths.
 - `memory/04_a_share/`: A-share capabilities, plugin map, limitations, roadmap.
 - `memory/05_runtime/`: run/debug commands and environment notes.
-- `memory/06_requirements/`: user requirements, strategy ideas, and product roadmap.
 - `memory/09_decisions/`: user decisions, tradeoffs, pending tasks.
+
+Requirement documents live in `requirements/`, not `memory/`.
 
 Memory maintenance rules:
 
