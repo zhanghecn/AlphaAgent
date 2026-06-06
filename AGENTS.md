@@ -45,6 +45,8 @@ read this file and verify against the local code/docs when needed.
 - `tests/`: pytest tests.
 - `pyproject.toml`: project metadata and dependencies.
 - `requirements/`: product requirements and requirement analysis documents.
+  - `requirements/alphaagent_requirement_map.md`: raw requirement map.
+  - `requirements/alphaagent_functional_design.md`: functional modules and execution flow.
 - `memory/`: local project map maintained for future conversations.
 
 ## Current Environment Snapshot
