@@ -1,3 +1,16 @@
+# AlphaAgent
+
+AlphaAgent 是基于 VeighNa/vn.py 二次开发的 A 股量化交易与 Agent 投研系统。
+
+当前阶段目标：
+
+- 梳理 vn.py 的源码结构、数据链路、Gateway/Datafeed/Database 抽象。
+- 接入适合 A 股的行情、历史数据、财务数据和交易通道。
+- 构建服务端能力，为自动量化、智能选股、策略回测、实盘交易和 Agent 辅助决策打基础。
+- 在保留 `vnpy` Python 包名和插件兼容性的前提下，逐步沉淀属于 AlphaAgent 的上层服务、策略、数据和 Agent 模块。
+
+本项目底层来自 VeighNa/vn.py 4.4.0。以下内容保留原项目说明，便于继续查阅官方模块、插件和文档。
+
 # VeighNa - By Traders, For Traders, AI-Powered.
 
 <p align="center">

@@ -1,10 +1,11 @@
 [project]
 name = "vnpy"
 dynamic = ["version"]
-description = "A framework for developing quant trading systems."
+description = "AlphaAgent is an A-share quantitative trading and agent research system built on vn.py."
 readme = "README.md"
 license = {text = "MIT"}
 authors = [{name = "Xiaoyou Chen", email = "xiaoyou.chen@mail.vnpy.com"}]
+maintainers = [{name = "zhanghe", email = "2016976438@qq.com"}]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "License :: OSI Approved :: MIT License",
@@ -12,7 +13,6 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -21,7 +21,7 @@ classifiers = [
     "Natural Language :: Chinese (Simplified)",
     "Typing :: Typed",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "tzlocal>=5.3.1",
     "PySide6==6.8.2.1",
@@ -39,7 +39,7 @@ dependencies = [
     "requests>=2.32.0",
     "qrcode>=7.4.2"
 ]
-keywords = ["quant", "quantitative", "investment", "trading", "algotrading"]
+keywords = ["quant", "quantitative", "investment", "trading", "algotrading", "agent", "a-share"]
 
 [project.optional-dependencies]
 alpha = [
@@ -59,10 +59,10 @@ dev = [
 ]
 
 [project.urls]
-"Homepage" = "https://www.vnpy.com"
+"Homepage" = "https://github.com/zhanghecn/AlphaAgent"
 "Documentation" = "https://www.vnpy.com/docs"
-"Changes" = "https://github.com/vnpy/vnpy/blob/master/CHANGELOG.md"
-"Source" = "https://github.com/vnpy/vnpy/"
+"Changes" = "https://github.com/zhanghecn/AlphaAgent/blob/master/CHANGELOG.md"
+"Source" = "https://github.com/zhanghecn/AlphaAgent/"
 "Forum" = "https://www.vnpy.com/forum"
 
 [build-system]
