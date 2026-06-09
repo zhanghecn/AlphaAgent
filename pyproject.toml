@@ -42,6 +42,28 @@ dependencies = [
 keywords = ["quant", "quantitative", "investment", "trading", "algotrading", "agent", "a-share"]
 
 [project.optional-dependencies]
+server = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic-settings>=2.4",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.2",
+    "redis>=5.0",
+    "beautifulsoup4>=4.9.1",
+    "lxml>=4.2.1",
+    "pandas>=2.0.0",
+    "requests>=2.22.0",
+    "curl_cffi>=0.13.0",
+    "html5lib>=1.0.1",
+    "xlrd>=1.2.0",
+    "urllib3>=1.25.8",
+    "tqdm>=4.43.0",
+    "openpyxl>=3.0.3",
+    "jsonpath>=0.82",
+    "tabulate>=0.8.6",
+    "decorator>=4.4.2",
+    "akracer>=0.0.13",
+]
 alpha = [
     "polars>=1.26.0",
     "scipy>=1.15.2",
@@ -56,6 +78,8 @@ dev = [
     "scipy-stubs>=1.16.3.0",
     "hatchling>=1.27.0",
     "babel>=2.17.0",
+    "pytest>=8.3.0",
+    "httpx>=0.28.0",
 ]
 
 [project.urls]

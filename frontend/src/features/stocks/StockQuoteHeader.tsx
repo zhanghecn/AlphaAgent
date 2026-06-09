@@ -1,0 +1,74 @@
+import type { StockQuote } from "@/api/types";
+import {
+  formatPrice,
+  formatPct,
+  formatAmount,
+  formatMarketCap,
+  priceColorClass,
+  dataSourceLabel,
+} from "@/lib/utils";
+import { Badge } from "@/components/ui/badge";
+
+interface StockQuoteHeaderProps {
+  quote: StockQuote;
+}
+
+export function StockQuoteHeader({ quote }: StockQuoteHeaderProps) {
+  const colorClass = priceColorClass(quote.change_pct);
+
+  return (
+    <div className="space-y-3">
+      {/* Title row */}
+      <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+        <h1 className="break-words text-2xl font-bold leading-tight">{quote.name}</h1>
+        <span className="text-sm text-muted-foreground font-mono break-all">
+          {quote.vt_symbol}
+        </span>
+        <Badge variant="outline">{quote.exchange}</Badge>
+        {quote.industry && (
+          <Badge variant="secondary">{quote.industry}</Badge>
+        )}
+      </div>
+
+      {/* Price row */}
+      <div className="flex flex-wrap items-baseline gap-4">
+        <span className={`text-4xl font-bold tabular-nums ${colorClass}`}>
+          {formatPrice(quote.last_price)}
+        </span>
+        <span className={`text-lg tabular-nums ${colorClass}`}>
+          {quote.change != null
+            ? `${quote.change > 0 ? "+" : ""}${quote.change.toFixed(2)}`
+            : "--"}
+        </span>
+        <span className={`text-lg tabular-nums ${colorClass}`}>
+          {formatPct(quote.change_pct)}
+        </span>
+      </div>
+
+      {/* Detail grid */}
+      <div className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm sm:grid-cols-3 md:grid-cols-5 lg:grid-cols-8">
+        <QuoteField label="开盘" value={formatPrice(quote.open_price)} />
+        <QuoteField label="最高" value={formatPrice(quote.high_price)} />
+        <QuoteField label="最低" value={formatPrice(quote.low_price)} />
+        <QuoteField label="昨收" value={formatPrice(quote.previous_close)} />
+        <QuoteField label="成交额" value={formatAmount(quote.turnover)} />
+        <QuoteField label="换手率" value={quote.turnover_rate != null ? `${quote.turnover_rate.toFixed(2)}%` : "--"} />
+        <QuoteField label="市值" value={formatMarketCap(quote.market_cap)} />
+        <QuoteField label="PE" value={quote.pe != null ? quote.pe.toFixed(2) : "--"} />
+        <QuoteField label="PB" value={quote.pb != null ? quote.pb.toFixed(2) : "--"} />
+        <QuoteField label="成交量" value={quote.volume != null ? `${(quote.volume / 10000).toFixed(0)}万手` : "--"} />
+        <QuoteField label="地区" value={quote.area ?? "--"} />
+        <QuoteField label="数据" value={dataSourceLabel(quote.source)} />
+      </div>
+    </div>
+  );
+}
+
+function QuoteField({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0">
+      <span className="text-muted-foreground">{label}</span>
+      <p className="break-words tabular-nums font-medium">{value}</p>
+    </div>
+  );
+}

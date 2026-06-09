@@ -1,0 +1,89 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 222.2 47.4% 11.2%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 222.2 84% 4.9%;
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+/* A-share convention: rise = red, fall = green */
+.text-rise {
+  color: hsl(0 84% 60%);
+}
+.text-fall {
+  color: hsl(142 71% 45%);
+}
+.bg-rise {
+  background-color: hsl(0 84% 60%);
+}
+.bg-fall {
+  background-color: hsl(142 71% 45%);
+}
+
+/* ── Concept Tag Badge ── */
+.concept-tag {
+  @apply inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium
+    border transition-colors cursor-pointer select-none;
+}
+.concept-tag:hover {
+  @apply opacity-80;
+}
+.concept-tag-rise {
+  @apply bg-rose-50 text-rose-700 border-rose-200;
+}
+.concept-tag-fall {
+  @apply bg-emerald-50 text-emerald-700 border-emerald-200;
+}
+.concept-tag-flat {
+  @apply bg-gray-50 text-gray-600 border-gray-200;
+}
+.concept-tag-industry {
+  @apply bg-blue-50 text-blue-700 border-blue-200;
+}
+
+/* ── Rank Card Styles ── */
+.rank-badge {
+  @apply flex items-center justify-center rounded-full font-bold text-xs;
+  width: 1.5rem;
+  height: 1.5rem;
+}
+.rank-badge-top1 { @apply bg-red-500 text-white; }
+.rank-badge-top2 { @apply bg-orange-500 text-white; }
+.rank-badge-top3 { @apply bg-amber-500 text-white; }
+.rank-badge-default { @apply bg-gray-100 text-gray-600; }
+
+/* ── Sector Detail Panel ── */
+.sector-detail-panel {
+  @apply rounded-lg border bg-card p-4 shadow-sm;
+}

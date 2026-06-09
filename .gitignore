@@ -19,6 +19,7 @@ x64
 build
 dist
 *.local
+.env
 
 # VeighNa
 .vntrader
@@ -37,6 +38,12 @@ _templates
 # Misc
 .DS_Store
 *.mo
+.docker/
+frontend/node_modules/
+frontend/dist/
+.playwright/
+.playwright-cli/
+.claude/
 
 # Alpha
 lab/

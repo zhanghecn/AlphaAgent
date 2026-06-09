@@ -1,0 +1,582 @@
+"""Database schema for the AlphaAgent sync MVP."""
+
+from __future__ import annotations
+
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Column,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+
+metadata = MetaData()
+
+sync_sources = Table(
+    "sync_sources",
+    metadata,
+    Column("id", String(80), primary_key=True),
+    Column("name", String(120), nullable=False),
+    Column("kind", String(40), nullable=False),
+    Column("base_url", String(255), nullable=True),
+    Column("enabled", Boolean, nullable=False, server_default="true"),
+    Column("priority", Integer, nullable=False, server_default="100"),
+    Column("status", String(40), nullable=False, server_default="unknown"),
+    Column("message", Text, nullable=True),
+    Column("checked_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+sync_job_definitions = Table(
+    "sync_job_definitions",
+    metadata,
+    Column("id", String(80), primary_key=True),
+    Column("name", String(120), nullable=False),
+    Column("description", Text, nullable=False),
+    Column("source_id", String(80), ForeignKey("sync_sources.id"), nullable=False),
+    Column("target_table", String(80), nullable=False),
+    Column("enabled", Boolean, nullable=False, server_default="true"),
+    Column("default_params", JSONB, nullable=False, server_default="{}"),
+    Column("schedule_cron", String(80), nullable=True),
+    Column("last_status", String(40), nullable=True),
+    Column("last_run_id", BigInteger, nullable=True),
+    Column("last_started_at", DateTime(timezone=True), nullable=True),
+    Column("last_finished_at", DateTime(timezone=True), nullable=True),
+    Column("last_message", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+sync_job_runs = Table(
+    "sync_job_runs",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("job_id", String(80), ForeignKey("sync_job_definitions.id"), nullable=False),
+    Column("status", String(40), nullable=False),
+    Column("params", JSONB, nullable=False, server_default="{}"),
+    Column("rows_read", Integer, nullable=False, server_default="0"),
+    Column("rows_written", Integer, nullable=False, server_default="0"),
+    Column("message", Text, nullable=True),
+    Column("error_type", String(120), nullable=True),
+    Column("error_detail", Text, nullable=True),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+)
+
+stocks = Table(
+    "stocks",
+    metadata,
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("symbol", String(16), nullable=False),
+    Column("exchange", String(16), nullable=False),
+    Column("name", String(80), nullable=False),
+    Column("industry", String(120), nullable=True),
+    Column("area", String(80), nullable=True),
+    Column("last_price", Float, nullable=True),
+    Column("change_pct", Float, nullable=True),
+    Column("return_5d", Float, nullable=True),
+    Column("return_10d", Float, nullable=True),
+    Column("return_20d", Float, nullable=True),
+    Column("turnover", Float, nullable=True),
+    Column("market_cap", Float, nullable=True),
+    Column("pe", Float, nullable=True),
+    Column("pb", Float, nullable=True),
+    Column("turnover_rate", Float, nullable=True),
+    Column("trade_time", String(40), nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_stocks_symbol", stocks.c.symbol)
+Index("ix_stocks_name", stocks.c.name)
+
+stock_daily_bars = Table(
+    "stock_daily_bars",
+    metadata,
+    Column("vt_symbol", String(32), ForeignKey("stocks.vt_symbol", ondelete="CASCADE"), primary_key=True),
+    Column("trade_date", Date, primary_key=True),
+    Column("open_price", Float, nullable=False),
+    Column("close_price", Float, nullable=False),
+    Column("high_price", Float, nullable=False),
+    Column("low_price", Float, nullable=False),
+    Column("volume", Float, nullable=True),
+    Column("turnover", Float, nullable=True),
+    Column("change_pct", Float, nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_stock_daily_bars_trade_date", stock_daily_bars.c.trade_date)
+
+sectors = Table(
+    "sectors",
+    metadata,
+    Column("id", String(64), primary_key=True),
+    Column("name", String(160), nullable=False),
+    Column("type", String(40), nullable=False),
+    Column("category", String(160), nullable=True),
+    Column("path", JSONB, nullable=False, server_default="[]"),
+    Column("stock_count", Integer, nullable=True),
+    Column("change_pct", Float, nullable=True),
+    Column("market_cap", Float, nullable=True),
+    Column("turnover_rate", Float, nullable=True),
+    Column("rise_count", Integer, nullable=True),
+    Column("fall_count", Integer, nullable=True),
+    Column("leader_stock", String(120), nullable=True),
+    Column("leader_change_pct", Float, nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_sectors_name", sectors.c.name)
+Index("ix_sectors_type", sectors.c.type)
+
+sector_memberships = Table(
+    "sector_memberships",
+    metadata,
+    Column("sector_id", String(64), ForeignKey("sectors.id", ondelete="CASCADE"), primary_key=True),
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("symbol", String(16), nullable=False),
+    Column("exchange", String(16), nullable=False),
+    Column("name", String(80), nullable=False),
+    Column("change_pct", Float, nullable=True),
+    Column("return_5d", Float, nullable=True),
+    Column("return_10d", Float, nullable=True),
+    Column("return_20d", Float, nullable=True),
+    Column("turnover", Float, nullable=True),
+    Column("market_cap", Float, nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_sector_memberships_vt_symbol", sector_memberships.c.vt_symbol)
+
+stock_sector_memberships = Table(
+    "stock_sector_memberships",
+    metadata,
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("sector_id", String(64), primary_key=True),
+    Column("sector_name", String(160), nullable=False),
+    Column("sector_type", String(40), nullable=False),
+    Column("rank", Integer, nullable=True),
+    Column("confirmed", Boolean, nullable=True),
+    Column("is_precise", Boolean, nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_stock_sector_memberships_sector", stock_sector_memberships.c.sector_id)
+
+stock_business_segments = Table(
+    "stock_business_segments",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("vt_symbol", String(32), nullable=False),
+    Column("segment_name", String(240), nullable=False),
+    Column("segment_type", String(40), nullable=True),
+    Column("report_date", String(40), nullable=True),
+    Column("revenue", Float, nullable=True),
+    Column("revenue_ratio", Float, nullable=True),
+    Column("revenue_yoy", Float, nullable=True),
+    Column("gross_profit", Float, nullable=True),
+    Column("gross_profit_ratio", Float, nullable=True),
+    Column("gross_margin", Float, nullable=True),
+    Column("profit_ratio", Float, nullable=True),
+    Column("rank", Integer, nullable=True),
+    Column("confidence", Float, nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+    UniqueConstraint("vt_symbol", "segment_name", "report_date", name="uq_stock_business_segment"),
+)
+Index("ix_stock_business_segments_vt_symbol", stock_business_segments.c.vt_symbol)
+
+
+# ── Shenwan Industry Classification ──
+
+shenwan_industries = Table(
+    "shenwan_industries",
+    metadata,
+    Column("code", String(32), primary_key=True),
+    Column("name", String(160), nullable=False),
+    Column("level", Integer, nullable=False),
+    Column("parent_code", String(32), ForeignKey("shenwan_industries.code"), nullable=True),
+    Column("path", JSONB, nullable=False, server_default="[]"),
+    Column("stock_count", Integer, nullable=True),
+    Column("change_pct", Float, nullable=True),
+    Column("market_cap", Float, nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_shenwan_industries_level", shenwan_industries.c.level)
+Index("ix_shenwan_industries_parent_code", shenwan_industries.c.parent_code)
+Index("ix_shenwan_industries_name", shenwan_industries.c.name)
+
+shenwan_industry_members = Table(
+    "shenwan_industry_members",
+    metadata,
+    Column("industry_code", String(32), ForeignKey("shenwan_industries.code", ondelete="CASCADE"), primary_key=True),
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("symbol", String(16), nullable=False),
+    Column("exchange", String(16), nullable=False),
+    Column("name", String(80), nullable=False),
+    Column("market_cap", Float, nullable=True),
+    Column("change_pct", Float, nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_shenwan_industry_members_vt_symbol", shenwan_industry_members.c.vt_symbol)
+
+industry_chain_edges = Table(
+    "industry_chain_edges",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("as_of_date", Date, nullable=True),
+    Column("period", String(16), nullable=True),
+    Column("source_industry_code", String(32), ForeignKey("shenwan_industries.code"), nullable=False),
+    Column("target_industry_code", String(32), ForeignKey("shenwan_industries.code"), nullable=False),
+    Column("source_node_id", String(64), nullable=True),
+    Column("target_node_id", String(64), nullable=True),
+    Column("relationship_type", String(40), nullable=False),
+    Column("relation_type", String(40), nullable=True),
+    Column("strength", Float, nullable=False),
+    Column("score", Float, nullable=True),
+    Column("evidence_count", Integer, nullable=False, server_default="0"),
+    Column("evidence_detail", JSONB, nullable=False, server_default="[]"),
+    Column("evidence", JSONB, nullable=True),
+    Column("confidence", Float, nullable=True),
+    Column("level", Integer, nullable=False),
+    Column("source", String(160), nullable=False, server_default="alphaagent_supply_chain_inference"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+    UniqueConstraint(
+        "source_industry_code", "target_industry_code", "relationship_type", "level",
+        name="uq_industry_chain_edge",
+    ),
+)
+Index("ix_industry_chain_edges_source", industry_chain_edges.c.source_industry_code)
+Index("ix_industry_chain_edges_target", industry_chain_edges.c.target_industry_code)
+
+industry_board_mapping = Table(
+    "industry_board_mapping",
+    metadata,
+    Column("industry_code", String(32), ForeignKey("shenwan_industries.code", ondelete="CASCADE"), primary_key=True),
+    Column("board_id", String(64), primary_key=True),
+    Column("board_name", String(160), nullable=False),
+    Column("board_type", String(40), nullable=False),
+    Column("overlap_count", Integer, nullable=False, server_default="0"),
+    Column("overlap_ratio", Float, nullable=False, server_default="0.0"),
+    Column("source", String(160), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+
+# ── Sector dashboard: daily bars, metrics, period scores ──
+
+sector_daily_bars = Table(
+    "sector_daily_bars",
+    metadata,
+    Column("sector_id", String(64), ForeignKey("sectors.id", ondelete="CASCADE"), primary_key=True),
+    Column("trade_date", Date, primary_key=True),
+    Column("open_price", Float, nullable=False),
+    Column("close_price", Float, nullable=False),
+    Column("high_price", Float, nullable=False),
+    Column("low_price", Float, nullable=False),
+    Column("volume", Float, nullable=True),
+    Column("turnover", Float, nullable=True),
+    Column("change_pct", Float, nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_sector_daily_bars_trade_date", sector_daily_bars.c.trade_date)
+
+sector_daily_metrics = Table(
+    "sector_daily_metrics",
+    metadata,
+    Column("sector_id", String(64), ForeignKey("sectors.id", ondelete="CASCADE"), primary_key=True),
+    Column("trade_date", Date, primary_key=True),
+    Column("stock_count", Integer, nullable=True),
+    Column("rise_count", Integer, nullable=True),
+    Column("fall_count", Integer, nullable=True),
+    Column("flat_count", Integer, nullable=True),
+    Column("limit_up_count", Integer, nullable=True),
+    Column("limit_down_count", Integer, nullable=True),
+    Column("avg_change_pct", Float, nullable=True),
+    Column("median_change_pct", Float, nullable=True),
+    Column("turnover_weighted_change_pct", Float, nullable=True),
+    Column("market_cap_weighted_change_pct", Float, nullable=True),
+    Column("turnover", Float, nullable=True),
+    Column("main_net_inflow", Float, nullable=True),
+    Column("main_net_inflow_ratio", Float, nullable=True),
+    Column("leader_vt_symbol", String(32), nullable=True),
+    Column("leader_name", String(80), nullable=True),
+    Column("leader_change_pct", Float, nullable=True),
+    Column("leader_reason", String(80), nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_sector_daily_metrics_trade_date", sector_daily_metrics.c.trade_date)
+
+sector_period_scores = Table(
+    "sector_period_scores",
+    metadata,
+    Column("sector_id", String(64), ForeignKey("sectors.id", ondelete="CASCADE"), primary_key=True),
+    Column("as_of_date", Date, primary_key=True),
+    Column("period", String(16), primary_key=True),
+    Column("sector_type", String(40), nullable=True),
+    Column("return_pct", Float, nullable=True),
+    Column("rank_return", Integer, nullable=True),
+    Column("momentum_score", Float, nullable=True),
+    Column("breadth_score", Float, nullable=True),
+    Column("fund_score", Float, nullable=True),
+    Column("sentiment_score", Float, nullable=True),
+    Column("leader_score", Float, nullable=True),
+    Column("continuity_score", Float, nullable=True),
+    Column("liquidity_score", Float, nullable=True),
+    Column("risk_penalty", Float, nullable=True),
+    Column("heat_score", Float, nullable=True),
+    Column("trend_state", String(20), nullable=True),
+    Column("confidence", Float, nullable=True),
+    Column("evidence", JSONB, nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("computed_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_sector_period_scores_date", sector_period_scores.c.as_of_date)
+Index("ix_sector_period_scores_period", sector_period_scores.c.period)
+
+# ── Sector relation graph ──
+
+sector_relation_edges = Table(
+    "sector_relation_edges",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("as_of_date", Date, nullable=False),
+    Column("period", String(16), nullable=False),
+    Column("source_sector_id", String(64), ForeignKey("sectors.id", ondelete="CASCADE"), nullable=False),
+    Column("target_sector_id", String(64), ForeignKey("sectors.id", ondelete="CASCADE"), nullable=False),
+    Column("score", Float, nullable=True),
+    Column("shared_stock_count", Integer, nullable=True),
+    Column("shared_stock_ratio", Float, nullable=True),
+    Column("jaccard", Float, nullable=True),
+    Column("price_correlation", Float, nullable=True),
+    Column("fund_correlation", Float, nullable=True),
+    Column("limit_up_cooccurrence", Float, nullable=True),
+    Column("keyword_similarity", Float, nullable=True),
+    Column("leader_overlap", Float, nullable=True),
+    Column("evidence", JSONB, nullable=True),
+    Column("confidence", Float, nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("computed_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+    UniqueConstraint(
+        "as_of_date", "period", "source_sector_id", "target_sector_id",
+        name="uq_sector_relation_edge",
+    ),
+)
+Index("ix_sector_relation_edges_date", sector_relation_edges.c.as_of_date)
+Index("ix_sector_relation_edges_source", sector_relation_edges.c.source_sector_id)
+Index("ix_sector_relation_edges_target", sector_relation_edges.c.target_sector_id)
+
+# ── Dynamic industry chain (entity extraction + relationship scoring) ──
+
+industry_chain_nodes = Table(
+    "industry_chain_nodes",
+    metadata,
+    Column("id", String(64), primary_key=True),
+    Column("as_of_date", Date, nullable=True),
+    Column("name", String(160), nullable=False),
+    Column("node_type", String(40), nullable=True),
+    Column("stage", String(40), nullable=True),
+    Column("sector_id", String(64), ForeignKey("sectors.id", ondelete="SET NULL"), nullable=True),
+    Column("vt_symbol", String(32), nullable=True),
+    Column("keywords", JSONB, nullable=True),
+    Column("metrics", JSONB, nullable=True),
+    Column("evidence", JSONB, nullable=True),
+    Column("confidence", Float, nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_industry_chain_nodes_stage", industry_chain_nodes.c.stage)
+Index("ix_industry_chain_nodes_sector_id", industry_chain_nodes.c.sector_id)
+
+# ── Stock financial reports ──
+
+stock_financial_reports = Table(
+    "stock_financial_reports",
+    metadata,
+    Column("vt_symbol", String(32), ForeignKey("stocks.vt_symbol", ondelete="CASCADE"), primary_key=True),
+    Column("report_date", String(20), primary_key=True),
+    Column("period_type", String(20), primary_key=True),
+    Column("publish_date", String(20), nullable=True),
+    Column("revenue", Float, nullable=True),
+    Column("revenue_yoy", Float, nullable=True),
+    Column("revenue_qoq", Float, nullable=True),
+    Column("net_profit", Float, nullable=True),
+    Column("net_profit_yoy", Float, nullable=True),
+    Column("net_profit_qoq", Float, nullable=True),
+    Column("deducted_net_profit", Float, nullable=True),
+    Column("gross_margin", Float, nullable=True),
+    Column("net_margin", Float, nullable=True),
+    Column("roe", Float, nullable=True),
+    Column("debt_asset_ratio", Float, nullable=True),
+    Column("operating_cash_flow", Float, nullable=True),
+    Column("cash_flow_quality", Float, nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_stock_financial_reports_date", stock_financial_reports.c.report_date)
+
+stock_financial_statement_items = Table(
+    "stock_financial_statement_items",
+    metadata,
+    Column("vt_symbol", String(32), ForeignKey("stocks.vt_symbol", ondelete="CASCADE"), primary_key=True),
+    Column("report_date", String(20), primary_key=True),
+    Column("statement_type", String(40), primary_key=True),
+    Column("item_code", String(80), nullable=True),
+    Column("item_name", String(160), primary_key=True),
+    Column("value", Float, nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_stock_financial_stmt_items_date", stock_financial_statement_items.c.report_date)
+
+# ── Stock events (news, notices, announcements) ──
+
+stock_events = Table(
+    "stock_events",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("vt_symbol", String(32), ForeignKey("stocks.vt_symbol", ondelete="CASCADE"), nullable=False),
+    Column("event_date", String(20), nullable=False),
+    Column("event_type", String(40), nullable=False),
+    Column("title", String(500), nullable=True),
+    Column("summary", Text, nullable=True),
+    Column("url", String(500), nullable=True),
+    Column("keywords", JSONB, nullable=True),
+    Column("sentiment", String(20), nullable=True),
+    Column("importance", Float, nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_stock_events_vt_symbol", stock_events.c.vt_symbol)
+Index("ix_stock_events_date", stock_events.c.event_date)
+
+# ── Stock fund flows ──
+
+stock_fund_flows = Table(
+    "stock_fund_flows",
+    metadata,
+    Column("vt_symbol", String(32), ForeignKey("stocks.vt_symbol", ondelete="CASCADE"), primary_key=True),
+    Column("trade_date", String(20), primary_key=True),
+    Column("period", String(20), primary_key=True),
+    Column("main_net_inflow", Float, nullable=True),
+    Column("main_net_inflow_ratio", Float, nullable=True),
+    Column("super_large_net_inflow", Float, nullable=True),
+    Column("large_net_inflow", Float, nullable=True),
+    Column("medium_net_inflow", Float, nullable=True),
+    Column("small_net_inflow", Float, nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_stock_fund_flows_date", stock_fund_flows.c.trade_date)
+
+# ── Sector fund flows ──
+
+sector_fund_flows = Table(
+    "sector_fund_flows",
+    metadata,
+    Column("sector_id", String(64), ForeignKey("sectors.id", ondelete="CASCADE"), primary_key=True),
+    Column("trade_date", String(20), primary_key=True),
+    Column("period", String(20), primary_key=True),
+    Column("main_net_inflow", Float, nullable=True),
+    Column("main_net_inflow_ratio", Float, nullable=True),
+    Column("rank", Integer, nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_sector_fund_flows_date", sector_fund_flows.c.trade_date)
+
+# ── Stock hot ranks ──
+
+stock_hot_ranks = Table(
+    "stock_hot_ranks",
+    metadata,
+    Column("vt_symbol", String(32), ForeignKey("stocks.vt_symbol", ondelete="CASCADE"), primary_key=True),
+    Column("rank_time", String(30), primary_key=True),
+    Column("rank", Integer, nullable=True),
+    Column("rank_change", Float, nullable=True),
+    Column("keywords", JSONB, nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+    UniqueConstraint("vt_symbol", "rank_time", "source", name="uq_stock_hot_rank"),
+)
+Index("ix_stock_hot_ranks_time", stock_hot_ranks.c.rank_time)
+
+# ── Stock dragon-tiger board (龙虎榜) records ──
+
+stock_lhb_records = Table(
+    "stock_lhb_records",
+    metadata,
+    Column("vt_symbol", String(32), ForeignKey("stocks.vt_symbol", ondelete="CASCADE"), primary_key=True),
+    Column("trade_date", String(20), primary_key=True),
+    Column("reason", String(200), primary_key=True),
+    Column("buy_amount", Float, nullable=True),
+    Column("sell_amount", Float, nullable=True),
+    Column("net_amount", Float, nullable=True),
+    Column("departments", JSONB, nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_stock_lhb_records_date", stock_lhb_records.c.trade_date)
+
+
+def create_schema(engine) -> None:
+    """Create all AlphaAgent sync tables when they are missing."""
+
+    metadata.create_all(engine)
+

@@ -6,6 +6,9 @@
 
 - `alphaagent_requirement_map.md`: 原始需求和需求地图，整理用户想法。
 - `alphaagent_functional_design.md`: 功能模块与执行流程设计，说明系统要做什么、如何结合 vn.py、用户最终看到什么。
+- `alphaagent_service_frontend_execution_plan.md`: 服务端与前端执行方案，说明 vn.py 服务化边界、前端页面、API 契约、数据模型和 MVP 阶段。
+- `alphaagent_data_sync_management_plan.md`: 数据同步管理模块执行计划，说明数据源管理、定时同步、立即执行、任务状态、失败重试和稳定性设计。
+- `alphaagent_sector_stock_research_dashboard_plan.md`: 板块主线仪表盘与个股投研工作台执行计划，说明主线热度、板块关系图、动态产业链、季度财报、主营历史和前后端接口契约。
 
 ## 维护规则
 

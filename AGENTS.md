@@ -19,6 +19,7 @@ read this file and verify against the local code/docs when needed.
   scripts at repository root.
 - The project/product name is `AlphaAgent`. Keep the internal Python package name
   `vnpy` for now to preserve compatibility with vn.py plugins and imports.
+- Do not run `git commit` or `git push` unless the user explicitly asks for it.
 
 ## Repository Layout
 
@@ -47,6 +48,7 @@ read this file and verify against the local code/docs when needed.
 - `requirements/`: product requirements and requirement analysis documents.
   - `requirements/alphaagent_requirement_map.md`: raw requirement map.
   - `requirements/alphaagent_functional_design.md`: functional modules and execution flow.
+  - `requirements/alphaagent_service_frontend_execution_plan.md`: backend/frontend execution plan and API contract draft.
 - `memory/`: local project map maintained for future conversations.
 
 ## Current Environment Snapshot

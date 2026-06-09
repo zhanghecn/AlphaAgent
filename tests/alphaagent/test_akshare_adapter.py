@@ -1,0 +1,354 @@
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+from alphaagent.data_sources.akshare_adapter import (
+    AkShareAdapter,
+    _eastmoney_board_member_row_to_api,
+    _eastmoney_board_row_to_api,
+    _eastmoney_hsf10_sector_rows_to_api,
+    _eastmoney_quote_row_to_api,
+    _sina_member_row_to_api,
+)
+from alphaagent.market.cache import market_cache
+from alphaagent.market.providers import RealMarketDataClient
+
+
+def test_akshare_source_info_reads_integrated_source_tree() -> None:
+    adapter = AkShareAdapter()
+
+    info = adapter.info().to_api()
+
+    assert info["name"] == "akshare"
+    assert info["version"] != "unknown"
+    assert Path(str(info["package_dir"])).joinpath("_version.py").exists()
+
+
+def test_adapter_exposes_akshare_submodules_without_full_init() -> None:
+    sys.modules.pop("akshare", None)
+
+    adapter = AkShareAdapter()
+    adapter._install_namespace_package()
+
+    module = sys.modules["akshare"]
+    assert str(adapter.package_dir) in list(module.__path__)
+    assert not hasattr(module, "stock_zh_a_spot_em")
+
+
+def test_a_share_spot_normalizes_tencent_rows(monkeypatch) -> None:
+    market_cache.clear()
+    adapter = AkShareAdapter()
+
+    class FakeModule:
+        @staticmethod
+        def stock_zh_a_spot_tx():
+            return pd.DataFrame(
+                [
+                    {
+                        "code": "sh600487",
+                        "name": "亨通光电",
+                        "zxj": "15.26",
+                        "zd": "0.38",
+                        "zdf": "2.55",
+                        "zdf_d5": "5.10",
+                        "zdf_d10": "7.20",
+                        "zdf_d20": "12.30",
+                        "turnover": "123456",
+                        "zsz": "2370.70",
+                        "ltsz": "2350.31",
+                    }
+                ]
+            )
+
+    monkeypatch.setattr("importlib.import_module", lambda name: FakeModule)
+
+    data = adapter.a_share_spot(limit=1)
+
+    assert data["items"][0]["vt_symbol"] == "600487.SSE"
+    assert data["items"][0]["name"] == "亨通光电"
+    assert data["items"][0]["last_price"] == 15.26
+    assert data["items"][0]["turnover"] == 1234560000
+    assert data["items"][0]["market_cap"] == 237070000000
+    assert data["items"][0]["float_market_cap"] == 235031000000
+    assert data["items"][0]["return_20d"] == 12.30
+
+
+def test_a_share_spot_uses_prefixed_exchange_for_bse(monkeypatch) -> None:
+    market_cache.clear()
+    adapter = AkShareAdapter()
+
+    class FakeModule:
+        @staticmethod
+        def stock_zh_a_spot_tx():
+            return pd.DataFrame(
+                [
+                    {
+                        "code": "bj920206",
+                        "name": "N彩客",
+                        "zxj": "98.50",
+                        "zdf": "225.30",
+                        "turnover": "37888",
+                        "zsz": "70.47",
+                        "ltsz": "14.04",
+                    }
+                ]
+            )
+
+    monkeypatch.setattr("importlib.import_module", lambda name: FakeModule)
+
+    item = adapter.a_share_spot(limit=1)["items"][0]
+
+    assert item["symbol"] == "920206"
+    assert item["exchange"] == "BSE"
+    assert item["vt_symbol"] == "920206.BSE"
+
+
+def test_stock_detail_uses_fast_tencent_quote(monkeypatch) -> None:
+    market_cache.clear()
+    adapter = AkShareAdapter()
+
+    class FakeResponse:
+        text = (
+            'v_sh600487="1~亨通光电~600487~100.85~96.12~92.55~1243049~661907~'
+            '577572~100.80~27~100.74~182~100.73~51~100.70~1~100.68~90~'
+            '100.85~7~100.86~567~100.87~1~100.88~1048~100.89~188~~'
+            '20260608102722~4.73~4.92~100.88~92.55~100.85/1243049/12001902312~'
+            '1243049~1200190~5.08~77.04~~100.88~92.55~8.67~2465.97~2487.36~'
+            '7.67~105.73~86.51~2.53~-1460~96.55~56.26~92.80~~~~1.88~'
+            '1200190.2312";'
+        )
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+    monkeypatch.setattr("requests.get", lambda *args, **kwargs: FakeResponse())
+
+    item = adapter.stock_detail("600487", "SSE")
+
+    assert item["vt_symbol"] == "600487.SSE"
+    assert item["name"] == "亨通光电"
+    assert item["last_price"] == 100.85
+    assert item["change_pct"] == 4.92
+    assert item["source"] == "tencent.qt.gtimg"
+
+
+def test_list_stocks_uses_ttl_cache(monkeypatch) -> None:
+    market_cache.clear()
+    adapter = AkShareAdapter()
+    calls = {"count": 0}
+
+    def fake_page(page: int, page_size: int, sort: str):
+        del page, page_size, sort
+        calls["count"] += 1
+        return {
+            "items": [{"vt_symbol": "600487.SSE", "symbol": "600487", "name": "亨通光电"}],
+            "page": 1,
+            "page_size": 50,
+            "total": 1,
+            "source": "fake",
+        }
+
+    monkeypatch.setattr("alphaagent.data_sources.akshare_adapter._sina_all_a_page", fake_page)
+
+    first = adapter.list_stocks(page=1, page_size=50, sort="price")
+    second = adapter.list_stocks(page=1, page_size=50, sort="price")
+
+    assert first["items"][0]["vt_symbol"] == "600487.SSE"
+    assert second["items"][0]["vt_symbol"] == "600487.SSE"
+    assert calls["count"] == 1
+
+
+def test_source_status_cache_keeps_datetime_values(monkeypatch) -> None:
+    market_cache.clear()
+    adapter = AkShareAdapter()
+
+    monkeypatch.setattr(adapter, "list_stocks", lambda page=1, page_size=1: {"items": []})
+    monkeypatch.setattr(adapter, "stock_bars", lambda *args, **kwargs: {"items": [{"close": 1}]})
+    monkeypatch.setattr(adapter, "stock_business", lambda *args, **kwargs: {"summary": "ok"})
+    monkeypatch.setattr(adapter, "board_names", lambda *args, **kwargs: {"items": []})
+
+    first = adapter.source_status()
+    second = adapter.source_status()
+
+    assert first[0].to_api()["checked_at"]
+    assert second[0].to_api()["checked_at"]
+
+
+def test_stock_bars_return_latest_tail_records(monkeypatch) -> None:
+    adapter = AkShareAdapter()
+
+    class FakeModule:
+        @staticmethod
+        def stock_zh_a_hist_tx(symbol: str, start_date: str, end_date: str, adjust: str):
+            del symbol, start_date, end_date, adjust
+            return pd.DataFrame(
+                [
+                    {"date": "2020-01-01", "open": 1, "close": 1, "high": 1, "low": 1, "amount": 100},
+                    {"date": "2026-06-04", "open": 2, "close": 2, "high": 2, "low": 2, "amount": 200},
+                    {"date": "2026-06-05", "open": 3, "close": 3, "high": 3, "low": 3, "amount": 300},
+                ]
+            )
+
+    monkeypatch.setattr("importlib.import_module", lambda name: FakeModule)
+    monkeypatch.setattr("alphaagent.data_sources.akshare_adapter._tencent_stock_kline", lambda *args, **kwargs: pd.DataFrame())
+    monkeypatch.setattr("alphaagent.data_sources.akshare_adapter._eastmoney_stock_kline", lambda *args, **kwargs: pd.DataFrame())
+
+    data = adapter.stock_bars("600487", "SSE", limit=2, interval="1d")
+
+    assert [item["trade_date"] for item in data["items"]] == ["2026-06-04", "2026-06-05"]
+
+
+def test_sina_member_row_converts_market_caps_from_wan_yuan() -> None:
+    item = _sina_member_row_to_api(
+        {
+            "symbol": "sh600487",
+            "code": "600487",
+            "name": "亨通光电",
+            "trade": "96.12",
+            "amount": "1418168378",
+            "mktcap": "1879706.055",
+            "nmc": "1802680.125",
+        }
+    )
+
+    assert item["vt_symbol"] == "600487.SSE"
+    assert item["turnover"] == 1418168378
+    assert item["market_cap"] == 18797060550
+    assert item["float_market_cap"] == 18026801250
+    assert item["source"] == "akshare.stock_classify_sina"
+
+
+def test_sina_member_row_uses_prefixed_exchange_for_bse() -> None:
+    item = _sina_member_row_to_api(
+        {
+            "symbol": "bj920206",
+            "code": "920206",
+            "name": "N彩客",
+            "trade": "98.5",
+            "amount": "378880000",
+            "mktcap": "704700",
+        }
+    )
+
+    assert item["exchange"] == "BSE"
+    assert item["vt_symbol"] == "920206.BSE"
+
+
+def test_sina_member_row_uses_code_fallback_for_bse() -> None:
+    item = _sina_member_row_to_api(
+        {
+            "symbol": "bj920206",
+            "code": "920206",
+            "name": "N彩客",
+            "trade": "98.5",
+            "amount": "378880000",
+            "mktcap": "704700",
+        }
+    )
+
+    assert item["exchange"] == "BSE"
+    assert item["vt_symbol"] == "920206.BSE"
+
+
+def test_eastmoney_row_uses_code_fallback_for_bse() -> None:
+    item = _eastmoney_quote_row_to_api(
+        {
+            "f12": "920206",
+            "f13": 0,
+            "f14": "N彩客",
+            "f2": 88.7,
+            "f3": 192.93,
+            "f20": 6346150335,
+        }
+    )
+
+    assert item["exchange"] == "BSE"
+    assert item["vt_symbol"] == "920206.BSE"
+
+
+def test_eastmoney_board_row_exposes_realtime_metrics() -> None:
+    item = _eastmoney_board_row_to_api(
+        {
+            "f12": "BK1036",
+            "f14": "半导体",
+            "f3": 1.23,
+            "f20": 123456789,
+            "f104": 71,
+            "f105": 42,
+            "f128": "赛微微电",
+            "f136": 15.88,
+        },
+        "industry",
+    )
+
+    assert item["id"] == "BK1036"
+    assert item["name"] == "半导体"
+    assert item["type"] == "industry"
+    assert item["stock_count"] == 113
+    assert item["change_pct"] == 1.23
+    assert item["source"] == "eastmoney.push2.board"
+
+
+def test_eastmoney_board_member_row_uses_quote_shape() -> None:
+    item = _eastmoney_board_member_row_to_api(
+        {
+            "f12": "600487",
+            "f13": 1,
+            "f14": "亨通光电",
+            "f2": 10.01,
+            "f3": 2.34,
+            "f6": 123456789,
+            "f20": 987654321,
+        }
+    )
+
+    assert item["vt_symbol"] == "600487.SSE"
+    assert item["name"] == "亨通光电"
+    assert item["change_pct"] == 2.34
+    assert item["source"] == "eastmoney.push2.board"
+
+
+def test_eastmoney_hsf10_sector_rows_confirm_real_stock_memberships() -> None:
+    items = _eastmoney_hsf10_sector_rows_to_api(
+        [
+            {"BOARD_CODE": "1215", "BOARD_NAME": "通信", "BOARD_RANK": 1, "IS_PRECISE": None},
+            {"BOARD_CODE": "159", "BOARD_NAME": "江苏板块", "BOARD_RANK": 4, "IS_PRECISE": "0"},
+            {"BOARD_CODE": "1660", "BOARD_NAME": "光纤概念", "BOARD_RANK": 20, "IS_PRECISE": "1"},
+        ]
+    )
+
+    assert [item["id"] for item in items] == ["BK1215", "BK1660", "BK0159"]
+    by_id = {item["id"]: item for item in items}
+    assert by_id["BK1215"]["type"] == "industry"
+    assert by_id["BK0159"]["type"] == "region"
+    assert by_id["BK1660"]["type"] == "concept"
+    assert all(item["confirmed"] is True for item in items)
+    assert by_id["BK1660"]["is_precise"] is True
+
+
+def test_runtime_market_client_uses_akshare_public_methods() -> None:
+    assert issubclass(RealMarketDataClient, AkShareAdapter)
+    assert RealMarketDataClient.list_stocks is not AkShareAdapter.list_stocks
+    assert RealMarketDataClient.sector_stocks is not AkShareAdapter.sector_stocks
+    assert RealMarketDataClient.stock_bars is not AkShareAdapter.stock_bars
+    assert RealMarketDataClient.stock_business is AkShareAdapter.stock_business
+
+
+def test_runtime_market_client_prefers_local_synced_bars(monkeypatch) -> None:
+    local_payload = {"items": [{"trade_date": "2026-06-05", "close": 10}], "source": "postgresql.stock_daily_bars"}
+    monkeypatch.setattr("alphaagent.market.providers._local_stock_bars", lambda *args, **kwargs: local_payload)
+
+    client = RealMarketDataClient()
+
+    assert client.stock_bars("600487", "SSE") is local_payload
+
+
+def test_runtime_market_client_prefers_local_synced_stock_list(monkeypatch) -> None:
+    local_payload = {"items": [{"vt_symbol": "600487.SSE"}], "source": "postgresql.stocks"}
+    monkeypatch.setattr("alphaagent.market.providers._local_list_stocks", lambda *args, **kwargs: local_payload)
+
+    client = RealMarketDataClient()
+
+    assert client.list_stocks(page=1, page_size=50) is local_payload
