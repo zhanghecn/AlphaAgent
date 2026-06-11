@@ -11,9 +11,14 @@ import { Badge } from "@/components/ui/badge";
 
 interface StockQuoteHeaderProps {
   quote: StockQuote;
+  sealInfo?: {
+    limit_amount?: number | null;
+    limit_pool_type?: string;
+    continuous_limit_up_count?: number | null;
+  } | null;
 }
 
-export function StockQuoteHeader({ quote }: StockQuoteHeaderProps) {
+export function StockQuoteHeader({ quote, sealInfo }: StockQuoteHeaderProps) {
   const colorClass = priceColorClass(quote.change_pct);
 
   return (
@@ -27,6 +32,9 @@ export function StockQuoteHeader({ quote }: StockQuoteHeaderProps) {
         <Badge variant="outline">{quote.exchange}</Badge>
         {quote.industry && (
           <Badge variant="secondary">{quote.industry}</Badge>
+        )}
+        {sealInfo?.continuous_limit_up_count != null && sealInfo.continuous_limit_up_count > 0 && (
+          <Badge variant="destructive">{sealInfo.continuous_limit_up_count}连板</Badge>
         )}
       </div>
 
@@ -53,6 +61,10 @@ export function StockQuoteHeader({ quote }: StockQuoteHeaderProps) {
         <QuoteField label="昨收" value={formatPrice(quote.previous_close)} />
         <QuoteField label="成交额" value={formatAmount(quote.turnover)} />
         <QuoteField label="换手率" value={quote.turnover_rate != null ? `${quote.turnover_rate.toFixed(2)}%` : "--"} />
+        <QuoteField label="量比" value={quote.volume_ratio != null ? quote.volume_ratio.toFixed(2) : "--"} />
+        {sealInfo?.limit_amount != null && (
+          <QuoteField label="封单" value={formatAmount(sealInfo.limit_amount)} />
+        )}
         <QuoteField label="市值" value={formatMarketCap(quote.market_cap)} />
         <QuoteField label="PE" value={quote.pe != null ? quote.pe.toFixed(2) : "--"} />
         <QuoteField label="PB" value={quote.pb != null ? quote.pb.toFixed(2) : "--"} />

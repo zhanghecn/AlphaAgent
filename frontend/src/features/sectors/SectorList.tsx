@@ -2,12 +2,14 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { fetchSectorStocks, fetchSectorTrend, fetchSectors } from "@/api/sectors";
-import type { SectorInfo, SectorTrend, StockQuote } from "@/api/types";
+import type { SectorInfo, StockQuote } from "@/api/types";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { Badge } from "@/components/ui/badge";
+import { SectorTrendPanel } from "@/components/SectorTrendPanel";
 import { formatAmount, formatMarketCap, formatPct, formatPrice, priceColorClass } from "@/lib/utils";
+import { ArrowUp, ArrowDown, ArrowUpDown } from "lucide-react";
 
 const SECTOR_TYPES = [
   { value: "industry", label: "行业" },
@@ -111,6 +113,7 @@ function SectorGrid({
 
 function SectorMembers({ sector }: { sector: SectorInfo | null }) {
   const navigate = useNavigate();
+  const [sort, setSort] = useState<{ key: string; direction: "asc" | "desc" }>({ key: "change_pct", direction: "desc" });
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["sector-stocks", sector?.id],
     queryFn: () => fetchSectorStocks(sector!.id, 1, 30, true),
@@ -121,6 +124,28 @@ function SectorMembers({ sector }: { sector: SectorInfo | null }) {
     queryFn: () => fetchSectorTrend(sector!.id),
     enabled: !!sector,
   });
+
+  // Client-side sorting (small dataset ~30 rows)
+  const sortedItems = useMemo(() => {
+    const items = data?.items ?? [];
+    if (!sort) return items;
+    const { key, direction } = sort;
+    return [...items].sort((a: StockQuote, b: StockQuote) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const av = Number((a as any)[key] ?? 0) || 0;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const bv = Number((b as any)[key] ?? 0) || 0;
+      return direction === "desc" ? bv - av : av - bv;
+    });
+  }, [data?.items, sort]);
+
+  function toggleSort(key: string) {
+    setSort((prev) =>
+      prev.key === key
+        ? { key, direction: prev.direction === "desc" ? "asc" : "desc" }
+        : { key, direction: "desc" },
+    );
+  }
 
   if (!sector) {
     return <div className="rounded-md border p-4 text-sm text-muted-foreground">请选择板块</div>;
@@ -158,17 +183,17 @@ function SectorMembers({ sector }: { sector: SectorInfo | null }) {
                   <th className="px-3 py-2 text-left">代码</th>
                   <th className="px-3 py-2 text-left">名称</th>
                   <th className="px-3 py-2 text-right">最新价</th>
-                  <th className="px-3 py-2 text-right">涨跌幅</th>
-                  <th className="px-3 py-2 text-right">5日</th>
-                  <th className="px-3 py-2 text-right">10日</th>
-                  <th className="px-3 py-2 text-right">20日</th>
-                  <th className="px-3 py-2 text-right">成交额</th>
-                  <th className="px-3 py-2 text-right">换手率</th>
-                  <th className="px-3 py-2 text-right">市值</th>
+                  <SortHeader label="涨跌幅" sortKey="change_pct" sort={sort} onSort={toggleSort} />
+                  <SortHeader label="5日" sortKey="return_5d" sort={sort} onSort={toggleSort} />
+                  <SortHeader label="10日" sortKey="return_10d" sort={sort} onSort={toggleSort} />
+                  <SortHeader label="20日" sortKey="return_20d" sort={sort} onSort={toggleSort} />
+                  <SortHeader label="成交额" sortKey="turnover" sort={sort} onSort={toggleSort} />
+                  <SortHeader label="换手率" sortKey="turnover_rate" sort={sort} onSort={toggleSort} />
+                  <SortHeader label="市值" sortKey="market_cap" sort={sort} onSort={toggleSort} />
                 </tr>
               </thead>
               <tbody>
-                {(data?.items ?? []).map((stock: StockQuote) => (
+                {sortedItems.map((stock: StockQuote) => (
                   <tr
                     key={stock.vt_symbol}
                     className="cursor-pointer border-t hover:bg-muted/40"
@@ -201,68 +226,28 @@ function SectorMembers({ sector }: { sector: SectorInfo | null }) {
   );
 }
 
-function SectorTrendPanel({
-  trend,
-  isLoading,
-  isError,
-  onRetry,
-}: {
-  trend?: SectorTrend;
-  isLoading: boolean;
-  isError: boolean;
-  onRetry: () => void;
-}) {
-  if (isLoading) {
-    return <LoadingState rows={2} />;
-  }
-  if (isError) {
-    return <ErrorState message="板块趋势指标加载失败" onRetry={onRetry} />;
-  }
-  if (!trend) {
-    return <div className="rounded-md border p-3 text-sm text-muted-foreground">暂无板块趋势指标</div>;
-  }
-
-  const primary = trend.turnover_weighted_change_pct ?? trend.avg_change_pct;
-  return (
-    <div className="rounded-md border">
-      <div className="grid gap-0 sm:grid-cols-2 lg:grid-cols-4">
-        <TrendMetric label="趋势" value={trendStateLabel(trend.trend_state)} valueClass={priceColorClass(primary)} />
-        <TrendMetric label="成交额加权涨幅" value={formatPct(trend.turnover_weighted_change_pct)} valueClass={priceColorClass(trend.turnover_weighted_change_pct)} />
-        <TrendMetric label="上涨家数" value={`${trend.rise_count}/${trend.sample_size}`} subValue={formatRatio(trend.rise_ratio)} valueClass={priceColorClass((trend.rise_ratio ?? 50) - 50)} />
-        <TrendMetric label="板块成交额" value={formatAmount(trend.turnover)} />
-      </div>
-      <div className="grid gap-0 border-t sm:grid-cols-2 lg:grid-cols-4">
-        <TrendMetric label="平均涨幅" value={formatPct(trend.avg_change_pct)} valueClass={priceColorClass(trend.avg_change_pct)} />
-        <TrendMetric label="市值加权涨幅" value={formatPct(trend.market_cap_weighted_change_pct)} valueClass={priceColorClass(trend.market_cap_weighted_change_pct)} />
-        <TrendMetric label="下跌家数" value={`${trend.fall_count}/${trend.sample_size}`} subValue={formatRatio(trend.fall_ratio)} valueClass={priceColorClass(50 - (trend.fall_ratio ?? 50))} />
-        <TrendMetric label="涨跌停" value={`${trend.limit_up_count} / ${trend.limit_down_count}`} />
-      </div>
-      <div className="border-t px-3 py-2 text-xs text-muted-foreground">
-        样本来自真实板块成分股行情，数据源: {trend.source ?? "--"}
-      </div>
-    </div>
-  );
-}
-
-function TrendMetric({
-  label,
-  value,
-  subValue,
-  valueClass,
-}: {
+function SortHeader({ label, sortKey, sort, onSort }: {
   label: string;
-  value: string;
-  subValue?: string;
-  valueClass?: string;
+  sortKey: string;
+  sort: { key: string; direction: "asc" | "desc" };
+  onSort: (key: string) => void;
 }) {
+  const isActive = sort.key === sortKey;
   return (
-    <div className="border-b px-3 py-2 last:border-b-0 sm:border-r lg:border-b-0">
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <div className="mt-1 flex items-baseline gap-2">
-        <span className={`text-sm font-semibold tabular-nums ${valueClass ?? ""}`}>{value}</span>
-        {subValue && <span className="text-xs text-muted-foreground tabular-nums">{subValue}</span>}
-      </div>
-    </div>
+    <th className="px-3 py-2 text-right">
+      <button
+        type="button"
+        className="inline-flex items-center gap-1 hover:text-foreground transition-colors"
+        onClick={() => onSort(sortKey)}
+      >
+        {label}
+        {isActive ? (
+          sort.direction === "desc" ? <ArrowDown size={12} /> : <ArrowUp size={12} />
+        ) : (
+          <ArrowUpDown size={12} className="opacity-40" />
+        )}
+      </button>
+    </th>
   );
 }
 
@@ -272,20 +257,6 @@ function ReturnCell({ value }: { value: number | null | undefined }) {
       {formatPct(value)}
     </td>
   );
-}
-
-function trendStateLabel(state: SectorTrend["trend_state"]) {
-  if (state === "STRONG_UP") return "强势上涨";
-  if (state === "UP") return "上涨";
-  if (state === "STRONG_DOWN") return "强势下跌";
-  if (state === "DOWN") return "下跌";
-  if (state === "RANGE") return "震荡";
-  return "未知";
-}
-
-function formatRatio(value: number | null | undefined) {
-  if (value == null) return "--";
-  return `${value.toFixed(1)}%`;
 }
 
 function typeLabel(type: string) {

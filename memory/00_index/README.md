@@ -16,6 +16,7 @@
 - `03_data/`: Datafeed、Database、DataManager、历史数据/实时行情路径。
 - `04_a_share/`: A 股相关网关、数据源、策略/选股能力边界。
 - `05_runtime/`: 运行方式、调试方式、环境状态。
+- `06_backtests/`: 已执行回测的样本范围、参数、指标和限制。
 - `09_decisions/`: 和用户确认过的决策、取舍、待办。
 
 需求分析文档单独放在项目根目录的 `requirements/`，例如 `requirements/alphaagent_requirement_map.md`。

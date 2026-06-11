@@ -5,6 +5,9 @@ from __future__ import annotations
 
 INDEX_SYMBOLS: tuple[dict[str, str], ...] = (
     {"symbol": "000001", "exchange": "SSE", "name": "上证指数"},
+    {"symbol": "000300", "exchange": "SSE", "name": "沪深300"},
+    {"symbol": "000905", "exchange": "SSE", "name": "中证500"},
+    {"symbol": "000852", "exchange": "SSE", "name": "中证1000"},
     {"symbol": "399001", "exchange": "SZSE", "name": "深证成指"},
     {"symbol": "399006", "exchange": "SZSE", "name": "创业板指"},
     {"symbol": "000688", "exchange": "SSE", "name": "科创50"},

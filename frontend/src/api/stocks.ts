@@ -14,6 +14,7 @@ export interface StockListParams {
   page?: number;
   page_size?: number;
   sort?: string;
+  order?: "asc" | "desc";
 }
 
 export function fetchStocks(params: StockListParams = {}) {
@@ -22,6 +23,7 @@ export function fetchStocks(params: StockListParams = {}) {
   if (params.page) qs.set("page", String(params.page));
   if (params.page_size) qs.set("page_size", String(params.page_size));
   if (params.sort) qs.set("sort", params.sort);
+  if (params.order) qs.set("order", params.order);
   const search = qs.toString();
   return apiClient.get<StockListData>(`/stocks${search ? `?${search}` : ""}`);
 }

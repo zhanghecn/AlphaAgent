@@ -210,9 +210,12 @@ function LimitPoolSection({
 }) {
   if (isLoading) return <LoadingState rows={2} />;
 
-  const limitUp = data?.pools?.limit_up?.length ?? 0;
-  const limitDown = data?.pools?.limit_down?.length ?? 0;
-  const strong = data?.pools?.strong?.length ?? 0;
+  const ztPool = data?.pools?.zt;
+  const dtgcPool = data?.pools?.dtgc;
+  const strongPool = data?.pools?.strong;
+  const limitUp = ztPool?.items?.length ?? 0;
+  const limitDown = dtgcPool?.items?.length ?? 0;
+  const strongCount = strongPool?.items?.length ?? 0;
 
   return (
     <section className="rounded-lg border p-4">
@@ -230,17 +233,17 @@ function LimitPoolSection({
           <div className="text-xs text-muted-foreground">跌停</div>
         </div>
         <div className="rounded-lg bg-amber-50 p-2">
-          <div className="text-xl font-bold text-amber-600">{strong}</div>
+          <div className="text-xl font-bold text-amber-600">{strongCount}</div>
           <div className="text-xs text-muted-foreground">强势</div>
         </div>
       </div>
       {/* Top limit-up stocks */}
-      {data?.pools?.limit_up && data.pools.limit_up.length > 0 && (
+      {ztPool && ztPool.items.length > 0 && (
         <div className="mt-3 space-y-1">
-          {data.pools.limit_up.slice(0, 5).map((s) => (
+          {ztPool.items.slice(0, 5).map((s) => (
             <Link
-              key={s.code}
-              to={`/stocks/${s.code}.SSE`}
+              key={s.vt_symbol}
+              to={`/stocks/${s.vt_symbol}`}
               className="flex items-center justify-between rounded px-2 py-1 text-xs transition-colors hover:bg-muted/50"
             >
               <span className="truncate font-medium">{s.name}</span>

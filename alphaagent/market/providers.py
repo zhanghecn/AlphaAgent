@@ -31,17 +31,23 @@ class RealMarketDataClient(AkShareAdapter):
     def market_overview(self) -> dict[str, object]:
         return _mark_live_api(super().market_overview(), fallback_used=False)
 
-    def list_stocks(self, page: int = 1, page_size: int = 50, sort: str = "mktcap") -> dict[str, object]:
-        local = _local_list_stocks(page=page, page_size=page_size, sort=sort, q="")
+    def list_stocks(self, page: int = 1, page_size: int = 50, sort: str = "mktcap", order: str = "desc") -> dict[str, object]:
+        local = _local_list_stocks(page=page, page_size=page_size, sort=sort, q="", order=order)
         if local:
             return local
-        return _mark_live_api(super().list_stocks(page=page, page_size=page_size, sort=sort), fallback_used=True)
+        try:
+            return _mark_live_api(super().list_stocks(page=page, page_size=page_size, sort=sort, order=order), fallback_used=False)
+        except Exception:
+            raise
 
     def search_stocks(self, query: str, page_size: int = 50) -> dict[str, object]:
         local = _local_list_stocks(page=1, page_size=page_size, sort="mktcap", q=query)
         if local and (query.strip() or local.get("items")):
             return local
-        return _mark_live_api(super().search_stocks(query, page_size=page_size), fallback_used=True)
+        try:
+            return _mark_live_api(super().search_stocks(query, page_size=page_size), fallback_used=False)
+        except Exception:
+            raise
 
     def stock_detail(self, symbol: str, exchange: str | None = None) -> dict[str, object]:
         return _mark_live_api(super().stock_detail(symbol, exchange), fallback_used=False)
@@ -61,9 +67,12 @@ class RealMarketDataClient(AkShareAdapter):
         with_returns: bool = False,
         q: str = "",
     ) -> dict[str, object]:
-        local = _local_sector_stocks(sector_id, page=page, page_size=page_size, sort=sort, with_returns=with_returns, q=q)
-        if local:
-            return local
+        # Local DB lacks period return data — skip when returns are requested
+        skip_local = with_returns or sort.strip().lower() in ("return_5d", "return_10d", "return_20d")
+        if not skip_local:
+            local = _local_sector_stocks(sector_id, page=page, page_size=page_size, sort=sort, with_returns=with_returns, q=q)
+            if local:
+                return local
         return _mark_live_api(
             super().sector_stocks(sector_id, page=page, page_size=page_size, sort=sort, with_returns=with_returns, q=q),
             fallback_used=True,
@@ -114,12 +123,12 @@ def _mark_live_api(data: dict[str, object], fallback_used: bool) -> dict[str, ob
     }
 
 
-def _local_list_stocks(page: int, page_size: int, sort: str, q: str) -> dict[str, object] | None:
+def _local_list_stocks(page: int, page_size: int, sort: str, q: str, order: str = "desc") -> dict[str, object] | None:
     try:
         from alphaagent.server.services.data_sync import local_list_stocks
     except Exception:
         return None
-    return local_list_stocks(page=page, page_size=page_size, sort=sort, q=q)
+    return local_list_stocks(page=page, page_size=page_size, sort=sort, q=q, order=order)
 
 
 def _local_list_sectors(sector_type: str) -> dict[str, object] | None:

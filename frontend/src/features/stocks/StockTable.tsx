@@ -34,7 +34,7 @@ import {
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { EmptyState } from "@/components/EmptyState";
-import { Search, ArrowUpDown, ChevronLeft, ChevronRight, Database, Radio } from "lucide-react";
+import { Search, ArrowUpDown, ArrowUp, ArrowDown, ChevronLeft, ChevronRight, Database, Radio } from "lucide-react";
 
 export function StockTable() {
   const navigate = useNavigate();
@@ -55,23 +55,28 @@ export function StockTable() {
           ? "changepercent"
         : sorting[0].id === "turnover_rate"
             ? "turnoverratio"
-            : sorting[0].id === "return_5d"
-              ? "return_5d"
-              : sorting[0].id === "return_10d"
-                ? "return_10d"
-                : sorting[0].id === "return_20d"
-                  ? "return_20d"
-            : "mktcap"
+            : sorting[0].id === "volume_ratio"
+              ? "volume_ratio"
+              : sorting[0].id === "return_5d"
+                ? "return_5d"
+                : sorting[0].id === "return_10d"
+                  ? "return_10d"
+                  : sorting[0].id === "return_20d"
+                    ? "return_20d"
+              : "mktcap"
     : "mktcap";
 
+  const orderParam = sorting[0]?.desc ? "desc" : "asc";
+
   const { data, isLoading, isError, error, refetch } = useQuery({
-    queryKey: ["stocks", appliedSearch, page, sortParam],
+    queryKey: ["stocks", appliedSearch, page, sortParam, orderParam],
     queryFn: () =>
       fetchStocks({
         q: appliedSearch || undefined,
         page,
         page_size: pageSize,
         sort: sortParam,
+        order: orderParam as "asc" | "desc",
       }),
   });
 
@@ -137,7 +142,7 @@ export function StockTable() {
       {
         accessorKey: "return_5d",
         header: ({ column }) => (
-          <SortableColumnButton label="5日" onClick={() => column.toggleSorting(column.getIsSorted() === "asc")} />
+          <SortableColumnButton label="5日" onClick={() => column.toggleSorting(column.getIsSorted() === "asc")} sorted={column.getIsSorted()} />
         ),
         cell: ({ getValue }) => (
           <span className={`tabular-nums ${priceColorClass(getValue() as number | null)}`}>
@@ -149,7 +154,7 @@ export function StockTable() {
       {
         accessorKey: "return_10d",
         header: ({ column }) => (
-          <SortableColumnButton label="10日" onClick={() => column.toggleSorting(column.getIsSorted() === "asc")} />
+          <SortableColumnButton label="10日" onClick={() => column.toggleSorting(column.getIsSorted() === "asc")} sorted={column.getIsSorted()} />
         ),
         cell: ({ getValue }) => (
           <span className={`tabular-nums ${priceColorClass(getValue() as number | null)}`}>
@@ -161,7 +166,7 @@ export function StockTable() {
       {
         accessorKey: "return_20d",
         header: ({ column }) => (
-          <SortableColumnButton label="20日" onClick={() => column.toggleSorting(column.getIsSorted() === "asc")} />
+          <SortableColumnButton label="20日" onClick={() => column.toggleSorting(column.getIsSorted() === "asc")} sorted={column.getIsSorted()} />
         ),
         cell: ({ getValue }) => (
           <span className={`tabular-nums ${priceColorClass(getValue() as number | null)}`}>
@@ -204,6 +209,24 @@ export function StockTable() {
           return <span className="tabular-nums">{val != null ? `${val.toFixed(2)}%` : "--"}</span>;
         },
         size: 80,
+      },
+      {
+        accessorKey: "volume_ratio",
+        header: ({ column }) => (
+          <button
+            type="button"
+            className="flex items-center gap-1"
+            onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
+          >
+            量比
+            <ArrowUpDown size={14} />
+          </button>
+        ),
+        cell: ({ getValue }) => {
+          const val = getValue() as number | null;
+          return <span className="tabular-nums">{val != null ? val.toFixed(2) : "--"}</span>;
+        },
+        size: 72,
       },
       {
         accessorKey: "market_cap",
@@ -298,7 +321,7 @@ export function StockTable() {
       ) : (
         <>
           <div className="overflow-x-auto rounded-md border">
-          <Table className="min-w-[1120px]">
+          <Table className="min-w-[1190px]">
             <TableHeader>
               {table.getHeaderGroups().map((hg) => (
                 <TableRow key={hg.id}>
@@ -365,11 +388,15 @@ export function StockTable() {
   );
 }
 
-function SortableColumnButton({ label, onClick }: { label: string; onClick: () => void }) {
+function SortableColumnButton({ label, onClick, sorted }: { label: string; onClick: () => void; sorted?: false | "asc" | "desc" }) {
   return (
     <button type="button" className="flex items-center gap-1" onClick={onClick}>
       {label}
-      <ArrowUpDown size={14} />
+      {sorted ? (
+        sorted === "desc" ? <ArrowDown size={14} /> : <ArrowUp size={14} />
+      ) : (
+        <ArrowUpDown size={14} className="opacity-40" />
+      )}
     </button>
   );
 }

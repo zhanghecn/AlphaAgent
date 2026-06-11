@@ -9,21 +9,24 @@
  */
 import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { useMemo } from "react";
 import {
   fetchStockDetail,
   fetchStockSnapshot,
   fetchStockBusiness,
 } from "@/api/stocks";
 import { fetchConceptCards } from "@/api/research";
+import { fetchLimitPools } from "@/api/market";
 import { StockQuoteHeader } from "@/features/stocks/StockQuoteHeader";
 import { StockKlineChart } from "@/features/stocks/StockKlineChart";
 import { StockIndicatorPanel } from "@/features/stocks/StockIndicatorPanel";
+import { StockFinanceChart } from "@/features/stocks/StockFinanceChart";
 import { ConceptTag } from "@/components/ConceptTag";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { Badge } from "@/components/ui/badge";
 import { formatPct, cn } from "@/lib/utils";
-import type { ConceptCard, ShenwanClassification, StockConceptCardsResponse } from "@/types/research";
+import type { ConceptCard, ShenwanClassification, StockConceptCardsResponse, ConceptHint } from "@/types/research";
 import type { StockSnapshot, StockBusiness as StockBusinessType } from "@/api/types";
 import {
   Fingerprint,
@@ -33,6 +36,7 @@ import {
   Building2,
   Flame,
   ArrowRight,
+  TrendingUp,
 } from "lucide-react";
 
 export function StockDetailPage() {
@@ -65,6 +69,33 @@ export function StockDetailPage() {
     enabled: !!vtSymbol,
   });
 
+  // Limit pool data — for seal order (封单) display
+  const limitPoolQuery = useQuery({
+    queryKey: ["limit-pools-seal", vtSymbol],
+    queryFn: () => fetchLimitPools(),
+    staleTime: 60_000,
+    enabled: !!vtSymbol,
+  });
+
+  const sealInfo = useMemo(() => {
+    const pools = limitPoolQuery.data?.pools ?? {};
+    const stockCode = vtSymbol!.split(".")[0];
+    // Backend pool keys: zt, zt_previous, strong, zbgc, dtgc
+    for (const poolKey of ["zt", "strong", "zbgc", "dtgc"] as const) {
+      const group = pools[poolKey];
+      const items = group?.items ?? [];
+      const match = items.find((item) => item.symbol === stockCode);
+      if (match) {
+        return {
+          limit_amount: match.limit_amount ?? null,
+          limit_pool_type: poolKey,
+          continuous_limit_up_count: match.limit_up_count ?? null,
+        };
+      }
+    }
+    return null;
+  }, [limitPoolQuery.data, vtSymbol]);
+
   if (!vtSymbol) return <ErrorState message="无效的股票代码" />;
 
   if (quoteQuery.isLoading) return <LoadingState rows={6} />;
@@ -91,7 +122,7 @@ export function StockDetailPage() {
   return (
     <div className="space-y-5">
       {/* Quote header (reused) */}
-      <StockQuoteHeader quote={quote} />
+      <StockQuoteHeader quote={quote} sealInfo={sealInfo} />
 
       {/* Data evidence bar */}
       <StockDataEvidence sources={sources} missing={missing} />
@@ -136,6 +167,15 @@ export function StockDetailPage() {
           <ShenwanHierarchy shenwan={concepts?.shenwan} />
         </section>
       </div>
+
+      {/* Historical Financial Reports */}
+      <section className="rounded-lg border p-3 sm:p-4">
+        <h3 className="mb-3 flex items-center gap-2 text-sm font-medium">
+          <TrendingUp size={14} />
+          历史财报
+        </h3>
+        <StockFinanceChart vtSymbol={vtSymbol} />
+      </section>
     </div>
   );
 }
@@ -153,6 +193,7 @@ function IdentityCard({
 
   const cards = conceptData?.cards ?? [];
   const shenwan = conceptData?.shenwan;
+  const hint = conceptData?.concept_hint;
 
   // Find the "hottest" concept (highest |change_pct|)
   const hottest: ConceptCard | null = cards.reduce<ConceptCard | null>(
@@ -175,6 +216,9 @@ function IdentityCard({
           </span>
         )}
       </div>
+
+      {/* ── 概念解读面板 ── */}
+      {hint && hint.main_identity && <ConceptHintPanel hint={hint} />}
 
       {/* Shenwan industry path */}
       {shenwan && (shenwan.level1 || shenwan.level2 || shenwan.level3) && (
@@ -236,6 +280,77 @@ function IdentityCard({
         </div>
       )}
     </section>
+  );
+}
+
+// ── Concept Hint Panel (概念解读) ──
+
+function ConceptHintPanel({ hint }: { hint: ConceptHint }) {
+  const res = hint.resonance;
+  const resonanceColor = res?.level_color === "rise"
+    ? "text-rise"
+    : res?.level_color === "fall"
+      ? "text-fall"
+      : "text-muted-foreground";
+
+  return (
+    <div className="mb-4 rounded-lg border bg-card/80 px-4 py-3 space-y-2">
+      {/* 一句话定位 */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-muted-foreground">核心定位</span>
+        <span className="text-sm font-semibold text-primary">
+          {hint.main_identity}
+        </span>
+      </div>
+
+      {/* 主题聚类标签 */}
+      {hint.themes.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-xs text-muted-foreground">主线</span>
+          {hint.themes.slice(0, 4).map((t) => (
+            <Badge
+              key={t.name}
+              variant="outline"
+              className="text-xs gap-1 px-2 py-0"
+            >
+              {t.name}
+              <span className="text-muted-foreground">×{t.strength}</span>
+            </Badge>
+          ))}
+          {hint.themes.length > 4 && (
+            <span className="text-xs text-muted-foreground">
+              +{hint.themes.length - 4}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* 共振指示器 */}
+      {res && res.total > 0 && (
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className="text-muted-foreground">概念共振</span>
+          {/* Mini bar */}
+          <div className="flex h-3 w-24 overflow-hidden rounded-sm bg-muted">
+            <div
+              className="bg-rise/70"
+              style={{ width: `${(res.rising / res.total) * 100}%` }}
+            />
+            <div
+              className="bg-muted-foreground/30"
+              style={{ width: `${(res.flat / res.total) * 100}%` }}
+            />
+            <div
+              className="bg-fall/70"
+              style={{ width: `${(res.falling / res.total) * 100}%` }}
+            />
+          </div>
+          <span className={resonanceColor}>{res.level}</span>
+          <span className="text-muted-foreground">
+            {res.rising}/{res.total}上涨
+          </span>
+        </div>
+      )}
+    </div>
   );
 }
 

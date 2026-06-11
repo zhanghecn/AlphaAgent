@@ -274,6 +274,7 @@ def _collect_score_input(
     inp = SectorScoreInput(
         sector_id=sector_id,
         sector_type=sector_type,
+        period="",
         as_of_date=as_of_date,
     )
 

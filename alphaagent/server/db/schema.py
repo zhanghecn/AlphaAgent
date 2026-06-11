@@ -94,6 +94,7 @@ stocks = Table(
     Column("pe", Float, nullable=True),
     Column("pb", Float, nullable=True),
     Column("turnover_rate", Float, nullable=True),
+    Column("volume_ratio", Float, nullable=True),
     Column("trade_time", String(40), nullable=True),
     Column("source", String(160), nullable=False),
     Column("raw", JSONB, nullable=False, server_default="{}"),
@@ -121,6 +122,27 @@ stock_daily_bars = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
 )
 Index("ix_stock_daily_bars_trade_date", stock_daily_bars.c.trade_date)
+
+stock_minute_bars = Table(
+    "stock_minute_bars",
+    metadata,
+    Column("vt_symbol", String(32), ForeignKey("stocks.vt_symbol", ondelete="CASCADE"), primary_key=True),
+    Column("bar_time", DateTime(timezone=False), primary_key=True),
+    Column("interval", String(8), primary_key=True),
+    Column("trade_date", Date, nullable=False),
+    Column("open_price", Float, nullable=False),
+    Column("close_price", Float, nullable=False),
+    Column("high_price", Float, nullable=False),
+    Column("low_price", Float, nullable=False),
+    Column("volume", Float, nullable=True),
+    Column("turnover", Float, nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_stock_minute_bars_trade_date", stock_minute_bars.c.trade_date)
+Index("ix_stock_minute_bars_symbol_date", stock_minute_bars.c.vt_symbol, stock_minute_bars.c.trade_date)
 
 sectors = Table(
     "sectors",
@@ -446,6 +468,7 @@ stock_financial_reports = Table(
     Column("net_profit_yoy", Float, nullable=True),
     Column("net_profit_qoq", Float, nullable=True),
     Column("deducted_net_profit", Float, nullable=True),
+    Column("eps", Float, nullable=True),
     Column("gross_margin", Float, nullable=True),
     Column("net_margin", Float, nullable=True),
     Column("roe", Float, nullable=True),
@@ -575,8 +598,297 @@ stock_lhb_records = Table(
 Index("ix_stock_lhb_records_date", stock_lhb_records.c.trade_date)
 
 
+# ── Quant strategy, backtest, portfolio, simulation ──
+
+quant_strategy_templates = Table(
+    "quant_strategy_templates",
+    metadata,
+    Column("id", String(80), primary_key=True),
+    Column("name", String(160), nullable=False),
+    Column("strategy_type", String(60), nullable=False),
+    Column("version", String(40), nullable=False),
+    Column("enabled", Boolean, nullable=False, server_default="true"),
+    Column("description", Text, nullable=True),
+    Column("params", JSONB, nullable=False, server_default="{}"),
+    Column("source", String(160), nullable=False, server_default="alphaagent.quant"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_quant_strategy_templates_type", quant_strategy_templates.c.strategy_type)
+
+quant_signal_runs = Table(
+    "quant_signal_runs",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("strategy_id", String(80), nullable=False),
+    Column("strategy_version", String(40), nullable=False),
+    Column("trade_date", Date, nullable=False),
+    Column("status", String(40), nullable=False),
+    Column("params", JSONB, nullable=False, server_default="{}"),
+    Column("candidate_count", Integer, nullable=False, server_default="0"),
+    Column("signal_count", Integer, nullable=False, server_default="0"),
+    Column("recommendation_count", Integer, nullable=False, server_default="0"),
+    Column("message", Text, nullable=True),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+)
+Index("ix_quant_signal_runs_date", quant_signal_runs.c.trade_date)
+Index("ix_quant_signal_runs_strategy", quant_signal_runs.c.strategy_id)
+
+quant_stock_signals = Table(
+    "quant_stock_signals",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("run_id", BigInteger, ForeignKey("quant_signal_runs.id", ondelete="CASCADE"), nullable=True),
+    Column("trade_date", Date, nullable=False),
+    Column("vt_symbol", String(32), nullable=False),
+    Column("strategy_id", String(80), nullable=False),
+    Column("strategy_version", String(40), nullable=False),
+    Column("signal_type", String(80), nullable=False),
+    Column("total_score", Float, nullable=True),
+    Column("relative_strength_score", Float, nullable=True),
+    Column("washout_score", Float, nullable=True),
+    Column("trend_quality_score", Float, nullable=True),
+    Column("sector_mainline_score", Float, nullable=True),
+    Column("financial_improvement_score", Float, nullable=True),
+    Column("liquidity_score", Float, nullable=True),
+    Column("risk_score", Float, nullable=True),
+    Column("entry_signal", Boolean, nullable=False, server_default="false"),
+    Column("risk_level", String(20), nullable=True),
+    Column("evidence", JSONB, nullable=True),
+    Column("source", String(160), nullable=False, server_default="alphaagent.quant.signal"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("trade_date", "vt_symbol", "strategy_id", "strategy_version", name="uq_quant_stock_signal"),
+)
+Index("ix_quant_stock_signals_date", quant_stock_signals.c.trade_date)
+Index("ix_quant_stock_signals_vt_symbol", quant_stock_signals.c.vt_symbol)
+
+quant_recommendations = Table(
+    "quant_recommendations",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("run_id", BigInteger, ForeignKey("quant_signal_runs.id", ondelete="CASCADE"), nullable=True),
+    Column("trade_date", Date, nullable=False),
+    Column("vt_symbol", String(32), nullable=False),
+    Column("strategy_id", String(80), nullable=False),
+    Column("strategy_version", String(40), nullable=False),
+    Column("rank", Integer, nullable=False),
+    Column("action", String(40), nullable=False),
+    Column("horizon", String(40), nullable=False),
+    Column("confidence", Float, nullable=True),
+    Column("total_score", Float, nullable=True),
+    Column("reason", JSONB, nullable=True),
+    Column("risk_control", JSONB, nullable=True),
+    Column("status", String(40), nullable=False, server_default="active"),
+    Column("expires_at", Date, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("trade_date", "vt_symbol", "strategy_id", "strategy_version", name="uq_quant_recommendation"),
+)
+Index("ix_quant_recommendations_date", quant_recommendations.c.trade_date)
+Index("ix_quant_recommendations_vt_symbol", quant_recommendations.c.vt_symbol)
+
+backtest_runs = Table(
+    "backtest_runs",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("strategy_id", String(80), nullable=False),
+    Column("strategy_version", String(40), nullable=False),
+    Column("start_date", Date, nullable=False),
+    Column("end_date", Date, nullable=False),
+    Column("status", String(40), nullable=False),
+    Column("initial_cash", Float, nullable=False),
+    Column("final_equity", Float, nullable=True),
+    Column("params", JSONB, nullable=False, server_default="{}"),
+    Column("metrics", JSONB, nullable=True),
+    Column("message", Text, nullable=True),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+)
+Index("ix_backtest_runs_strategy", backtest_runs.c.strategy_id)
+
+backtest_orders = Table(
+    "backtest_orders",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("backtest_id", BigInteger, ForeignKey("backtest_runs.id", ondelete="CASCADE"), nullable=False),
+    Column("trade_date", Date, nullable=False),
+    Column("vt_symbol", String(32), nullable=False),
+    Column("side", String(20), nullable=False),
+    Column("price", Float, nullable=True),
+    Column("volume", Integer, nullable=True),
+    Column("status", String(40), nullable=False),
+    Column("reason", String(240), nullable=True),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+Index("ix_backtest_orders_run", backtest_orders.c.backtest_id)
+
+backtest_trades = Table(
+    "backtest_trades",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("backtest_id", BigInteger, ForeignKey("backtest_runs.id", ondelete="CASCADE"), nullable=False),
+    Column("trade_date", Date, nullable=False),
+    Column("vt_symbol", String(32), nullable=False),
+    Column("side", String(20), nullable=False),
+    Column("price", Float, nullable=False),
+    Column("volume", Integer, nullable=False),
+    Column("amount", Float, nullable=False),
+    Column("fee", Float, nullable=False),
+    Column("pnl", Float, nullable=True),
+    Column("reason", String(240), nullable=True),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+Index("ix_backtest_trades_run", backtest_trades.c.backtest_id)
+Index("ix_backtest_trades_vt_symbol", backtest_trades.c.vt_symbol)
+
+backtest_daily_equity = Table(
+    "backtest_daily_equity",
+    metadata,
+    Column("backtest_id", BigInteger, ForeignKey("backtest_runs.id", ondelete="CASCADE"), primary_key=True),
+    Column("trade_date", Date, primary_key=True),
+    Column("cash", Float, nullable=False),
+    Column("market_value", Float, nullable=False),
+    Column("total_equity", Float, nullable=False),
+    Column("drawdown_pct", Float, nullable=True),
+    Column("position_count", Integer, nullable=False, server_default="0"),
+)
+Index("ix_backtest_daily_equity_date", backtest_daily_equity.c.trade_date)
+
+backtest_metrics = Table(
+    "backtest_metrics",
+    metadata,
+    Column("backtest_id", BigInteger, ForeignKey("backtest_runs.id", ondelete="CASCADE"), primary_key=True),
+    Column("metric_key", String(80), primary_key=True),
+    Column("metric_value", Float, nullable=True),
+    Column("metric_text", Text, nullable=True),
+    Column("raw", JSONB, nullable=True),
+)
+
+portfolio_groups = Table(
+    "portfolio_groups",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("name", String(120), nullable=False),
+    Column("group_type", String(40), nullable=False),
+    Column("description", Text, nullable=True),
+    Column("auto_managed", Boolean, nullable=False, server_default="false"),
+    Column("risk_profile", String(40), nullable=False, server_default="balanced"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+    UniqueConstraint("name", name="uq_portfolio_group_name"),
+)
+
+portfolio_group_items = Table(
+    "portfolio_group_items",
+    metadata,
+    Column("group_id", BigInteger, ForeignKey("portfolio_groups.id", ondelete="CASCADE"), primary_key=True),
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("name", String(80), nullable=True),
+    Column("source", String(40), nullable=False, server_default="manual"),
+    Column("reason", Text, nullable=True),
+    Column("strategy_id", String(80), nullable=True),
+    Column("strategy_version", String(40), nullable=True),
+    Column("expires_at", Date, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_portfolio_group_items_symbol", portfolio_group_items.c.vt_symbol)
+
+simulation_accounts = Table(
+    "simulation_accounts",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("name", String(120), nullable=False),
+    Column("initial_cash", Float, nullable=False),
+    Column("cash", Float, nullable=False),
+    Column("status", String(40), nullable=False, server_default="active"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+simulation_orders = Table(
+    "simulation_orders",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("account_id", BigInteger, ForeignKey("simulation_accounts.id", ondelete="CASCADE"), nullable=False),
+    Column("vt_symbol", String(32), nullable=False),
+    Column("side", String(20), nullable=False),
+    Column("price", Float, nullable=True),
+    Column("volume", Integer, nullable=True),
+    Column("amount", Float, nullable=True),
+    Column("status", String(40), nullable=False),
+    Column("reason", Text, nullable=True),
+    Column("recommendation_id", BigInteger, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_simulation_orders_account", simulation_orders.c.account_id)
+
+simulation_trades = Table(
+    "simulation_trades",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("account_id", BigInteger, ForeignKey("simulation_accounts.id", ondelete="CASCADE"), nullable=False),
+    Column("order_id", BigInteger, ForeignKey("simulation_orders.id", ondelete="SET NULL"), nullable=True),
+    Column("vt_symbol", String(32), nullable=False),
+    Column("side", String(20), nullable=False),
+    Column("price", Float, nullable=False),
+    Column("volume", Integer, nullable=False),
+    Column("amount", Float, nullable=False),
+    Column("fee", Float, nullable=False),
+    Column("pnl", Float, nullable=True),
+    Column("trade_time", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+Index("ix_simulation_trades_account", simulation_trades.c.account_id)
+
+simulation_positions = Table(
+    "simulation_positions",
+    metadata,
+    Column("account_id", BigInteger, ForeignKey("simulation_accounts.id", ondelete="CASCADE"), primary_key=True),
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("name", String(80), nullable=True),
+    Column("volume", Integer, nullable=False),
+    Column("available", Integer, nullable=False),
+    Column("cost_price", Float, nullable=False),
+    Column("last_price", Float, nullable=True),
+    Column("market_value", Float, nullable=True),
+    Column("floating_pnl", Float, nullable=True),
+    Column("floating_pnl_pct", Float, nullable=True),
+    Column("stop_loss_price", Float, nullable=True),
+    Column("take_profit_price", Float, nullable=True),
+    Column("trailing_stop_price", Float, nullable=True),
+    Column("source", String(40), nullable=False, server_default="manual"),
+    Column("reason", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+risk_events = Table(
+    "risk_events",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("account_id", BigInteger, ForeignKey("simulation_accounts.id", ondelete="CASCADE"), nullable=True),
+    Column("vt_symbol", String(32), nullable=True),
+    Column("event_type", String(80), nullable=False),
+    Column("severity", String(20), nullable=False),
+    Column("message", Text, nullable=False),
+    Column("context", JSONB, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+Index("ix_risk_events_account", risk_events.c.account_id)
+
+
 def create_schema(engine) -> None:
     """Create all AlphaAgent sync tables when they are missing."""
 
     metadata.create_all(engine)
+    _apply_compatible_schema_patches(engine)
 
+
+def _apply_compatible_schema_patches(engine) -> None:
+    """Patch columns added after early local databases were created."""
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql("ALTER TABLE stocks ADD COLUMN IF NOT EXISTS volume_ratio FLOAT")

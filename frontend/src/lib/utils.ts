@@ -18,11 +18,12 @@ export function formatPct(value: number | null | undefined): string {
   return `${sign}${value.toFixed(2)}%`;
 }
 
-/** Format large numbers (e.g. turnover) in 亿 */
+/** Format large numbers (e.g. turnover) in 亿/万 (supports negative values) */
 export function formatAmount(value: number | null | undefined): string {
   if (value == null) return "--";
-  if (value >= 1e8) return `${(value / 1e8).toFixed(2)}亿`;
-  if (value >= 1e4) return `${(value / 1e4).toFixed(2)}万`;
+  const abs = Math.abs(value);
+  if (abs >= 1e8) return `${(value / 1e8).toFixed(2)}亿`;
+  if (abs >= 1e4) return `${(value / 1e4).toFixed(2)}万`;
   return value.toFixed(2);
 }
 

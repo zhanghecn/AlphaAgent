@@ -17,6 +17,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import csv
+import io
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Sequence
@@ -28,8 +31,14 @@ from alphaagent.data_sources.akshare_adapter import AkShareAdapter
 from alphaagent.market.symbols import normalize_exchange, vt_symbol
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
+from alphaagent.server.services import research_sector_scores
 
 logger = logging.getLogger(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+ALLOWED_IMPORT_DIRS = (
+    PROJECT_ROOT / "data" / "imports",
+    PROJECT_ROOT / "memory" / "06_backtests",
+)
 
 # ─── Source / Job constants ──────────────────────────────────────────────
 
@@ -97,6 +106,15 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         schedule_cron="30 17 * * 1-5",
     ),
     JobDefinition(
+        id="sync_stock_minute_bars",
+        name="股票分钟 K 线",
+        description="同步高流动性/候选股票最近分钟线，用于尾盘 5 日线低吸入场验证。",
+        source_id="akshare",
+        target_table="stock_minute_bars",
+        default_params={"stock_limit": 100, "limit": 240, "interval": "1m", "only_missing": True},
+        schedule_cron="5 15 * * 1-5",
+    ),
+    JobDefinition(
         id="sync_stock_sector_memberships",
         name="股票-板块反向索引",
         description="重建每只股票所属板块的反向索引。",
@@ -160,6 +178,15 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         target_table="sector_fund_flows",
         default_params={"periods": ["即时", "3日", "5日", "10日"]},
         schedule_cron="*/10 9-15 * * 1-5",
+    ),
+    JobDefinition(
+        id="sync_sector_period_scores",
+        name="板块周期评分",
+        description="根据板块 K 线、资金流、成员涨跌和情绪事件计算主线热度评分。",
+        source_id="akshare",
+        target_table="sector_period_scores",
+        default_params={"periods": ["20d"], "sector_limit": 300},
+        schedule_cron="30 18 * * 1-5",
     ),
     JobDefinition(
         id="sync_limit_up_pools",
@@ -307,8 +334,20 @@ class DataSyncRunner:
 
     def _run_sync_stock_daily_bars(self, params: dict[str, Any]) -> dict[str, Any]:
         limit = int(params.get("limit", 250))
+        stock_limit = int(params.get("stock_limit", 0) or 0)
+        only_missing = _truthy(params.get("only_missing", False))
         with session_scope() as session:
-            stock_rows = session.execute(select(schema.stocks)).mappings().all()
+            query = select(schema.stocks).order_by(desc(schema.stocks.c.turnover), desc(schema.stocks.c.market_cap))
+            if only_missing:
+                existing_symbols = (
+                    select(schema.stock_daily_bars.c.vt_symbol)
+                    .group_by(schema.stock_daily_bars.c.vt_symbol)
+                    .having(func.count() >= min(limit, 80))
+                )
+                query = query.where(schema.stocks.c.vt_symbol.not_in(existing_symbols))
+            if stock_limit > 0:
+                query = query.limit(stock_limit)
+            stock_rows = session.execute(query).mappings().all()
         if not stock_rows:
             return {"rows_read": 0, "rows_written": 0, "message": "No stocks in DB; run sync_stock_list first."}
         total_read = 0
@@ -329,6 +368,64 @@ class DataSyncRunner:
             batch_size += 1
             if batch_size % 50 == 0:
                 logger.info("sync_stock_daily_bars: processed %d stocks", batch_size)
+        return {"rows_read": total_read, "rows_written": total_written}
+
+    def _run_sync_stock_minute_bars(self, params: dict[str, Any]) -> dict[str, Any]:
+        limit = int(params.get("limit", 240))
+        stock_limit = int(params.get("stock_limit", 100))
+        interval = str(params.get("interval", "1m")).strip().lower()
+        only_missing = _truthy(params.get("only_missing", True))
+        symbols = _param_list(params.get("symbols"))
+        start_date = _parse_date(params.get("start_date"))
+        end_date = _parse_date(params.get("end_date"))
+        if interval not in {"1m", "5m", "15m", "30m", "60m"}:
+            raise DataSyncError(f"Unsupported minute interval: {interval}")
+
+        with session_scope() as session:
+            query = select(schema.stocks).order_by(desc(schema.stocks.c.turnover), desc(schema.stocks.c.market_cap))
+            if symbols:
+                query = query.where(schema.stocks.c.vt_symbol.in_(symbols))
+            if only_missing:
+                coverage_start = start_date or date.today() - timedelta(days=10)
+                coverage_end = end_date or date.today()
+                expected_floor = min(limit, 60)
+                existing_symbols = (
+                    select(schema.stock_minute_bars.c.vt_symbol)
+                    .where(
+                        (schema.stock_minute_bars.c.interval == interval)
+                        & (schema.stock_minute_bars.c.trade_date >= coverage_start)
+                        & (schema.stock_minute_bars.c.trade_date <= coverage_end)
+                    )
+                    .group_by(schema.stock_minute_bars.c.vt_symbol)
+                    .having(func.count() >= expected_floor)
+                )
+                query = query.where(schema.stocks.c.vt_symbol.not_in(existing_symbols))
+            if stock_limit > 0:
+                query = query.limit(min(stock_limit, 5000 if symbols else 500))
+            stock_rows = session.execute(query).mappings().all()
+        if not stock_rows:
+            return {"rows_read": 0, "rows_written": 0, "message": "No stocks need minute sync."}
+
+        total_read = 0
+        total_written = 0
+        for stock_row in stock_rows:
+            symbol = str(stock_row["symbol"])
+            exchange = str(stock_row["exchange"])
+            try:
+                data = self.adapter.stock_bars(
+                    symbol,
+                    exchange,
+                    limit=limit,
+                    interval=interval,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            except Exception as exc:
+                logger.debug("stock_minute_bars(%s, %s) failed: %s", symbol, interval, exc)
+                continue
+            items = data.get("items") or []
+            total_read += len(items)
+            total_written += _upsert_minute_bars(symbol, exchange, items, interval, data.get("source", "akshare"))
         return {"rows_read": total_read, "rows_written": total_written}
 
     def _run_sync_stock_sector_memberships(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -446,27 +543,16 @@ class DataSyncRunner:
     def _run_sync_stock_fund_flows(self, params: dict[str, Any]) -> dict[str, Any]:
         stock_limit = int(params.get("stock_limit", 200))
         period = str(params.get("period", "即时"))
-        with session_scope() as session:
-            stock_rows = session.execute(
-                select(schema.stocks).limit(min(stock_limit, 1000))
-            ).mappings().all()
-        if not stock_rows:
-            return {"rows_read": 0, "rows_written": 0, "message": "No stocks in DB."}
-        total_read = 0
-        total_written = 0
-        for stock_row in stock_rows:
-            symbol = str(stock_row["symbol"])
-            exchange = str(stock_row["exchange"])
-            try:
-                data = self.adapter.stock_fund_flows(symbol, exchange=exchange, period=period)
-            except Exception as exc:
-                logger.debug("stock_fund_flows(%s) failed: %s", symbol, exc)
-                continue
-            items = data.get("items") or []
-            total_read += len(items)
-            written = _upsert_stock_fund_flows(symbol, exchange, items, period)
-            total_written += written
-        return {"rows_read": total_read, "rows_written": total_written}
+        try:
+            data = self.adapter.stock_fund_flows("", exchange="SSE", period=period, limit=min(max(stock_limit, 1), 5000))
+        except Exception as exc:
+            logger.debug("stock_fund_flows(all) failed: %s", exc)
+            return {"rows_read": 0, "rows_written": 0, "message": f"stock fund flow unavailable: {exc.__class__.__name__}"}
+        items = data.get("items") or []
+        if stock_limit > 0:
+            items = items[: min(stock_limit, 5000)]
+        rows_written = _upsert_stock_fund_flow_items(items, period)
+        return {"rows_read": len(items), "rows_written": rows_written}
 
     def _run_sync_stock_hot_ranks(self, params: dict[str, Any]) -> dict[str, Any]:
         limit = int(params.get("limit", 100))
@@ -484,14 +570,24 @@ class DataSyncRunner:
         rows_written = _upsert_stock_lhb_records(items)
         return {"rows_read": len(items), "rows_written": rows_written}
 
+    def _run_sync_sector_period_scores(self, params: dict[str, Any]) -> dict[str, Any]:
+        raw_periods = params.get("periods", ["20d"])
+        periods = [raw_periods] if isinstance(raw_periods, str) else list(raw_periods)
+        sector_limit = int(params.get("sector_limit", 300) or 0)
+        as_of = _parse_date(params.get("as_of_date")) if params.get("as_of_date") else None
+        result = research_sector_scores.compute_and_persist(as_of_date=as_of, periods=periods, sector_limit=sector_limit)
+        return {
+            "rows_read": result.get("sectors_scored", 0),
+            "rows_written": result.get("rows_written", 0),
+            "message": f"as_of_date={result.get('as_of_date')}",
+        }
+
     # ── Research data runners: stock financials ──
 
     def _run_sync_stock_financial_quarterly(self, params: dict[str, Any]) -> dict[str, Any]:
         stock_limit = int(params.get("stock_limit", 100))
-        with session_scope() as session:
-            stock_rows = session.execute(
-                select(schema.stocks).limit(min(stock_limit, 500))
-            ).mappings().all()
+        only_missing = _truthy(params.get("only_missing", True))
+        stock_rows = _financial_sync_stock_rows(stock_limit, only_missing)
         if not stock_rows:
             return {"rows_read": 0, "rows_written": 0, "message": "No stocks in DB."}
         total_read = 0
@@ -499,12 +595,20 @@ class DataSyncRunner:
         for stock_row in stock_rows:
             symbol = str(stock_row["symbol"])
             exchange = str(stock_row["exchange"])
+
+            # Fetch quarterly profit sheet data
             try:
                 data = self.adapter.stock_financial_quarterly(symbol, exchange=exchange)
             except Exception as exc:
                 logger.debug("stock_financial_quarterly(%s) failed: %s", symbol, exc)
                 continue
             items = data.get("items") or []
+
+            # Enrich with ROE by fetching equity from the balance sheet.
+            # ROE = (归母净利润 / 归母权益) * 100
+            self._enrich_quarterly_with_roe(items, symbol, exchange)
+            self._enrich_quarterly_with_cash_flow(items, symbol, exchange)
+
             total_read += len(items)
             written = _upsert_stock_financial_reports(
                 symbol, exchange, items, "quarterly",
@@ -512,12 +616,127 @@ class DataSyncRunner:
             total_written += written
         return {"rows_read": total_read, "rows_written": total_written}
 
+    @staticmethod
+    def _to_float(value: Any) -> float | None:
+        """Convert a value to float, returning None for missing / invalid."""
+        if value is None or value == "" or value == "-":
+            return None
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return None
+
+    def _enrich_quarterly_with_roe(
+        self,
+        items: list[dict[str, Any]],
+        symbol: str,
+        exchange: str,
+    ) -> None:
+        """Enrich quarterly items with computed ROE, margins, and EPS.
+
+        ROE requires equity from the balance sheet.
+        Gross margin = (revenue - cost) / revenue * 100.
+        Net margin = net_profit / revenue * 100.
+        EPS is extracted from BASIC_EPS in raw data.
+        """
+        if not items:
+            return
+
+        # Build report_date → TOTAL_PARENT_EQUITY from balance sheet
+        equity_map: dict[str, float] = {}
+        try:
+            bs_data = self.adapter.stock_balance_sheet(symbol, exchange=exchange)
+            for bs in bs_data.get("items") or []:
+                bs_dict = bs if isinstance(bs, dict) else {}
+                report_date_raw = bs_dict.get("REPORT_DATE")
+                if not report_date_raw:
+                    continue
+                rd = str(report_date_raw)[:10]
+                equity = self._to_float(bs_dict.get("TOTAL_PARENT_EQUITY"))
+                if equity:
+                    equity_map[rd] = equity
+        except Exception:
+            pass
+
+        for item in items:
+            raw = item.get("raw") or {}
+            rd = str(item.get("report_date", ""))[:10]
+
+            # --- EPS from raw fallback ---
+            if item.get("eps") is None:
+                eps = self._to_float(raw.get("BASIC_EPS"))
+                if eps is not None:
+                    item["eps"] = eps
+
+            # --- Gross margin = (income - cost) / income * 100 ---
+            if item.get("gross_margin") is None:
+                income = self._to_float(raw.get("TOTAL_OPERATE_INCOME") or raw.get("OPERATE_INCOME"))
+                cost = self._to_float(raw.get("OPERATE_COST"))
+                if income and cost is not None:
+                    item["gross_margin"] = round(((income - cost) / income) * 100, 4)
+
+            # --- Net margin = net_profit / income * 100 ---
+            if item.get("net_margin") is None:
+                income = self._to_float(raw.get("TOTAL_OPERATE_INCOME") or raw.get("OPERATE_INCOME"))
+                np = self._to_float(raw.get("NETPROFIT"))
+                if income and np is not None:
+                    item["net_margin"] = round((np / income) * 100, 4)
+
+            # --- ROE = parent_net_profit / parent_equity * 100 ---
+            if item.get("roe") is None:
+                equity = equity_map.get(rd)
+                if equity:
+                    pnp = self._to_float(raw.get("PARENT_NETPROFIT"))
+                    if pnp is not None:
+                        item["roe"] = round((pnp / equity) * 100, 4)
+
+    def _enrich_quarterly_with_cash_flow(
+        self,
+        items: list[dict[str, Any]],
+        symbol: str,
+        exchange: str,
+    ) -> None:
+        """Enrich quarterly items with operating cash flow and disclosure date."""
+        if not items:
+            return
+
+        cash_flow_map: dict[str, dict[str, Any]] = {}
+        try:
+            cash_flow_data = self.adapter.stock_cash_flow_sheet(symbol, exchange=exchange)
+        except Exception:
+            return
+
+        for row in cash_flow_data.get("items") or []:
+            record = row if isinstance(row, dict) else {}
+            report_date = str(record.get("REPORT_DATE") or record.get("报告期") or "")[:10]
+            if report_date:
+                cash_flow_map[report_date] = record
+
+        for item in items:
+            report_date = str(item.get("report_date") or "")[:10]
+            cash_flow_row = cash_flow_map.get(report_date)
+            if not cash_flow_row:
+                continue
+
+            if item.get("publish_date") is None:
+                item["publish_date"] = cash_flow_row.get("NOTICE_DATE") or cash_flow_row.get("公告日期")
+
+            if item.get("operating_cash_flow") is None:
+                item["operating_cash_flow"] = self._to_float(
+                    cash_flow_row.get("NETCASH_OPERATE")
+                    or cash_flow_row.get("经营活动产生的现金流量净额")
+                )
+
+            if item.get("cash_flow_quality") is None:
+                operating_cash_flow = self._to_float(item.get("operating_cash_flow"))
+                net_profit = self._to_float(item.get("net_profit") or cash_flow_row.get("NETPROFIT"))
+                if operating_cash_flow is not None and net_profit not in (None, 0):
+                    item["cash_flow_quality"] = round(operating_cash_flow / net_profit, 4)
+
     def _run_sync_stock_financial_indicators(self, params: dict[str, Any]) -> dict[str, Any]:
         stock_limit = int(params.get("stock_limit", 100))
-        with session_scope() as session:
-            stock_rows = session.execute(
-                select(schema.stocks).limit(min(stock_limit, 500))
-            ).mappings().all()
+        only_missing = _truthy(params.get("only_missing", True))
+        stock_rows = _financial_sync_stock_rows(stock_limit, only_missing)
         if not stock_rows:
             return {"rows_read": 0, "rows_written": 0, "message": "No stocks in DB."}
         total_read = 0
@@ -591,6 +810,7 @@ JOB_RUNNERS: dict[str, str] = {
     "sync_sector_list": "_run_sync_sector_list",
     "sync_sector_members": "_run_sync_sector_members",
     "sync_stock_daily_bars": "_run_sync_stock_daily_bars",
+    "sync_stock_minute_bars": "_run_sync_stock_minute_bars",
     "sync_stock_sector_memberships": "_run_sync_stock_sector_memberships",
     "sync_shenwan_industry_tree": "_run_sync_shenwan_industry_tree",
     "sync_shenwan_industry_members": "_run_sync_shenwan_industry_members",
@@ -599,6 +819,7 @@ JOB_RUNNERS: dict[str, str] = {
     # ── Research data: sector dashboard ──
     "sync_sector_daily_bars": "_run_sync_sector_daily_bars",
     "sync_sector_fund_flows": "_run_sync_sector_fund_flows",
+    "sync_sector_period_scores": "_run_sync_sector_period_scores",
     "sync_limit_up_pools": "_run_sync_limit_up_pools",
     "sync_stock_fund_flows": "_run_sync_stock_fund_flows",
     "sync_stock_hot_ranks": "_run_sync_stock_hot_ranks",
@@ -623,6 +844,96 @@ class DataSyncError(RuntimeError):
     """Raised when a sync job fails."""
 
 
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _param_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = value.replace("\n", ",").split(",")
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        raw_items = [value]
+    result = []
+    for item in raw_items:
+        text = str(item or "").strip().upper()
+        if not text or "." not in text:
+            continue
+        if text not in result:
+            result.append(text)
+    return result
+
+
+def _normalize_csv_key(value: Any) -> str:
+    return str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def _minute_csv_symbol_exchange(row: dict[str, Any]) -> tuple[str, str]:
+    vt_symbol_value = str(row.get("vt_symbol") or row.get("code_exchange") or "").strip().upper()
+    if vt_symbol_value and "." in vt_symbol_value:
+        symbol, exchange = vt_symbol_value.split(".", 1)
+        return symbol.strip(), exchange.strip()
+    symbol = str(row.get("symbol") or row.get("code") or row.get("股票代码") or "").strip()
+    exchange = str(row.get("exchange") or row.get("market") or row.get("交易所") or "").strip().upper()
+    if not symbol:
+        raise ValueError("missing vt_symbol or symbol")
+    if not exchange:
+        exchange = normalize_exchange(symbol)
+    return symbol, exchange
+
+
+def _minute_csv_item(row: dict[str, Any]) -> dict[str, Any]:
+    bar_time = (
+        row.get("bar_time")
+        or row.get("trade_date")
+        or row.get("datetime")
+        or row.get("time")
+        or row.get("date_time")
+    )
+    if _parse_datetime(bar_time) is None:
+        raise ValueError("missing or invalid bar_time")
+    open_price = _required_number(row, "open", "open_price", "开盘")
+    high_price = _required_number(row, "high", "high_price", "最高")
+    low_price = _required_number(row, "low", "low_price", "最低")
+    close_price = _required_number(row, "close", "close_price", "收盘")
+    return {
+        "trade_date": bar_time,
+        "open": open_price,
+        "high": high_price,
+        "low": low_price,
+        "close": close_price,
+        "volume": _optional_number(row, "volume", "vol", "成交量"),
+        "turnover": _optional_number(row, "turnover", "amount", "成交额"),
+        "raw": row,
+    }
+
+
+def _required_number(row: dict[str, Any], *keys: str) -> float:
+    value = _optional_number(row, *keys)
+    if value is None:
+        raise ValueError(f"missing numeric field: {keys[0]}")
+    return value
+
+
+def _optional_number(row: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = row.get(_normalize_csv_key(key))
+        if value in (None, ""):
+            continue
+        try:
+            return float(str(value).replace(",", ""))
+        except ValueError as exc:
+            raise ValueError(f"invalid numeric field {key}: {value}") from exc
+    return None
+
+
 # ─── Schema bootstrap ────────────────────────────────────────────────────
 
 def ensure_sync_schema() -> None:
@@ -630,6 +941,14 @@ def ensure_sync_schema() -> None:
     if not is_database_configured():
         return
     schema.create_schema(get_engine())
+    # Idempotent column additions for tables created by earlier migrations
+    try:
+        with session_scope() as session:
+            session.execute(text(
+                "ALTER TABLE stocks ADD COLUMN IF NOT EXISTS volume_ratio FLOAT"
+            ))
+    except Exception:
+        pass
     seed_default_registry()
 
 
@@ -705,7 +1024,7 @@ def coverage() -> dict[str, Any]:
         return {"status": "unavailable", "tables": {}, "message": "DATABASE_URL not configured"}
 
     table_names = [
-        "stocks", "stock_daily_bars", "sectors", "sector_memberships",
+        "stocks", "stock_daily_bars", "stock_minute_bars", "sectors", "sector_memberships",
         "stock_sector_memberships", "stock_business_segments",
         "shenwan_industries", "shenwan_industry_members",
         "industry_chain_edges", "industry_board_mapping",
@@ -752,10 +1071,600 @@ def usage() -> dict[str, Any]:
     }
 
 
+def minute_csv_template() -> str:
+    """Return a minimal CSV template for importing historical minute bars."""
+
+    return (
+        "vt_symbol,bar_time,open,high,low,close,volume,turnover\n"
+        "600000.SSE,2026-01-08 14:56:00,10.00,10.10,9.98,10.05,120000,1206000\n"
+    )
+
+
+def import_stock_minute_bars_csv(
+    csv_text: str,
+    *,
+    interval: str = "1m",
+    source: str = "manual_csv",
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Import historical minute bars from CSV text into stock_minute_bars."""
+
+    if not is_database_configured():
+        return {"status": "unavailable", "message": "DATABASE_URL not configured"}
+    interval = str(interval or "1m").strip().lower()
+    if interval not in {"1m", "5m", "15m", "30m", "60m"}:
+        raise DataSyncError(f"Unsupported minute interval: {interval}")
+    if not csv_text.strip():
+        return {"status": "empty", "rows_read": 0, "rows_written": 0, "rows_skipped": 0, "errors": ["CSV is empty"]}
+
+    reader = csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff")))
+    return _import_stock_minute_bars_from_reader(reader, interval=interval, source=source, dry_run=dry_run)
+
+
+def import_stock_minute_bars_file(
+    file_path: str,
+    *,
+    interval: str = "1m",
+    source: str = "manual_csv_file",
+    dry_run: bool = False,
+    encoding: str = "utf-8-sig",
+) -> dict[str, Any]:
+    """Import historical minute bars from an allowed local CSV file path."""
+
+    if not is_database_configured():
+        return {"status": "unavailable", "message": "DATABASE_URL not configured"}
+    interval = str(interval or "1m").strip().lower()
+    if interval not in {"1m", "5m", "15m", "30m", "60m"}:
+        raise DataSyncError(f"Unsupported minute interval: {interval}")
+    resolved = _allowed_import_file(file_path)
+    with resolved.open("r", encoding=encoding, newline="") as file:
+        reader = csv.DictReader(file)
+        result = _import_stock_minute_bars_from_reader_streaming(
+            reader,
+            interval=interval,
+            source=source,
+            dry_run=dry_run,
+        )
+    result["file_path"] = str(resolved.relative_to(PROJECT_ROOT))
+    return result
+
+
+def _import_stock_minute_bars_from_reader(
+    reader: csv.DictReader,
+    *,
+    interval: str,
+    source: str,
+    dry_run: bool,
+) -> dict[str, Any]:
+    if not reader.fieldnames:
+        return {"status": "empty", "rows_read": 0, "rows_written": 0, "rows_skipped": 0, "errors": ["CSV header is missing"]}
+
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    errors: list[str] = []
+    rows_read = 0
+    rows_skipped = 0
+    for row in reader:
+        rows_read += 1
+        normalized = {_normalize_csv_key(key): value for key, value in row.items()}
+        try:
+            symbol, exchange = _minute_csv_symbol_exchange(normalized)
+            item = _minute_csv_item(normalized)
+        except ValueError as exc:
+            rows_skipped += 1
+            if len(errors) < 20:
+                errors.append(f"row {rows_read}: {exc}")
+            continue
+        grouped.setdefault((symbol, exchange), []).append(item)
+
+    rows_written = 0
+    if not dry_run:
+        ensure_sync_schema()
+        for (symbol, exchange), items in grouped.items():
+            rows_written += _upsert_minute_bars(symbol, exchange, items, interval, source)
+
+    return {
+        "status": "ready" if rows_read and (rows_written or dry_run) else "empty",
+        "interval": interval,
+        "source": source,
+        "dry_run": dry_run,
+        "rows_read": rows_read,
+        "rows_written": rows_written,
+        "rows_skipped": rows_skipped,
+        "symbol_count": len(grouped),
+        "errors": errors,
+        "required_columns": ["vt_symbol 或 symbol+exchange", "bar_time/trade_date/time/datetime", "open/high/low/close"],
+    }
+
+
+def _import_stock_minute_bars_from_reader_streaming(
+    reader: csv.DictReader,
+    *,
+    interval: str,
+    source: str,
+    dry_run: bool,
+    batch_size: int = 2000,
+) -> dict[str, Any]:
+    """Import minute bars from a CSV reader without holding the whole file."""
+
+    if not reader.fieldnames:
+        return {"status": "empty", "rows_read": 0, "rows_written": 0, "rows_skipped": 0, "errors": ["CSV header is missing"]}
+
+    errors: list[str] = []
+    rows_read = 0
+    rows_skipped = 0
+    rows_written = 0
+    symbol_keys: set[tuple[str, str]] = set()
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+
+    if not dry_run:
+        ensure_sync_schema()
+
+    def flush(force: bool = False) -> None:
+        nonlocal rows_written, grouped
+        if not grouped:
+            return
+        pending_count = sum(len(items) for items in grouped.values())
+        if not force and pending_count < batch_size:
+            return
+        if not dry_run:
+            for (symbol, exchange), items in grouped.items():
+                rows_written += _upsert_minute_bars(symbol, exchange, items, interval, source)
+        grouped = {}
+
+    for row in reader:
+        rows_read += 1
+        normalized = {_normalize_csv_key(key): value for key, value in row.items()}
+        try:
+            symbol, exchange = _minute_csv_symbol_exchange(normalized)
+            item = _minute_csv_item(normalized)
+        except ValueError as exc:
+            rows_skipped += 1
+            if len(errors) < 20:
+                errors.append(f"row {rows_read}: {exc}")
+            continue
+        key = (symbol, exchange)
+        symbol_keys.add(key)
+        grouped.setdefault(key, []).append(item)
+        flush()
+
+    flush(force=True)
+
+    return {
+        "status": "ready" if rows_read and (rows_written or dry_run) else "empty",
+        "interval": interval,
+        "source": source,
+        "dry_run": dry_run,
+        "rows_read": rows_read,
+        "rows_written": rows_written,
+        "rows_skipped": rows_skipped,
+        "symbol_count": len(symbol_keys),
+        "errors": errors,
+        "required_columns": ["vt_symbol 或 symbol+exchange", "bar_time/trade_date/time/datetime", "open/high/low/close"],
+    }
+
+
+def audit_minute_gap_csv(
+    gap_csv_text: str,
+    *,
+    interval: str = "1m",
+    tail_entry_start: str = "14:30",
+    tail_entry_end: str = "14:57",
+    min_tail_bars: int = 1,
+) -> dict[str, Any]:
+    """Check whether stock_minute_bars covers a strict-tail backtest gap CSV."""
+
+    interval = str(interval or "1m").strip().lower()
+    if interval not in {"1m", "5m", "15m", "30m", "60m"}:
+        raise DataSyncError(f"Unsupported minute interval: {interval}")
+    if not gap_csv_text.strip():
+        return {"status": "empty", "rows_read": 0, "rows_skipped": 0, "errors": ["CSV is empty"]}
+    if not is_database_configured():
+        return {"status": "unavailable", "message": "DATABASE_URL not configured"}
+
+    requirements = _parse_minute_gap_requirements(gap_csv_text)
+    return _audit_minute_gap_requirements(
+        requirements,
+        interval=interval,
+        tail_entry_start=tail_entry_start,
+        tail_entry_end=tail_entry_end,
+        min_tail_bars=min_tail_bars,
+    )
+
+
+def audit_minute_gap_file(
+    file_path: str,
+    *,
+    interval: str = "1m",
+    tail_entry_start: str = "14:30",
+    tail_entry_end: str = "14:57",
+    min_tail_bars: int = 1,
+    encoding: str = "utf-8-sig",
+) -> dict[str, Any]:
+    """Check minute-bar coverage for a strict-tail gap CSV file."""
+
+    interval = str(interval or "1m").strip().lower()
+    if interval not in {"1m", "5m", "15m", "30m", "60m"}:
+        raise DataSyncError(f"Unsupported minute interval: {interval}")
+    if not is_database_configured():
+        return {"status": "unavailable", "message": "DATABASE_URL not configured"}
+    resolved = _allowed_import_file(file_path)
+    with resolved.open("r", encoding=encoding, newline="") as file:
+        requirements = _parse_minute_gap_reader(csv.DictReader(file))
+    result = _audit_minute_gap_requirements(
+        requirements,
+        interval=interval,
+        tail_entry_start=tail_entry_start,
+        tail_entry_end=tail_entry_end,
+        min_tail_bars=min_tail_bars,
+    )
+    result["file_path"] = str(resolved.relative_to(PROJECT_ROOT))
+    return result
+
+
+def _audit_minute_gap_requirements(
+    requirements: dict[str, Any],
+    *,
+    interval: str,
+    tail_entry_start: str,
+    tail_entry_end: str,
+    min_tail_bars: int,
+) -> dict[str, Any]:
+    if requirements["errors"] and not requirements["items"]:
+        return {
+            "status": "empty",
+            "rows_read": requirements["rows_read"],
+            "rows_skipped": requirements["rows_skipped"],
+            "errors": requirements["errors"],
+        }
+
+    items = requirements["items"]
+    coverage = _minute_gap_coverage_counts(items, interval, tail_entry_start, tail_entry_end)
+    covered = []
+    missing = []
+    for item in items:
+        key = (item["vt_symbol"], item["trade_date"])
+        count = int(coverage.get(key, 0) or 0)
+        row = {**item, "minute_bar_count": count, "required_tail_bars": min_tail_bars}
+        if count >= min_tail_bars:
+            covered.append(row)
+        else:
+            row["missing_reason"] = "no_tail_window_minute_bars" if count == 0 else "insufficient_tail_window_minute_bars"
+            missing.append(row)
+
+    unique_symbols = sorted({item["vt_symbol"] for item in items})
+    unique_dates = sorted({item["trade_date"] for item in items})
+    missing_symbols = sorted({item["vt_symbol"] for item in missing})
+    missing_dates = sorted({item["trade_date"] for item in missing})
+    return {
+        "status": "ready" if not missing else "incomplete",
+        "interval": interval,
+        "tail_entry_window": f"{tail_entry_start}-{tail_entry_end}",
+        "required_tail_bars": min_tail_bars,
+        "rows_read": requirements["rows_read"],
+        "rows_skipped": requirements["rows_skipped"],
+        "gap_count": len(items),
+        "covered_count": len(covered),
+        "missing_count": len(missing),
+        "coverage_pct": round(len(covered) / len(items) * 100, 4) if items else 0,
+        "symbol_count": len(unique_symbols),
+        "date_count": len(unique_dates),
+        "missing_symbol_count": len(missing_symbols),
+        "missing_date_count": len(missing_dates),
+        "symbols": unique_symbols[:500],
+        "missing_symbols": missing_symbols[:500],
+        "missing_dates": [item.isoformat() for item in missing_dates[:500]],
+        "covered_examples": _minute_gap_rows_to_api(covered[:20]),
+        "missing_examples": _minute_gap_rows_to_api(missing[:100]),
+        "errors": requirements["errors"],
+        "next_action": (
+            "strict_tail_backtest_ready"
+            if not missing
+            else "import historical 1m bars for missing_symbols/missing_dates, then rerun audit and strict backtest"
+        ),
+    }
+
+
+def minute_gap_import_template(gap_csv_text: str, *, sample_limit: int = 200) -> str:
+    """Build a minute-bar import template scoped to rows from a gap CSV."""
+
+    parsed = _parse_minute_gap_requirements(gap_csv_text)
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["vt_symbol", "bar_time", "open", "high", "low", "close", "volume", "turnover"])
+    seen: set[tuple[str, date]] = set()
+    for item in parsed["items"]:
+        key = (item["vt_symbol"], item["trade_date"])
+        if key in seen:
+            continue
+        seen.add(key)
+        writer.writerow([item["vt_symbol"], f"{item['trade_date'].isoformat()} 14:56:00", "", "", "", "", "", ""])
+        if len(seen) >= max(sample_limit, 1):
+            break
+    return "\ufeff" + buffer.getvalue()
+
+
+def minute_gap_vendor_manifest(
+    gap_csv_text: str = "",
+    *,
+    file_path: str = "",
+    tail_entry_start: str = "14:30",
+    tail_entry_end: str = "14:57",
+    sample_limit: int = 20,
+) -> dict[str, Any]:
+    """Build a provider-facing request manifest from a strict-tail gap CSV."""
+
+    requirements = load_minute_gap_requirements(gap_csv_text, file_path=file_path)
+    items = requirements["items"]
+    rows = _minute_gap_vendor_rows(items, tail_entry_start, tail_entry_end)
+    symbols = sorted({row["vt_symbol"] for row in rows})
+    dates = sorted({row["trade_date"] for row in rows})
+    return {
+        "status": "ready" if rows else "empty",
+        "rows_read": requirements["rows_read"],
+        "rows_skipped": requirements["rows_skipped"],
+        "errors": requirements["errors"],
+        "request_count": len(rows),
+        "symbol_count": len(symbols),
+        "date_count": len(dates),
+        "tail_entry_window": f"{tail_entry_start}-{tail_entry_end}",
+        "start_date": dates[0].isoformat() if dates else None,
+        "end_date": dates[-1].isoformat() if dates else None,
+        "symbols": symbols[:500],
+        "dates": [item.isoformat() for item in dates[:500]],
+        "sample_rows": [_vendor_row_to_api(row) for row in rows[: max(sample_limit, 1)]],
+        "required_import_columns": ["vt_symbol", "bar_time", "open", "high", "low", "close", "volume", "turnover"],
+        "provider_notes": [
+            "每个 vt_symbol + trade_date 需要覆盖 tail_start 至 tail_end 的真实 1 分钟 K 线。",
+            "AlphaAgent 导入 CSV 使用 vt_symbol,bar_time,open,high,low,close,volume,turnover。",
+            "Tushare Pro 可按 ts_code + start_date/end_date + freq=1min 拉取；返回行必须属于目标 trade_date。",
+            "vn.py 数据库可按 symbol/exchange/Interval.MINUTE 查询同一窗口后通过 /api/vnpy/import-minute-bars/gaps 导入。",
+        ],
+    }
+
+
+def minute_gap_vendor_manifest_csv(
+    gap_csv_text: str = "",
+    *,
+    file_path: str = "",
+    tail_entry_start: str = "14:30",
+    tail_entry_end: str = "14:57",
+) -> str:
+    """Return a provider-facing CSV request list for strict-tail gaps."""
+
+    requirements = load_minute_gap_requirements(gap_csv_text, file_path=file_path)
+    rows = _minute_gap_vendor_rows(requirements["items"], tail_entry_start, tail_entry_end)
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(
+        [
+            "vt_symbol",
+            "symbol",
+            "exchange",
+            "tushare_ts_code",
+            "trade_date",
+            "tail_start",
+            "tail_end",
+            "start_datetime",
+            "end_datetime",
+            "reference_date",
+            "ma5",
+            "alphaagent_import_columns",
+            "note",
+        ]
+    )
+    for row in rows:
+        writer.writerow(
+            [
+                row["vt_symbol"],
+                row["symbol"],
+                row["exchange"],
+                row["tushare_ts_code"],
+                row["trade_date"].isoformat(),
+                row["tail_start"],
+                row["tail_end"],
+                row["start_datetime"],
+                row["end_datetime"],
+                row["reference_date"].isoformat() if row.get("reference_date") else "",
+                row.get("ma5") if row.get("ma5") is not None else "",
+                "vt_symbol,bar_time,open,high,low,close,volume,turnover",
+                "return all real 1m bars in [tail_start, tail_end] for this symbol-date",
+            ]
+        )
+    return "\ufeff" + buffer.getvalue()
+
+
+def load_minute_gap_requirements(gap_csv_text: str = "", *, file_path: str = "") -> dict[str, Any]:
+    """Load strict-tail gap requirements from inline CSV text or an allowed file."""
+
+    if str(file_path or "").strip():
+        resolved = _allowed_import_file(file_path)
+        with resolved.open("r", encoding="utf-8-sig", newline="") as file:
+            return _parse_minute_gap_reader(csv.DictReader(file))
+    if not str(gap_csv_text or "").strip():
+        return {"items": [], "rows_read": 0, "rows_skipped": 0, "errors": ["CSV is empty"]}
+    return _parse_minute_gap_requirements(gap_csv_text)
+
+
+def _minute_gap_vendor_rows(items: list[dict[str, Any]], tail_entry_start: str, tail_entry_end: str) -> list[dict[str, Any]]:
+    rows = []
+    seen: set[tuple[str, date]] = set()
+    start_time = _parse_time_value(tail_entry_start)
+    end_time = _parse_time_value(tail_entry_end)
+    for item in sorted(items, key=lambda value: (value["trade_date"], value["vt_symbol"])):
+        key = (item["vt_symbol"], item["trade_date"])
+        if key in seen:
+            continue
+        seen.add(key)
+        symbol, exchange = _split_vt_symbol(item["vt_symbol"])
+        rows.append(
+            {
+                "vt_symbol": item["vt_symbol"],
+                "symbol": symbol,
+                "exchange": exchange,
+                "tushare_ts_code": _tushare_ts_code(symbol, exchange),
+                "trade_date": item["trade_date"],
+                "tail_start": start_time,
+                "tail_end": end_time,
+                "start_datetime": f"{item['trade_date'].isoformat()} {start_time}:00",
+                "end_datetime": f"{item['trade_date'].isoformat()} {end_time}:00",
+                "reference_date": item.get("reference_date"),
+                "ma5": item.get("ma5"),
+            }
+        )
+    return rows
+
+
+def _split_vt_symbol(value: str) -> tuple[str, str]:
+    parts = str(value or "").strip().upper().split(".")
+    if len(parts) != 2:
+        return str(value or "").strip().upper(), ""
+    return parts[0], parts[1]
+
+
+def _tushare_ts_code(symbol: str, exchange: str) -> str:
+    suffix = {"SSE": "SH", "SZSE": "SZ", "BSE": "BJ"}.get(exchange, exchange)
+    return f"{symbol}.{suffix}" if symbol and suffix else symbol
+
+
+def _vendor_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **row,
+        "trade_date": row["trade_date"].isoformat() if isinstance(row.get("trade_date"), date) else row.get("trade_date"),
+        "reference_date": row["reference_date"].isoformat() if isinstance(row.get("reference_date"), date) else row.get("reference_date"),
+    }
+
+
+def _parse_minute_gap_requirements(gap_csv_text: str) -> dict[str, Any]:
+    reader = csv.DictReader(io.StringIO(gap_csv_text.lstrip("\ufeff")))
+    return _parse_minute_gap_reader(reader)
+
+
+def _parse_minute_gap_reader(reader: csv.DictReader) -> dict[str, Any]:
+    if not reader.fieldnames:
+        return {"items": [], "rows_read": 0, "rows_skipped": 0, "errors": ["CSV header is missing"]}
+
+    items: list[dict[str, Any]] = []
+    seen: set[tuple[str, date]] = set()
+    errors: list[str] = []
+    rows_read = 0
+    rows_skipped = 0
+    for row in reader:
+        rows_read += 1
+        normalized = {_normalize_csv_key(key): value for key, value in row.items()}
+        try:
+            vt_symbol_value = str(normalized.get("vt_symbol") or "").strip().upper()
+            if not vt_symbol_value:
+                symbol, exchange = _minute_csv_symbol_exchange(normalized)
+                vt_symbol_value = vt_symbol(symbol, normalize_exchange(symbol, exchange))
+            trade_date = _parse_date(
+                normalized.get("trade_date")
+                or normalized.get("bar_date")
+                or normalized.get("date")
+            )
+            if trade_date is None:
+                raise ValueError("missing or invalid trade_date")
+            key = (vt_symbol_value, trade_date)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(
+                {
+                    "vt_symbol": vt_symbol_value,
+                    "trade_date": trade_date,
+                    "reference_date": _parse_date(normalized.get("reference_date")),
+                    "ma5": _optional_number(normalized, "ma5"),
+                    "window": str(normalized.get("window") or "").strip(),
+                }
+            )
+        except ValueError as exc:
+            rows_skipped += 1
+            if len(errors) < 20:
+                errors.append(f"row {rows_read}: {exc}")
+    return {"items": items, "rows_read": rows_read, "rows_skipped": rows_skipped, "errors": errors}
+
+
+def _allowed_import_file(file_path: str) -> Path:
+    text_path = str(file_path or "").strip()
+    if not text_path:
+        raise DataSyncError("CSV file path is empty")
+    raw_path = Path(text_path)
+    resolved = raw_path if raw_path.is_absolute() else PROJECT_ROOT / raw_path
+    resolved = resolved.resolve()
+    allowed_roots = []
+    for directory in ALLOWED_IMPORT_DIRS:
+        directory.mkdir(parents=True, exist_ok=True)
+        allowed_roots.append(directory.resolve())
+    if not resolved.is_file():
+        raise DataSyncError(f"CSV file not found: {file_path}")
+    if resolved.suffix.lower() != ".csv":
+        raise DataSyncError("Only .csv files are allowed")
+    if not any(resolved == root or root in resolved.parents for root in allowed_roots):
+        allowed = ", ".join(str(root.relative_to(PROJECT_ROOT)) for root in allowed_roots)
+        raise DataSyncError(f"CSV file must be under one of: {allowed}")
+    return resolved
+
+
+def _minute_gap_coverage_counts(
+    items: list[dict[str, Any]],
+    interval: str,
+    tail_entry_start: str,
+    tail_entry_end: str,
+) -> dict[tuple[str, date], int]:
+    if not items:
+        return {}
+    vt_symbols = sorted({item["vt_symbol"] for item in items})
+    dates = sorted({item["trade_date"] for item in items})
+    start_time = _parse_time_value(tail_entry_start)
+    end_time = _parse_time_value(tail_entry_end)
+    with session_scope() as session:
+        rows = session.execute(
+            select(
+                schema.stock_minute_bars.c.vt_symbol,
+                schema.stock_minute_bars.c.trade_date,
+                func.count().label("bar_count"),
+            )
+            .where(
+                schema.stock_minute_bars.c.vt_symbol.in_(vt_symbols),
+                schema.stock_minute_bars.c.trade_date >= dates[0],
+                schema.stock_minute_bars.c.trade_date <= dates[-1],
+                schema.stock_minute_bars.c.interval == interval,
+                func.to_char(schema.stock_minute_bars.c.bar_time, "HH24:MI") >= start_time,
+                func.to_char(schema.stock_minute_bars.c.bar_time, "HH24:MI") <= end_time,
+            )
+            .group_by(schema.stock_minute_bars.c.vt_symbol, schema.stock_minute_bars.c.trade_date)
+        ).mappings().all()
+    return {(str(row["vt_symbol"]), row["trade_date"]): int(row["bar_count"] or 0) for row in rows}
+
+
+def _parse_time_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("time is empty")
+    try:
+        parsed = datetime.strptime(text[:5], "%H:%M")
+    except ValueError as exc:
+        raise ValueError(f"invalid HH:MM time: {text}") from exc
+    return parsed.strftime("%H:%M")
+
+
+def _minute_gap_rows_to_api(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result = []
+    for row in rows:
+        result.append(
+            {
+                **row,
+                "trade_date": row["trade_date"].isoformat() if isinstance(row.get("trade_date"), date) else row.get("trade_date"),
+                "reference_date": row["reference_date"].isoformat() if isinstance(row.get("reference_date"), date) else row.get("reference_date"),
+            }
+        )
+    return result
+
+
 def _usage_capabilities() -> list[dict[str, Any]]:
     caps = [
         {"name": "stock_list", "table": "stocks", "description": "全 A 股票清单"},
         {"name": "stock_daily_bars", "table": "stock_daily_bars", "description": "股票日 K 线"},
+        {"name": "stock_minute_bars", "table": "stock_minute_bars", "description": "股票分钟 K 线 / 尾盘入场验证"},
         {"name": "sector_list", "table": "sectors", "description": "板块 / 概念清单"},
         {"name": "sector_members", "table": "sector_memberships", "description": "板块成分股"},
         {"name": "stock_sectors", "table": "stock_sector_memberships", "description": "股票-板块反向索引"},
@@ -941,8 +1850,26 @@ def local_list_stocks(
     page_size: int = 50,
     sort: str = "mktcap",
     q: str = "",
+    order: str = "desc",
 ) -> dict[str, Any] | None:
     """Read stocks from local DB, return None if empty."""
+    # Map frontend sort keys to DB columns (descending by default)
+    _sort_col_map = {
+        "mktcap": schema.stocks.c.market_cap,
+        "market_cap": schema.stocks.c.market_cap,
+        "amount": schema.stocks.c.turnover,
+        "turnover": schema.stocks.c.turnover,
+        "changepercent": schema.stocks.c.change_pct,
+        "change_pct": schema.stocks.c.change_pct,
+        "turnoverratio": schema.stocks.c.turnover_rate,
+        "turnover_rate": schema.stocks.c.turnover_rate,
+        "volume_ratio": schema.stocks.c.volume_ratio,
+        "volumeratio": schema.stocks.c.volume_ratio,
+        "pe": schema.stocks.c.pe,
+        "pb": schema.stocks.c.pb,
+    }
+    sort_col = _sort_col_map.get(sort.strip().lower(), schema.stocks.c.market_cap)
+
     try:
         with session_scope() as session:
             query = select(schema.stocks)
@@ -954,6 +1881,8 @@ def local_list_stocks(
                     | (schema.stocks.c.vt_symbol.ilike(f"%{normalized_q}%"))
                 )
             total = session.execute(select(func.count()).select_from(query.subquery())).scalar() or 0
+            sort_expr = sort_col.asc().nulls_last() if order.strip().lower() == "asc" else sort_col.desc().nulls_last()
+            query = query.order_by(sort_expr)
             offset = (max(page, 1) - 1) * min(max(page_size, 1), 200)
             query = query.offset(offset).limit(min(max(page_size, 1), 200))
             rows = session.execute(query).mappings().all()
@@ -1487,6 +2416,7 @@ def _upsert_stocks(items: list[dict[str, Any]]) -> int:
                 "pe": item.get("pe"),
                 "pb": item.get("pb"),
                 "turnover_rate": item.get("turnover_rate"),
+                "volume_ratio": item.get("volume_ratio"),
                 "trade_time": item.get("trade_time"),
                 "source": str(item.get("source") or "akshare"),
                 "raw": item.get("raw") or {},
@@ -1687,6 +2617,64 @@ def _upsert_daily_bars(symbol: str, exchange: str, items: list[dict[str, Any]]) 
                 )
             else:
                 session.execute(schema.stock_daily_bars.insert().values(**values))
+            written += 1
+    return written
+
+
+def _upsert_minute_bars(
+    symbol: str,
+    exchange: str,
+    items: list[dict[str, Any]],
+    interval: str,
+    source: str = "akshare",
+) -> int:
+    """Upsert intraday bar rows for one stock."""
+    if not items:
+        return 0
+    normalized = normalize_exchange(symbol, exchange)
+    vts = vt_symbol(symbol, normalized)
+    written = 0
+    with session_scope() as session:
+        exists = session.execute(select(schema.stocks.c.vt_symbol).where(schema.stocks.c.vt_symbol == vts)).scalar()
+        if not exists:
+            return 0
+        for item in items:
+            bar_time = _parse_datetime(item.get("trade_date") or item.get("bar_time") or item.get("time"))
+            if bar_time is None:
+                continue
+            values = {
+                "vt_symbol": vts,
+                "bar_time": bar_time,
+                "interval": interval,
+                "trade_date": bar_time.date(),
+                "open_price": float(item.get("open") or item.get("open_price") or 0),
+                "close_price": float(item.get("close") or item.get("close_price") or 0),
+                "high_price": float(item.get("high") or item.get("high_price") or 0),
+                "low_price": float(item.get("low") or item.get("low_price") or 0),
+                "volume": item.get("volume"),
+                "turnover": item.get("turnover"),
+                "source": str(item.get("source") or source or "akshare"),
+                "raw": item.get("raw") or item,
+            }
+            existing = session.execute(
+                select(schema.stock_minute_bars).where(
+                    (schema.stock_minute_bars.c.vt_symbol == vts)
+                    & (schema.stock_minute_bars.c.bar_time == bar_time)
+                    & (schema.stock_minute_bars.c.interval == interval)
+                )
+            ).first()
+            if existing:
+                session.execute(
+                    schema.stock_minute_bars.update()
+                    .where(
+                        (schema.stock_minute_bars.c.vt_symbol == vts)
+                        & (schema.stock_minute_bars.c.bar_time == bar_time)
+                        & (schema.stock_minute_bars.c.interval == interval)
+                    )
+                    .values(**values)
+                )
+            else:
+                session.execute(schema.stock_minute_bars.insert().values(**values))
             written += 1
     return written
 
@@ -1989,6 +2977,7 @@ def _stock_db_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
         "pe": row.get("pe"),
         "pb": row.get("pb"),
         "turnover_rate": row.get("turnover_rate"),
+        "volume_ratio": row.get("volume_ratio"),
         "industry": row.get("industry"),
         "area": row.get("area"),
         "trade_time": row.get("trade_time"),
@@ -2222,9 +3211,12 @@ def _upsert_limit_up_events(
         return 0
     written = 0
     with session_scope() as session:
+        known_symbols = set(
+            session.execute(select(schema.stocks.c.vt_symbol)).scalars().all()
+        )
         for item in items:
             vts = str(item.get("vt_symbol") or "")
-            if not vts:
+            if not vts or vts not in known_symbols:
                 continue
             title = f"{pool_type}: {item.get('name', vts)}"
             values = {
@@ -2296,16 +3288,69 @@ def _upsert_stock_fund_flows(
     return written
 
 
+def _upsert_stock_fund_flow_items(items: list[dict[str, Any]], period: str) -> int:
+    """Upsert stock fund-flow records from an already fetched all-market list."""
+    if not items:
+        return 0
+    today_str = date.today().isoformat()
+    written = 0
+    with session_scope() as session:
+        known_symbols = set(
+            session.execute(select(schema.stocks.c.vt_symbol)).scalars().all()
+        )
+        for item in items:
+            item_vts = str(item.get("vt_symbol") or "")
+            if not item_vts or item_vts not in known_symbols:
+                continue
+            values = {
+                "vt_symbol": item_vts,
+                "trade_date": today_str,
+                "period": period,
+                "main_net_inflow": item.get("main_net_inflow"),
+                "main_net_inflow_ratio": item.get("main_net_inflow_pct"),
+                "super_large_net_inflow": item.get("super_large_net_inflow"),
+                "large_net_inflow": item.get("large_net_inflow"),
+                "medium_net_inflow": item.get("medium_net_inflow"),
+                "small_net_inflow": item.get("small_net_inflow"),
+                "source": "akshare",
+                "raw": item.get("raw") or {},
+            }
+            existing = session.execute(
+                select(schema.stock_fund_flows).where(
+                    (schema.stock_fund_flows.c.vt_symbol == item_vts)
+                    & (schema.stock_fund_flows.c.trade_date == today_str)
+                    & (schema.stock_fund_flows.c.period == period)
+                )
+            ).first()
+            if existing:
+                session.execute(
+                    schema.stock_fund_flows.update()
+                    .where(
+                        (schema.stock_fund_flows.c.vt_symbol == item_vts)
+                        & (schema.stock_fund_flows.c.trade_date == today_str)
+                        & (schema.stock_fund_flows.c.period == period)
+                    )
+                    .values(**values)
+                )
+            else:
+                session.execute(schema.stock_fund_flows.insert().values(**values))
+            written += 1
+    return written
+
+
 def _upsert_stock_hot_ranks(items: list[dict[str, Any]]) -> int:
     """Upsert stock hot rank records."""
     if not items:
         return 0
-    now_str = datetime.now(timezone.utc).isoformat()
+    now_str = datetime.now(timezone.utc).isoformat()[:30]
     written = 0
     with session_scope() as session:
+        known_symbols = set(
+            session.execute(select(schema.stocks.c.vt_symbol)).scalars().all()
+        )
         for item in items:
             vts = str(item.get("vt_symbol") or "")
-            if not vts:
+            if not vts or vts not in known_symbols:
                 continue
             values = {
                 "vt_symbol": vts,
@@ -2343,11 +3388,14 @@ def _upsert_stock_lhb_records(items: list[dict[str, Any]]) -> int:
         return 0
     written = 0
     with session_scope() as session:
+        known_symbols = set(
+            session.execute(select(schema.stocks.c.vt_symbol)).scalars().all()
+        )
         for item in items:
             vts = str(item.get("vt_symbol") or "")
             trade_date = str(item.get("trade_date") or "")
             reason = str(item.get("reason") or "")
-            if not vts or not trade_date:
+            if not vts or vts not in known_symbols or not trade_date:
                 continue
             values = {
                 "vt_symbol": vts,
@@ -2383,6 +3431,29 @@ def _upsert_stock_lhb_records(items: list[dict[str, Any]]) -> int:
     return written
 
 
+def _financial_sync_stock_rows(stock_limit: int, only_missing: bool = True) -> list[dict[str, Any]]:
+    limit = min(max(int(stock_limit or 100), 1), 1000)
+    with session_scope() as session:
+        query = select(schema.stocks).order_by(desc(schema.stocks.c.turnover), desc(schema.stocks.c.market_cap))
+        if only_missing:
+            report_counts = (
+                select(
+                    schema.stock_financial_reports.c.vt_symbol.label("vt_symbol"),
+                    func.count().label("report_count"),
+                )
+                .where(schema.stock_financial_reports.c.publish_date.is_not(None))
+                .group_by(schema.stock_financial_reports.c.vt_symbol)
+                .subquery()
+            )
+            query = (
+                select(schema.stocks)
+                .join(report_counts, schema.stocks.c.vt_symbol == report_counts.c.vt_symbol, isouter=True)
+                .where(func.coalesce(report_counts.c.report_count, 0) < 4)
+                .order_by(desc(schema.stocks.c.turnover), desc(schema.stocks.c.market_cap))
+            )
+        return session.execute(query.limit(limit)).mappings().all()
+
+
 def _upsert_stock_financial_reports(
     symbol: str,
     exchange: str,
@@ -2403,14 +3474,21 @@ def _upsert_stock_financial_reports(
                 "vt_symbol": vts,
                 "report_date": report_date,
                 "period_type": period_type,
+                "publish_date": item.get("publish_date"),
                 "revenue": item.get("revenue"),
                 "revenue_yoy": item.get("revenue_yoy"),
+                "revenue_qoq": item.get("revenue_qoq"),
                 "net_profit": item.get("net_profit"),
                 "net_profit_yoy": item.get("net_profit_yoy"),
+                "net_profit_qoq": item.get("net_profit_qoq"),
+                "deducted_net_profit": item.get("deducted_net_profit"),
+                "eps": item.get("eps"),
                 "gross_margin": item.get("gross_margin"),
                 "net_margin": item.get("net_margin"),
                 "roe": item.get("roe"),
                 "debt_asset_ratio": item.get("debt_ratio"),
+                "operating_cash_flow": item.get("operating_cash_flow"),
+                "cash_flow_quality": item.get("cash_flow_quality"),
                 "source": "akshare",
                 "raw": item.get("raw") or {},
             }
@@ -2538,3 +3616,26 @@ def _parse_date(value: Any) -> date | None:
         except ValueError:
             continue
     return None
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    """Parse common market data datetime strings into a naive local datetime."""
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
+    text_value = str(value or "").strip()
+    if not text_value:
+        return None
+    text_value = text_value.replace("T", " ").replace("Z", "")
+    if "+" in text_value:
+        text_value = text_value.split("+", 1)[0].strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y%m%d %H:%M:%S", "%Y%m%d%H%M%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text_value[:19], fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text_value).replace(tzinfo=None)
+    except ValueError:
+        return None

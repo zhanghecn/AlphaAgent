@@ -52,12 +52,36 @@ export interface ShenwanClassification {
   level3?: { name?: string; code?: string };
 }
 
+export interface ConceptTheme {
+  name: string;
+  concepts: string[];
+  strength: number;
+}
+
+export interface ConceptResonance {
+  total: number;
+  rising: number;
+  falling: number;
+  flat: number;
+  ratio: number;
+  level: string;
+  level_color: "rise" | "fall" | "neutral";
+}
+
+export interface ConceptHint {
+  themes: ConceptTheme[];
+  main_identity: string;
+  resonance: ConceptResonance | null;
+  summary: string;
+}
+
 export interface StockConceptCardsResponse {
   vt_symbol: string;
   name: string;
   cards: ConceptCard[];
   shenwan: ShenwanClassification;
   total_cards: number;
+  concept_hint: ConceptHint;
   status: "ready" | "empty";
   updated_at: string;
 }
@@ -108,24 +132,32 @@ export interface HotRanksResponse {
 // ── Limit Pools ──
 
 export interface LimitPoolStock {
-  code: string;
+  symbol: string;
+  exchange: string;
+  vt_symbol: string;
   name: string;
+  close_price: number | null;
   change_pct: number | null;
-  latest_price: number | null;
+  limit_up_price?: number | null;
+  volume_ratio?: number | null;
   turnover_rate?: number | null;
   turnover?: number | null;
   limit_amount?: number | null;
-  continuous_limit_up_count?: number | null;
+  limit_up_count?: number | null;
+  first_limit_time?: string | null;
+  last_limit_time?: string | null;
   [key: string]: unknown;
+}
+
+export interface LimitPoolGroup {
+  label: string;
+  items: LimitPoolStock[];
+  total?: number;
 }
 
 export interface LimitPoolsData {
   trade_date: string;
-  pools: {
-    limit_up?: LimitPoolStock[];
-    limit_down?: LimitPoolStock[];
-    strong?: LimitPoolStock[];
-  };
+  pools: Record<string, LimitPoolGroup>;
   status: "ready" | "unavailable";
   message?: string;
   updated_at: string;

@@ -215,22 +215,27 @@ class AkShareAdapter:
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    def list_stocks(self, page: int = 1, page_size: int = 50, sort: str = "mktcap") -> dict[str, Any]:
+    def list_stocks(self, page: int = 1, page_size: int = 50, sort: str = "mktcap", order: str = "desc") -> dict[str, Any]:
         """Return a page of live A-share quotes through fast public quote APIs."""
 
-        key = f"list_stocks:{page}:{page_size}:{sort.strip().lower()}"
-        return market_cache.get_or_set(key, LIST_TTL_SECONDS, lambda: self._list_stocks_uncached(page, page_size, sort))
+        key = f"list_stocks:{page}:{page_size}:{sort.strip().lower()}:{order.strip().lower()}"
+        return market_cache.get_or_set(key, LIST_TTL_SECONDS, lambda: self._list_stocks_uncached(page, page_size, sort, order))
 
-    def _list_stocks_uncached(self, page: int, page_size: int, sort: str) -> dict[str, Any]:
+    def _list_stocks_uncached(self, page: int, page_size: int, sort: str, order: str = "desc") -> dict[str, Any]:
         offset = (max(page, 1) - 1) * min(max(page_size, 1), 200)
         count = min(max(page_size, 1), 200)
-        try:
-            return _sina_all_a_page(page=max(page, 1), page_size=count, sort=sort)
-        except Exception:
-            pass
+
+        # Sina 不提供期间涨幅数据，排序相关字段时跳过以避免全 null 结果
+        skip_sina = sort.strip().lower() in ("return_5d", "return_10d", "return_20d")
+
+        if not skip_sina:
+            try:
+                return _sina_all_a_page(page=max(page, 1), page_size=count, sort=sort)
+            except Exception:
+                pass
 
         try:
-            return _eastmoney_all_a_page(page=max(page, 1), page_size=count, sort=sort)
+            return _eastmoney_all_a_page(page=max(page, 1), page_size=count, sort=sort, order=order)
         except Exception:
             pass
 
@@ -345,6 +350,7 @@ class AkShareAdapter:
             "pe": None,
             "pb": None,
             "turnover_rate": None,
+            "volume_ratio": None,
             "industry": info.get("行业"),
             "area": None,
             "trade_time": None,
@@ -384,6 +390,7 @@ class AkShareAdapter:
             "pe": _number(parts[39] if len(parts) > 39 else None),
             "pb": _number(parts[46] if len(parts) > 46 else None),
             "turnover_rate": _number(parts[38] if len(parts) > 38 else None),
+            "volume_ratio": _number(parts[49] if len(parts) > 49 else None),
             "trade_time": _format_tencent_trade_time(parts[30]),
             "raw_symbol": prefixed,
             "raw": {"parts": parts},
@@ -449,24 +456,37 @@ class AkShareAdapter:
         exchange: str | None = None,
         limit: int = 90,
         interval: str = "1d",
+        start_date: str | date | None = None,
+        end_date: str | date | None = None,
     ) -> dict[str, Any]:
         """Return stock or index K-lines through AkShare."""
 
         normalized = normalize_exchange(symbol, exchange)
         normalized_interval = _normalize_interval(interval)
-        key = f"stock_bars:{symbol}:{normalized}:{normalized_interval}:{limit}"
+        start_key = _date_key(start_date) if start_date else ""
+        end_key = _date_key(end_date) if end_date else ""
+        key = f"stock_bars:{symbol}:{normalized}:{normalized_interval}:{limit}:{start_key}:{end_key}"
         return market_cache.get_or_set(
             key,
             BARS_TTL_SECONDS,
-            lambda: self._stock_bars_uncached(symbol, normalized, limit, normalized_interval),
+            lambda: self._stock_bars_uncached(symbol, normalized, limit, normalized_interval, start_key, end_key),
         )
 
-    def _stock_bars_uncached(self, symbol: str, exchange: str, limit: int, interval: str) -> dict[str, Any]:
+    def _stock_bars_uncached(
+        self,
+        symbol: str,
+        exchange: str,
+        limit: int,
+        interval: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> dict[str, Any]:
         normalized = normalize_exchange(symbol, exchange)
         if _is_index_symbol(symbol, normalized):
             df, source = self._index_bars(symbol, normalized, interval, limit)
         else:
-            df, source = self._stock_bars(symbol, interval, limit)
+            df, source = self._stock_bars(symbol, interval, limit, start_date, end_date)
+        df = _filter_bars_by_date(df, start_date, end_date)
         items = [_bar_row_to_api(row) for row in _tail_records(df, limit)]
         if not items:
             raise AkShareSourceError(f"No AkShare bar data for {symbol}")
@@ -475,6 +495,8 @@ class AkShareAdapter:
             "exchange": normalized,
             "vt_symbol": vt_symbol(symbol, normalized),
             "interval": interval,
+            "start_date": start_date,
+            "end_date": end_date,
             "items": items,
             "source": source,
             "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -762,32 +784,47 @@ class AkShareAdapter:
             raise AkShareSourceError("No sample index returned by live index quotes")
         return self.stock_bars(symbol, exchange, limit=limit, interval="1d")
 
-    def _stock_bars(self, symbol: str, interval: str, limit: int) -> tuple[pd.DataFrame, str]:
+    def _stock_bars(
+        self,
+        symbol: str,
+        interval: str,
+        limit: int,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> tuple[pd.DataFrame, str]:
         prefixed = _prefixed_symbol(symbol, normalize_exchange(symbol))
         if interval in {"1m", "5m", "15m", "30m", "60m"}:
-            module = importlib.import_module("akshare.stock.stock_zh_a_sina")
-            with _akshare_network_env():
-                df = module.stock_zh_a_minute(symbol=prefixed, period=interval.removesuffix("m"), adjust="")
-            return df.tail(limit), "akshare.stock_zh_a_minute"
+            if not start_date and not end_date:
+                try:
+                    module = importlib.import_module("akshare.stock.stock_zh_a_sina")
+                    with _akshare_network_env():
+                        df = module.stock_zh_a_minute(symbol=prefixed, period=interval.removesuffix("m"), adjust="")
+                    if not df.empty:
+                        return df.tail(limit), "akshare.stock_zh_a_minute"
+                except Exception:
+                    pass
+            df = _eastmoney_stock_kline(symbol, normalize_exchange(symbol), interval, limit, start_date, end_date)
+            return df.tail(limit), "eastmoney.stock_kline_minute"
 
         try:
             df = _tencent_stock_kline(symbol, normalize_exchange(symbol), interval, limit)
-            if not df.empty:
+            if not df.empty and not start_date and not end_date:
                 return df.tail(limit), "tencent.stock_kline"
         except Exception:
             pass
 
         try:
-            df = _eastmoney_stock_kline(symbol, normalize_exchange(symbol), interval, limit)
+            df = _eastmoney_stock_kline(symbol, normalize_exchange(symbol), interval, limit, start_date, end_date)
             if not df.empty:
                 return df.tail(limit), "eastmoney.stock_kline"
         except Exception:
             pass
 
         module = importlib.import_module("akshare.stock_feature.stock_hist_tx")
-        start_date = _history_start_for_limit(limit, interval)
+        start_value = start_date or _history_start_for_limit(limit, interval)
+        end_value = end_date or "20500101"
         with _akshare_network_env():
-            df = module.stock_zh_a_hist_tx(symbol=prefixed, start_date=start_date, end_date="20500101", adjust="")
+            df = module.stock_zh_a_hist_tx(symbol=prefixed, start_date=start_value, end_date=end_value, adjust="")
         if interval == "1w":
             df = _resample_ohlcv(df, "W")
         elif interval == "1mo":
@@ -1306,39 +1343,56 @@ class AkShareAdapter:
         symbol: str,
         exchange: str | None = None,
         period: str = "即时",
+        limit: int = 50,
     ) -> dict[str, Any]:
         """Return individual stock fund flow through AkShare."""
 
         normalized = normalize_exchange(symbol, exchange)
-        key = f"stock_fund_flows:{symbol}:{normalized}:{period}"
+        key = f"stock_fund_flows:{symbol}:{normalized}:{period}:{limit}"
         return market_cache.get_or_set(
             key,
             self.FUND_FLOW_TTL_SECONDS,
-            lambda: self._stock_fund_flows_uncached(symbol, normalized, period),
+            lambda: self._stock_fund_flows_uncached(symbol, normalized, period, limit),
         )
 
-    def _stock_fund_flows_uncached(self, symbol: str, exchange: str, period: str) -> dict[str, Any]:
-        module = importlib.import_module("akshare.stock_feature.stock_fund_flow")
-        with _akshare_network_env():
-            df = module.stock_fund_flow_individual(symbol=period)
-        # Filter for this symbol
+    def _stock_fund_flows_uncached(self, symbol: str, exchange: str, period: str, limit: int) -> dict[str, Any]:
+        bounded_limit = min(max(int(limit or 50), 1), 5000)
+        try:
+            df, source = self._stock_main_fund_flow(period)
+        except Exception:
+            df, source = self._stock_ths_fund_flow(period)
+
         target = symbol.strip()
-        matched = df[
-            df["代码"].astype(str).str.strip().str.endswith(target)
-            if "代码" in df.columns
-            else False
-        ] if not df.empty else df
-        items = [_stock_fund_flow_row_to_api(row, symbol) for row in _records(matched, 50)]
+        code_column = _first_existing_column(df, ("代码", "股票代码", "code"))
+        if target and code_column and not df.empty:
+            matched = df[df[code_column].astype(str).str.strip().str.endswith(target)]
+        else:
+            matched = df
+        items = [_stock_fund_flow_row_to_api(row, symbol) for row in _records(matched, bounded_limit)]
         if not items:
-            items = [_stock_fund_flow_row_to_api(row, symbol) for row in _records(df, 50)]
+            items = [_stock_fund_flow_row_to_api(row, symbol) for row in _records(df, bounded_limit)]
         return {
             "vt_symbol": vt_symbol(symbol, exchange),
             "period": period,
             "items": items,
             "total": len(items),
-            "source": "akshare.stock_fund_flow_individual",
+            "source": source,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
+
+    def _stock_main_fund_flow(self, period: str) -> tuple[pd.DataFrame, str]:
+        """Fetch EastMoney main-fund ranking for batch stock fund-flow sync."""
+
+        del period
+        return _eastmoney_stock_main_fund_flow(limit=500), "eastmoney.stock_main_fund_flow"
+
+    def _stock_ths_fund_flow(self, period: str) -> tuple[pd.DataFrame, str]:
+        """Fallback to THS fund-flow table when EastMoney ranking is unavailable."""
+
+        module = importlib.import_module("akshare.stock_feature.stock_fund_flow")
+        with _akshare_network_env():
+            df = module.stock_fund_flow_individual(symbol=period)
+        return df, "akshare.stock_fund_flow_individual"
 
     def limit_up_pools(self, trade_date: str | None = None) -> dict[str, Any]:
         """Return limit-up, limit-down and related pools through AkShare."""
@@ -1391,14 +1445,11 @@ class AkShareAdapter:
         )
 
     def _stock_hot_ranks_uncached(self, limit: int) -> dict[str, Any]:
-        module = importlib.import_module("akshare.stock.stock_hot_rank_em")
-        with _akshare_network_env():
-            df = module.stock_hot_rank_em()
-        items = [_hot_rank_row_to_api(row) for row in _records(df, limit)]
+        items = _eastmoney_stock_hot_rank_items(limit)
         return {
             "items": items,
-            "total": len(df),
-            "source": "akshare.stock_hot_rank_em",
+            "total": len(items),
+            "source": "eastmoney.stockrank",
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -1746,11 +1797,36 @@ def _records(df: pd.DataFrame, limit: int) -> list[dict[str, Any]]:
     return [_normalize_record(row) for row in df.head(bounded_limit).to_dict(orient="records")]
 
 
+def _first_existing_column(df: pd.DataFrame, candidates: tuple[str, ...]) -> str | None:
+    for column in candidates:
+        if column in df.columns:
+            return column
+    return None
+
+
 def _tail_records(df: pd.DataFrame, limit: int) -> list[dict[str, Any]]:
     if df.empty:
         return []
     bounded_limit = min(max(limit, 1), 3000)
     return [_normalize_record(row) for row in df.tail(bounded_limit).to_dict(orient="records")]
+
+
+def _filter_bars_by_date(df: pd.DataFrame, start_date: str | date | None, end_date: str | date | None) -> pd.DataFrame:
+    if df.empty or (not start_date and not end_date):
+        return df
+    date_column = _first_existing_column(df, ("date", "day", "datetime", "时间", "日期"))
+    if not date_column:
+        return df
+    result = df.copy()
+    parsed = pd.to_datetime(result[date_column], errors="coerce")
+    if start_date:
+        start = pd.Timestamp(_date_key(start_date))
+        result = result[parsed >= start]
+        parsed = parsed.loc[result.index]
+    if end_date:
+        end = pd.Timestamp(_date_key(end_date)) + pd.Timedelta(days=1)
+        result = result[parsed < end]
+    return result
 
 
 def _all_records(df: pd.DataFrame) -> list[dict[str, Any]]:
@@ -1806,6 +1882,7 @@ def _stock_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
         "pe": _number(normalized.get("市盈率-动态") or normalized.get("pe_ttm")),
         "pb": _number(normalized.get("市净率")),
         "turnover_rate": _number(normalized.get("换手率") or normalized.get("hsl")),
+        "volume_ratio": _number(normalized.get("量比") or normalized.get("lb")),
         "return_5d": _number(normalized.get("zdf_d5")),
         "return_10d": _number(normalized.get("zdf_d10")),
         "return_20d": _number(normalized.get("zdf_d20")),
@@ -1816,7 +1893,13 @@ def _stock_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
 
 def _bar_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
     normalized = _normalize_record(row)
-    trade_date = normalized.get("日期") or normalized.get("时间") or normalized.get("date")
+    trade_date = (
+        normalized.get("日期")
+        or normalized.get("时间")
+        or normalized.get("day")
+        or normalized.get("datetime")
+        or normalized.get("date")
+    )
     volume = _number(normalized.get("成交量") or normalized.get("volume"))
     explicit_turnover = _number(normalized.get("成交额") or normalized.get("turnover"))
     if volume is None and "amount" in normalized and "成交额" not in normalized:
@@ -1845,8 +1928,15 @@ def _format_tencent_trade_time(value: Any) -> str | None:
     return f"{text[:4]}-{text[4:6]}-{text[6:8]} {text[8:10]}:{text[10:12]}:{text[12:14]}"
 
 
-def _eastmoney_stock_kline(symbol: str, exchange: str, interval: str, limit: int) -> pd.DataFrame:
-    period_map = {"1d": "101", "1w": "102", "1mo": "103"}
+def _eastmoney_stock_kline(
+    symbol: str,
+    exchange: str,
+    interval: str,
+    limit: int,
+    start_date: str | date | None = None,
+    end_date: str | date | None = None,
+) -> pd.DataFrame:
+    period_map = {"1m": "1", "5m": "5", "15m": "15", "30m": "30", "60m": "60", "1d": "101", "1w": "102", "1mo": "103"}
     period = period_map.get(interval)
     if period is None:
         raise AkShareSourceError(f"Unsupported EastMoney kline interval: {interval}")
@@ -1857,8 +1947,8 @@ def _eastmoney_stock_kline(symbol: str, exchange: str, interval: str, limit: int
         "klt": period,
         "fqt": "0",
         "secid": eastmoney_secid(symbol, exchange),
-        "beg": _history_start_for_limit(limit, interval),
-        "end": "20500101",
+        "beg": _date_key(start_date) if start_date else _history_start_for_limit(limit, interval),
+        "end": _date_key(end_date) if end_date else "20500101",
     }
     response = None
     for host in ("https://push2his.eastmoney.com", "https://48.push2his.eastmoney.com", "https://push2delay.eastmoney.com"):
@@ -1875,7 +1965,16 @@ def _eastmoney_stock_kline(symbol: str, exchange: str, interval: str, limit: int
     klines = data.get("klines") or []
     if not klines:
         return pd.DataFrame()
-    rows = [item.split(",") for item in klines]
+    rows = []
+    for item in klines:
+        parts = item.split(",")
+        if len(parts) == 11:
+            parts.append(None)
+        if len(parts) < 12:
+            continue
+        rows.append(parts[:12])
+    if not rows:
+        return pd.DataFrame()
     df = pd.DataFrame(
         rows,
         columns=[
@@ -1895,7 +1994,8 @@ def _eastmoney_stock_kline(symbol: str, exchange: str, interval: str, limit: int
     )
     for column in ("open", "close", "high", "low", "volume", "turnover", "change_pct"):
         df[column] = pd.to_numeric(df[column], errors="coerce")
-    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+    parsed_dates = pd.to_datetime(df["date"], errors="coerce")
+    df["date"] = parsed_dates if interval in {"1m", "5m", "15m", "30m", "60m"} else parsed_dates.dt.date
     df.dropna(subset=["date", "open", "close"], inplace=True)
     return df
 
@@ -1961,6 +2061,11 @@ EASTMONEY_BOARD_MEMBER_HOSTS = (
     "https://48.push2delay.eastmoney.com",
     "https://29.push2.eastmoney.com",
 )
+EASTMONEY_STOCK_FUND_FLOW_HOSTS = (
+    "https://push2.eastmoney.com",
+    "https://48.push2.eastmoney.com",
+    "https://push2delay.eastmoney.com",
+)
 EASTMONEY_HSF10_HOSTS = (
     "https://emweb.securities.eastmoney.com",
     "https://emweb.eastmoney.com",
@@ -2009,6 +2114,149 @@ def _eastmoney_board_items(board_type: str) -> list[dict[str, Any]]:
         if isinstance(row, dict)
     ]
     return sorted(items, key=lambda item: (_number(item.get("change_pct")) is None, -(_number(item.get("change_pct")) or -999), str(item.get("name") or "")))
+
+
+def _eastmoney_stock_main_fund_flow(limit: int = 500) -> pd.DataFrame:
+    page_size = 100
+    params = _eastmoney_stock_main_fund_flow_params(page=1, page_size=page_size)
+    data = _eastmoney_clist_get(EASTMONEY_STOCK_FUND_FLOW_HOSTS, params, timeout=12)
+    first_data = data.get("data") or {}
+    rows = [row for row in (first_data.get("diff") or []) if isinstance(row, dict)]
+    total = int(first_data.get("total") or len(rows))
+    total_pages = min(math.ceil(total / page_size), math.ceil(max(limit, 1) / page_size), 12)
+    for page in range(2, total_pages + 1):
+        try:
+            time.sleep(0.2)
+            data = _eastmoney_clist_get(
+                EASTMONEY_STOCK_FUND_FLOW_HOSTS,
+                _eastmoney_stock_main_fund_flow_params(page=page, page_size=page_size),
+                timeout=12,
+            )
+        except Exception:
+            break
+        rows.extend(row for row in ((data.get("data") or {}).get("diff") or []) if isinstance(row, dict))
+        if len(rows) >= limit:
+            break
+
+    normalized = [_eastmoney_stock_main_fund_flow_row(row) for row in rows[:limit]]
+    return pd.DataFrame(normalized)
+
+
+def _eastmoney_stock_main_fund_flow_params(page: int, page_size: int) -> dict[str, Any]:
+    return {
+        "fid": "f184",
+        "po": "1",
+        "pz": min(max(page_size, 1), 500),
+        "pn": max(page, 1),
+        "np": "1",
+        "fltt": "2",
+        "invt": "2",
+        "fields": "f2,f3,f12,f13,f14,f62,f184,f225,f165,f263,f109,f175,f264,f160,f100,f124,f265,f1",
+        "ut": "b2884a393a59ad64002292a3e90d46a5",
+        "fs": "m:0+t:6+f:!2,m:0+t:13+f:!2,m:0+t:80+f:!2,m:1+t:2+f:!2,m:1+t:23+f:!2",
+    }
+
+
+def _eastmoney_stock_main_fund_flow_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "代码": row.get("f12"),
+        "名称": row.get("f14"),
+        "最新价": row.get("f2"),
+        "今日排行榜-主力净额": row.get("f62"),
+        "今日排行榜-主力净占比": row.get("f184"),
+        "今日排行榜-今日排名": row.get("f225"),
+        "今日排行榜-今日涨跌": row.get("f3"),
+        "5日排行榜-主力净占比": row.get("f165"),
+        "5日排行榜-5日排名": row.get("f263"),
+        "5日排行榜-5日涨跌": row.get("f109"),
+        "10日排行榜-主力净占比": row.get("f175"),
+        "10日排行榜-10日排名": row.get("f264"),
+        "10日排行榜-10日涨跌": row.get("f160"),
+        "所属板块": row.get("f100"),
+        "更新时间": row.get("f124"),
+        "板块代码": row.get("f265"),
+        "raw": row,
+    }
+
+
+def _eastmoney_stock_hot_rank_items(limit: int = 100) -> list[dict[str, Any]]:
+    rank_rows = _eastmoney_stock_hot_rank_raw(limit)
+    secids = [_eastmoney_hot_rank_secid(row) for row in rank_rows]
+    quote_map: dict[str, dict[str, Any]] = {}
+    try:
+        quote_map = {
+            str(item.get("symbol")): item
+            for item in (_eastmoney_quote_row_to_api(row) for row in _eastmoney_batch_quotes(secids) if isinstance(row, dict))
+            if item.get("symbol")
+        }
+    except Exception:
+        quote_map = {}
+
+    items: list[dict[str, Any]] = []
+    for row in rank_rows[: min(max(limit, 1), 500)]:
+        raw_symbol = str(row.get("sc") or "")
+        clean = _clean_stock_symbol(raw_symbol)
+        exchange = _exchange_from_prefixed_symbol(raw_symbol, clean)
+        quote = quote_map.get(clean) or {}
+        items.append(
+            {
+                "symbol": clean,
+                "exchange": exchange,
+                "vt_symbol": vt_symbol(clean, exchange),
+                "name": quote.get("name"),
+                "rank": _int_value(row.get("rk")),
+                "rank_change": _number(row.get("rc")),
+                "hot_score": None,
+                "last_price": quote.get("last_price"),
+                "change_pct": quote.get("change_pct"),
+                "raw": {**row, "quote": quote},
+            }
+        )
+    return items
+
+
+def _eastmoney_stock_hot_rank_raw(limit: int = 100) -> list[dict[str, Any]]:
+    url = "https://emappdata.eastmoney.com/stockrank/getAllCurrentList"
+    payload = {
+        "appId": "appId01",
+        "globalId": "786e4c21-70dc-435a-93bb-38",
+        "marketType": "",
+        "pageNo": 1,
+        "pageSize": min(max(limit, 1), 100),
+    }
+    headers = {
+        **EASTMONEY_HEADERS,
+        "Referer": "https://guba.eastmoney.com/rank/",
+        "Content-Type": "application/json",
+    }
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            session = requests.Session()
+            session.trust_env = False
+            response = session.post(url, json=payload, headers=headers, timeout=12)
+            response.raise_for_status()
+            data = response.json()
+            rows = data.get("data") or []
+            if not isinstance(rows, list):
+                raise AkShareSourceError("EastMoney hot rank response has no rows")
+            return [row for row in rows if isinstance(row, dict)]
+        except Exception as exc:
+            last_error = exc
+            time.sleep(0.4 * (attempt + 1) + random.uniform(0.05, 0.2))
+        finally:
+            try:
+                session.close()
+            except Exception:
+                pass
+    raise AkShareSourceError(f"stock hot rank unavailable: {last_error.__class__.__name__ if last_error else 'unknown'}")
+
+
+def _eastmoney_hot_rank_secid(row: dict[str, Any]) -> str:
+    raw_symbol = str(row.get("sc") or "")
+    clean = _clean_stock_symbol(raw_symbol)
+    exchange = _exchange_from_prefixed_symbol(raw_symbol, clean)
+    return eastmoney_secid(clean, exchange)
 
 
 def _eastmoney_search_board_items(query: str, limit: int = 20) -> list[dict[str, Any]]:
@@ -2373,8 +2621,8 @@ def _sina_all_a_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
     return {**_sina_member_row_to_api(row), "source": "sina.market_center.hs_a"}
 
 
-def _eastmoney_all_a_page(page: int, page_size: int, sort: str) -> dict[str, Any]:
-    data = _eastmoney_clist_page(page=page, page_size=page_size, sort=sort)
+def _eastmoney_all_a_page(page: int, page_size: int, sort: str, order: str = "desc") -> dict[str, Any]:
+    data = _eastmoney_clist_page(page=page, page_size=page_size, sort=sort, order=order)
     rows = (data.get("data") or {}).get("diff") or []
     return {
         "items": [_eastmoney_quote_row_to_api(row) for row in rows if isinstance(row, dict)],
@@ -2386,12 +2634,12 @@ def _eastmoney_all_a_page(page: int, page_size: int, sort: str) -> dict[str, Any
     }
 
 
-def _eastmoney_clist_page(page: int, page_size: int, sort: str) -> dict[str, Any]:
+def _eastmoney_clist_page(page: int, page_size: int, sort: str, order: str = "desc") -> dict[str, Any]:
     url = "https://48.push2delay.eastmoney.com/api/qt/clist/get"
     params = {
         "pn": max(page, 1),
         "pz": min(max(page_size, 1), 200),
-        "po": 1,
+        "po": 1 if order.strip().lower() != "asc" else 0,
         "np": 1,
         "ut": "bd1d9ddb04089700cf9c27f6f7426281",
         "fltt": 2,
@@ -2455,6 +2703,7 @@ def _eastmoney_search_stock_quotes(query: str, limit: int) -> list[dict[str, Any
                     "pe": None,
                     "pb": None,
                     "turnover_rate": None,
+                    "volume_ratio": None,
                     "raw": row,
                     "source": "eastmoney.searchapi",
                 }
@@ -2546,7 +2795,7 @@ def _sina_index_quotes() -> list[Quote]:
 
 
 def _eastmoney_quote_fields() -> str:
-    return "f2,f3,f4,f5,f6,f8,f9,f12,f13,f14,f15,f16,f17,f18,f20,f21,f23"
+    return "f2,f3,f4,f5,f6,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21,f23,f109,f110,f160"
 
 
 def _eastmoney_stock_sort_field(sort: str) -> str:
@@ -2570,6 +2819,11 @@ def _eastmoney_stock_sort_field(sort: str) -> str:
         "zsz": "f20",
         "float_market_cap": "f21",
         "nmc": "f21",
+        "return_5d": "f109",
+        "return_10d": "f160",
+        "return_20d": "f110",
+        "volume_ratio": "f10",
+        "volumeratio": "f10",
     }
     return sort_map.get(normalized, "f20")
 
@@ -2597,6 +2851,10 @@ def _eastmoney_quote_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
         "pe": _number(normalized.get("f9")),
         "pb": _number(normalized.get("f23")),
         "turnover_rate": _number(normalized.get("f8")),
+        "volume_ratio": _number(normalized.get("f10")),
+        "return_5d": _number(normalized.get("f109")),
+        "return_10d": _number(normalized.get("f160")),
+        "return_20d": _number(normalized.get("f110")),
         "raw": normalized,
         "source": "eastmoney.push2",
     }
@@ -2748,6 +3006,22 @@ def _history_start_for_limit(limit: int, interval: str) -> str:
     multiplier = 3 if interval == "1w" else 6 if interval == "1mo" else 2
     days = max(limit * multiplier, 260)
     return (date.today() - timedelta(days=days)).strftime("%Y%m%d")
+
+
+def _date_key(value: str | date | datetime | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%Y%m%d")
+    if isinstance(value, date):
+        return value.strftime("%Y%m%d")
+    text = str(value).strip()
+    if not text:
+        return ""
+    digits = re.sub(r"[^0-9]", "", text)
+    if len(digits) >= 8:
+        return digits[:8]
+    return text
 
 
 def _is_index_symbol(symbol: str, exchange: str) -> bool:
@@ -2996,6 +3270,10 @@ def _sina_member_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
         "pe": _number(normalized.get("per")),
         "pb": _number(normalized.get("pb")),
         "turnover_rate": _number(normalized.get("turnoverratio")),
+        "volume_ratio": None,
+        "return_5d": None,
+        "return_10d": None,
+        "return_20d": None,
         "trade_time": normalized.get("ticktime"),
         "raw_symbol": prefixed_symbol,
         "raw": normalized,
@@ -3256,21 +3534,35 @@ def _fund_flow_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
 def _stock_fund_flow_row_to_api(row: dict[str, Any], symbol: str) -> dict[str, Any]:
     """Normalize an individual stock fund-flow row from AkShare."""
     n = _normalize_record(row)
-    raw_symbol = str(n.get("代码") or n.get("code") or symbol).strip()
+    raw_symbol = str(n.get("代码") or n.get("股票代码") or n.get("code") or symbol).strip()
     clean = _clean_stock_symbol(raw_symbol)
     exchange = _exchange_from_prefixed_symbol(raw_symbol, clean)
     return {
         "symbol": clean,
         "exchange": exchange,
         "vt_symbol": vt_symbol(clean, exchange),
-        "name": n.get("名称") or n.get("name"),
-        "change_pct": _number(n.get("涨跌幅") or n.get("今日涨跌幅")),
-        "main_net_inflow": _number(n.get("主力净流入-净额") or n.get("今日主力净流入") or n.get("主力净流入")),
-        "main_net_inflow_pct": _number(n.get("主力净流入-净占比") or n.get("今日主力净流入占比")),
+        "name": n.get("名称") or n.get("股票简称") or n.get("name"),
+        "change_pct": _number(n.get("涨跌幅") or n.get("今日涨跌幅") or n.get("今日排行榜-今日涨跌")),
+        "main_net_inflow": _number(
+            n.get("主力净流入-净额")
+            or n.get("今日主力净流入")
+            or n.get("主力净流入")
+            or n.get("净额")
+            or n.get("资金流入净额")
+            or n.get("今日排行榜-主力净额")
+        ),
+        "main_net_inflow_pct": _number(
+            n.get("主力净流入-净占比")
+            or n.get("今日主力净流入占比")
+            or n.get("今日排行榜-主力净占比")
+        ),
         "super_large_net_inflow": _number(n.get("超大单净流入-净额")),
         "large_net_inflow": _number(n.get("大单净流入-净额")),
         "medium_net_inflow": _number(n.get("中单净流入-净额")),
         "small_net_inflow": _number(n.get("小单净流入-净额")),
+        "main_rank": _int_value(n.get("今日排行榜-今日排名")),
+        "main_rank_5d": _int_value(n.get("5日排行榜-5日排名")),
+        "main_rank_10d": _int_value(n.get("10日排行榜-10日排名")),
         "raw": n,
     }
 
@@ -3328,13 +3620,13 @@ def _lhb_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
         "exchange": exchange,
         "vt_symbol": vt_symbol(clean, exchange),
         "name": n.get("名称") or n.get("name"),
-        "trade_date": n.get("交易日期") or n.get("上榜日期") or n.get("日期"),
+        "trade_date": n.get("交易日期") or n.get("上榜日期") or n.get("上榜日") or n.get("日期"),
         "close_price": _number(n.get("收盘价")),
         "change_pct": _number(n.get("涨跌幅")),
         "turnover_rate": _number(n.get("换手率")),
-        "buy_amount": _number(n.get("买入额") or n.get("买入金额")),
-        "sell_amount": _number(n.get("卖出额") or n.get("卖出金额")),
-        "net_buy": _number(n.get("净额") or n.get("净买入额")),
+        "buy_amount": _number(n.get("买入额") or n.get("买入金额") or n.get("龙虎榜买入额")),
+        "sell_amount": _number(n.get("卖出额") or n.get("卖出金额") or n.get("龙虎榜卖出额")),
+        "net_buy": _number(n.get("净额") or n.get("净买入额") or n.get("龙虎榜净买额")),
         "reason": n.get("上榜原因") or n.get("上榜理由") or n.get("解读"),
         "broker_count": _int_value(n.get("营业部数")),
         "raw": n,
@@ -3355,18 +3647,56 @@ def _notice_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _financial_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
-    """Normalize a quarterly financial report row from AkShare."""
+    """Normalize a quarterly financial report row from AkShare.
+
+    AkShare's ``stock_profit_sheet_by_quarterly_em`` returns English uppercase
+    column names (OPERATE_INCOME, NETPROFIT, …) while some older / alternative
+    data sources use Chinese names.  We try both conventions so the mapping
+    works regardless of the source.
+    """
     n = _normalize_record(row)
+    report_date = n.get("报告期") or n.get("截止日期") or n.get("REPORT_DATE")
+    publish_date = n.get("公告日期") or n.get("披露日期") or n.get("NOTICE_DATE") or n.get("UPDATE_DATE")
     return {
-        "report_date": n.get("报告期") or n.get("截止日期") or n.get("REPORT_DATE"),
-        "revenue": _number(n.get("营业总收入") or n.get("营业总收入_同比增长")),
-        "revenue_yoy": _number(n.get("营业总收入同比增长") or n.get("营业总收入同比增长率")),
-        "net_profit": _number(n.get("净利润") or n.get("净利润_同比增长")),
-        "net_profit_yoy": _number(n.get("净利润同比增长") or n.get("净利润同比增长率")),
-        "gross_margin": _number(n.get("销售毛利率")),
-        "net_margin": _number(n.get("销售净利率")),
-        "eps": _number(n.get("每股收益") or n.get("基本每股收益")),
-        "roe": _number(n.get("净资产收益率") or n.get("加权净资产收益率")),
+        "report_date": report_date,
+        "publish_date": publish_date,
+        "revenue": _number(
+            n.get("营业总收入")
+            or n.get("TOTAL_OPERATE_INCOME")
+            or n.get("OPERATE_INCOME"),
+        ),
+        "revenue_yoy": _number(
+            n.get("营业总收入同比增长")
+            or n.get("营业总收入同比增长率")
+            or n.get("TOTAL_OPERATE_INCOME_QOQ")
+            or n.get("OPERATE_INCOME_QOQ"),
+        ),
+        "net_profit": _number(
+            n.get("净利润")
+            or n.get("NETPROFIT"),
+        ),
+        "net_profit_yoy": _number(
+            n.get("净利润同比增长")
+            or n.get("净利润同比增长率")
+            or n.get("NETPROFIT_QOQ"),
+        ),
+        "gross_margin": _number(
+            n.get("销售毛利率"),
+        ),
+        "net_margin": _number(
+            n.get("销售净利率"),
+        ),
+        "eps": _number(
+            n.get("每股收益")
+            or n.get("基本每股收益")
+            or n.get("BASIC_EPS"),
+        ),
+        "roe": _number(
+            n.get("净资产收益率")
+            or n.get("加权净资产收益率"),
+        ),
+        "deducted_net_profit": _number(n.get("扣非净利润") or n.get("DEDUCT_PARENT_NETPROFIT")),
+        "operating_cash_flow": _number(n.get("经营活动产生的现金流量净额") or n.get("NETCASH_OPERATE")),
         "raw": n,
     }
 

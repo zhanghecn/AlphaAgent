@@ -26,11 +26,19 @@ def list_stocks(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=100),
     sort: str = Query(default="mktcap"),
+    order: str = Query(default="desc"),
 ):
     # Filters beyond q/sort become database-backed in the next stage.
     del industry, sector, market
     try:
-        data = client().search_stocks(q, page_size=page_size) if q.strip() else client().list_stocks(page, page_size, sort)
+        market_client = client()
+        if q.strip():
+            data = market_client.search_stocks(q, page_size=page_size)
+        else:
+            try:
+                data = market_client.list_stocks(page, page_size, sort, order)
+            except TypeError:
+                data = market_client.list_stocks(page, page_size, sort)
         return ok(data)
     except Exception as exc:
         return JSONResponse(

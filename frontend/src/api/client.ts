@@ -2,6 +2,10 @@ import type { ApiResponse } from "./types";
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api";
 
+export function apiUrl(path: string): string {
+  return `${BASE_URL}${path}`;
+}
+
 export class ApiClientError extends Error {
   code: string;
   detail: Record<string, unknown>;

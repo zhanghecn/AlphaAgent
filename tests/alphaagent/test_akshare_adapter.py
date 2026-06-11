@@ -2,13 +2,21 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from alphaagent.data_sources.akshare_adapter import (
     AkShareAdapter,
+    AkShareSourceError,
+    _bar_row_to_api,
     _eastmoney_board_member_row_to_api,
     _eastmoney_board_row_to_api,
     _eastmoney_hsf10_sector_rows_to_api,
     _eastmoney_quote_row_to_api,
+    _eastmoney_stock_main_fund_flow,
+    _eastmoney_stock_kline,
+    _eastmoney_stock_hot_rank_items,
+    _filter_bars_by_date,
+    _financial_row_to_api,
     _sina_member_row_to_api,
 )
 from alphaagent.market.cache import market_cache
@@ -176,6 +184,237 @@ def test_source_status_cache_keeps_datetime_values(monkeypatch) -> None:
     assert second[0].to_api()["checked_at"]
 
 
+def test_financial_row_to_api_maps_publish_and_cash_flow_fields() -> None:
+    item = _financial_row_to_api(
+        {
+            "REPORT_DATE": "2026-03-31 00:00:00",
+            "NOTICE_DATE": "2026-04-30 00:00:00",
+            "OPERATE_INCOME": 100_000_000,
+            "NETPROFIT": 12_000_000,
+            "DEDUCT_PARENT_NETPROFIT": 10_000_000,
+            "NETCASH_OPERATE": 18_000_000,
+        }
+    )
+
+    assert item["report_date"] == "2026-03-31 00:00:00"
+    assert item["publish_date"] == "2026-04-30 00:00:00"
+    assert item["revenue"] == 100_000_000
+    assert item["net_profit"] == 12_000_000
+    assert item["deducted_net_profit"] == 10_000_000
+    assert item["operating_cash_flow"] == 18_000_000
+
+
+def test_stock_fund_flows_prefers_eastmoney_main_rank_table(monkeypatch) -> None:
+    market_cache.clear()
+    adapter = AkShareAdapter()
+
+    def fake_main_flow(period: str):
+        assert period == "即时"
+        return (
+            pd.DataFrame(
+                [
+                    {
+                        "代码": "600000",
+                        "名称": "浦发银行",
+                        "今日排行榜-主力净额": 123_000_000,
+                        "今日排行榜-主力净占比": 6.2,
+                        "今日排行榜-今日排名": 3,
+                        "今日排行榜-今日涨跌": 1.5,
+                    },
+                    {
+                        "代码": "000001",
+                        "名称": "平安银行",
+                        "今日排行榜-主力净占比": -1.1,
+                        "今日排行榜-今日排名": 200,
+                    },
+                ]
+            ),
+            "akshare.stock_main_fund_flow",
+        )
+
+    monkeypatch.setattr(adapter, "_stock_main_fund_flow", fake_main_flow)
+    monkeypatch.setattr(adapter, "_stock_ths_fund_flow", lambda period: (_ for _ in ()).throw(AssertionError(period)))
+
+    data = adapter.stock_fund_flows("600000", "SSE", period="即时", limit=10)
+
+    assert data["source"] == "akshare.stock_main_fund_flow"
+    assert data["items"][0]["vt_symbol"] == "600000.SSE"
+    assert data["items"][0]["main_net_inflow"] == 123_000_000
+    assert data["items"][0]["main_net_inflow_pct"] == 6.2
+    assert data["items"][0]["main_rank"] == 3
+    assert len(data["items"]) == 1
+
+
+def test_eastmoney_stock_main_fund_flow_fetches_multiple_pages(monkeypatch) -> None:
+    calls: list[int] = []
+
+    def fake_clist_get(hosts, params, timeout):
+        del hosts, timeout
+        page = int(params["pn"])
+        calls.append(page)
+        start = (page - 1) * 100
+        return {
+            "data": {
+                "total": 250,
+                "diff": [
+                    {
+                        "f12": f"{start + index:06d}",
+                        "f14": f"股票{start + index}",
+                        "f62": start + index,
+                        "f184": 1.0,
+                        "f225": start + index,
+                    }
+                    for index in range(100)
+                ],
+            }
+        }
+
+    monkeypatch.setattr("alphaagent.data_sources.akshare_adapter._eastmoney_clist_get", fake_clist_get)
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+
+    df = _eastmoney_stock_main_fund_flow(limit=250)
+
+    assert calls == [1, 2, 3]
+    assert len(df) == 250
+    assert df.iloc[-1]["代码"] == "000249"
+
+
+def test_stock_fund_flows_falls_back_to_ths_stock_code_column(monkeypatch) -> None:
+    market_cache.clear()
+    adapter = AkShareAdapter()
+
+    def fail_main_flow(period: str):
+        del period
+        raise AkShareSourceError("main flow unavailable")
+
+    def fake_ths_flow(period: str):
+        assert period == "即时"
+        return (
+            pd.DataFrame(
+                [
+                    {
+                        "股票代码": "000001",
+                        "股票简称": "平安银行",
+                        "净额": 88_000_000,
+                        "涨跌幅": 2.3,
+                    }
+                ]
+            ),
+            "akshare.stock_fund_flow_individual",
+        )
+
+    monkeypatch.setattr(adapter, "_stock_main_fund_flow", fail_main_flow)
+    monkeypatch.setattr(adapter, "_stock_ths_fund_flow", fake_ths_flow)
+
+    item = adapter.stock_fund_flows("000001", "SZSE", period="即时", limit=5)["items"][0]
+
+    assert item["vt_symbol"] == "000001.SZSE"
+    assert item["name"] == "平安银行"
+    assert item["main_net_inflow"] == 88_000_000
+
+
+def test_stock_hot_ranks_retries_transient_failures(monkeypatch) -> None:
+    market_cache.clear()
+    adapter = AkShareAdapter()
+
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter._eastmoney_stock_hot_rank_items",
+        lambda limit: [
+            {
+                "symbol": "600000",
+                "exchange": "SSE",
+                "vt_symbol": "600000.SSE",
+                "name": "浦发银行",
+                "rank": 1,
+                "rank_change": -2,
+                "raw": {},
+            }
+        ],
+    )
+
+    data = adapter.stock_hot_ranks(limit=5)
+
+    assert data["source"] == "eastmoney.stockrank"
+    assert data["items"][0]["vt_symbol"] == "600000.SSE"
+    assert data["items"][0]["rank"] == 1
+
+
+def test_eastmoney_stock_hot_rank_items_keep_rank_when_quote_fails(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter._eastmoney_stock_hot_rank_raw",
+        lambda limit: [{"sc": "SH600000", "rk": 1, "rc": -2}],
+    )
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter._eastmoney_batch_quotes",
+        lambda secids: (_ for _ in ()).throw(ConnectionError("quote down")),
+    )
+
+    items = _eastmoney_stock_hot_rank_items(limit=5)
+
+    assert items[0]["vt_symbol"] == "600000.SSE"
+    assert items[0]["rank"] == 1
+    assert items[0]["rank_change"] == -2
+    assert items[0]["name"] is None
+
+
+def test_eastmoney_stock_hot_rank_raw_retries_then_raises(monkeypatch) -> None:
+    from alphaagent.data_sources import akshare_adapter
+
+    calls = {"count": 0}
+
+    class FakeSession:
+        trust_env = False
+
+        def post(self, *args, **kwargs):
+            del args, kwargs
+            calls["count"] += 1
+            raise ConnectionError("still down")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("requests.Session", lambda: FakeSession())
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+
+    with pytest.raises(AkShareSourceError, match="stock hot rank unavailable"):
+        akshare_adapter._eastmoney_stock_hot_rank_raw(limit=5)
+
+    assert calls["count"] == 3
+
+
+def test_eastmoney_stock_hot_rank_raw_caps_page_size(monkeypatch) -> None:
+    from alphaagent.data_sources import akshare_adapter
+
+    seen_payloads: list[dict[str, object]] = []
+
+    class FakeResponse:
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        @staticmethod
+        def json():
+            return {"data": [{"sc": "SH600000", "rk": 1, "rc": 0}]}
+
+    class FakeSession:
+        trust_env = False
+
+        def post(self, *args, **kwargs):
+            del args
+            seen_payloads.append(kwargs["json"])
+            return FakeResponse()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("requests.Session", lambda: FakeSession())
+
+    rows = akshare_adapter._eastmoney_stock_hot_rank_raw(limit=200)
+
+    assert rows[0]["sc"] == "SH600000"
+    assert seen_payloads[0]["pageSize"] == 100
+
+
 def test_stock_bars_return_latest_tail_records(monkeypatch) -> None:
     adapter = AkShareAdapter()
 
@@ -198,6 +437,72 @@ def test_stock_bars_return_latest_tail_records(monkeypatch) -> None:
     data = adapter.stock_bars("600487", "SSE", limit=2, interval="1d")
 
     assert [item["trade_date"] for item in data["items"]] == ["2026-06-04", "2026-06-05"]
+
+
+def test_bar_row_to_api_accepts_minute_day_column() -> None:
+    item = _bar_row_to_api(
+        {
+            "day": "2026-06-11 14:56:00",
+            "open": "10.1",
+            "high": "10.2",
+            "low": "10.0",
+            "close": "10.15",
+            "volume": "1200",
+        }
+    )
+
+    assert item["trade_date"] == "2026-06-11 14:56:00"
+    assert item["close"] == 10.15
+    assert item["volume"] == 1200
+
+
+def test_eastmoney_stock_kline_supports_minute_interval(monkeypatch) -> None:
+    class FakeResponse:
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {
+                "data": {
+                    "klines": [
+                        "2026-06-11 14:56,10.0,10.1,10.2,9.9,1200,12120,0,1.0,0.1,2.0",
+                    ]
+                }
+            }
+
+    seen_params: list[dict[str, object]] = []
+
+    def fake_get(url, params, timeout):
+        del url, timeout
+        seen_params.append(params)
+        return FakeResponse()
+
+    monkeypatch.setattr("requests.get", fake_get)
+
+    df = _eastmoney_stock_kline("600000", "SSE", "1m", 5, start_date="2026-06-01", end_date="2026-06-11")
+
+    assert seen_params[0]["klt"] == "1"
+    assert seen_params[0]["beg"] == "20260601"
+    assert seen_params[0]["end"] == "20260611"
+    assert len(df) == 1
+    assert str(df.iloc[0]["date"]).startswith("2026-06-11 14:56")
+    assert df.iloc[0]["close"] == 10.1
+
+
+def test_filter_bars_by_date_drops_out_of_range_minute_rows() -> None:
+    df = pd.DataFrame(
+        [
+            {"date": "2026-01-08 14:56:00", "close": 10.0},
+            {"date": "2026-06-11 14:56:00", "close": 12.0},
+        ]
+    )
+
+    filtered = _filter_bars_by_date(df, "2026-01-08", "2026-01-08")
+
+    assert len(filtered) == 1
+    assert filtered.iloc[0]["close"] == 10.0
 
 
 def test_sina_member_row_converts_market_caps_from_wan_yuan() -> None:

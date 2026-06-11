@@ -5,6 +5,7 @@ import {
   Database,
   LayoutDashboard,
   Network,
+  Activity,
   TrendingUp,
   ChevronLeft,
   ChevronRight,
@@ -15,6 +16,7 @@ const NAV_ITEMS = [
   { to: "/", label: "今日市场", icon: LayoutDashboard },
   { to: "/explore", label: "主线探索", icon: Compass },
   { to: "/stocks", label: "全 A 股票", icon: TrendingUp },
+  { to: "/quant", label: "量化交易", icon: Activity },
   { to: "/chain", label: "产业链", icon: Network },
   { to: "/data", label: "数据管理", icon: Database },
 ];
@@ -30,7 +32,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <div className="flex h-14 items-center justify-between px-4">
           <span className="text-lg font-bold tracking-tight">AlphaAgent</span>
         </div>
-        <nav className="grid grid-cols-5 gap-1 px-2 pb-2">
+        <nav className="grid grid-cols-6 gap-1 px-2 pb-2">
           {NAV_ITEMS.map(({ to, label, icon: Icon }) => {
             const active = location.pathname === to ||
               (to !== "/" && location.pathname.startsWith(to));

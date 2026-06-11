@@ -9,6 +9,7 @@ COPY alphaagent/server/requirements.txt /tmp/alphaagent-server-requirements.txt
 RUN python -m pip install --no-cache-dir -r /tmp/alphaagent-server-requirements.txt
 
 COPY alphaagent ./alphaagent
+COPY vnpy ./vnpy
 COPY third_party ./third_party
 
 ENV PYTHONPATH=/app/third_party/akshare:/app

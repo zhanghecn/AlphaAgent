@@ -56,6 +56,7 @@ export interface StockQuote {
   pe: number | null;
   pb: number | null;
   turnover_rate: number | null;
+  volume_ratio: number | null;
   return_5d?: number | null;
   return_10d?: number | null;
   return_20d?: number | null;

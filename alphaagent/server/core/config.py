@@ -17,11 +17,17 @@ class Settings(BaseSettings):
     alphaagent_env: str = Field(default="local", alias="ALPHAAGENT_ENV")
     api_host: str = Field(default="0.0.0.0", alias="ALPHAAGENT_API_HOST")
     api_port: int = Field(default=8000, alias="ALPHAAGENT_API_PORT")
-    cors_origins: str = Field(default="http://localhost:5173,http://localhost:8000", alias="CORS_ORIGINS")
+    cors_origins: str = Field(
+        default="http://localhost:5173,http://localhost:5174,http://localhost:5175,http://localhost:5176,http://localhost:5177,http://localhost:8000,http://localhost:8001,http://localhost:8002,http://localhost:8003",
+        alias="CORS_ORIGINS",
+    )
     database_url: str = Field(default="", alias="DATABASE_URL")
     redis_url: str = Field(default="redis://host.docker.internal:6379/0", alias="REDIS_URL")
     market_timeout_seconds: float = Field(default=8.0, alias="MARKET_TIMEOUT_SECONDS")
     market_page_size: int = Field(default=50, alias="MARKET_PAGE_SIZE")
+    tushare_token: str = Field(default="", alias="TUSHARE_TOKEN")
+    tushare_api_url: str = Field(default="https://api.tushare.pro", alias="TUSHARE_API_URL")
+    tushare_timeout_seconds: float = Field(default=12.0, alias="TUSHARE_TIMEOUT_SECONDS")
 
     @property
     def cors_origin_list(self) -> list[str]:
