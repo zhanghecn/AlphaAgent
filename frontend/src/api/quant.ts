@@ -1,6 +1,13 @@
 import { apiClient, apiUrl } from "./client";
 
-export interface QuantRecommendation {
+export type StockBoard = "main" | "chinext" | "star" | "bse" | "index" | "unknown" | string;
+
+export interface StockIdentityFields {
+  board?: StockBoard;
+  board_label?: string | null;
+}
+
+export interface QuantRecommendation extends StockIdentityFields {
   id?: number;
   rank: number;
   trade_date: string;
@@ -26,6 +33,7 @@ export interface QuantScreenRun {
   run_id?: number | null;
   total?: number;
   recommendation_count?: number;
+  included_boards?: string[];
   recommendations: QuantRecommendation[];
   portfolio_sync?: {
     group_id: number;
@@ -64,10 +72,34 @@ export interface BacktestMetrics {
   daily_open_fallback_count?: number;
 }
 
-export interface BacktestTrade {
+export interface BacktestMethod {
+  id: string;
+  name: string;
+  signal_timing: string;
+  execution_timing: string;
+  candidate_policy: string;
+  universe: string;
+  symbols?: string[];
+  included_boards?: string[];
+  included_board_labels?: string[];
+  entry_filter?: {
+    min_entry_score?: number;
+    strict_entry?: boolean;
+    candidate_limit?: number;
+  };
+  execution?: {
+    intraday_entry?: boolean;
+    minute_entry_required?: boolean;
+    tail_entry_window?: string;
+    tail_entry_ma5_tolerance_pct?: number;
+  };
+}
+
+export interface BacktestTrade extends StockIdentityFields {
   id?: number;
   trade_date: string;
   vt_symbol: string;
+  name?: string | null;
   side: "BUY" | "SELL" | string;
   price: number;
   volume: number;
@@ -75,10 +107,45 @@ export interface BacktestTrade {
   fee: number;
   pnl?: number | null;
   reason?: string | null;
+  raw?: Record<string, unknown>;
 }
 
-export interface BacktestClosedTrade {
+export interface BacktestAuditEvent extends StockIdentityFields {
+  event_type: "order" | "trade" | string;
+  trade_date: string;
   vt_symbol: string;
+  name?: string | null;
+  side: "BUY" | "SELL" | string;
+  status?: string;
+  reason?: string | null;
+  price?: number | null;
+  volume?: number | null;
+  pnl?: number | null;
+  execution_mode?: string | null;
+  message?: string;
+  raw?: Record<string, unknown>;
+}
+
+export interface BacktestAudit {
+  status: string;
+  backtest_id: number;
+  vt_symbol?: string | null;
+  strategy_id: string;
+  strategy_version: string;
+  start_date: string;
+  end_date: string;
+  method?: BacktestMethod;
+  params?: Record<string, unknown>;
+  orders: BacktestAuditEvent[];
+  trades: BacktestTrade[];
+  events: BacktestAuditEvent[];
+  order_summary?: BacktestOrderStats;
+  note?: string;
+}
+
+export interface BacktestClosedTrade extends StockIdentityFields {
+  vt_symbol: string;
+  name?: string | null;
   entry_date?: string | null;
   exit_date?: string | null;
   entry_price?: number | null;
@@ -102,8 +169,9 @@ export interface BacktestMonthlyReturn {
   max_drawdown_pct: number;
 }
 
-export interface BacktestSymbolPerformance {
+export interface BacktestSymbolPerformance extends StockIdentityFields {
   vt_symbol: string;
+  name?: string | null;
   trade_count: number;
   win_count: number;
   loss_count: number;
@@ -149,9 +217,10 @@ export interface BacktestOrderStats {
   total: number;
   by_status: Record<string, number>;
   by_reason: Record<string, number>;
-  rejected_examples: Array<{
+  rejected_examples: Array<StockIdentityFields & {
     trade_date: string;
     vt_symbol: string;
+    name?: string | null;
     side: string;
     price?: number | null;
     volume?: number | null;
@@ -426,6 +495,7 @@ export interface BacktestReport {
   regime_analysis?: BacktestRegimeAnalysis;
   robustness_checks?: BacktestRobustnessChecks;
   execution_quality?: BacktestExecutionQuality;
+  method?: BacktestMethod;
   assumptions: Record<string, string>;
   limitations: string[];
 }
@@ -439,7 +509,7 @@ export interface PortfolioGroup {
   risk_profile?: string;
 }
 
-export interface PortfolioItem {
+export interface PortfolioItem extends StockIdentityFields {
   group_id: number;
   vt_symbol: string;
   name?: string | null;
@@ -449,6 +519,7 @@ export interface PortfolioItem {
   strategy_version?: string | null;
   expires_at?: string | null;
   created_at?: string;
+  updated_at?: string;
 }
 
 export interface SimulationAccount {
@@ -459,7 +530,7 @@ export interface SimulationAccount {
   status: string;
 }
 
-export interface SimulationPosition {
+export interface SimulationPosition extends StockIdentityFields {
   account_id: number;
   account_name?: string;
   vt_symbol: string;
@@ -531,12 +602,21 @@ export function createScreenRun(payload: {
   min_recommendation_score?: number;
   persist?: boolean;
   auto_portfolio?: boolean;
+  included_boards?: string[];
 } = {}) {
   return apiClient.post<QuantScreenRun>("/quant/screen-runs", payload);
 }
 
 export function fetchRecommendations(limit = 20) {
-  return apiClient.get<{ status: string; trade_date?: string; items: QuantRecommendation[] }>(
+  return apiClient.get<{
+    status: string;
+    trade_date?: string;
+    run_id?: number | null;
+    strategy_version?: string;
+    included_boards?: string[];
+    items: QuantRecommendation[];
+    message?: string;
+  }>(
     `/quant/recommendations?limit=${limit}`
   );
 }
@@ -560,6 +640,9 @@ export function createBacktest(payload: {
   tail_entry_start?: string;
   tail_entry_end?: string;
   tail_entry_ma5_tolerance_pct?: number;
+  symbols?: string[];
+  vt_symbol?: string;
+  included_boards?: string[];
 } = {}) {
   return apiClient.post<{
     status: string;
@@ -569,6 +652,34 @@ export function createBacktest(payload: {
     start: string;
     end: string;
   }>("/backtests", payload);
+}
+
+export function createSymbolBacktest(payload: {
+  vt_symbol: string;
+  start?: string;
+  end?: string;
+  initial_cash?: number;
+  persist?: boolean;
+  min_entry_score?: number;
+  strict_entry?: boolean;
+  intraday_entry?: boolean;
+  minute_entry_required?: boolean;
+  tail_entry_start?: string;
+  tail_entry_end?: string;
+  tail_entry_ma5_tolerance_pct?: number;
+  included_boards?: string[];
+}) {
+  return apiClient.post<{
+    status: string;
+    backtest_id: number | null;
+    metrics: BacktestMetrics;
+    trades: BacktestTrade[];
+    orders?: BacktestAuditEvent[];
+    start: string;
+    end: string;
+    audit?: BacktestAudit;
+    assumptions?: Record<string, string>;
+  }>("/backtests/symbol", payload);
 }
 
 export function runStrictMinuteBacktestPipeline(payload: {
@@ -582,6 +693,7 @@ export function runStrictMinuteBacktestPipeline(payload: {
   tail_entry_start?: string;
   tail_entry_end?: string;
   tail_entry_ma5_tolerance_pct?: number;
+  included_boards?: string[];
   gap_csv_text?: string;
   gap_file_path?: string;
   min_tail_bars?: number;
@@ -620,6 +732,12 @@ export function fetchBacktestReport(backtestId: number, tradeLimit = 50) {
   return apiClient.get<BacktestReport>(`/backtests/${backtestId}/report?trade_limit=${tradeLimit}`);
 }
 
+export function fetchBacktestAudit(backtestId: number, vtSymbol?: string, limit = 200) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (vtSymbol) params.set("vt_symbol", vtSymbol);
+  return apiClient.get<BacktestAudit>(`/backtests/${backtestId}/audit?${params.toString()}`);
+}
+
 export function backtestReportCsvUrl(backtestId: number, tradeLimit = 500) {
   return apiUrl(`/backtests/${backtestId}/report.csv?trade_limit=${tradeLimit}`);
 }
@@ -638,6 +756,26 @@ export function fetchPortfolioGroups() {
 
 export function fetchPortfolioGroupItems(groupId: number) {
   return apiClient.get<{ status: string; items: PortfolioItem[] }>(`/portfolio/groups/${groupId}/items`);
+}
+
+export function createPortfolioGroup(payload: {
+  name: string;
+  group_type?: string;
+  description?: string;
+  risk_profile?: string;
+}) {
+  return apiClient.post<{ status: string; id?: number; message?: string }>("/portfolio/groups", payload);
+}
+
+export function addPortfolioGroupItem(groupId: number, payload: {
+  vt_symbol: string;
+  name?: string;
+  source?: string;
+  reason?: string;
+  strategy_id?: string;
+  strategy_version?: string;
+}) {
+  return apiClient.post<{ status: string; group_id: number; vt_symbol: string }>(`/portfolio/groups/${groupId}/items`, payload);
 }
 
 export function fetchHoldings() {

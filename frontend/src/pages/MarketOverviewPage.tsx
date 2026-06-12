@@ -9,6 +9,7 @@ import { useQuery } from "@tanstack/react-query";
 import { IndexStrip } from "@/features/market/IndexStrip";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
+import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { fetchSectorRanking } from "@/api/research";
 import { fetchFundFlow, fetchHotRanks, fetchLimitPools } from "@/api/market";
 import { formatPct, formatAmount, cn } from "@/lib/utils";
@@ -246,7 +247,12 @@ function LimitPoolSection({
               to={`/stocks/${s.vt_symbol}`}
               className="flex items-center justify-between rounded px-2 py-1 text-xs transition-colors hover:bg-muted/50"
             >
-              <span className="truncate font-medium">{s.name}</span>
+              <StockIdentityLink
+                name={s.name}
+                vtSymbol={s.vt_symbol ?? stockVtSymbol(s.symbol)}
+                link={false}
+                className="min-w-0"
+              />
               <span className="text-rise tabular-nums">
                 {formatPct(s.change_pct)}
               </span>
@@ -256,6 +262,15 @@ function LimitPoolSection({
       )}
     </section>
   );
+}
+
+function stockVtSymbol(symbol?: string | null) {
+  const code = String(symbol ?? "").trim();
+  if (!code) return "";
+  if (code.includes(".")) return code.toUpperCase();
+  if (code.startsWith("6")) return `${code}.SSE`;
+  if (/^(8|4|920)/.test(code)) return `${code}.BSE`;
+  return `${code}.SZSE`;
 }
 
 function HotStocksSection({

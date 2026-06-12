@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { fetchMarketOverview } from "@/api/market";
 import { CardSkeleton } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
+import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { formatPrice, formatPct, formatAmount, priceColorClass } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { ArrowRight, TrendingUp, TrendingDown, Minus } from "lucide-react";
@@ -93,10 +94,13 @@ function ActiveStockTable({ items }: { items: StockQuote[] }) {
                     {stock.symbol}
                   </Link>
                 </td>
-                <td className="px-3 py-2 font-medium">
-                  <Link to={`/stocks/${stock.vt_symbol}`} className="hover:underline">
-                    {stock.name}
-                  </Link>
+                <td className="px-3 py-2">
+                  <StockIdentityLink
+                    name={stock.name}
+                    vtSymbol={stock.vt_symbol}
+                    board={stock.board}
+                    boardLabel={stock.board_label}
+                  />
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums">{formatPrice(stock.last_price)}</td>
                 <td className={`px-3 py-2 text-right font-medium tabular-nums ${priceColorClass(stock.change_pct)}`}>

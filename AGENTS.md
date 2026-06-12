@@ -20,6 +20,18 @@ read this file and verify against the local code/docs when needed.
 - The project/product name is `AlphaAgent`. Keep the internal Python package name
   `vnpy` for now to preserve compatibility with vn.py plugins and imports.
 - Do not run `git commit` or `git push` unless the user explicitly asks for it.
+- For Docker, deployment, and release architecture, use `~/project/ai/sub2api` as
+  the local reference project. Keep the operator/developer entrypoint simple
+  (`docker compose up --build` for local development, Compose files under
+  `deploy/` for deployment) and put build/release complexity into Dockerfile,
+  Compose, deploy scripts, and CI instead of asking users to remember special
+  build target commands.
+- Docker release shape: root `docker-compose.yml` is for local development;
+  `deploy/docker-compose.local.yml` is for server deployment with local data
+  directories; `.github/workflows/docker-release.yml` publishes
+  `ghcr.io/zhanghecn/alphaagent-api` and `ghcr.io/zhanghecn/alphaagent-web` on
+  `v*` tags. Do not reintroduce manual dependency-build instructions for normal
+  users.
 
 ## Repository Layout
 
@@ -171,6 +183,7 @@ Memory folders:
 - `memory/03_data/`: datafeed, database, DataManager, realtime/historical data paths.
 - `memory/04_a_share/`: A-share capabilities, plugin map, limitations, roadmap.
 - `memory/05_runtime/`: run/debug commands and environment notes.
+- `memory/06_backtests/`: backtest reports, exported result tables, gap manifests, and validation evidence.
 - `memory/09_decisions/`: user decisions, tradeoffs, pending tasks.
 
 Requirement documents live in `requirements/`, not `memory/`.
@@ -182,6 +195,33 @@ Memory maintenance rules:
 - Keep entries concise and link to concrete project files.
 - Mark uncertain items as pending verification.
 - Do not migrate unverified old tutorial content into memory.
+- Treat `memory/` as a maintained project map, not an ever-growing diary. Do not keep
+  appending chronological notes when an existing section can be rewritten to the
+  current truth.
+- At the end of each completed task, do a small memory hygiene pass when the task
+  changed durable facts, architecture, commands, verification results, decisions, or
+  known limitations:
+  - Update the owning memory file in place.
+  - Merge duplicate bullets.
+  - Replace stale status with current status.
+  - Keep detailed evidence in dedicated artifacts such as `memory/06_backtests/` and
+    link to those artifacts instead of copying long tables into overview files.
+  - Remove or compress obsolete process notes that no longer help the next session.
+- Prefer this memory shape:
+  - `Current state`: what is true now.
+  - `How to verify/run`: shortest commands or endpoints.
+  - `Evidence`: links to reports, tests, commits, or concrete files.
+  - `Open risks/next work`: only actionable unresolved items.
+- Avoid this memory shape:
+  - Long timestamped chat transcripts.
+  - Repeated "today I ran..." notes after the result has been summarized.
+  - Conflicting old and new statuses without marking the old status obsolete.
+  - Large raw outputs pasted into index or runtime files.
+- If a memory file becomes long, summarize it around the current state, move detailed
+  historical artifacts to a typed subfolder, and keep only links plus the conclusions
+  needed for future work.
+- When a task only changes transient local state, experimental scratch data, or a
+  failed attempt with no lasting lesson, do not update memory just to record activity.
 
 ## Local Files to Handle Deliberately
 

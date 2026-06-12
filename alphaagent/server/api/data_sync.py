@@ -39,6 +39,35 @@ def run_job(job_id: str, params: dict[str, Any] = Body(default_factory=dict)):
         return _sync_error(exc)
 
 
+@router.post("/batches/run-all")
+def run_all(payload: dict[str, Any] = Body(default_factory=dict)):
+    try:
+        return ok(
+            service.start_sync_batch(
+                profile=str(payload.get("profile") or "core"),
+                params=payload.get("params") if isinstance(payload.get("params"), dict) else {},
+            )
+        )
+    except Exception as exc:
+        return _sync_error(exc)
+
+
+@router.get("/batches/latest")
+def latest_batch():
+    try:
+        return ok(service.get_latest_sync_batch())
+    except Exception as exc:
+        return _sync_error(exc)
+
+
+@router.get("/batches/{batch_id}")
+def batch_detail(batch_id: str):
+    try:
+        return ok(service.get_sync_batch(batch_id))
+    except Exception as exc:
+        return _sync_error(exc)
+
+
 @router.post("/jobs/{job_id}/schedule")
 def schedule_job(job_id: str, payload: dict[str, Any] = Body(default_factory=dict)):
     try:

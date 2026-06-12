@@ -8,10 +8,12 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   fetchDataUsage,
+  fetchLatestSyncBatch,
   fetchSyncJobs,
   fetchSyncRuns,
   fetchSyncCoverage,
   fetchSyncSources,
+  runAllSyncJobs,
   runSyncJob,
 } from "@/api/dataSync";
 import type {
@@ -19,6 +21,9 @@ import type {
   SyncSourceItem,
   SyncJobItem,
   SyncRunItem,
+  SyncBatchStatus,
+  SyncBatchJobStatus,
+  SyncProgressSample,
 } from "@/api/dataSync";
 import { LoadingState } from "@/components/LoadingState";
 import { cn } from "@/lib/utils";
@@ -26,12 +31,16 @@ import {
   Database,
   RefreshCw,
   Play,
+  PlayCircle,
   CheckCircle2,
   XCircle,
   Clock,
   Loader2,
   Server,
   Table,
+  Activity,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 
 type TabKey = "status" | "sync" | "sources";
@@ -43,7 +52,7 @@ const TABS: { key: TabKey; label: string; icon: typeof Database }[] = [
 ];
 
 export default function DataManagementPage() {
-  const [activeTab, setActiveTab] = useState<TabKey>("status");
+  const [activeTab, setActiveTab] = useState<TabKey>("sync");
 
   return (
     <div className="space-y-4">
@@ -94,18 +103,10 @@ function StatusTab() {
     staleTime: 30_000,
   });
 
-  if (usageQuery.isLoading) return <LoadingState rows={4} />;
-  if (usageQuery.error) {
-    return (
-      <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-red-700">
-        加载失败: {(usageQuery.error as Error).message}
-      </div>
-    );
-  }
-
   const usage = usageQuery.data;
   const capabilities = usage?.capabilities ?? [];
   const coverage = coverageQuery.data;
+  const unavailableCount = capabilities.filter((c) => c.status === "unavailable").length;
 
   // Compute summary from capabilities
   const readyCount = capabilities.filter((c) => c.status === "ready").length;
@@ -113,6 +114,22 @@ function StatusTab() {
 
   return (
     <div className="space-y-4">
+      {usageQuery.isLoading ? <LoadingState rows={4} /> : null}
+      {usageQuery.error ? (
+        <DataNotice
+          title="数据同步模块未就绪"
+          message={(usageQuery.error as Error).message}
+          action="先确认 DATABASE_URL/PostgreSQL，再刷新本页。市场页面可能仍会回退公开实时源。"
+        />
+      ) : null}
+      {!usageQuery.error && unavailableCount > 0 ? (
+        <DataNotice
+          title="本地数据能力不可用"
+          message={`${unavailableCount} 项能力暂时不可用，通常是 PostgreSQL 未配置或连接失败。`}
+          action="进入 deploy/.env 或根目录 .env 检查 DATABASE_URL，启动数据库后再执行同步任务。"
+        />
+      ) : null}
+
       {/* Summary cards */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <SummaryCard label="数据能力" value={capabilities.length} />
@@ -189,12 +206,13 @@ function StatusTab() {
 function CapabilityRow({ cap }: { cap: DataUsageCapability }) {
   return (
     <div className="flex items-center justify-between px-4 py-3">
-      <div className="min-w-0">
-        <div className="font-medium">{cap.description || cap.name}</div>
-        <div className="text-sm text-muted-foreground">
-          {cap.name} · 表: {cap.table}
+        <div className="min-w-0">
+          <div className="font-medium">{cap.description || cap.name}</div>
+          <div className="text-sm text-muted-foreground">
+            {cap.name} · 表: {cap.table}
+          </div>
+          {cap.message && <div className="mt-1 text-xs text-amber-700">{cap.message}</div>}
         </div>
-      </div>
       <div className="flex items-center gap-2 shrink-0">
         <span className="text-xs text-muted-foreground tabular-nums">
           {cap.count?.toLocaleString() ?? "--"} 条
@@ -209,6 +227,7 @@ function CapabilityRow({ cap }: { cap: DataUsageCapability }) {
 
 function SyncTab() {
   const queryClient = useQueryClient();
+  const [syncProfile, setSyncProfile] = useState<"core" | "all">("core");
 
   const jobsQuery = useQuery({
     queryKey: ["syncJobs"],
@@ -220,24 +239,137 @@ function SyncTab() {
     queryKey: ["syncRuns"],
     queryFn: () => fetchSyncRuns(20),
     staleTime: 10_000,
+    refetchInterval: 5_000,
+  });
+
+  const coverageQuery = useQuery({
+    queryKey: ["syncCoverage"],
+    queryFn: fetchSyncCoverage,
+    staleTime: 10_000,
+    refetchInterval: 8_000,
+  });
+
+  const latestBatchQuery = useQuery({
+    queryKey: ["syncBatchLatest"],
+    queryFn: fetchLatestSyncBatch,
+    staleTime: 2_000,
+    refetchInterval: (query) => (query.state.data?.status === "running" ? 2_000 : 8_000),
   });
 
   const runMutation = useMutation({
     mutationFn: (jobId: string) => runSyncJob(jobId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["syncRuns"] });
+      queryClient.invalidateQueries({ queryKey: ["syncCoverage"] });
+      queryClient.invalidateQueries({ queryKey: ["dataUsage"] });
+    },
+  });
+
+  const runAllMutation = useMutation({
+    mutationFn: () => runAllSyncJobs({ profile: syncProfile }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["syncBatchLatest"] });
+      queryClient.invalidateQueries({ queryKey: ["syncRuns"] });
     },
   });
 
   const jobs: SyncJobItem[] = jobsQuery.data ?? [];
   const runs: SyncRunItem[] = runsQuery.data ?? [];
+  const disabledJobs = jobs.filter((job) => !job.enabled || job.last_status === "unavailable").length;
+  const batch = latestBatchQuery.data;
+  const isBatchRunning = batch?.status === "running" || runAllMutation.isPending;
+  const coverage = coverageQuery.data;
+  const tableEntries = Object.entries(coverage?.tables ?? {});
+  const nonEmptyTables = tableEntries.filter(([, info]) => coverageCount(info) > 0);
+  const totalRows = tableEntries.reduce((sum, [, info]) => sum + coverageCount(info), 0);
 
   return (
     <div className="space-y-4">
+      {jobsQuery.error ? (
+        <DataNotice
+          title="同步任务暂时不能执行"
+          message={(jobsQuery.error as Error).message}
+          action="同步任务依赖 PostgreSQL；数据库恢复后刷新页面即可。"
+        />
+      ) : null}
+      {!jobsQuery.error && disabledJobs > 0 ? (
+        <DataNotice
+          title="部分同步任务不可执行"
+          message={`${disabledJobs} 个任务处于禁用或不可用状态。`}
+          action="如果状态是 DATABASE_URL not configured，请先配置数据库连接。"
+        />
+      ) : null}
+
+      <section className="rounded-lg border bg-card">
+        <div className="grid gap-4 p-4 lg:grid-cols-[1.1fr_0.9fr]">
+          <div>
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <Activity size={16} />
+              数据初始化
+            </div>
+            <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
+              新库为空时先跑核心数据：股票清单、板块、日线、资金流和热度。全量数据会继续拉财报、公告、龙虎榜、行业链等，耗时更长。
+            </p>
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <div className="inline-flex rounded-md border bg-background p-1">
+                <button
+                  className={cn(
+                    "rounded px-3 py-1.5 text-sm transition-colors",
+                    syncProfile === "core" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                  )}
+                  onClick={() => setSyncProfile("core")}
+                  disabled={isBatchRunning}
+                >
+                  核心数据
+                </button>
+                <button
+                  className={cn(
+                    "rounded px-3 py-1.5 text-sm transition-colors",
+                    syncProfile === "all" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                  )}
+                  onClick={() => setSyncProfile("all")}
+                  disabled={isBatchRunning}
+                >
+                  全量数据
+                </button>
+              </div>
+              <button
+                className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={() => runAllMutation.mutate()}
+                disabled={isBatchRunning || jobs.length === 0}
+              >
+                {isBatchRunning ? <Loader2 size={16} className="animate-spin" /> : <PlayCircle size={16} />}
+                {isBatchRunning ? "同步中" : "一键同步"}
+              </button>
+              <button
+                className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium transition-colors hover:bg-muted"
+                onClick={() => {
+                  queryClient.invalidateQueries({ queryKey: ["syncBatchLatest"] });
+                  queryClient.invalidateQueries({ queryKey: ["syncRuns"] });
+                  queryClient.invalidateQueries({ queryKey: ["syncCoverage"] });
+                  queryClient.invalidateQueries({ queryKey: ["dataUsage"] });
+                }}
+              >
+                <RefreshCw size={15} />
+                刷新状态
+              </button>
+            </div>
+            {runAllMutation.error ? (
+              <div className="mt-3 text-sm text-red-600">{(runAllMutation.error as Error).message}</div>
+            ) : null}
+          </div>
+          <DataHealthPanel totalRows={totalRows} nonEmptyTables={nonEmptyTables.length} tableCount={tableEntries.length} />
+        </div>
+        <BatchProgress batch={batch} isStarting={runAllMutation.isPending} />
+      </section>
+
       {/* Sync jobs */}
       <section className="rounded-lg border">
         <div className="flex items-center justify-between border-b px-4 py-3">
-          <h3 className="text-sm font-semibold">同步任务</h3>
+          <div>
+            <h3 className="text-sm font-semibold">同步任务</h3>
+            <div className="text-xs text-muted-foreground">可以单独执行，也可以用上方一键同步按依赖顺序执行。</div>
+          </div>
           <span className="text-xs text-muted-foreground">{jobs.length} 个任务</span>
         </div>
         {jobsQuery.isLoading ? (
@@ -247,7 +379,7 @@ function SyncTab() {
         ) : (
           <div className="divide-y">
             {jobs.map((job) => (
-              <div key={job.id} className="flex items-center justify-between px-4 py-3">
+              <div key={job.id} className="grid gap-3 px-4 py-3 md:grid-cols-[1fr_auto] md:items-center">
                 <div className="min-w-0">
                   <div className="font-medium">{job.name}</div>
                   <div className="text-xs text-muted-foreground">{job.description}</div>
@@ -255,14 +387,15 @@ function SyncTab() {
                     <span>目标: {job.target_table}</span>
                     {job.schedule_cron && <span>计划: {job.schedule_cron}</span>}
                   </div>
+                  {job.message && <div className="mt-1 text-xs text-amber-700">{job.message}</div>}
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
+                <div className="flex items-center gap-2 shrink-0 md:justify-end">
                   <RunStatusBadge status={job.last_status} />
                   {job.enabled && (
                     <button
                       className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors hover:bg-muted disabled:opacity-50"
                       onClick={() => runMutation.mutate(job.id)}
-                      disabled={runMutation.isPending}
+                      disabled={runMutation.isPending || isBatchRunning}
                     >
                       {runMutation.isPending ? (
                         <Loader2 size={12} className="animate-spin" />
@@ -303,7 +436,7 @@ function SyncTab() {
               </thead>
               <tbody>
                 {runs.slice(0, 15).map((run) => (
-                  <tr key={run.id} className="border-t hover:bg-muted/30">
+                  <tr key={run.id ?? run.run_id ?? `${run.job_id}-${run.started_at}`} className="border-t hover:bg-muted/30">
                     <td className="px-4 py-2 font-mono text-xs">{run.job_id}</td>
                     <td className="px-4 py-2 text-center">
                       <RunStatusBadge status={run.status} />
@@ -336,19 +469,18 @@ function SourcesTab() {
     staleTime: 30_000,
   });
 
-  if (isLoading) return <LoadingState rows={3} />;
-  if (error) {
-    return (
-      <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-red-700">
-        加载失败: {(error as Error).message}
-      </div>
-    );
-  }
-
   const sources: SyncSourceItem[] = data ?? [];
 
   return (
     <div className="space-y-3">
+      {isLoading ? <LoadingState rows={3} /> : null}
+      {error ? (
+        <DataNotice
+          title="数据源注册表未就绪"
+          message={(error as Error).message}
+          action="这通常不影响公开行情回退，但同步任务需要 PostgreSQL 可用。"
+        />
+      ) : null}
       {sources.length === 0 ? (
         <div className="py-10 text-center text-sm text-muted-foreground">暂无数据源</div>
       ) : (
@@ -405,20 +537,260 @@ function SummaryCard({
   );
 }
 
+function DataHealthPanel({
+  totalRows,
+  nonEmptyTables,
+  tableCount,
+}: {
+  totalRows: number;
+  nonEmptyTables: number;
+  tableCount: number;
+}) {
+  return (
+    <div className="grid grid-cols-3 gap-2 rounded-lg bg-muted/40 p-3">
+      <div>
+        <div className="text-xs text-muted-foreground">总行数</div>
+        <div className="mt-1 text-lg font-semibold tabular-nums">{totalRows.toLocaleString()}</div>
+      </div>
+      <div>
+        <div className="text-xs text-muted-foreground">有数据表</div>
+        <div className="mt-1 text-lg font-semibold tabular-nums">{nonEmptyTables}/{tableCount || "--"}</div>
+      </div>
+      <div>
+        <div className="text-xs text-muted-foreground">当前状态</div>
+        <div className="mt-1 text-lg font-semibold">{totalRows > 0 ? "有数据" : "空库"}</div>
+      </div>
+    </div>
+  );
+}
+
+function BatchProgress({ batch, isStarting }: { batch: SyncBatchStatus | null | undefined; isStarting: boolean }) {
+  const [openJobs, setOpenJobs] = useState<Record<string, boolean>>({});
+
+  if (isStarting && !batch) {
+    return (
+      <div className="border-t px-4 py-3 text-sm text-muted-foreground">
+        <Loader2 size={14} className="mr-2 inline animate-spin" />
+        正在创建同步批次
+      </div>
+    );
+  }
+  if (!batch) {
+    return (
+      <div className="border-t px-4 py-3 text-sm text-muted-foreground">
+        还没有一键同步记录。点击“一键同步”后，这里会显示当前任务、进度和写入行数。
+      </div>
+    );
+  }
+
+  const pct = Math.max(0, Math.min(Number(batch.progress_pct ?? 0), 100));
+  const current = batch.current_job_id ? batch.jobs.find((job) => job.job_id === batch.current_job_id) : undefined;
+
+  return (
+    <div className="border-t px-4 py-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <div className="flex items-center gap-2 text-sm font-medium">
+            <RunStatusBadge status={batch.status} />
+            <span>{batch.profile === "all" ? "全量同步" : "核心同步"}</span>
+            <span className="text-muted-foreground">#{batch.id.slice(0, 8)}</span>
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            {batch.message || (current ? jobActivityText(current) : "等待下一步")}
+          </div>
+        </div>
+        <div className="text-right text-xs text-muted-foreground">
+          <div>{batch.completed_jobs}/{batch.total_jobs} 个任务</div>
+          <div>读取 {batch.rows_read.toLocaleString()}，写入 {batch.rows_written.toLocaleString()}</div>
+        </div>
+      </div>
+      <div className="mt-3 h-2 overflow-hidden rounded-full bg-muted">
+        <div
+          className={cn(
+            "h-full rounded-full transition-all",
+            batch.status === "failed" ? "bg-red-500" : "bg-primary"
+          )}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <div className="mt-4 divide-y rounded-md border">
+        {batch.jobs.map((job) => {
+          const hasSamples = (job.sample_items?.length ?? 0) > 0;
+          const isOpen = openJobs[job.job_id] ?? job.status === "running";
+          return (
+            <div key={job.job_id} className="bg-background">
+              <div className="grid gap-3 px-3 py-3 md:grid-cols-[minmax(220px,0.9fr)_minmax(260px,1.4fr)_auto] md:items-center">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <RunStatusBadge status={job.status} />
+                    <span className="truncate text-sm font-medium">{job.job_id}</span>
+                  </div>
+                  <div className="mt-1 truncate text-xs text-muted-foreground">
+                    {jobActivityText(job)}
+                  </div>
+                </div>
+                <div className="min-w-0">
+                  <TaskProgressBar job={job} />
+                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                    <span>读取 {Number(job.rows_read ?? 0).toLocaleString()}</span>
+                    <span>写入 {Number(job.rows_written ?? 0).toLocaleString()}</span>
+                    {progressUnits(job) ? <span>{progressUnits(job)}</span> : null}
+                  </div>
+                </div>
+                <div className="flex justify-end">
+                  <button
+                    className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+                    onClick={() => setOpenJobs((prev) => ({ ...prev, [job.job_id]: !isOpen }))}
+                    disabled={!hasSamples}
+                  >
+                    {isOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                    样本
+                  </button>
+                </div>
+              </div>
+              {hasSamples && isOpen ? <ProgressSamples items={job.sample_items ?? []} /> : null}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function TaskProgressBar({ job }: { job: SyncBatchJobStatus }) {
+  const pct = Math.max(0, Math.min(Number(job.progress_pct ?? 0), 100));
+  const color = job.status === "failed" ? "bg-red-500" : job.status === "succeeded" ? "bg-green-600" : "bg-primary";
+  return (
+    <div className="flex items-center gap-2">
+      <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
+        <div className={cn("h-full rounded-full transition-all", color)} style={{ width: `${pct}%` }} />
+      </div>
+      <span className="w-12 text-right text-xs tabular-nums text-muted-foreground">{pct.toFixed(0)}%</span>
+    </div>
+  );
+}
+
+function ProgressSamples({ items }: { items: SyncProgressSample[] }) {
+  return (
+    <div className="border-t bg-muted/20 px-3 py-3">
+      <div className="grid gap-2 lg:grid-cols-3">
+        {items.map((item, index) => (
+          <div key={`${index}-${String(item.vt_symbol ?? item.id ?? item.symbol ?? "")}`} className="rounded-md border bg-card px-3 py-2">
+            <div className="truncate text-xs font-medium">{sampleTitle(item)}</div>
+            <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-muted-foreground">
+              {sampleFields(item).map(([key, value]) => (
+                <div key={key} className="min-w-0">
+                  <span className="text-muted-foreground/80">{sampleLabel(key)} </span>
+                  <span className="tabular-nums text-foreground">{formatSampleValue(value)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function jobActivityText(job: SyncBatchJobStatus): string {
+  const stage = job.stage || (job.status === "pending" ? "等待执行" : "");
+  const label = job.current_label || "";
+  if (stage && label) return `${stage}：${label}`;
+  return stage || label || job.message || "";
+}
+
+function progressUnits(job: SyncBatchJobStatus): string {
+  const total = Number(job.progress_total ?? 0);
+  if (total <= 0) return "";
+  const current = Number(job.progress_current ?? 0);
+  return `${Math.min(current, total).toLocaleString()}/${total.toLocaleString()}`;
+}
+
+function sampleTitle(item: SyncProgressSample): string {
+  const vt = item.vt_symbol ?? item.symbol ?? item.id ?? "样本";
+  const name = item.name ? ` ${item.name}` : "";
+  return `${vt}${name}`;
+}
+
+function sampleFields(item: SyncProgressSample): [string, SyncProgressSample[string]][] {
+  const priority = [
+    "trade_date",
+    "bar_time",
+    "close",
+    "close_price",
+    "change_pct",
+    "volume",
+    "turnover",
+    "main_net_inflow",
+    "rank",
+    "report_date",
+    "publish_date",
+    "operating_cash_flow",
+    "cash_flow_quality",
+    "type",
+  ];
+  return priority
+    .filter((key) => item[key] !== undefined && item[key] !== null && item[key] !== "")
+    .slice(0, 6)
+    .map((key) => [key, item[key]]);
+}
+
+function sampleLabel(key: string): string {
+  const labels: Record<string, string> = {
+    trade_date: "日期",
+    bar_time: "时间",
+    close: "收盘",
+    close_price: "收盘",
+    change_pct: "涨跌",
+    volume: "成交量",
+    turnover: "成交额",
+    main_net_inflow: "主力净流入",
+    rank: "排名",
+    report_date: "报告期",
+    publish_date: "披露",
+    operating_cash_flow: "经营现金流",
+    cash_flow_quality: "现金质量",
+    type: "类型",
+  };
+  return labels[key] ?? key;
+}
+
+function formatSampleValue(value: SyncProgressSample[string]): string {
+  if (Array.isArray(value)) return value.join(", ");
+  if (typeof value === "number") {
+    if (Math.abs(value) >= 100_000_000) return `${(value / 100_000_000).toFixed(2)}亿`;
+    if (Math.abs(value) >= 10_000) return `${(value / 10_000).toFixed(2)}万`;
+    return Number.isInteger(value) ? value.toLocaleString() : value.toFixed(2);
+  }
+  return String(value ?? "");
+}
+
 function StatusBadge({ status }: { status: string }) {
   const cls =
     status === "ready" || status === "ok" || status === "succeeded"
       ? "bg-green-50 text-green-700"
+      : status === "empty" || status === "pending"
+        ? "bg-gray-50 text-gray-600"
       : status === "partial"
         ? "bg-yellow-50 text-yellow-700"
-        : status === "unknown"
-          ? "bg-gray-50 text-gray-500"
+      : status === "unknown"
+        ? "bg-gray-50 text-gray-500"
           : "bg-red-50 text-red-700";
 
   return (
     <span className={cn("rounded-full px-2 py-0.5 text-xs font-medium", cls)}>
       {status}
     </span>
+  );
+}
+
+function DataNotice({ title, message, action }: { title: string; message: string; action: string }) {
+  return (
+    <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm">
+      <div className="font-medium text-amber-900">{title}</div>
+      <div className="mt-1 text-amber-800">{message}</div>
+      <div className="mt-2 text-xs text-amber-700">{action}</div>
+    </div>
   );
 }
 
@@ -437,10 +809,18 @@ function RunStatusBadge({ status }: { status: string | null | undefined }) {
     status === "running" ? "text-blue-600" :
     "text-muted-foreground";
 
+  const label =
+    status === "succeeded" ? "成功" :
+    status === "failed" ? "失败" :
+    status === "running" ? "运行中" :
+    status === "pending" ? "等待" :
+    status === "empty" ? "空" :
+    status;
+
   return (
     <span className={cn("inline-flex items-center gap-1 text-xs font-medium", colorClass)}>
       <Icon size={12} className={status === "running" ? "animate-spin" : ""} />
-      {status === "succeeded" ? "成功" : status === "failed" ? "失败" : status === "running" ? "运行中" : status}
+      {label}
     </span>
   );
 }
@@ -451,4 +831,10 @@ function formatDuration(startAt: string, finishAt: string | null | undefined): s
   if (ms < 1000) return `${ms}ms`;
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
   return `${(ms / 60_000).toFixed(1)}min`;
+}
+
+function coverageCount(info: unknown): number {
+  if (!info || typeof info !== "object") return 0;
+  const rec = info as { count?: number; rows?: number };
+  return Number(rec.count ?? rec.rows ?? 0);
 }

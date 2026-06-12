@@ -9,6 +9,28 @@ AlphaAgent 是基于 VeighNa/vn.py 二次开发的 A 股量化交易与 Agent �
 - 构建服务端能力，为自动量化、智能选股、策略回测、实盘交易和 Agent 辅助决策打基础。
 - 在保留 `vnpy` Python 包名和插件兼容性的前提下，逐步沉淀属于 AlphaAgent 的上层服务、策略、数据和 Agent 模块。
 
+## Docker 启动
+
+开发默认使用 Docker Compose：
+
+```bash
+docker compose up --build
+```
+
+后端 API 默认监听 `http://localhost:8000`，前端默认监听 `http://localhost:5173`。根目录 Compose 会同时启动 PostgreSQL、Redis、API 和 Web；AlphaAgent 数据落在 Docker 命名卷，vn.py 运行目录落在 `alphaagent_vntrader` 卷，不再依赖宿主机 PostgreSQL/Redis。
+
+服务器部署文件在 `deploy/`，按 `sub2api` 的本地目录持久化方式维护：
+
+```bash
+cd deploy
+./docker-deploy.sh
+docker compose -f docker-compose.local.yml up -d
+```
+
+发版由 `.github/workflows/docker-release.yml` 处理：推送 `v*` tag 后构建并发布
+`ghcr.io/zhanghecn/alphaagent-api` 和 `ghcr.io/zhanghecn/alphaagent-web`。使用者只需要
+Compose 拉镜像，不需要记额外 Docker build target 或手动编译 TA-Lib。
+
 本项目底层来自 VeighNa/vn.py 4.4.0。以下内容保留原项目说明，便于继续查阅官方模块、插件和文档。
 
 # VeighNa - By Traders, For Traders, AI-Powered.

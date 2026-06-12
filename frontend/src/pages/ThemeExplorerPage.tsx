@@ -10,7 +10,7 @@
  *   - Sector trend stats (from sectors API)
  */
 import React, { useState, useCallback, useMemo } from "react";
-import { useSearchParams, Link } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { fetchSectorRanking } from "@/api/research";
 import { fetchSectorStocks, fetchSectorTrend, searchSectors } from "@/api/sectors";
@@ -18,6 +18,7 @@ import { SectorRankCard } from "@/components/SectorRankCard";
 import { SectorTrendPanel } from "@/components/SectorTrendPanel";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
+import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { formatPct, formatAmount, formatPrice, formatMarketCap, cn, priceColorClass } from "@/lib/utils";
 import type { SectorRankingItem } from "@/types/research";
 import type { StockQuote } from "@/api/types";
@@ -551,15 +552,12 @@ function SectorDetailPanel({ item }: { item: SectorRankingItem }) {
                 {sortedStocks.map((stock) => (
                   <tr key={stock.vt_symbol} className="border-t hover:bg-muted/30">
                     <td className="py-1.5">
-                      <Link
-                        to={`/stocks/${stock.vt_symbol}`}
-                        className="font-medium hover:underline"
-                      >
-                        {stock.name}
-                      </Link>
-                      <div className="text-[10px] text-muted-foreground">
-                        {stock.symbol}
-                      </div>
+                      <StockIdentityLink
+                        name={stock.name}
+                        vtSymbol={stock.vt_symbol}
+                        board={stock.board}
+                        boardLabel={stock.board_label}
+                      />
                     </td>
                     <td className="py-1.5 text-right tabular-nums">
                       {formatPrice(stock.last_price)}
@@ -687,12 +685,13 @@ function MiniStockList({ title, stocks }: { title: string; stocks: StockQuote[] 
       <div className="mt-1.5 space-y-1">
         {stocks.map((stock) => (
           <div key={stock.vt_symbol} className="flex items-center justify-between text-sm">
-            <Link
-              to={`/stocks/${stock.vt_symbol}`}
-              className="min-w-0 font-medium hover:underline truncate"
-            >
-              {stock.name}
-            </Link>
+            <StockIdentityLink
+              name={stock.name}
+              vtSymbol={stock.vt_symbol}
+              board={stock.board}
+              boardLabel={stock.board_label}
+              className="min-w-0"
+            />
             <span className={cn("tabular-nums text-xs ml-2", priceColorClass(stock.change_pct))}>
               {formatPct(stock.change_pct)}
             </span>

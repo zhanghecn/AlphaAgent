@@ -29,6 +29,7 @@ export function StockQuoteHeader({ quote, sealInfo }: StockQuoteHeaderProps) {
         <span className="text-sm text-muted-foreground font-mono break-all">
           {quote.vt_symbol}
         </span>
+        <Badge variant="outline">{stockBoardLabel(quote.board, quote.board_label, quote.vt_symbol)}</Badge>
         <Badge variant="outline">{quote.exchange}</Badge>
         {quote.industry && (
           <Badge variant="secondary">{quote.industry}</Badge>
@@ -74,6 +75,21 @@ export function StockQuoteHeader({ quote, sealInfo }: StockQuoteHeaderProps) {
       </div>
     </div>
   );
+}
+
+function stockBoardLabel(board?: string | null, boardLabel?: string | null, vtSymbol?: string | null) {
+  if (boardLabel) return boardLabel;
+  if (board === "main") return "主板";
+  if (board === "chinext") return "创业板";
+  if (board === "star") return "科创板";
+  if (board === "bse") return "北交所";
+  const text = vtSymbol?.toUpperCase() ?? "";
+  const [symbol, exchange = ""] = text.split(".");
+  if (exchange === "BSE" || exchange === "BJ" || /^(8|4|920)/.test(symbol)) return "北交所";
+  if (symbol.startsWith("688")) return "科创板";
+  if (symbol.startsWith("300") || symbol.startsWith("301")) return "创业板";
+  if (exchange === "SSE" || exchange === "SZSE") return "主板";
+  return "其他";
 }
 
 function QuoteField({ label, value }: { label: string; value: string }) {

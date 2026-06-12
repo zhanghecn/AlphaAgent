@@ -42,6 +42,8 @@ export interface StockQuote {
   symbol: string;
   exchange: string;
   vt_symbol: string;
+  board?: string | null;
+  board_label?: string | null;
   name: string;
   last_price: number | null;
   change: number | null;

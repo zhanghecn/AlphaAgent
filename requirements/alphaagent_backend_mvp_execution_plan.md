@@ -179,10 +179,10 @@ CORS_ORIGINS=http://localhost:5173
 - `psycopg`
 - `redis`
 
-如果担心影响 vn.py 发行包兼容，也可以新增可选 extra：
+如果担心影响 vn.py 发行包兼容，也可以新增 dependency group：
 
 ```toml
-[project.optional-dependencies]
+[dependency-groups]
 server = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
@@ -197,10 +197,10 @@ server = [
 执行时 Dockerfile 使用：
 
 ```bash
-uv sync --extra server
+uv sync --group server
 ```
 
-本计划推荐使用 `server` extra，减少对原 vn.py 主依赖的扰动。
+本计划推荐使用 `server` dependency group，减少对原 vn.py 主依赖的扰动。
 
 ## 6. API 契约
 
@@ -507,7 +507,7 @@ docker compose run --rm alphaagent-api alembic upgrade head
 1. Dockerfile 使用 Python 3.11 或 3.12 基础镜像。
 2. 安装 `uv`。
 3. 复制 `pyproject.toml`、`uv.lock`。
-4. 执行 `uv sync --extra server`。
+4. 执行 `uv sync --group server`。
 5. 复制项目源码。
 6. 默认命令运行：
 

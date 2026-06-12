@@ -9,7 +9,7 @@ from typing import Any
 
 
 STRATEGY_ID = "mainline_leader_pullback"
-STRATEGY_VERSION = "0.1.0"
+STRATEGY_VERSION = "0.1.1"
 
 
 @dataclass(frozen=True)

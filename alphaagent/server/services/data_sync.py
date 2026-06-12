@@ -22,7 +22,8 @@ import io
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
+from uuid import uuid4
 
 from sqlalchemy import desc, func, select, text
 from sqlalchemy.engine import Engine
@@ -263,14 +264,66 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
     ),
 )
 
+SYNC_BATCH_PROFILES: dict[str, tuple[str, ...]] = {
+    "core": (
+        "sync_stock_list",
+        "sync_sector_list",
+        "sync_stock_daily_bars",
+        "sync_stock_fund_flows",
+        "sync_stock_hot_ranks",
+    ),
+    "all": tuple(job.id for job in DEFAULT_JOBS),
+}
+
+_BATCH_LOCK = threading.Lock()
+_SYNC_BATCHES: dict[str, dict[str, Any]] = {}
+_LATEST_BATCH_ID: str | None = None
+_BATCH_KEEP_LIMIT = 20
+ProgressCallback = Callable[[dict[str, Any]], None]
+
 
 # ─── Job runner registry ─────────────────────────────────────────────────
 
 class DataSyncRunner:
     """Executes individual sync jobs against AkShare / local data."""
 
-    def __init__(self, adapter: AkShareAdapter | None = None) -> None:
+    def __init__(self, adapter: AkShareAdapter | None = None, progress: ProgressCallback | None = None) -> None:
         self.adapter = adapter or AkShareAdapter()
+        self.progress = progress
+
+    def _report_progress(
+        self,
+        stage: str,
+        *,
+        current: int | None = None,
+        total: int | None = None,
+        current_label: str | None = None,
+        rows_read: int | None = None,
+        rows_written: int | None = None,
+        sample_items: Sequence[dict[str, Any]] | None = None,
+        message: str | None = None,
+    ) -> None:
+        if not self.progress:
+            return
+        patch: dict[str, Any] = {"stage": stage}
+        if current is not None:
+            patch["progress_current"] = max(int(current), 0)
+        if total is not None:
+            patch["progress_total"] = max(int(total), 0)
+        if current_label is not None:
+            patch["current_label"] = current_label
+        if rows_read is not None:
+            patch["rows_read"] = max(int(rows_read), 0)
+        if rows_written is not None:
+            patch["rows_written"] = max(int(rows_written), 0)
+        if sample_items is not None:
+            patch["sample_items"] = [_compact_progress_item(item) for item in list(sample_items)[-3:]]
+        if message:
+            patch["message"] = message
+        try:
+            self.progress(patch)
+        except Exception:
+            logger.debug("data sync progress callback failed", exc_info=True)
 
     # ── original 5 runners ──
 
@@ -280,19 +333,38 @@ class DataSyncRunner:
         all_items: list[dict[str, Any]] = []
         page = 1
         total: int | None = None
+        self._report_progress("读取股票清单", current=0, current_label=f"第 {page} 页")
         while True:
+            self._report_progress("读取股票清单", current=len(all_items), total=total, current_label=f"第 {page} 页")
             data = self.adapter.list_stocks(page=page, page_size=page_size, sort=sort)
             items = data.get("items") or []
             total = data.get("total")
             if not items:
                 break
             all_items.extend(items)
+            self._report_progress(
+                "读取股票清单",
+                current=len(all_items),
+                total=total,
+                current_label=f"第 {page} 页，累计 {len(all_items)} 只",
+                rows_read=len(all_items),
+                sample_items=items,
+            )
             if total is not None and len(all_items) >= total:
                 break
             page += 1
             if page > 40:
                 break
+        self._report_progress("写入股票清单", current=0, total=len(all_items), rows_read=len(all_items), sample_items=all_items)
         rows_written = _upsert_stocks(all_items)
+        self._report_progress(
+            "写入股票清单",
+            current=rows_written,
+            total=len(all_items),
+            rows_read=len(all_items),
+            rows_written=rows_written,
+            sample_items=all_items,
+        )
         return {"rows_read": len(all_items), "rows_written": rows_written}
 
     def _run_sync_sector_list(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -300,13 +372,33 @@ class DataSyncRunner:
         if isinstance(types, str):
             types = [types]
         all_items: list[dict[str, Any]] = []
-        for sector_type in types:
+        total_types = len(types)
+        self._report_progress("读取板块清单", current=0, total=total_types)
+        for index, sector_type in enumerate(types, start=1):
+            self._report_progress("读取板块清单", current=index - 1, total=total_types, current_label=str(sector_type))
             data = self.adapter.list_sectors(sector_type)
             items = data.get("items") or []
             for item in items:
                 item["type"] = sector_type
             all_items.extend(items)
+            self._report_progress(
+                "读取板块清单",
+                current=index,
+                total=total_types,
+                current_label=f"{sector_type}，{len(items)} 个",
+                rows_read=len(all_items),
+                sample_items=items,
+            )
+        self._report_progress("写入板块清单", current=0, total=len(all_items), rows_read=len(all_items), sample_items=all_items)
         rows_written = _upsert_sectors(all_items)
+        self._report_progress(
+            "写入板块清单",
+            current=rows_written,
+            total=len(all_items),
+            rows_read=len(all_items),
+            rows_written=rows_written,
+            sample_items=all_items,
+        )
         return {"rows_read": len(all_items), "rows_written": rows_written}
 
     def _run_sync_sector_members(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -318,18 +410,33 @@ class DataSyncRunner:
             return {"rows_read": 0, "rows_written": 0, "message": "No sectors in DB; run sync_sector_list first."}
         total_read = 0
         total_written = 0
-        for sector_row in sector_rows:
+        total_sectors = len(sector_rows)
+        self._report_progress("同步板块成分股", current=0, total=total_sectors)
+        for index, sector_row in enumerate(sector_rows, start=1):
             sector_id = str(sector_row["id"])
             sector_type = str(sector_row["type"])
+            sector_name = str(sector_row.get("name") or sector_id)
+            label = f"{sector_name} {sector_id}"
+            self._report_progress("读取板块成分股", current=index - 1, total=total_sectors, current_label=label, rows_read=total_read, rows_written=total_written)
             try:
                 data = self.adapter.sector_stocks(sector_id, page=1, page_size=page_size)
             except Exception as exc:
                 logger.warning("sector_stocks(%s) failed: %s", sector_id, exc)
+                self._report_progress("读取板块成分股", current=index, total=total_sectors, current_label=label, rows_read=total_read, rows_written=total_written, message=f"{sector_id} 失败：{exc.__class__.__name__}")
                 continue
             items = data.get("items") or []
             total_read += len(items)
             written = _upsert_sector_memberships(sector_id, items)
             total_written += written
+            self._report_progress(
+                "写入板块成分股",
+                current=index,
+                total=total_sectors,
+                current_label=f"{label}，{len(items)} 只",
+                rows_read=total_read,
+                rows_written=total_written,
+                sample_items=items,
+            )
         return {"rows_read": total_read, "rows_written": total_written}
 
     def _run_sync_stock_daily_bars(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -353,18 +460,35 @@ class DataSyncRunner:
         total_read = 0
         total_written = 0
         batch_size = 0
-        for stock_row in stock_rows:
+        total_stocks = len(stock_rows)
+        self._report_progress("同步股票日 K 线", current=0, total=total_stocks)
+        for index, stock_row in enumerate(stock_rows, start=1):
             symbol = str(stock_row["symbol"])
             exchange = str(stock_row["exchange"])
+            stock_name = str(stock_row.get("name") or symbol)
+            current_vts = vt_symbol(symbol, exchange)
+            label = f"{current_vts} {stock_name}"
+            self._report_progress("读取股票日 K 线", current=index - 1, total=total_stocks, current_label=label, rows_read=total_read, rows_written=total_written)
             try:
                 data = self.adapter.stock_bars(symbol, exchange, limit=limit, interval="1d")
             except Exception as exc:
                 logger.debug("stock_bars(%s) failed: %s", symbol, exc)
+                self._report_progress("读取股票日 K 线", current=index, total=total_stocks, current_label=label, rows_read=total_read, rows_written=total_written, message=f"{current_vts} 失败：{exc.__class__.__name__}")
                 continue
             items = data.get("items") or []
             total_read += len(items)
             written = _upsert_daily_bars(symbol, exchange, items)
             total_written += written
+            sample_items = [{**item, "vt_symbol": current_vts, "name": stock_name} for item in items[-3:]]
+            self._report_progress(
+                "写入股票日 K 线",
+                current=index,
+                total=total_stocks,
+                current_label=f"{label}，{len(items)} 根",
+                rows_read=total_read,
+                rows_written=total_written,
+                sample_items=sample_items,
+            )
             batch_size += 1
             if batch_size % 50 == 0:
                 logger.info("sync_stock_daily_bars: processed %d stocks", batch_size)
@@ -408,9 +532,15 @@ class DataSyncRunner:
 
         total_read = 0
         total_written = 0
-        for stock_row in stock_rows:
+        total_stocks = len(stock_rows)
+        self._report_progress("同步股票分钟 K 线", current=0, total=total_stocks)
+        for index, stock_row in enumerate(stock_rows, start=1):
             symbol = str(stock_row["symbol"])
             exchange = str(stock_row["exchange"])
+            stock_name = str(stock_row.get("name") or symbol)
+            current_vts = vt_symbol(symbol, exchange)
+            label = f"{current_vts} {stock_name}"
+            self._report_progress("读取股票分钟 K 线", current=index - 1, total=total_stocks, current_label=label, rows_read=total_read, rows_written=total_written)
             try:
                 data = self.adapter.stock_bars(
                     symbol,
@@ -422,10 +552,22 @@ class DataSyncRunner:
                 )
             except Exception as exc:
                 logger.debug("stock_minute_bars(%s, %s) failed: %s", symbol, interval, exc)
+                self._report_progress("读取股票分钟 K 线", current=index, total=total_stocks, current_label=label, rows_read=total_read, rows_written=total_written, message=f"{current_vts} 失败：{exc.__class__.__name__}")
                 continue
             items = data.get("items") or []
             total_read += len(items)
-            total_written += _upsert_minute_bars(symbol, exchange, items, interval, data.get("source", "akshare"))
+            written = _upsert_minute_bars(symbol, exchange, items, interval, data.get("source", "akshare"))
+            total_written += written
+            sample_items = [{**item, "vt_symbol": current_vts, "name": stock_name, "interval": interval} for item in items[-3:]]
+            self._report_progress(
+                "写入股票分钟 K 线",
+                current=index,
+                total=total_stocks,
+                current_label=f"{label}，{len(items)} 根",
+                rows_read=total_read,
+                rows_written=total_written,
+                sample_items=sample_items,
+            )
         return {"rows_read": total_read, "rows_written": total_written}
 
     def _run_sync_stock_sector_memberships(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -543,22 +685,59 @@ class DataSyncRunner:
     def _run_sync_stock_fund_flows(self, params: dict[str, Any]) -> dict[str, Any]:
         stock_limit = int(params.get("stock_limit", 200))
         period = str(params.get("period", "即时"))
+        limit = min(max(stock_limit, 1), 5000)
+        self._report_progress("读取个股资金流", current=0, total=limit, current_label=f"{period} / 前 {limit} 只")
         try:
-            data = self.adapter.stock_fund_flows("", exchange="SSE", period=period, limit=min(max(stock_limit, 1), 5000))
+            data = self.adapter.stock_fund_flows("", exchange="SSE", period=period, limit=limit)
         except Exception as exc:
             logger.debug("stock_fund_flows(all) failed: %s", exc)
             return {"rows_read": 0, "rows_written": 0, "message": f"stock fund flow unavailable: {exc.__class__.__name__}"}
         items = data.get("items") or []
         if stock_limit > 0:
             items = items[: min(stock_limit, 5000)]
+        self._report_progress(
+            "写入个股资金流",
+            current=len(items),
+            total=len(items),
+            current_label=f"{period} / {len(items)} 条",
+            rows_read=len(items),
+            sample_items=items,
+        )
         rows_written = _upsert_stock_fund_flow_items(items, period)
+        self._report_progress(
+            "写入个股资金流",
+            current=rows_written,
+            total=len(items),
+            current_label=f"{period} / 写入 {rows_written} 条",
+            rows_read=len(items),
+            rows_written=rows_written,
+            sample_items=items,
+        )
         return {"rows_read": len(items), "rows_written": rows_written}
 
     def _run_sync_stock_hot_ranks(self, params: dict[str, Any]) -> dict[str, Any]:
         limit = int(params.get("limit", 100))
+        self._report_progress("读取个股热度排行", current=0, total=limit, current_label=f"前 {limit} 名")
         data = self.adapter.stock_hot_ranks(limit=limit)
         items = data.get("items") or []
+        self._report_progress(
+            "写入个股热度排行",
+            current=len(items),
+            total=len(items),
+            current_label=f"{len(items)} 条热度排行",
+            rows_read=len(items),
+            sample_items=items,
+        )
         rows_written = _upsert_stock_hot_ranks(items)
+        self._report_progress(
+            "写入个股热度排行",
+            current=rows_written,
+            total=len(items),
+            current_label=f"写入 {rows_written} 条",
+            rows_read=len(items),
+            rows_written=rows_written,
+            sample_items=items,
+        )
         return {"rows_read": len(items), "rows_written": rows_written}
 
     def _run_sync_stock_lhb_records(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -592,15 +771,22 @@ class DataSyncRunner:
             return {"rows_read": 0, "rows_written": 0, "message": "No stocks in DB."}
         total_read = 0
         total_written = 0
-        for stock_row in stock_rows:
+        total_stocks = len(stock_rows)
+        self._report_progress("同步个股季度财报", current=0, total=total_stocks)
+        for index, stock_row in enumerate(stock_rows, start=1):
             symbol = str(stock_row["symbol"])
             exchange = str(stock_row["exchange"])
+            stock_name = str(stock_row.get("name") or symbol)
+            current_vts = vt_symbol(symbol, exchange)
+            label = f"{current_vts} {stock_name}"
+            self._report_progress("读取个股季度财报", current=index - 1, total=total_stocks, current_label=label, rows_read=total_read, rows_written=total_written)
 
             # Fetch quarterly profit sheet data
             try:
                 data = self.adapter.stock_financial_quarterly(symbol, exchange=exchange)
             except Exception as exc:
                 logger.debug("stock_financial_quarterly(%s) failed: %s", symbol, exc)
+                self._report_progress("读取个股季度财报", current=index, total=total_stocks, current_label=label, rows_read=total_read, rows_written=total_written, message=f"{current_vts} 失败：{exc.__class__.__name__}")
                 continue
             items = data.get("items") or []
 
@@ -614,6 +800,16 @@ class DataSyncRunner:
                 symbol, exchange, items, "quarterly",
             )
             total_written += written
+            sample_items = [{**item, "vt_symbol": current_vts, "name": stock_name} for item in items[-3:]]
+            self._report_progress(
+                "写入个股季度财报",
+                current=index,
+                total=total_stocks,
+                current_label=f"{label}，{len(items)} 期",
+                rows_read=total_read,
+                rows_written=total_written,
+                sample_items=sample_items,
+            )
         return {"rows_read": total_read, "rows_written": total_written}
 
     @staticmethod
@@ -741,13 +937,20 @@ class DataSyncRunner:
             return {"rows_read": 0, "rows_written": 0, "message": "No stocks in DB."}
         total_read = 0
         total_written = 0
-        for stock_row in stock_rows:
+        total_stocks = len(stock_rows)
+        self._report_progress("同步个股财务指标", current=0, total=total_stocks)
+        for index, stock_row in enumerate(stock_rows, start=1):
             symbol = str(stock_row["symbol"])
             exchange = str(stock_row["exchange"])
+            stock_name = str(stock_row.get("name") or symbol)
+            current_vts = vt_symbol(symbol, exchange)
+            label = f"{current_vts} {stock_name}"
+            self._report_progress("读取个股财务指标", current=index - 1, total=total_stocks, current_label=label, rows_read=total_read, rows_written=total_written)
             try:
                 data = self.adapter.stock_financial_indicators(symbol, exchange=exchange)
             except Exception as exc:
                 logger.debug("stock_financial_indicators(%s) failed: %s", symbol, exc)
+                self._report_progress("读取个股财务指标", current=index, total=total_stocks, current_label=label, rows_read=total_read, rows_written=total_written, message=f"{current_vts} 失败：{exc.__class__.__name__}")
                 continue
             items = data.get("items") or []
             total_read += len(items)
@@ -755,6 +958,16 @@ class DataSyncRunner:
                 symbol, exchange, items, "indicator",
             )
             total_written += written
+            sample_items = [{**item, "vt_symbol": current_vts, "name": stock_name} for item in items[-3:]]
+            self._report_progress(
+                "写入个股财务指标",
+                current=index,
+                total=total_stocks,
+                current_label=f"{label}，{len(items)} 期",
+                rows_read=total_read,
+                rows_written=total_written,
+                sample_items=sample_items,
+            )
         return {"rows_read": total_read, "rows_written": total_written}
 
     def _run_sync_stock_business_segments_history(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -767,18 +980,35 @@ class DataSyncRunner:
             return {"rows_read": 0, "rows_written": 0, "message": "No stocks in DB."}
         total_read = 0
         total_written = 0
-        for stock_row in stock_rows:
+        total_stocks = len(stock_rows)
+        self._report_progress("同步主营构成历史", current=0, total=total_stocks)
+        for index, stock_row in enumerate(stock_rows, start=1):
             symbol = str(stock_row["symbol"])
             exchange = str(stock_row["exchange"])
+            stock_name = str(stock_row.get("name") or symbol)
+            current_vts = vt_symbol(symbol, exchange)
+            label = f"{current_vts} {stock_name}"
+            self._report_progress("读取主营构成历史", current=index - 1, total=total_stocks, current_label=label, rows_read=total_read, rows_written=total_written)
             try:
                 data = self.adapter.stock_business_segments_history(symbol, exchange=exchange)
             except Exception as exc:
                 logger.debug("stock_business_segments_history(%s) failed: %s", symbol, exc)
+                self._report_progress("读取主营构成历史", current=index, total=total_stocks, current_label=label, rows_read=total_read, rows_written=total_written, message=f"{current_vts} 失败：{exc.__class__.__name__}")
                 continue
             items = data.get("items") or []
             total_read += len(items)
             written = _upsert_stock_business_segments(symbol, exchange, items)
             total_written += written
+            sample_items = [{**item, "vt_symbol": current_vts, "name": stock_name} for item in items[-3:]]
+            self._report_progress(
+                "写入主营构成历史",
+                current=index,
+                total=total_stocks,
+                current_label=f"{label}，{len(items)} 条",
+                rows_read=total_read,
+                rows_written=total_written,
+                sample_items=sample_items,
+            )
         return {"rows_read": total_read, "rows_written": total_written}
 
     def _run_sync_stock_notices(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -791,17 +1021,35 @@ class DataSyncRunner:
             return {"rows_read": 0, "rows_written": 0, "message": "No stocks in DB."}
         total_read = 0
         total_written = 0
-        for stock_row in stock_rows:
+        total_stocks = len(stock_rows)
+        self._report_progress("同步个股公告", current=0, total=total_stocks)
+        for index, stock_row in enumerate(stock_rows, start=1):
             symbol = str(stock_row["symbol"])
+            exchange = str(stock_row.get("exchange") or normalize_exchange(symbol))
+            stock_name = str(stock_row.get("name") or symbol)
+            current_vts = vt_symbol(symbol, exchange)
+            label = f"{current_vts} {stock_name}"
+            self._report_progress("读取个股公告", current=index - 1, total=total_stocks, current_label=label, rows_read=total_read, rows_written=total_written)
             try:
                 data = self.adapter.stock_notices(symbol)
             except Exception as exc:
                 logger.debug("stock_notices(%s) failed: %s", symbol, exc)
+                self._report_progress("读取个股公告", current=index, total=total_stocks, current_label=label, rows_read=total_read, rows_written=total_written, message=f"{current_vts} 失败：{exc.__class__.__name__}")
                 continue
             items = data.get("items") or []
             total_read += len(items)
             written = _upsert_stock_events(symbol, items, "notice")
             total_written += written
+            sample_items = [{**item, "vt_symbol": current_vts, "name": stock_name} for item in items[-3:]]
+            self._report_progress(
+                "写入个股公告",
+                current=index,
+                total=total_stocks,
+                current_label=f"{label}，{len(items)} 条",
+                rows_read=total_read,
+                rows_written=total_written,
+                sample_items=sample_items,
+            )
         return {"rows_read": total_read, "rows_written": total_written}
 
 
@@ -950,6 +1198,7 @@ def ensure_sync_schema() -> None:
     except Exception:
         pass
     seed_default_registry()
+    mark_interrupted_runs()
 
 
 def seed_default_registry() -> None:
@@ -982,28 +1231,70 @@ def seed_default_registry() -> None:
         logger.warning("seed_default_registry failed: %s", exc)
 
 
+def mark_interrupted_runs() -> None:
+    """Mark runs left in running state by a previous API process as failed."""
+    try:
+        with session_scope() as session:
+            session.execute(
+                schema.sync_job_runs.update()
+                .where(schema.sync_job_runs.c.status == "running")
+                .values(
+                    status="failed",
+                    message="API process restarted before this sync job finished.",
+                    error_type="Interrupted",
+                    finished_at=datetime.now(timezone.utc),
+                )
+            )
+            session.execute(
+                schema.sync_job_definitions.update()
+                .where(schema.sync_job_definitions.c.last_status == "running")
+                .values(
+                    last_status="failed",
+                    last_message="API process restarted before this sync job finished.",
+                    last_finished_at=datetime.now(timezone.utc),
+                )
+            )
+    except Exception as exc:
+        logger.warning("mark_interrupted_runs failed: %s", exc)
+
+
 # ─── Public query API ────────────────────────────────────────────────────
 
 def list_sources() -> list[dict[str, Any]]:
-    with session_scope() as session:
-        rows = session.execute(select(schema.sync_sources).order_by(schema.sync_sources.c.priority)).mappings().all()
-    return [_mapping_to_api(dict(row)) for row in rows]
+    if not is_database_configured():
+        return _default_sources("unavailable", "DATABASE_URL not configured")
+    try:
+        with session_scope() as session:
+            rows = session.execute(select(schema.sync_sources).order_by(schema.sync_sources.c.priority)).mappings().all()
+        return [_mapping_to_api(dict(row)) for row in rows]
+    except Exception as exc:
+        return _default_sources("unavailable", exc.__class__.__name__)
 
 
 def list_jobs() -> list[dict[str, Any]]:
-    with session_scope() as session:
-        rows = session.execute(select(schema.sync_job_definitions).order_by(schema.sync_job_definitions.c.id)).mappings().all()
-    return [_mapping_to_api(dict(row)) for row in rows]
+    if not is_database_configured():
+        return _default_jobs("unavailable", "DATABASE_URL not configured")
+    try:
+        with session_scope() as session:
+            rows = session.execute(select(schema.sync_job_definitions).order_by(schema.sync_job_definitions.c.id)).mappings().all()
+        return [_mapping_to_api(dict(row)) for row in rows]
+    except Exception as exc:
+        return _default_jobs("unavailable", exc.__class__.__name__)
 
 
 def list_runs(limit: int = 20) -> list[dict[str, Any]]:
-    with session_scope() as session:
-        rows = session.execute(
-            select(schema.sync_job_runs)
-            .order_by(desc(schema.sync_job_runs.c.id))
-            .limit(min(max(limit, 1), 100))
-        ).mappings().all()
-    return [_mapping_to_api(dict(row)) for row in rows]
+    if not is_database_configured():
+        return []
+    try:
+        with session_scope() as session:
+            rows = session.execute(
+                select(schema.sync_job_runs)
+                .order_by(desc(schema.sync_job_runs.c.id))
+                .limit(min(max(limit, 1), 100))
+            ).mappings().all()
+        return [_mapping_to_api(dict(row)) for row in rows]
+    except Exception:
+        return []
 
 
 def update_job_schedule(job_id: str, schedule_cron: str | None) -> dict[str, Any]:
@@ -1014,6 +1305,340 @@ def update_job_schedule(job_id: str, schedule_cron: str | None) -> dict[str, Any
             .values(schedule_cron=schedule_cron)
         )
     return {"job_id": job_id, "schedule_cron": schedule_cron}
+
+
+# ─── Sync batches ────────────────────────────────────────────────────────
+
+def start_sync_batch(profile: str = "core", params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Start a background batch that runs sync jobs in dependency order."""
+    global _LATEST_BATCH_ID
+
+    if not is_database_configured():
+        raise DataSyncError("DATABASE_URL is not configured")
+
+    profile_key = profile if profile in SYNC_BATCH_PROFILES else "core"
+    with _BATCH_LOCK:
+        if _LATEST_BATCH_ID:
+            latest = _SYNC_BATCHES.get(_LATEST_BATCH_ID)
+            if latest and latest.get("status") == "running":
+                return _copy_batch(latest)
+
+    batch_id = uuid4().hex
+    job_ids = list(SYNC_BATCH_PROFILES[profile_key])
+    created_at = _utc_now_iso()
+    batch = {
+        "id": batch_id,
+        "profile": profile_key,
+        "status": "running",
+        "created_at": created_at,
+        "started_at": created_at,
+        "finished_at": None,
+        "current_job_id": job_ids[0] if job_ids else None,
+        "total_jobs": len(job_ids),
+        "completed_jobs": 0,
+        "succeeded_jobs": 0,
+        "failed_jobs": 0,
+        "rows_read": 0,
+        "rows_written": 0,
+        "message": "",
+        "jobs": [
+            {
+                "job_id": job_id,
+                "status": "pending",
+                "started_at": None,
+                "finished_at": None,
+                "rows_read": 0,
+                "rows_written": 0,
+                "progress_current": 0,
+                "progress_total": 0,
+                "progress_pct": 0,
+                "stage": "",
+                "current_label": "",
+                "sample_items": [],
+                "message": "",
+            }
+            for job_id in job_ids
+        ],
+    }
+
+    with _BATCH_LOCK:
+        _SYNC_BATCHES[batch_id] = batch
+        _LATEST_BATCH_ID = batch_id
+        _trim_batches_locked()
+
+    thread = threading.Thread(
+        target=_run_sync_batch,
+        args=(batch_id, params or {}),
+        name=f"data-sync-batch-{batch_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+    return get_sync_batch(batch_id)
+
+
+def get_sync_batch(batch_id: str) -> dict[str, Any]:
+    """Return a sync batch snapshot."""
+    with _BATCH_LOCK:
+        batch = _SYNC_BATCHES.get(batch_id)
+        if batch is None:
+            raise DataSyncError(f"Unknown sync batch: {batch_id}")
+        return _copy_batch(batch)
+
+
+def get_latest_sync_batch() -> dict[str, Any] | None:
+    """Return the latest sync batch snapshot, if any."""
+    with _BATCH_LOCK:
+        if not _LATEST_BATCH_ID:
+            return None
+        batch = _SYNC_BATCHES.get(_LATEST_BATCH_ID)
+        return _copy_batch(batch) if batch is not None else None
+
+
+def _run_sync_batch(batch_id: str, params: dict[str, Any]) -> None:
+    with _BATCH_LOCK:
+        batch = _SYNC_BATCHES.get(batch_id)
+        if not batch:
+            return
+        job_ids = [item["job_id"] for item in batch["jobs"]]
+
+    for index, job_id in enumerate(job_ids):
+        _update_batch_job(
+            batch_id,
+            job_id,
+            {
+                "status": "running",
+                "started_at": _utc_now_iso(),
+                "progress_current": 0,
+                "progress_total": 0,
+                "progress_pct": 0,
+                "stage": "准备执行",
+                "current_label": "",
+                "sample_items": [],
+            },
+        )
+        _patch_batch(batch_id, {"current_job_id": job_id, "message": f"正在同步 {job_id}"})
+        try:
+            result = run_job(job_id, _batch_job_params(job_id, params), progress=_batch_progress_callback(batch_id, job_id))
+            rows_read = int(result.get("rows_read") or 0)
+            rows_written = int(result.get("rows_written") or 0)
+            _update_batch_job(
+                batch_id,
+                job_id,
+                {
+                    "status": "succeeded",
+                    "finished_at": _utc_now_iso(),
+                    "rows_read": rows_read,
+                    "rows_written": rows_written,
+                    "progress_pct": 100,
+                    "stage": "完成",
+                    "current_label": "",
+                    "message": str(result.get("message") or ""),
+                    "run_id": result.get("run_id") or result.get("id"),
+                },
+            )
+            _increment_batch(batch_id, completed=1, succeeded=1, rows_read=rows_read, rows_written=rows_written)
+        except Exception as exc:
+            _update_batch_job(
+                batch_id,
+                job_id,
+                {
+                    "status": "failed",
+                    "finished_at": _utc_now_iso(),
+                    "message": str(exc),
+                    "error_type": exc.__class__.__name__,
+                    "stage": "失败",
+                },
+            )
+            _increment_batch(batch_id, completed=1, failed=1)
+            _finish_batch(batch_id, "failed", f"{job_id} 失败：{exc}")
+            return
+
+        with _BATCH_LOCK:
+            batch = _SYNC_BATCHES.get(batch_id)
+            if batch:
+                batch["current_job_id"] = job_ids[index + 1] if index + 1 < len(job_ids) else None
+
+    _finish_batch(batch_id, "succeeded", "同步完成")
+
+
+def _batch_job_params(job_id: str, batch_params: dict[str, Any]) -> dict[str, Any]:
+    per_job = batch_params.get("jobs") if isinstance(batch_params.get("jobs"), dict) else {}
+    params = per_job.get(job_id, {}) if isinstance(per_job, dict) else {}
+    return params if isinstance(params, dict) else {}
+
+
+def _batch_progress_callback(batch_id: str, job_id: str) -> ProgressCallback:
+    def callback(patch: dict[str, Any]) -> None:
+        safe_patch = _progress_patch_to_batch_fields(patch)
+        if not safe_patch:
+            return
+        _update_batch_job(batch_id, job_id, safe_patch)
+        stage = safe_patch.get("stage")
+        label = safe_patch.get("current_label")
+        if stage or label:
+            message = f"{stage or '同步中'}：{label}" if label else str(stage)
+            _patch_batch(batch_id, {"message": message})
+
+    return callback
+
+
+def _progress_patch_to_batch_fields(patch: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "stage",
+        "current_label",
+        "rows_read",
+        "rows_written",
+        "progress_current",
+        "progress_total",
+        "sample_items",
+        "message",
+    }
+    safe: dict[str, Any] = {key: patch[key] for key in allowed if key in patch}
+    if "progress_current" in safe:
+        safe["progress_current"] = max(int(safe["progress_current"] or 0), 0)
+    if "progress_total" in safe:
+        safe["progress_total"] = max(int(safe["progress_total"] or 0), 0)
+    if "rows_read" in safe:
+        safe["rows_read"] = max(int(safe["rows_read"] or 0), 0)
+    if "rows_written" in safe:
+        safe["rows_written"] = max(int(safe["rows_written"] or 0), 0)
+    if "sample_items" in safe:
+        samples = safe.get("sample_items") if isinstance(safe.get("sample_items"), list) else []
+        safe["sample_items"] = [_compact_progress_item(item) for item in samples[-3:] if isinstance(item, dict)]
+    current = safe.get("progress_current")
+    total = safe.get("progress_total")
+    if isinstance(current, int) and isinstance(total, int) and total > 0:
+        safe["progress_pct"] = round(min(current / total * 100, 100), 2)
+    return safe
+
+
+def _compact_progress_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Return a small, UI-safe sample of one synced record."""
+    allowed_keys = (
+        "vt_symbol",
+        "symbol",
+        "exchange",
+        "name",
+        "id",
+        "type",
+        "trade_date",
+        "bar_time",
+        "interval",
+        "open",
+        "high",
+        "low",
+        "close",
+        "close_price",
+        "volume",
+        "turnover",
+        "change_pct",
+        "rank",
+        "rank_change",
+        "main_net_inflow",
+        "main_net_inflow_pct",
+        "report_date",
+        "publish_date",
+        "net_profit",
+        "revenue",
+        "operating_cash_flow",
+        "cash_flow_quality",
+        "title",
+    )
+    compact: dict[str, Any] = {}
+    for key in allowed_keys:
+        value = item.get(key)
+        if value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            compact[key] = value
+        elif isinstance(value, date):
+            compact[key] = value.isoformat()
+        elif isinstance(value, datetime):
+            compact[key] = value.isoformat()
+        elif isinstance(value, list):
+            compact[key] = [str(v)[:80] for v in value[:3]]
+    if "vt_symbol" not in compact and compact.get("symbol"):
+        try:
+            compact["vt_symbol"] = vt_symbol(str(compact["symbol"]), str(compact.get("exchange") or normalize_exchange(str(compact["symbol"]))))
+        except Exception:
+            pass
+    return compact
+
+
+def _patch_batch(batch_id: str, patch: dict[str, Any]) -> None:
+    with _BATCH_LOCK:
+        batch = _SYNC_BATCHES.get(batch_id)
+        if batch:
+            batch.update(patch)
+
+
+def _increment_batch(batch_id: str, completed: int = 0, succeeded: int = 0, failed: int = 0, rows_read: int = 0, rows_written: int = 0) -> None:
+    with _BATCH_LOCK:
+        batch = _SYNC_BATCHES.get(batch_id)
+        if not batch:
+            return
+        batch["completed_jobs"] = int(batch.get("completed_jobs") or 0) + completed
+        batch["succeeded_jobs"] = int(batch.get("succeeded_jobs") or 0) + succeeded
+        batch["failed_jobs"] = int(batch.get("failed_jobs") or 0) + failed
+        batch["rows_read"] = int(batch.get("rows_read") or 0) + rows_read
+        batch["rows_written"] = int(batch.get("rows_written") or 0) + rows_written
+
+
+def _finish_batch(batch_id: str, status: str, message: str) -> None:
+    with _BATCH_LOCK:
+        batch = _SYNC_BATCHES.get(batch_id)
+        if not batch:
+            return
+        batch["status"] = status
+        batch["finished_at"] = _utc_now_iso()
+        batch["current_job_id"] = None
+        batch["message"] = message
+
+
+def _update_batch_job(batch_id: str, job_id: str, patch: dict[str, Any]) -> None:
+    with _BATCH_LOCK:
+        batch = _SYNC_BATCHES.get(batch_id)
+        if not batch:
+            return
+        for item in batch["jobs"]:
+            if item["job_id"] == job_id:
+                item.update(patch)
+                break
+
+
+def _copy_batch(batch: dict[str, Any]) -> dict[str, Any]:
+    copied = dict(batch)
+    copied["jobs"] = []
+    for item in batch.get("jobs", []):
+        job = dict(item)
+        samples = job.get("sample_items") if isinstance(job.get("sample_items"), list) else []
+        job["sample_items"] = [dict(sample) for sample in samples if isinstance(sample, dict)]
+        total_units = int(job.get("progress_total") or 0)
+        current_units = int(job.get("progress_current") or 0)
+        if job.get("status") == "succeeded":
+            job["progress_pct"] = 100
+        elif total_units > 0:
+            job["progress_pct"] = round(min(current_units / total_units * 100, 100), 2)
+        else:
+            job["progress_pct"] = 0
+        copied["jobs"].append(job)
+    total = int(copied.get("total_jobs") or 0)
+    completed = int(copied.get("completed_jobs") or 0)
+    copied["progress_pct"] = round(completed / total * 100, 2) if total else 0
+    return copied
+
+
+def _trim_batches_locked() -> None:
+    if len(_SYNC_BATCHES) <= _BATCH_KEEP_LIMIT:
+        return
+    ordered = sorted(_SYNC_BATCHES.items(), key=lambda item: str(item[1].get("created_at") or ""))
+    for batch_id, batch in ordered[: max(len(_SYNC_BATCHES) - _BATCH_KEEP_LIMIT, 0)]:
+        if batch.get("status") != "running":
+            _SYNC_BATCHES.pop(batch_id, None)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 # ─── Coverage / usage ────────────────────────────────────────────────────
@@ -1686,24 +2311,71 @@ def _usage_capabilities() -> list[dict[str, Any]]:
         {"name": "stock_hot_ranks", "table": "stock_hot_ranks", "description": "个股热度"},
         {"name": "stock_lhb_records", "table": "stock_lhb_records", "description": "龙虎榜"},
     ]
-    with session_scope() as session:
+    if not is_database_configured():
         for cap in caps:
-            table_obj = getattr(schema, cap["table"], None)
-            if table_obj is None:
-                cap["status"] = "unknown"
-                continue
-            try:
-                count = session.execute(select(func.count()).select_from(table_obj)).scalar() or 0
-                cap["status"] = "ready" if count > 0 else "empty"
-                cap["count"] = count
-            except Exception:
-                cap["status"] = "unavailable"
+            cap["status"] = "unavailable"
+            cap["count"] = 0
+            cap["message"] = "DATABASE_URL not configured"
+        return caps
+    try:
+        with session_scope() as session:
+            for cap in caps:
+                table_obj = getattr(schema, cap["table"], None)
+                if table_obj is None:
+                    cap["status"] = "unknown"
+                    cap["count"] = 0
+                    continue
+                try:
+                    count = session.execute(select(func.count()).select_from(table_obj)).scalar() or 0
+                    cap["status"] = "ready" if count > 0 else "empty"
+                    cap["count"] = count
+                except Exception as exc:
+                    cap["status"] = "unavailable"
+                    cap["count"] = 0
+                    cap["message"] = exc.__class__.__name__
+    except Exception as exc:
+        for cap in caps:
+            cap["status"] = "unavailable"
+            cap["count"] = 0
+            cap["message"] = exc.__class__.__name__
     return caps
+
+
+def _default_sources(status: str, message: str) -> list[dict[str, Any]]:
+    return [
+        {
+            **source,
+            "status": status,
+            "message": message,
+            "checked_at": "",
+        }
+        for source in DEFAULT_SOURCE.values()
+    ]
+
+
+def _default_jobs(status: str, message: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": job.id,
+            "name": job.name,
+            "description": job.description,
+            "source_id": job.source_id,
+            "target_table": job.target_table,
+            "enabled": False,
+            "default_params": job.default_params,
+            "schedule_cron": job.schedule_cron,
+            "last_status": status,
+            "last_run_id": None,
+            "last_started_at": None,
+            "message": message,
+        }
+        for job in DEFAULT_JOBS
+    ]
 
 
 # ─── Run job ─────────────────────────────────────────────────────────────
 
-def run_job(job_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+def run_job(job_id: str, params: dict[str, Any] | None = None, progress: ProgressCallback | None = None) -> dict[str, Any]:
     """Execute a sync job immediately (synchronous, in-process)."""
     if not is_database_configured():
         raise DataSyncError("DATABASE_URL is not configured")
@@ -1727,7 +2399,7 @@ def run_job(job_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]
     # Create run record
     run_id = _create_run(job_id, run_params)
     try:
-        runner = DataSyncRunner()
+        runner = DataSyncRunner(progress=progress)
         method = getattr(runner, method_name)
         merged_params = {**job_def.default_params, **run_params}
         result = method(merged_params)
@@ -2011,7 +2683,16 @@ def local_stock_bars(
     limit: int = 90,
     interval: str = "1d",
 ) -> dict[str, Any] | None:
-    """Read stock daily bars from local DB."""
+    """Read stock daily bars from local DB.
+
+    Only serves daily/weekly/monthly intervals — minute-level bars are not
+    stored locally and must come from the live AkShare API instead.
+    """
+    # Minute intervals are not available in local DB — let caller fall through
+    # to the live AkShare data source which does return intraday bars.
+    if interval in {"1m", "5m", "15m", "30m", "60m"}:
+        return None
+
     try:
         normalized = normalize_exchange(symbol, exchange)
         vts = vt_symbol(symbol, normalized)

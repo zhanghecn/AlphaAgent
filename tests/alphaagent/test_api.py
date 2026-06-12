@@ -485,6 +485,20 @@ def test_data_sync_routes(monkeypatch) -> None:
         "run_job",
         lambda job_id, params=None: {"id": 2, "job_id": job_id, "status": "succeeded", "params": params or {}},
     )
+    monkeypatch.setattr(
+        data_sync.service,
+        "start_sync_batch",
+        lambda profile="core", params=None: {
+            "id": "batch1",
+            "profile": profile,
+            "status": "running",
+            "progress_pct": 0,
+            "jobs": [],
+            "params": params or {},
+        },
+    )
+    monkeypatch.setattr(data_sync.service, "get_latest_sync_batch", lambda: {"id": "batch1", "status": "running"})
+    monkeypatch.setattr(data_sync.service, "get_sync_batch", lambda batch_id: {"id": batch_id, "status": "succeeded"})
     client = TestClient(create_app())
 
     assert client.get("/api/data-sync/sources").json()["data"]["items"][0]["id"] == "akshare"
@@ -495,6 +509,11 @@ def test_data_sync_routes(monkeypatch) -> None:
     run_response = client.post("/api/data-sync/jobs/sync_stock_list/run", json={"max_pages": 1})
     assert run_response.status_code == 200
     assert run_response.json()["data"]["job_id"] == "sync_stock_list"
+    batch_response = client.post("/api/data-sync/batches/run-all", json={"profile": "core"})
+    assert batch_response.status_code == 200
+    assert batch_response.json()["data"]["id"] == "batch1"
+    assert client.get("/api/data-sync/batches/latest").json()["data"]["status"] == "running"
+    assert client.get("/api/data-sync/batches/batch1").json()["data"]["status"] == "succeeded"
 
 
 def test_stocks(monkeypatch) -> None:

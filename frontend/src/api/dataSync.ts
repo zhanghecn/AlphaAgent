@@ -2,16 +2,22 @@ import { apiClient, apiUrl } from "./client";
 import type { SyncCoverage } from "./types";
 
 /** Backend returns plain arrays for these endpoints, not {items, total} wrappers. */
-export function fetchSyncSources() {
-  return apiClient.get<SyncSourceItem[]>("/data-sync/sources");
+type ListResponse<T> = T[] | { items?: T[] };
+
+function unwrapItems<T>(payload: ListResponse<T>): T[] {
+  return Array.isArray(payload) ? payload : payload.items ?? [];
 }
 
-export function fetchSyncJobs() {
-  return apiClient.get<SyncJobItem[]>("/data-sync/jobs");
+export async function fetchSyncSources() {
+  return unwrapItems(await apiClient.get<ListResponse<SyncSourceItem>>("/data-sync/sources"));
 }
 
-export function fetchSyncRuns(limit = 20) {
-  return apiClient.get<SyncRunItem[]>(`/data-sync/runs?limit=${limit}`);
+export async function fetchSyncJobs() {
+  return unwrapItems(await apiClient.get<ListResponse<SyncJobItem>>("/data-sync/jobs"));
+}
+
+export async function fetchSyncRuns(limit = 20) {
+  return unwrapItems(await apiClient.get<ListResponse<SyncRunItem>>(`/data-sync/runs?limit=${limit}`));
 }
 
 export function fetchSyncCoverage() {
@@ -24,6 +30,28 @@ export function fetchDataUsage() {
 
 export function runSyncJob(jobId: string, params: Record<string, unknown> = {}) {
   return apiClient.post<SyncRunItem>(`/data-sync/jobs/${encodeURIComponent(jobId)}/run`, params);
+}
+
+export function runAllSyncJobs(payload: { profile?: "core" | "all"; params?: Record<string, unknown> } = {}) {
+  return apiClient.post<SyncBatchStatus>("/data-sync/batches/run-all", payload);
+}
+
+export async function fetchLatestSyncBatch() {
+  const response = await fetch(apiUrl("/data-sync/batches/latest"), {
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) {
+    throw new Error(`请求失败: ${response.status} ${response.statusText}`);
+  }
+  const body = await response.json();
+  if (!body.success) {
+    throw new Error(body.error?.message ?? "同步批次状态读取失败");
+  }
+  return (body.data ?? null) as SyncBatchStatus | null;
+}
+
+export function fetchSyncBatch(batchId: string) {
+  return apiClient.get<SyncBatchStatus>(`/data-sync/batches/${encodeURIComponent(batchId)}`);
 }
 
 export function importMinuteBarsCsv(payload: {
@@ -141,10 +169,12 @@ export interface SyncJobItem {
   last_status?: string | null;
   last_run_id?: string | null;
   last_started_at?: string | null;
+  message?: string;
 }
 
 export interface SyncRunItem {
-  id: string;
+  id?: string | number;
+  run_id?: string | number;
   job_id: string;
   status: string;
   started_at: string;
@@ -160,11 +190,51 @@ export interface DataUsageCapability {
   description: string;
   status: string;
   count: number;
+  message?: string;
 }
 
 export interface DataUsageResponse {
   capabilities: DataUsageCapability[];
   coverage: Record<string, { count: number; last_updated?: string }>;
+}
+
+export interface SyncBatchJobStatus {
+  job_id: string;
+  status: "pending" | "running" | "succeeded" | "failed" | string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  rows_read: number;
+  rows_written: number;
+  progress_current?: number;
+  progress_total?: number;
+  progress_pct?: number;
+  stage?: string;
+  current_label?: string;
+  sample_items?: SyncProgressSample[];
+  message?: string;
+  run_id?: string | number | null;
+  error_type?: string;
+}
+
+export type SyncProgressSample = Record<string, string | number | boolean | string[] | null | undefined>;
+
+export interface SyncBatchStatus {
+  id: string;
+  profile: "core" | "all" | string;
+  status: "running" | "succeeded" | "failed" | string;
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  current_job_id?: string | null;
+  total_jobs: number;
+  completed_jobs: number;
+  succeeded_jobs: number;
+  failed_jobs: number;
+  rows_read: number;
+  rows_written: number;
+  progress_pct: number;
+  message?: string;
+  jobs: SyncBatchJobStatus[];
 }
 
 export interface MinuteBarsImportResult {

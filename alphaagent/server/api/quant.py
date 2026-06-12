@@ -26,6 +26,7 @@ def create_screen_run(payload: dict[str, Any] = Body(default_factory=dict)):
                 min_recommendation_score=float(payload.get("min_recommendation_score") or 60),
                 persist=bool(payload.get("persist", True)),
                 auto_portfolio=bool(payload.get("auto_portfolio", True)),
+                included_boards=payload.get("included_boards"),
             )
         )
     except Exception as exc:

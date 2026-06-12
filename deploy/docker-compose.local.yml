@@ -1,10 +1,25 @@
+# =============================================================================
+# AlphaAgent Docker Compose - Local Directory Version
+# =============================================================================
+# This configuration uses local directories for data storage instead of named
+# volumes, making server migration a directory copy operation.
+#
+# Quick Start:
+#   1. Copy .env.example to .env and configure secrets
+#   2. mkdir -p data postgres_data redis_data
+#   3. docker compose -f docker-compose.local.yml up -d
+#   4. Open http://localhost:5173
+# =============================================================================
+
 services:
   alphaagent-api:
-    build:
-      context: .
-      dockerfile: Dockerfile.alphaagent-api
-      target: runtime
+    image: ${ALPHAAGENT_IMAGE:-ghcr.io/zhanghecn/alphaagent-api:latest}
+    container_name: alphaagent-api
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
     command:
       - python
       - -m
@@ -15,13 +30,13 @@ services:
       - --port
       - "8000"
     environment:
-      ALPHAAGENT_ENV: ${ALPHAAGENT_ENV:-local}
-      ALPHAAGENT_API_HOST: ${ALPHAAGENT_API_HOST:-0.0.0.0}
-      ALPHAAGENT_API_PORT: ${ALPHAAGENT_API_PORT:-8000}
+      ALPHAAGENT_ENV: ${ALPHAAGENT_ENV:-production}
+      ALPHAAGENT_API_HOST: 0.0.0.0
+      ALPHAAGENT_API_PORT: 8000
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:8000}
       MARKET_TIMEOUT_SECONDS: ${MARKET_TIMEOUT_SECONDS:-8}
       MARKET_PAGE_SIZE: ${MARKET_PAGE_SIZE:-50}
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-alphaagent}:${POSTGRES_PASSWORD:-alphaagent-local}@postgres:5432/${POSTGRES_DB:-alphaagent}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-alphaagent}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-alphaagent}
       REDIS_URL: redis://redis:6379/0
       TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
       TUSHARE_API_URL: ${TUSHARE_API_URL:-https://api.tushare.pro}
@@ -30,8 +45,8 @@ services:
     ports:
       - "${ALPHAAGENT_API_PORT:-8000}:8000"
     volumes:
-      - alphaagent_data:/app/data
-      - alphaagent_vntrader:/app/.vntrader
+      - ./data:/app/data
+      - ./vntrader:/app/.vntrader
     depends_on:
       postgres:
         condition: service_healthy
@@ -47,18 +62,18 @@ services:
       start_period: 30s
 
   alphaagent-web:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-      target: dev
+    image: ${ALPHAAGENT_WEB_IMAGE:-ghcr.io/zhanghecn/alphaagent-web:latest}
+    container_name: alphaagent-web
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
     environment:
-      VITE_API_BASE_URL: http://localhost:8000/api
-    volumes:
-      - ./frontend/src:/app/src
-      - ./frontend/index.html:/app/index.html
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000/api}
+      TZ: ${TZ:-Asia/Shanghai}
     ports:
-      - "5173:5173"
+      - "${ALPHAAGENT_WEB_PORT:-5173}:80"
     depends_on:
       alphaagent-api:
         condition: service_healthy
@@ -67,15 +82,20 @@ services:
 
   postgres:
     image: postgres:16-alpine
+    container_name: alphaagent-postgres
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
     environment:
       PGDATA: /var/lib/postgresql/data
       POSTGRES_USER: ${POSTGRES_USER:-alphaagent}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-alphaagent-local}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-alphaagent}
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
-      - alphaagent_postgres_data:/var/lib/postgresql/data
+      - ./postgres_data:/var/lib/postgresql/data
     networks:
       - alphaagent-network
     healthcheck:
@@ -87,12 +107,17 @@ services:
 
   redis:
     image: redis:8-alpine
+    container_name: alphaagent-redis
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
     command: redis-server --save 60 1 --appendonly yes --appendfsync everysec
     environment:
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
-      - alphaagent_redis_data:/data
+      - ./redis_data:/data
     networks:
       - alphaagent-network
     healthcheck:
@@ -101,12 +126,6 @@ services:
       timeout: 5s
       retries: 5
       start_period: 5s
-
-volumes:
-  alphaagent_data:
-  alphaagent_vntrader:
-  alphaagent_postgres_data:
-  alphaagent_redis_data:
 
 networks:
   alphaagent-network:

@@ -12,6 +12,8 @@ import {
   type HistogramData,
   type IChartApi,
   type LineData,
+  type MouseEventHandler,
+  type SeriesMarker,
   type Time,
   ColorType,
   CrosshairMode,
@@ -24,6 +26,32 @@ import { Database, Radio } from "lucide-react";
 interface StockKlineChartProps {
   vtSymbol: string;
   isIndex?: boolean;
+  markers?: KlineMarker[];
+  selectedMarkerId?: string | null;
+  onMarkerClick?: (marker: KlineMarker) => void;
+}
+
+export interface KlineMarker {
+  id?: string;
+  time: string;
+  side: "BUY" | "SELL" | string;
+  price?: number | null;
+  text?: string;
+  title?: string;
+  strategy?: string;
+  signalText?: string;
+  executionText?: string;
+  reasonText?: string;
+  executionMode?: string | null;
+  tradeDate?: string;
+  signalDate?: string | null;
+  executeDate?: string | null;
+  volume?: number | null;
+  amount?: number | null;
+  fee?: number | null;
+  pnl?: number | null;
+  evidence?: Array<{ label: string; value: string; valueClass?: string }>;
+  raw?: Record<string, unknown>;
 }
 
 type OverlayMode = "ma" | "boll" | "none";
@@ -54,8 +82,15 @@ const INDICATORS: { value: IndicatorMode; label: string }[] = [
 
 const VISIBLE_BARS = 120;
 const MOBILE_VISIBLE_BARS = 70;
+const EMPTY_MARKERS: KlineMarker[] = [];
 
-export function StockKlineChart({ vtSymbol, isIndex = false }: StockKlineChartProps) {
+export function StockKlineChart({
+  vtSymbol,
+  isIndex = false,
+  markers = EMPTY_MARKERS,
+  selectedMarkerId,
+  onMarkerClick,
+}: StockKlineChartProps) {
   const [period, setPeriod] = useState("1d");
   const [overlayMode, setOverlayMode] = useState<OverlayMode>("ma");
   const [indicatorMode, setIndicatorMode] = useState<IndicatorMode>("volume");
@@ -92,54 +127,73 @@ export function StockKlineChart({ vtSymbol, isIndex = false }: StockKlineChartPr
     destroyCharts(chartsRef.current);
     chartsRef.current = null;
 
-    const priceChart = createBaseChart(priceContainerRef.current, 430, period);
-    const indicatorChart = createBaseChart(indicatorContainerRef.current, 150, period);
-    chartsRef.current = { price: priceChart, indicator: indicatorChart };
-    setActiveBar(null);
+    try {
+      const priceChart = createBaseChart(priceContainerRef.current, 430, period);
+      const indicatorChart = createBaseChart(indicatorContainerRef.current, 150, period);
+      chartsRef.current = { price: priceChart, indicator: indicatorChart };
+      setActiveBar(null);
 
-    const candleSeries = priceChart.addCandlestickSeries({
-      upColor: "#ef4444",
-      downColor: "#22c55e",
-      borderUpColor: "#ef4444",
-      borderDownColor: "#22c55e",
-      wickUpColor: "#ef4444",
-      wickDownColor: "#22c55e",
-    });
-    candleSeries.setData(toCandles(bars, period));
+      const candleSeries = priceChart.addCandlestickSeries({
+        upColor: "#ef4444",
+        downColor: "#22c55e",
+        borderUpColor: "#ef4444",
+        borderDownColor: "#22c55e",
+        wickUpColor: "#ef4444",
+        wickDownColor: "#22c55e",
+      });
+      candleSeries.setData(toCandles(bars, period));
+      if (markers.length > 0) {
+        candleSeries.setMarkers(toSeriesMarkers(markers, bars, period, selectedMarkerId));
+      }
 
-    if (overlayMode === "ma") {
-      priceChart.addLineSeries(lineOptions("#f59e0b")).setData(movingAverageData(bars, 5, "close", period));
-      priceChart.addLineSeries(lineOptions("#8b5cf6")).setData(movingAverageData(bars, 10, "close", period));
-      priceChart.addLineSeries(lineOptions("#2563eb")).setData(movingAverageData(bars, 20, "close", period));
-      priceChart.addLineSeries(lineOptions("#475569")).setData(movingAverageData(bars, 60, "close", period));
-    }
+      if (overlayMode === "ma") {
+        priceChart.addLineSeries(lineOptions("#f59e0b")).setData(movingAverageData(bars, 5, "close", period));
+        priceChart.addLineSeries(lineOptions("#8b5cf6")).setData(movingAverageData(bars, 10, "close", period));
+        priceChart.addLineSeries(lineOptions("#2563eb")).setData(movingAverageData(bars, 20, "close", period));
+        priceChart.addLineSeries(lineOptions("#475569")).setData(movingAverageData(bars, 60, "close", period));
+      }
 
-    if (overlayMode === "boll") {
-      priceChart.addLineSeries(lineOptions("#0f766e")).setData(bollingerData(bars, "upper", period));
-      priceChart.addLineSeries(lineOptions("#64748b")).setData(bollingerData(bars, "mid", period));
-      priceChart.addLineSeries(lineOptions("#0f766e")).setData(bollingerData(bars, "lower", period));
-    }
+      if (overlayMode === "boll") {
+        priceChart.addLineSeries(lineOptions("#0f766e")).setData(bollingerData(bars, "upper", period));
+        priceChart.addLineSeries(lineOptions("#64748b")).setData(bollingerData(bars, "mid", period));
+        priceChart.addLineSeries(lineOptions("#0f766e")).setData(bollingerData(bars, "lower", period));
+      }
 
-    renderIndicatorChart(indicatorChart, bars, indicatorMode, period);
-    syncCharts(priceChart, indicatorChart);
-    applyDefaultVisibleRange(priceChart, indicatorChart, bars.length, priceContainerRef.current.clientWidth);
+      renderIndicatorChart(indicatorChart, bars, indicatorMode, period);
+      syncCharts(priceChart, indicatorChart);
+      applyDefaultVisibleRange(priceChart, indicatorChart, bars.length, priceContainerRef.current.clientWidth);
 
-    priceChart.subscribeCrosshairMove((param) => {
-      const bar = findBarByTime(bars, period, param.time as Time | undefined);
-      setActiveBar(bar);
-    });
+      priceChart.subscribeCrosshairMove((param) => {
+        const bar = findBarByTime(bars, period, param.time as Time | undefined);
+        setActiveBar(bar);
+      });
 
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        priceChart.applyOptions({ width: entry.contentRect.width });
-        indicatorChart.applyOptions({ width: entry.contentRect.width });
-        applyDefaultVisibleRange(priceChart, indicatorChart, bars.length, entry.contentRect.width);
+      const clickHandler: MouseEventHandler<Time> = (param) => {
+        const marker = findMarkerFromClick(markers, period, param.hoveredObjectId, param.time as Time | undefined);
+        if (marker) {
+          onMarkerClick?.(marker);
+        }
+      };
+      priceChart.subscribeClick(clickHandler);
+
+      const observer = new ResizeObserver((entries) => {
+        for (const entry of entries) {
+          priceChart.applyOptions({ width: entry.contentRect.width });
+          indicatorChart.applyOptions({ width: entry.contentRect.width });
+          applyDefaultVisibleRange(priceChart, indicatorChart, bars.length, entry.contentRect.width);
       }
     });
-    observer.observe(priceContainerRef.current);
+      observer.observe(priceContainerRef.current);
 
-    return () => observer.disconnect();
-  }, [bars, barsQuery.isLoading, indicatorMode, overlayMode, period, vtSymbol]);
+      return () => observer.disconnect();
+    } catch (err) {
+      // Graceful degradation: if chart rendering fails (e.g. NaN times),
+      // destroy partial charts and let React show the data anyway.
+      console.error("K-line chart render error:", err);
+      destroyCharts(chartsRef.current);
+      chartsRef.current = null;
+    }
+  }, [bars, barsQuery.isLoading, indicatorMode, markers, onMarkerClick, overlayMode, period, selectedMarkerId, vtSymbol]);
 
   if (barsQuery.isLoading) {
     return (
@@ -181,7 +235,37 @@ export function StockKlineChart({ vtSymbol, isIndex = false }: StockKlineChartPr
       </div>
 
       <OverlayLegend mode={overlayMode} values={latestIndicators} />
+      {markers.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 border-t pt-2 text-xs text-muted-foreground">
+          <span>回测买卖点已标注在图表上</span>
+          <span>{markers.length} 个</span>
+          <span>点击买/卖箭头或对应 K 线查看策略说明</span>
+        </div>
+      )}
       <div ref={priceContainerRef} className="h-[430px] w-full" />
+
+      {markers.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {markers.map((marker) => {
+            const isSelected = selectedMarkerId && marker.id === selectedMarkerId;
+            const isBuy = marker.side === "BUY";
+            return (
+              <button
+                key={marker.id ?? `${marker.time}-${marker.side}-${marker.price ?? ""}`}
+                type="button"
+                className={cn(
+                  "rounded-md border px-2 py-1 text-xs tabular-nums transition-colors hover:bg-muted",
+                  isSelected && "border-primary bg-muted text-foreground",
+                  !isSelected && (isBuy ? "text-rise" : "text-fall")
+                )}
+                onClick={() => onMarkerClick?.(marker)}
+              >
+                {marker.time.slice(0, 10)} {isBuy ? "买" : "卖"} {formatPrice(marker.price)}
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-3">
         <ButtonGroup items={INDICATORS} value={indicatorMode} onChange={(value) => setIndicatorMode(value as IndicatorMode)} />
@@ -344,13 +428,57 @@ function toCandles(bars: Bar[], period: string): CandlestickData<Time>[] {
   }));
 }
 
+function toSeriesMarkers(
+  markers: KlineMarker[],
+  bars: Bar[],
+  period: string,
+  selectedMarkerId?: string | null
+): SeriesMarker<Time>[] {
+  const barTimes = new Set(bars.map((bar) => normalizeChartTime(chartTime(bar.trade_date, period))));
+  return markers
+    .filter((marker) => barTimes.has(normalizeChartTime(chartTime(marker.time, period))))
+    .map((marker) => {
+      const isBuy = marker.side === "BUY";
+      const isSelected = selectedMarkerId && marker.id === selectedMarkerId;
+      return {
+        id: marker.id,
+        time: chartTime(marker.time, period),
+        position: isBuy ? "belowBar" : "aboveBar",
+        color: isSelected ? "#111827" : isBuy ? "#ef4444" : "#16a34a",
+        shape: isBuy ? "arrowUp" : "arrowDown",
+        text: isSelected ? marker.text || (isBuy ? "已选买" : "已选卖") : marker.text || (isBuy ? "买" : "卖"),
+      };
+    });
+}
+
+function findMarkerFromClick(markers: KlineMarker[], period: string, objectId: unknown, time?: Time) {
+  const objectKey = typeof objectId === "string" ? objectId : objectId == null ? "" : String(objectId);
+  if (objectKey) {
+    const byId = markers.find((marker) => marker.id === objectKey);
+    if (byId) return byId;
+  }
+  if (!time) return null;
+  const target = normalizeChartTime(time);
+  const sameTime = markers.filter((marker) => normalizeChartTime(chartTime(marker.time, period)) === target);
+  if (sameTime.length === 0) return null;
+  return sameTime.length === 1 ? sameTime[0] : sameTime.find((marker) => marker.side === "BUY") ?? sameTime[0];
+}
+
 function lineOptions(color: string) {
   return { color, lineWidth: 1 as const, priceLineVisible: false, lastValueVisible: false };
 }
 
 function chartTime(value: string, period: string): Time {
   if (!period.endsWith("m")) return value.slice(0, 10);
-  const parsed = new Date(value.replace(" ", "T") + "+08:00").getTime();
+  // Minute-level: parse datetime string like "2026-06-11 14:15:00" → unix seconds
+  const iso = value.includes("T") ? value : value.replace(" ", "T");
+  // Ensure proper ISO-8601 with timezone so Date.parse doesn't produce NaN
+  const withTz = iso.includes("+") || iso.endsWith("Z") ? iso : iso + "+08:00";
+  const parsed = new Date(withTz).getTime();
+  if (!Number.isFinite(parsed)) {
+    // Fallback: treat as UTC midnight if time component is missing
+    return value.slice(0, 10) as Time;
+  }
   return Math.floor(parsed / 1000) as Time;
 }
 

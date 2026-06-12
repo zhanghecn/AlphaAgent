@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import and_, desc, select
 
+from alphaagent.market.boards import stock_board_payload
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
 
@@ -102,7 +103,17 @@ def list_items(group_id: int) -> dict[str, Any]:
     _ensure_portfolio_schema()
     with session_scope() as session:
         rows = session.execute(
-            select(schema.portfolio_group_items)
+            select(
+                schema.portfolio_group_items,
+                schema.stocks.c.name.label("stock_name"),
+                schema.stocks.c.exchange.label("stock_exchange"),
+            )
+            .select_from(
+                schema.portfolio_group_items.outerjoin(
+                    schema.stocks,
+                    schema.portfolio_group_items.c.vt_symbol == schema.stocks.c.vt_symbol,
+                )
+            )
             .where(schema.portfolio_group_items.c.group_id == group_id)
             .order_by(schema.portfolio_group_items.c.created_at.desc())
         ).mappings().all()
@@ -176,8 +187,11 @@ def holdings() -> dict[str, Any]:
             select(
                 schema.simulation_positions,
                 schema.simulation_accounts.c.name.label("account_name"),
+                schema.stocks.c.name.label("stock_name"),
+                schema.stocks.c.exchange.label("stock_exchange"),
             )
             .join(schema.simulation_accounts, schema.simulation_positions.c.account_id == schema.simulation_accounts.c.id)
+            .outerjoin(schema.stocks, schema.simulation_positions.c.vt_symbol == schema.stocks.c.vt_symbol)
             .order_by(schema.simulation_positions.c.updated_at.desc())
         ).mappings().all()
         items = []
@@ -263,6 +277,10 @@ def _parse_date(value: Any) -> date | None:
 
 def _mapping_to_api(row: dict[str, Any]) -> dict[str, Any]:
     result = dict(row)
+    vt_symbol = result.get("vt_symbol")
+    if vt_symbol:
+        result["name"] = result.get("name") or result.pop("stock_name", None)
+        result.update(stock_board_payload(vt_symbol, result.pop("stock_exchange", None)))
     for key, value in list(result.items()):
         if hasattr(value, "isoformat"):
             result[key] = value.isoformat()

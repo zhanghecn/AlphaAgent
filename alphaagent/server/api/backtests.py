@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Body, Query
 from fastapi.responses import JSONResponse, Response
 
+from alphaagent.market.boards import normalize_included_boards
 from alphaagent.server.core.responses import fail, ok
 from alphaagent.server.services.backtest.engine import (
     BacktestParams,
@@ -16,6 +17,7 @@ from alphaagent.server.services.backtest.engine import (
     backtest_report,
     backtest_report_csv,
     backtest_trades,
+    backtest_audit,
     backtest_validation_grid,
     backtest_validation_grid_csv,
     backtest_minute_gap_csv,
@@ -33,6 +35,31 @@ def create_backtest(payload: dict[str, Any] = Body(default_factory=dict)):
     try:
         params = _params_from_payload(payload)
         return ok(run_backtest(params))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.post("/symbol")
+def create_symbol_backtest(payload: dict[str, Any] = Body(default_factory=dict)):
+    try:
+        vt_symbol = str(payload.get("vt_symbol") or payload.get("symbol") or "").strip().upper()
+        if not vt_symbol:
+            return JSONResponse(status_code=400, content=fail("INVALID_SYMBOL", "vt_symbol is required."))
+        params = _params_from_payload(
+            {
+                **payload,
+                "symbols": [vt_symbol],
+                "max_symbols": 1,
+                "max_positions": int(payload.get("max_positions") or 1),
+                "candidate_limit": int(payload.get("candidate_limit") or 1),
+                "persist": payload.get("persist", True),
+            }
+        )
+        result = run_backtest(params)
+        backtest_id = result.get("backtest_id")
+        if result.get("status") == "ready" and backtest_id:
+            result["audit"] = backtest_audit(int(backtest_id), vt_symbol, int(payload.get("audit_limit") or 300))
+        return ok(result)
     except Exception as exc:
         return _service_error(exc)
 
@@ -82,6 +109,18 @@ def get_metrics(backtest_id: int):
 def get_report(backtest_id: int, trade_limit: int = Query(default=50, ge=1, le=500)):
     try:
         return ok(backtest_report(backtest_id, trade_limit))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/{backtest_id}/audit")
+def get_audit(
+    backtest_id: int,
+    vt_symbol: str = Query(default=""),
+    limit: int = Query(default=200, ge=1, le=1000),
+):
+    try:
+        return ok(backtest_audit(backtest_id, vt_symbol or None, limit))
     except Exception as exc:
         return _service_error(exc)
 
@@ -187,8 +226,21 @@ def _params_from_payload(payload: dict[str, Any]) -> BacktestParams:
         tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
         tail_entry_end=str(payload.get("tail_entry_end") or "14:57"),
         tail_entry_ma5_tolerance_pct=float(payload.get("tail_entry_ma5_tolerance_pct") or 1.5),
+        symbols=_parse_symbols(payload.get("symbols") or payload.get("vt_symbols") or payload.get("vt_symbol")),
+        included_boards=normalize_included_boards(payload.get("included_boards")),
         persist=bool(payload.get("persist") or False),
     )
+
+
+def _parse_symbols(value: Any) -> list[str] | None:
+    if not value:
+        return None
+    if isinstance(value, str):
+        raw_items = [item.strip() for item in value.split(",")]
+    else:
+        raw_items = [str(item).strip() for item in value]
+    items = [item.upper() for item in raw_items if item]
+    return items or None
 
 
 def _parse_bool(value: Any, *, default: bool = False) -> bool:

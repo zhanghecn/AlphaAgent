@@ -1,12 +1,30 @@
-FROM python:3.13-slim
+# =============================================================================
+# AlphaAgent API Dockerfile
+# =============================================================================
+# Stage 1: Install Python dependencies
+# Stage 2: Final runtime image
+# =============================================================================
+
+FROM python:3.13-slim AS python-deps
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PIP_ONLY_BINARY=TA-Lib,numpy
+
+WORKDIR /app
+
+COPY pyproject.toml ./pyproject.toml
+RUN python -m pip install --upgrade pip && \
+    python -m pip install --no-cache-dir --group pyproject.toml:server
+
+FROM python:3.13-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-COPY alphaagent/server/requirements.txt /tmp/alphaagent-server-requirements.txt
-RUN python -m pip install --no-cache-dir -r /tmp/alphaagent-server-requirements.txt
+COPY --from=python-deps /usr/local /usr/local
 
 COPY alphaagent ./alphaagent
 COPY vnpy ./vnpy

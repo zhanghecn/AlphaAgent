@@ -9,6 +9,7 @@ from typing import Any
 
 from sqlalchemy import and_, desc, func, select
 
+from alphaagent.market.boards import DEFAULT_QUANT_INCLUDED_BOARDS, normalize_included_boards, stock_board, stock_board_payload
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
 from alphaagent.server.services.quant.factors import (
@@ -34,6 +35,7 @@ def screen_stocks(
     min_recommendation_score: float = 60.0,
     persist: bool = False,
     auto_portfolio: bool = True,
+    included_boards: list[str] | tuple[str, ...] | str | None = None,
 ) -> dict[str, Any]:
     """Run the daily stock screen."""
 
@@ -48,11 +50,8 @@ def screen_stocks(
         if as_of is None:
             return {"status": "empty", "message": "stock_daily_bars is empty", "items": [], "recommendations": []}
 
-        stock_rows = session.execute(
-            select(schema.stocks)
-            .order_by(desc(schema.stocks.c.turnover), desc(schema.stocks.c.market_cap))
-            .limit(min(max(max_symbols, 1), 5000))
-        ).mappings().all()
+        boards = normalize_included_boards(included_boards)
+        stock_rows = _load_stock_universe(session, max_symbols, boards)
         symbols = [str(row["vt_symbol"]) for row in stock_rows]
         bars_by_symbol = _load_bars(session, symbols, as_of, lookback_days=160)
         index_return_20d = _load_index_return_20d(session, as_of)
@@ -88,7 +87,7 @@ def screen_stocks(
         run_id = None
         portfolio_sync = None
         if persist:
-            run_id = _persist_screen_run(session, as_of, scored, recommendations, strategy_id)
+            run_id = _persist_screen_run(session, as_of, scored, recommendations, strategy_id, boards)
             if auto_portfolio:
                 portfolio_sync = _sync_quant_candidate_group(session, recommendations, stock_meta, strategy_id)
 
@@ -105,6 +104,7 @@ def screen_stocks(
         ],
         "total": len(scored),
         "recommendation_count": len(recommendations),
+        "included_boards": list(boards),
         "portfolio_sync": portfolio_sync,
     }
 
@@ -114,21 +114,33 @@ def list_signals(trade_date: date | None = None, strategy_id: str = STRATEGY_ID,
         return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
     _ensure_quant_schema()
     with session_scope() as session:
-        as_of = trade_date or _latest_signal_date(session) or _latest_trade_date(session)
+        run = _latest_screen_run(session, strategy_id, trade_date)
+        as_of = run["trade_date"] if run else trade_date or _latest_signal_date(session) or _latest_trade_date(session)
         if as_of is None:
             return {"status": "empty", "items": []}
+        filters = (
+            [schema.quant_stock_signals.c.run_id == run["id"]]
+            if run
+            else [
+                schema.quant_stock_signals.c.trade_date == as_of,
+                schema.quant_stock_signals.c.strategy_id == strategy_id,
+                schema.quant_stock_signals.c.strategy_version == STRATEGY_VERSION,
+            ]
+        )
         rows = session.execute(
             select(schema.quant_stock_signals)
-            .where(
-                and_(
-                    schema.quant_stock_signals.c.trade_date == as_of,
-                    schema.quant_stock_signals.c.strategy_id == strategy_id,
-                )
-            )
+            .where(and_(*filters))
             .order_by(desc(schema.quant_stock_signals.c.total_score))
             .limit(min(max(limit, 1), 500))
         ).mappings().all()
-    return {"status": "ready" if rows else "empty", "trade_date": as_of.isoformat(), "items": [_mapping_to_api(dict(row)) for row in rows]}
+    return {
+        "status": "ready" if rows else "empty",
+        "trade_date": as_of.isoformat(),
+        "run_id": int(run["id"]) if run else None,
+        "strategy_version": str(run["strategy_version"]) if run else STRATEGY_VERSION,
+        "included_boards": _run_included_boards(run),
+        "items": [_mapping_to_api(dict(row)) for row in rows],
+    }
 
 
 def list_recommendations(trade_date: date | None = None, strategy_id: str = STRATEGY_ID, limit: int = 50) -> dict[str, Any]:
@@ -136,21 +148,42 @@ def list_recommendations(trade_date: date | None = None, strategy_id: str = STRA
         return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
     _ensure_quant_schema()
     with session_scope() as session:
-        as_of = trade_date or _latest_recommendation_date(session) or _latest_trade_date(session)
+        run = _latest_screen_run(session, strategy_id, trade_date)
+        as_of = run["trade_date"] if run else trade_date or _latest_recommendation_date(session) or _latest_trade_date(session)
         if as_of is None:
             return {"status": "empty", "items": []}
+        filters = (
+            [schema.quant_recommendations.c.run_id == run["id"]]
+            if run
+            else [
+                schema.quant_recommendations.c.trade_date == as_of,
+                schema.quant_recommendations.c.strategy_id == strategy_id,
+                schema.quant_recommendations.c.strategy_version == STRATEGY_VERSION,
+            ]
+        )
         rows = session.execute(
-            select(schema.quant_recommendations)
-            .where(
-                and_(
-                    schema.quant_recommendations.c.trade_date == as_of,
-                    schema.quant_recommendations.c.strategy_id == strategy_id,
+            select(
+                schema.quant_recommendations,
+                schema.stocks.c.name.label("stock_name"),
+            )
+            .select_from(
+                schema.quant_recommendations.outerjoin(
+                    schema.stocks,
+                    schema.quant_recommendations.c.vt_symbol == schema.stocks.c.vt_symbol,
                 )
             )
+            .where(and_(*filters))
             .order_by(schema.quant_recommendations.c.rank)
             .limit(min(max(limit, 1), 200))
         ).mappings().all()
-    return {"status": "ready" if rows else "empty", "trade_date": as_of.isoformat(), "items": [_mapping_to_api(dict(row)) for row in rows]}
+    return {
+        "status": "ready" if rows else "empty",
+        "trade_date": as_of.isoformat(),
+        "run_id": int(run["id"]) if run else None,
+        "strategy_version": str(run["strategy_version"]) if run else STRATEGY_VERSION,
+        "included_boards": _run_included_boards(run),
+        "items": [_recommendation_row_to_api(dict(row)) for row in rows],
+    }
 
 
 def get_recommendation(recommendation_id: int) -> dict[str, Any]:
@@ -159,11 +192,21 @@ def get_recommendation(recommendation_id: int) -> dict[str, Any]:
     _ensure_quant_schema()
     with session_scope() as session:
         row = session.execute(
-            select(schema.quant_recommendations).where(schema.quant_recommendations.c.id == recommendation_id)
+            select(
+                schema.quant_recommendations,
+                schema.stocks.c.name.label("stock_name"),
+            )
+            .select_from(
+                schema.quant_recommendations.outerjoin(
+                    schema.stocks,
+                    schema.quant_recommendations.c.vt_symbol == schema.stocks.c.vt_symbol,
+                )
+            )
+            .where(schema.quant_recommendations.c.id == recommendation_id)
         ).mappings().first()
     if not row:
         return {"status": "not_found", "id": recommendation_id}
-    return {"status": "ready", "item": _mapping_to_api(dict(row))}
+    return {"status": "ready", "item": _recommendation_row_to_api(dict(row))}
 
 
 def get_run(run_id: int) -> dict[str, Any]:
@@ -193,6 +236,31 @@ def _latest_signal_date(session) -> date | None:
 
 def _latest_recommendation_date(session) -> date | None:
     return session.execute(select(func.max(schema.quant_recommendations.c.trade_date))).scalar()
+
+
+def _latest_screen_run(session, strategy_id: str, trade_date: date | None = None) -> dict[str, Any] | None:
+    query = select(schema.quant_signal_runs).where(
+        and_(
+            schema.quant_signal_runs.c.strategy_id == strategy_id,
+            schema.quant_signal_runs.c.strategy_version == STRATEGY_VERSION,
+            schema.quant_signal_runs.c.status == "succeeded",
+        )
+    )
+    if trade_date is not None:
+        query = query.where(schema.quant_signal_runs.c.trade_date == trade_date)
+    row = session.execute(
+        query
+        .order_by(desc(schema.quant_signal_runs.c.trade_date), desc(schema.quant_signal_runs.c.id))
+        .limit(1)
+    ).mappings().first()
+    return dict(row) if row else None
+
+
+def _run_included_boards(run: dict[str, Any] | None) -> list[str]:
+    if not run:
+        return list(DEFAULT_QUANT_INCLUDED_BOARDS)
+    params = run.get("params") if isinstance(run.get("params"), dict) else {}
+    return list(normalize_included_boards(params.get("included_boards")))
 
 
 def _load_bars(session, vt_symbols: list[str], trade_date: date, lookback_days: int) -> dict[str, list[Bar]]:
@@ -225,6 +293,22 @@ def _load_bars(session, vt_symbols: list[str], trade_date: date, lookback_days: 
             )
         )
     return result
+
+
+def _load_stock_universe(session, max_symbols: int, included_boards: tuple[str, ...]) -> list[dict[str, Any]]:
+    rows = session.execute(
+        select(schema.stocks)
+        .where(schema.stocks.c.vt_symbol != "000001.SSE")
+        .order_by(desc(schema.stocks.c.turnover), desc(schema.stocks.c.market_cap))
+        .limit(5000)
+    ).mappings().all()
+    allowed = set(included_boards or DEFAULT_QUANT_INCLUDED_BOARDS)
+    result = [
+        dict(row)
+        for row in rows
+        if stock_board(row.get("vt_symbol"), row.get("exchange")) in allowed
+    ]
+    return result[: min(max(max_symbols, 1), 5000)]
 
 
 def _load_index_return_20d(session, trade_date: date) -> float | None:
@@ -398,7 +482,14 @@ def _load_lhb_scores(session, vt_symbols: list[str], trade_date: date) -> dict[s
     return result
 
 
-def _persist_screen_run(session, trade_date: date, scored: list[SignalScore], recommendations: list[SignalScore], strategy_id: str) -> int:
+def _persist_screen_run(
+    session,
+    trade_date: date,
+    scored: list[SignalScore],
+    recommendations: list[SignalScore],
+    strategy_id: str,
+    included_boards: tuple[str, ...] = DEFAULT_QUANT_INCLUDED_BOARDS,
+) -> int:
     now = datetime.now(timezone.utc)
     run_id = session.execute(
         schema.quant_signal_runs.insert()
@@ -407,7 +498,7 @@ def _persist_screen_run(session, trade_date: date, scored: list[SignalScore], re
             strategy_version=STRATEGY_VERSION,
             trade_date=trade_date,
             status="succeeded",
-            params={},
+            params={"included_boards": list(included_boards)},
             candidate_count=len(scored),
             signal_count=sum(1 for item in scored if item.entry_signal),
             recommendation_count=len(recommendations),
@@ -417,40 +508,34 @@ def _persist_screen_run(session, trade_date: date, scored: list[SignalScore], re
         .returning(schema.quant_signal_runs.c.id)
     ).scalar_one()
 
+    _clear_existing_screen_outputs(session, trade_date, strategy_id)
+
     for item in scored:
         values = _score_to_db(item, run_id, strategy_id)
-        existing = session.execute(
-            select(schema.quant_stock_signals.c.id).where(
-                and_(
-                    schema.quant_stock_signals.c.trade_date == item.trade_date,
-                    schema.quant_stock_signals.c.vt_symbol == item.vt_symbol,
-                    schema.quant_stock_signals.c.strategy_id == strategy_id,
-                    schema.quant_stock_signals.c.strategy_version == STRATEGY_VERSION,
-                )
-            )
-        ).scalar_one_or_none()
-        if existing:
-            session.execute(schema.quant_stock_signals.update().where(schema.quant_stock_signals.c.id == existing).values(**values))
-        else:
-            session.execute(schema.quant_stock_signals.insert().values(**values))
+        session.execute(schema.quant_stock_signals.insert().values(**values))
 
     for rank, item in enumerate(recommendations, start=1):
         values = _recommendation_to_db(rank, item, run_id, strategy_id)
-        existing = session.execute(
-            select(schema.quant_recommendations.c.id).where(
-                and_(
-                    schema.quant_recommendations.c.trade_date == item.trade_date,
-                    schema.quant_recommendations.c.vt_symbol == item.vt_symbol,
-                    schema.quant_recommendations.c.strategy_id == strategy_id,
-                    schema.quant_recommendations.c.strategy_version == STRATEGY_VERSION,
-                )
-            )
-        ).scalar_one_or_none()
-        if existing:
-            session.execute(schema.quant_recommendations.update().where(schema.quant_recommendations.c.id == existing).values(**values))
-        else:
-            session.execute(schema.quant_recommendations.insert().values(**values))
+        session.execute(schema.quant_recommendations.insert().values(**values))
     return int(run_id)
+
+
+def _clear_existing_screen_outputs(session, trade_date: date, strategy_id: str) -> None:
+    match_current_run = and_(
+        schema.quant_recommendations.c.trade_date == trade_date,
+        schema.quant_recommendations.c.strategy_id == strategy_id,
+        schema.quant_recommendations.c.strategy_version == STRATEGY_VERSION,
+    )
+    session.execute(schema.quant_recommendations.delete().where(match_current_run))
+    session.execute(
+        schema.quant_stock_signals.delete().where(
+            and_(
+                schema.quant_stock_signals.c.trade_date == trade_date,
+                schema.quant_stock_signals.c.strategy_id == strategy_id,
+                schema.quant_stock_signals.c.strategy_version == STRATEGY_VERSION,
+            )
+        )
+    )
 
 
 def _sync_quant_candidate_group(
@@ -585,6 +670,7 @@ def _score_to_api(item: SignalScore, stock: dict[str, Any] | None = None) -> dic
     payload.pop("run_id", None)
     payload["trade_date"] = item.trade_date.isoformat()
     payload["name"] = stock.get("name") if stock else None
+    payload.update(stock_board_payload(item.vt_symbol, (stock or {}).get("exchange")))
     return payload
 
 
@@ -594,6 +680,7 @@ def _recommendation_to_api(rank: int, item: SignalScore, stock: dict[str, Any] |
     payload["trade_date"] = item.trade_date.isoformat()
     payload["expires_at"] = payload["expires_at"].isoformat()
     payload["name"] = stock.get("name") if stock else None
+    payload.update(stock_board_payload(item.vt_symbol, (stock or {}).get("exchange")))
     return payload
 
 
@@ -610,9 +697,17 @@ def default_risk_control() -> dict[str, Any]:
 
 def _mapping_to_api(row: dict[str, Any]) -> dict[str, Any]:
     result = dict(row)
+    if result.get("vt_symbol"):
+        result.update(stock_board_payload(result.get("vt_symbol")))
     for key, value in list(result.items()):
         if hasattr(value, "isoformat"):
             result[key] = value.isoformat()
+    return result
+
+
+def _recommendation_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
+    result = _mapping_to_api(row)
+    result["name"] = result.pop("stock_name", None)
     return result
 
 

@@ -54,10 +54,10 @@ def query_local_daily_bars(
 ) -> dict[str, Any]:
     """Return local daily bars as vn.py BarData objects and API-friendly rows."""
 
+    request = history_request(vt_symbol, start, end)
     if not is_database_configured():
         return {"status": "unavailable", "message": "DATABASE_URL not configured", "items": []}
 
-    request = history_request(vt_symbol, start, end)
     end_date = _as_date(end) if end else None
     clauses = [
         schema.stock_daily_bars.c.vt_symbol == request.vt_symbol,

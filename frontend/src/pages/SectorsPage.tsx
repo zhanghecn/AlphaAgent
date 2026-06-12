@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
+import { StockIdentityLink } from "@/components/StockIdentityLink";
 import {
   cn,
   formatAmount,
@@ -1401,7 +1402,15 @@ function StockTable({
               onClick={() => onRowClick(stock)}
             >
               <td className="px-3 py-2 font-mono text-xs">{stock.symbol}</td>
-              <td className="px-3 py-2 font-medium">{stock.name}</td>
+              <td className="px-3 py-2">
+                <StockIdentityLink
+                  name={stock.name}
+                  vtSymbol={stock.vt_symbol}
+                  board={stock.board}
+                  boardLabel={stock.board_label}
+                  link={false}
+                />
+              </td>
               {showSector && (
                 <td className="px-3 py-2 text-muted-foreground">
                   {"related_sector_name" in stock ? stock.related_sector_name ?? "--" : "--"}

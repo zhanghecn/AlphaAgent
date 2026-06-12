@@ -1,13 +1,14 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BarChart3, Briefcase, ClipboardCheck, Download, FileUp, Play, RefreshCw, ShieldCheck, Upload, WalletCards } from "lucide-react";
+import { AlertTriangle, BarChart3, Briefcase, ClipboardCheck, Database, Download, FileText, FileUp, Play, RefreshCw, ShieldCheck, Upload, WalletCards } from "lucide-react";
 import {
   autoBuyRecommendations,
   backtestReportCsvUrl,
   backtestValidationGridCsvUrl,
   createBacktest,
   createScreenRun,
+  fetchBacktestAudit,
   fetchBacktestReport,
   fetchBacktestValidationGrid,
   fetchBacktests,
@@ -41,11 +42,21 @@ import {
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorState } from "@/components/ErrorState";
 import { LoadingState } from "@/components/LoadingState";
+import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn, formatAmount, formatPct, formatPrice, priceColorClass } from "@/lib/utils";
 
 const DEFAULT_BACKTEST_START = "2025-10-14";
+const MIN_TRUSTED_BACKTEST_VERSION = "0.1.1";
+const QUANT_BOARD_OPTIONS = [
+  { value: "main", label: "主板" },
+  { value: "chinext", label: "创业板" },
+  { value: "star", label: "科创板" },
+  { value: "bse", label: "北交所" },
+] as const;
+
 const DEFAULT_BACKTEST_PARAMS = {
   start: DEFAULT_BACKTEST_START,
   initial_cash: 1_000_000,
@@ -58,7 +69,10 @@ const DEFAULT_BACKTEST_PARAMS = {
   tail_entry_start: "14:30",
   tail_entry_end: "14:57",
   tail_entry_ma5_tolerance_pct: 1.5,
+  included_boards: ["main"],
 };
+
+type QuantBoard = (typeof QUANT_BOARD_OPTIONS)[number]["value"];
 
 export function QuantTradingPage() {
   const queryClient = useQueryClient();
@@ -123,6 +137,13 @@ export function QuantTradingPage() {
     staleTime: 20_000,
   });
 
+  const auditQuery = useQuery({
+    queryKey: ["backtestAudit", activeBacktestId],
+    queryFn: () => fetchBacktestAudit(activeBacktestId!, undefined, 120),
+    enabled: Boolean(activeBacktestId),
+    staleTime: 20_000,
+  });
+
   const validationGridQuery = useQuery({
     queryKey: ["backtestValidationGrid", activeBacktestId],
     queryFn: () => fetchBacktestValidationGrid(activeBacktestId!, 54),
@@ -156,6 +177,7 @@ export function QuantTradingPage() {
         min_recommendation_score: 60,
         persist: true,
         auto_portfolio: true,
+        included_boards: backtestParams.included_boards,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["quantRecommendations"] });
@@ -346,7 +368,7 @@ export function QuantTradingPage() {
         <div>
           <h1 className="text-xl font-semibold tracking-tight">量化交易</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            日线筛选、真实数据回测、模拟持仓。当前不是实盘下单。
+            按“数据准备、筛选候选、回测验证、模拟持仓”执行。当前不会连接券商实盘。
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -373,17 +395,66 @@ export function QuantTradingPage() {
         />
       )}
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">
-        <section className="space-y-4">
-          <RecommendationsPanel
-            isLoading={recommendationsQuery.isLoading}
-            isError={recommendationsQuery.isError}
-            error={recommendationsQuery.error}
-            items={recommendationsQuery.data?.items ?? []}
-            tradeDate={recommendationsQuery.data?.trade_date}
-            syncedCount={quantGroupItemsQuery.data?.items.length ?? 0}
-            onRetry={() => recommendationsQuery.refetch()}
-          />
+      <QuantWorkflowGuide
+        recommendationLoading={recommendationsQuery.isLoading}
+        recommendationError={recommendationsQuery.isError}
+        recommendationStatus={recommendationsQuery.data?.status}
+        recommendationMessage={recommendationsQuery.data?.message}
+        recommendationCount={recommendationsQuery.data?.items.length ?? 0}
+        backtestCount={backtestsQuery.data?.items.length ?? 0}
+        holdingsCount={holdingsQuery.data?.items.length ?? 0}
+        minuteAudit={minuteGapAuditMutation.data}
+        vnpyStatus={vnpyStatusQuery.data}
+      />
+
+      <Tabs defaultValue="candidates" className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b">
+          <TabsList className="h-auto rounded-none bg-transparent p-0">
+            <TabsTrigger value="candidates" className="rounded-none px-3 py-2 shadow-none">候选</TabsTrigger>
+            <TabsTrigger value="backtest" className="rounded-none px-3 py-2 shadow-none">回测</TabsTrigger>
+            <TabsTrigger value="logs" className="rounded-none px-3 py-2 shadow-none">日志</TabsTrigger>
+            <TabsTrigger value="data" className="rounded-none px-3 py-2 shadow-none">数据</TabsTrigger>
+          </TabsList>
+        </div>
+
+        <TabsContent value="candidates" className="mt-0">
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+            <RecommendationsPanel
+              isLoading={recommendationsQuery.isLoading}
+              isError={recommendationsQuery.isError}
+              error={recommendationsQuery.error}
+              items={recommendationsQuery.data?.items ?? []}
+              tradeDate={recommendationsQuery.data?.trade_date}
+              runId={recommendationsQuery.data?.run_id}
+              strategyVersion={recommendationsQuery.data?.strategy_version}
+              includedBoards={recommendationsQuery.data?.included_boards}
+              selectedBoards={backtestParams.included_boards}
+              onSelectedBoardsChange={(included_boards) => setBacktestParams({ ...backtestParams, included_boards })}
+              status={recommendationsQuery.data?.status}
+              message={recommendationsQuery.data?.message}
+              syncedCount={quantGroupItemsQuery.data?.items.length ?? 0}
+              onRetry={() => recommendationsQuery.refetch()}
+              onRunScreen={() => screenMutation.mutate()}
+              isRunningScreen={screenMutation.isPending}
+            />
+            <section className="space-y-4">
+              <HoldingsPanel
+                accountCount={accountsQuery.data?.items.length ?? 0}
+                cash={accountsQuery.data?.items[0]?.cash}
+                initialCash={accountsQuery.data?.items[0]?.initial_cash}
+                items={holdingsQuery.data?.items ?? []}
+                isLoading={accountsQuery.isLoading || holdingsQuery.isLoading}
+                isError={accountsQuery.isError || holdingsQuery.isError}
+                onRetry={() => {
+                  accountsQuery.refetch();
+                  holdingsQuery.refetch();
+                }}
+              />
+            </section>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="backtest" className="mt-0">
           <BacktestPanel
             runs={backtestsQuery.data?.items ?? []}
             selectedId={activeBacktestId}
@@ -394,102 +465,92 @@ export function QuantTradingPage() {
             onRun={() => backtestMutation.mutate(undefined)}
             onStrictMinutePreset={applyStrictMinutePreset}
             report={reportQuery.data}
+            audit={auditQuery.data}
             isLoading={backtestsQuery.isLoading || reportQuery.isLoading}
             isError={backtestsQuery.isError || reportQuery.isError}
             onRetry={() => {
               backtestsQuery.refetch();
               reportQuery.refetch();
+              auditQuery.refetch();
             }}
             validationGrid={validationGridQuery.data}
             isValidationGridLoading={validationGridQuery.isFetching}
             onRunValidationGrid={() => validationGridQuery.refetch()}
           />
-        </section>
+        </TabsContent>
 
-        <section className="space-y-4">
-          <HoldingsPanel
-            accountCount={accountsQuery.data?.items.length ?? 0}
-            cash={accountsQuery.data?.items[0]?.cash}
-            initialCash={accountsQuery.data?.items[0]?.initial_cash}
-            items={holdingsQuery.data?.items ?? []}
-            isLoading={accountsQuery.isLoading || holdingsQuery.isLoading}
-            isError={accountsQuery.isError || holdingsQuery.isError}
-            onRetry={() => {
-              accountsQuery.refetch();
-              holdingsQuery.refetch();
-            }}
-          />
-          <RiskNotes />
-          <MinuteDataPanel
-            gapCsv={minuteGapCsv}
-            importCsv={minuteImportCsv}
-            gapFilePath={minuteGapFilePath}
-            importFilePath={minuteImportFilePath}
-            template={minuteGapTemplate}
-            vendorManifest={minuteVendorManifestMutation.data}
-            vendorManifestCsv={minuteVendorManifestCsv}
-            onGapCsvChange={setMinuteGapCsv}
-            onImportCsvChange={setMinuteImportCsv}
-            onGapFilePathChange={setMinuteGapFilePath}
-            onImportFilePathChange={setMinuteImportFilePath}
-            onGapFileLoad={setMinuteGapCsv}
-            onImportFileLoad={setMinuteImportCsv}
-            onAudit={() => minuteGapAuditMutation.mutate()}
-            onTemplate={() => minuteGapTemplateMutation.mutate()}
-            onVendorManifest={() => minuteVendorManifestMutation.mutate()}
-            onVendorManifestCsv={() => minuteVendorManifestCsvMutation.mutate()}
-            onDryRun={() => minuteImportMutation.mutate(true)}
-            onImport={() => minuteImportMutation.mutate(false)}
-            onRunStrictBacktest={() => {
-              applyStrictMinutePreset();
-              backtestMutation.mutate({
-                ...backtestParams,
-                max_symbols: Math.max(backtestParams.max_symbols, 1500),
-                intraday_entry: true,
-                minute_entry_required: true,
-                persist: true,
-              });
-            }}
-            vnpyParams={vnpyImportParams}
-            onVnpyParamsChange={setVnpyImportParams}
-            onImportFromVnpy={() => vnpyMinuteImportMutation.mutate()}
-            onImportGapsFromVnpy={(dryRun) => vnpyGapImportMutation.mutate(dryRun)}
-            onImportGapsFromTushare={(dryRun) => tushareGapImportMutation.mutate(dryRun)}
-            onImportGapsFromTdx={(dryRun) => tdxGapImportMutation.mutate(dryRun)}
-            onRunStrictPipeline={() => strictPipelineMutation.mutate()}
-            audit={minuteGapAuditMutation.data}
-            importResult={minuteImportMutation.data}
-            vnpyImportResult={vnpyMinuteImportMutation.data}
-            vnpyGapImportResult={vnpyGapImportMutation.data}
-            tushareGapImportResult={tushareGapImportMutation.data}
-            tdxGapImportResult={tdxGapImportMutation.data}
-            strictPipelineResult={strictPipelineMutation.data}
-            isAuditing={minuteGapAuditMutation.isPending}
-            isGeneratingTemplate={minuteGapTemplateMutation.isPending}
-            isGeneratingVendorManifest={minuteVendorManifestMutation.isPending || minuteVendorManifestCsvMutation.isPending}
-            isImporting={minuteImportMutation.isPending}
-            isImportingFromVnpy={vnpyMinuteImportMutation.isPending}
-            isImportingGapsFromVnpy={vnpyGapImportMutation.isPending}
-            isImportingGapsFromTushare={tushareGapImportMutation.isPending}
-            isImportingGapsFromTdx={tdxGapImportMutation.isPending}
-            isRunningStrictPipeline={strictPipelineMutation.isPending}
-            isRunningBacktest={backtestMutation.isPending}
-            error={
-              minuteGapAuditMutation.error ??
-              minuteGapTemplateMutation.error ??
-              minuteVendorManifestMutation.error ??
-              minuteVendorManifestCsvMutation.error ??
-              minuteImportMutation.error ??
-              vnpyMinuteImportMutation.error ??
-              vnpyGapImportMutation.error ??
-              tushareGapImportMutation.error ??
-              tdxGapImportMutation.error ??
-              strictPipelineMutation.error
-            }
-          />
-          <VnpyStatusPanel data={vnpyStatusQuery.data} isLoading={vnpyStatusQuery.isLoading} />
-        </section>
-      </div>
+        <TabsContent value="logs" className="mt-0">
+          <BacktestLogWorkspace report={reportQuery.data} audit={auditQuery.data} isLoading={auditQuery.isLoading} />
+        </TabsContent>
+
+        <TabsContent value="data" className="mt-0">
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+            <MinuteDataPanel
+              gapCsv={minuteGapCsv}
+              importCsv={minuteImportCsv}
+              gapFilePath={minuteGapFilePath}
+              importFilePath={minuteImportFilePath}
+              template={minuteGapTemplate}
+              vendorManifest={minuteVendorManifestMutation.data}
+              vendorManifestCsv={minuteVendorManifestCsv}
+              onGapCsvChange={setMinuteGapCsv}
+              onImportCsvChange={setMinuteImportCsv}
+              onGapFilePathChange={setMinuteGapFilePath}
+              onImportFilePathChange={setMinuteImportFilePath}
+              onGapFileLoad={setMinuteGapCsv}
+              onImportFileLoad={setMinuteImportCsv}
+              onAudit={() => minuteGapAuditMutation.mutate()}
+              onTemplate={() => minuteGapTemplateMutation.mutate()}
+              onVendorManifest={() => minuteVendorManifestMutation.mutate()}
+              onVendorManifestCsv={() => minuteVendorManifestCsvMutation.mutate()}
+              onDryRun={() => minuteImportMutation.mutate(true)}
+              onImport={() => minuteImportMutation.mutate(false)}
+              vnpyParams={vnpyImportParams}
+              onVnpyParamsChange={setVnpyImportParams}
+              onImportFromVnpy={() => vnpyMinuteImportMutation.mutate()}
+              onImportGapsFromVnpy={(dryRun) => vnpyGapImportMutation.mutate(dryRun)}
+              onImportGapsFromTushare={(dryRun) => tushareGapImportMutation.mutate(dryRun)}
+              onImportGapsFromTdx={(dryRun) => tdxGapImportMutation.mutate(dryRun)}
+              onRunStrictPipeline={() => strictPipelineMutation.mutate()}
+              audit={minuteGapAuditMutation.data}
+              importResult={minuteImportMutation.data}
+              vnpyImportResult={vnpyMinuteImportMutation.data}
+              vnpyGapImportResult={vnpyGapImportMutation.data}
+              tushareGapImportResult={tushareGapImportMutation.data}
+              tdxGapImportResult={tdxGapImportMutation.data}
+              strictPipelineResult={strictPipelineMutation.data}
+              isAuditing={minuteGapAuditMutation.isPending}
+              isGeneratingTemplate={minuteGapTemplateMutation.isPending}
+              isGeneratingVendorManifest={minuteVendorManifestMutation.isPending || minuteVendorManifestCsvMutation.isPending}
+              isImporting={minuteImportMutation.isPending}
+              isImportingFromVnpy={vnpyMinuteImportMutation.isPending}
+              isImportingGapsFromVnpy={vnpyGapImportMutation.isPending}
+              isImportingGapsFromTushare={tushareGapImportMutation.isPending}
+              isImportingGapsFromTdx={tdxGapImportMutation.isPending}
+              isRunningStrictPipeline={strictPipelineMutation.isPending}
+              isRunningBacktest={backtestMutation.isPending}
+              error={
+                minuteGapAuditMutation.error ??
+                minuteGapTemplateMutation.error ??
+                minuteVendorManifestMutation.error ??
+                minuteVendorManifestCsvMutation.error ??
+                minuteImportMutation.error ??
+                vnpyMinuteImportMutation.error ??
+                vnpyGapImportMutation.error ??
+                tushareGapImportMutation.error ??
+                tdxGapImportMutation.error ??
+                strictPipelineMutation.error
+              }
+            />
+            <section className="space-y-4">
+              <VnpyStatusPanel data={vnpyStatusQuery.data} isLoading={vnpyStatusQuery.isLoading} />
+              {reportQuery.data && (
+                <BacktestDataQuality data={reportQuery.data.data_quality} limitations={reportQuery.data.limitations} />
+              )}
+            </section>
+          </div>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
@@ -500,16 +561,34 @@ function RecommendationsPanel({
   error,
   items,
   tradeDate,
+  runId,
+  strategyVersion,
+  includedBoards,
+  selectedBoards,
+  onSelectedBoardsChange,
+  status,
+  message,
   syncedCount,
   onRetry,
+  onRunScreen,
+  isRunningScreen,
 }: {
   isLoading: boolean;
   isError: boolean;
   error: unknown;
   items: QuantRecommendation[];
   tradeDate?: string;
+  runId?: number | null;
+  strategyVersion?: string;
+  includedBoards?: string[];
+  selectedBoards: string[];
+  onSelectedBoardsChange: (boards: string[]) => void;
+  status?: string;
+  message?: string;
   syncedCount: number;
   onRetry: () => void;
+  onRunScreen: () => void;
+  isRunningScreen: boolean;
 }) {
   if (isLoading) return <LoadingState rows={6} />;
   if (isError) {
@@ -521,21 +600,35 @@ function RecommendationsPanel({
     );
   }
 
+  const activeBoards = includedBoards?.length ? includedBoards : selectedBoards;
+
   return (
     <section className="rounded-lg border">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
-        <div className="flex items-center gap-2">
-          <ShieldCheck size={16} />
-          <h2 className="text-sm font-semibold">量化候选</h2>
+      <div className="space-y-3 border-b px-4 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <ShieldCheck size={16} />
+            <h2 className="text-sm font-semibold">量化候选</h2>
+          </div>
+          <div className="text-xs text-muted-foreground">
+            {tradeDate ?? "--"} · {runId ? `运行 #${runId}` : "未运行"} · {strategyVersion ?? "--"} · 分组同步 {syncedCount} 只
+          </div>
         </div>
-        <div className="text-xs text-muted-foreground">
-          {tradeDate ?? "--"} · 分组同步 {syncedCount} 只
-        </div>
+        <QuantBoardSelector
+          selectedBoards={selectedBoards}
+          activeBoards={activeBoards}
+          onChange={onSelectedBoardsChange}
+          onRun={onRunScreen}
+          isRunning={isRunningScreen}
+        />
       </div>
       {items.length === 0 ? (
-        <div className="p-4">
-          <EmptyState message="暂无推荐" description="运行筛选后会写入推荐表和量化候选分组。" />
-        </div>
+        <QuantEmptyState
+          status={status}
+          message={message}
+          onRunScreen={onRunScreen}
+          isRunningScreen={isRunningScreen}
+        />
       ) : (
         <Table>
           <TableHeader>
@@ -559,10 +652,7 @@ function RecommendationsPanel({
                 <TableRow key={`${item.trade_date}-${item.vt_symbol}`}>
                   <TableCell className="font-medium tabular-nums">{item.rank}</TableCell>
                   <TableCell>
-                    <Link className="font-medium hover:underline" to={`/stocks/${item.vt_symbol}`}>
-                      {item.name || item.vt_symbol}
-                    </Link>
-                    <div className="text-xs text-muted-foreground">{item.vt_symbol}</div>
+                    <StockIdentityLink name={item.name} vtSymbol={item.vt_symbol} board={item.board} boardLabel={item.board_label} />
                   </TableCell>
                   <TableCell>
                     <span
@@ -596,6 +686,209 @@ function RecommendationsPanel({
   );
 }
 
+function QuantBoardSelector({
+  selectedBoards,
+  activeBoards,
+  onChange,
+  onRun,
+  isRunning,
+}: {
+  selectedBoards: string[];
+  activeBoards: string[];
+  onChange: (boards: string[]) => void;
+  onRun?: () => void;
+  isRunning: boolean;
+}) {
+  const toggleBoard = (board: QuantBoard, checked: boolean) => {
+    const current = new Set(selectedBoards);
+    if (checked) {
+      current.add(board);
+    } else {
+      current.delete(board);
+    }
+    const next = QUANT_BOARD_OPTIONS
+      .map((item) => item.value)
+      .filter((item) => current.has(item));
+    onChange(next.length ? next : ["main"]);
+  };
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm text-muted-foreground">股票池</span>
+        {QUANT_BOARD_OPTIONS.map((option) => (
+          <label key={option.value} className="flex h-8 items-center gap-2 rounded-md border px-2 text-sm">
+            <input
+              type="checkbox"
+              checked={selectedBoards.includes(option.value)}
+              onChange={(event) => toggleBoard(option.value, event.target.checked)}
+            />
+            {option.label}
+          </label>
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-muted-foreground">
+          当前结果: {boardLabels(activeBoards)}
+        </span>
+        {onRun && (
+          <Button size="sm" onClick={onRun} disabled={isRunning}>
+            {isRunning ? <RefreshCw size={15} className="animate-spin" /> : <Play size={15} />}
+            按当前股票池筛选
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function boardLabels(boards: string[]) {
+  const labels = QUANT_BOARD_OPTIONS
+    .filter((option) => boards.includes(option.value))
+    .map((option) => option.label);
+  return labels.length ? labels.join("、") : "主板";
+}
+
+function QuantWorkflowGuide({
+  recommendationLoading,
+  recommendationError,
+  recommendationStatus,
+  recommendationMessage,
+  recommendationCount,
+  backtestCount,
+  holdingsCount,
+  minuteAudit,
+  vnpyStatus,
+}: {
+  recommendationLoading: boolean;
+  recommendationError: boolean;
+  recommendationStatus?: string;
+  recommendationMessage?: string;
+  recommendationCount: number;
+  backtestCount: number;
+  holdingsCount: number;
+  minuteAudit?: MinuteGapAuditResult;
+  vnpyStatus?: VnpyStatus;
+}) {
+  const dataState: "ready" | "warning" | "pending" =
+    recommendationLoading
+      ? "pending"
+      : recommendationError || recommendationStatus === "unavailable"
+        ? "warning"
+        : "ready";
+  const auditReady = minuteAudit?.status === "ready";
+  const steps: Array<{
+    label: string;
+    status: "ready" | "warning" | "pending";
+    value: string;
+    note: string;
+  }> = [
+    {
+      label: "数据",
+      status: dataState,
+      value: dataState === "ready" ? "可筛选" : dataState === "pending" ? "检查中" : "待配置",
+      note: recommendationMessage || "需要本地股票、日线和可选财报/资金流数据。",
+    },
+    {
+      label: "筛选",
+      status: recommendationCount > 0 ? "ready" : "pending",
+      value: recommendationCount > 0 ? `${recommendationCount}只` : "未生成",
+      note: "运行筛选会写入量化推荐表和量化候选持仓分组。",
+    },
+    {
+      label: "回测",
+      status: backtestCount > 0 ? "ready" : "pending",
+      value: backtestCount > 0 ? `${backtestCount}份` : "未运行",
+      note: auditReady ? "分钟缺口已覆盖，可运行严格尾盘回测。" : "没有分钟线时只能做宽松回测或生成缺口清单。",
+    },
+    {
+      label: "模拟",
+      status: holdingsCount > 0 ? "ready" : "pending",
+      value: holdingsCount > 0 ? `${holdingsCount}只` : "空仓",
+      note: "自动建仓只写模拟账户，不会下实盘委托。",
+    },
+    {
+      label: "vn.py",
+      status: vnpyStatus?.status === "ready" ? "ready" : "warning",
+      value: vnpyStatus?.status === "ready" ? "A股就绪" : "部分就绪",
+      note: "A股实盘和实时全市场仍需要安装并配置对应 Gateway/Datafeed。",
+    },
+  ];
+
+  return (
+    <section className="rounded-lg border">
+      <div className="grid divide-y md:grid-cols-5 md:divide-x md:divide-y-0">
+        {steps.map((step) => (
+          <div key={step.label} className="p-2.5" title={step.note}>
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-sm font-medium">{step.label}</div>
+              <WorkflowStatus status={step.status} />
+            </div>
+            <div className="mt-1 text-sm tabular-nums text-muted-foreground">{step.value}</div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function WorkflowStatus({ status }: { status: "ready" | "warning" | "pending" }) {
+  const cls =
+    status === "ready"
+      ? "border-green-200 bg-green-50 text-green-700"
+      : status === "warning"
+        ? "border-amber-200 bg-amber-50 text-amber-700"
+        : "border-gray-200 bg-gray-50 text-gray-600";
+  const text = status === "ready" ? "就绪" : status === "warning" ? "需处理" : "待执行";
+  return <span className={cn("rounded-md border px-2 py-0.5 text-xs", cls)}>{text}</span>;
+}
+
+function QuantEmptyState({
+  status,
+  message,
+  onRunScreen,
+  isRunningScreen,
+}: {
+  status?: string;
+  message?: string;
+  onRunScreen: () => void;
+  isRunningScreen: boolean;
+}) {
+  const unavailable = status === "unavailable";
+  return (
+    <div className="p-4">
+      <div className={cn("rounded-lg border p-4", unavailable ? "border-amber-200 bg-amber-50" : "bg-muted/20")}>
+        <div className="flex items-start gap-3">
+          {unavailable ? <AlertTriangle size={18} className="mt-0.5 text-amber-700" /> : <Database size={18} className="mt-0.5 text-muted-foreground" />}
+          <div className="min-w-0 flex-1">
+            <div className="font-medium">{unavailable ? "量化数据还不能读取" : "还没有量化候选"}</div>
+            <div className="mt-1 text-sm text-muted-foreground">
+              {message || "先运行筛选。系统会基于本地日线、相对大盘强弱、资金/财务辅助因子生成候选。"}
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button size="sm" onClick={onRunScreen} disabled={isRunningScreen || unavailable}>
+                {isRunningScreen ? <RefreshCw size={15} className="animate-spin" /> : <Play size={15} />}
+                运行筛选
+              </Button>
+              <Button asChild size="sm" variant="outline">
+                <Link to="/data">
+                  <Database size={15} />
+                  查看数据状态
+                </Link>
+              </Button>
+            </div>
+            {unavailable && (
+              <div className="mt-3 text-xs text-amber-700">
+                先配置 PostgreSQL 的 DATABASE_URL，并同步股票清单、日线和可选财报/资金流数据。
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function BacktestPanel({
   runs,
   selectedId,
@@ -606,6 +899,7 @@ function BacktestPanel({
   onRun,
   onStrictMinutePreset,
   report,
+  audit,
   isLoading,
   isError,
   onRetry,
@@ -622,6 +916,7 @@ function BacktestPanel({
   onRun: () => void;
   onStrictMinutePreset: () => void;
   report?: Awaited<ReturnType<typeof fetchBacktestReport>>;
+  audit?: Awaited<ReturnType<typeof fetchBacktestAudit>>;
   isLoading: boolean;
   isError: boolean;
   onRetry: () => void;
@@ -637,7 +932,7 @@ function BacktestPanel({
       <div className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
         <div className="flex items-center gap-2">
           <BarChart3 size={16} />
-          <h2 className="text-sm font-semibold">回测表</h2>
+          <h2 className="text-sm font-semibold">回测结果</h2>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button variant="outline" size="sm" onClick={onStrictMinutePreset}>
@@ -677,91 +972,47 @@ function BacktestPanel({
           <EmptyState message="暂无回测报告" description="运行回测后会生成可复查的交易表和指标。" />
         ) : (
           <>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {report.summary_rows.slice(1, 9).map((row) => (
-              <div key={row.key} className="rounded-lg border p-3">
-                <div className="text-xs text-muted-foreground">{row.label}</div>
-                <div className={cn("mt-1 text-lg font-semibold tabular-nums", metricColor(row.key, row.value))}>
-                  {formatMetric(row.key, row.value)}
-                </div>
-              </div>
-            ))}
-          </div>
+            <BacktestSummary report={report} audit={audit} />
 
-          <div className="grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-5">
-            <InfoCell label="样本股票" value={`${report.sample.symbol_count}只`} />
-            <InfoCell label="有效样本" value={`${report.sample.eligible_symbol_count ?? report.sample.symbol_count}只`} />
-            <InfoCell label="日线条数" value={report.sample.bar_count.toLocaleString()} />
-            <InfoCell label="交易日" value={`${report.sample.equity_days}天`} />
-            <InfoCell label="区间" value={`${report.start_date} 至 ${report.end_date}`} />
-            <InfoCell label="本地股票池" value={`${report.sample.universe_stock_count ?? "--"}只`} />
-            <InfoCell label="样本覆盖" value={formatPct(report.sample.coverage_pct)} />
-            <InfoCell label="交易行数" value={`${report.trade_count.toLocaleString()}行`} />
-            <InfoCell label="返回明细" value={`${report.returned_trade_count ?? report.trades.length}行`} />
-            <InfoCell label="闭仓笔数" value={`${report.closed_trade_count ?? report.metrics.trade_count ?? 0}笔`} />
-          </div>
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+              <section className="space-y-4">
+                {report.execution_quality && <BacktestExecutionQualityPanel quality={report.execution_quality} />}
+                <BacktestTradeTable trades={report.trades} />
+              </section>
+              <section className="space-y-4">
+                {report.extended_metrics && <BacktestRealityStats metrics={report.extended_metrics} />}
+                <BacktestSymbolTable rows={report.symbol_performance ?? []} compact />
+              </section>
+            </div>
 
-          {report.extended_metrics && <BacktestRealityStats metrics={report.extended_metrics} />}
-
-          {report.execution_quality && <BacktestExecutionQualityPanel quality={report.execution_quality} />}
-
-          {report.benchmark && <BacktestBenchmarkTable benchmarks={report.benchmark.benchmarks} />}
-
-          {report.period_analysis && <BacktestPeriodTable analysis={report.period_analysis} />}
-
-          {report.regime_analysis && <BacktestRegimeTable analysis={report.regime_analysis} />}
-
-          {report.robustness_checks && <BacktestRobustnessPanel checks={report.robustness_checks} />}
-
-          {selectedId && (
-            <BacktestValidationGridPanel
-              backtestId={selectedId}
-              grid={validationGrid}
-              isLoading={isValidationGridLoading}
-              onRun={onRunValidationGrid}
-            />
-          )}
-
-          <BacktestMonthlyTable rows={report.monthly_returns ?? []} />
-
-          <BacktestSymbolTable rows={report.symbol_performance ?? []} />
-
-          <BacktestWorstTrades rows={report.worst_trades ?? []} />
-
-          {report.order_stats && <BacktestOrderStatsPanel stats={report.order_stats} />}
-
-          <div className="overflow-hidden rounded-lg border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>日期</TableHead>
-                  <TableHead>股票</TableHead>
-                  <TableHead>方向</TableHead>
-                  <TableHead className="text-right">价格</TableHead>
-                  <TableHead className="text-right">数量</TableHead>
-                  <TableHead className="text-right">盈亏</TableHead>
-                  <TableHead>原因</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {report.trades.slice(0, 12).map((trade, index) => (
-                  <TableRow key={`${trade.trade_date}-${trade.vt_symbol}-${index}`}>
-                    <TableCell className="tabular-nums">{trade.trade_date}</TableCell>
-                    <TableCell className="font-medium">{trade.vt_symbol}</TableCell>
-                    <TableCell>{trade.side === "BUY" ? "买入" : "卖出"}</TableCell>
-                    <TableCell className="text-right tabular-nums">{formatPrice(trade.price)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{trade.volume.toLocaleString()}</TableCell>
-                    <TableCell className={cn("text-right tabular-nums", priceColorClass(trade.pnl))}>
-                      {trade.pnl == null ? "--" : formatAmount(trade.pnl)}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">{trade.reason ?? "--"}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-
-          <BacktestDataQuality data={report.data_quality} limitations={report.limitations} />
+            <Tabs defaultValue="validation" className="space-y-3">
+              <TabsList className="h-auto rounded-none bg-transparent p-0">
+                <TabsTrigger value="validation" className="rounded-none px-3 py-2 shadow-none">验证</TabsTrigger>
+                <TabsTrigger value="trades" className="rounded-none px-3 py-2 shadow-none">交易归因</TabsTrigger>
+                <TabsTrigger value="months" className="rounded-none px-3 py-2 shadow-none">收益分段</TabsTrigger>
+              </TabsList>
+              <TabsContent value="validation" className="space-y-4">
+                {report.benchmark && <BacktestBenchmarkTable benchmarks={report.benchmark.benchmarks} />}
+                {report.period_analysis && <BacktestPeriodTable analysis={report.period_analysis} />}
+                {report.regime_analysis && <BacktestRegimeTable analysis={report.regime_analysis} />}
+                {report.robustness_checks && <BacktestRobustnessPanel checks={report.robustness_checks} />}
+                {selectedId && (
+                  <BacktestValidationGridPanel
+                    backtestId={selectedId}
+                    grid={validationGrid}
+                    isLoading={isValidationGridLoading}
+                    onRun={onRunValidationGrid}
+                  />
+                )}
+              </TabsContent>
+              <TabsContent value="trades" className="space-y-4">
+                <BacktestSymbolTable rows={report.symbol_performance ?? []} />
+                <BacktestWorstTrades rows={report.worst_trades ?? []} />
+              </TabsContent>
+              <TabsContent value="months">
+                <BacktestMonthlyTable rows={report.monthly_returns ?? []} />
+              </TabsContent>
+            </Tabs>
           </>
         )}
       </div>
@@ -786,6 +1037,14 @@ function BacktestParamsForm({
 
   return (
     <div className="rounded-lg border p-3">
+      <div className="mb-3 border-b pb-3">
+        <QuantBoardSelector
+          selectedBoards={params.included_boards}
+          activeBoards={params.included_boards}
+          onChange={(included_boards) => onChange({ ...params, included_boards })}
+          isRunning={isRunning}
+        />
+      </div>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
         <label className="text-sm">
           <span className="text-xs text-muted-foreground">开始日期</span>
@@ -856,54 +1115,294 @@ function BacktestParamsForm({
           </Button>
         </div>
       </div>
-      <div className="mt-3 grid gap-3 border-t pt-3 sm:grid-cols-2 lg:grid-cols-5">
-        <label className="flex h-9 items-center gap-2 rounded-md border px-2 text-sm">
-          <input
-            type="checkbox"
-            checked={params.intraday_entry}
-            onChange={(event) => onChange({ ...params, intraday_entry: event.target.checked })}
-          />
-          尝试尾盘分钟入场
-        </label>
-        <label className="flex h-9 items-center gap-2 rounded-md border px-2 text-sm">
-          <input
-            type="checkbox"
-            checked={params.minute_entry_required}
-            onChange={(event) => onChange({ ...params, minute_entry_required: event.target.checked })}
-          />
-          强制分钟成交
-        </label>
-        <label className="text-sm">
-          <span className="text-xs text-muted-foreground">尾盘开始</span>
-          <input
-            className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
-            type="time"
-            value={params.tail_entry_start}
-            onChange={(event) => onChange({ ...params, tail_entry_start: event.target.value })}
-          />
-        </label>
-        <label className="text-sm">
-          <span className="text-xs text-muted-foreground">尾盘结束</span>
-          <input
-            className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
-            type="time"
-            value={params.tail_entry_end}
-            onChange={(event) => onChange({ ...params, tail_entry_end: event.target.value })}
-          />
-        </label>
-        <label className="text-sm">
-          <span className="text-xs text-muted-foreground">MA5允许偏离%</span>
-          <input
-            className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
-            type="number"
-            min={0.1}
-            max={5}
-            step={0.1}
-            value={params.tail_entry_ma5_tolerance_pct}
-            onChange={(event) => setNumber("tail_entry_ma5_tolerance_pct", event.target.value)}
-          />
-        </label>
+      <details className="mt-3 border-t pt-3 text-sm">
+        <summary className="cursor-pointer text-muted-foreground">高级执行设置：尾盘分钟线、强制分钟成交、MA5 偏离</summary>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+          <label className="flex h-9 items-center gap-2 rounded-md border px-2 text-sm">
+            <input
+              type="checkbox"
+              checked={params.intraday_entry}
+              onChange={(event) => onChange({ ...params, intraday_entry: event.target.checked })}
+            />
+            尝试尾盘分钟入场
+          </label>
+          <label className="flex h-9 items-center gap-2 rounded-md border px-2 text-sm">
+            <input
+              type="checkbox"
+              checked={params.minute_entry_required}
+              onChange={(event) => onChange({ ...params, minute_entry_required: event.target.checked })}
+            />
+            强制分钟成交
+          </label>
+          <label className="text-sm">
+            <span className="text-xs text-muted-foreground">尾盘开始</span>
+            <input
+              className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
+              type="time"
+              value={params.tail_entry_start}
+              onChange={(event) => onChange({ ...params, tail_entry_start: event.target.value })}
+            />
+          </label>
+          <label className="text-sm">
+            <span className="text-xs text-muted-foreground">尾盘结束</span>
+            <input
+              className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
+              type="time"
+              value={params.tail_entry_end}
+              onChange={(event) => onChange({ ...params, tail_entry_end: event.target.value })}
+            />
+          </label>
+          <label className="text-sm">
+            <span className="text-xs text-muted-foreground">MA5允许偏离%</span>
+            <input
+              className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
+              type="number"
+              min={0.1}
+              max={5}
+              step={0.1}
+              value={params.tail_entry_ma5_tolerance_pct}
+              onChange={(event) => setNumber("tail_entry_ma5_tolerance_pct", event.target.value)}
+            />
+          </label>
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function BacktestSummary({
+  report,
+  audit,
+}: {
+  report: Awaited<ReturnType<typeof fetchBacktestReport>>;
+  audit?: Awaited<ReturnType<typeof fetchBacktestAudit>>;
+}) {
+  return (
+    <div className="space-y-4">
+      <BacktestTrustPanel report={report} />
+      <BacktestMethodPanel report={report} audit={audit} />
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {report.summary_rows.slice(1, 9).map((row) => (
+          <div key={row.key} className="rounded-lg border p-3">
+            <div className="text-xs text-muted-foreground">{row.label}</div>
+            <div className={cn("mt-1 text-lg font-semibold tabular-nums", metricColor(row.key, row.value))}>
+              {formatMetric(row.key, row.value)}
+            </div>
+          </div>
+        ))}
       </div>
+      <div className="grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-5">
+        <InfoCell label="样本股票" value={`${report.sample.symbol_count}只`} />
+        <InfoCell label="有效样本" value={`${report.sample.eligible_symbol_count ?? report.sample.symbol_count}只`} />
+        <InfoCell label="交易日" value={`${report.sample.equity_days}天`} />
+        <InfoCell label="区间" value={`${report.start_date} 至 ${report.end_date}`} />
+        <InfoCell label="闭仓笔数" value={`${report.closed_trade_count ?? report.metrics.trade_count ?? 0}笔`} />
+      </div>
+    </div>
+  );
+}
+
+function BacktestTrustPanel({
+  report,
+}: {
+  report: Awaited<ReturnType<typeof fetchBacktestReport>>;
+}) {
+  const verdict = backtestTrustVerdict(report);
+  return (
+    <div
+      className={cn(
+        "rounded-lg border p-3 text-sm",
+        verdict.status === "invalid" && "border-red-200 bg-red-50",
+        verdict.status === "warning" && "border-amber-200 bg-amber-50",
+        verdict.status === "pass" && "border-green-200 bg-green-50"
+      )}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2 font-medium">
+            {verdict.status === "pass" ? <ShieldCheck size={15} /> : <AlertTriangle size={15} />}
+            {verdict.title}
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">{verdict.description}</div>
+        </div>
+        <span className={cn("rounded-md border bg-background px-2 py-1 text-xs", verdict.status === "invalid" ? "text-fall" : verdict.status === "pass" ? "text-rise" : "text-amber-700")}>
+          {verdict.label}
+        </span>
+      </div>
+
+      <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+        <InfoCell label="撮合版本" value={report.strategy_version} />
+        <InfoCell label="买入方式" value={verdict.entryMode} />
+        <InfoCell label="尾盘成交占比" value={formatPct(report.execution_quality?.minute_tail_entry_ratio)} />
+        <InfoCell label="开盘回退占比" value={formatPct(report.execution_quality?.daily_open_fallback_ratio)} />
+        <InfoCell label="闭仓笔数" value={`${report.closed_trade_count ?? report.metrics.trade_count ?? 0}笔`} />
+      </div>
+
+      {verdict.items.length > 0 && (
+        <ul className="mt-3 space-y-1 text-xs text-muted-foreground">
+          {verdict.items.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function BacktestMethodPanel({
+  report,
+  audit,
+}: {
+  report: Awaited<ReturnType<typeof fetchBacktestReport>>;
+  audit?: Awaited<ReturnType<typeof fetchBacktestAudit>>;
+}) {
+  const method = report.method ?? audit?.method;
+  return (
+    <div className="rounded-lg border p-3 text-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 font-medium">
+          <FileText size={15} />
+          回测方法
+        </div>
+        <span className="text-xs text-muted-foreground">
+          {report.strategy_id} / {report.strategy_version}
+        </span>
+      </div>
+      <div className="mt-3 grid gap-2 md:grid-cols-2">
+        <InfoCell label="候选生成" value={method?.signal_timing ?? report.assumptions.candidate_generation} />
+        <InfoCell label="执行时点" value={method?.execution_timing ?? report.assumptions.execution} />
+        <InfoCell label="股票池" value={method?.universe ?? `${report.sample.symbol_count} 只样本`} />
+        <InfoCell label="候选口径" value={method?.candidate_policy ?? "历史逐日动态候选"} />
+      </div>
+      {audit?.note && <div className="mt-3 rounded-md border bg-muted/30 p-2 text-xs text-muted-foreground">{audit.note}</div>}
+    </div>
+  );
+}
+
+function BacktestTradeTable({ trades }: { trades: Awaited<ReturnType<typeof fetchBacktestReport>>["trades"] }) {
+  return (
+    <div className="overflow-hidden rounded-lg border">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b px-3 py-2">
+        <div className="text-sm font-medium">最近买卖点</div>
+      </div>
+      {trades.length === 0 ? (
+        <div className="p-3 text-sm text-muted-foreground">当前回测没有成交记录。</div>
+      ) : (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>日期</TableHead>
+              <TableHead>股票</TableHead>
+              <TableHead>方向</TableHead>
+              <TableHead className="text-right">价格</TableHead>
+              <TableHead className="text-right">数量</TableHead>
+              <TableHead className="text-right">盈亏</TableHead>
+              <TableHead>原因</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {trades.slice(0, 12).map((trade, index) => (
+              <TableRow key={`${trade.trade_date}-${trade.vt_symbol}-${index}`}>
+                <TableCell className="tabular-nums">{trade.trade_date}</TableCell>
+                <TableCell>
+                  <StockIdentityLink name={trade.name} vtSymbol={trade.vt_symbol} board={trade.board} boardLabel={trade.board_label} />
+                </TableCell>
+                <TableCell>{trade.side === "BUY" ? "买入" : "卖出"}</TableCell>
+                <TableCell className="text-right tabular-nums">{formatPrice(trade.price)}</TableCell>
+                <TableCell className="text-right tabular-nums">{trade.volume.toLocaleString()}</TableCell>
+                <TableCell className={cn("text-right tabular-nums", priceColorClass(trade.pnl))}>
+                  {trade.pnl == null ? "--" : formatAmount(trade.pnl)}
+                </TableCell>
+                <TableCell className="text-muted-foreground">{trade.reason ?? "--"}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
+    </div>
+  );
+}
+
+function BacktestLogWorkspace({
+  report,
+  audit,
+  isLoading,
+}: {
+  report?: Awaited<ReturnType<typeof fetchBacktestReport>>;
+  audit?: Awaited<ReturnType<typeof fetchBacktestAudit>>;
+  isLoading: boolean;
+}) {
+  if (isLoading) return <LoadingState rows={5} />;
+  if (!report && !audit) {
+    return <EmptyState message="暂无策略日志" description="先运行或选择一份回测，再检查每天的订单、成交和拒绝原因。" />;
+  }
+
+  return (
+    <section className="space-y-4">
+      <div className="rounded-lg border p-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <h2 className="text-sm font-semibold">策略日志</h2>
+          {report && (
+            <div className="grid grid-cols-3 gap-4 text-sm">
+              <InfoCell label="交易行数" value={`${report.trade_count.toLocaleString()}行`} />
+              <InfoCell label="返回明细" value={`${report.returned_trade_count ?? report.trades.length}行`} />
+              <InfoCell label="闭仓笔数" value={`${report.closed_trade_count ?? report.metrics.trade_count ?? 0}笔`} />
+            </div>
+          )}
+        </div>
+      </div>
+      {audit?.order_summary && <BacktestOrderStatsPanel stats={audit.order_summary} />}
+      {audit && <BacktestAuditPanel audit={audit} />}
+    </section>
+  );
+}
+
+function BacktestAuditPanel({
+  audit,
+}: {
+  audit: Awaited<ReturnType<typeof fetchBacktestAudit>>;
+}) {
+  const events = audit.events ?? [];
+  return (
+    <div className="overflow-hidden rounded-lg border">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b px-3 py-2">
+        <div className="text-sm font-medium">订单审计</div>
+        <span className="text-xs text-muted-foreground">
+          订单 {audit.orders.length} · 成交 {audit.trades.length}
+        </span>
+      </div>
+      {events.length === 0 ? (
+        <div className="p-3 text-sm text-muted-foreground">
+          当前报告没有订单事件。若是单股回测，通常表示该股在区间内没有满足入场分或严格入场条件。
+        </div>
+      ) : (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>日期</TableHead>
+              <TableHead>股票</TableHead>
+              <TableHead>事件</TableHead>
+              <TableHead>执行</TableHead>
+              <TableHead className="text-right">价格</TableHead>
+              <TableHead>说明</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {events.slice(0, 16).map((event, index) => (
+              <TableRow key={`${event.trade_date}-${event.vt_symbol}-${event.event_type}-${index}`}>
+                <TableCell className="tabular-nums">{event.trade_date}</TableCell>
+                <TableCell>
+                  <StockIdentityLink name={event.name} vtSymbol={event.vt_symbol} board={event.board} boardLabel={event.board_label} />
+                </TableCell>
+                <TableCell>{eventLabel(event)}</TableCell>
+                <TableCell className="text-muted-foreground">{executionModeLabel(event.execution_mode)}</TableCell>
+                <TableCell className="text-right tabular-nums">{formatPrice(event.price)}</TableCell>
+                <TableCell className="max-w-[520px] text-muted-foreground">{event.message ?? event.reason ?? "--"}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
     </div>
   );
 }
@@ -1508,8 +2007,10 @@ function BacktestMonthlyTable({ rows }: { rows: NonNullable<Awaited<ReturnType<t
 
 function BacktestSymbolTable({
   rows,
+  compact = false,
 }: {
   rows: NonNullable<Awaited<ReturnType<typeof fetchBacktestReport>>["symbol_performance"]>;
+  compact?: boolean;
 }) {
   if (rows.length === 0) return null;
   return (
@@ -1527,9 +2028,11 @@ function BacktestSymbolTable({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {rows.slice(0, 12).map((row) => (
+          {rows.slice(0, compact ? 6 : 12).map((row) => (
             <TableRow key={row.vt_symbol}>
-              <TableCell className="font-medium">{row.vt_symbol}</TableCell>
+              <TableCell>
+                <StockIdentityLink name={row.name} vtSymbol={row.vt_symbol} board={row.board} boardLabel={row.board_label} />
+              </TableCell>
               <TableCell className="text-right tabular-nums">{row.trade_count}</TableCell>
               <TableCell className="text-right tabular-nums">{formatPct(row.win_rate * 100)}</TableCell>
               <TableCell className={cn("text-right tabular-nums", priceColorClass(row.pnl))}>
@@ -1545,6 +2048,9 @@ function BacktestSymbolTable({
           ))}
         </TableBody>
       </Table>
+      {compact && rows.length > 6 && (
+        <div className="border-t px-3 py-2 text-xs text-muted-foreground">更多个股贡献在“交易归因”页签查看。</div>
+      )}
     </div>
   );
 }
@@ -1568,7 +2074,9 @@ function BacktestWorstTrades({ rows }: { rows: BacktestClosedTrade[] }) {
         <TableBody>
           {rows.slice(0, 10).map((row, index) => (
             <TableRow key={`${row.vt_symbol}-${row.exit_date}-${index}`}>
-              <TableCell className="font-medium">{row.vt_symbol}</TableCell>
+              <TableCell>
+                <StockIdentityLink name={row.name} vtSymbol={row.vt_symbol} board={row.board} boardLabel={row.board_label} />
+              </TableCell>
               <TableCell className="text-muted-foreground">
                 {row.entry_date ?? "--"} / {row.exit_date ?? "--"}
               </TableCell>
@@ -1609,6 +2117,32 @@ function BacktestOrderStatsPanel({
               {reason}: {count}
             </span>
           ))}
+        </div>
+      )}
+      {stats.rejected_examples.length > 0 && (
+        <div className="mt-3 overflow-hidden rounded-md border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>日期</TableHead>
+                <TableHead>股票</TableHead>
+                <TableHead>方向</TableHead>
+                <TableHead>原因</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {stats.rejected_examples.slice(0, 5).map((row, index) => (
+                <TableRow key={`${row.trade_date}-${row.vt_symbol}-${index}`}>
+                  <TableCell className="tabular-nums">{row.trade_date}</TableCell>
+                  <TableCell>
+                    <StockIdentityLink name={row.name} vtSymbol={row.vt_symbol} board={row.board} boardLabel={row.board_label} />
+                  </TableCell>
+                  <TableCell>{row.side === "BUY" ? "买入" : "卖出"}</TableCell>
+                  <TableCell className="text-muted-foreground">{row.reason ?? "--"}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
         </div>
       )}
     </div>
@@ -1659,6 +2193,8 @@ function HoldingsPanel({
   items: Array<{
     vt_symbol: string;
     name?: string | null;
+    board?: string | null;
+    board_label?: string | null;
     volume: number;
     cost_price: number;
     last_price?: number | null;
@@ -1695,7 +2231,12 @@ function HoldingsPanel({
           <Briefcase size={16} />
           <h2 className="text-sm font-semibold">模拟持仓</h2>
         </div>
-        <span className="text-xs text-muted-foreground">{accountCount} 个账户</span>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-muted-foreground">{accountCount} 个账户</span>
+          <Button asChild size="sm" variant="outline">
+            <Link to="/portfolio">打开持仓</Link>
+          </Button>
+        </div>
       </div>
       <div className="grid grid-cols-3 gap-2 border-b p-4 text-sm">
         <InfoCell label="现金" value={formatAmount(cash)} />
@@ -1711,11 +2252,9 @@ function HoldingsPanel({
           {items.map((item) => (
             <div key={item.vt_symbol} className="px-4 py-3">
               <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <Link className="font-medium hover:underline" to={`/stocks/${item.vt_symbol}`}>
-                    {item.name || item.vt_symbol}
-                  </Link>
-                  <div className="text-xs text-muted-foreground">{item.vt_symbol} · {item.source}</div>
+                <div>
+                  <StockIdentityLink name={item.name} vtSymbol={item.vt_symbol} board={item.board} boardLabel={item.board_label} />
+                  <div className="text-xs text-muted-foreground">{item.source}</div>
                 </div>
                 <div className={cn("text-right text-sm font-medium tabular-nums", priceColorClass(item.floating_pnl_pct))}>
                   {formatPct(item.floating_pnl_pct)}
@@ -1749,19 +2288,6 @@ function HoldingsPanel({
           ))}
         </div>
       )}
-    </section>
-  );
-}
-
-function RiskNotes() {
-  return (
-    <section className="rounded-lg border p-4 text-sm">
-      <h2 className="text-sm font-semibold">当前边界</h2>
-      <ul className="mt-3 space-y-2 text-muted-foreground">
-        <li>分钟线不足时，尾盘低吸会标记为缺口或回退成交。</li>
-        <li>自动建仓只写入模拟账户，不连接券商。</li>
-        <li>本地数据样本不足时，回测结果不能外推到全 A。</li>
-      </ul>
     </section>
   );
 }
@@ -1805,7 +2331,6 @@ function MinuteDataPanel({
   onVendorManifestCsv,
   onDryRun,
   onImport,
-  onRunStrictBacktest,
   onVnpyParamsChange,
   onImportFromVnpy,
   onImportGapsFromVnpy,
@@ -1856,7 +2381,6 @@ function MinuteDataPanel({
   onVendorManifestCsv: () => void;
   onDryRun: () => void;
   onImport: () => void;
-  onRunStrictBacktest: () => void;
   onVnpyParamsChange: (value: { vt_symbol: string; start: string; end: string; dry_run: boolean }) => void;
   onImportFromVnpy: () => void;
   onImportGapsFromVnpy: (dryRun: boolean) => void;
@@ -1865,9 +2389,9 @@ function MinuteDataPanel({
   onRunStrictPipeline: () => void;
 }) {
   const [fileError, setFileError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
   const canAudit = Boolean(gapCsv.trim() || gapFilePath.trim());
   const canImport = Boolean(importCsv.trim() || importFilePath.trim());
-  const strictBacktestReady = audit?.status === "ready";
   const loadCsvFile = (file: File | undefined, onLoad: (value: string) => void) => {
     if (!file) return;
     const reader = new FileReader();
@@ -1884,8 +2408,9 @@ function MinuteDataPanel({
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <ClipboardCheck size={16} />
-          <h2 className="text-sm font-semibold">分钟线补数</h2>
+          <h2 className="text-sm font-semibold">严格分钟补数</h2>
         </div>
+        <div className="flex items-center gap-2">
         {audit && (
           <span
             className={cn(
@@ -1896,9 +2421,28 @@ function MinuteDataPanel({
             {audit.status === "ready" ? "覆盖完成" : "仍有缺口"}
           </span>
         )}
+          <Button size="sm" variant="outline" onClick={() => setExpanded((value) => !value)}>
+            {expanded ? "收起" : "展开"}
+          </Button>
+        </div>
       </div>
+      {!expanded && (
+        <div className="mt-3 grid grid-cols-2 gap-2 border-t pt-3">
+          <InfoCell label="缺口状态" value={audit?.status ?? "未审计"} />
+          <InfoCell label="覆盖率" value={formatPct(audit?.coverage_pct)} />
+          <InfoCell label="缺口" value={audit?.gap_count == null ? "--" : `${audit.gap_count}个`} />
+          <InfoCell label="缺失" value={audit?.missing_count == null ? "--" : `${audit.missing_count}个`} />
+        </div>
+      )}
+
+      {expanded && (
 
       <div className="mt-3 space-y-3">
+        <MinuteStep
+          number="1"
+          title="先拿到缺口清单"
+          description="严格尾盘回测会记录哪些股票在 D+1 尾盘缺少 1 分钟线。这里先导入或填写这份缺口 CSV。"
+        />
         <label className="block">
           <span className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
             严格尾盘缺口 CSV
@@ -1940,11 +2484,11 @@ function MinuteDataPanel({
           </Button>
           <Button size="sm" variant="outline" onClick={onVendorManifest} disabled={!canAudit || isGeneratingVendorManifest}>
             {isGeneratingVendorManifest ? <RefreshCw size={15} className="animate-spin" /> : <ClipboardCheck size={15} />}
-            补数清单
+            预览补数清单
           </Button>
           <Button size="sm" variant="outline" onClick={onVendorManifestCsv} disabled={!canAudit || isGeneratingVendorManifest}>
             {isGeneratingVendorManifest ? <RefreshCw size={15} className="animate-spin" /> : <Download size={15} />}
-            清单CSV
+            导出补数清单
           </Button>
         </div>
 
@@ -1978,13 +2522,9 @@ function MinuteDataPanel({
         )}
         {audit && (
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" onClick={onRunStrictBacktest} disabled={!strictBacktestReady || isRunningBacktest}>
-              {isRunningBacktest ? <RefreshCw size={15} className="animate-spin" /> : <BarChart3 size={15} />}
-              运行严格分钟回测
-            </Button>
-            <Button size="sm" variant="outline" onClick={onRunStrictPipeline} disabled={!canAudit || isRunningStrictPipeline}>
+            <Button size="sm" onClick={onRunStrictPipeline} disabled={!canAudit || isRunningStrictPipeline || isRunningBacktest}>
               {isRunningStrictPipeline ? <RefreshCw size={15} className="animate-spin" /> : <ShieldCheck size={15} />}
-              严格流水线
+              审计并运行严格回测
             </Button>
           </div>
         )}
@@ -2015,6 +2555,11 @@ function MinuteDataPanel({
           </label>
         )}
 
+        <MinuteStep
+          number="2"
+          title="补齐分钟线"
+          description="可从外部 CSV、vn.py 数据库、TDX 公开源或 Tushare Pro 回填。建议先预检查，再正式导入。"
+        />
         <label className="block border-t pt-3">
           <span className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
             外部分钟线 CSV
@@ -2246,7 +2791,9 @@ function MinuteDataPanel({
                 <TableBody>
                   {audit.missing_examples.slice(0, 8).map((row) => (
                     <TableRow key={`${row.vt_symbol}-${row.trade_date}`}>
-                      <TableCell>{row.vt_symbol}</TableCell>
+                      <TableCell>
+                        <StockIdentityLink vtSymbol={row.vt_symbol} />
+                      </TableCell>
                       <TableCell>{row.trade_date}</TableCell>
                       <TableCell className="text-right tabular-nums">{row.minute_bar_count}</TableCell>
                     </TableRow>
@@ -2257,9 +2804,15 @@ function MinuteDataPanel({
           </div>
         )}
 
+        <MinuteStep
+          number="3"
+          title="复审后再跑严格回测"
+          description="导入后重新审计缺口。只有覆盖率为 100% 时，严格流水线才会生成真实尾盘分钟成交回测。"
+        />
         {fileError ? <div className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-fall">{fileError}</div> : null}
         {error ? <div className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-fall">{String(error)}</div> : null}
       </div>
+      )}
     </section>
   );
 }
@@ -2292,6 +2845,20 @@ function VnpyStatusPanel({ data, isLoading }: { data?: VnpyStatus; isLoading: bo
         </div>
       )}
     </section>
+  );
+}
+
+function MinuteStep({ number, title, description }: { number: string; title: string; description: string }) {
+  return (
+    <div className="flex gap-3 rounded-lg border bg-muted/20 p-3">
+      <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border bg-background text-xs font-medium">
+        {number}
+      </div>
+      <div className="min-w-0">
+        <div className="font-medium">{title}</div>
+        <div className="mt-1 text-xs leading-5 text-muted-foreground">{description}</div>
+      </div>
+    </div>
   );
 }
 
@@ -2351,6 +2918,78 @@ function formatMetric(key: string, value: number | null) {
   return value.toFixed(2);
 }
 
+function backtestTrustVerdict(report: Awaited<ReturnType<typeof fetchBacktestReport>>) {
+  const legacy = compareVersions(report.strategy_version, MIN_TRUSTED_BACKTEST_VERSION) < 0;
+  const quality = report.execution_quality;
+  const buyCount = quality?.buy_count ?? 0;
+  const minuteRatio = quality?.minute_tail_entry_ratio ?? 0;
+  const fallbackRatio = quality?.daily_open_fallback_ratio ?? 0;
+  const items: string[] = [];
+
+  if (legacy) {
+    items.push("旧版本卖出撮合存在时间顺序风险：收盘触发条件可能按当天开盘成交，历史结果不要用于判断策略有效性。");
+  }
+  if (buyCount === 0) {
+    items.push("这份报告没有买入成交，只能检查数据和筛选流程，不能统计策略胜率。");
+  }
+  if (buyCount > 0 && fallbackRatio >= 80) {
+    items.push("多数买入是 D+1 开盘回退，不是你想要的尾盘接近 5 日线真实分钟成交。");
+  }
+  if (buyCount > 0 && minuteRatio < 80) {
+    items.push("严格验证尾盘低吸前，需要补齐分钟线并使用“严格分钟预设”。");
+  }
+
+  if (legacy) {
+    return {
+      status: "invalid" as const,
+      label: "需重跑",
+      title: "这份旧回测不能信",
+      description: "当前结果来自旧撮合版本，先重新运行回测再看收益、胜率和个股归因。",
+      entryMode: "旧版撮合",
+      items,
+    };
+  }
+  if (buyCount > 0 && fallbackRatio >= 80) {
+    return {
+      status: "warning" as const,
+      label: "宽松模拟",
+      title: "结果只能当日线近似",
+      description: "卖出撮合已按下一交易日开盘处理，但买入大多没有分钟线成交证据。",
+      entryMode: "D+1 开盘回退",
+      items,
+    };
+  }
+  if (quality?.status === "pass") {
+    return {
+      status: "pass" as const,
+      label: "可复核",
+      title: "撮合顺序和分钟覆盖通过",
+      description: "买卖时点没有同日未来函数，买入主要由尾盘分钟规则成交。",
+      entryMode: "尾盘分钟成交",
+      items,
+    };
+  }
+  return {
+    status: "warning" as const,
+    label: "需复核",
+    title: "结果需要结合日志复核",
+    description: "撮合版本已更新，但样本、分钟线或财报覆盖仍可能影响结论。",
+    entryMode: buyCount > 0 ? "混合成交" : "无成交",
+    items,
+  };
+}
+
+function compareVersions(left: string, right: string) {
+  const leftParts = left.split(".").map((item) => Number(item) || 0);
+  const rightParts = right.split(".").map((item) => Number(item) || 0);
+  const length = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const diff = (leftParts[index] ?? 0) - (rightParts[index] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
 function metricColor(key: string, value: number | null) {
   if (value == null) return "";
   if (key === "max_drawdown_pct") return "text-fall";
@@ -2368,4 +3007,20 @@ function robustnessStatus(status: string) {
 function formatRobustnessValue(value: number | null | undefined, valueType?: string) {
   if (valueType === "count") return value == null ? "--" : value.toLocaleString();
   return formatPct(value);
+}
+
+function eventLabel(event: { event_type: string; side?: string; status?: string }) {
+  const side = event.side === "BUY" ? "买入" : event.side === "SELL" ? "卖出" : event.side ?? "--";
+  if (event.event_type === "trade") return `${side}成交`;
+  if (event.status === "filled") return `${side}订单成交`;
+  if (event.status === "rejected") return `${side}订单拒绝`;
+  return `${side}订单`;
+}
+
+function executionModeLabel(mode?: string | null) {
+  if (mode === "minute_tail_ma5") return "尾盘分钟";
+  if (mode === "daily_next_open") return "次日开盘";
+  if (mode === "daily_next_open_fallback") return "开盘回退";
+  if (mode === "minute_tail_ma5_required") return "严格分钟";
+  return mode || "--";
 }

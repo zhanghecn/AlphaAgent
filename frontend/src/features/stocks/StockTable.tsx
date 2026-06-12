@@ -34,6 +34,7 @@ import {
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { EmptyState } from "@/components/EmptyState";
+import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { Search, ArrowUpDown, ArrowUp, ArrowDown, ChevronLeft, ChevronRight, Database, Radio } from "lucide-react";
 
 export function StockTable() {
@@ -93,16 +94,16 @@ export function StockTable() {
       {
         accessorKey: "name",
         header: "名称",
-        cell: ({ getValue, row }) => (
-          <button
-            type="button"
-            className="text-left hover:underline font-medium"
-            onClick={() => navigate(`/stocks/${row.original.vt_symbol}`)}
-          >
-            {getValue() as string}
-          </button>
+        cell: ({ row }) => (
+          <StockIdentityLink
+            name={row.original.name}
+            vtSymbol={row.original.vt_symbol}
+            board={row.original.board}
+            boardLabel={row.original.board_label}
+            link={false}
+          />
         ),
-        size: 100,
+        size: 150,
       },
       {
         accessorKey: "exchange",

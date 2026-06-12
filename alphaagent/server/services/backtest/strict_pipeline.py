@@ -124,6 +124,8 @@ def _strict_params(params: BacktestParams) -> BacktestParams:
         tail_entry_start=params.tail_entry_start,
         tail_entry_end=params.tail_entry_end,
         tail_entry_ma5_tolerance_pct=params.tail_entry_ma5_tolerance_pct,
+        symbols=params.symbols,
+        included_boards=params.included_boards,
         persist=True,
     )
 
@@ -133,4 +135,6 @@ def _params_payload(params: BacktestParams) -> dict[str, Any]:
     for key, value in list(result.items()):
         if isinstance(value, date):
             result[key] = value.isoformat()
+        elif isinstance(value, tuple):
+            result[key] = list(value)
     return result

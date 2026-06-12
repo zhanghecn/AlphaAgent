@@ -1,0 +1,6 @@
+.env
+data/
+vntrader/
+postgres_data/
+redis_data/
+*.log

@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import and_, desc, select
 
+from alphaagent.market.boards import stock_board_payload
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
 from alphaagent.server.services.quant.factors import STRATEGY_VERSION
@@ -507,6 +508,9 @@ def _resolve_volume(payload: dict[str, Any], price: float) -> int:
 
 def _mapping_to_api(row: dict[str, Any]) -> dict[str, Any]:
     result = dict(row)
+    vt_symbol = result.get("vt_symbol")
+    if vt_symbol:
+        result.update(stock_board_payload(vt_symbol))
     for key, value in list(result.items()):
         if hasattr(value, "isoformat"):
             result[key] = value.isoformat()

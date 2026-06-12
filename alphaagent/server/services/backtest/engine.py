@@ -17,6 +17,13 @@ from typing import Any
 from sqlalchemy import and_, desc, func, select
 
 from alphaagent.data_sources.akshare_adapter import AkShareAdapter
+from alphaagent.market.boards import (
+    DEFAULT_QUANT_INCLUDED_BOARDS,
+    included_board_labels,
+    normalize_included_boards,
+    stock_board,
+    stock_board_payload,
+)
 from alphaagent.market.symbols import INDEX_SYMBOLS
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
@@ -56,6 +63,11 @@ class BacktestParams:
     tail_entry_end: str = "14:57"
     tail_entry_ma5_tolerance_pct: float = 1.5
     persist: bool = False
+    symbols: list[str] | None = None
+    included_boards: tuple[str, ...] = DEFAULT_QUANT_INCLUDED_BOARDS
+
+    def __post_init__(self) -> None:
+        self.included_boards = normalize_included_boards(self.included_boards)
 
 
 @dataclass(frozen=True)
@@ -111,7 +123,7 @@ def run_backtest(params: BacktestParams) -> dict[str, Any]:
         end = params.end or session.execute(select(func.max(schema.stock_daily_bars.c.trade_date))).scalar()
         if end is None:
             return {"status": "empty", "message": "stock_daily_bars is empty"}
-        vt_symbols = _load_symbol_universe(session, params.max_symbols)
+        vt_symbols = _load_symbol_universe(session, params.max_symbols, params.symbols, params.included_boards)
         if not vt_symbols:
             return {"status": "empty", "message": "stocks is empty"}
         bars_by_symbol = _load_all_bars(session, vt_symbols, params.start, end)
@@ -135,12 +147,7 @@ def run_backtest(params: BacktestParams) -> dict[str, Any]:
         "equity": run["equity"],
         "trades": run["trades"],
         "orders": run["orders"],
-        "assumptions": {
-            "execution": "D close signal; D+1 tail-window minute fill when stock_minute_bars is available, otherwise D+1 open fallback unless minute_entry_required=true",
-            "tail_entry_window": f"{params.tail_entry_start}-{params.tail_entry_end}",
-            "minute_entry_required": params.minute_entry_required,
-            "data_as_of_policy": "daily bars only; financial data requires publish_date",
-        },
+        "assumptions": _backtest_assumptions(params),
     }
 
 
@@ -244,6 +251,10 @@ def backtest_report(backtest_id: int, trade_limit: int = 50) -> dict[str, Any]:
             )
             .order_by(schema.stock_daily_bars.c.vt_symbol, schema.stock_daily_bars.c.trade_date)
         ).mappings().all()
+        trade_dicts = [dict(row) for row in trades]
+        all_trade_dicts = [dict(row) for row in all_trades]
+        order_dicts = [dict(row) for row in orders]
+        stock_names = _load_stock_names(session, _symbols_from_rows(trade_dicts, all_trade_dicts, order_dicts))
 
     metrics = dict(run.get("metrics") or {})
     sample_payload = dict(sample)
@@ -251,8 +262,9 @@ def backtest_report(backtest_id: int, trade_limit: int = 50) -> dict[str, Any]:
     sample_payload["eligible_symbol_count"] = int(eligible_symbol_count or 0)
     sample_payload["universe_stock_count"] = int(total_stock_count or 0)
     sample_payload["coverage_pct"] = _ratio_pct(sample_payload.get("symbol_count"), total_stock_count)
-    all_trade_dicts = [dict(row) for row in all_trades]
-    order_dicts = [dict(row) for row in orders]
+    trade_dicts = _with_stock_names(trade_dicts, stock_names)
+    all_trade_dicts = _with_stock_names(all_trade_dicts, stock_names)
+    order_dicts = _with_stock_names(order_dicts, stock_names)
     equity_dicts = [dict(row) for row in equity]
     sample_bar_dicts = [dict(row) for row in sample_bars]
     closed_trades = _closed_trades(all_trade_dicts)
@@ -271,6 +283,7 @@ def backtest_report(backtest_id: int, trade_limit: int = 50) -> dict[str, Any]:
         sample_benchmark_curve,
     )
     execution_quality = _execution_quality_report(metrics, extended_metrics, data_quality, sample_payload)
+    params = _params_from_run(dict(run))
     return {
         "status": "ready",
         "backtest_id": backtest_id,
@@ -282,9 +295,9 @@ def backtest_report(backtest_id: int, trade_limit: int = 50) -> dict[str, Any]:
         "metrics": metrics,
         "extended_metrics": extended_metrics,
         "summary_rows": _metric_rows(metrics),
-        "trades": [_mapping_to_api(dict(row)) for row in trades],
+        "trades": [_mapping_to_api(row) for row in trade_dicts],
         "trade_count": len(all_trade_dicts),
-        "returned_trade_count": len(trades),
+        "returned_trade_count": len(trade_dicts),
         "closed_trades": closed_trades[: min(max(trade_limit, 1), 500)],
         "closed_trade_count": len(closed_trades),
         "monthly_returns": _monthly_returns(equity_dicts),
@@ -298,13 +311,8 @@ def backtest_report(backtest_id: int, trade_limit: int = 50) -> dict[str, Any]:
         "robustness_checks": robustness_checks,
         "execution_quality": execution_quality,
         "data_quality": data_quality,
-        "assumptions": {
-            "execution": "D close signal; D+1 tail-window minute fill when stock_minute_bars is available, otherwise D+1 open fallback unless minute_entry_required=true",
-            "tail_entry": "uses prior visible daily MA5 and the configured intraday window; no same-day close look-ahead",
-            "costs": "commission, stamp tax on sells, and slippage are included",
-            "positioning": "equal cash budget per position, 100-share lot rounded",
-            "turnover": "turnover_pct uses traded notional divided by initial cash",
-        },
+        "method": _backtest_method(params),
+        "assumptions": _backtest_assumptions(params),
         "limitations": [
             "当前本地样本不是全 A，只能作为小样本真实日线模拟。",
             "分钟线只覆盖已同步股票和日期；未覆盖订单会在 raw.execution.mode 中标记为 daily_next_open_fallback，除非 minute_entry_required=true。",
@@ -374,7 +382,7 @@ def backtest_validation_grid(backtest_id: int, max_variants: int = 54) -> dict[s
 
         base_params = _params_from_run(dict(run))
         end = _as_date(run["end_date"]) or base_params.end or date.today()
-        vt_symbols = _load_symbol_universe(session, base_params.max_symbols)
+        vt_symbols = _load_symbol_universe(session, base_params.max_symbols, base_params.symbols, base_params.included_boards)
         if not vt_symbols:
             return {"status": "empty", "message": "stocks is empty"}
         bars_by_symbol = _load_all_bars(session, vt_symbols, base_params.start, end)
@@ -411,7 +419,9 @@ def backtest_trades(backtest_id: int, limit: int = 500) -> dict[str, Any]:
             .order_by(schema.backtest_trades.c.trade_date, schema.backtest_trades.c.id)
             .limit(min(max(limit, 1), 2000))
         ).mappings().all()
-    return {"status": "ready" if rows else "empty", "items": [_mapping_to_api(dict(row)) for row in rows]}
+        row_dicts = [dict(row) for row in rows]
+        stock_names = _load_stock_names(session, _symbols_from_rows(row_dicts))
+    return {"status": "ready" if rows else "empty", "items": [_mapping_to_api(row) for row in _with_stock_names(row_dicts, stock_names)]}
 
 
 def backtest_equity(backtest_id: int) -> dict[str, Any]:
@@ -425,6 +435,57 @@ def backtest_equity(backtest_id: int) -> dict[str, Any]:
             .order_by(schema.backtest_daily_equity.c.trade_date)
         ).mappings().all()
     return {"status": "ready" if rows else "empty", "items": [_mapping_to_api(dict(row)) for row in rows]}
+
+
+def backtest_audit(backtest_id: int, vt_symbol: str | None = None, limit: int = 200) -> dict[str, Any]:
+    if not is_database_configured():
+        return {"status": "unavailable", "items": []}
+    _ensure_backtest_schema()
+    symbol = _normalize_symbol(vt_symbol) if vt_symbol else None
+    with session_scope() as session:
+        run = session.execute(select(schema.backtest_runs).where(schema.backtest_runs.c.id == backtest_id)).mappings().first()
+        if not run:
+            return {"status": "not_found", "id": backtest_id}
+
+        order_query = (
+            select(schema.backtest_orders)
+            .where(schema.backtest_orders.c.backtest_id == backtest_id)
+            .order_by(schema.backtest_orders.c.trade_date, schema.backtest_orders.c.id)
+        )
+        trade_query = (
+            select(schema.backtest_trades)
+            .where(schema.backtest_trades.c.backtest_id == backtest_id)
+            .order_by(schema.backtest_trades.c.trade_date, schema.backtest_trades.c.id)
+        )
+        if symbol:
+            order_query = order_query.where(schema.backtest_orders.c.vt_symbol == symbol)
+            trade_query = trade_query.where(schema.backtest_trades.c.vt_symbol == symbol)
+
+        orders = session.execute(order_query.limit(min(max(limit, 1), 1000))).mappings().all()
+        trades = session.execute(trade_query.limit(min(max(limit, 1), 1000))).mappings().all()
+        order_dicts = [dict(row) for row in orders]
+        trade_dicts = [dict(row) for row in trades]
+        stock_names = _load_stock_names(session, _symbols_from_rows(order_dicts, trade_dicts))
+
+    params = _params_from_run(dict(run))
+    order_items = [_mapping_to_api(row) for row in _with_stock_names(order_dicts, stock_names)]
+    trade_items = [_mapping_to_api(row) for row in _with_stock_names(trade_dicts, stock_names)]
+    return {
+        "status": "ready",
+        "backtest_id": backtest_id,
+        "vt_symbol": symbol,
+        "strategy_id": run["strategy_id"],
+        "strategy_version": run["strategy_version"],
+        "start_date": run["start_date"].isoformat(),
+        "end_date": run["end_date"].isoformat(),
+        "method": _backtest_method(params),
+        "params": _params_to_json(params),
+        "orders": order_items,
+        "trades": trade_items,
+        "events": _audit_events(order_items, trade_items),
+        "order_summary": _order_stats(order_items),
+        "note": "组合回测会在历史每个交易日重新计算当日候选，并在下一交易日按执行规则买入；不是把今天候选名单套到过去。",
+    }
 
 
 def _ensure_backtest_schema() -> None:
@@ -446,6 +507,7 @@ def _simulate(
     cash = params.initial_cash
     positions: dict[str, Position] = {}
     pending_buys: list[dict[str, Any]] = []
+    pending_sells: list[dict[str, Any]] = []
     trades: list[Trade] = []
     orders: list[dict[str, Any]] = []
     equity_curve: list[dict[str, Any]] = []
@@ -458,11 +520,44 @@ def _simulate(
     for index, current_day in enumerate(trading_days):
         today_bars = {symbol: bar_index[symbol][current_day] for symbol in bar_index if current_day in bar_index[symbol]}
 
+        for order in list(pending_sells):
+            if order["execute_date"] != current_day:
+                continue
+            pending_sells.remove(order)
+            position = positions.get(order["vt_symbol"])
+            if not position:
+                continue
+            bar = today_bars.get(order["vt_symbol"])
+            raw = {
+                "mode": "daily_next_open_sell",
+                "signal_date": order["signal_date"].isoformat(),
+                "execute_date": current_day.isoformat(),
+                "entry_date": position.entry_date.isoformat(),
+                "reason": order["reason"],
+            }
+            if not bar:
+                orders.append(_order(current_day, order["vt_symbol"], "SELL", None, position.volume, "rejected", "no_bar", raw))
+                continue
+            if _is_limit_down_open(bar):
+                orders.append(_order(current_day, order["vt_symbol"], "SELL", None, position.volume, "rejected", "limit_down", raw))
+                continue
+            fill_price = bar.open_price * (1 - params.slippage_bps / 10000)
+            amount = fill_price * position.volume
+            fee = amount * (params.commission_rate + params.stamp_tax_rate)
+            pnl = (fill_price - position.cost_price) * position.volume - fee
+            cash += amount - fee
+            del positions[order["vt_symbol"]]
+            orders.append(_order(current_day, order["vt_symbol"], "SELL", fill_price, position.volume, "filled", order["reason"], raw))
+            trades.append(Trade(current_day, order["vt_symbol"], "SELL", fill_price, position.volume, amount, fee, pnl, order["reason"], raw))
+
         for order in list(pending_buys):
             if order["execute_date"] != current_day:
                 continue
             pending_buys.remove(order)
             if order["vt_symbol"] in positions:
+                continue
+            if len(positions) >= params.max_positions:
+                orders.append(_order(current_day, order["vt_symbol"], "BUY", None, None, "rejected", "position_slot_unavailable"))
                 continue
             bar = today_bars.get(order["vt_symbol"])
             if not bar or _is_limit_up_open(bar):
@@ -514,7 +609,10 @@ def _simulate(
             orders.append(_order(current_day, order["vt_symbol"], "BUY", fill_price, volume, "filled", "entry_signal", fill))
             trades.append(Trade(current_day, order["vt_symbol"], "BUY", fill_price, volume, amount, fee, None, "entry_signal", entry_reason))
 
+        pending_sell_symbols = {str(order["vt_symbol"]) for order in pending_sells}
         for vt_symbol, position in list(positions.items()):
+            if vt_symbol in pending_sell_symbols:
+                continue
             bar = today_bars.get(vt_symbol)
             if not bar:
                 continue
@@ -524,21 +622,31 @@ def _simulate(
                 continue
             if current_day <= position.entry_date:
                 continue
-            if _is_limit_down_open(bar):
-                orders.append(_order(current_day, vt_symbol, "SELL", None, position.volume, "rejected", "limit_down"))
+            if index >= len(trading_days) - 1:
                 continue
-            fill_price = bar.open_price * (1 - params.slippage_bps / 10000)
-            amount = fill_price * position.volume
-            fee = amount * (params.commission_rate + params.stamp_tax_rate)
-            pnl = (fill_price - position.cost_price) * position.volume - fee
-            cash += amount - fee
-            del positions[vt_symbol]
-            orders.append(_order(current_day, vt_symbol, "SELL", fill_price, position.volume, "filled", sell_reason))
-            trades.append(Trade(current_day, vt_symbol, "SELL", fill_price, position.volume, amount, fee, pnl, sell_reason, {"entry_date": position.entry_date.isoformat()}))
+            next_day = trading_days[index + 1]
+            raw = {
+                "mode": "daily_close_sell_signal",
+                "signal_date": current_day.isoformat(),
+                "execute_date": next_day.isoformat(),
+                "entry_date": position.entry_date.isoformat(),
+                "reason": sell_reason,
+            }
+            pending_sells.append(
+                {
+                    "execute_date": next_day,
+                    "signal_date": current_day,
+                    "vt_symbol": vt_symbol,
+                    "reason": sell_reason,
+                }
+            )
+            pending_sell_symbols.add(vt_symbol)
+            orders.append(_order(current_day, vt_symbol, "SELL", None, position.volume, "pending", sell_reason, raw))
 
         if index < len(trading_days) - 1:
             next_day = trading_days[index + 1]
-            free_slots = max(params.max_positions - len(positions) - len(pending_buys), 0)
+            reserved_exit_count = len({str(order["vt_symbol"]) for order in pending_sells})
+            free_slots = max(params.max_positions - len(positions) + reserved_exit_count - len(pending_buys), 0)
             if free_slots > 0:
                 candidates = _score_day(session, bars_by_symbol, current_day, params, score_cache, score_context)
                 for candidate in candidates[: min(free_slots, params.candidate_limit)]:
@@ -649,19 +757,77 @@ def _sell_reason(position: Position, bar: Bar, current_day: date, params: Backte
     return None
 
 
-def _load_symbol_universe(session, max_symbols: int) -> list[str]:
+def _load_symbol_universe(
+    session,
+    max_symbols: int,
+    symbols: list[str] | None = None,
+    included_boards: tuple[str, ...] = DEFAULT_QUANT_INCLUDED_BOARDS,
+) -> list[str]:
+    requested = [_normalize_symbol(symbol) for symbol in symbols or [] if _normalize_symbol(symbol)]
+    if requested:
+        existing = session.execute(
+            select(schema.stocks.c.vt_symbol)
+            .where(schema.stocks.c.vt_symbol.in_(requested))
+            .order_by(schema.stocks.c.vt_symbol)
+        ).all()
+        found = {str(row[0]) for row in existing}
+        return [symbol for symbol in requested if symbol in found]
+
     rows = session.execute(
-        select(schema.stocks.c.vt_symbol)
+        select(schema.stocks.c.vt_symbol, schema.stocks.c.exchange)
         .where(schema.stocks.c.vt_symbol != "000001.SSE")
         .order_by(desc(schema.stocks.c.turnover), desc(schema.stocks.c.market_cap))
-        .limit(min(max(max_symbols, 1), 5000))
+        .limit(5000)
     ).all()
-    return [str(row[0]) for row in rows]
+    allowed = set(normalize_included_boards(included_boards))
+    result = [
+        str(row[0])
+        for row in rows
+        if stock_board(row[0], row[1]) in allowed
+    ]
+    return result[: min(max(max_symbols, 1), 5000)]
 
 
 def _load_stock_meta(session, vt_symbols: list[str]) -> dict[str, dict[str, Any]]:
     rows = session.execute(select(schema.stocks).where(schema.stocks.c.vt_symbol.in_(vt_symbols))).mappings().all()
     return {str(row["vt_symbol"]): dict(row) for row in rows}
+
+
+def _load_stock_names(session, vt_symbols: list[str]) -> dict[str, dict[str, Any]]:
+    symbols = sorted({symbol for symbol in vt_symbols if symbol})
+    if not symbols:
+        return {}
+    rows = session.execute(
+        select(schema.stocks.c.vt_symbol, schema.stocks.c.name, schema.stocks.c.exchange)
+        .where(schema.stocks.c.vt_symbol.in_(symbols))
+    ).mappings().all()
+    return {str(row["vt_symbol"]): dict(row) for row in rows}
+
+
+def _symbols_from_rows(*row_groups: list[dict[str, Any]]) -> list[str]:
+    symbols: set[str] = set()
+    for rows in row_groups:
+        for row in rows:
+            symbol = str(row.get("vt_symbol") or "").strip().upper()
+            if symbol:
+                symbols.add(symbol)
+    return sorted(symbols)
+
+
+def _stock_board_payload(vt_symbol: Any, stock: dict[str, Any] | None = None) -> dict[str, str]:
+    return stock_board_payload(vt_symbol, (stock or {}).get("exchange"))
+
+
+def _with_stock_names(rows: list[dict[str, Any]], names: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    result = []
+    for row in rows:
+        item = dict(row)
+        vt_symbol = str(item.get("vt_symbol") or "")
+        stock = names.get(vt_symbol) or {}
+        item["name"] = item.get("name") or stock.get("name")
+        item.update(_stock_board_payload(vt_symbol, stock))
+        result.append(item)
+    return result
 
 
 def _load_score_context(session, vt_symbols: list[str]) -> ScoreContext:
@@ -1089,6 +1255,15 @@ def _closed_trades(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
         result.append(
             {
                 "vt_symbol": vt_symbol,
+                "name": (entry or {}).get("name") or trade.get("name"),
+                **(
+                    {
+                        "board": (entry or {}).get("board") or trade.get("board") or _stock_board_payload(vt_symbol)["board"],
+                        "board_label": (entry or {}).get("board_label")
+                        or trade.get("board_label")
+                        or _stock_board_payload(vt_symbol)["board_label"],
+                    }
+                ),
                 "entry_date": entry_date.isoformat() if entry_date else None,
                 "exit_date": exit_date.isoformat() if exit_date else None,
                 "entry_price": float(entry.get("price")) if entry and entry.get("price") is not None else None,
@@ -1168,6 +1343,9 @@ def _symbol_performance(closed_trades: list[dict[str, Any]]) -> list[dict[str, A
             vt_symbol,
             {
                 "vt_symbol": vt_symbol,
+                "name": trade.get("name"),
+                "board": trade.get("board") or _stock_board_payload(vt_symbol)["board"],
+                "board_label": trade.get("board_label") or _stock_board_payload(vt_symbol)["board_label"],
                 "trade_count": 0,
                 "win_count": 0,
                 "loss_count": 0,
@@ -1177,6 +1355,11 @@ def _symbol_performance(closed_trades: list[dict[str, Any]]) -> list[dict[str, A
                 "worst_trade": None,
             },
         )
+        if not item.get("name") and trade.get("name"):
+            item["name"] = trade.get("name")
+        if not item.get("board") and trade.get("board"):
+            item["board"] = trade.get("board")
+            item["board_label"] = trade.get("board_label")
         pnl = float(trade.get("pnl") or 0)
         item["trade_count"] += 1
         item["win_count"] += 1 if pnl > 0 else 0
@@ -2239,6 +2422,8 @@ def _params_from_run(run: dict[str, Any]) -> BacktestParams:
         tail_entry_start=str(raw_params.get("tail_entry_start") or "14:30"),
         tail_entry_end=str(raw_params.get("tail_entry_end") or "14:57"),
         tail_entry_ma5_tolerance_pct=float(raw_params.get("tail_entry_ma5_tolerance_pct") or 1.5),
+        symbols=[_normalize_symbol(symbol) for symbol in (raw_params.get("symbols") or []) if _normalize_symbol(symbol)],
+        included_boards=normalize_included_boards(raw_params.get("included_boards")),
         persist=False,
     )
 
@@ -2496,6 +2681,137 @@ def _ratio_pct(numerator: Any, denominator: Any) -> float | None:
     return float(numerator or 0) / float(denominator) * 100
 
 
+def _normalize_symbol(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
+def _backtest_method(params: BacktestParams) -> dict[str, Any]:
+    board_labels = included_board_labels(params.included_boards)
+    universe = (
+        "指定股票"
+        if params.symbols
+        else f"按成交额/市值取前 {params.max_symbols} 只本地股票；板块：{', '.join(board_labels)}"
+    )
+    return {
+        "id": "daily_dynamic_candidate_backtest",
+        "name": "历史逐日动态候选回测",
+        "signal_timing": "每个历史交易日收盘后，只使用当日及以前可见数据重新打分生成候选。",
+        "execution_timing": "买入在下一交易日执行；卖出信号在 D 日收盘后确认，只能在 D+1 开盘撮合。",
+        "candidate_policy": "不是用今天的候选名单回测全部历史。",
+        "universe": universe,
+        "symbols": params.symbols or [],
+        "included_boards": list(params.included_boards),
+        "included_board_labels": board_labels,
+        "entry_filter": {
+            "min_entry_score": params.min_entry_score,
+            "strict_entry": params.strict_entry,
+            "candidate_limit": params.candidate_limit,
+        },
+        "execution": {
+            "intraday_entry": params.intraday_entry,
+            "minute_entry_required": params.minute_entry_required,
+            "tail_entry_window": f"{params.tail_entry_start}-{params.tail_entry_end}",
+            "tail_entry_ma5_tolerance_pct": params.tail_entry_ma5_tolerance_pct,
+        },
+    }
+
+
+def _backtest_assumptions(params: BacktestParams) -> dict[str, str]:
+    return {
+        "candidate_generation": "历史逐日重新打分：D 日收盘后生成 D 日候选，D+1 才能买入。",
+        "execution": "Buy: D close signal -> D+1 tail-window minute fill, or D+1 open fallback unless minute_entry_required=true. Sell: D close exit signal -> D+1 open fill.",
+        "tail_entry": "uses prior visible daily MA5 and the configured intraday window; no same-day close look-ahead",
+        "tail_entry_window": f"{params.tail_entry_start}-{params.tail_entry_end}",
+        "minute_entry_required": str(params.minute_entry_required),
+        "costs": "commission, stamp tax on sells, and slippage are included",
+        "positioning": "equal cash budget per position, 100-share lot rounded",
+        "turnover": "turnover_pct uses traded notional divided by initial cash",
+        "data_as_of_policy": "daily bars only; financial data requires publish_date",
+    }
+
+
+def _audit_events(orders: list[dict[str, Any]], trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    events = []
+    for order in orders:
+        raw = order.get("raw") if isinstance(order.get("raw"), dict) else {}
+        execution = raw.get("execution") if isinstance(raw.get("execution"), dict) else raw
+        events.append(
+            {
+                "event_type": "order",
+                "trade_date": order.get("trade_date"),
+                "vt_symbol": order.get("vt_symbol"),
+                "name": order.get("name"),
+                "board": order.get("board") or _stock_board_payload(order.get("vt_symbol"))["board"],
+                "board_label": order.get("board_label") or _stock_board_payload(order.get("vt_symbol"))["board_label"],
+                "side": order.get("side"),
+                "status": order.get("status"),
+                "reason": order.get("reason"),
+                "price": order.get("price"),
+                "volume": order.get("volume"),
+                "execution_mode": execution.get("mode") if isinstance(execution, dict) else None,
+                "message": _audit_order_message(order, execution if isinstance(execution, dict) else {}),
+                "raw": raw,
+            }
+        )
+    for trade in trades:
+        raw = trade.get("raw") if isinstance(trade.get("raw"), dict) else {}
+        execution = raw.get("execution") if isinstance(raw.get("execution"), dict) else {}
+        events.append(
+            {
+                "event_type": "trade",
+                "trade_date": trade.get("trade_date"),
+                "vt_symbol": trade.get("vt_symbol"),
+                "name": trade.get("name"),
+                "board": trade.get("board") or _stock_board_payload(trade.get("vt_symbol"))["board"],
+                "board_label": trade.get("board_label") or _stock_board_payload(trade.get("vt_symbol"))["board_label"],
+                "side": trade.get("side"),
+                "status": "filled",
+                "reason": trade.get("reason"),
+                "price": trade.get("price"),
+                "volume": trade.get("volume"),
+                "pnl": trade.get("pnl"),
+                "execution_mode": execution.get("mode"),
+                "message": _audit_trade_message(trade, execution),
+                "raw": raw,
+            }
+        )
+    events.sort(key=lambda item: (str(item.get("trade_date") or ""), str(item.get("vt_symbol") or ""), item["event_type"]))
+    return events
+
+
+def _audit_order_message(order: dict[str, Any], execution: dict[str, Any]) -> str:
+    side = "买入" if order.get("side") == "BUY" else "卖出"
+    status = "已成交" if order.get("status") == "filled" else "未成交"
+    reason = order.get("reason") or "unknown"
+    mode = execution.get("mode")
+    if mode == "minute_tail_ma5":
+        return f"{side}{status}：尾盘分钟线接近可见 MA5，原因 {reason}。"
+    if mode == "daily_next_open_fallback":
+        return f"{side}{status}：分钟尾盘不可用或未触发，回退到 D+1 开盘，原因 {reason}。"
+    if mode == "minute_tail_ma5_required":
+        return f"{side}{status}：严格分钟模式下尾盘 MA5 未触发或缺分钟线，原因 {reason}。"
+    if mode == "daily_close_sell_signal":
+        execute_date = execution.get("execute_date")
+        return f"卖出信号：收盘后触发 {reason}，计划 {execute_date or '下一交易日'} 开盘撮合。"
+    if mode == "daily_next_open_sell":
+        signal_date = execution.get("signal_date")
+        return f"卖出{status}：{signal_date or '前一交易日'} 收盘信号，当前开盘撮合，原因 {reason}。"
+    return f"{side}{status}：{reason}。"
+
+
+def _audit_trade_message(trade: dict[str, Any], execution: dict[str, Any]) -> str:
+    side = "买入" if trade.get("side") == "BUY" else "卖出"
+    mode = execution.get("mode")
+    if side == "买入" and mode:
+        return f"{side}成交：执行模式 {mode}，价格 {trade.get('price')}。"
+    if side == "卖出":
+        if mode == "daily_next_open_sell":
+            signal_date = execution.get("signal_date")
+            return f"{side}成交：{signal_date or '前一交易日'} 收盘触发 {trade.get('reason') or 'unknown'}，当前开盘成交，盈亏 {trade.get('pnl')}。"
+        return f"{side}成交：退出原因 {trade.get('reason') or 'unknown'}，盈亏 {trade.get('pnl')}。"
+    return f"{side}成交。"
+
+
 def _as_date(value: Any) -> date | None:
     if isinstance(value, date):
         return value
@@ -2529,9 +2845,11 @@ def _order(
     reason: str,
     raw: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    board = _stock_board_payload(vt_symbol)
     return {
         "trade_date": trade_date,
         "vt_symbol": vt_symbol,
+        **board,
         "side": side,
         "price": price,
         "volume": volume,
@@ -2568,11 +2886,26 @@ def _persist_run(session, params: BacktestParams, run: dict[str, Any], end: date
         .returning(schema.backtest_runs.c.id)
     ).scalar_one()
     for item in run["equity"]:
-        session.execute(schema.backtest_daily_equity.insert().values(backtest_id=backtest_id, **_parse_dates(item)))
+        session.execute(
+            schema.backtest_daily_equity.insert().values(
+                backtest_id=backtest_id,
+                **_table_values(schema.backtest_daily_equity, item),
+            )
+        )
     for item in run["orders"]:
-        session.execute(schema.backtest_orders.insert().values(backtest_id=backtest_id, **_parse_dates(item)))
+        session.execute(
+            schema.backtest_orders.insert().values(
+                backtest_id=backtest_id,
+                **_table_values(schema.backtest_orders, item),
+            )
+        )
     for item in run["trades"]:
-        session.execute(schema.backtest_trades.insert().values(backtest_id=backtest_id, **_parse_dates(item)))
+        session.execute(
+            schema.backtest_trades.insert().values(
+                backtest_id=backtest_id,
+                **_table_values(schema.backtest_trades, item),
+            )
+        )
     for key, value in metrics.items():
         if isinstance(value, (int, float)) or value is None:
             session.execute(schema.backtest_metrics.insert().values(backtest_id=backtest_id, metric_key=key, metric_value=value))
@@ -2585,6 +2918,7 @@ def _trade_to_api(trade: Trade) -> dict[str, Any]:
     return {
         "trade_date": trade.trade_date.isoformat(),
         "vt_symbol": trade.vt_symbol,
+        **_stock_board_payload(trade.vt_symbol),
         "side": trade.side,
         "price": trade.price,
         "volume": trade.volume,
@@ -2593,6 +2927,15 @@ def _trade_to_api(trade: Trade) -> dict[str, Any]:
         "pnl": trade.pnl,
         "reason": trade.reason,
         "raw": trade.raw,
+    }
+
+
+def _table_values(table, item: dict[str, Any]) -> dict[str, Any]:
+    columns = set(table.c.keys())
+    return {
+        key: value
+        for key, value in _parse_dates(item).items()
+        if key in columns and key not in {"id", "backtest_id", "created_at"}
     }
 
 
@@ -2618,4 +2961,6 @@ def _params_to_json(params: BacktestParams) -> dict[str, Any]:
     for key, value in list(result.items()):
         if hasattr(value, "isoformat"):
             result[key] = value.isoformat()
+        elif isinstance(value, tuple):
+            result[key] = list(value)
     return result

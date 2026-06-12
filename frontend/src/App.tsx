@@ -5,6 +5,7 @@ import { StocksPage } from "@/pages/StocksPage";
 import { StockDetailPage } from "@/pages/StockDetailPage";
 import { SectorsPage } from "@/pages/SectorsPage";
 import { QuantTradingPage } from "@/pages/QuantTradingPage";
+import { PortfolioPage } from "@/pages/PortfolioPage";
 
 import ThemeExplorerPage from "@/pages/ThemeExplorerPage";
 import ChainGraphPage from "@/pages/ChainGraphPage";
@@ -19,6 +20,7 @@ export default function App() {
         <Route path="/stocks" element={<StocksPage />} />
         <Route path="/stocks/:vtSymbol" element={<StockDetailPage />} />
         <Route path="/quant" element={<QuantTradingPage />} />
+        <Route path="/portfolio" element={<PortfolioPage />} />
         <Route path="/chain" element={<ChainGraphPage />} />
         <Route path="/data" element={<DataManagementPage />} />
         {/* Legacy routes */}

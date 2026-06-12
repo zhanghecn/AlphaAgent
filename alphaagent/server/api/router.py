@@ -19,7 +19,10 @@ from alphaagent.server.api.sectors import router as sectors_router
 from alphaagent.server.api.simulation import router as simulation_router
 from alphaagent.server.api.stocks import router as stocks_router
 from alphaagent.server.api.vnpy_status import router as vnpy_status_router
-from alphaagent.server.api.vnpy_local_data import router as vnpy_local_data_router
+try:
+    from alphaagent.server.api.vnpy_local_data import router as vnpy_local_data_router
+except ImportError:
+    vnpy_local_data_router = None
 
 api_router = APIRouter()
 api_router.include_router(health_router)
@@ -39,4 +42,5 @@ api_router.include_router(backtests_router)
 api_router.include_router(portfolios_router)
 api_router.include_router(simulation_router)
 api_router.include_router(vnpy_status_router)
-api_router.include_router(vnpy_local_data_router)
+if vnpy_local_data_router is not None:
+    api_router.include_router(vnpy_local_data_router)

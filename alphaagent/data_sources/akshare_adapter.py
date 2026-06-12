@@ -28,6 +28,7 @@ import pandas as pd
 import requests
 
 from alphaagent.market.cache import market_cache
+from alphaagent.market.boards import stock_board_payload
 from alphaagent.market.models import DataSourceStatus, Quote
 from alphaagent.market.symbols import INDEX_SYMBOLS, eastmoney_secid, normalize_exchange, vt_symbol
 
@@ -322,19 +323,23 @@ class AkShareAdapter:
         symbol_matches = [item for item in search.get("items") or [] if item.get("symbol") == symbol]
         for item in search.get("items") or []:
             if item.get("symbol") == symbol and normalize_exchange(symbol, item.get("exchange")) == normalized:
-                return {**item, "exchange": normalized, "vt_symbol": vt_symbol(symbol, normalized)}
+                vts = vt_symbol(symbol, normalized)
+                return {**item, "exchange": normalized, "vt_symbol": vts, **stock_board_payload(vts, normalized)}
         if len(symbol_matches) == 1:
             item = symbol_matches[0]
             resolved_exchange = str(item.get("exchange") or normalize_exchange(symbol))
-            return {**item, "exchange": resolved_exchange, "vt_symbol": vt_symbol(symbol, resolved_exchange)}
+            vts = vt_symbol(symbol, resolved_exchange)
+            return {**item, "exchange": resolved_exchange, "vt_symbol": vts, **stock_board_payload(vts, resolved_exchange)}
         try:
             info = self._stock_individual_info(symbol)
         except Exception:
             info = {}
+        vts = vt_symbol(symbol, normalized)
         quote = {
             "symbol": symbol,
             "exchange": normalized,
-            "vt_symbol": vt_symbol(symbol, normalized),
+            "vt_symbol": vts,
+            **stock_board_payload(vts, normalized),
             "name": info.get("股票简称") or symbol,
             "last_price": _number(info.get("最新")),
             "change": None,
@@ -370,11 +375,13 @@ class AkShareAdapter:
             raise AkShareSourceError(f"Tencent quote payload incomplete for {prefixed}")
         quote_symbol = parts[2]
         quote_exchange = _exchange_from_prefixed_symbol(prefixed, quote_symbol)
+        vts = vt_symbol(quote_symbol, quote_exchange)
         turnover = _number(parts[57] if len(parts) > 57 else None)
         return {
             "symbol": quote_symbol,
             "exchange": quote_exchange,
-            "vt_symbol": vt_symbol(quote_symbol, quote_exchange),
+            "vt_symbol": vts,
+            **stock_board_payload(vts, quote_exchange),
             "name": parts[1],
             "last_price": _number(parts[3]),
             "change": _number(parts[31]),
@@ -1863,10 +1870,12 @@ def _stock_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
     raw_symbol = str(normalized.get("代码") or normalized.get("code") or "")
     symbol = _clean_stock_symbol(raw_symbol)
     exchange = _exchange_from_prefixed_symbol(raw_symbol, symbol)
+    vts = vt_symbol(symbol, exchange)
     return {
         "symbol": symbol,
         "exchange": exchange,
-        "vt_symbol": vt_symbol(symbol, exchange),
+        "vt_symbol": vts,
+        **stock_board_payload(vts, exchange),
         "name": normalized.get("名称") or normalized.get("name"),
         "last_price": _number(normalized.get("最新价") or normalized.get("zxj")),
         "change": _number(normalized.get("涨跌额") or normalized.get("zd")),
@@ -2832,10 +2841,12 @@ def _eastmoney_quote_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
     normalized = _normalize_record(row)
     symbol = str(normalized.get("f12") or "").strip()
     exchange = _eastmoney_exchange_from_market(normalized.get("f13"), symbol)
+    vts = vt_symbol(symbol, exchange)
     return {
         "symbol": symbol,
         "exchange": exchange,
-        "vt_symbol": vt_symbol(symbol, exchange),
+        "vt_symbol": vts,
+        **stock_board_payload(vts, exchange),
         "name": normalized.get("f14") or symbol,
         "last_price": _number(normalized.get("f2")),
         "change": _number(normalized.get("f4")),
@@ -3251,10 +3262,12 @@ def _sina_member_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
     symbol = _clean_stock_symbol(raw_symbol)
     exchange = _exchange_from_prefixed_symbol(raw_symbol, symbol)
     prefixed_symbol = str(normalized.get("symbol") or "")
+    vts = vt_symbol(symbol, exchange)
     return {
         "symbol": symbol,
         "exchange": exchange,
-        "vt_symbol": vt_symbol(symbol, exchange),
+        "vt_symbol": vts,
+        **stock_board_payload(vts, exchange),
         "name": normalized.get("name") or symbol,
         "last_price": _number(normalized.get("trade")),
         "change": _number(normalized.get("pricechange")),

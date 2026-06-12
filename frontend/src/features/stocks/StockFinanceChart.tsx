@@ -12,15 +12,7 @@
  */
 import { Fragment, useCallback, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  Cell,
-} from "recharts";
+import ReactECharts from "echarts-for-react";
 import {
   fetchQuarterlyFinance,
   fetchFinancialStatement,
@@ -497,7 +489,7 @@ const SUMMARY_CARDS: SummaryCardDef[] = [
     colorize: true,
   },
   {
-    key: "operating_cash",
+    key: "operating_cash_flow",
     label: "经营现金流",
     fmt: "amount",
     extract: (item) => item.operating_cash_flow ?? rawNum(item.raw, AK.netcashOperate),
@@ -505,12 +497,22 @@ const SUMMARY_CARDS: SummaryCardDef[] = [
   },
 ];
 
-function SummaryCard({ def, item }: { def: SummaryCardDef; item: QuarterlyFinanceItem }) {
+function SummaryCard({ def, item, selected, onClick }: {
+  def: SummaryCardDef; item: QuarterlyFinanceItem; selected: boolean; onClick: () => void;
+}) {
   const value = def.extract(item);
   const yoy = def.yoyExtract?.(item);
 
   return (
-    <div className="rounded-lg border bg-card p-3 space-y-1 hover:bg-accent/30 transition-colors">
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-lg border p-3 space-y-1 text-left transition-colors cursor-pointer ${
+        selected
+          ? "bg-primary/10 border-primary/40 ring-1 ring-primary/20"
+          : "bg-card hover:bg-accent/30"
+      }`}
+    >
       <p className="text-xs text-muted-foreground truncate">{def.label}</p>
       <p className={`text-lg font-bold tabular-nums ${def.colorize ? priceColorClass(value) : "text-foreground"}`}>
         {fmtValue(value, def.fmt)}
@@ -523,15 +525,23 @@ function SummaryCard({ def, item }: { def: SummaryCardDef; item: QuarterlyFinanc
           <span className="text-xs text-muted-foreground">同比</span>
         </div>
       )}
-    </div>
+    </button>
   );
 }
 
-function SummaryCardGrid({ item }: { item: QuarterlyFinanceItem }) {
+function SummaryCardGrid({ item, selectedKey, onSelect }: {
+  item: QuarterlyFinanceItem; selectedKey: string; onSelect: (key: string) => void;
+}) {
   return (
     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
       {SUMMARY_CARDS.map((def) => (
-        <SummaryCard key={def.key} def={def} item={item} />
+        <SummaryCard
+          key={def.key}
+          def={def}
+          item={item}
+          selected={def.key === selectedKey}
+          onClick={() => onSelect(def.key)}
+        />
       ))}
     </div>
   );
@@ -544,41 +554,131 @@ type ChartSource =
   | { type: "statement"; fieldKey: string; items: Record<string, string | number | null>[]; dates: string[]; labels: string[] };
 
 function UnifiedTrendChart({ source }: { source: ChartSource | null }) {
-  const { chartData, fmt, label, colorize } = useMemo(() => {
-    if (!source) return { chartData: [], fmt: "amount" as const, label: "", colorize: false };
+  const option = useMemo(() => {
+    if (!source) return null;
+
+    // Build data arrays
+    let categories: string[] = [];
+    let values: (number | null)[] = [];
+    let fmt: "amount" | "pct" | "ratio" = "amount";
+    let doColorize = false;
 
     if (source.type === "metric") {
       const visible = source.items.slice(0, source.periods.length);
       const reversed = [...visible].reverse();
-      return {
-        chartData: reversed.map((item, i) => ({
-          label: source.periods[visible.length - 1 - i]?.short ?? "",
-          value: source.metric.extract(item),
-        })),
-        fmt: source.metric.fmt,
-        label: source.metric.label,
-        colorize: source.metric.colorize ?? false,
-      };
+      categories = reversed.map((_, i) => source.periods[visible.length - 1 - i]?.label ?? "");
+      values = reversed.map((item) => source.metric.extract(item) ?? null);
+      fmt = source.metric.fmt;
+      doColorize = source.metric.colorize ?? false;
+    } else {
+      const reversed = [...source.items].reverse();
+      const reversedLabels = [...source.labels].reverse();
+      categories = reversedLabels;
+      values = reversed.map((item) => toNum(item[source.fieldKey]));
+      doColorize = true;
     }
 
-    // statement type — use labels[] for Chinese period names
-    const reversed = [...source.items].reverse();
-    const reversedLabels = [...source.labels].reverse();
+    if (!values.some((v) => v != null)) return null;
+
+    const isPct = fmt === "pct";
+
+    // Color palette: positive = warm red (#E8564A), negative = teal (#2EAA6E)
+    const POS_COLOR = "#E8564A";
+    const NEG_COLOR = "#2EAA6E";
+    const NEUTRAL_COLOR = "#6B8A9E";
+    const PRIMARY_COLOR = "#4A7FE0";
+
+    // Build per-bar color array
+    const barColors = values.map((v) => {
+      if (!doColorize && !isPct) return PRIMARY_COLOR;
+      if (v == null) return NEUTRAL_COLOR;
+      if (v > 0) return POS_COLOR;
+      if (v < 0) return NEG_COLOR;
+      return NEUTRAL_COLOR;
+    });
+
+    // Gradient decoration: top bars get a subtle gradient for polish
+    const seriesData = values.map((v, i) => ({
+      value: v ?? "-",
+      itemStyle: {
+        color: barColors[i],
+        borderRadius: [3, 3, 0, 0],
+      },
+    }));
+
     return {
-      chartData: reversed.map((item, i) => ({
-        label: reversedLabels[i] ?? "",
-        value: toNum(item[source.fieldKey]),
-      })),
-      fmt: "amount" as const,
-      label: FIELD_LABELS[source.fieldKey] ?? source.fieldKey,
-      colorize: true, // statements always colorize
+      grid: { top: 36, right: 20, bottom: 24, left: 68, containLabel: false },
+      tooltip: {
+        trigger: "axis" as const,
+        backgroundColor: "rgba(255,255,255,0.96)",
+        borderColor: "#E5E7EB",
+        borderWidth: 1,
+        borderRadius: 6,
+        padding: [8, 12],
+        textStyle: { color: "#374151", fontSize: 12 },
+        formatter: (params: Array<{ name: string; value: number | string }>) => {
+          const p = params[0];
+          const val = typeof p.value === "number" ? p.value : null;
+          return `<b>${p.name}</b><br/><span style="font-weight:600">${fmtValue(val, fmt)}</span>`;
+        },
+      },
+      xAxis: {
+        type: "category" as const,
+        data: categories,
+        axisLine: { lineStyle: { color: "#E5E7EB" } },
+        axisTick: { show: false },
+        axisLabel: {
+          color: "#9CA3AF",
+          fontSize: 11,
+          interval: 0,
+          rotate: categories.length > 6 ? 25 : 0,
+        },
+      },
+      yAxis: {
+        type: "value" as const,
+        axisLine: { show: false },
+        axisTick: { show: false },
+        splitLine: { lineStyle: { color: "#F3F4F6", type: "dashed" } },
+        axisLabel: {
+          color: "#9CA3AF",
+          fontSize: 11,
+          formatter: (v: number) =>
+            fmt === "amount"
+              ? formatAmount(v)
+              : isPct
+                ? `${v.toFixed(0)}%`
+                : v.toFixed(2),
+        },
+      },
+      series: [
+        {
+          type: "bar" as const,
+          data: seriesData,
+          barMaxWidth: 36,
+          label: {
+            show: true,
+            position: "top",
+            color: "#6B7280",
+            fontSize: 10,
+            formatter: (params: { value: number | string }) => {
+              const v = typeof params.value === "number" ? params.value : null;
+              return fmtValue(v, fmt);
+            },
+          },
+          emphasis: {
+            itemStyle: {
+              shadowBlur: 10,
+              shadowColor: "rgba(0,0,0,0.12)",
+            },
+          },
+          animationDuration: 600,
+          animationEasing: "cubicOut" as const,
+        },
+      ],
     };
   }, [source]);
 
-  const isPct = fmt === "pct";
-  const hasData = chartData.some((d) => d.value != null);
-
-  if (!hasData) {
+  if (!option) {
     return (
       <div className="flex h-[200px] items-center justify-center text-sm text-muted-foreground">
         暂无数据
@@ -587,51 +687,8 @@ function UnifiedTrendChart({ source }: { source: ChartSource | null }) {
   }
 
   return (
-    <div className="h-[220px] w-full">
-      <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={chartData} margin={{ top: 16, right: 16, left: 0, bottom: 4 }}>
-          <XAxis
-            dataKey="label"
-            tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }}
-            axisLine={false}
-            tickLine={false}
-          />
-          <YAxis
-            tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }}
-            axisLine={false}
-            tickLine={false}
-            width={60}
-            tickFormatter={(v: number) =>
-              fmt === "amount"
-                ? formatAmount(v)
-                : isPct
-                  ? `${v.toFixed(0)}%`
-                  : v.toFixed(2)
-            }
-          />
-          <Tooltip
-            formatter={(value) => [fmtValue(Number(value ?? 0), fmt), label]}
-            contentStyle={{
-              backgroundColor: "hsl(var(--card))",
-              border: "1px solid hsl(var(--border))",
-              borderRadius: 6,
-              fontSize: 12,
-            }}
-          />
-          <Bar dataKey="value" radius={[3, 3, 0, 0]} maxBarSize={40}>
-            {chartData.map((entry, index) => {
-              const v = entry.value;
-              let fill = "hsl(var(--primary))";
-              if (isPct || colorize) {
-                if (v != null && v > 0) fill = "#ef4444";
-                else if (v != null && v < 0) fill = "#22c55e";
-                else fill = "hsl(var(--muted-foreground))";
-              }
-              return <Cell key={index} fill={fill} />;
-            })}
-          </Bar>
-        </BarChart>
-      </ResponsiveContainer>
+    <div className="h-[280px] w-full">
+      <ReactECharts option={option} style={{ height: "100%", width: "100%" }} opts={{ renderer: "canvas" }} />
     </div>
   );
 }
@@ -1339,22 +1396,28 @@ export function StockFinanceChart({ vtSymbol }: StockFinanceChartProps) {
 
   return (
     <div className="space-y-4">
-      {/* Zone A: Summary metric cards */}
-      {items[0] && <SummaryCardGrid item={items[0]} />}
+      {/* Zone A: Summary metric cards (clickable → switch trend chart) */}
+      {items[0] && (
+        <SummaryCardGrid
+          item={items[0]}
+          selectedKey={selectedChartKey}
+          onSelect={handleSelectKey}
+        />
+      )}
 
       {/* Zone B: Unified interactive trend chart */}
       <div className="rounded-md border">
         <div className="flex items-center justify-between border-b px-4 py-2">
           <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">
+            <span className="text-sm font-semibold text-foreground">
               {chartLabel}
             </span>
             <span className="text-xs text-muted-foreground">
-              趋势
+              季度趋势
             </span>
           </div>
           <span className="text-xs text-muted-foreground">
-            点击表格行切换图表
+            点击上方卡片或下方表格行切换指标
           </span>
         </div>
         <div className="px-2 py-2">

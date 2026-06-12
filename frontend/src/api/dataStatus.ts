@@ -6,7 +6,7 @@ export function fetchHealth() {
 }
 
 export function fetchReady() {
-  return apiClient.get<ReadyStatus>("/ready");
+  return apiClient.get<ReadyStatus>("/ready", { allowErrorData: true });
 }
 
 export function fetchDataStatus() {
