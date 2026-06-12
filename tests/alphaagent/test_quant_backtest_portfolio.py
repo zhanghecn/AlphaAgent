@@ -70,6 +70,29 @@ def test_mainline_pullback_score_uses_smart_money_proxy_inputs() -> None:
     assert "not proof of main-force intent" in boosted.evidence["smart_money_note"]
 
 
+def test_mainline_pullback_liquidity_estimates_a_share_volume_lots() -> None:
+    bars = _bars()
+    bars = [
+        Bar(
+            trade_date=bar.trade_date,
+            open_price=bar.open_price,
+            high_price=bar.high_price,
+            low_price=bar.low_price,
+            close_price=100.0,
+            volume=1_000_000,
+            turnover=None,
+            change_pct=bar.change_pct,
+        )
+        for bar in bars
+    ]
+
+    score = score_stock("600000.SSE", bars, bars[-1].trade_date)
+
+    assert score.evidence["turnover_estimated_from_volume"] is True
+    assert score.evidence["turnover20"] == 10_000_000_000
+    assert score.liquidity_score == 100.0
+
+
 def test_quant_smart_money_loaders_score_observable_tables() -> None:
     from alphaagent.server.services.quant import screening
 

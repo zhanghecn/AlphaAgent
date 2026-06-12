@@ -191,7 +191,7 @@ def backtest_report(backtest_id: int, trade_limit: int = 50) -> dict[str, Any]:
         trades = session.execute(
             select(schema.backtest_trades)
             .where(schema.backtest_trades.c.backtest_id == backtest_id)
-            .order_by(schema.backtest_trades.c.trade_date, schema.backtest_trades.c.id)
+            .order_by(desc(schema.backtest_trades.c.trade_date), desc(schema.backtest_trades.c.id))
             .limit(min(max(trade_limit, 1), 500))
         ).mappings().all()
         all_trades = session.execute(
@@ -265,6 +265,7 @@ def backtest_report(backtest_id: int, trade_limit: int = 50) -> dict[str, Any]:
     trade_dicts = _with_stock_names(trade_dicts, stock_names)
     all_trade_dicts = _with_stock_names(all_trade_dicts, stock_names)
     order_dicts = _with_stock_names(order_dicts, stock_names)
+    recent_trade_dicts = [_mapping_to_api(row) for row in trade_dicts]
     equity_dicts = [dict(row) for row in equity]
     sample_bar_dicts = [dict(row) for row in sample_bars]
     closed_trades = _closed_trades(all_trade_dicts)
@@ -295,7 +296,8 @@ def backtest_report(backtest_id: int, trade_limit: int = 50) -> dict[str, Any]:
         "metrics": metrics,
         "extended_metrics": extended_metrics,
         "summary_rows": _metric_rows(metrics),
-        "trades": [_mapping_to_api(row) for row in trade_dicts],
+        "trades": recent_trade_dicts,
+        "recent_trades": recent_trade_dicts,
         "trade_count": len(all_trade_dicts),
         "returned_trade_count": len(trade_dicts),
         "closed_trades": closed_trades[: min(max(trade_limit, 1), 500)],
@@ -437,6 +439,127 @@ def backtest_equity(backtest_id: int) -> dict[str, Any]:
     return {"status": "ready" if rows else "empty", "items": [_mapping_to_api(dict(row)) for row in rows]}
 
 
+def backtest_day_detail(backtest_id: int, trade_date: date) -> dict[str, Any]:
+    if not is_database_configured():
+        return {"status": "unavailable", "message": "DATABASE_URL not configured"}
+    _ensure_backtest_schema()
+    with session_scope() as session:
+        run = session.execute(select(schema.backtest_runs).where(schema.backtest_runs.c.id == backtest_id)).mappings().first()
+        if not run:
+            return {"status": "not_found", "id": backtest_id}
+        equity = session.execute(
+            select(schema.backtest_daily_equity)
+            .where(
+                schema.backtest_daily_equity.c.backtest_id == backtest_id,
+                schema.backtest_daily_equity.c.trade_date == trade_date,
+            )
+        ).mappings().first()
+        position_rows = session.execute(
+            select(schema.backtest_daily_positions)
+            .where(
+                schema.backtest_daily_positions.c.backtest_id == backtest_id,
+                schema.backtest_daily_positions.c.trade_date == trade_date,
+            )
+            .order_by(desc(schema.backtest_daily_positions.c.market_value), schema.backtest_daily_positions.c.vt_symbol)
+        ).mappings().all()
+        trade_rows = session.execute(
+            select(schema.backtest_trades)
+            .where(
+                schema.backtest_trades.c.backtest_id == backtest_id,
+                schema.backtest_trades.c.trade_date == trade_date,
+            )
+            .order_by(schema.backtest_trades.c.id)
+        ).mappings().all()
+        order_rows = session.execute(
+            select(schema.backtest_orders)
+            .where(
+                schema.backtest_orders.c.backtest_id == backtest_id,
+                schema.backtest_orders.c.trade_date == trade_date,
+            )
+            .order_by(schema.backtest_orders.c.id)
+        ).mappings().all()
+        position_dicts = [dict(row) for row in position_rows]
+        trade_dicts = [dict(row) for row in trade_rows]
+        order_dicts = [dict(row) for row in order_rows]
+        stock_names = _load_stock_names(session, _symbols_from_rows(position_dicts, trade_dicts, order_dicts))
+
+    named_positions = _with_stock_names(position_dicts, stock_names)
+    named_trades = _with_stock_names(trade_dicts, stock_names)
+    named_orders = _with_stock_names(order_dicts, stock_names)
+    buys = [row for row in named_trades if row.get("side") == "BUY"]
+    sells = [row for row in named_trades if row.get("side") == "SELL"]
+    return {
+        "status": "ready" if equity or position_rows or trade_rows or order_rows else "empty",
+        "backtest_id": backtest_id,
+        "trade_date": trade_date.isoformat(),
+        "equity": _mapping_to_api(dict(equity)) if equity else None,
+        "positions": [_mapping_to_api(row) for row in named_positions],
+        "trades": [_mapping_to_api(row) for row in named_trades],
+        "buy_trades": [_mapping_to_api(row) for row in buys],
+        "sell_trades": [_mapping_to_api(row) for row in sells],
+        "orders": [_mapping_to_api(row) for row in named_orders],
+        "snapshot_available": bool(position_rows),
+        "note": "旧回测没有逐股持仓快照时，需要重跑回测后才能查看每日每只持仓市值。",
+    }
+
+
+def backtest_symbol_detail(backtest_id: int, vt_symbol: str) -> dict[str, Any]:
+    if not is_database_configured():
+        return {"status": "unavailable", "message": "DATABASE_URL not configured"}
+    symbol = _normalize_symbol(vt_symbol)
+    if not symbol:
+        return {"status": "invalid_symbol", "message": "vt_symbol is required"}
+    _ensure_backtest_schema()
+    with session_scope() as session:
+        run = session.execute(select(schema.backtest_runs).where(schema.backtest_runs.c.id == backtest_id)).mappings().first()
+        if not run:
+            return {"status": "not_found", "id": backtest_id}
+        position_rows = session.execute(
+            select(schema.backtest_daily_positions)
+            .where(
+                schema.backtest_daily_positions.c.backtest_id == backtest_id,
+                schema.backtest_daily_positions.c.vt_symbol == symbol,
+            )
+            .order_by(schema.backtest_daily_positions.c.trade_date)
+        ).mappings().all()
+        trade_rows = session.execute(
+            select(schema.backtest_trades)
+            .where(
+                schema.backtest_trades.c.backtest_id == backtest_id,
+                schema.backtest_trades.c.vt_symbol == symbol,
+            )
+            .order_by(schema.backtest_trades.c.trade_date, schema.backtest_trades.c.id)
+        ).mappings().all()
+        order_rows = session.execute(
+            select(schema.backtest_orders)
+            .where(
+                schema.backtest_orders.c.backtest_id == backtest_id,
+                schema.backtest_orders.c.vt_symbol == symbol,
+            )
+            .order_by(schema.backtest_orders.c.trade_date, schema.backtest_orders.c.id)
+        ).mappings().all()
+        position_dicts = [dict(row) for row in position_rows]
+        trade_dicts = [dict(row) for row in trade_rows]
+        order_dicts = [dict(row) for row in order_rows]
+        stock_names = _load_stock_names(session, [symbol])
+
+    named_positions = _with_stock_names(position_dicts, stock_names)
+    named_trades = _with_stock_names(trade_dicts, stock_names)
+    return {
+        "status": "ready" if position_rows or trade_rows or order_rows else "empty",
+        "backtest_id": backtest_id,
+        "vt_symbol": symbol,
+        **_stock_board_payload(symbol, stock_names.get(symbol)),
+        "name": (stock_names.get(symbol) or {}).get("name"),
+        "positions": [_mapping_to_api(row) for row in named_positions],
+        "trades": [_mapping_to_api(row) for row in named_trades],
+        "orders": [_mapping_to_api(row) for row in _with_stock_names(order_dicts, stock_names)],
+        "closed_trades": _closed_trades(named_trades),
+        "snapshot_available": bool(position_rows),
+        "note": "旧回测没有逐股持仓快照时，需要重跑回测后才能查看该股票每日持仓路径。",
+    }
+
+
 def backtest_audit(backtest_id: int, vt_symbol: str | None = None, limit: int = 200) -> dict[str, Any]:
     if not is_database_configured():
         return {"status": "unavailable", "items": []}
@@ -511,6 +634,7 @@ def _simulate(
     trades: list[Trade] = []
     orders: list[dict[str, Any]] = []
     equity_curve: list[dict[str, Any]] = []
+    position_snapshots: list[dict[str, Any]] = []
     bar_index = _bar_index(bars_by_symbol)
     if params.intraday_entry:
         minute_index = minute_index if minute_index is not None else _load_minute_bar_index(session, list(bars_by_symbol), trading_days[0], trading_days[-1])
@@ -659,21 +783,24 @@ def _simulate(
                         "reason": candidate.evidence,
                     })
 
-        total_equity = cash + _market_value(positions, today_bars)
+        market_value = _market_value(positions, today_bars)
+        total_equity = cash + market_value
         equity_curve.append(
             {
                 "trade_date": current_day,
                 "cash": cash,
-                "market_value": total_equity - cash,
+                "market_value": market_value,
                 "total_equity": total_equity,
                 "position_count": len(positions),
             }
         )
+        position_snapshots.extend(_position_snapshot_rows(current_day, positions, today_bars, total_equity))
 
     metrics = _metrics(params.initial_cash, equity_curve, trades)
     return {
         "metrics": metrics,
         "equity": [_mapping_to_api(item) for item in equity_curve],
+        "positions": [_mapping_to_api(item) for item in position_snapshots],
         "trades": [_trade_to_api(trade) for trade in trades],
         "orders": [_mapping_to_api(item) for item in orders],
     }
@@ -946,6 +1073,40 @@ def _market_value(positions: dict[str, Position], today_bars: dict[str, Bar]) ->
         else:
             value += position.cost_price * position.volume
     return value
+
+
+def _position_snapshot_rows(
+    trade_date: date,
+    positions: dict[str, Position],
+    today_bars: dict[str, Bar],
+    total_equity: float,
+) -> list[dict[str, Any]]:
+    rows = []
+    for vt_symbol, position in sorted(positions.items()):
+        bar = today_bars.get(vt_symbol)
+        close_price = bar.close_price if bar else position.cost_price
+        market_value = close_price * position.volume
+        cost_amount = position.cost_price * position.volume
+        floating_pnl = market_value - cost_amount
+        rows.append(
+            {
+                "trade_date": trade_date,
+                "vt_symbol": vt_symbol,
+                "name": position.name,
+                "volume": position.volume,
+                "cost_price": position.cost_price,
+                "close_price": close_price,
+                "market_value": market_value,
+                "floating_pnl": floating_pnl,
+                "floating_pnl_pct": floating_pnl / cost_amount * 100 if cost_amount else None,
+                "weight_pct": market_value / total_equity * 100 if total_equity else None,
+                "entry_date": position.entry_date,
+                "holding_days": (trade_date - position.entry_date).days,
+                "highest_price": position.highest_price,
+                "raw": position.reason,
+            }
+        )
+    return rows
 
 
 def _resolve_buy_fill(
@@ -2657,10 +2818,18 @@ def _data_quality_snapshot(session) -> dict[str, Any]:
     for name, table in tables.items():
         count = session.execute(select(func.count()).select_from(table)).scalar_one()
         result[name] = {"count": int(count or 0)}
+    daily_count = int((result.get("stock_daily_bars") or {}).get("count") or 0)
+    daily_turnover_count = session.execute(
+        select(func.count()).select_from(schema.stock_daily_bars).where(schema.stock_daily_bars.c.turnover.is_not(None))
+    ).scalar_one()
+    result["stock_daily_bars"]["turnover_count"] = int(daily_turnover_count or 0)
+    result["stock_daily_bars"]["turnover_coverage_pct"] = _ratio_pct(daily_turnover_count, daily_count)
     result["limitations"] = [
         "stock_fund_flows、stock_hot_ranks、stock_lhb_records 为空时，游资/情绪信号只能使用价格成交量代理。",
         "sector_period_scores 为空时，主线板块评分退化为中性或缺失。",
         "stock_minute_bars 覆盖不足时，尾盘低吸只能对已同步样本做分钟级验证。",
+        "stock_financial_reports 为空时，股票详情页实时可查财报也不会进入筛选/回测评分。",
+        "stock_daily_bars.turnover 覆盖不足时，流动性评分会退化为 close * volume 估算，可能影响买点过滤。",
     ]
     return result
 
@@ -2890,6 +3059,13 @@ def _persist_run(session, params: BacktestParams, run: dict[str, Any], end: date
             schema.backtest_daily_equity.insert().values(
                 backtest_id=backtest_id,
                 **_table_values(schema.backtest_daily_equity, item),
+            )
+        )
+    for item in run.get("positions") or []:
+        session.execute(
+            schema.backtest_daily_positions.insert().values(
+                backtest_id=backtest_id,
+                **_table_values(schema.backtest_daily_positions, item),
             )
         )
     for item in run["orders"]:

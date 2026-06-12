@@ -73,6 +73,28 @@ def get_recommendation(recommendation_id: int):
         return _service_error(exc)
 
 
+@router.get("/symbols/{vt_symbol}/signal-history")
+def get_symbol_signal_history(
+    vt_symbol: str,
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    min_entry_score: float = Query(default=68.0, ge=0, le=100),
+    limit: int = Query(default=200, ge=1, le=1000),
+):
+    try:
+        return ok(
+            screening.symbol_signal_history(
+                vt_symbol,
+                start=_parse_date(start),
+                end=_parse_date(end),
+                min_entry_score=min_entry_score,
+                limit=limit,
+            )
+        )
+    except Exception as exc:
+        return _service_error(exc)
+
+
 def _parse_date(value: Any) -> date | None:
     if not value:
         return None

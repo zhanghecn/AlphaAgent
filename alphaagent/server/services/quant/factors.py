@@ -67,7 +67,7 @@ def score_stock(
 
     closes = [bar.close_price for bar in visible_bars]
     volumes = [bar.volume or 0 for bar in visible_bars]
-    turnover_values = [bar.turnover if bar.turnover and bar.turnover > 0 else (bar.close_price * (bar.volume or 0)) for bar in visible_bars]
+    turnover_values = [daily_turnover_yuan(bar) for bar in visible_bars]
     latest = visible_bars[-1]
 
     return_20d = period_return(closes, 20)
@@ -150,6 +150,12 @@ def moving_average(values: list[float], window: int) -> float | None:
     if len(values) < window:
         return None
     return sum(values[-window:]) / window
+
+
+def daily_turnover_yuan(bar: Bar) -> float:
+    if bar.turnover and bar.turnover > 0:
+        return float(bar.turnover)
+    return bar.close_price * (bar.volume or 0) * 100
 
 
 def period_return(values: list[float], window: int) -> float | None:

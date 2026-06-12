@@ -443,8 +443,11 @@ class DataSyncRunner:
         limit = int(params.get("limit", 250))
         stock_limit = int(params.get("stock_limit", 0) or 0)
         only_missing = _truthy(params.get("only_missing", False))
+        symbols = _param_list(params.get("symbols"))
         with session_scope() as session:
             query = select(schema.stocks).order_by(desc(schema.stocks.c.turnover), desc(schema.stocks.c.market_cap))
+            if symbols:
+                query = query.where(schema.stocks.c.vt_symbol.in_(symbols))
             if only_missing:
                 existing_symbols = (
                     select(schema.stock_daily_bars.c.vt_symbol)

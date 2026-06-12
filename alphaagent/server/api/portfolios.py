@@ -45,6 +45,17 @@ def delete_group(group_id: int):
         return _service_error(exc)
 
 
+@router.post("/groups/reorder")
+def reorder_groups(payload: dict[str, Any] = Body(default_factory=dict)):
+    try:
+        group_ids = payload.get("group_ids") or []
+        if not isinstance(group_ids, list):
+            return _service_error(ValueError("group_ids must be a list"))
+        return ok(groups.reorder_groups([int(gid) for gid in group_ids]))
+    except Exception as exc:
+        return _service_error(exc)
+
+
 @router.get("/groups/{group_id}/items")
 def list_items(group_id: int):
     try:

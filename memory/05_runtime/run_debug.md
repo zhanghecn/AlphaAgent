@@ -56,7 +56,9 @@ uv run uvicorn alphaagent.server.main:app --host 0.0.0.0 --port 8000
 
 ```bash
 cd frontend
-npm run dev -- --host 0.0.0.0 --port 5173
+corepack enable
+pnpm install --frozen-lockfile
+pnpm run dev -- --host 0.0.0.0 --port 5173
 ```
 
 2026-06-11 验证过的备用端口：
@@ -88,6 +90,15 @@ docker compose up --build
 AlphaAgent 研究数据、同步任务、量化推荐、回测、持仓和模拟账户使用 Compose 内部 PostgreSQL；vn.py 运行目录挂载到 `vnpy_alphaagent_vntrader`，用于 `vt_setting.json`、vn.py SQLite `database.db` 和日志等本地文件。不要把根目录 `.env` 再改回 `host.docker.internal`，否则容器会绕过 Compose 内部数据库。
 
 日常不要使用 `docker compose build --no-cache`，除非正在排查基础镜像或依赖缓存问题。
+
+前端开发镜像 `frontend/Dockerfile` 使用 pnpm：
+
+- `frontend/package.json` 通过 `packageManager` 固定 `pnpm@11.6.0`，前端 lockfile 为 `frontend/pnpm-lock.yaml`；不要再维护 `frontend/package-lock.json`。
+- `frontend/pnpm-workspace.yaml` 记录 `allowBuilds.esbuild=true`，用于 pnpm 11 在 Docker/CI 中无交互批准 esbuild 的必要 postinstall。
+- Docker 通过 corepack 激活 pnpm，`pnpm install --frozen-lockfile --store-dir=/pnpm/store --prefer-offline` 使用 `--mount=type=cache,id=alphaagent-web-pnpm-store,target=/pnpm/store` 保留 pnpm store。
+- 本地 `docker-compose.yml` 给 `alphaagent-web` 构建传入 `PNPM_REGISTRY`，默认 `https://registry.npmmirror.com`；如需官方源，可在 `.env` 设置 `PNPM_REGISTRY=https://registry.npmjs.org/`。
+- 2026-06-13 验证：`cd frontend && pnpm install --frozen-lockfile` 约 0.9 秒，`pnpm run build` 通过；`docker compose build alphaagent-web` 在 pnpm store 已有部分缓存时安装依赖约 6.9 秒，重复构建约 0.4 秒；`docker build -f frontend/Dockerfile --build-arg PNPM_REGISTRY=https://registry.npmmirror.com -t alphaagent-web-runtime-test frontend` 通过。若 Docker 中未显式 `pnpm config set registry`，会退回 `registry.npmjs.org` 并可能因 `echarts` 等包下载超时。
+- 2026-06-12 曾用 npm BuildKit cache 把 `npm ci` 从约 7 分钟降到约 9 秒；2026-06-13 按用户偏好迁移到 pnpm，后续以 pnpm 构建结果为准。
 
 部署目录参考 `~/project/ai/sub2api/deploy`：
 
@@ -175,6 +186,11 @@ uv run python -m compileall alphaagent/server/api alphaagent/server/services alp
 - `uv run pytest tests/alphaagent -q`：170 passed, 1 skipped, 1 warning。
 - `uv run python -m compileall alphaagent/market/boards.py alphaagent/data_sources/akshare_adapter.py alphaagent/server/services/quant/screening.py alphaagent/server/services/backtest/engine.py alphaagent/server/api/quant.py alphaagent/server/api/backtests.py`：通过。
 - `cd frontend && npm run build`：通过，仅 Vite chunk 体积警告。
+- 用户反馈的 5 个量化问题已完成排查，审计报告见 `memory/06_backtests/2026-06-12_quant_issue_audit.md`；当前确认存在“最近买卖点”排序文案/展示错误、vn.py 状态文案不清、财报详情与回测数据链路不一致、日线成交额缺失影响流动性评分、缺每日逐股持仓快照等问题。
+- 2026-06-12 晚间修复复核：`uv run pytest tests/alphaagent/test_quant_backtest_portfolio.py -q` 通过（79 passed）；`uv run python -m compileall alphaagent/server/api alphaagent/server/services alphaagent/server/db` 通过；`cd frontend && npm run build` 通过，仅 Vite chunk 体积警告。API 已重建并重启，`/api/backtests/29/report?trade_limit=8` 返回最近交易日期 `2026-06-12/2026-06-11`；新回测 `#30` 写入 3 条 `backtest_daily_positions`，日期/股票钻取接口可返回逐股持仓。
+- 金安国纪历史信号复核：`/api/quant/symbols/002636.SZSE/signal-history?limit=10` 返回 `entry_signal_count=0`，但 `2026-02-09` 等多天只因 `liquidity_score=15` 未触发；这和 `stock_daily_bars.turnover` 覆盖为 0 直接相关。
+- 2026-06-12 日线成交额修复后复核：`AkShareAdapter.stock_bars("002636","SZSE",limit=1,interval="1d")` 返回 `source=tencent.stock_kline_full`、`turnover=7580017900.0`；定向运行 `sync_stock_daily_bars` 参数 `{"symbols":["002636.SZSE"],"limit":250}` 写入 250 行；正式 API `/api/quant/symbols/002636.SZSE/signal-history?limit=5` 返回 `entry_signal_count=26`，最近 `2026-06-12` 未入场原因只剩 `ma5_distance`。
+- 2026-06-12 成交额修复验证：`uv run pytest tests/alphaagent/test_akshare_adapter.py tests/alphaagent/test_quant_backtest_portfolio.py -q` 通过（111 passed, 1 warning）；`uv run python -m compileall alphaagent/data_sources/akshare_adapter.py alphaagent/server/services/data_sync.py alphaagent/server/services/quant/factors.py alphaagent/server/api alphaagent/server/services alphaagent/server/db` 通过；`cd frontend && npm run build` 通过，仅 Vite chunk 体积警告。API 已 `docker compose up -d --build alphaagent-api` 重建并健康。
 - `docker compose up -d --build alphaagent-api alphaagent-web` 使用依赖缓存重建业务层；`/api/backtests/1/audit?limit=3` 返回 `daily_dynamic_candidate_backtest` 方法说明和订单审计；`/portfolio`、`/quant`、`/stocks/600000.SSE` 浏览器 smoke 均通过。
 - 页面截图：`/tmp/alphaagent--quant-final.png`、`/tmp/alphaagent--portfolio-final.png`、`/tmp/alphaagent--stocks-600000.SSE-final.png`。
 - 追加 UI 复核：`/api/quant/recommendations?limit=3` 返回 `name`（如华虹宏力、联瑞新材、芯碁微装）；`/api/backtests/2/report?trade_limit=3` 和 `/api/backtests/2/audit?limit=3` 返回 `name`（如绿的谐波、紫金矿业、拓荆科技）；Playwright smoke 确认 `/quant` 候选、回测、日志页签均显示名称且“高级执行设置”默认折叠。

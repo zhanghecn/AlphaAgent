@@ -42,6 +42,44 @@ export interface QuantScreenRun {
   } | null;
 }
 
+export interface SymbolSignalHistoryRow {
+  trade_date: string;
+  vt_symbol: string;
+  total_score: number;
+  relative_strength_score: number;
+  washout_score: number;
+  trend_quality_score: number;
+  sector_mainline_score: number;
+  financial_improvement_score: number;
+  liquidity_score: number;
+  risk_score: number;
+  entry_signal: boolean;
+  ma5?: number | null;
+  ma5_distance_pct?: number | null;
+  turnover20?: number | null;
+  turnover_estimated_from_volume?: boolean;
+  failed_rules: string[];
+  failed_rule_count: number;
+  evidence?: Record<string, unknown>;
+}
+
+export interface SymbolSignalHistory extends StockIdentityFields {
+  status: string;
+  vt_symbol: string;
+  name?: string | null;
+  strategy_id: string;
+  strategy_version: string;
+  start_date?: string | null;
+  end_date?: string | null;
+  entry_signal_count: number;
+  entry_signals: SymbolSignalHistoryRow[];
+  best_total_score?: SymbolSignalHistoryRow | null;
+  best_entry_fit?: SymbolSignalHistoryRow | null;
+  near_misses: SymbolSignalHistoryRow[];
+  recent: SymbolSignalHistoryRow[];
+  rule?: Record<string, unknown>;
+}
+
 export interface BacktestRun {
   id: number;
   strategy_id: string;
@@ -108,6 +146,75 @@ export interface BacktestTrade extends StockIdentityFields {
   pnl?: number | null;
   reason?: string | null;
   raw?: Record<string, unknown>;
+}
+
+export interface BacktestEquityRow {
+  backtest_id?: number;
+  trade_date: string;
+  cash: number;
+  market_value: number;
+  total_equity: number;
+  drawdown_pct?: number | null;
+  position_count: number;
+}
+
+export interface BacktestPositionSnapshot extends StockIdentityFields {
+  backtest_id?: number;
+  trade_date: string;
+  vt_symbol: string;
+  name?: string | null;
+  volume: number;
+  cost_price: number;
+  close_price?: number | null;
+  market_value: number;
+  floating_pnl?: number | null;
+  floating_pnl_pct?: number | null;
+  weight_pct?: number | null;
+  entry_date: string;
+  holding_days: number;
+  highest_price?: number | null;
+  raw?: Record<string, unknown>;
+}
+
+export interface BacktestOrderEvent extends StockIdentityFields {
+  id?: number;
+  backtest_id?: number;
+  trade_date: string;
+  vt_symbol: string;
+  name?: string | null;
+  side: "BUY" | "SELL" | string;
+  price?: number | null;
+  volume?: number | null;
+  status: string;
+  reason?: string | null;
+  raw?: Record<string, unknown>;
+}
+
+export interface BacktestDayDetail {
+  status: string;
+  backtest_id: number;
+  trade_date: string;
+  equity?: BacktestEquityRow | null;
+  positions: BacktestPositionSnapshot[];
+  trades: BacktestTrade[];
+  buy_trades: BacktestTrade[];
+  sell_trades: BacktestTrade[];
+  orders: BacktestOrderEvent[];
+  snapshot_available: boolean;
+  note?: string;
+}
+
+export interface BacktestSymbolDetail extends StockIdentityFields {
+  status: string;
+  backtest_id: number;
+  vt_symbol: string;
+  name?: string | null;
+  positions: BacktestPositionSnapshot[];
+  trades: BacktestTrade[];
+  orders: BacktestOrderEvent[];
+  closed_trades: BacktestClosedTrade[];
+  snapshot_available: boolean;
+  note?: string;
 }
 
 export interface BacktestAuditEvent extends StockIdentityFields {
@@ -230,7 +337,7 @@ export interface BacktestOrderStats {
 }
 
 export interface BacktestDataQuality {
-  [tableName: string]: { count: number } | string[] | undefined;
+  [tableName: string]: { count: number; [metric: string]: number | string | null | undefined } | string[] | undefined;
   limitations?: string[];
 }
 
@@ -478,6 +585,7 @@ export interface BacktestReport {
   extended_metrics?: BacktestExtendedMetrics;
   summary_rows: Array<{ key: string; label: string; value: number | null }>;
   trades: BacktestTrade[];
+  recent_trades?: BacktestTrade[];
   trade_count: number;
   returned_trade_count?: number;
   closed_trades?: BacktestClosedTrade[];
@@ -486,6 +594,7 @@ export interface BacktestReport {
   symbol_performance?: BacktestSymbolPerformance[];
   worst_trades?: BacktestClosedTrade[];
   order_stats?: BacktestOrderStats;
+  equity_tail?: BacktestEquityRow[];
   data_quality?: BacktestDataQuality;
   benchmark?: {
     status: string;
@@ -621,6 +730,21 @@ export function fetchRecommendations(limit = 20) {
   );
 }
 
+export function fetchSymbolSignalHistory(vtSymbol: string, params: {
+  start?: string;
+  end?: string;
+  min_entry_score?: number;
+  limit?: number;
+} = {}) {
+  const search = new URLSearchParams();
+  if (params.start) search.set("start", params.start);
+  if (params.end) search.set("end", params.end);
+  if (params.min_entry_score != null) search.set("min_entry_score", String(params.min_entry_score));
+  if (params.limit != null) search.set("limit", String(params.limit));
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  return apiClient.get<SymbolSignalHistory>(`/quant/symbols/${encodeURIComponent(vtSymbol)}/signal-history${suffix}`);
+}
+
 export function fetchBacktests(limit = 10) {
   return apiClient.get<{ status: string; items: BacktestRun[] }>(`/backtests?limit=${limit}`);
 }
@@ -732,6 +856,14 @@ export function fetchBacktestReport(backtestId: number, tradeLimit = 50) {
   return apiClient.get<BacktestReport>(`/backtests/${backtestId}/report?trade_limit=${tradeLimit}`);
 }
 
+export function fetchBacktestDayDetail(backtestId: number, tradeDate: string) {
+  return apiClient.get<BacktestDayDetail>(`/backtests/${backtestId}/days/${tradeDate}`);
+}
+
+export function fetchBacktestSymbolDetail(backtestId: number, vtSymbol: string) {
+  return apiClient.get<BacktestSymbolDetail>(`/backtests/${backtestId}/symbols/${vtSymbol}`);
+}
+
 export function fetchBacktestAudit(backtestId: number, vtSymbol?: string, limit = 200) {
   const params = new URLSearchParams({ limit: String(limit) });
   if (vtSymbol) params.set("vt_symbol", vtSymbol);
@@ -776,6 +908,14 @@ export function addPortfolioGroupItem(groupId: number, payload: {
   strategy_version?: string;
 }) {
   return apiClient.post<{ status: string; group_id: number; vt_symbol: string }>(`/portfolio/groups/${groupId}/items`, payload);
+}
+
+export function removePortfolioGroupItem(groupId: number, vtSymbol: string) {
+  return apiClient.del<{ status: string; deleted: number }>(`/portfolio/groups/${groupId}/items/${encodeURIComponent(vtSymbol)}`);
+}
+
+export function reorderPortfolioGroups(groupIds: number[]) {
+  return apiClient.post<{ status: string; reordered: number }>("/portfolio/groups/reorder", { group_ids: groupIds });
 }
 
 export function fetchHoldings() {

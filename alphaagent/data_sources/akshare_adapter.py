@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.machinery
+import json
 import math
 import os
 import random
@@ -799,7 +800,8 @@ class AkShareAdapter:
         start_date: str | None = None,
         end_date: str | None = None,
     ) -> tuple[pd.DataFrame, str]:
-        prefixed = _prefixed_symbol(symbol, normalize_exchange(symbol))
+        normalized_exchange = normalize_exchange(symbol)
+        prefixed = _prefixed_symbol(symbol, normalized_exchange)
         if interval in {"1m", "5m", "15m", "30m", "60m"}:
             if not start_date and not end_date:
                 try:
@@ -810,20 +812,28 @@ class AkShareAdapter:
                         return df.tail(limit), "akshare.stock_zh_a_minute"
                 except Exception:
                     pass
-            df = _eastmoney_stock_kline(symbol, normalize_exchange(symbol), interval, limit, start_date, end_date)
+            df = _eastmoney_stock_kline(symbol, normalized_exchange, interval, limit, start_date, end_date)
             return df.tail(limit), "eastmoney.stock_kline_minute"
 
+        if not start_date and not end_date:
+            try:
+                df = _tencent_stock_kline_full(symbol, normalized_exchange, interval, limit)
+                if not df.empty:
+                    return df.tail(limit), "tencent.stock_kline_full"
+            except Exception:
+                pass
+
         try:
-            df = _tencent_stock_kline(symbol, normalize_exchange(symbol), interval, limit)
-            if not df.empty and not start_date and not end_date:
-                return df.tail(limit), "tencent.stock_kline"
+            df = _eastmoney_stock_kline(symbol, normalized_exchange, interval, limit, start_date, end_date)
+            if not df.empty:
+                return df.tail(limit), "eastmoney.stock_kline"
         except Exception:
             pass
 
         try:
-            df = _eastmoney_stock_kline(symbol, normalize_exchange(symbol), interval, limit, start_date, end_date)
-            if not df.empty:
-                return df.tail(limit), "eastmoney.stock_kline"
+            df = _tencent_stock_kline(symbol, normalized_exchange, interval, limit)
+            if not df.empty and not start_date and not end_date:
+                return df.tail(limit), "tencent.stock_kline"
         except Exception:
             pass
 
@@ -1910,7 +1920,12 @@ def _bar_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
         or normalized.get("date")
     )
     volume = _number(normalized.get("成交量") or normalized.get("volume"))
-    explicit_turnover = _number(normalized.get("成交额") or normalized.get("turnover"))
+    explicit_turnover = _number(
+        normalized.get("成交额")
+        or normalized.get("turnover")
+        or normalized.get("turnover_yuan")
+        or normalized.get("amount_yuan")
+    )
     if volume is None and "amount" in normalized and "成交额" not in normalized:
         volume = _number(normalized.get("amount"))
     return {
@@ -2007,6 +2022,67 @@ def _eastmoney_stock_kline(
     df["date"] = parsed_dates if interval in {"1m", "5m", "15m", "30m", "60m"} else parsed_dates.dt.date
     df.dropna(subset=["date", "open", "close"], inplace=True)
     return df
+
+
+def _tencent_stock_kline_full(symbol: str, exchange: str, interval: str, limit: int) -> pd.DataFrame:
+    period_map = {"1d": "day", "1w": "week", "1mo": "month"}
+    period = period_map.get(interval)
+    if period is None:
+        raise AkShareSourceError(f"Unsupported Tencent kline interval: {interval}")
+
+    prefixed = _prefixed_symbol(symbol, exchange)
+    count = min(max(limit, 5), 3000)
+    url = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
+    params = {
+        "_var": "kline_data",
+        "param": f"{prefixed},{period},,,{count},",
+        "r": str(random.random()),
+    }
+    with _akshare_network_env():
+        response = requests.get(url, params=params, timeout=8)
+    response.raise_for_status()
+    payload = _parse_tencent_jsonp(response.text)
+    data = (((payload or {}).get("data") or {}).get(prefixed) or {})
+    rows = data.get(period) or []
+    if not rows:
+        return pd.DataFrame()
+
+    cleaned_rows = []
+    for row in rows:
+        if not isinstance(row, list) or len(row) < 9:
+            continue
+        cleaned_rows.append(
+            {
+                "date": row[0],
+                "open": row[1],
+                "close": row[2],
+                "high": row[3],
+                "low": row[4],
+                "volume": row[5],
+                "turnover_rate": row[7],
+                "turnover": row[8],
+            }
+        )
+    if not cleaned_rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(cleaned_rows)
+    for column in ("open", "close", "high", "low", "volume", "turnover", "turnover_rate"):
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+    df["turnover"] = df["turnover"] * 10_000
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+    df.dropna(subset=["date", "open", "close"], inplace=True)
+    return df
+
+
+def _parse_tencent_jsonp(text: str) -> dict[str, Any]:
+    content = text.strip()
+    if content.startswith("{"):
+        return json.loads(content)
+    start = content.find("=")
+    if start < 0:
+        raise AkShareSourceError("Tencent kline response is not valid JSONP")
+    return json.loads(content[start + 1 :].rstrip(";"))
 
 
 def _tencent_stock_kline(symbol: str, exchange: str, interval: str, limit: int) -> pd.DataFrame:
@@ -3075,15 +3151,19 @@ def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     temp[date_col] = pd.to_datetime(temp[date_col], errors="coerce")
     temp.dropna(subset=[date_col], inplace=True)
     temp.set_index(date_col, inplace=True)
-    result = temp.resample(rule).agg(
-        {
-            "open": "first",
-            "close": "last",
-            "high": "max",
-            "low": "min",
-            "amount": "sum",
-        }
-    )
+    aggregations = {
+        "open": "first",
+        "close": "last",
+        "high": "max",
+        "low": "min",
+    }
+    if "volume" in temp.columns:
+        aggregations["volume"] = "sum"
+    if "turnover" in temp.columns:
+        aggregations["turnover"] = "sum"
+    if "amount" in temp.columns:
+        aggregations["amount"] = "sum"
+    result = temp.resample(rule).agg(aggregations)
     result.dropna(subset=["open", "close"], inplace=True)
     result.reset_index(inplace=True)
     result.rename(columns={date_col: "date"}, inplace=True)

@@ -756,6 +756,28 @@ backtest_daily_equity = Table(
 )
 Index("ix_backtest_daily_equity_date", backtest_daily_equity.c.trade_date)
 
+backtest_daily_positions = Table(
+    "backtest_daily_positions",
+    metadata,
+    Column("backtest_id", BigInteger, ForeignKey("backtest_runs.id", ondelete="CASCADE"), primary_key=True),
+    Column("trade_date", Date, primary_key=True),
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("name", String(80), nullable=True),
+    Column("volume", Integer, nullable=False),
+    Column("cost_price", Float, nullable=False),
+    Column("close_price", Float, nullable=True),
+    Column("market_value", Float, nullable=False),
+    Column("floating_pnl", Float, nullable=True),
+    Column("floating_pnl_pct", Float, nullable=True),
+    Column("weight_pct", Float, nullable=True),
+    Column("entry_date", Date, nullable=False),
+    Column("holding_days", Integer, nullable=False, server_default="0"),
+    Column("highest_price", Float, nullable=True),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+)
+Index("ix_backtest_daily_positions_date", backtest_daily_positions.c.backtest_id, backtest_daily_positions.c.trade_date)
+Index("ix_backtest_daily_positions_symbol", backtest_daily_positions.c.backtest_id, backtest_daily_positions.c.vt_symbol)
+
 backtest_metrics = Table(
     "backtest_metrics",
     metadata,
@@ -775,6 +797,7 @@ portfolio_groups = Table(
     Column("description", Text, nullable=True),
     Column("auto_managed", Boolean, nullable=False, server_default="false"),
     Column("risk_profile", String(40), nullable=False, server_default="balanced"),
+    Column("sort_order", Integer, nullable=False, server_default="0"),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
     UniqueConstraint("name", name="uq_portfolio_group_name"),

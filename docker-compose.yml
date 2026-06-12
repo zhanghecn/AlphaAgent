@@ -51,6 +51,8 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       target: dev
+      args:
+        PNPM_REGISTRY: ${PNPM_REGISTRY:-https://registry.npmmirror.com}
     restart: unless-stopped
     environment:
       VITE_API_BASE_URL: http://localhost:8000/api

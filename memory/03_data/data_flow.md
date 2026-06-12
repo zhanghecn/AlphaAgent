@@ -50,6 +50,23 @@ vn.py 中数据需要分清四类：
 - `vnpy.trader.database.get_database()`。
 - 官方 `examples/download_bars/download_bars.ipynb`。
 
+## AlphaAgent 日线同步路径
+
+当前 AlphaAgent 自研服务的股票日线同步不走 vn.py Datafeed，而是：
+
+1. `alphaagent.server.services.data_sync.run_job("sync_stock_daily_bars")`
+2. `DataSyncRunner._run_sync_stock_daily_bars()`
+3. `AkShareAdapter.stock_bars(..., interval="1d")`
+4. 写入 PostgreSQL `stock_daily_bars`
+
+当前已验证事实：
+
+- 股票日线优先使用腾讯 `newfqkline` 接口，源码 helper 为 `_tencent_stock_kline_full()`。
+- 腾讯 `newfqkline` 的成交额字段单位为“万元”，入库前换算为“元”。
+- `stock_daily_bars.volume` 来自 A 股行情源，常见单位为“手”；旧数据缺 `turnover` 时，量化流动性兜底按 `close * volume * 100` 估算成交额。
+- `sync_stock_daily_bars` 支持 `symbols` 参数，可定向重跑单只股票，例如 `{"symbols":["002636.SZSE"],"limit":250}`。
+- 2026-06-12 已定向回填金安国纪 `002636.SZSE` 250 根日线，`turnover` 覆盖约 99.6%；全表历史旧数据仍需重跑补齐。
+
 ## DataManager
 
 文件/文档：

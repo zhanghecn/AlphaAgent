@@ -51,7 +51,7 @@ def list_groups() -> dict[str, Any]:
         return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
     ensure_default_groups()
     with session_scope() as session:
-        rows = session.execute(select(schema.portfolio_groups).order_by(schema.portfolio_groups.c.id)).mappings().all()
+        rows = session.execute(select(schema.portfolio_groups).order_by(schema.portfolio_groups.c.sort_order, schema.portfolio_groups.c.id)).mappings().all()
     return {"status": "ready", "items": [_mapping_to_api(dict(row)) for row in rows]}
 
 
@@ -74,6 +74,19 @@ def create_group(payload: dict[str, Any]) -> dict[str, Any]:
             .returning(schema.portfolio_groups.c.id)
         ).scalar_one()
     return {"status": "ready", "id": int(group_id)}
+
+
+def reorder_groups(group_ids: list[int]) -> dict[str, Any]:
+    if not is_database_configured():
+        return {"status": "unavailable", "message": "DATABASE_URL not configured"}
+    with session_scope() as session:
+        for idx, gid in enumerate(group_ids):
+            session.execute(
+                schema.portfolio_groups.update()
+                .where(schema.portfolio_groups.c.id == gid)
+                .values(sort_order=idx)
+            )
+    return {"status": "ready", "reordered": len(group_ids)}
 
 
 def update_group(group_id: int, payload: dict[str, Any]) -> dict[str, Any]:

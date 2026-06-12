@@ -12,10 +12,12 @@ from alphaagent.market.boards import normalize_included_boards
 from alphaagent.server.core.responses import fail, ok
 from alphaagent.server.services.backtest.engine import (
     BacktestParams,
+    backtest_day_detail,
     backtest_equity,
     backtest_metrics,
     backtest_report,
     backtest_report_csv,
+    backtest_symbol_detail,
     backtest_trades,
     backtest_audit,
     backtest_validation_grid,
@@ -187,6 +189,25 @@ def get_trades(backtest_id: int, limit: int = Query(default=500, ge=1, le=2000))
 def get_equity(backtest_id: int):
     try:
         return ok(backtest_equity(backtest_id))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/{backtest_id}/days/{trade_date}")
+def get_day_detail(backtest_id: int, trade_date: str):
+    try:
+        parsed_date = _parse_date(trade_date)
+        if parsed_date is None:
+            return JSONResponse(status_code=400, content=fail("INVALID_DATE", "trade_date is required."))
+        return ok(backtest_day_detail(backtest_id, parsed_date))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/{backtest_id}/symbols/{vt_symbol}")
+def get_symbol_detail(backtest_id: int, vt_symbol: str):
+    try:
+        return ok(backtest_symbol_detail(backtest_id, vt_symbol))
     except Exception as exc:
         return _service_error(exc)
 

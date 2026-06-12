@@ -220,6 +220,86 @@ def get_run(run_id: int) -> dict[str, Any]:
     return {"status": "ready", "item": _mapping_to_api(dict(row))}
 
 
+def symbol_signal_history(
+    vt_symbol: str,
+    *,
+    start: date | None = None,
+    end: date | None = None,
+    min_entry_score: float = 68.0,
+    limit: int = 200,
+) -> dict[str, Any]:
+    symbol = str(vt_symbol or "").strip().upper()
+    if not symbol:
+        return {"status": "invalid_symbol", "message": "vt_symbol is required"}
+    if not is_database_configured():
+        return {"status": "unavailable", "message": "DATABASE_URL not configured", "items": []}
+    _ensure_quant_schema()
+    with session_scope() as session:
+        stock = session.execute(select(schema.stocks).where(schema.stocks.c.vt_symbol == symbol)).mappings().first()
+        if not stock:
+            return {"status": "not_found", "vt_symbol": symbol, "items": []}
+        latest = end or session.execute(
+            select(func.max(schema.stock_daily_bars.c.trade_date)).where(schema.stock_daily_bars.c.vt_symbol == symbol)
+        ).scalar()
+        if latest is None:
+            return {"status": "empty", "vt_symbol": symbol, "items": []}
+        earliest = start or session.execute(
+            select(func.min(schema.stock_daily_bars.c.trade_date)).where(schema.stock_daily_bars.c.vt_symbol == symbol)
+        ).scalar()
+        bars = _load_bars(session, [symbol], latest, lookback_days=max((latest - earliest).days + 120, 200)).get(symbol, [])
+        trade_dates = [bar.trade_date for bar in bars if earliest <= bar.trade_date <= latest]
+        rows = []
+        for trade_date in trade_dates:
+            index_return_20d = _load_index_return_20d(session, trade_date)
+            sector_score = _load_sector_scores(session, [symbol], trade_date).get(symbol)
+            financial_score = _load_financial_scores(session, [symbol], trade_date).get(symbol)
+            fund_flow_score = _load_fund_flow_scores(session, [symbol], trade_date).get(symbol)
+            hot_rank_score = _load_hot_rank_scores(session, [symbol], trade_date).get(symbol)
+            lhb_score = _load_lhb_scores(session, [symbol], trade_date).get(symbol)
+            score = score_stock(
+                symbol,
+                bars,
+                trade_date,
+                index_return_20d=index_return_20d,
+                sector_score=sector_score,
+                financial_score=financial_score,
+                fund_flow_score=fund_flow_score,
+                hot_rank_score=hot_rank_score,
+                lhb_score=lhb_score,
+            )
+            if score.evidence.get("status") != "ready":
+                continue
+            rows.append(_symbol_signal_row(score, min_entry_score))
+
+    trigger_rows = [row for row in rows if row["entry_signal"]]
+    near_rows = sorted(rows, key=lambda row: (row["failed_rule_count"], -float(row["total_score"]), abs(float(row.get("ma5_distance_pct") or 999))))[:limit]
+    recent_rows = sorted(rows, key=lambda row: row["trade_date"], reverse=True)[:limit]
+    best_total = max(rows, key=lambda row: float(row["total_score"]), default=None)
+    best_entry_fit = near_rows[0] if near_rows else None
+    return {
+        "status": "ready" if rows else "empty",
+        "vt_symbol": symbol,
+        "name": stock.get("name"),
+        **stock_board_payload(symbol, stock.get("exchange")),
+        "strategy_id": STRATEGY_ID,
+        "strategy_version": STRATEGY_VERSION,
+        "start_date": earliest.isoformat() if earliest else None,
+        "end_date": latest.isoformat(),
+        "entry_signal_count": len(trigger_rows),
+        "entry_signals": trigger_rows[:limit],
+        "best_total_score": best_total,
+        "best_entry_fit": best_entry_fit,
+        "near_misses": near_rows,
+        "recent": recent_rows,
+        "rule": {
+            "min_entry_score": min_entry_score,
+            "ma5_distance_pct": "[-1.5, 2.0]",
+            "min_risk_score": 35,
+            "min_liquidity_score": 25,
+        },
+    }
+
+
 def _ensure_quant_schema() -> None:
     """Allow quant screening to run from service calls, not only API startup."""
 
@@ -662,6 +742,40 @@ def _recommendation_to_db(rank: int, item: SignalScore, run_id: int | None, stra
         "risk_control": default_risk_control(),
         "status": "active",
         "expires_at": item.trade_date + timedelta(days=7),
+    }
+
+
+def _symbol_signal_row(item: SignalScore, min_entry_score: float) -> dict[str, Any]:
+    evidence = item.evidence or {}
+    ma5_distance = evidence.get("ma5_distance_pct")
+    failed_rules = []
+    if item.total_score < min_entry_score:
+        failed_rules.append("total_score")
+    if ma5_distance is None or not (-1.5 <= float(ma5_distance) <= 2.0):
+        failed_rules.append("ma5_distance")
+    if item.risk_score < 35:
+        failed_rules.append("risk_score")
+    if item.liquidity_score < 25:
+        failed_rules.append("liquidity_score")
+    return {
+        "trade_date": item.trade_date.isoformat(),
+        "vt_symbol": item.vt_symbol,
+        "total_score": item.total_score,
+        "relative_strength_score": item.relative_strength_score,
+        "washout_score": item.washout_score,
+        "trend_quality_score": item.trend_quality_score,
+        "sector_mainline_score": item.sector_mainline_score,
+        "financial_improvement_score": item.financial_improvement_score,
+        "liquidity_score": item.liquidity_score,
+        "risk_score": item.risk_score,
+        "entry_signal": item.entry_signal,
+        "ma5": evidence.get("ma5"),
+        "ma5_distance_pct": ma5_distance,
+        "turnover20": evidence.get("turnover20"),
+        "turnover_estimated_from_volume": evidence.get("turnover_estimated_from_volume"),
+        "failed_rules": failed_rules,
+        "failed_rule_count": len(failed_rules),
+        "evidence": evidence,
     }
 
 

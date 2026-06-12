@@ -18,6 +18,7 @@ from alphaagent.data_sources.akshare_adapter import (
     _filter_bars_by_date,
     _financial_row_to_api,
     _sina_member_row_to_api,
+    _tencent_stock_kline_full,
 )
 from alphaagent.market.cache import market_cache
 from alphaagent.market.providers import RealMarketDataClient
@@ -431,12 +432,62 @@ def test_stock_bars_return_latest_tail_records(monkeypatch) -> None:
             )
 
     monkeypatch.setattr("importlib.import_module", lambda name: FakeModule)
+    monkeypatch.setattr("alphaagent.data_sources.akshare_adapter._tencent_stock_kline_full", lambda *args, **kwargs: pd.DataFrame())
     monkeypatch.setattr("alphaagent.data_sources.akshare_adapter._tencent_stock_kline", lambda *args, **kwargs: pd.DataFrame())
     monkeypatch.setattr("alphaagent.data_sources.akshare_adapter._eastmoney_stock_kline", lambda *args, **kwargs: pd.DataFrame())
 
     data = adapter.stock_bars("600487", "SSE", limit=2, interval="1d")
 
     assert [item["trade_date"] for item in data["items"]] == ["2026-06-04", "2026-06-05"]
+
+
+def test_stock_bars_prefers_tencent_full_kline_turnover(monkeypatch) -> None:
+    market_cache.clear()
+    adapter = AkShareAdapter()
+
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter._tencent_stock_kline_full",
+        lambda *args, **kwargs: pd.DataFrame(
+            [
+                {
+                    "date": "2026-06-12",
+                    "open": 89.99,
+                    "close": 89.88,
+                    "high": 93.28,
+                    "low": 86.92,
+                    "volume": 843772,
+                    "turnover": 7580017890,
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr("alphaagent.data_sources.akshare_adapter._eastmoney_stock_kline", lambda *args, **kwargs: pd.DataFrame())
+    monkeypatch.setattr("alphaagent.data_sources.akshare_adapter._tencent_stock_kline", lambda *args, **kwargs: pd.DataFrame())
+
+    data = adapter.stock_bars("002636", "SZSE", limit=1, interval="1d")
+
+    assert data["source"] == "tencent.stock_kline_full"
+    assert data["items"][0]["turnover"] == 7580017890
+
+
+def test_tencent_stock_kline_full_converts_turnover_wan_yuan(monkeypatch) -> None:
+    class FakeResponse:
+        text = (
+            'kline_data={"code":0,"msg":"","data":{"sz002636":{"day":['
+            '["2026-06-12","89.99","89.88","93.28","86.92","843772.00",{},"11.65","758001.79","0.00","0.00"]'
+            "]}}}"
+        )
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+    monkeypatch.setattr("requests.get", lambda *args, **kwargs: FakeResponse())
+
+    df = _tencent_stock_kline_full("002636", "SZSE", "1d", 5)
+
+    assert df.iloc[0]["volume"] == 843772
+    assert df.iloc[0]["turnover"] == pytest.approx(7580017900)
 
 
 def test_bar_row_to_api_accepts_minute_day_column() -> None:
