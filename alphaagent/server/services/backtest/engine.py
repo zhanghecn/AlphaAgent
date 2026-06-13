@@ -162,15 +162,27 @@ def get_backtest(backtest_id: int) -> dict[str, Any]:
     return {"status": "ready", "item": _mapping_to_api(dict(row))}
 
 
-def list_backtests(limit: int = 50) -> dict[str, Any]:
+def list_backtests(limit: int = 50, run_type: str = "all") -> dict[str, Any]:
     if not is_database_configured():
         return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
     _ensure_backtest_schema()
+    requested_type = str(run_type or "all").lower()
+    item_limit = min(max(limit, 1), 200)
+    query_limit = item_limit if requested_type == "all" else min(max(item_limit * 10, 200), 1000)
     with session_scope() as session:
         rows = session.execute(
-            select(schema.backtest_runs).order_by(desc(schema.backtest_runs.c.id)).limit(min(max(limit, 1), 200))
+            select(schema.backtest_runs).order_by(desc(schema.backtest_runs.c.id)).limit(query_limit)
         ).mappings().all()
-    return {"status": "ready", "items": [_mapping_to_api(dict(row)) for row in rows]}
+    items = []
+    for row in rows:
+        payload = _mapping_to_api(dict(row))
+        payload["run_type"] = _run_type_from_params(payload.get("params") or {})
+        if requested_type in {"portfolio", "symbol"} and payload["run_type"] != requested_type:
+            continue
+        items.append(payload)
+        if len(items) >= item_limit:
+            break
+    return {"status": "ready", "items": items}
 
 
 def backtest_metrics(backtest_id: int) -> dict[str, Any]:
@@ -178,6 +190,124 @@ def backtest_metrics(backtest_id: int) -> dict[str, Any]:
     if detail.get("status") != "ready":
         return detail
     return {"status": "ready", "backtest_id": backtest_id, "metrics": detail["item"].get("metrics") or {}}
+
+
+def backtest_signal_events(
+    backtest_id: int,
+    *,
+    start: date | None = None,
+    end: date | None = None,
+    vt_symbol: str | None = None,
+    side: str | None = None,
+    limit: int = 500,
+) -> dict[str, Any]:
+    if not is_database_configured():
+        return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
+    _ensure_backtest_schema()
+    with session_scope() as session:
+        run = session.execute(select(schema.backtest_runs).where(schema.backtest_runs.c.id == backtest_id)).mappings().first()
+        if not run:
+            return {"status": "not_found", "id": backtest_id, "items": []}
+        filters = [schema.backtest_signal_events.c.backtest_id == backtest_id]
+        if start is not None:
+            filters.append(schema.backtest_signal_events.c.trade_date >= start)
+        if end is not None:
+            filters.append(schema.backtest_signal_events.c.trade_date <= end)
+        symbol = _normalize_symbol(vt_symbol or "")
+        if symbol:
+            filters.append(schema.backtest_signal_events.c.vt_symbol == symbol)
+        normalized_side = str(side or "").strip().upper()
+        if normalized_side in {"BUY", "SELL"}:
+            filters.append(schema.backtest_signal_events.c.side == normalized_side)
+        rows = session.execute(
+            select(schema.backtest_signal_events)
+            .where(and_(*filters))
+            .order_by(desc(schema.backtest_signal_events.c.trade_date), schema.backtest_signal_events.c.vt_symbol, schema.backtest_signal_events.c.id)
+            .limit(min(max(limit, 1), 20_000))
+        ).mappings().all()
+        row_dicts = [dict(row) for row in rows]
+        stock_names = _load_stock_names(session, _symbols_from_rows(row_dicts))
+
+    named_rows = _with_stock_names(row_dicts, stock_names)
+    return {
+        "status": "ready" if rows else "empty",
+        "backtest_id": backtest_id,
+        "run_type": _run_type_from_params(run.get("params") or {}),
+        "items": [_mapping_to_api(row) for row in named_rows],
+        "returned_count": len(rows),
+        "note": "旧回测未生成全股票信号流水，请重跑组合回测。" if not rows else None,
+    }
+
+
+def backtest_signal_amount_preview(
+    backtest_id: int,
+    *,
+    capital: float,
+    max_positions: int,
+    start: date | None = None,
+    end: date | None = None,
+    vt_symbol: str | None = None,
+    side: str | None = None,
+    limit: int = 500,
+) -> dict[str, Any]:
+    events = backtest_signal_events(backtest_id, end=end, vt_symbol=vt_symbol, limit=20_000)
+    if events.get("status") not in {"ready", "empty"}:
+        return events
+    per_trade_budget = float(capital or 0) / max(int(max_positions or 1), 1)
+    lots_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    preview_rows = []
+    normalized_side = str(side or "").strip().upper()
+    event_rows = sorted(
+        events.get("items") or [],
+        key=lambda item: (str(item.get("trade_date") or ""), str(item.get("vt_symbol") or ""), 0 if str(item.get("side") or "").upper() == "BUY" else 1),
+    )
+    for item in event_rows:
+        row = dict(item)
+        price = _safe_float(row.get("price"))
+        side = str(row.get("side") or "").upper()
+        volume = 0
+        amount = 0.0
+        theoretical_pnl = None
+        if side == "BUY" and price and price > 0:
+            volume = int(per_trade_budget / price / 100) * 100
+            amount = price * volume
+            if volume > 0:
+                lots_by_symbol.setdefault(str(row["vt_symbol"]), []).append({"volume": volume, "price": price})
+        elif side == "SELL" and price and price > 0:
+            open_lots = lots_by_symbol.get(str(row["vt_symbol"])) or []
+            if open_lots:
+                lot = open_lots.pop(0)
+                volume = int(lot["volume"])
+                amount = price * volume
+                theoretical_pnl = (price - float(lot["price"])) * volume
+        row["preview_volume"] = volume
+        row["preview_amount"] = amount
+        row["preview_pnl"] = theoretical_pnl
+        row["preview_budget"] = per_trade_budget
+        preview_rows.append(row)
+    filtered_rows = []
+    for row in preview_rows:
+        trade_date = _as_date(row.get("trade_date"))
+        row_side = str(row.get("side") or "").upper()
+        if start is not None and (trade_date is None or trade_date < start):
+            continue
+        if end is not None and (trade_date is None or trade_date > end):
+            continue
+        if normalized_side in {"BUY", "SELL"} and row_side != normalized_side:
+            continue
+        filtered_rows.append(row)
+    filtered_rows.sort(key=lambda item: (str(item.get("trade_date") or ""), str(item.get("vt_symbol") or ""), int(item.get("id") or 0)), reverse=True)
+    item_limit = min(max(limit, 1), 2000)
+    return {
+        **events,
+        "status": "ready" if filtered_rows else "empty",
+        "capital": capital,
+        "max_positions": max_positions,
+        "per_trade_budget": per_trade_budget,
+        "items": filtered_rows[:item_limit],
+        "returned_count": len(filtered_rows[:item_limit]),
+        "source_count": len(preview_rows),
+    }
 
 
 def backtest_report(backtest_id: int, trade_limit: int = 50) -> dict[str, Any]:
@@ -288,6 +418,7 @@ def backtest_report(backtest_id: int, trade_limit: int = 50) -> dict[str, Any]:
     return {
         "status": "ready",
         "backtest_id": backtest_id,
+        "run_type": _run_type_from_params(run.get("params") or {}),
         "strategy_id": run["strategy_id"],
         "strategy_version": run["strategy_version"],
         "start_date": run["start_date"].isoformat(),
@@ -410,20 +541,44 @@ def backtest_validation_grid_csv(backtest_id: int, max_variants: int = 54) -> di
     }
 
 
-def backtest_trades(backtest_id: int, limit: int = 500) -> dict[str, Any]:
+def backtest_trades(backtest_id: int, limit: int = 500, offset: int = 0, order: str = "desc") -> dict[str, Any]:
     if not is_database_configured():
         return {"status": "unavailable", "items": []}
     _ensure_backtest_schema()
+    row_limit = min(max(limit, 1), 2000)
+    row_offset = max(offset, 0)
+    is_desc = str(order or "desc").lower() != "asc"
+    ordering = (
+        (desc(schema.backtest_trades.c.trade_date), desc(schema.backtest_trades.c.id))
+        if is_desc
+        else (schema.backtest_trades.c.trade_date, schema.backtest_trades.c.id)
+    )
     with session_scope() as session:
+        run = session.execute(select(schema.backtest_runs.c.id).where(schema.backtest_runs.c.id == backtest_id)).first()
+        if not run:
+            return {"status": "not_found", "backtest_id": backtest_id, "items": []}
+        total = session.execute(
+            select(func.count()).select_from(schema.backtest_trades).where(schema.backtest_trades.c.backtest_id == backtest_id)
+        ).scalar_one()
         rows = session.execute(
             select(schema.backtest_trades)
             .where(schema.backtest_trades.c.backtest_id == backtest_id)
-            .order_by(schema.backtest_trades.c.trade_date, schema.backtest_trades.c.id)
-            .limit(min(max(limit, 1), 2000))
+            .order_by(*ordering)
+            .offset(row_offset)
+            .limit(row_limit)
         ).mappings().all()
         row_dicts = [dict(row) for row in rows]
         stock_names = _load_stock_names(session, _symbols_from_rows(row_dicts))
-    return {"status": "ready" if rows else "empty", "items": [_mapping_to_api(row) for row in _with_stock_names(row_dicts, stock_names)]}
+    return {
+        "status": "ready" if rows else "empty",
+        "backtest_id": backtest_id,
+        "items": [_mapping_to_api(row) for row in _with_stock_names(row_dicts, stock_names)],
+        "limit": row_limit,
+        "offset": row_offset,
+        "total": int(total or 0),
+        "returned_count": len(rows),
+        "has_more": row_offset + len(rows) < int(total or 0),
+    }
 
 
 def backtest_equity(backtest_id: int) -> dict[str, Any]:
@@ -631,10 +786,12 @@ def _simulate(
     positions: dict[str, Position] = {}
     pending_buys: list[dict[str, Any]] = []
     pending_sells: list[dict[str, Any]] = []
+    theoretical_positions: dict[str, Position] = {}
     trades: list[Trade] = []
     orders: list[dict[str, Any]] = []
     equity_curve: list[dict[str, Any]] = []
     position_snapshots: list[dict[str, Any]] = []
+    signal_events: list[dict[str, Any]] = []
     bar_index = _bar_index(bars_by_symbol)
     if params.intraday_entry:
         minute_index = minute_index if minute_index is not None else _load_minute_bar_index(session, list(bars_by_symbol), trading_days[0], trading_days[-1])
@@ -769,11 +926,12 @@ def _simulate(
 
         if index < len(trading_days) - 1:
             next_day = trading_days[index + 1]
+            daily_candidates = None
             reserved_exit_count = len({str(order["vt_symbol"]) for order in pending_sells})
             free_slots = max(params.max_positions - len(positions) + reserved_exit_count - len(pending_buys), 0)
             if free_slots > 0:
-                candidates = _score_day(session, bars_by_symbol, current_day, params, score_cache, score_context)
-                for candidate in candidates[: min(free_slots, params.candidate_limit)]:
+                daily_candidates = _score_day(session, bars_by_symbol, current_day, params, score_cache, score_context)
+                for candidate in daily_candidates[: min(free_slots, params.candidate_limit)]:
                     if candidate.vt_symbol in positions:
                         continue
                     pending_buys.append({
@@ -782,6 +940,26 @@ def _simulate(
                         "vt_symbol": candidate.vt_symbol,
                         "reason": candidate.evidence,
                     })
+            if not params.symbols:
+                if daily_candidates is None:
+                    if score_cache is not None and current_day in score_cache:
+                        daily_candidates = _score_day(session, bars_by_symbol, current_day, params, score_cache, score_context)
+                    elif session is not None:
+                        daily_candidates = _score_day(session, bars_by_symbol, current_day, params, score_cache, score_context)
+                    else:
+                        daily_candidates = []
+                signal_events.extend(
+                    _signal_events_for_day(
+                        current_day,
+                        next_day,
+                        daily_candidates,
+                        theoretical_positions,
+                        today_bars,
+                        bar_index,
+                        stock_meta,
+                        params,
+                    )
+                )
 
         market_value = _market_value(positions, today_bars)
         total_equity = cash + market_value
@@ -801,6 +979,7 @@ def _simulate(
         "metrics": metrics,
         "equity": [_mapping_to_api(item) for item in equity_curve],
         "positions": [_mapping_to_api(item) for item in position_snapshots],
+        "signal_events": [_mapping_to_api(item) for item in signal_events],
         "trades": [_trade_to_api(trade) for trade in trades],
         "orders": [_mapping_to_api(item) for item in orders],
     }
@@ -870,6 +1049,91 @@ def _is_buy_candidate(score, params: BacktestParams) -> bool:
     if params.strict_entry:
         return bool(score.entry_signal)
     return True
+
+
+def _signal_events_for_day(
+    signal_date: date,
+    execute_date: date,
+    scores: list[Any],
+    theoretical_positions: dict[str, Position],
+    today_bars: dict[str, Bar],
+    bar_index: dict[str, dict[date, Bar]],
+    stock_meta: dict[str, dict[str, Any]],
+    params: BacktestParams,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for vt_symbol, position in list(theoretical_positions.items()):
+        bar = today_bars.get(vt_symbol)
+        if not bar:
+            continue
+        position.highest_price = max(position.highest_price, bar.high_price)
+        sell_reason = _sell_reason(position, bar, signal_date, params)
+        if not sell_reason or signal_date <= position.entry_date:
+            continue
+        execute_bar = bar_index.get(vt_symbol, {}).get(execute_date)
+        if not execute_bar:
+            continue
+        sell_price = execute_bar.open_price
+        del theoretical_positions[vt_symbol]
+        rows.append(
+            {
+                "trade_date": execute_date,
+                "signal_date": signal_date,
+                "execute_date": execute_date,
+                "vt_symbol": vt_symbol,
+                "side": "SELL",
+                "price": sell_price,
+                "score": None,
+                "reason": sell_reason,
+                "raw": {
+                    "mode": "signal流水",
+                    "entry_date": position.entry_date.isoformat(),
+                    "signal_date": signal_date.isoformat(),
+                    "execute_date": execute_date.isoformat(),
+                    "reason": sell_reason,
+                },
+            }
+        )
+
+    for score in scores:
+        if not _is_buy_candidate(score, params):
+            continue
+        if score.vt_symbol in theoretical_positions:
+            continue
+        execute_bar = bar_index.get(score.vt_symbol, {}).get(execute_date)
+        buy_price = execute_bar.open_price if execute_bar else None
+        buy_raw = {
+            "mode": "signal流水",
+            "signal_date": signal_date.isoformat(),
+            "execute_date": execute_date.isoformat(),
+            "entry_signal": bool(score.entry_signal),
+            "evidence": score.evidence,
+        }
+        rows.append(
+            {
+                "trade_date": execute_date,
+                "signal_date": signal_date,
+                "execute_date": execute_date,
+                "vt_symbol": score.vt_symbol,
+                "side": "BUY",
+                "price": buy_price,
+                "score": score.total_score,
+                "reason": "entry_signal",
+                "raw": buy_raw,
+            }
+        )
+        if buy_price and buy_price > 0:
+            theoretical_positions[score.vt_symbol] = Position(
+                vt_symbol=score.vt_symbol,
+                name=stock_meta.get(score.vt_symbol, {}).get("name"),
+                volume=100,
+                cost_price=buy_price,
+                entry_date=execute_date,
+                highest_price=execute_bar.high_price if execute_bar else buy_price,
+                reason=score.evidence,
+            )
+    rows.sort(key=lambda item: (item["trade_date"], item["vt_symbol"], 0 if item["side"] == "BUY" else 1))
+    return rows
 
 
 def _sell_reason(position: Position, bar: Bar, current_day: date, params: BacktestParams) -> str | None:
@@ -3068,6 +3332,13 @@ def _persist_run(session, params: BacktestParams, run: dict[str, Any], end: date
                 **_table_values(schema.backtest_daily_positions, item),
             )
         )
+    for item in run.get("signal_events") or []:
+        session.execute(
+            schema.backtest_signal_events.insert().values(
+                backtest_id=backtest_id,
+                **_table_values(schema.backtest_signal_events, item),
+            )
+        )
     for item in run["orders"]:
         session.execute(
             schema.backtest_orders.insert().values(
@@ -3123,9 +3394,23 @@ def _mapping_to_api(row: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _run_type_from_params(params: dict[str, Any]) -> str:
+    symbols = [symbol for symbol in (params.get("symbols") or []) if symbol]
+    return "symbol" if len(symbols) == 1 else "portfolio"
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _parse_dates(row: dict[str, Any]) -> dict[str, Any]:
     result = dict(row)
-    for key in ("trade_date", "entry_date", "start_date", "end_date"):
+    for key in ("trade_date", "signal_date", "execute_date", "entry_date", "start_date", "end_date"):
         value = result.get(key)
         if isinstance(value, str):
             result[key] = date.fromisoformat(value[:10])

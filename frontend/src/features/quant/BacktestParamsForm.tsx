@@ -2,17 +2,20 @@ import { Play, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { BacktestParams } from "@/features/quant/constants";
 import { QuantBoardSelector } from "@/features/quant/RecommendationsPanel";
+import { TradingDateSelector } from "@/features/quant/TradingDateSelector";
 
 export function BacktestParamsForm({
   params,
   onChange,
   isRunning,
   onRun,
+  tradingDates,
 }: {
   params: BacktestParams;
   onChange: (params: BacktestParams) => void;
   isRunning: boolean;
   onRun: () => void;
+  tradingDates: string[];
 }) {
   const setNumber = (key: keyof BacktestParams, value: string) => {
     onChange({ ...params, [key]: Number(value) });
@@ -28,16 +31,16 @@ export function BacktestParamsForm({
           isRunning={isRunning}
         />
       </div>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
-        <label className="text-sm">
-          <span className="text-xs text-muted-foreground">开始日期</span>
-          <input
-            className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
-            type="date"
-            value={params.start}
-            onChange={(event) => onChange({ ...params, start: event.target.value })}
-          />
-        </label>
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-7">
+        <TradingDateSelector
+          label="开始日期"
+          value={params.start}
+          dates={[...tradingDates, params.start]}
+          onChange={(start) => onChange({ ...params, start })}
+          disabled={isRunning}
+          className="items-start gap-1 lg:col-span-2"
+          selectClassName="mt-1 h-9 w-full min-w-0"
+        />
         <label className="text-sm">
           <span className="text-xs text-muted-foreground">初始资金</span>
           <input

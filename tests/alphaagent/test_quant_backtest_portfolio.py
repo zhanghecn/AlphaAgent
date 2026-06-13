@@ -651,6 +651,7 @@ def test_quant_schema_tables_are_registered() -> None:
     table_names = set(schema.metadata.tables)
 
     assert "quant_stock_signals" in table_names
+    assert "backtest_signal_events" in table_names
     assert "backtest_runs" in table_names
     assert "stock_minute_bars" in table_names
     assert "portfolio_groups" in table_names
@@ -672,6 +673,7 @@ def test_new_api_returns_unavailable_when_database_off(monkeypatch) -> None:
 
     client = TestClient(create_app())
 
+    assert client.get("/api/quant/trading-dates").json()["data"]["status"] == "unavailable"
     assert client.get("/api/quant/recommendations").json()["data"]["status"] == "unavailable"
     assert client.get("/api/backtests").json()["data"]["status"] == "unavailable"
     assert client.get("/api/portfolio/groups").json()["data"]["status"] == "unavailable"
@@ -708,6 +710,124 @@ def test_backtest_service_bootstraps_schema_without_api_startup(monkeypatch) -> 
 
     assert result == {"status": "ready", "items": []}
     assert calls[0] == ("create_schema", "fake-engine")
+
+
+def test_backtest_list_filters_portfolio_and_symbol_runs(monkeypatch) -> None:
+    from alphaagent.server.services.backtest import engine
+
+    class FakeRows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {
+                    "id": 2,
+                    "strategy_id": "mainline_leader_pullback",
+                    "strategy_version": "0.1.1",
+                    "start_date": date(2026, 1, 1),
+                    "end_date": date(2026, 6, 12),
+                    "status": "succeeded",
+                    "initial_cash": 100_000,
+                    "final_equity": 101_000,
+                    "params": {"symbols": ["600000.SSE"]},
+                    "metrics": {},
+                },
+                {
+                    "id": 1,
+                    "strategy_id": "mainline_leader_pullback",
+                    "strategy_version": "0.1.1",
+                    "start_date": date(2026, 1, 1),
+                    "end_date": date(2026, 6, 12),
+                    "status": "succeeded",
+                    "initial_cash": 1_000_000,
+                    "final_equity": 990_000,
+                    "params": {"symbols": []},
+                    "metrics": {},
+                },
+            ]
+
+    class FakeSession:
+        def execute(self, statement):
+            del statement
+            return FakeRows()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(engine, "is_database_configured", lambda: True)
+    monkeypatch.setattr(engine, "_ensure_backtest_schema", lambda: None)
+    monkeypatch.setattr(engine, "session_scope", fake_session_scope)
+
+    portfolio = engine.list_backtests(run_type="portfolio")
+    symbol = engine.list_backtests(run_type="symbol")
+
+    assert [item["id"] for item in portfolio["items"]] == [1]
+    assert portfolio["items"][0]["run_type"] == "portfolio"
+    assert [item["id"] for item in symbol["items"]] == [2]
+    assert symbol["items"][0]["run_type"] == "symbol"
+
+
+def test_backtest_list_fetches_extra_rows_before_run_type_filter(monkeypatch) -> None:
+    from alphaagent.server.services.backtest import engine
+
+    captured_limits: list[int] = []
+
+    class FakeRows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            rows = []
+            for index in range(220, 20, -1):
+                rows.append(
+                    {
+                        "id": index,
+                        "strategy_id": "mainline_leader_pullback",
+                        "strategy_version": "0.1.1",
+                        "start_date": date(2026, 1, 1),
+                        "end_date": date(2026, 6, 12),
+                        "status": "succeeded",
+                        "initial_cash": 100_000,
+                        "final_equity": 101_000,
+                        "params": {"symbols": [f"{index:06d}.SSE"]},
+                        "metrics": {},
+                    }
+                )
+            rows.append(
+                {
+                    "id": 20,
+                    "strategy_id": "mainline_leader_pullback",
+                    "strategy_version": "0.1.1",
+                    "start_date": date(2026, 1, 1),
+                    "end_date": date(2026, 6, 12),
+                    "status": "succeeded",
+                    "initial_cash": 1_000_000,
+                    "final_equity": 990_000,
+                    "params": {"symbols": []},
+                    "metrics": {},
+                }
+            )
+            return rows
+
+    class FakeSession:
+        def execute(self, statement):
+            captured_limits.append(statement._limit_clause.value)
+            return FakeRows()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(engine, "is_database_configured", lambda: True)
+    monkeypatch.setattr(engine, "_ensure_backtest_schema", lambda: None)
+    monkeypatch.setattr(engine, "session_scope", fake_session_scope)
+
+    result = engine.list_backtests(limit=20, run_type="portfolio")
+
+    assert captured_limits == [200]
+    assert [item["id"] for item in result["items"]] == [20]
 
 
 def test_quant_recommendation_marks_buy_only_for_entry_signal() -> None:
@@ -966,6 +1086,88 @@ def test_recommendations_use_latest_screen_run_id_not_same_day_old_versions(monk
     )
 
 
+def test_list_screen_runs_returns_recent_runs(monkeypatch) -> None:
+    from alphaagent.server.services.quant import screening
+
+    class FakeRows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {
+                    "id": 9,
+                    "strategy_id": "mainline_leader_pullback",
+                    "strategy_version": "0.1.1",
+                    "trade_date": date(2026, 6, 12),
+                    "status": "succeeded",
+                    "params": {"included_boards": ["main"]},
+                    "candidate_count": 300,
+                    "signal_count": 12,
+                    "recommendation_count": 20,
+                }
+            ]
+
+    class FakeSession:
+        def execute(self, statement):
+            assert "FROM quant_signal_runs" in str(statement)
+            return FakeRows()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(screening, "is_database_configured", lambda: True)
+    monkeypatch.setattr(screening, "_ensure_quant_schema", lambda: None)
+    monkeypatch.setattr(screening, "session_scope", fake_session_scope)
+
+    result = screening.list_screen_runs()
+
+    assert result["status"] == "ready"
+    assert result["items"][0]["trade_date"] == "2026-06-12"
+    assert result["items"][0]["recommendation_count"] == 20
+
+
+def test_list_trading_dates_returns_local_daily_bar_dates(monkeypatch) -> None:
+    from alphaagent.server.services.quant import screening
+
+    class FakeRows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {"trade_date": date(2026, 6, 12), "symbol_count": 2},
+                {"trade_date": date(2026, 6, 11), "symbol_count": 1},
+            ]
+
+    class FakeSession:
+        def execute(self, statement):
+            text = str(statement)
+            assert "FROM stock_daily_bars" in text
+            assert "GROUP BY stock_daily_bars.trade_date" in text
+            assert "ORDER BY stock_daily_bars.trade_date DESC" in text
+            return FakeRows()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(screening, "is_database_configured", lambda: True)
+    monkeypatch.setattr(screening, "_ensure_quant_schema", lambda: None)
+    monkeypatch.setattr(screening, "session_scope", fake_session_scope)
+
+    result = screening.list_trading_dates(limit=20)
+
+    assert result["status"] == "ready"
+    assert result["latest_trade_date"] == "2026-06-12"
+    assert result["returned_count"] == 2
+    assert result["items"] == [
+        {"trade_date": "2026-06-12", "symbol_count": 2},
+        {"trade_date": "2026-06-11", "symbol_count": 1},
+    ]
+
+
 def test_backtest_metric_rows_are_report_ready() -> None:
     from alphaagent.server.services.backtest import engine
 
@@ -1077,6 +1279,99 @@ def test_backtest_can_reject_when_minute_tail_entry_is_required() -> None:
 
     assert fill["status"] == "rejected"
     assert fill["reason"] == "tail_entry_not_triggered"
+
+
+def test_signal_events_use_independent_symbol_state_machine() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    symbol = "600000.SSE"
+    signal_day = date(2026, 1, 5)
+    execute_day = date(2026, 1, 6)
+    sell_day = date(2026, 1, 10)
+    bar_index = {
+        symbol: {
+            execute_day: engine.Bar(execute_day, 10, 10.5, 9.8, 10.2),
+            sell_day + timedelta(days=1): engine.Bar(sell_day + timedelta(days=1), 8.6, 8.9, 8.4, 8.5),
+        }
+    }
+    today_bars = {
+        symbol: engine.Bar(sell_day, 8.8, 9.0, 8.6, 8.7),
+    }
+    score = SignalScore(
+        vt_symbol=symbol,
+        trade_date=signal_day,
+        total_score=80,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={"status": "ready"},
+    )
+    params = engine.BacktestParams(stop_loss_pct=0.07)
+    positions: dict[str, engine.Position] = {}
+
+    buys = engine._signal_events_for_day(signal_day, execute_day, [score], positions, {}, bar_index, {symbol: {"name": "浦发银行"}}, params)
+    duplicate = engine._signal_events_for_day(signal_day + timedelta(days=1), sell_day, [score], positions, {}, bar_index, {}, params)
+    sells = engine._signal_events_for_day(sell_day, sell_day + timedelta(days=1), [], positions, today_bars, bar_index, {}, params)
+
+    assert [row["side"] for row in buys] == ["BUY"]
+    assert duplicate == []
+    assert [row["side"] for row in sells] == ["SELL"]
+    assert sells[0]["reason"] == "stop_loss"
+
+
+def test_signal_amount_preview_uses_equal_capital_budget(monkeypatch) -> None:
+    from alphaagent.server.services.backtest import engine
+
+    def fake_events(*args, **kwargs):
+        del args, kwargs
+        return {
+            "status": "ready",
+            "backtest_id": 5,
+            "items": [
+                {"trade_date": "2026-01-02", "vt_symbol": "600000.SSE", "side": "BUY", "price": 10.0},
+                {"trade_date": "2026-01-10", "vt_symbol": "600000.SSE", "side": "SELL", "price": 12.0},
+            ],
+        }
+
+    monkeypatch.setattr(engine, "backtest_signal_events", fake_events)
+
+    result = engine.backtest_signal_amount_preview(5, capital=1_000_000, max_positions=8)
+
+    assert result["per_trade_budget"] == 125_000
+    assert result["items"][1]["preview_volume"] == 12_500
+    assert result["items"][1]["preview_amount"] == 125_000
+    assert result["items"][0]["preview_volume"] == 12_500
+    assert result["items"][0]["preview_pnl"] == 25_000
+
+
+def test_signal_amount_preview_filters_after_pairing_trades(monkeypatch) -> None:
+    from alphaagent.server.services.backtest import engine
+
+    def fake_events(*args, **kwargs):
+        del args, kwargs
+        return {
+            "status": "ready",
+            "backtest_id": 5,
+            "items": [
+                {"trade_date": "2026-01-02", "vt_symbol": "600000.SSE", "side": "BUY", "price": 10.0},
+                {"trade_date": "2026-06-10", "vt_symbol": "600000.SSE", "side": "SELL", "price": 12.0},
+            ],
+        }
+
+    monkeypatch.setattr(engine, "backtest_signal_events", fake_events)
+
+    result = engine.backtest_signal_amount_preview(
+        5,
+        capital=1_000_000,
+        max_positions=8,
+        start=date(2026, 6, 1),
+        side="SELL",
+    )
+
+    assert len(result["items"]) == 1
+    assert result["items"][0]["side"] == "SELL"
+    assert result["items"][0]["preview_volume"] == 12_500
+    assert result["items"][0]["preview_pnl"] == 25_000
 
 
 def test_backtest_sell_signal_executes_next_day_open_without_lookahead() -> None:
@@ -1870,6 +2165,25 @@ def test_backtest_audit_api_passes_symbol_filter(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["data"]["vt_symbol"] == "600000.SSE"
     assert captured == {"backtest_id": 11, "vt_symbol": "600000.SSE", "limit": 77}
+
+
+def test_backtest_trades_api_passes_pagination(monkeypatch) -> None:
+    from alphaagent.server.api import backtests
+
+    captured = {}
+
+    def fake_trades(backtest_id, limit=500, offset=0, order="desc"):
+        captured.update({"backtest_id": backtest_id, "limit": limit, "offset": offset, "order": order})
+        return {"status": "ready", "backtest_id": backtest_id, "items": [], "limit": limit, "offset": offset, "total": 0, "has_more": False}
+
+    monkeypatch.setattr(backtests, "backtest_trades", fake_trades)
+
+    client = TestClient(create_app())
+    response = client.get("/api/backtests/11/trades?limit=20&offset=40&order=desc")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["offset"] == 40
+    assert captured == {"backtest_id": 11, "limit": 20, "offset": 40, "order": "desc"}
 
 
 def test_backtest_execution_quality_flags_minute_fallback_risk() -> None:

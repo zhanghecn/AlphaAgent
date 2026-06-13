@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     api_host: str = Field(default="0.0.0.0", alias="ALPHAAGENT_API_HOST")
     api_port: int = Field(default=8000, alias="ALPHAAGENT_API_PORT")
     cors_origins: str = Field(
-        default="http://localhost:5173,http://localhost:5174,http://localhost:5175,http://localhost:5176,http://localhost:5177,http://localhost:8000,http://localhost:8001,http://localhost:8002,http://localhost:8003",
+        default="http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,http://localhost:5175,http://127.0.0.1:5175,http://localhost:5176,http://127.0.0.1:5176,http://localhost:5177,http://127.0.0.1:5177,http://localhost:8000,http://127.0.0.1:8000,http://localhost:8001,http://127.0.0.1:8001,http://localhost:8002,http://127.0.0.1:8002,http://localhost:8003,http://127.0.0.1:8003",
         alias="CORS_ORIGINS",
     )
     database_url: str = Field(default="", alias="DATABASE_URL")

@@ -14,6 +14,8 @@ from alphaagent.server.services.backtest.engine import (
     BacktestParams,
     backtest_day_detail,
     backtest_equity,
+    backtest_signal_amount_preview,
+    backtest_signal_events,
     backtest_metrics,
     backtest_report,
     backtest_report_csv,
@@ -84,9 +86,12 @@ def create_strict_minute_backtest(payload: dict[str, Any] = Body(default_factory
 
 
 @router.get("")
-def list_runs(limit: int = Query(default=50, ge=1, le=200)):
+def list_runs(
+    limit: int = Query(default=50, ge=1, le=200),
+    run_type: str = Query(default="all", pattern="^(all|portfolio|symbol)$"),
+):
     try:
-        return ok(list_backtests(limit))
+        return ok(list_backtests(limit, run_type=run_type))
     except Exception as exc:
         return _service_error(exc)
 
@@ -178,9 +183,14 @@ def download_validation_grid_csv(backtest_id: int, max_variants: int = Query(def
 
 
 @router.get("/{backtest_id}/trades")
-def get_trades(backtest_id: int, limit: int = Query(default=500, ge=1, le=2000)):
+def get_trades(
+    backtest_id: int,
+    limit: int = Query(default=100, ge=1, le=2000),
+    offset: int = Query(default=0, ge=0),
+    order: str = Query(default="desc", pattern="^(asc|desc)$"),
+):
     try:
-        return ok(backtest_trades(backtest_id, limit))
+        return ok(backtest_trades(backtest_id, limit=limit, offset=offset, order=order))
     except Exception as exc:
         return _service_error(exc)
 
@@ -189,6 +199,58 @@ def get_trades(backtest_id: int, limit: int = Query(default=500, ge=1, le=2000))
 def get_equity(backtest_id: int):
     try:
         return ok(backtest_equity(backtest_id))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/{backtest_id}/signal-events")
+def get_signal_events(
+    backtest_id: int,
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    vt_symbol: str = Query(default=""),
+    side: str = Query(default=""),
+    limit: int = Query(default=500, ge=1, le=2000),
+):
+    try:
+        return ok(
+            backtest_signal_events(
+                backtest_id,
+                start=_parse_date(start),
+                end=_parse_date(end),
+                vt_symbol=vt_symbol or None,
+                side=side or None,
+                limit=limit,
+            )
+        )
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/{backtest_id}/signal-events/amount-preview")
+def get_signal_amount_preview(
+    backtest_id: int,
+    capital: float = Query(default=1_000_000, gt=0),
+    max_positions: int = Query(default=8, ge=1, le=200),
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    vt_symbol: str = Query(default=""),
+    side: str = Query(default=""),
+    limit: int = Query(default=500, ge=1, le=2000),
+):
+    try:
+        return ok(
+            backtest_signal_amount_preview(
+                backtest_id,
+                capital=capital,
+                max_positions=max_positions,
+                start=_parse_date(start),
+                end=_parse_date(end),
+                vt_symbol=vt_symbol or None,
+                side=side or None,
+                limit=limit,
+            )
+        )
     except Exception as exc:
         return _service_error(exc)
 

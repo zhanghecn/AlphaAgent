@@ -19,6 +19,7 @@ import {
   BacktestWorstTrades,
 } from "@/features/quant/BacktestTables";
 import { BacktestDrilldownPanel } from "@/features/quant/BacktestDrilldownPanel";
+import { BacktestSignalEventsPanel } from "@/features/quant/BacktestSignalEventsPanel";
 import {
   BacktestExecutionQualityPanel,
   BacktestRealityStats,
@@ -33,6 +34,7 @@ export function BacktestPanel({
   onSelect,
   params,
   onParamsChange,
+  tradingDates,
   isRunning,
   onRun,
   onStrictMinutePreset,
@@ -51,6 +53,7 @@ export function BacktestPanel({
   onSelect: (id: number) => void;
   params: BacktestParams;
   onParamsChange: (params: BacktestParams) => void;
+  tradingDates: string[];
   isRunning: boolean;
   onRun: () => void;
   onStrictMinutePreset: () => void;
@@ -105,6 +108,7 @@ export function BacktestPanel({
         <BacktestParamsForm
           params={params}
           onChange={onParamsChange}
+          tradingDates={tradingDates}
           isRunning={isRunning}
           onRun={onRun}
         />
@@ -117,7 +121,7 @@ export function BacktestPanel({
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
               <section className="space-y-4">
                 {report.execution_quality && <BacktestExecutionQualityPanel quality={report.execution_quality} />}
-                <BacktestTradeTable trades={report.recent_trades ?? report.trades} />
+                <BacktestTradeTable backtestId={selectedId} trades={report.recent_trades ?? report.trades} total={report.trade_count} />
                 <SignalCardList trades={report.recent_trades ?? report.trades} />
               </section>
               <section className="space-y-4">
@@ -130,6 +134,7 @@ export function BacktestPanel({
               <TabsList className="h-auto rounded-none bg-transparent p-0">
                 <TabsTrigger value="validation" className="rounded-none px-3 py-2 shadow-none">验证</TabsTrigger>
                 <TabsTrigger value="trades" className="rounded-none px-3 py-2 shadow-none">交易归因</TabsTrigger>
+                <TabsTrigger value="signals" className="rounded-none px-3 py-2 shadow-none">信号流水</TabsTrigger>
                 <TabsTrigger value="months" className="rounded-none px-3 py-2 shadow-none">收益分段</TabsTrigger>
               </TabsList>
               <TabsContent value="validation" className="space-y-4">
@@ -150,6 +155,17 @@ export function BacktestPanel({
                 {selectedId && <BacktestDrilldownPanel backtestId={selectedId} report={report} />}
                 <BacktestSymbolTable rows={report.symbol_performance ?? []} onAddToPortfolio={onAddToPortfolio} />
                 <BacktestWorstTrades rows={report.worst_trades ?? []} />
+              </TabsContent>
+              <TabsContent value="signals" className="space-y-4">
+                {selectedId && (
+                  <BacktestSignalEventsPanel
+                    backtestId={selectedId}
+                    defaultCapital={params.initial_cash}
+                    defaultMaxPositions={params.max_positions}
+                    defaultStart={report.start_date}
+                    defaultEnd={report.end_date}
+                  />
+                )}
               </TabsContent>
               <TabsContent value="months">
                 <BacktestMonthlyTable rows={report.monthly_returns ?? []} />

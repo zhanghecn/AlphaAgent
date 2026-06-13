@@ -18,7 +18,7 @@ services:
       ALPHAAGENT_ENV: ${ALPHAAGENT_ENV:-local}
       ALPHAAGENT_API_HOST: ${ALPHAAGENT_API_HOST:-0.0.0.0}
       ALPHAAGENT_API_PORT: ${ALPHAAGENT_API_PORT:-8000}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:8000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000}
       MARKET_TIMEOUT_SECONDS: ${MARKET_TIMEOUT_SECONDS:-8}
       MARKET_PAGE_SIZE: ${MARKET_PAGE_SIZE:-50}
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-alphaagent}:${POSTGRES_PASSWORD:-alphaagent-local}@postgres:5432/${POSTGRES_DB:-alphaagent}

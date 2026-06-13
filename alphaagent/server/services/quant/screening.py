@@ -143,6 +143,63 @@ def list_signals(trade_date: date | None = None, strategy_id: str = STRATEGY_ID,
     }
 
 
+def list_screen_runs(strategy_id: str = STRATEGY_ID, limit: int = 120) -> dict[str, Any]:
+    if not is_database_configured():
+        return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
+    _ensure_quant_schema()
+    with session_scope() as session:
+        rows = session.execute(
+            select(schema.quant_signal_runs)
+            .where(schema.quant_signal_runs.c.strategy_id == strategy_id)
+            .order_by(desc(schema.quant_signal_runs.c.trade_date), desc(schema.quant_signal_runs.c.id))
+            .limit(min(max(limit, 1), 500))
+        ).mappings().all()
+    return {"status": "ready" if rows else "empty", "items": [_mapping_to_api(dict(row)) for row in rows]}
+
+
+def list_trading_dates(start: date | None = None, end: date | None = None, limit: int = 600) -> dict[str, Any]:
+    """List local A-share trading dates from daily bar storage."""
+
+    if not is_database_configured():
+        return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
+    _ensure_quant_schema()
+
+    filters = []
+    if start is not None:
+        filters.append(schema.stock_daily_bars.c.trade_date >= start)
+    if end is not None:
+        filters.append(schema.stock_daily_bars.c.trade_date <= end)
+
+    query = (
+        select(
+            schema.stock_daily_bars.c.trade_date,
+            func.count(func.distinct(schema.stock_daily_bars.c.vt_symbol)).label("symbol_count"),
+        )
+        .group_by(schema.stock_daily_bars.c.trade_date)
+        .order_by(desc(schema.stock_daily_bars.c.trade_date))
+        .limit(min(max(limit, 1), 2000))
+    )
+    if filters:
+        query = query.where(and_(*filters))
+
+    with session_scope() as session:
+        rows = session.execute(query).mappings().all()
+
+    items = [
+        {
+            "trade_date": row["trade_date"].isoformat(),
+            "symbol_count": int(row["symbol_count"] or 0),
+        }
+        for row in rows
+    ]
+    return {
+        "status": "ready" if items else "empty",
+        "items": items,
+        "latest_trade_date": items[0]["trade_date"] if items else None,
+        "returned_count": len(items),
+    }
+
+
 def list_recommendations(trade_date: date | None = None, strategy_id: str = STRATEGY_ID, limit: int = 50) -> dict[str, Any]:
     if not is_database_configured():
         return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
@@ -727,6 +784,10 @@ def _score_to_db(item: SignalScore, run_id: int | None, strategy_id: str) -> dic
 
 
 def _recommendation_to_db(rank: int, item: SignalScore, run_id: int | None, strategy_id: str) -> dict[str, Any]:
+    reason = dict(item.evidence or {})
+    reason["risk_score"] = item.risk_score
+    reason["liquidity_score"] = item.liquidity_score
+    reason["failed_rules"] = _failed_entry_rules(item, 68.0)
     return {
         "run_id": run_id,
         "trade_date": item.trade_date,
@@ -738,7 +799,7 @@ def _recommendation_to_db(rank: int, item: SignalScore, run_id: int | None, stra
         "horizon": "SWING",
         "confidence": item.total_score / 100,
         "total_score": item.total_score,
-        "reason": item.evidence,
+        "reason": reason,
         "risk_control": default_risk_control(),
         "status": "active",
         "expires_at": item.trade_date + timedelta(days=7),
@@ -748,15 +809,7 @@ def _recommendation_to_db(rank: int, item: SignalScore, run_id: int | None, stra
 def _symbol_signal_row(item: SignalScore, min_entry_score: float) -> dict[str, Any]:
     evidence = item.evidence or {}
     ma5_distance = evidence.get("ma5_distance_pct")
-    failed_rules = []
-    if item.total_score < min_entry_score:
-        failed_rules.append("total_score")
-    if ma5_distance is None or not (-1.5 <= float(ma5_distance) <= 2.0):
-        failed_rules.append("ma5_distance")
-    if item.risk_score < 35:
-        failed_rules.append("risk_score")
-    if item.liquidity_score < 25:
-        failed_rules.append("liquidity_score")
+    failed_rules = _failed_entry_rules(item, min_entry_score)
     return {
         "trade_date": item.trade_date.isoformat(),
         "vt_symbol": item.vt_symbol,
@@ -777,6 +830,21 @@ def _symbol_signal_row(item: SignalScore, min_entry_score: float) -> dict[str, A
         "failed_rule_count": len(failed_rules),
         "evidence": evidence,
     }
+
+
+def _failed_entry_rules(item: SignalScore, min_entry_score: float) -> list[str]:
+    evidence = item.evidence or {}
+    ma5_distance = evidence.get("ma5_distance_pct")
+    failed_rules = []
+    if item.total_score < min_entry_score:
+        failed_rules.append("total_score")
+    if ma5_distance is None or not (-1.5 <= float(ma5_distance) <= 2.0):
+        failed_rules.append("ma5_distance")
+    if item.risk_score < 35:
+        failed_rules.append("risk_score")
+    if item.liquidity_score < 25:
+        failed_rules.append("liquidity_score")
+    return failed_rules
 
 
 def _score_to_api(item: SignalScore, stock: dict[str, Any] | None = None) -> dict[str, Any]:

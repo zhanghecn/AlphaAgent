@@ -53,12 +53,15 @@
 - `quant_stock_signals`: 单股评分明细。
 - `quant_recommendations`: 推荐列表。
 - `backtest_runs`: 回测主记录。
+- `backtest_signal_events`: 组合回测附带生成的全股票理论买卖点流水，用于核查每只股票历史何时触发买入/卖出。
 - `backtest_orders`: 回测订单，包括 pending、filled、rejected。
 - `backtest_trades`: 回测成交。
 - `backtest_daily_equity`: 每日总现金、持仓市值、总权益、持仓数量。
 - `backtest_metrics`: 指标键值。
 
 `backtest_daily_positions` 已新增。新回测会记录每日每只股票的持仓数量、成本、市值、浮盈和仓位占比；旧回测没有这张快照，只能展示总权益和成交流水。
+
+`backtest_signal_events` 只在组合回测生成，单股回测不写这张表。它是不受组合资金、最大持仓槽位和现金占用约束的理论信号流水，目的是回答“这只股票历史上有没有触发过当前策略买点/卖点”。真实组合盈亏仍以 `backtest_orders`、`backtest_trades`、`backtest_daily_equity` 和 `backtest_daily_positions` 为准。
 
 ## 3. 筛选流程
 
@@ -129,6 +132,13 @@ score = score_stock(
 # 9. persist=True 时，写入 quant_signal_runs、quant_stock_signals、quant_recommendations
 #    auto_portfolio=True 时，同步到“量化候选”持仓分组。
 ```
+
+候选核查接口：
+
+- `GET /api/quant/trading-dates?limit=600`：从本地 `stock_daily_bars` 聚合真实交易日，前端候选和回测开始日期选择器使用它，避免选到周末或无日线数据日期。
+- `GET /api/quant/screen-runs?limit=120`：列出已持久化的筛选运行，前端候选日期选择器会叠加显示运行编号和候选数；未运行的交易日可先选中再点“运行筛选”生成当天候选。
+- `GET /api/quant/recommendations?trade_date=YYYY-MM-DD&limit=200`：按指定日期返回当日推荐；如果这天没有持久化运行，会回退到当日日线对应的推荐记录。
+- 候选表的 `reason` 已包含 `risk_score`、`liquidity_score` 和 `failed_rules`，用于核查为什么某只股票只是观察或未通过买点门槛。
 
 ## 4. 因子评分
 
@@ -256,6 +266,14 @@ for current_day in trading_days:
     #    backtest_daily_positions 记录每只持仓的成本、市值、浮盈和仓位占比。
     record_daily_equity(current_day)
     record_daily_positions(current_day)
+
+    # 6. 组合回测额外生成全股票理论信号流水
+    #    这条流水对每只股票独立维护“理论是否持仓”状态：
+    #    没有理论持仓时，满足入场规则就记 BUY；
+    #    已有理论持仓时，不再重复记 BUY；
+    #    满足止损、止盈、跟踪止损或时间止损时，下一交易日有日线开盘价才记 SELL。
+    #    它用于核查候选和买卖点，不用于替代真实组合资金曲线。
+    record_signal_events(current_day)
 ```
 
 买入撮合：
@@ -326,16 +344,27 @@ elif holding_calendar_days >= time_stop_days * 2:
 - 点击某个交易日，列出当天每只持仓的市值、成本、浮盈、仓位占比。
 - 点击某个股票，展示完整持仓周期的每日持仓金额变化。
 - 在组合回测页直接按日期钻取“当天买了什么、卖了什么、剩余现金、持仓市值、总权益”。
+- 在组合回测页“信号流水”中，按日期、股票、方向查看全股票理论买卖点。
+- 输入总资金和最大持仓数后，按 `每笔预算 = 总资金 / 最大持仓数` 预览理论买卖点金额；买入按 100 股整数手换算，卖出沿用最近一次理论买入数量。
+- “组合最近成交”支持分页查看全部真实组合成交，不再只截取前 12 条。
 
 相关接口：
 
+- `GET /api/backtests?run_type=portfolio|symbol|all`：按组合/单股回测过滤列表；量化页默认只展示组合回测，避免单股回测把组合回测挤掉。
+- `GET /api/backtests/{id}/trades?limit=20&offset=0&order=desc`：分页查看真实组合成交。
 - `GET /api/backtests/{id}/days/{date}`：按日期钻取现金、持仓市值、总权益、当日买卖、逐股持仓。
 - `GET /api/backtests/{id}/symbols/{vt_symbol}`：按股票钻取买卖记录和每日持仓轨迹。
+- `GET /api/backtests/{id}/equity`：返回该回测实际覆盖的每日权益日期，前端“信号流水”的开始/结束日期选择器使用它，只在回测交易日之间切换。
+- `GET /api/backtests/{id}/signal-events`：查询组合回测生成的全股票理论信号流水，支持 `start`、`end`、`vt_symbol`、`side`、`limit`。
+- `GET /api/backtests/{id}/signal-events/amount-preview`：按总资金和最大持仓数预览理论成交数量、金额和配对卖出盈亏。
 
 边界：
 
 - 新增快照只对修复后运行的新回测完整可用。
 - 旧回测没有 `backtest_daily_positions` 历史快照，需要重跑才能看到逐股每日持仓。
+- 旧回测没有 `backtest_signal_events`，需要重跑组合回测后才能看到全股票理论信号流水。
+- 金额预览不是一条真实组合资金曲线，不考虑同一天多信号之间的现金争用，也不替代真实组合回测结果。
+- 组合回测不是“拿今天候选回放历史”。它从 `start_date` 到 `end_date` 逐个交易日重新评分，只用当日及以前数据生成当日候选；买入占用现金和持仓槽位，卖出成交后释放现金和仓位，后续交易日会继续使用剩余现金和空出来的仓位。
 
 ## 7. 严格尾盘分钟回测
 
@@ -430,7 +459,7 @@ result = run_backtest(params)
 9. 数据质量：日线覆盖、分钟线覆盖、财报覆盖、资金流/热度/龙虎榜覆盖。
 10. 稳健性检查：样本内外、不同市场环境、成本压力、参数敏感性、随机基准。
 
-当前 AlphaAgent 已补齐第 6-8 的基础能力：新回测会写每日逐股持仓，前端提供日期/股票钻取。严格尾盘分钟数据、财报落库和策略族扩展仍需继续完善。
+当前 AlphaAgent 已补齐第 6-8 的基础能力：新回测会写每日逐股持仓，前端提供日期/股票钻取；组合回测还会生成全股票理论信号流水和等权金额预览，便于核查“历史上有没有买点”。严格尾盘分钟数据、财报落库和策略族扩展仍需继续完善。
 
 ## 11. 下一步建议
 

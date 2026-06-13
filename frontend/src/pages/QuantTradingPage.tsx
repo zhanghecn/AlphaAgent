@@ -14,7 +14,9 @@ import {
   fetchPortfolioGroupItems,
   fetchPortfolioGroups,
   fetchRecommendations,
+  fetchScreenRuns,
   fetchSimulationAccounts,
+  fetchTradingDates,
   fetchVnpyStatus,
 } from "@/api/quant";
 import type { MinuteGapAuditResult } from "@/api/dataSync";
@@ -39,6 +41,7 @@ export function QuantTradingPage() {
   const [minuteAudit, setMinuteAudit] = useState<MinuteGapAuditResult | undefined>(undefined);
   const [addToGroupOpen, setAddToGroupOpen] = useState(false);
   const [addToGroupSymbol, setAddToGroupSymbol] = useState<string | null>(null);
+  const [selectedRecommendationDate, setSelectedRecommendationDate] = useState("");
 
   const applyStrictMinutePreset = () => {
     setBacktestParams((current) => ({
@@ -52,9 +55,27 @@ export function QuantTradingPage() {
     }));
   };
 
+  const screenRunsQuery = useQuery({
+    queryKey: ["quantScreenRuns"],
+    queryFn: () => fetchScreenRuns(120),
+    staleTime: 30_000,
+  });
+
+  const tradingDatesQuery = useQuery({
+    queryKey: ["quantTradingDates"],
+    queryFn: () => fetchTradingDates({ limit: 800 }),
+    staleTime: 60_000,
+  });
+
+  const activeRecommendationDate =
+    selectedRecommendationDate ||
+    tradingDatesQuery.data?.latest_trade_date ||
+    screenRunsQuery.data?.items[0]?.trade_date ||
+    "";
+
   const recommendationsQuery = useQuery({
-    queryKey: ["quantRecommendations"],
-    queryFn: () => fetchRecommendations(20),
+    queryKey: ["quantRecommendations", activeRecommendationDate],
+    queryFn: () => fetchRecommendations(200, activeRecommendationDate || undefined),
     staleTime: 20_000,
   });
 
@@ -73,8 +94,8 @@ export function QuantTradingPage() {
   });
 
   const backtestsQuery = useQuery({
-    queryKey: ["backtests"],
-    queryFn: () => fetchBacktests(10),
+    queryKey: ["backtests", "portfolio"],
+    queryFn: () => fetchBacktests(20, "portfolio"),
     staleTime: 20_000,
   });
 
@@ -121,6 +142,7 @@ export function QuantTradingPage() {
   const screenMutation = useMutation({
     mutationFn: () =>
       createScreenRun({
+        trade_date: activeRecommendationDate || undefined,
         max_symbols: 500,
         recommendation_limit: 20,
         min_recommendation_score: 60,
@@ -129,6 +151,8 @@ export function QuantTradingPage() {
         included_boards: backtestParams.included_boards,
       }),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["quantScreenRuns"] });
+      queryClient.invalidateQueries({ queryKey: ["quantTradingDates"] });
       queryClient.invalidateQueries({ queryKey: ["quantRecommendations"] });
       queryClient.invalidateQueries({ queryKey: ["portfolioGroups"] });
       queryClient.invalidateQueries({ queryKey: ["portfolioGroupItems"] });
@@ -247,6 +271,10 @@ export function QuantTradingPage() {
               runId={recommendationsQuery.data?.run_id}
               strategyVersion={recommendationsQuery.data?.strategy_version}
               includedBoards={recommendationsQuery.data?.included_boards}
+              screenRuns={screenRunsQuery.data?.items ?? []}
+              tradingDates={tradingDatesQuery.data?.items.map((item) => item.trade_date) ?? []}
+              selectedTradeDate={activeRecommendationDate}
+              onSelectedTradeDateChange={setSelectedRecommendationDate}
               selectedBoards={backtestParams.included_boards}
               onSelectedBoardsChange={(included_boards) => setBacktestParams({ ...backtestParams, included_boards })}
               status={recommendationsQuery.data?.status}
@@ -277,6 +305,7 @@ export function QuantTradingPage() {
             onSelect={setSelectedBacktestId}
             params={backtestParams}
             onParamsChange={setBacktestParams}
+            tradingDates={tradingDatesQuery.data?.items.map((item) => item.trade_date) ?? []}
             isRunning={backtestMutation.isPending}
             onRun={() => backtestMutation.mutate(undefined)}
             onStrictMinutePreset={applyStrictMinutePreset}

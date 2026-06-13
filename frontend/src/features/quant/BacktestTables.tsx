@@ -1,19 +1,69 @@
+import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { cn, formatAmount, formatPct, formatPrice, priceColorClass } from "@/lib/utils";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
+import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { BacktestClosedTrade } from "@/api/quant";
-import { fetchBacktestReport } from "@/api/quant";
+import { fetchBacktestReport, fetchBacktestTrades } from "@/api/quant";
 
 // ── 1. Recent trades ────────────────────────────────────────────────────────
 
-export function BacktestTradeTable({ trades }: { trades: Awaited<ReturnType<typeof fetchBacktestReport>>["trades"] }) {
+export function BacktestTradeTable({
+  backtestId,
+  trades,
+  total,
+}: {
+  backtestId?: number | null;
+  trades: Awaited<ReturnType<typeof fetchBacktestReport>>["trades"];
+  total?: number;
+}) {
+  const pageSize = 20;
+  const [page, setPage] = useState(0);
+  const offset = page * pageSize;
+  useEffect(() => {
+    setPage(0);
+  }, [backtestId]);
+  const tradesQuery = useQuery({
+    queryKey: ["backtestTrades", backtestId, pageSize, offset],
+    queryFn: () => fetchBacktestTrades(backtestId!, { limit: pageSize, offset, order: "desc" }),
+    enabled: Boolean(backtestId),
+    staleTime: 20_000,
+  });
+  const rows = tradesQuery.data?.items ?? (page === 0 ? trades : []);
+  const rowTotal = tradesQuery.data?.total ?? total ?? trades.length;
+  const recentTrades = [...rows].sort((left, right) => {
+    const dateDiff = right.trade_date.localeCompare(left.trade_date);
+    if (dateDiff !== 0) return dateDiff;
+    return (right.id ?? 0) - (left.id ?? 0);
+  });
+  const from = rowTotal === 0 ? 0 : offset + 1;
+  const to = Math.min(offset + recentTrades.length, rowTotal);
   return (
     <div className="overflow-hidden rounded-lg border">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-3 py-2">
-        <div className="text-sm font-medium">最近买卖点</div>
+        <div>
+          <div className="text-sm font-medium">组合最近成交</div>
+          <div className="mt-0.5 text-xs text-muted-foreground">
+            {rowTotal > 0 ? `${from}-${to} / ${rowTotal}` : "0 / 0"}
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" onClick={() => setPage((value) => Math.max(value - 1, 0))} disabled={page === 0 || tradesQuery.isFetching}>
+            上一页
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setPage((value) => value + 1)}
+            disabled={tradesQuery.isFetching || offset + pageSize >= rowTotal}
+          >
+            下一页
+          </Button>
+        </div>
       </div>
-      {trades.length === 0 ? (
-        <div className="p-3 text-sm text-muted-foreground">当前回测没有成交记录。</div>
+      {recentTrades.length === 0 ? (
+        <div className="p-3 text-sm text-muted-foreground">{tradesQuery.isFetching ? "成交记录加载中。" : "当前回测没有成交记录。"}</div>
       ) : (
         <Table>
           <TableHeader>
@@ -28,7 +78,7 @@ export function BacktestTradeTable({ trades }: { trades: Awaited<ReturnType<type
             </TableRow>
           </TableHeader>
           <TableBody>
-            {trades.slice(0, 12).map((trade, index) => (
+            {recentTrades.map((trade, index) => (
               <TableRow key={`${trade.trade_date}-${trade.vt_symbol}-${index}`}>
                 <TableCell className="tabular-nums">{trade.trade_date}</TableCell>
                 <TableCell>

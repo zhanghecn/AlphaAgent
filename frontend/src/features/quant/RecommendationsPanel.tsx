@@ -8,7 +8,8 @@ import { LoadingState } from "@/components/LoadingState";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import type { QuantRecommendation } from "@/api/quant";
+import { TradingDateSelector } from "@/features/quant/TradingDateSelector";
+import type { QuantRecommendation, QuantScreenRunItem } from "@/api/quant";
 
 export function RecommendationsPanel({
   isLoading,
@@ -19,6 +20,10 @@ export function RecommendationsPanel({
   runId,
   strategyVersion,
   includedBoards,
+  screenRuns,
+  tradingDates,
+  selectedTradeDate,
+  onSelectedTradeDateChange,
   selectedBoards,
   onSelectedBoardsChange,
   status,
@@ -36,6 +41,10 @@ export function RecommendationsPanel({
   runId?: number | null;
   strategyVersion?: string;
   includedBoards?: string[];
+  screenRuns: QuantScreenRunItem[];
+  tradingDates: string[];
+  selectedTradeDate: string;
+  onSelectedTradeDateChange: (tradeDate: string) => void;
   selectedBoards: string[];
   onSelectedBoardsChange: (boards: string[]) => void;
   status?: string;
@@ -56,6 +65,16 @@ export function RecommendationsPanel({
   }
 
   const activeBoards = includedBoards?.length ? includedBoards : selectedBoards;
+  const latestRunByDate = new Map<string, QuantScreenRunItem>();
+  for (const run of screenRuns) {
+    const current = latestRunByDate.get(run.trade_date);
+    if (!current || run.id > current.id) {
+      latestRunByDate.set(run.trade_date, run);
+    }
+  }
+  const availableDates = Array.from(
+    new Set([...tradingDates, ...screenRuns.map((run) => run.trade_date), selectedTradeDate].filter(Boolean))
+  );
 
   return (
     <section className="rounded-lg border">
@@ -69,6 +88,16 @@ export function RecommendationsPanel({
             {tradeDate ?? "--"} · {runId ? `运行 #${runId}` : "未运行"} · {strategyVersion ?? "--"} · 分组同步 {syncedCount} 只
           </div>
         </div>
+        <TradingDateSelector
+          label="候选日期"
+          value={selectedTradeDate}
+          dates={availableDates}
+          onChange={onSelectedTradeDateChange}
+          getOptionLabel={(date) => {
+            const run = latestRunByDate.get(date);
+            return run ? `${date} · #${run.id} · 候选 ${run.recommendation_count}` : `${date} · 未运行`;
+          }}
+        />
         <QuantBoardSelector
           selectedBoards={selectedBoards}
           activeBoards={activeBoards}
@@ -93,15 +122,17 @@ export function RecommendationsPanel({
               <TableHead>动作</TableHead>
               <TableHead className="text-right">总分</TableHead>
               <TableHead className="text-right">MA5距离</TableHead>
-              <TableHead className="text-right">20日收益</TableHead>
-              <TableHead className="text-right">风控</TableHead>
+              <TableHead className="text-right">风险/流动性</TableHead>
+              <TableHead>核查</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {items.map((item) => {
               const reason = item.reason ?? {};
               const ma5Distance = numberValue(reason.ma5_distance_pct);
-              const return20 = numberValue(reason.return_20d);
+              const riskScore = numberValue(reason.risk_score);
+              const liquidityScore = numberValue(reason.liquidity_score);
+              const failedRules = Array.isArray(reason.failed_rules) ? reason.failed_rules.join(", ") : "";
               const risk = item.risk_control ?? {};
               return (
                 <TableRow key={`${item.trade_date}-${item.vt_symbol}`}>
@@ -125,11 +156,11 @@ export function RecommendationsPanel({
                   <TableCell className={cn("text-right tabular-nums", priceColorClass(ma5Distance))}>
                     {formatPct(ma5Distance)}
                   </TableCell>
-                  <TableCell className={cn("text-right tabular-nums", priceColorClass(return20))}>
-                    {formatPct(return20)}
-                  </TableCell>
                   <TableCell className="text-right text-xs text-muted-foreground">
-                    止损 {formatPct(numberValue(risk.stop_loss_pct) ? -numberValue(risk.stop_loss_pct)! * 100 : null)}
+                    {formatNumber(riskScore, 1)} / {formatNumber(liquidityScore, 1)}
+                  </TableCell>
+                  <TableCell className="max-w-60 text-xs text-muted-foreground">
+                    {failedRules || `止损 ${formatPct(numberValue(risk.stop_loss_pct) ? -numberValue(risk.stop_loss_pct)! * 100 : null)}`}
                   </TableCell>
                 </TableRow>
               );

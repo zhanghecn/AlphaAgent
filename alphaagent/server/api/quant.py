@@ -33,10 +33,39 @@ def create_screen_run(payload: dict[str, Any] = Body(default_factory=dict)):
         return _service_error(exc)
 
 
+@router.get("/screen-runs")
+def list_screen_runs(
+    strategy: str = Query(default=screening.STRATEGY_ID),
+    limit: int = Query(default=120, ge=1, le=500),
+):
+    try:
+        return ok(screening.list_screen_runs(strategy_id=strategy, limit=limit))
+    except Exception as exc:
+        return _service_error(exc)
+
+
 @router.get("/screen-runs/{run_id}")
 def get_screen_run(run_id: int):
     try:
         return ok(screening.get_run(run_id))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/trading-dates")
+def list_trading_dates(
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    limit: int = Query(default=600, ge=1, le=2000),
+):
+    try:
+        return ok(
+            screening.list_trading_dates(
+                start=_parse_date(start),
+                end=_parse_date(end),
+                limit=limit,
+            )
+        )
     except Exception as exc:
         return _service_error(exc)
 

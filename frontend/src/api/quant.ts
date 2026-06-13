@@ -92,6 +92,7 @@ export interface BacktestRun {
   params?: Record<string, unknown>;
   metrics?: BacktestMetrics | null;
   finished_at?: string | null;
+  run_type?: "portfolio" | "symbol" | string;
 }
 
 export interface BacktestMetrics {
@@ -176,6 +177,11 @@ export interface BacktestPositionSnapshot extends StockIdentityFields {
   raw?: Record<string, unknown>;
 }
 
+export interface BacktestEquityResult {
+  status: string;
+  items: BacktestEquityRow[];
+}
+
 export interface BacktestOrderEvent extends StockIdentityFields {
   id?: number;
   backtest_id?: number;
@@ -188,6 +194,56 @@ export interface BacktestOrderEvent extends StockIdentityFields {
   status: string;
   reason?: string | null;
   raw?: Record<string, unknown>;
+}
+
+export interface BacktestSignalEvent extends StockIdentityFields {
+  id?: number;
+  backtest_id?: number;
+  trade_date: string;
+  signal_date: string;
+  execute_date: string;
+  vt_symbol: string;
+  name?: string | null;
+  side: "BUY" | "SELL" | string;
+  price?: number | null;
+  score?: number | null;
+  reason?: string | null;
+  raw?: Record<string, unknown>;
+}
+
+export interface BacktestSignalAmountPreviewRow extends BacktestSignalEvent {
+  preview_volume: number;
+  preview_amount: number;
+  preview_pnl?: number | null;
+  preview_budget: number;
+}
+
+export interface BacktestSignalEventsResult {
+  status: string;
+  backtest_id: number;
+  run_type?: string;
+  items: BacktestSignalEvent[];
+  returned_count?: number;
+  note?: string | null;
+}
+
+export interface BacktestSignalAmountPreviewResult extends Omit<BacktestSignalEventsResult, "items"> {
+  capital: number;
+  max_positions: number;
+  per_trade_budget: number;
+  source_count?: number;
+  items: BacktestSignalAmountPreviewRow[];
+}
+
+export interface BacktestTradesResult {
+  status: string;
+  backtest_id: number;
+  items: BacktestTrade[];
+  limit: number;
+  offset: number;
+  total: number;
+  returned_count: number;
+  has_more: boolean;
 }
 
 export interface BacktestDayDetail {
@@ -567,6 +623,7 @@ export interface BacktestValidationGrid {
 export interface BacktestReport {
   status: string;
   backtest_id: number;
+  run_type?: "portfolio" | "symbol" | string;
   strategy_id: string;
   strategy_version: string;
   start_date: string;
@@ -704,6 +761,25 @@ export interface VnpyStatus {
   notes: string[];
 }
 
+export interface QuantScreenRunItem {
+  id: number;
+  strategy_id: string;
+  strategy_version: string;
+  trade_date: string;
+  status: string;
+  params?: Record<string, unknown>;
+  candidate_count: number;
+  signal_count: number;
+  recommendation_count: number;
+  message?: string | null;
+  finished_at?: string | null;
+}
+
+export interface QuantTradingDateItem {
+  trade_date: string;
+  symbol_count: number;
+}
+
 export function createScreenRun(payload: {
   trade_date?: string;
   max_symbols?: number;
@@ -716,7 +792,25 @@ export function createScreenRun(payload: {
   return apiClient.post<QuantScreenRun>("/quant/screen-runs", payload);
 }
 
-export function fetchRecommendations(limit = 20) {
+export function fetchScreenRuns(limit = 120) {
+  return apiClient.get<{ status: string; items: QuantScreenRunItem[] }>(`/quant/screen-runs?limit=${limit}`);
+}
+
+export function fetchTradingDates(params: { start?: string; end?: string; limit?: number } = {}) {
+  const search = new URLSearchParams({ limit: String(params.limit ?? 600) });
+  if (params.start) search.set("start", params.start);
+  if (params.end) search.set("end", params.end);
+  return apiClient.get<{
+    status: string;
+    items: QuantTradingDateItem[];
+    latest_trade_date?: string | null;
+    returned_count?: number;
+  }>(`/quant/trading-dates?${search.toString()}`);
+}
+
+export function fetchRecommendations(limit = 20, tradeDate?: string) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (tradeDate) params.set("trade_date", tradeDate);
   return apiClient.get<{
     status: string;
     trade_date?: string;
@@ -725,9 +819,7 @@ export function fetchRecommendations(limit = 20) {
     included_boards?: string[];
     items: QuantRecommendation[];
     message?: string;
-  }>(
-    `/quant/recommendations?limit=${limit}`
-  );
+  }>(`/quant/recommendations?${params.toString()}`);
 }
 
 export function fetchSymbolSignalHistory(vtSymbol: string, params: {
@@ -745,8 +837,8 @@ export function fetchSymbolSignalHistory(vtSymbol: string, params: {
   return apiClient.get<SymbolSignalHistory>(`/quant/symbols/${encodeURIComponent(vtSymbol)}/signal-history${suffix}`);
 }
 
-export function fetchBacktests(limit = 10) {
-  return apiClient.get<{ status: string; items: BacktestRun[] }>(`/backtests?limit=${limit}`);
+export function fetchBacktests(limit = 10, runType: "portfolio" | "symbol" | "all" = "all") {
+  return apiClient.get<{ status: string; items: BacktestRun[] }>(`/backtests?limit=${limit}&run_type=${runType}`);
 }
 
 export function createBacktest(payload: {
@@ -856,12 +948,67 @@ export function fetchBacktestReport(backtestId: number, tradeLimit = 50) {
   return apiClient.get<BacktestReport>(`/backtests/${backtestId}/report?trade_limit=${tradeLimit}`);
 }
 
+export function fetchBacktestEquity(backtestId: number) {
+  return apiClient.get<BacktestEquityResult>(`/backtests/${backtestId}/equity`);
+}
+
+export function fetchBacktestTrades(backtestId: number, params: {
+  limit?: number;
+  offset?: number;
+  order?: "asc" | "desc";
+} = {}) {
+  const search = new URLSearchParams({
+    limit: String(params.limit ?? 50),
+    offset: String(params.offset ?? 0),
+    order: params.order ?? "desc",
+  });
+  return apiClient.get<BacktestTradesResult>(`/backtests/${backtestId}/trades?${search.toString()}`);
+}
+
 export function fetchBacktestDayDetail(backtestId: number, tradeDate: string) {
   return apiClient.get<BacktestDayDetail>(`/backtests/${backtestId}/days/${tradeDate}`);
 }
 
 export function fetchBacktestSymbolDetail(backtestId: number, vtSymbol: string) {
   return apiClient.get<BacktestSymbolDetail>(`/backtests/${backtestId}/symbols/${vtSymbol}`);
+}
+
+export function fetchBacktestSignalEvents(backtestId: number, params: {
+  start?: string;
+  end?: string;
+  vt_symbol?: string;
+  side?: string;
+  limit?: number;
+} = {}) {
+  const search = new URLSearchParams();
+  if (params.start) search.set("start", params.start);
+  if (params.end) search.set("end", params.end);
+  if (params.vt_symbol) search.set("vt_symbol", params.vt_symbol);
+  if (params.side) search.set("side", params.side);
+  if (params.limit != null) search.set("limit", String(params.limit));
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  return apiClient.get<BacktestSignalEventsResult>(`/backtests/${backtestId}/signal-events${suffix}`);
+}
+
+export function fetchBacktestSignalAmountPreview(backtestId: number, params: {
+  capital: number;
+  max_positions: number;
+  start?: string;
+  end?: string;
+  vt_symbol?: string;
+  side?: string;
+  limit?: number;
+}) {
+  const search = new URLSearchParams({
+    capital: String(params.capital),
+    max_positions: String(params.max_positions),
+  });
+  if (params.start) search.set("start", params.start);
+  if (params.end) search.set("end", params.end);
+  if (params.vt_symbol) search.set("vt_symbol", params.vt_symbol);
+  if (params.side) search.set("side", params.side);
+  if (params.limit != null) search.set("limit", String(params.limit));
+  return apiClient.get<BacktestSignalAmountPreviewResult>(`/backtests/${backtestId}/signal-events/amount-preview?${search.toString()}`);
 }
 
 export function fetchBacktestAudit(backtestId: number, vtSymbol?: string, limit = 200) {

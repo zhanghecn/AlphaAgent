@@ -743,6 +743,25 @@ backtest_trades = Table(
 Index("ix_backtest_trades_run", backtest_trades.c.backtest_id)
 Index("ix_backtest_trades_vt_symbol", backtest_trades.c.vt_symbol)
 
+backtest_signal_events = Table(
+    "backtest_signal_events",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("backtest_id", BigInteger, ForeignKey("backtest_runs.id", ondelete="CASCADE"), nullable=False),
+    Column("trade_date", Date, nullable=False),
+    Column("signal_date", Date, nullable=False),
+    Column("execute_date", Date, nullable=False),
+    Column("vt_symbol", String(32), nullable=False),
+    Column("side", String(20), nullable=False),
+    Column("price", Float, nullable=True),
+    Column("score", Float, nullable=True),
+    Column("reason", String(240), nullable=True),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+Index("ix_backtest_signal_events_run_date", backtest_signal_events.c.backtest_id, backtest_signal_events.c.trade_date)
+Index("ix_backtest_signal_events_symbol", backtest_signal_events.c.backtest_id, backtest_signal_events.c.vt_symbol)
+
 backtest_daily_equity = Table(
     "backtest_daily_equity",
     metadata,
