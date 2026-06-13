@@ -72,13 +72,14 @@ vn.py 中数据需要分清四类：
 当前 `/quant` 候选和回测核查不走 vn.py Datafeed，而是使用 AlphaAgent PostgreSQL 业务表：
 
 1. `GET /api/quant/trading-dates` 从 `stock_daily_bars` 聚合本地真实交易日；前端候选日期和回测开始日期选择器使用它，只在有日线数据的交易日之间切换。
-2. `quant_signal_runs` 记录每次筛选运行；`GET /api/quant/screen-runs` 给前端候选日期选择器叠加显示运行编号和候选数，未运行交易日可先选择再点“运行筛选”。
-3. `quant_recommendations` 支持按 `trade_date` 查询；候选表会显示 `risk_score`、`liquidity_score` 和 `failed_rules`，用于核查当日推荐是否正确。
-4. 组合回测列表支持 `GET /api/backtests?run_type=portfolio`，前端默认只看组合回测，避免股票详情页的单股回测混进量化页主列表。
-5. 新组合回测会写 `backtest_signal_events`，记录每只股票独立状态机下的理论 BUY/SELL 信号；旧回测没有这张流水，需要重跑组合回测。
-6. `GET /api/backtests/{id}/equity` 返回该回测实际交易日，前端“信号流水”的开始/结束日期选择器使用它。
-7. `GET /api/backtests/{id}/signal-events/amount-preview` 按 `总资金 / 最大持仓数` 做等权金额预览，买入按 100 股整数手，卖出沿用最近一次理论买入数量。
-8. `GET /api/backtests/{id}/trades?limit=20&offset=0&order=desc` 分页返回真实组合成交，用于前端“组合最近成交”翻页查看全部。
+2. `POST /api/quant/screen-runs/range` 从选中的起始交易日到本地最新交易日逐日生成候选并落库；只有最后一个交易日同步到“量化候选”分组。`POST /api/quant/screen-runs` 保留为单日脚本/调试接口。
+3. `quant_signal_runs` 记录每次筛选运行；`GET /api/quant/screen-runs` 给前端候选日期选择器叠加显示运行编号和候选数。
+4. `quant_recommendations` 支持按 `trade_date` 查询；候选表会显示 `risk_score`、`liquidity_score` 和 `failed_rules`，用于核查当日推荐是否正确。
+5. 组合回测列表支持 `GET /api/backtests?run_type=portfolio`，前端默认只看组合回测，避免股票详情页的单股回测混进量化页主列表。
+6. 新组合回测会写 `backtest_signal_events`，记录每只股票独立状态机下的理论 BUY/SELL 信号；旧回测没有这张流水，需要重跑组合回测。
+7. `GET /api/backtests/{id}/equity` 返回该回测实际交易日，前端“信号流水”的开始/结束日期选择器使用它。
+8. `GET /api/backtests/{id}/signal-events/amount-preview` 按 `总资金 / 最大持仓数` 做等权金额预览，买入按 100 股整数手，卖出沿用最近一次理论买入数量。
+9. `GET /api/backtests/{id}/trades?limit=20&offset=0&order=desc` 分页返回真实组合成交，用于前端“组合最近成交”翻页查看全部。
 
 注意：`backtest_signal_events` 是理论信号流水，用于核查“历史上有没有买点/卖点”；真实组合资金曲线仍以 `backtest_trades`、`backtest_daily_equity` 和 `backtest_daily_positions` 为准。
 

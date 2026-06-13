@@ -91,7 +91,7 @@
 - 量化、回测、持仓、模拟服务会在直接调用时创建 AlphaAgent 业务表，不依赖 API lifespan 单一路径。
 - 提供持仓分组、自选观察、量化候选、模拟持仓和黑名单基础能力。
 - 提供本地模拟账户、模拟订单、模拟成交、模拟持仓和风险事件查询。
-- 前端 `/quant` 页面展示量化候选、回测表和模拟持仓，并提供运行筛选、参数化运行回测、导出 CSV、自动模拟建仓按钮。
+- 前端 `/quant` 页面展示量化候选、回测表和模拟持仓；候选页提供单一“生成区间候选”入口，从起始交易日到本地最新交易日逐日落库，回测页提供参数化运行回测、导出 CSV 和审计/钻取能力。
 - `stock_minute_bars` 和 `sync_stock_minute_bars` 已加入，用于尾盘 14:30-14:57 接近 MA5 的分钟级入场验证；分钟线缺失时回测会把买入标记为 `daily_next_open_fallback`，强制分钟模式可拒绝缺分钟数据的订单。
 - `sync_stock_minute_bars` 支持 `symbols`、`start_date`、`end_date` 参数；当前公共 EastMoney 分钟源不能可靠回填指定历史日，AkShare adapter 会过滤区间外分钟线，避免把最近分钟数据误写进历史回测窗口。
 - `/api/data-sync/imports/minute-bars/template.csv` 和 `/api/data-sync/imports/minute-bars` 已加入，可用外部 CSV 补 `stock_minute_bars` 历史分钟线，支持 `dry_run` 预检查。

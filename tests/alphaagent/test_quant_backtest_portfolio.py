@@ -680,6 +680,54 @@ def test_new_api_returns_unavailable_when_database_off(monkeypatch) -> None:
     assert client.get("/api/simulation/accounts").json()["data"]["status"] == "unavailable"
 
 
+def test_quant_screen_range_api_passes_range_payload(monkeypatch) -> None:
+    from alphaagent.server.services.quant import screening
+
+    captured: dict[str, object] = {}
+
+    def fake_screen_stocks_range(start=None, end=None, **kwargs):
+        captured.update({"start": start, "end": end, **kwargs})
+        return {
+            "status": "ready",
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "trade_date": end.isoformat(),
+            "total_dates": 2,
+            "succeeded_count": 2,
+            "recommendation_count": 3,
+            "range_recommendation_count": 7,
+            "runs": [],
+            "items": [],
+            "recommendations": [],
+        }
+
+    monkeypatch.setattr(screening, "screen_stocks_range", fake_screen_stocks_range)
+
+    client = TestClient(create_app())
+    response = client.post(
+        "/api/quant/screen-runs/range",
+        json={
+            "start": "2026-06-10",
+            "end": "2026-06-12",
+            "max_symbols": 120,
+            "recommendation_limit": 20,
+            "min_recommendation_score": 60,
+            "persist": True,
+            "auto_portfolio": True,
+            "included_boards": ["main", "chinext"],
+        },
+    )
+
+    data = response.json()["data"]
+    assert response.status_code == 200
+    assert data["status"] == "ready"
+    assert data["total_dates"] == 2
+    assert captured["start"] == date(2026, 6, 10)
+    assert captured["end"] == date(2026, 6, 12)
+    assert captured["max_symbols"] == 120
+    assert captured["included_boards"] == ["main", "chinext"]
+
+
 def test_backtest_service_bootstraps_schema_without_api_startup(monkeypatch) -> None:
     from alphaagent.server.services.backtest import engine
 
@@ -1166,6 +1214,74 @@ def test_list_trading_dates_returns_local_daily_bar_dates(monkeypatch) -> None:
         {"trade_date": "2026-06-12", "symbol_count": 2},
         {"trade_date": "2026-06-11", "symbol_count": 1},
     ]
+
+
+def test_screen_stocks_range_uses_local_trading_dates_and_syncs_latest_only(monkeypatch) -> None:
+    from alphaagent.server.services.quant import screening
+
+    calls: list[tuple[date, bool]] = []
+
+    class FakeRows:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def all(self):
+            return self.rows
+
+    class FakeScalar:
+        def scalar(self):
+            return date(2026, 6, 12)
+
+    class FakeSession:
+        def execute(self, statement):
+            text = str(statement)
+            if "max(stock_daily_bars.trade_date)" in text:
+                return FakeScalar()
+            assert "FROM stock_daily_bars" in text
+            assert "GROUP BY stock_daily_bars.trade_date" in text
+            assert "ORDER BY stock_daily_bars.trade_date" in text
+            return FakeRows([(date(2026, 6, 10),), (date(2026, 6, 11),), (date(2026, 6, 12),)])
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    def fake_screen_stocks(trade_date, **kwargs):
+        calls.append((trade_date, kwargs["auto_portfolio"]))
+        return {
+            "status": "ready",
+            "trade_date": trade_date.isoformat(),
+            "run_id": len(calls),
+            "total": 100 + len(calls),
+            "recommendation_count": len(calls),
+            "included_boards": kwargs["included_boards"],
+            "items": [{"trade_date": trade_date.isoformat()}],
+            "recommendations": [{"trade_date": trade_date.isoformat()}],
+            "portfolio_sync": {"synced": 1} if kwargs["auto_portfolio"] else None,
+        }
+
+    monkeypatch.setattr(screening, "is_database_configured", lambda: True)
+    monkeypatch.setattr(screening, "_ensure_quant_schema", lambda: None)
+    monkeypatch.setattr(screening, "session_scope", fake_session_scope)
+    monkeypatch.setattr(screening, "screen_stocks", fake_screen_stocks)
+
+    result = screening.screen_stocks_range(start=date(2026, 6, 10), included_boards=["main"])
+
+    assert calls == [
+        (date(2026, 6, 10), False),
+        (date(2026, 6, 11), False),
+        (date(2026, 6, 12), True),
+    ]
+    assert result["status"] == "ready"
+    assert result["start_date"] == "2026-06-10"
+    assert result["end_date"] == "2026-06-12"
+    assert result["trade_date"] == "2026-06-12"
+    assert result["total_dates"] == 3
+    assert result["succeeded_count"] == 3
+    assert result["range_recommendation_count"] == 6
+    assert result["recommendation_count"] == 3
+    assert result["portfolio_sync"] == {"synced": 1}
+    assert [item["trade_date"] for item in result["runs"]] == ["2026-06-10", "2026-06-11", "2026-06-12"]
 
 
 def test_backtest_metric_rows_are_report_ready() -> None:

@@ -42,6 +42,21 @@ export interface QuantScreenRun {
   } | null;
 }
 
+export interface QuantScreenRunRange extends QuantScreenRun {
+  start_date?: string;
+  end_date?: string;
+  total_dates?: number;
+  succeeded_count?: number;
+  range_recommendation_count?: number;
+  runs?: Array<{
+    trade_date: string;
+    status: string;
+    run_id?: number | null;
+    candidate_count: number;
+    recommendation_count: number;
+  }>;
+}
+
 export interface SymbolSignalHistoryRow {
   trade_date: string;
   vt_symbol: string;
@@ -790,6 +805,19 @@ export function createScreenRun(payload: {
   included_boards?: string[];
 } = {}) {
   return apiClient.post<QuantScreenRun>("/quant/screen-runs", payload);
+}
+
+export function createScreenRunRange(payload: {
+  start?: string;
+  end?: string;
+  max_symbols?: number;
+  recommendation_limit?: number;
+  min_recommendation_score?: number;
+  persist?: boolean;
+  auto_portfolio?: boolean;
+  included_boards?: string[];
+} = {}) {
+  return apiClient.post<QuantScreenRunRange>("/quant/screen-runs/range", payload);
 }
 
 export function fetchScreenRuns(limit = 120) {

@@ -33,6 +33,26 @@ def create_screen_run(payload: dict[str, Any] = Body(default_factory=dict)):
         return _service_error(exc)
 
 
+@router.post("/screen-runs/range")
+def create_screen_runs_range(payload: dict[str, Any] = Body(default_factory=dict)):
+    try:
+        return ok(
+            screening.screen_stocks_range(
+                start=_parse_date(payload.get("start") or payload.get("start_date") or payload.get("trade_date")),
+                end=_parse_date(payload.get("end") or payload.get("end_date")),
+                strategy_id=str(payload.get("strategy") or screening.STRATEGY_ID),
+                max_symbols=int(payload.get("max_symbols") or 500),
+                recommendation_limit=int(payload.get("recommendation_limit") or screening.DEFAULT_RECOMMENDATION_LIMIT),
+                min_recommendation_score=float(payload.get("min_recommendation_score") or 60),
+                persist=bool(payload.get("persist", True)),
+                auto_portfolio=bool(payload.get("auto_portfolio", True)),
+                included_boards=payload.get("included_boards"),
+            )
+        )
+    except Exception as exc:
+        return _service_error(exc)
+
+
 @router.get("/screen-runs")
 def list_screen_runs(
     strategy: str = Query(default=screening.STRATEGY_ID),

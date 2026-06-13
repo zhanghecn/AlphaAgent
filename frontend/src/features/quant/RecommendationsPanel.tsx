@@ -89,7 +89,7 @@ export function RecommendationsPanel({
           </div>
         </div>
         <TradingDateSelector
-          label="候选日期"
+          label="起始交易日"
           value={selectedTradeDate}
           dates={availableDates}
           onChange={onSelectedTradeDateChange}
@@ -110,8 +110,6 @@ export function RecommendationsPanel({
         <QuantEmptyState
           status={status}
           message={message}
-          onRunScreen={onRunScreen}
-          isRunningScreen={isRunningScreen}
         />
       ) : (
         <Table>
@@ -220,7 +218,7 @@ export function QuantBoardSelector({
         {onRun && (
           <Button size="sm" onClick={onRun} disabled={isRunning}>
             {isRunning ? <RefreshCw size={15} className="animate-spin" /> : <Play size={15} />}
-            按当前股票池筛选
+            生成区间候选
           </Button>
         )}
       </div>
@@ -231,13 +229,9 @@ export function QuantBoardSelector({
 function QuantEmptyState({
   status,
   message,
-  onRunScreen,
-  isRunningScreen,
 }: {
   status?: string;
   message?: string;
-  onRunScreen: () => void;
-  isRunningScreen: boolean;
 }) {
   const unavailable = status === "unavailable";
   return (
@@ -248,13 +242,9 @@ function QuantEmptyState({
           <div className="min-w-0 flex-1">
             <div className="font-medium">{unavailable ? "量化数据还不能读取" : "还没有量化候选"}</div>
             <div className="mt-1 text-sm text-muted-foreground">
-              {message || "先运行筛选。系统会基于本地日线、相对大盘强弱、资金/财务辅助因子生成候选。"}
+              {message || "选择起始交易日后生成区间候选。系统会按真实交易日逐日打分并落库。"}
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
-              <Button size="sm" onClick={onRunScreen} disabled={isRunningScreen || unavailable}>
-                {isRunningScreen ? <RefreshCw size={15} className="animate-spin" /> : <Play size={15} />}
-                运行筛选
-              </Button>
               <Button asChild size="sm" variant="outline">
                 <Link to="/data">
                   <Database size={15} />

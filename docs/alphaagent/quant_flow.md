@@ -16,6 +16,7 @@
 - `stock_financial_reports` 当前为 0 行，所以筛选/回测里的财务改善分会降级为中性；股票详情页能看到财报，是因为详情接口实时回退到 AkShare，并没有把这些财报持久化进回测库。
 - `stock_daily_bars.turnover` 同步链路已修复：股票日线优先使用腾讯 `newfqkline` 带成交额接口，成交额从“万元”换算为“元”后落库。
 - 历史全表仍需重跑 `sync_stock_daily_bars` 才能补齐旧数据；金安国纪 `002636.SZSE` 已定向回填 250 根日线，`turnover` 覆盖约 99.6%。
+- `/quant` 候选页现在只有一个“生成区间候选”入口：默认起始日跟随回测开始日，也可手动选择；生成时从起始交易日到本地最新交易日逐日筛选并落库，只有最新交易日同步到“量化候选”分组。
 
 ## 1. 代码入口
 
@@ -85,6 +86,17 @@ screen_stocks(
 )
 ```
 
+区间候选入口：
+
+```python
+screen_stocks_range(
+    start=date(2025, 1, 2),          # 起始交易日；不传则只跑最新交易日
+    end=None,                        # 不传则使用 stock_daily_bars 最新交易日
+    persist=True,                    # 每个交易日都写入 quant_* 表
+    auto_portfolio=True,             # 只把最后一个交易日同步到“量化候选”分组
+)
+```
+
 注释式流程：
 
 ```python
@@ -133,10 +145,27 @@ score = score_stock(
 #    auto_portfolio=True 时，同步到“量化候选”持仓分组。
 ```
 
+区间候选流程：
+
+```python
+# 1. 从 stock_daily_bars 聚合 start/end 之间真实存在的交易日
+trade_dates = trading_dates_between(start, end)
+
+# 2. 按交易日升序逐日调用 screen_stocks
+for date in trade_dates:
+    screen_stocks(date, persist=True, auto_portfolio=False)
+
+# 3. 最后一个交易日仍调用同一套评分逻辑，但 auto_portfolio=True
+#    这样历史候选用于核查，右侧“量化候选”分组代表最新交易日。
+screen_stocks(latest_date, persist=True, auto_portfolio=True)
+```
+
 候选核查接口：
 
 - `GET /api/quant/trading-dates?limit=600`：从本地 `stock_daily_bars` 聚合真实交易日，前端候选和回测开始日期选择器使用它，避免选到周末或无日线数据日期。
-- `GET /api/quant/screen-runs?limit=120`：列出已持久化的筛选运行，前端候选日期选择器会叠加显示运行编号和候选数；未运行的交易日可先选中再点“运行筛选”生成当天候选。
+- `POST /api/quant/screen-runs/range`：从选中的起始交易日到本地最新交易日逐日生成候选；每个交易日写入 `quant_signal_runs`、`quant_stock_signals`、`quant_recommendations`，最后一个交易日同步到“量化候选”分组。
+- `POST /api/quant/screen-runs`：保留为单日筛选接口，供脚本或调试使用。
+- `GET /api/quant/screen-runs?limit=500`：列出已持久化的筛选运行，前端候选日期选择器会叠加显示运行编号和候选数。
 - `GET /api/quant/recommendations?trade_date=YYYY-MM-DD&limit=200`：按指定日期返回当日推荐；如果这天没有持久化运行，会回退到当日日线对应的推荐记录。
 - 候选表的 `reason` 已包含 `risk_score`、`liquidity_score` 和 `failed_rules`，用于核查为什么某只股票只是观察或未通过买点门槛。
 

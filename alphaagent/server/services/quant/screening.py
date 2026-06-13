@@ -109,6 +109,110 @@ def screen_stocks(
     }
 
 
+def screen_stocks_range(
+    start: date | None = None,
+    end: date | None = None,
+    *,
+    strategy_id: str = STRATEGY_ID,
+    max_symbols: int = 500,
+    recommendation_limit: int = DEFAULT_RECOMMENDATION_LIMIT,
+    min_recommendation_score: float = 60.0,
+    persist: bool = False,
+    auto_portfolio: bool = True,
+    included_boards: list[str] | tuple[str, ...] | str | None = None,
+) -> dict[str, Any]:
+    """Run daily screens for every local trading date in a range."""
+
+    if strategy_id != STRATEGY_ID:
+        return {"status": "unsupported_strategy", "strategy_id": strategy_id, "items": [], "recommendations": [], "runs": []}
+    if not is_database_configured():
+        return {"status": "unavailable", "message": "DATABASE_URL not configured", "items": [], "recommendations": [], "runs": []}
+    _ensure_quant_schema()
+
+    with session_scope() as session:
+        latest = end or _latest_trade_date(session)
+        if latest is None:
+            return {"status": "empty", "message": "stock_daily_bars is empty", "items": [], "recommendations": [], "runs": []}
+        start_date = start or latest
+        if start_date > latest:
+            return {
+                "status": "invalid_range",
+                "message": "start date must be earlier than or equal to end date",
+                "start_date": start_date.isoformat(),
+                "end_date": latest.isoformat(),
+                "items": [],
+                "recommendations": [],
+                "runs": [],
+            }
+        trade_dates = _trading_dates_between(session, start_date, latest)
+
+    if not trade_dates:
+        return {
+            "status": "empty",
+            "message": "no local trading dates in range",
+            "start_date": start_date.isoformat(),
+            "end_date": latest.isoformat(),
+            "items": [],
+            "recommendations": [],
+            "runs": [],
+        }
+
+    runs = []
+    latest_result: dict[str, Any] | None = None
+    succeeded_count = 0
+    range_recommendation_count = 0
+    boards = list(normalize_included_boards(included_boards))
+
+    for index, trade_date in enumerate(trade_dates):
+        result = screen_stocks(
+            trade_date,
+            strategy_id=strategy_id,
+            max_symbols=max_symbols,
+            recommendation_limit=recommendation_limit,
+            min_recommendation_score=min_recommendation_score,
+            persist=persist,
+            auto_portfolio=auto_portfolio and index == len(trade_dates) - 1,
+            included_boards=boards,
+        )
+        latest_result = result
+        status = str(result.get("status") or "empty")
+        if status == "ready":
+            succeeded_count += 1
+        recommendation_count = int(result.get("recommendation_count") or 0)
+        range_recommendation_count += recommendation_count
+        runs.append(
+            {
+                "trade_date": trade_date.isoformat(),
+                "status": status,
+                "run_id": result.get("run_id"),
+                "candidate_count": int(result.get("total") or 0),
+                "recommendation_count": recommendation_count,
+            }
+        )
+
+    latest_result = latest_result or {}
+    status = "ready" if succeeded_count else str(latest_result.get("status") or "empty")
+    return {
+        "status": status,
+        "strategy_id": strategy_id,
+        "strategy_version": STRATEGY_VERSION,
+        "start_date": trade_dates[0].isoformat(),
+        "end_date": trade_dates[-1].isoformat(),
+        "trade_date": latest_result.get("trade_date") or trade_dates[-1].isoformat(),
+        "run_id": latest_result.get("run_id"),
+        "total_dates": len(trade_dates),
+        "succeeded_count": succeeded_count,
+        "range_recommendation_count": range_recommendation_count,
+        "total": int(latest_result.get("total") or 0),
+        "recommendation_count": int(latest_result.get("recommendation_count") or 0),
+        "included_boards": latest_result.get("included_boards") or boards,
+        "items": latest_result.get("items") or [],
+        "recommendations": latest_result.get("recommendations") or [],
+        "portfolio_sync": latest_result.get("portfolio_sync"),
+        "runs": runs,
+    }
+
+
 def list_signals(trade_date: date | None = None, strategy_id: str = STRATEGY_ID, limit: int = 100) -> dict[str, Any]:
     if not is_database_configured():
         return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
@@ -391,6 +495,21 @@ def _latest_screen_run(session, strategy_id: str, trade_date: date | None = None
         .limit(1)
     ).mappings().first()
     return dict(row) if row else None
+
+
+def _trading_dates_between(session, start: date, end: date) -> list[date]:
+    rows = session.execute(
+        select(schema.stock_daily_bars.c.trade_date)
+        .where(
+            and_(
+                schema.stock_daily_bars.c.trade_date >= start,
+                schema.stock_daily_bars.c.trade_date <= end,
+            )
+        )
+        .group_by(schema.stock_daily_bars.c.trade_date)
+        .order_by(schema.stock_daily_bars.c.trade_date)
+    ).all()
+    return [row[0] for row in rows]
 
 
 def _run_included_boards(run: dict[str, Any] | None) -> list[str]:

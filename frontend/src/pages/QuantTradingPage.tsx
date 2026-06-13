@@ -1,11 +1,11 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BarChart3, Play, RefreshCw, WalletCards } from "lucide-react";
+import { BarChart3, RefreshCw, WalletCards } from "lucide-react";
 import {
   addPortfolioGroupItem,
   autoBuyRecommendations,
   createBacktest,
-  createScreenRun,
+  createScreenRunRange,
   fetchBacktestAudit,
   fetchBacktestReport,
   fetchBacktestValidationGrid,
@@ -57,7 +57,7 @@ export function QuantTradingPage() {
 
   const screenRunsQuery = useQuery({
     queryKey: ["quantScreenRuns"],
-    queryFn: () => fetchScreenRuns(120),
+    queryFn: () => fetchScreenRuns(500),
     staleTime: 30_000,
   });
 
@@ -69,6 +69,7 @@ export function QuantTradingPage() {
 
   const activeRecommendationDate =
     selectedRecommendationDate ||
+    backtestParams.start ||
     tradingDatesQuery.data?.latest_trade_date ||
     screenRunsQuery.data?.items[0]?.trade_date ||
     "";
@@ -141,8 +142,8 @@ export function QuantTradingPage() {
 
   const screenMutation = useMutation({
     mutationFn: () =>
-      createScreenRun({
-        trade_date: activeRecommendationDate || undefined,
+      createScreenRunRange({
+        start: activeRecommendationDate || undefined,
         max_symbols: 500,
         recommendation_limit: 20,
         min_recommendation_score: 60,
@@ -211,14 +212,10 @@ export function QuantTradingPage() {
         <div>
           <h1 className="text-xl font-semibold tracking-tight">量化交易</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            按"数据准备、筛选候选、回测验证、模拟持仓"执行。当前不会连接券商实盘。
+            候选按交易日核查，回测按历史逐日动态候选执行。当前不会连接券商实盘。
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="outline" onClick={() => screenMutation.mutate()} disabled={screenMutation.isPending}>
-            {screenMutation.isPending ? <RefreshCw size={16} className="animate-spin" /> : <Play size={16} />}
-            运行筛选
-          </Button>
           <Button variant="outline" onClick={() => backtestMutation.mutate(undefined)} disabled={backtestMutation.isPending}>
             {backtestMutation.isPending ? <RefreshCw size={16} className="animate-spin" /> : <BarChart3 size={16} />}
             运行回测

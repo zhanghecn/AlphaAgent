@@ -46,7 +46,7 @@ export function QuantWorkflowGuide({
       label: "筛选",
       status: recommendationCount > 0 ? "ready" : "pending",
       value: recommendationCount > 0 ? `${recommendationCount}只` : "未生成",
-      note: "运行筛选会写入量化推荐表和量化候选持仓分组。",
+      note: "生成区间候选会按真实交易日逐日写入推荐表，并把最新交易日同步到量化候选分组。",
     },
     {
       label: "回测",
