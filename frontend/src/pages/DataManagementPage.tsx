@@ -211,7 +211,7 @@ function CapabilityRow({ cap }: { cap: DataUsageCapability }) {
           <div className="text-sm text-muted-foreground">
             {cap.name} · 表: {cap.table}
           </div>
-          {cap.message && <div className="mt-1 text-xs text-amber-700">{cap.message}</div>}
+          {cap.message && <div className="mt-1 text-xs text-amber-700 dark:text-amber-400">{cap.message}</div>}
         </div>
       <div className="flex items-center gap-2 shrink-0">
         <span className="text-xs text-muted-foreground tabular-nums">
@@ -387,7 +387,7 @@ function SyncTab() {
                     <span>目标: {job.target_table}</span>
                     {job.schedule_cron && <span>计划: {job.schedule_cron}</span>}
                   </div>
-                  {job.message && <div className="mt-1 text-xs text-amber-700">{job.message}</div>}
+                  {job.message && <div className="mt-1 text-xs text-amber-700 dark:text-amber-400">{job.message}</div>}
                 </div>
                 <div className="flex items-center gap-2 shrink-0 md:justify-end">
                   <RunStatusBadge status={job.last_status} />
@@ -768,14 +768,14 @@ function formatSampleValue(value: SyncProgressSample[string]): string {
 function StatusBadge({ status }: { status: string }) {
   const cls =
     status === "ready" || status === "ok" || status === "succeeded"
-      ? "bg-green-50 text-green-700"
+      ? "bg-green-50 text-green-700 dark:bg-green-500/15 dark:text-green-300"
       : status === "empty" || status === "pending"
-        ? "bg-gray-50 text-gray-600"
+        ? "bg-gray-50 text-gray-600 dark:bg-gray-500/15 dark:text-gray-300"
       : status === "partial"
-        ? "bg-yellow-50 text-yellow-700"
+        ? "bg-yellow-50 text-yellow-700 dark:bg-yellow-500/15 dark:text-yellow-300"
       : status === "unknown"
-        ? "bg-gray-50 text-gray-500"
-          : "bg-red-50 text-red-700";
+        ? "bg-gray-50 text-gray-500 dark:bg-gray-500/15 dark:text-gray-400"
+          : "bg-red-50 text-red-700 dark:bg-red-500/15 dark:text-red-300";
 
   return (
     <span className={cn("rounded-full px-2 py-0.5 text-xs font-medium", cls)}>
@@ -786,10 +786,10 @@ function StatusBadge({ status }: { status: string }) {
 
 function DataNotice({ title, message, action }: { title: string; message: string; action: string }) {
   return (
-    <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm">
-      <div className="font-medium text-amber-900">{title}</div>
-      <div className="mt-1 text-amber-800">{message}</div>
-      <div className="mt-2 text-xs text-amber-700">{action}</div>
+    <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm dark:border-amber-500/30 dark:bg-amber-500/10">
+      <div className="font-medium text-amber-900 dark:text-amber-200">{title}</div>
+      <div className="mt-1 text-amber-800 dark:text-amber-300">{message}</div>
+      <div className="mt-2 text-xs text-amber-700 dark:text-amber-400">{action}</div>
     </div>
   );
 }
@@ -804,9 +804,9 @@ function RunStatusBadge({ status }: { status: string | null | undefined }) {
     Clock;
 
   const colorClass =
-    status === "succeeded" ? "text-green-600" :
-    status === "failed" ? "text-red-600" :
-    status === "running" ? "text-blue-600" :
+    status === "succeeded" ? "text-green-600 dark:text-green-400" :
+    status === "failed" ? "text-red-600 dark:text-red-400" :
+    status === "running" ? "text-blue-600 dark:text-blue-400" :
     "text-muted-foreground";
 
   const label =

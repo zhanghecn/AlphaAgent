@@ -26,6 +26,7 @@ import { cn, formatPct } from "@/lib/utils";
 export interface MinuteDataWizardProps {
   tailEntryStart: string;
   tailEntryEnd: string;
+  minuteInterval: string;
   isRunningBacktest: boolean;
   onStrictPipelineComplete: (backtestId: number) => void;
   onAuditChange?: (audit: MinuteGapAuditResult | undefined) => void;
@@ -34,6 +35,7 @@ export interface MinuteDataWizardProps {
 export function MinuteDataWizard({
   tailEntryStart,
   tailEntryEnd,
+  minuteInterval,
   isRunningBacktest,
   onStrictPipelineComplete,
   onAuditChange,
@@ -63,7 +65,7 @@ export function MinuteDataWizard({
       auditMinuteGapCsv({
         gap_csv_text: minuteGapFilePath.trim() ? undefined : minuteGapCsv,
         file_path: minuteGapFilePath.trim() || undefined,
-        interval: "1m",
+        interval: minuteInterval,
         tail_entry_start: tailEntryStart,
         tail_entry_end: tailEntryEnd,
       }),
@@ -102,7 +104,7 @@ export function MinuteDataWizard({
       importMinuteBarsCsv({
         csv_text: minuteImportFilePath.trim() ? undefined : minuteImportCsv,
         file_path: minuteImportFilePath.trim() || undefined,
-        interval: "1m",
+        interval: minuteInterval,
         source: minuteImportFilePath.trim() ? "manual_csv_file" : "manual_csv",
         dry_run: dryRun,
       }),
@@ -120,7 +122,7 @@ export function MinuteDataWizard({
         vt_symbol: vnpyImportParams.vt_symbol,
         start: vnpyImportParams.start,
         end: vnpyImportParams.end || undefined,
-        interval: "1m",
+        interval: minuteInterval,
         dry_run: vnpyImportParams.dry_run,
       }),
     onSuccess: (result) => {
@@ -136,7 +138,7 @@ export function MinuteDataWizard({
       importVnpyMinuteBarsForGaps({
         gap_csv_text: minuteGapFilePath.trim() ? undefined : minuteGapCsv,
         gap_file_path: minuteGapFilePath.trim() || undefined,
-        interval: "1m",
+        interval: minuteInterval,
         tail_entry_start: tailEntryStart,
         tail_entry_end: tailEntryEnd,
         dry_run: dryRun,
@@ -155,7 +157,7 @@ export function MinuteDataWizard({
       importMinuteGapsFromTushare({
         gap_csv_text: minuteGapFilePath.trim() ? undefined : minuteGapCsv,
         gap_file_path: minuteGapFilePath.trim() || undefined,
-        interval: "1m",
+        interval: minuteInterval,
         tail_entry_start: tailEntryStart,
         tail_entry_end: tailEntryEnd,
         dry_run: dryRun,
@@ -174,7 +176,7 @@ export function MinuteDataWizard({
       importMinuteGapsFromTdx({
         gap_csv_text: minuteGapFilePath.trim() ? undefined : minuteGapCsv,
         gap_file_path: minuteGapFilePath.trim() || undefined,
-        interval: "1m",
+        interval: minuteInterval,
         tail_entry_start: tailEntryStart,
         tail_entry_end: tailEntryEnd,
         dry_run: dryRun,
@@ -196,6 +198,7 @@ export function MinuteDataWizard({
         max_symbols: 1500,
         gap_csv_text: minuteGapFilePath.trim() ? undefined : minuteGapCsv,
         gap_file_path: minuteGapFilePath.trim() || undefined,
+        minute_interval: minuteInterval,
         min_tail_bars: 1,
         trade_limit: 80,
         tail_entry_start: tailEntryStart,
@@ -260,7 +263,7 @@ export function MinuteDataWizard({
           <span
             className={cn(
               "rounded-md border px-2 py-1 text-xs",
-              audit.status === "ready" ? "border-green-200 bg-green-50 text-rise" : "border-amber-200 bg-amber-50 text-amber-700"
+              audit.status === "ready" ? "border-green-200 bg-green-50 text-rise dark:border-green-500/30 dark:bg-green-500/10" : "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300"
             )}
           >
             {audit.status === "ready" ? "覆盖完成" : "仍有缺口"}
@@ -274,6 +277,7 @@ export function MinuteDataWizard({
       {!expanded && (
         <div className="mt-3 grid grid-cols-2 gap-2 border-t pt-3">
           <InfoCell label="缺口状态" value={audit?.status ?? "未审计"} />
+          <InfoCell label="分钟周期" value={audit?.interval ?? minuteInterval} />
           <InfoCell label="覆盖率" value={formatPct(audit?.coverage_pct)} />
           <InfoCell label="缺口" value={audit?.gap_count == null ? "--" : `${audit.gap_count}个`} />
           <InfoCell label="缺失" value={audit?.missing_count == null ? "--" : `${audit.missing_count}个`} />
@@ -360,6 +364,7 @@ export function MinuteDataWizard({
             <InfoCell label="缺口" value={`${audit.gap_count ?? 0}个`} />
             <InfoCell label="已覆盖" value={`${audit.covered_count ?? 0}个`} />
             <InfoCell label="缺失" value={`${audit.missing_count ?? 0}个`} />
+            <InfoCell label="周期" value={audit.interval ?? minuteInterval} />
             <InfoCell label="覆盖率" value={formatPct(audit.coverage_pct)} />
             <InfoCell label="股票数" value={`${audit.symbol_count ?? 0}只`} />
             <InfoCell label="交易日" value={`${audit.date_count ?? 0}天`} />
@@ -377,12 +382,13 @@ export function MinuteDataWizard({
           <div
             className={cn(
               "rounded-md border p-3 text-xs",
-              strictPipelineResult.status === "ready" ? "border-green-200 bg-green-50 text-rise" : "border-amber-200 bg-amber-50 text-amber-700"
+              strictPipelineResult.status === "ready" ? "border-green-200 bg-green-50 text-rise dark:border-green-500/30 dark:bg-green-500/10" : "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300"
             )}
           >
             <div className="font-medium">{strictPipelineResult.message ?? strictPipelineResult.status}</div>
             <div className="mt-2 grid grid-cols-2 gap-2 text-foreground">
               <InfoCell label="状态" value={strictPipelineResult.status} />
+              <InfoCell label="周期" value={String(strictPipelineResult.params?.minute_interval ?? minuteInterval)} />
               <InfoCell label="缺口覆盖" value={formatPct(strictPipelineResult.audit?.coverage_pct)} />
               <InfoCell label="缺口" value={`${strictPipelineResult.audit?.gap_count ?? 0}个`} />
               <InfoCell label="缺失" value={`${strictPipelineResult.audit?.missing_count ?? 0}个`} />
@@ -449,6 +455,7 @@ export function MinuteDataWizard({
         {importResult && (
           <div className="grid grid-cols-2 gap-2 border-t pt-3">
             <InfoCell label="状态" value={importResult.status} />
+            <InfoCell label="周期" value={importResult.interval ?? minuteInterval} />
             <InfoCell label="预检查" value={importResult.dry_run ? "是" : "否"} />
             <InfoCell label="读取" value={`${importResult.rows_read ?? 0}行`} />
             <InfoCell label="写入" value={`${importResult.rows_written ?? 0}行`} />
@@ -520,6 +527,7 @@ export function MinuteDataWizard({
           {vnpyImportResult && (
             <div className="mt-3 grid grid-cols-2 gap-2">
               <InfoCell label="状态" value={vnpyImportResult.status} />
+              <InfoCell label="周期" value={vnpyImportResult.interval ?? minuteInterval} />
               <InfoCell label="预检查" value={vnpyImportResult.dry_run ? "是" : "否"} />
               <InfoCell label="读取" value={`${vnpyImportResult.rows_read ?? 0}行`} />
               <InfoCell label="写入" value={`${vnpyImportResult.rows_written ?? 0}行`} />
@@ -528,6 +536,7 @@ export function MinuteDataWizard({
           {vnpyGapImportResult && (
             <div className="mt-3 grid grid-cols-2 gap-2">
               <InfoCell label="批量状态" value={vnpyGapImportResult.status} />
+              <InfoCell label="周期" value={vnpyGapImportResult.interval ?? minuteInterval} />
               <InfoCell label="预检查" value={vnpyGapImportResult.dry_run ? "是" : "否"} />
               <InfoCell label="处理缺口" value={`${vnpyGapImportResult.processed_gap_count ?? 0}个`} />
               <InfoCell label="读取" value={`${vnpyGapImportResult.rows_read ?? 0}行`} />
@@ -564,6 +573,7 @@ export function MinuteDataWizard({
           {tdxGapImportResult && (
             <div className="mt-3 grid grid-cols-2 gap-2">
               <InfoCell label="状态" value={tdxGapImportResult.status} />
+              <InfoCell label="周期" value={tdxGapImportResult.interval ?? minuteInterval} />
               <InfoCell label="预检查" value={tdxGapImportResult.dry_run ? "是" : "否"} />
               <InfoCell label="处理缺口" value={`${tdxGapImportResult.processed_gap_count ?? 0}个`} />
               <InfoCell label="读取" value={`${tdxGapImportResult.rows_read ?? 0}行`} />
@@ -574,7 +584,7 @@ export function MinuteDataWizard({
             </div>
           )}
           {tdxGapImportResult?.message && (
-            <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">
+            <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
               {tdxGapImportResult.message}
             </div>
           )}
@@ -605,6 +615,7 @@ export function MinuteDataWizard({
           {tushareGapImportResult && (
             <div className="mt-3 grid grid-cols-2 gap-2">
               <InfoCell label="状态" value={tushareGapImportResult.status} />
+              <InfoCell label="周期" value={tushareGapImportResult.interval ?? minuteInterval} />
               <InfoCell label="预检查" value={tushareGapImportResult.dry_run ? "是" : "否"} />
               <InfoCell label="处理缺口" value={`${tushareGapImportResult.processed_gap_count ?? 0}个`} />
               <InfoCell label="读取" value={`${tushareGapImportResult.rows_read ?? 0}行`} />
@@ -615,7 +626,7 @@ export function MinuteDataWizard({
             </div>
           )}
           {tushareGapImportResult?.message && (
-            <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">
+            <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
               {tushareGapImportResult.message}
             </div>
           )}
@@ -654,8 +665,8 @@ export function MinuteDataWizard({
           title="复审后再跑严格回测"
           description="导入后重新审计缺口。只有覆盖率为 100% 时，严格流水线才会生成真实尾盘分钟成交回测。"
         />
-        {fileError ? <div className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-fall">{fileError}</div> : null}
-        {error ? <div className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-fall">{String(error)}</div> : null}
+        {fileError ? <div className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-fall dark:border-red-500/30 dark:bg-red-500/10">{fileError}</div> : null}
+        {error ? <div className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-fall dark:border-red-500/30 dark:bg-red-500/10">{String(error)}</div> : null}
       </div>
       )}
     </section>

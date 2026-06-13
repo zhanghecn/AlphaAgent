@@ -55,7 +55,7 @@ export function SectorRankCard({
             {item.name}
           </span>
           {item.type === "industry" && (
-            <span className="rounded bg-blue-100 px-1 py-0.5 text-[10px] text-blue-600">行业</span>
+            <span className="rounded bg-blue-100 px-1 py-0.5 text-[10px] text-blue-600 dark:bg-blue-500/15 dark:text-blue-300">行业</span>
           )}
         </div>
         <div className="flex items-center gap-3 shrink-0">

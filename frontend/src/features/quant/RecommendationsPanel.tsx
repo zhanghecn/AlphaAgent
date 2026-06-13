@@ -142,7 +142,7 @@ export function RecommendationsPanel({
                     <span
                       className={cn(
                         "rounded-md border px-2 py-1 text-xs",
-                        item.action === "BUY" ? "border-red-200 bg-red-50 text-rise" : "text-muted-foreground"
+                        item.action === "BUY" ? "border-red-200 bg-red-50 text-rise dark:border-red-500/30 dark:bg-red-500/10" : "text-muted-foreground"
                       )}
                     >
                       {item.action === "BUY" ? "买入" : "观察"}
@@ -236,9 +236,9 @@ function QuantEmptyState({
   const unavailable = status === "unavailable";
   return (
     <div className="p-4">
-      <div className={cn("rounded-lg border p-4", unavailable ? "border-amber-200 bg-amber-50" : "bg-muted/20")}>
+      <div className={cn("rounded-lg border p-4", unavailable ? "border-amber-200 bg-amber-50 dark:border-amber-500/30 dark:bg-amber-500/10" : "bg-muted/20")}>
         <div className="flex items-start gap-3">
-          {unavailable ? <AlertTriangle size={18} className="mt-0.5 text-amber-700" /> : <Database size={18} className="mt-0.5 text-muted-foreground" />}
+          {unavailable ? <AlertTriangle size={18} className="mt-0.5 text-amber-700 dark:text-amber-400" /> : <Database size={18} className="mt-0.5 text-muted-foreground" />}
           <div className="min-w-0 flex-1">
             <div className="font-medium">{unavailable ? "量化数据还不能读取" : "还没有量化候选"}</div>
             <div className="mt-1 text-sm text-muted-foreground">
@@ -253,7 +253,7 @@ function QuantEmptyState({
               </Button>
             </div>
             {unavailable && (
-              <div className="mt-3 text-xs text-amber-700">
+              <div className="mt-3 text-xs text-amber-700 dark:text-amber-400">
                 先配置 PostgreSQL 的 DATABASE_URL，并同步股票清单、日线和可选财报/资金流数据。
               </div>
             )}

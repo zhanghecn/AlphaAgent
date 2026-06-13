@@ -163,7 +163,7 @@ export function BacktestSignalEventsPanel({
         <InfoCell label="最大持仓" value={previewQuery.data?.max_positions ?? maxPositions} />
       </div>
 
-      {eventsQuery.data?.note && <div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{eventsQuery.data.note}</div>}
+      {eventsQuery.data?.note && <div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">{eventsQuery.data.note}</div>}
 
       {rows.length === 0 ? (
         <EmptyState message="暂无信号流水" description="旧回测需要重跑组合回测后才会生成全股票理论买卖点。" />

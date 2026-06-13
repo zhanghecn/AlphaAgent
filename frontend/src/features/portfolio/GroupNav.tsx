@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { FolderPlus, GripVertical } from "lucide-react";
+import { FolderPlus, GripVertical, Pencil } from "lucide-react";
 import {
   DndContext,
   closestCenter,
@@ -19,21 +19,24 @@ import { CSS } from "@dnd-kit/utilities";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
+export interface GroupNavItem {
+  id: number;
+  name: string;
+  group_type: string;
+  description?: string | null;
+  auto_managed: boolean;
+  risk_profile?: string;
+}
+
 interface GroupNavProps {
-  groups: Array<{
-    id: number;
-    name: string;
-    group_type: string;
-    description?: string | null;
-    auto_managed: boolean;
-    risk_profile?: string;
-  }>;
+  groups: GroupNavItem[];
   activeId: number | null;
   onSelect: (id: number) => void;
   itemCounts: Record<number, number>;
   onCreateGroup: (name: string) => void;
   isCreating: boolean;
   onReorder?: (groupIds: number[]) => void;
+  onEdit?: (group: GroupNavItem) => void;
 }
 
 export function GroupNav({
@@ -44,6 +47,7 @@ export function GroupNav({
   onCreateGroup,
   isCreating,
   onReorder,
+  onEdit,
 }: GroupNavProps) {
   const [newGroupName, setNewGroupName] = useState("");
 
@@ -76,10 +80,8 @@ export function GroupNav({
   return (
     <section className="space-y-4">
       {/* Group list with drag-and-drop */}
-      <section className="rounded-lg border">
-        <div className="border-b px-4 py-3 text-sm font-semibold">
-          持仓分组
-        </div>
+      <section className="rounded-lg border bg-card shadow-card">
+        <div className="border-b px-4 py-3 text-sm font-semibold">持仓分组</div>
         <DndContext
           sensors={sensors}
           collisionDetection={closestCenter}
@@ -98,6 +100,7 @@ export function GroupNav({
                   itemCount={itemCounts[group.id] ?? 0}
                   onSelect={onSelect}
                   isDraggable={Boolean(onReorder)}
+                  onEdit={onEdit}
                 />
               ))}
             </div>
@@ -106,7 +109,7 @@ export function GroupNav({
       </section>
 
       {/* Create form */}
-      <section className="rounded-lg border p-4 text-sm">
+      <section className="rounded-lg border bg-card p-4 text-sm shadow-card">
         <div className="font-medium">新建分组</div>
         <div className="mt-3 flex gap-2">
           <input
@@ -141,16 +144,14 @@ function SortableGroupItem({
   itemCount,
   onSelect,
   isDraggable,
+  onEdit,
 }: {
-  group: {
-    id: number;
-    name: string;
-    group_type: string;
-  };
+  group: GroupNavItem;
   isActive: boolean;
   itemCount: number;
   onSelect: (id: number) => void;
   isDraggable: boolean;
+  onEdit?: (group: GroupNavItem) => void;
 }) {
   const {
     attributes,
@@ -172,7 +173,7 @@ function SortableGroupItem({
       ref={setNodeRef}
       style={style}
       className={cn(
-        "flex items-center gap-1 px-4 py-3 text-sm hover:bg-muted/50",
+        "group flex items-center gap-1 px-4 py-3 text-sm hover:bg-muted/50",
         isActive && "bg-muted",
       )}
     >
@@ -200,17 +201,27 @@ function SortableGroupItem({
               </span>
             )}
             {group.group_type !== "quant_candidate" &&
-              group.group_type !== "manual" && (
-                <span className="text-xs text-muted-foreground">
-                  {group.group_type}
-                </span>
+              group.group_type !== "manual" &&
+              group.group_type !== "manual_watch" && (
+                <span className="text-xs text-muted-foreground">{group.group_type}</span>
               )}
           </div>
-          <span className="text-muted-foreground">
-            {itemCount}
-          </span>
+          <span className="text-muted-foreground tabular-nums">{itemCount}</span>
         </div>
       </button>
+      {onEdit && (
+        <button
+          type="button"
+          className="shrink-0 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100"
+          title="编辑分组"
+          onClick={(event) => {
+            event.stopPropagation();
+            onEdit(group);
+          }}
+        >
+          <Pencil size={13} />
+        </button>
+      )}
     </div>
   );
 }

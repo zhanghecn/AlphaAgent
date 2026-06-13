@@ -10,8 +10,11 @@ import {
   TrendingUp,
   ChevronLeft,
   ChevronRight,
+  Sun,
+  Moon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useTheme } from "@/theme/useTheme";
 
 const NAV_ITEMS = [
   { to: "/", label: "今日市场", icon: LayoutDashboard },
@@ -26,6 +29,7 @@ const NAV_ITEMS = [
 export function AppShell({ children }: { children: React.ReactNode }) {
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
+  const { theme, toggle } = useTheme();
 
   return (
     <div className="flex min-h-screen bg-background md:h-screen md:overflow-hidden">
@@ -33,6 +37,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <header className="fixed inset-x-0 top-0 z-30 border-b bg-card md:hidden">
         <div className="flex h-14 items-center justify-between px-4">
           <span className="text-lg font-bold tracking-tight">AlphaAgent</span>
+          <button
+            type="button"
+            onClick={toggle}
+            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            title={theme === "dark" ? "切换到浅色模式" : "切换到深色模式"}
+            aria-label="切换深浅色主题"
+          >
+            {theme === "dark" ? <Sun size={20} /> : <Moon size={20} />}
+          </button>
         </div>
         <nav className="grid grid-cols-4 gap-1 px-2 pb-2">
           {NAV_ITEMS.map(({ to, label, icon: Icon }) => {
@@ -46,7 +59,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   "flex min-w-0 items-center justify-center gap-1 rounded-md px-1 py-2 text-xs font-medium transition-colors",
                   active
                     ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
                 )}
               >
                 <Icon size={16} />
@@ -61,7 +74,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <aside
         className={cn(
           "hidden flex-col border-r bg-card transition-all duration-200 md:flex",
-          collapsed ? "w-16" : "w-56"
+          collapsed ? "w-16" : "w-56",
         )}
       >
         <div className="flex h-14 items-center border-b px-4">
@@ -72,9 +85,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             type="button"
             className={cn(
               "ml-auto rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground",
-              collapsed && "ml-0"
+              collapsed && "ml-0",
             )}
             onClick={() => setCollapsed((v) => !v)}
+            aria-label="折叠/展开侧边栏"
           >
             {collapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
           </button>
@@ -91,7 +105,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
                   active
                     ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
                 )}
                 title={collapsed ? label : undefined}
               >
@@ -101,6 +115,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             );
           })}
         </nav>
+        <div className="border-t p-2">
+          <button
+            type="button"
+            onClick={toggle}
+            className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            title={theme === "dark" ? "切换到浅色模式" : "切换到深色模式"}
+          >
+            {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+            {!collapsed && (
+              <span>{theme === "dark" ? "浅色模式" : "深色模式"}</span>
+            )}
+          </button>
+        </div>
       </aside>
 
       {/* Main content */}

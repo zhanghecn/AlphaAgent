@@ -391,12 +391,12 @@ function SectorDetailPanel({ item }: { item: SectorRankingItem }) {
             <div className="flex items-center gap-2">
               <h2 className="text-lg font-bold">{item.name}</h2>
               {item.type === "industry" && (
-                <span className="rounded bg-blue-100 px-1.5 py-0.5 text-xs text-blue-600">
+                <span className="rounded bg-blue-100 px-1.5 py-0.5 text-xs text-blue-600 dark:bg-blue-500/15 dark:text-blue-300">
                   行业
                 </span>
               )}
               {item.type === "concept" && (
-                <span className="rounded bg-purple-100 px-1.5 py-0.5 text-xs text-purple-600">
+                <span className="rounded bg-purple-100 px-1.5 py-0.5 text-xs text-purple-600 dark:bg-purple-500/15 dark:text-purple-300">
                   概念
                 </span>
               )}

@@ -22,6 +22,7 @@ import { ErrorState } from "@/components/ErrorState";
 import { EmptyState } from "@/components/EmptyState";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { formatAmount, formatPct, priceColorClass } from "@/lib/utils";
+import { useChartColors } from "@/lib/chart-theme";
 import type {
   FinancialStatementResponse,
   QuarterlyFinanceItem,
@@ -554,6 +555,7 @@ type ChartSource =
   | { type: "statement"; fieldKey: string; items: Record<string, string | number | null>[]; dates: string[]; labels: string[] };
 
 function UnifiedTrendChart({ source }: { source: ChartSource | null }) {
+  const palette = useChartColors();
   const option = useMemo(() => {
     if (!source) return null;
 
@@ -586,7 +588,7 @@ function UnifiedTrendChart({ source }: { source: ChartSource | null }) {
     const POS_COLOR = "#E8564A";
     const NEG_COLOR = "#2EAA6E";
     const NEUTRAL_COLOR = "#6B8A9E";
-    const PRIMARY_COLOR = "#4A7FE0";
+    const PRIMARY_COLOR = palette.brand;
 
     // Build per-bar color array
     const barColors = values.map((v) => {
@@ -610,12 +612,12 @@ function UnifiedTrendChart({ source }: { source: ChartSource | null }) {
       grid: { top: 36, right: 20, bottom: 24, left: 68, containLabel: false },
       tooltip: {
         trigger: "axis" as const,
-        backgroundColor: "rgba(255,255,255,0.96)",
-        borderColor: "#E5E7EB",
+        backgroundColor: palette.tooltipBg,
+        borderColor: palette.tooltipBorder,
         borderWidth: 1,
         borderRadius: 6,
         padding: [8, 12],
-        textStyle: { color: "#374151", fontSize: 12 },
+        textStyle: { color: palette.tooltipText, fontSize: 12 },
         formatter: (params: Array<{ name: string; value: number | string }>) => {
           const p = params[0];
           const val = typeof p.value === "number" ? p.value : null;
@@ -625,10 +627,10 @@ function UnifiedTrendChart({ source }: { source: ChartSource | null }) {
       xAxis: {
         type: "category" as const,
         data: categories,
-        axisLine: { lineStyle: { color: "#E5E7EB" } },
+        axisLine: { lineStyle: { color: palette.axis } },
         axisTick: { show: false },
         axisLabel: {
-          color: "#9CA3AF",
+          color: palette.text,
           fontSize: 11,
           interval: 0,
           rotate: categories.length > 6 ? 25 : 0,
@@ -638,9 +640,9 @@ function UnifiedTrendChart({ source }: { source: ChartSource | null }) {
         type: "value" as const,
         axisLine: { show: false },
         axisTick: { show: false },
-        splitLine: { lineStyle: { color: "#F3F4F6", type: "dashed" } },
+        splitLine: { lineStyle: { color: palette.grid, type: "dashed" } },
         axisLabel: {
-          color: "#9CA3AF",
+          color: palette.text,
           fontSize: 11,
           formatter: (v: number) =>
             fmt === "amount"
@@ -658,7 +660,7 @@ function UnifiedTrendChart({ source }: { source: ChartSource | null }) {
           label: {
             show: true,
             position: "top",
-            color: "#6B7280",
+            color: palette.text,
             fontSize: 10,
             formatter: (params: { value: number | string }) => {
               const v = typeof params.value === "number" ? params.value : null;
@@ -676,7 +678,7 @@ function UnifiedTrendChart({ source }: { source: ChartSource | null }) {
         },
       ],
     };
-  }, [source]);
+  }, [source, palette]);
 
   if (!option) {
     return (

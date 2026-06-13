@@ -47,7 +47,7 @@ function ChainNode({ data }: { data: { label: string; changePct?: number | null;
   return (
     <div
       className={cn(
-        "rounded-lg border-2 border-gray-300 bg-white px-3 py-2 shadow-sm min-w-[100px] text-center"
+        "rounded-lg border-2 border-gray-300 bg-white px-3 py-2 shadow-sm min-w-[100px] text-center dark:border-gray-600 dark:bg-gray-800"
       )}
     >
       <div className="text-xs font-bold">{data.label}</div>
@@ -58,7 +58,7 @@ function ChainNode({ data }: { data: { label: string; changePct?: number | null;
         <div
           className={cn(
             "text-xs font-semibold tabular-nums",
-            changePct != null && changePct > 0 ? "text-rise" : isFall ? "text-fall" : "text-gray-500"
+            changePct != null && changePct > 0 ? "text-rise" : isFall ? "text-fall" : "text-gray-500 dark:text-gray-400"
           )}
         >
           {formatPct(changePct)}

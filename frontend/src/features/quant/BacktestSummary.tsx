@@ -46,9 +46,9 @@ export function BacktestTrustPanel({
     <div
       className={cn(
         "rounded-lg border p-3 text-sm",
-        verdict.status === "invalid" && "border-red-200 bg-red-50",
-        verdict.status === "warning" && "border-amber-200 bg-amber-50",
-        verdict.status === "pass" && "border-green-200 bg-green-50"
+        verdict.status === "invalid" && "border-red-200 bg-red-50 dark:border-red-500/30 dark:bg-red-500/10",
+        verdict.status === "warning" && "border-amber-200 bg-amber-50 dark:border-amber-500/30 dark:bg-amber-500/10",
+        verdict.status === "pass" && "border-green-200 bg-green-50 dark:border-green-500/30 dark:bg-green-500/10"
       )}
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -59,15 +59,16 @@ export function BacktestTrustPanel({
           </div>
           <div className="mt-1 text-xs text-muted-foreground">{verdict.description}</div>
         </div>
-        <span className={cn("rounded-md border bg-background px-2 py-1 text-xs", verdict.status === "invalid" ? "text-fall" : verdict.status === "pass" ? "text-rise" : "text-amber-700")}>
+        <span className={cn("rounded-md border bg-background px-2 py-1 text-xs", verdict.status === "invalid" ? "text-fall" : verdict.status === "pass" ? "text-rise" : "text-amber-700 dark:text-amber-300")}>
           {verdict.label}
         </span>
       </div>
 
-      <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+      <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-6">
         <InfoCell label="撮合版本" value={report.strategy_version} />
         <InfoCell label="买入方式" value={verdict.entryMode} />
         <InfoCell label="尾盘成交占比" value={formatPct(report.execution_quality?.minute_tail_entry_ratio)} />
+        <InfoCell label="严格拒单" value={`${report.execution_quality?.strict_tail_rejected_count ?? 0}笔`} />
         <InfoCell label="开盘回退占比" value={formatPct(report.execution_quality?.daily_open_fallback_ratio)} />
         <InfoCell label="闭仓笔数" value={`${report.closed_trade_count ?? report.metrics.trade_count ?? 0}笔`} />
       </div>

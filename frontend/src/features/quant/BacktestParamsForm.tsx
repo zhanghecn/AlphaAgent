@@ -1,6 +1,6 @@
 import { Play, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { BacktestParams } from "@/features/quant/constants";
+import { MINUTE_INTERVAL_OPTIONS, type BacktestParams, type MinuteInterval } from "@/features/quant/constants";
 import { QuantBoardSelector } from "@/features/quant/RecommendationsPanel";
 import { TradingDateSelector } from "@/features/quant/TradingDateSelector";
 
@@ -103,7 +103,7 @@ export function BacktestParamsForm({
       </div>
       <details className="mt-3 border-t pt-3 text-sm">
         <summary className="cursor-pointer text-muted-foreground">高级执行设置：尾盘分钟线、强制分钟成交、MA5 偏离</summary>
-        <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
           <label className="flex h-9 items-center gap-2 rounded-md border px-2 text-sm">
             <input
               type="checkbox"
@@ -119,6 +119,20 @@ export function BacktestParamsForm({
               onChange={(event) => onChange({ ...params, minute_entry_required: event.target.checked })}
             />
             强制分钟成交
+          </label>
+          <label className="text-sm">
+            <span className="text-xs text-muted-foreground">分钟周期</span>
+            <select
+              className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
+              value={params.minute_interval}
+              onChange={(event) => onChange({ ...params, minute_interval: event.target.value as MinuteInterval })}
+            >
+              {MINUTE_INTERVAL_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
           </label>
           <label className="text-sm">
             <span className="text-xs text-muted-foreground">尾盘开始</span>

@@ -88,10 +88,10 @@ export function QuantWorkflowGuide({
 function WorkflowStatus({ status }: { status: "ready" | "warning" | "pending" }) {
   const cls =
     status === "ready"
-      ? "border-green-200 bg-green-50 text-green-700"
+      ? "border-green-200 bg-green-50 text-green-700 dark:border-green-500/30 dark:bg-green-500/10 dark:text-green-300"
       : status === "warning"
-        ? "border-amber-200 bg-amber-50 text-amber-700"
-        : "border-gray-200 bg-gray-50 text-gray-600";
+        ? "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300"
+        : "border-gray-200 bg-gray-50 text-gray-600 dark:border-gray-500/30 dark:bg-gray-500/10 dark:text-gray-300";
   const text = status === "ready" ? "就绪" : status === "warning" ? "待接入" : "待执行";
   return <span className={cn("rounded-md border px-2 py-0.5 text-xs", cls)}>{text}</span>;
 }

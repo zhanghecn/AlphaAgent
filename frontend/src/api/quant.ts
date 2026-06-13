@@ -144,6 +144,7 @@ export interface BacktestMethod {
   execution?: {
     intraday_entry?: boolean;
     minute_entry_required?: boolean;
+    minute_interval?: string;
     tail_entry_window?: string;
     tail_entry_ma5_tolerance_pct?: number;
   };
@@ -381,6 +382,9 @@ export interface BacktestExtendedMetrics {
 export interface BacktestExecutionQuality {
   status: "pass" | "warning" | string;
   buy_count: number;
+  strict_tail_attempt_count?: number;
+  strict_tail_rejected_count?: number;
+  strict_tail_rejected_ratio?: number | null;
   minute_tail_entry_count: number;
   daily_open_fallback_count: number;
   minute_tail_entry_ratio?: number | null;
@@ -754,6 +758,33 @@ export interface AutoBuyResult {
   message?: string;
 }
 
+/** A simulated order placement result (filled / skipped / rejected / invalid). */
+export interface PlaceOrderResult {
+  status: string;
+  vt_symbol?: string;
+  order_id?: number;
+  side?: string;
+  price?: number;
+  volume?: number;
+  amount?: number;
+  fee?: number;
+  pnl?: number;
+  reason?: string;
+  message?: string;
+}
+
+/** A risk event row (order rejected, stop triggered, etc.). */
+export interface RiskEvent {
+  id: number;
+  account_id?: number | null;
+  vt_symbol?: string | null;
+  event_type: string;
+  severity: string;
+  message: string;
+  context?: Record<string, unknown> | null;
+  created_at?: string;
+}
+
 export interface VnpyStatus {
   status: string;
   product: string;
@@ -881,6 +912,7 @@ export function createBacktest(payload: {
   strict_entry?: boolean;
   intraday_entry?: boolean;
   minute_entry_required?: boolean;
+  minute_interval?: string;
   tail_entry_start?: string;
   tail_entry_end?: string;
   tail_entry_ma5_tolerance_pct?: number;
@@ -908,6 +940,7 @@ export function createSymbolBacktest(payload: {
   strict_entry?: boolean;
   intraday_entry?: boolean;
   minute_entry_required?: boolean;
+  minute_interval?: string;
   tail_entry_start?: string;
   tail_entry_end?: string;
   tail_entry_ma5_tolerance_pct?: number;
@@ -934,6 +967,7 @@ export function runStrictMinuteBacktestPipeline(payload: {
   max_symbols?: number;
   candidate_limit?: number;
   min_entry_score?: number;
+  minute_interval?: string;
   tail_entry_start?: string;
   tail_entry_end?: string;
   tail_entry_ma5_tolerance_pct?: number;
@@ -1093,6 +1127,19 @@ export function reorderPortfolioGroups(groupIds: number[]) {
   return apiClient.post<{ status: string; reordered: number }>("/portfolio/groups/reorder", { group_ids: groupIds });
 }
 
+export function updatePortfolioGroup(groupId: number, payload: {
+  name?: string;
+  description?: string | null;
+  risk_profile?: string;
+  auto_managed?: boolean;
+}) {
+  return apiClient.patch<{ status: string; id: number; updated: number }>(`/portfolio/groups/${groupId}`, payload);
+}
+
+export function deletePortfolioGroup(groupId: number) {
+  return apiClient.del<{ status: string; id: number; deleted: number }>(`/portfolio/groups/${groupId}`);
+}
+
 export function fetchHoldings() {
   return apiClient.get<{ status: string; items: SimulationPosition[] }>("/portfolio/holdings");
 }
@@ -1108,6 +1155,24 @@ export function autoBuyRecommendations(payload: {
   initial_cash?: number;
 } = {}) {
   return apiClient.post<AutoBuyResult>("/simulation/auto-buy-recommendations", payload);
+}
+
+export function placeOrder(accountId: number, payload: {
+  vt_symbol: string;
+  side: "BUY" | "SELL";
+  price?: number;
+  volume?: number;
+  amount?: number;
+  reason?: string;
+  recommendation_id?: number;
+}) {
+  return apiClient.post<PlaceOrderResult>(`/simulation/accounts/${accountId}/orders`, payload);
+}
+
+export function fetchRiskEvents(accountId: number, limit = 100) {
+  return apiClient.get<{ status: string; items: RiskEvent[] }>(
+    `/simulation/accounts/${accountId}/risk-events?limit=${limit}`,
+  );
 }
 
 export function fetchVnpyStatus() {

@@ -10,6 +10,13 @@ export const QUANT_BOARD_OPTIONS = [
 ] as const;
 
 export type QuantBoard = (typeof QUANT_BOARD_OPTIONS)[number]["value"];
+export type MinuteInterval = "1m" | "5m" | "10m";
+
+export const MINUTE_INTERVAL_OPTIONS = [
+  { value: "1m", label: "1分钟" },
+  { value: "5m", label: "5分钟" },
+  { value: "10m", label: "10分钟" },
+] as const;
 
 export const DEFAULT_BACKTEST_PARAMS = {
   start: DEFAULT_BACKTEST_START,
@@ -20,6 +27,7 @@ export const DEFAULT_BACKTEST_PARAMS = {
   strict_entry: true,
   intraday_entry: true,
   minute_entry_required: false,
+  minute_interval: "1m" as MinuteInterval,
   tail_entry_start: "14:30",
   tail_entry_end: "14:57",
   tail_entry_ma5_tolerance_pct: 1.5,

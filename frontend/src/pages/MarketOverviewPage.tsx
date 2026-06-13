@@ -125,7 +125,7 @@ function MainlineRankRow({ item, rank }: { item: SectorRankingItem; rank: number
           rank === 1 && "bg-red-500 text-white",
           rank === 2 && "bg-orange-500 text-white",
           rank === 3 && "bg-amber-500 text-white",
-          rank > 3 && "bg-gray-100 text-gray-500"
+          rank > 3 && "bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-300"
         )}
       >
         {rank}
@@ -136,7 +136,7 @@ function MainlineRankRow({ item, rank }: { item: SectorRankingItem; rank: number
         <div className="flex items-center gap-1.5">
           <span className="truncate font-medium">{item.name}</span>
           {item.type === "industry" && (
-            <span className="shrink-0 rounded bg-blue-100 px-1 py-0.5 text-[10px] text-blue-600">
+            <span className="shrink-0 rounded bg-blue-100 px-1 py-0.5 text-[10px] text-blue-600 dark:bg-blue-500/15 dark:text-blue-300">
               行业
             </span>
           )}
@@ -225,16 +225,16 @@ function LimitPoolSection({
         涨停池
       </h3>
       <div className="mt-3 grid grid-cols-3 gap-3 text-center">
-        <div className="rounded-lg bg-red-50 p-2">
+        <div className="rounded-lg bg-red-50 p-2 dark:bg-red-500/10">
           <div className="text-xl font-bold text-rise">{limitUp}</div>
           <div className="text-xs text-muted-foreground">涨停</div>
         </div>
-        <div className="rounded-lg bg-green-50 p-2">
+        <div className="rounded-lg bg-green-50 p-2 dark:bg-green-500/10">
           <div className="text-xl font-bold text-fall">{limitDown}</div>
           <div className="text-xs text-muted-foreground">跌停</div>
         </div>
-        <div className="rounded-lg bg-amber-50 p-2">
-          <div className="text-xl font-bold text-amber-600">{strongCount}</div>
+        <div className="rounded-lg bg-amber-50 p-2 dark:bg-amber-500/10">
+          <div className="text-xl font-bold text-amber-600 dark:text-amber-400">{strongCount}</div>
           <div className="text-xs text-muted-foreground">强势</div>
         </div>
       </div>
@@ -306,7 +306,7 @@ function HotStocksSection({
                     "flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold",
                     idx === 0 && "bg-red-500 text-white",
                     idx === 1 && "bg-orange-500 text-white",
-                    idx >= 2 && "bg-gray-100 text-gray-500"
+                    idx >= 2 && "bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-300"
                   )}
                 >
                   {idx + 1}

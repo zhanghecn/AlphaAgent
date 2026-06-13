@@ -43,7 +43,13 @@ export function QuantTradingPage() {
   const [addToGroupSymbol, setAddToGroupSymbol] = useState<string | null>(null);
   const [selectedRecommendationDate, setSelectedRecommendationDate] = useState("");
 
+  const updateBacktestParams = (next: BacktestParams) => {
+    setBacktestParams(next);
+    setMinuteAudit(undefined);
+  };
+
   const applyStrictMinutePreset = () => {
+    setMinuteAudit(undefined);
     setBacktestParams((current) => ({
       ...current,
       max_symbols: Math.max(current.max_symbols, 1500),
@@ -273,7 +279,7 @@ export function QuantTradingPage() {
               selectedTradeDate={activeRecommendationDate}
               onSelectedTradeDateChange={setSelectedRecommendationDate}
               selectedBoards={backtestParams.included_boards}
-              onSelectedBoardsChange={(included_boards) => setBacktestParams({ ...backtestParams, included_boards })}
+              onSelectedBoardsChange={(included_boards) => updateBacktestParams({ ...backtestParams, included_boards })}
               status={recommendationsQuery.data?.status}
               message={recommendationsQuery.data?.message}
               syncedCount={quantGroupItemsQuery.data?.items.length ?? 0}
@@ -301,7 +307,7 @@ export function QuantTradingPage() {
             selectedId={activeBacktestId}
             onSelect={setSelectedBacktestId}
             params={backtestParams}
-            onParamsChange={setBacktestParams}
+            onParamsChange={updateBacktestParams}
             tradingDates={tradingDatesQuery.data?.items.map((item) => item.trade_date) ?? []}
             isRunning={backtestMutation.isPending}
             onRun={() => backtestMutation.mutate(undefined)}
@@ -331,6 +337,7 @@ export function QuantTradingPage() {
             <MinuteDataWizard
               tailEntryStart={backtestParams.tail_entry_start}
               tailEntryEnd={backtestParams.tail_entry_end}
+              minuteInterval={backtestParams.minute_interval}
               isRunningBacktest={backtestMutation.isPending}
               onStrictPipelineComplete={(backtestId) => {
                 setSelectedBacktestId(backtestId);

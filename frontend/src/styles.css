@@ -10,7 +10,7 @@
     --card-foreground: 222.2 84% 4.9%;
     --popover: 0 0% 100%;
     --popover-foreground: 222.2 84% 4.9%;
-    --primary: 222.2 47.4% 11.2%;
+    --primary: 243 75% 59%;
     --primary-foreground: 210 40% 98%;
     --secondary: 210 40% 96.1%;
     --secondary-foreground: 222.2 47.4% 11.2%;
@@ -22,8 +22,31 @@
     --destructive-foreground: 210 40% 98%;
     --border: 214.3 31.8% 91.4%;
     --input: 214.3 31.8% 91.4%;
-    --ring: 222.2 84% 4.9%;
+    --ring: 243 75% 59%;
     --radius: 0.5rem;
+  }
+
+  /* 深色模式色阶（slate 系），保留 A 股涨红跌绿语义不变 */
+  .dark {
+    --background: 222 47% 11%;
+    --foreground: 210 40% 98%;
+    --card: 222 47% 13%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222 47% 11%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 243 75% 65%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 217 33% 17%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217 33% 17%;
+    --muted-foreground: 215 20% 65%;
+    --accent: 217 33% 20%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 63% 45%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217 33% 20%;
+    --input: 217 33% 20%;
+    --ring: 243 75% 65%;
   }
 }
 
@@ -60,16 +83,16 @@
   @apply opacity-80;
 }
 .concept-tag-rise {
-  @apply bg-rose-50 text-rose-700 border-rose-200;
+  @apply bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-500/15 dark:text-rose-300 dark:border-rose-500/30;
 }
 .concept-tag-fall {
-  @apply bg-emerald-50 text-emerald-700 border-emerald-200;
+  @apply bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-500/15 dark:text-emerald-300 dark:border-emerald-500/30;
 }
 .concept-tag-flat {
-  @apply bg-gray-50 text-gray-600 border-gray-200;
+  @apply bg-gray-50 text-gray-600 border-gray-200 dark:bg-gray-500/15 dark:text-gray-300 dark:border-gray-500/30;
 }
 .concept-tag-industry {
-  @apply bg-blue-50 text-blue-700 border-blue-200;
+  @apply bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-500/15 dark:text-blue-300 dark:border-blue-500/30;
 }
 
 /* ── Rank Card Styles ── */
@@ -81,7 +104,7 @@
 .rank-badge-top1 { @apply bg-red-500 text-white; }
 .rank-badge-top2 { @apply bg-orange-500 text-white; }
 .rank-badge-top3 { @apply bg-amber-500 text-white; }
-.rank-badge-default { @apply bg-gray-100 text-gray-600; }
+.rank-badge-default { @apply bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300; }
 
 /* ── Sector Detail Panel ── */
 .sector-detail-panel {

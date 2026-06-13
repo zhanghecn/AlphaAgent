@@ -293,7 +293,7 @@ function SingleStockBacktestPanel({
       </div>
 
       {Boolean(error) && (
-        <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-2 text-sm text-fall">
+        <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-2 text-sm text-fall dark:border-red-500/30 dark:bg-red-500/10">
           {error instanceof Error ? error.message : "单股回测失败"}
         </div>
       )}

@@ -21,6 +21,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn, formatAmount, formatPrice, priceColorClass } from "@/lib/utils";
+import { useChartColors, type ChartPalette } from "@/lib/chart-theme";
 import { Database, Radio } from "lucide-react";
 
 interface StockKlineChartProps {
@@ -95,6 +96,7 @@ export function StockKlineChart({
   const [overlayMode, setOverlayMode] = useState<OverlayMode>("ma");
   const [indicatorMode, setIndicatorMode] = useState<IndicatorMode>("volume");
   const [activeBar, setActiveBar] = useState<Bar | null>(null);
+  const palette = useChartColors();
   const priceContainerRef = useRef<HTMLDivElement>(null);
   const indicatorContainerRef = useRef<HTMLDivElement>(null);
   const chartsRef = useRef<{ price: IChartApi; indicator: IChartApi } | null>(null);
@@ -128,8 +130,8 @@ export function StockKlineChart({
     chartsRef.current = null;
 
     try {
-      const priceChart = createBaseChart(priceContainerRef.current, 430, period);
-      const indicatorChart = createBaseChart(indicatorContainerRef.current, 150, period);
+      const priceChart = createBaseChart(priceContainerRef.current, 430, period, palette);
+      const indicatorChart = createBaseChart(indicatorContainerRef.current, 150, period, palette);
       chartsRef.current = { price: priceChart, indicator: indicatorChart };
       setActiveBar(null);
 
@@ -193,7 +195,7 @@ export function StockKlineChart({
       destroyCharts(chartsRef.current);
       chartsRef.current = null;
     }
-  }, [bars, barsQuery.isLoading, indicatorMode, markers, onMarkerClick, overlayMode, period, selectedMarkerId, vtSymbol]);
+  }, [bars, barsQuery.isLoading, indicatorMode, markers, onMarkerClick, overlayMode, period, selectedMarkerId, vtSymbol, palette]);
 
   if (barsQuery.isLoading) {
     return (
@@ -292,23 +294,23 @@ function isLocalBars(source?: string) {
   return Boolean(source?.startsWith("postgresql"));
 }
 
-function createBaseChart(container: HTMLDivElement, height: number, period: string) {
+function createBaseChart(container: HTMLDivElement, height: number, period: string, palette: ChartPalette) {
   return createChart(container, {
     layout: {
       background: { type: ColorType.Solid, color: "transparent" },
-      textColor: "#64748b",
+      textColor: palette.text,
       fontSize: 12,
     },
     grid: {
-      vertLines: { color: "#f1f5f9" },
-      horzLines: { color: "#f1f5f9" },
+      vertLines: { color: palette.grid },
+      horzLines: { color: palette.grid },
     },
     width: container.clientWidth,
     height,
     crosshair: { mode: CrosshairMode.Normal },
-    rightPriceScale: { borderColor: "#e2e8f0" },
+    rightPriceScale: { borderColor: palette.axis },
     timeScale: {
-      borderColor: "#e2e8f0",
+      borderColor: palette.axis,
       timeVisible: period.endsWith("m"),
       secondsVisible: false,
       tickMarkFormatter: (time: Time) => formatAxisTime(time, period),
@@ -667,18 +669,18 @@ function OverlayLegend({ mode, values }: { mode: OverlayMode; values: ReturnType
   if (mode === "boll") {
     return (
       <div className="flex h-6 flex-wrap gap-1.5 text-xs">
-        <IndicatorBadge label="BOLL上" value={values.bollUpper} className="text-teal-700" />
+        <IndicatorBadge label="BOLL上" value={values.bollUpper} className="text-teal-700 dark:text-teal-400" />
         <IndicatorBadge label="BOLL中" value={values.bollMid} />
-        <IndicatorBadge label="BOLL下" value={values.bollLower} className="text-teal-700" />
+        <IndicatorBadge label="BOLL下" value={values.bollLower} className="text-teal-700 dark:text-teal-400" />
       </div>
     );
   }
   return (
     <div className="flex h-6 flex-wrap gap-1.5 text-xs">
-      <IndicatorBadge label="MA5" value={values.ma5} className="text-amber-600" />
-      <IndicatorBadge label="MA10" value={values.ma10} className="text-violet-600" />
-      <IndicatorBadge label="MA20" value={values.ma20} className="text-blue-600" />
-      <IndicatorBadge label="MA60" value={values.ma60} className="text-slate-600" />
+      <IndicatorBadge label="MA5" value={values.ma5} className="text-amber-600 dark:text-amber-400" />
+      <IndicatorBadge label="MA10" value={values.ma10} className="text-violet-600 dark:text-violet-400" />
+      <IndicatorBadge label="MA20" value={values.ma20} className="text-blue-600 dark:text-blue-400" />
+      <IndicatorBadge label="MA60" value={values.ma60} className="text-slate-600 dark:text-slate-400" />
     </div>
   );
 }

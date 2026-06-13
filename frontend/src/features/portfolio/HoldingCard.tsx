@@ -1,8 +1,13 @@
+import { ArrowDownToLine, ArrowUpFromLine } from "lucide-react";
 import { cn, formatAmount, formatPct, formatPrice, priceColorClass } from "@/lib/utils";
 import { formatTime, sourceLabel } from "@/lib/backtest-utils";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { HoldingMiniChart, type SignalMarker } from "./HoldingMiniChart";
 import type { SimulationPosition } from "@/api/quant";
+import type { RiskBadge } from "@/lib/portfolio-risk";
 
 /**
  * Daily bar for the mini K-line chart inside a holding card.
@@ -39,10 +44,16 @@ export interface HoldingCardProps {
   position?: SimulationPosition | null;
   /** Recent daily bars for the mini chart */
   dailyBars?: DailyBar[];
+  /** Risk badges derived from the position (near stop-loss / deep loss / overdue) */
+  riskBadges?: RiskBadge[];
   /** Callback to open the add-to-group dialog */
   onAddToGroup?: (vtSymbol: string) => void;
   /** Callback to navigate to stock detail page */
   onViewDetail?: (vtSymbol: string) => void;
+  /** Callback to open the sell dialog (held only) */
+  onSell?: (vtSymbol: string) => void;
+  /** Callback to open the add-position dialog (held only) */
+  onAddPosition?: (vtSymbol: string) => void;
   /** Whether batch selection mode is active */
   isSelecting?: boolean;
   /** Whether this card is selected in batch mode */
@@ -62,8 +73,11 @@ export function HoldingCard({
   item,
   position,
   dailyBars,
+  riskBadges,
   onAddToGroup,
   onViewDetail,
+  onSell,
+  onAddPosition,
   isSelecting,
   isSelected,
   onToggleSelect,
@@ -95,15 +109,31 @@ export function HoldingCard({
   }
 
   return (
-    <section
+    <Card
       className={cn(
-        "rounded-lg border p-4 text-sm transition-colors",
-        isHeld ? "bg-card" : "bg-card/60",
+        "p-4 text-sm",
+        !isHeld && "bg-card/60",
         isSelecting && isSelected && "ring-2 ring-primary",
       )}
       onClick={isSelecting && onToggleSelect ? () => onToggleSelect(item.vt_symbol) : undefined}
       style={isSelecting ? { cursor: "pointer" } : undefined}
     >
+      {/* Risk badges (held only) */}
+      {isHeld && riskBadges && riskBadges.length > 0 && (
+        <div className="mb-2 flex flex-wrap gap-1">
+          {riskBadges.map((badge) => (
+            <Badge
+              key={badge.type}
+              variant={badge.severity === "high" ? "destructive" : "secondary"}
+              className="px-2 py-0.5"
+              title={badge.detail}
+            >
+              {badge.label}
+            </Badge>
+          ))}
+        </div>
+      )}
+
       {/* Header: checkbox + stock identity + P&L */}
       <div className="flex items-start justify-between gap-3">
         {isSelecting && (
@@ -198,21 +228,24 @@ export function HoldingCard({
           )}
           {position.last_sell_time && (
             <div>
-              最近卖出 {formatTime(position.last_sell_time)} · {formatPrice(position.last_sell_price)}
-              {position.last_sell_pnl != null && (
-                <>
-                  {" "}· 盈亏{" "}
-                  <span className={priceColorClass(position.last_sell_pnl)}>
-                    {formatAmount(position.last_sell_pnl)}
-                  </span>
-                </>
-              )}
+              最近卖出 {formatTime(position.last_sell_time)} · {formatPrice(position.last_sell_price)} · 盈亏{" "}
+              <span className={priceColorClass(position.last_sell_pnl)}>
+                {formatAmount(position.last_sell_pnl)}
+              </span>
             </div>
           )}
           {(position.stop_loss_price || position.take_profit_price) && (
-            <div>
-              止损 {formatPrice(position.stop_loss_price)} / 止盈 {formatPrice(position.take_profit_price)}
-              {position.trailing_stop_price && ` · 跟踪 ${formatPrice(position.trailing_stop_price)}`}
+            <div className="flex flex-wrap items-center gap-1">
+              <span>
+                止损 {formatPrice(position.stop_loss_price)} / 止盈 {formatPrice(position.take_profit_price)}
+                {position.trailing_stop_price && ` · 跟踪 ${formatPrice(position.trailing_stop_price)}`}
+              </span>
+              <span
+                className="rounded border px-1 text-[10px] leading-4 text-muted-foreground"
+                title="止损止盈当前为策略默认值，后续版本支持手动调整"
+              >
+                只读
+              </span>
             </div>
           )}
         </div>
@@ -220,26 +253,30 @@ export function HoldingCard({
 
       {/* Action buttons */}
       <div className="mt-3 flex flex-wrap gap-2 border-t pt-3">
+        {isHeld && onSell && (
+          <Button size="sm" variant="outline" onClick={() => onSell(item.vt_symbol)}>
+            <ArrowDownToLine className="mr-1" size={14} />
+            卖出
+          </Button>
+        )}
+        {isHeld && onAddPosition && (
+          <Button size="sm" variant="outline" onClick={() => onAddPosition(item.vt_symbol)}>
+            <ArrowUpFromLine className="mr-1" size={14} />
+            加仓
+          </Button>
+        )}
         {onAddToGroup && (
-          <button
-            type="button"
-            className="rounded-md border px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            onClick={() => onAddToGroup(item.vt_symbol)}
-          >
+          <Button size="sm" variant="ghost" onClick={() => onAddToGroup(item.vt_symbol)}>
             加入分组
-          </button>
+          </Button>
         )}
         {onViewDetail && (
-          <button
-            type="button"
-            className="rounded-md border px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            onClick={() => onViewDetail(item.vt_symbol)}
-          >
+          <Button size="sm" variant="ghost" onClick={() => onViewDetail(item.vt_symbol)}>
             查看详情
-          </button>
+          </Button>
         )}
       </div>
-    </section>
+    </Card>
   );
 }
 

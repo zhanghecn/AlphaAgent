@@ -26,7 +26,7 @@ export function SignalCard({ trade, isHighlighted, onClick }: SignalCardProps) {
       onClick={onClick ? () => onClick(trade) : undefined}
     >
       <div className="flex items-center justify-between gap-2">
-        <span className={cn("rounded-md px-1.5 py-0.5 text-xs font-medium", isBuy ? "bg-red-50 text-red-700" : "bg-green-50 text-green-700")}>
+        <span className={cn("rounded-md px-1.5 py-0.5 text-xs font-medium", isBuy ? "bg-red-50 text-red-700 dark:bg-red-500/15 dark:text-red-300" : "bg-green-50 text-green-700 dark:bg-green-500/15 dark:text-green-300")}>
           {isBuy ? "买入" : "卖出"}
         </span>
         <span className="text-xs text-muted-foreground">{trade.trade_date}</span>

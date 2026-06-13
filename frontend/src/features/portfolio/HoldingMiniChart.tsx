@@ -6,6 +6,7 @@ import {
   ColorType,
   CrosshairMode,
 } from "lightweight-charts";
+import { useChartColors } from "@/lib/chart-theme";
 
 export interface SignalMarker {
   time: string; // YYYY-MM-DD format
@@ -43,6 +44,7 @@ export function HoldingMiniChart({
 }: HoldingMiniChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
+  const palette = useChartColors();
 
   useEffect(() => {
     if (!containerRef.current || !bars || bars.length === 0) {
@@ -54,7 +56,7 @@ export function HoldingMiniChart({
       height,
       layout: {
         background: { type: ColorType.Solid, color: "transparent" },
-        textColor: "#9ca3af",
+        textColor: palette.text,
         fontSize: 10,
       },
       grid: {
@@ -165,7 +167,7 @@ export function HoldingMiniChart({
       chart.remove();
       chartRef.current = null;
     };
-  }, [bars, costPrice, stopLossPrice, takeProfitPrice, buySignals, sellSignals, height]);
+  }, [bars, costPrice, stopLossPrice, takeProfitPrice, buySignals, sellSignals, height, palette]);
 
   if (!bars || bars.length === 0) {
     return null;

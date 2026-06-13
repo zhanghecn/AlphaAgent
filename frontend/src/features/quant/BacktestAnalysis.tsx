@@ -348,16 +348,17 @@ export function BacktestExecutionQualityPanel({
         <span
           className={cn(
             "rounded-md border px-2 py-1 text-xs",
-            quality.status === "pass" ? "border-green-200 bg-green-50 text-rise" : "border-amber-200 bg-amber-50 text-amber-700"
+            quality.status === "pass" ? "border-green-200 bg-green-50 text-rise dark:border-green-500/30 dark:bg-green-500/10" : "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300"
           )}
         >
           {quality.status === "pass" ? "通过" : "有缺口"}
         </span>
       </div>
       <div className="space-y-3 p-3">
-        <div className="grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-5">
+        <div className="grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-6">
           <InfoCell label="买入笔数" value={`${quality.buy_count}笔`} />
           <InfoCell label="尾盘分钟成交" value={`${quality.minute_tail_entry_count}笔`} />
+          <InfoCell label="严格拒单" value={`${quality.strict_tail_rejected_count ?? 0}笔`} />
           <InfoCell label="尾盘成交占比" value={formatPct(quality.minute_tail_entry_ratio)} />
           <InfoCell label="开盘回退占比" value={formatPct(quality.daily_open_fallback_ratio)} />
           <InfoCell label="分钟线条数" value={quality.minute_bar_count.toLocaleString()} />
