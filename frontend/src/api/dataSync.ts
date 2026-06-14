@@ -65,6 +65,7 @@ export function importMinuteBarsCsv(payload: {
 }
 
 export function auditMinuteGapCsv(payload: {
+  backtest_id?: number | string;
   gap_csv_text?: string;
   file_path?: string;
   interval?: string;
@@ -76,6 +77,7 @@ export function auditMinuteGapCsv(payload: {
 }
 
 export function importMinuteGapsFromTushare(payload: {
+  backtest_id?: number | string;
   gap_csv_text?: string;
   gap_file_path?: string;
   interval?: string;
@@ -88,6 +90,7 @@ export function importMinuteGapsFromTushare(payload: {
 }
 
 export function importMinuteGapsFromTdx(payload: {
+  backtest_id?: number | string;
   gap_csv_text?: string;
   gap_file_path?: string;
   interval?: string;
@@ -101,7 +104,21 @@ export function importMinuteGapsFromTdx(payload: {
   return apiClient.post<MinuteGapProviderImportResult>("/data-sync/imports/minute-bars/tdx-gaps", payload);
 }
 
+export function importMinuteGapsFromAkshare(payload: {
+  backtest_id?: number | string;
+  gap_csv_text?: string;
+  gap_file_path?: string;
+  interval?: string;
+  tail_entry_start?: string;
+  tail_entry_end?: string;
+  dry_run?: boolean;
+  max_gaps?: number;
+}) {
+  return apiClient.post<MinuteGapProviderImportResult>("/data-sync/imports/minute-bars/akshare-gaps", payload);
+}
+
 export function fetchMinuteGapVendorManifest(payload: {
+  backtest_id?: number | string;
   gap_csv_text?: string;
   gap_file_path?: string;
   tail_entry_start?: string;
@@ -112,6 +129,7 @@ export function fetchMinuteGapVendorManifest(payload: {
 }
 
 export async function fetchMinuteGapVendorManifestCsv(payload: {
+  backtest_id?: number | string;
   gap_csv_text?: string;
   gap_file_path?: string;
   tail_entry_start?: string;
@@ -129,7 +147,8 @@ export async function fetchMinuteGapVendorManifestCsv(payload: {
 }
 
 export async function fetchMinuteGapImportTemplate(payload: {
-  gap_csv_text: string;
+  backtest_id?: number | string;
+  gap_csv_text?: string;
   sample_limit?: number;
 }) {
   const response = await fetch(apiUrl("/data-sync/imports/minute-bars/gap-template.csv"), {
@@ -177,11 +196,14 @@ export interface SyncRunItem {
   run_id?: string | number;
   job_id: string;
   status: string;
+  params?: Record<string, unknown>;
   started_at: string;
   finished_at?: string | null;
   rows_read: number;
   rows_written: number;
+  message?: string | null;
   error?: string | null;
+  error_type?: string | null;
 }
 
 export interface DataUsageCapability {

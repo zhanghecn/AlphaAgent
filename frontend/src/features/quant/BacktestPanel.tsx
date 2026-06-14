@@ -1,6 +1,16 @@
-import { BarChart3, Download, ShieldCheck } from "lucide-react";
-import type { BacktestRun } from "@/api/quant";
-import { backtestReportCsvUrl, fetchBacktestAudit, fetchBacktestReport, fetchBacktestValidationGrid } from "@/api/quant";
+import { useMutation } from "@tanstack/react-query";
+import { BarChart3, Download } from "lucide-react";
+import type { BacktestRun, QuantStrategyOption } from "@/api/quant";
+import {
+  backtestReportCsvUrl,
+  fetchBacktestAudit,
+  fetchBacktestDataQuality,
+  fetchBacktestExecutionModelComparison,
+  fetchBacktestMinuteCoverage,
+  fetchBacktestReport,
+  fetchBacktestValidationGrid,
+  runBacktestStrategyComparison,
+} from "@/api/quant";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorState } from "@/components/ErrorState";
 import { LoadingState } from "@/components/LoadingState";
@@ -20,9 +30,15 @@ import {
 } from "@/features/quant/BacktestTables";
 import { BacktestDrilldownPanel } from "@/features/quant/BacktestDrilldownPanel";
 import { BacktestSignalEventsPanel } from "@/features/quant/BacktestSignalEventsPanel";
+import { MinuteCoveragePanel } from "@/features/quant/MinuteCoveragePanel";
+import { BacktestDataQualityPanel } from "@/features/quant/BacktestDataQualityPanel";
+import { BacktestStrategyComparisonPanel } from "@/features/quant/BacktestStrategyComparisonPanel";
 import {
+  BacktestDataAsOfAuditPanel,
+  BacktestExecutionModelComparisonPanel,
   BacktestExecutionQualityPanel,
   BacktestRealityStats,
+  BacktestRealityVerdictPanel,
   BacktestRobustnessPanel,
   BacktestValidationGridPanel,
 } from "@/features/quant/BacktestAnalysis";
@@ -34,11 +50,17 @@ export function BacktestPanel({
   onSelect,
   params,
   onParamsChange,
+  strategies,
+  selectedStrategy,
+  onStrategyChange,
   tradingDates,
   isRunning,
   onRun,
-  onStrictMinutePreset,
   report,
+  minuteCoverage,
+  isMinuteCoverageLoading,
+  dataQuality,
+  isDataQualityLoading,
   audit,
   isLoading,
   isError,
@@ -46,6 +68,9 @@ export function BacktestPanel({
   validationGrid,
   isValidationGridLoading,
   onRunValidationGrid,
+  executionComparison,
+  isExecutionComparisonLoading,
+  onRunExecutionComparison,
   onAddToPortfolio,
 }: {
   runs: BacktestRun[];
@@ -53,11 +78,17 @@ export function BacktestPanel({
   onSelect: (id: number) => void;
   params: BacktestParams;
   onParamsChange: (params: BacktestParams) => void;
+  strategies: QuantStrategyOption[];
+  selectedStrategy: string;
+  onStrategyChange: (strategy: string) => void;
   tradingDates: string[];
   isRunning: boolean;
   onRun: () => void;
-  onStrictMinutePreset: () => void;
   report?: Awaited<ReturnType<typeof fetchBacktestReport>>;
+  minuteCoverage?: Awaited<ReturnType<typeof fetchBacktestMinuteCoverage>>;
+  isMinuteCoverageLoading: boolean;
+  dataQuality?: Awaited<ReturnType<typeof fetchBacktestDataQuality>>;
+  isDataQualityLoading: boolean;
   audit?: Awaited<ReturnType<typeof fetchBacktestAudit>>;
   isLoading: boolean;
   isError: boolean;
@@ -65,8 +96,23 @@ export function BacktestPanel({
   validationGrid?: Awaited<ReturnType<typeof fetchBacktestValidationGrid>>;
   isValidationGridLoading: boolean;
   onRunValidationGrid: () => void;
+  executionComparison?: Awaited<ReturnType<typeof fetchBacktestExecutionModelComparison>>;
+  isExecutionComparisonLoading: boolean;
+  onRunExecutionComparison: () => void;
   onAddToPortfolio?: (vtSymbol: string) => void;
 }) {
+  const strategyComparisonMutation = useMutation({
+    mutationFn: () =>
+      runBacktestStrategyComparison({
+        ...params,
+        strategies: strategies.length ? strategies.map((strategy) => strategy.id) : [selectedStrategy],
+        minute_interval: "1m",
+        tail_entry_start: "14:30",
+        tail_entry_end: "14:30",
+        persist: false,
+      }),
+  });
+
   if (isLoading) return <LoadingState rows={5} />;
   if (isError) return <ErrorState message="加载回测报告失败" onRetry={onRetry} />;
 
@@ -78,10 +124,6 @@ export function BacktestPanel({
           <h2 className="text-sm font-semibold">回测结果</h2>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Button variant="outline" size="sm" onClick={onStrictMinutePreset}>
-            <ShieldCheck size={15} />
-            严格分钟预设
-          </Button>
           {selectedId && (
             <Button asChild variant="outline" size="sm">
               <a href={backtestReportCsvUrl(selectedId, 500)} download>
@@ -108,6 +150,9 @@ export function BacktestPanel({
         <BacktestParamsForm
           params={params}
           onChange={onParamsChange}
+          strategies={strategies}
+          selectedStrategy={selectedStrategy}
+          onStrategyChange={onStrategyChange}
           tradingDates={tradingDates}
           isRunning={isRunning}
           onRun={onRun}
@@ -117,6 +162,20 @@ export function BacktestPanel({
         ) : (
           <>
             <BacktestSummary report={report} audit={audit} />
+            <BacktestRealityVerdictPanel
+              report={report}
+              comparison={executionComparison}
+              isComparisonLoading={isExecutionComparisonLoading}
+              onRunComparison={onRunExecutionComparison}
+            />
+            <MinuteCoveragePanel coverage={minuteCoverage} isLoading={isMinuteCoverageLoading} />
+            <BacktestDataQualityPanel quality={dataQuality} isLoading={isDataQualityLoading} />
+            <BacktestStrategyComparisonPanel
+              comparison={strategyComparisonMutation.data}
+              isLoading={strategyComparisonMutation.isPending}
+              error={strategyComparisonMutation.error}
+              onRun={() => strategyComparisonMutation.mutate()}
+            />
 
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
               <section className="space-y-4">
@@ -134,10 +193,16 @@ export function BacktestPanel({
               <TabsList className="h-auto rounded-none bg-transparent p-0">
                 <TabsTrigger value="validation" className="rounded-none px-3 py-2 shadow-none">验证</TabsTrigger>
                 <TabsTrigger value="trades" className="rounded-none px-3 py-2 shadow-none">交易归因</TabsTrigger>
-                <TabsTrigger value="signals" className="rounded-none px-3 py-2 shadow-none">信号流水</TabsTrigger>
+                <TabsTrigger value="signals" className="rounded-none px-3 py-2 shadow-none">信号计划</TabsTrigger>
                 <TabsTrigger value="months" className="rounded-none px-3 py-2 shadow-none">收益分段</TabsTrigger>
               </TabsList>
               <TabsContent value="validation" className="space-y-4">
+                {report.data_as_of_audit && <BacktestDataAsOfAuditPanel audit={report.data_as_of_audit} />}
+                <BacktestExecutionModelComparisonPanel
+                  comparison={executionComparison}
+                  isLoading={isExecutionComparisonLoading}
+                  onRun={onRunExecutionComparison}
+                />
                 {report.benchmark && <BacktestBenchmarkTable benchmarks={report.benchmark.benchmarks} />}
                 {report.period_analysis && <BacktestPeriodTable analysis={report.period_analysis} />}
                 {report.regime_analysis && <BacktestRegimeTable analysis={report.regime_analysis} />}

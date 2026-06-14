@@ -57,6 +57,19 @@ export interface QuantScreenRunRange extends QuantScreenRun {
   }>;
 }
 
+export interface QuantStrategyOption {
+  id: string;
+  version: string;
+  name: string;
+  description: string;
+  default_min_entry_score?: number;
+  entry_action_label?: string;
+  watch_action_label?: string;
+  failed_rule_labels?: Record<string, string>;
+  evidence_labels?: Record<string, string>;
+  primary_metric_keys?: string[];
+}
+
 export interface SymbolSignalHistoryRow {
   trade_date: string;
   vt_symbol: string;
@@ -86,13 +99,129 @@ export interface SymbolSignalHistory extends StockIdentityFields {
   strategy_version: string;
   start_date?: string | null;
   end_date?: string | null;
+  scored_date_count?: number;
   entry_signal_count: number;
+  watch_count?: number;
   entry_signals: SymbolSignalHistoryRow[];
   best_total_score?: SymbolSignalHistoryRow | null;
   best_entry_fit?: SymbolSignalHistoryRow | null;
   near_misses: SymbolSignalHistoryRow[];
   recent: SymbolSignalHistoryRow[];
+  financial_coverage?: {
+    local_report_count: number;
+    usable_report_count: number;
+    missing_publish_date_count?: number;
+    future_publish_date_count?: number;
+    latest_publish_date?: string | null;
+    latest_usable_publish_date?: string | null;
+    latest_usable_report_date?: string | null;
+    policy?: string;
+  };
   rule?: Record<string, unknown>;
+}
+
+export interface SymbolStrategyComparisonItem {
+  strategy: QuantStrategyOption;
+  status: string;
+  strategy_id: string;
+  strategy_version?: string;
+  scored_date_count: number;
+  entry_signal_count: number;
+  watch_count: number;
+  best_total_score?: SymbolSignalHistoryRow | null;
+  best_entry_fit?: SymbolSignalHistoryRow | null;
+  entry_signals: SymbolSignalHistoryRow[];
+  recent: SymbolSignalHistoryRow[];
+  rule?: Record<string, unknown>;
+  message?: string | null;
+}
+
+export interface SymbolStrategyComparison extends StockIdentityFields {
+  status: string;
+  vt_symbol: string;
+  name?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  financial_coverage?: SymbolSignalHistory["financial_coverage"];
+  items: SymbolStrategyComparisonItem[];
+}
+
+export interface SymbolDiagnosticsSummary {
+  status: string;
+  status_label?: string;
+  has_entry_signal: boolean;
+  entry_signal_count: number;
+  strategy_signal_counts?: Array<{
+    strategy_id: string;
+    strategy_name?: string | null;
+    entry_signal_count: number;
+    watch_count: number;
+    best_signal_date?: string | null;
+    best_entry_score?: number | null;
+  }>;
+  strategies_with_entry_signal?: string[];
+  best_signal_date?: string | null;
+  selected_signal_date?: string | null;
+  has_backtest: boolean;
+  backtest_id?: number | null;
+  has_trade: boolean;
+  trade_count: number;
+  buy_trade_count: number;
+  sell_trade_count: number;
+  has_order: boolean;
+  order_count: number;
+  rejected_order_count: number;
+  has_position: boolean;
+  position_day_count: number;
+  main_reason?: string | null;
+  main_reason_label?: string | null;
+  main_reason_source?: string | null;
+  main_reason_detail?: string | null;
+  candidate_action?: string | null;
+  candidate_rank?: number | null;
+  candidate_score?: number | null;
+  planned_execute_date?: string | null;
+  signal_day_cash?: number | null;
+  signal_day_market_value?: number | null;
+  signal_day_total_equity?: number | null;
+  signal_day_position_count?: number | null;
+  not_traded_context?: {
+    status?: string | null;
+    reason?: string | null;
+    needs_signal_date?: boolean;
+    best_signal_date?: string | null;
+    selected_signal_date?: string | null;
+    candidate_action?: string | null;
+    candidate_rank?: number | null;
+    candidate_score?: number | null;
+    plan_status?: string | null;
+    planned_execute_date?: string | null;
+    cash?: number | null;
+    market_value?: number | null;
+    total_equity?: number | null;
+    position_count?: number | null;
+  };
+  diagnostic_checks?: Array<{
+    label: string;
+    status: "pass" | "warning" | "fail" | string;
+  }>;
+  next_action?: string | null;
+}
+
+export interface SymbolDiagnostics extends StockIdentityFields {
+  status: string;
+  vt_symbol: string;
+  name?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  strategy_comparison: SymbolStrategyComparison;
+  backtest?: {
+    backtest_id?: number | null;
+    signal_date?: string | null;
+    symbol_detail?: BacktestSymbolDetail | null;
+    candidate_trace?: BacktestCandidateTrace | null;
+  } | null;
+  summary: SymbolDiagnosticsSummary;
 }
 
 export interface BacktestRun {
@@ -116,12 +245,18 @@ export interface BacktestMetrics {
   total_return_pct?: number;
   annual_return_pct?: number;
   max_drawdown_pct?: number;
+  total_trade_rows?: number;
+  buy_count?: number;
+  sell_count?: number;
   trade_count?: number;
+  open_trade_count?: number;
   win_rate?: number;
   profit_factor?: number | null;
   average_win?: number;
   average_loss?: number;
   sharpe?: number | null;
+  minute_1430_count?: number;
+  daily_close_proxy_count?: number;
   minute_tail_entry_count?: number;
   daily_open_fallback_count?: number;
 }
@@ -147,6 +282,7 @@ export interface BacktestMethod {
     minute_interval?: string;
     tail_entry_window?: string;
     tail_entry_ma5_tolerance_pct?: number;
+    execution_model?: string;
   };
 }
 
@@ -162,6 +298,7 @@ export interface BacktestTrade extends StockIdentityFields {
   fee: number;
   pnl?: number | null;
   reason?: string | null;
+  reason_label?: string | null;
   raw?: Record<string, unknown>;
 }
 
@@ -209,6 +346,7 @@ export interface BacktestOrderEvent extends StockIdentityFields {
   volume?: number | null;
   status: string;
   reason?: string | null;
+  reason_label?: string | null;
   raw?: Record<string, unknown>;
 }
 
@@ -224,6 +362,13 @@ export interface BacktestSignalEvent extends StockIdentityFields {
   price?: number | null;
   score?: number | null;
   reason?: string | null;
+  reason_label?: string | null;
+  linked_order_id?: number | null;
+  linked_order_status?: string | null;
+  linked_order_reason?: string | null;
+  linked_order_reason_label?: string | null;
+  plan_status?: string | null;
+  plan_status_label?: string | null;
   raw?: Record<string, unknown>;
 }
 
@@ -262,6 +407,84 @@ export interface BacktestTradesResult {
   has_more: boolean;
 }
 
+export interface BacktestDailyDecisionRow extends BacktestDailyDecisionSummary {
+  trade_date: string;
+  cash?: number | null;
+  market_value?: number | null;
+  total_equity?: number | null;
+  drawdown_pct?: number | null;
+  position_count: number;
+  position_snapshot_count: number;
+}
+
+export interface BacktestDailyDecisionsResult {
+  status: string;
+  backtest_id: number;
+  start_date?: string;
+  end_date?: string;
+  items: BacktestDailyDecisionRow[];
+  limit: number;
+  offset: number;
+  total: number;
+  returned_count: number;
+  has_more: boolean;
+  note?: string | null;
+}
+
+export interface BacktestDrilldownDateOption {
+  trade_date: string;
+  cash?: number | null;
+  market_value?: number | null;
+  total_equity?: number | null;
+  drawdown_pct?: number | null;
+  position_count: number;
+  buy_trade_count: number;
+  sell_trade_count: number;
+  buy_candidate_count?: number;
+  watch_candidate_count?: number;
+  buy_signal_count?: number;
+  sell_signal_count?: number;
+  filled_order_count: number;
+  rejected_order_count: number;
+  signal_event_count: number;
+  position_snapshot_count: number;
+}
+
+export interface BacktestDrilldownSymbolOption extends StockIdentityFields {
+  vt_symbol: string;
+  name?: string | null;
+  trade_count: number;
+  buy_trade_count: number;
+  sell_trade_count: number;
+  order_count: number;
+  filled_order_count: number;
+  rejected_order_count: number;
+  signal_event_count: number;
+  buy_signal_count: number;
+  sell_signal_count: number;
+  position_day_count: number;
+  first_signal_date?: string | null;
+  first_trade_date?: string | null;
+  last_trade_date?: string | null;
+  status: string;
+  status_label: string;
+  main_reason?: string | null;
+  main_reason_label?: string | null;
+}
+
+export interface BacktestDrilldownOptions {
+  status: string;
+  backtest_id: number;
+  run_type?: string;
+  start_date?: string;
+  end_date?: string;
+  dates: BacktestDrilldownDateOption[];
+  symbols: BacktestDrilldownSymbolOption[];
+  date_count?: number;
+  symbol_count?: number;
+  note?: string | null;
+}
+
 export interface BacktestDayDetail {
   status: string;
   backtest_id: number;
@@ -272,8 +495,35 @@ export interface BacktestDayDetail {
   buy_trades: BacktestTrade[];
   sell_trades: BacktestTrade[];
   orders: BacktestOrderEvent[];
+  signals?: BacktestSignalEvent[];
+  recommendations?: QuantRecommendation[];
+  decision_summary?: BacktestDailyDecisionSummary;
   snapshot_available: boolean;
   note?: string;
+}
+
+export interface BacktestDailyDecisionSummary {
+  status: string;
+  status_label: string;
+  buy_candidate_count: number;
+  watch_candidate_count: number;
+  buy_signal_count: number;
+  sell_signal_count: number;
+  buy_order_count: number;
+  sell_order_count: number;
+  filled_order_count: number;
+  rejected_order_count: number;
+  buy_trade_count: number;
+  sell_trade_count: number;
+  buy_amount: number;
+  sell_cash_in: number;
+  realized_pnl: number;
+  source_signal_dates?: string[];
+  rejected_reasons: Array<{
+    reason: string;
+    reason_label?: string | null;
+    count: number;
+  }>;
 }
 
 export interface BacktestSymbolDetail extends StockIdentityFields {
@@ -285,8 +535,66 @@ export interface BacktestSymbolDetail extends StockIdentityFields {
   trades: BacktestTrade[];
   orders: BacktestOrderEvent[];
   closed_trades: BacktestClosedTrade[];
+  trade_attribution?: BacktestTradeAttribution[];
   snapshot_available: boolean;
   note?: string;
+}
+
+export interface BacktestTradeAttribution extends StockIdentityFields {
+  vt_symbol: string;
+  name?: string | null;
+  status: "closed" | "open" | string;
+  entry_date?: string | null;
+  exit_date?: string | null;
+  entry_price?: number | null;
+  exit_price?: number | null;
+  volume?: number | null;
+  entry_amount?: number | null;
+  exit_amount?: number | null;
+  fee?: number | null;
+  pnl?: number | null;
+  return_pct?: number | null;
+  holding_days?: number | null;
+  exit_reason?: string | null;
+  exit_reason_label?: string | null;
+  max_floating_pnl?: number | null;
+  min_floating_pnl?: number | null;
+  max_floating_pnl_pct?: number | null;
+  min_floating_pnl_pct?: number | null;
+  execution_mode?: string | null;
+  price_source?: string | null;
+  proxy_used?: boolean | null;
+  bar_time?: string | null;
+}
+
+export interface BacktestTradeAttributionSummary {
+  total_count: number;
+  closed_count: number;
+  open_count: number;
+  realized_pnl: number;
+  loss_pnl: number;
+  win_pnl: number;
+  win_rate: number;
+  worst_trade_pnl?: number | null;
+  best_trade_pnl?: number | null;
+  largest_open_drawdown?: number | null;
+  largest_open_profit?: number | null;
+}
+
+export interface BacktestTradeAttributionResult {
+  status: string;
+  backtest_id: number;
+  start_date?: string;
+  end_date?: string;
+  items: BacktestTradeAttribution[];
+  summary: BacktestTradeAttributionSummary;
+  limit: number;
+  offset: number;
+  total: number;
+  returned_count: number;
+  has_more: boolean;
+  sort: string;
+  note?: string | null;
 }
 
 export interface BacktestAuditEvent extends StockIdentityFields {
@@ -297,6 +605,7 @@ export interface BacktestAuditEvent extends StockIdentityFields {
   side: "BUY" | "SELL" | string;
   status?: string;
   reason?: string | null;
+  reason_label?: string | null;
   price?: number | null;
   volume?: number | null;
   pnl?: number | null;
@@ -320,6 +629,82 @@ export interface BacktestAudit {
   events: BacktestAuditEvent[];
   order_summary?: BacktestOrderStats;
   note?: string;
+}
+
+export interface BacktestCandidateTrace extends StockIdentityFields {
+  status: string;
+  summary: string;
+  backtest_id: number;
+  signal_date: string;
+  planned_execute_date?: string | null;
+  vt_symbol: string;
+  name?: string | null;
+  strategy_id?: string;
+  strategy_version?: string;
+  run_type?: string;
+  action?: string | null;
+  rank?: number | null;
+  total_score?: number | null;
+  recommendation?: QuantRecommendation | null;
+  signals: BacktestSignalEvent[];
+  orders: BacktestOrderEvent[];
+  trades: BacktestTrade[];
+  positions: BacktestPositionSnapshot[];
+  equity?: BacktestEquityRow | null;
+  linked_order_status?: string | null;
+  linked_order_reason?: string | null;
+  plan_status?: string | null;
+  plan_status_label?: string | null;
+  not_planned_context?: BacktestCandidateNotPlannedContext | null;
+  diagnostics: Array<{
+    id: string;
+    status: string;
+    message: string;
+    failed_rules?: string[];
+  }>;
+}
+
+export interface BacktestCandidateNotPlannedContext {
+  likely_reason?: string | null;
+  likely_reason_label?: string | null;
+  backtest_start_date?: string | null;
+  backtest_end_date?: string | null;
+  first_signal_date?: string | null;
+  last_signal_date?: string | null;
+  signal_event_count?: number | null;
+  signal_date_has_plan?: boolean | null;
+  signal_date_plan_count?: number | null;
+  signal_date_buy_plan_count?: number | null;
+  signal_date_sell_plan_count?: number | null;
+  candidate_limit?: number | null;
+  max_positions?: number | null;
+  max_symbols?: number | null;
+  included_boards?: string[];
+  target_in_universe?: boolean | null;
+  target_universe_rank?: number | null;
+  recommendation_run_id?: number | null;
+  recommendation_rank?: number | null;
+  recommendation_action?: string | null;
+  recommendation_score?: number | null;
+  persisted_recommendation_count?: number | null;
+  persisted_buy_candidate_count?: number | null;
+  persisted_watch_candidate_count?: number | null;
+  same_day_top_recommendations?: Array<{
+    vt_symbol: string;
+    name?: string | null;
+    rank?: number | null;
+    action?: string | null;
+    total_score?: number | null;
+  }>;
+  planned_buy_symbols?: Array<{
+    vt_symbol: string;
+    name?: string | null;
+    trade_date?: string | null;
+    execute_date?: string | null;
+    score?: number | null;
+    reason?: string | null;
+  }>;
+  target_symbol?: string | null;
 }
 
 export interface BacktestClosedTrade extends StockIdentityFields {
@@ -375,6 +760,13 @@ export interface BacktestExtendedMetrics {
   average_exposure_pct: number;
   max_position_count: number;
   rejected_order_count: number;
+  strict_tail_rejected_count?: number;
+  strict_1430_rejected_count?: number;
+  tail_entry_rejected_count?: number;
+  tail_exit_rejected_count?: number;
+  minute_gap_rejected_count?: number;
+  limit_up_blocked_buy_count?: number;
+  limit_down_blocked_sell_count?: number;
   filled_order_count: number;
   execution_modes?: Record<string, number>;
 }
@@ -385,8 +777,21 @@ export interface BacktestExecutionQuality {
   strict_tail_attempt_count?: number;
   strict_tail_rejected_count?: number;
   strict_tail_rejected_ratio?: number | null;
-  minute_tail_entry_count: number;
-  daily_open_fallback_count: number;
+  strict_1430_attempt_count?: number;
+  strict_1430_rejected_count?: number;
+  strict_1430_rejected_ratio?: number | null;
+  tail_entry_rejected_count?: number;
+  tail_exit_rejected_count?: number;
+  minute_gap_rejected_count?: number;
+  minute_1430_count?: number;
+  daily_close_proxy_count?: number;
+  legacy_open_fallback_count?: number;
+  limit_up_blocked_buy_count?: number;
+  limit_down_blocked_sell_count?: number;
+  minute_tail_entry_count?: number;
+  daily_open_fallback_count?: number;
+  minute_1430_ratio?: number | null;
+  daily_close_proxy_ratio?: number | null;
   minute_tail_entry_ratio?: number | null;
   daily_open_fallback_ratio?: number | null;
   minute_bar_count: number;
@@ -520,6 +925,12 @@ export interface BacktestRobustnessChecks {
   limitations: string[];
 }
 
+export interface BacktestDataAsOfAudit {
+  status: string;
+  policy?: string;
+  diagnostics: BacktestRobustnessDiagnostic[];
+}
+
 export interface BacktestValidationGridRow {
   variant_id: number;
   is_base_params: boolean;
@@ -639,6 +1050,127 @@ export interface BacktestValidationGrid {
   limitations: string[];
 }
 
+export interface BacktestExecutionModelComparisonRow {
+  execution_model: "tail_close_hybrid" | "strict_1430" | string;
+  label: string;
+  status: string;
+  message?: string | null;
+  final_equity?: number | null;
+  total_return_pct?: number | null;
+  max_drawdown_pct?: number | null;
+  trade_count?: number | null;
+  buy_count?: number | null;
+  minute_1430_count?: number | null;
+  daily_close_proxy_count?: number | null;
+  minute_1430_ratio?: number | null;
+  daily_close_proxy_ratio?: number | null;
+  strict_1430_rejected_count?: number | null;
+  tail_entry_rejected_count?: number | null;
+  minute_gap_rejected_count?: number | null;
+}
+
+export interface BacktestExecutionModelComparison {
+  status: string;
+  backtest_id: number;
+  base_execution_model?: string;
+  start_date?: string | null;
+  end_date?: string | null;
+  strategy?: string;
+  rows: BacktestExecutionModelComparisonRow[];
+  summary?: {
+    status: string;
+    return_delta_pct?: number | null;
+    message?: string;
+  };
+  note?: string;
+}
+
+export interface BacktestStrategyComparisonRow {
+  strategy_id: string;
+  strategy_version?: string | null;
+  strategy_name?: string | null;
+  status: string;
+  message?: string | null;
+  quality_status?: string | null;
+  quality_label?: string | null;
+  quality_warning?: string | null;
+  final_equity?: number | null;
+  total_return_pct?: number | null;
+  max_drawdown_pct?: number | null;
+  trade_count?: number | null;
+  buy_count?: number | null;
+  sell_count?: number | null;
+  buy_signal_count?: number | null;
+  watch_count?: number | null;
+  rejected_order_count?: number | null;
+  strict_1430_rejected_count?: number | null;
+  tail_entry_rejected_count?: number | null;
+  minute_gap_rejected_count?: number | null;
+  minute_1430_count?: number | null;
+  daily_close_proxy_count?: number | null;
+  minute_1430_ratio?: number | null;
+  daily_close_proxy_ratio?: number | null;
+}
+
+export interface BacktestStrategyComparison {
+  status: string;
+  params?: Record<string, unknown>;
+  rows: BacktestStrategyComparisonRow[];
+  summary?: {
+    status: string;
+    strategy_count?: number;
+    ready_count?: number;
+    best_strategy_id?: string | null;
+    best_total_return_pct?: number | null;
+    best_verifiable_strategy_id?: string | null;
+    best_verifiable_total_return_pct?: number | null;
+    complete_strict_count?: number;
+    message?: string;
+  };
+  note?: string;
+  message?: string;
+}
+
+export interface BacktestMinuteCoverage {
+  status: "ready" | "mixed_proxy" | "missing_snapshots" | "strategy_not_triggered" | "empty" | "unavailable" | "not_found" | string;
+  backtest_id?: number;
+  execution_model?: string;
+  buy_count?: number;
+  minute_1430_count?: number;
+  minute_1430_ratio?: number | null;
+  daily_close_proxy_count?: number;
+  daily_close_proxy_ratio?: number | null;
+  strict_1430_rejected_count?: number;
+  minute_gap_rejected_count?: number;
+  tail_entry_rejected_count?: number;
+  tail_exit_rejected_count?: number;
+  next_action?: string;
+  diagnostics?: BacktestRobustnessDiagnostic[];
+  message?: string;
+}
+
+export interface BacktestDataQualityDashboard {
+  status: "ready" | "warning" | "mixed_proxy" | "missing_snapshots" | "unavailable" | "not_found" | string;
+  backtest_id: number;
+  strategy_id?: string | null;
+  strategy_version?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  execution_model?: string | null;
+  minute_coverage?: BacktestMinuteCoverage;
+  data_as_of_audit?: Record<string, unknown>;
+  sample?: Record<string, unknown>;
+  checks: Array<{
+    id: string;
+    label: string;
+    status: "pass" | "warning" | "fail" | string;
+    value?: number | string | null;
+    message?: string | null;
+  }>;
+  next_action?: string | null;
+  message?: string | null;
+}
+
 export interface BacktestReport {
   status: string;
   backtest_id: number;
@@ -680,6 +1212,7 @@ export interface BacktestReport {
   regime_analysis?: BacktestRegimeAnalysis;
   robustness_checks?: BacktestRobustnessChecks;
   execution_quality?: BacktestExecutionQuality;
+  data_as_of_audit?: BacktestDataAsOfAudit;
   method?: BacktestMethod;
   assumptions: Record<string, string>;
   limitations: string[];
@@ -817,6 +1350,8 @@ export interface QuantScreenRunItem {
   candidate_count: number;
   signal_count: number;
   recommendation_count: number;
+  buy_recommendation_count?: number;
+  watch_recommendation_count?: number;
   message?: string | null;
   finished_at?: string | null;
 }
@@ -828,6 +1363,7 @@ export interface QuantTradingDateItem {
 
 export function createScreenRun(payload: {
   trade_date?: string;
+  strategy?: string;
   max_symbols?: number;
   recommendation_limit?: number;
   min_recommendation_score?: number;
@@ -841,6 +1377,7 @@ export function createScreenRun(payload: {
 export function createScreenRunRange(payload: {
   start?: string;
   end?: string;
+  strategy?: string;
   max_symbols?: number;
   recommendation_limit?: number;
   min_recommendation_score?: number;
@@ -851,8 +1388,10 @@ export function createScreenRunRange(payload: {
   return apiClient.post<QuantScreenRunRange>("/quant/screen-runs/range", payload);
 }
 
-export function fetchScreenRuns(limit = 120) {
-  return apiClient.get<{ status: string; items: QuantScreenRunItem[] }>(`/quant/screen-runs?limit=${limit}`);
+export function fetchScreenRuns(limit = 120, strategy?: string) {
+  const search = new URLSearchParams({ limit: String(limit) });
+  if (strategy) search.set("strategy", strategy);
+  return apiClient.get<{ status: string; items: QuantScreenRunItem[] }>(`/quant/screen-runs?${search.toString()}`);
 }
 
 export function fetchTradingDates(params: { start?: string; end?: string; limit?: number } = {}) {
@@ -867,13 +1406,15 @@ export function fetchTradingDates(params: { start?: string; end?: string; limit?
   }>(`/quant/trading-dates?${search.toString()}`);
 }
 
-export function fetchRecommendations(limit = 20, tradeDate?: string) {
+export function fetchRecommendations(limit = 20, tradeDate?: string, strategy?: string) {
   const params = new URLSearchParams({ limit: String(limit) });
   if (tradeDate) params.set("trade_date", tradeDate);
+  if (strategy) params.set("strategy", strategy);
   return apiClient.get<{
     status: string;
     trade_date?: string;
     run_id?: number | null;
+    strategy_id?: string;
     strategy_version?: string;
     included_boards?: string[];
     items: QuantRecommendation[];
@@ -882,12 +1423,14 @@ export function fetchRecommendations(limit = 20, tradeDate?: string) {
 }
 
 export function fetchSymbolSignalHistory(vtSymbol: string, params: {
+  strategy?: string;
   start?: string;
   end?: string;
   min_entry_score?: number;
   limit?: number;
 } = {}) {
   const search = new URLSearchParams();
+  if (params.strategy) search.set("strategy", params.strategy);
   if (params.start) search.set("start", params.start);
   if (params.end) search.set("end", params.end);
   if (params.min_entry_score != null) search.set("min_entry_score", String(params.min_entry_score));
@@ -896,11 +1439,48 @@ export function fetchSymbolSignalHistory(vtSymbol: string, params: {
   return apiClient.get<SymbolSignalHistory>(`/quant/symbols/${encodeURIComponent(vtSymbol)}/signal-history${suffix}`);
 }
 
+export function fetchSymbolStrategyComparison(vtSymbol: string, params: {
+  start?: string;
+  end?: string;
+  limit?: number;
+} = {}) {
+  const search = new URLSearchParams();
+  if (params.start) search.set("start", params.start);
+  if (params.end) search.set("end", params.end);
+  if (params.limit != null) search.set("limit", String(params.limit));
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  return apiClient.get<SymbolStrategyComparison>(`/quant/symbols/${encodeURIComponent(vtSymbol)}/strategy-comparison${suffix}`);
+}
+
+export function fetchSymbolDiagnostics(vtSymbol: string, params: {
+  start?: string;
+  end?: string;
+  backtest_id?: number | string;
+  signal_date?: string;
+  limit?: number;
+} = {}) {
+  const search = new URLSearchParams();
+  if (params.start) search.set("start", params.start);
+  if (params.end) search.set("end", params.end);
+  if (params.backtest_id != null && String(params.backtest_id).trim()) {
+    search.set("backtest_id", String(params.backtest_id));
+  }
+  if (params.signal_date) search.set("signal_date", params.signal_date);
+  if (params.limit != null) search.set("limit", String(params.limit));
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  return apiClient.get<SymbolDiagnostics>(`/quant/symbols/${encodeURIComponent(vtSymbol)}/diagnostics${suffix}`);
+}
+
+export function fetchQuantStrategies() {
+  return apiClient.get<{ status: string; default_strategy_id: string; items: QuantStrategyOption[] }>("/quant/strategies");
+}
+
 export function fetchBacktests(limit = 10, runType: "portfolio" | "symbol" | "all" = "all") {
   return apiClient.get<{ status: string; items: BacktestRun[] }>(`/backtests?limit=${limit}&run_type=${runType}`);
 }
 
 export function createBacktest(payload: {
+  strategy?: string;
   start?: string;
   end?: string;
   initial_cash?: number;
@@ -910,8 +1490,7 @@ export function createBacktest(payload: {
   persist?: boolean;
   min_entry_score?: number;
   strict_entry?: boolean;
-  intraday_entry?: boolean;
-  minute_entry_required?: boolean;
+  execution_model?: "tail_close_hybrid" | "strict_1430" | string;
   minute_interval?: string;
   tail_entry_start?: string;
   tail_entry_end?: string;
@@ -930,16 +1509,37 @@ export function createBacktest(payload: {
   }>("/backtests", payload);
 }
 
+export function runBacktestStrategyComparison(payload: {
+  strategies?: string[];
+  start?: string;
+  end?: string;
+  initial_cash?: number;
+  max_positions?: number;
+  max_symbols?: number;
+  candidate_limit?: number;
+  persist?: boolean;
+  min_entry_score?: number;
+  strict_entry?: boolean;
+  execution_model?: "tail_close_hybrid" | "strict_1430" | string;
+  minute_interval?: string;
+  tail_entry_start?: string;
+  tail_entry_end?: string;
+  tail_entry_ma5_tolerance_pct?: number;
+  included_boards?: string[];
+} = {}) {
+  return apiClient.post<BacktestStrategyComparison>("/backtests/strategy-comparison", payload);
+}
+
 export function createSymbolBacktest(payload: {
   vt_symbol: string;
+  strategy?: string;
   start?: string;
   end?: string;
   initial_cash?: number;
   persist?: boolean;
   min_entry_score?: number;
   strict_entry?: boolean;
-  intraday_entry?: boolean;
-  minute_entry_required?: boolean;
+  execution_model?: "tail_close_hybrid" | "strict_1430" | string;
   minute_interval?: string;
   tail_entry_start?: string;
   tail_entry_end?: string;
@@ -960,6 +1560,7 @@ export function createSymbolBacktest(payload: {
 }
 
 export function runStrictMinuteBacktestPipeline(payload: {
+  backtest_id?: number | string;
   start?: string;
   end?: string;
   initial_cash?: number;
@@ -967,6 +1568,7 @@ export function runStrictMinuteBacktestPipeline(payload: {
   max_symbols?: number;
   candidate_limit?: number;
   min_entry_score?: number;
+  execution_model?: "strict_1430" | string;
   minute_interval?: string;
   tail_entry_start?: string;
   tail_entry_end?: string;
@@ -1014,6 +1616,10 @@ export function fetchBacktestEquity(backtestId: number) {
   return apiClient.get<BacktestEquityResult>(`/backtests/${backtestId}/equity`);
 }
 
+export function fetchBacktestDrilldownOptions(backtestId: number) {
+  return apiClient.get<BacktestDrilldownOptions>(`/backtests/${backtestId}/drilldown-options`);
+}
+
 export function fetchBacktestTrades(backtestId: number, params: {
   limit?: number;
   offset?: number;
@@ -1025,6 +1631,32 @@ export function fetchBacktestTrades(backtestId: number, params: {
     order: params.order ?? "desc",
   });
   return apiClient.get<BacktestTradesResult>(`/backtests/${backtestId}/trades?${search.toString()}`);
+}
+
+export function fetchBacktestDailyDecisions(backtestId: number, params: {
+  limit?: number;
+  offset?: number;
+  order?: "asc" | "desc";
+} = {}) {
+  const search = new URLSearchParams({
+    limit: String(params.limit ?? 100),
+    offset: String(params.offset ?? 0),
+    order: params.order ?? "desc",
+  });
+  return apiClient.get<BacktestDailyDecisionsResult>(`/backtests/${backtestId}/daily-decisions?${search.toString()}`);
+}
+
+export function fetchBacktestTradeAttribution(backtestId: number, params: {
+  limit?: number;
+  offset?: number;
+  sort?: "pnl_asc" | "pnl_desc" | "entry_desc" | "entry_asc";
+} = {}) {
+  const search = new URLSearchParams({
+    limit: String(params.limit ?? 100),
+    offset: String(params.offset ?? 0),
+    sort: params.sort ?? "pnl_asc",
+  });
+  return apiClient.get<BacktestTradeAttributionResult>(`/backtests/${backtestId}/trade-attribution?${search.toString()}`);
 }
 
 export function fetchBacktestDayDetail(backtestId: number, tradeDate: string) {
@@ -1079,12 +1711,29 @@ export function fetchBacktestAudit(backtestId: number, vtSymbol?: string, limit 
   return apiClient.get<BacktestAudit>(`/backtests/${backtestId}/audit?${params.toString()}`);
 }
 
+export function fetchBacktestCandidateTrace(backtestId: number, vtSymbol: string, signalDate: string) {
+  const params = new URLSearchParams({ vt_symbol: vtSymbol, signal_date: signalDate });
+  return apiClient.get<BacktestCandidateTrace>(`/backtests/${backtestId}/candidate-trace?${params.toString()}`);
+}
+
 export function backtestReportCsvUrl(backtestId: number, tradeLimit = 500) {
   return apiUrl(`/backtests/${backtestId}/report.csv?trade_limit=${tradeLimit}`);
 }
 
 export function fetchBacktestValidationGrid(backtestId: number, maxVariants = 54) {
   return apiClient.get<BacktestValidationGrid>(`/backtests/${backtestId}/validation-grid?max_variants=${maxVariants}`);
+}
+
+export function fetchBacktestExecutionModelComparison(backtestId: number) {
+  return apiClient.get<BacktestExecutionModelComparison>(`/backtests/${backtestId}/execution-model-comparison`);
+}
+
+export function fetchBacktestMinuteCoverage(backtestId: number) {
+  return apiClient.get<BacktestMinuteCoverage>(`/backtests/${backtestId}/minute-coverage`);
+}
+
+export function fetchBacktestDataQuality(backtestId: number) {
+  return apiClient.get<BacktestDataQualityDashboard>(`/backtests/${backtestId}/data-quality`);
 }
 
 export function backtestValidationGridCsvUrl(backtestId: number, maxVariants = 54) {
@@ -1200,6 +1849,7 @@ export function importVnpyMinuteBars(payload: {
 }
 
 export function importVnpyMinuteBarsForGaps(payload: {
+  backtest_id?: number | string;
   gap_csv_text?: string;
   gap_file_path?: string;
   interval?: string;

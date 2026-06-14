@@ -5,8 +5,133 @@ import { InfoCell } from "@/components/InfoCell";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { backtestValidationGridCsvUrl, fetchBacktestReport, fetchBacktestValidationGrid } from "@/api/quant";
+import {
+  backtestValidationGridCsvUrl,
+  fetchBacktestExecutionModelComparison,
+  fetchBacktestReport,
+  fetchBacktestValidationGrid,
+} from "@/api/quant";
 import { BacktestYearlyTable } from "./BacktestTables";
+
+export function BacktestRealityVerdictPanel({
+  report,
+  comparison,
+  isComparisonLoading,
+  onRunComparison,
+}: {
+  report: Awaited<ReturnType<typeof fetchBacktestReport>>;
+  comparison?: Awaited<ReturnType<typeof fetchBacktestExecutionModelComparison>>;
+  isComparisonLoading: boolean;
+  onRunComparison: () => void;
+}) {
+  const quality = report.execution_quality;
+  const verdict = realityVerdict(report);
+  const strictRow = comparison?.rows.find((row) => row.execution_model === "strict_1430");
+  const hybridRow = comparison?.rows.find((row) => row.execution_model === "tail_close_hybrid");
+
+  return (
+    <div className="rounded-lg border">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b px-3 py-2">
+        <div className="text-sm font-medium">回测真实性结论</div>
+        <span className={cn("rounded-md border px-2 py-1 text-xs", verdict.className)}>{verdict.label}</span>
+      </div>
+      <div className="space-y-3 p-3">
+        <div className="grid gap-3 text-sm md:grid-cols-4">
+          <InfoCell label="执行模型" value={executionModelLabel(report.method?.execution?.execution_model)} />
+          <InfoCell label="14:30真实占比" value={formatPct(quality?.minute_1430_ratio ?? quality?.minute_tail_entry_ratio)} />
+          <InfoCell label="收盘代理占比" value={formatPct(quality?.daily_close_proxy_ratio)} />
+          <InfoCell label="严格拒单" value={`${quality?.strict_1430_rejected_count ?? quality?.strict_tail_rejected_count ?? 0}笔`} />
+        </div>
+        <div className="grid gap-2 text-sm lg:grid-cols-2">
+          <VerdictLine label="成交口径" text={verdict.executionText} />
+          <VerdictLine label="反未来函数" text={verdict.asOfText} />
+          <VerdictLine label="数值可信度" text={verdict.numericText} />
+          <VerdictLine label="过拟合" text={verdict.overfitText} />
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3 text-sm">
+          <div className="text-muted-foreground">
+            {comparison?.summary?.message ??
+              "执行模型对比会用同一参数重跑尾盘混合和严格14:30，判断收益是否依赖收盘代理。"}
+          </div>
+          <Button variant="outline" size="sm" onClick={onRunComparison} disabled={isComparisonLoading}>
+            {isComparisonLoading ? <RefreshCw size={15} className="animate-spin" /> : <BarChart3 size={15} />}
+            执行模型对比
+          </Button>
+        </div>
+        {comparison?.status === "ready" && (
+          <div className="grid gap-2 text-sm md:grid-cols-3">
+            <InfoCell label="混合收益" value={formatPct(hybridRow?.total_return_pct)} />
+            <InfoCell label="严格收益" value={formatPct(strictRow?.total_return_pct)} />
+            <InfoCell label="严格-混合" value={formatPct(comparison.summary?.return_delta_pct)} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function BacktestExecutionModelComparisonPanel({
+  comparison,
+  isLoading,
+  onRun,
+}: {
+  comparison?: Awaited<ReturnType<typeof fetchBacktestExecutionModelComparison>>;
+  isLoading: boolean;
+  onRun: () => void;
+}) {
+  return (
+    <div className="overflow-hidden rounded-lg border">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b px-3 py-2">
+        <div>
+          <div className="text-sm font-medium">执行模型对比</div>
+          <div className="text-xs text-muted-foreground">同一回测参数下，对比尾盘混合和严格14:30。</div>
+        </div>
+        <Button variant="outline" size="sm" onClick={onRun} disabled={isLoading}>
+          {isLoading ? <RefreshCw size={15} className="animate-spin" /> : <BarChart3 size={15} />}
+          运行对比
+        </Button>
+      </div>
+      {!comparison ? (
+        <div className="p-3 text-sm text-muted-foreground">点击运行后，会非持久化重跑两个执行模型，不新增回测记录。</div>
+      ) : comparison.status !== "ready" ? (
+        <div className="p-3 text-sm text-muted-foreground">执行模型对比状态：{comparison.status}</div>
+      ) : (
+        <div className="space-y-3 p-3">
+          {comparison.summary?.message && <div className="text-sm text-muted-foreground">{comparison.summary.message}</div>}
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>模型</TableHead>
+                <TableHead className="text-right">收益</TableHead>
+                <TableHead className="text-right">回撤</TableHead>
+                <TableHead className="text-right">买入</TableHead>
+                <TableHead className="text-right">14:30占比</TableHead>
+                <TableHead className="text-right">收盘代理</TableHead>
+                <TableHead className="text-right">严格拒单</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {comparison.rows.map((row) => (
+                <TableRow key={row.execution_model}>
+                  <TableCell className="font-medium">{row.label}</TableCell>
+                  <TableCell className={cn("text-right tabular-nums", priceColorClass(row.total_return_pct))}>
+                    {formatPct(row.total_return_pct)}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums text-fall">{formatPct(row.max_drawdown_pct)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{row.buy_count ?? "--"}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatPct(row.minute_1430_ratio)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatPct(row.daily_close_proxy_ratio)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{row.strict_1430_rejected_count ?? 0}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+          {comparison.note && <div className="border-t pt-2 text-xs text-muted-foreground">{comparison.note}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function BacktestRobustnessPanel({
   checks,
@@ -89,6 +214,53 @@ export function BacktestRobustnessPanel({
   );
 }
 
+export function BacktestDataAsOfAuditPanel({
+  audit,
+}: {
+  audit: NonNullable<Awaited<ReturnType<typeof fetchBacktestReport>>["data_as_of_audit"]>;
+}) {
+  return (
+    <div className="overflow-hidden rounded-lg border">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b px-3 py-2">
+        <div className="text-sm font-medium">反未来函数审计</div>
+        <span
+          className={cn(
+            "rounded-md border px-2 py-1 text-xs",
+            audit.status === "pass" ? "border-green-200 bg-green-50 text-rise dark:border-green-500/30 dark:bg-green-500/10" : "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300"
+          )}
+        >
+          {audit.status === "pass" ? "通过" : "需复核"}
+        </span>
+      </div>
+      <div className="space-y-3 p-3">
+        {audit.policy && <div className="text-xs text-muted-foreground">{audit.policy}</div>}
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>检查项</TableHead>
+              <TableHead>状态</TableHead>
+              <TableHead className="text-right">数值</TableHead>
+              <TableHead>结论</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {audit.diagnostics.map((row) => (
+              <TableRow key={row.id}>
+                <TableCell className="font-medium">{row.label}</TableCell>
+                <TableCell>{robustnessStatus(row.status)}</TableCell>
+                <TableCell className={cn("text-right tabular-nums", priceColorClass(row.value))}>
+                  {formatRobustnessValue(row.value, row.value_type)}
+                </TableCell>
+                <TableCell className="text-muted-foreground">{row.message}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
+  );
+}
+
 export function BacktestValidationGridPanel({
   backtestId,
   grid,
@@ -124,7 +296,7 @@ export function BacktestValidationGridPanel({
       </div>
 
       {!grid ? (
-        <div className="p-3 text-sm text-muted-foreground">点击运行后，会用同一股票池和交易区间重跑不同入场分、止损、止盈、严格入场组合。</div>
+        <div className="p-3 text-sm text-muted-foreground">点击运行后，会用同一股票池和交易区间重跑不同入场分、止损、止盈、硬入场/宽松研究组合。</div>
       ) : grid.status !== "ready" ? (
         <div className="p-3 text-sm text-muted-foreground">网格验证状态：{grid.status}</div>
       ) : (
@@ -328,10 +500,13 @@ export function BacktestRealityStats({
       <InfoCell label="换手估算" value={formatPct(metrics.turnover_pct)} />
       <InfoCell label="平均仓位" value={formatPct(metrics.average_exposure_pct)} />
       <InfoCell label="最大持仓数" value={`${metrics.max_position_count}只`} />
+      <InfoCell label="买入/卖出/持仓中" value={`${metrics.buy_count} / ${metrics.sell_count} / ${metrics.open_trade_count}笔`} />
       <InfoCell label="成交订单" value={`${metrics.filled_order_count}笔`} />
       <InfoCell label="未成交订单" value={`${metrics.rejected_order_count}笔`} />
-      <InfoCell label="分钟尾盘买入" value={`${executionModes.minute_tail_ma5 ?? 0}笔`} />
-      <InfoCell label="开盘回退买入" value={`${executionModes.daily_next_open_fallback ?? 0}笔`} />
+      <InfoCell label="14:30真实买入" value={`${executionModes.minute_1430 ?? executionModes.minute_tail_ma5 ?? 0}笔`} />
+      <InfoCell label="收盘代理买入" value={`${executionModes.daily_close_proxy ?? 0}笔`} />
+      <InfoCell label="涨停未买" value={`${metrics.limit_up_blocked_buy_count ?? 0}笔`} />
+      <InfoCell label="跌停未卖" value={`${metrics.limit_down_blocked_sell_count ?? 0}笔`} />
     </div>
   );
 }
@@ -357,10 +532,12 @@ export function BacktestExecutionQualityPanel({
       <div className="space-y-3 p-3">
         <div className="grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-6">
           <InfoCell label="买入笔数" value={`${quality.buy_count}笔`} />
-          <InfoCell label="尾盘分钟成交" value={`${quality.minute_tail_entry_count}笔`} />
-          <InfoCell label="严格拒单" value={`${quality.strict_tail_rejected_count ?? 0}笔`} />
-          <InfoCell label="尾盘成交占比" value={formatPct(quality.minute_tail_entry_ratio)} />
-          <InfoCell label="开盘回退占比" value={formatPct(quality.daily_open_fallback_ratio)} />
+          <InfoCell label="14:30真实成交" value={`${quality.minute_1430_count ?? quality.minute_tail_entry_count ?? 0}笔`} />
+          <InfoCell label="收盘代理成交" value={`${quality.daily_close_proxy_count ?? 0}笔`} />
+          <InfoCell label="入场未触发" value={`${quality.tail_entry_rejected_count ?? 0}笔`} />
+          <InfoCell label="缺14:30快照" value={`${quality.minute_gap_rejected_count ?? 0}笔`} />
+          <InfoCell label="14:30真实占比" value={formatPct(quality.minute_1430_ratio ?? quality.minute_tail_entry_ratio)} />
+          <InfoCell label="收盘代理占比" value={formatPct(quality.daily_close_proxy_ratio)} />
           <InfoCell label="分钟线条数" value={quality.minute_bar_count.toLocaleString()} />
         </div>
         <Table>
@@ -488,4 +665,59 @@ function numberValue(value: unknown): number | undefined {
     return Number.isFinite(parsed) ? parsed : undefined;
   }
   return undefined;
+}
+
+function VerdictLine({ label, text }: { label: string; text: string }) {
+  return (
+    <div className="rounded-md border bg-muted/20 p-3">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="mt-1 leading-6">{text}</div>
+    </div>
+  );
+}
+
+function executionModelLabel(model?: string | null): string {
+  if (model === "tail_close_hybrid") return "尾盘混合";
+  if (model === "strict_1430") return "严格14:30";
+  if (model === "legacy_next_open") return "旧版次日开盘";
+  return model || "--";
+}
+
+function realityVerdict(report: Awaited<ReturnType<typeof fetchBacktestReport>>) {
+  const quality = report.execution_quality;
+  const dataAsOf = report.data_as_of_audit;
+  const minuteRatio = numberValue(quality?.minute_1430_ratio ?? quality?.minute_tail_entry_ratio) ?? 0;
+  const proxyRatio = numberValue(quality?.daily_close_proxy_ratio) ?? 0;
+  const strictRejected = Number(quality?.strict_1430_rejected_count ?? quality?.strict_tail_rejected_count ?? 0);
+  const gapRejected = Number(quality?.minute_gap_rejected_count ?? 0);
+  const hasFutureWarning = dataAsOf?.status && dataAsOf.status !== "pass";
+  const hasOverfitWarning = report.robustness_checks?.status && report.robustness_checks.status !== "pass";
+
+  let label = "需复核";
+  let className = "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300";
+  if (minuteRatio >= 80 && proxyRatio <= 20 && strictRejected === 0 && !hasFutureWarning) {
+    label = "接近真实14:30";
+    className = "border-green-200 bg-green-50 text-rise dark:border-green-500/30 dark:bg-green-500/10";
+  } else if (proxyRatio >= 50 || gapRejected > 0 || strictRejected > 0) {
+    label = "不能当纯真实";
+  }
+
+  const executionText =
+    proxyRatio >= 50
+      ? "收益主要按尾盘混合口径解读，当前大量买入使用执行日收盘价代理尾盘。"
+      : minuteRatio >= 80
+        ? "大多数买入使用 14:30 分钟快照，执行口径相对接近真实尾盘。"
+        : "14:30 覆盖不足，必须结合收盘代理占比和严格拒单看结果。";
+  const asOfText = hasFutureWarning
+    ? "反未来函数审计存在警告，需要逐项检查数据可见时间。"
+    : "当前审计显示日线和财报按交易日可见口径使用，未直接发现未来函数证据。";
+  const numericText =
+    strictRejected > 0 || gapRejected > 0
+      ? "严格14:30存在拒单或缺快照，数值不能直接代表完整可执行策略。"
+      : "费用、滑点、100股整数手和持仓资金已进入模拟，但仍需用严格模式对比收益。";
+  const overfitText = hasOverfitWarning
+    ? "反过拟合检查存在警告，不能用单次回测收益证明策略有效。"
+    : "已有基础稳健性检查；仍需要多年全A、walk-forward 和基准超额验证。";
+
+  return { label, className, executionText, asOfText, numericText, overfitText };
 }

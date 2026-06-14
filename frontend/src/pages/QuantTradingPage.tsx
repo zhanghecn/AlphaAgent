@@ -1,18 +1,21 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BarChart3, RefreshCw, WalletCards } from "lucide-react";
 import {
   addPortfolioGroupItem,
   autoBuyRecommendations,
   createBacktest,
   createScreenRunRange,
   fetchBacktestAudit,
+  fetchBacktestDataQuality,
+  fetchBacktestExecutionModelComparison,
+  fetchBacktestMinuteCoverage,
   fetchBacktestReport,
   fetchBacktestValidationGrid,
   fetchBacktests,
   fetchHoldings,
   fetchPortfolioGroupItems,
   fetchPortfolioGroups,
+  fetchQuantStrategies,
   fetchRecommendations,
   fetchScreenRuns,
   fetchSimulationAccounts,
@@ -20,7 +23,6 @@ import {
   fetchVnpyStatus,
 } from "@/api/quant";
 import type { MinuteGapAuditResult } from "@/api/dataSync";
-import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DEFAULT_BACKTEST_PARAMS, type BacktestParams } from "@/features/quant/constants";
 import { ActionStatus } from "@/features/quant/ActionStatus";
@@ -28,6 +30,7 @@ import { QuantWorkflowGuide } from "@/features/quant/QuantWorkflowGuide";
 import { QuantGroupPreview } from "@/features/quant/QuantGroupPreview";
 import { VnpyStatusPanel } from "@/features/quant/VnpyStatusPanel";
 import { RecommendationsPanel } from "@/features/quant/RecommendationsPanel";
+import { CandidateRunCoveragePanel } from "@/features/quant/CandidateRunCoveragePanel";
 import { BacktestPanel } from "@/features/quant/BacktestPanel";
 import { BacktestLogWorkspace } from "@/features/quant/BacktestLogWorkspace";
 import { BacktestDataQuality } from "@/features/quant/BacktestAnalysis";
@@ -41,29 +44,24 @@ export function QuantTradingPage() {
   const [minuteAudit, setMinuteAudit] = useState<MinuteGapAuditResult | undefined>(undefined);
   const [addToGroupOpen, setAddToGroupOpen] = useState(false);
   const [addToGroupSymbol, setAddToGroupSymbol] = useState<string | null>(null);
+  const [screenStartDate, setScreenStartDate] = useState("");
   const [selectedRecommendationDate, setSelectedRecommendationDate] = useState("");
+  const [selectedStrategy, setSelectedStrategy] = useState(DEFAULT_BACKTEST_PARAMS.strategy);
 
   const updateBacktestParams = (next: BacktestParams) => {
     setBacktestParams(next);
     setMinuteAudit(undefined);
   };
 
-  const applyStrictMinutePreset = () => {
-    setMinuteAudit(undefined);
-    setBacktestParams((current) => ({
-      ...current,
-      max_symbols: Math.max(current.max_symbols, 1500),
-      intraday_entry: true,
-      minute_entry_required: true,
-      tail_entry_start: current.tail_entry_start || "14:30",
-      tail_entry_end: current.tail_entry_end || "14:57",
-      tail_entry_ma5_tolerance_pct: current.tail_entry_ma5_tolerance_pct || 1.5,
-    }));
-  };
+  const strategiesQuery = useQuery({
+    queryKey: ["quantStrategies"],
+    queryFn: fetchQuantStrategies,
+    staleTime: 60_000,
+  });
 
   const screenRunsQuery = useQuery({
-    queryKey: ["quantScreenRuns"],
-    queryFn: () => fetchScreenRuns(500),
+    queryKey: ["quantScreenRuns", selectedStrategy],
+    queryFn: () => fetchScreenRuns(500, selectedStrategy),
     staleTime: 30_000,
   });
 
@@ -75,14 +73,20 @@ export function QuantTradingPage() {
 
   const activeRecommendationDate =
     selectedRecommendationDate ||
-    backtestParams.start ||
     tradingDatesQuery.data?.latest_trade_date ||
     screenRunsQuery.data?.items[0]?.trade_date ||
+    backtestParams.start ||
+    "";
+
+  const activeScreenStartDate =
+    screenStartDate ||
+    backtestParams.start ||
+    tradingDatesQuery.data?.items[0]?.trade_date ||
     "";
 
   const recommendationsQuery = useQuery({
-    queryKey: ["quantRecommendations", activeRecommendationDate],
-    queryFn: () => fetchRecommendations(200, activeRecommendationDate || undefined),
+    queryKey: ["quantRecommendations", activeRecommendationDate, selectedStrategy],
+    queryFn: () => fetchRecommendations(200, activeRecommendationDate || undefined, selectedStrategy),
     staleTime: 20_000,
   });
 
@@ -114,6 +118,20 @@ export function QuantTradingPage() {
     staleTime: 20_000,
   });
 
+  const minuteCoverageQuery = useQuery({
+    queryKey: ["backtestMinuteCoverage", activeBacktestId],
+    queryFn: () => fetchBacktestMinuteCoverage(activeBacktestId!),
+    enabled: Boolean(activeBacktestId),
+    staleTime: 20_000,
+  });
+
+  const dataQualityQuery = useQuery({
+    queryKey: ["backtestDataQuality", activeBacktestId],
+    queryFn: () => fetchBacktestDataQuality(activeBacktestId!),
+    enabled: Boolean(activeBacktestId),
+    staleTime: 20_000,
+  });
+
   const auditQuery = useQuery({
     queryKey: ["backtestAudit", activeBacktestId],
     queryFn: () => fetchBacktestAudit(activeBacktestId!, undefined, 120),
@@ -124,6 +142,13 @@ export function QuantTradingPage() {
   const validationGridQuery = useQuery({
     queryKey: ["backtestValidationGrid", activeBacktestId],
     queryFn: () => fetchBacktestValidationGrid(activeBacktestId!, 54),
+    enabled: false,
+    staleTime: 60_000,
+  });
+
+  const executionComparisonQuery = useQuery({
+    queryKey: ["backtestExecutionModelComparison", activeBacktestId],
+    queryFn: () => fetchBacktestExecutionModelComparison(activeBacktestId!),
     enabled: false,
     staleTime: 60_000,
   });
@@ -149,7 +174,8 @@ export function QuantTradingPage() {
   const screenMutation = useMutation({
     mutationFn: () =>
       createScreenRunRange({
-        start: activeRecommendationDate || undefined,
+        start: activeScreenStartDate || undefined,
+        strategy: selectedStrategy,
         max_symbols: 500,
         recommendation_limit: 20,
         min_recommendation_score: 60,
@@ -170,7 +196,13 @@ export function QuantTradingPage() {
     mutationFn: (override?: Partial<BacktestParams> & { persist?: boolean }) =>
       createBacktest({
         ...backtestParams,
+        strategy: selectedStrategy,
         ...override,
+        strict_entry: true,
+        execution_model: "strict_1430",
+        minute_interval: "1m",
+        tail_entry_start: "14:30",
+        tail_entry_end: "14:30",
         persist: override?.persist ?? true,
       }),
     onSuccess: (result) => {
@@ -178,6 +210,7 @@ export function QuantTradingPage() {
       if (result.backtest_id) {
         setSelectedBacktestId(result.backtest_id);
         queryClient.invalidateQueries({ queryKey: ["backtestReport", result.backtest_id] });
+        queryClient.invalidateQueries({ queryKey: ["backtestMinuteCoverage", result.backtest_id] });
       }
     },
   });
@@ -212,6 +245,12 @@ export function QuantTradingPage() {
     setAddToGroupOpen(true);
   };
 
+  const handleStrategyChange = (strategy: string) => {
+    setSelectedStrategy(strategy);
+    updateBacktestParams({ ...backtestParams, strategy });
+    setSelectedRecommendationDate("");
+  };
+
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b pb-4">
@@ -220,16 +259,6 @@ export function QuantTradingPage() {
           <p className="mt-1 text-sm text-muted-foreground">
             候选按交易日核查，回测按历史逐日动态候选执行。当前不会连接券商实盘。
           </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <Button variant="outline" onClick={() => backtestMutation.mutate(undefined)} disabled={backtestMutation.isPending}>
-            {backtestMutation.isPending ? <RefreshCw size={16} className="animate-spin" /> : <BarChart3 size={16} />}
-            运行回测
-          </Button>
-          <Button onClick={() => autoBuyMutation.mutate()} disabled={autoBuyMutation.isPending}>
-            {autoBuyMutation.isPending ? <RefreshCw size={16} className="animate-spin" /> : <WalletCards size={16} />}
-            自动模拟建仓
-          </Button>
         </div>
       </div>
 
@@ -276,10 +305,16 @@ export function QuantTradingPage() {
               includedBoards={recommendationsQuery.data?.included_boards}
               screenRuns={screenRunsQuery.data?.items ?? []}
               tradingDates={tradingDatesQuery.data?.items.map((item) => item.trade_date) ?? []}
+              screenStartDate={activeScreenStartDate}
+              onScreenStartDateChange={setScreenStartDate}
               selectedTradeDate={activeRecommendationDate}
               onSelectedTradeDateChange={setSelectedRecommendationDate}
+              strategies={strategiesQuery.data?.items ?? []}
+              selectedStrategy={selectedStrategy}
+              onStrategyChange={handleStrategyChange}
               selectedBoards={backtestParams.included_boards}
               onSelectedBoardsChange={(included_boards) => updateBacktestParams({ ...backtestParams, included_boards })}
+              activeBacktestId={activeBacktestId}
               status={recommendationsQuery.data?.status}
               message={recommendationsQuery.data?.message}
               syncedCount={quantGroupItemsQuery.data?.items.length ?? 0}
@@ -288,6 +323,14 @@ export function QuantTradingPage() {
               isRunningScreen={screenMutation.isPending}
             />
             <section className="space-y-4">
+              <CandidateRunCoveragePanel
+                screenRuns={screenRunsQuery.data?.items ?? []}
+                tradingDates={tradingDatesQuery.data?.items ?? []}
+                startDate={activeScreenStartDate}
+                selectedTradeDate={activeRecommendationDate}
+                strategy={strategiesQuery.data?.items.find((strategy) => strategy.id === selectedStrategy)}
+                onSelectDate={setSelectedRecommendationDate}
+              />
               <QuantGroupPreview
                 candidateCount={quantGroupItemsQuery.data?.items.length ?? 0}
                 holdingsCount={holdingsQuery.data?.items.length ?? 0}
@@ -308,22 +351,33 @@ export function QuantTradingPage() {
             onSelect={setSelectedBacktestId}
             params={backtestParams}
             onParamsChange={updateBacktestParams}
+            strategies={strategiesQuery.data?.items ?? []}
+            selectedStrategy={selectedStrategy}
+            onStrategyChange={handleStrategyChange}
             tradingDates={tradingDatesQuery.data?.items.map((item) => item.trade_date) ?? []}
             isRunning={backtestMutation.isPending}
             onRun={() => backtestMutation.mutate(undefined)}
-            onStrictMinutePreset={applyStrictMinutePreset}
             report={reportQuery.data}
+            minuteCoverage={minuteCoverageQuery.data}
+            isMinuteCoverageLoading={minuteCoverageQuery.isLoading}
+            dataQuality={dataQualityQuery.data}
+            isDataQualityLoading={dataQualityQuery.isLoading}
             audit={auditQuery.data}
             isLoading={backtestsQuery.isLoading || reportQuery.isLoading}
             isError={backtestsQuery.isError || reportQuery.isError}
             onRetry={() => {
               backtestsQuery.refetch();
               reportQuery.refetch();
+              minuteCoverageQuery.refetch();
+              dataQualityQuery.refetch();
               auditQuery.refetch();
             }}
             validationGrid={validationGridQuery.data}
             isValidationGridLoading={validationGridQuery.isFetching}
             onRunValidationGrid={() => validationGridQuery.refetch()}
+            executionComparison={executionComparisonQuery.data}
+            isExecutionComparisonLoading={executionComparisonQuery.isFetching}
+            onRunExecutionComparison={() => executionComparisonQuery.refetch()}
             onAddToPortfolio={handleAddToPortfolio}
           />
         </TabsContent>
@@ -338,10 +392,13 @@ export function QuantTradingPage() {
               tailEntryStart={backtestParams.tail_entry_start}
               tailEntryEnd={backtestParams.tail_entry_end}
               minuteInterval={backtestParams.minute_interval}
+              backtestId={activeBacktestId}
               isRunningBacktest={backtestMutation.isPending}
               onStrictPipelineComplete={(backtestId) => {
                 setSelectedBacktestId(backtestId);
                 queryClient.invalidateQueries({ queryKey: ["backtestReport", backtestId] });
+                queryClient.invalidateQueries({ queryKey: ["backtestMinuteCoverage", backtestId] });
+                queryClient.invalidateQueries({ queryKey: ["backtestDataQuality", backtestId] });
               }}
               onAuditChange={setMinuteAudit}
             />

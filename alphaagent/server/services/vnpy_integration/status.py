@@ -86,7 +86,7 @@ def vnpy_status() -> dict[str, Any]:
         "notes": [
             "AlphaAgent 当前回测使用 PostgreSQL 日线数据和自研组合回测服务。",
             "AlphaAgent 可通过 /api/vnpy/local-bars 把本地日线转换为 vn.py BarData 语义，供本地研究/适配使用。",
-            "stock_minute_bars 有数据时，AlphaAgent 回测可对尾盘 5 日线附近低吸做分钟级入场验证。",
+            "stock_minute_bars 有执行日 14:30 快照时，AlphaAgent 回测可做严格 14:30 成交验证。",
             "vn.py GUI 当前只注册 CTP Gateway，不能直接连接 A 股券商。",
             "接入 A 股实盘前需要安装并配置 vnpy_xtp/vnpy_tora/vnpy_ost/vnpy_emt 之一。",
             "接入 vn.py 官方历史数据路径前需要安装并配置 vnpy_xt/vnpy_rqdata/vnpy_tushare 之一。",

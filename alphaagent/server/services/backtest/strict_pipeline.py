@@ -7,6 +7,9 @@ from typing import Any
 
 from alphaagent.server.services.backtest.engine import (
     BacktestParams,
+    _params_from_run,
+    backtest_minute_gap_csv,
+    get_backtest,
     backtest_report,
     backtest_report_csv,
     run_backtest,
@@ -17,6 +20,7 @@ from alphaagent.server.services.data_sync import audit_minute_gap_csv, audit_min
 def run_strict_minute_backtest_pipeline(
     params: BacktestParams,
     *,
+    backtest_id: int | None = None,
     gap_csv_text: str = "",
     gap_file_path: str = "",
     min_tail_bars: int = 1,
@@ -24,22 +28,23 @@ def run_strict_minute_backtest_pipeline(
 ) -> dict[str, Any]:
     """Audit strict minute gaps and run the backtest only when coverage is ready."""
 
+    gap_csv_text = _gap_csv_from_backtest(backtest_id) if backtest_id is not None else gap_csv_text
+    strict_params = _strict_params(_base_params(params, backtest_id))
     audit = _audit_gap_coverage(
         gap_csv_text=gap_csv_text,
         gap_file_path=gap_file_path,
-        interval="1m",
-        tail_entry_start=params.tail_entry_start,
-        tail_entry_end=params.tail_entry_end,
+        interval=strict_params.minute_interval,
+        tail_entry_start=strict_params.tail_entry_start,
+        tail_entry_end=strict_params.tail_entry_end,
         min_tail_bars=min_tail_bars,
     )
-    strict_params = _strict_params(params)
     if audit.get("status") != "ready":
         return {
             "status": "blocked_by_minute_gaps",
             "message": "严格分钟尾盘回测未运行：分钟线缺口尚未覆盖完成。",
             "audit": audit,
             "params": _params_payload(strict_params),
-            "next_action": "先用外部 CSV、vn.py 数据库或 Tushare Pro 补齐缺口；审计 ready 后再运行严格分钟回测。",
+            "next_action": "先用数据同步补齐该回测的执行日 14:30 快照；审计 ready 后再运行严格分钟回测。",
         }
 
     result = run_backtest(strict_params)
@@ -100,6 +105,24 @@ def _audit_gap_coverage(
     )
 
 
+def _gap_csv_from_backtest(backtest_id: int | None) -> str:
+    if backtest_id is None:
+        return ""
+    result = backtest_minute_gap_csv(int(backtest_id))
+    if result.get("status") not in {"ready", "empty"}:
+        raise ValueError(f"Cannot load minute gaps for backtest {backtest_id}: {result.get('status')}")
+    return str(result.get("content") or "")
+
+
+def _base_params(params: BacktestParams, backtest_id: int | None) -> BacktestParams:
+    if backtest_id is None:
+        return params
+    result = get_backtest(int(backtest_id))
+    if result.get("status") != "ready" or not result.get("item"):
+        raise ValueError(f"Cannot load params for backtest {backtest_id}: {result.get('status')}")
+    return _params_from_run(dict(result["item"]))
+
+
 def _strict_params(params: BacktestParams) -> BacktestParams:
     return BacktestParams(
         strategy=params.strategy,
@@ -116,11 +139,13 @@ def _strict_params(params: BacktestParams) -> BacktestParams:
         trailing_stop_pct=params.trailing_stop_pct,
         time_stop_days=params.time_stop_days,
         candidate_limit=params.candidate_limit,
-        max_symbols=max(params.max_symbols, 1500),
+        max_symbols=params.max_symbols,
         min_entry_score=params.min_entry_score,
         strict_entry=True,
+        execution_model="strict_1430",
         intraday_entry=True,
         minute_entry_required=True,
+        minute_interval="1m",
         tail_entry_start=params.tail_entry_start,
         tail_entry_end=params.tail_entry_end,
         tail_entry_ma5_tolerance_pct=params.tail_entry_ma5_tolerance_pct,

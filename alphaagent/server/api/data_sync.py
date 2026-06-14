@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse, Response
 
 from alphaagent.server.core.responses import fail, ok
 from alphaagent.server.services import data_sync as service
+from alphaagent.server.services.data_providers.akshare_minute_import import import_akshare_minute_bars_for_gaps
 from alphaagent.server.services.data_providers.tdx_minute_import import import_tdx_minute_bars_for_gaps
 from alphaagent.server.services.data_providers.tushare_minute_import import import_tushare_minute_bars_for_gaps
 
@@ -141,23 +142,34 @@ def import_minute_bars(payload: dict[str, Any] = Body(default_factory=dict)):
 @router.post("/imports/minute-bars/audit-gaps")
 def audit_minute_bar_gaps(payload: dict[str, Any] = Body(default_factory=dict)):
     try:
+        if payload.get("backtest_id") not in (None, ""):
+            requirements = service.minute_gap_requirements_from_params(payload)
+            return ok(
+                service._audit_minute_gap_requirements(
+                    requirements,
+                    interval="1m",
+                    tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
+                    tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
+                    min_tail_bars=int(payload.get("min_tail_bars") or 1),
+                )
+            )
         file_path = str(payload.get("file_path") or "").strip()
         if file_path:
             return ok(
                 service.audit_minute_gap_file(
                     file_path,
-                    interval=str(payload.get("interval") or "1m"),
+                    interval="1m",
                     tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
-                    tail_entry_end=str(payload.get("tail_entry_end") or "14:57"),
+                    tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
                     min_tail_bars=int(payload.get("min_tail_bars") or 1),
                 )
             )
         return ok(
             service.audit_minute_gap_csv(
                 str(payload.get("gap_csv_text") or payload.get("csv_text") or ""),
-                interval=str(payload.get("interval") or "1m"),
+                interval="1m",
                 tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
-                tail_entry_end=str(payload.get("tail_entry_end") or "14:57"),
+                tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
                 min_tail_bars=int(payload.get("min_tail_bars") or 1),
             )
         )
@@ -168,9 +180,14 @@ def audit_minute_bar_gaps(payload: dict[str, Any] = Body(default_factory=dict)):
 @router.post("/imports/minute-bars/gap-template.csv")
 def minute_gap_import_template(payload: dict[str, Any] = Body(default_factory=dict)):
     try:
+        if payload.get("backtest_id") not in (None, ""):
+            requirements = service.minute_gap_requirements_from_params(payload)
+            gap_csv_text = _requirements_to_gap_csv(requirements)
+        else:
+            gap_csv_text = str(payload.get("gap_csv_text") or payload.get("csv_text") or "")
         return Response(
             content=service.minute_gap_import_template(
-                str(payload.get("gap_csv_text") or payload.get("csv_text") or ""),
+                gap_csv_text,
                 sample_limit=int(payload.get("sample_limit") or 200),
             ),
             media_type="text/csv; charset=utf-8",
@@ -183,12 +200,22 @@ def minute_gap_import_template(payload: dict[str, Any] = Body(default_factory=di
 @router.post("/imports/minute-bars/vendor-manifest")
 def minute_gap_vendor_manifest(payload: dict[str, Any] = Body(default_factory=dict)):
     try:
+        if payload.get("backtest_id") not in (None, ""):
+            requirements = service.minute_gap_requirements_from_params(payload)
+            return ok(
+                service.minute_gap_vendor_manifest(
+                    _requirements_to_gap_csv(requirements),
+                    tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
+                    tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
+                    sample_limit=int(payload.get("sample_limit") or 20),
+                )
+            )
         return ok(
             service.minute_gap_vendor_manifest(
                 str(payload.get("gap_csv_text") or payload.get("csv_text") or ""),
                 file_path=str(payload.get("file_path") or payload.get("gap_file_path") or ""),
                 tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
-                tail_entry_end=str(payload.get("tail_entry_end") or "14:57"),
+                tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
                 sample_limit=int(payload.get("sample_limit") or 20),
             )
         )
@@ -199,12 +226,19 @@ def minute_gap_vendor_manifest(payload: dict[str, Any] = Body(default_factory=di
 @router.post("/imports/minute-bars/vendor-manifest.csv")
 def minute_gap_vendor_manifest_csv(payload: dict[str, Any] = Body(default_factory=dict)):
     try:
+        if payload.get("backtest_id") not in (None, ""):
+            requirements = service.minute_gap_requirements_from_params(payload)
+            gap_csv_text = _requirements_to_gap_csv(requirements)
+            gap_file_path = ""
+        else:
+            gap_csv_text = str(payload.get("gap_csv_text") or payload.get("csv_text") or "")
+            gap_file_path = str(payload.get("file_path") or payload.get("gap_file_path") or "")
         return Response(
             content=service.minute_gap_vendor_manifest_csv(
-                str(payload.get("gap_csv_text") or payload.get("csv_text") or ""),
-                file_path=str(payload.get("file_path") or payload.get("gap_file_path") or ""),
+                gap_csv_text,
+                file_path=gap_file_path,
                 tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
-                tail_entry_end=str(payload.get("tail_entry_end") or "14:57"),
+                tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
             ),
             media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": 'attachment; filename="alphaagent_minute_gap_vendor_manifest.csv"'},
@@ -216,13 +250,14 @@ def minute_gap_vendor_manifest_csv(payload: dict[str, Any] = Body(default_factor
 @router.post("/imports/minute-bars/tushare-gaps")
 def import_minute_bar_gaps_from_tushare(payload: dict[str, Any] = Body(default_factory=dict)):
     try:
+        gap_csv_text, gap_file_path = _gap_payload_source(payload)
         return ok(
             import_tushare_minute_bars_for_gaps(
-                gap_csv_text=str(payload.get("gap_csv_text") or payload.get("csv_text") or ""),
-                gap_file_path=str(payload.get("gap_file_path") or payload.get("file_path") or ""),
-                interval=str(payload.get("interval") or "1m"),
+                gap_csv_text=gap_csv_text,
+                gap_file_path=gap_file_path,
+                interval="1m",
                 tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
-                tail_entry_end=str(payload.get("tail_entry_end") or "14:57"),
+                tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
                 dry_run=bool(payload.get("dry_run") if payload.get("dry_run") is not None else True),
                 max_gaps=int(payload.get("max_gaps") or 200),
             )
@@ -234,13 +269,14 @@ def import_minute_bar_gaps_from_tushare(payload: dict[str, Any] = Body(default_f
 @router.post("/imports/minute-bars/tdx-gaps")
 def import_minute_bar_gaps_from_tdx(payload: dict[str, Any] = Body(default_factory=dict)):
     try:
+        gap_csv_text, gap_file_path = _gap_payload_source(payload)
         return ok(
             import_tdx_minute_bars_for_gaps(
-                gap_csv_text=str(payload.get("gap_csv_text") or payload.get("csv_text") or ""),
-                gap_file_path=str(payload.get("gap_file_path") or payload.get("file_path") or ""),
-                interval=str(payload.get("interval") or "1m"),
+                gap_csv_text=gap_csv_text,
+                gap_file_path=gap_file_path,
+                interval="1m",
                 tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
-                tail_entry_end=str(payload.get("tail_entry_end") or "14:57"),
+                tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
                 dry_run=bool(payload.get("dry_run") if payload.get("dry_run") is not None else True),
                 max_gaps=int(payload.get("max_gaps") or 2000),
                 max_pages_per_symbol=int(payload.get("max_pages_per_symbol") or 32),
@@ -249,6 +285,57 @@ def import_minute_bar_gaps_from_tdx(payload: dict[str, Any] = Body(default_facto
         )
     except Exception as exc:
         return _sync_error(exc)
+
+
+@router.post("/imports/minute-bars/akshare-gaps")
+def import_minute_bar_gaps_from_akshare(payload: dict[str, Any] = Body(default_factory=dict)):
+    try:
+        gap_csv_text, gap_file_path = _gap_payload_source(payload)
+        return ok(
+            import_akshare_minute_bars_for_gaps(
+                gap_csv_text=gap_csv_text,
+                gap_file_path=gap_file_path,
+                interval="1m",
+                tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
+                tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
+                dry_run=bool(payload.get("dry_run") if payload.get("dry_run") is not None else True),
+                max_gaps=int(payload.get("max_gaps") or 200),
+            )
+        )
+    except Exception as exc:
+        return _sync_error(exc)
+
+
+def _gap_payload_source(payload: dict[str, Any]) -> tuple[str, str]:
+    if payload.get("backtest_id") not in (None, ""):
+        requirements = service.minute_gap_requirements_from_params(payload)
+        return _requirements_to_gap_csv(requirements), ""
+    return (
+        str(payload.get("gap_csv_text") or payload.get("csv_text") or ""),
+        str(payload.get("gap_file_path") or payload.get("file_path") or ""),
+    )
+
+
+def _requirements_to_gap_csv(requirements: dict[str, Any]) -> str:
+    import csv
+    import io
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["trade_date", "vt_symbol", "reference_date", "window", "ma5"])
+    for item in requirements.get("items") or []:
+        trade_date = item.get("trade_date")
+        reference_date = item.get("reference_date")
+        writer.writerow(
+            [
+                trade_date.isoformat() if hasattr(trade_date, "isoformat") else trade_date,
+                item.get("vt_symbol") or "",
+                reference_date.isoformat() if hasattr(reference_date, "isoformat") else (reference_date or ""),
+                item.get("window") or "",
+                item.get("ma5") if item.get("ma5") is not None else "",
+            ]
+        )
+    return buffer.getvalue()
 
 
 def _sync_error(exc: Exception) -> JSONResponse:

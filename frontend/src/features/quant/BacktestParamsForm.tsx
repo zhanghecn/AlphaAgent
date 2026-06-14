@@ -1,18 +1,25 @@
 import { Play, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { MINUTE_INTERVAL_OPTIONS, type BacktestParams, type MinuteInterval } from "@/features/quant/constants";
+import type { BacktestParams } from "@/features/quant/constants";
 import { QuantBoardSelector } from "@/features/quant/RecommendationsPanel";
 import { TradingDateSelector } from "@/features/quant/TradingDateSelector";
+import type { QuantStrategyOption } from "@/api/quant";
 
 export function BacktestParamsForm({
   params,
   onChange,
+  strategies,
+  selectedStrategy,
+  onStrategyChange,
   isRunning,
   onRun,
   tradingDates,
 }: {
   params: BacktestParams;
   onChange: (params: BacktestParams) => void;
+  strategies: QuantStrategyOption[];
+  selectedStrategy: string;
+  onStrategyChange: (strategy: string) => void;
   isRunning: boolean;
   onRun: () => void;
   tradingDates: string[];
@@ -87,83 +94,54 @@ export function BacktestParamsForm({
           />
         </label>
         <div className="flex items-end gap-2">
-          <label className="flex h-9 items-center gap-2 rounded-md border px-2 text-sm">
-            <input
-              type="checkbox"
-              checked={params.strict_entry}
-              onChange={(event) => onChange({ ...params, strict_entry: event.target.checked })}
-            />
-            严格入场
-          </label>
           <Button size="sm" onClick={onRun} disabled={isRunning}>
             {isRunning ? <RefreshCw size={15} className="animate-spin" /> : <Play size={15} />}
-            运行
+            运行组合回测
           </Button>
         </div>
       </div>
       <details className="mt-3 border-t pt-3 text-sm">
-        <summary className="cursor-pointer text-muted-foreground">高级执行设置：尾盘分钟线、强制分钟成交、MA5 偏离</summary>
-        <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
-          <label className="flex h-9 items-center gap-2 rounded-md border px-2 text-sm">
-            <input
-              type="checkbox"
-              checked={params.intraday_entry}
-              onChange={(event) => onChange({ ...params, intraday_entry: event.target.checked })}
-            />
-            尝试尾盘分钟入场
-          </label>
-          <label className="flex h-9 items-center gap-2 rounded-md border px-2 text-sm">
-            <input
-              type="checkbox"
-              checked={params.minute_entry_required}
-              onChange={(event) => onChange({ ...params, minute_entry_required: event.target.checked })}
-            />
-            强制分钟成交
-          </label>
+        <summary className="cursor-pointer text-muted-foreground">高级执行设置：策略、严格14:30快照、只买 BUY</summary>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           <label className="text-sm">
-            <span className="text-xs text-muted-foreground">分钟周期</span>
+            <span className="text-xs text-muted-foreground">策略</span>
             <select
               className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
-              value={params.minute_interval}
-              onChange={(event) => onChange({ ...params, minute_interval: event.target.value as MinuteInterval })}
+              value={selectedStrategy}
+              onChange={(event) => onStrategyChange(event.target.value)}
             >
-              {MINUTE_INTERVAL_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
+              {strategies.length === 0 ? (
+                <option value={selectedStrategy}>主线强势回踩低吸</option>
+              ) : (
+                strategies.map((strategy) => (
+                  <option key={strategy.id} value={strategy.id}>
+                    {strategy.name}
+                  </option>
+                ))
+              )}
             </select>
           </label>
           <label className="text-sm">
-            <span className="text-xs text-muted-foreground">尾盘开始</span>
-            <input
-              className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
-              type="time"
-              value={params.tail_entry_start}
-              onChange={(event) => onChange({ ...params, tail_entry_start: event.target.value })}
-            />
+            <span className="text-xs text-muted-foreground">执行模型</span>
+            <div className="mt-1 flex h-9 items-center rounded-md border bg-muted/30 px-2 text-sm">严格14:30</div>
           </label>
           <label className="text-sm">
-            <span className="text-xs text-muted-foreground">尾盘结束</span>
-            <input
-              className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
-              type="time"
-              value={params.tail_entry_end}
-              onChange={(event) => onChange({ ...params, tail_entry_end: event.target.value })}
-            />
+            <span className="text-xs text-muted-foreground">执行快照</span>
+            <div className="mt-1 flex h-9 items-center rounded-md border bg-muted/30 px-2 text-sm">1分钟 / 14:30快照</div>
           </label>
           <label className="text-sm">
-            <span className="text-xs text-muted-foreground">MA5允许偏离%</span>
-            <input
-              className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
-              type="number"
-              min={0.1}
-              max={5}
-              step={0.1}
-              value={params.tail_entry_ma5_tolerance_pct}
-              onChange={(event) => setNumber("tail_entry_ma5_tolerance_pct", event.target.value)}
-            />
+            <span className="text-xs text-muted-foreground">尾盘约束</span>
+            <div className="mt-1 flex h-9 items-center rounded-md border bg-muted/30 px-2 text-sm">
+              14:30 单点，MA5偏离 {params.tail_entry_ma5_tolerance_pct}%
+            </div>
           </label>
+          <label className="text-sm">
+            <span className="text-xs text-muted-foreground">入场口径</span>
+            <div className="mt-1 flex h-9 items-center rounded-md border bg-muted/30 px-2 text-sm">只买 BUY 硬入场</div>
+          </label>
+        </div>
+        <div className="mt-2 text-xs text-muted-foreground">
+          普通组合回测固定严格14:30执行，只买 BUY 硬入场信号，WATCH 不会参与买入；其他执行模型只在“执行模型对比”中作为研究对照。
         </div>
       </details>
     </div>

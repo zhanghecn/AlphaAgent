@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
 from alphaagent.server.main import create_app
 from alphaagent.server.db import schema
-from alphaagent.server.services.quant.factors import Bar, SignalScore, score_stock
+from alphaagent.server.services.quant.factors import (
+    Bar,
+    SignalScore,
+    score_breakout_confirmation,
+    score_limit_up_after_pullback,
+    score_stock,
+    score_trend_acceleration,
+)
 
 
 def _bars(days: int = 80) -> list[Bar]:
@@ -49,7 +56,820 @@ def test_mainline_pullback_score_generates_entry_candidate() -> None:
     assert score.evidence["status"] == "ready"
     assert score.total_score > 0
     assert score.relative_strength_score > 50
-    assert "daily_close_signal_next_open_execution" == score.evidence["entry_rule"]
+    assert score.evidence["selection_rule"] == "daily_close_visible_signal"
+    assert score.evidence["entry_setup"] == "ma5_pullback"
+
+
+def test_quant_strategy_registry_dispatches_default_strategy() -> None:
+    from alphaagent.server.services.quant.strategy_registry import get_strategy, list_strategies, score_strategy
+
+    bars = _bars()
+    strategy = get_strategy("mainline_leader_pullback")
+    score = score_strategy("mainline_leader_pullback", "600000.SSE", bars, bars[-1].trade_date)
+
+    assert strategy is not None
+    assert strategy.version == "0.1.1"
+    assert list_strategies()[0]["id"] == "mainline_leader_pullback"
+    assert score.signal_type == "mainline_leader_pullback"
+    assert score.evidence["entry_setup"] == "ma5_pullback"
+
+
+def test_breakout_confirmation_score_generates_entry_candidate() -> None:
+    start = date(2025, 1, 1)
+    bars: list[Bar] = []
+    price = 10.0
+    for index in range(85):
+        if index < 65:
+            price = 10 + index * 0.03
+        elif index < 82:
+            price = 12.0 + (index % 4) * 0.05
+        else:
+            price = 12.8 + (index - 82) * 0.25
+        bars.append(
+            Bar(
+                trade_date=start + timedelta(days=index),
+                open_price=price * 0.99,
+                high_price=price * 1.01,
+                low_price=price * 0.98,
+                close_price=price,
+                volume=2_000_000 if index >= 82 else 1_000_000,
+                turnover=300_000_000,
+                change_pct=2.0,
+            )
+        )
+
+    score = score_breakout_confirmation("002636.SZSE", bars, bars[-1].trade_date)
+
+    assert score.signal_type == "breakout_confirmation"
+    assert score.evidence["status"] == "ready"
+    assert score.evidence["entry_setup"] == "breakout_confirmation"
+    assert score.entry_signal is True
+    assert score.total_score >= 70
+
+
+def test_limit_up_after_pullback_score_generates_entry_candidate() -> None:
+    start = date(2025, 1, 1)
+    bars: list[Bar] = []
+    price = 10.0
+    for index in range(85):
+        if index < 60:
+            change_pct = 0.6
+        elif index == 78:
+            change_pct = 10.0
+        elif index in {79, 80, 81, 82}:
+            change_pct = -1.2
+        elif index == 83:
+            change_pct = 0.4
+        else:
+            change_pct = 0.3
+        price *= 1 + change_pct / 100
+        bars.append(
+            Bar(
+                trade_date=start + timedelta(days=index),
+                open_price=price * 0.99,
+                high_price=price * 1.02,
+                low_price=price * 0.98,
+                close_price=price,
+                volume=1_500_000,
+                turnover=350_000_000,
+                change_pct=change_pct,
+            )
+        )
+
+    score = score_limit_up_after_pullback(
+        "002636.SZSE",
+        bars,
+        bars[-1].trade_date,
+        index_return_20d=-5.0,
+        sector_score=80.0,
+        financial_score=70.0,
+        fund_flow_score=90.0,
+        hot_rank_score=80.0,
+        lhb_score=75.0,
+    )
+
+    assert score.signal_type == "limit_up_after_pullback"
+    assert score.evidence["status"] == "ready"
+    assert score.evidence["entry_setup"] == "limit_up_after_pullback"
+    assert score.evidence["limit_up_count_20d"] == 1
+    assert 2 <= score.evidence["days_since_limit_up"] <= 12
+    assert score.entry_signal is True
+    assert score.total_score >= 72
+
+
+def test_trend_acceleration_score_generates_entry_candidate() -> None:
+    start = date(2025, 1, 1)
+    bars: list[Bar] = []
+    price = 10.0
+    for index in range(85):
+        if index < 25:
+            change_pct = 0.1
+        elif index < 60:
+            change_pct = 0.35
+        elif index < 80:
+            change_pct = 0.75
+        else:
+            change_pct = 1.8
+        price *= 1 + change_pct / 100
+        bars.append(
+            Bar(
+                trade_date=start + timedelta(days=index),
+                open_price=price * 0.99,
+                high_price=price * 1.015,
+                low_price=price * 0.985,
+                close_price=price,
+                volume=1_700_000 if index >= 75 else 1_000_000,
+                turnover=420_000_000,
+                change_pct=change_pct,
+            )
+        )
+
+    score = score_trend_acceleration(
+        "002636.SZSE",
+        bars,
+        bars[-1].trade_date,
+        index_return_20d=-2.0,
+        sector_score=82.0,
+        financial_score=70.0,
+        fund_flow_score=85.0,
+        hot_rank_score=80.0,
+        lhb_score=70.0,
+    )
+
+    assert score.signal_type == "trend_acceleration"
+    assert score.evidence["status"] == "ready"
+    assert score.evidence["entry_setup"] == "trend_acceleration"
+    assert score.evidence["return_20d"] >= 12.0
+    assert 1.05 <= score.evidence["volume_ratio_5d_20d"] <= 2.80
+    assert score.entry_signal is True
+    assert score.total_score >= 73
+
+
+def test_quant_strategy_registry_returns_rule_metadata() -> None:
+    from alphaagent.server.services.quant.strategy_registry import list_strategies
+
+    strategies = {item["id"]: item for item in list_strategies()}
+
+    assert strategies["mainline_leader_pullback"]["default_min_entry_score"] == 68.0
+    assert strategies["mainline_leader_pullback"]["failed_rule_labels"]["ma5_distance"] == "不在MA5低吸区"
+    assert strategies["mainline_leader_pullback"]["primary_metric_keys"] == ["ma5_distance_pct"]
+    assert strategies["mainline_leader_pullback"]["evidence_labels"]["ma5_distance_pct"] == "MA5距离"
+    assert strategies["breakout_confirmation"]["default_min_entry_score"] == 70.0
+    assert strategies["breakout_confirmation"]["failed_rule_labels"]["breakout_distance"] == "未接近60日高点"
+    assert strategies["breakout_confirmation"]["primary_metric_keys"] == ["close_to_prior_high_pct", "volume_ratio_5d_20d"]
+    assert strategies["breakout_confirmation"]["evidence_labels"]["close_to_prior_high_pct"] == "距60日高点"
+    assert strategies["limit_up_after_pullback"]["default_min_entry_score"] == 72.0
+    assert strategies["limit_up_after_pullback"]["failed_rule_labels"]["limit_up_presence"] == "近20日无涨停"
+    assert strategies["limit_up_after_pullback"]["primary_metric_keys"] == ["days_since_limit_up", "ma5_distance_pct"]
+    assert strategies["limit_up_after_pullback"]["evidence_labels"]["days_since_limit_up"] == "距涨停天数"
+    assert strategies["trend_acceleration"]["default_min_entry_score"] == 73.0
+    assert strategies["trend_acceleration"]["failed_rule_labels"]["overheat"] == "短期过热"
+    assert strategies["trend_acceleration"]["primary_metric_keys"] == ["return_20d", "volume_ratio_5d_20d"]
+    assert strategies["trend_acceleration"]["evidence_labels"]["return_20d"] == "20日涨跌"
+
+
+def test_symbol_signal_rule_payload_is_strategy_specific() -> None:
+    from alphaagent.server.services.quant import screening
+
+    pullback = screening._strategy_rule_payload("mainline_leader_pullback", 68.0)
+    breakout = screening._strategy_rule_payload("breakout_confirmation", 70.0)
+    limit_up = screening._strategy_rule_payload("limit_up_after_pullback", 72.0)
+    acceleration = screening._strategy_rule_payload("trend_acceleration", 73.0)
+
+    assert pullback["ma5_distance_pct"] == "[-1.5, 2.0]"
+    assert "ma5_distance_pct" not in breakout
+    assert breakout["close_to_prior_high_pct"] == ">= -1.0"
+    assert breakout["volume_ratio_5d_20d"] == ">= 1.10"
+    assert limit_up["limit_up_count_20d"] == ">= 1"
+    assert limit_up["days_since_limit_up"] == "[2, 12]"
+    assert limit_up["ma20_distance_pct"] == ">= -2.0"
+    assert acceleration["return_20d"] == ">= 12.0"
+    assert acceleration["ma_alignment"] == "MA5 > MA20 > MA60"
+    assert acceleration["volume_ratio_5d_20d"] == "[1.05, 2.80]"
+
+
+def test_symbol_strategy_comparison_aggregates_registered_strategies(monkeypatch) -> None:
+    from alphaagent.server.services.quant import screening
+
+    monkeypatch.setattr(
+        screening,
+        "list_available_strategies",
+        lambda: {
+            "status": "ready",
+            "items": [
+                {"id": "mainline_leader_pullback", "version": "0.1.1", "name": "低吸", "default_min_entry_score": 68.0},
+                {"id": "breakout_confirmation", "version": "0.1.0", "name": "突破", "default_min_entry_score": 70.0},
+            ],
+        },
+    )
+
+    def fake_history(vt_symbol, *, strategy_id, start, end, min_entry_score, limit):
+        return {
+            "status": "ready",
+            "vt_symbol": vt_symbol,
+            "name": "金安国纪",
+            "board": "main",
+            "board_label": "主板",
+            "strategy_id": strategy_id,
+            "strategy_version": "0.1.x",
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "scored_date_count": 9 if strategy_id == "mainline_leader_pullback" else 6,
+            "entry_signal_count": 2 if strategy_id == "mainline_leader_pullback" else 1,
+            "watch_count": 7 if strategy_id == "mainline_leader_pullback" else 5,
+            "entry_signals": [{"trade_date": "2026-01-02", "entry_signal": True}],
+            "best_total_score": {"trade_date": "2026-01-03", "total_score": 80},
+            "best_entry_fit": {"trade_date": "2026-01-02", "total_score": 78},
+            "recent": [{"trade_date": "2026-01-04", "entry_signal": False}],
+            "financial_coverage": {"usable_report_count": 3},
+            "rule": {"min_entry_score": min_entry_score},
+        }
+
+    monkeypatch.setattr(screening, "symbol_signal_history", fake_history)
+
+    result = screening.symbol_strategy_comparison(
+        "002636.SZSE",
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 31),
+        limit=5,
+    )
+
+    assert result["status"] == "ready"
+    assert result["vt_symbol"] == "002636.SZSE"
+    assert result["name"] == "金安国纪"
+    assert result["financial_coverage"]["usable_report_count"] == 3
+    assert [item["strategy_id"] for item in result["items"]] == ["mainline_leader_pullback", "breakout_confirmation"]
+    assert result["items"][0]["scored_date_count"] == 9
+    assert result["items"][0]["entry_signal_count"] == 2
+    assert result["items"][0]["watch_count"] == 7
+    assert result["items"][1]["rule"]["min_entry_score"] == 70.0
+
+
+def test_symbol_strategy_comparison_api_passes_date_range(monkeypatch) -> None:
+    from alphaagent.server.api import quant
+
+    captured = {}
+
+    def fake_comparison(vt_symbol, *, start, end, limit):
+        captured.update({"vt_symbol": vt_symbol, "start": start, "end": end, "limit": limit})
+        return {"status": "ready", "vt_symbol": vt_symbol, "items": []}
+
+    monkeypatch.setattr(quant.screening, "symbol_strategy_comparison", fake_comparison)
+
+    client = TestClient(create_app())
+    response = client.get("/api/quant/symbols/002636.SZSE/strategy-comparison?start=2025-10-14&end=2026-06-13&limit=7")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "ready"
+    assert captured == {
+        "vt_symbol": "002636.SZSE",
+        "start": date(2025, 10, 14),
+        "end": date(2026, 6, 13),
+        "limit": 7,
+    }
+
+
+def test_symbol_diagnostics_summarizes_entry_signal_without_trade(monkeypatch) -> None:
+    from alphaagent.server.services.quant import symbol_diagnostics
+
+    def fake_comparison(vt_symbol, *, start, end, limit):
+        return {
+            "status": "ready",
+            "vt_symbol": vt_symbol,
+            "name": "金安国纪",
+            "board": "main",
+            "board_label": "主板",
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "items": [
+                {
+                    "strategy_id": "mainline_leader_pullback",
+                    "strategy_name": "低吸",
+                    "entry_signal_count": 1,
+                    "watch_count": 3,
+                    "entry_signals": [{"trade_date": "2026-02-09", "entry_signal": True}],
+                    "best_entry_fit": {"trade_date": "2026-02-09", "total_score": 84.4},
+                },
+                {
+                    "strategy_id": "limit_up_after_pullback",
+                    "strategy_name": "涨停后回踩",
+                    "entry_signal_count": 2,
+                    "watch_count": 4,
+                    "entry_signals": [{"trade_date": "2026-04-30", "entry_signal": True}],
+                    "best_entry_fit": {"trade_date": "2026-04-30", "total_score": 85.8},
+                }
+            ],
+            "financial_coverage": {"usable_report_count": 20},
+        }
+
+    def fake_symbol_detail(backtest_id, vt_symbol):
+        return {
+            "status": "empty",
+            "backtest_id": backtest_id,
+            "vt_symbol": vt_symbol,
+            "orders": [],
+            "trades": [],
+            "positions": [],
+        }
+
+    monkeypatch.setattr(symbol_diagnostics.screening, "symbol_strategy_comparison", fake_comparison)
+    monkeypatch.setattr(symbol_diagnostics.backtest_engine, "backtest_symbol_detail", fake_symbol_detail)
+
+    result = symbol_diagnostics.symbol_diagnostics_report(
+        "002636.SZSE",
+        start=date(2026, 2, 2),
+        end=date(2026, 6, 13),
+        backtest_id=62,
+    )
+
+    assert result["status"] == "ready"
+    assert result["name"] == "金安国纪"
+    assert result["summary"]["has_entry_signal"] is True
+    assert result["summary"]["entry_signal_count"] == 3
+    assert result["summary"]["best_signal_date"] == "2026-02-09"
+    assert result["summary"]["strategy_signal_counts"] == [
+        {
+            "strategy_id": "mainline_leader_pullback",
+            "strategy_name": "低吸",
+            "entry_signal_count": 1,
+            "watch_count": 3,
+            "best_signal_date": "2026-02-09",
+            "best_entry_score": 84.4,
+        },
+        {
+            "strategy_id": "limit_up_after_pullback",
+            "strategy_name": "涨停后回踩",
+            "entry_signal_count": 2,
+            "watch_count": 4,
+            "best_signal_date": "2026-04-30",
+            "best_entry_score": 85.8,
+        },
+    ]
+    assert result["summary"]["has_trade"] is False
+    assert result["summary"]["status"] == "needs_signal_date"
+    assert result["summary"]["not_traded_context"]["needs_signal_date"] is True
+    assert "选择 BUY 信号日" in result["summary"]["next_action"]
+
+
+def test_symbol_diagnostics_prioritizes_rejected_order_reason(monkeypatch) -> None:
+    from alphaagent.server.services.quant import symbol_diagnostics
+
+    def fake_comparison(vt_symbol, *, start, end, limit):
+        del start, end, limit
+        return {
+            "status": "ready",
+            "vt_symbol": vt_symbol,
+            "name": "金安国纪",
+            "items": [
+                {
+                    "strategy_id": "mainline_leader_pullback",
+                    "entry_signal_count": 1,
+                    "entry_signals": [{"trade_date": "2026-02-09", "entry_signal": True}],
+                }
+            ],
+        }
+
+    def fake_symbol_detail(backtest_id, vt_symbol):
+        return {
+            "status": "ready",
+            "backtest_id": backtest_id,
+            "vt_symbol": vt_symbol,
+            "orders": [{"status": "rejected", "reason": "position_slot_unavailable", "reason_label": "持仓名额不足"}],
+            "trades": [],
+            "positions": [],
+        }
+
+    def fake_candidate_trace(backtest_id, vt_symbol, signal_date):
+        del backtest_id, vt_symbol, signal_date
+        return {
+            "status": "rejected",
+            "action": "BUY",
+            "rank": 2,
+            "total_score": 84.4645,
+            "planned_execute_date": "2026-02-10",
+            "linked_order_reason": "insufficient_cash",
+            "linked_order_reason_label": "现金不足",
+            "summary": "真实组合订单被拒绝：insufficient_cash。",
+            "orders": [{"status": "rejected", "reason": "insufficient_cash", "reason_label": "现金不足"}],
+            "trades": [],
+            "equity": {
+                "cash": 12_000.0,
+                "market_value": 988_000.0,
+                "total_equity": 1_000_000.0,
+                "position_count": 8,
+            },
+        }
+
+    monkeypatch.setattr(symbol_diagnostics.screening, "symbol_strategy_comparison", fake_comparison)
+    monkeypatch.setattr(symbol_diagnostics.backtest_engine, "backtest_symbol_detail", fake_symbol_detail)
+    monkeypatch.setattr(symbol_diagnostics.backtest_engine, "backtest_candidate_trace", fake_candidate_trace)
+
+    result = symbol_diagnostics.symbol_diagnostics_report(
+        "002636.SZSE",
+        start=date(2026, 2, 2),
+        end=date(2026, 6, 13),
+        backtest_id=62,
+        signal_date=date(2026, 2, 9),
+    )
+
+    summary = result["summary"]
+    assert summary["status"] == "rejected"
+    assert summary["main_reason"] == "insufficient_cash"
+    assert summary["main_reason_label"] == "现金不足"
+    assert summary["main_reason_source"] == "linked_order"
+    assert summary["candidate_action"] == "BUY"
+    assert summary["candidate_rank"] == 2
+    assert summary["candidate_score"] == 84.4645
+    assert summary["planned_execute_date"] == "2026-02-10"
+    assert summary["signal_day_cash"] == 12_000.0
+    assert summary["signal_day_market_value"] == 988_000.0
+    assert summary["signal_day_total_equity"] == 1_000_000.0
+    assert summary["signal_day_position_count"] == 8
+    assert summary["not_traded_context"]["candidate_action"] == "BUY"
+    assert summary["not_traded_context"]["planned_execute_date"] == "2026-02-10"
+    assert summary["diagnostic_checks"][0] == {"label": "单股BUY信号", "status": "pass"}
+    assert {"label": "真实买入成交", "status": "fail"} in summary["diagnostic_checks"]
+    assert "资金" in summary["next_action"]
+
+
+def test_symbol_diagnostics_api_passes_backtest_and_signal_date(monkeypatch) -> None:
+    from alphaagent.server.api import quant
+
+    captured = {}
+
+    def fake_diagnostics(vt_symbol, *, start, end, backtest_id, signal_date, limit):
+        captured.update(
+            {
+                "vt_symbol": vt_symbol,
+                "start": start,
+                "end": end,
+                "backtest_id": backtest_id,
+                "signal_date": signal_date,
+                "limit": limit,
+            }
+        )
+        return {
+            "status": "ready",
+            "vt_symbol": vt_symbol,
+            "summary": {"status": "rejected"},
+            "strategy_comparison": {"items": []},
+        }
+
+    monkeypatch.setattr(quant, "symbol_diagnostics_report", fake_diagnostics)
+
+    client = TestClient(create_app())
+    response = client.get(
+        "/api/quant/symbols/002636.SZSE/diagnostics"
+        "?start=2026-02-02&end=2026-06-13&backtest_id=62&signal_date=2026-02-09&limit=5"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "ready"
+    assert captured == {
+        "vt_symbol": "002636.SZSE",
+        "start": date(2026, 2, 2),
+        "end": date(2026, 6, 13),
+        "backtest_id": 62,
+        "signal_date": date(2026, 2, 9),
+        "limit": 5,
+    }
+
+
+def test_backtest_strategy_comparison_runs_selected_strategies(monkeypatch) -> None:
+    from alphaagent.server.services.backtest import strategy_comparison
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    monkeypatch.setattr(
+        strategy_comparison,
+        "list_strategies",
+        lambda: [
+            {"id": "mainline_leader_pullback", "version": "0.1.1", "name": "低吸"},
+            {"id": "breakout_confirmation", "version": "0.1.0", "name": "突破"},
+        ],
+    )
+
+    def fake_run(params):
+        if params.strategy == "mainline_leader_pullback":
+            return {
+                "status": "ready",
+                "strategy_version": "0.1.1",
+                "metrics": {
+                    "final_equity": 950000,
+                    "total_return_pct": -5.0,
+                    "max_drawdown_pct": -9.0,
+                    "minute_1430_count": 1,
+                    "daily_close_proxy_count": 0,
+                },
+                "trades": [{"side": "BUY"}, {"side": "SELL"}],
+                "orders": [{"status": "rejected", "reason": "tail_entry_not_triggered", "raw": {"execution_model": "strict_1430"}}],
+                "signal_events": [{"side": "BUY"}],
+            }
+        return {
+            "status": "ready",
+            "strategy_version": "0.1.0",
+            "metrics": {
+                "final_equity": 1020000,
+                "total_return_pct": 2.0,
+                "max_drawdown_pct": -1.0,
+                "minute_1430_count": 2,
+                "daily_close_proxy_count": 0,
+            },
+            "trades": [{"side": "BUY"}, {"side": "BUY"}, {"side": "SELL"}],
+            "orders": [],
+            "signal_events": [{"side": "BUY"}, {"side": "BUY"}],
+        }
+
+    result = strategy_comparison.compare_strategies(
+        BacktestParams(start=date(2026, 2, 2), max_symbols=80, persist=True),
+        strategies=["mainline_leader_pullback", "breakout_confirmation"],
+        run_backtest=fake_run,
+    )
+
+    assert result["status"] == "ready"
+    assert result["params"]["persist"] is False
+    assert [row["strategy_id"] for row in result["rows"]] == ["mainline_leader_pullback", "breakout_confirmation"]
+    assert result["rows"][0]["buy_signal_count"] == 1
+    assert result["rows"][0]["strict_1430_rejected_count"] == 1
+    assert result["rows"][0]["quality_status"] == "strict_condition_rejections"
+    assert result["rows"][1]["minute_1430_ratio"] == 100.0
+    assert result["rows"][1]["quality_status"] == "complete_strict"
+    assert result["summary"]["best_strategy_id"] == "breakout_confirmation"
+    assert result["summary"]["best_verifiable_strategy_id"] == "breakout_confirmation"
+
+
+def test_backtest_strategy_comparison_treats_zero_return_as_valid(monkeypatch) -> None:
+    from alphaagent.server.services.backtest import strategy_comparison
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    monkeypatch.setattr(
+        strategy_comparison,
+        "list_strategies",
+        lambda: [
+            {"id": "mainline_leader_pullback", "version": "0.1.1", "name": "低吸"},
+            {"id": "breakout_confirmation", "version": "0.1.0", "name": "突破"},
+        ],
+    )
+
+    def fake_run(params):
+        returns = {
+            "mainline_leader_pullback": -5.0819,
+            "breakout_confirmation": 0.0,
+        }
+        return {
+            "status": "ready",
+            "strategy_version": "0.1.0",
+            "metrics": {
+                "final_equity": 1_000_000,
+                "total_return_pct": returns[params.strategy],
+                "max_drawdown_pct": 0.0,
+                "minute_1430_count": 0,
+                "daily_close_proxy_count": 0,
+            },
+            "trades": [],
+            "orders": [],
+            "signal_events": [{"side": "BUY"}],
+        }
+
+    result = strategy_comparison.compare_strategies(
+        BacktestParams(start=date(2026, 2, 2), max_symbols=80, persist=True),
+        strategies=["mainline_leader_pullback", "breakout_confirmation"],
+        run_backtest=fake_run,
+    )
+
+    assert result["summary"]["best_strategy_id"] == "breakout_confirmation"
+    assert result["summary"]["best_total_return_pct"] == 0.0
+    assert result["summary"]["best_verifiable_strategy_id"] is None
+    assert result["rows"][1]["quality_status"] == "no_fills"
+    assert "不能验证收益" in result["rows"][1]["quality_warning"]
+
+
+def test_backtest_strategy_comparison_treats_strict_condition_rejections_as_verifiable(monkeypatch) -> None:
+    from alphaagent.server.services.backtest import strategy_comparison
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    monkeypatch.setattr(
+        strategy_comparison,
+        "list_strategies",
+        lambda: [
+            {"id": "pullback", "version": "0.1.1", "name": "低吸"},
+            {"id": "breakout", "version": "0.1.0", "name": "突破"},
+        ],
+    )
+
+    def fake_run(params):
+        if params.strategy == "pullback":
+            return {
+                "status": "ready",
+                "metrics": {
+                    "final_equity": 950000,
+                    "total_return_pct": -5.0,
+                    "max_drawdown_pct": -9.0,
+                    "minute_1430_count": 21,
+                    "daily_close_proxy_count": 0,
+                },
+                "trades": [{"side": "BUY"}],
+                "orders": [{"status": "rejected", "reason": "tail_entry_not_triggered", "raw": {"execution_model": "strict_1430"}}],
+                "signal_events": [{"side": "BUY"}],
+            }
+        return {
+            "status": "ready",
+            "metrics": {
+                "final_equity": 1_000_000,
+                "total_return_pct": 0.0,
+                "max_drawdown_pct": 0.0,
+                "minute_1430_count": 0,
+                "daily_close_proxy_count": 0,
+            },
+            "trades": [],
+            "orders": [{"status": "rejected", "reason": "missing_1430_snapshot", "raw": {"execution_model": "strict_1430", "reason": "missing_1430_snapshot"}}],
+            "signal_events": [{"side": "BUY"}],
+        }
+
+    result = strategy_comparison.compare_strategies(
+        BacktestParams(start=date(2026, 2, 2), max_symbols=80),
+        strategies=["pullback", "breakout"],
+        run_backtest=fake_run,
+    )
+
+    assert result["summary"]["best_strategy_id"] == "breakout"
+    assert result["summary"]["best_verifiable_strategy_id"] == "pullback"
+    assert result["rows"][0]["quality_status"] == "strict_condition_rejections"
+    assert result["rows"][1]["quality_status"] == "missing_snapshots"
+
+
+def test_backtest_strategy_comparison_marks_missing_snapshots_and_proxy_quality(monkeypatch) -> None:
+    from alphaagent.server.services.backtest import strategy_comparison
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    monkeypatch.setattr(
+        strategy_comparison,
+        "list_strategies",
+        lambda: [
+            {"id": "missing", "version": "0.1.0", "name": "缺快照"},
+            {"id": "proxy", "version": "0.1.0", "name": "收盘代理"},
+        ],
+    )
+
+    def fake_run(params):
+        if params.strategy == "missing":
+            return {
+                "status": "ready",
+                "metrics": {
+                    "final_equity": 1_000_000,
+                    "total_return_pct": 0.0,
+                    "max_drawdown_pct": 0.0,
+                    "minute_1430_count": 0,
+                    "daily_close_proxy_count": 0,
+                },
+                "trades": [],
+                "orders": [
+                    {
+                        "status": "rejected",
+                        "reason": "missing_1430_snapshot",
+                        "raw": {"execution_model": "strict_1430", "reason": "missing_1430_snapshot"},
+                    }
+                ],
+                "signal_events": [{"side": "BUY"}],
+            }
+        return {
+            "status": "ready",
+            "metrics": {
+                "final_equity": 1_001_000,
+                "total_return_pct": 0.1,
+                "max_drawdown_pct": -0.1,
+                "minute_1430_count": 0,
+                "daily_close_proxy_count": 1,
+            },
+            "trades": [{"side": "BUY"}],
+            "orders": [],
+            "signal_events": [{"side": "BUY"}],
+        }
+
+    result = strategy_comparison.compare_strategies(
+        BacktestParams(start=date(2026, 2, 2), max_symbols=80),
+        strategies=["missing", "proxy"],
+        run_backtest=fake_run,
+    )
+
+    assert result["rows"][0]["quality_status"] == "missing_snapshots"
+    assert result["rows"][0]["minute_gap_rejected_count"] == 1
+    assert result["rows"][1]["quality_status"] == "uses_daily_close_proxy"
+    assert result["summary"]["complete_strict_count"] == 0
+
+
+def test_run_backtest_returns_signal_events_for_strategy_comparison(monkeypatch) -> None:
+    from alphaagent.server.services.backtest import engine
+
+    trading_days = [date(2026, 1, 1) + timedelta(days=index) for index in range(85)]
+    bars_by_symbol = {"600000.SSE": _bars(85)}
+
+    class FakeSession:
+        def execute(self, statement):
+            del statement
+            raise AssertionError("unexpected execute")
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(engine, "is_database_configured", lambda: True)
+    monkeypatch.setattr(engine, "_ensure_backtest_schema", lambda: None)
+    monkeypatch.setattr(engine, "session_scope", fake_session_scope)
+    monkeypatch.setattr(engine, "_load_symbol_universe", lambda session, max_symbols, symbols, included_boards: ["600000.SSE"])
+    captured = {}
+
+    def fake_load_all_bars(session, vt_symbols, start, end):
+        captured["load_start"] = start
+        captured["load_end"] = end
+        return bars_by_symbol
+
+    monkeypatch.setattr(engine, "_load_all_bars", fake_load_all_bars)
+    monkeypatch.setattr(engine, "_trading_days", lambda bars, start, end: trading_days)
+    monkeypatch.setattr(engine, "_load_stock_meta", lambda session, vt_symbols: {"600000.SSE": {"name": "浦发银行"}})
+    monkeypatch.setattr(engine, "_load_score_context", lambda session, vt_symbols: engine.ScoreContext())
+    monkeypatch.setattr(
+        engine,
+        "_simulate",
+        lambda session, params, bars_by_symbol_arg, trading_days_arg, stock_meta, score_context=None: {
+            "metrics": {"final_equity": 100000, "total_return_pct": 0},
+            "equity": [],
+            "trades": [],
+            "orders": [],
+            "signal_events": [{"side": "BUY", "vt_symbol": "600000.SSE"}],
+        },
+    )
+
+    result = engine.run_backtest(engine.BacktestParams(start=trading_days[0], end=trading_days[-1], persist=False, max_symbols=1))
+
+    assert result["status"] == "ready"
+    assert result["signal_events"] == [{"side": "BUY", "vt_symbol": "600000.SSE"}]
+    assert captured["load_start"] < trading_days[0]
+    assert captured["load_end"] == trading_days[-1]
+
+
+def test_strategy_comparison_api_passes_params_and_strategies(monkeypatch) -> None:
+    from alphaagent.server.api import backtests
+
+    captured = {}
+
+    def fake_comparison(params, strategies=None):
+        captured.update({"params": params, "strategies": strategies})
+        return {"status": "ready", "rows": [], "summary": {}}
+
+    monkeypatch.setattr(backtests, "backtest_strategy_comparison", fake_comparison)
+
+    client = TestClient(create_app())
+    response = client.post(
+        "/api/backtests/strategy-comparison",
+        json={
+            "start": "2026-02-02",
+            "end": "2026-06-13",
+            "max_symbols": 80,
+            "execution_model": "strict_1430",
+            "strategies": ["mainline_leader_pullback", "breakout_confirmation"],
+            "persist": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "ready"
+    assert captured["params"].start == date(2026, 2, 2)
+    assert captured["params"].end == date(2026, 6, 13)
+    assert captured["params"].max_symbols == 80
+    assert captured["params"].execution_model == "strict_1430"
+    assert captured["params"].persist is False
+    assert captured["strategies"] == ["mainline_leader_pullback", "breakout_confirmation"]
+
+
+def test_quant_screening_rejects_unknown_strategy_without_database_check(monkeypatch) -> None:
+    from alphaagent.server.services.quant import screening
+
+    monkeypatch.setattr(screening, "is_database_configured", lambda: True)
+
+    result = screening.screen_stocks(strategy_id="unknown_strategy")
+
+    assert result["status"] == "unsupported_strategy"
+    assert result["strategy_id"] == "unknown_strategy"
+    assert result["recommendations"] == []
+
+
+def test_quant_api_mapping_normalizes_legacy_execution_labels() -> None:
+    from alphaagent.server.services.quant import screening
+
+    row = screening._mapping_to_api(
+        {
+            "vt_symbol": "600000.SSE",
+            "reason": {"entry_rule": "daily_close_signal_next_open_execution"},
+            "risk_control": {
+                "execution": "D close signal; D+1 tail-window minute fill when available, otherwise next-open simulation fallback"
+            },
+        }
+    )
+
+    assert row["reason"]["selection_rule"] == "daily_close_visible_signal"
+    assert row["reason"]["entry_setup"] == "ma5_pullback"
+    assert "entry_rule" not in row["reason"]
+    assert row["risk_control"]["execution"] == "daily close observable signal; execution model selected by backtest"
 
 
 def test_mainline_pullback_score_uses_smart_money_proxy_inputs() -> None:
@@ -279,7 +1099,7 @@ def test_stock_minute_bar_upsert_parses_intraday_time(monkeypatch) -> None:
         "SSE",
         [
             {
-                "trade_date": "2026-06-11 14:56:00",
+                "trade_date": "2026-06-11 14:30:00",
                 "open": 10.0,
                 "high": 10.2,
                 "low": 9.99,
@@ -294,7 +1114,7 @@ def test_stock_minute_bar_upsert_parses_intraday_time(monkeypatch) -> None:
     assert written == 1
     assert inserted[0]["vt_symbol"] == "600000.SSE"
     assert inserted[0]["trade_date"].isoformat() == "2026-06-11"
-    assert inserted[0]["bar_time"].strftime("%H:%M:%S") == "14:56:00"
+    assert inserted[0]["bar_time"].strftime("%H:%M:%S") == "14:30:00"
 
 
 def test_stock_minute_sync_job_is_registered() -> None:
@@ -304,6 +1124,39 @@ def test_stock_minute_sync_job_is_registered() -> None:
 
     assert "sync_stock_minute_bars" in job_ids
     assert data_sync.JOB_RUNNERS["sync_stock_minute_bars"] == "_run_sync_stock_minute_bars"
+
+
+def test_seed_default_registry_updates_existing_minute_job(monkeypatch) -> None:
+    from alphaagent.server.services import data_sync
+
+    captured_updates: list[dict[str, object]] = []
+
+    class FakeResult:
+        inserted_primary_key = [1]
+
+        def first(self):
+            return object()
+
+    class FakeSession:
+        def execute(self, statement):
+            statement_text = str(statement)
+            if "UPDATE sync_job_definitions" in statement_text:
+                params = statement.compile().params
+                if params.get("id_1") == "sync_stock_minute_bars":
+                    captured_updates.append(params)
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(data_sync, "session_scope", fake_session_scope)
+
+    data_sync.seed_default_registry()
+
+    minute_update = captured_updates[-1]
+    assert minute_update["description"] == "同步最近分钟线，或按严格回测缺口补执行日 14:30 尾盘快照。"
+    assert minute_update["default_params"]["mode"] == "recent"
 
 
 def test_stock_minute_sync_accepts_symbols_and_date_range(monkeypatch) -> None:
@@ -336,7 +1189,7 @@ def test_stock_minute_sync_accepts_symbols_and_date_range(monkeypatch) -> None:
                     "end_date": end_date,
                 }
             )
-            return {"source": "fake", "items": [{"trade_date": "2026-06-11 14:56:00", "open": 10, "high": 10.2, "low": 9.9, "close": 10.1}]}
+            return {"source": "fake", "items": [{"trade_date": "2026-06-11 14:30:00", "open": 10, "high": 10.2, "low": 9.9, "close": 10.1}]}
 
     @contextmanager
     def fake_session_scope():
@@ -359,11 +1212,131 @@ def test_stock_minute_sync_accepts_symbols_and_date_range(monkeypatch) -> None:
         }
     )
 
-    assert result == {"rows_read": 1, "rows_written": 1}
+    assert result["mode"] == "recent"
+    assert result["provider"] == "akshare"
+    assert result["interval"] == "1m"
+    assert result["rows_read"] == 1
+    assert result["rows_written"] == 1
     assert seen_calls[0]["start_date"].isoformat() == "2026-06-01"
     assert seen_calls[0]["end_date"].isoformat() == "2026-06-11"
     assert seen_calls[0]["limit"] == 1200
     assert written == [("600000", "SSE", "1m")]
+
+
+def test_stock_minute_sync_gap_mode_uses_backtest_gap_csv(monkeypatch) -> None:
+    from alphaagent.server.services import data_sync
+    from alphaagent.server.services.data_providers import tdx_minute_import
+    from alphaagent.server.services.backtest import engine
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        engine,
+        "backtest_minute_gap_csv",
+        lambda backtest_id: {
+            "status": "ready",
+            "content": "trade_date,vt_symbol\n2026-06-11,600000.SSE\n",
+            "gap_count": 1,
+        },
+    )
+
+    def fake_import(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "ready",
+            "rows_read": 2,
+            "rows_written": 2,
+            "audit_after": {"status": "ready", "covered_count": 1, "missing_count": 0},
+        }
+
+    monkeypatch.setattr(tdx_minute_import, "import_tdx_minute_bars_for_gaps", fake_import)
+
+    result = data_sync.DataSyncRunner()._run_sync_stock_minute_bars(
+        {
+            "mode": "backtest_gaps",
+            "provider": "tdx",
+            "backtest_id": 42,
+            "interval": "1m",
+            "dry_run": True,
+            "max_gaps": 20,
+            "tail_entry_start": "14:30",
+        }
+    )
+
+    assert captured["gap_csv_text"].startswith("trade_date,vt_symbol")
+    assert captured["gap_file_path"] == ""
+    assert captured["interval"] == "1m"
+    assert captured["tail_entry_start"] == "14:30"
+    assert captured["tail_entry_end"] == "14:30"
+    assert captured["dry_run"] is True
+    assert captured["max_gaps"] == 20
+    assert result["mode"] == "backtest_gaps"
+    assert result["provider"] == "tdx"
+    assert result["gap_source"] == "backtest_id=42"
+    assert result["rows_read"] == 2
+    assert result["rows_written"] == 2
+
+
+def test_stock_minute_sync_gap_mode_forces_1m_tail_snapshot(monkeypatch) -> None:
+    from alphaagent.server.services import data_sync
+    from alphaagent.server.services.data_providers import tdx_minute_import
+
+    captured: dict[str, object] = {}
+
+    def fake_import(**kwargs):
+        captured.update(kwargs)
+        return {"status": "ready", "rows_read": 10, "rows_written": 10}
+
+    monkeypatch.setattr(tdx_minute_import, "import_tdx_minute_bars_for_gaps", fake_import)
+
+    result = data_sync.DataSyncRunner()._run_sync_stock_minute_bars(
+        {
+            "mode": "backtest_gaps",
+            "provider": "tdx",
+            "gap_csv_text": "trade_date,vt_symbol\n2026-06-11,600000.SSE\n",
+            "interval": "1m",
+            "dry_run": False,
+        }
+    )
+
+    assert captured["interval"] == "1m"
+    assert result["interval"] == "1m"
+    assert result["fetch_interval"] == "1m"
+    assert result["base_rows_written"] == 10
+    assert result["aggregate_rows_written"] == 0
+    assert result["rows_written"] == 10
+
+
+def test_stock_minute_sync_gap_mode_uses_akshare_provider(monkeypatch) -> None:
+    from alphaagent.server.services import data_sync
+    from alphaagent.server.services.data_providers import akshare_minute_import
+
+    captured: dict[str, object] = {}
+
+    def fake_import(**kwargs):
+        captured.update(kwargs)
+        return {"status": "ready", "rows_read": 1, "rows_written": 0, "audit_after": {"status": "ready"}}
+
+    monkeypatch.setattr(akshare_minute_import, "import_akshare_minute_bars_for_gaps", fake_import)
+
+    result = data_sync.DataSyncRunner()._run_sync_stock_minute_bars(
+        {
+            "mode": "backtest_gaps",
+            "provider": "akshare",
+            "gap_csv_text": "trade_date,vt_symbol\n2026-06-12,600000.SSE\n",
+            "interval": "1m",
+            "dry_run": True,
+            "tail_entry_start": "14:30",
+            "tail_entry_end": "14:30",
+        }
+    )
+
+    assert captured["interval"] == "1m"
+    assert captured["tail_entry_start"] == "14:30"
+    assert captured["tail_entry_end"] == "14:30"
+    assert result["provider"] == "akshare"
+    assert result["interval"] == "1m"
+    assert result["rows_read"] == 1
 
 
 def test_import_stock_minute_bars_csv_groups_and_upserts(monkeypatch) -> None:
@@ -382,8 +1355,8 @@ def test_import_stock_minute_bars_csv_groups_and_upserts(monkeypatch) -> None:
 
     result = data_sync.import_stock_minute_bars_csv(
         "\ufeffvt_symbol,bar_time,open,high,low,close,volume,turnover\n"
-        "600000.SSE,2026-01-08 14:56:00,10,10.2,9.9,10.1,1200,12120\n"
-        "000001.SZSE,2026-01-08 14:56:00,20,20.2,19.9,20.1,2200,44220\n",
+        "600000.SSE,2026-01-08 14:30:00,10,10.2,9.9,10.1,1200,12120\n"
+        "000001.SZSE,2026-01-08 14:30:00,20,20.2,19.9,20.1,2200,44220\n",
         interval="1m",
         source="unit_test",
     )
@@ -397,6 +1370,118 @@ def test_import_stock_minute_bars_csv_groups_and_upserts(monkeypatch) -> None:
     assert calls[0][3:] == ("1m", "unit_test")
 
 
+def test_import_stock_minute_bars_rejects_obsolete_10m_interval(monkeypatch) -> None:
+    from alphaagent.server.services import data_sync
+
+    monkeypatch.setattr(data_sync, "is_database_configured", lambda: True)
+
+    try:
+        data_sync.import_stock_minute_bars_csv(
+            "vt_symbol,bar_time,open,high,low,close\n"
+            "600000.SSE,2026-01-08 14:30:00,10,10.2,9.9,10.1\n",
+            interval="10m",
+        )
+    except data_sync.DataSyncError as exc:
+        assert "Unsupported minute interval: 10m" in str(exc)
+    else:
+        raise AssertionError("expected DataSyncError")
+
+
+def test_backtest_params_rejects_non_1m_minute_interval() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    try:
+        engine.BacktestParams(minute_interval="5m")
+    except ValueError as exc:
+        assert "Unsupported backtest minute interval: 5m" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_backtest_execution_model_empty_default_is_strict_1430() -> None:
+    from alphaagent.server.services.backtest import engine, execution_models
+
+    assert execution_models.normalize_execution_model(None) == "strict_1430"
+    assert engine._normalize_execution_model(None) == "strict_1430"
+    assert engine.BacktestParams().execution_model == "strict_1430"
+
+
+def test_backtest_ledger_calculates_buy_execution_with_slippage_commission_and_lot() -> None:
+    from alphaagent.server.services.backtest import ledger
+
+    result = ledger.calculate_buy_execution(
+        raw_price=10.0,
+        cash=100_000,
+        target_cash=50_000,
+        commission_rate=0.0003,
+        slippage_bps=10,
+    )
+
+    assert round(result.price, 4) == 10.01
+    assert result.volume == 4_900
+    assert round(result.amount, 4) == 49_049.0
+    assert round(result.fee, 4) == 14.7147
+    assert round(result.cash_delta, 4) == -49_063.7147
+    assert round(result.cash_after, 4) == 50_936.2853
+
+
+def test_backtest_ledger_reduces_buy_volume_when_fee_exceeds_cash() -> None:
+    from alphaagent.server.services.backtest import ledger
+
+    result = ledger.calculate_buy_execution(
+        raw_price=10.0,
+        cash=10_000,
+        target_cash=10_000,
+        commission_rate=0.0003,
+        slippage_bps=0,
+    )
+
+    assert result.price == 10.0
+    assert result.volume == 900
+    assert result.amount == 9_000.0
+    assert result.fee == 2.6999999999999997
+    assert round(result.cash_after, 4) == 997.3
+
+
+def test_backtest_ledger_rejects_buy_below_one_lot() -> None:
+    from alphaagent.server.services.backtest import ledger
+
+    result = ledger.calculate_buy_execution(
+        raw_price=10.0,
+        cash=999,
+        target_cash=999,
+        commission_rate=0.0003,
+        slippage_bps=0,
+    )
+
+    assert result.price == 10.0
+    assert result.volume == 0
+    assert result.amount == 0.0
+    assert result.fee == 0.0
+    assert result.cash_delta == 0.0
+    assert result.cash_after == 999
+
+
+def test_backtest_ledger_calculates_sell_execution_with_slippage_stamp_tax_and_pnl() -> None:
+    from alphaagent.server.services.backtest import ledger
+
+    result = ledger.calculate_sell_execution(
+        raw_price=12.0,
+        volume=1_000,
+        cost_price=10.01,
+        commission_rate=0.0003,
+        stamp_tax_rate=0.0005,
+        slippage_bps=10,
+    )
+
+    assert result.price == 11.988
+    assert result.volume == 1_000
+    assert result.amount == 11_988.0
+    assert round(result.fee, 4) == 9.5904
+    assert round(result.pnl, 4) == 1_968.4096
+    assert result.cash_delta == 11_978.4096
+
+
 def test_import_stock_minute_bars_file_uses_allowed_path(monkeypatch, tmp_path) -> None:
     from alphaagent.server.services import data_sync
 
@@ -405,7 +1490,7 @@ def test_import_stock_minute_bars_file_uses_allowed_path(monkeypatch, tmp_path) 
     csv_path = import_dir / "minute.csv"
     csv_path.write_text(
         "vt_symbol,bar_time,open,high,low,close,volume,turnover\n"
-        "600000.SSE,2026-01-08 14:56:00,10,10.2,9.9,10.1,1200,12120\n",
+        "600000.SSE,2026-01-08 14:30:00,10,10.2,9.9,10.1,1200,12120\n",
         encoding="utf-8",
     )
 
@@ -504,7 +1589,7 @@ def test_import_minute_bars_api_template_and_dry_run(monkeypatch) -> None:
         "/api/data-sync/imports/minute-bars",
         json={
             "dry_run": True,
-            "csv_text": "vt_symbol,bar_time,open,high,low,close\n600000.SSE,2026-01-08 14:56:00,10,10.2,9.9,10.1\n",
+            "csv_text": "vt_symbol,bar_time,open,high,low,close\n600000.SSE,2026-01-08 14:30:00,10,10.2,9.9,10.1\n",
         },
     )
 
@@ -547,11 +1632,11 @@ def test_audit_minute_gap_csv_reports_missing_and_covered(monkeypatch) -> None:
 
     result = data_sync.audit_minute_gap_csv(
         "\ufefftrade_date,vt_symbol,reference_date,window,ma5,minute_bar_count,missing_reason\n"
-        "2026-01-08,600000.SSE,2026-01-07,14:30-14:57,10.1,0,no_tail_window_minute_bars\n"
-        "2026-01-08,000001.SZSE,2026-01-07,14:30-14:57,20.1,0,no_tail_window_minute_bars\n",
+        "2026-01-08,600000.SSE,2026-01-07,14:30-14:30,10.1,0,no_tail_window_minute_bars\n"
+        "2026-01-08,000001.SZSE,2026-01-07,14:30-14:30,20.1,0,no_tail_window_minute_bars\n",
         interval="1m",
         tail_entry_start="14:30",
-        tail_entry_end="14:57",
+        tail_entry_end="14:30",
     )
 
     assert result["status"] == "incomplete"
@@ -588,11 +1673,11 @@ def test_minute_gap_import_template_uses_gap_rows() -> None:
 
     content = data_sync.minute_gap_import_template(
         "trade_date,vt_symbol,reference_date,window,ma5\n"
-        "2026-01-08,600000.SSE,2026-01-07,14:30-14:57,10.1\n",
+        "2026-01-08,600000.SSE,2026-01-07,14:30-14:30,10.1\n",
     )
 
     assert "vt_symbol,bar_time,open,high,low,close,volume,turnover" in content
-    assert "600000.SSE,2026-01-08 14:56:00" in content
+    assert "600000.SSE,2026-01-08 14:30:00" in content
 
 
 def test_minute_gap_audit_api(monkeypatch) -> None:
@@ -608,7 +1693,7 @@ def test_minute_gap_audit_api(monkeypatch) -> None:
             "gap_csv_text": "trade_date,vt_symbol\n2026-01-08,600000.SSE\n",
             "interval": "1m",
             "tail_entry_start": "14:30",
-            "tail_entry_end": "14:57",
+            "tail_entry_end": "14:30",
         },
     )
 
@@ -639,12 +1724,39 @@ def test_minute_gap_audit_api_accepts_file_path(monkeypatch) -> None:
     client = TestClient(create_app())
     response = client.post(
         "/api/data-sync/imports/minute-bars/audit-gaps",
-        json={"file_path": "memory/06_backtests/gap.csv", "tail_entry_start": "14:30", "tail_entry_end": "14:57"},
+        json={"file_path": "memory/06_backtests/gap.csv", "tail_entry_start": "14:30", "tail_entry_end": "14:30"},
     )
 
     assert response.status_code == 200
     assert captured["file_path"] == "memory/06_backtests/gap.csv"
     assert response.json()["data"]["status"] == "ready"
+
+
+def test_minute_gap_audit_api_accepts_backtest_id(monkeypatch) -> None:
+    from alphaagent.server.api import data_sync as api
+
+    def fake_requirements(params):
+        assert params["backtest_id"] == 42
+        return {
+            "items": [{"vt_symbol": "600000.SSE", "trade_date": date(2026, 1, 8), "reference_date": None, "ma5": None, "window": "14:30-14:30"}],
+            "rows_read": 1,
+            "rows_skipped": 0,
+            "errors": [],
+            "gap_source": "backtest_id=42",
+        }
+
+    monkeypatch.setattr(api.service, "minute_gap_requirements_from_params", fake_requirements)
+    monkeypatch.setattr(api.service, "_minute_gap_coverage_counts", lambda items, interval, start, end: {})
+
+    client = TestClient(create_app())
+    response = client.post(
+        "/api/data-sync/imports/minute-bars/audit-gaps",
+        json={"backtest_id": 42, "tail_entry_start": "14:30", "tail_entry_end": "14:30"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "incomplete"
+    assert response.json()["data"]["missing_count"] == 1
 
 
 def test_quant_schema_tables_are_registered() -> None:
@@ -763,7 +1875,7 @@ def test_backtest_service_bootstraps_schema_without_api_startup(monkeypatch) -> 
 def test_backtest_list_filters_portfolio_and_symbol_runs(monkeypatch) -> None:
     from alphaagent.server.services.backtest import engine
 
-    class FakeRows:
+    class FakeRunRows:
         def mappings(self):
             return self
 
@@ -798,7 +1910,7 @@ def test_backtest_list_filters_portfolio_and_symbol_runs(monkeypatch) -> None:
     class FakeSession:
         def execute(self, statement):
             del statement
-            return FakeRows()
+            return FakeRunRows()
 
     @contextmanager
     def fake_session_scope():
@@ -822,7 +1934,7 @@ def test_backtest_list_fetches_extra_rows_before_run_type_filter(monkeypatch) ->
 
     captured_limits: list[int] = []
 
-    class FakeRows:
+    class FakeRunRows:
         def mappings(self):
             return self
 
@@ -862,7 +1974,7 @@ def test_backtest_list_fetches_extra_rows_before_run_type_filter(monkeypatch) ->
     class FakeSession:
         def execute(self, statement):
             captured_limits.append(statement._limit_clause.value)
-            return FakeRows()
+            return FakeRunRows()
 
     @contextmanager
     def fake_session_scope():
@@ -898,6 +2010,58 @@ def test_quant_recommendation_marks_buy_only_for_entry_signal() -> None:
 
     assert screening._recommendation_to_db(1, buy_score, None, "mainline_leader_pullback")["action"] == "BUY"
     assert screening._recommendation_to_db(2, watch_score, None, "mainline_leader_pullback")["action"] == "WATCH"
+
+
+def test_quant_recommendation_uses_strategy_entry_threshold_for_failed_rules() -> None:
+    from alphaagent.server.services.quant import screening
+
+    breakout_watch = SignalScore(
+        vt_symbol="002636.SZSE",
+        trade_date=date(2026, 1, 2),
+        total_score=69,
+        signal_type="breakout_confirmation",
+        entry_signal=False,
+        liquidity_score=80,
+        risk_score=80,
+        trend_quality_score=80,
+        evidence={
+            "status": "ready",
+            "close_to_prior_high_pct": 0.2,
+            "volume_ratio_5d_20d": 1.4,
+        },
+    )
+
+    result = screening._recommendation_to_db(1, breakout_watch, None, "breakout_confirmation")
+
+    assert result["action"] == "WATCH"
+    assert result["reason"]["failed_rules"] == ["total_score"]
+
+
+def test_quant_recommendation_uses_limit_up_pullback_failed_rules() -> None:
+    from alphaagent.server.services.quant import screening
+
+    limit_up_watch = SignalScore(
+        vt_symbol="002636.SZSE",
+        trade_date=date(2026, 1, 2),
+        total_score=74,
+        signal_type="limit_up_after_pullback",
+        entry_signal=False,
+        liquidity_score=80,
+        risk_score=80,
+        trend_quality_score=80,
+        evidence={
+            "status": "ready",
+            "limit_up_count_20d": 1,
+            "days_since_limit_up": 20,
+            "ma5_distance_pct": 0.8,
+            "ma20_distance_pct": 2.0,
+        },
+    )
+
+    result = screening._recommendation_to_db(1, limit_up_watch, None, "limit_up_after_pullback")
+
+    assert result["action"] == "WATCH"
+    assert result["reason"]["failed_rules"] == ["limit_up_recency"]
 
 
 def test_stock_board_classification_is_display_only_identity() -> None:
@@ -1153,13 +2317,26 @@ def test_list_screen_runs_returns_recent_runs(monkeypatch) -> None:
                     "candidate_count": 300,
                     "signal_count": 12,
                     "recommendation_count": 20,
-                }
+                    }
+                ]
+
+    class FakeActionRows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {"run_id": 9, "action": "BUY", "count": 7},
+                {"run_id": 9, "action": "WATCH", "count": 13},
             ]
 
     class FakeSession:
         def execute(self, statement):
-            assert "FROM quant_signal_runs" in str(statement)
-            return FakeRows()
+            text = str(statement)
+            if "FROM quant_signal_runs" in text:
+                return FakeRows()
+            assert "FROM quant_recommendations" in text
+            return FakeActionRows()
 
     @contextmanager
     def fake_session_scope():
@@ -1174,6 +2351,8 @@ def test_list_screen_runs_returns_recent_runs(monkeypatch) -> None:
     assert result["status"] == "ready"
     assert result["items"][0]["trade_date"] == "2026-06-12"
     assert result["items"][0]["recommendation_count"] == 20
+    assert result["items"][0]["buy_recommendation_count"] == 7
+    assert result["items"][0]["watch_recommendation_count"] == 13
 
 
 def test_list_trading_dates_returns_local_daily_bar_dates(monkeypatch) -> None:
@@ -1333,7 +2512,7 @@ def test_backtest_tail_entry_uses_minute_bar_near_visible_ma5() -> None:
         "600000.SSE": {
             execute_day: [
                 engine.MinuteBar(
-                    bar_time=datetime(2026, 1, 6, 14, 56),
+                    bar_time=datetime(2026, 1, 6, 14, 30),
                     trade_date=execute_day,
                     open_price=10.18,
                     high_price=10.22,
@@ -1350,11 +2529,11 @@ def test_backtest_tail_entry_uses_minute_bar_near_visible_ma5() -> None:
         daily_bar,
         bar_index,
         minute_index,
-        engine.BacktestParams(),
+        engine.BacktestParams(execution_model="tail_close_hybrid"),
     )
 
     assert fill["status"] == "filled"
-    assert fill["mode"] == "minute_tail_ma5"
+    assert fill["mode"] == "minute_1430"
     assert fill["price"] == 10.2
     assert fill["reference_date"] == dates[4].isoformat()
 
@@ -1382,7 +2561,7 @@ def test_backtest_can_reject_when_minute_tail_entry_is_required() -> None:
             for index in range(5)
         }
     }
-    params = engine.BacktestParams(minute_entry_required=True)
+    params = engine.BacktestParams(execution_model="strict_1430")
 
     fill = engine._resolve_buy_fill(
         {"vt_symbol": "600000.SSE", "signal_date": date(2026, 1, 5)},
@@ -1394,7 +2573,225 @@ def test_backtest_can_reject_when_minute_tail_entry_is_required() -> None:
     )
 
     assert fill["status"] == "rejected"
+    assert fill["reason"] == "missing_1430_snapshot"
+    assert fill["mode"] == "strict_1430_required"
+
+
+def test_backtest_strict_1430_rejects_tail_condition_when_snapshot_present() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    signal_day = date(2026, 1, 5)
+    execute_day = date(2026, 1, 6)
+    daily_bar = engine.Bar(
+        trade_date=execute_day,
+        open_price=10,
+        high_price=12,
+        low_price=9,
+        close_price=12,
+    )
+    bar_index = {
+        "600000.SSE": {
+            signal_day - timedelta(days=4) + timedelta(days=index): engine.Bar(
+                trade_date=signal_day - timedelta(days=4) + timedelta(days=index),
+                open_price=10,
+                high_price=10,
+                low_price=10,
+                close_price=10,
+            )
+            for index in range(5)
+        }
+    }
+    minute_index = {
+        "600000.SSE": {
+            execute_day: [
+                engine.MinuteBar(
+                    bar_time=datetime(2026, 1, 6, 14, 30),
+                    trade_date=execute_day,
+                    open_price=12,
+                    high_price=12,
+                    low_price=12,
+                    close_price=12,
+                )
+            ]
+        }
+    }
+    params = engine.BacktestParams(execution_model="strict_1430")
+
+    fill = engine._resolve_buy_fill(
+        {"vt_symbol": "600000.SSE", "signal_date": signal_day},
+        execute_day,
+        daily_bar,
+        bar_index,
+        minute_index,
+        params,
+    )
+
+    assert fill["status"] == "rejected"
     assert fill["reason"] == "tail_entry_not_triggered"
+    assert fill["price_source"] == "stock_minute_bars.close_price"
+    assert round(fill["ma5_distance_pct"], 6) == 20.0
+
+
+def test_backtest_tail_hybrid_uses_daily_close_proxy_when_minute_missing() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    signal_day = date(2026, 1, 5)
+    execute_day = date(2026, 1, 6)
+    bar_index = {
+        "600000.SSE": {
+            signal_day - timedelta(days=4) + timedelta(days=index): engine.Bar(
+                trade_date=signal_day - timedelta(days=4) + timedelta(days=index),
+                open_price=10,
+                high_price=10,
+                low_price=10,
+                close_price=10,
+            )
+            for index in range(5)
+        }
+    }
+    daily_bar = engine.Bar(execute_day, open_price=11, high_price=11.2, low_price=9.8, close_price=10.05)
+    bar_index["600000.SSE"][execute_day] = daily_bar
+
+    fill = engine._resolve_buy_fill(
+        {"vt_symbol": "600000.SSE", "signal_date": signal_day},
+        execute_day,
+        daily_bar,
+        bar_index,
+        {},
+        engine.BacktestParams(execution_model="tail_close_hybrid"),
+    )
+
+    assert fill["status"] == "filled"
+    assert fill["mode"] == "daily_close_proxy"
+    assert fill["price"] == 10.05
+    assert fill["proxy_used"] is True
+
+
+def test_default_backtest_does_not_buy_watch_candidate() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    day1 = date(2026, 1, 1)
+    day2 = date(2026, 1, 2)
+    symbol = "600000.SSE"
+    bars_by_symbol = {
+        symbol: [
+            engine.Bar(day1, 10.0, 10.1, 9.9, 10.0, volume=1_000_000, turnover=120_000_000),
+            engine.Bar(day2, 10.0, 10.2, 9.8, 10.0, volume=1_000_000, turnover=120_000_000),
+        ]
+    }
+    watch_score = SignalScore(
+        vt_symbol=symbol,
+        trade_date=day1,
+        total_score=80,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=False,
+        evidence={"status": "ready"},
+    )
+    params = engine.BacktestParams(
+        start=day1,
+        initial_cash=100_000,
+        max_positions=1,
+        max_position_pct=1.0,
+        commission_rate=0.0,
+        stamp_tax_rate=0.0,
+        slippage_bps=0.0,
+        min_entry_score=68,
+        strict_entry=True,
+    )
+
+    result = engine._simulate(
+        session=None,
+        params=params,
+        bars_by_symbol=bars_by_symbol,
+        trading_days=[day1, day2],
+        stock_meta={symbol: {"name": "浦发银行"}},
+        score_cache={day1: [watch_score]},
+        minute_index={},
+    )
+
+    assert result["trades"] == []
+    assert result["orders"] == []
+    assert result["equity"][-1]["cash"] == 100_000
+    assert result["equity"][-1]["position_count"] == 0
+
+
+def test_backtest_scoring_buy_candidate_policy_matches_strict_entry_flag() -> None:
+    from alphaagent.server.services.backtest import engine
+    from alphaagent.server.services.backtest import scoring
+
+    day = date(2026, 1, 1)
+    watch_score = SignalScore(
+        vt_symbol="600000.SSE",
+        trade_date=day,
+        total_score=80,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=False,
+        evidence={"status": "ready"},
+    )
+    buy_score = SignalScore(
+        vt_symbol="000001.SZSE",
+        trade_date=day,
+        total_score=80,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={"status": "ready"},
+    )
+
+    assert scoring.is_buy_candidate(buy_score, engine.BacktestParams(strict_entry=True))
+    assert not scoring.is_buy_candidate(watch_score, engine.BacktestParams(strict_entry=True))
+    assert scoring.is_buy_candidate(watch_score, engine.BacktestParams(strict_entry=False))
+
+
+def test_loose_research_mode_can_buy_watch_candidate_explicitly() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    day1 = date(2026, 1, 1)
+    day2 = date(2026, 1, 2)
+    symbol = "600000.SSE"
+    bars_by_symbol = {
+        symbol: [
+            engine.Bar(day1, 10.0, 10.1, 9.9, 10.0, volume=1_000_000, turnover=120_000_000),
+            engine.Bar(day2, 10.0, 10.2, 9.8, 10.0, volume=1_000_000, turnover=120_000_000),
+        ]
+    }
+    watch_score = SignalScore(
+        vt_symbol=symbol,
+        trade_date=day1,
+        total_score=80,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=False,
+        evidence={"status": "ready"},
+    )
+    params = engine.BacktestParams(
+        start=day1,
+        initial_cash=100_000,
+        max_positions=1,
+        max_position_pct=1.0,
+        commission_rate=0.0,
+        stamp_tax_rate=0.0,
+        slippage_bps=0.0,
+        min_entry_score=68,
+        strict_entry=False,
+        execution_model="tail_close_hybrid",
+    )
+
+    result = engine._simulate(
+        session=None,
+        params=params,
+        bars_by_symbol=bars_by_symbol,
+        trading_days=[day1, day2],
+        stock_meta={symbol: {"name": "浦发银行"}},
+        score_cache={day1: [watch_score]},
+        minute_index={},
+    )
+
+    assert len(result["trades"]) == 1
+    assert result["trades"][0]["side"] == "BUY"
+    assert result["trades"][0]["vt_symbol"] == symbol
 
 
 def test_signal_events_use_independent_symbol_state_machine() -> None:
@@ -1406,7 +2803,8 @@ def test_signal_events_use_independent_symbol_state_machine() -> None:
     sell_day = date(2026, 1, 10)
     bar_index = {
         symbol: {
-            execute_day: engine.Bar(execute_day, 10, 10.5, 9.8, 10.2),
+            signal_day: engine.Bar(signal_day, 10, 10.5, 9.8, 10.0),
+            execute_day: engine.Bar(execute_day, 10, 10.5, 9.8, 10.05),
             sell_day + timedelta(days=1): engine.Bar(sell_day + timedelta(days=1), 8.6, 8.9, 8.4, 8.5),
         }
     }
@@ -1422,17 +2820,345 @@ def test_signal_events_use_independent_symbol_state_machine() -> None:
         entry_signal=True,
         evidence={"status": "ready"},
     )
-    params = engine.BacktestParams(stop_loss_pct=0.07)
+    params = engine.BacktestParams(stop_loss_pct=0.07, execution_model="tail_close_hybrid")
     positions: dict[str, engine.Position] = {}
 
-    buys = engine._signal_events_for_day(signal_day, execute_day, [score], positions, {}, bar_index, {symbol: {"name": "浦发银行"}}, params)
-    duplicate = engine._signal_events_for_day(signal_day + timedelta(days=1), sell_day, [score], positions, {}, bar_index, {}, params)
-    sells = engine._signal_events_for_day(sell_day, sell_day + timedelta(days=1), [], positions, today_bars, bar_index, {}, params)
+    buys = engine._signal_events_for_day(signal_day, execute_day, [score], positions, {}, bar_index, {}, {symbol: {"name": "浦发银行"}}, params)
+    duplicate = engine._signal_events_for_day(signal_day + timedelta(days=1), sell_day, [score], positions, {}, bar_index, {}, {}, params)
+    sells = engine._signal_events_for_day(sell_day, sell_day + timedelta(days=1), [], positions, today_bars, bar_index, {}, {}, params)
 
     assert [row["side"] for row in buys] == ["BUY"]
+    assert buys[0]["price"] == 10.05
+    assert buys[0]["raw"]["mode"] == "daily_close_proxy"
     assert duplicate == []
     assert [row["side"] for row in sells] == ["SELL"]
     assert sells[0]["reason"] == "stop_loss"
+    assert sells[0]["trade_date"] == sell_day + timedelta(days=1)
+    assert sells[0]["execute_date"] == sell_day + timedelta(days=1)
+    assert sells[0]["raw"]["signal_date"] == sell_day.isoformat()
+    assert sells[0]["price"] == 8.5
+    assert sells[0]["raw"]["mode"] == "daily_close_proxy_sell"
+
+
+def test_signal_events_keep_rejected_theoretical_buy_for_audit() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    symbol = "600000.SSE"
+    signal_day = date(2026, 1, 5)
+    execute_day = date(2026, 1, 6)
+    bar_index = {
+        symbol: {
+            signal_day - timedelta(days=4) + timedelta(days=index): engine.Bar(
+                trade_date=signal_day - timedelta(days=4) + timedelta(days=index),
+                open_price=10,
+                high_price=10,
+                low_price=10,
+                close_price=10,
+            )
+            for index in range(5)
+        }
+    }
+    bar_index[symbol][execute_day] = engine.Bar(
+        trade_date=execute_day,
+        open_price=11,
+        high_price=11,
+        low_price=10.8,
+        close_price=11,
+    )
+    score = SignalScore(
+        vt_symbol=symbol,
+        trade_date=signal_day,
+        total_score=80,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={"status": "ready"},
+    )
+    params = engine.BacktestParams(execution_model="strict_1430")
+    positions: dict[str, engine.Position] = {}
+
+    events = engine._signal_events_for_day(
+        signal_day,
+        execute_day,
+        [score],
+        positions,
+        {},
+        bar_index,
+        {},
+        {symbol: {"name": "浦发银行"}},
+        params,
+    )
+
+    assert len(events) == 1
+    assert events[0]["side"] == "BUY"
+    assert events[0]["price"] is None
+    assert events[0]["reason"] == "entry_signal"
+    assert events[0]["raw"]["status"] == "rejected"
+    assert events[0]["raw"]["reason"] == "missing_1430_snapshot"
+    assert events[0]["raw"]["mode"] == "strict_1430_required"
+    assert positions == {}
+
+
+def test_backtest_simulation_records_deterministic_cash_position_and_slot_rejection() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    day1 = date(2026, 1, 1)
+    day2 = date(2026, 1, 2)
+    symbol_a = "600000.SSE"
+    symbol_b = "000001.SZSE"
+    bars_by_symbol = {
+        symbol_a: [
+            engine.Bar(day1, 10.0, 10.2, 9.8, 10.0, volume=1_000_000, turnover=120_000_000),
+            engine.Bar(day2, 10.0, 10.4, 9.9, 10.2, volume=1_000_000, turnover=120_000_000),
+        ],
+        symbol_b: [
+            engine.Bar(day1, 20.0, 20.3, 19.8, 20.0, volume=1_000_000, turnover=120_000_000),
+            engine.Bar(day2, 22.0, 22.0, 21.8, 22.0, volume=1_000_000, turnover=120_000_000, change_pct=10.0),
+        ],
+    }
+    score_cache = {
+        day1: [
+            SignalScore(symbol_a, day1, total_score=80, liquidity_score=80, risk_score=80, entry_signal=True, evidence={"status": "ready"}),
+            SignalScore(symbol_b, day1, total_score=79, liquidity_score=80, risk_score=80, entry_signal=True, evidence={"status": "ready"}),
+        ],
+    }
+    minute_index = {
+        symbol_a: {
+            day2: [
+                engine.MinuteBar(
+                    bar_time=datetime(2026, 1, 2, 14, 30),
+                    trade_date=day2,
+                    open_price=10.0,
+                    high_price=10.1,
+                    low_price=9.9,
+                    close_price=10.0,
+                )
+            ]
+        }
+    }
+    params = engine.BacktestParams(
+        start=day1,
+        initial_cash=100_000,
+        max_positions=2,
+        max_position_pct=0.5,
+        commission_rate=0.0,
+        stamp_tax_rate=0.0,
+        slippage_bps=0.0,
+        min_entry_score=68,
+        strict_entry=True,
+    )
+
+    result = engine._simulate(
+        session=None,
+        params=params,
+        bars_by_symbol=bars_by_symbol,
+        trading_days=[day1, day2],
+        stock_meta={symbol_a: {"name": "浦发银行"}, symbol_b: {"name": "平安银行"}},
+        score_cache=score_cache,
+        minute_index=minute_index,
+    )
+
+    trades = result["trades"]
+    orders = result["orders"]
+    equity_tail = result["equity"][-1]
+    positions = result["positions"]
+
+    assert len(trades) == 1
+    assert trades[0]["vt_symbol"] == symbol_a
+    assert trades[0]["side"] == "BUY"
+    assert trades[0]["price"] == 10.0
+    assert trades[0]["volume"] == 5_000
+    assert trades[0]["amount"] == 50_000.0
+    assert equity_tail["cash"] == 50_000.0
+    assert equity_tail["market_value"] == 51_000.0
+    assert equity_tail["total_equity"] == 101_000.0
+    assert positions[-1]["vt_symbol"] == symbol_a
+    assert positions[-1]["market_value"] == 51_000.0
+    rejected = [order for order in orders if order["status"] == "rejected"]
+    assert rejected[0]["vt_symbol"] == symbol_b
+    assert rejected[0]["reason"] == "limit_up_or_no_bar"
+
+
+def test_candidate_trace_summary_explains_filled_candidate() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    signal_date = date(2026, 1, 5)
+    execute_date = date(2026, 1, 6)
+    result = engine._candidate_trace_summary(
+        backtest_id=7,
+        vt_symbol="600000.SSE",
+        signal_date=signal_date,
+        run={"strategy_id": "mainline_leader_pullback", "strategy_version": "0.1.1", "params": {"max_positions": 8}},
+        recommendation={
+            "trade_date": signal_date,
+            "vt_symbol": "600000.SSE",
+            "action": "BUY",
+            "rank": 3,
+            "total_score": 72.5,
+            "reason": {"failed_rules": []},
+        },
+        signal_rows=[
+            {
+                "trade_date": execute_date,
+                "signal_date": signal_date,
+                "execute_date": execute_date,
+                "vt_symbol": "600000.SSE",
+                "side": "BUY",
+                "price": 10.1,
+                "score": 72.5,
+                "reason": "entry_signal",
+                "raw": {"status": "filled", "mode": "daily_close_proxy"},
+            }
+        ],
+        order_rows=[
+            {
+                "id": 9,
+                "trade_date": execute_date,
+                "vt_symbol": "600000.SSE",
+                "side": "BUY",
+                "price": 10.1,
+                "volume": 1000,
+                "status": "filled",
+                "reason": "entry_signal",
+                "raw": {"mode": "daily_close_proxy"},
+            }
+        ],
+        trade_rows=[
+            {
+                "id": 10,
+                "trade_date": execute_date,
+                "vt_symbol": "600000.SSE",
+                "side": "BUY",
+                "price": 10.1,
+                "volume": 1000,
+                "amount": 10_100,
+                "fee": 3.03,
+                "pnl": None,
+                "reason": "entry_signal",
+                "raw": {"mode": "daily_close_proxy"},
+            }
+        ],
+        equity_row={"trade_date": execute_date, "cash": 989_897, "market_value": 10_100, "total_equity": 999_997, "position_count": 1},
+        position_rows=[],
+        stock_names={"600000.SSE": {"name": "浦发银行", "exchange": "SSE"}},
+    )
+
+    assert result["status"] == "filled"
+    assert result["action"] == "BUY"
+    assert result["planned_execute_date"] == "2026-01-06"
+    assert result["linked_order_status"] == "filled"
+    assert result["summary"] == "候选为 BUY，组合回测已下单并成交。"
+    assert result["equity"]["cash"] == 989_897
+    assert result["trades"][0]["amount"] == 10_100
+
+
+def test_candidate_trace_summary_explains_watch_not_bought() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    result = engine._candidate_trace_summary(
+        backtest_id=7,
+        vt_symbol="600000.SSE",
+        signal_date=date(2026, 1, 5),
+        run={"strategy_id": "mainline_leader_pullback", "strategy_version": "0.1.1", "params": {"strict_entry": True}},
+        recommendation={
+            "trade_date": date(2026, 1, 5),
+            "vt_symbol": "600000.SSE",
+            "action": "WATCH",
+            "rank": 12,
+            "total_score": 66.0,
+            "reason": {"failed_rules": ["ma5_distance"]},
+        },
+        signal_rows=[],
+        order_rows=[],
+        trade_rows=[],
+        equity_row=None,
+        position_rows=[],
+        stock_names={"600000.SSE": {"name": "浦发银行", "exchange": "SSE"}},
+    )
+
+    assert result["status"] == "watch_not_bought"
+    assert result["linked_order_status"] == "not_ordered"
+    assert result["summary"] == "候选是 WATCH，默认组合回测不会买入观察股。"
+
+
+def test_candidate_trace_summary_does_not_link_orders_without_signal_plan() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    signal_date = date(2026, 1, 5)
+    result = engine._candidate_trace_summary(
+        backtest_id=7,
+        vt_symbol="600000.SSE",
+        signal_date=signal_date,
+        run={"strategy_id": "mainline_leader_pullback", "strategy_version": "0.1.1", "params": {}},
+        recommendation={
+            "trade_date": signal_date,
+            "vt_symbol": "600000.SSE",
+            "action": "BUY",
+            "rank": 1,
+            "total_score": 88.0,
+            "reason": {"failed_rules": []},
+        },
+        signal_rows=[],
+        order_rows=[],
+        trade_rows=[],
+        equity_row={"trade_date": signal_date, "cash": 1_000_000, "market_value": 0, "total_equity": 1_000_000, "position_count": 0},
+        position_rows=[],
+        stock_names={"600000.SSE": {"name": "浦发银行", "exchange": "SSE"}},
+        not_planned_context={
+            "likely_reason": "before_first_signal_date",
+            "likely_reason_label": "信号日早于该回测首个可复盘信号日 2026-03-31",
+            "first_signal_date": "2026-03-31",
+            "signal_date_plan_count": 0,
+            "target_universe_rank": 3,
+            "max_symbols": 80,
+        },
+    )
+
+    assert result["status"] == "candidate_not_planned"
+    assert result["linked_order_status"] == "not_ordered"
+    assert result["planned_execute_date"] is None
+    assert "首个可复盘信号日 2026-03-31" in result["summary"]
+    assert result["not_planned_context"]["likely_reason"] == "before_first_signal_date"
+
+
+def test_candidate_trace_summary_explains_untriggered_theoretical_signal() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    signal_date = date(2026, 6, 3)
+    execute_date = date(2026, 6, 4)
+    result = engine._candidate_trace_summary(
+        backtest_id=59,
+        vt_symbol="002636.SZSE",
+        signal_date=signal_date,
+        run={"strategy_id": "mainline_leader_pullback", "strategy_version": "0.1.1", "params": {}},
+        recommendation=None,
+        signal_rows=[
+            {
+                "trade_date": execute_date,
+                "signal_date": signal_date,
+                "execute_date": execute_date,
+                "vt_symbol": "002636.SZSE",
+                "side": "BUY",
+                "price": None,
+                "score": 79.46,
+                "reason": "entry_signal",
+                "plan_status": "not_triggered",
+                "plan_status_label": "理论未触发",
+                "raw": {"status": "rejected", "reason": "tail_entry_not_triggered"},
+            }
+        ],
+        order_rows=[],
+        trade_rows=[],
+        equity_row={"trade_date": execute_date, "cash": 1_000_000, "market_value": 0, "total_equity": 1_000_000, "position_count": 0},
+        position_rows=[],
+        stock_names={"002636.SZSE": {"name": "金安国纪", "exchange": "SZSE"}},
+    )
+
+    assert result["status"] == "not_triggered"
+    assert result["plan_status"] == "not_triggered"
+    assert result["linked_order_status"] == "not_ordered"
+    assert "执行日 14:30 价格没有满足尾盘入场条件" in result["summary"]
+    assert [item for item in result["diagnostics"] if item["id"] == "real_order"][0]["status"] == "info"
 
 
 def test_signal_amount_preview_uses_equal_capital_budget(monkeypatch) -> None:
@@ -1490,6 +3216,184 @@ def test_signal_amount_preview_filters_after_pairing_trades(monkeypatch) -> None
     assert result["items"][0]["preview_pnl"] == 25_000
 
 
+def test_signal_events_link_to_real_orders() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    events = [
+        {
+            "trade_date": date(2026, 1, 6),
+            "signal_date": date(2026, 1, 5),
+            "execute_date": date(2026, 1, 6),
+            "vt_symbol": "600000.SSE",
+            "side": "BUY",
+            "price": 10.0,
+            "raw": {"mode": "daily_close_proxy"},
+        }
+    ]
+    orders = [
+        {
+            "id": 88,
+            "trade_date": date(2026, 1, 6),
+            "vt_symbol": "600000.SSE",
+            "side": "BUY",
+            "status": "filled",
+            "reason": "entry_signal",
+            "price": 10.0,
+            "volume": 1000,
+        }
+    ]
+
+    linked = engine._link_signal_events_to_orders(events, orders)
+
+    assert linked[0]["linked_order_id"] == 88
+    assert linked[0]["linked_order_status"] == "filled"
+    assert linked[0]["linked_order_reason"] == "entry_signal"
+    assert linked[0]["raw"]["event_role"] == "theoretical_signal"
+    assert linked[0]["raw"]["linked_order"]["volume"] == 1000
+
+
+def test_signal_plan_module_links_orders_and_labels_untriggered_events() -> None:
+    from alphaagent.server.services.backtest import signal_plan
+
+    def as_date(value):
+        if isinstance(value, date):
+            return value
+        return date.fromisoformat(str(value))
+
+    linked = signal_plan.link_signal_events_to_orders(
+        [
+            {
+                "trade_date": "2026-01-06",
+                "execute_date": "2026-01-06",
+                "vt_symbol": "600000.SSE",
+                "side": "BUY",
+                "raw": {"status": "filled"},
+            },
+            {
+                "trade_date": "2026-01-07",
+                "execute_date": "2026-01-07",
+                "vt_symbol": "000001.SZSE",
+                "side": "BUY",
+                "raw": {"status": "rejected", "reason": "tail_entry_not_triggered"},
+            },
+        ],
+        [
+            {
+                "id": 88,
+                "trade_date": "2026-01-06",
+                "vt_symbol": "600000.SSE",
+                "side": "BUY",
+                "status": "filled",
+                "reason": "entry_signal",
+                "price": 10.0,
+                "volume": 1000,
+            }
+        ],
+        as_date=as_date,
+    )
+
+    assert linked[0]["linked_order_id"] == 88
+    assert linked[0]["plan_status"] == "filled"
+    assert linked[0]["plan_status_label"] == "已成交"
+    assert linked[1]["linked_order_id"] is None
+    assert linked[1]["plan_status"] == "not_triggered"
+    assert linked[1]["plan_status_label"] == "理论未触发"
+    assert linked[1]["raw"]["linked_order"] is None
+
+
+def test_backtest_drilldown_options_include_signal_only_symbols_and_reason_labels() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    dates = engine._backtest_drilldown_date_options(
+        equity_rows=[
+            {
+                "trade_date": date(2026, 1, 6),
+                "cash": 900_000,
+                "market_value": 100_000,
+                "total_equity": 1_000_000,
+                "drawdown_pct": 0,
+                "position_count": 1,
+            }
+        ],
+        trade_rows=[
+            {"trade_date": date(2026, 1, 6), "vt_symbol": "600000.SSE", "side": "BUY"},
+        ],
+        order_rows=[
+            {
+                "trade_date": date(2026, 1, 6),
+                "vt_symbol": "002636.SZSE",
+                "side": "BUY",
+                "status": "rejected",
+                "reason": "tail_entry_not_triggered",
+            }
+        ],
+        signal_rows=[
+            {
+                "trade_date": date(2026, 1, 6),
+                "signal_date": date(2026, 1, 5),
+                "vt_symbol": "002636.SZSE",
+                "side": "BUY",
+                "raw": {"reason": "tail_entry_not_triggered"},
+            },
+        ],
+        position_rows=[
+            {"trade_date": date(2026, 1, 6), "vt_symbol": "600000.SSE"},
+        ],
+        recommendation_rows=[
+            {"trade_date": date(2026, 1, 5), "vt_symbol": "002636.SZSE", "action": "BUY"},
+            {"trade_date": date(2026, 1, 5), "vt_symbol": "600000.SSE", "action": "WATCH"},
+        ],
+    )
+    symbols = engine._backtest_drilldown_symbol_options(
+        trade_rows=[
+            {"trade_date": date(2026, 1, 6), "vt_symbol": "600000.SSE", "side": "BUY"},
+        ],
+        order_rows=[
+            {
+                "trade_date": date(2026, 1, 6),
+                "vt_symbol": "002636.SZSE",
+                "side": "BUY",
+                "status": "rejected",
+                "reason": "tail_entry_not_triggered",
+            }
+        ],
+        signal_rows=[
+            {
+                "trade_date": date(2026, 1, 6),
+                "signal_date": date(2026, 1, 5),
+                "vt_symbol": "002636.SZSE",
+                "side": "BUY",
+                "raw": {"reason": "tail_entry_not_triggered"},
+            },
+        ],
+        position_rows=[
+            {"trade_date": date(2026, 1, 6), "vt_symbol": "600000.SSE"},
+        ],
+        stock_names={
+            "600000.SSE": {"name": "浦发银行", "exchange": "SSE"},
+            "002636.SZSE": {"name": "金安国纪", "exchange": "SZSE"},
+        },
+    )
+
+    assert dates[0]["trade_date"] == "2026-01-06"
+    assert dates[0]["buy_trade_count"] == 1
+    assert dates[0]["buy_candidate_count"] == 1
+    assert dates[0]["watch_candidate_count"] == 1
+    assert dates[0]["buy_signal_count"] == 1
+    assert dates[0]["sell_signal_count"] == 0
+    assert dates[0]["rejected_order_count"] == 1
+    assert dates[0]["signal_event_count"] == 1
+    assert dates[0]["position_snapshot_count"] == 1
+    by_symbol = {row["vt_symbol"]: row for row in symbols}
+    assert by_symbol["600000.SSE"]["status_label"] == "有成交"
+    assert by_symbol["600000.SSE"]["main_reason_label"] is None
+    assert by_symbol["002636.SZSE"]["status_label"] == "有拒单"
+    assert by_symbol["002636.SZSE"]["buy_signal_count"] == 1
+    assert by_symbol["002636.SZSE"]["main_reason_label"] == "尾盘入场未触发"
+    assert engine.backtest_reason_label("insufficient_cash") == "现金不足"
+    assert engine.backtest_reason_label("missing_1430_snapshot") == "缺14:30快照"
+
+
 def test_backtest_sell_signal_executes_next_day_open_without_lookahead() -> None:
     from alphaagent.server.services.backtest import engine
 
@@ -1527,6 +3431,7 @@ def test_backtest_sell_signal_executes_next_day_open_without_lookahead() -> None
         stop_loss_pct=0.5,
         trailing_stop_pct=0.9,
         time_stop_days=999,
+        execution_model="legacy_next_open",
         intraday_entry=False,
     )
 
@@ -1554,24 +3459,124 @@ def test_backtest_sell_signal_executes_next_day_open_without_lookahead() -> None
     assert pending_orders[0]["raw"]["execute_date"] == d3.isoformat()
 
 
-def test_backtest_persist_filters_api_only_order_fields() -> None:
+def test_backtest_tail_close_sell_signal_executes_next_trade_day_without_lookahead() -> None:
     from alphaagent.server.services.backtest import engine
 
-    values = engine._table_values(
-        engine.schema.backtest_orders,
-        {
-            "trade_date": "2026-01-03",
-            "vt_symbol": "600000.SSE",
-            "board": "main",
-            "board_label": "主板",
-            "side": "SELL",
-            "price": 13.0,
-            "volume": 1000,
-            "status": "filled",
-            "reason": "take_profit",
-            "raw": {"mode": "daily_next_open_sell"},
-        },
+    d0 = date(2026, 1, 1)
+    d1 = date(2026, 1, 2)
+    d2 = date(2026, 1, 3)
+    d3 = date(2026, 1, 4)
+    symbol = "600000.SSE"
+    bars_by_symbol = {
+        symbol: [
+            engine.Bar(trade_date=d0, open_price=10.0, high_price=10.0, low_price=10.0, close_price=10.0),
+            engine.Bar(trade_date=d1, open_price=10.0, high_price=10.1, low_price=9.9, close_price=10.0),
+            engine.Bar(trade_date=d2, open_price=5.0, high_price=12.5, low_price=4.9, close_price=12.0),
+            engine.Bar(trade_date=d3, open_price=13.0, high_price=13.2, low_price=12.8, close_price=13.1),
+        ]
+    }
+    candidate = SignalScore(
+        vt_symbol=symbol,
+        trade_date=d0,
+        total_score=80,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={"status": "ready", "note": "unit_test_candidate"},
     )
+    minute_index = {
+        symbol: {
+            d1: [
+                engine.MinuteBar(
+                    bar_time=datetime(2026, 1, 2, 14, 30),
+                    trade_date=d1,
+                    open_price=10.0,
+                    high_price=10.0,
+                    low_price=10.0,
+                    close_price=10.0,
+                )
+            ],
+            d2: [
+                engine.MinuteBar(
+                    bar_time=datetime(2026, 1, 3, 14, 30),
+                    trade_date=d2,
+                    open_price=6.0,
+                    high_price=6.0,
+                    low_price=6.0,
+                    close_price=6.0,
+                )
+            ],
+            d3: [
+                engine.MinuteBar(
+                    bar_time=datetime(2026, 1, 4, 14, 30),
+                    trade_date=d3,
+                    open_price=13.0,
+                    high_price=13.0,
+                    low_price=13.0,
+                    close_price=13.0,
+                )
+            ],
+        }
+    }
+    params = engine.BacktestParams(
+        start=d0,
+        end=d3,
+        initial_cash=100_000,
+        max_positions=1,
+        max_position_pct=1.0,
+        commission_rate=0.0,
+        stamp_tax_rate=0.0,
+        slippage_bps=0.0,
+        take_profit_pct=0.1,
+        stop_loss_pct=0.5,
+        trailing_stop_pct=0.9,
+        time_stop_days=999,
+        execution_model="tail_close_hybrid",
+    )
+
+    run = engine._simulate(
+        None,
+        params,
+        bars_by_symbol,
+        [d0, d1, d2, d3],
+        {symbol: {"name": "测试股"}},
+        score_cache={d0: [candidate], d2: []},
+        minute_index=minute_index,
+        score_context=engine.ScoreContext(),
+    )
+
+    sells = [trade for trade in run["trades"] if trade["side"] == "SELL"]
+    assert len(sells) == 1
+    assert sells[0]["trade_date"] == d3.isoformat()
+    assert sells[0]["price"] == 13.0
+    assert sells[0]["raw"]["signal_date"] == d2.isoformat()
+    assert sells[0]["raw"]["execute_date"] == d3.isoformat()
+    assert sells[0]["raw"]["mode"] == "minute_1430_sell"
+    assert not any(trade["side"] == "SELL" and trade["trade_date"] == d2.isoformat() for trade in run["trades"])
+
+    pending_orders = [order for order in run["orders"] if order["side"] == "SELL" and order["status"] == "pending"]
+    assert pending_orders[0]["trade_date"] == d2.isoformat()
+    assert pending_orders[0]["raw"]["execute_date"] == d3.isoformat()
+
+
+def test_backtest_persist_filters_api_only_order_fields() -> None:
+    from alphaagent.server.services.backtest import engine
+    from alphaagent.server.services.backtest import persistence
+
+    row = {
+        "trade_date": "2026-01-03",
+        "vt_symbol": "600000.SSE",
+        "board": "main",
+        "board_label": "主板",
+        "side": "SELL",
+        "price": 13.0,
+        "volume": 1000,
+        "status": "filled",
+        "reason": "take_profit",
+        "raw": {"mode": "daily_next_open_sell"},
+    }
+
+    values = engine._table_values(engine.schema.backtest_orders, row)
 
     assert values == {
         "trade_date": date(2026, 1, 3),
@@ -1583,6 +3588,7 @@ def test_backtest_persist_filters_api_only_order_fields() -> None:
         "reason": "take_profit",
         "raw": {"mode": "daily_next_open_sell"},
     }
+    assert values == persistence.table_values(engine.schema.backtest_orders, row)
 
 
 def test_backtest_report_tables_pair_closed_trades_and_symbol_performance() -> None:
@@ -1653,7 +3659,12 @@ def test_backtest_report_tables_pair_closed_trades_and_symbol_performance() -> N
         {"initial_cash": 100_000},
         closed,
         trades,
-        [{"status": "filled"}, {"status": "rejected", "reason": "limit_up_or_no_bar"}],
+        [
+            {"status": "filled"},
+            {"status": "rejected", "reason": "limit_up_or_no_bar"},
+            {"status": "rejected", "reason": "missing_1430_snapshot", "raw": {"execution_model": "strict_1430", "reason": "missing_1430_snapshot"}},
+            {"status": "rejected", "reason": "tail_entry_not_triggered", "raw": {"execution_model": "strict_1430", "price_source": "stock_minute_bars.close_price"}},
+        ],
         [
             {"trade_date": date(2026, 1, 2), "market_value": 10_000, "total_equity": 100_000, "position_count": 1},
             {"trade_date": date(2026, 1, 9), "market_value": 0, "total_equity": 100_991.2, "position_count": 0},
@@ -1669,8 +3680,78 @@ def test_backtest_report_tables_pair_closed_trades_and_symbol_performance() -> N
     assert symbols[0]["name"] == "浦发银行"
     assert symbols[0]["pnl"] == 991.2
     assert stats["closed_trade_count"] == 2
-    assert stats["rejected_order_count"] == 1
+    assert stats["rejected_order_count"] == 3
+    assert stats["strict_1430_rejected_count"] == 2
+    assert stats["minute_gap_rejected_count"] == 1
+    assert stats["tail_entry_rejected_count"] == 1
     assert stats["average_holding_days"] == 6.5
+
+
+def test_backtest_metrics_report_open_buys_separately_from_closed_trades() -> None:
+    from alphaagent.server.services.backtest import engine
+    from alphaagent.server.services.backtest.schemas import Trade
+
+    equity = [
+        {"trade_date": date(2026, 1, 2), "total_equity": 100_000.0},
+        {"trade_date": date(2026, 1, 3), "total_equity": 101_000.0},
+    ]
+    trades = [
+        Trade(date(2026, 1, 2), "600000.SSE", "BUY", 10.0, 1000, 10_000.0, 3.0, raw={"execution": {"mode": "minute_1430"}}),
+        Trade(date(2026, 1, 3), "000001.SZSE", "BUY", 20.0, 500, 10_000.0, 3.0, raw={"execution": {"mode": "minute_1430"}}),
+        Trade(date(2026, 1, 3), "600000.SSE", "SELL", 11.0, 1000, 11_000.0, 8.8, pnl=991.2),
+    ]
+
+    metrics = engine._metrics(100_000, equity, trades)
+
+    assert metrics["total_trade_rows"] == 3
+    assert metrics["buy_count"] == 2
+    assert metrics["sell_count"] == 1
+    assert metrics["trade_count"] == 1
+    assert metrics["open_trade_count"] == 1
+    assert metrics["minute_1430_count"] == 2
+
+
+def test_persist_run_uses_registered_strategy_version(monkeypatch) -> None:
+    from alphaagent.server.db import schema
+    from alphaagent.server.services.backtest import persistence
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    captured_runs: list[dict] = []
+
+    class FakeInsertResult:
+        def __init__(self, statement):
+            self.statement = statement
+
+        def scalar_one(self):
+            captured_runs.append(dict(self.statement.compile().params))
+            return 99
+
+    class FakeSession:
+        def execute(self, statement):
+            if getattr(statement, "table", None) is schema.backtest_runs:
+                return FakeInsertResult(statement)
+            return None
+
+    run = {
+        "metrics": {"initial_cash": 100_000, "final_equity": 100_000},
+        "equity": [],
+        "positions": [],
+        "signal_events": [],
+        "orders": [],
+        "trades": [],
+    }
+
+    backtest_id = persistence.persist_run(
+        FakeSession(),
+        BacktestParams(strategy="limit_up_after_pullback", start=date(2026, 2, 2)),
+        run,
+        date(2026, 6, 13),
+        params_to_json=lambda params: {"strategy": params.strategy},
+    )
+
+    assert backtest_id == 99
+    assert captured_runs[0]["strategy_id"] == "limit_up_after_pullback"
+    assert captured_runs[0]["strategy_version"] == "0.1.0"
 
 
 def test_backtest_audit_events_keep_stock_names() -> None:
@@ -2082,8 +4163,9 @@ def test_backtest_validation_grid_reuses_minute_index(monkeypatch) -> None:
     trading_days = [date(2026, 1, 1) + timedelta(days=index) for index in range(85)]
     bars_by_symbol = {"600000.SSE": _bars(85)}
 
-    def fake_minute_index(session, vt_symbols, start, end):
+    def fake_minute_index(session, vt_symbols, start, end, interval="1m"):
         del session, vt_symbols, start, end
+        assert interval == "1m"
         calls["minute_loads"] += 1
         return {}
 
@@ -2113,7 +4195,7 @@ def test_backtest_validation_grid_reuses_minute_index(monkeypatch) -> None:
     result = engine._run_validation_grid(
         session=None,
         backtest_id=9,
-        base_params=engine.BacktestParams(intraday_entry=True),
+        base_params=engine.BacktestParams(intraday_entry=True, minute_interval="1m"),
         bars_by_symbol=bars_by_symbol,
         trading_days=trading_days,
         stock_meta={},
@@ -2155,6 +4237,39 @@ def test_financial_scores_from_context_respects_publish_date() -> None:
     after_publish = engine._financial_scores_from_context(context, date(2026, 5, 1))
 
     assert before_publish["600000.SSE"] < after_publish["600000.SSE"]
+
+
+def test_symbol_financial_coverage_summary_uses_publish_date_cutoff() -> None:
+    from alphaagent.server.services.quant import financials
+
+    rows = [
+        {"publish_date": "2026-05-01", "report_date": "2026-03-31", "period_type": "quarterly"},
+        {"publish_date": "2026-03-30", "report_date": "2025-12-31", "period_type": "quarterly"},
+        {"publish_date": None, "report_date": "2025-09-30", "period_type": "quarterly"},
+    ]
+
+    class FakeRows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return rows
+
+    class FakeSession:
+        def execute(self, statement):
+            del statement
+            return FakeRows()
+
+    summary = financials.financial_coverage_summary(FakeSession(), "600000.SSE", date(2026, 4, 15))
+
+    assert summary["local_report_count"] == 3
+    assert summary["usable_report_count"] == 1
+    assert summary["missing_publish_date_count"] == 1
+    assert summary["future_publish_date_count"] == 1
+    assert summary["latest_publish_date"] == "2026-05-01"
+    assert summary["latest_usable_publish_date"] == "2026-03-30"
+    assert summary["latest_usable_report_date"] == "2025-12-31"
+    assert "publish_date <= trade_date" in summary["policy"]
 
 
 def test_backtest_validation_grid_csv_endpoint_returns_download(monkeypatch) -> None:
@@ -2215,23 +4330,78 @@ def test_backtest_api_parses_strict_minute_entry_params(monkeypatch) -> None:
     client = TestClient(create_app())
     response = client.post(
         "/api/backtests",
+            json={
+                "start": "2026-01-01",
+                "execution_model": "strict_1430",
+                "intraday_entry": "false",
+                "minute_entry_required": "false",
+                "minute_interval": "1m",
+                "tail_entry_start": "14:30",
+                "tail_entry_end": "14:30",
+                "tail_entry_ma5_tolerance_pct": 0.8,
+                "persist": False,
+            },
+    )
+
+    assert response.status_code == 200
+    assert captured["params"].execution_model == "strict_1430"
+    assert captured["params"].intraday_entry is True
+    assert captured["params"].minute_entry_required is True
+    assert captured["params"].minute_interval == "1m"
+    assert captured["params"].tail_entry_start == "14:30"
+    assert captured["params"].tail_entry_end == "14:30"
+    assert captured["params"].tail_entry_ma5_tolerance_pct == 0.8
+
+
+def test_backtest_api_derives_tail_hybrid_flags_from_execution_model(monkeypatch) -> None:
+    from alphaagent.server.api import backtests
+
+    captured = {}
+
+    def fake_run_backtest(params):
+        captured["params"] = params
+        return {"status": "ready", "backtest_id": 10, "metrics": {}, "trades": [], "start": "2026-01-01", "end": "2026-01-31"}
+
+    monkeypatch.setattr(backtests, "run_backtest", fake_run_backtest)
+
+    client = TestClient(create_app())
+    response = client.post(
+        "/api/backtests",
         json={
             "start": "2026-01-01",
-            "intraday_entry": "true",
+            "execution_model": "tail_close_hybrid",
+            "intraday_entry": "false",
             "minute_entry_required": "true",
-            "tail_entry_start": "14:35",
-            "tail_entry_end": "14:55",
-            "tail_entry_ma5_tolerance_pct": 0.8,
             "persist": False,
         },
     )
 
     assert response.status_code == 200
+    assert captured["params"].execution_model == "tail_close_hybrid"
     assert captured["params"].intraday_entry is True
+    assert captured["params"].minute_entry_required is False
+
+
+def test_backtest_api_defaults_to_1430_tail_snapshot(monkeypatch) -> None:
+    from alphaagent.server.api import backtests
+
+    captured = {}
+
+    def fake_run_backtest(params):
+        captured["params"] = params
+        return {"status": "ready", "backtest_id": 10, "metrics": {}, "trades": [], "start": "2026-01-01", "end": "2026-01-31"}
+
+    monkeypatch.setattr(backtests, "run_backtest", fake_run_backtest)
+
+    client = TestClient(create_app())
+    response = client.post("/api/backtests", json={"start": "2026-01-01", "persist": False})
+
+    assert response.status_code == 200
+    assert captured["params"].tail_entry_start == "14:30"
+    assert captured["params"].tail_entry_end == "14:30"
+    assert captured["params"].minute_interval == "1m"
+    assert captured["params"].execution_model == "strict_1430"
     assert captured["params"].minute_entry_required is True
-    assert captured["params"].tail_entry_start == "14:35"
-    assert captured["params"].tail_entry_end == "14:55"
-    assert captured["params"].tail_entry_ma5_tolerance_pct == 0.8
 
 
 def test_symbol_backtest_api_passes_single_symbol_and_returns_audit(monkeypatch) -> None:
@@ -2283,6 +4453,307 @@ def test_backtest_audit_api_passes_symbol_filter(monkeypatch) -> None:
     assert captured == {"backtest_id": 11, "vt_symbol": "600000.SSE", "limit": 77}
 
 
+def test_backtest_candidate_trace_api_passes_symbol_and_signal_date(monkeypatch) -> None:
+    from alphaagent.server.api import backtests
+
+    captured = {}
+
+    def fake_trace(backtest_id, vt_symbol, signal_date):
+        captured.update({"backtest_id": backtest_id, "vt_symbol": vt_symbol, "signal_date": signal_date})
+        return {"status": "filled", "backtest_id": backtest_id, "vt_symbol": vt_symbol, "signal_date": signal_date.isoformat()}
+
+    monkeypatch.setattr(backtests, "backtest_candidate_trace", fake_trace)
+
+    client = TestClient(create_app())
+    response = client.get("/api/backtests/11/candidate-trace?vt_symbol=600000.SSE&signal_date=2026-01-05")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "filled"
+    assert captured == {"backtest_id": 11, "vt_symbol": "600000.SSE", "signal_date": date(2026, 1, 5)}
+
+
+def test_backtest_execution_model_comparison_summary_warns_on_proxy_dependence() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    rows = [
+        {
+            "execution_model": "tail_close_hybrid",
+            "status": "ready",
+            "total_return_pct": -13.47,
+            "buy_count": 21,
+            "daily_close_proxy_ratio": 90.0,
+        },
+        {
+            "execution_model": "strict_1430",
+            "status": "ready",
+            "total_return_pct": -0.25,
+            "buy_count": 2,
+            "strict_1430_rejected_count": 0,
+        },
+    ]
+
+    summary = engine._execution_model_comparison_summary(rows)
+
+    assert summary["status"] == "warning"
+    assert summary["return_delta_pct"] == 13.22
+    assert "收盘代理" in summary["message"]
+
+
+def test_backtest_execution_model_comparison_summary_distinguishes_condition_rejections() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    rows = [
+        {
+            "execution_model": "tail_close_hybrid",
+            "status": "ready",
+            "total_return_pct": -10.37,
+            "buy_count": 21,
+            "daily_close_proxy_ratio": 0.0,
+        },
+        {
+            "execution_model": "strict_1430",
+            "status": "ready",
+            "total_return_pct": -10.37,
+            "buy_count": 21,
+            "strict_1430_rejected_count": 83,
+            "minute_gap_rejected_count": 0,
+        },
+    ]
+
+    summary = engine._execution_model_comparison_summary(rows)
+
+    assert summary["status"] == "warning"
+    assert "策略条件约束" in summary["message"]
+    assert "补齐对应执行日快照" not in summary["message"]
+
+
+def test_backtest_execution_model_comparison_api(monkeypatch) -> None:
+    from alphaagent.server.api import backtests
+
+    captured = {}
+
+    def fake_comparison(backtest_id):
+        captured["backtest_id"] = backtest_id
+        return {"status": "ready", "backtest_id": backtest_id, "rows": []}
+
+    monkeypatch.setattr(backtests, "backtest_execution_model_comparison", fake_comparison)
+
+    client = TestClient(create_app())
+    response = client.get("/api/backtests/11/execution-model-comparison")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "ready"
+    assert captured == {"backtest_id": 11}
+
+
+def test_backtest_drilldown_options_api(monkeypatch) -> None:
+    from alphaagent.server.api import backtests
+
+    captured = {}
+
+    def fake_options(backtest_id: int):
+        captured["backtest_id"] = backtest_id
+        return {
+            "status": "ready",
+            "backtest_id": backtest_id,
+            "dates": [{"trade_date": "2026-01-06"}],
+            "symbols": [{"vt_symbol": "002636.SZSE", "status_label": "有拒单"}],
+        }
+
+    monkeypatch.setattr(backtests, "backtest_drilldown_options", fake_options)
+
+    client = TestClient(create_app())
+    response = client.get("/api/backtests/7/drilldown-options")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["data"]["symbols"][0]["vt_symbol"] == "002636.SZSE"
+    assert captured == {"backtest_id": 7}
+
+
+def test_backtest_daily_decisions_api(monkeypatch) -> None:
+    from alphaagent.server.api import backtests
+
+    captured = {}
+
+    def fake_daily_decisions(backtest_id: int, limit: int, offset: int, order: str):
+        captured.update({"backtest_id": backtest_id, "limit": limit, "offset": offset, "order": order})
+        return {
+            "status": "ready",
+            "backtest_id": backtest_id,
+            "items": [{"trade_date": "2026-01-06", "buy_candidate_count": 1}],
+        }
+
+    monkeypatch.setattr(backtests, "backtest_daily_decisions", fake_daily_decisions)
+
+    client = TestClient(create_app())
+    response = client.get("/api/backtests/7/daily-decisions?limit=20&offset=40&order=asc")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["data"]["items"][0]["trade_date"] == "2026-01-06"
+    assert captured == {"backtest_id": 7, "limit": 20, "offset": 40, "order": "asc"}
+
+
+def test_backtest_trade_attribution_api(monkeypatch) -> None:
+    from alphaagent.server.api import backtests
+
+    captured = {}
+
+    def fake_trade_attribution(backtest_id: int, limit: int, offset: int, sort: str):
+        captured.update({"backtest_id": backtest_id, "limit": limit, "offset": offset, "sort": sort})
+        return {
+            "status": "ready",
+            "backtest_id": backtest_id,
+            "summary": {"closed_count": 1},
+            "items": [{"vt_symbol": "002636.SZSE", "pnl": -120.0}],
+        }
+
+    monkeypatch.setattr(backtests, "backtest_trade_attribution", fake_trade_attribution)
+
+    client = TestClient(create_app())
+    response = client.get("/api/backtests/7/trade-attribution?limit=30&offset=60&sort=entry_desc")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["data"]["items"][0]["vt_symbol"] == "002636.SZSE"
+    assert captured == {"backtest_id": 7, "limit": 30, "offset": 60, "sort": "entry_desc"}
+
+
+def test_backtest_minute_coverage_classifies_proxy_and_gap_states(monkeypatch) -> None:
+    from alphaagent.server.services.backtest import engine
+
+    def fake_report(backtest_id, trade_limit=1):
+        del trade_limit
+        if backtest_id == 1:
+            quality = {
+                "buy_count": 3,
+                "minute_1430_count": 3,
+                "minute_1430_ratio": 100.0,
+                "daily_close_proxy_count": 0,
+                "strict_1430_rejected_count": 0,
+                "minute_gap_rejected_count": 0,
+            }
+        elif backtest_id == 2:
+            quality = {
+                "buy_count": 5,
+                "minute_1430_count": 1,
+                "minute_1430_ratio": 20.0,
+                "daily_close_proxy_count": 4,
+                "daily_close_proxy_ratio": 80.0,
+                "strict_1430_rejected_count": 0,
+                "minute_gap_rejected_count": 0,
+            }
+        elif backtest_id == 3:
+            quality = {
+                "buy_count": 1,
+                "minute_1430_count": 0,
+                "daily_close_proxy_count": 0,
+                "strict_1430_rejected_count": 9,
+                "minute_gap_rejected_count": 4,
+            }
+        else:
+            quality = {
+                "buy_count": 2,
+                "minute_1430_count": 2,
+                "daily_close_proxy_count": 0,
+                "strict_1430_rejected_count": 8,
+                "minute_gap_rejected_count": 0,
+            }
+        return {
+            "status": "ready",
+            "backtest_id": backtest_id,
+            "execution_quality": quality,
+            "method": {"execution": {"execution_model": "strict_1430"}},
+        }
+
+    monkeypatch.setattr(engine, "backtest_report", fake_report)
+
+    assert engine.backtest_minute_coverage(1)["status"] == "ready"
+    assert engine.backtest_minute_coverage(2)["status"] == "mixed_proxy"
+    assert engine.backtest_minute_coverage(3)["status"] == "missing_snapshots"
+    assert engine.backtest_minute_coverage(4)["status"] == "strategy_not_triggered"
+
+
+def test_backtest_minute_coverage_api(monkeypatch) -> None:
+    from alphaagent.server.api import backtests
+
+    captured = {}
+
+    def fake_coverage(backtest_id):
+        captured["backtest_id"] = backtest_id
+        return {"status": "ready", "backtest_id": backtest_id, "buy_count": 1}
+
+    monkeypatch.setattr(backtests, "backtest_minute_coverage", fake_coverage)
+
+    client = TestClient(create_app())
+    response = client.get("/api/backtests/11/minute-coverage")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "ready"
+    assert captured == {"backtest_id": 11}
+
+
+def test_backtest_data_quality_summarizes_existing_report_and_coverage() -> None:
+    from alphaagent.server.services.backtest import data_quality
+
+    def fake_report(backtest_id, trade_limit):
+        assert backtest_id == 62
+        assert trade_limit == 1
+        return {
+            "status": "ready",
+            "backtest_id": backtest_id,
+            "strategy_id": "mainline_leader_pullback",
+            "strategy_version": "0.1.1",
+            "start_date": "2026-02-02",
+            "end_date": "2026-06-13",
+            "execution_quality": {
+                "daily_close_proxy_count": 0,
+                "minute_gap_rejected_count": 0,
+            },
+            "data_quality": {"stock_financial_reports": {"count": 20}},
+            "sample": {"symbol_count": 80, "coverage_pct": 2.5},
+            "data_as_of_audit": {"status": "ready"},
+        }
+
+    def fake_coverage(backtest_id):
+        assert backtest_id == 62
+        return {
+            "status": "ready",
+            "execution_model": "strict_1430",
+            "minute_1430_count": 21,
+            "next_action": "本次买入均可按 14:30 分钟快照解读。",
+        }
+
+    result = data_quality.backtest_data_quality(62, report_loader=fake_report, coverage_loader=fake_coverage)
+
+    assert result["status"] == "ready"
+    assert result["execution_model"] == "strict_1430"
+    assert result["checks"][0]["id"] == "minute_1430_coverage"
+    assert result["checks"][0]["status"] == "pass"
+    assert result["checks"][3]["id"] == "financial_visibility"
+    assert result["checks"][3]["status"] == "pass"
+
+
+def test_backtest_data_quality_api(monkeypatch) -> None:
+    from alphaagent.server.api import backtests
+
+    captured = {}
+
+    def fake_data_quality(backtest_id):
+        captured["backtest_id"] = backtest_id
+        return {"status": "ready", "backtest_id": backtest_id, "checks": []}
+
+    monkeypatch.setattr(backtests, "backtest_data_quality", fake_data_quality)
+
+    client = TestClient(create_app())
+    response = client.get("/api/backtests/62/data-quality")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "ready"
+    assert captured == {"backtest_id": 62}
+
+
 def test_backtest_trades_api_passes_pagination(monkeypatch) -> None:
     from alphaagent.server.api import backtests
 
@@ -2317,9 +4788,37 @@ def test_backtest_execution_quality_flags_minute_fallback_risk() -> None:
     )
 
     assert quality["status"] == "warning"
-    assert quality["minute_tail_entry_ratio"] == 0.0
+    assert quality["minute_1430_ratio"] == 0.0
     assert quality["daily_open_fallback_ratio"] == 100.0
-    assert any(item["id"] == "minute_tail_entry_coverage" and item["status"] == "warning" for item in quality["diagnostics"])
+    assert any(item["id"] == "minute_1430_coverage" and item["status"] == "warning" for item in quality["diagnostics"])
+    assert any(item["id"] == "legacy_open_fallback_rate" and item["status"] == "warning" for item in quality["diagnostics"])
+
+
+def test_backtest_execution_quality_flags_strict_tail_rejections() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    quality = engine._execution_quality_report(
+        {"minute_1430_count": 2, "daily_close_proxy_count": 0},
+        {
+            "buy_count": 2,
+            "strict_1430_rejected_count": 780,
+            "minute_gap_rejected_count": 780,
+            "execution_modes": {"minute_1430": 2},
+        },
+        {
+            "stock_minute_bars": {"count": 61544},
+            "stock_daily_bars": {"count": 1000},
+            "stock_financial_reports": {"count": 3},
+        },
+        {"coverage_pct": 99.0},
+    )
+
+    assert quality["status"] == "warning"
+    assert quality["minute_1430_ratio"] == 100.0
+    assert quality["strict_1430_rejected_count"] == 780
+    assert quality["strict_1430_rejected_ratio"] > 99
+    assert quality["minute_gap_rejected_count"] == 780
+    assert any(item["id"] == "strict_tail_rejected_orders" and item["status"] == "warning" for item in quality["diagnostics"])
 
 
 def test_data_sync_truthy_handles_string_params() -> None:
@@ -2661,7 +5160,7 @@ def test_vnpy_database_imports_gap_minute_bars(monkeypatch) -> None:
             ]
 
     writes = []
-    gap_csv = "trade_date,vt_symbol,reference_date,window,ma5\n2026-01-08,600000.SSE,2026-01-07,14:30-14:57,10.0\n"
+    gap_csv = "trade_date,vt_symbol,reference_date,window,ma5\n2026-01-08,600000.SSE,2026-01-07,14:30-14:30,10.0\n"
     monkeypatch.setattr(database_import, "is_database_configured", lambda: True)
     monkeypatch.setattr(database_import, "get_database", lambda: FakeDatabase())
     monkeypatch.setattr(
@@ -2687,7 +5186,7 @@ def test_vnpy_database_imports_gap_minute_bars(monkeypatch) -> None:
     assert result["gap_count"] == 1
     assert result["rows_read"] == 1
     assert result["rows_written"] == 1
-    assert seen_windows == [("600000", Exchange.SSE, Interval.MINUTE, "14:30", "14:57")]
+    assert seen_windows == [("600000", Exchange.SSE, Interval.MINUTE, "14:30", "14:30")]
     assert writes == [("600000", "SSE", 1, "1m", "vnpy_database_gap")]
     assert result["audit_after"]["status"] == "ready"
 
@@ -2701,7 +5200,7 @@ def test_vnpy_gap_import_reports_empty_when_database_has_no_bars(monkeypatch) ->
             del symbol, exchange, interval, start, end
             return []
 
-    gap_csv = "trade_date,vt_symbol,reference_date,window,ma5\n2026-01-08,600000.SSE,2026-01-07,14:30-14:57,10.0\n"
+    gap_csv = "trade_date,vt_symbol,reference_date,window,ma5\n2026-01-08,600000.SSE,2026-01-07,14:30-14:30,10.0\n"
     monkeypatch.setattr(database_import, "is_database_configured", lambda: True)
     monkeypatch.setattr(database_import, "get_database", lambda: FakeDatabase())
     monkeypatch.setattr(
@@ -2764,7 +5263,7 @@ def test_vnpy_import_gap_minute_bars_endpoint(monkeypatch) -> None:
             "gap_file_path": "memory/06_backtests/gaps.csv",
             "interval": "1m",
             "tail_entry_start": "14:30",
-            "tail_entry_end": "14:57",
+            "tail_entry_end": "14:30",
             "dry_run": True,
             "max_gaps": 50,
         },
@@ -2776,10 +5275,44 @@ def test_vnpy_import_gap_minute_bars_endpoint(monkeypatch) -> None:
         "gap_file_path": "memory/06_backtests/gaps.csv",
         "interval": "1m",
         "tail_entry_start": "14:30",
-        "tail_entry_end": "14:57",
+        "tail_entry_end": "14:30",
         "dry_run": True,
         "max_gaps": 50,
     }
+    assert response.json()["data"]["status"] == "ready"
+
+
+def test_vnpy_import_gap_minute_bars_endpoint_accepts_backtest_id(monkeypatch) -> None:
+    from alphaagent.server.api import vnpy_local_data
+
+    captured = {}
+
+    monkeypatch.setattr(
+        vnpy_local_data.data_sync_service,
+        "minute_gap_requirements_from_params",
+        lambda params: {
+            "items": [{"vt_symbol": "600000.SSE", "trade_date": date(2026, 1, 8), "reference_date": None, "ma5": None, "window": "14:30-14:30"}],
+            "rows_read": 1,
+            "rows_skipped": 0,
+            "errors": [],
+        },
+    )
+
+    def fake_import(**kwargs):
+        captured.update(kwargs)
+        return {"status": "ready", "rows_read": 2, "rows_written": 0}
+
+    monkeypatch.setattr(vnpy_local_data, "import_vnpy_minute_bars_for_gaps", fake_import)
+
+    client = TestClient(create_app())
+    response = client.post(
+        "/api/vnpy/import-minute-bars/gaps",
+        json={"backtest_id": 42, "interval": "1m", "tail_entry_start": "14:30", "tail_entry_end": "14:30", "dry_run": True},
+    )
+
+    assert response.status_code == 200
+    assert captured["gap_csv_text"].startswith("trade_date,vt_symbol")
+    assert captured["gap_file_path"] == ""
     assert response.json()["data"]["status"] == "ready"
 
 
@@ -2814,9 +5347,9 @@ def test_minute_gap_vendor_manifest_builds_provider_rows() -> None:
 
     gap_csv = (
         "trade_date,vt_symbol,reference_date,window,ma5\n"
-        "2026-01-08,600000.SSE,2026-01-07,14:30-14:57,10.0\n"
-        "2026-01-08,600000.SSE,2026-01-07,14:30-14:57,10.0\n"
-        "2026-01-09,000001.SZSE,2026-01-08,14:30-14:57,12.0\n"
+        "2026-01-08,600000.SSE,2026-01-07,14:30-14:30,10.0\n"
+        "2026-01-08,600000.SSE,2026-01-07,14:30-14:30,10.0\n"
+        "2026-01-09,000001.SZSE,2026-01-08,14:30-14:30,12.0\n"
     )
 
     manifest = data_sync.minute_gap_vendor_manifest(gap_csv, tail_entry_start="14:30", tail_entry_end="14:57")
@@ -2851,6 +5384,30 @@ def test_minute_gap_vendor_manifest_endpoint(monkeypatch) -> None:
     assert "600000.SSE" in csv_response.text
 
 
+def test_minute_gap_vendor_manifest_endpoint_accepts_backtest_id(monkeypatch) -> None:
+    from alphaagent.server.api import data_sync
+
+    monkeypatch.setattr(
+        data_sync.service,
+        "minute_gap_requirements_from_params",
+        lambda params: {
+            "items": [{"vt_symbol": "600000.SSE", "trade_date": date(2026, 1, 8), "reference_date": None, "ma5": None, "window": "14:30-14:30"}],
+            "rows_read": 1,
+            "rows_skipped": 0,
+            "errors": [],
+        },
+    )
+
+    client = TestClient(create_app())
+    response = client.post("/api/data-sync/imports/minute-bars/vendor-manifest", json={"backtest_id": 42})
+    csv_response = client.post("/api/data-sync/imports/minute-bars/vendor-manifest.csv", json={"backtest_id": 42})
+
+    assert response.status_code == 200
+    assert response.json()["data"]["request_count"] == 1
+    assert csv_response.status_code == 200
+    assert "600000.SSE" in csv_response.text
+
+
 def test_tushare_gap_import_filters_and_upserts(monkeypatch) -> None:
     from types import SimpleNamespace
 
@@ -2868,15 +5425,15 @@ def test_tushare_gap_import_filters_and_upserts(monkeypatch) -> None:
                 "data": {
                     "fields": ["ts_code", "trade_time", "open", "close", "high", "low", "vol", "amount"],
                     "items": [
-                        ["600000.SH", "2026-01-08 14:56:00", 10, 10.1, 10.2, 9.9, 1000, 10100],
-                        ["600000.SH", "2026-06-11 14:56:00", 11, 11.1, 11.2, 10.9, 1000, 11100],
+                        ["600000.SH", "2026-01-08 14:30:00", 10, 10.1, 10.2, 9.9, 1000, 10100],
+                        ["600000.SH", "2026-06-11 14:30:00", 11, 11.1, 11.2, 10.9, 1000, 11100],
                     ],
                 },
             }
 
     posted = []
     writes = []
-    gap_csv = "trade_date,vt_symbol,reference_date,window,ma5\n2026-01-08,600000.SSE,2026-01-07,14:30-14:57,10.0\n"
+    gap_csv = "trade_date,vt_symbol,reference_date,window,ma5\n2026-01-08,600000.SSE,2026-01-07,14:30-14:30,10.0\n"
     monkeypatch.setattr(tushare_minute_import, "is_database_configured", lambda: True)
     monkeypatch.setattr(
         tushare_minute_import,
@@ -2953,7 +5510,7 @@ def test_tdx_gap_import_writes_real_minute_rows(monkeypatch) -> None:
             return None
 
     writes = []
-    gap_csv = "trade_date,vt_symbol,reference_date,window,ma5\n2026-01-08,600000.SSE,2026-01-07,14:30-14:57,10.0\n"
+    gap_csv = "trade_date,vt_symbol,reference_date,window,ma5\n2026-01-08,600000.SSE,2026-01-07,14:30-14:30,10.0\n"
     monkeypatch.setattr(tdx_minute_import, "is_database_configured", lambda: True)
     monkeypatch.setattr(
         tdx_minute_import,
@@ -2980,10 +5537,10 @@ def test_tdx_gap_import_writes_real_minute_rows(monkeypatch) -> None:
     result = tdx_minute_import.import_tdx_minute_bars_for_gaps(gap_csv_text=gap_csv, dry_run=False, max_pages_per_symbol=1)
 
     assert result["status"] == "ready"
-    assert result["rows_read"] == 2
-    assert result["rows_written"] == 2
+    assert result["rows_read"] == 1
+    assert result["rows_written"] == 1
     assert result["preview_covered_gap_count"] == 1
-    assert writes == [("600000", "SSE", 2, "1m", "tdx_public_hq")]
+    assert writes == [("600000", "SSE", 1, "1m", "tdx_public_hq")]
     assert result["audit_after"]["status"] == "ready"
 
 
@@ -3005,7 +5562,6 @@ def test_tdx_gap_import_endpoint(monkeypatch) -> None:
             "gap_file_path": "memory/06_backtests/gaps.csv",
             "interval": "1m",
             "tail_entry_start": "14:30",
-            "tail_entry_end": "14:57",
             "dry_run": True,
             "max_gaps": 12,
             "max_pages_per_symbol": 3,
@@ -3019,7 +5575,7 @@ def test_tdx_gap_import_endpoint(monkeypatch) -> None:
         "gap_file_path": "memory/06_backtests/gaps.csv",
         "interval": "1m",
         "tail_entry_start": "14:30",
-        "tail_entry_end": "14:57",
+        "tail_entry_end": "14:30",
         "dry_run": True,
         "max_gaps": 12,
         "max_pages_per_symbol": 3,
@@ -3039,30 +5595,55 @@ def test_backtest_minute_gap_csv_content_uses_rejected_orders() -> None:
                 "trade_date": date(2026, 5, 11),
                 "vt_symbol": "688668.SSE",
                 "raw": {
-                    "mode": "minute_tail_ma5_required",
+                    "mode": "strict_1430_required",
                     "reference_date": "2026-05-08",
-                    "window": "14:30-14:57",
+                    "window": "14:30-14:30",
                     "ma5": 220.918,
                     "minute_bar_count": 0,
-                    "reason": "tail_entry_not_triggered",
+                    "reason": "missing_1430_snapshot",
                 },
             },
             {
                 "trade_date": date(2026, 5, 11),
                 "vt_symbol": "688668.SSE",
                 "raw": {
-                    "mode": "minute_tail_ma5_required",
+                    "mode": "strict_1430_required",
                     "reference_date": "2026-05-08",
-                    "window": "14:30-14:57",
+                    "window": "14:30-14:30",
                     "ma5": 220.918,
+                },
+            },
+            {
+                "trade_date": date(2026, 5, 12),
+                "vt_symbol": "600000.SSE",
+                "raw": {
+                    "mode": "strict_1430_required",
+                    "reference_date": "2026-05-11",
+                    "window": "14:30-14:30",
+                    "ma5": 10.5,
+                    "price_source": "stock_minute_bars.close_price",
+                    "reason": "tail_entry_not_triggered",
+                },
+            },
+            {
+                "trade_date": date(2026, 5, 13),
+                "vt_symbol": "000001.SZSE",
+                "raw": {
+                    "mode": "strict_1430_required_sell",
+                    "reference_date": "2026-05-13",
+                    "window": "14:30-14:30",
+                    "minute_bar_count": 0,
+                    "reason": "tail_exit_not_triggered",
                 },
             },
         ]
     )
 
-    assert gap_count == 1
+    assert gap_count == 2
     assert "trade_date,vt_symbol,reference_date,window,ma5,minute_bar_count,missing_reason" in content
-    assert "2026-05-11,688668.SSE,2026-05-08,14:30-14:57,220.918,0,tail_entry_not_triggered" in content
+    assert "2026-05-11,688668.SSE,2026-05-08,14:30-14:30,220.918,0,missing_1430_snapshot" in content
+    assert "2026-05-13,000001.SZSE,2026-05-13,14:30-14:30,,0,tail_exit_not_triggered" in content
+    assert "2026-05-12,600000.SSE" not in content
 
 
 def test_tushare_gap_import_endpoint(monkeypatch) -> None:
@@ -3083,7 +5664,6 @@ def test_tushare_gap_import_endpoint(monkeypatch) -> None:
             "gap_file_path": "memory/06_backtests/gaps.csv",
             "interval": "1m",
             "tail_entry_start": "14:30",
-            "tail_entry_end": "14:57",
             "dry_run": True,
             "max_gaps": 20,
         },
@@ -3095,7 +5675,7 @@ def test_tushare_gap_import_endpoint(monkeypatch) -> None:
         "gap_file_path": "memory/06_backtests/gaps.csv",
         "interval": "1m",
         "tail_entry_start": "14:30",
-        "tail_entry_end": "14:57",
+        "tail_entry_end": "14:30",
         "dry_run": True,
         "max_gaps": 20,
     }
@@ -3106,19 +5686,60 @@ def test_strict_minute_pipeline_blocks_when_gap_audit_incomplete(monkeypatch) ->
     from alphaagent.server.services.backtest import strict_pipeline
     from alphaagent.server.services.backtest.engine import BacktestParams
 
-    monkeypatch.setattr(
-        strict_pipeline,
-        "_audit_gap_coverage",
-        lambda **kwargs: {"status": "incomplete", "gap_count": 3, "covered_count": 1, "missing_count": 2, "coverage_pct": 33.3333},
-    )
+    captured = {}
+
+    def fake_audit(**kwargs):
+        captured.update(kwargs)
+        return {"status": "incomplete", "gap_count": 3, "covered_count": 1, "missing_count": 2, "coverage_pct": 33.3333}
+
+    monkeypatch.setattr(strict_pipeline, "_audit_gap_coverage", fake_audit)
     monkeypatch.setattr(strict_pipeline, "run_backtest", lambda params: (_ for _ in ()).throw(AssertionError("should not run")))
 
-    result = strict_pipeline.run_strict_minute_backtest_pipeline(BacktestParams(max_symbols=20), gap_csv_text="x")
+    result = strict_pipeline.run_strict_minute_backtest_pipeline(BacktestParams(max_symbols=20, minute_interval="1m"), gap_csv_text="x")
 
     assert result["status"] == "blocked_by_minute_gaps"
     assert result["audit"]["missing_count"] == 2
+    assert result["params"]["execution_model"] == "strict_1430"
     assert result["params"]["minute_entry_required"] is True
-    assert result["params"]["max_symbols"] == 1500
+    assert result["params"]["minute_interval"] == "1m"
+    assert result["params"]["max_symbols"] == 20
+    assert captured["interval"] == "1m"
+
+
+def test_strict_minute_pipeline_accepts_backtest_id(monkeypatch) -> None:
+    from alphaagent.server.services.backtest import strict_pipeline
+    from alphaagent.server.services.backtest.engine import BacktestParams
+
+    captured = {}
+
+    monkeypatch.setattr(
+        strict_pipeline,
+        "backtest_minute_gap_csv",
+        lambda backtest_id: {"status": "ready", "content": "trade_date,vt_symbol\n2026-01-08,600000.SSE\n"},
+    )
+    monkeypatch.setattr(
+        strict_pipeline,
+        "get_backtest",
+        lambda backtest_id: {
+            "status": "ready",
+            "item": {
+                "strategy_id": "mainline_leader_pullback",
+                "start_date": "2026-01-01",
+                "end_date": "2026-02-01",
+                "initial_cash": 1_000_000,
+                "params": {"max_symbols": 80, "minute_interval": "1m"},
+            },
+        },
+    )
+    monkeypatch.setattr(strict_pipeline, "_audit_gap_coverage", lambda **kwargs: captured.update(kwargs) or {"status": "incomplete"})
+
+    result = strict_pipeline.run_strict_minute_backtest_pipeline(BacktestParams(max_symbols=20, minute_interval="1m"), backtest_id=42)
+
+    assert result["status"] == "blocked_by_minute_gaps"
+    assert result["params"]["max_symbols"] == 80
+    assert captured["gap_csv_text"].startswith("trade_date,vt_symbol")
+    assert captured["gap_file_path"] == ""
+    assert captured["tail_entry_start"] == "14:30"
 
 
 def test_strict_minute_pipeline_runs_when_gap_audit_ready(monkeypatch) -> None:
@@ -3136,13 +5757,71 @@ def test_strict_minute_pipeline_runs_when_gap_audit_ready(monkeypatch) -> None:
     monkeypatch.setattr(strict_pipeline, "backtest_report", lambda backtest_id, trade_limit: {"status": "ready", "backtest_id": backtest_id, "metrics": {"total_return_pct": 1.2}})
     monkeypatch.setattr(strict_pipeline, "backtest_report_csv", lambda backtest_id, trade_limit: {"status": "ready", "filename": f"alphaagent_backtest_{backtest_id}.csv"})
 
-    result = strict_pipeline.run_strict_minute_backtest_pipeline(BacktestParams(max_symbols=20), gap_csv_text="x")
+    result = strict_pipeline.run_strict_minute_backtest_pipeline(BacktestParams(max_symbols=20, minute_interval="1m"), gap_csv_text="x")
 
     assert result["status"] == "ready"
     assert result["backtest"]["backtest_id"] == 99
     assert result["csv"]["filename"] == "alphaagent_backtest_99.csv"
     assert captured["params"].minute_entry_required is True
     assert captured["params"].intraday_entry is True
+    assert captured["params"].execution_model == "strict_1430"
+    assert captured["params"].minute_interval == "1m"
+    assert captured["params"].persist is True
+
+
+def test_strict_minute_pipeline_reuses_source_backtest_params(monkeypatch) -> None:
+    from alphaagent.server.services.backtest import strict_pipeline
+    from alphaagent.server.services.backtest.engine import BacktestParams
+
+    captured = {}
+
+    monkeypatch.setattr(
+        strict_pipeline,
+        "backtest_minute_gap_csv",
+        lambda backtest_id: {"status": "ready", "content": "trade_date,vt_symbol\n2026-01-08,600000.SSE\n"},
+    )
+    monkeypatch.setattr(
+        strict_pipeline,
+        "get_backtest",
+        lambda backtest_id: {
+            "status": "ready",
+            "item": {
+                "strategy_id": "mainline_leader_pullback",
+                "start_date": "2026-02-02",
+                "end_date": "2026-06-13",
+                "initial_cash": 1_000_000,
+                "params": {
+                    "strategy": "mainline_leader_pullback",
+                    "start": "2026-02-02",
+                    "end": "2026-06-13",
+                    "max_symbols": 80,
+                    "max_positions": 8,
+                    "included_boards": ["main"],
+                    "execution_model": "strict_1430",
+                    "minute_interval": "1m",
+                },
+            },
+        },
+    )
+
+    def fake_run(params):
+        captured["params"] = params
+        return {"status": "ready", "backtest_id": 99, "metrics": {}, "start": "2026-02-02", "end": "2026-06-13"}
+
+    monkeypatch.setattr(strict_pipeline, "_audit_gap_coverage", lambda **kwargs: {"status": "ready"})
+    monkeypatch.setattr(strict_pipeline, "run_backtest", fake_run)
+    monkeypatch.setattr(strict_pipeline, "backtest_report", lambda backtest_id, trade_limit: {"status": "ready", "backtest_id": backtest_id})
+    monkeypatch.setattr(strict_pipeline, "backtest_report_csv", lambda backtest_id, trade_limit: {"status": "ready", "filename": "report.csv"})
+
+    result = strict_pipeline.run_strict_minute_backtest_pipeline(
+        BacktestParams(max_symbols=1500, minute_interval="1m"),
+        backtest_id=42,
+    )
+
+    assert result["status"] == "ready"
+    assert captured["params"].max_symbols == 80
+    assert captured["params"].included_boards == ("main",)
+    assert captured["params"].execution_model == "strict_1430"
     assert captured["params"].persist is True
 
 
@@ -3166,7 +5845,6 @@ def test_strict_minute_pipeline_endpoint(monkeypatch) -> None:
             "max_symbols": 1500,
             "gap_file_path": "memory/06_backtests/gaps.csv",
             "tail_entry_start": "14:30",
-            "tail_entry_end": "14:57",
             "trade_limit": 12,
         },
     )
@@ -3175,4 +5853,129 @@ def test_strict_minute_pipeline_endpoint(monkeypatch) -> None:
     assert captured["gap_file_path"] == "memory/06_backtests/gaps.csv"
     assert captured["trade_limit"] == 12
     assert captured["params"].start.isoformat() == "2026-01-01"
+    assert captured["params"].tail_entry_end == "14:30"
     assert response.json()["data"]["status"] == "blocked_by_minute_gaps"
+
+
+def test_backtest_daily_decision_summary_counts_candidate_order_trade_chain() -> None:
+    from alphaagent.server.services.backtest import queries
+
+    summary = queries.daily_decision_summary(
+        recommendations=[
+            {"trade_date": date(2026, 1, 2), "vt_symbol": "600000.SSE", "action": "BUY"},
+            {"trade_date": date(2026, 1, 2), "vt_symbol": "000001.SZSE", "action": "WATCH"},
+        ],
+        signals=[
+            {"trade_date": date(2026, 1, 3), "signal_date": date(2026, 1, 2), "vt_symbol": "600000.SSE", "side": "BUY"},
+            {"trade_date": date(2026, 1, 3), "signal_date": date(2026, 1, 2), "vt_symbol": "600000.SSE", "side": "SELL"},
+        ],
+        orders=[
+            {"trade_date": date(2026, 1, 3), "vt_symbol": "600000.SSE", "side": "BUY", "status": "filled"},
+            {"trade_date": date(2026, 1, 3), "vt_symbol": "000001.SZSE", "side": "BUY", "status": "rejected", "reason": "tail_entry_not_triggered"},
+            {"trade_date": date(2026, 1, 3), "vt_symbol": "600000.SSE", "side": "SELL", "status": "filled"},
+        ],
+        trades=[
+            {"trade_date": date(2026, 1, 3), "vt_symbol": "600000.SSE", "side": "BUY", "amount": 10_000.0, "fee": 3.0},
+            {"trade_date": date(2026, 1, 3), "vt_symbol": "600000.SSE", "side": "SELL", "amount": 10_500.0, "fee": 8.0, "pnl": 489.0},
+        ],
+    )
+
+    assert summary["status"] == "traded"
+    assert summary["buy_candidate_count"] == 1
+    assert summary["watch_candidate_count"] == 1
+    assert summary["buy_signal_count"] == 1
+    assert summary["sell_signal_count"] == 1
+    assert summary["buy_order_count"] == 2
+    assert summary["sell_order_count"] == 1
+    assert summary["buy_trade_count"] == 1
+    assert summary["sell_trade_count"] == 1
+    assert summary["buy_amount"] == 10_003.0
+    assert summary["sell_cash_in"] == 10_492.0
+    assert summary["realized_pnl"] == 489.0
+    assert summary["rejected_reasons"] == [{"reason": "tail_entry_not_triggered", "reason_label": "尾盘入场未触发", "count": 1}]
+
+
+def test_backtest_daily_decision_rows_map_signal_date_candidates_to_execute_day() -> None:
+    from alphaagent.server.services.backtest import queries
+
+    rows = queries.daily_decision_rows(
+        equity_rows=[
+            {"trade_date": date(2026, 1, 2), "cash": 100_000.0, "market_value": 0.0, "total_equity": 100_000.0, "position_count": 0},
+            {"trade_date": date(2026, 1, 5), "cash": 89_997.0, "market_value": 10_100.0, "total_equity": 100_097.0, "position_count": 1},
+        ],
+        recommendations=[
+            {"trade_date": date(2026, 1, 2), "vt_symbol": "600000.SSE", "action": "BUY"},
+            {"trade_date": date(2026, 1, 2), "vt_symbol": "000001.SZSE", "action": "WATCH"},
+        ],
+        signals=[
+            {"trade_date": date(2026, 1, 5), "signal_date": date(2026, 1, 2), "execute_date": date(2026, 1, 5), "vt_symbol": "600000.SSE", "side": "BUY"},
+        ],
+        orders=[
+            {"trade_date": date(2026, 1, 5), "vt_symbol": "600000.SSE", "side": "BUY", "status": "filled"},
+        ],
+        trades=[
+            {"trade_date": date(2026, 1, 5), "vt_symbol": "600000.SSE", "side": "BUY", "amount": 10_000.0, "fee": 3.0},
+        ],
+        position_counts=[
+            {"trade_date": date(2026, 1, 5), "position_snapshot_count": 1},
+        ],
+    )
+
+    by_date = {row["trade_date"]: row for row in rows}
+    execute_day = by_date[date(2026, 1, 5)]
+    assert execute_day["source_signal_dates"] == [date(2026, 1, 2)]
+    assert execute_day["buy_candidate_count"] == 1
+    assert execute_day["watch_candidate_count"] == 1
+    assert execute_day["buy_signal_count"] == 1
+    assert execute_day["buy_trade_count"] == 1
+    assert execute_day["buy_amount"] == 10_003.0
+    assert execute_day["position_snapshot_count"] == 1
+
+
+def test_backtest_trade_attribution_reports_floating_extremes() -> None:
+    from alphaagent.server.services.backtest import queries
+
+    rows = queries.trade_attribution(
+        trades=[
+            {
+                "trade_date": date(2026, 1, 2),
+                "vt_symbol": "600000.SSE",
+                "side": "BUY",
+                "price": 10.0,
+                "volume": 1000,
+                "amount": 10_000.0,
+                "fee": 3.0,
+                "raw": {"execution": {"mode": "minute_1430", "price_source": "stock_minute_bars.close_price", "proxy_used": False}},
+            },
+            {
+                "trade_date": date(2026, 1, 5),
+                "vt_symbol": "600000.SSE",
+                "side": "SELL",
+                "price": 10.8,
+                "volume": 1000,
+                "amount": 10_800.0,
+                "fee": 8.4,
+                "pnl": 788.6,
+                "reason": "take_profit",
+            },
+        ],
+        positions=[
+            {"trade_date": date(2026, 1, 2), "vt_symbol": "600000.SSE", "floating_pnl": 100.0, "floating_pnl_pct": 1.0},
+            {"trade_date": date(2026, 1, 3), "vt_symbol": "600000.SSE", "floating_pnl": -250.0, "floating_pnl_pct": -2.5},
+            {"trade_date": date(2026, 1, 4), "vt_symbol": "600000.SSE", "floating_pnl": 900.0, "floating_pnl_pct": 9.0},
+        ],
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["status"] == "closed"
+    assert row["entry_date"] == date(2026, 1, 2)
+    assert row["exit_date"] == date(2026, 1, 5)
+    assert row["pnl"] == 788.6
+    assert row["return_pct"] == 7.886
+    assert row["max_floating_pnl"] == 900.0
+    assert row["min_floating_pnl"] == -250.0
+    assert row["max_floating_pnl_pct"] == 9.0
+    assert row["min_floating_pnl_pct"] == -2.5
+    assert row["execution_mode"] == "minute_1430"
+    assert row["exit_reason_label"] == "止盈"

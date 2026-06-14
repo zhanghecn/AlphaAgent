@@ -22,6 +22,9 @@ interface CandidateReason {
   risk_level?: string;
   trade_date?: string;
   entry_rule?: string;
+  selection_rule?: string;
+  entry_setup?: string;
+  entry_signal?: boolean;
 }
 
 /** Parse the quant_candidate reason JSON (rank / score / risk / date). */
@@ -50,6 +53,11 @@ function riskBadge(level?: string): { label: string; variant: "destructive" | "s
 
 const ENTRY_RULE_LABEL: Record<string, string> = {
   daily_close_signal_next_open_execution: "收盘信号·次日开盘执行",
+  daily_close_visible_signal: "收盘可见信号",
+  ma5_pullback: "MA5回踩",
+  breakout_confirmation: "平台突破",
+  limit_up_after_pullback: "涨停后回踩",
+  trend_acceleration: "趋势加速",
 };
 
 /**
@@ -163,13 +171,24 @@ export function CandidateTable({ items, action, onBuild, onViewDetail }: Candida
                             <DetailRow label="综合评分" value={reason?.total_score?.toFixed(2)} />
                             <DetailRow label="风险等级" value={risk.label} />
                             <DetailRow
-                              label="入场规则"
+                              label="信号规则"
                               value={
-                                reason?.entry_rule
-                                  ? ENTRY_RULE_LABEL[reason.entry_rule] ?? reason.entry_rule
+                                reason?.selection_rule
+                                  ? ENTRY_RULE_LABEL[reason.selection_rule] ?? reason.selection_rule
+                                  : reason?.entry_rule
+                                    ? ENTRY_RULE_LABEL[reason.entry_rule] ?? reason.entry_rule
+                                    : undefined
+                              }
+                            />
+                            <DetailRow
+                              label="入场形态"
+                              value={
+                                reason?.entry_setup
+                                  ? ENTRY_RULE_LABEL[reason.entry_setup] ?? reason.entry_setup
                                   : undefined
                               }
                             />
+                            <DetailRow label="买入信号" value={reason?.entry_signal == null ? undefined : reason.entry_signal ? "BUY" : "WATCH"} />
                             <DetailRow label="策略" value={item.strategy_id} />
                             <DetailRow label="版本" value={item.strategy_version} />
                           </div>

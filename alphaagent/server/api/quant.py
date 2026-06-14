@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 
 from alphaagent.server.core.responses import fail, ok
 from alphaagent.server.services.quant import screening
+from alphaagent.server.services.quant.symbol_diagnostics import symbol_diagnostics_report
 
 router = APIRouter(prefix="/quant", tags=["quant"])
 
@@ -49,6 +50,14 @@ def create_screen_runs_range(payload: dict[str, Any] = Body(default_factory=dict
                 included_boards=payload.get("included_boards"),
             )
         )
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/strategies")
+def list_strategies():
+    try:
+        return ok(screening.list_available_strategies())
     except Exception as exc:
         return _service_error(exc)
 
@@ -125,6 +134,7 @@ def get_recommendation(recommendation_id: int):
 @router.get("/symbols/{vt_symbol}/signal-history")
 def get_symbol_signal_history(
     vt_symbol: str,
+    strategy: str = Query(default=screening.STRATEGY_ID),
     start: str = Query(default=""),
     end: str = Query(default=""),
     min_entry_score: float = Query(default=68.0, ge=0, le=100),
@@ -134,9 +144,54 @@ def get_symbol_signal_history(
         return ok(
             screening.symbol_signal_history(
                 vt_symbol,
+                strategy_id=strategy,
                 start=_parse_date(start),
                 end=_parse_date(end),
                 min_entry_score=min_entry_score,
+                limit=limit,
+            )
+        )
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/symbols/{vt_symbol}/strategy-comparison")
+def get_symbol_strategy_comparison(
+    vt_symbol: str,
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    limit: int = Query(default=80, ge=1, le=300),
+):
+    try:
+        return ok(
+            screening.symbol_strategy_comparison(
+                vt_symbol,
+                start=_parse_date(start),
+                end=_parse_date(end),
+                limit=limit,
+            )
+        )
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/symbols/{vt_symbol}/diagnostics")
+def get_symbol_diagnostics(
+    vt_symbol: str,
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    backtest_id: int | None = Query(default=None, ge=1),
+    signal_date: str = Query(default=""),
+    limit: int = Query(default=80, ge=1, le=300),
+):
+    try:
+        return ok(
+            symbol_diagnostics_report(
+                vt_symbol,
+                start=_parse_date(start),
+                end=_parse_date(end),
+                backtest_id=backtest_id,
+                signal_date=_parse_date(signal_date),
                 limit=limit,
             )
         )

@@ -22,17 +22,37 @@ export function TradingDateSelector({
   selectClassName?: string;
 }) {
   const sortedDates = uniqueSortedDates(dates);
+  const validDates = new Set(sortedDates);
   const currentIndex = sortedDates.indexOf(value);
+  const firstDate = sortedDates[0] ?? "";
   const previousDate = currentIndex > 0 ? sortedDates[currentIndex - 1] : "";
   const nextDate = currentIndex >= 0 && currentIndex < sortedDates.length - 1 ? sortedDates[currentIndex + 1] : "";
   const latestDate = sortedDates[sortedDates.length - 1] ?? "";
   const selectDates = [...sortedDates].reverse();
   const showCurrentFallback = value && currentIndex < 0;
   const isDisabled = disabled || sortedDates.length === 0;
+  const adjustedDate = value && currentIndex < 0 ? nearestTradingDate(value, sortedDates) : "";
 
   return (
     <div className={cn("flex flex-wrap items-center gap-2", className)}>
       <span className="text-sm text-muted-foreground">{label}</span>
+      <input
+        className="h-8 w-36 rounded-md border bg-background px-2 text-sm"
+        type="date"
+        value={value}
+        min={firstDate}
+        max={latestDate}
+        disabled={isDisabled}
+        onChange={(event) => {
+          const next = event.target.value;
+          if (validDates.has(next)) {
+            onChange(next);
+            return;
+          }
+          const adjusted = nearestTradingDate(next, sortedDates);
+          if (adjusted) onChange(adjusted);
+        }}
+      />
       <select
         className={cn("h-8 min-w-44 rounded-md border bg-background px-2 text-sm", selectClassName)}
         value={value}
@@ -48,6 +68,16 @@ export function TradingDateSelector({
           </option>
         ))}
       </select>
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className="h-8 px-2"
+        disabled={isDisabled || value === firstDate}
+        onClick={() => firstDate && onChange(firstDate)}
+      >
+        最早
+      </Button>
       <Button
         type="button"
         size="sm"
@@ -81,10 +111,23 @@ export function TradingDateSelector({
         <CalendarDays size={14} />
         最近交易日
       </Button>
+      {adjustedDate && (
+        <span className="text-xs text-amber-700 dark:text-amber-300">
+          已按交易日对齐到 {adjustedDate}
+        </span>
+      )}
     </div>
   );
 }
 
 function uniqueSortedDates(dates: string[]): string[] {
   return Array.from(new Set(dates.filter((item) => /^\d{4}-\d{2}-\d{2}$/.test(item)))).sort();
+}
+
+function nearestTradingDate(value: string, sortedDates: string[]): string {
+  if (!value || sortedDates.length === 0) return "";
+  for (let index = sortedDates.length - 1; index >= 0; index -= 1) {
+    if (sortedDates[index] <= value) return sortedDates[index];
+  }
+  return sortedDates[0] ?? "";
 }

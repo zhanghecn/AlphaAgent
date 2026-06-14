@@ -85,14 +85,18 @@
 
 - 提供主线龙头分歧低吸的日线量化信号。
 - 持久化筛选会把高分候选同步到“量化候选”分组；只有 `action=BUY` 的推荐会被自动模拟建仓。
-- 提供日线组合回测和 `/api/backtests/{id}/report` 回测表接口，规则为 D 日收盘生成信号、D+1 开盘模拟成交。
+- 提供日线组合回测和 `/api/backtests/{id}/report` 回测表接口；当前普通新建组合回测默认是 `strict_1430 / 1m / 14:30 / strict_entry=true`。规则为上一交易日可见候选生成 D+1 计划，D+1 只有在 14:30 的 1 分钟快照存在且满足尾盘条件时才成交；缺分钟线会拒单。`tail_close_hybrid` 只作为研究对比模型，缺分钟线时会标记 `daily_close_proxy` 收盘代理；旧 D+1 开盘口径只作为历史兼容/对比。
+- `/api/backtests/{id}/minute-coverage` 返回 14:30 覆盖摘要，状态包括 `ready`、`mixed_proxy`、`missing_snapshots`、`strategy_not_triggered` 和 `empty`；前端 `/quant` 的“14:30覆盖”面板使用它快速判断某次回测是否可按真实 14:30 成交解读。
+- `alphaagent/server/services/backtest/queries.py` 负责回测读侧 helper，包括成交分页、权益曲线、日期/股票详情、候选追踪、审计事件数据读取、交易归因日期/股票选项聚合和拒单/信号原因中文标签；`engine.py` 仍保留兼容 wrapper 给现有 API 和测试使用。
+- `alphaagent/server/services/backtest/schemas.py` 负责回测参数和账本数据结构，包括 `BacktestParams`、`MinuteBar`、`Position`、`Trade` 和 `ScoreContext`；`engine.BacktestParams` 保持兼容导出。
+- `alphaagent/server/services/backtest/reports.py` 负责回测报告纯函数，包括扩展交易指标、成交真实性检查、报告 CSV、参数网格 CSV 和严格 14:30 缺口 CSV 内容生成；`engine.py` 保留同名 wrapper。
 - `/api/backtests/{id}/report` 当前返回扩展回测表：样本覆盖率、扩展交易指标、样本等权和指数基准对比、样本内/样本外分段、年度分段、市场环境分段、成本压力测试、随机样本基准、反过拟合诊断、月度收益、个股贡献、最差交易、订单未成交原因、权益尾部和数据质量快照。
 - `/api/backtests/{id}/report.csv` 返回可下载 CSV 回测表，包含摘要、核心指标、样本覆盖、扩展交易指标、基准对比、分段、反过拟合检查、月度、个股、最差交易、交易明细、订单统计和数据质量。
 - 量化、回测、持仓、模拟服务会在直接调用时创建 AlphaAgent 业务表，不依赖 API lifespan 单一路径。
 - 提供持仓分组、自选观察、量化候选、模拟持仓和黑名单基础能力。
 - 提供本地模拟账户、模拟订单、模拟成交、模拟持仓和风险事件查询。
 - 前端 `/quant` 页面展示量化候选、回测表和模拟持仓；候选页提供单一“生成区间候选”入口，从起始交易日到本地最新交易日逐日落库，回测页提供参数化运行回测、导出 CSV 和审计/钻取能力。
-- `stock_minute_bars` 和 `sync_stock_minute_bars` 已加入，用于尾盘 14:30-14:57 接近 MA5 的分钟级入场验证；分钟线缺失时回测会把买入标记为 `daily_next_open_fallback`，强制分钟模式可拒绝缺分钟数据的订单。
+- `stock_minute_bars` 和 `sync_stock_minute_bars` 已加入，用于执行日 14:30 快照的分钟级入场验证；普通量化入口和 `/data` 回测缺口补数表单只展示 14:30 单点快照。严格 `strict_1430` 缺分钟数据时拒单；`tail_close_hybrid` 研究对比模型缺分钟线时才标记 `daily_close_proxy`。旧 14:30-14:57 窗口仅保留后端兼容/历史排查。
 - `sync_stock_minute_bars` 支持 `symbols`、`start_date`、`end_date` 参数；当前公共 EastMoney 分钟源不能可靠回填指定历史日，AkShare adapter 会过滤区间外分钟线，避免把最近分钟数据误写进历史回测窗口。
 - `/api/data-sync/imports/minute-bars/template.csv` 和 `/api/data-sync/imports/minute-bars` 已加入，可用外部 CSV 补 `stock_minute_bars` 历史分钟线，支持 `dry_run` 预检查。
 - `/api/data-sync/imports/minute-bars/audit-gaps` 和 `/api/data-sync/imports/minute-bars/gap-template.csv` 已加入，用于检查严格尾盘缺口覆盖并生成按缺口待填的分钟线模板。

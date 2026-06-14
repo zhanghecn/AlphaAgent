@@ -30,7 +30,7 @@ export function BacktestSummary({
         <InfoCell label="有效样本" value={`${report.sample.eligible_symbol_count ?? report.sample.symbol_count}只`} />
         <InfoCell label="交易日" value={`${report.sample.equity_days}天`} />
         <InfoCell label="区间" value={`${report.start_date} 至 ${report.end_date}`} />
-        <InfoCell label="闭仓笔数" value={`${report.closed_trade_count ?? report.metrics.trade_count ?? 0}笔`} />
+        <InfoCell label="买入/卖出/持仓中" value={tradePathLabel(report)} />
       </div>
     </div>
   );
@@ -67,10 +67,10 @@ export function BacktestTrustPanel({
       <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-6">
         <InfoCell label="撮合版本" value={report.strategy_version} />
         <InfoCell label="买入方式" value={verdict.entryMode} />
-        <InfoCell label="尾盘成交占比" value={formatPct(report.execution_quality?.minute_tail_entry_ratio)} />
-        <InfoCell label="严格拒单" value={`${report.execution_quality?.strict_tail_rejected_count ?? 0}笔`} />
-        <InfoCell label="开盘回退占比" value={formatPct(report.execution_quality?.daily_open_fallback_ratio)} />
-        <InfoCell label="闭仓笔数" value={`${report.closed_trade_count ?? report.metrics.trade_count ?? 0}笔`} />
+        <InfoCell label="14:30真实占比" value={formatPct(report.execution_quality?.minute_1430_ratio ?? report.execution_quality?.minute_tail_entry_ratio)} />
+        <InfoCell label="收盘代理占比" value={formatPct(report.execution_quality?.daily_close_proxy_ratio)} />
+        <InfoCell label="缺快照拒单" value={`${report.execution_quality?.minute_gap_rejected_count ?? 0}笔`} />
+        <InfoCell label="买入/卖出/持仓中" value={tradePathLabel(report)} />
       </div>
 
       {verdict.items.length > 0 && (
@@ -82,6 +82,15 @@ export function BacktestTrustPanel({
       )}
     </div>
   );
+}
+
+function tradePathLabel(report: Awaited<ReturnType<typeof fetchBacktestReport>>) {
+  const metrics = report.metrics ?? {};
+  const extended = report.extended_metrics;
+  const buyCount = extended?.buy_count ?? metrics.buy_count ?? 0;
+  const sellCount = extended?.sell_count ?? metrics.sell_count ?? report.closed_trade_count ?? metrics.trade_count ?? 0;
+  const openCount = extended?.open_trade_count ?? metrics.open_trade_count ?? Math.max(buyCount - sellCount, 0);
+  return `${buyCount} / ${sellCount} / ${openCount} 笔`;
 }
 
 export function BacktestMethodPanel({

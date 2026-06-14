@@ -26,7 +26,7 @@ def import_tdx_minute_bars_for_gaps(
     gap_file_path: str = "",
     interval: str = "1m",
     tail_entry_start: str = "14:30",
-    tail_entry_end: str = "14:57",
+    tail_entry_end: str = "14:30",
     dry_run: bool = True,
     max_gaps: int = 2000,
     max_pages_per_symbol: int = 32,

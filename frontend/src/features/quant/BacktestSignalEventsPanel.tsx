@@ -78,9 +78,9 @@ export function BacktestSignalEventsPanel({
     <section className="space-y-3 rounded-lg border p-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold">全股票信号流水</h3>
+          <h3 className="text-sm font-semibold">全股票信号计划</h3>
           <div className="mt-1 text-xs text-muted-foreground">
-            覆盖回测区间内逐日重新选股后的理论买卖点；金额按总资金等权预览，不替代真实组合资金曲线。
+            覆盖回测区间内逐日重新选股后的理论信号；金额按总资金等权预览，真实成交以订单和组合资金曲线为准。
           </div>
         </div>
         <Button
@@ -157,7 +157,7 @@ export function BacktestSignalEventsPanel({
       </div>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <InfoCell label="理论信号" value={`${previewQuery.data?.source_count ?? eventsQuery.data?.returned_count ?? rows.length} / 显示 ${rows.length}`} />
+        <InfoCell label="信号计划" value={`${previewQuery.data?.source_count ?? eventsQuery.data?.returned_count ?? rows.length} / 显示 ${rows.length}`} />
         <InfoCell label="每笔预算" value={formatAmount(previewQuery.data?.per_trade_budget)} />
         <InfoCell label="总资金" value={formatAmount(previewQuery.data?.capital ?? capital)} />
         <InfoCell label="最大持仓" value={previewQuery.data?.max_positions ?? maxPositions} />
@@ -166,7 +166,7 @@ export function BacktestSignalEventsPanel({
       {eventsQuery.data?.note && <div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">{eventsQuery.data.note}</div>}
 
       {rows.length === 0 ? (
-        <EmptyState message="暂无信号流水" description="旧回测需要重跑组合回测后才会生成全股票理论买卖点。" />
+        <EmptyState message="暂无信号计划" description="旧回测需要重跑组合回测后才会生成全股票理论信号。" />
       ) : (
         <div className="overflow-hidden rounded-lg border">
           <Table>
@@ -179,6 +179,7 @@ export function BacktestSignalEventsPanel({
                 <TableHead className="text-right">数量</TableHead>
                 <TableHead className="text-right">金额</TableHead>
                 <TableHead className="text-right">盈亏</TableHead>
+                <TableHead>订单</TableHead>
                 <TableHead>原因</TableHead>
               </TableRow>
             </TableHeader>
@@ -196,7 +197,8 @@ export function BacktestSignalEventsPanel({
                   <TableCell className={cn("text-right tabular-nums", priceColorClass(row.preview_pnl))}>
                     {formatAmount(row.preview_pnl)}
                   </TableCell>
-                  <TableCell className="text-muted-foreground">{row.reason ?? "--"}</TableCell>
+                  <TableCell className="text-muted-foreground">{row.plan_status_label ?? orderLinkLabel(row.linked_order_status)}</TableCell>
+                  <TableCell className="text-muted-foreground">{signalReasonText(row)}</TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -205,4 +207,22 @@ export function BacktestSignalEventsPanel({
       )}
     </section>
   );
+}
+
+function orderLinkLabel(status?: string | null) {
+  if (status === "filled") return "已成交";
+  if (status === "rejected") return "已拒单";
+  if (status === "pending") return "待执行";
+  return "未下单";
+}
+
+function signalReasonText(row: {
+  reason?: string | null;
+  reason_label?: string | null;
+  linked_order_reason?: string | null;
+  linked_order_reason_label?: string | null;
+  raw?: Record<string, unknown>;
+}) {
+  const rawReason = typeof row.raw?.reason === "string" ? row.raw.reason : "";
+  return row.linked_order_reason_label ?? row.reason_label ?? row.linked_order_reason ?? rawReason ?? row.reason ?? "--";
 }

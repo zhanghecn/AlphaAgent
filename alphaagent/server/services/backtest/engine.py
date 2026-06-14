@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import csv
-import io
 import json
 import random
 from collections import defaultdict
-from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timezone
-from itertools import product
+from dataclasses import replace
+from datetime import date, timedelta
 from math import sqrt
 from statistics import mean, pstdev
 from typing import Any
@@ -27,7 +24,12 @@ from alphaagent.market.boards import (
 from alphaagent.market.symbols import INDEX_SYMBOLS
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
-from alphaagent.server.services.quant.factors import STRATEGY_ID, STRATEGY_VERSION, Bar, score_financial_report, score_stock
+from alphaagent.server.services.backtest import data_quality as data_quality_service
+from alphaagent.server.services.backtest import execution_models, persistence, queries, reports, scoring, signal_plan, simulation, strategy_comparison, validation
+from alphaagent.server.services.backtest.schemas import BacktestParams, MinuteBar, Position, ScoreContext, Trade
+from alphaagent.server.services.quant.factors import STRATEGY_ID, STRATEGY_VERSION, Bar
+from alphaagent.server.services.quant.financials import financial_scores_from_rows_by_symbol
+from alphaagent.server.services.quant.strategy_registry import get_strategy
 from alphaagent.server.services.quant.screening import (
     _load_financial_scores,
     _load_fund_flow_scores,
@@ -38,82 +40,14 @@ from alphaagent.server.services.quant.screening import (
 )
 
 
-@dataclass
-class BacktestParams:
-    strategy: str = STRATEGY_ID
-    start: date = date(2020, 1, 1)
-    end: date | None = None
-    initial_cash: float = 1_000_000
-    max_positions: int = 8
-    max_position_pct: float = 0.125
-    commission_rate: float = 0.0003
-    stamp_tax_rate: float = 0.0005
-    slippage_bps: float = 10
-    stop_loss_pct: float = 0.07
-    take_profit_pct: float = 0.18
-    trailing_stop_pct: float = 0.08
-    time_stop_days: int = 15
-    candidate_limit: int = 20
-    max_symbols: int = 500
-    min_entry_score: float = 68.0
-    strict_entry: bool = True
-    intraday_entry: bool = True
-    minute_entry_required: bool = False
-    tail_entry_start: str = "14:30"
-    tail_entry_end: str = "14:57"
-    tail_entry_ma5_tolerance_pct: float = 1.5
-    persist: bool = False
-    symbols: list[str] | None = None
-    included_boards: tuple[str, ...] = DEFAULT_QUANT_INCLUDED_BOARDS
-
-    def __post_init__(self) -> None:
-        self.included_boards = normalize_included_boards(self.included_boards)
-
-
-@dataclass(frozen=True)
-class MinuteBar:
-    bar_time: datetime
-    trade_date: date
-    open_price: float
-    high_price: float
-    low_price: float
-    close_price: float
-    volume: float | None = None
-    turnover: float | None = None
-
-
-@dataclass
-class Position:
-    vt_symbol: str
-    name: str | None
-    volume: int
-    cost_price: float
-    entry_date: date
-    highest_price: float
-    reason: dict[str, Any]
-
-
-@dataclass
-class Trade:
-    trade_date: date
-    vt_symbol: str
-    side: str
-    price: float
-    volume: int
-    amount: float
-    fee: float
-    pnl: float | None = None
-    reason: str | None = None
-    raw: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class ScoreContext:
-    financial_rows_by_symbol: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+SUPPORTED_BACKTEST_MINUTE_INTERVALS = execution_models.SUPPORTED_BACKTEST_MINUTE_INTERVALS
+SUPPORTED_EXECUTION_MODELS = execution_models.SUPPORTED_EXECUTION_MODELS
+BACKTEST_LOOKBACK_DAYS = 160
 
 
 def run_backtest(params: BacktestParams) -> dict[str, Any]:
-    if params.strategy != STRATEGY_ID:
+    strategy = get_strategy(params.strategy)
+    if strategy is None:
         return {"status": "unsupported_strategy", "strategy": params.strategy}
     if not is_database_configured():
         return {"status": "unavailable", "message": "DATABASE_URL not configured"}
@@ -126,7 +60,7 @@ def run_backtest(params: BacktestParams) -> dict[str, Any]:
         vt_symbols = _load_symbol_universe(session, params.max_symbols, params.symbols, params.included_boards)
         if not vt_symbols:
             return {"status": "empty", "message": "stocks is empty"}
-        bars_by_symbol = _load_all_bars(session, vt_symbols, params.start, end)
+        bars_by_symbol = _load_all_bars(session, vt_symbols, _lookback_start(params.start), end)
         trading_days = _trading_days(bars_by_symbol, params.start, end)
         if len(trading_days) < 80:
             return {"status": "insufficient_data", "trading_days": len(trading_days)}
@@ -140,13 +74,14 @@ def run_backtest(params: BacktestParams) -> dict[str, Any]:
         "status": "ready",
         "backtest_id": backtest_id,
         "strategy": params.strategy,
-        "strategy_version": STRATEGY_VERSION,
+        "strategy_version": strategy.version,
         "start": params.start.isoformat(),
         "end": end.isoformat(),
         "metrics": run["metrics"],
         "equity": run["equity"],
         "trades": run["trades"],
         "orders": run["orders"],
+        "signal_events": run.get("signal_events") or [],
         "assumptions": _backtest_assumptions(params),
     }
 
@@ -192,6 +127,115 @@ def backtest_metrics(backtest_id: int) -> dict[str, Any]:
     return {"status": "ready", "backtest_id": backtest_id, "metrics": detail["item"].get("metrics") or {}}
 
 
+def backtest_minute_coverage(backtest_id: int) -> dict[str, Any]:
+    """Summarize whether a persisted backtest can be read as real 14:30 execution."""
+
+    report = backtest_report(backtest_id, trade_limit=1)
+    if report.get("status") != "ready":
+        return report
+    quality = report.get("execution_quality") or {}
+    method = report.get("method") or {}
+    execution = method.get("execution") if isinstance(method.get("execution"), dict) else {}
+    execution_model = str(execution.get("execution_model") or "unknown")
+    buy_count = int(quality.get("buy_count") or 0)
+    minute_1430_count = int(quality.get("minute_1430_count") or quality.get("minute_tail_entry_count") or 0)
+    daily_close_proxy_count = int(quality.get("daily_close_proxy_count") or 0)
+    strict_1430_rejected_count = int(
+        quality.get("strict_1430_rejected_count")
+        or quality.get("strict_tail_rejected_count")
+        or 0
+    )
+    minute_gap_rejected_count = int(quality.get("minute_gap_rejected_count") or 0)
+    tail_entry_rejected_count = int(quality.get("tail_entry_rejected_count") or 0)
+    tail_exit_rejected_count = int(quality.get("tail_exit_rejected_count") or 0)
+    minute_1430_ratio = quality.get("minute_1430_ratio")
+    if minute_1430_ratio is None:
+        minute_1430_ratio = _ratio_pct(minute_1430_count, buy_count)
+    daily_close_proxy_ratio = quality.get("daily_close_proxy_ratio")
+    if daily_close_proxy_ratio is None:
+        daily_close_proxy_ratio = _ratio_pct(daily_close_proxy_count, buy_count)
+
+    if minute_gap_rejected_count > 0:
+        status = "missing_snapshots"
+        next_action = "先用数据同步的股票分钟 K 线任务按回测 ID 补齐执行日 14:30 的 1m 快照，再重跑严格 14:30 回测。"
+    elif buy_count == 0:
+        status = "empty"
+        next_action = "本次回测没有实际买入，先检查候选日期、策略阈值、股票池和板块范围。"
+    elif daily_close_proxy_count > 0 or (daily_close_proxy_ratio is not None and float(daily_close_proxy_ratio) > 0):
+        status = "mixed_proxy"
+        next_action = "这是尾盘混合回测，收益包含收盘代理；需要严格真实性时请补齐 14:30 快照后运行 strict_1430。"
+    elif strict_1430_rejected_count > 0:
+        status = "strategy_not_triggered"
+        next_action = "数据快照未显示缺口，严格拒单主要来自尾盘条件未触发；应复核策略阈值和候选质量，而不是补数据。"
+    elif minute_1430_count > 0:
+        status = "ready"
+        next_action = "本次买入均可按 14:30 分钟快照解读，仍需结合反未来函数和过拟合检查。"
+    else:
+        status = "empty"
+        next_action = "没有可归类的买入成交，先检查交易表和订单表。"
+
+    diagnostics = [
+        {
+            "id": "minute_1430",
+            "label": "14:30真实成交",
+            "status": "pass" if buy_count > 0 and minute_1430_count == buy_count else "warning",
+            "value": minute_1430_count,
+            "value_type": "count",
+            "message": f"{minute_1430_count} / {buy_count} 笔买入使用执行日 14:30 的 1m 快照。",
+        },
+        {
+            "id": "daily_close_proxy",
+            "label": "收盘代理",
+            "status": "pass" if daily_close_proxy_count == 0 else "warning",
+            "value": daily_close_proxy_count,
+            "value_type": "count",
+            "message": (
+                "没有使用日线收盘代理。"
+                if daily_close_proxy_count == 0
+                else f"{daily_close_proxy_count} 笔买入缺 14:30 快照，使用执行日收盘价代理尾盘。"
+            ),
+        },
+        {
+            "id": "strict_1430_rejected",
+            "label": "严格14:30拒单",
+            "status": "pass" if strict_1430_rejected_count == 0 else "warning",
+            "value": strict_1430_rejected_count,
+            "value_type": "count",
+            "message": (
+                "严格 14:30 没有拒单。"
+                if strict_1430_rejected_count == 0
+                else f"{strict_1430_rejected_count} 笔严格 14:30 订单未成交，其中 {minute_gap_rejected_count} 笔是缺快照。"
+            ),
+        },
+    ]
+    return {
+        "status": status,
+        "backtest_id": backtest_id,
+        "execution_model": execution_model,
+        "buy_count": buy_count,
+        "minute_1430_count": minute_1430_count,
+        "minute_1430_ratio": minute_1430_ratio,
+        "daily_close_proxy_count": daily_close_proxy_count,
+        "daily_close_proxy_ratio": daily_close_proxy_ratio,
+        "strict_1430_rejected_count": strict_1430_rejected_count,
+        "minute_gap_rejected_count": minute_gap_rejected_count,
+        "tail_entry_rejected_count": tail_entry_rejected_count,
+        "tail_exit_rejected_count": tail_exit_rejected_count,
+        "next_action": next_action,
+        "diagnostics": diagnostics,
+    }
+
+
+def backtest_data_quality(backtest_id: int) -> dict[str, Any]:
+    """Return a compact data-quality dashboard for one persisted backtest."""
+
+    return data_quality_service.backtest_data_quality(
+        backtest_id,
+        report_loader=backtest_report,
+        coverage_loader=backtest_minute_coverage,
+    )
+
+
 def backtest_signal_events(
     backtest_id: int,
     *,
@@ -226,16 +270,29 @@ def backtest_signal_events(
             .limit(min(max(limit, 1), 20_000))
         ).mappings().all()
         row_dicts = [dict(row) for row in rows]
-        stock_names = _load_stock_names(session, _symbols_from_rows(row_dicts))
+        order_rows = session.execute(
+            select(schema.backtest_orders)
+            .where(
+                and_(
+                    schema.backtest_orders.c.backtest_id == backtest_id,
+                    schema.backtest_orders.c.trade_date >= (start or date.min),
+                    schema.backtest_orders.c.trade_date <= (end or date.max),
+                )
+            )
+            .order_by(schema.backtest_orders.c.trade_date, schema.backtest_orders.c.vt_symbol, schema.backtest_orders.c.side, schema.backtest_orders.c.id)
+        ).mappings().all()
+        order_dicts = [dict(row) for row in order_rows]
+        stock_names = _load_stock_names(session, _symbols_from_rows(row_dicts, order_dicts))
 
-    named_rows = _with_stock_names(row_dicts, stock_names)
+    linked_rows = _link_signal_events_to_orders(row_dicts, order_dicts)
+    named_rows = _with_stock_names(linked_rows, stock_names)
     return {
         "status": "ready" if rows else "empty",
         "backtest_id": backtest_id,
         "run_type": _run_type_from_params(run.get("params") or {}),
         "items": [_mapping_to_api(row) for row in named_rows],
         "returned_count": len(rows),
-        "note": "旧回测未生成全股票信号流水，请重跑组合回测。" if not rows else None,
+        "note": "旧回测未生成全股票信号计划，请重跑组合回测。" if not rows else None,
     }
 
 
@@ -308,6 +365,41 @@ def backtest_signal_amount_preview(
         "returned_count": len(filtered_rows[:item_limit]),
         "source_count": len(preview_rows),
     }
+
+
+def backtest_candidate_trace(backtest_id: int, vt_symbol: str, signal_date: date) -> dict[str, Any]:
+    """Explain how one daily candidate flowed into a portfolio backtest."""
+
+    rows = queries.candidate_trace_rows(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=_ensure_backtest_schema,
+        normalize_symbol=_normalize_symbol,
+        as_date=_as_date,
+        load_stock_names=_load_stock_names,
+        board_payload=_stock_board_payload,
+        backtest_id=backtest_id,
+        vt_symbol=vt_symbol,
+        signal_date=signal_date,
+    )
+    if rows.get("status") != "ready":
+        return rows
+
+    return _candidate_trace_summary(
+        backtest_id=backtest_id,
+        vt_symbol=rows["vt_symbol"],
+        signal_date=signal_date,
+        run=rows["run"],
+        recommendation=rows["recommendation"],
+        signal_rows=rows["signal_rows"],
+        order_rows=rows["order_rows"],
+        trade_rows=rows["trade_rows"],
+        equity_row=rows["equity_row"],
+        position_rows=rows["position_rows"],
+        stock_names=rows["stock_names"],
+        not_planned_context=rows.get("not_planned_context"),
+    )
 
 
 def backtest_report(backtest_id: int, trade_limit: int = 50) -> dict[str, Any]:
@@ -415,6 +507,7 @@ def backtest_report(backtest_id: int, trade_limit: int = 50) -> dict[str, Any]:
     )
     execution_quality = _execution_quality_report(metrics, extended_metrics, data_quality, sample_payload)
     params = _params_from_run(dict(run))
+    data_as_of_audit = _data_as_of_audit(params, execution_quality, data_quality)
     return {
         "status": "ready",
         "backtest_id": backtest_id,
@@ -443,12 +536,13 @@ def backtest_report(backtest_id: int, trade_limit: int = 50) -> dict[str, Any]:
         "regime_analysis": regime_analysis,
         "robustness_checks": robustness_checks,
         "execution_quality": execution_quality,
+        "data_as_of_audit": data_as_of_audit,
         "data_quality": data_quality,
         "method": _backtest_method(params),
         "assumptions": _backtest_assumptions(params),
         "limitations": [
             "当前本地样本不是全 A，只能作为小样本真实日线模拟。",
-            "分钟线只覆盖已同步股票和日期；未覆盖订单会在 raw.execution.mode 中标记为 daily_next_open_fallback，除非 minute_entry_required=true。",
+            "默认混合尾盘回测会优先使用执行日 14:30 分钟快照；缺分钟线时使用执行日收盘价作为尾盘代理，不能称为纯分钟真实回测。",
             "板块周期评分、资金流、热度、龙虎榜数据不完整时会降低主线/游资信号可信度。",
             "财报仅在 publish_date 不晚于交易日时参与评分，缺披露日的数据不会用于真实回测。",
             "上证指数、沪深300、中证500、中证1000基准会临时从外部行情获取，尚未持久化为本地可审计指数表。",
@@ -456,6 +550,148 @@ def backtest_report(backtest_id: int, trade_limit: int = 50) -> dict[str, Any]:
             "市场环境分段当前按样本等权基准粗分，尚未使用正式指数/行业 regime 模型。",
             "参数网格验证通过 /api/backtests/{id}/validation-grid 单独重跑，报告页默认不自动嵌入以避免误触发长任务。",
         ],
+    }
+
+
+def backtest_execution_model_comparison(backtest_id: int) -> dict[str, Any]:
+    """Re-run the same backtest parameters across supported execution models.
+
+    The comparison is intentionally opt-in and non-persistent: it can be slow on
+    a large local universe, and it must not create extra backtest rows simply by
+    opening a report page.
+    """
+
+    if not is_database_configured():
+        return {"status": "unavailable", "message": "DATABASE_URL not configured"}
+    _ensure_backtest_schema()
+    with session_scope() as session:
+        run = session.execute(select(schema.backtest_runs).where(schema.backtest_runs.c.id == backtest_id)).mappings().first()
+        if not run:
+            return {"status": "not_found", "id": backtest_id}
+
+    base_params = _params_from_run(dict(run))
+    variants = [
+        ("tail_close_hybrid", "尾盘混合"),
+        ("strict_1430", "严格14:30"),
+    ]
+    rows = []
+    for model, label in variants:
+        params = replace(
+            base_params,
+            execution_model=model,
+            minute_interval="1m",
+            tail_entry_start="14:30",
+            tail_entry_end="14:30",
+            persist=False,
+        )
+        result = run_backtest(params)
+        rows.append(_execution_model_comparison_row(model, label, result))
+    summary = _execution_model_comparison_summary(rows)
+    return {
+        "status": "ready",
+        "backtest_id": backtest_id,
+        "base_execution_model": base_params.execution_model,
+        "start_date": base_params.start.isoformat(),
+        "end_date": base_params.end.isoformat() if base_params.end else None,
+        "strategy": base_params.strategy,
+        "rows": rows,
+        "summary": summary,
+        "note": "对比会用同一回测参数非持久化重跑；严格14:30缺快照或尾盘未触发会拒单，不用收盘价代理。",
+    }
+
+
+def backtest_strategy_comparison(params: BacktestParams, strategies: list[str] | None = None) -> dict[str, Any]:
+    """Run registered strategies with the same portfolio backtest parameters."""
+
+    return strategy_comparison.compare_strategies(
+        params,
+        strategies=strategies,
+        run_backtest=run_backtest,
+    )
+
+
+def _execution_model_comparison_row(model: str, label: str, result: dict[str, Any]) -> dict[str, Any]:
+    if result.get("status") != "ready":
+        return {
+            "execution_model": model,
+            "label": label,
+            "status": result.get("status") or "error",
+            "message": result.get("message"),
+        }
+    metrics = dict(result.get("metrics") or {})
+    orders = list(result.get("orders") or [])
+    trades = list(result.get("trades") or [])
+    buy_count = len([trade for trade in trades if trade.get("side") == "BUY"])
+    rejected_orders = [order for order in orders if order.get("status") == "rejected"]
+    strict_rejected = [order for order in rejected_orders if _order_execution_model(order) == "strict_1430"]
+    tail_entry_rejected = [order for order in rejected_orders if str(order.get("reason") or "") == "tail_entry_not_triggered"]
+    tail_exit_rejected = [order for order in rejected_orders if str(order.get("reason") or "") == "tail_exit_not_triggered"]
+    minute_gap_rejected = [
+        order
+        for order in strict_rejected
+        if str(order.get("reason") or "") == "missing_1430_snapshot"
+        or str(_order_execution(order).get("reason") or "") == "missing_1430_snapshot"
+        or str(_order_execution(order).get("price_source") or "") == ""
+    ]
+    minute_1430_count = int(metrics.get("minute_1430_count") or 0)
+    daily_close_proxy_count = int(metrics.get("daily_close_proxy_count") or 0)
+    return {
+        "execution_model": model,
+        "label": label,
+        "status": "ready",
+        "final_equity": metrics.get("final_equity"),
+        "total_return_pct": metrics.get("total_return_pct"),
+        "max_drawdown_pct": metrics.get("max_drawdown_pct"),
+        "trade_count": metrics.get("trade_count"),
+        "buy_count": buy_count,
+        "minute_1430_count": minute_1430_count,
+        "daily_close_proxy_count": daily_close_proxy_count,
+        "minute_1430_ratio": _ratio_pct(minute_1430_count, buy_count),
+        "daily_close_proxy_ratio": _ratio_pct(daily_close_proxy_count, buy_count),
+        "strict_1430_rejected_count": len(strict_rejected),
+        "tail_entry_rejected_count": len(tail_entry_rejected),
+        "tail_exit_rejected_count": len(tail_exit_rejected),
+        "minute_gap_rejected_count": len(minute_gap_rejected),
+    }
+
+
+def _execution_model_comparison_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    hybrid = next((row for row in rows if row.get("execution_model") == "tail_close_hybrid"), None)
+    strict = next((row for row in rows if row.get("execution_model") == "strict_1430"), None)
+    if not hybrid or not strict or hybrid.get("status") != "ready" or strict.get("status") != "ready":
+        return {
+            "status": "incomplete",
+            "message": "至少一个执行模型未能完成重跑。",
+        }
+    hybrid_return = _safe_float(hybrid.get("total_return_pct"))
+    strict_return = _safe_float(strict.get("total_return_pct"))
+    strict_rejected = int(strict.get("strict_1430_rejected_count") or 0)
+    minute_gap_rejected = int(strict.get("minute_gap_rejected_count") or 0)
+    strict_buy_count = int(strict.get("buy_count") or 0)
+    proxy_ratio = _safe_float(hybrid.get("daily_close_proxy_ratio")) or 0
+    if strict_buy_count == 0:
+        message = "严格14:30没有形成买入成交，当前收益主要依赖收盘代理或分钟覆盖不足。"
+        status = "warning"
+    elif minute_gap_rejected > 0:
+        message = "严格14:30存在拒单，需先补齐对应执行日快照再评价收益。"
+        status = "warning"
+    elif strict_rejected > 0:
+        message = "严格14:30仍有候选因尾盘条件未触发而拒单；这是策略条件约束，不是分钟数据缺口。"
+        status = "warning"
+    elif proxy_ratio > 50:
+        message = "尾盘混合大量使用收盘代理，应优先看严格14:30结果。"
+        status = "warning"
+    else:
+        message = "严格14:30可成交，且收盘代理占比较低。"
+        status = "pass"
+    return {
+        "status": status,
+        "return_delta_pct": (
+            strict_return - hybrid_return
+            if strict_return is not None and hybrid_return is not None
+            else None
+        ),
+        "message": message,
     }
 
 
@@ -472,7 +708,7 @@ def backtest_report_csv(backtest_id: int, trade_limit: int = 500) -> dict[str, A
 
 
 def backtest_minute_gap_csv(backtest_id: int) -> dict[str, Any]:
-    """Export strict-tail rejected buy orders as a minute gap CSV."""
+    """Export strict-tail rejected orders as a minute gap CSV."""
 
     if not is_database_configured():
         return {"status": "unavailable", "message": "DATABASE_URL not configured"}
@@ -485,21 +721,22 @@ def backtest_minute_gap_csv(backtest_id: int) -> dict[str, Any]:
             select(schema.backtest_orders)
             .where(
                 schema.backtest_orders.c.backtest_id == backtest_id,
-                schema.backtest_orders.c.side == "BUY",
                 schema.backtest_orders.c.status == "rejected",
-                schema.backtest_orders.c.reason == "tail_entry_not_triggered",
+                schema.backtest_orders.c.reason.in_(["missing_1430_snapshot", "tail_entry_not_triggered", "tail_exit_not_triggered"]),
             )
-            .order_by(schema.backtest_orders.c.trade_date, schema.backtest_orders.c.vt_symbol, schema.backtest_orders.c.id)
+            .order_by(schema.backtest_orders.c.trade_date, schema.backtest_orders.c.vt_symbol, schema.backtest_orders.c.side, schema.backtest_orders.c.id)
         ).mappings().all()
 
+    params = _params_from_run(dict(run))
     content, gap_count = _minute_gap_csv_content([dict(row) for row in rows])
     return {
         "status": "ready" if gap_count else "empty",
         "backtest_id": backtest_id,
         "gap_count": gap_count,
+        "interval": params.minute_interval,
         "filename": f"alphaagent_minute_gap_backtest_{backtest_id}_{run['start_date']}_{run['end_date']}.csv",
         "content": content,
-        "note": "导出 strict minute_entry_required 回测中被 tail_entry_not_triggered 拒绝的买入订单，用于补齐 D+1 尾盘 1 分钟线。",
+        "note": f"导出严格 14:30 回测中缺少执行日快照的买入/卖出订单，用于补齐 14:30 的 {params.minute_interval} 快照。",
     }
 
 
@@ -518,7 +755,7 @@ def backtest_validation_grid(backtest_id: int, max_variants: int = 54) -> dict[s
         vt_symbols = _load_symbol_universe(session, base_params.max_symbols, base_params.symbols, base_params.included_boards)
         if not vt_symbols:
             return {"status": "empty", "message": "stocks is empty"}
-        bars_by_symbol = _load_all_bars(session, vt_symbols, base_params.start, end)
+        bars_by_symbol = _load_all_bars(session, vt_symbols, _lookback_start(base_params.start), end)
         trading_days = _trading_days(bars_by_symbol, base_params.start, end)
         if len(trading_days) < 80:
             return {"status": "insufficient_data", "trading_days": len(trading_days)}
@@ -542,228 +779,215 @@ def backtest_validation_grid_csv(backtest_id: int, max_variants: int = 54) -> di
 
 
 def backtest_trades(backtest_id: int, limit: int = 500, offset: int = 0, order: str = "desc") -> dict[str, Any]:
-    if not is_database_configured():
-        return {"status": "unavailable", "items": []}
-    _ensure_backtest_schema()
-    row_limit = min(max(limit, 1), 2000)
-    row_offset = max(offset, 0)
-    is_desc = str(order or "desc").lower() != "asc"
-    ordering = (
-        (desc(schema.backtest_trades.c.trade_date), desc(schema.backtest_trades.c.id))
-        if is_desc
-        else (schema.backtest_trades.c.trade_date, schema.backtest_trades.c.id)
+    return queries.backtest_trades(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=_ensure_backtest_schema,
+        load_stock_names=_load_stock_names,
+        symbols_from_rows=_symbols_from_rows,
+        with_stock_names=_with_stock_names,
+        to_api=_mapping_to_api,
+        backtest_id=backtest_id,
+        limit=limit,
+        offset=offset,
+        order=order,
     )
-    with session_scope() as session:
-        run = session.execute(select(schema.backtest_runs.c.id).where(schema.backtest_runs.c.id == backtest_id)).first()
-        if not run:
-            return {"status": "not_found", "backtest_id": backtest_id, "items": []}
-        total = session.execute(
-            select(func.count()).select_from(schema.backtest_trades).where(schema.backtest_trades.c.backtest_id == backtest_id)
-        ).scalar_one()
-        rows = session.execute(
-            select(schema.backtest_trades)
-            .where(schema.backtest_trades.c.backtest_id == backtest_id)
-            .order_by(*ordering)
-            .offset(row_offset)
-            .limit(row_limit)
-        ).mappings().all()
-        row_dicts = [dict(row) for row in rows]
-        stock_names = _load_stock_names(session, _symbols_from_rows(row_dicts))
-    return {
-        "status": "ready" if rows else "empty",
-        "backtest_id": backtest_id,
-        "items": [_mapping_to_api(row) for row in _with_stock_names(row_dicts, stock_names)],
-        "limit": row_limit,
-        "offset": row_offset,
-        "total": int(total or 0),
-        "returned_count": len(rows),
-        "has_more": row_offset + len(rows) < int(total or 0),
-    }
 
 
 def backtest_equity(backtest_id: int) -> dict[str, Any]:
+    return queries.backtest_equity(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=_ensure_backtest_schema,
+        to_api=_mapping_to_api,
+        backtest_id=backtest_id,
+    )
+
+
+def backtest_daily_decisions(backtest_id: int, limit: int = 500, offset: int = 0, order: str = "desc") -> dict[str, Any]:
+    return queries.backtest_daily_decisions(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=_ensure_backtest_schema,
+        to_api=_mapping_to_api,
+        backtest_id=backtest_id,
+        limit=limit,
+        offset=offset,
+        order=order,
+    )
+
+
+def backtest_trade_attribution(backtest_id: int, limit: int = 500, offset: int = 0, sort: str = "pnl_asc") -> dict[str, Any]:
+    return queries.backtest_trade_attribution(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=_ensure_backtest_schema,
+        load_stock_names=_load_stock_names,
+        symbols_from_rows=_symbols_from_rows,
+        with_stock_names=_with_stock_names,
+        to_api=_mapping_to_api,
+        backtest_id=backtest_id,
+        limit=limit,
+        offset=offset,
+        sort=sort,
+    )
+
+
+def backtest_drilldown_options(backtest_id: int) -> dict[str, Any]:
+    """Return complete date and symbol choices for backtest drilldown."""
+
     if not is_database_configured():
-        return {"status": "unavailable", "items": []}
+        return {"status": "unavailable", "dates": [], "symbols": [], "message": "DATABASE_URL not configured"}
     _ensure_backtest_schema()
     with session_scope() as session:
-        rows = session.execute(
+        run = session.execute(select(schema.backtest_runs).where(schema.backtest_runs.c.id == backtest_id)).mappings().first()
+        if not run:
+            return {"status": "not_found", "id": backtest_id, "dates": [], "symbols": []}
+        equity_rows = session.execute(
             select(schema.backtest_daily_equity)
             .where(schema.backtest_daily_equity.c.backtest_id == backtest_id)
             .order_by(schema.backtest_daily_equity.c.trade_date)
         ).mappings().all()
-    return {"status": "ready" if rows else "empty", "items": [_mapping_to_api(dict(row)) for row in rows]}
+        trade_rows = session.execute(
+            select(
+                schema.backtest_trades.c.trade_date,
+                schema.backtest_trades.c.vt_symbol,
+                schema.backtest_trades.c.side,
+            )
+            .where(schema.backtest_trades.c.backtest_id == backtest_id)
+            .order_by(schema.backtest_trades.c.trade_date, schema.backtest_trades.c.id)
+        ).mappings().all()
+        order_rows = session.execute(
+            select(
+                schema.backtest_orders.c.trade_date,
+                schema.backtest_orders.c.vt_symbol,
+                schema.backtest_orders.c.side,
+                schema.backtest_orders.c.status,
+                schema.backtest_orders.c.reason,
+            )
+            .where(schema.backtest_orders.c.backtest_id == backtest_id)
+            .order_by(schema.backtest_orders.c.trade_date, schema.backtest_orders.c.id)
+        ).mappings().all()
+        signal_rows = session.execute(
+            select(
+                schema.backtest_signal_events.c.trade_date,
+                schema.backtest_signal_events.c.signal_date,
+                schema.backtest_signal_events.c.execute_date,
+                schema.backtest_signal_events.c.vt_symbol,
+                schema.backtest_signal_events.c.side,
+                schema.backtest_signal_events.c.raw,
+            )
+            .where(schema.backtest_signal_events.c.backtest_id == backtest_id)
+            .order_by(schema.backtest_signal_events.c.trade_date, schema.backtest_signal_events.c.id)
+        ).mappings().all()
+        position_rows = session.execute(
+            select(
+                schema.backtest_daily_positions.c.trade_date,
+                schema.backtest_daily_positions.c.vt_symbol,
+            )
+            .where(schema.backtest_daily_positions.c.backtest_id == backtest_id)
+            .order_by(schema.backtest_daily_positions.c.trade_date, schema.backtest_daily_positions.c.vt_symbol)
+        ).mappings().all()
+
+        equity_dicts = [dict(row) for row in equity_rows]
+        trade_dicts = [dict(row) for row in trade_rows]
+        order_dicts = [dict(row) for row in order_rows]
+        signal_dicts = [dict(row) for row in signal_rows]
+        position_dicts = [dict(row) for row in position_rows]
+        signal_dates = sorted({row["signal_date"] for row in signal_dicts if row.get("signal_date")})
+        if signal_dates:
+            recommendation_rows = session.execute(
+                select(
+                    schema.quant_recommendations.c.trade_date,
+                    schema.quant_recommendations.c.action,
+                )
+                .where(
+                    schema.quant_recommendations.c.trade_date.in_(signal_dates),
+                    schema.quant_recommendations.c.strategy_id == run["strategy_id"],
+                    schema.quant_recommendations.c.strategy_version == run["strategy_version"],
+                )
+                .order_by(schema.quant_recommendations.c.trade_date, schema.quant_recommendations.c.rank)
+            ).mappings().all()
+        else:
+            recommendation_rows = []
+        recommendation_dicts = [dict(row) for row in recommendation_rows]
+        stock_names = _load_stock_names(
+            session,
+            _symbols_from_rows(trade_dicts, order_dicts, signal_dicts, position_dicts),
+        )
+
+    dates = _backtest_drilldown_date_options(equity_dicts, trade_dicts, order_dicts, signal_dicts, position_dicts, recommendation_dicts)
+    symbols = _backtest_drilldown_symbol_options(trade_dicts, order_dicts, signal_dicts, position_dicts, stock_names)
+    return {
+        "status": "ready" if dates or symbols else "empty",
+        "backtest_id": backtest_id,
+        "run_type": _run_type_from_params(run.get("params") or {}),
+        "start_date": run["start_date"].isoformat(),
+        "end_date": run["end_date"].isoformat(),
+        "dates": dates,
+        "symbols": symbols,
+        "date_count": len(dates),
+        "symbol_count": len(symbols),
+        "note": "日期来自每日权益曲线；股票来自成交、订单、理论信号和持仓快照的合集。",
+    }
 
 
 def backtest_day_detail(backtest_id: int, trade_date: date) -> dict[str, Any]:
-    if not is_database_configured():
-        return {"status": "unavailable", "message": "DATABASE_URL not configured"}
-    _ensure_backtest_schema()
-    with session_scope() as session:
-        run = session.execute(select(schema.backtest_runs).where(schema.backtest_runs.c.id == backtest_id)).mappings().first()
-        if not run:
-            return {"status": "not_found", "id": backtest_id}
-        equity = session.execute(
-            select(schema.backtest_daily_equity)
-            .where(
-                schema.backtest_daily_equity.c.backtest_id == backtest_id,
-                schema.backtest_daily_equity.c.trade_date == trade_date,
-            )
-        ).mappings().first()
-        position_rows = session.execute(
-            select(schema.backtest_daily_positions)
-            .where(
-                schema.backtest_daily_positions.c.backtest_id == backtest_id,
-                schema.backtest_daily_positions.c.trade_date == trade_date,
-            )
-            .order_by(desc(schema.backtest_daily_positions.c.market_value), schema.backtest_daily_positions.c.vt_symbol)
-        ).mappings().all()
-        trade_rows = session.execute(
-            select(schema.backtest_trades)
-            .where(
-                schema.backtest_trades.c.backtest_id == backtest_id,
-                schema.backtest_trades.c.trade_date == trade_date,
-            )
-            .order_by(schema.backtest_trades.c.id)
-        ).mappings().all()
-        order_rows = session.execute(
-            select(schema.backtest_orders)
-            .where(
-                schema.backtest_orders.c.backtest_id == backtest_id,
-                schema.backtest_orders.c.trade_date == trade_date,
-            )
-            .order_by(schema.backtest_orders.c.id)
-        ).mappings().all()
-        position_dicts = [dict(row) for row in position_rows]
-        trade_dicts = [dict(row) for row in trade_rows]
-        order_dicts = [dict(row) for row in order_rows]
-        stock_names = _load_stock_names(session, _symbols_from_rows(position_dicts, trade_dicts, order_dicts))
-
-    named_positions = _with_stock_names(position_dicts, stock_names)
-    named_trades = _with_stock_names(trade_dicts, stock_names)
-    named_orders = _with_stock_names(order_dicts, stock_names)
-    buys = [row for row in named_trades if row.get("side") == "BUY"]
-    sells = [row for row in named_trades if row.get("side") == "SELL"]
-    return {
-        "status": "ready" if equity or position_rows or trade_rows or order_rows else "empty",
-        "backtest_id": backtest_id,
-        "trade_date": trade_date.isoformat(),
-        "equity": _mapping_to_api(dict(equity)) if equity else None,
-        "positions": [_mapping_to_api(row) for row in named_positions],
-        "trades": [_mapping_to_api(row) for row in named_trades],
-        "buy_trades": [_mapping_to_api(row) for row in buys],
-        "sell_trades": [_mapping_to_api(row) for row in sells],
-        "orders": [_mapping_to_api(row) for row in named_orders],
-        "snapshot_available": bool(position_rows),
-        "note": "旧回测没有逐股持仓快照时，需要重跑回测后才能查看每日每只持仓市值。",
-    }
+    return queries.backtest_day_detail(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=_ensure_backtest_schema,
+        load_stock_names=_load_stock_names,
+        symbols_from_rows=_symbols_from_rows,
+        with_stock_names=_with_stock_names,
+        to_api=_mapping_to_api,
+        backtest_id=backtest_id,
+        trade_date=trade_date,
+    )
 
 
 def backtest_symbol_detail(backtest_id: int, vt_symbol: str) -> dict[str, Any]:
-    if not is_database_configured():
-        return {"status": "unavailable", "message": "DATABASE_URL not configured"}
-    symbol = _normalize_symbol(vt_symbol)
-    if not symbol:
-        return {"status": "invalid_symbol", "message": "vt_symbol is required"}
-    _ensure_backtest_schema()
-    with session_scope() as session:
-        run = session.execute(select(schema.backtest_runs).where(schema.backtest_runs.c.id == backtest_id)).mappings().first()
-        if not run:
-            return {"status": "not_found", "id": backtest_id}
-        position_rows = session.execute(
-            select(schema.backtest_daily_positions)
-            .where(
-                schema.backtest_daily_positions.c.backtest_id == backtest_id,
-                schema.backtest_daily_positions.c.vt_symbol == symbol,
-            )
-            .order_by(schema.backtest_daily_positions.c.trade_date)
-        ).mappings().all()
-        trade_rows = session.execute(
-            select(schema.backtest_trades)
-            .where(
-                schema.backtest_trades.c.backtest_id == backtest_id,
-                schema.backtest_trades.c.vt_symbol == symbol,
-            )
-            .order_by(schema.backtest_trades.c.trade_date, schema.backtest_trades.c.id)
-        ).mappings().all()
-        order_rows = session.execute(
-            select(schema.backtest_orders)
-            .where(
-                schema.backtest_orders.c.backtest_id == backtest_id,
-                schema.backtest_orders.c.vt_symbol == symbol,
-            )
-            .order_by(schema.backtest_orders.c.trade_date, schema.backtest_orders.c.id)
-        ).mappings().all()
-        position_dicts = [dict(row) for row in position_rows]
-        trade_dicts = [dict(row) for row in trade_rows]
-        order_dicts = [dict(row) for row in order_rows]
-        stock_names = _load_stock_names(session, [symbol])
-
-    named_positions = _with_stock_names(position_dicts, stock_names)
-    named_trades = _with_stock_names(trade_dicts, stock_names)
-    return {
-        "status": "ready" if position_rows or trade_rows or order_rows else "empty",
-        "backtest_id": backtest_id,
-        "vt_symbol": symbol,
-        **_stock_board_payload(symbol, stock_names.get(symbol)),
-        "name": (stock_names.get(symbol) or {}).get("name"),
-        "positions": [_mapping_to_api(row) for row in named_positions],
-        "trades": [_mapping_to_api(row) for row in named_trades],
-        "orders": [_mapping_to_api(row) for row in _with_stock_names(order_dicts, stock_names)],
-        "closed_trades": _closed_trades(named_trades),
-        "snapshot_available": bool(position_rows),
-        "note": "旧回测没有逐股持仓快照时，需要重跑回测后才能查看该股票每日持仓路径。",
-    }
+    return queries.backtest_symbol_detail(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=_ensure_backtest_schema,
+        normalize_symbol=_normalize_symbol,
+        load_stock_names=_load_stock_names,
+        with_stock_names=_with_stock_names,
+        board_payload=_stock_board_payload,
+        closed_trades=_closed_trades,
+        to_api=_mapping_to_api,
+        backtest_id=backtest_id,
+        vt_symbol=vt_symbol,
+    )
 
 
 def backtest_audit(backtest_id: int, vt_symbol: str | None = None, limit: int = 200) -> dict[str, Any]:
-    if not is_database_configured():
-        return {"status": "unavailable", "items": []}
-    _ensure_backtest_schema()
-    symbol = _normalize_symbol(vt_symbol) if vt_symbol else None
-    with session_scope() as session:
-        run = session.execute(select(schema.backtest_runs).where(schema.backtest_runs.c.id == backtest_id)).mappings().first()
-        if not run:
-            return {"status": "not_found", "id": backtest_id}
-
-        order_query = (
-            select(schema.backtest_orders)
-            .where(schema.backtest_orders.c.backtest_id == backtest_id)
-            .order_by(schema.backtest_orders.c.trade_date, schema.backtest_orders.c.id)
-        )
-        trade_query = (
-            select(schema.backtest_trades)
-            .where(schema.backtest_trades.c.backtest_id == backtest_id)
-            .order_by(schema.backtest_trades.c.trade_date, schema.backtest_trades.c.id)
-        )
-        if symbol:
-            order_query = order_query.where(schema.backtest_orders.c.vt_symbol == symbol)
-            trade_query = trade_query.where(schema.backtest_trades.c.vt_symbol == symbol)
-
-        orders = session.execute(order_query.limit(min(max(limit, 1), 1000))).mappings().all()
-        trades = session.execute(trade_query.limit(min(max(limit, 1), 1000))).mappings().all()
-        order_dicts = [dict(row) for row in orders]
-        trade_dicts = [dict(row) for row in trades]
-        stock_names = _load_stock_names(session, _symbols_from_rows(order_dicts, trade_dicts))
-
-    params = _params_from_run(dict(run))
-    order_items = [_mapping_to_api(row) for row in _with_stock_names(order_dicts, stock_names)]
-    trade_items = [_mapping_to_api(row) for row in _with_stock_names(trade_dicts, stock_names)]
-    return {
-        "status": "ready",
-        "backtest_id": backtest_id,
-        "vt_symbol": symbol,
-        "strategy_id": run["strategy_id"],
-        "strategy_version": run["strategy_version"],
-        "start_date": run["start_date"].isoformat(),
-        "end_date": run["end_date"].isoformat(),
-        "method": _backtest_method(params),
-        "params": _params_to_json(params),
-        "orders": order_items,
-        "trades": trade_items,
-        "events": _audit_events(order_items, trade_items),
-        "order_summary": _order_stats(order_items),
-        "note": "组合回测会在历史每个交易日重新计算当日候选，并在下一交易日按执行规则买入；不是把今天候选名单套到过去。",
-    }
+    return queries.audit_rows(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=_ensure_backtest_schema,
+        normalize_symbol=_normalize_symbol,
+        load_stock_names=_load_stock_names,
+        symbols_from_rows=_symbols_from_rows,
+        with_stock_names=_with_stock_names,
+        to_api=_mapping_to_api,
+        params_from_run=_params_from_run,
+        params_to_json=_params_to_json,
+        backtest_method=_backtest_method,
+        audit_events=_audit_events,
+        order_stats=_order_stats,
+        backtest_id=backtest_id,
+        vt_symbol=vt_symbol,
+        limit=limit,
+    )
 
 
 def _ensure_backtest_schema() -> None:
@@ -782,207 +1006,32 @@ def _simulate(
     minute_index: dict[str, dict[date, list[MinuteBar]]] | None = None,
     score_context: ScoreContext | None = None,
 ) -> dict[str, Any]:
-    cash = params.initial_cash
-    positions: dict[str, Position] = {}
-    pending_buys: list[dict[str, Any]] = []
-    pending_sells: list[dict[str, Any]] = []
-    theoretical_positions: dict[str, Position] = {}
-    trades: list[Trade] = []
-    orders: list[dict[str, Any]] = []
-    equity_curve: list[dict[str, Any]] = []
-    position_snapshots: list[dict[str, Any]] = []
-    signal_events: list[dict[str, Any]] = []
-    bar_index = _bar_index(bars_by_symbol)
-    if params.intraday_entry:
-        minute_index = minute_index if minute_index is not None else _load_minute_bar_index(session, list(bars_by_symbol), trading_days[0], trading_days[-1])
-    else:
-        minute_index = {}
+    return simulation.simulate_portfolio(
+        session,
+        params,
+        bars_by_symbol,
+        trading_days,
+        stock_meta,
+        _simulation_callbacks(),
+        score_cache=score_cache,
+        minute_index=minute_index,
+        score_context=score_context,
+    )
 
-    for index, current_day in enumerate(trading_days):
-        today_bars = {symbol: bar_index[symbol][current_day] for symbol in bar_index if current_day in bar_index[symbol]}
 
-        for order in list(pending_sells):
-            if order["execute_date"] != current_day:
-                continue
-            pending_sells.remove(order)
-            position = positions.get(order["vt_symbol"])
-            if not position:
-                continue
-            bar = today_bars.get(order["vt_symbol"])
-            raw = {
-                "mode": "daily_next_open_sell",
-                "signal_date": order["signal_date"].isoformat(),
-                "execute_date": current_day.isoformat(),
-                "entry_date": position.entry_date.isoformat(),
-                "reason": order["reason"],
-            }
-            if not bar:
-                orders.append(_order(current_day, order["vt_symbol"], "SELL", None, position.volume, "rejected", "no_bar", raw))
-                continue
-            if _is_limit_down_open(bar):
-                orders.append(_order(current_day, order["vt_symbol"], "SELL", None, position.volume, "rejected", "limit_down", raw))
-                continue
-            fill_price = bar.open_price * (1 - params.slippage_bps / 10000)
-            amount = fill_price * position.volume
-            fee = amount * (params.commission_rate + params.stamp_tax_rate)
-            pnl = (fill_price - position.cost_price) * position.volume - fee
-            cash += amount - fee
-            del positions[order["vt_symbol"]]
-            orders.append(_order(current_day, order["vt_symbol"], "SELL", fill_price, position.volume, "filled", order["reason"], raw))
-            trades.append(Trade(current_day, order["vt_symbol"], "SELL", fill_price, position.volume, amount, fee, pnl, order["reason"], raw))
-
-        for order in list(pending_buys):
-            if order["execute_date"] != current_day:
-                continue
-            pending_buys.remove(order)
-            if order["vt_symbol"] in positions:
-                continue
-            if len(positions) >= params.max_positions:
-                orders.append(_order(current_day, order["vt_symbol"], "BUY", None, None, "rejected", "position_slot_unavailable"))
-                continue
-            bar = today_bars.get(order["vt_symbol"])
-            if not bar or _is_limit_up_open(bar):
-                orders.append(_order(current_day, order["vt_symbol"], "BUY", None, None, "rejected", "limit_up_or_no_bar"))
-                continue
-            fill = _resolve_buy_fill(order, current_day, bar, bar_index, minute_index, params)
-            if fill.get("status") != "filled":
-                orders.append(
-                    _order(
-                        current_day,
-                        order["vt_symbol"],
-                        "BUY",
-                        fill.get("price"),
-                        0,
-                        "rejected",
-                        str(fill.get("reason") or "tail_entry_not_triggered"),
-                        fill,
-                    )
-                )
-                continue
-            target_cash = params.initial_cash * params.max_position_pct
-            budget = min(cash, target_cash)
-            fill_price = float(fill["price"]) * (1 + params.slippage_bps / 10000)
-            volume = int(budget / fill_price / 100) * 100
-            if volume <= 0:
-                orders.append(_order(current_day, order["vt_symbol"], "BUY", fill_price, 0, "rejected", "insufficient_cash", fill))
-                continue
-            amount = fill_price * volume
-            fee = amount * params.commission_rate
-            if amount + fee > cash:
-                volume = int(cash / (fill_price * (1 + params.commission_rate)) / 100) * 100
-                amount = fill_price * volume
-                fee = amount * params.commission_rate
-            if volume <= 0:
-                orders.append(_order(current_day, order["vt_symbol"], "BUY", fill_price, 0, "rejected", "insufficient_cash", fill))
-                continue
-            cash -= amount + fee
-            entry_reason = dict(order["reason"])
-            entry_reason["execution"] = fill
-            positions[order["vt_symbol"]] = Position(
-                vt_symbol=order["vt_symbol"],
-                name=stock_meta.get(order["vt_symbol"], {}).get("name"),
-                volume=volume,
-                cost_price=fill_price,
-                entry_date=current_day,
-                highest_price=bar.high_price,
-                reason=entry_reason,
-            )
-            orders.append(_order(current_day, order["vt_symbol"], "BUY", fill_price, volume, "filled", "entry_signal", fill))
-            trades.append(Trade(current_day, order["vt_symbol"], "BUY", fill_price, volume, amount, fee, None, "entry_signal", entry_reason))
-
-        pending_sell_symbols = {str(order["vt_symbol"]) for order in pending_sells}
-        for vt_symbol, position in list(positions.items()):
-            if vt_symbol in pending_sell_symbols:
-                continue
-            bar = today_bars.get(vt_symbol)
-            if not bar:
-                continue
-            position.highest_price = max(position.highest_price, bar.high_price)
-            sell_reason = _sell_reason(position, bar, current_day, params)
-            if not sell_reason:
-                continue
-            if current_day <= position.entry_date:
-                continue
-            if index >= len(trading_days) - 1:
-                continue
-            next_day = trading_days[index + 1]
-            raw = {
-                "mode": "daily_close_sell_signal",
-                "signal_date": current_day.isoformat(),
-                "execute_date": next_day.isoformat(),
-                "entry_date": position.entry_date.isoformat(),
-                "reason": sell_reason,
-            }
-            pending_sells.append(
-                {
-                    "execute_date": next_day,
-                    "signal_date": current_day,
-                    "vt_symbol": vt_symbol,
-                    "reason": sell_reason,
-                }
-            )
-            pending_sell_symbols.add(vt_symbol)
-            orders.append(_order(current_day, vt_symbol, "SELL", None, position.volume, "pending", sell_reason, raw))
-
-        if index < len(trading_days) - 1:
-            next_day = trading_days[index + 1]
-            daily_candidates = None
-            reserved_exit_count = len({str(order["vt_symbol"]) for order in pending_sells})
-            free_slots = max(params.max_positions - len(positions) + reserved_exit_count - len(pending_buys), 0)
-            if free_slots > 0:
-                daily_candidates = _score_day(session, bars_by_symbol, current_day, params, score_cache, score_context)
-                for candidate in daily_candidates[: min(free_slots, params.candidate_limit)]:
-                    if candidate.vt_symbol in positions:
-                        continue
-                    pending_buys.append({
-                        "execute_date": next_day,
-                        "signal_date": current_day,
-                        "vt_symbol": candidate.vt_symbol,
-                        "reason": candidate.evidence,
-                    })
-            if not params.symbols:
-                if daily_candidates is None:
-                    if score_cache is not None and current_day in score_cache:
-                        daily_candidates = _score_day(session, bars_by_symbol, current_day, params, score_cache, score_context)
-                    elif session is not None:
-                        daily_candidates = _score_day(session, bars_by_symbol, current_day, params, score_cache, score_context)
-                    else:
-                        daily_candidates = []
-                signal_events.extend(
-                    _signal_events_for_day(
-                        current_day,
-                        next_day,
-                        daily_candidates,
-                        theoretical_positions,
-                        today_bars,
-                        bar_index,
-                        stock_meta,
-                        params,
-                    )
-                )
-
-        market_value = _market_value(positions, today_bars)
-        total_equity = cash + market_value
-        equity_curve.append(
-            {
-                "trade_date": current_day,
-                "cash": cash,
-                "market_value": market_value,
-                "total_equity": total_equity,
-                "position_count": len(positions),
-            }
-        )
-        position_snapshots.extend(_position_snapshot_rows(current_day, positions, today_bars, total_equity))
-
-    metrics = _metrics(params.initial_cash, equity_curve, trades)
-    return {
-        "metrics": metrics,
-        "equity": [_mapping_to_api(item) for item in equity_curve],
-        "positions": [_mapping_to_api(item) for item in position_snapshots],
-        "signal_events": [_mapping_to_api(item) for item in signal_events],
-        "trades": [_trade_to_api(trade) for trade in trades],
-        "orders": [_mapping_to_api(item) for item in orders],
-    }
+def _simulation_callbacks() -> simulation.SimulationCallbacks:
+    return simulation.SimulationCallbacks(
+        load_minute_bar_index=_load_minute_bar_index,
+        score_day=_score_day,
+        resolve_buy_fill=_resolve_buy_fill,
+        resolve_tail_sell_fill=_resolve_tail_sell_fill,
+        is_limit_up_open=_is_limit_up_open,
+        is_limit_down_open=_is_limit_down_open,
+        metrics=_metrics,
+        order=_order,
+        trade_to_api=_trade_to_api,
+        mapping_to_api=_mapping_to_api,
+    )
 
 
 def _score_day(
@@ -993,62 +1042,42 @@ def _score_day(
     score_cache: dict[date, list[Any]] | None = None,
     score_context: ScoreContext | None = None,
 ):
-    if score_cache is not None and trade_date in score_cache:
-        scores = score_cache[trade_date]
-    else:
-        scores = _score_candidates_for_day(session, bars_by_symbol, trade_date, score_context)
-        if score_cache is not None:
-            score_cache[trade_date] = scores
-    candidates = [score for score in scores if _is_buy_candidate(score, params)]
-    candidates.sort(key=lambda item: (-item.total_score, item.vt_symbol))
-    return candidates
+    return scoring.score_day(
+        session,
+        bars_by_symbol,
+        trade_date,
+        params,
+        score_cache,
+        score_context,
+        score_candidates_for_day=_score_candidates_for_day,
+    )
 
 
 def _score_candidates_for_day(
     session,
     bars_by_symbol: dict[str, list[Bar]],
     trade_date: date,
+    params: BacktestParams,
     score_context: ScoreContext | None = None,
 ) -> list[Any]:
-    vt_symbols = list(bars_by_symbol.keys())
-    index_return_20d = _load_index_return_20d(session, trade_date)
-    sector_scores = _load_sector_scores(session, vt_symbols, trade_date)
-    financial_scores = (
-        _financial_scores_from_context(score_context, trade_date)
-        if score_context is not None
-        else _load_financial_scores(session, vt_symbols, trade_date)
+    return scoring.score_candidates_for_day(
+        session,
+        bars_by_symbol,
+        trade_date,
+        params,
+        score_context,
+        load_index_return_20d=_load_index_return_20d,
+        load_sector_scores=_load_sector_scores,
+        load_financial_scores=_load_financial_scores,
+        load_fund_flow_scores=_load_fund_flow_scores,
+        load_hot_rank_scores=_load_hot_rank_scores,
+        load_lhb_scores=_load_lhb_scores,
+        financial_scores_from_context=_financial_scores_from_context,
     )
-    fund_flow_scores = _load_fund_flow_scores(session, vt_symbols, trade_date)
-    hot_rank_scores = _load_hot_rank_scores(session, vt_symbols, trade_date)
-    lhb_scores = _load_lhb_scores(session, vt_symbols, trade_date)
-    scores = []
-    for vt_symbol, bars in bars_by_symbol.items():
-        score = score_stock(
-            vt_symbol,
-            bars,
-            trade_date,
-            index_return_20d=index_return_20d,
-            sector_score=sector_scores.get(vt_symbol),
-            financial_score=financial_scores.get(vt_symbol),
-            fund_flow_score=fund_flow_scores.get(vt_symbol),
-            hot_rank_score=hot_rank_scores.get(vt_symbol),
-            lhb_score=lhb_scores.get(vt_symbol),
-        )
-        scores.append(score)
-    scores.sort(key=lambda item: (-item.total_score, item.vt_symbol))
-    return scores
 
 
 def _is_buy_candidate(score, params: BacktestParams) -> bool:
-    if score.evidence.get("status") != "ready":
-        return False
-    if score.total_score < params.min_entry_score:
-        return False
-    if score.risk_score < 35 or score.liquidity_score < 25:
-        return False
-    if params.strict_entry:
-        return bool(score.entry_signal)
-    return True
+    return scoring.is_buy_candidate(score, params)
 
 
 def _signal_events_for_day(
@@ -1058,94 +1087,26 @@ def _signal_events_for_day(
     theoretical_positions: dict[str, Position],
     today_bars: dict[str, Bar],
     bar_index: dict[str, dict[date, Bar]],
+    minute_index: dict[str, dict[date, list[MinuteBar]]],
     stock_meta: dict[str, dict[str, Any]],
     params: BacktestParams,
 ) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for vt_symbol, position in list(theoretical_positions.items()):
-        bar = today_bars.get(vt_symbol)
-        if not bar:
-            continue
-        position.highest_price = max(position.highest_price, bar.high_price)
-        sell_reason = _sell_reason(position, bar, signal_date, params)
-        if not sell_reason or signal_date <= position.entry_date:
-            continue
-        execute_bar = bar_index.get(vt_symbol, {}).get(execute_date)
-        if not execute_bar:
-            continue
-        sell_price = execute_bar.open_price
-        del theoretical_positions[vt_symbol]
-        rows.append(
-            {
-                "trade_date": execute_date,
-                "signal_date": signal_date,
-                "execute_date": execute_date,
-                "vt_symbol": vt_symbol,
-                "side": "SELL",
-                "price": sell_price,
-                "score": None,
-                "reason": sell_reason,
-                "raw": {
-                    "mode": "signal流水",
-                    "entry_date": position.entry_date.isoformat(),
-                    "signal_date": signal_date.isoformat(),
-                    "execute_date": execute_date.isoformat(),
-                    "reason": sell_reason,
-                },
-            }
-        )
-
-    for score in scores:
-        if not _is_buy_candidate(score, params):
-            continue
-        if score.vt_symbol in theoretical_positions:
-            continue
-        execute_bar = bar_index.get(score.vt_symbol, {}).get(execute_date)
-        buy_price = execute_bar.open_price if execute_bar else None
-        buy_raw = {
-            "mode": "signal流水",
-            "signal_date": signal_date.isoformat(),
-            "execute_date": execute_date.isoformat(),
-            "entry_signal": bool(score.entry_signal),
-            "evidence": score.evidence,
-        }
-        rows.append(
-            {
-                "trade_date": execute_date,
-                "signal_date": signal_date,
-                "execute_date": execute_date,
-                "vt_symbol": score.vt_symbol,
-                "side": "BUY",
-                "price": buy_price,
-                "score": score.total_score,
-                "reason": "entry_signal",
-                "raw": buy_raw,
-            }
-        )
-        if buy_price and buy_price > 0:
-            theoretical_positions[score.vt_symbol] = Position(
-                vt_symbol=score.vt_symbol,
-                name=stock_meta.get(score.vt_symbol, {}).get("name"),
-                volume=100,
-                cost_price=buy_price,
-                entry_date=execute_date,
-                highest_price=execute_bar.high_price if execute_bar else buy_price,
-                reason=score.evidence,
-            )
-    rows.sort(key=lambda item: (item["trade_date"], item["vt_symbol"], 0 if item["side"] == "BUY" else 1))
-    return rows
+    return simulation.signal_events_for_day(
+        signal_date,
+        execute_date,
+        scores,
+        theoretical_positions,
+        today_bars,
+        bar_index,
+        minute_index,
+        stock_meta,
+        params,
+        _simulation_callbacks(),
+    )
 
 
 def _sell_reason(position: Position, bar: Bar, current_day: date, params: BacktestParams) -> str | None:
-    if bar.close_price <= position.cost_price * (1 - params.stop_loss_pct):
-        return "stop_loss"
-    if bar.close_price >= position.cost_price * (1 + params.take_profit_pct):
-        return "take_profit"
-    if bar.close_price <= position.highest_price * (1 - params.trailing_stop_pct):
-        return "trailing_stop"
-    if (current_day - position.entry_date).days >= params.time_stop_days * 2:
-        return "time_stop"
-    return None
+    return simulation.sell_reason_for_position(position, bar, current_day, params)
 
 
 def _load_symbol_universe(
@@ -1221,6 +1182,177 @@ def _with_stock_names(rows: list[dict[str, Any]], names: dict[str, dict[str, Any
     return result
 
 
+def _link_signal_events_to_orders(events: list[dict[str, Any]], orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return signal_plan.link_signal_events_to_orders(events, orders, as_date=_as_date)
+
+
+def _backtest_drilldown_date_options(
+    equity_rows: list[dict[str, Any]],
+    trade_rows: list[dict[str, Any]],
+    order_rows: list[dict[str, Any]],
+    signal_rows: list[dict[str, Any]],
+    position_rows: list[dict[str, Any]],
+    recommendation_rows: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    return queries.drilldown_date_options(
+        equity_rows,
+        trade_rows,
+        order_rows,
+        signal_rows,
+        position_rows,
+        recommendation_rows,
+        as_date=_as_date,
+        to_api=_mapping_to_api,
+    )
+
+
+def _backtest_drilldown_symbol_options(
+    trade_rows: list[dict[str, Any]],
+    order_rows: list[dict[str, Any]],
+    signal_rows: list[dict[str, Any]],
+    position_rows: list[dict[str, Any]],
+    stock_names: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return queries.drilldown_symbol_options(
+        trade_rows,
+        order_rows,
+        signal_rows,
+        position_rows,
+        stock_names,
+        as_date=_as_date,
+        normalize_symbol=_normalize_symbol,
+        board_payload=_stock_board_payload,
+        to_api=_mapping_to_api,
+    )
+
+
+def _candidate_trace_summary(
+    *,
+    backtest_id: int,
+    vt_symbol: str,
+    signal_date: date,
+    run: dict[str, Any],
+    recommendation: dict[str, Any] | None,
+    signal_rows: list[dict[str, Any]],
+    order_rows: list[dict[str, Any]],
+    trade_rows: list[dict[str, Any]],
+    equity_row: dict[str, Any] | None,
+    position_rows: list[dict[str, Any]],
+    stock_names: dict[str, dict[str, Any]],
+    not_planned_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    linked_signals = _link_signal_events_to_orders(signal_rows, order_rows)
+    named_signals = _with_stock_names(linked_signals, stock_names)
+    named_orders = _with_stock_names(order_rows, stock_names)
+    named_trades = _with_stock_names(trade_rows, stock_names)
+    named_positions = _with_stock_names(position_rows, stock_names)
+    buy_orders = [row for row in named_orders if str(row.get("side") or "").upper() == "BUY"]
+    buy_trades = [row for row in named_trades if str(row.get("side") or "").upper() == "BUY"]
+    action = str((recommendation or {}).get("action") or "").upper()
+    first_signal = named_signals[0] if named_signals else None
+    first_order = buy_orders[0] if buy_orders else (named_orders[0] if named_orders else None)
+    linked_status = str(first_order.get("status") or "") if first_order else "not_ordered"
+    first_plan_status = str(first_signal.get("plan_status") or "") if first_signal else ""
+    first_signal_raw = first_signal.get("raw") if isinstance(first_signal, dict) and isinstance(first_signal.get("raw"), dict) else {}
+    first_signal_reason = str(first_signal.get("linked_order_reason") or first_signal_raw.get("reason") or "") if first_signal else ""
+
+    if buy_trades:
+        status = "filled"
+        summary = "候选为 BUY，组合回测已下单并成交。"
+    elif first_order and str(first_order.get("status") or "") == "rejected":
+        status = "rejected"
+        summary = f"候选进入买入计划，但真实组合订单被拒绝：{first_order.get('reason') or 'unknown'}。"
+    elif action == "WATCH":
+        status = "watch_not_bought"
+        summary = "候选是 WATCH，默认组合回测不会买入观察股。"
+    elif recommendation and not first_signal:
+        status = "candidate_not_planned"
+        summary = _candidate_not_planned_summary(not_planned_context)
+    elif first_signal:
+        if first_plan_status in {"not_triggered", "rejected"}:
+            status = first_plan_status
+            summary = _candidate_trace_plan_summary(first_signal_reason)
+        else:
+            status = "planned_not_ordered"
+            summary = "理论信号存在，但没有找到对应真实组合订单，通常是组合资金、仓位或回测链路未记录完整。"
+    else:
+        status = "not_selected"
+        summary = "该股票在这个信号日没有进入当前回测策略的候选或信号计划。"
+
+    planned_execute_date = first_signal.get("execute_date") if first_signal else first_order.get("trade_date") if first_order else None
+    result = {
+        "status": status,
+        "summary": summary,
+        "backtest_id": backtest_id,
+        "signal_date": signal_date.isoformat(),
+        "planned_execute_date": planned_execute_date.isoformat() if hasattr(planned_execute_date, "isoformat") else planned_execute_date,
+        "vt_symbol": vt_symbol,
+        **_stock_board_payload(vt_symbol, stock_names.get(vt_symbol)),
+        "name": (stock_names.get(vt_symbol) or {}).get("name"),
+        "strategy_id": run.get("strategy_id"),
+        "strategy_version": run.get("strategy_version"),
+        "run_type": _run_type_from_params(run.get("params") or {}),
+        "action": action or None,
+        "rank": (recommendation or {}).get("rank"),
+        "total_score": (recommendation or {}).get("total_score"),
+        "recommendation": _mapping_to_api(_with_stock_names([recommendation], stock_names)[0]) if recommendation else None,
+        "signals": [_mapping_to_api(row) for row in named_signals],
+        "orders": [_mapping_to_api(row) for row in named_orders],
+        "trades": [_mapping_to_api(row) for row in named_trades],
+        "positions": [_mapping_to_api(row) for row in named_positions],
+        "equity": _mapping_to_api(equity_row) if equity_row else None,
+        "linked_order_status": linked_status,
+        "linked_order_reason": first_order.get("reason") if first_order else None,
+        "diagnostics": _candidate_trace_diagnostics(recommendation, named_signals, named_orders, named_trades),
+        "not_planned_context": _mapping_to_api(not_planned_context) if status == "candidate_not_planned" and not_planned_context else None,
+    }
+    if first_signal:
+        result["plan_status"] = first_signal.get("plan_status")
+        result["plan_status_label"] = first_signal.get("plan_status_label")
+    return result
+
+
+def _candidate_not_planned_summary(context: dict[str, Any] | None) -> str:
+    if not context:
+        return "候选存在，但没有进入该回测的理论买入计划，通常是排名、持仓上限、策略参数或回测区间不一致。"
+    reason = str(context.get("likely_reason") or "")
+    label = str(context.get("likely_reason_label") or "").strip()
+    if reason == "before_first_signal_date":
+        return f"候选存在，但信号日处于该回测的预热/明细空窗期：{label}。回测需要先加载足够历史K线计算 MA60、60日回撤等指标。"
+    if reason == "after_last_signal_date":
+        return f"候选存在，但信号日不在该回测已记录的信号明细范围内：{label}。"
+    if reason == "outside_backtest_universe":
+        return f"候选存在，但不在该回测股票池内：{label}。"
+    if reason == "signal_date_has_no_plan":
+        return f"候选存在，但该信号日没有生成回测理论计划：{label}。"
+    if reason == "not_in_same_day_plan":
+        return f"候选存在，但该股票没有进入该信号日理论计划：{label}。"
+    if reason == "not_in_persisted_candidates":
+        return "该股票没有进入这一天的落库候选。"
+    return f"候选存在，但没有进入该回测的理论买入计划。{label or '需要核查回测参数、股票池和候选生成链路。'}"
+
+
+def _candidate_trace_plan_summary(reason: str) -> str:
+    return signal_plan.candidate_trace_plan_summary(reason)
+
+
+def _candidate_trace_diagnostics(
+    recommendation: dict[str, Any] | None,
+    signal_rows: list[dict[str, Any]],
+    order_rows: list[dict[str, Any]],
+    trade_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return signal_plan.candidate_trace_diagnostics(recommendation, signal_rows, order_rows, trade_rows)
+
+
+def _signal_plan_status(raw: dict[str, Any], order: dict[str, Any] | None) -> str:
+    return signal_plan.signal_plan_status(raw, order)
+
+
+def _signal_plan_status_label(status: str) -> str:
+    return signal_plan.signal_plan_status_label(status)
+
+
 def _load_score_context(session, vt_symbols: list[str]) -> ScoreContext:
     return ScoreContext(financial_rows_by_symbol=_load_financial_rows_by_symbol(session, vt_symbols))
 
@@ -1242,15 +1374,7 @@ def _load_financial_rows_by_symbol(session, vt_symbols: list[str]) -> dict[str, 
 def _financial_scores_from_context(score_context: ScoreContext | None, trade_date: date) -> dict[str, float]:
     if score_context is None:
         return {}
-    result: dict[str, float] = {}
-    for vt_symbol, rows in score_context.financial_rows_by_symbol.items():
-        for row in rows:
-            publish_date = _as_date(row.get("publish_date"))
-            if publish_date is None or publish_date > trade_date:
-                continue
-            result[vt_symbol] = score_financial_report(row)
-            break
-    return result
+    return financial_scores_from_rows_by_symbol(score_context.financial_rows_by_symbol, trade_date)
 
 
 def _load_all_bars(session, vt_symbols: list[str], start: date, end: date) -> dict[str, list[Bar]]:
@@ -1280,6 +1404,12 @@ def _load_all_bars(session, vt_symbols: list[str], start: date, end: date) -> di
             )
         )
     return dict(result)
+
+
+def _lookback_start(start: date) -> date:
+    """Load enough pre-start bars for MA60 and 60-day drawdown factors."""
+
+    return start - timedelta(days=BACKTEST_LOOKBACK_DAYS * 2)
 
 
 def _load_minute_bar_index(
@@ -1325,18 +1455,11 @@ def _trading_days(bars_by_symbol: dict[str, list[Bar]], start: date, end: date) 
 
 
 def _bar_index(bars_by_symbol: dict[str, list[Bar]]) -> dict[str, dict[date, Bar]]:
-    return {symbol: {bar.trade_date: bar for bar in bars} for symbol, bars in bars_by_symbol.items()}
+    return simulation.bar_index_by_symbol(bars_by_symbol)
 
 
 def _market_value(positions: dict[str, Position], today_bars: dict[str, Bar]) -> float:
-    value = 0.0
-    for vt_symbol, position in positions.items():
-        bar = today_bars.get(vt_symbol)
-        if bar:
-            value += bar.close_price * position.volume
-        else:
-            value += position.cost_price * position.volume
-    return value
+    return simulation.market_value(positions, today_bars)
 
 
 def _position_snapshot_rows(
@@ -1345,32 +1468,7 @@ def _position_snapshot_rows(
     today_bars: dict[str, Bar],
     total_equity: float,
 ) -> list[dict[str, Any]]:
-    rows = []
-    for vt_symbol, position in sorted(positions.items()):
-        bar = today_bars.get(vt_symbol)
-        close_price = bar.close_price if bar else position.cost_price
-        market_value = close_price * position.volume
-        cost_amount = position.cost_price * position.volume
-        floating_pnl = market_value - cost_amount
-        rows.append(
-            {
-                "trade_date": trade_date,
-                "vt_symbol": vt_symbol,
-                "name": position.name,
-                "volume": position.volume,
-                "cost_price": position.cost_price,
-                "close_price": close_price,
-                "market_value": market_value,
-                "floating_pnl": floating_pnl,
-                "floating_pnl_pct": floating_pnl / cost_amount * 100 if cost_amount else None,
-                "weight_pct": market_value / total_equity * 100 if total_equity else None,
-                "entry_date": position.entry_date,
-                "holding_days": (trade_date - position.entry_date).days,
-                "highest_price": position.highest_price,
-                "raw": position.reason,
-            }
-        )
-    return rows
+    return simulation.position_snapshot_rows(trade_date, positions, today_bars, total_equity)
 
 
 def _resolve_buy_fill(
@@ -1381,85 +1479,33 @@ def _resolve_buy_fill(
     minute_index: dict[str, dict[date, list[MinuteBar]]],
     params: BacktestParams,
 ) -> dict[str, Any]:
-    vt_symbol = str(order["vt_symbol"])
-    if not params.intraday_entry:
-        return {"status": "filled", "price": daily_bar.open_price, "mode": "daily_next_open"}
-
-    reference_date = _as_date(order.get("signal_date")) or _previous_trade_date(bar_index.get(vt_symbol, {}), current_day)
-    ma5 = _ma5_for_entry_day(bar_index.get(vt_symbol, {}), reference_date) if reference_date else None
-    minute_bars = minute_index.get(vt_symbol, {}).get(current_day, [])
-    trigger = _tail_entry_trigger(minute_bars, ma5, params)
-    if trigger:
-        return {
-            "status": "filled",
-            "price": trigger.close_price,
-            "mode": "minute_tail_ma5",
-            "bar_time": trigger.bar_time.isoformat(sep=" "),
-            "reference_date": reference_date.isoformat() if reference_date else None,
-            "ma5": ma5,
-            "ma5_distance_pct": _pct_distance(trigger.close_price, ma5),
-            "window": f"{params.tail_entry_start}-{params.tail_entry_end}",
-        }
-    if params.minute_entry_required:
-        return {
-            "status": "rejected",
-            "price": None,
-            "reason": "tail_entry_not_triggered",
-            "mode": "minute_tail_ma5_required",
-            "minute_bar_count": len(minute_bars),
-            "reference_date": reference_date.isoformat() if reference_date else None,
-            "ma5": ma5,
-            "window": f"{params.tail_entry_start}-{params.tail_entry_end}",
-        }
-    return {
-        "status": "filled",
-        "price": daily_bar.open_price,
-        "mode": "daily_next_open_fallback",
-        "fallback_reason": "minute_tail_entry_unavailable_or_not_triggered",
-        "minute_bar_count": len(minute_bars),
-        "reference_date": reference_date.isoformat() if reference_date else None,
-        "ma5": ma5,
-        "window": f"{params.tail_entry_start}-{params.tail_entry_end}",
-    }
+    return execution_models.resolve_buy_fill(order, current_day, daily_bar, bar_index, minute_index, params)
 
 
-def _tail_entry_trigger(minute_bars: list[MinuteBar], ma5: float | None, params: BacktestParams) -> MinuteBar | None:
-    if ma5 is None or ma5 <= 0:
-        return None
-    start = _parse_hhmm(params.tail_entry_start)
-    end = _parse_hhmm(params.tail_entry_end)
-    for bar in sorted(minute_bars, key=lambda item: item.bar_time):
-        hhmm = bar.bar_time.time()
-        if hhmm < start or hhmm > end:
-            continue
-        distance = _pct_distance(bar.close_price, ma5)
-        if distance is not None and abs(distance) <= params.tail_entry_ma5_tolerance_pct:
-            return bar
-    return None
+def _resolve_tail_sell_fill(
+    vt_symbol: str,
+    position: Position,
+    current_day: date,
+    daily_bar: Bar,
+    minute_index: dict[str, dict[date, list[MinuteBar]]],
+    params: BacktestParams,
+    reason: str,
+    signal_date: date | None = None,
+) -> dict[str, Any]:
+    return execution_models.resolve_tail_sell_fill(
+        vt_symbol,
+        position,
+        current_day,
+        daily_bar,
+        minute_index,
+        params,
+        reason,
+        signal_date=signal_date,
+    )
 
 
-def _ma5_for_entry_day(symbol_bars: dict[date, Bar], reference_date: date | None) -> float | None:
-    if reference_date is None:
-        return None
-    closes = [bar.close_price for day, bar in sorted(symbol_bars.items()) if day <= reference_date]
-    if len(closes) < 5:
-        return None
-    return sum(closes[-5:]) / 5
-
-
-def _previous_trade_date(symbol_bars: dict[date, Bar], current_day: date) -> date | None:
-    previous = [day for day in symbol_bars if day < current_day]
-    return max(previous) if previous else None
-
-
-def _parse_hhmm(value: str):
-    return datetime.strptime(value, "%H:%M").time()
-
-
-def _pct_distance(value: float | None, reference: float | None) -> float | None:
-    if value is None or reference in (None, 0):
-        return None
-    return (float(value) / float(reference) - 1) * 100
+def _pending_sell_raw(order: dict[str, Any], position: Position, current_day: date, mode: str) -> dict[str, Any]:
+    return simulation.pending_sell_raw(order, position, current_day, mode)
 
 
 def _metrics(initial_cash: float, equity_curve: list[dict[str, Any]], trades: list[Trade]) -> dict[str, Any]:
@@ -1493,14 +1539,18 @@ def _metrics(initial_cash: float, equity_curve: list[dict[str, Any]], trades: li
         "total_return_pct": total_return,
         "annual_return_pct": annual_return,
         "max_drawdown_pct": max_dd,
+        "total_trade_rows": len(trades),
+        "buy_count": len(buy_trades),
+        "sell_count": len(sell_trades),
         "trade_count": len(sell_trades),
+        "open_trade_count": max(len(buy_trades) - len(sell_trades), 0),
         "win_rate": len(wins) / len(sell_trades) if sell_trades else 0,
         "profit_factor": abs(sum(wins) / sum(losses)) if losses and sum(losses) else None,
         "average_win": mean(wins) if wins else 0,
         "average_loss": mean(losses) if losses else 0,
         "sharpe": sharpe,
-        "minute_tail_entry_count": execution_modes.get("minute_tail_ma5", 0),
-        "daily_open_fallback_count": execution_modes.get("daily_next_open_fallback", 0),
+        "minute_1430_count": execution_modes.get("minute_1430", 0),
+        "daily_close_proxy_count": execution_modes.get("daily_close_proxy", 0),
     }
 
 
@@ -1511,14 +1561,18 @@ def _metric_rows(metrics: dict[str, Any]) -> list[dict[str, Any]]:
         "total_return_pct": "总收益率",
         "annual_return_pct": "年化收益率",
         "max_drawdown_pct": "最大回撤",
+        "total_trade_rows": "成交记录数",
+        "buy_count": "买入笔数",
+        "sell_count": "卖出笔数",
         "trade_count": "平仓交易数",
+        "open_trade_count": "持仓中笔数",
         "win_rate": "胜率",
         "profit_factor": "盈亏比",
         "average_win": "平均盈利",
         "average_loss": "平均亏损",
         "sharpe": "Sharpe",
-        "minute_tail_entry_count": "分钟尾盘成交数",
-        "daily_open_fallback_count": "日线开盘回退成交数",
+        "minute_1430_count": "14:30真实成交数",
+        "daily_close_proxy_count": "日线收盘代理成交数",
     }
     return [
         {"key": key, "label": label, "value": metrics.get(key)}
@@ -1546,31 +1600,17 @@ def _extended_metrics(
     orders: list[dict[str, Any]],
     equity: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    sell_trades = [trade for trade in all_trades if trade.get("side") == "SELL"]
-    buy_trades = [trade for trade in all_trades if trade.get("side") == "BUY"]
-    holding_days = [int(trade["holding_days"]) for trade in closed_trades if trade.get("holding_days") is not None]
-    traded_amount = sum(float(trade.get("amount") or 0) for trade in all_trades)
-    initial_cash = float(metrics.get("initial_cash") or 0)
-    rejected_orders = [order for order in orders if order.get("status") == "rejected"]
-    exposure = [float(row.get("market_value") or 0) / float(row.get("total_equity") or 1) for row in equity if row.get("total_equity")]
-    execution_modes = _trade_execution_mode_counts(buy_trades)
-
-    return {
-        "total_trade_rows": len(all_trades),
-        "buy_count": len(buy_trades),
-        "sell_count": len(sell_trades),
-        "closed_trade_count": len(closed_trades),
-        "open_trade_count": max(len(buy_trades) - len(sell_trades), 0),
-        "average_holding_days": mean(holding_days) if holding_days else 0,
-        "median_holding_days": _median(holding_days),
-        "turnover_pct": traded_amount / initial_cash * 100 if initial_cash else None,
-        "traded_amount": traded_amount,
-        "average_exposure_pct": mean(exposure) * 100 if exposure else 0,
-        "max_position_count": max((int(row.get("position_count") or 0) for row in equity), default=0),
-        "rejected_order_count": len(rejected_orders),
-        "filled_order_count": len([order for order in orders if order.get("status") == "filled"]),
-        "execution_modes": execution_modes,
-    }
+    return reports.extended_metrics(
+        metrics,
+        closed_trades,
+        all_trades,
+        orders,
+        equity,
+        order_execution_model=_order_execution_model,
+        order_execution=_order_execution,
+        trade_execution_mode_counts=_trade_execution_mode_counts,
+        median=_median,
+    )
 
 
 def _execution_quality_report(
@@ -1579,72 +1619,88 @@ def _execution_quality_report(
     data_quality: dict[str, Any],
     sample: dict[str, Any],
 ) -> dict[str, Any]:
-    execution_modes = extended_metrics.get("execution_modes") or {}
-    buy_count = int(extended_metrics.get("buy_count") or 0)
-    minute_tail_count = int(metrics.get("minute_tail_entry_count") or execution_modes.get("minute_tail_ma5") or 0)
-    daily_fallback_count = int(metrics.get("daily_open_fallback_count") or execution_modes.get("daily_next_open_fallback") or 0)
-    minute_bar_count = int((data_quality.get("stock_minute_bars") or {}).get("count") or 0)
-    daily_bar_count = int((data_quality.get("stock_daily_bars") or {}).get("count") or 0)
-    financial_count = int((data_quality.get("stock_financial_reports") or {}).get("count") or 0)
-    coverage_pct = sample.get("coverage_pct")
+    return reports.execution_quality_report(
+        metrics,
+        extended_metrics,
+        data_quality,
+        sample,
+        ratio_pct=_ratio_pct,
+    )
 
+
+def _data_as_of_audit(
+    params: BacktestParams,
+    execution_quality: dict[str, Any],
+    data_quality: dict[str, Any],
+) -> dict[str, Any]:
+    daily_close_proxy_ratio = execution_quality.get("daily_close_proxy_ratio")
+    minute_gap_rejected_count = int(execution_quality.get("minute_gap_rejected_count") or 0)
+    financial_count = int((data_quality.get("stock_financial_reports") or {}).get("count") or 0)
     diagnostics = [
         {
-            "id": "minute_tail_entry_coverage",
-            "label": "尾盘分钟成交覆盖",
-            "status": "pass" if buy_count > 0 and minute_tail_count / buy_count >= 0.8 else "warning",
-            "value": _ratio_pct(minute_tail_count, buy_count),
-            "value_type": "pct",
-            "message": (
-                "大多数买入由分钟尾盘 MA5 规则成交。"
-                if buy_count > 0 and minute_tail_count / buy_count >= 0.8
-                else "当前买入主要不是分钟尾盘成交，不能宣称已充分验证尾盘低吸。"
-            ),
+            "id": "candidate_daily_visibility",
+            "label": "候选数据可见性",
+            "status": "pass",
+            "value": None,
+            "value_type": "text",
+            "message": "候选逐交易日重新评分，只使用信号日及以前的日线、资金流、热度、龙虎榜和板块数据。",
         },
         {
-            "id": "daily_open_fallback_rate",
-            "label": "日线开盘回退占比",
-            "status": "pass" if buy_count == 0 or daily_fallback_count / buy_count <= 0.2 else "warning",
-            "value": _ratio_pct(daily_fallback_count, buy_count),
-            "value_type": "pct",
-            "message": (
-                "日线开盘回退占比较低。"
-                if buy_count == 0 or daily_fallback_count / buy_count <= 0.2
-                else "多数买入回退到 D+1 开盘，尾盘成交真实性依赖后续补分钟数据。"
-            ),
-        },
-        {
-            "id": "daily_sample_coverage",
-            "label": "股票池日线覆盖",
-            "status": "pass" if coverage_pct is not None and float(coverage_pct) >= 80 else "warning",
-            "value": coverage_pct,
-            "value_type": "pct",
-            "message": (
-                "日线样本接近全股票池覆盖。"
-                if coverage_pct is not None and float(coverage_pct) >= 80
-                else "当前回测样本不是全 A，只能代表本地已同步股票池。"
-            ),
-        },
-        {
-            "id": "financial_data_presence",
-            "label": "财报数据覆盖",
+            "id": "financial_publish_date",
+            "label": "财报披露日约束",
             "status": "pass" if financial_count > 0 else "warning",
             "value": financial_count,
             "value_type": "count",
-            "message": "财报数据已参与披露日约束评分。" if financial_count > 0 else "财报数据缺失，现金流改善只能降级处理。",
+            "message": (
+                "财报评分只读取 publish_date <= trade_date 的本地财报。"
+                if financial_count > 0
+                else "本地财报为空或覆盖不足，详情页现在可查的财报不会自动进入历史当日评分。"
+            ),
+        },
+        {
+            "id": "execution_after_signal",
+            "label": "信号后执行",
+            "status": "pass",
+            "value": None,
+            "value_type": "text",
+            "message": _execution_timing(params),
+        },
+        {
+            "id": "tail_proxy_risk",
+            "label": "尾盘代理风险",
+            "status": "warning" if daily_close_proxy_ratio is not None and float(daily_close_proxy_ratio) > 50 else "pass",
+            "value": daily_close_proxy_ratio,
+            "value_type": "pct",
+            "message": (
+                "收盘代理占比较高，当前结果不能按纯 14:30 分钟真实回测解读。"
+                if daily_close_proxy_ratio is not None and float(daily_close_proxy_ratio) > 50
+                else "收盘代理占比未超过一半，但仍应查看成交真实性检查。"
+            ),
+        },
+        {
+            "id": "strict_minute_gap",
+            "label": "严格分钟缺口",
+            "status": "warning" if minute_gap_rejected_count > 0 else "pass",
+            "value": minute_gap_rejected_count,
+            "value_type": "count",
+            "message": (
+                "存在缺 14:30 快照导致的严格拒单，应先补齐分钟线再判断策略真实收益。"
+                if minute_gap_rejected_count > 0
+                else "本报告未发现严格 14:30 缺口拒单。"
+            ),
+        },
+        {
+            "id": "overfit_scope",
+            "label": "过拟合验证范围",
+            "status": "warning",
+            "value": None,
+            "value_type": "text",
+            "message": "当前报告内置分段、随机样本和成本压力检查；多年全 A walk-forward 与参数网格需要单独运行后才可证明稳健性。",
         },
     ]
-
     return {
         "status": "warning" if any(item["status"] != "pass" for item in diagnostics) else "pass",
-        "buy_count": buy_count,
-        "minute_tail_entry_count": minute_tail_count,
-        "daily_open_fallback_count": daily_fallback_count,
-        "minute_tail_entry_ratio": _ratio_pct(minute_tail_count, buy_count),
-        "daily_open_fallback_ratio": _ratio_pct(daily_fallback_count, buy_count),
-        "minute_bar_count": minute_bar_count,
-        "daily_bar_count": daily_bar_count,
-        "financial_report_count": financial_count,
+        "policy": "反未来函数审计只证明当前实现的数据可见性约束，不证明策略有效或不过拟合。",
         "diagnostics": diagnostics,
     }
 
@@ -1659,6 +1715,16 @@ def _trade_execution_mode_counts(buy_trades: list[dict[str, Any]]) -> dict[str, 
             mode = "unknown"
         counts[str(mode)] = counts.get(str(mode), 0) + 1
     return counts
+
+
+def _order_execution(order: dict[str, Any]) -> dict[str, Any]:
+    raw = order.get("raw") if isinstance(order.get("raw"), dict) else {}
+    execution = raw.get("execution") if isinstance(raw.get("execution"), dict) else raw
+    return execution if isinstance(execution, dict) else {}
+
+
+def _order_execution_model(order: dict[str, Any]) -> str:
+    return str(_order_execution(order).get("execution_model") or "")
 
 
 def _closed_trades(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2338,7 +2404,13 @@ def _run_validation_grid(
     sample_benchmark_curve = _sample_equal_weight_curve(_bars_to_rows(bars_by_symbol))
     score_cache: dict[date, list[Any]] = {}
     shared_minute_index = (
-        _load_minute_bar_index(session, list(bars_by_symbol), trading_days[0], trading_days[-1])
+        _load_minute_bar_index(
+            session,
+            list(bars_by_symbol),
+            trading_days[0],
+            trading_days[-1],
+            base_params.minute_interval,
+        )
         if base_params.intraday_entry
         else {}
     )
@@ -2408,29 +2480,7 @@ def _run_validation_grid(
 
 
 def _validation_param_variants(base_params: BacktestParams, max_variants: int) -> list[BacktestParams]:
-    min_scores = [64.0, 68.0, 72.0]
-    stop_losses = [0.05, 0.07, 0.09]
-    take_profits = [0.14, 0.18, 0.22]
-    strict_values = [True, False]
-    variants = []
-    for min_score, stop_loss, take_profit, strict_entry in product(min_scores, stop_losses, take_profits, strict_values):
-        variants.append(
-            replace(
-                base_params,
-                min_entry_score=min_score,
-                stop_loss_pct=stop_loss,
-                take_profit_pct=take_profit,
-                strict_entry=strict_entry,
-                persist=False,
-            )
-        )
-    max_count = max(min(max_variants, len(variants)), 1)
-    base_index = next((index for index, params in enumerate(variants) if _same_grid_params(params, base_params)), None)
-    if base_index is None or base_index < max_count:
-        return variants[:max_count]
-    selected = variants[: max_count - 1]
-    selected.append(variants[base_index])
-    return selected
+    return validation.validation_param_variants(base_params, max_variants, same_grid_params=_same_grid_params)
 
 
 def _validation_row(
@@ -2443,120 +2493,26 @@ def _validation_row(
     sample_benchmark_curve: list[dict[str, Any]],
     high_friction: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    strategy_return = metrics.get("total_return_pct")
-    sample_return = _nav_return_pct(sample_benchmark_curve)
-    return {
-        "variant_id": variant_id,
-        "is_base_params": _same_grid_params(params, base_params),
-        "min_entry_score": params.min_entry_score,
-        "stop_loss_pct": params.stop_loss_pct,
-        "take_profit_pct": params.take_profit_pct,
-        "strict_entry": params.strict_entry,
-        "final_equity": metrics.get("final_equity"),
-        "total_return_pct": strategy_return,
-        "annual_return_pct": metrics.get("annual_return_pct"),
-        "max_drawdown_pct": metrics.get("max_drawdown_pct"),
-        "trade_count": metrics.get("trade_count"),
-        "win_rate": metrics.get("win_rate"),
-        "profit_factor": metrics.get("profit_factor"),
-        "sharpe": metrics.get("sharpe"),
-        "in_sample_return_pct": (in_sample or {}).get("return_pct"),
-        "out_sample_return_pct": (out_sample or {}).get("return_pct"),
-        "out_sample_excess_pct": (out_sample or {}).get("excess_return_pct"),
-        "sample_equal_weight_return_pct": sample_return,
-        "sample_equal_weight_excess_pct": (
-            float(strategy_return) - float(sample_return)
-            if strategy_return is not None and sample_return is not None
-            else None
-        ),
-        "high_friction_return_pct": (high_friction or {}).get("total_return_pct"),
-    }
+    return validation.validation_row(
+        variant_id,
+        params,
+        base_params,
+        metrics,
+        in_sample,
+        out_sample,
+        sample_benchmark_curve,
+        high_friction,
+        nav_return_pct=_nav_return_pct,
+        same_grid_params=_same_grid_params,
+    )
 
 
 def _validation_grid_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    returns = _numeric_values(rows, "total_return_pct")
-    out_returns = _numeric_values(rows, "out_sample_return_pct")
-    excess_returns = _numeric_values(rows, "sample_equal_weight_excess_pct")
-    high_friction_returns = _numeric_values(rows, "high_friction_return_pct")
-    base_row = next((row for row in rows if row.get("is_base_params")), None)
-    ranked_total = sorted(rows, key=lambda row: (float(row.get("total_return_pct") or -1e9), -abs(float(row.get("max_drawdown_pct") or 0))), reverse=True)
-    ranked_out = sorted(rows, key=lambda row: (float(row.get("out_sample_return_pct") or -1e9), -abs(float(row.get("max_drawdown_pct") or 0))), reverse=True)
-
-    return {
-        "variant_count": len(rows),
-        "positive_count": len([value for value in returns if value > 0]),
-        "positive_ratio": _ratio_pct(len([value for value in returns if value > 0]), len(returns)),
-        "out_sample_positive_count": len([value for value in out_returns if value > 0]),
-        "out_sample_positive_ratio": _ratio_pct(len([value for value in out_returns if value > 0]), len(out_returns)),
-        "sample_excess_positive_count": len([value for value in excess_returns if value > 0]),
-        "sample_excess_positive_ratio": _ratio_pct(len([value for value in excess_returns if value > 0]), len(excess_returns)),
-        "high_friction_positive_count": len([value for value in high_friction_returns if value > 0]),
-        "high_friction_positive_ratio": _ratio_pct(len([value for value in high_friction_returns if value > 0]), len(high_friction_returns)),
-        "return_avg_pct": mean(returns) if returns else None,
-        "return_median_pct": _median(returns) if returns else None,
-        "return_min_pct": min(returns) if returns else None,
-        "return_max_pct": max(returns) if returns else None,
-        "out_sample_return_median_pct": _median(out_returns) if out_returns else None,
-        "base_variant_id": base_row.get("variant_id") if base_row else None,
-        "base_total_return_pct": base_row.get("total_return_pct") if base_row else None,
-        "base_out_sample_return_pct": base_row.get("out_sample_return_pct") if base_row else None,
-        "base_total_rank": _rank_for_variant(ranked_total, base_row),
-        "base_out_sample_rank": _rank_for_variant(ranked_out, base_row),
-        "best_total_variant_id": ranked_total[0]["variant_id"] if ranked_total else None,
-        "best_out_sample_variant_id": ranked_out[0]["variant_id"] if ranked_out else None,
-    }
+    return validation.validation_grid_summary(rows, ratio_pct=_ratio_pct, median=_median, rank_for_variant=_rank_for_variant)
 
 
 def _validation_grid_diagnostics(summary: dict[str, Any]) -> list[dict[str, Any]]:
-    positive_ratio = summary.get("positive_ratio")
-    out_ratio = summary.get("out_sample_positive_ratio")
-    excess_ratio = summary.get("sample_excess_positive_ratio")
-    friction_ratio = summary.get("high_friction_positive_ratio")
-    base_out_rank = summary.get("base_out_sample_rank")
-    variant_count = int(summary.get("variant_count") or 0)
-
-    return [
-        {
-            "id": "grid_positive_ratio",
-            "label": "参数组合盈利占比",
-            "status": "pass" if positive_ratio is not None and positive_ratio >= 60 else "warning",
-            "value": positive_ratio,
-            "value_type": "pct",
-            "message": "多数参数组合为正收益" if positive_ratio is not None and positive_ratio >= 60 else "盈利依赖少数组合，参数敏感性偏高。",
-        },
-        {
-            "id": "grid_out_sample_positive_ratio",
-            "label": "样本外盈利占比",
-            "status": "pass" if out_ratio is not None and out_ratio >= 50 else "fail",
-            "value": out_ratio,
-            "value_type": "pct",
-            "message": "样本外多数参数为正收益" if out_ratio is not None and out_ratio >= 50 else "样本外稳定性不足，不能认为策略已抗过拟合。",
-        },
-        {
-            "id": "grid_sample_excess_ratio",
-            "label": "跑赢样本等权占比",
-            "status": "pass" if excess_ratio is not None and excess_ratio >= 50 else "fail",
-            "value": excess_ratio,
-            "value_type": "pct",
-            "message": "多数参数跑赢样本等权" if excess_ratio is not None and excess_ratio >= 50 else "多数参数未跑赢样本等权，选股优势仍不足。",
-        },
-        {
-            "id": "grid_high_friction_ratio",
-            "label": "高摩擦正收益占比",
-            "status": "pass" if friction_ratio is not None and friction_ratio >= 60 else "warning",
-            "value": friction_ratio,
-            "value_type": "pct",
-            "message": "多数参数在更高交易成本下仍为正" if friction_ratio is not None and friction_ratio >= 60 else "交易成本压力下收益容易被吃掉。",
-        },
-        {
-            "id": "base_out_sample_rank",
-            "label": "当前参数样本外排名",
-            "status": "pass" if base_out_rank and variant_count and base_out_rank <= max(1, int(variant_count * 0.33)) else "warning",
-            "value": base_out_rank,
-            "value_type": "count",
-            "message": "当前参数处于样本外排名前列" if base_out_rank and variant_count and base_out_rank <= max(1, int(variant_count * 0.33)) else "当前参数不是样本外最稳组合，需谨慎使用默认值。",
-        },
-    ]
+    return validation.validation_grid_diagnostics(summary)
 
 
 def _walk_forward_grid_analysis(
@@ -2567,104 +2523,15 @@ def _walk_forward_grid_analysis(
     test_days: int = 20,
     step_days: int = 20,
 ) -> dict[str, Any]:
-    if not variant_runs:
-        return {"status": "insufficient_data", "folds": [], "diagnostics": []}
-    dates = [
-        _as_date(row.get("trade_date"))
-        for row in sorted(variant_runs[0].get("equity") or [], key=lambda item: item["trade_date"])
-    ]
-    dates = [item for item in dates if item is not None]
-    if len(dates) < train_days + test_days:
-        return {
-            "status": "insufficient_data",
-            "method": "rolling_train_select_then_test",
-            "folds": [],
-            "diagnostics": [],
-            "limitations": [f"交易日不足，至少需要 {train_days + test_days} 个交易日。"],
-        }
-
-    folds = []
-    max_start = len(dates) - train_days - test_days
-    for fold_index, start_index in enumerate(range(0, max_start + 1, step_days), start=1):
-        train_start = dates[start_index]
-        train_end = dates[start_index + train_days - 1]
-        test_start = train_end
-        test_end = dates[start_index + train_days + test_days - 1]
-        ranked = []
-        for variant in variant_runs:
-            train_summary = _variant_period_summary(
-                f"fold_{fold_index}_train",
-                "训练窗口",
-                variant,
-                train_start,
-                train_end,
-                benchmark_curve,
-            )
-            test_summary = _variant_period_summary(
-                f"fold_{fold_index}_test",
-                "测试窗口",
-                variant,
-                test_start,
-                test_end,
-                benchmark_curve,
-                exclude_start_trade_date=True,
-            )
-            if train_summary and test_summary:
-                ranked.append((variant, train_summary, test_summary))
-        if not ranked:
-            continue
-        selected, train_summary, test_summary = max(
-            ranked,
-            key=lambda item: (
-                float(item[1].get("return_pct") or -1e9),
-                float(item[1].get("excess_return_pct") or -1e9),
-                -abs(float(item[1].get("max_drawdown_pct") or 0)),
-            ),
-        )
-        params: BacktestParams = selected["params"]
-        folds.append(
-            {
-                "id": f"fold_{fold_index}",
-                "train_start_date": train_start.isoformat(),
-                "train_end_date": train_end.isoformat(),
-                "test_start_date": test_start.isoformat(),
-                "test_end_date": test_end.isoformat(),
-                "train_days": train_summary["days"],
-                "test_days": test_summary["days"],
-                "selected_variant_id": selected["variant_id"],
-                "min_entry_score": params.min_entry_score,
-                "stop_loss_pct": params.stop_loss_pct,
-                "take_profit_pct": params.take_profit_pct,
-                "strict_entry": params.strict_entry,
-                "train_return_pct": train_summary["return_pct"],
-                "train_excess_return_pct": train_summary.get("excess_return_pct"),
-                "train_max_drawdown_pct": train_summary["max_drawdown_pct"],
-                "train_trade_count": train_summary["trade_count"],
-                "test_return_pct": test_summary["return_pct"],
-                "test_benchmark_return_pct": test_summary.get("benchmark_return_pct"),
-                "test_excess_return_pct": test_summary.get("excess_return_pct"),
-                "test_max_drawdown_pct": test_summary["max_drawdown_pct"],
-                "test_trade_count": test_summary["trade_count"],
-                "test_win_rate": test_summary["win_rate"],
-                "test_pnl": test_summary["pnl"],
-            }
-        )
-
-    summary = _walk_forward_summary(folds)
-    return {
-        "status": "ready" if folds else "empty",
-        "method": "rolling_train_select_then_test",
-        "train_days": train_days,
-        "test_days": test_days,
-        "step_days": step_days,
-        "folds": folds,
-        "summary": summary,
-        "diagnostics": _walk_forward_diagnostics(summary),
-        "limitations": [
-            "每个折叠只在训练窗口按收益/超额/回撤选择参数，再在后续窗口测试；没有使用未来窗口选择参数。",
-            "当前样本只有约数月日线，折叠数量有限，不能代表完整牛熊周期。",
-        ],
-    }
+    return validation.walk_forward_grid_analysis(
+        variant_runs,
+        benchmark_curve,
+        as_date=_as_date,
+        period_summary=_period_summary,
+        train_days=train_days,
+        test_days=test_days,
+        step_days=step_days,
+    )
 
 
 def _variant_period_summary(
@@ -2677,127 +2544,41 @@ def _variant_period_summary(
     *,
     exclude_start_trade_date: bool = False,
 ) -> dict[str, Any] | None:
-    rows = [
-        row for row in variant.get("equity") or []
-        if start_date <= _as_date(row.get("trade_date")) <= end_date
-    ]
-    if len(rows) < 2:
-        return None
-    return _period_summary(
+    return validation.variant_period_summary(
         period_id,
         label,
-        rows,
-        variant.get("closed_trades") or [],
+        variant,
+        start_date,
+        end_date,
         benchmark_curve,
+        as_date=_as_date,
+        period_summary=_period_summary,
         exclude_start_trade_date=exclude_start_trade_date,
     )
 
 
 def _walk_forward_summary(folds: list[dict[str, Any]]) -> dict[str, Any]:
-    test_returns = _numeric_values(folds, "test_return_pct")
-    test_excess = _numeric_values(folds, "test_excess_return_pct")
-    selected_counts: dict[int, int] = defaultdict(int)
-    for fold in folds:
-        selected_counts[int(fold["selected_variant_id"])] += 1
-    most_selected_variant_id = None
-    if selected_counts:
-        most_selected_variant_id = max(selected_counts.items(), key=lambda item: (item[1], -item[0]))[0]
-    return {
-        "fold_count": len(folds),
-        "positive_test_count": len([value for value in test_returns if value > 0]),
-        "positive_test_ratio": _ratio_pct(len([value for value in test_returns if value > 0]), len(test_returns)),
-        "excess_positive_count": len([value for value in test_excess if value > 0]),
-        "excess_positive_ratio": _ratio_pct(len([value for value in test_excess if value > 0]), len(test_excess)),
-        "test_return_avg_pct": mean(test_returns) if test_returns else None,
-        "test_return_median_pct": _median(test_returns) if test_returns else None,
-        "test_return_min_pct": min(test_returns) if test_returns else None,
-        "test_return_max_pct": max(test_returns) if test_returns else None,
-        "test_excess_avg_pct": mean(test_excess) if test_excess else None,
-        "most_selected_variant_id": most_selected_variant_id,
-        "selected_variant_counts": dict(sorted(selected_counts.items())),
-    }
+    return validation.walk_forward_summary(folds, ratio_pct=_ratio_pct, median=_median)
 
 
 def _walk_forward_diagnostics(summary: dict[str, Any]) -> list[dict[str, Any]]:
-    fold_count = int(summary.get("fold_count") or 0)
-    positive_ratio = summary.get("positive_test_ratio")
-    excess_ratio = summary.get("excess_positive_ratio")
-    excess_avg = summary.get("test_excess_avg_pct")
-    return [
-        {
-            "id": "walk_forward_fold_count",
-            "label": "滚动折叠数量",
-            "status": "pass" if fold_count >= 3 else "warning",
-            "value": fold_count,
-            "value_type": "count",
-            "message": "折叠数量可用于初步判断" if fold_count >= 3 else "折叠数量不足，只能作烟测。",
-        },
-        {
-            "id": "walk_forward_positive_ratio",
-            "label": "测试窗口盈利占比",
-            "status": "pass" if positive_ratio is not None and positive_ratio >= 50 else "fail",
-            "value": positive_ratio,
-            "value_type": "pct",
-            "message": "多数未来测试窗口为正收益" if positive_ratio is not None and positive_ratio >= 50 else "未来测试窗口盈利稳定性不足。",
-        },
-        {
-            "id": "walk_forward_excess_ratio",
-            "label": "测试窗口超额占比",
-            "status": "pass" if excess_ratio is not None and excess_ratio >= 50 else "fail",
-            "value": excess_ratio,
-            "value_type": "pct",
-            "message": "多数未来测试窗口跑赢样本等权" if excess_ratio is not None and excess_ratio >= 50 else "多数未来测试窗口未跑赢样本等权。",
-        },
-        {
-            "id": "walk_forward_avg_excess",
-            "label": "测试窗口平均超额",
-            "status": "pass" if excess_avg is not None and excess_avg > 0 else "fail",
-            "value": excess_avg,
-            "value_type": "pct",
-            "message": "未来测试窗口平均超额为正" if excess_avg is not None and excess_avg > 0 else "未来测试窗口平均超额为负。",
-        },
-    ]
+    return validation.walk_forward_diagnostics(summary)
 
 
 def _top_validation_variants(rows: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
-    ordered = sorted(
-        rows,
-        key=lambda row: (
-            float(row.get("out_sample_return_pct") if row.get("out_sample_return_pct") is not None else -1e9),
-            float(row.get("total_return_pct") if row.get("total_return_pct") is not None else -1e9),
-            -abs(float(row.get("max_drawdown_pct") or 0)),
-        ),
-        reverse=True,
-    )
-    return ordered[:limit]
+    return validation.top_validation_variants(rows, limit)
 
 
 def _numeric_values(rows: list[dict[str, Any]], key: str) -> list[float]:
-    values = []
-    for row in rows:
-        value = row.get(key)
-        if value is not None:
-            values.append(float(value))
-    return values
+    return validation.numeric_values(rows, key)
 
 
 def _rank_for_variant(ordered_rows: list[dict[str, Any]], target: dict[str, Any] | None) -> int | None:
-    if not target:
-        return None
-    target_id = target.get("variant_id")
-    for index, row in enumerate(ordered_rows, start=1):
-        if row.get("variant_id") == target_id:
-            return index
-    return None
+    return validation.rank_for_variant(ordered_rows, target)
 
 
 def _same_grid_params(params: BacktestParams, base_params: BacktestParams) -> bool:
-    return (
-        abs(params.min_entry_score - base_params.min_entry_score) < 1e-9
-        and abs(params.stop_loss_pct - base_params.stop_loss_pct) < 1e-9
-        and abs(params.take_profit_pct - base_params.take_profit_pct) < 1e-9
-        and params.strict_entry == base_params.strict_entry
-    )
+    return validation.same_grid_params(params, base_params)
 
 
 def _bars_to_rows(bars_by_symbol: dict[str, list[Bar]]) -> list[dict[str, Any]]:
@@ -2842,10 +2623,12 @@ def _params_from_run(run: dict[str, Any]) -> BacktestParams:
         max_symbols=int(raw_params.get("max_symbols") or 500),
         min_entry_score=float(raw_params.get("min_entry_score") or 68),
         strict_entry=_truthy(raw_params.get("strict_entry", True)),
+        execution_model=str(raw_params.get("execution_model") or "legacy_next_open"),
         intraday_entry=_truthy(raw_params.get("intraday_entry", True)),
         minute_entry_required=_truthy(raw_params.get("minute_entry_required", False)),
+        minute_interval=_legacy_minute_interval(raw_params.get("minute_interval") or "1m"),
         tail_entry_start=str(raw_params.get("tail_entry_start") or "14:30"),
-        tail_entry_end=str(raw_params.get("tail_entry_end") or "14:57"),
+        tail_entry_end=str(raw_params.get("tail_entry_end") or "14:30"),
         tail_entry_ma5_tolerance_pct=float(raw_params.get("tail_entry_ma5_tolerance_pct") or 1.5),
         symbols=[_normalize_symbol(symbol) for symbol in (raw_params.get("symbols") or []) if _normalize_symbol(symbol)],
         included_boards=normalize_included_boards(raw_params.get("included_boards")),
@@ -2859,35 +2642,33 @@ def _truthy(value: Any) -> bool:
     return bool(value)
 
 
+def _normalize_execution_model(value: Any) -> str:
+    return execution_models.normalize_execution_model(value)
+
+
+def _normalize_backtest_minute_interval(value: Any) -> str:
+    interval = str(value or "1m").strip().lower()
+    aliases = {
+        "1": "1m",
+        "1min": "1m",
+        "1分钟": "1m",
+    }
+    interval = aliases.get(interval, interval)
+    if interval not in SUPPORTED_BACKTEST_MINUTE_INTERVALS:
+        supported = ", ".join(sorted(SUPPORTED_BACKTEST_MINUTE_INTERVALS))
+        raise ValueError(f"Unsupported backtest minute interval: {interval}; supported: {supported}")
+    return interval
+
+
+def _legacy_minute_interval(value: Any) -> str:
+    try:
+        return _normalize_backtest_minute_interval(value)
+    except ValueError:
+        return "1m"
+
+
 def _validation_grid_csv_content(grid: dict[str, Any]) -> str:
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-
-    _write_section(writer, "参数网格摘要")
-    writer.writerow(["回测ID", grid["backtest_id"]])
-    writer.writerow(["策略", grid["strategy"]])
-    writer.writerow(["版本", grid["strategy_version"]])
-    writer.writerow(["区间", f"{grid['start_date']} 至 {grid['end_date']}"])
-    writer.writerow(["方法", grid["method"]])
-    writer.writerow(["组合数量", grid["variant_count"]])
-    writer.writerow([])
-
-    _write_dict_rows(writer, "参数空间", [grid.get("param_space") or {}])
-    _write_dict_rows(writer, "汇总", [grid.get("summary") or {}])
-    _write_dict_rows(writer, "诊断", grid.get("diagnostics") or [])
-    walk_forward = grid.get("walk_forward") or {}
-    _write_dict_rows(writer, "Walk Forward 汇总", [walk_forward.get("summary") or {}] if walk_forward.get("summary") else [])
-    _write_dict_rows(writer, "Walk Forward 诊断", walk_forward.get("diagnostics") or [])
-    _write_dict_rows(writer, "Walk Forward 折叠", walk_forward.get("folds") or [])
-    _write_dict_rows(writer, "样本外Top组合", grid.get("top_variants") or [])
-    _write_dict_rows(writer, "全部参数组合", grid.get("rows") or [])
-
-    _write_section(writer, "限制")
-    writer.writerow(["说明"])
-    for item in grid.get("limitations") or []:
-        writer.writerow([item])
-
-    return "\ufeff" + buffer.getvalue()
+    return reports.validation_grid_csv_content(grid)
 
 
 def _nav_return_pct(curve: list[dict[str, Any]]) -> float | None:
@@ -2897,144 +2678,11 @@ def _nav_return_pct(curve: list[dict[str, Any]]) -> float | None:
 
 
 def _report_csv_content(report: dict[str, Any]) -> str:
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-
-    _write_section(writer, "回测摘要")
-    writer.writerow(["回测ID", report["backtest_id"]])
-    writer.writerow(["策略", report["strategy_id"]])
-    writer.writerow(["版本", report["strategy_version"]])
-    writer.writerow(["区间", f"{report['start_date']} 至 {report['end_date']}"])
-    writer.writerow(["执行模型", report["assumptions"].get("execution")])
-    writer.writerow([])
-
-    _write_section(writer, "核心指标")
-    writer.writerow(["指标", "数值"])
-    for row in report.get("summary_rows") or []:
-        writer.writerow([row["label"], row.get("value")])
-    writer.writerow([])
-
-    _write_section(writer, "样本覆盖")
-    writer.writerow(["字段", "数值"])
-    for key, value in (report.get("sample") or {}).items():
-        writer.writerow([key, value])
-    writer.writerow([])
-
-    _write_dict_rows(writer, "扩展交易指标", [report.get("extended_metrics") or {}])
-    execution_quality = report.get("execution_quality") or {}
-    _write_dict_rows(
-        writer,
-        "成交真实性检查",
-        [{key: value for key, value in execution_quality.items() if key != "diagnostics"}] if execution_quality else [],
-    )
-    _write_dict_rows(writer, "成交真实性诊断", execution_quality.get("diagnostics") or [])
-    _write_dict_rows(writer, "基准对比", (report.get("benchmark") or {}).get("benchmarks") or [])
-    _write_dict_rows(writer, "样本内样本外", (report.get("period_analysis") or {}).get("periods") or [])
-    _write_dict_rows(writer, "市场环境分段", (report.get("regime_analysis") or {}).get("periods") or [])
-    robustness = report.get("robustness_checks") or {}
-    _write_dict_rows(writer, "年度分段", robustness.get("yearly_periods") or [])
-    _write_dict_rows(writer, "成本压力测试", robustness.get("cost_stress") or [])
-    random_baseline = robustness.get("random_baseline") or {}
-    _write_dict_rows(writer, "随机样本基准摘要", [{key: value for key, value in random_baseline.items() if key != "runs"}] if random_baseline else [])
-    _write_dict_rows(writer, "随机样本基准明细", random_baseline.get("runs") or [])
-    _write_dict_rows(writer, "反过拟合诊断", robustness.get("diagnostics") or [])
-    _write_dict_rows(writer, "月度收益", report.get("monthly_returns") or [])
-    _write_dict_rows(writer, "个股贡献", report.get("symbol_performance") or [])
-    _write_dict_rows(writer, "最差交易", report.get("worst_trades") or [])
-    _write_dict_rows(writer, "交易明细", report.get("trades") or [])
-    _write_dict_rows(writer, "已闭仓交易", report.get("closed_trades") or [])
-
-    order_stats = report.get("order_stats") or {}
-    order_rows = [
-        {"type": "status", "name": key, "count": value}
-        for key, value in (order_stats.get("by_status") or {}).items()
-    ]
-    order_rows.extend(
-        {"type": "reason", "name": key, "count": value}
-        for key, value in (order_stats.get("by_reason") or {}).items()
-    )
-    _write_dict_rows(writer, "订单统计", order_rows)
-    _write_dict_rows(writer, "未成交示例", order_stats.get("rejected_examples") or [])
-
-    data_quality = report.get("data_quality") or {}
-    data_quality_rows = [
-        {"table": key, "count": value.get("count")}
-        for key, value in data_quality.items()
-        if isinstance(value, dict)
-    ]
-    _write_dict_rows(writer, "数据质量", data_quality_rows)
-
-    _write_section(writer, "限制")
-    writer.writerow(["说明"])
-    for item in [*(data_quality.get("limitations") or []), *(report.get("limitations") or [])]:
-        writer.writerow([item])
-
-    return "\ufeff" + buffer.getvalue()
+    return reports.report_csv_content(report)
 
 
 def _minute_gap_csv_content(orders: list[dict[str, Any]]) -> tuple[str, int]:
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow(["trade_date", "vt_symbol", "reference_date", "window", "ma5", "minute_bar_count", "missing_reason"])
-    gap_count = 0
-    seen: set[tuple[str, date]] = set()
-    for order in orders:
-        trade_date = _as_date(order.get("trade_date"))
-        vt_symbol = str(order.get("vt_symbol") or "").strip().upper()
-        raw = order.get("raw") or {}
-        if not trade_date or not vt_symbol or not isinstance(raw, dict):
-            continue
-        execution = raw.get("execution") if isinstance(raw.get("execution"), dict) else raw
-        if not isinstance(execution, dict) or execution.get("mode") != "minute_tail_ma5_required":
-            continue
-        key = (vt_symbol, trade_date)
-        if key in seen:
-            continue
-        seen.add(key)
-        writer.writerow(
-            [
-                trade_date.isoformat(),
-                vt_symbol,
-                execution.get("reference_date") or "",
-                execution.get("window") or "",
-                execution.get("ma5") if execution.get("ma5") is not None else "",
-                execution.get("minute_bar_count") if execution.get("minute_bar_count") is not None else "",
-                execution.get("reason") or "tail_entry_not_triggered",
-            ]
-        )
-        gap_count += 1
-    return "\ufeff" + buffer.getvalue(), gap_count
-
-
-def _write_section(writer: csv.writer, title: str) -> None:
-    writer.writerow([f"## {title}"])
-
-
-def _write_dict_rows(writer: csv.writer, title: str, rows: list[dict[str, Any]]) -> None:
-    if not rows:
-        return
-    writer.writerow([])
-    _write_section(writer, title)
-    keys = _ordered_csv_keys(rows)
-    writer.writerow(keys)
-    for row in rows:
-        writer.writerow([_csv_value(row.get(key)) for key in keys])
-    writer.writerow([])
-
-
-def _ordered_csv_keys(rows: list[dict[str, Any]]) -> list[str]:
-    keys = []
-    for row in rows:
-        for key in row:
-            if key not in keys and key != "windows":
-                keys.append(key)
-    return keys
-
-
-def _csv_value(value: Any) -> Any:
-    if isinstance(value, (dict, list)):
-        return str(value)
-    return value
+    return reports.minute_gap_csv_content(orders, as_date=_as_date)
 
 
 def _equity_return_pct(equity: list[dict[str, Any]]) -> float | None:
@@ -3128,8 +2776,8 @@ def _backtest_method(params: BacktestParams) -> dict[str, Any]:
     return {
         "id": "daily_dynamic_candidate_backtest",
         "name": "历史逐日动态候选回测",
-        "signal_timing": "每个历史交易日收盘后，只使用当日及以前可见数据重新打分生成候选。",
-        "execution_timing": "买入在下一交易日执行；卖出信号在 D 日收盘后确认，只能在 D+1 开盘撮合。",
+        "signal_timing": _execution_signal_timing(params),
+        "execution_timing": _execution_timing(params),
         "candidate_policy": "不是用今天的候选名单回测全部历史。",
         "universe": universe,
         "symbols": params.symbols or [],
@@ -3141,8 +2789,10 @@ def _backtest_method(params: BacktestParams) -> dict[str, Any]:
             "candidate_limit": params.candidate_limit,
         },
         "execution": {
+            "execution_model": params.execution_model,
             "intraday_entry": params.intraday_entry,
             "minute_entry_required": params.minute_entry_required,
+            "minute_interval": params.minute_interval,
             "tail_entry_window": f"{params.tail_entry_start}-{params.tail_entry_end}",
             "tail_entry_ma5_tolerance_pct": params.tail_entry_ma5_tolerance_pct,
         },
@@ -3151,9 +2801,11 @@ def _backtest_method(params: BacktestParams) -> dict[str, Any]:
 
 def _backtest_assumptions(params: BacktestParams) -> dict[str, str]:
     return {
-        "candidate_generation": "历史逐日重新打分：D 日收盘后生成 D 日候选，D+1 才能买入。",
-        "execution": "Buy: D close signal -> D+1 tail-window minute fill, or D+1 open fallback unless minute_entry_required=true. Sell: D close exit signal -> D+1 open fill.",
-        "tail_entry": "uses prior visible daily MA5 and the configured intraday window; no same-day close look-ahead",
+        "candidate_generation": _execution_signal_timing(params),
+        "execution": _execution_timing(params),
+        "execution_model": params.execution_model,
+        "tail_entry": _tail_entry_assumption(params),
+        "minute_interval": params.minute_interval,
         "tail_entry_window": f"{params.tail_entry_start}-{params.tail_entry_end}",
         "minute_entry_required": str(params.minute_entry_required),
         "costs": "commission, stamp tax on sells, and slippage are included",
@@ -3161,6 +2813,28 @@ def _backtest_assumptions(params: BacktestParams) -> dict[str, str]:
         "turnover": "turnover_pct uses traded notional divided by initial cash",
         "data_as_of_policy": "daily bars only; financial data requires publish_date",
     }
+
+
+def _execution_signal_timing(params: BacktestParams) -> str:
+    if params.execution_model in {"tail_close_hybrid", "strict_1430"}:
+        return "D 日收盘后生成下一交易日计划；买入和卖出都只执行已经可见的前一交易日信号。"
+    return "历史逐日重新打分：D 日收盘后生成 D 日候选，D+1 才能买入。"
+
+
+def _execution_timing(params: BacktestParams) -> str:
+    if params.execution_model == "tail_close_hybrid":
+        return "买入/卖出均为收盘信号后的下一交易日执行；优先使用执行日 14:30 分钟快照，没有分钟线时使用执行日收盘价作为尾盘代理。"
+    if params.execution_model == "strict_1430":
+        return "买入/卖出均为收盘信号后的下一交易日执行；只在执行日 14:30 分钟快照存在时成交，缺 14:30 数据或未触发时拒单。"
+    return "兼容旧模型：买入为 D 收盘信号 -> D+1 尾盘分钟/开盘回退；卖出为 D 收盘信号 -> D+1 开盘。"
+
+
+def _tail_entry_assumption(params: BacktestParams) -> str:
+    if params.execution_model == "strict_1430":
+        return "严格 14:30 模型使用 D 日收盘可见日线生成下一交易日计划；执行日只在 14:30 的 1 分钟快照存在且满足尾盘条件时成交，否则拒单。"
+    if params.execution_model == "tail_close_hybrid":
+        return "尾盘混合模型使用 D 日收盘可见日线生成下一交易日计划；执行日 14:30 分钟价优先，无分钟线时用执行日收盘价作为尾盘代理。"
+    return "旧兼容模型用于历史报告对比，不作为当前严格 14:30 真实回测口径。"
 
 
 def _audit_events(orders: list[dict[str, Any]], trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3217,6 +2891,20 @@ def _audit_order_message(order: dict[str, Any], execution: dict[str, Any]) -> st
     status = "已成交" if order.get("status") == "filled" else "未成交"
     reason = order.get("reason") or "unknown"
     mode = execution.get("mode")
+    if mode == "minute_1430":
+        return f"{side}{status}：使用执行日 14:30 真实分钟快照成交，原因 {reason}。"
+    if mode == "daily_close_proxy":
+        return f"{side}{status}：缺少执行日 14:30 分钟线，使用执行日收盘价作为尾盘代理，原因 {reason}。"
+    if mode == "minute_1430_sell":
+        return f"{side}{status}：使用执行日 14:30 真实分钟快照卖出，原因 {reason}。"
+    if mode == "daily_close_proxy_sell":
+        return f"{side}{status}：缺少执行日 14:30 分钟线，使用执行日收盘价作为尾盘代理卖出，原因 {reason}。"
+    if mode == "limit_up_tail_unfilled":
+        return f"{side}{status}：执行日尾盘涨停或接近涨停，保守判定买不到。"
+    if mode == "limit_down_tail_blocked":
+        return f"{side}{status}：执行日尾盘跌停或接近跌停，保守判定卖不出。"
+    if mode in {"strict_1430_required", "strict_1430_required_sell"}:
+        return f"{side}{status}：严格 14:30 模式缺少可用分钟快照或未触发，原因 {reason}。"
     if mode == "minute_tail_ma5":
         return f"{side}{status}：尾盘分钟线接近可见 MA5，原因 {reason}。"
     if mode == "daily_next_open_fallback":
@@ -3235,6 +2923,14 @@ def _audit_order_message(order: dict[str, Any], execution: dict[str, Any]) -> st
 def _audit_trade_message(trade: dict[str, Any], execution: dict[str, Any]) -> str:
     side = "买入" if trade.get("side") == "BUY" else "卖出"
     mode = execution.get("mode")
+    if mode == "minute_1430":
+        return f"{side}成交：执行日 14:30 真实分钟快照，价格 {trade.get('price')}。"
+    if mode == "daily_close_proxy":
+        return f"{side}成交：执行日收盘价代理尾盘，价格 {trade.get('price')}。"
+    if mode == "minute_1430_sell":
+        return f"{side}成交：执行日 14:30 真实分钟快照，盈亏 {trade.get('pnl')}。"
+    if mode == "daily_close_proxy_sell":
+        return f"{side}成交：执行日收盘价代理尾盘，盈亏 {trade.get('pnl')}。"
     if side == "买入" and mode:
         return f"{side}成交：执行模式 {mode}，价格 {trade.get('price')}。"
     if side == "卖出":
@@ -3251,6 +2947,11 @@ def _as_date(value: Any) -> date | None:
     if value:
         return date.fromisoformat(str(value)[:10])
     return None
+
+
+def _iso_date(value: Any) -> str | None:
+    parsed = _as_date(value)
+    return parsed.isoformat() if parsed else None
 
 
 def _annualized_return(total_return_pct: float, trading_days: int) -> float:
@@ -3300,65 +3001,27 @@ def _is_limit_down_open(bar: Bar) -> bool:
     return bool(bar.change_pct is not None and bar.change_pct <= -9.8 and bar.open_price <= bar.close_price * 1.005)
 
 
+def _is_limit_up_tail(vt_symbol: str, bar: Bar) -> bool:
+    threshold = _daily_limit_threshold(vt_symbol)
+    return bool(bar.change_pct is not None and bar.change_pct >= threshold)
+
+
+def _is_limit_down_tail(vt_symbol: str, bar: Bar) -> bool:
+    threshold = _daily_limit_threshold(vt_symbol)
+    return bool(bar.change_pct is not None and bar.change_pct <= -threshold)
+
+
+def _daily_limit_threshold(vt_symbol: str) -> float:
+    board = stock_board(vt_symbol)
+    if board == "bse":
+        return 29.8
+    if board in {"star", "chinext"}:
+        return 19.8
+    return 9.8
+
+
 def _persist_run(session, params: BacktestParams, run: dict[str, Any], end: date) -> int:
-    metrics = run["metrics"]
-    backtest_id = session.execute(
-        schema.backtest_runs.insert()
-        .values(
-            strategy_id=params.strategy,
-            strategy_version=STRATEGY_VERSION,
-            start_date=params.start,
-            end_date=end,
-            status="succeeded",
-            initial_cash=params.initial_cash,
-            final_equity=metrics.get("final_equity"),
-            params=_params_to_json(params),
-            metrics=metrics,
-            finished_at=datetime.now(timezone.utc),
-        )
-        .returning(schema.backtest_runs.c.id)
-    ).scalar_one()
-    for item in run["equity"]:
-        session.execute(
-            schema.backtest_daily_equity.insert().values(
-                backtest_id=backtest_id,
-                **_table_values(schema.backtest_daily_equity, item),
-            )
-        )
-    for item in run.get("positions") or []:
-        session.execute(
-            schema.backtest_daily_positions.insert().values(
-                backtest_id=backtest_id,
-                **_table_values(schema.backtest_daily_positions, item),
-            )
-        )
-    for item in run.get("signal_events") or []:
-        session.execute(
-            schema.backtest_signal_events.insert().values(
-                backtest_id=backtest_id,
-                **_table_values(schema.backtest_signal_events, item),
-            )
-        )
-    for item in run["orders"]:
-        session.execute(
-            schema.backtest_orders.insert().values(
-                backtest_id=backtest_id,
-                **_table_values(schema.backtest_orders, item),
-            )
-        )
-    for item in run["trades"]:
-        session.execute(
-            schema.backtest_trades.insert().values(
-                backtest_id=backtest_id,
-                **_table_values(schema.backtest_trades, item),
-            )
-        )
-    for key, value in metrics.items():
-        if isinstance(value, (int, float)) or value is None:
-            session.execute(schema.backtest_metrics.insert().values(backtest_id=backtest_id, metric_key=key, metric_value=value))
-        else:
-            session.execute(schema.backtest_metrics.insert().values(backtest_id=backtest_id, metric_key=key, metric_text=str(value)))
-    return int(backtest_id)
+    return persistence.persist_run(session, params, run, end, params_to_json=_params_to_json)
 
 
 def _trade_to_api(trade: Trade) -> dict[str, Any]:
@@ -3373,25 +3036,46 @@ def _trade_to_api(trade: Trade) -> dict[str, Any]:
         "fee": trade.fee,
         "pnl": trade.pnl,
         "reason": trade.reason,
-        "raw": trade.raw,
+        "raw": _normalize_backtest_raw(trade.raw),
     }
 
 
 def _table_values(table, item: dict[str, Any]) -> dict[str, Any]:
-    columns = set(table.c.keys())
-    return {
-        key: value
-        for key, value in _parse_dates(item).items()
-        if key in columns and key not in {"id", "backtest_id", "created_at"}
-    }
+    return persistence.table_values(table, item)
 
 
 def _mapping_to_api(row: dict[str, Any]) -> dict[str, Any]:
     result = dict(row)
+    if isinstance(result.get("raw"), dict):
+        result["raw"] = _normalize_backtest_raw(result["raw"])
+    if "reason" in result and "reason_label" not in result:
+        result["reason_label"] = backtest_reason_label(result.get("reason"))
+    if "linked_order_reason" in result and "linked_order_reason_label" not in result:
+        result["linked_order_reason_label"] = backtest_reason_label(result.get("linked_order_reason"))
     for key, value in list(result.items()):
         if hasattr(value, "isoformat"):
             result[key] = value.isoformat()
     return result
+
+
+def backtest_reason_label(reason: Any) -> str | None:
+    return queries.reason_label(reason)
+
+
+def _normalize_backtest_raw(value: dict[str, Any]) -> dict[str, Any]:
+    raw = {}
+    for key, item in dict(value or {}).items():
+        if isinstance(item, dict):
+            raw[key] = _normalize_backtest_raw(item)
+        elif hasattr(item, "isoformat"):
+            raw[key] = item.isoformat()
+        else:
+            raw[key] = item
+    if raw.get("entry_rule") == "daily_close_signal_next_open_execution":
+        raw.pop("entry_rule", None)
+        raw.setdefault("selection_rule", "daily_close_visible_signal")
+        raw.setdefault("entry_setup", "ma5_pullback")
+    return raw
 
 
 def _run_type_from_params(params: dict[str, Any]) -> str:
@@ -3409,12 +3093,7 @@ def _safe_float(value: Any) -> float | None:
 
 
 def _parse_dates(row: dict[str, Any]) -> dict[str, Any]:
-    result = dict(row)
-    for key in ("trade_date", "signal_date", "execute_date", "entry_date", "start_date", "end_date"):
-        value = result.get(key)
-        if isinstance(value, str):
-            result[key] = date.fromisoformat(value[:10])
-    return result
+    return persistence.parse_dates(row)
 
 
 def _params_to_json(params: BacktestParams) -> dict[str, Any]:

@@ -10,6 +10,12 @@ from typing import Any
 
 STRATEGY_ID = "mainline_leader_pullback"
 STRATEGY_VERSION = "0.1.1"
+BREAKOUT_STRATEGY_ID = "breakout_confirmation"
+BREAKOUT_STRATEGY_VERSION = "0.1.0"
+LIMIT_UP_PULLBACK_STRATEGY_ID = "limit_up_after_pullback"
+LIMIT_UP_PULLBACK_STRATEGY_VERSION = "0.1.0"
+TREND_ACCELERATION_STRATEGY_ID = "trend_acceleration"
+TREND_ACCELERATION_STRATEGY_VERSION = "0.1.0"
 
 
 @dataclass(frozen=True)
@@ -57,93 +63,114 @@ def score_stock(
     hot_rank_score: float | None = None,
     lhb_score: float | None = None,
 ) -> SignalScore:
-    """Score one stock using data available at ``trade_date``."""
+    """Compatibility wrapper for the mainline pullback strategy."""
 
-    visible_bars = [bar for bar in bars if bar.trade_date <= trade_date]
-    result = SignalScore(vt_symbol=vt_symbol, trade_date=trade_date)
-    if len(visible_bars) < 60:
-        result.evidence = {"status": "insufficient_data", "bars": len(visible_bars), "min_required": 60}
-        return result
+    from alphaagent.server.services.quant.strategies.pullback import score_stock as _score_stock
 
-    closes = [bar.close_price for bar in visible_bars]
-    volumes = [bar.volume or 0 for bar in visible_bars]
-    turnover_values = [daily_turnover_yuan(bar) for bar in visible_bars]
-    latest = visible_bars[-1]
-
-    return_20d = period_return(closes, 20)
-    return_60d = period_return(closes, 60)
-    max_drawdown_60d = max_drawdown(closes[-60:])
-    ma5 = moving_average(closes, 5)
-    ma10 = moving_average(closes, 10)
-    ma20 = moving_average(closes, 20)
-    ma60 = moving_average(closes, 60)
-    volume5 = moving_average(volumes, 5)
-    volume20 = moving_average(volumes, 20)
-    turnover20 = moving_average(turnover_values, 20)
-
-    relative_strength = score_relative_strength(return_20d, return_60d, index_return_20d, max_drawdown_60d)
-    washout, washout_evidence = score_washout_setup(closes, volumes, ma5, ma10, ma20, ma60)
-    trend_quality = score_trend_quality(closes, ma5, ma20, ma60)
-    liquidity = score_liquidity(turnover20)
-    risk = score_risk(max_drawdown_60d, latest.change_pct)
-    sector = clamp_score(sector_score if sector_score is not None else 50.0)
-    financial = clamp_score(financial_score if financial_score is not None else 50.0)
-    fund_flow = clamp_score(fund_flow_score if fund_flow_score is not None else 50.0)
-    hot_rank = clamp_score(hot_rank_score if hot_rank_score is not None else 50.0)
-    lhb = clamp_score(lhb_score if lhb_score is not None else 50.0)
-    smart_money = 0.50 * fund_flow + 0.30 * hot_rank + 0.20 * lhb
-
-    total = (
-        0.25 * relative_strength
-        + 0.20 * washout
-        + 0.15 * trend_quality
-        + 0.12 * sector
-        + 0.10 * financial
-        + 0.08 * smart_money
-        + 0.10 * liquidity
-        + 0.00 * risk
+    return _score_stock(
+        vt_symbol,
+        bars,
+        trade_date,
+        index_return_20d=index_return_20d,
+        sector_score=sector_score,
+        financial_score=financial_score,
+        fund_flow_score=fund_flow_score,
+        hot_rank_score=hot_rank_score,
+        lhb_score=lhb_score,
     )
-    ma5_distance_pct = pct_distance(latest.close_price, ma5)
-    pullback_near_ma = ma5_distance_pct is not None and -1.5 <= ma5_distance_pct <= 2.0
-    entry_signal = total >= 68 and pullback_near_ma and risk >= 35 and liquidity >= 25
 
-    result.total_score = round(total, 4)
-    result.relative_strength_score = relative_strength
-    result.washout_score = washout
-    result.trend_quality_score = trend_quality
-    result.sector_mainline_score = sector
-    result.financial_improvement_score = financial
-    result.fund_flow_score = fund_flow
-    result.hot_rank_score = hot_rank
-    result.lhb_score = lhb
-    result.liquidity_score = liquidity
-    result.risk_score = risk
-    result.entry_signal = entry_signal
-    result.risk_level = risk_level(risk)
-    result.evidence = {
-        "status": "ready",
-        "return_20d": return_20d,
-        "return_60d": return_60d,
-        "index_return_20d": index_return_20d,
-        "max_drawdown_60d": max_drawdown_60d,
-        "ma5": ma5,
-        "ma10": ma10,
-        "ma20": ma20,
-        "ma60": ma60,
-        "ma5_distance_pct": ma5_distance_pct,
-        "volume5": volume5,
-        "volume20": volume20,
-        "turnover20": turnover20,
-        "turnover_estimated_from_volume": any(not bar.turnover for bar in visible_bars[-20:]),
-        "washout": washout_evidence,
-        "smart_money_proxy_score": smart_money,
-        "fund_flow_score": fund_flow,
-        "hot_rank_score": hot_rank,
-        "lhb_score": lhb,
-        "smart_money_note": "fund/hot/lhb are observable proxy signals, not proof of main-force intent",
-        "entry_rule": "daily_close_signal_next_open_execution",
-    }
-    return result
+
+def score_breakout_confirmation(
+    vt_symbol: str,
+    bars: list[Bar],
+    trade_date: date,
+    *,
+    index_return_20d: float | None = None,
+    sector_score: float | None = None,
+    financial_score: float | None = None,
+    fund_flow_score: float | None = None,
+    hot_rank_score: float | None = None,
+    lhb_score: float | None = None,
+) -> SignalScore:
+    """Compatibility wrapper for the breakout confirmation strategy."""
+
+    from alphaagent.server.services.quant.strategies.breakout import (
+        score_breakout_confirmation as _score_breakout_confirmation,
+    )
+
+    return _score_breakout_confirmation(
+        vt_symbol,
+        bars,
+        trade_date,
+        index_return_20d=index_return_20d,
+        sector_score=sector_score,
+        financial_score=financial_score,
+        fund_flow_score=fund_flow_score,
+        hot_rank_score=hot_rank_score,
+        lhb_score=lhb_score,
+    )
+
+
+def score_limit_up_after_pullback(
+    vt_symbol: str,
+    bars: list[Bar],
+    trade_date: date,
+    *,
+    index_return_20d: float | None = None,
+    sector_score: float | None = None,
+    financial_score: float | None = None,
+    fund_flow_score: float | None = None,
+    hot_rank_score: float | None = None,
+    lhb_score: float | None = None,
+) -> SignalScore:
+    """Compatibility wrapper for the limit-up pullback strategy."""
+
+    from alphaagent.server.services.quant.strategies.limit_up_pullback import (
+        score_limit_up_after_pullback as _score_limit_up_after_pullback,
+    )
+
+    return _score_limit_up_after_pullback(
+        vt_symbol,
+        bars,
+        trade_date,
+        index_return_20d=index_return_20d,
+        sector_score=sector_score,
+        financial_score=financial_score,
+        fund_flow_score=fund_flow_score,
+        hot_rank_score=hot_rank_score,
+        lhb_score=lhb_score,
+    )
+
+
+def score_trend_acceleration(
+    vt_symbol: str,
+    bars: list[Bar],
+    trade_date: date,
+    *,
+    index_return_20d: float | None = None,
+    sector_score: float | None = None,
+    financial_score: float | None = None,
+    fund_flow_score: float | None = None,
+    hot_rank_score: float | None = None,
+    lhb_score: float | None = None,
+) -> SignalScore:
+    """Compatibility wrapper for the trend acceleration strategy."""
+
+    from alphaagent.server.services.quant.strategies.trend_acceleration import (
+        score_trend_acceleration as _score_trend_acceleration,
+    )
+
+    return _score_trend_acceleration(
+        vt_symbol,
+        bars,
+        trade_date,
+        index_return_20d=index_return_20d,
+        sector_score=sector_score,
+        financial_score=financial_score,
+        fund_flow_score=fund_flow_score,
+        hot_rank_score=hot_rank_score,
+        lhb_score=lhb_score,
+    )
 
 
 def moving_average(values: list[float], window: int) -> float | None:
@@ -279,6 +306,48 @@ def score_risk(max_drawdown_60d: float | None, change_pct: float | None) -> floa
         score += max_drawdown_60d * 1.2
     if change_pct is not None and change_pct <= -8:
         score -= 20
+    return clamp_score(score)
+
+
+def score_breakout_strength(
+    close_to_prior_high_pct: float | None,
+    return_20d: float | None,
+    return_60d: float | None,
+) -> float:
+    score = 50.0
+    if close_to_prior_high_pct is not None:
+        score += max(min((close_to_prior_high_pct + 2.0) * 10, 30), -20)
+    if return_20d is not None:
+        score += max(min(return_20d * 0.8, 20), -15)
+    if return_60d is not None:
+        score += max(min(return_60d * 0.25, 15), -10)
+    return clamp_score(score)
+
+
+def score_volume_confirmation(volume_ratio: float | None, latest_volume: float | None, volume20: float | None) -> float:
+    score = 45.0
+    if volume_ratio is not None:
+        score += max(min((volume_ratio - 1.0) * 35, 35), -15)
+    if latest_volume and volume20:
+        score += max(min((latest_volume / volume20 - 1.0) * 15, 15), -10)
+    return clamp_score(score)
+
+
+def score_breakout_risk(
+    max_drawdown_60d: float | None,
+    change_pct: float | None,
+    ma20_distance_pct: float | None,
+    base_range_pct: float | None,
+) -> float:
+    score = 75.0
+    if max_drawdown_60d is not None:
+        score += max(max_drawdown_60d * 0.8, -25)
+    if change_pct is not None and change_pct >= 9.8:
+        score -= 8
+    if ma20_distance_pct is not None and ma20_distance_pct > 30:
+        score -= min((ma20_distance_pct - 30) * 1.2, 18)
+    if base_range_pct is not None and base_range_pct > 45:
+        score -= min((base_range_pct - 45) * 0.5, 12)
     return clamp_score(score)
 
 

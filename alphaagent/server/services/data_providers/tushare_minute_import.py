@@ -17,7 +17,7 @@ from alphaagent.server.services.data_sync import (
 from alphaagent.server.services.vnpy_integration.local_data import parse_vt_symbol
 
 
-SUPPORTED_INTERVALS = {"1m": "1min", "5m": "5min", "15m": "15min", "30m": "30min", "60m": "60min"}
+SUPPORTED_INTERVALS = {"1m": "1min"}
 
 
 def import_tushare_minute_bars_for_gaps(
@@ -26,7 +26,7 @@ def import_tushare_minute_bars_for_gaps(
     gap_file_path: str = "",
     interval: str = "1m",
     tail_entry_start: str = "14:30",
-    tail_entry_end: str = "14:57",
+    tail_entry_end: str = "14:30",
     dry_run: bool = True,
     max_gaps: int = 200,
 ) -> dict[str, Any]:
@@ -47,7 +47,12 @@ def import_tushare_minute_bars_for_gaps(
     interval_key = str(interval or "1m").strip().lower()
     ts_freq = SUPPORTED_INTERVALS.get(interval_key)
     if ts_freq is None:
-        return {"status": "unsupported_interval", "interval": interval, "supported": sorted(SUPPORTED_INTERVALS)}
+        return {
+            "status": "unsupported_interval",
+            "interval": interval,
+            "supported": sorted(SUPPORTED_INTERVALS),
+            "message": "Strict 14:30 gap workflows only support 1m snapshots",
+        }
 
     requirements = load_minute_gap_requirements(gap_csv_text, file_path=gap_file_path)
     if requirements["errors"] and not requirements["items"]:

@@ -4,7 +4,7 @@
  * Merged from DataStatusPage + DataSyncPage.
  * Three tabs: Status, Sync, Sources
  */
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   fetchDataUsage,
@@ -44,6 +44,36 @@ import {
 } from "lucide-react";
 
 type TabKey = "status" | "sync" | "sources";
+type MinuteSyncMode = "backtest_gaps" | "recent";
+type MinuteGapProvider = "akshare" | "tdx" | "tushare";
+
+interface MinuteSyncFormState {
+  mode: MinuteSyncMode;
+  provider: MinuteGapProvider;
+  interval: "1m";
+  backtestId: string;
+  gapFilePath: string;
+  maxGaps: number;
+  dryRun: boolean;
+  stockLimit: number;
+  limit: number;
+  startDate: string;
+  endDate: string;
+}
+
+const DEFAULT_MINUTE_SYNC_FORM: MinuteSyncFormState = {
+  mode: "backtest_gaps",
+  provider: "akshare",
+  interval: "1m",
+  backtestId: "",
+  gapFilePath: "",
+  maxGaps: 2000,
+  dryRun: true,
+  stockLimit: 100,
+  limit: 240,
+  startDate: "",
+  endDate: "",
+};
 
 const TABS: { key: TabKey; label: string; icon: typeof Database }[] = [
   { key: "status", label: "数据状态", icon: Database },
@@ -134,7 +164,7 @@ function StatusTab() {
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <SummaryCard label="数据能力" value={capabilities.length} />
         <SummaryCard label="就绪" value={readyCount} className="text-rise" />
-        <SummaryCard label="降级/部分" value={degradedCount} className="text-yellow-600" />
+        <SummaryCard label="能力受限/降级" value={degradedCount} className="text-yellow-600" />
         <SummaryCard
           label="覆盖表"
           value={coverage?.tables ? Object.keys(coverage.tables).length : "--"}
@@ -228,6 +258,7 @@ function CapabilityRow({ cap }: { cap: DataUsageCapability }) {
 function SyncTab() {
   const queryClient = useQueryClient();
   const [syncProfile, setSyncProfile] = useState<"core" | "all">("core");
+  const [minuteSyncForm, setMinuteSyncForm] = useState<MinuteSyncFormState>(DEFAULT_MINUTE_SYNC_FORM);
 
   const jobsQuery = useQuery({
     queryKey: ["syncJobs"],
@@ -257,7 +288,7 @@ function SyncTab() {
   });
 
   const runMutation = useMutation({
-    mutationFn: (jobId: string) => runSyncJob(jobId),
+    mutationFn: ({ jobId, params }: { jobId: string; params?: Record<string, unknown> }) => runSyncJob(jobId, params ?? {}),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["syncRuns"] });
       queryClient.invalidateQueries({ queryKey: ["syncCoverage"] });
@@ -394,7 +425,7 @@ function SyncTab() {
                   {job.enabled && (
                     <button
                       className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors hover:bg-muted disabled:opacity-50"
-                      onClick={() => runMutation.mutate(job.id)}
+                      onClick={() => runMutation.mutate({ jobId: job.id, params: job.id === "sync_stock_minute_bars" ? buildMinuteSyncParams(minuteSyncForm) : undefined })}
                       disabled={runMutation.isPending || isBatchRunning}
                     >
                       {runMutation.isPending ? (
@@ -406,6 +437,11 @@ function SyncTab() {
                     </button>
                   )}
                 </div>
+                {job.id === "sync_stock_minute_bars" ? (
+                  <div className="md:col-span-2">
+                    <MinuteSyncParamsPanel value={minuteSyncForm} onChange={setMinuteSyncForm} disabled={runMutation.isPending || isBatchRunning} />
+                  </div>
+                ) : null}
               </div>
             ))}
           </div>
@@ -428,6 +464,7 @@ function SyncTab() {
                 <tr>
                   <th className="px-4 py-2 text-left">任务</th>
                   <th className="px-4 py-2 text-center">状态</th>
+                  <th className="px-4 py-2 text-left">参数</th>
                   <th className="px-4 py-2 text-right">读取</th>
                   <th className="px-4 py-2 text-right">写入</th>
                   <th className="px-4 py-2 text-right">耗时</th>
@@ -440,6 +477,10 @@ function SyncTab() {
                     <td className="px-4 py-2 font-mono text-xs">{run.job_id}</td>
                     <td className="px-4 py-2 text-center">
                       <RunStatusBadge status={run.status} />
+                    </td>
+                    <td className="max-w-[360px] px-4 py-2 text-xs text-muted-foreground">
+                      <div className="truncate">{syncRunParamsText(run)}</div>
+                      {run.message ? <div className="mt-1 truncate text-amber-700 dark:text-amber-400">{run.message}</div> : null}
                     </td>
                     <td className="px-4 py-2 text-right tabular-nums">{run.rows_read.toLocaleString()}</td>
                     <td className="px-4 py-2 text-right tabular-nums">{run.rows_written.toLocaleString()}</td>
@@ -519,6 +560,237 @@ function SourcesTab() {
 }
 
 // ── Helper components ──
+
+function MinuteSyncParamsPanel({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: MinuteSyncFormState;
+  onChange: (value: MinuteSyncFormState) => void;
+  disabled: boolean;
+}) {
+  const setValue = <K extends keyof MinuteSyncFormState>(key: K, next: MinuteSyncFormState[K]) => {
+    onChange({ ...value, [key]: next });
+  };
+
+  return (
+    <div className="rounded-md border bg-muted/20 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="inline-flex rounded-md border bg-background p-1">
+          <button
+            className={cn(
+              "rounded px-3 py-1.5 text-xs transition-colors",
+              value.mode === "backtest_gaps" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+            )}
+            type="button"
+            onClick={() => setValue("mode", "backtest_gaps")}
+            disabled={disabled}
+          >
+            回测缺口
+          </button>
+          <button
+            className={cn(
+              "rounded px-3 py-1.5 text-xs transition-colors",
+              value.mode === "recent" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+            )}
+            type="button"
+            onClick={() => setValue("mode", "recent")}
+            disabled={disabled}
+          >
+            最近分钟线
+          </button>
+        </div>
+        <label className="flex items-center gap-2 text-xs">
+          <input
+            type="checkbox"
+            checked={value.dryRun}
+            onChange={(event) => setValue("dryRun", event.target.checked)}
+            disabled={disabled}
+          />
+          预检查
+        </label>
+      </div>
+
+      {value.mode === "backtest_gaps" ? (
+        <div className="mt-3 space-y-3">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <Field label="回测 ID">
+              <input
+                className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
+                value={value.backtestId}
+                onChange={(event) => setValue("backtestId", event.target.value)}
+                placeholder="例如 42"
+                disabled={disabled || Boolean(value.gapFilePath.trim())}
+              />
+            </Field>
+            <Field label="数据源">
+              <select
+                className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
+                value={value.provider}
+                onChange={(event) => setValue("provider", event.target.value as MinuteGapProvider)}
+                disabled={disabled}
+              >
+                <option value="akshare">AkShare近端</option>
+                <option value="tdx">TDX公开源</option>
+                <option value="tushare">Tushare Pro</option>
+              </select>
+            </Field>
+            <Field label="周期">
+              <div className="mt-1 flex h-9 items-center rounded-md border bg-muted/30 px-2 text-sm">1分钟 / 14:30快照</div>
+            </Field>
+            <Field label="最大缺口">
+              <input
+                className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
+                type="number"
+                min={1}
+                max={20000}
+                value={value.maxGaps}
+                onChange={(event) => setValue("maxGaps", Number(event.target.value))}
+                disabled={disabled}
+              />
+            </Field>
+          </div>
+          <details className="rounded-md border bg-background/60 px-3 py-2">
+            <summary className="cursor-pointer text-xs text-muted-foreground">高级兜底：服务器缺口文件</summary>
+            <div className="mt-2 max-w-xl">
+              <Field label="缺口文件路径">
+                <input
+                  className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
+                  value={value.gapFilePath}
+                  onChange={(event) => setValue("gapFilePath", event.target.value)}
+                  placeholder="memory/06_backtests/..."
+                  disabled={disabled}
+                />
+              </Field>
+            </div>
+          </details>
+        </div>
+      ) : (
+        <div className="mt-3 grid gap-3 md:grid-cols-3 xl:grid-cols-5">
+          <Field label="周期">
+            <div className="mt-1 flex h-9 items-center rounded-md border bg-muted/30 px-2 text-sm">1分钟</div>
+          </Field>
+          <Field label="股票数">
+            <input
+              className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
+              type="number"
+              min={1}
+              max={500}
+              value={value.stockLimit}
+              onChange={(event) => setValue("stockLimit", Number(event.target.value))}
+              disabled={disabled}
+            />
+          </Field>
+          <Field label="每股根数">
+            <input
+              className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
+              type="number"
+              min={1}
+              max={5000}
+              value={value.limit}
+              onChange={(event) => setValue("limit", Number(event.target.value))}
+              disabled={disabled}
+            />
+          </Field>
+          <Field label="开始日期">
+            <input
+              className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
+              type="date"
+              value={value.startDate}
+              onChange={(event) => setValue("startDate", event.target.value)}
+              disabled={disabled}
+            />
+          </Field>
+          <Field label="结束日期">
+            <input
+              className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
+              type="date"
+              value={value.endDate}
+              onChange={(event) => setValue("endDate", event.target.value)}
+              disabled={disabled}
+            />
+          </Field>
+        </div>
+      )}
+      <div className="mt-2 text-xs text-muted-foreground">
+        {value.mode === "backtest_gaps"
+          ? "执行仍走 sync_stock_minute_bars；严格缺口固定只补执行日 1分钟 / 14:30 快照。AkShare 适合近端交易日，历史缺口会明确标记未覆盖。"
+          : "最近分钟线适合收盘后补近端数据，不等于覆盖某次长区间回测缺口。"}
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="min-w-0 text-xs text-muted-foreground">
+      {label}
+      {children}
+    </label>
+  );
+}
+
+function buildMinuteSyncParams(value: MinuteSyncFormState): Record<string, unknown> {
+  if (value.mode === "recent") {
+    return compactParams({
+      mode: "recent",
+      interval: value.interval,
+      stock_limit: value.stockLimit,
+      limit: value.limit,
+      start_date: value.startDate,
+      end_date: value.endDate,
+      only_missing: true,
+    });
+  }
+
+  return compactParams({
+    mode: "backtest_gaps",
+    provider: value.provider,
+    interval: value.interval,
+    backtest_id: value.gapFilePath.trim() ? "" : value.backtestId,
+    gap_file_path: value.gapFilePath,
+    tail_entry_start: "14:30",
+    tail_entry_end: "14:30",
+    dry_run: value.dryRun,
+    max_gaps: value.maxGaps,
+    max_pages_per_symbol: value.provider === "tdx" ? 32 : undefined,
+    timeout_seconds: value.provider === "tdx" ? 3 : undefined,
+  });
+}
+
+function compactParams(params: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== "")
+  );
+}
+
+function syncRunParamsText(run: SyncRunItem): string {
+  const params = run.params ?? {};
+  const mode = String(params.mode ?? "");
+  if (run.job_id === "sync_stock_minute_bars" && mode === "backtest_gaps") {
+    const parts = [
+      "回测缺口",
+      params.provider ? `源 ${params.provider}` : "",
+      params.interval ? `周期 ${params.interval}` : "",
+      params.backtest_id ? `回测 #${params.backtest_id}` : "",
+      params.gap_file_path ? `文件 ${params.gap_file_path}` : "",
+      params.dry_run === true ? "预检查" : params.dry_run === false ? "写入" : "",
+    ].filter(Boolean);
+    return parts.join(" · ");
+  }
+  if (run.job_id === "sync_stock_minute_bars" && mode === "recent") {
+    return [
+      "最近分钟线",
+      params.interval ? `周期 ${params.interval}` : "",
+      params.stock_limit ? `${params.stock_limit} 只` : "",
+      params.limit ? `${params.limit} 根` : "",
+    ].filter(Boolean).join(" · ");
+  }
+  const keys = Object.keys(params);
+  if (!keys.length) return "--";
+  return keys.slice(0, 4).map((key) => `${key}=${String(params[key])}`).join(" · ");
+}
 
 function SummaryCard({
   label,
@@ -779,9 +1051,26 @@ function StatusBadge({ status }: { status: string }) {
 
   return (
     <span className={cn("rounded-full px-2 py-0.5 text-xs font-medium", cls)}>
-      {status}
+      {formatStatusLabel(status)}
     </span>
   );
+}
+
+function formatStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    ready: "就绪",
+    ok: "正常",
+    succeeded: "成功",
+    empty: "暂无数据",
+    pending: "待执行",
+    partial: "能力受限",
+    degraded: "降级可用",
+    unavailable: "不可用",
+    unknown: "未知",
+    running: "运行中",
+    failed: "失败",
+  };
+  return labels[status] ?? status;
 }
 
 function DataNotice({ title, message, action }: { title: string; message: string; action: string }) {

@@ -32,6 +32,7 @@ from alphaagent.data_sources.akshare_adapter import AkShareAdapter
 from alphaagent.market.symbols import normalize_exchange, vt_symbol
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
+from alphaagent.server.services import minute_gaps, minute_imports, minute_provider_imports
 from alphaagent.server.services import research_sector_scores
 
 logger = logging.getLogger(__name__)
@@ -109,10 +110,10 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
     JobDefinition(
         id="sync_stock_minute_bars",
         name="股票分钟 K 线",
-        description="同步高流动性/候选股票最近分钟线，用于尾盘 5 日线低吸入场验证。",
+        description="同步最近分钟线，或按严格回测缺口补执行日 14:30 尾盘快照。",
         source_id="akshare",
         target_table="stock_minute_bars",
-        default_params={"stock_limit": 100, "limit": 240, "interval": "1m", "only_missing": True},
+        default_params={"mode": "recent", "stock_limit": 100, "limit": 240, "interval": "1m", "only_missing": True},
         schedule_cron="5 15 * * 1-5",
     ),
     JobDefinition(
@@ -498,6 +499,12 @@ class DataSyncRunner:
         return {"rows_read": total_read, "rows_written": total_written}
 
     def _run_sync_stock_minute_bars(self, params: dict[str, Any]) -> dict[str, Any]:
+        mode = str(params.get("mode") or "recent").strip().lower()
+        if mode in {"backtest_gap", "backtest_gaps", "gaps", "gap"}:
+            return self._run_sync_stock_minute_gap_bars(params)
+        if mode not in {"recent", "latest", "normal"}:
+            raise DataSyncError(f"Unsupported stock minute sync mode: {mode}")
+
         limit = int(params.get("limit", 240))
         stock_limit = int(params.get("stock_limit", 100))
         interval = str(params.get("interval", "1m")).strip().lower()
@@ -571,7 +578,46 @@ class DataSyncRunner:
                 rows_written=total_written,
                 sample_items=sample_items,
             )
-        return {"rows_read": total_read, "rows_written": total_written}
+        return {
+            "mode": "recent",
+            "provider": "akshare",
+            "interval": interval,
+            "rows_read": total_read,
+            "rows_written": total_written,
+        }
+
+    def _run_sync_stock_minute_gap_bars(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Fill strict-tail backtest minute gaps through the data-sync job."""
+
+        provider = _normalize_minute_gap_provider(params.get("provider") or params.get("source") or "tdx")
+        interval = "1m"
+        fetch_interval = _minute_gap_fetch_interval(provider, interval)
+        gap_source = minute_provider_imports.minute_gap_source_label(params)
+        self._report_progress(
+            "同步回测分钟缺口",
+            current=0,
+            total=1,
+            current_label=f"{provider} {interval}",
+            message=gap_source,
+        )
+
+        try:
+            result = minute_provider_imports.import_minute_bars_for_gaps(params)
+        except minute_provider_imports.MinuteProviderImportError as exc:
+            raise DataSyncError(str(exc)) from exc
+
+        rows_read = int(result.get("rows_read") or 0)
+        rows_written = int(result.get("rows_written") or 0)
+        self._report_progress(
+            "同步回测分钟缺口",
+            current=1,
+            total=1,
+            current_label=f"{provider} {result.get('status') or 'done'}",
+            rows_read=rows_read,
+            rows_written=rows_written,
+            message=str(result.get("message") or result.get("note") or ""),
+        )
+        return {**result, "rows_read": rows_read, "rows_written": rows_written, "fetch_interval": fetch_interval}
 
     def _run_sync_stock_sector_memberships(self, params: dict[str, Any]) -> dict[str, Any]:
         rows_written = _rebuild_stock_sector_memberships()
@@ -1122,67 +1168,52 @@ def _param_list(value: Any) -> list[str]:
     return result
 
 
+def _normalize_minute_gap_provider(value: Any) -> str:
+    return minute_provider_imports.normalize_minute_gap_provider(value)
+
+
+def _minute_gap_csv_from_sync_params(params: dict[str, Any]) -> tuple[str, str]:
+    try:
+        return minute_provider_imports.minute_gap_csv_from_sync_params(params)
+    except minute_provider_imports.MinuteProviderImportError as exc:
+        raise DataSyncError(str(exc)) from exc
+
+
+def minute_gap_requirements_from_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Load strict-tail gap requirements from backtest id, inline CSV, or file."""
+
+    gap_csv_text, gap_source = _minute_gap_csv_from_sync_params(params)
+    gap_file_path = str(params.get("gap_file_path") or params.get("file_path") or "").strip()
+    requirements = load_minute_gap_requirements(gap_csv_text, file_path=gap_file_path)
+    requirements["gap_source"] = gap_source
+    return requirements
+
+
+def _minute_gap_fetch_interval(provider: str, interval: str) -> str:
+    try:
+        return minute_provider_imports.minute_gap_fetch_interval(provider, interval)
+    except minute_provider_imports.MinuteProviderImportError as exc:
+        raise DataSyncError(str(exc)) from exc
+
+
 def _normalize_csv_key(value: Any) -> str:
-    return str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+    return minute_imports.normalize_csv_key(value)
 
 
 def _minute_csv_symbol_exchange(row: dict[str, Any]) -> tuple[str, str]:
-    vt_symbol_value = str(row.get("vt_symbol") or row.get("code_exchange") or "").strip().upper()
-    if vt_symbol_value and "." in vt_symbol_value:
-        symbol, exchange = vt_symbol_value.split(".", 1)
-        return symbol.strip(), exchange.strip()
-    symbol = str(row.get("symbol") or row.get("code") or row.get("股票代码") or "").strip()
-    exchange = str(row.get("exchange") or row.get("market") or row.get("交易所") or "").strip().upper()
-    if not symbol:
-        raise ValueError("missing vt_symbol or symbol")
-    if not exchange:
-        exchange = normalize_exchange(symbol)
-    return symbol, exchange
+    return minute_imports.minute_csv_symbol_exchange(row)
 
 
 def _minute_csv_item(row: dict[str, Any]) -> dict[str, Any]:
-    bar_time = (
-        row.get("bar_time")
-        or row.get("trade_date")
-        or row.get("datetime")
-        or row.get("time")
-        or row.get("date_time")
-    )
-    if _parse_datetime(bar_time) is None:
-        raise ValueError("missing or invalid bar_time")
-    open_price = _required_number(row, "open", "open_price", "开盘")
-    high_price = _required_number(row, "high", "high_price", "最高")
-    low_price = _required_number(row, "low", "low_price", "最低")
-    close_price = _required_number(row, "close", "close_price", "收盘")
-    return {
-        "trade_date": bar_time,
-        "open": open_price,
-        "high": high_price,
-        "low": low_price,
-        "close": close_price,
-        "volume": _optional_number(row, "volume", "vol", "成交量"),
-        "turnover": _optional_number(row, "turnover", "amount", "成交额"),
-        "raw": row,
-    }
+    return minute_imports.minute_csv_item(row)
 
 
 def _required_number(row: dict[str, Any], *keys: str) -> float:
-    value = _optional_number(row, *keys)
-    if value is None:
-        raise ValueError(f"missing numeric field: {keys[0]}")
-    return value
+    return minute_imports.required_number(row, *keys)
 
 
 def _optional_number(row: dict[str, Any], *keys: str) -> float | None:
-    for key in keys:
-        value = row.get(_normalize_csv_key(key))
-        if value in (None, ""):
-            continue
-        try:
-            return float(str(value).replace(",", ""))
-        except ValueError as exc:
-            raise ValueError(f"invalid numeric field {key}: {value}") from exc
-    return None
+    return minute_imports.optional_number(row, *keys)
 
 
 # ─── Schema bootstrap ────────────────────────────────────────────────────
@@ -1230,6 +1261,20 @@ def seed_default_registry() -> None:
                         default_params=job.default_params,
                         schedule_cron=job.schedule_cron,
                     ))
+                else:
+                    session.execute(
+                        schema.sync_job_definitions.update()
+                        .where(schema.sync_job_definitions.c.id == job.id)
+                        .values(
+                            name=job.name,
+                            description=job.description,
+                            source_id=job.source_id,
+                            target_table=job.target_table,
+                            enabled=job.enabled,
+                            default_params=job.default_params,
+                            schedule_cron=job.schedule_cron,
+                        )
+                    )
     except Exception as exc:
         logger.warning("seed_default_registry failed: %s", exc)
 
@@ -1702,10 +1747,7 @@ def usage() -> dict[str, Any]:
 def minute_csv_template() -> str:
     """Return a minimal CSV template for importing historical minute bars."""
 
-    return (
-        "vt_symbol,bar_time,open,high,low,close,volume,turnover\n"
-        "600000.SSE,2026-01-08 14:56:00,10.00,10.10,9.98,10.05,120000,1206000\n"
-    )
+    return minute_imports.minute_csv_template()
 
 
 def import_stock_minute_bars_csv(
@@ -1717,16 +1759,18 @@ def import_stock_minute_bars_csv(
 ) -> dict[str, Any]:
     """Import historical minute bars from CSV text into stock_minute_bars."""
 
-    if not is_database_configured():
-        return {"status": "unavailable", "message": "DATABASE_URL not configured"}
-    interval = str(interval or "1m").strip().lower()
-    if interval not in {"1m", "5m", "15m", "30m", "60m"}:
-        raise DataSyncError(f"Unsupported minute interval: {interval}")
-    if not csv_text.strip():
-        return {"status": "empty", "rows_read": 0, "rows_written": 0, "rows_skipped": 0, "errors": ["CSV is empty"]}
-
-    reader = csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff")))
-    return _import_stock_minute_bars_from_reader(reader, interval=interval, source=source, dry_run=dry_run)
+    try:
+        return minute_imports.import_stock_minute_bars_csv(
+            csv_text,
+            interval=interval,
+            source=source,
+            dry_run=dry_run,
+            ensure_schema=ensure_sync_schema,
+            database_configured=is_database_configured,
+            upsert=_upsert_minute_bars,
+        )
+    except minute_imports.MinuteImportError as exc:
+        raise DataSyncError(str(exc)) from exc
 
 
 def import_stock_minute_bars_file(
@@ -1739,22 +1783,21 @@ def import_stock_minute_bars_file(
 ) -> dict[str, Any]:
     """Import historical minute bars from an allowed local CSV file path."""
 
-    if not is_database_configured():
-        return {"status": "unavailable", "message": "DATABASE_URL not configured"}
-    interval = str(interval or "1m").strip().lower()
-    if interval not in {"1m", "5m", "15m", "30m", "60m"}:
-        raise DataSyncError(f"Unsupported minute interval: {interval}")
-    resolved = _allowed_import_file(file_path)
-    with resolved.open("r", encoding=encoding, newline="") as file:
-        reader = csv.DictReader(file)
-        result = _import_stock_minute_bars_from_reader_streaming(
-            reader,
+    try:
+        return minute_imports.import_stock_minute_bars_file(
+            file_path,
             interval=interval,
             source=source,
             dry_run=dry_run,
+            encoding=encoding,
+            project_root=PROJECT_ROOT,
+            allowed_import_dirs=ALLOWED_IMPORT_DIRS,
+            ensure_schema=ensure_sync_schema,
+            database_configured=is_database_configured,
+            upsert=_upsert_minute_bars,
         )
-    result["file_path"] = str(resolved.relative_to(PROJECT_ROOT))
-    return result
+    except minute_imports.MinuteImportError as exc:
+        raise DataSyncError(str(exc)) from exc
 
 
 def _import_stock_minute_bars_from_reader(
@@ -1764,44 +1807,14 @@ def _import_stock_minute_bars_from_reader(
     source: str,
     dry_run: bool,
 ) -> dict[str, Any]:
-    if not reader.fieldnames:
-        return {"status": "empty", "rows_read": 0, "rows_written": 0, "rows_skipped": 0, "errors": ["CSV header is missing"]}
-
-    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    errors: list[str] = []
-    rows_read = 0
-    rows_skipped = 0
-    for row in reader:
-        rows_read += 1
-        normalized = {_normalize_csv_key(key): value for key, value in row.items()}
-        try:
-            symbol, exchange = _minute_csv_symbol_exchange(normalized)
-            item = _minute_csv_item(normalized)
-        except ValueError as exc:
-            rows_skipped += 1
-            if len(errors) < 20:
-                errors.append(f"row {rows_read}: {exc}")
-            continue
-        grouped.setdefault((symbol, exchange), []).append(item)
-
-    rows_written = 0
-    if not dry_run:
-        ensure_sync_schema()
-        for (symbol, exchange), items in grouped.items():
-            rows_written += _upsert_minute_bars(symbol, exchange, items, interval, source)
-
-    return {
-        "status": "ready" if rows_read and (rows_written or dry_run) else "empty",
-        "interval": interval,
-        "source": source,
-        "dry_run": dry_run,
-        "rows_read": rows_read,
-        "rows_written": rows_written,
-        "rows_skipped": rows_skipped,
-        "symbol_count": len(grouped),
-        "errors": errors,
-        "required_columns": ["vt_symbol 或 symbol+exchange", "bar_time/trade_date/time/datetime", "open/high/low/close"],
-    }
+    return minute_imports.import_stock_minute_bars_from_reader(
+        reader,
+        interval=interval,
+        source=source,
+        dry_run=dry_run,
+        ensure_schema=ensure_sync_schema,
+        upsert=_upsert_minute_bars,
+    )
 
 
 def _import_stock_minute_bars_from_reader_streaming(
@@ -1814,61 +1827,15 @@ def _import_stock_minute_bars_from_reader_streaming(
 ) -> dict[str, Any]:
     """Import minute bars from a CSV reader without holding the whole file."""
 
-    if not reader.fieldnames:
-        return {"status": "empty", "rows_read": 0, "rows_written": 0, "rows_skipped": 0, "errors": ["CSV header is missing"]}
-
-    errors: list[str] = []
-    rows_read = 0
-    rows_skipped = 0
-    rows_written = 0
-    symbol_keys: set[tuple[str, str]] = set()
-    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
-
-    if not dry_run:
-        ensure_sync_schema()
-
-    def flush(force: bool = False) -> None:
-        nonlocal rows_written, grouped
-        if not grouped:
-            return
-        pending_count = sum(len(items) for items in grouped.values())
-        if not force and pending_count < batch_size:
-            return
-        if not dry_run:
-            for (symbol, exchange), items in grouped.items():
-                rows_written += _upsert_minute_bars(symbol, exchange, items, interval, source)
-        grouped = {}
-
-    for row in reader:
-        rows_read += 1
-        normalized = {_normalize_csv_key(key): value for key, value in row.items()}
-        try:
-            symbol, exchange = _minute_csv_symbol_exchange(normalized)
-            item = _minute_csv_item(normalized)
-        except ValueError as exc:
-            rows_skipped += 1
-            if len(errors) < 20:
-                errors.append(f"row {rows_read}: {exc}")
-            continue
-        key = (symbol, exchange)
-        symbol_keys.add(key)
-        grouped.setdefault(key, []).append(item)
-        flush()
-
-    flush(force=True)
-
-    return {
-        "status": "ready" if rows_read and (rows_written or dry_run) else "empty",
-        "interval": interval,
-        "source": source,
-        "dry_run": dry_run,
-        "rows_read": rows_read,
-        "rows_written": rows_written,
-        "rows_skipped": rows_skipped,
-        "symbol_count": len(symbol_keys),
-        "errors": errors,
-        "required_columns": ["vt_symbol 或 symbol+exchange", "bar_time/trade_date/time/datetime", "open/high/low/close"],
-    }
+    return minute_imports.import_stock_minute_bars_from_reader_streaming(
+        reader,
+        interval=interval,
+        source=source,
+        dry_run=dry_run,
+        ensure_schema=ensure_sync_schema,
+        upsert=_upsert_minute_bars,
+        batch_size=batch_size,
+    )
 
 
 def audit_minute_gap_csv(
@@ -1876,14 +1843,12 @@ def audit_minute_gap_csv(
     *,
     interval: str = "1m",
     tail_entry_start: str = "14:30",
-    tail_entry_end: str = "14:57",
+    tail_entry_end: str = "14:30",
     min_tail_bars: int = 1,
 ) -> dict[str, Any]:
     """Check whether stock_minute_bars covers a strict-tail backtest gap CSV."""
 
-    interval = str(interval or "1m").strip().lower()
-    if interval not in {"1m", "5m", "15m", "30m", "60m"}:
-        raise DataSyncError(f"Unsupported minute interval: {interval}")
+    interval = _strict_gap_interval(interval)
     if not gap_csv_text.strip():
         return {"status": "empty", "rows_read": 0, "rows_skipped": 0, "errors": ["CSV is empty"]}
     if not is_database_configured():
@@ -1904,15 +1869,13 @@ def audit_minute_gap_file(
     *,
     interval: str = "1m",
     tail_entry_start: str = "14:30",
-    tail_entry_end: str = "14:57",
+    tail_entry_end: str = "14:30",
     min_tail_bars: int = 1,
     encoding: str = "utf-8-sig",
 ) -> dict[str, Any]:
     """Check minute-bar coverage for a strict-tail gap CSV file."""
 
-    interval = str(interval or "1m").strip().lower()
-    if interval not in {"1m", "5m", "15m", "30m", "60m"}:
-        raise DataSyncError(f"Unsupported minute interval: {interval}")
+    interval = _strict_gap_interval(interval)
     if not is_database_configured():
         return {"status": "unavailable", "message": "DATABASE_URL not configured"}
     resolved = _allowed_import_file(file_path)
@@ -1937,78 +1900,20 @@ def _audit_minute_gap_requirements(
     tail_entry_end: str,
     min_tail_bars: int,
 ) -> dict[str, Any]:
-    if requirements["errors"] and not requirements["items"]:
-        return {
-            "status": "empty",
-            "rows_read": requirements["rows_read"],
-            "rows_skipped": requirements["rows_skipped"],
-            "errors": requirements["errors"],
-        }
-
-    items = requirements["items"]
-    coverage = _minute_gap_coverage_counts(items, interval, tail_entry_start, tail_entry_end)
-    covered = []
-    missing = []
-    for item in items:
-        key = (item["vt_symbol"], item["trade_date"])
-        count = int(coverage.get(key, 0) or 0)
-        row = {**item, "minute_bar_count": count, "required_tail_bars": min_tail_bars}
-        if count >= min_tail_bars:
-            covered.append(row)
-        else:
-            row["missing_reason"] = "no_tail_window_minute_bars" if count == 0 else "insufficient_tail_window_minute_bars"
-            missing.append(row)
-
-    unique_symbols = sorted({item["vt_symbol"] for item in items})
-    unique_dates = sorted({item["trade_date"] for item in items})
-    missing_symbols = sorted({item["vt_symbol"] for item in missing})
-    missing_dates = sorted({item["trade_date"] for item in missing})
-    return {
-        "status": "ready" if not missing else "incomplete",
-        "interval": interval,
-        "tail_entry_window": f"{tail_entry_start}-{tail_entry_end}",
-        "required_tail_bars": min_tail_bars,
-        "rows_read": requirements["rows_read"],
-        "rows_skipped": requirements["rows_skipped"],
-        "gap_count": len(items),
-        "covered_count": len(covered),
-        "missing_count": len(missing),
-        "coverage_pct": round(len(covered) / len(items) * 100, 4) if items else 0,
-        "symbol_count": len(unique_symbols),
-        "date_count": len(unique_dates),
-        "missing_symbol_count": len(missing_symbols),
-        "missing_date_count": len(missing_dates),
-        "symbols": unique_symbols[:500],
-        "missing_symbols": missing_symbols[:500],
-        "missing_dates": [item.isoformat() for item in missing_dates[:500]],
-        "covered_examples": _minute_gap_rows_to_api(covered[:20]),
-        "missing_examples": _minute_gap_rows_to_api(missing[:100]),
-        "errors": requirements["errors"],
-        "next_action": (
-            "strict_tail_backtest_ready"
-            if not missing
-            else "import historical 1m bars for missing_symbols/missing_dates, then rerun audit and strict backtest"
-        ),
-    }
+    return minute_gaps.audit_minute_gap_requirements(
+        requirements,
+        interval=interval,
+        tail_entry_start=tail_entry_start,
+        tail_entry_end=tail_entry_end,
+        min_tail_bars=min_tail_bars,
+        coverage_counts=_minute_gap_coverage_counts,
+    )
 
 
 def minute_gap_import_template(gap_csv_text: str, *, sample_limit: int = 200) -> str:
     """Build a minute-bar import template scoped to rows from a gap CSV."""
 
-    parsed = _parse_minute_gap_requirements(gap_csv_text)
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow(["vt_symbol", "bar_time", "open", "high", "low", "close", "volume", "turnover"])
-    seen: set[tuple[str, date]] = set()
-    for item in parsed["items"]:
-        key = (item["vt_symbol"], item["trade_date"])
-        if key in seen:
-            continue
-        seen.add(key)
-        writer.writerow([item["vt_symbol"], f"{item['trade_date'].isoformat()} 14:56:00", "", "", "", "", "", ""])
-        if len(seen) >= max(sample_limit, 1):
-            break
-    return "\ufeff" + buffer.getvalue()
+    return minute_gaps.minute_gap_import_template(gap_csv_text, sample_limit=sample_limit)
 
 
 def minute_gap_vendor_manifest(
@@ -2016,38 +1921,19 @@ def minute_gap_vendor_manifest(
     *,
     file_path: str = "",
     tail_entry_start: str = "14:30",
-    tail_entry_end: str = "14:57",
+    tail_entry_end: str = "14:30",
     sample_limit: int = 20,
 ) -> dict[str, Any]:
     """Build a provider-facing request manifest from a strict-tail gap CSV."""
 
-    requirements = load_minute_gap_requirements(gap_csv_text, file_path=file_path)
-    items = requirements["items"]
-    rows = _minute_gap_vendor_rows(items, tail_entry_start, tail_entry_end)
-    symbols = sorted({row["vt_symbol"] for row in rows})
-    dates = sorted({row["trade_date"] for row in rows})
-    return {
-        "status": "ready" if rows else "empty",
-        "rows_read": requirements["rows_read"],
-        "rows_skipped": requirements["rows_skipped"],
-        "errors": requirements["errors"],
-        "request_count": len(rows),
-        "symbol_count": len(symbols),
-        "date_count": len(dates),
-        "tail_entry_window": f"{tail_entry_start}-{tail_entry_end}",
-        "start_date": dates[0].isoformat() if dates else None,
-        "end_date": dates[-1].isoformat() if dates else None,
-        "symbols": symbols[:500],
-        "dates": [item.isoformat() for item in dates[:500]],
-        "sample_rows": [_vendor_row_to_api(row) for row in rows[: max(sample_limit, 1)]],
-        "required_import_columns": ["vt_symbol", "bar_time", "open", "high", "low", "close", "volume", "turnover"],
-        "provider_notes": [
-            "每个 vt_symbol + trade_date 需要覆盖 tail_start 至 tail_end 的真实 1 分钟 K 线。",
-            "AlphaAgent 导入 CSV 使用 vt_symbol,bar_time,open,high,low,close,volume,turnover。",
-            "Tushare Pro 可按 ts_code + start_date/end_date + freq=1min 拉取；返回行必须属于目标 trade_date。",
-            "vn.py 数据库可按 symbol/exchange/Interval.MINUTE 查询同一窗口后通过 /api/vnpy/import-minute-bars/gaps 导入。",
-        ],
-    }
+    return minute_gaps.minute_gap_vendor_manifest(
+        gap_csv_text,
+        file_path=file_path,
+        tail_entry_start=tail_entry_start,
+        tail_entry_end=tail_entry_end,
+        sample_limit=sample_limit,
+        allowed_import_file=_allowed_import_file,
+    )
 
 
 def minute_gap_vendor_manifest_csv(
@@ -2055,181 +1941,69 @@ def minute_gap_vendor_manifest_csv(
     *,
     file_path: str = "",
     tail_entry_start: str = "14:30",
-    tail_entry_end: str = "14:57",
+    tail_entry_end: str = "14:30",
 ) -> str:
     """Return a provider-facing CSV request list for strict-tail gaps."""
 
-    requirements = load_minute_gap_requirements(gap_csv_text, file_path=file_path)
-    rows = _minute_gap_vendor_rows(requirements["items"], tail_entry_start, tail_entry_end)
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow(
-        [
-            "vt_symbol",
-            "symbol",
-            "exchange",
-            "tushare_ts_code",
-            "trade_date",
-            "tail_start",
-            "tail_end",
-            "start_datetime",
-            "end_datetime",
-            "reference_date",
-            "ma5",
-            "alphaagent_import_columns",
-            "note",
-        ]
+    return minute_gaps.minute_gap_vendor_manifest_csv(
+        gap_csv_text,
+        file_path=file_path,
+        tail_entry_start=tail_entry_start,
+        tail_entry_end=tail_entry_end,
+        allowed_import_file=_allowed_import_file,
     )
-    for row in rows:
-        writer.writerow(
-            [
-                row["vt_symbol"],
-                row["symbol"],
-                row["exchange"],
-                row["tushare_ts_code"],
-                row["trade_date"].isoformat(),
-                row["tail_start"],
-                row["tail_end"],
-                row["start_datetime"],
-                row["end_datetime"],
-                row["reference_date"].isoformat() if row.get("reference_date") else "",
-                row.get("ma5") if row.get("ma5") is not None else "",
-                "vt_symbol,bar_time,open,high,low,close,volume,turnover",
-                "return all real 1m bars in [tail_start, tail_end] for this symbol-date",
-            ]
-        )
-    return "\ufeff" + buffer.getvalue()
 
 
 def load_minute_gap_requirements(gap_csv_text: str = "", *, file_path: str = "") -> dict[str, Any]:
     """Load strict-tail gap requirements from inline CSV text or an allowed file."""
 
-    if str(file_path or "").strip():
-        resolved = _allowed_import_file(file_path)
-        with resolved.open("r", encoding="utf-8-sig", newline="") as file:
-            return _parse_minute_gap_reader(csv.DictReader(file))
-    if not str(gap_csv_text or "").strip():
-        return {"items": [], "rows_read": 0, "rows_skipped": 0, "errors": ["CSV is empty"]}
-    return _parse_minute_gap_requirements(gap_csv_text)
+    return minute_gaps.load_minute_gap_requirements(
+        gap_csv_text,
+        file_path=file_path,
+        allowed_import_file=_allowed_import_file,
+    )
 
 
 def _minute_gap_vendor_rows(items: list[dict[str, Any]], tail_entry_start: str, tail_entry_end: str) -> list[dict[str, Any]]:
-    rows = []
-    seen: set[tuple[str, date]] = set()
-    start_time = _parse_time_value(tail_entry_start)
-    end_time = _parse_time_value(tail_entry_end)
-    for item in sorted(items, key=lambda value: (value["trade_date"], value["vt_symbol"])):
-        key = (item["vt_symbol"], item["trade_date"])
-        if key in seen:
-            continue
-        seen.add(key)
-        symbol, exchange = _split_vt_symbol(item["vt_symbol"])
-        rows.append(
-            {
-                "vt_symbol": item["vt_symbol"],
-                "symbol": symbol,
-                "exchange": exchange,
-                "tushare_ts_code": _tushare_ts_code(symbol, exchange),
-                "trade_date": item["trade_date"],
-                "tail_start": start_time,
-                "tail_end": end_time,
-                "start_datetime": f"{item['trade_date'].isoformat()} {start_time}:00",
-                "end_datetime": f"{item['trade_date'].isoformat()} {end_time}:00",
-                "reference_date": item.get("reference_date"),
-                "ma5": item.get("ma5"),
-            }
-        )
-    return rows
+    return minute_gaps.minute_gap_vendor_rows(items, tail_entry_start, tail_entry_end)
 
 
 def _split_vt_symbol(value: str) -> tuple[str, str]:
-    parts = str(value or "").strip().upper().split(".")
-    if len(parts) != 2:
-        return str(value or "").strip().upper(), ""
-    return parts[0], parts[1]
+    return minute_gaps.split_vt_symbol(value)
 
 
 def _tushare_ts_code(symbol: str, exchange: str) -> str:
-    suffix = {"SSE": "SH", "SZSE": "SZ", "BSE": "BJ"}.get(exchange, exchange)
-    return f"{symbol}.{suffix}" if symbol and suffix else symbol
+    return minute_gaps.tushare_ts_code(symbol, exchange)
 
 
 def _vendor_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        **row,
-        "trade_date": row["trade_date"].isoformat() if isinstance(row.get("trade_date"), date) else row.get("trade_date"),
-        "reference_date": row["reference_date"].isoformat() if isinstance(row.get("reference_date"), date) else row.get("reference_date"),
-    }
+    return minute_gaps.vendor_row_to_api(row)
 
 
 def _parse_minute_gap_requirements(gap_csv_text: str) -> dict[str, Any]:
-    reader = csv.DictReader(io.StringIO(gap_csv_text.lstrip("\ufeff")))
-    return _parse_minute_gap_reader(reader)
+    return minute_gaps.parse_minute_gap_requirements(gap_csv_text)
+
+
+def _strict_gap_interval(value: Any) -> str:
+    try:
+        return minute_gaps.strict_gap_interval(value)
+    except minute_gaps.MinuteGapError as exc:
+        raise DataSyncError(str(exc)) from exc
 
 
 def _parse_minute_gap_reader(reader: csv.DictReader) -> dict[str, Any]:
-    if not reader.fieldnames:
-        return {"items": [], "rows_read": 0, "rows_skipped": 0, "errors": ["CSV header is missing"]}
-
-    items: list[dict[str, Any]] = []
-    seen: set[tuple[str, date]] = set()
-    errors: list[str] = []
-    rows_read = 0
-    rows_skipped = 0
-    for row in reader:
-        rows_read += 1
-        normalized = {_normalize_csv_key(key): value for key, value in row.items()}
-        try:
-            vt_symbol_value = str(normalized.get("vt_symbol") or "").strip().upper()
-            if not vt_symbol_value:
-                symbol, exchange = _minute_csv_symbol_exchange(normalized)
-                vt_symbol_value = vt_symbol(symbol, normalize_exchange(symbol, exchange))
-            trade_date = _parse_date(
-                normalized.get("trade_date")
-                or normalized.get("bar_date")
-                or normalized.get("date")
-            )
-            if trade_date is None:
-                raise ValueError("missing or invalid trade_date")
-            key = (vt_symbol_value, trade_date)
-            if key in seen:
-                continue
-            seen.add(key)
-            items.append(
-                {
-                    "vt_symbol": vt_symbol_value,
-                    "trade_date": trade_date,
-                    "reference_date": _parse_date(normalized.get("reference_date")),
-                    "ma5": _optional_number(normalized, "ma5"),
-                    "window": str(normalized.get("window") or "").strip(),
-                }
-            )
-        except ValueError as exc:
-            rows_skipped += 1
-            if len(errors) < 20:
-                errors.append(f"row {rows_read}: {exc}")
-    return {"items": items, "rows_read": rows_read, "rows_skipped": rows_skipped, "errors": errors}
+    return minute_gaps.parse_minute_gap_reader(reader)
 
 
 def _allowed_import_file(file_path: str) -> Path:
-    text_path = str(file_path or "").strip()
-    if not text_path:
-        raise DataSyncError("CSV file path is empty")
-    raw_path = Path(text_path)
-    resolved = raw_path if raw_path.is_absolute() else PROJECT_ROOT / raw_path
-    resolved = resolved.resolve()
-    allowed_roots = []
-    for directory in ALLOWED_IMPORT_DIRS:
-        directory.mkdir(parents=True, exist_ok=True)
-        allowed_roots.append(directory.resolve())
-    if not resolved.is_file():
-        raise DataSyncError(f"CSV file not found: {file_path}")
-    if resolved.suffix.lower() != ".csv":
-        raise DataSyncError("Only .csv files are allowed")
-    if not any(resolved == root or root in resolved.parents for root in allowed_roots):
-        allowed = ", ".join(str(root.relative_to(PROJECT_ROOT)) for root in allowed_roots)
-        raise DataSyncError(f"CSV file must be under one of: {allowed}")
-    return resolved
+    try:
+        return minute_imports.allowed_import_file(
+            file_path,
+            project_root=PROJECT_ROOT,
+            allowed_import_dirs=ALLOWED_IMPORT_DIRS,
+        )
+    except minute_imports.MinuteImportError as exc:
+        raise DataSyncError(str(exc)) from exc
 
 
 def _minute_gap_coverage_counts(
@@ -2238,54 +2012,15 @@ def _minute_gap_coverage_counts(
     tail_entry_start: str,
     tail_entry_end: str,
 ) -> dict[tuple[str, date], int]:
-    if not items:
-        return {}
-    vt_symbols = sorted({item["vt_symbol"] for item in items})
-    dates = sorted({item["trade_date"] for item in items})
-    start_time = _parse_time_value(tail_entry_start)
-    end_time = _parse_time_value(tail_entry_end)
-    with session_scope() as session:
-        rows = session.execute(
-            select(
-                schema.stock_minute_bars.c.vt_symbol,
-                schema.stock_minute_bars.c.trade_date,
-                func.count().label("bar_count"),
-            )
-            .where(
-                schema.stock_minute_bars.c.vt_symbol.in_(vt_symbols),
-                schema.stock_minute_bars.c.trade_date >= dates[0],
-                schema.stock_minute_bars.c.trade_date <= dates[-1],
-                schema.stock_minute_bars.c.interval == interval,
-                func.to_char(schema.stock_minute_bars.c.bar_time, "HH24:MI") >= start_time,
-                func.to_char(schema.stock_minute_bars.c.bar_time, "HH24:MI") <= end_time,
-            )
-            .group_by(schema.stock_minute_bars.c.vt_symbol, schema.stock_minute_bars.c.trade_date)
-        ).mappings().all()
-    return {(str(row["vt_symbol"]), row["trade_date"]): int(row["bar_count"] or 0) for row in rows}
+    return minute_gaps.minute_gap_coverage_counts(items, interval, tail_entry_start, tail_entry_end)
 
 
 def _parse_time_value(value: Any) -> str:
-    text = str(value or "").strip()
-    if not text:
-        raise ValueError("time is empty")
-    try:
-        parsed = datetime.strptime(text[:5], "%H:%M")
-    except ValueError as exc:
-        raise ValueError(f"invalid HH:MM time: {text}") from exc
-    return parsed.strftime("%H:%M")
+    return minute_gaps.parse_time_value(value)
 
 
 def _minute_gap_rows_to_api(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    result = []
-    for row in rows:
-        result.append(
-            {
-                **row,
-                "trade_date": row["trade_date"].isoformat() if isinstance(row.get("trade_date"), date) else row.get("trade_date"),
-                "reference_date": row["reference_date"].isoformat() if isinstance(row.get("reference_date"), date) else row.get("reference_date"),
-            }
-        )
-    return result
+    return minute_gaps.minute_gap_rows_to_api(rows)
 
 
 def _usage_capabilities() -> list[dict[str, Any]]:
@@ -2406,7 +2141,13 @@ def run_job(job_id: str, params: dict[str, Any] | None = None, progress: Progres
         method = getattr(runner, method_name)
         merged_params = {**job_def.default_params, **run_params}
         result = method(merged_params)
-        _finish_run(run_id, "succeeded", rows_read=result.get("rows_read", 0), rows_written=result.get("rows_written", 0))
+        _finish_run(
+            run_id,
+            "succeeded",
+            rows_read=result.get("rows_read", 0),
+            rows_written=result.get("rows_written", 0),
+            message=_sync_result_message(result),
+        )
         return {
             "run_id": run_id,
             "job_id": job_id,
@@ -2416,6 +2157,21 @@ def run_job(job_id: str, params: dict[str, Any] | None = None, progress: Progres
     except Exception as exc:
         _finish_run(run_id, "failed", message=str(exc), error_type=exc.__class__.__name__)
         raise DataSyncError(str(exc)) from exc
+
+
+def _sync_result_message(result: dict[str, Any]) -> str | None:
+    message = str(result.get("message") or "").strip()
+    if message:
+        return message[:500]
+    audit = result.get("audit_after")
+    if isinstance(audit, dict) and audit.get("status"):
+        return (
+            f"audit_after={audit.get('status')}, "
+            f"covered={audit.get('covered_count', 0)}, "
+            f"missing={audit.get('missing_count', 0)}"
+        )[:500]
+    note = str(result.get("note") or "").strip()
+    return note[:500] if note else None
 
 
 # ─── Scheduler ────────────────────────────────────────────────────────────

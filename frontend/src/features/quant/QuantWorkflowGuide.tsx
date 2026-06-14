@@ -39,11 +39,11 @@ export function QuantWorkflowGuide({
     {
       label: "数据",
       status: dataState,
-      value: dataState === "ready" ? "可筛选" : dataState === "pending" ? "检查中" : "待配置",
+      value: dataState === "ready" ? "可生成" : dataState === "pending" ? "检查中" : "待配置",
       note: recommendationMessage || "需要本地股票、日线和可选财报/资金流数据。",
     },
     {
-      label: "筛选",
+      label: "候选",
       status: recommendationCount > 0 ? "ready" : "pending",
       value: recommendationCount > 0 ? `${recommendationCount}只` : "未生成",
       note: "生成区间候选会按真实交易日逐日写入推荐表，并把最新交易日同步到量化候选分组。",
@@ -52,7 +52,7 @@ export function QuantWorkflowGuide({
       label: "回测",
       status: backtestCount > 0 ? "ready" : "pending",
       value: backtestCount > 0 ? `${backtestCount}份` : "未运行",
-      note: auditReady ? "分钟缺口已覆盖，可运行严格尾盘回测。" : "没有分钟线时只能做宽松回测或生成缺口清单。",
+      note: auditReady ? "分钟缺口已覆盖，可运行严格14:30回测。" : "严格14:30缺快照会拒单；可先补缺口，尾盘混合只作研究对比。",
     },
     {
       label: "模拟",
@@ -63,7 +63,7 @@ export function QuantWorkflowGuide({
     {
       label: "vn.py",
       status: vnpyStatus?.status === "ready" ? "ready" : "warning",
-      value: vnpyStatus?.status === "ready" ? "A股插件就绪" : "本地回测可用",
+      value: vnpyStatus?.status === "ready" ? "A股插件就绪" : "A股待接入",
       note: "AlphaAgent 本地回测可用；A股实盘和官方数据源仍需要安装并配置对应 Gateway/Datafeed。",
     },
   ];

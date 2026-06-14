@@ -87,15 +87,15 @@ def import_vnpy_minute_bars_for_gaps(
     gap_file_path: str = "",
     interval: str = "1m",
     tail_entry_start: str = "14:30",
-    tail_entry_end: str = "14:57",
+    tail_entry_end: str = "14:30",
     dry_run: bool = True,
     max_gaps: int = 2000,
 ) -> dict[str, Any]:
     """Load vn.py minute bars for strict-tail gap rows and upsert them.
 
     The gap CSV is the file produced by strict minute backtests.  Each row
-    represents a D+1 entry date and symbol that must have visible tail-window
-    bars before the strict backtest can claim a real fill.
+    represents an execution date and symbol that must have a visible 14:30
+    snapshot before the strict backtest can claim a real fill.
     """
 
     if not is_database_configured():
