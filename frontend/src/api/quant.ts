@@ -1452,6 +1452,47 @@ export function fetchSymbolStrategyComparison(vtSymbol: string, params: {
   return apiClient.get<SymbolStrategyComparison>(`/quant/symbols/${encodeURIComponent(vtSymbol)}/strategy-comparison${suffix}`);
 }
 
+/** 某股最近一次候选的买卖计划（候选筛选时预算存储，单股详情直接读取，免重算）。 */
+export interface SymbolTradePlan extends StockIdentityFields {
+  status: string;
+  message?: string;
+  trade_date?: string;
+  strategy_id?: string;
+  rank?: number;
+  action?: string;
+  total_score?: number;
+  trade_plan?: {
+    entry_price: number;
+    stop_loss_price: number;
+    take_profit_price: number;
+    entry_date?: string;
+  } | null;
+  risk_control?: Record<string, unknown>;
+}
+
+export function fetchSymbolTradePlan(vtSymbol: string, strategy?: string) {
+  const suffix = strategy ? `?strategy=${encodeURIComponent(strategy)}` : "";
+  return apiClient.get<SymbolTradePlan>(`/quant/symbols/${encodeURIComponent(vtSymbol)}/trade-plan${suffix}`);
+}
+
+/** 某股最近的单股回测（trades + metrics，免重算直接读存储）。 */
+export interface SymbolLatestBacktest {
+  status: string;
+  message?: string;
+  backtest_id?: number;
+  strategy_id?: string;
+  start_date?: string;
+  end_date?: string;
+  metrics?: Record<string, unknown>;
+  trade_count?: number;
+  trades?: BacktestTrade[];
+}
+
+export function fetchLatestSymbolBacktest(vtSymbol: string, strategy?: string) {
+  const suffix = strategy ? `?strategy=${encodeURIComponent(strategy)}` : "";
+  return apiClient.get<SymbolLatestBacktest>(`/backtests/symbols/${encodeURIComponent(vtSymbol)}/latest${suffix}`);
+}
+
 export function fetchSymbolDiagnostics(vtSymbol: string, params: {
   start?: string;
   end?: string;
@@ -1816,6 +1857,13 @@ export function placeOrder(accountId: number, payload: {
   recommendation_id?: number;
 }) {
   return apiClient.post<PlaceOrderResult>(`/simulation/accounts/${accountId}/orders`, payload);
+}
+
+export function updatePositionCost(accountId: number, vtSymbol: string, costPrice: number) {
+  return apiClient.patch<{ status: string; position?: SimulationPosition }>(
+    `/simulation/accounts/${accountId}/positions/${encodeURIComponent(vtSymbol)}`,
+    { cost_price: costPrice },
+  );
 }
 
 export function fetchRiskEvents(accountId: number, limit = 100) {

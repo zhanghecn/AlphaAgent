@@ -120,6 +120,48 @@ def list_backtests(limit: int = 50, run_type: str = "all") -> dict[str, Any]:
     return {"status": "ready", "items": items}
 
 
+def latest_symbol_backtest(vt_symbol: str, strategy_id: str | None = None) -> dict[str, Any]:
+    """读某股最近的单股回测（trades + metrics），供单股详情免重算直接展示。
+
+    单股回测 createSymbolBacktest persist=true 已存 backtest_runs + backtest_trades。
+    单股详情进入/切换策略时读最近记录，无需重跑；仅"重新运行"才触发重算。
+    """
+    symbol = str(vt_symbol or "").strip().upper()
+    if not symbol:
+        return {"status": "invalid_symbol", "message": "vt_symbol is required"}
+    if not is_database_configured():
+        return {"status": "unavailable", "message": "DATABASE_URL not configured"}
+    _ensure_backtest_schema()
+    with session_scope() as session:
+        rows = session.execute(
+            select(schema.backtest_runs).order_by(desc(schema.backtest_runs.c.id)).limit(100)
+        ).mappings().all()
+        for row in rows:
+            params = row.get("params") or {}
+            symbols = params.get("symbols") or []
+            if symbol not in symbols:
+                continue
+            if strategy_id and row.get("strategy_id") != strategy_id:
+                continue
+            backtest_id = int(row["id"])
+            trades = session.execute(
+                select(schema.backtest_trades)
+                .where(schema.backtest_trades.c.backtest_id == backtest_id)
+                .order_by(schema.backtest_trades.c.trade_date, schema.backtest_trades.c.id)
+            ).mappings().all()
+            return {
+                "status": "ready",
+                "backtest_id": backtest_id,
+                "strategy_id": row.get("strategy_id"),
+                "start_date": row["start_date"].isoformat() if row.get("start_date") else None,
+                "end_date": row["end_date"].isoformat() if row.get("end_date") else None,
+                "metrics": row.get("metrics") or {},
+                "trade_count": len(trades),
+                "trades": [_mapping_to_api(dict(t)) for t in trades],
+            }
+    return {"status": "empty", "vt_symbol": symbol, "message": "该股该策略暂无回测记录，可手动运行生成"}
+
+
 def backtest_metrics(backtest_id: int) -> dict[str, Any]:
     detail = get_backtest(backtest_id)
     if detail.get("status") != "ready":

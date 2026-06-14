@@ -155,6 +155,17 @@ def get_symbol_signal_history(
         return _service_error(exc)
 
 
+@router.get("/symbols/{vt_symbol}/trade-plan")
+def get_symbol_trade_plan(
+    vt_symbol: str,
+    strategy: str = Query(default=screening.STRATEGY_ID),
+):
+    try:
+        return ok(screening.latest_trade_plan(vt_symbol, strategy_id=strategy))
+    except Exception as exc:
+        return _service_error(exc)
+
+
 @router.get("/symbols/{vt_symbol}/strategy-comparison")
 def get_symbol_strategy_comparison(
     vt_symbol: str,

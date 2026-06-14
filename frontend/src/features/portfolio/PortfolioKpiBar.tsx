@@ -1,36 +1,34 @@
 import { StatCard } from "@/components/dashboard/StatCard";
-import { formatAmount, priceColorClass } from "@/lib/utils";
+import { formatAmount, formatPct, priceColorClass } from "@/lib/utils";
 
 export interface PortfolioKpi {
-  cash: number;
-  equity: number;
-  returnPct: number | null;
+  weightedReturnPct: number | null;
   floatingPnl: number;
+  returnPct: number | null;
+  positionCount: number;
 }
 
 /**
- * Portfolio KPI bar — three focused StatCards: total assets (with return
- * badge), floating P&L, and available cash. Trimmed from five cards to cut
- * visual noise so the workflow lanes stay the focus.
+ * Portfolio KPI bar — 三张 StatCard：持仓收益率(加权%) / 持仓盈亏 / 持仓数。
+ * 不显示总资产/可用现金金额，聚焦持仓盈亏质量（用户看收益率而非金额）。
+ * 持仓收益率 = 各股浮动收益率按市值加权，反映"选的股"整体表现。
  */
 export function PortfolioKpiBar({ kpi }: { kpi: PortfolioKpi }) {
-  const { cash, equity, returnPct, floatingPnl } = kpi;
-
+  const { weightedReturnPct, floatingPnl, returnPct, positionCount } = kpi;
   return (
     <div className="grid gap-3 sm:grid-cols-3">
       <StatCard
-        label="总资产"
-        value={formatAmount(equity)}
-        delta={returnPct ?? undefined}
-        deltaLabel="累计收益率"
+        label="持仓收益率"
+        value={<span className={priceColorClass(weightedReturnPct)}>{formatPct(weightedReturnPct)}</span>}
+        deltaLabel="市值加权"
       />
       <StatCard
         label="持仓盈亏"
         value={<span className={priceColorClass(floatingPnl)}>{formatAmount(floatingPnl)}</span>}
         delta={returnPct ?? undefined}
-        deltaLabel="收益率"
+        deltaLabel="总收益率"
       />
-      <StatCard label="可用现金" value={formatAmount(cash)} />
+      <StatCard label="持仓数" value={`${positionCount} 只`} />
     </div>
   );
 }

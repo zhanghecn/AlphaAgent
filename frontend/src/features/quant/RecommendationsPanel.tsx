@@ -24,8 +24,6 @@ export function RecommendationsPanel({
   includedBoards,
   screenRuns,
   tradingDates,
-  screenStartDate,
-  onScreenStartDateChange,
   selectedTradeDate,
   onSelectedTradeDateChange,
   strategies,
@@ -40,6 +38,7 @@ export function RecommendationsPanel({
   onRetry,
   onRunScreen,
   isRunningScreen,
+  onAddToHolding,
 }: {
   isLoading: boolean;
   isError: boolean;
@@ -51,8 +50,6 @@ export function RecommendationsPanel({
   includedBoards?: string[];
   screenRuns: QuantScreenRunItem[];
   tradingDates: string[];
-  screenStartDate: string;
-  onScreenStartDateChange: (tradeDate: string) => void;
   selectedTradeDate: string;
   onSelectedTradeDateChange: (tradeDate: string) => void;
   strategies: QuantStrategyOption[];
@@ -67,6 +64,7 @@ export function RecommendationsPanel({
   onRetry: () => void;
   onRunScreen: () => void;
   isRunningScreen: boolean;
+  onAddToHolding?: (item: QuantRecommendation) => void;
 }) {
   const [actionFilter, setActionFilter] = useState<"all" | "BUY" | "WATCH">("all");
   const [failedRuleFilter, setFailedRuleFilter] = useState("all");
@@ -83,7 +81,7 @@ export function RecommendationsPanel({
     }
   }
   const availableDates = Array.from(
-    new Set([...tradingDates, ...screenRuns.map((run) => run.trade_date), selectedTradeDate, screenStartDate].filter(Boolean))
+    new Set([...tradingDates, ...screenRuns.map((run) => run.trade_date), selectedTradeDate].filter(Boolean))
   );
   const stats = useMemo(() => candidateStats(items), [items]);
   const filteredItems = useMemo(() => {
@@ -125,19 +123,7 @@ export function RecommendationsPanel({
             {tradeDate ?? "--"} · {runId ? `运行 #${runId}` : "未运行"} · {strategyVersion ?? "--"} · 分组同步 {syncedCount} 只
           </div>
         </div>
-        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_260px]">
-          <TradingDateSelector
-            label="生成区间起点"
-            value={screenStartDate}
-            dates={availableDates}
-            onChange={onScreenStartDateChange}
-            getOptionLabel={(date) => {
-              const run = latestRunByDate.get(date);
-              return run ? `${date} · #${run.id} · 候选 ${run.recommendation_count}` : `${date} · 未运行`;
-            }}
-            className="items-start gap-1"
-            selectClassName="mt-1 w-full min-w-0"
-          />
+        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_260px]">
           <TradingDateSelector
             label="查看交易日"
             value={selectedTradeDate}
@@ -226,7 +212,7 @@ export function RecommendationsPanel({
                 ))}
                 <TableHead className="text-right">风险/流动性</TableHead>
                 <TableHead>核查</TableHead>
-                <TableHead className="w-24">回测追踪</TableHead>
+                <TableHead className="w-24">回测成交</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -270,15 +256,23 @@ export function RecommendationsPanel({
                       {itemFailedRules.length ? itemFailedRules.map((rule) => failedRuleLabel(rule, failedRuleLabels)).join(", ") : `止损 ${formatPct(numberValue(risk.stop_loss_pct) ? -numberValue(risk.stop_loss_pct)! * 100 : null)}`}
                     </TableCell>
                     <TableCell>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => setTraceTarget({ vtSymbol: item.vt_symbol, tradeDate: item.trade_date })}
-                        disabled={!activeBacktestId}
-                      >
-                        <Search size={14} />
-                        追踪
-                      </Button>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setTraceTarget({ vtSymbol: item.vt_symbol, tradeDate: item.trade_date })}
+                          disabled={!activeBacktestId}
+                          title={activeBacktestId ? "查看该候选在选中回测里的成交/拒单情况" : "先在「回测」tab选中一个回测，才能追踪候选的成交情况"}
+                        >
+                          <Search size={14} />
+                          回测成交
+                        </Button>
+                        {onAddToHolding && (
+                          <Button size="sm" onClick={() => onAddToHolding(item)}>
+                            加入持仓
+                          </Button>
+                        )}
+                      </div>
                     </TableCell>
                   </TableRow>
                 );

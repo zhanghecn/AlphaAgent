@@ -44,6 +44,10 @@ export function useHoldings() {
 
   const marketValue = positions.reduce((sum, position) => sum + (position.market_value ?? 0), 0);
   const floatingPnl = positions.reduce((sum, position) => sum + (position.floating_pnl ?? 0), 0);
+  // 持仓加权收益率：按市值加权的各股浮动收益率，反映持仓整体盈亏质量（而非总资产收益率）
+  const weightedReturnPct = marketValue > 0
+    ? positions.reduce((sum, position) => sum + (position.market_value ?? 0) * (position.floating_pnl_pct ?? 0), 0) / marketValue
+    : null;
   const cash = account?.cash ?? 0;
   const equity = cash + marketValue;
   const initialCash = account?.initial_cash ?? 0;
@@ -61,6 +65,7 @@ export function useHoldings() {
       equity,
       initialCash,
       returnPct,
+      weightedReturnPct,
       floatingPnl,
       positionCount: positions.length,
     },

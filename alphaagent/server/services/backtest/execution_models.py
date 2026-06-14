@@ -126,13 +126,15 @@ def resolve_tail_sell_fill(
             "price_source": "stock_minute_bars.close_price",
             "proxy_used": False,
         }
-    if params.execution_model == "strict_1430":
+    if params.execution_model == "strict_1430" and current_day >= date.today():
+        # 今天缺 14:30 快照才拒单并提示；历史 strict_1430 走下方日线收盘代理卖出
         return {
             **base,
             "status": "rejected",
             "price": None,
-            "mode": "strict_1430_required_sell",
-            "reason": "tail_exit_not_triggered",
+            "mode": "today_pending_1430_snapshot_sell",
+            "reason": "today_pending_1430_snapshot",
+            "next_action": "今日 14:30 后分钟数据将自动补齐，届时重跑获取真实卖出价。",
             "price_source": None,
             "proxy_used": False,
         }
@@ -281,21 +283,43 @@ def _resolve_strict_1430_buy_fill(
     ma5 = _ma5_for_entry_day(bar_index.get(vt_symbol, {}), reference_date) if reference_date else None
     minute_bars = minute_index.get(vt_symbol, {}).get(current_day, [])
     trigger = _exact_tail_bar(minute_bars, params)
-    if not trigger:
-        return _tail_reject_payload("missing_1430_snapshot", order, current_day, daily_bar, bar_index, minute_index, params)
-    return _tail_buy_payload(
-        mode="minute_1430",
-        price=trigger.close_price,
-        order=order,
-        current_day=current_day,
-        reference_date=reference_date,
-        ma5=ma5,
-        params=params,
-        minute_bars=minute_bars,
-        minute_bar=trigger,
-        price_source="stock_minute_bars.close_price",
-        proxy_used=False,
+    if trigger:
+        return _tail_buy_payload(
+            mode="minute_1430",
+            price=trigger.close_price,
+            order=order,
+            current_day=current_day,
+            reference_date=reference_date,
+            ma5=ma5,
+            params=params,
+            minute_bars=minute_bars,
+            minute_bar=trigger,
+            price_source="stock_minute_bars.close_price",
+            proxy_used=False,
+        )
+    # 无 14:30 快照：按日期分流，解决历史日期无意义拒单
+    if current_day < date.today():
+        # 历史日期缺分钟数据属正常，用执行日日线收盘代理成交（信号确认后的可观测价）
+        return _tail_buy_payload(
+            mode="daily_close_proxy",
+            price=daily_bar.close_price,
+            order=order,
+            current_day=current_day,
+            reference_date=reference_date,
+            ma5=ma5,
+            params=params,
+            minute_bars=minute_bars,
+            minute_bar=None,
+            price_source="stock_daily_bars.close_price",
+            proxy_used=True,
+        )
+    # 今天缺 14:30 快照：盘中未到或数据未同步，明确提示而非无意义拒单
+    payload = _tail_reject_payload(
+        "missing_1430_snapshot", order, current_day, daily_bar, bar_index, minute_index, params
     )
+    payload["mode"] = "today_pending_1430_snapshot"
+    payload["next_action"] = "今日 14:30 后分钟数据将自动补齐，届时重跑可获取真实成交价；历史日期已用日线收盘代理成交。"
+    return payload
 
 
 def _tail_buy_payload(

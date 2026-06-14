@@ -138,6 +138,14 @@ def place_order(account_id: int, payload: dict[str, Any]) -> dict[str, Any]:
             .returning(schema.simulation_orders.c.id)
         ).scalar_one()
         fill = _fill_order(session, dict(account), int(order_id), vt_symbol, side, price, volume, payload)
+        if side == "BUY" and fill.get("status") == "filled":
+            # 手动买入成交后同步到"手动持仓"组，区别于策略自动建仓的 simulation_auto 组
+            fill["auto_position_sync"] = {
+                "group_type": "manual_holding",
+                "synced": _upsert_manual_holding_group_item(
+                    session, vt_symbol, (stock or {}).get("name"), price, volume, payload.get("reason")
+                ),
+            }
     return fill
 
 
@@ -278,6 +286,99 @@ def list_risk_events(account_id: int, limit: int = 100) -> dict[str, Any]:
             .limit(min(max(limit, 1), 500))
         ).mappings().all()
     return {"status": "ready", "items": [_mapping_to_api(dict(row)) for row in rows]}
+
+
+def update_position_cost(account_id: int, vt_symbol: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """修改某持仓的成本价，并按最新价重算浮动盈亏（用于手动校正建仓成本）。"""
+    if not is_database_configured():
+        return {"status": "unavailable", "message": "DATABASE_URL not configured"}
+    _ensure_simulation_schema()
+    symbol = str(vt_symbol or "").strip()
+    if not symbol:
+        return {"status": "invalid", "message": "vt_symbol is required"}
+    try:
+        new_cost_price = float(payload.get("cost_price"))
+    except (TypeError, ValueError):
+        return {"status": "invalid", "message": "cost_price must be a positive number"}
+    if new_cost_price <= 0:
+        return {"status": "invalid", "message": "cost_price must be positive"}
+    with session_scope() as session:
+        row = session.execute(
+            select(schema.simulation_positions).where(
+                and_(
+                    schema.simulation_positions.c.account_id == account_id,
+                    schema.simulation_positions.c.vt_symbol == symbol,
+                )
+            )
+        ).mappings().first()
+        if not row:
+            return {"status": "not_found", "message": "position not found"}
+        volume = int(row["volume"])
+        last_price = float(row["last_price"] or new_cost_price)
+        session.execute(
+            schema.simulation_positions.update()
+            .where(
+                and_(
+                    schema.simulation_positions.c.account_id == account_id,
+                    schema.simulation_positions.c.vt_symbol == symbol,
+                )
+            )
+            .values(
+                cost_price=new_cost_price,
+                market_value=last_price * volume,
+                floating_pnl=(last_price - new_cost_price) * volume,
+                floating_pnl_pct=(last_price / new_cost_price - 1) * 100 if new_cost_price else 0,
+            )
+        )
+        updated = session.execute(
+            select(schema.simulation_positions).where(
+                and_(
+                    schema.simulation_positions.c.account_id == account_id,
+                    schema.simulation_positions.c.vt_symbol == symbol,
+                )
+            )
+        ).mappings().first()
+    return {"status": "updated", "position": _mapping_to_api(dict(updated))}
+
+
+def _upsert_manual_holding_group_item(
+    session,
+    vt_symbol: str,
+    name: str | None,
+    price: float,
+    volume: int,
+    reason: str | None,
+) -> int:
+    group_id = _ensure_auto_group(session, "手动持仓", "manual_holding", "用户手动选股加入的持仓")
+    values = {
+        "group_id": group_id,
+        "vt_symbol": vt_symbol,
+        "name": name,
+        "source": "manual",
+        "reason": f"{reason or '手动加入'}; cost={price:.4f}; volume={volume}",
+    }
+    existing = session.execute(
+        select(schema.portfolio_group_items.c.vt_symbol).where(
+            and_(
+                schema.portfolio_group_items.c.group_id == group_id,
+                schema.portfolio_group_items.c.vt_symbol == vt_symbol,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing:
+        session.execute(
+            schema.portfolio_group_items.update()
+            .where(
+                and_(
+                    schema.portfolio_group_items.c.group_id == group_id,
+                    schema.portfolio_group_items.c.vt_symbol == vt_symbol,
+                )
+            )
+            .values(**values)
+        )
+    else:
+        session.execute(schema.portfolio_group_items.insert().values(**values))
+    return 1
 
 
 def _upsert_simulation_auto_group_item(

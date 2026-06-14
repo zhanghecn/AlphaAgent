@@ -22,7 +22,7 @@ export const DEFAULT_BACKTEST_PARAMS = {
   start: DEFAULT_BACKTEST_START,
   initial_cash: 1_000_000,
   max_symbols: 120,
-  max_positions: 8,
+  max_positions: 10,
   min_entry_score: 68,
   strict_entry: true,
   execution_model: "strict_1430" as ExecutionModel,

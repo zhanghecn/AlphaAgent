@@ -34,6 +34,7 @@ from alphaagent.server.services.backtest.engine import (
     backtest_validation_grid_csv,
     backtest_minute_gap_csv,
     get_backtest,
+    latest_symbol_backtest,
     list_backtests,
     run_backtest,
 )
@@ -72,6 +73,14 @@ def create_symbol_backtest(payload: dict[str, Any] = Body(default_factory=dict))
         if result.get("status") == "ready" and backtest_id:
             result["audit"] = backtest_audit(int(backtest_id), vt_symbol, int(payload.get("audit_limit") or 300))
         return ok(result)
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/symbols/{vt_symbol}/latest")
+def get_latest_symbol_backtest(vt_symbol: str, strategy: str = Query(default="")):
+    try:
+        return ok(latest_symbol_backtest(vt_symbol, strategy_id=strategy or None))
     except Exception as exc:
         return _service_error(exc)
 

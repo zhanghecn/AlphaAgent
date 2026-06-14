@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Search } from "lucide-react";
 import {
@@ -30,6 +31,9 @@ export function StockQuantAuditPanel({
   });
   const comparison = comparisonQuery.data;
   const items = comparison?.items?.length ? comparison.items : FALLBACK_STRATEGIES.map(emptyComparisonItem);
+  const [selectedStrategyId, setSelectedStrategyId] = useState<string>("");
+  const activeStrategyId = selectedStrategyId || items[0]?.strategy_id || "";
+  const selectedItem = items.find((item) => item.strategy_id === activeStrategyId) ?? items[0];
   const isFetching = comparisonQuery.isFetching;
   const isReady = comparison?.status === "ready";
 
@@ -73,11 +77,23 @@ export function StockQuantAuditPanel({
 
       {isReady ? (
         <div className="mt-4 space-y-4">
-          <div className="grid gap-3 md:grid-cols-2">
-            {items.map((item) => (
-              <StrategySummaryCard key={item.strategy_id} item={item} />
-            ))}
+          <div className="flex flex-wrap gap-2">
+            {items.map((item) => {
+              const active = activeStrategyId === item.strategy_id;
+              return (
+                <Button
+                  key={item.strategy_id}
+                  size="sm"
+                  variant={active ? "default" : "outline"}
+                  onClick={() => setSelectedStrategyId(item.strategy_id)}
+                >
+                  {item.strategy.name}
+                </Button>
+              );
+            })}
           </div>
+
+          {selectedItem && <StrategySummaryCard item={selectedItem} />}
 
           <div className="rounded-md border bg-muted/20 p-3 text-sm leading-6">
             <div className="font-medium">财报口径</div>
@@ -95,15 +111,14 @@ export function StockQuantAuditPanel({
             </div>
           </div>
 
-          {items.map((item) => (
+          {selectedItem && (
             <StrategySignalSection
-              key={`signals-${item.strategy_id}`}
-              item={item}
+              item={selectedItem}
               startDate={comparison.start_date}
               endDate={comparison.end_date}
               onTraceSignalDate={onTraceSignalDate}
             />
-          ))}
+          )}
         </div>
       ) : null}
     </section>

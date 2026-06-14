@@ -17,7 +17,7 @@ class BacktestParams:
     start: date = date(2020, 1, 1)
     end: date | None = None
     initial_cash: float = 1_000_000
-    max_positions: int = 8
+    max_positions: int = 10
     max_position_pct: float = 0.125
     commission_rate: float = 0.0003
     stamp_tax_rate: float = 0.0005

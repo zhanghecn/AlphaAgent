@@ -83,6 +83,10 @@ def screen_stocks(
                 lhb_score=lhb_scores.get(vt_symbol),
             )
             if score.evidence.get("status") == "ready":
+                # 信号日收盘价随 evidence 存储，供买卖计划预算与单股回测复用（免重算）
+                bars = bars_by_symbol.get(vt_symbol, [])
+                if bars:
+                    score.evidence["close_price"] = float(bars[-1].close_price)
                 scored.append(score)
 
         scored.sort(key=lambda item: (-item.total_score, item.vt_symbol))
@@ -141,7 +145,7 @@ def screen_stocks_range(
         latest = end or _latest_trade_date(session)
         if latest is None:
             return {"status": "empty", "message": "stock_daily_bars is empty", "items": [], "recommendations": [], "runs": []}
-        start_date = start or latest
+        start_date = start or _earliest_trade_date(session) or latest
         if start_date > latest:
             return {
                 "status": "invalid_range",
@@ -391,6 +395,59 @@ def list_recommendations(trade_date: date | None = None, strategy_id: str = STRA
     }
 
 
+def latest_trade_plan(vt_symbol: str, strategy_id: str = STRATEGY_ID) -> dict[str, Any]:
+    """返回某股最近一次候选的买卖计划（risk_control.trade_plan）。
+
+    候选筛选时已预算并存储买卖计划，单股详情直接读取，避免重跑回测。
+    """
+    symbol = str(vt_symbol or "").strip().upper()
+    if not symbol:
+        return {"status": "invalid_symbol", "message": "vt_symbol is required"}
+    if not is_database_configured():
+        return {"status": "unavailable", "message": "DATABASE_URL not configured"}
+    strategy = get_strategy(strategy_id)
+    if strategy is None:
+        return {"status": "unsupported_strategy", "strategy_id": strategy_id}
+    _ensure_quant_schema()
+    with session_scope() as session:
+        row = session.execute(
+            select(
+                schema.quant_recommendations,
+                schema.stocks.c.name.label("stock_name"),
+            )
+            .select_from(
+                schema.quant_recommendations.outerjoin(
+                    schema.stocks,
+                    schema.quant_recommendations.c.vt_symbol == schema.stocks.c.vt_symbol,
+                )
+            )
+            .where(
+                and_(
+                    schema.quant_recommendations.c.vt_symbol == symbol,
+                    schema.quant_recommendations.c.strategy_id == strategy.id,
+                )
+            )
+            .order_by(desc(schema.quant_recommendations.c.trade_date))
+            .limit(1)
+        ).mappings().first()
+    if not row:
+        return {"status": "empty", "vt_symbol": symbol, "message": "该股未在候选列表中"}
+    risk_control = row.get("risk_control") or {}
+    trade_plan = risk_control.get("trade_plan") if isinstance(risk_control, dict) else None
+    return {
+        "status": "ready" if trade_plan else "no_plan",
+        "vt_symbol": symbol,
+        "name": row.get("stock_name"),
+        "trade_date": row["trade_date"].isoformat() if row.get("trade_date") else None,
+        "strategy_id": strategy.id,
+        "rank": row.get("rank"),
+        "action": row.get("action"),
+        "total_score": row.get("total_score"),
+        "trade_plan": trade_plan,
+        "risk_control": risk_control,
+    }
+
+
 def get_recommendation(recommendation_id: int) -> dict[str, Any]:
     if not is_database_configured():
         return {"status": "unavailable", "message": "DATABASE_URL not configured"}
@@ -606,6 +663,10 @@ def _ensure_quant_schema() -> None:
 
 def _latest_trade_date(session) -> date | None:
     return screening_loaders.latest_trade_date(session)
+
+
+def _earliest_trade_date(session) -> date | None:
+    return screening_loaders.earliest_trade_date(session)
 
 
 def _latest_signal_date(session) -> date | None:

@@ -27,6 +27,7 @@ interface WorkflowLanesProps {
   isSelecting?: boolean;
   selectedSymbols?: Set<string>;
   onToggleSelect?: (vtSymbol: string) => void;
+  accountId?: number;
 }
 
 /**
@@ -49,6 +50,7 @@ export function WorkflowLanes({
   isSelecting,
   selectedSymbols,
   onToggleSelect,
+  accountId,
 }: WorkflowLanesProps) {
   return (
     <div className="space-y-4">
@@ -91,6 +93,7 @@ export function WorkflowLanes({
             isSelecting={isSelecting}
             selectedSymbols={selectedSymbols}
             onToggleSelect={onToggleSelect}
+            accountId={accountId}
           />
         );
       })}

@@ -338,6 +338,10 @@ export function MinuteDataWizard({
         </div>
       </div>
 
+      <div className="mt-2 rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
+        历史回测已自动用日线收盘代理成交，<strong className="text-foreground">无需手动补分钟</strong>；此处仅用于补齐今日实时 14:30 快照。默认 AkShare 自动拉取，无需整理 CSV；高级/CSV 选项在「展开」里。
+      </div>
+
       <StrictMinuteSourcePanel
         audit={audit}
         sourceBacktestId={sourceBacktestId}

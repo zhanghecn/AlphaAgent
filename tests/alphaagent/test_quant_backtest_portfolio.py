@@ -2572,9 +2572,93 @@ def test_backtest_can_reject_when_minute_tail_entry_is_required() -> None:
         params,
     )
 
+    # 历史日期缺 14:30 快照不再无意义拒单：改走日线收盘代理；代理价偏离 MA5 超容差时按策略拒单
+    assert fill["status"] == "rejected"
+    assert fill["reason"] == "tail_entry_not_triggered"
+    assert fill["mode"] == "strict_1430_required"
+
+
+def test_backtest_strict_1430_uses_daily_close_proxy_for_past_date_when_snapshot_missing() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    execute_day = date(2026, 1, 6)
+    daily_bar = engine.Bar(
+        trade_date=execute_day,
+        open_price=10.0,
+        high_price=10.1,
+        low_price=9.9,
+        close_price=10.0,  # 与 MA5(=10) 距离 0%，在容差内
+    )
+    bar_index = {
+        "600000.SSE": {
+            date(2026, 1, 1) + timedelta(days=index): engine.Bar(
+                trade_date=date(2026, 1, 1) + timedelta(days=index),
+                open_price=10,
+                high_price=10,
+                low_price=10,
+                close_price=10,
+            )
+            for index in range(5)
+        }
+    }
+    params = engine.BacktestParams(execution_model="strict_1430")
+
+    fill = engine._resolve_buy_fill(
+        {"vt_symbol": "600000.SSE", "signal_date": date(2026, 1, 5)},
+        execute_day,
+        daily_bar,
+        bar_index,
+        {},  # 无分钟数据
+        params,
+    )
+
+    # 历史日期缺 14:30 快照：用日线收盘代理成交，不再拒单
+    assert fill["status"] == "filled"
+    assert fill["mode"] == "daily_close_proxy"
+    assert fill["price"] == 10.0
+    assert fill["proxy_used"] is True
+
+
+def test_backtest_strict_1430_rejects_today_pending_snapshot_with_hint() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    today = date.today()
+    signal_day = today - timedelta(days=1)
+    daily_bar = engine.Bar(
+        trade_date=today,
+        open_price=10.0,
+        high_price=10.1,
+        low_price=9.9,
+        close_price=10.0,
+    )
+    bar_index = {
+        "600000.SSE": {
+            signal_day - timedelta(days=4) + timedelta(days=index): engine.Bar(
+                trade_date=signal_day - timedelta(days=4) + timedelta(days=index),
+                open_price=10,
+                high_price=10,
+                low_price=10,
+                close_price=10,
+            )
+            for index in range(5)
+        }
+    }
+    params = engine.BacktestParams(execution_model="strict_1430")
+
+    fill = engine._resolve_buy_fill(
+        {"vt_symbol": "600000.SSE", "signal_date": signal_day},
+        today,
+        daily_bar,
+        bar_index,
+        {},  # 今日尚无 14:30 分钟快照
+        params,
+    )
+
+    # 今天缺 14:30 快照：拒单并给出补齐提示，而非无意义拒单
     assert fill["status"] == "rejected"
     assert fill["reason"] == "missing_1430_snapshot"
-    assert fill["mode"] == "strict_1430_required"
+    assert fill["mode"] == "today_pending_1430_snapshot"
+    assert "14:30" in fill["next_action"]
 
 
 def test_backtest_strict_1430_rejects_tail_condition_when_snapshot_present() -> None:
@@ -2893,8 +2977,9 @@ def test_signal_events_keep_rejected_theoretical_buy_for_audit() -> None:
     assert events[0]["side"] == "BUY"
     assert events[0]["price"] is None
     assert events[0]["reason"] == "entry_signal"
+    # 历史日期缺 14:30 快照走日线收盘代理；代理价偏离 MA5 超容差按策略拒单，事件保留审计
     assert events[0]["raw"]["status"] == "rejected"
-    assert events[0]["raw"]["reason"] == "missing_1430_snapshot"
+    assert events[0]["raw"]["reason"] == "tail_entry_not_triggered"
     assert events[0]["raw"]["mode"] == "strict_1430_required"
     assert positions == {}
 

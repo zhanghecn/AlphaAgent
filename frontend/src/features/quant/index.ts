@@ -4,7 +4,6 @@ export { DEFAULT_BACKTEST_START, DEFAULT_BACKTEST_PARAMS, QUANT_BOARD_OPTIONS, b
 // Leaf components
 export { ActionStatus } from "./ActionStatus";
 export { VnpyStatusPanel } from "./VnpyStatusPanel";
-export { QuantGroupPreview } from "./QuantGroupPreview";
 export { QuantWorkflowGuide } from "./QuantWorkflowGuide";
 
 // Recommendations

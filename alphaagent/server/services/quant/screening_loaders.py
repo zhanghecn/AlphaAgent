@@ -17,6 +17,10 @@ def latest_trade_date(session) -> date | None:
     return session.execute(select(func.max(schema.stock_daily_bars.c.trade_date))).scalar()
 
 
+def earliest_trade_date(session) -> date | None:
+    return session.execute(select(func.min(schema.stock_daily_bars.c.trade_date))).scalar()
+
+
 def latest_signal_date(session) -> date | None:
     return session.execute(select(func.max(schema.quant_stock_signals.c.trade_date))).scalar()
 

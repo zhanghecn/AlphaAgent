@@ -1,4 +1,6 @@
-import { ArrowDownToLine, ArrowUpFromLine } from "lucide-react";
+import { useState } from "react";
+import { ArrowDownToLine, ArrowUpFromLine, Pencil } from "lucide-react";
+import { EditCostDialog } from "./EditCostDialog";
 import { cn, formatAmount, formatPct, formatPrice, priceColorClass } from "@/lib/utils";
 import { formatTime, sourceLabel } from "@/lib/backtest-utils";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
@@ -60,6 +62,8 @@ export interface HoldingCardProps {
   isSelected?: boolean;
   /** Toggle selection for this card */
   onToggleSelect?: (vtSymbol: string) => void;
+  /** Simulation account id（用于改成本价） */
+  accountId?: number;
 }
 
 /**
@@ -81,7 +85,9 @@ export function HoldingCard({
   isSelecting,
   isSelected,
   onToggleSelect,
+  accountId,
 }: HoldingCardProps) {
+  const [editCostOpen, setEditCostOpen] = useState(false);
   const isHeld = Boolean(position);
 
   // Build buy/sell signal markers from position data
@@ -200,6 +206,17 @@ export function HoldingCard({
         <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
           <MetricRow label="现价" value={formatPrice(position.last_price)} />
           <MetricRow label="成本" value={formatPrice(position.cost_price)} />
+          {accountId != null && (
+            <div className="col-span-2 -mt-1">
+              <button
+                type="button"
+                className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-primary"
+                onClick={() => setEditCostOpen(true)}
+              >
+                <Pencil size={11} /> 修改成本价
+              </button>
+            </div>
+          )}
           <MetricRow
             label="盈亏"
             value={formatAmount(position.floating_pnl)}
@@ -276,6 +293,16 @@ export function HoldingCard({
           </Button>
         )}
       </div>
+
+      {accountId != null && (
+        <EditCostDialog
+          open={editCostOpen}
+          onOpenChange={setEditCostOpen}
+          accountId={accountId}
+          vtSymbol={item.vt_symbol}
+          defaultCost={position?.cost_price}
+        />
+      )}
     </Card>
   );
 }

@@ -286,6 +286,7 @@ export function PortfolioPage() {
             isSelecting={selection.isSelecting}
             selectedSymbols={selection.selectedSymbols}
             onToggleSelect={selection.toggle}
+            accountId={holdings.accountId}
           />
         </div>
       </div>

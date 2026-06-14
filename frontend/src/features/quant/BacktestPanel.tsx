@@ -1,5 +1,5 @@
 import { useMutation } from "@tanstack/react-query";
-import { BarChart3, Download } from "lucide-react";
+import { BarChart3, Download, RefreshCw } from "lucide-react";
 import type { BacktestRun, QuantStrategyOption } from "@/api/quant";
 import {
   backtestReportCsvUrl,
@@ -157,6 +157,15 @@ export function BacktestPanel({
           isRunning={isRunning}
           onRun={onRun}
         />
+        {isRunning && (
+          <div className="flex items-center gap-3 rounded-lg border bg-primary/5 px-4 py-3 text-sm">
+            <RefreshCw size={16} className="animate-spin text-primary" />
+            <div>
+              <div className="font-medium">正在逐日回测…</div>
+              <div className="text-xs text-muted-foreground">扫全市场候选 × 历史交易日，模拟买入/卖出/止损止盈，生成交易表与指标。大范围回测可能需要 1-3 分钟。</div>
+            </div>
+          </div>
+        )}
         {!report ? (
           <EmptyState message="暂无回测报告" description="运行回测后会生成可复查的交易表和指标。" />
         ) : (

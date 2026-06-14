@@ -54,6 +54,7 @@ def recommendation_to_db(
     reason["risk_score"] = item.risk_score
     reason["liquidity_score"] = item.liquidity_score
     reason["failed_rules"] = failed_entry_rules(item, threshold)
+    entry_price = (item.evidence or {}).get("close_price")
     return {
         "run_id": run_id,
         "trade_date": item.trade_date,
@@ -66,7 +67,7 @@ def recommendation_to_db(
         "confidence": item.total_score / 100,
         "total_score": item.total_score,
         "reason": reason,
-        "risk_control": default_risk_control(),
+        "risk_control": default_risk_control(entry_price=entry_price, trade_date=item.trade_date),
         "status": "active",
         "expires_at": item.trade_date + timedelta(days=7),
     }
@@ -267,15 +268,27 @@ def recommendation_to_api(rank: int, item: SignalScore, stock: dict[str, Any] | 
     return payload
 
 
-def default_risk_control() -> dict[str, Any]:
-    return {
+def default_risk_control(entry_price: float | None = None, trade_date: date | None = None) -> dict[str, Any]:
+    stop_loss_pct = 0.07
+    take_profit_pct = 0.18
+    risk_control = {
         "max_position_pct": 0.125,
-        "stop_loss_pct": 0.07,
-        "take_profit_pct": 0.18,
+        "stop_loss_pct": stop_loss_pct,
+        "take_profit_pct": take_profit_pct,
         "trailing_stop_pct": 0.08,
         "time_stop_days": 15,
         "execution": "daily close observable signal; execution model selected by backtest",
     }
+    # 候选筛选时预算买卖计划：买入价=信号日收盘，止损/止盈按风险参数推算。
+    # 存入 risk_control.trade_plan，供单股详情与回测直接读取，避免反复重算。
+    if entry_price is not None:
+        risk_control["trade_plan"] = {
+            "entry_price": round(float(entry_price), 4),
+            "stop_loss_price": round(float(entry_price) * (1 - stop_loss_pct), 4),
+            "take_profit_price": round(float(entry_price) * (1 + take_profit_pct), 4),
+            "entry_date": trade_date.isoformat() if trade_date else None,
+        }
+    return risk_control
 
 
 def mapping_to_api(row: dict[str, Any]) -> dict[str, Any]:

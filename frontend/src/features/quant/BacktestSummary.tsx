@@ -16,7 +16,10 @@ export function BacktestSummary({
       <BacktestTrustPanel report={report} />
       <BacktestMethodPanel report={report} audit={audit} />
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        {report.summary_rows.slice(1, 9).map((row) => (
+        {report.summary_rows
+          .filter((row) => !["initial_cash", "final_equity", "average_win", "average_loss"].includes(row.key))
+          .slice(0, 8)
+          .map((row) => (
           <div key={row.key} className="rounded-lg border p-3">
             <div className="text-xs text-muted-foreground">{row.label}</div>
             <div className={cn("mt-1 text-lg font-semibold tabular-nums", metricColor(row.key, row.value))}>

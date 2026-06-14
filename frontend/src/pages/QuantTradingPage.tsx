@@ -2,7 +2,6 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   addPortfolioGroupItem,
-  autoBuyRecommendations,
   createBacktest,
   createScreenRunRange,
   fetchBacktestAudit,
@@ -21,21 +20,26 @@ import {
   fetchSimulationAccounts,
   fetchTradingDates,
   fetchVnpyStatus,
+  placeOrder,
+  type QuantRecommendation,
 } from "@/api/quant";
 import type { MinuteGapAuditResult } from "@/api/dataSync";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DEFAULT_BACKTEST_PARAMS, type BacktestParams } from "@/features/quant/constants";
 import { ActionStatus } from "@/features/quant/ActionStatus";
+import { ScreenProgress } from "@/features/quant/ScreenProgress";
 import { QuantWorkflowGuide } from "@/features/quant/QuantWorkflowGuide";
-import { QuantGroupPreview } from "@/features/quant/QuantGroupPreview";
+import { QuantKpiBar, type QuantKpi } from "@/features/quant/QuantKpiBar";
 import { VnpyStatusPanel } from "@/features/quant/VnpyStatusPanel";
 import { RecommendationsPanel } from "@/features/quant/RecommendationsPanel";
-import { CandidateRunCoveragePanel } from "@/features/quant/CandidateRunCoveragePanel";
 import { BacktestPanel } from "@/features/quant/BacktestPanel";
 import { BacktestLogWorkspace } from "@/features/quant/BacktestLogWorkspace";
 import { BacktestDataQuality } from "@/features/quant/BacktestAnalysis";
 import { MinuteDataWizard } from "@/features/quant/MinuteDataWizard";
 import { AddToGroupDialog } from "@/features/portfolio/AddToGroupDialog";
+import { ManualBuyDialog } from "@/features/quant/ManualBuyDialog";
+import { Button } from "@/components/ui/button";
+import { Link } from "react-router-dom";
 
 export function QuantTradingPage() {
   const queryClient = useQueryClient();
@@ -44,9 +48,10 @@ export function QuantTradingPage() {
   const [minuteAudit, setMinuteAudit] = useState<MinuteGapAuditResult | undefined>(undefined);
   const [addToGroupOpen, setAddToGroupOpen] = useState(false);
   const [addToGroupSymbol, setAddToGroupSymbol] = useState<string | null>(null);
-  const [screenStartDate, setScreenStartDate] = useState("");
   const [selectedRecommendationDate, setSelectedRecommendationDate] = useState("");
   const [selectedStrategy, setSelectedStrategy] = useState(DEFAULT_BACKTEST_PARAMS.strategy);
+  const [isScreenRunning, setIsScreenRunning] = useState(false);
+  const [strategyRunIndex, setStrategyRunIndex] = useState(0);
 
   const updateBacktestParams = (next: BacktestParams) => {
     setBacktestParams(next);
@@ -63,6 +68,8 @@ export function QuantTradingPage() {
     queryKey: ["quantScreenRuns", selectedStrategy],
     queryFn: () => fetchScreenRuns(500, selectedStrategy),
     staleTime: 30_000,
+    // 批量生成时每 2s 轮询已 persist 的 run 数，驱动实时进度条
+    refetchInterval: () => (isScreenRunning ? 2000 : false),
   });
 
   const tradingDatesQuery = useQuery({
@@ -76,12 +83,6 @@ export function QuantTradingPage() {
     tradingDatesQuery.data?.latest_trade_date ||
     screenRunsQuery.data?.items[0]?.trade_date ||
     backtestParams.start ||
-    "";
-
-  const activeScreenStartDate =
-    screenStartDate ||
-    backtestParams.start ||
-    tradingDatesQuery.data?.items[0]?.trade_date ||
     "";
 
   const recommendationsQuery = useQuery({
@@ -172,24 +173,38 @@ export function QuantTradingPage() {
   });
 
   const screenMutation = useMutation({
-    mutationFn: () =>
-      createScreenRunRange({
-        start: activeScreenStartDate || undefined,
-        strategy: selectedStrategy,
-        max_symbols: 500,
-        recommendation_limit: 20,
-        min_recommendation_score: 60,
-        persist: true,
-        auto_portfolio: true,
-        included_boards: backtestParams.included_boards,
-      }),
+    mutationFn: async () => {
+      // 全局每策略预算：批量跑所有策略 × 所有交易日，各自存储买卖计划
+      const strategyIds = (strategiesQuery.data?.items ?? []).map((item) => item.id);
+      const targets = strategyIds.length > 0 ? strategyIds : [selectedStrategy];
+      let lastResult: Awaited<ReturnType<typeof createScreenRunRange>> | undefined;
+      for (let index = 0; index < targets.length; index += 1) {
+        setStrategyRunIndex(index);
+        lastResult = await createScreenRunRange({
+          strategy: targets[index],
+          max_symbols: 500,
+          recommendation_limit: 20,
+          min_recommendation_score: 60,
+          persist: true,
+          auto_portfolio: true,
+          included_boards: backtestParams.included_boards,
+        });
+      }
+      return lastResult;
+    },
+    onMutate: () => {
+      setStrategyRunIndex(0);
+      setIsScreenRunning(true);
+    },
     onSuccess: () => {
+      setIsScreenRunning(false);
       queryClient.invalidateQueries({ queryKey: ["quantScreenRuns"] });
       queryClient.invalidateQueries({ queryKey: ["quantTradingDates"] });
       queryClient.invalidateQueries({ queryKey: ["quantRecommendations"] });
       queryClient.invalidateQueries({ queryKey: ["portfolioGroups"] });
       queryClient.invalidateQueries({ queryKey: ["portfolioGroupItems"] });
     },
+    onError: () => setIsScreenRunning(false),
   });
 
   const backtestMutation = useMutation({
@@ -215,17 +230,23 @@ export function QuantTradingPage() {
     },
   });
 
-  const autoBuyMutation = useMutation({
-    mutationFn: () =>
-      autoBuyRecommendations({
-        account_id: accountsQuery.data?.items[0]?.id,
-        limit: 5,
-        amount_per_order: 100_000,
-        initial_cash: 1_000_000,
+  const [buyTarget, setBuyTarget] = useState<QuantRecommendation | null>(null);
+  const placeOrderMutation = useMutation({
+    mutationFn: ({ price, volume }: { price: number; volume: number }) =>
+      placeOrder(accountsQuery.data?.items[0]?.id ?? 0, {
+        vt_symbol: buyTarget!.vt_symbol,
+        side: "BUY",
+        price,
+        volume,
+        reason: `手动加入持仓（候选#${buyTarget!.rank}，${buyTarget!.trade_date}）`,
+        recommendation_id: buyTarget!.id,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["simulationAccounts"] });
       queryClient.invalidateQueries({ queryKey: ["portfolioHoldings"] });
+      queryClient.invalidateQueries({ queryKey: ["portfolioGroups"] });
+      queryClient.invalidateQueries({ queryKey: ["portfolioGroupItems"] });
+      setBuyTarget(null);
     },
   });
 
@@ -251,6 +272,17 @@ export function QuantTradingPage() {
     setSelectedRecommendationDate("");
   };
 
+  const quantHoldings = holdingsQuery.data?.items ?? [];
+  const quantMarketValue = quantHoldings.reduce((sum, p) => sum + (p.market_value ?? 0), 0);
+  const quantWeightedReturnPct = quantMarketValue > 0
+    ? quantHoldings.reduce((sum, p) => sum + (p.market_value ?? 0) * (p.floating_pnl_pct ?? 0), 0) / quantMarketValue
+    : null;
+  const quantKpi: QuantKpi = {
+    candidateCount: quantGroupItemsQuery.data?.items.length ?? 0,
+    holdingsCount: quantHoldings.length,
+    weightedReturnPct: quantWeightedReturnPct,
+  };
+
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b pb-4">
@@ -260,13 +292,25 @@ export function QuantTradingPage() {
             候选按交易日核查，回测按历史逐日动态候选执行。当前不会连接券商实盘。
           </p>
         </div>
+        <Button asChild size="sm" variant="outline">
+          <Link to="/portfolio">打开持仓中心</Link>
+        </Button>
       </div>
 
-      {(screenMutation.data || backtestMutation.data || autoBuyMutation.data) && (
+      {isScreenRunning && (
+        <ScreenProgress
+          completed={screenRunsQuery.data?.items.length ?? 0}
+          total={tradingDatesQuery.data?.items.length ?? 0}
+          strategyName={strategiesQuery.data?.items[strategyRunIndex]?.name}
+          strategyIndex={strategyRunIndex}
+          strategyTotal={strategiesQuery.data?.items.length ?? 1}
+        />
+      )}
+
+      {(screenMutation.data || backtestMutation.data) && (
         <ActionStatus
           screen={screenMutation.data}
           backtestId={backtestMutation.data?.backtest_id}
-          autoBuy={autoBuyMutation.data}
         />
       )}
 
@@ -293,7 +337,8 @@ export function QuantTradingPage() {
         </div>
 
         <TabsContent value="candidates" className="mt-0">
-          <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+          <div className="space-y-4">
+            <QuantKpiBar kpi={quantKpi} />
             <RecommendationsPanel
               isLoading={recommendationsQuery.isLoading}
               isError={recommendationsQuery.isError}
@@ -305,8 +350,6 @@ export function QuantTradingPage() {
               includedBoards={recommendationsQuery.data?.included_boards}
               screenRuns={screenRunsQuery.data?.items ?? []}
               tradingDates={tradingDatesQuery.data?.items.map((item) => item.trade_date) ?? []}
-              screenStartDate={activeScreenStartDate}
-              onScreenStartDateChange={setScreenStartDate}
               selectedTradeDate={activeRecommendationDate}
               onSelectedTradeDateChange={setSelectedRecommendationDate}
               strategies={strategiesQuery.data?.items ?? []}
@@ -320,27 +363,9 @@ export function QuantTradingPage() {
               syncedCount={quantGroupItemsQuery.data?.items.length ?? 0}
               onRetry={() => recommendationsQuery.refetch()}
               onRunScreen={() => screenMutation.mutate()}
-              isRunningScreen={screenMutation.isPending}
+              isRunningScreen={isScreenRunning}
+              onAddToHolding={(item) => setBuyTarget(item)}
             />
-            <section className="space-y-4">
-              <CandidateRunCoveragePanel
-                screenRuns={screenRunsQuery.data?.items ?? []}
-                tradingDates={tradingDatesQuery.data?.items ?? []}
-                startDate={activeScreenStartDate}
-                selectedTradeDate={activeRecommendationDate}
-                strategy={strategiesQuery.data?.items.find((strategy) => strategy.id === selectedStrategy)}
-                onSelectDate={setSelectedRecommendationDate}
-              />
-              <QuantGroupPreview
-                candidateCount={quantGroupItemsQuery.data?.items.length ?? 0}
-                holdingsCount={holdingsQuery.data?.items.length ?? 0}
-                cash={accountsQuery.data?.items[0]?.cash}
-                initialCash={accountsQuery.data?.items[0]?.initial_cash}
-                positions={holdingsQuery.data?.items ?? []}
-                onAutoBuy={() => autoBuyMutation.mutate()}
-                isAutoBuying={autoBuyMutation.isPending}
-              />
-            </section>
           </div>
         </TabsContent>
 
@@ -419,6 +444,16 @@ export function QuantTradingPage() {
         groups={groupsQuery.data?.items ?? []}
         onAdd={(groupId, symbol, reason) => addItemMutation.mutate({ groupId, symbol, reason })}
         isAdding={addItemMutation.isPending}
+      />
+
+      <ManualBuyDialog
+        open={Boolean(buyTarget)}
+        onOpenChange={(open) => !open && setBuyTarget(null)}
+        vtSymbol={buyTarget?.vt_symbol ?? ""}
+        name={buyTarget?.name}
+        defaultPrice={(buyTarget?.risk_control as { trade_plan?: { entry_price?: number } } | null | undefined)?.trade_plan?.entry_price}
+        onConfirm={(price, volume) => placeOrderMutation.mutate({ price, volume })}
+        isPending={placeOrderMutation.isPending}
       />
     </div>
   );

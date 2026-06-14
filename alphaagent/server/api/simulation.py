@@ -62,6 +62,14 @@ def place_order(account_id: int, payload: dict[str, Any] = Body(default_factory=
         return _service_error(exc)
 
 
+@router.patch("/accounts/{account_id}/positions/{vt_symbol}")
+def update_position_cost(account_id: int, vt_symbol: str, payload: dict[str, Any] = Body(default_factory=dict)):
+    try:
+        return ok(account.update_position_cost(account_id, vt_symbol, payload))
+    except Exception as exc:
+        return _service_error(exc)
+
+
 @router.get("/accounts/{account_id}/trades")
 def list_trades(account_id: int, limit: int = Query(default=100, ge=1, le=500)):
     try:

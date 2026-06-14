@@ -8,7 +8,7 @@
  *         Business + Financials → Fund flow + Events
  */
 import { useParams, Link } from "react-router-dom";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   fetchStockDetail,
@@ -21,12 +21,16 @@ import {
   createSymbolBacktest,
   fetchQuantStrategies,
   fetchSymbolDiagnostics,
+  fetchSymbolTradePlan,
+  fetchLatestSymbolBacktest,
   type BacktestAudit,
   type BacktestCandidateNotPlannedContext,
   type BacktestCandidateTrace,
   type BacktestSymbolDetail,
   type BacktestTrade,
   type QuantStrategyOption,
+  type SymbolTradePlan,
+  type SymbolLatestBacktest,
 } from "@/api/quant";
 import { StockQuoteHeader } from "@/features/stocks/StockQuoteHeader";
 import { StockKlineChart, type KlineMarker } from "@/features/stocks/StockKlineChart";
@@ -61,6 +65,7 @@ import {
 
 export function StockDetailPage() {
   const { vtSymbol } = useParams<{ vtSymbol: string }>();
+  const queryClient = useQueryClient();
   const [backtestStart, setBacktestStart] = useState(DEFAULT_BACKTEST_START);
   const [singleBacktestStrategy, setSingleBacktestStrategy] = useState("mainline_leader_pullback");
   const [selectedBacktestMarkerId, setSelectedBacktestMarkerId] = useState<string | null>(null);
@@ -127,6 +132,23 @@ export function StockDetailPage() {
     return null;
   }, [limitPoolQuery.data, vtSymbol]);
 
+  // 候选筛选时已预算并存储的买卖计划，单股详情直接读取，避免重跑回测
+  const tradePlanQuery = useQuery({
+    queryKey: ["symbolTradePlan", vtSymbol, singleBacktestStrategy],
+    queryFn: () => fetchSymbolTradePlan(vtSymbol!, singleBacktestStrategy),
+    enabled: !!vtSymbol,
+    staleTime: 30_000,
+  });
+
+  // 单股回测结果缓存：读最近 symbol 回测，免重算；无缓存时自动创建一次
+  const latestBacktestQuery = useQuery({
+    queryKey: ["symbolLatestBacktest", vtSymbol, singleBacktestStrategy],
+    queryFn: () => fetchLatestSymbolBacktest(vtSymbol!, singleBacktestStrategy),
+    enabled: !!vtSymbol,
+    staleTime: 30_000,
+  });
+  const latestBacktest = latestBacktestQuery.data?.status === "ready" ? latestBacktestQuery.data : null;
+
   const singleBacktestMutation = useMutation({
     mutationFn: () =>
       createSymbolBacktest({
@@ -143,11 +165,16 @@ export function StockDetailPage() {
         tail_entry_end: "14:30",
         tail_entry_ma5_tolerance_pct: 1.5,
       }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["symbolLatestBacktest"] });
+    },
   });
   const backtestAudit = singleBacktestMutation.data?.audit;
+  // 买卖点优先取刚跑的回测，否则读最近缓存，免重算
+  const effectiveTrades = backtestAudit?.trades ?? singleBacktestMutation.data?.trades ?? latestBacktest?.trades ?? [];
   const backtestMarkers = useMemo(
-    () => backtestTradesToMarkers(backtestAudit?.trades ?? [], backtestAudit),
-    [backtestAudit]
+    () => backtestTradesToMarkers(effectiveTrades, backtestAudit),
+    [effectiveTrades, backtestAudit]
   );
   const selectedBacktestMarker = useMemo(
     () => backtestMarkers.find((marker) => marker.id === selectedBacktestMarkerId) ?? backtestMarkers[0] ?? null,
@@ -160,6 +187,23 @@ export function StockDetailPage() {
       return backtestMarkers[0]?.id ?? null;
     });
   }, [backtestMarkers]);
+
+  // 无缓存时自动创建一次单股回测（persist 后后续读缓存）；切换策略同样触发
+  useEffect(() => {
+    if (
+      latestBacktestQuery.data?.status === "empty" &&
+      !latestBacktestQuery.isFetching &&
+      !singleBacktestMutation.isPending
+    ) {
+      singleBacktestMutation.mutate();
+    }
+  }, [latestBacktestQuery.data?.status, latestBacktestQuery.isFetching, singleBacktestMutation.isPending]);
+
+  // 切换策略时清旧回测结果，避免显示上一策略的买卖点
+  const handleSingleStrategyChange = (strategy: string) => {
+    setSingleBacktestStrategy(strategy);
+    singleBacktestMutation.reset();
+  };
 
   const handleBacktestMarkerClick = useCallback((marker: KlineMarker) => {
     setSelectedBacktestMarkerId(marker.id ?? null);
@@ -223,9 +267,11 @@ export function StockDetailPage() {
         onStartChange={setBacktestStart}
         strategy={singleBacktestStrategy}
         strategies={strategyOptions}
-        onStrategyChange={setSingleBacktestStrategy}
+        onStrategyChange={handleSingleStrategyChange}
         result={singleBacktestMutation.data}
         audit={backtestAudit}
+        tradePlan={tradePlanQuery.data}
+        latest={latestBacktest}
         isRunning={singleBacktestMutation.isPending}
         error={singleBacktestMutation.error}
         onRun={() => singleBacktestMutation.mutate()}
@@ -293,6 +339,8 @@ function SingleStockBacktestPanel({
   onStrategyChange,
   result,
   audit,
+  tradePlan,
+  latest,
   isRunning,
   error,
   onRun,
@@ -305,12 +353,14 @@ function SingleStockBacktestPanel({
   onStrategyChange: (value: string) => void;
   result: Awaited<ReturnType<typeof createSymbolBacktest>> | undefined;
   audit?: BacktestAudit;
+  tradePlan?: SymbolTradePlan;
+  latest?: SymbolLatestBacktest | null;
   isRunning: boolean;
   error: unknown;
   onRun: () => void;
 }) {
-  const metrics = result?.metrics;
-  const trades = audit?.trades ?? result?.trades ?? [];
+  const metrics = (result?.metrics ?? latest?.metrics) as { total_return_pct?: number | null; max_drawdown_pct?: number | null; win_rate?: number | null } | undefined;
+  const trades = audit?.trades ?? result?.trades ?? latest?.trades ?? [];
   const events = audit?.events ?? [];
 
   return (
@@ -347,12 +397,35 @@ function SingleStockBacktestPanel({
             value={start}
             onChange={(event) => onStartChange(event.target.value)}
           />
-          <Button size="sm" onClick={onRun} disabled={isRunning}>
-            {isRunning ? <RefreshCw size={15} className="animate-spin" /> : <BarChart3 size={15} />}
-            运行单股回测
+          <Button size="sm" variant="outline" onClick={onRun} disabled={isRunning}>
+            {isRunning ? <RefreshCw size={15} className="animate-spin" /> : <RefreshCw size={15} />}
+            重新运行
           </Button>
         </div>
       </div>
+
+      {tradePlan?.status === "ready" && tradePlan.trade_plan && (
+        <div className="mt-3 rounded-md border bg-muted/30 p-3 text-sm">
+          <div className="flex items-center gap-2 font-medium">
+            <ShieldCheck size={14} />
+            候选买卖计划（{tradePlan.trade_date} 候选第 {tradePlan.rank} 名 · 评分 {tradePlan.total_score?.toFixed(1)}）
+          </div>
+          <div className="mt-2 grid gap-2 md:grid-cols-4">
+            <InfoCell label="买入价" value={formatPrice(tradePlan.trade_plan.entry_price)} />
+            <InfoCell label="止损价" value={formatPrice(tradePlan.trade_plan.stop_loss_price)} valueClass="text-fall" />
+            <InfoCell label="止盈价" value={formatPrice(tradePlan.trade_plan.take_profit_price)} valueClass="text-rise" />
+            <InfoCell label="信号日" value={tradePlan.trade_plan.entry_date ?? tradePlan.trade_date ?? "--"} />
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">
+            候选筛选时已预算并存储，无需重新运行回测。下方可手动运行完整单股回测查看交易明细。
+          </p>
+        </div>
+      )}
+      {tradePlan?.status === "empty" && (
+        <div className="mt-3 rounded-md border p-3 text-sm text-muted-foreground">
+          该股未在候选列表中。可手动运行下方单股回测。
+        </div>
+      )}
 
       {Boolean(error) && (
         <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-2 text-sm text-fall dark:border-red-500/30 dark:bg-red-500/10">
@@ -360,11 +433,11 @@ function SingleStockBacktestPanel({
         </div>
       )}
 
-      {result && (
+      {(result || latest) && (
         <div className="mt-4 space-y-4">
           <div className="grid gap-3 text-sm md:grid-cols-5">
-            <InfoCell label="状态" value={result.status} />
-            <InfoCell label="回测ID" value={result.backtest_id ?? "--"} />
+            <InfoCell label="状态" value={(result ?? latest)?.status ?? "--"} />
+            <InfoCell label="回测ID" value={(result ?? latest)?.backtest_id ?? "--"} />
             <InfoCell label="总收益" value={formatPct(metrics?.total_return_pct)} valueClass={priceColorClass(metrics?.total_return_pct)} />
             <InfoCell label="最大回撤" value={formatPct(metrics?.max_drawdown_pct)} valueClass="text-fall" />
             <InfoCell label="胜率" value={metrics?.win_rate == null ? "--" : formatPct(metrics.win_rate * 100)} />
@@ -968,7 +1041,7 @@ function BacktestMarkerInsight({ marker, audit }: { marker: KlineMarker | null; 
   if (!audit) {
     return (
       <div className="mt-4 border-t pt-3 text-sm text-muted-foreground">
-        运行单股回测后，买入点和卖出点会标在 K 线上；点击图表上的买/卖标记可查看对应策略口径。
+        单股回测的买入点和卖出点会标在 K 线上（自动读取最近回测）；点击图表上的买/卖标记可查看对应策略口径。
       </div>
     );
   }

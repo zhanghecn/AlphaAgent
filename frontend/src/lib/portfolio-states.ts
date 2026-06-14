@@ -25,6 +25,7 @@ export const GROUP_TYPE_STATE_MAP: Record<string, PortfolioState> = {
   quality_long: "watch",
   quant_candidate: "candidate",
   simulation_auto: "holding",
+  manual_holding: "holding",
   sold_review: "review",
   blacklist: "blacklist",
 };
