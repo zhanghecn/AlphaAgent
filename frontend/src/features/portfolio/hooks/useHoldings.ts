@@ -42,11 +42,6 @@ export function useHoldings() {
     return map;
   }, [positions]);
 
-  const marketValue = positions.reduce((sum, position) => sum + (position.market_value ?? 0), 0);
-  // 持仓加权收益率：按市值加权的各股浮动收益率，反映持仓整体盈亏质量（而非总资产收益率）
-  const weightedReturnPct = marketValue > 0
-    ? positions.reduce((sum, position) => sum + (position.market_value ?? 0) * (position.floating_pnl_pct ?? 0), 0) / marketValue
-    : null;
   const averageReturnPct = positions.length
     ? positions.reduce((sum, position) => sum + (position.floating_pnl_pct ?? 0), 0) / positions.length
     : null;
@@ -58,7 +53,6 @@ export function useHoldings() {
     positionsBySymbol,
     riskBadgesBySymbol,
     kpi: {
-      weightedReturnPct,
       averageReturnPct,
       positionCount: positions.length,
     },

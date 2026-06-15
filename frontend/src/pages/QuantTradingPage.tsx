@@ -306,14 +306,13 @@ export function QuantTradingPage() {
   };
 
   const quantHoldings = holdingsQuery.data?.items ?? [];
-  const quantMarketValue = quantHoldings.reduce((sum, p) => sum + (p.market_value ?? 0), 0);
-  const quantWeightedReturnPct = quantMarketValue > 0
-    ? quantHoldings.reduce((sum, p) => sum + (p.market_value ?? 0) * (p.floating_pnl_pct ?? 0), 0) / quantMarketValue
+  const quantAverageReturnPct = quantHoldings.length > 0
+    ? quantHoldings.reduce((sum, p) => sum + (p.floating_pnl_pct ?? 0), 0) / quantHoldings.length
     : null;
   const quantKpi: QuantKpi = {
     candidateCount: quantGroupItemsQuery.data?.items.length ?? 0,
     holdingsCount: quantHoldings.length,
-    weightedReturnPct: quantWeightedReturnPct,
+    averageReturnPct: quantAverageReturnPct,
   };
 
   return (

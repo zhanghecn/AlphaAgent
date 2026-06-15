@@ -1254,8 +1254,6 @@ export interface PortfolioItem extends StockIdentityFields {
 export interface SimulationAccount {
   id: number;
   name: string;
-  initial_cash: number;
-  cash: number;
   status: string;
 }
 
@@ -1268,8 +1266,6 @@ export interface SimulationPosition extends StockIdentityFields {
   available: number;
   cost_price: number;
   last_price?: number | null;
-  market_value?: number | null;
-  floating_pnl?: number | null;
   floating_pnl_pct?: number | null;
   stop_loss_price?: number | null;
   take_profit_price?: number | null;
@@ -1279,13 +1275,10 @@ export interface SimulationPosition extends StockIdentityFields {
   last_buy_time?: string | null;
   last_buy_price?: number | null;
   last_buy_volume?: number | null;
-  last_buy_amount?: number | null;
   last_buy_reason?: string | null;
   last_sell_time?: string | null;
   last_sell_price?: number | null;
   last_sell_volume?: number | null;
-  last_sell_amount?: number | null;
-  last_sell_pnl?: number | null;
   recommendation_id?: number | null;
   updated_at?: string;
 }
@@ -1310,9 +1303,6 @@ export interface PlaceOrderResult {
   side?: string;
   price?: number;
   volume?: number;
-  amount?: number;
-  fee?: number;
-  pnl?: number;
   reason?: string;
   message?: string;
 }
@@ -1985,8 +1975,6 @@ export function fetchSimulationAccounts() {
 export function autoBuyRecommendations(payload: {
   account_id?: number;
   limit?: number;
-  amount_per_order?: number;
-  initial_cash?: number;
 } = {}) {
   return apiClient.post<AutoBuyResult>("/simulation/auto-buy-recommendations", payload);
 }
@@ -1996,7 +1984,6 @@ export function placeOrder(accountId: number, payload: {
   side: "BUY" | "SELL";
   price?: number;
   volume?: number;
-  amount?: number;
   reason?: string;
   recommendation_id?: number;
 }) {

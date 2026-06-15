@@ -9,7 +9,6 @@ export interface TradeOrderPayload {
   vt_symbol: string;
   side: "BUY" | "SELL";
   volume?: number;
-  amount?: number;
   price?: number;
   reason?: string;
 }
@@ -30,7 +29,7 @@ const HUNDRED = 100;
  * TradeDialog — manual sell / add-position confirmation panel.
  *
  * Sell/add: volume inputs are floored to 100-share lots. The dialog avoids
- * account-amount controls; the user manages position size by shares.
+ * account money controls; the user manages position size by shares.
  */
 export function TradeDialog({
   open,

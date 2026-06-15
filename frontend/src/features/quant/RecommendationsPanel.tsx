@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { AlertTriangle, Database, Play, RefreshCw, Search, ShieldCheck } from "lucide-react";
-import { cn, formatAmount, formatPct, formatPrice, priceColorClass } from "@/lib/utils";
+import { cn, formatPct, formatPrice, priceColorClass } from "@/lib/utils";
 import { formatNumber, numberValue } from "@/lib/backtest-utils";
 import { QUANT_BOARD_OPTIONS, boardLabels, type QuantBoard } from "@/features/quant/constants";
 import { ErrorState } from "@/components/ErrorState";
@@ -340,11 +340,9 @@ function CandidateTracePanel({
               <TraceCell label="订单原因" value={trace.linked_order_reason ?? "--"} />
             </div>
           </div>
-          <div className="grid gap-3 md:grid-cols-4">
-            <TraceCell label="现金" value={formatAmount(trace.equity?.cash)} framed />
-            <TraceCell label="持仓市值" value={formatAmount(trace.equity?.market_value)} framed />
-            <TraceCell label="总权益" value={formatAmount(trace.equity?.total_equity)} framed />
+          <div className="grid gap-3 md:grid-cols-2">
             <TraceCell label="持仓数" value={trace.equity?.position_count ?? "--"} framed />
+            <TraceCell label="拒单数" value={trace.orders.filter((row) => row.status === "rejected").length} framed />
           </div>
           <div className="grid gap-2 md:grid-cols-2">
             {trace.diagnostics.map((item) => (
@@ -442,7 +440,6 @@ function TraceOrderRows({ trace }: { trace: BacktestCandidateTrace }) {
             <TableHead>状态</TableHead>
             <TableHead className="text-right">价格</TableHead>
             <TableHead className="text-right">数量</TableHead>
-            <TableHead className="text-right">金额</TableHead>
             <TableHead>原因</TableHead>
           </TableRow>
         </TableHeader>
@@ -455,7 +452,6 @@ function TraceOrderRows({ trace }: { trace: BacktestCandidateTrace }) {
               <TableCell>{traceOrderStatus(row.status)}</TableCell>
               <TableCell className="text-right tabular-nums">{formatPrice(row.price)}</TableCell>
               <TableCell className="text-right tabular-nums">{row.volume == null ? "--" : row.volume.toLocaleString()}</TableCell>
-              <TableCell className="text-right tabular-nums">--</TableCell>
               <TableCell className="text-muted-foreground">{row.reason ?? "--"}</TableCell>
             </TableRow>
           ))}
@@ -467,7 +463,6 @@ function TraceOrderRows({ trace }: { trace: BacktestCandidateTrace }) {
               <TableCell>已成交</TableCell>
               <TableCell className="text-right tabular-nums">{formatPrice(row.price)}</TableCell>
               <TableCell className="text-right tabular-nums">{row.volume.toLocaleString()}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatAmount(row.amount)}</TableCell>
               <TableCell className="text-muted-foreground">{row.reason ?? "--"}</TableCell>
             </TableRow>
           ))}
