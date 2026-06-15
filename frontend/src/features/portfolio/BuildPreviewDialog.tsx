@@ -2,13 +2,13 @@ import { useEffect, useState } from "react";
 import { CheckCircle2, RefreshCw, XCircle } from "lucide-react";
 import { Modal, ModalBody, ModalFooter, ModalHeader } from "@/components/ui/modal";
 import { Button } from "@/components/ui/button";
-import { cn, formatAmount } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import type { AutoBuyResult } from "@/api/quant";
 
 interface BuildPreviewDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onBuild: (params: { limit: number; amount_per_order: number; initial_cash: number }) => void;
+  onBuild: (params: { limit: number }) => void;
   isBuilding: boolean;
   result?: AutoBuyResult;
   error?: Error | null;
@@ -21,12 +21,7 @@ interface FillItem {
 }
 
 /**
- * BuildPreviewDialog — configurable quant-candidate build with result feedback.
- *
- * Stage 1: configure limit / amount per order / initial cash. Stage 2 (once a
- * result is present): summarize filled / skipped / rejected counts and list
- * each candidate's outcome reason, using the fills[] the backend already
- * returns from auto-buy-recommendations.
+ * BuildPreviewDialog — quant-candidate build with result feedback.
  */
 export function BuildPreviewDialog({
   open,
@@ -37,14 +32,10 @@ export function BuildPreviewDialog({
   error,
 }: BuildPreviewDialogProps) {
   const [limit, setLimit] = useState(5);
-  const [amountPerOrder, setAmountPerOrder] = useState(100_000);
-  const [initialCash, setInitialCash] = useState(1_000_000);
 
   useEffect(() => {
     if (open && !result) {
       setLimit(5);
-      setAmountPerOrder(100_000);
-      setInitialCash(1_000_000);
     }
   }, [open, result]);
 
@@ -55,7 +46,7 @@ export function BuildPreviewDialog({
   const hasResult = Boolean(result && items.length > 0);
 
   const handleConfirm = () => {
-    onBuild({ limit, amount_per_order: amountPerOrder, initial_cash: initialCash });
+    onBuild({ limit });
   };
 
   return (
@@ -65,28 +56,14 @@ export function BuildPreviewDialog({
         {!hasResult ? (
           <>
             <p className="text-sm text-muted-foreground">
-              从最新量化候选中按排名取前 N 只，每只按设定金额建仓（按 100 股整手取整）。已持仓的候选会自动跳过。
+              从最新量化候选中按排名取前 N 只，每只按最小整手记录为模拟持仓。已持仓的候选会自动跳过。
             </p>
-            <div className="grid grid-cols-3 gap-3">
+            <div className="max-w-40">
               <NumberField label="候选数量" value={limit} onChange={setLimit} min={1} max={20} step={1} />
-              <NumberField
-                label="每单金额"
-                value={amountPerOrder}
-                onChange={setAmountPerOrder}
-                min={10_000}
-                step={10_000}
-              />
-              <NumberField
-                label="初始资金"
-                value={initialCash}
-                onChange={setInitialCash}
-                min={100_000}
-                step={100_000}
-              />
             </div>
             <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
               预计最多建仓 <span className="text-foreground tabular-nums">{limit}</span> 只 ·
-              单只预算 <span className="text-foreground tabular-nums">{formatAmount(amountPerOrder)}</span>
+              每只按 <span className="text-foreground tabular-nums">100</span> 股最小整手记录
             </div>
             {error && <p className="text-xs text-destructive">{error.message}</p>}
           </>

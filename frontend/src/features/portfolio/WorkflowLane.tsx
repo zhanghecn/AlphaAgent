@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { SectionCard } from "@/components/dashboard/SectionCard";
 import { EmptyState } from "@/components/EmptyState";
 import { Badge } from "@/components/ui/badge";
-import { HoldingCard, type HoldingCardItem, type DailyBar } from "./HoldingCard";
+import { HoldingCard, type HoldingCardItem, type DailyBar, type StrategyAdvice } from "./HoldingCard";
 import type { SimulationPosition } from "@/api/quant";
 import type { RiskBadge } from "@/lib/portfolio-risk";
 import type { PortfolioStateMeta } from "@/lib/portfolio-states";
@@ -13,6 +13,7 @@ export interface LaneCardData {
   position?: SimulationPosition;
   bars?: DailyBar[];
   riskBadges?: RiskBadge[];
+  strategyAdvice?: StrategyAdvice | null;
 }
 
 interface WorkflowLaneProps {
@@ -79,6 +80,7 @@ export function WorkflowLane({
               position={card.position}
               dailyBars={card.bars}
               riskBadges={card.riskBadges}
+              strategyAdvice={card.strategyAdvice}
               onAddToGroup={onAddToGroup}
               onViewDetail={onViewDetail}
               onSell={card.position ? onSell : undefined}

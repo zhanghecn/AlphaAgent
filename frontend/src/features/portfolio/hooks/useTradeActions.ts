@@ -18,7 +18,7 @@ export function useTradeActions(accountId?: number) {
 
   const placeOrderMutation = useMutation({
     mutationFn: (payload: Parameters<typeof placeOrder>[1]) => {
-      if (!accountId) throw new Error("无可用模拟账户，请先创建模拟账户");
+      if (!accountId) throw new Error("暂无可用持仓账户，请先刷新持仓数据");
       return placeOrder(accountId, payload);
     },
     onSuccess: (data, variables) => {

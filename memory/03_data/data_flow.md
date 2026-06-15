@@ -112,6 +112,7 @@ vn.py 中数据需要分清四类：
 13. 理论信号与真实订单关联由 `alphaagent.server.services.backtest.signal_plan` 计算：按 `vt_symbol + execute_date/trade_date + side` 匹配，输出 `linked_order_id`、`linked_order_status`、`linked_order_reason`、`plan_status` 和 `plan_status_label`，供信号流水和候选追踪复用。
 14. 回测订单、信号和候选追踪 API 行会返回 `reason_label` / `linked_order_reason_label`，用于前端显示“尾盘入场未触发”“现金不足”等中文原因。
 15. 组合回测加载日线时会从用户开始日前额外加载预热历史 K 线，避免 MA60、60 日回撤等指标在回测初期因样本不足而缺失；但权益、持仓和交易记录仍只从用户选择的开始日期开始。
+16. 股票详情页单股复盘会在读取最新单股回测后再调用 `/api/backtests/{id}/audit?vt_symbol=`，用审计事件生成 K 线标记：T 日 BUY 信号、T+1 执行拒绝、实际买入成交和实际卖出成交。只有 `backtest_trades` 不足以解释“有信号但未买入”的情况。
 
 注意：`backtest_signal_events` 是理论信号计划，用于核查“历史上有没有买点/卖点”；真实组合资金曲线仍以 `backtest_trades`、`backtest_daily_equity` 和 `backtest_daily_positions` 为准。
 

@@ -1,0 +1,906 @@
+"""Unified strategy replay built from persisted quant signals."""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from datetime import date, timedelta
+from typing import Any
+
+from sqlalchemy import and_, desc, func, select
+
+from alphaagent.market.boards import DEFAULT_QUANT_INCLUDED_BOARDS, normalize_included_boards, stock_board_payload
+from alphaagent.server.db import schema
+from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
+from alphaagent.server.services.backtest import execution_models, simulation
+from alphaagent.server.services.backtest.schemas import BacktestParams, MinuteBar, Position
+from alphaagent.server.services.quant.factors import STRATEGY_ID, Bar
+from alphaagent.server.services.quant.strategy_registry import get_strategy
+
+
+DEFAULT_REPLAY_MIN_ENTRY_SCORE = 68.0
+
+
+def create_replay_run(
+    *,
+    start: date,
+    end: date,
+    strategy_id: str = STRATEGY_ID,
+    max_symbols: int = 500,
+    min_entry_score: float = DEFAULT_REPLAY_MIN_ENTRY_SCORE,
+    strict_entry: bool = True,
+    execution_model: str = "strict_1430",
+    minute_interval: str = "1m",
+    tail_entry_start: str = "14:30",
+    tail_entry_end: str = "14:30",
+    tail_entry_ma5_tolerance_pct: float = 1.5,
+    stop_loss_pct: float = 0.07,
+    take_profit_pct: float = 0.18,
+    trailing_stop_pct: float = 0.08,
+    time_stop_days: int = 15,
+    included_boards: list[str] | tuple[str, ...] | str | None = None,
+) -> dict[str, Any]:
+    """Create an auditable replay from already persisted quant signals."""
+
+    strategy = get_strategy(strategy_id)
+    if strategy is None:
+        return {"status": "unsupported_strategy", "strategy_id": strategy_id}
+    if not is_database_configured():
+        return {"status": "unavailable", "message": "DATABASE_URL not configured"}
+    if start > end:
+        return {"status": "invalid_range", "message": "start must be earlier than or equal to end"}
+    _ensure_schema()
+
+    params = _params(
+        strategy_id=strategy.id,
+        start=start,
+        end=end,
+        max_symbols=max_symbols,
+        min_entry_score=min_entry_score,
+        strict_entry=strict_entry,
+        execution_model=execution_model,
+        minute_interval=minute_interval,
+        tail_entry_start=tail_entry_start,
+        tail_entry_end=tail_entry_end,
+        tail_entry_ma5_tolerance_pct=tail_entry_ma5_tolerance_pct,
+        stop_loss_pct=stop_loss_pct,
+        take_profit_pct=take_profit_pct,
+        trailing_stop_pct=trailing_stop_pct,
+        time_stop_days=time_stop_days,
+        included_boards=included_boards,
+    )
+
+    with session_scope() as session:
+        signal_rows = _load_signal_rows(session, strategy.id, strategy.version, start, end)
+        if not signal_rows:
+            replay_id = _insert_run(
+                session,
+                strategy.id,
+                strategy.version,
+                start,
+                end,
+                "empty",
+                _params_to_json(params),
+                {"signal_count": 0, "attempt_count": 0},
+                "No persisted quant signals in range.",
+            )
+            return {
+                "status": "empty",
+                "replay_run_id": replay_id,
+                "strategy_id": strategy.id,
+                "strategy_version": strategy.version,
+                "start_date": start.isoformat(),
+                "end_date": end.isoformat(),
+                "message": "No persisted quant signals in range.",
+            }
+
+        vt_symbols = _limited_symbols(signal_rows, params.max_symbols)
+        bars_by_symbol = _load_all_bars(session, vt_symbols, _lookback_start(start), end)
+        trading_days = _trading_days(bars_by_symbol, start, end)
+        if len(trading_days) < 2:
+            replay_id = _insert_run(
+                session,
+                strategy.id,
+                strategy.version,
+                start,
+                end,
+                "insufficient_data",
+                _params_to_json(params),
+                {"signal_count": len(signal_rows), "attempt_count": 0},
+                "Not enough daily bars to execute replay.",
+            )
+            return {
+                "status": "insufficient_data",
+                "replay_run_id": replay_id,
+                "strategy_id": strategy.id,
+                "strategy_version": strategy.version,
+                "start_date": start.isoformat(),
+                "end_date": end.isoformat(),
+                "message": "Not enough daily bars to execute replay.",
+            }
+
+        minute_index = _load_minute_bar_index(session, vt_symbols, start, end, params.minute_interval)
+        stock_meta = _load_stock_meta(session, vt_symbols)
+        attempts = _replay_attempts(
+            signal_rows,
+            bars_by_symbol,
+            trading_days,
+            stock_meta,
+            minute_index,
+            params,
+        )
+        metrics = _summary_metrics(attempts)
+        replay_id = _insert_run(
+            session,
+            strategy.id,
+            strategy.version,
+            start,
+            end,
+            "ready",
+            _params_to_json(params),
+            metrics,
+            None,
+        )
+        _insert_attempts(session, replay_id, attempts)
+
+    return {
+        "status": "ready",
+        "replay_run_id": replay_id,
+        "strategy_id": strategy.id,
+        "strategy_version": strategy.version,
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "metrics": metrics,
+    }
+
+
+def latest_symbol_replay(vt_symbol: str, strategy_id: str = STRATEGY_ID) -> dict[str, Any]:
+    symbol = _normalize_symbol(vt_symbol)
+    if not symbol:
+        return {"status": "invalid_symbol", "message": "vt_symbol is required"}
+    if not is_database_configured():
+        return {"status": "unavailable", "message": "DATABASE_URL not configured"}
+    strategy = get_strategy(strategy_id)
+    if strategy is None:
+        return {"status": "unsupported_strategy", "strategy_id": strategy_id}
+    _ensure_schema()
+    with session_scope() as session:
+        symbol_run = session.execute(
+            select(schema.strategy_replay_runs.c.id)
+            .select_from(
+                schema.strategy_replay_runs.join(
+                    schema.strategy_replay_attempts,
+                    schema.strategy_replay_runs.c.id == schema.strategy_replay_attempts.c.replay_run_id,
+                )
+            )
+            .where(
+                and_(
+                    schema.strategy_replay_runs.c.strategy_id == strategy.id,
+                    schema.strategy_replay_attempts.c.vt_symbol == symbol,
+                )
+            )
+            .order_by(desc(schema.strategy_replay_runs.c.id))
+            .limit(1)
+        ).scalar_one_or_none()
+        if symbol_run:
+            return symbol_replay(int(symbol_run), symbol)
+        run = session.execute(
+            select(schema.strategy_replay_runs)
+            .where(schema.strategy_replay_runs.c.strategy_id == strategy.id)
+            .order_by(desc(schema.strategy_replay_runs.c.id))
+            .limit(1)
+        ).mappings().first()
+        if not run:
+            return {
+                "status": "empty",
+                "vt_symbol": symbol,
+                "strategy_id": strategy.id,
+                "message": "该股暂无全局策略复盘结果，请先生成区间候选或补齐 replay。",
+            }
+    return symbol_replay(int(run["id"]), symbol)
+
+
+def symbol_replay(replay_run_id: int, vt_symbol: str) -> dict[str, Any]:
+    symbol = _normalize_symbol(vt_symbol)
+    if not symbol:
+        return {"status": "invalid_symbol", "message": "vt_symbol is required"}
+    if not is_database_configured():
+        return {"status": "unavailable", "message": "DATABASE_URL not configured"}
+    _ensure_schema()
+    with session_scope() as session:
+        run = session.execute(
+            select(schema.strategy_replay_runs).where(schema.strategy_replay_runs.c.id == replay_run_id)
+        ).mappings().first()
+        if not run:
+            return {"status": "not_found", "replay_run_id": replay_run_id}
+        rows = session.execute(
+            select(schema.strategy_replay_attempts)
+            .where(
+                and_(
+                    schema.strategy_replay_attempts.c.replay_run_id == replay_run_id,
+                    schema.strategy_replay_attempts.c.vt_symbol == symbol,
+                )
+            )
+            .order_by(schema.strategy_replay_attempts.c.signal_date, schema.strategy_replay_attempts.c.side, schema.strategy_replay_attempts.c.id)
+        ).mappings().all()
+        stock = session.execute(select(schema.stocks).where(schema.stocks.c.vt_symbol == symbol)).mappings().first()
+    attempts = [_mapping_to_api(dict(row)) for row in rows]
+    trades = _closed_trades(attempts)
+    events = _events_from_attempts(attempts)
+    summary = _symbol_summary(attempts, trades)
+    return {
+        "status": "ready" if attempts else "empty",
+        "replay_run_id": replay_run_id,
+        "vt_symbol": symbol,
+        "name": stock.get("name") if stock else None,
+        **stock_board_payload(symbol, stock.get("exchange") if stock else None),
+        "strategy_id": run["strategy_id"],
+        "strategy_version": run["strategy_version"],
+        "start_date": run["start_date"].isoformat() if run.get("start_date") else None,
+        "end_date": run["end_date"].isoformat() if run.get("end_date") else None,
+        "params": run.get("params") or {},
+        "summary": summary,
+        "attempts": attempts,
+        "events": events,
+        "closed_trades": trades,
+        "message": None if attempts else "该股在最新全局策略复盘中没有信号或执行记录。",
+    }
+
+
+def list_replay_runs(strategy_id: str = STRATEGY_ID, limit: int = 80) -> dict[str, Any]:
+    if not is_database_configured():
+        return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
+    _ensure_schema()
+    with session_scope() as session:
+        rows = session.execute(
+            select(schema.strategy_replay_runs)
+            .where(schema.strategy_replay_runs.c.strategy_id == strategy_id)
+            .order_by(desc(schema.strategy_replay_runs.c.id))
+            .limit(min(max(limit, 1), 300))
+        ).mappings().all()
+    return {"status": "ready" if rows else "empty", "items": [_mapping_to_api(dict(row)) for row in rows]}
+
+
+def get_replay_run(replay_run_id: int) -> dict[str, Any]:
+    if not is_database_configured():
+        return {"status": "unavailable", "message": "DATABASE_URL not configured"}
+    _ensure_schema()
+    with session_scope() as session:
+        row = session.execute(
+            select(schema.strategy_replay_runs).where(schema.strategy_replay_runs.c.id == replay_run_id)
+        ).mappings().first()
+    if not row:
+        return {"status": "not_found", "replay_run_id": replay_run_id}
+    return {"status": "ready", "item": _mapping_to_api(dict(row))}
+
+
+def _replay_attempts(
+    signal_rows: list[dict[str, Any]],
+    bars_by_symbol: dict[str, list[Bar]],
+    trading_days: list[date],
+    stock_meta: dict[str, dict[str, Any]],
+    minute_index: dict[str, dict[date, list[MinuteBar]]],
+    params: BacktestParams,
+) -> list[dict[str, Any]]:
+    signals_by_date = _signals_by_date(signal_rows, params)
+    bar_index = simulation.bar_index_by_symbol(bars_by_symbol)
+    positions: dict[str, Position] = {}
+    pending_buys: list[dict[str, Any]] = []
+    pending_sells: list[dict[str, Any]] = []
+    attempts: list[dict[str, Any]] = []
+
+    for index, current_day in enumerate(trading_days):
+        today_bars = {symbol: by_date[current_day] for symbol, by_date in bar_index.items() if current_day in by_date}
+
+        for order in list(pending_sells):
+            if order["execute_date"] != current_day:
+                continue
+            pending_sells.remove(order)
+            position = positions.get(order["vt_symbol"])
+            if not position:
+                continue
+            bar = today_bars.get(order["vt_symbol"])
+            attempt = _sell_attempt(order, position, current_day, bar, minute_index, params)
+            attempts.append(attempt)
+            if attempt["execution_status"] == "filled":
+                del positions[order["vt_symbol"]]
+
+        for order in list(pending_buys):
+            if order["execute_date"] != current_day:
+                continue
+            pending_buys.remove(order)
+            if order["vt_symbol"] in positions:
+                continue
+            bar = today_bars.get(order["vt_symbol"])
+            attempt = _buy_attempt(order, current_day, bar, bar_index, minute_index, params)
+            attempts.append(attempt)
+            if attempt["execution_status"] != "filled":
+                continue
+            positions[order["vt_symbol"]] = Position(
+                vt_symbol=order["vt_symbol"],
+                name=stock_meta.get(order["vt_symbol"], {}).get("name"),
+                volume=100,
+                cost_price=float(attempt["price"]),
+                entry_date=current_day,
+                highest_price=bar.high_price if bar else float(attempt["price"]),
+                reason=attempt["raw"],
+            )
+
+        for vt_symbol, position in list(positions.items()):
+            bar = today_bars.get(vt_symbol)
+            if not bar:
+                continue
+            position.highest_price = max(position.highest_price, bar.high_price)
+            sell_reason = simulation.sell_reason_for_position(position, bar, current_day, params)
+            if not sell_reason or current_day <= position.entry_date or index >= len(trading_days) - 1:
+                continue
+            if any(order["vt_symbol"] == vt_symbol for order in pending_sells):
+                continue
+            pending_sells.append(
+                {
+                    "signal_run_id": None,
+                    "signal_date": current_day,
+                    "execute_date": trading_days[index + 1],
+                    "vt_symbol": vt_symbol,
+                    "side": "SELL",
+                    "signal_type": "exit_signal",
+                    "score": None,
+                    "reason": sell_reason,
+                    "evidence": {"reason": sell_reason, "entry_date": position.entry_date.isoformat()},
+                }
+            )
+
+        next_day = trading_days[index + 1] if index < len(trading_days) - 1 else None
+        for signal in signals_by_date.get(current_day, []):
+            if signal["vt_symbol"] in positions:
+                attempts.append(_signal_only_attempt(signal, current_day, current_day, "already_holding"))
+                continue
+            if next_day is None:
+                attempts.append(_signal_only_attempt(signal, current_day, current_day, "no_next_trade_date"))
+                continue
+            pending_buys.append(
+                {
+                    "signal_run_id": signal.get("run_id"),
+                    "signal_date": current_day,
+                    "execute_date": next_day,
+                    "vt_symbol": signal["vt_symbol"],
+                    "side": "BUY",
+                    "signal_type": signal.get("signal_type"),
+                    "score": signal.get("total_score"),
+                    "reason": signal.get("evidence") or {},
+                    "evidence": signal.get("evidence") or {},
+                }
+            )
+    return attempts
+
+
+def _signal_only_attempt(signal: dict[str, Any], signal_date: date, execute_date: date, reason: str) -> dict[str, Any]:
+    evidence = signal.get("evidence") or {}
+    return {
+        "signal_run_id": signal.get("run_id"),
+        "signal_date": signal_date,
+        "execute_date": execute_date,
+        "vt_symbol": signal["vt_symbol"],
+        "side": "BUY",
+        "signal_type": signal.get("signal_type"),
+        "plan_status": "signal_only",
+        "execution_status": "signal_only",
+        "price": None,
+        "price_source": None,
+        "proxy_used": False,
+        "reject_reason": reason,
+        "score": _float_or_none(signal.get("total_score")),
+        "raw": {
+            "status": "signal_only",
+            "reason": reason,
+            "signal_date": signal_date.isoformat(),
+            "execute_date": execute_date.isoformat(),
+            "evidence": evidence,
+        },
+    }
+
+
+def _buy_attempt(
+    order: dict[str, Any],
+    current_day: date,
+    bar: Bar | None,
+    bar_index: dict[str, dict[date, Bar]],
+    minute_index: dict[str, dict[date, list[MinuteBar]]],
+    params: BacktestParams,
+) -> dict[str, Any]:
+    if not bar:
+        fill = {
+            "status": "rejected",
+            "mode": "no_execute_bar",
+            "reason": "no_execute_bar",
+            "signal_date": order["signal_date"].isoformat(),
+            "execute_date": current_day.isoformat(),
+            "price_source": None,
+            "proxy_used": False,
+        }
+        return _attempt_row(order, current_day, "rejected", None, fill)
+    if _is_limit_up_open(bar):
+        fill = {
+            "status": "rejected",
+            "mode": "limit_up_open_blocked",
+            "reason": "limit_up_open_blocked",
+            "signal_date": order["signal_date"].isoformat(),
+            "execute_date": current_day.isoformat(),
+            "price_source": "stock_daily_bars.open_price",
+            "proxy_used": False,
+            "open_price": bar.open_price,
+            "high_price": bar.high_price,
+            "low_price": bar.low_price,
+            "close_price": bar.close_price,
+            "change_pct": bar.change_pct,
+        }
+        return _attempt_row(order, current_day, "rejected", None, fill)
+    fill = execution_models.resolve_buy_fill(order, current_day, bar, bar_index, minute_index, params)
+    status = "filled" if fill.get("status") == "filled" else "rejected"
+    price = fill.get("price") if status == "filled" else fill.get("price")
+    return _attempt_row(order, current_day, status, price, fill)
+
+
+def _sell_attempt(
+    order: dict[str, Any],
+    position: Position,
+    current_day: date,
+    bar: Bar | None,
+    minute_index: dict[str, dict[date, list[MinuteBar]]],
+    params: BacktestParams,
+) -> dict[str, Any]:
+    if not bar:
+        fill = {
+            "status": "rejected",
+            "mode": "no_execute_bar",
+            "reason": "no_execute_bar",
+            "signal_date": order["signal_date"].isoformat(),
+            "execute_date": current_day.isoformat(),
+            "price_source": None,
+            "proxy_used": False,
+        }
+        return _attempt_row(order, current_day, "rejected", None, fill)
+    fill = execution_models.resolve_tail_sell_fill(
+        order["vt_symbol"],
+        position,
+        current_day,
+        bar,
+        minute_index,
+        params,
+        str(order["reason"]),
+        order["signal_date"],
+    )
+    status = "filled" if fill.get("status") == "filled" else "rejected"
+    price = fill.get("price") if status == "filled" else fill.get("price")
+    return _attempt_row(order, current_day, status, price, fill)
+
+
+def _attempt_row(
+    order: dict[str, Any],
+    execute_date: date,
+    status: str,
+    price: Any,
+    fill: dict[str, Any],
+) -> dict[str, Any]:
+    reason = str(fill.get("reason") or order.get("reason") or "")
+    plan_status = "filled" if status == "filled" else "not_triggered"
+    raw = {
+        **fill,
+        "evidence": order.get("evidence") or order.get("reason") or {},
+    }
+    return {
+        "signal_run_id": order.get("signal_run_id"),
+        "signal_date": order["signal_date"],
+        "execute_date": execute_date,
+        "vt_symbol": order["vt_symbol"],
+        "side": order["side"],
+        "signal_type": order.get("signal_type"),
+        "plan_status": plan_status,
+        "execution_status": status,
+        "price": _float_or_none(price),
+        "price_source": fill.get("price_source"),
+        "proxy_used": bool(fill.get("proxy_used") or False),
+        "reject_reason": None if status == "filled" else reason,
+        "score": _float_or_none(order.get("score")),
+        "raw": raw,
+    }
+
+
+def _signals_by_date(signal_rows: list[dict[str, Any]], params: BacktestParams) -> dict[date, list[dict[str, Any]]]:
+    result: dict[date, list[dict[str, Any]]] = defaultdict(list)
+    for row in signal_rows:
+        if not _is_buy_signal(row, params):
+            continue
+        result[row["trade_date"]].append(row)
+    for rows in result.values():
+        rows.sort(key=lambda item: (-(float(item.get("total_score") or 0)), str(item.get("vt_symbol") or "")))
+    return dict(result)
+
+
+def _is_buy_signal(row: dict[str, Any], params: BacktestParams) -> bool:
+    if float(row.get("total_score") or 0) < params.min_entry_score:
+        return False
+    if float(row.get("risk_score") or 0) < 35 or float(row.get("liquidity_score") or 0) < 25:
+        return False
+    if params.strict_entry and not bool(row.get("entry_signal")):
+        return False
+    return True
+
+
+def _closed_trades(attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    open_lots: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    trades: list[dict[str, Any]] = []
+    for row in sorted(attempts, key=lambda item: (str(item.get("execute_date") or ""), str(item.get("side") or ""))):
+        if row.get("execution_status") != "filled" or row.get("price") is None:
+            continue
+        side = str(row.get("side") or "").upper()
+        symbol = str(row.get("vt_symbol") or "")
+        if side == "BUY":
+            open_lots[symbol].append(row)
+            continue
+        if side != "SELL" or not open_lots[symbol]:
+            continue
+        entry = open_lots[symbol].pop(0)
+        entry_price = float(entry["price"])
+        exit_price = float(row["price"])
+        return_pct = (exit_price / entry_price - 1) * 100 if entry_price else None
+        entry_date = _as_date(entry.get("execute_date"))
+        exit_date = _as_date(row.get("execute_date"))
+        trades.append(
+            {
+                "vt_symbol": symbol,
+                "entry_date": entry.get("execute_date"),
+                "exit_date": row.get("execute_date"),
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "return_pct": return_pct,
+                "holding_days": (exit_date - entry_date).days if entry_date and exit_date else None,
+                "exit_reason": row.get("raw", {}).get("reason") or row.get("reject_reason"),
+            }
+        )
+    return trades
+
+
+def _events_from_attempts(attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for row in attempts:
+        if row.get("side") == "BUY":
+            events.append(
+                {
+                    "event_type": "signal",
+                    "trade_date": row.get("signal_date"),
+                    "signal_date": row.get("signal_date"),
+                    "execute_date": row.get("execute_date"),
+                    "vt_symbol": row.get("vt_symbol"),
+                    "side": "BUY",
+                    "status": "signal",
+                    "price": None,
+                    "score": row.get("score"),
+                    "reason": "entry_signal",
+                    "raw": row.get("raw") or {},
+                }
+            )
+        events.append(
+            {
+                "event_type": "execution",
+                "trade_date": row.get("execute_date"),
+                "signal_date": row.get("signal_date"),
+                "execute_date": row.get("execute_date"),
+                "vt_symbol": row.get("vt_symbol"),
+                "side": row.get("side"),
+                "status": row.get("execution_status"),
+                "price": row.get("price"),
+                "score": row.get("score"),
+                "reason": row.get("reject_reason") or (row.get("raw") or {}).get("reason"),
+                "price_source": row.get("price_source"),
+                "proxy_used": row.get("proxy_used"),
+                "raw": row.get("raw") or {},
+            }
+        )
+    return events
+
+
+def _symbol_summary(attempts: list[dict[str, Any]], trades: list[dict[str, Any]]) -> dict[str, Any]:
+    buy_attempts = [row for row in attempts if row.get("side") == "BUY"]
+    buy_filled = [row for row in buy_attempts if row.get("execution_status") == "filled"]
+    rejected = [row for row in attempts if row.get("execution_status") == "rejected"]
+    returns = [float(row["return_pct"]) for row in trades if row.get("return_pct") is not None]
+    compound = None
+    if returns:
+        value = 1.0
+        for item in returns:
+            value *= 1 + item / 100
+        compound = (value - 1) * 100
+    return {
+        "signal_count": len(buy_attempts),
+        "buy_filled_count": len(buy_filled),
+        "rejected_count": len(rejected),
+        "closed_trade_count": len(trades),
+        "compound_return_pct": compound,
+        "average_return_pct": sum(returns) / len(returns) if returns else None,
+        "win_rate_pct": len([item for item in returns if item > 0]) / len(returns) * 100 if returns else None,
+        "reject_reasons": _reject_reason_counts(rejected),
+        "current_status": _current_status(attempts),
+    }
+
+
+def _summary_metrics(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    rejected = [row for row in attempts if row.get("execution_status") == "rejected"]
+    return {
+        "attempt_count": len(attempts),
+        "buy_attempt_count": len([row for row in attempts if row.get("side") == "BUY"]),
+        "sell_attempt_count": len([row for row in attempts if row.get("side") == "SELL"]),
+        "filled_count": len([row for row in attempts if row.get("execution_status") == "filled"]),
+        "rejected_count": len(rejected),
+        "reject_reasons": _reject_reason_counts(rejected),
+    }
+
+
+def _current_status(attempts: list[dict[str, Any]]) -> str:
+    filled = [row for row in attempts if row.get("execution_status") == "filled"]
+    if not filled:
+        return "no_position"
+    last = sorted(filled, key=lambda item: str(item.get("execute_date") or ""))[-1]
+    return "holding" if last.get("side") == "BUY" else "closed"
+
+
+def _reject_reason_counts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    counts: dict[str, int] = defaultdict(int)
+    for row in rows:
+        reason = str(row.get("reject_reason") or "unknown")
+        counts[reason] += 1
+    return [{"reason": reason, "count": count} for reason, count in sorted(counts.items())]
+
+
+def _load_signal_rows(session, strategy_id: str, strategy_version: str, start: date, end: date) -> list[dict[str, Any]]:
+    rows = session.execute(
+        select(schema.quant_stock_signals)
+        .where(
+            and_(
+                schema.quant_stock_signals.c.strategy_id == strategy_id,
+                schema.quant_stock_signals.c.strategy_version == strategy_version,
+                schema.quant_stock_signals.c.trade_date >= start,
+                schema.quant_stock_signals.c.trade_date <= end,
+            )
+        )
+        .order_by(schema.quant_stock_signals.c.trade_date, desc(schema.quant_stock_signals.c.total_score), schema.quant_stock_signals.c.vt_symbol)
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _limited_symbols(signal_rows: list[dict[str, Any]], max_symbols: int) -> list[str]:
+    ranked = sorted(
+        {
+            str(row["vt_symbol"]): max(float(row.get("total_score") or 0), 0)
+            for row in signal_rows
+        }.items(),
+        key=lambda item: (-item[1], item[0]),
+    )
+    return [symbol for symbol, _score in ranked[: min(max(max_symbols, 1), 5000)]]
+
+
+def _load_all_bars(session, vt_symbols: list[str], start: date, end: date) -> dict[str, list[Bar]]:
+    rows = session.execute(
+        select(schema.stock_daily_bars)
+        .where(
+            and_(
+                schema.stock_daily_bars.c.vt_symbol.in_(vt_symbols),
+                schema.stock_daily_bars.c.trade_date >= start,
+                schema.stock_daily_bars.c.trade_date <= end,
+            )
+        )
+        .order_by(schema.stock_daily_bars.c.vt_symbol, schema.stock_daily_bars.c.trade_date)
+    ).mappings().all()
+    result: dict[str, list[Bar]] = defaultdict(list)
+    for row in rows:
+        result[str(row["vt_symbol"])].append(
+            Bar(
+                trade_date=row["trade_date"],
+                open_price=float(row["open_price"]),
+                high_price=float(row["high_price"]),
+                low_price=float(row["low_price"]),
+                close_price=float(row["close_price"]),
+                volume=row.get("volume"),
+                turnover=row.get("turnover"),
+                change_pct=row.get("change_pct"),
+            )
+        )
+    return dict(result)
+
+
+def _load_minute_bar_index(
+    session,
+    vt_symbols: list[str],
+    start: date,
+    end: date,
+    interval: str = "1m",
+) -> dict[str, dict[date, list[MinuteBar]]]:
+    if not vt_symbols or not hasattr(schema, "stock_minute_bars"):
+        return {}
+    rows = session.execute(
+        select(schema.stock_minute_bars)
+        .where(
+            and_(
+                schema.stock_minute_bars.c.vt_symbol.in_(vt_symbols),
+                schema.stock_minute_bars.c.trade_date >= start,
+                schema.stock_minute_bars.c.trade_date <= end,
+                schema.stock_minute_bars.c.interval == interval,
+            )
+        )
+        .order_by(schema.stock_minute_bars.c.vt_symbol, schema.stock_minute_bars.c.bar_time)
+    ).mappings().all()
+    result: dict[str, dict[date, list[MinuteBar]]] = defaultdict(lambda: defaultdict(list))
+    for row in rows:
+        bar = MinuteBar(
+            bar_time=row["bar_time"],
+            trade_date=row["trade_date"],
+            open_price=float(row["open_price"]),
+            high_price=float(row["high_price"]),
+            low_price=float(row["low_price"]),
+            close_price=float(row["close_price"]),
+            volume=row.get("volume"),
+            turnover=row.get("turnover"),
+        )
+        result[str(row["vt_symbol"])][bar.trade_date].append(bar)
+    return {symbol: dict(by_date) for symbol, by_date in result.items()}
+
+
+def _load_stock_meta(session, vt_symbols: list[str]) -> dict[str, dict[str, Any]]:
+    if not vt_symbols:
+        return {}
+    rows = session.execute(select(schema.stocks).where(schema.stocks.c.vt_symbol.in_(vt_symbols))).mappings().all()
+    return {str(row["vt_symbol"]): dict(row) for row in rows}
+
+
+def _trading_days(bars_by_symbol: dict[str, list[Bar]], start: date, end: date) -> list[date]:
+    days = {bar.trade_date for bars in bars_by_symbol.values() for bar in bars if start <= bar.trade_date <= end}
+    return sorted(days)
+
+
+def _insert_run(
+    session,
+    strategy_id: str,
+    strategy_version: str,
+    start: date,
+    end: date,
+    status: str,
+    params: dict[str, Any],
+    metrics: dict[str, Any],
+    message: str | None,
+) -> int:
+    return int(
+        session.execute(
+            schema.strategy_replay_runs.insert()
+            .values(
+                strategy_id=strategy_id,
+                strategy_version=strategy_version,
+                start_date=start,
+                end_date=end,
+                status=status,
+                params=params,
+                metrics=metrics,
+                message=message,
+                finished_at=func.now(),
+            )
+            .returning(schema.strategy_replay_runs.c.id)
+        ).scalar_one()
+    )
+
+
+def _insert_attempts(session, replay_id: int, attempts: list[dict[str, Any]]) -> None:
+    for attempt in attempts:
+        session.execute(
+            schema.strategy_replay_attempts.insert().values(
+                replay_run_id=replay_id,
+                **attempt,
+            )
+        )
+
+
+def _params(
+    *,
+    strategy_id: str,
+    start: date,
+    end: date,
+    max_symbols: int,
+    min_entry_score: float,
+    strict_entry: bool,
+    execution_model: str,
+    minute_interval: str,
+    tail_entry_start: str,
+    tail_entry_end: str,
+    tail_entry_ma5_tolerance_pct: float,
+    stop_loss_pct: float,
+    take_profit_pct: float,
+    trailing_stop_pct: float,
+    time_stop_days: int,
+    included_boards: list[str] | tuple[str, ...] | str | None,
+) -> BacktestParams:
+    return BacktestParams(
+        strategy=strategy_id,
+        start=start,
+        end=end,
+        initial_cash=1.0,
+        max_positions=5000,
+        max_position_pct=1.0,
+        stop_loss_pct=stop_loss_pct,
+        take_profit_pct=take_profit_pct,
+        trailing_stop_pct=trailing_stop_pct,
+        time_stop_days=time_stop_days,
+        candidate_limit=5000,
+        max_symbols=max_symbols,
+        min_entry_score=min_entry_score,
+        strict_entry=strict_entry,
+        execution_model=execution_model,
+        intraday_entry=True,
+        minute_entry_required=False,
+        minute_interval=minute_interval,
+        tail_entry_start=tail_entry_start,
+        tail_entry_end=tail_entry_end,
+        tail_entry_ma5_tolerance_pct=tail_entry_ma5_tolerance_pct,
+        persist=False,
+        included_boards=normalize_included_boards(included_boards or DEFAULT_QUANT_INCLUDED_BOARDS),
+    )
+
+
+def _params_to_json(params: BacktestParams) -> dict[str, Any]:
+    return {
+        "strategy": params.strategy,
+        "start": params.start.isoformat(),
+        "end": params.end.isoformat() if params.end else None,
+        "max_symbols": params.max_symbols,
+        "min_entry_score": params.min_entry_score,
+        "strict_entry": params.strict_entry,
+        "execution_model": params.execution_model,
+        "intraday_entry": params.intraday_entry,
+        "minute_entry_required": params.minute_entry_required,
+        "minute_interval": params.minute_interval,
+        "tail_entry_start": params.tail_entry_start,
+        "tail_entry_end": params.tail_entry_end,
+        "tail_entry_ma5_tolerance_pct": params.tail_entry_ma5_tolerance_pct,
+        "stop_loss_pct": params.stop_loss_pct,
+        "take_profit_pct": params.take_profit_pct,
+        "trailing_stop_pct": params.trailing_stop_pct,
+        "time_stop_days": params.time_stop_days,
+        "included_boards": list(params.included_boards),
+    }
+
+
+def _is_limit_up_open(bar: Bar) -> bool:
+    return bool(bar.change_pct is not None and bar.change_pct >= 9.8 and bar.open_price >= bar.close_price * 0.995)
+
+
+def _lookback_start(start: date) -> date:
+    return start - timedelta(days=320)
+
+
+def _ensure_schema() -> None:
+    schema.create_schema(get_engine())
+
+
+def _mapping_to_api(row: dict[str, Any]) -> dict[str, Any]:
+    result = dict(row)
+    for key, value in list(result.items()):
+        if hasattr(value, "isoformat"):
+            result[key] = value.isoformat()
+    return result
+
+
+def _as_date(value: Any) -> date | None:
+    if isinstance(value, date):
+        return value
+    if value:
+        return date.fromisoformat(str(value)[:10])
+    return None
+
+
+def _normalize_symbol(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value in (None, "", "-", "--"):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

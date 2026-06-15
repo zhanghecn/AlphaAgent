@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { ArrowDownToLine, ArrowUpFromLine, Pencil } from "lucide-react";
 import { EditCostDialog } from "./EditCostDialog";
-import { cn, formatAmount, formatPct, formatPrice, priceColorClass } from "@/lib/utils";
+import { cn, formatPct, formatPrice, priceColorClass } from "@/lib/utils";
 import { formatTime, sourceLabel } from "@/lib/backtest-utils";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { Card } from "@/components/ui/card";
@@ -39,6 +39,12 @@ export interface HoldingCardItem {
   created_at?: string | null;
 }
 
+export interface StrategyAdvice {
+  label: string;
+  detail?: string | null;
+  tone?: "neutral" | "hold" | "sell" | "warning";
+}
+
 export interface HoldingCardProps {
   /** Group item (always present) */
   item: HoldingCardItem;
@@ -48,6 +54,8 @@ export interface HoldingCardProps {
   dailyBars?: DailyBar[];
   /** Risk badges derived from the position (near stop-loss / deep loss / overdue) */
   riskBadges?: RiskBadge[];
+  /** Strategy replay advice derived from the unified quant replay. */
+  strategyAdvice?: StrategyAdvice | null;
   /** Callback to open the add-to-group dialog */
   onAddToGroup?: (vtSymbol: string) => void;
   /** Callback to navigate to stock detail page */
@@ -78,6 +86,7 @@ export function HoldingCard({
   position,
   dailyBars,
   riskBadges,
+  strategyAdvice,
   onAddToGroup,
   onViewDetail,
   onSell,
@@ -137,6 +146,21 @@ export function HoldingCard({
               {badge.label}
             </Badge>
           ))}
+        </div>
+      )}
+
+      {isHeld && strategyAdvice && (
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <Badge
+            variant={strategyAdvice.tone === "sell" || strategyAdvice.tone === "warning" ? "secondary" : "outline"}
+            className={cn("px-2 py-0.5", strategyAdviceClass(strategyAdvice.tone))}
+            title={strategyAdvice.detail ?? undefined}
+          >
+            {strategyAdvice.label}
+          </Badge>
+          {strategyAdvice.detail && (
+            <span className="text-xs text-muted-foreground">{strategyAdvice.detail}</span>
+          )}
         </div>
       )}
 
@@ -218,12 +242,11 @@ export function HoldingCard({
             </div>
           )}
           <MetricRow
-            label="盈亏"
-            value={formatAmount(position.floating_pnl)}
-            valueClass={priceColorClass(position.floating_pnl)}
+            label="收益率"
+            value={formatPct(position.floating_pnl_pct)}
+            valueClass={priceColorClass(position.floating_pnl_pct)}
           />
           <MetricRow label="持仓" value={`${position.volume.toLocaleString()} 股`} />
-          <MetricRow label="市值" value={formatAmount(position.market_value)} />
         </div>
       )}
 
@@ -245,10 +268,7 @@ export function HoldingCard({
           )}
           {position.last_sell_time && (
             <div>
-              最近卖出 {formatTime(position.last_sell_time)} · {formatPrice(position.last_sell_price)} · 盈亏{" "}
-              <span className={priceColorClass(position.last_sell_pnl)}>
-                {formatAmount(position.last_sell_pnl)}
-              </span>
+              最近卖出 {formatTime(position.last_sell_time)} · {formatPrice(position.last_sell_price)}
             </div>
           )}
           {(position.stop_loss_price || position.take_profit_price) && (
@@ -332,4 +352,11 @@ function dailyChangePct(bars: DailyBar[]): number | null {
   const curr = bars[bars.length - 1]?.close;
   if (!prev || !curr) return null;
   return ((curr - prev) / prev) * 100;
+}
+
+function strategyAdviceClass(tone?: StrategyAdvice["tone"]): string {
+  if (tone === "hold") return "border-green-200 bg-green-50 text-green-700 dark:border-green-500/30 dark:bg-green-500/10 dark:text-green-300";
+  if (tone === "sell") return "border-red-200 bg-red-50 text-fall dark:border-red-500/30 dark:bg-red-500/10";
+  if (tone === "warning") return "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300";
+  return "";
 }

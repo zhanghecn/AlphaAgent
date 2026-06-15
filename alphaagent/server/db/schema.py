@@ -807,6 +807,58 @@ backtest_metrics = Table(
     Column("raw", JSONB, nullable=True),
 )
 
+strategy_replay_runs = Table(
+    "strategy_replay_runs",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("strategy_id", String(80), nullable=False),
+    Column("strategy_version", String(40), nullable=False),
+    Column("start_date", Date, nullable=False),
+    Column("end_date", Date, nullable=False),
+    Column("status", String(40), nullable=False),
+    Column("params", JSONB, nullable=False, server_default="{}"),
+    Column("metrics", JSONB, nullable=True),
+    Column("message", Text, nullable=True),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+)
+Index("ix_strategy_replay_runs_strategy", strategy_replay_runs.c.strategy_id)
+Index("ix_strategy_replay_runs_date", strategy_replay_runs.c.start_date, strategy_replay_runs.c.end_date)
+
+strategy_replay_attempts = Table(
+    "strategy_replay_attempts",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("replay_run_id", BigInteger, ForeignKey("strategy_replay_runs.id", ondelete="CASCADE"), nullable=False),
+    Column("signal_run_id", BigInteger, ForeignKey("quant_signal_runs.id", ondelete="SET NULL"), nullable=True),
+    Column("signal_date", Date, nullable=False),
+    Column("execute_date", Date, nullable=False),
+    Column("vt_symbol", String(32), nullable=False),
+    Column("side", String(20), nullable=False),
+    Column("signal_type", String(80), nullable=True),
+    Column("plan_status", String(40), nullable=False),
+    Column("execution_status", String(40), nullable=False),
+    Column("price", Float, nullable=True),
+    Column("price_source", String(160), nullable=True),
+    Column("proxy_used", Boolean, nullable=False, server_default="false"),
+    Column("reject_reason", String(240), nullable=True),
+    Column("score", Float, nullable=True),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint(
+        "replay_run_id",
+        "signal_date",
+        "execute_date",
+        "vt_symbol",
+        "side",
+        "signal_type",
+        name="uq_strategy_replay_attempt",
+    ),
+)
+Index("ix_strategy_replay_attempts_run_symbol", strategy_replay_attempts.c.replay_run_id, strategy_replay_attempts.c.vt_symbol)
+Index("ix_strategy_replay_attempts_signal_date", strategy_replay_attempts.c.replay_run_id, strategy_replay_attempts.c.signal_date)
+Index("ix_strategy_replay_attempts_execute_date", strategy_replay_attempts.c.replay_run_id, strategy_replay_attempts.c.execute_date)
+
 portfolio_groups = Table(
     "portfolio_groups",
     metadata,

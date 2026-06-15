@@ -1765,6 +1765,8 @@ def test_quant_schema_tables_are_registered() -> None:
     assert "quant_stock_signals" in table_names
     assert "backtest_signal_events" in table_names
     assert "backtest_runs" in table_names
+    assert "strategy_replay_runs" in table_names
+    assert "strategy_replay_attempts" in table_names
     assert "stock_minute_bars" in table_names
     assert "portfolio_groups" in table_names
     assert "simulation_positions" in table_names
@@ -1782,11 +1784,15 @@ def test_new_api_returns_unavailable_when_database_off(monkeypatch) -> None:
     monkeypatch.setattr(engine, "is_database_configured", lambda: False)
     monkeypatch.setattr(groups, "is_database_configured", lambda: False)
     monkeypatch.setattr(account, "is_database_configured", lambda: False)
+    from alphaagent.server.services.quant import strategy_replay
+
+    monkeypatch.setattr(strategy_replay, "is_database_configured", lambda: False)
 
     client = TestClient(create_app())
 
     assert client.get("/api/quant/trading-dates").json()["data"]["status"] == "unavailable"
     assert client.get("/api/quant/recommendations").json()["data"]["status"] == "unavailable"
+    assert client.get("/api/quant/symbols/600000.SSE/replay/latest").json()["data"]["status"] == "unavailable"
     assert client.get("/api/backtests").json()["data"]["status"] == "unavailable"
     assert client.get("/api/portfolio/groups").json()["data"]["status"] == "unavailable"
     assert client.get("/api/simulation/accounts").json()["data"]["status"] == "unavailable"
@@ -2395,6 +2401,110 @@ def test_list_trading_dates_returns_local_daily_bar_dates(monkeypatch) -> None:
     ]
 
 
+def test_screen_stocks_range_creates_replay_from_persisted_signals(monkeypatch) -> None:
+    from alphaagent.server.services.quant import screening
+    from alphaagent.server.services.quant import strategy_replay
+
+    calls: list[dict[str, object]] = []
+
+    class FakeSession:
+        pass
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(screening, "is_database_configured", lambda: True)
+    monkeypatch.setattr(screening, "_ensure_quant_schema", lambda: None)
+    monkeypatch.setattr(screening, "session_scope", fake_session_scope)
+    monkeypatch.setattr(screening, "_latest_trade_date", lambda session: date(2026, 1, 3))
+    monkeypatch.setattr(screening, "_earliest_trade_date", lambda session: date(2026, 1, 2))
+    monkeypatch.setattr(screening, "_trading_dates_between", lambda session, start, end: [date(2026, 1, 2), date(2026, 1, 3)])
+    monkeypatch.setattr(
+        screening,
+        "screen_stocks",
+        lambda trade_date, **kwargs: {
+            "status": "ready",
+            "strategy_id": "mainline_leader_pullback",
+            "strategy_version": "0.1.1",
+            "trade_date": trade_date.isoformat(),
+            "run_id": 100 if trade_date == date(2026, 1, 2) else 101,
+            "total": 1,
+            "recommendation_count": 1,
+            "included_boards": ["main"],
+            "items": [],
+            "recommendations": [],
+        },
+    )
+
+    def fake_create_replay_run(**kwargs):
+        calls.append(kwargs)
+        return {"status": "ready", "replay_run_id": 77}
+
+    monkeypatch.setattr(strategy_replay, "create_replay_run", fake_create_replay_run)
+
+    result = screening.screen_stocks_range(
+        date(2026, 1, 2),
+        date(2026, 1, 3),
+        persist=True,
+        included_boards=["main"],
+    )
+
+    assert result["replay_run_id"] == 77
+    assert result["replay_run"]["status"] == "ready"
+    assert calls[0]["start"] == date(2026, 1, 2)
+    assert calls[0]["end"] == date(2026, 1, 3)
+    assert calls[0]["strategy_id"] == "mainline_leader_pullback"
+
+
+def test_screen_stocks_range_keeps_candidates_when_replay_fails(monkeypatch) -> None:
+    from alphaagent.server.services.quant import screening
+    from alphaagent.server.services.quant import strategy_replay
+
+    class FakeSession:
+        pass
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(screening, "is_database_configured", lambda: True)
+    monkeypatch.setattr(screening, "_ensure_quant_schema", lambda: None)
+    monkeypatch.setattr(screening, "session_scope", fake_session_scope)
+    monkeypatch.setattr(screening, "_latest_trade_date", lambda session: date(2026, 1, 3))
+    monkeypatch.setattr(screening, "_earliest_trade_date", lambda session: date(2026, 1, 2))
+    monkeypatch.setattr(screening, "_trading_dates_between", lambda session, start, end: [date(2026, 1, 2)])
+    monkeypatch.setattr(
+        screening,
+        "screen_stocks",
+        lambda trade_date, **kwargs: {
+            "status": "ready",
+            "strategy_id": "mainline_leader_pullback",
+            "strategy_version": "0.1.1",
+            "trade_date": trade_date.isoformat(),
+            "run_id": 100,
+            "total": 1,
+            "recommendation_count": 1,
+            "included_boards": ["main"],
+            "items": [],
+            "recommendations": [],
+        },
+    )
+    monkeypatch.setattr(strategy_replay, "create_replay_run", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    result = screening.screen_stocks_range(
+        date(2026, 1, 2),
+        date(2026, 1, 3),
+        persist=True,
+        included_boards=["main"],
+    )
+
+    assert result["status"] == "ready"
+    assert result["succeeded_count"] == 1
+    assert result["replay_run_id"] is None
+    assert result["replay_run"] == {"status": "failed", "message": "boom"}
+
+
 def test_screen_stocks_range_uses_local_trading_dates_and_syncs_latest_only(monkeypatch) -> None:
     from alphaagent.server.services.quant import screening
 
@@ -2716,6 +2826,14 @@ def test_backtest_strict_1430_rejects_tail_condition_when_snapshot_present() -> 
     assert round(fill["ma5_distance_pct"], 6) == 20.0
 
 
+def test_backtest_reason_label_keeps_new_and_legacy_execution_rejections() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    assert engine.backtest_reason_label("limit_up_open_blocked") == "开盘涨停买不到"
+    assert engine.backtest_reason_label("no_execute_bar") == "缺少执行日K线"
+    assert engine.backtest_reason_label("limit_up_or_no_bar") == "涨停或缺少执行日K线"
+
+
 def test_backtest_tail_hybrid_uses_daily_close_proxy_when_minute_missing() -> None:
     from alphaagent.server.services.backtest import engine
 
@@ -2749,6 +2867,107 @@ def test_backtest_tail_hybrid_uses_daily_close_proxy_when_minute_missing() -> No
     assert fill["mode"] == "daily_close_proxy"
     assert fill["price"] == 10.05
     assert fill["proxy_used"] is True
+
+
+def test_strategy_replay_uses_persisted_signals_and_records_buy_signal_rejection() -> None:
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+    from alphaagent.server.services.quant import strategy_replay
+
+    signal_date = date(2025, 12, 30)
+    execute_date = date(2025, 12, 31)
+    symbol = "002536.SZSE"
+    signals = [
+        {
+            "id": 1,
+            "run_id": 11,
+            "trade_date": signal_date,
+            "vt_symbol": symbol,
+            "strategy_id": "mainline_leader_pullback",
+            "strategy_version": "0.1.1",
+            "signal_type": "mainline_leader_pullback",
+            "total_score": 80.0,
+            "risk_score": 60.0,
+            "liquidity_score": 70.0,
+            "entry_signal": True,
+            "evidence": {"status": "ready", "ma5": 10.0},
+        }
+    ]
+    bars_by_symbol = {
+        symbol: [
+            Bar(signal_date, 10.0, 10.2, 9.9, 10.0, change_pct=0.2),
+            Bar(execute_date, 11.0, 11.0, 11.0, 11.0, change_pct=10.0),
+        ]
+    }
+    params = BacktestParams(
+        strategy="mainline_leader_pullback",
+        start=signal_date,
+        end=execute_date,
+        min_entry_score=68,
+        strict_entry=True,
+        execution_model="strict_1430",
+        minute_entry_required=False,
+    )
+
+    attempts = strategy_replay._replay_attempts(
+        signals,
+        bars_by_symbol,
+        [signal_date, execute_date],
+        {symbol: {"name": "飞龙股份"}},
+        {},
+        params,
+    )
+    api_attempts = [strategy_replay._mapping_to_api(dict(item)) for item in attempts]
+    events = strategy_replay._events_from_attempts(api_attempts)
+
+    assert len(attempts) == 1
+    assert attempts[0]["signal_run_id"] == 11
+    assert attempts[0]["execution_status"] == "rejected"
+    assert attempts[0]["reject_reason"] == "limit_up_open_blocked"
+    assert attempts[0]["raw"]["mode"] == "limit_up_open_blocked"
+    assert [event["status"] for event in events] == ["signal", "rejected"]
+
+
+def test_latest_symbol_replay_prefers_recent_run_containing_symbol(monkeypatch) -> None:
+    from alphaagent.server.services.quant import strategy_replay
+
+    calls: list[tuple[int, str]] = []
+
+    class FakeScalar:
+        def scalar_one_or_none(self):
+            return 88
+
+    class FakeRows:
+        def mappings(self):
+            return self
+
+        def first(self):
+            raise AssertionError("latest run fallback should not be queried when symbol run exists")
+
+    class FakeSession:
+        def execute(self, statement):
+            text = str(statement)
+            if "JOIN strategy_replay_attempts" in text:
+                return FakeScalar()
+            return FakeRows()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(strategy_replay, "is_database_configured", lambda: True)
+    monkeypatch.setattr(strategy_replay, "_ensure_schema", lambda: None)
+    monkeypatch.setattr(strategy_replay, "session_scope", fake_session_scope)
+
+    def fake_symbol_replay(run_id: int, vt_symbol: str):
+        calls.append((run_id, vt_symbol))
+        return {"status": "ready", "replay_run_id": run_id, "vt_symbol": vt_symbol}
+
+    monkeypatch.setattr(strategy_replay, "symbol_replay", fake_symbol_replay)
+
+    result = strategy_replay.latest_symbol_replay("002536.SZSE")
+
+    assert result["replay_run_id"] == 88
+    assert calls == [(88, "002536.SZSE")]
 
 
 def test_default_backtest_does_not_buy_watch_candidate() -> None:
@@ -3061,7 +3280,8 @@ def test_backtest_simulation_records_deterministic_cash_position_and_slot_reject
     assert positions[-1]["market_value"] == 51_000.0
     rejected = [order for order in orders if order["status"] == "rejected"]
     assert rejected[0]["vt_symbol"] == symbol_b
-    assert rejected[0]["reason"] == "limit_up_or_no_bar"
+    assert rejected[0]["reason"] == "limit_up_open_blocked"
+    assert rejected[0]["raw"]["mode"] == "limit_up_open_blocked"
 
 
 def test_candidate_trace_summary_explains_filled_candidate() -> None:
@@ -3746,7 +3966,7 @@ def test_backtest_report_tables_pair_closed_trades_and_symbol_performance() -> N
         trades,
         [
             {"status": "filled"},
-            {"status": "rejected", "reason": "limit_up_or_no_bar"},
+            {"status": "rejected", "reason": "limit_up_open_blocked"},
             {"status": "rejected", "reason": "missing_1430_snapshot", "raw": {"execution_model": "strict_1430", "reason": "missing_1430_snapshot"}},
             {"status": "rejected", "reason": "tail_entry_not_triggered", "raw": {"execution_model": "strict_1430", "price_source": "stock_minute_bars.close_price"}},
         ],
@@ -3873,6 +4093,40 @@ def test_backtest_audit_events_keep_stock_names() -> None:
 
     assert events[0]["name"] == "浦发银行"
     assert events[1]["name"] == "浦发银行"
+    assert events[0]["reason_label"] == "买入信号"
+    assert events[1]["reason_label"] == "买入信号"
+
+
+def test_backtest_audit_events_include_precise_rejection_label_and_message() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    events = engine._audit_events(
+        [
+            {
+                "trade_date": "2025-12-31",
+                "vt_symbol": "002536.SZSE",
+                "side": "BUY",
+                "price": 29.7,
+                "volume": 0,
+                "status": "rejected",
+                "reason": "tail_entry_not_triggered",
+                "raw": {
+                    "mode": "strict_1430_required",
+                    "price": 29.7,
+                    "ma5": 31.744,
+                    "ma5_distance_pct": -6.439012096774199,
+                    "signal_date": "2025-12-30",
+                    "execute_date": "2025-12-31",
+                },
+            }
+        ],
+        [],
+    )
+
+    assert events[0]["reason_label"] == "尾盘入场未触发"
+    assert "执行价 29.7" in events[0]["message"]
+    assert "信号日MA5 31.744" in events[0]["message"]
+    assert "距MA5 -6.44%" in events[0]["message"]
 
 
 def test_backtest_monthly_returns_and_order_stats_are_report_ready() -> None:
@@ -3889,7 +4143,7 @@ def test_backtest_monthly_returns_and_order_stats_are_report_ready() -> None:
     orders = engine._order_stats(
         [
             {"trade_date": date(2026, 1, 2), "vt_symbol": "600000.SSE", "side": "BUY", "status": "filled", "reason": "entry_signal"},
-            {"trade_date": date(2026, 1, 3), "vt_symbol": "000001.SZSE", "side": "BUY", "status": "rejected", "reason": "limit_up_or_no_bar"},
+            {"trade_date": date(2026, 1, 3), "vt_symbol": "000001.SZSE", "side": "BUY", "status": "rejected", "reason": "limit_up_open_blocked"},
         ]
     )
 
@@ -3915,7 +4169,7 @@ def test_backtest_monthly_returns_and_order_stats_are_report_ready() -> None:
     ]
     assert orders["total"] == 2
     assert orders["by_status"] == {"filled": 1, "rejected": 1}
-    assert orders["by_reason"]["limit_up_or_no_bar"] == 1
+    assert orders["by_reason"]["limit_up_open_blocked"] == 1
     assert orders["rejected_examples"][0]["trade_date"] == "2026-01-03"
 
 

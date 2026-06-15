@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   addPortfolioGroupItem,
   createBacktest,
+  createReplayRun,
   createScreenRunRange,
   fetchBacktestAudit,
   fetchBacktestDataQuality,
@@ -16,12 +17,14 @@ import {
   fetchPortfolioGroups,
   fetchQuantStrategies,
   fetchRecommendations,
+  fetchReplayRuns,
   fetchScreenRuns,
   fetchSimulationAccounts,
   fetchTradingDates,
   fetchVnpyStatus,
   placeOrder,
   type QuantRecommendation,
+  type StrategyReplayRun,
 } from "@/api/quant";
 import type { MinuteGapAuditResult } from "@/api/dataSync";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -40,6 +43,7 @@ import { AddToGroupDialog } from "@/features/portfolio/AddToGroupDialog";
 import { ManualBuyDialog } from "@/features/quant/ManualBuyDialog";
 import { Button } from "@/components/ui/button";
 import { Link } from "react-router-dom";
+import { RefreshCw } from "lucide-react";
 
 export function QuantTradingPage() {
   const queryClient = useQueryClient();
@@ -88,6 +92,12 @@ export function QuantTradingPage() {
   const recommendationsQuery = useQuery({
     queryKey: ["quantRecommendations", activeRecommendationDate, selectedStrategy],
     queryFn: () => fetchRecommendations(200, activeRecommendationDate || undefined, selectedStrategy),
+    staleTime: 20_000,
+  });
+
+  const replayRunsQuery = useQuery({
+    queryKey: ["quantReplayRuns", selectedStrategy],
+    queryFn: () => fetchReplayRuns(80, selectedStrategy),
     staleTime: 20_000,
   });
 
@@ -201,10 +211,33 @@ export function QuantTradingPage() {
       queryClient.invalidateQueries({ queryKey: ["quantScreenRuns"] });
       queryClient.invalidateQueries({ queryKey: ["quantTradingDates"] });
       queryClient.invalidateQueries({ queryKey: ["quantRecommendations"] });
+      queryClient.invalidateQueries({ queryKey: ["quantReplayRuns"] });
       queryClient.invalidateQueries({ queryKey: ["portfolioGroups"] });
       queryClient.invalidateQueries({ queryKey: ["portfolioGroupItems"] });
     },
     onError: () => setIsScreenRunning(false),
+  });
+
+  const replayMutation = useMutation({
+    mutationFn: () =>
+      createReplayRun({
+        start: backtestParams.start,
+        end: tradingDatesQuery.data?.latest_trade_date ?? backtestParams.start,
+        strategy: selectedStrategy,
+        max_symbols: 500,
+        min_entry_score: 68,
+        strict_entry: true,
+        execution_model: "strict_1430",
+        minute_interval: "1m",
+        tail_entry_start: "14:30",
+        tail_entry_end: "14:30",
+        tail_entry_ma5_tolerance_pct: 1.5,
+        included_boards: backtestParams.included_boards,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["quantReplayRuns"] });
+      queryClient.invalidateQueries({ queryKey: ["symbolLatestReplay"] });
+    },
   });
 
   const backtestMutation = useMutation({
@@ -339,6 +372,13 @@ export function QuantTradingPage() {
         <TabsContent value="candidates" className="mt-0">
           <div className="space-y-4">
             <QuantKpiBar kpi={quantKpi} />
+            <ReplayRunPanel
+              latest={replayRunsQuery.data?.items[0]}
+              isLoading={replayRunsQuery.isLoading || replayRunsQuery.isFetching}
+              isCreating={replayMutation.isPending}
+              error={replayMutation.error}
+              onCreate={() => replayMutation.mutate()}
+            />
             <RecommendationsPanel
               isLoading={recommendationsQuery.isLoading}
               isError={recommendationsQuery.isError}
@@ -457,4 +497,89 @@ export function QuantTradingPage() {
       />
     </div>
   );
+}
+
+function ReplayRunPanel({
+  latest,
+  isLoading,
+  isCreating,
+  error,
+  onCreate,
+}: {
+  latest?: StrategyReplayRun;
+  isLoading: boolean;
+  isCreating: boolean;
+  error: unknown;
+  onCreate: () => void;
+}) {
+  const metrics = latest?.metrics ?? {};
+  const rejectReasons = metrics.reject_reasons ?? [];
+  return (
+    <section className="rounded-lg border p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold">Replay 执行</h2>
+          <div className="mt-1 text-sm text-muted-foreground">
+            基于已落库候选生成信号到执行的统一复盘，股票详情和持仓建议读取这里。
+          </div>
+        </div>
+        <Button size="sm" variant="outline" onClick={onCreate} disabled={isCreating}>
+          {isCreating ? <RefreshCw size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+          补齐 replay
+        </Button>
+      </div>
+      {isLoading ? (
+        <div className="mt-3 text-sm text-muted-foreground">正在读取 replay...</div>
+      ) : latest ? (
+        <div className="mt-3 grid gap-3 text-sm md:grid-cols-6">
+          <ReplayMetric label="Replay ID" value={`#${latest.id}`} />
+          <ReplayMetric label="区间" value={`${latest.start_date} ~ ${latest.end_date}`} />
+          <ReplayMetric label="执行尝试" value={metrics.attempt_count ?? 0} />
+          <ReplayMetric label="成交" value={metrics.filled_count ?? 0} valueClass="text-rise" />
+          <ReplayMetric label="拒绝" value={metrics.rejected_count ?? 0} valueClass={(metrics.rejected_count ?? 0) > 0 ? "text-fall" : undefined} />
+          <ReplayMetric label="状态" value={latest.status} />
+        </div>
+      ) : (
+        <div className="mt-3 rounded-md border p-3 text-sm text-muted-foreground">
+          暂无 replay。生成区间候选会自动创建，也可以基于已有候选手动补齐。
+        </div>
+      )}
+      {rejectReasons.length ? (
+        <div className="mt-3 flex flex-wrap gap-2 border-t pt-3 text-xs">
+          {rejectReasons.slice(0, 6).map((row) => (
+            <span key={row.reason} className="rounded-md border px-2 py-1 text-muted-foreground">
+              {replayReasonLabel(row.reason)}：{row.count}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {error ? (
+        <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-2 text-sm text-fall dark:border-red-500/30 dark:bg-red-500/10">
+          {error instanceof Error ? error.message : "补齐 replay 失败"}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function ReplayMetric({ label, value, valueClass }: { label: string; value?: string | number | null; valueClass?: string }) {
+  return (
+    <div>
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className={`mt-0.5 font-medium tabular-nums ${valueClass ?? ""}`}>{value ?? "--"}</div>
+    </div>
+  );
+}
+
+function replayReasonLabel(reason?: string | null) {
+  const labels: Record<string, string> = {
+    limit_up_open_blocked: "开盘涨停买不到",
+    limit_up_tail_unfilled: "尾盘涨停买不到",
+    no_execute_bar: "缺执行日K线",
+    tail_entry_not_triggered: "尾盘入场未触发",
+    today_pending_1430_snapshot: "等待今日14:30",
+    already_holding: "已持有",
+    no_next_trade_date: "无下一交易日",
+  };
+  return labels[reason ?? ""] ?? reason ?? "--";
 }

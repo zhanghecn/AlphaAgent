@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { PORTFOLIO_STATES } from "@/lib/portfolio-states";
 import type { PortfolioState } from "@/lib/portfolio-states";
 import type { PortfolioGroup, PortfolioItem, SimulationPosition } from "@/api/quant";
-import type { DailyBar } from "./HoldingCard";
+import type { DailyBar, StrategyAdvice } from "./HoldingCard";
 import type { RiskBadge } from "@/lib/portfolio-risk";
 import { WorkflowLane, type LaneCardData } from "./WorkflowLane";
 import { CandidateTable } from "./CandidateTable";
@@ -16,6 +16,7 @@ interface WorkflowLanesProps {
   positionsBySymbol: Map<string, SimulationPosition>;
   barsBySymbol: Map<string, DailyBar[]>;
   riskBadgesBySymbol: Map<string, RiskBadge[]>;
+  strategyAdviceBySymbol?: Map<string, StrategyAdvice>;
   /** Optional per-lane action keyed by state (e.g. build button on candidate). */
   laneAction?: (state: PortfolioState) => ReactNode;
   onAddToGroup?: (vtSymbol: string) => void;
@@ -41,6 +42,7 @@ export function WorkflowLanes({
   positionsBySymbol,
   barsBySymbol,
   riskBadgesBySymbol,
+  strategyAdviceBySymbol,
   laneAction,
   onAddToGroup,
   onViewDetail,
@@ -68,7 +70,7 @@ export function WorkflowLanes({
         }
         const cards =
           state.key === "holding"
-            ? buildHoldingCards(positions, barsBySymbol, riskBadgesBySymbol)
+            ? buildHoldingCards(positions, barsBySymbol, riskBadgesBySymbol, strategyAdviceBySymbol)
             : buildCards(itemsByState[state.key] ?? [], positionsBySymbol, barsBySymbol, riskBadgesBySymbol);
 
         return (
@@ -120,6 +122,7 @@ function buildHoldingCards(
   positions: SimulationPosition[],
   barsBySymbol: Map<string, DailyBar[]>,
   riskBadgesBySymbol: Map<string, RiskBadge[]>,
+  strategyAdviceBySymbol?: Map<string, StrategyAdvice>,
 ): LaneCardData[] {
   return positions.map((position) => ({
     item: {
@@ -133,5 +136,6 @@ function buildHoldingCards(
     position,
     bars: barsBySymbol.get(position.vt_symbol),
     riskBadges: riskBadgesBySymbol.get(position.vt_symbol),
+    strategyAdvice: strategyAdviceBySymbol?.get(position.vt_symbol),
   }));
 }

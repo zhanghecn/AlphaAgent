@@ -1,8 +1,8 @@
 /**
  * Holdings + KPI hook.
  *
- * Fetches simulation accounts and positions, derives KPI totals (equity,
- * market value, return %) and pre-computes risk badges per position, so the
+ * Fetches simulation accounts and positions, derives return-rate KPIs and
+ * pre-computes risk badges per position, so the
  * holding lane and KPI bar can read everything from one source.
  */
 import { useMemo } from "react";
@@ -43,15 +43,13 @@ export function useHoldings() {
   }, [positions]);
 
   const marketValue = positions.reduce((sum, position) => sum + (position.market_value ?? 0), 0);
-  const floatingPnl = positions.reduce((sum, position) => sum + (position.floating_pnl ?? 0), 0);
   // 持仓加权收益率：按市值加权的各股浮动收益率，反映持仓整体盈亏质量（而非总资产收益率）
   const weightedReturnPct = marketValue > 0
     ? positions.reduce((sum, position) => sum + (position.market_value ?? 0) * (position.floating_pnl_pct ?? 0), 0) / marketValue
     : null;
-  const cash = account?.cash ?? 0;
-  const equity = cash + marketValue;
-  const initialCash = account?.initial_cash ?? 0;
-  const returnPct = initialCash ? (equity / initialCash - 1) * 100 : null;
+  const averageReturnPct = positions.length
+    ? positions.reduce((sum, position) => sum + (position.floating_pnl_pct ?? 0), 0) / positions.length
+    : null;
 
   return {
     account,
@@ -60,13 +58,8 @@ export function useHoldings() {
     positionsBySymbol,
     riskBadgesBySymbol,
     kpi: {
-      cash,
-      marketValue,
-      equity,
-      initialCash,
-      returnPct,
       weightedReturnPct,
-      floatingPnl,
+      averageReturnPct,
       positionCount: positions.length,
     },
     isLoading: holdingsQuery.isLoading || accountsQuery.isLoading,

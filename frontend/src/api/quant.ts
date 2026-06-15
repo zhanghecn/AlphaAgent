@@ -48,6 +48,17 @@ export interface QuantScreenRunRange extends QuantScreenRun {
   total_dates?: number;
   succeeded_count?: number;
   range_recommendation_count?: number;
+  replay_run_id?: number | null;
+  replay_run?: {
+    status: string;
+    replay_run_id?: number | null;
+    strategy_id?: string;
+    strategy_version?: string;
+    start_date?: string;
+    end_date?: string;
+    metrics?: Record<string, unknown>;
+    message?: string | null;
+  } | null;
   runs?: Array<{
     trade_date: string;
     status: string;
@@ -1388,6 +1399,58 @@ export function createScreenRunRange(payload: {
   return apiClient.post<QuantScreenRunRange>("/quant/screen-runs/range", payload);
 }
 
+export interface StrategyReplayRun {
+  id: number;
+  strategy_id: string;
+  strategy_version: string;
+  start_date: string;
+  end_date: string;
+  status: string;
+  params?: Record<string, unknown>;
+  metrics?: {
+    attempt_count?: number;
+    buy_attempt_count?: number;
+    sell_attempt_count?: number;
+    filled_count?: number;
+    rejected_count?: number;
+    reject_reasons?: Array<{ reason: string; count: number }>;
+  } | null;
+  message?: string | null;
+  finished_at?: string | null;
+}
+
+export function fetchReplayRuns(limit = 80, strategy?: string) {
+  const search = new URLSearchParams({ limit: String(limit) });
+  if (strategy) search.set("strategy", strategy);
+  return apiClient.get<{ status: string; items: StrategyReplayRun[] }>(`/quant/replay-runs?${search.toString()}`);
+}
+
+export function createReplayRun(payload: {
+  start: string;
+  end: string;
+  strategy?: string;
+  max_symbols?: number;
+  min_entry_score?: number;
+  strict_entry?: boolean;
+  execution_model?: string;
+  minute_interval?: string;
+  tail_entry_start?: string;
+  tail_entry_end?: string;
+  tail_entry_ma5_tolerance_pct?: number;
+  included_boards?: string[];
+}) {
+  return apiClient.post<{
+    status: string;
+    replay_run_id?: number;
+    strategy_id?: string;
+    strategy_version?: string;
+    start_date?: string;
+    end_date?: string;
+    metrics?: StrategyReplayRun["metrics"];
+    message?: string | null;
+  }>("/quant/replay-runs", payload);
+}
+
 export function fetchScreenRuns(limit = 120, strategy?: string) {
   const search = new URLSearchParams({ limit: String(limit) });
   if (strategy) search.set("strategy", strategy);
@@ -1491,6 +1554,87 @@ export interface SymbolLatestBacktest {
 export function fetchLatestSymbolBacktest(vtSymbol: string, strategy?: string) {
   const suffix = strategy ? `?strategy=${encodeURIComponent(strategy)}` : "";
   return apiClient.get<SymbolLatestBacktest>(`/backtests/symbols/${encodeURIComponent(vtSymbol)}/latest${suffix}`);
+}
+
+export interface StrategyReplayAttempt extends StockIdentityFields {
+  id?: number;
+  replay_run_id?: number;
+  signal_run_id?: number | null;
+  signal_date: string;
+  execute_date: string;
+  vt_symbol: string;
+  name?: string | null;
+  side: "BUY" | "SELL" | string;
+  signal_type?: string | null;
+  plan_status: string;
+  execution_status: string;
+  price?: number | null;
+  price_source?: string | null;
+  proxy_used?: boolean;
+  reject_reason?: string | null;
+  score?: number | null;
+  raw?: Record<string, unknown>;
+}
+
+export interface StrategyReplayEvent extends StockIdentityFields {
+  event_type: "signal" | "execution" | string;
+  trade_date: string;
+  signal_date?: string | null;
+  execute_date?: string | null;
+  vt_symbol: string;
+  name?: string | null;
+  side: "BUY" | "SELL" | string;
+  status: string;
+  price?: number | null;
+  score?: number | null;
+  reason?: string | null;
+  price_source?: string | null;
+  proxy_used?: boolean;
+  raw?: Record<string, unknown>;
+}
+
+export interface StrategyReplayClosedTrade extends StockIdentityFields {
+  vt_symbol: string;
+  name?: string | null;
+  entry_date?: string | null;
+  exit_date?: string | null;
+  entry_price?: number | null;
+  exit_price?: number | null;
+  return_pct?: number | null;
+  holding_days?: number | null;
+  exit_reason?: string | null;
+}
+
+export interface SymbolStrategyReplay extends StockIdentityFields {
+  status: string;
+  message?: string | null;
+  replay_run_id?: number;
+  vt_symbol: string;
+  name?: string | null;
+  strategy_id?: string;
+  strategy_version?: string;
+  start_date?: string | null;
+  end_date?: string | null;
+  params?: Record<string, unknown>;
+  summary?: {
+    signal_count?: number;
+    buy_filled_count?: number;
+    rejected_count?: number;
+    closed_trade_count?: number;
+    compound_return_pct?: number | null;
+    average_return_pct?: number | null;
+    win_rate_pct?: number | null;
+    current_status?: string;
+    reject_reasons?: Array<{ reason: string; count: number }>;
+  };
+  attempts?: StrategyReplayAttempt[];
+  events?: StrategyReplayEvent[];
+  closed_trades?: StrategyReplayClosedTrade[];
+}
+
+export function fetchLatestSymbolReplay(vtSymbol: string, strategy?: string) {
+  const suffix = strategy ? `?strategy=${encodeURIComponent(strategy)}` : "";
+  return apiClient.get<SymbolStrategyReplay>(`/quant/symbols/${encodeURIComponent(vtSymbol)}/replay/latest${suffix}`);
 }
 
 export function fetchSymbolDiagnostics(vtSymbol: string, params: {

@@ -2895,6 +2895,7 @@ def _audit_events(orders: list[dict[str, Any]], trades: list[dict[str, Any]]) ->
                 "side": order.get("side"),
                 "status": order.get("status"),
                 "reason": order.get("reason"),
+                "reason_label": backtest_reason_label(order.get("reason")),
                 "price": order.get("price"),
                 "volume": order.get("volume"),
                 "execution_mode": execution.get("mode") if isinstance(execution, dict) else None,
@@ -2916,6 +2917,7 @@ def _audit_events(orders: list[dict[str, Any]], trades: list[dict[str, Any]]) ->
                 "side": trade.get("side"),
                 "status": "filled",
                 "reason": trade.get("reason"),
+                "reason_label": backtest_reason_label(trade.get("reason")),
                 "price": trade.get("price"),
                 "volume": trade.get("volume"),
                 "pnl": trade.get("pnl"),
@@ -2941,10 +2943,30 @@ def _audit_order_message(order: dict[str, Any], execution: dict[str, Any]) -> st
         return f"{side}{status}：使用执行日 14:30 真实分钟快照卖出，原因 {reason}。"
     if mode == "daily_close_proxy_sell":
         return f"{side}{status}：缺少执行日 14:30 分钟线，使用执行日收盘价作为尾盘代理卖出，原因 {reason}。"
+    if mode == "limit_up_open_blocked":
+        return f"{side}{status}：执行日开盘涨停或接近涨停，保守判定买不到。"
+    if mode == "no_execute_bar":
+        return f"{side}{status}：缺少执行日K线，无法判断可执行价格。"
     if mode == "limit_up_tail_unfilled":
         return f"{side}{status}：执行日尾盘涨停或接近涨停，保守判定买不到。"
     if mode == "limit_down_tail_blocked":
         return f"{side}{status}：执行日尾盘跌停或接近跌停，保守判定卖不出。"
+    if reason == "tail_entry_not_triggered":
+        details = []
+        price = execution.get("price")
+        ma5 = execution.get("ma5")
+        distance = execution.get("ma5_distance_pct")
+        if price is not None:
+            details.append(f"执行价 {price}")
+        if ma5 is not None:
+            details.append(f"信号日MA5 {ma5}")
+        if distance is not None:
+            try:
+                details.append(f"距MA5 {float(distance):.2f}%")
+            except (TypeError, ValueError):
+                details.append(f"距MA5 {distance}")
+        suffix = f"：{'，'.join(details)}" if details else ""
+        return f"{side}{status}：尾盘入场条件未触发{suffix}。"
     if mode in {"strict_1430_required", "strict_1430_required_sell"}:
         return f"{side}{status}：严格 14:30 模式缺少可用分钟快照或未触发，原因 {reason}。"
     if mode == "minute_tail_ma5":

@@ -7,8 +7,7 @@ import { updatePositionCost } from "@/api/quant";
 /**
  * 修改持仓成本价对话框。
  *
- * 用户手动校正建仓成本（如实际买入价与系统记录不符）。保存后后端按最新价重算浮动盈亏，
- * 前端 invalidate 持仓数据刷新 KPI 与卡片。
+ * 用户手动校正建仓成本（如实际买入价与系统记录不符）。保存后刷新持仓收益率。
  */
 export function EditCostDialog({
   open,
@@ -47,7 +46,7 @@ export function EditCostDialog({
       <ModalHeader title={`修改成本价 · ${vtSymbol}`} onClose={() => onOpenChange(false)} />
       <ModalBody>
         <div className="space-y-2 text-sm">
-          <label className="text-muted-foreground">新成本价（按实际买入价校正，保存后重算浮动盈亏）</label>
+          <label className="text-muted-foreground">新成本价（按实际买入价校正，保存后刷新收益率）</label>
           <input
             type="number"
             step="0.01"

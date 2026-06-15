@@ -202,6 +202,28 @@ def screen_stocks_range(
             }
         )
 
+    replay_run = None
+    if persist:
+        from alphaagent.server.services.quant import strategy_replay
+
+        try:
+            replay_run = strategy_replay.create_replay_run(
+                start=trade_dates[0],
+                end=trade_dates[-1],
+                strategy_id=strategy.id,
+                max_symbols=max_symbols,
+                min_entry_score=float(getattr(strategy, "default_min_entry_score", min_recommendation_score) or min_recommendation_score),
+                strict_entry=True,
+                execution_model="strict_1430",
+                minute_interval="1m",
+                tail_entry_start="14:30",
+                tail_entry_end="14:30",
+                tail_entry_ma5_tolerance_pct=1.5,
+                included_boards=boards,
+            )
+        except Exception as exc:
+            replay_run = {"status": "failed", "message": str(exc)}
+
     latest_result = latest_result or {}
     status = "ready" if succeeded_count else str(latest_result.get("status") or "empty")
     return {
@@ -218,6 +240,8 @@ def screen_stocks_range(
         "total": int(latest_result.get("total") or 0),
         "recommendation_count": int(latest_result.get("recommendation_count") or 0),
         "included_boards": latest_result.get("included_boards") or boards,
+        "replay_run": replay_run,
+        "replay_run_id": replay_run.get("replay_run_id") if isinstance(replay_run, dict) else None,
         "items": latest_result.get("items") or [],
         "recommendations": latest_result.get("recommendations") or [],
         "portfolio_sync": latest_result.get("portfolio_sync"),

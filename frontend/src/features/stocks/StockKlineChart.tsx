@@ -20,8 +20,9 @@ import {
 } from "lightweight-charts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { cn, formatAmount, formatPrice, priceColorClass } from "@/lib/utils";
+import { cn, formatAmount, formatPct, formatPrice, priceColorClass } from "@/lib/utils";
 import { useChartColors, type ChartPalette } from "@/lib/chart-theme";
+import { diagnosticForBar, type ChartBarDiagnostic } from "@/features/stocks/stockChartDiagnostics";
 import { Database, Radio } from "lucide-react";
 
 interface StockKlineChartProps {
@@ -36,6 +37,10 @@ export interface KlineMarker {
   id?: string;
   time: string;
   side: "BUY" | "SELL" | string;
+  markerKind?: "signal" | "trade" | "rejected";
+  status?: "signal" | "filled" | "rejected" | string;
+  reason?: string | null;
+  reasonLabel?: string | null;
   price?: number | null;
   text?: string;
   title?: string;
@@ -47,10 +52,7 @@ export interface KlineMarker {
   tradeDate?: string;
   signalDate?: string | null;
   executeDate?: string | null;
-  volume?: number | null;
-  amount?: number | null;
-  fee?: number | null;
-  pnl?: number | null;
+  returnPct?: number | null;
   evidence?: Array<{ label: string; value: string; valueClass?: string }>;
   raw?: Record<string, unknown>;
 }
@@ -96,6 +98,7 @@ export function StockKlineChart({
   const [overlayMode, setOverlayMode] = useState<OverlayMode>("ma");
   const [indicatorMode, setIndicatorMode] = useState<IndicatorMode>("volume");
   const [activeBar, setActiveBar] = useState<Bar | null>(null);
+  const [selectedBar, setSelectedBar] = useState<Bar | null>(null);
   const palette = useChartColors();
   const priceContainerRef = useRef<HTMLDivElement>(null);
   const indicatorContainerRef = useRef<HTMLDivElement>(null);
@@ -111,7 +114,8 @@ export function StockKlineChart({
   });
 
   const bars = useMemo(() => barsQuery.data?.items ?? [], [barsQuery.data]);
-  const latest = activeBar ?? bars[bars.length - 1] ?? null;
+  const focusedBar = selectedBar ?? activeBar ?? bars[bars.length - 1] ?? null;
+  const focusedDiagnostic = useMemo(() => diagnosticForBar(bars, focusedBar), [bars, focusedBar]);
   const latestIndicators = useMemo(() => latestIndicatorValues(bars), [bars]);
 
   useEffect(() => {
@@ -134,6 +138,7 @@ export function StockKlineChart({
       const indicatorChart = createBaseChart(indicatorContainerRef.current, 150, period, palette);
       chartsRef.current = { price: priceChart, indicator: indicatorChart };
       setActiveBar(null);
+      setSelectedBar(null);
 
       const candleSeries = priceChart.addCandlestickSeries({
         upColor: "#ef4444",
@@ -175,16 +180,27 @@ export function StockKlineChart({
         if (marker) {
           onMarkerClick?.(marker);
         }
+        const bar = findBarByTime(bars, period, param.time as Time | undefined);
+        if (bar) {
+          setSelectedBar(bar);
+        }
       };
       priceChart.subscribeClick(clickHandler);
+      const indicatorClickHandler: MouseEventHandler<Time> = (param) => {
+        const bar = findBarByTime(bars, period, param.time as Time | undefined);
+        if (bar) {
+          setSelectedBar(bar);
+        }
+      };
+      indicatorChart.subscribeClick(indicatorClickHandler);
 
       const observer = new ResizeObserver((entries) => {
         for (const entry of entries) {
           priceChart.applyOptions({ width: entry.contentRect.width });
           indicatorChart.applyOptions({ width: entry.contentRect.width });
           applyDefaultVisibleRange(priceChart, indicatorChart, bars.length, entry.contentRect.width);
-      }
-    });
+        }
+      });
       observer.observe(priceContainerRef.current);
 
       return () => observer.disconnect();
@@ -227,21 +243,21 @@ export function StockKlineChart({
       </div>
 
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-        <span>{formatTradeTime(latest?.trade_date)}</span>
-        <span>开 {formatPrice(latest?.open)}</span>
-        <span>高 {formatPrice(latest?.high)}</span>
-        <span>低 {formatPrice(latest?.low)}</span>
-        <span className={priceColorClass(latest?.change_pct)}>收 {formatPrice(latest?.close)}</span>
-        <span>量 {formatAmount(latest?.volume)}</span>
-        <span>额 {formatAmount(latest?.turnover)}</span>
+        <span>{formatTradeTime(focusedBar?.trade_date)}</span>
+        <span>开 {formatPrice(focusedBar?.open)}</span>
+        <span>高 {formatPrice(focusedBar?.high)}</span>
+        <span>低 {formatPrice(focusedBar?.low)}</span>
+        <span className={priceColorClass(focusedDiagnostic?.changePct)}>收 {formatPrice(focusedBar?.close)}</span>
+        <span>量 {formatAmount(focusedBar?.volume)}</span>
+        <span>额 {formatAmount(focusedBar?.turnover)}</span>
       </div>
 
       <OverlayLegend mode={overlayMode} values={latestIndicators} />
       {markers.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 border-t pt-2 text-xs text-muted-foreground">
-          <span>回测买卖点已标注在图表上</span>
+          <span>信号、拒绝和成交已标注在图表上</span>
           <span>{markers.length} 个</span>
-          <span>点击买/卖箭头或对应 K 线查看策略说明</span>
+          <span>点击标记、K 线或指标柱查看细节</span>
         </div>
       )}
       <div ref={priceContainerRef} className="h-[430px] w-full" />
@@ -250,7 +266,6 @@ export function StockKlineChart({
         <div className="flex flex-wrap gap-1.5">
           {markers.map((marker) => {
             const isSelected = selectedMarkerId && marker.id === selectedMarkerId;
-            const isBuy = marker.side === "BUY";
             return (
               <button
                 key={marker.id ?? `${marker.time}-${marker.side}-${marker.price ?? ""}`}
@@ -258,11 +273,11 @@ export function StockKlineChart({
                 className={cn(
                   "rounded-md border px-2 py-1 text-xs tabular-nums transition-colors hover:bg-muted",
                   isSelected && "border-primary bg-muted text-foreground",
-                  !isSelected && (isBuy ? "text-rise" : "text-fall")
+                  !isSelected && markerToneClass(marker)
                 )}
                 onClick={() => onMarkerClick?.(marker)}
               >
-                {marker.time.slice(0, 10)} {isBuy ? "买" : "卖"} {formatPrice(marker.price)}
+                {marker.time.slice(0, 10)} {markerListLabel(marker)}
               </button>
             );
           })}
@@ -274,6 +289,14 @@ export function StockKlineChart({
         <SubIndicatorText mode={indicatorMode} values={latestIndicators} />
       </div>
       <div ref={indicatorContainerRef} className="h-[150px] w-full" />
+
+      {focusedDiagnostic && (
+        <BarDiagnosticPanel
+          bar={focusedBar}
+          diagnostic={focusedDiagnostic}
+          markers={markers.filter((marker) => sameChartDay(marker.time, focusedBar?.trade_date))}
+        />
+      )}
 
       <div className="flex flex-wrap gap-1.5">
         <Badge variant="outline">真实周期: {barsQuery.data?.interval ?? period}</Badge>
@@ -440,17 +463,48 @@ function toSeriesMarkers(
   return markers
     .filter((marker) => barTimes.has(normalizeChartTime(chartTime(marker.time, period))))
     .map((marker) => {
-      const isBuy = marker.side === "BUY";
       const isSelected = selectedMarkerId && marker.id === selectedMarkerId;
+      const style = markerChartStyle(marker);
       return {
         id: marker.id,
         time: chartTime(marker.time, period),
-        position: isBuy ? "belowBar" : "aboveBar",
-        color: isSelected ? "#111827" : isBuy ? "#ef4444" : "#16a34a",
-        shape: isBuy ? "arrowUp" : "arrowDown",
-        text: isSelected ? marker.text || (isBuy ? "已选买" : "已选卖") : marker.text || (isBuy ? "买" : "卖"),
+        position: style.position,
+        color: isSelected ? "#111827" : style.color,
+        shape: style.shape,
+        text: isSelected ? `已选${style.text}` : marker.text || style.text,
       };
     });
+}
+
+function markerChartStyle(marker: KlineMarker): {
+  position: "aboveBar" | "belowBar" | "inBar";
+  color: string;
+  shape: "circle" | "square" | "arrowUp" | "arrowDown";
+  text: string;
+} {
+  if (marker.markerKind === "signal" || marker.status === "signal") {
+    return { position: "belowBar", color: "#2563eb", shape: "circle", text: "信号" };
+  }
+  if (marker.markerKind === "rejected" || marker.status === "rejected") {
+    return { position: "belowBar", color: "#d97706", shape: "square", text: "买拒" };
+  }
+  if (String(marker.side).toUpperCase() === "BUY") {
+    return { position: "belowBar", color: "#ef4444", shape: "arrowUp", text: "买" };
+  }
+  return { position: "aboveBar", color: "#16a34a", shape: "arrowDown", text: "卖" };
+}
+
+function markerListLabel(marker: KlineMarker) {
+  const label = marker.text || marker.title || markerChartStyle(marker).text;
+  const price = marker.price == null ? "" : ` ${formatPrice(marker.price)}`;
+  const returnText = marker.returnPct == null ? "" : ` ${formatPct(marker.returnPct)}`;
+  return `${label}${price}${returnText}`;
+}
+
+function markerToneClass(marker: KlineMarker) {
+  if (marker.markerKind === "signal" || marker.status === "signal") return "border-blue-200 text-blue-700 dark:border-blue-500/30 dark:text-blue-300";
+  if (marker.markerKind === "rejected" || marker.status === "rejected") return "border-amber-200 text-amber-700 dark:border-amber-500/30 dark:text-amber-300";
+  return String(marker.side).toUpperCase() === "BUY" ? "text-rise" : "text-fall";
 }
 
 function findMarkerFromClick(markers: KlineMarker[], period: string, objectId: unknown, time?: Time) {
@@ -724,6 +778,78 @@ function SubIndicatorText({
     );
   }
   return <p className="text-xs text-muted-foreground">成交量 MA5 / MA10</p>;
+}
+
+function BarDiagnosticPanel({
+  bar,
+  diagnostic,
+  markers,
+}: {
+  bar: Bar | null;
+  diagnostic: ChartBarDiagnostic;
+  markers: KlineMarker[];
+}) {
+  if (!bar) return null;
+  return (
+    <div className="rounded-md border p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-medium tabular-nums">{formatTradeTime(bar.trade_date)}</div>
+          <div className="mt-1 text-xs text-muted-foreground">点击 K 线或指标柱切换当日明细</div>
+        </div>
+        {markers.length > 0 && (
+          <div className="flex flex-wrap gap-1.5">
+            {markers.map((marker) => (
+              <Badge key={marker.id ?? `${marker.time}-${marker.side}`} variant="outline" className={cn("rounded-md", markerToneClass(marker))}>
+                {markerListLabel(marker)}
+              </Badge>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="mt-3 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-6">
+        <ChartInfoCell label="开盘" value={formatPrice(bar.open)} />
+        <ChartInfoCell label="最高" value={formatPrice(bar.high)} />
+        <ChartInfoCell label="最低" value={formatPrice(bar.low)} />
+        <ChartInfoCell label="收盘" value={formatPrice(bar.close)} valueClass={priceColorClass(diagnostic.changePct)} />
+        <ChartInfoCell label="较前收" value={`${formatPrice(diagnostic.changeAmount)} / ${formatPct(diagnostic.changePct)}`} valueClass={priceColorClass(diagnostic.changePct)} />
+        <ChartInfoCell label="开盘跳空" value={formatPct(diagnostic.gapOpenPct)} valueClass={priceColorClass(diagnostic.gapOpenPct)} />
+        <ChartInfoCell label="振幅" value={formatPct(diagnostic.amplitudePct)} />
+        <ChartInfoCell label="实体涨跌" value={formatPct(diagnostic.intradayReturnPct)} valueClass={priceColorClass(diagnostic.intradayReturnPct)} />
+        <ChartInfoCell label="成交量" value={formatAmount(bar.volume)} />
+        <ChartInfoCell label="成交额" value={formatAmount(bar.turnover)} />
+        <ChartInfoCell label="量比 MA5" value={formatRatio(diagnostic.volumeRatio5)} />
+        <ChartInfoCell label="量比 MA20" value={formatRatio(diagnostic.volumeRatio20)} />
+      </div>
+
+      <div className="mt-3 grid gap-3 border-t pt-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+        <ChartInfoCell label="MA5 / 距离" value={`${formatPrice(diagnostic.ma5)} / ${formatPct(diagnostic.closeToMa5Pct)}`} valueClass={priceColorClass(diagnostic.closeToMa5Pct)} />
+        <ChartInfoCell label="MA10 / 距离" value={`${formatPrice(diagnostic.ma10)} / ${formatPct(diagnostic.closeToMa10Pct)}`} valueClass={priceColorClass(diagnostic.closeToMa10Pct)} />
+        <ChartInfoCell label="MA20 / 距离" value={`${formatPrice(diagnostic.ma20)} / ${formatPct(diagnostic.closeToMa20Pct)}`} valueClass={priceColorClass(diagnostic.closeToMa20Pct)} />
+        <ChartInfoCell label="MA60 / 距离" value={`${formatPrice(diagnostic.ma60)} / ${formatPct(diagnostic.closeToMa60Pct)}`} valueClass={priceColorClass(diagnostic.closeToMa60Pct)} />
+      </div>
+    </div>
+  );
+}
+
+function ChartInfoCell({ label, value, valueClass }: { label: string; value: string; valueClass?: string }) {
+  return (
+    <div>
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className={cn("mt-0.5 font-medium tabular-nums", valueClass)}>{value}</div>
+    </div>
+  );
+}
+
+function formatRatio(value: number | null | undefined) {
+  if (value == null) return "--";
+  return `${value.toFixed(2)}x`;
+}
+
+function sameChartDay(left?: string | null, right?: string | null) {
+  if (!left || !right) return false;
+  return left.slice(0, 10) === right.slice(0, 10);
 }
 
 function formatTradeTime(value?: string) {

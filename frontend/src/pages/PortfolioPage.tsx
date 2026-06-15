@@ -1,12 +1,13 @@
 import { useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
 import { Briefcase, RefreshCw } from "lucide-react";
 import {
   addPortfolioGroupItem,
+  fetchLatestSymbolReplay,
   removePortfolioGroupItem,
 } from "@/api/quant";
-import type { PortfolioGroup } from "@/api/quant";
+import type { PortfolioGroup, SymbolStrategyReplay } from "@/api/quant";
 import { ErrorState } from "@/components/ErrorState";
 import { LoadingState } from "@/components/LoadingState";
 import { Button } from "@/components/ui/button";
@@ -21,6 +22,7 @@ import { BuildPreviewDialog } from "@/features/portfolio/BuildPreviewDialog";
 import { GroupEditDialog } from "@/features/portfolio/GroupEditDialog";
 import { useDailyBarsForCards } from "@/features/portfolio/hooks/useDailyBarsForCards";
 import { useToast } from "@/components/ui/toast";
+import type { StrategyAdvice } from "@/features/portfolio/HoldingCard";
 import {
   useBatchSelection,
   useHoldings,
@@ -85,6 +87,25 @@ export function PortfolioPage() {
   }, [batchableItems, holdings.positions]);
 
   const barsBySymbol = useDailyBarsForCards(allSymbols);
+
+  const replayAdviceQueries = useQueries({
+    queries: holdings.positions.map((position) => ({
+      queryKey: ["symbolLatestReplay", position.vt_symbol],
+      queryFn: () => fetchLatestSymbolReplay(position.vt_symbol),
+      enabled: Boolean(position.vt_symbol),
+      staleTime: 30_000,
+    })),
+  });
+
+  const strategyAdviceBySymbol = useMemo(() => {
+    const result = new Map<string, StrategyAdvice>();
+    holdings.positions.forEach((position, index) => {
+      const query = replayAdviceQueries[index];
+      const replay = query?.data;
+      result.set(position.vt_symbol, strategyAdviceFromReplay(replay, query?.isLoading || query?.isFetching));
+    });
+    return result;
+  }, [holdings.positions, replayAdviceQueries]);
 
   const itemCounts = useMemo(() => {
     const counts: Record<number, number> = {};
@@ -196,7 +217,7 @@ export function PortfolioPage() {
 
   // Build a single candidate into a position (default 100k per order).
   const handleSingleBuild = (vtSymbol: string) => {
-    trade.placeOrder({ vt_symbol: vtSymbol, side: "BUY", amount: 100_000 });
+    trade.placeOrder({ vt_symbol: vtSymbol, side: "BUY", volume: 100 });
   };
 
   const tradePosition = tradeDialog.open
@@ -270,6 +291,7 @@ export function PortfolioPage() {
             positionsBySymbol={holdings.positionsBySymbol}
             barsBySymbol={barsBySymbol}
             riskBadgesBySymbol={holdings.riskBadgesBySymbol}
+            strategyAdviceBySymbol={strategyAdviceBySymbol}
             onAddToGroup={handleAddToGroup}
             onViewDetail={handleViewDetail}
             onSell={openSell}
@@ -331,8 +353,6 @@ export function PortfolioPage() {
         onBuild={(params) =>
           trade.autoBuy({
             limit: params.limit,
-            amount_per_order: params.amount_per_order,
-            initial_cash: params.initial_cash,
           })
         }
         isBuilding={trade.isAutoBuying}
@@ -357,4 +377,64 @@ export function PortfolioPage() {
       />
     </div>
   );
+}
+
+function strategyAdviceFromReplay(
+  replay: SymbolStrategyReplay | undefined,
+  isLoading: boolean | undefined,
+): StrategyAdvice {
+  if (isLoading) return { label: "策略读取中", tone: "neutral" };
+  if (!replay || replay.status !== "ready") return { label: "无 replay", detail: replay?.message, tone: "neutral" };
+
+  const latestEvent = [...(replay.events ?? [])]
+    .sort((a, b) => String(b.trade_date ?? "").localeCompare(String(a.trade_date ?? "")))[0];
+  if (latestEvent?.side === "SELL" && latestEvent.status === "filled") {
+    return {
+      label: "策略已卖出",
+      detail: latestEvent.trade_date ? `${latestEvent.trade_date} 已触发卖出` : "已触发卖出",
+      tone: "sell",
+    };
+  }
+  if (latestEvent?.side === "SELL" && latestEvent.status === "rejected") {
+    return {
+      label: "卖出待确认",
+      detail: `${portfolioReplayReasonLabel(latestEvent.reason)}，需复核执行条件`,
+      tone: "warning",
+    };
+  }
+  if (replay.summary?.current_status === "holding") {
+    const closedCount = replay.summary.closed_trade_count ?? 0;
+    return {
+      label: "策略持有",
+      detail: closedCount > 0 ? `已完成 ${closedCount} 笔闭环` : "最近 replay 仍处于持有状态",
+      tone: "hold",
+    };
+  }
+  if (replay.summary?.current_status === "closed") {
+    return { label: "策略已卖出", detail: "最近 replay 状态为已平仓", tone: "sell" };
+  }
+  const rejectedCount = replay.summary?.rejected_count ?? 0;
+  if (rejectedCount > 0) {
+    const firstReason = replay.summary?.reject_reasons?.[0]?.reason;
+    return {
+      label: "买入未成交",
+      detail: portfolioReplayReasonLabel(firstReason),
+      tone: "warning",
+    };
+  }
+  return { label: "无持仓建议", detail: "replay 暂无有效成交", tone: "neutral" };
+}
+
+function portfolioReplayReasonLabel(reason?: string | null): string {
+  const labels: Record<string, string> = {
+    limit_up_open_blocked: "开盘涨停买不到",
+    limit_up_tail_unfilled: "尾盘涨停买不到",
+    no_execute_bar: "缺执行日K线",
+    tail_entry_not_triggered: "尾盘入场未触发",
+    limit_down_tail_blocked: "尾盘跌停卖不出",
+    today_pending_1430_snapshot: "等待今日14:30",
+    already_holding: "已持有",
+    no_next_trade_date: "无下一交易日",
+  };
+  return reason ? labels[reason] ?? reason : "--";
 }

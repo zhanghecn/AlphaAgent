@@ -147,8 +147,34 @@ def simulate_portfolio(
                 orders.append(callbacks.order(current_day, order["vt_symbol"], "BUY", None, None, "rejected", "position_slot_unavailable", None))
                 continue
             bar = today_bars.get(order["vt_symbol"])
-            if not bar or callbacks.is_limit_up_open(bar):
-                orders.append(callbacks.order(current_day, order["vt_symbol"], "BUY", None, None, "rejected", "limit_up_or_no_bar", None))
+            if not bar:
+                raw = {
+                    "status": "rejected",
+                    "mode": "no_execute_bar",
+                    "reason": "no_execute_bar",
+                    "signal_date": order["signal_date"].isoformat(),
+                    "execute_date": current_day.isoformat(),
+                    "price_source": None,
+                    "proxy_used": False,
+                }
+                orders.append(callbacks.order(current_day, order["vt_symbol"], "BUY", None, None, "rejected", "no_execute_bar", raw))
+                continue
+            if callbacks.is_limit_up_open(bar):
+                raw = {
+                    "status": "rejected",
+                    "mode": "limit_up_open_blocked",
+                    "reason": "limit_up_open_blocked",
+                    "signal_date": order["signal_date"].isoformat(),
+                    "execute_date": current_day.isoformat(),
+                    "price_source": "stock_daily_bars.open_price",
+                    "proxy_used": False,
+                    "open_price": bar.open_price,
+                    "high_price": bar.high_price,
+                    "low_price": bar.low_price,
+                    "close_price": bar.close_price,
+                    "change_pct": bar.change_pct,
+                }
+                orders.append(callbacks.order(current_day, order["vt_symbol"], "BUY", None, 0, "rejected", "limit_up_open_blocked", raw))
                 continue
             fill = callbacks.resolve_buy_fill(order, current_day, bar, bar_index, minute_index, params)
             if fill.get("status") != "filled":

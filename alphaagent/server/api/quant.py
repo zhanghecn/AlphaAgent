@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 
 from alphaagent.server.core.responses import fail, ok
 from alphaagent.server.services.quant import screening
+from alphaagent.server.services.quant import strategy_replay
 from alphaagent.server.services.quant.symbol_diagnostics import symbol_diagnostics_report
 
 router = APIRouter(prefix="/quant", tags=["quant"])
@@ -50,6 +51,60 @@ def create_screen_runs_range(payload: dict[str, Any] = Body(default_factory=dict
                 included_boards=payload.get("included_boards"),
             )
         )
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.post("/replay-runs")
+def create_replay_run(payload: dict[str, Any] = Body(default_factory=dict)):
+    try:
+        start = _parse_date(payload.get("start") or payload.get("start_date") or payload.get("trade_date"))
+        end = _parse_date(payload.get("end") or payload.get("end_date"))
+        if start is None or end is None:
+            return JSONResponse(status_code=400, content=fail("INVALID_DATE", "start and end are required."))
+        return ok(
+            strategy_replay.create_replay_run(
+                start=start,
+                end=end,
+                strategy_id=str(payload.get("strategy") or screening.STRATEGY_ID),
+                max_symbols=int(payload.get("max_symbols") or 500),
+                min_entry_score=float(payload.get("min_entry_score") or 68),
+                strict_entry=bool(payload.get("strict_entry", True)),
+                execution_model=str(payload.get("execution_model") or "strict_1430"),
+                minute_interval=str(payload.get("minute_interval") or "1m"),
+                tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
+                tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
+                tail_entry_ma5_tolerance_pct=float(payload.get("tail_entry_ma5_tolerance_pct") or 1.5),
+                included_boards=payload.get("included_boards"),
+            )
+        )
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/replay-runs")
+def list_replay_runs(
+    strategy: str = Query(default=screening.STRATEGY_ID),
+    limit: int = Query(default=80, ge=1, le=300),
+):
+    try:
+        return ok(strategy_replay.list_replay_runs(strategy_id=strategy, limit=limit))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/replay-runs/{run_id}")
+def get_replay_run(run_id: int):
+    try:
+        return ok(strategy_replay.get_replay_run(run_id))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/replay-runs/{run_id}/symbols/{vt_symbol}")
+def get_replay_symbol(run_id: int, vt_symbol: str):
+    try:
+        return ok(strategy_replay.symbol_replay(run_id, vt_symbol))
     except Exception as exc:
         return _service_error(exc)
 
@@ -162,6 +217,17 @@ def get_symbol_trade_plan(
 ):
     try:
         return ok(screening.latest_trade_plan(vt_symbol, strategy_id=strategy))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/symbols/{vt_symbol}/replay/latest")
+def get_latest_symbol_replay(
+    vt_symbol: str,
+    strategy: str = Query(default=screening.STRATEGY_ID),
+):
+    try:
+        return ok(strategy_replay.latest_symbol_replay(vt_symbol, strategy_id=strategy))
     except Exception as exc:
         return _service_error(exc)
 
