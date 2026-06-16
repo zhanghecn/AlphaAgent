@@ -13,7 +13,6 @@ import { LoadingState } from "@/components/LoadingState";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { BacktestParams } from "@/features/quant/constants";
-import { BacktestParamsForm } from "@/features/quant/BacktestParamsForm";
 import { BacktestSummary } from "@/features/quant/BacktestSummary";
 import {
   BacktestTradeTable,
@@ -41,11 +40,8 @@ export function BacktestPanel({
   selectedId,
   onSelect,
   params,
-  onParamsChange,
   strategies,
   selectedStrategy,
-  tradingDates,
-  isRunning,
   report,
   dataQuality,
   isDataQualityLoading,
@@ -62,11 +58,8 @@ export function BacktestPanel({
   selectedId: number | null;
   onSelect: (id: number) => void;
   params: BacktestParams;
-  onParamsChange: (params: BacktestParams) => void;
   strategies: QuantStrategyOption[];
   selectedStrategy: string;
-  tradingDates: string[];
-  isRunning: boolean;
   report?: Awaited<ReturnType<typeof fetchBacktestReport>>;
   dataQuality?: Awaited<ReturnType<typeof fetchBacktestDataQuality>>;
   isDataQualityLoading: boolean;
@@ -79,7 +72,8 @@ export function BacktestPanel({
   onRunValidationGrid: () => void;
   onAddToPortfolio?: (vtSymbol: string) => void;
 }) {
-  if (isLoading) return <LoadingState rows={5} />;
+  const selectedRun = runs.find((item) => item.id === selectedId) ?? runs[0] ?? null;
+  if (isLoading && !selectedRun) return <LoadingState rows={5} />;
   if (isError) return <ErrorState message="加载回测报告失败" onRetry={onRetry} />;
 
   return (
@@ -113,16 +107,21 @@ export function BacktestPanel({
       </div>
 
       <div className="space-y-4 p-4">
-        <BacktestParamsForm
+        <BacktestReadonlyMethod
+          run={selectedRun}
+          report={report}
           params={params}
-          onChange={onParamsChange}
-          strategies={strategies}
-          selectedStrategy={selectedStrategy}
-          tradingDates={tradingDates}
-          isRunning={isRunning}
+          strategyName={strategies.find((strategy) => strategy.id === selectedStrategy)?.name ?? "主线龙回头回踩低吸"}
         />
         {!report ? (
-          <EmptyState message="暂无回测报告" description="运行回测后会生成可复查的交易表和指标。" />
+          isLoading ? (
+            <div className="rounded-lg border p-4">
+              <div className="mb-3 text-sm font-medium">正在加载回测报告</div>
+              <LoadingState rows={4} />
+            </div>
+          ) : (
+            <EmptyState message="暂无回测报告" description="请先在候选页刷新候选并回测，系统会自动生成组合回测。" />
+          )
         ) : (
           <>
             <BacktestSummary report={report} audit={audit} />
@@ -187,4 +186,69 @@ export function BacktestPanel({
       </div>
     </section>
   );
+}
+
+function BacktestReadonlyMethod({
+  run,
+  report,
+  params,
+  strategyName,
+}: {
+  run: BacktestRun | null;
+  report?: Awaited<ReturnType<typeof fetchBacktestReport>>;
+  params: BacktestParams;
+  strategyName: string;
+}) {
+  const rawParams = run?.params ?? {};
+  const maxPositions = numberOrDefault(rawParams.max_positions, params.max_positions);
+  const candidateLimit = numberOrDefault(report?.method?.entry_filter?.candidate_limit ?? rawParams.candidate_limit, params.candidate_limit);
+  const maxSymbols = numberOrDefault(rawParams.max_symbols, params.max_symbols);
+  const boardValues = report?.method?.included_board_labels?.length
+    ? report.method.included_board_labels
+    : Array.isArray(rawParams.included_boards)
+      ? rawParams.included_boards
+      : [];
+  const boards = boardValues.length
+    ? boardValues.join("、")
+    : "主板";
+  const executionModel = String(rawParams.execution_model ?? report?.method?.execution?.execution_model ?? params.execution_model);
+
+  return (
+    <div className="rounded-lg border p-3 text-sm">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b pb-3">
+        <div>
+          <div className="font-medium">当前回测口径</div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            回测由候选页一键研究自动生成；这里仅查看结果和归因。
+          </div>
+        </div>
+        <div className="text-xs text-muted-foreground">
+          {run ? `#${run.id}` : "--"}
+        </div>
+      </div>
+      <div className="mt-3 grid gap-3 md:grid-cols-6">
+        <ReadonlyCell label="策略" value={strategyName} />
+        <ReadonlyCell label="区间" value={report ? `${report.start_date} 至 ${report.end_date}` : run ? `${run.start_date} 至 ${run.end_date}` : "--"} />
+        <ReadonlyCell label="股票池" value={`${boards} / ${maxSymbols}只`} />
+        <ReadonlyCell label="买入规则" value={`前${candidateLimit}名`} />
+        <ReadonlyCell label="最大持仓" value={`${maxPositions}只`} />
+        <ReadonlyCell label="执行" value={executionModel === "legacy_next_open" ? "D+1开盘" : executionModel} />
+      </div>
+    </div>
+  );
+}
+
+function ReadonlyCell({ label, value }: { label: string; value: string | number | null | undefined }) {
+  return (
+    <div>
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="mt-1 min-h-5 font-medium">{value ?? "--"}</div>
+    </div>
+  );
+}
+
+function numberOrDefault(value: unknown, fallback: number) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }

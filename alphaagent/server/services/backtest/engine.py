@@ -27,7 +27,7 @@ from alphaagent.server.db.session import get_engine, is_database_configured, ses
 from alphaagent.server.services.backtest import data_quality as data_quality_service
 from alphaagent.server.services.backtest import execution_models, persistence, queries, reports, scoring, signal_plan, simulation, strategy_comparison, validation
 from alphaagent.server.services.backtest.schemas import BacktestParams, MinuteBar, Position, ScoreContext, Trade
-from alphaagent.server.services.quant.factors import STRATEGY_ID, STRATEGY_VERSION, Bar
+from alphaagent.server.services.quant.factors import DRAGON_PULLBACK_STRATEGY_ID, STRATEGY_ID, STRATEGY_VERSION, Bar
 from alphaagent.server.services.quant.financials import financial_scores_from_rows_by_symbol
 from alphaagent.server.services.quant.strategy_registry import get_strategy
 from alphaagent.server.services.quant.screening import (
@@ -108,6 +108,9 @@ def list_backtests(limit: int = 50, run_type: str = "all", strategy_id: str | No
     conditions = []
     if requested_strategy:
         conditions.append(schema.backtest_runs.c.strategy_id == requested_strategy)
+        strategy = get_strategy(requested_strategy)
+        if strategy is not None:
+            conditions.append(schema.backtest_runs.c.strategy_version == strategy.version)
     query = select(schema.backtest_runs)
     if conditions:
         query = query.where(and_(*conditions))
@@ -138,6 +141,7 @@ def latest_symbol_backtest(vt_symbol: str, strategy_id: str | None = None) -> di
     if not is_database_configured():
         return {"status": "unavailable", "message": "DATABASE_URL not configured"}
     _ensure_backtest_schema()
+    strategy = get_strategy(strategy_id) if strategy_id else None
     with session_scope() as session:
         rows = session.execute(
             select(schema.backtest_runs).order_by(desc(schema.backtest_runs.c.id)).limit(100)
@@ -148,6 +152,8 @@ def latest_symbol_backtest(vt_symbol: str, strategy_id: str | None = None) -> di
             if symbol not in symbols:
                 continue
             if strategy_id and row.get("strategy_id") != strategy_id:
+                continue
+            if strategy is not None and row.get("strategy_version") != strategy.version:
                 continue
             backtest_id = int(row["id"])
             trades = session.execute(
@@ -2678,6 +2684,11 @@ def _params_from_run(run: dict[str, Any]) -> BacktestParams:
         tail_entry_start=str(raw_params.get("tail_entry_start") or "14:30"),
         tail_entry_end=str(raw_params.get("tail_entry_end") or "14:30"),
         tail_entry_ma5_tolerance_pct=float(raw_params.get("tail_entry_ma5_tolerance_pct") or 1.5),
+        enable_signal_rotation=_truthy(raw_params.get("enable_signal_rotation", True)),
+        rotation_min_score=float(raw_params.get("rotation_min_score") or 95.0),
+        rotation_min_score_gap=float(raw_params.get("rotation_min_score_gap") or 8.0),
+        rotation_max_holding_return_pct=float(raw_params.get("rotation_max_holding_return_pct") or 8.0),
+        rotation_min_holding_days=int(raw_params.get("rotation_min_holding_days") or 3),
         symbols=[_normalize_symbol(symbol) for symbol in (raw_params.get("symbols") or []) if _normalize_symbol(symbol)],
         included_boards=normalize_included_boards(raw_params.get("included_boards")),
         persist=False,
@@ -2835,6 +2846,13 @@ def _backtest_method(params: BacktestParams) -> dict[str, Any]:
             "min_entry_score": params.min_entry_score,
             "strict_entry": params.strict_entry,
             "candidate_limit": params.candidate_limit,
+        },
+        "rotation": {
+            "enabled": params.enable_signal_rotation and params.strategy == DRAGON_PULLBACK_STRATEGY_ID,
+            "min_score": params.rotation_min_score,
+            "score_gap_reference": params.rotation_min_score_gap,
+            "max_holding_return_pct": params.rotation_max_holding_return_pct,
+            "min_holding_days": params.rotation_min_holding_days,
         },
         "execution": _execution_method_payload(params),
     }

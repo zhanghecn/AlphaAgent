@@ -7,12 +7,11 @@ import { useToast } from "@/components/ui/toast";
 import { PortfolioKpiBar } from "@/features/portfolio/PortfolioKpiBar";
 import { PortfolioTabs } from "@/features/portfolio/PortfolioTabs";
 import { PortfolioList } from "@/features/portfolio/PortfolioList";
-import { AddToGroupDialog } from "@/features/portfolio/AddToGroupDialog";
 import { GroupManageDialog } from "@/features/portfolio/GroupManageDialog";
 import { usePortfolioGroups } from "@/features/portfolio/hooks/usePortfolioGroups";
 import { useHoldings } from "@/features/portfolio/hooks/useHoldings";
 import { usePortfolioState } from "@/features/portfolio/hooks/usePortfolioState";
-import { addPortfolioGroupItem, removePortfolioGroupItem } from "@/api/quant";
+import { removePortfolioGroupItem } from "@/api/quant";
 
 /**
  * PortfolioPage — holdings center.
@@ -31,19 +30,7 @@ export function PortfolioPage() {
   const holdings = useHoldings();
 
   const [activeGroupId, setActiveGroupId] = useState<number | null>(null);
-  const [addToGroupSymbol, setAddToGroupSymbol] = useState<string | null>(null);
   const [manageOpen, setManageOpen] = useState(false);
-
-  const addMutation = useMutation({
-    mutationFn: ({ groupId, symbol, reason }: { groupId: number; symbol: string; reason: string }) =>
-      addPortfolioGroupItem(groupId, { vt_symbol: symbol, source: "manual", reason }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["portfolioGroupItems"] });
-      setAddToGroupSymbol(null);
-      toast({ title: "已加入分组", variant: "success" });
-    },
-    onError: (error) => toast({ title: "加入失败", description: error.message, variant: "error" }),
-  });
 
   const removeMutation = useMutation({
     mutationFn: ({ groupId, symbol }: { groupId: number; symbol: string }) =>
@@ -112,7 +99,6 @@ export function PortfolioPage() {
         <PortfolioList
           items={items}
           positionsBySymbol={holdings.positionsBySymbol}
-          onAddToGroup={(vt) => setAddToGroupSymbol(vt)}
           onRemove={(groupId, vt) => removeMutation.mutate({ groupId, symbol: vt })}
           onViewDetail={(vt) => navigate(`/stocks/${vt}`)}
           removingSymbol={removingSymbol}
@@ -122,15 +108,6 @@ export function PortfolioPage() {
           暂无分组有股票。点「分组管理」新建分组，或在股票列表点「加入」。
         </p>
       )}
-
-      <AddToGroupDialog
-        open={addToGroupSymbol !== null}
-        onOpenChange={(open) => !open && setAddToGroupSymbol(null)}
-        defaultSymbol={addToGroupSymbol ?? undefined}
-        groups={groups.groups}
-        onAdd={(groupId, symbol, reason) => addMutation.mutate({ groupId, symbol, reason })}
-        isAdding={addMutation.isPending}
-      />
 
       <GroupManageDialog
         open={manageOpen}

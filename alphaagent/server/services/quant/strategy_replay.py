@@ -872,6 +872,11 @@ def _params_to_json(params: BacktestParams) -> dict[str, Any]:
         "take_profit_pct": params.take_profit_pct,
         "trailing_stop_pct": params.trailing_stop_pct,
         "time_stop_days": params.time_stop_days,
+        "enable_signal_rotation": params.enable_signal_rotation,
+        "rotation_min_score": params.rotation_min_score,
+        "rotation_min_score_gap": params.rotation_min_score_gap,
+        "rotation_max_holding_return_pct": params.rotation_max_holding_return_pct,
+        "rotation_min_holding_days": params.rotation_min_holding_days,
         "included_boards": list(params.included_boards),
     }
     if params.execution_model in {"tail_close_hybrid", "strict_1430"}:

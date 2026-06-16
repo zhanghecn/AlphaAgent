@@ -102,7 +102,7 @@ vn.py 中数据需要分清四类：
 3. `quant_signal_runs` 记录每次筛选运行；`GET /api/quant/screen-runs` 给前端候选日期选择器叠加显示运行编号和候选数。
 4. `quant_recommendations` 支持按 `trade_date` 查询；候选表会显示 `risk_score`、`liquidity_score` 和 `failed_rules`，用于核查当日推荐是否正确。
 5. `GET /api/quant/symbols/{vt_symbol}/latest-state` 动态聚合最近全局量化过程，不新增派生表：优先以不早于最新候选日的 `strategy_replay_runs` 日期范围为准，读取同范围 `quant_stock_signals`、`quant_recommendations` 和该股 `strategy_replay_attempts`，返回评分/BUY 信号/候选/买卖记录/收益率的统一状态；如果最新买卖记录早于最新候选日或尚未生成买卖记录，则回退到最近 `quant_signal_runs` 的单日筛选状态，并返回 `latest_available_trade_date` / `is_stale`。
-6. 组合回测列表支持 `GET /api/backtests?run_type=portfolio`，前端默认只看组合回测，避免股票详情页的单股回测混进量化页主列表。
+6. 组合回测列表支持 `GET /api/backtests?run_type=portfolio`，前端默认只看组合回测，避免股票详情页的单股回测混进量化页主列表；指定当前公开策略时，读取端按注册表当前策略版本过滤，旧 `0.1.0` 回测不会挤掉当前 `0.1.1` 基线。
 7. 新组合回测会写 `backtest_signal_events`，记录每只股票独立状态机下的理论 BUY/SELL 信号；旧回测没有这张流水，需要重跑组合回测。
 8. `GET /api/backtests/{id}/equity` 返回该回测实际交易日，前端“信号计划”的开始/结束日期选择器使用它。
 9. `GET /api/backtests/{id}/signal-events/amount-preview` 按 `总资金 / 最大持仓数` 做等权金额预览，买入按 100 股整数手，卖出沿用最近一次理论买入数量。
@@ -115,17 +115,17 @@ vn.py 中数据需要分清四类：
 16. 组合回测加载日线时会从用户开始日前额外加载预热历史 K 线，避免 MA60、60 日回撤等指标在回测初期因样本不足而缺失；但权益、持仓和交易记录仍只从用户选择的开始日期开始。
 17. 历史组合回测默认使用 `legacy_next_open`：D 日收盘信号，D+1 日线开盘买入/卖出，默认最大持仓 10、候选前 10 名、收益率为主要观察指标。
 18. 普通量化产品路径只公开 `mainline_dragon_pullback`；`GET /api/quant/strategies` 返回单一公开策略，旧策略仅保留内部兼容和旧报告/对比接口。
-19. 股票详情页 K 线标记优先来自最新组合回测的个股详情：先取 `GET /api/backtests?run_type=portfolio&strategy=mainline_dragon_pullback` 最新回测，再用 `GET /api/backtests/{id}/symbols/{vt_symbol}` 加载该股在真实组合回测中的订单/成交/收益标记；`latest-state` 的全局买卖记录和 BUY 信号用于补充候选、买拒和信号过程。这样短区间最新买卖记录不会遮住全历史组合回测中的早期买卖点。旧 `/api/backtests/symbol` 仅作为没有组合回测执行记录时的兜底缓存。
+19. 股票详情页 K 线标记优先来自最新组合回测：先取 `GET /api/backtests?run_type=portfolio&strategy=mainline_dragon_pullback` 当前版本最新回测，再用 `GET /api/backtests/{id}/symbols/{vt_symbol}` 加载真实组合订单/成交/收益标记，并用 `GET /api/backtests/{id}/signal-events?vt_symbol=` 叠加同一回测内的理论 BUY/SELL 信号计划；`latest-state` 的全局买卖记录和 BUY 信号只作为没有组合执行记录时的兜底。这样短区间最新买卖记录不会遮住全历史组合回测中的早期理论买点，也不会把旧全局 replay 噪音叠到已有组合执行标记上。
 
 注意：`backtest_signal_events` 是理论信号计划，用于核查“历史上有没有买点/卖点”；真实组合资金曲线仍以 `backtest_trades`、`backtest_daily_equity` 和 `backtest_daily_positions` 为准。
 
 2026-06-16 当前量化数据刷新：
 
-- 本地日线交易日范围：`2025-03-26` 至 `2026-06-15`。
-- `mainline_dragon_pullback / 0.1.0` 候选已补齐 `2026-03-31` 至 `2026-06-15`，最新 run 为 `#1736`。
-- 最新后台研究任务已成功补齐 `2025-03-26` 至 `2026-06-15`：补生成 `133` 个交易日候选，跳过 `163` 个已有成功交易日。
-- 最新全局买卖记录为 `strategy_replay_runs #5`，范围 `2025-03-26` 至 `2026-06-15`。
-- 最新组合回测为 `backtests #118`，范围 `2025-03-26` 至 `2026-06-15`。
+- 本地日线交易日范围：`2025-03-26` 至 `2026-06-16`；`2026-06-16` 本地日线覆盖约 `1302` 只股票，低于正常全市场覆盖。
+- `mainline_dragon_pullback / 0.1.1` 候选已补齐 `2025-03-26` 至 `2026-06-16`，最新 run 为 `#2267`。
+- 最新后台研究任务 `bdb5ab71823c49a7a43878ef70d75047` 已成功处理 `297` 个交易日，强制刷新 `101` 个已有日期，最新日推荐 `10` 只，区间累计推荐 `1900` 条。
+- 最新全局买卖记录为 `strategy_replay_runs #7`，范围 `2025-03-26` 至 `2026-06-16`。
+- 最新组合回测为 `backtests #120`，范围 `2025-03-26` 至 `2026-06-16`，收益约 `+44.45%`，最大回撤约 `-29.61%`。
 - `/quant` 已切换为后台研究任务接口；任务状态是进程内内存状态，服务重启后 `GET /api/quant/research-runs/latest` 可能返回空，但已落库候选、买卖记录和回测仍按普通 API 可查。短区间任务如果日线不足，会显示具体失败原因，避免只看到“组合回测失败”。
 
 2026-06-14 回测钻取复核：

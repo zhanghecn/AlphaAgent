@@ -2495,6 +2495,58 @@ def test_backtest_list_filters_by_strategy_id(monkeypatch) -> None:
     assert [item["strategy_id"] for item in result["items"]] == ["mainline_dragon_pullback"]
 
 
+def test_backtest_list_filters_current_strategy_version_when_strategy_requested(monkeypatch) -> None:
+    from sqlalchemy.sql import visitors
+
+    from alphaagent.server.services.backtest import engine
+
+    captured_statements = []
+
+    class FakeRunRows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {
+                    "id": 119,
+                    "strategy_id": "mainline_dragon_pullback",
+                    "strategy_version": "0.1.1",
+                    "start_date": date(2025, 3, 26),
+                    "end_date": date(2026, 6, 16),
+                    "status": "succeeded",
+                    "initial_cash": 1_000_000,
+                    "final_equity": 1_116_204,
+                    "params": {"symbols": []},
+                    "metrics": {},
+                }
+            ]
+
+    class FakeSession:
+        def execute(self, statement):
+            captured_statements.append(statement)
+            return FakeRunRows()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(engine, "is_database_configured", lambda: True)
+    monkeypatch.setattr(engine, "_ensure_backtest_schema", lambda: None)
+    monkeypatch.setattr(engine, "session_scope", fake_session_scope)
+
+    result = engine.list_backtests(limit=50, run_type="portfolio", strategy_id="mainline_dragon_pullback")
+
+    bind_values = [
+        element.value
+        for element in visitors.iterate(captured_statements[0])
+        if hasattr(element, "value")
+    ]
+    assert "mainline_dragon_pullback" in bind_values
+    assert "0.1.1" in bind_values
+    assert [item["strategy_version"] for item in result["items"]] == ["0.1.1"]
+
+
 def test_quant_recommendation_marks_buy_only_for_entry_signal() -> None:
     from alphaagent.server.services.quant import screening
 
@@ -4332,6 +4384,130 @@ def test_backtest_simulation_records_deterministic_cash_position_and_slot_reject
     assert rejected[0]["raw"]["mode"] == "limit_up_open_blocked"
 
 
+def test_dragon_pullback_backtest_rotates_weak_holding_for_stronger_signal() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    d0 = date(2026, 1, 1)
+    d1 = date(2026, 1, 2)
+    d2 = date(2026, 1, 3)
+    d3 = date(2026, 1, 4)
+    d4 = date(2026, 1, 5)
+    d5 = date(2026, 1, 6)
+    weak_symbol = "600000.SSE"
+    strong_symbol = "603629.SSE"
+    bars_by_symbol = {
+        weak_symbol: [
+            engine.Bar(d0, 10.0, 10.2, 9.8, 10.0, volume=1_000_000, turnover=120_000_000),
+            engine.Bar(d1, 10.0, 10.1, 9.8, 9.95, volume=1_000_000, turnover=120_000_000),
+            engine.Bar(d2, 9.95, 10.0, 9.8, 9.9, volume=1_000_000, turnover=120_000_000),
+            engine.Bar(d3, 9.9, 10.0, 9.7, 9.85, volume=1_000_000, turnover=120_000_000),
+            engine.Bar(d4, 9.85, 10.0, 9.7, 9.8, volume=1_000_000, turnover=120_000_000),
+            engine.Bar(d5, 9.8, 9.9, 9.6, 9.75, volume=1_000_000, turnover=120_000_000),
+        ],
+        strong_symbol: [
+            engine.Bar(d4, 20.0, 21.0, 19.8, 20.5, volume=1_000_000, turnover=120_000_000),
+            engine.Bar(d5, 20.5, 21.0, 20.0, 20.8, volume=1_000_000, turnover=120_000_000),
+        ],
+    }
+    score_cache = {
+        d0: [
+            SignalScore(
+                weak_symbol,
+                d0,
+                total_score=80,
+                liquidity_score=80,
+                risk_score=80,
+                entry_signal=True,
+                evidence={"status": "ready", "dragon_state": "TAIL_BUY_READY", "fresh_tail_buy": True},
+            )
+        ],
+        d4: [
+            SignalScore(
+                strong_symbol,
+                d4,
+                total_score=99,
+                liquidity_score=80,
+                risk_score=80,
+                entry_signal=True,
+                evidence={"status": "ready", "dragon_state": "TAIL_BUY_READY", "fresh_tail_buy": True},
+            )
+        ],
+    }
+    params = engine.BacktestParams(
+        strategy=DRAGON_PULLBACK_STRATEGY_ID,
+        start=d0,
+        end=d2,
+        initial_cash=100_000,
+        max_positions=1,
+        max_position_pct=1.0,
+        commission_rate=0.0,
+        stamp_tax_rate=0.0,
+        slippage_bps=0.0,
+        min_entry_score=76,
+        strict_entry=True,
+        candidate_limit=10,
+    )
+
+    result = engine._simulate(
+        session=None,
+        params=params,
+        bars_by_symbol=bars_by_symbol,
+        trading_days=[d0, d1, d2, d3, d4, d5],
+        stock_meta={weak_symbol: {"name": "弱持仓"}, strong_symbol: {"name": "强信号"}},
+        score_cache=score_cache,
+        minute_index={},
+    )
+
+    trades = result["trades"]
+    orders = result["orders"]
+
+    assert [trade["side"] for trade in trades] == ["BUY", "SELL", "BUY"]
+    assert trades[0]["vt_symbol"] == weak_symbol
+    assert trades[1]["vt_symbol"] == weak_symbol
+    assert trades[1]["reason"] == "rotation_for_stronger_signal"
+    assert trades[2]["vt_symbol"] == strong_symbol
+    rotation_order = next(order for order in orders if order["side"] == "SELL" and order["reason"] == "rotation_for_stronger_signal")
+    assert rotation_order["trade_date"] == d5.isoformat()
+    assert rotation_order["raw"]["replacement_symbol"] == strong_symbol
+    assert rotation_order["raw"]["replacement_score"] == 99
+
+
+def test_dragon_pullback_rotation_keeps_fresh_higher_score_holding() -> None:
+    from alphaagent.server.services.backtest import engine, simulation
+
+    signal_day = date(2026, 3, 10)
+    position = engine.Position(
+        vt_symbol="603629.SSE",
+        name="利通电子",
+        volume=100,
+        cost_price=58.8,
+        entry_date=date(2026, 3, 10),
+        highest_price=60.0,
+        reason={"entry_total_score": 99.9325, "dragon_state": "TAIL_BUY_READY"},
+    )
+    candidate = SignalScore(
+        vt_symbol="000039.SZSE",
+        trade_date=signal_day,
+        total_score=99.72,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={"status": "ready", "dragon_state": "TAIL_BUY_READY", "fresh_tail_buy": True},
+    )
+    params = engine.BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID)
+
+    replacement = simulation.rotation_replacement_for_candidate(
+        candidate,
+        {"603629.SSE": position},
+        set(),
+        {"603629.SSE": engine.Bar(signal_day, 58.0, 60.0, 57.0, 57.35)},
+        params,
+        signal_day,
+    )
+
+    assert replacement is None
+
+
 def test_candidate_trace_summary_explains_filled_candidate() -> None:
     from alphaagent.server.services.backtest import engine
 
@@ -5730,6 +5906,11 @@ def test_backtest_api_parses_strict_minute_entry_params(monkeypatch) -> None:
                 "tail_entry_start": "14:30",
                 "tail_entry_end": "14:30",
                 "tail_entry_ma5_tolerance_pct": 0.8,
+                "enable_signal_rotation": True,
+                "rotation_min_score": 96,
+                "rotation_min_score_gap": 10,
+                "rotation_max_holding_return_pct": 6,
+                "rotation_min_holding_days": 4,
                 "persist": False,
             },
     )
@@ -5742,6 +5923,11 @@ def test_backtest_api_parses_strict_minute_entry_params(monkeypatch) -> None:
     assert captured["params"].tail_entry_start == "14:30"
     assert captured["params"].tail_entry_end == "14:30"
     assert captured["params"].tail_entry_ma5_tolerance_pct == 0.8
+    assert captured["params"].enable_signal_rotation is True
+    assert captured["params"].rotation_min_score == 96
+    assert captured["params"].rotation_min_score_gap == 10
+    assert captured["params"].rotation_max_holding_return_pct == 6
+    assert captured["params"].rotation_min_holding_days == 4
 
 
 def test_backtest_api_derives_tail_hybrid_flags_from_execution_model(monkeypatch) -> None:
@@ -5797,6 +5983,30 @@ def test_backtest_api_defaults_to_daily_next_open(monkeypatch) -> None:
     assert captured["params"].max_positions == 10
     assert captured["params"].candidate_limit == 10
     assert captured["params"].max_position_pct == 0.1
+    assert captured["params"].enable_signal_rotation is True
+    assert captured["params"].rotation_min_score == 95.0
+
+
+def test_backtest_method_documents_dragon_pullback_rotation_policy() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    params = engine.BacktestParams(
+        strategy=DRAGON_PULLBACK_STRATEGY_ID,
+        enable_signal_rotation=True,
+        rotation_min_score=96,
+        rotation_min_score_gap=10,
+        rotation_max_holding_return_pct=6,
+    )
+
+    method = engine._backtest_method(params)
+
+    assert method["rotation"] == {
+        "enabled": True,
+        "min_score": 96,
+        "score_gap_reference": 10,
+        "max_holding_return_pct": 6,
+        "min_holding_days": 3,
+    }
 
 
 def test_symbol_backtest_api_passes_single_symbol_and_returns_audit(monkeypatch) -> None:

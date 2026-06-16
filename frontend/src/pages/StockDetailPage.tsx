@@ -20,11 +20,13 @@ import { fetchLimitPools } from "@/api/market";
 import {
   createSymbolBacktest,
   fetchBacktestAudit,
+  fetchBacktestSignalEvents,
   fetchBacktestSymbolDetail,
   fetchBacktests,
   fetchLatestSymbolBacktest,
   fetchQuantStrategies,
   fetchLatestSymbolQuantState,
+  type BacktestSignalEvent,
   type BacktestRun,
   type BacktestAudit,
   type BacktestAuditEvent,
@@ -152,6 +154,12 @@ export function StockDetailPage() {
     enabled: Boolean(vtSymbol && latestPortfolioBacktestId),
     staleTime: 60_000,
   });
+  const portfolioSignalEventsQuery = useQuery({
+    queryKey: ["portfolioBacktestSignalEvents", latestPortfolioBacktestId, vtSymbol],
+    queryFn: () => fetchBacktestSignalEvents(Number(latestPortfolioBacktestId), { vt_symbol: vtSymbol!, limit: 2000 }),
+    enabled: Boolean(vtSymbol && latestPortfolioBacktestId),
+    staleTime: 60_000,
+  });
   const hasPortfolioSymbolExecutions = (portfolioSymbolDetailQuery.data?.trades?.length ?? 0) > 0
     || (portfolioSymbolDetailQuery.data?.orders?.length ?? 0) > 0;
   const latestSymbolBacktestQuery = useQuery({
@@ -209,11 +217,15 @@ export function StockDetailPage() {
     () => backtestSymbolDetailToMarkers(portfolioSymbolDetailQuery.data),
     [portfolioSymbolDetailQuery.data]
   );
+  const portfolioSignalMarkers = useMemo(
+    () => backtestSignalEventsToMarkers(portfolioSignalEventsQuery.data?.items ?? []),
+    [portfolioSignalEventsQuery.data]
+  );
 
   const backtestMarkers = useMemo(
     () => {
       if (portfolioDetailMarkers.some((marker) => marker.markerKind === "trade" || marker.markerKind === "rejected")) {
-        return portfolioDetailMarkers;
+        return mergeMarkerSets(portfolioDetailMarkers, portfolioSignalMarkers);
       }
       const quantMarkers = latestQuantStateQuery.data?.status === "ready"
         ? quantStateToMarkers(latestQuantStateQuery.data)
@@ -221,9 +233,9 @@ export function StockDetailPage() {
           ? replayEventsToMarkers(latestReplay)
           : [];
       const autoReviewMarkers = backtestAuditToMarkers(autoReviewTrades, autoReviewAudit);
-      return mergeMarkerSets(portfolioDetailMarkers, mergeMarkerSets(prioritizeExecutionMarkers(quantMarkers), autoReviewMarkers));
+      return mergeMarkerSets(mergeMarkerSets(portfolioDetailMarkers, portfolioSignalMarkers), mergeMarkerSets(prioritizeExecutionMarkers(quantMarkers), autoReviewMarkers));
     },
-    [autoReviewAudit, autoReviewTrades, latestQuantStateQuery.data, latestReplay, portfolioDetailMarkers]
+    [autoReviewAudit, autoReviewTrades, latestQuantStateQuery.data, latestReplay, portfolioDetailMarkers, portfolioSignalMarkers]
   );
   const selectedBacktestMarker = useMemo(
     () => backtestMarkers.find((marker) => marker.id === selectedBacktestMarkerId) ?? backtestMarkers[0] ?? null,
@@ -290,6 +302,7 @@ export function StockDetailPage() {
         quantState={latestQuantStateQuery.data}
         portfolioBacktest={latestPortfolioBacktest}
         portfolioDetail={portfolioSymbolDetailQuery.data}
+        markerCount={backtestMarkers.length}
         isQuantStateLoading={latestQuantStateQuery.isLoading || latestQuantStateQuery.isFetching}
         quantStateError={latestQuantStateQuery.error}
         isPortfolioDetailLoading={portfolioSymbolDetailQuery.isLoading || portfolioSymbolDetailQuery.isFetching}
@@ -365,6 +378,7 @@ function SingleStockBacktestPanel({
   quantState,
   portfolioBacktest,
   portfolioDetail,
+  markerCount,
   isQuantStateLoading,
   quantStateError,
   isPortfolioDetailLoading,
@@ -378,6 +392,7 @@ function SingleStockBacktestPanel({
   quantState?: SymbolLatestQuantState;
   portfolioBacktest?: BacktestRun | null;
   portfolioDetail?: BacktestSymbolDetail | null;
+  markerCount: number;
   isQuantStateLoading: boolean;
   quantStateError: unknown;
   isPortfolioDetailLoading: boolean;
@@ -429,6 +444,7 @@ function SingleStockBacktestPanel({
         <PortfolioBacktestSymbolSummary
           backtest={portfolioBacktest}
           detail={portfolioDetail}
+          markerCount={markerCount}
           isLoading={isPortfolioDetailLoading}
           error={portfolioDetailError}
           strategyName={strategies.find((item) => item.id === strategy)?.name ?? "主线龙回头回踩低吸"}
@@ -530,12 +546,14 @@ function SingleStockBacktestPanel({
 function PortfolioBacktestSymbolSummary({
   backtest,
   detail,
+  markerCount,
   isLoading,
   error,
   strategyName,
 }: {
   backtest?: BacktestRun | null;
   detail?: BacktestSymbolDetail | null;
+  markerCount: number;
   isLoading: boolean;
   error: unknown;
   strategyName: string;
@@ -593,7 +611,7 @@ function PortfolioBacktestSymbolSummary({
           <InfoCell label="过程来源" value="组合回测" />
           <InfoCell label="回测ID" value={backtest?.id ? `#${backtest.id}` : "--"} />
           <InfoCell label="策略" value={strategyName} />
-          <InfoCell label="K线标记" value={`${backtestSymbolDetailToMarkers(detail).length} 个`} />
+          <InfoCell label="K线标记" value={`${markerCount} 个`} />
         </div>
         <p className="mt-3 text-xs text-muted-foreground">
           本页收益、闭合交易和 K 线买卖标记均来自同一个组合回测口径，已过滤全局 replay 中重复的持仓期 BUY 信号。
@@ -1047,6 +1065,89 @@ function backtestSymbolDetailToMarkers(detail?: BacktestSymbolDetail | null): Kl
     if (dateCompare !== 0) return dateCompare;
     return markerSortRank(left) - markerSortRank(right);
   });
+}
+
+function backtestSignalEventsToMarkers(events: BacktestSignalEvent[]): KlineMarker[] {
+  return dedupeMarkers(
+    events
+      .filter((event) => event.side === "BUY" || event.side === "SELL")
+      .map((event, index) => backtestSignalEventToMarker(event, index))
+  ).sort((left, right) => {
+    const dateCompare = left.time.localeCompare(right.time);
+    if (dateCompare !== 0) return dateCompare;
+    return markerSortRank(left) - markerSortRank(right);
+  });
+}
+
+function backtestSignalEventToMarker(event: BacktestSignalEvent, index: number): KlineMarker {
+  const raw = safeRaw(event.raw);
+  const evidence = raw.evidence && typeof raw.evidence === "object" && !Array.isArray(raw.evidence)
+    ? raw.evidence as Record<string, unknown>
+    : raw;
+  const isBuy = event.side === "BUY";
+  const status = event.linked_order_status === "filled" ? "filled" : event.plan_status ?? "planned";
+  return {
+    id: `portfolio-signal-${event.backtest_id ?? ""}-${event.vt_symbol}-${event.signal_date}-${event.side}-${index}`,
+    time: event.signal_date ?? event.trade_date,
+    tradeDate: event.trade_date,
+    signalDate: event.signal_date,
+    executeDate: event.execute_date,
+    side: event.side,
+    markerKind: "signal",
+    status: "signal",
+    reason: event.reason,
+    reasonLabel: event.reason_label ?? portfolioReasonLabel(event.reason),
+    price: null,
+    executionMode: getRawText(raw, "mode") ?? getRawText(raw, "execution_model"),
+    title: isBuy ? "BUY 信号" : `SELL 信号：${event.reason_label ?? portfolioReasonLabel(event.reason)}`,
+    strategy: isBuy ? portfolioSignalText(event, evidence) : `${event.signal_date} 收盘后触发 ${event.reason_label ?? portfolioReasonLabel(event.reason)}。`,
+    signalText: isBuy ? portfolioSignalText(event, evidence) : `${event.signal_date} 收盘后触发 ${event.reason_label ?? portfolioReasonLabel(event.reason)}。`,
+    executionText: portfolioSignalExecutionText(event, status),
+    reasonText: isBuy
+      ? "同一组合回测里的理论 BUY 计划；是否实际买入还取决于排名、持仓、资金和执行规则。"
+      : markerReasonTextFromReason(event.reason),
+    evidence: portfolioSignalEvidence(event, evidence),
+    raw: event.raw,
+    text: isBuy ? "信号" : "卖信",
+  };
+}
+
+function portfolioSignalText(event: BacktestSignalEvent, evidence: Record<string, unknown>) {
+  const score = event.score ?? getRawNumber(evidence, "total_score");
+  const ma5Distance = getRawNumber(evidence, "ma5_distance_pct");
+  const closePrice = getRawNumber(evidence, "close_price");
+  const parts = [
+    `${event.signal_date} 收盘后生成 BUY 信号`,
+    score == null ? "" : `总分 ${formatNumber(score, 1)}`,
+    closePrice == null ? "" : `收盘价 ${formatPrice(closePrice)}`,
+    ma5Distance == null ? "" : `距MA5 ${formatPct(ma5Distance)}`,
+  ].filter(Boolean);
+  return parts.join("；");
+}
+
+function portfolioSignalExecutionText(event: BacktestSignalEvent, status: string) {
+  if (event.linked_order_status) {
+    return `执行日 ${event.execute_date}，关联订单状态 ${event.linked_order_status}。`;
+  }
+  if (status === "planned") {
+    return `理论计划执行日 ${event.execute_date}；组合未必实际成交，请以买入成交/买拒标记为准。`;
+  }
+  return `${event.plan_status_label ?? status}，执行日 ${event.execute_date}。`;
+}
+
+function portfolioSignalEvidence(event: BacktestSignalEvent, evidence: Record<string, unknown>): KlineMarker["evidence"] {
+  const rows: Array<{ label: string; value: string; valueClass?: string }> = [];
+  rows.push({ label: "信号日", value: event.signal_date });
+  rows.push({ label: "执行日", value: event.execute_date });
+  if (event.reason_label || event.reason) rows.push({ label: "原因", value: event.reason_label ?? portfolioReasonLabel(event.reason) });
+  if (event.plan_status_label || event.plan_status) rows.push({ label: "计划状态", value: event.plan_status_label ?? event.plan_status ?? "--" });
+  pushNumberEvidence(rows, "评分", event.score, 1);
+  pushPriceEvidence(rows, "理论价", event.price);
+  pushPriceEvidence(rows, "MA5", getRawNumber(evidence, "ma5"));
+  pushPctEvidence(rows, "距MA5", getRawNumber(evidence, "ma5_distance_pct"));
+  if (event.linked_order_status) rows.push({ label: "订单状态", value: event.linked_order_status });
+  if (event.linked_order_reason_label || event.linked_order_reason) rows.push({ label: "订单原因", value: event.linked_order_reason_label ?? portfolioReasonLabel(event.linked_order_reason) });
+  return rows;
 }
 
 function orderToAuditEvent(order: BacktestOrderEvent): BacktestAuditEvent {

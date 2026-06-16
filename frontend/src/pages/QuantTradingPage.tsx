@@ -383,11 +383,8 @@ export function QuantTradingPage() {
             selectedId={activeBacktestId}
             onSelect={setSelectedBacktestId}
             params={backtestParams}
-            onParamsChange={updateBacktestParams}
             strategies={strategiesQuery.data?.items ?? []}
             selectedStrategy={selectedStrategy}
-            tradingDates={tradingDatesQuery.data?.items.map((item) => item.trade_date) ?? []}
-            isRunning={isResearchRunning}
             report={reportQuery.data}
             dataQuality={dataQualityQuery.data}
             isDataQualityLoading={dataQualityQuery.isLoading}

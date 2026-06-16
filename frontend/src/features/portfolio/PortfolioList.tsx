@@ -1,4 +1,4 @@
-import { Plus, Trash2 } from "lucide-react";
+import { Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -36,14 +36,12 @@ function adviceClass(advice?: string): string {
 export function PortfolioList({
   items,
   positionsBySymbol,
-  onAddToGroup,
   onRemove,
   onViewDetail,
   removingSymbol,
 }: {
   items: PortfolioItem[];
   positionsBySymbol: Map<string, SimulationPosition>;
-  onAddToGroup: (vtSymbol: string, name?: string | null) => void;
   onRemove: (groupId: number, vtSymbol: string) => void;
   onViewDetail?: (vtSymbol: string) => void;
   removingSymbol?: string | null;
@@ -99,9 +97,6 @@ export function PortfolioList({
               )}
             </button>
 
-            <Button size="sm" variant="outline" onClick={() => onAddToGroup(item.vt_symbol, item.name)}>
-              <Plus size={13} className="mr-1" /> 加入
-            </Button>
             <Button
               size="sm"
               variant="ghost"

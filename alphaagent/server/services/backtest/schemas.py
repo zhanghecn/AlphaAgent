@@ -37,6 +37,11 @@ class BacktestParams:
     tail_entry_start: str = "14:30"
     tail_entry_end: str = "14:30"
     tail_entry_ma5_tolerance_pct: float = 1.5
+    enable_signal_rotation: bool = True
+    rotation_min_score: float = 95.0
+    rotation_min_score_gap: float = 8.0
+    rotation_max_holding_return_pct: float = 8.0
+    rotation_min_holding_days: int = 3
     persist: bool = False
     symbols: list[str] | None = None
     included_boards: tuple[str, ...] = DEFAULT_QUANT_INCLUDED_BOARDS

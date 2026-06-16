@@ -115,6 +115,7 @@ def simulate_portfolio(
                     "price_source": "stock_daily_bars.open_price",
                     "proxy_used": False,
                 }
+                raw.update(order.get("raw") or {})
                 if callbacks.is_limit_down_open(bar):
                     orders.append(callbacks.order(current_day, order["vt_symbol"], "SELL", None, position.volume, "rejected", "limit_down", raw))
                     continue
@@ -259,17 +260,22 @@ def simulate_portfolio(
             daily_candidates = None
             reserved_exit_count = len({str(order["vt_symbol"]) for order in pending_sells})
             free_slots = max(params.max_positions - len(positions) + reserved_exit_count - len(pending_buys), 0)
-            if free_slots > 0:
-                daily_candidates = callbacks.score_day(session, bars_by_symbol, current_day, params, score_cache, score_context)
-                for candidate in daily_candidates[: min(free_slots, params.candidate_limit)]:
-                    if candidate.vt_symbol in positions:
-                        continue
-                    pending_buys.append({
-                        "execute_date": next_day,
-                        "signal_date": current_day,
-                        "vt_symbol": candidate.vt_symbol,
-                        "reason": candidate.evidence,
-                    })
+            should_score_for_rotation = params.enable_signal_rotation and params.strategy == DRAGON_PULLBACK_STRATEGY_ID
+            if free_slots > 0 or should_score_for_rotation:
+                if score_cache is not None and current_day not in score_cache and session is None:
+                    daily_candidates = []
+                else:
+                    daily_candidates = callbacks.score_day(session, bars_by_symbol, current_day, params, score_cache, score_context)
+            schedule_entry_plans(
+                current_day,
+                next_day,
+                daily_candidates or [],
+                positions,
+                pending_buys,
+                pending_sells,
+                today_bars,
+                params,
+            )
             if not params.symbols:
                 if daily_candidates is None:
                     if score_cache is not None and current_day in score_cache:
@@ -282,7 +288,7 @@ def simulate_portfolio(
                     signal_events_for_day(
                         current_day,
                         next_day,
-                        daily_candidates,
+                        daily_candidates or [],
                         theoretical_positions,
                         today_bars,
                         bar_index,
@@ -315,6 +321,143 @@ def simulate_portfolio(
         "trades": [callbacks.trade_to_api(trade) for trade in trades],
         "orders": [callbacks.mapping_to_api(item) for item in orders],
     }
+
+
+def schedule_entry_plans(
+    signal_date: date,
+    execute_date: date,
+    candidates: list[Any],
+    positions: dict[str, Position],
+    pending_buys: list[dict[str, Any]],
+    pending_sells: list[dict[str, Any]],
+    today_bars: dict[str, Bar],
+    params: BacktestParams,
+) -> None:
+    pending_buy_symbols = {str(order["vt_symbol"]) for order in pending_buys}
+    pending_sell_symbols = {str(order["vt_symbol"]) for order in pending_sells}
+
+    for candidate in candidates[: params.candidate_limit]:
+        vt_symbol = str(candidate.vt_symbol)
+        if vt_symbol in positions or vt_symbol in pending_buy_symbols:
+            continue
+        reserved_exit_count = len({str(order["vt_symbol"]) for order in pending_sells})
+        free_slots = max(params.max_positions - len(positions) + reserved_exit_count - len(pending_buys), 0)
+        if free_slots <= 0:
+            replacement = rotation_replacement_for_candidate(candidate, positions, pending_sell_symbols, today_bars, params, signal_date)
+            if replacement is None:
+                continue
+            pending_sells.append(
+                {
+                    "execute_date": execute_date,
+                    "signal_date": signal_date,
+                    "vt_symbol": replacement.vt_symbol,
+                    "reason": "rotation_for_stronger_signal",
+                    "raw": rotation_sell_raw(candidate, replacement, signal_date, execute_date, today_bars.get(replacement.vt_symbol)),
+                }
+            )
+            pending_sell_symbols.add(replacement.vt_symbol)
+
+        pending_buys.append(
+            {
+                "execute_date": execute_date,
+                "signal_date": signal_date,
+                "vt_symbol": vt_symbol,
+                "reason": candidate_entry_reason(candidate),
+            }
+        )
+        pending_buy_symbols.add(vt_symbol)
+
+
+def rotation_replacement_for_candidate(
+    candidate: Any,
+    positions: dict[str, Position],
+    pending_sell_symbols: set[str],
+    today_bars: dict[str, Bar],
+    params: BacktestParams,
+    signal_date: date | None = None,
+) -> Position | None:
+    if not allow_signal_rotation(candidate, params):
+        return None
+
+    candidate_score = float(getattr(candidate, "total_score", 0) or 0)
+    replacement_rows: list[tuple[float, float, Position]] = []
+    for vt_symbol, position in positions.items():
+        if vt_symbol in pending_sell_symbols:
+            continue
+        if signal_date is not None and (signal_date - position.entry_date).days < params.rotation_min_holding_days:
+            continue
+        bar = today_bars.get(vt_symbol)
+        if not bar:
+            continue
+        holding_return_pct = position_return_pct(position, bar)
+        if holding_return_pct > params.rotation_max_holding_return_pct:
+            continue
+        entry_score = entry_score_for_position(position)
+        if candidate_score < entry_score:
+            continue
+        replacement_rows.append((holding_return_pct, entry_score, position))
+    if not replacement_rows:
+        return None
+    replacement_rows.sort(key=lambda item: (item[0], item[1], item[2].entry_date, item[2].vt_symbol))
+    return replacement_rows[0][2]
+
+
+def allow_signal_rotation(candidate: Any, params: BacktestParams) -> bool:
+    if params.strategy != DRAGON_PULLBACK_STRATEGY_ID or not params.enable_signal_rotation:
+        return False
+    if not bool(getattr(candidate, "entry_signal", False)):
+        return False
+    if float(getattr(candidate, "total_score", 0) or 0) < params.rotation_min_score:
+        return False
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if evidence.get("dragon_state") != "TAIL_BUY_READY":
+        return False
+    if evidence.get("fresh_tail_buy") is False:
+        return False
+    return True
+
+
+def rotation_sell_raw(
+    candidate: Any,
+    replacement: Position,
+    signal_date: date,
+    execute_date: date,
+    bar: Bar | None,
+) -> dict[str, Any]:
+    holding_return_pct = position_return_pct(replacement, bar) if bar else None
+    return {
+        "mode": "rotation_for_stronger_signal",
+        "signal_date": signal_date.isoformat(),
+        "execute_date": execute_date.isoformat(),
+        "entry_date": replacement.entry_date.isoformat(),
+        "reason": "rotation_for_stronger_signal",
+        "replacement_symbol": str(candidate.vt_symbol),
+        "replacement_score": float(getattr(candidate, "total_score", 0) or 0),
+        "replaced_entry_score": entry_score_for_position(replacement),
+        "holding_return_pct": holding_return_pct,
+    }
+
+
+def entry_score_for_position(position: Position) -> float:
+    reason = position.reason if isinstance(position.reason, dict) else {}
+    for key in ("entry_total_score", "total_score", "score"):
+        value = _float_or_none(reason.get(key))
+        if value is not None:
+            return value
+    return 0.0
+
+
+def position_return_pct(position: Position, bar: Bar) -> float:
+    if not position.cost_price:
+        return 0.0
+    return (bar.close_price / position.cost_price - 1) * 100
+
+
+def candidate_entry_reason(candidate: Any) -> dict[str, Any]:
+    evidence = dict(getattr(candidate, "evidence", {}) or {})
+    evidence.setdefault("entry_total_score", float(getattr(candidate, "total_score", 0) or 0))
+    evidence.setdefault("entry_signal_type", str(getattr(candidate, "signal_type", "") or ""))
+    return evidence
 
 
 def signal_events_for_day(
