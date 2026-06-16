@@ -1222,15 +1222,7 @@ def ensure_sync_schema() -> None:
     """Create sync tables if they are missing."""
     if not is_database_configured():
         return
-    schema.create_schema(get_engine())
-    # Idempotent column additions for tables created by earlier migrations
-    try:
-        with session_scope() as session:
-            session.execute(text(
-                "ALTER TABLE stocks ADD COLUMN IF NOT EXISTS volume_ratio FLOAT"
-            ))
-    except Exception:
-        pass
+    schema.ensure_schema_once(get_engine())
     seed_default_registry()
     mark_interrupted_runs()
 

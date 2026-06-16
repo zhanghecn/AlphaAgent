@@ -97,17 +97,23 @@ def get_backtest(backtest_id: int) -> dict[str, Any]:
     return {"status": "ready", "item": _mapping_to_api(dict(row))}
 
 
-def list_backtests(limit: int = 50, run_type: str = "all") -> dict[str, Any]:
+def list_backtests(limit: int = 50, run_type: str = "all", strategy_id: str | None = None) -> dict[str, Any]:
     if not is_database_configured():
         return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
     _ensure_backtest_schema()
     requested_type = str(run_type or "all").lower()
+    requested_strategy = str(strategy_id or "").strip()
     item_limit = min(max(limit, 1), 200)
     query_limit = item_limit if requested_type == "all" else min(max(item_limit * 10, 200), 1000)
+    conditions = []
+    if requested_strategy:
+        conditions.append(schema.backtest_runs.c.strategy_id == requested_strategy)
+    query = select(schema.backtest_runs)
+    if conditions:
+        query = query.where(and_(*conditions))
+    query = query.order_by(desc(schema.backtest_runs.c.id)).limit(query_limit)
     with session_scope() as session:
-        rows = session.execute(
-            select(schema.backtest_runs).order_by(desc(schema.backtest_runs.c.id)).limit(query_limit)
-        ).mappings().all()
+        rows = session.execute(query).mappings().all()
     items = []
     for row in rows:
         payload = _mapping_to_api(dict(row))
@@ -1035,7 +1041,7 @@ def backtest_audit(backtest_id: int, vt_symbol: str | None = None, limit: int = 
 def _ensure_backtest_schema() -> None:
     """Allow backtests to run from CLI/service calls, not only API startup."""
 
-    schema.create_schema(get_engine())
+    schema.ensure_schema_once(get_engine())
 
 
 def _simulate(
@@ -2830,31 +2836,47 @@ def _backtest_method(params: BacktestParams) -> dict[str, Any]:
             "strict_entry": params.strict_entry,
             "candidate_limit": params.candidate_limit,
         },
-        "execution": {
-            "execution_model": params.execution_model,
-            "intraday_entry": params.intraday_entry,
-            "minute_entry_required": params.minute_entry_required,
-            "minute_interval": params.minute_interval,
-            "tail_entry_window": f"{params.tail_entry_start}-{params.tail_entry_end}",
-            "tail_entry_ma5_tolerance_pct": params.tail_entry_ma5_tolerance_pct,
-        },
+        "execution": _execution_method_payload(params),
     }
 
 
 def _backtest_assumptions(params: BacktestParams) -> dict[str, str]:
-    return {
+    assumptions = {
         "candidate_generation": _execution_signal_timing(params),
         "execution": _execution_timing(params),
         "execution_model": params.execution_model,
         "tail_entry": _tail_entry_assumption(params),
-        "minute_interval": params.minute_interval,
-        "tail_entry_window": f"{params.tail_entry_start}-{params.tail_entry_end}",
-        "minute_entry_required": str(params.minute_entry_required),
         "costs": "commission, stamp tax on sells, and slippage are included",
         "positioning": "equal cash budget per position, 100-share lot rounded",
         "turnover": "turnover_pct uses traded notional divided by initial cash",
         "data_as_of_policy": "daily bars only; financial data requires publish_date",
     }
+    if params.execution_model in {"tail_close_hybrid", "strict_1430"}:
+        assumptions.update(
+            {
+                "minute_interval": params.minute_interval,
+                "tail_entry_window": f"{params.tail_entry_start}-{params.tail_entry_end}",
+                "minute_entry_required": str(params.minute_entry_required),
+            }
+        )
+    return assumptions
+
+
+def _execution_method_payload(params: BacktestParams) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "execution_model": params.execution_model,
+        "intraday_entry": params.intraday_entry,
+        "minute_entry_required": params.minute_entry_required,
+    }
+    if params.execution_model in {"tail_close_hybrid", "strict_1430"}:
+        payload.update(
+            {
+                "minute_interval": params.minute_interval,
+                "tail_entry_window": f"{params.tail_entry_start}-{params.tail_entry_end}",
+                "tail_entry_ma5_tolerance_pct": params.tail_entry_ma5_tolerance_pct,
+            }
+        )
+    return payload
 
 
 def _execution_signal_timing(params: BacktestParams) -> str:
@@ -2868,7 +2890,7 @@ def _execution_timing(params: BacktestParams) -> str:
         return "买入/卖出均为收盘信号后的下一交易日执行；优先使用执行日 14:30 分钟快照，没有分钟线时使用执行日收盘价作为尾盘代理。"
     if params.execution_model == "strict_1430":
         return "买入/卖出均为收盘信号后的下一交易日执行；只在执行日 14:30 分钟快照存在时成交，缺 14:30 数据或未触发时拒单。"
-    return "兼容旧模型：买入为 D 收盘信号 -> D+1 尾盘分钟/开盘回退；卖出为 D 收盘信号 -> D+1 开盘。"
+    return "历史日线模型：D 日收盘信号，D+1 开盘执行买入/卖出。"
 
 
 def _tail_entry_assumption(params: BacktestParams) -> str:
@@ -2876,7 +2898,7 @@ def _tail_entry_assumption(params: BacktestParams) -> str:
         return "严格 14:30 模型使用 D 日收盘可见日线生成下一交易日计划；执行日只在 14:30 的 1 分钟快照存在且满足尾盘条件时成交，否则拒单。"
     if params.execution_model == "tail_close_hybrid":
         return "尾盘混合模型使用 D 日收盘可见日线生成下一交易日计划；执行日 14:30 分钟价优先，无分钟线时用执行日收盘价作为尾盘代理。"
-    return "旧兼容模型用于历史报告对比，不作为当前严格 14:30 真实回测口径。"
+    return "默认历史日线模型不依赖分钟线；实时尾盘判断应放在实时交易/模拟交易模块中处理。"
 
 
 def _audit_events(orders: list[dict[str, Any]], trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2951,6 +2973,8 @@ def _audit_order_message(order: dict[str, Any], execution: dict[str, Any]) -> st
         return f"{side}{status}：执行日尾盘涨停或接近涨停，保守判定买不到。"
     if mode == "limit_down_tail_blocked":
         return f"{side}{status}：执行日尾盘跌停或接近跌停，保守判定卖不出。"
+    if mode == "limit_down_open_blocked":
+        return f"{side}{status}：执行日开盘跌停或接近跌停，保守判定卖不出。"
     if reason == "tail_entry_not_triggered":
         details = []
         price = execution.get("price")
@@ -2972,7 +2996,9 @@ def _audit_order_message(order: dict[str, Any], execution: dict[str, Any]) -> st
     if mode == "minute_tail_ma5":
         return f"{side}{status}：尾盘分钟线接近可见 MA5，原因 {reason}。"
     if mode == "daily_next_open_fallback":
-        return f"{side}{status}：分钟尾盘不可用或未触发，回退到 D+1 开盘，原因 {reason}。"
+        return f"{side}{status}：按历史日线模型在 D+1 开盘成交，原因 {reason}。"
+    if mode == "daily_next_open":
+        return f"{side}{status}：按历史日线模型在 D+1 开盘成交，原因 {reason}。"
     if mode == "minute_tail_ma5_required":
         return f"{side}{status}：严格分钟模式下尾盘 MA5 未触发或缺分钟线，原因 {reason}。"
     if mode == "daily_close_sell_signal":

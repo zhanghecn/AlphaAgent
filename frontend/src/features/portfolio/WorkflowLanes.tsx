@@ -29,6 +29,7 @@ interface WorkflowLanesProps {
   selectedSymbols?: Set<string>;
   onToggleSelect?: (vtSymbol: string) => void;
   accountId?: number;
+  selectedGroupId?: number;
 }
 
 /**
@@ -53,6 +54,7 @@ export function WorkflowLanes({
   selectedSymbols,
   onToggleSelect,
   accountId,
+  selectedGroupId,
 }: WorkflowLanesProps) {
   return (
     <div className="space-y-4">
@@ -96,6 +98,7 @@ export function WorkflowLanes({
             selectedSymbols={selectedSymbols}
             onToggleSelect={onToggleSelect}
             accountId={accountId}
+            selectedGroupId={selectedGroupId}
           />
         );
       })}

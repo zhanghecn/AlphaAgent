@@ -39,6 +39,7 @@ from alphaagent.server.services.backtest.engine import (
     run_backtest,
 )
 from alphaagent.server.services.backtest.strict_pipeline import run_strict_minute_backtest_pipeline
+from alphaagent.server.services.quant.factors import STRATEGY_ID
 
 router = APIRouter(prefix="/backtests", tags=["backtests"])
 
@@ -117,9 +118,10 @@ def create_strategy_comparison(payload: dict[str, Any] = Body(default_factory=di
 def list_runs(
     limit: int = Query(default=50, ge=1, le=200),
     run_type: str = Query(default="all", pattern="^(all|portfolio|symbol)$"),
+    strategy: str | None = Query(default=None),
 ):
     try:
-        return ok(list_backtests(limit, run_type=run_type))
+        return ok(list_backtests(limit, run_type=run_type, strategy_id=strategy))
     except Exception as exc:
         return _service_error(exc)
 
@@ -387,15 +389,15 @@ def _parse_date(value: Any) -> date | None:
 
 
 def _params_from_payload(payload: dict[str, Any]) -> BacktestParams:
-    execution_model = str(payload.get("execution_model") or "strict_1430")
+    execution_model = str(payload.get("execution_model") or "legacy_next_open")
     intraday_entry, minute_entry_required = _execution_flags_from_payload(payload, execution_model)
     return BacktestParams(
-        strategy=str(payload.get("strategy") or "mainline_leader_pullback"),
+        strategy=str(payload.get("strategy") or STRATEGY_ID),
         start=_parse_date(payload.get("start")) or date(2020, 1, 1),
         end=_parse_date(payload.get("end")),
         initial_cash=float(payload.get("initial_cash") or 1_000_000),
-        max_positions=int(payload.get("max_positions") or 8),
-        max_position_pct=float(payload.get("max_position_pct") or 0.125),
+        max_positions=int(payload.get("max_positions") or 10),
+        max_position_pct=float(payload.get("max_position_pct") or 0.1),
         commission_rate=float(payload.get("commission_rate") or 0.0003),
         stamp_tax_rate=float(payload.get("stamp_tax_rate") or 0.0005),
         slippage_bps=float(payload.get("slippage_bps") or 10),
@@ -403,9 +405,9 @@ def _params_from_payload(payload: dict[str, Any]) -> BacktestParams:
         take_profit_pct=float(payload.get("take_profit_pct") or 0.18),
         trailing_stop_pct=float(payload.get("trailing_stop_pct") or 0.08),
         time_stop_days=int(payload.get("time_stop_days") or 15),
-        candidate_limit=int(payload.get("candidate_limit") or 20),
-        max_symbols=int(payload.get("max_symbols") or 500),
-        min_entry_score=float(payload.get("min_entry_score") or 68),
+        candidate_limit=int(payload.get("candidate_limit") or 10),
+        max_symbols=int(payload.get("max_symbols") or 5000),
+        min_entry_score=float(payload.get("min_entry_score") or 76),
         strict_entry=_parse_bool(payload.get("strict_entry"), default=True),
         execution_model=execution_model,
         intraday_entry=intraday_entry,
@@ -434,7 +436,7 @@ def _execution_flags_from_payload(payload: dict[str, Any], execution_model: str)
     if model in {"tail_close_hybrid", "hybrid", "tail"}:
         return True, False
     return (
-        _parse_bool(payload.get("intraday_entry"), default=True),
+        _parse_bool(payload.get("intraday_entry"), default=False),
         _parse_bool(payload.get("minute_entry_required"), default=False),
     )
 

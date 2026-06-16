@@ -1,440 +1,149 @@
 import { useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
-import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
-import { Briefcase, RefreshCw } from "lucide-react";
-import {
-  addPortfolioGroupItem,
-  fetchLatestSymbolReplay,
-  removePortfolioGroupItem,
-} from "@/api/quant";
-import type { PortfolioGroup, SymbolStrategyReplay } from "@/api/quant";
-import { ErrorState } from "@/components/ErrorState";
-import { LoadingState } from "@/components/LoadingState";
+import { useNavigate } from "react-router-dom";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { RefreshCw, Settings2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { PortfolioKpiBar } from "@/features/portfolio/PortfolioKpiBar";
-import { GroupNav } from "@/features/portfolio/GroupNav";
-import { WorkflowLanes } from "@/features/portfolio/WorkflowLanes";
-import { BlacklistSidebar } from "@/features/portfolio/BlacklistSidebar";
-import { AddToGroupDialog } from "@/features/portfolio/AddToGroupDialog";
-import { BatchGroupActions } from "@/features/portfolio/BatchGroupActions";
-import { TradeDialog, type TradeOrderPayload } from "@/features/portfolio/TradeDialog";
-import { BuildPreviewDialog } from "@/features/portfolio/BuildPreviewDialog";
-import { GroupEditDialog } from "@/features/portfolio/GroupEditDialog";
-import { useDailyBarsForCards } from "@/features/portfolio/hooks/useDailyBarsForCards";
 import { useToast } from "@/components/ui/toast";
-import type { StrategyAdvice } from "@/features/portfolio/HoldingCard";
-import {
-  useBatchSelection,
-  useHoldings,
-  usePortfolioGroups,
-  usePortfolioState,
-  useTradeActions,
-} from "@/features/portfolio/hooks";
-
-interface TradeDialogState {
-  open: boolean;
-  mode: "sell" | "add";
-  symbol: string;
-}
+import { PortfolioKpiBar } from "@/features/portfolio/PortfolioKpiBar";
+import { PortfolioTabs } from "@/features/portfolio/PortfolioTabs";
+import { PortfolioList } from "@/features/portfolio/PortfolioList";
+import { AddToGroupDialog } from "@/features/portfolio/AddToGroupDialog";
+import { GroupManageDialog } from "@/features/portfolio/GroupManageDialog";
+import { usePortfolioGroups } from "@/features/portfolio/hooks/usePortfolioGroups";
+import { useHoldings } from "@/features/portfolio/hooks/useHoldings";
+import { usePortfolioState } from "@/features/portfolio/hooks/usePortfolioState";
+import { addPortfolioGroupItem, removePortfolioGroupItem } from "@/api/quant";
 
 /**
- * Portfolio center — workflow-lane layout with actionable holdings.
+ * PortfolioPage — holdings center.
  *
- * Four lifecycle lanes (watch / candidate / holding / review) + blacklist
- * sidebar, driven by extracted hooks. Holding cards support manual
- * sell / add-position (via placeOrder), the build button opens a configurable
- * preview with result feedback, and group editing/deleting is wired to the
- * already-existing PATCH/DELETE endpoints.
+ * Tabs are the actual backend groups (one tab per non-empty group, named by
+ * the group's own name) — not a fixed set of lifecycle buckets. Selecting a
+ * tab shows that group's stocks. Each row has only 加入 / 删掉. The
+ * 「分组管理」button opens a modal to create / edit / delete groups.
  */
 export function PortfolioPage() {
-  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const toast = useToast();
-
-  const [selectedGroupId, setSelectedGroupId] = useState<number | null>(null);
-  const [addToGroupOpen, setAddToGroupOpen] = useState(false);
-  const [addToGroupSymbol, setAddToGroupSymbol] = useState("");
-  const [tradeDialog, setTradeDialog] = useState<TradeDialogState>({
-    open: false,
-    mode: "sell",
-    symbol: "",
-  });
-  const [buildOpen, setBuildOpen] = useState(false);
-  const [editGroup, setEditGroup] = useState<PortfolioGroup | null>(null);
-
+  const navigate = useNavigate();
   const groups = usePortfolioGroups();
-  const holdings = useHoldings();
   const portfolioState = usePortfolioState(groups.groups);
-  const selection = useBatchSelection();
-  const trade = useTradeActions(holdings.accountId);
+  const holdings = useHoldings();
 
-  // Items that participate in batch group operations (non-holding lanes).
-  const batchableItems = useMemo(
-    () => [
-      ...portfolioState.itemsByState.watch,
-      ...portfolioState.itemsByState.candidate,
-      ...portfolioState.itemsByState.review,
-    ],
-    [portfolioState.itemsByState],
-  );
+  const [activeGroupId, setActiveGroupId] = useState<number | null>(null);
+  const [addToGroupSymbol, setAddToGroupSymbol] = useState<string | null>(null);
+  const [manageOpen, setManageOpen] = useState(false);
 
-  // All symbols needing daily bars (lane items + real positions).
-  const allSymbols = useMemo(() => {
-    const symbols = new Set<string>();
-    batchableItems.forEach((item) => symbols.add(item.vt_symbol));
-    holdings.positions.forEach((position) => symbols.add(position.vt_symbol));
-    return Array.from(symbols);
-  }, [batchableItems, holdings.positions]);
-
-  const barsBySymbol = useDailyBarsForCards(allSymbols);
-
-  const replayAdviceQueries = useQueries({
-    queries: holdings.positions.map((position) => ({
-      queryKey: ["symbolLatestReplay", position.vt_symbol],
-      queryFn: () => fetchLatestSymbolReplay(position.vt_symbol),
-      enabled: Boolean(position.vt_symbol),
-      staleTime: 30_000,
-    })),
+  const addMutation = useMutation({
+    mutationFn: ({ groupId, symbol, reason }: { groupId: number; symbol: string; reason: string }) =>
+      addPortfolioGroupItem(groupId, { vt_symbol: symbol, source: "manual", reason }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["portfolioGroupItems"] });
+      setAddToGroupSymbol(null);
+      toast({ title: "已加入分组", variant: "success" });
+    },
+    onError: (error) => toast({ title: "加入失败", description: error.message, variant: "error" }),
   });
 
-  const strategyAdviceBySymbol = useMemo(() => {
-    const result = new Map<string, StrategyAdvice>();
-    holdings.positions.forEach((position, index) => {
-      const query = replayAdviceQueries[index];
-      const replay = query?.data;
-      result.set(position.vt_symbol, strategyAdviceFromReplay(replay, query?.isLoading || query?.isFetching));
-    });
-    return result;
-  }, [holdings.positions, replayAdviceQueries]);
+  const removeMutation = useMutation({
+    mutationFn: ({ groupId, symbol }: { groupId: number; symbol: string }) =>
+      removePortfolioGroupItem(groupId, symbol),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["portfolioGroupItems"] });
+      toast({ title: "已删除", variant: "success" });
+    },
+    onError: (error) => toast({ title: "删除失败", description: error.message, variant: "error" }),
+  });
 
+  // Per-group item count (for the manage dialog: all groups, including empty).
   const itemCounts = useMemo(() => {
-    const counts: Record<number, number> = {};
-    for (const [groupId, items] of portfolioState.itemsByGroupId) {
-      counts[groupId] = items.length;
-    }
-    return counts;
+    const c: Record<number, number> = {};
+    portfolioState.itemsByGroupId.forEach((list, gid) => {
+      c[gid] = list.length;
+    });
+    return c;
   }, [portfolioState.itemsByGroupId]);
 
-  // Batch add selected symbols to a target group.
-  const batchAddMutation = useMutation({
-    mutationFn: async ({
-      groupId,
-      symbols,
-      reason,
-    }: {
-      groupId: number;
-      symbols: string[];
-      reason: string;
-    }) => {
-      return Promise.allSettled(
-        symbols.map((symbol) =>
-          addPortfolioGroupItem(groupId, { vt_symbol: symbol, source: "batch", reason }),
-        ),
-      );
-    },
-    onSuccess: (results) => {
-      queryClient.invalidateQueries({ queryKey: ["portfolioGroupItems"] });
-      selection.clear();
-      const fulfilled = results.filter((r) => r.status === "fulfilled").length;
-      const failed = results.length - fulfilled;
-      toast({
-        title: fulfilled > 0 ? `已加入 ${fulfilled} 只` : "加入分组失败",
-        description: failed > 0 ? `${failed} 只未成功` : undefined,
-        variant: fulfilled > 0 ? "success" : "error",
-      });
-    },
-  });
+  // Tabs = user-managed groups only. System-generated groups (量化候选 from
+  // screening, 自动模拟持仓 from backtest) are excluded — their data lives on
+  // the quant/backtest pages. The holdings center stays a generic, user-managed
+  // stock collection. Sorted so groups with stocks come first.
+  const SYSTEM_GROUP_TYPES = new Set(["quant_candidate", "simulation_auto"]);
+  const tabGroups = useMemo(
+    () =>
+      groups.groups
+        .filter((g) => !SYSTEM_GROUP_TYPES.has(g.group_type))
+        .map((g) => ({ id: g.id, name: g.name, count: itemCounts[g.id] ?? 0 }))
+        .sort((a, b) => b.count - a.count),
+    [groups.groups, itemCounts],
+  );
 
-  // Batch remove selected symbols from every group they belong to.
-  const batchRemoveMutation = useMutation({
-    mutationFn: async (symbols: string[]) => {
-      const removals: Promise<unknown>[] = [];
-      for (const symbol of symbols) {
-        for (const [groupId, items] of portfolioState.itemsByGroupId) {
-          if (items.some((item) => item.vt_symbol === symbol)) {
-            removals.push(removePortfolioGroupItem(groupId, symbol));
-          }
-        }
-      }
-      return Promise.allSettled(removals);
-    },
-    onSuccess: (results) => {
-      queryClient.invalidateQueries({ queryKey: ["portfolioGroupItems"] });
-      selection.clear();
-      const fulfilled = results.filter((r) => r.status === "fulfilled").length;
-      const failed = results.length - fulfilled;
-      toast({
-        title: fulfilled > 0 ? `已移出 ${fulfilled} 只` : "移出失败",
-        description: failed > 0 ? `${failed} 只未成功` : undefined,
-        variant: fulfilled > 0 ? "success" : "error",
-      });
-    },
-  });
+  const effectiveGroupId = activeGroupId ?? tabGroups[0]?.id ?? null;
+  const items = effectiveGroupId ? portfolioState.itemsOf(effectiveGroupId) : [];
+  const removingSymbol = removeMutation.isPending ? removeMutation.variables?.symbol ?? null : null;
 
-  if (groups.isLoading) return <LoadingState rows={6} />;
-  if (groups.isError) {
-    return <ErrorState message="加载持仓分组失败" onRetry={() => groups.refetch()} />;
-  }
-
-  const handleAddToGroup = (vtSymbol: string) => {
-    setAddToGroupSymbol(vtSymbol);
-    setAddToGroupOpen(true);
+  const refresh = () => {
+    groups.refetch();
+    holdings.refetch();
   };
-
-  const handleViewDetail = (vtSymbol: string) => {
-    navigate(`/stocks/${encodeURIComponent(vtSymbol)}`);
-  };
-
-  const refreshBars = () => {
-    queryClient.invalidateQueries({ queryKey: ["stockDailyBarsForCard"] });
-  };
-
-  const openSell = (vtSymbol: string) => {
-    trade.resetPlaceOrder();
-    setTradeDialog({ open: true, mode: "sell", symbol: vtSymbol });
-  };
-
-  const openAddPosition = (vtSymbol: string) => {
-    trade.resetPlaceOrder();
-    setTradeDialog({ open: true, mode: "add", symbol: vtSymbol });
-  };
-
-  const handleTradeConfirm = async (payload: TradeOrderPayload) => {
-    try {
-      await trade.placeOrderAsync(payload);
-      setTradeDialog((prev) => ({ ...prev, open: false }));
-      trade.resetPlaceOrder();
-    } catch {
-      // Failure keeps the dialog open; error shows via placeOrderError and
-      // the backend also writes a risk_event visible in RiskEventsPanel.
-    }
-  };
-
-  const openBuild = () => {
-    trade.resetAutoBuy();
-    setBuildOpen(true);
-  };
-
-  // Build a single candidate into a position (default 100k per order).
-  const handleSingleBuild = (vtSymbol: string) => {
-    trade.placeOrder({ vt_symbol: vtSymbol, side: "BUY", volume: 100 });
-  };
-
-  const tradePosition = tradeDialog.open
-    ? holdings.positionsBySymbol.get(tradeDialog.symbol) ?? null
-    : null;
 
   return (
-    <div className="space-y-5">
-      {/* Header */}
-      <div className="flex flex-wrap items-start justify-between gap-3 border-b pb-4">
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">持仓中心</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            按投资生命周期管理观察、候选、持仓与复盘。量化筛选结果自动同步到候选池。
-          </p>
+          <h1 className="text-lg font-semibold">持仓中心</h1>
+          <p className="text-xs text-muted-foreground">每个 tab 是一个分组 · 加入 / 删除股票 · 持仓实时评估</p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <Button variant="outline" asChild>
-            <Link to="/quant">回到量化</Link>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => setManageOpen(true)}>
+            <Settings2 size={14} className="mr-1" /> 分组管理
+          </Button>
+          <Button variant="outline" size="sm" onClick={refresh}>
+            <RefreshCw size={14} className="mr-1" /> 刷新
           </Button>
         </div>
       </div>
 
-      {/* KPI bar */}
       <PortfolioKpiBar kpi={holdings.kpi} />
 
-      {/* Main: group sidebar + workflow lanes */}
-      <div className="grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)]">
-        <aside className="space-y-4">
-          <GroupNav
-            groups={groups.groups}
-            activeId={selectedGroupId ?? groups.groups[0]?.id ?? null}
-            onSelect={setSelectedGroupId}
-            itemCounts={itemCounts}
-            onCreateGroup={groups.createGroup}
-            isCreating={groups.isCreating}
-            onReorder={groups.reorderGroups}
-            onEdit={setEditGroup}
-          />
-          <BlacklistSidebar
-            items={portfolioState.itemsByState.blacklist}
-            onViewDetail={handleViewDetail}
-          />
-        </aside>
+      <PortfolioTabs groups={tabGroups} activeGroupId={effectiveGroupId} onChange={setActiveGroupId} />
 
-        <div className="space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <BatchGroupActions
-              selectedCount={selection.selectedCount}
-              totalCount={batchableItems.length}
-              isSelecting={selection.isSelecting}
-              onToggleSelect={selection.toggleSelecting}
-              onSelectAll={() => selection.selectAll(batchableItems.map((item) => item.vt_symbol))}
-              onClearSelection={selection.clear}
-              onBatchAdd={() => setAddToGroupOpen(true)}
-              onBatchRemove={() =>
-                batchRemoveMutation.mutate(Array.from(selection.selectedSymbols))
-              }
-              isOperating={batchAddMutation.isPending || batchRemoveMutation.isPending}
-            />
-            <Button size="sm" variant="outline" onClick={refreshBars}>
-              <RefreshCw size={14} />
-              刷新行情
-            </Button>
-          </div>
+      {effectiveGroupId ? (
+        <PortfolioList
+          items={items}
+          positionsBySymbol={holdings.positionsBySymbol}
+          onAddToGroup={(vt) => setAddToGroupSymbol(vt)}
+          onRemove={(groupId, vt) => removeMutation.mutate({ groupId, symbol: vt })}
+          onViewDetail={(vt) => navigate(`/stocks/${vt}`)}
+          removingSymbol={removingSymbol}
+        />
+      ) : (
+        <p className="py-10 text-center text-sm text-muted-foreground">
+          暂无分组有股票。点「分组管理」新建分组，或在股票列表点「加入」。
+        </p>
+      )}
 
-          <WorkflowLanes
-            itemsByState={portfolioState.itemsByState}
-            groupsByState={portfolioState.groupsByState}
-            positions={holdings.positions}
-            positionsBySymbol={holdings.positionsBySymbol}
-            barsBySymbol={barsBySymbol}
-            riskBadgesBySymbol={holdings.riskBadgesBySymbol}
-            strategyAdviceBySymbol={strategyAdviceBySymbol}
-            onAddToGroup={handleAddToGroup}
-            onViewDetail={handleViewDetail}
-            onSell={openSell}
-            onAddPosition={openAddPosition}
-            onBuild={handleSingleBuild}
-            laneAction={(state) =>
-              state === "candidate" ? (
-                <Button size="sm" variant="outline" onClick={openBuild}>
-                  <Briefcase size={14} />
-                  批量建仓
-                </Button>
-              ) : null
-            }
-            isSelecting={selection.isSelecting}
-            selectedSymbols={selection.selectedSymbols}
-            onToggleSelect={selection.toggle}
-            accountId={holdings.accountId}
-          />
-        </div>
-      </div>
-
-      {/* Add-to-group dialog (also used for batch add) */}
       <AddToGroupDialog
-        open={addToGroupOpen}
-        onOpenChange={setAddToGroupOpen}
-        defaultSymbol={
-          selection.selectedCount === 1
-            ? Array.from(selection.selectedSymbols)[0]
-            : addToGroupSymbol
-        }
+        open={addToGroupSymbol !== null}
+        onOpenChange={(open) => !open && setAddToGroupSymbol(null)}
+        defaultSymbol={addToGroupSymbol ?? undefined}
         groups={groups.groups}
-        onAdd={(groupId, symbol, reason) => {
-          const symbols =
-            selection.selectedCount > 0 ? Array.from(selection.selectedSymbols) : [symbol];
-          batchAddMutation.mutate({ groupId, symbols, reason });
-          setAddToGroupOpen(false);
-        }}
-        isAdding={batchAddMutation.isPending}
+        onAdd={(groupId, symbol, reason) => addMutation.mutate({ groupId, symbol, reason })}
+        isAdding={addMutation.isPending}
       />
 
-      {/* Sell / add-position dialog */}
-      <TradeDialog
-        open={tradeDialog.open}
-        onOpenChange={(open) => setTradeDialog((prev) => ({ ...prev, open }))}
-        mode={tradeDialog.mode}
-        position={tradePosition}
-        onConfirm={handleTradeConfirm}
-        isPlacing={trade.isPlacing}
-        error={trade.placeOrderError instanceof Error ? trade.placeOrderError : null}
-      />
-
-      {/* Build preview + result feedback */}
-      <BuildPreviewDialog
-        open={buildOpen}
-        onOpenChange={(open) => {
-          setBuildOpen(open);
-          if (!open) trade.resetAutoBuy();
-        }}
-        onBuild={(params) =>
-          trade.autoBuy({
-            limit: params.limit,
-          })
-        }
-        isBuilding={trade.isAutoBuying}
-        result={trade.autoBuyResult}
-        error={trade.autoBuyError instanceof Error ? trade.autoBuyError : null}
-      />
-
-      {/* Group edit / delete */}
-      <GroupEditDialog
-        open={editGroup !== null}
-        onOpenChange={(open) => {
-          if (!open) setEditGroup(null);
-        }}
-        group={editGroup}
+      <GroupManageDialog
+        open={manageOpen}
+        onOpenChange={setManageOpen}
+        groups={groups.groups}
+        itemCounts={itemCounts}
+        onCreate={groups.createGroup}
         onUpdate={(groupId, payload) => groups.updateGroup({ groupId, payload })}
-        onDelete={(groupId) => {
-          groups.deleteGroup(groupId);
-          setEditGroup(null);
-        }}
+        onDelete={groups.deleteGroup}
+        isCreating={groups.isCreating}
         isUpdating={groups.isUpdating}
         isDeleting={groups.isDeleting}
       />
     </div>
   );
-}
-
-function strategyAdviceFromReplay(
-  replay: SymbolStrategyReplay | undefined,
-  isLoading: boolean | undefined,
-): StrategyAdvice {
-  if (isLoading) return { label: "策略读取中", tone: "neutral" };
-  if (!replay || replay.status !== "ready") return { label: "无 replay", detail: replay?.message, tone: "neutral" };
-
-  const latestEvent = [...(replay.events ?? [])]
-    .sort((a, b) => String(b.trade_date ?? "").localeCompare(String(a.trade_date ?? "")))[0];
-  if (latestEvent?.side === "SELL" && latestEvent.status === "filled") {
-    return {
-      label: "策略已卖出",
-      detail: latestEvent.trade_date ? `${latestEvent.trade_date} 已触发卖出` : "已触发卖出",
-      tone: "sell",
-    };
-  }
-  if (latestEvent?.side === "SELL" && latestEvent.status === "rejected") {
-    return {
-      label: "卖出待确认",
-      detail: `${portfolioReplayReasonLabel(latestEvent.reason)}，需复核执行条件`,
-      tone: "warning",
-    };
-  }
-  if (replay.summary?.current_status === "holding") {
-    const closedCount = replay.summary.closed_trade_count ?? 0;
-    return {
-      label: "策略持有",
-      detail: closedCount > 0 ? `已完成 ${closedCount} 笔闭环` : "最近 replay 仍处于持有状态",
-      tone: "hold",
-    };
-  }
-  if (replay.summary?.current_status === "closed") {
-    return { label: "策略已卖出", detail: "最近 replay 状态为已平仓", tone: "sell" };
-  }
-  const rejectedCount = replay.summary?.rejected_count ?? 0;
-  if (rejectedCount > 0) {
-    const firstReason = replay.summary?.reject_reasons?.[0]?.reason;
-    return {
-      label: "买入未成交",
-      detail: portfolioReplayReasonLabel(firstReason),
-      tone: "warning",
-    };
-  }
-  return { label: "无持仓建议", detail: "replay 暂无有效成交", tone: "neutral" };
-}
-
-function portfolioReplayReasonLabel(reason?: string | null): string {
-  const labels: Record<string, string> = {
-    limit_up_open_blocked: "开盘涨停买不到",
-    limit_up_tail_unfilled: "尾盘涨停买不到",
-    no_execute_bar: "缺执行日K线",
-    tail_entry_not_triggered: "尾盘入场未触发",
-    limit_down_tail_blocked: "尾盘跌停卖不出",
-    today_pending_1430_snapshot: "等待今日14:30",
-    already_holding: "已持有",
-    no_next_trade_date: "无下一交易日",
-  };
-  return reason ? labels[reason] ?? reason : "--";
 }

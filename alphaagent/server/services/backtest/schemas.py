@@ -30,8 +30,8 @@ class BacktestParams:
     max_symbols: int = 500
     min_entry_score: float = 68.0
     strict_entry: bool = True
-    execution_model: str = "strict_1430"
-    intraday_entry: bool = True
+    execution_model: str = "legacy_next_open"
+    intraday_entry: bool = False
     minute_entry_required: bool = False
     minute_interval: str = "1m"
     tail_entry_start: str = "14:30"

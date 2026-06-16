@@ -12,7 +12,7 @@ export function VnpyStatusPanel({ data, isLoading }: { data?: VnpyStatus; isLoad
   const checks = [
     { label: "vn.py core", ready: installed.some((item) => item.module === "vnpy"), next: "已安装，可作为对象模型和本地适配基础。" },
     { label: "本地日线回测", ready: Boolean(capabilities.alphaagent_local_daily_backtest), next: "同步股票清单和日线后可用。" },
-    { label: "14:30分钟快照", ready: Boolean(capabilities.alphaagent_local_minute_tail_entry), next: "用数据同步的回测缺口模式按回测 ID 补 1m 快照。" },
+    { label: "实时分钟快照", ready: Boolean(capabilities.alphaagent_local_minute_tail_entry), next: "后续用于盘中辅助和实时确认；历史策略研究默认不依赖。" },
     { label: "A股 Datafeed", ready: Boolean(capabilities.vnpy_a_share_datafeed), next: "安装并配置 vnpy_xt、vnpy_rqdata 或 vnpy_tushare。" },
     { label: "A股 Gateway", ready: Boolean(capabilities.vnpy_a_share_gateway), next: "安装并配置 vnpy_xtp、vnpy_tora、vnpy_ost 或 vnpy_emt。" },
   ];

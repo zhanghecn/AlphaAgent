@@ -28,6 +28,7 @@ export interface DailyBar {
  */
 export interface HoldingCardItem {
   vt_symbol: string;
+  group_id?: number;
   name?: string | null;
   board?: string | null;
   board_label?: string | null;
@@ -54,7 +55,7 @@ export interface HoldingCardProps {
   dailyBars?: DailyBar[];
   /** Risk badges derived from the position (near stop-loss / deep loss / overdue) */
   riskBadges?: RiskBadge[];
-  /** Strategy replay advice derived from the unified quant replay. */
+  /** Strategy advice derived from the unified quant execution review. */
   strategyAdvice?: StrategyAdvice | null;
   /** Callback to open the add-to-group dialog */
   onAddToGroup?: (vtSymbol: string) => void;
@@ -72,6 +73,8 @@ export interface HoldingCardProps {
   onToggleSelect?: (vtSymbol: string) => void;
   /** Simulation account id（用于改成本价） */
   accountId?: number;
+  /** Currently selected group in the sidebar; cards belonging to it are highlighted. */
+  selectedGroupId?: number;
 }
 
 /**
@@ -85,7 +88,6 @@ export function HoldingCard({
   item,
   position,
   dailyBars,
-  riskBadges,
   strategyAdvice,
   onAddToGroup,
   onViewDetail,
@@ -95,6 +97,7 @@ export function HoldingCard({
   isSelected,
   onToggleSelect,
   accountId,
+  selectedGroupId,
 }: HoldingCardProps) {
   const [editCostOpen, setEditCostOpen] = useState(false);
   const isHeld = Boolean(position);
@@ -129,26 +132,27 @@ export function HoldingCard({
         "p-4 text-sm",
         !isHeld && "bg-card/60",
         isSelecting && isSelected && "ring-2 ring-primary",
+        item.group_id != null && item.group_id === selectedGroupId && "ring-2 ring-brand",
       )}
       onClick={isSelecting && onToggleSelect ? () => onToggleSelect(item.vt_symbol) : undefined}
       style={isSelecting ? { cursor: "pointer" } : undefined}
     >
-      {/* Risk badges (held only) */}
-      {isHeld && riskBadges && riskBadges.length > 0 && (
-        <div className="mb-2 flex flex-wrap gap-1">
-          {riskBadges.map((badge) => (
-            <Badge
-              key={badge.type}
-              variant={badge.severity === "high" ? "destructive" : "secondary"}
-              className="px-2 py-0.5"
-              title={badge.detail}
-            >
-              {badge.label}
-            </Badge>
-          ))}
+      {/* Realtime exit advice (held only) — live stop-loss/take-profit/trailing/time
+          evaluation from the strategy exit rules, shared with the backtest engine. */}
+      {isHeld && position?.advice && (
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <Badge
+            variant="outline"
+            className={cn("px-2 py-0.5", strategyAdviceClass(ADVICE_TONE[position.advice]))}
+            title="实时止损止盈规则评估（按成本价/现价动态计算）"
+          >
+            {ADVICE_LABEL[position.advice] ?? position.advice}
+          </Badge>
         </div>
       )}
 
+      {/* Strategy advice (held only) — historical hold/sell from the quant execution review,
+          complements the realtime exit advice above. */}
       {isHeld && strategyAdvice && (
         <div className="mb-2 flex flex-wrap items-center gap-2">
           <Badge
@@ -360,3 +364,19 @@ function strategyAdviceClass(tone?: StrategyAdvice["tone"]): string {
   if (tone === "warning") return "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300";
   return "";
 }
+
+/** Map a realtime exit advice to the badge tone + Chinese label. */
+const ADVICE_TONE: Record<string, StrategyAdvice["tone"]> = {
+  stop_loss: "sell",
+  trailing_stop: "sell",
+  take_profit: "hold",
+  time_stop: "warning",
+};
+
+const ADVICE_LABEL: Record<string, string> = {
+  stop_loss: "触发止损",
+  trailing_stop: "跟踪止损",
+  take_profit: "触发止盈",
+  time_stop: "持仓超时",
+  hold: "建议持有",
+};

@@ -1,15 +1,11 @@
-import { useMutation } from "@tanstack/react-query";
-import { BarChart3, Download, RefreshCw } from "lucide-react";
+import { BarChart3, Download } from "lucide-react";
 import type { BacktestRun, QuantStrategyOption } from "@/api/quant";
 import {
   backtestReportCsvUrl,
   fetchBacktestAudit,
   fetchBacktestDataQuality,
-  fetchBacktestExecutionModelComparison,
-  fetchBacktestMinuteCoverage,
   fetchBacktestReport,
   fetchBacktestValidationGrid,
-  runBacktestStrategyComparison,
 } from "@/api/quant";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorState } from "@/components/ErrorState";
@@ -30,15 +26,11 @@ import {
 } from "@/features/quant/BacktestTables";
 import { BacktestDrilldownPanel } from "@/features/quant/BacktestDrilldownPanel";
 import { BacktestSignalEventsPanel } from "@/features/quant/BacktestSignalEventsPanel";
-import { MinuteCoveragePanel } from "@/features/quant/MinuteCoveragePanel";
 import { BacktestDataQualityPanel } from "@/features/quant/BacktestDataQualityPanel";
-import { BacktestStrategyComparisonPanel } from "@/features/quant/BacktestStrategyComparisonPanel";
 import {
   BacktestDataAsOfAuditPanel,
-  BacktestExecutionModelComparisonPanel,
   BacktestExecutionQualityPanel,
   BacktestRealityStats,
-  BacktestRealityVerdictPanel,
   BacktestRobustnessPanel,
   BacktestValidationGridPanel,
 } from "@/features/quant/BacktestAnalysis";
@@ -52,13 +44,9 @@ export function BacktestPanel({
   onParamsChange,
   strategies,
   selectedStrategy,
-  onStrategyChange,
   tradingDates,
   isRunning,
-  onRun,
   report,
-  minuteCoverage,
-  isMinuteCoverageLoading,
   dataQuality,
   isDataQualityLoading,
   audit,
@@ -68,9 +56,6 @@ export function BacktestPanel({
   validationGrid,
   isValidationGridLoading,
   onRunValidationGrid,
-  executionComparison,
-  isExecutionComparisonLoading,
-  onRunExecutionComparison,
   onAddToPortfolio,
 }: {
   runs: BacktestRun[];
@@ -80,13 +65,9 @@ export function BacktestPanel({
   onParamsChange: (params: BacktestParams) => void;
   strategies: QuantStrategyOption[];
   selectedStrategy: string;
-  onStrategyChange: (strategy: string) => void;
   tradingDates: string[];
   isRunning: boolean;
-  onRun: () => void;
   report?: Awaited<ReturnType<typeof fetchBacktestReport>>;
-  minuteCoverage?: Awaited<ReturnType<typeof fetchBacktestMinuteCoverage>>;
-  isMinuteCoverageLoading: boolean;
   dataQuality?: Awaited<ReturnType<typeof fetchBacktestDataQuality>>;
   isDataQualityLoading: boolean;
   audit?: Awaited<ReturnType<typeof fetchBacktestAudit>>;
@@ -96,23 +77,8 @@ export function BacktestPanel({
   validationGrid?: Awaited<ReturnType<typeof fetchBacktestValidationGrid>>;
   isValidationGridLoading: boolean;
   onRunValidationGrid: () => void;
-  executionComparison?: Awaited<ReturnType<typeof fetchBacktestExecutionModelComparison>>;
-  isExecutionComparisonLoading: boolean;
-  onRunExecutionComparison: () => void;
   onAddToPortfolio?: (vtSymbol: string) => void;
 }) {
-  const strategyComparisonMutation = useMutation({
-    mutationFn: () =>
-      runBacktestStrategyComparison({
-        ...params,
-        strategies: strategies.length ? strategies.map((strategy) => strategy.id) : [selectedStrategy],
-        minute_interval: "1m",
-        tail_entry_start: "14:30",
-        tail_entry_end: "14:30",
-        persist: false,
-      }),
-  });
-
   if (isLoading) return <LoadingState rows={5} />;
   if (isError) return <ErrorState message="加载回测报告失败" onRetry={onRetry} />;
 
@@ -152,39 +118,15 @@ export function BacktestPanel({
           onChange={onParamsChange}
           strategies={strategies}
           selectedStrategy={selectedStrategy}
-          onStrategyChange={onStrategyChange}
           tradingDates={tradingDates}
           isRunning={isRunning}
-          onRun={onRun}
         />
-        {isRunning && (
-          <div className="flex items-center gap-3 rounded-lg border bg-primary/5 px-4 py-3 text-sm">
-            <RefreshCw size={16} className="animate-spin text-primary" />
-            <div>
-              <div className="font-medium">正在逐日回测…</div>
-              <div className="text-xs text-muted-foreground">扫全市场候选 × 历史交易日，模拟买入/卖出/止损止盈，生成交易表与指标。大范围回测可能需要 1-3 分钟。</div>
-            </div>
-          </div>
-        )}
         {!report ? (
           <EmptyState message="暂无回测报告" description="运行回测后会生成可复查的交易表和指标。" />
         ) : (
           <>
             <BacktestSummary report={report} audit={audit} />
-            <BacktestRealityVerdictPanel
-              report={report}
-              comparison={executionComparison}
-              isComparisonLoading={isExecutionComparisonLoading}
-              onRunComparison={onRunExecutionComparison}
-            />
-            <MinuteCoveragePanel coverage={minuteCoverage} isLoading={isMinuteCoverageLoading} />
             <BacktestDataQualityPanel quality={dataQuality} isLoading={isDataQualityLoading} />
-            <BacktestStrategyComparisonPanel
-              comparison={strategyComparisonMutation.data}
-              isLoading={strategyComparisonMutation.isPending}
-              error={strategyComparisonMutation.error}
-              onRun={() => strategyComparisonMutation.mutate()}
-            />
 
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
               <section className="space-y-4">
@@ -207,11 +149,6 @@ export function BacktestPanel({
               </TabsList>
               <TabsContent value="validation" className="space-y-4">
                 {report.data_as_of_audit && <BacktestDataAsOfAuditPanel audit={report.data_as_of_audit} />}
-                <BacktestExecutionModelComparisonPanel
-                  comparison={executionComparison}
-                  isLoading={isExecutionComparisonLoading}
-                  onRun={onRunExecutionComparison}
-                />
                 {report.benchmark && <BacktestBenchmarkTable benchmarks={report.benchmark.benchmarks} />}
                 {report.period_analysis && <BacktestPeriodTable analysis={report.period_analysis} />}
                 {report.regime_analysis && <BacktestRegimeTable analysis={report.regime_analysis} />}

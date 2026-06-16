@@ -19,6 +19,7 @@ import { SectorTrendPanel } from "@/components/SectorTrendPanel";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
+import { AddToGroupButton } from "@/features/portfolio/AddToGroupButton";
 import { formatPct, formatAmount, formatPrice, formatMarketCap, cn, priceColorClass } from "@/lib/utils";
 import type { SectorRankingItem } from "@/types/research";
 import type { StockQuote } from "@/api/types";
@@ -546,6 +547,7 @@ function SectorDetailPanel({ item }: { item: SectorRankingItem }) {
                   <th className="pb-2 text-right font-medium">
                     <SortHeader label="市值" sortKey="market_cap" sort={stockSort} onSort={toggleStockSort} />
                   </th>
+                  <th className="pb-2 text-center font-medium">操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -589,6 +591,9 @@ function SectorDetailPanel({ item }: { item: SectorRankingItem }) {
                     </td>
                     <td className="py-1.5 text-right tabular-nums">
                       {formatMarketCap(stock.market_cap)}
+                    </td>
+                    <td className="py-1.5 text-center">
+                      <AddToGroupButton vtSymbol={stock.vt_symbol} compact />
                     </td>
                   </tr>
                 ))}

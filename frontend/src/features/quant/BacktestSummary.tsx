@@ -70,9 +70,9 @@ export function BacktestTrustPanel({
       <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-6">
         <InfoCell label="撮合版本" value={report.strategy_version} />
         <InfoCell label="买入方式" value={verdict.entryMode} />
-        <InfoCell label="14:30真实占比" value={formatPct(report.execution_quality?.minute_1430_ratio ?? report.execution_quality?.minute_tail_entry_ratio)} />
-        <InfoCell label="收盘代理占比" value={formatPct(report.execution_quality?.daily_close_proxy_ratio)} />
-        <InfoCell label="缺快照拒单" value={`${report.execution_quality?.minute_gap_rejected_count ?? 0}笔`} />
+        <InfoCell label="执行模型" value={executionModelLabel(report.method?.execution?.execution_model)} />
+        <InfoCell label="开盘执行占比" value={formatPct(report.execution_quality?.daily_open_fallback_ratio)} />
+        <InfoCell label="收盘执行占比" value={formatPct(report.execution_quality?.daily_close_proxy_ratio)} />
         <InfoCell label="买入/卖出/持仓中" value={tradePathLabel(report)} />
       </div>
 
@@ -85,6 +85,13 @@ export function BacktestTrustPanel({
       )}
     </div>
   );
+}
+
+function executionModelLabel(model?: string | null): string {
+  if (model === "legacy_next_open") return "日线D+1开盘";
+  if (model === "tail_close_hybrid") return "日线收盘代理";
+  if (model === "strict_1430") return "实时分钟";
+  return model || "--";
 }
 
 function tradePathLabel(report: Awaited<ReturnType<typeof fetchBacktestReport>>) {

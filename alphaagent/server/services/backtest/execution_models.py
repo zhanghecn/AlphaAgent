@@ -6,7 +6,7 @@ from datetime import date, datetime
 from typing import Any, Protocol
 
 from alphaagent.market.boards import stock_board
-from alphaagent.server.services.quant.factors import Bar
+from alphaagent.server.services.quant.factors import Bar, DRAGON_PULLBACK_STRATEGY_ID
 
 
 SUPPORTED_BACKTEST_MINUTE_INTERVALS = {"1m"}
@@ -35,7 +35,7 @@ class MinuteBarLike(Protocol):
 
 
 def normalize_execution_model(value: Any) -> str:
-    model = str(value or "strict_1430").strip().lower()
+    model = str(value or "legacy_next_open").strip().lower()
     aliases = {
         "hybrid": "tail_close_hybrid",
         "tail": "tail_close_hybrid",
@@ -93,6 +93,9 @@ def resolve_tail_sell_fill(
     reason: str,
     signal_date: date | None = None,
 ) -> dict[str, Any]:
+    if params.execution_model == "legacy_next_open":
+        return _resolve_legacy_next_open_sell_fill(vt_symbol, position, current_day, daily_bar, params, reason, signal_date)
+
     minute_bars = minute_index.get(vt_symbol, {}).get(current_day, [])
     signal_day = signal_date or current_day
     base = {
@@ -147,6 +150,43 @@ def resolve_tail_sell_fill(
     }
 
 
+def _resolve_legacy_next_open_sell_fill(
+    vt_symbol: str,
+    position: Any,
+    current_day: date,
+    daily_bar: Bar,
+    params: BacktestParamsLike,
+    reason: str,
+    signal_date: date | None = None,
+) -> dict[str, Any]:
+    signal_day = signal_date or current_day
+    if _is_limit_down_open(daily_bar):
+        return {
+            "status": "rejected",
+            "execution_model": params.execution_model,
+            "signal_date": signal_day.isoformat(),
+            "execute_date": current_day.isoformat(),
+            "entry_date": position.entry_date.isoformat(),
+            "reason": "limit_down_open_blocked",
+            "price": None,
+            "mode": "limit_down_open_blocked",
+            "price_source": "stock_daily_bars.open_price",
+            "proxy_used": False,
+        }
+    return {
+        "status": "filled",
+        "execution_model": params.execution_model,
+        "signal_date": signal_day.isoformat(),
+        "execute_date": current_day.isoformat(),
+        "entry_date": position.entry_date.isoformat(),
+        "reason": reason,
+        "price": daily_bar.open_price,
+        "mode": "daily_next_open_sell",
+        "price_source": "stock_daily_bars.open_price",
+        "proxy_used": False,
+    }
+
+
 def _resolve_legacy_next_open_buy_fill(
     order: dict[str, Any],
     current_day: date,
@@ -169,7 +209,7 @@ def _resolve_legacy_next_open_buy_fill(
         }
 
     reference_date = _as_date(order.get("signal_date")) or _previous_trade_date(bar_index.get(vt_symbol, {}), current_day)
-    ma5 = _ma5_for_entry_day(bar_index.get(vt_symbol, {}), reference_date) if reference_date else None
+    ma5 = _entry_reference_price(order, bar_index.get(vt_symbol, {}), reference_date)
     minute_bars = minute_index.get(vt_symbol, {}).get(current_day, [])
     trigger = _tail_entry_trigger(minute_bars, ma5, params)
     if trigger:
@@ -236,7 +276,7 @@ def _resolve_tail_hybrid_buy_fill(
     if _is_limit_up_tail(vt_symbol, daily_bar):
         return _tail_reject_payload("limit_up_tail_unfilled", order, current_day, daily_bar, bar_index, minute_index, params)
     reference_date = _as_date(order.get("signal_date")) or _previous_trade_date(bar_index.get(vt_symbol, {}), current_day)
-    ma5 = _ma5_for_entry_day(bar_index.get(vt_symbol, {}), reference_date) if reference_date else None
+    ma5 = _entry_reference_price(order, bar_index.get(vt_symbol, {}), reference_date)
     minute_bars = minute_index.get(vt_symbol, {}).get(current_day, [])
     trigger = _exact_tail_bar(minute_bars, params)
     if trigger:
@@ -280,7 +320,7 @@ def _resolve_strict_1430_buy_fill(
     if _is_limit_up_tail(vt_symbol, daily_bar):
         return _tail_reject_payload("limit_up_tail_unfilled", order, current_day, daily_bar, bar_index, minute_index, params)
     reference_date = _as_date(order.get("signal_date")) or _previous_trade_date(bar_index.get(vt_symbol, {}), current_day)
-    ma5 = _ma5_for_entry_day(bar_index.get(vt_symbol, {}), reference_date) if reference_date else None
+    ma5 = _entry_reference_price(order, bar_index.get(vt_symbol, {}), reference_date)
     minute_bars = minute_index.get(vt_symbol, {}).get(current_day, [])
     trigger = _exact_tail_bar(minute_bars, params)
     if trigger:
@@ -371,7 +411,7 @@ def _tail_reject_payload(
 ) -> dict[str, Any]:
     vt_symbol = str(order["vt_symbol"])
     reference_date = _as_date(order.get("signal_date")) or _previous_trade_date(bar_index.get(vt_symbol, {}), current_day)
-    ma5 = _ma5_for_entry_day(bar_index.get(vt_symbol, {}), reference_date) if reference_date else None
+    ma5 = _entry_reference_price(order, bar_index.get(vt_symbol, {}), reference_date)
     minute_bars = minute_index.get(vt_symbol, {}).get(current_day, [])
     return {
         **_tail_base_payload(order, current_day, reference_date, ma5, params, minute_bars),
@@ -440,6 +480,27 @@ def _ma5_for_entry_day(symbol_bars: dict[date, Bar], reference_date: date | None
     return sum(closes[-5:]) / 5
 
 
+def _entry_reference_price(order: dict[str, Any], symbol_bars: dict[date, Bar], reference_date: date | None) -> float | None:
+    reason = order.get("reason") if isinstance(order.get("reason"), dict) else {}
+    if reason.get("entry_setup") == "dragon_pullback" or reason.get("strategy_id") == DRAGON_PULLBACK_STRATEGY_ID:
+        support_price = _float_or_none(reason.get("support_price"))
+        if support_price is not None and support_price > 0:
+            return support_price
+        support_type = str(reason.get("support_type") or "")
+        if support_type == "ma10_support":
+            ma10 = _float_or_none(reason.get("ma10"))
+            if ma10 is not None and ma10 > 0:
+                return ma10
+        if support_type == "ma20_support":
+            ma20 = _float_or_none(reason.get("ma20"))
+            if ma20 is not None and ma20 > 0:
+                return ma20
+        ma5 = _float_or_none(reason.get("ma5"))
+        if ma5 is not None and ma5 > 0:
+            return ma5
+    return _ma5_for_entry_day(symbol_bars, reference_date) if reference_date else None
+
+
 def _previous_trade_date(symbol_bars: dict[date, Bar], current_day: date) -> date | None:
     previous = [day for day in symbol_bars if day < current_day]
     return max(previous) if previous else None
@@ -455,6 +516,15 @@ def _pct_distance(value: float | None, reference: float | None) -> float | None:
     return (float(value) / float(reference) - 1) * 100
 
 
+def _float_or_none(value: Any) -> float | None:
+    if value in (None, "", "-", "--"):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _is_limit_up_tail(vt_symbol: str, bar: Bar) -> bool:
     threshold = _daily_limit_threshold(vt_symbol)
     return bool(bar.change_pct is not None and bar.change_pct >= threshold)
@@ -463,6 +533,10 @@ def _is_limit_up_tail(vt_symbol: str, bar: Bar) -> bool:
 def _is_limit_down_tail(vt_symbol: str, bar: Bar) -> bool:
     threshold = _daily_limit_threshold(vt_symbol)
     return bool(bar.change_pct is not None and bar.change_pct <= -threshold)
+
+
+def _is_limit_down_open(bar: Bar) -> bool:
+    return bool(bar.change_pct is not None and bar.change_pct <= -9.8 and bar.open_price <= bar.close_price * 1.005)
 
 
 def _daily_limit_threshold(vt_symbol: str) -> float:

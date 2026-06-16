@@ -45,7 +45,11 @@ def extended_metrics(
         )
     ]
     limit_up_blocked_buys = [order for order in rejected_orders if str(order.get("reason") or "") == "limit_up_tail_unfilled"]
-    limit_down_blocked_sells = [order for order in rejected_orders if str(order.get("reason") or "") == "limit_down_tail_blocked"]
+    limit_down_blocked_sells = [
+        order
+        for order in rejected_orders
+        if str(order.get("reason") or "") in {"limit_down_open_blocked", "limit_down_tail_blocked"}
+    ]
     exposure = [float(row.get("market_value") or 0) / float(row.get("total_equity") or 1) for row in equity if row.get("total_equity")]
     execution_modes = trade_execution_mode_counts(buy_trades)
 

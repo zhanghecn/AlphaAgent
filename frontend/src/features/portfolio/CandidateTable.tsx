@@ -98,7 +98,7 @@ export function CandidateTable({ items, action, onBuild, onViewDetail }: Candida
         <div className="p-4">
           <EmptyState
             message="候选池为空"
-            description="在量化页生成区间候选后会自动同步到此。"
+            description="在量化页运行策略研究后会自动同步到此。"
           />
         </div>
       ) : (

@@ -10,11 +10,30 @@ from sqlalchemy import and_, desc, select
 from alphaagent.market.boards import stock_board_payload
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
+from alphaagent.server.services.quant.factors import STRATEGY_ID
 from alphaagent.server.services.quant.factors import STRATEGY_VERSION
 
 
 DEFAULT_COMMISSION_RATE = 0.0003
 DEFAULT_STAMP_TAX_RATE = 0.0005
+
+
+def latest_bar_close(session, vt_symbol: str) -> float | None:
+    """Latest daily-bar close price for a symbol, or None when no bar exists.
+
+    Shared by realtime position valuation so both the simulation account
+    service (list_positions/auto-buy) and the portfolio holdings endpoint
+    resolve the same live price from stock_daily_bars, instead of each
+    inlining its own bar query.
+    """
+    bar = session.execute(
+        select(schema.stock_daily_bars.c.close_price)
+        .where(schema.stock_daily_bars.c.vt_symbol == vt_symbol)
+        .order_by(desc(schema.stock_daily_bars.c.trade_date))
+        .limit(1)
+    ).mappings().first()
+    close = bar.get("close_price") if bar else None
+    return float(close) if close is not None else None
 
 
 def list_accounts() -> dict[str, Any]:
@@ -162,7 +181,7 @@ def auto_buy_recommendations(account_id: int | None = None, payload: dict[str, A
 
     limit = min(max(int(payload.get("limit") or 5), 1), 20)
     amount_per_order = float(payload.get("amount_per_order") or 100_000)
-    strategy_id = str(payload.get("strategy_id") or "mainline_leader_pullback")
+    strategy_id = str(payload.get("strategy_id") or STRATEGY_ID)
 
     fills: list[dict[str, Any]] = []
     synced_group_items = 0
@@ -201,13 +220,8 @@ def auto_buy_recommendations(account_id: int | None = None, payload: dict[str, A
                 continue
 
             stock = session.execute(select(schema.stocks).where(schema.stocks.c.vt_symbol == vt_symbol)).mappings().first()
-            latest_bar = session.execute(
-                select(schema.stock_daily_bars)
-                .where(schema.stock_daily_bars.c.vt_symbol == vt_symbol)
-                .order_by(desc(schema.stock_daily_bars.c.trade_date))
-                .limit(1)
-            ).mappings().first()
-            price = float((latest_bar or {}).get("close_price") or (stock or {}).get("last_price") or 0)
+            bar_close = latest_bar_close(session, vt_symbol)
+            price = float(bar_close or (stock or {}).get("last_price") or 0)
             if price <= 0:
                 fills.append({"status": "rejected", "vt_symbol": vt_symbol, "reason": "price_unavailable"})
                 continue
@@ -453,7 +467,7 @@ def _ensure_auto_group(session, name: str, group_type: str, description: str) ->
 def _ensure_simulation_schema() -> None:
     """Allow simulation services to run outside the API lifespan."""
 
-    schema.create_schema(get_engine())
+    schema.ensure_schema_once(get_engine())
 
 
 def _fill_order(session, account: dict[str, Any], order_id: int, vt_symbol: str, side: str, price: float, volume: int, payload: dict[str, Any]) -> dict[str, Any]:

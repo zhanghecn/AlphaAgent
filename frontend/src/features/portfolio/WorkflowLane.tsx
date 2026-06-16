@@ -31,6 +31,7 @@ interface WorkflowLaneProps {
   selectedSymbols?: Set<string>;
   onToggleSelect?: (vtSymbol: string) => void;
   accountId?: number;
+  selectedGroupId?: number;
 }
 
 /**
@@ -50,6 +51,7 @@ export function WorkflowLane({
   selectedSymbols,
   onToggleSelect,
   accountId,
+  selectedGroupId,
 }: WorkflowLaneProps) {
   return (
     <SectionCard
@@ -89,6 +91,7 @@ export function WorkflowLane({
               isSelected={selectedSymbols?.has(card.item.vt_symbol)}
               onToggleSelect={onToggleSelect}
               accountId={card.position ? accountId : undefined}
+              selectedGroupId={selectedGroupId}
             />
           ))}
         </div>
@@ -102,7 +105,7 @@ function emptyHint(stateKey: PortfolioStateMeta["key"]): string {
     case "watch":
       return "可手动加入股票，或从其他分组移入。";
     case "candidate":
-      return "在量化页生成区间候选后会自动同步到此。";
+      return "在量化页运行策略研究后会自动同步到此。";
     case "holding":
       return "可从候选池模拟建仓，或手动下模拟单。";
     case "review":

@@ -8,6 +8,7 @@ from typing import Any
 from alphaagent.market.boards import stock_board_payload
 from alphaagent.server.services.quant.factors import (
     BREAKOUT_STRATEGY_ID,
+    DRAGON_PULLBACK_STRATEGY_ID,
     LIMIT_UP_PULLBACK_STRATEGY_ID,
     STRATEGY_ID,
     STRATEGY_VERSION,
@@ -100,6 +101,17 @@ def symbol_signal_row(item: SignalScore, min_entry_score: float) -> dict[str, An
 
 
 def symbol_signal_fit_key(row: dict[str, Any], strategy_id: str) -> tuple[int, float, float]:
+    if strategy_id == DRAGON_PULLBACK_STRATEGY_ID:
+        evidence = row.get("evidence") or {}
+        state_rank = 0 if evidence.get("dragon_state") == "TAIL_BUY_READY" else 1
+        support_rank = 0 if evidence.get("support_type") in {"ma5_reclaim", "ma10_support"} else 1
+        ma5_distance = evidence.get("ma5_distance_pct")
+        ma10_distance = evidence.get("ma10_distance_pct")
+        distance = min(
+            abs(float(ma5_distance)) if ma5_distance is not None else 999.0,
+            abs(float(ma10_distance)) if ma10_distance is not None else 999.0,
+        )
+        return (state_rank + support_rank + int(row["failed_rule_count"]), -float(row["total_score"]), distance)
     if strategy_id == BREAKOUT_STRATEGY_ID:
         evidence = row.get("evidence") or {}
         close_to_high = evidence.get("close_to_prior_high_pct")
@@ -125,6 +137,18 @@ def symbol_signal_fit_key(row: dict[str, Any], strategy_id: str) -> tuple[int, f
 
 
 def strategy_rule_payload(strategy_id: str, min_entry_score: float) -> dict[str, Any]:
+    if strategy_id == DRAGON_PULLBACK_STRATEGY_ID:
+        return {
+            "min_entry_score": min_entry_score,
+            "pullback_days": "[3, 12]",
+            "support_type": "MA5/MA10/MA20 support + reclaim",
+            "ma5_distance_pct": "[-1.8, 2.5]",
+            "ma10_distance_pct": "[-2.5, 3.0]",
+            "distribution_risk": "reject",
+            "weak_rebound_ma5_below_ma10": "reject",
+            "min_risk_score": 35,
+            "min_liquidity_score": 25,
+        }
     if strategy_id == BREAKOUT_STRATEGY_ID:
         return {
             "min_entry_score": min_entry_score,
@@ -173,6 +197,15 @@ def failed_entry_rules(item: SignalScore, min_entry_score: float) -> list[str]:
     failed_rules = []
     if item.total_score < min_entry_score:
         failed_rules.append("total_score")
+    if item.signal_type == DRAGON_PULLBACK_STRATEGY_ID:
+        for rule in evidence.get("failed_rules") or []:
+            if rule not in failed_rules:
+                failed_rules.append(str(rule))
+        if item.risk_score < 35:
+            failed_rules.append("risk_score")
+        if item.liquidity_score < 25:
+            failed_rules.append("liquidity_score")
+        return failed_rules
     if item.signal_type == BREAKOUT_STRATEGY_ID:
         close_to_high = evidence.get("close_to_prior_high_pct")
         volume_ratio = evidence.get("volume_ratio_5d_20d")

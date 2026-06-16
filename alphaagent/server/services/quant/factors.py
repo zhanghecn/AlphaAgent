@@ -8,8 +8,12 @@ from math import isfinite
 from typing import Any
 
 
-STRATEGY_ID = "mainline_leader_pullback"
-STRATEGY_VERSION = "0.1.1"
+DRAGON_PULLBACK_STRATEGY_ID = "mainline_dragon_pullback"
+DRAGON_PULLBACK_STRATEGY_VERSION = "0.1.1"
+STRATEGY_ID = DRAGON_PULLBACK_STRATEGY_ID
+STRATEGY_VERSION = DRAGON_PULLBACK_STRATEGY_VERSION
+LEADER_PULLBACK_STRATEGY_ID = "mainline_leader_pullback"
+LEADER_PULLBACK_STRATEGY_VERSION = "0.1.1"
 BREAKOUT_STRATEGY_ID = "breakout_confirmation"
 BREAKOUT_STRATEGY_VERSION = "0.1.0"
 LIMIT_UP_PULLBACK_STRATEGY_ID = "limit_up_after_pullback"
@@ -99,6 +103,37 @@ def score_breakout_confirmation(
     )
 
     return _score_breakout_confirmation(
+        vt_symbol,
+        bars,
+        trade_date,
+        index_return_20d=index_return_20d,
+        sector_score=sector_score,
+        financial_score=financial_score,
+        fund_flow_score=fund_flow_score,
+        hot_rank_score=hot_rank_score,
+        lhb_score=lhb_score,
+    )
+
+
+def score_dragon_pullback(
+    vt_symbol: str,
+    bars: list[Bar],
+    trade_date: date,
+    *,
+    index_return_20d: float | None = None,
+    sector_score: float | None = None,
+    financial_score: float | None = None,
+    fund_flow_score: float | None = None,
+    hot_rank_score: float | None = None,
+    lhb_score: float | None = None,
+) -> SignalScore:
+    """Compatibility wrapper for the mainline dragon pullback strategy."""
+
+    from alphaagent.server.services.quant.strategies.dragon_pullback import (
+        score_dragon_pullback as _score_dragon_pullback,
+    )
+
+    return _score_dragon_pullback(
         vt_symbol,
         bars,
         trade_date,
@@ -390,3 +425,41 @@ def risk_level(score: float) -> str:
     if score >= 40:
         return "MEDIUM"
     return "HIGH"
+
+
+EXIT_HOLD: str | None = None
+EXIT_REASONS = ("stop_loss", "take_profit", "trailing_stop", "time_stop")
+
+
+def evaluate_exit(
+    *,
+    last_price: float,
+    stop_loss_price: float | None = None,
+    take_profit_price: float | None = None,
+    trailing_stop_price: float | None = None,
+    entry_date: date | None = None,
+    current_day: date | None = None,
+    time_stop_days: int = 15,
+) -> str | None:
+    """Evaluate whether a held position should exit based on absolute price levels.
+
+    Single source of truth for "when to sell" decisions, reused by both the
+    backtest engine (``sell_reason_for_position``) and the realtime holdings
+    endpoint (``groups.holdings``). Accepts absolute price levels rather than
+    coefficients so each caller supplies whichever price source it has — the
+    backtest derives levels from params × cost/highest, realtime reads the
+    stop_loss_price/take_profit_price/trailing_stop_price stored on the position.
+
+    Priority: stop_loss > take_profit > trailing_stop > time_stop. Returns the
+    reason string, or ``None`` (= hold) when no rule is triggered.
+    """
+    if stop_loss_price is not None and last_price <= stop_loss_price:
+        return "stop_loss"
+    if take_profit_price is not None and last_price >= take_profit_price:
+        return "take_profit"
+    if trailing_stop_price is not None and last_price <= trailing_stop_price:
+        return "trailing_stop"
+    if entry_date is not None and current_day is not None:
+        if (current_day - entry_date).days >= time_stop_days * 2:
+            return "time_stop"
+    return None

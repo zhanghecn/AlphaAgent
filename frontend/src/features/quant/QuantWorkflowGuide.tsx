@@ -1,5 +1,4 @@
 import { cn } from "@/lib/utils";
-import type { MinuteGapAuditResult } from "@/api/dataSync";
 import type { VnpyStatus } from "@/api/quant";
 
 export function QuantWorkflowGuide({
@@ -10,8 +9,9 @@ export function QuantWorkflowGuide({
   recommendationCount,
   backtestCount,
   holdingsCount,
-  minuteAudit,
   vnpyStatus,
+  latestTradeDate,
+  latestScreenDate,
 }: {
   recommendationLoading: boolean;
   recommendationError: boolean;
@@ -20,8 +20,9 @@ export function QuantWorkflowGuide({
   recommendationCount: number;
   backtestCount: number;
   holdingsCount: number;
-  minuteAudit?: MinuteGapAuditResult;
   vnpyStatus?: VnpyStatus;
+  latestTradeDate?: string | null;
+  latestScreenDate?: string | null;
 }) {
   const dataState: "ready" | "warning" | "pending" =
     recommendationLoading
@@ -29,7 +30,6 @@ export function QuantWorkflowGuide({
       : recommendationError || recommendationStatus === "unavailable"
         ? "warning"
         : "ready";
-  const auditReady = minuteAudit?.status === "ready";
   const steps: Array<{
     label: string;
     status: "ready" | "warning" | "pending";
@@ -39,20 +39,20 @@ export function QuantWorkflowGuide({
     {
       label: "数据",
       status: dataState,
-      value: dataState === "ready" ? "可生成" : dataState === "pending" ? "检查中" : "待配置",
-      note: recommendationMessage || "需要本地股票、日线和可选财报/资金流数据。",
+      value: latestTradeDate ? `至 ${latestTradeDate}` : dataState === "pending" ? "检查中" : "待配置",
+      note: recommendationMessage || "显示本地日线库最新交易日；没有同步到今天时不会显示今天。",
     },
     {
       label: "候选",
-      status: recommendationCount > 0 ? "ready" : "pending",
-      value: recommendationCount > 0 ? `${recommendationCount}只` : "未生成",
-      note: "生成区间候选会按真实交易日逐日写入推荐表，并把最新交易日同步到量化候选分组。",
+      status: latestTradeDate && latestScreenDate && latestScreenDate < latestTradeDate ? "warning" : recommendationCount > 0 ? "ready" : "pending",
+      value: latestScreenDate ? `至 ${latestScreenDate}` : "未生成",
+      note: "刷新候选并回测会按当前策略版本重算历史交易日，并把最新候选同步到量化候选分组。",
     },
     {
       label: "回测",
       status: backtestCount > 0 ? "ready" : "pending",
       value: backtestCount > 0 ? `${backtestCount}份` : "未运行",
-      note: auditReady ? "分钟缺口已覆盖，可运行严格14:30回测。" : "严格14:30缺快照会拒单；可先补缺口，尾盘混合只作研究对比。",
+      note: "历史回测使用日线口径，自动按候选评分前10名和最多10只持仓模拟买卖。",
     },
     {
       label: "模拟",
@@ -81,6 +81,11 @@ export function QuantWorkflowGuide({
           </div>
         ))}
       </div>
+      {latestTradeDate && (
+        <div className="border-t px-3 py-2 text-xs text-muted-foreground">
+          策略研究截止到本地日线库最新交易日 {latestTradeDate}；如果今天是交易日但这里未显示今天，需要先同步今天的日线数据再启动策略流程。
+        </div>
+      )}
     </section>
   );
 }
@@ -92,6 +97,6 @@ function WorkflowStatus({ status }: { status: "ready" | "warning" | "pending" })
       : status === "warning"
         ? "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300"
         : "border-gray-200 bg-gray-50 text-gray-600 dark:border-gray-500/30 dark:bg-gray-500/10 dark:text-gray-300";
-  const text = status === "ready" ? "就绪" : status === "warning" ? "待接入" : "待执行";
+  const text = status === "ready" ? "就绪" : status === "warning" ? "需处理" : "待执行";
   return <span className={cn("rounded-md border px-2 py-0.5 text-xs", cls)}>{text}</span>;
 }

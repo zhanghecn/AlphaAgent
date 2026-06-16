@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from alphaagent.server.services.backtest import ledger, scoring
 from alphaagent.server.services.backtest.schemas import BacktestParams, MinuteBar, Position, ScoreContext, Trade
-from alphaagent.server.services.quant.factors import Bar
+from alphaagent.server.services.quant.factors import Bar, DRAGON_PULLBACK_STRATEGY_ID, evaluate_exit
 
 
 @dataclass(frozen=True)
@@ -435,14 +435,50 @@ def signal_events_for_day(
 
 
 def sell_reason_for_position(position: Position, bar: Bar, current_day: date, params: BacktestParams) -> str | None:
-    if bar.close_price <= position.cost_price * (1 - params.stop_loss_pct):
-        return "stop_loss"
-    if bar.close_price >= position.cost_price * (1 + params.take_profit_pct):
-        return "take_profit"
-    if bar.close_price <= position.highest_price * (1 - params.trailing_stop_pct):
-        return "trailing_stop"
-    if (current_day - position.entry_date).days >= params.time_stop_days * 2:
-        return "time_stop"
+    if params.strategy == DRAGON_PULLBACK_STRATEGY_ID:
+        return dragon_pullback_sell_reason(position, bar, current_day, params)
+    # Backtest derives absolute exit levels from params coefficients and the
+    # position's cost/highest; realtime holdings instead read the stored price
+    # levels directly. Both paths share factors.evaluate_exit as the single
+    # source of truth for the exit priority and thresholds.
+    return evaluate_exit(
+        last_price=bar.close_price,
+        stop_loss_price=position.cost_price * (1 - params.stop_loss_pct),
+        take_profit_price=position.cost_price * (1 + params.take_profit_pct),
+        trailing_stop_price=position.highest_price * (1 - params.trailing_stop_pct),
+        entry_date=position.entry_date,
+        current_day=current_day,
+        time_stop_days=params.time_stop_days,
+    )
+
+
+def dragon_pullback_sell_reason(position: Position, bar: Bar, current_day: date, params: BacktestParams) -> str | None:
+    """Trend-oriented exit for the dragon pullback strategy."""
+
+    cost_price = position.cost_price
+    if bar.close_price <= cost_price * (1 - params.stop_loss_pct):
+        return "support_stop"
+
+    reason = position.reason if isinstance(position.reason, dict) else {}
+    ma10 = _float_or_none(reason.get("ma10"))
+    ma20 = _float_or_none(reason.get("ma20"))
+    entry_support = _float_or_none(reason.get("support_price"))
+    support_stop = entry_support * 0.965 if entry_support else None
+    if support_stop is not None and bar.close_price <= support_stop:
+        return "support_stop"
+    if ma20 is not None and bar.close_price < ma20 * 0.97 and current_day > position.entry_date:
+        return "trend_break"
+
+    gain = bar.close_price / cost_price - 1 if cost_price else 0
+    drawdown_from_high = bar.close_price / position.highest_price - 1 if position.highest_price else 0
+    if gain >= 0.30 and drawdown_from_high <= -0.10:
+        return "trend_trailing_stop"
+    if gain >= 0.18 and drawdown_from_high <= -0.12:
+        return "trend_trailing_stop"
+    if ma10 is not None and gain > 0.08 and bar.close_price < ma10 * 0.98:
+        return "trend_break"
+    if (current_day - position.entry_date).days >= params.time_stop_days * 2 and gain < 0.04:
+        return "time_efficiency_stop"
     return None
 
 
@@ -514,3 +550,12 @@ def _as_date(value: Any) -> date | None:
     if value:
         return date.fromisoformat(str(value)[:10])
     return None
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value in (None, "", "-", "--"):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

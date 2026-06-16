@@ -91,16 +91,18 @@ export function eventLabel(event: { event_type: string; side?: string; status?: 
 
 /** Map an execution mode string to a display label. */
 export function executionModeLabel(mode?: string | null): string {
-  if (mode === "minute_1430") return "14:30真实";
+  if (mode === "minute_1430") return "实时分钟";
   if (mode === "daily_close_proxy") return "收盘代理";
-  if (mode === "minute_1430_sell") return "14:30卖出";
+  if (mode === "minute_1430_sell") return "实时分钟卖出";
   if (mode === "daily_close_proxy_sell") return "收盘代理卖出";
-  if (mode === "strict_1430_required") return "严格14:30";
-  if (mode === "strict_1430_required_sell") return "严格14:30卖出";
+  if (mode === "strict_1430_required") return "严格分钟";
+  if (mode === "strict_1430_required_sell") return "严格分钟卖出";
   if (mode === "limit_up_tail_unfilled") return "涨停未买";
   if (mode === "limit_down_tail_blocked") return "跌停未卖";
-  if (mode === "minute_tail_ma5") return "尾盘分钟";
+  if (mode === "limit_down_open_blocked") return "开盘跌停未卖";
+  if (mode === "minute_tail_ma5") return "实时分钟";
   if (mode === "daily_next_open") return "次日开盘";
+  if (mode === "daily_next_open_sell") return "次日开盘卖出";
   if (mode === "daily_next_open_fallback") return "开盘回退";
   if (mode === "minute_tail_ma5_required") return "严格分钟";
   return mode || "--";
@@ -126,32 +128,33 @@ export const MIN_TRUSTED_BACKTEST_VERSION = "0.1.1";
  */
 export function backtestTrustVerdict(report: {
   strategy_version: string;
+  method?: {
+    execution?: {
+      execution_model?: string | null;
+    };
+  } | null;
   execution_quality?: {
     status?: string | null;
     buy_count?: number | null;
-    minute_tail_entry_ratio?: number | null;
     daily_open_fallback_ratio?: number | null;
-    minute_1430_ratio?: number | null;
     daily_close_proxy_ratio?: number | null;
   } | null;
 }) {
   const legacy = compareVersions(report.strategy_version, MIN_TRUSTED_BACKTEST_VERSION) < 0;
   const quality = report.execution_quality;
   const buyCount = quality?.buy_count ?? 0;
-  const minuteRatio = quality?.minute_1430_ratio ?? quality?.minute_tail_entry_ratio ?? 0;
+  const executionModel = report.method?.execution?.execution_model ?? "";
   const fallbackRatio = quality?.daily_open_fallback_ratio ?? 0;
   const proxyRatio = quality?.daily_close_proxy_ratio ?? 0;
   const items: string[] = [];
   const entryMode =
     buyCount <= 0
       ? "无成交"
-      : minuteRatio >= 80 && proxyRatio === 0 && fallbackRatio === 0
-        ? "严格14:30"
+      : executionModel === "legacy_next_open" || fallbackRatio >= 80
+        ? "D+1开盘"
         : proxyRatio >= 80
-          ? "收盘代理"
-          : fallbackRatio >= 80
-            ? "开盘回退"
-            : "混合成交";
+          ? "D+1收盘"
+          : "日线成交";
 
   if (legacy) {
     items.push("旧版本卖出撮合存在时间顺序风险：收盘触发条件可能按当天开盘成交，历史结果不要用于判断策略有效性。");
@@ -159,14 +162,8 @@ export function backtestTrustVerdict(report: {
   if (buyCount === 0) {
     items.push("这份报告没有买入成交，只能检查数据和筛选流程，不能统计策略胜率。");
   }
-  if (buyCount > 0 && proxyRatio >= 80) {
-    items.push("多数买入使用执行日收盘价代理尾盘，不是纯 14:30 分钟真实成交。");
-  }
-  if (buyCount > 0 && fallbackRatio >= 80) {
-    items.push("多数买入是旧版 D+1 开盘回退，不符合当前尾盘混合回测模型。");
-  }
-  if (buyCount > 0 && minuteRatio < 80) {
-    items.push("严格验证尾盘低吸前，需要补齐 14:30 分钟快照并使用「严格14:30」。");
+  if (buyCount > 0 && executionModel !== "legacy_next_open") {
+    items.push("这份报告不是当前默认日线 D+1 开盘口径，和新主流程对比时建议重跑。");
   }
 
   if (legacy) {
@@ -179,22 +176,12 @@ export function backtestTrustVerdict(report: {
       items,
     };
   }
-  if (buyCount > 0 && proxyRatio >= 80) {
-    return {
-      status: "warning" as const,
-      label: "混合代理",
-      title: "多数成交是收盘代理",
-      description: "当前结果以执行日收盘价代理尾盘成交为主，适合先看策略方向，不能当作纯 14:30 分钟真实结果。",
-      entryMode: "收盘代理",
-      items,
-    };
-  }
   if (quality?.status === "pass") {
     return {
       status: "pass" as const,
       label: "可复核",
-      title: "撮合顺序通过",
-      description: "买卖时点没有未来函数；成交来源可在报告中区分 14:30 真实快照和收盘代理。",
+      title: "日线回测可复核",
+      description: "信号按历史逐日生成，买卖按下一交易日日线价格执行，适合做通用策略研究。",
       entryMode,
       items,
     };
@@ -203,7 +190,7 @@ export function backtestTrustVerdict(report: {
     status: "warning" as const,
     label: "需复核",
     title: "结果需要结合日志复核",
-    description: "撮合版本已更新，但样本、分钟线或财报覆盖仍可能影响结论。",
+    description: "撮合版本已更新，但样本、财报覆盖和股票池范围仍可能影响结论。",
     entryMode,
     items,
   };

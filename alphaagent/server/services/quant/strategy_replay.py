@@ -28,7 +28,7 @@ def create_replay_run(
     max_symbols: int = 500,
     min_entry_score: float = DEFAULT_REPLAY_MIN_ENTRY_SCORE,
     strict_entry: bool = True,
-    execution_model: str = "strict_1430",
+    execution_model: str = "legacy_next_open",
     minute_interval: str = "1m",
     tail_entry_start: str = "14:30",
     tail_entry_end: str = "14:30",
@@ -81,7 +81,7 @@ def create_replay_run(
                 "empty",
                 _params_to_json(params),
                 {"signal_count": 0, "attempt_count": 0},
-                "No persisted quant signals in range.",
+                "区间内没有已保存的量化信号，无法生成买卖记录。",
             )
             return {
                 "status": "empty",
@@ -90,7 +90,7 @@ def create_replay_run(
                 "strategy_version": strategy.version,
                 "start_date": start.isoformat(),
                 "end_date": end.isoformat(),
-                "message": "No persisted quant signals in range.",
+                "message": "区间内没有已保存的量化信号，无法生成买卖记录。",
             }
 
         vt_symbols = _limited_symbols(signal_rows, params.max_symbols)
@@ -106,7 +106,7 @@ def create_replay_run(
                 "insufficient_data",
                 _params_to_json(params),
                 {"signal_count": len(signal_rows), "attempt_count": 0},
-                "Not enough daily bars to execute replay.",
+                "区间内日线数据不足，无法生成买卖记录。",
             )
             return {
                 "status": "insufficient_data",
@@ -115,7 +115,7 @@ def create_replay_run(
                 "strategy_version": strategy.version,
                 "start_date": start.isoformat(),
                 "end_date": end.isoformat(),
-                "message": "Not enough daily bars to execute replay.",
+                "message": "区间内日线数据不足，无法生成买卖记录。",
             }
 
         minute_index = _load_minute_bar_index(session, vt_symbols, start, end, params.minute_interval)
@@ -175,6 +175,7 @@ def latest_symbol_replay(vt_symbol: str, strategy_id: str = STRATEGY_ID) -> dict
             .where(
                 and_(
                     schema.strategy_replay_runs.c.strategy_id == strategy.id,
+                    schema.strategy_replay_runs.c.strategy_version == strategy.version,
                     schema.strategy_replay_attempts.c.vt_symbol == symbol,
                 )
             )
@@ -185,7 +186,12 @@ def latest_symbol_replay(vt_symbol: str, strategy_id: str = STRATEGY_ID) -> dict
             return symbol_replay(int(symbol_run), symbol)
         run = session.execute(
             select(schema.strategy_replay_runs)
-            .where(schema.strategy_replay_runs.c.strategy_id == strategy.id)
+            .where(
+                and_(
+                    schema.strategy_replay_runs.c.strategy_id == strategy.id,
+                    schema.strategy_replay_runs.c.strategy_version == strategy.version,
+                )
+            )
             .order_by(desc(schema.strategy_replay_runs.c.id))
             .limit(1)
         ).mappings().first()
@@ -194,7 +200,7 @@ def latest_symbol_replay(vt_symbol: str, strategy_id: str = STRATEGY_ID) -> dict
                 "status": "empty",
                 "vt_symbol": symbol,
                 "strategy_id": strategy.id,
-                "message": "该股暂无全局策略复盘结果，请先生成区间候选或补齐 replay。",
+                "message": "该股暂无全局买卖记录，请先在量化页运行策略研究。",
             }
     return symbol_replay(int(run["id"]), symbol)
 
@@ -242,18 +248,26 @@ def symbol_replay(replay_run_id: int, vt_symbol: str) -> dict[str, Any]:
         "attempts": attempts,
         "events": events,
         "closed_trades": trades,
-        "message": None if attempts else "该股在最新全局策略复盘中没有信号或执行记录。",
+        "message": None if attempts else "该股在最新全局买卖记录中没有信号或执行记录。",
     }
 
 
 def list_replay_runs(strategy_id: str = STRATEGY_ID, limit: int = 80) -> dict[str, Any]:
     if not is_database_configured():
         return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
+    strategy = get_strategy(strategy_id)
+    if strategy is None:
+        return {"status": "unsupported_strategy", "strategy_id": strategy_id, "items": []}
     _ensure_schema()
     with session_scope() as session:
         rows = session.execute(
             select(schema.strategy_replay_runs)
-            .where(schema.strategy_replay_runs.c.strategy_id == strategy_id)
+            .where(
+                and_(
+                    schema.strategy_replay_runs.c.strategy_id == strategy.id,
+                    schema.strategy_replay_runs.c.strategy_version == strategy.version,
+                )
+            )
             .order_by(desc(schema.strategy_replay_runs.c.id))
             .limit(min(max(limit, 1), 300))
         ).mappings().all()
@@ -815,6 +829,7 @@ def _params(
     time_stop_days: int,
     included_boards: list[str] | tuple[str, ...] | str | None,
 ) -> BacktestParams:
+    uses_minute_execution = execution_model in {"tail_close_hybrid", "strict_1430"}
     return BacktestParams(
         strategy=strategy_id,
         start=start,
@@ -831,8 +846,8 @@ def _params(
         min_entry_score=min_entry_score,
         strict_entry=strict_entry,
         execution_model=execution_model,
-        intraday_entry=True,
-        minute_entry_required=False,
+        intraday_entry=uses_minute_execution,
+        minute_entry_required=execution_model == "strict_1430",
         minute_interval=minute_interval,
         tail_entry_start=tail_entry_start,
         tail_entry_end=tail_entry_end,
@@ -843,7 +858,7 @@ def _params(
 
 
 def _params_to_json(params: BacktestParams) -> dict[str, Any]:
-    return {
+    payload = {
         "strategy": params.strategy,
         "start": params.start.isoformat(),
         "end": params.end.isoformat() if params.end else None,
@@ -853,16 +868,22 @@ def _params_to_json(params: BacktestParams) -> dict[str, Any]:
         "execution_model": params.execution_model,
         "intraday_entry": params.intraday_entry,
         "minute_entry_required": params.minute_entry_required,
-        "minute_interval": params.minute_interval,
-        "tail_entry_start": params.tail_entry_start,
-        "tail_entry_end": params.tail_entry_end,
-        "tail_entry_ma5_tolerance_pct": params.tail_entry_ma5_tolerance_pct,
         "stop_loss_pct": params.stop_loss_pct,
         "take_profit_pct": params.take_profit_pct,
         "trailing_stop_pct": params.trailing_stop_pct,
         "time_stop_days": params.time_stop_days,
         "included_boards": list(params.included_boards),
     }
+    if params.execution_model in {"tail_close_hybrid", "strict_1430"}:
+        payload.update(
+            {
+                "minute_interval": params.minute_interval,
+                "tail_entry_start": params.tail_entry_start,
+                "tail_entry_end": params.tail_entry_end,
+                "tail_entry_ma5_tolerance_pct": params.tail_entry_ma5_tolerance_pct,
+            }
+        )
+    return payload
 
 
 def _is_limit_up_open(bar: Bar) -> bool:
@@ -874,7 +895,7 @@ def _lookback_start(start: date) -> date:
 
 
 def _ensure_schema() -> None:
-    schema.create_schema(get_engine())
+    schema.ensure_schema_once(get_engine())
 
 
 def _mapping_to_api(row: dict[str, Any]) -> dict[str, Any]:

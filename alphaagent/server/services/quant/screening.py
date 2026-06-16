@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import and_, desc, func, select
 
@@ -41,6 +41,7 @@ def screen_stocks(
     persist: bool = False,
     auto_portfolio: bool = True,
     included_boards: list[str] | tuple[str, ...] | str | None = None,
+    ensure_schema: bool = True,
 ) -> dict[str, Any]:
     """Run the daily stock screen."""
 
@@ -49,7 +50,8 @@ def screen_stocks(
         return {"status": "unsupported_strategy", "strategy_id": strategy_id, "items": [], "recommendations": []}
     if not is_database_configured():
         return {"status": "unavailable", "message": "DATABASE_URL not configured", "items": [], "recommendations": []}
-    _ensure_quant_schema()
+    if ensure_schema:
+        _ensure_quant_schema()
 
     with session_scope() as session:
         as_of = trade_date or _latest_trade_date(session)
@@ -131,6 +133,8 @@ def screen_stocks_range(
     persist: bool = False,
     auto_portfolio: bool = True,
     included_boards: list[str] | tuple[str, ...] | str | None = None,
+    force_refresh: bool = False,
+    progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Run daily screens for every local trading date in a range."""
 
@@ -157,6 +161,7 @@ def screen_stocks_range(
                 "runs": [],
             }
         trade_dates = _trading_dates_between(session, start_date, latest)
+        existing_runs = _screen_runs_by_date(session, strategy.id, strategy.version, trade_dates)
 
     if not trade_dates:
         return {
@@ -172,24 +177,38 @@ def screen_stocks_range(
     runs = []
     latest_result: dict[str, Any] | None = None
     succeeded_count = 0
+    processed_count = 0
     range_recommendation_count = 0
+    force_refreshed_count = 0
     boards = list(normalize_included_boards(included_boards))
 
     for index, trade_date in enumerate(trade_dates):
-        result = screen_stocks(
-            trade_date,
-            strategy_id=strategy.id,
-            max_symbols=max_symbols,
-            recommendation_limit=recommendation_limit,
-            min_recommendation_score=min_recommendation_score,
-            persist=persist,
-            auto_portfolio=auto_portfolio and index == len(trade_dates) - 1,
-            included_boards=boards,
-        )
+        existing_run = existing_runs.get(trade_date) if persist else None
+        use_existing = bool(existing_run and not force_refresh)
+        if existing_run and force_refresh:
+            force_refreshed_count += 1
+        if use_existing:
+            result = _screen_result_from_existing_run(existing_run, strategy.id, strategy.version, boards)
+            if auto_portfolio and index == len(trade_dates) - 1:
+                _sync_existing_recommendations_to_portfolio(existing_run["id"], strategy.id, strategy.version)
+        else:
+            result = screen_stocks(
+                trade_date,
+                strategy_id=strategy.id,
+                max_symbols=max_symbols,
+                recommendation_limit=recommendation_limit,
+                min_recommendation_score=min_recommendation_score,
+                persist=persist,
+                auto_portfolio=auto_portfolio and index == len(trade_dates) - 1,
+                included_boards=boards,
+                ensure_schema=False,
+            )
         latest_result = result
         status = str(result.get("status") or "empty")
         if status == "ready":
             succeeded_count += 1
+        if status in {"ready", "empty"}:
+            processed_count += 1
         recommendation_count = int(result.get("recommendation_count") or 0)
         range_recommendation_count += recommendation_count
         runs.append(
@@ -199,8 +218,22 @@ def screen_stocks_range(
                 "run_id": result.get("run_id"),
                 "candidate_count": int(result.get("total") or 0),
                 "recommendation_count": recommendation_count,
+                "skipped_existing": use_existing,
+                "force_refreshed": bool(existing_run and force_refresh),
             }
         )
+        if progress:
+            progress(
+                {
+                    "trade_date": trade_date.isoformat(),
+                    "progress_current": index + 1,
+                    "progress_total": len(trade_dates),
+                    "status": status,
+                    "run_id": result.get("run_id"),
+                    "skipped_existing": use_existing,
+                    "force_refreshed": bool(existing_run and force_refresh),
+                }
+            )
 
     replay_run = None
     if persist:
@@ -214,11 +247,7 @@ def screen_stocks_range(
                 max_symbols=max_symbols,
                 min_entry_score=float(getattr(strategy, "default_min_entry_score", min_recommendation_score) or min_recommendation_score),
                 strict_entry=True,
-                execution_model="strict_1430",
-                minute_interval="1m",
-                tail_entry_start="14:30",
-                tail_entry_end="14:30",
-                tail_entry_ma5_tolerance_pct=1.5,
+                execution_model="legacy_next_open",
                 included_boards=boards,
             )
         except Exception as exc:
@@ -236,6 +265,11 @@ def screen_stocks_range(
         "run_id": latest_result.get("run_id"),
         "total_dates": len(trade_dates),
         "succeeded_count": succeeded_count,
+        "processed_count": processed_count,
+        "generated_count": sum(1 for item in runs if not item.get("skipped_existing")),
+        "skipped_existing_count": sum(1 for item in runs if item.get("skipped_existing")),
+        "force_refreshed_count": force_refreshed_count,
+        "force_refresh": bool(force_refresh),
         "range_recommendation_count": range_recommendation_count,
         "total": int(latest_result.get("total") or 0),
         "recommendation_count": int(latest_result.get("recommendation_count") or 0),
@@ -297,7 +331,12 @@ def list_screen_runs(strategy_id: str = STRATEGY_ID, limit: int = 120) -> dict[s
     with session_scope() as session:
         rows = session.execute(
             select(schema.quant_signal_runs)
-            .where(schema.quant_signal_runs.c.strategy_id == strategy.id)
+            .where(
+                and_(
+                    schema.quant_signal_runs.c.strategy_id == strategy.id,
+                    schema.quant_signal_runs.c.strategy_version == strategy.version,
+                )
+            )
             .order_by(desc(schema.quant_signal_runs.c.trade_date), desc(schema.quant_signal_runs.c.id))
             .limit(min(max(limit, 1), 500))
         ).mappings().all()
@@ -356,6 +395,13 @@ def list_trading_dates(start: date | None = None, end: date | None = None, limit
 
     with session_scope() as session:
         rows = session.execute(query).mappings().all()
+        min_query = select(func.min(schema.stock_daily_bars.c.trade_date))
+        max_query = select(func.max(schema.stock_daily_bars.c.trade_date))
+        if filters:
+            min_query = min_query.where(and_(*filters))
+            max_query = max_query.where(and_(*filters))
+        earliest = session.execute(min_query).scalar()
+        latest = session.execute(max_query).scalar()
 
     items = [
         {
@@ -367,7 +413,8 @@ def list_trading_dates(start: date | None = None, end: date | None = None, limit
     return {
         "status": "ready" if items else "empty",
         "items": items,
-        "latest_trade_date": items[0]["trade_date"] if items else None,
+        "latest_trade_date": latest.isoformat() if latest else (items[0]["trade_date"] if items else None),
+        "earliest_trade_date": earliest.isoformat() if earliest else None,
         "returned_count": len(items),
     }
 
@@ -682,7 +729,7 @@ def symbol_strategy_comparison(
 def _ensure_quant_schema() -> None:
     """Allow quant screening to run from service calls, not only API startup."""
 
-    schema.create_schema(get_engine())
+    schema.ensure_schema_once(get_engine())
 
 
 def _latest_trade_date(session) -> date | None:
@@ -705,6 +752,86 @@ def _latest_screen_run(session, strategy_id: str, trade_date: date | None = None
     strategy = get_strategy(strategy_id)
     strategy_version = strategy.version if strategy else STRATEGY_VERSION
     return screening_loaders.latest_screen_run(session, strategy_id, strategy_version, trade_date)
+
+
+def _screen_runs_by_date(session, strategy_id: str, strategy_version: str, trade_dates: list[date]) -> dict[date, dict[str, Any]]:
+    if not trade_dates:
+        return {}
+    rows = session.execute(
+        select(schema.quant_signal_runs)
+        .where(
+            and_(
+                schema.quant_signal_runs.c.strategy_id == strategy_id,
+                schema.quant_signal_runs.c.strategy_version == strategy_version,
+                schema.quant_signal_runs.c.status.in_(["succeeded", "empty"]),
+                schema.quant_signal_runs.c.trade_date.in_(trade_dates),
+            )
+        )
+        .order_by(schema.quant_signal_runs.c.trade_date, desc(schema.quant_signal_runs.c.id))
+    ).mappings().all()
+    result: dict[date, dict[str, Any]] = {}
+    for row in rows:
+        trade_date = row["trade_date"]
+        if trade_date not in result:
+            result[trade_date] = dict(row)
+    return result
+
+
+def _screen_result_from_existing_run(
+    run: dict[str, Any],
+    strategy_id: str,
+    strategy_version: str,
+    boards: list[str],
+) -> dict[str, Any]:
+    return {
+        "status": "ready" if str(run.get("status") or "") == "succeeded" else str(run.get("status") or "empty"),
+        "strategy_id": strategy_id,
+        "strategy_version": strategy_version,
+        "trade_date": run["trade_date"].isoformat(),
+        "run_id": int(run["id"]),
+        "total": int(run.get("candidate_count") or 0),
+        "recommendation_count": int(run.get("recommendation_count") or 0),
+        "included_boards": _run_included_boards(run) or boards,
+        "items": [],
+        "recommendations": [],
+    }
+
+
+def _sync_existing_recommendations_to_portfolio(run_id: int, strategy_id: str, strategy_version: str) -> dict[str, Any] | None:
+    with session_scope() as session:
+        rows = session.execute(
+            select(schema.quant_recommendations)
+            .where(schema.quant_recommendations.c.run_id == run_id)
+            .order_by(schema.quant_recommendations.c.rank)
+        ).mappings().all()
+        if not rows:
+            return None
+        stock_meta_rows = session.execute(
+            select(schema.stocks).where(schema.stocks.c.vt_symbol.in_([row["vt_symbol"] for row in rows]))
+        ).mappings().all()
+        stock_meta = {str(row["vt_symbol"]): dict(row) for row in stock_meta_rows}
+        recommendations = [_recommendation_row_to_score(dict(row)) for row in rows]
+        return _sync_quant_candidate_group(session, recommendations, stock_meta, strategy_id, strategy_version)
+
+
+def _recommendation_row_to_score(row: dict[str, Any]) -> SignalScore:
+    reason = row.get("reason") if isinstance(row.get("reason"), dict) else {}
+    return SignalScore(
+        vt_symbol=str(row["vt_symbol"]),
+        trade_date=row["trade_date"],
+        signal_type=str(row.get("strategy_id") or STRATEGY_ID),
+        total_score=float(row.get("total_score") or 0),
+        relative_strength_score=float(reason.get("strong_leg_score") or 0),
+        washout_score=float(reason.get("pullback_structure_score") or 0),
+        trend_quality_score=float(reason.get("reclaim_confirmation_score") or 0),
+        sector_mainline_score=float(reason.get("smart_money_proxy_score") or 0),
+        financial_improvement_score=float(reason.get("financial_score") or 0),
+        liquidity_score=float(reason.get("liquidity_score") or 0),
+        risk_score=float(reason.get("risk_score") or 0),
+        entry_signal=str(row.get("action") or "").upper() == "BUY",
+        risk_level=str(reason.get("risk_level") or "MEDIUM"),
+        evidence=reason,
+    )
 
 
 def _trading_dates_between(session, start: date, end: date) -> list[date]:

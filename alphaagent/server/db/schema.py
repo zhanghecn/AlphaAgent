@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -22,6 +24,8 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 
 metadata = MetaData()
+_SCHEMA_READY = False
+_SCHEMA_LOCK = threading.Lock()
 
 sync_sources = Table(
     "sync_sources",
@@ -979,6 +983,25 @@ def create_schema(engine) -> None:
 
     metadata.create_all(engine)
     _apply_compatible_schema_patches(engine)
+
+
+def ensure_schema_once(engine) -> None:
+    """Create/patch schema once per API process.
+
+    Several read endpoints call service-level schema bootstrapping so they can
+    also run from tests and direct service calls. Without this process-local
+    guard, frequent frontend polling repeatedly issues idempotent DDL and can
+    take relation locks while long quant research jobs are writing candidates.
+    """
+
+    global _SCHEMA_READY
+    if _SCHEMA_READY:
+        return
+    with _SCHEMA_LOCK:
+        if _SCHEMA_READY:
+            return
+        create_schema(engine)
+        _SCHEMA_READY = True
 
 
 def _apply_compatible_schema_patches(engine) -> None:

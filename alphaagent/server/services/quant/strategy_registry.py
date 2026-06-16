@@ -13,6 +13,10 @@ from typing import Callable
 from alphaagent.server.services.quant.factors import (
     BREAKOUT_STRATEGY_ID,
     BREAKOUT_STRATEGY_VERSION,
+    DRAGON_PULLBACK_STRATEGY_ID,
+    DRAGON_PULLBACK_STRATEGY_VERSION,
+    LEADER_PULLBACK_STRATEGY_ID,
+    LEADER_PULLBACK_STRATEGY_VERSION,
     LIMIT_UP_PULLBACK_STRATEGY_ID,
     LIMIT_UP_PULLBACK_STRATEGY_VERSION,
     STRATEGY_ID,
@@ -23,6 +27,7 @@ from alphaagent.server.services.quant.factors import (
     SignalScore,
 )
 from alphaagent.server.services.quant.strategies.breakout import score_breakout_confirmation
+from alphaagent.server.services.quant.strategies.dragon_pullback import score_dragon_pullback
 from alphaagent.server.services.quant.strategies.limit_up_pullback import score_limit_up_after_pullback
 from alphaagent.server.services.quant.strategies.pullback import score_stock
 from alphaagent.server.services.quant.strategies.trend_acceleration import score_trend_acceleration
@@ -47,8 +52,8 @@ class QuantStrategy:
 
 
 MAINLINE_LEADER_PULLBACK = QuantStrategy(
-    id=STRATEGY_ID,
-    version=STRATEGY_VERSION,
+    id=LEADER_PULLBACK_STRATEGY_ID,
+    version=LEADER_PULLBACK_STRATEGY_VERSION,
     name="主线强势回踩低吸",
     description="使用日线可见数据寻找主线强势股在 MA5 附近回踩的低吸机会。",
     default_min_entry_score=68.0,
@@ -94,6 +99,46 @@ BREAKOUT_CONFIRMATION = QuantStrategy(
     },
     primary_metric_keys=("close_to_prior_high_pct", "volume_ratio_5d_20d"),
     score=score_breakout_confirmation,
+)
+
+MAINLINE_DRAGON_PULLBACK = QuantStrategy(
+    id=DRAGON_PULLBACK_STRATEGY_ID,
+    version=DRAGON_PULLBACK_STRATEGY_VERSION,
+    name="主线龙回头回踩低吸",
+    description="使用日线可见数据识别主线强势股第一波启动后的缩量回踩、均线承接和弱转强机会。",
+    default_min_entry_score=76.0,
+    entry_action_label="买入",
+    watch_action_label="观察",
+    failed_rule_labels={
+        "total_score": "分数不足",
+        "strong_leg": "第一波强度不足",
+        "pullback_structure": "回踩结构不足",
+        "pullback_too_short": "回踩时间不足",
+        "pullback_too_late": "回踩时间过长",
+        "support_acceptance": "均线承接不足",
+        "reclaim_confirmation": "弱转强确认不足",
+        "repeat_tail_buy_setup": "同一回踩结构重复信号",
+        "weak_rebound_ma5_below_ma10": "MA5下穿MA10弱反抽",
+        "distribution_risk": "高位派发风险",
+        "pullback_too_deep": "回撤过深",
+        "ma20_broken": "跌破MA20支撑",
+        "overheat": "短期过热",
+        "risk_score": "风险分不足",
+        "liquidity_score": "流动性不足",
+    },
+    evidence_labels={
+        "dragon_state": "龙回头状态",
+        "support_type": "承接类型",
+        "ma5_distance_pct": "MA5距离",
+        "ma10_distance_pct": "MA10距离",
+        "drawdown_from_pivot_pct": "距高点回撤",
+        "pullback_days": "回踩天数",
+        "volume_ratio_5d_20d": "量能比",
+        "risk_score": "风险分",
+        "liquidity_score": "流动性",
+    },
+    primary_metric_keys=("dragon_state", "support_type", "ma5_distance_pct"),
+    score=score_dragon_pullback,
 )
 
 LIMIT_UP_AFTER_PULLBACK = QuantStrategy(
@@ -163,10 +208,13 @@ TREND_ACCELERATION = QuantStrategy(
 
 _STRATEGIES: dict[str, QuantStrategy] = {
     MAINLINE_LEADER_PULLBACK.id: MAINLINE_LEADER_PULLBACK,
+    MAINLINE_DRAGON_PULLBACK.id: MAINLINE_DRAGON_PULLBACK,
     BREAKOUT_CONFIRMATION.id: BREAKOUT_CONFIRMATION,
     LIMIT_UP_AFTER_PULLBACK.id: LIMIT_UP_AFTER_PULLBACK,
     TREND_ACCELERATION.id: TREND_ACCELERATION,
 }
+
+PUBLIC_STRATEGY_IDS = (DRAGON_PULLBACK_STRATEGY_ID,)
 
 
 def get_strategy(strategy_id: str | None) -> QuantStrategy | None:
@@ -185,24 +233,36 @@ def require_strategy(strategy_id: str | None) -> QuantStrategy:
     return strategy
 
 
-def list_strategies() -> list[dict[str, object]]:
+def list_strategies(*, include_internal: bool = False) -> list[dict[str, object]]:
     """Return strategy metadata suitable for API/UI option lists."""
 
+    strategy_ids = _STRATEGIES if include_internal else PUBLIC_STRATEGY_IDS
     return [
-        {
-            "id": strategy.id,
-            "version": strategy.version,
-            "name": strategy.name,
-            "description": strategy.description,
-            "default_min_entry_score": strategy.default_min_entry_score,
-            "entry_action_label": strategy.entry_action_label,
-            "watch_action_label": strategy.watch_action_label,
-            "failed_rule_labels": strategy.failed_rule_labels,
-            "evidence_labels": strategy.evidence_labels,
-            "primary_metric_keys": list(strategy.primary_metric_keys),
-        }
-        for strategy in _STRATEGIES.values()
+        _strategy_metadata(_STRATEGIES[strategy_id])
+        for strategy_id in strategy_ids
+        if strategy_id in _STRATEGIES
     ]
+
+
+def list_internal_strategies() -> list[dict[str, object]]:
+    """Return all registered strategies for compatibility tooling."""
+
+    return list_strategies(include_internal=True)
+
+
+def _strategy_metadata(strategy: QuantStrategy) -> dict[str, object]:
+    return {
+        "id": strategy.id,
+        "version": strategy.version,
+        "name": strategy.name,
+        "description": strategy.description,
+        "default_min_entry_score": strategy.default_min_entry_score,
+        "entry_action_label": strategy.entry_action_label,
+        "watch_action_label": strategy.watch_action_label,
+        "failed_rule_labels": strategy.failed_rule_labels,
+        "evidence_labels": strategy.evidence_labels,
+        "primary_metric_keys": list(strategy.primary_metric_keys),
+    }
 
 
 def score_strategy(

@@ -24,7 +24,7 @@ export function BacktestStrategyComparisonPanel({
             策略同口径对比
           </h3>
           <p className="mt-1 text-sm text-muted-foreground">
-            用当前回测参数非持久化重跑已注册策略，比较 BUY、成交、拒单、收益和 14:30 覆盖。
+            用当前日线回测参数非持久化重跑已注册策略，比较 BUY、成交、拒单、收益和回撤。
           </p>
         </div>
         <Button size="sm" variant="outline" onClick={onRun} disabled={isLoading}>
@@ -50,8 +50,8 @@ export function BacktestStrategyComparisonPanel({
                 value={formatPct(comparison.summary.best_total_return_pct)}
                 valueClass={priceColorClass(comparison.summary.best_total_return_pct)}
               />
-              <InfoCell label="数据可验证最优" value={comparison.summary.best_verifiable_strategy_id ?? "--"} />
-              <InfoCell label="无缺口无代理" value={`${comparison.summary.complete_strict_count ?? 0} 个`} />
+              <InfoCell label="日线最优" value={comparison.summary.best_verifiable_strategy_id ?? "--"} />
+              <InfoCell label="完成策略数" value={`${comparison.summary.ready_count ?? comparison.summary.complete_strict_count ?? 0} 个`} />
             </div>
           ) : null}
 
@@ -67,8 +67,7 @@ export function BacktestStrategyComparisonPanel({
                   <TableHead className="text-right">BUY信号</TableHead>
                   <TableHead className="text-right">买入</TableHead>
                   <TableHead className="text-right">拒单</TableHead>
-                  <TableHead className="text-right">14:30</TableHead>
-                  <TableHead className="text-right">收盘代理</TableHead>
+                  <TableHead className="text-right">成交行</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -94,8 +93,7 @@ export function BacktestStrategyComparisonPanel({
                     <TableCell className="text-right tabular-nums">{row.buy_signal_count ?? "--"}</TableCell>
                     <TableCell className="text-right tabular-nums">{row.buy_count ?? "--"}</TableCell>
                     <TableCell className="text-right tabular-nums">{row.rejected_order_count ?? "--"}</TableCell>
-                    <TableCell className="text-right tabular-nums">{row.minute_1430_count ?? "--"}</TableCell>
-                    <TableCell className="text-right tabular-nums">{row.daily_close_proxy_count ?? "--"}</TableCell>
+                    <TableCell className="text-right tabular-nums">{row.total_trade_rows ?? "--"}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>

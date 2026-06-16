@@ -10,7 +10,9 @@ from fastapi.responses import JSONResponse
 
 from alphaagent.server.core.responses import fail, ok
 from alphaagent.server.services.quant import screening
+from alphaagent.server.services.quant import research_jobs
 from alphaagent.server.services.quant import strategy_replay
+from alphaagent.server.services.quant.symbol_quant_state import latest_symbol_quant_state
 from alphaagent.server.services.quant.symbol_diagnostics import symbol_diagnostics_report
 
 router = APIRouter(prefix="/quant", tags=["quant"])
@@ -49,8 +51,53 @@ def create_screen_runs_range(payload: dict[str, Any] = Body(default_factory=dict
                 persist=bool(payload.get("persist", True)),
                 auto_portfolio=bool(payload.get("auto_portfolio", True)),
                 included_boards=payload.get("included_boards"),
+                force_refresh=bool(payload.get("force_refresh", False)),
             )
         )
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.post("/research-runs")
+def create_research_run(payload: dict[str, Any] = Body(default_factory=dict)):
+    try:
+        return ok(
+            research_jobs.start_research_run(
+                start=_parse_date(payload.get("start") or payload.get("start_date") or payload.get("trade_date")),
+                end=_parse_date(payload.get("end") or payload.get("end_date")),
+                strategy_id=str(payload.get("strategy") or screening.STRATEGY_ID),
+                max_symbols=int(payload.get("max_symbols") or 5000),
+                recommendation_limit=int(payload.get("recommendation_limit") or screening.DEFAULT_RECOMMENDATION_LIMIT),
+                min_recommendation_score=float(payload.get("min_recommendation_score") or 60),
+                min_entry_score=_parse_float(payload.get("min_entry_score")),
+                persist=bool(payload.get("persist", True)),
+                auto_portfolio=bool(payload.get("auto_portfolio", True)),
+                included_boards=payload.get("included_boards"),
+                initial_cash=float(payload.get("initial_cash") or 1_000_000),
+                max_positions=int(payload.get("max_positions") or 10),
+                candidate_limit=int(payload.get("candidate_limit") or 10),
+                max_position_pct=float(payload.get("max_position_pct") or 0.1),
+                strict_entry=bool(payload.get("strict_entry", True)),
+                execution_model=str(payload.get("execution_model") or "legacy_next_open"),
+                force_refresh=bool(payload.get("force_refresh", False)),
+            )
+        )
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/research-runs/latest")
+def latest_research_run():
+    try:
+        return ok(research_jobs.get_latest_research_run())
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/research-runs/{run_id}")
+def get_research_run(run_id: str):
+    try:
+        return ok(research_jobs.get_research_run(run_id))
     except Exception as exc:
         return _service_error(exc)
 
@@ -70,7 +117,7 @@ def create_replay_run(payload: dict[str, Any] = Body(default_factory=dict)):
                 max_symbols=int(payload.get("max_symbols") or 500),
                 min_entry_score=float(payload.get("min_entry_score") or 68),
                 strict_entry=bool(payload.get("strict_entry", True)),
-                execution_model=str(payload.get("execution_model") or "strict_1430"),
+                execution_model=str(payload.get("execution_model") or "legacy_next_open"),
                 minute_interval=str(payload.get("minute_interval") or "1m"),
                 tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
                 tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
@@ -221,6 +268,17 @@ def get_symbol_trade_plan(
         return _service_error(exc)
 
 
+@router.get("/symbols/{vt_symbol}/latest-state")
+def get_latest_symbol_quant_state(
+    vt_symbol: str,
+    strategy: str = Query(default=screening.STRATEGY_ID),
+):
+    try:
+        return ok(latest_symbol_quant_state(vt_symbol, strategy_id=strategy))
+    except Exception as exc:
+        return _service_error(exc)
+
+
 @router.get("/symbols/{vt_symbol}/replay/latest")
 def get_latest_symbol_replay(
     vt_symbol: str,
@@ -282,6 +340,12 @@ def _parse_date(value: Any) -> date | None:
     if isinstance(value, date):
         return value
     return date.fromisoformat(str(value)[:10])
+
+
+def _parse_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    return float(value)
 
 
 def _service_error(exc: Exception) -> JSONResponse:

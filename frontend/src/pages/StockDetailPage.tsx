@@ -8,7 +8,7 @@
  *         Business + Financials → Fund flow + Events
  */
 import { useParams, Link } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   fetchStockDetail,
@@ -20,16 +20,19 @@ import { fetchLimitPools } from "@/api/market";
 import {
   createSymbolBacktest,
   fetchBacktestAudit,
-  fetchQuantStrategies,
-  fetchLatestSymbolReplay,
-  fetchSymbolTradePlan,
+  fetchBacktestSymbolDetail,
+  fetchBacktests,
   fetchLatestSymbolBacktest,
+  fetchQuantStrategies,
+  fetchLatestSymbolQuantState,
+  type BacktestRun,
   type BacktestAudit,
   type BacktestAuditEvent,
+  type BacktestOrderEvent,
+  type BacktestSymbolDetail,
   type BacktestTrade,
   type QuantStrategyOption,
-  type SymbolTradePlan,
-  type SymbolLatestBacktest,
+  type SymbolLatestQuantState,
   type SymbolStrategyReplay,
   type StrategyReplayEvent,
 } from "@/api/quant";
@@ -37,14 +40,12 @@ import { StockQuoteHeader } from "@/features/stocks/StockQuoteHeader";
 import { StockKlineChart, type KlineMarker } from "@/features/stocks/StockKlineChart";
 import { StockIndicatorPanel } from "@/features/stocks/StockIndicatorPanel";
 import { StockFinanceChart } from "@/features/stocks/StockFinanceChart";
-import { deriveStockReturnSummary, type ClosedReturnTrade } from "@/features/stocks/stockReturnMetrics";
-import { DEFAULT_BACKTEST_START } from "@/features/quant/constants";
+import { DEFAULT_BACKTEST_PARAMS, DEFAULT_BACKTEST_START } from "@/features/quant/constants";
 import { ConceptTag } from "@/components/ConceptTag";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
-import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { AddToGroupButton } from "@/features/portfolio/AddToGroupButton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { formatPct, formatPrice, priceColorClass, cn } from "@/lib/utils";
 import type { ConceptCard, ShenwanClassification, StockConceptCardsResponse, ConceptHint } from "@/types/research";
@@ -59,15 +60,11 @@ import {
   ArrowRight,
   TrendingUp,
   BarChart3,
-  RefreshCw,
-  FileText,
 } from "lucide-react";
 
 export function StockDetailPage() {
   const { vtSymbol } = useParams<{ vtSymbol: string }>();
-  const queryClient = useQueryClient();
-  const [backtestStart, setBacktestStart] = useState(DEFAULT_BACKTEST_START);
-  const [singleBacktestStrategy, setSingleBacktestStrategy] = useState("mainline_leader_pullback");
+  const singleBacktestStrategy = DEFAULT_BACKTEST_PARAMS.strategy;
   const [selectedBacktestMarkerId, setSelectedBacktestMarkerId] = useState<string | null>(null);
 
   const quoteQuery = useQuery({
@@ -130,64 +127,103 @@ export function StockDetailPage() {
     return null;
   }, [limitPoolQuery.data, vtSymbol]);
 
-  // 候选筛选时已预算并存储的买卖计划，单股详情直接读取，避免重跑回测
-  const tradePlanQuery = useQuery({
-    queryKey: ["symbolTradePlan", vtSymbol, singleBacktestStrategy],
-    queryFn: () => fetchSymbolTradePlan(vtSymbol!, singleBacktestStrategy),
+  const latestQuantStateQuery = useQuery({
+    queryKey: ["symbolLatestQuantState", vtSymbol, singleBacktestStrategy],
+    queryFn: () => fetchLatestSymbolQuantState(vtSymbol!, singleBacktestStrategy),
     enabled: !!vtSymbol,
     staleTime: 30_000,
   });
-
-  const latestReplayQuery = useQuery({
-    queryKey: ["symbolLatestReplay", vtSymbol, singleBacktestStrategy],
-    queryFn: () => fetchLatestSymbolReplay(vtSymbol!, singleBacktestStrategy),
+  const latestReplay = latestQuantStateToReplay(latestQuantStateQuery.data);
+  const quantProcessRangeKey = processDateRangeKey(latestQuantStateQuery.data);
+  const hasGlobalExecutionMarkers = latestQuantStateQuery.data?.status === "ready"
+    ? quantStateToMarkers(latestQuantStateQuery.data).some((marker) => marker.markerKind === "trade" || marker.markerKind === "rejected")
+    : false;
+  const latestPortfolioBacktestQuery = useQuery({
+    queryKey: ["backtests", "portfolio", singleBacktestStrategy],
+    queryFn: () => fetchBacktests(1, "portfolio", singleBacktestStrategy),
     enabled: !!vtSymbol,
-    staleTime: 30_000,
+    staleTime: 60_000,
   });
-  const latestReplay = latestReplayQuery.data?.status === "ready" ? latestReplayQuery.data : null;
-
-  // 单股回测结果缓存：读最近 symbol 回测，免重算；无缓存时自动创建一次
-  const latestBacktestQuery = useQuery({
+  const latestPortfolioBacktest = latestPortfolioBacktestQuery.data?.items[0] ?? undefined;
+  const latestPortfolioBacktestId = latestPortfolioBacktest?.id ?? undefined;
+  const portfolioSymbolDetailQuery = useQuery({
+    queryKey: ["portfolioBacktestSymbolDetail", latestPortfolioBacktestId, vtSymbol],
+    queryFn: () => fetchBacktestSymbolDetail(Number(latestPortfolioBacktestId), vtSymbol!),
+    enabled: Boolean(vtSymbol && latestPortfolioBacktestId),
+    staleTime: 60_000,
+  });
+  const hasPortfolioSymbolExecutions = (portfolioSymbolDetailQuery.data?.trades?.length ?? 0) > 0
+    || (portfolioSymbolDetailQuery.data?.orders?.length ?? 0) > 0;
+  const latestSymbolBacktestQuery = useQuery({
     queryKey: ["symbolLatestBacktest", vtSymbol, singleBacktestStrategy],
     queryFn: () => fetchLatestSymbolBacktest(vtSymbol!, singleBacktestStrategy),
-    enabled: false,
-    staleTime: 30_000,
+    enabled: Boolean(vtSymbol && !hasPortfolioSymbolExecutions && !hasGlobalExecutionMarkers),
+    staleTime: 5 * 60_000,
   });
-  const latestBacktest = latestBacktestQuery.data?.status === "ready" ? latestBacktestQuery.data : null;
-
-  const latestAuditQuery = useQuery({
-    queryKey: ["symbolLatestBacktestAudit", latestBacktest?.backtest_id, vtSymbol],
-    queryFn: () => fetchBacktestAudit(Number(latestBacktest!.backtest_id), vtSymbol!, 500),
-    enabled: Boolean(vtSymbol && latestBacktest?.backtest_id),
-    staleTime: 30_000,
+  const latestSymbolBacktestId =
+    latestSymbolBacktestQuery.data?.status === "ready" ? latestSymbolBacktestQuery.data.backtest_id : undefined;
+  const latestSymbolAuditQuery = useQuery({
+    queryKey: ["symbolLatestBacktestAudit", latestSymbolBacktestId, vtSymbol],
+    queryFn: () => fetchBacktestAudit(Number(latestSymbolBacktestId), vtSymbol!, 500),
+    enabled: Boolean(vtSymbol && latestSymbolBacktestId && !hasPortfolioSymbolExecutions && !hasGlobalExecutionMarkers),
+    staleTime: 5 * 60_000,
   });
-
-  const singleBacktestMutation = useMutation({
-    mutationFn: () =>
+  const autoCreateReviewQuery = useQuery({
+    queryKey: ["symbolAutoCreateReview", vtSymbol, singleBacktestStrategy, quantProcessRangeKey],
+    queryFn: () =>
       createSymbolBacktest({
         vt_symbol: vtSymbol!,
         strategy: singleBacktestStrategy,
-        start: backtestStart,
+        start: DEFAULT_BACKTEST_START,
+        end: latestQuantStateQuery.data?.process?.latest_available_trade_date ?? latestQuantStateQuery.data?.process?.end_date ?? undefined,
         persist: true,
-        min_entry_score: 68,
+        min_entry_score: strategyMinEntryScore(strategiesQuery.data?.items ?? [], singleBacktestStrategy),
         strict_entry: true,
-        execution_model: "strict_1430",
-        minute_interval: "1m",
-        tail_entry_start: "14:30",
-        tail_entry_end: "14:30",
-        tail_entry_ma5_tolerance_pct: 1.5,
-    }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["symbolLatestBacktest"] });
-      queryClient.invalidateQueries({ queryKey: ["symbolLatestBacktestAudit"] });
-    },
+        execution_model: "legacy_next_open",
+        included_boards: latestQuantStateQuery.data?.process?.included_boards?.length
+          ? latestQuantStateQuery.data.process.included_boards
+          : ["main"],
+      }),
+    enabled: Boolean(
+      vtSymbol
+      && !latestQuantStateQuery.isLoading
+      && !latestQuantStateQuery.isFetching
+      && !portfolioSymbolDetailQuery.isLoading
+      && !portfolioSymbolDetailQuery.isFetching
+      && !latestSymbolBacktestQuery.isLoading
+      && !latestSymbolBacktestQuery.isFetching
+      && !hasPortfolioSymbolExecutions
+      && !hasGlobalExecutionMarkers
+      && latestSymbolBacktestQuery.data?.status === "empty"
+    ),
+    staleTime: 5 * 60_000,
+    retry: 1,
   });
-  const backtestAudit = singleBacktestMutation.data?.audit ?? latestAuditQuery.data;
-  // 买卖点优先取刚跑的回测，否则读最近缓存，免重算
-  const effectiveTrades = backtestAudit?.trades ?? singleBacktestMutation.data?.trades ?? latestBacktest?.trades ?? [];
+  const autoReviewAudit = latestSymbolAuditQuery.data ?? autoCreateReviewQuery.data?.audit;
+  const autoReviewTrades =
+    autoReviewAudit?.trades
+    ?? latestSymbolBacktestQuery.data?.trades
+    ?? autoCreateReviewQuery.data?.trades
+    ?? [];
+  const portfolioDetailMarkers = useMemo(
+    () => backtestSymbolDetailToMarkers(portfolioSymbolDetailQuery.data),
+    [portfolioSymbolDetailQuery.data]
+  );
+
   const backtestMarkers = useMemo(
-    () => latestReplay ? replayEventsToMarkers(latestReplay) : backtestAuditToMarkers(effectiveTrades, backtestAudit),
-    [latestReplay, effectiveTrades, backtestAudit]
+    () => {
+      if (portfolioDetailMarkers.some((marker) => marker.markerKind === "trade" || marker.markerKind === "rejected")) {
+        return portfolioDetailMarkers;
+      }
+      const quantMarkers = latestQuantStateQuery.data?.status === "ready"
+        ? quantStateToMarkers(latestQuantStateQuery.data)
+        : latestReplay
+          ? replayEventsToMarkers(latestReplay)
+          : [];
+      const autoReviewMarkers = backtestAuditToMarkers(autoReviewTrades, autoReviewAudit);
+      return mergeMarkerSets(portfolioDetailMarkers, mergeMarkerSets(prioritizeExecutionMarkers(quantMarkers), autoReviewMarkers));
+    },
+    [autoReviewAudit, autoReviewTrades, latestQuantStateQuery.data, latestReplay, portfolioDetailMarkers]
   );
   const selectedBacktestMarker = useMemo(
     () => backtestMarkers.find((marker) => marker.id === selectedBacktestMarkerId) ?? backtestMarkers[0] ?? null,
@@ -200,12 +236,6 @@ export function StockDetailPage() {
       return backtestMarkers[0]?.id ?? null;
     });
   }, [backtestMarkers]);
-
-  // 切换策略时清旧回测结果，避免显示上一策略的买卖点
-  const handleSingleStrategyChange = (strategy: string) => {
-    setSingleBacktestStrategy(strategy);
-    singleBacktestMutation.reset();
-  };
 
   const handleBacktestMarkerClick = useCallback((marker: KlineMarker) => {
     setSelectedBacktestMarkerId(marker.id ?? null);
@@ -240,6 +270,11 @@ export function StockDetailPage() {
       {/* Quote header (reused) */}
       <StockQuoteHeader quote={quote} sealInfo={sealInfo} />
 
+      {/* 加入持仓 entry (self-contained: pick a group to add this stock to) */}
+      <div className="flex items-center gap-2">
+        <AddToGroupButton vtSymbol={vtSymbol!} name={quote?.name} />
+      </div>
+
       {/* Data evidence bar */}
       <StockDataEvidence sources={sources} missing={missing} />
 
@@ -250,20 +285,25 @@ export function StockDetailPage() {
       />
 
       <SingleStockBacktestPanel
-        start={backtestStart}
-        onStartChange={setBacktestStart}
         strategy={singleBacktestStrategy}
         strategies={strategyOptions}
-        onStrategyChange={handleSingleStrategyChange}
-        replay={latestReplayQuery.data}
-        isReplayLoading={latestReplayQuery.isLoading || latestReplayQuery.isFetching}
-        result={singleBacktestMutation.data}
-        audit={backtestAudit}
-        tradePlan={tradePlanQuery.data}
-        latest={latestBacktest}
-        isRunning={singleBacktestMutation.isPending}
-        error={singleBacktestMutation.error}
-        onRun={() => singleBacktestMutation.mutate()}
+        quantState={latestQuantStateQuery.data}
+        portfolioBacktest={latestPortfolioBacktest}
+        portfolioDetail={portfolioSymbolDetailQuery.data}
+        isQuantStateLoading={latestQuantStateQuery.isLoading || latestQuantStateQuery.isFetching}
+        quantStateError={latestQuantStateQuery.error}
+        isPortfolioDetailLoading={portfolioSymbolDetailQuery.isLoading || portfolioSymbolDetailQuery.isFetching}
+        portfolioDetailError={portfolioSymbolDetailQuery.error}
+        isAutoReviewLoading={
+          latestSymbolBacktestQuery.isLoading
+          || latestSymbolBacktestQuery.isFetching
+          || latestSymbolAuditQuery.isLoading
+          || latestSymbolAuditQuery.isFetching
+          || autoCreateReviewQuery.isLoading
+          || autoCreateReviewQuery.isFetching
+        }
+        autoReviewError={latestSymbolBacktestQuery.error ?? latestSymbolAuditQuery.error ?? autoCreateReviewQuery.error}
+        autoReviewAudit={autoReviewAudit}
       />
 
       {/* K-line chart */}
@@ -320,42 +360,42 @@ export function StockDetailPage() {
 }
 
 function SingleStockBacktestPanel({
-  start,
-  onStartChange,
   strategy,
   strategies,
-  onStrategyChange,
-  replay,
-  isReplayLoading,
-  result,
-  audit,
-  tradePlan,
-  latest,
-  isRunning,
-  error,
-  onRun,
+  quantState,
+  portfolioBacktest,
+  portfolioDetail,
+  isQuantStateLoading,
+  quantStateError,
+  isPortfolioDetailLoading,
+  portfolioDetailError,
+  isAutoReviewLoading,
+  autoReviewError,
+  autoReviewAudit,
 }: {
-  start: string;
-  onStartChange: (value: string) => void;
   strategy: string;
   strategies: QuantStrategyOption[];
-  onStrategyChange: (value: string) => void;
-  replay?: SymbolStrategyReplay;
-  isReplayLoading: boolean;
-  result: Awaited<ReturnType<typeof createSymbolBacktest>> | undefined;
-  audit?: BacktestAudit;
-  tradePlan?: SymbolTradePlan;
-  latest?: SymbolLatestBacktest | null;
-  isRunning: boolean;
-  error: unknown;
-  onRun: () => void;
+  quantState?: SymbolLatestQuantState;
+  portfolioBacktest?: BacktestRun | null;
+  portfolioDetail?: BacktestSymbolDetail | null;
+  isQuantStateLoading: boolean;
+  quantStateError: unknown;
+  isPortfolioDetailLoading: boolean;
+  portfolioDetailError: unknown;
+  isAutoReviewLoading: boolean;
+  autoReviewError: unknown;
+  autoReviewAudit?: BacktestAudit;
 }) {
-  const trades = audit?.trades ?? result?.trades ?? latest?.trades ?? [];
-  const events = audit?.events ?? [];
-  const returnSummary = useMemo(() => deriveStockReturnSummary(trades), [trades]);
+  const replay = latestQuantStateToReplay(quantState);
   const replayClosedTrades = replay?.closed_trades ?? [];
   const replaySummary = replay?.summary;
-  const hasReplay = replay?.status === "ready";
+  const tradePlan = quantState?.candidate?.trade_plan;
+  const candidate = quantState?.candidate?.item;
+  const latestSignal = quantState?.signal?.latest_entry_signal ?? quantState?.signal?.latest;
+  const hasPortfolioExecutions = (portfolioDetail?.trades?.length ?? 0) > 0
+    || (portfolioDetail?.orders?.length ?? 0) > 0
+    || (portfolioDetail?.trade_attribution?.length ?? 0) > 0;
+  const sourceMode: "portfolio" | "global" = hasPortfolioExecutions ? "portfolio" : "global";
 
   return (
     <section className="rounded-lg border p-4">
@@ -366,156 +406,231 @@ function SingleStockBacktestPanel({
             策略复盘
           </h3>
           <p className="mt-1 text-sm text-muted-foreground">
-            读取区间候选生成后的全局 replay。BUY 信号不等于实际购买，执行日还要通过涨跌停、尾盘价格和卖出规则。
+            优先读取最新组合回测的实际买卖；若组合没有该票成交，再退回全局信号记录。BUY 信号不等于实际购买。
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <select
-            className="h-9 rounded-md border bg-background px-2 text-sm"
-            value={strategy}
-            onChange={(event) => onStrategyChange(event.target.value)}
-          >
-            {strategies.length === 0 ? (
-              <option value={strategy}>主线强势回踩低吸</option>
-            ) : (
-              strategies.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name}
-                </option>
-              ))
-            )}
-          </select>
-          <input
-            className="h-9 rounded-md border bg-background px-2 text-sm"
-            type="date"
-            value={start}
-            onChange={(event) => onStartChange(event.target.value)}
-          />
-          <Button size="sm" variant="outline" onClick={onRun} disabled={isRunning}>
-            {isRunning ? <RefreshCw size={15} className="animate-spin" /> : <RefreshCw size={15} />}
-            手动研究回测
-          </Button>
+        <div className="text-sm">
+          <div className="text-xs text-muted-foreground">策略</div>
+          <div className="mt-1 flex h-9 items-center rounded-md border bg-muted/30 px-2">
+            {strategies.find((item) => item.id === strategy)?.name ?? "主线龙回头回踩低吸"}
+          </div>
         </div>
       </div>
 
-      {tradePlan?.status === "ready" && tradePlan.trade_plan && (
-        <div className="mt-3 rounded-md border bg-muted/30 p-3 text-sm">
-          <div className="flex items-center gap-2 font-medium">
-            <ShieldCheck size={14} />
-            候选买卖计划（{tradePlan.trade_date} 候选第 {tradePlan.rank} 名 · 评分 {tradePlan.total_score?.toFixed(1)}）
+      {isQuantStateLoading ? (
+        <div className="mt-3 rounded-md border p-3 text-sm text-muted-foreground">
+          正在读取最近量化过程...
+        </div>
+      ) : quantStateError ? (
+        <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-fall dark:border-red-500/30 dark:bg-red-500/10">
+          {quantStateError instanceof Error ? quantStateError.message : "读取最近量化过程失败"}
+        </div>
+      ) : sourceMode === "portfolio" ? (
+        <PortfolioBacktestSymbolSummary
+          backtest={portfolioBacktest}
+          detail={portfolioDetail}
+          isLoading={isPortfolioDetailLoading}
+          error={portfolioDetailError}
+          strategyName={strategies.find((item) => item.id === strategy)?.name ?? "主线龙回头回踩低吸"}
+        />
+      ) : quantState?.status === "ready" ? (
+        <div className="mt-4 space-y-4">
+          <div className="rounded-md border bg-muted/20 p-3 text-sm">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 font-medium">
+                <ShieldCheck size={14} />
+                最近量化过程
+              </div>
+              <Badge variant={stateBadgeVariant(quantState.state?.severity)} className="rounded-md">
+                {quantState.state?.label ?? "--"}
+              </Badge>
+            </div>
+            <div className="mt-3 grid gap-3 md:grid-cols-5">
+              <InfoCell label="日期范围" value={processDateRange(quantState)} />
+              <InfoCell label="过程来源" value={quantProcessSourceLabel(quantState.process?.source)} />
+              <InfoCell label="过程ID" value={quantState.process?.replay_run_id ?? quantState.process?.screen_run_id ?? "--"} />
+              <InfoCell label="评分日期" value={`${quantState.signal?.scored_date_count ?? 0} 天`} />
+              <InfoCell label="BUY信号" value={`${quantState.signal?.entry_signal_count ?? 0} 次`} valueClass={(quantState.signal?.entry_signal_count ?? 0) > 0 ? "text-rise" : undefined} />
+            </div>
+            <p className="mt-3 text-xs text-muted-foreground">{quantState.message}</p>
+            {isAutoReviewLoading ? (
+              <p className="mt-2 text-xs text-muted-foreground">正在自动准备该策略的历史买卖点...</p>
+            ) : autoReviewAudit ? (
+              <p className="mt-2 text-xs text-muted-foreground">
+                K 线已补充该策略单股复盘买卖点：{autoReviewAudit.start_date} 至 {autoReviewAudit.end_date}。
+              </p>
+            ) : autoReviewError ? (
+              <p className="mt-2 text-xs text-fall">
+                自动准备买卖点失败：{autoReviewError instanceof Error ? autoReviewError.message : "请稍后刷新重试"}。
+              </p>
+            ) : null}
           </div>
-          <div className="mt-2 grid gap-2 md:grid-cols-4">
-            <InfoCell label="买入价" value={formatPrice(tradePlan.trade_plan.entry_price)} />
-            <InfoCell label="止损价" value={formatPrice(tradePlan.trade_plan.stop_loss_price)} valueClass="text-fall" />
-            <InfoCell label="止盈价" value={formatPrice(tradePlan.trade_plan.take_profit_price)} valueClass="text-rise" />
-            <InfoCell label="信号日" value={tradePlan.trade_plan.entry_date ?? tradePlan.trade_date ?? "--"} />
+
+          <div className="grid gap-3 text-sm md:grid-cols-4">
+            <InfoCell label="最近信号日" value={latestSignal?.trade_date ?? "--"} />
+            <InfoCell label="信号类型" value={latestSignal?.entry_signal ? "BUY" : latestSignal ? "WATCH/评分" : "--"} valueClass={latestSignal?.entry_signal ? "text-rise" : undefined} />
+            <InfoCell label="评分" value={formatMaybeNumber(latestSignal?.total_score, 1)} />
+            <InfoCell label="候选" value={candidate ? `${candidate.action ?? "--"} #${candidate.rank ?? "--"}` : "未进入候选"} />
           </div>
-          <p className="mt-2 text-xs text-muted-foreground">
-            候选筛选时已生成信号计划，无需重新运行即可查看；下方可手动运行完整单股复盘查看执行结果。
-          </p>
-        </div>
-      )}
-      {tradePlan?.status === "empty" && (
-        <div className="mt-3 rounded-md border p-3 text-sm text-muted-foreground">
-          该股未在候选列表中。可手动运行下方单股回测。
-        </div>
-      )}
 
-      {Boolean(error) && (
-        <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-2 text-sm text-fall dark:border-red-500/30 dark:bg-red-500/10">
-          {error instanceof Error ? error.message : "单股回测失败"}
-        </div>
-      )}
+          {tradePlan && (
+            <div className="rounded-md border p-3 text-sm">
+              <div className="flex items-center gap-2 font-medium">
+                <ShieldCheck size={14} />
+                候选买卖计划
+              </div>
+              <div className="mt-2 grid gap-2 md:grid-cols-4">
+                <InfoCell label="买入价" value={formatPrice(tradePlan.entry_price)} />
+                <InfoCell label="止损价" value={formatPrice(tradePlan.stop_loss_price)} valueClass="text-fall" />
+                <InfoCell label="止盈价" value={formatPrice(tradePlan.take_profit_price)} valueClass="text-rise" />
+                <InfoCell label="信号日" value={tradePlan.entry_date ?? candidate?.trade_date ?? "--"} />
+              </div>
+            </div>
+          )}
 
-      {isReplayLoading ? (
-        <div className="mt-3 rounded-md border p-3 text-sm text-muted-foreground">
-          正在读取最新全局策略复盘...
-        </div>
-      ) : !hasReplay ? (
-        <div className="mt-3 rounded-md border p-3 text-sm text-muted-foreground">
-          {replay?.message ?? "该股暂无全局策略复盘结果。请先在量化页生成区间候选，或用补齐 replay 接口基于已有候选生成统一复盘。"}
+          {replay ? (
+            <div className="space-y-4">
+              <div className="grid gap-3 text-sm md:grid-cols-6">
+                <InfoCell label="买卖记录ID" value={replay.replay_run_id ?? "--"} />
+                <InfoCell label="执行状态" value={replayStatusLabel(quantState.replay?.status)} />
+                <InfoCell label="买入成交" value={`${replaySummary?.buy_filled_count ?? 0} 次`} valueClass={(replaySummary?.buy_filled_count ?? 0) > 0 ? "text-rise" : undefined} />
+                <InfoCell label="拒绝" value={`${replaySummary?.rejected_count ?? 0} 次`} valueClass={(replaySummary?.rejected_count ?? 0) > 0 ? "text-fall" : undefined} />
+                <InfoCell label="闭合交易" value={`${replaySummary?.closed_trade_count ?? 0} 笔`} />
+                <InfoCell label="持仓状态" value={strategyStatusLabel(replaySummary?.current_status)} />
+              </div>
+              <div className="grid gap-3 text-sm md:grid-cols-3">
+                <InfoCell label="累计收益率" value={formatPct(replaySummary?.compound_return_pct)} valueClass={priceColorClass(replaySummary?.compound_return_pct)} />
+                <InfoCell label="平均单笔" value={formatPct(replaySummary?.average_return_pct)} valueClass={priceColorClass(replaySummary?.average_return_pct)} />
+                <InfoCell label="胜率" value={formatPct(replaySummary?.win_rate_pct)} />
+              </div>
+              {replaySummary?.reject_reasons?.length ? <ReplayRejectReasonList rows={replaySummary.reject_reasons} /> : null}
+              {replayClosedTrades.length ? (
+                <ReplayClosedTradeTable trades={replayClosedTrades} />
+              ) : (
+                <div className="rounded-md border p-3 text-sm text-muted-foreground">
+                  本轮未形成闭合交易。若状态显示有 BUY 信号或买入拒绝，可点击 K 线标记查看当天信号和执行原因。
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="rounded-md border p-3 text-sm text-muted-foreground">
+              当前已有筛选评分，但尚未生成统一买卖记录。请在量化页运行策略研究，系统会自动生成全局候选和组合回测，避免单股临时回测和全局口径不一致。
+            </div>
+          )}
         </div>
       ) : (
-        <div className="mt-4 space-y-4">
-          <div className="grid gap-3 text-sm md:grid-cols-6">
-            <InfoCell label="Replay ID" value={replay.replay_run_id ?? "--"} />
-            <InfoCell label="BUY信号" value={`${replaySummary?.signal_count ?? 0} 次`} />
-            <InfoCell label="买入成交" value={`${replaySummary?.buy_filled_count ?? 0} 次`} valueClass={(replaySummary?.buy_filled_count ?? 0) > 0 ? "text-rise" : undefined} />
-            <InfoCell label="拒绝" value={`${replaySummary?.rejected_count ?? 0} 次`} valueClass={(replaySummary?.rejected_count ?? 0) > 0 ? "text-fall" : undefined} />
-            <InfoCell label="闭合交易" value={`${replaySummary?.closed_trade_count ?? 0} 笔`} />
-            <InfoCell label="状态" value={strategyStatusLabel(replaySummary?.current_status)} />
-          </div>
-          <div className="grid gap-3 text-sm md:grid-cols-3">
-            <InfoCell label="累计收益率" value={formatPct(replaySummary?.compound_return_pct)} valueClass={priceColorClass(replaySummary?.compound_return_pct)} />
-            <InfoCell label="平均单笔" value={formatPct(replaySummary?.average_return_pct)} valueClass={priceColorClass(replaySummary?.average_return_pct)} />
-            <InfoCell label="胜率" value={formatPct(replaySummary?.win_rate_pct)} />
-          </div>
-          {replaySummary?.reject_reasons?.length ? <ReplayRejectReasonList rows={replaySummary.reject_reasons} /> : null}
-          {replayClosedTrades.length ? (
-            <ReplayClosedTradeTable trades={replayClosedTrades} />
-          ) : (
-            <div className="rounded-md border p-3 text-sm text-muted-foreground">
-              当前全局 replay 尚未形成闭合交易。若图上有 BUY 信号或拒绝标记，请点击 K 线查看执行原因。
-            </div>
-          )}
-        </div>
-      )}
-
-      {(result || latest) && (
-        <div className="mt-4 space-y-4">
-          <div className="border-t pt-4 text-sm font-medium">手动研究回测结果</div>
-          <div className="grid gap-3 text-sm md:grid-cols-6">
-            <InfoCell label="状态" value={(result ?? latest)?.status ?? "--"} />
-            <InfoCell label="回测ID" value={(result ?? latest)?.backtest_id ?? "--"} />
-            <InfoCell label="累计收益率" value={formatPct(returnSummary.compoundReturnPct)} valueClass={priceColorClass(returnSummary.compoundReturnPct)} />
-            <InfoCell label="平均单笔" value={formatPct(returnSummary.averageReturnPct)} valueClass={priceColorClass(returnSummary.averageReturnPct)} />
-            <InfoCell label="胜率" value={formatPct(returnSummary.winRatePct)} />
-            <InfoCell label="闭合交易" value={`${returnSummary.closedCount} 笔`} />
-          </div>
-          <div className="grid gap-3 text-sm md:grid-cols-3">
-            <InfoCell label="最好单笔" value={formatPct(returnSummary.bestReturnPct)} valueClass={priceColorClass(returnSummary.bestReturnPct)} />
-            <InfoCell label="最差单笔" value={formatPct(returnSummary.worstReturnPct)} valueClass={priceColorClass(returnSummary.worstReturnPct)} />
-            <InfoCell label="成交记录" value={`${trades.length} 条`} />
-          </div>
-
-          {audit?.method && (
-            <div className="rounded-md border bg-muted/30 p-3 text-sm">
-              <div className="flex items-center gap-2 font-medium">
-                <FileText size={14} />
-                策略口径
-              </div>
-              <div className="mt-2 grid gap-2 md:grid-cols-2">
-                <InfoCell label="候选生成" value={audit.method.signal_timing} />
-                <InfoCell label="执行时点" value={audit.method.execution_timing} />
-                <InfoCell label="入场过滤" value={`最低分 ${audit.method.entry_filter?.min_entry_score ?? "--"} / 严格 ${audit.method.entry_filter?.strict_entry ? "是" : "否"}`} />
-                <InfoCell label="执行模式" value={stockExecutionMethodLabel(audit.method.execution)} />
-              </div>
-            </div>
-          )}
-
-          {trades.length === 0 ? (
-            <div className="rounded-md border p-3 text-sm text-muted-foreground">
-              当前区间没有实际成交。若图上有 BUY 信号或买入拒绝，请查看对应执行日的拒绝原因和策略日志。
-            </div>
-          ) : returnSummary.trades.length === 0 ? (
-            <div className="rounded-md border p-3 text-sm text-muted-foreground">
-              当前区间有成交记录，但还没有形成“买入成交到卖出成交”的闭合交易，暂不计算单笔收益率。
-            </div>
-          ) : (
-            <ClosedReturnTradeTable trades={returnSummary.trades} />
-          )}
-
-          <BacktestEventLog events={events} />
+        <div className="mt-3 rounded-md border p-3 text-sm text-muted-foreground">
+          {quantState?.message ?? "暂无全局量化过程。请先在量化页运行策略研究。"}
         </div>
       )}
     </section>
   );
 }
 
-function ClosedReturnTradeTable({ trades }: { trades: ClosedReturnTrade[] }) {
+function PortfolioBacktestSymbolSummary({
+  backtest,
+  detail,
+  isLoading,
+  error,
+  strategyName,
+}: {
+  backtest?: BacktestRun | null;
+  detail?: BacktestSymbolDetail | null;
+  isLoading: boolean;
+  error: unknown;
+  strategyName: string;
+}) {
+  if (isLoading && !detail) {
+    return (
+      <div className="mt-3 rounded-md border p-3 text-sm text-muted-foreground">
+        正在读取最新组合回测逐股明细...
+      </div>
+    );
+  }
+
+  if (error && !detail) {
+    return (
+      <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-fall dark:border-red-500/30 dark:bg-red-500/10">
+        {error instanceof Error ? error.message : "读取组合回测逐股明细失败"}
+      </div>
+    );
+  }
+
+  const trades = detail?.trades ?? [];
+  const orders = detail?.orders ?? [];
+  const attributionRows = detail?.trade_attribution ?? [];
+  const closedRows = attributionRows.filter((row) => row.status === "closed");
+  const buyTrades = trades.filter((trade) => trade.side === "BUY");
+  const sellTrades = trades.filter((trade) => trade.side === "SELL");
+  const rejectedOrders = orders.filter((order) => order.status === "rejected");
+  const openRows = attributionRows.filter((row) => row.status === "open");
+  const totalReturnPct = sumNumbers(closedRows.map((row) => row.return_pct));
+  const averageReturnPct = closedRows.length && totalReturnPct != null ? totalReturnPct / closedRows.length : null;
+  const winRatePct = closedRows.length
+    ? closedRows.filter((row) => (row.return_pct ?? 0) > 0).length / closedRows.length * 100
+    : null;
+  const maxFloatingPct = maxMaybe(attributionRows.map((row) => row.max_floating_pnl_pct));
+  const minFloatingPct = minMaybe(attributionRows.map((row) => row.min_floating_pnl_pct));
+  const statusLabel = openRows.length ? "持有中" : closedRows.length ? "已闭合" : trades.length ? "已成交" : "无成交";
+  const dateRange = backtest?.start_date && backtest?.end_date
+    ? `${backtest.start_date} 至 ${backtest.end_date}`
+    : "--";
+
+  return (
+    <div className="mt-4 space-y-4">
+      <div className="rounded-md border bg-muted/20 p-3 text-sm">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 font-medium">
+            <ShieldCheck size={14} />
+            最新组合回测
+          </div>
+          <Badge variant={closedRows.length || openRows.length ? "secondary" : "outline"} className="rounded-md">
+            {statusLabel}
+          </Badge>
+        </div>
+        <div className="mt-3 grid gap-3 md:grid-cols-5">
+          <InfoCell label="日期范围" value={dateRange} />
+          <InfoCell label="过程来源" value="组合回测" />
+          <InfoCell label="回测ID" value={backtest?.id ? `#${backtest.id}` : "--"} />
+          <InfoCell label="策略" value={strategyName} />
+          <InfoCell label="K线标记" value={`${backtestSymbolDetailToMarkers(detail).length} 个`} />
+        </div>
+        <p className="mt-3 text-xs text-muted-foreground">
+          本页收益、闭合交易和 K 线买卖标记均来自同一个组合回测口径，已过滤全局 replay 中重复的持仓期 BUY 信号。
+        </p>
+      </div>
+
+      <div className="grid gap-3 text-sm md:grid-cols-6">
+        <InfoCell label="买入成交" value={`${buyTrades.length} 次`} valueClass={buyTrades.length ? "text-rise" : undefined} />
+        <InfoCell label="卖出成交" value={`${sellTrades.length} 次`} />
+        <InfoCell label="买/卖拒绝" value={`${rejectedOrders.length} 次`} valueClass={rejectedOrders.length ? "text-fall" : undefined} />
+        <InfoCell label="闭合交易" value={`${closedRows.length} 笔`} />
+        <InfoCell label="持仓状态" value={statusLabel} />
+        <InfoCell label="执行方式" value={portfolioExecutionModeLabel(attributionRows)} />
+      </div>
+
+      <div className="grid gap-3 text-sm md:grid-cols-4">
+        <InfoCell label="累计收益率" value={formatPct(totalReturnPct)} valueClass={priceColorClass(totalReturnPct)} />
+        <InfoCell label="平均单笔" value={formatPct(averageReturnPct)} valueClass={priceColorClass(averageReturnPct)} />
+        <InfoCell label="胜率" value={formatPct(winRatePct)} />
+        <InfoCell label="最大浮盈/浮亏" value={`${formatPct(maxFloatingPct)} / ${formatPct(minFloatingPct)}`} valueClass={priceColorClass(maxFloatingPct)} />
+      </div>
+
+      {closedRows.length || openRows.length ? (
+        <PortfolioClosedTradeTable rows={attributionRows} />
+      ) : (
+        <div className="rounded-md border p-3 text-sm text-muted-foreground">
+          最新组合回测中该股票没有形成实际买卖。若 K 线只有信号或拒绝标记，可点击标记查看原因。
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PortfolioClosedTradeTable({ rows }: { rows: NonNullable<BacktestSymbolDetail["trade_attribution"]> }) {
   return (
     <div className="overflow-hidden rounded-lg border">
-      <div className="border-b px-3 py-2 text-sm font-medium">闭合交易收益率</div>
+      <div className="border-b px-3 py-2 text-sm font-medium">组合回测交易收益率</div>
       <Table>
         <TableHeader>
           <TableRow>
@@ -524,22 +639,30 @@ function ClosedReturnTradeTable({ trades }: { trades: ClosedReturnTrade[] }) {
             <TableHead className="text-right">买入价</TableHead>
             <TableHead className="text-right">卖出价</TableHead>
             <TableHead className="text-right">收益率</TableHead>
+            <TableHead className="text-right">最大浮盈</TableHead>
+            <TableHead className="text-right">最大浮亏</TableHead>
             <TableHead className="text-right">持有天数</TableHead>
             <TableHead>退出原因</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {trades.map((trade, index) => (
-            <TableRow key={`${trade.entryDate}-${trade.exitDate}-${index}`}>
-              <TableCell className="tabular-nums">{trade.entryDate}</TableCell>
-              <TableCell className="tabular-nums">{trade.exitDate}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatPrice(trade.entryPrice)}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatPrice(trade.exitPrice)}</TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(trade.returnPct))}>
-                {formatPct(trade.returnPct)}
+          {rows.map((row, index) => (
+            <TableRow key={`${row.vt_symbol}-${row.entry_date}-${row.exit_date ?? "open"}-${index}`}>
+              <TableCell className="tabular-nums">{row.entry_date ?? "--"}</TableCell>
+              <TableCell className="tabular-nums">{row.exit_date ?? (row.status === "open" ? "持有中" : "--")}</TableCell>
+              <TableCell className="text-right tabular-nums">{formatPrice(row.entry_price)}</TableCell>
+              <TableCell className="text-right tabular-nums">{formatPrice(row.exit_price)}</TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.return_pct))}>
+                {formatPct(row.return_pct)}
               </TableCell>
-              <TableCell className="text-right tabular-nums">{trade.holdingDays ?? "--"}</TableCell>
-              <TableCell className="text-muted-foreground">{trade.exitReasonLabel ?? exitReasonLabel(trade.exitReason)}</TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.max_floating_pnl_pct))}>
+                {formatPct(row.max_floating_pnl_pct)}
+              </TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.min_floating_pnl_pct))}>
+                {formatPct(row.min_floating_pnl_pct)}
+              </TableCell>
+              <TableCell className="text-right tabular-nums">{row.holding_days ?? "--"}</TableCell>
+              <TableCell className="text-muted-foreground">{exitReasonLabel(row.exit_reason)}</TableCell>
             </TableRow>
           ))}
         </TableBody>
@@ -595,44 +718,6 @@ function ReplayRejectReasonList({ rows }: { rows: Array<{ reason: string; count:
           </Badge>
         ))}
       </div>
-    </div>
-  );
-}
-
-function BacktestEventLog({ events }: { events: BacktestAudit["events"] }) {
-  return (
-    <div className="overflow-hidden rounded-lg border">
-      <div className="border-b px-3 py-2 text-sm font-medium">策略日志</div>
-      {events.length === 0 ? (
-        <div className="p-3 text-sm text-muted-foreground">暂无订单日志。</div>
-      ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>日期</TableHead>
-              <TableHead>股票</TableHead>
-              <TableHead>事件</TableHead>
-              <TableHead>执行</TableHead>
-              <TableHead className="text-right">价格</TableHead>
-              <TableHead>说明</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {events.slice(0, 20).map((event, index) => (
-              <TableRow key={`${event.trade_date}-${event.event_type}-${index}`}>
-                <TableCell className="tabular-nums">{event.trade_date}</TableCell>
-                <TableCell>
-                  <StockIdentityLink name={event.name} vtSymbol={event.vt_symbol} board={event.board} boardLabel={event.board_label} />
-                </TableCell>
-                <TableCell>{stockEventLabel(event.event_type, event.side, event.status)}</TableCell>
-                <TableCell className="text-muted-foreground">{executionModeLabel(event.execution_mode)}</TableCell>
-                <TableCell className="text-right tabular-nums">{formatPrice(event.price)}</TableCell>
-                <TableCell className="text-muted-foreground">{event.message ?? event.reason ?? "--"}</TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      )}
     </div>
   );
 }
@@ -706,6 +791,134 @@ function markerBadgeLabel(marker: KlineMarker) {
   return marker.side || "--";
 }
 
+type LatestQuantSignalRow = NonNullable<NonNullable<SymbolLatestQuantState["signal"]>["latest_entry_signal"]>;
+
+function strategyMinEntryScore(strategies: QuantStrategyOption[], strategyId: string) {
+  return strategies.find((item) => item.id === strategyId)?.default_min_entry_score ?? DEFAULT_BACKTEST_PARAMS.min_entry_score;
+}
+
+function processDateRangeKey(state?: SymbolLatestQuantState) {
+  const start = state?.process?.start_date ?? DEFAULT_BACKTEST_START;
+  const end = state?.process?.end_date ?? "latest";
+  return `${start}:${end}`;
+}
+
+function processDateRange(state: SymbolLatestQuantState) {
+  const start = state.process?.start_date;
+  const end = state.process?.end_date;
+  if (start && end && start !== end) return `${start} 至 ${end}`;
+  return start ?? end ?? "--";
+}
+
+function quantProcessSourceLabel(source?: string) {
+  if (source === "replay") return "全局买卖记录";
+  if (source === "screen") return "候选筛选";
+  return source || "--";
+}
+
+function replayStatusLabel(status?: string) {
+  if (status === "ready") return "有执行记录";
+  if (status === "no_attempts") return "无执行尝试";
+  if (status === "not_generated") return "未生成买卖记录";
+  return status || "--";
+}
+
+function stateBadgeVariant(severity?: string): "default" | "secondary" | "destructive" | "outline" | "brand" {
+  if (severity === "success") return "secondary";
+  if (severity === "warning") return "outline";
+  return "outline";
+}
+
+function formatMaybeNumber(value?: number | null, digits = 2) {
+  return value == null ? "--" : formatNumber(value, digits);
+}
+
+function latestQuantStateToReplay(state?: SymbolLatestQuantState): SymbolStrategyReplay | null {
+  if (state?.status !== "ready" || !state.replay || state.replay.status === "not_generated") return null;
+  return {
+    status: state.replay.status === "ready" ? "ready" : "empty",
+    message: state.message ?? null,
+    replay_run_id: state.replay.replay_run_id ?? undefined,
+    vt_symbol: state.vt_symbol,
+    name: state.name,
+    strategy_id: state.strategy_id,
+    strategy_version: state.strategy_version,
+    start_date: state.process?.start_date ?? null,
+    end_date: state.process?.end_date ?? null,
+    params: state.process?.params ?? {},
+    summary: state.replay.summary ?? undefined,
+    attempts: state.replay.attempts ?? [],
+    events: state.replay.events ?? [],
+    closed_trades: state.replay.closed_trades ?? [],
+  };
+}
+
+function quantStateToMarkers(state: SymbolLatestQuantState): KlineMarker[] {
+  const replay = latestQuantStateToReplay(state);
+  const markers = replay ? replayEventsToMarkers(replay) : [];
+  const signal = state.signal?.latest_entry_signal;
+  const hasExecutionMarker = markers.some((marker) => marker.markerKind === "trade" || marker.markerKind === "rejected");
+  if (!hasExecutionMarker && signal?.trade_date && !markers.some((marker) => marker.markerKind === "signal" && marker.signalDate === signal.trade_date)) {
+    markers.push(quantSignalToMarker(signal, markers.length));
+  }
+  return dedupeMarkers(markers).sort((left, right) => {
+    const dateCompare = left.time.localeCompare(right.time);
+    if (dateCompare !== 0) return dateCompare;
+    return markerSortRank(left) - markerSortRank(right);
+  });
+}
+
+function quantSignalToMarker(signal: LatestQuantSignalRow, index: number): KlineMarker {
+  const evidence = safeRaw(signal.evidence);
+  const signalDate = signal.trade_date ?? "";
+  return {
+    id: `quant-signal-${signal.vt_symbol ?? ""}-${signalDate}-${index}`,
+    time: signalDate,
+    tradeDate: signalDate,
+    signalDate,
+    side: "BUY",
+    markerKind: "signal",
+    status: "signal",
+    price: null,
+    title: "BUY 信号",
+    strategy: quantSignalText(signal, evidence),
+    signalText: quantSignalText(signal, evidence),
+    executionText: "本轮最新量化过程记录了 BUY 信号；是否实际购买以候选和买卖记录为准。",
+    reasonText: "BUY 信号是收盘后策略判断，不等于实际成交。",
+    evidence: quantSignalEvidence(signal, evidence),
+    raw: evidence,
+    text: "信号",
+  };
+}
+
+function quantSignalText(signal: LatestQuantSignalRow, evidence: Record<string, unknown>) {
+  const score = signal.total_score ?? getRawNumber(evidence, "total_score");
+  const ma5Distance = getRawNumber(evidence, "ma5_distance_pct");
+  const closePrice = getRawNumber(evidence, "close_price");
+  const parts = [
+    `${signal.trade_date ?? "信号日"} 收盘后生成 BUY 信号`,
+    score == null ? "" : `总分 ${formatNumber(score, 1)}`,
+    closePrice == null ? "" : `收盘价 ${formatPrice(closePrice)}`,
+    ma5Distance == null ? "" : `距MA5 ${formatPct(ma5Distance)}`,
+  ].filter(Boolean);
+  return parts.join("；");
+}
+
+function quantSignalEvidence(
+  signal: LatestQuantSignalRow,
+  evidence: Record<string, unknown>
+): KlineMarker["evidence"] {
+  const rows: Array<{ label: string; value: string; valueClass?: string }> = [];
+  if (signal.trade_date) rows.push({ label: "信号日", value: signal.trade_date });
+  pushNumberEvidence(rows, "评分", signal.total_score, 1);
+  pushNumberEvidence(rows, "流动性", signal.liquidity_score, 1);
+  pushNumberEvidence(rows, "风险分", signal.risk_score, 1);
+  pushPriceEvidence(rows, "收盘价", getRawNumber(evidence, "close_price"));
+  pushPriceEvidence(rows, "MA5", getRawNumber(evidence, "ma5"));
+  pushPctEvidence(rows, "距MA5", getRawNumber(evidence, "ma5_distance_pct"));
+  return rows;
+}
+
 function replayEventsToMarkers(replay: SymbolStrategyReplay): KlineMarker[] {
   const events = replay.events ?? [];
   return dedupeMarkers(events.map((event, index) => replayEventToMarker(event, index))).sort((left, right) => {
@@ -720,7 +933,7 @@ function replayEventToMarker(event: StrategyReplayEvent, index: number): KlineMa
   const evidence = raw.evidence && typeof raw.evidence === "object" && !Array.isArray(raw.evidence)
     ? raw.evidence as Record<string, unknown>
     : {};
-  const isSignal = event.event_type === "signal" || event.status === "signal";
+  const isSignal = event.event_type === "signal" || event.status === "signal" || event.status === "signal_only";
   const isRejected = event.status === "rejected";
   const markerKind = isSignal ? "signal" : isRejected ? "rejected" : "trade";
   const reasonLabel = portfolioReasonLabel(event.reason);
@@ -749,7 +962,7 @@ function replayEventToMarker(event: StrategyReplayEvent, index: number): KlineMa
 }
 
 function replayMarkerTitle(event: StrategyReplayEvent, reasonLabel: string) {
-  if (event.status === "signal") return "BUY 信号";
+  if (event.status === "signal" || event.status === "signal_only") return "BUY 信号";
   if (event.status === "rejected") return `${event.side === "SELL" ? "卖出" : "买入"}拒绝：${reasonLabel}`;
   if (event.side === "BUY") return "买入成交";
   if (event.side === "SELL") return `卖出成交：${reasonLabel}`;
@@ -757,15 +970,15 @@ function replayMarkerTitle(event: StrategyReplayEvent, reasonLabel: string) {
 }
 
 function replayMarkerText(event: StrategyReplayEvent) {
-  if (event.status === "signal") return "信号";
+  if (event.status === "signal" || event.status === "signal_only") return "信号";
   if (event.status === "rejected") return event.side === "SELL" ? "卖拒" : "买拒";
   return event.side === "SELL" ? "卖" : "买";
 }
 
 function replayMarkerStrategyText(event: StrategyReplayEvent, evidence: Record<string, unknown>, reasonLabel: string) {
-  if (event.status === "signal") return replaySignalText(event, evidence);
+  if (event.status === "signal" || event.status === "signal_only") return replaySignalText(event, evidence);
   if (event.status === "rejected") return `${event.execute_date ?? event.trade_date} 执行未成交：${reasonLabel}。`;
-  return `${event.execute_date ?? event.trade_date} 按统一策略 replay 成交，价格来源 ${event.price_source ?? "--"}。`;
+  return `${event.execute_date ?? event.trade_date} 按统一买卖记录成交，价格来源 ${event.price_source ?? "--"}。`;
 }
 
 function replaySignalText(event: StrategyReplayEvent, evidence: Record<string, unknown>) {
@@ -780,7 +993,7 @@ function replaySignalText(event: StrategyReplayEvent, evidence: Record<string, u
 }
 
 function replayExecutionText(event: StrategyReplayEvent, reasonLabel: string) {
-  if (event.status === "signal") return `计划执行日 ${event.execute_date ?? "--"}，实际是否成交以执行规则为准。`;
+  if (event.status === "signal" || event.status === "signal_only") return `计划执行日 ${event.execute_date ?? "--"}；${event.reason === "already_holding" ? "当时已持仓，不重复买入。" : "实际是否成交以执行规则为准。"}`;
   if (event.status === "rejected") return `执行状态：拒绝，原因 ${reasonLabel}。`;
   return `执行状态：成交，价格 ${formatPrice(event.price)}。`;
 }
@@ -807,7 +1020,7 @@ function backtestAuditToMarkers(trades: BacktestTrade[], audit?: BacktestAudit):
   const returnQueues = closedReturnQueues(trades);
   const markers = audit?.events?.length
     ? audit.events.flatMap((event, index) => auditEventToMarkers(event, index, returnQueues))
-    : trades.map((trade, index) => tradeToExecutionMarker(trade, index, audit, nextReturnForSell(returnQueues, trade)));
+    : trades.map((trade, index) => tradeToExecutionMarker(trade, index, nextReturnForSell(returnQueues, trade)));
   return dedupeMarkers(markers).sort((left, right) => {
     const dateCompare = left.time.localeCompare(right.time);
     if (dateCompare !== 0) return dateCompare;
@@ -815,10 +1028,47 @@ function backtestAuditToMarkers(trades: BacktestTrade[], audit?: BacktestAudit):
   });
 }
 
+function backtestSymbolDetailToMarkers(detail?: BacktestSymbolDetail | null): KlineMarker[] {
+  const trades = detail?.trades ?? [];
+  const orders = detail?.orders ?? [];
+  if (!trades.length && !orders.length) return [];
+  const returnQueues = closedReturnQueues(trades);
+  const events: BacktestAuditEvent[] = [
+    ...orders.map(orderToAuditEvent),
+    ...trades.map((trade) => ({ ...trade, event_type: "trade", status: "filled" })),
+  ].sort((left, right) => {
+    const dateCompare = String(left.trade_date).localeCompare(String(right.trade_date));
+    if (dateCompare !== 0) return dateCompare;
+    return auditEventSortRank(left) - auditEventSortRank(right);
+  });
+  const markers = events.flatMap((event, index) => auditEventToMarkers(event, index, returnQueues));
+  return dedupeMarkers(markers).sort((left, right) => {
+    const dateCompare = left.time.localeCompare(right.time);
+    if (dateCompare !== 0) return dateCompare;
+    return markerSortRank(left) - markerSortRank(right);
+  });
+}
+
+function orderToAuditEvent(order: BacktestOrderEvent): BacktestAuditEvent {
+  return {
+    ...order,
+    event_type: "order",
+    message: undefined,
+    execution_mode: undefined,
+  };
+}
+
+function auditEventSortRank(event: BacktestAuditEvent) {
+  if (event.event_type === "order" && event.status === "rejected") return 1;
+  if (event.event_type === "trade" && event.side === "BUY") return 2;
+  if (event.event_type === "trade" && event.side === "SELL") return 3;
+  return 4;
+}
+
 function auditEventToMarkers(
   event: BacktestAuditEvent,
   index: number,
-  returnQueues: Map<string, ClosedReturnTrade[]>
+  returnQueues: Map<string, number[]>
 ): KlineMarker[] {
   const markers: KlineMarker[] = [];
   const signalMarker = auditEventToSignalMarker(event, index);
@@ -835,7 +1085,7 @@ function auditEventToSignalMarker(event: BacktestAuditEvent, index: number): Kli
   if (!signalDate) return null;
   const executeDate = getRawText(raw, "execute_date") ?? event.trade_date;
   return {
-    id: `signal-${event.vt_symbol}-${signalDate}-${index}`,
+    id: `single-review-signal-${event.vt_symbol}-${signalDate}-${index}`,
     time: signalDate,
     side: "BUY",
     markerKind: "signal",
@@ -843,10 +1093,10 @@ function auditEventToSignalMarker(event: BacktestAuditEvent, index: number): Kli
     price: null,
     text: "信号",
     title: "BUY 信号",
-    strategy: markerSignalTextFromAuditEvent(event),
-    signalText: markerSignalTextFromAuditEvent(event),
-    executionText: `计划在 ${executeDate} 按执行模型撮合；只有执行规则通过才会成为实际买入。`,
-    reasonText: "BUY 信号代表 T 日收盘后策略认为可买，不代表 T+1 一定成交。",
+    strategy: auditSignalText(event),
+    signalText: auditSignalText(event),
+    executionText: `计划在 ${executeDate} 按执行规则撮合；只有执行规则通过才会成为实际买入。`,
+    reasonText: "BUY 信号代表信号日收盘后策略认为可买，不代表下一交易日一定成交。",
     signalDate,
     executeDate,
     tradeDate: signalDate,
@@ -858,7 +1108,7 @@ function auditEventToSignalMarker(event: BacktestAuditEvent, index: number): Kli
 function auditEventToExecutionMarker(
   event: BacktestAuditEvent,
   index: number,
-  returnQueues: Map<string, ClosedReturnTrade[]>
+  returnQueues: Map<string, number[]>
 ): KlineMarker | null {
   if (event.event_type === "trade") {
     return auditTradeEventToMarker(event, index, nextReturnForSell(returnQueues, event));
@@ -870,7 +1120,7 @@ function auditEventToExecutionMarker(
   const sideLabel = event.side === "SELL" ? "卖出" : "买入";
   const reasonLabel = event.reason_label ?? portfolioReasonLabel(event.reason);
   return {
-    id: `rejected-${event.vt_symbol}-${executeDate}-${event.side}-${event.reason ?? "unknown"}-${index}`,
+    id: `single-review-rejected-${event.vt_symbol}-${executeDate}-${event.side}-${event.reason ?? "unknown"}-${index}`,
     time: executeDate,
     side: event.side,
     markerKind: "rejected",
@@ -881,9 +1131,9 @@ function auditEventToExecutionMarker(
     text: event.side === "SELL" ? "卖拒" : "买拒",
     title: `${sideLabel}拒绝：${reasonLabel}`,
     strategy: event.message ?? `${sideLabel}未成交：${reasonLabel}`,
-    signalText: markerSignalTextFromAuditEvent(event),
+    signalText: auditSignalText(event),
     executionText: event.message ?? `${sideLabel}未成交：${reasonLabel}`,
-    reasonText: reasonLabel,
+    reasonText: markerReasonTextFromReason(event.reason),
     executionMode: event.execution_mode ?? getRawText(raw, "mode"),
     signalDate,
     executeDate,
@@ -902,7 +1152,7 @@ function auditTradeEventToMarker(event: BacktestAuditEvent, index: number, retur
   const executeDate = getRawText(execution, "execute_date") ?? event.trade_date;
   const isBuy = event.side === "BUY";
   return {
-    id: `trade-${event.vt_symbol}-${event.trade_date}-${event.side}-${index}`,
+    id: `single-review-trade-${event.vt_symbol}-${event.trade_date}-${event.side}-${index}`,
     time: event.trade_date,
     tradeDate: event.trade_date,
     signalDate,
@@ -917,7 +1167,7 @@ function auditTradeEventToMarker(event: BacktestAuditEvent, index: number, retur
     executionMode: event.execution_mode ?? getRawText(execution, "mode"),
     title: isBuy ? "买入成交" : `卖出成交：${event.reason_label ?? exitReasonLabel(event.reason)}`,
     strategy: event.message ?? (isBuy ? "买入执行已成交。" : "卖出执行已成交。"),
-    signalText: isBuy ? markerSignalTextFromAuditEvent(event) : `${signalDate ?? "信号日"} 收盘后触发 ${event.reason_label ?? exitReasonLabel(event.reason)}。`,
+    signalText: isBuy ? auditSignalText(event) : `${signalDate ?? "信号日"} 收盘后触发 ${event.reason_label ?? exitReasonLabel(event.reason)}。`,
     executionText: event.message,
     reasonText: event.reason_label ?? markerReasonTextFromReason(event.reason),
     evidence: auditMarkerEvidence(event),
@@ -926,8 +1176,42 @@ function auditTradeEventToMarker(event: BacktestAuditEvent, index: number, retur
   };
 }
 
-function markerSignalTextFromAuditEvent(event: BacktestAuditEvent): string {
-  const raw = safeRaw(event.raw);
+function tradeToExecutionMarker(trade: BacktestTrade, index: number, returnPct: number | null = null): KlineMarker {
+  const execution = markerExecutionRaw(trade);
+  const isBuy = trade.side === "BUY";
+  const signalDate = isBuy ? getRawText(execution, "reference_date") : getRawText(execution, "signal_date");
+  const executeDate = getRawText(execution, "execute_date") ?? trade.trade_date;
+  return {
+    id: `single-review-trade-${trade.vt_symbol}-${trade.trade_date}-${trade.side}-${index}`,
+    time: trade.trade_date,
+    tradeDate: trade.trade_date,
+    signalDate,
+    executeDate,
+    side: trade.side,
+    markerKind: "trade",
+    status: "filled",
+    reason: trade.reason,
+    reasonLabel: trade.reason_label,
+    price: trade.price,
+    returnPct,
+    executionMode: getRawText(execution, "mode"),
+    title: isBuy ? "买入成交" : `卖出成交：${exitReasonLabel(trade.reason)}`,
+    strategy: isBuy ? "单股复盘中买入成交。" : "单股复盘中卖出成交。",
+    signalText: isBuy ? auditSignalTextFromRaw(trade.raw) : `${signalDate ?? "信号日"} 收盘后触发 ${exitReasonLabel(trade.reason)}。`,
+    executionText: auditExecutionText(trade.side, execution, trade.price),
+    reasonText: isBuy ? markerReasonTextFromReason(trade.reason) : exitReasonLabel(trade.reason),
+    evidence: tradeMarkerEvidence(trade, execution),
+    raw: trade.raw,
+    text: isBuy ? "买" : "卖",
+  };
+}
+
+function auditSignalText(event: BacktestAuditEvent): string {
+  return auditSignalTextFromRaw(event.raw);
+}
+
+function auditSignalTextFromRaw(rawValue: unknown): string {
+  const raw = safeRaw(rawValue);
   const evidence = raw.execution && typeof raw.execution === "object" && !Array.isArray(raw.execution)
     ? raw
     : raw;
@@ -946,15 +1230,17 @@ function markerSignalTextFromAuditEvent(event: BacktestAuditEvent): string {
   return parts.length ? parts.join("；") : "策略在信号日收盘后生成计划，执行日再按撮合规则判断是否成交。";
 }
 
-function markerReasonTextFromReason(reason?: string | null): string {
-  if (reason === "tail_entry_not_triggered") return "执行价没有落在尾盘 MA5 容忍范围内，因此 BUY 信号没有转成实际买入。";
-  if (reason === "limit_up_open_blocked") return "执行日开盘涨停或接近涨停，保守判定买不到。";
-  if (reason === "limit_up_tail_unfilled") return "执行日尾盘涨停或接近涨停，保守判定买不到。";
-  if (reason === "no_execute_bar") return "缺少执行日 K 线，无法判断可执行价格。";
-  if (reason === "missing_1430_snapshot") return "今日严格 14:30 模式缺少可用分钟快照，需等待分钟数据补齐。";
-  if (reason === "position_slot_unavailable") return "组合持仓名额已满，信号未转成实际买入。";
-  if (reason === "insufficient_cash") return "组合可用资金不足，信号未转成实际买入。";
-  return reason ? portfolioReasonLabel(reason) : "--";
+function auditExecutionText(side: string, execution: Record<string, unknown>, price?: number | null) {
+  const mode = getRawText(execution, "mode");
+  if (side === "BUY" && mode === "daily_next_open") return `信号次一交易日按日线开盘价买入，价格 ${formatPrice(price)}。`;
+  if (side === "BUY" && mode === "minute_1430") return `执行日实时分钟快照成交，价格 ${formatPrice(price)}。`;
+  if (side === "BUY" && mode === "daily_close_proxy") return `使用执行日收盘价代理成交，价格 ${formatPrice(price)}。`;
+  if (side === "SELL" && (mode === "daily_next_open" || mode === "daily_next_open_sell")) {
+    return `信号次一交易日按日线开盘价卖出，价格 ${formatPrice(price)}。`;
+  }
+  if (side === "SELL" && mode === "minute_1430_sell") return `执行日实时分钟快照卖出，价格 ${formatPrice(price)}。`;
+  if (side === "SELL" && mode === "daily_close_proxy_sell") return `使用执行日收盘价代理卖出，价格 ${formatPrice(price)}。`;
+  return `按 ${executionModeLabel(mode)} 执行，价格 ${formatPrice(price)}。`;
 }
 
 function auditMarkerEvidence(event: BacktestAuditEvent): KlineMarker["evidence"] {
@@ -972,67 +1258,115 @@ function auditMarkerEvidence(event: BacktestAuditEvent): KlineMarker["evidence"]
   pushPriceEvidence(rows, "MA5", getRawNumber(execution, "ma5") ?? getRawNumber(raw, "ma5"));
   pushPctEvidence(rows, "距MA5", getRawNumber(execution, "ma5_distance_pct") ?? getRawNumber(raw, "ma5_distance_pct"));
   pushNumberEvidence(rows, "分钟线数量", getRawNumber(execution, "minute_bar_count"), 0);
-  const window = getRawText(execution, "window");
-  if (window) rows.push({ label: "尾盘窗口", value: window });
   const priceSource = getRawText(execution, "price_source");
   if (priceSource) rows.push({ label: "价格来源", value: priceSource });
   return rows;
 }
 
-function tradeToExecutionMarker(
-  trade: BacktestTrade,
-  index: number,
-  audit?: BacktestAudit,
-  returnPct: number | null = null
-): KlineMarker {
-    const execution = markerExecutionRaw(trade);
-    const executionMode = getRawText(execution, "mode");
-    const isBuy = trade.side === "BUY";
-    const signalDate = isBuy ? getRawText(execution, "reference_date") : getRawText(execution, "signal_date");
-    const executeDate = getRawText(execution, "execute_date") ?? trade.trade_date;
-    return {
-      id: `${trade.trade_date}-${trade.side}-${trade.vt_symbol}-${index}`,
-      time: trade.trade_date,
-      tradeDate: trade.trade_date,
-      signalDate,
-      executeDate,
-      side: trade.side,
-      markerKind: "trade",
-      status: "filled",
-      reason: trade.reason,
-      reasonLabel: trade.reason_label,
-      price: trade.price,
-      returnPct,
-      executionMode,
-      title: markerTitle(trade),
-      strategy: markerStrategyText(trade, audit),
-      signalText: markerSignalText(trade, audit),
-      executionText: markerExecutionText(trade, execution),
-      reasonText: markerReasonText(trade),
-      evidence: markerEvidence(trade, execution),
-      raw: trade.raw,
-      text: isBuy ? `买 ${formatPrice(trade.price)}` : `卖 ${formatPrice(trade.price)}`,
-    };
+function tradeMarkerEvidence(trade: BacktestTrade, execution: Record<string, unknown>): KlineMarker["evidence"] {
+  const rows = auditMarkerEvidence({
+    event_type: "trade",
+    trade_date: trade.trade_date,
+    vt_symbol: trade.vt_symbol,
+    side: trade.side,
+    status: "filled",
+    reason: trade.reason,
+    reason_label: trade.reason_label,
+    price: trade.price,
+    raw: trade.raw,
+  });
+  const entryDate = getRawText(execution, "entry_date");
+  if (entryDate) rows?.unshift({ label: "买入日期", value: entryDate });
+  return rows;
 }
 
-function closedReturnQueues(trades: BacktestTrade[]): Map<string, ClosedReturnTrade[]> {
-  const summary = deriveStockReturnSummary(trades);
-  const queues = new Map<string, ClosedReturnTrade[]>();
-  for (const trade of summary.trades) {
-    const items = queues.get(trade.exitDate) ?? [];
-    items.push(trade);
-    queues.set(trade.exitDate, items);
+function markerExecutionRaw(trade: BacktestTrade) {
+  const raw = safeRaw(trade.raw);
+  return raw.execution && typeof raw.execution === "object" && !Array.isArray(raw.execution)
+    ? raw.execution as Record<string, unknown>
+    : raw;
+}
+
+function closedReturnQueues(trades: BacktestTrade[]): Map<string, number[]> {
+  const openBuys: BacktestTrade[] = [];
+  const queues = new Map<string, number[]>();
+  const sorted = [...trades].sort((left, right) => {
+    const dateCompare = String(left.trade_date).localeCompare(String(right.trade_date));
+    if (dateCompare !== 0) return dateCompare;
+    return (left.id ?? 0) - (right.id ?? 0);
+  });
+  for (const trade of sorted) {
+    if (trade.side === "BUY") {
+      openBuys.push(trade);
+      continue;
+    }
+    if (trade.side !== "SELL") continue;
+    const entry = openBuys.shift();
+    if (!entry?.price || !trade.price) continue;
+    const items = queues.get(trade.trade_date) ?? [];
+    items.push((trade.price / entry.price - 1) * 100);
+    queues.set(trade.trade_date, items);
   }
   return queues;
 }
 
 function nextReturnForSell(
-  queues: Map<string, ClosedReturnTrade[]>,
+  queues: Map<string, number[]>,
   trade: Pick<BacktestTrade, "side" | "trade_date"> | Pick<BacktestAuditEvent, "side" | "trade_date">
 ): number | null {
   if (trade.side !== "SELL") return null;
-  const queue = queues.get(trade.trade_date);
-  return queue?.shift()?.returnPct ?? null;
+  return queues.get(trade.trade_date)?.shift() ?? null;
+}
+
+function mergeMarkerSets(primary: KlineMarker[], fallback: KlineMarker[]): KlineMarker[] {
+  const primaryHasExecutions = primary.some((marker) => marker.markerKind === "trade" || marker.markerKind === "rejected");
+  const fallbackHasExecutions = fallback.some((marker) => marker.markerKind === "trade" || marker.markerKind === "rejected");
+  const merged = fallbackHasExecutions && !primaryHasExecutions ? [...fallback, ...primary] : [...primary, ...fallback];
+  return dedupeMarkers(merged).sort((left, right) => {
+    const dateCompare = left.time.localeCompare(right.time);
+    if (dateCompare !== 0) return dateCompare;
+    return markerSortRank(left) - markerSortRank(right);
+  });
+}
+
+function prioritizeExecutionMarkers(markers: KlineMarker[]): KlineMarker[] {
+  const hasExecutionMarker = markers.some((marker) => marker.markerKind === "trade" || marker.markerKind === "rejected");
+  if (!hasExecutionMarker) return markers.slice(-6);
+  return markers.filter((marker) => marker.markerKind !== "signal");
+}
+
+function markerReasonTextFromReason(reason?: string | null): string {
+  if (reason === "tail_entry_not_triggered") return "执行价没有落在策略要求的 MA5 容忍范围内，因此 BUY 信号没有转成实际买入。";
+  if (reason === "limit_up_open_blocked") return "执行日开盘涨停或接近涨停，保守判定买不到。";
+  if (reason === "limit_up_tail_unfilled") return "执行日涨停或接近涨停，保守判定买不到。";
+  if (reason === "limit_down_open_blocked") return "执行日开盘跌停或接近跌停，保守判定卖不出。";
+  if (reason === "no_execute_bar") return "缺少执行日 K 线，无法判断可执行价格。";
+  if (reason === "missing_1430_snapshot") return "实时分钟快照缺失，需等待数据补齐。历史日线研究不依赖该数据。";
+  if (reason === "position_slot_unavailable") return "组合持仓名额已满，信号未转成实际买入。";
+  if (reason === "insufficient_cash") return "组合可用资金不足，信号未转成实际买入。";
+  return reason ? portfolioReasonLabel(reason) : "--";
+}
+
+function sumNumbers(values: Array<number | null | undefined>): number | null {
+  const valid = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (!valid.length) return null;
+  return valid.reduce((sum, value) => sum + value, 0);
+}
+
+function maxMaybe(values: Array<number | null | undefined>): number | null {
+  const valid = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  return valid.length ? Math.max(...valid) : null;
+}
+
+function minMaybe(values: Array<number | null | undefined>): number | null {
+  const valid = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  return valid.length ? Math.min(...valid) : null;
+}
+
+function portfolioExecutionModeLabel(rows: NonNullable<BacktestSymbolDetail["trade_attribution"]>): string {
+  const modes = Array.from(new Set(rows.map((row) => row.execution_mode).filter(Boolean)));
+  if (!modes.length) return "--";
+  return modes.map((mode) => executionModeLabel(mode)).join(" / ");
 }
 
 function dedupeMarkers(markers: KlineMarker[]): KlineMarker[] {
@@ -1056,134 +1390,6 @@ function markerSortRank(marker: KlineMarker) {
   if (marker.markerKind === "rejected") return 1;
   if (marker.side === "BUY") return 2;
   return 3;
-}
-
-function markerTitle(trade: BacktestTrade) {
-  if (trade.side === "BUY") return "买入信号";
-  return `卖出信号：${exitReasonLabel(trade.reason)}`;
-}
-
-function markerStrategyText(trade: BacktestTrade, audit?: BacktestAudit) {
-  if (trade.side === "BUY") {
-    const minScore = audit?.method?.entry_filter?.min_entry_score;
-    const strict = audit?.method?.entry_filter?.strict_entry;
-    const window = audit?.method?.execution?.tail_entry_window;
-    return [
-      "历史逐日动态候选回测：只使用信号日及以前可见数据打分。",
-      `入场要求${minScore == null ? "" : `总分不低于 ${minScore}`}${strict ? "，并满足严格入场条件" : ""}。`,
-      window ? `执行日按 ${window} 尾盘规则复核；历史缺分钟线时用收盘价代理，今日缺快照才等待数据补齐。` : "",
-    ].filter(Boolean).join(" ");
-  }
-  return "退出规则在持仓后的每个交易日收盘后检查止损、止盈、移动止损和时间止损；当前模型只生成下一交易日卖出计划，再按 14:30 快照执行，缺快照或未触发则拒单。";
-}
-
-function markerSignalText(trade: BacktestTrade, audit?: BacktestAudit) {
-  if (trade.side === "BUY") {
-    const raw = safeRaw(trade.raw);
-    const return20 = getRawNumber(raw, "return_20d");
-    const indexReturn20 = getRawNumber(raw, "index_return_20d");
-    const ma5Distance = getRawNumber(raw, "ma5_distance_pct");
-    const scoreText = audit?.method?.entry_filter?.min_entry_score == null
-      ? "达到入场过滤条件"
-      : `达到最低入场分 ${audit.method.entry_filter.min_entry_score}`;
-    return [
-      `信号日收盘后重新打分，${scoreText}。`,
-      return20 == null ? "" : `近 20 日收益 ${formatPct(return20)}`,
-      indexReturn20 == null ? "" : `同期指数 ${formatPct(indexReturn20)}`,
-      ma5Distance == null ? "" : `收盘距 MA5 ${formatPct(ma5Distance)}`,
-    ].filter(Boolean).join("；");
-  }
-
-  const execution = markerExecutionRaw(trade);
-  const signalDate = getRawText(execution, "signal_date");
-  return `${signalDate ?? "信号日"} 收盘后触发 ${exitReasonLabel(trade.reason)}，当天只记录卖出计划，不使用未发生的次日开盘价。`;
-}
-
-function markerExecutionText(trade: BacktestTrade, execution: Record<string, unknown>) {
-  const mode = getRawText(execution, "mode");
-  const modeLabel = executionModeLabel(mode);
-  if (trade.side === "BUY") {
-    if (mode === "minute_1430") {
-      const barTime = getRawText(execution, "bar_time");
-      const distance = getRawNumber(execution, "ma5_distance_pct");
-      return `执行日 14:30 真实分钟快照成交，${barTime ? `成交分钟 ${barTime}，` : ""}成交方式 ${modeLabel}${distance == null ? "" : `，距 MA5 ${formatPct(distance)}`}。`;
-    }
-    if (mode === "daily_close_proxy") {
-      const distance = getRawNumber(execution, "ma5_distance_pct");
-      return `缺少执行日 14:30 分钟线，使用执行日收盘价代理尾盘成交${distance == null ? "" : `，距 MA5 ${formatPct(distance)}`}。`;
-    }
-    if (mode === "minute_tail_ma5") {
-      const barTime = getRawText(execution, "bar_time");
-      const distance = getRawNumber(execution, "ma5_distance_pct");
-      return `旧版尾盘分钟线触发，${barTime ? `成交分钟 ${barTime}，` : ""}成交方式 ${modeLabel}${distance == null ? "" : `，距 MA5 ${formatPct(distance)}`}。`;
-    }
-    if (mode === "daily_next_open_fallback") {
-      const count = getRawNumber(execution, "minute_bar_count");
-      return `旧版模型尾盘分钟线缺失或未触发，回退为次日开盘成交${count == null ? "" : `；当日分钟线 ${count} 根`}。`;
-    }
-    return `按 ${modeLabel} 执行成交。`;
-  }
-
-  const signalDate = getRawText(execution, "signal_date");
-  const executeDate = getRawText(execution, "execute_date") ?? trade.trade_date;
-  if (mode === "minute_1430_sell") {
-    return `${signalDate ?? "D 日"} 出现退出信号，${executeDate} 使用 14:30 真实分钟快照卖出；成交价已计入滑点、佣金和卖出印花税。`;
-  }
-  if (mode === "daily_close_proxy_sell") {
-    return `${signalDate ?? "D 日"} 出现退出信号，${executeDate} 使用收盘价代理尾盘卖出；成交价已计入滑点、佣金和卖出印花税。`;
-  }
-  return `${signalDate ?? "信号日"} 出现退出信号，${executeDate} 按当前执行模型撮合；成交价已计入滑点、佣金和卖出印花税。`;
-}
-
-function markerReasonText(trade: BacktestTrade) {
-  if (trade.side === "BUY") {
-    const raw = safeRaw(trade.raw);
-    const washout = safeRaw(raw.washout);
-    const drawdown = getRawNumber(washout, "drawdown_from_20d_high");
-    const volumeRatio = getRawNumber(washout, "volume_ratio_5d_20d");
-    const parts = [
-      "策略寻找相对强势、趋势未破坏、回踩接近 MA5 的候选。",
-      drawdown == null ? "" : `较 20 日高点回撤 ${formatPct(drawdown)}`,
-      volumeRatio == null ? "" : `5/20 日量比 ${formatNumber(volumeRatio, 2)}`,
-    ].filter(Boolean);
-    return parts.join("；");
-  }
-  return exitReasonDescription(trade.reason);
-}
-
-function markerEvidence(trade: BacktestTrade, execution: Record<string, unknown>): KlineMarker["evidence"] {
-  const raw = safeRaw(trade.raw);
-  const rows: Array<{ label: string; value: string; valueClass?: string }> = [];
-  if (trade.side === "BUY") {
-    pushPctEvidence(rows, "20日收益", getRawNumber(raw, "return_20d"));
-    pushPctEvidence(rows, "60日收益", getRawNumber(raw, "return_60d"));
-    pushPctEvidence(rows, "60日回撤", getRawNumber(raw, "max_drawdown_60d"));
-    pushPriceEvidence(rows, "MA5", getRawNumber(raw, "ma5"));
-    pushPctEvidence(rows, "距MA5", getRawNumber(raw, "ma5_distance_pct"));
-    pushNumberEvidence(rows, "资金热度代理", getRawNumber(raw, "smart_money_proxy_score"));
-    pushNumberEvidence(rows, "资金流分", getRawNumber(raw, "fund_flow_score"));
-    pushNumberEvidence(rows, "热度排名分", getRawNumber(raw, "hot_rank_score"));
-    pushNumberEvidence(rows, "龙虎榜分", getRawNumber(raw, "lhb_score"));
-    pushNumberEvidence(rows, "分钟线数量", getRawNumber(execution, "minute_bar_count"), 0);
-    const window = getRawText(execution, "window");
-    if (window) rows.push({ label: "尾盘窗口", value: window });
-    return rows;
-  }
-  const entryDate = getRawText(execution, "entry_date");
-  const signalDate = getRawText(execution, "signal_date");
-  const executeDate = getRawText(execution, "execute_date");
-  if (entryDate) rows.push({ label: "买入日期", value: entryDate });
-  if (signalDate) rows.push({ label: "信号日期", value: signalDate });
-  if (executeDate) rows.push({ label: "成交日期", value: executeDate });
-  rows.push({ label: "退出原因", value: exitReasonLabel(trade.reason) });
-  return rows;
-}
-
-function markerExecutionRaw(trade: BacktestTrade) {
-  const raw = safeRaw(trade.raw);
-  return raw.execution && typeof raw.execution === "object" && !Array.isArray(raw.execution)
-    ? raw.execution as Record<string, unknown>
-    : raw;
 }
 
 function safeRaw(value: unknown): Record<string, unknown> {
@@ -1249,23 +1455,6 @@ function strategyStatusLabel(status?: string | null) {
   return status || "--";
 }
 
-function exitReasonDescription(reason?: string | null) {
-  if (reason === "stop_loss") return "价格跌破成本价下方的止损阈值，按当前执行模型卖出。";
-  if (reason === "take_profit") return "价格达到设定止盈阈值，按当前执行模型卖出。";
-  if (reason === "trailing_stop") return "持仓后曾创新高，但价格从持仓高点回撤超过移动止损阈值，按当前执行模型卖出。";
-  if (reason === "time_stop") return "持仓时间超过策略设定的时间上限，按当前执行模型卖出。";
-  return reason || "--";
-}
-
-function stockExecutionMethodLabel(execution?: Record<string, unknown>) {
-  const model = execution?.execution_model;
-  const window = execution?.tail_entry_window;
-  if (model === "strict_1430") return `严格14:30 ${typeof window === "string" ? window : "14:30-14:30"}`;
-  if (model === "tail_close_hybrid" || !model) return `尾盘混合 ${typeof window === "string" ? window : "14:30-14:30"}`;
-  if (model === "legacy_next_open") return "旧报告兼容";
-  return String(model);
-}
-
 function InfoCell({ label, value, valueClass }: { label: string; value?: string | number | null; valueClass?: string }) {
   return (
     <div>
@@ -1275,22 +1464,15 @@ function InfoCell({ label, value, valueClass }: { label: string; value?: string 
   );
 }
 
-function stockEventLabel(eventType: string, side?: string, status?: string) {
-  const sideLabel = side === "BUY" ? "买入" : side === "SELL" ? "卖出" : side ?? "--";
-  if (eventType === "trade") return `${sideLabel}成交`;
-  if (status === "rejected") return `${sideLabel}拒绝`;
-  if (status === "filled") return `${sideLabel}订单成交`;
-  return `${sideLabel}订单`;
-}
-
 function portfolioReasonLabel(reason?: string | null) {
   const labels: Record<string, string> = {
     entry_signal: "入场信号",
-    missing_1430_snapshot: "缺14:30快照",
-    tail_entry_not_triggered: "尾盘入场未触发",
+    missing_1430_snapshot: "缺分钟快照",
+    tail_entry_not_triggered: "入场条件未触发",
     limit_up_open_blocked: "开盘涨停买不到",
-    limit_up_tail_unfilled: "尾盘涨停买不到",
-    limit_down_tail_blocked: "尾盘跌停卖不出",
+    limit_up_tail_unfilled: "涨停买不到",
+    limit_down_open_blocked: "开盘跌停卖不出",
+    limit_down_tail_blocked: "跌停卖不出",
     no_execute_bar: "缺少执行日K线",
     limit_up_or_no_bar: "涨停或缺少执行日K线",
     no_bar: "无日线",
@@ -1305,18 +1487,20 @@ function portfolioReasonLabel(reason?: string | null) {
 }
 
 function executionModeLabel(mode?: string | null) {
-  if (mode === "minute_1430") return "14:30真实";
+  if (mode === "minute_1430") return "实时分钟";
   if (mode === "daily_close_proxy") return "收盘代理";
-  if (mode === "minute_1430_sell") return "14:30卖出";
+  if (mode === "minute_1430_sell") return "实时分钟卖出";
   if (mode === "daily_close_proxy_sell") return "收盘代理卖出";
-  if (mode === "strict_1430_required") return "严格14:30";
-  if (mode === "strict_1430_required_sell") return "严格14:30卖出";
+  if (mode === "strict_1430_required") return "严格分钟";
+  if (mode === "strict_1430_required_sell") return "严格分钟卖出";
   if (mode === "limit_up_tail_unfilled") return "涨停未买";
   if (mode === "limit_down_tail_blocked") return "跌停未卖";
-  if (mode === "minute_tail_ma5") return "尾盘分钟";
+  if (mode === "limit_down_open_blocked") return "开盘跌停未卖";
+  if (mode === "minute_tail_ma5") return "实时分钟";
   if (mode === "daily_next_open_fallback") return "开盘回退";
   if (mode === "minute_tail_ma5_required") return "严格分钟";
-  if (mode === "daily_next_open") return "旧报告兼容";
+  if (mode === "daily_next_open") return "次日开盘";
+  if (mode === "daily_next_open_sell") return "次日开盘卖出";
   return mode || "--";
 }
 

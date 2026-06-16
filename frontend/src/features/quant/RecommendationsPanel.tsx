@@ -28,7 +28,6 @@ export function RecommendationsPanel({
   onSelectedTradeDateChange,
   strategies,
   selectedStrategy,
-  onStrategyChange,
   selectedBoards,
   onSelectedBoardsChange,
   activeBacktestId,
@@ -54,7 +53,6 @@ export function RecommendationsPanel({
   onSelectedTradeDateChange: (tradeDate: string) => void;
   strategies: QuantStrategyOption[];
   selectedStrategy: string;
-  onStrategyChange: (strategy: string) => void;
   selectedBoards: string[];
   onSelectedBoardsChange: (boards: string[]) => void;
   activeBacktestId?: number | null;
@@ -80,9 +78,9 @@ export function RecommendationsPanel({
       latestRunByDate.set(run.trade_date, run);
     }
   }
-  const availableDates = Array.from(
-    new Set([...tradingDates, ...screenRuns.map((run) => run.trade_date), selectedTradeDate].filter(Boolean))
-  );
+  const succeededRunDates = screenRuns.filter((run) => run.status === "succeeded").map((run) => run.trade_date);
+  const fallbackDates = succeededRunDates.length ? [] : tradingDates.slice(0, 60);
+  const availableDates = Array.from(new Set([...succeededRunDates, ...fallbackDates, selectedTradeDate].filter(Boolean)));
   const stats = useMemo(() => candidateStats(items), [items]);
   const filteredItems = useMemo(() => {
     return items.filter((item) => {
@@ -91,7 +89,7 @@ export function RecommendationsPanel({
       return true;
     });
   }, [actionFilter, failedRuleFilter, items]);
-  const runDates = new Set(screenRuns.filter((run) => run.status === "succeeded").map((run) => run.trade_date));
+  const runDates = new Set(succeededRunDates);
   const runDateCount = availableDates.filter((date) => runDates.has(date)).length;
   const missingRunCount = Math.max(availableDates.length - runDateCount, 0);
   const traceQuery = useQuery({
@@ -136,24 +134,12 @@ export function RecommendationsPanel({
             className="items-start gap-1"
             selectClassName="mt-1 w-full min-w-0"
           />
-          <label className="text-sm">
-            <span className="text-xs text-muted-foreground">策略</span>
-            <select
-              className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
-              value={selectedStrategy}
-              onChange={(event) => onStrategyChange(event.target.value)}
-            >
-              {strategies.length === 0 ? (
-                <option value={selectedStrategy}>主线强势回踩低吸</option>
-              ) : (
-                strategies.map((strategy) => (
-                  <option key={strategy.id} value={strategy.id}>
-                    {strategy.name}
-                  </option>
-                ))
-              )}
-            </select>
-          </label>
+          <div className="text-sm">
+            <div className="text-xs text-muted-foreground">策略</div>
+            <div className="mt-1 flex h-9 items-center rounded-md border bg-muted/30 px-2 text-sm">
+              {selectedStrategyMeta?.name ?? "主线龙回头回踩低吸"}
+            </div>
+          </div>
         </div>
         <QuantBoardSelector
           selectedBoards={selectedBoards}
@@ -649,7 +635,7 @@ export function QuantBoardSelector({
         {onRun && (
           <Button size="sm" onClick={onRun} disabled={isRunning}>
             {isRunning ? <RefreshCw size={15} className="animate-spin" /> : <Play size={15} />}
-            生成区间候选
+            刷新候选并回测
           </Button>
         )}
       </div>
@@ -676,7 +662,7 @@ function QuantEmptyState({
           <div className="min-w-0 flex-1">
             <div className="font-medium">{unavailable ? "量化数据还不能读取" : "还没有量化候选"}</div>
             <div className="mt-1 text-sm text-muted-foreground">
-              {message || "选择起始交易日后生成区间候选。系统会按真实交易日逐日打分并落库。"}
+              {message || "选择起始交易日后刷新候选并回测。系统会按真实交易日逐日打分、生成候选并自动回测。"}
             </div>
             {strategy && (
               <div className="mt-2 text-xs text-muted-foreground">

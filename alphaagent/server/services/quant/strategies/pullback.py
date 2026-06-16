@@ -6,6 +6,7 @@ from datetime import date
 
 from alphaagent.server.services.quant.factors import (
     Bar,
+    LEADER_PULLBACK_STRATEGY_ID,
     SignalScore,
     clamp_score,
     daily_turnover_yuan,
@@ -37,7 +38,7 @@ def score_stock(
     """Score one stock using data available at ``trade_date``."""
 
     visible_bars = [bar for bar in bars if bar.trade_date <= trade_date]
-    result = SignalScore(vt_symbol=vt_symbol, trade_date=trade_date)
+    result = SignalScore(vt_symbol=vt_symbol, trade_date=trade_date, signal_type=LEADER_PULLBACK_STRATEGY_ID)
     if len(visible_bars) < 60:
         result.evidence = {"status": "insufficient_data", "bars": len(visible_bars), "min_required": 60}
         return result

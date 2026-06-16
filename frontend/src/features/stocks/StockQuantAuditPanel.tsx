@@ -43,7 +43,7 @@ export function StockQuantAuditPanel({
         <div>
           <h3 className="text-sm font-semibold">量化信号复核</h3>
           <p className="mt-1 text-sm text-muted-foreground">
-            低吸和突破分开复核。涨停接力、强势加速仍需要更多独立策略，不能用一个低吸规则硬解释所有买点。
+            当前只复核主线龙回头回踩低吸，和量化页全局研究保持同一策略口径。
           </p>
         </div>
         <Button
@@ -204,111 +204,33 @@ function BestFitRow({ row, strategy }: { row: SymbolSignalHistoryRow; strategy?:
 
 const FALLBACK_STRATEGIES: QuantStrategyOption[] = [
   {
-    id: "mainline_leader_pullback",
+    id: "mainline_dragon_pullback",
     version: "0.1.1",
-    name: "主线强势回踩低吸",
-    description: "使用日线可见数据寻找主线强势股在 MA5 附近回踩的低吸机会。",
-    default_min_entry_score: 68,
+    name: "主线龙回头回踩低吸",
+    description: "使用日线可见数据识别主线强势股第一波启动后的缩量回踩、均线承接和弱转强机会。",
+    default_min_entry_score: 76,
     entry_action_label: "买入",
     watch_action_label: "观察",
     failed_rule_labels: {
       total_score: "分数不足",
-      ma5_distance: "不在MA5低吸区",
+      strong_leg: "第一波强度不足",
+      pullback_structure: "回踩结构不足",
+      support_acceptance: "均线承接不足",
+      reclaim_confirmation: "弱转强确认不足",
+      distribution_risk: "高位派发风险",
       risk_score: "风险分不足",
       liquidity_score: "流动性不足",
     },
     evidence_labels: {
+      dragon_state: "龙回头状态",
+      support_type: "承接类型",
       ma5_distance_pct: "MA5距离",
-      risk_score: "风险分",
-      liquidity_score: "流动性",
-    },
-    primary_metric_keys: ["ma5_distance_pct"],
-  },
-  {
-    id: "breakout_confirmation",
-    version: "0.1.0",
-    name: "平台放量突破确认",
-    description: "使用日线可见数据寻找接近 60 日新高、量能确认、趋势未破坏的突破机会。",
-    default_min_entry_score: 70,
-    entry_action_label: "买入",
-    watch_action_label: "观察",
-    failed_rule_labels: {
-      total_score: "分数不足",
-      breakout_distance: "未接近60日高点",
-      volume_confirmation: "量能确认不足",
-      trend_quality: "趋势质量不足",
-      risk_score: "风险分不足",
-      liquidity_score: "流动性不足",
-    },
-    evidence_labels: {
-      close_to_prior_high_pct: "距60日高点",
-      volume_ratio_5d_20d: "量能比",
-      trend_quality_score: "趋势质量",
-      risk_score: "风险分",
-      liquidity_score: "流动性",
-    },
-    primary_metric_keys: ["close_to_prior_high_pct", "volume_ratio_5d_20d"],
-  },
-  {
-    id: "limit_up_after_pullback",
-    version: "0.1.0",
-    name: "涨停后回踩确认",
-    description: "使用日线可见数据寻找近 20 日有涨停、回踩 MA5/MA20 未破坏的强势股确认机会。",
-    default_min_entry_score: 72,
-    entry_action_label: "买入",
-    watch_action_label: "观察",
-    failed_rule_labels: {
-      total_score: "分数不足",
-      limit_up_presence: "近20日无涨停",
-      limit_up_recency: "涨停后时间不合适",
-      pullback_position: "回踩位置不合适",
-      ma20_support: "跌破MA20支撑",
-      trend_quality: "趋势质量不足",
-      risk_score: "风险分不足",
-      liquidity_score: "流动性不足",
-    },
-    evidence_labels: {
-      days_since_limit_up: "距涨停天数",
-      limit_up_count_20d: "20日涨停数",
-      ma5_distance_pct: "MA5距离",
-      ma20_distance_pct: "MA20距离",
-      risk_score: "风险分",
-      liquidity_score: "流动性",
-    },
-    primary_metric_keys: ["days_since_limit_up", "ma5_distance_pct"],
-  },
-  {
-    id: "trend_acceleration",
-    version: "0.1.0",
-    name: "趋势加速确认",
-    description: "使用日线可见数据寻找趋势已形成且正在温和加速、但尚未明显过热的强势股机会。",
-    default_min_entry_score: 73,
-    entry_action_label: "买入",
-    watch_action_label: "观察",
-    failed_rule_labels: {
-      total_score: "分数不足",
-      trend_return: "阶段强度不足",
-      recent_acceleration: "短期加速不合适",
-      ma_alignment: "均线多头不足",
-      ma5_position: "偏离MA5不合适",
-      ma20_position: "趋势位置不合适",
-      volume_acceleration: "量能加速不合适",
-      overheat: "短期过热",
-      trend_quality: "趋势质量不足",
-      risk_score: "风险分不足",
-      liquidity_score: "流动性不足",
-    },
-    evidence_labels: {
-      return_5d: "5日涨跌",
-      return_20d: "20日涨跌",
-      return_60d: "60日涨跌",
-      ma5_distance_pct: "MA5距离",
-      ma20_distance_pct: "MA20距离",
+      ma10_distance_pct: "MA10距离",
       volume_ratio_5d_20d: "量能比",
       risk_score: "风险分",
       liquidity_score: "流动性",
     },
-    primary_metric_keys: ["return_20d", "volume_ratio_5d_20d"],
+    primary_metric_keys: ["dragon_state", "support_type", "ma5_distance_pct"],
   },
 ];
 

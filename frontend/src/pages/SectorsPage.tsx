@@ -28,6 +28,7 @@ import { Input } from "@/components/ui/input";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
+import { AddToGroupButton } from "@/features/portfolio/AddToGroupButton";
 import {
   cn,
   formatAmount,
@@ -1116,11 +1117,10 @@ function FocusStocksSection({
       ) : (
         <div className="grid divide-y md:grid-cols-2 md:divide-x md:divide-y-0 xl:grid-cols-3">
           {focusStocks.slice(0, 6).map((stock) => (
-            <button
+            <div
               key={`focus-${stock.vt_symbol}`}
-              type="button"
               onClick={() => onRowClick(stock)}
-              className="min-w-0 px-4 py-3 text-left hover:bg-muted"
+              className="min-w-0 cursor-pointer px-4 py-3 hover:bg-muted"
             >
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
@@ -1132,12 +1132,15 @@ function FocusStocksSection({
                     {"related_sector_name" in stock && stock.related_sector_name ? stock.related_sector_name : stock.vt_symbol}
                   </p>
                 </div>
-                <div className="shrink-0 text-right">
+                <div className="flex shrink-0 flex-col items-end gap-1">
                   <p className={cn("text-sm font-semibold tabular-nums", priceColorClass(stock.change_pct))}>{formatPct(stock.change_pct)}</p>
-                  <p className="mt-1 text-xs tabular-nums text-muted-foreground">{formatAmount(stock.turnover)}</p>
+                  <p className="text-xs tabular-nums text-muted-foreground">{formatAmount(stock.turnover)}</p>
+                  <div onClick={(e) => e.stopPropagation()}>
+                    <AddToGroupButton vtSymbol={stock.vt_symbol} compact />
+                  </div>
                 </div>
               </div>
-            </button>
+            </div>
           ))}
         </div>
       )}
@@ -1307,13 +1310,14 @@ function StockMiniList({ title, stocks }: { title: string; stocks: StockQuote[] 
       <h4 className="mb-3 text-sm font-semibold">{title}</h4>
       <div className="space-y-2">
         {stocks.map((stock) => (
-          <div key={`${title}-${stock.vt_symbol}`} className="grid grid-cols-[minmax(0,1fr)_76px_88px] items-center gap-2 text-sm">
+          <div key={`${title}-${stock.vt_symbol}`} className="grid grid-cols-[minmax(0,1fr)_64px_72px_auto] items-center gap-2 text-sm">
             <div className="min-w-0">
               <div className="truncate font-medium">{stock.name}</div>
               <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">{stock.symbol}</div>
             </div>
             <span className={cn("text-right text-xs tabular-nums", priceColorClass(stock.change_pct))}>{formatPct(stock.change_pct)}</span>
             <span className="text-right text-xs tabular-nums text-muted-foreground">{formatAmount(stock.turnover)}</span>
+            <AddToGroupButton vtSymbol={stock.vt_symbol} compact />
           </div>
         ))}
         {stocks.length === 0 && <div className="text-sm text-muted-foreground">暂无股票样本</div>}
@@ -1392,6 +1396,7 @@ function StockTable({
             <SortableHeader label="成交额" sortKey="turnover" sort={sort} onSort={toggleSort} align="right" />
             <SortableHeader label="换手率" sortKey="turnover_rate" sort={sort} onSort={toggleSort} align="right" />
             <SortableHeader label="市值" sortKey="market_cap" sort={sort} onSort={toggleSort} align="right" />
+            <th className="px-3 py-2 text-center text-xs font-medium">操作</th>
           </tr>
         </thead>
         <tbody>
@@ -1428,11 +1433,14 @@ function StockTable({
                 {stock.turnover_rate != null ? `${stock.turnover_rate.toFixed(2)}%` : "--"}
               </td>
               <td className="px-3 py-2 text-right tabular-nums">{formatMarketCap(stock.market_cap)}</td>
+              <td className="px-3 py-2 text-center" onClick={(e) => e.stopPropagation()}>
+                <AddToGroupButton vtSymbol={stock.vt_symbol} compact />
+              </td>
             </tr>
           ))}
           {sortedStocks.length === 0 && (
             <tr>
-              <td colSpan={showSector ? 11 : showReturns ? 10 : 7} className="px-3 py-8 text-center text-sm text-muted-foreground">
+              <td colSpan={showSector ? 12 : showReturns ? 11 : 8} className="px-3 py-8 text-center text-sm text-muted-foreground">
                 当前条件下没有匹配股票
               </td>
             </tr>

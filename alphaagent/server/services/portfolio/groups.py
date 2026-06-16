@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import and_, desc, select
@@ -10,6 +10,8 @@ from sqlalchemy import and_, desc, select
 from alphaagent.market.boards import stock_board_payload
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
+from alphaagent.server.services.simulation.account import latest_bar_close
+from alphaagent.server.services.quant.factors import evaluate_exit
 
 
 DEFAULT_GROUPS = [
@@ -191,6 +193,67 @@ def delete_item(group_id: int, vt_symbol: str) -> dict[str, Any]:
     return {"status": "ready", "deleted": result.rowcount}
 
 
+def _apply_live_price(item: dict[str, Any], session) -> None:
+    """Refresh last_price and derived valuation with the latest daily-bar close.
+
+    Positions store last_price from the fill at build time; without this the
+    holdings endpoint would show stale prices. Refreshing in-place keeps P&L,
+    market value and (downstream) exit advice consistent with the live close.
+    """
+    vt_symbol = str(item.get("vt_symbol") or "")
+    if not vt_symbol:
+        return
+    live_price = latest_bar_close(session, vt_symbol)
+    if live_price is None or live_price <= 0:
+        return
+    cost = item.get("cost_price")
+    volume = item.get("volume")
+    item["last_price"] = live_price
+    if isinstance(volume, (int, float)) and volume:
+        item["market_value"] = live_price * volume
+        if isinstance(cost, (int, float)) and cost:
+            item["floating_pnl"] = (live_price - cost) * volume
+            item["floating_pnl_pct"] = (live_price / cost - 1) * 100
+
+
+def _as_date(value: Any):
+    """Coerce a stored created_at (datetime/str/date) into a date, or None."""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def _attach_advice(item: dict[str, Any]) -> None:
+    """Attach a realtime exit advice to a holding item.
+
+    Reuses factors.evaluate_exit (the single exit-rule source shared with the
+    backtest engine) over the position's stored absolute exit levels and the
+    (live-refreshed) last_price. Sets advice to one of
+    hold/stop_loss/take_profit/trailing_stop/time_stop; defaults to "hold"
+    when price data is missing or no rule fires.
+    """
+    last_price = item.get("last_price")
+    if not isinstance(last_price, (int, float)) or last_price <= 0:
+        item["advice"] = "hold"
+        return
+    reason = evaluate_exit(
+        last_price=float(last_price),
+        stop_loss_price=item.get("stop_loss_price"),
+        take_profit_price=item.get("take_profit_price"),
+        trailing_stop_price=item.get("trailing_stop_price"),
+        entry_date=_as_date(item.get("created_at")),
+        current_day=date.today(),
+    )
+    item["advice"] = reason or "hold"
+
+
 def holdings() -> dict[str, Any]:
     if not is_database_configured():
         return {"status": "unavailable", "items": []}
@@ -210,6 +273,8 @@ def holdings() -> dict[str, Any]:
         items = []
         for row in rows:
             item = dict(row)
+            _apply_live_price(item, session)
+            _attach_advice(item)
             item.update(_position_trade_summary(session, int(row["account_id"]), str(row["vt_symbol"])))
             items.append(_mapping_to_api(item))
     return {"status": "ready", "items": items}
@@ -274,7 +339,7 @@ def _position_trade_summary(session, account_id: int, vt_symbol: str) -> dict[st
 def _ensure_portfolio_schema() -> None:
     """Allow portfolio services to run outside the API lifespan."""
 
-    schema.create_schema(get_engine())
+    schema.ensure_schema_once(get_engine())
 
 
 def _parse_date(value: Any) -> date | None:

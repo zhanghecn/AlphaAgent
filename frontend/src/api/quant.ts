@@ -47,6 +47,11 @@ export interface QuantScreenRunRange extends QuantScreenRun {
   end_date?: string;
   total_dates?: number;
   succeeded_count?: number;
+  processed_count?: number;
+  generated_count?: number;
+  skipped_existing_count?: number;
+  force_refreshed_count?: number;
+  force_refresh?: boolean;
   range_recommendation_count?: number;
   replay_run_id?: number | null;
   replay_run?: {
@@ -65,7 +70,41 @@ export interface QuantScreenRunRange extends QuantScreenRun {
     run_id?: number | null;
     candidate_count: number;
     recommendation_count: number;
+    skipped_existing?: boolean;
+    force_refreshed?: boolean;
   }>;
+}
+
+export interface QuantResearchRun {
+  id: string;
+  status: "running" | "succeeded" | "failed" | string;
+  strategy_id: string;
+  strategy_version?: string;
+  created_at?: string;
+  started_at?: string;
+  finished_at?: string | null;
+  stage?: "queued" | "screening" | "backtest" | string;
+  message?: string | null;
+  progress_current?: number;
+  progress_total?: number;
+  progress_pct?: number;
+  params?: Record<string, unknown>;
+  screen_run?: QuantScreenRunRange | null;
+  replay_run?: QuantScreenRunRange["replay_run"] | null;
+  replay_run_id?: number | null;
+  backtest_id?: number | null;
+  backtest?: {
+    status?: string;
+    backtest_id?: number | null;
+    strategy?: string;
+    strategy_version?: string;
+    start?: string;
+    end?: string;
+    metrics?: BacktestMetrics;
+    message?: string | null;
+  } | null;
+  error_type?: string | null;
+  error_detail?: string | null;
 }
 
 export interface QuantStrategyOption {
@@ -1070,6 +1109,7 @@ export interface BacktestExecutionModelComparisonRow {
   total_return_pct?: number | null;
   max_drawdown_pct?: number | null;
   trade_count?: number | null;
+  total_trade_rows?: number | null;
   buy_count?: number | null;
   minute_1430_count?: number | null;
   daily_close_proxy_count?: number | null;
@@ -1109,6 +1149,7 @@ export interface BacktestStrategyComparisonRow {
   total_return_pct?: number | null;
   max_drawdown_pct?: number | null;
   trade_count?: number | null;
+  total_trade_rows?: number | null;
   buy_count?: number | null;
   sell_count?: number | null;
   buy_signal_count?: number | null;
@@ -1270,6 +1311,8 @@ export interface SimulationPosition extends StockIdentityFields {
   stop_loss_price?: number | null;
   take_profit_price?: number | null;
   trailing_stop_price?: number | null;
+  /** Realtime exit advice: hold/stop_loss/take_profit/trailing_stop/time_stop. */
+  advice?: string;
   source: string;
   reason?: string | null;
   last_buy_time?: string | null;
@@ -1385,8 +1428,39 @@ export function createScreenRunRange(payload: {
   persist?: boolean;
   auto_portfolio?: boolean;
   included_boards?: string[];
+  force_refresh?: boolean;
 } = {}) {
   return apiClient.post<QuantScreenRunRange>("/quant/screen-runs/range", payload);
+}
+
+export function createQuantResearchRun(payload: {
+  start?: string;
+  end?: string;
+  strategy?: string;
+  max_symbols?: number;
+  recommendation_limit?: number;
+  min_recommendation_score?: number;
+  min_entry_score?: number;
+  persist?: boolean;
+  auto_portfolio?: boolean;
+  included_boards?: string[];
+  initial_cash?: number;
+  max_positions?: number;
+  candidate_limit?: number;
+  max_position_pct?: number;
+  strict_entry?: boolean;
+  execution_model?: "legacy_next_open" | string;
+  force_refresh?: boolean;
+} = {}) {
+  return apiClient.post<QuantResearchRun>("/quant/research-runs", payload);
+}
+
+export function fetchLatestQuantResearchRun() {
+  return apiClient.get<QuantResearchRun | null>("/quant/research-runs/latest");
+}
+
+export function fetchQuantResearchRun(runId: string) {
+  return apiClient.get<QuantResearchRun>(`/quant/research-runs/${encodeURIComponent(runId)}`);
 }
 
 export interface StrategyReplayRun {
@@ -1455,6 +1529,7 @@ export function fetchTradingDates(params: { start?: string; end?: string; limit?
     status: string;
     items: QuantTradingDateItem[];
     latest_trade_date?: string | null;
+    earliest_trade_date?: string | null;
     returned_count?: number;
   }>(`/quant/trading-dates?${search.toString()}`);
 }
@@ -1526,6 +1601,87 @@ export interface SymbolTradePlan extends StockIdentityFields {
 export function fetchSymbolTradePlan(vtSymbol: string, strategy?: string) {
   const suffix = strategy ? `?strategy=${encodeURIComponent(strategy)}` : "";
   return apiClient.get<SymbolTradePlan>(`/quant/symbols/${encodeURIComponent(vtSymbol)}/trade-plan${suffix}`);
+}
+
+export interface SymbolQuantSignalRow extends StockIdentityFields {
+  id?: number;
+  run_id?: number | null;
+  trade_date?: string;
+  vt_symbol?: string;
+  strategy_id?: string;
+  strategy_version?: string;
+  signal_type?: string;
+  total_score?: number | null;
+  relative_strength_score?: number | null;
+  washout_score?: number | null;
+  trend_quality_score?: number | null;
+  sector_mainline_score?: number | null;
+  financial_improvement_score?: number | null;
+  liquidity_score?: number | null;
+  risk_score?: number | null;
+  entry_signal?: boolean;
+  risk_level?: string | null;
+  evidence?: Record<string, unknown> | null;
+}
+
+export interface SymbolLatestQuantState extends StockIdentityFields {
+  status: string;
+  message?: string | null;
+  vt_symbol: string;
+  name?: string | null;
+  strategy_id?: string;
+  strategy_version?: string;
+  process?: {
+    source?: "replay" | "screen" | string;
+    replay_run_id?: number | null;
+    screen_run_id?: number | null;
+    strategy_id?: string;
+    strategy_version?: string;
+    start_date?: string | null;
+    end_date?: string | null;
+    latest_available_trade_date?: string | null;
+    is_stale?: boolean;
+    status?: string | null;
+    params?: Record<string, unknown>;
+    metrics?: Record<string, unknown>;
+    message?: string | null;
+    included_boards?: string[];
+  };
+  state?: {
+    code?: string;
+    label?: string;
+    severity?: "success" | "warning" | "neutral" | string;
+    reason?: string | null;
+  };
+  signal?: {
+    status?: string;
+    scored_date_count?: number;
+    entry_signal_count?: number;
+    latest?: SymbolQuantSignalRow | null;
+    latest_entry_signal?: SymbolQuantSignalRow | null;
+    best_total_score?: SymbolQuantSignalRow | null;
+    recent?: SymbolQuantSignalRow[];
+  };
+  candidate?: {
+    status?: string;
+    item?: SymbolTradePlan | null;
+    trade_plan?: SymbolTradePlan["trade_plan"] | null;
+  };
+  replay?: {
+    status?: string;
+    replay_run_id?: number | null;
+    vt_symbol?: string;
+    name?: string | null;
+    summary?: SymbolStrategyReplay["summary"] | null;
+    attempts?: StrategyReplayAttempt[];
+    events?: StrategyReplayEvent[];
+    closed_trades?: StrategyReplayClosedTrade[];
+  };
+}
+
+export function fetchLatestSymbolQuantState(vtSymbol: string, strategy?: string) {
+  const suffix = strategy ? `?strategy=${encodeURIComponent(strategy)}` : "";
+  return apiClient.get<SymbolLatestQuantState>(`/quant/symbols/${encodeURIComponent(vtSymbol)}/latest-state${suffix}`);
 }
 
 /** 某股最近的单股回测（trades + metrics，免重算直接读存储）。 */
@@ -1650,8 +1806,10 @@ export function fetchQuantStrategies() {
   return apiClient.get<{ status: string; default_strategy_id: string; items: QuantStrategyOption[] }>("/quant/strategies");
 }
 
-export function fetchBacktests(limit = 10, runType: "portfolio" | "symbol" | "all" = "all") {
-  return apiClient.get<{ status: string; items: BacktestRun[] }>(`/backtests?limit=${limit}&run_type=${runType}`);
+export function fetchBacktests(limit = 10, runType: "portfolio" | "symbol" | "all" = "all", strategy?: string) {
+  const search = new URLSearchParams({ limit: String(limit), run_type: runType });
+  if (strategy) search.set("strategy", strategy);
+  return apiClient.get<{ status: string; items: BacktestRun[] }>(`/backtests?${search.toString()}`);
 }
 
 export function createBacktest(payload: {
@@ -1660,6 +1818,7 @@ export function createBacktest(payload: {
   end?: string;
   initial_cash?: number;
   max_positions?: number;
+  max_position_pct?: number;
   max_symbols?: number;
   candidate_limit?: number;
   persist?: boolean;
@@ -1986,6 +2145,7 @@ export function placeOrder(accountId: number, payload: {
   volume?: number;
   reason?: string;
   recommendation_id?: number;
+  strategy_id?: string;
 }) {
   return apiClient.post<PlaceOrderResult>(`/simulation/accounts/${accountId}/orders`, payload);
 }

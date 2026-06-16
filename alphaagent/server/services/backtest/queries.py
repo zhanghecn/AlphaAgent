@@ -1159,7 +1159,7 @@ def audit_rows(
         "trades": trade_items,
         "events": audit_events(order_items, trade_items),
         "order_summary": order_stats(order_items),
-        "note": "组合回测会在历史每个交易日重新计算可见候选；默认严格 14:30 模型用上一交易日候选在执行日 14:30 快照撮合，缺快照会拒单，不是把今天候选名单套到过去。",
+        "note": "组合回测会在历史每个交易日重新计算可见候选；默认日线模型用上一交易日候选在下一交易日开盘撮合，不是把今天候选名单套到过去。",
     }
 
 
@@ -1178,6 +1178,7 @@ def reason_label(reason: Any) -> str | None:
         "tail_exit_not_triggered": "尾盘卖出未触发",
         "limit_up_open_blocked": "开盘涨停买不到",
         "limit_up_tail_unfilled": "涨停买不到",
+        "limit_down_open_blocked": "开盘跌停卖不出",
         "limit_down_tail_blocked": "跌停卖不出",
         "no_execute_bar": "缺少执行日K线",
         "limit_up_or_no_bar": "涨停或缺少执行日K线",

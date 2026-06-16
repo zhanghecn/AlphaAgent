@@ -6,7 +6,7 @@ from dataclasses import replace
 from typing import Any, Callable
 
 from alphaagent.server.services.backtest.schemas import BacktestParams
-from alphaagent.server.services.quant.strategy_registry import list_strategies
+from alphaagent.server.services.quant.strategy_registry import list_internal_strategies
 
 
 RunBacktest = Callable[[BacktestParams], dict[str, Any]]
@@ -20,7 +20,7 @@ def compare_strategies(
 ) -> dict[str, Any]:
     """Run multiple strategies with identical non-persistent parameters."""
 
-    strategy_meta = {str(item.get("id")): item for item in list_strategies()}
+    strategy_meta = {str(item.get("id")): item for item in list_internal_strategies()}
     selected = _selected_strategies(strategies, strategy_meta)
     if not selected:
         return {"status": "empty", "rows": [], "message": "No strategies selected."}
