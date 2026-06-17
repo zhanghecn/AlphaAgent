@@ -1,10 +1,10 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { AlertTriangle, Database, Play, RefreshCw, Search, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ChevronLeft, ChevronRight, Database, Play, RefreshCw, Search, ShieldCheck } from "lucide-react";
 import { cn, formatPct, formatPrice, priceColorClass } from "@/lib/utils";
 import { formatNumber, numberValue } from "@/lib/backtest-utils";
-import { DEFAULT_EXECUTION_CANDIDATE_LIMIT, DEFAULT_RECOMMENDATION_LIMIT, QUANT_BOARD_OPTIONS, boardLabels, type QuantBoard } from "@/features/quant/constants";
+import { DEFAULT_CANDIDATE_OBSERVATION_LIMIT, DEFAULT_EXECUTION_CANDIDATE_LIMIT, QUANT_BOARD_OPTIONS, boardLabels, type QuantBoard } from "@/features/quant/constants";
 import { ErrorState } from "@/components/ErrorState";
 import { LoadingState } from "@/components/LoadingState";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
@@ -65,6 +65,7 @@ export function RecommendationsPanel({
   const [actionFilter, setActionFilter] = useState<"all" | "BUY" | "WATCH">("all");
   const [failedRuleFilter, setFailedRuleFilter] = useState("all");
   const [traceTarget, setTraceTarget] = useState<{ vtSymbol: string; tradeDate: string } | null>(null);
+  const [page, setPage] = useState(1);
   const activeBoards = includedBoards?.length ? includedBoards : selectedBoards;
   const selectedStrategyMeta = strategies.find((strategy) => strategy.id === selectedStrategy);
   const failedRuleLabels = selectedStrategyMeta?.failed_rule_labels ?? {};
@@ -87,6 +88,13 @@ export function RecommendationsPanel({
       return true;
     });
   }, [actionFilter, failedRuleFilter, items]);
+  const pageSize = 20;
+  const pageCount = Math.max(Math.ceil(filteredItems.length / pageSize), 1);
+  const currentPage = Math.min(page, pageCount);
+  const pageStartIndex = (currentPage - 1) * pageSize;
+  const pagedItems = filteredItems.slice(pageStartIndex, pageStartIndex + pageSize);
+  const pageStart = filteredItems.length ? pageStartIndex + 1 : 0;
+  const pageEnd = Math.min(pageStartIndex + pageSize, filteredItems.length);
   const runDates = new Set(succeededRunDates);
   const runDateCount = availableDates.filter((date) => runDates.has(date)).length;
   const missingRunCount = Math.max(availableDates.length - runDateCount, 0);
@@ -116,7 +124,7 @@ export function RecommendationsPanel({
             <h2 className="text-sm font-semibold">量化候选</h2>
           </div>
           <div className="text-xs text-muted-foreground">
-            {tradeDate ?? "--"} · 前 {DEFAULT_RECOMMENDATION_LIMIT} · 执行前 {DEFAULT_EXECUTION_CANDIDATE_LIMIT} · {runId ? `运行 #${runId}` : "未运行"} · {strategyVersion ?? "--"}
+            {tradeDate ?? "--"} · 观察前 {DEFAULT_CANDIDATE_OBSERVATION_LIMIT} · 执行前 {DEFAULT_EXECUTION_CANDIDATE_LIMIT} · {runId ? `运行 #${runId}` : "未运行"} · {strategyVersion ?? "--"}
           </div>
         </div>
         <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_260px]">
@@ -159,7 +167,8 @@ export function RecommendationsPanel({
             <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
               <span>BUY {stats.buyCount}</span>
               <span>WATCH {stats.watchCount}</span>
-              <span>候选展示前 {DEFAULT_RECOMMENDATION_LIMIT}，回测只执行 BUY 前 {DEFAULT_EXECUTION_CANDIDATE_LIMIT}</span>
+              <span>按评分排名观察前 {DEFAULT_CANDIDATE_OBSERVATION_LIMIT}，不强行保留低吸名额</span>
+              <span>回测只执行 BUY 前 {DEFAULT_EXECUTION_CANDIDATE_LIMIT}</span>
               <span>已运行 {runDateCount} 日</span>
               <span>未运行 {missingRunCount} 日</span>
             </div>
@@ -167,7 +176,10 @@ export function RecommendationsPanel({
               <select
                 className="h-8 rounded-md border bg-background px-2 text-sm"
                 value={actionFilter}
-                onChange={(event) => setActionFilter(event.target.value as "all" | "BUY" | "WATCH")}
+                onChange={(event) => {
+                  setActionFilter(event.target.value as "all" | "BUY" | "WATCH");
+                  setPage(1);
+                }}
               >
                 <option value="all">全部动作</option>
                 <option value="BUY">仅买入</option>
@@ -176,7 +188,10 @@ export function RecommendationsPanel({
               <select
                 className="h-8 rounded-md border bg-background px-2 text-sm"
                 value={failedRuleFilter}
-                onChange={(event) => setFailedRuleFilter(event.target.value)}
+                onChange={(event) => {
+                  setFailedRuleFilter(event.target.value);
+                  setPage(1);
+                }}
               >
                 <option value="all">全部规则</option>
                 {stats.failedRules.map((rule) => (
@@ -201,7 +216,7 @@ export function RecommendationsPanel({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filteredItems.map((item) => {
+              {pagedItems.map((item) => {
                 const reason = item.reason ?? {};
                 const riskScore = numberValue(reason.risk_score);
                 const liquidityScore = numberValue(reason.liquidity_score);
@@ -220,7 +235,7 @@ export function RecommendationsPanel({
                           item.action === "BUY" ? "border-red-200 bg-red-50 text-rise dark:border-red-500/30 dark:bg-red-500/10" : "text-muted-foreground"
                         )}
                       >
-                        {item.action === "BUY" ? "买入" : "观察"}
+                        {candidateActionLabel(item)}
                       </span>
                     </TableCell>
                     <TableCell className="text-right font-medium tabular-nums">
@@ -273,6 +288,36 @@ export function RecommendationsPanel({
             </TableBody>
           </Table>
           {filteredItems.length === 0 && <div className="border-t p-3 text-sm text-muted-foreground">当前过滤条件下没有候选。</div>}
+          {filteredItems.length > pageSize && (
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-3 text-sm">
+              <div className="text-muted-foreground">
+                第 {pageStart}-{pageEnd} / {filteredItems.length} 个候选
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setPage((value) => Math.max(value - 1, 1))}
+                  disabled={currentPage <= 1}
+                >
+                  <ChevronLeft size={14} />
+                  上一页
+                </Button>
+                <span className="text-xs text-muted-foreground">
+                  {currentPage} / {pageCount}
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setPage((value) => Math.min(value + 1, pageCount))}
+                  disabled={currentPage >= pageCount}
+                >
+                  下一页
+                  <ChevronRight size={14} />
+                </Button>
+              </div>
+            </div>
+          )}
           {traceTarget && (
             <CandidateTracePanel
               backtestId={activeBacktestId}
@@ -482,6 +527,11 @@ function TraceCell({ label, value, framed }: { label: string; value?: string | n
 function failedRules(item: QuantRecommendation): string[] {
   const raw = item.reason?.failed_rules;
   return Array.isArray(raw) ? raw.map((rule) => String(rule)).filter(Boolean) : [];
+}
+
+function candidateActionLabel(item: QuantRecommendation): string {
+  if (typeof item.signal_label === "string" && item.signal_label) return item.signal_label;
+  return item.action === "BUY" ? "买入" : "观察";
 }
 
 function CandidateScoreExplanation({
@@ -871,7 +921,7 @@ export function QuantBoardSelector({
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs text-muted-foreground">
-          当前结果: {boardLabels(activeBoards)} · 候选前 {DEFAULT_RECOMMENDATION_LIMIT} · 执行前 {DEFAULT_EXECUTION_CANDIDATE_LIMIT}
+          当前结果: {boardLabels(activeBoards)} · 观察前 {DEFAULT_CANDIDATE_OBSERVATION_LIMIT} · 执行前 {DEFAULT_EXECUTION_CANDIDATE_LIMIT}
         </span>
         {onRun && (
           <Button size="sm" onClick={onRun} disabled={isRunning}>

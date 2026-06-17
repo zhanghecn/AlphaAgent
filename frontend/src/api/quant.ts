@@ -21,6 +21,9 @@ export interface QuantRecommendation extends StockIdentityFields {
   total_score?: number | null;
   reason?: Record<string, unknown> | null;
   risk_control?: Record<string, unknown> | null;
+  signal_label?: string | null;
+  signal_role?: string | null;
+  key_entry_signal?: boolean | null;
   status?: string;
   expires_at?: string | null;
 }
@@ -141,6 +144,9 @@ export interface SymbolSignalHistoryRow {
   turnover_estimated_from_volume?: boolean;
   failed_rules: string[];
   failed_rule_count: number;
+  signal_label?: string | null;
+  signal_role?: string | null;
+  key_entry_signal?: boolean | null;
   evidence?: Record<string, unknown>;
 }
 
@@ -1641,6 +1647,9 @@ export interface SymbolQuantSignalRow extends StockIdentityFields {
   action?: "BUY" | "WATCH" | string;
   failed_rules?: string[];
   failed_rule_count?: number;
+  signal_label?: string | null;
+  signal_role?: string | null;
+  key_entry_signal?: boolean | null;
   risk_level?: string | null;
   evidence?: Record<string, unknown> | null;
 }

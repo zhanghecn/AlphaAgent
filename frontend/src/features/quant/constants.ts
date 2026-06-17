@@ -12,7 +12,7 @@ export const QUANT_BOARD_OPTIONS = [
 export type QuantBoard = (typeof QUANT_BOARD_OPTIONS)[number]["value"];
 export type ExecutionModel = "legacy_next_open";
 
-export const DEFAULT_RECOMMENDATION_LIMIT = 20;
+export const DEFAULT_CANDIDATE_OBSERVATION_LIMIT = 100;
 export const DEFAULT_EXECUTION_CANDIDATE_LIMIT = 20;
 
 export const DEFAULT_BACKTEST_PARAMS = {

@@ -116,6 +116,7 @@ def entry_action_payload(item: SignalScore, min_entry_score: float) -> dict[str,
     effective_min_entry_score = effective_entry_score_threshold(item, min_entry_score)
     failed_rules = failed_entry_rules(item, min_entry_score)
     executable = bool(item.entry_signal and not failed_rules)
+    signal_label, signal_role, key_entry_signal = signal_semantics(item, executable)
     return {
         "raw_entry_signal": bool(item.entry_signal),
         "executable_entry_signal": executable,
@@ -124,7 +125,27 @@ def entry_action_payload(item: SignalScore, min_entry_score: float) -> dict[str,
         "failed_rule_count": len(failed_rules),
         "effective_min_entry_score": effective_min_entry_score,
         "entry_threshold_reason": "stealth_low_suction" if effective_min_entry_score < float(min_entry_score) else "default",
+        "signal_label": signal_label,
+        "signal_role": signal_role,
+        "key_entry_signal": key_entry_signal,
     }
+
+
+def signal_semantics(item: SignalScore, executable: bool) -> tuple[str, str, bool]:
+    evidence = item.evidence or {}
+    setup = str(evidence.get("setup_type") or evidence.get("entry_setup") or "")
+    launch_confirmed = bool(evidence.get("low_suction_launch_confirmed"))
+    fresh_tail_buy = bool(evidence.get("fresh_tail_buy", True))
+    repeat_days = int(float(evidence.get("tail_buy_repeat_days") or 0))
+    if setup == "stealth_low_suction":
+        if executable and launch_confirmed:
+            return "低吸启动买点", "key_buy", True
+        return "低吸蓄势观察", "watch", False
+    if setup == "dragon_pullback" and (not fresh_tail_buy or repeat_days > 0):
+        return "重复龙回头观察" if not executable else "龙回头买点", "key_buy" if executable else "watch", executable
+    if executable:
+        return "龙回头买点", "key_buy", True
+    return "观察", "watch", False
 
 
 def symbol_signal_fit_key(row: dict[str, Any], strategy_id: str) -> tuple[int, float, float]:

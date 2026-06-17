@@ -19,7 +19,7 @@ import {
   type QuantResearchRun,
 } from "@/api/quant";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { DEFAULT_BACKTEST_PARAMS, DEFAULT_EXECUTION_CANDIDATE_LIMIT, DEFAULT_RECOMMENDATION_LIMIT, type BacktestParams } from "@/features/quant/constants";
+import { DEFAULT_BACKTEST_PARAMS, DEFAULT_CANDIDATE_OBSERVATION_LIMIT, DEFAULT_EXECUTION_CANDIDATE_LIMIT, type BacktestParams } from "@/features/quant/constants";
 import { ActionStatus } from "@/features/quant/ActionStatus";
 import { ScreenProgress } from "@/features/quant/ScreenProgress";
 import { QuantWorkflowGuide } from "@/features/quant/QuantWorkflowGuide";
@@ -93,7 +93,7 @@ export function QuantTradingPage() {
 
   const recommendationsQuery = useQuery({
     queryKey: ["quantRecommendations", activeRecommendationDate, selectedStrategy],
-    queryFn: () => fetchRecommendations(DEFAULT_RECOMMENDATION_LIMIT, activeRecommendationDate || undefined, selectedStrategy),
+    queryFn: () => fetchRecommendations(DEFAULT_CANDIDATE_OBSERVATION_LIMIT, activeRecommendationDate || undefined, selectedStrategy),
     enabled: Boolean(activeRecommendationDate),
     staleTime: 20_000,
   });
@@ -149,7 +149,7 @@ export function QuantTradingPage() {
         end: tradingDatesQuery.data?.latest_trade_date ?? undefined,
         strategy: selectedStrategy,
         max_symbols: backtestParams.max_symbols,
-        recommendation_limit: DEFAULT_RECOMMENDATION_LIMIT,
+        recommendation_limit: DEFAULT_CANDIDATE_OBSERVATION_LIMIT,
         min_recommendation_score: 60,
         min_entry_score: minEntryScore,
         persist: true,

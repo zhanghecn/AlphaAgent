@@ -35,10 +35,10 @@ pnpm run dev -- --host 0.0.0.0 --port 5173
 
 常用页面：
 
-- `/quant`: 单一主操作“刷新候选并回测”；普通视图只保留“候选/回测”两个入口。候选默认前 20，组合执行 BUY 前 20，最大持仓 10，页面直接展示“为什么这个分数”和回测归因；回测页不再把“信号计划”作为普通 tab 暴露。
+- `/quant`: 单一主操作“刷新候选并回测”；普通视图只保留“候选/回测”两个入口。候选默认观察评分前 100 并分页，每页 20；组合执行 BUY 前 20，最大持仓 10，页面直接展示“为什么这个分数”和回测归因；回测页不再把“信号计划”作为普通 tab 暴露。
 - `/data`: 数据同步、回测缺口补 14:30 快照、通用分钟线同步。
 - `/portfolio`: 自选分组、量化候选分组、模拟持仓。
-- `/stocks/:vtSymbol`: 股票详情、财报口径、策略复盘和“为什么这个分数”。即使最新组合回测已有成交，策略复盘也会显示最近评分日、低吸蓄势、均线收敛、低吸蓄势分和评分构成。K 线会显示 BUY 信号、买入拒绝、买入成交和卖出成交；点击 K 线或指标柱可查看较前一日涨跌、跳空、振幅、均线距离和量比。
+- `/stocks/:vtSymbol`: 股票详情、财报口径、策略复盘和“为什么这个分数”。股票详情支持 `交易复盘 / 候选信号` 切换：交易复盘只显示实际买入、卖出和拒绝执行，候选信号只显示理论候选/信号。点击 K 线或指标柱可查看较前一日涨跌、跳空、振幅、均线距离和量比。
 
 ## Docker
 
@@ -130,13 +130,14 @@ pnpm --dir frontend run build
 - 买入当天硬破位次日撤退实验 `#174 / 0.1.20` 已验证失败并从默认代码撤回：同区间收益约 `+51.51%`、最大回撤约 `-19.00%`，收益/PF/Sharpe 弱于 `#169`。不要把 `entry_day_breakdown_stop` 当作当前基线。
 - 卖出侧早期破位实验 `#173 / 0.1.19` 已验证失败并从默认代码撤回：同区间收益约 `+54.40%`、最大回撤约 `-19.79%`，弱于 `#169`。不要把 `early_breakdown_stop` 当作当前基线。
 - `#175` 不给低吸固定保留名额；低吸仍在同一候选池竞争。买入 setup 统计为 `dragon_pullback=138`、`stealth_low_suction=86`，其中 61 笔低吸买入带 `low_suction_launch_confirmed=true`。闭合 PnL 约为 `dragon_pullback +56.13 万`、`stealth_low_suction +9.75 万`。
+- `#186 / 0.1.22` 高位重复龙回头硬拒实验已验证失败并从默认代码撤回：同区间收益约 `+59.39%`、最大回撤约 `-18.13%`，弱于 `#175 / 0.1.21`。`002119.SZSE` 类重复高位龙回头风险只作为诊断证据，不作为默认硬拒买规则。
 - `stealth_low_suction` 已作为独立 setup 与 `dragon_pullback` 并列计算并进入内部 lane；红星发展 `2026-02-11/02-12`、合肥城建 `2026-04-28/04-29/04-30`、埃斯顿 `2026-04-14` 起的多日低吸蓄势可由单股逐日评分识别。
 - 东山精密 `002384.SZSE` 的 `2026-03-27` 至 `2026-04-01` 低吸段已修复：单股逐日评分显示低吸天数从 `1/2/3/4` 累计，`2026-04-01` 为可执行 `stealth_low_suction` BUY，`low_suction_launch_confirmed=true`。`#175` candidate trace 显示该信号进入执行池第 `7` 名，但执行日满仓 `10/10` 且未触发换仓，所以有理论计划但没有真实订单。
 - `#165` candidate-trace 关键结论：红星发展 `2026-02-11` 全部 BUY 原始排名 `238`，但进入低吸洗盘通道执行池第 `15` 名，执行日满仓 `10/10` 且未触发换仓；合肥城建 `2026-04-28` 原始排名 `293`，进入低吸洗盘通道执行池第 `8` 名，执行日满仓 `10/10` 且未触发换仓；埃斯顿 `2026-04-14` 原始排名 `250`，仍未进入执行前 `20`。
 - 低吸执行/换仓边界：`#162 / 0.1.12` 收益约 `+30.19%`、最大回撤约 `-23.37%`，拒绝；`#163 / 0.1.13` 收益约 `+46.88%`、最大回撤约 `-16.71%`，回撤改善但收益牺牲过大，拒绝作为基线；`#165 / 0.1.15` 收益约 `+55.41%`、最大回撤约 `-21.17%`，是中间方向；`#167 / 0.1.16` 收益约 `+28.80%`，过度保守；`#168 / 0.1.17` 收益约 `+39.16%`、最大回撤约 `-27.63%`，低吸机会加分过宽，拒绝。
 - 单股逐日评分接口 `GET /api/quant/symbols/{vt_symbol}/signal-history` 会重新按历史可见日线逐日计算，适合查连续低吸状态；`GET /api/backtests/{id}/candidate-trace` 查组合计划/订单/成交链路，适合解释为什么有信号但没买。两者不能混读。
 - 当前数据库没有目标历史日期同版本 `quant_recommendations` 落库候选记录，历史候选页和组合回测信号计划仍存在数据源差异；后续应统一候选落库与回测理论计划的数据源。
-- 最新源码验证：`tests/alphaagent/test_quant_backtest_portfolio.py` 为 `244 passed, 1 warning`；`uv run python -m compileall alphaagent/server/api alphaagent/server/services alphaagent/market alphaagent/data_sources alphaagent/server/db` 通过；API 容器已重建并确认 `/api/quant/strategies` 返回 `mainline_dragon_pullback / 0.1.21`。
+- 最新源码验证：`tests/alphaagent/test_quant_backtest_portfolio.py` 为 `246 passed, 1 warning`；`uv run python -m compileall alphaagent/server/api alphaagent/server/services alphaagent/market alphaagent/data_sources alphaagent/server/db` 通过；`pnpm --dir frontend run build` 通过，仅有既有 chunk-size warning；`git diff --check` 通过。API 容器此前已重建并确认 `/api/quant/strategies` 返回 `mainline_dragon_pullback / 0.1.21`。
 
 ## Known Caveats
 
@@ -146,3 +147,4 @@ pnpm --dir frontend run build
 - 当前公开策略代码为 `mainline_dragon_pullback / 0.1.21`，最新 `#175` 在当前本地样本中优于 `#172/#169/#137` 的收益和最大回撤；仍不能宣称稳定盈利或最终优化成功，参数敏感性和多年 walk-forward 尚未完成。
 - 旧严格 14:30 报告只作为分钟模型历史材料；当前历史主流程是日线 D+1 开盘执行。
 - 候选页落库推荐、单股逐日评分和组合回测理论计划仍需进一步统一展示口径。
+- 不要默认使用 `0.1.22/#186` 那类“高位重复龙回头且缺少低吸蓄势”硬拒买规则；已验证全局收益/回撤弱于当前基线。

@@ -580,6 +580,61 @@ def test_stealth_low_suction_threshold_requires_strict_structure() -> None:
     assert "ma20_broken" in risky_row["failed_rules"]
 
 
+def test_symbol_signal_row_marks_low_suction_launch_as_key_entry_only() -> None:
+    from alphaagent.server.services.quant import screening_payloads
+
+    buildup = SignalScore(
+        vt_symbol="002384.SZSE",
+        trade_date=date(2026, 3, 31),
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=74.0,
+        liquidity_score=80.0,
+        risk_score=80.0,
+        entry_signal=False,
+        evidence={
+            "status": "ready",
+            "setup_type": "stealth_low_suction",
+            "entry_setup": "stealth_low_suction",
+            "failed_rules": [],
+            "low_suction_days": 4,
+            "low_suction_launch_confirmed": False,
+        },
+    )
+    launch = SignalScore(
+        vt_symbol="002384.SZSE",
+        trade_date=date(2026, 4, 1),
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=78.0,
+        liquidity_score=80.0,
+        risk_score=80.0,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "setup_type": "stealth_low_suction",
+            "entry_setup": "stealth_low_suction",
+            "failed_rules": [],
+            "low_suction_days": 5,
+            "low_suction_buildup_score": 100.0,
+            "stealth_low_suction_score": 96.0,
+            "ma_convergence_pct": 3.0,
+            "volume_ratio_5d_20d": 1.1,
+            "ma20_distance_pct": 1.0,
+            "low_suction_launch_confirmed": True,
+        },
+    )
+
+    buildup_row = screening_payloads.symbol_signal_row(buildup, min_entry_score=76.0)
+    launch_row = screening_payloads.symbol_signal_row(launch, min_entry_score=76.0)
+
+    assert buildup_row["signal_label"] == "低吸蓄势观察"
+    assert buildup_row["signal_role"] == "watch"
+    assert buildup_row["key_entry_signal"] is False
+    assert launch_row["action"] == "BUY"
+    assert launch_row["signal_label"] == "低吸启动买点"
+    assert launch_row["signal_role"] == "key_buy"
+    assert launch_row["key_entry_signal"] is True
+
+
 def test_symbol_signal_row_marks_raw_entry_with_failed_rules_as_watch() -> None:
     from alphaagent.server.services.quant import screening_payloads
 
@@ -771,6 +826,58 @@ def test_dragon_pullback_rejects_hot_wide_ma_without_low_suction_near_ma20() -> 
     assert score.evidence["low_suction_days"] < 2
     assert "ma_convergence_too_wide_without_low_suction" in score.evidence["failed_rules"]
     assert score.entry_signal is False
+
+
+def test_dragon_pullback_exposes_repeated_stretched_dragon_without_low_suction_risk() -> None:
+    start = date(2026, 1, 1)
+    closes = [18 + index * 0.05 for index in range(70)]
+    closes.extend([24.0, 27.0, 30.0, 33.0, 36.0, 39.0, 42.0, 38.0, 36.0, 35.0, 35.8, 36.8])
+    changes = []
+    for index in range(len(closes)):
+        if index < 70:
+            changes.append(0.4)
+        elif index <= 76:
+            changes.append(9.8)
+        elif index < 80:
+            changes.append(-3.0)
+        elif index == 80:
+            changes.append(2.8)
+        else:
+            changes.append(2.2)
+    bars = [
+        Bar(
+            trade_date=start + timedelta(days=index),
+            open_price=close * (0.985 if index >= 80 else 0.99),
+            high_price=close * (1.012 if index >= 80 else 1.025),
+            low_price=close * (0.975 if index >= 80 else 0.98),
+            close_price=close,
+            volume=1_500_000 if index < 70 else 900_000,
+            turnover=480_000_000,
+            change_pct=changes[index],
+        )
+        for index, close in enumerate(closes)
+    ]
+
+    score = score_dragon_pullback(
+        "002119.SZSE",
+        bars,
+        bars[-1].trade_date,
+        index_return_20d=-1.0,
+        sector_score=85.0,
+        financial_score=60.0,
+        fund_flow_score=80.0,
+        hot_rank_score=80.0,
+        lhb_score=70.0,
+    )
+
+    assert score.evidence["return_20d"] >= 40
+    assert score.evidence["ma_convergence_pct"] >= 18
+    assert score.evidence["low_suction_days"] == 0
+    assert score.evidence["near_limit_up_count_20d"] >= 3
+    assert score.evidence["fresh_tail_buy"] is False
+    assert score.evidence["tail_buy_repeat_days"] >= 1
+    assert score.evidence["entry_setup"] == "dragon_pullback"
+    assert score.evidence["low_suction_launch_confirmed"] is False
 
 
 def test_dragon_pullback_does_not_hard_reject_tail_reversal_experiment() -> None:

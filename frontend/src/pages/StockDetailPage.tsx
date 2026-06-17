@@ -70,6 +70,7 @@ export function StockDetailPage() {
   const { vtSymbol } = useParams<{ vtSymbol: string }>();
   const singleBacktestStrategy = DEFAULT_BACKTEST_PARAMS.strategy;
   const [selectedBacktestMarkerId, setSelectedBacktestMarkerId] = useState<string | null>(null);
+  const [quantViewMode, setQuantViewMode] = useState<QuantViewMode>("trade_replay");
 
   const quoteQuery = useQuery({
     queryKey: ["stock-detail", vtSymbol],
@@ -223,22 +224,50 @@ export function StockDetailPage() {
     () => backtestSignalEventsToMarkers(portfolioSignalEventsQuery.data?.items ?? []),
     [portfolioSignalEventsQuery.data]
   );
-
-  const backtestMarkers = useMemo(
-    () => {
-      if (portfolioDetailMarkers.some((marker) => marker.markerKind === "trade" || marker.markerKind === "rejected")) {
-        return mergeMarkerSets(portfolioDetailMarkers, portfolioSignalMarkers);
-      }
-      const quantMarkers = latestQuantStateQuery.data?.status === "ready"
-        ? quantStateToMarkers(latestQuantStateQuery.data)
-        : latestReplay
-          ? replayEventsToMarkers(latestReplay)
-          : [];
-      const autoReviewMarkers = backtestAuditToMarkers(autoReviewTrades, autoReviewAudit);
-      return mergeMarkerSets(mergeMarkerSets(portfolioDetailMarkers, portfolioSignalMarkers), mergeMarkerSets(prioritizeExecutionMarkers(quantMarkers), autoReviewMarkers));
-    },
-    [autoReviewAudit, autoReviewTrades, latestQuantStateQuery.data, latestReplay, portfolioDetailMarkers, portfolioSignalMarkers]
+  const portfolioExecutionMarkers = useMemo(
+    () => portfolioDetailMarkers.filter((marker) => marker.markerKind !== "signal"),
+    [portfolioDetailMarkers]
   );
+  const quantStateMarkers = useMemo(
+    () => latestQuantStateQuery.data?.status === "ready"
+      ? quantStateToMarkers(latestQuantStateQuery.data)
+      : latestReplay
+        ? replayEventsToMarkers(latestReplay)
+        : [],
+    [latestQuantStateQuery.data, latestReplay]
+  );
+  const quantExecutionMarkers = useMemo(
+    () => prioritizeExecutionMarkers(quantStateMarkers).filter((marker) => marker.markerKind !== "signal"),
+    [quantStateMarkers]
+  );
+  const autoReviewMarkers = useMemo(
+    () => backtestAuditToMarkers(autoReviewTrades, autoReviewAudit),
+    [autoReviewAudit, autoReviewTrades]
+  );
+  const autoReviewExecutionMarkers = useMemo(
+    () => autoReviewMarkers.filter((marker) => marker.markerKind !== "signal"),
+    [autoReviewMarkers]
+  );
+  const tradeReplayMarkers = useMemo(
+    () => {
+      if (portfolioExecutionMarkers.length) return sortMarkers(portfolioExecutionMarkers);
+      const fallbackExecutionMarkers = quantExecutionMarkers.length ? quantExecutionMarkers : autoReviewExecutionMarkers;
+      return sortMarkers(fallbackExecutionMarkers);
+    },
+    [autoReviewExecutionMarkers, portfolioExecutionMarkers, quantExecutionMarkers]
+  );
+  const candidateSignalMarkers = useMemo(
+    () => {
+      const markers = [
+        ...portfolioSignalMarkers,
+        ...quantStateMarkers.filter((marker) => marker.markerKind === "signal"),
+        ...autoReviewMarkers.filter((marker) => marker.markerKind === "signal"),
+      ];
+      return sortMarkers(suppressLinkedPortfolioSignals(dedupeMarkers(markers)));
+    },
+    [autoReviewMarkers, portfolioSignalMarkers, quantStateMarkers]
+  );
+  const backtestMarkers = quantViewMode === "trade_replay" ? tradeReplayMarkers : candidateSignalMarkers;
   const selectedBacktestMarker = useMemo(
     () => backtestMarkers.find((marker) => marker.id === selectedBacktestMarkerId) ?? backtestMarkers[0] ?? null,
     [backtestMarkers, selectedBacktestMarkerId]
@@ -301,6 +330,8 @@ export function StockDetailPage() {
       <SingleStockBacktestPanel
         strategy={singleBacktestStrategy}
         strategies={strategyOptions}
+        quantViewMode={quantViewMode}
+        onQuantViewModeChange={setQuantViewMode}
         quantState={latestQuantStateQuery.data}
         portfolioBacktest={latestPortfolioBacktest}
         portfolioDetail={portfolioSymbolDetailQuery.data}
@@ -329,7 +360,7 @@ export function StockDetailPage() {
           selectedMarkerId={selectedBacktestMarker?.id ?? null}
           onMarkerClick={handleBacktestMarkerClick}
         />
-        <BacktestMarkerInsight marker={selectedBacktestMarker} />
+        <BacktestMarkerInsight marker={selectedBacktestMarker} mode={quantViewMode} />
       </div>
 
       {/* Technical indicators */}
@@ -377,6 +408,8 @@ export function StockDetailPage() {
 function SingleStockBacktestPanel({
   strategy,
   strategies,
+  quantViewMode,
+  onQuantViewModeChange,
   quantState,
   portfolioBacktest,
   portfolioDetail,
@@ -391,6 +424,8 @@ function SingleStockBacktestPanel({
 }: {
   strategy: string;
   strategies: QuantStrategyOption[];
+  quantViewMode: QuantViewMode;
+  onQuantViewModeChange: (mode: QuantViewMode) => void;
   quantState?: SymbolLatestQuantState;
   portfolioBacktest?: BacktestRun | null;
   portfolioDetail?: BacktestSymbolDetail | null;
@@ -426,12 +461,38 @@ function SingleStockBacktestPanel({
             优先读取最新组合回测的实际买卖；若组合没有该票成交，再退回全局信号记录。BUY 信号不等于实际购买。
           </p>
         </div>
-        <div className="text-sm">
-          <div className="text-xs text-muted-foreground">策略</div>
-          <div className="mt-1 flex h-9 items-center rounded-md border bg-muted/30 px-2">
-            {strategies.find((item) => item.id === strategy)?.name ?? "主线龙回头回踩低吸"}
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="text-sm">
+            <div className="text-xs text-muted-foreground">视图</div>
+            <div className="mt-1 flex rounded-md border bg-muted/20 p-0.5">
+              <button
+                type="button"
+                className={cn("h-8 rounded px-2 text-sm", quantViewMode === "trade_replay" ? "bg-background shadow-sm" : "text-muted-foreground")}
+                onClick={() => onQuantViewModeChange("trade_replay")}
+              >
+                交易复盘
+              </button>
+              <button
+                type="button"
+                className={cn("h-8 rounded px-2 text-sm", quantViewMode === "candidate_signals" ? "bg-background shadow-sm" : "text-muted-foreground")}
+                onClick={() => onQuantViewModeChange("candidate_signals")}
+              >
+                候选信号
+              </button>
+            </div>
+          </div>
+          <div className="text-sm">
+            <div className="text-xs text-muted-foreground">策略</div>
+            <div className="mt-1 flex h-9 items-center rounded-md border bg-muted/30 px-2">
+              {strategies.find((item) => item.id === strategy)?.name ?? "主线龙回头回踩低吸"}
+            </div>
           </div>
         </div>
+      </div>
+      <div className="mt-3 rounded-md border bg-muted/20 p-3 text-sm text-muted-foreground">
+        {quantViewMode === "trade_replay"
+          ? "当前 K 线只显示策略复盘的买入、卖出和拒绝执行标记；收益按配对买卖计算。"
+          : "当前 K 线只显示候选/理论信号标记；高分信号用于复核形态，不代表组合已经买入。"}
       </div>
 
       {isQuantStateLoading ? (
@@ -738,13 +799,14 @@ function LatestSignalScoreSummary({
   const support = getRawText(evidence, "support_type");
   const action = quantSignalAction(signal);
   const isBuy = action === "BUY";
+  const signalLabel = signal.signal_label || action;
 
   return (
     <div className={cn("rounded-md border p-3 text-sm", compact ? "" : "mt-4")}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="font-medium">为什么这个分数</div>
         <Badge variant={isBuy ? "secondary" : "outline"} className="rounded-md">
-          {action}
+          {signalLabel}
         </Badge>
       </div>
       <div className="mt-2 text-xs text-muted-foreground">
@@ -753,6 +815,7 @@ function LatestSignalScoreSummary({
       <div className="mt-3 grid gap-3 md:grid-cols-6">
         <InfoCell label="评分日" value={signal.trade_date ?? "--"} />
         <InfoCell label="总分" value={formatMaybeNumber(signal.total_score, 1)} valueClass={isBuy ? "text-rise" : undefined} />
+        <InfoCell label="信号" value={signalLabel} valueClass={isBuy ? "text-rise" : undefined} />
         <InfoCell label="状态" value={strategyDragonStateLabel(state)} />
         <InfoCell label="低吸蓄势" value={lowSuctionDays == null ? "--" : `${lowSuctionDays.toFixed(0)} 天`} />
         <InfoCell label="均线收敛" value={convergence == null ? "--" : formatPct(convergence)} />
@@ -837,11 +900,13 @@ function ReplayRejectReasonList({ rows }: { rows: Array<{ reason: string; count:
   );
 }
 
-function BacktestMarkerInsight({ marker }: { marker: KlineMarker | null }) {
+function BacktestMarkerInsight({ marker, mode }: { marker: KlineMarker | null; mode: QuantViewMode }) {
   if (!marker) {
     return (
       <div className="mt-4 border-t pt-3 text-sm text-muted-foreground">
-        单股复盘的 BUY 信号、买入拒绝和成交会标在 K 线上；点击标记可查看对应策略口径。
+        {mode === "trade_replay"
+          ? "当前视图没有策略买卖执行标记；切换到候选信号可查看理论信号。"
+          : "当前视图没有候选信号标记；切换到交易复盘可查看实际买卖执行。"}
       </div>
     );
   }
@@ -907,6 +972,7 @@ function markerBadgeLabel(marker: KlineMarker) {
 }
 
 type LatestQuantSignalRow = NonNullable<NonNullable<SymbolLatestQuantState["signal"]>["latest_entry_signal"]>;
+type QuantViewMode = "trade_replay" | "candidate_signals";
 
 function strategyMinEntryScore(strategies: QuantStrategyOption[], strategyId: string) {
   return strategies.find((item) => item.id === strategyId)?.default_min_entry_score ?? DEFAULT_BACKTEST_PARAMS.min_entry_score;
@@ -1540,12 +1606,8 @@ function nextReturnForSell(
   return queues.get(trade.trade_date)?.shift() ?? null;
 }
 
-function mergeMarkerSets(primary: KlineMarker[], fallback: KlineMarker[]): KlineMarker[] {
-  const primaryHasExecutions = primary.some((marker) => marker.markerKind === "trade" || marker.markerKind === "rejected");
-  const fallbackHasExecutions = fallback.some((marker) => marker.markerKind === "trade" || marker.markerKind === "rejected");
-  const filteredFallback = primaryHasExecutions ? suppressLinkedPortfolioSignals(fallback) : fallback;
-  const merged = fallbackHasExecutions && !primaryHasExecutions ? [...filteredFallback, ...primary] : [...primary, ...filteredFallback];
-  return dedupeMarkers(merged).sort((left, right) => {
+function sortMarkers(markers: KlineMarker[]): KlineMarker[] {
+  return dedupeMarkers(markers).sort((left, right) => {
     const dateCompare = left.time.localeCompare(right.time);
     if (dateCompare !== 0) return dateCompare;
     return markerSortRank(left) - markerSortRank(right);

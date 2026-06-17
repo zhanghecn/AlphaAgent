@@ -290,8 +290,8 @@ function SignalTable({
         <TableBody>
           {rows.map((row) => {
             const explanation = scoreExplanation(row, strategy);
-            const action = signalRowAction(row);
-            const executable = action === "BUY";
+            const action = signalRowLabel(row);
+            const executable = signalRowExecutable(row);
             return (
               <TableRow key={`${title}-${row.trade_date}`}>
                 <TableCell className="tabular-nums">{row.trade_date}</TableCell>
@@ -331,10 +331,17 @@ function SignalTable({
   );
 }
 
-function signalRowAction(row: SymbolSignalHistoryRow) {
+function signalRowLabel(row: SymbolSignalHistoryRow) {
+  if (row.signal_label) return row.signal_label;
   if (row.action) return row.action.toUpperCase();
   if (row.executable_entry_signal != null) return row.executable_entry_signal ? "BUY" : "WATCH";
   return row.entry_signal && !row.failed_rules?.length ? "BUY" : "WATCH";
+}
+
+function signalRowExecutable(row: SymbolSignalHistoryRow) {
+  if (row.executable_entry_signal != null) return row.executable_entry_signal;
+  if (row.action) return row.action.toUpperCase() === "BUY";
+  return row.entry_signal && !row.failed_rules?.length;
 }
 
 function AuditCell({ label, value, valueClass }: { label: string; value?: string | number | null; valueClass?: string }) {
