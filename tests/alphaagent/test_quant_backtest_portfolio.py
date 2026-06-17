@@ -79,7 +79,7 @@ def test_quant_strategy_registry_dispatches_default_strategy() -> None:
     assert default_strategy.id == "mainline_dragon_pullback"
     assert strategy is not None
     assert strategy.version == "0.1.1"
-    assert default_strategy.version == "0.1.18"
+    assert default_strategy.version == "0.1.21"
     assert [item["id"] for item in list_strategies()] == ["mainline_dragon_pullback"]
     assert "mainline_leader_pullback" in {item["id"] for item in list_internal_strategies()}
     assert score.signal_type == "mainline_leader_pullback"
@@ -290,8 +290,8 @@ def test_dragon_pullback_repeated_tail_buy_ready_builds_low_suction_score() -> N
 
     first_ready = score_dragon_pullback(
         "002428.SZSE",
-        bars[:-1],
-        bars[-2].trade_date,
+        bars[:-2],
+        bars[-3].trade_date,
         index_return_20d=-2.0,
         sector_score=82.0,
         financial_score=65.0,
@@ -301,8 +301,8 @@ def test_dragon_pullback_repeated_tail_buy_ready_builds_low_suction_score() -> N
     )
     repeated_ready = score_dragon_pullback(
         "002428.SZSE",
-        bars,
-        bars[-1].trade_date,
+        bars[:-1],
+        bars[-2].trade_date,
         index_return_20d=-2.0,
         sector_score=82.0,
         financial_score=65.0,
@@ -312,11 +312,11 @@ def test_dragon_pullback_repeated_tail_buy_ready_builds_low_suction_score() -> N
     )
 
     assert first_ready.evidence["dragon_state"] == "TAIL_BUY_READY"
-    assert first_ready.evidence["low_suction_days"] == 0
+    assert first_ready.evidence["fresh_tail_buy"] is True
     assert first_ready.entry_signal is True
     assert repeated_ready.evidence["dragon_state"] == "LOW_SUCTION_BUILDUP"
     assert "repeat_tail_buy_setup" not in repeated_ready.evidence["failed_rules"]
-    assert repeated_ready.evidence["low_suction_days"] >= 3
+    assert repeated_ready.evidence["low_suction_days"] > first_ready.evidence["low_suction_days"]
     assert repeated_ready.evidence["low_suction_buildup_score"] >= 35
     assert repeated_ready.evidence["score_notes"]
     assert repeated_ready.entry_signal is False
@@ -879,6 +879,54 @@ def test_dragon_pullback_detects_stealth_low_suction_as_separate_setup() -> None
     assert "fresh_stealth_low_suction" in score.evidence
     assert "strong_leg" not in score.evidence["failed_rules"]
     assert "pullback_too_late" not in score.evidence["failed_rules"]
+
+
+def test_stealth_low_suction_accumulates_before_first_lift_with_ma5_below_ma10() -> None:
+    start = date(2026, 1, 1)
+    closes = [50 + index * 0.18 for index in range(70)]
+    closes.extend([64.0, 68.0, 72.0, 76.0, 82.0, 77.0, 73.0, 70.5, 69.0, 68.5])
+    closes.extend([69.5, 69.0, 68.7, 68.2, 67.9, 67.6, 67.8, 67.7, 67.9, 69.4])
+    bars: list[Bar] = []
+    for index, close in enumerate(closes):
+        is_lift = index == len(closes) - 1
+        bars.append(
+            Bar(
+                trade_date=start + timedelta(days=index),
+                open_price=close * (0.99 if is_lift else 0.995),
+                high_price=close * (1.005 if is_lift else 1.012),
+                low_price=close * (0.985 if is_lift else 0.982),
+                close_price=close,
+                volume=1_600_000 if index < 70 else (650_000 if not is_lift else 820_000),
+                turnover=520_000_000,
+                change_pct=2.4 if is_lift else (-0.4 if index >= 72 else 1.2),
+            )
+        )
+
+    setup_day = score_dragon_pullback(
+        "002384.SZSE",
+        bars[:-1],
+        bars[-2].trade_date,
+        index_return_20d=-1.0,
+        sector_score=80.0,
+        financial_score=60.0,
+    )
+    lift_day = score_dragon_pullback(
+        "002384.SZSE",
+        bars,
+        bars[-1].trade_date,
+        index_return_20d=-1.0,
+        sector_score=80.0,
+        financial_score=60.0,
+    )
+
+    assert setup_day.evidence["ma5_vs_ma10_pct"] < 0
+    assert setup_day.evidence["low_suction_days"] >= 4
+    assert "weak_rebound_ma5_below_ma10" not in setup_day.evidence["failed_rules"]
+    assert lift_day.entry_signal is True
+    assert lift_day.evidence["setup_type"] == "stealth_low_suction"
+    assert lift_day.evidence["low_suction_days"] >= setup_day.evidence["low_suction_days"]
+    assert lift_day.evidence["low_suction_launch_confirmed"] is True
+    assert "pullback_too_late" not in lift_day.evidence["failed_rules"]
 
 
 def test_stealth_low_suction_persistence_rules_do_not_reject_dragon_specific_failures() -> None:
@@ -3393,7 +3441,7 @@ def test_backtest_list_filters_current_strategy_version_when_strategy_requested(
         if hasattr(element, "value")
     ]
     assert "mainline_dragon_pullback" in bind_values
-    assert "0.1.18" in bind_values
+    assert "0.1.21" in bind_values
     assert [item["strategy_version"] for item in result["items"]] == ["0.1.8"]
 
 

@@ -33,6 +33,7 @@ import {
   type BacktestOrderEvent,
   type BacktestSymbolDetail,
   type BacktestTrade,
+  type BacktestTradeAttribution,
   type QuantStrategyOption,
   type SymbolQuantSignalRow,
   type SymbolLatestQuantState,
@@ -587,8 +588,10 @@ function PortfolioBacktestSymbolSummary({
   const sellTrades = trades.filter((trade) => trade.side === "SELL");
   const rejectedOrders = orders.filter((order) => order.status === "rejected");
   const openRows = attributionRows.filter((row) => row.status === "open");
-  const totalReturnPct = sumNumbers(closedRows.map((row) => row.return_pct));
-  const averageReturnPct = closedRows.length && totalReturnPct != null ? totalReturnPct / closedRows.length : null;
+  const realizedReturnPct = sumNumbers(closedRows.map((row) => row.return_pct));
+  const openReturnPct = sumNumbers(openRows.map((row) => latestOpenReturnPct(row, detail?.positions ?? [])));
+  const markedReturnPct = sumNumbers([realizedReturnPct, openReturnPct]);
+  const averageReturnPct = closedRows.length && realizedReturnPct != null ? realizedReturnPct / closedRows.length : null;
   const winRatePct = closedRows.length
     ? closedRows.filter((row) => (row.return_pct ?? 0) > 0).length / closedRows.length * 100
     : null;
@@ -632,15 +635,19 @@ function PortfolioBacktestSymbolSummary({
         <InfoCell label="执行方式" value={portfolioExecutionModeLabel(attributionRows)} />
       </div>
 
-      <div className="grid gap-3 text-sm md:grid-cols-4">
-        <InfoCell label="累计收益率" value={formatPct(totalReturnPct)} valueClass={priceColorClass(totalReturnPct)} />
+      <div className="grid gap-3 text-sm md:grid-cols-5">
+        <InfoCell label="闭合收益率" value={formatPct(realizedReturnPct)} valueClass={priceColorClass(realizedReturnPct)} />
+        <InfoCell label="当前浮盈率" value={formatPct(openReturnPct)} valueClass={priceColorClass(openReturnPct)} />
+        <InfoCell label="盯市合计" value={formatPct(markedReturnPct)} valueClass={priceColorClass(markedReturnPct)} />
         <InfoCell label="平均单笔" value={formatPct(averageReturnPct)} valueClass={priceColorClass(averageReturnPct)} />
         <InfoCell label="胜率" value={formatPct(winRatePct)} />
+      </div>
+      <div className="text-sm">
         <InfoCell label="最大浮盈/浮亏" value={`${formatPct(maxFloatingPct)} / ${formatPct(minFloatingPct)}`} valueClass={priceColorClass(maxFloatingPct)} />
       </div>
 
       {closedRows.length || openRows.length ? (
-        <PortfolioClosedTradeTable rows={attributionRows} />
+        <PortfolioClosedTradeTable rows={attributionRows} positions={detail?.positions ?? []} />
       ) : (
         <div className="rounded-md border p-3 text-sm text-muted-foreground">
           最新组合回测中该股票没有形成实际买卖。若 K 线只有信号或拒绝标记，可点击标记查看原因。
@@ -650,7 +657,13 @@ function PortfolioBacktestSymbolSummary({
   );
 }
 
-function PortfolioClosedTradeTable({ rows }: { rows: NonNullable<BacktestSymbolDetail["trade_attribution"]> }) {
+function PortfolioClosedTradeTable({
+  rows,
+  positions,
+}: {
+  rows: NonNullable<BacktestSymbolDetail["trade_attribution"]>;
+  positions: BacktestSymbolDetail["positions"];
+}) {
   return (
     <div className="overflow-hidden rounded-lg border">
       <div className="border-b px-3 py-2 text-sm font-medium">组合回测交易收益率</div>
@@ -669,25 +682,28 @@ function PortfolioClosedTradeTable({ rows }: { rows: NonNullable<BacktestSymbolD
           </TableRow>
         </TableHeader>
         <TableBody>
-          {rows.map((row, index) => (
-            <TableRow key={`${row.vt_symbol}-${row.entry_date}-${row.exit_date ?? "open"}-${index}`}>
-              <TableCell className="tabular-nums">{row.entry_date ?? "--"}</TableCell>
-              <TableCell className="tabular-nums">{row.exit_date ?? (row.status === "open" ? "持有中" : "--")}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatPrice(row.entry_price)}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatPrice(row.exit_price)}</TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.return_pct))}>
-                {formatPct(row.return_pct)}
-              </TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.max_floating_pnl_pct))}>
-                {formatPct(row.max_floating_pnl_pct)}
-              </TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.min_floating_pnl_pct))}>
-                {formatPct(row.min_floating_pnl_pct)}
-              </TableCell>
-              <TableCell className="text-right tabular-nums">{row.holding_days ?? "--"}</TableCell>
-              <TableCell className="text-muted-foreground">{exitReasonLabel(row.exit_reason)}</TableCell>
-            </TableRow>
-          ))}
+          {rows.map((row, index) => {
+            const displayReturnPct = row.status === "open" ? latestOpenReturnPct(row, positions) : row.return_pct;
+            return (
+              <TableRow key={`${row.vt_symbol}-${row.entry_date}-${row.exit_date ?? "open"}-${index}`}>
+                <TableCell className="tabular-nums">{row.entry_date ?? "--"}</TableCell>
+                <TableCell className="tabular-nums">{row.exit_date ?? (row.status === "open" ? "持有中" : "--")}</TableCell>
+                <TableCell className="text-right tabular-nums">{formatPrice(row.entry_price)}</TableCell>
+                <TableCell className="text-right tabular-nums">{formatPrice(row.exit_price)}</TableCell>
+                <TableCell className={cn("text-right tabular-nums", priceColorClass(displayReturnPct))}>
+                  {formatPct(displayReturnPct)}
+                </TableCell>
+                <TableCell className={cn("text-right tabular-nums", priceColorClass(row.max_floating_pnl_pct))}>
+                  {formatPct(row.max_floating_pnl_pct)}
+                </TableCell>
+                <TableCell className={cn("text-right tabular-nums", priceColorClass(row.min_floating_pnl_pct))}>
+                  {formatPct(row.min_floating_pnl_pct)}
+                </TableCell>
+                <TableCell className="text-right tabular-nums">{row.holding_days ?? "--"}</TableCell>
+                <TableCell className="text-muted-foreground">{row.status === "open" ? "持有中" : exitReasonLabel(row.exit_reason)}</TableCell>
+              </TableRow>
+            );
+          })}
         </TableBody>
       </Table>
     </div>
@@ -1568,6 +1584,17 @@ function sumNumbers(values: Array<number | null | undefined>): number | null {
   const valid = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
   if (!valid.length) return null;
   return valid.reduce((sum, value) => sum + value, 0);
+}
+
+function latestOpenReturnPct(
+  row: BacktestTradeAttribution,
+  positions: BacktestSymbolDetail["positions"]
+): number | null {
+  if (row.status !== "open" || !row.entry_date) return row.return_pct ?? null;
+  const path = positions
+    .filter((position) => position.vt_symbol === row.vt_symbol && position.entry_date === row.entry_date)
+    .sort((a, b) => a.trade_date.localeCompare(b.trade_date));
+  return path.length ? path[path.length - 1]?.floating_pnl_pct ?? null : row.max_floating_pnl_pct ?? null;
 }
 
 function maxMaybe(values: Array<number | null | undefined>): number | null {

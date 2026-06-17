@@ -22,7 +22,7 @@ from alphaagent.server.services.quant.factors import (
 )
 
 
-DRAGON_PULLBACK_STRATEGY_VERSION = "0.1.18"
+DRAGON_PULLBACK_STRATEGY_VERSION = "0.1.21"
 
 
 @dataclass(frozen=True)
@@ -411,7 +411,7 @@ def _score_low_suction_buildup(features: DragonFeatures, *, low_suction_days: in
             score += 22
         elif features.ma_convergence_pct <= 5.0:
             score += 14
-        elif features.ma_convergence_pct <= 8.0:
+        elif features.ma_convergence_pct <= 8.8:
             score += 6
     if days >= 4:
         score += 22
@@ -436,16 +436,18 @@ def _score_low_suction_buildup(features: DragonFeatures, *, low_suction_days: in
 
 
 def _is_low_suction_structure(features: DragonFeatures) -> bool:
-    convergence_ok = features.ma_convergence_pct is not None and features.ma_convergence_pct <= 8.0
+    convergence_ok = features.ma_convergence_pct is not None and features.ma_convergence_pct <= 8.8
     short_ma_ok = (
         features.ma5_distance_pct is not None
-        and -2.2 <= features.ma5_distance_pct <= 3.2
+        and -3.2 <= features.ma5_distance_pct <= 4.2
     ) or (
         features.ma10_distance_pct is not None
-        and -2.8 <= features.ma10_distance_pct <= 3.2
+        and -4.2 <= features.ma10_distance_pct <= 4.5
     )
-    trend_not_broken = features.ma20_distance_pct is not None and features.ma20_distance_pct >= -3.0
-    return bool(convergence_ok and short_ma_ok and trend_not_broken)
+    ma20_acceptance = features.ma20_distance_pct is not None and -3.2 <= features.ma20_distance_pct <= 4.8
+    trend_not_broken = features.ma20_distance_pct is not None and features.ma20_distance_pct >= -3.2
+    quiet_volume = features.volume_ratio is not None and features.volume_ratio <= 1.20
+    return bool(convergence_ok and (short_ma_ok or ma20_acceptance) and trend_not_broken and quiet_volume)
 
 
 def _is_wide_ma_without_low_suction(features: DragonFeatures) -> bool:
@@ -542,6 +544,8 @@ def _score_stealth_low_suction(
         score += 8
     if features.latest_change_pct is not None and -3.0 <= features.latest_change_pct <= 4.8:
         score += 8
+    if _is_low_suction_launch_confirmed(features, low_suction_days=low_suction_days):
+        score += 10
     if support >= 70:
         score += 8
     if reclaim >= 62:
@@ -560,11 +564,11 @@ def _setup_type(
     low_suction: float,
     stealth_low_suction: float,
 ) -> str:
+    if _is_stealth_low_suction_setup(features, failed_rules, low_suction, stealth_low_suction):
+        return "stealth_low_suction"
     if state == "TAIL_BUY_READY" and not failed_rules:
         return "dragon_pullback"
-    if not _is_stealth_low_suction_setup(features, failed_rules, low_suction, stealth_low_suction):
-        return state.lower()
-    return "stealth_low_suction"
+    return state.lower()
 
 
 def _is_stealth_low_suction_setup(
@@ -577,7 +581,13 @@ def _is_stealth_low_suction_setup(
         return False
     if features.low_suction_days < 3:
         return False
-    if features.ma_convergence_pct is None or features.ma_convergence_pct > 5.0:
+    launch_confirmed = _is_low_suction_launch_confirmed(features, low_suction_days=features.low_suction_days)
+    if features.ma_convergence_pct is None:
+        return False
+    if launch_confirmed:
+        if features.ma_convergence_pct > 8.8:
+            return False
+    elif features.ma_convergence_pct > 5.0:
         return False
     if features.ma20_distance_pct is None or features.ma20_distance_pct < -2.5:
         return False
@@ -596,6 +606,29 @@ def _is_stealth_low_suction_setup(
         "overheat",
     }
     return not any(rule in hard_failures for rule in failed_rules)
+
+
+def _is_low_suction_launch_confirmed(features: DragonFeatures, *, low_suction_days: int) -> bool:
+    """Return whether repeated absorption has its first controlled lift."""
+
+    if low_suction_days < 3:
+        return False
+    if features.latest_change_pct is None or not (0.8 <= features.latest_change_pct <= 6.2):
+        return False
+    if features.close_location_in_range is None or features.close_location_in_range < 0.58:
+        return False
+    if features.volume_ratio is None or features.volume_ratio > 1.55:
+        return False
+    if features.ma20_distance_pct is None or features.ma20_distance_pct < -2.5:
+        return False
+    if features.ma_convergence_pct is None or features.ma_convergence_pct > 8.8:
+        return False
+    near_short_or_medium = (
+        (features.ma5_distance_pct is not None and -1.2 <= features.ma5_distance_pct <= 4.2)
+        or (features.ma10_distance_pct is not None and -1.5 <= features.ma10_distance_pct <= 4.5)
+        or (features.ma20_distance_pct is not None and -1.0 <= features.ma20_distance_pct <= 5.5)
+    )
+    return bool(near_short_or_medium)
 
 
 def _fresh_stealth_low_suction(bars: list[Bar], setup_type: str, low_suction_days: int) -> bool:
@@ -754,11 +787,31 @@ def _is_weak_rebound_after_breakdown(features: DragonFeatures) -> bool:
         and features.ma20_distance_pct >= -2.5
     ):
         return False
+    if _has_quiet_low_suction_absorption(features):
+        return False
     return (
         features.ma5_vs_ma10_pct < -2.0
         and features.ma10_distance_pct < 0
         and (features.ma5_slope_pct is None or features.ma5_slope_pct <= 0.3)
     )
+
+
+def _has_quiet_low_suction_absorption(features: DragonFeatures) -> bool:
+    if features.low_suction_days < 3:
+        return False
+    if features.support_hold_days < 2:
+        return False
+    if features.ma_convergence_pct is None or features.ma_convergence_pct > 13.0:
+        return False
+    if features.ma20_distance_pct is None or features.ma20_distance_pct < -3.2:
+        return False
+    if features.volume_ratio is None or features.volume_ratio > 1.15:
+        return False
+    if features.latest_change_pct is not None and features.latest_change_pct < -4.5:
+        return False
+    if features.drawdown_from_pivot_pct is not None and features.drawdown_from_pivot_pct < -20.0:
+        return False
+    return True
 
 
 def _is_distribution_risk(features: DragonFeatures) -> bool:
@@ -873,6 +926,7 @@ def _evidence(
         "lhb_score": lhb,
         "smart_money_note": "fund/hot/lhb are observable proxy signals, not proof of main-force intent",
         "fresh_stealth_low_suction": fresh_stealth_low_suction,
+        "low_suction_launch_confirmed": _is_low_suction_launch_confirmed(features, low_suction_days=low_suction_days),
         "score_breakdown": _score_breakdown(
             relative_strength=relative_strength,
             strong_leg=strong_leg,
@@ -973,6 +1027,8 @@ def _score_notes(
     notes.append(f"低吸洗盘分 {stealth_low_suction:.1f}")
     if fresh_stealth_low_suction:
         notes.append("低吸洗盘新启动")
+    if _is_low_suction_launch_confirmed(features, low_suction_days=low_suction_days):
+        notes.append("低吸蓄势后首个温和拉升确认")
     if executable_low_suction:
         notes.append("低吸蓄势入口已满足")
     if failed_rules:
@@ -1011,27 +1067,80 @@ def _low_suction_days(bars: list[Bar], lookback: int = 6) -> int:
     days = 0
     start = max(len(bars) - lookback, 0)
     for end_index in range(start + 1, len(bars) + 1):
-        closes = [bar.close_price for bar in bars[:end_index]]
-        if len(closes) < 30:
-            continue
-        latest = bars[end_index - 1]
-        ma5 = moving_average(closes, 5)
-        ma10 = moving_average(closes, 10)
-        ma20 = moving_average(closes, 20)
-        ma30 = moving_average(closes, 30)
-        ma5_distance = pct_distance(latest.close_price, ma5)
-        ma10_distance = pct_distance(latest.close_price, ma10)
-        ma20_distance = pct_distance(latest.close_price, ma20)
-        convergence = _ma_convergence_pct(ma5, ma10, ma20, ma30)
-        near_short_ma = (
-            (ma5_distance is not None and -2.2 <= ma5_distance <= 3.2)
-            or (ma10_distance is not None and -2.8 <= ma10_distance <= 3.2)
-        )
-        trend_not_broken = ma20_distance is not None and ma20_distance >= -3.0
-        converged = convergence is not None and convergence <= 6.0
-        if near_short_ma and trend_not_broken and converged:
+        if _is_low_suction_day(bars[:end_index]):
             days += 1
     return days
+
+
+def _is_low_suction_day(bars: list[Bar]) -> bool:
+    closes = [bar.close_price for bar in bars]
+    highs = [bar.high_price for bar in bars]
+    volumes = [bar.volume or 0 for bar in bars]
+    if len(closes) < 30:
+        return False
+    latest = bars[-1]
+    ma5 = moving_average(closes, 5)
+    ma10 = moving_average(closes, 10)
+    ma20 = moving_average(closes, 20)
+    ma30 = moving_average(closes, 30)
+    ma5_distance = pct_distance(latest.close_price, ma5)
+    ma10_distance = pct_distance(latest.close_price, ma10)
+    ma20_distance = pct_distance(latest.close_price, ma20)
+    convergence = _ma_convergence_pct(ma5, ma10, ma20, ma30)
+    previous_convergence = _previous_ma_convergence(closes)
+    volume5 = moving_average(volumes, 5)
+    volume20 = moving_average(volumes, 20)
+    volume_ratio = volume5 / volume20 if volume5 is not None and volume20 else None
+    latest_change = _bar_change_pct(bars, len(bars) - 1, _derived_change_pcts(bars))
+    recent_high = max(highs[-20:])
+    drawdown = pct_distance(latest.close_price, recent_high)
+
+    near_short_ma = (
+        (ma5_distance is not None and -3.2 <= ma5_distance <= 4.2)
+        or (ma10_distance is not None and -4.2 <= ma10_distance <= 4.5)
+    )
+    ma20_acceptance = ma20_distance is not None and -3.2 <= ma20_distance <= 4.8
+    trend_not_broken = ma20_distance is not None and ma20_distance >= -3.2
+    quiet_volume = volume_ratio is not None and volume_ratio <= 1.15
+    controlled_lift = (
+        latest_change is not None
+        and 0.8 <= latest_change <= 6.2
+        and volume_ratio is not None
+        and volume_ratio <= 1.55
+    )
+    convergence_ok = convergence is not None and (
+        convergence <= 8.8
+        or (
+            convergence <= 13.0
+            and previous_convergence is not None
+            and convergence <= previous_convergence - 0.25
+            and quiet_volume
+            and ma20_distance is not None
+            and ma20_distance >= -2.5
+        )
+    )
+    daily_not_broken = latest_change is None or (-4.5 <= latest_change <= 8.5)
+    drawdown_controlled = drawdown is None or drawdown >= -20.0
+    return bool(
+        (near_short_ma or ma20_acceptance)
+        and trend_not_broken
+        and convergence_ok
+        and (quiet_volume or controlled_lift)
+        and daily_not_broken
+        and drawdown_controlled
+    )
+
+
+def _previous_ma_convergence(closes: list[float]) -> float | None:
+    if len(closes) < 31:
+        return None
+    previous = closes[:-1]
+    return _ma_convergence_pct(
+        moving_average(previous, 5),
+        moving_average(previous, 10),
+        moving_average(previous, 20),
+        moving_average(previous, 30),
+    )
 
 
 def _support_hold_days(bars: list[Bar], lookback: int = 6) -> int:
