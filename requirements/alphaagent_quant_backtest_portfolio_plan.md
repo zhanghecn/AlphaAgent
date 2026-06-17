@@ -16,7 +16,7 @@
 - 历史分钟线导入：`GET /api/data-sync/imports/minute-bars/template.csv` 提供模板，`POST /api/data-sync/imports/minute-bars` 支持从 CSV 导入外部 1 分钟 K 线，参数为 `csv_text`、`interval`、`source`、`dry_run`，用于补严格尾盘回测缺口。
 - 大文件导入：`POST /api/data-sync/imports/minute-bars` 也支持 `file_path`，只允许读取 `data/imports/` 或 `memory/06_backtests/` 下的 `.csv` 文件，并按批流式写入，适合 XT/RQData/券商导出的大型分钟线文件。
 - 历史分钟线缺口审计：`POST /api/data-sync/imports/minute-bars/audit-gaps` 可检查缺口 CSV 在 `stock_minute_bars` 中的尾盘窗口覆盖；`POST /api/data-sync/imports/minute-bars/gap-template.csv` 可按缺口生成待填分钟线模板。
-- 大文件缺口审计：`POST /api/data-sync/imports/minute-bars/audit-gaps` 支持 `file_path`，可直接审计 `memory/06_backtests/alphaagent_minute_gap_backtest_10_2025-10-14_2026-06-11.csv`。
+- 大文件缺口审计：`POST /api/data-sync/imports/minute-bars/audit-gaps` 支持 `file_path`，适合审计放在 `data/imports/` 下的外部缺口 CSV；旧回测原始 CSV 已合并到报告后从 `memory/06_backtests/` 移除。
 - 持仓：默认分组、自选加入、量化候选自动入池、自动模拟持仓、持仓展示买入时间/买入价/成本/推荐 id/买入理由/卖出信息。
 - 财报：利润表字段、披露日、扣非净利润、经营现金流和现金流质量字段映射/落库；回测只使用披露日已到的数据。
 - 前端：`/quant` 工作台展示推荐、回测、报告、导出、持仓和 vn.py 状态；回测参数可切换宽松日线开盘回退或严格分钟尾盘成交模式。
@@ -40,31 +40,31 @@
 最新回测：
 
 - 严格分钟真实模拟回测 12：`memory/06_backtests/2026-06-11_backtest_12_strict_tdx_minute_report.md`
-- 回测表：`memory/06_backtests/alphaagent_backtest_12_2026-02-02_2026-06-11.csv`
+- 原始回测 CSV 已合并清理；关键指标保留在 `memory/06_backtests/2026-06-11_backtest_12_strict_tdx_minute_report.md`。
 - 区间：2026-02-02 至 2026-06-11。
 - 补数：TDX 公开行情按回测 11 缺口导入 5376 根真实 1 分钟线；缺口审计 192/192 覆盖，覆盖率 100%。
 - 指标：总收益 6.60%，最大回撤 -2.22%，胜率 62.96%，盈亏比 2.77，Sharpe 2.42。
 - 成交真实性：买入 30 笔，30 笔均为 D+1 14:30-14:57 真实分钟尾盘 MA5 成交，日线开盘回退 0 笔。
-- 严格参数网格：`memory/06_backtests/alphaagent_validation_grid_12_2026-02-02_2026-06-11.csv`，54 组合全部正收益，收益区间 6.08% 至 10.86%；默认参数排名 41/54，Walk-forward 只有 1 折，只能作为短区间初步检查。
+- 严格参数网格：54 组合全部正收益，收益区间 6.08% 至 10.86%；默认参数排名 41/54，Walk-forward 只有 1 折，只能作为短区间初步检查。原始 CSV 已合并清理，结论保留在回测 12 报告。
 
 - `memory/06_backtests/2026-06-11_backtest_9_report.md`
-- `memory/06_backtests/alphaagent_backtest_9_2025-10-14_2026-06-11.csv`
+- 宽松回测 9 原始 CSV 已合并清理，结论保留在 `memory/06_backtests/2026-06-11_backtest_9_report.md`。
 - 指标：总收益 44.64%，最大回撤 -6.87%，胜率 53.67%，盈亏比 1.87，Sharpe 3.04。
 
 严格尾盘回测：
 
-- `memory/06_backtests/alphaagent_backtest_10_2025-10-14_2026-06-11.csv`
+- 严格尾盘回测 10 原始 CSV 已合并清理，结论保留在 `memory/06_backtests/2026-06-11_backtest_10_strict_tail_report.md`。
 - 参数：同区间、1500 标的、`minute_entry_required=true`，不允许 D+1 开盘回退。
 - 指标：总收益 0%，平仓交易 0，分钟尾盘成交 0。
 - 结论：当前分钟线覆盖不足，尾盘 MA5 低吸规则已实现并可强制验证，但还不能得到真实有效的历史胜率。
-- 缺口清单：`memory/06_backtests/alphaagent_minute_gap_backtest_10_2025-10-14_2026-06-11.csv`，794 条缺口订单，覆盖 101 个交易日、194 只股票。
+- 缺口清单：794 条缺口订单，覆盖 101 个交易日、194 只股票；原始 CSV 已合并清理，关键范围保留在严格分钟就绪报告。
 - 缺口审计：当前数据库只覆盖 2/794 个严格尾盘缺口，覆盖率 0.2519%，仍缺 792 个订单窗口。
 - vn.py SQLite 审计：当前 `/root/.vntrader/database.db` 的 `dbbardata`、`dbtickdata` 均为 0 行；按缺口从 vn.py 数据库 dry-run 只处理 10 个缺口时读取 0 行、写入 0 行、返回 `empty`，不能补齐严格尾盘回测。
 - 公共分钟源复核：EastMoney 分钟 K、Sina 分钟 K 对 2026-01-08 缺口样本仍返回 2026-06-10/11 近端数据；Sina 历史逐笔 JSON 对 2026-01-08 返回 0 条，只对 2026-06-11 当日样本有数据。因此公共源不能补严格历史分钟缺口。
 - Tushare 当前环境审计：未配置 `TUSHARE_TOKEN`，`tushare-gaps` dry-run 返回 `unavailable`，尚不能直接补数。
-- 严格流水线当前实测：用 `memory/06_backtests/alphaagent_minute_gap_backtest_10_2025-10-14_2026-06-11.csv` 返回 `blocked_by_minute_gaps`，缺口 794、覆盖 2、缺失 792、覆盖率 0.2519%；未运行新严格回测。
+- 严格流水线当前实测：旧缺口样本返回 `blocked_by_minute_gaps`，缺口 794、覆盖 2、缺失 792、覆盖率 0.2519%；未运行新严格回测。原始缺口 CSV 已合并清理，需要时从接口重新导出。
 - 供应商补数清单当前实测：同一缺口文件生成 794 条 symbol-date 请求，覆盖 194 只股票、101 个交易日，区间 2026-01-08 至 2026-06-11，窗口 14:30-14:57。
-- TDX 当前环境实测：回测 11 缺口 `memory/06_backtests/alphaagent_minute_gap_backtest_11_2026-02-02_2026-06-11.csv` 共 192 个 symbol-date，TDX dry-run 可取 5376 行，正式导入 5376 行，审计 ready 后严格流水线生成回测 12。
+- TDX 当前环境实测：回测 11 缺口共 192 个 symbol-date，TDX dry-run 可取 5376 行，正式导入 5376 行，审计 ready 后严格流水线生成回测 12；原始缺口 CSV 已合并清理。
 
 仍需补齐：
 

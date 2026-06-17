@@ -26,10 +26,8 @@
 
 ## 文件
 
-- 严格尾盘 CSV：`memory/06_backtests/alphaagent_backtest_10_2025-10-14_2026-06-11.csv`
-- 分钟缺口 CSV：`memory/06_backtests/alphaagent_minute_gap_backtest_10_2025-10-14_2026-06-11.csv`
-- 宽松回退 CSV：`memory/06_backtests/alphaagent_backtest_9_2025-10-14_2026-06-11.csv`
-- 参数网格 CSV：`memory/06_backtests/alphaagent_validation_grid_9_2025-10-14_2026-06-11.csv`
+- 原始严格尾盘、分钟缺口、宽松回退和参数网格 CSV 已从长期记忆移除。
+- 本报告保留关键结论：严格尾盘 0 成交，待补分钟缺口 794 条，覆盖 101 个交易日、194 只股票。
 
 ## 下一步
 

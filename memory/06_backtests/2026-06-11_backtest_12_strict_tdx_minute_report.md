@@ -6,8 +6,7 @@
 - 初始资金：1,000,000.00
 - 执行：D 日收盘信号；D+1 14:30-14:57 真实 1 分钟线；接近可见 MA5 才成交；`minute_entry_required=true`
 - 分钟数据来源：TDX public quote server，通过 `/api/data-sync/imports/minute-bars/tdx-gaps` 按缺口导入
-- 缺口文件：`memory/06_backtests/alphaagent_minute_gap_backtest_11_2026-02-02_2026-06-11.csv`
-- 回测表：`memory/06_backtests/alphaagent_backtest_12_2026-02-02_2026-06-11.csv`
+- 原始缺口 CSV 和回测 CSV 已从长期记忆移除；关键审计指标保留在本报告。
 
 ## 严格分钟审计
 
@@ -61,7 +60,7 @@
 
 ## 参数网格验证
 
-- 文件：`memory/06_backtests/alphaagent_validation_grid_12_2026-02-02_2026-06-11.csv`
+- 原始参数网格 CSV 已从长期记忆移除；关键参数敏感性结论保留在本节。
 - 参数组合：54 组
 - 正收益组合：54 组，占比 100.0%
 - 样本外正收益组合：54 组，占比 100.0%

@@ -114,26 +114,26 @@ vn.py 中数据需要分清四类：
 14. 理论信号与真实订单关联由 `alphaagent.server.services.backtest.signal_plan` 计算：按 `vt_symbol + execute_date/trade_date + side` 匹配，输出 `linked_order_id`、`linked_order_status`、`linked_order_reason`、`plan_status` 和 `plan_status_label`，供信号流水和候选追踪复用。
 15. 回测订单、信号和候选追踪 API 行会返回 `reason_label` / `linked_order_reason_label`，用于前端显示“入场条件未触发”“现金不足”等中文原因。
 16. 组合回测加载日线时会从用户开始日前额外加载预热历史 K 线，避免 MA60、60 日回撤等指标在回测初期因样本不足而缺失；但权益、持仓和交易记录仍只从用户选择的开始日期开始。
-17. 历史组合回测默认使用 `legacy_next_open`：D 日收盘信号，D+1 日线开盘买入/卖出，默认最大持仓 10、候选前 10 名、收益率为主要观察指标。
+17. 历史组合回测默认使用 `legacy_next_open`：D 日收盘信号，D+1 日线开盘买入/卖出，默认最大持仓 10、BUY 候选前 20 名、收益率和最大回撤为主要观察指标。
 18. 普通量化产品路径只公开 `mainline_dragon_pullback`；`GET /api/quant/strategies` 返回单一公开策略，旧策略仅保留内部兼容和旧报告/对比接口。
 19. 组合模拟支持 `mainline_dragon_pullback` 的有限换仓规则：组合满仓时，`total_score >= 98` 的新鲜 `TAIL_BUY_READY` BUY 可替换浮盈不超过 `+3%`、持有不少于 `3` 天且入场分不高于新信号的持仓；卖出原因写为 `rotation_for_stronger_signal`。该规则用于避免高分龙回头信号因满仓完全错过，不改变默认最大持仓 `10`。
-20. 股票详情页 K 线标记优先来自产品基线组合回测：先取 `GET /api/backtests?run_type=portfolio&strategy=mainline_dragon_pullback&baseline_only=true` 当前版本全历史基线，再用 `GET /api/backtests/{id}/symbols/{vt_symbol}` 加载真实组合订单/成交/收益标记，并用 `GET /api/backtests/{id}/signal-events?vt_symbol=` 叠加同一回测内的理论 BUY/SELL 信号计划；已关联真实成交的同日理论 BUY 会被前端抑制，避免同一信号重复显示。`latest-state` 的全局买卖记录和 BUY 信号只作为没有组合执行记录时的兜底。
+20. 股票详情页 K 线标记优先来自产品基线组合回测：先取 `GET /api/backtests?run_type=portfolio&strategy=mainline_dragon_pullback&baseline_only=true` 当前版本全历史基线，再用 `GET /api/backtests/{id}/symbols/{vt_symbol}` 加载真实组合订单/成交/收益标记，并用 `GET /api/backtests/{id}/signal-events?vt_symbol=` 叠加同一回测内的理论 BUY/SELL 信号计划；已关联真实成交的同日理论 BUY 会被前端抑制，避免同一信号重复显示。股票详情收益口径区分“闭合收益率”“当前浮盈率”和“盯市合计”，避免持有中盈利票被历史闭合亏损误读为整票亏损。`latest-state` 的全局买卖记录和 BUY 信号只作为没有组合执行记录时的兜底。
 
 注意：`backtest_signal_events` 是理论信号计划，用于核查“历史上有没有买点/卖点”；真实组合资金曲线仍以 `backtest_trades`、`backtest_daily_equity` 和 `backtest_daily_positions` 为准。
 
 当前量化状态：
 
 - 本地日线交易日范围：`2025-03-26` 至 `2026-06-16`；`2026-06-16` 本地日线覆盖约 `1302` 只股票，低于正常全市场覆盖。
-- 当前公开策略代码为 `mainline_dragon_pullback / 0.1.8`，低吸蓄势被并入主评分，不是新增页面或独立策略；主要字段包括 `low_suction_days`、`support_hold_days`、`ma_convergence_pct`、`low_suction_buildup_score`、`score_notes` 和 `score_breakdown`。
-- 候选默认只展示前 `20` 个推荐；组合执行仍按默认最大持仓 `10`、BUY 候选前 `10` 做模拟买卖。候选、自动回测和成交追踪是内部链路，不再作为多个用户主操作拆开理解。
+- 当前公开策略代码为 `mainline_dragon_pullback / 0.1.21`，低吸洗盘和经典龙回头是同一公开策略下的内部 setup；主要字段包括 `setup_type`、`entry_setup`、`low_suction_days`、`support_hold_days`、`ma_convergence_pct`、`low_suction_buildup_score`、`stealth_low_suction_score`、`low_suction_launch_confirmed`、`score_notes` 和 `score_breakdown`。
+- 候选默认只展示前 `20` 个推荐；组合执行按默认最大持仓 `10`、BUY 候选前 `20` 做模拟买卖。候选、自动回测和成交追踪是内部链路，不再作为多个用户主操作拆开理解。
 - 候选、股票详情、量化候选分组和组合执行 action 使用同一可执行入场口径：`entry_signal` 是原始诊断字段，只有 `executable_entry_signal=true` / `action=BUY` 才展示为 BUY、计入 BUY 次数并进入买入计划；硬信号低于 `min_entry_score` 或有失败规则时展示 `WATCH`。回测缓存和全局买卖记录也不再直接把原始 `entry_signal=true` 当作可买入。
 - `/quant` 候选表直接显示“为什么这个分数”，并通过 `score_notes` / `score_breakdown` 解释总分来源、低吸蓄势加分和失败规则；候选行明确写出“总分按分项贡献相加后扣风险”，并优先露出“低吸蓄势”贡献，避免用户把连续低吸理解成额外策略或额外页面。
 - `/quant` 普通视图只保留“候选/回测”两个入口；运行状态只显示覆盖区间、完成进度、最新候选数和自动回测编号，不展示“新生成/跳过/同步”等内部流水账。回测页首屏读取轻量报告并默认打开“交易归因”，用户打开“验证”子 tab 后才加载完整分析和数据质量审计，避免因为重分析耗时误判为“没数据”。
 - `/quant` 回测页普通子入口只保留“验证 / 交易归因 / 收益分段”；全股票理论信号计划不再作为普通 tab 暴露。候选行的“回测成交”追踪和股票详情 K 线仍会使用同一底层信号/订单数据解释买入、拒单和卖出。
 - `/stocks/:vtSymbol` 在“策略复盘”里固定显示“为什么这个分数”，即使该票在最新组合回测里已有实际成交，也能看到评分日、总分、状态、低吸蓄势天数、均线收敛、低吸蓄势分、评分构成，以及“低吸蓄势是同一回踩低吸策略里的连续加分”的解释。
-- `0.1.8` 已验证东山精密 `002384.SZSE`：`2026-06-09`、`2026-06-10`、`2026-06-11`、`2026-06-12` 连续入选前 `20`，排名分别为 `1 / 10 / 9 / 2`，均为 BUY；低吸蓄势天数从 `2` 增至 `5`，低吸蓄势分从 `85` 增至 `100`，`2026-06-12` 均线收敛约 `1.75%` 且失败规则为空。
-- 最新完整全历史组合回测为 `mainline_dragon_pullback / 0.1.8` 的 `backtests #149`：范围 `2025-03-26` 至 `2026-06-16`，收益约 `+61.87%`，最大回撤约 `-24.86%`，买入/卖出/持仓中 `238 / 228 / 10`。它收益高于 `#147 / 0.1.8`，但回撤略差，且仍弱于 `#137 / 0.1.3` 的回撤，不能作为最终高收益结论。
-- `0.1.10/#148` 高位冲高回落硬拒买实验收益约 `+46.05%`、最大回撤约 `-26.24%`，弱于 `#147`；当前默认已回退到 `0.1.8`，该实验只作为失败证据。
+- 东山精密 `002384.SZSE` 在当前产品基线 `#175 / 0.1.21` 中修复了 `2026-03-27` 至 `2026-04-01` 低吸段：低吸天数从 `1/2/3/4` 累计，`2026-04-01` 为可执行 `stealth_low_suction` BUY，`low_suction_launch_confirmed=true`；组合候选追踪显示它进入执行池第 `7` 名，但执行日满仓 `10/10` 且未触发换仓，所以没有真实订单。
+- 当前完整全历史组合回测为 `mainline_dragon_pullback / 0.1.21` 的 `backtests #175`：范围 `2025-03-26` 至 `2026-06-17`，收益约 `+81.36%`，最大回撤约 `-15.59%`，买入/卖出/持仓中 `224 / 214 / 10`。它较 `#172/#169` 改善收益和回撤，但仍需多年 walk-forward、参数敏感性和市场分层验证。
+- 卖出侧失败边界：`0.1.19/#173` 买后早期连续破位止损收益约 `+54.40%`、最大回撤约 `-19.79%`；`0.1.20/#174` 买入当天硬破位次日撤退收益约 `+51.51%`、最大回撤约 `-19.00%`。二者已撤回，当前默认代码是 `0.1.21`。
 - `/quant` 已切换为后台研究任务接口；任务状态是进程内内存状态，服务重启后 `GET /api/quant/research-runs/latest` 可能返回空，但已落库候选、买卖记录和回测仍按普通 API 可查。短区间任务如果日线不足，会显示具体失败原因，避免只看到“组合回测失败”。
 
 2026-06-14 回测钻取复核：

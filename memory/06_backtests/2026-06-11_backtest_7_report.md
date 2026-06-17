@@ -105,8 +105,7 @@
 
 ## 产物
 
-- 主回测 CSV：`memory/06_backtests/alphaagent_backtest_7_2025-10-14_2026-06-11.csv`
-- 参数网格 CSV：`memory/06_backtests/alphaagent_validation_grid_7_2025-10-14_2026-06-11.csv`
+- 原始主回测和参数网格 CSV 已从长期记忆移除；关键指标和验证结论保留在本报告。
 
 ## 后续缺口
 

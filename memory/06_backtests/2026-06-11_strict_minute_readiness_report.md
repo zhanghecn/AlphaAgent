@@ -19,14 +19,13 @@
 
 ## 已生成文件
 
-- 严格缺口 CSV：`memory/06_backtests/alphaagent_minute_gap_backtest_10_2025-10-14_2026-06-11.csv`
-- 供应商补数清单：`memory/06_backtests/alphaagent_minute_vendor_manifest_backtest_10_2025-10-14_2026-06-11.csv`
+- 原始严格缺口 CSV 和供应商补数清单 CSV 已从长期记忆移除；缺口数量、覆盖率、股票数、交易日和窗口要求保留在本报告。
 - 严格回测 10 结果：`memory/06_backtests/2026-06-11_backtest_10_strict_tail_report.md`
 - 宽松回测 9 结果：`memory/06_backtests/2026-06-11_backtest_9_report.md`
 
 ## 补数要求
 
-供应商或导出工具需要按 `alphaagent_minute_vendor_manifest_backtest_10_2025-10-14_2026-06-11.csv` 返回真实 1 分钟 K 线。
+供应商或导出工具需要按本报告记录的缺口范围返回真实 1 分钟 K 线；如需机器可读清单，应从当前接口重新导出补数清单。
 
 AlphaAgent 导入 CSV 必须包含：
 

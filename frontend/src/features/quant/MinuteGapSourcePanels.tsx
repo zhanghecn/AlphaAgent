@@ -194,7 +194,7 @@ export function AdvancedGapSourcePanel({
           className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-xs"
           value={minuteGapFilePath}
           onChange={(event) => setMinuteGapFilePath(event.target.value)}
-          placeholder="memory/06_backtests/alphaagent_minute_gap_backtest_10_2025-10-14_2026-06-11.csv"
+          placeholder="data/imports/minute_gap_backtest.csv"
         />
       </label>
       <div className="flex flex-wrap gap-2">

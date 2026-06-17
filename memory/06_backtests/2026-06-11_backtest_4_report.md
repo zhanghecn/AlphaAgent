@@ -4,7 +4,7 @@
 策略：`mainline_leader_pullback`
 版本：`0.1.0`
 接口来源：`GET /api/backtests/4/report?trade_limit=500`
-CSV 回测表：`memory/06_backtests/alphaagent_backtest_4_2025-10-14_2026-06-11.csv`
+原始 CSV：已从长期记忆移除；关键指标、参数网格和结论保留在本报告。
 执行模型：D 日收盘信号，D+1 开盘加滑点模拟成交。
 重要边界：这是日线模拟回测，不是分钟级尾盘低吸验证。
 
@@ -126,7 +126,7 @@ CSV 回测表：`memory/06_backtests/alphaagent_backtest_4_2025-10-14_2026-06-11
 
 实现方式：同一回测样本、同一股票池，按不同 `min_entry_score`、`stop_loss_pct`、`take_profit_pct`、`strict_entry` 重新跑选股、D+1 开盘撮合、止损止盈和仓位路径；不是只在既有交易结果上改数字。
 
-完整 CSV：`memory/06_backtests/alphaagent_validation_grid_4_2025-10-14_2026-06-11.csv`。
+原始参数网格 CSV 已从长期记忆移除；完整结论以本节表格为准，必要时从接口重新导出。
 
 | 项目 | 数值 |
 | --- | ---: |

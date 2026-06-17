@@ -47,8 +47,7 @@
 
 ## 文件
 
-- 交易明细 CSV：memory/06_backtests/alphaagent_backtest_9_2025-10-14_2026-06-11.csv
-- 参数网格 CSV：memory/06_backtests/alphaagent_validation_grid_9_2025-10-14_2026-06-11.csv
+- 原始交易明细和参数网格 CSV 已从长期记忆移除；关键指标、订单统计和验证结论保留在本报告。
 
 ## 限制
 - 当前本地样本不是全 A，只能作为小样本真实日线模拟。
