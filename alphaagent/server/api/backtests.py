@@ -119,9 +119,10 @@ def list_runs(
     limit: int = Query(default=50, ge=1, le=200),
     run_type: str = Query(default="all", pattern="^(all|portfolio|symbol)$"),
     strategy: str | None = Query(default=None),
+    baseline_only: bool = Query(default=False),
 ):
     try:
-        return ok(list_backtests(limit, run_type=run_type, strategy_id=strategy))
+        return ok(list_backtests(limit, run_type=run_type, strategy_id=strategy, baseline_only=baseline_only))
     except Exception as exc:
         return _service_error(exc)
 
@@ -143,9 +144,13 @@ def get_metrics(backtest_id: int):
 
 
 @router.get("/{backtest_id}/report")
-def get_report(backtest_id: int, trade_limit: int = Query(default=50, ge=1, le=500)):
+def get_report(
+    backtest_id: int,
+    trade_limit: int = Query(default=50, ge=1, le=500),
+    include_analysis: bool = Query(default=False),
+):
     try:
-        return ok(backtest_report(backtest_id, trade_limit))
+        return ok(backtest_report(backtest_id, trade_limit, include_analysis=include_analysis))
     except Exception as exc:
         return _service_error(exc)
 
@@ -405,7 +410,7 @@ def _params_from_payload(payload: dict[str, Any]) -> BacktestParams:
         take_profit_pct=float(payload.get("take_profit_pct") or 0.18),
         trailing_stop_pct=float(payload.get("trailing_stop_pct") or 0.08),
         time_stop_days=int(payload.get("time_stop_days") or 15),
-        candidate_limit=int(payload.get("candidate_limit") or 10),
+        candidate_limit=int(payload.get("candidate_limit") or 20),
         max_symbols=int(payload.get("max_symbols") or 5000),
         min_entry_score=float(payload.get("min_entry_score") or 76),
         strict_entry=_parse_bool(payload.get("strict_entry"), default=True),
@@ -417,9 +422,9 @@ def _params_from_payload(payload: dict[str, Any]) -> BacktestParams:
         tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
         tail_entry_ma5_tolerance_pct=float(payload.get("tail_entry_ma5_tolerance_pct") or 1.5),
         enable_signal_rotation=_parse_bool(payload.get("enable_signal_rotation"), default=True),
-        rotation_min_score=float(payload.get("rotation_min_score") or 95.0),
+        rotation_min_score=float(payload.get("rotation_min_score") or 98.0),
         rotation_min_score_gap=float(payload.get("rotation_min_score_gap") or 8.0),
-        rotation_max_holding_return_pct=float(payload.get("rotation_max_holding_return_pct") or 8.0),
+        rotation_max_holding_return_pct=float(payload.get("rotation_max_holding_return_pct") or 3.0),
         rotation_min_holding_days=int(payload.get("rotation_min_holding_days") or 3),
         symbols=_parse_symbols(payload.get("symbols") or payload.get("vt_symbols") or payload.get("vt_symbol")),
         included_boards=normalize_included_boards(payload.get("included_boards")),

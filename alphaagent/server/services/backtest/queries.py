@@ -661,6 +661,10 @@ def _attribution_row(
     min_floating_pnl_pct = _min_number(row.get("floating_pnl_pct") for row in path)
     entry_raw = entry.get("raw") if isinstance((entry or {}).get("raw"), dict) else {}
     execution = entry_raw.get("execution") if isinstance(entry_raw.get("execution"), dict) else {}
+    entry_score = _entry_raw_number(entry_raw, "entry_total_score", "total_score")
+    low_suction_days = _entry_raw_number(entry_raw, "low_suction_days")
+    low_suction_score = _entry_raw_number(entry_raw, "low_suction_buildup_score")
+    ma_convergence_pct = _entry_raw_number(entry_raw, "ma_convergence_pct")
     amount = float((entry or {}).get("amount") or 0)
     pnl = float(exit_trade.get("pnl") or 0) if exit_trade and exit_trade.get("pnl") is not None else None
     return {
@@ -686,6 +690,13 @@ def _attribution_row(
         "min_floating_pnl": min_floating_pnl,
         "max_floating_pnl_pct": max_floating_pnl_pct,
         "min_floating_pnl_pct": min_floating_pnl_pct,
+        "entry_score": entry_score,
+        "entry_state": entry_raw.get("dragon_state"),
+        "entry_support_type": entry_raw.get("support_type"),
+        "low_suction_days": low_suction_days,
+        "low_suction_buildup_score": low_suction_score,
+        "ma_convergence_pct": ma_convergence_pct,
+        "entry_failed_rules": entry_raw.get("failed_rules") if isinstance(entry_raw.get("failed_rules"), list) else [],
         "execution_mode": execution.get("mode"),
         "price_source": execution.get("price_source"),
         "proxy_used": execution.get("proxy_used"),
@@ -712,6 +723,18 @@ def _max_number(values) -> float | None:
 def _min_number(values) -> float | None:
     parsed = [float(value) for value in values if value is not None]
     return min(parsed) if parsed else None
+
+
+def _entry_raw_number(raw: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = raw.get(key)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def _sort_number(value: Any, *, default: float) -> float:
@@ -827,8 +850,29 @@ def candidate_trace_rows(
                 .order_by(schema.backtest_trades.c.trade_date, schema.backtest_trades.c.id)
             ).mappings().all()
         else:
-            order_rows = []
-            trade_rows = []
+            order_rows = session.execute(
+                select(schema.backtest_orders)
+                .where(
+                    and_(
+                        schema.backtest_orders.c.backtest_id == backtest_id,
+                        schema.backtest_orders.c.vt_symbol == symbol,
+                        schema.backtest_orders.c.raw["signal_date"].as_string() == signal_date.isoformat(),
+                    )
+                )
+                .order_by(schema.backtest_orders.c.trade_date, schema.backtest_orders.c.id)
+            ).mappings().all()
+            trade_rows = session.execute(
+                select(schema.backtest_trades)
+                .where(
+                    and_(
+                        schema.backtest_trades.c.backtest_id == backtest_id,
+                        schema.backtest_trades.c.vt_symbol == symbol,
+                        schema.backtest_trades.c.raw["execution"]["signal_date"].as_string() == signal_date.isoformat(),
+                    )
+                )
+                .order_by(schema.backtest_trades.c.trade_date, schema.backtest_trades.c.id)
+            ).mappings().all()
+            execute_dates = sorted({as_date(row["trade_date"]) for row in [*order_rows, *trade_rows] if as_date(row["trade_date"])})
         equity_date = execute_dates[0] if execute_dates else signal_date
         equity_row = session.execute(
             select(schema.backtest_daily_equity).where(
@@ -906,7 +950,7 @@ def _universe_context(
     params: dict[str, Any],
     board_payload: BoardPayload,
 ) -> dict[str, Any]:
-    max_symbols = _safe_int(params.get("max_symbols"), 500)
+    max_symbols = _safe_int(params.get("max_symbols"), 5000)
     included_boards = list(normalize_included_boards(params.get("included_boards") or DEFAULT_QUANT_INCLUDED_BOARDS))
     rows = session.execute(
         select(
@@ -917,7 +961,7 @@ def _universe_context(
             schema.stocks.c.market_cap,
         )
         .where(schema.stocks.c.vt_symbol != "000001.SSE")
-        .order_by(desc(schema.stocks.c.turnover), desc(schema.stocks.c.market_cap))
+        .order_by(schema.stocks.c.vt_symbol)
         .limit(5000)
     ).mappings().all()
     allowed = set(included_boards)
@@ -960,6 +1004,8 @@ def _not_planned_context(
     watch_recommendations = [row for row in same_day_recommendations if str(row.get("action") or "").upper() == "WATCH"]
     buy_signals = [row for row in same_day_signal_rows if str(row.get("side") or "").upper() == "BUY"]
     sell_signals = [row for row in same_day_signal_rows if str(row.get("side") or "").upper() == "SELL"]
+    target_signal_rank, target_signal_row = _target_signal_context(symbol, buy_signals)
+    target_execution = _signal_execution_context(target_signal_row)
     first_signal_date = _as_iso(signal_bounds.get("first_signal_date"))
     last_signal_date = _as_iso(signal_bounds.get("last_signal_date"))
     likely_reason, likely_reason_label = _not_planned_reason(
@@ -992,6 +1038,25 @@ def _not_planned_context(
         "recommendation_rank": (recommendation or {}).get("rank"),
         "recommendation_action": (recommendation or {}).get("action"),
         "recommendation_score": (recommendation or {}).get("total_score"),
+        "target_signal_rank": target_signal_rank,
+        "target_signal_score": target_signal_row.get("score") if target_signal_row else None,
+        "target_signal_setup": _signal_setup_type(target_signal_row),
+        "target_execution_lane": target_execution.get("execution_lane"),
+        "target_raw_signal_rank": target_execution.get("raw_signal_rank"),
+        "target_execution_candidate_rank": target_execution.get("execution_candidate_rank"),
+        "target_execution_candidate_selected": target_execution.get("execution_candidate_selected"),
+        "target_exceeds_candidate_limit": (
+            (
+                target_execution.get("execution_candidate_selected") is False
+                if target_execution
+                else target_signal_rank is not None
+            )
+            and (
+                target_execution.get("execution_candidate_rank") is None
+                if target_execution
+                else target_signal_rank > _safe_int(run_params.get("candidate_limit"), 20)
+            )
+        ),
         "persisted_recommendation_count": len(same_day_recommendations),
         "persisted_buy_candidate_count": len(buy_recommendations),
         "persisted_watch_candidate_count": len(watch_recommendations),
@@ -999,6 +1064,29 @@ def _not_planned_context(
         "planned_buy_symbols": _top_signal_context(buy_signals, stock_names),
         "target_symbol": symbol,
     }
+
+
+def _target_signal_context(symbol: str, buy_signals: list[dict[str, Any]]) -> tuple[int | None, dict[str, Any] | None]:
+    for index, row in enumerate(buy_signals, start=1):
+        if str(row.get("vt_symbol") or "") == symbol:
+            return index, row
+    return None, None
+
+
+def _signal_setup_type(row: dict[str, Any] | None) -> str | None:
+    if not row:
+        return None
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+    evidence = raw.get("evidence") if isinstance(raw.get("evidence"), dict) else {}
+    return evidence.get("setup_type") or evidence.get("entry_setup")
+
+
+def _signal_execution_context(row: dict[str, Any] | None) -> dict[str, Any]:
+    if not row:
+        return {}
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+    context = raw.get("candidate_execution") if isinstance(raw.get("candidate_execution"), dict) else {}
+    return dict(context)
 
 
 def _not_planned_reason(
@@ -1047,17 +1135,19 @@ def _top_recommendation_context(rows: list[dict[str, Any]], stock_names: dict[st
 
 def _top_signal_context(rows: list[dict[str, Any]], stock_names: dict[str, dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
     result = []
-    for row in rows[:limit]:
+    for rank, row in enumerate(rows[:limit], start=1):
         symbol = str(row.get("vt_symbol") or "")
         stock = stock_names.get(symbol) or {}
         result.append(
             {
                 "vt_symbol": symbol,
                 "name": stock.get("name"),
+                "rank": rank,
                 "trade_date": _as_iso(row.get("trade_date")),
                 "execute_date": _as_iso(row.get("execute_date")),
                 "score": row.get("score"),
                 "reason": row.get("reason"),
+                "setup_type": _signal_setup_type(row),
             }
         )
     return result
@@ -1172,6 +1262,8 @@ def reason_label(reason: Any) -> str | None:
         "stop_loss": "止损",
         "take_profit": "止盈",
         "trailing_stop": "移动止盈/回撤止损",
+        "profit_protection_stop": "浮盈保护",
+        "fragile_structure_stop": "脆弱结构破位",
         "time_stop": "持仓超时",
         "missing_1430_snapshot": "缺14:30快照",
         "tail_entry_not_triggered": "尾盘入场未触发",
@@ -1190,6 +1282,8 @@ def reason_label(reason: Any) -> str | None:
         "candidate_not_planned": "候选未进入组合计划",
         "watch_not_bought": "观察未买",
         "planned_not_ordered": "计划未下单",
+        "rotation_for_stronger_signal": "强信号换仓",
+        "rotation_for_stealth_low_suction": "低吸洗盘换仓",
     }
     return labels.get(text, text)
 

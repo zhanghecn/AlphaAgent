@@ -90,7 +90,7 @@ def latest_symbol_quant_state(vt_symbol: str, strategy_id: str = STRATEGY_ID) ->
                     "name": stock.get("name") if stock else None,
                     **stock_board_payload(symbol, stock.get("exchange") if stock else None),
                     "strategy_id": strategy.id,
-                    "message": "暂无全局量化过程。请先在量化页运行策略研究。",
+                    "message": "暂无全局量化过程。请先在量化页刷新候选并回测。",
                 }
             process = _process_from_screen(dict(screen_run))
             signal_rows = _signal_rows_for_run(session, int(screen_run["id"]), symbol)
@@ -273,7 +273,7 @@ def _signal_payload(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "best_total_score": None,
             "recent": [],
         }
-    entry_rows = [row for row in rows if bool(row.get("entry_signal"))]
+    entry_rows = [row for row in rows if bool(row.get("executable_entry_signal"))]
     best = max(rows, key=lambda row: float(row.get("total_score") or 0))
     latest = rows[0]
     latest_entry = entry_rows[0] if entry_rows else None

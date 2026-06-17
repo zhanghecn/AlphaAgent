@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 import { AlertTriangle, Database, Play, RefreshCw, Search, ShieldCheck } from "lucide-react";
 import { cn, formatPct, formatPrice, priceColorClass } from "@/lib/utils";
 import { formatNumber, numberValue } from "@/lib/backtest-utils";
-import { QUANT_BOARD_OPTIONS, boardLabels, type QuantBoard } from "@/features/quant/constants";
+import { DEFAULT_EXECUTION_CANDIDATE_LIMIT, DEFAULT_RECOMMENDATION_LIMIT, QUANT_BOARD_OPTIONS, boardLabels, type QuantBoard } from "@/features/quant/constants";
 import { ErrorState } from "@/components/ErrorState";
 import { LoadingState } from "@/components/LoadingState";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
@@ -33,7 +33,6 @@ export function RecommendationsPanel({
   activeBacktestId,
   status,
   message,
-  syncedCount,
   onRetry,
   onRunScreen,
   isRunningScreen,
@@ -58,7 +57,6 @@ export function RecommendationsPanel({
   activeBacktestId?: number | null;
   status?: string;
   message?: string;
-  syncedCount: number;
   onRetry: () => void;
   onRunScreen: () => void;
   isRunningScreen: boolean;
@@ -118,7 +116,7 @@ export function RecommendationsPanel({
             <h2 className="text-sm font-semibold">量化候选</h2>
           </div>
           <div className="text-xs text-muted-foreground">
-            {tradeDate ?? "--"} · {runId ? `运行 #${runId}` : "未运行"} · {strategyVersion ?? "--"} · 分组同步 {syncedCount} 只
+            {tradeDate ?? "--"} · 前 {DEFAULT_RECOMMENDATION_LIMIT} · 执行前 {DEFAULT_EXECUTION_CANDIDATE_LIMIT} · {runId ? `运行 #${runId}` : "未运行"} · {strategyVersion ?? "--"}
           </div>
         </div>
         <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_260px]">
@@ -161,6 +159,7 @@ export function RecommendationsPanel({
             <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
               <span>BUY {stats.buyCount}</span>
               <span>WATCH {stats.watchCount}</span>
+              <span>候选展示前 {DEFAULT_RECOMMENDATION_LIMIT}，回测只执行 BUY 前 {DEFAULT_EXECUTION_CANDIDATE_LIMIT}</span>
               <span>已运行 {runDateCount} 日</span>
               <span>未运行 {missingRunCount} 日</span>
             </div>
@@ -197,7 +196,7 @@ export function RecommendationsPanel({
                   <TableHead key={metric.key} className="text-right">{metric.label}</TableHead>
                 ))}
                 <TableHead className="text-right">风险/流动性</TableHead>
-                <TableHead>核查</TableHead>
+                <TableHead>为什么这个分数</TableHead>
                 <TableHead className="w-24">回测成交</TableHead>
               </TableRow>
             </TableHeader>
@@ -228,7 +227,7 @@ export function RecommendationsPanel({
                       {formatNumber(item.total_score, 2)}
                     </TableCell>
                     {metricColumns.map((metric) => {
-                      const value = numberValue(reason[metric.key]);
+                      const value = metricValue(reason, metric.key);
                       return (
                         <TableCell key={metric.key} className={cn("text-right tabular-nums", metric.className(value))}>
                           {metric.format(value)}
@@ -238,8 +237,16 @@ export function RecommendationsPanel({
                     <TableCell className="text-right text-xs text-muted-foreground">
                       {formatNumber(riskScore, 1)} / {formatNumber(liquidityScore, 1)}
                     </TableCell>
-                    <TableCell className="max-w-60 text-xs text-muted-foreground">
-                      {itemFailedRules.length ? itemFailedRules.map((rule) => failedRuleLabel(rule, failedRuleLabels)).join(", ") : `止损 ${formatPct(numberValue(risk.stop_loss_pct) ? -numberValue(risk.stop_loss_pct)! * 100 : null)}`}
+                    <TableCell
+                      className="min-w-72 max-w-96 text-xs"
+                      title={candidateScoreTooltip(reason, itemFailedRules, failedRuleLabels, risk)}
+                    >
+                      <CandidateScoreExplanation
+                        reason={reason}
+                        rules={itemFailedRules}
+                        labels={failedRuleLabels}
+                        risk={risk}
+                      />
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-2">
@@ -353,6 +360,11 @@ function NotPlannedContextPanel({ context }: { context?: BacktestCandidateNotPla
       <div className="font-medium">未进计划核查</div>
       <div className="mt-2 grid gap-3 md:grid-cols-6">
         <TraceCell label="具体原因" value={context.likely_reason_label ?? context.likely_reason ?? "--"} />
+        <TraceCell label="理论买入排名" value={context.target_signal_rank == null ? "--" : `${context.target_signal_rank}`} />
+        <TraceCell label="理论分数" value={formatNumber(context.target_signal_score, 1)} />
+        <TraceCell label="理论形态" value={setupLabel(context.target_signal_setup)} />
+        <TraceCell label="执行上限" value={`前 ${context.candidate_limit ?? "--"}`} />
+        <TraceCell label="超出上限" value={context.target_exceeds_candidate_limit == null ? "--" : context.target_exceeds_candidate_limit ? "是" : "否"} />
         <TraceCell label="回测区间" value={`${context.backtest_start_date ?? "--"} ~ ${context.backtest_end_date ?? "--"}`} />
         <TraceCell label="首个信号日" value={context.first_signal_date ?? "--"} />
         <TraceCell label="当天计划数" value={context.signal_date_plan_count ?? 0} />
@@ -373,8 +385,8 @@ function NotPlannedContextPanel({ context }: { context?: BacktestCandidateNotPla
           title="当天计划买入"
           rows={(context.planned_buy_symbols ?? []).slice(0, 5).map((row) => ({
             key: `${row.execute_date}-${row.vt_symbol}`,
-            left: row.name ?? row.vt_symbol,
-            right: `${row.execute_date ?? "--"} · ${formatNumber(row.score, 1)}`,
+            left: `${row.rank ?? "--"}. ${row.name ?? row.vt_symbol}`,
+            right: `${setupLabel(row.setup_type)} · ${formatNumber(row.score, 1)}`,
           }))}
           empty="该日没有理论买入计划。"
         />
@@ -472,6 +484,115 @@ function failedRules(item: QuantRecommendation): string[] {
   return Array.isArray(raw) ? raw.map((rule) => String(rule)).filter(Boolean) : [];
 }
 
+function CandidateScoreExplanation({
+  reason,
+  rules,
+  labels,
+  risk,
+}: {
+  reason: Record<string, unknown>;
+  rules: string[];
+  labels: Record<string, string>;
+  risk: Record<string, unknown>;
+}) {
+  const facts = candidateScoreFacts(reason);
+  const contributions = topScoreContributions(reason.score_breakdown, 4);
+  const rejected = rules.map((rule) => failedRuleLabel(rule, labels));
+  const fallback = candidateScoreReason(reason, rules, labels, risk);
+  return (
+    <div className="space-y-1 leading-5">
+      {facts.length > 0 ? (
+        <div className="text-foreground">{facts.join(" · ")}</div>
+      ) : (
+        <div className="text-muted-foreground">{fallback}</div>
+      )}
+      {contributions.length > 0 && (
+        <div className="text-muted-foreground">分项贡献: {contributions.join(" / ")}</div>
+      )}
+      <div className="text-muted-foreground">
+        总分按分项贡献相加后扣风险；低吸蓄势是同一策略内的连续加分。
+      </div>
+      {rejected.length > 0 && (
+        <div className="text-fall">观察原因: {rejected.join(" / ")}</div>
+      )}
+    </div>
+  );
+}
+
+function candidateScoreFacts(reason: Record<string, unknown>): string[] {
+  const lowSuctionDays = numberValue(reason.low_suction_days);
+  const convergence = numberValue(reason.ma_convergence_pct);
+  const lowSuctionScore = numberValue(reason.low_suction_buildup_score);
+  const supportHoldDays = numberValue(reason.support_hold_days);
+  const supportType = typeof reason.support_type === "string" ? reason.support_type : null;
+  const state = typeof reason.dragon_state === "string" ? reason.dragon_state : null;
+  const parts: string[] = [];
+  if (state) parts.push(dragonStateLabel(state));
+  if (supportType) parts.push(supportTypeLabel(supportType));
+  if (lowSuctionDays != null) parts.push(`低吸${lowSuctionDays.toFixed(0)}天`);
+  if (supportHoldDays != null) parts.push(`支撑${supportHoldDays.toFixed(0)}天`);
+  if (convergence != null) parts.push(`均线收敛${formatPct(convergence)}`);
+  if (lowSuctionScore != null) parts.push(`低吸分${formatNumber(lowSuctionScore, 1)}`);
+  return parts;
+}
+
+function candidateScoreReason(
+  reason: Record<string, unknown>,
+  rules: string[],
+  labels: Record<string, string>,
+  risk: Record<string, unknown>
+): string {
+  const notes = Array.isArray(reason.score_notes)
+    ? reason.score_notes.map((item) => String(item)).filter(Boolean)
+    : [];
+  const contributions = topScoreContributions(reason.score_breakdown, 3);
+  const lowSuctionDays = numberValue(reason.low_suction_days);
+  const convergence = numberValue(reason.ma_convergence_pct);
+  const lowSuctionScore = numberValue(reason.low_suction_buildup_score);
+  const parts: string[] = [];
+  const state = typeof reason.dragon_state === "string" ? reason.dragon_state : null;
+  if (state) parts.push(`状态${dragonStateLabel(state)}`);
+  if (lowSuctionDays != null) parts.push(`低吸${lowSuctionDays.toFixed(0)}天`);
+  if (convergence != null) parts.push(`均线收敛${formatPct(convergence)}`);
+  if (lowSuctionScore != null) parts.push(`蓄势分${formatNumber(lowSuctionScore, 1)}`);
+  if (parts.length && contributions.length) return `${parts.join("，")}；来源 ${contributions.join("、")}`;
+  if (parts.length) return parts.join("，");
+  if (contributions.length) return `主要来源 ${contributions.join("、")}`;
+  if (notes.length) return notes.slice(0, 3).join("；");
+  if (rules.length) return rules.map((rule) => failedRuleLabel(rule, labels)).join(", ");
+  return `止损 ${formatPct(numberValue(risk.stop_loss_pct) ? -numberValue(risk.stop_loss_pct)! * 100 : null)}`;
+}
+
+function candidateScoreTooltip(
+  reason: Record<string, unknown>,
+  rules: string[],
+  labels: Record<string, string>,
+  risk: Record<string, unknown>
+): string {
+  const notes = Array.isArray(reason.score_notes)
+    ? reason.score_notes.map((item) => readableScoreNote(String(item))).filter(Boolean)
+    : [];
+  const breakdown = Array.isArray(reason.score_breakdown)
+    ? reason.score_breakdown
+        .map((item) => {
+          if (!item || typeof item !== "object") return "";
+          const row = item as Record<string, unknown>;
+          const name = String(row.name ?? "");
+          const score = numberValue(row.score);
+          const weight = numberValue(row.weight);
+          const contribution = numberValue(row.contribution);
+          if (!name) return "";
+          const scoreText = score == null ? "--" : formatNumber(score, 1);
+          const weightText = weight == null ? "--" : `${formatNumber(weight * 100, 0)}%`;
+          const contributionText = contribution == null ? "--" : formatNumber(contribution, 2);
+          return `${name}: ${scoreText} * ${weightText} = ${contributionText}`;
+        })
+        .filter(Boolean)
+    : [];
+  const fallback = candidateScoreReason(reason, rules, labels, risk);
+  return [...notes, ...breakdown].join("\n") || fallback;
+}
+
 function traceStatusLabel(status: string): string {
   if (status === "filled") return "已成交";
   if (status === "rejected") return "已拒单";
@@ -488,6 +609,12 @@ function traceOrderStatus(status?: string | null): string {
   if (status === "pending") return "待执行";
   if (status === "not_ordered") return "未下单";
   return status || "--";
+}
+
+function setupLabel(value?: string | null): string {
+  if (value === "stealth_low_suction") return "低吸洗盘";
+  if (value === "dragon_pullback") return "龙回头";
+  return value || "--";
 }
 
 function diagnosticStatusLabel(status: string): string {
@@ -515,6 +642,7 @@ function failedRuleLabel(rule: string, labels: Record<string, string> = {}): str
   if (rule === "limit_up_recency") return "涨停后时间";
   if (rule === "pullback_position") return "回踩位置";
   if (rule === "ma20_support") return "MA20支撑";
+  if (rule === "ma_convergence_too_wide_without_low_suction") return "均线发散且缺少低吸蓄势";
   if (rule === "risk_score") return "风险不足";
   if (rule === "liquidity_score") return "流动性不足";
   return rule;
@@ -522,7 +650,7 @@ function failedRuleLabel(rule: string, labels: Record<string, string> = {}): str
 
 function recommendationMetricColumns(strategy?: QuantStrategyOption) {
   const keys = strategy?.primary_metric_keys?.length ? strategy.primary_metric_keys : ["ma5_distance_pct"];
-  return keys.slice(0, 2).map((key) => ({
+  return keys.slice(0, 3).map((key) => ({
     key,
     label: strategy?.evidence_labels?.[key] ?? metricLabel(key),
     format: metricFormatter(key),
@@ -530,8 +658,21 @@ function recommendationMetricColumns(strategy?: QuantStrategyOption) {
   }));
 }
 
+function metricValue(reason: Record<string, unknown>, key: string): string | number | null {
+  const raw = reason[key];
+  if (typeof raw === "string" && raw) return raw;
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  return null;
+}
+
 function metricLabel(key: string): string {
   const labels: Record<string, string> = {
+    dragon_state: "龙回头状态",
+    support_type: "承接类型",
+    low_suction_days: "低吸天数",
+    support_hold_days: "支撑天数",
+    ma_convergence_pct: "均线收敛",
+    low_suction_buildup_score: "蓄势分",
     ma5_distance_pct: "MA5距离",
     ma20_distance_pct: "MA20距离",
     close_to_prior_high_pct: "距60日高点",
@@ -543,27 +684,127 @@ function metricLabel(key: string): string {
 }
 
 function metricFormatter(key: string) {
+  if (key === "dragon_state") return dragonStateLabel;
+  if (key === "support_type") return supportTypeLabel;
+  if (key.endsWith("_score")) return formatScoreMetric;
   if (key.includes("ratio")) return formatRatio;
   if (key.includes("days") || key.includes("count")) return formatIntegerMetric;
-  return formatPct;
+  return formatPercentMetric;
 }
 
 function metricColorClass(key: string) {
+  if (key === "dragon_state") return dragonStateClass;
+  if (key === "support_type") return () => undefined;
+  if (key.endsWith("_score")) return scoreColorClass;
   if (key.includes("ratio")) return ratioColorClass;
   if (key.includes("days") || key.includes("count")) return () => undefined;
-  return priceColorClass;
+  return percentColorClass;
 }
 
-function formatIntegerMetric(value?: number | null): string {
-  return value == null ? "--" : value.toFixed(0);
+function formatPercentMetric(value?: string | number | null): string {
+  return formatPct(metricNumber(value));
 }
 
-function formatRatio(value?: number | null): string {
-  return value == null ? "--" : `${value.toFixed(2)}x`;
+function percentColorClass(value?: string | number | null): string | undefined {
+  return priceColorClass(metricNumber(value));
 }
 
-function ratioColorClass(value?: number | null): string | undefined {
-  return value == null ? undefined : value >= 1 ? "text-rise" : "text-fall";
+function formatIntegerMetric(value?: string | number | null): string {
+  const number = metricNumber(value);
+  return number == null ? "--" : number.toFixed(0);
+}
+
+function formatRatio(value?: string | number | null): string {
+  const number = metricNumber(value);
+  return number == null ? "--" : `${number.toFixed(2)}x`;
+}
+
+function formatScoreMetric(value?: string | number | null): string {
+  const number = metricNumber(value);
+  return number == null ? "--" : number.toFixed(1);
+}
+
+function metricNumber(value?: string | number | null): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function dragonStateLabel(value?: string | number | null): string {
+  const state = String(value ?? "");
+  const labels: Record<string, string> = {
+    TAIL_BUY_READY: "龙回头买点",
+    LOW_SUCTION_BUILDUP: "低吸蓄势",
+    SUPPORT_ACCEPTED: "均线承接",
+    PULLBACK_OBSERVE: "回踩观察",
+    STRONG_LEG_CONFIRMED: "强势确认",
+    DISTRIBUTION_RISK: "派发风险",
+    INVALIDATED: "破位失效",
+  };
+  return (labels[state] ?? state) || "--";
+}
+
+function readableScoreNote(note: string): string {
+  if (note.startsWith("状态 ")) return `状态 ${dragonStateLabel(note.slice(3))}`;
+  if (note.startsWith("承接 ")) return `承接 ${supportTypeLabel(note.slice(3))}`;
+  return note;
+}
+
+function supportTypeLabel(value?: string | number | null): string {
+  const support = String(value ?? "");
+  const labels: Record<string, string> = {
+    ma5_reclaim: "MA5承接",
+    ma10_support: "MA10承接",
+    ma20_support: "MA20承接",
+    none: "未承接",
+  };
+  return (labels[support] ?? support) || "--";
+}
+
+function dragonStateClass(value?: string | number | null): string | undefined {
+  const state = String(value ?? "");
+  if (state === "TAIL_BUY_READY" || state === "LOW_SUCTION_BUILDUP") return "text-rise";
+  if (state === "DISTRIBUTION_RISK" || state === "INVALIDATED") return "text-fall";
+  return undefined;
+}
+
+function scoreColorClass(value?: string | number | null): string | undefined {
+  const number = metricNumber(value);
+  if (number == null) return undefined;
+  return number >= 85 ? "text-rise" : number < 60 ? "text-fall" : undefined;
+}
+
+function topScoreContributions(value: unknown, limit: number): string[] {
+  if (!Array.isArray(value)) return [];
+  const ranked = value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const row = item as Record<string, unknown>;
+      const name = String(row.name ?? "");
+      const contribution = metricNumber(row.contribution as string | number | null);
+      if (!name || contribution == null || contribution <= 0) return null;
+      return { name, contribution };
+    })
+    .filter((item): item is { name: string; contribution: number } => Boolean(item))
+    .sort((left, right) => right.contribution - left.contribution);
+  const selected = ranked.slice(0, limit);
+  const lowSuction = ranked.find((item) => item.name === "低吸蓄势");
+  if (lowSuction && limit > 0 && !selected.some((item) => item.name === lowSuction.name)) {
+    if (selected.length >= limit) {
+      selected[selected.length - 1] = lowSuction;
+    } else {
+      selected.push(lowSuction);
+    }
+  }
+  return selected.map((item) => `${item.name}+${item.contribution.toFixed(2)}`);
+}
+
+function ratioColorClass(value?: string | number | null): string | undefined {
+  const number = metricNumber(value);
+  return number == null ? undefined : number >= 1 ? "text-rise" : "text-fall";
 }
 
 function candidateStats(items: QuantRecommendation[]) {
@@ -630,7 +871,7 @@ export function QuantBoardSelector({
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs text-muted-foreground">
-          当前结果: {boardLabels(activeBoards)}
+          当前结果: {boardLabels(activeBoards)} · 候选前 {DEFAULT_RECOMMENDATION_LIMIT} · 执行前 {DEFAULT_EXECUTION_CANDIDATE_LIMIT}
         </span>
         {onRun && (
           <Button size="sm" onClick={onRun} disabled={isRunning}>

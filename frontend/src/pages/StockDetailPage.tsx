@@ -34,6 +34,7 @@ import {
   type BacktestSymbolDetail,
   type BacktestTrade,
   type QuantStrategyOption,
+  type SymbolQuantSignalRow,
   type SymbolLatestQuantState,
   type SymbolStrategyReplay,
   type StrategyReplayEvent,
@@ -141,8 +142,8 @@ export function StockDetailPage() {
     ? quantStateToMarkers(latestQuantStateQuery.data).some((marker) => marker.markerKind === "trade" || marker.markerKind === "rejected")
     : false;
   const latestPortfolioBacktestQuery = useQuery({
-    queryKey: ["backtests", "portfolio", singleBacktestStrategy],
-    queryFn: () => fetchBacktests(1, "portfolio", singleBacktestStrategy),
+    queryKey: ["backtests", "portfolio", singleBacktestStrategy, "baseline"],
+    queryFn: () => fetchBacktests(1, "portfolio", singleBacktestStrategy, { baselineOnly: true }),
     enabled: !!vtSymbol,
     staleTime: 60_000,
   });
@@ -441,14 +442,17 @@ function SingleStockBacktestPanel({
           {quantStateError instanceof Error ? quantStateError.message : "读取最近量化过程失败"}
         </div>
       ) : sourceMode === "portfolio" ? (
-        <PortfolioBacktestSymbolSummary
-          backtest={portfolioBacktest}
-          detail={portfolioDetail}
-          markerCount={markerCount}
-          isLoading={isPortfolioDetailLoading}
-          error={portfolioDetailError}
-          strategyName={strategies.find((item) => item.id === strategy)?.name ?? "主线龙回头回踩低吸"}
-        />
+        <div className="space-y-4">
+          <PortfolioBacktestSymbolSummary
+            backtest={portfolioBacktest}
+            detail={portfolioDetail}
+            markerCount={markerCount}
+            isLoading={isPortfolioDetailLoading}
+            error={portfolioDetailError}
+            strategyName={strategies.find((item) => item.id === strategy)?.name ?? "主线龙回头回踩低吸"}
+          />
+          <LatestSignalScoreSummary signal={latestSignal} candidate={candidate} />
+        </div>
       ) : quantState?.status === "ready" ? (
         <div className="mt-4 space-y-4">
           <div className="rounded-md border bg-muted/20 p-3 text-sm">
@@ -484,10 +488,11 @@ function SingleStockBacktestPanel({
 
           <div className="grid gap-3 text-sm md:grid-cols-4">
             <InfoCell label="最近信号日" value={latestSignal?.trade_date ?? "--"} />
-            <InfoCell label="信号类型" value={latestSignal?.entry_signal ? "BUY" : latestSignal ? "WATCH/评分" : "--"} valueClass={latestSignal?.entry_signal ? "text-rise" : undefined} />
+            <InfoCell label="信号类型" value={latestSignal ? quantSignalAction(latestSignal) : "--"} valueClass={isExecutableQuantSignal(latestSignal) ? "text-rise" : undefined} />
             <InfoCell label="评分" value={formatMaybeNumber(latestSignal?.total_score, 1)} />
-            <InfoCell label="候选" value={candidate ? `${candidate.action ?? "--"} #${candidate.rank ?? "--"}` : "未进入候选"} />
+            <InfoCell label="候选" value={candidateLabelForSignal(latestSignal, candidate)} />
           </div>
+          <LatestSignalScoreSummary signal={latestSignal} candidate={candidate} compact />
 
           {tradePlan && (
             <div className="rounded-md border p-3 text-sm">
@@ -530,13 +535,13 @@ function SingleStockBacktestPanel({
             </div>
           ) : (
             <div className="rounded-md border p-3 text-sm text-muted-foreground">
-              当前已有筛选评分，但尚未生成统一买卖记录。请在量化页运行策略研究，系统会自动生成全局候选和组合回测，避免单股临时回测和全局口径不一致。
+              当前已有筛选评分，但尚未生成统一买卖记录。请在量化页刷新候选并回测，系统会自动生成全局候选和组合回测，避免单股临时回测和全局口径不一致。
             </div>
           )}
         </div>
       ) : (
         <div className="mt-3 rounded-md border p-3 text-sm text-muted-foreground">
-          {quantState?.message ?? "暂无全局量化过程。请先在量化页运行策略研究。"}
+          {quantState?.message ?? "暂无全局量化过程。请先在量化页刷新候选并回测。"}
         </div>
       )}
     </section>
@@ -614,7 +619,7 @@ function PortfolioBacktestSymbolSummary({
           <InfoCell label="K线标记" value={`${markerCount} 个`} />
         </div>
         <p className="mt-3 text-xs text-muted-foreground">
-          本页收益、闭合交易和 K 线买卖标记均来自同一个组合回测口径，已过滤全局 replay 中重复的持仓期 BUY 信号。
+          本页收益、闭合交易和 K 线买卖标记均来自同一个组合回测口径，已过滤全局买卖记录中重复的持仓期 BUY 信号。
         </p>
       </div>
 
@@ -685,6 +690,82 @@ function PortfolioClosedTradeTable({ rows }: { rows: NonNullable<BacktestSymbolD
           ))}
         </TableBody>
       </Table>
+    </div>
+  );
+}
+
+function LatestSignalScoreSummary({
+  signal,
+  candidate,
+  compact = false,
+}: {
+  signal?: SymbolQuantSignalRow | null;
+  candidate?: { trade_date?: string | null; action?: string | null; rank?: number | null } | null;
+  compact?: boolean;
+}) {
+  if (!signal) {
+    return (
+      <div className={cn("rounded-md border p-3 text-sm text-muted-foreground", compact ? "" : "mt-4")}>
+        暂无最近评分记录。请先在量化页刷新候选并回测。
+      </div>
+    );
+  }
+
+  const evidence = safeRaw(signal.evidence);
+  const failedRules = quantSignalFailedRules(signal, evidence);
+  const notes = evidenceStringArray(evidence.score_notes).map(readableStrategyScoreNote);
+  const breakdown = scoreBreakdownRows(evidence.score_breakdown);
+  const lowSuctionDays = getRawNumber(evidence, "low_suction_days");
+  const lowSuctionScore = getRawNumber(evidence, "low_suction_buildup_score");
+  const convergence = getRawNumber(evidence, "ma_convergence_pct");
+  const state = getRawText(evidence, "dragon_state");
+  const support = getRawText(evidence, "support_type");
+  const action = quantSignalAction(signal);
+  const isBuy = action === "BUY";
+
+  return (
+    <div className={cn("rounded-md border p-3 text-sm", compact ? "" : "mt-4")}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="font-medium">为什么这个分数</div>
+        <Badge variant={isBuy ? "secondary" : "outline"} className="rounded-md">
+          {action}
+        </Badge>
+      </div>
+      <div className="mt-2 text-xs text-muted-foreground">
+        总分 = 分项贡献相加后扣风险；低吸蓄势是同一回踩低吸策略里的连续加分，不是额外策略。
+      </div>
+      <div className="mt-3 grid gap-3 md:grid-cols-6">
+        <InfoCell label="评分日" value={signal.trade_date ?? "--"} />
+        <InfoCell label="总分" value={formatMaybeNumber(signal.total_score, 1)} valueClass={isBuy ? "text-rise" : undefined} />
+        <InfoCell label="状态" value={strategyDragonStateLabel(state)} />
+        <InfoCell label="低吸蓄势" value={lowSuctionDays == null ? "--" : `${lowSuctionDays.toFixed(0)} 天`} />
+        <InfoCell label="均线收敛" value={convergence == null ? "--" : formatPct(convergence)} />
+        <InfoCell label="候选" value={candidateLabelForSignal(signal, candidate)} />
+      </div>
+      <div className="mt-3 grid gap-3 md:grid-cols-4">
+        <InfoCell label="承接" value={strategySupportTypeLabel(support)} />
+        <InfoCell label="低吸蓄势分" value={lowSuctionScore == null ? "--" : formatNumber(lowSuctionScore, 1)} />
+        <InfoCell label="流动性" value={formatMaybeNumber(signal.liquidity_score, 1)} />
+        <InfoCell label="风险分" value={formatMaybeNumber(signal.risk_score, 1)} />
+      </div>
+      {notes.length ? (
+        <div className="mt-3 text-xs leading-6 text-muted-foreground">
+          {notes.join("；")}
+        </div>
+      ) : null}
+      <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+        {breakdown.map((row) => (
+          <div key={row.name} className="rounded-md border bg-muted/20 px-2 py-1.5">
+            <div className="text-xs text-muted-foreground">{row.name}</div>
+            <div className="mt-0.5 text-sm font-medium tabular-nums">
+              {row.score} * {row.weight} = {row.contribution}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 text-xs text-muted-foreground">
+        失败规则：{failedRules.length ? failedRules.map(strategyFailedRuleLabel).join("、") : "通过"}
+      </div>
     </div>
   );
 }
@@ -851,6 +932,30 @@ function formatMaybeNumber(value?: number | null, digits = 2) {
   return value == null ? "--" : formatNumber(value, digits);
 }
 
+function candidateLabelForSignal(signal?: SymbolQuantSignalRow | null, candidate?: { trade_date?: string | null; action?: string | null; rank?: number | null } | null) {
+  if (!signal?.trade_date) return "--";
+  if (!candidate) return "未找到同日候选";
+  if (candidate.trade_date !== signal.trade_date) return `最新候选 ${candidate.trade_date ?? "--"} ${candidate.action ?? "--"} #${candidate.rank ?? "--"}`;
+  return `${candidate.action ?? "--"} #${candidate.rank ?? "--"}`;
+}
+
+function quantSignalAction(signal?: SymbolQuantSignalRow | null) {
+  if (!signal) return "WATCH";
+  if (signal.action) return signal.action.toUpperCase();
+  if (signal.executable_entry_signal != null) return signal.executable_entry_signal ? "BUY" : "WATCH";
+  const evidence = safeRaw(signal.evidence);
+  return signal.entry_signal && !quantSignalFailedRules(signal, evidence).length ? "BUY" : "WATCH";
+}
+
+function isExecutableQuantSignal(signal?: SymbolQuantSignalRow | null) {
+  return quantSignalAction(signal) === "BUY";
+}
+
+function quantSignalFailedRules(signal: SymbolQuantSignalRow, evidence: Record<string, unknown>) {
+  if (Array.isArray(signal.failed_rules)) return signal.failed_rules.map((item) => String(item)).filter(Boolean);
+  return evidenceStringArray(evidence.failed_rules);
+}
+
 function latestQuantStateToReplay(state?: SymbolLatestQuantState): SymbolStrategyReplay | null {
   if (state?.status !== "ready" || !state.replay || state.replay.status === "not_generated") return null;
   return {
@@ -876,7 +981,7 @@ function quantStateToMarkers(state: SymbolLatestQuantState): KlineMarker[] {
   const markers = replay ? replayEventsToMarkers(replay) : [];
   const signal = state.signal?.latest_entry_signal;
   const hasExecutionMarker = markers.some((marker) => marker.markerKind === "trade" || marker.markerKind === "rejected");
-  if (!hasExecutionMarker && signal?.trade_date && !markers.some((marker) => marker.markerKind === "signal" && marker.signalDate === signal.trade_date)) {
+  if (isExecutableQuantSignal(signal) && !hasExecutionMarker && signal?.trade_date && !markers.some((marker) => marker.markerKind === "signal" && marker.signalDate === signal.trade_date)) {
     markers.push(quantSignalToMarker(signal, markers.length));
   }
   return dedupeMarkers(markers).sort((left, right) => {
@@ -1422,11 +1527,22 @@ function nextReturnForSell(
 function mergeMarkerSets(primary: KlineMarker[], fallback: KlineMarker[]): KlineMarker[] {
   const primaryHasExecutions = primary.some((marker) => marker.markerKind === "trade" || marker.markerKind === "rejected");
   const fallbackHasExecutions = fallback.some((marker) => marker.markerKind === "trade" || marker.markerKind === "rejected");
-  const merged = fallbackHasExecutions && !primaryHasExecutions ? [...fallback, ...primary] : [...primary, ...fallback];
+  const filteredFallback = primaryHasExecutions ? suppressLinkedPortfolioSignals(fallback) : fallback;
+  const merged = fallbackHasExecutions && !primaryHasExecutions ? [...filteredFallback, ...primary] : [...primary, ...filteredFallback];
   return dedupeMarkers(merged).sort((left, right) => {
     const dateCompare = left.time.localeCompare(right.time);
     if (dateCompare !== 0) return dateCompare;
     return markerSortRank(left) - markerSortRank(right);
+  });
+}
+
+function suppressLinkedPortfolioSignals(markers: KlineMarker[]): KlineMarker[] {
+  return markers.filter((marker) => {
+    if (marker.markerKind !== "signal") return true;
+    const raw = safeRaw(marker.raw);
+    const linkedOrder = raw.linked_order;
+    if (!linkedOrder || typeof linkedOrder !== "object" || Array.isArray(linkedOrder)) return true;
+    return (linkedOrder as Record<string, unknown>).status !== "filled";
   });
 }
 
@@ -1512,6 +1628,38 @@ function getRawNumber(raw: Record<string, unknown>, key: string) {
   return null;
 }
 
+function evidenceStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean) : [];
+}
+
+function scoreBreakdownRows(value: unknown): Array<{ name: string; score: string; weight: string; contribution: string }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const raw = item as Record<string, unknown>;
+    const name = String(raw.name ?? "");
+    if (!name) return [];
+    const score = numericValue(raw.score);
+    const weight = numericValue(raw.weight);
+    const contribution = numericValue(raw.contribution);
+    return [{
+      name,
+      score: score == null ? "--" : formatNumber(score, 1),
+      weight: weight == null ? "--" : `${formatNumber(weight * 100, 0)}%`,
+      contribution: contribution == null ? "--" : formatNumber(contribution, 2),
+    }];
+  });
+}
+
+function numericValue(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 function pushPctEvidence(
   rows: Array<{ label: string; value: string; valueClass?: string }>,
   label: string,
@@ -1547,6 +1695,57 @@ function exitReasonLabel(reason?: string | null) {
   if (reason === "time_stop") return "时间止损";
   if (reason === "entry_signal") return "入场信号";
   return reason || "--";
+}
+
+function strategyFailedRuleLabel(rule?: string | null) {
+  const labels: Record<string, string> = {
+    total_score: "分数不足",
+    strong_leg: "第一波强度不足",
+    pullback_structure: "回踩结构不足",
+    pullback_too_short: "回踩时间不足",
+    pullback_too_late: "回踩时间过长",
+    support_acceptance: "均线承接不足",
+    reclaim_confirmation: "弱转强确认不足",
+    low_suction_buildup: "低吸蓄势不足",
+    ma_convergence_too_wide_without_low_suction: "均线发散且缺少低吸蓄势",
+    weak_rebound_ma5_below_ma10: "MA5下穿MA10弱反抽",
+    distribution_risk: "高位派发风险",
+    pullback_too_deep: "回撤过深",
+    ma20_broken: "跌破MA20支撑",
+    overheat: "短期过热",
+    risk_score: "风险分不足",
+    liquidity_score: "流动性不足",
+  };
+  return rule ? labels[rule] ?? portfolioReasonLabel(rule) : "--";
+}
+
+function strategyDragonStateLabel(state?: string | null) {
+  const labels: Record<string, string> = {
+    TAIL_BUY_READY: "龙回头买点",
+    LOW_SUCTION_BUILDUP: "低吸蓄势",
+    SUPPORT_ACCEPTED: "均线承接",
+    PULLBACK_OBSERVE: "回踩观察",
+    STRONG_LEG_CONFIRMED: "强势确认",
+    DISTRIBUTION_RISK: "派发风险",
+    INVALIDATED: "破位失效",
+  };
+  return state ? labels[state] ?? state : "--";
+}
+
+function strategySupportTypeLabel(support?: string | null) {
+  const labels: Record<string, string> = {
+    ma5_reclaim: "MA5承接",
+    ma10_support: "MA10承接",
+    ma20_support: "MA20承接",
+    none: "未承接",
+  };
+  return support ? labels[support] ?? support : "--";
+}
+
+function readableStrategyScoreNote(note: string) {
+  if (note.startsWith("状态 ")) return `状态 ${strategyDragonStateLabel(note.slice(3))}`;
+  if (note.startsWith("承接 ")) return `承接 ${strategySupportTypeLabel(note.slice(3))}`;
+  return note;
 }
 
 function strategyStatusLabel(status?: string | null) {

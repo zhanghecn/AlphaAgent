@@ -85,7 +85,7 @@
 
 - 提供主线龙头分歧低吸的日线量化信号。
 - 持久化筛选会把高分候选同步到“量化候选”分组；只有 `action=BUY` 的推荐会被自动模拟建仓。
-- 提供日线组合回测和 `/api/backtests/{id}/report` 回测表接口；当前普通新建组合回测默认是 `strict_1430 / 1m / 14:30 / strict_entry=true`。规则为上一交易日可见候选生成 D+1 计划，D+1 只有在 14:30 的 1 分钟快照存在且满足尾盘条件时才成交；缺分钟线会拒单。`tail_close_hybrid` 只作为研究对比模型，缺分钟线时会标记 `daily_close_proxy` 收盘代理；旧 D+1 开盘口径只作为历史兼容/对比。
+- 提供日线组合回测和 `/api/backtests/{id}/report` 回测表接口；当前普通历史研究默认是 `legacy_next_open / strict_entry=true`。规则为 D 日收盘可见候选生成 D+1 计划，D+1 按日线开盘价执行。`strict_1430` 和 `tail_close_hybrid` 保留为实时/分钟数据层和旧报告兼容能力，不再是普通历史研究默认口径。
 - 股票详情页 `/stocks/:vtSymbol` 的单股信号复盘会把 BUY 信号、买入拒绝和买卖成交分开显示在 K 线上；最新单股回测会额外读取 `/api/backtests/{id}/audit`，因此即使 BUY 信号未成交也能看到信号日标记和执行日拒绝原因。
 - 单股信号复盘不再展示模拟账户金额、现金、权益、成交金额、数量、费用或盈亏金额；收益统计改为按成交价格直接计算闭合交易收益率：`sell_price / buy_price - 1`，汇总使用单笔收益率连乘。
 - `/api/backtests/{id}/minute-coverage` 返回 14:30 覆盖摘要，状态包括 `ready`、`mixed_proxy`、`missing_snapshots`、`strategy_not_triggered` 和 `empty`；前端 `/quant` 的“14:30覆盖”面板使用它快速判断某次回测是否可按真实 14:30 成交解读。
@@ -97,7 +97,7 @@
 - 量化、回测、持仓、模拟服务会在直接调用时创建 AlphaAgent 业务表，不依赖 API lifespan 单一路径。
 - 提供持仓分组、自选观察、量化候选、模拟持仓和黑名单基础能力。
 - 提供本地模拟账户、模拟订单、模拟成交、模拟持仓和风险事件查询。
-- 前端 `/quant` 页面展示量化候选、回测表和模拟持仓；候选页提供单一“生成区间候选”入口，从起始交易日到本地最新交易日逐日落库，回测页提供参数化运行回测、导出 CSV 和审计/钻取能力。
+- 前端 `/quant` 页面展示量化候选、回测表和模拟持仓；用户主操作是“刷新候选并回测”，后台内部从起始交易日到本地最新交易日逐日落库候选、生成买卖记录并运行组合回测。回测页只用于查看报告、导出 CSV 和审计/钻取能力。
 - `stock_minute_bars` 和 `sync_stock_minute_bars` 已加入，用于执行日 14:30 快照的分钟级入场验证；普通量化入口和 `/data` 回测缺口补数表单只展示 14:30 单点快照。当前单股历史复盘口径下，历史日期缺 14:30 分钟线可用执行日日线收盘价代理尾盘价格，今日缺快照才等待数据补齐/拒绝；若代理价距离信号日 MA5 超过容忍度，会标记 `tail_entry_not_triggered` 而不是误写成缺分钟。`tail_close_hybrid` 研究对比模型缺分钟线时也会标记 `daily_close_proxy`；旧 14:30-14:57 窗口仅保留后端兼容/历史排查。
 - `sync_stock_minute_bars` 支持 `symbols`、`start_date`、`end_date` 参数；当前公共 EastMoney 分钟源不能可靠回填指定历史日，AkShare adapter 会过滤区间外分钟线，避免把最近分钟数据误写进历史回测窗口。
 - `/api/data-sync/imports/minute-bars/template.csv` 和 `/api/data-sync/imports/minute-bars` 已加入，可用外部 CSV 补 `stock_minute_bars` 历史分钟线，支持 `dry_run` 预检查。

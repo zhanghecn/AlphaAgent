@@ -6,6 +6,7 @@ from datetime import date
 from typing import Any, Callable
 
 from alphaagent.server.services.backtest.schemas import BacktestParams, ScoreContext
+from alphaagent.server.services.quant import screening_payloads
 from alphaagent.server.services.quant.strategy_registry import score_strategy
 
 
@@ -25,7 +26,7 @@ def score_day(
         scores = score_cache[trade_date]
     else:
         scorer = score_candidates_for_day or globals()["score_candidates_for_day"]
-        scores = scorer(session, bars_by_symbol, trade_date, params, score_context)
+        scores = scorer(session, bars_with_signal_date(bars_by_symbol, trade_date), trade_date, params, score_context)
         if score_cache is not None:
             score_cache[trade_date] = scores
     candidates = [score for score in scores if is_buy_candidate(score, params)]
@@ -80,15 +81,33 @@ def score_candidates_for_day(
     return scores
 
 
+def bars_with_signal_date(bars_by_symbol: dict[str, list[Any]], trade_date: date) -> dict[str, list[Any]]:
+    """Keep symbols whose latest visible bar is exactly the signal date."""
+
+    result = {}
+    for vt_symbol, bars in bars_by_symbol.items():
+        visible = [bar for bar in bars if bar.trade_date <= trade_date]
+        if visible and visible[-1].trade_date == trade_date:
+            result[vt_symbol] = visible
+    return result
+
+
 def is_buy_candidate(score, params: BacktestParams) -> bool:
     """Return whether a score is eligible for portfolio buy planning."""
 
     if score.evidence.get("status") != "ready":
         return False
-    if score.total_score < params.min_entry_score:
-        return False
     if score.risk_score < 35 or score.liquidity_score < 25:
         return False
     if params.strict_entry:
-        return bool(score.entry_signal)
+        return is_executable_entry_signal(score, params.min_entry_score)
+    if score.total_score < screening_payloads.effective_entry_score_threshold(score, params.min_entry_score):
+        return False
     return True
+
+
+def is_executable_entry_signal(score, min_entry_score: float) -> bool:
+    return bool(
+        getattr(score, "entry_signal", False)
+        and not screening_payloads.failed_entry_rules(score, min_entry_score)
+    )

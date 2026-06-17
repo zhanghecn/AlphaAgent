@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { BarChart3, Download } from "lucide-react";
 import type { BacktestRun, QuantStrategyOption } from "@/api/quant";
 import {
@@ -24,11 +26,9 @@ import {
   BacktestWorstTrades,
 } from "@/features/quant/BacktestTables";
 import { BacktestDrilldownPanel } from "@/features/quant/BacktestDrilldownPanel";
-import { BacktestSignalEventsPanel } from "@/features/quant/BacktestSignalEventsPanel";
 import { BacktestDataQualityPanel } from "@/features/quant/BacktestDataQualityPanel";
 import {
   BacktestDataAsOfAuditPanel,
-  BacktestExecutionQualityPanel,
   BacktestRealityStats,
   BacktestRobustnessPanel,
   BacktestValidationGridPanel,
@@ -43,9 +43,6 @@ export function BacktestPanel({
   strategies,
   selectedStrategy,
   report,
-  dataQuality,
-  isDataQualityLoading,
-  audit,
   isLoading,
   isError,
   onRetry,
@@ -61,9 +58,6 @@ export function BacktestPanel({
   strategies: QuantStrategyOption[];
   selectedStrategy: string;
   report?: Awaited<ReturnType<typeof fetchBacktestReport>>;
-  dataQuality?: Awaited<ReturnType<typeof fetchBacktestDataQuality>>;
-  isDataQualityLoading: boolean;
-  audit?: Awaited<ReturnType<typeof fetchBacktestAudit>>;
   isLoading: boolean;
   isError: boolean;
   onRetry: () => void;
@@ -73,6 +67,29 @@ export function BacktestPanel({
   onAddToPortfolio?: (vtSymbol: string) => void;
 }) {
   const selectedRun = runs.find((item) => item.id === selectedId) ?? runs[0] ?? null;
+  const [activeDetailTab, setActiveDetailTab] = useState("trades");
+  const shouldLoadValidation = Boolean(selectedId && activeDetailTab === "validation");
+  const validationReportQuery = useQuery({
+    queryKey: ["backtestReport", selectedId, "analysis"],
+    queryFn: () => fetchBacktestReport(selectedId!, 80, { includeAnalysis: true }),
+    enabled: shouldLoadValidation,
+    staleTime: 60_000,
+  });
+  const validationReport = validationReportQuery.data ?? report;
+  const dataQualityQuery = useQuery({
+    queryKey: ["backtestDataQuality", selectedId],
+    queryFn: () => fetchBacktestDataQuality(selectedId!),
+    enabled: shouldLoadValidation,
+    staleTime: 60_000,
+  });
+  const auditQuery = useQuery({
+    queryKey: ["backtestAudit", selectedId],
+    queryFn: () => fetchBacktestAudit(selectedId!, undefined, 120),
+    enabled: shouldLoadValidation,
+    staleTime: 60_000,
+  });
+  const validationAnalysisLoading =
+    activeDetailTab === "validation" && validationReportQuery.isFetching && !validationReportQuery.data;
   if (isLoading && !selectedRun) return <LoadingState rows={5} />;
   if (isError) return <ErrorState message="加载回测报告失败" onRetry={onRetry} />;
 
@@ -99,7 +116,7 @@ export function BacktestPanel({
           >
             {runs.map((run) => (
               <option key={run.id} value={run.id}>
-                #{run.id} {run.start_date} - {run.end_date}
+                #{run.id} {run.start_date} - {run.end_date} / {run.strategy_version}
               </option>
             ))}
           </select>
@@ -124,12 +141,9 @@ export function BacktestPanel({
           )
         ) : (
           <>
-            <BacktestSummary report={report} audit={audit} />
-            <BacktestDataQualityPanel quality={dataQuality} isLoading={isDataQualityLoading} />
-
+            <BacktestSummary report={report} audit={auditQuery.data} />
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
               <section className="space-y-4">
-                {report.execution_quality && <BacktestExecutionQualityPanel quality={report.execution_quality} />}
                 <BacktestTradeTable backtestId={selectedId} trades={report.recent_trades ?? report.trades} total={report.trade_count} />
                 <SignalCardList trades={report.recent_trades ?? report.trades} />
               </section>
@@ -139,19 +153,24 @@ export function BacktestPanel({
               </section>
             </div>
 
-            <Tabs defaultValue="validation" className="space-y-3">
+            <Tabs value={activeDetailTab} onValueChange={setActiveDetailTab} className="space-y-3">
               <TabsList className="h-auto rounded-none bg-transparent p-0">
                 <TabsTrigger value="validation" className="rounded-none px-3 py-2 shadow-none">验证</TabsTrigger>
                 <TabsTrigger value="trades" className="rounded-none px-3 py-2 shadow-none">交易归因</TabsTrigger>
-                <TabsTrigger value="signals" className="rounded-none px-3 py-2 shadow-none">信号计划</TabsTrigger>
                 <TabsTrigger value="months" className="rounded-none px-3 py-2 shadow-none">收益分段</TabsTrigger>
               </TabsList>
               <TabsContent value="validation" className="space-y-4">
-                {report.data_as_of_audit && <BacktestDataAsOfAuditPanel audit={report.data_as_of_audit} />}
-                {report.benchmark && <BacktestBenchmarkTable benchmarks={report.benchmark.benchmarks} />}
-                {report.period_analysis && <BacktestPeriodTable analysis={report.period_analysis} />}
-                {report.regime_analysis && <BacktestRegimeTable analysis={report.regime_analysis} />}
-                {report.robustness_checks && <BacktestRobustnessPanel checks={report.robustness_checks} />}
+                <BacktestDataQualityPanel quality={dataQualityQuery.data} isLoading={dataQualityQuery.isLoading} />
+                {validationAnalysisLoading && (
+                  <div className="rounded-lg border p-3 text-sm text-muted-foreground">
+                    正在加载深度验证数据，回测收益和交易归因已可先查看。
+                  </div>
+                )}
+                {validationReport?.data_as_of_audit && <BacktestDataAsOfAuditPanel audit={validationReport.data_as_of_audit} />}
+                {validationReport?.benchmark && <BacktestBenchmarkTable benchmarks={validationReport.benchmark.benchmarks} />}
+                {validationReport?.period_analysis && <BacktestPeriodTable analysis={validationReport.period_analysis} />}
+                {validationReport?.regime_analysis && <BacktestRegimeTable analysis={validationReport.regime_analysis} />}
+                {validationReport?.robustness_checks && <BacktestRobustnessPanel checks={validationReport.robustness_checks} />}
                 {selectedId && (
                   <BacktestValidationGridPanel
                     backtestId={selectedId}
@@ -165,17 +184,6 @@ export function BacktestPanel({
                 {selectedId && <BacktestDrilldownPanel backtestId={selectedId} report={report} />}
                 <BacktestSymbolTable rows={report.symbol_performance ?? []} onAddToPortfolio={onAddToPortfolio} />
                 <BacktestWorstTrades rows={report.worst_trades ?? []} />
-              </TabsContent>
-              <TabsContent value="signals" className="space-y-4">
-                {selectedId && (
-                  <BacktestSignalEventsPanel
-                    backtestId={selectedId}
-                    defaultCapital={params.initial_cash}
-                    defaultMaxPositions={params.max_positions}
-                    defaultStart={report.start_date}
-                    defaultEnd={report.end_date}
-                  />
-                )}
               </TabsContent>
               <TabsContent value="months">
                 <BacktestMonthlyTable rows={report.monthly_returns ?? []} />

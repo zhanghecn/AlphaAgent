@@ -8,7 +8,13 @@ from typing import Any, Callable
 
 from alphaagent.server.services.backtest import ledger, scoring
 from alphaagent.server.services.backtest.schemas import BacktestParams, MinuteBar, Position, ScoreContext, Trade
+from alphaagent.server.services.quant import candidate_lanes
 from alphaagent.server.services.quant.factors import Bar, DRAGON_PULLBACK_STRATEGY_ID, evaluate_exit
+
+STEALTH_LOW_SUCTION_ROTATION_MIN_SCORE = 90.0
+STEALTH_LOW_SUCTION_ROTATION_MIN_HOLDING_DAYS = 5
+STEALTH_LOW_SUCTION_ROTATION_MAX_HOLDING_RETURN_PCT = -1.0
+STEALTH_LOW_SUCTION_ROTATION_MAX_PORTFOLIO_DRAWDOWN_PCT = -8.0
 
 
 @dataclass(frozen=True)
@@ -217,6 +223,7 @@ def simulate_portfolio(
                 entry_date=current_day,
                 highest_price=bar.high_price,
                 reason=entry_reason,
+                last_price=bar.close_price,
             )
             orders.append(callbacks.order(current_day, order["vt_symbol"], "BUY", fill_price, volume, "filled", "entry_signal", fill))
             trades.append(Trade(current_day, order["vt_symbol"], "BUY", fill_price, volume, amount, fee, None, "entry_signal", entry_reason))
@@ -228,6 +235,7 @@ def simulate_portfolio(
             bar = today_bars.get(vt_symbol)
             if not bar:
                 continue
+            position.last_price = bar.close_price
             position.highest_price = max(position.highest_price, bar.high_price)
             sell_reason = sell_reason_for_position(position, bar, current_day, params)
             if not sell_reason:
@@ -335,8 +343,9 @@ def schedule_entry_plans(
 ) -> None:
     pending_buy_symbols = {str(order["vt_symbol"]) for order in pending_buys}
     pending_sell_symbols = {str(order["vt_symbol"]) for order in pending_sells}
+    pool_context = candidate_lanes.execution_pool_context(candidates, params.candidate_limit, params.strategy)
 
-    for candidate in candidates[: params.candidate_limit]:
+    for candidate in execution_candidate_pool(candidates, params):
         vt_symbol = str(candidate.vt_symbol)
         if vt_symbol in positions or vt_symbol in pending_buy_symbols:
             continue
@@ -346,13 +355,14 @@ def schedule_entry_plans(
             replacement = rotation_replacement_for_candidate(candidate, positions, pending_sell_symbols, today_bars, params, signal_date)
             if replacement is None:
                 continue
+            rotation_reason = rotation_reason_for_candidate(candidate)
             pending_sells.append(
                 {
                     "execute_date": execute_date,
                     "signal_date": signal_date,
                     "vt_symbol": replacement.vt_symbol,
-                    "reason": "rotation_for_stronger_signal",
-                    "raw": rotation_sell_raw(candidate, replacement, signal_date, execute_date, today_bars.get(replacement.vt_symbol)),
+                    "reason": rotation_reason,
+                    "raw": rotation_sell_raw(candidate, replacement, signal_date, execute_date, today_bars.get(replacement.vt_symbol), rotation_reason),
                 }
             )
             pending_sell_symbols.add(replacement.vt_symbol)
@@ -362,7 +372,7 @@ def schedule_entry_plans(
                 "execute_date": execute_date,
                 "signal_date": signal_date,
                 "vt_symbol": vt_symbol,
-                "reason": candidate_entry_reason(candidate),
+                "reason": candidate_entry_reason(candidate, pool_context.get(vt_symbol)),
             }
         )
         pending_buy_symbols.add(vt_symbol)
@@ -378,6 +388,16 @@ def rotation_replacement_for_candidate(
 ) -> Position | None:
     if not allow_signal_rotation(candidate, params):
         return None
+    if is_stealth_low_suction_rotation_candidate(candidate):
+        if portfolio_drawdown_pct(positions, today_bars, params.initial_cash) > STEALTH_LOW_SUCTION_ROTATION_MAX_PORTFOLIO_DRAWDOWN_PCT:
+            return None
+        return low_efficiency_replacement_for_stealth_low_suction(
+            positions,
+            pending_sell_symbols,
+            today_bars,
+            params,
+            signal_date,
+        )
 
     candidate_score = float(getattr(candidate, "total_score", 0) or 0)
     replacement_rows: list[tuple[float, float, Position]] = []
@@ -393,7 +413,7 @@ def rotation_replacement_for_candidate(
         if holding_return_pct > params.rotation_max_holding_return_pct:
             continue
         entry_score = entry_score_for_position(position)
-        if candidate_score < entry_score:
+        if candidate_score < entry_score + params.rotation_min_score_gap:
             continue
         replacement_rows.append((holding_return_pct, entry_score, position))
     if not replacement_rows:
@@ -402,11 +422,17 @@ def rotation_replacement_for_candidate(
     return replacement_rows[0][2]
 
 
+def execution_candidate_pool(candidates: list[Any], params: BacktestParams) -> list[Any]:
+    return candidate_lanes.select_dragon_pullback_execution_pool(candidates, params.candidate_limit, params.strategy)
+
+
 def allow_signal_rotation(candidate: Any, params: BacktestParams) -> bool:
     if params.strategy != DRAGON_PULLBACK_STRATEGY_ID or not params.enable_signal_rotation:
         return False
     if not bool(getattr(candidate, "entry_signal", False)):
         return False
+    if is_stealth_low_suction_rotation_candidate(candidate):
+        return True
     if float(getattr(candidate, "total_score", 0) or 0) < params.rotation_min_score:
         return False
     evidence = getattr(candidate, "evidence", {}) or {}
@@ -417,25 +443,110 @@ def allow_signal_rotation(candidate: Any, params: BacktestParams) -> bool:
     return True
 
 
+def low_efficiency_replacement_for_stealth_low_suction(
+    positions: dict[str, Position],
+    pending_sell_symbols: set[str],
+    today_bars: dict[str, Bar],
+    params: BacktestParams,
+    signal_date: date | None,
+) -> Position | None:
+    replacement_rows: list[tuple[float, int, float, Position]] = []
+    min_holding_days = max(params.rotation_min_holding_days, STEALTH_LOW_SUCTION_ROTATION_MIN_HOLDING_DAYS)
+    for vt_symbol, position in positions.items():
+        if vt_symbol in pending_sell_symbols:
+            continue
+        if signal_date is not None and (signal_date - position.entry_date).days < min_holding_days:
+            continue
+        bar = today_bars.get(vt_symbol)
+        if not bar:
+            continue
+        holding_return_pct = position_return_pct(position, bar)
+        if holding_return_pct > STEALTH_LOW_SUCTION_ROTATION_MAX_HOLDING_RETURN_PCT:
+            continue
+        holding_days = (signal_date - position.entry_date).days if signal_date else 0
+        replacement_rows.append((holding_return_pct, -holding_days, entry_score_for_position(position), position))
+    if not replacement_rows:
+        return None
+    replacement_rows.sort(key=lambda item: (item[0], item[1], item[2], item[3].vt_symbol))
+    return replacement_rows[0][3]
+
+
+def is_stealth_low_suction_rotation_candidate(candidate: Any) -> bool:
+    if not bool(getattr(candidate, "entry_signal", False)):
+        return False
+    if float(getattr(candidate, "total_score", 0) or 0) < STEALTH_LOW_SUCTION_ROTATION_MIN_SCORE:
+        return False
+    evidence = getattr(candidate, "evidence", {}) or {}
+    setup = str(evidence.get("entry_setup") or evidence.get("setup_type") or "")
+    if setup != "stealth_low_suction":
+        return False
+    if _float_or_none(evidence.get("low_suction_days")) is None or float(evidence.get("low_suction_days") or 0) < 3:
+        return False
+    if float(evidence.get("low_suction_buildup_score") or 0) < 95:
+        return False
+    if float(evidence.get("stealth_low_suction_score") or 0) < 95:
+        return False
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    if ma_convergence is None or ma_convergence > 4.0:
+        return False
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    if volume_ratio is None or not (0.55 <= volume_ratio <= 1.45):
+        return False
+    ma20_distance = _float_or_none(evidence.get("ma20_distance_pct"))
+    if ma20_distance is None or ma20_distance < -2.5:
+        return False
+    hard_failures = {
+        "distribution_risk",
+        "weak_rebound_ma5_below_ma10",
+        "ma20_broken",
+        "pullback_too_deep",
+        "liquidity_score",
+        "risk_score",
+        "overheat",
+    }
+    failures = {str(rule) for rule in (evidence.get("failed_rules") or [])}
+    risk_flags = {str(flag) for flag in (evidence.get("risk_flags") or [])}
+    return not (failures & hard_failures or risk_flags & hard_failures)
+
+
+def stealth_low_suction_rotation_key(candidate: Any) -> tuple[float, float, float, float, str]:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    return (
+        -float(evidence.get("stealth_low_suction_score") or 0),
+        -float(evidence.get("low_suction_buildup_score") or 0),
+        -float(evidence.get("low_suction_days") or 0),
+        ma_convergence if ma_convergence is not None else 999.0,
+        str(getattr(candidate, "vt_symbol", "")),
+    )
+
+
 def rotation_sell_raw(
     candidate: Any,
     replacement: Position,
     signal_date: date,
     execute_date: date,
     bar: Bar | None,
+    reason: str = "rotation_for_stronger_signal",
 ) -> dict[str, Any]:
     holding_return_pct = position_return_pct(replacement, bar) if bar else None
     return {
-        "mode": "rotation_for_stronger_signal",
+        "mode": reason,
         "signal_date": signal_date.isoformat(),
         "execute_date": execute_date.isoformat(),
         "entry_date": replacement.entry_date.isoformat(),
-        "reason": "rotation_for_stronger_signal",
+        "reason": reason,
         "replacement_symbol": str(candidate.vt_symbol),
         "replacement_score": float(getattr(candidate, "total_score", 0) or 0),
         "replaced_entry_score": entry_score_for_position(replacement),
         "holding_return_pct": holding_return_pct,
     }
+
+
+def rotation_reason_for_candidate(candidate: Any) -> str:
+    if is_stealth_low_suction_rotation_candidate(candidate):
+        return "rotation_for_stealth_low_suction"
+    return "rotation_for_stronger_signal"
 
 
 def entry_score_for_position(position: Position) -> float:
@@ -453,10 +564,21 @@ def position_return_pct(position: Position, bar: Bar) -> float:
     return (bar.close_price / position.cost_price - 1) * 100
 
 
-def candidate_entry_reason(candidate: Any) -> dict[str, Any]:
+def portfolio_drawdown_pct(positions: dict[str, Position], today_bars: dict[str, Bar], initial_cash: float) -> float:
+    if not initial_cash:
+        return 0.0
+    total_cost = sum(position.cost_price * position.volume for position in positions.values())
+    cash_proxy = max(float(initial_cash) - total_cost, 0.0)
+    equity = cash_proxy + market_value(positions, today_bars)
+    return (equity / float(initial_cash) - 1) * 100
+
+
+def candidate_entry_reason(candidate: Any, execution_context: dict[str, Any] | None = None) -> dict[str, Any]:
     evidence = dict(getattr(candidate, "evidence", {}) or {})
     evidence.setdefault("entry_total_score", float(getattr(candidate, "total_score", 0) or 0))
     evidence.setdefault("entry_signal_type", str(getattr(candidate, "signal_type", "") or ""))
+    if execution_context:
+        evidence["candidate_execution"] = dict(execution_context)
     return evidence
 
 
@@ -473,6 +595,7 @@ def signal_events_for_day(
     callbacks: SimulationCallbacks,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    pool_context = candidate_lanes.execution_pool_context(scores, params.candidate_limit, params.strategy)
     for vt_symbol, position in list(theoretical_positions.items()):
         bar = today_bars.get(vt_symbol)
         if not bar:
@@ -548,6 +671,7 @@ def signal_events_for_day(
             **buy_fill,
             "entry_signal": bool(score.entry_signal),
             "evidence": score.evidence,
+            "candidate_execution": pool_context.get(str(score.vt_symbol)),
         }
         rows.append(
             {
@@ -572,6 +696,7 @@ def signal_events_for_day(
             entry_date=execute_date,
             highest_price=execute_bar.high_price,
             reason={**score.evidence, "execution": buy_fill},
+            last_price=execute_bar.close_price,
         )
     rows.sort(key=lambda item: (item["trade_date"], item["vt_symbol"], 0 if item["side"] == "BUY" else 1))
     return rows
@@ -606,14 +731,26 @@ def dragon_pullback_sell_reason(position: Position, bar: Bar, current_day: date,
     ma10 = _float_or_none(reason.get("ma10"))
     ma20 = _float_or_none(reason.get("ma20"))
     entry_support = _float_or_none(reason.get("support_price"))
+    max_drawdown_60d = _float_or_none(reason.get("max_drawdown_60d"))
+    fragile_entry = max_drawdown_60d is not None and max_drawdown_60d <= -25.0
+    gain = bar.close_price / cost_price - 1 if cost_price else 0
     support_stop = entry_support * 0.965 if entry_support else None
+    if fragile_entry and gain < 0.04:
+        if bar.close_price <= cost_price * 0.95:
+            return "fragile_structure_stop"
+        if entry_support is not None and bar.close_price <= entry_support * 0.98:
+            return "fragile_structure_stop"
     if support_stop is not None and bar.close_price <= support_stop:
         return "support_stop"
     if ma20 is not None and bar.close_price < ma20 * 0.97 and current_day > position.entry_date:
         return "trend_break"
 
-    gain = bar.close_price / cost_price - 1 if cost_price else 0
     drawdown_from_high = bar.close_price / position.highest_price - 1 if position.highest_price else 0
+    high_gain = position.highest_price / cost_price - 1 if cost_price and position.highest_price else 0
+    if high_gain >= 0.25 and gain <= 0.12 and drawdown_from_high <= -0.12:
+        return "profit_protection_stop"
+    if high_gain >= 0.18 and gain <= 0.08 and drawdown_from_high <= -0.10:
+        return "profit_protection_stop"
     if gain >= 0.30 and drawdown_from_high <= -0.10:
         return "trend_trailing_stop"
     if gain >= 0.18 and drawdown_from_high <= -0.12:
@@ -635,8 +772,10 @@ def market_value(positions: dict[str, Position], today_bars: dict[str, Bar]) -> 
         bar = today_bars.get(vt_symbol)
         if bar:
             value += bar.close_price * position.volume
+            position.last_price = bar.close_price
         else:
-            value += position.cost_price * position.volume
+            fallback_price = position.last_price if position.last_price is not None else position.cost_price
+            value += fallback_price * position.volume
     return value
 
 
@@ -649,7 +788,11 @@ def position_snapshot_rows(
     rows = []
     for vt_symbol, position in sorted(positions.items()):
         bar = today_bars.get(vt_symbol)
-        close_price = bar.close_price if bar else position.cost_price
+        if bar:
+            close_price = bar.close_price
+            position.last_price = close_price
+        else:
+            close_price = position.last_price if position.last_price is not None else position.cost_price
         current_market_value = close_price * position.volume
         cost_amount = position.cost_price * position.volume
         floating_pnl = current_market_value - cost_amount

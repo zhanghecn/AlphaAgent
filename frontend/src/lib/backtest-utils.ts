@@ -120,7 +120,7 @@ export function metricColor(key: string, value: number | null): string {
 }
 
 /** Minimum strategy version considered trustworthy for backtest results. */
-export const MIN_TRUSTED_BACKTEST_VERSION = "0.1.1";
+export const MIN_TRUSTED_BACKTEST_VERSION = "0.1.8";
 
 /**
  * Assess the trustworthiness of a backtest report.

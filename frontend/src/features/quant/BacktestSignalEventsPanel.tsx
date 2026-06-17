@@ -1,30 +1,24 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Search } from "lucide-react";
-import { fetchBacktestEquity, fetchBacktestSignalAmountPreview, fetchBacktestSignalEvents } from "@/api/quant";
+import { fetchBacktestEquity, fetchBacktestSignalEvents } from "@/api/quant";
 import { EmptyState } from "@/components/EmptyState";
 import { InfoCell } from "@/components/InfoCell";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { TradingDateSelector } from "@/features/quant/TradingDateSelector";
-import { cn, formatAmount, formatPrice, priceColorClass } from "@/lib/utils";
+import { formatPrice } from "@/lib/utils";
 
 export function BacktestSignalEventsPanel({
   backtestId,
-  defaultCapital,
-  defaultMaxPositions,
   defaultStart,
   defaultEnd,
 }: {
   backtestId: number;
-  defaultCapital: number;
-  defaultMaxPositions: number;
   defaultStart?: string;
   defaultEnd?: string;
 }) {
-  const [capital, setCapital] = useState(defaultCapital);
-  const [maxPositions, setMaxPositions] = useState(defaultMaxPositions);
   const [symbol, setSymbol] = useState("");
   const [side, setSide] = useState("");
   const [start, setStart] = useState(defaultStart ?? "");
@@ -32,11 +26,9 @@ export function BacktestSignalEventsPanel({
   const normalizedSymbol = symbol.trim().toUpperCase();
 
   useEffect(() => {
-    setCapital(defaultCapital);
-    setMaxPositions(defaultMaxPositions);
     setStart(defaultStart ?? "");
     setEnd(defaultEnd ?? "");
-  }, [backtestId, defaultCapital, defaultMaxPositions, defaultStart, defaultEnd]);
+  }, [backtestId, defaultStart, defaultEnd]);
 
   const equityQuery = useQuery({
     queryKey: ["backtestEquity", backtestId],
@@ -52,23 +44,8 @@ export function BacktestSignalEventsPanel({
     staleTime: 30_000,
   });
 
-  const previewQuery = useQuery({
-    queryKey: ["backtestSignalAmountPreview", backtestId, capital, maxPositions, normalizedSymbol, side, start, end],
-    queryFn: () =>
-      fetchBacktestSignalAmountPreview(backtestId, {
-        capital,
-        max_positions: maxPositions,
-        vt_symbol: normalizedSymbol,
-        side,
-        start,
-        end,
-        limit: 500,
-      }),
-    enabled: Boolean(backtestId && capital > 0 && maxPositions > 0),
-    staleTime: 20_000,
-  });
-
-  const rows = useMemo(() => previewQuery.data?.items ?? [], [previewQuery.data?.items]);
+  const rows = useMemo(() => eventsQuery.data?.items ?? [], [eventsQuery.data?.items]);
+  const stats = useMemo(() => signalPlanStats(rows), [rows]);
   const tradingDates = useMemo(() => {
     const equityDates = equityQuery.data?.items.map((item) => item.trade_date) ?? [];
     return Array.from(new Set([...equityDates, defaultStart, defaultEnd, start, end].filter(Boolean) as string[]));
@@ -80,49 +57,26 @@ export function BacktestSignalEventsPanel({
         <div>
           <h3 className="text-sm font-semibold">全股票信号计划</h3>
           <div className="mt-1 text-xs text-muted-foreground">
-            覆盖回测区间内逐日重新选股后的理论信号；金额按总资金等权预览，真实成交以订单和组合资金曲线为准。
+            覆盖回测区间内逐日重新选股后的理论买卖信号；真实成交看订单状态和原因。
           </div>
         </div>
         <Button
           size="sm"
           variant="outline"
-          onClick={() => {
-            eventsQuery.refetch();
-            previewQuery.refetch();
-          }}
+          onClick={() => eventsQuery.refetch()}
         >
           <Search size={14} />
           查询
         </Button>
       </div>
 
-      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-8">
-        <label className="text-xs text-muted-foreground">
-          总资金
-          <input
-            className="mt-1 h-8 w-full rounded-md border bg-background px-2 text-sm"
-            type="number"
-            min={1}
-            value={capital}
-            onChange={(event) => setCapital(Number(event.target.value) || 0)}
-          />
-        </label>
-        <label className="text-xs text-muted-foreground">
-          最大持仓
-          <input
-            className="mt-1 h-8 w-full rounded-md border bg-background px-2 text-sm"
-            type="number"
-            min={1}
-            value={maxPositions}
-            onChange={(event) => setMaxPositions(Number(event.target.value) || 1)}
-          />
-        </label>
+      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-6">
         <TradingDateSelector
           label="开始日期"
           value={start}
           dates={tradingDates}
           onChange={setStart}
-          className="items-start gap-1 text-xs text-muted-foreground xl:col-span-2"
+          className="items-start gap-1 text-xs text-muted-foreground"
           selectClassName="mt-1 w-full min-w-0"
         />
         <TradingDateSelector
@@ -130,7 +84,7 @@ export function BacktestSignalEventsPanel({
           value={end}
           dates={tradingDates}
           onChange={setEnd}
-          className="items-start gap-1 text-xs text-muted-foreground xl:col-span-2"
+          className="items-start gap-1 text-xs text-muted-foreground"
           selectClassName="mt-1 w-full min-w-0"
         />
         <label className="text-xs text-muted-foreground">
@@ -157,10 +111,10 @@ export function BacktestSignalEventsPanel({
       </div>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <InfoCell label="信号计划" value={`${previewQuery.data?.source_count ?? eventsQuery.data?.returned_count ?? rows.length} / 显示 ${rows.length}`} />
-        <InfoCell label="每笔预算" value={formatAmount(previewQuery.data?.per_trade_budget)} />
-        <InfoCell label="总资金" value={formatAmount(previewQuery.data?.capital ?? capital)} />
-        <InfoCell label="最大持仓" value={previewQuery.data?.max_positions ?? maxPositions} />
+        <InfoCell label="信号计划" value={`${eventsQuery.data?.returned_count ?? rows.length} / 显示 ${rows.length}`} />
+        <InfoCell label="买入信号" value={`${stats.buyCount} 条`} />
+        <InfoCell label="卖出信号" value={`${stats.sellCount} 条`} />
+        <InfoCell label="已成交/拒绝" value={`${stats.filledCount} / ${stats.rejectedCount}`} />
       </div>
 
       {eventsQuery.data?.note && <div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">{eventsQuery.data.note}</div>}
@@ -176,9 +130,7 @@ export function BacktestSignalEventsPanel({
                 <TableHead>股票</TableHead>
                 <TableHead>方向</TableHead>
                 <TableHead className="text-right">价格</TableHead>
-                <TableHead className="text-right">数量</TableHead>
-                <TableHead className="text-right">金额</TableHead>
-                <TableHead className="text-right">盈亏</TableHead>
+                <TableHead className="text-right">评分</TableHead>
                 <TableHead>订单</TableHead>
                 <TableHead>原因</TableHead>
               </TableRow>
@@ -192,11 +144,7 @@ export function BacktestSignalEventsPanel({
                   </TableCell>
                   <TableCell>{row.side === "BUY" ? "买入" : "卖出"}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatPrice(row.price)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{row.preview_volume.toLocaleString()}</TableCell>
-                  <TableCell className="text-right tabular-nums">{formatAmount(row.preview_amount)}</TableCell>
-                  <TableCell className={cn("text-right tabular-nums", priceColorClass(row.preview_pnl))}>
-                    {formatAmount(row.preview_pnl)}
-                  </TableCell>
+                  <TableCell className="text-right tabular-nums">{formatScore(row.score)}</TableCell>
                   <TableCell className="text-muted-foreground">{row.plan_status_label ?? orderLinkLabel(row.linked_order_status)}</TableCell>
                   <TableCell className="text-muted-foreground">{signalReasonText(row)}</TableCell>
                 </TableRow>
@@ -207,6 +155,25 @@ export function BacktestSignalEventsPanel({
       )}
     </section>
   );
+}
+
+function signalPlanStats(rows: Array<{ side?: string | null; linked_order_status?: string | null }>) {
+  let buyCount = 0;
+  let sellCount = 0;
+  let filledCount = 0;
+  let rejectedCount = 0;
+  for (const row of rows) {
+    const side = String(row.side ?? "").toUpperCase();
+    if (side === "BUY") buyCount += 1;
+    if (side === "SELL") sellCount += 1;
+    if (row.linked_order_status === "filled") filledCount += 1;
+    if (row.linked_order_status === "rejected") rejectedCount += 1;
+  }
+  return { buyCount, sellCount, filledCount, rejectedCount };
+}
+
+function formatScore(value?: number | null) {
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(1) : "--";
 }
 
 function orderLinkLabel(status?: string | null) {

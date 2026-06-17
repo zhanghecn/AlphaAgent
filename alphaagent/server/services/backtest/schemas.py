@@ -27,7 +27,7 @@ class BacktestParams:
     trailing_stop_pct: float = 0.08
     time_stop_days: int = 15
     candidate_limit: int = 20
-    max_symbols: int = 500
+    max_symbols: int = 5000
     min_entry_score: float = 68.0
     strict_entry: bool = True
     execution_model: str = "legacy_next_open"
@@ -38,9 +38,9 @@ class BacktestParams:
     tail_entry_end: str = "14:30"
     tail_entry_ma5_tolerance_pct: float = 1.5
     enable_signal_rotation: bool = True
-    rotation_min_score: float = 95.0
+    rotation_min_score: float = 98.0
     rotation_min_score_gap: float = 8.0
-    rotation_max_holding_return_pct: float = 8.0
+    rotation_max_holding_return_pct: float = 3.0
     rotation_min_holding_days: int = 3
     persist: bool = False
     symbols: list[str] | None = None
@@ -76,6 +76,7 @@ class Position:
     entry_date: date
     highest_price: float
     reason: dict[str, Any]
+    last_price: float | None = None
 
 
 @dataclass

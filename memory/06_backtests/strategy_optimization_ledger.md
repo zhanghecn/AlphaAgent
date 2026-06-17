@@ -1,0 +1,76 @@
+# Strategy Optimization Ledger
+
+这个台账用于每次策略优化后的全局对比。它只记录已落库或已写入证据文件的结果；不能把单股肉眼判断或未完成实验写成当前基线。
+
+## Current Product Baseline
+
+- Public strategy: `mainline_dragon_pullback / 0.1.18`.
+- Product path: one candidate list plus portfolio backtest review.
+- Candidate display: top `20`.
+- Portfolio execution: BUY candidates top `20`, max positions `10`.
+- Historical execution model: `legacy_next_open` (`D` close-visible signal, `D+1` daily open execution).
+- Main range used below: `2025-03-26` to `2026-06-16`, main board, `max_symbols=5000`.
+
+## Version Ledger
+
+| Version / Run | Change Tested | Return | Max Drawdown | Trades | Decision | Evidence |
+| --- | --- | ---: | ---: | --- | --- | --- |
+| `0.1.19 / #173` | Early post-entry breakdown stop experiment: within 10 days, trigger an `early_breakdown_stop` after consecutive closes fail to reclaim entry support, loss exceeds 3%, and price is near/below entry MA20. | `+54.40%` | `-19.79%` | `233 / 223 / 10` | Rejected and removed from default code. The rule reduced raw `support_stop` loss but mostly re-labeled/accelerated losing exits and sold some later trend winners too early; return, drawdown, profit factor and Sharpe all worsened versus `#169`. | API `#173`; comparison SQL versus `#169`; tests passed before revert, then code restored to `0.1.18` with `243 passed`. |
+| `0.1.18 / #169` | Keep one public strategy and no fixed low-suction slot reservation. Low-suction only receives execution opportunity bonus after longer absorption and clean lift: generally `low_suction_days >= 6`, MA5/MA10 not stretched, volume not expanding, no extreme 60-day extension. | `+62.14%` | `-19.22%` | `231 / 221 / 10` | Current code evidence. It restores most return versus `#165/#168`, improves drawdown versus `#164/#157`, and avoids the over-concentration failure of `#167`. It still does not beat `#137` drawdown, so keep as current baseline, not final proof of stable alpha. | API `#169`; tests `243 passed`; API strategy version `0.1.18`. |
+| `0.1.17 / #168` | Remove fixed lane reservation and keep low-suction maturity only as execution opportunity bonus, not raw signal score. | `+39.16%` | `-27.63%` | `226 / 216 / 10` | Rejected. The semantic separation was right, but the bonus was too easy to max out; low-suction trades expanded to `84` closed trades and produced about `-37,311`, while dragon-pullback realized PnL fell. | API `#168`; tests passed before retune. |
+| `0.1.16 / #167` | Sort all candidates by a unified opportunity score and add low-suction maturity bonus into `stealth_total`. | `+28.80%` | `-14.83%` | `154 / 144 / 10` | Rejected boundary experiment. Drawdown improved sharply but return collapsed because the strategy became too conservative and displaced too many dragon-pullback opportunities. | API `#167`; tests passed before retune. |
+| `0.1.15 / #165` | Keep one public strategy, but split execution/recommendation ranking into internal lanes: classic `dragon_pullback` and fresh `stealth_low_suction`. The lane pool reserves low-suction washout candidates without exposing another UI strategy. | `+55.41%` | `-21.17%` | `251 / 242 / 9` | Superseded intermediate direction. It improves drawdown versus `#164/#157`, and brings 红星发展 `2026-02-11` plus 合肥城建 `2026-04-28` into the low-suction execution lane, but return falls materially versus `#164/#157/#137`. | API `#165`; tests `242 passed`; frontend build passed. |
+| `0.1.14 / #164` | Keep `0.1.11` signal semantics and add a very conservative low-suction rotation guard: only strict `stealth_low_suction` score `>=90`, portfolio drawdown proxy `<=-8%`, replaced holding return `<=-1%`, and holding days `>=5` may rotate. | `+63.96%` | `-24.24%` | `238 / 228 / 10` | Previous code evidence. It is effectively no-op on the full-history sample, so it preserves `#161` performance but does not solve low-suction execution or drawdown. Kept as a safety guard plus test coverage, not as a performance improvement. | API `#164`; tests `238 passed`. |
+| `0.1.13 / #163` | Remove top-20 supplemental low-suction lane; allow strict low-suction candidates already inside the execution top `20` to replace low-efficiency holdings. | `+46.88%` | `-16.71%` | `267 / 257 / 10` | Boundary experiment. Drawdown improved materially versus `#161/#157/#137`, but return dropped too much and low-suction rotation fired `49` times; do not use as current product baseline. | API `#163`; rotation reason count check. |
+| `0.1.12 / #162` | Add strict low-suction supplemental execution lane from outside top `20` plus low-efficiency holding replacement. | `+30.19%` | `-23.37%` | `266 / 256 / 10` | Rejected. It forced too many lower-ranked low-suction setups into execution, sharply reducing return while barely improving drawdown. Code was narrowed after validation. | API `#162`. |
+| `0.1.11 / #161` | Add setup-specific execution threshold for strict `stealth_low_suction`: effective entry line `74.5` only when low-suction persistence, MA convergence, volume ratio, MA20 support and hard-risk gates all pass. | `+63.96%` | `-24.24%` | `238 / 228 / 10` | Previous code evidence. It fixes 合肥城建 `2025-09-24` from raw WATCH to executable low-suction BUY, but global return/drawdown are slightly weaker than `#157`; keep only as signal-semantics correction, not as proof of strategy improvement. | API `#161`; candidate-trace checks summarized here. |
+| `0.1.9 / #157` | Split quiet MA5/MA10 low-suction washout (`stealth_low_suction`) from classic dragon pullback while keeping one public strategy; candidate trace explains theory rank, candidate limit, full-position and rotation reasons. Execution candidate limit raised to `20` while max positions stay `10`. | `+64.25%` | `-24.21%` | `237 / 227 / 10` | Previous performance reference. It captures 红星发展 `2026-02-11`, 合肥城建 `2026-04-28/29/30`, 埃斯顿 `2026-04-14` as executable low-suction BUY signals; 合肥城建 `2025-09-24` remains WATCH because total score is below `76`. It improves versus `#149`, but still does not beat `#137` drawdown. | API `#157` and candidate-trace checks summarized here. |
+| `0.1.9 / #156` | Same scoring as `#157` but old execution candidate limit `10`; used to diagnose why target low-suction signals were not bought by the portfolio. | `+64.25%` | `-24.21%` | `237 / 227 / 10` | Diagnostic only. 红星发展 ranked `18` and was blocked by top-10 execution; 合肥城建 ranked `48`, 埃斯顿 ranked `53`. | API candidate-trace checks. |
+| `0.1.8 / #153` | Portfolio support-stop cooldown experiment on cached-signal range: block fresh `TAIL_BUY_READY` candidates with `low_suction_days=0` after clustered `support_stop` exits | `+51.41%` | `-29.99%` | `197 / 187 / 10` | Rejected. Same-range baseline `#154` without cooldown produced `+61.87%` and `-24.86%`; cooldown blocked 586 candidates and worsened both return and drawdown. Code was not kept as a default product rule. | API `#153/#154`; blocked-candidate count check. |
+| `0.1.8 / #152` | Entry-day stop scheduling experiment: allow a T-day close `support_stop`/`fragile_structure_stop` after a T-day buy to sell at T+1 open | `+62.78%` | `-25.72%` | `251 / 241 / 10` | Rejected. Same-position-size comparison versus `#149` slightly improved return but worsened max drawdown, profit factor and Sharpe, so the rule is not kept in default code. | Failed experiment; reverted from code after validation. |
+| `0.1.10 / #148` | High-level tail-reversal hard reject: weak close / long upper shadow / wide MA spread without repeated low suction | `+46.05%` | `-26.24%` | `239 / 229 / 10` | Rejected. Removed some bad trades but worsened global return and drawdown. | API `#148`. |
+| `0.1.8 / #149` | Add fragile-structure exit path and fix single-stock replay evidence so stock detail exits read the same entry evidence as portfolio exits | `+61.87%` | `-24.86%` | `238 / 228 / 10` | Old code evidence for return/profit-factor improvement and stock-detail consistency. Superseded by `#157 / 0.1.9`, but still useful for comparing fragile-stop behavior. | API `#149`; replay/audit checks. |
+| `0.1.8 / #147` | Enforce `rotation_min_score_gap=8.0` in full-position rotation; keep low-suction scoring and public UI simplification | `+59.27%` | `-24.30%` | `240 / 230 / 10` | Historical drawdown reference within `0.1.8`; superseded first by `#149`, then by current `#157`. | API `#147`; rotation-count check. |
+| `0.1.8 / #142` | Add explicit score explanation and Dongshan repeated low-suction capture before rotation-gap fix | `+49.95%` | `-25.34%` | `260 / 250 / 10` | Superseded by `#147`; rotation churn was too high. | API `#142`; score-explanation checks. |
+| `0.1.6 / #140` | Add repeated low-suction buildup recognition and clearer evidence fields | `+24.52%` | `-23.93%` | `224 / 214 / 10` | Rejected as global portfolio baseline; kept useful explanation ideas. | API `#140`; Dongshan signal checks. |
+| `0.1.3 / #137` | Action threshold consistency, top-20 candidate display, stronger drawdown profile versus `0.1.1` | `+63.36%` | `-17.94%` | `250 / 240 / 10` | Best verified return/drawdown comparison so far, but not current public code because later versions changed scoring/explanation. | API `#137`; candidate display checks. |
+| `0.1.1 / #121` | Limited full-position rotation for rare high-score fresh `TAIL_BUY_READY` signals | `+73.02%` | `-29.67%` | `216 / 206 / 10` | High return but high drawdown and parameter-sensitivity risk; superseded for risk profile. | API `#121`; rotation-check summary. |
+| `0.1.1 / #120` | D+1 daily-open full-history refresh before rotation | `+44.45%` | `-29.61%` | `199 / 189 / 10` | Superseded by `#121` and later versions. | `2026-06-16_dragon_pullback_v0_1_1_refresh.md` |
+| `0.1.0 / #118` | Early daily D+1 dragon-pullback optimization | `+66.78%` | `-30.22%` | `201 / 193 / 8` | Historical reference only; later action/execution fixes changed the valid comparison set. | `2026-06-16_full_history_dragon_pullback_refresh.md` |
+
+## Required Record For Future Optimizations
+
+每次策略优化必须补齐以下字段，再判断是否保留：
+
+- Strategy version and exact rule change.
+- Backtest ID and execution model.
+- Date range, stock universe, candidate display limit, execution candidate limit and max positions.
+- Total return, max drawdown, buy/sell/open counts, win rate and profit factor if available.
+- At least one global comparison against the current baseline and one focused check for user-named stocks when relevant.
+- Anti-future-function evidence: signal day data visibility, financial publish-date constraint and execution after signal.
+- Overfit risk note: whether the change was tuned to a small set of named stocks or validated across the whole sample.
+
+## Current Conclusion
+
+`0.1.18 / #169` is the current code evidence. It keeps the simplified one-strategy workflow and treats "低吸洗盘悄悄上升" and "经典龙回头" as two internal setups under the same public strategy, but it no longer reserves fixed slots for low-suction candidates. Low-suction opportunity bonus is now narrow: it rewards longer absorption plus clean lift, and caps or removes the bonus when the setup is too fresh, too stretched from MA5/MA10, volume is expanding, or the 60-day move is already extreme.
+
+Global result improved versus the failed lane experiments: `#169` return is `+62.14%`, max drawdown is `-19.22%`, buy/sell/open is `231 / 221 / 10`, profit factor is `1.4593`, and Sharpe is `1.8207`. Setup attribution is also healthier: `dragon_pullback` closed trades produced about `+388,495`, while `stealth_low_suction` closed trades produced about `+112,289`. This is much better than `#165` low-suction PnL `-18,638` and `#168` low-suction PnL `-37,311`.
+
+Current limitation: `#169` still does not beat `#137 / 0.1.3` on max drawdown (`-19.22%` vs `-17.94%`). Treat `0.1.18` as the current implementation baseline, not as proof of final stable high alpha. The next optimization should focus on support-stop loss reduction, post-entry break handling, and walk-forward/parameter validation.
+
+`0.1.19/#173` tested the user's hypothesis that post-entry continuous breakdown was causing losses. The diagnosis was directionally right: in `#169`, `support_stop` had `135` sells and about `-981,609` realized PnL. However, the daily D+1 execution model means many worst losses are already scheduled as soon as the close-visible break appears, then executed at the next open; the remaining damage often comes from overnight gaps rather than a missing earlier close signal. The early-breakdown rule split `#173` sell attribution into `support_stop` `106` sells / about `-706,086` and `early_breakdown_stop` `33` sells / about `-277,733`, while reducing `trend_trailing_stop` profit from about `+1,418,154` to about `+1,342,937`. Net result worsened from `#169` `+62.14%`, DD `-19.22%`, PF `1.4593`, Sharpe `1.8207` to `#173` `+54.40%`, DD `-19.79%`, PF `1.3825`, Sharpe `1.5946`. Do not reintroduce broad early support-break exits without evidence from MAE/MFE or intraday stop data.
+
+## Return Drop Attribution For `0.1.15 / #165`
+
+The return drop is primarily an entry ranking / opportunity-cost problem, not a worse drawdown problem.
+
+- `#165` max drawdown improved to `-21.17%` from `#164` `-24.24%`; the worst drawdown date moved from `2025-12-17` to `2025-12-23`, and the drawdown depth was smaller.
+- Closed-trade profit fell from `#164` `+505,290.59` to `#165` `+468,580.21`, a drop of about `36,710`.
+- Open floating profit at the end fell from `#164` `+141,201.82` to `#165` `+92,866.18`, a drop of about `48,336`.
+- Matched closed trades between `#164` and `#165` were almost unchanged: `154` matched trades improved by about `+3,893` in `#165`.
+- Trades added only by `#165` closed at about `-29,741`; trades present in `#164` but missing from `#165` had about `+10,863` closed profit.
+- Setup-level closed PnL explains the issue: `#165` `dragon_pullback` trades produced about `+487,219`, while `#165` `stealth_low_suction` trades produced about `-18,638`. In `#164`, `stealth_low_suction` had about `+116,794`.
+- The worst added `#165` low-suction losers include 天际股份 `2026-05-21`, 明阳智能 `2026-05-22`, 川发龙蟒 `2026-03-16`, 岩山科技 `2025-11-19`, 骆驼股份 `2025-10-24` and 农业银行 `2025-12-10`. They were mostly fresh `LOW_SUCTION_BUILDUP` entries with low-suction days around `3` and exited by `support_stop` or `trend_break`.
+- The biggest missing profitable `#164` trades were mostly high-elasticity trend winners: 京能置业, 江西铜业, 鹏鼎控股, 杭电股份, 博汇纸业, 融捷股份 and similar `trend_trailing_stop` exits.
+
+Conclusion: `0.1.15` improved risk containment but over-reserved capacity for lower-quality low-suction setups and displaced some high-payoff dragon/trend opportunities. The next change should not loosen low-suction inclusion further. It should raise low-suction lane quality requirements, penalize weak first-leg / low relative-strength low-suction setups, and make full-position rotation compare expected payoff rather than just reserving a lane.

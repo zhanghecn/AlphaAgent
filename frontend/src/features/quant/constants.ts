@@ -12,13 +12,16 @@ export const QUANT_BOARD_OPTIONS = [
 export type QuantBoard = (typeof QUANT_BOARD_OPTIONS)[number]["value"];
 export type ExecutionModel = "legacy_next_open";
 
+export const DEFAULT_RECOMMENDATION_LIMIT = 20;
+export const DEFAULT_EXECUTION_CANDIDATE_LIMIT = 20;
+
 export const DEFAULT_BACKTEST_PARAMS = {
   strategy: "mainline_dragon_pullback",
   start: DEFAULT_BACKTEST_START,
   initial_cash: 1_000_000,
   max_symbols: 5000,
   max_positions: 10,
-  candidate_limit: 10,
+  candidate_limit: DEFAULT_EXECUTION_CANDIDATE_LIMIT,
   min_entry_score: 76,
   strict_entry: true,
   execution_model: "legacy_next_open" as ExecutionModel,

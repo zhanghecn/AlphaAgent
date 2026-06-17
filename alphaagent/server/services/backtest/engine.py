@@ -27,8 +27,9 @@ from alphaagent.server.db.session import get_engine, is_database_configured, ses
 from alphaagent.server.services.backtest import data_quality as data_quality_service
 from alphaagent.server.services.backtest import execution_models, persistence, queries, reports, scoring, signal_plan, simulation, strategy_comparison, validation
 from alphaagent.server.services.backtest.schemas import BacktestParams, MinuteBar, Position, ScoreContext, Trade
-from alphaagent.server.services.quant.factors import DRAGON_PULLBACK_STRATEGY_ID, STRATEGY_ID, STRATEGY_VERSION, Bar
+from alphaagent.server.services.quant.factors import DRAGON_PULLBACK_STRATEGY_ID, STRATEGY_ID, STRATEGY_VERSION, Bar, SignalScore
 from alphaagent.server.services.quant.financials import financial_scores_from_rows_by_symbol
+from alphaagent.server.services.quant import screening_payloads
 from alphaagent.server.services.quant.strategy_registry import get_strategy
 from alphaagent.server.services.quant.screening import (
     _load_financial_scores,
@@ -67,7 +68,8 @@ def run_backtest(params: BacktestParams) -> dict[str, Any]:
 
         stock_meta = _load_stock_meta(session, vt_symbols)
         score_context = _load_score_context(session, list(bars_by_symbol))
-        run = _simulate(session, params, bars_by_symbol, trading_days, stock_meta, score_context=score_context)
+        score_cache = _load_score_cache_from_persisted_signals(session, params, strategy.version, vt_symbols, trading_days)
+        run = _simulate(session, params, bars_by_symbol, trading_days, stock_meta, score_cache=score_cache, score_context=score_context)
         backtest_id = _persist_run(session, params, run, end) if params.persist else None
 
     return {
@@ -97,7 +99,12 @@ def get_backtest(backtest_id: int) -> dict[str, Any]:
     return {"status": "ready", "item": _mapping_to_api(dict(row))}
 
 
-def list_backtests(limit: int = 50, run_type: str = "all", strategy_id: str | None = None) -> dict[str, Any]:
+def list_backtests(
+    limit: int = 50,
+    run_type: str = "all",
+    strategy_id: str | None = None,
+    baseline_only: bool = False,
+) -> dict[str, Any]:
     if not is_database_configured():
         return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
     _ensure_backtest_schema()
@@ -124,9 +131,29 @@ def list_backtests(limit: int = 50, run_type: str = "all", strategy_id: str | No
         if requested_type in {"portfolio", "symbol"} and payload["run_type"] != requested_type:
             continue
         items.append(payload)
-        if len(items) >= item_limit:
-            break
+    if baseline_only and requested_type == "portfolio":
+        items = _filter_product_baseline_backtests(items)
+    items = items[:item_limit]
     return {"status": "ready", "items": items}
+
+
+def _filter_product_baseline_backtests(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep full-range product runs so short experiments do not become the default UI run."""
+
+    portfolio_items = [item for item in items if item.get("run_type") == "portfolio" and item.get("start_date") and item.get("end_date")]
+    if not portfolio_items:
+        return items
+    latest_end = max(str(item["end_date"]) for item in portfolio_items)
+    latest_end_items = [item for item in portfolio_items if str(item.get("end_date")) == latest_end]
+    earliest_start = min(str(item["start_date"]) for item in latest_end_items)
+    baseline_items = [
+        item
+        for item in items
+        if item.get("run_type") == "portfolio"
+        and str(item.get("end_date")) == latest_end
+        and str(item.get("start_date")) == earliest_start
+    ]
+    return baseline_items or items
 
 
 def latest_symbol_backtest(vt_symbol: str, strategy_id: str | None = None) -> dict[str, Any]:
@@ -283,9 +310,12 @@ def backtest_minute_coverage(backtest_id: int) -> dict[str, Any]:
 def backtest_data_quality(backtest_id: int) -> dict[str, Any]:
     """Return a compact data-quality dashboard for one persisted backtest."""
 
+    def report_with_analysis(report_id: int, trade_limit: int) -> dict[str, Any]:
+        return backtest_report(report_id, trade_limit, include_analysis=True)
+
     return data_quality_service.backtest_data_quality(
         backtest_id,
-        report_loader=backtest_report,
+        report_loader=report_with_analysis,
         coverage_loader=backtest_minute_coverage,
     )
 
@@ -456,7 +486,7 @@ def backtest_candidate_trace(backtest_id: int, vt_symbol: str, signal_date: date
     )
 
 
-def backtest_report(backtest_id: int, trade_limit: int = 50) -> dict[str, Any]:
+def backtest_report(backtest_id: int, trade_limit: int = 50, *, include_analysis: bool = False) -> dict[str, Any]:
     if not is_database_configured():
         return {"status": "unavailable", "message": "DATABASE_URL not configured"}
     _ensure_backtest_schema()
@@ -513,20 +543,22 @@ def backtest_report(backtest_id: int, trade_limit: int = 50) -> dict[str, Any]:
             )
         ).scalar_one()
         total_stock_count = session.execute(select(func.count()).select_from(schema.stocks)).scalar_one()
-        data_quality = _data_quality_snapshot(session)
-        sample_bars = session.execute(
-            select(
-                schema.stock_daily_bars.c.vt_symbol,
-                schema.stock_daily_bars.c.trade_date,
-                schema.stock_daily_bars.c.close_price,
-            ).where(
-                and_(
-                    schema.stock_daily_bars.c.trade_date >= run["start_date"],
-                    schema.stock_daily_bars.c.trade_date <= run["end_date"],
+        data_quality = _data_quality_snapshot(session) if include_analysis else {}
+        sample_bars = []
+        if include_analysis:
+            sample_bars = session.execute(
+                select(
+                    schema.stock_daily_bars.c.vt_symbol,
+                    schema.stock_daily_bars.c.trade_date,
+                    schema.stock_daily_bars.c.close_price,
+                ).where(
+                    and_(
+                        schema.stock_daily_bars.c.trade_date >= run["start_date"],
+                        schema.stock_daily_bars.c.trade_date <= run["end_date"],
+                    )
                 )
-            )
-            .order_by(schema.stock_daily_bars.c.vt_symbol, schema.stock_daily_bars.c.trade_date)
-        ).mappings().all()
+                .order_by(schema.stock_daily_bars.c.vt_symbol, schema.stock_daily_bars.c.trade_date)
+            ).mappings().all()
         trade_dicts = [dict(row) for row in trades]
         all_trade_dicts = [dict(row) for row in all_trades]
         order_dicts = [dict(row) for row in orders]
@@ -546,22 +578,26 @@ def backtest_report(backtest_id: int, trade_limit: int = 50) -> dict[str, Any]:
     sample_bar_dicts = [dict(row) for row in sample_bars]
     closed_trades = _closed_trades(all_trade_dicts)
     extended_metrics = _extended_metrics(metrics, closed_trades, all_trade_dicts, order_dicts, equity_dicts)
-    sample_benchmark_curve = _sample_equal_weight_curve(sample_bar_dicts)
-    index_benchmark_curves = _index_benchmark_curves(run["start_date"], run["end_date"])
-    benchmark = _benchmark_report(equity_dicts, sample_benchmark_curve, index_benchmark_curves)
-    period_analysis = _period_analysis(equity_dicts, closed_trades, sample_benchmark_curve)
-    regime_analysis = _regime_analysis(equity_dicts, closed_trades, sample_benchmark_curve)
-    robustness_checks = _robustness_checks(
-        metrics,
-        equity_dicts,
-        closed_trades,
-        all_trade_dicts,
-        sample_bar_dicts,
-        sample_benchmark_curve,
+    sample_benchmark_curve = _sample_equal_weight_curve(sample_bar_dicts) if include_analysis else []
+    index_benchmark_curves = _index_benchmark_curves(run["start_date"], run["end_date"]) if include_analysis else {}
+    benchmark = _benchmark_report(equity_dicts, sample_benchmark_curve, index_benchmark_curves) if include_analysis else None
+    period_analysis = _period_analysis(equity_dicts, closed_trades, sample_benchmark_curve) if include_analysis else None
+    regime_analysis = _regime_analysis(equity_dicts, closed_trades, sample_benchmark_curve) if include_analysis else None
+    robustness_checks = (
+        _robustness_checks(
+            metrics,
+            equity_dicts,
+            closed_trades,
+            all_trade_dicts,
+            sample_bar_dicts,
+            sample_benchmark_curve,
+        )
+        if include_analysis
+        else None
     )
     execution_quality = _execution_quality_report(metrics, extended_metrics, data_quality, sample_payload)
     params = _params_from_run(dict(run))
-    data_as_of_audit = _data_as_of_audit(params, execution_quality, data_quality)
+    data_as_of_audit = _data_as_of_audit(params, execution_quality, data_quality) if include_analysis else None
     return {
         "status": "ready",
         "backtest_id": backtest_id,
@@ -1130,6 +1166,97 @@ def _score_candidates_for_day(
     )
 
 
+def _load_score_cache_from_persisted_signals(
+    session,
+    params: BacktestParams,
+    strategy_version: str,
+    vt_symbols: list[str],
+    trading_days: list[date],
+) -> dict[date, list[SignalScore]] | None:
+    """Load same-version daily screening scores to avoid recomputing a full range."""
+
+    if params.symbols or not params.persist or not trading_days:
+        return None
+    required_dates = set(trading_days[:-1])
+    run_rows = session.execute(
+        select(schema.quant_signal_runs.c.id, schema.quant_signal_runs.c.trade_date, schema.quant_signal_runs.c.params)
+        .where(
+            and_(
+                schema.quant_signal_runs.c.strategy_id == params.strategy,
+                schema.quant_signal_runs.c.strategy_version == strategy_version,
+                schema.quant_signal_runs.c.status.in_(["succeeded", "empty"]),
+                schema.quant_signal_runs.c.trade_date.in_(required_dates),
+            )
+        )
+        .order_by(schema.quant_signal_runs.c.trade_date, desc(schema.quant_signal_runs.c.id))
+    ).mappings().all()
+    matched_runs: dict[date, int] = {}
+    for row in run_rows:
+        trade_date = row["trade_date"]
+        if trade_date in matched_runs:
+            continue
+        if _screen_run_matches_backtest_params(dict(row), params):
+            matched_runs[trade_date] = int(row["id"])
+    run_dates = set(matched_runs)
+    if not required_dates.issubset(run_dates):
+        return None
+    run_ids = sorted(matched_runs.values())
+    min_score_prefilter = screening_payloads.signal_score_prefilter_threshold(params.strategy, params.min_entry_score)
+    rows = session.execute(
+        select(schema.quant_stock_signals)
+        .where(
+            and_(
+                schema.quant_stock_signals.c.strategy_id == params.strategy,
+                schema.quant_stock_signals.c.strategy_version == strategy_version,
+                schema.quant_stock_signals.c.run_id.in_(run_ids),
+                schema.quant_stock_signals.c.vt_symbol.in_(vt_symbols),
+                schema.quant_stock_signals.c.total_score >= min_score_prefilter,
+                schema.quant_stock_signals.c.risk_score >= 35,
+                schema.quant_stock_signals.c.liquidity_score >= 25,
+            )
+        )
+        .order_by(schema.quant_stock_signals.c.trade_date, desc(schema.quant_stock_signals.c.total_score), schema.quant_stock_signals.c.vt_symbol)
+    ).mappings().all()
+    by_date: dict[date, list[SignalScore]] = defaultdict(list)
+    for trade_date in required_dates:
+        by_date[trade_date] = []
+    for row in rows:
+        score = _signal_score_from_row(dict(row), params.min_entry_score)
+        by_date[score.trade_date].append(score)
+
+    for scores in by_date.values():
+        scores.sort(key=lambda item: (-item.total_score, item.vt_symbol))
+    return by_date
+
+
+def _screen_run_matches_backtest_params(run: dict[str, Any], params: BacktestParams) -> bool:
+    run_params = run.get("params") if isinstance(run.get("params"), dict) else {}
+    if int(run_params.get("max_symbols") or 0) != int(params.max_symbols):
+        return False
+    return tuple(normalize_included_boards(run_params.get("included_boards"))) == tuple(normalize_included_boards(params.included_boards))
+
+
+def _signal_score_from_row(row: dict[str, Any], min_entry_score: float) -> SignalScore:
+    score = SignalScore(
+        vt_symbol=str(row["vt_symbol"]),
+        trade_date=row["trade_date"],
+        signal_type=str(row.get("signal_type") or row.get("strategy_id") or STRATEGY_ID),
+        total_score=float(row.get("total_score") or 0),
+        relative_strength_score=float(row.get("relative_strength_score") or 0),
+        washout_score=float(row.get("washout_score") or 0),
+        trend_quality_score=float(row.get("trend_quality_score") or 0),
+        sector_mainline_score=float(row.get("sector_mainline_score") or 50),
+        financial_improvement_score=float(row.get("financial_improvement_score") or 50),
+        liquidity_score=float(row.get("liquidity_score") or 0),
+        risk_score=float(row.get("risk_score") or 50),
+        entry_signal=bool(row.get("entry_signal")),
+        risk_level=str(row.get("risk_level") or "MEDIUM"),
+        evidence=dict(row.get("evidence") or {}),
+    )
+    score.entry_signal = scoring.is_executable_entry_signal(score, min_entry_score)
+    return score
+
+
 def _is_buy_candidate(score, params: BacktestParams) -> bool:
     return scoring.is_buy_candidate(score, params)
 
@@ -1182,7 +1309,7 @@ def _load_symbol_universe(
     rows = session.execute(
         select(schema.stocks.c.vt_symbol, schema.stocks.c.exchange)
         .where(schema.stocks.c.vt_symbol != "000001.SSE")
-        .order_by(desc(schema.stocks.c.turnover), desc(schema.stocks.c.market_cap))
+        .order_by(schema.stocks.c.vt_symbol)
         .limit(5000)
     ).all()
     allowed = set(normalize_included_boards(included_boards))
@@ -1312,7 +1439,7 @@ def _candidate_trace_summary(
 
     if buy_trades:
         status = "filled"
-        summary = "候选为 BUY，组合回测已下单并成交。"
+        summary = "组合回测已按该信号日下单并成交。"
     elif first_order and str(first_order.get("status") or "") == "rejected":
         status = "rejected"
         summary = f"候选进入买入计划，但真实组合订单被拒绝：{first_order.get('reason') or 'unknown'}。"
@@ -1328,7 +1455,7 @@ def _candidate_trace_summary(
             summary = _candidate_trace_plan_summary(first_signal_reason)
         else:
             status = "planned_not_ordered"
-            summary = "理论信号存在，但没有找到对应真实组合订单，通常是组合资金、仓位或回测链路未记录完整。"
+            summary = _candidate_planned_not_ordered_summary(not_planned_context, equity_row)
     else:
         status = "not_selected"
         summary = "该股票在这个信号日没有进入当前回测策略的候选或信号计划。"
@@ -1358,12 +1485,46 @@ def _candidate_trace_summary(
         "linked_order_status": linked_status,
         "linked_order_reason": first_order.get("reason") if first_order else None,
         "diagnostics": _candidate_trace_diagnostics(recommendation, named_signals, named_orders, named_trades),
-        "not_planned_context": _mapping_to_api(not_planned_context) if status == "candidate_not_planned" and not_planned_context else None,
+        "not_planned_context": _mapping_to_api(not_planned_context) if status in {"candidate_not_planned", "planned_not_ordered"} and not_planned_context else None,
     }
     if first_signal:
         result["plan_status"] = first_signal.get("plan_status")
         result["plan_status_label"] = first_signal.get("plan_status_label")
     return result
+
+
+def _candidate_planned_not_ordered_summary(context: dict[str, Any] | None, equity_row: dict[str, Any] | None) -> str:
+    if not context:
+        return "理论信号存在，但没有找到对应真实组合订单，通常是组合资金、仓位或回测链路未记录完整。"
+    rank = _safe_int_or_none(context.get("target_signal_rank"))
+    execution_rank = _safe_int_or_none(context.get("target_execution_candidate_rank"))
+    candidate_limit = _safe_int_or_none(context.get("candidate_limit"))
+    max_positions = _safe_int_or_none(context.get("max_positions"))
+    position_count = _safe_int_or_none((equity_row or {}).get("position_count"))
+    setup = str(context.get("target_signal_setup") or "").strip()
+    lane = str(context.get("target_execution_lane") or setup or "").strip()
+    lane_text = f"{_setup_type_label(lane)}通道" if lane else ""
+    if execution_rank is not None and candidate_limit is not None:
+        if position_count is not None and max_positions is not None and position_count >= max_positions:
+            setup_text = f"{_setup_type_label(setup)}" if setup else ""
+            return f"理论{setup_text}信号已进入{lane_text}执行池第 {execution_rank} 名，但执行日组合已满仓 {position_count}/{max_positions}，且未触发换仓规则。"
+        return f"理论信号已进入{lane_text}执行池第 {execution_rank} 名，但没有找到对应真实组合订单；请核查执行日涨跌停、持仓上限和订单记录。"
+    if execution_rank is None and candidate_limit is not None and context.get("target_execution_candidate_selected") is False:
+        return f"理论{_setup_type_label(setup)}信号存在，但{lane_text}没有进入组合执行前 {candidate_limit} 名，因此没有下真实订单。"
+    if rank is not None and candidate_limit is not None and rank > candidate_limit:
+        return f"理论信号存在，但当日理论买入排名第 {rank}，超过组合执行前 {candidate_limit} 名，因此没有下真实订单。"
+    if position_count is not None and max_positions is not None and position_count >= max_positions:
+        setup_text = f"{_setup_type_label(setup)}" if setup else ""
+        return f"理论{setup_text}信号存在，但执行日组合已满仓 {position_count}/{max_positions}，且未触发换仓规则。"
+    return "理论信号存在，但没有找到对应真实组合订单；请核查当日候选排名、持仓上限和换仓规则。"
+
+
+def _setup_type_label(value: str) -> str:
+    labels = {
+        "stealth_low_suction": "低吸洗盘",
+        "dragon_pullback": "龙回头",
+    }
+    return labels.get(value, value)
 
 
 def _candidate_not_planned_summary(context: dict[str, Any] | None) -> str:
@@ -1384,6 +1545,15 @@ def _candidate_not_planned_summary(context: dict[str, Any] | None) -> str:
     if reason == "not_in_persisted_candidates":
         return "该股票没有进入这一天的落库候选。"
     return f"候选存在，但没有进入该回测的理论买入计划。{label or '需要核查回测参数、股票池和候选生成链路。'}"
+
+
+def _safe_int_or_none(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _candidate_trace_plan_summary(reason: str) -> str:
@@ -2674,7 +2844,7 @@ def _params_from_run(run: dict[str, Any]) -> BacktestParams:
         trailing_stop_pct=float(raw_params.get("trailing_stop_pct") or 0.08),
         time_stop_days=int(raw_params.get("time_stop_days") or 15),
         candidate_limit=int(raw_params.get("candidate_limit") or 20),
-        max_symbols=int(raw_params.get("max_symbols") or 500),
+        max_symbols=int(raw_params.get("max_symbols") or 5000),
         min_entry_score=float(raw_params.get("min_entry_score") or 68),
         strict_entry=_truthy(raw_params.get("strict_entry", True)),
         execution_model=str(raw_params.get("execution_model") or "legacy_next_open"),
@@ -2685,9 +2855,9 @@ def _params_from_run(run: dict[str, Any]) -> BacktestParams:
         tail_entry_end=str(raw_params.get("tail_entry_end") or "14:30"),
         tail_entry_ma5_tolerance_pct=float(raw_params.get("tail_entry_ma5_tolerance_pct") or 1.5),
         enable_signal_rotation=_truthy(raw_params.get("enable_signal_rotation", True)),
-        rotation_min_score=float(raw_params.get("rotation_min_score") or 95.0),
+        rotation_min_score=float(raw_params.get("rotation_min_score") or 98.0),
         rotation_min_score_gap=float(raw_params.get("rotation_min_score_gap") or 8.0),
-        rotation_max_holding_return_pct=float(raw_params.get("rotation_max_holding_return_pct") or 8.0),
+        rotation_max_holding_return_pct=float(raw_params.get("rotation_max_holding_return_pct") or 3.0),
         rotation_min_holding_days=int(raw_params.get("rotation_min_holding_days") or 3),
         symbols=[_normalize_symbol(symbol) for symbol in (raw_params.get("symbols") or []) if _normalize_symbol(symbol)],
         included_boards=normalize_included_boards(raw_params.get("included_boards")),
@@ -2830,7 +3000,7 @@ def _backtest_method(params: BacktestParams) -> dict[str, Any]:
     universe = (
         "指定股票"
         if params.symbols
-        else f"按成交额/市值取前 {params.max_symbols} 只本地股票；板块：{', '.join(board_labels)}"
+        else f"按稳定证券代码顺序取前 {params.max_symbols} 只本地股票；板块：{', '.join(board_labels)}；流动性由信号日历史成交额打分过滤"
     )
     return {
         "id": "daily_dynamic_candidate_backtest",

@@ -205,7 +205,7 @@ function BestFitRow({ row, strategy }: { row: SymbolSignalHistoryRow; strategy?:
 const FALLBACK_STRATEGIES: QuantStrategyOption[] = [
   {
     id: "mainline_dragon_pullback",
-    version: "0.1.1",
+    version: "0.1.8",
     name: "主线龙回头回踩低吸",
     description: "使用日线可见数据识别主线强势股第一波启动后的缩量回踩、均线承接和弱转强机会。",
     default_min_entry_score: 76,
@@ -217,6 +217,8 @@ const FALLBACK_STRATEGIES: QuantStrategyOption[] = [
       pullback_structure: "回踩结构不足",
       support_acceptance: "均线承接不足",
       reclaim_confirmation: "弱转强确认不足",
+      low_suction_buildup: "低吸蓄势不足",
+      ma_convergence_too_wide_without_low_suction: "均线发散且缺少低吸蓄势",
       distribution_risk: "高位派发风险",
       risk_score: "风险分不足",
       liquidity_score: "流动性不足",
@@ -224,13 +226,16 @@ const FALLBACK_STRATEGIES: QuantStrategyOption[] = [
     evidence_labels: {
       dragon_state: "龙回头状态",
       support_type: "承接类型",
+      low_suction_days: "低吸蓄势天数",
+      ma_convergence_pct: "均线收敛",
+      low_suction_buildup_score: "低吸蓄势分",
       ma5_distance_pct: "MA5距离",
       ma10_distance_pct: "MA10距离",
       volume_ratio_5d_20d: "量能比",
       risk_score: "风险分",
       liquidity_score: "流动性",
     },
-    primary_metric_keys: ["dragon_state", "support_type", "ma5_distance_pct"],
+    primary_metric_keys: ["dragon_state", "low_suction_days", "ma_convergence_pct"],
   },
 ];
 
@@ -278,45 +283,58 @@ function SignalTable({
               <TableHead key={metric.key} className="text-right">{metric.label}</TableHead>
             ))}
             <TableHead className="text-right">流动性</TableHead>
-            <TableHead>失败规则</TableHead>
+            <TableHead>为什么这个分数</TableHead>
             {canTrace && <TableHead className="text-right">组合追踪</TableHead>}
           </TableRow>
         </TableHeader>
         <TableBody>
-          {rows.map((row) => (
-            <TableRow key={`${title}-${row.trade_date}`}>
-              <TableCell className="tabular-nums">{row.trade_date}</TableCell>
-              <TableCell className={row.entry_signal ? "text-rise" : "text-muted-foreground"}>
-                {row.entry_signal ? "BUY" : "WATCH"}
-              </TableCell>
-              <TableCell className="text-right tabular-nums">{row.total_score.toFixed(1)}</TableCell>
-              {metrics.map((metric) => {
-                const value = metricValue(row, metric.key);
-                return (
-                  <TableCell key={metric.key} className={cn("text-right tabular-nums", metric.className(value))}>
-                    {metric.format(value)}
-                  </TableCell>
-                );
-              })}
-              <TableCell className="text-right tabular-nums">{row.liquidity_score.toFixed(1)}</TableCell>
-              <TableCell className="text-muted-foreground">{failedRulesLabel(row.failed_rules, strategy?.failed_rule_labels)}</TableCell>
-              {canTrace && (
-                <TableCell className="text-right">
-                  {row.entry_signal ? (
-                    <Button size="sm" variant="outline" onClick={() => onTraceSignalDate?.(row.trade_date)}>
-                      追踪
-                    </Button>
-                  ) : (
-                    <span className="text-xs text-muted-foreground">--</span>
-                  )}
+          {rows.map((row) => {
+            const explanation = scoreExplanation(row, strategy);
+            const action = signalRowAction(row);
+            const executable = action === "BUY";
+            return (
+              <TableRow key={`${title}-${row.trade_date}`}>
+                <TableCell className="tabular-nums">{row.trade_date}</TableCell>
+                <TableCell className={executable ? "text-rise" : "text-muted-foreground"}>
+                  {action}
                 </TableCell>
-              )}
-            </TableRow>
-          ))}
+                <TableCell className="text-right tabular-nums">{row.total_score.toFixed(1)}</TableCell>
+                {metrics.map((metric) => {
+                  const value = metricValue(row, metric.key);
+                  return (
+                    <TableCell key={metric.key} className={cn("text-right tabular-nums", metric.className(value))}>
+                      {metric.format(value)}
+                    </TableCell>
+                  );
+                })}
+                <TableCell className="text-right tabular-nums">{row.liquidity_score.toFixed(1)}</TableCell>
+                <TableCell className="max-w-80 text-muted-foreground" title={scoreExplanationTooltip(row, strategy)}>
+                  {explanation}
+                </TableCell>
+                {canTrace && (
+                  <TableCell className="text-right">
+                    {executable ? (
+                      <Button size="sm" variant="outline" onClick={() => onTraceSignalDate?.(row.trade_date)}>
+                        追踪
+                      </Button>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">--</span>
+                    )}
+                  </TableCell>
+                )}
+              </TableRow>
+            );
+          })}
         </TableBody>
       </Table>
     </div>
   );
+}
+
+function signalRowAction(row: SymbolSignalHistoryRow) {
+  if (row.action) return row.action.toUpperCase();
+  if (row.executable_entry_signal != null) return row.executable_entry_signal ? "BUY" : "WATCH";
+  return row.entry_signal && !row.failed_rules?.length ? "BUY" : "WATCH";
 }
 
 function AuditCell({ label, value, valueClass }: { label: string; value?: string | number | null; valueClass?: string }) {
@@ -328,12 +346,9 @@ function AuditCell({ label, value, valueClass }: { label: string; value?: string
   );
 }
 
-function formatNullablePct(value?: number | null) {
-  return value == null ? "--" : formatPct(value);
-}
-
-function formatRatio(value?: number | null) {
-  return value == null ? "--" : `${value.toFixed(2)}x`;
+function formatRatio(value?: string | number | null) {
+  const number = numericEvidence(value);
+  return number == null ? "--" : `${number.toFixed(2)}x`;
 }
 
 function priceClass(value?: number | null) {
@@ -342,7 +357,7 @@ function priceClass(value?: number | null) {
 
 function metricDefinitions(strategy?: QuantStrategyOption) {
   const keys = strategy?.primary_metric_keys?.length ? strategy.primary_metric_keys : ["ma5_distance_pct"];
-  return keys.slice(0, 2).map((key) => ({
+  return keys.slice(0, 3).map((key) => ({
     key,
     label: strategy?.evidence_labels?.[key] ?? metricLabel(key),
     format: metricFormatter(key),
@@ -365,11 +380,18 @@ function metricValue(row: SymbolSignalHistoryRow, key: string) {
   if (key === "ma5_distance_pct") return row.ma5_distance_pct;
   if (key === "trend_quality_score") return row.trend_quality_score;
   const raw = row.evidence?.[key];
+  if (typeof raw === "string" && raw) return raw;
   return typeof raw === "number" ? raw : null;
 }
 
 function metricLabel(key: string) {
   const labels: Record<string, string> = {
+    dragon_state: "龙回头状态",
+    support_type: "承接类型",
+    low_suction_days: "低吸天数",
+    support_hold_days: "支撑天数",
+    ma_convergence_pct: "均线收敛",
+    low_suction_buildup_score: "蓄势分",
     ma5_distance_pct: "MA5距离",
     ma20_distance_pct: "MA20距离",
     close_to_prior_high_pct: "距60日高点",
@@ -385,23 +407,160 @@ function metricLabel(key: string) {
 }
 
 function metricFormatter(key: string) {
+  if (key === "dragon_state") return dragonStateLabel;
+  if (key === "support_type") return supportTypeLabel;
+  if (key.endsWith("_score")) return formatScoreMetric;
   if (key.includes("ratio")) return formatRatio;
   if (key.includes("days") || key.includes("count")) return formatNullableNumber;
-  return formatNullablePct;
+  return formatPercentMetric;
 }
 
 function metricClassName(key: string) {
+  if (key === "dragon_state") return dragonStateClass;
+  if (key === "support_type") return () => undefined;
+  if (key.endsWith("_score")) return scoreClass;
   if (key.includes("ratio")) return ratioClass;
   if (key.includes("days") || key.includes("count")) return () => undefined;
-  return priceClass;
+  return percentClass;
 }
 
-function formatNullableNumber(value?: number | null) {
-  return value == null ? "--" : value.toFixed(0);
+function formatPercentMetric(value?: string | number | null) {
+  return formatPct(numericEvidence(value));
 }
 
-function ratioClass(value?: number | null) {
-  return value == null ? undefined : value >= 1 ? "text-rise" : "text-fall";
+function percentClass(value?: string | number | null) {
+  return priceClass(numericEvidence(value));
+}
+
+function formatNullableNumber(value?: string | number | null) {
+  const number = numericEvidence(value);
+  return number == null ? "--" : number.toFixed(0);
+}
+
+function ratioClass(value?: string | number | null) {
+  const number = numericEvidence(value);
+  return number == null ? undefined : number >= 1 ? "text-rise" : "text-fall";
+}
+
+function scoreExplanation(row: SymbolSignalHistoryRow, strategy?: QuantStrategyOption) {
+  const evidence = row.evidence ?? {};
+  const notes = evidenceArray(evidence.score_notes);
+  const contributions = topScoreContributions(evidence.score_breakdown, 3);
+  const parts: string[] = [];
+  const state = typeof evidence.dragon_state === "string" ? evidence.dragon_state : null;
+  const lowSuctionDays = numericEvidence(evidence.low_suction_days);
+  const convergence = numericEvidence(evidence.ma_convergence_pct);
+  const lowSuctionScore = numericEvidence(evidence.low_suction_buildup_score);
+  if (state) parts.push(`状态 ${dragonStateLabel(state)}`);
+  if (lowSuctionDays != null) parts.push(`低吸蓄势 ${lowSuctionDays.toFixed(0)} 天`);
+  if (convergence != null) parts.push(`均线收敛 ${formatPct(convergence)}`);
+  if (lowSuctionScore != null) parts.push(`低吸蓄势分 ${lowSuctionScore.toFixed(1)}`);
+  if (parts.length && contributions.length) return `${parts.join("；")}；来源 ${contributions.join("、")}`;
+  if (parts.length) return parts.join("；");
+  if (contributions.length) return `主要来源 ${contributions.join("、")}`;
+  if (notes.length) return notes.slice(0, 4).join("；");
+
+  return failedRulesLabel(row.failed_rules, strategy?.failed_rule_labels);
+}
+
+function scoreExplanationTooltip(row: SymbolSignalHistoryRow, strategy?: QuantStrategyOption) {
+  const evidence = row.evidence ?? {};
+  const notes = evidenceArray(evidence.score_notes).map(readableScoreNote);
+  const breakdown = Array.isArray(evidence.score_breakdown)
+    ? evidence.score_breakdown
+        .map((item) => {
+          if (!item || typeof item !== "object") return "";
+          const raw = item as Record<string, unknown>;
+          const name = String(raw.name ?? "");
+          const score = numericEvidence(raw.score);
+          const weight = numericEvidence(raw.weight);
+          const contribution = numericEvidence(raw.contribution);
+          if (!name) return "";
+          const scoreText = score == null ? "--" : score.toFixed(1);
+          const weightText = weight == null ? "--" : `${(weight * 100).toFixed(0)}%`;
+          const contributionText = contribution == null ? "--" : contribution.toFixed(2);
+          return `${name}: ${scoreText} * ${weightText} = ${contributionText}`;
+        })
+        .filter(Boolean)
+    : [];
+  const failed = failedRulesLabel(row.failed_rules, strategy?.failed_rule_labels);
+  return [...notes, ...breakdown, `失败规则: ${failed}`].filter(Boolean).join("\n");
+}
+
+function evidenceArray(value: unknown) {
+  return Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean) : [];
+}
+
+function numericEvidence(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatScoreMetric(value?: string | number | null) {
+  const number = numericEvidence(value);
+  return number == null ? "--" : number.toFixed(1);
+}
+
+function dragonStateLabel(value?: string | number | null) {
+  const state = String(value ?? "");
+  const labels: Record<string, string> = {
+    TAIL_BUY_READY: "龙回头买点",
+    LOW_SUCTION_BUILDUP: "低吸蓄势",
+    SUPPORT_ACCEPTED: "均线承接",
+    PULLBACK_OBSERVE: "回踩观察",
+    STRONG_LEG_CONFIRMED: "强势确认",
+    DISTRIBUTION_RISK: "派发风险",
+    INVALIDATED: "破位失效",
+  };
+  return (labels[state] ?? state) || "--";
+}
+
+function readableScoreNote(note: string) {
+  if (note.startsWith("状态 ")) return `状态 ${dragonStateLabel(note.slice(3))}`;
+  if (note.startsWith("承接 ")) return `承接 ${supportTypeLabel(note.slice(3))}`;
+  return note;
+}
+
+function supportTypeLabel(value?: string | number | null) {
+  const support = String(value ?? "");
+  const labels: Record<string, string> = {
+    ma5_reclaim: "MA5承接",
+    ma10_support: "MA10承接",
+    ma20_support: "MA20承接",
+    none: "未承接",
+  };
+  return (labels[support] ?? support) || "--";
+}
+
+function dragonStateClass(value?: string | number | null) {
+  const state = String(value ?? "");
+  if (state === "TAIL_BUY_READY" || state === "LOW_SUCTION_BUILDUP") return "text-rise";
+  if (state === "DISTRIBUTION_RISK" || state === "INVALIDATED") return "text-fall";
+  return undefined;
+}
+
+function scoreClass(value?: string | number | null) {
+  const number = numericEvidence(value);
+  if (number == null) return undefined;
+  return number >= 85 ? "text-rise" : number < 60 ? "text-fall" : undefined;
+}
+
+function topScoreContributions(value: unknown, limit: number): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const row = item as Record<string, unknown>;
+      const name = String(row.name ?? "");
+      const contribution = numericEvidence(row.contribution);
+      if (!name || contribution == null || contribution <= 0) return null;
+      return { name, contribution };
+    })
+    .filter((item): item is { name: string; contribution: number } => Boolean(item))
+    .sort((left, right) => right.contribution - left.contribution)
+    .slice(0, limit)
+    .map((item) => `${item.name}+${item.contribution.toFixed(2)}`);
 }
 
 function failedRulesLabel(rules?: string[], labels?: Record<string, string>) {
@@ -424,6 +583,7 @@ function failedRulesLabel(rules?: string[], labels?: Record<string, string>) {
     ma5_position: "偏离MA5不合适",
     ma20_position: "趋势位置不合适",
     volume_acceleration: "量能加速不合适",
+    ma_convergence_too_wide_without_low_suction: "均线发散且缺少低吸蓄势",
     overheat: "短期过热",
   };
   return rules.map((rule) => labels?.[rule] ?? fallbackLabels[rule] ?? rule).join("、");

@@ -132,6 +132,9 @@ export interface SymbolSignalHistoryRow {
   liquidity_score: number;
   risk_score: number;
   entry_signal: boolean;
+  raw_entry_signal?: boolean;
+  executable_entry_signal?: boolean;
+  action?: "BUY" | "WATCH" | string;
   ma5?: number | null;
   ma5_distance_pct?: number | null;
   turnover20?: number | null;
@@ -611,6 +614,13 @@ export interface BacktestTradeAttribution extends StockIdentityFields {
   min_floating_pnl?: number | null;
   max_floating_pnl_pct?: number | null;
   min_floating_pnl_pct?: number | null;
+  entry_score?: number | null;
+  entry_state?: string | null;
+  entry_support_type?: string | null;
+  low_suction_days?: number | null;
+  low_suction_buildup_score?: number | null;
+  ma_convergence_pct?: number | null;
+  entry_failed_rules?: string[];
   execution_mode?: string | null;
   price_source?: string | null;
   proxy_used?: boolean | null;
@@ -736,6 +746,10 @@ export interface BacktestCandidateNotPlannedContext {
   recommendation_rank?: number | null;
   recommendation_action?: string | null;
   recommendation_score?: number | null;
+  target_signal_rank?: number | null;
+  target_signal_score?: number | null;
+  target_signal_setup?: string | null;
+  target_exceeds_candidate_limit?: boolean | null;
   persisted_recommendation_count?: number | null;
   persisted_buy_candidate_count?: number | null;
   persisted_watch_candidate_count?: number | null;
@@ -753,6 +767,8 @@ export interface BacktestCandidateNotPlannedContext {
     execute_date?: string | null;
     score?: number | null;
     reason?: string | null;
+    rank?: number | null;
+    setup_type?: string | null;
   }>;
   target_symbol?: string | null;
 }
@@ -1620,6 +1636,11 @@ export interface SymbolQuantSignalRow extends StockIdentityFields {
   liquidity_score?: number | null;
   risk_score?: number | null;
   entry_signal?: boolean;
+  raw_entry_signal?: boolean;
+  executable_entry_signal?: boolean;
+  action?: "BUY" | "WATCH" | string;
+  failed_rules?: string[];
+  failed_rule_count?: number;
   risk_level?: string | null;
   evidence?: Record<string, unknown> | null;
 }
@@ -1806,9 +1827,15 @@ export function fetchQuantStrategies() {
   return apiClient.get<{ status: string; default_strategy_id: string; items: QuantStrategyOption[] }>("/quant/strategies");
 }
 
-export function fetchBacktests(limit = 10, runType: "portfolio" | "symbol" | "all" = "all", strategy?: string) {
+export function fetchBacktests(
+  limit = 10,
+  runType: "portfolio" | "symbol" | "all" = "all",
+  strategy?: string,
+  options?: { baselineOnly?: boolean }
+) {
   const search = new URLSearchParams({ limit: String(limit), run_type: runType });
   if (strategy) search.set("strategy", strategy);
+  if (options?.baselineOnly) search.set("baseline_only", "true");
   return apiClient.get<{ status: string; items: BacktestRun[] }>(`/backtests?${search.toString()}`);
 }
 
@@ -1942,8 +1969,12 @@ export function runStrictMinuteBacktestPipeline(payload: {
   }>("/backtests/strict-minute-pipeline", payload);
 }
 
-export function fetchBacktestReport(backtestId: number, tradeLimit = 50) {
-  return apiClient.get<BacktestReport>(`/backtests/${backtestId}/report?trade_limit=${tradeLimit}`);
+export function fetchBacktestReport(backtestId: number, tradeLimit = 50, options: { includeAnalysis?: boolean } = {}) {
+  const search = new URLSearchParams({
+    trade_limit: String(tradeLimit),
+  });
+  if (options.includeAnalysis) search.set("include_analysis", "true");
+  return apiClient.get<BacktestReport>(`/backtests/${backtestId}/report?${search.toString()}`);
 }
 
 export function fetchBacktestEquity(backtestId: number) {

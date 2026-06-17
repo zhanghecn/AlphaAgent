@@ -3,36 +3,29 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   addPortfolioGroupItem,
   createQuantResearchRun,
-  fetchBacktestAudit,
-  fetchBacktestDataQuality,
   fetchBacktestReport,
   fetchBacktestValidationGrid,
   fetchBacktests,
   fetchHoldings,
   fetchLatestQuantResearchRun,
-  fetchPortfolioGroupItems,
   fetchPortfolioGroups,
   fetchQuantStrategies,
   fetchRecommendations,
   fetchScreenRuns,
   fetchSimulationAccounts,
   fetchTradingDates,
-  fetchVnpyStatus,
   placeOrder,
   type QuantRecommendation,
   type QuantResearchRun,
 } from "@/api/quant";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { DEFAULT_BACKTEST_PARAMS, type BacktestParams } from "@/features/quant/constants";
+import { DEFAULT_BACKTEST_PARAMS, DEFAULT_EXECUTION_CANDIDATE_LIMIT, DEFAULT_RECOMMENDATION_LIMIT, type BacktestParams } from "@/features/quant/constants";
 import { ActionStatus } from "@/features/quant/ActionStatus";
 import { ScreenProgress } from "@/features/quant/ScreenProgress";
 import { QuantWorkflowGuide } from "@/features/quant/QuantWorkflowGuide";
 import { QuantKpiBar, type QuantKpi } from "@/features/quant/QuantKpiBar";
-import { VnpyStatusPanel } from "@/features/quant/VnpyStatusPanel";
 import { RecommendationsPanel } from "@/features/quant/RecommendationsPanel";
 import { BacktestPanel } from "@/features/quant/BacktestPanel";
-import { BacktestLogWorkspace } from "@/features/quant/BacktestLogWorkspace";
-import { BacktestDataQuality } from "@/features/quant/BacktestAnalysis";
 import { AddToGroupDialog } from "@/features/portfolio/AddToGroupDialog";
 import { ManualBuyDialog } from "@/features/quant/ManualBuyDialog";
 import { Button } from "@/components/ui/button";
@@ -100,7 +93,7 @@ export function QuantTradingPage() {
 
   const recommendationsQuery = useQuery({
     queryKey: ["quantRecommendations", activeRecommendationDate, selectedStrategy],
-    queryFn: () => fetchRecommendations(200, activeRecommendationDate || undefined, selectedStrategy),
+    queryFn: () => fetchRecommendations(DEFAULT_RECOMMENDATION_LIMIT, activeRecommendationDate || undefined, selectedStrategy),
     enabled: Boolean(activeRecommendationDate),
     staleTime: 20_000,
   });
@@ -111,17 +104,9 @@ export function QuantTradingPage() {
     staleTime: 60_000,
   });
 
-  const quantGroupId = groupsQuery.data?.items.find((item) => item.group_type === "quant_candidate")?.id;
-  const quantGroupItemsQuery = useQuery({
-    queryKey: ["portfolioGroupItems", quantGroupId],
-    queryFn: () => fetchPortfolioGroupItems(quantGroupId!),
-    enabled: Boolean(quantGroupId),
-    staleTime: 20_000,
-  });
-
   const backtestsQuery = useQuery({
-    queryKey: ["backtests", "portfolio", selectedStrategy],
-    queryFn: () => fetchBacktests(50, "portfolio", selectedStrategy),
+    queryKey: ["backtests", "portfolio", selectedStrategy, "baseline"],
+    queryFn: () => fetchBacktests(50, "portfolio", selectedStrategy, { baselineOnly: true }),
     staleTime: 20_000,
   });
 
@@ -129,27 +114,11 @@ export function QuantTradingPage() {
   const selectedBacktest =
     selectedBacktestId == null ? null : backtestRuns.find((run) => run.id === selectedBacktestId) ?? null;
   const activeBacktestId = selectedBacktest?.id ?? backtestRuns[0]?.id ?? null;
-  const shouldLoadBacktestReport = activeTab === "backtest" || activeTab === "data";
-  const shouldLoadBacktestDataQuality = activeTab === "backtest";
-  const shouldLoadBacktestAudit = activeTab === "backtest" || activeTab === "logs";
+  const shouldLoadBacktestReport = activeTab === "backtest";
   const reportQuery = useQuery({
     queryKey: ["backtestReport", activeBacktestId],
     queryFn: () => fetchBacktestReport(activeBacktestId!, 80),
     enabled: Boolean(activeBacktestId && shouldLoadBacktestReport),
-    staleTime: 20_000,
-  });
-
-  const dataQualityQuery = useQuery({
-    queryKey: ["backtestDataQuality", activeBacktestId],
-    queryFn: () => fetchBacktestDataQuality(activeBacktestId!),
-    enabled: Boolean(activeBacktestId && shouldLoadBacktestDataQuality),
-    staleTime: 20_000,
-  });
-
-  const auditQuery = useQuery({
-    queryKey: ["backtestAudit", activeBacktestId],
-    queryFn: () => fetchBacktestAudit(activeBacktestId!, undefined, 120),
-    enabled: Boolean(activeBacktestId && shouldLoadBacktestAudit),
     staleTime: 20_000,
   });
 
@@ -172,12 +141,6 @@ export function QuantTradingPage() {
     staleTime: 20_000,
   });
 
-  const vnpyStatusQuery = useQuery({
-    queryKey: ["vnpyStatus"],
-    queryFn: fetchVnpyStatus,
-    staleTime: 60_000,
-  });
-
   const researchMutation = useMutation({
     mutationFn: () => {
       const minEntryScore = strategyMinEntryScore(strategiesQuery.data?.items ?? [], selectedStrategy, backtestParams.min_entry_score);
@@ -186,19 +149,19 @@ export function QuantTradingPage() {
         end: tradingDatesQuery.data?.latest_trade_date ?? undefined,
         strategy: selectedStrategy,
         max_symbols: backtestParams.max_symbols,
-        recommendation_limit: backtestParams.candidate_limit,
+        recommendation_limit: DEFAULT_RECOMMENDATION_LIMIT,
         min_recommendation_score: 60,
         min_entry_score: minEntryScore,
         persist: true,
         auto_portfolio: true,
         included_boards: backtestParams.included_boards,
         initial_cash: backtestParams.initial_cash,
-        max_positions: 10,
-        candidate_limit: 10,
+        max_positions: backtestParams.max_positions,
+        candidate_limit: DEFAULT_EXECUTION_CANDIDATE_LIMIT,
         max_position_pct: 0.1,
         strict_entry: true,
         execution_model: "legacy_next_open",
-        force_refresh: true,
+        force_refresh: false,
       });
     },
     onSuccess: (result) => {
@@ -330,7 +293,6 @@ export function QuantTradingPage() {
         recommendationCount={recommendationsQuery.data?.items.length ?? 0}
         backtestCount={backtestRuns.length}
         holdingsCount={holdingsQuery.data?.items.length ?? 0}
-        vnpyStatus={vnpyStatusQuery.data}
         latestTradeDate={latestTradeDate}
         latestScreenDate={latestScreenDate}
       />
@@ -340,8 +302,6 @@ export function QuantTradingPage() {
           <TabsList className="h-auto rounded-none bg-transparent p-0">
             <TabsTrigger value="candidates" className="rounded-none px-3 py-2 shadow-none">候选</TabsTrigger>
             <TabsTrigger value="backtest" className="rounded-none px-3 py-2 shadow-none">回测</TabsTrigger>
-            <TabsTrigger value="logs" className="rounded-none px-3 py-2 shadow-none">日志</TabsTrigger>
-            <TabsTrigger value="data" className="rounded-none px-3 py-2 shadow-none">数据</TabsTrigger>
           </TabsList>
         </div>
 
@@ -368,7 +328,6 @@ export function QuantTradingPage() {
               activeBacktestId={activeBacktestId}
               status={recommendationsQuery.data?.status}
               message={recommendationsQuery.data?.message}
-              syncedCount={quantGroupItemsQuery.data?.items.length ?? 0}
               onRetry={() => recommendationsQuery.refetch()}
               onRunScreen={() => researchMutation.mutate()}
               isRunningScreen={isResearchRunning}
@@ -386,35 +345,17 @@ export function QuantTradingPage() {
             strategies={strategiesQuery.data?.items ?? []}
             selectedStrategy={selectedStrategy}
             report={reportQuery.data}
-            dataQuality={dataQualityQuery.data}
-            isDataQualityLoading={dataQualityQuery.isLoading}
-            audit={auditQuery.data}
             isLoading={backtestsQuery.isLoading || reportQuery.isLoading}
             isError={backtestsQuery.isError || reportQuery.isError}
             onRetry={() => {
               backtestsQuery.refetch();
               reportQuery.refetch();
-              dataQualityQuery.refetch();
-              auditQuery.refetch();
             }}
             validationGrid={validationGridQuery.data}
             isValidationGridLoading={validationGridQuery.isFetching}
             onRunValidationGrid={() => validationGridQuery.refetch()}
             onAddToPortfolio={handleAddToPortfolio}
           />
-        </TabsContent>
-
-        <TabsContent value="logs" className="mt-0">
-          <BacktestLogWorkspace report={reportQuery.data} audit={auditQuery.data} isLoading={auditQuery.isLoading} />
-        </TabsContent>
-
-        <TabsContent value="data" className="mt-0">
-          <div className="grid gap-4 xl:grid-cols-[360px_minmax(0,1fr)]">
-            <VnpyStatusPanel data={vnpyStatusQuery.data} isLoading={vnpyStatusQuery.isLoading} />
-            {reportQuery.data && (
-              <BacktestDataQuality data={reportQuery.data.data_quality} limitations={reportQuery.data.limitations} />
-            )}
-          </div>
         </TabsContent>
       </Tabs>
 

@@ -25,7 +25,7 @@ def create_screen_run(payload: dict[str, Any] = Body(default_factory=dict)):
             screening.screen_stocks(
                 _parse_date(payload.get("trade_date")),
                 strategy_id=str(payload.get("strategy") or screening.STRATEGY_ID),
-                max_symbols=int(payload.get("max_symbols") or 500),
+                max_symbols=int(payload.get("max_symbols") or 5000),
                 recommendation_limit=int(payload.get("recommendation_limit") or screening.DEFAULT_RECOMMENDATION_LIMIT),
                 min_recommendation_score=float(payload.get("min_recommendation_score") or 60),
                 persist=bool(payload.get("persist", True)),
@@ -45,7 +45,7 @@ def create_screen_runs_range(payload: dict[str, Any] = Body(default_factory=dict
                 start=_parse_date(payload.get("start") or payload.get("start_date") or payload.get("trade_date")),
                 end=_parse_date(payload.get("end") or payload.get("end_date")),
                 strategy_id=str(payload.get("strategy") or screening.STRATEGY_ID),
-                max_symbols=int(payload.get("max_symbols") or 500),
+                max_symbols=int(payload.get("max_symbols") or 5000),
                 recommendation_limit=int(payload.get("recommendation_limit") or screening.DEFAULT_RECOMMENDATION_LIMIT),
                 min_recommendation_score=float(payload.get("min_recommendation_score") or 60),
                 persist=bool(payload.get("persist", True)),
@@ -75,7 +75,7 @@ def create_research_run(payload: dict[str, Any] = Body(default_factory=dict)):
                 included_boards=payload.get("included_boards"),
                 initial_cash=float(payload.get("initial_cash") or 1_000_000),
                 max_positions=int(payload.get("max_positions") or 10),
-                candidate_limit=int(payload.get("candidate_limit") or 10),
+                candidate_limit=int(payload.get("candidate_limit") or 20),
                 max_position_pct=float(payload.get("max_position_pct") or 0.1),
                 strict_entry=bool(payload.get("strict_entry", True)),
                 execution_model=str(payload.get("execution_model") or "legacy_next_open"),
@@ -114,7 +114,7 @@ def create_replay_run(payload: dict[str, Any] = Body(default_factory=dict)):
                 start=start,
                 end=end,
                 strategy_id=str(payload.get("strategy") or screening.STRATEGY_ID),
-                max_symbols=int(payload.get("max_symbols") or 500),
+                max_symbols=int(payload.get("max_symbols") or 5000),
                 min_entry_score=float(payload.get("min_entry_score") or 68),
                 strict_entry=bool(payload.get("strict_entry", True)),
                 execution_model=str(payload.get("execution_model") or "legacy_next_open"),
@@ -217,7 +217,7 @@ def list_signals(
 def list_recommendations(
     trade_date: str = Query(default=""),
     strategy: str = Query(default=screening.STRATEGY_ID),
-    limit: int = Query(default=50, ge=1, le=200),
+    limit: int = Query(default=screening.DEFAULT_RECOMMENDATION_LIMIT, ge=1, le=200),
 ):
     try:
         return ok(screening.list_recommendations(_parse_date(trade_date), strategy_id=strategy, limit=limit))

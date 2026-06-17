@@ -18,6 +18,18 @@ from alphaagent.server.services.quant.factors import (
 from alphaagent.server.services.quant.strategy_registry import require_strategy
 
 
+STEALTH_LOW_SUCTION_ENTRY_SCORE = 74.5
+STEALTH_LOW_SUCTION_HARD_FAILURES = {
+    "distribution_risk",
+    "weak_rebound_ma5_below_ma10",
+    "ma20_broken",
+    "pullback_too_deep",
+    "liquidity_score",
+    "risk_score",
+    "overheat",
+}
+
+
 def score_to_db(item: SignalScore, run_id: int | None, strategy_id: str, strategy_version: str = STRATEGY_VERSION) -> dict[str, Any]:
     return {
         "run_id": run_id,
@@ -54,7 +66,8 @@ def recommendation_to_db(
     reason = dict(item.evidence or {})
     reason["risk_score"] = item.risk_score
     reason["liquidity_score"] = item.liquidity_score
-    reason["failed_rules"] = failed_entry_rules(item, threshold)
+    action_payload = entry_action_payload(item, threshold)
+    reason["failed_rules"] = action_payload["failed_rules"]
     entry_price = (item.evidence or {}).get("close_price")
     return {
         "run_id": run_id,
@@ -63,7 +76,7 @@ def recommendation_to_db(
         "strategy_id": strategy_id,
         "strategy_version": strategy_version,
         "rank": rank,
-        "action": "BUY" if item.entry_signal else "WATCH",
+        "action": action_payload["action"],
         "horizon": "SWING",
         "confidence": item.total_score / 100,
         "total_score": item.total_score,
@@ -77,7 +90,7 @@ def recommendation_to_db(
 def symbol_signal_row(item: SignalScore, min_entry_score: float) -> dict[str, Any]:
     evidence = item.evidence or {}
     ma5_distance = evidence.get("ma5_distance_pct")
-    failed_rules = failed_entry_rules(item, min_entry_score)
+    action_payload = entry_action_payload(item, min_entry_score)
     return {
         "trade_date": item.trade_date.isoformat(),
         "vt_symbol": item.vt_symbol,
@@ -90,13 +103,27 @@ def symbol_signal_row(item: SignalScore, min_entry_score: float) -> dict[str, An
         "liquidity_score": item.liquidity_score,
         "risk_score": item.risk_score,
         "entry_signal": item.entry_signal,
+        **action_payload,
         "ma5": evidence.get("ma5"),
         "ma5_distance_pct": ma5_distance,
         "turnover20": evidence.get("turnover20"),
         "turnover_estimated_from_volume": evidence.get("turnover_estimated_from_volume"),
+        "evidence": evidence,
+    }
+
+
+def entry_action_payload(item: SignalScore, min_entry_score: float) -> dict[str, Any]:
+    effective_min_entry_score = effective_entry_score_threshold(item, min_entry_score)
+    failed_rules = failed_entry_rules(item, min_entry_score)
+    executable = bool(item.entry_signal and not failed_rules)
+    return {
+        "raw_entry_signal": bool(item.entry_signal),
+        "executable_entry_signal": executable,
+        "action": "BUY" if executable else "WATCH",
         "failed_rules": failed_rules,
         "failed_rule_count": len(failed_rules),
-        "evidence": evidence,
+        "effective_min_entry_score": effective_min_entry_score,
+        "entry_threshold_reason": "stealth_low_suction" if effective_min_entry_score < float(min_entry_score) else "default",
     }
 
 
@@ -140,10 +167,15 @@ def strategy_rule_payload(strategy_id: str, min_entry_score: float) -> dict[str,
     if strategy_id == DRAGON_PULLBACK_STRATEGY_ID:
         return {
             "min_entry_score": min_entry_score,
+            "stealth_low_suction_min_entry_score": STEALTH_LOW_SUCTION_ENTRY_SCORE,
             "pullback_days": "[3, 12]",
             "support_type": "MA5/MA10/MA20 support + reclaim",
-            "ma5_distance_pct": "[-1.8, 2.5]",
+            "ma5_distance_pct": "[-1.8, 3.0]",
             "ma10_distance_pct": "[-2.5, 3.0]",
+            "ma_convergence_pct": "<= 8.0 adds low-suction score",
+            "low_suction_days": "continuous MA5/MA10 acceptance adds score",
+            "stealth_low_suction_execution": "setup-specific threshold requires >=4 low-suction days, MA convergence <=3.5, volume ratio [0.55, 1.45], MA20 distance >= -2.5, and no hard risk failure",
+            "ma_convergence_too_wide_without_low_suction": "reject wide MA spread without repeated low-suction",
             "distribution_risk": "reject",
             "weak_rebound_ma5_below_ma10": "reject",
             "min_risk_score": 35,
@@ -195,10 +227,12 @@ def strategy_rule_payload(strategy_id: str, min_entry_score: float) -> dict[str,
 def failed_entry_rules(item: SignalScore, min_entry_score: float) -> list[str]:
     evidence = item.evidence or {}
     failed_rules = []
-    if item.total_score < min_entry_score:
+    if item.total_score < effective_entry_score_threshold(item, min_entry_score):
         failed_rules.append("total_score")
     if item.signal_type == DRAGON_PULLBACK_STRATEGY_ID:
         for rule in evidence.get("failed_rules") or []:
+            if _is_executable_low_suction_exception(evidence, str(rule)):
+                continue
             if rule not in failed_rules:
                 failed_rules.append(str(rule))
         if item.risk_score < 35:
@@ -282,6 +316,78 @@ def failed_entry_rules(item: SignalScore, min_entry_score: float) -> list[str]:
     return failed_rules
 
 
+def effective_entry_score_threshold(item: SignalScore, min_entry_score: float) -> float:
+    if _qualifies_for_stealth_low_suction_threshold(item):
+        return min(float(min_entry_score), STEALTH_LOW_SUCTION_ENTRY_SCORE)
+    return float(min_entry_score)
+
+
+def signal_score_prefilter_threshold(strategy_id: str, min_entry_score: float) -> float:
+    if strategy_id == DRAGON_PULLBACK_STRATEGY_ID:
+        return min(float(min_entry_score), STEALTH_LOW_SUCTION_ENTRY_SCORE)
+    return float(min_entry_score)
+
+
+def _qualifies_for_stealth_low_suction_threshold(item: SignalScore) -> bool:
+    if item.signal_type != DRAGON_PULLBACK_STRATEGY_ID:
+        return False
+    if not item.entry_signal:
+        return False
+    if float(item.total_score or 0.0) < STEALTH_LOW_SUCTION_ENTRY_SCORE:
+        return False
+    evidence = item.evidence or {}
+    if evidence.get("setup_type") != "stealth_low_suction" and evidence.get("entry_setup") != "stealth_low_suction":
+        return False
+    try:
+        low_suction_days = float(evidence.get("low_suction_days") or 0)
+        low_suction_score = float(evidence.get("low_suction_buildup_score") or 0)
+        stealth_score = float(evidence.get("stealth_low_suction_score") or 0)
+        convergence = float(evidence.get("ma_convergence_pct") or 999)
+        volume_ratio = float(evidence.get("volume_ratio_5d_20d") or 0)
+        ma20_distance = float(evidence.get("ma20_distance_pct") or -999)
+    except (TypeError, ValueError):
+        return False
+    if low_suction_days < 4 or low_suction_score < 95 or stealth_score < 90:
+        return False
+    if convergence > 3.5:
+        return False
+    if not 0.55 <= volume_ratio <= 1.45:
+        return False
+    if ma20_distance < -2.5:
+        return False
+    failed_rules = {str(rule) for rule in evidence.get("failed_rules") or []}
+    return not bool(failed_rules & STEALTH_LOW_SUCTION_HARD_FAILURES)
+
+
+def _is_executable_low_suction_exception(evidence: dict[str, Any], rule: str) -> bool:
+    if evidence.get("setup_type") == "stealth_low_suction":
+        return rule in {
+            "strong_leg",
+            "pullback_structure",
+            "support_acceptance",
+            "reclaim_confirmation",
+            "pullback_too_short",
+            "pullback_too_late",
+        }
+    if rule != "reclaim_confirmation":
+        return False
+    if evidence.get("dragon_state") != "LOW_SUCTION_BUILDUP":
+        return False
+    try:
+        low_suction_score = float(evidence.get("low_suction_buildup_score") or 0)
+        low_suction_days = float(evidence.get("low_suction_days") or 0)
+        convergence = float(evidence.get("ma_convergence_pct") or 999)
+        ma20_distance = float(evidence.get("ma20_distance_pct") or -999)
+    except (TypeError, ValueError):
+        return False
+    return (
+        low_suction_score >= 90
+        and low_suction_days >= 3
+        and convergence <= 5.0
+        and ma20_distance >= -3.0
+    )
+
+
 def score_to_api(item: SignalScore, stock: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = score_to_db(item, None, item.signal_type or STRATEGY_ID)
     payload.pop("run_id", None)
@@ -332,6 +438,8 @@ def mapping_to_api(row: dict[str, Any]) -> dict[str, Any]:
         result["reason"] = normalize_quant_evidence(result["reason"])
     if isinstance(result.get("evidence"), dict):
         result["evidence"] = normalize_quant_evidence(result["evidence"])
+    if "entry_signal" in result and "total_score" in result:
+        result.update(signal_mapping_action_payload(result))
     if isinstance(result.get("risk_control"), dict):
         result["risk_control"] = normalize_risk_control(result["risk_control"])
     for key, value in list(result.items()):
@@ -355,8 +463,44 @@ def normalize_quant_evidence(value: dict[str, Any]) -> dict[str, Any]:
     return evidence
 
 
+def signal_mapping_action_payload(row: dict[str, Any], min_entry_score: float | None = None) -> dict[str, Any]:
+    strategy_id = str(row.get("signal_type") or row.get("strategy_id") or STRATEGY_ID)
+    if min_entry_score is None:
+        try:
+            min_entry_score = float(require_strategy(strategy_id).default_min_entry_score)
+        except ValueError:
+            min_entry_score = float(require_strategy(STRATEGY_ID).default_min_entry_score)
+    evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+    item = SignalScore(
+        vt_symbol=str(row.get("vt_symbol") or ""),
+        trade_date=row.get("trade_date") if isinstance(row.get("trade_date"), date) else date.min,
+        signal_type=strategy_id,
+        total_score=_float_or_default(row.get("total_score"), 0.0),
+        relative_strength_score=_float_or_default(row.get("relative_strength_score"), 0.0),
+        washout_score=_float_or_default(row.get("washout_score"), 0.0),
+        trend_quality_score=_float_or_default(row.get("trend_quality_score"), 0.0),
+        sector_mainline_score=_float_or_default(row.get("sector_mainline_score"), 50.0),
+        financial_improvement_score=_float_or_default(row.get("financial_improvement_score"), 50.0),
+        liquidity_score=_float_or_default(row.get("liquidity_score"), 0.0),
+        risk_score=_float_or_default(row.get("risk_score"), 50.0),
+        entry_signal=bool(row.get("entry_signal")),
+        risk_level=str(row.get("risk_level") or "MEDIUM"),
+        evidence=evidence,
+    )
+    return entry_action_payload(item, float(min_entry_score))
+
+
 def normalize_risk_control(value: dict[str, Any]) -> dict[str, Any]:
     risk_control = dict(value)
     if risk_control.get("execution") == "D close signal; D+1 tail-window minute fill when available, otherwise next-open simulation fallback":
         risk_control["execution"] = default_risk_control()["execution"]
     return risk_control
+
+
+def _float_or_default(value: Any, default: float) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default

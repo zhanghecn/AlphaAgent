@@ -25,6 +25,10 @@ interface CandidateReason {
   selection_rule?: string;
   entry_setup?: string;
   entry_signal?: boolean;
+  raw_entry_signal?: boolean;
+  executable_entry_signal?: boolean;
+  action?: "BUY" | "WATCH" | string;
+  failed_rules?: string[];
 }
 
 /** Parse the quant_candidate reason JSON (rank / score / risk / date). */
@@ -58,6 +62,8 @@ const ENTRY_RULE_LABEL: Record<string, string> = {
   breakout_confirmation: "平台突破",
   limit_up_after_pullback: "涨停后回踩",
   trend_acceleration: "趋势加速",
+  dragon_pullback: "龙回头回踩",
+  stealth_low_suction: "低吸洗盘",
 };
 
 /**
@@ -98,7 +104,7 @@ export function CandidateTable({ items, action, onBuild, onViewDetail }: Candida
         <div className="p-4">
           <EmptyState
             message="候选池为空"
-            description="在量化页运行策略研究后会自动同步到此。"
+            description="在量化页刷新候选并回测后会自动同步到此。"
           />
         </div>
       ) : (
@@ -117,6 +123,7 @@ export function CandidateTable({ items, action, onBuild, onViewDetail }: Candida
               {rows.map(({ item, reason }) => {
                 const risk = riskBadge(reason?.risk_level);
                 const isOpen = expanded === item.vt_symbol;
+                const actionLabel = candidateActionLabel(reason);
                 return (
                   <Fragment key={item.vt_symbol}>
                     <tr className="border-b last:border-0 hover:bg-muted/30">
@@ -188,7 +195,9 @@ export function CandidateTable({ items, action, onBuild, onViewDetail }: Candida
                                   : undefined
                               }
                             />
-                            <DetailRow label="买入信号" value={reason?.entry_signal == null ? undefined : reason.entry_signal ? "BUY" : "WATCH"} />
+                            <DetailRow label="买入信号" value={actionLabel} />
+                            <DetailRow label="原始信号" value={reason?.raw_entry_signal == null ? undefined : reason.raw_entry_signal ? "是" : "否"} />
+                            <DetailRow label="失败规则" value={reason?.failed_rules?.length ? reason.failed_rules.join(", ") : "通过"} />
                             <DetailRow label="策略" value={item.strategy_id} />
                             <DetailRow label="版本" value={item.strategy_version} />
                           </div>
@@ -213,6 +222,14 @@ export function CandidateTable({ items, action, onBuild, onViewDetail }: Candida
       )}
     </SectionCard>
   );
+}
+
+function candidateActionLabel(reason?: CandidateReason | null): string | undefined {
+  if (!reason) return undefined;
+  if (reason.action) return reason.action.toUpperCase();
+  if (reason.executable_entry_signal != null) return reason.executable_entry_signal ? "BUY" : "WATCH";
+  if (reason.entry_signal != null) return reason.entry_signal ? "BUY" : "WATCH";
+  return undefined;
 }
 
 function DetailRow({ label, value }: { label: string; value?: string | null }) {

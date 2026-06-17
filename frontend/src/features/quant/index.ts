@@ -12,7 +12,6 @@ export { TradingDateSelector } from "./TradingDateSelector";
 
 // Backtest components
 export { BacktestPanel } from "./BacktestPanel";
-export { BacktestSignalEventsPanel } from "./BacktestSignalEventsPanel";
 export { BacktestSummary, BacktestTrustPanel, BacktestMethodPanel } from "./BacktestSummary";
 export { BacktestParamsForm } from "./BacktestParamsForm";
 export { BacktestLogWorkspace } from "./BacktestLogWorkspace";

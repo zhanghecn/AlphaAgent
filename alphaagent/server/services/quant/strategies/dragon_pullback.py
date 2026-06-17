@@ -22,7 +22,7 @@ from alphaagent.server.services.quant.factors import (
 )
 
 
-DRAGON_PULLBACK_STRATEGY_VERSION = "0.1.1"
+DRAGON_PULLBACK_STRATEGY_VERSION = "0.1.18"
 
 
 @dataclass(frozen=True)
@@ -40,6 +40,7 @@ class DragonFeatures:
     ma5: float | None
     ma10: float | None
     ma20: float | None
+    ma30: float | None
     ma60: float | None
     ma5_prev: float | None
     ma10_prev: float | None
@@ -48,6 +49,10 @@ class DragonFeatures:
     ma20_distance_pct: float | None
     ma5_vs_ma10_pct: float | None
     ma10_vs_ma20_pct: float | None
+    ma20_vs_ma30_pct: float | None
+    ma_convergence_pct: float | None
+    low_suction_days: int
+    support_hold_days: int
     ma5_slope_pct: float | None
     volume5: float | None
     volume20: float | None
@@ -83,6 +88,14 @@ def score_dragon_pullback(
 
     visible_bars = [bar for bar in bars if bar.trade_date <= trade_date]
     result = SignalScore(vt_symbol=vt_symbol, trade_date=trade_date, signal_type=DRAGON_PULLBACK_STRATEGY_ID)
+    latest_bar_date = visible_bars[-1].trade_date if visible_bars else None
+    if latest_bar_date != trade_date:
+        result.evidence = {
+            "status": "missing_trade_date_bar",
+            "trade_date": trade_date.isoformat(),
+            "latest_bar_date": latest_bar_date.isoformat() if latest_bar_date else None,
+        }
+        return result
     if len(visible_bars) < 80:
         result.evidence = {"status": "insufficient_data", "bars": len(visible_bars), "min_required": 80}
         return result
@@ -112,29 +125,66 @@ def score_dragon_pullback(
     failed_rules = _failed_rules(features, strong_leg, pullback, support, reclaim, risk_flags, liquidity, risk)
     state = _dragon_state(features, failed_rules, support_type, reclaim)
     fresh_tail_buy, repeat_days, last_ready_date = _tail_buy_freshness(visible_bars, state)
-    if state == "TAIL_BUY_READY" and not fresh_tail_buy:
-        failed_rules = [*failed_rules, "repeat_tail_buy_setup"]
+    repeat_low_suction_days = repeat_days + 1 if repeat_days and _is_low_suction_structure(features) else 0
+    effective_low_suction_days = max(features.low_suction_days, repeat_low_suction_days)
+    low_suction = _score_low_suction_buildup(features, low_suction_days=effective_low_suction_days)
+    if state == "TAIL_BUY_READY" and not fresh_tail_buy and effective_low_suction_days >= 2:
+        state = "LOW_SUCTION_BUILDUP"
+    stealth_low_suction = _score_stealth_low_suction(
+        features,
+        support=support,
+        reclaim=reclaim,
+        low_suction=low_suction,
+        low_suction_days=effective_low_suction_days,
+        smart_money=smart_money,
+    )
+    setup_type = _setup_type(features, state, failed_rules, low_suction, stealth_low_suction)
+    fresh_stealth_low_suction = _fresh_stealth_low_suction(visible_bars, setup_type, effective_low_suction_days)
 
-    total = (
+    dragon_total = (
         0.20 * relative_strength
         + 0.16 * strong_leg
-        + 0.18 * pullback
-        + 0.16 * support
+        + 0.15 * pullback
+        + 0.14 * support
         + 0.12 * reclaim
+        + 0.07 * low_suction
         + 0.08 * sector
         + 0.04 * financial
         + 0.06 * smart_money
         + 0.10 * liquidity
         - risk_penalty
     )
-    total = clamp_score(total)
+    stealth_total = (
+        0.24 * stealth_low_suction
+        + 0.18 * support
+        + 0.14 * reclaim
+        + 0.12 * pullback
+        + 0.10 * relative_strength
+        + 0.08 * smart_money
+        + 0.06 * sector
+        + 0.04 * financial
+        + 0.08 * liquidity
+        - risk_penalty
+    )
+    total = clamp_score(max(dragon_total, stealth_total))
+    executable_low_suction = _is_executable_low_suction_buildup(features, state, failed_rules, low_suction, setup_type=setup_type)
+    evidence_failed_rules = _display_failed_rules(
+        failed_rules,
+        executable_low_suction=executable_low_suction,
+        setup_type=setup_type,
+    )
     entry_signal = (
         total >= 72
-        and state == "TAIL_BUY_READY"
-        and fresh_tail_buy
+        and (
+            (
+                state == "TAIL_BUY_READY"
+                and not failed_rules
+            )
+            or setup_type == "stealth_low_suction"
+            or executable_low_suction
+        )
         and liquidity >= 25
         and risk >= 35
-        and not failed_rules
     )
 
     result.total_score = round(total, 4)
@@ -153,13 +203,21 @@ def score_dragon_pullback(
     result.evidence = _evidence(
         features=features,
         index_return_20d=index_return_20d,
+        relative_strength=relative_strength,
         strong_leg=strong_leg,
         pullback=pullback,
         support=support,
         reclaim=reclaim,
+        low_suction=low_suction,
+        stealth_low_suction=stealth_low_suction,
+        low_suction_days=effective_low_suction_days,
+        support_hold_days=features.support_hold_days,
+        sector=sector,
+        financial=financial,
+        liquidity=liquidity,
         support_type=support_type,
         state=state,
-        failed_rules=failed_rules,
+        failed_rules=evidence_failed_rules,
         risk_flags=risk_flags,
         risk_penalty=risk_penalty,
         fresh_tail_buy=fresh_tail_buy,
@@ -169,6 +227,11 @@ def score_dragon_pullback(
         fund_flow=fund_flow,
         hot_rank=hot_rank,
         lhb=lhb,
+        executable_low_suction=executable_low_suction,
+        setup_type=setup_type,
+        fresh_stealth_low_suction=fresh_stealth_low_suction,
+        dragon_total=dragon_total,
+        stealth_total=stealth_total,
     )
     return result
 
@@ -185,6 +248,7 @@ def _build_features(bars: list[Bar]) -> DragonFeatures:
     ma5 = moving_average(closes, 5)
     ma10 = moving_average(closes, 10)
     ma20 = moving_average(closes, 20)
+    ma30 = moving_average(closes, 30)
     ma60 = moving_average(closes, 60)
     ma5_prev = moving_average(previous_closes, 5)
     ma10_prev = moving_average(previous_closes, 10)
@@ -211,6 +275,7 @@ def _build_features(bars: list[Bar]) -> DragonFeatures:
         ma5=ma5,
         ma10=ma10,
         ma20=ma20,
+        ma30=ma30,
         ma60=ma60,
         ma5_prev=ma5_prev,
         ma10_prev=ma10_prev,
@@ -219,6 +284,10 @@ def _build_features(bars: list[Bar]) -> DragonFeatures:
         ma20_distance_pct=pct_distance(latest.close_price, ma20),
         ma5_vs_ma10_pct=pct_distance(ma5, ma10),
         ma10_vs_ma20_pct=pct_distance(ma10, ma20),
+        ma20_vs_ma30_pct=pct_distance(ma20, ma30),
+        ma_convergence_pct=_ma_convergence_pct(ma5, ma10, ma20, ma30),
+        low_suction_days=_low_suction_days(bars),
+        support_hold_days=_support_hold_days(bars),
         ma5_slope_pct=pct_distance(ma5, ma5_prev),
         volume5=volume5,
         volume20=volume20,
@@ -332,6 +401,241 @@ def _score_reclaim(features: DragonFeatures) -> float:
     return clamp_score(score)
 
 
+def _score_low_suction_buildup(features: DragonFeatures, *, low_suction_days: int | None = None) -> float:
+    """Score repeated low-suction acceptance around short MAs."""
+
+    score = 35.0
+    days = features.low_suction_days if low_suction_days is None else low_suction_days
+    if features.ma_convergence_pct is not None:
+        if features.ma_convergence_pct <= 3.0:
+            score += 22
+        elif features.ma_convergence_pct <= 5.0:
+            score += 14
+        elif features.ma_convergence_pct <= 8.0:
+            score += 6
+    if days >= 4:
+        score += 22
+    elif days >= 3:
+        score += 16
+    elif days >= 2:
+        score += 9
+    if features.support_hold_days >= 4:
+        score += 14
+    elif features.support_hold_days >= 2:
+        score += 8
+    if features.volume_ratio is not None:
+        if features.volume_ratio <= 0.9:
+            score += 12
+        elif features.volume_ratio <= 1.15:
+            score += 6
+    if features.latest_change_pct is not None and -2.5 <= features.latest_change_pct <= 5.5:
+        score += 8
+    if features.ma20_distance_pct is not None and features.ma20_distance_pct >= -2.5:
+        score += 7
+    return clamp_score(score)
+
+
+def _is_low_suction_structure(features: DragonFeatures) -> bool:
+    convergence_ok = features.ma_convergence_pct is not None and features.ma_convergence_pct <= 8.0
+    short_ma_ok = (
+        features.ma5_distance_pct is not None
+        and -2.2 <= features.ma5_distance_pct <= 3.2
+    ) or (
+        features.ma10_distance_pct is not None
+        and -2.8 <= features.ma10_distance_pct <= 3.2
+    )
+    trend_not_broken = features.ma20_distance_pct is not None and features.ma20_distance_pct >= -3.0
+    return bool(convergence_ok and short_ma_ok and trend_not_broken)
+
+
+def _is_wide_ma_without_low_suction(features: DragonFeatures) -> bool:
+    """Reject fast, extended pullbacks that are not repeated low-suction setups."""
+
+    if features.ma_convergence_pct is None:
+        return False
+    if features.low_suction_days >= 2:
+        return False
+    if features.ma_convergence_pct <= 14.0:
+        return False
+    if features.close_location_in_range is None or features.close_location_in_range < 0.70:
+        return False
+    if features.latest_change_pct is None or features.latest_change_pct < 1.5:
+        return False
+    if features.return_20d is not None and features.return_20d >= 25.0:
+        return True
+    return features.ma20_distance_pct is not None and features.ma20_distance_pct > 8.0
+
+
+def _is_executable_low_suction_buildup(
+    features: DragonFeatures,
+    state: str,
+    failed_rules: list[str],
+    low_suction: float,
+    *,
+    setup_type: str,
+) -> bool:
+    """Allow repeated MA5/MA10 low-suction buildup before full reclaim confirmation."""
+
+    if setup_type == "stealth_low_suction":
+        return True
+    if state != "LOW_SUCTION_BUILDUP":
+        return False
+    if low_suction < 90:
+        return False
+    if features.low_suction_days < 3:
+        return False
+    if features.ma_convergence_pct is None or features.ma_convergence_pct > 5.0:
+        return False
+    if features.ma20_distance_pct is None or features.ma20_distance_pct < -3.0:
+        return False
+    hard_failures = {
+        "distribution_risk",
+        "weak_rebound_ma5_below_ma10",
+        "ma20_broken",
+        "pullback_too_deep",
+        "pullback_too_short",
+        "pullback_too_late",
+        "ma_convergence_too_wide_without_low_suction",
+        "liquidity_score",
+        "risk_score",
+        "overheat",
+    }
+    return not any(rule in hard_failures for rule in failed_rules)
+
+
+def _score_stealth_low_suction(
+    features: DragonFeatures,
+    *,
+    support: float,
+    reclaim: float,
+    low_suction: float,
+    low_suction_days: int,
+    smart_money: float,
+) -> float:
+    """Score quiet MA5/MA10 absorption as a setup separate from dragon pullback."""
+
+    score = 20.0
+    if low_suction_days >= 6:
+        score += 24
+    elif low_suction_days >= 4:
+        score += 20
+    elif low_suction_days >= 3:
+        score += 14
+    if features.ma_convergence_pct is not None:
+        if features.ma_convergence_pct <= 3.0:
+            score += 20
+        elif features.ma_convergence_pct <= 5.0:
+            score += 16
+        elif features.ma_convergence_pct <= 6.5:
+            score += 8
+    if features.volume_ratio is not None:
+        if 0.55 <= features.volume_ratio <= 0.95:
+            score += 16
+        elif 0.95 < features.volume_ratio <= 1.20:
+            score += 8
+    if features.ma20_distance_pct is not None:
+        if features.ma20_distance_pct >= 0:
+            score += 10
+        elif features.ma20_distance_pct >= -2.5:
+            score += 6
+    if features.ma5_slope_pct is not None and features.ma5_slope_pct >= -0.45:
+        score += 8
+    if features.latest_change_pct is not None and -3.0 <= features.latest_change_pct <= 4.8:
+        score += 8
+    if support >= 70:
+        score += 8
+    if reclaim >= 62:
+        score += 5
+    if low_suction >= 95:
+        score += 8
+    if smart_money >= 60:
+        score += 4
+    return clamp_score(score)
+
+
+def _setup_type(
+    features: DragonFeatures,
+    state: str,
+    failed_rules: list[str],
+    low_suction: float,
+    stealth_low_suction: float,
+) -> str:
+    if state == "TAIL_BUY_READY" and not failed_rules:
+        return "dragon_pullback"
+    if not _is_stealth_low_suction_setup(features, failed_rules, low_suction, stealth_low_suction):
+        return state.lower()
+    return "stealth_low_suction"
+
+
+def _is_stealth_low_suction_setup(
+    features: DragonFeatures,
+    failed_rules: list[str],
+    low_suction: float,
+    stealth_low_suction: float,
+) -> bool:
+    if stealth_low_suction < 78 or low_suction < 90:
+        return False
+    if features.low_suction_days < 3:
+        return False
+    if features.ma_convergence_pct is None or features.ma_convergence_pct > 5.0:
+        return False
+    if features.ma20_distance_pct is None or features.ma20_distance_pct < -2.5:
+        return False
+    if features.volume_ratio is None or not _stealth_volume_ok(features):
+        return False
+    if features.latest_change_pct is not None and features.latest_change_pct > 6.5:
+        return False
+    hard_failures = {
+        "distribution_risk",
+        "weak_rebound_ma5_below_ma10",
+        "ma20_broken",
+        "pullback_too_deep",
+        "ma_convergence_too_wide_without_low_suction",
+        "liquidity_score",
+        "risk_score",
+        "overheat",
+    }
+    return not any(rule in hard_failures for rule in failed_rules)
+
+
+def _fresh_stealth_low_suction(bars: list[Bar], setup_type: str, low_suction_days: int) -> bool:
+    if setup_type != "stealth_low_suction" or len(bars) < 2:
+        return False
+    if low_suction_days <= 3:
+        return True
+    return _low_suction_days(bars[:-1]) < 3
+
+
+def _stealth_volume_ok(features: DragonFeatures) -> bool:
+    if features.volume_ratio is None:
+        return False
+    if 0.50 <= features.volume_ratio <= 1.25:
+        return True
+    confirmation_day = (
+        features.latest_change_pct is not None
+        and 0.8 <= features.latest_change_pct <= 6.2
+        and features.close_location_in_range is not None
+        and features.close_location_in_range >= 0.58
+    )
+    return bool(confirmation_day and features.volume_ratio <= 1.55)
+
+
+def _display_failed_rules(failed_rules: list[str], *, executable_low_suction: bool, setup_type: str) -> list[str]:
+    if not executable_low_suction:
+        return failed_rules
+    if setup_type == "stealth_low_suction":
+        setup_specific_rules = {
+            "strong_leg",
+            "pullback_structure",
+            "support_acceptance",
+            "reclaim_confirmation",
+            "pullback_too_short",
+            "pullback_too_late",
+        }
+        return [rule for rule in failed_rules if rule not in setup_specific_rules]
+    return [rule for rule in failed_rules if rule != "reclaim_confirmation"]
+
+
 def _risk_penalty(features: DragonFeatures) -> tuple[float, list[str]]:
     flags: list[str] = []
     penalty = 0.0
@@ -373,6 +677,8 @@ def _failed_rules(
         failed.append("pullback_too_short")
     if features.pullback_days > 12:
         failed.append("pullback_too_late")
+    if _is_wide_ma_without_low_suction(features):
+        failed.append("ma_convergence_too_wide_without_low_suction")
     if liquidity < 25:
         failed.append("liquidity_score")
     if risk < 35:
@@ -394,6 +700,14 @@ def _dragon_state(
         return "INVALIDATED"
     if support_type != "none" and reclaim >= 62 and not failed_rules:
         return "TAIL_BUY_READY"
+    if (
+        support_type != "none"
+        and features.low_suction_days >= 3
+        and features.ma_convergence_pct is not None
+        and features.ma_convergence_pct <= 5.0
+        and not any(rule in failed_rules for rule in ("distribution_risk", "weak_rebound_ma5_below_ma10", "ma20_broken", "pullback_too_deep", "overheat"))
+    ):
+        return "LOW_SUCTION_BUILDUP"
     if support_type != "none":
         return "SUPPORT_ACCEPTED"
     if features.pullback_days >= 1:
@@ -431,6 +745,15 @@ def _tail_buy_freshness(bars: list[Bar], state: str) -> tuple[bool, int, date | 
 def _is_weak_rebound_after_breakdown(features: DragonFeatures) -> bool:
     if features.ma5_vs_ma10_pct is None or features.ma10_distance_pct is None:
         return False
+    if (
+        features.low_suction_days >= 3
+        and features.support_hold_days >= 2
+        and features.ma_convergence_pct is not None
+        and features.ma_convergence_pct <= 4.0
+        and features.ma20_distance_pct is not None
+        and features.ma20_distance_pct >= -2.5
+    ):
+        return False
     return (
         features.ma5_vs_ma10_pct < -2.0
         and features.ma10_distance_pct < 0
@@ -460,10 +783,18 @@ def _evidence(
     *,
     features: DragonFeatures,
     index_return_20d: float | None,
+    relative_strength: float,
     strong_leg: float,
     pullback: float,
     support: float,
     reclaim: float,
+    low_suction: float,
+    stealth_low_suction: float,
+    low_suction_days: int,
+    support_hold_days: int,
+    sector: float,
+    financial: float,
+    liquidity: float,
     support_type: str,
     state: str,
     failed_rules: list[str],
@@ -476,6 +807,11 @@ def _evidence(
     fund_flow: float,
     hot_rank: float,
     lhb: float,
+    executable_low_suction: bool,
+    setup_type: str,
+    fresh_stealth_low_suction: bool,
+    dragon_total: float,
+    stealth_total: float,
 ) -> dict[str, object]:
     return {
         "status": "ready",
@@ -487,12 +823,17 @@ def _evidence(
         "ma5": features.ma5,
         "ma10": features.ma10,
         "ma20": features.ma20,
+        "ma30": features.ma30,
         "ma60": features.ma60,
         "ma5_distance_pct": features.ma5_distance_pct,
         "ma10_distance_pct": features.ma10_distance_pct,
         "ma20_distance_pct": features.ma20_distance_pct,
         "ma5_vs_ma10_pct": features.ma5_vs_ma10_pct,
         "ma10_vs_ma20_pct": features.ma10_vs_ma20_pct,
+        "ma20_vs_ma30_pct": features.ma20_vs_ma30_pct,
+        "ma_convergence_pct": features.ma_convergence_pct,
+        "low_suction_days": low_suction_days,
+        "support_hold_days": support_hold_days,
         "ma5_slope_pct": features.ma5_slope_pct,
         "volume5": features.volume5,
         "volume20": features.volume20,
@@ -514,6 +855,9 @@ def _evidence(
         "pullback_structure_score": pullback,
         "support_acceptance_score": support,
         "reclaim_confirmation_score": reclaim,
+        "low_suction_buildup_score": low_suction,
+        "stealth_low_suction_score": stealth_low_suction,
+        "setup_type": setup_type,
         "support_type": support_type,
         "support_price": _support_price(features, support_type),
         "dragon_state": state,
@@ -528,9 +872,112 @@ def _evidence(
         "hot_rank_score": hot_rank,
         "lhb_score": lhb,
         "smart_money_note": "fund/hot/lhb are observable proxy signals, not proof of main-force intent",
+        "fresh_stealth_low_suction": fresh_stealth_low_suction,
+        "score_breakdown": _score_breakdown(
+            relative_strength=relative_strength,
+            strong_leg=strong_leg,
+            pullback=pullback,
+            support=support,
+            reclaim=reclaim,
+            low_suction=low_suction,
+            sector=sector,
+            financial=financial,
+            smart_money=smart_money,
+            liquidity=liquidity,
+            risk_penalty=risk_penalty,
+        ),
+        "setup_scores": {
+            "dragon_pullback": round(clamp_score(dragon_total), 4),
+            "stealth_low_suction": round(clamp_score(stealth_total), 4),
+        },
+        "score_notes": _score_notes(
+            features,
+            state,
+            setup_type,
+            support_type,
+            low_suction,
+            stealth_low_suction,
+            failed_rules,
+            low_suction_days,
+            support_hold_days,
+            executable_low_suction,
+            fresh_stealth_low_suction,
+        ),
         "selection_rule": "daily_close_visible_signal",
-        "entry_setup": "dragon_pullback",
+        "entry_setup": setup_type,
     }
+
+
+def _score_breakdown(
+    *,
+    relative_strength: float | None,
+    strong_leg: float,
+    pullback: float,
+    support: float,
+    reclaim: float,
+    low_suction: float,
+    sector: float | None,
+    financial: float | None,
+    smart_money: float,
+    liquidity: float | None,
+    risk_penalty: float,
+) -> list[dict[str, object]]:
+    rows = [
+        ("相对强度", relative_strength, 0.20),
+        ("第一波强度", strong_leg, 0.16),
+        ("回踩结构", pullback, 0.15),
+        ("均线承接", support, 0.14),
+        ("弱转强确认", reclaim, 0.12),
+        ("低吸蓄势", low_suction, 0.07),
+        ("主线板块", sector, 0.08),
+        ("财务改善", financial, 0.04),
+        ("资金热度", smart_money, 0.06),
+        ("流动性", liquidity, 0.10),
+    ]
+    breakdown = [
+        {
+            "name": name,
+            "score": score,
+            "weight": weight,
+            "contribution": round(float(score or 0) * weight, 4),
+        }
+        for name, score, weight in rows
+    ]
+    breakdown.append({"name": "风险扣分", "score": -risk_penalty, "weight": 1.0, "contribution": -risk_penalty})
+    return breakdown
+
+
+def _score_notes(
+    features: DragonFeatures,
+    state: str,
+    setup_type: str,
+    support_type: str,
+    low_suction: float,
+    stealth_low_suction: float,
+    failed_rules: list[str],
+    low_suction_days: int,
+    support_hold_days: int,
+    executable_low_suction: bool,
+    fresh_stealth_low_suction: bool,
+) -> list[str]:
+    notes = [
+        f"状态 {state}",
+        f"入口 {setup_type}",
+        f"承接 {support_type}",
+        f"低吸蓄势 {low_suction_days} 天",
+        f"支撑未破 {support_hold_days} 天",
+    ]
+    if features.ma_convergence_pct is not None:
+        notes.append(f"MA5/10/20/30 收敛宽度 {features.ma_convergence_pct:.2f}%")
+    notes.append(f"低吸蓄势分 {low_suction:.1f}")
+    notes.append(f"低吸洗盘分 {stealth_low_suction:.1f}")
+    if fresh_stealth_low_suction:
+        notes.append("低吸洗盘新启动")
+    if executable_low_suction:
+        notes.append("低吸蓄势入口已满足")
+    if failed_rules:
+        notes.append("扣分/拒绝: " + ", ".join(failed_rules))
+    return notes
 
 
 def _percentile_rank(values: list[float], latest: float | None) -> float | None:
@@ -548,6 +995,60 @@ def _support_price(features: DragonFeatures, support_type: str) -> float | None:
     if support_type == "ma20_support":
         return features.ma20
     return features.ma5
+
+
+def _ma_convergence_pct(ma5: float | None, ma10: float | None, ma20: float | None, ma30: float | None) -> float | None:
+    values = [value for value in (ma5, ma10, ma20, ma30) if value is not None and value > 0]
+    if len(values) < 4:
+        return None
+    base = sum(values) / len(values)
+    if base <= 0:
+        return None
+    return (max(values) - min(values)) / base * 100
+
+
+def _low_suction_days(bars: list[Bar], lookback: int = 6) -> int:
+    days = 0
+    start = max(len(bars) - lookback, 0)
+    for end_index in range(start + 1, len(bars) + 1):
+        closes = [bar.close_price for bar in bars[:end_index]]
+        if len(closes) < 30:
+            continue
+        latest = bars[end_index - 1]
+        ma5 = moving_average(closes, 5)
+        ma10 = moving_average(closes, 10)
+        ma20 = moving_average(closes, 20)
+        ma30 = moving_average(closes, 30)
+        ma5_distance = pct_distance(latest.close_price, ma5)
+        ma10_distance = pct_distance(latest.close_price, ma10)
+        ma20_distance = pct_distance(latest.close_price, ma20)
+        convergence = _ma_convergence_pct(ma5, ma10, ma20, ma30)
+        near_short_ma = (
+            (ma5_distance is not None and -2.2 <= ma5_distance <= 3.2)
+            or (ma10_distance is not None and -2.8 <= ma10_distance <= 3.2)
+        )
+        trend_not_broken = ma20_distance is not None and ma20_distance >= -3.0
+        converged = convergence is not None and convergence <= 6.0
+        if near_short_ma and trend_not_broken and converged:
+            days += 1
+    return days
+
+
+def _support_hold_days(bars: list[Bar], lookback: int = 6) -> int:
+    days = 0
+    start = max(len(bars) - lookback, 0)
+    for end_index in range(start + 1, len(bars) + 1):
+        closes = [bar.close_price for bar in bars[:end_index]]
+        if len(closes) < 20:
+            continue
+        latest = bars[end_index - 1]
+        ma10 = moving_average(closes, 10)
+        ma20 = moving_average(closes, 20)
+        ma10_distance = pct_distance(latest.close_price, ma10)
+        ma20_distance = pct_distance(latest.close_price, ma20)
+        if ma10_distance is not None and ma20_distance is not None and ma10_distance >= -3.2 and ma20_distance >= -3.5:
+            days += 1
+    return days
 
 
 def _close_location(bar: Bar) -> float | None:

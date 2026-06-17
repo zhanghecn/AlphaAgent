@@ -11,9 +11,10 @@ from sqlalchemy import and_, desc, func, select
 from alphaagent.market.boards import DEFAULT_QUANT_INCLUDED_BOARDS, normalize_included_boards, stock_board_payload
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
-from alphaagent.server.services.backtest import execution_models, simulation
+from alphaagent.server.services.backtest import execution_models, scoring, simulation
 from alphaagent.server.services.backtest.schemas import BacktestParams, MinuteBar, Position
-from alphaagent.server.services.quant.factors import STRATEGY_ID, Bar
+from alphaagent.server.services.quant import screening_payloads
+from alphaagent.server.services.quant.factors import STRATEGY_ID, Bar, SignalScore
 from alphaagent.server.services.quant.strategy_registry import get_strategy
 
 
@@ -25,7 +26,7 @@ def create_replay_run(
     start: date,
     end: date,
     strategy_id: str = STRATEGY_ID,
-    max_symbols: int = 500,
+    max_symbols: int = 5000,
     min_entry_score: float = DEFAULT_REPLAY_MIN_ENTRY_SCORE,
     strict_entry: bool = True,
     execution_model: str = "legacy_next_open",
@@ -70,7 +71,7 @@ def create_replay_run(
     )
 
     with session_scope() as session:
-        signal_rows = _load_signal_rows(session, strategy.id, strategy.version, start, end)
+        signal_rows = _load_signal_rows(session, strategy.id, strategy.version, start, end, params)
         if not signal_rows:
             replay_id = _insert_run(
                 session,
@@ -200,7 +201,7 @@ def latest_symbol_replay(vt_symbol: str, strategy_id: str = STRATEGY_ID) -> dict
                 "status": "empty",
                 "vt_symbol": symbol,
                 "strategy_id": strategy.id,
-                "message": "该股暂无全局买卖记录，请先在量化页运行策略研究。",
+                "message": "该股暂无全局买卖记录，请先在量化页刷新候选并回测。",
             }
     return symbol_replay(int(run["id"]), symbol)
 
@@ -329,6 +330,8 @@ def _replay_attempts(
             attempts.append(attempt)
             if attempt["execution_status"] != "filled":
                 continue
+            entry_reason = dict(order.get("evidence") or order.get("reason") or {})
+            entry_reason["execution"] = attempt["raw"]
             positions[order["vt_symbol"]] = Position(
                 vt_symbol=order["vt_symbol"],
                 name=stock_meta.get(order["vt_symbol"], {}).get("name"),
@@ -336,7 +339,7 @@ def _replay_attempts(
                 cost_price=float(attempt["price"]),
                 entry_date=current_day,
                 highest_price=bar.high_price if bar else float(attempt["price"]),
-                reason=attempt["raw"],
+                reason=entry_reason,
             )
 
         for vt_symbol, position in list(positions.items()):
@@ -531,13 +534,10 @@ def _signals_by_date(signal_rows: list[dict[str, Any]], params: BacktestParams) 
 
 
 def _is_buy_signal(row: dict[str, Any], params: BacktestParams) -> bool:
-    if float(row.get("total_score") or 0) < params.min_entry_score:
-        return False
-    if float(row.get("risk_score") or 0) < 35 or float(row.get("liquidity_score") or 0) < 25:
-        return False
-    if params.strict_entry and not bool(row.get("entry_signal")):
-        return False
-    return True
+    """Compatibility predicate for tests and callers passing unscreened rows."""
+
+    score = _signal_score_from_row(row)
+    return scoring.is_buy_candidate(score, params)
 
 
 def _closed_trades(attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -665,20 +665,49 @@ def _reject_reason_counts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{"reason": reason, "count": count} for reason, count in sorted(counts.items())]
 
 
-def _load_signal_rows(session, strategy_id: str, strategy_version: str, start: date, end: date) -> list[dict[str, Any]]:
+def _load_signal_rows(
+    session,
+    strategy_id: str,
+    strategy_version: str,
+    start: date,
+    end: date,
+    params: BacktestParams,
+) -> list[dict[str, Any]]:
+    min_score_prefilter = screening_payloads.signal_score_prefilter_threshold(strategy_id, params.min_entry_score)
+    filters = [
+        schema.quant_stock_signals.c.strategy_id == strategy_id,
+        schema.quant_stock_signals.c.strategy_version == strategy_version,
+        schema.quant_stock_signals.c.trade_date >= start,
+        schema.quant_stock_signals.c.trade_date <= end,
+        schema.quant_stock_signals.c.total_score >= min_score_prefilter,
+        schema.quant_stock_signals.c.risk_score >= 35,
+        schema.quant_stock_signals.c.liquidity_score >= 25,
+    ]
     rows = session.execute(
         select(schema.quant_stock_signals)
-        .where(
-            and_(
-                schema.quant_stock_signals.c.strategy_id == strategy_id,
-                schema.quant_stock_signals.c.strategy_version == strategy_version,
-                schema.quant_stock_signals.c.trade_date >= start,
-                schema.quant_stock_signals.c.trade_date <= end,
-            )
-        )
+        .where(and_(*filters))
         .order_by(schema.quant_stock_signals.c.trade_date, desc(schema.quant_stock_signals.c.total_score), schema.quant_stock_signals.c.vt_symbol)
     ).mappings().all()
     return [dict(row) for row in rows]
+
+
+def _signal_score_from_row(row: dict[str, Any]) -> SignalScore:
+    return SignalScore(
+        vt_symbol=str(row.get("vt_symbol") or ""),
+        trade_date=row["trade_date"],
+        signal_type=str(row.get("signal_type") or row.get("strategy_id") or STRATEGY_ID),
+        total_score=float(row.get("total_score") or 0),
+        relative_strength_score=float(row.get("relative_strength_score") or 0),
+        washout_score=float(row.get("washout_score") or 0),
+        trend_quality_score=float(row.get("trend_quality_score") or 0),
+        sector_mainline_score=float(row.get("sector_mainline_score") or 50),
+        financial_improvement_score=float(row.get("financial_improvement_score") or 50),
+        liquidity_score=float(row.get("liquidity_score") or 0),
+        risk_score=float(row.get("risk_score") or 50),
+        entry_signal=bool(row.get("entry_signal")),
+        risk_level=str(row.get("risk_level") or "MEDIUM"),
+        evidence=dict(row.get("evidence") or {}),
+    )
 
 
 def _limited_symbols(signal_rows: list[dict[str, Any]], max_symbols: int) -> list[str]:
@@ -801,13 +830,10 @@ def _insert_run(
 
 
 def _insert_attempts(session, replay_id: int, attempts: list[dict[str, Any]]) -> None:
-    for attempt in attempts:
-        session.execute(
-            schema.strategy_replay_attempts.insert().values(
-                replay_run_id=replay_id,
-                **attempt,
-            )
-        )
+    if not attempts:
+        return
+    rows = [{"replay_run_id": replay_id, **attempt} for attempt in attempts]
+    session.execute(schema.strategy_replay_attempts.insert(), rows)
 
 
 def _params(

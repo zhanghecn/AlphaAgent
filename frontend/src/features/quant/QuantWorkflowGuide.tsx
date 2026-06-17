@@ -1,5 +1,4 @@
 import { cn } from "@/lib/utils";
-import type { VnpyStatus } from "@/api/quant";
 
 export function QuantWorkflowGuide({
   recommendationLoading,
@@ -9,7 +8,6 @@ export function QuantWorkflowGuide({
   recommendationCount,
   backtestCount,
   holdingsCount,
-  vnpyStatus,
   latestTradeDate,
   latestScreenDate,
 }: {
@@ -20,7 +18,6 @@ export function QuantWorkflowGuide({
   recommendationCount: number;
   backtestCount: number;
   holdingsCount: number;
-  vnpyStatus?: VnpyStatus;
   latestTradeDate?: string | null;
   latestScreenDate?: string | null;
 }) {
@@ -37,7 +34,7 @@ export function QuantWorkflowGuide({
     note: string;
   }> = [
     {
-      label: "数据",
+      label: "日线",
       status: dataState,
       value: latestTradeDate ? `至 ${latestTradeDate}` : dataState === "pending" ? "检查中" : "待配置",
       note: recommendationMessage || "显示本地日线库最新交易日；没有同步到今天时不会显示今天。",
@@ -55,22 +52,16 @@ export function QuantWorkflowGuide({
       note: "历史回测使用日线口径，自动按候选评分前10名和最多10只持仓模拟买卖。",
     },
     {
-      label: "模拟",
+      label: "持仓",
       status: holdingsCount > 0 ? "ready" : "pending",
       value: holdingsCount > 0 ? `${holdingsCount}只` : "空仓",
       note: "自动建仓只写模拟账户，不会下实盘委托。",
-    },
-    {
-      label: "vn.py",
-      status: vnpyStatus?.status === "ready" ? "ready" : "warning",
-      value: vnpyStatus?.status === "ready" ? "A股插件就绪" : "A股待接入",
-      note: "AlphaAgent 本地回测可用；A股实盘和官方数据源仍需要安装并配置对应 Gateway/Datafeed。",
     },
   ];
 
   return (
     <section className="rounded-lg border">
-      <div className="grid divide-y md:grid-cols-5 md:divide-x md:divide-y-0">
+      <div className="grid divide-y md:grid-cols-4 md:divide-x md:divide-y-0">
         {steps.map((step) => (
           <div key={step.label} className="p-2.5" title={step.note}>
             <div className="flex items-center justify-between gap-2">

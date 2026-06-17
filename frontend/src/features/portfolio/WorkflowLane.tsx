@@ -105,7 +105,7 @@ function emptyHint(stateKey: PortfolioStateMeta["key"]): string {
     case "watch":
       return "可手动加入股票，或从其他分组移入。";
     case "candidate":
-      return "在量化页运行策略研究后会自动同步到此。";
+      return "在量化页刷新候选并回测后会自动同步到此。";
     case "holding":
       return "可从候选池模拟建仓，或手动下模拟单。";
     case "review":

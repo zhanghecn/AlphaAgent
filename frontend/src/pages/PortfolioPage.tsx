@@ -98,7 +98,6 @@ export function PortfolioPage() {
       {effectiveGroupId ? (
         <PortfolioList
           items={items}
-          positionsBySymbol={holdings.positionsBySymbol}
           onRemove={(groupId, vt) => removeMutation.mutate({ groupId, symbol: vt })}
           onViewDetail={(vt) => navigate(`/stocks/${vt}`)}
           removingSymbol={removingSymbol}

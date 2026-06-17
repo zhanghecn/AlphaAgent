@@ -105,7 +105,7 @@ def load_stock_universe(session, max_symbols: int, included_boards: tuple[str, .
     rows = session.execute(
         select(schema.stocks)
         .where(schema.stocks.c.vt_symbol != "000001.SSE")
-        .order_by(desc(schema.stocks.c.turnover), desc(schema.stocks.c.market_cap))
+        .order_by(schema.stocks.c.vt_symbol)
         .limit(5000)
     ).mappings().all()
     allowed = set(included_boards or DEFAULT_QUANT_INCLUDED_BOARDS)

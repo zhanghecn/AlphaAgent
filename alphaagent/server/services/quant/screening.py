@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
+from dataclasses import dataclass
 from datetime import date
 from typing import Any, Callable
 
@@ -11,17 +13,28 @@ from alphaagent.market.boards import DEFAULT_QUANT_INCLUDED_BOARDS, normalize_in
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
 from alphaagent.server.services.quant.factors import (
+    DRAGON_PULLBACK_STRATEGY_ID,
     STRATEGY_ID,
     STRATEGY_VERSION,
     Bar,
     SignalScore,
 )
+from alphaagent.server.services.quant import candidate_lanes
 from alphaagent.server.services.quant import screening_loaders, screening_payloads, screening_persistence
 from alphaagent.server.services.quant.financials import financial_coverage_summary
 from alphaagent.server.services.quant.strategy_registry import get_strategy, score_strategy
 
 
 DEFAULT_RECOMMENDATION_LIMIT = 20
+
+
+@dataclass(frozen=True)
+class _ScreenRangeContext:
+    stock_rows: list[dict[str, Any]]
+    stock_meta: dict[str, dict[str, Any]]
+    symbols: list[str]
+    bars_by_symbol: dict[str, list[Bar]]
+    bar_dates_by_symbol: dict[str, list[date]]
 
 
 def list_available_strategies() -> dict[str, Any]:
@@ -35,13 +48,14 @@ def screen_stocks(
     trade_date: date | None = None,
     *,
     strategy_id: str = STRATEGY_ID,
-    max_symbols: int = 500,
+    max_symbols: int = 5000,
     recommendation_limit: int = DEFAULT_RECOMMENDATION_LIMIT,
     min_recommendation_score: float = 60.0,
     persist: bool = False,
     auto_portfolio: bool = True,
     included_boards: list[str] | tuple[str, ...] | str | None = None,
     ensure_schema: bool = True,
+    range_context: _ScreenRangeContext | None = None,
 ) -> dict[str, Any]:
     """Run the daily stock screen."""
 
@@ -59,9 +73,16 @@ def screen_stocks(
             return {"status": "empty", "message": "stock_daily_bars is empty", "items": [], "recommendations": []}
 
         boards = normalize_included_boards(included_boards)
-        stock_rows = _load_stock_universe(session, max_symbols, boards)
-        symbols = [str(row["vt_symbol"]) for row in stock_rows]
-        bars_by_symbol = _load_bars(session, symbols, as_of, lookback_days=160)
+        if range_context is not None:
+            stock_rows = range_context.stock_rows
+            symbols = range_context.symbols
+            bars_by_symbol = range_context.bars_by_symbol
+            bar_dates_by_symbol = range_context.bar_dates_by_symbol
+        else:
+            stock_rows = _load_stock_universe(session, max_symbols, boards)
+            symbols = [str(row["vt_symbol"]) for row in stock_rows]
+            bars_by_symbol = _load_bars(session, symbols, as_of, lookback_days=160)
+            bar_dates_by_symbol = _bar_dates_by_symbol(bars_by_symbol)
         index_return_20d = _load_index_return_20d(session, as_of)
         sector_scores = _load_sector_scores(session, symbols, as_of)
         financial_scores = _load_financial_scores(session, symbols, as_of)
@@ -72,10 +93,17 @@ def screen_stocks(
         scored = []
         stock_meta = {str(row["vt_symbol"]): dict(row) for row in stock_rows}
         for vt_symbol in symbols:
+            bars = _visible_bars_for_date(
+                bars_by_symbol.get(vt_symbol, []),
+                bar_dates_by_symbol.get(vt_symbol, []),
+                as_of,
+            )
+            if not bars:
+                continue
             score = score_strategy(
                 strategy.id,
                 vt_symbol,
-                bars_by_symbol.get(vt_symbol, []),
+                bars,
                 as_of,
                 index_return_20d=index_return_20d,
                 sector_score=sector_scores.get(vt_symbol),
@@ -86,9 +114,7 @@ def screen_stocks(
             )
             if score.evidence.get("status") == "ready":
                 # 信号日收盘价随 evidence 存储，供买卖计划预算与单股回测复用（免重算）
-                bars = bars_by_symbol.get(vt_symbol, [])
-                if bars:
-                    score.evidence["close_price"] = float(bars[-1].close_price)
+                score.evidence["close_price"] = float(bars[-1].close_price)
                 scored.append(score)
 
         scored.sort(key=lambda item: (-item.total_score, item.vt_symbol))
@@ -96,11 +122,17 @@ def screen_stocks(
             item
             for item in scored
             if item.entry_signal or item.total_score >= min_recommendation_score
-        ][:recommendation_limit]
+        ]
+        recommendations = _select_recommendations(
+            recommendations,
+            strategy.id,
+            strategy.default_min_entry_score,
+            recommendation_limit,
+        )
         run_id = None
         portfolio_sync = None
         if persist:
-            run_id = _persist_screen_run(session, as_of, scored, recommendations, strategy.id, strategy.version, boards)
+            run_id = _persist_screen_run(session, as_of, scored, recommendations, strategy.id, strategy.version, boards, max_symbols=max_symbols)
             if auto_portfolio:
                 portfolio_sync = _sync_quant_candidate_group(session, recommendations, stock_meta, strategy.id, strategy.version)
 
@@ -122,12 +154,15 @@ def screen_stocks(
     }
 
 
+_SCREEN_STOCKS_IMPL = screen_stocks
+
+
 def screen_stocks_range(
     start: date | None = None,
     end: date | None = None,
     *,
     strategy_id: str = STRATEGY_ID,
-    max_symbols: int = 500,
+    max_symbols: int = 5000,
     recommendation_limit: int = DEFAULT_RECOMMENDATION_LIMIT,
     min_recommendation_score: float = 60.0,
     persist: bool = False,
@@ -144,6 +179,7 @@ def screen_stocks_range(
     if not is_database_configured():
         return {"status": "unavailable", "message": "DATABASE_URL not configured", "items": [], "recommendations": [], "runs": []}
     _ensure_quant_schema()
+    boards = list(normalize_included_boards(included_boards))
 
     with session_scope() as session:
         latest = end or _latest_trade_date(session)
@@ -161,7 +197,7 @@ def screen_stocks_range(
                 "runs": [],
             }
         trade_dates = _trading_dates_between(session, start_date, latest)
-        existing_runs = _screen_runs_by_date(session, strategy.id, strategy.version, trade_dates)
+        existing_runs = _screen_runs_by_date(session, strategy.id, strategy.version, trade_dates, max_symbols=max_symbols, included_boards=tuple(boards))
 
     if not trade_dates:
         return {
@@ -180,16 +216,19 @@ def screen_stocks_range(
     processed_count = 0
     range_recommendation_count = 0
     force_refreshed_count = 0
-    boards = list(normalize_included_boards(included_boards))
+    range_context = _build_screen_range_context(start_date, latest, max_symbols, tuple(boards)) if _should_use_fast_range_context() else None
 
-    for index, trade_date in enumerate(trade_dates):
+    processing_dates = list(reversed(trade_dates))
+    latest_trade_date = trade_dates[-1]
+    run_rows_by_date: dict[date, dict[str, Any]] = {}
+    for index, trade_date in enumerate(processing_dates):
         existing_run = existing_runs.get(trade_date) if persist else None
         use_existing = bool(existing_run and not force_refresh)
         if existing_run and force_refresh:
             force_refreshed_count += 1
         if use_existing:
             result = _screen_result_from_existing_run(existing_run, strategy.id, strategy.version, boards)
-            if auto_portfolio and index == len(trade_dates) - 1:
+            if auto_portfolio and trade_date == latest_trade_date:
                 _sync_existing_recommendations_to_portfolio(existing_run["id"], strategy.id, strategy.version)
         else:
             result = screen_stocks(
@@ -199,11 +238,13 @@ def screen_stocks_range(
                 recommendation_limit=recommendation_limit,
                 min_recommendation_score=min_recommendation_score,
                 persist=persist,
-                auto_portfolio=auto_portfolio and index == len(trade_dates) - 1,
+                auto_portfolio=auto_portfolio and trade_date == latest_trade_date,
                 included_boards=boards,
                 ensure_schema=False,
+                range_context=range_context,
             )
-        latest_result = result
+        if trade_date == latest_trade_date:
+            latest_result = result
         status = str(result.get("status") or "empty")
         if status == "ready":
             succeeded_count += 1
@@ -211,17 +252,15 @@ def screen_stocks_range(
             processed_count += 1
         recommendation_count = int(result.get("recommendation_count") or 0)
         range_recommendation_count += recommendation_count
-        runs.append(
-            {
-                "trade_date": trade_date.isoformat(),
-                "status": status,
-                "run_id": result.get("run_id"),
-                "candidate_count": int(result.get("total") or 0),
-                "recommendation_count": recommendation_count,
-                "skipped_existing": use_existing,
-                "force_refreshed": bool(existing_run and force_refresh),
-            }
-        )
+        run_rows_by_date[trade_date] = {
+            "trade_date": trade_date.isoformat(),
+            "status": status,
+            "run_id": result.get("run_id"),
+            "candidate_count": int(result.get("total") or 0),
+            "recommendation_count": recommendation_count,
+            "skipped_existing": use_existing,
+            "force_refreshed": bool(existing_run and force_refresh),
+        }
         if progress:
             progress(
                 {
@@ -234,11 +273,22 @@ def screen_stocks_range(
                     "force_refreshed": bool(existing_run and force_refresh),
                 }
             )
+    runs = [run_rows_by_date[trade_date] for trade_date in trade_dates if trade_date in run_rows_by_date]
 
     replay_run = None
     if persist:
         from alphaagent.server.services.quant import strategy_replay
 
+        if progress:
+            progress(
+                {
+                    "stage": "replay",
+                    "message": "候选已补齐，正在生成买卖记录",
+                    "progress_current": len(trade_dates),
+                    "progress_total": len(trade_dates),
+                    "status": "ready" if succeeded_count else str(latest_result.get("status") or "empty"),
+                }
+            )
         try:
             replay_run = strategy_replay.create_replay_run(
                 start=trade_dates[0],
@@ -419,7 +469,11 @@ def list_trading_dates(start: date | None = None, end: date | None = None, limit
     }
 
 
-def list_recommendations(trade_date: date | None = None, strategy_id: str = STRATEGY_ID, limit: int = 50) -> dict[str, Any]:
+def list_recommendations(
+    trade_date: date | None = None,
+    strategy_id: str = STRATEGY_ID,
+    limit: int = DEFAULT_RECOMMENDATION_LIMIT,
+) -> dict[str, Any]:
     if not is_database_configured():
         return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
     strategy = get_strategy(strategy_id)
@@ -615,7 +669,7 @@ def symbol_signal_history(
                 continue
             rows.append(_symbol_signal_row(score, effective_min_entry_score))
 
-    trigger_rows = [row for row in rows if row["entry_signal"]]
+    trigger_rows = [row for row in rows if row.get("executable_entry_signal")]
     near_rows = sorted(rows, key=lambda row: _symbol_signal_fit_key(row, strategy.id))[:limit]
     recent_rows = sorted(rows, key=lambda row: row["trade_date"], reverse=True)[:limit]
     best_total = max(rows, key=lambda row: float(row["total_score"]), default=None)
@@ -754,7 +808,15 @@ def _latest_screen_run(session, strategy_id: str, trade_date: date | None = None
     return screening_loaders.latest_screen_run(session, strategy_id, strategy_version, trade_date)
 
 
-def _screen_runs_by_date(session, strategy_id: str, strategy_version: str, trade_dates: list[date]) -> dict[date, dict[str, Any]]:
+def _screen_runs_by_date(
+    session,
+    strategy_id: str,
+    strategy_version: str,
+    trade_dates: list[date],
+    *,
+    max_symbols: int = 5000,
+    included_boards: tuple[str, ...] = DEFAULT_QUANT_INCLUDED_BOARDS,
+) -> dict[date, dict[str, Any]]:
     if not trade_dates:
         return {}
     rows = session.execute(
@@ -773,8 +835,17 @@ def _screen_runs_by_date(session, strategy_id: str, strategy_version: str, trade
     for row in rows:
         trade_date = row["trade_date"]
         if trade_date not in result:
-            result[trade_date] = dict(row)
+            run = dict(row)
+            if _screen_run_matches_params(run, max_symbols=max_symbols, included_boards=included_boards):
+                result[trade_date] = run
     return result
+
+
+def _screen_run_matches_params(run: dict[str, Any], *, max_symbols: int, included_boards: tuple[str, ...]) -> bool:
+    params = run.get("params") if isinstance(run.get("params"), dict) else {}
+    if int(params.get("max_symbols") or 0) != int(max_symbols):
+        return False
+    return tuple(normalize_included_boards(params.get("included_boards"))) == tuple(normalize_included_boards(included_boards))
 
 
 def _screen_result_from_existing_run(
@@ -838,6 +909,44 @@ def _trading_dates_between(session, start: date, end: date) -> list[date]:
     return screening_loaders.trading_dates_between(session, start, end)
 
 
+def _should_use_fast_range_context() -> bool:
+    if screen_stocks is not _SCREEN_STOCKS_IMPL:
+        return False
+    try:
+        with session_scope() as session:
+            return hasattr(session, "execute")
+    except Exception:
+        return False
+
+
+def _build_screen_range_context(start: date, end: date, max_symbols: int, boards: tuple[str, ...]) -> _ScreenRangeContext:
+    with session_scope() as session:
+        stock_rows = _load_stock_universe(session, max_symbols, boards)
+        symbols = [str(row["vt_symbol"]) for row in stock_rows]
+        bars_by_symbol = _load_bars(session, symbols, end, lookback_days=max((end - start).days + 160, 200))
+    return _ScreenRangeContext(
+        stock_rows=stock_rows,
+        stock_meta={str(row["vt_symbol"]): dict(row) for row in stock_rows},
+        symbols=symbols,
+        bars_by_symbol=bars_by_symbol,
+        bar_dates_by_symbol=_bar_dates_by_symbol(bars_by_symbol),
+    )
+
+
+def _bar_dates_by_symbol(bars_by_symbol: dict[str, list[Bar]]) -> dict[str, list[date]]:
+    return {vt_symbol: [bar.trade_date for bar in bars] for vt_symbol, bars in bars_by_symbol.items()}
+
+
+def _visible_bars_for_date(bars: list[Bar], bar_dates: list[date], trade_date: date) -> list[Bar]:
+    if not bars or not bar_dates:
+        return []
+    end_index = bisect_right(bar_dates, trade_date)
+    if end_index <= 0 or bars[end_index - 1].trade_date != trade_date:
+        return []
+    start_index = max(0, end_index - 180)
+    return bars[start_index:end_index]
+
+
 def _run_included_boards(run: dict[str, Any] | None) -> list[str]:
     return screening_loaders.run_included_boards(run)
 
@@ -882,6 +991,7 @@ def _persist_screen_run(
     strategy_id: str,
     strategy_version: str | tuple[str, ...] = STRATEGY_VERSION,
     included_boards: tuple[str, ...] = DEFAULT_QUANT_INCLUDED_BOARDS,
+    max_symbols: int = 5000,
 ) -> int:
     if isinstance(strategy_version, tuple):
         included_boards = strategy_version
@@ -894,6 +1004,7 @@ def _persist_screen_run(
         strategy_id,
         strategy_version,
         included_boards,
+        max_symbols=max_symbols,
     )
 
 
@@ -958,6 +1069,60 @@ def _strategy_rule_payload(strategy_id: str, min_entry_score: float) -> dict[str
 
 def _failed_entry_rules(item: SignalScore, min_entry_score: float) -> list[str]:
     return screening_payloads.failed_entry_rules(item, min_entry_score)
+
+
+def _recommendation_sort_key(item: SignalScore, min_entry_score: float) -> tuple[int, int, float, int, float, float, str]:
+    evidence = item.evidence or {}
+    low_suction_days = _float_or_default(evidence.get("low_suction_days"), 0.0)
+    convergence = _float_or_default(evidence.get("ma_convergence_pct"), 999.0)
+    low_suction_score = _float_or_default(evidence.get("low_suction_buildup_score"), 0.0)
+    state = str(evidence.get("dragon_state") or "")
+    buy_action = _recommendation_buy_action(item, min_entry_score)
+    low_suction_watch = (
+        not buy_action
+        and state == "LOW_SUCTION_BUILDUP"
+        and low_suction_days >= 2
+    )
+    return (
+        0 if buy_action else 1,
+        0 if low_suction_watch else 1,
+        -float(item.total_score or 0),
+        -int(low_suction_days),
+        convergence,
+        -low_suction_score,
+        item.vt_symbol,
+    )
+
+
+def _select_recommendations(
+    recommendations: list[SignalScore],
+    strategy_id: str,
+    min_entry_score: float,
+    limit: int,
+) -> list[SignalScore]:
+    ordered = sorted(recommendations, key=lambda item: _recommendation_sort_key(item, min_entry_score))
+    if strategy_id != DRAGON_PULLBACK_STRATEGY_ID:
+        return ordered[:limit]
+    buy_items = [item for item in ordered if _recommendation_buy_action(item, min_entry_score)]
+    watch_items = [item for item in ordered if not _recommendation_buy_action(item, min_entry_score)]
+    selected = candidate_lanes.select_dragon_pullback_execution_pool(buy_items, limit, strategy_id)
+    selected_symbols = {item.vt_symbol for item in selected}
+    if len(selected) < limit:
+        selected.extend(item for item in watch_items if item.vt_symbol not in selected_symbols)
+    return selected[:limit]
+
+
+def _recommendation_buy_action(item: SignalScore, min_entry_score: float) -> bool:
+    return bool(item.entry_signal and not screening_payloads.failed_entry_rules(item, min_entry_score))
+
+
+def _float_or_default(value: Any, default: float) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _score_to_api(item: SignalScore, stock: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -54,7 +54,7 @@ export function BacktestParamsForm({
         </div>
       </div>
       <div className="mt-3 border-t pt-3 text-xs text-muted-foreground">
-        历史研究使用日线口径：D日收盘产生信号，D+1按日线开盘价执行；资金仅用于等权计算，页面默认只看收益率和买卖点。
+        历史研究使用日线口径：D日收盘产生信号，D+1按日线开盘价执行；页面默认只看收益率和买卖点。
         {selectedStrategyMeta?.default_min_entry_score ? ` 当前策略默认最低分 ${selectedStrategyMeta.default_min_entry_score}。` : ""}
       </div>
     </div>

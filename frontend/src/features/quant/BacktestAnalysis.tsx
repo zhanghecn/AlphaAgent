@@ -491,20 +491,16 @@ export function BacktestRealityStats({
 }: {
   metrics: NonNullable<Awaited<ReturnType<typeof fetchBacktestReport>>["extended_metrics"]>;
 }) {
-  const executionModes = metrics.execution_modes ?? {};
   return (
     <div className="grid gap-2 border-t pt-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
       <InfoCell label="平均持仓" value={`${formatNumber(metrics.average_holding_days, 1)}天`} />
       <InfoCell label="持仓中位数" value={`${formatNumber(metrics.median_holding_days, 1)}天`} />
-      <InfoCell label="成交额" value={formatAmount(metrics.traded_amount)} />
       <InfoCell label="换手估算" value={formatPct(metrics.turnover_pct)} />
       <InfoCell label="平均仓位" value={formatPct(metrics.average_exposure_pct)} />
       <InfoCell label="最大持仓数" value={`${metrics.max_position_count}只`} />
       <InfoCell label="买入/卖出/持仓中" value={`${metrics.buy_count} / ${metrics.sell_count} / ${metrics.open_trade_count}笔`} />
       <InfoCell label="成交订单" value={`${metrics.filled_order_count}笔`} />
       <InfoCell label="未成交订单" value={`${metrics.rejected_order_count}笔`} />
-      <InfoCell label="14:30真实买入" value={`${executionModes.minute_1430 ?? executionModes.minute_tail_ma5 ?? 0}笔`} />
-      <InfoCell label="收盘代理买入" value={`${executionModes.daily_close_proxy ?? 0}笔`} />
       <InfoCell label="涨停未买" value={`${metrics.limit_up_blocked_buy_count ?? 0}笔`} />
       <InfoCell label="跌停未卖" value={`${metrics.limit_down_blocked_sell_count ?? 0}笔`} />
     </div>

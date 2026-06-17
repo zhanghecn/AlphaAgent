@@ -23,8 +23,10 @@ def persist_screen_run(
     strategy_id: str,
     strategy_version: str = STRATEGY_VERSION,
     included_boards: tuple[str, ...] = DEFAULT_QUANT_INCLUDED_BOARDS,
+    max_symbols: int = 5000,
 ) -> int:
     now = datetime.now(timezone.utc)
+    strategy = require_strategy(strategy_id)
     run_id = session.execute(
         schema.quant_signal_runs.insert()
         .values(
@@ -32,9 +34,13 @@ def persist_screen_run(
             strategy_version=strategy_version,
             trade_date=trade_date,
             status="succeeded",
-            params={"included_boards": list(included_boards)},
+            params={"included_boards": list(included_boards), "max_symbols": int(max_symbols)},
             candidate_count=len(scored),
-            signal_count=sum(1 for item in scored if item.entry_signal),
+            signal_count=sum(
+                1
+                for item in scored
+                if screening_payloads.entry_action_payload(item, strategy.default_min_entry_score)["executable_entry_signal"]
+            ),
             recommendation_count=len(recommendations),
             message="daily close observable signal; execution model selected by backtest",
             finished_at=now,
@@ -44,13 +50,15 @@ def persist_screen_run(
 
     clear_existing_screen_outputs(session, trade_date, strategy_id, strategy_version)
 
-    for item in scored:
-        values = screening_payloads.score_to_db(item, run_id, strategy_id, strategy_version)
-        session.execute(schema.quant_stock_signals.insert().values(**values))
+    signal_rows = [
+        screening_payloads.score_to_db(item, run_id, strategy_id, strategy_version)
+        for item in scored
+    ]
+    if signal_rows:
+        session.execute(schema.quant_stock_signals.insert(), signal_rows)
 
-    strategy = require_strategy(strategy_id)
-    for rank, item in enumerate(recommendations, start=1):
-        values = screening_payloads.recommendation_to_db(
+    recommendation_rows = [
+        screening_payloads.recommendation_to_db(
             rank,
             item,
             run_id,
@@ -58,7 +66,10 @@ def persist_screen_run(
             strategy_version,
             min_entry_score=strategy.default_min_entry_score,
         )
-        session.execute(schema.quant_recommendations.insert().values(**values))
+        for rank, item in enumerate(recommendations, start=1)
+    ]
+    if recommendation_rows:
+        session.execute(schema.quant_recommendations.insert(), recommendation_rows)
     return int(run_id)
 
 
@@ -99,8 +110,10 @@ def sync_quant_candidate_group(
     )
 
     inserted = 0
+    strategy = require_strategy(strategy_id)
     for rank, item in enumerate(recommendations, start=1):
         stock = stock_meta.get(item.vt_symbol) or {}
+        action_payload = screening_payloads.entry_action_payload(item, strategy.default_min_entry_score)
         values = {
             "group_id": group_id,
             "vt_symbol": item.vt_symbol,
@@ -113,7 +126,11 @@ def sync_quant_candidate_group(
                     "trade_date": item.trade_date.isoformat(),
                     "selection_rule": item.evidence.get("selection_rule"),
                     "entry_setup": item.evidence.get("entry_setup"),
-                    "entry_signal": item.entry_signal,
+                    "entry_signal": action_payload["executable_entry_signal"],
+                    "raw_entry_signal": action_payload["raw_entry_signal"],
+                    "executable_entry_signal": action_payload["executable_entry_signal"],
+                    "action": action_payload["action"],
+                    "failed_rules": action_payload["failed_rules"],
                     "risk_level": item.risk_level,
                 },
                 ensure_ascii=False,

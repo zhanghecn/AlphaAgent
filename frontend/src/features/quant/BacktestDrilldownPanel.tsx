@@ -24,7 +24,7 @@ import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { BacktestDecisionTimeline } from "@/features/quant/BacktestDecisionTimeline";
 import { executionModeLabel } from "@/lib/backtest-utils";
-import { cn, formatAmount, formatPct, formatPrice, priceColorClass } from "@/lib/utils";
+import { cn, formatPct, formatPrice, priceColorClass } from "@/lib/utils";
 
 type BacktestReportData = Awaited<ReturnType<typeof fetchBacktestReport>>;
 
@@ -222,16 +222,12 @@ export function BacktestDrilldownPanel({
                 <InfoCell label="卖出计划" value={selectedDateSummary.sell_signal_count ?? 0} />
                 <InfoCell label="拒单" value={selectedDateSummary.rejected_order_count} />
                 <InfoCell label="理论信号" value={selectedDateSummary.signal_event_count} />
-                <InfoCell label="持仓快照" value={selectedDateSummary.position_snapshot_count} />
-                <InfoCell label="总权益" value={formatAmount(selectedDateSummary.total_equity)} />
               </div>
             )}
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
-              <InfoCell label="现金" value={formatAmount(day.equity?.cash)} />
-              <InfoCell label="持仓市值" value={formatAmount(day.equity?.market_value)} />
-              <InfoCell label="总权益" value={formatAmount(day.equity?.total_equity)} />
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
               <InfoCell label="持仓数" value={day.equity?.position_count ?? 0} />
               <InfoCell label="回撤" value={formatPct(day.equity?.drawdown_pct)} />
+              <InfoCell label="持仓快照" value={day.positions.length} />
             </div>
             <DailyDecisionSummaryPanel summary={day.decision_summary} />
             {!day.snapshot_available && <div className="text-xs text-muted-foreground">{day.note}</div>}
@@ -344,10 +340,7 @@ function DailyDecisionTable({
               <TableHead className="text-right">计划</TableHead>
               <TableHead className="text-right">成交</TableHead>
               <TableHead className="text-right">拒单</TableHead>
-              <TableHead className="text-right">买入占用</TableHead>
-              <TableHead className="text-right">卖出回款</TableHead>
-              <TableHead className="text-right">实现盈亏</TableHead>
-              <TableHead className="text-right">总权益</TableHead>
+              <TableHead>拒单原因</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -364,10 +357,7 @@ function DailyDecisionTable({
                 <TableCell className="text-right tabular-nums">{row.buy_signal_count}/{row.sell_signal_count}</TableCell>
                 <TableCell className="text-right tabular-nums">{row.buy_trade_count}/{row.sell_trade_count}</TableCell>
                 <TableCell className="text-right tabular-nums">{row.rejected_order_count}</TableCell>
-                <TableCell className="text-right tabular-nums">{formatAmount(row.buy_amount)}</TableCell>
-                <TableCell className="text-right tabular-nums">{formatAmount(row.sell_cash_in)}</TableCell>
-                <TableCell className={cn("text-right tabular-nums", priceColorClass(row.realized_pnl))}>{formatAmount(row.realized_pnl)}</TableCell>
-                <TableCell className="text-right tabular-nums">{formatAmount(row.total_equity)}</TableCell>
+                <TableCell className="text-muted-foreground">{rejectedReasonsLabel(row.rejected_reasons)}</TableCell>
               </TableRow>
             ))}
           </TableBody>
@@ -417,12 +407,10 @@ function PortfolioAttributionTable({
       </div>
       {summary && (
         <div className="grid grid-cols-2 gap-3 border-b p-3 md:grid-cols-6">
+          <InfoCell label="交易合计" value={summary.total_count} />
           <InfoCell label="闭仓" value={summary.closed_count} />
           <InfoCell label="持仓中" value={summary.open_count} />
           <InfoCell label="胜率" value={formatPct(summary.win_rate)} />
-          <InfoCell label="已实现盈亏" value={formatAmount(summary.realized_pnl)} />
-          <InfoCell label="亏损合计" value={formatAmount(summary.loss_pnl)} />
-          <InfoCell label="最大单笔亏损" value={formatAmount(summary.worst_trade_pnl)} />
         </div>
       )}
       {rows.length === 0 ? (
@@ -435,8 +423,8 @@ function PortfolioAttributionTable({
               <TableHead>状态</TableHead>
               <TableHead>买入</TableHead>
               <TableHead>卖出</TableHead>
-              <TableHead className="text-right">仓位金额</TableHead>
-              <TableHead className="text-right">盈亏</TableHead>
+              <TableHead>入场依据</TableHead>
+              <TableHead className="text-right">收益率</TableHead>
               <TableHead className="text-right">最大浮盈</TableHead>
               <TableHead className="text-right">最大浮亏</TableHead>
               <TableHead>执行</TableHead>
@@ -457,15 +445,15 @@ function PortfolioAttributionTable({
                 <TableCell>{row.status === "closed" ? "已平仓" : "持仓中"}</TableCell>
                 <TableCell className="tabular-nums">{row.entry_date ?? "--"}</TableCell>
                 <TableCell className="tabular-nums">{row.exit_date ?? "--"}</TableCell>
-                <TableCell className="text-right tabular-nums">{formatAmount(row.entry_amount)}</TableCell>
-                <TableCell className={cn("text-right tabular-nums", priceColorClass(row.pnl))}>
-                  {formatAmount(row.pnl)} / {formatPct(row.return_pct)}
+                <TableCell className="text-xs leading-5 text-muted-foreground">{entryEvidenceLabel(row)}</TableCell>
+                <TableCell className={cn("text-right tabular-nums", priceColorClass(row.return_pct))}>
+                  {formatPct(row.return_pct)}
                 </TableCell>
-                <TableCell className={cn("text-right tabular-nums", priceColorClass(row.max_floating_pnl))}>
-                  {formatAmount(row.max_floating_pnl)}
+                <TableCell className={cn("text-right tabular-nums", priceColorClass(row.max_floating_pnl_pct))}>
+                  {formatPct(row.max_floating_pnl_pct)}
                 </TableCell>
-                <TableCell className={cn("text-right tabular-nums", priceColorClass(row.min_floating_pnl))}>
-                  {formatAmount(row.min_floating_pnl)}
+                <TableCell className={cn("text-right tabular-nums", priceColorClass(row.min_floating_pnl_pct))}>
+                  {formatPct(row.min_floating_pnl_pct)}
                 </TableCell>
                 <TableCell className="text-muted-foreground">{executionModeLabel(row.execution_mode ?? "")}</TableCell>
                 <TableCell className="text-muted-foreground">{row.exit_reason_label ?? row.exit_reason ?? "--"}</TableCell>
@@ -496,17 +484,9 @@ function DailyDecisionSummaryPanel({ summary }: { summary?: BacktestDailyDecisio
         <InfoCell label="拒单" value={summary.rejected_order_count} />
         <InfoCell label="买入成交" value={summary.buy_trade_count} />
         <InfoCell label="卖出成交" value={summary.sell_trade_count} />
-        <InfoCell label="买入占用" value={formatAmount(summary.buy_amount)} />
-        <InfoCell label="卖出回款" value={formatAmount(summary.sell_cash_in)} />
-        <div className="rounded-md border bg-muted/20 p-2">
-          <div className="text-xs text-muted-foreground">实现盈亏</div>
-          <div className={cn("mt-1 text-sm font-medium tabular-nums", priceColorClass(summary.realized_pnl))}>
-            {formatAmount(summary.realized_pnl)}
-          </div>
-        </div>
         <InfoCell
           label="拒单原因"
-          value={summary.rejected_reasons.length ? summary.rejected_reasons.map((item) => `${item.reason_label ?? item.reason} ${item.count}`).join("、") : "--"}
+          value={rejectedReasonsLabel(summary.rejected_reasons)}
         />
       </div>
     </div>
@@ -526,8 +506,6 @@ function DayTradeTable({ title, rows }: { title: string; rows: BacktestTrade[] }
             <TableHead>方向</TableHead>
             <TableHead className="text-right">价格</TableHead>
             <TableHead className="text-right">数量</TableHead>
-            <TableHead className="text-right">金额</TableHead>
-            <TableHead className="text-right">盈亏</TableHead>
             <TableHead>执行</TableHead>
           </TableRow>
         </TableHeader>
@@ -541,10 +519,6 @@ function DayTradeTable({ title, rows }: { title: string; rows: BacktestTrade[] }
               <TableCell>{sideLabel(row.side)}</TableCell>
               <TableCell className="text-right tabular-nums">{formatPrice(row.price)}</TableCell>
               <TableCell className="text-right tabular-nums">{row.volume.toLocaleString()}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatAmount(row.amount)}</TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.pnl))}>
-                {formatAmount(row.pnl)}
-              </TableCell>
               <TableCell className="text-muted-foreground">{executionModeLabel(executionMode(row.raw))}</TableCell>
             </TableRow>
           ))}
@@ -606,7 +580,7 @@ function ClosedTradeTable({ rows }: { rows: BacktestClosedTrade[] }) {
             <TableHead className="text-right">买入价</TableHead>
             <TableHead className="text-right">卖出价</TableHead>
             <TableHead className="text-right">数量</TableHead>
-            <TableHead className="text-right">盈亏</TableHead>
+            <TableHead className="text-right">收益率</TableHead>
             <TableHead>原因</TableHead>
           </TableRow>
         </TableHeader>
@@ -618,7 +592,7 @@ function ClosedTradeTable({ rows }: { rows: BacktestClosedTrade[] }) {
               <TableCell className="text-right tabular-nums">{formatPrice(row.entry_price)}</TableCell>
               <TableCell className="text-right tabular-nums">{formatPrice(row.exit_price)}</TableCell>
               <TableCell className="text-right tabular-nums">{row.volume.toLocaleString()}</TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.pnl))}>{formatAmount(row.pnl)}</TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.return_pct))}>{formatPct(row.return_pct)}</TableCell>
               <TableCell className="text-muted-foreground">{row.exit_reason ?? "--"}</TableCell>
             </TableRow>
           ))}
@@ -639,9 +613,10 @@ function TradeAttributionTable({ rows }: { rows: BacktestTradeAttribution[] }) {
             <TableHead>状态</TableHead>
             <TableHead>买入</TableHead>
             <TableHead>卖出</TableHead>
+            <TableHead>入场依据</TableHead>
             <TableHead className="text-right">买入价</TableHead>
             <TableHead className="text-right">卖出价</TableHead>
-            <TableHead className="text-right">盈亏</TableHead>
+            <TableHead className="text-right">收益率</TableHead>
             <TableHead className="text-right">最大浮盈</TableHead>
             <TableHead className="text-right">最大浮亏</TableHead>
             <TableHead>执行</TableHead>
@@ -654,16 +629,17 @@ function TradeAttributionTable({ rows }: { rows: BacktestTradeAttribution[] }) {
               <TableCell>{row.status === "closed" ? "已平仓" : "持仓中"}</TableCell>
               <TableCell className="tabular-nums">{row.entry_date ?? "--"}</TableCell>
               <TableCell className="tabular-nums">{row.exit_date ?? "--"}</TableCell>
+              <TableCell className="text-xs leading-5 text-muted-foreground">{entryEvidenceLabel(row)}</TableCell>
               <TableCell className="text-right tabular-nums">{formatPrice(row.entry_price)}</TableCell>
               <TableCell className="text-right tabular-nums">{formatPrice(row.exit_price)}</TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.pnl))}>
-                {formatAmount(row.pnl)} / {formatPct(row.return_pct)}
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.return_pct))}>
+                {formatPct(row.return_pct)}
               </TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.max_floating_pnl))}>
-                {formatAmount(row.max_floating_pnl)} / {formatPct(row.max_floating_pnl_pct)}
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.max_floating_pnl_pct))}>
+                {formatPct(row.max_floating_pnl_pct)}
               </TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.min_floating_pnl))}>
-                {formatAmount(row.min_floating_pnl)} / {formatPct(row.min_floating_pnl_pct)}
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.min_floating_pnl_pct))}>
+                {formatPct(row.min_floating_pnl_pct)}
               </TableCell>
               <TableCell className="text-muted-foreground">{executionModeLabel(row.execution_mode ?? "")}</TableCell>
               <TableCell className="text-muted-foreground">{row.exit_reason_label ?? row.exit_reason ?? "--"}</TableCell>
@@ -675,6 +651,44 @@ function TradeAttributionTable({ rows }: { rows: BacktestTradeAttribution[] }) {
   );
 }
 
+function entryEvidenceLabel(row: BacktestTradeAttribution): string {
+  const parts = [
+    row.entry_score == null ? "" : `总分 ${formatFixed(row.entry_score, 1)}`,
+    row.entry_state ? entryStateLabel(row.entry_state) : "",
+    row.entry_support_type ? supportTypeLabel(row.entry_support_type) : "",
+    row.low_suction_days == null ? "" : `低吸 ${formatFixed(row.low_suction_days, 0)}天`,
+    row.ma_convergence_pct == null ? "" : `收敛 ${formatFixed(row.ma_convergence_pct, 1)}%`,
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : "--";
+}
+
+function formatFixed(value: number | null | undefined, digits = 1): string {
+  if (value == null || !Number.isFinite(value)) return "--";
+  return value.toFixed(digits);
+}
+
+function entryStateLabel(state: string): string {
+  const labels: Record<string, string> = {
+    TAIL_BUY_READY: "龙回头买点",
+    LOW_SUCTION_BUILDUP: "低吸蓄势",
+    SUPPORT_ACCEPTED: "均线承接",
+    PULLBACK_OBSERVE: "回踩观察",
+    DISTRIBUTION_RISK: "派发风险",
+    INVALIDATED: "破位失效",
+  };
+  return labels[state] ?? state;
+}
+
+function supportTypeLabel(type: string): string {
+  const labels: Record<string, string> = {
+    ma5_reclaim: "MA5承接",
+    ma10_support: "MA10承接",
+    ma20_support: "MA20承接",
+    none: "无承接",
+  };
+  return labels[type] ?? type;
+}
+
 function executionMode(raw?: Record<string, unknown>): string | null {
   const execution = raw?.execution;
   if (execution && typeof execution === "object" && "mode" in execution) {
@@ -682,6 +696,11 @@ function executionMode(raw?: Record<string, unknown>): string | null {
   }
   const mode = raw?.mode;
   return mode == null ? null : String(mode);
+}
+
+function rejectedReasonsLabel(reasons: BacktestDailyDecisionSummary["rejected_reasons"]): string {
+  if (!reasons.length) return "--";
+  return reasons.map((item) => `${item.reason_label ?? item.reason} ${item.count}`).join("、");
 }
 
 function sideLabel(side: string): string {
@@ -728,9 +747,9 @@ function PositionTable({
             <TableHead className="text-right">数量</TableHead>
             <TableHead className="text-right">成本</TableHead>
             <TableHead className="text-right">收盘</TableHead>
-            <TableHead className="text-right">市值</TableHead>
-            <TableHead className="text-right">浮盈</TableHead>
+            <TableHead className="text-right">浮盈率</TableHead>
             <TableHead className="text-right">仓位</TableHead>
+            <TableHead className="text-right">持仓天数</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -747,11 +766,11 @@ function PositionTable({
               <TableCell className="text-right tabular-nums">{row.volume.toLocaleString()}</TableCell>
               <TableCell className="text-right tabular-nums">{formatPrice(row.cost_price)}</TableCell>
               <TableCell className="text-right tabular-nums">{formatPrice(row.close_price)}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatAmount(row.market_value)}</TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.floating_pnl))}>
-                {formatAmount(row.floating_pnl)} / {formatPct(row.floating_pnl_pct)}
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.floating_pnl_pct))}>
+                {formatPct(row.floating_pnl_pct)}
               </TableCell>
               <TableCell className="text-right tabular-nums">{formatPct(row.weight_pct)}</TableCell>
+              <TableCell className="text-right tabular-nums">{row.holding_days}</TableCell>
             </TableRow>
           ))}
         </TableBody>
@@ -771,8 +790,7 @@ function PositionPathTable({ rows }: { rows: Array<{ trade_date: string; volume:
             <TableHead>日期</TableHead>
             <TableHead className="text-right">数量</TableHead>
             <TableHead className="text-right">收盘</TableHead>
-            <TableHead className="text-right">市值</TableHead>
-            <TableHead className="text-right">浮盈</TableHead>
+            <TableHead className="text-right">浮盈率</TableHead>
             <TableHead className="text-right">持仓天数</TableHead>
           </TableRow>
         </TableHeader>
@@ -782,9 +800,8 @@ function PositionPathTable({ rows }: { rows: Array<{ trade_date: string; volume:
               <TableCell className="tabular-nums">{row.trade_date}</TableCell>
               <TableCell className="text-right tabular-nums">{row.volume.toLocaleString()}</TableCell>
               <TableCell className="text-right tabular-nums">{formatPrice(row.close_price)}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatAmount(row.market_value)}</TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.floating_pnl))}>
-                {formatAmount(row.floating_pnl)} / {formatPct(row.floating_pnl_pct)}
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.floating_pnl_pct))}>
+                {formatPct(row.floating_pnl_pct)}
               </TableCell>
               <TableCell className="text-right tabular-nums">{row.holding_days}</TableCell>
             </TableRow>

@@ -40,7 +40,7 @@ def start_research_run(
     included_boards: list[str] | tuple[str, ...] | str | None = None,
     initial_cash: float = 1_000_000,
     max_positions: int = 10,
-    candidate_limit: int = 10,
+    candidate_limit: int = 20,
     max_position_pct: float = 0.1,
     strict_entry: bool = True,
     execution_model: str = "legacy_next_open",
@@ -92,7 +92,7 @@ def start_research_run(
         "started_at": created_at,
         "finished_at": None,
         "stage": "queued",
-        "message": "准备运行策略研究",
+        "message": "准备刷新候选并回测",
         "progress_current": 0,
         "progress_total": 0,
         "progress_pct": 0,
@@ -212,12 +212,14 @@ def _screen_progress(run_id: str) -> Callable[[dict[str, Any]], None]:
         current = int(patch.get("progress_current") or 0)
         total = int(patch.get("progress_total") or 0)
         trade_date = patch.get("trade_date")
+        stage = str(patch.get("stage") or "screening")
+        message = patch.get("message")
         safe = {
-            "stage": "screening",
+            "stage": stage,
             "progress_current": current,
             "progress_total": total,
             "progress_pct": round(min(current / total * 85, 85), 2) if total > 0 else 0,
-            "message": f"正在补齐候选：{trade_date}" if trade_date else "正在补齐候选交易日",
+            "message": str(message) if message else (f"正在补齐候选：{trade_date}" if trade_date else "正在补齐候选交易日"),
         }
         _patch_job(run_id, safe)
 
