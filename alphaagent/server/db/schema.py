@@ -79,6 +79,24 @@ sync_job_runs = Table(
     Column("finished_at", DateTime(timezone=True), nullable=True),
 )
 
+sync_batch_schedules = Table(
+    "sync_batch_schedules",
+    metadata,
+    Column("id", String(80), primary_key=True),
+    Column("name", String(120), nullable=False),
+    Column("cron", String(80), nullable=False),
+    Column("job_ids", JSONB, nullable=False, server_default="[]"),
+    Column("enabled", Boolean, nullable=False, server_default="true"),
+    Column("concurrency", Integer, nullable=False, server_default="8"),
+    Column("last_status", String(40), nullable=True),
+    Column("last_started_at", DateTime(timezone=True), nullable=True),
+    Column("last_finished_at", DateTime(timezone=True), nullable=True),
+    Column("last_message", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+
 stocks = Table(
     "stocks",
     metadata,

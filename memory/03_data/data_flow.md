@@ -93,6 +93,43 @@ vn.py 中数据需要分清四类：
 - `alphaagent/server/services/data_providers/tushare_minute_import.py`
 - `frontend/src/pages/DataManagementPage.tsx`
 
+## AlphaAgent 统一批量定时同步
+
+2026-06-18 起，数据同步从「24 个分散单任务 cron」改为「统一的批量增量定时档」：
+
+- 新表 `sync_batch_schedules`（`schema.py`）：一条 = 一个 cron + 有序 `job_ids` + `concurrency` + `enabled`。
+- 默认 seed 两档：`intraday_14h`（14:00 盘中：股票清单快照 + 当日分钟线 + 资金流 + 热度 + 涨停池）、`eod_18h`（18:00 盘后：完整日K + 板块 + 龙虎榜 + 公告 + 财报；龙虎榜排末尾因 18:00 后才发布）。
+- `DEFAULT_JOBS` 的 24 个单任务 `schedule_cron` 已全部清空；调度器 `_run_scheduled_jobs` 改为遍历 `sync_batch_schedules`，cron 匹配则触发 `start_sync_batch(job_ids=..., concurrency=..., source="schedule")`。
+- 批量执行 `_run_sync_batch`：任务按 `job_ids` 顺序串行（保证数据依赖），单任务失败不再中止整批（终态 `succeeded`/`partial`/`failed`）；基础任务（`sync_stock_list`/`sync_sector_list`）失败时用 `_depends_on` 跳过其下游。
+- 日K/分钟K 任务内 `ThreadPoolExecutor(concurrency)` 并发拉全A；真增量：按每只股票最后 bar 日期 `start_date` 续传（`_last_bar_dates_daily`/`_last_bar_dates_minute`），修复旧 `only_missing`「整只跳过」导致老股不更新当日新 bar 的缺陷。
+- API：`GET/POST/PATCH/DELETE /api/data-sync/schedules`、`POST /schedules/{id}/run`；前端 `/data` 同步管理 tab 新增「定时计划」区（启停/立即执行/新增自定义档）。
+- 数据时效约束：14:00 档拿不到当日完整日K（AkShare 日线收盘后才更新）、龙虎榜（18:00 后）、财报（22:00 后）；这些只在 18:00 档跑。可自定义加更晚档。
+- 并发度默认 8（AkShare 公开端限流克制值），每档可配。
+
+关键源码：
+
+- `alphaagent/server/db/schema.py`（`sync_batch_schedules` 表）
+- `alphaagent/server/services/data_sync.py`（`DEFAULT_BATCH_SCHEDULES`、`start_sync_batch`、`_run_sync_batch`、`_run_scheduled_jobs`、`_last_bar_dates_*`、schedule CRUD）
+- `alphaagent/server/api/data_sync.py`（schedules 端点）
+- `frontend/src/api/dataSync.ts`（`BatchSchedule` + schedule CRUD）、`frontend/src/pages/DataManagementPage.tsx`（`BatchSchedulesPanel`）
+- 设计 `requirements/alphaagent_unified_incremental_schedule_plan.md`；执行计划 `requirements/alphaagent_unified_schedule_execution_plan.md`；测试 `tests/alphaagent/test_data_sync_schedule.py`（14 个）
+
+验证：`uv run pytest tests/alphaagent/test_data_sync_schedule.py -v`（全绿）；回归 `uv run pytest tests/alphaagent/ --ignore=tests/alphaagent/test_playwright_research.py`（374 passed）。
+
+2026-06-18 真实联调验证（Docker API 容器）：
+
+- `GET /schedules` 返回两档（`eod_18h` 13任务 / `intraday_14h` 5任务），24 个单任务 cron 全部清空 ✓
+- 触发 `intraday_14h`：5/5 `succeeded`（stock_list 4000只 → 分钟线 23520 → 资金流 → 热度 → 涨停池），任务按序、并发拉取、进度追踪 ✓
+- 分钟K增量修复：`only_missing` 与 `incremental` 互斥（`only_missing = only_missing and not incremental`）。修复前 `only_missing=True` 会拉「下一批未同步的全量历史」而非当日增量；修复后 `incremental` 主导，对每只活跃股从最后 bar `start_date` 续传，已同步股增量跳过 → `read=0`（不重复拉历史）✓
+- 日K增量：`incremental` 默认 True，按每只最后日K日期 `start_date` 续传（trade_date 是 date 类型，eod 档启用）。
+
+已知优化点（非阻塞，后续可做）：
+
+- 退市股（如 `001399`/`688797`）每次拉取报「股票数据不存在」被捕获跳过，浪费请求；可在 stocks 表标记退市、`_select_*` 过滤。
+- `adapter.stock_bars` 的 `market_cache` 在同步场景理论上不需要（要最新数据），当前靠 `start_date` 区分 cache key 工作正常；如需可加 `use_cache=False` 透传。
+- 前端「定时计划」区需 rebuild `alphaagent-web` 容器或本地 `pnpm run dev` 才能看到。
+- AkShare 当日分钟线依赖数据源更新（交易时段 14:00 有当日，盘外无）。
+
 ## AlphaAgent 量化/回测核查路径
 
 当前 `/quant` 候选和回测核查不走 vn.py Datafeed，而是使用 AlphaAgent PostgreSQL 业务表：

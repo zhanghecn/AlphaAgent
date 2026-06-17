@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import csv
 import io
@@ -78,7 +79,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="stocks",
         default_params={"page_size": 200, "sort": "mktcap"},
-        schedule_cron="30 8 * * 1-5",
     ),
     JobDefinition(
         id="sync_sector_list",
@@ -87,7 +87,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="sectors",
         default_params={"types": ["concept", "industry", "theme"]},
-        schedule_cron="45 8 * * 1-5",
     ),
     JobDefinition(
         id="sync_sector_members",
@@ -96,7 +95,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="sector_memberships",
         default_params={"page_size": 200},
-        schedule_cron="0 9 * * 1-5",
     ),
     JobDefinition(
         id="sync_stock_daily_bars",
@@ -105,7 +103,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="stock_daily_bars",
         default_params={"limit": 250},
-        schedule_cron="30 17 * * 1-5",
     ),
     JobDefinition(
         id="sync_stock_minute_bars",
@@ -114,7 +111,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="stock_minute_bars",
         default_params={"mode": "recent", "stock_limit": 100, "limit": 240, "interval": "1m", "only_missing": True},
-        schedule_cron="5 15 * * 1-5",
     ),
     JobDefinition(
         id="sync_stock_sector_memberships",
@@ -123,7 +119,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="stock_sector_memberships",
         default_params={},
-        schedule_cron="0 10 * * 1-5",
     ),
     # ── Shenwan Industry Classification ──
     JobDefinition(
@@ -133,7 +128,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="shenwan_industries",
         default_params={"levels": [1, 2, 3]},
-        schedule_cron="0 4 * * 1",
     ),
     JobDefinition(
         id="sync_shenwan_industry_members",
@@ -142,7 +136,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="shenwan_industry_members",
         default_params={},
-        schedule_cron="30 4 * * 1",
     ),
     JobDefinition(
         id="sync_industry_board_mapping",
@@ -151,7 +144,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="industry_board_mapping",
         default_params={},
-        schedule_cron="0 5 * * 1",
     ),
     JobDefinition(
         id="sync_supply_chain_edges",
@@ -160,7 +152,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="industry_chain_edges",
         default_params={"level": 2},
-        schedule_cron="30 5 * * 1",
     ),
     # ── Research data: sector dashboard ──
     JobDefinition(
@@ -170,7 +161,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="sector_daily_bars",
         default_params={"limit": 250},
-        schedule_cron="0 18 * * 1-5",
     ),
     JobDefinition(
         id="sync_sector_fund_flows",
@@ -179,7 +169,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="sector_fund_flows",
         default_params={"periods": ["即时", "3日", "5日", "10日"]},
-        schedule_cron="*/10 9-15 * * 1-5",
     ),
     JobDefinition(
         id="sync_sector_period_scores",
@@ -188,7 +177,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="sector_period_scores",
         default_params={"periods": ["20d"], "sector_limit": 300},
-        schedule_cron="30 18 * * 1-5",
     ),
     JobDefinition(
         id="sync_limit_up_pools",
@@ -197,7 +185,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="stock_events",
         default_params={},
-        schedule_cron="*/5 9-15 * * 1-5",
     ),
     JobDefinition(
         id="sync_stock_fund_flows",
@@ -206,7 +193,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="stock_fund_flows",
         default_params={"stock_limit": 200},
-        schedule_cron="*/10 9-15 * * 1-5",
     ),
     JobDefinition(
         id="sync_stock_hot_ranks",
@@ -215,7 +201,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="stock_hot_ranks",
         default_params={"limit": 100},
-        schedule_cron="*/5 9-15 * * 1-5",
     ),
     JobDefinition(
         id="sync_stock_lhb_records",
@@ -224,7 +209,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="stock_lhb_records",
         default_params={"days": 30},
-        schedule_cron="0 20 * * 1-5",
     ),
     # ── Research data: stock financials ──
     JobDefinition(
@@ -234,7 +218,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="stock_financial_reports",
         default_params={"stock_limit": 100},
-        schedule_cron="0 22 * * 1-5",
     ),
     JobDefinition(
         id="sync_stock_financial_indicators",
@@ -243,7 +226,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="stock_financial_reports",
         default_params={"stock_limit": 100},
-        schedule_cron="30 22 * * 1-5",
     ),
     JobDefinition(
         id="sync_stock_business_segments_history",
@@ -252,7 +234,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="stock_business_segments",
         default_params={"stock_limit": 100},
-        schedule_cron="0 23 * * 1-5",
     ),
     JobDefinition(
         id="sync_stock_notices",
@@ -261,9 +242,52 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="stock_events",
         default_params={},
-        schedule_cron="0 21 * * 1-5",
     ),
 )
+
+# Unified batch-sync schedules. Execution priority = list order (upstream
+# jobs first to satisfy data dependencies). Replaces the per-job crons that
+# used to live on DEFAULT_JOBS. See
+# requirements/alphaagent_unified_incremental_schedule_plan.md.
+DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
+    {
+        "id": "intraday_14h",
+        "name": "盘中同步（14:00，服务尾盘选股）",
+        "cron": "0 14 * * 1-5",
+        "enabled": True,
+        "concurrency": 8,
+        "job_ids": [
+            "sync_stock_list",          # realtime snapshot (price / change / volume ratio)
+            "sync_stock_minute_bars",   # intraday minute bars up to 14:00
+            "sync_stock_fund_flows",    # per-stock fund flow
+            "sync_stock_hot_ranks",     # per-stock hotness
+            "sync_limit_up_pools",      # limit-up / limit-down pools
+        ],
+    },
+    {
+        "id": "eod_18h",
+        "name": "盘后同步（18:00，补完整数据）",
+        "cron": "0 18 * * 1-5",
+        "enabled": True,
+        "concurrency": 8,
+        "job_ids": [
+            "sync_stock_list",
+            "sync_stock_daily_bars",    # full daily bars (true incremental)
+            "sync_sector_list",
+            "sync_sector_members",
+            "sync_stock_sector_memberships",
+            "sync_sector_daily_bars",
+            "sync_sector_fund_flows",
+            "sync_sector_period_scores",
+            "sync_stock_lhb_records",   # LHB publishes after 18:00 -> run late
+            "sync_stock_notices",
+            "sync_stock_financial_quarterly",
+            "sync_stock_financial_indicators",
+            "sync_stock_business_segments_history",
+        ],
+    },
+]
+
 
 SYNC_BATCH_PROFILES: dict[str, tuple[str, ...]] = {
     "core": (
@@ -288,9 +312,10 @@ ProgressCallback = Callable[[dict[str, Any]], None]
 class DataSyncRunner:
     """Executes individual sync jobs against AkShare / local data."""
 
-    def __init__(self, adapter: AkShareAdapter | None = None, progress: ProgressCallback | None = None) -> None:
+    def __init__(self, adapter: AkShareAdapter | None = None, progress: ProgressCallback | None = None, concurrency: int = 8) -> None:
         self.adapter = adapter or AkShareAdapter()
         self.progress = progress
+        self.concurrency = max(1, int(concurrency))
 
     def _report_progress(
         self,
@@ -443,60 +468,66 @@ class DataSyncRunner:
     def _run_sync_stock_daily_bars(self, params: dict[str, Any]) -> dict[str, Any]:
         limit = int(params.get("limit", 250))
         stock_limit = int(params.get("stock_limit", 0) or 0)
-        only_missing = _truthy(params.get("only_missing", False))
         symbols = _param_list(params.get("symbols"))
-        with session_scope() as session:
-            query = select(schema.stocks).order_by(desc(schema.stocks.c.turnover), desc(schema.stocks.c.market_cap))
-            if symbols:
-                query = query.where(schema.stocks.c.vt_symbol.in_(symbols))
-            if only_missing:
-                existing_symbols = (
-                    select(schema.stock_daily_bars.c.vt_symbol)
-                    .group_by(schema.stock_daily_bars.c.vt_symbol)
-                    .having(func.count() >= min(limit, 80))
-                )
-                query = query.where(schema.stocks.c.vt_symbol.not_in(existing_symbols))
-            if stock_limit > 0:
-                query = query.limit(stock_limit)
-            stock_rows = session.execute(query).mappings().all()
+        stock_rows = _select_daily_bar_stocks(symbols, stock_limit)
         if not stock_rows:
             return {"rows_read": 0, "rows_written": 0, "message": "No stocks in DB; run sync_stock_list first."}
-        total_read = 0
-        total_written = 0
-        batch_size = 0
+
+        incremental = _truthy(params.get("incremental", True))
+        vt_symbols = [vt_symbol(str(r["symbol"]), str(r["exchange"])) for r in stock_rows]
+        last_dates = _last_bar_dates_daily(vt_symbols) if incremental else {}
+
         total_stocks = len(stock_rows)
         self._report_progress("同步股票日 K 线", current=0, total=total_stocks)
-        for index, stock_row in enumerate(stock_rows, start=1):
+
+        lock = threading.Lock()
+        counters = {"read": 0, "written": 0, "done": 0}
+
+        def _do_one(stock_row: dict[str, Any]) -> None:
             symbol = str(stock_row["symbol"])
             exchange = str(stock_row["exchange"])
             stock_name = str(stock_row.get("name") or symbol)
             current_vts = vt_symbol(symbol, exchange)
-            label = f"{current_vts} {stock_name}"
-            self._report_progress("读取股票日 K 线", current=index - 1, total=total_stocks, current_label=label, rows_read=total_read, rows_written=total_written)
+            start_date = _next_day(last_dates.get(current_vts)) if last_dates.get(current_vts) else None
             try:
-                data = self.adapter.stock_bars(symbol, exchange, limit=limit, interval="1d")
+                data = self.adapter.stock_bars(symbol, exchange, limit=limit, interval="1d", start_date=start_date)
             except Exception as exc:
                 logger.debug("stock_bars(%s) failed: %s", symbol, exc)
-                self._report_progress("读取股票日 K 线", current=index, total=total_stocks, current_label=label, rows_read=total_read, rows_written=total_written, message=f"{current_vts} 失败：{exc.__class__.__name__}")
-                continue
+                with lock:
+                    counters["done"] += 1
+                    cur_done, cur_read, cur_written = counters["done"], counters["read"], counters["written"]
+                self._report_progress(
+                    "读取股票日 K 线",
+                    current=cur_done,
+                    total=total_stocks,
+                    current_label=f"{current_vts} 失败：{exc.__class__.__name__}",
+                    rows_read=cur_read,
+                    rows_written=cur_written,
+                )
+                return
             items = data.get("items") or []
-            total_read += len(items)
             written = _upsert_daily_bars(symbol, exchange, items)
-            total_written += written
             sample_items = [{**item, "vt_symbol": current_vts, "name": stock_name} for item in items[-3:]]
+            with lock:
+                counters["read"] += len(items)
+                counters["written"] += written
+                counters["done"] += 1
+                cur_done, cur_read, cur_written = counters["done"], counters["read"], counters["written"]
             self._report_progress(
                 "写入股票日 K 线",
-                current=index,
+                current=cur_done,
                 total=total_stocks,
-                current_label=f"{label}，{len(items)} 根",
-                rows_read=total_read,
-                rows_written=total_written,
+                current_label=f"{current_vts} {stock_name}，{len(items)} 根",
+                rows_read=cur_read,
+                rows_written=cur_written,
                 sample_items=sample_items,
             )
-            batch_size += 1
-            if batch_size % 50 == 0:
-                logger.info("sync_stock_daily_bars: processed %d stocks", batch_size)
-        return {"rows_read": total_read, "rows_written": total_written}
+
+        with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
+            list(pool.map(_do_one, stock_rows))
+
+        logger.info("sync_stock_daily_bars: processed %d stocks", counters["done"])
+        return {"rows_read": counters["read"], "rows_written": counters["written"]}
 
     def _run_sync_stock_minute_bars(self, params: dict[str, Any]) -> dict[str, Any]:
         mode = str(params.get("mode") or "recent").strip().lower()
@@ -508,82 +539,79 @@ class DataSyncRunner:
         limit = int(params.get("limit", 240))
         stock_limit = int(params.get("stock_limit", 100))
         interval = str(params.get("interval", "1m")).strip().lower()
-        only_missing = _truthy(params.get("only_missing", True))
+        incremental = _truthy(params.get("incremental", True))
+        # incremental (per-stock 续传当日新 bar) 与 only_missing (跳过已同步整只) 互斥：
+        # 增量模式下不跳过，对每只活跃股从最后 bar 续传，避免定时档只补历史而不拉当日新数据。
+        only_missing = _truthy(params.get("only_missing", True)) and not incremental
         symbols = _param_list(params.get("symbols"))
         start_date = _parse_date(params.get("start_date"))
         end_date = _parse_date(params.get("end_date"))
         if interval not in {"1m", "5m", "15m", "30m", "60m"}:
             raise DataSyncError(f"Unsupported minute interval: {interval}")
 
-        with session_scope() as session:
-            query = select(schema.stocks).order_by(desc(schema.stocks.c.turnover), desc(schema.stocks.c.market_cap))
-            if symbols:
-                query = query.where(schema.stocks.c.vt_symbol.in_(symbols))
-            if only_missing:
-                coverage_start = start_date or date.today() - timedelta(days=10)
-                coverage_end = end_date or date.today()
-                expected_floor = min(limit, 60)
-                existing_symbols = (
-                    select(schema.stock_minute_bars.c.vt_symbol)
-                    .where(
-                        (schema.stock_minute_bars.c.interval == interval)
-                        & (schema.stock_minute_bars.c.trade_date >= coverage_start)
-                        & (schema.stock_minute_bars.c.trade_date <= coverage_end)
-                    )
-                    .group_by(schema.stock_minute_bars.c.vt_symbol)
-                    .having(func.count() >= expected_floor)
-                )
-                query = query.where(schema.stocks.c.vt_symbol.not_in(existing_symbols))
-            if stock_limit > 0:
-                query = query.limit(min(stock_limit, 5000 if symbols else 500))
-            stock_rows = session.execute(query).mappings().all()
+        stock_rows = _select_minute_bar_stocks(symbols, stock_limit, interval, only_missing, start_date, end_date, limit)
         if not stock_rows:
             return {"rows_read": 0, "rows_written": 0, "message": "No stocks need minute sync."}
 
-        total_read = 0
-        total_written = 0
+        vt_symbols = [vt_symbol(str(r["symbol"]), str(r["exchange"])) for r in stock_rows]
+        last_dates = _last_bar_dates_minute(vt_symbols, interval) if incremental else {}
+
         total_stocks = len(stock_rows)
         self._report_progress("同步股票分钟 K 线", current=0, total=total_stocks)
-        for index, stock_row in enumerate(stock_rows, start=1):
+
+        lock = threading.Lock()
+        counters = {"read": 0, "written": 0, "done": 0}
+
+        def _do_one(stock_row: dict[str, Any]) -> None:
             symbol = str(stock_row["symbol"])
             exchange = str(stock_row["exchange"])
             stock_name = str(stock_row.get("name") or symbol)
             current_vts = vt_symbol(symbol, exchange)
-            label = f"{current_vts} {stock_name}"
-            self._report_progress("读取股票分钟 K 线", current=index - 1, total=total_stocks, current_label=label, rows_read=total_read, rows_written=total_written)
+            stock_start = _next_day(last_dates.get(current_vts)) if last_dates.get(current_vts) else start_date
             try:
-                data = self.adapter.stock_bars(
-                    symbol,
-                    exchange,
-                    limit=limit,
-                    interval=interval,
-                    start_date=start_date,
-                    end_date=end_date,
-                )
+                data = self.adapter.stock_bars(symbol, exchange, limit=limit, interval=interval, start_date=stock_start, end_date=end_date)
             except Exception as exc:
                 logger.debug("stock_minute_bars(%s, %s) failed: %s", symbol, interval, exc)
-                self._report_progress("读取股票分钟 K 线", current=index, total=total_stocks, current_label=label, rows_read=total_read, rows_written=total_written, message=f"{current_vts} 失败：{exc.__class__.__name__}")
-                continue
+                with lock:
+                    counters["done"] += 1
+                    cur_done, cur_read, cur_written = counters["done"], counters["read"], counters["written"]
+                self._report_progress(
+                    "读取股票分钟 K 线",
+                    current=cur_done,
+                    total=total_stocks,
+                    current_label=f"{current_vts} 失败：{exc.__class__.__name__}",
+                    rows_read=cur_read,
+                    rows_written=cur_written,
+                )
+                return
             items = data.get("items") or []
-            total_read += len(items)
             written = _upsert_minute_bars(symbol, exchange, items, interval, data.get("source", "akshare"))
-            total_written += written
             sample_items = [{**item, "vt_symbol": current_vts, "name": stock_name, "interval": interval} for item in items[-3:]]
+            with lock:
+                counters["read"] += len(items)
+                counters["written"] += written
+                counters["done"] += 1
+                cur_done, cur_read, cur_written = counters["done"], counters["read"], counters["written"]
             self._report_progress(
                 "写入股票分钟 K 线",
-                current=index,
+                current=cur_done,
                 total=total_stocks,
-                current_label=f"{label}，{len(items)} 根",
-                rows_read=total_read,
-                rows_written=total_written,
+                current_label=f"{current_vts} {stock_name}，{len(items)} 根",
+                rows_read=cur_read,
+                rows_written=cur_written,
                 sample_items=sample_items,
             )
+
+        with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
+            list(pool.map(_do_one, stock_rows))
+
+        logger.info("sync_stock_minute_bars: processed %d stocks", counters["done"])
         return {
             "mode": "recent",
             "provider": "akshare",
             "interval": interval,
-            "rows_read": total_read,
-            "rows_written": total_written,
+            "rows_read": counters["read"],
+            "rows_written": counters["written"],
         }
 
     def _run_sync_stock_minute_gap_bars(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1267,6 +1295,30 @@ def seed_default_registry() -> None:
                             schedule_cron=job.schedule_cron,
                         )
                     )
+
+            # Seed default batch schedules (unified incremental sync slots).
+            for sched in DEFAULT_BATCH_SCHEDULES:
+                existing_sched = session.execute(
+                    select(schema.sync_batch_schedules).where(
+                        schema.sync_batch_schedules.c.id == sched["id"]
+                    )
+                ).first()
+                sched_values = {
+                    "id": sched["id"],
+                    "name": sched["name"],
+                    "cron": sched["cron"],
+                    "job_ids": sched["job_ids"],
+                    "enabled": sched["enabled"],
+                    "concurrency": sched["concurrency"],
+                }
+                if existing_sched is None:
+                    session.execute(schema.sync_batch_schedules.insert().values(**sched_values))
+                else:
+                    session.execute(
+                        schema.sync_batch_schedules.update()
+                        .where(schema.sync_batch_schedules.c.id == sched["id"])
+                        .values(**sched_values)
+                    )
     except Exception as exc:
         logger.warning("seed_default_registry failed: %s", exc)
 
@@ -1347,16 +1399,151 @@ def update_job_schedule(job_id: str, schedule_cron: str | None) -> dict[str, Any
     return {"job_id": job_id, "schedule_cron": schedule_cron}
 
 
+# ─── Batch schedule CRUD ─────────────────────────────────────────────────
+
+
+def list_schedules() -> list[dict[str, Any]]:
+    if not is_database_configured():
+        return []
+    with session_scope() as session:
+        rows = session.execute(
+            select(schema.sync_batch_schedules).order_by(schema.sync_batch_schedules.c.id)
+        ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _assert_cron(cron: str) -> None:
+    if not cron or len(cron.split()) != 5:
+        raise DataSyncError("cron must be a 5-field expression")
+
+
+def _assert_known_jobs(job_ids: list[str]) -> None:
+    valid = {job.id for job in DEFAULT_JOBS}
+    unknown = [j for j in job_ids if j not in valid]
+    if unknown:
+        raise DataSyncError(f"Unknown job_ids: {unknown}")
+
+
+def create_schedule(payload: dict[str, Any]) -> dict[str, Any]:
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise DataSyncError("name is required")
+    cron = str(payload.get("cron") or "").strip()
+    job_ids = [str(j) for j in (payload.get("job_ids") or [])]
+    _assert_cron(cron)
+    _assert_known_jobs(job_ids)
+    schedule_id = str(payload.get("id") or f"custom_{uuid4().hex[:8]}")
+    values = {
+        "id": schedule_id,
+        "name": name,
+        "cron": cron,
+        "job_ids": job_ids,
+        "enabled": bool(payload.get("enabled", True)),
+        "concurrency": int(payload.get("concurrency", 8)),
+    }
+    with session_scope() as session:
+        existing = session.execute(
+            select(schema.sync_batch_schedules).where(schema.sync_batch_schedules.c.id == schedule_id)
+        ).first()
+        if existing:
+            raise DataSyncError(f"schedule {schedule_id} already exists")
+        session.execute(schema.sync_batch_schedules.insert().values(**values))
+    return values
+
+
+def update_schedule(schedule_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    allowed = ("name", "cron", "job_ids", "enabled", "concurrency")
+    updates: dict[str, Any] = {k: payload[k] for k in allowed if k in payload}
+    if "job_ids" in updates:
+        if not isinstance(updates["job_ids"], list):
+            raise DataSyncError("job_ids must be a list")
+        _assert_known_jobs([str(j) for j in updates["job_ids"]])
+    if "cron" in updates:
+        _assert_cron(str(updates["cron"]))
+    with session_scope() as session:
+        existing = session.execute(
+            select(schema.sync_batch_schedules).where(schema.sync_batch_schedules.c.id == schedule_id)
+        ).first()
+        if not existing:
+            raise DataSyncError(f"schedule {schedule_id} not found")
+        if updates:
+            session.execute(
+                schema.sync_batch_schedules.update()
+                .where(schema.sync_batch_schedules.c.id == schedule_id)
+                .values(**updates)
+            )
+    return {"id": schedule_id, **updates}
+
+
+def delete_schedule(schedule_id: str) -> dict[str, Any]:
+    with session_scope() as session:
+        existing = session.execute(
+            select(schema.sync_batch_schedules).where(schema.sync_batch_schedules.c.id == schedule_id)
+        ).first()
+        if not existing:
+            raise DataSyncError(f"schedule {schedule_id} not found")
+        session.execute(
+            schema.sync_batch_schedules.delete().where(schema.sync_batch_schedules.c.id == schedule_id)
+        )
+    return {"id": schedule_id, "deleted": True}
+
+
+def run_schedule_now(schedule_id: str) -> dict[str, Any]:
+    if not is_database_configured():
+        raise DataSyncError("DATABASE_URL is not configured")
+    with session_scope() as session:
+        row = session.execute(
+            select(schema.sync_batch_schedules).where(schema.sync_batch_schedules.c.id == schedule_id)
+        ).mappings().first()
+    if not row:
+        raise DataSyncError(f"schedule {schedule_id} not found")
+    return start_sync_batch(
+        job_ids=list(row.get("job_ids") or []),
+        concurrency=int(row.get("concurrency") or 8),
+        source="manual",
+        schedule_id=schedule_id,
+    )
+
+
 # ─── Sync batches ────────────────────────────────────────────────────────
 
-def start_sync_batch(profile: str = "core", params: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Start a background batch that runs sync jobs in dependency order."""
+def _new_batch_job_item(job_id: str) -> dict[str, Any]:
+    """Fresh per-job status entry inside a sync batch."""
+    return {
+        "job_id": job_id,
+        "status": "pending",
+        "started_at": None,
+        "finished_at": None,
+        "rows_read": 0,
+        "rows_written": 0,
+        "progress_current": 0,
+        "progress_total": 0,
+        "progress_pct": 0,
+        "stage": "",
+        "current_label": "",
+        "sample_items": [],
+        "message": "",
+    }
+
+
+def start_sync_batch(
+    profile: str = "core",
+    job_ids: list[str] | None = None,
+    params: dict[str, Any] | None = None,
+    concurrency: int = 8,
+    source: str = "manual",
+    schedule_id: str | None = None,
+) -> dict[str, Any]:
+    """Start a background batch that runs sync jobs in priority order.
+
+    ``job_ids`` (explicit, e.g. from a schedule) takes precedence over
+    ``profile``; ``concurrency`` controls per-job inner parallelism.
+    """
     global _LATEST_BATCH_ID
 
     if not is_database_configured():
         raise DataSyncError("DATABASE_URL is not configured")
 
-    profile_key = profile if profile in SYNC_BATCH_PROFILES else "core"
     with _BATCH_LOCK:
         if _LATEST_BATCH_ID:
             latest = _SYNC_BATCHES.get(_LATEST_BATCH_ID)
@@ -1364,41 +1551,28 @@ def start_sync_batch(profile: str = "core", params: dict[str, Any] | None = None
                 return _copy_batch(latest)
 
     batch_id = uuid4().hex
-    job_ids = list(SYNC_BATCH_PROFILES[profile_key])
+    resolved = list(job_ids) if job_ids else list(SYNC_BATCH_PROFILES.get(profile, SYNC_BATCH_PROFILES["core"]))
     created_at = _utc_now_iso()
     batch = {
         "id": batch_id,
-        "profile": profile_key,
+        "profile": profile if job_ids is None else "custom",
+        "source": source,
+        "schedule_id": schedule_id,
+        "concurrency": int(concurrency),
         "status": "running",
         "created_at": created_at,
         "started_at": created_at,
         "finished_at": None,
-        "current_job_id": job_ids[0] if job_ids else None,
-        "total_jobs": len(job_ids),
+        "current_job_id": resolved[0] if resolved else None,
+        "total_jobs": len(resolved),
         "completed_jobs": 0,
         "succeeded_jobs": 0,
         "failed_jobs": 0,
+        "skipped_jobs": 0,
         "rows_read": 0,
         "rows_written": 0,
         "message": "",
-        "jobs": [
-            {
-                "job_id": job_id,
-                "status": "pending",
-                "started_at": None,
-                "finished_at": None,
-                "rows_read": 0,
-                "rows_written": 0,
-                "progress_current": 0,
-                "progress_total": 0,
-                "progress_pct": 0,
-                "stage": "",
-                "current_label": "",
-                "sample_items": [],
-                "message": "",
-            }
-            for job_id in job_ids
-        ],
+        "jobs": [_new_batch_job_item(job_id) for job_id in resolved],
     }
 
     with _BATCH_LOCK:
@@ -1408,7 +1582,8 @@ def start_sync_batch(profile: str = "core", params: dict[str, Any] | None = None
 
     thread = threading.Thread(
         target=_run_sync_batch,
-        args=(batch_id, params or {}),
+        args=(batch_id, {**(params or {}), "_job_ids": resolved}),
+        kwargs={"concurrency": int(concurrency), "source": source, "schedule_id": schedule_id},
         name=f"data-sync-batch-{batch_id[:8]}",
         daemon=True,
     )
@@ -1434,7 +1609,31 @@ def get_latest_sync_batch() -> dict[str, Any] | None:
         return _copy_batch(batch) if batch is not None else None
 
 
-def _run_sync_batch(batch_id: str, params: dict[str, Any]) -> None:
+# Base jobs whose failure should skip their downstream dependents.
+_BASE_SYNC_JOBS = {"sync_stock_list", "sync_sector_list"}
+
+
+def _depends_on(job_id: str, upstream: str) -> bool:
+    """Whether ``job_id`` depends on a failed base ``upstream`` job.
+
+    Used only to skip downstream jobs when a base job fails: per-stock jobs
+    depend on the stock list, sector jobs on the sector list.
+    """
+    if upstream == "sync_stock_list":
+        return job_id.startswith("sync_stock_") and job_id not in _BASE_SYNC_JOBS
+    if upstream == "sync_sector_list":
+        return job_id.startswith("sync_sector_") or job_id == "sync_stock_sector_memberships"
+    return False
+
+
+def _run_sync_batch(
+    batch_id: str,
+    params: dict[str, Any],
+    *,
+    concurrency: int = 8,
+    source: str = "manual",
+    schedule_id: str | None = None,
+) -> None:
     with _BATCH_LOCK:
         batch = _SYNC_BATCHES.get(batch_id)
         if not batch:
@@ -1442,6 +1641,13 @@ def _run_sync_batch(batch_id: str, params: dict[str, Any]) -> None:
         job_ids = [item["job_id"] for item in batch["jobs"]]
 
     for index, job_id in enumerate(job_ids):
+        # Skip jobs already marked skipped due to an upstream base-job failure.
+        with _BATCH_LOCK:
+            snapshot = _SYNC_BATCHES.get(batch_id)
+            item = next((it for it in snapshot.get("jobs", []) if it["job_id"] == job_id), None) if snapshot else None
+        if item and item.get("status") == "skipped":
+            continue
+
         _update_batch_job(
             batch_id,
             job_id,
@@ -1490,15 +1696,41 @@ def _run_sync_batch(batch_id: str, params: dict[str, Any]) -> None:
                 },
             )
             _increment_batch(batch_id, completed=1, failed=1)
-            _finish_batch(batch_id, "failed", f"{job_id} 失败：{exc}")
-            return
+            # A failed base job skips its downstream dependents, but the batch continues.
+            if job_id in _BASE_SYNC_JOBS:
+                for later_id in job_ids[index + 1:]:
+                    if _depends_on(later_id, job_id):
+                        _update_batch_job(
+                            batch_id,
+                            later_id,
+                            {
+                                "status": "skipped",
+                                "finished_at": _utc_now_iso(),
+                                "message": f"上游 {job_id} 失败，跳过",
+                                "stage": "跳过",
+                            },
+                        )
+                        _increment_batch(batch_id, completed=1, skipped=1)
+            continue
 
         with _BATCH_LOCK:
             batch = _SYNC_BATCHES.get(batch_id)
             if batch:
                 batch["current_job_id"] = job_ids[index + 1] if index + 1 < len(job_ids) else None
 
-    _finish_batch(batch_id, "succeeded", "同步完成")
+    # Determine terminal status from success/failure counts (no early abort).
+    with _BATCH_LOCK:
+        final = _SYNC_BATCHES.get(batch_id)
+        failed = int(final.get("failed_jobs") or 0) if final else 0
+        succeeded = int(final.get("succeeded_jobs") or 0) if final else 0
+    if not final:
+        return
+    if failed and succeeded == 0:
+        _finish_batch(batch_id, "failed", "全部失败")
+    elif failed:
+        _finish_batch(batch_id, "partial", f"{succeeded} 成功 / {failed} 失败")
+    else:
+        _finish_batch(batch_id, "succeeded", "同步完成")
 
 
 def _batch_job_params(job_id: str, batch_params: dict[str, Any]) -> dict[str, Any]:
@@ -1612,7 +1844,7 @@ def _patch_batch(batch_id: str, patch: dict[str, Any]) -> None:
             batch.update(patch)
 
 
-def _increment_batch(batch_id: str, completed: int = 0, succeeded: int = 0, failed: int = 0, rows_read: int = 0, rows_written: int = 0) -> None:
+def _increment_batch(batch_id: str, completed: int = 0, succeeded: int = 0, failed: int = 0, skipped: int = 0, rows_read: int = 0, rows_written: int = 0) -> None:
     with _BATCH_LOCK:
         batch = _SYNC_BATCHES.get(batch_id)
         if not batch:
@@ -1620,6 +1852,7 @@ def _increment_batch(batch_id: str, completed: int = 0, succeeded: int = 0, fail
         batch["completed_jobs"] = int(batch.get("completed_jobs") or 0) + completed
         batch["succeeded_jobs"] = int(batch.get("succeeded_jobs") or 0) + succeeded
         batch["failed_jobs"] = int(batch.get("failed_jobs") or 0) + failed
+        batch["skipped_jobs"] = int(batch.get("skipped_jobs") or 0) + skipped
         batch["rows_read"] = int(batch.get("rows_read") or 0) + rows_read
         batch["rows_written"] = int(batch.get("rows_written") or 0) + rows_written
 
@@ -2194,39 +2427,52 @@ def _scheduler_loop() -> None:
         _scheduler_stop.wait(timeout=60)
 
 
-def _run_scheduled_jobs() -> None:
-    """Check and run jobs whose cron schedule matches current time."""
-    now = datetime.now(timezone.utc)
-    # Convert to China timezone for cron matching
-    china_tz = timezone(timedelta(hours=8))
-    now_china = now.astimezone(china_tz)
+def _now_china() -> datetime:
+    """Current time in China timezone (cron schedules are China-local)."""
+    return datetime.now(timezone(timedelta(hours=8)))
 
+
+def _load_batch_schedules() -> list[dict[str, Any]]:
+    """Return enabled batch schedules for the scheduler to consider."""
+    if not is_database_configured():
+        return []
     with session_scope() as session:
         rows = session.execute(
-            select(schema.sync_job_definitions).where(schema.sync_job_definitions.c.enabled == True)  # noqa: E712
+            select(schema.sync_batch_schedules).where(schema.sync_batch_schedules.c.enabled == True)  # noqa: E712
         ).mappings().all()
+    return [dict(row) for row in rows]
 
-    for row in rows:
-        job_id = str(row["id"])
-        schedule_cron = row.get("schedule_cron")
-        if not schedule_cron:
+
+def _recently_started(row: dict[str, Any], within_seconds: int = 1800) -> bool:
+    """True if the schedule's last batch started within the throttle window."""
+    last_started = row.get("last_started_at")
+    if last_started is None:
+        return False
+    if hasattr(last_started, "tzinfo") and last_started.tzinfo is None:
+        last_started = last_started.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - last_started).total_seconds() < within_seconds
+
+
+def _run_scheduled_jobs() -> None:
+    """Trigger batch schedules whose cron matches the current China time."""
+    now_china = _now_china()
+    for row in _load_batch_schedules():
+        cron = row.get("cron")
+        if not cron:
             continue
-        last_status = row.get("last_status")
-        last_started = row.get("last_started_at")
-        # Simple throttle: don't re-run within 30 minutes
-        if last_started is not None:
-            if hasattr(last_started, "tzinfo") and last_started.tzinfo is None:
-                last_started = last_started.replace(tzinfo=timezone.utc)
-            elapsed = (now - last_started).total_seconds()
-            if elapsed < 1800:
-                continue
-        # Very simple cron matching: check if minute and hour match
+        if _recently_started(row):
+            continue
         try:
-            if _cron_matches(schedule_cron, now_china):
+            if _cron_matches(cron, now_china):
                 try:
-                    run_job(job_id)
+                    start_sync_batch(
+                        job_ids=list(row.get("job_ids") or []),
+                        concurrency=int(row.get("concurrency") or 8),
+                        source="schedule",
+                        schedule_id=str(row["id"]),
+                    )
                 except Exception as exc:
-                    logger.warning("Scheduled job %s failed: %s", job_id, exc)
+                    logger.warning("Scheduled batch %s failed: %s", row.get("id"), exc)
         except Exception:
             pass
 
@@ -2995,6 +3241,95 @@ def _upsert_stock_sector_memberships(items: list[dict[str, Any]]) -> int:
                 session.execute(schema.stock_sector_memberships.insert().values(**values))
             written += 1
     return written
+
+
+def _next_day(date_value: Any) -> str | None:
+    """Return ISO date of the day after ``date_value`` (str/date), or None."""
+    try:
+        d = date.fromisoformat(str(date_value)[:10])
+    except Exception:
+        return None
+    return (d + timedelta(days=1)).isoformat()
+
+
+def _last_bar_dates_daily(vt_symbols: list[str]) -> dict[str, str]:
+    """Return {vt_symbol: max trade_date} for daily bars that already exist."""
+    if not vt_symbols:
+        return {}
+    with session_scope() as session:
+        rows = session.execute(
+            select(
+                schema.stock_daily_bars.c.vt_symbol,
+                func.max(schema.stock_daily_bars.c.trade_date),
+            )
+            .where(schema.stock_daily_bars.c.vt_symbol.in_(vt_symbols))
+            .group_by(schema.stock_daily_bars.c.vt_symbol)
+        ).all()
+    return {str(r[0]): str(r[1]) for r in rows if r[1] is not None}
+
+
+def _last_bar_dates_minute(vt_symbols: list[str], interval: str) -> dict[str, str]:
+    """Return {vt_symbol: max trade_date} for minute bars that already exist."""
+    if not vt_symbols:
+        return {}
+    with session_scope() as session:
+        rows = session.execute(
+            select(
+                schema.stock_minute_bars.c.vt_symbol,
+                func.max(schema.stock_minute_bars.c.trade_date),
+            )
+            .where(
+                (schema.stock_minute_bars.c.interval == interval)
+                & schema.stock_minute_bars.c.vt_symbol.in_(vt_symbols)
+            )
+            .group_by(schema.stock_minute_bars.c.vt_symbol)
+        ).all()
+    return {str(r[0]): str(r[1]) for r in rows if r[1] is not None}
+
+
+def _select_daily_bar_stocks(symbols: list[str], stock_limit: int) -> list[dict[str, Any]]:
+    """Return stock rows to sync daily bars for, ordered by liquidity."""
+    with session_scope() as session:
+        query = select(schema.stocks).order_by(desc(schema.stocks.c.turnover), desc(schema.stocks.c.market_cap))
+        if symbols:
+            query = query.where(schema.stocks.c.vt_symbol.in_(symbols))
+        if stock_limit > 0:
+            query = query.limit(stock_limit)
+        return [dict(row) for row in session.execute(query).mappings().all()]
+
+
+def _select_minute_bar_stocks(
+    symbols: list[str],
+    stock_limit: int,
+    interval: str,
+    only_missing: bool,
+    start_date: date | None,
+    end_date: date | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Return stock rows to sync minute bars for (recent mode)."""
+    with session_scope() as session:
+        query = select(schema.stocks).order_by(desc(schema.stocks.c.turnover), desc(schema.stocks.c.market_cap))
+        if symbols:
+            query = query.where(schema.stocks.c.vt_symbol.in_(symbols))
+        if only_missing:
+            coverage_start = start_date or date.today() - timedelta(days=10)
+            coverage_end = end_date or date.today()
+            expected_floor = min(limit, 60)
+            existing_symbols = (
+                select(schema.stock_minute_bars.c.vt_symbol)
+                .where(
+                    (schema.stock_minute_bars.c.interval == interval)
+                    & (schema.stock_minute_bars.c.trade_date >= coverage_start)
+                    & (schema.stock_minute_bars.c.trade_date <= coverage_end)
+                )
+                .group_by(schema.stock_minute_bars.c.vt_symbol)
+                .having(func.count() >= expected_floor)
+            )
+            query = query.where(schema.stocks.c.vt_symbol.not_in(existing_symbols))
+        if stock_limit > 0:
+            query = query.limit(min(stock_limit, 5000 if symbols else 500))
+        return [dict(row) for row in session.execute(query).mappings().all()]
 
 
 def _upsert_daily_bars(symbol: str, exchange: str, items: list[dict[str, Any]]) -> int:

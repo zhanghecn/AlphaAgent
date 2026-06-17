@@ -15,6 +15,11 @@ import {
   fetchSyncSources,
   runAllSyncJobs,
   runSyncJob,
+  fetchSyncSchedules,
+  createSyncSchedule,
+  updateSyncSchedule,
+  deleteSyncSchedule,
+  runSyncSchedule,
 } from "@/api/dataSync";
 import type {
   DataUsageCapability,
@@ -24,6 +29,7 @@ import type {
   SyncBatchStatus,
   SyncBatchJobStatus,
   SyncProgressSample,
+  BatchSchedule,
 } from "@/api/dataSync";
 import { LoadingState } from "@/components/LoadingState";
 import { cn } from "@/lib/utils";
@@ -41,6 +47,9 @@ import {
   Activity,
   ChevronDown,
   ChevronRight,
+  Plus,
+  Save,
+  Trash2,
 } from "lucide-react";
 
 type TabKey = "status" | "sync" | "sources";
@@ -394,6 +403,8 @@ function SyncTab() {
         <BatchProgress batch={batch} isStarting={runAllMutation.isPending} />
       </section>
 
+      <BatchSchedulesPanel jobs={jobs} />
+
       {/* Sync jobs */}
       <section className="rounded-lg border">
         <div className="flex items-center justify-between border-b px-4 py-3">
@@ -502,6 +513,191 @@ function SyncTab() {
 }
 
 // ── Sources Tab ──
+
+function BatchSchedulesPanel({ jobs }: { jobs: SyncJobItem[] }) {
+  const queryClient = useQueryClient();
+  const schedulesQuery = useQuery({
+    queryKey: ["syncSchedules"],
+    queryFn: fetchSyncSchedules,
+    staleTime: 5_000,
+    refetchInterval: 30_000,
+  });
+
+  const createMutation = useMutation({
+    mutationFn: (payload: Partial<BatchSchedule>) => createSyncSchedule(payload),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["syncSchedules"] }),
+  });
+  const updateMutation = useMutation({
+    mutationFn: ({ id, payload }: { id: string; payload: Partial<BatchSchedule> }) => updateSyncSchedule(id, payload),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["syncSchedules"] }),
+  });
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => deleteSyncSchedule(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["syncSchedules"] }),
+  });
+  const runMutation = useMutation({
+    mutationFn: (id: string) => runSyncSchedule(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["syncBatchLatest"] });
+      queryClient.invalidateQueries({ queryKey: ["syncSchedules"] });
+    },
+  });
+
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState({
+    name: "",
+    cron: "0 14 * * 1-5",
+    concurrency: 8,
+    job_ids: [] as string[],
+    enabled: true,
+  });
+
+  const schedules = schedulesQuery.data ?? [];
+
+  function toggleJob(jobId: string) {
+    setForm((f) => ({
+      ...f,
+      job_ids: f.job_ids.includes(jobId) ? f.job_ids.filter((j) => j !== jobId) : [...f.job_ids, jobId],
+    }));
+  }
+
+  function submitCreate() {
+    if (!form.name.trim() || form.cron.trim().split(/\s+/).length !== 5) return;
+    createMutation.mutate(form, { onSuccess: () => setEditing(false) });
+  }
+
+  return (
+    <section className="rounded-lg border">
+      <div className="flex items-center justify-between border-b px-4 py-3">
+        <div>
+          <h3 className="text-sm font-semibold">定时计划</h3>
+          <div className="text-xs text-muted-foreground">统一的批量增量同步档，按数据依赖顺序执行。默认 14:00 盘中 + 18:00 盘后。</div>
+        </div>
+        <button
+          className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90"
+          onClick={() => setEditing((v) => !v)}
+        >
+          <Plus size={15} /> {editing ? "取消" : "新增定时"}
+        </button>
+      </div>
+
+      {editing ? (
+        <div className="space-y-3 border-b px-4 py-3">
+          <div className="grid gap-3 md:grid-cols-3">
+            <Field label="名称">
+              <input
+                className="w-full rounded-md border bg-background px-3 py-1.5 text-sm"
+                value={form.name}
+                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                placeholder="如：盘中同步"
+              />
+            </Field>
+            <Field label="Cron（分 时 日 月 周）">
+              <input
+                className="w-full rounded-md border bg-background px-3 py-1.5 text-sm font-mono"
+                value={form.cron}
+                onChange={(e) => setForm((f) => ({ ...f, cron: e.target.value }))}
+                placeholder="0 14 * * 1-5"
+              />
+            </Field>
+            <Field label="并发度">
+              <input
+                type="number"
+                min={1}
+                max={32}
+                className="w-full rounded-md border bg-background px-3 py-1.5 text-sm"
+                value={form.concurrency}
+                onChange={(e) => setForm((f) => ({ ...f, concurrency: Number(e.target.value) || 8 }))}
+              />
+            </Field>
+          </div>
+          <Field label="任务（按勾选顺序执行）">
+            <div className="flex flex-wrap gap-2">
+              {jobs.map((job) => (
+                <button
+                  key={job.id}
+                  type="button"
+                  className={cn(
+                    "rounded-md border px-2.5 py-1 text-xs transition-colors",
+                    form.job_ids.includes(job.id)
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "bg-background text-muted-foreground hover:text-foreground"
+                  )}
+                  onClick={() => toggleJob(job.id)}
+                >
+                  {job.name}
+                </button>
+              ))}
+            </div>
+          </Field>
+          <div className="flex items-center gap-2">
+            <button
+              className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+              onClick={submitCreate}
+              disabled={createMutation.isPending}
+            >
+              {createMutation.isPending ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />} 保存
+            </button>
+            {createMutation.error ? (
+              <span className="text-xs text-red-600">{(createMutation.error as Error).message}</span>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {schedulesQuery.isLoading ? (
+        <LoadingState rows={2} />
+      ) : schedules.length === 0 ? (
+        <div className="px-4 py-8 text-center text-sm text-muted-foreground">暂无定时计划</div>
+      ) : (
+        <div className="divide-y">
+          {schedules.map((schedule) => (
+            <div key={schedule.id} className="grid gap-3 px-4 py-3 md:grid-cols-[1fr_auto] md:items-center">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium">{schedule.name}</span>
+                  <StatusBadge status={schedule.last_status ?? "unknown"} />
+                </div>
+                <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                  <span className="font-mono">{schedule.cron}</span>
+                  <span>{schedule.job_ids.length} 个任务</span>
+                  <span>并发 {schedule.concurrency}</span>
+                  {schedule.last_finished_at ? (
+                    <span>上次 {new Date(schedule.last_finished_at).toLocaleString()}</span>
+                  ) : null}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  className={cn(
+                    "rounded-md border px-2.5 py-1 text-xs transition-colors",
+                    schedule.enabled ? "border-primary text-primary" : "text-muted-foreground"
+                  )}
+                  onClick={() => updateMutation.mutate({ id: schedule.id, payload: { enabled: !schedule.enabled } })}
+                >
+                  {schedule.enabled ? "已启用" : "已停用"}
+                </button>
+                <button
+                  className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs hover:bg-muted"
+                  onClick={() => runMutation.mutate(schedule.id)}
+                  disabled={runMutation.isPending}
+                >
+                  {runMutation.isPending ? <Loader2 size={13} className="animate-spin" /> : <PlayCircle size={13} />} 立即执行
+                </button>
+                <button
+                  className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs text-red-600 hover:bg-red-50"
+                  onClick={() => deleteMutation.mutate(schedule.id)}
+                >
+                  <Trash2 size={13} /> 删除
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
 
 function SourcesTab() {
   const { data, isLoading, error } = useQuery({

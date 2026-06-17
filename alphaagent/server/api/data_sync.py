@@ -77,6 +77,46 @@ def schedule_job(job_id: str, payload: dict[str, Any] = Body(default_factory=dic
         return _sync_error(exc)
 
 
+@router.get("/schedules")
+def list_schedules():
+    try:
+        return ok(service.list_schedules())
+    except Exception as exc:
+        return _sync_error(exc)
+
+
+@router.post("/schedules")
+def create_schedule(payload: dict[str, Any] = Body(default_factory=dict)):
+    try:
+        return ok(service.create_schedule(payload))
+    except Exception as exc:
+        return _sync_error(exc)
+
+
+@router.patch("/schedules/{schedule_id}")
+def update_schedule(schedule_id: str, payload: dict[str, Any] = Body(default_factory=dict)):
+    try:
+        return ok(service.update_schedule(schedule_id, payload))
+    except Exception as exc:
+        return _sync_error(exc)
+
+
+@router.delete("/schedules/{schedule_id}")
+def delete_schedule(schedule_id: str):
+    try:
+        return ok(service.delete_schedule(schedule_id))
+    except Exception as exc:
+        return _sync_error(exc)
+
+
+@router.post("/schedules/{schedule_id}/run")
+def run_schedule(schedule_id: str):
+    try:
+        return ok(service.run_schedule_now(schedule_id))
+    except Exception as exc:
+        return _sync_error(exc)
+
+
 @router.get("/runs")
 def runs(limit: int = Query(default=20, ge=1, le=100)):
     try:

@@ -36,6 +36,28 @@ export function runAllSyncJobs(payload: { profile?: "core" | "all"; params?: Rec
   return apiClient.post<SyncBatchStatus>("/data-sync/batches/run-all", payload);
 }
 
+// ── Batch schedules (unified incremental sync slots) ──
+
+export function fetchSyncSchedules() {
+  return apiClient.get<BatchSchedule[]>("/data-sync/schedules");
+}
+
+export function createSyncSchedule(payload: Partial<BatchSchedule>) {
+  return apiClient.post<BatchSchedule>("/data-sync/schedules", payload);
+}
+
+export function updateSyncSchedule(id: string, payload: Partial<BatchSchedule>) {
+  return apiClient.patch<BatchSchedule>(`/data-sync/schedules/${encodeURIComponent(id)}`, payload);
+}
+
+export function deleteSyncSchedule(id: string) {
+  return apiClient.del<{ id: string }>(`/data-sync/schedules/${encodeURIComponent(id)}`);
+}
+
+export function runSyncSchedule(id: string) {
+  return apiClient.post<SyncBatchStatus>(`/data-sync/schedules/${encodeURIComponent(id)}/run`);
+}
+
 export async function fetchLatestSyncBatch() {
   const response = await fetch(apiUrl("/data-sync/batches/latest"), {
     headers: { Accept: "application/json" },
@@ -257,6 +279,20 @@ export interface SyncBatchStatus {
   progress_pct: number;
   message?: string;
   jobs: SyncBatchJobStatus[];
+}
+
+/** A unified incremental sync slot (replaces per-job crons). */
+export interface BatchSchedule {
+  id: string;
+  name: string;
+  cron: string;
+  job_ids: string[];
+  enabled: boolean;
+  concurrency: number;
+  last_status?: string | null;
+  last_started_at?: string | null;
+  last_finished_at?: string | null;
+  last_message?: string | null;
 }
 
 export interface MinuteBarsImportResult {

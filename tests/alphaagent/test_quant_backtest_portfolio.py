@@ -2553,6 +2553,7 @@ def test_stock_minute_sync_accepts_symbols_and_date_range(monkeypatch) -> None:
             "limit": 1200,
             "interval": "1m",
             "only_missing": False,
+            "incremental": False,
         }
     )
 
