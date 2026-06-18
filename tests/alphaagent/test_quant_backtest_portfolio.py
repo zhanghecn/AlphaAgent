@@ -10675,3 +10675,294 @@ def test_top_candidate_bucket_summary_groups_by_rank_and_market_return() -> None
     assert result["top_win_rate"] == 0.5
     assert result["top_avg_return_pct"] == 3.5
     assert result["top_avg_benchmark_return_pct"] == 2.0
+    assert result["top_excluding_strong_summary"]["candidate_count"] == 2
+    assert result["top_excluding_strong_summary"]["evaluated_count"] == 2
+    assert result["top_excluding_strong_summary"]["win_rate"] == 0.5
+    assert result["top_strong_summary"]["candidate_count"] == 0
+
+
+def test_top_candidate_bucket_summary_excludes_strong_market_for_overfit_audit() -> None:
+    from alphaagent.server.services.backtest import queries
+
+    rows = [
+        {
+            "signal_date": date(2026, 1, 2),
+            "rank": 1,
+            "vt_symbol": "A",
+            "return_pct": 12.0,
+            "benchmark_return_pct": 8.0,
+            "excess_return_pct": 4.0,
+            "market_regime": "strong",
+            "benchmark_source": "equal_weight_stock_proxy",
+        },
+        {
+            "signal_date": date(2026, 1, 3),
+            "rank": 2,
+            "vt_symbol": "B",
+            "return_pct": -4.0,
+            "benchmark_return_pct": -5.0,
+            "excess_return_pct": 1.0,
+            "market_regime": "weak",
+            "benchmark_source": "equal_weight_stock_proxy",
+        },
+        {
+            "signal_date": date(2026, 1, 4),
+            "rank": 8,
+            "vt_symbol": "C",
+            "return_pct": 6.0,
+            "benchmark_return_pct": 1.0,
+            "excess_return_pct": 5.0,
+            "market_regime": "choppy",
+            "benchmark_source": "index_daily_bars",
+        },
+        {
+            "signal_date": date(2026, 1, 5),
+            "rank": 14,
+            "vt_symbol": "D",
+            "return_pct": 20.0,
+            "benchmark_return_pct": 7.0,
+            "excess_return_pct": 13.0,
+            "market_regime": "strong",
+            "benchmark_source": "index_daily_bars",
+        },
+    ]
+
+    result = queries.top_candidate_bucket_summary(rows, top_n=10)
+
+    assert result["top_count"] == 3
+    assert round(result["top_strong_candidate_share"], 6) == round(1 / 3, 6)
+    assert result["top_strong_summary"]["candidate_count"] == 1
+    assert result["top_strong_summary"]["win_rate"] == 1.0
+    assert result["top_excluding_strong_summary"]["candidate_count"] == 2
+    assert result["top_excluding_strong_summary"]["evaluated_count"] == 2
+    assert result["top_excluding_strong_summary"]["win_rate"] == 0.5
+    assert result["top_excluding_strong_summary"]["avg_return_pct"] == 1.0
+    assert result["top_excluding_strong_summary"]["avg_benchmark_return_pct"] == -2.0
+    assert result["top_excluding_strong_summary"]["avg_excess_return_pct"] == 3.0
+    assert result["benchmark_sources"] == [
+        {"source": "equal_weight_stock_proxy", "count": 2},
+        {"source": "index_daily_bars", "count": 1},
+    ]
+
+
+def test_top_candidate_bucket_summary_includes_fixed_horizon_observation_audit() -> None:
+    from alphaagent.server.services.backtest import queries
+
+    rows = [
+        {
+            "rank": 1,
+            "vt_symbol": "A",
+            "benchmark_return_pct": 8.0,
+            "market_regime": "strong",
+            "observation_return_pct": 12.0,
+            "observation_excess_return_pct": 4.0,
+        },
+        {
+            "rank": 2,
+            "vt_symbol": "B",
+            "benchmark_return_pct": -5.0,
+            "market_regime": "weak",
+            "observation_return_pct": -4.0,
+            "observation_excess_return_pct": 1.0,
+        },
+        {
+            "rank": 9,
+            "vt_symbol": "C",
+            "benchmark_return_pct": 1.0,
+            "market_regime": "choppy",
+            "observation_return_pct": 6.0,
+            "observation_excess_return_pct": 5.0,
+        },
+        {
+            "rank": 11,
+            "vt_symbol": "D",
+            "benchmark_return_pct": -2.0,
+            "market_regime": "choppy",
+            "observation_return_pct": 9.0,
+            "observation_excess_return_pct": 11.0,
+        },
+    ]
+
+    result = queries.top_candidate_bucket_summary(rows, top_n=10)
+    observation = result["candidate_observation"]
+
+    assert observation["candidate_count"] == 3
+    assert observation["observed_count"] == 3
+    assert observation["win_rate"] == 2 / 3
+    assert observation["avg_return_pct"] == (12.0 - 4.0 + 6.0) / 3
+    assert observation["excluding_strong_summary"]["candidate_count"] == 2
+    assert observation["excluding_strong_summary"]["observed_count"] == 2
+    assert observation["excluding_strong_summary"]["win_rate"] == 0.5
+    assert observation["excluding_strong_summary"]["avg_return_pct"] == 1.0
+    assert observation["excluding_strong_summary"]["avg_benchmark_return_pct"] == -2.0
+    assert observation["excluding_strong_summary"]["avg_excess_return_pct"] == 3.0
+    assert [row["regime"] for row in observation["market_buckets"]] == ["strong", "weak", "choppy"]
+
+
+def test_market_context_classifies_narrow_theme_pullback_without_killing_mainline() -> None:
+    from alphaagent.server.services.quant import market_context
+
+    regime, notes = market_context._classify_dynamic_regime(
+        market_score=61.0,
+        trend_score=59.0,
+        momentum_score=57.0,
+        breadth_score=38.0,
+        risk_score=48.0,
+        theme_strength=78.0,
+        growth_score=74.0,
+        value_score=55.0,
+    )
+    theme_state = market_context._theme_state(
+        theme_strength=64.0,
+        breadth_score=42.0,
+        risk_score=54.0,
+        regime=regime,
+    )
+
+    assert regime == "narrow_theme_bull"
+    assert theme_state == "active_pullback"
+    assert notes == ["成长/小盘主线强于宽基，市场广度偏窄"]
+
+
+def test_market_context_classifies_rotation_and_bear_market_separately() -> None:
+    from alphaagent.server.services.quant import market_context
+
+    rotation, _ = market_context._classify_dynamic_regime(
+        market_score=54.0,
+        trend_score=52.0,
+        momentum_score=50.0,
+        breadth_score=50.0,
+        risk_score=45.0,
+        theme_strength=57.0,
+        growth_score=52.0,
+        value_score=54.0,
+    )
+    crash, crash_notes = market_context._classify_dynamic_regime(
+        market_score=35.0,
+        trend_score=36.0,
+        momentum_score=32.0,
+        breadth_score=22.0,
+        risk_score=82.0,
+        theme_strength=40.0,
+        growth_score=35.0,
+        value_score=37.0,
+    )
+
+    assert rotation == "choppy_rotation"
+    assert crash == "crash"
+    assert crash_notes == ["指数破位且波动/回撤风险高"]
+
+
+def test_top_candidate_bucket_summary_includes_dynamic_market_and_theme_alignment() -> None:
+    from alphaagent.server.services.backtest import queries
+
+    rows = [
+        {
+            "rank": 1,
+            "return_pct": 9.0,
+            "excess_return_pct": 5.0,
+            "observation_return_pct": 6.0,
+            "observation_excess_return_pct": 3.0,
+            "dynamic_market_regime": "narrow_theme_bull",
+            "market_score": 66.0,
+            "market_breadth_score": 41.0,
+            "market_risk_score": 45.0,
+            "theme_strength": 82.0,
+            "stock_theme_alignment": "leader_theme",
+        },
+        {
+            "rank": 2,
+            "return_pct": -4.0,
+            "excess_return_pct": -2.0,
+            "observation_return_pct": 2.0,
+            "observation_excess_return_pct": 1.0,
+            "dynamic_market_regime": "weak_defensive",
+            "market_score": 38.0,
+            "market_breadth_score": 28.0,
+            "market_risk_score": 72.0,
+            "theme_strength": 48.0,
+            "stock_theme_alignment": "isolated_candidate",
+        },
+        {
+            "rank": 11,
+            "return_pct": 11.0,
+            "excess_return_pct": 8.0,
+            "observation_return_pct": 7.0,
+            "observation_excess_return_pct": 5.0,
+            "dynamic_market_regime": "strong_broad",
+            "market_score": 76.0,
+            "market_breadth_score": 65.0,
+            "market_risk_score": 35.0,
+            "theme_strength": 70.0,
+            "stock_theme_alignment": "theme_related",
+        },
+    ]
+
+    result = queries.top_candidate_bucket_summary(rows, top_n=10)
+
+    assert [row["regime"] for row in result["dynamic_market_buckets"]] == ["narrow_theme_bull", "weak_defensive"]
+    assert result["dynamic_market_buckets"][0]["win_rate"] == 1.0
+    assert result["dynamic_market_buckets"][1]["win_rate"] == 0.0
+    assert [row["alignment"] for row in result["theme_alignment_buckets"]] == ["leader_theme", "isolated_candidate"]
+    assert result["theme_alignment_buckets"][0]["avg_theme_strength"] == 82.0
+    assert [row["regime"] for row in result["candidate_observation"]["dynamic_market_buckets"]] == [
+        "narrow_theme_bull",
+        "weak_defensive",
+    ]
+
+
+def test_market_context_falls_back_to_benchmark_proxy_without_index_data() -> None:
+    from alphaagent.server.services.quant import market_context
+
+    rows = [
+        {
+            "vt_symbol": "A",
+            "benchmark_return_pct": 7.0,
+            "reason": {"smart_money_proxy_score": 76.0},
+        },
+        {
+            "vt_symbol": "B",
+            "benchmark_return_pct": -4.0,
+            "reason": {"smart_money_proxy_score": 61.0},
+        },
+        {
+            "vt_symbol": "C",
+            "benchmark_return_pct": -9.0,
+            "reason": {"smart_money_proxy_score": 45.0},
+        },
+    ]
+
+    result = market_context._annotate_rows_with_benchmark_proxy(rows)
+
+    assert [row["dynamic_market_regime"] for row in result] == ["strong_broad", "weak_defensive", "crash"]
+    assert [row["stock_theme_alignment"] for row in result] == [
+        "leader_theme",
+        "theme_related",
+        "isolated_candidate",
+    ]
+
+
+def test_market_returns_20d_batch_uses_index_when_available(monkeypatch) -> None:
+    from alphaagent.server.services.backtest import queries
+
+    calls = []
+
+    def fake_index_returns(session, schema, dates):
+        calls.append(("index", tuple(dates)))
+        return {date(2026, 1, 30): 4.5}
+
+    def fake_proxy_returns(session, schema, dates):
+        calls.append(("proxy", tuple(dates)))
+        return {date(2026, 2, 2): -2.0}
+
+    monkeypatch.setattr(queries, "_index_returns_20d_from_session", fake_index_returns)
+    monkeypatch.setattr(queries, "_equal_weight_market_returns_20d_from_session", fake_proxy_returns)
+
+    result = queries._market_returns_20d_for_audit(None, None, [date(2026, 1, 30), date(2026, 2, 2)])
+
+    assert result[date(2026, 1, 30)] == {"return_20d": 4.5, "source": "000001.SSE"}
+    assert result[date(2026, 2, 2)] == {"return_20d": -2.0, "source": "equal_weight_stock_proxy"}
+    assert calls == [
+        ("index", (date(2026, 1, 30), date(2026, 2, 2))),
+        ("proxy", (date(2026, 2, 2),)),
+    ]

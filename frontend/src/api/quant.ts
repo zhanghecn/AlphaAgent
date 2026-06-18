@@ -985,6 +985,139 @@ export interface BacktestRegimeAnalysis {
   periods: BacktestRegimeRow[];
 }
 
+export interface BacktestTopCandidateMetricSummary {
+  candidate_count: number;
+  evaluated_count: number;
+  win_rate?: number | null;
+  avg_return_pct?: number | null;
+  avg_benchmark_return_pct?: number | null;
+  avg_excess_return_pct?: number | null;
+}
+
+export interface BacktestCandidateObservationMetricSummary {
+  candidate_count: number;
+  observed_count: number;
+  win_rate?: number | null;
+  avg_return_pct?: number | null;
+  avg_benchmark_return_pct?: number | null;
+  avg_excess_return_pct?: number | null;
+}
+
+export interface BacktestCandidateObservationMarketBucket extends BacktestCandidateObservationMetricSummary {
+  regime: string;
+  label: string;
+}
+
+export interface BacktestDynamicMarketBucket {
+  regime: string;
+  label: string;
+  candidate_count: number;
+  evaluated_count: number;
+  win_rate?: number | null;
+  avg_return_pct?: number | null;
+  avg_excess_return_pct?: number | null;
+  avg_market_score?: number | null;
+  avg_breadth_score?: number | null;
+  avg_risk_score?: number | null;
+}
+
+export interface BacktestThemeAlignmentBucket {
+  alignment: string;
+  label: string;
+  candidate_count: number;
+  evaluated_count: number;
+  win_rate?: number | null;
+  avg_return_pct?: number | null;
+  avg_excess_return_pct?: number | null;
+  avg_market_score?: number | null;
+  avg_theme_strength?: number | null;
+}
+
+export interface BacktestCandidateObservationSummary extends BacktestCandidateObservationMetricSummary {
+  evaluable_count?: number;
+  excluding_strong_summary?: BacktestCandidateObservationMetricSummary;
+  market_buckets?: BacktestCandidateObservationMarketBucket[];
+  dynamic_market_buckets?: BacktestDynamicMarketBucket[];
+  theme_alignment_buckets?: BacktestThemeAlignmentBucket[];
+  holding_days?: number;
+  method?: string;
+}
+
+export interface BacktestTopCandidateMarketBucket extends BacktestTopCandidateMetricSummary {
+  regime: string;
+  label: string;
+}
+
+export interface BacktestTopCandidateSummary {
+  top_n: number;
+  total_count: number;
+  evaluated_count: number;
+  top_count: number;
+  top_evaluated_count: number;
+  top_win_rate?: number | null;
+  top_avg_return_pct?: number | null;
+  top_avg_benchmark_return_pct?: number | null;
+  top_avg_excess_return_pct?: number | null;
+  other_count: number;
+  other_evaluated_count: number;
+  other_win_rate?: number | null;
+  other_avg_return_pct?: number | null;
+  other_avg_benchmark_return_pct?: number | null;
+  other_avg_excess_return_pct?: number | null;
+  market_buckets: BacktestTopCandidateMarketBucket[];
+  top_strong_summary?: BacktestTopCandidateMetricSummary;
+  top_excluding_strong_summary?: BacktestTopCandidateMetricSummary;
+  top_strong_candidate_share?: number | null;
+  benchmark_sources?: Array<{ source: string; count: number }>;
+  candidate_observation?: BacktestCandidateObservationSummary;
+  dynamic_market_buckets?: BacktestDynamicMarketBucket[];
+  theme_alignment_buckets?: BacktestThemeAlignmentBucket[];
+}
+
+export interface BacktestTopCandidateAuditItem extends StockIdentityFields {
+  signal_date?: string | null;
+  rank?: number | null;
+  vt_symbol: string;
+  name?: string | null;
+  score?: number | null;
+  entry_date?: string | null;
+  exit_date?: string | null;
+  return_pct?: number | null;
+  benchmark_return_pct?: number | null;
+  benchmark_source?: string | null;
+  excess_return_pct?: number | null;
+  market_regime?: string | null;
+  evaluated?: boolean;
+  dynamic_market_source?: string | null;
+  observation_entry_date?: string | null;
+  observation_exit_date?: string | null;
+  observation_entry_price?: number | null;
+  observation_exit_price?: number | null;
+  observation_return_pct?: number | null;
+  observation_excess_return_pct?: number | null;
+  observation_status?: string | null;
+  dynamic_market_regime?: string | null;
+  dynamic_market_label?: string | null;
+  dominant_theme?: string | null;
+  dominant_theme_id?: string | null;
+  theme_state?: string | null;
+  market_score?: number | null;
+  market_breadth_score?: number | null;
+  market_risk_score?: number | null;
+  theme_strength?: number | null;
+  stock_theme_alignment?: string | null;
+}
+
+export interface BacktestTopCandidateAudit {
+  status: string;
+  backtest_id: number;
+  top_n: number;
+  summary: BacktestTopCandidateSummary;
+  items?: BacktestTopCandidateAuditItem[];
+  note?: string;
+  message?: string;
+}
+
 export interface BacktestCostStressRow {
   id: string;
   label: string;
@@ -2075,6 +2208,11 @@ export function fetchBacktestPathDiagnostics(backtestId: number, vtSymbol?: stri
   const search = new URLSearchParams({ limit: "500", lookahead_days: "10" });
   if (vtSymbol) search.set("vt_symbol", vtSymbol);
   return apiClient.get<BacktestPathDiagnosticsResponse>(`/backtests/${backtestId}/path-diagnostics?${search.toString()}`);
+}
+
+export function fetchBacktestTopCandidateAudit(backtestId: number, topN = 10): Promise<BacktestTopCandidateAudit> {
+  const search = new URLSearchParams({ top_n: String(topN) });
+  return apiClient.get<BacktestTopCandidateAudit>(`/backtests/${backtestId}/top-candidate-audit?${search.toString()}`);
 }
 
 export function fetchBacktestDayDetail(backtestId: number, tradeDate: string) {

@@ -9,9 +9,10 @@ import {
   backtestValidationGridCsvUrl,
   fetchBacktestExecutionModelComparison,
   fetchBacktestReport,
+  fetchBacktestTopCandidateAudit,
   fetchBacktestValidationGrid,
 } from "@/api/quant";
-import { BacktestYearlyTable } from "./BacktestTables";
+import { BacktestRegimeTable, BacktestYearlyTable } from "./BacktestTables";
 
 export function BacktestRealityVerdictPanel({
   report,
@@ -210,6 +211,89 @@ export function BacktestRobustnessPanel({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+export function BacktestMarketAuditPanel({
+  report,
+  topCandidateAudit,
+  isTopCandidateAuditLoading,
+}: {
+  report?: Awaited<ReturnType<typeof fetchBacktestReport>>;
+  topCandidateAudit?: Awaited<ReturnType<typeof fetchBacktestTopCandidateAudit>>;
+  isTopCandidateAuditLoading?: boolean;
+}) {
+  const yearlyRows = report?.robustness_checks?.yearly_periods ?? [];
+  const regimeAnalysis = report?.regime_analysis ?? report?.robustness_checks?.market_regime_analysis;
+  const summary = topCandidateAudit?.summary;
+  const excludingStrong = summary?.top_excluding_strong_summary;
+  const strong = summary?.top_strong_summary;
+  const observation = summary?.candidate_observation;
+  const observationExcludingStrong = observation?.excluding_strong_summary;
+  const sourceText = formatBenchmarkSources(summary?.benchmark_sources);
+  const dynamicSourceText = formatDynamicMarketSource(topCandidateAudit?.items?.[0]?.dynamic_market_source);
+  const hasAnalysis = yearlyRows.length > 0 || Boolean(regimeAnalysis?.periods?.length) || Boolean(summary);
+
+  if (!hasAnalysis && !isTopCandidateAuditLoading) return null;
+
+  return (
+    <div className="space-y-3 rounded-lg border p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-medium">年度 / 大盘 / 前10候选审计</div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            用同一回测结果检查收益是否集中在强势行情；候选胜率只统计真实成交并闭仓的前10候选。
+          </div>
+        </div>
+        {summary && (
+          <span className="rounded-md border px-2 py-1 text-xs text-muted-foreground">
+            前{summary.top_n}候选：{summary.top_evaluated_count}/{summary.top_count} 已闭仓
+          </span>
+        )}
+      </div>
+
+      {summary && (
+        <div className="grid gap-3 text-sm md:grid-cols-4">
+          <InfoCell label={`前${summary.top_n}胜率`} value={formatRate(summary.top_win_rate)} />
+          <InfoCell label={`前${summary.top_n}平均收益`} value={formatPct(summary.top_avg_return_pct)} />
+          <InfoCell label={`前${summary.top_n}平均超额`} value={formatPct(summary.top_avg_excess_return_pct)} />
+          <InfoCell label="强势候选占比" value={formatRate(summary.top_strong_candidate_share)} />
+          <InfoCell label="排除强势胜率" value={formatRate(excludingStrong?.win_rate)} />
+          <InfoCell label="排除强势平均收益" value={formatPct(excludingStrong?.avg_return_pct)} />
+          <InfoCell label="排除强势平均超额" value={formatPct(excludingStrong?.avg_excess_return_pct)} />
+          <InfoCell label="强势行情胜率" value={formatRate(strong?.win_rate)} />
+          <InfoCell label="候选观察胜率" value={formatRate(observation?.win_rate)} />
+          <InfoCell label="观察排除强势胜率" value={formatRate(observationExcludingStrong?.win_rate)} />
+          <InfoCell label="观察排除强势收益" value={formatPct(observationExcludingStrong?.avg_return_pct)} />
+          <InfoCell label="观察排除强势超额" value={formatPct(observationExcludingStrong?.avg_excess_return_pct)} />
+        </div>
+      )}
+
+      {summary?.dynamic_market_buckets?.length ? (
+        <DynamicMarketBucketTable title="前10候选按动态市场画像" rows={summary.dynamic_market_buckets} />
+      ) : null}
+      {summary?.theme_alignment_buckets?.length ? (
+        <ThemeAlignmentBucketTable title="前10候选按主线对齐" rows={summary.theme_alignment_buckets} />
+      ) : null}
+      {observation?.dynamic_market_buckets?.length ? (
+        <DynamicMarketBucketTable title="固定持有观察按动态市场画像" rows={observation.dynamic_market_buckets} />
+      ) : null}
+      {observation?.theme_alignment_buckets?.length ? (
+        <ThemeAlignmentBucketTable title="固定持有观察按主线对齐" rows={observation.theme_alignment_buckets} />
+      ) : null}
+      {summary?.market_buckets?.length ? <TopCandidateMarketBucketTable rows={summary.market_buckets} /> : null}
+      {observation?.market_buckets?.length ? <CandidateObservationMarketBucketTable rows={observation.market_buckets} /> : null}
+      {yearlyRows.length > 0 && <BacktestYearlyTable rows={yearlyRows} />}
+      {regimeAnalysis?.periods?.length ? <BacktestRegimeTable analysis={regimeAnalysis} /> : null}
+
+      <div className="text-xs text-muted-foreground">
+        {isTopCandidateAuditLoading
+          ? "正在加载前10候选审计。"
+          : `${topCandidateAudit?.note ?? "候选审计未加载。"} ${observation?.method ?? ""}`}
+        {sourceText ? ` 大盘基准来源：${sourceText}。` : ""}
+        {dynamicSourceText ? ` 动态画像来源：${dynamicSourceText}。` : ""}
+      </div>
     </div>
   );
 }
@@ -670,6 +754,216 @@ function VerdictLine({ label, text }: { label: string; text: string }) {
       <div className="mt-1 leading-6">{text}</div>
     </div>
   );
+}
+
+function TopCandidateMarketBucketTable({
+  rows,
+}: {
+  rows: NonNullable<Awaited<ReturnType<typeof fetchBacktestTopCandidateAudit>>["summary"]>["market_buckets"];
+}) {
+  return (
+    <div className="overflow-hidden rounded-lg border">
+      <div className="border-b px-3 py-2 text-sm font-medium">前10候选按大盘环境</div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>环境</TableHead>
+            <TableHead className="text-right">候选</TableHead>
+            <TableHead className="text-right">已闭仓</TableHead>
+            <TableHead className="text-right">胜率</TableHead>
+            <TableHead className="text-right">平均收益</TableHead>
+            <TableHead className="text-right">基准收益</TableHead>
+            <TableHead className="text-right">平均超额</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row) => (
+            <TableRow key={row.regime}>
+              <TableCell className="font-medium">{row.label}</TableCell>
+              <TableCell className="text-right tabular-nums">{row.candidate_count}</TableCell>
+              <TableCell className="text-right tabular-nums">{row.evaluated_count}</TableCell>
+              <TableCell className="text-right tabular-nums">{formatRate(row.win_rate)}</TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.avg_return_pct))}>
+                {formatPct(row.avg_return_pct)}
+              </TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.avg_benchmark_return_pct))}>
+                {formatPct(row.avg_benchmark_return_pct)}
+              </TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.avg_excess_return_pct))}>
+                {formatPct(row.avg_excess_return_pct)}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+function DynamicMarketBucketTable({
+  title,
+  rows,
+}: {
+  title: string;
+  rows: NonNullable<Awaited<ReturnType<typeof fetchBacktestTopCandidateAudit>>["summary"]>["dynamic_market_buckets"];
+}) {
+  if (!rows?.length) return null;
+  return (
+    <div className="overflow-hidden rounded-lg border">
+      <div className="border-b px-3 py-2 text-sm font-medium">{title}</div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>市场</TableHead>
+            <TableHead className="text-right">候选</TableHead>
+            <TableHead className="text-right">样本</TableHead>
+            <TableHead className="text-right">胜率</TableHead>
+            <TableHead className="text-right">收益</TableHead>
+            <TableHead className="text-right">超额</TableHead>
+            <TableHead className="text-right">市场分</TableHead>
+            <TableHead className="text-right">广度</TableHead>
+            <TableHead className="text-right">风险</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row) => (
+            <TableRow key={`${title}-${row.regime}`}>
+              <TableCell className="font-medium">{row.label}</TableCell>
+              <TableCell className="text-right tabular-nums">{row.candidate_count}</TableCell>
+              <TableCell className="text-right tabular-nums">{row.evaluated_count}</TableCell>
+              <TableCell className="text-right tabular-nums">{formatRate(row.win_rate)}</TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.avg_return_pct))}>
+                {formatPct(row.avg_return_pct)}
+              </TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.avg_excess_return_pct))}>
+                {formatPct(row.avg_excess_return_pct)}
+              </TableCell>
+              <TableCell className="text-right tabular-nums">{formatNumber(row.avg_market_score)}</TableCell>
+              <TableCell className="text-right tabular-nums">{formatNumber(row.avg_breadth_score)}</TableCell>
+              <TableCell className="text-right tabular-nums">{formatNumber(row.avg_risk_score)}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+function ThemeAlignmentBucketTable({
+  title,
+  rows,
+}: {
+  title: string;
+  rows: NonNullable<Awaited<ReturnType<typeof fetchBacktestTopCandidateAudit>>["summary"]>["theme_alignment_buckets"];
+}) {
+  if (!rows?.length) return null;
+  return (
+    <div className="overflow-hidden rounded-lg border">
+      <div className="border-b px-3 py-2 text-sm font-medium">{title}</div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>对齐</TableHead>
+            <TableHead className="text-right">候选</TableHead>
+            <TableHead className="text-right">样本</TableHead>
+            <TableHead className="text-right">胜率</TableHead>
+            <TableHead className="text-right">收益</TableHead>
+            <TableHead className="text-right">超额</TableHead>
+            <TableHead className="text-right">市场分</TableHead>
+            <TableHead className="text-right">主线强度</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row) => (
+            <TableRow key={`${title}-${row.alignment}`}>
+              <TableCell className="font-medium">{row.label}</TableCell>
+              <TableCell className="text-right tabular-nums">{row.candidate_count}</TableCell>
+              <TableCell className="text-right tabular-nums">{row.evaluated_count}</TableCell>
+              <TableCell className="text-right tabular-nums">{formatRate(row.win_rate)}</TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.avg_return_pct))}>
+                {formatPct(row.avg_return_pct)}
+              </TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.avg_excess_return_pct))}>
+                {formatPct(row.avg_excess_return_pct)}
+              </TableCell>
+              <TableCell className="text-right tabular-nums">{formatNumber(row.avg_market_score)}</TableCell>
+              <TableCell className="text-right tabular-nums">{formatNumber(row.avg_theme_strength)}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+function CandidateObservationMarketBucketTable({
+  rows,
+}: {
+  rows: NonNullable<Awaited<ReturnType<typeof fetchBacktestTopCandidateAudit>>["summary"]["candidate_observation"]>["market_buckets"];
+}) {
+  if (!rows?.length) return null;
+  return (
+    <div className="overflow-hidden rounded-lg border">
+      <div className="border-b px-3 py-2 text-sm font-medium">前10候选固定持有观察</div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>环境</TableHead>
+            <TableHead className="text-right">候选</TableHead>
+            <TableHead className="text-right">可观察</TableHead>
+            <TableHead className="text-right">胜率</TableHead>
+            <TableHead className="text-right">观察收益</TableHead>
+            <TableHead className="text-right">基准收益</TableHead>
+            <TableHead className="text-right">观察超额</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row) => (
+            <TableRow key={row.regime}>
+              <TableCell className="font-medium">{row.label}</TableCell>
+              <TableCell className="text-right tabular-nums">{row.candidate_count}</TableCell>
+              <TableCell className="text-right tabular-nums">{row.observed_count}</TableCell>
+              <TableCell className="text-right tabular-nums">{formatRate(row.win_rate)}</TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.avg_return_pct))}>
+                {formatPct(row.avg_return_pct)}
+              </TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.avg_benchmark_return_pct))}>
+                {formatPct(row.avg_benchmark_return_pct)}
+              </TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.avg_excess_return_pct))}>
+                {formatPct(row.avg_excess_return_pct)}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+function formatBenchmarkSources(sources?: Array<{ source: string; count: number }>) {
+  if (!sources?.length) return "";
+  return sources.map((item) => `${benchmarkSourceLabel(item.source)} ${item.count}`).join("、");
+}
+
+function benchmarkSourceLabel(source: string) {
+  if (source === "index_daily_bars") return "指数日线";
+  if (source === "equal_weight_stock_proxy") return "股票等权代理";
+  if (source === "akshare_index_spot") return "AkShare指数";
+  if (source === "unknown") return "未知";
+  return source;
+}
+
+function formatDynamicMarketSource(source?: string | null) {
+  if (!source) return "";
+  if (source === "benchmark_return_20d_proxy") return "20日市场收益代理";
+  if (source === "stock_daily_bars") return "指数/日线市场画像";
+  if (source === "fallback") return "数据不足降级";
+  return source;
+}
+
+function formatRate(value?: number | null) {
+  return value == null ? "--" : formatPct(value * 100);
 }
 
 function executionModelLabel(model?: string | null): string {

@@ -400,6 +400,7 @@ export function BacktestYearlyTable({
 }: {
   rows: NonNullable<Awaited<ReturnType<typeof fetchBacktestReport>>["robustness_checks"]>["yearly_periods"];
 }) {
+  if (rows.length === 0) return null;
   return (
     <div className="overflow-hidden rounded-lg border">
       <div className="border-b px-3 py-2 text-sm font-medium">年度分段</div>

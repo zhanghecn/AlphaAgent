@@ -7,6 +7,7 @@ import {
   fetchBacktestAudit,
   fetchBacktestDataQuality,
   fetchBacktestReport,
+  fetchBacktestTopCandidateAudit,
   fetchBacktestValidationGrid,
 } from "@/api/quant";
 import { EmptyState } from "@/components/EmptyState";
@@ -29,6 +30,7 @@ import { BacktestDrilldownPanel } from "@/features/quant/BacktestDrilldownPanel"
 import { BacktestDataQualityPanel } from "@/features/quant/BacktestDataQualityPanel";
 import {
   BacktestDataAsOfAuditPanel,
+  BacktestMarketAuditPanel,
   BacktestRealityStats,
   BacktestRobustnessPanel,
   BacktestValidationGridPanel,
@@ -69,13 +71,20 @@ export function BacktestPanel({
   const selectedRun = runs.find((item) => item.id === selectedId) ?? runs[0] ?? null;
   const [activeDetailTab, setActiveDetailTab] = useState("trades");
   const shouldLoadValidation = Boolean(selectedId && activeDetailTab === "validation");
-  const validationReportQuery = useQuery({
-    queryKey: ["backtestReport", selectedId, "analysis"],
+  const marketAuditReportQuery = useQuery({
+    queryKey: ["backtestReport", selectedId, "market-audit"],
     queryFn: () => fetchBacktestReport(selectedId!, 80, { includeAnalysis: true }),
-    enabled: shouldLoadValidation,
+    enabled: Boolean(selectedId),
     staleTime: 60_000,
   });
-  const validationReport = validationReportQuery.data ?? report;
+  const marketAuditReport = marketAuditReportQuery.data ?? report;
+  const topCandidateAuditQuery = useQuery({
+    queryKey: ["backtestTopCandidateAudit", selectedId, 10],
+    queryFn: () => fetchBacktestTopCandidateAudit(selectedId!, 10),
+    enabled: Boolean(selectedId),
+    staleTime: 60_000,
+  });
+  const validationReport = marketAuditReport;
   const dataQualityQuery = useQuery({
     queryKey: ["backtestDataQuality", selectedId],
     queryFn: () => fetchBacktestDataQuality(selectedId!),
@@ -89,7 +98,7 @@ export function BacktestPanel({
     staleTime: 60_000,
   });
   const validationAnalysisLoading =
-    activeDetailTab === "validation" && validationReportQuery.isFetching && !validationReportQuery.data;
+    activeDetailTab === "validation" && marketAuditReportQuery.isFetching && !marketAuditReportQuery.data;
   if (isLoading && !selectedRun) return <LoadingState rows={5} />;
   if (isError) return <ErrorState message="加载回测报告失败" onRetry={onRetry} />;
 
@@ -142,6 +151,11 @@ export function BacktestPanel({
         ) : (
           <>
             <BacktestSummary report={report} audit={auditQuery.data} />
+            <BacktestMarketAuditPanel
+              report={marketAuditReport}
+              topCandidateAudit={topCandidateAuditQuery.data}
+              isTopCandidateAuditLoading={topCandidateAuditQuery.isFetching}
+            />
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
               <section className="space-y-4">
                 <BacktestTradeTable backtestId={selectedId} trades={report.recent_trades ?? report.trades} total={report.trade_count} />

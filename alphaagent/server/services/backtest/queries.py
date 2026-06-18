@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from bisect import bisect_right
 from datetime import date, timedelta
 from typing import Any, Callable
 
@@ -10,6 +11,7 @@ from sqlalchemy import and_, desc, func, select
 
 from alphaagent.market.boards import DEFAULT_QUANT_INCLUDED_BOARDS, normalize_included_boards
 from alphaagent.server.services.quant.factors import Bar, score_dragon_pullback
+from alphaagent.server.services.quant import market_context
 
 DateParser = Callable[[Any], date | None]
 ApiMapper = Callable[[dict[str, Any]], dict[str, Any]]
@@ -870,6 +872,8 @@ def top_candidate_bucket_summary(rows: list[dict[str, Any]], top_n: int = 10) ->
     other_rows = [row for row in rows if int(_safe_float(row.get("rank")) or 0) > top_limit]
     evaluated_top = [row for row in top_rows if _safe_float(row.get("return_pct")) is not None]
     evaluated_other = [row for row in other_rows if _safe_float(row.get("return_pct")) is not None]
+    top_strong_rows = [row for row in top_rows if _top_candidate_row_regime(row) == "strong"]
+    top_excluding_strong_rows = [row for row in top_rows if _top_candidate_row_regime(row) != "strong"]
     return {
         "top_n": top_limit,
         "total_count": len(rows),
@@ -893,6 +897,54 @@ def top_candidate_bucket_summary(rows: list[dict[str, Any]], top_n: int = 10) ->
         "other_avg_benchmark_return_pct": _avg(row.get("benchmark_return_pct") for row in other_rows),
         "other_avg_excess_return_pct": _avg(row.get("excess_return_pct") for row in evaluated_other),
         "market_buckets": _top_candidate_market_buckets(top_rows),
+        "top_strong_summary": _top_candidate_metric_summary(top_strong_rows),
+        "top_excluding_strong_summary": _top_candidate_metric_summary(top_excluding_strong_rows),
+        "top_strong_candidate_share": _ratio(len(top_strong_rows), len(top_rows)),
+        "benchmark_sources": _top_candidate_benchmark_sources(top_rows),
+        "candidate_observation": candidate_observation_summary(top_rows),
+        "dynamic_market_buckets": market_context.summarize_contexts(
+            top_rows,
+            return_key="return_pct",
+            excess_key="excess_return_pct",
+            evaluated_predicate=lambda row: _safe_float(row.get("return_pct")) is not None,
+        ),
+        "theme_alignment_buckets": _theme_alignment_buckets(top_rows, return_key="return_pct", excess_key="excess_return_pct"),
+    }
+
+
+def candidate_observation_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    evaluable_rows = [row for row in rows if _safe_float(row.get("observation_return_pct")) is not None]
+    excluding_strong = [row for row in rows if _top_candidate_row_regime(row) != "strong"]
+    market_buckets = []
+    for regime in ("strong", "weak", "choppy", "unknown"):
+        bucket_rows = [row for row in rows if _top_candidate_row_regime(row) == regime]
+        if not bucket_rows:
+            continue
+        market_buckets.append(
+            {
+                "regime": regime,
+                "label": {"strong": "强势", "weak": "弱势", "choppy": "震荡", "unknown": "未知"}[regime],
+                **_candidate_observation_metric_summary(bucket_rows),
+            }
+        )
+    return {
+        **_candidate_observation_metric_summary(rows),
+        "evaluable_count": len(evaluable_rows),
+        "excluding_strong_summary": _candidate_observation_metric_summary(excluding_strong),
+        "market_buckets": market_buckets,
+        "dynamic_market_buckets": market_context.summarize_contexts(
+            rows,
+            return_key="observation_return_pct",
+            excess_key="observation_excess_return_pct",
+            evaluated_predicate=lambda row: _safe_float(row.get("observation_return_pct")) is not None,
+        ),
+        "theme_alignment_buckets": _theme_alignment_buckets(
+            rows,
+            return_key="observation_return_pct",
+            excess_key="observation_excess_return_pct",
+        ),
+        "holding_days": 20,
+        "method": "D+1开盘观察买入，持有20个交易日后按收盘价观察收益；只用于候选质量事后审计，不参与策略交易。",
     }
 
 
@@ -942,10 +994,8 @@ def backtest_top_candidate_audit(
         trade_dicts = [dict(row) for row in trade_rows]
         entry_dates = [_as_date(row.get("trade_date")) for row in recommendation_dicts]
         entry_dates = [day for day in entry_dates if day is not None]
-        benchmark_by_date = {
-            day: _market_return_20d_for_audit(session, schema, day)
-            for day in sorted(set(entry_dates))
-        }
+        benchmark_by_date = _market_returns_20d_for_audit(session, schema, sorted(set(entry_dates)))
+        observation_by_key = _candidate_observation_returns(session, schema, recommendation_dicts, holding_days=20)
         stock_names = load_stock_names(session, symbols_from_rows(recommendation_dicts, trade_dicts))
     named_recommendations = with_stock_names(recommendation_dicts, stock_names)
     named_trades = with_stock_names(trade_dicts, stock_names)
@@ -958,6 +1008,8 @@ def backtest_top_candidate_audit(
         benchmark = benchmark_by_date.get(signal_date) if signal_date else None
         return_pct = closed.get("return_pct") if closed else None
         benchmark_return = (benchmark or {}).get("return_20d")
+        observation = observation_by_key.get((vt_symbol, signal_date)) if signal_date else None
+        observation_return = (observation or {}).get("return_pct")
         rows.append(
             {
                 "signal_date": signal_date,
@@ -965,6 +1017,7 @@ def backtest_top_candidate_audit(
                 "vt_symbol": vt_symbol,
                 "name": recommendation.get("name"),
                 "score": recommendation.get("total_score"),
+                "reason": recommendation.get("reason") if isinstance(recommendation.get("reason"), dict) else {},
                 "entry_date": closed.get("entry_date") if closed else None,
                 "exit_date": closed.get("exit_date") if closed else None,
                 "return_pct": return_pct,
@@ -973,15 +1026,25 @@ def backtest_top_candidate_audit(
                 "excess_return_pct": return_pct - benchmark_return if return_pct is not None and benchmark_return is not None else None,
                 "market_regime": _candidate_market_regime(benchmark_return),
                 "evaluated": closed is not None,
+                "observation_entry_date": (observation or {}).get("entry_date"),
+                "observation_exit_date": (observation or {}).get("exit_date"),
+                "observation_entry_price": (observation or {}).get("entry_price"),
+                "observation_exit_price": (observation or {}).get("exit_price"),
+                "observation_return_pct": observation_return,
+                "observation_excess_return_pct": observation_return - benchmark_return if observation_return is not None and benchmark_return is not None else None,
+                "observation_status": (observation or {}).get("status") or "missing_bar",
             }
         )
+    with session_scope() as session:
+        rows = market_context.annotate_rows_with_market_context(session, schema, rows, date_key="signal_date")
     summary = top_candidate_bucket_summary(rows, top_n=top_limit)
+    response_rows = [{key: value for key, value in row.items() if key != "reason"} for row in rows]
     return {
         "status": "ready" if rows else "empty",
         "backtest_id": backtest_id,
         "top_n": top_limit,
         "summary": summary,
-        "items": [to_api(row) for row in rows],
+        "items": [to_api(row) for row in response_rows],
         "note": "候选审计只用真实成交并闭仓的候选计算胜率；未成交候选只计数量，不用未来走势伪造收益。",
     }
 
@@ -1110,6 +1173,55 @@ def _market_return_20d_for_audit(session: Any, schema: Any, trade_date: date) ->
     return {"return_20d": proxy_return, "source": "equal_weight_stock_proxy" if proxy_return is not None else "unavailable"}
 
 
+def _market_returns_20d_for_audit(session: Any, schema: Any, trade_dates: list[date]) -> dict[date, dict[str, Any]]:
+    dates = sorted({day for day in trade_dates if day})
+    if not dates:
+        return {}
+    index_returns = _index_returns_20d_from_session(session, schema, dates)
+    missing_dates = [day for day in dates if day not in index_returns]
+    proxy_returns = _equal_weight_market_returns_20d_from_session(session, schema, missing_dates) if missing_dates else {}
+    return {
+        day: (
+            {"return_20d": index_returns[day], "source": "000001.SSE"}
+            if day in index_returns
+            else {
+                "return_20d": proxy_returns.get(day),
+                "source": "equal_weight_stock_proxy" if proxy_returns.get(day) is not None else "unavailable",
+            }
+        )
+        for day in dates
+    }
+
+
+def _index_returns_20d_from_session(session: Any, schema: Any, trade_dates: list[date]) -> dict[date, float]:
+    dates = sorted({day for day in trade_dates if day})
+    if not dates:
+        return {}
+    rows = session.execute(
+        select(
+            schema.stock_daily_bars.c.trade_date,
+            schema.stock_daily_bars.c.close_price,
+        )
+        .where(schema.stock_daily_bars.c.vt_symbol == "000001.SSE")
+        .where(schema.stock_daily_bars.c.trade_date >= dates[0] - timedelta(days=60))
+        .where(schema.stock_daily_bars.c.trade_date <= dates[-1])
+        .order_by(schema.stock_daily_bars.c.trade_date)
+    ).mappings().all()
+    closes_by_date = {row["trade_date"]: float(row["close_price"]) for row in rows}
+    ordered_dates = [row["trade_date"] for row in rows]
+    result: dict[date, float] = {}
+    for trade_date in dates:
+        index = bisect_right(ordered_dates, trade_date) - 1
+        baseline_index = index - 20
+        if baseline_index < 0:
+            continue
+        start_close = closes_by_date.get(ordered_dates[baseline_index])
+        end_close = closes_by_date.get(ordered_dates[index])
+        if start_close and end_close:
+            result[trade_date] = (end_close / start_close - 1) * 100
+    return result
+
+
 def _equal_weight_market_return_20d_from_session(session: Any, schema: Any, trade_date: date) -> float | None:
     trading_days = session.execute(
         select(schema.stock_daily_bars.c.trade_date)
@@ -1143,6 +1255,61 @@ def _equal_weight_market_return_20d_from_session(session: Any, schema: Any, trad
     if not returns:
         return None
     return sum(returns) / len(returns) * 100
+
+
+def _equal_weight_market_returns_20d_from_session(session: Any, schema: Any, trade_dates: list[date]) -> dict[date, float | None]:
+    dates = sorted({day for day in trade_dates if day})
+    if not dates:
+        return {}
+    trading_days = session.execute(
+        select(schema.stock_daily_bars.c.trade_date)
+        .where(schema.stock_daily_bars.c.trade_date >= dates[0] - timedelta(days=70))
+        .where(schema.stock_daily_bars.c.trade_date <= dates[-1])
+        .group_by(schema.stock_daily_bars.c.trade_date)
+        .order_by(schema.stock_daily_bars.c.trade_date)
+    ).all()
+    ordered_dates = [row[0] for row in trading_days]
+    date_pairs: dict[date, tuple[date, date]] = {}
+    needed_dates: set[date] = set()
+    for trade_date in dates:
+        index = bisect_right(ordered_dates, trade_date) - 1
+        baseline_index = index - 20
+        if baseline_index < 0:
+            continue
+        start_date = ordered_dates[baseline_index]
+        end_date = ordered_dates[index]
+        date_pairs[trade_date] = (start_date, end_date)
+        needed_dates.update((start_date, end_date))
+    if not needed_dates:
+        return {day: None for day in dates}
+    rows = session.execute(
+        select(
+            schema.stock_daily_bars.c.vt_symbol,
+            schema.stock_daily_bars.c.trade_date,
+            schema.stock_daily_bars.c.close_price,
+        )
+        .where(schema.stock_daily_bars.c.trade_date.in_(sorted(needed_dates)))
+        .order_by(schema.stock_daily_bars.c.vt_symbol, schema.stock_daily_bars.c.trade_date)
+    ).mappings().all()
+    closes_by_date_symbol: dict[date, dict[str, float]] = {}
+    for row in rows:
+        closes_by_date_symbol.setdefault(row["trade_date"], {})[str(row["vt_symbol"])] = float(row["close_price"])
+    result: dict[date, float | None] = {}
+    for trade_date in dates:
+        pair = date_pairs.get(trade_date)
+        if not pair:
+            result[trade_date] = None
+            continue
+        start_date, end_date = pair
+        start_values = closes_by_date_symbol.get(start_date, {})
+        end_values = closes_by_date_symbol.get(end_date, {})
+        returns = [
+            end_close / start_close - 1
+            for symbol, start_close in start_values.items()
+            if start_close and (end_close := end_values.get(symbol))
+        ]
+        result[trade_date] = sum(returns) / len(returns) * 100 if returns else None
+    return result
 
 
 def _merge_start_factor_evidence(row: dict[str, Any], evidence: dict[str, Any], market_return: dict[str, Any]) -> dict[str, Any]:
@@ -1230,24 +1397,164 @@ def _top_candidate_market_buckets(rows: list[dict[str, Any]]) -> list[dict[str, 
     result = []
     for regime in ("strong", "weak", "choppy", "unknown"):
         bucket_rows = [row for row in rows if str(row.get("market_regime") or "unknown") == regime]
-        evaluated_rows = [row for row in bucket_rows if _safe_float(row.get("return_pct")) is not None]
         if not bucket_rows:
             continue
         result.append(
             {
                 "regime": regime,
                 "label": {"strong": "强势", "weak": "弱势", "choppy": "震荡", "unknown": "未知"}[regime],
+                **_top_candidate_metric_summary(bucket_rows),
+            }
+        )
+    return result
+
+
+def _top_candidate_metric_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    evaluated_rows = [row for row in rows if _safe_float(row.get("return_pct")) is not None]
+    return {
+        "candidate_count": len(rows),
+        "evaluated_count": len(evaluated_rows),
+        "win_rate": _ratio(
+            len([row for row in evaluated_rows if (_safe_float(row.get("return_pct")) or 0) > 0]),
+            len(evaluated_rows),
+        ),
+        "avg_return_pct": _avg(row.get("return_pct") for row in evaluated_rows),
+        "avg_benchmark_return_pct": _avg(row.get("benchmark_return_pct") for row in rows),
+        "avg_excess_return_pct": _avg(row.get("excess_return_pct") for row in evaluated_rows),
+    }
+
+
+def _candidate_observation_metric_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    observed_rows = [row for row in rows if _safe_float(row.get("observation_return_pct")) is not None]
+    return {
+        "candidate_count": len(rows),
+        "observed_count": len(observed_rows),
+        "win_rate": _ratio(
+            len([row for row in observed_rows if (_safe_float(row.get("observation_return_pct")) or 0) > 0]),
+            len(observed_rows),
+        ),
+        "avg_return_pct": _avg(row.get("observation_return_pct") for row in observed_rows),
+        "avg_benchmark_return_pct": _avg(row.get("benchmark_return_pct") for row in rows),
+        "avg_excess_return_pct": _avg(row.get("observation_excess_return_pct") for row in observed_rows),
+    }
+
+
+def _theme_alignment_buckets(rows: list[dict[str, Any]], *, return_key: str, excess_key: str) -> list[dict[str, Any]]:
+    result = []
+    labels = {
+        "leader_theme": "主线内",
+        "theme_related": "主线相关",
+        "isolated_candidate": "独立强票",
+        "unknown": "未知",
+    }
+    for alignment in ("leader_theme", "theme_related", "isolated_candidate", "unknown"):
+        bucket_rows = [row for row in rows if str(row.get("stock_theme_alignment") or "unknown") == alignment]
+        if not bucket_rows:
+            continue
+        evaluated_rows = [row for row in bucket_rows if _safe_float(row.get(return_key)) is not None]
+        result.append(
+            {
+                "alignment": alignment,
+                "label": labels[alignment],
                 "candidate_count": len(bucket_rows),
                 "evaluated_count": len(evaluated_rows),
                 "win_rate": _ratio(
-                    len([row for row in evaluated_rows if (_safe_float(row.get("return_pct")) or 0) > 0]),
+                    len([row for row in evaluated_rows if (_safe_float(row.get(return_key)) or 0) > 0]),
                     len(evaluated_rows),
                 ),
-                "avg_return_pct": _avg(row.get("return_pct") for row in evaluated_rows),
-                "avg_benchmark_return_pct": _avg(row.get("benchmark_return_pct") for row in bucket_rows),
-                "avg_excess_return_pct": _avg(row.get("excess_return_pct") for row in evaluated_rows),
+                "avg_return_pct": _avg(row.get(return_key) for row in evaluated_rows),
+                "avg_excess_return_pct": _avg(row.get(excess_key) for row in evaluated_rows),
+                "avg_market_score": _avg(row.get("market_score") for row in bucket_rows),
+                "avg_theme_strength": _avg(row.get("theme_strength") for row in bucket_rows),
             }
         )
+    return result
+
+
+def _top_candidate_row_regime(row: dict[str, Any]) -> str:
+    regime = row.get("market_regime")
+    if regime:
+        return str(regime)
+    return _candidate_market_regime(_safe_float(row.get("benchmark_return_pct")))
+
+
+def _top_candidate_benchmark_sources(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        source = str(row.get("benchmark_source") or "unknown")
+        counts[source] = counts.get(source, 0) + 1
+    return [{"source": source, "count": count} for source, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))]
+
+
+def _candidate_observation_returns(
+    session: Any,
+    schema: Any,
+    recommendation_rows: list[dict[str, Any]],
+    *,
+    holding_days: int,
+) -> dict[tuple[str, date | None], dict[str, Any]]:
+    signals = [
+        (str(row.get("vt_symbol") or ""), _as_date(row.get("trade_date")))
+        for row in recommendation_rows
+        if row.get("vt_symbol") and _as_date(row.get("trade_date"))
+    ]
+    if not signals:
+        return {}
+    symbols = sorted({symbol for symbol, _signal_date in signals if symbol})
+    signal_dates = [signal_date for _symbol, signal_date in signals if signal_date is not None]
+    if not symbols or not signal_dates:
+        return {}
+    rows = session.execute(
+        select(
+            schema.stock_daily_bars.c.vt_symbol,
+            schema.stock_daily_bars.c.trade_date,
+            schema.stock_daily_bars.c.open_price,
+            schema.stock_daily_bars.c.close_price,
+        )
+        .where(schema.stock_daily_bars.c.vt_symbol.in_(symbols))
+        .where(schema.stock_daily_bars.c.trade_date > min(signal_dates))
+        .where(schema.stock_daily_bars.c.trade_date <= max(signal_dates) + timedelta(days=holding_days * 3 + 20))
+        .order_by(schema.stock_daily_bars.c.vt_symbol, schema.stock_daily_bars.c.trade_date)
+    ).mappings().all()
+    bars_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    dates_by_symbol: dict[str, list[date]] = {}
+    for row in rows:
+        symbol = str(row["vt_symbol"])
+        bar = dict(row)
+        bars_by_symbol.setdefault(symbol, []).append(bar)
+        dates_by_symbol.setdefault(symbol, []).append(bar["trade_date"])
+    result: dict[tuple[str, date | None], dict[str, Any]] = {}
+    for symbol, signal_date in signals:
+        bars = bars_by_symbol.get(symbol) or []
+        dates = dates_by_symbol.get(symbol) or []
+        key = (symbol, signal_date)
+        if not bars or signal_date is None:
+            result[key] = {"status": "missing_bar"}
+            continue
+        entry_index = bisect_right(dates, signal_date)
+        exit_index = entry_index + max(int(holding_days or 20), 1) - 1
+        if entry_index >= len(bars):
+            result[key] = {"status": "missing_entry_bar"}
+            continue
+        if exit_index >= len(bars):
+            result[key] = {
+                "status": "missing_exit_bar",
+                "entry_date": bars[entry_index].get("trade_date"),
+                "entry_price": _safe_float(bars[entry_index].get("open_price")),
+            }
+            continue
+        entry_bar = bars[entry_index]
+        exit_bar = bars[exit_index]
+        entry_price = _safe_float(entry_bar.get("open_price"))
+        exit_price = _safe_float(exit_bar.get("close_price"))
+        result[key] = {
+            "status": "ready" if entry_price and exit_price else "missing_price",
+            "entry_date": entry_bar.get("trade_date"),
+            "exit_date": exit_bar.get("trade_date"),
+            "entry_price": entry_price,
+            "exit_price": exit_price,
+            "return_pct": (exit_price / entry_price - 1) * 100 if entry_price and exit_price else None,
+        }
     return result
 
 
