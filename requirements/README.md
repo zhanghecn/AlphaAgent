@@ -12,6 +12,7 @@
 - `alphaagent_quant_backtest_portfolio_plan.md`: 量化选股、回测与持仓模块执行计划，说明洗盘/试探代理信号、弱市抗跌、财报改善、MA5 低吸、真实回测和持仓分组。
 - `alphaagent_pullback_low_suction_strategy_research.md`: 回踩低吸/龙回头策略优化研究，审计六只样本股、现有策略缺陷、游资打法量化映射和新状态机方案。
 - `alphaagent_dragon_pullback_implementation_plan.md`: `mainline_dragon_pullback` 第一版实现计划，说明新增策略、卖出逻辑、测试和验证范围。
+- `alphaagent_strategy_drawdown_optimization_plan.md`: 下一阶段回撤、卖出和候选排序优化计划，要求先补 MAE/MFE/卖后反弹诊断，再做全局回测验证后决定是否保留策略改动。
 
 ## 维护规则
 

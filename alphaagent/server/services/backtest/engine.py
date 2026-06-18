@@ -927,6 +927,58 @@ def backtest_trade_attribution(backtest_id: int, limit: int = 500, offset: int =
     )
 
 
+def backtest_path_diagnostics(
+    backtest_id: int,
+    vt_symbol: str | None = None,
+    lookahead_days: int = 10,
+    limit: int = 500,
+) -> dict[str, Any]:
+    return queries.backtest_path_diagnostics(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=_ensure_backtest_schema,
+        load_stock_names=_load_stock_names,
+        symbols_from_rows=_symbols_from_rows,
+        with_stock_names=_with_stock_names,
+        to_api=_mapping_to_api,
+        backtest_id=backtest_id,
+        vt_symbol=vt_symbol,
+        lookahead_days=lookahead_days,
+        limit=limit,
+    )
+
+
+def backtest_low_suction_start_factor_audit(backtest_id: int, lookahead_days: int = 10) -> dict[str, Any]:
+    return queries.backtest_low_suction_start_factor_audit(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=_ensure_backtest_schema,
+        load_stock_names=_load_stock_names,
+        symbols_from_rows=_symbols_from_rows,
+        with_stock_names=_with_stock_names,
+        to_api=_mapping_to_api,
+        backtest_id=backtest_id,
+        lookahead_days=lookahead_days,
+    )
+
+
+def backtest_top_candidate_audit(backtest_id: int, top_n: int = 10) -> dict[str, Any]:
+    return queries.backtest_top_candidate_audit(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=_ensure_backtest_schema,
+        load_stock_names=_load_stock_names,
+        symbols_from_rows=_symbols_from_rows,
+        with_stock_names=_with_stock_names,
+        to_api=_mapping_to_api,
+        backtest_id=backtest_id,
+        top_n=top_n,
+    )
+
+
 def backtest_drilldown_options(backtest_id: int) -> dict[str, Any]:
     """Return complete date and symbol choices for backtest drilldown."""
 
@@ -2452,12 +2504,15 @@ def _robustness_checks(
     sample_benchmark_curve: list[dict[str, Any]],
 ) -> dict[str, Any]:
     yearly = _calendar_period_analysis(equity, closed_trades, sample_benchmark_curve)
+    regime = _regime_analysis(equity, closed_trades, sample_benchmark_curve)
     cost_stress = _cost_stress_tests(metrics, trades)
     random_baseline = _random_equal_weight_baseline(sample_bars)
-    diagnostics = _robustness_diagnostics(metrics, yearly, cost_stress, random_baseline, sample_benchmark_curve)
+    diagnostics = _robustness_diagnostics(metrics, yearly, regime, cost_stress, random_baseline, sample_benchmark_curve)
     return {
         "status": "ready",
         "yearly_periods": yearly,
+        "market_regime_periods": regime.get("periods") or [],
+        "market_regime_analysis": regime,
         "cost_stress": cost_stress,
         "random_baseline": random_baseline,
         "diagnostics": diagnostics,
@@ -2567,6 +2622,7 @@ def _random_equal_weight_baseline(sample_bars: list[dict[str, Any]], *, seeds: i
 def _robustness_diagnostics(
     metrics: dict[str, Any],
     yearly: list[dict[str, Any]],
+    regime_analysis: dict[str, Any],
     cost_stress: list[dict[str, Any]],
     random_baseline: dict[str, Any],
     sample_benchmark_curve: list[dict[str, Any]],
@@ -2576,6 +2632,10 @@ def _robustness_diagnostics(
     random_avg = random_baseline.get("return_avg_pct")
     high_friction = next((row for row in cost_stress if row["id"] == "high_friction"), None)
     positive_years = [row for row in yearly if float(row.get("return_pct") or 0) > 0]
+    positive_regimes = [row for row in regime_analysis.get("periods") or [] if float(row.get("avg_strategy_return_pct") or 0) > 0]
+    weak_regime = next((row for row in regime_analysis.get("periods") or [] if row.get("regime") == "weak"), None)
+    year_concentration = _dominant_period_share(yearly, value_key="return_pct")
+    regime_concentration = _dominant_period_share(regime_analysis.get("periods") or [], value_key="avg_strategy_return_pct")
 
     result = [
         {
@@ -2607,8 +2667,80 @@ def _robustness_diagnostics(
             "value_type": "count",
             "message": "当前覆盖年度均为正收益" if yearly and len(positive_years) == len(yearly) else "年度覆盖不足或存在负收益年度。",
         },
+        {
+            "id": "year_return_concentration",
+            "label": "年度收益集中度",
+            "status": (
+                "pass"
+                if year_concentration is not None and year_concentration <= 70
+                else "warning"
+            ),
+            "value": year_concentration,
+            "value_type": "pct",
+            "message": (
+                "收益未明显集中在单一年份。"
+                if year_concentration is not None and year_concentration <= 70
+                else "收益可能集中在单一年份，需要用更长历史验证。"
+            ),
+        },
+        {
+            "id": "market_regime_positive",
+            "label": "市场环境适用性",
+            "status": (
+                "pass"
+                if regime_analysis.get("periods") and len(positive_regimes) == len(regime_analysis.get("periods") or [])
+                else "warning"
+            ),
+            "value": len(positive_regimes),
+            "value_type": "count",
+            "message": (
+                "当前样本强势、震荡、弱势环境均为正收益。"
+                if regime_analysis.get("periods") and len(positive_regimes) == len(regime_analysis.get("periods") or [])
+                else "存在市场环境分段收益不佳或样本不足，不能证明牛熊都适用。"
+            ),
+        },
+        {
+            "id": "weak_market_usability",
+            "label": "弱市可用性",
+            "status": (
+                "pass"
+                if weak_regime and float(weak_regime.get("avg_strategy_return_pct") or 0) > 0
+                else "warning"
+            ),
+            "value": weak_regime.get("avg_strategy_return_pct") if weak_regime else None,
+            "value_type": "pct",
+            "message": (
+                "弱势样本窗口仍保持正收益。"
+                if weak_regime and float(weak_regime.get("avg_strategy_return_pct") or 0) > 0
+                else "弱势窗口缺失或收益不佳，弱市胜率仍需重点优化。"
+            ),
+        },
+        {
+            "id": "market_regime_return_concentration",
+            "label": "行情收益集中度",
+            "status": (
+                "pass"
+                if regime_concentration is not None and regime_concentration <= 70
+                else "warning"
+            ),
+            "value": regime_concentration,
+            "value_type": "pct",
+            "message": (
+                "收益未明显集中在单一市场环境。"
+                if regime_concentration is not None and regime_concentration <= 70
+                else "收益可能集中在单一市场环境，需谨慎外推。"
+            ),
+        },
     ]
     return result
+
+
+def _dominant_period_share(rows: list[dict[str, Any]], *, value_key: str) -> float | None:
+    positive_values = [max(float(row.get(value_key) or 0), 0.0) for row in rows]
+    total = sum(positive_values)
+    if not positive_values or total <= 0:
+        return None
+    return max(positive_values) / total * 100
 
 
 def _run_validation_grid(

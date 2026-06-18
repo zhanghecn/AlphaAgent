@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from alphaagent.server.services.backtest import engine as backtest_engine
@@ -63,6 +63,147 @@ def symbol_diagnostics_report(
         else None,
         "summary": summary,
     }
+
+
+def display_candidate_markers(rows: list[dict[str, Any]], *, cluster_days: int = 3) -> list[dict[str, Any]]:
+    """Select user-facing candidate markers from dense daily signal rows.
+
+    Quant rows are evidence, not all chart markers. BUY rows are collapsed into
+    short clusters so a low-suction buildup followed by launch becomes one key
+    point. Raw buy rows that failed rules are kept as rejected-buy markers.
+    """
+
+    selected: list[dict[str, Any]] = []
+    buy_cluster: list[dict[str, Any]] = []
+    buy_cluster_start: date | None = None
+    max_cluster_days = max(int(cluster_days), 0)
+
+    def flush_buy_cluster() -> None:
+        nonlocal buy_cluster, buy_cluster_start
+        if not buy_cluster:
+            return
+        selected.append(_candidate_cluster_marker(buy_cluster))
+        buy_cluster = []
+        buy_cluster_start = None
+
+    for row in sorted((dict(item) for item in rows), key=_candidate_marker_sort_key):
+        row_date = _candidate_row_date(row)
+        if _is_actual_trade_or_sell_marker(row):
+            flush_buy_cluster()
+            selected.append(_with_display_kind(row, _existing_display_kind(row) or "trade"))
+            continue
+        if _is_display_buy_row(row):
+            if buy_cluster_start is None:
+                buy_cluster_start = row_date
+            if row_date is not None and buy_cluster_start is not None and (row_date - buy_cluster_start).days > max_cluster_days:
+                flush_buy_cluster()
+                buy_cluster_start = row_date
+            buy_cluster.append(row)
+            continue
+        if _is_display_rejected_buy_row(row):
+            flush_buy_cluster()
+            selected.append(_with_display_kind(row, "rejected_buy"))
+            continue
+    flush_buy_cluster()
+    return sorted(selected, key=_candidate_marker_sort_key)
+
+
+def _candidate_cluster_marker(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    best = max(rows, key=lambda row: (_candidate_score(row), _candidate_date_text(row), str(row.get("vt_symbol") or "")))
+    dates = [_candidate_date_text(row) for row in rows if _candidate_date_text(row)]
+    marker = _with_display_kind(best, "buy")
+    marker["cluster_size"] = len(rows)
+    marker["cluster_start_date"] = dates[0] if dates else None
+    marker["cluster_end_date"] = dates[-1] if dates else None
+    marker["cluster_dates"] = dates
+    return marker
+
+
+def _is_display_buy_row(row: dict[str, Any]) -> bool:
+    return str(row.get("action") or "").upper() == "BUY" or bool(row.get("executable_entry_signal"))
+
+
+def _is_display_rejected_buy_row(row: dict[str, Any]) -> bool:
+    if str(row.get("action") or "").upper() != "WATCH":
+        return False
+    if not _candidate_failed_rules(row):
+        return False
+    raw_entry_signal = row.get("raw_entry_signal")
+    return bool(row.get("entry_signal")) or bool(raw_entry_signal) or raw_entry_signal is None
+
+
+def _is_actual_trade_or_sell_marker(row: dict[str, Any]) -> bool:
+    marker_kind = str(row.get("markerKind") or row.get("marker_kind") or "").lower()
+    side = str(row.get("side") or "").upper()
+    if marker_kind == "trade":
+        return True
+    if marker_kind == "rejected" and side == "BUY":
+        return True
+    return side == "SELL" and marker_kind in {"trade", "execution", "sell"}
+
+
+def _existing_display_kind(row: dict[str, Any]) -> str | None:
+    value = row.get("display_kind")
+    return str(value) if value not in (None, "") else None
+
+
+def _with_display_kind(row: dict[str, Any], display_kind: str) -> dict[str, Any]:
+    marker = dict(row)
+    marker["display_kind"] = display_kind
+    return marker
+
+
+def _candidate_failed_rules(row: dict[str, Any]) -> list[str]:
+    failed_rules = row.get("failed_rules")
+    if isinstance(failed_rules, list):
+        return [str(rule) for rule in failed_rules if str(rule)]
+    evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+    evidence_rules = evidence.get("failed_rules") if isinstance(evidence, dict) else None
+    if isinstance(evidence_rules, list):
+        return [str(rule) for rule in evidence_rules if str(rule)]
+    return []
+
+
+def _candidate_marker_sort_key(row: dict[str, Any]) -> tuple[date, str, float]:
+    row_date = _candidate_row_date(row) or date.min
+    return (row_date, str(row.get("vt_symbol") or ""), -_candidate_score(row))
+
+
+def _candidate_row_date(row: dict[str, Any]) -> date | None:
+    for key in ("trade_date", "signal_date", "time", "execute_date"):
+        value = row.get(key)
+        parsed = _parse_candidate_date(value)
+        if parsed:
+            return parsed
+    return None
+
+
+def _candidate_date_text(row: dict[str, Any]) -> str:
+    value = row.get("trade_date") or row.get("signal_date") or row.get("time") or row.get("execute_date")
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value or "")
+
+
+def _parse_candidate_date(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def _candidate_score(row: dict[str, Any]) -> float:
+    value = row.get("total_score", row.get("score"))
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _diagnostic_status(

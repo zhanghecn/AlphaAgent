@@ -663,6 +663,36 @@ export interface BacktestTradeAttributionResult {
   note?: string | null;
 }
 
+export interface BacktestPathDiagnosticRow extends StockIdentityFields {
+  vt_symbol: string;
+  name?: string | null;
+  entry_date?: string | null;
+  exit_date?: string | null;
+  entry_setup?: string | null;
+  entry_score?: number | null;
+  return_pct?: number | null;
+  mae_pct?: number | null;
+  mfe_pct?: number | null;
+  post_exit_max_return_pct?: number | null;
+  sold_before_rebound?: boolean | null;
+  exit_reason?: string | null;
+}
+
+export interface BacktestPathDiagnosticsResponse {
+  status: string;
+  backtest_id: number;
+  start_date?: string;
+  end_date?: string;
+  lookahead_days: number;
+  items: BacktestPathDiagnosticRow[];
+  summary?: Record<string, unknown>;
+  limit?: number;
+  total?: number;
+  returned_count?: number;
+  has_more?: boolean;
+  note?: string | null;
+}
+
 export interface BacktestAuditEvent extends StockIdentityFields {
   event_type: "order" | "trade" | string;
   trade_date: string;
@@ -991,6 +1021,8 @@ export interface BacktestRandomBaseline {
 export interface BacktestRobustnessChecks {
   status: string;
   yearly_periods: BacktestPeriodRow[];
+  market_regime_periods?: BacktestRegimeRow[];
+  market_regime_analysis?: BacktestRegimeAnalysis;
   cost_stress: BacktestCostStressRow[];
   random_baseline: BacktestRandomBaseline;
   diagnostics: BacktestRobustnessDiagnostic[];
@@ -1650,6 +1682,11 @@ export interface SymbolQuantSignalRow extends StockIdentityFields {
   signal_label?: string | null;
   signal_role?: string | null;
   key_entry_signal?: boolean | null;
+  display_kind?: "buy" | "rejected_buy" | "trade" | string | null;
+  cluster_size?: number | null;
+  cluster_start_date?: string | null;
+  cluster_end_date?: string | null;
+  cluster_dates?: string[];
   risk_level?: string | null;
   evidence?: Record<string, unknown> | null;
 }
@@ -1691,6 +1728,7 @@ export interface SymbolLatestQuantState extends StockIdentityFields {
     latest_entry_signal?: SymbolQuantSignalRow | null;
     best_total_score?: SymbolQuantSignalRow | null;
     recent?: SymbolQuantSignalRow[];
+    display_markers?: SymbolQuantSignalRow[];
   };
   candidate?: {
     status?: string;
@@ -2031,6 +2069,12 @@ export function fetchBacktestTradeAttribution(backtestId: number, params: {
     sort: params.sort ?? "pnl_asc",
   });
   return apiClient.get<BacktestTradeAttributionResult>(`/backtests/${backtestId}/trade-attribution?${search.toString()}`);
+}
+
+export function fetchBacktestPathDiagnostics(backtestId: number, vtSymbol?: string): Promise<BacktestPathDiagnosticsResponse> {
+  const search = new URLSearchParams({ limit: "500", lookahead_days: "10" });
+  if (vtSymbol) search.set("vt_symbol", vtSymbol);
+  return apiClient.get<BacktestPathDiagnosticsResponse>(`/backtests/${backtestId}/path-diagnostics?${search.toString()}`);
 }
 
 export function fetchBacktestDayDetail(backtestId: number, tradeDate: string) {

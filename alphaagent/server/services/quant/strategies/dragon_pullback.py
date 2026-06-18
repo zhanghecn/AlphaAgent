@@ -69,7 +69,18 @@ class DragonFeatures:
     body_pct: float | None
     large_bull_count_20d: int
     near_limit_up_count_20d: int
+    consecutive_bull_closes: int
+    upward_gap_in_leg: bool
+    persistent_volume_expansion: bool
     latest_change_pct: float | None
+    weekly_top_fractal_risk: bool
+    spiky_churn_risk: bool
+    volume_stall_risk: bool
+    high_position_volume_stall_risk: bool
+    key_support_break_risk: bool
+    illiquid_forgotten_risk: bool
+    high_level_sideways_days: int
+    high_level_sideways_distribution_risk: bool
 
 
 def score_dragon_pullback(
@@ -308,7 +319,18 @@ def _build_features(bars: list[Bar]) -> DragonFeatures:
         near_limit_up_count_20d=sum(
             1 for index in range(max(len(bars) - 20, 0), len(bars)) if (_bar_change_pct(bars, index, derived_changes) or 0) >= 9.5
         ),
+        consecutive_bull_closes=_consecutive_bull_closes(bars),
+        upward_gap_in_leg=_has_upward_gap_in_leg(bars),
+        persistent_volume_expansion=_has_persistent_volume_expansion(bars),
         latest_change_pct=latest_change,
+        weekly_top_fractal_risk=_is_weekly_top_fractal_risk(bars),
+        spiky_churn_risk=_is_spiky_churn_risk(bars, derived_changes),
+        volume_stall_risk=_is_volume_stall_risk(closes, volumes, turnovers),
+        high_position_volume_stall_risk=_is_high_position_volume_stall_risk(closes, volumes, turnovers),
+        key_support_break_risk=_is_key_support_break_risk(latest.close_price, ma20, ma30),
+        illiquid_forgotten_risk=_is_illiquid_forgotten_risk(volumes, turnovers),
+        high_level_sideways_days=_high_level_sideways_days(closes),
+        high_level_sideways_distribution_risk=_is_high_level_sideways_distribution_risk(closes, volumes, turnovers),
     )
 
 
@@ -501,6 +523,8 @@ def _is_executable_low_suction_buildup(
         "liquidity_score",
         "risk_score",
         "overheat",
+        "key_support_break_risk",
+        "volume_stall_risk",
     }
     return not any(rule in hard_failures for rule in failed_rules)
 
@@ -604,6 +628,8 @@ def _is_stealth_low_suction_setup(
         "liquidity_score",
         "risk_score",
         "overheat",
+        "key_support_break_risk",
+        "volume_stall_risk",
     }
     return not any(rule in hard_failures for rule in failed_rules)
 
@@ -675,6 +701,27 @@ def _risk_penalty(features: DragonFeatures) -> tuple[float, list[str]]:
     if _is_distribution_risk(features):
         flags.append("distribution_risk")
         penalty += 35.0
+    if features.weekly_top_fractal_risk:
+        flags.append("weekly_top_fractal_risk")
+        penalty += 4.0
+    if features.spiky_churn_risk:
+        flags.append("spiky_churn_risk")
+        penalty += 6.0
+    if features.volume_stall_risk:
+        flags.append("volume_stall_risk")
+        penalty += 16.0
+    if features.high_position_volume_stall_risk:
+        flags.append("high_position_volume_stall_risk")
+        penalty += 6.0
+    if features.key_support_break_risk:
+        flags.append("key_support_break_risk")
+        penalty += 18.0
+    if features.illiquid_forgotten_risk:
+        flags.append("illiquid_forgotten_risk")
+        penalty += 4.0
+    if features.high_level_sideways_distribution_risk:
+        flags.append("high_level_sideways_distribution_risk")
+        penalty += 6.0
     if _is_weak_rebound_after_breakdown(features):
         flags.append("weak_rebound_ma5_below_ma10")
         penalty += 28.0
@@ -697,7 +744,19 @@ def _failed_rules(
     liquidity: float,
     risk: float,
 ) -> list[str]:
-    failed = list(risk_flags)
+    failed = [
+        flag
+        for flag in risk_flags
+        if flag
+        in {
+            "distribution_risk",
+            "weak_rebound_ma5_below_ma10",
+            "pullback_too_deep",
+            "ma20_broken",
+            "key_support_break_risk",
+            "volume_stall_risk",
+        }
+    ]
     if strong_leg < 55:
         failed.append("strong_leg")
     if pullback < 55:
@@ -712,6 +771,10 @@ def _failed_rules(
         failed.append("pullback_too_late")
     if _is_wide_ma_without_low_suction(features):
         failed.append("ma_convergence_too_wide_without_low_suction")
+    if features.key_support_break_risk and "key_support_break_risk" not in failed:
+        failed.append("key_support_break_risk")
+    if features.volume_stall_risk and "volume_stall_risk" not in failed:
+        failed.append("volume_stall_risk")
     if liquidity < 25:
         failed.append("liquidity_score")
     if risk < 35:
@@ -866,6 +929,23 @@ def _evidence(
     dragon_total: float,
     stealth_total: float,
 ) -> dict[str, object]:
+    recent_limit_up = features.near_limit_up_count_20d >= 1
+    consecutive_bull = features.consecutive_bull_closes >= 4
+    factor_count = sum(
+        (
+            recent_limit_up,
+            consecutive_bull,
+            features.upward_gap_in_leg,
+            features.persistent_volume_expansion,
+        )
+    )
+    weak_index_strength = bool(
+        index_return_20d is not None
+        and index_return_20d <= 0
+        and consecutive_bull
+        and features.return_20d is not None
+        and features.return_20d > 0
+    )
     return {
         "status": "ready",
         "return_5d": features.return_5d,
@@ -903,7 +983,21 @@ def _evidence(
         "body_pct": features.body_pct,
         "large_bull_count_20d": features.large_bull_count_20d,
         "near_limit_up_count_20d": features.near_limit_up_count_20d,
+        "recent_limit_up_20d": recent_limit_up,
+        "consecutive_bull_closes": features.consecutive_bull_closes,
+        "upward_gap_in_leg": features.upward_gap_in_leg,
+        "persistent_volume_expansion": features.persistent_volume_expansion,
+        "limit_up_start_factor_count": factor_count,
+        "weak_index_strength_confirmation": weak_index_strength,
         "latest_change_pct": features.latest_change_pct,
+        "weekly_top_fractal_risk": features.weekly_top_fractal_risk,
+        "spiky_churn_risk": features.spiky_churn_risk,
+        "volume_stall_risk": features.volume_stall_risk,
+        "high_position_volume_stall_risk": features.high_position_volume_stall_risk,
+        "key_support_break_risk": features.key_support_break_risk,
+        "illiquid_forgotten_risk": features.illiquid_forgotten_risk,
+        "high_level_sideways_days": features.high_level_sideways_days,
+        "high_level_sideways_distribution_risk": features.high_level_sideways_distribution_risk,
         "strong_leg_score": strong_leg,
         "pullback_structure_score": pullback,
         "support_acceptance_score": support,
@@ -1158,6 +1252,223 @@ def _support_hold_days(bars: list[Bar], lookback: int = 6) -> int:
         if ma10_distance is not None and ma20_distance is not None and ma10_distance >= -3.2 and ma20_distance >= -3.5:
             days += 1
     return days
+
+
+def _consecutive_bull_closes(bars: list[Bar], lookback: int = 8) -> int:
+    count = 0
+    start = max(len(bars) - lookback, 0)
+    for index in range(len(bars) - 1, start - 1, -1):
+        bar = bars[index]
+        previous_close = bars[index - 1].close_price if index > 0 else None
+        close_to_close_up = previous_close is not None and bar.close_price > previous_close
+        close_above_open = bar.close_price > bar.open_price
+        if close_above_open or close_to_close_up:
+            count += 1
+            continue
+        break
+    return count
+
+
+def _has_upward_gap_in_leg(bars: list[Bar], lookback: int = 20) -> bool:
+    start = max(len(bars) - lookback, 1)
+    for index in range(start, len(bars)):
+        previous_close = bars[index - 1].close_price
+        if previous_close <= 0:
+            continue
+        bar = bars[index]
+        gap_pct = (bar.open_price / previous_close - 1) * 100
+        invalidated = bar.low_price < previous_close * 0.995 and bar.close_price <= previous_close
+        if gap_pct >= 1.5 and not invalidated:
+            return True
+    return False
+
+
+def _has_persistent_volume_expansion(bars: list[Bar], lookback: int = 20) -> bool:
+    if len(bars) < 25:
+        return False
+    start = max(len(bars) - lookback, 0)
+    strong_days = 0
+    broad_days = 0
+    for index in range(start, len(bars)):
+        baseline = moving_average([bar.volume or 0 for bar in bars[:index]], 20)
+        volume = bars[index].volume or 0
+        if not baseline or baseline <= 0:
+            continue
+        ratio = volume / baseline
+        if ratio >= 1.8:
+            strong_days += 1
+        if ratio >= 1.4:
+            broad_days += 1
+    return strong_days >= 2 or broad_days >= 3
+
+
+def _is_weekly_top_fractal_risk(bars: list[Bar]) -> bool:
+    if len(bars) < 45:
+        return False
+    weekly = _weekly_bars(bars)
+    if len(weekly) < 5:
+        return False
+    left, middle, right = weekly[-3], weekly[-2], weekly[-1]
+    top_fractal = middle.high_price > left.high_price and middle.high_price > right.high_price
+    reversal = right.close_price < middle.close_price and right.high_price <= middle.high_price * 1.01
+    high_location = _series_location([bar.close_price for bar in bars], bars[-1].close_price, 60)
+    return bool(top_fractal and reversal and high_location is not None and high_location >= 0.68)
+
+
+def _weekly_bars(bars: list[Bar]) -> list[Bar]:
+    result: list[Bar] = []
+    for start in range(0, len(bars), 5):
+        chunk = bars[start : start + 5]
+        if not chunk:
+            continue
+        result.append(
+            Bar(
+                trade_date=chunk[-1].trade_date,
+                open_price=chunk[0].open_price,
+                high_price=max(bar.high_price for bar in chunk),
+                low_price=min(bar.low_price for bar in chunk),
+                close_price=chunk[-1].close_price,
+                volume=sum(bar.volume or 0 for bar in chunk),
+                turnover=sum(daily_turnover_yuan(bar) for bar in chunk),
+                change_pct=None,
+            )
+        )
+    return result
+
+
+def _is_spiky_churn_risk(bars: list[Bar], derived_changes: list[float | None]) -> bool:
+    recent = bars[-20:]
+    recent_changes = derived_changes[-20:]
+    if len(recent) < 12:
+        return False
+    long_range_days = sum(1 for bar in recent if _daily_range_pct(bar) >= 12.0)
+    large_move_days = sum(1 for value in recent_changes if value is not None and abs(value) >= 4.0)
+    alternating_days = 0
+    for left, right in zip(recent_changes, recent_changes[1:]):
+        if left is None or right is None:
+            continue
+        if abs(left) >= 3.5 and abs(right) >= 3.5 and left * right < 0:
+            alternating_days += 1
+    return bool(long_range_days >= 6 and large_move_days >= 8 and alternating_days >= 5)
+
+
+def _is_volume_stall_risk(closes: list[float], volumes: list[float], turnovers: list[float]) -> bool:
+    high_location = _series_location(closes, closes[-1], 60)
+    volume_ratio = _recent_ratio(volumes, 5, 20)
+    turnover_ratio = _recent_ratio(turnovers, 5, 20)
+    return_5d = period_return(closes, 5)
+    return bool(
+        high_location is not None
+        and high_location >= 0.68
+        and ((volume_ratio is not None and volume_ratio >= 1.8) or (turnover_ratio is not None and turnover_ratio >= 1.8))
+        and return_5d is not None
+        and return_5d <= 2.0
+    )
+
+
+def _is_high_position_volume_stall_risk(closes: list[float], volumes: list[float], turnovers: list[float]) -> bool:
+    high_location = _series_location(closes, closes[-1], 60)
+    volume_ratio = _recent_ratio(volumes, 5, 20)
+    turnover_ratio = _recent_ratio(turnovers, 5, 20)
+    return_20d = period_return(closes, 20)
+    return bool(
+        high_location is not None
+        and high_location >= 0.70
+        and ((volume_ratio is not None and volume_ratio >= 1.35) or (turnover_ratio is not None and turnover_ratio >= 1.35))
+        and return_20d is not None
+        and -6.0 <= return_20d <= 8.0
+    )
+
+
+def _is_key_support_break_risk(close: float, ma20: float | None, ma30: float | None) -> bool:
+    ma20_break = ma20 is not None and close < ma20 * 0.965
+    ma30_break = ma30 is not None and close < ma30 * 0.970
+    return bool(ma20_break or ma30_break)
+
+
+def _is_illiquid_forgotten_risk(volumes: list[float], turnovers: list[float]) -> bool:
+    if len(volumes) < 60 or len(turnovers) < 60:
+        return False
+    volume5 = moving_average(volumes, 5)
+    volume60 = moving_average(volumes, 60)
+    turnover5 = moving_average(turnovers, 5)
+    turnover60 = moving_average(turnovers, 60)
+    turnover_recent = turnover5 or 0
+    volume_ratio = volume5 / volume60 if volume5 is not None and volume60 else None
+    turnover_ratio = turnover5 / turnover60 if turnover5 is not None and turnover60 else None
+    return bool(
+        turnover_recent < 30_000_000
+        or (
+            volume_ratio is not None
+            and turnover_ratio is not None
+            and volume_ratio <= 0.16
+            and turnover_ratio <= 0.16
+        )
+    )
+
+
+def _high_level_sideways_days(closes: list[float], lookback: int = 20) -> int:
+    if len(closes) < 60:
+        return 0
+    recent = closes[-lookback:]
+    recent_mid = sum(recent) / len(recent)
+    high_location = _series_location(closes, recent_mid, 60)
+    if high_location is None or high_location < 0.64:
+        return 0
+    high = max(recent)
+    low = min(recent)
+    base = sum(recent) / len(recent)
+    if base <= 0:
+        return 0
+    range_width = (high / low - 1) * 100 if low > 0 else 999.0
+    range_return = (recent[-1] / recent[0] - 1) * 100 if recent[0] > 0 else None
+    if range_width <= 12.0 and range_return is not None and -6.5 <= range_return <= 8.5:
+        return len(recent)
+    return 0
+
+
+def _is_high_level_sideways_distribution_risk(closes: list[float], volumes: list[float], turnovers: list[float]) -> bool:
+    days = _high_level_sideways_days(closes)
+    if days < 15:
+        return False
+    volume_ratio = _recent_ratio(volumes, 5, 20)
+    turnover_ratio = _recent_ratio(turnovers, 5, 20)
+    sustained_volume_ratio = _recent_ratio(volumes, 20, 60)
+    sustained_turnover_ratio = _recent_ratio(turnovers, 20, 60)
+    return_5d = period_return(closes, 5)
+    stale_volume = (
+        (volume_ratio is not None and volume_ratio >= 1.25)
+        or (turnover_ratio is not None and turnover_ratio >= 1.25)
+        or (sustained_volume_ratio is not None and sustained_volume_ratio >= 1.35)
+        or (sustained_turnover_ratio is not None and sustained_turnover_ratio >= 1.35)
+    )
+    weak_progress = return_5d is not None and return_5d <= 1.5
+    return bool(stale_volume and weak_progress)
+
+
+def _series_location(values: list[float], latest: float, lookback: int) -> float | None:
+    recent = values[-lookback:]
+    if not recent:
+        return None
+    high = max(recent)
+    low = min(recent)
+    if high <= low:
+        return None
+    return (latest - low) / (high - low)
+
+
+def _recent_ratio(values: list[float], short: int, long: int) -> float | None:
+    short_ma = moving_average(values, short)
+    long_ma = moving_average(values, long)
+    if short_ma is None or long_ma is None or long_ma <= 0:
+        return None
+    return short_ma / long_ma
+
+
+def _daily_range_pct(bar: Bar) -> float:
+    if bar.close_price <= 0:
+        return 0.0
+    return (bar.high_price / bar.low_price - 1) * 100 if bar.low_price > 0 else 0.0
 
 
 def _close_location(bar: Bar) -> float | None:

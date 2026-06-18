@@ -4,6 +4,7 @@ import {
   fetchBacktestDailyDecisions,
   fetchBacktestDayDetail,
   fetchBacktestDrilldownOptions,
+  fetchBacktestPathDiagnostics,
   fetchBacktestReport,
   fetchBacktestSignalEvents,
   fetchBacktestSymbolDetail,
@@ -14,6 +15,7 @@ import {
   type BacktestDrilldownDateOption,
   type BacktestDrilldownSymbolOption,
   type BacktestOrderEvent,
+  type BacktestPathDiagnosticsResponse,
   type BacktestTrade,
   type BacktestTradeAttribution,
   type BacktestTradeAttributionSummary,
@@ -166,6 +168,12 @@ export function BacktestDrilldownPanel({
     enabled: Boolean(backtestId),
     staleTime: 30_000,
   });
+  const pathDiagnosticsQuery = useQuery({
+    queryKey: ["backtest-path-diagnostics", backtestId],
+    queryFn: () => fetchBacktestPathDiagnostics(backtestId),
+    enabled: Boolean(backtestId),
+    staleTime: 60_000,
+  });
 
   const day = dayQuery.data;
   const symbol = symbolQuery.data;
@@ -191,6 +199,7 @@ export function BacktestDrilldownPanel({
         onPageChange={setAttributionPage}
         onSelectSymbol={setSelectedSymbol}
       />
+      <PathDiagnosticsPanel diagnostics={pathDiagnosticsQuery.data} isLoading={pathDiagnosticsQuery.isFetching} onSelectSymbol={setSelectedSymbol} />
       <section className="rounded-lg border">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b px-3 py-2">
           <div className="text-sm font-medium">按日期查看</div>
@@ -466,6 +475,92 @@ function PortfolioAttributionTable({
   );
 }
 
+function PathDiagnosticsPanel({
+  diagnostics,
+  isLoading,
+  onSelectSymbol,
+}: {
+  diagnostics?: BacktestPathDiagnosticsResponse;
+  isLoading: boolean;
+  onSelectSymbol: (vtSymbol: string) => void;
+}) {
+  const rows = diagnostics?.items ?? [];
+  const summary = diagnostics?.summary ?? {};
+  const worstRows = [...rows]
+    .filter((row) => row.return_pct != null)
+    .sort((left, right) => (left.return_pct ?? 0) - (right.return_pct ?? 0))
+    .slice(0, 6);
+
+  return (
+    <div className="overflow-hidden rounded-lg border">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b px-3 py-2">
+        <div>
+          <div className="text-sm font-medium">买卖路径诊断</div>
+          <div className="mt-0.5 text-xs text-muted-foreground">
+            {diagnostics ? `卖出后观察 ${diagnostics.lookahead_days} 天` : "MAE/MFE 和卖飞复盘"}
+          </div>
+        </div>
+      </div>
+      {!diagnostics && isLoading ? (
+        <div className="p-3 text-sm text-muted-foreground">路径诊断加载中。</div>
+      ) : rows.length === 0 ? (
+        <div className="p-3 text-sm text-muted-foreground">暂无可诊断的闭仓路径。</div>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 gap-3 border-b p-3 md:grid-cols-5">
+            <InfoCell label="交易数" value={metricValue(summary.trade_count)} />
+            <InfoCell label="亏损数" value={metricValue(summary.loss_count)} />
+            <InfoCell label="卖飞数" value={metricValue(summary.sold_before_rebound_count)} />
+            <InfoCell label="平均MAE" value={formatPct(asNumber(summary.avg_mae_pct))} />
+            <InfoCell label="平均MFE" value={formatPct(asNumber(summary.avg_mfe_pct))} />
+          </div>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>股票</TableHead>
+                <TableHead>买入</TableHead>
+                <TableHead>卖出</TableHead>
+                <TableHead>入场</TableHead>
+                <TableHead className="text-right">收益</TableHead>
+                <TableHead className="text-right">MAE</TableHead>
+                <TableHead className="text-right">MFE</TableHead>
+                <TableHead className="text-right">卖后高点</TableHead>
+                <TableHead>卖出</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {worstRows.map((row) => (
+                <TableRow key={`${row.vt_symbol}-${row.entry_date}-${row.exit_date}`}>
+                  <TableCell>
+                    <div className="flex items-center justify-between gap-2">
+                      <StockIdentityLink name={row.name} vtSymbol={row.vt_symbol} board={row.board} boardLabel={row.board_label} />
+                      <button type="button" className="shrink-0 text-xs text-primary hover:underline" onClick={() => onSelectSymbol(row.vt_symbol)}>
+                        查看
+                      </button>
+                    </div>
+                  </TableCell>
+                  <TableCell className="tabular-nums">{row.entry_date ?? "--"}</TableCell>
+                  <TableCell className="tabular-nums">{row.exit_date ?? "--"}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">{entrySetupLabel(row.entry_setup)}</TableCell>
+                  <TableCell className={cn("text-right tabular-nums", priceColorClass(row.return_pct))}>{formatPct(row.return_pct)}</TableCell>
+                  <TableCell className={cn("text-right tabular-nums", priceColorClass(row.mae_pct))}>{formatPct(row.mae_pct)}</TableCell>
+                  <TableCell className={cn("text-right tabular-nums", priceColorClass(row.mfe_pct))}>{formatPct(row.mfe_pct)}</TableCell>
+                  <TableCell className={cn("text-right tabular-nums", priceColorClass(row.post_exit_max_return_pct))}>
+                    {formatPct(row.post_exit_max_return_pct)}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {row.sold_before_rebound ? "卖后反弹" : pathExitReasonLabel(row.exit_reason)}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </>
+      )}
+    </div>
+  );
+}
+
 function DailyDecisionSummaryPanel({ summary }: { summary?: BacktestDailyDecisionSummary }) {
   if (!summary) return null;
   const sourceDates = summary.source_signal_dates?.filter(Boolean).join("、") || "--";
@@ -660,6 +755,37 @@ function entryEvidenceLabel(row: BacktestTradeAttribution): string {
     row.ma_convergence_pct == null ? "" : `收敛 ${formatFixed(row.ma_convergence_pct, 1)}%`,
   ].filter(Boolean);
   return parts.length ? parts.join(" · ") : "--";
+}
+
+function entrySetupLabel(setup?: string | null): string {
+  const labels: Record<string, string> = {
+    dragon_pullback: "龙回头",
+    stealth_low_suction: "低吸洗盘",
+    ma5_pullback: "MA5回踩",
+  };
+  return setup ? labels[setup] ?? setup : "--";
+}
+
+function pathExitReasonLabel(reason?: string | null): string {
+  const labels: Record<string, string> = {
+    support_stop: "支撑止损",
+    profit_protection_stop: "利润保护",
+    trend_trailing_stop: "趋势回撤",
+    trend_break: "趋势破位",
+    time_efficiency_stop: "时间效率",
+    fragile_structure_stop: "脆弱结构",
+    rotation_for_stronger_signal: "换仓",
+    rotation_for_stealth_low_suction: "换入低吸",
+  };
+  return reason ? labels[reason] ?? reason : "--";
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function metricValue(value: unknown): string | number {
+  return typeof value === "number" && Number.isFinite(value) ? value : "--";
 }
 
 function formatFixed(value: number | null | undefined, digits = 1): string {

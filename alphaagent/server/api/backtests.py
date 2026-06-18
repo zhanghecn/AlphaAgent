@@ -24,9 +24,12 @@ from alphaagent.server.services.backtest.engine import (
     backtest_strategy_comparison,
     backtest_metrics,
     backtest_minute_coverage,
+    backtest_low_suction_start_factor_audit,
+    backtest_path_diagnostics,
     backtest_report,
     backtest_report_csv,
     backtest_symbol_detail,
+    backtest_top_candidate_audit,
     backtest_trade_attribution,
     backtest_trades,
     backtest_audit,
@@ -292,6 +295,45 @@ def get_trade_attribution(
 ):
     try:
         return ok(backtest_trade_attribution(backtest_id, limit=limit, offset=offset, sort=sort))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/{backtest_id}/path-diagnostics")
+def get_path_diagnostics(
+    backtest_id: int,
+    vt_symbol: str = Query(default=""),
+    lookahead_days: int = Query(default=10, ge=1, le=30),
+    limit: int = Query(default=500, ge=1, le=2000),
+):
+    try:
+        return ok(
+            backtest_path_diagnostics(
+                backtest_id,
+                vt_symbol=vt_symbol or None,
+                lookahead_days=lookahead_days,
+                limit=limit,
+            )
+        )
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/{backtest_id}/low-suction-start-factor-audit")
+def get_low_suction_start_factor_audit(
+    backtest_id: int,
+    lookahead_days: int = Query(default=10, ge=1, le=30),
+):
+    try:
+        return ok(backtest_low_suction_start_factor_audit(backtest_id, lookahead_days=lookahead_days))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/{backtest_id}/top-candidate-audit")
+def get_top_candidate_audit(backtest_id: int, top_n: int = Query(default=10, ge=1, le=100)):
+    try:
+        return ok(backtest_top_candidate_audit(backtest_id, top_n=top_n))
     except Exception as exc:
         return _service_error(exc)
 

@@ -702,9 +702,16 @@ def signal_events_for_day(
     return rows
 
 
-def sell_reason_for_position(position: Position, bar: Bar, current_day: date, params: BacktestParams) -> str | None:
+def sell_reason_for_position(
+    position: Position,
+    bar: Bar,
+    current_day: date,
+    params: BacktestParams,
+    *,
+    current_buy_signal: bool = False,
+) -> str | None:
     if params.strategy == DRAGON_PULLBACK_STRATEGY_ID:
-        return dragon_pullback_sell_reason(position, bar, current_day, params)
+        return dragon_pullback_sell_reason(position, bar, current_day, params, current_buy_signal=current_buy_signal)
     # Backtest derives absolute exit levels from params coefficients and the
     # position's cost/highest; realtime holdings instead read the stored price
     # levels directly. Both paths share factors.evaluate_exit as the single
@@ -720,7 +727,14 @@ def sell_reason_for_position(position: Position, bar: Bar, current_day: date, pa
     )
 
 
-def dragon_pullback_sell_reason(position: Position, bar: Bar, current_day: date, params: BacktestParams) -> str | None:
+def dragon_pullback_sell_reason(
+    position: Position,
+    bar: Bar,
+    current_day: date,
+    params: BacktestParams,
+    *,
+    current_buy_signal: bool = False,
+) -> str | None:
     """Trend-oriented exit for the dragon pullback strategy."""
 
     cost_price = position.cost_price
@@ -735,6 +749,12 @@ def dragon_pullback_sell_reason(position: Position, bar: Bar, current_day: date,
     fragile_entry = max_drawdown_60d is not None and max_drawdown_60d <= -25.0
     gain = bar.close_price / cost_price - 1 if cost_price else 0
     support_stop = entry_support * 0.965 if entry_support else None
+    hold_context = dragon_pullback_hold_context(position, bar)
+    hold_soft_exit = (
+        hold_context["low_base_accumulation"]
+        or (hold_context["ma_support_pullback"] and hold_context["price_volume_sync"])
+        or current_buy_signal
+    )
     if fragile_entry and gain < 0.04:
         if bar.close_price <= cost_price * 0.95:
             return "fragile_structure_stop"
@@ -756,10 +776,48 @@ def dragon_pullback_sell_reason(position: Position, bar: Bar, current_day: date,
     if gain >= 0.18 and drawdown_from_high <= -0.12:
         return "trend_trailing_stop"
     if ma10 is not None and gain > 0.08 and bar.close_price < ma10 * 0.98:
+        if hold_soft_exit and ma20 is not None and bar.close_price >= ma20 * 0.99:
+            return None
         return "trend_break"
     if (current_day - position.entry_date).days >= params.time_stop_days * 2 and gain < 0.04:
+        if hold_soft_exit:
+            return None
         return "time_efficiency_stop"
     return None
+
+
+def dragon_pullback_hold_context(position: Position, bar: Bar) -> dict[str, bool]:
+    reason = position.reason if isinstance(position.reason, dict) else {}
+    low_base_days = int(reason.get("low_base_days") or 0)
+    price_location = _float_or_none(reason.get("price_location_60d_pct"))
+    base_volatility = _float_or_none(reason.get("base_volatility_20d_pct"))
+    ma10 = _float_or_none(reason.get("ma10"))
+    ma20 = _float_or_none(reason.get("ma20"))
+    latest_change = _float_or_none(reason.get("latest_change_pct"))
+    volume_ratio = _float_or_none(reason.get("volume_ratio_5d_20d"))
+    return {
+        "low_base_accumulation": bool(
+            low_base_days >= 30
+            and price_location is not None
+            and price_location <= 35
+            and base_volatility is not None
+            and base_volatility <= 8
+            and ma20 is not None
+            and bar.close_price >= ma20 * 0.98
+        ),
+        "ma_support_pullback": bool(
+            ma10 is not None
+            and ma20 is not None
+            and bar.low_price <= ma10 * 1.02
+            and bar.close_price >= ma20 * 0.99
+        ),
+        "price_volume_sync": bool(
+            latest_change is not None
+            and latest_change >= 0
+            and volume_ratio is not None
+            and 0.9 <= volume_ratio <= 1.8
+        ),
+    }
 
 
 def bar_index_by_symbol(bars_by_symbol: dict[str, list[Bar]]) -> dict[str, dict[date, Bar]]:
