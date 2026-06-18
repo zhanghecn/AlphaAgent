@@ -135,6 +135,7 @@ AlphaAgent 当前普通产品入口只保留一个公开策略：`mainline_drago
 
 - `summary.dynamic_market_buckets`
 - `summary.theme_alignment_buckets`
+- `summary.dynamic_market_sources`
 - `summary.candidate_observation.dynamic_market_buckets`
 - `summary.candidate_observation.theme_alignment_buckets`
 - `items[].dynamic_market_source`

@@ -10867,6 +10867,7 @@ def test_top_candidate_bucket_summary_includes_dynamic_market_and_theme_alignmen
             "market_score": 66.0,
             "market_breadth_score": 41.0,
             "market_risk_score": 45.0,
+            "dynamic_market_source": "stock_daily_bars",
             "theme_strength": 82.0,
             "stock_theme_alignment": "leader_theme",
         },
@@ -10880,6 +10881,7 @@ def test_top_candidate_bucket_summary_includes_dynamic_market_and_theme_alignmen
             "market_score": 38.0,
             "market_breadth_score": 28.0,
             "market_risk_score": 72.0,
+            "dynamic_market_source": "benchmark_return_20d_proxy",
             "theme_strength": 48.0,
             "stock_theme_alignment": "isolated_candidate",
         },
@@ -10893,6 +10895,7 @@ def test_top_candidate_bucket_summary_includes_dynamic_market_and_theme_alignmen
             "market_score": 76.0,
             "market_breadth_score": 65.0,
             "market_risk_score": 35.0,
+            "dynamic_market_source": "stock_daily_bars",
             "theme_strength": 70.0,
             "stock_theme_alignment": "theme_related",
         },
@@ -10905,6 +10908,10 @@ def test_top_candidate_bucket_summary_includes_dynamic_market_and_theme_alignmen
     assert result["dynamic_market_buckets"][1]["win_rate"] == 0.0
     assert [row["alignment"] for row in result["theme_alignment_buckets"]] == ["leader_theme", "isolated_candidate"]
     assert result["theme_alignment_buckets"][0]["avg_theme_strength"] == 82.0
+    assert result["dynamic_market_sources"] == [
+        {"source": "benchmark_return_20d_proxy", "count": 1},
+        {"source": "stock_daily_bars", "count": 1},
+    ]
     assert [row["regime"] for row in result["candidate_observation"]["dynamic_market_buckets"]] == [
         "narrow_theme_bull",
         "weak_defensive",

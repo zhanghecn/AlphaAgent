@@ -901,6 +901,7 @@ def top_candidate_bucket_summary(rows: list[dict[str, Any]], top_n: int = 10) ->
         "top_excluding_strong_summary": _top_candidate_metric_summary(top_excluding_strong_rows),
         "top_strong_candidate_share": _ratio(len(top_strong_rows), len(top_rows)),
         "benchmark_sources": _top_candidate_benchmark_sources(top_rows),
+        "dynamic_market_sources": _top_candidate_dynamic_market_sources(top_rows),
         "candidate_observation": candidate_observation_summary(top_rows),
         "dynamic_market_buckets": market_context.summarize_contexts(
             top_rows,
@@ -1482,6 +1483,14 @@ def _top_candidate_benchmark_sources(rows: list[dict[str, Any]]) -> list[dict[st
     counts: dict[str, int] = {}
     for row in rows:
         source = str(row.get("benchmark_source") or "unknown")
+        counts[source] = counts.get(source, 0) + 1
+    return [{"source": source, "count": count} for source, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))]
+
+
+def _top_candidate_dynamic_market_sources(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        source = str(row.get("dynamic_market_source") or "unknown")
         counts[source] = counts.get(source, 0) + 1
     return [{"source": source, "count": count} for source, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))]
 

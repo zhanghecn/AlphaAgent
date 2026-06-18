@@ -232,7 +232,7 @@ export function BacktestMarketAuditPanel({
   const observation = summary?.candidate_observation;
   const observationExcludingStrong = observation?.excluding_strong_summary;
   const sourceText = formatBenchmarkSources(summary?.benchmark_sources);
-  const dynamicSourceText = formatDynamicMarketSource(topCandidateAudit?.items?.[0]?.dynamic_market_source);
+  const dynamicSourceText = formatDynamicMarketSources(summary?.dynamic_market_sources);
   const hasAnalysis = yearlyRows.length > 0 || Boolean(regimeAnalysis?.periods?.length) || Boolean(summary);
 
   if (!hasAnalysis && !isTopCandidateAuditLoading) return null;
@@ -944,6 +944,11 @@ function CandidateObservationMarketBucketTable({
 function formatBenchmarkSources(sources?: Array<{ source: string; count: number }>) {
   if (!sources?.length) return "";
   return sources.map((item) => `${benchmarkSourceLabel(item.source)} ${item.count}`).join("、");
+}
+
+function formatDynamicMarketSources(sources?: Array<{ source: string; count: number }>) {
+  if (!sources?.length) return "";
+  return sources.map((item) => `${formatDynamicMarketSource(item.source)} ${item.count}`).join("、");
 }
 
 function benchmarkSourceLabel(source: string) {

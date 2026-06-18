@@ -1069,6 +1069,7 @@ export interface BacktestTopCandidateSummary {
   top_excluding_strong_summary?: BacktestTopCandidateMetricSummary;
   top_strong_candidate_share?: number | null;
   benchmark_sources?: Array<{ source: string; count: number }>;
+  dynamic_market_sources?: Array<{ source: string; count: number }>;
   candidate_observation?: BacktestCandidateObservationSummary;
   dynamic_market_buckets?: BacktestDynamicMarketBucket[];
   theme_alignment_buckets?: BacktestThemeAlignmentBucket[];
