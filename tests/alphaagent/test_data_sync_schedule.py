@@ -26,7 +26,7 @@ def test_sync_batch_schedules_table_defined():
 
 def test_default_batch_schedules_defined():
     ids = {s["id"] for s in svc.DEFAULT_BATCH_SCHEDULES}
-    assert {"intraday_14h", "eod_18h"}.issubset(ids)
+    assert {"tail_prepare_14h", "tail_quant_1430", "eod_18h"}.issubset(ids)
 
 
 def test_default_jobs_have_no_cron():
@@ -36,14 +36,23 @@ def test_default_jobs_have_no_cron():
 
 
 def test_intraday_schedule_contains_intraday_jobs():
-    intraday = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "intraday_14h")
+    intraday = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "tail_prepare_14h")
+    assert intraday["action"] == "sync"
     assert "sync_stock_minute_bars" in intraday["job_ids"]
     # Daily bars are not available at 14:00, so they must NOT be in the intraday slot.
     assert "sync_stock_daily_bars" not in intraday["job_ids"]
 
 
+def test_tail_quant_schedule_triggers_quant_research():
+    tail_quant = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "tail_quant_1430")
+    assert tail_quant["action"] == "quant_research"
+    assert tail_quant["cron"] == "30 14 * * 1-5"
+    assert tail_quant["job_ids"] == []
+
+
 def test_eod_schedule_has_daily_bars_and_lhb_last():
     eod = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "eod_18h")
+    assert eod["action"] == "sync"
     assert "sync_stock_daily_bars" in eod["job_ids"]
     # LHB publishes after 18:00, so it must run after daily bars.
     assert eod["job_ids"].index("sync_stock_lhb_records") > eod["job_ids"].index("sync_stock_daily_bars")
@@ -263,7 +272,7 @@ def test_scheduler_triggers_matching_batch_schedule(monkeypatch):
     monkeypatch.setattr(
         svc,
         "_load_batch_schedules",
-        lambda: [{"id": "eod_18h", "cron": "0 18 * * 1-5", "enabled": True, "job_ids": ["sync_stock_list"], "concurrency": 8, "last_started_at": None}],
+        lambda: [{"id": "eod_18h", "cron": "0 18 * * 1-5", "enabled": True, "action": "sync", "job_ids": ["sync_stock_list"], "concurrency": 8, "last_started_at": None}],
     )
     monkeypatch.setattr(svc, "_now_china", lambda: dt.datetime(2026, 6, 17, 18, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))))
 
@@ -275,6 +284,26 @@ def test_scheduler_triggers_matching_batch_schedule(monkeypatch):
     assert triggered[0]["schedule_id"] == "eod_18h"
 
 
+def test_scheduler_triggers_quant_research_schedule(monkeypatch):
+    import datetime as dt
+
+    triggered: list[dict[str, Any]] = []
+    monkeypatch.setattr(svc.research_jobs, "start_research_run", lambda **kw: triggered.append(kw) or {"id": "research_x"})
+    monkeypatch.setattr(
+        svc,
+        "_load_batch_schedules",
+        lambda: [{"id": "tail_quant_1430", "cron": "30 14 * * 1-5", "enabled": True, "action": "quant_research", "job_ids": [], "concurrency": 8, "last_started_at": None}],
+    )
+    monkeypatch.setattr(svc, "_touch_schedule", lambda *args, **kwargs: None)
+    monkeypatch.setattr(svc, "_now_china", lambda: dt.datetime(2026, 6, 17, 14, 30, tzinfo=dt.timezone(dt.timedelta(hours=8))))
+
+    svc._run_scheduled_jobs()
+
+    assert triggered, "expected tail quant schedule to start research"
+    assert triggered[0]["persist"] is True
+    assert triggered[0]["auto_portfolio"] is True
+
+
 def test_scheduler_skips_non_matching_cron(monkeypatch):
     import datetime as dt
 
@@ -283,7 +312,7 @@ def test_scheduler_skips_non_matching_cron(monkeypatch):
     monkeypatch.setattr(
         svc,
         "_load_batch_schedules",
-        lambda: [{"id": "eod_18h", "cron": "0 18 * * 1-5", "enabled": True, "job_ids": ["sync_stock_list"], "concurrency": 8, "last_started_at": None}],
+        lambda: [{"id": "eod_18h", "cron": "0 18 * * 1-5", "enabled": True, "action": "sync", "job_ids": ["sync_stock_list"], "concurrency": 8, "last_started_at": None}],
     )
     # now is 14:00, does not match the 18:00 cron
     monkeypatch.setattr(svc, "_now_china", lambda: dt.datetime(2026, 6, 17, 14, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))))

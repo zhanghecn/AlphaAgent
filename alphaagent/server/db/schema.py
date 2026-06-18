@@ -85,6 +85,7 @@ sync_batch_schedules = Table(
     Column("id", String(80), primary_key=True),
     Column("name", String(120), nullable=False),
     Column("cron", String(80), nullable=False),
+    Column("action", String(40), nullable=False, server_default="sync"),
     Column("job_ids", JSONB, nullable=False, server_default="[]"),
     Column("enabled", Boolean, nullable=False, server_default="true"),
     Column("concurrency", Integer, nullable=False, server_default="8"),
@@ -1027,3 +1028,6 @@ def _apply_compatible_schema_patches(engine) -> None:
 
     with engine.begin() as connection:
         connection.exec_driver_sql("ALTER TABLE stocks ADD COLUMN IF NOT EXISTS volume_ratio FLOAT")
+        connection.exec_driver_sql(
+            "ALTER TABLE sync_batch_schedules ADD COLUMN IF NOT EXISTS action VARCHAR(40) NOT NULL DEFAULT 'sync'"
+        )

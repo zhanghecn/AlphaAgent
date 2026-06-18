@@ -35,6 +35,7 @@ from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
 from alphaagent.server.services import minute_gaps, minute_imports, minute_provider_imports
 from alphaagent.server.services import research_sector_scores
+from alphaagent.server.services.quant import research_jobs
 
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -251,11 +252,12 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
 # requirements/alphaagent_unified_incremental_schedule_plan.md.
 DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
     {
-        "id": "intraday_14h",
-        "name": "盘中同步（14:00，服务尾盘选股）",
+        "id": "tail_prepare_14h",
+        "name": "尾盘准备（14:00，关键数据快同步）",
         "cron": "0 14 * * 1-5",
+        "action": "sync",
         "enabled": True,
-        "concurrency": 8,
+        "concurrency": 12,
         "job_ids": [
             "sync_stock_list",          # realtime snapshot (price / change / volume ratio)
             "sync_stock_minute_bars",   # intraday minute bars up to 14:00
@@ -265,9 +267,19 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         ],
     },
     {
+        "id": "tail_quant_1430",
+        "name": "尾盘量化（14:30，自动刷新候选）",
+        "cron": "30 14 * * 1-5",
+        "action": "quant_research",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": [],
+    },
+    {
         "id": "eod_18h",
         "name": "盘后同步（18:00，补完整数据）",
         "cron": "0 18 * * 1-5",
+        "action": "sync",
         "enabled": True,
         "concurrency": 8,
         "job_ids": [
@@ -1307,6 +1319,7 @@ def seed_default_registry() -> None:
                     "id": sched["id"],
                     "name": sched["name"],
                     "cron": sched["cron"],
+                    "action": sched.get("action") or "sync",
                     "job_ids": sched["job_ids"],
                     "enabled": sched["enabled"],
                     "concurrency": sched["concurrency"],
@@ -1424,19 +1437,29 @@ def _assert_known_jobs(job_ids: list[str]) -> None:
         raise DataSyncError(f"Unknown job_ids: {unknown}")
 
 
+def _schedule_action(payload: dict[str, Any]) -> str:
+    action = str(payload.get("action") or "sync").strip()
+    if action not in {"sync", "quant_research"}:
+        raise DataSyncError(f"Unsupported schedule action: {action}")
+    return action
+
+
 def create_schedule(payload: dict[str, Any]) -> dict[str, Any]:
     name = str(payload.get("name") or "").strip()
     if not name:
         raise DataSyncError("name is required")
     cron = str(payload.get("cron") or "").strip()
+    action = _schedule_action(payload)
     job_ids = [str(j) for j in (payload.get("job_ids") or [])]
     _assert_cron(cron)
-    _assert_known_jobs(job_ids)
+    if action == "sync":
+        _assert_known_jobs(job_ids)
     schedule_id = str(payload.get("id") or f"custom_{uuid4().hex[:8]}")
     values = {
         "id": schedule_id,
         "name": name,
         "cron": cron,
+        "action": action,
         "job_ids": job_ids,
         "enabled": bool(payload.get("enabled", True)),
         "concurrency": int(payload.get("concurrency", 8)),
@@ -1452,20 +1475,22 @@ def create_schedule(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def update_schedule(schedule_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    allowed = ("name", "cron", "job_ids", "enabled", "concurrency")
+    allowed = ("name", "cron", "action", "job_ids", "enabled", "concurrency")
     updates: dict[str, Any] = {k: payload[k] for k in allowed if k in payload}
-    if "job_ids" in updates:
-        if not isinstance(updates["job_ids"], list):
-            raise DataSyncError("job_ids must be a list")
-        _assert_known_jobs([str(j) for j in updates["job_ids"]])
     if "cron" in updates:
         _assert_cron(str(updates["cron"]))
     with session_scope() as session:
         existing = session.execute(
             select(schema.sync_batch_schedules).where(schema.sync_batch_schedules.c.id == schedule_id)
-        ).first()
+        ).mappings().first()
         if not existing:
             raise DataSyncError(f"schedule {schedule_id} not found")
+        next_action = _schedule_action(updates) if "action" in updates else str(existing.get("action") or "sync")
+        if "job_ids" in updates:
+            if not isinstance(updates["job_ids"], list):
+                raise DataSyncError("job_ids must be a list")
+            if next_action != "quant_research":
+                _assert_known_jobs([str(j) for j in updates["job_ids"]])
         if updates:
             session.execute(
                 schema.sync_batch_schedules.update()
@@ -1497,12 +1522,66 @@ def run_schedule_now(schedule_id: str) -> dict[str, Any]:
         ).mappings().first()
     if not row:
         raise DataSyncError(f"schedule {schedule_id} not found")
-    return start_sync_batch(
-        job_ids=list(row.get("job_ids") or []),
-        concurrency=int(row.get("concurrency") or 8),
-        source="manual",
-        schedule_id=schedule_id,
-    )
+    if str(row.get("action") or "sync") == "quant_research":
+        research_run = _run_schedule_action(dict(row), raise_errors=True) or {}
+        return _quant_research_schedule_status(schedule_id, research_run)
+    return start_sync_batch(job_ids=list(row.get("job_ids") or []), concurrency=int(row.get("concurrency") or 8), source="manual", schedule_id=schedule_id)
+
+
+def run_tail_prepare_now() -> dict[str, Any]:
+    """Start the default fast tail-session preparation batch."""
+
+    return run_schedule_now("tail_prepare_14h")
+
+
+def _quant_research_schedule_status(schedule_id: str, research_run: dict[str, Any]) -> dict[str, Any]:
+    """Represent a quant-research schedule trigger as a batch-like response."""
+
+    status = str(research_run.get("status") or "running")
+    completed = 0 if status == "running" else 1
+    progress_pct = float(research_run.get("progress_pct") or (0 if status == "running" else 100))
+    created_at = str(research_run.get("created_at") or _utc_now_iso())
+    started_at = research_run.get("started_at") or created_at
+    finished_at = research_run.get("finished_at")
+    message = str(research_run.get("message") or "尾盘量化任务已启动")
+    return {
+        "id": f"quant_{research_run.get('id') or uuid4().hex}",
+        "profile": "quant_research",
+        "source": "manual",
+        "schedule_id": schedule_id,
+        "concurrency": 1,
+        "status": status,
+        "created_at": created_at,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "current_job_id": "quant_research" if status == "running" else None,
+        "total_jobs": 1,
+        "completed_jobs": completed,
+        "succeeded_jobs": 1 if status == "succeeded" else 0,
+        "failed_jobs": 1 if status == "failed" else 0,
+        "skipped_jobs": 0,
+        "rows_read": 0,
+        "rows_written": 0,
+        "progress_pct": progress_pct,
+        "message": message,
+        "jobs": [
+            {
+                "job_id": "quant_research",
+                "status": status,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "rows_read": 0,
+                "rows_written": 0,
+                "progress_current": int(research_run.get("progress_current") or completed),
+                "progress_total": int(research_run.get("progress_total") or 1),
+                "progress_pct": progress_pct,
+                "stage": str(research_run.get("stage") or ""),
+                "current_label": "",
+                "sample_items": [],
+                "message": message,
+            }
+        ],
+    }
 
 
 # ─── Sync batches ────────────────────────────────────────────────────────
@@ -1993,6 +2072,54 @@ def usage() -> dict[str, Any]:
         "capabilities": _usage_capabilities(),
         "coverage": coverage(),
     }
+
+
+def tail_workflow_status() -> dict[str, Any]:
+    """Return the compact state needed by the ordinary tail-preparation UI."""
+
+    if not is_database_configured():
+        return {"status": "unavailable", "message": "DATABASE_URL not configured"}
+    with session_scope() as session:
+        latest_daily_date = session.execute(select(func.max(schema.stock_daily_bars.c.trade_date))).scalar()
+        latest_daily_updated = session.execute(select(func.max(schema.stock_daily_bars.c.updated_at))).scalar()
+        latest_snapshot_updated = session.execute(select(func.max(schema.stocks.c.updated_at))).scalar()
+        latest_snapshot_trade_time = session.execute(select(func.max(schema.stocks.c.trade_time))).scalar()
+        latest_minute_date = session.execute(select(func.max(schema.stock_minute_bars.c.trade_date))).scalar()
+        latest_minute_time = session.execute(select(func.max(schema.stock_minute_bars.c.bar_time))).scalar()
+        latest_candidate = session.execute(
+            select(schema.quant_signal_runs)
+            .where(schema.quant_signal_runs.c.status == "succeeded")
+            .order_by(desc(schema.quant_signal_runs.c.trade_date), desc(schema.quant_signal_runs.c.id))
+            .limit(1)
+        ).mappings().first()
+        schedule_rows = session.execute(select(schema.sync_batch_schedules)).mappings().all()
+    schedules = {str(row["id"]): dict(row) for row in schedule_rows}
+    latest_research = research_jobs.get_latest_research_run()
+    intraday_ready = bool(latest_snapshot_updated or latest_minute_time)
+    candidate_date = latest_candidate["trade_date"] if latest_candidate else None
+    return {
+        "status": "ready",
+        "daily_bar_latest_date": _iso_or_none(latest_daily_date),
+        "daily_bar_updated_at": _iso_or_none(latest_daily_updated),
+        "intraday_snapshot_updated_at": _iso_or_none(latest_snapshot_updated),
+        "intraday_snapshot_trade_time": str(latest_snapshot_trade_time) if latest_snapshot_trade_time else None,
+        "minute_latest_date": _iso_or_none(latest_minute_date),
+        "minute_latest_time": _iso_or_none(latest_minute_time),
+        "candidate_latest_date": _iso_or_none(candidate_date),
+        "candidate_updated_at": _iso_or_none(latest_candidate.get("finished_at")) if latest_candidate else None,
+        "latest_research_run": latest_research,
+        "tail_prepare_schedule": schedules.get("tail_prepare_14h"),
+        "tail_quant_schedule": schedules.get("tail_quant_1430"),
+        "eod_schedule": schedules.get("eod_18h"),
+        "tail_prepare_ready": intraday_ready,
+        "message": "盘中候选引擎尚未启用；当前尾盘量化会使用最新完整日线。",
+    }
+
+
+def _iso_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
 def minute_csv_template() -> str:
@@ -2490,17 +2617,43 @@ def _run_scheduled_jobs() -> None:
             continue
         try:
             if _cron_matches(cron, now_china):
-                try:
-                    start_sync_batch(
-                        job_ids=list(row.get("job_ids") or []),
-                        concurrency=int(row.get("concurrency") or 8),
-                        source="schedule",
-                        schedule_id=str(row["id"]),
-                    )
-                except Exception as exc:
-                    logger.warning("Scheduled batch %s failed: %s", row.get("id"), exc)
+                _run_schedule_action(row)
         except Exception:
             pass
+
+
+def _run_schedule_action(row: dict[str, Any], *, raise_errors: bool = False) -> dict[str, Any] | None:
+    schedule_id = str(row["id"])
+    action = str(row.get("action") or "sync")
+    try:
+        if action == "quant_research":
+            _touch_schedule(schedule_id, last_started_at=datetime.now(timezone.utc), last_status="running")
+            research_run = research_jobs.start_research_run(persist=True, auto_portfolio=True, force_refresh=False)
+            _touch_schedule(
+                schedule_id,
+                last_status="succeeded",
+                last_finished_at=datetime.now(timezone.utc),
+                last_message="尾盘量化任务已启动",
+            )
+            return research_run
+        start_sync_batch(
+            job_ids=list(row.get("job_ids") or []),
+            concurrency=int(row.get("concurrency") or 8),
+            source="schedule",
+            schedule_id=schedule_id,
+        )
+        return None
+    except Exception as exc:
+        _touch_schedule(
+            schedule_id,
+            last_status="failed",
+            last_finished_at=datetime.now(timezone.utc),
+            last_message=str(exc)[:500],
+        )
+        logger.warning("Scheduled action %s failed: %s", schedule_id, exc)
+        if raise_errors:
+            raise
+        return None
 
 
 def _cron_matches(cron_expr: str, now: datetime) -> bool:

@@ -24,6 +24,14 @@ export function fetchSyncCoverage() {
   return apiClient.get<SyncCoverage>("/data-sync/coverage");
 }
 
+export function fetchTailWorkflowStatus() {
+  return apiClient.get<TailWorkflowStatus>("/data-sync/tail-workflow");
+}
+
+export function runTailPrepare() {
+  return apiClient.post<SyncBatchStatus>("/data-sync/tail-workflow/prepare");
+}
+
 export function fetchDataUsage() {
   return apiClient.get<DataUsageResponse>("/data-sync/usage");
 }
@@ -265,6 +273,9 @@ export type SyncProgressSample = Record<string, string | number | boolean | stri
 export interface SyncBatchStatus {
   id: string;
   profile: "core" | "all" | string;
+  source?: string;
+  schedule_id?: string | null;
+  concurrency?: number;
   status: "running" | "succeeded" | "failed" | string;
   created_at: string;
   started_at?: string | null;
@@ -286,6 +297,7 @@ export interface BatchSchedule {
   id: string;
   name: string;
   cron: string;
+  action?: "sync" | "quant_research" | string;
   job_ids: string[];
   enabled: boolean;
   concurrency: number;
@@ -293,6 +305,38 @@ export interface BatchSchedule {
   last_started_at?: string | null;
   last_finished_at?: string | null;
   last_message?: string | null;
+}
+
+export interface TailWorkflowStatus {
+  status: "ready" | "unavailable" | string;
+  daily_bar_latest_date?: string | null;
+  daily_bar_updated_at?: string | null;
+  intraday_snapshot_updated_at?: string | null;
+  intraday_snapshot_trade_time?: string | null;
+  minute_latest_date?: string | null;
+  minute_latest_time?: string | null;
+  candidate_latest_date?: string | null;
+  candidate_updated_at?: string | null;
+  latest_research_run?: TailResearchRun | null;
+  tail_prepare_schedule?: BatchSchedule | null;
+  tail_quant_schedule?: BatchSchedule | null;
+  eod_schedule?: BatchSchedule | null;
+  tail_prepare_ready?: boolean;
+  message?: string | null;
+}
+
+export interface TailResearchRun {
+  id?: string;
+  status?: string;
+  stage?: string;
+  message?: string | null;
+  created_at?: string;
+  started_at?: string;
+  finished_at?: string | null;
+  progress_current?: number;
+  progress_total?: number;
+  progress_pct?: number;
+  backtest_id?: number | null;
 }
 
 export interface MinuteBarsImportResult {

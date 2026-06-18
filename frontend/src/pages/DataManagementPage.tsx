@@ -8,11 +8,13 @@ import { useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   fetchDataUsage,
+  fetchTailWorkflowStatus,
   fetchLatestSyncBatch,
   fetchSyncJobs,
   fetchSyncRuns,
   fetchSyncCoverage,
   fetchSyncSources,
+  runTailPrepare,
   runAllSyncJobs,
   runSyncJob,
   fetchSyncSchedules,
@@ -30,6 +32,7 @@ import type {
   SyncBatchJobStatus,
   SyncProgressSample,
   BatchSchedule,
+  TailWorkflowStatus,
 } from "@/api/dataSync";
 import { LoadingState } from "@/components/LoadingState";
 import { cn } from "@/lib/utils";
@@ -52,7 +55,7 @@ import {
   Trash2,
 } from "lucide-react";
 
-type TabKey = "status" | "sync" | "sources";
+type TabKey = "tail" | "status" | "sources";
 type MinuteSyncMode = "backtest_gaps" | "recent";
 type MinuteGapProvider = "akshare" | "tdx" | "tushare";
 
@@ -85,13 +88,13 @@ const DEFAULT_MINUTE_SYNC_FORM: MinuteSyncFormState = {
 };
 
 const TABS: { key: TabKey; label: string; icon: typeof Database }[] = [
+  { key: "tail", label: "尾盘准备", icon: Clock },
   { key: "status", label: "数据状态", icon: Database },
-  { key: "sync", label: "同步管理", icon: RefreshCw },
   { key: "sources", label: "数据源", icon: Server },
 ];
 
 export default function DataManagementPage() {
-  const [activeTab, setActiveTab] = useState<TabKey>("sync");
+  const [activeTab, setActiveTab] = useState<TabKey>("tail");
 
   return (
     <div className="space-y-4">
@@ -120,11 +123,225 @@ export default function DataManagementPage() {
       </div>
 
       {/* Tab content */}
+      {activeTab === "tail" && <TailWorkflowTab />}
       {activeTab === "status" && <StatusTab />}
-      {activeTab === "sync" && <SyncTab />}
       {activeTab === "sources" && <SourcesTab />}
     </div>
   );
+}
+
+// ── Tail Workflow Tab ──
+
+function TailWorkflowTab() {
+  const queryClient = useQueryClient();
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+
+  const statusQuery = useQuery({
+    queryKey: ["tailWorkflowStatus"],
+    queryFn: fetchTailWorkflowStatus,
+    staleTime: 10_000,
+    refetchInterval: 15_000,
+  });
+
+  const latestBatchQuery = useQuery({
+    queryKey: ["syncBatchLatest"],
+    queryFn: fetchLatestSyncBatch,
+    staleTime: 2_000,
+    refetchInterval: (query) => (query.state.data?.status === "running" ? 2_000 : 8_000),
+  });
+
+  const prepareMutation = useMutation({
+    mutationFn: runTailPrepare,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["tailWorkflowStatus"] });
+      queryClient.invalidateQueries({ queryKey: ["syncBatchLatest"] });
+      queryClient.invalidateQueries({ queryKey: ["syncRuns"] });
+      queryClient.invalidateQueries({ queryKey: ["syncCoverage"] });
+      queryClient.invalidateQueries({ queryKey: ["dataUsage"] });
+    },
+  });
+
+  const status = statusQuery.data;
+  const batch = latestBatchQuery.data;
+  const tailPrepareBatch = batch?.schedule_id === "tail_prepare_14h" ? batch : null;
+  const isPreparing = prepareMutation.isPending || tailPrepareBatch?.status === "running";
+
+  return (
+    <div className="space-y-4">
+      {statusQuery.error ? (
+        <DataNotice
+          title="尾盘准备状态不可用"
+          message={(statusQuery.error as Error).message}
+          action="先确认 DATABASE_URL/PostgreSQL，再刷新本页。"
+        />
+      ) : null}
+      {status?.status === "unavailable" ? (
+        <DataNotice
+          title="本地数据库未就绪"
+          message={status.message ?? "DATABASE_URL not configured"}
+          action="尾盘同步和量化需要本地数据库可用。"
+        />
+      ) : null}
+
+      <section className="rounded-lg border bg-card">
+        <div className="grid gap-4 p-4 lg:grid-cols-[1fr_auto] lg:items-start">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-base font-semibold">尾盘准备</h2>
+              <StatusBadge status={tailStatusBadge(status)} />
+            </div>
+            <div className="mt-2 text-sm text-muted-foreground">
+              14:00 同步实时快照、分钟线、资金、热度和涨停池；14:30 自动运行策略研究；18:00 补完整日线和慢数据。
+            </div>
+            {status?.message ? (
+              <div className="mt-2 text-xs text-amber-700 dark:text-amber-400">{status.message}</div>
+            ) : null}
+          </div>
+          <div className="flex flex-wrap gap-2 lg:justify-end">
+            <button
+              className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => prepareMutation.mutate()}
+              disabled={isPreparing || status?.status === "unavailable"}
+            >
+              {isPreparing ? <Loader2 size={16} className="animate-spin" /> : <PlayCircle size={16} />}
+              {isPreparing ? "准备中" : "立即尾盘准备"}
+            </button>
+            <button
+              className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium transition-colors hover:bg-muted"
+              onClick={() => {
+                statusQuery.refetch();
+                latestBatchQuery.refetch();
+              }}
+            >
+              <RefreshCw size={15} />
+              刷新状态
+            </button>
+          </div>
+        </div>
+        {prepareMutation.error ? (
+          <div className="border-t px-4 py-3 text-sm text-red-600">{(prepareMutation.error as Error).message}</div>
+        ) : null}
+        <BatchProgress batch={tailPrepareBatch} isStarting={prepareMutation.isPending} />
+      </section>
+
+      {statusQuery.isLoading ? <LoadingState rows={3} /> : null}
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <TailStateItem label="完整日线" value={status?.daily_bar_latest_date} detail={formatDateTime(status?.daily_bar_updated_at)} />
+        <TailStateItem label="盘中快照" value={formatDateTime(status?.intraday_snapshot_updated_at)} detail={status?.intraday_snapshot_trade_time ?? undefined} />
+        <TailStateItem label="分钟线" value={status?.minute_latest_date} detail={formatDateTime(status?.minute_latest_time)} />
+        <TailStateItem label="量化候选" value={status?.candidate_latest_date} detail={formatDateTime(status?.candidate_updated_at)} />
+      </div>
+
+      <section className="rounded-lg border">
+        <div className="border-b px-4 py-3">
+          <h3 className="text-sm font-semibold">自动计划</h3>
+        </div>
+        <div className="divide-y">
+          <ScheduleSummary schedule={status?.tail_prepare_schedule} label="14:00 尾盘准备" fallbackCron="0 14 * * 1-5" />
+          <ScheduleSummary schedule={status?.tail_quant_schedule} label="14:30 尾盘量化" fallbackCron="30 14 * * 1-5" />
+          <ScheduleSummary schedule={status?.eod_schedule} label="18:00 盘后补全" fallbackCron="0 18 * * 1-5" />
+        </div>
+      </section>
+
+      <ResearchRunSummary run={status?.latest_research_run} />
+
+      <section className="rounded-lg border">
+        <button
+          className="flex w-full items-center justify-between px-4 py-3 text-left text-sm font-semibold transition-colors hover:bg-muted/40"
+          onClick={() => setAdvancedOpen((value) => !value)}
+        >
+          <span>高级同步</span>
+          {advancedOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+        </button>
+        {advancedOpen ? (
+          <div className="border-t p-4">
+            <SyncTab />
+          </div>
+        ) : null}
+      </section>
+    </div>
+  );
+}
+
+function TailStateItem({ label, value, detail }: { label: string; value?: string | null; detail?: string | null }) {
+  return (
+    <div className="rounded-lg border p-3">
+      <div className="text-sm text-muted-foreground">{label}</div>
+      <div className="mt-1 text-base font-semibold tabular-nums">{value || "--"}</div>
+      {detail ? <div className="mt-1 truncate text-xs text-muted-foreground">{detail}</div> : null}
+    </div>
+  );
+}
+
+function ScheduleSummary({
+  schedule,
+  label,
+  fallbackCron,
+}: {
+  schedule?: BatchSchedule | null;
+  label: string;
+  fallbackCron: string;
+}) {
+  const enabled = schedule?.enabled ?? false;
+  return (
+    <div className="grid gap-2 px-4 py-3 sm:grid-cols-[1fr_auto] sm:items-center">
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm font-medium">{label}</span>
+          <StatusBadge status={enabled ? "ready" : "unknown"} />
+        </div>
+        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+          <span className="font-mono">{schedule?.cron ?? fallbackCron}</span>
+          {schedule?.last_finished_at ? <span>上次 {formatDateTime(schedule.last_finished_at)}</span> : null}
+          {schedule?.last_message ? <span>{schedule.last_message}</span> : null}
+        </div>
+      </div>
+      <RunStatusBadge status={schedule?.last_status} />
+    </div>
+  );
+}
+
+function ResearchRunSummary({ run }: { run?: TailWorkflowStatus["latest_research_run"] }) {
+  if (!run) {
+    return (
+      <section className="rounded-lg border px-4 py-3 text-sm text-muted-foreground">
+        暂无策略研究任务记录。
+      </section>
+    );
+  }
+  const pct = Math.max(0, Math.min(Number(run.progress_pct ?? 0), 100));
+  return (
+    <section className="rounded-lg border p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <div className="flex items-center gap-2 text-sm font-semibold">
+            <Activity size={15} />
+            最近策略研究
+            <RunStatusBadge status={run.status} />
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            {run.message || run.stage || "--"}
+            {run.backtest_id ? ` · 回测 #${run.backtest_id}` : ""}
+          </div>
+        </div>
+        <div className="text-xs text-muted-foreground">{formatDateTime(run.finished_at ?? run.started_at ?? run.created_at)}</div>
+      </div>
+      {run.status === "running" ? (
+        <div className="mt-3 flex items-center gap-2">
+          <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
+            <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${pct}%` }} />
+          </div>
+          <span className="w-12 text-right text-xs tabular-nums text-muted-foreground">{pct.toFixed(0)}%</span>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function tailStatusBadge(status: TailWorkflowStatus | undefined): string {
+  if (!status) return "unknown";
+  if (status.status === "unavailable") return "unavailable";
+  return status.tail_prepare_ready ? "ready" : "empty";
 }
 
 // ── Status Tab ──
@@ -1046,7 +1263,7 @@ function BatchProgress({ batch, isStarting }: { batch: SyncBatchStatus | null | 
   if (!batch) {
     return (
       <div className="border-t px-4 py-3 text-sm text-muted-foreground">
-        还没有一键同步记录。点击“一键同步”后，这里会显示当前任务、进度和写入行数。
+        还没有同步批次记录。执行同步后，这里会显示当前任务、进度和写入行数。
       </div>
     );
   }
@@ -1060,7 +1277,7 @@ function BatchProgress({ batch, isStarting }: { batch: SyncBatchStatus | null | 
         <div>
           <div className="flex items-center gap-2 text-sm font-medium">
             <RunStatusBadge status={batch.status} />
-            <span>{batch.profile === "all" ? "全量同步" : "核心同步"}</span>
+            <span>{batchTitle(batch)}</span>
             <span className="text-muted-foreground">#{batch.id.slice(0, 8)}</span>
           </div>
           <div className="mt-1 text-xs text-muted-foreground">
@@ -1123,6 +1340,14 @@ function BatchProgress({ batch, isStarting }: { batch: SyncBatchStatus | null | 
       </div>
     </div>
   );
+}
+
+function batchTitle(batch: SyncBatchStatus): string {
+  if (batch.schedule_id === "tail_prepare_14h") return "尾盘准备";
+  if (batch.schedule_id === "tail_quant_1430" || batch.profile === "quant_research") return "尾盘量化";
+  if (batch.profile === "all") return "全量同步";
+  if (batch.profile === "core") return "核心同步";
+  return "同步批次";
 }
 
 function TaskProgressBar({ job }: { job: SyncBatchJobStatus }) {
@@ -1231,6 +1456,13 @@ function formatSampleValue(value: SyncProgressSample[string]): string {
     return Number.isInteger(value) ? value.toLocaleString() : value.toFixed(2);
   }
   return String(value ?? "");
+}
+
+function formatDateTime(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString("zh-CN");
 }
 
 function StatusBadge({ status }: { status: string }) {

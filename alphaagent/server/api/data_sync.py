@@ -141,6 +141,22 @@ def usage():
         return _sync_error(exc)
 
 
+@router.get("/tail-workflow")
+def tail_workflow():
+    try:
+        return ok(service.tail_workflow_status())
+    except Exception as exc:
+        return _sync_error(exc)
+
+
+@router.post("/tail-workflow/prepare")
+def run_tail_prepare():
+    try:
+        return ok(service.run_tail_prepare_now())
+    except Exception as exc:
+        return _sync_error(exc)
+
+
 @router.get("/imports/minute-bars/template.csv")
 def minute_bars_template():
     try:
