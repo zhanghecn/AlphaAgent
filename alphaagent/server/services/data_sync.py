@@ -1588,6 +1588,8 @@ def start_sync_batch(
         daemon=True,
     )
     thread.start()
+    if schedule_id:
+        _touch_schedule(schedule_id, last_started_at=datetime.now(timezone.utc), last_status="running")
     return get_sync_batch(batch_id)
 
 
@@ -1857,6 +1859,21 @@ def _increment_batch(batch_id: str, completed: int = 0, succeeded: int = 0, fail
         batch["rows_written"] = int(batch.get("rows_written") or 0) + rows_written
 
 
+def _touch_schedule(schedule_id: str | None, **fields: Any) -> None:
+    """Best-effort update of status fields on a batch schedule row."""
+    if not schedule_id or not is_database_configured():
+        return
+    try:
+        with session_scope() as session:
+            session.execute(
+                schema.sync_batch_schedules.update()
+                .where(schema.sync_batch_schedules.c.id == schedule_id)
+                .values(**fields)
+            )
+    except Exception:
+        logger.debug("touch schedule %s failed", schedule_id, exc_info=True)
+
+
 def _finish_batch(batch_id: str, status: str, message: str) -> None:
     with _BATCH_LOCK:
         batch = _SYNC_BATCHES.get(batch_id)
@@ -1866,6 +1883,15 @@ def _finish_batch(batch_id: str, status: str, message: str) -> None:
         batch["finished_at"] = _utc_now_iso()
         batch["current_job_id"] = None
         batch["message"] = message
+        schedule_id = batch.get("schedule_id")
+    # Reflect terminal status back onto the originating schedule (best-effort).
+    if schedule_id:
+        _touch_schedule(
+            schedule_id,
+            last_status=status,
+            last_finished_at=datetime.now(timezone.utc),
+            last_message=(message or "")[:500],
+        )
 
 
 def _update_batch_job(batch_id: str, job_id: str, patch: dict[str, Any]) -> None:
