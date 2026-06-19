@@ -6,7 +6,9 @@ import {
   backtestReportCsvUrl,
   fetchBacktestAudit,
   fetchBacktestDataQuality,
+  fetchBacktestFactorAudit,
   fetchBacktestReport,
+  fetchBacktestSetupMarketExitAudit,
   fetchBacktestTopCandidateAudit,
   fetchBacktestValidationGrid,
 } from "@/api/quant";
@@ -84,6 +86,18 @@ export function BacktestPanel({
     enabled: Boolean(selectedId),
     staleTime: 60_000,
   });
+  const factorAuditQuery = useQuery({
+    queryKey: ["backtestFactorAudit", selectedId, 100],
+    queryFn: () => fetchBacktestFactorAudit(selectedId!, 100),
+    enabled: Boolean(selectedId),
+    staleTime: 60_000,
+  });
+  const setupMarketExitAuditQuery = useQuery({
+    queryKey: ["backtestSetupMarketExitAudit", selectedId, 10],
+    queryFn: () => fetchBacktestSetupMarketExitAudit(selectedId!, 10),
+    enabled: Boolean(selectedId),
+    staleTime: 60_000,
+  });
   const validationReport = marketAuditReport;
   const dataQualityQuery = useQuery({
     queryKey: ["backtestDataQuality", selectedId],
@@ -155,6 +169,10 @@ export function BacktestPanel({
               report={marketAuditReport}
               topCandidateAudit={topCandidateAuditQuery.data}
               isTopCandidateAuditLoading={topCandidateAuditQuery.isFetching}
+              factorAudit={factorAuditQuery.data}
+              isFactorAuditLoading={factorAuditQuery.isFetching}
+              setupMarketExitAudit={setupMarketExitAuditQuery.data}
+              isSetupMarketExitAuditLoading={setupMarketExitAuditQuery.isFetching}
             />
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
               <section className="space-y-4">

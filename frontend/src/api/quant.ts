@@ -854,6 +854,26 @@ export interface BacktestCandidateNotPlannedContext {
   target_theoretical_entry_date?: string | null;
   target_real_held_on_signal_date?: boolean | null;
   target_real_entry_date?: string | null;
+  signal_snapshot?: {
+    source?: string | null;
+    run_id?: number | null;
+    trade_date?: string | null;
+    vt_symbol?: string | null;
+    total_score?: number | null;
+    raw_entry_signal?: boolean | null;
+    executable_entry_signal?: boolean | null;
+    action?: string | null;
+    failed_rules?: string[];
+    signal_label?: string | null;
+    signal_role?: string | null;
+    entry_setup?: string | null;
+    low_suction_days?: number | null;
+    low_suction_launch_confirmed?: boolean | null;
+    low_suction_launch_quality_bucket?: string | null;
+    ma_convergence_pct?: number | null;
+    latest_change_pct?: number | null;
+    close_location_in_range?: number | null;
+  } | null;
 }
 
 export interface BacktestClosedTrade extends StockIdentityFields {
@@ -1164,6 +1184,257 @@ export interface BacktestTopCandidateAudit {
   items?: BacktestTopCandidateAuditItem[];
   note?: string;
   message?: string;
+}
+
+export interface FactorAuditBucket {
+  bucket: string;
+  sample_count: number;
+  win_rate?: number | null;
+  average_return?: number | null;
+  median_return?: number | null;
+  profit_factor?: number | null;
+  mfe_8_pct_hit_ratio?: number | null;
+  mae_5_pct_loss_ratio?: number | null;
+  failed_launch_ratio?: number | null;
+  support_stop_like_ratio?: number | null;
+}
+
+export interface CandidateExecutionAttributionRow {
+  signal_date?: string | null;
+  execute_date?: string | null;
+  vt_symbol?: string | null;
+  name?: string | null;
+  rank?: number | null;
+  score?: number | null;
+  entry_family?: string | null;
+  entry_family_label?: string | null;
+  planned?: boolean | null;
+  ordered?: boolean | null;
+  filled?: boolean | null;
+  execution_status?: string | null;
+  not_filled_reason?: string | null;
+  not_filled_subreason?: string | null;
+  not_filled_label?: string | null;
+  order_status?: string | null;
+  order_reason?: string | null;
+  trade_price?: number | null;
+  fixed_return_20d?: number | null;
+  missed_return_20d?: number | null;
+  missed_mfe_20d?: number | null;
+  missed_mae_20d?: number | null;
+  uses_future_for_label_only?: boolean | null;
+  not_used_for_signal_score?: boolean | null;
+  held_positions?: Array<Record<string, unknown>>;
+}
+
+export interface CandidateExecutionAttributionBucket {
+  execution_status?: string | null;
+  not_filled_reason?: string | null;
+  not_filled_subreason?: string | null;
+  sample_count?: number | null;
+  filled_count?: number | null;
+  missed_count?: number | null;
+  positive_20d_count?: number | null;
+  win_rate?: number | null;
+  average_return_20d?: number | null;
+}
+
+export interface CandidateOpportunityCostRow {
+  signal_date?: string | null;
+  execute_date?: string | null;
+  missed_symbol?: string | null;
+  missed_rank?: number | null;
+  missed_score?: number | null;
+  missed_return_20d?: number | null;
+  missed_mfe_20d?: number | null;
+  missed_mae_20d?: number | null;
+  held_symbol?: string | null;
+  held_entry_score?: number | null;
+  held_unrealized_return_pct?: number | null;
+  held_days?: number | null;
+  held_support_state?: string | null;
+  rotation_score_gap?: number | null;
+  replacement_quality_delta?: number | null;
+  not_used_for_signal_score?: boolean | null;
+}
+
+export interface CandidateExecutionAttributionSummary {
+  method?: string | null;
+  max_execution_rank?: number | null;
+  candidate_count?: number | null;
+  filled_count?: number | null;
+  missed_count?: number | null;
+  top20_missed_quality?: {
+    missed_count?: number | null;
+    missed_positive_20d_count?: number | null;
+    missed_avg_return_20d?: number | null;
+    missed_avg_mfe_20d?: number | null;
+    missed_avg_mae_20d?: number | null;
+    by_reason?: CandidateExecutionAttributionBucket[];
+  };
+  missed_candidate_opportunity_cost?: CandidateOpportunityCostRow[];
+  by_status?: CandidateExecutionAttributionBucket[];
+  by_not_filled_reason?: CandidateExecutionAttributionBucket[];
+  by_not_filled_subreason?: CandidateExecutionAttributionBucket[];
+  items?: CandidateExecutionAttributionRow[];
+}
+
+export interface FactorAuditResponse {
+  status: string;
+  backtest_id?: number;
+  top_limit?: number;
+  exclude_strong_market?: boolean;
+  summary?: FactorAuditBucket;
+  by_setup?: FactorAuditBucket[];
+  by_entry_family_conflict?: FactorAuditBucket[];
+  by_low_position_reclaim_type?: FactorAuditBucket[];
+  by_rank_bucket?: FactorAuditBucket[];
+  by_market_regime?: FactorAuditBucket[];
+  by_market_warning_level?: FactorAuditBucket[];
+  by_fund_flow_state?: FactorAuditBucket[];
+  by_factor_bucket?: Record<string, FactorAuditBucket[]>;
+  factor_interaction_opportunity_cost?: {
+    method?: string | null;
+    entry_family_rank?: BacktestPathMetricBucket[];
+    entry_family_market?: BacktestPathMetricBucket[];
+    launch_quality_market?: BacktestPathMetricBucket[];
+    low_suction_days_first_lift?: BacktestPathMetricBucket[];
+    reclaim_support_ma?: BacktestPathMetricBucket[];
+    risk_market_warning?: BacktestPathMetricBucket[];
+    opportunity_cost?: {
+      removed_winner_count?: number | null;
+      removed_winner_return_sum?: number | null;
+      avoided_loser_count?: number | null;
+      avoided_loser_return_sum?: number | null;
+      added_loser_count?: number | null;
+      added_loser_return_sum?: number | null;
+      replacement_quality_delta?: number | null;
+      note?: string | null;
+    };
+    not_used_for_signal_score?: boolean | null;
+  };
+  candidate_execution_attribution?: CandidateExecutionAttributionSummary;
+  success_paths?: unknown[];
+  failure_paths?: unknown[];
+  coverage?: Record<string, unknown>;
+}
+
+export interface BacktestPathMetricBucket {
+  label?: string | null;
+  trade_count?: number | null;
+  evaluated_count?: number | null;
+  win_rate?: number | null;
+  avg_return_pct?: number | null;
+  median_return_pct?: number | null;
+  total_return_pct?: number | null;
+  avg_mfe_pct?: number | null;
+  avg_mae_pct?: number | null;
+  sold_before_rebound_count?: number | null;
+  bad_replacement_count?: number | null;
+  strong_replacement_count?: number | null;
+  [key: string]: unknown;
+}
+
+export interface BuySellProblemMatrix {
+  by_problem?: BacktestPathMetricBucket[];
+  by_setup_problem?: BacktestPathMetricBucket[];
+  by_market_problem?: BacktestPathMetricBucket[];
+  focused_symbols?: BacktestPathDiagnosticRow[];
+}
+
+export interface ExitPathReplacementQuality {
+  method?: string | null;
+  overall?: BacktestPathMetricBucket;
+  by_trade_problem_type?: BacktestPathMetricBucket[];
+  by_exit_reason?: BacktestPathMetricBucket[];
+  by_support_stop_context?: BacktestPathMetricBucket[];
+  replacement_quality_summary?: {
+    replacement_trade_count?: number | null;
+    bad_replacement_count?: number | null;
+    strong_replacement_count?: number | null;
+    avg_replacement_return_pct?: number | null;
+    avg_replacement_return_delta_pct?: number | null;
+    by_replacement_outcome?: BacktestPathMetricBucket[];
+  };
+  not_used_for_signal_score?: boolean | null;
+}
+
+export interface MarketContextValidationSummary {
+  method?: string | null;
+  by_market_regime?: BacktestPathMetricBucket[];
+  by_market_warning_level?: BacktestPathMetricBucket[];
+  by_market_recovery_level?: BacktestPathMetricBucket[];
+  by_fund_flow_state?: BacktestPathMetricBucket[];
+  by_market_mainline_trade_context?: BacktestPathMetricBucket[];
+  excluding_strong_market?: BacktestPathMetricBucket;
+  fund_flow_coverage?: {
+    by_coverage?: BacktestPathMetricBucket[];
+    insufficient_data_count?: number | null;
+  };
+  not_used_for_signal_score?: boolean | null;
+}
+
+export interface BacktestSetupMarketExitAuditResponse {
+  status: string;
+  backtest_id?: number;
+  start_date?: string;
+  end_date?: string;
+  lookahead_days?: number;
+  summary?: {
+    buy_sell_problem_matrix?: BuySellProblemMatrix;
+    exit_path_replacement_quality?: ExitPathReplacementQuality;
+    market_context_validation?: MarketContextValidationSummary;
+    [key: string]: unknown;
+  };
+  items?: BacktestPathDiagnosticRow[];
+  total?: number;
+  returned_count?: number;
+  has_more?: boolean;
+  note?: string | null;
+}
+
+export interface FactorCandidateResponse {
+  status: string;
+  backtest_id?: number;
+  items: Array<Record<string, unknown>>;
+  coverage?: Record<string, unknown>;
+}
+
+export interface StrategyTimelineEvent {
+  date: string;
+  vt_symbol: string;
+  candidate?: Record<string, unknown>;
+  plan?: Record<string, unknown>;
+  execution?: Record<string, unknown>;
+  sell?: Record<string, unknown>;
+  cluster?: Record<string, unknown>;
+  markers?: string[];
+  display_markers?: Array<"BUY_SIGNAL" | "BUY_REJECTED" | "BUY_FILLED" | "SELL_FILLED" | string>;
+}
+
+export interface StrategyLifecycleSegment {
+  vt_symbol?: string | null;
+  cluster_start_date?: string | null;
+  cluster_end_date?: string | null;
+  key_signal_date?: string | null;
+  cluster_type?: string | null;
+  buildup_days?: number | null;
+  support_hold_days?: number | null;
+  first_effective_lift?: boolean | null;
+  launch_confirmed?: boolean | null;
+  launch_quality_bucket?: string | null;
+  key_signal_rank?: number | null;
+  key_signal_score?: number | null;
+  key_signal_action?: string | null;
+}
+
+export interface StrategyTimelineResponse {
+  status: string;
+  backtest_id: number;
+  vt_symbol: string;
+  items: StrategyTimelineEvent[];
+  lifecycle_segments?: StrategyLifecycleSegment[];
+  coverage?: Record<string, unknown>;
 }
 
 export interface BacktestCostStressRow {
@@ -2098,7 +2369,10 @@ export function createBacktest(payload: {
   enable_entry_launch_quality_score?: boolean;
   enable_entry_launch_risk_penalty?: boolean;
   enable_low_suction_market_risk_penalty?: boolean;
+  enable_market_adaptive_setup_weighting?: boolean;
+  enable_low_suction_first_lift_bonus?: boolean;
   enable_failed_launch_exit_stop?: boolean;
+  enable_contextual_failed_launch_exit_stop?: boolean;
   enable_mid_profit_giveback_stop?: boolean;
   mid_profit_giveback_min_high_gain_pct?: number;
   mid_profit_giveback_max_current_gain_pct?: number;
@@ -2139,7 +2413,10 @@ export function runBacktestStrategyComparison(payload: {
   enable_entry_launch_quality_score?: boolean;
   enable_entry_launch_risk_penalty?: boolean;
   enable_low_suction_market_risk_penalty?: boolean;
+  enable_market_adaptive_setup_weighting?: boolean;
+  enable_low_suction_first_lift_bonus?: boolean;
   enable_failed_launch_exit_stop?: boolean;
+  enable_contextual_failed_launch_exit_stop?: boolean;
   enable_mid_profit_giveback_stop?: boolean;
   mid_profit_giveback_min_high_gain_pct?: number;
   mid_profit_giveback_max_current_gain_pct?: number;
@@ -2169,7 +2446,10 @@ export function createSymbolBacktest(payload: {
   enable_entry_launch_quality_score?: boolean;
   enable_entry_launch_risk_penalty?: boolean;
   enable_low_suction_market_risk_penalty?: boolean;
+  enable_market_adaptive_setup_weighting?: boolean;
+  enable_low_suction_first_lift_bonus?: boolean;
   enable_failed_launch_exit_stop?: boolean;
+  enable_contextual_failed_launch_exit_stop?: boolean;
   enable_mid_profit_giveback_stop?: boolean;
   mid_profit_giveback_min_high_gain_pct?: number;
   mid_profit_giveback_max_current_gain_pct?: number;
@@ -2209,7 +2489,10 @@ export function runStrictMinuteBacktestPipeline(payload: {
   enable_entry_launch_quality_score?: boolean;
   enable_entry_launch_risk_penalty?: boolean;
   enable_low_suction_market_risk_penalty?: boolean;
+  enable_market_adaptive_setup_weighting?: boolean;
+  enable_low_suction_first_lift_bonus?: boolean;
   enable_failed_launch_exit_stop?: boolean;
+  enable_contextual_failed_launch_exit_stop?: boolean;
   enable_mid_profit_giveback_stop?: boolean;
   mid_profit_giveback_min_high_gain_pct?: number;
   mid_profit_giveback_max_current_gain_pct?: number;
@@ -2313,6 +2596,30 @@ export function fetchBacktestPathDiagnostics(backtestId: number, vtSymbol?: stri
 export function fetchBacktestTopCandidateAudit(backtestId: number, topN = 10): Promise<BacktestTopCandidateAudit> {
   const search = new URLSearchParams({ top_n: String(topN) });
   return apiClient.get<BacktestTopCandidateAudit>(`/backtests/${backtestId}/top-candidate-audit?${search.toString()}`);
+}
+
+export function fetchBacktestFactorAudit(backtestId: number, topLimit = 100, options: { excludeStrongMarket?: boolean } = {}): Promise<FactorAuditResponse> {
+  const search = new URLSearchParams({ top_limit: String(topLimit) });
+  if (options.excludeStrongMarket) search.set("exclude_strong_market", "true");
+  return apiClient.get<FactorAuditResponse>(`/backtests/${backtestId}/factor-audit?${search.toString()}`);
+}
+
+export function fetchBacktestSetupMarketExitAudit(backtestId: number, lookaheadDays = 10): Promise<BacktestSetupMarketExitAuditResponse> {
+  const search = new URLSearchParams({ lookahead_days: String(lookaheadDays) });
+  return apiClient.get<BacktestSetupMarketExitAuditResponse>(`/backtests/${backtestId}/setup-market-exit-audit?${search.toString()}`);
+}
+
+export function fetchBacktestFactorCandidates(backtestId: number, params: { vt_symbol?: string; limit?: number } = {}): Promise<FactorCandidateResponse> {
+  const search = new URLSearchParams();
+  if (params.vt_symbol) search.set("vt_symbol", params.vt_symbol);
+  if (params.limit != null) search.set("limit", String(params.limit));
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  return apiClient.get<FactorCandidateResponse>(`/backtests/${backtestId}/factor-candidates${suffix}`);
+}
+
+export function fetchBacktestStrategyTimeline(backtestId: number, vtSymbol: string): Promise<StrategyTimelineResponse> {
+  const search = new URLSearchParams({ vt_symbol: vtSymbol });
+  return apiClient.get<StrategyTimelineResponse>(`/backtests/${backtestId}/strategy-timeline?${search.toString()}`);
 }
 
 export function fetchBacktestDayDetail(backtestId: number, tradeDate: string) {

@@ -807,6 +807,37 @@ backtest_signal_events = Table(
 Index("ix_backtest_signal_events_run_date", backtest_signal_events.c.backtest_id, backtest_signal_events.c.trade_date)
 Index("ix_backtest_signal_events_symbol", backtest_signal_events.c.backtest_id, backtest_signal_events.c.vt_symbol)
 
+backtest_factor_snapshots = Table(
+    "backtest_factor_snapshots",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("backtest_id", BigInteger, ForeignKey("backtest_runs.id", ondelete="CASCADE"), nullable=False),
+    Column("trade_date", Date, nullable=False),
+    Column("vt_symbol", String(32), nullable=False),
+    Column("rank", Integer, nullable=True),
+    Column("entry_family", String(64), nullable=True),
+    Column("payload", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("backtest_id", "trade_date", "vt_symbol", "rank", name="uq_backtest_factor_snapshot"),
+)
+Index("ix_backtest_factor_snapshots_run_date", backtest_factor_snapshots.c.backtest_id, backtest_factor_snapshots.c.trade_date)
+Index("ix_backtest_factor_snapshots_symbol", backtest_factor_snapshots.c.backtest_id, backtest_factor_snapshots.c.vt_symbol)
+
+backtest_factor_outcomes = Table(
+    "backtest_factor_outcomes",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("backtest_id", BigInteger, ForeignKey("backtest_runs.id", ondelete="CASCADE"), nullable=False),
+    Column("signal_date", Date, nullable=False),
+    Column("vt_symbol", String(32), nullable=False),
+    Column("rank", Integer, nullable=True),
+    Column("payload", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("backtest_id", "signal_date", "vt_symbol", "rank", name="uq_backtest_factor_outcome"),
+)
+Index("ix_backtest_factor_outcomes_run_date", backtest_factor_outcomes.c.backtest_id, backtest_factor_outcomes.c.signal_date)
+Index("ix_backtest_factor_outcomes_symbol", backtest_factor_outcomes.c.backtest_id, backtest_factor_outcomes.c.vt_symbol)
+
 backtest_daily_equity = Table(
     "backtest_daily_equity",
     metadata,

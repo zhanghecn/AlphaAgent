@@ -19,6 +19,8 @@ from alphaagent.server.services.backtest.engine import (
     backtest_drilldown_options,
     backtest_equity,
     backtest_execution_model_comparison,
+    backtest_factor_audit,
+    backtest_factor_candidates,
     backtest_signal_amount_preview,
     backtest_signal_events,
     backtest_strategy_comparison,
@@ -29,6 +31,7 @@ from alphaagent.server.services.backtest.engine import (
     backtest_report,
     backtest_report_csv,
     backtest_setup_market_exit_audit,
+    backtest_strategy_timeline,
     backtest_symbol_detail,
     backtest_top_candidate_audit,
     backtest_trade_attribution,
@@ -350,6 +353,38 @@ def get_top_candidate_audit(backtest_id: int, top_n: int = Query(default=10, ge=
         return _service_error(exc)
 
 
+@router.get("/{backtest_id}/factor-candidates")
+def get_factor_candidates(
+    backtest_id: int,
+    vt_symbol: str = Query(default=""),
+    limit: int = Query(default=500, ge=1, le=2000),
+):
+    try:
+        return ok(backtest_factor_candidates(backtest_id, vt_symbol=vt_symbol or None, limit=limit))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/{backtest_id}/factor-audit")
+def get_factor_audit(
+    backtest_id: int,
+    top_limit: int = Query(default=100, ge=1, le=2000),
+    exclude_strong_market: bool = Query(default=False),
+):
+    try:
+        return ok(backtest_factor_audit(backtest_id, top_limit=top_limit, exclude_strong_market=exclude_strong_market))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/{backtest_id}/strategy-timeline")
+def get_strategy_timeline(backtest_id: int, vt_symbol: str = Query(..., min_length=1)):
+    try:
+        return ok(backtest_strategy_timeline(backtest_id, vt_symbol))
+    except Exception as exc:
+        return _service_error(exc)
+
+
 @router.get("/{backtest_id}/signal-events")
 def get_signal_events(
     backtest_id: int,
@@ -496,11 +531,42 @@ def _params_from_payload(payload: dict[str, Any]) -> BacktestParams:
             payload.get("enable_low_suction_market_risk_penalty"),
             default=False,
         ),
+        enable_market_adaptive_setup_weighting=_parse_bool(
+            payload.get("enable_market_adaptive_setup_weighting"),
+            default=False,
+        ),
+        enable_low_suction_first_lift_bonus=_parse_bool(
+            payload.get("enable_low_suction_first_lift_bonus"),
+            default=False,
+        ),
         enable_failed_launch_exit_stop=_parse_bool(payload.get("enable_failed_launch_exit_stop"), default=False),
+        enable_contextual_failed_launch_exit_stop=_parse_bool(
+            payload.get("enable_contextual_failed_launch_exit_stop"),
+            default=False,
+        ),
         enable_mid_profit_giveback_stop=_parse_bool(payload.get("enable_mid_profit_giveback_stop"), default=False),
         mid_profit_giveback_min_high_gain_pct=float(payload.get("mid_profit_giveback_min_high_gain_pct") or 0.10),
         mid_profit_giveback_max_current_gain_pct=float(payload.get("mid_profit_giveback_max_current_gain_pct") or 0.04),
         mid_profit_giveback_drawdown_pct=float(payload.get("mid_profit_giveback_drawdown_pct") or 0.07),
+        enable_contextual_support_reclaim_delay=_parse_bool(payload.get("enable_contextual_support_reclaim_delay"), default=False),
+        support_reclaim_delay_max_warning_level=int(payload.get("support_reclaim_delay_max_warning_level") or 2),
+        support_reclaim_delay_max_replacement_score_gap=float(payload.get("support_reclaim_delay_max_replacement_score_gap") or 6.0),
+        support_reclaim_delay_min_sell_day_range_pct=float(payload.get("support_reclaim_delay_min_sell_day_range_pct") or 5.0),
+        enable_contextual_peak_giveback_stop=_parse_bool(payload.get("enable_contextual_peak_giveback_stop"), default=False),
+        peak_giveback_min_high_gain_pct=float(payload.get("peak_giveback_min_high_gain_pct") or 0.12),
+        peak_giveback_max_current_gain_pct=float(payload.get("peak_giveback_max_current_gain_pct") or 0.03),
+        peak_giveback_drawdown_pct=float(payload.get("peak_giveback_drawdown_pct") or 0.07),
+        peak_giveback_min_holding_days=int(payload.get("peak_giveback_min_holding_days") or 5),
+        enable_low_suction_false_launch_watch_gate=_parse_bool(payload.get("enable_low_suction_false_launch_watch_gate"), default=False),
+        low_suction_false_launch_min_days=int(payload.get("low_suction_false_launch_min_days") or 3),
+        low_suction_false_launch_min_warning_level=int(payload.get("low_suction_false_launch_min_warning_level") or 2),
+        low_suction_false_launch_max_recovery_level=int(payload.get("low_suction_false_launch_max_recovery_level") or 1),
+        enable_missed_candidate_quality_rotation=_parse_bool(payload.get("enable_missed_candidate_quality_rotation"), default=False),
+        missed_rotation_min_score=float(payload.get("missed_rotation_min_score") or 98.0),
+        missed_rotation_min_score_gap=float(payload.get("missed_rotation_min_score_gap") or 10.0),
+        missed_rotation_max_held_return_pct=float(payload.get("missed_rotation_max_held_return_pct") or 1.0),
+        missed_rotation_min_held_days=int(payload.get("missed_rotation_min_held_days") or 4),
+        exclude_from_product_baseline=_parse_bool(payload.get("exclude_from_product_baseline"), default=False),
         symbols=_parse_symbols(payload.get("symbols") or payload.get("vt_symbols") or payload.get("vt_symbol")),
         included_boards=normalize_included_boards(payload.get("included_boards")),
         persist=bool(payload.get("persist") or False),

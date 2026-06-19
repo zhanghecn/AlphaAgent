@@ -46,6 +46,7 @@ def simulate_portfolio(
     positions: dict[str, Position] = {}
     pending_buys: list[dict[str, Any]] = []
     pending_sells: list[dict[str, Any]] = []
+    pending_reclaim_checks: dict[str, dict[str, Any]] = {}
     theoretical_positions: dict[str, Position] = {}
     trades: list[Trade] = []
     orders: list[dict[str, Any]] = []
@@ -231,12 +232,78 @@ def simulate_portfolio(
             orders.append(callbacks.order(current_day, order["vt_symbol"], "BUY", fill_price, volume, "filled", "entry_signal", order_raw))
             trades.append(Trade(current_day, order["vt_symbol"], "BUY", fill_price, volume, amount, fee, None, "entry_signal", entry_reason))
 
+        for vt_symbol, check in list(pending_reclaim_checks.items()):
+            if check["check_date"] != current_day:
+                continue
+            pending_reclaim_checks.pop(vt_symbol, None)
+            position = positions.get(vt_symbol)
+            if not position:
+                continue
+            bar = today_bars.get(vt_symbol)
+            if not bar:
+                continue
+            if support_reclaim_delay_recovered(position, bar, params):
+                raw = {
+                    "mode": "contextual_support_reclaim_delay_recovered",
+                    "signal_date": check["signal_date"].isoformat(),
+                    "check_date": current_day.isoformat(),
+                    "entry_date": position.entry_date.isoformat(),
+                    "reason": "contextual_support_reclaim_delay_recovered",
+                    "original_reason": check["reason"],
+                    "not_used_for_signal_score": True,
+                }
+                orders.append(
+                    callbacks.order(
+                        current_day,
+                        vt_symbol,
+                        "SELL",
+                        None,
+                        position.volume,
+                        "cancelled",
+                        "contextual_support_reclaim_delay_recovered",
+                        raw,
+                    )
+                )
+                continue
+            if index >= len(trading_days) - 1:
+                continue
+            next_day = trading_days[index + 1]
+            raw = {
+                "mode": "contextual_support_reclaim_delay_failed",
+                "signal_date": current_day.isoformat(),
+                "execute_date": next_day.isoformat(),
+                "entry_date": position.entry_date.isoformat(),
+                "reason": check["reason"],
+                "delayed_from_signal_date": check["signal_date"].isoformat(),
+                "not_used_for_signal_score": True,
+            }
+            pending_sells.append(
+                {
+                    "execute_date": next_day,
+                    "signal_date": current_day,
+                    "vt_symbol": vt_symbol,
+                    "reason": check["reason"],
+                    "raw": raw,
+                }
+            )
+            orders.append(callbacks.order(current_day, vt_symbol, "SELL", None, position.volume, "pending", check["reason"], raw))
+
         current_buy_signal_symbols: set[str] = set()
-        if params.enable_failed_launch_exit_stop and index < len(trading_days) - 1:
-            if score_cache is not None and current_day not in score_cache and session is None:
-                daily_candidates = []
-            else:
+        should_load_exit_candidates = (
+            params.enable_failed_launch_exit_stop
+            or contextual_failed_launch_exit_needs_replacement_lookup(positions, today_bars, params)
+            or (params.enable_contextual_support_reclaim_delay and bool(positions))
+        )
+        if should_load_exit_candidates and index < len(trading_days) - 1:
+            if params.enable_failed_launch_exit_stop:
+                if score_cache is not None and current_day not in score_cache and session is None:
+                    daily_candidates = []
+                else:
+                    daily_candidates = callbacks.score_day(session, bars_by_symbol, current_day, params, score_cache, score_context)
+            elif score_cache is not None and current_day in score_cache:
                 daily_candidates = callbacks.score_day(session, bars_by_symbol, current_day, params, score_cache, score_context)
+            else:
+                daily_candidates = []
             current_buy_signal_symbols = {
                 str(candidate.vt_symbol)
                 for candidate in daily_candidates or []
@@ -244,6 +311,7 @@ def simulate_portfolio(
             }
 
         pending_sell_symbols = {str(order["vt_symbol"]) for order in pending_sells}
+        pending_buy_symbols = {str(order["vt_symbol"]) for order in pending_buys}
         for vt_symbol, position in list(positions.items()):
             if vt_symbol in pending_sell_symbols:
                 continue
@@ -259,6 +327,14 @@ def simulate_portfolio(
                 current_day,
                 params,
                 current_buy_signal=vt_symbol in current_buy_signal_symbols,
+                replacement_available=has_strong_replacement_candidate(
+                    daily_candidates or [],
+                    positions,
+                    pending_buy_symbols,
+                    pending_sell_symbols,
+                    position,
+                    params,
+                ),
             )
             if not sell_reason:
                 continue
@@ -267,6 +343,53 @@ def simulate_portfolio(
             if index >= len(trading_days) - 1:
                 continue
             next_day = trading_days[index + 1]
+            replacement_score_gap = strongest_replacement_score_gap(
+                daily_candidates or [],
+                positions,
+                pending_buy_symbols,
+                pending_sell_symbols,
+                position,
+                params,
+            )
+            if params.enable_contextual_support_reclaim_delay and sell_reason == "support_stop":
+                delay_decision = should_delay_contextual_support_reclaim(
+                    exit_reason=sell_reason,
+                    position=position,
+                    bar=bar,
+                    params=params,
+                    replacement_score_gap=replacement_score_gap,
+                )
+                if delay_decision["delay"]:
+                    pending_reclaim_checks[vt_symbol] = {
+                        "check_date": next_day,
+                        "signal_date": current_day,
+                        "vt_symbol": vt_symbol,
+                        "reason": sell_reason,
+                    }
+                    raw = {
+                        "mode": "contextual_support_reclaim_delay",
+                        "signal_date": current_day.isoformat(),
+                        "check_date": next_day.isoformat(),
+                        "entry_date": position.entry_date.isoformat(),
+                        "reason": "contextual_support_reclaim_delay",
+                        "original_reason": sell_reason,
+                        "replacement_score_gap": replacement_score_gap,
+                        "delay_reasons": delay_decision["notes"],
+                        "not_used_for_signal_score": True,
+                    }
+                    orders.append(
+                        callbacks.order(
+                            current_day,
+                            vt_symbol,
+                            "SELL",
+                            None,
+                            position.volume,
+                            "review_pending",
+                            "contextual_support_reclaim_delay",
+                            raw,
+                        )
+                    )
+                    continue
             raw = {
                 "mode": "daily_close_sell_signal",
                 "signal_date": current_day.isoformat(),
@@ -409,6 +532,17 @@ def rotation_replacement_for_candidate(
 ) -> Position | None:
     if not allow_signal_rotation(candidate, params):
         return None
+    if params.enable_missed_candidate_quality_rotation:
+        replacement = missed_candidate_quality_replacement_for_candidate(
+            candidate,
+            positions,
+            pending_sell_symbols,
+            today_bars,
+            params,
+            signal_date,
+        )
+        if replacement is not None:
+            return replacement
     if is_stealth_low_suction_rotation_candidate(candidate):
         if portfolio_drawdown_pct(positions, today_bars, params.initial_cash) > STEALTH_LOW_SUCTION_ROTATION_MAX_PORTFOLIO_DRAWDOWN_PCT:
             return None
@@ -447,11 +581,86 @@ def execution_candidate_pool(candidates: list[Any], params: BacktestParams) -> l
     return candidate_lanes.select_dragon_pullback_execution_pool(candidates, params.candidate_limit, params.strategy)
 
 
+def has_strong_replacement_candidate(
+    candidates: list[Any],
+    positions: dict[str, Position],
+    pending_buy_symbols: set[str],
+    pending_sell_symbols: set[str],
+    position: Position,
+    params: BacktestParams,
+) -> bool:
+    if not params.enable_contextual_failed_launch_exit_stop:
+        return False
+
+    entry_score = entry_score_for_position(position)
+    held_symbols = set(positions)
+    for candidate in execution_candidate_pool(candidates, params):
+        vt_symbol = str(getattr(candidate, "vt_symbol", "") or "")
+        if not vt_symbol or vt_symbol in held_symbols:
+            continue
+        if vt_symbol in pending_buy_symbols or vt_symbol in pending_sell_symbols:
+            continue
+        if not bool(getattr(candidate, "entry_signal", False)):
+            continue
+        total_score = float(getattr(candidate, "total_score", 0) or 0)
+        if total_score < params.rotation_min_score:
+            continue
+        if entry_score and total_score < entry_score + params.rotation_min_score_gap:
+            continue
+        if not scoring.is_buy_candidate(candidate, params):
+            continue
+        return True
+    return False
+
+
+def strongest_replacement_score_gap(
+    candidates: list[Any],
+    positions: dict[str, Position],
+    pending_buy_symbols: set[str],
+    pending_sell_symbols: set[str],
+    position: Position,
+    params: BacktestParams,
+) -> float | None:
+    entry_score = entry_score_for_position(position)
+    held_symbols = set(positions)
+    best_gap: float | None = None
+    for candidate in execution_candidate_pool(candidates, params):
+        vt_symbol = str(getattr(candidate, "vt_symbol", "") or "")
+        if not vt_symbol or vt_symbol in held_symbols:
+            continue
+        if vt_symbol in pending_buy_symbols or vt_symbol in pending_sell_symbols:
+            continue
+        if not bool(getattr(candidate, "entry_signal", False)):
+            continue
+        if not scoring.is_buy_candidate(candidate, params):
+            continue
+        gap = float(getattr(candidate, "total_score", 0) or 0) - entry_score
+        if best_gap is None or gap > best_gap:
+            best_gap = gap
+    return best_gap
+
+
+def contextual_failed_launch_exit_needs_replacement_lookup(
+    positions: dict[str, Position],
+    today_bars: dict[str, Bar],
+    params: BacktestParams,
+) -> bool:
+    if params.strategy != DRAGON_PULLBACK_STRATEGY_ID or not params.enable_contextual_failed_launch_exit_stop:
+        return False
+    for vt_symbol, position in positions.items():
+        bar = today_bars.get(vt_symbol)
+        if bar and contextual_failed_launch_exit_preflight_applies(position, bar):
+            return True
+    return False
+
+
 def allow_signal_rotation(candidate: Any, params: BacktestParams) -> bool:
     if params.strategy != DRAGON_PULLBACK_STRATEGY_ID or not params.enable_signal_rotation:
         return False
     if not bool(getattr(candidate, "entry_signal", False)):
         return False
+    if params.enable_missed_candidate_quality_rotation and missed_candidate_quality_rotation_candidate(candidate, params):
+        return True
     if is_stealth_low_suction_rotation_candidate(candidate):
         return True
     if float(getattr(candidate, "total_score", 0) or 0) < params.rotation_min_score:
@@ -462,6 +671,59 @@ def allow_signal_rotation(candidate: Any, params: BacktestParams) -> bool:
     if evidence.get("fresh_tail_buy") is False:
         return False
     return True
+
+
+def missed_candidate_quality_rotation_candidate(candidate: Any, params: BacktestParams) -> bool:
+    if float(getattr(candidate, "total_score", 0) or 0) < params.missed_rotation_min_score:
+        return False
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if evidence.get("dragon_state") != "TAIL_BUY_READY" and str(evidence.get("entry_setup") or "") != "stealth_low_suction":
+        return False
+    if str(evidence.get("low_suction_launch_quality_bucket") or "") == "unconfirmed_buildup":
+        return False
+    if evidence.get("low_suction_launch_confirmed") is False and float(evidence.get("low_suction_days") or 0) >= 3:
+        return False
+    return True
+
+
+def missed_candidate_quality_replacement_for_candidate(
+    candidate: Any,
+    positions: dict[str, Position],
+    pending_sell_symbols: set[str],
+    today_bars: dict[str, Bar],
+    params: BacktestParams,
+    signal_date: date | None,
+) -> Position | None:
+    if not missed_candidate_quality_rotation_candidate(candidate, params):
+        return None
+    candidate_score = float(getattr(candidate, "total_score", 0) or 0)
+    rows: list[tuple[float, float, Position]] = []
+    for vt_symbol, position in positions.items():
+        if vt_symbol in pending_sell_symbols:
+            continue
+        if signal_date is not None and (signal_date - position.entry_date).days < params.missed_rotation_min_held_days:
+            continue
+        bar = today_bars.get(vt_symbol)
+        if not bar:
+            continue
+        holding_return_pct = position_return_pct(position, bar)
+        if holding_return_pct > params.missed_rotation_max_held_return_pct:
+            continue
+        entry_score = entry_score_for_position(position)
+        if candidate_score < entry_score + params.missed_rotation_min_score_gap:
+            continue
+        if current_same_stock_hold_signal(position, bar):
+            continue
+        rows.append((holding_return_pct, entry_score, position))
+    if not rows:
+        return None
+    rows.sort(key=lambda item: (item[0], item[1], item[2].entry_date, item[2].vt_symbol))
+    return rows[0][2]
+
+
+def current_same_stock_hold_signal(position: Position, bar: Bar) -> bool:
+    context = dragon_pullback_hold_context(position, bar)
+    return bool(context["low_base_accumulation"] or (context["ma_support_pullback"] and context["price_volume_sync"]))
 
 
 def low_efficiency_replacement_for_stealth_low_suction(
@@ -738,9 +1000,17 @@ def sell_reason_for_position(
     params: BacktestParams,
     *,
     current_buy_signal: bool = False,
+    replacement_available: bool = False,
 ) -> str | None:
     if params.strategy == DRAGON_PULLBACK_STRATEGY_ID:
-        return dragon_pullback_sell_reason(position, bar, current_day, params, current_buy_signal=current_buy_signal)
+        return dragon_pullback_sell_reason(
+            position,
+            bar,
+            current_day,
+            params,
+            current_buy_signal=current_buy_signal,
+            replacement_available=replacement_available,
+        )
     # Backtest derives absolute exit levels from params coefficients and the
     # position's cost/highest; realtime holdings instead read the stored price
     # levels directly. Both paths share factors.evaluate_exit as the single
@@ -763,6 +1033,7 @@ def dragon_pullback_sell_reason(
     params: BacktestParams,
     *,
     current_buy_signal: bool = False,
+    replacement_available: bool = False,
 ) -> str | None:
     """Trend-oriented exit for the dragon pullback strategy."""
 
@@ -797,6 +1068,11 @@ def dragon_pullback_sell_reason(
     drawdown_from_high = bar.close_price / position.highest_price - 1 if position.highest_price else 0
     high_gain = position.highest_price / cost_price - 1 if cost_price and position.highest_price else 0
     if (
+        params.enable_contextual_failed_launch_exit_stop
+        and contextual_failed_launch_exit_stop_applies(position, bar, gain, high_gain, hold_soft_exit, replacement_available)
+    ):
+        return "contextual_failed_launch_exit_stop"
+    if (
         params.enable_failed_launch_exit_stop
         and failed_launch_exit_stop_applies(position, bar, gain, high_gain, hold_soft_exit)
     ):
@@ -810,6 +1086,26 @@ def dragon_pullback_sell_reason(
         and drawdown_from_high <= -params.mid_profit_giveback_drawdown_pct
     ):
         return "mid_profit_giveback_stop"
+    if params.enable_contextual_peak_giveback_stop:
+        peak_decision = should_trigger_contextual_peak_giveback_stop(
+            highest_return_pct=high_gain,
+            current_return_pct=gain,
+            holding_days=(current_day - position.entry_date).days,
+            has_current_buy_or_hold_signal=hold_soft_exit,
+            market_warning_level=_float_or_none(reason.get("market_warning_level")) or 0,
+            support_reclaim_failed=peak_giveback_support_reclaim_failed(position, bar),
+            distribution_risk=bool(
+                reason.get("high_level_sideways_distribution_risk")
+                or reason.get("volume_stall_risk")
+                or reason.get("distribution_risk")
+            ),
+            min_high_gain_pct=params.peak_giveback_min_high_gain_pct,
+            max_current_gain_pct=params.peak_giveback_max_current_gain_pct,
+            drawdown_pct=params.peak_giveback_drawdown_pct,
+            min_holding_days=params.peak_giveback_min_holding_days,
+        )
+        if peak_decision["trigger"]:
+            return str(peak_decision["reason"])
     if high_gain >= 0.25 and gain <= 0.12 and drawdown_from_high <= -0.12:
         return "profit_protection_stop"
     if high_gain >= 0.18 and gain <= 0.08 and drawdown_from_high <= -0.10:
@@ -836,9 +1132,50 @@ def failed_launch_exit_stop_applies(
     high_gain: float,
     hold_soft_exit: bool,
 ) -> bool:
-    if position.visible_holding_bars < 3 or hold_soft_exit:
-        return False
     reason = position.reason if isinstance(position.reason, dict) else {}
+    return _failed_launch_exit_conditions_met(
+        visible_holding_bars=position.visible_holding_bars,
+        reason=reason,
+        bar=bar,
+        gain=gain,
+        high_gain=high_gain,
+        hold_soft_exit=hold_soft_exit,
+    )
+
+
+def contextual_failed_launch_exit_preflight_applies(position: Position, bar: Bar) -> bool:
+    cost_price = position.cost_price
+    if not cost_price:
+        return False
+    projected_highest_price = max(position.highest_price, bar.high_price)
+    gain = bar.close_price / cost_price - 1
+    high_gain = projected_highest_price / cost_price - 1 if projected_highest_price else 0
+    hold_context = dragon_pullback_hold_context(position, bar)
+    hold_soft_exit = hold_context["low_base_accumulation"] or (
+        hold_context["ma_support_pullback"] and hold_context["price_volume_sync"]
+    )
+    reason = position.reason if isinstance(position.reason, dict) else {}
+    return _failed_launch_exit_conditions_met(
+        visible_holding_bars=position.visible_holding_bars + 1,
+        reason=reason,
+        bar=bar,
+        gain=gain,
+        high_gain=high_gain,
+        hold_soft_exit=hold_soft_exit,
+    )
+
+
+def _failed_launch_exit_conditions_met(
+    *,
+    visible_holding_bars: int,
+    reason: dict[str, Any],
+    bar: Bar,
+    gain: float,
+    high_gain: float,
+    hold_soft_exit: bool,
+) -> bool:
+    if visible_holding_bars < 3 or hold_soft_exit:
+        return False
     setup = str(reason.get("entry_setup") or reason.get("setup_type") or "")
     if setup not in {"dragon_pullback", "stealth_low_suction"}:
         return False
@@ -856,6 +1193,111 @@ def failed_launch_exit_stop_applies(
         and bar.close_price < min(ma10, ma20) * 0.995
     )
     return weak_close and (failed_support_reclaim or failed_ma_reclaim)
+
+
+def contextual_failed_launch_exit_stop_applies(
+    position: Position,
+    bar: Bar,
+    gain: float,
+    high_gain: float,
+    hold_soft_exit: bool,
+    replacement_available: bool,
+) -> bool:
+    if not replacement_available:
+        return False
+    return failed_launch_exit_stop_applies(position, bar, gain, high_gain, hold_soft_exit)
+
+
+def should_delay_contextual_support_reclaim(
+    *,
+    exit_reason: str,
+    position: Position,
+    bar: Bar,
+    params: BacktestParams,
+    replacement_score_gap: float | None,
+) -> dict[str, Any]:
+    """Return whether a support stop should wait one close for reclaim."""
+
+    if exit_reason != "support_stop":
+        return {"delay": False, "notes": []}
+    if bar.close_price <= position.cost_price * (1 - params.stop_loss_pct - 0.02):
+        return {"delay": False, "notes": ["破位超过硬止损缓冲"]}
+    high_gain = position.highest_price / position.cost_price - 1 if position.cost_price and position.highest_price else 0.0
+    if high_gain < 0:
+        return {"delay": False, "notes": ["持仓路径没有可见正浮盈"]}
+    range_pct = (bar.high_price / bar.low_price - 1) * 100 if bar.low_price else 0.0
+    if range_pct < params.support_reclaim_delay_min_sell_day_range_pct:
+        return {"delay": False, "notes": ["卖出日振幅不足，不像恐慌洗盘"]}
+    if replacement_score_gap is not None and replacement_score_gap > params.support_reclaim_delay_max_replacement_score_gap:
+        return {"delay": False, "notes": ["存在更强替换候选"]}
+    reason = position.reason if isinstance(position.reason, dict) else {}
+    warning = _float_or_none(reason.get("market_warning_level")) or 0
+    regime = str(reason.get("dynamic_market_regime") or "")
+    if warning > params.support_reclaim_delay_max_warning_level and regime not in {"mainline_pullback", "choppy_rotation"}:
+        return {"delay": False, "notes": ["市场风险过高"]}
+    if reason.get("high_level_sideways_distribution_risk") or reason.get("volume_stall_risk"):
+        return {"delay": False, "notes": ["存在高位派发或放量滞涨风险"]}
+    return {
+        "delay": True,
+        "notes": ["支撑止损疑似恐慌洗盘，且无明显更强替换候选，等待一次支撑收复"],
+        "not_used_for_signal_score": True,
+    }
+
+
+def support_reclaim_delay_recovered(position: Position, bar: Bar, params: BacktestParams) -> bool:
+    del params
+    reason = position.reason if isinstance(position.reason, dict) else {}
+    support = _float_or_none(reason.get("support_price"))
+    ma10 = _float_or_none(reason.get("ma10"))
+    ma20 = _float_or_none(reason.get("ma20"))
+    reclaimed_support = bool(support is not None and bar.close_price >= support * 0.99)
+    reclaimed_ma10 = bool(ma10 is not None and bar.close_price >= ma10 * 0.99)
+    held_ma20 = bool(ma20 is not None and bar.close_price >= ma20 * 0.99)
+    return reclaimed_support or reclaimed_ma10 or held_ma20
+
+
+def should_trigger_contextual_peak_giveback_stop(
+    *,
+    highest_return_pct: float,
+    current_return_pct: float,
+    holding_days: int,
+    has_current_buy_or_hold_signal: bool,
+    market_warning_level: float | int,
+    support_reclaim_failed: bool,
+    distribution_risk: bool,
+    min_high_gain_pct: float = 0.12,
+    max_current_gain_pct: float = 0.03,
+    drawdown_pct: float = 0.07,
+    min_holding_days: int = 5,
+) -> dict[str, Any]:
+    """Return a research-only peak-giveback exit decision."""
+
+    giveback = float(highest_return_pct or 0) - float(current_return_pct or 0)
+    trigger = bool(
+        holding_days >= min_holding_days
+        and highest_return_pct >= min_high_gain_pct
+        and current_return_pct <= max_current_gain_pct
+        and giveback >= drawdown_pct
+        and not has_current_buy_or_hold_signal
+        and (support_reclaim_failed or distribution_risk or float(market_warning_level or 0) >= 3)
+    )
+    return {
+        "trigger": trigger,
+        "reason": "contextual_peak_giveback_stop" if trigger else None,
+        "giveback_from_peak_pct": giveback,
+        "not_used_for_signal_score": True,
+    }
+
+
+def peak_giveback_support_reclaim_failed(position: Position, bar: Bar) -> bool:
+    reason = position.reason if isinstance(position.reason, dict) else {}
+    ma10 = _float_or_none(reason.get("ma10"))
+    ma20 = _float_or_none(reason.get("ma20"))
+    support = _float_or_none(reason.get("support_price"))
+    failed_support = bool(support is not None and bar.close_price < support * 0.99)
+    failed_ma = bool(ma10 is not None and bar.close_price < ma10 * 0.985)
+    failed_mid_ma = bool(ma20 is not None and bar.close_price < ma20 * 0.99)
+    return failed_support or failed_ma or failed_mid_ma
 
 
 def dragon_pullback_hold_context(position: Position, bar: Bar) -> dict[str, bool]:

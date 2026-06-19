@@ -13,6 +13,12 @@
 - `alphaagent_pullback_low_suction_strategy_research.md`: 回踩低吸/龙回头策略优化研究，审计六只样本股、现有策略缺陷、游资打法量化映射和新状态机方案。
 - `alphaagent_dragon_pullback_implementation_plan.md`: `mainline_dragon_pullback` 第一版实现计划，说明新增策略、卖出逻辑、测试和验证范围。
 - `alphaagent_strategy_drawdown_optimization_plan.md`: 下一阶段回撤、卖出和候选排序优化计划，要求先补 MAE/MFE/卖后反弹诊断，再做全局回测验证后决定是否保留策略改动。
+- `alphaagent_low_suction_factor_validation_plan.md`: 低吸/龙回头因子验证执行计划，说明内部双入场引擎、候选特征表、固定持有后验表、因子分桶胜率、统一策略时间线和默认关闭实验晋升标准。
+- `alphaagent_quant_strategy_next_execution_plan.md`: 下一阶段量化策略验证执行计划，先修正产品基线选择，再补细粒度特征表、买卖问题归因、股票详情统一时间线和默认关闭实验门槛。
+- `alphaagent_quant_feature_validation_execution_plan.md`: 量化策略特征表校验执行计划，说明除全局回测外如何用候选特征、固定持有后验、真实组合归因、市场/主线环境、低吸生命周期和替换交易质量判断收益提升或亏损降低的真实来源。
+- `alphaagent_quant_feature_drilldown_next_execution_plan.md`: 后续细粒度特征校验执行计划，明确候选信号日特征、固定持有后验、真实组合归因、卖点/替换质量、动态大盘/主线画像、低吸/龙回头生命周期、前端整合和默认关闭实验晋升门槛。
+- `alphaagent_quant_next_experiment_execution_plan.md`: 下一轮默认关闭实验执行计划，在已有特征审计之后继续拆 `candidate_not_planned`、重点股票逐日证据、支撑止损延迟确认、高浮盈回撤保护、低吸假启动观察/降权和满仓换仓质量，要求用统一报告证明收益提升或亏损降低来源。
+- `alphaagent_quant_feature_table_execution_plan.md`: 下一轮特征表校验与默认关闭实验总入口，明确除全局回测外要用哪些候选、生命周期、固定后验、真实执行、卖点替换、市场主线和机会成本表做细致比对，以及实验晋升门槛。
 
 ## 维护规则
 

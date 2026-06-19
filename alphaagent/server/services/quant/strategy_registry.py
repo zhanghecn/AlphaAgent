@@ -138,6 +138,10 @@ MAINLINE_DRAGON_PULLBACK = QuantStrategy(
     },
     evidence_labels={
         "dragon_state": "龙回头状态",
+        "entry_family": "入场家族",
+        "entry_family_label": "入场类型",
+        "low_position_reclaim_type": "低位承接类型",
+        "low_position_reclaim_label": "低位承接标签",
         "support_type": "承接类型",
         "ma5_distance_pct": "MA5距离",
         "ma10_distance_pct": "MA10距离",

@@ -568,6 +568,7 @@ def normalize_quant_evidence(value: dict[str, Any]) -> dict[str, Any]:
     _normalize_low_suction_stage(evidence)
     _normalize_low_suction_launch_quality(evidence)
     _normalize_low_suction_dragon_context(evidence)
+    _normalize_entry_family_context(evidence)
     return evidence
 
 
@@ -675,6 +676,12 @@ def _normalize_low_suction_dragon_context(evidence: dict[str, Any]) -> None:
     from alphaagent.server.services.quant.low_suction_quality import ensure_low_suction_dragon_context
 
     ensure_low_suction_dragon_context(evidence)
+
+
+def _normalize_entry_family_context(evidence: dict[str, Any]) -> None:
+    from alphaagent.server.services.quant.low_suction_quality import ensure_entry_family_context
+
+    ensure_entry_family_context(evidence)
 
 
 def signal_mapping_action_payload(row: dict[str, Any], min_entry_score: float | None = None) -> dict[str, Any]:

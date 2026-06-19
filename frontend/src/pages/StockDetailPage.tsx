@@ -24,6 +24,7 @@ import {
   fetchBacktestPathDiagnostics,
   fetchBacktestSignalEvents,
   fetchBacktestSymbolDetail,
+  fetchBacktestStrategyTimeline,
   fetchBacktests,
   fetchLatestSymbolBacktest,
   fetchQuantStrategies,
@@ -36,6 +37,8 @@ import {
   type BacktestOrderEvent,
   type BacktestPathDiagnosticRow,
   type BacktestPathDiagnosticsResponse,
+  type StrategyTimelineEvent,
+  type StrategyTimelineResponse,
   type BacktestSymbolDetail,
   type BacktestTrade,
   type BacktestTradeAttribution,
@@ -76,7 +79,6 @@ export function StockDetailPage() {
   const { vtSymbol } = useParams<{ vtSymbol: string }>();
   const singleBacktestStrategy = DEFAULT_BACKTEST_PARAMS.strategy;
   const [selectedBacktestMarkerId, setSelectedBacktestMarkerId] = useState<string | null>(null);
-  const [quantViewMode, setQuantViewMode] = useState<QuantViewMode>("trade_replay");
 
   const quoteQuery = useQuery({
     queryKey: ["stock-detail", vtSymbol],
@@ -172,6 +174,12 @@ export function StockDetailPage() {
   const portfolioPathDiagnosticsQuery = useQuery({
     queryKey: ["portfolioBacktestPathDiagnostics", latestPortfolioBacktestId, vtSymbol],
     queryFn: () => fetchBacktestPathDiagnostics(Number(latestPortfolioBacktestId), vtSymbol!),
+    enabled: Boolean(vtSymbol && latestPortfolioBacktestId),
+    staleTime: 60_000,
+  });
+  const strategyTimelineQuery = useQuery({
+    queryKey: ["portfolioBacktestStrategyTimeline", latestPortfolioBacktestId, vtSymbol],
+    queryFn: () => fetchBacktestStrategyTimeline(Number(latestPortfolioBacktestId), vtSymbol!),
     enabled: Boolean(vtSymbol && latestPortfolioBacktestId),
     staleTime: 60_000,
   });
@@ -284,7 +292,13 @@ export function StockDetailPage() {
     },
     [autoReviewMarkers, latestQuantStateQuery.data, portfolioSignalMarkers]
   );
-  const backtestMarkers = quantViewMode === "trade_replay" ? tradeReplayMarkers : candidateSignalMarkers;
+  const strategyTimelineMarkers = useMemo(
+    () => strategyTimelineToMarkers(strategyTimelineQuery.data),
+    [strategyTimelineQuery.data]
+  );
+  const backtestMarkers = strategyTimelineMarkers.length
+    ? strategyTimelineMarkers
+    : sortMarkers([...tradeReplayMarkers, ...candidateSignalMarkers]);
   const selectedBacktestMarker = useMemo(
     () => backtestMarkers.find((marker) => marker.id === selectedBacktestMarkerId) ?? defaultSelectedMarker(backtestMarkers),
     [backtestMarkers, selectedBacktestMarkerId]
@@ -357,11 +371,12 @@ export function StockDetailPage() {
       <SingleStockBacktestPanel
         strategy={singleBacktestStrategy}
         strategies={strategyOptions}
-        quantViewMode={quantViewMode}
-        onQuantViewModeChange={setQuantViewMode}
         quantState={latestQuantStateQuery.data}
         portfolioBacktest={latestPortfolioBacktest}
         portfolioDetail={portfolioSymbolDetailQuery.data}
+        strategyTimeline={strategyTimelineQuery.data}
+        isStrategyTimelineLoading={strategyTimelineQuery.isLoading || strategyTimelineQuery.isFetching}
+        strategyTimelineError={strategyTimelineQuery.error}
         portfolioPathDiagnostics={portfolioPathDiagnosticsQuery.data}
         candidateTrace={candidateTraceQuery.data}
         candidateTraceDate={selectedCandidateTraceDate}
@@ -392,7 +407,7 @@ export function StockDetailPage() {
           selectedMarkerId={selectedBacktestMarker?.id ?? null}
           onMarkerClick={handleBacktestMarkerClick}
         />
-        <BacktestMarkerInsight marker={selectedBacktestMarker} mode={quantViewMode} />
+        <BacktestMarkerInsight marker={selectedBacktestMarker} />
       </div>
 
       {/* Technical indicators */}
@@ -440,11 +455,12 @@ export function StockDetailPage() {
 function SingleStockBacktestPanel({
   strategy,
   strategies,
-  quantViewMode,
-  onQuantViewModeChange,
   quantState,
   portfolioBacktest,
   portfolioDetail,
+  strategyTimeline,
+  isStrategyTimelineLoading,
+  strategyTimelineError,
   portfolioPathDiagnostics,
   candidateTrace,
   candidateTraceDate,
@@ -461,11 +477,12 @@ function SingleStockBacktestPanel({
 }: {
   strategy: string;
   strategies: QuantStrategyOption[];
-  quantViewMode: QuantViewMode;
-  onQuantViewModeChange: (mode: QuantViewMode) => void;
   quantState?: SymbolLatestQuantState;
   portfolioBacktest?: BacktestRun | null;
   portfolioDetail?: BacktestSymbolDetail | null;
+  strategyTimeline?: StrategyTimelineResponse | null;
+  isStrategyTimelineLoading: boolean;
+  strategyTimelineError: unknown;
   portfolioPathDiagnostics?: BacktestPathDiagnosticsResponse | null;
   candidateTrace?: BacktestCandidateTrace | null;
   candidateTraceDate?: string | null;
@@ -500,31 +517,12 @@ function SingleStockBacktestPanel({
             策略复盘
           </h3>
           <p className="mt-1 text-sm text-muted-foreground">
-            优先读取最新组合回测的实际买卖；若组合没有该票成交，再退回全局信号记录。BUY 信号不等于实际购买。
+            候选、计划、买拒、成交和卖出按日期合并展示。BUY 信号不等于实际购买。
           </p>
         </div>
         <div className="flex flex-wrap items-end gap-3">
           <div className="text-sm">
-            <div className="text-xs text-muted-foreground">视图</div>
-            <div className="mt-1 flex rounded-md border bg-muted/20 p-0.5">
-              <button
-                type="button"
-                className={cn("h-8 rounded px-2 text-sm", quantViewMode === "trade_replay" ? "bg-background shadow-sm" : "text-muted-foreground")}
-                onClick={() => onQuantViewModeChange("trade_replay")}
-              >
-                交易复盘
-              </button>
-              <button
-                type="button"
-                className={cn("h-8 rounded px-2 text-sm", quantViewMode === "candidate_signals" ? "bg-background shadow-sm" : "text-muted-foreground")}
-                onClick={() => onQuantViewModeChange("candidate_signals")}
-              >
-                候选信号
-              </button>
-            </div>
-          </div>
-          <div className="text-sm">
-            <div className="text-xs text-muted-foreground">策略</div>
+            <div className="text-xs text-muted-foreground">策略时间线</div>
             <div className="mt-1 flex h-9 items-center rounded-md border bg-muted/30 px-2">
               {strategies.find((item) => item.id === strategy)?.name ?? "主线龙回头回踩低吸"}
             </div>
@@ -532,10 +530,13 @@ function SingleStockBacktestPanel({
         </div>
       </div>
       <div className="mt-3 rounded-md border bg-muted/20 p-3 text-sm text-muted-foreground">
-        {quantViewMode === "trade_replay"
-          ? "当前 K 线只显示策略复盘的买入、卖出和拒绝执行标记；收益按配对买卖计算。"
-          : "当前 K 线只显示候选/理论信号标记；高分信号用于复核形态，不代表组合已经买入。"}
+        当前 K 线优先显示统一策略时间线标记；如果组合时间线暂不可用，则回退显示现有买卖和候选标记。
       </div>
+      <StrategyTimelinePanel
+        timeline={strategyTimeline}
+        isLoading={isStrategyTimelineLoading}
+        error={strategyTimelineError}
+      />
       <CandidateTraceStateSplit
         trace={candidateTrace}
         traceDate={candidateTraceDate}
@@ -1081,13 +1082,11 @@ function ReplayRejectReasonList({ rows }: { rows: Array<{ reason: string; count:
   );
 }
 
-function BacktestMarkerInsight({ marker, mode }: { marker: KlineMarker | null; mode: QuantViewMode }) {
+function BacktestMarkerInsight({ marker }: { marker: KlineMarker | null }) {
   if (!marker) {
     return (
       <div className="mt-4 border-t pt-3 text-sm text-muted-foreground">
-        {mode === "trade_replay"
-          ? "当前视图没有策略买卖执行标记；切换到候选信号可查看理论信号。"
-          : "当前视图没有候选信号标记；切换到交易复盘可查看实际买卖执行。"}
+        当前没有可显示的策略时间线标记。
       </div>
     );
   }
@@ -1133,6 +1132,121 @@ function BacktestMarkerInsight({ marker, mode }: { marker: KlineMarker | null; m
   );
 }
 
+function StrategyTimelinePanel({
+  timeline,
+  isLoading,
+  error,
+}: {
+  timeline?: StrategyTimelineResponse | null;
+  isLoading: boolean;
+  error: unknown;
+}) {
+  const rows = (timeline?.items ?? []).slice(-8).reverse();
+  if (isLoading) {
+    return <div className="mt-3 rounded-md border p-3 text-sm text-muted-foreground">正在读取策略时间线...</div>;
+  }
+  if (error) {
+    return (
+      <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+        策略时间线暂不可用，页面已回退到现有买卖和候选标记。
+      </div>
+    );
+  }
+  if (!rows.length) return null;
+  return (
+    <div className="mt-3 overflow-hidden rounded-md border">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-28">日期</TableHead>
+            <TableHead>状态</TableHead>
+            <TableHead>分数/排名</TableHead>
+            <TableHead>原因</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row) => (
+            <TableRow key={`${row.date}-${row.markers?.join("-") ?? ""}`}>
+              <TableCell className="font-mono text-xs">{row.date}</TableCell>
+              <TableCell>{timelineStatusLabel(row)}</TableCell>
+              <TableCell>{timelineScoreLabel(row)}</TableCell>
+              <TableCell className="text-muted-foreground">{timelineReasonLabel(row)}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+function timelineStatusLabel(row: StrategyTimelineEvent) {
+  if (row.sell) return "卖出成交";
+  if (row.execution) {
+    const status = getRawText(row.execution, "status");
+    if (status === "planned_not_ordered" || status === "rejected") return "买入未成交";
+    return getRawText(row.execution, "side") === "SELL" ? "卖出执行" : "买入成交";
+  }
+  if (row.cluster) return "低吸蓄势观察";
+  if (row.plan) return "执行计划";
+  if (row.candidate) return getRawText(row.candidate, "action") === "BUY" ? "候选买点" : "观察/买拒";
+  return "策略事件";
+}
+
+function timelineScoreLabel(row: StrategyTimelineEvent) {
+  const score = getRawNumber(row.candidate ?? {}, "score") ?? getRawNumber(row.candidate ?? {}, "total_score") ?? getRawNumber(row.plan ?? {}, "score");
+  const rank = getRawNumber(row.candidate ?? {}, "rank");
+  return [score == null ? "" : `分 ${formatNumber(score, 1)}`, rank == null ? "" : `排 ${formatNumber(rank, 0)}`].filter(Boolean).join(" / ") || "--";
+}
+
+function timelineReasonLabel(row: StrategyTimelineEvent) {
+  if (row.sell) return exitReasonLabel(getRawText(row.sell, "reason"));
+  if (row.execution) return portfolioReasonLabel(getRawText(row.execution, "reason_code"));
+  if (row.cluster) return "蓄势簇，等待首个有效上拉";
+  if (row.candidate) return getRawText(row.candidate, "entry_family_label") ?? getRawText(row.candidate, "low_position_reclaim_label") ?? "--";
+  return "--";
+}
+
+function timelineCandidateText(candidate: Record<string, unknown>, date: string) {
+  const score = getRawNumber(candidate, "score") ?? getRawNumber(candidate, "total_score");
+  const rank = getRawNumber(candidate, "rank");
+  const family = getRawText(candidate, "entry_family_label");
+  return [
+    `${date} 识别候选`,
+    family,
+    score == null ? "" : `总分 ${formatNumber(score, 1)}`,
+    rank == null ? "" : `排名 ${formatNumber(rank, 0)}`,
+  ].filter(Boolean).join("；");
+}
+
+function timelineCandidateEvidence(candidate: Record<string, unknown>): KlineMarker["evidence"] {
+  const rows: Array<{ label: string; value: string; valueClass?: string }> = [];
+  const rank = getRawNumber(candidate, "rank");
+  const score = getRawNumber(candidate, "score") ?? getRawNumber(candidate, "total_score");
+  pushNumberEvidence(rows, "评分", score, 1);
+  pushNumberEvidence(rows, "排名", rank, 0);
+  const family = getRawText(candidate, "entry_family_label");
+  if (family) rows.push({ label: "入场类型", value: family });
+  pushNumberEvidence(rows, "低吸天数", getRawNumber(candidate, "low_suction_days"), 0);
+  return rows;
+}
+
+function timelineExecutionEvidence(execution: Record<string, unknown>): KlineMarker["evidence"] {
+  const rows: Array<{ label: string; value: string; valueClass?: string }> = [];
+  const reason = getRawText(execution, "reason_code");
+  if (reason) rows.push({ label: "原因", value: portfolioReasonLabel(reason) });
+  pushPriceEvidence(rows, "执行价", getRawNumber(execution, "price"));
+  return rows;
+}
+
+function timelineSellEvidence(sell: Record<string, unknown>): KlineMarker["evidence"] {
+  const rows: Array<{ label: string; value: string; valueClass?: string }> = [];
+  const reason = getRawText(sell, "reason");
+  if (reason) rows.push({ label: "原因", value: exitReasonLabel(reason) });
+  pushPriceEvidence(rows, "卖出价", getRawNumber(sell, "price"));
+  pushPctEvidence(rows, "收益", getRawNumber(sell, "pnl"));
+  return rows;
+}
+
 function InsightBlock({ title, text }: { title: string; text?: string }) {
   return (
     <div className="rounded-md border bg-muted/20 p-3">
@@ -1153,7 +1267,6 @@ function markerBadgeLabel(marker: KlineMarker) {
 }
 
 type LatestQuantSignalRow = NonNullable<NonNullable<SymbolLatestQuantState["signal"]>["latest_entry_signal"]>;
-type QuantViewMode = "trade_replay" | "candidate_signals";
 
 function strategyMinEntryScore(strategies: QuantStrategyOption[], strategyId: string) {
   return strategies.find((item) => item.id === strategyId)?.default_min_entry_score ?? DEFAULT_BACKTEST_PARAMS.min_entry_score;
@@ -1236,6 +1349,7 @@ function realExecutionStateLabel(trace?: BacktestCandidateTrace | null, hasOrder
   if (hasOrderOrTrade) return "有订单记录";
   if (trace.status === "planned_not_ordered") return "未下单";
   if (trace.status === "candidate_not_planned") return "未进入真实买入";
+  if (trace.status === "signal_snapshot_not_persisted") return "信号未进计划";
   return trace.status || "--";
 }
 
@@ -1498,6 +1612,97 @@ function backtestSignalEventsToMarkers(events: BacktestSignalEvent[]): KlineMark
     if (dateCompare !== 0) return dateCompare;
     return markerSortRank(left) - markerSortRank(right);
   });
+}
+
+function strategyTimelineToMarkers(timeline?: StrategyTimelineResponse | null): KlineMarker[] {
+  const items = timeline?.items ?? [];
+  return sortMarkers(items.flatMap((item, index) => strategyTimelineEventToMarkers(item, index)));
+}
+
+function strategyTimelineEventToMarkers(item: StrategyTimelineEvent, index: number): KlineMarker[] {
+  const markers: KlineMarker[] = [];
+  const displayMarkers = new Set(item.display_markers ?? []);
+  if (item.candidate && (displayMarkers.size === 0 || displayMarkers.has("BUY_SIGNAL") || displayMarkers.has("BUY_REJECTED"))) {
+    const action = getRawText(item.candidate, "action");
+    const isBuySignal = displayMarkers.size ? displayMarkers.has("BUY_SIGNAL") : action === "BUY";
+    markers.push({
+      id: `strategy-timeline-candidate-${item.vt_symbol}-${item.date}-${index}`,
+      time: item.date,
+      side: "BUY",
+      markerKind: isBuySignal ? "signal" : "rejected",
+      status: isBuySignal ? "signal" : "rejected",
+      title: isBuySignal ? "BUY 信号" : (item.cluster ? "低吸蓄势观察" : "买入观察"),
+      text: isBuySignal ? "信号" : "买拒",
+      signalDate: item.date,
+      tradeDate: item.date,
+      reasonLabel: item.cluster ? "低吸蓄势观察" : (getRawText(item.candidate, "entry_family_label") ?? "候选"),
+      strategy: item.cluster ? timelineClusterText(item) : timelineCandidateText(item.candidate, item.date),
+      signalText: item.cluster ? timelineClusterText(item) : timelineCandidateText(item.candidate, item.date),
+      executionText: item.cluster
+        ? "这是低吸蓄势簇证据，不是关键买点；后续首个有效上拉才会显示为 BUY 信号。"
+        : "候选信号需要经过执行日、排名、持仓和换仓约束后才可能成交。",
+      reasonText: item.cluster ? "低吸蓄势尚未确认启动。" : (getRawText(item.candidate, "entry_family_label") ?? "候选识别"),
+      evidence: timelineCandidateEvidence(item.candidate),
+      raw: item.candidate,
+    });
+  }
+  if (item.execution && (displayMarkers.size === 0 || displayMarkers.has("BUY_FILLED") || displayMarkers.has("BUY_REJECTED"))) {
+    const side = getRawText(item.execution, "side") ?? "BUY";
+    const status = getRawText(item.execution, "status");
+    const rejected = status === "planned_not_ordered" || status === "rejected";
+    const reason = getRawText(item.execution, "reason_code");
+    markers.push({
+      id: `strategy-timeline-execution-${item.vt_symbol}-${item.date}-${side}-${index}`,
+      time: item.date,
+      side,
+      markerKind: rejected ? "rejected" : "trade",
+      status: rejected ? "rejected" : "filled",
+      title: rejected ? `${side === "SELL" ? "卖出" : "买入"}拒绝：${portfolioReasonLabel(reason)}` : (side === "SELL" ? "卖出成交" : "买入成交"),
+      text: rejected ? (side === "SELL" ? "卖拒" : "买拒") : (side === "SELL" ? "卖" : "买"),
+      tradeDate: item.date,
+      executeDate: item.date,
+      price: getRawNumber(item.execution, "price"),
+      reason,
+      reasonLabel: portfolioReasonLabel(reason),
+      strategy: rejected ? `执行日 ${item.date} 未成交：${portfolioReasonLabel(reason)}。` : `执行日 ${item.date} 成交。`,
+      executionText: rejected ? `执行状态：拒绝，原因 ${portfolioReasonLabel(reason)}。` : `执行状态：成交，价格 ${formatPrice(getRawNumber(item.execution, "price"))}。`,
+      reasonText: markerReasonTextFromReason(reason),
+      evidence: timelineExecutionEvidence(item.execution),
+      raw: item.execution,
+    });
+  }
+  if (item.sell && (displayMarkers.size === 0 || displayMarkers.has("SELL_FILLED"))) {
+    const reason = getRawText(item.sell, "reason");
+    markers.push({
+      id: `strategy-timeline-sell-${item.vt_symbol}-${item.date}-${index}`,
+      time: item.date,
+      side: "SELL",
+      markerKind: "trade",
+      status: "filled",
+      title: `卖出成交：${exitReasonLabel(reason)}`,
+      text: "卖",
+      tradeDate: item.date,
+      executeDate: item.date,
+      price: getRawNumber(item.sell, "price"),
+      returnPct: getRawNumber(item.sell, "pnl"),
+      reason,
+      reasonLabel: exitReasonLabel(reason),
+      strategy: `执行日 ${item.date} 卖出成交。`,
+      executionText: `卖出成交，价格 ${formatPrice(getRawNumber(item.sell, "price"))}。`,
+      reasonText: exitReasonLabel(reason),
+      evidence: timelineSellEvidence(item.sell),
+      raw: item.sell,
+    });
+  }
+  return markers;
+}
+
+function timelineClusterText(item: StrategyTimelineEvent) {
+  const cluster = safeRaw(item.cluster);
+  const start = getRawText(cluster, "cluster_start_date") ?? item.date;
+  const end = getRawText(cluster, "cluster_end_date") ?? item.date;
+  const size = getRawNumber(cluster, "cluster_size");
+  return `${start} 至 ${end} 低吸蓄势观察${size == null ? "" : `，共 ${formatNumber(size, 0)} 天`}；未作为关键 BUY 点。`;
 }
 
 function backtestSignalEventToMarker(event: BacktestSignalEvent, index: number): KlineMarker {

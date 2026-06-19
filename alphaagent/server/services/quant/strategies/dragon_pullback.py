@@ -21,6 +21,7 @@ from alphaagent.server.services.quant.factors import (
     score_trend_quality,
 )
 from alphaagent.server.services.quant.low_suction_quality import (
+    ensure_entry_family_context,
     low_suction_launch_quality_bucket,
     low_suction_launch_quality_label,
 )
@@ -963,7 +964,7 @@ def _evidence(
             "pullback_days": features.pullback_days,
         }
     )
-    return {
+    payload = {
         "status": "ready",
         "return_5d": features.return_5d,
         "return_20d": features.return_20d,
@@ -1076,6 +1077,8 @@ def _evidence(
         "selection_rule": "daily_close_visible_signal",
         "entry_setup": setup_type,
     }
+    ensure_entry_family_context(payload)
+    return payload
 
 
 def _score_breakdown(

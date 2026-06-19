@@ -118,6 +118,88 @@ def market_context_for_date(session: Any, schema: Any, trade_date: date) -> dict
     return compute_market_contexts(session, schema, [trade_date]).get(trade_date, _fallback_context(trade_date)).to_dict()
 
 
+def classify_dynamic_market_context(
+    *,
+    index_trend: dict[str, float | str | None],
+    breadth: dict[str, float | int | None],
+    sector_flow: dict[str, float | str | None],
+    stock_theme_alignment: str | None,
+) -> dict[str, Any]:
+    """Classify market/mainline state for audit displays only."""
+
+    index_return_20d = _safe_float(index_trend.get("return_20d"))
+    index_return_5d = _safe_float(index_trend.get("return_5d"))
+    drawdown_20d = _safe_float(index_trend.get("drawdown_20d_pct") or index_trend.get("drawdown_pct"))
+    ma20_slope = _safe_float(index_trend.get("ma20_slope_pct"))
+    breadth_score = _safe_float(breadth.get("breadth_score"))
+    up_ratio = _safe_float(breadth.get("up_ratio"))
+    limit_down_count = _safe_float(breadth.get("limit_down_count")) or 0.0
+    theme_strength = _safe_float(sector_flow.get("theme_strength") or sector_flow.get("dominant_theme_strength")) or 0.0
+    fund_flow_state = _fund_flow_state_from_audit_payload(sector_flow)
+    dominant_theme = sector_flow.get("dominant_theme")
+    alignment = str(stock_theme_alignment or "unknown")
+    explain: list[str] = []
+
+    market_warning_level = 0
+    if limit_down_count >= 30 or (drawdown_20d is not None and drawdown_20d <= -8) or fund_flow_state == "panic_outflow":
+        market_warning_level = 4
+        explain.append("市场出现强风险或恐慌流出")
+    elif (index_return_20d is not None and index_return_20d <= -5) or (breadth_score is not None and breadth_score < 35) or fund_flow_state == "outflow":
+        market_warning_level = 3
+        explain.append("大盘或资金状态向下")
+    elif (index_return_20d is not None and index_return_20d < 0) or (breadth_score is not None and breadth_score < 45):
+        market_warning_level = 2
+        explain.append("市场分歧，风险观察")
+    elif fund_flow_state == "insufficient_data":
+        explain.append("资金流历史不足")
+
+    market_recovery_level = 0
+    if fund_flow_state == "recovery" and (index_return_5d is None or index_return_5d >= 0):
+        market_recovery_level = 3
+        explain.append("资金回流")
+    elif index_return_5d is not None and index_return_5d > 1.5 and (breadth_score is None or breadth_score >= 50):
+        market_recovery_level = 3
+        explain.append("指数和市场广度回暖")
+    elif index_return_5d is not None and index_return_5d >= 0 and (up_ratio is None or up_ratio >= 0.48):
+        market_recovery_level = 2
+        explain.append("止跌观察")
+
+    if theme_strength >= 75 and alignment in {"aligned", "leader_theme", "theme_related"}:
+        if market_warning_level >= 2 and index_return_5d is not None and index_return_5d < 0:
+            regime = "mainline_pullback"
+            explain.append("主线仍强但处于回踩")
+        else:
+            regime = "narrow_mainline_bull"
+            explain.append("主线强势且个股对齐")
+    elif market_warning_level >= 4:
+        regime = "risk_off"
+    elif market_warning_level >= 3:
+        regime = "risk_off" if market_recovery_level <= 1 else "weak_rebound"
+    elif index_return_20d is not None and index_return_20d >= 5 and (breadth_score is None or breadth_score >= 55):
+        regime = "strong_broad"
+        explain.append("指数和广度强势")
+    elif market_recovery_level >= 2 and market_warning_level >= 2:
+        regime = "weak_rebound"
+    elif ma20_slope is not None and ma20_slope > 0 and (breadth_score is not None and breadth_score < 48):
+        regime = "false_bull"
+        explain.append("指数表面偏强但广度不足")
+    else:
+        regime = "choppy_rotation"
+        explain.append("震荡轮动")
+
+    return {
+        "dynamic_market_regime": regime,
+        "market_warning_level": market_warning_level,
+        "market_recovery_level": market_recovery_level,
+        "fund_flow_state": fund_flow_state,
+        "dominant_theme": dominant_theme,
+        "theme_strength": theme_strength,
+        "stock_theme_alignment": alignment,
+        "explain": _dedupe_notes(explain),
+        "not_used_for_signal_score": True,
+    }
+
+
 def compute_market_contexts(session: Any, schema: Any, trade_dates: list[date]) -> dict[date, MarketContext]:
     dates = sorted({day for day in trade_dates if day})
     if not dates:
@@ -392,6 +474,29 @@ def _fund_flow_marker(payload: dict[str, Any]) -> dict[str, Any]:
         "main_net_inflow_ratio": ratio,
         "note": note,
     }
+
+
+def _fund_flow_state_from_audit_payload(payload: dict[str, Any]) -> str:
+    explicit = str(payload.get("fund_flow_state") or "").strip()
+    if explicit:
+        if explicit == "inflow":
+            return "recovery"
+        if explicit == "unknown":
+            return "insufficient_data"
+        return explicit
+    if payload.get("fund_flow_source") in {None, "", "unknown"}:
+        return "insufficient_data"
+    net_ratio = _safe_float(payload.get("main_net_inflow_ratio"))
+    outflow_streak = int(_safe_float(payload.get("fund_flow_streak_days") or payload.get("outflow_streak_days")) or 0)
+    if net_ratio is None:
+        return "insufficient_data"
+    if net_ratio <= -8:
+        return "panic_outflow"
+    if net_ratio < 0:
+        return "outflow" if outflow_streak < 3 else "panic_outflow"
+    if net_ratio >= 3:
+        return "recovery"
+    return "balanced"
 
 
 def _dedupe_notes(notes: list[str]) -> list[str]:

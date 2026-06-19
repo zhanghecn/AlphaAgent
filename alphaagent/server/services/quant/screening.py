@@ -971,6 +971,7 @@ def symbol_signal_history(
         financial_coverage = financial_coverage_summary(session, symbol, latest)
         bars = _load_bars(session, [symbol], latest, lookback_days=max((latest - earliest).days + 120, 200)).get(symbol, [])
         trade_dates = [bar.trade_date for bar in bars if earliest <= bar.trade_date <= latest]
+        market_contexts = market_context.compute_market_contexts(session, schema, trade_dates)
         effective_min_entry_score = (
             float(min_entry_score)
             if min_entry_score is not None and float(min_entry_score) != 68.0
@@ -978,13 +979,18 @@ def symbol_signal_history(
         )
         rows = []
         for trade_date in trade_dates:
-            index_return_20d = _load_index_return_20d(session, trade_date)
+            market_snapshot = market_contexts.get(trade_date)
+            market_payload = market_snapshot.to_dict() if market_snapshot else None
+            index_return_20d = (
+                _float_or_none((market_payload or {}).get("index_return_20d"))
+                if market_payload
+                else _load_index_return_20d(session, trade_date)
+            )
             sector_score = _load_sector_scores(session, [symbol], trade_date).get(symbol)
             financial_score = _load_financial_scores(session, [symbol], trade_date).get(symbol)
             fund_flow_score = _load_fund_flow_scores(session, [symbol], trade_date).get(symbol)
             hot_rank_score = _load_hot_rank_scores(session, [symbol], trade_date).get(symbol)
             lhb_score = _load_lhb_scores(session, [symbol], trade_date).get(symbol)
-            market_payload = market_context.market_context_for_date(session, schema, trade_date)
             score = score_strategy(
                 strategy.id,
                 symbol,
