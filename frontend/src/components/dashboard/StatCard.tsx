@@ -1,7 +1,6 @@
 import * as React from "react";
-import { cn, priceColorClass } from "@/lib/utils";
+import { cn, formatPct, priceColorClass } from "@/lib/utils";
 import { Card } from "@/components/ui/card";
-import { KpiNumber } from "@/components/motion";
 
 interface StatCardProps {
   /** 指标名称（如「营业总收入」） */
@@ -19,8 +18,7 @@ interface StatCardProps {
 
 /**
  * KPI 指标卡：标题 + 大数值 + 涨跌徽章 + 可选附加区。
- * value 走 display 字体 + tabular-nums；delta 走 KpiNumber（滚动 + 涨跌脉冲）。
- * 不内置 Reveal —— 页面级用 StaggerList 包 grid 控制逐卡进入。
+ * 仪表盘式信息密度的核心积木，hover 时随 Card 微抬升。
  */
 export function StatCard({
   label,
@@ -42,12 +40,14 @@ export function StatCard({
           </p>
           {delta != null && (
             <div className="mt-1 flex items-center gap-1">
-              <KpiNumber
-                value={delta}
-                format="pct"
-                pulse
-                className={cn("text-xs font-semibold", priceColorClass(delta))}
-              />
+              <span
+                className={cn(
+                  "text-xs font-semibold tabular-nums",
+                  priceColorClass(delta),
+                )}
+              >
+                {formatPct(delta)}
+              </span>
               <span className="text-xs text-muted-foreground">{deltaLabel}</span>
             </div>
           )}

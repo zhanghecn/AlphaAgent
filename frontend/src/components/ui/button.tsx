@@ -16,9 +16,6 @@ const buttonVariants = cva(
         link: "text-primary underline-offset-4 hover:underline",
         brand:
           "bg-gradient-brand text-white shadow-card transition-all hover:shadow-card-hover active:scale-[0.98]",
-        // glow：CTA 强调态，品牌聚焦辉光 + 点击回弹
-        glow:
-          "bg-primary text-primary-foreground shadow-focus-glow transition-all hover:bg-primary/90 active:scale-[0.97]",
       },
       size: {
         default: "h-10 px-4 py-2",

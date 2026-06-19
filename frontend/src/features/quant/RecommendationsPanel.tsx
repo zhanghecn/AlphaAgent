@@ -161,13 +161,13 @@ export function RecommendationsPanel({
                 const run = latestRunByDate.get(date);
                 return run ? `${date} · #${run.id} · 候选 ${run.recommendation_count}` : `${date} · 未运行`;
               }}
-              className="items-start gap-1"
-              selectClassName="mt-1 w-full min-w-0"
+              className="gap-1"
+              selectClassName="w-full min-w-0"
             />
           )}
-          <div className="text-sm">
-            <div className="text-xs text-muted-foreground">策略</div>
-            <div className="mt-1 flex h-9 items-center rounded-md border bg-muted/30 px-2 text-sm">
+          <div className="flex flex-col gap-1">
+            <span className="text-xs text-muted-foreground">策略</span>
+            <div className="flex h-8 items-center rounded-md border bg-muted/30 px-2 text-sm">
               {selectedStrategyMeta?.name ?? "主线龙回头回踩低吸"}
             </div>
           </div>
@@ -730,6 +730,7 @@ function traceStatusLabel(status: string): string {
   if (status === "rejected") return "已拒单";
   if (status === "watch_not_bought") return "观察未买";
   if (status === "candidate_not_planned") return "候选未进计划";
+  if (status === "signal_snapshot_not_persisted") return "信号未进计划";
   if (status === "planned_not_ordered") return "计划未下单";
   if (status === "not_selected") return "未入选";
   return status || "--";

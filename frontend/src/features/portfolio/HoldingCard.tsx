@@ -7,7 +7,6 @@ import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { KpiNumber } from "@/components/motion";
 import { HoldingMiniChart, type SignalMarker } from "./HoldingMiniChart";
 import type { SimulationPosition } from "@/api/quant";
 import type { RiskBadge } from "@/lib/portfolio-risk";
@@ -193,26 +192,24 @@ export function HoldingCard({
           </div>
         </div>
         {isHeld && position && (
-          <KpiNumber
-            value={position.floating_pnl_pct}
-            format="pct"
-            pulse
+          <div
             className={cn(
-              "shrink-0 text-sm font-semibold",
-              priceColorClass(position.floating_pnl_pct),
+              "text-right text-sm font-semibold tabular-nums shrink-0",
+              priceColorClass(position.floating_pnl_pct)
             )}
-          />
+          >
+            {formatPct(position.floating_pnl_pct)}
+          </div>
         )}
         {!isHeld && dailyBars && dailyBars.length > 0 && (
-          <KpiNumber
-            value={dailyChangePct(dailyBars)}
-            format="pct"
-            pulse
+          <div
             className={cn(
-              "shrink-0 text-sm font-semibold",
-              priceColorClass(dailyChangePct(dailyBars)),
+              "text-right text-sm font-semibold tabular-nums shrink-0",
+              priceColorClass(dailyChangePct(dailyBars))
             )}
-          />
+          >
+            {formatPct(dailyChangePct(dailyBars))}
+          </div>
         )}
       </div>
 

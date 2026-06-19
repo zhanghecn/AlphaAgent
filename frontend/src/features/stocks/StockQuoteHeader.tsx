@@ -1,13 +1,13 @@
 import type { StockQuote } from "@/api/types";
 import {
   formatPrice,
+  formatPct,
   formatAmount,
   formatMarketCap,
   priceColorClass,
   dataSourceLabel,
 } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
-import { KpiNumber } from "@/components/motion";
 
 interface StockQuoteHeaderProps {
   quote: StockQuote;
@@ -39,25 +39,19 @@ export function StockQuoteHeader({ quote, sealInfo }: StockQuoteHeaderProps) {
         )}
       </div>
 
-      {/* Price row —— 头部三大数字：现价滚动 + 涨跌额(手动正号) + 涨跌幅脉冲 */}
+      {/* Price row */}
       <div className="flex flex-wrap items-baseline gap-4">
-        <KpiNumber
-          value={quote.last_price}
-          format="price"
-          pulse
-          className={`font-display text-4xl font-bold ${colorClass}`}
-        />
+        <span className={`font-display text-4xl font-bold tabular-nums ${colorClass}`}>
+          {formatPrice(quote.last_price)}
+        </span>
         <span className={`text-lg tabular-nums ${colorClass}`}>
           {quote.change != null
             ? `${quote.change > 0 ? "+" : ""}${quote.change.toFixed(2)}`
             : "--"}
         </span>
-        <KpiNumber
-          value={quote.change_pct}
-          format="pct"
-          pulse
-          className={`text-lg ${colorClass}`}
-        />
+        <span className={`text-lg tabular-nums ${colorClass}`}>
+          {formatPct(quote.change_pct)}
+        </span>
       </div>
 
       {/* Detail grid */}

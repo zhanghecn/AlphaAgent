@@ -1,19 +1,12 @@
 import * as React from "react";
-import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
 
 interface TabsContextValue {
   value: string;
   onValueChange: (value: string) => void;
-  /** 每个 Tabs 实例唯一的 layoutId，避免多组 Tab 共享 layoutId 串扰 */
-  layoutId: string;
 }
 
-const TabsContext = React.createContext<TabsContextValue>({
-  value: "",
-  onValueChange: () => {},
-  layoutId: "",
-});
+const TabsContext = React.createContext<TabsContextValue>({ value: "", onValueChange: () => {} });
 
 interface TabsProps extends React.HTMLAttributes<HTMLDivElement> {
   defaultValue?: string;
@@ -25,8 +18,6 @@ const Tabs = React.forwardRef<HTMLDivElement, TabsProps>(
   ({ className, defaultValue = "", value: controlledValue, onValueChange, children, ...props }, ref) => {
     const [internalValue, setInternalValue] = React.useState(defaultValue);
     const value = controlledValue ?? internalValue;
-    // useId 保证每个 Tabs 的 active 指示条 layoutId 唯一，多组 Tab 不串扰
-    const layoutId = React.useId();
     const handleChange = React.useCallback(
       (v: string) => {
         setInternalValue(v);
@@ -35,7 +26,7 @@ const Tabs = React.forwardRef<HTMLDivElement, TabsProps>(
       [onValueChange]
     );
     return (
-      <TabsContext.Provider value={{ value, onValueChange: handleChange, layoutId }}>
+      <TabsContext.Provider value={{ value, onValueChange: handleChange }}>
         <div ref={ref} className={cn("", className)} {...props}>
           {children}
         </div>
@@ -64,7 +55,7 @@ interface TabsTriggerProps extends React.ButtonHTMLAttributes<HTMLButtonElement>
 }
 
 const TabsTrigger = React.forwardRef<HTMLButtonElement, TabsTriggerProps>(
-  ({ className, value, children, ...props }, ref) => {
+  ({ className, value, ...props }, ref) => {
     const ctx = React.useContext(TabsContext);
     const isActive = ctx.value === value;
     return (
@@ -74,23 +65,13 @@ const TabsTrigger = React.forwardRef<HTMLButtonElement, TabsTriggerProps>(
         role="tab"
         aria-selected={isActive}
         className={cn(
-          "relative isolate inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
-          isActive ? "text-foreground" : "text-muted-foreground hover:text-foreground",
+          "inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
+          isActive && "bg-background text-foreground shadow-sm",
           className
         )}
         onClick={() => ctx.onValueChange(value)}
         {...props}
-      >
-        {/* active 指示条：framer-motion layoutId 在激活项间平滑滑动 */}
-        {isActive && (
-          <motion.span
-            layoutId={ctx.layoutId}
-            className="absolute inset-0 -z-10 rounded-sm bg-background shadow-sm"
-            transition={{ type: "spring", stiffness: 500, damping: 35 }}
-          />
-        )}
-        <span className="relative">{children}</span>
-      </button>
+      />
     );
   }
 );

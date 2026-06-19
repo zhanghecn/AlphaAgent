@@ -1,5 +1,4 @@
 import { AlertCircle } from "lucide-react";
-import { Reveal } from "@/components/motion";
 
 interface ErrorStateProps {
   message?: string;
@@ -8,20 +7,18 @@ interface ErrorStateProps {
 
 export function ErrorState({ message = "加载失败", onRetry }: ErrorStateProps) {
   return (
-    <Reveal>
-      <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-8 text-center">
-        <AlertCircle className="h-8 w-8 animate-float text-destructive" />
-        <p className="text-sm text-destructive">{message}</p>
-        {onRetry && (
-          <button
-            type="button"
-            className="text-sm text-muted-foreground underline transition-colors hover:text-foreground"
-            onClick={onRetry}
-          >
-            重试
-          </button>
-        )}
-      </div>
-    </Reveal>
+    <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-8 text-center">
+      <AlertCircle className="h-8 w-8 text-destructive" />
+      <p className="text-sm text-destructive">{message}</p>
+      {onRetry && (
+        <button
+          type="button"
+          className="text-sm text-muted-foreground underline transition-colors hover:text-foreground"
+          onClick={onRetry}
+        >
+          重试
+        </button>
+      )}
+    </div>
   );
 }

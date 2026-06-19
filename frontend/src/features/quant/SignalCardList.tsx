@@ -1,7 +1,6 @@
 import { useState } from "react";
 import type { BacktestTrade } from "@/api/quant";
 import { SignalCard } from "./SignalCard";
-import { StaggerList, StaggerItem } from "@/components/motion";
 
 interface SignalCardListProps {
   trades: BacktestTrade[];
@@ -39,19 +38,16 @@ export function SignalCardList({ trades, onTradeClick, highlightedId }: SignalCa
           </FilterBtn>
         </div>
       </div>
-      {/* 信号卡片：错峰进入 + 每张 mount 时扫光一次（新信号仪式感） */}
-      <StaggerList className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4" staggerDelay={0.04}>
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {filtered.map((trade, idx) => (
-          <StaggerItem key={`${trade.trade_date}-${trade.vt_symbol}-${trade.side}-${idx}`}>
-            <SignalCard
-              trade={trade}
-              isHighlighted={highlightedId != null && trade.id === highlightedId}
-              isNew
-              onClick={onTradeClick}
-            />
-          </StaggerItem>
+          <SignalCard
+            key={`${trade.trade_date}-${trade.vt_symbol}-${trade.side}-${idx}`}
+            trade={trade}
+            isHighlighted={highlightedId != null && trade.id === highlightedId}
+            onClick={onTradeClick}
+          />
         ))}
-      </StaggerList>
+      </div>
       {filtered.length === 0 && (
         <div className="py-4 text-center text-sm text-muted-foreground">
           没有匹配的信号

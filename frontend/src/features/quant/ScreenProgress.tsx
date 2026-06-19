@@ -1,5 +1,4 @@
 import { RefreshCw } from "lucide-react";
-import { Progress } from "@/components/ui/progress";
 
 export function ScreenProgress({
   completed,
@@ -30,8 +29,12 @@ export function ScreenProgress({
           {total > 0 ? `${completed} / ${total} 交易日 · ` : ""}{safePct}%
         </span>
       </div>
-      {/* 进度条：framer-motion width spring + 品牌渐变 */}
-      <Progress className="mt-2" value={safePct} />
+      <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-muted">
+        <div
+          className="h-full rounded-full bg-primary transition-all duration-500"
+          style={{ width: `${safePct}%` }}
+        />
+      </div>
       <p className="mt-2 text-xs text-muted-foreground">
         {message || "后台会按当前策略版本逐日评分，更新候选前20，并按 BUY 前10和最多10只持仓自动回测。"}
       </p>

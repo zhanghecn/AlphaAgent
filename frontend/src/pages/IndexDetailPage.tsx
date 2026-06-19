@@ -5,8 +5,7 @@ import { StockKlineChart } from "@/features/stocks/StockKlineChart";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { Badge } from "@/components/ui/badge";
-import { formatAmount, priceColorClass } from "@/lib/utils";
-import { KpiNumber } from "@/components/motion";
+import { formatPrice, formatPct, formatAmount, priceColorClass } from "@/lib/utils";
 import { TechnicalIndicatorView } from "@/features/stocks/StockIndicatorPanel";
 import type { IndexQuote } from "@/api/types";
 
@@ -45,25 +44,19 @@ export function IndexDetailPage() {
 
   return (
     <div className="space-y-6">
-      {/* Header —— 指数点位滚动 + 涨跌幅脉冲 */}
+      {/* Header */}
       <div className="space-y-2">
         <div className="flex flex-wrap items-center gap-3">
           <h2 className="font-display break-words text-2xl font-bold">{name}</h2>
           <Badge variant="outline">{key}</Badge>
         </div>
         <div className="flex flex-wrap items-baseline gap-4">
-          <KpiNumber
-            value={lastPrice}
-            format="price"
-            pulse
-            className={`font-display text-4xl font-bold ${colorClass}`}
-          />
-          <KpiNumber
-            value={changePct}
-            format="pct"
-            pulse
-            className={`text-lg ${colorClass}`}
-          />
+          <span className={`font-display text-4xl font-bold tabular-nums ${colorClass}`}>
+            {formatPrice(lastPrice)}
+          </span>
+          <span className={`text-lg tabular-nums ${colorClass}`}>
+            {formatPct(changePct)}
+          </span>
           <span className="text-sm text-muted-foreground">
             成交额 {formatAmount(turnover)}
           </span>

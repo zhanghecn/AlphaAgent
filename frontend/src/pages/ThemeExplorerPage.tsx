@@ -21,7 +21,6 @@ import { ErrorState } from "@/components/ErrorState";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { AddToGroupButton } from "@/features/portfolio/AddToGroupButton";
 import { formatPct, formatAmount, formatPrice, formatMarketCap, cn, priceColorClass } from "@/lib/utils";
-import { StaggerList, StaggerItem, KpiNumber } from "@/components/motion";
 import type { SectorRankingItem } from "@/types/research";
 import type { StockQuote } from "@/api/types";
 import {
@@ -263,23 +262,22 @@ export default function ThemeExplorerPage() {
               <div className="text-xs text-muted-foreground">
                 {filteredItems.length} / {rankingQuery.data.total} 个板块
               </div>
-              <StaggerList className="max-h-[calc(100vh-320px)] space-y-1 overflow-y-auto pr-1" staggerDelay={0.02}>
+              <div className="max-h-[calc(100vh-320px)] space-y-1 overflow-y-auto pr-1">
                 {filteredItems.map((item, idx) => (
-                  <StaggerItem key={item.sector_id}>
-                    <SectorRankCard
-                      item={item}
-                      rank={idx + 1}
-                      selected={selectedId === item.sector_id}
-                      onClick={() => handleSelect(item)}
-                    />
-                  </StaggerItem>
+                  <SectorRankCard
+                    key={item.sector_id}
+                    item={item}
+                    rank={idx + 1}
+                    selected={selectedId === item.sector_id}
+                    onClick={() => handleSelect(item)}
+                  />
                 ))}
                 {filteredItems.length === 0 && (
                   <div className="py-8 text-center text-sm text-muted-foreground">
                     无匹配结果
                   </div>
                 )}
-              </StaggerList>
+              </div>
             </div>
           )}
         </div>
@@ -406,15 +404,14 @@ function SectorDetailPanel({ item }: { item: SectorRankingItem }) {
             </div>
           </div>
           <div className="text-right">
-            <KpiNumber
-              value={item.change_pct}
-              format="pct"
-              pulse
+            <div
               className={cn(
-                "font-display text-2xl font-bold",
+                "font-display text-2xl font-bold tabular-nums",
                 item.change_pct != null && item.change_pct > 0 ? "text-rise" : "text-fall"
               )}
-            />
+            >
+              {formatPct(item.change_pct)}
+            </div>
           </div>
         </div>
 

@@ -5,7 +5,6 @@ import { CardSkeleton } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { formatPrice, formatPct, formatAmount, priceColorClass } from "@/lib/utils";
-import { CountUp, KpiNumber, StaggerList, StaggerItem } from "@/components/motion";
 import { Badge } from "@/components/ui/badge";
 import { ArrowRight, TrendingUp, TrendingDown, Minus } from "lucide-react";
 import type { IndexQuote, StockQuote } from "@/api/types";
@@ -47,23 +46,16 @@ function IndexCard({ quote }: { quote: IndexQuote }) {
         <p className="text-sm font-medium text-muted-foreground truncate">
           {quote.name}
         </p>
-        {/* 指数点位：CountUp 滚动 + display 字体 */}
-        <CountUp
-          value={quote.last_price ?? 0}
-          format="price"
-          className={`font-display block text-xl font-bold ${colorClass}`}
-        />
+        <p className={`font-display text-xl font-bold tabular-nums ${colorClass}`}>
+          {formatPrice(quote.last_price)}
+        </p>
       </div>
       <div className="text-right space-y-1">
-        {/* 涨跌幅：滚动 + 涨跌脉冲 */}
-        <KpiNumber
-          value={quote.change_pct}
-          format="pct"
-          pulse
-          className={`text-sm font-semibold ${colorClass}`}
-        />
+        <p className={`text-sm font-semibold tabular-nums ${colorClass}`}>
+          {formatPct(quote.change_pct)}
+        </p>
         <p className="text-xs text-muted-foreground tabular-nums">
-          成交额 <CountUp value={quote.turnover ?? 0} format="amount" />
+          成交额 {formatAmount(quote.turnover)}
         </p>
       </div>
       <ArrowRight size={16} className="text-muted-foreground" />
@@ -169,14 +161,11 @@ export function IndexStrip() {
           </span>
         )}
       </div>
-      {/* 指数卡片：逐张错峰进入 */}
-      <StaggerList className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4" staggerDelay={0.08}>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {data.indices.map((idx) => (
-          <StaggerItem key={idx.vt_symbol}>
-            <IndexCard quote={idx} />
-          </StaggerItem>
+          <IndexCard key={idx.vt_symbol} quote={idx} />
         ))}
-      </StaggerList>
+      </div>
       <ActiveStockTable items={data.active_stocks ?? []} />
     </div>
   );

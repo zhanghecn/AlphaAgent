@@ -1,16 +1,14 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { motion, AnimatePresence } from "framer-motion";
 import { CheckCircle2, Info, X, XCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 /**
  * Lightweight global toast notifications.
  *
- * 手写（不引 radix-toast）。success 用 brand(indigo)、error 用 destructive，
- * 刻意避开 A 股红涨/绿跌语义，防止与数字配色冲突。
- * 动效改用 framer-motion AnimatePresence：进入 spring 滑入 + exit 淡出收缩，
- * layout 让多条 toast 间位置变化平滑（新 toast 进入时其他自动让位）。
+ * Hand-written (no radix-toast dependency). Uses brand (indigo) for success
+ * and destructive for error on purpose — to avoid clashing with the A-share
+ * red-rise / green-fall semantics used for numbers elsewhere.
  */
 type ToastVariant = "success" | "error" | "default";
 
@@ -68,11 +66,9 @@ export function useToast() {
 function Toaster({ toasts, onClose }: { toasts: ToastItem[]; onClose: (id: number) => void }) {
   return createPortal(
     <div className="pointer-events-none fixed bottom-4 right-4 z-[100] flex w-80 flex-col gap-2">
-      <AnimatePresence initial={false}>
-        {toasts.map((t) => (
-          <ToastCard key={t.id} toast={t} onClose={() => onClose(t.id)} />
-        ))}
-      </AnimatePresence>
+      {toasts.map((t) => (
+        <ToastCard key={t.id} toast={t} onClose={() => onClose(t.id)} />
+      ))}
     </div>,
     document.body,
   );
@@ -89,14 +85,9 @@ function ToastCard({ toast, onClose }: { toast: ToastItem; onClose: () => void }
     );
 
   return (
-    <motion.div
-      layout
-      initial={{ opacity: 0, x: 40, scale: 0.96 }}
-      animate={{ opacity: 1, x: 0, scale: 1 }}
-      exit={{ opacity: 0, x: 40, scale: 0.96 }}
-      transition={{ type: "spring", stiffness: 350, damping: 30 }}
+    <div
       className={cn(
-        "pointer-events-auto flex items-start gap-2 rounded-lg border bg-card p-3 shadow-card-hover",
+        "pointer-events-auto flex items-start gap-2 rounded-lg border bg-card p-3 shadow-card-hover animate-slide-in-right",
         toast.variant === "success" && "border-brand-500/30",
         toast.variant === "error" && "border-destructive/40",
       )}
@@ -110,6 +101,6 @@ function ToastCard({ toast, onClose }: { toast: ToastItem; onClose: () => void }
       <button type="button" onClick={onClose} className="shrink-0 text-muted-foreground hover:text-foreground">
         <X size={14} />
       </button>
-    </motion.div>
+    </div>
   );
 }
