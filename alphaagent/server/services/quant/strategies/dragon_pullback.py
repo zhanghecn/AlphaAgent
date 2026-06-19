@@ -20,6 +20,10 @@ from alphaagent.server.services.quant.factors import (
     score_risk,
     score_trend_quality,
 )
+from alphaagent.server.services.quant.low_suction_quality import (
+    low_suction_launch_quality_bucket,
+    low_suction_launch_quality_label,
+)
 
 
 DRAGON_PULLBACK_STRATEGY_VERSION = "0.1.21"
@@ -946,6 +950,19 @@ def _evidence(
         and features.return_20d is not None
         and features.return_20d > 0
     )
+    low_suction_launch_confirmed = _is_low_suction_launch_confirmed(features, low_suction_days=low_suction_days)
+    low_suction_stage = _low_suction_stage(features, setup_type, low_suction_days)
+    low_suction_quality = low_suction_launch_quality_bucket(
+        {
+            "entry_setup": setup_type,
+            "low_suction_days": low_suction_days,
+            "low_suction_launch_confirmed": low_suction_launch_confirmed,
+            "close_location_in_range": features.close_location_in_range,
+            "volume_ratio_5d_20d": features.volume_ratio,
+            "tail_buy_repeat_days": repeat_days,
+            "pullback_days": features.pullback_days,
+        }
+    )
     return {
         "status": "ready",
         "return_5d": features.return_5d,
@@ -994,6 +1011,7 @@ def _evidence(
         "spiky_churn_risk": features.spiky_churn_risk,
         "volume_stall_risk": features.volume_stall_risk,
         "high_position_volume_stall_risk": features.high_position_volume_stall_risk,
+        "early_dragon_pullback_risk": _is_early_dragon_pullback_risk(features, setup_type, low_suction_days),
         "key_support_break_risk": features.key_support_break_risk,
         "illiquid_forgotten_risk": features.illiquid_forgotten_risk,
         "high_level_sideways_days": features.high_level_sideways_days,
@@ -1020,7 +1038,11 @@ def _evidence(
         "lhb_score": lhb,
         "smart_money_note": "fund/hot/lhb are observable proxy signals, not proof of main-force intent",
         "fresh_stealth_low_suction": fresh_stealth_low_suction,
-        "low_suction_launch_confirmed": _is_low_suction_launch_confirmed(features, low_suction_days=low_suction_days),
+        "low_suction_launch_confirmed": low_suction_launch_confirmed,
+        "low_suction_stage": low_suction_stage,
+        "low_suction_stage_label": _low_suction_stage_label(low_suction_stage),
+        "low_suction_launch_quality_bucket": low_suction_quality,
+        "low_suction_launch_quality_label": low_suction_launch_quality_label(low_suction_quality),
         "score_breakdown": _score_breakdown(
             relative_strength=relative_strength,
             strong_leg=strong_leg,
@@ -1125,9 +1147,59 @@ def _score_notes(
         notes.append("低吸蓄势后首个温和拉升确认")
     if executable_low_suction:
         notes.append("低吸蓄势入口已满足")
+    if _is_early_dragon_pullback_risk(features, setup_type, low_suction_days):
+        notes.append("经典龙回头偏早：均线发散且缺少低吸蓄势")
     if failed_rules:
         notes.append("扣分/拒绝: " + ", ".join(failed_rules))
     return notes
+
+
+def _low_suction_stage(features: DragonFeatures, setup_type: str, low_suction_days: int) -> str:
+    if setup_type != "stealth_low_suction" and low_suction_days < 3:
+        return "not_low_suction"
+    if _is_low_suction_launch_confirmed(features, low_suction_days=low_suction_days):
+        if features.pullback_days >= 12:
+            return "late_confirmed_lift"
+        if features.volume_ratio is not None and features.volume_ratio < 0.75:
+            return "thin_confirmed_lift"
+        if (
+            features.close_location_in_range is not None
+            and 0.55 <= features.close_location_in_range <= 0.72
+            and features.volume_ratio is not None
+            and 0.80 <= features.volume_ratio <= 1.40
+        ):
+            return "balanced_first_lift"
+        return "confirmed_lift"
+    if low_suction_days >= 6:
+        return "mature_buildup_waiting_lift"
+    if low_suction_days >= 3:
+        return "buildup_waiting_lift"
+    return "not_low_suction"
+
+
+def _low_suction_stage_label(stage: str) -> str:
+    labels = {
+        "not_low_suction": "非低吸蓄势",
+        "buildup_waiting_lift": "低吸蓄势等待上拉",
+        "mature_buildup_waiting_lift": "低吸蓄势已久等待上拉",
+        "balanced_first_lift": "低吸首个均衡上拉",
+        "thin_confirmed_lift": "低吸上拉量能偏弱",
+        "late_confirmed_lift": "低吸启动偏晚",
+        "confirmed_lift": "低吸上拉确认",
+    }
+    return labels.get(stage, stage)
+
+
+def _is_early_dragon_pullback_risk(features: DragonFeatures, setup_type: str, low_suction_days: int) -> bool:
+    if setup_type != "dragon_pullback" or low_suction_days > 0:
+        return False
+    if features.ma_convergence_pct is None or features.ma_convergence_pct < 18.0:
+        return False
+    if features.latest_change_pct is None or features.latest_change_pct < 1.0:
+        return False
+    if features.close_location_in_range is None or features.close_location_in_range < 0.55:
+        return False
+    return True
 
 
 def _percentile_rank(values: list[float], latest: float | None) -> float | None:

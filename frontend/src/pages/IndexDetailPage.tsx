@@ -5,7 +5,8 @@ import { StockKlineChart } from "@/features/stocks/StockKlineChart";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { Badge } from "@/components/ui/badge";
-import { formatPrice, formatPct, formatAmount, priceColorClass } from "@/lib/utils";
+import { formatAmount, priceColorClass } from "@/lib/utils";
+import { KpiNumber } from "@/components/motion";
 import { TechnicalIndicatorView } from "@/features/stocks/StockIndicatorPanel";
 import type { IndexQuote } from "@/api/types";
 
@@ -44,19 +45,25 @@ export function IndexDetailPage() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
+      {/* Header —— 指数点位滚动 + 涨跌幅脉冲 */}
       <div className="space-y-2">
         <div className="flex flex-wrap items-center gap-3">
-          <h2 className="break-words text-2xl font-bold">{name}</h2>
+          <h2 className="font-display break-words text-2xl font-bold">{name}</h2>
           <Badge variant="outline">{key}</Badge>
         </div>
         <div className="flex flex-wrap items-baseline gap-4">
-          <span className={`text-4xl font-bold tabular-nums ${colorClass}`}>
-            {formatPrice(lastPrice)}
-          </span>
-          <span className={`text-lg tabular-nums ${colorClass}`}>
-            {formatPct(changePct)}
-          </span>
+          <KpiNumber
+            value={lastPrice}
+            format="price"
+            pulse
+            className={`font-display text-4xl font-bold ${colorClass}`}
+          />
+          <KpiNumber
+            value={changePct}
+            format="pct"
+            pulse
+            className={`text-lg ${colorClass}`}
+          />
           <span className="text-sm text-muted-foreground">
             成交额 {formatAmount(turnover)}
           </span>
@@ -72,7 +79,7 @@ export function IndexDetailPage() {
       </div>
 
       <div className="rounded-lg border p-3 sm:p-4">
-        <h3 className="mb-3 text-sm font-medium">指数指标</h3>
+        <h3 className="font-display mb-3 text-sm font-medium">指数指标</h3>
         {indicatorQuery.isLoading ? (
           <LoadingState rows={2} />
         ) : indicatorQuery.isError ? (

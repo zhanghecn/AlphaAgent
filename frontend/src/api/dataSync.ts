@@ -297,7 +297,7 @@ export interface BatchSchedule {
   id: string;
   name: string;
   cron: string;
-  action?: "sync" | "quant_research" | string;
+  action?: "sync" | "quant_research" | "tail_preview" | string;
   job_ids: string[];
   enabled: boolean;
   concurrency: number;
@@ -310,6 +310,7 @@ export interface BatchSchedule {
 export interface TailWorkflowStatus {
   status: "ready" | "unavailable" | string;
   daily_bar_latest_date?: string | null;
+  daily_bar_latest_complete_date?: string | null;
   daily_bar_updated_at?: string | null;
   intraday_snapshot_updated_at?: string | null;
   intraday_snapshot_trade_time?: string | null;
@@ -322,6 +323,20 @@ export interface TailWorkflowStatus {
   tail_quant_schedule?: BatchSchedule | null;
   eod_schedule?: BatchSchedule | null;
   tail_prepare_ready?: boolean;
+  tail_preview?: {
+    status?: string;
+    trade_date?: string | null;
+    data_source?: string | null;
+    temporary_bar?: boolean;
+    base_daily_date?: string | null;
+    cached_trade_date?: string | null;
+    cached_generated_at?: string | null;
+    cached_recommendation_count?: number;
+    cached_total?: number;
+    snapshot_updated_at?: string | null;
+    minute_latest_date?: string | null;
+    message?: string | null;
+  } | null;
   message?: string | null;
 }
 

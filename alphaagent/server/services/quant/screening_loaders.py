@@ -17,6 +17,28 @@ def latest_trade_date(session) -> date | None:
     return session.execute(select(func.max(schema.stock_daily_bars.c.trade_date))).scalar()
 
 
+def latest_complete_trade_date(session, min_symbol_count: int = 3000) -> date | None:
+    row = session.execute(
+        select(schema.stock_daily_bars.c.trade_date)
+        .group_by(schema.stock_daily_bars.c.trade_date)
+        .having(func.count(func.distinct(schema.stock_daily_bars.c.vt_symbol)) >= min_symbol_count)
+        .order_by(desc(schema.stock_daily_bars.c.trade_date))
+        .limit(1)
+    ).first()
+    return row[0] if row else None
+
+
+def daily_symbol_count(session, trade_date: date) -> int:
+    return int(
+        session.execute(
+            select(func.count(func.distinct(schema.stock_daily_bars.c.vt_symbol))).where(
+                schema.stock_daily_bars.c.trade_date == trade_date
+            )
+        ).scalar()
+        or 0
+    )
+
+
 def earliest_trade_date(session) -> date | None:
     return session.execute(select(func.min(schema.stock_daily_bars.c.trade_date))).scalar()
 
@@ -29,7 +51,14 @@ def latest_recommendation_date(session) -> date | None:
     return session.execute(select(func.max(schema.quant_recommendations.c.trade_date))).scalar()
 
 
-def latest_screen_run(session, strategy_id: str, strategy_version: str, trade_date: date | None = None) -> dict[str, Any] | None:
+def latest_screen_run(
+    session,
+    strategy_id: str,
+    strategy_version: str,
+    trade_date: date | None = None,
+    *,
+    signal_evidence_schema_version: str | None = None,
+) -> dict[str, Any] | None:
     query = select(schema.quant_signal_runs).where(
         and_(
             schema.quant_signal_runs.c.strategy_id == strategy_id,
@@ -39,12 +68,19 @@ def latest_screen_run(session, strategy_id: str, strategy_version: str, trade_da
     )
     if trade_date is not None:
         query = query.where(schema.quant_signal_runs.c.trade_date == trade_date)
-    row = session.execute(
+    rows = session.execute(
         query
         .order_by(desc(schema.quant_signal_runs.c.trade_date), desc(schema.quant_signal_runs.c.id))
-        .limit(1)
-    ).mappings().first()
-    return dict(row) if row else None
+        .limit(50 if signal_evidence_schema_version else 1)
+    ).mappings().all()
+    for row in rows:
+        payload = dict(row)
+        if signal_evidence_schema_version is None:
+            return payload
+        params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+        if params.get("signal_evidence_schema_version") == signal_evidence_schema_version:
+            return payload
+    return None
 
 
 def trading_dates_between(session, start: date, end: date) -> list[date]:
@@ -97,6 +133,79 @@ def load_bars(session, vt_symbols: list[str], trade_date: date, lookback_days: i
                 turnover=row.get("turnover"),
                 change_pct=row.get("change_pct"),
             )
+        )
+    return result
+
+
+def load_intraday_temp_bars(session, vt_symbols: list[str], trade_date: date, interval: str = "1m") -> dict[str, Bar]:
+    if not vt_symbols:
+        return {}
+    aggregate = (
+        select(
+            schema.stock_minute_bars.c.vt_symbol.label("vt_symbol"),
+            func.min(schema.stock_minute_bars.c.bar_time).label("first_time"),
+            func.max(schema.stock_minute_bars.c.bar_time).label("last_time"),
+            func.max(schema.stock_minute_bars.c.high_price).label("high_price"),
+            func.min(schema.stock_minute_bars.c.low_price).label("low_price"),
+            func.sum(schema.stock_minute_bars.c.volume).label("volume"),
+            func.sum(schema.stock_minute_bars.c.turnover).label("turnover"),
+        )
+        .where(
+            and_(
+                schema.stock_minute_bars.c.vt_symbol.in_(vt_symbols),
+                schema.stock_minute_bars.c.trade_date == trade_date,
+                schema.stock_minute_bars.c.interval == interval,
+            )
+        )
+        .group_by(schema.stock_minute_bars.c.vt_symbol)
+        .subquery()
+    )
+    first_bar = schema.stock_minute_bars.alias("first_bar")
+    last_bar = schema.stock_minute_bars.alias("last_bar")
+    rows = session.execute(
+        select(
+            aggregate.c.vt_symbol,
+            first_bar.c.open_price.label("open_price"),
+            last_bar.c.close_price.label("close_price"),
+            aggregate.c.high_price,
+            aggregate.c.low_price,
+            aggregate.c.volume,
+            aggregate.c.turnover,
+        )
+        .select_from(
+            aggregate
+            .join(
+                first_bar,
+                and_(
+                    first_bar.c.vt_symbol == aggregate.c.vt_symbol,
+                    first_bar.c.trade_date == trade_date,
+                    first_bar.c.interval == interval,
+                    first_bar.c.bar_time == aggregate.c.first_time,
+                ),
+            )
+            .join(
+                last_bar,
+                and_(
+                    last_bar.c.vt_symbol == aggregate.c.vt_symbol,
+                    last_bar.c.trade_date == trade_date,
+                    last_bar.c.interval == interval,
+                    last_bar.c.bar_time == aggregate.c.last_time,
+                ),
+            )
+        )
+    ).mappings().all()
+
+    result: dict[str, Bar] = {}
+    for row in rows:
+        result[str(row["vt_symbol"])] = Bar(
+            trade_date=trade_date,
+            open_price=float(row["open_price"]),
+            high_price=float(row["high_price"]),
+            low_price=float(row["low_price"]),
+            close_price=float(row["close_price"]),
+            volume=float(row["volume"]) if row.get("volume") is not None else None,
+            turnover=float(row["turnover"]) if row.get("turnover") is not None else None,
+            change_pct=None,
         )
     return result
 

@@ -1335,23 +1335,14 @@ class AkShareAdapter:
 
     def _sector_fund_flows_uncached(self, sector_type: str, period: str) -> dict[str, Any]:
         normalized_type = _normalize_board_type(sector_type)
-        module = importlib.import_module("akshare.stock_feature.stock_fund_flow")
-        if normalized_type in {"concept", "theme"}:
-            with _akshare_network_env():
-                df = module.stock_fund_flow_concept(symbol=period)
-            source = "akshare.stock_fund_flow_concept"
-        else:
-            with _akshare_network_env():
-                df = module.stock_fund_flow_industry(symbol=period)
-            source = "akshare.stock_fund_flow_industry"
-
+        df = _eastmoney_sector_fund_flow(normalized_type, period)
         items = [_fund_flow_row_to_api(row) for row in _records(df, 500)]
         return {
             "sector_type": normalized_type,
             "period": period,
             "items": items,
             "total": len(items),
-            "source": source,
+            "source": "eastmoney.sector_fund_flow_rank",
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -2151,6 +2142,11 @@ EASTMONEY_STOCK_FUND_FLOW_HOSTS = (
     "https://48.push2.eastmoney.com",
     "https://push2delay.eastmoney.com",
 )
+EASTMONEY_SECTOR_FUND_FLOW_HOSTS = (
+    "https://push2delay.eastmoney.com",
+    "https://push2.eastmoney.com",
+    "https://48.push2.eastmoney.com",
+)
 EASTMONEY_HSF10_HOSTS = (
     "https://emweb.securities.eastmoney.com",
     "https://emweb.eastmoney.com",
@@ -2262,6 +2258,206 @@ def _eastmoney_stock_main_fund_flow_row(row: dict[str, Any]) -> dict[str, Any]:
         "板块代码": row.get("f265"),
         "raw": row,
     }
+
+
+def _eastmoney_sector_fund_flow(board_type: str, period: str, limit: int = 500) -> pd.DataFrame:
+    normalized_type = _normalize_board_type(board_type)
+    if normalized_type == "theme":
+        normalized_type = "concept"
+    if normalized_type not in {"concept", "industry"}:
+        raise AkShareSourceError(f"Unsupported EastMoney fund-flow board type: {board_type}")
+
+    period_config = _eastmoney_sector_fund_flow_period_config(period)
+    page_size = 100
+    params = _eastmoney_sector_fund_flow_params(
+        normalized_type,
+        page=1,
+        page_size=page_size,
+        period_config=period_config,
+    )
+    data = _eastmoney_clist_get(EASTMONEY_SECTOR_FUND_FLOW_HOSTS, params, timeout=12)
+    first_data = data.get("data") or {}
+    rows = [row for row in (first_data.get("diff") or []) if isinstance(row, dict)]
+    total = int(first_data.get("total") or len(rows))
+    total_pages = min(math.ceil(total / page_size), math.ceil(max(limit, 1) / page_size), 10)
+    for page in range(2, total_pages + 1):
+        try:
+            time.sleep(0.2)
+            data = _eastmoney_clist_get(
+                EASTMONEY_SECTOR_FUND_FLOW_HOSTS,
+                _eastmoney_sector_fund_flow_params(
+                    normalized_type,
+                    page=page,
+                    page_size=page_size,
+                    period_config=period_config,
+                ),
+                timeout=12,
+            )
+        except Exception:
+            break
+        rows.extend(row for row in ((data.get("data") or {}).get("diff") or []) if isinstance(row, dict))
+        if len(rows) >= limit:
+            break
+
+    normalized = [
+        _eastmoney_sector_fund_flow_row(row, normalized_type, index + 1, period_config)
+        for index, row in enumerate(rows[:limit])
+    ]
+    return pd.DataFrame(normalized)
+
+
+def _eastmoney_sector_fund_flow_period_config(period: str) -> dict[str, str]:
+    normalized = str(period or "今日").strip()
+    if normalized in {"即时", "今日", "1日", "当日"}:
+        return {
+            "period": "今日",
+            "stat": "1",
+            "sort_field": "f62",
+            "change_field": "f3",
+            "main_field": "f62",
+            "main_ratio_field": "f184",
+            "super_field": "f66",
+            "super_ratio_field": "f69",
+            "large_field": "f72",
+            "large_ratio_field": "f75",
+            "medium_field": "f78",
+            "medium_ratio_field": "f81",
+            "small_field": "f84",
+            "small_ratio_field": "f87",
+            "leader_field": "f204",
+            "leader_code_field": "f205",
+        }
+    if normalized in {"5日", "5日排行"}:
+        return {
+            "period": "5日",
+            "stat": "5",
+            "sort_field": "f164",
+            "change_field": "f109",
+            "main_field": "f164",
+            "main_ratio_field": "f165",
+            "super_field": "f166",
+            "super_ratio_field": "f167",
+            "large_field": "f168",
+            "large_ratio_field": "f169",
+            "medium_field": "f170",
+            "medium_ratio_field": "f171",
+            "small_field": "f172",
+            "small_ratio_field": "f173",
+            "leader_field": "f257",
+            "leader_code_field": "f258",
+        }
+    if normalized in {"10日", "10日排行"}:
+        return {
+            "period": "10日",
+            "stat": "10",
+            "sort_field": "f174",
+            "change_field": "f160",
+            "main_field": "f174",
+            "main_ratio_field": "f175",
+            "super_field": "f176",
+            "super_ratio_field": "f177",
+            "large_field": "f178",
+            "large_ratio_field": "f179",
+            "medium_field": "f180",
+            "medium_ratio_field": "f181",
+            "small_field": "f182",
+            "small_ratio_field": "f183",
+            "leader_field": "f260",
+            "leader_code_field": "f261",
+        }
+    raise AkShareSourceError(f"Unsupported EastMoney sector fund-flow period: {period}")
+
+
+def _eastmoney_sector_fund_flow_params(
+    board_type: str,
+    *,
+    page: int,
+    page_size: int,
+    period_config: dict[str, str],
+) -> dict[str, Any]:
+    sector_type_code = "3" if board_type == "concept" else "2"
+    fields = ",".join(
+        [
+            "f12",
+            "f14",
+            "f2",
+            period_config["change_field"],
+            period_config["main_field"],
+            period_config["main_ratio_field"],
+            period_config["super_field"],
+            period_config["super_ratio_field"],
+            period_config["large_field"],
+            period_config["large_ratio_field"],
+            period_config["medium_field"],
+            period_config["medium_ratio_field"],
+            period_config["small_field"],
+            period_config["small_ratio_field"],
+            period_config["leader_field"],
+            period_config["leader_code_field"],
+            "f124",
+        ]
+    )
+    return {
+        "pn": max(page, 1),
+        "pz": min(max(page_size, 1), 500),
+        "po": 1,
+        "np": 1,
+        "ut": "b2884a393a59ad64002292a3e90d46a5",
+        "fltt": 2,
+        "invt": 2,
+        "fid0": period_config["sort_field"],
+        "fid": period_config["sort_field"],
+        "fs": f"m:90 t:{sector_type_code}",
+        "stat": period_config["stat"],
+        "fields": fields,
+        "rt": "52975239",
+        "_": int(time.time() * 1000),
+    }
+
+
+def _eastmoney_sector_fund_flow_row(
+    row: dict[str, Any],
+    board_type: str,
+    rank: int,
+    period_config: dict[str, str],
+) -> dict[str, Any]:
+    update_date = _eastmoney_timestamp_date(row.get("f124"))
+    period_label = period_config["period"]
+    return {
+        "id": row.get("f12"),
+        "代码": row.get("f12"),
+        "名称": row.get("f14"),
+        f"{period_label}涨跌幅": row.get(period_config["change_field"]),
+        f"{period_label}主力净流入-净额": row.get(period_config["main_field"]),
+        f"{period_label}主力净流入-净占比": row.get(period_config["main_ratio_field"]),
+        f"{period_label}超大单净流入-净额": row.get(period_config["super_field"]),
+        f"{period_label}超大单净流入-净占比": row.get(period_config["super_ratio_field"]),
+        f"{period_label}大单净流入-净额": row.get(period_config["large_field"]),
+        f"{period_label}大单净流入-净占比": row.get(period_config["large_ratio_field"]),
+        f"{period_label}中单净流入-净额": row.get(period_config["medium_field"]),
+        f"{period_label}中单净流入-净占比": row.get(period_config["medium_ratio_field"]),
+        f"{period_label}小单净流入-净额": row.get(period_config["small_field"]),
+        f"{period_label}小单净流入-净占比": row.get(period_config["small_ratio_field"]),
+        f"{period_label}主力净流入最大股": row.get(period_config["leader_field"]),
+        f"{period_label}主力净流入最大股代码": row.get(period_config["leader_code_field"]),
+        "rank": rank,
+        "period": period_label,
+        "type": board_type,
+        "trade_date": update_date,
+        "updated_timestamp": row.get("f124"),
+        "source": "eastmoney.sector_fund_flow_rank",
+        "raw": row,
+    }
+
+
+def _eastmoney_timestamp_date(value: Any) -> str | None:
+    number = _int_value(value)
+    if not number:
+        return None
+    try:
+        return datetime.fromtimestamp(number, timezone(timedelta(hours=8))).date().isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _eastmoney_stock_hot_rank_items(limit: int = 100) -> list[dict[str, Any]]:
@@ -3610,18 +3806,58 @@ def _exchange_from_prefixed_symbol(raw_symbol: str, symbol: str) -> str:
 def _fund_flow_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
     """Normalize a sector fund-flow row from AkShare."""
     n = _normalize_record(row)
+    period_prefix = _fund_flow_period_prefix(n)
     return {
+        "id": n.get("id") or n.get("代码") or n.get("板块代码") or n.get("code"),
         "name": n.get("名称") or n.get("板块") or n.get("name"),
         "code": n.get("代码") or n.get("板块代码") or n.get("code"),
-        "change_pct": _number(n.get("涨跌幅") or n.get("今日涨跌幅")),
-        "main_net_inflow": _number(n.get("主力净流入-净额") or n.get("今日主力净流入") or n.get("主力净流入")),
-        "main_net_inflow_pct": _number(n.get("主力净流入-净占比") or n.get("今日主力净流入占比")),
-        "super_large_net_inflow": _number(n.get("超大单净流入-净额") or n.get("今日超大单净流入")),
-        "large_net_inflow": _number(n.get("大单净流入-净额") or n.get("今日大单净流入")),
-        "medium_net_inflow": _number(n.get("中单净流入-净额") or n.get("今日中单净流入")),
-        "small_net_inflow": _number(n.get("小单净流入-净额") or n.get("今日小单净流入")),
+        "trade_date": n.get("trade_date") or n.get("日期"),
+        "period": n.get("period"),
+        "rank": _int_value(n.get("rank") or n.get("序号")),
+        "change_pct": _number(_period_value(n, period_prefix, "涨跌幅") or n.get("涨跌幅")),
+        "main_net_inflow": _number(
+            _period_value(n, period_prefix, "主力净流入-净额")
+            or n.get("主力净流入-净额")
+            or n.get("今日主力净流入")
+            or n.get("主力净流入")
+            or n.get("净额")
+        ),
+        "main_net_inflow_pct": _number(
+            _period_value(n, period_prefix, "主力净流入-净占比")
+            or n.get("主力净流入-净占比")
+            or n.get("今日主力净流入占比")
+        ),
+        "super_large_net_inflow": _number(_period_value(n, period_prefix, "超大单净流入-净额") or n.get("超大单净流入-净额")),
+        "large_net_inflow": _number(_period_value(n, period_prefix, "大单净流入-净额") or n.get("大单净流入-净额")),
+        "medium_net_inflow": _number(_period_value(n, period_prefix, "中单净流入-净额") or n.get("中单净流入-净额")),
+        "small_net_inflow": _number(_period_value(n, period_prefix, "小单净流入-净额") or n.get("小单净流入-净额")),
+        "leader_stock": _period_value(n, period_prefix, "主力净流入最大股"),
+        "leader_stock_code": _period_value(n, period_prefix, "主力净流入最大股代码"),
+        "source": n.get("source"),
         "raw": n,
     }
+
+
+def _fund_flow_period_prefix(row: dict[str, Any]) -> str:
+    period = str(row.get("period") or "").strip()
+    if period in {"今日", "5日", "10日"}:
+        return period
+    for prefix in ("今日", "5日", "10日", "3日", "20日"):
+        if any(str(key).startswith(prefix) for key in row):
+            return prefix
+    return ""
+
+
+def _period_value(row: dict[str, Any], prefix: str, suffix: str) -> Any:
+    if prefix:
+        value = row.get(f"{prefix}{suffix}")
+        if value is not None:
+            return value
+    if prefix == "今日":
+        value = row.get(f"今天{suffix}")
+        if value is not None:
+            return value
+    return row.get(suffix)
 
 
 def _stock_fund_flow_row_to_api(row: dict[str, Any], symbol: str) -> dict[str, Any]:

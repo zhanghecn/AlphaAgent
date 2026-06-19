@@ -34,7 +34,11 @@ def persist_screen_run(
             strategy_version=strategy_version,
             trade_date=trade_date,
             status="succeeded",
-            params={"included_boards": list(included_boards), "max_symbols": int(max_symbols)},
+            params={
+                "included_boards": list(included_boards),
+                "max_symbols": int(max_symbols),
+                "signal_evidence_schema_version": screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+            },
             candidate_count=len(scored),
             signal_count=sum(
                 1
@@ -130,6 +134,9 @@ def sync_quant_candidate_group(
                     "raw_entry_signal": action_payload["raw_entry_signal"],
                     "executable_entry_signal": action_payload["executable_entry_signal"],
                     "action": action_payload["action"],
+                    "signal_label": action_payload["signal_label"],
+                    "signal_role": action_payload["signal_role"],
+                    "key_entry_signal": action_payload["key_entry_signal"],
                     "failed_rules": action_payload["failed_rules"],
                     "risk_level": item.risk_level,
                 },

@@ -30,12 +30,12 @@ from sqlalchemy import desc, func, select, text
 from sqlalchemy.engine import Engine
 
 from alphaagent.data_sources.akshare_adapter import AkShareAdapter
-from alphaagent.market.symbols import normalize_exchange, vt_symbol
+from alphaagent.market.symbols import INDEX_SYMBOLS, normalize_exchange, vt_symbol
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
 from alphaagent.server.services import minute_gaps, minute_imports, minute_provider_imports
 from alphaagent.server.services import research_sector_scores
-from alphaagent.server.services.quant import research_jobs
+from alphaagent.server.services.quant import research_jobs, screening
 
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -106,6 +106,14 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         default_params={"limit": 250},
     ),
     JobDefinition(
+        id="sync_index_daily_bars",
+        name="核心指数日 K 线",
+        description="同步上证、沪深300、中证500/1000、创业板、科创50等核心指数日线，供大盘画像和回测审计使用。",
+        source_id="akshare",
+        target_table="stock_daily_bars",
+        default_params={"limit": 500},
+    ),
+    JobDefinition(
         id="sync_stock_minute_bars",
         name="股票分钟 K 线",
         description="同步最近分钟线，或按严格回测缺口补执行日 14:30 尾盘快照。",
@@ -161,7 +169,7 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         description="同步行业/概念板块历史日 K 线数据。",
         source_id="akshare",
         target_table="sector_daily_bars",
-        default_params={"limit": 250},
+        default_params={"limit": 250, "sector_limit": 300},
     ),
     JobDefinition(
         id="sync_sector_fund_flows",
@@ -169,7 +177,7 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         description="同步行业/概念板块资金流向数据。",
         source_id="akshare",
         target_table="sector_fund_flows",
-        default_params={"periods": ["即时", "3日", "5日", "10日"]},
+        default_params={"periods": ["即时", "5日", "10日"]},
     ),
     JobDefinition(
         id="sync_sector_period_scores",
@@ -252,28 +260,36 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
 # requirements/alphaagent_unified_incremental_schedule_plan.md.
 DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
     {
-        "id": "tail_prepare_14h",
-        "name": "尾盘准备（14:00，关键数据快同步）",
+        "id": "tail_preview_14h",
+        "name": "尾盘预览缓存（14:00，快照后生成）",
         "cron": "0 14 * * 1-5",
-        "action": "sync",
+        "action": "tail_preview",
         "enabled": True,
         "concurrency": 12,
         "job_ids": [
             "sync_stock_list",          # realtime snapshot (price / change / volume ratio)
             "sync_stock_minute_bars",   # intraday minute bars up to 14:00
             "sync_stock_fund_flows",    # per-stock fund flow
+            "sync_sector_fund_flows",   # sector fund flow for market/mainline context
             "sync_stock_hot_ranks",     # per-stock hotness
             "sync_limit_up_pools",      # limit-up / limit-down pools
         ],
     },
     {
         "id": "tail_quant_1430",
-        "name": "尾盘量化（14:30，自动刷新候选）",
+        "name": "尾盘预览缓存（14:30，尾盘确认）",
         "cron": "30 14 * * 1-5",
-        "action": "quant_research",
+        "action": "tail_preview",
         "enabled": True,
-        "concurrency": 1,
-        "job_ids": [],
+        "concurrency": 12,
+        "job_ids": [
+            "sync_stock_list",
+            "sync_stock_minute_bars",
+            "sync_stock_fund_flows",
+            "sync_sector_fund_flows",
+            "sync_stock_hot_ranks",
+            "sync_limit_up_pools",
+        ],
     },
     {
         "id": "eod_18h",
@@ -285,6 +301,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "job_ids": [
             "sync_stock_list",
             "sync_stock_daily_bars",    # full daily bars (true incremental)
+            "sync_index_daily_bars",    # market context benchmarks
             "sync_sector_list",
             "sync_sector_members",
             "sync_stock_sector_memberships",
@@ -296,9 +313,18 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_stock_financial_quarterly",
             "sync_stock_financial_indicators",
             "sync_stock_business_segments_history",
+            "eod_quant_research",
         ],
     },
 ]
+
+OBSOLETE_BATCH_SCHEDULE_IDS = {
+    "intraday_14h": "已由 tail_preview_14h 替代：14:00 生成今日尾盘预览缓存。",
+    "tail_prepare_14h": "已由 tail_preview_14h 替代：14:00 同步关键数据并生成预览缓存。",
+}
+TAIL_PREVIEW_BATCH_JOB_ID = "tail_preview_cache"
+EOD_QUANT_RESEARCH_BATCH_JOB_ID = "eod_quant_research"
+INTERNAL_BATCH_JOB_IDS = {TAIL_PREVIEW_BATCH_JOB_ID, EOD_QUANT_RESEARCH_BATCH_JOB_ID}
 
 
 SYNC_BATCH_PROFILES: dict[str, tuple[str, ...]] = {
@@ -306,6 +332,7 @@ SYNC_BATCH_PROFILES: dict[str, tuple[str, ...]] = {
         "sync_stock_list",
         "sync_sector_list",
         "sync_stock_daily_bars",
+        "sync_index_daily_bars",
         "sync_stock_fund_flows",
         "sync_stock_hot_ranks",
     ),
@@ -541,6 +568,71 @@ class DataSyncRunner:
         logger.info("sync_stock_daily_bars: processed %d stocks", counters["done"])
         return {"rows_read": counters["read"], "rows_written": counters["written"]}
 
+    def _run_sync_index_daily_bars(self, params: dict[str, Any]) -> dict[str, Any]:
+        limit = int(params.get("limit", 500))
+        symbols = _param_list(params.get("symbols"))
+        index_rows = [
+            item
+            for item in INDEX_SYMBOLS
+            if not symbols or vt_symbol(str(item["symbol"]), str(item["exchange"])) in symbols or str(item["symbol"]) in symbols
+        ]
+        if not index_rows:
+            return {"rows_read": 0, "rows_written": 0, "message": "No matching index symbols."}
+
+        _upsert_stocks(
+            [
+                {
+                    "symbol": str(row["symbol"]),
+                    "exchange": str(row["exchange"]),
+                    "name": str(row.get("name") or row["symbol"]),
+                    "source": "index_benchmark",
+                    "raw": {"instrument_type": "index"},
+                }
+                for row in index_rows
+            ]
+        )
+        incremental = _truthy(params.get("incremental", True))
+        vt_symbols = [vt_symbol(str(row["symbol"]), str(row["exchange"])) for row in index_rows]
+        last_dates = _last_bar_dates_daily(vt_symbols) if incremental else {}
+        total_indexes = len(index_rows)
+        total_read = 0
+        total_written = 0
+        self._report_progress("同步核心指数日 K 线", current=0, total=total_indexes)
+        for index, row in enumerate(index_rows, start=1):
+            symbol = str(row["symbol"])
+            exchange = str(row["exchange"])
+            name = str(row.get("name") or symbol)
+            current_vts = vt_symbol(symbol, exchange)
+            start_date = _next_day(last_dates.get(current_vts)) if last_dates.get(current_vts) else None
+            try:
+                data = self.adapter.stock_bars(symbol, exchange, limit=limit, interval="1d", start_date=start_date)
+            except Exception as exc:
+                logger.debug("index stock_bars(%s) failed: %s", current_vts, exc)
+                self._report_progress(
+                    "读取核心指数日 K 线",
+                    current=index,
+                    total=total_indexes,
+                    current_label=f"{current_vts} {name} 失败：{exc.__class__.__name__}",
+                    rows_read=total_read,
+                    rows_written=total_written,
+                )
+                continue
+            items = data.get("items") or []
+            total_read += len(items)
+            written = _upsert_daily_bars(symbol, exchange, items)
+            total_written += written
+            sample_items = [{**item, "vt_symbol": current_vts, "name": name} for item in items[-3:]]
+            self._report_progress(
+                "写入核心指数日 K 线",
+                current=index,
+                total=total_indexes,
+                current_label=f"{current_vts} {name}，{len(items)} 根",
+                rows_read=total_read,
+                rows_written=total_written,
+                sample_items=sample_items,
+            )
+        return {"rows_read": total_read, "rows_written": total_written}
+
     def _run_sync_stock_minute_bars(self, params: dict[str, Any]) -> dict[str, Any]:
         mode = str(params.get("mode") or "recent").strip().lower()
         if mode in {"backtest_gap", "backtest_gaps", "gaps", "gap"}:
@@ -723,18 +815,47 @@ class DataSyncRunner:
             sector_rows = sector_rows[:sector_limit]
         total_read = 0
         total_written = 0
-        for sector_row in sector_rows:
+        total_sectors = len(sector_rows)
+        self._report_progress("同步板块历史 K 线", current=0, total=total_sectors)
+        for index, sector_row in enumerate(sector_rows, start=1):
             sector_id = str(sector_row["id"])
             sector_type = str(sector_row["type"])
+            sector_name = str(sector_row.get("name") or sector_id)
+            label = f"{sector_name} {sector_id}"
+            self._report_progress(
+                "读取板块历史 K 线",
+                current=index - 1,
+                total=total_sectors,
+                current_label=label,
+                rows_read=total_read,
+                rows_written=total_written,
+            )
             try:
                 data = self.adapter.sector_daily_bars(sector_id, board_type=sector_type, limit=limit)
             except Exception as exc:
                 logger.debug("sector_daily_bars(%s) failed: %s", sector_id, exc)
+                self._report_progress(
+                    "读取板块历史 K 线",
+                    current=index,
+                    total=total_sectors,
+                    current_label=f"{label} 失败：{exc.__class__.__name__}",
+                    rows_read=total_read,
+                    rows_written=total_written,
+                )
                 continue
             items = data.get("items") or []
             total_read += len(items)
             written = _upsert_sector_daily_bars(sector_id, items, data.get("source", "akshare"))
             total_written += written
+            self._report_progress(
+                "写入板块历史 K 线",
+                current=index,
+                total=total_sectors,
+                current_label=f"{label}，{len(items)} 根",
+                rows_read=total_read,
+                rows_written=total_written,
+                sample_items=[{**item, "id": sector_id, "name": sector_name} for item in items[-3:]],
+            )
         return {"rows_read": total_read, "rows_written": total_written}
 
     def _run_sync_sector_fund_flows(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -745,6 +866,12 @@ class DataSyncRunner:
         total_written = 0
         for sector_type in ("concept", "industry"):
             for period in periods:
+                self._report_progress(
+                    "读取板块资金流",
+                    current_label=f"{sector_type} / {period}",
+                    rows_read=total_read,
+                    rows_written=total_written,
+                )
                 try:
                     data = self.adapter.sector_fund_flows(sector_type=sector_type, period=period)
                 except Exception as exc:
@@ -754,6 +881,13 @@ class DataSyncRunner:
                 total_read += len(items)
                 written = _upsert_sector_fund_flows(items, period, sector_type)
                 total_written += written
+                self._report_progress(
+                    "写入板块资金流",
+                    current_label=f"{sector_type} / {period} / {written} 条",
+                    rows_read=total_read,
+                    rows_written=total_written,
+                    sample_items=items,
+                )
         return {"rows_read": total_read, "rows_written": total_written}
 
     def _run_sync_limit_up_pools(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1147,6 +1281,7 @@ JOB_RUNNERS: dict[str, str] = {
     "sync_sector_list": "_run_sync_sector_list",
     "sync_sector_members": "_run_sync_sector_members",
     "sync_stock_daily_bars": "_run_sync_stock_daily_bars",
+    "sync_index_daily_bars": "_run_sync_index_daily_bars",
     "sync_stock_minute_bars": "_run_sync_stock_minute_bars",
     "sync_stock_sector_memberships": "_run_sync_stock_sector_memberships",
     "sync_shenwan_industry_tree": "_run_sync_shenwan_industry_tree",
@@ -1332,6 +1467,17 @@ def seed_default_registry() -> None:
                         .where(schema.sync_batch_schedules.c.id == sched["id"])
                         .values(**sched_values)
                     )
+            for schedule_id, reason in OBSOLETE_BATCH_SCHEDULE_IDS.items():
+                session.execute(
+                    schema.sync_batch_schedules.update()
+                    .where(schema.sync_batch_schedules.c.id == schedule_id)
+                    .values(
+                        enabled=False,
+                        last_status="disabled",
+                        last_finished_at=datetime.now(timezone.utc),
+                        last_message=reason,
+                    )
+                )
     except Exception as exc:
         logger.warning("seed_default_registry failed: %s", exc)
 
@@ -1356,6 +1502,15 @@ def mark_interrupted_runs() -> None:
                 .values(
                     last_status="failed",
                     last_message="API process restarted before this sync job finished.",
+                    last_finished_at=datetime.now(timezone.utc),
+                )
+            )
+            session.execute(
+                schema.sync_batch_schedules.update()
+                .where(schema.sync_batch_schedules.c.last_status == "running")
+                .values(
+                    last_status="failed",
+                    last_message="API process restarted before this schedule finished.",
                     last_finished_at=datetime.now(timezone.utc),
                 )
             )
@@ -1430,16 +1585,46 @@ def _assert_cron(cron: str) -> None:
         raise DataSyncError("cron must be a 5-field expression")
 
 
-def _assert_known_jobs(job_ids: list[str]) -> None:
+def _assert_known_jobs(
+    job_ids: list[str],
+    *,
+    allow_tail_preview_cache: bool = False,
+    allow_eod_quant_research: bool = False,
+) -> None:
     valid = {job.id for job in DEFAULT_JOBS}
-    unknown = [j for j in job_ids if j not in valid]
+    unknown = [
+        j for j in job_ids
+        if j not in valid
+        and not (allow_tail_preview_cache and j == TAIL_PREVIEW_BATCH_JOB_ID)
+        and not (allow_eod_quant_research and j == EOD_QUANT_RESEARCH_BATCH_JOB_ID)
+    ]
     if unknown:
         raise DataSyncError(f"Unknown job_ids: {unknown}")
 
 
+def _schedule_job_ids(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise DataSyncError("job_ids must be a list")
+    return [str(item) for item in value]
+
+
+def _assert_schedule_jobs(action: str, job_ids: list[str]) -> None:
+    if action not in {"sync", "tail_preview"}:
+        return
+    if not job_ids:
+        raise DataSyncError(f"{action} schedules require at least one job_id")
+    _assert_known_jobs(
+        job_ids,
+        allow_tail_preview_cache=action == "tail_preview",
+        allow_eod_quant_research=action == "sync",
+    )
+
+
 def _schedule_action(payload: dict[str, Any]) -> str:
     action = str(payload.get("action") or "sync").strip()
-    if action not in {"sync", "quant_research"}:
+    if action not in {"sync", "quant_research", "tail_preview"}:
         raise DataSyncError(f"Unsupported schedule action: {action}")
     return action
 
@@ -1450,10 +1635,9 @@ def create_schedule(payload: dict[str, Any]) -> dict[str, Any]:
         raise DataSyncError("name is required")
     cron = str(payload.get("cron") or "").strip()
     action = _schedule_action(payload)
-    job_ids = [str(j) for j in (payload.get("job_ids") or [])]
+    job_ids = [] if action == "quant_research" else _schedule_job_ids(payload.get("job_ids") or [])
     _assert_cron(cron)
-    if action == "sync":
-        _assert_known_jobs(job_ids)
+    _assert_schedule_jobs(action, job_ids)
     schedule_id = str(payload.get("id") or f"custom_{uuid4().hex[:8]}")
     values = {
         "id": schedule_id,
@@ -1487,10 +1671,15 @@ def update_schedule(schedule_id: str, payload: dict[str, Any]) -> dict[str, Any]
             raise DataSyncError(f"schedule {schedule_id} not found")
         next_action = _schedule_action(updates) if "action" in updates else str(existing.get("action") or "sync")
         if "job_ids" in updates:
-            if not isinstance(updates["job_ids"], list):
-                raise DataSyncError("job_ids must be a list")
-            if next_action != "quant_research":
-                _assert_known_jobs([str(j) for j in updates["job_ids"]])
+            updates["job_ids"] = _schedule_job_ids(updates["job_ids"])
+        if next_action == "quant_research":
+            if "action" in updates or "job_ids" in updates:
+                updates["job_ids"] = []
+        elif "action" in updates or "job_ids" in updates:
+            next_job_ids = updates.get("job_ids")
+            if next_job_ids is None:
+                next_job_ids = _schedule_job_ids(existing.get("job_ids") or [])
+            _assert_schedule_jobs(next_action, list(next_job_ids))
         if updates:
             session.execute(
                 schema.sync_batch_schedules.update()
@@ -1522,16 +1711,17 @@ def run_schedule_now(schedule_id: str) -> dict[str, Any]:
         ).mappings().first()
     if not row:
         raise DataSyncError(f"schedule {schedule_id} not found")
-    if str(row.get("action") or "sync") == "quant_research":
+    action = str(row.get("action") or "sync")
+    if action == "quant_research":
         research_run = _run_schedule_action(dict(row), raise_errors=True) or {}
         return _quant_research_schedule_status(schedule_id, research_run)
-    return start_sync_batch(job_ids=list(row.get("job_ids") or []), concurrency=int(row.get("concurrency") or 8), source="manual", schedule_id=schedule_id)
+    return _start_sync_schedule(dict(row), source="manual")
 
 
 def run_tail_prepare_now() -> dict[str, Any]:
     """Start the default fast tail-session preparation batch."""
 
-    return run_schedule_now("tail_prepare_14h")
+    return run_schedule_now("tail_preview_14h")
 
 
 def _quant_research_schedule_status(schedule_id: str, research_run: dict[str, Any]) -> dict[str, Any]:
@@ -1584,6 +1774,20 @@ def _quant_research_schedule_status(schedule_id: str, research_run: dict[str, An
     }
 
 
+def _start_sync_schedule(row: dict[str, Any], *, source: str) -> dict[str, Any]:
+    job_ids = _schedule_job_ids(row.get("job_ids"))
+    action = str(row.get("action") or "sync")
+    _assert_schedule_jobs(action, job_ids)
+    if action == "tail_preview" and TAIL_PREVIEW_BATCH_JOB_ID not in job_ids:
+        job_ids = [*job_ids, TAIL_PREVIEW_BATCH_JOB_ID]
+    return start_sync_batch(
+        job_ids=job_ids,
+        concurrency=int(row.get("concurrency") or 8),
+        source=source,
+        schedule_id=str(row["id"]),
+    )
+
+
 # ─── Sync batches ────────────────────────────────────────────────────────
 
 def _new_batch_job_item(job_id: str) -> dict[str, Any]:
@@ -1630,7 +1834,7 @@ def start_sync_batch(
                 return _copy_batch(latest)
 
     batch_id = uuid4().hex
-    resolved = list(job_ids) if job_ids else list(SYNC_BATCH_PROFILES.get(profile, SYNC_BATCH_PROFILES["core"]))
+    resolved = list(job_ids) if job_ids is not None else list(SYNC_BATCH_PROFILES.get(profile, SYNC_BATCH_PROFILES["core"]))
     created_at = _utc_now_iso()
     batch = {
         "id": batch_id,
@@ -1701,6 +1905,8 @@ def _depends_on(job_id: str, upstream: str) -> bool:
     depend on the stock list, sector jobs on the sector list.
     """
     if upstream == "sync_stock_list":
+        if job_id == TAIL_PREVIEW_BATCH_JOB_ID:
+            return True
         return job_id.startswith("sync_stock_") and job_id not in _BASE_SYNC_JOBS
     if upstream == "sync_sector_list":
         return job_id.startswith("sync_sector_") or job_id == "sync_stock_sector_memberships"
@@ -1745,7 +1951,15 @@ def _run_sync_batch(
         )
         _patch_batch(batch_id, {"current_job_id": job_id, "message": f"正在同步 {job_id}"})
         try:
-            result = run_job(job_id, _batch_job_params(job_id, params), progress=_batch_progress_callback(batch_id, job_id))
+            if job_id == TAIL_PREVIEW_BATCH_JOB_ID:
+                result = _run_tail_preview_cache_batch_job(params, schedule_id=schedule_id)
+            elif job_id == EOD_QUANT_RESEARCH_BATCH_JOB_ID:
+                result = _run_eod_quant_research_batch_job(
+                    _batch_job_params(job_id, params),
+                    progress=_batch_progress_callback(batch_id, job_id),
+                )
+            else:
+                result = run_job(job_id, _batch_job_params(job_id, params), progress=_batch_progress_callback(batch_id, job_id))
             rows_read = int(result.get("rows_read") or 0)
             rows_written = int(result.get("rows_written") or 0)
             _update_batch_job(
@@ -1812,6 +2026,130 @@ def _run_sync_batch(
         _finish_batch(batch_id, "partial", f"{succeeded} 成功 / {failed} 失败")
     else:
         _finish_batch(batch_id, "succeeded", "同步完成")
+
+
+def _run_tail_preview_cache_batch_job(params: dict[str, Any], *, schedule_id: str | None = None) -> dict[str, Any]:
+    preview_params = _batch_job_params(TAIL_PREVIEW_BATCH_JOB_ID, params)
+    result = screening.generate_tail_preview_cache(
+        _parse_date(preview_params.get("trade_date")),
+        strategy_id=str(preview_params.get("strategy") or screening.STRATEGY_ID),
+        max_symbols=int(preview_params.get("max_symbols") or 5000),
+        recommendation_limit=int(preview_params.get("recommendation_limit") or 100),
+        min_recommendation_score=float(preview_params.get("min_recommendation_score") or 60),
+        included_boards=preview_params.get("included_boards"),
+        source_schedule_id=schedule_id,
+    )
+    return {
+        "rows_read": int(result.get("total") or 0),
+        "rows_written": int(result.get("recommendation_count") or 0),
+        "message": (
+            f"今日预览 {result.get('trade_date') or '-'}："
+            f"{result.get('recommendation_count') or 0} 个推荐 / {result.get('total') or 0} 个候选"
+        ),
+        "trade_date": result.get("trade_date"),
+        "status": result.get("status"),
+    }
+
+
+def _run_eod_quant_research_batch_job(
+    params: dict[str, Any] | None = None,
+    *,
+    progress: ProgressCallback | None = None,
+    poll_interval_seconds: float = 2.0,
+    timeout_seconds: float = 1800.0,
+) -> dict[str, Any]:
+    """Run the true post-close quant workflow after complete daily bars exist."""
+
+    run_params = params or {}
+    latest_complete_date = _latest_complete_daily_date_for_research()
+    if latest_complete_date is None:
+        return {
+            "rows_read": 0,
+            "rows_written": 0,
+            "status": "empty",
+            "message": "完整日线不足，跳过盘后真实量化。",
+        }
+    if progress:
+        progress(
+            {
+                "stage": "盘后量化",
+                "current_label": latest_complete_date.isoformat(),
+                "progress_current": 0,
+                "progress_total": 1,
+                "message": f"正在生成 {latest_complete_date.isoformat()} 真实候选并回测",
+            }
+        )
+    research_run = research_jobs.start_research_run(
+        start=_parse_date(run_params.get("start") or run_params.get("start_date")),
+        end=_parse_date(run_params.get("end") or run_params.get("end_date")) or latest_complete_date,
+        strategy_id=str(run_params.get("strategy") or screening.STRATEGY_ID),
+        max_symbols=int(run_params.get("max_symbols") or 5000),
+        recommendation_limit=int(run_params.get("recommendation_limit") or screening.DEFAULT_RECOMMENDATION_LIMIT),
+        min_recommendation_score=float(run_params.get("min_recommendation_score") or 60),
+        min_entry_score=_float_or_none(run_params.get("min_entry_score")),
+        persist=bool(run_params.get("persist", True)),
+        auto_portfolio=bool(run_params.get("auto_portfolio", True)),
+        included_boards=run_params.get("included_boards"),
+        initial_cash=float(run_params.get("initial_cash") or 1_000_000),
+        max_positions=int(run_params.get("max_positions") or 10),
+        candidate_limit=int(run_params.get("candidate_limit") or 20),
+        max_position_pct=float(run_params.get("max_position_pct") or 0.1),
+        strict_entry=bool(run_params.get("strict_entry", True)),
+        execution_model=str(run_params.get("execution_model") or "legacy_next_open"),
+        force_refresh=bool(run_params.get("force_refresh", False)),
+    )
+    run_id = str(research_run.get("id") or "")
+    started = time.monotonic()
+    latest = research_run
+    while str(latest.get("status") or "") == "running":
+        if time.monotonic() - started > timeout_seconds:
+            raise DataSyncError(f"盘后量化超时：research_run={run_id}")
+        if progress:
+            progress(
+                {
+                    "stage": str(latest.get("stage") or "盘后量化"),
+                    "current_label": str(latest.get("message") or latest_complete_date.isoformat()),
+                    "progress_current": int(latest.get("progress_current") or 0),
+                    "progress_total": int(latest.get("progress_total") or 1),
+                    "message": str(latest.get("message") or "盘后量化运行中"),
+                }
+            )
+        time.sleep(max(float(poll_interval_seconds), 0.05))
+        latest = research_jobs.get_research_run(run_id)
+    if str(latest.get("status") or "") != "succeeded":
+        raise DataSyncError(str(latest.get("message") or "盘后量化失败"))
+    backtest = latest.get("backtest") if isinstance(latest.get("backtest"), dict) else {}
+    screen_run = latest.get("screen_run") if isinstance(latest.get("screen_run"), dict) else {}
+    if progress:
+        progress(
+            {
+                "stage": "完成",
+                "current_label": latest_complete_date.isoformat(),
+                "progress_current": 1,
+                "progress_total": 1,
+                "message": "盘后真实候选和组合回测完成",
+            }
+        )
+    return {
+        "rows_read": int(screen_run.get("total") or 0),
+        "rows_written": int(screen_run.get("recommendation_count") or 0),
+        "status": "succeeded",
+        "run_id": run_id,
+        "backtest_id": backtest.get("backtest_id") or latest.get("backtest_id"),
+        "trade_date": latest_complete_date.isoformat(),
+        "message": (
+            f"盘后真实量化完成：{latest_complete_date.isoformat()}，"
+            f"候选 {screen_run.get('recommendation_count') or 0}，"
+            f"回测 #{backtest.get('backtest_id') or latest.get('backtest_id') or '-'}"
+        ),
+    }
+
+
+def _latest_complete_daily_date_for_research() -> date | None:
+    if not is_database_configured():
+        return None
+    with session_scope() as session:
+        return _latest_complete_daily_date(session)
 
 
 def _batch_job_params(job_id: str, batch_params: dict[str, Any]) -> dict[str, Any]:
@@ -2081,6 +2419,7 @@ def tail_workflow_status() -> dict[str, Any]:
         return {"status": "unavailable", "message": "DATABASE_URL not configured"}
     with session_scope() as session:
         latest_daily_date = session.execute(select(func.max(schema.stock_daily_bars.c.trade_date))).scalar()
+        latest_complete_daily_date = _latest_complete_daily_date(session)
         latest_daily_updated = session.execute(select(func.max(schema.stock_daily_bars.c.updated_at))).scalar()
         latest_snapshot_updated = session.execute(select(func.max(schema.stocks.c.updated_at))).scalar()
         latest_snapshot_trade_time = session.execute(select(func.max(schema.stocks.c.trade_time))).scalar()
@@ -2088,18 +2427,73 @@ def tail_workflow_status() -> dict[str, Any]:
         latest_minute_time = session.execute(select(func.max(schema.stock_minute_bars.c.bar_time))).scalar()
         latest_candidate = session.execute(
             select(schema.quant_signal_runs)
-            .where(schema.quant_signal_runs.c.status == "succeeded")
+            .where(
+                schema.quant_signal_runs.c.status == "succeeded",
+                schema.quant_signal_runs.c.strategy_id == screening.STRATEGY_ID,
+                schema.quant_signal_runs.c.strategy_version == screening.STRATEGY_VERSION,
+            )
             .order_by(desc(schema.quant_signal_runs.c.trade_date), desc(schema.quant_signal_runs.c.id))
             .limit(1)
         ).mappings().first()
+        latest_tail_cache = session.execute(
+            select(schema.quant_tail_preview_cache)
+            .order_by(
+                desc(schema.quant_tail_preview_cache.c.trade_date),
+                desc(schema.quant_tail_preview_cache.c.generated_at),
+            )
+            .limit(1)
+        ).mappings().first()
+        latest_replay_run = session.execute(
+            select(schema.strategy_replay_runs)
+            .where(
+                schema.strategy_replay_runs.c.strategy_id == screening.STRATEGY_ID,
+                schema.strategy_replay_runs.c.strategy_version == screening.STRATEGY_VERSION,
+            )
+            .order_by(desc(schema.strategy_replay_runs.c.end_date), desc(schema.strategy_replay_runs.c.id))
+            .limit(1)
+        ).mappings().first()
+        latest_backtest = session.execute(
+            select(schema.backtest_runs)
+            .where(
+                schema.backtest_runs.c.strategy_id == screening.STRATEGY_ID,
+                schema.backtest_runs.c.strategy_version == screening.STRATEGY_VERSION,
+                schema.backtest_runs.c.status == "succeeded",
+            )
+            .order_by(desc(schema.backtest_runs.c.end_date), desc(schema.backtest_runs.c.id))
+            .limit(50)
+        ).mappings().all()
         schedule_rows = session.execute(select(schema.sync_batch_schedules)).mappings().all()
     schedules = {str(row["id"]): dict(row) for row in schedule_rows}
-    latest_research = research_jobs.get_latest_research_run()
+    latest_research = _compact_latest_research_run(research_jobs.get_latest_research_run()) or _latest_research_summary_from_db(
+        latest_candidate,
+        latest_replay_run,
+        latest_backtest,
+    )
     intraday_ready = bool(latest_snapshot_updated or latest_minute_time)
     candidate_date = latest_candidate["trade_date"] if latest_candidate else None
+    tail_preview_trade_date = _tail_preview_trade_date(latest_snapshot_updated)
+    tail_preview_ready = bool(
+        tail_preview_trade_date
+        and latest_complete_daily_date
+        and tail_preview_trade_date > latest_complete_daily_date
+        and intraday_ready
+    )
+    usable_tail_cache = (
+        latest_tail_cache
+        if latest_tail_cache
+        and tail_preview_trade_date
+        and latest_tail_cache.get("trade_date") == tail_preview_trade_date
+        else None
+    )
+    usable_tail_cache_payload = (
+        usable_tail_cache.get("payload")
+        if usable_tail_cache and isinstance(usable_tail_cache.get("payload"), dict)
+        else {}
+    )
     return {
         "status": "ready",
         "daily_bar_latest_date": _iso_or_none(latest_daily_date),
+        "daily_bar_latest_complete_date": _iso_or_none(latest_complete_daily_date),
         "daily_bar_updated_at": _iso_or_none(latest_daily_updated),
         "intraday_snapshot_updated_at": _iso_or_none(latest_snapshot_updated),
         "intraday_snapshot_trade_time": str(latest_snapshot_trade_time) if latest_snapshot_trade_time else None,
@@ -2108,11 +2502,29 @@ def tail_workflow_status() -> dict[str, Any]:
         "candidate_latest_date": _iso_or_none(candidate_date),
         "candidate_updated_at": _iso_or_none(latest_candidate.get("finished_at")) if latest_candidate else None,
         "latest_research_run": latest_research,
-        "tail_prepare_schedule": schedules.get("tail_prepare_14h"),
+        "tail_prepare_schedule": schedules.get("tail_preview_14h") or schedules.get("tail_prepare_14h"),
         "tail_quant_schedule": schedules.get("tail_quant_1430"),
         "eod_schedule": schedules.get("eod_18h"),
         "tail_prepare_ready": intraday_ready,
-        "message": "盘中候选引擎尚未启用；当前尾盘量化会使用最新完整日线。",
+        "tail_preview": {
+            "status": "ready" if (tail_preview_ready or usable_tail_cache) else "waiting",
+            "trade_date": tail_preview_trade_date.isoformat() if tail_preview_trade_date else None,
+            "data_source": screening.TAIL_PREVIEW_DATA_SOURCE,
+            "temporary_bar": True,
+            "base_daily_date": str(usable_tail_cache_payload.get("base_daily_date") or "") or _iso_or_none(latest_complete_daily_date or latest_daily_date),
+            "cached_trade_date": _iso_or_none(usable_tail_cache.get("trade_date")) if usable_tail_cache else None,
+            "cached_generated_at": _iso_or_none(usable_tail_cache.get("generated_at")) if usable_tail_cache else None,
+            "cached_recommendation_count": int(usable_tail_cache.get("recommendation_count") or 0) if usable_tail_cache else 0,
+            "cached_total": int(usable_tail_cache.get("total") or 0) if usable_tail_cache else 0,
+            "snapshot_updated_at": _iso_or_none(latest_snapshot_updated),
+            "minute_latest_date": _iso_or_none(latest_minute_date),
+            "message": (
+                "今日尾盘预览可用；使用盘中快照/分钟线临时K线，不写入历史候选。"
+                if tail_preview_ready or usable_tail_cache
+                else "等待今日盘中快照，或完整日线已覆盖无需预览。"
+            ),
+        },
+        "message": "历史候选仍使用完整日线；今日尾盘预览使用盘中临时K线，不参与回测收益统计。",
     }
 
 
@@ -2120,6 +2532,223 @@ def _iso_or_none(value: Any) -> str | None:
     if value is None:
         return None
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def _tail_preview_trade_date(snapshot_updated_at: Any) -> date | None:
+    if snapshot_updated_at is None:
+        return None
+    if isinstance(snapshot_updated_at, date) and not isinstance(snapshot_updated_at, datetime):
+        return snapshot_updated_at
+    if hasattr(snapshot_updated_at, "date"):
+        return snapshot_updated_at.date()
+    parsed = _parse_datetime(str(snapshot_updated_at))
+    return parsed.date() if parsed else None
+
+
+def _compact_latest_research_run(run: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return a status-card sized research payload.
+
+    Full research runs can include every daily candidate in ``screen_run.items``.
+    ``tail-workflow`` is polled by the UI, so keep it to progress, coverage and
+    summary metrics; detailed candidates stay behind the quant endpoints.
+    """
+
+    if not isinstance(run, dict):
+        return None
+    screen_run = run.get("screen_run") if isinstance(run.get("screen_run"), dict) else {}
+    replay_run = run.get("replay_run") if isinstance(run.get("replay_run"), dict) else {}
+    if not replay_run and isinstance(screen_run.get("replay_run"), dict):
+        replay_run = screen_run.get("replay_run") or {}
+    backtest = run.get("backtest") if isinstance(run.get("backtest"), dict) else {}
+    return {
+        "id": run.get("id"),
+        "status": run.get("status"),
+        "strategy_id": run.get("strategy_id"),
+        "strategy_version": run.get("strategy_version"),
+        "created_at": run.get("created_at"),
+        "started_at": run.get("started_at"),
+        "finished_at": run.get("finished_at"),
+        "stage": run.get("stage"),
+        "message": run.get("message"),
+        "progress_current": run.get("progress_current"),
+        "progress_total": run.get("progress_total"),
+        "progress_pct": run.get("progress_pct"),
+        "params": run.get("params") if isinstance(run.get("params"), dict) else {},
+        "screen_run": _compact_screen_run_summary(screen_run),
+        "replay_run": _compact_replay_run_summary(replay_run),
+        "replay_run_id": run.get("replay_run_id") or replay_run.get("replay_run_id") or screen_run.get("replay_run_id"),
+        "backtest_id": run.get("backtest_id") or backtest.get("backtest_id"),
+        "backtest": _compact_backtest_summary(backtest),
+        "error_type": run.get("error_type"),
+        "error_detail": run.get("error_detail"),
+    }
+
+
+def _latest_research_summary_from_db(
+    latest_candidate: Any,
+    latest_replay_run: Any,
+    latest_backtests: Sequence[Any],
+) -> dict[str, Any] | None:
+    if latest_candidate is None and latest_replay_run is None and not latest_backtests:
+        return None
+    latest_backtest = _latest_portfolio_backtest_row(latest_backtests)
+    screen_summary = _screen_run_summary_from_row(latest_candidate)
+    replay_summary = _replay_run_summary_from_row(latest_replay_run)
+    backtest_summary = _backtest_summary_from_row(latest_backtest)
+    status = "succeeded" if (screen_summary or backtest_summary) else "empty"
+    return {
+        "id": None,
+        "status": status,
+        "strategy_id": screening.STRATEGY_ID,
+        "strategy_version": screening.STRATEGY_VERSION,
+        "created_at": None,
+        "started_at": _iso_or_none((latest_backtest or latest_candidate or {}).get("started_at") if isinstance((latest_backtest or latest_candidate or {}), dict) else None),
+        "finished_at": _iso_or_none((latest_backtest or latest_candidate or {}).get("finished_at") if isinstance((latest_backtest or latest_candidate or {}), dict) else None),
+        "stage": "persisted",
+        "message": "最近一次已落库策略研究摘要",
+        "progress_current": 1,
+        "progress_total": 1,
+        "progress_pct": 100,
+        "params": {},
+        "screen_run": screen_summary,
+        "replay_run": replay_summary,
+        "replay_run_id": replay_summary.get("replay_run_id") if replay_summary else None,
+        "backtest_id": backtest_summary.get("backtest_id") if backtest_summary else None,
+        "backtest": backtest_summary,
+        "error_type": None,
+        "error_detail": None,
+    }
+
+
+def _latest_portfolio_backtest_row(rows: Sequence[Any]) -> dict[str, Any] | None:
+    for row in rows:
+        item = dict(row)
+        params = item.get("params") if isinstance(item.get("params"), dict) else {}
+        if not params.get("symbols"):
+            return item
+    return None
+
+
+def _screen_run_summary_from_row(row: Any) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    item = dict(row)
+    trade_date = item.get("trade_date")
+    return {
+        "status": item.get("status"),
+        "strategy_id": item.get("strategy_id"),
+        "strategy_version": item.get("strategy_version"),
+        "start_date": _iso_or_none(trade_date),
+        "end_date": _iso_or_none(trade_date),
+        "trade_date": _iso_or_none(trade_date),
+        "run_id": item.get("id"),
+        "total": item.get("candidate_count"),
+        "recommendation_count": item.get("recommendation_count"),
+        "message": item.get("message"),
+    }
+
+
+def _replay_run_summary_from_row(row: Any) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    item = dict(row)
+    return {
+        "status": item.get("status"),
+        "replay_run_id": item.get("id"),
+        "strategy_id": item.get("strategy_id"),
+        "strategy_version": item.get("strategy_version"),
+        "start_date": _iso_or_none(item.get("start_date")),
+        "end_date": _iso_or_none(item.get("end_date")),
+        "metrics": item.get("metrics") or {},
+        "message": item.get("message"),
+    }
+
+
+def _backtest_summary_from_row(row: Any) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    item = dict(row)
+    return {
+        "status": "ready" if item.get("status") == "succeeded" else item.get("status"),
+        "backtest_id": item.get("id"),
+        "strategy": item.get("strategy_id"),
+        "strategy_version": item.get("strategy_version"),
+        "start": _iso_or_none(item.get("start_date")),
+        "end": _iso_or_none(item.get("end_date")),
+        "metrics": item.get("metrics") or {},
+        "message": item.get("message"),
+    }
+
+
+def _compact_screen_run_summary(screen_run: dict[str, Any]) -> dict[str, Any] | None:
+    if not screen_run:
+        return None
+    keys = (
+        "status",
+        "strategy_id",
+        "strategy_version",
+        "start_date",
+        "end_date",
+        "trade_date",
+        "run_id",
+        "total_dates",
+        "succeeded_count",
+        "processed_count",
+        "generated_count",
+        "skipped_existing_count",
+        "force_refreshed_count",
+        "force_refresh",
+        "range_recommendation_count",
+        "total",
+        "recommendation_count",
+        "included_boards",
+        "replay_run_id",
+        "message",
+    )
+    return {key: screen_run.get(key) for key in keys if key in screen_run}
+
+
+def _compact_replay_run_summary(replay_run: dict[str, Any]) -> dict[str, Any] | None:
+    if not replay_run:
+        return None
+    keys = (
+        "status",
+        "replay_run_id",
+        "strategy_id",
+        "strategy_version",
+        "start_date",
+        "end_date",
+        "metrics",
+        "message",
+    )
+    return {key: replay_run.get(key) for key in keys if key in replay_run}
+
+
+def _compact_backtest_summary(backtest: dict[str, Any]) -> dict[str, Any] | None:
+    if not backtest:
+        return None
+    keys = (
+        "status",
+        "backtest_id",
+        "strategy",
+        "strategy_version",
+        "start",
+        "end",
+        "metrics",
+        "message",
+    )
+    return {key: backtest.get(key) for key in keys if key in backtest}
+
+
+def _latest_complete_daily_date(session, min_symbol_count: int = screening.MIN_COMPLETE_DAILY_SYMBOL_COUNT) -> date | None:
+    row = session.execute(
+        select(schema.stock_daily_bars.c.trade_date)
+        .group_by(schema.stock_daily_bars.c.trade_date)
+        .having(func.count(func.distinct(schema.stock_daily_bars.c.vt_symbol)) >= min_symbol_count)
+        .order_by(desc(schema.stock_daily_bars.c.trade_date))
+        .limit(1)
+    ).first()
+    return row[0] if row else None
 
 
 def minute_csv_template() -> str:
@@ -2636,12 +3265,7 @@ def _run_schedule_action(row: dict[str, Any], *, raise_errors: bool = False) -> 
                 last_message="尾盘量化任务已启动",
             )
             return research_run
-        start_sync_batch(
-            job_ids=list(row.get("job_ids") or []),
-            concurrency=int(row.get("concurrency") or 8),
-            source="schedule",
-            schedule_id=schedule_id,
-        )
+        _start_sync_schedule(row, source="schedule")
         return None
     except Exception as exc:
         _touch_schedule(
@@ -4105,7 +4729,6 @@ def _upsert_sector_fund_flows(
     """Upsert sector fund flow records."""
     if not items:
         return 0
-    today_str = date.today().isoformat()
     written = 0
     with session_scope() as session:
         for item in items:
@@ -4114,20 +4737,23 @@ def _upsert_sector_fund_flows(
             sector_id = str(item.get("id") or item.get("akshare_symbol") or code)
             if not sector_id:
                 continue
+            trade_date = str(item.get("trade_date") or date.today().isoformat())
+            if name:
+                _ensure_sector_row(session, sector_id, name, sector_type, item)
             values = {
                 "sector_id": sector_id,
-                "trade_date": today_str,
+                "trade_date": trade_date,
                 "period": period,
                 "main_net_inflow": item.get("main_net_inflow"),
                 "main_net_inflow_ratio": item.get("main_net_inflow_pct"),
                 "rank": item.get("rank"),
-                "source": "akshare",
+                "source": str(item.get("source") or "akshare"),
                 "raw": item.get("raw") or {},
             }
             existing = session.execute(
                 select(schema.sector_fund_flows).where(
                     (schema.sector_fund_flows.c.sector_id == sector_id)
-                    & (schema.sector_fund_flows.c.trade_date == today_str)
+                    & (schema.sector_fund_flows.c.trade_date == trade_date)
                     & (schema.sector_fund_flows.c.period == period)
                 )
             ).first()
@@ -4136,7 +4762,7 @@ def _upsert_sector_fund_flows(
                     schema.sector_fund_flows.update()
                     .where(
                         (schema.sector_fund_flows.c.sector_id == sector_id)
-                        & (schema.sector_fund_flows.c.trade_date == today_str)
+                        & (schema.sector_fund_flows.c.trade_date == trade_date)
                         & (schema.sector_fund_flows.c.period == period)
                     )
                     .values(**values)
@@ -4145,6 +4771,24 @@ def _upsert_sector_fund_flows(
                 session.execute(schema.sector_fund_flows.insert().values(**values))
             written += 1
     return written
+
+
+def _ensure_sector_row(session, sector_id: str, name: str, sector_type: str, item: dict[str, Any]) -> None:
+    values = {
+        "id": sector_id,
+        "name": name,
+        "type": sector_type,
+        "category": item.get("category"),
+        "path": item.get("path") or [],
+        "change_pct": item.get("change_pct"),
+        "source": str(item.get("source") or "akshare"),
+        "raw": item.get("raw") or {},
+    }
+    existing = session.execute(select(schema.sectors).where(schema.sectors.c.id == sector_id)).first()
+    if existing:
+        session.execute(schema.sectors.update().where(schema.sectors.c.id == sector_id).values(**values))
+    else:
+        session.execute(schema.sectors.insert().values(**values))
 
 
 def _upsert_limit_up_events(
@@ -4562,6 +5206,15 @@ def _parse_date(value: Any) -> date | None:
         except ValueError:
             continue
     return None
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_datetime(value: Any) -> datetime | None:

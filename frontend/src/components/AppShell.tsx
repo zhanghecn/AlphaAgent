@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Link, useLocation } from "react-router-dom";
+import { motion } from "framer-motion";
 import {
   Compass,
   Database,
@@ -26,6 +27,13 @@ const NAV_ITEMS = [
   { to: "/data", label: "数据管理", icon: Database },
 ];
 
+// 导航 active 指示条的滑动弹簧（layoutId 在激活项间平滑滑动）
+const NAV_SPRING = { type: "spring", stiffness: 400, damping: 32 } as const;
+
+function isActive(pathname: string, to: string): boolean {
+  return pathname === to || (to !== "/" && pathname.startsWith(to));
+}
+
 export function AppShell({ children }: { children: React.ReactNode }) {
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
@@ -33,10 +41,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-screen bg-background md:h-screen md:overflow-hidden">
-      {/* Mobile top nav */}
-      <header className="fixed inset-x-0 top-0 z-30 border-b bg-card md:hidden">
+      {/* Mobile top nav —— fixed 浮层，玻璃质感 + 极光顶光晕 */}
+      <header className="glass aurora fixed inset-x-0 top-0 z-30 border-b md:hidden">
         <div className="flex h-14 items-center justify-between px-4">
-          <span className="text-lg font-bold tracking-tight">AlphaAgent</span>
+          <span className="font-display text-lg font-bold tracking-tight">AlphaAgent</span>
           <button
             type="button"
             onClick={toggle}
@@ -49,42 +57,48 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
         <nav className="grid grid-cols-4 gap-1 px-2 pb-2">
           {NAV_ITEMS.map(({ to, label, icon: Icon }) => {
-            const active = location.pathname === to ||
-              (to !== "/" && location.pathname.startsWith(to));
+            const active = isActive(location.pathname, to);
             return (
               <Link
                 key={to}
                 to={to}
                 className={cn(
-                  "flex min-w-0 items-center justify-center gap-1 rounded-md px-1 py-2 text-xs font-medium transition-colors",
+                  "relative isolate flex min-w-0 items-center justify-center gap-1 rounded-md px-1 py-2 text-xs font-medium transition-colors",
                   active
-                    ? "bg-primary text-primary-foreground"
+                    ? "text-primary-foreground"
                     : "text-muted-foreground hover:bg-muted hover:text-foreground",
                 )}
               >
+                {active && (
+                  <motion.span
+                    layoutId="nav-active-mobile"
+                    className="absolute inset-0 rounded-md bg-primary"
+                    transition={NAV_SPRING}
+                  />
+                )}
                 <Icon size={16} />
-                <span className="truncate">{label}</span>
+                <span className="relative truncate">{label}</span>
               </Link>
             );
           })}
         </nav>
       </header>
 
-      {/* Sidebar */}
+      {/* Sidebar —— 宽度折叠用 CSS（性能优于 motion width），active 用 layoutId 滑动 */}
       <aside
         className={cn(
-          "hidden flex-col border-r bg-card transition-all duration-200 md:flex",
+          "hidden flex-col border-r bg-card transition-[width] duration-300 ease-spring md:flex",
           collapsed ? "w-16" : "w-56",
         )}
       >
-        <div className="flex h-14 items-center border-b px-4">
+        <div className="aurora relative flex h-14 items-center border-b px-4">
           {!collapsed && (
-            <span className="text-lg font-bold tracking-tight">AlphaAgent</span>
+            <span className="font-display text-lg font-bold tracking-tight">AlphaAgent</span>
           )}
           <button
             type="button"
             className={cn(
-              "ml-auto rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground",
+              "ml-auto rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
               collapsed && "ml-0",
             )}
             onClick={() => setCollapsed((v) => !v)}
@@ -95,22 +109,28 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
         <nav className="flex-1 space-y-1 p-2">
           {NAV_ITEMS.map(({ to, label, icon: Icon }) => {
-            const active = location.pathname === to ||
-              (to !== "/" && location.pathname.startsWith(to));
+            const active = isActive(location.pathname, to);
             return (
               <Link
                 key={to}
                 to={to}
                 className={cn(
-                  "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                  "relative isolate flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
                   active
-                    ? "bg-primary text-primary-foreground"
+                    ? "text-primary-foreground"
                     : "text-muted-foreground hover:bg-muted hover:text-foreground",
                 )}
                 title={collapsed ? label : undefined}
               >
+                {active && (
+                  <motion.span
+                    layoutId="nav-active-desktop"
+                    className="absolute inset-0 rounded-md bg-primary"
+                    transition={NAV_SPRING}
+                  />
+                )}
                 <Icon size={18} />
-                {!collapsed && <span>{label}</span>}
+                {!collapsed && <span className="relative">{label}</span>}
               </Link>
             );
           })}

@@ -710,6 +710,28 @@ quant_recommendations = Table(
 Index("ix_quant_recommendations_date", quant_recommendations.c.trade_date)
 Index("ix_quant_recommendations_vt_symbol", quant_recommendations.c.vt_symbol)
 
+quant_tail_preview_cache = Table(
+    "quant_tail_preview_cache",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("trade_date", Date, nullable=False),
+    Column("strategy_id", String(80), nullable=False),
+    Column("strategy_version", String(40), nullable=False),
+    Column("status", String(40), nullable=False),
+    Column("payload", JSONB, nullable=False, server_default="{}"),
+    Column("source_schedule_id", String(80), nullable=True),
+    Column("base_daily_date", Date, nullable=True),
+    Column("latest_daily_date", Date, nullable=True),
+    Column("recommendation_count", Integer, nullable=False, server_default="0"),
+    Column("total", Integer, nullable=False, server_default="0"),
+    Column("generated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+    UniqueConstraint("trade_date", "strategy_id", "strategy_version", name="uq_quant_tail_preview_cache"),
+)
+Index("ix_quant_tail_preview_cache_date", quant_tail_preview_cache.c.trade_date)
+Index("ix_quant_tail_preview_cache_strategy", quant_tail_preview_cache.c.strategy_id)
+
 backtest_runs = Table(
     "backtest_runs",
     metadata,
@@ -1030,4 +1052,31 @@ def _apply_compatible_schema_patches(engine) -> None:
         connection.exec_driver_sql("ALTER TABLE stocks ADD COLUMN IF NOT EXISTS volume_ratio FLOAT")
         connection.exec_driver_sql(
             "ALTER TABLE sync_batch_schedules ADD COLUMN IF NOT EXISTS action VARCHAR(40) NOT NULL DEFAULT 'sync'"
+        )
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS quant_tail_preview_cache (
+                id BIGSERIAL PRIMARY KEY,
+                trade_date DATE NOT NULL,
+                strategy_id VARCHAR(80) NOT NULL,
+                strategy_version VARCHAR(40) NOT NULL,
+                status VARCHAR(40) NOT NULL,
+                payload JSONB NOT NULL DEFAULT '{}',
+                source_schedule_id VARCHAR(80),
+                base_daily_date DATE,
+                latest_daily_date DATE,
+                recommendation_count INTEGER NOT NULL DEFAULT 0,
+                total INTEGER NOT NULL DEFAULT 0,
+                generated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                CONSTRAINT uq_quant_tail_preview_cache UNIQUE (trade_date, strategy_id, strategy_version)
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_quant_tail_preview_cache_date ON quant_tail_preview_cache (trade_date)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_quant_tail_preview_cache_strategy ON quant_tail_preview_cache (strategy_id)"
         )

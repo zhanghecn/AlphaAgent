@@ -65,7 +65,7 @@ def symbol_diagnostics_report(
     }
 
 
-def display_candidate_markers(rows: list[dict[str, Any]], *, cluster_days: int = 3) -> list[dict[str, Any]]:
+def display_candidate_markers(rows: list[dict[str, Any]], *, cluster_days: int = 14) -> list[dict[str, Any]]:
     """Select user-facing candidate markers from dense daily signal rows.
 
     Quant rows are evidence, not all chart markers. BUY rows are collapsed into
@@ -82,9 +82,20 @@ def display_candidate_markers(rows: list[dict[str, Any]], *, cluster_days: int =
         nonlocal buy_cluster, buy_cluster_start
         if not buy_cluster:
             return
-        selected.append(_candidate_cluster_marker(buy_cluster))
+        marker = _candidate_cluster_marker(buy_cluster)
+        if marker:
+            selected.append(marker)
         buy_cluster = []
         buy_cluster_start = None
+
+    def append_buy_cluster(row: dict[str, Any], row_date: date | None) -> None:
+        nonlocal buy_cluster_start
+        if buy_cluster_start is None:
+            buy_cluster_start = row_date
+        if row_date is not None and buy_cluster_start is not None and (row_date - buy_cluster_start).days > max_cluster_days:
+            flush_buy_cluster()
+            buy_cluster_start = row_date
+        buy_cluster.append(row)
 
     for row in sorted((dict(item) for item in rows), key=_candidate_marker_sort_key):
         row_date = _candidate_row_date(row)
@@ -92,24 +103,24 @@ def display_candidate_markers(rows: list[dict[str, Any]], *, cluster_days: int =
             flush_buy_cluster()
             selected.append(_with_display_kind(row, _existing_display_kind(row) or "trade"))
             continue
-        if _is_display_buy_row(row):
-            if buy_cluster_start is None:
-                buy_cluster_start = row_date
-            if row_date is not None and buy_cluster_start is not None and (row_date - buy_cluster_start).days > max_cluster_days:
-                flush_buy_cluster()
-                buy_cluster_start = row_date
-            buy_cluster.append(row)
+        if _is_display_buy_row(row) or _is_low_suction_context_row(row):
+            append_buy_cluster(row, row_date)
             continue
         if _is_display_rejected_buy_row(row):
             flush_buy_cluster()
             selected.append(_with_display_kind(row, "rejected_buy"))
             continue
+        if buy_cluster and _is_cluster_break_row(row):
+            flush_buy_cluster()
     flush_buy_cluster()
     return sorted(selected, key=_candidate_marker_sort_key)
 
 
-def _candidate_cluster_marker(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    best = max(rows, key=lambda row: (_candidate_score(row), _candidate_date_text(row), str(row.get("vt_symbol") or "")))
+def _candidate_cluster_marker(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    display_rows = [row for row in rows if _is_display_buy_row(row)]
+    if not display_rows:
+        return None
+    best = max(display_rows, key=_candidate_display_buy_key)
     dates = [_candidate_date_text(row) for row in rows if _candidate_date_text(row)]
     marker = _with_display_kind(best, "buy")
     marker["cluster_size"] = len(rows)
@@ -120,7 +131,66 @@ def _candidate_cluster_marker(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _is_display_buy_row(row: dict[str, Any]) -> bool:
-    return str(row.get("action") or "").upper() == "BUY" or bool(row.get("executable_entry_signal"))
+    if not (str(row.get("action") or "").upper() == "BUY" or bool(row.get("executable_entry_signal"))):
+        return False
+    if _is_low_suction_unconfirmed_row(row):
+        return False
+    return True
+
+
+def _is_low_suction_context_row(row: dict[str, Any]) -> bool:
+    if _is_low_suction_unconfirmed_row(row):
+        return True
+    evidence = _candidate_evidence(row)
+    try:
+        low_suction_days = float(evidence.get("low_suction_days") or 0)
+    except (TypeError, ValueError):
+        low_suction_days = 0.0
+    if low_suction_days < 3:
+        return False
+    failed_rules = set(_candidate_failed_rules(row))
+    hard_failures = {
+        "distribution_risk",
+        "weak_rebound_ma5_below_ma10",
+        "ma20_broken",
+        "pullback_too_deep",
+        "liquidity_score",
+        "risk_score",
+        "overheat",
+    }
+    return not bool(failed_rules & hard_failures)
+
+
+def _is_low_suction_unconfirmed_row(row: dict[str, Any]) -> bool:
+    evidence = _candidate_evidence(row)
+    setup = str(evidence.get("setup_type") or evidence.get("entry_setup") or "")
+    if setup != "stealth_low_suction":
+        return False
+    if bool(row.get("key_entry_signal")) or str(row.get("signal_role") or "") == "key_buy":
+        return False
+    return not bool(evidence.get("low_suction_launch_confirmed"))
+
+
+def _is_cluster_break_row(row: dict[str, Any]) -> bool:
+    if str(row.get("action") or "").upper() == "WATCH":
+        return bool(_candidate_failed_rules(row))
+    return bool(str(row.get("action") or "").strip())
+
+
+def _candidate_display_buy_key(row: dict[str, Any]) -> tuple[int, int, float, str, str]:
+    evidence = _candidate_evidence(row)
+    return (
+        1 if bool(row.get("key_entry_signal")) else 0,
+        1 if bool(evidence.get("low_suction_launch_confirmed")) else 0,
+        _candidate_score(row),
+        _candidate_date_text(row),
+        str(row.get("vt_symbol") or ""),
+    )
+
+
+def _candidate_evidence(row: dict[str, Any]) -> dict[str, Any]:
+    evidence = row.get("evidence")
+    return evidence if isinstance(evidence, dict) else {}
 
 
 def _is_display_rejected_buy_row(row: dict[str, Any]) -> bool:

@@ -246,6 +246,95 @@ def test_stock_fund_flows_prefers_eastmoney_main_rank_table(monkeypatch) -> None
     assert len(data["items"]) == 1
 
 
+def test_sector_fund_flows_use_eastmoney_rank_table(monkeypatch) -> None:
+    market_cache.clear()
+    adapter = AkShareAdapter()
+    calls: list[dict[str, object]] = []
+
+    def fake_clist_get(hosts, params, timeout):
+        del hosts, timeout
+        calls.append(dict(params))
+        assert params["fs"] == "m:90 t:3"
+        assert params["fid"] == "f62"
+        return {
+            "data": {
+                "total": 1,
+                "diff": [
+                    {
+                        "f12": "BK1134",
+                        "f14": "算力概念",
+                        "f3": 1.42,
+                        "f62": 11_423_465_472,
+                        "f184": 3.04,
+                        "f66": 14_252_535_808,
+                        "f72": -2_829_070_336,
+                        "f78": -9_135_968_256,
+                        "f84": -2_305_550_848,
+                        "f204": "工业富联",
+                        "f205": "601138",
+                        "f124": 1_781_768_387,
+                    }
+                ],
+            }
+        }
+
+    monkeypatch.setattr("alphaagent.data_sources.akshare_adapter._eastmoney_clist_get", fake_clist_get)
+
+    data = adapter.sector_fund_flows("concept", "即时")
+    item = data["items"][0]
+
+    assert data["source"] == "eastmoney.sector_fund_flow_rank"
+    assert len(calls) == 1
+    assert item["id"] == "BK1134"
+    assert item["name"] == "算力概念"
+    assert item["trade_date"] == "2026-06-18"
+    assert item["rank"] == 1
+    assert item["main_net_inflow"] == 11_423_465_472
+    assert item["main_net_inflow_pct"] == 3.04
+    assert item["leader_stock"] == "工业富联"
+
+
+def test_sector_fund_flows_map_5d_industry_fields(monkeypatch) -> None:
+    market_cache.clear()
+    adapter = AkShareAdapter()
+
+    def fake_clist_get(hosts, params, timeout):
+        del hosts, timeout
+        assert params["fs"] == "m:90 t:2"
+        assert params["fid"] == "f164"
+        return {
+            "data": {
+                "total": 1,
+                "diff": [
+                    {
+                        "f12": "BK1201",
+                        "f14": "电子",
+                        "f109": 12.6,
+                        "f164": 52_022_050_816,
+                        "f165": 1.07,
+                        "f166": 54_207_250_432,
+                        "f168": -2_185_199_616,
+                        "f170": -55_269_019_648,
+                        "f172": 3_528_388_608,
+                        "f257": "兆易创新",
+                        "f258": "603986",
+                        "f124": 1_781_768_387,
+                    }
+                ],
+            }
+        }
+
+    monkeypatch.setattr("alphaagent.data_sources.akshare_adapter._eastmoney_clist_get", fake_clist_get)
+
+    item = adapter.sector_fund_flows("industry", "5日")["items"][0]
+
+    assert item["id"] == "BK1201"
+    assert item["change_pct"] == 12.6
+    assert item["main_net_inflow"] == 52_022_050_816
+    assert item["main_net_inflow_pct"] == 1.07
+    assert item["leader_stock_code"] == "603986"
+
+
 def test_eastmoney_stock_main_fund_flow_fetches_multiple_pages(monkeypatch) -> None:
     calls: list[int] = []
 

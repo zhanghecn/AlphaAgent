@@ -1,16 +1,17 @@
 import { useEffect, type ReactNode } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
+const EASE: [number, number, number, number] = [0.16, 1, 0.3, 1];
+
 /**
  * Minimal modal primitive.
  *
- * Reuses the hand-written overlay pattern (fixed inset-0 + centered + ESC +
- * click-outside-to-close + stopPropagation) that AddToGroupDialog used, so
- * every portfolio dialog shares one focus/escape/click-out behavior without
- * pulling in radix-dialog. Uses design-system tokens (bg-card, shadow-card-
- * hover, animate-fade-in / animate-scale-in) and adapts to dark mode.
+ * 手写浮层模式（fixed inset-0 + 居中 + ESC + 点击遮罩关闭 + stopPropagation），
+ * 复用所有 portfolio dialog 的统一 focus/escape/click-out 行为，不引 radix-dialog。
+ * 动效改用 framer-motion AnimatePresence：进入 fade+scale，退出补齐（原 animate-fade-in/scale-in 无 exit）。
  */
 interface ModalProps {
   open: boolean;
@@ -29,23 +30,33 @@ function Modal({ open, onOpenChange, children, className }: ModalProps) {
     return () => document.removeEventListener("keydown", handleKey);
   }, [open, onOpenChange]);
 
-  if (!open) return null;
-
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm animate-fade-in"
-      onClick={() => onOpenChange(false)}
-    >
-      <div
-        className={cn(
-          "w-full max-w-lg rounded-xl border bg-card text-card-foreground shadow-card-hover animate-scale-in",
-          className,
-        )}
-        onClick={(event) => event.stopPropagation()}
-      >
-        {children}
-      </div>
-    </div>
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.2 }}
+          onClick={() => onOpenChange(false)}
+        >
+          <motion.div
+            className={cn(
+              "w-full max-w-lg rounded-xl border bg-card text-card-foreground shadow-card-hover",
+              className,
+            )}
+            initial={{ opacity: 0, scale: 0.96, y: 10 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.97, y: 8 }}
+            transition={{ duration: 0.22, ease: EASE }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            {children}
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 }
 
@@ -60,7 +71,7 @@ function ModalHeader({
 }) {
   return (
     <div className={cn("flex items-center justify-between border-b px-5 py-3", className)}>
-      <h2 className="text-base font-semibold tracking-tight">{title}</h2>
+      <h2 className="font-display text-base font-semibold tracking-tight">{title}</h2>
       {onClose && (
         <Button variant="ghost" size="icon" className="h-8 w-8" onClick={onClose}>
           <X className="h-4 w-4" />

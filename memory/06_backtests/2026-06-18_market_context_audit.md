@@ -100,3 +100,29 @@ Limitations:
 Keep dynamic market context as a first-screen audit and explanation layer. Do not use it yet as a hard buy threshold, sell rule, or position-size rule.
 
 Next work should backfill index bars and historical sector scores, then re-run this audit. Only after that should market context become a dynamic threshold or warehouse-control algorithm.
+
+## 2026-06-19 Read-side Integration
+
+`GET /api/backtests/{id}/path-diagnostics` now annotates each closed trade path
+with the same read-only market context at `entry_date`. This gives stock detail
+and path review the same fields already used by setup/market/exit audit:
+
+- `dynamic_market_regime` / `dynamic_market_label`
+- `dynamic_market_source`
+- `market_warning_label`
+- `fund_flow_label`
+- `recovery_label`
+- `stock_theme_alignment`
+
+Runtime check on `#194` after rebuilding the API container:
+
+| Field | Value |
+| --- | ---: |
+| Closed paths returned | `214` |
+| Dynamic market source | `stock_daily_bars` for all `214` rows |
+| Market regimes present | `choppy_rotation`, `false_bull`, `strong_broad` |
+| `rebound_prone_support_stop_review` rows | `60` |
+
+This is not a trading result and does not alter buy/sell behavior. It only makes
+path diagnostics explain whether a trade was opened in a choppy, false-bull, or
+strong-broad market bucket, plus the visible risk/recovery labels.

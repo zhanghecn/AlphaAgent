@@ -29,7 +29,7 @@ from alphaagent.server.services.backtest import execution_models, persistence, q
 from alphaagent.server.services.backtest.schemas import BacktestParams, MinuteBar, Position, ScoreContext, Trade
 from alphaagent.server.services.quant.factors import DRAGON_PULLBACK_STRATEGY_ID, STRATEGY_ID, STRATEGY_VERSION, Bar, SignalScore
 from alphaagent.server.services.quant.financials import financial_scores_from_rows_by_symbol
-from alphaagent.server.services.quant import screening_payloads
+from alphaagent.server.services.quant import market_context, screening_payloads
 from alphaagent.server.services.quant.strategy_registry import get_strategy
 from alphaagent.server.services.quant.screening import (
     _load_financial_scores,
@@ -140,7 +140,14 @@ def list_backtests(
 def _filter_product_baseline_backtests(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep full-range product runs so short experiments do not become the default UI run."""
 
-    portfolio_items = [item for item in items if item.get("run_type") == "portfolio" and item.get("start_date") and item.get("end_date")]
+    portfolio_items = [
+        item
+        for item in items
+        if item.get("run_type") == "portfolio"
+        and item.get("start_date")
+        and item.get("end_date")
+        and _is_product_baseline_params(item.get("params") or {})
+    ]
     if not portfolio_items:
         return items
     latest_end = max(str(item["end_date"]) for item in portfolio_items)
@@ -152,8 +159,29 @@ def _filter_product_baseline_backtests(items: list[dict[str, Any]]) -> list[dict
         if item.get("run_type") == "portfolio"
         and str(item.get("end_date")) == latest_end
         and str(item.get("start_date")) == earliest_start
+        and _is_product_baseline_params(item.get("params") or {})
     ]
     return baseline_items or items
+
+
+def _is_product_baseline_params(params: dict[str, Any]) -> bool:
+    """Return true for user-facing baseline runs, excluding research experiments."""
+
+    return (
+        not _truthy(params.get("exclude_from_product_baseline", False))
+        and not _truthy(params.get("require_low_suction_launch_confirmation", False))
+        and not _truthy(params.get("exclude_repeated_dragon_pullback", False))
+        and not _truthy(params.get("require_low_suction_launch_for_low_suction_context", False))
+        and not _truthy(params.get("require_balanced_low_suction_launch_quality", False))
+        and not _truthy(params.get("enable_entry_launch_quality_score", False))
+        and not _truthy(params.get("enable_entry_launch_risk_penalty", False))
+        and not _truthy(params.get("enable_low_suction_market_risk_penalty", False))
+        and not _truthy(params.get("enable_failed_launch_exit_stop", False))
+        and not _truthy(params.get("enable_mid_profit_giveback_stop", False))
+        and float(params.get("mid_profit_giveback_min_high_gain_pct") or 0.10) == 0.10
+        and float(params.get("mid_profit_giveback_max_current_gain_pct") or 0.04) == 0.04
+        and float(params.get("mid_profit_giveback_drawdown_pct") or 0.07) == 0.07
+    )
 
 
 def latest_symbol_backtest(vt_symbol: str, strategy_id: str | None = None) -> dict[str, Any]:
@@ -932,6 +960,7 @@ def backtest_path_diagnostics(
     vt_symbol: str | None = None,
     lookahead_days: int = 10,
     limit: int = 500,
+    full_result: bool = False,
 ) -> dict[str, Any]:
     return queries.backtest_path_diagnostics(
         schema=schema,
@@ -946,6 +975,22 @@ def backtest_path_diagnostics(
         vt_symbol=vt_symbol,
         lookahead_days=lookahead_days,
         limit=limit,
+        full_result=full_result,
+    )
+
+
+def backtest_setup_market_exit_audit(backtest_id: int, lookahead_days: int = 10) -> dict[str, Any]:
+    return queries.backtest_setup_market_exit_audit(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=_ensure_backtest_schema,
+        load_stock_names=_load_stock_names,
+        symbols_from_rows=_symbols_from_rows,
+        with_stock_names=_with_stock_names,
+        to_api=_mapping_to_api,
+        backtest_id=backtest_id,
+        lookahead_days=lookahead_days,
     )
 
 
@@ -1184,6 +1229,8 @@ def _score_day(
     score_cache: dict[date, list[Any]] | None = None,
     score_context: ScoreContext | None = None,
 ):
+    if params.enable_low_suction_market_risk_penalty:
+        score_cache = _score_cache_with_market_context(session, score_cache, trade_date)
     return scoring.score_day(
         session,
         bars_by_symbol,
@@ -1202,7 +1249,7 @@ def _score_candidates_for_day(
     params: BacktestParams,
     score_context: ScoreContext | None = None,
 ) -> list[Any]:
-    return scoring.score_candidates_for_day(
+    scores = scoring.score_candidates_for_day(
         session,
         bars_by_symbol,
         trade_date,
@@ -1216,6 +1263,9 @@ def _score_candidates_for_day(
         load_lhb_scores=_load_lhb_scores,
         financial_scores_from_context=_financial_scores_from_context,
     )
+    if params.enable_low_suction_market_risk_penalty:
+        _attach_scores_market_context(session, scores, trade_date)
+    return scores
 
 
 def _load_score_cache_from_persisted_signals(
@@ -1227,7 +1277,7 @@ def _load_score_cache_from_persisted_signals(
 ) -> dict[date, list[SignalScore]] | None:
     """Load same-version daily screening scores to avoid recomputing a full range."""
 
-    if params.symbols or not params.persist or not trading_days:
+    if params.symbols or not trading_days:
         return None
     required_dates = set(trading_days[:-1])
     run_rows = session.execute(
@@ -1249,8 +1299,7 @@ def _load_score_cache_from_persisted_signals(
             continue
         if _screen_run_matches_backtest_params(dict(row), params):
             matched_runs[trade_date] = int(row["id"])
-    run_dates = set(matched_runs)
-    if not required_dates.issubset(run_dates):
+    if not matched_runs:
         return None
     run_ids = sorted(matched_runs.values())
     min_score_prefilter = screening_payloads.signal_score_prefilter_threshold(params.strategy, params.min_entry_score)
@@ -1270,15 +1319,121 @@ def _load_score_cache_from_persisted_signals(
         .order_by(schema.quant_stock_signals.c.trade_date, desc(schema.quant_stock_signals.c.total_score), schema.quant_stock_signals.c.vt_symbol)
     ).mappings().all()
     by_date: dict[date, list[SignalScore]] = defaultdict(list)
-    for trade_date in required_dates:
+    for trade_date in matched_runs:
         by_date[trade_date] = []
     for row in rows:
         score = _signal_score_from_row(dict(row), params.min_entry_score)
         by_date[score.trade_date].append(score)
 
+    _drop_sparse_score_cache_dates(by_date, matched_runs)
+    if not any(by_date.values()):
+        return None
+
+    if params.enable_low_suction_market_risk_penalty:
+        by_date = _score_cache_with_market_context(session, by_date, *sorted(required_dates))
+
     for scores in by_date.values():
         scores.sort(key=lambda item: (-item.total_score, item.vt_symbol))
     return by_date
+
+
+def _drop_sparse_score_cache_dates(
+    by_date: dict[date, list[SignalScore]],
+    matched_runs: dict[date, int],
+) -> None:
+    """Drop stale run-cache dates whose signal rows were not fully persisted."""
+
+    for trade_date in matched_runs:
+        scores = by_date.get(trade_date) or []
+        if len(scores) < 50:
+            by_date.pop(trade_date, None)
+
+
+def _score_cache_with_market_context(
+    session,
+    score_cache: dict[date, list[SignalScore]] | None,
+    *trade_dates: date,
+) -> dict[date, list[SignalScore]] | None:
+    """Attach signal-day market context to cached scores without writing to storage."""
+
+    if not score_cache or not trade_dates:
+        return score_cache
+    missing_dates = [
+        day
+        for day in sorted({trade_date for trade_date in trade_dates if trade_date in score_cache})
+        if any(_needs_market_context(score) for score in score_cache.get(day, []))
+    ]
+    if not missing_dates:
+        return score_cache
+    contexts = market_context.compute_market_contexts(session, schema, missing_dates)
+    for trade_date in missing_dates:
+        context = contexts.get(trade_date)
+        if context is None:
+            continue
+        payload = context.to_dict()
+        _attach_scores_market_context_payload(score_cache.get(trade_date, []), payload)
+    return score_cache
+
+
+def _attach_scores_market_context(session, scores: list[SignalScore], trade_date: date) -> None:
+    if not scores or not any(_needs_market_context(score) for score in scores):
+        return
+    context = market_context.compute_market_contexts(session, schema, [trade_date]).get(trade_date)
+    if context is None:
+        return
+    _attach_scores_market_context_payload(scores, context.to_dict())
+
+
+def _attach_scores_market_context_payload(scores: list[SignalScore], payload: dict[str, Any]) -> None:
+    for score in scores:
+        if _needs_market_context(score):
+            _attach_score_market_context(score, payload)
+
+
+def _needs_market_context(score: SignalScore) -> bool:
+    evidence = getattr(score, "evidence", {}) or {}
+    return "dynamic_market_regime" not in evidence or "recovery_state" not in evidence
+
+
+def _attach_score_market_context(score: SignalScore, payload: dict[str, Any]) -> None:
+    evidence = getattr(score, "evidence", {}) or {}
+    score.evidence = evidence
+    evidence["market_context"] = {
+        "regime": payload.get("regime"),
+        "label": payload.get("label"),
+        "market_score": payload.get("market_score"),
+        "breadth_score": payload.get("breadth_score"),
+        "risk_score": payload.get("risk_score"),
+        "fund_flow_state": payload.get("fund_flow_state"),
+        "fund_flow_label": payload.get("fund_flow_label"),
+        "fund_flow_score": payload.get("fund_flow_score"),
+        "fund_flow_streak_days": payload.get("fund_flow_streak_days"),
+        "fund_flow_source": payload.get("fund_flow_source"),
+        "fund_flow_worsening_days": payload.get("fund_flow_worsening_days"),
+        "fund_flow_new_low": payload.get("fund_flow_new_low"),
+        "fund_flow_recovery_from_streak_days": payload.get("fund_flow_recovery_from_streak_days"),
+        "market_warning_level": payload.get("market_warning_level"),
+        "market_warning_label": payload.get("market_warning_label"),
+        "recovery_state": payload.get("recovery_state"),
+        "recovery_label": payload.get("recovery_label"),
+        "source": payload.get("source"),
+    }
+    evidence["market_context_summary"] = market_context.market_context_summary(payload)
+    evidence["dynamic_market_regime"] = payload.get("regime")
+    evidence["dynamic_market_label"] = payload.get("label")
+    evidence["market_breadth_score"] = payload.get("breadth_score")
+    evidence["market_risk_score"] = payload.get("risk_score")
+    evidence["market_warning_level"] = payload.get("market_warning_level")
+    evidence["market_warning_label"] = payload.get("market_warning_label")
+    evidence["fund_flow_state"] = payload.get("fund_flow_state")
+    evidence["fund_flow_label"] = payload.get("fund_flow_label")
+    evidence["fund_flow_streak_days"] = payload.get("fund_flow_streak_days")
+    evidence["fund_flow_source"] = payload.get("fund_flow_source")
+    evidence["fund_flow_worsening_days"] = payload.get("fund_flow_worsening_days")
+    evidence["fund_flow_new_low"] = payload.get("fund_flow_new_low")
+    evidence["fund_flow_recovery_from_streak_days"] = payload.get("fund_flow_recovery_from_streak_days")
+    evidence["recovery_state"] = payload.get("recovery_state")
+    evidence["recovery_label"] = payload.get("recovery_label")
 
 
 def _screen_run_matches_backtest_params(run: dict[str, Any], params: BacktestParams) -> bool:
@@ -1289,6 +1444,7 @@ def _screen_run_matches_backtest_params(run: dict[str, Any], params: BacktestPar
 
 
 def _signal_score_from_row(row: dict[str, Any], min_entry_score: float) -> SignalScore:
+    evidence = _enriched_cached_signal_evidence(dict(row.get("evidence") or {}))
     score = SignalScore(
         vt_symbol=str(row["vt_symbol"]),
         trade_date=row["trade_date"],
@@ -1303,10 +1459,47 @@ def _signal_score_from_row(row: dict[str, Any], min_entry_score: float) -> Signa
         risk_score=float(row.get("risk_score") or 50),
         entry_signal=bool(row.get("entry_signal")),
         risk_level=str(row.get("risk_level") or "MEDIUM"),
-        evidence=dict(row.get("evidence") or {}),
+        evidence=evidence,
     )
     score.entry_signal = scoring.is_executable_entry_signal(score, min_entry_score)
     return score
+
+
+def _enriched_cached_signal_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Backfill read-only diagnostics for older persisted signal caches."""
+
+    if "early_dragon_pullback_risk" in evidence:
+        return evidence
+    setup = str(evidence.get("entry_setup") or evidence.get("setup_type") or "")
+    low_suction_days = _float_or_none(evidence.get("low_suction_days")) or 0.0
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    early_risk = bool(
+        setup == "dragon_pullback"
+        and low_suction_days <= 0
+        and ma_convergence is not None
+        and ma_convergence >= 18.0
+        and latest_change is not None
+        and latest_change >= 1.0
+        and close_location is not None
+        and close_location >= 0.55
+    )
+    evidence["early_dragon_pullback_risk"] = early_risk
+    if early_risk:
+        notes = evidence.get("score_notes")
+        if isinstance(notes, list) and "经典龙回头偏早：均线发散且缺少低吸蓄势" not in notes:
+            notes.append("经典龙回头偏早：均线发散且缺少低吸蓄势")
+    return evidence
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _is_buy_candidate(score, params: BacktestParams) -> bool:
@@ -1584,6 +1777,12 @@ def _candidate_not_planned_summary(context: dict[str, Any] | None) -> str:
         return "候选存在，但没有进入该回测的理论买入计划，通常是排名、持仓上限、策略参数或回测区间不一致。"
     reason = str(context.get("likely_reason") or "")
     label = str(context.get("likely_reason_label") or "").strip()
+    if context.get("target_theoretical_held_on_signal_date"):
+        entry_date = str(context.get("target_theoretical_entry_date") or "").strip()
+        real_held = bool(context.get("target_real_held_on_signal_date"))
+        real_text = "真实组合当日也已持有" if real_held else "但真实组合当日未持有"
+        entry_text = f"自 {entry_date} 起" if entry_date else "此前"
+        return f"候选存在，但理论信号标记层{entry_text}已持有该股，因此不重复写入 BUY 计划；{real_text}，需要在详情页把候选 BUY 与真实成交分开展示。"
     if reason == "before_first_signal_date":
         return f"候选存在，但信号日处于该回测的预热/明细空窗期：{label}。回测需要先加载足够历史K线计算 MA60、60日回撤等指标。"
     if reason == "after_last_signal_date":
@@ -2991,6 +3190,20 @@ def _params_from_run(run: dict[str, Any]) -> BacktestParams:
         rotation_min_score_gap=float(raw_params.get("rotation_min_score_gap") or 8.0),
         rotation_max_holding_return_pct=float(raw_params.get("rotation_max_holding_return_pct") or 3.0),
         rotation_min_holding_days=int(raw_params.get("rotation_min_holding_days") or 3),
+        require_low_suction_launch_confirmation=_truthy(raw_params.get("require_low_suction_launch_confirmation", False)),
+        exclude_repeated_dragon_pullback=_truthy(raw_params.get("exclude_repeated_dragon_pullback", False)),
+        require_low_suction_launch_for_low_suction_context=_truthy(
+            raw_params.get("require_low_suction_launch_for_low_suction_context", False)
+        ),
+        require_balanced_low_suction_launch_quality=_truthy(raw_params.get("require_balanced_low_suction_launch_quality", False)),
+        enable_entry_launch_quality_score=_truthy(raw_params.get("enable_entry_launch_quality_score", False)),
+        enable_entry_launch_risk_penalty=_truthy(raw_params.get("enable_entry_launch_risk_penalty", False)),
+        enable_low_suction_market_risk_penalty=_truthy(raw_params.get("enable_low_suction_market_risk_penalty", False)),
+        enable_failed_launch_exit_stop=_truthy(raw_params.get("enable_failed_launch_exit_stop", False)),
+        enable_mid_profit_giveback_stop=_truthy(raw_params.get("enable_mid_profit_giveback_stop", False)),
+        mid_profit_giveback_min_high_gain_pct=float(raw_params.get("mid_profit_giveback_min_high_gain_pct") or 0.10),
+        mid_profit_giveback_max_current_gain_pct=float(raw_params.get("mid_profit_giveback_max_current_gain_pct") or 0.04),
+        mid_profit_giveback_drawdown_pct=float(raw_params.get("mid_profit_giveback_drawdown_pct") or 0.07),
         symbols=[_normalize_symbol(symbol) for symbol in (raw_params.get("symbols") or []) if _normalize_symbol(symbol)],
         included_boards=normalize_included_boards(raw_params.get("included_boards")),
         persist=False,
@@ -3082,7 +3295,9 @@ def _data_quality_snapshot(session) -> dict[str, Any]:
         "stock_daily_bars": schema.stock_daily_bars,
         "stock_minute_bars": schema.stock_minute_bars,
         "stock_financial_reports": schema.stock_financial_reports,
+        "sector_daily_metrics": schema.sector_daily_metrics,
         "sector_period_scores": schema.sector_period_scores,
+        "sector_fund_flows": schema.sector_fund_flows,
         "stock_fund_flows": schema.stock_fund_flows,
         "stock_hot_ranks": schema.stock_hot_ranks,
         "stock_lhb_records": schema.stock_lhb_records,
@@ -3091,20 +3306,51 @@ def _data_quality_snapshot(session) -> dict[str, Any]:
     for name, table in tables.items():
         count = session.execute(select(func.count()).select_from(table)).scalar_one()
         result[name] = {"count": int(count or 0)}
+        date_column = _data_quality_date_column(table)
+        if date_column is not None:
+            bounds = session.execute(select(func.min(date_column).label("min_date"), func.max(date_column).label("max_date"))).mappings().one()
+            result[name]["min_date"] = _date_bound_to_text(bounds.get("min_date"))
+            result[name]["max_date"] = _date_bound_to_text(bounds.get("max_date"))
     daily_count = int((result.get("stock_daily_bars") or {}).get("count") or 0)
     daily_turnover_count = session.execute(
         select(func.count()).select_from(schema.stock_daily_bars).where(schema.stock_daily_bars.c.turnover.is_not(None))
     ).scalar_one()
     result["stock_daily_bars"]["turnover_count"] = int(daily_turnover_count or 0)
     result["stock_daily_bars"]["turnover_coverage_pct"] = _ratio_pct(daily_turnover_count, daily_count)
-    result["limitations"] = [
-        "stock_fund_flows、stock_hot_ranks、stock_lhb_records 为空时，游资/情绪信号只能使用价格成交量代理。",
-        "sector_period_scores 为空时，主线板块评分退化为中性或缺失。",
+    limitations = [
         "stock_minute_bars 覆盖不足时，尾盘低吸只能对已同步样本做分钟级验证。",
-        "stock_financial_reports 为空时，股票详情页实时可查财报也不会进入筛选/回测评分。",
         "stock_daily_bars.turnover 覆盖不足时，流动性评分会退化为 close * volume 估算，可能影响买点过滤。",
     ]
+    if not _quality_has_rows(result, "stock_fund_flows") or not _quality_has_rows(result, "stock_hot_ranks") or not _quality_has_rows(result, "stock_lhb_records"):
+        limitations.append("stock_fund_flows、stock_hot_ranks、stock_lhb_records 为空时，游资/情绪信号只能使用价格成交量代理。")
+    if not _quality_has_rows(result, "sector_fund_flows"):
+        limitations.append("sector_fund_flows 为空时，市场资金流只能降级为局部个股资金榜单或资金未知。")
+    if not _quality_has_rows(result, "sector_period_scores"):
+        limitations.append("sector_period_scores 为空时，主线板块评分退化为中性或缺失。")
+    if not _quality_has_rows(result, "stock_financial_reports"):
+        limitations.append("stock_financial_reports 为空时，股票详情页实时可查财报也不会进入筛选/回测评分。")
+    result["limitations"] = limitations
     return result
+
+
+def _quality_has_rows(snapshot: dict[str, Any], table_name: str) -> bool:
+    table = snapshot.get(table_name)
+    return isinstance(table, dict) and int(table.get("count") or 0) > 0
+
+
+def _data_quality_date_column(table: Any) -> Any | None:
+    for name in ("trade_date", "as_of_date", "report_date"):
+        if name in table.c:
+            return table.c[name]
+    return None
+
+
+def _date_bound_to_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
 
 
 def _median(values: list[int | float]) -> float:

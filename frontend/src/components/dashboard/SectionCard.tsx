@@ -33,7 +33,7 @@ export function SectionCard({
         <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-3">
           <div className="min-w-0">
             {title && (
-              <h3 className="truncate text-sm font-semibold tracking-tight text-foreground">
+              <h3 className="font-display truncate text-sm font-semibold tracking-tight text-foreground">
                 {title}
               </h3>
             )}

@@ -51,6 +51,23 @@ class MarketContext:
     growth_score: float | None
     value_score: float | None
     small_cap_score: float | None
+    index_return_5d: float | None
+    index_return_20d: float | None
+    drawdown_60d_pct: float | None
+    fund_flow_state: str
+    fund_flow_label: str
+    fund_flow_score: float | None
+    fund_flow_streak_days: int
+    fund_flow_source: str | None
+    main_net_inflow: float | None
+    main_net_inflow_ratio: float | None
+    fund_flow_worsening_days: int
+    fund_flow_new_low: bool
+    fund_flow_recovery_from_streak_days: int
+    market_warning_level: int
+    market_warning_label: str
+    recovery_state: str
+    recovery_label: str
     source: str
     notes: list[str]
 
@@ -73,12 +90,31 @@ class MarketContext:
             "growth_score": self.growth_score,
             "value_score": self.value_score,
             "small_cap_score": self.small_cap_score,
+            "index_return_5d": self.index_return_5d,
+            "index_return_20d": self.index_return_20d,
+            "drawdown_60d_pct": self.drawdown_60d_pct,
+            "fund_flow_state": self.fund_flow_state,
+            "fund_flow_label": self.fund_flow_label,
+            "fund_flow_score": self.fund_flow_score,
+            "fund_flow_streak_days": self.fund_flow_streak_days,
+            "fund_flow_source": self.fund_flow_source,
+            "main_net_inflow": self.main_net_inflow,
+            "main_net_inflow_ratio": self.main_net_inflow_ratio,
+            "fund_flow_worsening_days": self.fund_flow_worsening_days,
+            "fund_flow_new_low": self.fund_flow_new_low,
+            "fund_flow_recovery_from_streak_days": self.fund_flow_recovery_from_streak_days,
+            "market_warning_level": self.market_warning_level,
+            "market_warning_label": self.market_warning_label,
+            "recovery_state": self.recovery_state,
+            "recovery_label": self.recovery_label,
             "source": self.source,
             "notes": self.notes,
         }
 
 
 def market_context_for_date(session: Any, schema: Any, trade_date: date) -> dict[str, Any]:
+    if not hasattr(session, "execute"):
+        return _fallback_context(trade_date).to_dict()
     return compute_market_contexts(session, schema, [trade_date]).get(trade_date, _fallback_context(trade_date)).to_dict()
 
 
@@ -86,14 +122,17 @@ def compute_market_contexts(session: Any, schema: Any, trade_dates: list[date]) 
     dates = sorted({day for day in trade_dates if day})
     if not dates:
         return {}
+    if not hasattr(session, "execute"):
+        return {day: _fallback_context(day) for day in dates}
     start = dates[0] - timedelta(days=420)
     end = dates[-1]
     index_bars = _load_index_bars(session, schema, start, end)
     breadth_by_date = _load_market_breadth_by_date(session, schema, dates[0] - timedelta(days=180), end, dates)
     sector_scores = _load_sector_scores(session, schema, start, end)
+    fund_flows = _load_fund_flows_by_date(session, schema, dates[0] - timedelta(days=80), end)
     contexts: dict[date, MarketContext] = {}
     for day in dates:
-        contexts[day] = _build_context(day, index_bars, breadth_by_date, sector_scores)
+        contexts[day] = _build_context(day, index_bars, breadth_by_date, sector_scores, fund_flows)
     return contexts
 
 
@@ -127,7 +166,17 @@ def annotate_rows_with_market_context(
         merged["market_score"] = payload["market_score"]
         merged["market_breadth_score"] = payload["breadth_score"]
         merged["market_risk_score"] = payload["risk_score"]
+        merged["market_warning_level"] = payload["market_warning_level"]
+        merged["market_warning_label"] = payload["market_warning_label"]
+        merged["fund_flow_state"] = payload["fund_flow_state"]
+        merged["fund_flow_label"] = payload["fund_flow_label"]
+        merged["fund_flow_score"] = payload["fund_flow_score"]
+        merged["fund_flow_streak_days"] = payload["fund_flow_streak_days"]
+        merged["fund_flow_source"] = payload["fund_flow_source"]
+        merged["recovery_state"] = payload["recovery_state"]
+        merged["recovery_label"] = payload["recovery_label"]
         merged["theme_strength"] = payload["theme_strength"]
+        merged["market_context_summary"] = market_context_summary(payload)
         merged["stock_theme_alignment"] = _stock_theme_alignment(
             row,
             payload,
@@ -151,22 +200,235 @@ def _annotate_rows_with_benchmark_proxy(rows: list[dict[str, Any]]) -> list[dict
         merged["market_score"] = payload["market_score"]
         merged["market_breadth_score"] = None
         merged["market_risk_score"] = payload["risk_score"]
+        merged["market_warning_level"] = payload.get("market_warning_level", 0)
+        merged["market_warning_label"] = payload.get("market_warning_label", "未知")
+        merged["fund_flow_state"] = "unknown"
+        merged["fund_flow_label"] = "资金未知"
+        merged["fund_flow_score"] = None
+        merged["fund_flow_streak_days"] = 0
+        merged["fund_flow_source"] = None
+        merged["recovery_state"] = payload.get("recovery_state", "none")
+        merged["recovery_label"] = payload.get("recovery_label", "未回暖")
         merged["theme_strength"] = 0.0
+        merged["market_context_summary"] = market_context_summary(payload)
         merged["stock_theme_alignment"] = _stock_theme_alignment(row, payload)
         result.append(merged)
+    return result
+
+
+def market_context_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    """Return a compact read-only market marker for UI and audits."""
+
+    if not payload:
+        return {
+            "state": "unknown",
+            "label": "市场环境未知",
+            "severity": "neutral",
+            "notes": [],
+            "fund_flow_marker": _fund_flow_marker({}),
+        }
+
+    regime = str(payload.get("regime") or payload.get("dynamic_market_regime") or "unknown")
+    market_label = str(payload.get("label") or payload.get("dynamic_market_label") or "未知")
+    warning_level = _safe_float(payload.get("market_warning_level")) or 0.0
+    warning_label = str(payload.get("market_warning_label") or "未知")
+    recovery_state = str(payload.get("recovery_state") or "none")
+    recovery_label = str(payload.get("recovery_label") or "未回暖")
+    fund_flow_state = str(payload.get("fund_flow_state") or "unknown")
+    fund_flow_label = str(payload.get("fund_flow_label") or "资金未知")
+    fund_flow_streak = int(_safe_float(payload.get("fund_flow_streak_days")) or 0)
+    source = str(payload.get("fund_flow_source") or payload.get("source") or "")
+    breadth = _safe_float(payload.get("breadth_score"))
+    if breadth is None:
+        breadth = _safe_float(payload.get("market_breadth_score"))
+
+    notes = [market_label] if market_label and market_label != "未知" else []
+    if warning_label and warning_label not in {"正常", "未知"}:
+        notes.append(warning_label)
+    flow_marker = _fund_flow_marker(payload)
+    if fund_flow_label and fund_flow_label != "资金未知":
+        notes.append(flow_marker["label"])
+    if fund_flow_streak >= 3:
+        notes.append(f"资金连续流出 {fund_flow_streak} 天")
+    if flow_marker.get("note"):
+        notes.append(str(flow_marker["note"]))
+    if recovery_state != "none" and recovery_label:
+        notes.append(recovery_label)
+    if source == "stock_fund_flows_partial":
+        notes.append("资金流为局部榜单兜底")
+
+    if regime in {"crash", "weak_defensive"} or warning_level >= 3 or fund_flow_state in {"panic_outflow", "continuous_outflow"}:
+        return {
+            "state": "risk_off",
+            "label": "大盘向下/资金防守",
+            "severity": "danger" if warning_level >= 4 or fund_flow_state == "panic_outflow" or flow_marker.get("level") == 4 else "warning",
+            "notes": _dedupe_notes(notes),
+            "fund_flow_marker": flow_marker,
+        }
+    if warning_level >= 2 or fund_flow_state == "outflow" or (breadth is not None and breadth < 42):
+        return {
+            "state": "risk_watch",
+            "label": "大盘风险观察",
+            "severity": "warning",
+            "notes": _dedupe_notes(notes),
+            "fund_flow_marker": flow_marker,
+        }
+    if recovery_state in {"warming_confirmed", "stabilizing"}:
+        return {
+            "state": "warming",
+            "label": recovery_label or "市场回暖",
+            "severity": "positive",
+            "notes": _dedupe_notes(notes),
+            "fund_flow_marker": flow_marker,
+        }
+    if regime == "narrow_theme_bull":
+        return {
+            "state": "mainline_active",
+            "label": "窄牛主线活跃",
+            "severity": "positive",
+            "notes": _dedupe_notes(notes),
+            "fund_flow_marker": flow_marker,
+        }
+    if regime in {"false_bull", "choppy_rotation"}:
+        return {
+            "state": "rotation",
+            "label": "震荡轮动",
+            "severity": "neutral",
+            "notes": _dedupe_notes(notes),
+            "fund_flow_marker": flow_marker,
+        }
+    return {
+        "state": "neutral",
+        "label": market_label if market_label != "未知" else "环境中性",
+        "severity": "neutral",
+        "notes": _dedupe_notes(notes),
+        "fund_flow_marker": flow_marker,
+    }
+
+
+def _fund_flow_marker(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a compact read-only fund-flow pressure/recovery marker."""
+
+    state = str(payload.get("fund_flow_state") or "unknown")
+    label = str(payload.get("fund_flow_label") or "资金未知")
+    score = _safe_float(payload.get("fund_flow_score"))
+    streak = int(_safe_float(payload.get("fund_flow_streak_days")) or 0)
+    source = str(payload.get("fund_flow_source") or payload.get("source") or "")
+    net = _safe_float(payload.get("main_net_inflow"))
+    ratio = _safe_float(payload.get("main_net_inflow_ratio"))
+    worsening_days = int(
+        _safe_float(payload.get("fund_flow_worsening_days"))
+        or _safe_float(payload.get("outflow_worsening_days"))
+        or 0
+    )
+    new_low = bool(payload.get("fund_flow_new_low") or payload.get("outflow_new_low"))
+    recovery_from_streak = int(
+        _safe_float(payload.get("fund_flow_recovery_from_streak_days"))
+        or _safe_float(payload.get("recovery_from_outflow_streak_days"))
+        or 0
+    )
+
+    severity = "neutral"
+    level = 0
+    note = ""
+    trend = "neutral"
+    trend_label = ""
+    if state == "panic_outflow":
+        severity = "danger"
+        level = 4
+        note = "资金明显外逃"
+        trend = "worsening"
+        trend_label = "资金外逃"
+    elif state == "continuous_outflow":
+        severity = "warning"
+        level = 3
+        note = f"连续流出 {streak} 天" if streak else "资金连续流出"
+        trend = "outflow"
+        trend_label = "连续流出"
+    elif state == "outflow":
+        severity = "warning"
+        level = 2
+        note = "资金净流出"
+        trend = "outflow"
+        trend_label = "资金流出"
+    elif state == "inflow":
+        severity = "positive"
+        level = 0
+        note = "资金回流"
+        trend = "recovery"
+        trend_label = "资金回流"
+    elif state == "balanced":
+        severity = "neutral"
+        level = 1
+        note = "资金平衡"
+        trend = "balanced"
+        trend_label = "资金平衡"
+
+    if state in {"outflow", "continuous_outflow", "panic_outflow"} and (new_low or worsening_days >= 2):
+        severity = "danger" if streak >= 3 or state == "panic_outflow" else "warning"
+        level = max(level, 4 if severity == "danger" else 3)
+        trend = "worsening"
+        trend_label = "流出扩大"
+        note = f"连续流出 {streak} 天且流出扩大" if streak else "资金流出扩大"
+    elif state == "inflow" and recovery_from_streak >= 3:
+        note = f"连续流出 {recovery_from_streak} 天后资金回流"
+
+    if source == "stock_fund_flows_partial" and label != "资金未知":
+        label = label if label.startswith("局部") else f"局部{label}"
+    return {
+        "state": state,
+        "label": label,
+        "severity": severity,
+        "level": level,
+        "score": round(score, 4) if score is not None else None,
+        "streak_days": streak,
+        "worsening_days": worsening_days,
+        "new_low": new_low,
+        "recovery_from_streak_days": recovery_from_streak,
+        "trend": trend,
+        "trend_label": trend_label,
+        "source": source or None,
+        "main_net_inflow": net,
+        "main_net_inflow_ratio": ratio,
+        "note": note,
+    }
+
+
+def _dedupe_notes(notes: list[str]) -> list[str]:
+    result = []
+    seen = set()
+    for note in notes:
+        text = str(note or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
     return result
 
 
 def _benchmark_proxy_context(row: dict[str, Any]) -> dict[str, Any]:
     benchmark_return = _safe_float(row.get("benchmark_return_pct"))
     if benchmark_return is None:
-        return {"regime": "unknown", "label": "未知", "market_score": 50.0, "risk_score": 50.0}
+        return {
+            "regime": "unknown",
+            "label": "未知",
+            "market_score": 50.0,
+            "risk_score": 50.0,
+            "market_warning_level": 0,
+            "market_warning_label": "未知",
+            "recovery_state": "none",
+            "recovery_label": "未回暖",
+        }
     if benchmark_return <= -8.0:
         return {
             "regime": "crash",
             "label": _dynamic_regime_labels()["crash"],
             "market_score": max(10.0, 35.0 + benchmark_return),
             "risk_score": min(95.0, 70.0 + abs(benchmark_return) * 2),
+            "market_warning_level": 4,
+            "market_warning_label": "极端风险",
+            "recovery_state": "none",
+            "recovery_label": "未回暖",
         }
     if benchmark_return <= -3.0:
         return {
@@ -174,6 +436,10 @@ def _benchmark_proxy_context(row: dict[str, Any]) -> dict[str, Any]:
             "label": _dynamic_regime_labels()["weak_defensive"],
             "market_score": max(20.0, 45.0 + benchmark_return),
             "risk_score": min(88.0, 58.0 + abs(benchmark_return) * 2),
+            "market_warning_level": 3,
+            "market_warning_label": "强风险",
+            "recovery_state": "none",
+            "recovery_label": "未回暖",
         }
     if benchmark_return >= 5.0:
         return {
@@ -181,18 +447,28 @@ def _benchmark_proxy_context(row: dict[str, Any]) -> dict[str, Any]:
             "label": _dynamic_regime_labels()["strong_broad"],
             "market_score": min(90.0, 64.0 + benchmark_return * 2),
             "risk_score": max(20.0, 42.0 - benchmark_return),
+            "market_warning_level": 0,
+            "market_warning_label": "正常",
+            "recovery_state": "warming_confirmed",
+            "recovery_label": "回暖确认",
         }
     return {
         "regime": "choppy_rotation",
         "label": _dynamic_regime_labels()["choppy_rotation"],
         "market_score": 50.0 + benchmark_return,
         "risk_score": 50.0 - benchmark_return,
+        "market_warning_level": 1 if benchmark_return < 0 else 0,
+        "market_warning_label": "窄幅分歧" if benchmark_return < 0 else "正常",
+        "recovery_state": "stabilizing" if benchmark_return >= 0 else "none",
+        "recovery_label": "止跌观察" if benchmark_return >= 0 else "未回暖",
     }
 
 
 def _has_index_context(session: Any, schema: Any, trade_dates: list[date]) -> bool:
     dates = sorted({day for day in trade_dates if day})
     if not dates:
+        return False
+    if not hasattr(session, "execute"):
         return False
     vt_symbols = [f"{item['symbol']}.{item['exchange']}" for item in INDEX_SYMBOLS]
     count = session.execute(
@@ -244,6 +520,7 @@ def _build_context(
     index_bars: dict[str, list[dict[str, Any]]],
     breadth_by_date: dict[date, dict[str, float]],
     sector_scores: list[dict[str, Any]],
+    fund_flows: dict[date, dict[str, Any]],
 ) -> MarketContext:
     index_features = [_index_feature(symbol, bars, trade_date) for symbol, bars in index_bars.items()]
     index_features = [feature for feature in index_features if feature]
@@ -260,6 +537,20 @@ def _build_context(
     growth_score = _style_score(index_features, GROWTH_INDEXES)
     value_score = _style_score(index_features, VALUE_INDEXES)
     small_cap_score = _style_score(index_features, {"000852.SSE", "000905.SSE"})
+    fund_flow = _fund_flow_snapshot(fund_flows, trade_date)
+    fund_flow_source = str(fund_flow.get("fund_flow_source") or "") or None
+    partial_fund_flow = fund_flow_source == "stock_fund_flows_partial"
+    fund_flow_state, fund_flow_label = _fund_flow_state(
+        fund_flow_score=_safe_float(fund_flow.get("fund_flow_score")),
+        main_net_inflow=_safe_float(fund_flow.get("main_net_inflow")),
+        main_net_inflow_ratio=_safe_float(fund_flow.get("main_net_inflow_ratio")),
+        outflow_streak=int(fund_flow.get("outflow_streak_days") or 0),
+    )
+    if partial_fund_flow and fund_flow_label != "资金未知":
+        fund_flow_label = f"局部{fund_flow_label}"
+    index_return_5d = _weighted_index_return(index_features, "return_5d")
+    index_return_20d = _weighted_index_return(index_features, "return_20d")
+    drawdown_60d_pct = _weighted_index_return(index_features, "drawdown_60d_pct")
     regime, notes = _classify_dynamic_regime(
         market_score=market_score,
         trend_score=trend_score,
@@ -271,6 +562,32 @@ def _build_context(
         value_score=value_score,
     )
     theme_state = _theme_state(theme_strength, breadth_score, risk_score, regime)
+    warning_level, warning_label = _market_warning(
+        regime=regime,
+        risk_score=risk_score,
+        trend_score=trend_score,
+        breadth_score=breadth_score,
+        fund_flow_state="balanced" if partial_fund_flow else fund_flow_state,
+        outflow_streak=0 if partial_fund_flow else int(fund_flow.get("outflow_streak_days") or 0),
+        drawdown_60d_pct=drawdown_60d_pct,
+        index_return_20d=index_return_20d,
+    )
+    recovery_state, recovery_label = _recovery_state(
+        trend_score=trend_score,
+        momentum_score=momentum_score,
+        breadth_score=breadth_score,
+        risk_score=risk_score,
+        fund_flow_state="balanced" if partial_fund_flow else fund_flow_state,
+        fund_flow_score=None if partial_fund_flow else _safe_float(fund_flow.get("fund_flow_score")),
+        index_return_5d=index_return_5d,
+    )
+    context_notes = list(notes)
+    if fund_flow_state in {"continuous_outflow", "panic_outflow"}:
+        context_notes.append(fund_flow_label)
+    if partial_fund_flow:
+        context_notes.append("个股资金流为局部榜单兜底，不能代表全市场资金流")
+    if recovery_state != "none":
+        context_notes.append(recovery_label)
     return MarketContext(
         trade_date=trade_date,
         regime=regime,
@@ -289,8 +606,25 @@ def _build_context(
         growth_score=round(growth_score, 4) if growth_score is not None else None,
         value_score=round(value_score, 4) if value_score is not None else None,
         small_cap_score=round(small_cap_score, 4) if small_cap_score is not None else None,
+        index_return_5d=round(index_return_5d, 4) if index_return_5d is not None else None,
+        index_return_20d=round(index_return_20d, 4) if index_return_20d is not None else None,
+        drawdown_60d_pct=round(drawdown_60d_pct, 4) if drawdown_60d_pct is not None else None,
+        fund_flow_state=fund_flow_state,
+        fund_flow_label=fund_flow_label,
+        fund_flow_score=round(float(fund_flow["fund_flow_score"]), 4) if fund_flow.get("fund_flow_score") is not None else None,
+        fund_flow_streak_days=int(fund_flow.get("outflow_streak_days") or 0),
+        fund_flow_source=fund_flow_source,
+        main_net_inflow=_safe_float(fund_flow.get("main_net_inflow")),
+        main_net_inflow_ratio=_safe_float(fund_flow.get("main_net_inflow_ratio")),
+        fund_flow_worsening_days=int(fund_flow.get("outflow_worsening_days") or 0),
+        fund_flow_new_low=bool(fund_flow.get("outflow_new_low")),
+        fund_flow_recovery_from_streak_days=int(fund_flow.get("recovery_from_outflow_streak_days") or 0),
+        market_warning_level=warning_level,
+        market_warning_label=warning_label,
+        recovery_state=recovery_state,
+        recovery_label=recovery_label,
         source=DEFAULT_CONTEXT_SOURCE,
-        notes=notes,
+        notes=context_notes,
     )
 
 
@@ -380,6 +714,222 @@ def _load_sector_scores(session: Any, schema: Any, start: date, end: date) -> li
     return [dict(row) for row in rows]
 
 
+def _load_fund_flows_by_date(session: Any, schema: Any, start: date, end: date) -> dict[date, dict[str, Any]]:
+    sector_flows = _load_sector_fund_flows_by_date(session, schema, start, end)
+    if sector_flows:
+        return sector_flows
+    return _load_stock_fund_flows_by_date(session, schema, start, end)
+
+
+def _load_sector_fund_flows_by_date(session: Any, schema: Any, start: date, end: date) -> dict[date, dict[str, Any]]:
+    if not hasattr(schema, "sector_fund_flows"):
+        return {}
+    rows = session.execute(
+        select(
+            schema.sector_fund_flows.c.trade_date,
+            func.sum(schema.sector_fund_flows.c.main_net_inflow).label("main_net_inflow"),
+            func.avg(schema.sector_fund_flows.c.main_net_inflow_ratio).label("main_net_inflow_ratio"),
+            func.count().label("sector_count"),
+        )
+        .where(schema.sector_fund_flows.c.trade_date >= start.isoformat())
+        .where(schema.sector_fund_flows.c.trade_date <= end.isoformat())
+        .where(schema.sector_fund_flows.c.period.in_(["即时", "今日", "1日"]))
+        .group_by(schema.sector_fund_flows.c.trade_date)
+        .order_by(schema.sector_fund_flows.c.trade_date)
+    ).mappings().all()
+    return _fund_flow_payloads_from_rows(rows, source="sector_fund_flows")
+
+
+def _load_stock_fund_flows_by_date(session: Any, schema: Any, start: date, end: date) -> dict[date, dict[str, Any]]:
+    if not hasattr(schema, "stock_fund_flows"):
+        return {}
+    rows = session.execute(
+        select(
+            schema.stock_fund_flows.c.trade_date,
+            func.sum(schema.stock_fund_flows.c.main_net_inflow).label("main_net_inflow"),
+            func.avg(schema.stock_fund_flows.c.main_net_inflow_ratio).label("main_net_inflow_ratio"),
+            func.count().label("stock_count"),
+        )
+        .where(schema.stock_fund_flows.c.trade_date >= start.isoformat())
+        .where(schema.stock_fund_flows.c.trade_date <= end.isoformat())
+        .where(schema.stock_fund_flows.c.period.in_(["即时", "今日", "1日"]))
+        .group_by(schema.stock_fund_flows.c.trade_date)
+        .order_by(schema.stock_fund_flows.c.trade_date)
+    ).mappings().all()
+    return _fund_flow_payloads_from_rows(rows, source="stock_fund_flows_partial")
+
+
+def _fund_flow_payloads_from_rows(rows: list[dict[str, Any]], *, source: str) -> dict[date, dict[str, Any]]:
+    dated: list[tuple[date, dict[str, Any]]] = []
+    for row in rows:
+        trade_date = _parse_date(row.get("trade_date"))
+        if trade_date is None:
+            continue
+        net = _safe_float(row.get("main_net_inflow"))
+        ratio = _safe_float(row.get("main_net_inflow_ratio"))
+        score = _flow_score(net, ratio)
+        dated.append(
+            (
+                trade_date,
+                {
+                    "main_net_inflow": net,
+                    "main_net_inflow_ratio": ratio,
+                    "fund_flow_score": score,
+                    "fund_flow_source": source,
+                    "sector_count": int(row.get("sector_count") or 0),
+                    "stock_count": int(row.get("stock_count") or 0),
+                },
+            )
+        )
+    result: dict[date, dict[str, Any]] = {}
+    streak = 0
+    worsening_days = 0
+    streak_min_score: float | None = None
+    previous_score: float | None = None
+    for trade_date, payload in dated:
+        score = _safe_float(payload.get("fund_flow_score"))
+        if score is not None and score < 45:
+            previous_min = streak_min_score
+            previous = previous_score
+            streak += 1
+            is_new_low = previous_min is not None and score < previous_min - 0.5
+            is_worsening = previous is not None and score < previous - 2.0
+            if is_new_low or is_worsening:
+                worsening_days += 1
+            else:
+                worsening_days = 0
+            streak_min_score = score if previous_min is None else min(previous_min, score)
+            payload["outflow_new_low"] = bool(streak > 1 and is_new_low)
+            payload["outflow_worsening_days"] = worsening_days
+            payload["recovery_from_outflow_streak_days"] = 0
+        elif score is not None and score >= 52:
+            payload["recovery_from_outflow_streak_days"] = streak
+            streak = 0
+            worsening_days = 0
+            streak_min_score = None
+            payload["outflow_new_low"] = False
+            payload["outflow_worsening_days"] = 0
+        else:
+            payload["outflow_new_low"] = False
+            payload["outflow_worsening_days"] = worsening_days
+            payload["recovery_from_outflow_streak_days"] = 0
+        payload["outflow_streak_days"] = streak
+        result[trade_date] = payload
+        if score is not None:
+            previous_score = score
+    return result
+
+
+def _fund_flow_snapshot(fund_flows: dict[date, dict[str, Any]], trade_date: date) -> dict[str, Any]:
+    if not fund_flows:
+        return {}
+    candidates = [day for day in fund_flows if day <= trade_date]
+    if not candidates:
+        return {}
+    return dict(fund_flows[max(candidates)])
+
+
+def _flow_score(main_net_inflow: float | None, main_net_inflow_ratio: float | None) -> float | None:
+    if main_net_inflow is None and main_net_inflow_ratio is None:
+        return None
+    ratio_score = None
+    if main_net_inflow_ratio is not None:
+        ratio_score = _clamp(50.0 + main_net_inflow_ratio * 2.4)
+    amount_score = None
+    if main_net_inflow is not None:
+        amount_score = _clamp(50.0 + main_net_inflow / 20_000_000_000 * 25.0)
+    if ratio_score is not None and amount_score is not None:
+        return ratio_score * 0.65 + amount_score * 0.35
+    return ratio_score if ratio_score is not None else amount_score
+
+
+def _fund_flow_state(
+    *,
+    fund_flow_score: float | None,
+    main_net_inflow: float | None,
+    main_net_inflow_ratio: float | None,
+    outflow_streak: int,
+) -> tuple[str, str]:
+    if fund_flow_score is None:
+        return "unknown", "资金未知"
+    if fund_flow_score <= 25 or (main_net_inflow is not None and main_net_inflow < -35_000_000_000) or outflow_streak >= 5:
+        return "panic_outflow", "恐慌流出"
+    if outflow_streak >= 3 or fund_flow_score <= 38:
+        return "continuous_outflow", "连续流出"
+    if fund_flow_score < 48 or (main_net_inflow_ratio is not None and main_net_inflow_ratio < -1.0):
+        return "outflow", "资金流出"
+    if fund_flow_score >= 62:
+        return "inflow", "资金流入"
+    return "balanced", "资金平衡"
+
+
+def _market_warning(
+    *,
+    regime: str,
+    risk_score: float,
+    trend_score: float,
+    breadth_score: float,
+    fund_flow_state: str,
+    outflow_streak: int,
+    drawdown_60d_pct: float | None,
+    index_return_20d: float | None,
+) -> tuple[int, str]:
+    level = 0
+    if regime in {"weak_defensive", "crash"}:
+        level = max(level, 2)
+    if regime == "crash" or risk_score >= 78:
+        level = max(level, 4)
+    elif risk_score >= 68 or trend_score < 42 or breadth_score < 30:
+        level = max(level, 3)
+    elif risk_score >= 58 or breadth_score < 42:
+        level = max(level, 2)
+    if fund_flow_state == "panic_outflow":
+        level = max(level, 4)
+    elif fund_flow_state == "continuous_outflow":
+        level = max(level, 3)
+    elif fund_flow_state == "outflow":
+        level = max(level, 2)
+    if outflow_streak >= 5:
+        level = max(level, 4)
+    elif outflow_streak >= 3:
+        level = max(level, 3)
+    if drawdown_60d_pct is not None and drawdown_60d_pct <= -8:
+        level = max(level, 3)
+    if index_return_20d is not None and index_return_20d <= -6:
+        level = max(level, 3)
+    labels = {
+        0: "正常",
+        1: "窄幅分歧",
+        2: "风险",
+        3: "强风险",
+        4: "极端风险",
+    }
+    return level, labels[level]
+
+
+def _recovery_state(
+    *,
+    trend_score: float,
+    momentum_score: float,
+    breadth_score: float,
+    risk_score: float,
+    fund_flow_state: str,
+    fund_flow_score: float | None,
+    index_return_5d: float | None,
+) -> tuple[str, str]:
+    if fund_flow_state in {"panic_outflow", "continuous_outflow"}:
+        return "none", "未回暖"
+    if risk_score <= 48 and breadth_score >= 55 and momentum_score >= 54:
+        return "warming_confirmed", "回暖确认"
+    if fund_flow_state == "inflow" and index_return_5d is not None and index_return_5d >= 0:
+        return "warming_confirmed", "资金回流"
+    if fund_flow_score is not None and fund_flow_score >= 52 and index_return_5d is not None and index_return_5d >= -1.0:
+        return "stabilizing", "止跌观察"
+    if trend_score >= 52 and breadth_score >= 45 and risk_score < 62:
+        return "stabilizing", "止跌观察"
+    return "none", "未回暖"
+
+
 def _index_feature(symbol: str, bars: list[dict[str, Any]], trade_date: date) -> dict[str, Any] | None:
     visible = [row for row in bars if row["trade_date"] <= trade_date]
     if len(visible) < 60:
@@ -411,8 +961,10 @@ def _index_feature(symbol: str, bars: list[dict[str, Any]], trade_date: date) ->
         "momentum_score": _clamp(momentum_score),
         "drawdown_score": drawdown_score,
         "volatility_score": volatility_score,
+        "return_5d": ret5,
         "return_20d": ret20,
         "return_60d": ret60,
+        "drawdown_60d_pct": dd60,
     }
 
 
@@ -559,6 +1111,22 @@ def _weighted_index_score(features: list[dict[str, Any]], key: str) -> float:
     return sum(weighted) / sum(weights) if weights else 50.0
 
 
+def _weighted_index_return(features: list[dict[str, Any]], key: str) -> float | None:
+    if not features:
+        return None
+    weighted = []
+    weights = []
+    for feature in features:
+        value = _safe_float(feature.get(key))
+        if value is None:
+            continue
+        symbol = str(feature["symbol"])
+        weight = INDEX_WEIGHTS.get(symbol, 0.08)
+        weighted.append(value * weight)
+        weights.append(weight)
+    return sum(weighted) / sum(weights) if weights else None
+
+
 def _style_score(features: list[dict[str, Any]], symbols: set[str]) -> float | None:
     selected = [feature for feature in features if str(feature.get("symbol")) in symbols]
     if not selected:
@@ -603,6 +1171,23 @@ def _fallback_context(trade_date: date) -> MarketContext:
         growth_score=None,
         value_score=None,
         small_cap_score=None,
+        index_return_5d=None,
+        index_return_20d=None,
+        drawdown_60d_pct=None,
+        fund_flow_state="unknown",
+        fund_flow_label="资金未知",
+        fund_flow_score=None,
+        fund_flow_streak_days=0,
+        fund_flow_source=None,
+        main_net_inflow=None,
+        main_net_inflow_ratio=None,
+        fund_flow_worsening_days=0,
+        fund_flow_new_low=False,
+        fund_flow_recovery_from_streak_days=0,
+        market_warning_level=0,
+        market_warning_label="未知",
+        recovery_state="none",
+        recovery_label="未回暖",
         source="fallback",
         notes=["市场画像数据不足"],
     )
@@ -615,6 +1200,22 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_date(value: Any) -> date | None:
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()[:10]
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y%m%d", "%Y/%m/%d"):
+        try:
+            from datetime import datetime
+
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 def _avg(values) -> float:

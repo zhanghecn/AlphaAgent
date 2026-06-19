@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/table";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
+import { CountUp } from "@/components/motion";
 import { CheckCircle2, XCircle, HelpCircle } from "lucide-react";
 import type { DataSourceStatus, ReadyStatus } from "@/api/types";
 
@@ -100,7 +101,9 @@ export function DataSourceStatusTable({ compact = false }: { compact?: boolean }
             {Object.entries(tables).map(([name, table]) => (
               <div key={name} className="rounded-lg border p-3">
                 <p className="font-mono text-xs text-muted-foreground">{name}</p>
-                <p className="mt-2 text-xl font-semibold tabular-nums">{table.rows ?? 0}</p>
+                <p className="mt-2 font-display text-xl font-semibold tabular-nums">
+                  <CountUp value={table.rows ?? 0} format="raw" decimals={0} />
+                </p>
                 <p className="mt-1 text-xs text-muted-foreground">
                   {table.latest_trade_date ? `最新 ${table.latest_trade_date}` : table.stocks != null ? `${table.stocks} 只股票` : table.updated_at ? "已同步" : "--"}
                 </p>
@@ -206,7 +209,8 @@ function StatusCard({ label, value }: { label: string; value: string }) {
 }
 
 function StatusIcon({ ok, pending }: { ok: boolean; pending?: boolean }) {
-  if (ok) return <CheckCircle2 size={16} className="text-green-500" />;
+  // ok/down 心跳：体现「数据源在运行 / 异常」的活体感
+  if (ok) return <CheckCircle2 size={16} className="animate-pulse text-green-500" />;
   if (pending) return <HelpCircle size={16} className="text-yellow-500" />;
-  return <XCircle size={16} className="text-red-500" />;
+  return <XCircle size={16} className="animate-pulse text-red-500" />;
 }

@@ -13,6 +13,7 @@ import {
   fetchRecommendations,
   fetchScreenRuns,
   fetchSimulationAccounts,
+  fetchTailPreview,
   fetchTradingDates,
   placeOrder,
   type QuantRecommendation,
@@ -38,6 +39,7 @@ export function QuantTradingPage() {
   const [addToGroupOpen, setAddToGroupOpen] = useState(false);
   const [addToGroupSymbol, setAddToGroupSymbol] = useState<string | null>(null);
   const [selectedRecommendationDate, setSelectedRecommendationDate] = useState("");
+  const [candidateViewMode, setCandidateViewMode] = useState<"history" | "tail_preview">("history");
   const [handledResearchJobId, setHandledResearchJobId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("candidates");
 
@@ -98,6 +100,13 @@ export function QuantTradingPage() {
     staleTime: 20_000,
   });
 
+  const tailPreviewQuery = useQuery({
+    queryKey: ["quantTailPreview", selectedStrategy],
+    queryFn: () => fetchTailPreview(50, undefined, selectedStrategy),
+    enabled: candidateViewMode === "tail_preview",
+    staleTime: 10_000,
+  });
+
   const groupsQuery = useQuery({
     queryKey: ["portfolioGroups"],
     queryFn: fetchPortfolioGroups,
@@ -116,8 +125,8 @@ export function QuantTradingPage() {
   const activeBacktestId = selectedBacktest?.id ?? backtestRuns[0]?.id ?? null;
   const shouldLoadBacktestReport = activeTab === "backtest";
   const reportQuery = useQuery({
-    queryKey: ["backtestReport", activeBacktestId],
-    queryFn: () => fetchBacktestReport(activeBacktestId!, 80),
+    queryKey: ["backtestReport", activeBacktestId, "analysis"],
+    queryFn: () => fetchBacktestReport(activeBacktestId!, 80, { includeAnalysis: true }),
     enabled: Boolean(activeBacktestId && shouldLoadBacktestReport),
     staleTime: 20_000,
   });
@@ -241,7 +250,9 @@ export function QuantTradingPage() {
   };
 
   const quantHoldings = holdingsQuery.data?.items ?? [];
-  const recommendationItems = recommendationsQuery.data?.items ?? [];
+  const recommendationItems = candidateViewMode === "tail_preview"
+    ? tailPreviewQuery.data?.recommendations ?? []
+    : recommendationsQuery.data?.items ?? [];
   const quantAverageReturnPct = quantHoldings.length > 0
     ? quantHoldings.reduce((sum, p) => sum + (p.floating_pnl_pct ?? 0), 0) / quantHoldings.length
     : null;
@@ -309,26 +320,35 @@ export function QuantTradingPage() {
           <div className="space-y-4">
             <QuantKpiBar kpi={quantKpi} />
             <RecommendationsPanel
-              isLoading={recommendationsQuery.isLoading}
-              isError={recommendationsQuery.isError}
-              error={recommendationsQuery.error}
+              isLoading={candidateViewMode === "tail_preview" ? tailPreviewQuery.isLoading : recommendationsQuery.isLoading}
+              isError={candidateViewMode === "tail_preview" ? tailPreviewQuery.isError : recommendationsQuery.isError}
+              error={candidateViewMode === "tail_preview" ? tailPreviewQuery.error : recommendationsQuery.error}
               items={recommendationItems}
-              tradeDate={recommendationsQuery.data?.trade_date}
-              runId={recommendationsQuery.data?.run_id}
-              strategyVersion={recommendationsQuery.data?.strategy_version}
-              includedBoards={recommendationsQuery.data?.included_boards}
+              tradeDate={candidateViewMode === "tail_preview" ? tailPreviewQuery.data?.trade_date : recommendationsQuery.data?.trade_date}
+              runId={candidateViewMode === "tail_preview" ? null : recommendationsQuery.data?.run_id}
+              strategyVersion={candidateViewMode === "tail_preview" ? tailPreviewQuery.data?.strategy_version : recommendationsQuery.data?.strategy_version}
+              includedBoards={candidateViewMode === "tail_preview" ? tailPreviewQuery.data?.included_boards : recommendationsQuery.data?.included_boards}
+              viewMode={candidateViewMode}
+              onViewModeChange={setCandidateViewMode}
+              previewMeta={candidateViewMode === "tail_preview" ? tailPreviewQuery.data : undefined}
               screenRuns={screenRunsQuery.data?.items ?? []}
               tradingDates={tradingDatesQuery.data?.items.map((item) => item.trade_date) ?? []}
-              selectedTradeDate={activeRecommendationDate}
+              selectedTradeDate={candidateViewMode === "tail_preview" ? tailPreviewQuery.data?.trade_date ?? "" : activeRecommendationDate}
               onSelectedTradeDateChange={setSelectedRecommendationDate}
               strategies={strategiesQuery.data?.items ?? []}
               selectedStrategy={selectedStrategy}
               selectedBoards={backtestParams.included_boards}
               onSelectedBoardsChange={(included_boards) => updateBacktestParams({ ...backtestParams, included_boards })}
               activeBacktestId={activeBacktestId}
-              status={recommendationsQuery.data?.status}
-              message={recommendationsQuery.data?.message}
-              onRetry={() => recommendationsQuery.refetch()}
+              status={candidateViewMode === "tail_preview" ? tailPreviewQuery.data?.status : recommendationsQuery.data?.status}
+              message={candidateViewMode === "tail_preview" ? tailPreviewQuery.data?.message ?? undefined : recommendationsQuery.data?.message}
+              onRetry={() => {
+                if (candidateViewMode === "tail_preview") {
+                  tailPreviewQuery.refetch();
+                } else {
+                  recommendationsQuery.refetch();
+                }
+              }}
               onRunScreen={() => researchMutation.mutate()}
               isRunningScreen={isResearchRunning}
               onAddToHolding={(item) => setBuyTarget(item)}

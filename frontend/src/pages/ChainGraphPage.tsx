@@ -25,6 +25,8 @@ import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { ConceptTag } from "@/components/ConceptTag";
 import { cn, formatPct } from "@/lib/utils";
+import { motion } from "framer-motion";
+import { KpiNumber } from "@/components/motion";
 import type { SectorRelationGraph } from "@/api/types";
 import {
   Network,
@@ -45,7 +47,10 @@ function ChainNode({ data }: { data: { label: string; changePct?: number | null;
   const isFall = changePct != null && changePct < 0;
 
   return (
-    <div
+    <motion.div
+      initial={{ scale: 0.8, opacity: 0 }}
+      animate={{ scale: 1, opacity: 1 }}
+      transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
       className={cn(
         "rounded-lg border-2 border-gray-300 bg-white px-3 py-2 shadow-sm min-w-[100px] text-center dark:border-gray-600 dark:bg-gray-800"
       )}
@@ -55,16 +60,17 @@ function ChainNode({ data }: { data: { label: string; changePct?: number | null;
         <div className="text-[10px] text-muted-foreground">{data.stockCount}只</div>
       )}
       {changePct != null && (
-        <div
+        <KpiNumber
+          value={changePct}
+          format="pct"
+          pulse
           className={cn(
-            "text-xs font-semibold tabular-nums",
-            changePct != null && changePct > 0 ? "text-rise" : isFall ? "text-fall" : "text-gray-500 dark:text-gray-400"
+            "block text-xs font-semibold",
+            changePct > 0 ? "text-rise" : isFall ? "text-fall" : "text-gray-500 dark:text-gray-400"
           )}
-        >
-          {formatPct(changePct)}
-        </div>
+        />
       )}
-    </div>
+    </motion.div>
   );
 }
 
@@ -136,7 +142,7 @@ function graphToFlowElements(graph: SectorRelationGraph) {
       id: `${e.source}-${e.target}`,
       source: e.source,
       target: e.target,
-      animated: false,
+      animated: true,
       markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
       style: {
         stroke: e.evidence_level === "strong" ? "#3b82f6" : "#94a3b8",
@@ -200,7 +206,7 @@ export default function ChainGraphPage() {
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-3">
-        <h1 className="text-xl font-bold">产业链图谱</h1>
+        <h1 className="font-display text-xl font-bold">产业链图谱</h1>
       </div>
 
       {/* Search bar */}

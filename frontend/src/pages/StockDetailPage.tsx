@@ -20,6 +20,7 @@ import { fetchLimitPools } from "@/api/market";
 import {
   createSymbolBacktest,
   fetchBacktestAudit,
+  fetchBacktestCandidateTrace,
   fetchBacktestPathDiagnostics,
   fetchBacktestSignalEvents,
   fetchBacktestSymbolDetail,
@@ -31,7 +32,9 @@ import {
   type BacktestRun,
   type BacktestAudit,
   type BacktestAuditEvent,
+  type BacktestCandidateTrace,
   type BacktestOrderEvent,
+  type BacktestPathDiagnosticRow,
   type BacktestPathDiagnosticsResponse,
   type BacktestSymbolDetail,
   type BacktestTrade,
@@ -39,6 +42,7 @@ import {
   type QuantStrategyOption,
   type SymbolQuantSignalRow,
   type SymbolLatestQuantState,
+  type SymbolTradePlan,
   type SymbolStrategyReplay,
   type StrategyReplayEvent,
 } from "@/api/quant";
@@ -269,9 +273,11 @@ export function StockDetailPage() {
       const latestQuantCandidateMarkers = latestQuantStateQuery.data?.status === "ready"
         ? quantDisplayMarkersToMarkers(latestQuantStateQuery.data)
         : [];
+      if (latestQuantCandidateMarkers.length) {
+        return sortMarkers(latestQuantCandidateMarkers);
+      }
       const markers = [
         ...portfolioSignalMarkers,
-        ...latestQuantCandidateMarkers,
         ...autoReviewMarkers.filter((marker) => marker.markerKind === "signal"),
       ];
       return sortMarkers(selectDisplayCandidateMarkers(suppressLinkedPortfolioSignals(dedupeMarkers(markers))));
@@ -280,14 +286,24 @@ export function StockDetailPage() {
   );
   const backtestMarkers = quantViewMode === "trade_replay" ? tradeReplayMarkers : candidateSignalMarkers;
   const selectedBacktestMarker = useMemo(
-    () => backtestMarkers.find((marker) => marker.id === selectedBacktestMarkerId) ?? backtestMarkers[0] ?? null,
+    () => backtestMarkers.find((marker) => marker.id === selectedBacktestMarkerId) ?? defaultSelectedMarker(backtestMarkers),
     [backtestMarkers, selectedBacktestMarkerId]
   );
+  const selectedCandidateTraceDate = useMemo(
+    () => candidateTraceDateForMarker(selectedBacktestMarker, latestQuantStateQuery.data),
+    [latestQuantStateQuery.data, selectedBacktestMarker]
+  );
+  const candidateTraceQuery = useQuery({
+    queryKey: ["backtestCandidateTrace", latestPortfolioBacktestId, vtSymbol, selectedCandidateTraceDate],
+    queryFn: () => fetchBacktestCandidateTrace(Number(latestPortfolioBacktestId), vtSymbol!, selectedCandidateTraceDate!),
+    enabled: Boolean(vtSymbol && latestPortfolioBacktestId && selectedCandidateTraceDate),
+    staleTime: 60_000,
+  });
 
   useEffect(() => {
     setSelectedBacktestMarkerId((current) => {
       if (current && backtestMarkers.some((marker) => marker.id === current)) return current;
-      return backtestMarkers[0]?.id ?? null;
+      return defaultSelectedMarker(backtestMarkers)?.id ?? null;
     });
   }, [backtestMarkers]);
 
@@ -347,6 +363,10 @@ export function StockDetailPage() {
         portfolioBacktest={latestPortfolioBacktest}
         portfolioDetail={portfolioSymbolDetailQuery.data}
         portfolioPathDiagnostics={portfolioPathDiagnosticsQuery.data}
+        candidateTrace={candidateTraceQuery.data}
+        candidateTraceDate={selectedCandidateTraceDate}
+        isCandidateTraceLoading={candidateTraceQuery.isLoading || candidateTraceQuery.isFetching}
+        candidateTraceError={candidateTraceQuery.error}
         markerCount={backtestMarkers.length}
         isQuantStateLoading={latestQuantStateQuery.isLoading || latestQuantStateQuery.isFetching}
         quantStateError={latestQuantStateQuery.error}
@@ -426,6 +446,10 @@ function SingleStockBacktestPanel({
   portfolioBacktest,
   portfolioDetail,
   portfolioPathDiagnostics,
+  candidateTrace,
+  candidateTraceDate,
+  isCandidateTraceLoading,
+  candidateTraceError,
   markerCount,
   isQuantStateLoading,
   quantStateError,
@@ -443,6 +467,10 @@ function SingleStockBacktestPanel({
   portfolioBacktest?: BacktestRun | null;
   portfolioDetail?: BacktestSymbolDetail | null;
   portfolioPathDiagnostics?: BacktestPathDiagnosticsResponse | null;
+  candidateTrace?: BacktestCandidateTrace | null;
+  candidateTraceDate?: string | null;
+  isCandidateTraceLoading: boolean;
+  candidateTraceError: unknown;
   markerCount: number;
   isQuantStateLoading: boolean;
   quantStateError: unknown;
@@ -508,6 +536,14 @@ function SingleStockBacktestPanel({
           ? "当前 K 线只显示策略复盘的买入、卖出和拒绝执行标记；收益按配对买卖计算。"
           : "当前 K 线只显示候选/理论信号标记；高分信号用于复核形态，不代表组合已经买入。"}
       </div>
+      <CandidateTraceStateSplit
+        trace={candidateTrace}
+        traceDate={candidateTraceDate}
+        signal={latestSignal}
+        candidate={candidate}
+        isLoading={isCandidateTraceLoading}
+        error={candidateTraceError}
+      />
 
       {isQuantStateLoading ? (
         <div className="mt-3 rounded-md border p-3 text-sm text-muted-foreground">
@@ -736,6 +772,68 @@ function PortfolioBacktestSymbolSummary({
   );
 }
 
+function CandidateTraceStateSplit({
+  trace,
+  traceDate,
+  signal,
+  candidate,
+  isLoading,
+  error,
+}: {
+  trace?: BacktestCandidateTrace | null;
+  traceDate?: string | null;
+  signal?: SymbolQuantSignalRow | null;
+  candidate?: SymbolTradePlan | null;
+  isLoading: boolean;
+  error: unknown;
+}) {
+  const context = trace?.not_planned_context;
+  const action = trace?.action ?? context?.recommendation_action ?? candidate?.action ?? (signal ? quantSignalAction(signal) : null);
+  const rank = trace?.rank ?? context?.recommendation_rank ?? candidate?.rank ?? null;
+  const score = trace?.total_score ?? context?.recommendation_score ?? candidate?.total_score ?? signal?.total_score ?? null;
+  const theoreticalHeld = context?.target_theoretical_held_on_signal_date;
+  const hasOrderOrTrade = (trace?.orders?.length ?? 0) > 0 || (trace?.trades?.length ?? 0) > 0;
+
+  return (
+    <div className="mt-3 rounded-md border bg-muted/20 p-3 text-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="font-medium">状态口径</div>
+        <div className="text-xs text-muted-foreground">{trace?.signal_date ?? traceDate ?? signal?.trade_date ?? candidate?.trade_date ?? "--"}</div>
+      </div>
+      <div className="mt-3 grid gap-3 md:grid-cols-3">
+        <InfoCell
+          label="候选 BUY"
+          value={action ? `${action}${rank == null ? "" : ` #${rank}`}` : "--"}
+          valueClass={action === "BUY" ? "text-rise" : undefined}
+        />
+        <InfoCell
+          label="理论信号"
+          value={theoreticalStateLabel(trace, signal)}
+          valueClass={theoreticalHeld ? "text-rise" : undefined}
+        />
+        <InfoCell
+          label="真实成交"
+          value={realExecutionStateLabel(trace, hasOrderOrTrade)}
+          valueClass={trace?.linked_order_status === "filled" || (trace?.trades?.length ?? 0) > 0 ? "text-rise" : undefined}
+        />
+      </div>
+      <div className="mt-3 grid gap-3 md:grid-cols-4">
+        <InfoCell label="评分" value={formatMaybeNumber(score, 1)} valueClass={action === "BUY" ? "text-rise" : undefined} />
+        <InfoCell label="计划执行日" value={trace?.planned_execute_date ?? candidate?.trade_plan?.entry_date ?? "--"} />
+        <InfoCell label="理论持仓起点" value={context?.target_theoretical_entry_date ?? "--"} />
+        <InfoCell label="真实持仓起点" value={context?.target_real_entry_date ?? "--"} />
+      </div>
+      <p className="mt-3 text-xs leading-6 text-muted-foreground">
+        {isLoading
+          ? "正在读取该日期候选到成交的追踪..."
+          : error
+            ? `候选追踪读取失败：${error instanceof Error ? error.message : "请稍后刷新重试"}`
+            : trace?.summary ?? "候选 BUY 表示形态和评分成立；理论信号是回测标记层，真实成交还要经过排名、仓位和执行规则。"}
+      </p>
+    </div>
+  );
+}
+
 function PortfolioClosedTradeTable({
   rows,
   positions,
@@ -816,6 +914,34 @@ function PortfolioPathDiagnosticSummary({ diagnostics }: { diagnostics?: Backtes
           <InfoCell label="卖后高点" value={formatPct(worst.post_exit_max_return_pct)} valueClass={priceColorClass(worst.post_exit_max_return_pct)} />
         </div>
       )}
+      {worst?.early_follow_through_state && (
+        <div className="mt-3 grid gap-3 md:grid-cols-5">
+          <InfoCell label="早期承接" value={worst.early_follow_through_label ?? earlyFollowThroughLabel(worst.early_follow_through_state)} />
+          <InfoCell
+            label="前3日MAE"
+            value={formatPct(worst.early_mae_pct)}
+            valueClass={priceColorClass(worst.early_mae_pct)}
+          />
+          <InfoCell
+            label="前3日MFE"
+            value={formatPct(worst.early_mfe_pct)}
+            valueClass={priceColorClass(worst.early_mfe_pct)}
+          />
+          <InfoCell
+            label="前3日收益"
+            value={formatPct(worst.early_return_pct)}
+            valueClass={priceColorClass(worst.early_return_pct)}
+          />
+          <InfoCell label="初步归因" value={pathDiagnosticTakeaway(worst)} />
+        </div>
+      )}
+      {pathContextFacts(worst).length > 0 && (
+        <div className="mt-3 grid gap-3 md:grid-cols-4">
+          {pathContextFacts(worst).map((item) => (
+            <InfoCell key={item.label} label={item.label} value={item.value} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -843,6 +969,9 @@ function LatestSignalScoreSummary({
   const breakdown = scoreBreakdownRows(evidence.score_breakdown);
   const lowSuctionDays = getRawNumber(evidence, "low_suction_days");
   const lowSuctionScore = getRawNumber(evidence, "low_suction_buildup_score");
+  const lowSuctionStage = getRawText(evidence, "low_suction_stage_label");
+  const lowSuctionQuality = getRawText(evidence, "low_suction_launch_quality_label");
+  const lowSuctionDragon = getRawText(evidence, "low_suction_dragon_label");
   const convergence = getRawNumber(evidence, "ma_convergence_pct");
   const state = getRawText(evidence, "dragon_state");
   const support = getRawText(evidence, "support_type");
@@ -867,6 +996,9 @@ function LatestSignalScoreSummary({
         <InfoCell label="信号" value={signalLabel} valueClass={isBuy ? "text-rise" : undefined} />
         <InfoCell label="状态" value={strategyDragonStateLabel(state)} />
         <InfoCell label="低吸蓄势" value={lowSuctionDays == null ? "--" : `${lowSuctionDays.toFixed(0)} 天`} />
+        <InfoCell label="低吸阶段" value={lowSuctionStage && lowSuctionStage !== "非低吸蓄势" ? lowSuctionStage : "--"} />
+        <InfoCell label="低吸质量" value={lowSuctionQuality && lowSuctionQuality !== "非低吸买点" ? lowSuctionQuality : "--"} />
+        <InfoCell label="启动诊断" value={lowSuctionDragon && lowSuctionDragon !== "非低吸龙回头" ? lowSuctionDragon : "--"} />
         <InfoCell label="均线收敛" value={convergence == null ? "--" : formatPct(convergence)} />
         <InfoCell label="候选" value={candidateLabelForSignal(signal, candidate)} />
       </div>
@@ -1068,6 +1200,43 @@ function candidateLabelForSignal(signal?: SymbolQuantSignalRow | null, candidate
   if (!candidate) return "未找到同日候选";
   if (candidate.trade_date !== signal.trade_date) return `最新候选 ${candidate.trade_date ?? "--"} ${candidate.action ?? "--"} #${candidate.rank ?? "--"}`;
   return `${candidate.action ?? "--"} #${candidate.rank ?? "--"}`;
+}
+
+function candidateTraceDateForMarker(marker: KlineMarker | null, quantState?: SymbolLatestQuantState) {
+  if (marker?.markerKind === "signal" || marker?.markerKind === "rejected") {
+    return marker.signalDate ?? marker.tradeDate ?? marker.time ?? null;
+  }
+  if (marker?.markerKind === "trade" && marker.side === "BUY") {
+    return marker.signalDate ?? getRawText(safeRaw(marker.raw), "signal_date") ?? marker.tradeDate ?? marker.time ?? null;
+  }
+  const candidateDate = quantState?.candidate?.item?.trade_date;
+  if (candidateDate) return candidateDate;
+  return quantState?.signal?.latest_entry_signal?.trade_date ?? quantState?.signal?.latest?.trade_date ?? null;
+}
+
+function theoreticalStateLabel(trace?: BacktestCandidateTrace | null, signal?: SymbolQuantSignalRow | null) {
+  const context = trace?.not_planned_context;
+  if (context?.target_theoretical_held_on_signal_date) {
+    return `已持仓${context.target_theoretical_entry_date ? ` ${context.target_theoretical_entry_date}` : ""}`;
+  }
+  if (trace?.signals?.some((item) => item.side === "BUY")) return "写入 BUY 计划";
+  if (trace?.plan_status_label) return trace.plan_status_label;
+  if (trace?.plan_status) return trace.plan_status;
+  return signal ? (isExecutableQuantSignal(signal) ? "有 BUY 信号" : "观察/拒买") : "--";
+}
+
+function realExecutionStateLabel(trace?: BacktestCandidateTrace | null, hasOrderOrTrade = false) {
+  if (!trace) return "--";
+  if ((trace.trades?.length ?? 0) > 0 || trace.linked_order_status === "filled") return "已成交";
+  if (trace.linked_order_status === "rejected" || trace.orders?.some((item) => item.status === "rejected")) return "买入拒绝";
+  const context = trace.not_planned_context;
+  if (context?.target_real_held_on_signal_date) {
+    return `已持仓${context.target_real_entry_date ? ` ${context.target_real_entry_date}` : ""}`;
+  }
+  if (hasOrderOrTrade) return "有订单记录";
+  if (trace.status === "planned_not_ordered") return "未下单";
+  if (trace.status === "candidate_not_planned") return "未进入真实买入";
+  return trace.status || "--";
 }
 
 function quantSignalAction(signal?: SymbolQuantSignalRow | null) {
@@ -1679,6 +1848,10 @@ function sortMarkers(markers: KlineMarker[]): KlineMarker[] {
   });
 }
 
+function defaultSelectedMarker(markers: KlineMarker[]): KlineMarker | null {
+  return markers.length ? markers[markers.length - 1] : null;
+}
+
 function suppressLinkedPortfolioSignals(markers: KlineMarker[]): KlineMarker[] {
   return markers.filter((marker) => {
     if (marker.markerKind !== "signal") return true;
@@ -1775,6 +1948,38 @@ function pathNumber(value: unknown): number | null {
 
 function pathMetric(value: unknown): string | number {
   return typeof value === "number" && Number.isFinite(value) ? value : "--";
+}
+
+function earlyFollowThroughLabel(state?: string | null): string {
+  const labels: Record<string, string> = {
+    failed_launch: "启动后立即失败",
+    no_follow_through: "买后无跟随",
+    weak_follow_through: "买后弱跟随",
+    confirmed_follow_through: "买后资金跟随",
+    unknown: "早期路径未知",
+  };
+  return labels[state ?? ""] ?? state ?? "--";
+}
+
+function pathContextFacts(row?: BacktestPathDiagnosticRow | null): Array<{ label: string; value: string }> {
+  if (!row) return [];
+  return [
+    { label: "入场环境", value: row.entry_context_label },
+    { label: "行情主线", value: row.market_mainline_trade_context_label },
+    { label: "启动诊断", value: row.entry_launch_diagnostic_label },
+    { label: "低吸/龙回头", value: row.low_suction_dragon_label && row.low_suction_dragon_label !== "非低吸龙回头" ? row.low_suction_dragon_label : undefined },
+    { label: "资金流覆盖", value: row.fund_flow_coverage_label },
+    { label: "大盘状态", value: [row.dynamic_market_label, row.market_warning_label, row.recovery_label].filter(Boolean).join(" / ") },
+  ].filter((item): item is { label: string; value: string } => Boolean(item.value));
+}
+
+function pathDiagnosticTakeaway(row: BacktestPathDiagnosticRow): string {
+  if (row.sold_before_rebound) return "卖早后反弹";
+  if (row.early_follow_through_state === "failed_launch" || row.early_follow_through_state === "no_follow_through") {
+    return "买后无承接";
+  }
+  if ((row.mfe_pct ?? 0) >= 8 && (row.return_pct ?? 0) < 0) return "浮盈回撤";
+  return "路径正常";
 }
 
 function latestOpenReturnPct(
@@ -1922,6 +2127,13 @@ function exitReasonLabel(reason?: string | null) {
   if (reason === "trailing_stop") return "移动止损";
   if (reason === "time_stop") return "时间止损";
   if (reason === "entry_signal") return "入场信号";
+  if (reason === "support_stop") return "支撑止损";
+  if (reason === "trend_break") return "趋势破位";
+  if (reason === "trend_trailing_stop") return "趋势回撤";
+  if (reason === "profit_protection_stop") return "浮盈保护";
+  if (reason === "rotation_for_stronger_signal") return "轮动换强";
+  if (reason === "time_efficiency_stop") return "时间效率";
+  if (reason === "mid_profit_giveback_stop") return "中段浮盈回撤";
   return reason || "--";
 }
 

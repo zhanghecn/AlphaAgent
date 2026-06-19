@@ -34,10 +34,19 @@ export interface QuantScreenRun {
   strategy_version: string;
   trade_date?: string;
   run_id?: number | null;
+  preview_mode?: string | null;
+  data_source?: string | null;
+  temporary_bar?: boolean;
+  base_daily_date?: string | null;
+  snapshot_updated_at?: string | null;
+  snapshot_trade_time?: string | null;
+  snapshot_price_count?: number;
+  intraday_bar_count?: number;
   total?: number;
   recommendation_count?: number;
   included_boards?: string[];
   recommendations: QuantRecommendation[];
+  message?: string | null;
   portfolio_sync?: {
     group_id: number;
     group_type: string;
@@ -625,6 +634,13 @@ export interface BacktestTradeAttribution extends StockIdentityFields {
   entry_support_type?: string | null;
   low_suction_days?: number | null;
   low_suction_buildup_score?: number | null;
+  low_suction_launch_quality_bucket?: string | null;
+  low_suction_launch_quality_label?: string | null;
+  low_suction_dragon_state?: string | null;
+  low_suction_dragon_label?: string | null;
+  low_suction_dragon_conflict?: boolean | null;
+  low_suction_dragon_conflict_level?: string | null;
+  low_suction_dragon_notes?: string[] | null;
   ma_convergence_pct?: number | null;
   entry_failed_rules?: string[];
   execution_mode?: string | null;
@@ -673,6 +689,33 @@ export interface BacktestPathDiagnosticRow extends StockIdentityFields {
   return_pct?: number | null;
   mae_pct?: number | null;
   mfe_pct?: number | null;
+  early_mae_pct?: number | null;
+  early_mfe_pct?: number | null;
+  early_return_pct?: number | null;
+  early_follow_through_state?: string | null;
+  early_follow_through_label?: string | null;
+  entry_context_state?: string | null;
+  entry_context_label?: string | null;
+  entry_context_notes?: string[] | null;
+  entry_launch_diagnostic_state?: string | null;
+  entry_launch_diagnostic_label?: string | null;
+  entry_launch_diagnostic_notes?: string[] | null;
+  low_suction_launch_quality_bucket?: string | null;
+  low_suction_launch_quality_label?: string | null;
+  low_suction_dragon_state?: string | null;
+  low_suction_dragon_label?: string | null;
+  low_suction_dragon_conflict?: boolean | null;
+  low_suction_dragon_conflict_level?: string | null;
+  low_suction_dragon_notes?: string[] | null;
+  market_mainline_trade_context?: string | null;
+  market_mainline_trade_context_label?: string | null;
+  market_mainline_trade_context_notes?: string[] | null;
+  fund_flow_coverage_state?: string | null;
+  fund_flow_coverage_label?: string | null;
+  dynamic_market_label?: string | null;
+  market_warning_label?: string | null;
+  fund_flow_label?: string | null;
+  recovery_label?: string | null;
   post_exit_max_return_pct?: number | null;
   sold_before_rebound?: boolean | null;
   exit_reason?: string | null;
@@ -807,6 +850,10 @@ export interface BacktestCandidateNotPlannedContext {
     setup_type?: string | null;
   }>;
   target_symbol?: string | null;
+  target_theoretical_held_on_signal_date?: boolean | null;
+  target_theoretical_entry_date?: string | null;
+  target_real_held_on_signal_date?: boolean | null;
+  target_real_entry_date?: string | null;
 }
 
 export interface BacktestClosedTrade extends StockIdentityFields {
@@ -1738,6 +1785,14 @@ export function fetchRecommendations(limit = 20, tradeDate?: string, strategy?: 
   }>(`/quant/recommendations?${params.toString()}`);
 }
 
+export function fetchTailPreview(limit = 100, tradeDate?: string, strategy?: string, refresh = false) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (tradeDate) params.set("trade_date", tradeDate);
+  if (strategy) params.set("strategy", strategy);
+  if (refresh) params.set("refresh", "true");
+  return apiClient.get<QuantScreenRun>(`/quant/tail-preview?${params.toString()}`);
+}
+
 export function fetchSymbolSignalHistory(vtSymbol: string, params: {
   strategy?: string;
   start?: string;
@@ -2037,6 +2092,17 @@ export function createBacktest(payload: {
   tail_entry_start?: string;
   tail_entry_end?: string;
   tail_entry_ma5_tolerance_pct?: number;
+  require_low_suction_launch_confirmation?: boolean;
+  exclude_repeated_dragon_pullback?: boolean;
+  require_low_suction_launch_for_low_suction_context?: boolean;
+  enable_entry_launch_quality_score?: boolean;
+  enable_entry_launch_risk_penalty?: boolean;
+  enable_low_suction_market_risk_penalty?: boolean;
+  enable_failed_launch_exit_stop?: boolean;
+  enable_mid_profit_giveback_stop?: boolean;
+  mid_profit_giveback_min_high_gain_pct?: number;
+  mid_profit_giveback_max_current_gain_pct?: number;
+  mid_profit_giveback_drawdown_pct?: number;
   symbols?: string[];
   vt_symbol?: string;
   included_boards?: string[];
@@ -2067,6 +2133,17 @@ export function runBacktestStrategyComparison(payload: {
   tail_entry_start?: string;
   tail_entry_end?: string;
   tail_entry_ma5_tolerance_pct?: number;
+  require_low_suction_launch_confirmation?: boolean;
+  exclude_repeated_dragon_pullback?: boolean;
+  require_low_suction_launch_for_low_suction_context?: boolean;
+  enable_entry_launch_quality_score?: boolean;
+  enable_entry_launch_risk_penalty?: boolean;
+  enable_low_suction_market_risk_penalty?: boolean;
+  enable_failed_launch_exit_stop?: boolean;
+  enable_mid_profit_giveback_stop?: boolean;
+  mid_profit_giveback_min_high_gain_pct?: number;
+  mid_profit_giveback_max_current_gain_pct?: number;
+  mid_profit_giveback_drawdown_pct?: number;
   included_boards?: string[];
 } = {}) {
   return apiClient.post<BacktestStrategyComparison>("/backtests/strategy-comparison", payload);
@@ -2086,6 +2163,17 @@ export function createSymbolBacktest(payload: {
   tail_entry_start?: string;
   tail_entry_end?: string;
   tail_entry_ma5_tolerance_pct?: number;
+  require_low_suction_launch_confirmation?: boolean;
+  exclude_repeated_dragon_pullback?: boolean;
+  require_low_suction_launch_for_low_suction_context?: boolean;
+  enable_entry_launch_quality_score?: boolean;
+  enable_entry_launch_risk_penalty?: boolean;
+  enable_low_suction_market_risk_penalty?: boolean;
+  enable_failed_launch_exit_stop?: boolean;
+  enable_mid_profit_giveback_stop?: boolean;
+  mid_profit_giveback_min_high_gain_pct?: number;
+  mid_profit_giveback_max_current_gain_pct?: number;
+  mid_profit_giveback_drawdown_pct?: number;
   included_boards?: string[];
 }) {
   return apiClient.post<{
@@ -2115,6 +2203,17 @@ export function runStrictMinuteBacktestPipeline(payload: {
   tail_entry_start?: string;
   tail_entry_end?: string;
   tail_entry_ma5_tolerance_pct?: number;
+  require_low_suction_launch_confirmation?: boolean;
+  exclude_repeated_dragon_pullback?: boolean;
+  require_low_suction_launch_for_low_suction_context?: boolean;
+  enable_entry_launch_quality_score?: boolean;
+  enable_entry_launch_risk_penalty?: boolean;
+  enable_low_suction_market_risk_penalty?: boolean;
+  enable_failed_launch_exit_stop?: boolean;
+  enable_mid_profit_giveback_stop?: boolean;
+  mid_profit_giveback_min_high_gain_pct?: number;
+  mid_profit_giveback_max_current_gain_pct?: number;
+  mid_profit_giveback_drawdown_pct?: number;
   included_boards?: string[];
   gap_csv_text?: string;
   gap_file_path?: string;

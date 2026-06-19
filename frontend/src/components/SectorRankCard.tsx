@@ -4,7 +4,8 @@
  * Renders a single ranking row for a concept/industry sector.
  * Shows: rank number, name, change_pct, fund flow, stock count, leader.
  */
-import { cn, formatPct, formatAmount } from "@/lib/utils";
+import { cn, formatAmount } from "@/lib/utils";
+import { KpiNumber } from "@/components/motion";
 import type { SectorRankingItem } from "@/types/research";
 
 export interface SectorRankCardProps {
@@ -59,16 +60,17 @@ export function SectorRankCard({
           )}
         </div>
         <div className="flex items-center gap-3 shrink-0">
-          {/* Change percent */}
-          <span
+          {/* Change percent —— 滚动 + 涨跌脉冲，涨跌色由 className 控制 */}
+          <KpiNumber
+            value={changePct}
+            format="pct"
+            pulse
             className={cn(
-              "font-semibold tabular-nums",
+              "font-semibold",
               compact ? "text-xs" : "text-sm",
               isRise ? "text-rise" : changePct != null ? "text-fall" : "text-muted-foreground"
             )}
-          >
-            {formatPct(changePct)}
-          </span>
+          />
         </div>
       </div>
 

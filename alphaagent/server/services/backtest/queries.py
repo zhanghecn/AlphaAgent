@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from bisect import bisect_right
 from datetime import date, timedelta
+from statistics import median
 from typing import Any, Callable
 
 from sqlalchemy import and_, desc, func, select
@@ -12,6 +13,13 @@ from sqlalchemy import and_, desc, func, select
 from alphaagent.market.boards import DEFAULT_QUANT_INCLUDED_BOARDS, normalize_included_boards
 from alphaagent.server.services.quant.factors import Bar, score_dragon_pullback
 from alphaagent.server.services.quant import market_context
+from alphaagent.server.services.quant import screening_payloads
+from alphaagent.server.services.quant.low_suction_quality import (
+    low_suction_dragon_context,
+    low_suction_dragon_context_label,
+    low_suction_launch_quality_bucket,
+    low_suction_launch_quality_label,
+)
 
 DateParser = Callable[[Any], date | None]
 ApiMapper = Callable[[dict[str, Any]], dict[str, Any]]
@@ -275,13 +283,14 @@ def backtest_path_diagnostics(
     vt_symbol: str | None = None,
     lookahead_days: int = 10,
     limit: int = 500,
+    full_result: bool = False,
 ) -> dict[str, Any]:
     """Return closed trade path diagnostics for a persisted backtest."""
 
     if not is_database_configured():
         return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
     ensure_schema()
-    row_limit = min(max(limit, 1), 2000)
+    row_limit = min(max(limit, 1), 100_000 if full_result else 2000)
     lookahead = min(max(lookahead_days, 1), 30)
     with session_scope() as session:
         run = session.execute(select(schema.backtest_runs).where(schema.backtest_runs.c.id == backtest_id)).mappings().first()
@@ -292,25 +301,38 @@ def backtest_path_diagnostics(
         if vt_symbol:
             trade_query = trade_query.where(schema.backtest_trades.c.vt_symbol == vt_symbol)
             position_query = position_query.where(schema.backtest_daily_positions.c.vt_symbol == vt_symbol)
+        all_trade_rows = session.execute(
+            select(schema.backtest_trades)
+            .where(schema.backtest_trades.c.backtest_id == backtest_id)
+            .order_by(schema.backtest_trades.c.trade_date, schema.backtest_trades.c.id)
+        ).mappings().all()
         trade_rows = session.execute(
             trade_query.order_by(schema.backtest_trades.c.trade_date, schema.backtest_trades.c.id)
         ).mappings().all()
         position_rows = session.execute(
             position_query.order_by(schema.backtest_daily_positions.c.trade_date, schema.backtest_daily_positions.c.vt_symbol)
         ).mappings().all()
+        all_trade_dicts = [dict(row) for row in all_trade_rows]
         trade_dicts = [dict(row) for row in trade_rows]
         position_dicts = [dict(row) for row in position_rows]
         future_bars = _future_daily_bars_for_trades(session, schema, trade_dicts, lookahead_days=lookahead, to_api=to_api)
-        stock_names = load_stock_names(session, symbols_from_rows(trade_dicts, position_dicts, future_bars))
+        daily_bars = _daily_bars_for_trade_paths(session, schema, trade_dicts, to_api=to_api)
+        stock_names = load_stock_names(session, symbols_from_rows(all_trade_dicts, trade_dicts, position_dicts, future_bars))
 
     named_trades = with_stock_names(trade_dicts, stock_names)
+    named_all_trades = with_stock_names(all_trade_dicts, stock_names)
     named_positions = with_stock_names(position_dicts, stock_names)
     rows = trade_path_diagnostics_from_trades(
         named_trades,
         named_positions,
         future_bars,
         lookahead_days=lookahead,
+        daily_bars=daily_bars,
+        replacement_trades=named_all_trades,
     )
+    with session_scope() as session:
+        rows = market_context.annotate_rows_with_market_context(session, schema, rows, date_key="entry_date")
+    rows = [_with_path_issue(row) for row in rows]
     rows.sort(key=lambda row: (_sort_number(row.get("return_pct"), default=10**18), str(row.get("entry_date") or ""), str(row.get("vt_symbol") or "")))
     page = rows[:row_limit]
     return {
@@ -325,7 +347,101 @@ def backtest_path_diagnostics(
         "total": len(rows),
         "returned_count": len(page),
         "has_more": len(page) < len(rows),
-        "note": "路径诊断只用于复盘买点/卖点质量；卖出后反弹来自日线历史，不参与当日交易决策。",
+        "note": "路径诊断只用于复盘买点/卖点质量；卖出后反弹和替换交易质量都是事后归因，不参与当日交易决策。",
+    }
+
+
+def backtest_setup_market_exit_audit(
+    *,
+    schema: Any,
+    session_scope: Any,
+    is_database_configured: Callable[[], bool],
+    ensure_schema: Callable[[], None],
+    load_stock_names: StockNameLoader,
+    symbols_from_rows: RowsSymbols,
+    with_stock_names: NameAppender,
+    to_api: ApiMapper,
+    backtest_id: int,
+    lookahead_days: int = 10,
+) -> dict[str, Any]:
+    """Group closed-trade path quality by entry setup, market regime, and exit reason."""
+
+    diagnostics = backtest_path_diagnostics(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=ensure_schema,
+        load_stock_names=load_stock_names,
+        symbols_from_rows=symbols_from_rows,
+        with_stock_names=with_stock_names,
+        to_api=to_api,
+        backtest_id=backtest_id,
+        lookahead_days=lookahead_days,
+        limit=100_000,
+        full_result=True,
+    )
+    if diagnostics.get("status") not in {"ready", "empty"}:
+        return diagnostics
+    rows = [_normalize_path_row_dates(row) for row in diagnostics.get("items") or []]
+    if rows and not any(row.get("dynamic_market_regime") for row in rows):
+        with session_scope() as session:
+            rows = market_context.annotate_rows_with_market_context(session, schema, rows, date_key="entry_date")
+    summary = setup_market_exit_audit_summary(rows)
+    return {
+        "status": "ready" if rows else "empty",
+        "backtest_id": backtest_id,
+        "start_date": diagnostics.get("start_date"),
+        "end_date": diagnostics.get("end_date"),
+        "lookahead_days": diagnostics.get("lookahead_days"),
+        "summary": summary,
+        "items": [to_api(row) for row in _worst_setup_market_exit_examples(rows)],
+        "total": diagnostics.get("total"),
+        "returned_count": diagnostics.get("returned_count"),
+        "has_more": diagnostics.get("has_more"),
+        "note": "该审计只用已落库成交和可见持仓路径做归因；大盘状态仅标记，不改变买卖、仓位或排序。",
+    }
+
+
+def setup_market_exit_audit_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    enriched = [_with_path_issue(row) for row in rows]
+    return {
+        "overall": _path_metric_summary(enriched),
+        "by_entry_setup": _group_path_metrics(enriched, "entry_setup", _entry_setup_label),
+        "by_dynamic_market_regime": _group_path_metrics(enriched, "dynamic_market_regime", _dynamic_market_label_for_bucket),
+        "by_market_warning": _group_path_metrics(enriched, "market_warning_label", lambda value, _rows: str(value or "未知")),
+        "by_entry_context": _group_path_metrics(enriched, "entry_context_state", _entry_context_label_for_bucket),
+        "by_short_term_trade_context": _group_path_metrics(
+            enriched,
+            "short_term_trade_context",
+            _short_term_trade_context_label_for_bucket,
+        ),
+        "by_market_mainline_trade_context": _group_path_metrics(
+            enriched,
+            "market_mainline_trade_context",
+            _market_mainline_trade_context_label_for_bucket,
+        ),
+        "by_entry_launch_diagnostic": _group_path_metrics(
+            enriched,
+            "entry_launch_diagnostic_state",
+            _entry_launch_diagnostic_label_for_bucket,
+        ),
+        "by_low_suction_dragon_context": _group_path_metrics(
+            enriched,
+            "low_suction_dragon_state",
+            _low_suction_dragon_context_label_for_bucket,
+        ),
+        "by_fund_flow_coverage": _group_path_metrics(enriched, "fund_flow_coverage_state", _fund_flow_coverage_label_for_bucket),
+        "by_exit_reason": _group_path_metrics(enriched, "exit_reason", _exit_reason_label_for_bucket),
+        "by_issue_type": _group_path_metrics(enriched, "path_issue_type", _path_issue_label_for_bucket),
+        "by_early_follow_through": _group_path_metrics(
+            enriched,
+            "early_follow_through_state",
+            _early_follow_through_label_for_bucket,
+        ),
+        "entry_launch_quality_audit": entry_launch_quality_audit(enriched),
+        "support_stop_context_audit": support_stop_context_audit(enriched),
+        "setup_market_exit_matrix": _setup_market_exit_matrix(enriched),
+        "worst_buckets": _worst_setup_market_exit_buckets(enriched),
     }
 
 
@@ -498,9 +614,9 @@ def backtest_symbol_detail(
         "vt_symbol": symbol,
         **board_payload(symbol, stock_names.get(symbol)),
         "name": (stock_names.get(symbol) or {}).get("name"),
-        "positions": [to_api(row) for row in named_positions],
-        "trades": [to_api(row) for row in named_trades],
-        "orders": [to_api(row) for row in with_stock_names(order_dicts, stock_names)],
+        "positions": [_entry_enriched_api_row(row, to_api) for row in named_positions],
+        "trades": [_entry_enriched_api_row(row, to_api) for row in named_trades],
+        "orders": [_entry_enriched_api_row(row, to_api) for row in with_stock_names(order_dicts, stock_names)],
         "closed_trades": closed_trades(named_trades),
         "trade_attribution": [to_api(row) for row in attribution],
         "snapshot_available": bool(position_rows),
@@ -687,6 +803,7 @@ def trade_path_diagnostic_row(
     future_bars: list[dict[str, Any]] | None = None,
     *,
     lookahead_days: int = 10,
+    daily_bars: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Return one closed trade's visible holding path plus post-exit rebound."""
 
@@ -699,13 +816,14 @@ def trade_path_diagnostic_row(
         and (entry_date is None or (_as_date(row.get("trade_date")) or date.min) >= entry_date)
         and (exit_date is None or (_as_date(row.get("trade_date")) or date.max) <= exit_date)
     ]
+    path.sort(key=lambda row: _as_date(row.get("trade_date")) or date.min)
     future_path = [
         row
         for row in future_bars or []
         if str(row.get("vt_symbol") or "") == vt_symbol
         and _is_within_lookahead(_as_date(row.get("trade_date")), exit_date, lookahead_days)
     ]
-    entry_raw = entry.get("raw") if isinstance(entry.get("raw"), dict) else {}
+    entry_raw = _entry_raw_payload(entry)
     entry_price = _safe_float(entry.get("price"))
     exit_price = _safe_float((exit_trade or {}).get("price"))
     future_closes = [value for row in future_path if (value := _safe_float(row.get("close_price"))) is not None]
@@ -716,33 +834,153 @@ def trade_path_diagnostic_row(
     return_pct = None
     if entry_price and exit_price:
         return_pct = (exit_price / entry_price - 1) * 100
+    follow_through = _early_follow_through_diagnostic(path)
+    mae_pct = _min_number(row.get("floating_pnl_pct") for row in path)
+    mfe_pct = _max_number(row.get("floating_pnl_pct") for row in path)
+    signal_bar_context = _sell_signal_bar_context(vt_symbol, exit_date, daily_bars or [])
+    review = _rebound_prone_support_stop_review(
+        exit_reason=(exit_trade or {}).get("reason"),
+        mfe_pct=mfe_pct,
+        early_mfe_pct=follow_through.get("early_mfe_pct"),
+        early_follow_through_state=follow_through.get("early_follow_through_state"),
+        signal_intraday_range_pct=signal_bar_context.get("sell_signal_intraday_range_pct"),
+    )
     return {
         "vt_symbol": vt_symbol,
         "name": (entry or exit_trade or {}).get("name"),
         "board": (entry or exit_trade or {}).get("board"),
         "board_label": (entry or exit_trade or {}).get("board_label"),
+        "entry_trade_id": entry.get("id"),
+        "exit_trade_id": (exit_trade or {}).get("id"),
         "entry_date": entry_date,
         "exit_date": exit_date,
         "entry_price": entry_price,
         "exit_price": exit_price,
+        "entry_amount": _safe_float(entry.get("amount")),
+        "exit_amount": _safe_float((exit_trade or {}).get("amount")),
+        "pnl": _safe_float((exit_trade or {}).get("pnl")),
         "entry_setup": entry_raw.get("entry_setup") or entry_raw.get("setup_type"),
         "entry_score": _entry_raw_number(entry_raw, "entry_total_score", "total_score", "score"),
         "low_suction_days": _entry_raw_number(entry_raw, "low_suction_days"),
+        "low_suction_buildup_score": _entry_raw_number(entry_raw, "low_suction_buildup_score"),
+        "stealth_low_suction_score": _entry_raw_number(entry_raw, "stealth_low_suction_score"),
         "low_suction_launch_confirmed": bool(entry_raw.get("low_suction_launch_confirmed")),
+        "low_suction_launch_quality_bucket": entry_raw.get("low_suction_launch_quality_bucket"),
+        "low_suction_launch_quality_label": entry_raw.get("low_suction_launch_quality_label"),
+        "low_suction_dragon_state": entry_raw.get("low_suction_dragon_state"),
+        "low_suction_dragon_label": entry_raw.get("low_suction_dragon_label"),
+        "low_suction_dragon_conflict": bool(entry_raw.get("low_suction_dragon_conflict")),
+        "low_suction_dragon_conflict_level": entry_raw.get("low_suction_dragon_conflict_level"),
+        "low_suction_dragon_notes": entry_raw.get("low_suction_dragon_notes") if isinstance(entry_raw.get("low_suction_dragon_notes"), list) else [],
+        "ma_convergence_pct": _entry_raw_number(entry_raw, "ma_convergence_pct"),
+        "volume_ratio_5d_20d": _entry_raw_number(entry_raw, "volume_ratio_5d_20d"),
+        "support_hold_days": _entry_raw_number(entry_raw, "support_hold_days"),
+        "pullback_days": _entry_raw_number(entry_raw, "pullback_days"),
+        "drawdown_from_pivot_pct": _entry_raw_number(entry_raw, "drawdown_from_pivot_pct"),
+        "close_location_in_range": _entry_raw_number(entry_raw, "close_location_in_range"),
+        "ma5_distance_pct": _entry_raw_number(entry_raw, "ma5_distance_pct"),
+        "ma10_distance_pct": _entry_raw_number(entry_raw, "ma10_distance_pct"),
+        "ma20_distance_pct": _entry_raw_number(entry_raw, "ma20_distance_pct"),
+        "fresh_tail_buy": bool(entry_raw.get("fresh_tail_buy")),
+        "tail_buy_repeat_days": _entry_raw_number(entry_raw, "tail_buy_repeat_days"),
         "recent_limit_up_20d": bool(entry_raw.get("recent_limit_up_20d")),
+        "large_bull_count_20d": _entry_raw_number(entry_raw, "large_bull_count_20d"),
+        "near_limit_up_count_20d": _entry_raw_number(entry_raw, "near_limit_up_count_20d"),
         "consecutive_bull_closes": _entry_raw_number(entry_raw, "consecutive_bull_closes"),
         "upward_gap_in_leg": bool(entry_raw.get("upward_gap_in_leg")),
         "persistent_volume_expansion": bool(entry_raw.get("persistent_volume_expansion")),
         "limit_up_start_factor_count": _entry_raw_number(entry_raw, "limit_up_start_factor_count"),
         "weak_index_strength_confirmation": bool(entry_raw.get("weak_index_strength_confirmation")),
         "index_return_20d": _entry_raw_number(entry_raw, "index_return_20d"),
+        "early_dragon_pullback_risk": bool(entry_raw.get("early_dragon_pullback_risk")),
         "exit_reason": (exit_trade or {}).get("reason"),
         "exit_reason_label": reason_label((exit_trade or {}).get("reason")),
         "return_pct": round(return_pct, 4) if return_pct is not None else None,
-        "mae_pct": _min_number(row.get("floating_pnl_pct") for row in path),
-        "mfe_pct": _max_number(row.get("floating_pnl_pct") for row in path),
+        "mae_pct": mae_pct,
+        "mfe_pct": mfe_pct,
+        **follow_through,
+        **signal_bar_context,
+        **review,
         "post_exit_max_return_pct": post_exit_max_return_pct,
         "sold_before_rebound": bool(post_exit_max_return_pct is not None and post_exit_max_return_pct >= 8.0),
+    }
+
+
+def _sell_signal_bar_context(
+    vt_symbol: str,
+    exit_date: date | None,
+    daily_bars: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if exit_date is None or not daily_bars:
+        return {}
+    symbol_bars = [row for row in daily_bars if str(row.get("vt_symbol") or "") == vt_symbol]
+    symbol_bars.sort(key=lambda row: _as_date(row.get("trade_date")) or date.min)
+    exit_index = next(
+        (index for index, row in enumerate(symbol_bars) if _as_date(row.get("trade_date")) == exit_date),
+        None,
+    )
+    if exit_index is None or exit_index <= 0:
+        return {}
+    signal_bar = symbol_bars[exit_index - 1]
+    previous_bar = symbol_bars[exit_index - 2] if exit_index >= 2 else None
+    open_price = _safe_float(signal_bar.get("open_price"))
+    close_price = _safe_float(signal_bar.get("close_price"))
+    high_price = _safe_float(signal_bar.get("high_price"))
+    low_price = _safe_float(signal_bar.get("low_price"))
+    if not all(value is not None for value in (open_price, close_price, high_price, low_price)) or not close_price:
+        return {}
+    bar_range = high_price - low_price
+    context = {
+        "sell_signal_date": _as_date(signal_bar.get("trade_date")),
+        "sell_signal_change_pct": _safe_float(signal_bar.get("change_pct")),
+        "sell_signal_body_pct": (close_price / open_price - 1) * 100 if open_price else None,
+        "sell_signal_intraday_range_pct": bar_range / close_price * 100 if close_price else None,
+        "sell_signal_close_location": (close_price - low_price) / bar_range if bar_range else None,
+        "sell_signal_lower_shadow_pct": (min(open_price, close_price) - low_price) / close_price * 100,
+        "sell_signal_upper_shadow_pct": (high_price - max(open_price, close_price)) / close_price * 100,
+    }
+    previous_close = _safe_float((previous_bar or {}).get("close_price"))
+    if previous_close:
+        context["sell_signal_gap_pct"] = (open_price / previous_close - 1) * 100 if open_price else None
+        context["sell_signal_close_vs_prev_pct"] = (close_price / previous_close - 1) * 100
+    return {key: (round(value, 4) if isinstance(value, float) else value) for key, value in context.items()}
+
+
+def _rebound_prone_support_stop_review(
+    *,
+    exit_reason: Any,
+    mfe_pct: float | None,
+    early_mfe_pct: float | None,
+    early_follow_through_state: Any,
+    signal_intraday_range_pct: float | None,
+) -> dict[str, Any]:
+    if str(exit_reason or "") != "support_stop":
+        return {"rebound_prone_support_stop_review": False, "rebound_prone_support_stop_score": 0.0, "rebound_prone_support_stop_notes": []}
+    score = 0.0
+    notes: list[str] = []
+    if early_mfe_pct is not None and early_mfe_pct >= 0:
+        score += 35.0
+        notes.append("买后曾有承接/MFE")
+    if mfe_pct is not None and 0 <= mfe_pct <= 3.0:
+        score += 30.0
+        notes.append("持仓曾小幅浮盈但未打开空间")
+    elif mfe_pct is not None and mfe_pct >= 3.0:
+        score += 20.0
+        notes.append("持仓路径曾有明显 MFE")
+    if str(early_follow_through_state or "") == "confirmed_follow_through":
+        score += 20.0
+        notes.append("早期跟随确认")
+    elif str(early_follow_through_state or "") == "weak_follow_through":
+        score += 10.0
+        notes.append("早期弱跟随")
+    if signal_intraday_range_pct is not None and signal_intraday_range_pct >= 5.0:
+        score += 25.0
+        notes.append("卖出信号日宽幅恐慌")
+    score = min(score, 100.0)
+    return {
+        "rebound_prone_support_stop_review": score >= 60.0,
+        "rebound_prone_support_stop_score": round(score, 4),
+        "rebound_prone_support_stop_notes": notes,
     }
 
 
@@ -752,10 +990,18 @@ def trade_path_diagnostics_from_trades(
     future_bars: list[dict[str, Any]],
     *,
     lookahead_days: int = 10,
+    daily_bars: list[dict[str, Any]] | None = None,
+    replacement_trades: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     positions_by_symbol: dict[str, list[dict[str, Any]]] = {}
     for row in positions:
         positions_by_symbol.setdefault(str(row.get("vt_symbol") or ""), []).append(row)
+    daily_bars_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    for row in daily_bars or []:
+        daily_bars_by_symbol.setdefault(str(row.get("vt_symbol") or ""), []).append(row)
+    future_bars_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    for row in future_bars or []:
+        future_bars_by_symbol.setdefault(str(row.get("vt_symbol") or ""), []).append(row)
 
     open_trades: dict[str, list[dict[str, Any]]] = {}
     rows: list[dict[str, Any]] = []
@@ -776,25 +1022,1081 @@ def trade_path_diagnostics_from_trades(
                 entry,
                 trade,
                 positions_by_symbol.get(vt_symbol, []),
-                future_bars,
+                future_bars_by_symbol.get(vt_symbol, []),
                 lookahead_days=lookahead_days,
+                daily_bars=daily_bars_by_symbol.get(vt_symbol, []),
             )
         )
+    return _attach_replacement_trade_quality(rows, replacement_trades or trades)
+
+
+def _attach_replacement_trade_quality(rows: list[dict[str, Any]], trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not rows:
+        return rows
+    closed_by_entry_id = _closed_trade_rows_by_entry_id(trades)
+    closed_by_entry_id.update({row.get("entry_trade_id"): row for row in rows if row.get("entry_trade_id") is not None})
+    sorted_buys = [
+        trade
+        for trade in sorted(trades, key=_trade_sort_key)
+        if str(trade.get("side") or "").upper() == "BUY"
+    ]
+    buy_index = 0
+    for row in sorted(rows, key=lambda item: (_as_date(item.get("exit_date")) or date.max, int(item.get("exit_trade_id") or 0))):
+        exit_trade_id = row.get("exit_trade_id")
+        if exit_trade_id is None:
+            row.update(_replacement_quality_payload(None, None, row))
+            continue
+        exit_key = (_as_date(row.get("exit_date")) or date.min, int(exit_trade_id or 0))
+        while buy_index < len(sorted_buys) and _trade_sort_key(sorted_buys[buy_index]) <= exit_key:
+            buy_index += 1
+        if buy_index >= len(sorted_buys):
+            row.update(_replacement_quality_payload(None, None, row))
+            continue
+        replacement = sorted_buys[buy_index]
+        buy_index += 1
+        row.update(_replacement_quality_payload(replacement, closed_by_entry_id.get(replacement.get("id")), row))
     return rows
 
 
+def _replacement_quality_payload(
+    replacement_entry: dict[str, Any] | None,
+    replacement_closed_row: dict[str, Any] | None,
+    source_row: dict[str, Any],
+) -> dict[str, Any]:
+    if replacement_entry is None:
+        return {
+            "replacement_status": "none",
+            "replacement_outcome": "no_replacement",
+            "replacement_outcome_label": "未释放到后续买入",
+        }
+    raw = _entry_raw_payload(replacement_entry)
+    replacement_return = _safe_float((replacement_closed_row or {}).get("return_pct"))
+    source_return = _safe_float(source_row.get("return_pct"))
+    delta = replacement_return - source_return if replacement_return is not None and source_return is not None else None
+    outcome, label = _replacement_outcome(replacement_return)
+    return {
+        "replacement_status": "closed" if replacement_closed_row else "open",
+        "replacement_trade_id": replacement_entry.get("id"),
+        "replacement_vt_symbol": replacement_entry.get("vt_symbol"),
+        "replacement_name": replacement_entry.get("name"),
+        "replacement_entry_date": _as_date(replacement_entry.get("trade_date")),
+        "replacement_entry_price": _safe_float(replacement_entry.get("price")),
+        "replacement_entry_setup": raw.get("entry_setup") or raw.get("setup_type"),
+        "replacement_entry_score": _entry_raw_number(raw, "entry_total_score", "total_score", "score"),
+        "replacement_exit_date": (replacement_closed_row or {}).get("exit_date"),
+        "replacement_exit_reason": (replacement_closed_row or {}).get("exit_reason"),
+        "replacement_exit_reason_label": (replacement_closed_row or {}).get("exit_reason_label"),
+        "replacement_return_pct": replacement_return,
+        "replacement_pnl": _safe_float((replacement_closed_row or {}).get("pnl")),
+        "replacement_return_delta_pct": round(delta, 4) if delta is not None else None,
+        "replacement_outcome": outcome,
+        "replacement_outcome_label": label,
+    }
+
+
+def _replacement_outcome(return_pct: float | None) -> tuple[str, str]:
+    if return_pct is None:
+        return "open_replacement", "替换持仓未闭合"
+    if return_pct >= 8.0:
+        return "strong_replacement", "替换买入强盈利"
+    if return_pct > 0:
+        return "profitable_replacement", "替换买入盈利"
+    if return_pct <= -5.0:
+        return "bad_replacement", "替换买入亏损"
+    return "weak_replacement", "替换买入弱表现"
+
+
+def _closed_trade_rows_by_entry_id(trades: list[dict[str, Any]]) -> dict[Any, dict[str, Any]]:
+    open_trades: dict[str, list[dict[str, Any]]] = {}
+    result: dict[Any, dict[str, Any]] = {}
+    for trade in sorted(trades, key=_trade_sort_key):
+        vt_symbol = str(trade.get("vt_symbol") or "")
+        side = str(trade.get("side") or "").upper()
+        if side == "BUY":
+            open_trades.setdefault(vt_symbol, []).append(trade)
+            continue
+        if side != "SELL":
+            continue
+        entry = open_trades.setdefault(vt_symbol, []).pop(0) if open_trades.get(vt_symbol) else None
+        if entry is None:
+            continue
+        entry_price = _safe_float(entry.get("price"))
+        exit_price = _safe_float(trade.get("price"))
+        return_pct = (exit_price / entry_price - 1) * 100 if entry_price and exit_price else None
+        result[entry.get("id")] = {
+            "vt_symbol": vt_symbol,
+            "entry_trade_id": entry.get("id"),
+            "exit_trade_id": trade.get("id"),
+            "entry_date": _as_date(entry.get("trade_date")),
+            "exit_date": _as_date(trade.get("trade_date")),
+            "entry_price": entry_price,
+            "exit_price": exit_price,
+            "exit_reason": trade.get("reason"),
+            "exit_reason_label": reason_label(trade.get("reason")),
+            "return_pct": round(return_pct, 4) if return_pct is not None else None,
+            "pnl": _safe_float(trade.get("pnl")),
+        }
+    return result
+
+
+def _trade_sort_key(trade: dict[str, Any]) -> tuple[date, int]:
+    return (_as_date(trade.get("trade_date")) or date.min, int(trade.get("id") or 0))
+
+
 def trade_path_diagnostics_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    enriched = [_with_path_issue(row) for row in rows]
     losses = [row for row in rows if _safe_float(row.get("return_pct")) is not None and float(row["return_pct"]) < 0]
     rebounds = [row for row in rows if row.get("sold_before_rebound")]
     mae_values = [value for row in rows if (value := _safe_float(row.get("mae_pct"))) is not None]
     mfe_values = [value for row in rows if (value := _safe_float(row.get("mfe_pct"))) is not None]
+    replacement_returns = [value for row in rows if (value := _safe_float(row.get("replacement_return_pct"))) is not None]
+    replacement_deltas = [value for row in rows if (value := _safe_float(row.get("replacement_return_delta_pct"))) is not None]
     return {
         "trade_count": len(rows),
         "loss_count": len(losses),
         "sold_before_rebound_count": len(rebounds),
+        "rebound_prone_support_stop_review_count": sum(1 for row in rows if row.get("rebound_prone_support_stop_review")),
+        "replacement_trade_count": sum(1 for row in rows if row.get("replacement_trade_id") is not None),
+        "bad_replacement_count": sum(1 for row in rows if row.get("replacement_outcome") == "bad_replacement"),
+        "strong_replacement_count": sum(1 for row in rows if row.get("replacement_outcome") == "strong_replacement"),
+        "avg_replacement_return_pct": _avg(replacement_returns),
+        "avg_replacement_return_delta_pct": _avg(replacement_deltas),
+        "by_replacement_outcome": _group_path_metrics(enriched, "replacement_outcome", _replacement_outcome_label_for_bucket),
+        "by_dynamic_market_regime": _group_path_metrics(enriched, "dynamic_market_regime", _dynamic_market_label_for_bucket),
+        "by_market_warning": _group_path_metrics(enriched, "market_warning_label", lambda value, _rows: str(value or "未知")),
+        "by_entry_context": _group_path_metrics(enriched, "entry_context_state", _entry_context_label_for_bucket),
+        "by_short_term_trade_context": _group_path_metrics(
+            enriched,
+            "short_term_trade_context",
+            _short_term_trade_context_label_for_bucket,
+        ),
+        "by_market_mainline_trade_context": _group_path_metrics(
+            enriched,
+            "market_mainline_trade_context",
+            _market_mainline_trade_context_label_for_bucket,
+        ),
+        "by_entry_launch_diagnostic": _group_path_metrics(
+            enriched,
+            "entry_launch_diagnostic_state",
+            _entry_launch_diagnostic_label_for_bucket,
+        ),
+        "by_low_suction_dragon_context": _group_path_metrics(
+            enriched,
+            "low_suction_dragon_state",
+            _low_suction_dragon_context_label_for_bucket,
+        ),
+        "by_fund_flow_coverage": _group_path_metrics(enriched, "fund_flow_coverage_state", _fund_flow_coverage_label_for_bucket),
+        "dynamic_market_sources": _top_candidate_dynamic_market_sources(rows),
         "avg_mae_pct": sum(mae_values) / len(mae_values) if mae_values else None,
         "avg_mfe_pct": sum(mfe_values) / len(mfe_values) if mfe_values else None,
     }
+
+
+def _normalize_path_row_dates(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["entry_date"] = _as_date(item.get("entry_date"))
+    item["exit_date"] = _as_date(item.get("exit_date"))
+    return item
+
+
+def _with_path_issue(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    if not item.get("early_follow_through_state"):
+        item.update(_early_follow_through_from_metrics(item))
+    item["giveback_pct"] = _path_giveback_pct(item)
+    issue_type, issue_label = _classify_path_issue(item)
+    item["path_issue_type"] = issue_type
+    item["path_issue_label"] = issue_label
+    item.update(_entry_context_marker(item))
+    item.update(_entry_launch_diagnostic_marker(item))
+    item.update(_low_suction_dragon_context_marker(item))
+    item.update(_fund_flow_coverage_marker(item))
+    item.update(_market_mainline_trade_context_marker(item))
+    item.update(_short_term_trade_context_marker(item))
+    return item
+
+
+def _path_giveback_pct(row: dict[str, Any]) -> float | None:
+    mfe = _safe_float(row.get("mfe_pct"))
+    ret = _safe_float(row.get("return_pct"))
+    if mfe is None or ret is None:
+        return None
+    return round(max(0.0, mfe - ret), 4)
+
+
+def _early_follow_through_diagnostic(path: list[dict[str, Any]], *, days: int = 3) -> dict[str, Any]:
+    early_path = path[:max(days, 1)]
+    early_mae = _min_number(row.get("floating_pnl_pct") for row in early_path)
+    early_mfe = _max_number(row.get("floating_pnl_pct") for row in early_path)
+    early_last_return = _safe_float(early_path[-1].get("floating_pnl_pct")) if early_path else None
+    state, label = _classify_early_follow_through(early_mae, early_mfe, early_last_return)
+    return {
+        "early_follow_through_days": len(early_path),
+        "early_mae_pct": early_mae,
+        "early_mfe_pct": early_mfe,
+        "early_return_pct": early_last_return,
+        "early_follow_through_state": state,
+        "early_follow_through_label": label,
+    }
+
+
+def _early_follow_through_from_metrics(row: dict[str, Any]) -> dict[str, Any]:
+    early_mae = _safe_float(row.get("early_mae_pct"))
+    early_mfe = _safe_float(row.get("early_mfe_pct"))
+    early_last_return = _safe_float(row.get("early_return_pct"))
+    state, label = _classify_early_follow_through(early_mae, early_mfe, early_last_return)
+    return {
+        "early_follow_through_state": state,
+        "early_follow_through_label": label,
+    }
+
+
+def _classify_early_follow_through(
+    early_mae: float | None,
+    early_mfe: float | None,
+    early_last_return: float | None,
+) -> tuple[str, str]:
+    if early_mae is None and early_mfe is None and early_last_return is None:
+        return "unknown", "早期路径未知"
+    if (early_mae is not None and early_mae <= -4.0) and (early_mfe is None or early_mfe < 2.0):
+        return "failed_launch", "启动后立即失败"
+    if (early_last_return is not None and early_last_return <= -2.0) and (early_mfe is None or early_mfe < 3.0):
+        return "failed_launch", "启动后立即失败"
+    if early_mfe is not None and early_mfe >= 4.0:
+        return "confirmed_follow_through", "买后资金跟随"
+    if early_mfe is not None and early_mfe >= 1.5:
+        return "weak_follow_through", "买后弱跟随"
+    return "no_follow_through", "买后无跟随"
+
+
+def _classify_path_issue(row: dict[str, Any]) -> tuple[str, str]:
+    ret = _safe_float(row.get("return_pct"))
+    mae = _safe_float(row.get("mae_pct"))
+    mfe = _safe_float(row.get("mfe_pct"))
+    giveback = _safe_float(row.get("giveback_pct"))
+    early_state = str(row.get("early_follow_through_state") or "")
+    if row.get("sold_before_rebound"):
+        return "sold_before_rebound", "卖早后反弹"
+    if giveback is not None and giveback >= 8.0 and (mfe or 0) >= 8.0:
+        return "exit_giveback", "回撤/卖点问题"
+    if ret is not None and ret < 0 and early_state in {"failed_launch", "no_follow_through"}:
+        return "entry_follow_through", "买后无承接"
+    if ret is not None and ret < 0 and (mfe is None or mfe < 4.0) and (mae is not None and mae <= -5.0):
+        return "entry_quality", "买点质量问题"
+    if ret is not None and ret < 0:
+        return "loss_control", "亏损控制问题"
+    return "healthy", "正常盈利"
+
+
+def _entry_context_marker(row: dict[str, Any]) -> dict[str, Any]:
+    if not any(row.get(key) for key in ("dynamic_market_regime", "market_warning_label", "recovery_state", "fund_flow_state")):
+        return {
+            "entry_context_state": "unknown",
+            "entry_context_label": "市场环境未知",
+            "entry_context_notes": [],
+        }
+    warning_level = _safe_float(row.get("market_warning_level")) or 0.0
+    breadth = _safe_float(row.get("market_breadth_score"))
+    recovery = str(row.get("recovery_state") or "")
+    regime = str(row.get("dynamic_market_regime") or "")
+    fund_flow = str(row.get("fund_flow_state") or "")
+    notes = []
+    if regime in {"crash", "weak_defensive"} or warning_level >= 3:
+        state, label = "risk_off", "环境向下/强风险"
+        notes.append(str(row.get("market_warning_label") or label))
+    elif recovery in {"warming_confirmed", "stabilizing"}:
+        state, label = "warming", str(row.get("recovery_label") or "回暖观察")
+    elif breadth is not None and breadth < 42:
+        state, label = "weak_breadth", "市场广度弱"
+    elif regime in {"false_bull", "choppy_rotation"} and recovery == "none":
+        state, label = "not_warmed", "震荡但未回暖"
+    else:
+        state, label = "neutral", str(row.get("dynamic_market_label") or "环境中性")
+    if fund_flow in {"outflow", "continuous_outflow", "panic_outflow"}:
+        notes.append(str(row.get("fund_flow_label") or "资金流出"))
+    elif fund_flow == "unknown":
+        notes.append("资金流数据不足")
+    return {
+        "entry_context_state": state,
+        "entry_context_label": label,
+        "entry_context_notes": notes,
+    }
+
+
+def _entry_launch_diagnostic_marker(row: dict[str, Any]) -> dict[str, Any]:
+    setup = str(row.get("entry_setup") or "")
+    early_state = str(row.get("early_follow_through_state") or "")
+    low_suction_days = _safe_float(row.get("low_suction_days")) or 0.0
+    launch_confirmed = bool(row.get("low_suction_launch_confirmed"))
+    close_location = _safe_float(row.get("close_location_in_range"))
+    volume_ratio = _safe_float(row.get("volume_ratio_5d_20d"))
+    pullback_days = _safe_float(row.get("pullback_days"))
+    notes = []
+    if early_state == "failed_launch":
+        state, label = "failed_launch", "启动后立即失败"
+    elif setup == "dragon_pullback" and row.get("early_dragon_pullback_risk"):
+        state, label = "early_dragon_risk", "经典龙回头偏早"
+    elif setup == "stealth_low_suction" and launch_confirmed:
+        if early_state in {"confirmed_follow_through", "weak_follow_through"}:
+            state, label = "low_suction_followed", "低吸启动后有跟随"
+        else:
+            state, label = "low_suction_unfollowed", "低吸启动未见承接"
+    elif low_suction_days >= 5 and not launch_confirmed:
+        state, label = "low_suction_waiting", "低吸蓄势仍在等待"
+    elif early_state == "confirmed_follow_through":
+        state, label = "followed", "买后资金跟随"
+    elif early_state == "weak_follow_through":
+        state, label = "weak_followed", "买后弱跟随"
+    else:
+        state, label = "watch", "启动质量观察"
+    if pullback_days is not None and pullback_days >= 12:
+        notes.append("回踩时间偏长")
+    if volume_ratio is not None and volume_ratio < 0.7:
+        notes.append("量能偏弱")
+    if close_location is not None and close_location >= 0.70:
+        notes.append("收盘位置偏高，需防弱反抽")
+    return {
+        "entry_launch_diagnostic_state": state,
+        "entry_launch_diagnostic_label": label,
+        "entry_launch_diagnostic_notes": notes,
+    }
+
+
+def _low_suction_dragon_context_marker(row: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(row)
+    quality_bucket = row.get("low_suction_launch_quality_bucket") or low_suction_launch_quality_bucket(payload)
+    quality_label = row.get("low_suction_launch_quality_label") or low_suction_launch_quality_label(quality_bucket)
+    payload.update(
+        {
+            "entry_setup": row.get("entry_setup"),
+            "setup_type": row.get("entry_setup"),
+            "low_suction_days": row.get("low_suction_days"),
+            "low_suction_launch_confirmed": row.get("low_suction_launch_confirmed"),
+            "low_suction_launch_quality_bucket": quality_bucket,
+            "low_suction_launch_quality_label": quality_label,
+            "early_dragon_pullback_risk": row.get("early_dragon_pullback_risk"),
+            "entry_launch_diagnostic_state": row.get("entry_launch_diagnostic_state"),
+            "early_follow_through_state": row.get("early_follow_through_state"),
+            "ma_convergence_pct": row.get("ma_convergence_pct"),
+            "latest_change_pct": row.get("latest_change_pct"),
+            "close_location_in_range": row.get("close_location_in_range"),
+        }
+    )
+    return {
+        "low_suction_launch_quality_bucket": quality_bucket,
+        "low_suction_launch_quality_label": quality_label,
+        **low_suction_dragon_context(payload),
+    }
+
+
+def _fund_flow_coverage_marker(row: dict[str, Any]) -> dict[str, Any]:
+    source = str(row.get("fund_flow_source") or "")
+    state = str(row.get("fund_flow_state") or "")
+    if source == "sector_fund_flows":
+        coverage_state, coverage_label = "market_fund_flow", "市场资金流可用"
+    elif source == "stock_fund_flows_partial":
+        coverage_state, coverage_label = "partial_stock_fund_flow", "局部个股资金流"
+    elif state == "unknown":
+        coverage_state, coverage_label = "missing", "资金流数据不足"
+    else:
+        coverage_state, coverage_label = "available", "资金流可用"
+    return {
+        "fund_flow_coverage_state": coverage_state,
+        "fund_flow_coverage_label": coverage_label,
+    }
+
+
+def _market_mainline_trade_context_marker(row: dict[str, Any]) -> dict[str, Any]:
+    """Map market/mainline context into read-only review buckets."""
+
+    regime = str(row.get("dynamic_market_regime") or "")
+    regime_label = str(row.get("dynamic_market_label") or "")
+    theme_state = str(row.get("theme_state") or "")
+    alignment = str(row.get("stock_theme_alignment") or "")
+    dominant_theme = str(row.get("dominant_theme") or "")
+    market_warning = _safe_float(row.get("market_warning_level")) or 0.0
+    fund_flow = str(row.get("fund_flow_state") or "")
+    launch_state = str(row.get("entry_launch_diagnostic_state") or row.get("early_follow_through_state") or "")
+    setup = str(row.get("entry_setup") or "")
+    notes = []
+    if regime_label:
+        notes.append(regime_label)
+    if dominant_theme:
+        notes.append(f"主线 {dominant_theme}")
+
+    if regime in {"weak_defensive", "crash"} or market_warning >= 3 or fund_flow in {"continuous_outflow", "panic_outflow"}:
+        state, label = "risk_off", "退潮/弱市防守"
+        notes.append("大盘或资金处于防守状态")
+    elif regime == "narrow_theme_bull" and theme_state in {"active", "active_pullback"} and alignment in {"leader_theme", "theme_related"}:
+        state, label = "mainline_pullback", "主线分歧回踩"
+        notes.append("主线仍在，候选属于主线或相关方向")
+    elif regime == "narrow_theme_bull" and theme_state == "active":
+        state, label = "mainline_active", "窄牛主线活跃"
+        notes.append("主线活跃但候选主线对齐不足")
+    elif regime == "choppy_rotation" and alignment in {"leader_theme", "theme_related"}:
+        state, label = "rotation_theme_candidate", "震荡轮动主线候选"
+        notes.append("震荡期主线/相关候选")
+    elif regime in {"choppy_rotation", "false_bull"} and setup == "stealth_low_suction":
+        state, label = "rotation_low_suction_watch", "震荡低吸观察"
+        notes.append("震荡/假强势环境下的低吸观察")
+    elif alignment == "isolated_candidate":
+        state, label = "isolated_strength", "弱市独立强票"
+        notes.append("非主线对齐，需看自身承接")
+    elif launch_state in {"followed", "low_suction_followed", "confirmed_follow_through"}:
+        state, label = "market_follow_through", "买后承接验证"
+        notes.append("买后有承接，作为路径复盘")
+    else:
+        state, label = "unknown_mainline", "主线未知/普通轮动"
+        notes.append("主线数据不足或未对齐")
+
+    return {
+        "market_mainline_trade_context": state,
+        "market_mainline_trade_context_label": label,
+        "market_mainline_trade_context_notes": _dedupe_texts(notes),
+    }
+
+
+def _short_term_trade_context_marker(row: dict[str, Any]) -> dict[str, Any]:
+    """Map public short-term/youzi concepts to observable path context."""
+
+    entry_context = str(row.get("entry_context_state") or "")
+    launch_state = str(row.get("entry_launch_diagnostic_state") or row.get("early_follow_through_state") or "")
+    replacement_outcome = str(row.get("replacement_outcome") or "")
+    exit_reason = str(row.get("exit_reason") or "")
+    setup = str(row.get("entry_setup") or "")
+    fund_flow = str(row.get("fund_flow_state") or "")
+    theme_state = str(row.get("theme_state") or "")
+    market_warning = _safe_float(row.get("market_warning_level")) or 0.0
+    mfe = _safe_float(row.get("mfe_pct"))
+    giveback = _safe_float(row.get("giveback_pct"))
+    sold_before_rebound = bool(row.get("sold_before_rebound"))
+    notes: list[str] = []
+
+    if entry_context == "risk_off" or market_warning >= 3 or fund_flow in {"continuous_outflow", "panic_outflow"}:
+        context, label = "defensive_tide", "退潮防守"
+        notes.append("大盘/资金环境偏防守")
+    elif sold_before_rebound and replacement_outcome == "bad_replacement":
+        context, label = "failed_slot_replacement", "卖早且替换差"
+        notes.append("释放仓位后的替换交易质量差")
+    elif exit_reason == "support_stop" and launch_state in {"failed_launch", "no_follow_through"}:
+        context, label = "failed_launch_cut", "假启动止损"
+        notes.append("买后三日无承接")
+    elif giveback is not None and giveback >= 8.0 and (mfe or 0.0) >= 8.0:
+        context, label = "trend_profit_giveback", "趋势浮盈回吐"
+        notes.append("有趋势利润但后续回撤")
+    elif entry_context == "warming" and launch_state in {"followed", "low_suction_followed", "confirmed_follow_through"}:
+        context, label = "warming_follow_through", "回暖后资金跟随"
+        notes.append("回暖期买后有承接")
+    elif entry_context in {"not_warmed", "weak_breadth"} and setup == "stealth_low_suction":
+        context, label = "divergence_low_suction", "分歧低吸观察"
+        notes.append("低吸发生在未回暖或弱广度环境")
+    elif theme_state in {"mainline_active", "leader_theme"} or entry_context == "mainline_active":
+        context, label = "mainline_active", "主线活跃"
+        notes.append("主线/题材状态活跃")
+    elif launch_state in {"followed", "low_suction_followed", "confirmed_follow_through"}:
+        context, label = "follow_through", "买后承接"
+        notes.append("买后有资金跟随")
+    else:
+        context, label = "neutral_rotation", "震荡轮动"
+
+    return {
+        "short_term_trade_context": context,
+        "short_term_trade_context_label": label,
+        "short_term_trade_context_notes": notes,
+    }
+
+
+def _dedupe_texts(values: list[str]) -> list[str]:
+    result = []
+    seen = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def support_stop_context_audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Split support-stop exits into context buckets for sell/hold research."""
+
+    support_rows = [row for row in rows if str(row.get("exit_reason") or "") == "support_stop"]
+    return {
+        "method": "只读归因：用已成交路径的 MAE/MFE、买后三日承接和卖后10日反弹拆分 support_stop，不改变卖点规则。",
+        "overall": _path_metric_summary(support_rows),
+        "by_context": _support_stop_context_bucket_rows(support_rows),
+    }
+
+
+def _support_stop_context_bucket_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        context, label = _classify_support_stop_context(row)
+        item = dict(row)
+        item["support_stop_context"] = context
+        item["support_stop_context_label"] = label
+        groups.setdefault(context, []).append(item)
+    result = []
+    for context, bucket_rows in groups.items():
+        result.append(
+            {
+                "support_stop_context": context,
+                "label": bucket_rows[0].get("support_stop_context_label") or context,
+                **_path_metric_summary(bucket_rows),
+            }
+        )
+    result.sort(key=lambda item: (-int(item.get("trade_count") or 0), _sort_number(item.get("avg_return_pct"), default=10**18)))
+    return result
+
+
+def _classify_support_stop_context(row: dict[str, Any]) -> tuple[str, str]:
+    mfe = _safe_float(row.get("mfe_pct"))
+    giveback = _safe_float(row.get("giveback_pct"))
+    early_state = str(row.get("early_follow_through_state") or "")
+    sold_before_rebound = bool(row.get("sold_before_rebound"))
+    if mfe is not None and mfe >= 8.0 and giveback is not None and giveback >= 8.0 and not sold_before_rebound:
+        return "clean_float_profit_giveback", "浮盈回吐后破位"
+    if mfe is not None and mfe >= 8.0 and sold_before_rebound:
+        return "high_mfe_then_rebound_after_stop", "高浮盈后止损又反弹"
+    if sold_before_rebound:
+        return "stopped_then_rebounded", "止损后反弹"
+    if early_state in {"failed_launch", "no_follow_through"} and (mfe is None or mfe < 4.0):
+        return "true_failed_launch_stop", "真失败启动止损"
+    if early_state in {"confirmed_follow_through", "weak_follow_through"}:
+        return "had_follow_through_but_lost_support", "有承接但后续破支撑"
+    return "other_support_stop", "其他支撑止损"
+
+
+def _path_metric_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    returns = [value for row in rows if (value := _safe_float(row.get("return_pct"))) is not None]
+    replacement_returns = [value for row in rows if (value := _safe_float(row.get("replacement_return_pct"))) is not None]
+    replacement_deltas = [value for row in rows if (value := _safe_float(row.get("replacement_return_delta_pct"))) is not None]
+    pnl_values = [value for row in rows if (value := _safe_float(row.get("pnl"))) is not None]
+    losses = [value for value in returns if value < 0]
+    wins = [value for value in returns if value > 0]
+    mae_values = [value for row in rows if (value := _safe_float(row.get("mae_pct"))) is not None]
+    mfe_values = [value for row in rows if (value := _safe_float(row.get("mfe_pct"))) is not None]
+    givebacks = [value for row in rows if (value := _safe_float(row.get("giveback_pct"))) is not None]
+    return {
+        "trade_count": len(rows),
+        "evaluated_count": len(returns),
+        "win_count": len(wins),
+        "loss_count": len(losses),
+        "win_rate": len(wins) / len(returns) * 100 if returns else None,
+        "avg_return_pct": _avg(returns),
+        "median_return_pct": median(returns) if returns else None,
+        "total_return_pct": sum(returns) if returns else None,
+        "replacement_trade_count": sum(1 for row in rows if row.get("replacement_trade_id") is not None),
+        "bad_replacement_count": sum(1 for row in rows if row.get("replacement_outcome") == "bad_replacement"),
+        "strong_replacement_count": sum(1 for row in rows if row.get("replacement_outcome") == "strong_replacement"),
+        "avg_replacement_return_pct": _avg(replacement_returns),
+        "avg_replacement_return_delta_pct": _avg(replacement_deltas),
+        "total_pnl": sum(pnl_values) if pnl_values else None,
+        "avg_pnl": _avg(pnl_values),
+        "avg_mae_pct": _avg(mae_values),
+        "worst_mae_pct": min(mae_values) if mae_values else None,
+        "avg_mfe_pct": _avg(mfe_values),
+        "best_mfe_pct": max(mfe_values) if mfe_values else None,
+        "avg_giveback_pct": _avg(givebacks),
+        "max_giveback_pct": max(givebacks) if givebacks else None,
+        "sold_before_rebound_count": sum(1 for row in rows if row.get("sold_before_rebound")),
+        "exit_giveback_count": sum(1 for row in rows if row.get("path_issue_type") == "exit_giveback"),
+        "entry_quality_issue_count": sum(1 for row in rows if row.get("path_issue_type") == "entry_quality"),
+        "entry_follow_through_issue_count": sum(1 for row in rows if row.get("path_issue_type") == "entry_follow_through"),
+        "loss_control_issue_count": sum(1 for row in rows if row.get("path_issue_type") == "loss_control"),
+        "failed_launch_count": sum(1 for row in rows if row.get("early_follow_through_state") == "failed_launch"),
+        "no_follow_through_count": sum(1 for row in rows if row.get("early_follow_through_state") == "no_follow_through"),
+        "confirmed_follow_through_count": sum(
+            1 for row in rows if row.get("early_follow_through_state") == "confirmed_follow_through"
+        ),
+    }
+
+
+def _group_path_metrics(
+    rows: list[dict[str, Any]],
+    key: str,
+    labeler: Callable[[Any, list[dict[str, Any]]], str],
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    values: dict[str, Any] = {}
+    for row in rows:
+        raw_value = row.get(key) or "unknown"
+        group_key = str(raw_value)
+        groups.setdefault(group_key, []).append(row)
+        values.setdefault(group_key, raw_value)
+    result = []
+    for group_key, bucket_rows in groups.items():
+        result.append(
+            {
+                key: None if group_key == "unknown" else values[group_key],
+                "label": labeler(values[group_key], bucket_rows),
+                **_path_metric_summary(bucket_rows),
+            }
+        )
+    result.sort(key=lambda item: (-int(item.get("trade_count") or 0), _sort_number(item.get("avg_return_pct"), default=10**18)))
+    return result
+
+
+def entry_launch_quality_audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compare visible entry factors against early post-entry follow-through."""
+
+    return {
+        "method": "只使用买入成交 raw 里在信号日已可见的入场因子；early_follow_through 是事后路径标签，只用于复盘归因。",
+        "overall": _entry_launch_quality_summary(rows),
+        "by_entry_setup": _entry_launch_quality_buckets(rows, "entry_setup", _entry_setup_label),
+        "by_low_suction_days": _entry_launch_quality_derived_buckets(
+            rows,
+            "low_suction_days_bucket",
+            _low_suction_days_bucket,
+            _identity_label,
+        ),
+        "by_ma_convergence": _entry_launch_quality_derived_buckets(
+            rows,
+            "ma_convergence_bucket",
+            _ma_convergence_bucket,
+            _identity_label,
+        ),
+        "by_volume_ratio": _entry_launch_quality_derived_buckets(
+            rows,
+            "volume_ratio_bucket",
+            _volume_ratio_bucket,
+            _identity_label,
+        ),
+        "by_pullback_days": _entry_launch_quality_derived_buckets(
+            rows,
+            "pullback_days_bucket",
+            _pullback_days_bucket,
+            _identity_label,
+        ),
+        "by_close_location": _entry_launch_quality_derived_buckets(
+            rows,
+            "close_location_bucket",
+            _close_location_bucket,
+            _identity_label,
+        ),
+        "by_tail_repeat": _entry_launch_quality_derived_buckets(
+            rows,
+            "tail_repeat_bucket",
+            _tail_repeat_bucket,
+            _identity_label,
+        ),
+        "by_low_suction_launch_quality": _entry_launch_quality_derived_buckets(
+            rows,
+            "low_suction_launch_quality_bucket",
+            _low_suction_launch_quality_bucket,
+            _low_suction_launch_quality_label,
+        ),
+        "by_dynamic_market_regime": _entry_launch_quality_buckets(
+            rows,
+            "dynamic_market_regime",
+            _dynamic_market_label_for_bucket,
+        ),
+        "risk_contrast": _entry_launch_risk_contrast(rows),
+    }
+
+
+def _entry_launch_quality_buckets(
+    rows: list[dict[str, Any]],
+    key: str,
+    labeler: Callable[[Any, list[dict[str, Any]]], str],
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    values: dict[str, Any] = {}
+    for row in rows:
+        value = row.get(key) or "unknown"
+        group_key = str(value)
+        groups.setdefault(group_key, []).append(row)
+        values.setdefault(group_key, value)
+    return _entry_launch_quality_bucket_rows(groups, values, key, labeler)
+
+
+def _entry_launch_quality_derived_buckets(
+    rows: list[dict[str, Any]],
+    key: str,
+    bucketer: Callable[[dict[str, Any]], str],
+    labeler: Callable[[Any, list[dict[str, Any]]], str],
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    values: dict[str, Any] = {}
+    for row in rows:
+        value = bucketer(row)
+        groups.setdefault(value, []).append(row)
+        values.setdefault(value, value)
+    return _entry_launch_quality_bucket_rows(groups, values, key, labeler)
+
+
+def _entry_launch_quality_bucket_rows(
+    groups: dict[str, list[dict[str, Any]]],
+    values: dict[str, Any],
+    key: str,
+    labeler: Callable[[Any, list[dict[str, Any]]], str],
+) -> list[dict[str, Any]]:
+    result = []
+    for group_key, bucket_rows in groups.items():
+        result.append(
+            {
+                key: None if group_key == "unknown" else values[group_key],
+                "label": labeler(values[group_key], bucket_rows),
+                **_entry_launch_quality_summary(bucket_rows),
+            }
+        )
+    result.sort(
+        key=lambda item: (
+            -int(item.get("trade_count") or 0),
+            -_sort_number(item.get("failed_launch_rate"), default=0),
+            _sort_number(item.get("avg_return_pct"), default=10**18),
+        )
+    )
+    return result
+
+
+def _entry_launch_quality_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    returns = [value for row in rows if (value := _safe_float(row.get("return_pct"))) is not None]
+    failed = [row for row in rows if row.get("early_follow_through_state") == "failed_launch"]
+    no_follow = [row for row in rows if row.get("early_follow_through_state") == "no_follow_through"]
+    weak = [row for row in rows if row.get("early_follow_through_state") == "weak_follow_through"]
+    confirmed = [row for row in rows if row.get("early_follow_through_state") == "confirmed_follow_through"]
+    return {
+        "trade_count": len(rows),
+        "evaluated_count": len(returns),
+        "win_rate": _rate((_safe_float(row.get("return_pct")) or 0) > 0 for row in rows if _safe_float(row.get("return_pct")) is not None),
+        "avg_return_pct": _avg(returns),
+        "failed_launch_count": len(failed),
+        "failed_launch_rate": _pct_ratio(len(failed), len(rows)),
+        "no_follow_through_count": len(no_follow),
+        "no_follow_through_rate": _pct_ratio(len(no_follow), len(rows)),
+        "weak_follow_through_count": len(weak),
+        "weak_follow_through_rate": _pct_ratio(len(weak), len(rows)),
+        "confirmed_follow_through_count": len(confirmed),
+        "confirmed_follow_through_rate": _pct_ratio(len(confirmed), len(rows)),
+        "avg_entry_score": _avg(row.get("entry_score") for row in rows),
+        "avg_low_suction_days": _avg(row.get("low_suction_days") for row in rows),
+        "avg_ma_convergence_pct": _avg(row.get("ma_convergence_pct") for row in rows),
+        "avg_volume_ratio_5d_20d": _avg(row.get("volume_ratio_5d_20d") for row in rows),
+        "avg_tail_buy_repeat_days": _avg(row.get("tail_buy_repeat_days") for row in rows),
+        "sold_before_rebound_count": sum(1 for row in rows if row.get("sold_before_rebound")),
+    }
+
+
+def _entry_launch_risk_contrast(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    failed = [row for row in rows if row.get("early_follow_through_state") == "failed_launch"]
+    confirmed = [row for row in rows if row.get("early_follow_through_state") == "confirmed_follow_through"]
+    return {
+        "failed_launch": _entry_factor_average_snapshot(failed),
+        "confirmed_follow_through": _entry_factor_average_snapshot(confirmed),
+        "note": "对比值只说明相关性，不代表可直接硬拒；需要后续全局回测验证。"
+    }
+
+
+def _entry_factor_average_snapshot(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "trade_count": len(rows),
+        "avg_return_pct": _avg(row.get("return_pct") for row in rows),
+        "avg_entry_score": _avg(row.get("entry_score") for row in rows),
+        "avg_low_suction_days": _avg(row.get("low_suction_days") for row in rows),
+        "avg_ma_convergence_pct": _avg(row.get("ma_convergence_pct") for row in rows),
+        "avg_volume_ratio_5d_20d": _avg(row.get("volume_ratio_5d_20d") for row in rows),
+        "avg_pullback_days": _avg(row.get("pullback_days") for row in rows),
+        "avg_close_location_in_range": _avg(row.get("close_location_in_range") for row in rows),
+        "avg_tail_buy_repeat_days": _avg(row.get("tail_buy_repeat_days") for row in rows),
+        "recent_limit_up_rate": _rate(row.get("recent_limit_up_20d") for row in rows),
+        "low_suction_launch_confirmed_rate": _rate(row.get("low_suction_launch_confirmed") for row in rows),
+    }
+
+
+def _low_suction_days_bucket(row: dict[str, Any]) -> str:
+    days = _safe_float(row.get("low_suction_days"))
+    if days is None:
+        return "unknown"
+    if days <= 0:
+        return "0"
+    if days <= 2:
+        return "1-2"
+    if days <= 4:
+        return "3-4"
+    return "5+"
+
+
+def _ma_convergence_bucket(row: dict[str, Any]) -> str:
+    value = _safe_float(row.get("ma_convergence_pct"))
+    if value is None:
+        return "unknown"
+    if value <= 5.0:
+        return "<=5%"
+    if value <= 8.8:
+        return "5-8.8%"
+    if value <= 13.0:
+        return "8.8-13%"
+    return ">13%"
+
+
+def _volume_ratio_bucket(row: dict[str, Any]) -> str:
+    value = _safe_float(row.get("volume_ratio_5d_20d"))
+    if value is None:
+        return "unknown"
+    if value < 0.7:
+        return "<0.7"
+    if value <= 1.2:
+        return "0.7-1.2"
+    if value <= 1.8:
+        return "1.2-1.8"
+    return ">1.8"
+
+
+def _pullback_days_bucket(row: dict[str, Any]) -> str:
+    value = _safe_float(row.get("pullback_days"))
+    if value is None:
+        return "unknown"
+    if value <= 2:
+        return "0-2"
+    if value <= 5:
+        return "3-5"
+    if value <= 8:
+        return "6-8"
+    if value <= 12:
+        return "9-12"
+    return "12+"
+
+
+def _close_location_bucket(row: dict[str, Any]) -> str:
+    value = _safe_float(row.get("close_location_in_range"))
+    if value is None:
+        return "unknown"
+    if value < 0.45:
+        return "<0.45"
+    if value < 0.58:
+        return "0.45-0.58"
+    if value < 0.70:
+        return "0.58-0.70"
+    return ">=0.70"
+
+
+def _tail_repeat_bucket(row: dict[str, Any]) -> str:
+    value = _safe_float(row.get("tail_buy_repeat_days"))
+    if value is None:
+        return "unknown"
+    if value <= 0:
+        return "0"
+    if value <= 2:
+        return "1-2"
+    return "3+"
+
+
+def _low_suction_launch_quality_bucket(row: dict[str, Any]) -> str:
+    return low_suction_launch_quality_bucket(row)
+
+
+def _low_suction_launch_quality_label(value: Any, _rows: list[dict[str, Any]]) -> str:
+    return low_suction_launch_quality_label(value)
+
+
+def _low_suction_dragon_context_label_for_bucket(value: Any, rows: list[dict[str, Any]]) -> str:
+    for row in rows:
+        if row.get("low_suction_dragon_label"):
+            return str(row["low_suction_dragon_label"])
+    return low_suction_dragon_context_label(value)
+
+
+def _identity_label(value: Any, _rows: list[dict[str, Any]]) -> str:
+    return str(value or "未知")
+
+
+def _setup_market_exit_matrix(rows: list[dict[str, Any]], *, min_trades: int = 1) -> list[dict[str, Any]]:
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        key = (
+            str(row.get("entry_setup") or "unknown"),
+            str(row.get("dynamic_market_regime") or "unknown"),
+            str(row.get("exit_reason") or "unknown"),
+        )
+        groups.setdefault(key, []).append(row)
+    result = []
+    for (setup, regime, reason), bucket_rows in groups.items():
+        if len(bucket_rows) < min_trades:
+            continue
+        result.append(
+            {
+                "entry_setup": None if setup == "unknown" else setup,
+                "entry_setup_label": _entry_setup_label(setup, bucket_rows),
+                "dynamic_market_regime": None if regime == "unknown" else regime,
+                "dynamic_market_label": _dynamic_market_label_for_bucket(regime, bucket_rows),
+                "exit_reason": None if reason == "unknown" else reason,
+                "exit_reason_label": _exit_reason_label_for_bucket(reason, bucket_rows),
+                **_path_metric_summary(bucket_rows),
+            }
+        )
+    result.sort(key=lambda item: (_sort_number(item.get("avg_return_pct"), default=10**18), -int(item.get("trade_count") or 0)))
+    return result
+
+
+def _worst_setup_market_exit_buckets(rows: list[dict[str, Any]], *, limit: int = 12) -> list[dict[str, Any]]:
+    matrix = [row for row in _setup_market_exit_matrix(rows) if int(row.get("trade_count") or 0) >= 2]
+    return matrix[:limit]
+
+
+def _worst_setup_market_exit_examples(rows: list[dict[str, Any]], *, limit: int = 40) -> list[dict[str, Any]]:
+    enriched = [_with_path_issue(row) for row in rows]
+    enriched.sort(
+        key=lambda row: (
+            _sort_number(row.get("return_pct"), default=10**18),
+            -_sort_number(row.get("giveback_pct"), default=0),
+            str(row.get("entry_date") or ""),
+            str(row.get("vt_symbol") or ""),
+        )
+    )
+    return enriched[:limit]
+
+
+def _entry_setup_label(value: Any, _rows: list[dict[str, Any]]) -> str:
+    labels = {
+        "dragon_pullback": "龙回头",
+        "stealth_low_suction": "低吸洗盘",
+        "ma5_pullback": "MA5回踩",
+        "unknown": "未知买点",
+    }
+    return labels.get(str(value or "unknown"), str(value or "未知"))
+
+
+def _dynamic_market_label_for_bucket(value: Any, rows: list[dict[str, Any]]) -> str:
+    for row in rows:
+        if row.get("dynamic_market_label"):
+            return str(row["dynamic_market_label"])
+    return str(value or "未知")
+
+
+def _exit_reason_label_for_bucket(value: Any, _rows: list[dict[str, Any]]) -> str:
+    return reason_label(value) or "未知卖点"
+
+
+def _path_issue_label_for_bucket(value: Any, rows: list[dict[str, Any]]) -> str:
+    for row in rows:
+        if row.get("path_issue_label"):
+            return str(row["path_issue_label"])
+    labels = {
+        "sold_before_rebound": "卖早后反弹",
+        "exit_giveback": "回撤/卖点问题",
+        "entry_follow_through": "买后无承接",
+        "entry_quality": "买点质量问题",
+        "loss_control": "亏损控制问题",
+        "healthy": "正常盈利",
+        "unknown": "未知",
+    }
+    return labels.get(str(value or "unknown"), str(value or "未知"))
+
+
+def _early_follow_through_label_for_bucket(value: Any, rows: list[dict[str, Any]]) -> str:
+    for row in rows:
+        if row.get("early_follow_through_label"):
+            return str(row["early_follow_through_label"])
+    labels = {
+        "failed_launch": "启动后立即失败",
+        "no_follow_through": "买后无跟随",
+        "weak_follow_through": "买后弱跟随",
+        "confirmed_follow_through": "买后资金跟随",
+        "unknown": "早期路径未知",
+    }
+    return labels.get(str(value or "unknown"), str(value or "未知"))
+
+
+def _entry_context_label_for_bucket(value: Any, rows: list[dict[str, Any]]) -> str:
+    for row in rows:
+        if row.get("entry_context_label"):
+            return str(row["entry_context_label"])
+    labels = {
+        "risk_off": "环境向下/强风险",
+        "weak_breadth": "市场广度弱",
+        "not_warmed": "震荡但未回暖",
+        "warming": "回暖观察",
+        "neutral": "环境中性",
+        "unknown": "未知",
+    }
+    return labels.get(str(value or "unknown"), str(value or "未知"))
+
+
+def _short_term_trade_context_label_for_bucket(value: Any, rows: list[dict[str, Any]]) -> str:
+    for row in rows:
+        if row.get("short_term_trade_context_label"):
+            return str(row["short_term_trade_context_label"])
+    labels = {
+        "defensive_tide": "退潮防守",
+        "failed_slot_replacement": "卖早且替换差",
+        "failed_launch_cut": "假启动止损",
+        "trend_profit_giveback": "趋势浮盈回吐",
+        "warming_follow_through": "回暖后资金跟随",
+        "divergence_low_suction": "分歧低吸观察",
+        "mainline_active": "主线活跃",
+        "follow_through": "买后承接",
+        "neutral_rotation": "震荡轮动",
+        "unknown": "未知",
+    }
+    return labels.get(str(value or "unknown"), str(value or "未知"))
+
+
+def _market_mainline_trade_context_label_for_bucket(value: Any, rows: list[dict[str, Any]]) -> str:
+    for row in rows:
+        if row.get("market_mainline_trade_context_label"):
+            return str(row["market_mainline_trade_context_label"])
+    labels = {
+        "risk_off": "退潮/弱市防守",
+        "mainline_pullback": "主线分歧回踩",
+        "mainline_active": "窄牛主线活跃",
+        "rotation_theme_candidate": "震荡轮动主线候选",
+        "rotation_low_suction_watch": "震荡低吸观察",
+        "isolated_strength": "弱市独立强票",
+        "market_follow_through": "买后承接验证",
+        "unknown_mainline": "主线未知/普通轮动",
+        "unknown": "未知",
+    }
+    return labels.get(str(value or "unknown"), str(value or "未知"))
+
+
+def _entry_launch_diagnostic_label_for_bucket(value: Any, rows: list[dict[str, Any]]) -> str:
+    for row in rows:
+        if row.get("entry_launch_diagnostic_label"):
+            return str(row["entry_launch_diagnostic_label"])
+    labels = {
+        "failed_launch": "启动后立即失败",
+        "early_dragon_risk": "经典龙回头偏早",
+        "low_suction_followed": "低吸启动后有跟随",
+        "low_suction_unfollowed": "低吸启动未见承接",
+        "low_suction_waiting": "低吸蓄势仍在等待",
+        "followed": "买后资金跟随",
+        "weak_followed": "买后弱跟随",
+        "watch": "启动质量观察",
+        "unknown": "未知",
+    }
+    return labels.get(str(value or "unknown"), str(value or "未知"))
+
+
+def _fund_flow_coverage_label_for_bucket(value: Any, rows: list[dict[str, Any]]) -> str:
+    for row in rows:
+        if row.get("fund_flow_coverage_label"):
+            return str(row["fund_flow_coverage_label"])
+    labels = {
+        "market_fund_flow": "市场资金流可用",
+        "partial_stock_fund_flow": "局部个股资金流",
+        "available": "资金流可用",
+        "missing": "资金流数据不足",
+        "unknown": "未知",
+    }
+    return labels.get(str(value or "unknown"), str(value or "未知"))
+
+
+def _replacement_outcome_label_for_bucket(value: Any, rows: list[dict[str, Any]]) -> str:
+    for row in rows:
+        if row.get("replacement_outcome_label"):
+            return str(row["replacement_outcome_label"])
+    labels = {
+        "no_replacement": "未释放到后续买入",
+        "open_replacement": "替换持仓未闭合",
+        "strong_replacement": "替换买入强盈利",
+        "profitable_replacement": "替换买入盈利",
+        "weak_replacement": "替换买入弱表现",
+        "bad_replacement": "替换买入亏损",
+        "unknown": "未知",
+    }
+    return labels.get(str(value or "unknown"), str(value or "未知"))
 
 
 def low_suction_start_factor_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -980,8 +2282,7 @@ def backtest_top_candidate_audit(
                     schema.quant_recommendations.c.trade_date <= run["end_date"],
                     schema.quant_recommendations.c.strategy_id == strategy_id,
                     schema.quant_recommendations.c.strategy_version == strategy_version,
-                    schema.quant_recommendations.c.action == "BUY",
-                    schema.quant_recommendations.c.rank <= max(top_limit * 2, top_limit + 10),
+                    schema.quant_recommendations.c.rank <= max(top_limit * 3, top_limit + 20),
                 )
             )
             .order_by(schema.quant_recommendations.c.trade_date, schema.quant_recommendations.c.rank, schema.quant_recommendations.c.vt_symbol)
@@ -991,7 +2292,11 @@ def backtest_top_candidate_audit(
             .where(schema.backtest_trades.c.backtest_id == backtest_id)
             .order_by(schema.backtest_trades.c.trade_date, schema.backtest_trades.c.id)
         ).mappings().all()
-        recommendation_dicts = [dict(row) for row in recommendation_rows]
+        recommendation_dicts = [
+            row
+            for row in (_recommendation_read_view(dict(row)) for row in recommendation_rows)
+            if str(row.get("action") or "").upper() == "BUY"
+        ]
         trade_dicts = [dict(row) for row in trade_rows]
         entry_dates = [_as_date(row.get("trade_date")) for row in recommendation_dicts]
         entry_dates = [day for day in entry_dates if day is not None]
@@ -1070,6 +2375,30 @@ def _future_daily_bars_for_trades(
         .where(schema.stock_daily_bars.c.vt_symbol.in_(symbols))
         .where(schema.stock_daily_bars.c.trade_date > min(sell_dates))
         .where(schema.stock_daily_bars.c.trade_date <= max(sell_dates) + timedelta(days=lookahead_days + 7))
+        .order_by(schema.stock_daily_bars.c.vt_symbol, schema.stock_daily_bars.c.trade_date)
+    ).mappings().all()
+    return [to_api(dict(row)) for row in rows]
+
+
+def _daily_bars_for_trade_paths(
+    session: Any,
+    schema: Any,
+    trades: list[dict[str, Any]],
+    *,
+    to_api: ApiMapper,
+) -> list[dict[str, Any]]:
+    sell_trades = [trade for trade in trades if str(trade.get("side") or "").upper() == "SELL"]
+    if not sell_trades:
+        return []
+    symbols = sorted({str(trade.get("vt_symbol") or "") for trade in sell_trades if trade.get("vt_symbol")})
+    sell_dates = [parsed for trade in sell_trades if (parsed := _as_date(trade.get("trade_date")))]
+    if not symbols or not sell_dates:
+        return []
+    rows = session.execute(
+        select(schema.stock_daily_bars)
+        .where(schema.stock_daily_bars.c.vt_symbol.in_(symbols))
+        .where(schema.stock_daily_bars.c.trade_date >= min(sell_dates) - timedelta(days=30))
+        .where(schema.stock_daily_bars.c.trade_date <= max(sell_dates))
         .order_by(schema.stock_daily_bars.c.vt_symbol, schema.stock_daily_bars.c.trade_date)
     ).mappings().all()
     return [to_api(dict(row)) for row in rows]
@@ -1614,6 +2943,11 @@ def _ratio(numerator: int | float, denominator: int | float) -> float | None:
     return float(numerator) / float(denominator) if denominator else None
 
 
+def _pct_ratio(numerator: int | float, denominator: int | float) -> float | None:
+    ratio = _ratio(numerator, denominator)
+    return ratio * 100 if ratio is not None else None
+
+
 def _rate(values) -> float | None:
     parsed = [bool(value) for value in values]
     return sum(1 for value in parsed if value) / len(parsed) * 100 if parsed else None
@@ -1680,7 +3014,7 @@ def _attribution_row(
     min_floating_pnl = _min_number(row.get("floating_pnl") for row in path)
     max_floating_pnl_pct = _max_number(row.get("floating_pnl_pct") for row in path)
     min_floating_pnl_pct = _min_number(row.get("floating_pnl_pct") for row in path)
-    entry_raw = entry.get("raw") if isinstance((entry or {}).get("raw"), dict) else {}
+    entry_raw = _entry_raw_payload(entry)
     execution = entry_raw.get("execution") if isinstance(entry_raw.get("execution"), dict) else {}
     entry_score = _entry_raw_number(entry_raw, "entry_total_score", "total_score")
     low_suction_days = _entry_raw_number(entry_raw, "low_suction_days")
@@ -1756,6 +3090,46 @@ def _entry_raw_number(raw: dict[str, Any], *keys: str) -> float | None:
         except (TypeError, ValueError):
             continue
     return None
+
+
+def _entry_raw_payload(entry: dict[str, Any] | None) -> dict[str, Any]:
+    if not entry or not isinstance(entry.get("raw"), dict):
+        return {}
+    raw = dict(entry.get("raw") or {})
+    evidence = raw.get("evidence") if isinstance(raw.get("evidence"), dict) else {}
+    if evidence:
+        merged = dict(evidence)
+        merged.update(raw)
+        return _enrich_entry_raw_payload(merged)
+    return _enrich_entry_raw_payload(raw)
+
+
+def _entry_enriched_api_row(row: dict[str, Any], to_api: ApiMapper) -> dict[str, Any]:
+    item = to_api(row)
+    if isinstance(item.get("raw"), dict):
+        item["raw"] = _enrich_entry_raw_payload(dict(item["raw"]))
+    return item
+
+
+def _enrich_entry_raw_payload(raw: dict[str, Any]) -> dict[str, Any]:
+    if "early_dragon_pullback_risk" in raw:
+        return raw
+    setup = str(raw.get("entry_setup") or raw.get("setup_type") or "")
+    low_suction_days = _entry_raw_number(raw, "low_suction_days") or 0.0
+    ma_convergence = _entry_raw_number(raw, "ma_convergence_pct")
+    latest_change = _entry_raw_number(raw, "latest_change_pct")
+    close_location = _entry_raw_number(raw, "close_location_in_range")
+    raw["early_dragon_pullback_risk"] = bool(
+        setup == "dragon_pullback"
+        and low_suction_days <= 0
+        and ma_convergence is not None
+        and ma_convergence >= 18.0
+        and latest_change is not None
+        and latest_change >= 1.0
+        and close_location is not None
+        and close_location >= 0.55
+    )
+    return raw
 
 
 def _safe_float(value: Any) -> float | None:
@@ -1847,6 +3221,17 @@ def candidate_trace_rows(
             )
             .order_by(desc(schema.backtest_signal_events.c.score), schema.backtest_signal_events.c.vt_symbol, schema.backtest_signal_events.c.id)
         ).mappings().all()
+        target_theoretical_signal_rows = session.execute(
+            select(schema.backtest_signal_events)
+            .where(
+                and_(
+                    schema.backtest_signal_events.c.backtest_id == backtest_id,
+                    schema.backtest_signal_events.c.vt_symbol == symbol,
+                    schema.backtest_signal_events.c.signal_date <= signal_date,
+                )
+            )
+            .order_by(schema.backtest_signal_events.c.signal_date, schema.backtest_signal_events.c.trade_date, schema.backtest_signal_events.c.id)
+        ).mappings().all()
         signal_bounds = session.execute(
             select(
                 func.min(schema.backtest_signal_events.c.signal_date).label("first_signal_date"),
@@ -1924,6 +3309,16 @@ def candidate_trace_rows(
             .order_by(schema.backtest_daily_positions.c.trade_date)
             .limit(20)
         ).mappings().all()
+        target_real_position = session.execute(
+            select(schema.backtest_daily_positions)
+            .where(
+                and_(
+                    schema.backtest_daily_positions.c.backtest_id == backtest_id,
+                    schema.backtest_daily_positions.c.vt_symbol == symbol,
+                    schema.backtest_daily_positions.c.trade_date == signal_date,
+                )
+            )
+        ).mappings().first()
         universe_context = _universe_context(
             session,
             schema,
@@ -1932,7 +3327,10 @@ def candidate_trace_rows(
             board_payload,
         )
         planned_dicts = [dict(row) for row in same_day_signal_rows]
-        recommendation_dicts = [dict(row) for row in same_day_recommendations]
+        target_theoretical_dicts = [dict(row) for row in target_theoretical_signal_rows]
+        recommendation_dicts = [_recommendation_read_view(dict(row)) for row in same_day_recommendations]
+        recommendation_dict = _recommendation_read_view(dict(recommendation)) if recommendation else None
+        theoretical_position_context = _theoretical_position_context(symbol, target_theoretical_dicts, signal_date)
         stock_names = load_stock_names(session, _symbols_from_many([{"vt_symbol": symbol}], planned_dicts, recommendation_dicts))
 
     return {
@@ -1941,7 +3339,7 @@ def candidate_trace_rows(
         "vt_symbol": symbol,
         "signal_date": signal_date,
         "run": dict(run),
-        "recommendation": dict(recommendation) if recommendation else None,
+        "recommendation": recommendation_dict,
         "signal_rows": [dict(row) for row in signal_rows],
         "order_rows": [dict(row) for row in order_rows],
         "trade_rows": [dict(row) for row in trade_rows],
@@ -1953,11 +3351,13 @@ def candidate_trace_rows(
             run_params=run_params,
             symbol=symbol,
             signal_date=signal_date,
-            recommendation=dict(recommendation) if recommendation else None,
+            recommendation=recommendation_dict,
             same_day_recommendations=recommendation_dicts,
             same_day_signal_rows=planned_dicts,
             signal_bounds=dict(signal_bounds) if signal_bounds else {},
             universe_context=universe_context,
+            theoretical_position_context=theoretical_position_context,
+            target_real_position=dict(target_real_position) if target_real_position else None,
             stock_names=stock_names,
         ),
     }
@@ -2028,6 +3428,8 @@ def _not_planned_context(
     same_day_signal_rows: list[dict[str, Any]],
     signal_bounds: dict[str, Any],
     universe_context: dict[str, Any],
+    theoretical_position_context: dict[str, Any],
+    target_real_position: dict[str, Any] | None,
     stock_names: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     buy_recommendations = [row for row in same_day_recommendations if str(row.get("action") or "").upper() == "BUY"]
@@ -2075,6 +3477,10 @@ def _not_planned_context(
         "target_raw_signal_rank": target_execution.get("raw_signal_rank"),
         "target_execution_candidate_rank": target_execution.get("execution_candidate_rank"),
         "target_execution_candidate_selected": target_execution.get("execution_candidate_selected"),
+        "target_theoretical_held_on_signal_date": bool(theoretical_position_context.get("held")),
+        "target_theoretical_entry_date": theoretical_position_context.get("entry_date"),
+        "target_real_held_on_signal_date": bool(target_real_position),
+        "target_real_entry_date": _as_iso((target_real_position or {}).get("entry_date")),
         "target_exceeds_candidate_limit": (
             (
                 target_execution.get("execution_candidate_selected") is False
@@ -2094,6 +3500,33 @@ def _not_planned_context(
         "planned_buy_symbols": _top_signal_context(buy_signals, stock_names),
         "target_symbol": symbol,
     }
+
+
+def _theoretical_position_context(symbol: str, same_day_signal_rows: list[dict[str, Any]], signal_date: date) -> dict[str, Any]:
+    """Infer whether the theoretical signal ledger already holds the target."""
+
+    events = [
+        row
+        for row in same_day_signal_rows
+        if str(row.get("vt_symbol") or "") == symbol
+        and (_as_date(row.get("trade_date") or row.get("execute_date") or row.get("signal_date")) or date.min) <= signal_date
+    ]
+    events.sort(key=lambda row: (_as_date(row.get("signal_date")) or date.min, _as_date(row.get("trade_date")) or date.min, int(row.get("id") or 0)))
+    entry_date = None
+    held = False
+    for row in events:
+        side = str(row.get("side") or "").upper()
+        raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+        status = str(raw.get("status") or row.get("plan_status") or "filled")
+        if status not in {"filled", "", "planned"}:
+            continue
+        if side == "BUY":
+            held = True
+            entry_date = _as_iso(row.get("trade_date") or row.get("execute_date") or row.get("signal_date"))
+        elif side == "SELL":
+            held = False
+            entry_date = None
+    return {"held": held, "entry_date": entry_date}
 
 
 def _target_signal_context(symbol: str, buy_signals: list[dict[str, Any]]) -> tuple[int | None, dict[str, Any] | None]:
@@ -2181,6 +3614,10 @@ def _top_signal_context(rows: list[dict[str, Any]], stock_names: dict[str, dict[
             }
         )
     return result
+
+
+def _recommendation_read_view(row: dict[str, Any]) -> dict[str, Any]:
+    return screening_payloads.recommendation_row_to_api(row)
 
 
 def _symbols_from_many(*row_groups: list[dict[str, Any]]) -> list[str]:
@@ -2289,6 +3726,11 @@ def reason_label(reason: Any) -> str | None:
         return None
     labels = {
         "entry_signal": "买入信号",
+        "support_stop": "支撑止损",
+        "trend_break": "趋势破位",
+        "trend_trailing_stop": "趋势回撤",
+        "time_efficiency_stop": "时间效率",
+        "mid_profit_giveback_stop": "中段浮盈回撤",
         "stop_loss": "止损",
         "take_profit": "止盈",
         "trailing_stop": "移动止盈/回撤止损",

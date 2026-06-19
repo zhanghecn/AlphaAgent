@@ -28,6 +28,7 @@ from alphaagent.server.services.backtest.engine import (
     backtest_path_diagnostics,
     backtest_report,
     backtest_report_csv,
+    backtest_setup_market_exit_audit,
     backtest_symbol_detail,
     backtest_top_candidate_audit,
     backtest_trade_attribution,
@@ -330,6 +331,17 @@ def get_low_suction_start_factor_audit(
         return _service_error(exc)
 
 
+@router.get("/{backtest_id}/setup-market-exit-audit")
+def get_setup_market_exit_audit(
+    backtest_id: int,
+    lookahead_days: int = Query(default=10, ge=1, le=30),
+):
+    try:
+        return ok(backtest_setup_market_exit_audit(backtest_id, lookahead_days=lookahead_days))
+    except Exception as exc:
+        return _service_error(exc)
+
+
 @router.get("/{backtest_id}/top-candidate-audit")
 def get_top_candidate_audit(backtest_id: int, top_n: int = Query(default=10, ge=1, le=100)):
     try:
@@ -468,6 +480,27 @@ def _params_from_payload(payload: dict[str, Any]) -> BacktestParams:
         rotation_min_score_gap=float(payload.get("rotation_min_score_gap") or 8.0),
         rotation_max_holding_return_pct=float(payload.get("rotation_max_holding_return_pct") or 3.0),
         rotation_min_holding_days=int(payload.get("rotation_min_holding_days") or 3),
+        require_low_suction_launch_confirmation=_parse_bool(payload.get("require_low_suction_launch_confirmation"), default=False),
+        exclude_repeated_dragon_pullback=_parse_bool(payload.get("exclude_repeated_dragon_pullback"), default=False),
+        require_low_suction_launch_for_low_suction_context=_parse_bool(
+            payload.get("require_low_suction_launch_for_low_suction_context"),
+            default=False,
+        ),
+        require_balanced_low_suction_launch_quality=_parse_bool(
+            payload.get("require_balanced_low_suction_launch_quality"),
+            default=False,
+        ),
+        enable_entry_launch_quality_score=_parse_bool(payload.get("enable_entry_launch_quality_score"), default=False),
+        enable_entry_launch_risk_penalty=_parse_bool(payload.get("enable_entry_launch_risk_penalty"), default=False),
+        enable_low_suction_market_risk_penalty=_parse_bool(
+            payload.get("enable_low_suction_market_risk_penalty"),
+            default=False,
+        ),
+        enable_failed_launch_exit_stop=_parse_bool(payload.get("enable_failed_launch_exit_stop"), default=False),
+        enable_mid_profit_giveback_stop=_parse_bool(payload.get("enable_mid_profit_giveback_stop"), default=False),
+        mid_profit_giveback_min_high_gain_pct=float(payload.get("mid_profit_giveback_min_high_gain_pct") or 0.10),
+        mid_profit_giveback_max_current_gain_pct=float(payload.get("mid_profit_giveback_max_current_gain_pct") or 0.04),
+        mid_profit_giveback_drawdown_pct=float(payload.get("mid_profit_giveback_drawdown_pct") or 0.07),
         symbols=_parse_symbols(payload.get("symbols") or payload.get("vt_symbols") or payload.get("vt_symbol")),
         included_boards=normalize_included_boards(payload.get("included_boards")),
         persist=bool(payload.get("persist") or False),

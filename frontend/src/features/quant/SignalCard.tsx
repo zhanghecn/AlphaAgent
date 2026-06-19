@@ -4,6 +4,8 @@ import type { BacktestTrade } from "@/api/quant";
 export interface SignalCardProps {
   trade: BacktestTrade;
   isHighlighted?: boolean;
+  /** 新信号：mount 时触发一次扫光高亮（CSS animation 默认只跑一次） */
+  isNew?: boolean;
   onClick?: (trade: BacktestTrade) => void;
 }
 
@@ -12,14 +14,14 @@ export interface SignalCardProps {
  * - Buy: red left border (红涨)
  * - Sell: green left border (绿跌)
  */
-export function SignalCard({ trade, isHighlighted, onClick }: SignalCardProps) {
+export function SignalCard({ trade, isHighlighted, isNew, onClick }: SignalCardProps) {
   const isBuy = trade.side === "BUY";
 
   return (
     <button
       type="button"
       className={cn(
-        "w-full rounded-lg border border-l-4 p-3 text-left text-sm transition-shadow hover:shadow-md",
+        "relative w-full overflow-hidden rounded-lg border border-l-4 p-3 text-left text-sm transition-shadow hover:shadow-md",
         isBuy ? "border-l-red-500" : "border-l-green-500",
         isHighlighted && "ring-2 ring-primary",
       )}
@@ -44,6 +46,10 @@ export function SignalCard({ trade, isHighlighted, onClick }: SignalCardProps) {
       </div>
       {trade.reason && (
         <div className="mt-1.5 truncate text-xs text-muted-foreground">{trade.reason}</div>
+      )}
+      {/* 新信号扫光：半透明白光自左向右掠过一次，pointer-events-none 不挡点击 */}
+      {isNew && (
+        <span className="pointer-events-none absolute inset-0 animate-sweep-shine bg-gradient-sweep" />
       )}
     </button>
   );

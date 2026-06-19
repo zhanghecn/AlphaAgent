@@ -5,6 +5,7 @@ import { CardSkeleton } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { formatPrice, formatPct, formatAmount, priceColorClass } from "@/lib/utils";
+import { CountUp, KpiNumber, StaggerList, StaggerItem } from "@/components/motion";
 import { Badge } from "@/components/ui/badge";
 import { ArrowRight, TrendingUp, TrendingDown, Minus } from "lucide-react";
 import type { IndexQuote, StockQuote } from "@/api/types";
@@ -39,23 +40,30 @@ function IndexCard({ quote }: { quote: IndexQuote }) {
   return (
     <Link
       to={`/indices/${quote.vt_symbol}`}
-      className="flex items-center gap-4 rounded-lg border p-4 transition-colors hover:bg-muted/50"
+      className="flex h-full items-center gap-4 rounded-lg border p-4 transition-colors hover:bg-muted/50"
     >
       <Icon size={20} className={colorClass} />
       <div className="min-w-0 flex-1">
         <p className="text-sm font-medium text-muted-foreground truncate">
           {quote.name}
         </p>
-        <p className={`text-xl font-bold tabular-nums ${colorClass}`}>
-          {formatPrice(quote.last_price)}
-        </p>
+        {/* 指数点位：CountUp 滚动 + display 字体 */}
+        <CountUp
+          value={quote.last_price ?? 0}
+          format="price"
+          className={`font-display block text-xl font-bold ${colorClass}`}
+        />
       </div>
       <div className="text-right space-y-1">
-        <p className={`text-sm tabular-nums ${colorClass}`}>
-          {formatPct(quote.change_pct)}
-        </p>
+        {/* 涨跌幅：滚动 + 涨跌脉冲 */}
+        <KpiNumber
+          value={quote.change_pct}
+          format="pct"
+          pulse
+          className={`text-sm font-semibold ${colorClass}`}
+        />
         <p className="text-xs text-muted-foreground tabular-nums">
-          成交额 {formatAmount(quote.turnover)}
+          成交额 <CountUp value={quote.turnover ?? 0} format="amount" />
         </p>
       </div>
       <ArrowRight size={16} className="text-muted-foreground" />
@@ -69,7 +77,7 @@ function ActiveStockTable({ items }: { items: StockQuote[] }) {
   return (
     <section className="space-y-3">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium">活跃 A 股</h3>
+        <h3 className="font-display text-sm font-medium">活跃 A 股</h3>
         <Link to="/stocks" className="text-xs text-muted-foreground hover:text-foreground">
           查看全部
         </Link>
@@ -161,11 +169,14 @@ export function IndexStrip() {
           </span>
         )}
       </div>
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      {/* 指数卡片：逐张错峰进入 */}
+      <StaggerList className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4" staggerDelay={0.08}>
         {data.indices.map((idx) => (
-          <IndexCard key={idx.vt_symbol} quote={idx} />
+          <StaggerItem key={idx.vt_symbol}>
+            <IndexCard quote={idx} />
+          </StaggerItem>
         ))}
-      </div>
+      </StaggerList>
       <ActiveStockTable items={data.active_stocks ?? []} />
     </div>
   );

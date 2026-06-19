@@ -903,6 +903,18 @@ def _params_to_json(params: BacktestParams) -> dict[str, Any]:
         "rotation_min_score_gap": params.rotation_min_score_gap,
         "rotation_max_holding_return_pct": params.rotation_max_holding_return_pct,
         "rotation_min_holding_days": params.rotation_min_holding_days,
+        "require_low_suction_launch_confirmation": params.require_low_suction_launch_confirmation,
+        "exclude_repeated_dragon_pullback": params.exclude_repeated_dragon_pullback,
+        "require_low_suction_launch_for_low_suction_context": params.require_low_suction_launch_for_low_suction_context,
+        "require_balanced_low_suction_launch_quality": params.require_balanced_low_suction_launch_quality,
+        "enable_entry_launch_quality_score": params.enable_entry_launch_quality_score,
+        "enable_entry_launch_risk_penalty": params.enable_entry_launch_risk_penalty,
+        "enable_low_suction_market_risk_penalty": params.enable_low_suction_market_risk_penalty,
+        "enable_failed_launch_exit_stop": params.enable_failed_launch_exit_stop,
+        "enable_mid_profit_giveback_stop": params.enable_mid_profit_giveback_stop,
+        "mid_profit_giveback_min_high_gain_pct": params.mid_profit_giveback_min_high_gain_pct,
+        "mid_profit_giveback_max_current_gain_pct": params.mid_profit_giveback_max_current_gain_pct,
+        "mid_profit_giveback_drawdown_pct": params.mid_profit_giveback_drawdown_pct,
         "included_boards": list(params.included_boards),
     }
     if params.execution_model in {"tail_close_hybrid", "strict_1430"}:

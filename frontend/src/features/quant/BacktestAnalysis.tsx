@@ -233,7 +233,7 @@ export function BacktestMarketAuditPanel({
   const observationExcludingStrong = observation?.excluding_strong_summary;
   const sourceText = formatBenchmarkSources(summary?.benchmark_sources);
   const dynamicSourceText = formatDynamicMarketSources(summary?.dynamic_market_sources);
-  const hasAnalysis = yearlyRows.length > 0 || Boolean(regimeAnalysis?.periods?.length) || Boolean(summary);
+  const hasAnalysis = yearlyRows.length > 0 || Boolean(regimeAnalysis?.periods?.length) || Boolean(summary) || Boolean(report?.data_quality);
 
   if (!hasAnalysis && !isTopCandidateAuditLoading) return null;
 
@@ -270,6 +270,10 @@ export function BacktestMarketAuditPanel({
         </div>
       )}
 
+      {report?.data_quality || summary ? (
+        <MarketDataCoveragePanel data={report?.data_quality} dynamicSourceText={dynamicSourceText} />
+      ) : null}
+
       {summary?.dynamic_market_buckets?.length ? (
         <DynamicMarketBucketTable title="前10候选按动态市场画像" rows={summary.dynamic_market_buckets} />
       ) : null}
@@ -293,6 +297,36 @@ export function BacktestMarketAuditPanel({
           : `${topCandidateAudit?.note ?? "候选审计未加载。"} ${observation?.method ?? ""}`}
         {sourceText ? ` 大盘基准来源：${sourceText}。` : ""}
         {dynamicSourceText ? ` 动态画像来源：${dynamicSourceText}。` : ""}
+      </div>
+    </div>
+  );
+}
+
+function MarketDataCoveragePanel({
+  data,
+  dynamicSourceText,
+}: {
+  data?: Awaited<ReturnType<typeof fetchBacktestReport>>["data_quality"];
+  dynamicSourceText: string;
+}) {
+  const dailyBars = qualityItem(data, "stock_daily_bars");
+  const sectorFlows = qualityItem(data, "sector_fund_flows");
+  const stockFlows = qualityItem(data, "stock_fund_flows");
+  const sectorScores = qualityItem(data, "sector_period_scores");
+  const fundFlowStatus = marketFundFlowCoverageStatus(sectorFlows, stockFlows);
+  return (
+    <div className="rounded-md border bg-muted/20 p-3 text-sm">
+      <div className="font-medium">行情数据覆盖</div>
+      <div className="mt-3 grid gap-3 md:grid-cols-4">
+        <InfoCell label="动态画像来源" value={dynamicSourceText || "--"} />
+        <InfoCell label="指数/日线覆盖" value={qualityRangeText(dailyBars)} />
+        <InfoCell label="板块资金流" value={qualityRangeText(sectorFlows)} />
+        <InfoCell label="个股资金流" value={qualityRangeText(stockFlows)} />
+        <InfoCell label="板块评分" value={qualityRangeText(sectorScores)} />
+        <InfoCell label="资金流可信度" value={fundFlowStatus.label} />
+      </div>
+      <div className="mt-3 text-xs leading-6 text-muted-foreground">
+        {fundFlowStatus.note}
       </div>
     </div>
   );
@@ -707,7 +741,16 @@ export function BacktestDataQuality({
   data?: Awaited<ReturnType<typeof fetchBacktestReport>>["data_quality"];
   limitations: string[];
 }) {
-  const tableNames = ["stocks", "stock_daily_bars", "stock_financial_reports", "sector_period_scores", "stock_fund_flows", "stock_hot_ranks", "stock_lhb_records"];
+  const tableNames = [
+    "stocks",
+    "stock_daily_bars",
+    "stock_financial_reports",
+    "sector_period_scores",
+    "sector_fund_flows",
+    "stock_fund_flows",
+    "stock_hot_ranks",
+    "stock_lhb_records",
+  ];
   const dailyBars = data?.stock_daily_bars;
   const financialReports = data?.stock_financial_reports;
   const turnoverCoverage = !Array.isArray(dailyBars) ? numberValue(dailyBars?.turnover_coverage_pct) : undefined;
@@ -745,6 +788,48 @@ function numberValue(value: unknown): number | undefined {
     return Number.isFinite(parsed) ? parsed : undefined;
   }
   return undefined;
+}
+
+function qualityItem(
+  data: Awaited<ReturnType<typeof fetchBacktestReport>>["data_quality"] | undefined,
+  key: string
+): { count?: number; min_date?: string | null; max_date?: string | null } | undefined {
+  const item = data?.[key];
+  if (!item || Array.isArray(item)) return undefined;
+  return {
+    count: numberValue(item.count),
+    min_date: typeof item.min_date === "string" ? item.min_date : null,
+    max_date: typeof item.max_date === "string" ? item.max_date : null,
+  };
+}
+
+function qualityRangeText(item?: { count?: number; min_date?: string | null; max_date?: string | null }) {
+  const count = item?.count ?? 0;
+  if (!count) return "无数据";
+  const range = item?.min_date && item?.max_date ? `${item.min_date} 至 ${item.max_date}` : "日期未知";
+  return `${count.toLocaleString()} / ${range}`;
+}
+
+function marketFundFlowCoverageStatus(
+  sectorFlows?: { count?: number; min_date?: string | null; max_date?: string | null },
+  stockFlows?: { count?: number; min_date?: string | null; max_date?: string | null }
+) {
+  if ((sectorFlows?.count ?? 0) > 0) {
+    return {
+      label: "可用",
+      note: "板块资金流可用于市场资金状态和风险等级；资金回流/连续流出标签可以作为行情审计依据。",
+    };
+  }
+  if ((stockFlows?.count ?? 0) > 0) {
+    return {
+      label: "局部参考",
+      note: "当前没有板块资金流，只有个股资金流局部榜单。系统会标记为局部资金流，不能把它当成全市场资金流或行业主线资金。",
+    };
+  }
+  return {
+    label: "资金未知",
+    note: "当前缺少可用资金流数据，市场状态主要来自指数、宽度和板块热度；不要把资金未知解释为资金正常。",
+  };
 }
 
 function VerdictLine({ label, text }: { label: string; text: string }) {

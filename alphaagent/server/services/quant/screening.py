@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any, Callable
 
 from sqlalchemy import and_, desc, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from alphaagent.market.boards import DEFAULT_QUANT_INCLUDED_BOARDS, normalize_included_boards, stock_board_payload
 from alphaagent.server.db import schema
@@ -19,13 +20,15 @@ from alphaagent.server.services.quant.factors import (
     Bar,
     SignalScore,
 )
-from alphaagent.server.services.quant import candidate_lanes
+from alphaagent.server.services.quant import candidate_lanes, market_context
 from alphaagent.server.services.quant import screening_loaders, screening_payloads, screening_persistence
 from alphaagent.server.services.quant.financials import financial_coverage_summary
 from alphaagent.server.services.quant.strategy_registry import get_strategy, score_strategy
 
 
 DEFAULT_RECOMMENDATION_LIMIT = 20
+TAIL_PREVIEW_DATA_SOURCE = "intraday_snapshot_temp_bar"
+MIN_COMPLETE_DAILY_SYMBOL_COUNT = 3000
 
 
 @dataclass(frozen=True)
@@ -84,6 +87,7 @@ def screen_stocks(
             bars_by_symbol = _load_bars(session, symbols, as_of, lookback_days=160)
             bar_dates_by_symbol = _bar_dates_by_symbol(bars_by_symbol)
         index_return_20d = _load_index_return_20d(session, as_of)
+        market_payload = market_context.market_context_for_date(session, schema, as_of)
         sector_scores = _load_sector_scores(session, symbols, as_of)
         financial_scores = _load_financial_scores(session, symbols, as_of)
         fund_flow_scores = _load_fund_flow_scores(session, symbols, as_of)
@@ -115,6 +119,7 @@ def screen_stocks(
             if score.evidence.get("status") == "ready":
                 # 信号日收盘价随 evidence 存储，供买卖计划预算与单股回测复用（免重算）
                 score.evidence["close_price"] = float(bars[-1].close_price)
+                _attach_market_context(score, market_payload)
                 scored.append(score)
 
         scored.sort(key=lambda item: (-item.total_score, item.vt_symbol))
@@ -155,6 +160,326 @@ def screen_stocks(
 
 
 _SCREEN_STOCKS_IMPL = screen_stocks
+
+
+def screen_tail_preview(
+    trade_date: date | None = None,
+    *,
+    strategy_id: str = STRATEGY_ID,
+    max_symbols: int = 5000,
+    recommendation_limit: int = 100,
+    min_recommendation_score: float = 60.0,
+    included_boards: list[str] | tuple[str, ...] | str | None = None,
+) -> dict[str, Any]:
+    """Score today's tail candidates from complete daily bars plus live snapshot prices.
+
+    This is intentionally read-only. It does not persist quant_signal_runs, does not
+    sync the portfolio candidate group, and must not be used by historical backtests.
+    """
+
+    strategy = get_strategy(strategy_id)
+    if strategy is None:
+        return {"status": "unsupported_strategy", "strategy_id": strategy_id, "items": [], "recommendations": []}
+    if not is_database_configured():
+        return {"status": "unavailable", "message": "DATABASE_URL not configured", "items": [], "recommendations": []}
+    _ensure_quant_schema()
+
+    with session_scope() as session:
+        latest_daily_date = _latest_trade_date(session)
+        base_daily_date = _latest_complete_trade_date(session) or latest_daily_date
+        snapshot_updated_at = _latest_snapshot_updated_at(session)
+        snapshot_trade_time = _latest_snapshot_trade_time(session)
+        as_of = trade_date or _date_from_datetime(snapshot_updated_at)
+        as_of_daily_symbol_count = _daily_symbol_count(session, as_of) if as_of else 0
+        if base_daily_date is None:
+            return {"status": "empty", "message": "stock_daily_bars is empty", "items": [], "recommendations": []}
+        if as_of is None:
+            return {"status": "empty", "message": "intraday snapshot is empty", "items": [], "recommendations": []}
+        if as_of <= base_daily_date and as_of_daily_symbol_count >= MIN_COMPLETE_DAILY_SYMBOL_COUNT:
+            return {
+                "status": "complete_daily_available",
+                "message": "完整日线已覆盖该日期，请使用历史候选。",
+                "strategy_id": strategy.id,
+                "strategy_version": strategy.version,
+                "trade_date": as_of.isoformat(),
+                "base_daily_date": base_daily_date.isoformat(),
+                "items": [],
+                "recommendations": [],
+                "total": 0,
+                "recommendation_count": 0,
+            }
+
+        boards = normalize_included_boards(included_boards)
+        stock_rows = _load_stock_universe(session, max_symbols, boards)
+        symbols = [str(row["vt_symbol"]) for row in stock_rows]
+        bars_by_symbol = _load_bars(session, symbols, base_daily_date, lookback_days=160)
+        bar_dates_by_symbol = _bar_dates_by_symbol(bars_by_symbol)
+        intraday_bars = _load_intraday_temp_bars(session, symbols, as_of)
+        index_return_20d = _load_index_return_20d(session, base_daily_date)
+        market_payload = market_context.market_context_for_date(session, schema, base_daily_date)
+        sector_scores = _load_sector_scores(session, symbols, base_daily_date)
+        financial_scores = _load_financial_scores(session, symbols, base_daily_date)
+        fund_flow_scores = _load_fund_flow_scores(session, symbols, base_daily_date)
+        hot_rank_scores = _load_hot_rank_scores(session, symbols, base_daily_date)
+        lhb_scores = _load_lhb_scores(session, symbols, base_daily_date)
+
+        stock_meta = {str(row["vt_symbol"]): dict(row) for row in stock_rows}
+        scored: list[SignalScore] = []
+        snapshot_price_count = 0
+        intraday_bar_count = 0
+        for vt_symbol in symbols:
+            stock = stock_meta.get(vt_symbol) or {}
+            base_bars = _visible_bars_for_date(
+                bars_by_symbol.get(vt_symbol, []),
+                bar_dates_by_symbol.get(vt_symbol, []),
+                base_daily_date,
+            )
+            if not base_bars:
+                continue
+            temp_bar = intraday_bars.get(vt_symbol) or _snapshot_temp_bar(stock, as_of, base_bars[-1])
+            if temp_bar is None:
+                continue
+            if vt_symbol in intraday_bars:
+                intraday_bar_count += 1
+            else:
+                snapshot_price_count += 1
+            bars = [*base_bars, temp_bar]
+            score = score_strategy(
+                strategy.id,
+                vt_symbol,
+                bars,
+                as_of,
+                index_return_20d=index_return_20d,
+                sector_score=sector_scores.get(vt_symbol),
+                financial_score=financial_scores.get(vt_symbol),
+                fund_flow_score=fund_flow_scores.get(vt_symbol),
+                hot_rank_score=hot_rank_scores.get(vt_symbol),
+                lhb_score=lhb_scores.get(vt_symbol),
+            )
+            if score.evidence.get("status") == "ready":
+                score.evidence["close_price"] = float(temp_bar.close_price)
+                _attach_market_context(score, market_payload)
+                score.evidence["data_source"] = TAIL_PREVIEW_DATA_SOURCE
+                score.evidence["temporary_bar"] = True
+                score.evidence["base_daily_date"] = base_daily_date.isoformat()
+                score.evidence["snapshot_updated_at"] = _iso_or_none(snapshot_updated_at)
+                score.evidence["snapshot_trade_time"] = str(snapshot_trade_time) if snapshot_trade_time else None
+                score.evidence["bar_mode"] = "minute_aggregate" if vt_symbol in intraday_bars else "snapshot_last_price"
+                scored.append(score)
+
+        scored.sort(key=lambda item: (-item.total_score, item.vt_symbol))
+        recommendations = [
+            item
+            for item in scored
+            if item.entry_signal or item.total_score >= min_recommendation_score
+        ]
+        recommendations = _select_recommendations(
+            recommendations,
+            strategy.id,
+            strategy.default_min_entry_score,
+            recommendation_limit,
+        )
+
+    return {
+        "status": "ready" if scored else "empty",
+        "strategy_id": strategy.id,
+        "strategy_version": strategy.version,
+        "trade_date": as_of.isoformat(),
+        "run_id": None,
+        "preview_mode": "tail_intraday",
+        "data_source": TAIL_PREVIEW_DATA_SOURCE,
+        "temporary_bar": True,
+        "base_daily_date": base_daily_date.isoformat(),
+        "latest_daily_date": latest_daily_date.isoformat() if latest_daily_date else None,
+        "trade_date_daily_symbol_count": as_of_daily_symbol_count,
+        "min_complete_daily_symbol_count": MIN_COMPLETE_DAILY_SYMBOL_COUNT,
+        "snapshot_updated_at": _iso_or_none(snapshot_updated_at),
+        "snapshot_trade_time": str(snapshot_trade_time) if snapshot_trade_time else None,
+        "snapshot_price_count": snapshot_price_count,
+        "intraday_bar_count": intraday_bar_count,
+        "items": [
+            _score_to_api(item, stock_meta.get(item.vt_symbol))
+            for item in scored[: min(max(recommendation_limit, 1), 200)]
+        ],
+        "recommendations": [
+            _recommendation_to_api(index + 1, item, stock_meta.get(item.vt_symbol))
+            for index, item in enumerate(recommendations)
+        ],
+        "total": len(scored),
+        "recommendation_count": len(recommendations),
+        "included_boards": list(boards),
+        "persistence": "read_only_not_persisted",
+        "message": "今日尾盘预览使用盘中快照临时K线，不写入历史候选，不参与回测收益统计。",
+    }
+
+
+def get_tail_preview(
+    trade_date: date | None = None,
+    *,
+    strategy_id: str = STRATEGY_ID,
+    max_symbols: int = 5000,
+    recommendation_limit: int = 100,
+    min_recommendation_score: float = 60.0,
+    included_boards: list[str] | tuple[str, ...] | str | None = None,
+    refresh: bool = False,
+) -> dict[str, Any]:
+    """Return today's tail preview, preferring the internal cache."""
+
+    target_trade_date = trade_date or _tail_preview_default_trade_date()
+    if not refresh:
+        cached = latest_tail_preview_cache(target_trade_date, strategy_id=strategy_id)
+        if cached is not None:
+            return _limit_tail_preview_payload(cached, recommendation_limit)
+    return screen_tail_preview(
+        target_trade_date,
+        strategy_id=strategy_id,
+        max_symbols=max_symbols,
+        recommendation_limit=recommendation_limit,
+        min_recommendation_score=min_recommendation_score,
+        included_boards=included_boards,
+    )
+
+
+def generate_tail_preview_cache(
+    trade_date: date | None = None,
+    *,
+    strategy_id: str = STRATEGY_ID,
+    max_symbols: int = 5000,
+    recommendation_limit: int = 100,
+    min_recommendation_score: float = 60.0,
+    included_boards: list[str] | tuple[str, ...] | str | None = None,
+    source_schedule_id: str | None = None,
+) -> dict[str, Any]:
+    """Compute and persist the current tail preview without touching historical signals."""
+
+    payload = screen_tail_preview(
+        trade_date,
+        strategy_id=strategy_id,
+        max_symbols=max_symbols,
+        recommendation_limit=recommendation_limit,
+        min_recommendation_score=min_recommendation_score,
+        included_boards=included_boards,
+    )
+    if not is_database_configured():
+        return payload
+    _ensure_quant_schema()
+
+    payload = dict(payload)
+    payload["cache"] = {
+        "status": "generated",
+        "source_schedule_id": source_schedule_id,
+        "generated_at": datetime.now().isoformat(),
+        "signal_evidence_schema_version": screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+    }
+
+    cache_trade_date = _parse_date(payload.get("trade_date")) or trade_date
+    if cache_trade_date is None:
+        return payload
+    strategy = get_strategy(strategy_id)
+    strategy_version = str(payload.get("strategy_version") or (strategy.version if strategy else STRATEGY_VERSION))
+    now = datetime.now(timezone.utc)
+    values = {
+        "trade_date": cache_trade_date,
+        "strategy_id": str(payload.get("strategy_id") or strategy_id),
+        "strategy_version": strategy_version,
+        "status": str(payload.get("status") or "empty"),
+        "payload": payload,
+        "source_schedule_id": source_schedule_id,
+        "base_daily_date": _parse_date(payload.get("base_daily_date")),
+        "latest_daily_date": _parse_date(payload.get("latest_daily_date")),
+        "recommendation_count": int(payload.get("recommendation_count") or 0),
+        "total": int(payload.get("total") or 0),
+        "generated_at": now,
+        "updated_at": now,
+    }
+    with session_scope() as session:
+        stmt = pg_insert(schema.quant_tail_preview_cache).values(**values)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[
+                schema.quant_tail_preview_cache.c.trade_date,
+                schema.quant_tail_preview_cache.c.strategy_id,
+                schema.quant_tail_preview_cache.c.strategy_version,
+            ],
+            set_={
+                "status": stmt.excluded.status,
+                "payload": stmt.excluded.payload,
+                "source_schedule_id": stmt.excluded.source_schedule_id,
+                "base_daily_date": stmt.excluded.base_daily_date,
+                "latest_daily_date": stmt.excluded.latest_daily_date,
+                "recommendation_count": stmt.excluded.recommendation_count,
+                "total": stmt.excluded.total,
+                "generated_at": stmt.excluded.generated_at,
+                "updated_at": stmt.excluded.updated_at,
+            },
+        )
+        session.execute(stmt)
+    payload["cache"]["status"] = "cached"
+    return payload
+
+
+def latest_tail_preview_cache(
+    trade_date: date | None = None,
+    *,
+    strategy_id: str = STRATEGY_ID,
+) -> dict[str, Any] | None:
+    """Load the latest cached tail preview payload for the strategy."""
+
+    if not is_database_configured():
+        return None
+    strategy = get_strategy(strategy_id)
+    if strategy is None:
+        return None
+    _ensure_quant_schema()
+    with session_scope() as session:
+        query = select(schema.quant_tail_preview_cache).where(
+            and_(
+                schema.quant_tail_preview_cache.c.strategy_id == strategy.id,
+                schema.quant_tail_preview_cache.c.strategy_version == strategy.version,
+            )
+        )
+        if trade_date is not None:
+            query = query.where(schema.quant_tail_preview_cache.c.trade_date == trade_date)
+        row = session.execute(
+            query.order_by(
+                desc(schema.quant_tail_preview_cache.c.trade_date),
+                desc(schema.quant_tail_preview_cache.c.generated_at),
+                desc(schema.quant_tail_preview_cache.c.id),
+            ).limit(1)
+        ).mappings().first()
+    if not row:
+        return None
+    payload = dict(row.get("payload") or {})
+    cache = dict(payload.get("cache") or {})
+    if cache.get("signal_evidence_schema_version") != screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION:
+        return None
+    cache.update(
+        {
+            "status": "cached",
+            "generated_at": _iso_or_none(row.get("generated_at")),
+            "source_schedule_id": row.get("source_schedule_id"),
+            "cache_id": int(row["id"]),
+        }
+    )
+    payload["cache"] = cache
+    return payload
+
+
+def _tail_preview_default_trade_date() -> date | None:
+    if not is_database_configured():
+        return None
+    _ensure_quant_schema()
+    with session_scope() as session:
+        return _date_from_datetime(_latest_snapshot_updated_at(session))
+
+
+def _limit_tail_preview_payload(payload: dict[str, Any], limit: int) -> dict[str, Any]:
+    capped = min(max(int(limit or 100), 1), 200)
+    result = dict(payload)
+    if isinstance(result.get("items"), list):
+        result["items"] = list(result["items"][:capped])
+    if isinstance(result.get("recommendations"), list):
+        result["recommendations"] = list(result["recommendations"][:capped])
+    return result
 
 
 def screen_stocks_range(
@@ -342,21 +667,24 @@ def list_signals(trade_date: date | None = None, strategy_id: str = STRATEGY_ID,
     _ensure_quant_schema()
     with session_scope() as session:
         run = _latest_screen_run(session, strategy.id, trade_date)
-        as_of = run["trade_date"] if run else trade_date or _latest_signal_date(session) or _latest_trade_date(session)
+        if not run:
+            as_of = trade_date or _latest_trade_date(session)
+            return {
+                "status": "empty",
+                "trade_date": as_of.isoformat() if as_of else None,
+                "run_id": None,
+                "strategy_id": strategy.id,
+                "strategy_version": strategy.version,
+                "included_boards": list(DEFAULT_QUANT_INCLUDED_BOARDS),
+                "items": [],
+                "message": "当前信号证据版本没有候选缓存，请刷新候选。",
+            }
+        as_of = run["trade_date"]
         if as_of is None:
             return {"status": "empty", "items": []}
-        filters = (
-            [schema.quant_stock_signals.c.run_id == run["id"]]
-            if run
-            else [
-                schema.quant_stock_signals.c.trade_date == as_of,
-                schema.quant_stock_signals.c.strategy_id == strategy.id,
-                schema.quant_stock_signals.c.strategy_version == strategy.version,
-            ]
-        )
         rows = session.execute(
             select(schema.quant_stock_signals)
-            .where(and_(*filters))
+            .where(schema.quant_stock_signals.c.run_id == run["id"])
             .order_by(desc(schema.quant_stock_signals.c.total_score))
             .limit(min(max(limit, 1), 500))
         ).mappings().all()
@@ -482,18 +810,21 @@ def list_recommendations(
     _ensure_quant_schema()
     with session_scope() as session:
         run = _latest_screen_run(session, strategy.id, trade_date)
-        as_of = run["trade_date"] if run else trade_date or _latest_recommendation_date(session) or _latest_trade_date(session)
+        if not run:
+            as_of = trade_date or _latest_trade_date(session)
+            return {
+                "status": "empty",
+                "trade_date": as_of.isoformat() if as_of else None,
+                "run_id": None,
+                "strategy_id": strategy.id,
+                "strategy_version": strategy.version,
+                "included_boards": list(DEFAULT_QUANT_INCLUDED_BOARDS),
+                "items": [],
+                "message": "当前信号证据版本没有候选缓存，请刷新候选。",
+            }
+        as_of = run["trade_date"]
         if as_of is None:
             return {"status": "empty", "items": []}
-        filters = (
-            [schema.quant_recommendations.c.run_id == run["id"]]
-            if run
-            else [
-                schema.quant_recommendations.c.trade_date == as_of,
-                schema.quant_recommendations.c.strategy_id == strategy.id,
-                schema.quant_recommendations.c.strategy_version == strategy.version,
-            ]
-        )
         rows = session.execute(
             select(
                 schema.quant_recommendations,
@@ -505,7 +836,7 @@ def list_recommendations(
                     schema.quant_recommendations.c.vt_symbol == schema.stocks.c.vt_symbol,
                 )
             )
-            .where(and_(*filters))
+            .where(schema.quant_recommendations.c.run_id == run["id"])
             .order_by(schema.quant_recommendations.c.rank)
             .limit(min(max(limit, 1), 200))
         ).mappings().all()
@@ -653,6 +984,7 @@ def symbol_signal_history(
             fund_flow_score = _load_fund_flow_scores(session, [symbol], trade_date).get(symbol)
             hot_rank_score = _load_hot_rank_scores(session, [symbol], trade_date).get(symbol)
             lhb_score = _load_lhb_scores(session, [symbol], trade_date).get(symbol)
+            market_payload = market_context.market_context_for_date(session, schema, trade_date)
             score = score_strategy(
                 strategy.id,
                 symbol,
@@ -667,6 +999,7 @@ def symbol_signal_history(
             )
             if score.evidence.get("status") != "ready":
                 continue
+            _attach_market_context(score, market_payload)
             rows.append(_symbol_signal_row(score, effective_min_entry_score))
 
     trigger_rows = [row for row in rows if row.get("executable_entry_signal")]
@@ -790,6 +1123,16 @@ def _latest_trade_date(session) -> date | None:
     return screening_loaders.latest_trade_date(session)
 
 
+def _latest_complete_trade_date(session) -> date | None:
+    return screening_loaders.latest_complete_trade_date(session, MIN_COMPLETE_DAILY_SYMBOL_COUNT)
+
+
+def _daily_symbol_count(session, trade_date: date | None) -> int:
+    if trade_date is None:
+        return 0
+    return screening_loaders.daily_symbol_count(session, trade_date)
+
+
 def _earliest_trade_date(session) -> date | None:
     return screening_loaders.earliest_trade_date(session)
 
@@ -805,7 +1148,13 @@ def _latest_recommendation_date(session) -> date | None:
 def _latest_screen_run(session, strategy_id: str, trade_date: date | None = None) -> dict[str, Any] | None:
     strategy = get_strategy(strategy_id)
     strategy_version = strategy.version if strategy else STRATEGY_VERSION
-    return screening_loaders.latest_screen_run(session, strategy_id, strategy_version, trade_date)
+    return screening_loaders.latest_screen_run(
+        session,
+        strategy_id,
+        strategy_version,
+        trade_date,
+        signal_evidence_schema_version=screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+    )
 
 
 def _screen_runs_by_date(
@@ -844,6 +1193,8 @@ def _screen_runs_by_date(
 def _screen_run_matches_params(run: dict[str, Any], *, max_symbols: int, included_boards: tuple[str, ...]) -> bool:
     params = run.get("params") if isinstance(run.get("params"), dict) else {}
     if int(params.get("max_symbols") or 0) != int(max_symbols):
+        return False
+    if params.get("signal_evidence_schema_version") != screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION:
         return False
     return tuple(normalize_included_boards(params.get("included_boards"))) == tuple(normalize_included_boards(included_boards))
 
@@ -955,6 +1306,60 @@ def _load_bars(session, vt_symbols: list[str], trade_date: date, lookback_days: 
     return screening_loaders.load_bars(session, vt_symbols, trade_date, lookback_days)
 
 
+def _load_intraday_temp_bars(session, vt_symbols: list[str], trade_date: date) -> dict[str, Bar]:
+    return screening_loaders.load_intraday_temp_bars(session, vt_symbols, trade_date)
+
+
+def _latest_snapshot_updated_at(session) -> Any:
+    return session.execute(select(func.max(schema.stocks.c.updated_at))).scalar()
+
+
+def _latest_snapshot_trade_time(session) -> Any:
+    return session.execute(select(func.max(schema.stocks.c.trade_time))).scalar()
+
+
+def _snapshot_temp_bar(stock: dict[str, Any], trade_date: date, previous_bar: Bar) -> Bar | None:
+    close_price = _float_or_none(stock.get("last_price"))
+    if close_price is None or close_price <= 0:
+        return None
+    previous_close = float(previous_bar.close_price)
+    high_price = max(previous_close, close_price)
+    low_price = min(previous_close, close_price)
+    turnover = _float_or_none(stock.get("turnover"))
+    volume = _float_or_none(stock.get("volume"))
+    if volume is None and turnover is not None and close_price > 0:
+        volume = turnover / close_price / 100
+    change_pct = _float_or_none(stock.get("change_pct"))
+    return Bar(
+        trade_date=trade_date,
+        open_price=previous_close,
+        high_price=high_price,
+        low_price=low_price,
+        close_price=close_price,
+        volume=volume,
+        turnover=turnover,
+        change_pct=change_pct,
+    )
+
+
+def _date_from_datetime(value: Any) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if hasattr(value, "date"):
+        return value.date()
+    return _parse_date(value)
+
+
+def _iso_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
 def _load_stock_universe(session, max_symbols: int, included_boards: tuple[str, ...]) -> list[dict[str, Any]]:
     return screening_loaders.load_stock_universe(session, max_symbols, included_boards)
 
@@ -981,6 +1386,56 @@ def _load_hot_rank_scores(session, vt_symbols: list[str], trade_date: date) -> d
 
 def _load_lhb_scores(session, vt_symbols: list[str], trade_date: date) -> dict[str, float]:
     return screening_loaders.load_lhb_scores(session, vt_symbols, trade_date, _float_or_none, _clamp)
+
+
+def _attach_market_context(score: SignalScore, payload: dict[str, Any] | None) -> None:
+    if not payload:
+        return
+    compact_keys = (
+        "regime",
+        "label",
+        "market_score",
+        "trend_score",
+        "momentum_score",
+        "breadth_score",
+        "risk_score",
+        "theme_state",
+        "dominant_theme",
+        "dominant_theme_id",
+        "theme_strength",
+        "fund_flow_state",
+        "fund_flow_label",
+        "fund_flow_score",
+        "fund_flow_streak_days",
+        "fund_flow_source",
+        "main_net_inflow",
+        "main_net_inflow_ratio",
+        "fund_flow_worsening_days",
+        "fund_flow_new_low",
+        "fund_flow_recovery_from_streak_days",
+        "market_warning_level",
+        "market_warning_label",
+        "recovery_state",
+        "recovery_label",
+        "index_return_5d",
+        "index_return_20d",
+        "drawdown_60d_pct",
+        "source",
+        "notes",
+    )
+    context = {key: payload.get(key) for key in compact_keys if key in payload}
+    score.evidence["market_context"] = context
+    score.evidence["market_context_summary"] = market_context.market_context_summary(payload)
+    score.evidence["dynamic_market_regime"] = payload.get("regime")
+    score.evidence["dynamic_market_label"] = payload.get("label")
+    score.evidence["market_warning_level"] = payload.get("market_warning_level")
+    score.evidence["market_warning_label"] = payload.get("market_warning_label")
+    score.evidence["fund_flow_state"] = payload.get("fund_flow_state")
+    score.evidence["fund_flow_label"] = payload.get("fund_flow_label")
+    score.evidence["fund_flow_streak_days"] = payload.get("fund_flow_streak_days")
+    score.evidence["fund_flow_source"] = payload.get("fund_flow_source")
+    score.evidence["recovery_state"] = payload.get("recovery_state")
+    score.evidence["recovery_label"] = payload.get("recovery_label")
 
 
 def _persist_screen_run(

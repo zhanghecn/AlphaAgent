@@ -24,6 +24,10 @@
     --input: 214.3 31.8% 91.4%;
     --ring: 243 75% 59%;
     --radius: 0.5rem;
+    /* 玻璃质感变量（叠在 backdrop-blur 上，浅色透明白） */
+    --glass-bg: 0 0% 100% / 0.72;
+    --glass-border: 243 75% 59% / 0.12;
+    --aurora-opacity: 0.5;
   }
 
   /* 深色模式色阶（slate 系），保留 A 股涨红跌绿语义不变 */
@@ -47,6 +51,10 @@
     --border: 217 33% 20%;
     --input: 217 33% 20%;
     --ring: 243 75% 65%;
+    /* 玻璃质感变量（深色透明 slate，光晕更亮） */
+    --glass-bg: 222 47% 13% / 0.72;
+    --glass-border: 243 75% 65% / 0.20;
+    --aurora-opacity: 0.7;
   }
 }
 
@@ -56,7 +64,67 @@
   }
   body {
     @apply bg-background text-foreground;
+    /* Inter Variable body 字体 + 中文系统 fallback */
+    font-family: "Inter Variable", "PingFang SC", "Microsoft YaHei",
+      "Noto Sans SC", system-ui, sans-serif;
     font-feature-settings: "rlig" 1, "calt" 1;
+  }
+  /* 全局等宽数字：所有表格、.tabular、[data-num] 默认 tabular-nums，
+     一次解决全站价格/涨跌幅对齐（零业务改动）。 */
+  table,
+  .tabular,
+  [data-num] {
+    font-variant-numeric: tabular-nums;
+  }
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+}
+
+@layer utilities {
+  /* display 字体（标题、KPI 大数字，金融科技几何感） */
+  .font-display {
+    font-family: "Space Grotesk Variable", "Inter Variable", "PingFang SC",
+      sans-serif;
+  }
+  /* 玻璃拟态：固定/浮层元素专用，列表项禁用（backdrop-filter 性能） */
+  .glass {
+    background: hsl(var(--glass-bg));
+    backdrop-filter: blur(12px) saturate(140%);
+    -webkit-backdrop-filter: blur(12px) saturate(140%);
+    border: 1px solid hsl(var(--glass-border));
+  }
+  .glass-strong {
+    background: hsl(var(--glass-bg) / 1);
+    backdrop-filter: blur(20px) saturate(160%);
+    -webkit-backdrop-filter: blur(20px) saturate(160%);
+    border: 1px solid hsl(var(--glass-border));
+  }
+  /* 极光顶部光晕（AppShell 顶栏 / 卡片头） */
+  .aurora {
+    position: relative;
+  }
+  .aurora::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image: theme("backgroundImage.gradient-aurora");
+    opacity: var(--aurora-opacity);
+    border-radius: inherit;
+  }
+}
+
+/* 保险层 1：全局 reduce-motion 降级（原语内部另有 useReducedMotion 二次保险） */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
   }
 }
 

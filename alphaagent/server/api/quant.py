@@ -183,6 +183,28 @@ def get_screen_run(run_id: int):
         return _service_error(exc)
 
 
+@router.get("/tail-preview")
+def get_tail_preview(
+    trade_date: str = Query(default=""),
+    strategy: str = Query(default=screening.STRATEGY_ID),
+    limit: int = Query(default=100, ge=1, le=200),
+    max_symbols: int = Query(default=5000, ge=1, le=5000),
+    refresh: bool = Query(default=False),
+):
+    try:
+        return ok(
+            screening.get_tail_preview(
+                _parse_date(trade_date),
+                strategy_id=strategy,
+                max_symbols=max_symbols,
+                recommendation_limit=limit,
+                refresh=refresh,
+            )
+        )
+    except Exception as exc:
+        return _service_error(exc)
+
+
 @router.get("/trading-dates")
 def list_trading_dates(
     start: str = Query(default=""),

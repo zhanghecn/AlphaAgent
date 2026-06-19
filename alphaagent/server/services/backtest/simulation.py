@@ -70,6 +70,7 @@ def simulate_portfolio(
 
     for index, current_day in enumerate(trading_days):
         today_bars = {symbol: bar_index[symbol][current_day] for symbol in bar_index if current_day in bar_index[symbol]}
+        daily_candidates = None
 
         for order in list(pending_sells):
             if order["execute_date"] != current_day:
@@ -215,6 +216,8 @@ def simulate_portfolio(
             cash = buy_execution.cash_after
             entry_reason = dict(order["reason"])
             entry_reason["execution"] = fill
+            order_raw = dict(entry_reason)
+            order_raw.update(fill)
             positions[order["vt_symbol"]] = Position(
                 vt_symbol=order["vt_symbol"],
                 name=stock_meta.get(order["vt_symbol"], {}).get("name"),
@@ -225,8 +228,20 @@ def simulate_portfolio(
                 reason=entry_reason,
                 last_price=bar.close_price,
             )
-            orders.append(callbacks.order(current_day, order["vt_symbol"], "BUY", fill_price, volume, "filled", "entry_signal", fill))
+            orders.append(callbacks.order(current_day, order["vt_symbol"], "BUY", fill_price, volume, "filled", "entry_signal", order_raw))
             trades.append(Trade(current_day, order["vt_symbol"], "BUY", fill_price, volume, amount, fee, None, "entry_signal", entry_reason))
+
+        current_buy_signal_symbols: set[str] = set()
+        if params.enable_failed_launch_exit_stop and index < len(trading_days) - 1:
+            if score_cache is not None and current_day not in score_cache and session is None:
+                daily_candidates = []
+            else:
+                daily_candidates = callbacks.score_day(session, bars_by_symbol, current_day, params, score_cache, score_context)
+            current_buy_signal_symbols = {
+                str(candidate.vt_symbol)
+                for candidate in daily_candidates or []
+                if bool(getattr(candidate, "entry_signal", False))
+            }
 
         pending_sell_symbols = {str(order["vt_symbol"]) for order in pending_sells}
         for vt_symbol, position in list(positions.items()):
@@ -235,9 +250,16 @@ def simulate_portfolio(
             bar = today_bars.get(vt_symbol)
             if not bar:
                 continue
+            position.visible_holding_bars += 1
             position.last_price = bar.close_price
             position.highest_price = max(position.highest_price, bar.high_price)
-            sell_reason = sell_reason_for_position(position, bar, current_day, params)
+            sell_reason = sell_reason_for_position(
+                position,
+                bar,
+                current_day,
+                params,
+                current_buy_signal=vt_symbol in current_buy_signal_symbols,
+            )
             if not sell_reason:
                 continue
             if current_day <= position.entry_date:
@@ -265,7 +287,6 @@ def simulate_portfolio(
 
         if index < len(trading_days) - 1:
             next_day = trading_days[index + 1]
-            daily_candidates = None
             reserved_exit_count = len({str(order["vt_symbol"]) for order in pending_sells})
             free_slots = max(params.max_positions - len(positions) + reserved_exit_count - len(pending_buys), 0)
             should_score_for_rotation = params.enable_signal_rotation and params.strategy == DRAGON_PULLBACK_STRATEGY_ID
@@ -596,12 +617,20 @@ def signal_events_for_day(
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     pool_context = candidate_lanes.execution_pool_context(scores, params.candidate_limit, params.strategy)
+    current_buy_signal_symbols = {str(score.vt_symbol) for score in scores if bool(getattr(score, "entry_signal", False))}
     for vt_symbol, position in list(theoretical_positions.items()):
         bar = today_bars.get(vt_symbol)
         if not bar:
             continue
+        position.visible_holding_bars += 1
         position.highest_price = max(position.highest_price, bar.high_price)
-        sell_reason = sell_reason_for_position(position, bar, signal_date, params)
+        sell_reason = sell_reason_for_position(
+            position,
+            bar,
+            signal_date,
+            params,
+            current_buy_signal=vt_symbol in current_buy_signal_symbols,
+        )
         if not sell_reason or signal_date <= position.entry_date:
             continue
         execute_bar = bar_index.get(vt_symbol, {}).get(execute_date)
@@ -767,6 +796,20 @@ def dragon_pullback_sell_reason(
 
     drawdown_from_high = bar.close_price / position.highest_price - 1 if position.highest_price else 0
     high_gain = position.highest_price / cost_price - 1 if cost_price and position.highest_price else 0
+    if (
+        params.enable_failed_launch_exit_stop
+        and failed_launch_exit_stop_applies(position, bar, gain, high_gain, hold_soft_exit)
+    ):
+        return "failed_launch_exit_stop"
+    if (
+        params.enable_mid_profit_giveback_stop
+        and str(reason.get("entry_setup") or reason.get("setup_type") or "") == "dragon_pullback"
+        and not hold_soft_exit
+        and high_gain >= params.mid_profit_giveback_min_high_gain_pct
+        and gain <= params.mid_profit_giveback_max_current_gain_pct
+        and drawdown_from_high <= -params.mid_profit_giveback_drawdown_pct
+    ):
+        return "mid_profit_giveback_stop"
     if high_gain >= 0.25 and gain <= 0.12 and drawdown_from_high <= -0.12:
         return "profit_protection_stop"
     if high_gain >= 0.18 and gain <= 0.08 and drawdown_from_high <= -0.10:
@@ -784,6 +827,35 @@ def dragon_pullback_sell_reason(
             return None
         return "time_efficiency_stop"
     return None
+
+
+def failed_launch_exit_stop_applies(
+    position: Position,
+    bar: Bar,
+    gain: float,
+    high_gain: float,
+    hold_soft_exit: bool,
+) -> bool:
+    if position.visible_holding_bars < 3 or hold_soft_exit:
+        return False
+    reason = position.reason if isinstance(position.reason, dict) else {}
+    setup = str(reason.get("entry_setup") or reason.get("setup_type") or "")
+    if setup not in {"dragon_pullback", "stealth_low_suction"}:
+        return False
+    if high_gain >= 0.025:
+        return False
+
+    entry_support = _float_or_none(reason.get("support_price"))
+    ma10 = _float_or_none(reason.get("ma10"))
+    ma20 = _float_or_none(reason.get("ma20"))
+    weak_close = gain <= -0.025
+    failed_support_reclaim = bool(entry_support is not None and bar.close_price < entry_support * 0.99)
+    failed_ma_reclaim = bool(
+        ma10 is not None
+        and ma20 is not None
+        and bar.close_price < min(ma10, ma20) * 0.995
+    )
+    return weak_close and (failed_support_reclaim or failed_ma_reclaim)
 
 
 def dragon_pullback_hold_context(position: Position, bar: Bar) -> dict[str, bool]:

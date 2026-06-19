@@ -521,6 +521,7 @@ function PathDiagnosticsPanel({
                 <TableHead>买入</TableHead>
                 <TableHead>卖出</TableHead>
                 <TableHead>入场</TableHead>
+                <TableHead>环境/启动</TableHead>
                 <TableHead className="text-right">收益</TableHead>
                 <TableHead className="text-right">MAE</TableHead>
                 <TableHead className="text-right">MFE</TableHead>
@@ -542,6 +543,7 @@ function PathDiagnosticsPanel({
                   <TableCell className="tabular-nums">{row.entry_date ?? "--"}</TableCell>
                   <TableCell className="tabular-nums">{row.exit_date ?? "--"}</TableCell>
                   <TableCell className="text-xs text-muted-foreground">{entrySetupLabel(row.entry_setup)}</TableCell>
+                  <TableCell className="max-w-[220px] text-xs leading-5 text-muted-foreground">{pathContextLabel(row)}</TableCell>
                   <TableCell className={cn("text-right tabular-nums", priceColorClass(row.return_pct))}>{formatPct(row.return_pct)}</TableCell>
                   <TableCell className={cn("text-right tabular-nums", priceColorClass(row.mae_pct))}>{formatPct(row.mae_pct)}</TableCell>
                   <TableCell className={cn("text-right tabular-nums", priceColorClass(row.mfe_pct))}>{formatPct(row.mfe_pct)}</TableCell>
@@ -778,6 +780,20 @@ function pathExitReasonLabel(reason?: string | null): string {
     rotation_for_stealth_low_suction: "换入低吸",
   };
   return reason ? labels[reason] ?? reason : "--";
+}
+
+function pathContextLabel(row: {
+  entry_context_label?: string | null;
+  entry_launch_diagnostic_label?: string | null;
+  low_suction_dragon_label?: string | null;
+  market_mainline_trade_context_label?: string | null;
+  fund_flow_coverage_label?: string | null;
+}): string {
+  const lowSuctionDragon = row.low_suction_dragon_label && row.low_suction_dragon_label !== "非低吸龙回头"
+    ? row.low_suction_dragon_label
+    : null;
+  const parts = [row.entry_context_label, row.market_mainline_trade_context_label, row.entry_launch_diagnostic_label, lowSuctionDragon, row.fund_flow_coverage_label].filter(Boolean);
+  return parts.length ? parts.join(" · ") : "--";
 }
 
 function asNumber(value: unknown): number | null {

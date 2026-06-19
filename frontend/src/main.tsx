@@ -5,6 +5,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
 import { ThemeProvider } from "@/theme/ThemeProvider";
 import { ToastProvider } from "@/components/ui/toast";
+// Variable font 子集（woff2-variations + unicode-range 懒加载）：
+// 一个 woff2 覆盖整条 weight 轴，中文 fallback 走系统字体，只下载 latin 子集。
+import "@fontsource-variable/inter/wght.css";
+import "@fontsource-variable/space-grotesk/wght.css";
 import "./styles.css";
 
 const queryClient = new QueryClient({

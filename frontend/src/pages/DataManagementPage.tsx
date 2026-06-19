@@ -163,8 +163,20 @@ function TailWorkflowTab() {
 
   const status = statusQuery.data;
   const batch = latestBatchQuery.data;
-  const tailPrepareBatch = batch?.schedule_id === "tail_prepare_14h" ? batch : null;
+  const tailPrepareBatch = batch?.schedule_id === "tail_preview_14h" || batch?.schedule_id === "tail_prepare_14h" ? batch : null;
   const isPreparing = prepareMutation.isPending || tailPrepareBatch?.status === "running";
+  const tailStateItems = [
+    { label: "完整日线", value: status?.daily_bar_latest_complete_date ?? status?.daily_bar_latest_date, detail: formatDateTime(status?.daily_bar_updated_at) },
+    { label: "今日预览", value: status?.tail_preview?.trade_date ?? status?.tail_preview?.cached_trade_date, detail: status?.tail_preview?.status === "ready" ? `缓存 ${status?.tail_preview?.cached_recommendation_count ?? 0} 个推荐` : status?.tail_preview?.message },
+    { label: "盘中快照", value: formatDateTime(status?.intraday_snapshot_updated_at), detail: status?.intraday_snapshot_trade_time },
+    { label: "分钟线", value: status?.minute_latest_date, detail: formatDateTime(status?.minute_latest_time) },
+    { label: "量化候选", value: status?.candidate_latest_date, detail: formatDateTime(status?.candidate_updated_at) },
+  ];
+  const scheduleItems = [
+    { schedule: status?.tail_prepare_schedule, label: "14:00 预览缓存", fallbackCron: "0 14 * * 1-5" },
+    { schedule: status?.tail_quant_schedule, label: "14:30 预览缓存", fallbackCron: "30 14 * * 1-5" },
+    { schedule: status?.eod_schedule, label: "18:00 盘后补全", fallbackCron: "0 18 * * 1-5" },
+  ];
 
   return (
     <div className="space-y-4">
@@ -191,7 +203,7 @@ function TailWorkflowTab() {
               <StatusBadge status={tailStatusBadge(status)} />
             </div>
             <div className="mt-2 text-sm text-muted-foreground">
-              14:00 同步实时快照、分钟线、资金、热度和涨停池；14:30 自动运行策略研究；18:00 补完整日线和慢数据。
+              14:00/14:30 同步快照、分钟线、资金、热度和涨停池并生成今日尾盘预览缓存；18:00 补完整日线和慢数据。
             </div>
             {status?.message ? (
               <div className="mt-2 text-xs text-amber-700 dark:text-amber-400">{status.message}</div>
@@ -225,11 +237,10 @@ function TailWorkflowTab() {
       </section>
 
       {statusQuery.isLoading ? <LoadingState rows={3} /> : null}
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <TailStateItem label="完整日线" value={status?.daily_bar_latest_date} detail={formatDateTime(status?.daily_bar_updated_at)} />
-        <TailStateItem label="盘中快照" value={formatDateTime(status?.intraday_snapshot_updated_at)} detail={status?.intraday_snapshot_trade_time ?? undefined} />
-        <TailStateItem label="分钟线" value={status?.minute_latest_date} detail={formatDateTime(status?.minute_latest_time)} />
-        <TailStateItem label="量化候选" value={status?.candidate_latest_date} detail={formatDateTime(status?.candidate_updated_at)} />
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+        {tailStateItems.map((item) => (
+          <TailStateItem key={item.label} {...item} />
+        ))}
       </div>
 
       <section className="rounded-lg border">
@@ -237,9 +248,9 @@ function TailWorkflowTab() {
           <h3 className="text-sm font-semibold">自动计划</h3>
         </div>
         <div className="divide-y">
-          <ScheduleSummary schedule={status?.tail_prepare_schedule} label="14:00 尾盘准备" fallbackCron="0 14 * * 1-5" />
-          <ScheduleSummary schedule={status?.tail_quant_schedule} label="14:30 尾盘量化" fallbackCron="30 14 * * 1-5" />
-          <ScheduleSummary schedule={status?.eod_schedule} label="18:00 盘后补全" fallbackCron="0 18 * * 1-5" />
+          {scheduleItems.map((item) => (
+            <ScheduleSummary key={item.label} {...item} />
+          ))}
         </div>
       </section>
 
@@ -1343,8 +1354,9 @@ function BatchProgress({ batch, isStarting }: { batch: SyncBatchStatus | null | 
 }
 
 function batchTitle(batch: SyncBatchStatus): string {
-  if (batch.schedule_id === "tail_prepare_14h") return "尾盘准备";
-  if (batch.schedule_id === "tail_quant_1430" || batch.profile === "quant_research") return "尾盘量化";
+  if (batch.schedule_id === "tail_preview_14h" || batch.schedule_id === "tail_prepare_14h") return "尾盘预览";
+  if (batch.schedule_id === "tail_quant_1430") return "尾盘预览";
+  if (batch.profile === "quant_research") return "策略研究";
   if (batch.profile === "all") return "全量同步";
   if (batch.profile === "core") return "核心同步";
   return "同步批次";

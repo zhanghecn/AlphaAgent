@@ -42,6 +42,18 @@ class BacktestParams:
     rotation_min_score_gap: float = 8.0
     rotation_max_holding_return_pct: float = 3.0
     rotation_min_holding_days: int = 3
+    require_low_suction_launch_confirmation: bool = False
+    exclude_repeated_dragon_pullback: bool = False
+    require_low_suction_launch_for_low_suction_context: bool = False
+    require_balanced_low_suction_launch_quality: bool = False
+    enable_entry_launch_quality_score: bool = False
+    enable_entry_launch_risk_penalty: bool = False
+    enable_low_suction_market_risk_penalty: bool = False
+    enable_failed_launch_exit_stop: bool = False
+    enable_mid_profit_giveback_stop: bool = False
+    mid_profit_giveback_min_high_gain_pct: float = 0.10
+    mid_profit_giveback_max_current_gain_pct: float = 0.04
+    mid_profit_giveback_drawdown_pct: float = 0.07
     persist: bool = False
     symbols: list[str] | None = None
     included_boards: tuple[str, ...] = DEFAULT_QUANT_INCLUDED_BOARDS
@@ -77,6 +89,7 @@ class Position:
     highest_price: float
     reason: dict[str, Any]
     last_price: float | None = None
+    visible_holding_bars: int = 0
 
 
 @dataclass

@@ -11,7 +11,7 @@ import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { TradingDateSelector } from "@/features/quant/TradingDateSelector";
-import { fetchBacktestCandidateTrace, type BacktestCandidateNotPlannedContext, type BacktestCandidateTrace, type QuantRecommendation, type QuantScreenRunItem, type QuantStrategyOption } from "@/api/quant";
+import { fetchBacktestCandidateTrace, type BacktestCandidateNotPlannedContext, type BacktestCandidateTrace, type QuantRecommendation, type QuantScreenRun, type QuantScreenRunItem, type QuantStrategyOption } from "@/api/quant";
 
 export function RecommendationsPanel({
   isLoading,
@@ -22,6 +22,9 @@ export function RecommendationsPanel({
   runId,
   strategyVersion,
   includedBoards,
+  viewMode,
+  onViewModeChange,
+  previewMeta,
   screenRuns,
   tradingDates,
   selectedTradeDate,
@@ -46,6 +49,9 @@ export function RecommendationsPanel({
   runId?: number | null;
   strategyVersion?: string;
   includedBoards?: string[];
+  viewMode: "history" | "tail_preview";
+  onViewModeChange: (mode: "history" | "tail_preview") => void;
+  previewMeta?: QuantScreenRun;
   screenRuns: QuantScreenRunItem[];
   tradingDates: string[];
   selectedTradeDate: string;
@@ -67,6 +73,7 @@ export function RecommendationsPanel({
   const [traceTarget, setTraceTarget] = useState<{ vtSymbol: string; tradeDate: string } | null>(null);
   const [page, setPage] = useState(1);
   const activeBoards = includedBoards?.length ? includedBoards : selectedBoards;
+  const isTailPreview = viewMode === "tail_preview";
   const selectedStrategyMeta = strategies.find((strategy) => strategy.id === selectedStrategy);
   const failedRuleLabels = selectedStrategyMeta?.failed_rule_labels ?? {};
   const metricColumns = recommendationMetricColumns(selectedStrategyMeta);
@@ -101,7 +108,7 @@ export function RecommendationsPanel({
   const traceQuery = useQuery({
     queryKey: ["backtestCandidateTrace", activeBacktestId, traceTarget?.vtSymbol, traceTarget?.tradeDate],
     queryFn: () => fetchBacktestCandidateTrace(activeBacktestId!, traceTarget!.vtSymbol, traceTarget!.tradeDate),
-    enabled: Boolean(activeBacktestId && traceTarget),
+    enabled: Boolean(activeBacktestId && traceTarget && !isTailPreview),
     staleTime: 20_000,
   });
 
@@ -124,22 +131,40 @@ export function RecommendationsPanel({
             <h2 className="text-sm font-semibold">量化候选</h2>
           </div>
           <div className="text-xs text-muted-foreground">
-            {tradeDate ?? "--"} · 观察前 {DEFAULT_CANDIDATE_OBSERVATION_LIMIT} · 执行前 {DEFAULT_EXECUTION_CANDIDATE_LIMIT} · {runId ? `运行 #${runId}` : "未运行"} · {strategyVersion ?? "--"}
+            {tradeDate ?? "--"} · 观察前 {DEFAULT_CANDIDATE_OBSERVATION_LIMIT} · {isTailPreview ? "今日预览" : `执行前 ${DEFAULT_EXECUTION_CANDIDATE_LIMIT}`} · {runId ? `运行 #${runId}` : isTailPreview ? "未落库" : "未运行"} · {strategyVersion ?? "--"}
           </div>
         </div>
+        <div className="flex w-fit rounded-md border bg-muted/30 p-1">
+          <button
+            className={cn("rounded px-3 py-1.5 text-sm", !isTailPreview ? "bg-background shadow-sm" : "text-muted-foreground")}
+            onClick={() => onViewModeChange("history")}
+          >
+            历史候选
+          </button>
+          <button
+            className={cn("rounded px-3 py-1.5 text-sm", isTailPreview ? "bg-background shadow-sm" : "text-muted-foreground")}
+            onClick={() => onViewModeChange("tail_preview")}
+          >
+            今日尾盘预览
+          </button>
+        </div>
         <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_260px]">
-          <TradingDateSelector
-            label="查看交易日"
-            value={selectedTradeDate}
-            dates={availableDates}
-            onChange={onSelectedTradeDateChange}
-            getOptionLabel={(date) => {
-              const run = latestRunByDate.get(date);
-              return run ? `${date} · #${run.id} · 候选 ${run.recommendation_count}` : `${date} · 未运行`;
-            }}
-            className="items-start gap-1"
-            selectClassName="mt-1 w-full min-w-0"
-          />
+          {isTailPreview ? (
+            <TailPreviewSummary meta={previewMeta} />
+          ) : (
+            <TradingDateSelector
+              label="查看交易日"
+              value={selectedTradeDate}
+              dates={availableDates}
+              onChange={onSelectedTradeDateChange}
+              getOptionLabel={(date) => {
+                const run = latestRunByDate.get(date);
+                return run ? `${date} · #${run.id} · 候选 ${run.recommendation_count}` : `${date} · 未运行`;
+              }}
+              className="items-start gap-1"
+              selectClassName="mt-1 w-full min-w-0"
+            />
+          )}
           <div className="text-sm">
             <div className="text-xs text-muted-foreground">策略</div>
             <div className="mt-1 flex h-9 items-center rounded-md border bg-muted/30 px-2 text-sm">
@@ -168,9 +193,15 @@ export function RecommendationsPanel({
               <span>BUY {stats.buyCount}</span>
               <span>WATCH {stats.watchCount}</span>
               <span>按评分排名观察前 {DEFAULT_CANDIDATE_OBSERVATION_LIMIT}，不强行保留低吸名额</span>
-              <span>回测只执行 BUY 前 {DEFAULT_EXECUTION_CANDIDATE_LIMIT}</span>
-              <span>已运行 {runDateCount} 日</span>
-              <span>未运行 {missingRunCount} 日</span>
+              {isTailPreview ? (
+                <span>盘中临时K线只做尾盘观察，不参与回测</span>
+              ) : (
+                <>
+                  <span>回测只执行 BUY 前 {DEFAULT_EXECUTION_CANDIDATE_LIMIT}</span>
+                  <span>已运行 {runDateCount} 日</span>
+                  <span>未运行 {missingRunCount} 日</span>
+                </>
+              )}
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <select
@@ -269,8 +300,14 @@ export function RecommendationsPanel({
                           size="sm"
                           variant="outline"
                           onClick={() => setTraceTarget({ vtSymbol: item.vt_symbol, tradeDate: item.trade_date })}
-                          disabled={!activeBacktestId}
-                          title={activeBacktestId ? "查看该候选在选中回测里的成交/拒单情况" : "先在「回测」tab选中一个回测，才能追踪候选的成交情况"}
+                          disabled={!activeBacktestId || isTailPreview}
+                          title={
+                            isTailPreview
+                              ? "今日尾盘预览未落库，暂无历史回测成交链路"
+                              : activeBacktestId
+                                ? "查看该候选在选中回测里的成交/拒单情况"
+                                : "先在「回测」tab选中一个回测，才能追踪候选的成交情况"
+                          }
                         >
                           <Search size={14} />
                           回测成交
@@ -318,7 +355,7 @@ export function RecommendationsPanel({
               </div>
             </div>
           )}
-          {traceTarget && (
+          {traceTarget && !isTailPreview && (
             <CandidateTracePanel
               backtestId={activeBacktestId}
               target={traceTarget}
@@ -330,6 +367,24 @@ export function RecommendationsPanel({
         </>
       )}
     </section>
+  );
+}
+
+function TailPreviewSummary({ meta }: { meta?: QuantScreenRun }) {
+  return (
+    <div className="rounded-md border bg-muted/20 p-3 text-sm">
+      <div className="font-medium">今日尾盘预览</div>
+      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+        <span>预览日 {meta?.trade_date ?? "--"}</span>
+        <span>基础日线 {meta?.base_daily_date ?? "--"}</span>
+        <span>快照 {compactDateTime(meta?.snapshot_updated_at) || "--"}</span>
+        <span>分钟K {meta?.intraday_bar_count ?? 0} 只</span>
+        <span>快照价 {meta?.snapshot_price_count ?? 0} 只</span>
+      </div>
+      <div className="mt-1 text-xs text-muted-foreground">
+        使用盘中临时K线，只做尾盘观察，不写入历史候选和收益统计。
+      </div>
+    </div>
   );
 }
 
@@ -546,6 +601,7 @@ function CandidateScoreExplanation({
   risk: Record<string, unknown>;
 }) {
   const facts = candidateScoreFacts(reason);
+  const market = candidateMarketFacts(reason);
   const contributions = topScoreContributions(reason.score_breakdown, 4);
   const rejected = rules.map((rule) => failedRuleLabel(rule, labels));
   const fallback = candidateScoreReason(reason, rules, labels, risk);
@@ -554,7 +610,10 @@ function CandidateScoreExplanation({
       {facts.length > 0 ? (
         <div className="text-foreground">{facts.join(" · ")}</div>
       ) : (
-        <div className="text-muted-foreground">{fallback}</div>
+          <div className="text-muted-foreground">{fallback}</div>
+      )}
+      {market && (
+        <div className="text-muted-foreground">{market}</div>
       )}
       {contributions.length > 0 && (
         <div className="text-muted-foreground">分项贡献: {contributions.join(" / ")}</div>
@@ -574,16 +633,39 @@ function candidateScoreFacts(reason: Record<string, unknown>): string[] {
   const convergence = numberValue(reason.ma_convergence_pct);
   const lowSuctionScore = numberValue(reason.low_suction_buildup_score);
   const supportHoldDays = numberValue(reason.support_hold_days);
+  const lowSuctionStage = typeof reason.low_suction_stage_label === "string" ? reason.low_suction_stage_label : null;
+  const lowSuctionQuality = typeof reason.low_suction_launch_quality_label === "string" ? reason.low_suction_launch_quality_label : null;
+  const lowSuctionDragon = typeof reason.low_suction_dragon_label === "string" ? reason.low_suction_dragon_label : null;
   const supportType = typeof reason.support_type === "string" ? reason.support_type : null;
   const state = typeof reason.dragon_state === "string" ? reason.dragon_state : null;
   const parts: string[] = [];
   if (state) parts.push(dragonStateLabel(state));
   if (supportType) parts.push(supportTypeLabel(supportType));
+  if (lowSuctionStage && lowSuctionStage !== "非低吸蓄势") parts.push(lowSuctionStage);
+  if (lowSuctionQuality && lowSuctionQuality !== "非低吸买点") parts.push(lowSuctionQuality);
+  if (lowSuctionDragon && lowSuctionDragon !== "非低吸龙回头" && lowSuctionDragon !== "标准龙回头") parts.push(lowSuctionDragon);
   if (lowSuctionDays != null) parts.push(`低吸${lowSuctionDays.toFixed(0)}天`);
   if (supportHoldDays != null) parts.push(`支撑${supportHoldDays.toFixed(0)}天`);
   if (convergence != null) parts.push(`均线收敛${formatPct(convergence)}`);
   if (lowSuctionScore != null) parts.push(`低吸分${formatNumber(lowSuctionScore, 1)}`);
   return parts;
+}
+
+function candidateMarketFacts(reason: Record<string, unknown>): string {
+  const summary = reason.market_context_summary;
+  if (summary && typeof summary === "object") {
+    const row = summary as Record<string, unknown>;
+    const label = typeof row.label === "string" ? row.label : null;
+    const notes = Array.isArray(row.notes) ? row.notes.map((item) => String(item)).filter(Boolean).slice(0, 3) : [];
+    const parts = [label, ...notes].filter(Boolean);
+    if (parts.length) return `大盘: ${parts.join(" / ")}`;
+  }
+  const regime = typeof reason.dynamic_market_label === "string" ? reason.dynamic_market_label : null;
+  const warning = typeof reason.market_warning_label === "string" ? reason.market_warning_label : null;
+  const fund = typeof reason.fund_flow_label === "string" ? reason.fund_flow_label : null;
+  const recovery = typeof reason.recovery_label === "string" ? reason.recovery_label : null;
+  const parts = [regime, warning, fund, recovery].filter(Boolean);
+  return parts.length ? `大盘: ${parts.join(" / ")}` : "";
 }
 
 function candidateScoreReason(
@@ -876,6 +958,11 @@ function candidateStats(items: QuantRecommendation[]) {
     watchCount,
     failedRules: [...failedRuleSet].sort(),
   };
+}
+
+function compactDateTime(value?: string | null): string {
+  if (!value) return "";
+  return value.replace("T", " ").slice(0, 16);
 }
 
 export function QuantBoardSelector({
