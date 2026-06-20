@@ -601,6 +601,23 @@ def test_scheduler_triggers_matching_batch_schedule(monkeypatch):
     assert triggered[0]["schedule_id"] == "eod_18h"
 
 
+def test_scheduler_skips_weekend_for_weekday_cron(monkeypatch):
+    import datetime as dt
+
+    triggered: list[dict[str, Any]] = []
+    monkeypatch.setattr(svc, "start_sync_batch", lambda **kw: triggered.append(kw) or {"id": "x"})
+    monkeypatch.setattr(
+        svc,
+        "_load_batch_schedules",
+        lambda: [{"id": "eod_18h", "cron": "0 18 * * 1-5", "enabled": True, "action": "sync", "job_ids": ["sync_stock_list"], "concurrency": 8, "last_started_at": None}],
+    )
+    monkeypatch.setattr(svc, "_now_china", lambda: dt.datetime(2026, 6, 20, 18, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))))
+
+    svc._run_scheduled_jobs()
+
+    assert not triggered
+
+
 def test_scheduler_triggers_tail_preview_schedule(monkeypatch):
     import datetime as dt
 

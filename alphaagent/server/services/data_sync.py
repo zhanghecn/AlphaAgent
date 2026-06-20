@@ -3327,12 +3327,16 @@ def _cron_matches(cron_expr: str, now: datetime) -> bool:
                 return True
         return False
 
+    # Cron day-of-week uses 0/7 for Sunday and 1-6 for Monday-Saturday.
+    # Python datetime.weekday() uses 0 for Monday, so translate explicitly.
+    cron_dow = (now.weekday() + 1) % 7
+
     return (
         _field_matches(minute_pat, now.minute)
         and _field_matches(hour_pat, now.hour)
         and _field_matches(dom_pat, now.day)
         and _field_matches(month_pat, now.month)
-        and _field_matches(dow_pat, now.weekday())
+        and _field_matches(dow_pat, cron_dow)
     )
 
 
