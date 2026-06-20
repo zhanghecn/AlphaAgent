@@ -98,13 +98,14 @@ vn.py 中数据需要分清四类：
 2026-06-18 起，数据同步从「24 个分散单任务 cron」改为「统一的批量增量定时档」：
 
 - 新表 `sync_batch_schedules`（`schema.py`）：一条 = 一个 cron + 有序 `job_ids` + `concurrency` + `enabled`。
-- 默认 seed 两档：`intraday_14h`（14:00 盘中：股票清单快照 + 当日分钟线 + 资金流 + 热度 + 涨停池）、`eod_18h`（18:00 盘后：完整日K + 板块 + 龙虎榜 + 公告 + 财报；龙虎榜排末尾因 18:00 后才发布）。
+- 默认 seed 三档：`tail_preview_14h`（14:00 盘中预备）、`tail_quant_1430`（14:30 尾盘确认）和 `eod_18h`（18:00 盘后补完整日K + 板块 + 龙虎榜 + 公告 + 财报；龙虎榜排末尾因 18:00 后才发布）。
 - `DEFAULT_JOBS` 的 24 个单任务 `schedule_cron` 已全部清空；调度器 `_run_scheduled_jobs` 改为遍历 `sync_batch_schedules`，cron 匹配则触发 `start_sync_batch(job_ids=..., concurrency=..., source="schedule")`。
 - 批量执行 `_run_sync_batch`：任务按 `job_ids` 顺序串行（保证数据依赖），单任务失败不再中止整批（终态 `succeeded`/`partial`/`failed`）；基础任务（`sync_stock_list`/`sync_sector_list`）失败时用 `_depends_on` 跳过其下游。
 - 日K/分钟K 任务内 `ThreadPoolExecutor(concurrency)` 并发拉全A；真增量：按每只股票最后 bar 日期 `start_date` 续传（`_last_bar_dates_daily`/`_last_bar_dates_minute`），修复旧 `only_missing`「整只跳过」导致老股不更新当日新 bar 的缺陷。
 - API：`GET/POST/PATCH/DELETE /api/data-sync/schedules`、`POST /schedules/{id}/run`；前端 `/data` 同步管理 tab 新增「定时计划」区（启停/立即执行/新增自定义档）。
 - 数据时效约束：14:00 档拿不到当日完整日K（AkShare 日线收盘后才更新）、龙虎榜（18:00 后）、财报（22:00 后）；这些只在 18:00 档跑。可自定义加更晚档。
 - 并发度默认 8（AkShare 公开端限流克制值），每档可配。
+- 尾盘预览的默认交易日必须来自晚于最新完整日线的真实 `stock_minute_bars.trade_date`。`stocks.updated_at` 只表示股票清单/快照同步时间，不能当作交易日；没有新分钟线时返回等待状态，不生成也不持久化假预览。
 
 关键源码：
 
@@ -122,6 +123,12 @@ vn.py 中数据需要分清四类：
 - 触发 `intraday_14h`：5/5 `succeeded`（stock_list 4000只 → 分钟线 23520 → 资金流 → 热度 → 涨停池），任务按序、并发拉取、进度追踪 ✓
 - 分钟K增量修复：`only_missing` 与 `incremental` 互斥（`only_missing = only_missing and not incremental`）。修复前 `only_missing=True` 会拉「下一批未同步的全量历史」而非当日增量；修复后 `incremental` 主导，对每只活跃股从最后 bar `start_date` 续传，已同步股增量跳过 → `read=0`（不重复拉历史）✓
 - 日K增量：`incremental` 默认 True，按每只最后日K日期 `start_date` 续传（trade_date 是 date 类型，eod 档启用）。
+
+2026-06-20 休市日复核（Docker API 容器）：
+
+- 当前完整日线、分钟线和历史候选均停在 `2026-06-18`；`stocks.updated_at` 可能更新到休市日，但不再驱动尾盘预览交易日。
+- `GET /api/quant/tail-preview?limit=5` 返回 `status=waiting_for_intraday_data`、`base_daily_date=2026-06-18`、`latest_intraday_date=null`，不会返回假的 `2026-06-19` 候选。
+- `GET /api/data-sync/tail-workflow` 在 `/quant` 和 `/data` 可见同步口径：完整日线、分钟线、盘中快照、候选日期、尾盘预览状态，以及 14:00/14:30/18:00 定时任务最近状态。
 
 已知优化点（非阻塞，后续可做）：
 

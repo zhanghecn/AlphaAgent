@@ -94,8 +94,8 @@ docker compose -f docker-compose.local.yml up -d
 
 核心接口：
 
-- `GET /api/data-sync/tail-workflow`: 尾盘准备状态，包含最新完整日线、盘中快照、分钟线、候选日期、今日尾盘预览缓存和 14:00/14:30/18:00 计划。该接口只返回最新研究任务摘要，不返回 `screen_run.items` 等全量候选明细；候选明细走 `/api/quant/recommendations`。
-- `GET /api/quant/tail-preview?limit=50`: 今日尾盘候选预览。默认优先读取当天 `quant_tail_preview_cache`；没有当天缓存时才现场计算。使用最新完整日线叠加今日分钟线/快照临时 K 线，只读返回 `preview_mode=tail_intraday`、`temporary_bar=true`，不写 `quant_signal_runs`，不参与历史回测收益统计。若当天日线只有少量股票（当前完整阈值 3000 只），预览继续使用上一完整日线作为 `base_daily_date`；传 `refresh=true` 可强制重算但仍不写历史候选。
+- `GET /api/data-sync/tail-workflow`: 尾盘准备状态，包含最新完整日线、盘中快照、分钟线、候选日期、今日尾盘预览缓存和 14:00/14:30/18:00 计划。该接口只返回最新研究任务摘要，不返回 `screen_run.items` 等全量候选明细；候选明细走 `/api/quant/recommendations`。`/quant` 候选区也读取该接口，直接显示最近同步时间和定时任务成功/失败状态。
+- `GET /api/quant/tail-preview?limit=50`: 今日尾盘候选预览。默认优先读取当天 `quant_tail_preview_cache`；没有当天缓存时才现场计算。使用最新完整日线叠加今日分钟线/快照临时 K 线，只读返回 `preview_mode=tail_intraday`、`temporary_bar=true`，不写 `quant_signal_runs`，不参与历史回测收益统计。尾盘预览交易日必须来自晚于最新完整日线的真实 `stock_minute_bars.trade_date`；`stocks.updated_at` 只表示快照同步时间，不能生成新交易日。若当天日线只有少量股票（当前完整阈值 3000 只），预览继续使用上一完整日线作为 `base_daily_date`；没有新分钟线时返回 `waiting_for_intraday_data` 且不写缓存；传 `refresh=true` 可强制重算但仍不写历史候选。
 - `POST /api/data-sync/tail-workflow/prepare`: 手动执行 `tail_preview_14h`，同步关键快照/分钟/资金/热度/涨停池后生成今日尾盘预览缓存。
 - `POST /api/data-sync/batches/run-all`: 一键同步批次。
 - `GET /api/data-sync/batches/latest`: 查看最新批次进度。
@@ -108,7 +108,8 @@ docker compose -f docker-compose.local.yml up -d
 
 当前数据事实：
 
-- 默认定时计划为工作日 `14:00` 的 `tail_preview_14h` 和 `14:30` 的 `tail_quant_1430`：两者都同步关键盘中数据、个股资金流、板块资金流、热度和涨停池，并生成今日尾盘预览缓存，不再触发历史策略研究；旧 `intraday_14h` 和 `tail_prepare_14h` 自动禁用。`18:00` 的 `eod_18h` 仍补完整盘后真实数据。历史候选和回测仍使用完整日线；今日尾盘预览通过“历史完整日线 + 今日分钟线/快照临时 Bar”只读计算，不能污染 `stock_daily_bars` 或历史候选表。`/data` 同时显示最新日线日期和最新完整日线日期，防止部分入库日期被误判为全市场完整数据。
+- 默认定时计划为工作日 `14:00` 的 `tail_preview_14h` 和 `14:30` 的 `tail_quant_1430`：两者都同步关键盘中数据、个股资金流、板块资金流、热度和涨停池，并生成今日尾盘预览缓存，不再触发历史策略研究；旧 `intraday_14h` 和 `tail_prepare_14h` 自动禁用。`18:00` 的 `eod_18h` 仍补完整盘后真实数据。历史候选和回测仍使用完整日线；今日尾盘预览通过“历史完整日线 + 今日分钟线/快照临时 Bar”只读计算，不能污染 `stock_daily_bars` 或历史候选表。`/data` 和 `/quant` 同时显示最新日线日期、最新完整日线日期、分钟线日期和尾盘预览状态，防止部分入库日期或快照更新时间被误判为交易日。
+- 2026-06-20 休市日复核：最新完整日线 `2026-06-18`，最新分钟线 `2026-06-18`，历史候选 `2026-06-18`；`stocks.updated_at` 更新到 `2026-06-20` 也不会生成 `2026-06-19` 预览。`GET /api/quant/tail-preview?limit=5` 返回 `waiting_for_intraday_data`，`GET /api/data-sync/tail-workflow` 返回尾盘预览 `waiting` 并显示 14:30/18:00 任务最近失败原因为 API 重启打断。
 - 2026-06-18 验证：手动触发 `tail_quant_1430` 成功生成 `quant_tail_preview_cache`，`trade_date=2026-06-18`，`base_daily_date=2026-06-17`，`total=2497`，`recommendation_count=100`；`GET /api/quant/tail-preview?limit=5` 返回缓存前五名：晶方科技、三力制药、能科科技、XD春秋电、中金岭南。盘后股票日线已补到完整 `2026-06-18`。
 - 2026-06-18 盘后真实量化已补齐：`GET /api/quant/screen-runs?limit=1` 返回当前 schema run `#5768 / 2026-06-18`，`candidate_count=2502`、`recommendation_count=100`；数据库 `quant_stock_signals` 当日 `2502` 条、`quant_recommendations` 当日 `100` 条。当前产品组合回测基线为 `#203/#194 / 0.1.21`，覆盖 `2025-03-26` 至 `2026-06-18`，收益约 `+82.99%`，最大回撤约 `-15.59%`，买入/卖出/持仓中 `224 / 214 / 10`。诊断回测 `#204` 因局部刷新 `2026-06-12` 候选缓存导致末端买入路径变化，已标记 `exclude_from_product_baseline=true`，不会被 `baseline_only=true` 返回。
 - 2026-06-19 回测缓存规则更新：`persist=false` 的临时组合回测也会尝试复用同版本完整 `quant_stock_signals` 候选缓存；如果某个交易日候选行过少，会按日期移出缓存并现场重算，避免早期稀疏缓存污染收益结论。本地已确认 `2025-08-06..2025-09-12` 存在稀疏候选缓存，完整全区间实验如果触发这些日期会变慢但更可靠。

@@ -2424,6 +2424,11 @@ def tail_workflow_status() -> dict[str, Any]:
         latest_snapshot_updated = session.execute(select(func.max(schema.stocks.c.updated_at))).scalar()
         latest_snapshot_trade_time = session.execute(select(func.max(schema.stocks.c.trade_time))).scalar()
         latest_minute_date = session.execute(select(func.max(schema.stock_minute_bars.c.trade_date))).scalar()
+        latest_tail_intraday_date = session.execute(
+            select(func.max(schema.stock_minute_bars.c.trade_date)).where(
+                schema.stock_minute_bars.c.interval == "1m"
+            )
+        ).scalar()
         latest_minute_time = session.execute(select(func.max(schema.stock_minute_bars.c.bar_time))).scalar()
         latest_candidate = session.execute(
             select(schema.quant_signal_runs)
@@ -2469,20 +2474,19 @@ def tail_workflow_status() -> dict[str, Any]:
         latest_replay_run,
         latest_backtest,
     )
-    intraday_ready = bool(latest_snapshot_updated or latest_minute_time)
     candidate_date = latest_candidate["trade_date"] if latest_candidate else None
-    tail_preview_trade_date = _tail_preview_trade_date(latest_snapshot_updated)
+    tail_preview_trade_date = _tail_preview_trade_date(latest_tail_intraday_date, latest_complete_daily_date)
     tail_preview_ready = bool(
         tail_preview_trade_date
         and latest_complete_daily_date
         and tail_preview_trade_date > latest_complete_daily_date
-        and intraday_ready
     )
     usable_tail_cache = (
         latest_tail_cache
         if latest_tail_cache
         and tail_preview_trade_date
         and latest_tail_cache.get("trade_date") == tail_preview_trade_date
+        and _tail_preview_cache_has_intraday(dict(latest_tail_cache))
         else None
     )
     usable_tail_cache_payload = (
@@ -2505,7 +2509,7 @@ def tail_workflow_status() -> dict[str, Any]:
         "tail_prepare_schedule": schedules.get("tail_preview_14h") or schedules.get("tail_prepare_14h"),
         "tail_quant_schedule": schedules.get("tail_quant_1430"),
         "eod_schedule": schedules.get("eod_18h"),
-        "tail_prepare_ready": intraday_ready,
+        "tail_prepare_ready": bool(tail_preview_ready or usable_tail_cache),
         "tail_preview": {
             "status": "ready" if (tail_preview_ready or usable_tail_cache) else "waiting",
             "trade_date": tail_preview_trade_date.isoformat() if tail_preview_trade_date else None,
@@ -2517,11 +2521,12 @@ def tail_workflow_status() -> dict[str, Any]:
             "cached_recommendation_count": int(usable_tail_cache.get("recommendation_count") or 0) if usable_tail_cache else 0,
             "cached_total": int(usable_tail_cache.get("total") or 0) if usable_tail_cache else 0,
             "snapshot_updated_at": _iso_or_none(latest_snapshot_updated),
+            "latest_intraday_date": _iso_or_none(latest_tail_intraday_date),
             "minute_latest_date": _iso_or_none(latest_minute_date),
             "message": (
                 "今日尾盘预览可用；使用盘中快照/分钟线临时K线，不写入历史候选。"
                 if tail_preview_ready or usable_tail_cache
-                else "等待今日盘中快照，或完整日线已覆盖无需预览。"
+                else "等待晚于最新完整日线的盘中分钟线；不会只用同步时间生成尾盘预览。"
             ),
         },
         "message": "历史候选仍使用完整日线；今日尾盘预览使用盘中临时K线，不参与回测收益统计。",
@@ -2534,15 +2539,31 @@ def _iso_or_none(value: Any) -> str | None:
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
-def _tail_preview_trade_date(snapshot_updated_at: Any) -> date | None:
-    if snapshot_updated_at is None:
+def _tail_preview_trade_date(latest_intraday_date: Any, latest_complete_daily_date: Any) -> date | None:
+    if latest_intraday_date is None:
         return None
-    if isinstance(snapshot_updated_at, date) and not isinstance(snapshot_updated_at, datetime):
-        return snapshot_updated_at
-    if hasattr(snapshot_updated_at, "date"):
-        return snapshot_updated_at.date()
-    parsed = _parse_datetime(str(snapshot_updated_at))
-    return parsed.date() if parsed else None
+    candidate = latest_intraday_date
+    if isinstance(candidate, datetime):
+        candidate = candidate.date()
+    elif not isinstance(candidate, date):
+        candidate = _parse_date(candidate)
+    if candidate is None:
+        return None
+    complete = latest_complete_daily_date
+    if isinstance(complete, datetime):
+        complete = complete.date()
+    elif complete is not None and not isinstance(complete, date):
+        complete = _parse_date(complete)
+    if complete is not None and candidate <= complete:
+        return None
+    return candidate
+
+
+def _tail_preview_cache_has_intraday(cache_row: dict[str, Any]) -> bool:
+    payload = cache_row.get("payload") if isinstance(cache_row.get("payload"), dict) else {}
+    if int(payload.get("intraday_bar_count") or 0) > 0:
+        return True
+    return bool(payload.get("latest_intraday_date"))
 
 
 def _compact_latest_research_run(run: dict[str, Any] | None) -> dict[str, Any] | None:

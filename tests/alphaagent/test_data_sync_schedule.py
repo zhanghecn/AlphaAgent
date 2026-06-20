@@ -8,6 +8,7 @@ requirements/alphaagent_unified_schedule_execution_plan.md
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from typing import Any
 
 from alphaagent.server.db import schema
@@ -200,6 +201,22 @@ def test_tail_preview_cache_batch_job_generates_cache(monkeypatch):
     assert captured["source_schedule_id"] == "tail_quant_1430"
     assert result["rows_read"] == 80
     assert result["rows_written"] == 12
+
+
+def test_tail_preview_trade_date_requires_intraday_after_complete_daily():
+    assert svc._tail_preview_trade_date(date(2026, 6, 18), date(2026, 6, 18)) is None
+    assert svc._tail_preview_trade_date(datetime(2026, 6, 19, 14, 30), date(2026, 6, 18)) == date(2026, 6, 19)
+    assert svc._tail_preview_trade_date("2026-06-20", "2026-06-18") == date(2026, 6, 20)
+
+
+def test_tail_preview_cache_requires_intraday_evidence():
+    stale_cache = {"payload": {"trade_date": "2026-06-19", "base_daily_date": "2026-06-18"}}
+    ready_cache = {"payload": {"trade_date": "2026-06-19", "latest_intraday_date": "2026-06-19"}}
+    bar_count_cache = {"payload": {"trade_date": "2026-06-19", "intraday_bar_count": 1}}
+
+    assert svc._tail_preview_cache_has_intraday(stale_cache) is False
+    assert svc._tail_preview_cache_has_intraday(ready_cache) is True
+    assert svc._tail_preview_cache_has_intraday(bar_count_cache) is True
 
 
 def test_eod_quant_research_batch_job_waits_for_completion(monkeypatch):

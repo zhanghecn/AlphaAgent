@@ -38,6 +38,8 @@ export interface QuantScreenRun {
   data_source?: string | null;
   temporary_bar?: boolean;
   base_daily_date?: string | null;
+  latest_daily_date?: string | null;
+  latest_intraday_date?: string | null;
   snapshot_updated_at?: string | null;
   snapshot_trade_time?: string | null;
   snapshot_price_count?: number;

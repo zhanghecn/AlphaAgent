@@ -334,6 +334,7 @@ export interface TailWorkflowStatus {
     cached_recommendation_count?: number;
     cached_total?: number;
     snapshot_updated_at?: string | null;
+    latest_intraday_date?: string | null;
     minute_latest_date?: string | null;
     message?: string | null;
   } | null;

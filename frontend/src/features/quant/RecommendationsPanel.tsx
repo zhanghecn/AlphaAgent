@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { TradingDateSelector } from "@/features/quant/TradingDateSelector";
 import { fetchBacktestCandidateTrace, type BacktestCandidateNotPlannedContext, type BacktestCandidateTrace, type QuantRecommendation, type QuantScreenRun, type QuantScreenRunItem, type QuantStrategyOption } from "@/api/quant";
+import type { TailWorkflowStatus } from "@/api/dataSync";
 
 export function RecommendationsPanel({
   isLoading,
@@ -36,6 +37,9 @@ export function RecommendationsPanel({
   activeBacktestId,
   status,
   message,
+  tailWorkflowStatus,
+  tailWorkflowLoading,
+  tailWorkflowError,
   onRetry,
   onRunScreen,
   isRunningScreen,
@@ -63,6 +67,9 @@ export function RecommendationsPanel({
   activeBacktestId?: number | null;
   status?: string;
   message?: string;
+  tailWorkflowStatus?: TailWorkflowStatus;
+  tailWorkflowLoading?: boolean;
+  tailWorkflowError?: unknown;
   onRetry: () => void;
   onRunScreen: () => void;
   isRunningScreen: boolean;
@@ -178,6 +185,11 @@ export function RecommendationsPanel({
           onChange={onSelectedBoardsChange}
           onRun={onRunScreen}
           isRunning={isRunningScreen}
+        />
+        <TailWorkflowSyncStrip
+          workflow={tailWorkflowStatus}
+          isLoading={Boolean(tailWorkflowLoading)}
+          error={tailWorkflowError}
         />
       </div>
       {items.length === 0 ? (
@@ -377,12 +389,95 @@ function TailPreviewSummary({ meta }: { meta?: QuantScreenRun }) {
       <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
         <span>预览日 {meta?.trade_date ?? "--"}</span>
         <span>基础日线 {meta?.base_daily_date ?? "--"}</span>
+        <span>最新分钟线 {meta?.latest_intraday_date ?? "--"}</span>
         <span>快照 {compactDateTime(meta?.snapshot_updated_at) || "--"}</span>
         <span>分钟K {meta?.intraday_bar_count ?? 0} 只</span>
         <span>快照价 {meta?.snapshot_price_count ?? 0} 只</span>
       </div>
       <div className="mt-1 text-xs text-muted-foreground">
         使用盘中临时K线，只做尾盘观察，不写入历史候选和收益统计。
+      </div>
+    </div>
+  );
+}
+
+function TailWorkflowSyncStrip({
+  workflow,
+  isLoading,
+  error,
+}: {
+  workflow?: TailWorkflowStatus;
+  isLoading: boolean;
+  error?: unknown;
+}) {
+  if (isLoading && !workflow) {
+    return (
+      <div className="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+        正在读取同步状态...
+      </div>
+    );
+  }
+
+  if (error && !workflow) {
+    return (
+      <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
+        同步状态读取失败: {(error as Error).message ?? "请稍后刷新"}
+      </div>
+    );
+  }
+
+  if (!workflow) return null;
+
+  const preview = workflow.tail_preview;
+  const previewStatus = preview?.status ?? "unknown";
+  const stateItems = [
+    { label: "完整日线", value: workflow.daily_bar_latest_complete_date ?? workflow.daily_bar_latest_date, detail: compactDateTime(workflow.daily_bar_updated_at) },
+    { label: "分钟线", value: workflow.minute_latest_date, detail: compactDateTime(workflow.minute_latest_time) },
+    { label: "盘中快照", value: compactDateTime(workflow.intraday_snapshot_updated_at), detail: workflow.intraday_snapshot_trade_time },
+    { label: "量化候选", value: workflow.candidate_latest_date, detail: compactDateTime(workflow.candidate_updated_at) },
+    {
+      label: "尾盘预览",
+      value: preview?.trade_date ?? preview?.cached_trade_date ?? statusLabel(previewStatus),
+      detail: preview?.message ?? (preview?.cached_recommendation_count != null ? `缓存 ${preview.cached_recommendation_count} 个推荐` : null),
+    },
+  ];
+
+  const schedules = [
+    { label: "14:00", schedule: workflow.tail_prepare_schedule },
+    { label: "14:30", schedule: workflow.tail_quant_schedule },
+    { label: "18:00", schedule: workflow.eod_schedule },
+  ];
+
+  return (
+    <div className="rounded-md border bg-muted/20 px-3 py-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className="font-medium">同步状态</span>
+          <CompactStatusPill status={previewStatus} />
+          {workflow.status === "unavailable" ? <CompactStatusPill status="unavailable" /> : null}
+        </div>
+        <Button asChild size="sm" variant="outline" className="h-7 px-2 text-xs">
+          <Link to="/data">数据同步</Link>
+        </Button>
+      </div>
+
+      <div className="mt-2 grid gap-2 md:grid-cols-5">
+        {stateItems.map((item) => (
+          <div key={item.label} className="min-w-0">
+            <div className="text-xs text-muted-foreground">{item.label}</div>
+            <div className="mt-0.5 truncate text-sm font-medium tabular-nums">{item.value || "--"}</div>
+            {item.detail ? <div className="mt-0.5 truncate text-xs text-muted-foreground">{item.detail}</div> : null}
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 border-t pt-2 text-xs text-muted-foreground">
+        {schedules.map((item) => (
+          <span key={item.label}>
+            {item.label} {statusLabel(item.schedule?.last_status)} {compactDateTime(item.schedule?.last_finished_at ?? item.schedule?.last_started_at) || "--"}
+            {item.schedule?.last_message ? ` · ${item.schedule.last_message}` : ""}
+          </span>
+        ))}
       </div>
     </div>
   );
@@ -964,6 +1059,39 @@ function candidateStats(items: QuantRecommendation[]) {
 function compactDateTime(value?: string | null): string {
   if (!value) return "";
   return value.replace("T", " ").slice(0, 16);
+}
+
+function statusLabel(status?: string | null): string {
+  if (!status) return "--";
+  const labels: Record<string, string> = {
+    ready: "可用",
+    waiting: "等待",
+    waiting_for_intraday_data: "等待分钟线",
+    unavailable: "不可用",
+    succeeded: "成功",
+    failed: "失败",
+    running: "运行中",
+    pending: "等待",
+    unknown: "未知",
+  };
+  return labels[status] ?? status;
+}
+
+function CompactStatusPill({ status }: { status?: string | null }) {
+  const className =
+    status === "ready" || status === "succeeded"
+      ? "border-green-200 bg-green-50 text-green-700 dark:border-green-500/30 dark:bg-green-500/10 dark:text-green-300"
+      : status === "waiting" || status === "waiting_for_intraday_data" || status === "pending"
+        ? "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300"
+        : status === "failed" || status === "unavailable"
+          ? "border-red-200 bg-red-50 text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300"
+          : "border-border bg-background text-muted-foreground";
+
+  return (
+    <span className={cn("rounded-md border px-1.5 py-0.5 text-xs", className)}>
+      {statusLabel(status)}
+    </span>
+  );
 }
 
 export function QuantBoardSelector({

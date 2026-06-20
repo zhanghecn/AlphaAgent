@@ -5450,6 +5450,8 @@ def test_screen_tail_preview_uses_intraday_temp_bar_without_persisting(monkeypat
     monkeypatch.setattr(screening, "session_scope", fake_session_scope)
     monkeypatch.setattr(screening, "_latest_trade_date", lambda session: today)
     monkeypatch.setattr(screening, "_latest_complete_trade_date", lambda session: base_date)
+    monkeypatch.setattr(screening, "_latest_tail_intraday_trade_date", lambda session, base_daily_date: today)
+    monkeypatch.setattr(screening, "_tail_intraday_date_available", lambda session, trade_date: trade_date == today)
     monkeypatch.setattr(screening, "_daily_symbol_count", lambda session, trade_date: 265 if trade_date == today else 4064)
     monkeypatch.setattr(screening, "_latest_snapshot_updated_at", lambda session: datetime(2026, 6, 18, 14, 1))
     monkeypatch.setattr(screening, "_latest_snapshot_trade_time", lambda session: "14:01:00")
@@ -5485,6 +5487,42 @@ def test_screen_tail_preview_uses_intraday_temp_bar_without_persisting(monkeypat
     assert persisted["called"] is False
 
 
+def test_screen_tail_preview_waits_when_only_snapshot_updated(monkeypatch) -> None:
+    from alphaagent.server.services.quant import screening
+
+    base_date = date(2026, 6, 18)
+
+    class FakeSession:
+        pass
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    def fail_load_stock_universe(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("must not score without real intraday date")
+
+    monkeypatch.setattr(screening, "is_database_configured", lambda: True)
+    monkeypatch.setattr(screening, "_ensure_quant_schema", lambda: None)
+    monkeypatch.setattr(screening, "session_scope", fake_session_scope)
+    monkeypatch.setattr(screening, "_latest_trade_date", lambda session: base_date)
+    monkeypatch.setattr(screening, "_latest_complete_trade_date", lambda session: base_date)
+    monkeypatch.setattr(screening, "_latest_tail_intraday_trade_date", lambda session, base_daily_date: None)
+    monkeypatch.setattr(screening, "_latest_snapshot_updated_at", lambda session: datetime(2026, 6, 19, 14, 1))
+    monkeypatch.setattr(screening, "_latest_snapshot_trade_time", lambda session: "15:00:00")
+    monkeypatch.setattr(screening, "_load_stock_universe", fail_load_stock_universe)
+
+    result = screening.screen_tail_preview(max_symbols=1, recommendation_limit=100, included_boards=["main"])
+
+    assert result["status"] == "waiting_for_intraday_data"
+    assert result["trade_date"] is None
+    assert result["base_daily_date"] == "2026-06-18"
+    assert result["latest_daily_date"] == "2026-06-18"
+    assert result["snapshot_updated_at"] == "2026-06-19T14:01:00"
+    assert result["recommendations"] == []
+
+
 def test_get_tail_preview_prefers_today_cache(monkeypatch) -> None:
     from alphaagent.server.services.quant import screening
 
@@ -5495,6 +5533,8 @@ def test_get_tail_preview_prefers_today_cache(monkeypatch) -> None:
         "strategy_version": "0.1.21",
         "items": [{"vt_symbol": "A"}, {"vt_symbol": "B"}],
         "recommendations": [{"vt_symbol": "A"}, {"vt_symbol": "B"}],
+        "latest_intraday_date": "2026-06-18",
+        "intraday_bar_count": 1,
         "recommendation_count": 2,
         "total": 2,
     }
@@ -5540,6 +5580,42 @@ def test_get_tail_preview_refresh_recomputes(monkeypatch) -> None:
     assert calls["screen"] == 1
 
 
+def test_get_tail_preview_ignores_cache_without_intraday_evidence(monkeypatch) -> None:
+    from alphaagent.server.services.quant import screening
+
+    calls = {"screen": 0}
+    stale_cache = {
+        "status": "ready",
+        "trade_date": "2026-06-19",
+        "base_daily_date": "2026-06-18",
+        "items": [{"vt_symbol": "600000.SSE"}],
+        "recommendations": [{"vt_symbol": "600000.SSE"}],
+        "recommendation_count": 1,
+        "total": 1,
+    }
+
+    monkeypatch.setattr(screening, "_tail_preview_default_trade_date", lambda: date(2026, 6, 19))
+    monkeypatch.setattr(screening, "latest_tail_preview_cache", lambda trade_date, strategy_id: stale_cache)
+
+    def fake_screen(trade_date, **kwargs):
+        del kwargs
+        calls["screen"] += 1
+        return {
+            "status": "waiting_for_intraday_data",
+            "trade_date": trade_date.isoformat(),
+            "items": [],
+            "recommendations": [],
+        }
+
+    monkeypatch.setattr(screening, "screen_tail_preview", fake_screen)
+
+    result = screening.get_tail_preview()
+
+    assert result["status"] == "waiting_for_intraday_data"
+    assert result["recommendations"] == []
+    assert calls["screen"] == 1
+
+
 def test_generate_tail_preview_cache_persists_preview_payload(monkeypatch) -> None:
     from alphaagent.server.services.quant import screening
 
@@ -5566,6 +5642,8 @@ def test_generate_tail_preview_cache_persists_preview_payload(monkeypatch) -> No
             "strategy_version": "0.1.21",
             "base_daily_date": "2026-06-17",
             "latest_daily_date": "2026-06-18",
+            "latest_intraday_date": "2026-06-18",
+            "intraday_bar_count": 1,
             "recommendation_count": 3,
             "total": 21,
             "items": [],

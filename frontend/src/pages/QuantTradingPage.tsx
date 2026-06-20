@@ -19,6 +19,7 @@ import {
   type QuantRecommendation,
   type QuantResearchRun,
 } from "@/api/quant";
+import { fetchTailWorkflowStatus } from "@/api/dataSync";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DEFAULT_BACKTEST_PARAMS, DEFAULT_CANDIDATE_OBSERVATION_LIMIT, DEFAULT_EXECUTION_CANDIDATE_LIMIT, type BacktestParams } from "@/features/quant/constants";
 import { ActionStatus } from "@/features/quant/ActionStatus";
@@ -105,6 +106,13 @@ export function QuantTradingPage() {
     queryFn: () => fetchTailPreview(50, undefined, selectedStrategy),
     enabled: candidateViewMode === "tail_preview",
     staleTime: 10_000,
+  });
+
+  const tailWorkflowStatusQuery = useQuery({
+    queryKey: ["tailWorkflowStatus"],
+    queryFn: fetchTailWorkflowStatus,
+    staleTime: 10_000,
+    refetchInterval: 30_000,
   });
 
   const groupsQuery = useQuery({
@@ -342,6 +350,9 @@ export function QuantTradingPage() {
               activeBacktestId={activeBacktestId}
               status={candidateViewMode === "tail_preview" ? tailPreviewQuery.data?.status : recommendationsQuery.data?.status}
               message={candidateViewMode === "tail_preview" ? tailPreviewQuery.data?.message ?? undefined : recommendationsQuery.data?.message}
+              tailWorkflowStatus={tailWorkflowStatusQuery.data}
+              tailWorkflowLoading={tailWorkflowStatusQuery.isLoading}
+              tailWorkflowError={tailWorkflowStatusQuery.error}
               onRetry={() => {
                 if (candidateViewMode === "tail_preview") {
                   tailPreviewQuery.refetch();

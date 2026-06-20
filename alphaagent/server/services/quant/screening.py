@@ -189,12 +189,21 @@ def screen_tail_preview(
         base_daily_date = _latest_complete_trade_date(session) or latest_daily_date
         snapshot_updated_at = _latest_snapshot_updated_at(session)
         snapshot_trade_time = _latest_snapshot_trade_time(session)
-        as_of = trade_date or _date_from_datetime(snapshot_updated_at)
+        latest_intraday_date = _latest_tail_intraday_trade_date(session, base_daily_date)
+        as_of = trade_date or latest_intraday_date
         as_of_daily_symbol_count = _daily_symbol_count(session, as_of) if as_of else 0
         if base_daily_date is None:
             return {"status": "empty", "message": "stock_daily_bars is empty", "items": [], "recommendations": []}
         if as_of is None:
-            return {"status": "empty", "message": "intraday snapshot is empty", "items": [], "recommendations": []}
+            return _tail_preview_waiting_payload(
+                strategy,
+                base_daily_date=base_daily_date,
+                latest_daily_date=latest_daily_date,
+                latest_intraday_date=latest_intraday_date,
+                snapshot_updated_at=snapshot_updated_at,
+                snapshot_trade_time=snapshot_trade_time,
+                message="暂无晚于最新完整日线的盘中分钟线，不能生成新的尾盘预览。",
+            )
         if as_of <= base_daily_date and as_of_daily_symbol_count >= MIN_COMPLETE_DAILY_SYMBOL_COUNT:
             return {
                 "status": "complete_daily_available",
@@ -208,6 +217,17 @@ def screen_tail_preview(
                 "total": 0,
                 "recommendation_count": 0,
             }
+        if not _tail_intraday_date_available(session, as_of):
+            return _tail_preview_waiting_payload(
+                strategy,
+                trade_date=as_of,
+                base_daily_date=base_daily_date,
+                latest_daily_date=latest_daily_date,
+                latest_intraday_date=latest_intraday_date,
+                snapshot_updated_at=snapshot_updated_at,
+                snapshot_trade_time=snapshot_trade_time,
+                message="目标日期没有盘中分钟线，不能只用快照写库时间生成尾盘预览。",
+            )
 
         boards = normalize_included_boards(included_boards)
         stock_rows = _load_stock_universe(session, max_symbols, boards)
@@ -295,6 +315,7 @@ def screen_tail_preview(
         "min_complete_daily_symbol_count": MIN_COMPLETE_DAILY_SYMBOL_COUNT,
         "snapshot_updated_at": _iso_or_none(snapshot_updated_at),
         "snapshot_trade_time": str(snapshot_trade_time) if snapshot_trade_time else None,
+        "latest_intraday_date": latest_intraday_date.isoformat() if latest_intraday_date else None,
         "snapshot_price_count": snapshot_price_count,
         "intraday_bar_count": intraday_bar_count,
         "items": [
@@ -326,9 +347,9 @@ def get_tail_preview(
     """Return today's tail preview, preferring the internal cache."""
 
     target_trade_date = trade_date or _tail_preview_default_trade_date()
-    if not refresh:
+    if target_trade_date is not None and not refresh:
         cached = latest_tail_preview_cache(target_trade_date, strategy_id=strategy_id)
-        if cached is not None:
+        if cached is not None and _tail_preview_payload_has_intraday(cached):
             return _limit_tail_preview_payload(cached, recommendation_limit)
     return screen_tail_preview(
         target_trade_date,
@@ -361,6 +382,8 @@ def generate_tail_preview_cache(
         included_boards=included_boards,
     )
     if not is_database_configured():
+        return payload
+    if payload.get("status") != "ready" or not _tail_preview_payload_has_intraday(payload):
         return payload
     _ensure_quant_schema()
 
@@ -452,6 +475,8 @@ def latest_tail_preview_cache(
     cache = dict(payload.get("cache") or {})
     if cache.get("signal_evidence_schema_version") != screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION:
         return None
+    if not _tail_preview_payload_has_intraday(payload):
+        return None
     cache.update(
         {
             "status": "cached",
@@ -469,7 +494,8 @@ def _tail_preview_default_trade_date() -> date | None:
         return None
     _ensure_quant_schema()
     with session_scope() as session:
-        return _date_from_datetime(_latest_snapshot_updated_at(session))
+        base_daily_date = _latest_complete_trade_date(session) or _latest_trade_date(session)
+        return _latest_tail_intraday_trade_date(session, base_daily_date)
 
 
 def _limit_tail_preview_payload(payload: dict[str, Any], limit: int) -> dict[str, Any]:
@@ -1322,6 +1348,69 @@ def _latest_snapshot_updated_at(session) -> Any:
 
 def _latest_snapshot_trade_time(session) -> Any:
     return session.execute(select(func.max(schema.stocks.c.trade_time))).scalar()
+
+
+def _latest_tail_intraday_trade_date(session, base_daily_date: date | None) -> date | None:
+    query = select(func.max(schema.stock_minute_bars.c.trade_date)).where(
+        schema.stock_minute_bars.c.interval == "1m"
+    )
+    if base_daily_date is not None:
+        query = query.where(schema.stock_minute_bars.c.trade_date > base_daily_date)
+    return session.execute(query).scalar()
+
+
+def _tail_intraday_date_available(session, trade_date: date) -> bool:
+    count = session.execute(
+        select(func.count()).where(
+            and_(
+                schema.stock_minute_bars.c.trade_date == trade_date,
+                schema.stock_minute_bars.c.interval == "1m",
+            )
+        )
+    ).scalar()
+    return bool(count)
+
+
+def _tail_preview_waiting_payload(
+    strategy,
+    *,
+    base_daily_date: date | None,
+    latest_daily_date: date | None,
+    latest_intraday_date: date | None,
+    snapshot_updated_at: Any,
+    snapshot_trade_time: Any,
+    message: str,
+    trade_date: date | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": "waiting_for_intraday_data",
+        "strategy_id": strategy.id,
+        "strategy_version": strategy.version,
+        "trade_date": trade_date.isoformat() if trade_date else None,
+        "run_id": None,
+        "preview_mode": "tail_intraday",
+        "data_source": TAIL_PREVIEW_DATA_SOURCE,
+        "temporary_bar": True,
+        "base_daily_date": base_daily_date.isoformat() if base_daily_date else None,
+        "latest_daily_date": latest_daily_date.isoformat() if latest_daily_date else None,
+        "latest_intraday_date": latest_intraday_date.isoformat() if latest_intraday_date else None,
+        "snapshot_updated_at": _iso_or_none(snapshot_updated_at),
+        "snapshot_trade_time": str(snapshot_trade_time) if snapshot_trade_time else None,
+        "snapshot_price_count": 0,
+        "intraday_bar_count": 0,
+        "items": [],
+        "recommendations": [],
+        "total": 0,
+        "recommendation_count": 0,
+        "persistence": "read_only_not_persisted",
+        "message": message,
+    }
+
+
+def _tail_preview_payload_has_intraday(payload: dict[str, Any]) -> bool:
+    if int(payload.get("intraday_bar_count") or 0) > 0:
+        return True
+    return bool(payload.get("latest_intraday_date"))
 
 
 def _snapshot_temp_bar(stock: dict[str, Any], trade_date: date, previous_bar: Bar) -> Bar | None:
