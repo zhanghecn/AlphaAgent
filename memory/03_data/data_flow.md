@@ -134,7 +134,7 @@ vn.py 中数据需要分清四类：
 
 - 退市股（如 `001399`/`688797`）每次拉取报「股票数据不存在」被捕获跳过，浪费请求；可在 stocks 表标记退市、`_select_*` 过滤。
 - `adapter.stock_bars` 的 `market_cache` 在同步场景理论上不需要（要最新数据），当前靠 `start_date` 区分 cache key 工作正常；如需可加 `use_cache=False` 透传。
-- 前端「定时计划」区需 rebuild `alphaagent-web` 容器或本地 `pnpm run dev` 才能看到。
+- 前端「定时计划」区需 rebuild `alphaagent-web` 容器才能看到（`docker compose up -d --build alphaagent-web`）。
 - AkShare 当日分钟线依赖数据源更新（交易时段 14:00 有当日，盘外无）。
 
 ## AlphaAgent 量化/回测核查路径

@@ -33,7 +33,8 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
         allow_credentials=False,
-        allow_methods=["GET", "POST"],
+        # 走网关同源后 CORS 基本不触发；这里补全方法，兼容直连调试与未来扩展。
+        allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["*"],
     )
 

@@ -75,6 +75,39 @@ main() {
         print_info "POSTGRES_PASSWORD already set."
     fi
 
+    # JWT_SECRET：留空或仍是占位值则随机生成（≥32 字节）。
+    CURRENT_JWT_SECRET=$(grep "^JWT_SECRET=" .env 2>/dev/null | cut -d= -f2-)
+    if [ -z "$CURRENT_JWT_SECRET" ] || [ "$CURRENT_JWT_SECRET" = "change-me-32-bytes-or-longer-random-hex" ]; then
+        JWT_SECRET=$(generate_secret)
+        if sed --version >/dev/null 2>&1; then
+            sed -i "s/^JWT_SECRET=.*/JWT_SECRET=${JWT_SECRET}/" .env
+        else
+            sed -i '' "s/^JWT_SECRET=.*/JWT_SECRET=${JWT_SECRET}/" .env
+        fi
+        print_success "Generated JWT_SECRET."
+    else
+        print_info "JWT_SECRET already set."
+    fi
+
+    # ADMIN_PASSWORD：留空或仍是占位值则随机生成并打印（务必保存）。
+    CURRENT_ADMIN_PASSWORD=$(grep "^ADMIN_PASSWORD=" .env 2>/dev/null | cut -d= -f2-)
+    if [ -z "$CURRENT_ADMIN_PASSWORD" ] || [ "$CURRENT_ADMIN_PASSWORD" = "change-me-strong-password" ]; then
+        # 只保留字母数字，避免破坏 .env / sed；24 位足够强。
+        ADMIN_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)
+        if sed --version >/dev/null 2>&1; then
+            sed -i "s/^ADMIN_PASSWORD=.*/ADMIN_PASSWORD=${ADMIN_PASSWORD}/" .env
+        else
+            sed -i '' "s/^ADMIN_PASSWORD=.*/ADMIN_PASSWORD=${ADMIN_PASSWORD}/" .env
+        fi
+        print_success "Generated ADMIN_PASSWORD."
+        ADMIN_USERNAME=$(grep "^ADMIN_USERNAME=" .env 2>/dev/null | cut -d= -f2-)
+        ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+        print_warning "Admin login  ->  username: ${ADMIN_USERNAME}  password: ${ADMIN_PASSWORD}"
+        print_warning "请立即保存此密码（.env 已 chmod 600）。"
+    else
+        print_info "ADMIN_PASSWORD already set."
+    fi
+
     mkdir -p data vntrader postgres_data redis_data
     chmod 600 .env
 
@@ -82,8 +115,9 @@ main() {
     echo ""
     echo "Next steps:"
     echo "  docker compose -f docker-compose.local.yml up -d"
-    echo "  docker compose -f docker-compose.local.yml logs -f alphaagent-api"
-    echo "  open http://localhost:5173"
+    echo "  docker compose -f docker-compose.local.yml logs -f alphaagent-gateway"
+    echo "  open http://localhost  (or http://<server-ip>)"
+    echo "  login with ADMIN_USERNAME / ADMIN_PASSWORD from .env"
     echo ""
 }
 

@@ -1,0 +1,14 @@
+# 本地构建产物
+/gateway
+/out
+*.test
+*.out
+
+# 编辑器
+.idea/
+.vscode/
+.DS_Store
+
+# 本地环境
+.env
+.env.*

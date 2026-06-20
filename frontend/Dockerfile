@@ -27,7 +27,7 @@ FROM deps AS dev
 WORKDIR /app
 COPY . .
 
-ENV VITE_API_BASE_URL=http://localhost:8000/api
+ENV VITE_API_BASE_URL=/api
 
 EXPOSE 5173
 
@@ -44,6 +44,6 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY docker-entrypoint.sh /docker-entrypoint.d/99-alphaagent-config.sh
 RUN chmod +x /docker-entrypoint.d/99-alphaagent-config.sh
 
-ENV VITE_API_BASE_URL=http://localhost:8000/api
+ENV VITE_API_BASE_URL=/api
 
 EXPOSE 80

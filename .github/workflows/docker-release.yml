@@ -27,6 +27,9 @@ jobs:
           - name: alphaagent-web
             context: ./frontend
             dockerfile: ./frontend/Dockerfile
+          - name: alphaagent-gateway
+            context: ./gateway
+            dockerfile: ./gateway/Dockerfile
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -58,5 +61,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # gateway Dockerfile 用 ARG VERSION 注入版本号；api/web 未声明该 ARG 会被忽略。
+          build-args: |
+            VERSION=${{ github.ref_name }}
           cache-from: type=gha,scope=${{ matrix.image.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}

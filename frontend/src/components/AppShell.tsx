@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   Compass,
   Database,
@@ -12,9 +12,11 @@ import {
   ChevronRight,
   Sun,
   Moon,
+  LogOut,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/theme/useTheme";
+import { apiClient, authToken } from "@/api/client";
 
 const NAV_ITEMS = [
   { to: "/", label: "今日市场", icon: LayoutDashboard },
@@ -32,8 +34,19 @@ function isActive(pathname: string, to: string): boolean {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const location = useLocation();
+  const navigate = useNavigate();
   const [collapsed, setCollapsed] = useState(false);
   const { theme, toggle } = useTheme();
+
+  const handleLogout = async () => {
+    try {
+      await apiClient.post("/auth/logout");
+    } catch {
+      // 忽略：前端清除 token 即可完成登出。
+    }
+    authToken.clear();
+    navigate("/login", { replace: true });
+  };
 
   return (
     <div className="flex min-h-screen bg-background md:h-screen md:overflow-hidden">
@@ -41,15 +54,26 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <header className="glass aurora fixed inset-x-0 top-0 z-30 border-b md:hidden">
         <div className="flex h-14 items-center justify-between px-4">
           <span className="font-display text-lg font-bold tracking-tight">AlphaAgent</span>
-          <button
-            type="button"
-            onClick={toggle}
-            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            title={theme === "dark" ? "切换到浅色模式" : "切换到深色模式"}
-            aria-label="切换深浅色主题"
-          >
-            {theme === "dark" ? <Sun size={20} /> : <Moon size={20} />}
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={toggle}
+              className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              title={theme === "dark" ? "切换到浅色模式" : "切换到深色模式"}
+              aria-label="切换深浅色主题"
+            >
+              {theme === "dark" ? <Sun size={20} /> : <Moon size={20} />}
+            </button>
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-destructive"
+              title="退出登录"
+              aria-label="退出登录"
+            >
+              <LogOut size={20} />
+            </button>
+          </div>
         </div>
         <nav className="grid grid-cols-4 gap-1 px-2 pb-2">
           {NAV_ITEMS.map(({ to, label, icon: Icon }) => {
@@ -128,6 +152,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             {!collapsed && (
               <span>{theme === "dark" ? "浅色模式" : "深色模式"}</span>
             )}
+          </button>
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-destructive"
+            title="退出登录"
+          >
+            <LogOut size={18} />
+            {!collapsed && <span>退出登录</span>}
           </button>
         </div>
       </aside>

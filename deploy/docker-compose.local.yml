@@ -4,18 +4,58 @@
 # This configuration uses local directories for data storage instead of named
 # volumes, making server migration a directory copy operation.
 #
+# 流量入口是 alphaagent-gateway（唯一对外端口，默认 80）。
+# api / web 仅在内部网络暴露，必须经网关登录后才能访问。
+#
 # Quick Start:
-#   1. Copy .env.example to .env and configure secrets
-#   2. mkdir -p data postgres_data redis_data
-#   3. docker compose -f docker-compose.local.yml up -d
-#   4. Open http://localhost:5173
+#   1. ./docker-deploy.sh          # 生成 .env（含 JWT_SECRET / ADMIN_PASSWORD）
+#   2. docker compose -f docker-compose.local.yml up -d
+#   3. 打开 http://<server>，用 ADMIN_USERNAME / ADMIN_PASSWORD 登录
+#
+# 后续迭代发版（一条命令，自动拉最新镜像）:
+#   docker compose -f docker-compose.local.yml up -d
 # =============================================================================
 
 services:
+  alphaagent-gateway:
+    image: ${ALPHAAGENT_GATEWAY_IMAGE:-ghcr.io/zhanghecn/alphaagent-gateway:latest}
+    container_name: alphaagent-gateway
+    restart: unless-stopped
+    pull_policy: always
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
+    environment:
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_TOKEN_TTL: ${JWT_TOKEN_TTL:-24h}
+      GATEWAY_PORT: "80"
+      API_UPSTREAM: http://alphaagent-api:8000
+      WEB_UPSTREAM: http://alphaagent-web:80
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${GATEWAY_PORT:-80}:80"
+    depends_on:
+      alphaagent-api:
+        condition: service_healthy
+      alphaagent-web:
+        condition: service_started
+    networks:
+      - alphaagent-network
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/gateway", "-healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   alphaagent-api:
     image: ${ALPHAAGENT_IMAGE:-ghcr.io/zhanghecn/alphaagent-api:latest}
     container_name: alphaagent-api
     restart: unless-stopped
+    pull_policy: always
     ulimits:
       nofile:
         soft: 100000
@@ -33,7 +73,7 @@ services:
       ALPHAAGENT_ENV: ${ALPHAAGENT_ENV:-production}
       ALPHAAGENT_API_HOST: 0.0.0.0
       ALPHAAGENT_API_PORT: 8000
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
       MARKET_TIMEOUT_SECONDS: ${MARKET_TIMEOUT_SECONDS:-8}
       MARKET_PAGE_SIZE: ${MARKET_PAGE_SIZE:-50}
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-alphaagent}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-alphaagent}
@@ -42,8 +82,8 @@ services:
       TUSHARE_API_URL: ${TUSHARE_API_URL:-https://api.tushare.pro}
       TUSHARE_TIMEOUT_SECONDS: ${TUSHARE_TIMEOUT_SECONDS:-12}
       TZ: ${TZ:-Asia/Shanghai}
-    ports:
-      - "${ALPHAAGENT_API_PORT:-8000}:8000"
+    expose:
+      - "8000"
     volumes:
       - ./data:/app/data
       - ./vntrader:/app/.vntrader
@@ -65,15 +105,17 @@ services:
     image: ${ALPHAAGENT_WEB_IMAGE:-ghcr.io/zhanghecn/alphaagent-web:latest}
     container_name: alphaagent-web
     restart: unless-stopped
+    pull_policy: always
     ulimits:
       nofile:
         soft: 100000
         hard: 100000
     environment:
-      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000/api}
+      # 同源经网关访问，前端用相对 /api。
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
       TZ: ${TZ:-Asia/Shanghai}
-    ports:
-      - "${ALPHAAGENT_WEB_PORT:-5173}:80"
+    expose:
+      - "80"
     depends_on:
       alphaagent-api:
         condition: service_healthy

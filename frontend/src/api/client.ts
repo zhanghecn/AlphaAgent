@@ -10,11 +10,12 @@ declare global {
 }
 
 const runtimeConfig = typeof window === "undefined" ? undefined : window.__ALPHAAGENT_CONFIG__;
+// 默认同源相对路径：前端经网关统一入口访问，/api 由 gateway 代理到后端。
 const BASE_URL =
   runtimeConfig?.API_BASE_URL ||
   runtimeConfig?.VITE_API_BASE_URL ||
   import.meta.env.VITE_API_BASE_URL ||
-  "http://localhost:8000/api";
+  "/api";
 
 export function apiUrl(path: string): string {
   return `${BASE_URL}${path}`;
@@ -34,12 +35,52 @@ export class ApiClientError extends Error {
   }
 }
 
+// ===== 认证 token（JWT 经 Authorization 头携带，存 localStorage）=====
+const TOKEN_KEY = "alphaagent_token";
+
+export const authToken = {
+  get: () => (typeof window === "undefined" ? null : localStorage.getItem(TOKEN_KEY)),
+  set: (token: string) => localStorage.setItem(TOKEN_KEY, token),
+  clear: () => localStorage.removeItem(TOKEN_KEY),
+};
+
+// 登录相关端点不触发 401 → /login 跳转（避免登录失败时跳回自己）。
+const PUBLIC_API_PATHS = ["/auth/login", "/auth/me", "/auth/logout"];
+
+function isPublicApiPath(path: string): boolean {
+  return PUBLIC_API_PATHS.some((p) => path === p || path.startsWith(`${p}/`));
+}
+
+function buildHeaders(extra?: HeadersInit): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+  const token = authToken.get();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (extra) Object.assign(headers, extra as Record<string, string>);
+  return headers;
+}
+
+// 收到 401 且非公开端点：清除本地 token 并跳转登录页。
+function handleUnauthorized(url: string): never {
+  authToken.clear();
+  if (typeof window !== "undefined" && window.location.pathname !== "/login") {
+    window.location.href = "/login";
+  }
+  throw new ApiClientError("UNAUTHENTICATED", "请先登录", { status: 401, url }, 401);
+}
+
 async function request<T>(path: string, options?: RequestInit, requestOptions?: { allowErrorData?: boolean }): Promise<T> {
   const url = `${BASE_URL}${path}`;
   const res = await fetch(url, {
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
     ...options,
+    headers: buildHeaders(options?.headers),
   });
+
+  if (res.status === 401 && !isPublicApiPath(path)) {
+    handleUnauthorized(url);
+  }
 
   const body: ApiResponse<T> = await res.json().catch(() => ({
     success: false,
@@ -102,9 +143,10 @@ export const apiClient = {
  */
 export async function plainGet<T>(path: string): Promise<T> {
   const url = `${BASE_URL}${path}`;
-  const res = await fetch(url, {
-    headers: { Accept: "application/json" },
-  });
+  const res = await fetch(url, { headers: buildHeaders({ Accept: "application/json" }) });
+  if (res.status === 401 && !isPublicApiPath(path)) {
+    handleUnauthorized(url);
+  }
   if (!res.ok) {
     throw new ApiClientError(
       `HTTP_${res.status}`,

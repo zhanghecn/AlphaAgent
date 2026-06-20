@@ -1,4 +1,37 @@
 services:
+  alphaagent-gateway:
+    # 统一入口：管理员登录 + 反向代理。对外唯一端口，api/web 不再直接暴露。
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+    restart: unless-stopped
+    environment:
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_TOKEN_TTL: ${JWT_TOKEN_TTL:-24h}
+      GATEWAY_PORT: "80"
+      API_UPSTREAM: http://alphaagent-api:8000
+      WEB_UPSTREAM: http://alphaagent-web:80
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${GATEWAY_PORT:-8080}:80"
+    depends_on:
+      alphaagent-api:
+        condition: service_healthy
+      alphaagent-web:
+        condition: service_started
+    networks:
+      - alphaagent-network
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/gateway", "-healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   alphaagent-api:
     build:
       context: .
@@ -27,8 +60,8 @@ services:
       TUSHARE_API_URL: ${TUSHARE_API_URL:-https://api.tushare.pro}
       TUSHARE_TIMEOUT_SECONDS: ${TUSHARE_TIMEOUT_SECONDS:-12}
       TZ: ${TZ:-Asia/Shanghai}
-    ports:
-      - "${ALPHAAGENT_API_PORT:-8000}:8000"
+    expose:
+      - "8000"
     volumes:
       - alphaagent_data:/app/data
       - alphaagent_vntrader:/app/.vntrader
@@ -50,17 +83,16 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-      target: dev
+      target: runtime
       args:
         PNPM_REGISTRY: ${PNPM_REGISTRY:-https://registry.npmmirror.com}
     restart: unless-stopped
     environment:
-      VITE_API_BASE_URL: http://localhost:8000/api
-    volumes:
-      - ./frontend/src:/app/src
-      - ./frontend/index.html:/app/index.html
-    ports:
-      - "5173:5173"
+      # 同源经网关访问，前端用相对 /api；docker-entrypoint.sh 据此生成 config.js。
+      VITE_API_BASE_URL: /api
+      TZ: ${TZ:-Asia/Shanghai}
+    expose:
+      - "80"
     depends_on:
       alphaagent-api:
         condition: service_healthy

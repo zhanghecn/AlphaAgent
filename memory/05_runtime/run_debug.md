@@ -24,14 +24,7 @@ API：
 uv run uvicorn alphaagent.server.main:app --host 0.0.0.0 --port 8000
 ```
 
-前端：
-
-```bash
-cd frontend
-corepack enable
-pnpm install --frozen-lockfile
-pnpm run dev -- --host 0.0.0.0 --port 5173
-```
+前端：本地开发统一走 Docker Compose（与正式版同架构，见下文 Docker 章节），入口 `http://localhost:8080`，不再单独跑 `pnpm dev`。仅当需要快速预览纯前端改动时，可临时 `pnpm -C frontend dev`（不经网关、无登录，仅本地预览，不作为验证环境）。
 
 常用页面：
 
@@ -42,25 +35,39 @@ pnpm run dev -- --host 0.0.0.0 --port 5173
 
 ## Docker
 
-本地开发默认入口：
+AlphaAgent 容器化由三个自研镜像 + postgres/redis 组成，统一入口是 Go 网关：
+
+- `alphaagent-gateway`（`gateway/`，Go + chi + JWT，~16MB 镜像）：唯一对外端口，负责管理员登录、登录态过滤和反向代理。`/api/auth/*` 自己处理；其余 `/api/*` 鉴权后转发到 `alphaagent-api:8000`；`/*` 转发到 `alphaagent-web`（nginx）。
+- `alphaagent-api`（FastAPI）：仅内部 `expose 8000`，不再对外暴露端口。
+- `alphaagent-web`（Vite build → nginx）：仅内部 `expose 80`，serve 前端 SPA。
+- `postgres` / `redis`：业务数据和缓存。
+
+本地全栈（build 模式，网关默认 `localhost:8080`）：
 
 ```bash
+# 需在 .env 配 ADMIN_PASSWORD / JWT_SECRET（≥32字节），或临时用 shell 环境变量
 docker compose up --build
+# 打开 http://localhost:8080，用 ADMIN_USERNAME/ADMIN_PASSWORD 登录
 ```
 
-当前 Compose 服务：
+日常改前端代码后 rebuild web 容器：`docker compose up -d --build alphaagent-web`（本地与正式版同架构，不再用 5173 dev server）。
 
-- `postgres`: AlphaAgent 业务数据。
-- `redis`: 缓存和任务辅助。
-- `alphaagent-api`: FastAPI 服务，容器内连接 Compose PostgreSQL。
-- `alphaagent-web`: Vite dev server，默认端口 `5173`。
-
-部署入口：
+部署（预构建镜像 + `pull_policy: always`，一条命令发版）：
 
 ```bash
 cd deploy
-./docker-deploy.sh
-docker compose -f docker-compose.local.yml up -d
+./docker-deploy.sh                                # 生成 .env，自动生成 JWT_SECRET / ADMIN_PASSWORD 并打印
+docker compose -f docker-compose.local.yml up -d  # 后续迭代发版同此命令，自动拉最新 :latest
+```
+
+发新版本：`git tag vX.Y.Z && git push origin vX.Y.Z` → CI 并行构建 api/web/gateway 推 `ghcr.io/zhanghecn/<name>:latest` → 服务器执行 `up -d`。
+
+网关本地验证：
+
+```bash
+cd gateway && go test ./...                        # 单测
+ADMIN_PASSWORD=x JWT_SECRET=$(openssl rand -hex 32) GATEWAY_PORT=18888 \
+  go run ./cmd/gateway                             # smoke：/healthz、/api/auth/login、/api/auth/me
 ```
 
 约束：
@@ -68,6 +75,8 @@ docker compose -f docker-compose.local.yml up -d
 - 不要把根目录 `.env` 改回 `host.docker.internal`，容器应使用 Compose 内部数据库。
 - 日常不要使用 `docker compose build --no-cache`，除非正在排查基础镜像或依赖缓存。
 - 前端使用 pnpm，`frontend/package.json` 固定 `pnpm@11.6.0`。
+- `JWT_SECRET` 必须 ≥32 字节，否则网关启动 fail-fast。
+- api/web 端口不再对外，必须经网关登录后访问；不要恢复它们的 `ports:` 映射。
 
 ## Quant Debug
 
