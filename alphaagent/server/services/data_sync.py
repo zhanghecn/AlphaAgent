@@ -43,6 +43,15 @@ ALLOWED_IMPORT_DIRS = (
     PROJECT_ROOT / "data" / "imports",
     PROJECT_ROOT / "memory" / "06_backtests",
 )
+INTERRUPTED_SYNC_JOB_MESSAGE = "API process restarted before this sync job finished."
+INTERRUPTED_SCHEDULE_MESSAGE = "API process restarted before this schedule finished."
+INTERRUPTED_SCHEDULE_RECOVERY_DELAY_SECONDS = 30
+INTERRUPTED_SCHEDULE_RECOVERY_WAIT_SECONDS = 6 * 60 * 60
+INTERRUPTED_SCHEDULE_RECOVERY_POLL_SECONDS = 5
+
+_INTERRUPTED_RECOVERY_LOCK = threading.Lock()
+_INTERRUPTED_SCHEDULE_RECOVERY_IDS: set[str] = set()
+_interrupted_recovery_thread: threading.Thread | None = None
 
 # ─── Source / Job constants ──────────────────────────────────────────────
 
@@ -1482,16 +1491,27 @@ def seed_default_registry() -> None:
         logger.warning("seed_default_registry failed: %s", exc)
 
 
-def mark_interrupted_runs() -> None:
+def mark_interrupted_runs() -> list[str]:
     """Mark runs left in running state by a previous API process as failed."""
+    interrupted_schedule_ids: list[str] = []
     try:
         with session_scope() as session:
+            interrupted_schedule_ids = [
+                str(schedule_id)
+                for schedule_id in session.execute(
+                    select(schema.sync_batch_schedules.c.id).where(
+                        schema.sync_batch_schedules.c.last_status == "running"
+                    )
+                )
+                .scalars()
+                .all()
+            ]
             session.execute(
                 schema.sync_job_runs.update()
                 .where(schema.sync_job_runs.c.status == "running")
                 .values(
                     status="failed",
-                    message="API process restarted before this sync job finished.",
+                    message=INTERRUPTED_SYNC_JOB_MESSAGE,
                     error_type="Interrupted",
                     finished_at=datetime.now(timezone.utc),
                 )
@@ -1501,7 +1521,7 @@ def mark_interrupted_runs() -> None:
                 .where(schema.sync_job_definitions.c.last_status == "running")
                 .values(
                     last_status="failed",
-                    last_message="API process restarted before this sync job finished.",
+                    last_message=INTERRUPTED_SYNC_JOB_MESSAGE,
                     last_finished_at=datetime.now(timezone.utc),
                 )
             )
@@ -1510,12 +1530,15 @@ def mark_interrupted_runs() -> None:
                 .where(schema.sync_batch_schedules.c.last_status == "running")
                 .values(
                     last_status="failed",
-                    last_message="API process restarted before this schedule finished.",
+                    last_message=INTERRUPTED_SCHEDULE_MESSAGE,
                     last_finished_at=datetime.now(timezone.utc),
                 )
             )
     except Exception as exc:
         logger.warning("mark_interrupted_runs failed: %s", exc)
+        return []
+    _queue_interrupted_schedule_recovery(interrupted_schedule_ids)
+    return interrupted_schedule_ids
 
 
 # ─── Public query API ────────────────────────────────────────────────────
@@ -3208,16 +3231,118 @@ def start_data_sync_scheduler() -> None:
     """Start a background thread that runs scheduled jobs."""
     global _scheduler_thread
     if _scheduler_thread is not None and _scheduler_thread.is_alive():
+        start_interrupted_schedule_recovery()
         return
     _scheduler_stop.clear()
     _scheduler_thread = threading.Thread(target=_scheduler_loop, name="data-sync-scheduler", daemon=True)
     _scheduler_thread.start()
+    start_interrupted_schedule_recovery()
     logger.info("Data sync scheduler started")
 
 
 def stop_data_sync_scheduler() -> None:
     """Signal the scheduler to stop."""
     _scheduler_stop.set()
+
+
+def _queue_interrupted_schedule_recovery(schedule_ids: Sequence[str]) -> None:
+    if not schedule_ids:
+        return
+    with _INTERRUPTED_RECOVERY_LOCK:
+        _INTERRUPTED_SCHEDULE_RECOVERY_IDS.update(str(schedule_id) for schedule_id in schedule_ids if schedule_id)
+
+
+def start_interrupted_schedule_recovery(
+    *,
+    delay_seconds: int = INTERRUPTED_SCHEDULE_RECOVERY_DELAY_SECONDS,
+) -> None:
+    """Start a one-shot recovery pass for schedules interrupted by process restart."""
+    global _interrupted_recovery_thread
+    with _INTERRUPTED_RECOVERY_LOCK:
+        if not _INTERRUPTED_SCHEDULE_RECOVERY_IDS:
+            return
+        if _interrupted_recovery_thread is not None and _interrupted_recovery_thread.is_alive():
+            return
+        schedule_ids = sorted(_INTERRUPTED_SCHEDULE_RECOVERY_IDS)
+        _INTERRUPTED_SCHEDULE_RECOVERY_IDS.clear()
+
+    _interrupted_recovery_thread = threading.Thread(
+        target=_delayed_interrupted_schedule_recovery,
+        args=(schedule_ids, max(0, int(delay_seconds))),
+        name="data-sync-interrupted-recovery",
+        daemon=True,
+    )
+    _interrupted_recovery_thread.start()
+
+
+def _finish_interrupted_schedule_recovery() -> None:
+    global _interrupted_recovery_thread
+    with _INTERRUPTED_RECOVERY_LOCK:
+        _interrupted_recovery_thread = None
+        has_pending = bool(_INTERRUPTED_SCHEDULE_RECOVERY_IDS)
+    if has_pending and not _scheduler_stop.is_set():
+        start_interrupted_schedule_recovery(delay_seconds=0)
+
+
+def _delayed_interrupted_schedule_recovery(schedule_ids: list[str], delay_seconds: int) -> None:
+    try:
+        if delay_seconds:
+            _scheduler_stop.wait(timeout=delay_seconds)
+            if _scheduler_stop.is_set():
+                _queue_interrupted_schedule_recovery(schedule_ids)
+                return
+        _recover_interrupted_schedules(schedule_ids)
+    finally:
+        _finish_interrupted_schedule_recovery()
+
+
+def _load_recoverable_interrupted_schedule(schedule_id: str) -> dict[str, Any] | None:
+    if not is_database_configured():
+        return None
+    with session_scope() as session:
+        row = session.execute(
+            select(schema.sync_batch_schedules).where(
+                schema.sync_batch_schedules.c.id == schedule_id,
+                schema.sync_batch_schedules.c.enabled == True,  # noqa: E712
+                schema.sync_batch_schedules.c.last_status == "failed",
+                schema.sync_batch_schedules.c.last_message == INTERRUPTED_SCHEDULE_MESSAGE,
+            )
+        ).mappings().first()
+    return dict(row) if row else None
+
+
+def _latest_sync_batch_running() -> bool:
+    with _BATCH_LOCK:
+        if not _LATEST_BATCH_ID:
+            return False
+        latest = _SYNC_BATCHES.get(_LATEST_BATCH_ID)
+        return bool(latest and latest.get("status") == "running")
+
+
+def _recover_interrupted_schedules(schedule_ids: Sequence[str]) -> None:
+    """Retry schedules that were interrupted by the immediately previous process."""
+    deadline = time.monotonic() + INTERRUPTED_SCHEDULE_RECOVERY_WAIT_SECONDS
+    unique_schedule_ids = list(dict.fromkeys(str(item) for item in schedule_ids if item))
+    for index, schedule_id in enumerate(unique_schedule_ids):
+        while True:
+            if _scheduler_stop.is_set():
+                _queue_interrupted_schedule_recovery(unique_schedule_ids[index:])
+                return
+            row = _load_recoverable_interrupted_schedule(schedule_id)
+            if row is None:
+                break
+            if _latest_sync_batch_running():
+                if time.monotonic() >= deadline:
+                    logger.warning("Interrupted schedule recovery %s timed out waiting for active batch", schedule_id)
+                    break
+                time.sleep(INTERRUPTED_SCHEDULE_RECOVERY_POLL_SECONDS)
+                continue
+            try:
+                _run_schedule_action(row)
+                break
+            except Exception as exc:
+                logger.warning("Interrupted schedule recovery %s failed: %s", schedule_id, exc)
+                break
 
 
 def _scheduler_loop() -> None:

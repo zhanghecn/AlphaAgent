@@ -8,6 +8,7 @@ requirements/alphaagent_unified_schedule_execution_plan.md
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import date, datetime
 from typing import Any
 
@@ -73,6 +74,95 @@ def test_sector_daily_bars_default_limits_slow_eod_scope():
     job = next(item for item in svc.DEFAULT_JOBS if item.id == "sync_sector_daily_bars")
 
     assert job.default_params["sector_limit"] == 300
+
+
+# ── Startup recovery: interrupted schedules are retried programmatically ──
+
+
+def test_mark_interrupted_runs_queues_running_schedules(monkeypatch):
+    class FakeScalarResult:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return ["tail_quant_1430"]
+
+    class FakeSession:
+        def __init__(self):
+            self.execute_count = 0
+
+        def execute(self, stmt):
+            del stmt
+            self.execute_count += 1
+            if self.execute_count == 1:
+                return FakeScalarResult()
+            return None
+
+    fake_session = FakeSession()
+
+    @contextmanager
+    def fake_session_scope():
+        yield fake_session
+
+    queued: list[str] = []
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+    monkeypatch.setattr(svc, "_queue_interrupted_schedule_recovery", lambda ids: queued.extend(ids), raising=False)
+
+    assert svc.mark_interrupted_runs() == ["tail_quant_1430"]
+    assert queued == ["tail_quant_1430"]
+
+
+def test_recover_interrupted_schedules_runs_only_still_interrupted(monkeypatch):
+    rows = {
+        "tail_quant_1430": {
+            "id": "tail_quant_1430",
+            "cron": "30 14 * * 1-5",
+            "enabled": True,
+            "action": "tail_preview",
+            "job_ids": ["sync_stock_list", "sync_stock_minute_bars"],
+            "concurrency": 8,
+            "last_status": "failed",
+            "last_message": svc.INTERRUPTED_SCHEDULE_MESSAGE,
+        },
+        "eod_18h": None,
+    }
+    recovered: list[str] = []
+
+    monkeypatch.setattr(svc, "_load_recoverable_interrupted_schedule", lambda schedule_id: rows.get(schedule_id), raising=False)
+    monkeypatch.setattr(svc, "_run_schedule_action", lambda row: recovered.append(row["id"]))
+
+    svc._recover_interrupted_schedules(["tail_quant_1430", "eod_18h"])
+
+    assert recovered == ["tail_quant_1430"]
+
+
+def test_start_interrupted_schedule_recovery_drains_queue(monkeypatch):
+    started: list[tuple[list[str], int]] = []
+
+    class FakeThread:
+        def __init__(self, *, target, args, name, daemon):
+            started.append((list(args[0]), args[1]))
+            self.target = target
+            self.args = args
+            self.name = name
+            self.daemon = daemon
+
+        def is_alive(self):
+            return False
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(svc.threading, "Thread", FakeThread)
+    svc._interrupted_recovery_thread = None
+    svc._INTERRUPTED_SCHEDULE_RECOVERY_IDS.clear()
+
+    svc._queue_interrupted_schedule_recovery(["eod_18h", "tail_quant_1430"])
+    svc.start_interrupted_schedule_recovery(delay_seconds=0)
+
+    assert started == [(["eod_18h", "tail_quant_1430"], 0)]
+    assert not svc._INTERRUPTED_SCHEDULE_RECOVERY_IDS
+    svc._interrupted_recovery_thread = None
 
 
 # ── Task 3: start_sync_batch accepts custom job_ids / concurrency / source ─
