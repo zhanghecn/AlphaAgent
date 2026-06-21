@@ -21,6 +21,23 @@
 
 需求分析文档单独放在项目根目录的 `requirements/`，例如 `requirements/alphaagent_requirement_map.md`。
 
+## 建议读取顺序
+
+处理普通项目问题：
+
+1. `memory/09_decisions/decisions.md`
+2. 对应 typed folder 的 overview，例如 `01_project/structure.md` 或 `03_data/data_flow.md`
+3. 具体源码、requirements 或证据文件
+
+处理量化策略问题：
+
+1. `memory/06_backtests/README.md`
+2. `memory/06_backtests/strategy_optimization_ledger.md`
+3. 对应日期实验报告或审计矩阵
+4. 需要实现新功能时再读对应 `requirements/` 计划；当前量化策略状态以 memory 台账为准
+
+不要把日期报告当成当前状态入口；日期报告只是证据。
+
 ## 维护原则
 
 - 只记录已从本地源码、官方文档、实际命令输出验证过的事实。
@@ -37,7 +54,7 @@
 
 - 优先改写已有段落，让文件反映“现在真实状态”。
 - 把重复、过期、冲突的旧记录合并或压缩。
-- 把长报告、CSV、截图说明、回测结果放到专门目录，例如 `memory/06_backtests/`，概要文件只保留结论和链接。
+- 把长报告和回测结果放到专门目录，例如 `memory/06_backtests/`，概要文件只保留结论和链接；CSV、截图、原始 JSON 和长日志不作为长期记忆保留。
 - 每条重要记忆最好能回答：现在是什么状态、如何验证、证据在哪里、下一步风险是什么。
 - 对临时尝试、失败但无长期价值的过程，不为了“记录做过”而追加。
 

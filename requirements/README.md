@@ -19,6 +19,7 @@
 - `alphaagent_quant_feature_drilldown_next_execution_plan.md`: 后续细粒度特征校验执行计划，明确候选信号日特征、固定持有后验、真实组合归因、卖点/替换质量、动态大盘/主线画像、低吸/龙回头生命周期、前端整合和默认关闭实验晋升门槛。
 - `alphaagent_quant_next_experiment_execution_plan.md`: 下一轮默认关闭实验执行计划，在已有特征审计之后继续拆 `candidate_not_planned`、重点股票逐日证据、支撑止损延迟确认、高浮盈回撤保护、低吸假启动观察/降权和满仓换仓质量，要求用统一报告证明收益提升或亏损降低来源。
 - `alphaagent_quant_feature_table_execution_plan.md`: 下一轮特征表校验与默认关闭实验总入口，明确除全局回测外要用哪些候选、生命周期、固定后验、真实执行、卖点替换、市场主线和机会成本表做细致比对，以及实验晋升门槛。
+- 当前量化策略状态和后续方向不再维护零散阶段计划；统一看 `memory/06_backtests/README.md`、`memory/06_backtests/strategy_optimization_ledger.md` 和 `memory/09_decisions/decisions.md`。
 
 ## 维护规则
 

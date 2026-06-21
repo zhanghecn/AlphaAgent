@@ -42,6 +42,7 @@ _templates
 frontend/node_modules/
 node_modules/
 frontend/dist/
+*.tsbuildinfo
 .playwright/
 .playwright-cli/
 .claude/
@@ -49,3 +50,9 @@ frontend/dist/
 # Alpha
 lab/
 /.mypy_cache
+
+# AlphaAgent memory should keep reports and decisions, not generated evidence blobs.
+memory/06_backtests/*.png
+memory/06_backtests/*_raw.json
+memory/06_backtests/*.csv
+memory/06_backtests/*.log
