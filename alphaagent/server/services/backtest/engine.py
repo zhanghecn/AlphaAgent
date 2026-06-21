@@ -54,7 +54,7 @@ from alphaagent.server.services.quant.screening import (
 SUPPORTED_BACKTEST_MINUTE_INTERVALS = execution_models.SUPPORTED_BACKTEST_MINUTE_INTERVALS
 SUPPORTED_EXECUTION_MODELS = execution_models.SUPPORTED_EXECUTION_MODELS
 BACKTEST_LOOKBACK_DAYS = 160
-FACTOR_AUDIT_CACHE_SCHEMA_VERSION = 3
+FACTOR_AUDIT_CACHE_SCHEMA_VERSION = 4
 
 
 def run_backtest(params: BacktestParams) -> dict[str, Any]:
@@ -129,7 +129,7 @@ def list_backtests(
     requested_type = str(run_type or "all").lower()
     requested_strategy = str(strategy_id or "").strip()
     item_limit = min(max(limit, 1), 200)
-    query_limit = item_limit if requested_type == "all" else min(max(item_limit * 10, 200), 1000)
+    query_limit = item_limit if requested_type == "all" and not baseline_only else min(max(item_limit * 10, 200), 1000)
     conditions = []
     if requested_strategy:
         conditions.append(schema.backtest_runs.c.strategy_id == requested_strategy)
@@ -149,7 +149,8 @@ def list_backtests(
         if requested_type in {"portfolio", "symbol"} and payload["run_type"] != requested_type:
             continue
         items.append(payload)
-    if baseline_only and requested_type == "portfolio":
+    if baseline_only:
+        items = [item for item in items if item.get("run_type") == "portfolio"]
         items = _filter_product_baseline_backtests(items)
     items = items[:item_limit]
     return {"status": "ready", "items": items}
@@ -704,10 +705,16 @@ def backtest_execution_model_comparison(backtest_id: int) -> dict[str, Any]:
 def backtest_strategy_comparison(params: BacktestParams, strategies: list[str] | None = None) -> dict[str, Any]:
     """Run registered strategies with the same portfolio backtest parameters."""
 
+    def load_market_contexts(trade_dates: list[date]) -> dict[date, dict[str, Any]]:
+        with session_scope() as session:
+            contexts = market_context.compute_market_contexts(session, schema, trade_dates)
+        return {trade_date: context.to_dict() for trade_date, context in contexts.items()}
+
     return strategy_comparison.compare_strategies(
         params,
         strategies=strategies,
         run_backtest=run_backtest,
+        load_market_contexts=load_market_contexts,
     )
 
 
@@ -977,6 +984,140 @@ def backtest_setup_market_exit_audit(backtest_id: int, lookahead_days: int = 10)
     )
 
 
+def backtest_support_stop_matrix(backtest_id: int, lookahead_days: int = 10, sample_limit: int = 40) -> dict[str, Any]:
+    return queries.backtest_support_stop_matrix(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=_ensure_backtest_schema,
+        load_stock_names=_load_stock_names,
+        symbols_from_rows=_symbols_from_rows,
+        with_stock_names=_with_stock_names,
+        to_api=_mapping_to_api,
+        backtest_id=backtest_id,
+        lookahead_days=lookahead_days,
+        sample_limit=sample_limit,
+    )
+
+
+def backtest_low_suction_confirmed_path_audit(backtest_id: int, lookahead_days: int = 20) -> dict[str, Any]:
+    return queries.backtest_low_suction_confirmed_path_audit(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=_ensure_backtest_schema,
+        load_stock_names=_load_stock_names,
+        symbols_from_rows=_symbols_from_rows,
+        with_stock_names=_with_stock_names,
+        to_api=_mapping_to_api,
+        backtest_id=backtest_id,
+        lookahead_days=lookahead_days,
+    )
+
+
+def backtest_market_phase_audit(backtest_id: int, candidate_top_n: int = 20) -> dict[str, Any]:
+    return queries.backtest_market_phase_audit(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=_ensure_backtest_schema,
+        to_api=_mapping_to_api,
+        backtest_id=backtest_id,
+        candidate_top_n=candidate_top_n,
+    )
+
+
+def backtest_phase_strategy_family_matrix(backtest_id: int, candidate_rank_limits: list[int] | None = None) -> dict[str, Any]:
+    return queries.backtest_phase_strategy_family_matrix(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=_ensure_backtest_schema,
+        to_api=_mapping_to_api,
+        backtest_id=backtest_id,
+        candidate_rank_limits=candidate_rank_limits,
+    )
+
+
+def backtest_replacement_quality_matrix(backtest_id: int, sample_limit: int = 80) -> dict[str, Any]:
+    return queries.backtest_replacement_quality_matrix(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=_ensure_backtest_schema,
+        load_stock_names=_load_stock_names,
+        symbols_from_rows=_symbols_from_rows,
+        with_stock_names=_with_stock_names,
+        to_api=_mapping_to_api,
+        backtest_id=backtest_id,
+        sample_limit=sample_limit,
+    )
+
+
+def backtest_execution_breakpoint_matrix(
+    backtest_id: int,
+    candidate_rank_limit: int = 100,
+    sample_limit: int = 120,
+) -> dict[str, Any]:
+    return queries.backtest_execution_breakpoint_matrix(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=_ensure_backtest_schema,
+        load_stock_names=_load_stock_names,
+        symbols_from_rows=_symbols_from_rows,
+        with_stock_names=_with_stock_names,
+        to_api=_mapping_to_api,
+        backtest_id=backtest_id,
+        candidate_rank_limit=candidate_rank_limit,
+        sample_limit=sample_limit,
+    )
+
+
+def backtest_rotation_opportunity_cost_matrix(
+    backtest_id: int,
+    candidate_rank_limit: int = 20,
+    sample_limit: int = 120,
+    holding_days: int = 20,
+) -> dict[str, Any]:
+    return queries.backtest_rotation_opportunity_cost_matrix(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=_ensure_backtest_schema,
+        load_stock_names=_load_stock_names,
+        symbols_from_rows=_symbols_from_rows,
+        with_stock_names=_with_stock_names,
+        to_api=_mapping_to_api,
+        backtest_id=backtest_id,
+        candidate_rank_limit=candidate_rank_limit,
+        sample_limit=sample_limit,
+        holding_days=holding_days,
+    )
+
+
+def backtest_trend_winner_protection_matrix(
+    backtest_id: int,
+    candidate_rank_limit: int = 20,
+    sample_limit: int = 120,
+    holding_days: int = 20,
+) -> dict[str, Any]:
+    return queries.backtest_trend_winner_protection_matrix(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=_ensure_backtest_schema,
+        load_stock_names=_load_stock_names,
+        symbols_from_rows=_symbols_from_rows,
+        with_stock_names=_with_stock_names,
+        to_api=_mapping_to_api,
+        backtest_id=backtest_id,
+        candidate_rank_limit=candidate_rank_limit,
+        sample_limit=sample_limit,
+        holding_days=holding_days,
+    )
+
+
 def backtest_low_suction_start_factor_audit(backtest_id: int, lookahead_days: int = 10) -> dict[str, Any]:
     return queries.backtest_low_suction_start_factor_audit(
         schema=schema,
@@ -1205,7 +1346,29 @@ def _lock_factor_cache_build(session: Any, backtest_id: int) -> None:
     session.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": 3_700_000_000 + int(backtest_id)})
 
 
-def _build_factor_cache_items(session: Any, run: dict[str, Any], row_limit: int) -> tuple[list[dict[str, Any]], dict[str, int]]:
+def _build_factor_cache_items(session: Any, run: dict[str, Any], row_limit: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if _uses_experiment_candidate_pool(run):
+        signal_rows = session.execute(
+            select(schema.backtest_signal_events)
+            .where(
+                schema.backtest_signal_events.c.backtest_id == int(run["id"]),
+                schema.backtest_signal_events.c.side == "BUY",
+            )
+            .order_by(
+                schema.backtest_signal_events.c.signal_date,
+                schema.backtest_signal_events.c.id,
+            )
+            .limit(row_limit)
+        ).mappings().all()
+        candidate_rows = _signal_event_candidate_rows([dict(row) for row in signal_rows], row_limit=row_limit)
+        return _factor_cache_items_from_candidate_rows(session, run, candidate_rows), {
+            "candidate_count": 0,
+            "signal_count": len(candidate_rows),
+            "used_signal_fallback_count": 0,
+            "signal_event_candidate_count": len(candidate_rows),
+            "candidate_source": "backtest_signal_events",
+        }
+
     filters = [
         schema.quant_recommendations.c.strategy_id == run["strategy_id"],
         schema.quant_recommendations.c.strategy_version == run["strategy_version"],
@@ -1234,6 +1397,20 @@ def _build_factor_cache_items(session: Any, run: dict[str, Any], row_limit: int)
     row_dicts = [dict(row) for row in recommendation_rows]
     signal_dicts = [_signal_row_as_candidate(dict(row)) for row in signal_rows]
     candidate_rows = [*row_dicts, *signal_dicts]
+    items = _factor_cache_items_from_candidate_rows(session, run, candidate_rows)
+    return items, {
+        "candidate_count": len(row_dicts),
+        "signal_count": len(signal_dicts),
+        "used_signal_fallback_count": len(signal_dicts),
+        "candidate_source": "quant_recommendations",
+    }
+
+
+def _factor_cache_items_from_candidate_rows(
+    session: Any,
+    run: dict[str, Any],
+    candidate_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     symbols = _symbols_from_rows(candidate_rows)
     stock_names = _load_stock_names(session, symbols)
     bars_by_symbol = _load_factor_candidate_bars(session, symbols, run["start_date"], run["end_date"])
@@ -1254,10 +1431,62 @@ def _build_factor_cache_items(session: Any, run: dict[str, Any], row_limit: int)
             if current_outcome:
                 outcome.update(current_outcome)
             item["outcome"] = outcome
-    return items, {
-        "candidate_count": len(row_dicts),
-        "signal_count": len(signal_dicts),
-        "used_signal_fallback_count": len(signal_dicts),
+    return items
+
+
+def _uses_experiment_candidate_pool(run: dict[str, Any]) -> bool:
+    params = run.get("params") if isinstance(run.get("params"), dict) else {}
+    return bool(
+        str(params.get("setup_family_filter") or "").strip()
+        or _truthy(params.get("enable_phase_aware_setup_selector", False))
+        or _truthy(params.get("enable_phase_replacement_quality", False))
+    )
+
+
+def _signal_event_candidate_rows(rows: list[dict[str, Any]], *, row_limit: int) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        candidate = _signal_event_candidate_row(row)
+        if candidate is not None:
+            candidates.append(candidate)
+    candidates.sort(
+        key=lambda item: (
+            _as_date(item.get("trade_date")) or date.min,
+            _factor_rank(item) or 10**9,
+            str(item.get("vt_symbol") or ""),
+        )
+    )
+    return candidates[: max(int(row_limit or 0), 0)]
+
+
+def _signal_event_candidate_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    if str(row.get("side") or "").upper() != "BUY":
+        return None
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+    evidence = raw.get("evidence") if isinstance(raw.get("evidence"), dict) else {}
+    execution = raw.get("candidate_execution") if isinstance(raw.get("candidate_execution"), dict) else {}
+    if not evidence:
+        return None
+    signal_date = _as_date(row.get("signal_date") or row.get("trade_date"))
+    if signal_date is None:
+        return None
+    rank = _safe_int_or_none(execution.get("execution_candidate_rank"))
+    if rank is None:
+        rank = _safe_int_or_none(execution.get("raw_signal_rank"))
+    total_score = _safe_float(row.get("score"))
+    if total_score is None:
+        total_score = _safe_float(evidence.get("total_score") or evidence.get("entry_total_score"))
+    return {
+        "trade_date": signal_date,
+        "vt_symbol": str(row.get("vt_symbol") or ""),
+        "rank": rank,
+        "action": "BUY",
+        "total_score": total_score,
+        "reason": evidence,
+        "source": "backtest_signal_events",
+        "execute_date": _as_date(row.get("execute_date") or row.get("trade_date")),
+        "signal_event_id": row.get("id"),
+        "candidate_execution": execution,
     }
 
 
@@ -1665,6 +1894,7 @@ def _score_day(
     score_context: ScoreContext | None = None,
 ):
     needs_market_context = params.enable_low_suction_market_risk_penalty
+    needs_market_context = needs_market_context or params.enable_phase_aware_setup_selector
     if needs_market_context and (score_cache is None or trade_date not in score_cache):
         score_cache = _score_cache_with_market_context(session, score_cache, trade_date)
     return scoring.score_day(
@@ -1699,7 +1929,7 @@ def _score_candidates_for_day(
         load_lhb_scores=_load_lhb_scores,
         financial_scores_from_context=_financial_scores_from_context,
     )
-    if params.enable_low_suction_market_risk_penalty:
+    if params.enable_low_suction_market_risk_penalty or params.enable_phase_aware_setup_selector:
         _attach_scores_market_context(session, scores, trade_date)
     return scores
 
@@ -1770,7 +2000,7 @@ def _load_score_cache_from_persisted_signals(
     if not any(by_date.values()):
         return None
 
-    if params.enable_low_suction_market_risk_penalty:
+    if params.enable_low_suction_market_risk_penalty or params.enable_phase_aware_setup_selector:
         by_date = _score_cache_with_market_context(session, by_date, *sorted(required_dates))
 
     for scores in by_date.values():
@@ -3691,6 +3921,11 @@ def _params_from_run(run: dict[str, Any]) -> BacktestParams:
         enable_low_suction_market_risk_penalty=_truthy(raw_params.get("enable_low_suction_market_risk_penalty", False)),
         enable_market_adaptive_setup_weighting=_truthy(raw_params.get("enable_market_adaptive_setup_weighting", False)),
         enable_low_suction_first_lift_bonus=_truthy(raw_params.get("enable_low_suction_first_lift_bonus", False)),
+        enable_low_suction_lifecycle_ranking=_truthy(raw_params.get("enable_low_suction_lifecycle_ranking", False)),
+        enable_dynamic_failed_launch_exit_stop=_truthy(raw_params.get("enable_dynamic_failed_launch_exit_stop", False)),
+        enable_dynamic_failed_launch_replacement_quality_gate=_truthy(
+            raw_params.get("enable_dynamic_failed_launch_replacement_quality_gate", False)
+        ),
         enable_failed_launch_exit_stop=_truthy(raw_params.get("enable_failed_launch_exit_stop", False)),
         enable_contextual_failed_launch_exit_stop=_truthy(raw_params.get("enable_contextual_failed_launch_exit_stop", False)),
         enable_mid_profit_giveback_stop=_truthy(raw_params.get("enable_mid_profit_giveback_stop", False)),
@@ -3715,6 +3950,56 @@ def _params_from_run(run: dict[str, Any]) -> BacktestParams:
         missed_rotation_min_score_gap=float(raw_params.get("missed_rotation_min_score_gap") or 10.0),
         missed_rotation_max_held_return_pct=float(raw_params.get("missed_rotation_max_held_return_pct") or 1.0),
         missed_rotation_min_held_days=int(raw_params.get("missed_rotation_min_held_days") or 4),
+        enable_high_quality_trend_rotation=_truthy(raw_params.get("enable_high_quality_trend_rotation", False)),
+        high_quality_rotation_min_score=float(raw_params.get("high_quality_rotation_min_score") or 96.0),
+        high_quality_rotation_max_rank=int(raw_params.get("high_quality_rotation_max_rank") or 10),
+        high_quality_rotation_min_score_gap=float(raw_params.get("high_quality_rotation_min_score_gap") or 8.0),
+        high_quality_rotation_max_held_return_pct=float(raw_params.get("high_quality_rotation_max_held_return_pct") or 0.0),
+        high_quality_rotation_min_held_days=int(raw_params.get("high_quality_rotation_min_held_days") or 4),
+        enable_weak_holding_quality_rotation=_truthy(raw_params.get("enable_weak_holding_quality_rotation", False)),
+        weak_holding_rotation_min_score=float(raw_params.get("weak_holding_rotation_min_score") or 96.0),
+        weak_holding_rotation_max_rank=int(raw_params.get("weak_holding_rotation_max_rank") or 20),
+        weak_holding_rotation_min_score_gap=float(raw_params.get("weak_holding_rotation_min_score_gap") or 6.0),
+        weak_holding_rotation_max_held_return_pct=float(raw_params.get("weak_holding_rotation_max_held_return_pct") or -5.0),
+        weak_holding_rotation_min_held_days=int(raw_params.get("weak_holding_rotation_min_held_days") or 3),
+        weak_holding_rotation_max_ma_convergence_pct=float(raw_params.get("weak_holding_rotation_max_ma_convergence_pct") or 5.0),
+        weak_holding_rotation_min_low_suction_days=int(raw_params.get("weak_holding_rotation_min_low_suction_days") or 3),
+        enable_protected_weak_holding_rotation=_truthy(raw_params.get("enable_protected_weak_holding_rotation", False)),
+        enable_low_suction_pullback_entry=_truthy(raw_params.get("enable_low_suction_pullback_entry", False)),
+        low_suction_pullback_entry_max_wait_days=int(raw_params.get("low_suction_pullback_entry_max_wait_days") or 3),
+        low_suction_pullback_entry_buffer_pct=float(raw_params.get("low_suction_pullback_entry_buffer_pct") or 0.01),
+        low_suction_pullback_entry_reserve_slot=_truthy(raw_params.get("low_suction_pullback_entry_reserve_slot", True)),
+        enable_low_suction_trigger_day_confirmation=_truthy(
+            raw_params.get("enable_low_suction_trigger_day_confirmation", False)
+        ),
+        enable_low_suction_confirmed_branch_exit=_truthy(raw_params.get("enable_low_suction_confirmed_branch_exit", False)),
+        low_suction_failed_follow_d3_low_pct=float(raw_params.get("low_suction_failed_follow_d3_low_pct") or -8.0),
+        low_suction_failed_follow_d3_high_pct=float(raw_params.get("low_suction_failed_follow_d3_high_pct") or 2.0),
+        low_suction_failed_follow_d3_close_pct=float(raw_params.get("low_suction_failed_follow_d3_close_pct") or -3.0),
+        low_suction_opened_space_d5_high_pct=float(raw_params.get("low_suction_opened_space_d5_high_pct") or 6.0),
+        low_suction_opened_space_d5_low_pct=float(raw_params.get("low_suction_opened_space_d5_low_pct") or -5.0),
+        enable_low_suction_branch_replacement_quality_gate=_truthy(
+            raw_params.get("enable_low_suction_branch_replacement_quality_gate", False)
+        ),
+        low_suction_branch_replacement_gate_wait_days=int(
+            _raw_param_value(raw_params, "low_suction_branch_replacement_gate_wait_days", 3)
+        ),
+        low_suction_branch_replacement_min_score=float(_raw_param_value(raw_params, "low_suction_branch_replacement_min_score", 98.0)),
+        low_suction_branch_replacement_max_market_warning_level=int(
+            _raw_param_value(raw_params, "low_suction_branch_replacement_max_market_warning_level", 1)
+        ),
+        low_suction_branch_replacement_max_low_suction_ma_convergence_pct=float(
+            _raw_param_value(raw_params, "low_suction_branch_replacement_max_low_suction_ma_convergence_pct", 7.0)
+        ),
+        low_suction_branch_replacement_max_dragon_ma_convergence_pct=float(
+            _raw_param_value(raw_params, "low_suction_branch_replacement_max_dragon_ma_convergence_pct", 12.0)
+        ),
+        enable_low_suction_branch_replacement_strict_setup_gate=_truthy(
+            raw_params.get("enable_low_suction_branch_replacement_strict_setup_gate", False)
+        ),
+        setup_family_filter=str(raw_params.get("setup_family_filter") or ""),
+        enable_phase_aware_setup_selector=_truthy(raw_params.get("enable_phase_aware_setup_selector", False)),
+        enable_phase_replacement_quality=_truthy(raw_params.get("enable_phase_replacement_quality", False)),
         exclude_from_product_baseline=_truthy(raw_params.get("exclude_from_product_baseline", False)),
         symbols=[_normalize_symbol(symbol) for symbol in (raw_params.get("symbols") or []) if _normalize_symbol(symbol)],
         included_boards=normalize_included_boards(raw_params.get("included_boards")),
@@ -3726,6 +4011,11 @@ def _truthy(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() not in {"false", "0", "no", "off", ""}
     return bool(value)
+
+
+def _raw_param_value(raw_params: dict[str, Any], key: str, default: Any) -> Any:
+    value = raw_params.get(key)
+    return default if value in (None, "") else value
 
 
 def _normalize_execution_model(value: Any) -> str:

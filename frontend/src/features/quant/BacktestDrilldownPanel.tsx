@@ -774,8 +774,13 @@ function pathExitReasonLabel(reason?: string | null): string {
     profit_protection_stop: "利润保护",
     trend_trailing_stop: "趋势回撤",
     trend_break: "趋势破位",
+    dynamic_failed_launch_exit_stop: "动态失败启动撤退",
+    dynamic_failed_launch_replacement_quality_gate: "动态失败启动后替换闸门",
     time_efficiency_stop: "时间效率",
     fragile_structure_stop: "脆弱结构",
+    low_suction_failed_follow_branch_stop: "低吸没拉起撤",
+    low_suction_opened_space_giveback_stop: "低吸回撤卖",
+    low_suction_branch_replacement_quality_gate: "低吸替换质量闸门",
     rotation_for_stronger_signal: "换仓",
     rotation_for_stealth_low_suction: "换入低吸",
   };

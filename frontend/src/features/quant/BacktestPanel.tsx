@@ -7,10 +7,15 @@ import {
   fetchBacktestAudit,
   fetchBacktestDataQuality,
   fetchBacktestFactorAudit,
+  fetchBacktestPhaseStrategyFamilyMatrix,
+  fetchBacktestReplacementQualityMatrix,
   fetchBacktestReport,
+  fetchBacktestRotationOpportunityCostMatrix,
   fetchBacktestSetupMarketExitAudit,
   fetchBacktestTopCandidateAudit,
+  fetchBacktestTrendWinnerProtectionMatrix,
   fetchBacktestValidationGrid,
+  runBacktestStrategyComparison,
 } from "@/api/quant";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorState } from "@/components/ErrorState";
@@ -38,6 +43,7 @@ import {
   BacktestValidationGridPanel,
 } from "@/features/quant/BacktestAnalysis";
 import { SignalCardList } from "@/features/quant/SignalCardList";
+import { BacktestStrategyComparisonPanel } from "@/features/quant/BacktestStrategyComparisonPanel";
 
 export function BacktestPanel({
   runs,
@@ -98,7 +104,42 @@ export function BacktestPanel({
     enabled: Boolean(selectedId),
     staleTime: 60_000,
   });
+  const phaseStrategyFamilyMatrixQuery = useQuery({
+    queryKey: ["backtestPhaseStrategyFamilyMatrix", selectedId, "10,20,100"],
+    queryFn: () => fetchBacktestPhaseStrategyFamilyMatrix(selectedId!, [10, 20, 100]),
+    enabled: Boolean(selectedId),
+    staleTime: 60_000,
+  });
+  const replacementQualityMatrixQuery = useQuery({
+    queryKey: ["backtestReplacementQualityMatrix", selectedId, 80],
+    queryFn: () => fetchBacktestReplacementQualityMatrix(selectedId!, 80),
+    enabled: Boolean(selectedId),
+    staleTime: 60_000,
+  });
+  const rotationOpportunityCostMatrixQuery = useQuery({
+    queryKey: ["backtestRotationOpportunityCostMatrix", selectedId, 20, 80, 20],
+    queryFn: () => fetchBacktestRotationOpportunityCostMatrix(selectedId!, 20, 80, 20),
+    enabled: Boolean(selectedId),
+    staleTime: 60_000,
+  });
+  const trendWinnerProtectionMatrixQuery = useQuery({
+    queryKey: ["backtestTrendWinnerProtectionMatrix", selectedId, 20, 80, 20],
+    queryFn: () => fetchBacktestTrendWinnerProtectionMatrix(selectedId!, 20, 80, 20),
+    enabled: Boolean(selectedId),
+    staleTime: 60_000,
+  });
   const validationReport = marketAuditReport;
+  const strategyComparisonQuery = useQuery({
+    queryKey: ["backtestStrategyComparison", params],
+    queryFn: () =>
+      runBacktestStrategyComparison({
+        ...params,
+        persist: false,
+        strategies: strategies.map((strategy) => strategy.id),
+      }),
+    enabled: false,
+    staleTime: 60_000,
+  });
   const dataQualityQuery = useQuery({
     queryKey: ["backtestDataQuality", selectedId],
     queryFn: () => fetchBacktestDataQuality(selectedId!),
@@ -173,6 +214,14 @@ export function BacktestPanel({
               isFactorAuditLoading={factorAuditQuery.isFetching}
               setupMarketExitAudit={setupMarketExitAuditQuery.data}
               isSetupMarketExitAuditLoading={setupMarketExitAuditQuery.isFetching}
+              phaseStrategyFamilyMatrix={phaseStrategyFamilyMatrixQuery.data}
+              isPhaseStrategyFamilyMatrixLoading={phaseStrategyFamilyMatrixQuery.isFetching}
+              replacementQualityMatrix={replacementQualityMatrixQuery.data}
+              isReplacementQualityMatrixLoading={replacementQualityMatrixQuery.isFetching}
+              rotationOpportunityCostMatrix={rotationOpportunityCostMatrixQuery.data}
+              isRotationOpportunityCostMatrixLoading={rotationOpportunityCostMatrixQuery.isFetching}
+              trendWinnerProtectionMatrix={trendWinnerProtectionMatrixQuery.data}
+              isTrendWinnerProtectionMatrixLoading={trendWinnerProtectionMatrixQuery.isFetching}
             />
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
               <section className="space-y-4">
@@ -211,6 +260,12 @@ export function BacktestPanel({
                     onRun={onRunValidationGrid}
                   />
                 )}
+                <BacktestStrategyComparisonPanel
+                  comparison={strategyComparisonQuery.data}
+                  isLoading={strategyComparisonQuery.isFetching}
+                  error={strategyComparisonQuery.error}
+                  onRun={() => strategyComparisonQuery.refetch()}
+                />
               </TabsContent>
               <TabsContent value="trades" className="space-y-4">
                 {selectedId && <BacktestDrilldownPanel backtestId={selectedId} report={report} />}

@@ -7,6 +7,8 @@ from datetime import date
 from typing import Any, Callable
 
 from alphaagent.server.services.backtest.schemas import BacktestParams, ScoreContext
+from alphaagent.server.services.backtest.queries import market_phase_setup_family
+from alphaagent.server.services.quant import market_context
 from alphaagent.server.services.quant import screening_payloads
 from alphaagent.server.services.quant.low_suction_quality import low_suction_launch_quality_bucket
 from alphaagent.server.services.quant.strategy_registry import score_strategy
@@ -32,13 +34,61 @@ def score_day(
         if score_cache is not None:
             score_cache[trade_date] = scores
     candidates = [score for score in scores if is_buy_candidate(score, params)]
+    candidates = [_with_strategy_family_fields(score) for score in candidates]
+    candidates = [score for score in candidates if _passes_setup_family_filter(score, params)]
+    candidates = [
+        adjusted
+        for score in candidates
+        if (adjusted := _with_phase_aware_setup_selector(score, params)) is not None
+    ]
     candidates = [_with_entry_launch_quality_score(score, params) for score in candidates]
     candidates = [_with_entry_launch_risk_penalty(score, params) for score in candidates]
     candidates = [_with_low_suction_market_risk_penalty(score, params) for score in candidates]
     candidates = [_with_market_adaptive_setup_weighting(score, params) for score in candidates]
     candidates = [_with_low_suction_first_lift_bonus(score, params) for score in candidates]
+    candidates = [_with_low_suction_lifecycle_ranking(score, params) for score in candidates]
     candidates.sort(key=lambda item: (-item.total_score, item.vt_symbol))
     return candidates
+
+
+def _with_strategy_family_fields(score):
+    evidence = getattr(score, "evidence", {}) or {}
+    family = market_phase_setup_family(evidence)
+    if evidence.get("setup_family") == family:
+        return score
+    adjusted = copy(score)
+    adjusted.evidence = dict(evidence)
+    adjusted.evidence["setup_family"] = family
+    adjusted.evidence["setup_family_source"] = "phase_strategy_family"
+    return adjusted
+
+
+def _passes_setup_family_filter(score, params: BacktestParams) -> bool:
+    requested = str(params.setup_family_filter or "").strip()
+    if not requested:
+        return True
+    allowed = {item.strip() for item in requested.split(",") if item.strip()}
+    if not allowed:
+        return True
+    family = str((getattr(score, "evidence", {}) or {}).get("setup_family") or "")
+    return family in allowed
+
+
+def _with_phase_aware_setup_selector(score, params: BacktestParams):
+    if not params.enable_phase_aware_setup_selector:
+        return score
+    evidence = getattr(score, "evidence", {}) or {}
+    decision = phase_aware_setup_selector_decision(evidence)
+    if not decision["allowed"]:
+        return None
+    if decision["score_adjustment"] == 0 and not decision["notes"]:
+        return score
+    adjusted = copy(score)
+    adjusted.total_score = round(float(getattr(score, "total_score", 0) or 0) + float(decision["score_adjustment"]), 4)
+    adjusted.evidence = dict(evidence)
+    adjusted.evidence["phase_aware_setup_selector"] = decision
+    adjusted.evidence["phase_aware_setup_score"] = adjusted.total_score
+    return adjusted
 
 
 def score_candidates_for_day(
@@ -272,6 +322,24 @@ def _with_low_suction_first_lift_bonus(score, params: BacktestParams):
     return adjusted
 
 
+def _with_low_suction_lifecycle_ranking(score, params: BacktestParams):
+    if not params.enable_low_suction_lifecycle_ranking:
+        return score
+    evidence = getattr(score, "evidence", {}) or {}
+    decision = low_suction_lifecycle_ranking_adjustment(evidence)
+    adjustment = float(decision["adjustment"])
+    if adjustment == 0:
+        return score
+    adjusted = copy(score)
+    adjusted.total_score = round(float(getattr(score, "total_score", 0) or 0) + adjustment, 4)
+    adjusted.evidence = dict(evidence)
+    adjusted.evidence["low_suction_lifecycle_adjustment"] = round(adjustment, 4)
+    adjusted.evidence["low_suction_lifecycle_score"] = round(adjusted.total_score, 4)
+    adjusted.evidence["low_suction_lifecycle_profile"] = decision["profile"]
+    adjusted.evidence["low_suction_lifecycle_notes"] = decision["notes"]
+    return adjusted
+
+
 def entry_launch_quality_adjustment(evidence: dict[str, Any]) -> float:
     """Return a research-only ranking adjustment from entry-day visible factors."""
 
@@ -390,6 +458,185 @@ def low_suction_first_lift_bonus_adjustment(evidence: dict[str, Any]) -> float:
     if volume_ratio is not None and 0.85 <= volume_ratio <= 1.15:
         bonus += 0.3
     return min(bonus, 2.0)
+
+
+def low_suction_lifecycle_ranking_adjustment(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Rank low-suction candidates by visible buildup/launch lifecycle quality."""
+
+    setup = str(evidence.get("entry_setup") or evidence.get("setup_type") or "")
+    low_suction_days = _float_or_none(evidence.get("low_suction_days")) or 0.0
+    if setup != "stealth_low_suction" and low_suction_days < 3:
+        return _low_suction_lifecycle_decision(0.0, "not_low_suction", [])
+
+    launch_bucket = str(
+        evidence.get("low_suction_launch_quality_bucket")
+        or low_suction_launch_quality_bucket(evidence)
+        or ""
+    )
+    launch_confirmed = bool(evidence.get("low_suction_launch_confirmed"))
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    ma5_distance = _float_or_none(evidence.get("ma5_distance_pct"))
+    risk_penalty = _float_or_none(evidence.get("risk_penalty")) or 0.0
+    notes: list[str] = []
+    adjustment = 0.0
+
+    if ma_convergence is not None:
+        if ma_convergence > 8.8:
+            adjustment -= 4.0
+            notes.append("低吸降权：均线重新发散")
+        elif ma_convergence > 6.5:
+            adjustment -= 2.0
+            notes.append("低吸降权：均线收敛质量偏弱")
+
+    if launch_confirmed:
+        if launch_bucket == "balanced_first_lift" and ma_convergence is not None and ma_convergence <= 5.0:
+            adjustment += 1.0
+            notes.append("低吸加分：收敛状态下首个均衡上拉确认")
+        elif launch_bucket == "other_confirmed_launch" and ma_convergence is not None and ma_convergence < 3.0:
+            adjustment += 0.4
+            notes.append("低吸加分：极度收敛后出现上拉确认")
+        elif launch_bucket == "high_close_launch":
+            adjustment -= 2.6
+            notes.append("低吸降权：启动收盘位置偏高")
+        elif launch_bucket == "repeated_launch":
+            adjustment -= 2.8
+            notes.append("低吸降权：重复启动未形成有效脱离")
+        elif launch_bucket == "thin_volume_launch":
+            adjustment -= 1.6
+            notes.append("低吸降权：启动量能偏弱")
+    else:
+        if low_suction_days >= 3 and ma_convergence is not None and ma_convergence > 6.5:
+            adjustment -= 1.6
+            notes.append("低吸降权：蓄势未确认且均线偏散")
+
+    if volume_ratio is not None:
+        if volume_ratio < 0.55:
+            adjustment -= 1.6
+            notes.append("低吸降权：量能过度萎缩")
+        elif launch_confirmed and 0.55 <= volume_ratio <= 1.15 and ma_convergence is not None and ma_convergence < 3.0:
+            adjustment += 0.3
+            notes.append("低吸加分：启动日量能仍可控")
+        elif volume_ratio > 1.55:
+            adjustment -= 1.6
+            notes.append("低吸降权：放量偏急")
+
+    if close_location is not None and close_location > 0.78:
+        adjustment -= 0.8
+        notes.append("低吸降权：收盘过高，追涨风险上升")
+    if ma5_distance is not None and 3.2 < ma5_distance <= 4.2:
+        adjustment -= 1.2
+        notes.append("低吸降权：偏离5日线较远")
+    if risk_penalty >= 12:
+        adjustment -= 1.2
+        notes.append("低吸降权：已有明显结构风险")
+
+    if not notes:
+        return _low_suction_lifecycle_decision(0.0, "neutral_low_suction", [])
+    return _low_suction_lifecycle_decision(
+        max(min(adjustment, 1.6), -5.0),
+        "low_suction_lifecycle",
+        notes,
+    )
+
+
+def phase_aware_setup_selector_decision(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Default-off selector combining market phase with strategy family.
+
+    This uses only signal-day visible evidence attached to the candidate. Future
+    outcomes remain audit-only and are not used here.
+    """
+
+    family = str(evidence.get("setup_family") or market_phase_setup_family(evidence))
+    phase = str(market_context.classify_trading_market_phase(evidence).get("phase") or "unknown")
+    launch_bucket = str(
+        evidence.get("low_suction_launch_quality_bucket")
+        or low_suction_launch_quality_bucket(evidence)
+        or ""
+    )
+    launch_confirmed = bool(evidence.get("low_suction_launch_confirmed"))
+    low_suction_days = _float_or_none(evidence.get("low_suction_days")) or 0.0
+    tail_repeat = _float_or_none(evidence.get("tail_buy_repeat_days")) or 0.0
+    score_adjustment = 0.0
+    allowed = True
+    notes: list[str] = []
+
+    if family == "low_suction_buildup":
+        allowed = False
+        notes.append("行情选择器：低吸蓄势只观察，不作为组合可买点")
+    elif phase == "retreat":
+        if family == "low_suction_first_lift" and launch_confirmed and launch_bucket in {"balanced_first_lift", "other_confirmed_launch"}:
+            score_adjustment += 1.2
+            notes.append("退潮期只保留低吸首启中的强承接候选")
+        elif family == "dragon_low_suction_overlap" and launch_confirmed and launch_bucket == "balanced_first_lift":
+            score_adjustment += 0.6
+            notes.append("退潮期保留低吸和龙回头重叠的均衡首启")
+        elif family == "dragon_pullback":
+            allowed = False
+            notes.append("退潮期过滤普通龙回头，避免行情下行时抢回踩")
+        else:
+            allowed = False
+            notes.append("退潮期过滤非强承接候选")
+    elif phase == "warming":
+        if family == "low_suction_first_lift":
+            score_adjustment += 1.0
+            notes.append("回暖期优先低吸首启")
+        elif family == "dragon_low_suction_overlap":
+            score_adjustment += 0.6
+            notes.append("回暖期保留低吸和龙回头重叠")
+        elif family == "dragon_pullback" and tail_repeat >= 2:
+            score_adjustment -= 1.2
+            notes.append("回暖期降低重复龙回头")
+    elif phase == "uptrend":
+        if family == "dragon_pullback" and tail_repeat <= 1:
+            score_adjustment += 1.2
+            notes.append("主升期优先新鲜龙回头")
+        elif family == "dragon_low_suction_overlap" and launch_confirmed:
+            score_adjustment += 0.8
+            notes.append("主升期保留龙回头叠加低吸确认")
+        elif family == "low_suction_first_lift" and low_suction_days >= 3:
+            score_adjustment += 0.4
+            notes.append("主升期低吸首启只作小幅优先")
+        elif family == "dragon_pullback" and tail_repeat >= 3:
+            score_adjustment -= 1.2
+            notes.append("主升期降低重复龙回头")
+    elif phase == "rotation":
+        if family == "low_suction_first_lift":
+            score_adjustment += 0.8
+            notes.append("震荡期优先低吸首启")
+        elif family == "dragon_low_suction_overlap":
+            score_adjustment += 0.4
+            notes.append("震荡期保留低吸和龙回头重叠")
+        elif family == "dragon_pullback" and tail_repeat >= 3:
+            score_adjustment -= 1.0
+            notes.append("震荡期降低重复龙回头")
+
+    if evidence.get("early_dragon_pullback_risk") and phase in {"retreat", "rotation"}:
+        score_adjustment -= 1.4
+        notes.append("行情选择器：弱行情下经典龙回头偏早")
+    if evidence.get("high_level_sideways_distribution_risk") or evidence.get("volume_stall_risk"):
+        score_adjustment -= 1.0
+        notes.append("行情选择器：高位横盘/放量滞涨风险")
+
+    return {
+        "allowed": allowed,
+        "phase": phase,
+        "setup_family": family,
+        "score_adjustment": max(min(score_adjustment, 2.0), -2.0),
+        "notes": notes,
+        "audit_only": False,
+        "no_future_data": True,
+    }
+
+
+def _low_suction_lifecycle_decision(adjustment: float, profile: str, notes: list[str]) -> dict[str, Any]:
+    return {
+        "adjustment": adjustment,
+        "profile": profile,
+        "notes": notes,
+        "not_used_for_signal_score": False,
+    }
 
 
 def entry_launch_risk_penalty_adjustment(evidence: dict[str, Any]) -> float:

@@ -7,13 +7,14 @@ orders or scores.
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import date, timedelta
 from statistics import mean, pstdev
+from threading import Lock
 from typing import Any
 
-from sqlalchemy import and_, case, desc, func, select
+from sqlalchemy import desc, func, select
 
 from alphaagent.market.symbols import INDEX_SYMBOLS
 
@@ -30,6 +31,9 @@ INDEX_WEIGHTS: dict[str, float] = {
 GROWTH_INDEXES = {"399006.SZSE", "000688.SSE", "000852.SSE"}
 VALUE_INDEXES = {"000001.SSE", "000300.SSE"}
 DEFAULT_CONTEXT_SOURCE = "stock_daily_bars"
+_BREADTH_CACHE_MAX_ENTRIES = 4
+_BREADTH_CACHE_LOCK = Lock()
+_BREADTH_CACHE: list[tuple[date, date, dict[date, dict[str, float]]]] = []
 
 
 @dataclass(frozen=True)
@@ -386,6 +390,228 @@ def market_context_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
         "notes": _dedupe_notes(notes),
         "fund_flow_marker": flow_marker,
     }
+
+
+def classify_trading_market_phase(payload: dict[str, Any] | None) -> dict[str, Any]:
+    """Map detailed market context into four trading phases for read-only audits."""
+
+    if not payload:
+        return {
+            "phase": "unknown",
+            "label": "行情未知",
+            "confidence": 0,
+            "position_hint": "等待数据",
+            "preferred_setups": [],
+            "notes": ["市场画像数据不足"],
+            "not_used_for_signal_score": True,
+        }
+
+    regime = str(payload.get("regime") or payload.get("dynamic_market_regime") or "unknown")
+    warning_level = int(_safe_float(payload.get("market_warning_level")) or 0)
+    recovery_state = str(payload.get("recovery_state") or "none")
+    fund_flow_state = str(payload.get("fund_flow_state") or "unknown")
+    market_score = _safe_float(payload.get("market_score"))
+    breadth_score = _safe_float(payload.get("breadth_score"))
+    if breadth_score is None:
+        breadth_score = _safe_float(payload.get("market_breadth_score"))
+    theme_strength = _safe_float(payload.get("theme_strength")) or 0.0
+    tide = _market_tide_state(payload)
+    notes = []
+
+    if tide["state"] == "retreat" and recovery_state not in {"warming_confirmed", "stabilizing"}:
+        phase = "retreat"
+        label = "退潮"
+        confidence = max(76, int(tide["confidence"]))
+        position_hint = "防守/空仓"
+        preferred_setups = ["极强低吸首启"]
+        notes.append("多指数同步走弱，涨潮线转入退潮")
+    elif tide["state"] == "warming":
+        phase = "warming"
+        label = "回暖"
+        confidence = max(72, int(tide["confidence"]))
+        position_hint = "小仓试错"
+        preferred_setups = ["低吸首启", "低吸+龙回头叠加"]
+        notes.append("多指数同步修复，退潮后回暖")
+    elif regime in {"crash", "weak_defensive", "risk_off"} or (
+        warning_level >= 3 and recovery_state not in {"warming_confirmed", "stabilizing"}
+    ):
+        phase = "retreat"
+        label = "退潮"
+        confidence = 86 if warning_level >= 3 or fund_flow_state in {"panic_outflow", "continuous_outflow"} else 76
+        position_hint = "防守/空仓"
+        preferred_setups = ["极强低吸首启"]
+        notes.append("市场风险优先，先控制仓位")
+    elif regime in {"weak_rebound"} or (
+        recovery_state in {"warming_confirmed", "stabilizing"} and warning_level >= 2
+    ):
+        phase = "warming"
+        label = "回暖"
+        confidence = 78 if recovery_state == "warming_confirmed" else 66
+        position_hint = "小仓试错"
+        preferred_setups = ["低吸首启", "低吸+龙回头叠加"]
+        notes.append("退潮后修复，优先看资金承接是否持续")
+    elif regime in {"strong_broad", "narrow_theme_bull", "narrow_mainline_bull", "mainline_pullback"}:
+        phase = "uptrend"
+        label = "主升"
+        confidence = 82 if warning_level <= 1 else 68
+        position_hint = "积极但不满仓预设"
+        preferred_setups = ["主线龙回头", "低吸首启", "低吸+龙回头叠加"]
+        notes.append("主升期仍需比较低吸和龙回头的实际胜率")
+    elif regime in {"choppy_rotation", "false_bull"}:
+        phase = "rotation"
+        label = "震荡"
+        confidence = 72 if warning_level <= 2 else 60
+        position_hint = "中低仓轮动"
+        preferred_setups = ["低吸首启", "低吸+龙回头叠加", "新鲜龙回头"]
+        notes.append("震荡期不强行持满，重视前排质量")
+    else:
+        phase = "unknown"
+        label = "行情未知"
+        confidence = 30
+        position_hint = "等待数据"
+        preferred_setups = []
+        notes.append("行情状态无法稳定识别")
+
+    if fund_flow_state in {"panic_outflow", "continuous_outflow", "outflow"}:
+        notes.append("资金流出压力")
+    if theme_strength >= 72:
+        notes.append("主线热度高")
+    if breadth_score is not None and breadth_score < 42:
+        notes.append("市场广度偏弱")
+    if tide.get("note"):
+        notes.append(str(tide["note"]))
+    if market_score is not None:
+        notes.append(f"市场分 {round(market_score, 1)}")
+
+    return {
+        "phase": phase,
+        "label": label,
+        "confidence": int(max(0, min(100, confidence))),
+        "position_hint": position_hint,
+        "preferred_setups": preferred_setups,
+        "notes": _dedupe_notes(notes),
+        "source_regime": regime,
+        "market_warning_level": warning_level,
+        "recovery_state": recovery_state,
+        "fund_flow_state": fund_flow_state,
+        "tide_state": tide["state"],
+        "tide_score": tide["score"],
+        "not_used_for_signal_score": True,
+    }
+
+
+def _market_tide_state(payload: dict[str, Any]) -> dict[str, Any]:
+    """Classify visible multi-index tide pressure/recovery.
+
+    This is a read-only overlay for UI/audits. It only uses fields that are
+    already computed from bars visible on or before the trade date.
+    """
+
+    market_score = _safe_float(payload.get("market_score")) or 50.0
+    breadth_score = _safe_float(payload.get("breadth_score"))
+    if breadth_score is None:
+        breadth_score = _safe_float(payload.get("market_breadth_score"))
+    index_return_5d = _safe_float(payload.get("index_return_5d"))
+    index_return_20d = _safe_float(payload.get("index_return_20d"))
+    growth_score = _safe_float(payload.get("growth_score"))
+    value_score = _safe_float(payload.get("value_score"))
+    small_cap_score = _safe_float(payload.get("small_cap_score"))
+    drawdown = _safe_float(payload.get("drawdown_60d_pct"))
+    warning_level = int(_safe_float(payload.get("market_warning_level")) or 0)
+    recovery_state = str(payload.get("recovery_state") or "none")
+    style_scores = [value for value in [growth_score, value_score, small_cap_score] if value is not None]
+    weak_style_count = sum(1 for value in style_scores if value < 46)
+    strong_style_count = sum(1 for value in style_scores if value >= 54)
+
+    raw_score = market_score
+    if index_return_5d is not None:
+        raw_score += index_return_5d * 3.2
+    if index_return_20d is not None:
+        raw_score += index_return_20d * 1.1
+    if breadth_score is not None:
+        raw_score += (breadth_score - 50.0) * 0.35
+    if style_scores:
+        raw_score += (sum(style_scores) / len(style_scores) - 50.0) * 0.28
+    if drawdown is not None and drawdown < 0:
+        raw_score += max(drawdown, -12.0) * 1.25
+    score = round(max(0.0, min(100.0, raw_score)), 2)
+
+    retreat_hits = 0
+    if index_return_5d is not None and index_return_5d <= -1.6:
+        retreat_hits += 1
+    if index_return_20d is not None and index_return_20d <= -2.4:
+        retreat_hits += 1
+    if breadth_score is not None and breadth_score < 45:
+        retreat_hits += 1
+    if weak_style_count >= 2:
+        retreat_hits += 1
+    if market_score < 48:
+        retreat_hits += 1
+    if warning_level >= 2:
+        retreat_hits += 1
+    strong_recovery_impulse = (
+        index_return_5d is not None
+        and index_return_5d >= 5.0
+        and strong_style_count >= 2
+        and market_score >= 55
+    )
+    false_bull_distribution = (
+        str(payload.get("regime") or payload.get("dynamic_market_regime") or "") == "false_bull"
+        and warning_level >= 2
+        and breadth_score is not None
+        and breadth_score < 40
+        and index_return_20d is not None
+        and index_return_20d >= 3.0
+        and not (
+            index_return_5d is not None
+            and index_return_5d >= 3.0
+            and str(payload.get("fund_flow_state") or "unknown") == "inflow"
+        )
+        and not strong_recovery_impulse
+    )
+
+    warming_hits = 0
+    if index_return_5d is not None and index_return_5d >= 1.4:
+        warming_hits += 1
+    if index_return_5d is not None and index_return_5d >= 3.0:
+        warming_hits += 1
+    if index_return_20d is not None and index_return_20d > -3.5:
+        warming_hits += 1
+    if breadth_score is not None and breadth_score >= 48:
+        warming_hits += 1
+    if strong_style_count >= 2:
+        warming_hits += 1
+    if market_score >= 53:
+        warming_hits += 1
+    if recovery_state in {"warming_confirmed", "stabilizing"}:
+        warming_hits += 1
+
+    if false_bull_distribution:
+        return {
+            "state": "retreat",
+            "score": min(score, 38.0),
+            "confidence": 78,
+            "note": "指数高位但广度退潮",
+        }
+    if retreat_hits >= 3 and warming_hits < 4:
+        return {
+            "state": "retreat",
+            "score": score,
+            "confidence": min(92, 58 + retreat_hits * 7),
+            "note": f"退潮确认项 {retreat_hits} 个",
+        }
+    if warming_hits >= 4 and (index_return_5d is None or index_return_5d >= 0):
+        return {
+            "state": "warming",
+            "score": score,
+            "confidence": min(90, 54 + warming_hits * 7),
+            "note": f"回暖确认项 {warming_hits} 个",
+        }
+    if score >= 66:
+        return {"state": "uptrend", "score": score, "confidence": 70, "note": "市场潮汐偏上"}
+    if score <= 38:
+        return {"state": "retreat", "score": score, "confidence": 72, "note": "市场潮汐偏下"}
+    return {"state": "rotation", "score": score, "confidence": 56, "note": "市场潮汐震荡"}
 
 
 def _fund_flow_marker(payload: dict[str, Any]) -> dict[str, Any]:
@@ -758,51 +984,87 @@ def _load_market_breadth_by_date(
     target_dates = sorted({day for day in trade_dates if day})
     if not target_dates:
         return {}
+    cached = _cached_market_breadth(start, end)
+    if cached is not None:
+        return {day: cached.get(day, _neutral_breadth()) for day in target_dates}
+
     table = schema.stock_daily_bars
     excluded_symbols = [f"{item['symbol']}.{item['exchange']}" for item in INDEX_SYMBOLS]
-    window = {
-        "partition_by": table.c.vt_symbol,
-        "order_by": table.c.trade_date,
-    }
-    rows = (
+    rows = session.execute(
         select(
-            table.c.vt_symbol.label("vt_symbol"),
-            table.c.trade_date.label("trade_date"),
-            table.c.close_price.label("close_price"),
-            func.avg(table.c.close_price).over(**window, rows=(-19, 0)).label("ma20"),
-            func.avg(table.c.close_price).over(**window, rows=(-59, 0)).label("ma60"),
-            func.count(table.c.close_price).over(**window, rows=(-19, 0)).label("count20"),
-            func.count(table.c.close_price).over(**window, rows=(-59, 0)).label("count60"),
-            func.lag(table.c.close_price).over(**window).label("prev_close"),
+            table.c.vt_symbol,
+            table.c.trade_date,
+            table.c.close_price,
         )
         .where(table.c.trade_date >= start)
         .where(table.c.trade_date <= end)
         .where(~table.c.vt_symbol.in_(excluded_symbols))
-        .subquery()
-    )
-    total_case = case((rows.c.count20 >= 20, 1), else_=0)
-    query = (
-        select(
-            rows.c.trade_date,
-            func.sum(total_case).label("total"),
-            func.sum(case((and_(rows.c.count20 >= 20, rows.c.close_price >= rows.c.ma20), 1), else_=0)).label("above20"),
-            func.sum(case((and_(rows.c.count60 >= 60, rows.c.close_price >= rows.c.ma60), 1), else_=0)).label("above60"),
-            func.sum(case((and_(rows.c.count20 >= 20, rows.c.close_price > rows.c.prev_close), 1), else_=0)).label("rising"),
-        )
-        .where(rows.c.trade_date.in_(target_dates))
-        .group_by(rows.c.trade_date)
-    )
-    result = {day: _neutral_breadth() for day in target_dates}
-    for row in session.execute(query).mappings().all():
-        result[row["trade_date"]] = _breadth_from_counts(
-            {
-                "total": int(row.get("total") or 0),
-                "above20": int(row.get("above20") or 0),
-                "above60": int(row.get("above60") or 0),
-                "rising": int(row.get("rising") or 0),
-            }
-        )
-    return result
+        .order_by(table.c.vt_symbol, table.c.trade_date)
+    ).all()
+    breadth = _market_breadth_from_close_rows(rows)
+    _store_market_breadth(start, end, breadth)
+    return {day: breadth.get(day, _neutral_breadth()) for day in target_dates}
+
+
+def _cached_market_breadth(start: date, end: date) -> dict[date, dict[str, float]] | None:
+    with _BREADTH_CACHE_LOCK:
+        for index, (cached_start, cached_end, values) in enumerate(_BREADTH_CACHE):
+            if cached_start <= start and cached_end >= end:
+                _BREADTH_CACHE.insert(0, _BREADTH_CACHE.pop(index))
+                return values
+    return None
+
+
+def _store_market_breadth(start: date, end: date, values: dict[date, dict[str, float]]) -> None:
+    with _BREADTH_CACHE_LOCK:
+        _BREADTH_CACHE.insert(0, (start, end, values))
+        del _BREADTH_CACHE[_BREADTH_CACHE_MAX_ENTRIES:]
+
+
+def _market_breadth_from_close_rows(rows: list[Any]) -> dict[date, dict[str, float]]:
+    counts: dict[date, dict[str, int]] = defaultdict(lambda: {"total": 0, "above20": 0, "above60": 0, "rising": 0})
+    current_symbol: str | None = None
+    window20: deque[float] = deque()
+    window60: deque[float] = deque()
+    sum20 = 0.0
+    sum60 = 0.0
+    previous_close: float | None = None
+
+    for row in rows:
+        vt_symbol = str(row[0])
+        trade_date = row[1]
+        close_price = _safe_float(row[2])
+        if close_price is None:
+            continue
+        if vt_symbol != current_symbol:
+            current_symbol = vt_symbol
+            window20 = deque()
+            window60 = deque()
+            sum20 = 0.0
+            sum60 = 0.0
+            previous_close = None
+
+        window20.append(close_price)
+        sum20 += close_price
+        if len(window20) > 20:
+            sum20 -= window20.popleft()
+        window60.append(close_price)
+        sum60 += close_price
+        if len(window60) > 60:
+            sum60 -= window60.popleft()
+
+        if len(window20) >= 20:
+            day_counts = counts[trade_date]
+            day_counts["total"] += 1
+            if close_price >= sum20 / len(window20):
+                day_counts["above20"] += 1
+            if len(window60) >= 60 and close_price >= sum60 / len(window60):
+                day_counts["above60"] += 1
+            if previous_close is not None and close_price > previous_close:
+                day_counts["rising"] += 1
+        previous_close = close_price
+
+    return {trade_date: _breadth_from_counts(day_counts) for trade_date, day_counts in counts.items()}
 
 
 def _load_sector_scores(session: Any, schema: Any, start: date, end: date) -> list[dict[str, Any]]:

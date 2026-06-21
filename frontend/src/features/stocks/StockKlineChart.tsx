@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { fetchStockBars } from "@/api/stocks";
 import { fetchIndexBars } from "@/api/indices";
 import type { Bar } from "@/api/types";
+import type { SymbolMarketLinePoint } from "@/api/quant";
 import { CardSkeleton } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { EmptyState } from "@/components/EmptyState";
@@ -20,6 +21,7 @@ import {
 } from "lightweight-charts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { cn, formatAmount, formatPct, formatPrice, priceColorClass } from "@/lib/utils";
 import { useChartColors, type ChartPalette } from "@/lib/chart-theme";
 import { diagnosticForBar, type ChartBarDiagnostic } from "@/features/stocks/stockChartDiagnostics";
@@ -29,6 +31,9 @@ interface StockKlineChartProps {
   vtSymbol: string;
   isIndex?: boolean;
   markers?: KlineMarker[];
+  marketLine?: SymbolMarketLinePoint[];
+  markersLoading?: boolean;
+  marketLineLoading?: boolean;
   selectedMarkerId?: string | null;
   onMarkerClick?: (marker: KlineMarker) => void;
 }
@@ -59,6 +64,9 @@ export interface KlineMarker {
 
 type OverlayMode = "ma" | "boll" | "none";
 type IndicatorMode = "volume" | "macd" | "kdj" | "rsi";
+type MarketLinePosition = "above" | "below";
+type MarketLineDirection = "rising" | "falling" | "flat";
+type MarketLineAdviceTone = "positive" | "warning" | "risk" | "neutral";
 
 const PERIODS = [
   { value: "5m", label: "5分", limit: 500 },
@@ -86,11 +94,33 @@ const INDICATORS: { value: IndicatorMode; label: string }[] = [
 const VISIBLE_BARS = 120;
 const MOBILE_VISIBLE_BARS = 70;
 const EMPTY_MARKERS: KlineMarker[] = [];
+const EMPTY_MARKET_LINE: SymbolMarketLinePoint[] = [];
+
+interface MarketLineOverlayStatus {
+  point: SymbolMarketLinePoint;
+  tradeDate: string;
+  lineValue: number;
+  close: number;
+  distancePct: number;
+  slopePct: number | null;
+  position: MarketLinePosition;
+  direction: MarketLineDirection;
+  advice: string;
+  adviceTone: MarketLineAdviceTone;
+}
+
+interface MarketLineOverlayResult {
+  data: LineData<Time>[];
+  byDate: Map<string, MarketLineOverlayStatus>;
+}
 
 export function StockKlineChart({
   vtSymbol,
   isIndex = false,
   markers = EMPTY_MARKERS,
+  marketLine = EMPTY_MARKET_LINE,
+  markersLoading = false,
+  marketLineLoading = false,
   selectedMarkerId,
   onMarkerClick,
 }: StockKlineChartProps) {
@@ -117,6 +147,15 @@ export function StockKlineChart({
   const focusedBar = selectedBar ?? activeBar ?? bars[bars.length - 1] ?? null;
   const focusedDiagnostic = useMemo(() => diagnosticForBar(bars, focusedBar), [bars, focusedBar]);
   const latestIndicators = useMemo(() => latestIndicatorValues(bars), [bars]);
+  const marketLineOverlay = useMemo(() => buildMarketLineOverlay(marketLine, bars, period), [marketLine, bars, period]);
+  const focusedMarketLineStatus = useMemo(
+    () => marketLineStatusForBar(marketLineOverlay, focusedBar),
+    [focusedBar, marketLineOverlay]
+  );
+  const focusedMarketLine = useMemo(
+    () => focusedMarketLineStatus?.point ?? marketLinePointForBar(marketLine, focusedBar) ?? marketLine[marketLine.length - 1] ?? null,
+    [focusedBar, focusedMarketLineStatus, marketLine]
+  );
 
   useEffect(() => {
     return () => {
@@ -158,6 +197,15 @@ export function StockKlineChart({
         priceChart.addLineSeries(lineOptions("#8b5cf6")).setData(movingAverageData(bars, 10, "close", period));
         priceChart.addLineSeries(lineOptions("#2563eb")).setData(movingAverageData(bars, 20, "close", period));
         priceChart.addLineSeries(lineOptions("#475569")).setData(movingAverageData(bars, 60, "close", period));
+      }
+
+      if (marketLineOverlay.data.length > 0) {
+        priceChart.addLineSeries({
+          color: "#57534e",
+          lineWidth: 2,
+          priceLineVisible: false,
+          lastValueVisible: false,
+        }).setData(marketLineOverlay.data);
       }
 
       if (overlayMode === "boll") {
@@ -211,7 +259,7 @@ export function StockKlineChart({
       destroyCharts(chartsRef.current);
       chartsRef.current = null;
     }
-  }, [bars, barsQuery.isLoading, indicatorMode, markers, onMarkerClick, overlayMode, period, selectedMarkerId, vtSymbol, palette]);
+  }, [bars, barsQuery.isLoading, indicatorMode, markers, marketLineOverlay.data, onMarkerClick, overlayMode, period, selectedMarkerId, vtSymbol, palette]);
 
   if (barsQuery.isLoading) {
     return (
@@ -252,10 +300,18 @@ export function StockKlineChart({
         <span>额 {formatAmount(focusedBar?.turnover)}</span>
       </div>
 
+      <ChartAsyncStatus
+        barsLoading={barsQuery.isLoading}
+        markersLoading={markersLoading}
+        marketLineLoading={marketLineLoading}
+        markerCount={markers.length}
+        hasMarketLine={marketLine.length > 0}
+      />
+      <MarketLineLegend point={focusedMarketLine} status={focusedMarketLineStatus} loading={marketLineLoading} />
       <OverlayLegend mode={overlayMode} values={latestIndicators} />
       {markers.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 border-t pt-2 text-xs text-muted-foreground">
-          <span>信号、拒绝和成交已标注在图表上</span>
+          <span>买入、拒买、卖出已标注在图表上</span>
           <span>{markers.length} 个</span>
           <span>点击标记、K 线或指标柱查看细节</span>
         </div>
@@ -352,18 +408,23 @@ function destroyCharts(charts: { price: IChartApi; indicator: IChartApi } | null
 
 function syncCharts(priceChart: IChartApi, indicatorChart: IChartApi) {
   let syncing = false;
+  const syncTo = (source: IChartApi, targets: IChartApi[]) => {
+    source.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+      if (syncing || !range) return;
+      syncing = true;
+      for (const target of targets) {
+        target.timeScale().setVisibleLogicalRange(range);
+      }
+      syncing = false;
+    });
+  };
   priceChart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
     if (syncing || !range) return;
     syncing = true;
     indicatorChart.timeScale().setVisibleLogicalRange(range);
     syncing = false;
   });
-  indicatorChart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
-    if (syncing || !range) return;
-    syncing = true;
-    priceChart.timeScale().setVisibleLogicalRange(range);
-    syncing = false;
-  });
+  syncTo(indicatorChart, [priceChart]);
 }
 
 function applyDefaultVisibleRange(priceChart: IChartApi, indicatorChart: IChartApi, totalBars: number, width: number) {
@@ -471,7 +532,7 @@ function toSeriesMarkers(
         position: style.position,
         color: isSelected ? "#111827" : style.color,
         shape: style.shape,
-        text: isSelected ? `已选${style.text}` : marker.text || style.text,
+        text: isSelected ? `已选${style.text}` : style.text,
       };
     });
 }
@@ -483,15 +544,15 @@ function markerChartStyle(marker: KlineMarker): {
   text: string;
 } {
   if (marker.markerKind === "signal" || marker.status === "signal") {
-    return { position: "belowBar", color: "#2563eb", shape: "circle", text: "信号" };
+    return { position: "belowBar", color: "#ef4444", shape: "circle", text: "买入" };
   }
   if (marker.markerKind === "rejected" || marker.status === "rejected") {
-    return { position: "belowBar", color: "#d97706", shape: "square", text: "买拒" };
+    return { position: "belowBar", color: "#d97706", shape: "square", text: "拒买" };
   }
   if (String(marker.side).toUpperCase() === "BUY") {
-    return { position: "belowBar", color: "#ef4444", shape: "arrowUp", text: "买" };
+    return { position: "belowBar", color: "#ef4444", shape: "arrowUp", text: "买入" };
   }
-  return { position: "aboveBar", color: "#16a34a", shape: "arrowDown", text: "卖" };
+  return { position: "aboveBar", color: "#16a34a", shape: "arrowDown", text: "卖出" };
 }
 
 function markerListLabel(marker: KlineMarker) {
@@ -571,6 +632,213 @@ function movingAverageData(bars: Bar[], window: number, field: "close" | "volume
     result.push({ time: chartTime(bars[index].trade_date, period), value });
   }
   return result;
+}
+
+function buildMarketLineOverlay(items: SymbolMarketLinePoint[], bars: Bar[], period: string): MarketLineOverlayResult {
+  const empty = { data: [], byDate: new Map<string, MarketLineOverlayStatus>() };
+  if (!items.length || !bars.length || period !== "1d") return empty;
+
+  const pointByDate = new Map(
+    items
+      .filter((item) => item.trade_date)
+      .map((item) => [item.trade_date.slice(0, 10), item])
+  );
+  const closes = bars.map((bar) => bar.close);
+  const ema20 = ema(closes, 20);
+  const ma5 = movingAverageValues(closes, 5);
+  const ma10 = movingAverageValues(closes, 10);
+  const rows: Array<{
+    bar: Bar;
+    point: SymbolMarketLinePoint;
+    lineValue: number;
+  }> = [];
+  let previousLine: number | null = null;
+
+  for (let index = 0; index < bars.length; index += 1) {
+    const bar = bars[index];
+    const tradeDate = bar.trade_date.slice(0, 10);
+    const point = pointByDate.get(tradeDate);
+    if (!point) continue;
+
+    const base = ema20[index] ?? bar.close;
+    const target = marketLineTargetValue(point, base, trailingVolatilityPct(bars, index));
+    const nextLine = previousLine == null ? target : previousLine * 0.58 + target * 0.42;
+    const smoothedLine = Number.isFinite(nextLine) ? nextLine : target;
+    const riskFloor = retreatRiskFloor(point, bar, ma5[index], ma10[index]);
+    const lineValue: number = riskFloor == null ? smoothedLine : Math.max(smoothedLine, riskFloor);
+    previousLine = lineValue;
+    rows.push({ bar, point, lineValue });
+  }
+
+  const data: LineData<Time>[] = [];
+  const byDate = new Map<string, MarketLineOverlayStatus>();
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    const tradeDate = row.bar.trade_date.slice(0, 10);
+    const slopeBase = rows[Math.max(0, index - 5)];
+    const slopePct =
+      slopeBase && slopeBase !== row && slopeBase.lineValue > 0
+        ? ((row.lineValue - slopeBase.lineValue) / slopeBase.lineValue) * 100
+        : null;
+    const previousPoint = rows[Math.max(0, index - 1)]?.point ?? null;
+    const direction = marketLineDirection(row.point, slopePct, previousPoint);
+    const distancePct = ((row.bar.close - row.lineValue) / row.lineValue) * 100;
+    const position: MarketLinePosition = row.bar.close >= row.lineValue ? "above" : "below";
+    const advice = marketLineAdvice(row.point, position, direction);
+
+    data.push({
+      time: chartTime(row.bar.trade_date, period),
+      value: row.lineValue,
+      color: marketLinePointColor(row.point),
+    });
+    byDate.set(tradeDate, {
+      point: row.point,
+      tradeDate,
+      lineValue: row.lineValue,
+      close: row.bar.close,
+      distancePct,
+      slopePct,
+      position,
+      direction,
+      advice: advice.text,
+      adviceTone: advice.tone,
+    });
+  }
+
+  return { data, byDate };
+}
+
+function normalizedMarketLineScore(point: SymbolMarketLinePoint) {
+  const score = typeof point.score === "number" && Number.isFinite(point.score)
+    ? point.score
+    : point.state === "bull" ? 76
+      : point.state === "warming" ? 62
+        : point.state === "bear" ? 24
+          : 48;
+  return Math.max(0.12, Math.min(0.9, score / 100));
+}
+
+function trailingVolatilityPct(bars: Bar[], index: number) {
+  const start = Math.max(0, index - 19);
+  const window = bars.slice(start, index + 1);
+  if (window.length === 0) return 0.025;
+  const averageRangePct =
+    window.reduce((sum, bar) => {
+      const close = Math.max(Math.abs(bar.close), 0.01);
+      return sum + Math.max(bar.high - bar.low, 0) / close;
+    }, 0) / window.length;
+  return clamp(averageRangePct, 0.012, 0.07);
+}
+
+function movingAverageValues(values: number[], window: number): Array<number | null> {
+  return values.map((_, index) => {
+    if (index + 1 < window) return null;
+    const slice = values.slice(index - window + 1, index + 1);
+    return slice.reduce((sum, value) => sum + value, 0) / window;
+  });
+}
+
+function marketLineTargetValue(point: SymbolMarketLinePoint, base: number, volatilityPct: number) {
+  const score = normalizedMarketLineScore(point) * 100;
+  const scorePressurePct = ((50 - score) / 50) * volatilityPct * 1.15;
+  const phasePressurePct = marketLinePhasePressure(point) * volatilityPct;
+  const maxOffset = Math.max(volatilityPct * 1.8, 0.025);
+  const offsetPct = clamp(scorePressurePct + phasePressurePct, -maxOffset, maxOffset);
+  return base * (1 + offsetPct);
+}
+
+function marketLinePhasePressure(point: SymbolMarketLinePoint) {
+  const phase = String(point.phase || point.state || "");
+  if (phase === "uptrend" || phase === "bull") return -0.35;
+  if (phase === "warming") return -0.16;
+  if (phase === "retreat" || phase === "bear") return 0.38;
+  if (phase === "rotation" || phase === "range") return 0.06;
+  return 0;
+}
+
+function retreatRiskFloor(point: SymbolMarketLinePoint, bar: Bar, ma5: number | null, ma10: number | null) {
+  if (!isRetreatMarketLine(point)) return null;
+  const closeBelowMa5 = ma5 != null && bar.close < ma5;
+  const closeLocation = bar.high > bar.low ? (bar.close - bar.low) / (bar.high - bar.low) : 0.5;
+  const intradayReturnPct = bar.open > 0 ? ((bar.close - bar.open) / bar.open) * 100 : 0;
+  const bearishLowClose = intradayReturnPct <= -3 && closeLocation <= 0.25;
+  if (!closeBelowMa5 && !bearishLowClose) return null;
+
+  const candidates = [ma5];
+  if (ma10 != null && (bar.close < ma10 || bearishLowClose || marketLineScoreValue(point) <= 32)) {
+    candidates.push(ma10);
+  }
+  const valid = candidates.filter((value): value is number => value != null && Number.isFinite(value));
+  if (valid.length === 0) return null;
+  return Math.max(...valid);
+}
+
+function marketLineDirection(
+  point: SymbolMarketLinePoint,
+  slopePct: number | null,
+  previousPoint: SymbolMarketLinePoint | null
+): MarketLineDirection {
+  if (isRetreatMarketLine(point)) return "falling";
+  const phase = String(point.phase || point.state || "");
+  if (phase === "warming") return "rising";
+  if (phase === "uptrend" || phase === "bull") return "rising";
+
+  const score = marketLineScoreValue(point);
+  const previousScore = previousPoint ? marketLineScoreValue(previousPoint) : null;
+  if (previousScore != null) {
+    if (score - previousScore >= 5) return "rising";
+    if (score - previousScore <= -5) return "falling";
+  }
+  if (slopePct == null) return "flat";
+  if (slopePct >= 0.35) return "rising";
+  if (slopePct <= -0.35) return "falling";
+  return "flat";
+}
+
+function isRetreatMarketLine(point: SymbolMarketLinePoint) {
+  const phase = String(point.phase || point.state || "");
+  return phase === "retreat" || phase === "bear";
+}
+
+function marketLineScoreValue(point: SymbolMarketLinePoint) {
+  if (typeof point.score === "number" && Number.isFinite(point.score)) return point.score;
+  return normalizedMarketLineScore(point) * 100;
+}
+
+function marketLineAdvice(
+  point: SymbolMarketLinePoint,
+  position: MarketLinePosition,
+  direction: MarketLineDirection
+): { text: string; tone: MarketLineAdviceTone } {
+  const phase = String(point.phase || point.state || "");
+  const isWeakPhase = phase === "retreat" || phase === "bear";
+  const isRecoveryPhase = phase === "warming";
+  const isStrongPhase = phase === "uptrend" || phase === "bull";
+
+  if (position === "below" && direction === "falling") {
+    return { text: isWeakPhase ? "空仓优先" : "防守观望", tone: "risk" };
+  }
+  if (position === "below" && direction === "rising") {
+    return { text: isRecoveryPhase ? "观察修复" : "等站回线", tone: "warning" };
+  }
+  if (position === "below") {
+    return { text: "等站回线", tone: "warning" };
+  }
+  if (direction === "rising") {
+    return { text: isStrongPhase || isRecoveryPhase ? "顺势关注" : "可观察", tone: "positive" };
+  }
+  if (direction === "falling") {
+    return { text: "谨慎防回落", tone: "warning" };
+  }
+  return { text: "可观察", tone: "neutral" };
+}
+
+function marketLinePointColor(point: SymbolMarketLinePoint) {
+  if (point.state === "bull") return "#ef4444";
+  if (point.state === "bear") return "#16a34a";
+  if (point.state === "warming") return "#d97706";
+  if (point.state === "range") return "#64748b";
+  return "#57534e";
 }
 
 function bollingerData(bars: Bar[], band: "upper" | "mid" | "lower", period: string): LineData<Time>[] {
@@ -747,6 +1015,95 @@ function IndicatorBadge({ label, value, className }: { label: string; value: num
   );
 }
 
+function ChartAsyncStatus({
+  barsLoading,
+  markersLoading,
+  marketLineLoading,
+  markerCount,
+  hasMarketLine,
+}: {
+  barsLoading: boolean;
+  markersLoading: boolean;
+  marketLineLoading: boolean;
+  markerCount: number;
+  hasMarketLine: boolean;
+}) {
+  if (!barsLoading && !markersLoading && !marketLineLoading && markerCount === 0 && !hasMarketLine) {
+    return null;
+  }
+  const items = [
+    {
+      label: "K线",
+      state: barsLoading ? "加载中" : "已加载",
+      loading: barsLoading,
+      done: !barsLoading,
+    },
+    {
+      label: "买卖点",
+      state: markersLoading ? "生成中" : markerCount > 0 ? `${markerCount} 个` : "暂无",
+      loading: markersLoading,
+      done: !markersLoading && markerCount > 0,
+    },
+    {
+      label: "牛熊线",
+      state: marketLineLoading ? "计算中" : hasMarketLine ? "已加载" : "暂无",
+      loading: marketLineLoading,
+      done: !marketLineLoading && hasMarketLine,
+    },
+  ];
+
+  return (
+    <div className="flex min-h-7 flex-wrap items-center gap-2 rounded-md border bg-muted/20 px-2 py-1.5 text-xs text-muted-foreground">
+      {items.map((item) => (
+        <span key={item.label} className="inline-flex items-center gap-1.5">
+          {item.loading ? <Skeleton className="h-2 w-2 rounded-full" /> : <span className={cn("h-2 w-2 rounded-full", item.done ? "bg-rise" : "bg-muted-foreground/35")} />}
+          <span>{item.label}</span>
+          <span className={item.done ? "text-foreground" : undefined}>{item.state}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function MarketLineLegend({
+  point,
+  status,
+  loading,
+}: {
+  point: SymbolMarketLinePoint | null;
+  status: MarketLineOverlayStatus | null;
+  loading: boolean;
+}) {
+  if (loading && !point) {
+    return (
+      <div className="flex min-h-6 flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <span>牛熊线</span>
+        <Skeleton className="h-3 w-28" />
+      </div>
+    );
+  }
+  if (!point) {
+    return <div className="h-6 text-xs text-muted-foreground">牛熊线 --</div>;
+  }
+  return (
+    <div className="flex min-h-6 flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+      <span className={cn("font-medium", marketLineToneClass(point.state))}>牛熊线 {marketPhaseLabel(point.phase ?? point.state ?? "")}</span>
+      <span className="tabular-nums text-muted-foreground">强度 {formatPrice(point.score)}</span>
+      {status ? (
+        <>
+          <span className="tabular-nums text-muted-foreground">线价 {formatPrice(status.lineValue)}</span>
+          <span className={cn("tabular-nums", priceColorClass(status.distancePct))}>
+            {marketLinePositionLabel(status.position)} {formatPct(status.distancePct)}
+          </span>
+          <span className={marketLineDirectionToneClass(status.direction)}>{marketLineDirectionLabel(status.direction)}</span>
+          <span className={marketLineAdviceToneClass(status.adviceTone)}>{status.advice}</span>
+        </>
+      ) : null}
+      {point.label ? <span className="text-muted-foreground">{point.label}</span> : null}
+    </div>
+  );
+}
+
 function SubIndicatorText({
   mode,
   values,
@@ -852,6 +1209,56 @@ function sameChartDay(left?: string | null, right?: string | null) {
   return left.slice(0, 10) === right.slice(0, 10);
 }
 
+function marketLineStatusForBar(overlay: MarketLineOverlayResult, bar: Bar | null): MarketLineOverlayStatus | null {
+  if (!bar) return null;
+  return overlay.byDate.get(bar.trade_date.slice(0, 10)) ?? null;
+}
+
+function marketLinePointForBar(items: SymbolMarketLinePoint[], bar: Bar | null): SymbolMarketLinePoint | null {
+  if (!bar) return null;
+  return items.find((item) => sameChartDay(item.trade_date, bar.trade_date)) ?? null;
+}
+
+function marketLineToneClass(state?: string | null) {
+  if (state === "bull") return "text-rise";
+  if (state === "bear") return "text-fall";
+  if (state === "warming") return "text-amber-700 dark:text-amber-300";
+  return "text-muted-foreground";
+}
+
+function marketLinePositionLabel(position: MarketLinePosition) {
+  return position === "above" ? "线上" : "线下";
+}
+
+function marketLineDirectionLabel(direction: MarketLineDirection) {
+  if (direction === "rising") return "上行";
+  if (direction === "falling") return "下行";
+  return "走平";
+}
+
+function marketLineDirectionToneClass(direction: MarketLineDirection) {
+  if (direction === "rising") return "text-rise";
+  if (direction === "falling") return "text-fall";
+  return "text-muted-foreground";
+}
+
+function marketLineAdviceToneClass(tone: MarketLineAdviceTone) {
+  if (tone === "positive") return "font-medium text-rise";
+  if (tone === "risk") return "font-medium text-fall";
+  if (tone === "warning") return "font-medium text-amber-700 dark:text-amber-300";
+  return "font-medium text-muted-foreground";
+}
+
+function marketPhaseLabel(phase: string) {
+  const labels: Record<string, string> = {
+    uptrend: "主升",
+    warming: "回暖",
+    rotation: "震荡",
+    retreat: "退潮",
+  };
+  return labels[phase] ?? phase;
+}
+
 function formatTradeTime(value?: string) {
   if (!value) return "--";
   return value.length >= 16 ? value.slice(0, 16) : value.slice(0, 10);
@@ -864,4 +1271,8 @@ function formatDateRange(bars: Bar[]) {
 
 function pad(value: number) {
   return String(value).padStart(2, "0");
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
 }

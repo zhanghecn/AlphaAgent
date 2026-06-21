@@ -51,6 +51,9 @@ class BacktestParams:
     enable_low_suction_market_risk_penalty: bool = False
     enable_market_adaptive_setup_weighting: bool = False
     enable_low_suction_first_lift_bonus: bool = False
+    enable_low_suction_lifecycle_ranking: bool = False
+    enable_dynamic_failed_launch_exit_stop: bool = False
+    enable_dynamic_failed_launch_replacement_quality_gate: bool = False
     enable_failed_launch_exit_stop: bool = False
     enable_contextual_failed_launch_exit_stop: bool = False
     enable_mid_profit_giveback_stop: bool = False
@@ -75,6 +78,42 @@ class BacktestParams:
     missed_rotation_min_score_gap: float = 10.0
     missed_rotation_max_held_return_pct: float = 1.0
     missed_rotation_min_held_days: int = 4
+    enable_high_quality_trend_rotation: bool = False
+    high_quality_rotation_min_score: float = 96.0
+    high_quality_rotation_max_rank: int = 10
+    high_quality_rotation_min_score_gap: float = 8.0
+    high_quality_rotation_max_held_return_pct: float = 0.0
+    high_quality_rotation_min_held_days: int = 4
+    enable_weak_holding_quality_rotation: bool = False
+    weak_holding_rotation_min_score: float = 96.0
+    weak_holding_rotation_max_rank: int = 20
+    weak_holding_rotation_min_score_gap: float = 6.0
+    weak_holding_rotation_max_held_return_pct: float = -5.0
+    weak_holding_rotation_min_held_days: int = 3
+    weak_holding_rotation_max_ma_convergence_pct: float = 5.0
+    weak_holding_rotation_min_low_suction_days: int = 3
+    enable_protected_weak_holding_rotation: bool = False
+    enable_low_suction_pullback_entry: bool = False
+    low_suction_pullback_entry_max_wait_days: int = 3
+    low_suction_pullback_entry_buffer_pct: float = 0.01
+    low_suction_pullback_entry_reserve_slot: bool = True
+    enable_low_suction_trigger_day_confirmation: bool = False
+    enable_low_suction_confirmed_branch_exit: bool = False
+    low_suction_failed_follow_d3_low_pct: float = -8.0
+    low_suction_failed_follow_d3_high_pct: float = 2.0
+    low_suction_failed_follow_d3_close_pct: float = -3.0
+    low_suction_opened_space_d5_high_pct: float = 6.0
+    low_suction_opened_space_d5_low_pct: float = -5.0
+    enable_low_suction_branch_replacement_quality_gate: bool = False
+    low_suction_branch_replacement_gate_wait_days: int = 3
+    low_suction_branch_replacement_min_score: float = 98.0
+    low_suction_branch_replacement_max_market_warning_level: int = 1
+    low_suction_branch_replacement_max_low_suction_ma_convergence_pct: float = 7.0
+    low_suction_branch_replacement_max_dragon_ma_convergence_pct: float = 12.0
+    enable_low_suction_branch_replacement_strict_setup_gate: bool = False
+    setup_family_filter: str = ""
+    enable_phase_aware_setup_selector: bool = False
+    enable_phase_replacement_quality: bool = False
     exclude_from_product_baseline: bool = False
     persist: bool = False
     symbols: list[str] | None = None
@@ -112,6 +151,9 @@ class Position:
     reason: dict[str, Any]
     last_price: float | None = None
     visible_holding_bars: int = 0
+    lowest_price: float | None = None
+    low_suction_confirmed_branch: str | None = None
+    low_suction_confirmed_branch_raw: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

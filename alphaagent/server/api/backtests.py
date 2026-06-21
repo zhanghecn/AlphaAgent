@@ -19,6 +19,7 @@ from alphaagent.server.services.backtest.engine import (
     backtest_drilldown_options,
     backtest_equity,
     backtest_execution_model_comparison,
+    backtest_execution_breakpoint_matrix,
     backtest_factor_audit,
     backtest_factor_candidates,
     backtest_signal_amount_preview,
@@ -26,12 +27,19 @@ from alphaagent.server.services.backtest.engine import (
     backtest_strategy_comparison,
     backtest_metrics,
     backtest_minute_coverage,
+    backtest_low_suction_confirmed_path_audit,
     backtest_low_suction_start_factor_audit,
+    backtest_market_phase_audit,
+    backtest_phase_strategy_family_matrix,
     backtest_path_diagnostics,
+    backtest_replacement_quality_matrix,
     backtest_report,
+    backtest_rotation_opportunity_cost_matrix,
     backtest_report_csv,
     backtest_setup_market_exit_audit,
     backtest_strategy_timeline,
+    backtest_support_stop_matrix,
+    backtest_trend_winner_protection_matrix,
     backtest_symbol_detail,
     backtest_top_candidate_audit,
     backtest_trade_attribution,
@@ -345,6 +353,131 @@ def get_setup_market_exit_audit(
         return _service_error(exc)
 
 
+@router.get("/{backtest_id}/support-stop-matrix")
+def get_support_stop_matrix(
+    backtest_id: int,
+    lookahead_days: int = Query(default=10, ge=1, le=30),
+    sample_limit: int = Query(default=40, ge=1, le=200),
+):
+    try:
+        return ok(
+            backtest_support_stop_matrix(
+                backtest_id,
+                lookahead_days=lookahead_days,
+                sample_limit=sample_limit,
+            )
+        )
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/{backtest_id}/low-suction-confirmed-path-audit")
+def get_low_suction_confirmed_path_audit(
+    backtest_id: int,
+    lookahead_days: int = Query(default=20, ge=5, le=30),
+):
+    try:
+        return ok(backtest_low_suction_confirmed_path_audit(backtest_id, lookahead_days=lookahead_days))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/{backtest_id}/market-phase-audit")
+def get_market_phase_audit(
+    backtest_id: int,
+    candidate_top_n: int = Query(default=20, ge=1, le=100),
+):
+    try:
+        return ok(backtest_market_phase_audit(backtest_id, candidate_top_n=candidate_top_n))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/{backtest_id}/phase-strategy-family-matrix")
+def get_phase_strategy_family_matrix(
+    backtest_id: int,
+    candidate_rank_limits: str = Query(default="10,20,100"),
+):
+    try:
+        return ok(
+            backtest_phase_strategy_family_matrix(
+                backtest_id,
+                candidate_rank_limits=_parse_int_list(candidate_rank_limits, default=[10, 20, 100]),
+            )
+        )
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/{backtest_id}/replacement-quality-matrix")
+def get_replacement_quality_matrix(
+    backtest_id: int,
+    sample_limit: int = Query(default=80, ge=1, le=500),
+):
+    try:
+        return ok(backtest_replacement_quality_matrix(backtest_id, sample_limit=sample_limit))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/{backtest_id}/execution-breakpoint-matrix")
+def get_execution_breakpoint_matrix(
+    backtest_id: int,
+    candidate_rank_limit: int = Query(default=100, ge=1, le=200),
+    sample_limit: int = Query(default=120, ge=1, le=500),
+):
+    try:
+        return ok(
+            backtest_execution_breakpoint_matrix(
+                backtest_id,
+                candidate_rank_limit=candidate_rank_limit,
+                sample_limit=sample_limit,
+            )
+        )
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/{backtest_id}/rotation-opportunity-cost-matrix")
+def get_rotation_opportunity_cost_matrix(
+    backtest_id: int,
+    candidate_rank_limit: int = Query(default=20, ge=1, le=200),
+    sample_limit: int = Query(default=120, ge=1, le=500),
+    holding_days: int = Query(default=20, ge=1, le=60),
+):
+    try:
+        return ok(
+            backtest_rotation_opportunity_cost_matrix(
+                backtest_id,
+                candidate_rank_limit=candidate_rank_limit,
+                sample_limit=sample_limit,
+                holding_days=holding_days,
+            )
+        )
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/{backtest_id}/trend-winner-protection-matrix")
+def get_trend_winner_protection_matrix(
+    backtest_id: int,
+    candidate_rank_limit: int = Query(default=20, ge=1, le=200),
+    sample_limit: int = Query(default=120, ge=1, le=500),
+    holding_days: int = Query(default=20, ge=1, le=60),
+):
+    try:
+        return ok(
+            backtest_trend_winner_protection_matrix(
+                backtest_id,
+                candidate_rank_limit=candidate_rank_limit,
+                sample_limit=sample_limit,
+                holding_days=holding_days,
+            )
+        )
+    except Exception as exc:
+        return _service_error(exc)
+
+
 @router.get("/{backtest_id}/top-candidate-audit")
 def get_top_candidate_audit(backtest_id: int, top_n: int = Query(default=10, ge=1, le=100)):
     try:
@@ -539,6 +672,18 @@ def _params_from_payload(payload: dict[str, Any]) -> BacktestParams:
             payload.get("enable_low_suction_first_lift_bonus"),
             default=False,
         ),
+        enable_low_suction_lifecycle_ranking=_parse_bool(
+            payload.get("enable_low_suction_lifecycle_ranking"),
+            default=False,
+        ),
+        enable_dynamic_failed_launch_exit_stop=_parse_bool(
+            payload.get("enable_dynamic_failed_launch_exit_stop"),
+            default=False,
+        ),
+        enable_dynamic_failed_launch_replacement_quality_gate=_parse_bool(
+            payload.get("enable_dynamic_failed_launch_replacement_quality_gate"),
+            default=False,
+        ),
         enable_failed_launch_exit_stop=_parse_bool(payload.get("enable_failed_launch_exit_stop"), default=False),
         enable_contextual_failed_launch_exit_stop=_parse_bool(
             payload.get("enable_contextual_failed_launch_exit_stop"),
@@ -566,6 +711,63 @@ def _params_from_payload(payload: dict[str, Any]) -> BacktestParams:
         missed_rotation_min_score_gap=float(payload.get("missed_rotation_min_score_gap") or 10.0),
         missed_rotation_max_held_return_pct=float(payload.get("missed_rotation_max_held_return_pct") or 1.0),
         missed_rotation_min_held_days=int(payload.get("missed_rotation_min_held_days") or 4),
+        enable_high_quality_trend_rotation=_parse_bool(payload.get("enable_high_quality_trend_rotation"), default=False),
+        high_quality_rotation_min_score=float(payload.get("high_quality_rotation_min_score") or 96.0),
+        high_quality_rotation_max_rank=int(payload.get("high_quality_rotation_max_rank") or 10),
+        high_quality_rotation_min_score_gap=float(payload.get("high_quality_rotation_min_score_gap") or 8.0),
+        high_quality_rotation_max_held_return_pct=float(payload.get("high_quality_rotation_max_held_return_pct") or 0.0),
+        high_quality_rotation_min_held_days=int(payload.get("high_quality_rotation_min_held_days") or 4),
+        enable_weak_holding_quality_rotation=_parse_bool(payload.get("enable_weak_holding_quality_rotation"), default=False),
+        weak_holding_rotation_min_score=float(payload.get("weak_holding_rotation_min_score") or 96.0),
+        weak_holding_rotation_max_rank=int(payload.get("weak_holding_rotation_max_rank") or 20),
+        weak_holding_rotation_min_score_gap=float(payload.get("weak_holding_rotation_min_score_gap") or 6.0),
+        weak_holding_rotation_max_held_return_pct=float(payload.get("weak_holding_rotation_max_held_return_pct") or -5.0),
+        weak_holding_rotation_min_held_days=int(payload.get("weak_holding_rotation_min_held_days") or 3),
+        weak_holding_rotation_max_ma_convergence_pct=float(payload.get("weak_holding_rotation_max_ma_convergence_pct") or 5.0),
+        weak_holding_rotation_min_low_suction_days=int(payload.get("weak_holding_rotation_min_low_suction_days") or 3),
+        enable_protected_weak_holding_rotation=_parse_bool(
+            payload.get("enable_protected_weak_holding_rotation"),
+            default=False,
+        ),
+        enable_low_suction_pullback_entry=_parse_bool(payload.get("enable_low_suction_pullback_entry"), default=False),
+        low_suction_pullback_entry_max_wait_days=int(payload.get("low_suction_pullback_entry_max_wait_days") or 3),
+        low_suction_pullback_entry_buffer_pct=float(payload.get("low_suction_pullback_entry_buffer_pct") or 0.01),
+        low_suction_pullback_entry_reserve_slot=_parse_bool(payload.get("low_suction_pullback_entry_reserve_slot"), default=True),
+        enable_low_suction_trigger_day_confirmation=_parse_bool(
+            payload.get("enable_low_suction_trigger_day_confirmation"),
+            default=False,
+        ),
+        enable_low_suction_confirmed_branch_exit=_parse_bool(
+            payload.get("enable_low_suction_confirmed_branch_exit"),
+            default=False,
+        ),
+        low_suction_failed_follow_d3_low_pct=float(payload.get("low_suction_failed_follow_d3_low_pct") or -8.0),
+        low_suction_failed_follow_d3_high_pct=float(payload.get("low_suction_failed_follow_d3_high_pct") or 2.0),
+        low_suction_failed_follow_d3_close_pct=float(payload.get("low_suction_failed_follow_d3_close_pct") or -3.0),
+        low_suction_opened_space_d5_high_pct=float(payload.get("low_suction_opened_space_d5_high_pct") or 6.0),
+        low_suction_opened_space_d5_low_pct=float(payload.get("low_suction_opened_space_d5_low_pct") or -5.0),
+        enable_low_suction_branch_replacement_quality_gate=_parse_bool(
+            payload.get("enable_low_suction_branch_replacement_quality_gate"),
+            default=False,
+        ),
+        low_suction_branch_replacement_gate_wait_days=int(_payload_value(payload, "low_suction_branch_replacement_gate_wait_days", 3)),
+        low_suction_branch_replacement_min_score=float(_payload_value(payload, "low_suction_branch_replacement_min_score", 98.0)),
+        low_suction_branch_replacement_max_market_warning_level=int(
+            _payload_value(payload, "low_suction_branch_replacement_max_market_warning_level", 1)
+        ),
+        low_suction_branch_replacement_max_low_suction_ma_convergence_pct=float(
+            _payload_value(payload, "low_suction_branch_replacement_max_low_suction_ma_convergence_pct", 7.0)
+        ),
+        low_suction_branch_replacement_max_dragon_ma_convergence_pct=float(
+            _payload_value(payload, "low_suction_branch_replacement_max_dragon_ma_convergence_pct", 12.0)
+        ),
+        enable_low_suction_branch_replacement_strict_setup_gate=_parse_bool(
+            payload.get("enable_low_suction_branch_replacement_strict_setup_gate"),
+            default=False,
+        ),
+        setup_family_filter=str(payload.get("setup_family_filter") or "").strip(),
+        enable_phase_aware_setup_selector=_parse_bool(payload.get("enable_phase_aware_setup_selector"), default=False),
+        enable_phase_replacement_quality=_parse_bool(payload.get("enable_phase_replacement_quality"), default=False),
         exclude_from_product_baseline=_parse_bool(payload.get("exclude_from_product_baseline"), default=False),
         symbols=_parse_symbols(payload.get("symbols") or payload.get("vt_symbols") or payload.get("vt_symbol")),
         included_boards=normalize_included_boards(payload.get("included_boards")),
@@ -614,12 +816,33 @@ def _parse_strategy_list(value: Any) -> list[str] | None:
     return items or None
 
 
+def _parse_int_list(value: Any, *, default: list[int]) -> list[int]:
+    if value is None or value == "":
+        return list(default)
+    raw_items = value.split(",") if isinstance(value, str) else value
+    items: list[int] = []
+    for item in raw_items:
+        text = str(item).strip()
+        if not text:
+            continue
+        try:
+            items.append(int(text))
+        except ValueError:
+            continue
+    return items or list(default)
+
+
 def _parse_bool(value: Any, *, default: bool = False) -> bool:
     if value is None:
         return default
     if isinstance(value, str):
         return value.strip().lower() not in {"", "0", "false", "no", "off"}
     return bool(value)
+
+
+def _payload_value(payload: dict[str, Any], key: str, default: Any) -> Any:
+    value = payload.get(key)
+    return default if value in (None, "") else value
 
 
 def _service_error(exc: Exception) -> JSONResponse:

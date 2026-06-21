@@ -279,6 +279,28 @@ def get_symbol_signal_history(
         return _service_error(exc)
 
 
+@router.get("/symbols/{vt_symbol}/market-line")
+def get_symbol_market_line(
+    vt_symbol: str,
+    strategy: str = Query(default=screening.STRATEGY_ID),
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    limit: int = Query(default=1000, ge=1, le=1500),
+):
+    try:
+        return ok(
+            screening.symbol_market_line(
+                vt_symbol,
+                strategy_id=strategy,
+                start=_parse_date(start),
+                end=_parse_date(end),
+                limit=limit,
+            )
+        )
+    except Exception as exc:
+        return _service_error(exc)
+
+
 @router.get("/symbols/{vt_symbol}/trade-plan")
 def get_symbol_trade_plan(
     vt_symbol: str,

@@ -249,6 +249,7 @@ def candidate_execution_attribution_summary(
     trades: list[dict[str, Any]] | None = None,
     cache_coverage: dict[str, Any] | None = None,
     max_execution_rank: int = 20,
+    portfolio_full_threshold: int = 10,
 ) -> dict[str, Any]:
     """Summarize how top candidates flowed into real portfolio execution.
 
@@ -289,10 +290,67 @@ def candidate_execution_attribution_summary(
         "missed_count": sum(1 for row in rows if not row.get("filled")),
         "top20_missed_quality": _top_missed_quality(rows),
         "missed_candidate_opportunity_cost": missed_candidate_opportunity_cost_rows(rows),
+        "portfolio_opportunity_summary": candidate_portfolio_opportunity_summary(
+            rows,
+            portfolio_full_threshold=portfolio_full_threshold,
+        ),
         "by_status": _candidate_execution_status_buckets(rows),
         "by_not_filled_reason": _candidate_not_filled_reason_buckets(rows),
         "by_not_filled_subreason": _candidate_not_filled_subreason_buckets(rows),
         "items": rows[:100],
+    }
+
+
+def candidate_portfolio_opportunity_summary(
+    rows: list[dict[str, Any]],
+    *,
+    portfolio_full_threshold: int = 10,
+) -> dict[str, Any]:
+    """Summarize missed candidates against the real portfolio snapshot."""
+
+    full_threshold = max(int(portfolio_full_threshold or 10), 1)
+    missed_new_symbol_rows = [
+        row
+        for row in rows
+        if not row.get("filled") and not _candidate_same_symbol_held(row)
+    ]
+    full_portfolio_missed_rows = [
+        row
+        for row in missed_new_symbol_rows
+        if _candidate_held_count(row) >= full_threshold
+    ]
+    return {
+        "method": "只读归因：把候选 top-N 与信号日真实持仓快照对照，区分已持有同股的重复信号和满仓错过的新标的；后验收益只用于审计。",
+        "portfolio_full_threshold": full_threshold,
+        "new_symbol_missed": _candidate_portfolio_bucket_metrics(
+            "new_symbol_missed",
+            missed_new_symbol_rows,
+            "opportunity_type",
+            portfolio_full_threshold=full_threshold,
+        ),
+        "full_portfolio_missed": _candidate_portfolio_bucket_metrics(
+            "new_symbol_missed_full_portfolio",
+            full_portfolio_missed_rows,
+            "opportunity_type",
+            portfolio_full_threshold=full_threshold,
+        ),
+        "by_opportunity_type": _candidate_portfolio_group_buckets(
+            rows,
+            "opportunity_type",
+            lambda row: _candidate_opportunity_type(row, portfolio_full_threshold=full_threshold),
+            portfolio_full_threshold=full_threshold,
+        ),
+        "by_delta_vs_weakest_held": _candidate_portfolio_group_buckets(
+            [row for row in missed_new_symbol_rows if _delta_vs_weakest_held(row) is not None],
+            "delta_bucket",
+            lambda row: _delta_bucket(_delta_vs_weakest_held(row)),
+            portfolio_full_threshold=full_threshold,
+        ),
+        "top_replacement_opportunities": _top_replacement_opportunities(
+            missed_new_symbol_rows,
+            limit=20,
+        ),
+        "not_used_for_signal_score": True,
     }
 
 
@@ -344,6 +402,165 @@ def missed_candidate_opportunity_cost_rows(rows: list[dict[str, Any]], *, limit:
         )
     )
     return result[: max(int(limit or 50), 1)]
+
+
+def _candidate_portfolio_group_buckets(
+    rows: list[dict[str, Any]],
+    bucket_key: str,
+    bucket_fn,
+    *,
+    portfolio_full_threshold: int,
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(str(bucket_fn(row) or "unknown"), []).append(row)
+    result = [
+        _candidate_portfolio_bucket_metrics(
+            bucket,
+            bucket_rows,
+            bucket_key,
+            portfolio_full_threshold=portfolio_full_threshold,
+        )
+        for bucket, bucket_rows in groups.items()
+    ]
+    result.sort(
+        key=lambda item: (
+            -int(item.get("sample_count") or 0),
+            -_sort_float(item.get("average_return_20d")),
+            str(item.get(bucket_key) or ""),
+        )
+    )
+    return result
+
+
+def _candidate_portfolio_bucket_metrics(
+    bucket: str,
+    rows: list[dict[str, Any]],
+    bucket_key: str,
+    *,
+    portfolio_full_threshold: int,
+) -> dict[str, Any]:
+    returns = [_candidate_audit_return(row) for row in rows]
+    returns = [value for value in returns if value is not None]
+    deltas = [_delta_vs_weakest_held(row) for row in rows]
+    deltas = [value for value in deltas if value is not None]
+    return {
+        bucket_key: bucket,
+        "sample_count": len(rows),
+        "filled_count": sum(1 for row in rows if row.get("filled")),
+        "missed_count": sum(1 for row in rows if not row.get("filled")),
+        "same_symbol_holding_count": sum(1 for row in rows if _candidate_same_symbol_held(row)),
+        "full_portfolio_count": sum(1 for row in rows if _candidate_held_count(row) >= portfolio_full_threshold),
+        "positive_20d_count": sum(1 for value in returns if value > 0),
+        "win_rate": _ratio_pct(sum(1 for value in returns if value > 0), len(returns)),
+        "average_return_20d": round(sum(returns) / len(returns), 4) if returns else None,
+        "median_return_20d": round(median(returns), 4) if returns else None,
+        "average_delta_vs_weakest_held": round(sum(deltas) / len(deltas), 4) if deltas else None,
+        "not_used_for_signal_score": True,
+    }
+
+
+def _top_replacement_opportunities(rows: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    candidates = []
+    for row in rows:
+        delta = _delta_vs_weakest_held(row)
+        weakest = _weakest_non_same_holding(row)
+        if delta is None or weakest is None:
+            continue
+        candidates.append(
+            {
+                "signal_date": row.get("signal_date"),
+                "execute_date": row.get("execute_date"),
+                "missed_symbol": row.get("vt_symbol"),
+                "missed_name": row.get("name"),
+                "missed_rank": row.get("rank"),
+                "missed_score": row.get("score"),
+                "missed_return_20d": row.get("missed_return_20d"),
+                "missed_mfe_20d": row.get("missed_mfe_20d"),
+                "missed_mae_20d": row.get("missed_mae_20d"),
+                "held_symbol": weakest.get("vt_symbol"),
+                "held_unrealized_return_pct": _float_or_none(weakest.get("floating_pnl_pct")),
+                "held_days": _int_or_none(weakest.get("holding_days")),
+                "replacement_quality_delta": delta,
+                "not_filled_subreason": row.get("not_filled_subreason"),
+                "not_used_for_signal_score": True,
+            }
+        )
+    candidates.sort(
+        key=lambda item: (
+            -_sort_float(item.get("replacement_quality_delta")),
+            -_sort_float(item.get("missed_return_20d")),
+            str(item.get("signal_date") or ""),
+            str(item.get("missed_symbol") or ""),
+        )
+    )
+    return candidates[: max(int(limit or 20), 1)]
+
+
+def _candidate_audit_return(row: dict[str, Any]) -> float | None:
+    return _float_or_none(row.get("fixed_return_20d") if row.get("filled") else row.get("missed_return_20d"))
+
+
+def _candidate_opportunity_type(row: dict[str, Any], *, portfolio_full_threshold: int) -> str:
+    if row.get("filled"):
+        return "filled"
+    if _candidate_same_symbol_held(row):
+        return "repeat_same_symbol_holding"
+    if _candidate_held_count(row) >= portfolio_full_threshold:
+        return "new_symbol_missed_full_portfolio"
+    if _candidate_held_count(row) > 0:
+        return "new_symbol_missed_with_open_slots"
+    return "new_symbol_missed_without_position_snapshot"
+
+
+def _delta_bucket(value: float | None) -> str:
+    if value is None:
+        return "unknown"
+    if value < 0:
+        return "<0"
+    if value < 5:
+        return "0-5"
+    if value < 10:
+        return "5-10"
+    if value < 20:
+        return "10-20"
+    return "20+"
+
+
+def _delta_vs_weakest_held(row: dict[str, Any]) -> float | None:
+    missed_return = _float_or_none(row.get("missed_return_20d"))
+    weakest = _weakest_non_same_holding(row)
+    held_return = _float_or_none((weakest or {}).get("floating_pnl_pct"))
+    if missed_return is None or held_return is None:
+        return None
+    return round(missed_return - held_return, 4)
+
+
+def _weakest_non_same_holding(row: dict[str, Any]) -> dict[str, Any] | None:
+    holdings = [
+        holding
+        for holding in _candidate_held_positions(row)
+        if not _same_symbol(row.get("vt_symbol"), holding.get("vt_symbol"))
+    ]
+    if not holdings:
+        return None
+    return min(
+        holdings,
+        key=lambda holding: (
+            _float_or_none(holding.get("floating_pnl_pct"))
+            if _float_or_none(holding.get("floating_pnl_pct")) is not None
+            else 10**18,
+            str(holding.get("vt_symbol") or ""),
+        ),
+    )
+
+
+def _candidate_same_symbol_held(row: dict[str, Any]) -> bool:
+    return any(_same_symbol(row.get("vt_symbol"), holding.get("vt_symbol")) for holding in _candidate_held_positions(row))
+
+
+def _candidate_held_count(row: dict[str, Any]) -> int:
+    return len(_candidate_held_positions(row))
 
 
 def _same_symbol(left: Any, right: Any) -> bool:

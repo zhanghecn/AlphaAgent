@@ -20,7 +20,7 @@ from alphaagent.server.services.quant.factors import (
     Bar,
     SignalScore,
 )
-from alphaagent.server.services.quant import candidate_lanes, market_context
+from alphaagent.server.services.quant import candidate_lanes, market_context, symbol_review
 from alphaagent.server.services.quant import screening_loaders, screening_payloads, screening_persistence
 from alphaagent.server.services.quant.financials import financial_coverage_summary
 from alphaagent.server.services.quant.strategy_registry import get_strategy, score_strategy
@@ -1040,6 +1040,7 @@ def symbol_signal_history(
     best_total = max(rows, key=lambda row: float(row["total_score"]), default=None)
     best_entry_fit = near_rows[0] if near_rows else None
     scored_date_count = len(rows)
+    review_payload = symbol_review.attach_symbol_review(rows)
     return {
         "status": "ready" if rows else "empty",
         "vt_symbol": symbol,
@@ -1057,8 +1058,95 @@ def symbol_signal_history(
         "best_entry_fit": best_entry_fit,
         "near_misses": near_rows,
         "recent": recent_rows,
+        **review_payload,
         "financial_coverage": financial_coverage,
         "rule": _strategy_rule_payload(strategy.id, effective_min_entry_score),
+    }
+
+
+def symbol_market_line(
+    vt_symbol: str,
+    *,
+    strategy_id: str = STRATEGY_ID,
+    start: date | None = None,
+    end: date | None = None,
+    limit: int = 1000,
+) -> dict[str, Any]:
+    """Return a compact read-only market line for a stock detail chart.
+
+    This endpoint deliberately avoids per-stock signal scoring. It only uses
+    trading dates for the stock and market data visible on or before each date.
+    """
+
+    symbol = str(vt_symbol or "").strip().upper()
+    if not symbol:
+        return {"status": "invalid_symbol", "message": "vt_symbol is required", "market_line": []}
+    if not is_database_configured():
+        return {"status": "unavailable", "message": "DATABASE_URL not configured", "market_line": []}
+    strategy = get_strategy(strategy_id)
+    if strategy is None:
+        return {"status": "unsupported_strategy", "strategy_id": strategy_id, "market_line": []}
+
+    capped_limit = max(1, min(int(limit or 1000), 1500))
+    _ensure_quant_schema()
+    with session_scope() as session:
+        stock = session.execute(select(schema.stocks).where(schema.stocks.c.vt_symbol == symbol)).mappings().first()
+        if not stock:
+            return {"status": "not_found", "vt_symbol": symbol, "market_line": []}
+
+        latest = end or session.execute(
+            select(func.max(schema.stock_daily_bars.c.trade_date)).where(schema.stock_daily_bars.c.vt_symbol == symbol)
+        ).scalar()
+        if latest is None:
+            return {"status": "empty", "vt_symbol": symbol, "market_line": []}
+
+        earliest = start or session.execute(
+            select(func.min(schema.stock_daily_bars.c.trade_date)).where(schema.stock_daily_bars.c.vt_symbol == symbol)
+        ).scalar()
+        if earliest is None:
+            return {"status": "empty", "vt_symbol": symbol, "market_line": []}
+
+        date_rows = session.execute(
+            select(schema.stock_daily_bars.c.trade_date)
+            .where(
+                and_(
+                    schema.stock_daily_bars.c.vt_symbol == symbol,
+                    schema.stock_daily_bars.c.trade_date >= earliest,
+                    schema.stock_daily_bars.c.trade_date <= latest,
+                )
+            )
+            .order_by(desc(schema.stock_daily_bars.c.trade_date))
+            .limit(capped_limit)
+        ).scalars().all()
+        trade_dates = sorted(date_rows)
+        market_contexts = market_context.compute_market_contexts(session, schema, trade_dates)
+
+    market_line = [
+        symbol_review.bull_bear_line_from_row(
+            {
+                "trade_date": trade_date.isoformat(),
+                "evidence": {
+                    "market_context": market_contexts[trade_date].to_dict(),
+                },
+            }
+        )
+        for trade_date in trade_dates
+        if trade_date in market_contexts
+    ]
+    return {
+        "status": "ready" if market_line else "empty",
+        "vt_symbol": symbol,
+        "name": stock.get("name"),
+        **stock_board_payload(symbol, stock.get("exchange")),
+        "strategy_id": strategy.id,
+        "strategy_version": strategy.version,
+        "start_date": trade_dates[0].isoformat() if trade_dates else earliest.isoformat(),
+        "end_date": trade_dates[-1].isoformat() if trade_dates else latest.isoformat(),
+        "market_line": market_line,
+        "latest_market_line": market_line[-1] if market_line else None,
+        "market_line_count": len(market_line),
+        "source": "market_context_only",
+        "not_used_for_signal_score": True,
     }
 
 
@@ -1498,6 +1586,9 @@ def _attach_market_context(score: SignalScore, payload: dict[str, Any] | None) -
         "dominant_theme",
         "dominant_theme_id",
         "theme_strength",
+        "growth_score",
+        "value_score",
+        "small_cap_score",
         "fund_flow_state",
         "fund_flow_label",
         "fund_flow_score",

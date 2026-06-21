@@ -12,6 +12,7 @@ from alphaagent.server.db.session import get_engine, is_database_configured, ses
 from alphaagent.server.services.quant import screening_payloads, strategy_replay
 from alphaagent.server.services.quant.factors import STRATEGY_ID
 from alphaagent.server.services.quant.symbol_diagnostics import display_candidate_markers
+from alphaagent.server.services.quant.symbol_review import attach_symbol_review
 from alphaagent.server.services.quant.strategy_registry import get_strategy
 
 
@@ -279,6 +280,7 @@ def _signal_payload(rows: list[dict[str, Any]]) -> dict[str, Any]:
     latest = rows[0]
     latest_entry = entry_rows[0] if entry_rows else None
     display_markers = display_candidate_markers(rows)
+    review_payload = attach_symbol_review(rows)
     return {
         "status": "buy_signal" if latest_entry else "scored",
         "scored_date_count": len(rows),
@@ -288,6 +290,7 @@ def _signal_payload(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "best_total_score": best,
         "recent": rows[:20],
         "display_markers": display_markers,
+        **review_payload,
     }
 
 

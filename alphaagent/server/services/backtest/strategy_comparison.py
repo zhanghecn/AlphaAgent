@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import date, datetime
 from typing import Any, Callable
 
 from alphaagent.server.services.backtest.schemas import BacktestParams
+from alphaagent.server.services.quant import market_context
 from alphaagent.server.services.quant.strategy_registry import list_internal_strategies
 
 
 RunBacktest = Callable[[BacktestParams], dict[str, Any]]
+LoadMarketContexts = Callable[[list[date]], dict[date, dict[str, Any]]]
 
 
 def compare_strategies(
@@ -17,6 +20,7 @@ def compare_strategies(
     *,
     strategies: list[str] | None = None,
     run_backtest: RunBacktest,
+    load_market_contexts: LoadMarketContexts | None = None,
 ) -> dict[str, Any]:
     """Run multiple strategies with identical non-persistent parameters."""
 
@@ -26,6 +30,7 @@ def compare_strategies(
         return {"status": "empty", "rows": [], "message": "No strategies selected."}
 
     rows = []
+    context_cache: dict[date, dict[str, Any]] = {}
     for strategy_id in selected:
         params = replace(
             base_params,
@@ -37,7 +42,22 @@ def compare_strategies(
             persist=False,
         )
         result = run_backtest(params)
-        rows.append(_strategy_row(strategy_id, strategy_meta.get(strategy_id) or {}, result))
+        trades = list(result.get("trades") or [])
+        signal_events = list(result.get("signal_events") or [])
+        if load_market_contexts is not None:
+            context_dates = _unique_dates([*_closed_trade_entry_dates(trades), *_candidate_signal_dates(signal_events)])
+            missing_dates = [day for day in context_dates if day not in context_cache]
+            if missing_dates:
+                context_cache.update(load_market_contexts(missing_dates))
+        rows.append(
+            _strategy_row(
+                strategy_id,
+                strategy_meta.get(strategy_id) or {},
+                result,
+                context_cache,
+                candidate_limit=base_params.candidate_limit,
+            )
+        )
 
     return {
         "status": "ready" if rows else "empty",
@@ -59,7 +79,14 @@ def _selected_strategies(strategies: list[str] | None, meta: dict[str, dict[str,
     return list(meta)
 
 
-def _strategy_row(strategy_id: str, meta: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+def _strategy_row(
+    strategy_id: str,
+    meta: dict[str, Any],
+    result: dict[str, Any],
+    market_context_by_date: dict[date, dict[str, Any]] | None = None,
+    *,
+    candidate_limit: int = 20,
+) -> dict[str, Any]:
     if result.get("status") != "ready":
         return {
             "strategy_id": strategy_id,
@@ -103,6 +130,12 @@ def _strategy_row(strategy_id: str, meta: dict[str, Any], result: dict[str, Any]
         strict_1430_rejected_count=len(strict_rejected),
         tail_entry_rejected_count=len(tail_entry_rejected),
     )
+    phase_summary = _strategy_phase_summary(trades, market_context_by_date)
+    candidate_phase_summary = _strategy_candidate_phase_summary(
+        signal_events,
+        market_context_by_date,
+        top_limit=candidate_limit,
+    )
     return {
         "strategy_id": strategy_id,
         "strategy_version": result.get("strategy_version") or meta.get("version"),
@@ -113,6 +146,7 @@ def _strategy_row(strategy_id: str, meta: dict[str, Any], result: dict[str, Any]
         "total_return_pct": metrics.get("total_return_pct"),
         "max_drawdown_pct": metrics.get("max_drawdown_pct"),
         "trade_count": len(trades),
+        "total_trade_rows": len(trades),
         "buy_count": len(buy_trades),
         "sell_count": len(sell_trades),
         "buy_signal_count": len(buy_signals),
@@ -125,6 +159,9 @@ def _strategy_row(strategy_id: str, meta: dict[str, Any], result: dict[str, Any]
         "daily_close_proxy_count": daily_close_proxy_count,
         "minute_1430_ratio": _ratio_pct(minute_1430_count, len(buy_trades)),
         "daily_close_proxy_ratio": _ratio_pct(daily_close_proxy_count, len(buy_trades)),
+        "phase_summary": phase_summary,
+        "phase_rank_hint": _phase_rank_hint(phase_summary),
+        "candidate_phase_summary": candidate_phase_summary,
     }
 
 
@@ -161,6 +198,426 @@ def _params_payload(params: BacktestParams) -> dict[str, Any]:
             payload[key] = list(value)
     payload["persist"] = False
     return payload
+
+
+def _strategy_phase_summary(
+    trades: list[dict[str, Any]],
+    market_context_by_date: dict[date, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    closed = _closed_trade_rows(trades)
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for row in closed:
+        phase = market_context.classify_trading_market_phase(_entry_market_payload(row, market_context_by_date))
+        phase_id = str(phase.get("phase") or "unknown")
+        item = dict(row)
+        item["market_phase"] = phase_id
+        item["market_phase_label"] = phase.get("label")
+        buckets.setdefault(phase_id, []).append(item)
+
+    by_phase = [_phase_bucket_summary(phase_id, rows) for phase_id, rows in buckets.items()]
+    by_phase.sort(key=lambda item: (_phase_sort_rank(str(item.get("phase") or "")), -int(item.get("trade_count") or 0)))
+    best_phase = max(
+        [row for row in by_phase if int(row.get("trade_count") or 0) > 0],
+        key=lambda row: (_numeric_or_floor(row.get("avg_return_pct")), _numeric_or_floor(row.get("win_rate_pct"))),
+        default=None,
+    )
+    return {
+        "status": "ready" if closed else "empty",
+        "trade_count": len(closed),
+        "by_phase": by_phase,
+        "best_phase": best_phase.get("phase") if best_phase else None,
+        "best_phase_label": best_phase.get("label") if best_phase else None,
+        "not_used_for_signal_score": True,
+        "method": "按真实闭合成交的买入日可见行情上下文聚合；不改变买卖、排序或仓位。",
+    }
+
+
+def _closed_trade_entry_dates(trades: list[dict[str, Any]]) -> list[date]:
+    result = []
+    for row in _closed_trade_rows(trades):
+        entry_date = _as_date(row.get("entry_date"))
+        if entry_date and entry_date not in result:
+            result.append(entry_date)
+    return result
+
+
+def _candidate_signal_dates(signal_events: list[dict[str, Any]]) -> list[date]:
+    result = []
+    for event in signal_events:
+        if str(event.get("side") or "").upper() != "BUY":
+            continue
+        signal_date = _as_date(event.get("signal_date") or event.get("trade_date"))
+        if signal_date and signal_date not in result:
+            result.append(signal_date)
+    return result
+
+
+def _unique_dates(values: list[date]) -> list[date]:
+    result = []
+    for value in values:
+        if value not in result:
+            result.append(value)
+    return result
+
+
+def _closed_trade_rows(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    open_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    rows: list[dict[str, Any]] = []
+    ordered = sorted(enumerate(trades), key=lambda item: (_date_sort_key(item[1].get("trade_date")), item[0]))
+    for _, trade in ordered:
+        side = str(trade.get("side") or "").upper()
+        vt_symbol = str(trade.get("vt_symbol") or "")
+        if side == "BUY":
+            open_by_symbol.setdefault(vt_symbol, []).append(trade)
+            continue
+        if side != "SELL":
+            continue
+        entry = open_by_symbol.get(vt_symbol, []).pop(0) if open_by_symbol.get(vt_symbol) else None
+        if not entry:
+            continue
+        entry_price = _safe_float(entry.get("price"))
+        exit_price = _safe_float(trade.get("price"))
+        amount = _safe_float(entry.get("amount"))
+        pnl = _safe_float(trade.get("pnl"))
+        return_pct = None
+        if pnl is not None and amount:
+            return_pct = pnl / amount * 100
+        elif entry_price and exit_price:
+            return_pct = (exit_price / entry_price - 1) * 100
+        rows.append(
+            {
+                "vt_symbol": vt_symbol,
+                "entry_date": _date_text(entry.get("trade_date")),
+                "exit_date": _date_text(trade.get("trade_date")),
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "amount": amount,
+                "pnl": pnl,
+                "return_pct": return_pct,
+                "exit_reason": trade.get("reason"),
+                "raw": entry.get("raw") if isinstance(entry.get("raw"), dict) else {},
+            }
+        )
+    return rows
+
+
+def _strategy_candidate_phase_summary(
+    signal_events: list[dict[str, Any]],
+    market_context_by_date: dict[date, dict[str, Any]] | None = None,
+    *,
+    top_limit: int = 20,
+) -> dict[str, Any]:
+    rows = _candidate_signal_outcome_rows(signal_events, market_context_by_date, top_limit=top_limit)
+    buy_rows = rows["buy_rows"]
+    closed_rows = rows["closed_rows"]
+    by_phase = []
+    phase_ids = {str(row.get("market_phase") or "unknown") for row in buy_rows}
+    phase_ids.update(str(row.get("market_phase") or "unknown") for row in closed_rows)
+    for phase_id in phase_ids:
+        phase_buy_rows = [row for row in buy_rows if str(row.get("market_phase") or "unknown") == phase_id]
+        phase_closed_rows = [row for row in closed_rows if str(row.get("market_phase") or "unknown") == phase_id]
+        by_phase.append(_candidate_phase_bucket_summary(phase_id, phase_buy_rows, phase_closed_rows))
+    by_phase.sort(key=lambda item: (_phase_sort_rank(str(item.get("phase") or "")), -int(item.get("signal_count") or 0)))
+    best_phase = max(
+        [row for row in by_phase if int(row.get("evaluated_count") or 0) > 0],
+        key=lambda row: (_numeric_or_floor(row.get("avg_return_pct")), _numeric_or_floor(row.get("win_rate_pct"))),
+        default=None,
+    )
+    return {
+        "status": "ready" if buy_rows else "empty",
+        "top_limit": int(top_limit or 0),
+        "signal_count": len(buy_rows),
+        "evaluated_count": len([row for row in closed_rows if _safe_float(row.get("return_pct")) is not None]),
+        "open_count": rows["open_count"],
+        "not_triggered_count": rows["not_triggered_count"],
+        "by_phase": by_phase,
+        "best_phase": best_phase.get("phase") if best_phase else None,
+        "best_phase_label": best_phase.get("label") if best_phase else None,
+        "not_used_for_signal_score": True,
+        "method": "按理论买入候选 Top-N 的信号日行情聚合，收益为后验审计；不改变默认买卖、排序或仓位。",
+    }
+
+
+def _candidate_signal_outcome_rows(
+    signal_events: list[dict[str, Any]],
+    market_context_by_date: dict[date, dict[str, Any]] | None,
+    *,
+    top_limit: int,
+) -> dict[str, Any]:
+    open_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    buy_rows: list[dict[str, Any]] = []
+    closed_rows: list[dict[str, Any]] = []
+    not_triggered_count = 0
+    ordered = sorted(enumerate(signal_events), key=lambda item: (_date_sort_key(item[1].get("trade_date")), item[0]))
+    for _, event in ordered:
+        side = str(event.get("side") or "").upper()
+        vt_symbol = str(event.get("vt_symbol") or "")
+        if side == "BUY":
+            if not _is_top_candidate_event(event, top_limit):
+                continue
+            row = _candidate_buy_row(event, market_context_by_date)
+            buy_rows.append(row)
+            if row.get("entry_price") is None or not row.get("filled"):
+                not_triggered_count += 1
+                continue
+            open_by_symbol.setdefault(vt_symbol, []).append(row)
+            continue
+        if side != "SELL":
+            continue
+        entry = open_by_symbol.get(vt_symbol, []).pop(0) if open_by_symbol.get(vt_symbol) else None
+        if not entry:
+            continue
+        exit_price = _safe_float(event.get("price"))
+        return_pct = None
+        entry_price = _safe_float(entry.get("entry_price"))
+        if entry_price and exit_price:
+            return_pct = (exit_price / entry_price - 1) * 100
+        closed_rows.append(
+            {
+                **entry,
+                "exit_date": _date_text(event.get("trade_date") or event.get("execute_date")),
+                "exit_price": exit_price,
+                "return_pct": return_pct,
+                "exit_reason": event.get("reason") or _event_raw(event).get("reason"),
+            }
+        )
+    return {
+        "buy_rows": buy_rows,
+        "closed_rows": closed_rows,
+        "open_count": sum(len(items) for items in open_by_symbol.values()),
+        "not_triggered_count": not_triggered_count,
+    }
+
+
+def _candidate_buy_row(
+    event: dict[str, Any],
+    market_context_by_date: dict[date, dict[str, Any]] | None,
+) -> dict[str, Any]:
+    raw = _event_raw(event)
+    evidence = _event_evidence(event)
+    signal_date = _as_date(event.get("signal_date") or event.get("trade_date"))
+    phase = market_context.classify_trading_market_phase(_candidate_market_payload(event, market_context_by_date))
+    execution = raw.get("candidate_execution") if isinstance(raw.get("candidate_execution"), dict) else {}
+    return {
+        "vt_symbol": str(event.get("vt_symbol") or ""),
+        "signal_date": signal_date.isoformat() if signal_date else None,
+        "entry_date": _date_text(event.get("execute_date") or event.get("trade_date")),
+        "entry_price": _safe_float(event.get("price")),
+        "score": _safe_float(event.get("score")),
+        "rank": _safe_int(execution.get("execution_candidate_rank") or execution.get("raw_signal_rank")),
+        "raw_signal_rank": _safe_int(execution.get("raw_signal_rank")),
+        "execution_candidate_rank": _safe_int(execution.get("execution_candidate_rank")),
+        "entry_setup": evidence.get("entry_setup") or evidence.get("setup_type") or evidence.get("entry_family"),
+        "entry_family": evidence.get("entry_family") or evidence.get("entry_setup") or evidence.get("setup_type"),
+        "market_phase": str(phase.get("phase") or "unknown"),
+        "market_phase_label": phase.get("label"),
+        "filled": _event_filled(event),
+    }
+
+
+def _candidate_market_payload(
+    event: dict[str, Any],
+    market_context_by_date: dict[date, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    raw = _event_raw(event)
+    evidence = _event_evidence(event)
+    signal_date = _as_date(event.get("signal_date") or event.get("trade_date"))
+    payload = dict((market_context_by_date or {}).get(signal_date, {}) if signal_date else {})
+    for source in (raw, evidence):
+        context = source.get("market_context") if isinstance(source.get("market_context"), dict) else {}
+        payload.update(context)
+        for key in (
+            "regime",
+            "dynamic_market_regime",
+            "market_warning_level",
+            "recovery_state",
+            "fund_flow_state",
+            "market_score",
+            "breadth_score",
+            "market_breadth_score",
+            "theme_strength",
+            "index_return_5d",
+            "index_return_20d",
+            "growth_score",
+            "value_score",
+            "small_cap_score",
+        ):
+            if key in source and key not in payload:
+                payload[key] = source[key]
+    return payload
+
+
+def _candidate_phase_bucket_summary(
+    phase_id: str,
+    buy_rows: list[dict[str, Any]],
+    closed_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    returns = [value for row in closed_rows if (value := _safe_float(row.get("return_pct"))) is not None]
+    wins = [value for value in returns if value > 0]
+    losses = [value for value in returns if value < 0]
+    return {
+        "phase": phase_id,
+        "label": _phase_label(phase_id),
+        "signal_count": len(buy_rows),
+        "evaluated_count": len(returns),
+        "open_count": sum(1 for row in buy_rows if row.get("filled"))
+        - len([row for row in closed_rows if row.get("filled")]),
+        "not_triggered_count": sum(1 for row in buy_rows if not row.get("filled") or row.get("entry_price") is None),
+        "win_count": len(wins),
+        "loss_count": len(losses),
+        "win_rate_pct": len(wins) / len(returns) * 100 if returns else None,
+        "avg_return_pct": sum(returns) / len(returns) if returns else None,
+        "total_return_pct": sum(returns) if returns else None,
+        "worst_return_pct": min(returns) if returns else None,
+        "best_return_pct": max(returns) if returns else None,
+        "support_stop_count": sum(1 for row in closed_rows if str(row.get("exit_reason") or "") == "support_stop"),
+    }
+
+
+def _entry_market_payload(
+    row: dict[str, Any],
+    market_context_by_date: dict[date, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+    entry_date = _as_date(row.get("entry_date"))
+    payload = dict((market_context_by_date or {}).get(entry_date, {}) if entry_date else {})
+    context = raw.get("market_context") if isinstance(raw.get("market_context"), dict) else {}
+    payload.update(context)
+    for key in (
+        "regime",
+        "dynamic_market_regime",
+        "market_warning_level",
+        "recovery_state",
+        "fund_flow_state",
+        "market_score",
+        "breadth_score",
+        "market_breadth_score",
+        "theme_strength",
+        "index_return_5d",
+        "index_return_20d",
+        "growth_score",
+        "value_score",
+        "small_cap_score",
+    ):
+        if key in raw and key not in payload:
+            payload[key] = raw[key]
+    return payload
+
+
+def _is_top_candidate_event(event: dict[str, Any], top_limit: int) -> bool:
+    limit = max(int(top_limit or 0), 0)
+    if limit <= 0:
+        return False
+    execution = _event_raw(event).get("candidate_execution")
+    if not isinstance(execution, dict):
+        return True
+    execution_rank = _safe_int(execution.get("execution_candidate_rank"))
+    if execution_rank is not None:
+        return 1 <= execution_rank <= limit
+    if execution.get("execution_candidate_selected") is False:
+        return False
+    raw_rank = _safe_int(execution.get("raw_signal_rank"))
+    if raw_rank is not None:
+        return 1 <= raw_rank <= limit
+    return True
+
+
+def _event_filled(event: dict[str, Any]) -> bool:
+    raw = _event_raw(event)
+    status = str(raw.get("status") or "").strip().lower()
+    if status:
+        return status == "filled"
+    return _safe_float(event.get("price")) is not None
+
+
+def _event_raw(event: dict[str, Any]) -> dict[str, Any]:
+    raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+    return raw
+
+
+def _event_evidence(event: dict[str, Any]) -> dict[str, Any]:
+    raw = _event_raw(event)
+    evidence = raw.get("evidence") if isinstance(raw.get("evidence"), dict) else {}
+    return evidence if evidence else raw
+
+
+def _phase_bucket_summary(phase_id: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    returns = [value for row in rows if (value := _safe_float(row.get("return_pct"))) is not None]
+    wins = [value for value in returns if value > 0]
+    losses = [value for value in returns if value < 0]
+    return {
+        "phase": phase_id,
+        "label": _phase_label(phase_id),
+        "trade_count": len(rows),
+        "evaluated_count": len(returns),
+        "win_count": len(wins),
+        "loss_count": len(losses),
+        "win_rate_pct": len(wins) / len(returns) * 100 if returns else None,
+        "avg_return_pct": sum(returns) / len(returns) if returns else None,
+        "total_return_pct": sum(returns) if returns else None,
+        "worst_return_pct": min(returns) if returns else None,
+        "best_return_pct": max(returns) if returns else None,
+        "support_stop_count": sum(1 for row in rows if str(row.get("exit_reason") or "") == "support_stop"),
+    }
+
+
+def _phase_rank_hint(summary: dict[str, Any]) -> dict[str, Any] | None:
+    by_phase = [row for row in summary.get("by_phase") or [] if int(row.get("trade_count") or 0) > 0]
+    if not by_phase:
+        return None
+    best = max(by_phase, key=lambda row: (_numeric_or_floor(row.get("avg_return_pct")), _numeric_or_floor(row.get("win_rate_pct"))))
+    weak = [
+        row
+        for row in by_phase
+        if int(row.get("evaluated_count") or 0) >= 3
+        and _safe_float(row.get("avg_return_pct")) is not None
+        and float(row.get("avg_return_pct") or 0) <= 0
+    ]
+    return {
+        "best_phase": best.get("phase"),
+        "best_phase_label": best.get("label"),
+        "best_avg_return_pct": best.get("avg_return_pct"),
+        "weak_phase_count": len(weak),
+        "note": "只读提示：用于比较策略适配行情，不参与默认交易。",
+    }
+
+
+def _phase_label(phase_id: str) -> str:
+    return {
+        "uptrend": "主升",
+        "rotation": "震荡",
+        "retreat": "退潮",
+        "warming": "回暖",
+        "unknown": "未知",
+    }.get(phase_id, phase_id or "未知")
+
+
+def _phase_sort_rank(phase_id: str) -> int:
+    order = {"uptrend": 0, "rotation": 1, "retreat": 2, "warming": 3, "unknown": 4}
+    return order.get(phase_id, 9)
+
+
+def _date_sort_key(value: Any) -> date:
+    parsed = _as_date(value)
+    return parsed or date.min
+
+
+def _date_text(value: Any) -> str | None:
+    parsed = _as_date(value)
+    return parsed.isoformat() if parsed else None
+
+
+def _as_date(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
 
 
 def _order_execution(order: dict[str, Any]) -> dict[str, Any]:
@@ -231,3 +688,21 @@ def _numeric_or_floor(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return -10**9
+
+
+def _safe_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

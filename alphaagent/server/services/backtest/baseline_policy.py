@@ -21,6 +21,9 @@ RESEARCH_SWITCHES = (
     "enable_low_suction_market_risk_penalty",
     "enable_market_adaptive_setup_weighting",
     "enable_low_suction_first_lift_bonus",
+    "enable_low_suction_lifecycle_ranking",
+    "enable_dynamic_failed_launch_exit_stop",
+    "enable_dynamic_failed_launch_replacement_quality_gate",
     "enable_failed_launch_exit_stop",
     "enable_contextual_failed_launch_exit_stop",
     "enable_mid_profit_giveback_stop",
@@ -28,6 +31,16 @@ RESEARCH_SWITCHES = (
     "enable_contextual_peak_giveback_stop",
     "enable_low_suction_false_launch_watch_gate",
     "enable_missed_candidate_quality_rotation",
+    "enable_high_quality_trend_rotation",
+    "enable_weak_holding_quality_rotation",
+    "enable_protected_weak_holding_rotation",
+    "enable_low_suction_pullback_entry",
+    "enable_low_suction_trigger_day_confirmation",
+    "enable_low_suction_confirmed_branch_exit",
+    "enable_low_suction_branch_replacement_quality_gate",
+    "enable_low_suction_branch_replacement_strict_setup_gate",
+    "enable_phase_aware_setup_selector",
+    "enable_phase_replacement_quality",
 )
 
 
@@ -42,6 +55,8 @@ def is_product_baseline_params(params: dict[str, Any]) -> bool:
     if _int_value(payload.get("candidate_limit"), default=20) != 20:
         return False
     if _int_value(payload.get("max_positions"), default=10) != 10:
+        return False
+    if _text(payload.get("setup_family_filter")):
         return False
     return (
         _float_value(payload.get("mid_profit_giveback_min_high_gain_pct"), default=0.10) == 0.10
