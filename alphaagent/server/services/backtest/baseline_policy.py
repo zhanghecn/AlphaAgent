@@ -41,6 +41,7 @@ RESEARCH_SWITCHES = (
     "enable_low_suction_branch_replacement_strict_setup_gate",
     "enable_phase_aware_setup_selector",
     "enable_phase_replacement_quality",
+    "reuse_signal_cache",
 )
 
 
@@ -98,6 +99,10 @@ def select_product_baselines(items: list[dict[str, Any]]) -> list[dict[str, Any]
 
     start_date = _most_common_start_date(latest_rows)
     selected = [item for item in latest_rows if _date_key(item.get("start_date")) == start_date]
+    metric_rows, metric_reason, metric_warning = _select_metric_protected_baselines(selected)
+    if metric_rows:
+        return _annotated_baselines(metric_rows, reason=metric_reason, warning=metric_warning)
+
     if _has_longer_latest_default(latest_rows, start_date):
         return _annotated_baselines(
             selected,
@@ -136,6 +141,65 @@ def _has_longer_latest_default(rows: list[dict[str, Any]], selected_start: str) 
     return any(_date_key(item.get("start_date")) < selected_start for item in rows)
 
 
+def _has_explicit_disabled_signal_cache(params: dict[str, Any]) -> bool:
+    payload = params if isinstance(params, dict) else {}
+    return "reuse_signal_cache" in payload and not _truthy(payload.get("reuse_signal_cache"))
+
+
+def _select_metric_protected_baselines(
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], str, str | None] | tuple[None, None, None]:
+    rows_with_metrics = [row for row in rows if _performance_key(row) is not None]
+    if not rows_with_metrics:
+        return None, None, None
+
+    legacy_rows = [
+        row
+        for row in rows_with_metrics
+        if "reuse_signal_cache" not in ((row.get("params") or {}) if isinstance(row.get("params"), dict) else {})
+    ]
+    if not legacy_rows:
+        best_key = max(_performance_key(row) for row in rows_with_metrics if _performance_key(row) is not None)
+        return _rows_matching_performance(rows_with_metrics, best_key), "best_available_metric_policy", None
+
+    incumbent_key = max(_performance_key(row) for row in legacy_rows if _performance_key(row) is not None)
+    explicit_no_cache_rows = [
+        row for row in rows_with_metrics if _has_explicit_disabled_signal_cache(row.get("params") or {})
+    ]
+    improved_rows = [
+        row
+        for row in explicit_no_cache_rows
+        if _dominates_performance(_performance_key(row), incumbent_key)
+    ]
+    if improved_rows:
+        best_key = max(_performance_key(row) for row in improved_rows if _performance_key(row) is not None)
+        return _rows_matching_performance(improved_rows, best_key), "improved_return_win_rate_policy", None
+
+    warning = "沿用历史高收益基线；当前重算/实验回测未同时提升收益率和胜率，仅用于分析。"
+    return _rows_matching_performance(legacy_rows, incumbent_key), "historical_high_return_policy", warning
+
+
+def _performance_key(row: dict[str, Any]) -> tuple[float, float] | None:
+    metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+    total_return = _float_or_none(metrics.get("total_return_pct"))
+    win_rate = _float_or_none(metrics.get("win_rate"))
+    if total_return is None or win_rate is None:
+        return None
+    if win_rate > 1:
+        win_rate = win_rate / 100.0
+    return total_return, win_rate
+
+
+def _dominates_performance(candidate: tuple[float, float] | None, incumbent: tuple[float, float]) -> bool:
+    if candidate is None:
+        return False
+    return candidate[0] > incumbent[0] and candidate[1] > incumbent[1]
+
+
+def _rows_matching_performance(rows: list[dict[str, Any]], key: tuple[float, float]) -> list[dict[str, Any]]:
+    return [row for row in rows if _performance_key(row) == key]
+
+
 def _date_key(value: Any) -> str:
     if hasattr(value, "isoformat"):
         return value.isoformat()
@@ -168,3 +232,12 @@ def _float_value(value: Any, *, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

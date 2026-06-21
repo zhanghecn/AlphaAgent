@@ -214,6 +214,7 @@ def _strict_params(params: BacktestParams) -> BacktestParams:
         setup_family_filter=params.setup_family_filter,
         enable_phase_aware_setup_selector=params.enable_phase_aware_setup_selector,
         enable_phase_replacement_quality=params.enable_phase_replacement_quality,
+        reuse_signal_cache=params.reuse_signal_cache,
         exclude_from_product_baseline=params.exclude_from_product_baseline,
         execution_model="strict_1430",
         intraday_entry=True,

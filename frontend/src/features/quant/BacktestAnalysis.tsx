@@ -7,8 +7,10 @@ import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
   backtestValidationGridCsvUrl,
+  fetchBacktestCandidateTradeQualityReport,
   fetchBacktestExecutionModelComparison,
   fetchBacktestFactorAudit,
+  fetchBacktestPerformanceAttributionReport,
   type PhaseStrategyFamilyMatrixRow,
   fetchBacktestPhaseStrategyFamilyMatrix,
   fetchBacktestReplacementQualityMatrix,
@@ -20,6 +22,11 @@ import {
   fetchBacktestSetupMarketExitAudit,
   fetchBacktestTopCandidateAudit,
   fetchBacktestValidationGrid,
+  type CandidateTradeQualityBucket,
+  type CandidateTradeQualityDailySummary,
+  type CandidateTradeQualitySample,
+  type BacktestPerformanceExitReasonRow,
+  type BacktestPerformanceTradeDelta,
 } from "@/api/quant";
 import { BacktestRegimeTable, BacktestYearlyTable } from "./BacktestTables";
 
@@ -363,6 +370,442 @@ export function BacktestMarketAuditPanel({
         {sourceText ? ` 大盘基准来源：${sourceText}。` : ""}
         {dynamicSourceText ? ` 动态画像来源：${dynamicSourceText}。` : ""}
       </div>
+    </div>
+  );
+}
+
+export function CandidateTradeQualityPanel({
+  report,
+  isLoading,
+}: {
+  report?: Awaited<ReturnType<typeof fetchBacktestCandidateTradeQualityReport>>;
+  isLoading?: boolean;
+}) {
+  if (!report && !isLoading) return null;
+  if (!report) {
+    return <div className="rounded-lg border p-3 text-sm text-muted-foreground">正在加载候选独立买卖质量。</div>;
+  }
+  if (report.status !== "ready" && report.status !== "empty") {
+    return <div className="rounded-lg border p-3 text-sm text-muted-foreground">候选独立买卖质量状态：{report.status}</div>;
+  }
+
+  const summary = report.summary;
+  const coverage = report.coverage ?? {};
+  const hasBuckets = Boolean(
+    report.by_rank_limit?.length ||
+    report.by_daily_rank_window?.length ||
+    report.by_rank_bucket?.length ||
+    report.by_score_bucket?.length ||
+    report.by_setup_family?.length ||
+    report.by_market_phase?.length ||
+    report.by_exit_reason?.length
+  );
+  const hasSamples = Boolean(report.worst_samples?.length || report.best_samples?.length);
+
+  return (
+    <div className="space-y-3 rounded-lg border p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-medium">候选独立买卖质量</div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            每个信号日的候选按排名独立测算，D+1 开盘买入、当前卖点卖出；不看现金、仓位、满仓、已有持仓或换仓。这里不是组合收益。
+          </div>
+        </div>
+        <div className="text-xs text-muted-foreground">
+          Top{report.rank_limit ?? 100} / 样本上限 {report.sample_limit ?? 500}
+        </div>
+      </div>
+
+      <div className="grid gap-3 text-sm md:grid-cols-4 xl:grid-cols-8">
+        <InfoCell label="候选簇" value={formatNumber(numberValue(coverage.cluster_count) ?? summary?.sample_count, 0)} />
+        <InfoCell label="纳入排名" value={formatNumber(numberValue(coverage.rank_limited_cluster_count) ?? summary?.sample_count, 0)} />
+        <InfoCell label="可评价" value={formatNumber(summary?.evaluated_count, 0)} />
+        <InfoCell label="胜率" value={formatRatioPct(summary?.win_rate)} />
+        <InfoCell label="平均收益" value={formatPct(summary?.average_return_pct)} />
+        <InfoCell label="中位收益" value={formatPct(summary?.median_return_pct)} />
+        <InfoCell label="平均最大回撤" value={formatPct(summary?.average_max_drawdown_pct)} />
+        <InfoCell label="平均持有" value={formatHoldingDays(summary?.average_holding_days)} />
+      </div>
+
+      <div className="grid gap-3 text-sm md:grid-cols-4">
+        <InfoCell label="缺失执行" value={formatNumber(numberValue(coverage.missing_count), 0)} />
+        <InfoCell label="无D+1日线" value={formatNumber(numberValue(coverage.no_execute_bar_count), 0)} />
+        <InfoCell label="涨停开盘阻塞" value={formatNumber(numberValue(coverage.limit_up_open_blocked_count), 0)} />
+        <InfoCell label="来源候选" value={formatNumber(numberValue(coverage.source_candidate_count), 0)} />
+      </div>
+
+      {report.status === "empty" && !summary?.sample_count ? (
+        <div className="rounded-md border p-3 text-sm text-muted-foreground">
+          {report.message ?? "当前回测区间暂无可评价的 BUY 候选簇。"}
+        </div>
+      ) : null}
+
+      {hasBuckets ? (
+        <div className="grid gap-3 lg:grid-cols-2">
+          <CandidateTradeQualityBucketTable title="每日累计TopN" rows={report.by_rank_limit} bucketKey="rank_limit" />
+          <CandidateTradeQualityBucketTable title="每日排名段" rows={report.by_daily_rank_window ?? report.by_rank_bucket} bucketKey={report.by_daily_rank_window?.length ? "daily_rank_window" : "rank_bucket"} />
+          <CandidateTradeQualityBucketTable title="按分数段" rows={report.by_score_bucket} bucketKey="score_bucket" />
+          <CandidateTradeQualityBucketTable title="按 setup" rows={report.by_setup_family} bucketKey="setup_family" />
+          <CandidateTradeQualityBucketTable title="按行情阶段" rows={report.by_market_phase} bucketKey="market_phase" />
+        </div>
+      ) : null}
+
+      <CandidateTradeQualityDailyTable rows={(report.daily_summaries ?? []).slice(0, 12)} topN={report.rank_limit ?? 100} />
+
+      <CandidateTradeQualityBucketTable title="按卖出原因" rows={report.by_exit_reason} bucketKey="exit_reason" />
+
+      {hasSamples ? (
+        <div className="grid gap-3 xl:grid-cols-2">
+          <CandidateTradeQualitySampleTable title="Top失败样本" rows={(report.worst_samples ?? []).slice(0, 8)} />
+          <CandidateTradeQualitySampleTable title="Top成功样本" rows={(report.best_samples ?? []).slice(0, 8)} />
+        </div>
+      ) : null}
+
+      <div className="text-xs text-muted-foreground">
+        {report.note ?? "后验收益、MFE/MAE 只作为报告标签，不进入信号评分；候选质量和真实组合收益需要分开判断。"}
+      </div>
+    </div>
+  );
+}
+
+export function BacktestPerformanceAttributionPanel({
+  report,
+  isLoading,
+}: {
+  report?: Awaited<ReturnType<typeof fetchBacktestPerformanceAttributionReport>>;
+  isLoading?: boolean;
+}) {
+  if (!report && !isLoading) return null;
+  if (!report) {
+    return <div className="rounded-lg border p-3 text-sm text-muted-foreground">正在加载收益差异归因。</div>;
+  }
+  if (report.status !== "ready") {
+    return <div className="rounded-lg border p-3 text-sm text-muted-foreground">收益差异归因状态：{report.status}</div>;
+  }
+
+  const current = report.current;
+  const reference = report.reference;
+  const delta = report.delta;
+  const schema = report.signal_schema;
+  const constraints = report.constraint_comparison;
+  const exitRows = report.by_exit_reason ?? [];
+  const missingWinners = report.trade_deltas?.missing_reference_winners ?? [];
+  const addedLosers = report.trade_deltas?.added_current_losers ?? [];
+
+  return (
+    <div className="space-y-3 rounded-lg border p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-medium">收益/胜率差异归因</div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            当前回测对比同策略同区间的历史高收益参照，解释收益和胜率为什么下降；这是只读诊断，不改变交易规则。
+          </div>
+        </div>
+        <div className="text-right text-xs text-muted-foreground">
+          <div>当前 #{report.backtest_id ?? current?.id ?? "--"}</div>
+          <div>参照 #{report.reference_backtest_id ?? reference?.id ?? "--"}</div>
+        </div>
+      </div>
+
+      <div className="grid gap-3 text-sm md:grid-cols-4 xl:grid-cols-8">
+        <InfoCell label="当前收益" value={formatPct(current?.total_return_pct)} />
+        <InfoCell label="参照收益" value={formatPct(reference?.total_return_pct)} />
+        <InfoCell label="收益差" value={formatSignedPct(delta?.total_return_pct)} />
+        <InfoCell label="胜率差" value={formatSignedPct(ratioToPctDelta(delta?.win_rate))} />
+        <InfoCell label="PF差" value={formatSignedNumber(delta?.profit_factor, 3)} />
+        <InfoCell label="平均盈利差" value={formatSignedAmount(delta?.average_win)} />
+        <InfoCell label="毛盈利差" value={formatSignedAmount(delta?.gross_win)} />
+        <InfoCell label="毛亏损差" value={formatSignedAmount(delta?.gross_loss)} />
+      </div>
+
+      <div className="grid gap-3 text-sm md:grid-cols-4">
+        <InfoCell label="持仓上限相同" value={constraints?.same_max_positions ? "是" : "否"} />
+        <InfoCell label="候选排名相同" value={constraints?.same_candidate_limit ? "是" : "否"} />
+        <InfoCell label="单票仓位相同" value={constraints?.same_position_sizing ? "是" : "否"} />
+        <InfoCell label="候选schema同源" value={schema?.same_schema_lineage ? "是" : "否"} />
+      </div>
+
+      {report.interpretation?.notes?.length ? (
+        <div className="rounded-md border p-3 text-sm leading-6 text-muted-foreground">
+          {report.interpretation.notes.map((item) => (
+            <div key={item}>{item}</div>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="grid gap-3 xl:grid-cols-2">
+        <PerformanceExitReasonTable rows={exitRows.slice(0, 8)} />
+        <div className="space-y-3">
+          <PerformanceTradeDeltaTable title="旧高收益有、当前缺失的赢家" rows={missingWinners.slice(0, 8)} mode="missingWinner" />
+          <PerformanceTradeDeltaTable title="当前新增的亏损样本" rows={addedLosers.slice(0, 8)} mode="addedLoser" />
+        </div>
+      </div>
+
+      {report.interpretation?.next_tests?.length ? (
+        <div className="border-t pt-3 text-sm">
+          <div className="mb-2 font-medium">下一步测评重点</div>
+          <div className="space-y-1 text-muted-foreground">
+            {report.interpretation.next_tests.map((item) => (
+              <div key={item}>{item}</div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function PerformanceExitReasonTable({ rows }: { rows: BacktestPerformanceExitReasonRow[] }) {
+  if (!rows.length) return null;
+  return (
+    <div className="overflow-hidden rounded-md border">
+      <div className="border-b px-3 py-2 text-sm font-medium">按卖出原因看差异</div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>卖出</TableHead>
+            <TableHead className="text-right">当前/参照</TableHead>
+            <TableHead className="text-right">胜率差</TableHead>
+            <TableHead className="text-right">贡献差</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row) => (
+            <TableRow key={String(row.exit_reason ?? row.exit_reason_label ?? "unknown")}>
+              <TableCell className="font-medium">{row.exit_reason_label ?? candidateQualityExitReasonLabel(row.exit_reason)}</TableCell>
+              <TableCell className="text-right tabular-nums">
+                {formatNumber(row.current?.trade_count, 0)} / {formatNumber(row.reference?.trade_count, 0)}
+              </TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(ratioToPctDelta(row.delta?.win_rate)))}>
+                {formatSignedPct(ratioToPctDelta(row.delta?.win_rate))}
+              </TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.delta?.net_pnl))}>
+                {formatSignedAmount(row.delta?.net_pnl)}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+function PerformanceTradeDeltaTable({
+  title,
+  rows,
+  mode,
+}: {
+  title: string;
+  rows: BacktestPerformanceTradeDelta[];
+  mode: "missingWinner" | "addedLoser";
+}) {
+  if (!rows.length) return null;
+  return (
+    <div className="overflow-hidden rounded-md border">
+      <div className="border-b px-3 py-2 text-sm font-medium">{title}</div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>股票</TableHead>
+            <TableHead>日期</TableHead>
+            <TableHead>原因</TableHead>
+            <TableHead className="text-right">差异</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row, index) => (
+            <TableRow key={`${title}-${row.vt_symbol ?? "symbol"}-${row.trade_date ?? "date"}-${index}`}>
+              <TableCell className="font-medium">{row.vt_symbol ?? "--"}</TableCell>
+              <TableCell className="whitespace-nowrap">{row.trade_date ?? "--"}</TableCell>
+              <TableCell>{mode === "missingWinner" ? candidateQualityExitReasonLabel(row.reference_reason) : candidateQualityExitReasonLabel(row.current_reason)}</TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.delta_pnl))}>
+                {formatSignedAmount(row.delta_pnl)}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+function CandidateTradeQualityBucketTable({
+  title,
+  rows,
+  bucketKey,
+}: {
+  title: string;
+  rows?: CandidateTradeQualityBucket[];
+  bucketKey: keyof CandidateTradeQualityBucket;
+}) {
+  if (!rows?.length) return null;
+  return (
+    <div className="overflow-hidden rounded-md border">
+      <div className="border-b px-3 py-2 text-sm font-medium">{title}</div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>分桶</TableHead>
+            <TableHead className="text-right">样本</TableHead>
+            <TableHead className="text-right">胜率</TableHead>
+            <TableHead className="text-right">均值</TableHead>
+            <TableHead className="text-right">中位数</TableHead>
+            <TableHead className="text-right">回撤</TableHead>
+            <TableHead className="text-right">持有</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row, index) => (
+            <TableRow key={`${title}-${candidateQualityBucketKey(row, bucketKey)}-${index}`}>
+              <TableCell className="font-medium">{candidateQualityBucketLabel(row, bucketKey)}</TableCell>
+              <TableCell className="text-right tabular-nums">{formatNumber(row.sample_count, 0)}</TableCell>
+              <TableCell className="text-right tabular-nums">{formatRatioPct(row.win_rate)}</TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.average_return_pct))}>
+                {formatPct(row.average_return_pct)}
+              </TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.median_return_pct))}>
+                {formatPct(row.median_return_pct)}
+              </TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.average_max_drawdown_pct))}>
+                {formatPct(row.average_max_drawdown_pct)}
+              </TableCell>
+              <TableCell className="text-right tabular-nums">{formatHoldingDays(row.average_holding_days)}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+function CandidateTradeQualityDailyTable({
+  rows,
+  topN,
+}: {
+  rows: CandidateTradeQualityDailySummary[];
+  topN: number;
+}) {
+  if (!rows.length) return null;
+  return (
+    <div className="overflow-hidden rounded-md border">
+      <div className="border-b px-3 py-2 text-sm font-medium">按信号日看候选池</div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>信号日</TableHead>
+            <TableHead className="text-right">候选/可评</TableHead>
+            <TableHead className="text-right">Top10</TableHead>
+            <TableHead className="text-right">Top20</TableHead>
+            <TableHead className="text-right">Top{topN}</TableHead>
+            <TableHead>最好候选</TableHead>
+            <TableHead>最差候选</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row) => (
+            <TableRow key={String(row.entry_signal_date ?? "")}>
+              <TableCell className="whitespace-nowrap font-medium">{row.entry_signal_date ?? "--"}</TableCell>
+              <TableCell className="text-right tabular-nums">
+                {formatNumber(row.candidate_count, 0)} / {formatNumber(row.evaluated_count, 0)}
+              </TableCell>
+              <CandidateTradeQualityDailyMetricCell summary={row.top10} />
+              <CandidateTradeQualityDailyMetricCell summary={row.top20} />
+              <CandidateTradeQualityDailyMetricCell summary={row.topn} />
+              <CandidateTradeQualityExtremeCell row={row.best_candidate} />
+              <CandidateTradeQualityExtremeCell row={row.worst_candidate} />
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+function CandidateTradeQualityDailyMetricCell({ summary }: { summary?: CandidateTradeQualityDailySummary["top10"] }) {
+  return (
+    <TableCell className="text-right tabular-nums">
+      <div>{formatRatioPct(summary?.win_rate)}</div>
+      <div className={cn("text-xs", priceColorClass(summary?.average_return_pct))}>
+        {formatPct(summary?.average_return_pct)}
+      </div>
+    </TableCell>
+  );
+}
+
+function CandidateTradeQualityExtremeCell({ row }: { row?: CandidateTradeQualityDailySummary["best_candidate"] }) {
+  if (!row) return <TableCell className="text-muted-foreground">--</TableCell>;
+  return (
+    <TableCell>
+      <div className="whitespace-nowrap">
+        {row.name || row.vt_symbol || "--"}
+        {row.rank != null ? ` #${row.rank}` : ""}
+      </div>
+      <div className={cn("text-xs tabular-nums", priceColorClass(row.return_pct))}>
+        {formatPct(row.return_pct)} · {candidateQualityExitReasonLabel(row.exit_reason)}
+      </div>
+    </TableCell>
+  );
+}
+
+function CandidateTradeQualitySampleTable({
+  title,
+  rows,
+}: {
+  title: string;
+  rows: CandidateTradeQualitySample[];
+}) {
+  if (!rows.length) return null;
+  return (
+    <div className="overflow-hidden rounded-md border">
+      <div className="border-b px-3 py-2 text-sm font-medium">{title}</div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>信号</TableHead>
+            <TableHead>候选</TableHead>
+            <TableHead>簇</TableHead>
+            <TableHead>执行</TableHead>
+            <TableHead className="text-right">收益</TableHead>
+            <TableHead className="text-right">回撤/MFE</TableHead>
+            <TableHead>卖出</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row, index) => (
+            <TableRow key={`${title}-${row.entry_signal_date ?? "date"}-${row.vt_symbol}-${index}`}>
+              <TableCell className="whitespace-nowrap">{row.entry_signal_date ?? "--"}</TableCell>
+              <TableCell>
+                <StockIdentityLink
+                  name={row.name}
+                  vtSymbol={row.vt_symbol}
+                  board={row.board}
+                  boardLabel={row.board_label}
+                  meta={candidateQualitySampleMeta(row)}
+                />
+              </TableCell>
+              <TableCell>
+                <div className="whitespace-nowrap">{candidateQualityClusterText(row)}</div>
+                <div className="text-xs text-muted-foreground">{row.setup_family_label ?? setupFamilyLabel(row.setup_family)}</div>
+              </TableCell>
+              <TableCell>
+                <div className="whitespace-nowrap">{row.entry_execute_date ?? "--"} 买</div>
+                <div className="whitespace-nowrap text-xs text-muted-foreground">{row.exit_execute_date ?? "未卖出"} 卖</div>
+              </TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.return_pct))}>
+                {formatPct(row.return_pct)}
+              </TableCell>
+              <TableCell className="text-right tabular-nums">
+                <div className={priceColorClass(row.max_drawdown_pct)}>{formatPct(row.max_drawdown_pct)}</div>
+                <div className={cn("text-xs", priceColorClass(row.max_runup_pct))}>{formatPct(row.max_runup_pct)}</div>
+              </TableCell>
+              <TableCell>
+                <div>{candidateQualityExitReasonLabel(row.exit_reason)}</div>
+                <div className="text-xs text-muted-foreground">{row.market_phase_label ?? phaseLabel(row.market_phase)}</div>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
     </div>
   );
 }
@@ -2232,6 +2675,74 @@ function formatRate(value?: number | null) {
 
 function formatRatioPct(value?: number | null) {
   return value == null ? "--" : formatPct(value);
+}
+
+function formatHoldingDays(value?: number | null) {
+  return value == null ? "--" : `${formatNumber(value, 1)}天`;
+}
+
+function ratioToPctDelta(value?: number | null) {
+  return value == null ? null : value * 100;
+}
+
+function formatSignedPct(value?: number | null) {
+  if (value == null || !Number.isFinite(value)) return "--";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${formatPct(value)}`;
+}
+
+function formatSignedNumber(value?: number | null, digits = 2) {
+  if (value == null || !Number.isFinite(value)) return "--";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${formatNumber(value, digits)}`;
+}
+
+function formatSignedAmount(value?: number | null) {
+  if (value == null || !Number.isFinite(value)) return "--";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${formatAmount(value)}`;
+}
+
+function candidateQualityBucketKey(row: CandidateTradeQualityBucket, bucketKey: keyof CandidateTradeQualityBucket) {
+  return String(row[bucketKey] ?? row.label ?? "unknown");
+}
+
+function candidateQualityBucketLabel(row: CandidateTradeQualityBucket, bucketKey: keyof CandidateTradeQualityBucket) {
+  if (typeof row.label === "string" && row.label.trim()) return row.label;
+  const value = String(row[bucketKey] ?? "unknown");
+  if (bucketKey === "setup_family") return setupFamilyLabel(value);
+  if (bucketKey === "market_phase") return phaseLabel(value);
+  if (bucketKey === "exit_reason") return candidateQualityExitReasonLabel(value);
+  return value;
+}
+
+function candidateQualitySampleMeta(row: CandidateTradeQualitySample) {
+  const parts = [];
+  if (row.rank != null) parts.push(`#${row.rank}`);
+  if (row.score != null) parts.push(formatNumber(row.score, 1));
+  return parts.length ? parts.join(" / ") : undefined;
+}
+
+function candidateQualityClusterText(row: CandidateTradeQualitySample) {
+  const size = row.cluster_size == null ? "" : ` / ${row.cluster_size}天`;
+  if (row.cluster_start_date && row.cluster_end_date && row.cluster_start_date !== row.cluster_end_date) {
+    return `${row.cluster_start_date} - ${row.cluster_end_date}${size}`;
+  }
+  return `${row.cluster_start_date ?? row.entry_signal_date ?? "--"}${size}`;
+}
+
+function candidateQualityExitReasonLabel(value?: string | null) {
+  const labels: Record<string, string> = {
+    open: "仍持有",
+    no_execute_bar: "无执行日线",
+    limit_up_open_blocked: "涨停开盘阻塞",
+    support_break: "跌破支撑",
+    time_stop: "时间止损",
+    take_profit: "止盈",
+    trailing_stop: "回撤止盈",
+    stop_loss: "止损",
+  };
+  return labels[String(value || "")] ?? String(value || "未归类");
 }
 
 function topFactorRows(

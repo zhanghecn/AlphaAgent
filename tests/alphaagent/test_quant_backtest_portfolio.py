@@ -6246,6 +6246,102 @@ def test_run_backtest_returns_signal_events_for_strategy_comparison(monkeypatch)
     assert captured["load_end"] == trading_days[-1]
 
 
+def test_run_backtest_does_not_reuse_signal_cache_by_default(monkeypatch) -> None:
+    from alphaagent.server.services.backtest import engine
+
+    trading_days = [date(2026, 1, 1) + timedelta(days=index) for index in range(85)]
+    bars_by_symbol = {"600000.SSE": _bars(85)}
+
+    class FakeSession:
+        def execute(self, statement):
+            del statement
+            raise AssertionError("unexpected execute")
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(engine, "is_database_configured", lambda: True)
+    monkeypatch.setattr(engine, "_ensure_backtest_schema", lambda: None)
+    monkeypatch.setattr(engine, "session_scope", fake_session_scope)
+    monkeypatch.setattr(engine, "_load_symbol_universe", lambda session, max_symbols, symbols, included_boards: ["600000.SSE"])
+    monkeypatch.setattr(engine, "_load_all_bars", lambda session, vt_symbols, start, end: bars_by_symbol)
+    monkeypatch.setattr(engine, "_trading_days", lambda bars, start, end: trading_days)
+    monkeypatch.setattr(engine, "_load_stock_meta", lambda session, vt_symbols: {"600000.SSE": {"name": "浦发银行"}})
+    monkeypatch.setattr(engine, "_load_score_context", lambda session, vt_symbols: engine.ScoreContext())
+
+    def fail_if_cache_loaded(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("portfolio backtest must not silently reuse persisted signal cache")
+
+    def fake_simulate(session, params, bars_by_symbol_arg, trading_days_arg, stock_meta, score_cache=None, score_context=None):
+        del session, params, bars_by_symbol_arg, trading_days_arg, stock_meta, score_context
+        assert score_cache is None
+        return {"metrics": {}, "equity": [], "trades": [], "orders": [], "signal_events": []}
+
+    monkeypatch.setattr(engine, "_load_score_cache_from_persisted_signals", fail_if_cache_loaded)
+    monkeypatch.setattr(engine, "_simulate", fake_simulate)
+
+    result = engine.run_backtest(engine.BacktestParams(start=trading_days[0], end=trading_days[-1], persist=False, max_symbols=1))
+
+    assert result["status"] == "ready"
+    assert result["assumptions"]["signal_cache_reuse"] == "disabled_current_code_recompute"
+
+
+def test_run_backtest_reuses_signal_cache_only_when_explicit(monkeypatch) -> None:
+    from alphaagent.server.services.backtest import engine
+
+    trading_days = [date(2026, 1, 1) + timedelta(days=index) for index in range(85)]
+    bars_by_symbol = {"600000.SSE": _bars(85)}
+    cache = {trading_days[0]: [SignalScore(vt_symbol="600000.SSE", trade_date=trading_days[0])]}
+    calls = {"cache_loads": 0}
+
+    class FakeSession:
+        def execute(self, statement):
+            del statement
+            raise AssertionError("unexpected execute")
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(engine, "is_database_configured", lambda: True)
+    monkeypatch.setattr(engine, "_ensure_backtest_schema", lambda: None)
+    monkeypatch.setattr(engine, "session_scope", fake_session_scope)
+    monkeypatch.setattr(engine, "_load_symbol_universe", lambda session, max_symbols, symbols, included_boards: ["600000.SSE"])
+    monkeypatch.setattr(engine, "_load_all_bars", lambda session, vt_symbols, start, end: bars_by_symbol)
+    monkeypatch.setattr(engine, "_trading_days", lambda bars, start, end: trading_days)
+    monkeypatch.setattr(engine, "_load_stock_meta", lambda session, vt_symbols: {"600000.SSE": {"name": "浦发银行"}})
+    monkeypatch.setattr(engine, "_load_score_context", lambda session, vt_symbols: engine.ScoreContext())
+
+    def fake_load_cache(*args, **kwargs):
+        del args, kwargs
+        calls["cache_loads"] += 1
+        return cache
+
+    def fake_simulate(session, params, bars_by_symbol_arg, trading_days_arg, stock_meta, score_cache=None, score_context=None):
+        del session, params, bars_by_symbol_arg, trading_days_arg, stock_meta, score_context
+        assert score_cache is cache
+        return {"metrics": {}, "equity": [], "trades": [], "orders": [], "signal_events": []}
+
+    monkeypatch.setattr(engine, "_load_score_cache_from_persisted_signals", fake_load_cache)
+    monkeypatch.setattr(engine, "_simulate", fake_simulate)
+
+    result = engine.run_backtest(
+        engine.BacktestParams(
+            start=trading_days[0],
+            end=trading_days[-1],
+            persist=False,
+            max_symbols=1,
+            reuse_signal_cache=True,
+        )
+    )
+
+    assert result["status"] == "ready"
+    assert result["assumptions"]["signal_cache_reuse"] == "enabled"
+    assert calls["cache_loads"] == 1
+
+
 def test_strategy_comparison_api_passes_params_and_strategies(monkeypatch) -> None:
     from alphaagent.server.api import backtests
 
@@ -8174,6 +8270,117 @@ def test_product_baseline_uses_common_start_when_no_explicit_policy() -> None:
     assert all(row["baseline_warning"] for row in selected)
 
 
+def test_product_baseline_keeps_historical_high_return_until_no_cache_improves_metrics() -> None:
+    from alphaagent.server.services.backtest.baseline_policy import select_product_baselines
+
+    rows = [
+        {
+            "id": 275,
+            "run_type": "portfolio",
+            "start_date": "2025-03-26",
+            "end_date": "2026-06-18",
+            "params": {
+                "symbols": [],
+                "execution_model": "legacy_next_open",
+                "candidate_limit": 20,
+                "max_positions": 10,
+                "reuse_signal_cache": False,
+            },
+            "metrics": {"total_return_pct": 48.80, "win_rate": 0.2976},
+        },
+        {
+            "id": 274,
+            "run_type": "portfolio",
+            "start_date": "2025-03-26",
+            "end_date": "2026-06-18",
+            "params": {
+                "symbols": [],
+                "execution_model": "legacy_next_open",
+                "candidate_limit": 20,
+                "max_positions": 10,
+            },
+            "metrics": {"total_return_pct": 45.17, "win_rate": 0.2967},
+        },
+        {
+            "id": 203,
+            "run_type": "portfolio",
+            "start_date": "2025-03-26",
+            "end_date": "2026-06-18",
+            "params": {"symbols": []},
+            "metrics": {"total_return_pct": 82.99, "win_rate": 0.3224},
+        },
+        {
+            "id": 194,
+            "run_type": "portfolio",
+            "start_date": "2025-03-26",
+            "end_date": "2026-06-18",
+            "params": {"symbols": []},
+            "metrics": {"total_return_pct": 82.99, "win_rate": 0.3224},
+        },
+        {
+            "id": 213,
+            "run_type": "portfolio",
+            "start_date": "2024-05-28",
+            "end_date": "2026-06-18",
+            "params": {
+                "symbols": [],
+                "execution_model": "legacy_next_open",
+                "candidate_limit": 20,
+                "max_positions": 10,
+            },
+        },
+    ]
+
+    selected = select_product_baselines(rows)
+
+    assert [row["id"] for row in selected] == [203, 194]
+    assert {row["baseline_reason"] for row in selected} == {"historical_high_return_policy"}
+    assert all("未同时提升收益率和胜率" in row["baseline_warning"] for row in selected)
+
+
+def test_product_baseline_promotes_no_cache_run_only_when_return_and_win_rate_improve() -> None:
+    from alphaagent.server.services.backtest.baseline_policy import select_product_baselines
+
+    rows = [
+        {
+            "id": 276,
+            "run_type": "portfolio",
+            "start_date": "2025-03-26",
+            "end_date": "2026-06-18",
+            "params": {
+                "symbols": [],
+                "execution_model": "legacy_next_open",
+                "candidate_limit": 20,
+                "max_positions": 10,
+                "reuse_signal_cache": False,
+            },
+            "metrics": {"total_return_pct": 90.0, "win_rate": 0.35},
+        },
+        {
+            "id": 203,
+            "run_type": "portfolio",
+            "start_date": "2025-03-26",
+            "end_date": "2026-06-18",
+            "params": {"symbols": []},
+            "metrics": {"total_return_pct": 82.99, "win_rate": 0.3224},
+        },
+        {
+            "id": 194,
+            "run_type": "portfolio",
+            "start_date": "2025-03-26",
+            "end_date": "2026-06-18",
+            "params": {"symbols": []},
+            "metrics": {"total_return_pct": 82.99, "win_rate": 0.3224},
+        },
+    ]
+
+    selected = select_product_baselines(rows)
+
+    assert [row["id"] for row in selected] == [276]
+    assert selected[0]["baseline_reason"] == "improved_return_win_rate_policy"
+    assert selected[0]["baseline_warning"] is None
+
+
 def test_next_experiment_switches_default_off_and_excluded_from_baseline() -> None:
     from alphaagent.server.services.backtest.baseline_policy import is_product_baseline_params
     from alphaagent.server.services.backtest.schemas import BacktestParams
@@ -8210,6 +8417,26 @@ def test_exclude_from_product_baseline_round_trips_through_backtest_params() -> 
 
     assert params.exclude_from_product_baseline is True
     assert payload["exclude_from_product_baseline"] is True
+    assert is_product_baseline_params(payload) is False
+
+
+def test_reuse_signal_cache_is_explicit_and_excluded_from_baseline() -> None:
+    from alphaagent.server.api.backtests import _params_from_payload
+    from alphaagent.server.services.backtest.engine import _params_from_run, _params_to_json
+    from alphaagent.server.services.backtest.baseline_policy import is_product_baseline_params
+    from alphaagent.server.services.quant.strategy_replay import _params_to_json as replay_params_to_json
+
+    default_params = _params_from_payload({})
+    params = _params_from_payload({"reuse_signal_cache": True})
+    payload = _params_to_json(params)
+    replay_payload = replay_params_to_json(params)
+    reloaded = _params_from_run({"params": payload, "strategy_id": DRAGON_PULLBACK_STRATEGY_ID})
+
+    assert default_params.reuse_signal_cache is False
+    assert params.reuse_signal_cache is True
+    assert payload["reuse_signal_cache"] is True
+    assert replay_payload["reuse_signal_cache"] is True
+    assert reloaded.reuse_signal_cache is True
     assert is_product_baseline_params(payload) is False
 
 
@@ -10216,7 +10443,7 @@ def test_screen_run_match_requires_current_signal_evidence_schema() -> None:
     assert screening._screen_run_matches_params({"params": current_params}, max_symbols=5000, included_boards=("main",))
     assert not screening._screen_run_matches_params({"params": stale_params}, max_symbols=5000, included_boards=("main",))
     assert engine._screen_run_matches_backtest_params({"params": current_params}, backtest_params)
-    assert engine._screen_run_matches_backtest_params({"params": stale_params}, backtest_params)
+    assert not engine._screen_run_matches_backtest_params({"params": stale_params}, backtest_params)
 
 
 def test_screen_stocks_range_force_refresh_regenerates_existing_persisted_dates(monkeypatch) -> None:
@@ -20156,6 +20383,48 @@ def test_market_phase_strategy_audit_summary_keeps_setup_per_phase() -> None:
     assert summary["not_used_for_signal_score"] is True
 
 
+def test_market_phase_strategy_audit_reads_nested_signal_evidence() -> None:
+    from alphaagent.server.services.backtest import queries
+
+    trades = [
+        {
+            "return_pct": 5.0,
+            "pnl": 500.0,
+            "raw": {
+                "evidence": {
+                    "entry_setup": "dragon_pullback",
+                    "dynamic_market_regime": "strong_broad",
+                    "market_warning_level": 0,
+                    "recovery_state": "warming_confirmed",
+                }
+            },
+        }
+    ]
+    candidates = [
+        {
+            "rank": 1,
+            "observation_return_pct": 8.0,
+            "raw": {
+                "evidence": {
+                    "entry_family": "stealth_low_suction",
+                    "low_suction_days": 5,
+                    "low_suction_launch_confirmed": True,
+                    "dynamic_market_regime": "strong_broad",
+                    "market_warning_level": 0,
+                    "recovery_state": "warming_confirmed",
+                }
+            },
+        }
+    ]
+
+    summary = queries.market_phase_strategy_audit_summary(trades, candidates, candidate_top_n=20)
+
+    assert summary["by_phase"][0]["market_phase"] == "uptrend"
+    assert summary["by_setup"][0]["setup_family"] == "dragon_pullback"
+    assert summary["candidate_by_phase"][0]["market_phase"] == "uptrend"
+    assert summary["candidate_by_phase_setup"][0]["setup_family"] == "low_suction_first_lift"
+
+
 def test_phase_strategy_family_matrix_summary_returns_rank_matrices() -> None:
     from alphaagent.server.services.backtest import queries
 
@@ -20392,3 +20661,361 @@ def test_backtest_entry_raw_payload_backfills_early_dragon_pullback_risk() -> No
 
     assert raw["early_dragon_pullback_risk"] is True
     assert api_row["raw"]["early_dragon_pullback_risk"] is True
+
+
+def _candidate_quality_row(
+    vt_symbol: str,
+    trade_date: date,
+    *,
+    rank: int = 1,
+    score: float = 88.0,
+    setup: str = "stealth_low_suction",
+    action: str = "BUY",
+    launch_confirmed: bool = False,
+) -> dict[str, object]:
+    return {
+        "trade_date": trade_date,
+        "vt_symbol": vt_symbol,
+        "rank": rank,
+        "action": action,
+        "total_score": score,
+        "reason": {
+            "action": action,
+            "entry_setup": setup,
+            "entry_family": setup,
+            "executable_entry_signal": action == "BUY",
+            "low_suction_launch_confirmed": launch_confirmed,
+            "low_suction_days": 4 if setup == "stealth_low_suction" else 0,
+        },
+    }
+
+
+def test_candidate_trade_quality_clusters_consecutive_buy_rows() -> None:
+    from alphaagent.server.services.backtest.factor_audit import build_candidate_clusters
+
+    rows = [
+        _candidate_quality_row("600000.SSE", date(2026, 1, 2), rank=1),
+        _candidate_quality_row("600000.SSE", date(2026, 1, 3), rank=2),
+        _candidate_quality_row("600001.SSE", date(2026, 1, 3), rank=3),
+    ]
+
+    clusters = build_candidate_clusters(rows)
+
+    assert len(clusters) == 2
+    first = next(cluster for cluster in clusters if cluster.vt_symbol == "600000.SSE")
+    assert first.cluster_start_date == date(2026, 1, 2)
+    assert first.cluster_end_date == date(2026, 1, 3)
+    assert len(first.rows) == 2
+
+
+def test_candidate_trade_quality_splits_cluster_after_gap() -> None:
+    from alphaagent.server.services.backtest.factor_audit import build_candidate_clusters
+
+    rows = [
+        _candidate_quality_row("600000.SSE", date(2026, 1, 2), rank=1),
+        _candidate_quality_row("600001.SSE", date(2026, 1, 3), rank=1),
+        _candidate_quality_row("600002.SSE", date(2026, 1, 4), rank=1),
+        _candidate_quality_row("600000.SSE", date(2026, 1, 5), rank=1),
+    ]
+
+    clusters = [cluster for cluster in build_candidate_clusters(rows) if cluster.vt_symbol == "600000.SSE"]
+
+    assert len(clusters) == 2
+    assert [cluster.cluster_start_date for cluster in clusters] == [date(2026, 1, 2), date(2026, 1, 5)]
+
+
+def test_candidate_trade_quality_uses_first_visible_buy_entry_not_later_confirmation() -> None:
+    from alphaagent.server.services.backtest.factor_audit import build_candidate_clusters
+
+    rows = [
+        _candidate_quality_row("600000.SSE", date(2026, 1, 2), rank=1, score=95, launch_confirmed=False),
+        _candidate_quality_row("600000.SSE", date(2026, 1, 3), rank=2, score=80, launch_confirmed=True),
+        _candidate_quality_row("600001.SSE", date(2026, 1, 2), rank=1, score=82, launch_confirmed=False),
+        _candidate_quality_row("600001.SSE", date(2026, 1, 3), rank=2, score=90, launch_confirmed=False),
+        _candidate_quality_row("600001.SSE", date(2026, 1, 4), rank=3, score=90, launch_confirmed=False),
+    ]
+
+    clusters = build_candidate_clusters(rows)
+    confirmed = next(cluster for cluster in clusters if cluster.vt_symbol == "600000.SSE")
+    high_score = next(cluster for cluster in clusters if cluster.vt_symbol == "600001.SSE")
+
+    assert confirmed.entry_row["trade_date"] == date(2026, 1, 2)
+    assert high_score.entry_row["trade_date"] == date(2026, 1, 2)
+
+
+def test_candidate_trade_quality_marks_missing_d1_bar() -> None:
+    from alphaagent.server.services.backtest.factor_audit import (
+        build_candidate_clusters,
+        simulate_independent_candidate_trade,
+    )
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    cluster = build_candidate_clusters([
+        _candidate_quality_row("600000.SSE", date(2026, 1, 2), rank=1),
+    ])[0]
+
+    result = simulate_independent_candidate_trade(
+        cluster,
+        [Bar(date(2026, 1, 2), 10, 10.5, 9.8, 10.2)],
+        params=BacktestParams(),
+        sell_reason_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result.status == "no_execute_bar"
+    assert result.return_pct is None
+
+
+def test_candidate_trade_quality_independent_trade_ignores_portfolio_capacity() -> None:
+    from alphaagent.server.services.backtest.factor_audit import (
+        build_candidate_clusters,
+        candidate_trade_quality_report_from_results,
+        simulate_independent_candidate_trade,
+    )
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    cluster = build_candidate_clusters([
+        _candidate_quality_row("600000.SSE", date(2026, 1, 2), rank=1, score=96, launch_confirmed=True),
+    ])[0]
+    bars = [
+        Bar(date(2026, 1, 2), 10, 10.2, 9.8, 10),
+        Bar(date(2026, 1, 3), 10, 10.6, 9.9, 10.5),
+        Bar(date(2026, 1, 4), 10.5, 11, 10.4, 10.9),
+        Bar(date(2026, 1, 5), 10.8, 11, 10.7, 10.9),
+    ]
+
+    def sell_next_day(position, bar, current_day, params, **kwargs):
+        del position, params, kwargs
+        return "test_exit" if current_day == date(2026, 1, 4) else None
+
+    result = simulate_independent_candidate_trade(
+        cluster,
+        bars,
+        params=BacktestParams(max_positions=0, initial_cash=0),
+        sell_reason_fn=sell_next_day,
+    )
+    report = candidate_trade_quality_report_from_results([result])
+
+    assert result.status == "closed"
+    assert result.entry_execute_date == date(2026, 1, 3)
+    assert result.exit_execute_date == date(2026, 1, 5)
+    assert result.return_pct == 8.0
+    assert report["summary"]["sample_count"] == 1
+    assert report["summary"]["win_rate"] == 100.0
+    assert report["items"][0]["uses_future_for_label_only"] is True
+    assert report["items"][0]["not_used_for_signal_score"] is True
+
+
+def test_candidate_trade_quality_reports_daily_topn_and_rank_windows() -> None:
+    from alphaagent.server.services.backtest.factor_audit import (
+        IndependentTradeResult,
+        build_candidate_clusters,
+        candidate_trade_quality_report_from_results,
+    )
+
+    clusters = build_candidate_clusters(
+        [
+            _candidate_quality_row("600001.SSE", date(2026, 1, 2), rank=1),
+            _candidate_quality_row("600012.SSE", date(2026, 1, 2), rank=12),
+            _candidate_quality_row("600025.SSE", date(2026, 1, 2), rank=25),
+            _candidate_quality_row("600007.SSE", date(2026, 1, 3), rank=7),
+        ]
+    )
+    returns_by_rank = {1: 10.0, 12: -5.0, 25: 2.0, 7: -3.0}
+    results = []
+    for cluster in clusters:
+        signal_date = cluster.entry_row["trade_date"]
+        rank = cluster.entry_row["rank"]
+        results.append(
+            IndependentTradeResult(
+                status="closed",
+                cluster=cluster,
+                entry_signal_date=signal_date,
+                entry_execute_date=signal_date,
+                entry_price=10.0,
+                exit_signal_date=signal_date,
+                exit_execute_date=signal_date,
+                exit_price=10.0,
+                return_pct=returns_by_rank[rank],
+                max_drawdown_pct=-2.0,
+                max_runup_pct=12.0,
+                holding_days=3,
+                exit_reason="test_exit",
+            )
+        )
+
+    report = candidate_trade_quality_report_from_results(results, rank_limit=50)
+    rank_limits = {row["rank_limit"]: row for row in report["by_rank_limit"]}
+    windows = {row["daily_rank_window"]: row for row in report["by_daily_rank_window"]}
+    daily = {row["entry_signal_date"]: row for row in report["daily_summaries"]}
+
+    assert rank_limits[10]["sample_count"] == 2
+    assert rank_limits[10]["average_return_pct"] == 3.5
+    assert rank_limits[20]["sample_count"] == 3
+    assert rank_limits[20]["average_return_pct"] == 0.6667
+    assert windows["rank_11_20"]["sample_count"] == 1
+    assert windows["rank_11_20"]["average_return_pct"] == -5.0
+    assert daily["2026-01-02"]["top10"]["sample_count"] == 1
+    assert daily["2026-01-02"]["top20"]["sample_count"] == 2
+    assert daily["2026-01-02"]["top20"]["average_return_pct"] == 2.5
+    assert daily["2026-01-02"]["best_candidate"]["rank"] == 1
+
+
+def test_candidate_trade_quality_marks_later_preferred_entry_audit_only() -> None:
+    from alphaagent.server.services.backtest.factor_audit import (
+        build_candidate_clusters,
+        candidate_trade_quality_report_from_results,
+        simulate_independent_candidate_trade,
+    )
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    cluster = build_candidate_clusters([
+        _candidate_quality_row("600000.SSE", date(2026, 1, 2), rank=3, score=80, launch_confirmed=False),
+        _candidate_quality_row("600000.SSE", date(2026, 1, 3), rank=1, score=98, launch_confirmed=True),
+    ])[0]
+    bars = [
+        Bar(date(2026, 1, 2), 10, 10.2, 9.8, 10),
+        Bar(date(2026, 1, 3), 10, 10.6, 9.9, 10.5),
+        Bar(date(2026, 1, 4), 10.5, 11, 10.4, 10.9),
+    ]
+
+    result = simulate_independent_candidate_trade(
+        cluster,
+        bars,
+        params=BacktestParams(),
+        sell_reason_fn=lambda *args, **kwargs: None,
+    )
+    report = candidate_trade_quality_report_from_results([result])
+    item = report["items"][0]
+
+    assert item["entry_selection"] == "first_visible_buy"
+    assert item["entry_signal_date"] == "2026-01-02"
+    assert item["entry_execute_date"] == "2026-01-03"
+    assert item["cluster_preferred_entry_signal_date_for_audit"] == "2026-01-03"
+    assert item["cluster_preferred_entry_not_used_for_trade"] is True
+
+
+def test_candidate_trade_quality_passes_current_buy_signal_to_sell_logic() -> None:
+    from alphaagent.server.services.backtest.factor_audit import (
+        build_candidate_clusters,
+        simulate_independent_candidate_trade,
+    )
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    cluster = build_candidate_clusters([
+        _candidate_quality_row("600000.SSE", date(2026, 1, 2), rank=1),
+    ])[0]
+    bars = [
+        Bar(date(2026, 1, 2), 10, 10.2, 9.8, 10),
+        Bar(date(2026, 1, 3), 10, 10.5, 9.9, 10.2),
+        Bar(date(2026, 1, 4), 10.2, 10.4, 9.9, 10.1),
+        Bar(date(2026, 1, 5), 10.1, 10.4, 10.0, 10.3),
+    ]
+    seen_current_buy_signals = []
+
+    def sell_when_current_buy_signal(position, bar, current_day, params, *, current_buy_signal=False, **kwargs):
+        del position, bar, current_day, params, kwargs
+        seen_current_buy_signals.append(current_buy_signal)
+        return "current_buy_signal_seen" if current_buy_signal else None
+
+    result = simulate_independent_candidate_trade(
+        cluster,
+        bars,
+        params=BacktestParams(),
+        sell_reason_fn=sell_when_current_buy_signal,
+        buy_signal_dates={date(2026, 1, 4)},
+    )
+
+    assert True in seen_current_buy_signals
+    assert result.status == "closed"
+    assert result.exit_signal_date == date(2026, 1, 4)
+
+
+def test_candidate_trade_quality_report_endpoint_passes_params(monkeypatch) -> None:
+    from alphaagent.server.api import backtests
+
+    captured = {}
+
+    def fake_report(backtest_id, **kwargs):
+        captured["backtest_id"] = backtest_id
+        captured.update(kwargs)
+        return {"status": "ready", "backtest_id": backtest_id, "summary": {"sample_count": 0}, "items": []}
+
+    monkeypatch.setattr(backtests, "backtest_candidate_trade_quality_report", fake_report)
+    client = TestClient(create_app())
+
+    response = client.get(
+        "/api/backtests/203/candidate-trade-quality-report"
+        "?rank_limit=50&sample_limit=25&start_date=2026-01-01&end_date=2026-02-01"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "ready"
+    assert captured == {
+        "backtest_id": 203,
+        "rank_limit": 50,
+        "sample_limit": 25,
+        "start_date": date(2026, 1, 1),
+        "end_date": date(2026, 2, 1),
+    }
+
+
+def test_candidate_trade_quality_report_endpoint_validates_limits(monkeypatch) -> None:
+    from alphaagent.server.api import backtests
+
+    monkeypatch.setattr(backtests, "backtest_candidate_trade_quality_report", lambda *args, **kwargs: {"status": "ready"})
+    client = TestClient(create_app())
+
+    response = client.get("/api/backtests/203/candidate-trade-quality-report?rank_limit=201")
+
+    assert response.status_code == 422
+
+
+def test_candidate_trade_quality_report_builds_full_candidate_cache(monkeypatch) -> None:
+    from alphaagent.server.services.backtest import engine
+
+    captured = {}
+
+    def fake_cache(backtest_id, *, limit):
+        captured["backtest_id"] = backtest_id
+        captured["limit"] = limit
+        return {"status": "unavailable", "coverage": {}}
+
+    monkeypatch.setattr(engine, "is_database_configured", lambda: True)
+    monkeypatch.setattr(engine, "_ensure_backtest_schema", lambda: None)
+    monkeypatch.setattr(engine, "ensure_factor_audit_cache", fake_cache)
+
+    result = engine.backtest_candidate_trade_quality_report(203)
+
+    assert result["status"] == "unavailable"
+    assert captured == {"backtest_id": 203, "limit": 20000}
+
+
+def test_backtest_performance_attribution_endpoint_passes_params(monkeypatch) -> None:
+    from alphaagent.server.api import backtests
+
+    captured = {}
+
+    def fake_report(backtest_id, **kwargs):
+        captured["backtest_id"] = backtest_id
+        captured.update(kwargs)
+        return {"status": "ready", "backtest_id": backtest_id, "reference_backtest_id": kwargs["reference_backtest_id"]}
+
+    monkeypatch.setattr(backtests, "backtest_performance_attribution_report", fake_report)
+    client = TestClient(create_app())
+
+    response = client.get("/api/backtests/274/performance-attribution?reference_backtest_id=203&sample_limit=12")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "ready"
+    assert captured == {"backtest_id": 274, "reference_backtest_id": 203, "sample_limit": 12}
+
+
+def test_backtest_performance_attribution_endpoint_validates_sample_limit(monkeypatch) -> None:
+    from alphaagent.server.api import backtests
+
+    monkeypatch.setattr(backtests, "backtest_performance_attribution_report", lambda *args, **kwargs: {"status": "ready"})
+    client = TestClient(create_app())
+
+    response = client.get("/api/backtests/274/performance-attribution?sample_limit=101")
+
+    assert response.status_code == 422

@@ -25,14 +25,17 @@ from alphaagent.market.symbols import INDEX_SYMBOLS
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
 from alphaagent.server.services.backtest import data_quality as data_quality_service
-from alphaagent.server.services.backtest import execution_models, persistence, queries, reports, scoring, signal_plan, simulation, strategy_comparison, validation
+from alphaagent.server.services.backtest import execution_models, performance_attribution, persistence, queries, reports, scoring, signal_plan, simulation, strategy_comparison, validation
 from alphaagent.server.services.backtest.baseline_policy import is_product_baseline_params, select_product_baselines
 from alphaagent.server.services.backtest.factor_audit import (
+    build_candidate_clusters,
     candidate_feature_rows,
     candidate_execution_attribution_summary,
+    candidate_trade_quality_report_from_results,
     current_strategy_trade_outcome_map,
     factor_audit_summary,
     fixed_horizon_outcome_row,
+    simulate_independent_candidate_trade,
     strategy_lifecycle_segments,
     strategy_timeline_rows,
 )
@@ -79,13 +82,17 @@ def run_backtest(params: BacktestParams) -> dict[str, Any]:
 
         stock_meta = _load_stock_meta(session, vt_symbols)
         score_context = _load_score_context(session, list(bars_by_symbol))
-        score_cache = _load_score_cache_from_persisted_signals(
-            session,
-            params,
-            strategy.version,
-            vt_symbols,
-            trading_days,
-            bars_by_symbol=bars_by_symbol,
+        score_cache = (
+            _load_score_cache_from_persisted_signals(
+                session,
+                params,
+                strategy.version,
+                vt_symbols,
+                trading_days,
+                bars_by_symbol=bars_by_symbol,
+            )
+            if params.reuse_signal_cache
+            else None
         )
         run = _simulate(session, params, bars_by_symbol, trading_days, stock_meta, score_cache=score_cache, score_context=score_context)
         backtest_id = _persist_run(session, params, run, end) if params.persist else None
@@ -1219,6 +1226,121 @@ def backtest_factor_audit(backtest_id: int, top_limit: int = 100, exclude_strong
     }
 
 
+def backtest_candidate_trade_quality_report(
+    backtest_id: int,
+    *,
+    rank_limit: int = 100,
+    sample_limit: int = 500,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> dict[str, Any]:
+    if not is_database_configured():
+        return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
+    _ensure_backtest_schema()
+    rank_cutoff = min(max(int(rank_limit or 100), 1), 200)
+    sample_cutoff = min(max(int(sample_limit or 500), 1), 1000)
+    cache = ensure_factor_audit_cache(backtest_id, limit=20000)
+    if cache.get("status") not in {"ready", "empty"}:
+        return {**cache, "items": []}
+    with session_scope() as session:
+        run = session.execute(select(schema.backtest_runs).where(schema.backtest_runs.c.id == backtest_id)).mappings().first()
+        if not run:
+            return {"status": "not_found", "backtest_id": backtest_id, "items": []}
+        run_row = dict(run)
+        lower = max([day for day in [run_row["start_date"], start_date] if day is not None])
+        upper = min([day for day in [run_row["end_date"], end_date] if day is not None])
+        if lower > upper:
+            return {
+                "status": "empty",
+                "backtest_id": backtest_id,
+                "items": [],
+                "summary": candidate_trade_quality_report_from_results([], rank_limit=rank_cutoff, sample_limit=sample_cutoff)["summary"],
+                "message": "date range has no overlap with backtest window",
+            }
+        snapshot_rows = session.execute(
+            select(schema.backtest_factor_snapshots, schema.backtest_factor_outcomes.c.payload.label("outcome_payload"))
+            .outerjoin(
+                schema.backtest_factor_outcomes,
+                and_(
+                    schema.backtest_factor_outcomes.c.backtest_id == schema.backtest_factor_snapshots.c.backtest_id,
+                    schema.backtest_factor_outcomes.c.signal_date == schema.backtest_factor_snapshots.c.trade_date,
+                    schema.backtest_factor_outcomes.c.vt_symbol == schema.backtest_factor_snapshots.c.vt_symbol,
+                    schema.backtest_factor_outcomes.c.rank == schema.backtest_factor_snapshots.c.rank,
+                ),
+            )
+            .where(
+                schema.backtest_factor_snapshots.c.backtest_id == backtest_id,
+                schema.backtest_factor_snapshots.c.trade_date >= lower,
+                schema.backtest_factor_snapshots.c.trade_date <= upper,
+            )
+            .order_by(schema.backtest_factor_snapshots.c.trade_date, schema.backtest_factor_snapshots.c.rank, schema.backtest_factor_snapshots.c.vt_symbol)
+        ).mappings().all()
+        candidate_items = []
+        for row in snapshot_rows:
+            item = dict(row.get("payload") or {})
+            outcome = row.get("outcome_payload")
+            if isinstance(outcome, dict):
+                item["outcome"] = outcome
+            candidate_items.append(item)
+        clusters = [
+            cluster
+            for cluster in build_candidate_clusters(candidate_items)
+            if (_safe_int_or_none(cluster.entry_row.get("rank")) or 10**9) <= rank_cutoff
+        ]
+        symbols = sorted({cluster.vt_symbol for cluster in clusters})
+        bars_by_symbol = _load_factor_candidate_bars(session, symbols, lower, upper)
+        params = _params_from_run(run_row)
+        buy_dates_by_symbol = _candidate_buy_signal_dates_by_symbol(candidate_items)
+
+    results = [
+        simulate_independent_candidate_trade(
+            cluster,
+            bars_by_symbol.get(cluster.vt_symbol, []),
+            params=params,
+            sell_reason_fn=simulation.sell_reason_for_position,
+            limit_up_open_fn=_is_limit_up_open,
+            limit_down_open_fn=_is_limit_down_open,
+            buy_signal_dates=buy_dates_by_symbol.get(cluster.vt_symbol, set()),
+        )
+        for cluster in clusters
+    ]
+    report = candidate_trade_quality_report_from_results(results, rank_limit=rank_cutoff, sample_limit=sample_cutoff)
+    return {
+        **report,
+        "backtest_id": backtest_id,
+        "start_date": lower.isoformat(),
+        "end_date": upper.isoformat(),
+        "strategy_id": run_row["strategy_id"],
+        "strategy_version": run_row["strategy_version"],
+        "cache": cache.get("cache"),
+        "coverage": {
+            **(report.get("coverage") or {}),
+            **(cache.get("coverage") or {}),
+            "candidate_source": (cache.get("coverage") or {}).get("candidate_source"),
+            "source_candidate_count": len(candidate_items),
+        },
+    }
+
+
+def backtest_performance_attribution_report(
+    backtest_id: int,
+    *,
+    reference_backtest_id: int | None = None,
+    sample_limit: int = 20,
+) -> dict[str, Any]:
+    return performance_attribution.backtest_performance_attribution_report(
+        schema=schema,
+        session_scope=session_scope,
+        is_database_configured=is_database_configured,
+        ensure_schema=_ensure_backtest_schema,
+        reason_label=backtest_reason_label,
+        current_schema_version=screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+        backtest_id=backtest_id,
+        reference_backtest_id=reference_backtest_id,
+        sample_limit=sample_limit,
+    )
+
+
 def _factor_candidate_execution_attribution(
     backtest_id: int,
     candidates: list[dict[str, Any]],
@@ -1293,7 +1415,7 @@ def ensure_factor_audit_cache(backtest_id: int, *, limit: int = 2000) -> dict[st
     if not is_database_configured():
         return {"status": "unavailable", "message": "DATABASE_URL not configured", "cache": "unavailable"}
     _ensure_backtest_schema()
-    row_limit = min(max(int(limit or 2000), 1), 2000)
+    row_limit = min(max(int(limit or 2000), 1), 20000)
     with session_scope() as session:
         existing_count = _valid_factor_cache_count(session, backtest_id)
         if existing_count >= row_limit:
@@ -1673,6 +1795,19 @@ def _load_factor_candidate_bars(session: Any, vt_symbols: list[str], start: date
         payload = dict(row)
         bars_by_symbol[str(payload["vt_symbol"])].append(_daily_bar_from_mapping(payload))
     return bars_by_symbol
+
+
+def _candidate_buy_signal_dates_by_symbol(candidates: list[dict[str, Any]]) -> dict[str, set[date]]:
+    result: dict[str, set[date]] = defaultdict(set)
+    for item in candidates:
+        action = str(item.get("entry_action") or item.get("action") or "").upper()
+        if action != "BUY" and not bool(item.get("executable_entry_signal")):
+            continue
+        vt_symbol = str(item.get("vt_symbol") or "").strip().upper()
+        signal_date = _as_date(item.get("trade_date") or item.get("signal_date"))
+        if vt_symbol and signal_date is not None:
+            result[vt_symbol].add(signal_date)
+    return result
 
 
 def _daily_bar_from_mapping(row: dict[str, Any]) -> Bar:
@@ -2129,6 +2264,8 @@ def _attach_score_market_context(score: SignalScore, payload: dict[str, Any]) ->
 def _screen_run_matches_backtest_params(run: dict[str, Any], params: BacktestParams) -> bool:
     run_params = run.get("params") if isinstance(run.get("params"), dict) else {}
     if int(run_params.get("max_symbols") or 0) != int(params.max_symbols):
+        return False
+    if run_params.get("signal_evidence_schema_version") != screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION:
         return False
     return tuple(normalize_included_boards(run_params.get("included_boards"))) == tuple(normalize_included_boards(params.included_boards))
 
@@ -4000,6 +4137,7 @@ def _params_from_run(run: dict[str, Any]) -> BacktestParams:
         setup_family_filter=str(raw_params.get("setup_family_filter") or ""),
         enable_phase_aware_setup_selector=_truthy(raw_params.get("enable_phase_aware_setup_selector", False)),
         enable_phase_replacement_quality=_truthy(raw_params.get("enable_phase_replacement_quality", False)),
+        reuse_signal_cache=_truthy(raw_params.get("reuse_signal_cache", False)),
         exclude_from_product_baseline=_truthy(raw_params.get("exclude_from_product_baseline", False)),
         symbols=[_normalize_symbol(symbol) for symbol in (raw_params.get("symbols") or []) if _normalize_symbol(symbol)],
         included_boards=normalize_included_boards(raw_params.get("included_boards")),
@@ -4218,6 +4356,7 @@ def _backtest_assumptions(params: BacktestParams) -> dict[str, str]:
         "positioning": "equal cash budget per position, 100-share lot rounded",
         "turnover": "turnover_pct uses traded notional divided by initial cash",
         "data_as_of_policy": "daily bars only; financial data requires publish_date",
+        "signal_cache_reuse": "enabled" if params.reuse_signal_cache else "disabled_current_code_recompute",
     }
     if params.execution_model in {"tail_close_hybrid", "strict_1430"}:
         assumptions.update(

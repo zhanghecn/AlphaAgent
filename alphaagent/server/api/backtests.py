@@ -13,6 +13,7 @@ from alphaagent.server.core.responses import fail, ok
 from alphaagent.server.services.backtest.engine import (
     BacktestParams,
     backtest_candidate_trace,
+    backtest_candidate_trade_quality_report,
     backtest_day_detail,
     backtest_data_quality,
     backtest_daily_decisions,
@@ -32,6 +33,7 @@ from alphaagent.server.services.backtest.engine import (
     backtest_market_phase_audit,
     backtest_phase_strategy_family_matrix,
     backtest_path_diagnostics,
+    backtest_performance_attribution_report,
     backtest_replacement_quality_matrix,
     backtest_report,
     backtest_rotation_opportunity_cost_matrix,
@@ -510,6 +512,46 @@ def get_factor_audit(
         return _service_error(exc)
 
 
+@router.get("/{backtest_id}/performance-attribution")
+def get_performance_attribution_report(
+    backtest_id: int,
+    reference_backtest_id: int | None = Query(default=None, ge=1),
+    sample_limit: int = Query(default=20, ge=1, le=100),
+):
+    try:
+        return ok(
+            backtest_performance_attribution_report(
+                backtest_id,
+                reference_backtest_id=reference_backtest_id,
+                sample_limit=sample_limit,
+            )
+        )
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@router.get("/{backtest_id}/candidate-trade-quality-report")
+def get_candidate_trade_quality_report(
+    backtest_id: int,
+    rank_limit: int = Query(default=100, ge=1, le=200),
+    sample_limit: int = Query(default=500, ge=1, le=1000),
+    start_date: str = Query(default=""),
+    end_date: str = Query(default=""),
+):
+    try:
+        return ok(
+            backtest_candidate_trade_quality_report(
+                backtest_id,
+                rank_limit=rank_limit,
+                sample_limit=sample_limit,
+                start_date=_parse_date(start_date),
+                end_date=_parse_date(end_date),
+            )
+        )
+    except Exception as exc:
+        return _service_error(exc)
+
+
 @router.get("/{backtest_id}/strategy-timeline")
 def get_strategy_timeline(backtest_id: int, vt_symbol: str = Query(..., min_length=1)):
     try:
@@ -768,6 +810,7 @@ def _params_from_payload(payload: dict[str, Any]) -> BacktestParams:
         setup_family_filter=str(payload.get("setup_family_filter") or "").strip(),
         enable_phase_aware_setup_selector=_parse_bool(payload.get("enable_phase_aware_setup_selector"), default=False),
         enable_phase_replacement_quality=_parse_bool(payload.get("enable_phase_replacement_quality"), default=False),
+        reuse_signal_cache=_parse_bool(payload.get("reuse_signal_cache"), default=False),
         exclude_from_product_baseline=_parse_bool(payload.get("exclude_from_product_baseline"), default=False),
         symbols=_parse_symbols(payload.get("symbols") or payload.get("vt_symbols") or payload.get("vt_symbol")),
         included_boards=normalize_included_boards(payload.get("included_boards")),

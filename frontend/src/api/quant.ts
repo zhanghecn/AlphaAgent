@@ -1419,6 +1419,210 @@ export interface FactorAuditResponse {
   coverage?: Record<string, unknown>;
 }
 
+export interface CandidateTradeQualityMetricSummary {
+  sample_count?: number | null;
+  evaluated_count?: number | null;
+  win_count?: number | null;
+  win_rate?: number | null;
+  average_return_pct?: number | null;
+  median_return_pct?: number | null;
+  average_max_drawdown_pct?: number | null;
+  average_max_runup_pct?: number | null;
+  average_holding_days?: number | null;
+}
+
+export interface CandidateTradeQualityBucket extends CandidateTradeQualityMetricSummary {
+  label?: string | null;
+  rank_limit?: number | null;
+  rank_bucket?: string | null;
+  daily_rank_window?: string | null;
+  score_bucket?: string | null;
+  setup_family?: string | null;
+  market_phase?: string | null;
+  exit_reason?: string | null;
+}
+
+export interface CandidateTradeQualityDailyExtreme extends StockIdentityFields {
+  vt_symbol?: string | null;
+  name?: string | null;
+  rank?: number | null;
+  score?: number | null;
+  return_pct?: number | null;
+  exit_reason?: string | null;
+}
+
+export interface CandidateTradeQualityDailySummary {
+  entry_signal_date?: string | null;
+  candidate_count?: number | null;
+  evaluated_count?: number | null;
+  missing_count?: number | null;
+  top10?: CandidateTradeQualityMetricSummary;
+  top20?: CandidateTradeQualityMetricSummary;
+  topn?: CandidateTradeQualityMetricSummary;
+  best_candidate?: CandidateTradeQualityDailyExtreme | null;
+  worst_candidate?: CandidateTradeQualityDailyExtreme | null;
+}
+
+export interface CandidateTradeQualitySample extends StockIdentityFields {
+  status: string;
+  vt_symbol: string;
+  name?: string | null;
+  rank?: number | null;
+  score?: number | null;
+  rank_bucket?: string | null;
+  daily_rank_window?: string | null;
+  score_bucket?: string | null;
+  setup_family?: string | null;
+  setup_family_label?: string | null;
+  market_phase?: string | null;
+  market_phase_label?: string | null;
+  entry_signal_date?: string | null;
+  entry_execute_date?: string | null;
+  entry_price?: number | null;
+  exit_signal_date?: string | null;
+  exit_execute_date?: string | null;
+  exit_price?: number | null;
+  return_pct?: number | null;
+  max_drawdown_pct?: number | null;
+  max_runup_pct?: number | null;
+  holding_days?: number | null;
+  exit_reason?: string | null;
+  cluster_start_date?: string | null;
+  cluster_end_date?: string | null;
+  cluster_size?: number | null;
+  entry_reason?: Record<string, unknown> | null;
+  uses_future_for_label_only?: boolean | null;
+  not_used_for_signal_score?: boolean | null;
+}
+
+export interface CandidateTradeQualityReport {
+  status: string;
+  backtest_id?: number;
+  start_date?: string;
+  end_date?: string;
+  strategy_id?: string;
+  strategy_version?: string;
+  method?: string | null;
+  rank_limit?: number;
+  sample_limit?: number;
+  summary?: CandidateTradeQualityMetricSummary;
+  by_rank_bucket?: CandidateTradeQualityBucket[];
+  by_rank_limit?: CandidateTradeQualityBucket[];
+  by_daily_rank_window?: CandidateTradeQualityBucket[];
+  by_score_bucket?: CandidateTradeQualityBucket[];
+  by_setup_family?: CandidateTradeQualityBucket[];
+  by_market_phase?: CandidateTradeQualityBucket[];
+  by_exit_reason?: CandidateTradeQualityBucket[];
+  daily_summaries?: CandidateTradeQualityDailySummary[];
+  best_samples?: CandidateTradeQualitySample[];
+  worst_samples?: CandidateTradeQualitySample[];
+  items?: CandidateTradeQualitySample[];
+  coverage?: Record<string, unknown>;
+  cache?: Record<string, unknown>;
+  uses_future_for_label_only?: boolean | null;
+  not_used_for_signal_score?: boolean | null;
+  note?: string | null;
+  message?: string | null;
+}
+
+export interface BacktestPerformanceAttributionRunSummary {
+  id: number;
+  strategy_id?: string | null;
+  strategy_version?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  initial_cash?: number | null;
+  final_equity?: number | null;
+  total_return_pct?: number | null;
+  max_drawdown_pct?: number | null;
+  win_rate?: number | null;
+  profit_factor?: number | null;
+  buy_count?: number | null;
+  sell_count?: number | null;
+  open_trade_count?: number | null;
+  average_win?: number | null;
+  average_loss?: number | null;
+  trade_summary?: BacktestPerformanceTradeSummary;
+  params?: Record<string, unknown>;
+}
+
+export interface BacktestPerformanceTradeSummary {
+  trade_count?: number | null;
+  win_count?: number | null;
+  loss_count?: number | null;
+  win_rate?: number | null;
+  average_win?: number | null;
+  average_loss?: number | null;
+  gross_win?: number | null;
+  gross_loss?: number | null;
+  profit_factor?: number | null;
+  net_pnl?: number | null;
+}
+
+export interface BacktestPerformanceExitReasonRow {
+  exit_reason?: string | null;
+  exit_reason_label?: string | null;
+  current?: BacktestPerformanceTradeSummary;
+  reference?: BacktestPerformanceTradeSummary;
+  delta?: BacktestPerformanceTradeSummary;
+}
+
+export interface BacktestPerformanceTradeDelta {
+  vt_symbol?: string | null;
+  trade_date?: string | null;
+  current_reason?: string | null;
+  current_pnl?: number | null;
+  reference_reason?: string | null;
+  reference_pnl?: number | null;
+  delta_pnl?: number | null;
+}
+
+export interface BacktestPerformanceAttributionReport {
+  status: string;
+  backtest_id?: number;
+  reference_backtest_id?: number | null;
+  current?: BacktestPerformanceAttributionRunSummary;
+  reference?: BacktestPerformanceAttributionRunSummary;
+  delta?: BacktestPerformanceTradeSummary & {
+    total_return_pct?: number | null;
+    max_drawdown_pct?: number | null;
+    buy_count?: number | null;
+    sell_count?: number | null;
+  };
+  constraint_comparison?: {
+    same_max_positions?: boolean | null;
+    same_candidate_limit?: boolean | null;
+    same_position_sizing?: boolean | null;
+    same_core_portfolio_params?: boolean | null;
+    core_params?: Array<{ key: string; current?: unknown; reference?: unknown; same?: boolean | null }>;
+  };
+  signal_schema?: {
+    current_required_version?: string | null;
+    same_schema_lineage?: boolean | null;
+    current?: Record<string, unknown>;
+    reference?: Record<string, unknown>;
+  };
+  by_exit_reason?: BacktestPerformanceExitReasonRow[];
+  monthly?: Array<{
+    month: string;
+    current_return_pct?: number | null;
+    reference_return_pct?: number | null;
+    delta_return_pct?: number | null;
+  }>;
+  trade_deltas?: {
+    largest_negative?: BacktestPerformanceTradeDelta[];
+    largest_positive?: BacktestPerformanceTradeDelta[];
+    missing_reference_winners?: BacktestPerformanceTradeDelta[];
+    added_current_losers?: BacktestPerformanceTradeDelta[];
+  };
+  interpretation?: {
+    notes?: string[];
+    next_tests?: string[];
+  };
+  note?: string | null;
+  message?: string | null;
+}
+
 export interface BacktestPathMetricBucket {
   label?: string | null;
   trade_count?: number | null;
@@ -2887,6 +3091,7 @@ export function createBacktest(payload: {
   mid_profit_giveback_min_high_gain_pct?: number;
   mid_profit_giveback_max_current_gain_pct?: number;
   mid_profit_giveback_drawdown_pct?: number;
+  reuse_signal_cache?: boolean;
   symbols?: string[];
   vt_symbol?: string;
   included_boards?: string[];
@@ -3121,6 +3326,36 @@ export function fetchBacktestFactorAudit(backtestId: number, topLimit = 100, opt
   const search = new URLSearchParams({ top_limit: String(topLimit) });
   if (options.excludeStrongMarket) search.set("exclude_strong_market", "true");
   return apiClient.get<FactorAuditResponse>(`/backtests/${backtestId}/factor-audit?${search.toString()}`);
+}
+
+export function fetchBacktestCandidateTradeQualityReport(
+  backtestId: number,
+  params: {
+    rankLimit?: number;
+    sampleLimit?: number;
+    startDate?: string;
+    endDate?: string;
+  } = {}
+): Promise<CandidateTradeQualityReport> {
+  const search = new URLSearchParams({
+    rank_limit: String(params.rankLimit ?? 100),
+    sample_limit: String(params.sampleLimit ?? 500),
+  });
+  if (params.startDate) search.set("start_date", params.startDate);
+  if (params.endDate) search.set("end_date", params.endDate);
+  return apiClient.get<CandidateTradeQualityReport>(`/backtests/${backtestId}/candidate-trade-quality-report?${search.toString()}`);
+}
+
+export function fetchBacktestPerformanceAttributionReport(
+  backtestId: number,
+  params: {
+    referenceBacktestId?: number;
+    sampleLimit?: number;
+  } = {}
+): Promise<BacktestPerformanceAttributionReport> {
+  const search = new URLSearchParams({ sample_limit: String(params.sampleLimit ?? 20) });
+  if (params.referenceBacktestId) search.set("reference_backtest_id", String(params.referenceBacktestId));
+  return apiClient.get<BacktestPerformanceAttributionReport>(`/backtests/${backtestId}/performance-attribution?${search.toString()}`);
 }
 
 export function fetchBacktestSetupMarketExitAudit(backtestId: number, lookaheadDays = 10): Promise<BacktestSetupMarketExitAuditResponse> {

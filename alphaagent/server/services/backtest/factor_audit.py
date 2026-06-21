@@ -2,13 +2,45 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 from statistics import median
 from typing import Any
 
 from alphaagent.market.boards import stock_board_payload
+from alphaagent.server.services.backtest.schemas import Position
 from alphaagent.server.services.quant.factors import Bar
 from alphaagent.server.services.quant.screening_payloads import normalize_quant_evidence
+
+
+@dataclass(frozen=True)
+class CandidateCluster:
+    """A merged run of consecutive executable BUY candidates for one symbol."""
+
+    vt_symbol: str
+    rows: tuple[dict[str, Any], ...]
+    cluster_start_date: date
+    cluster_end_date: date
+    entry_row: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class IndependentTradeResult:
+    """Theoretical one-symbol trade result used only by candidate-quality reports."""
+
+    status: str
+    cluster: CandidateCluster
+    entry_signal_date: date
+    entry_execute_date: date | None
+    entry_price: float | None
+    exit_signal_date: date | None
+    exit_execute_date: date | None
+    exit_price: float | None
+    return_pct: float | None
+    max_drawdown_pct: float | None
+    max_runup_pct: float | None
+    holding_days: int | None
+    exit_reason: str | None
 
 
 def rank_bucket(rank: int | None) -> str:
@@ -913,6 +945,184 @@ def candidate_feature_row(row: dict[str, Any], *, stock: dict[str, Any] | None =
     return payload
 
 
+def build_candidate_clusters(
+    rows: list[dict[str, Any]],
+    *,
+    max_gap_trading_days: int = 2,
+) -> list[CandidateCluster]:
+    """Merge consecutive executable BUY candidates by symbol.
+
+    ``max_gap_trading_days`` is measured in the candidate stream's own trading
+    dates. This avoids calendar-weekend surprises while still splitting stale
+    repeated signals when a symbol disappears from the BUY list for multiple
+    sessions.
+    """
+
+    buy_rows = [dict(row) for row in rows if _is_executable_buy_candidate(row)]
+    if not buy_rows:
+        return []
+
+    trade_dates = sorted({day for row in buy_rows if (day := _date_or_none(row.get("trade_date") or row.get("signal_date")))})
+    date_index = {day: index for index, day in enumerate(trade_dates)}
+    by_symbol: dict[str, list[dict[str, Any]]] = {}
+    for row in buy_rows:
+        symbol = str(row.get("vt_symbol") or "").strip().upper()
+        trade_date = _date_or_none(row.get("trade_date") or row.get("signal_date"))
+        if not symbol or trade_date is None:
+            continue
+        item = dict(row)
+        item["_cluster_trade_date"] = trade_date
+        by_symbol.setdefault(symbol, []).append(item)
+
+    clusters: list[CandidateCluster] = []
+    for symbol, symbol_rows in sorted(by_symbol.items()):
+        symbol_rows.sort(key=lambda row: (_date_or_none(row.get("_cluster_trade_date")) or date.min, _int_or_none(row.get("rank")) or 10**9))
+        current: list[dict[str, Any]] = []
+        last_date: date | None = None
+        for row in symbol_rows:
+            trade_date = _date_or_none(row.get("_cluster_trade_date"))
+            if trade_date is None:
+                continue
+            if current and last_date is not None and _candidate_trading_day_gap(last_date, trade_date, date_index) > max_gap_trading_days:
+                clusters.append(_candidate_cluster(symbol, current))
+                current = []
+            current.append(row)
+            last_date = trade_date
+        if current:
+            clusters.append(_candidate_cluster(symbol, current))
+
+    clusters.sort(
+        key=lambda cluster: (
+            _date_or_none(cluster.entry_row.get("trade_date") or cluster.entry_row.get("signal_date")) or date.min,
+            cluster.vt_symbol,
+        )
+    )
+    return clusters
+
+
+def simulate_independent_candidate_trade(
+    cluster: CandidateCluster,
+    bars: list[Bar],
+    *,
+    params: Any,
+    sell_reason_fn,
+    limit_up_open_fn=None,
+    limit_down_open_fn=None,
+    buy_signal_dates: set[date] | None = None,
+) -> IndependentTradeResult:
+    """Simulate one theoretical trade for a candidate cluster.
+
+    The entry is D+1 open. Exit signals are evaluated at daily close using the
+    same sell reason function as the portfolio backtest, then executed at the
+    next trading day's open. No cash, position count, existing holding or
+    rotation constraint is consulted.
+    """
+
+    sorted_bars = sorted(bars, key=lambda bar: bar.trade_date)
+    current_buy_signal_dates = buy_signal_dates or set()
+    signal_date = _date_or_none(cluster.entry_row.get("trade_date") or cluster.entry_row.get("signal_date")) or cluster.cluster_start_date
+    entry_index = next((index for index, bar in enumerate(sorted_bars) if bar.trade_date > signal_date), None)
+    if entry_index is None:
+        return _independent_trade_missing(cluster, signal_date, "no_execute_bar")
+
+    entry_bar = sorted_bars[entry_index]
+    if limit_up_open_fn is not None and limit_up_open_fn(entry_bar):
+        return _independent_trade_missing(cluster, signal_date, "limit_up_open_blocked", execute_date=entry_bar.trade_date)
+
+    entry_price = float(entry_bar.open_price)
+    position = _candidate_independent_position(cluster, entry_bar, entry_price)
+
+    for index in range(entry_index, len(sorted_bars)):
+        bar = sorted_bars[index]
+        position.visible_holding_bars += 1
+        position.last_price = bar.close_price
+        position.highest_price = max(position.highest_price, bar.high_price)
+        position.lowest_price = min(position.lowest_price if position.lowest_price is not None else bar.low_price, bar.low_price)
+        sell_reason = sell_reason_fn(
+            position,
+            bar,
+            bar.trade_date,
+            params,
+            current_buy_signal=bar.trade_date in current_buy_signal_dates,
+            replacement_available=False,
+        )
+        if not sell_reason or bar.trade_date <= position.entry_date:
+            continue
+        if index >= len(sorted_bars) - 1:
+            return _independent_trade_open_result(cluster, signal_date, entry_bar.trade_date, entry_price, sorted_bars[entry_index:])
+        exit_bar = sorted_bars[index + 1]
+        if limit_down_open_fn is not None and limit_down_open_fn(exit_bar):
+            continue
+        return _independent_trade_closed_result(
+            cluster,
+            signal_date=signal_date,
+            entry_execute_date=entry_bar.trade_date,
+            entry_price=entry_price,
+            exit_signal_date=bar.trade_date,
+            exit_execute_date=exit_bar.trade_date,
+            exit_price=float(exit_bar.open_price),
+            exit_reason=str(sell_reason),
+            window=sorted_bars[entry_index:index + 2],
+        )
+
+    return _independent_trade_open_result(cluster, signal_date, entry_bar.trade_date, entry_price, sorted_bars[entry_index:])
+
+
+def candidate_trade_quality_report_from_results(
+    results: list[IndependentTradeResult],
+    *,
+    rank_limit: int = 100,
+    sample_limit: int = 500,
+) -> dict[str, Any]:
+    """Aggregate independent candidate-trade results into report buckets."""
+
+    rank_cutoff = min(max(int(rank_limit or 100), 1), 200)
+    samples = [_candidate_trade_sample(result) for result in results]
+    ranked_samples = [item for item in samples if (_int_or_none(item.get("rank")) or 10**9) <= rank_cutoff]
+    evaluated = [item for item in ranked_samples if item.get("status") in {"closed", "open"} and _float_or_none(item.get("return_pct")) is not None]
+    missing = [item for item in ranked_samples if item.get("status") not in {"closed", "open"}]
+    by_rank_bucket = _candidate_trade_group_metrics(evaluated, "rank_bucket", _candidate_trade_rank_bucket_order)
+    by_rank_limit = _candidate_trade_rank_limit_metrics(evaluated, rank_cutoff=rank_cutoff)
+    by_daily_rank_window = _candidate_trade_group_metrics(evaluated, "daily_rank_window", _candidate_trade_rank_window_order)
+    by_score_bucket = _candidate_trade_group_metrics(evaluated, "score_bucket", _candidate_trade_score_bucket_order)
+    by_setup_family = _candidate_trade_group_metrics(evaluated, "setup_family")
+    by_market_phase = _candidate_trade_group_metrics(evaluated, "market_phase")
+    by_exit_reason = _candidate_trade_group_metrics(evaluated, "exit_reason")
+    daily_summaries = _candidate_trade_daily_summaries(ranked_samples, rank_cutoff=rank_cutoff)
+    sorted_by_return = sorted(evaluated, key=lambda item: (_sort_float(item.get("return_pct")), str(item.get("entry_signal_date") or ""), str(item.get("vt_symbol") or "")))
+    sample_cutoff = min(max(int(sample_limit or 500), 1), 1000)
+    return {
+        "status": "ready" if ranked_samples else "empty",
+        "method": "候选质量只读评估：每个交易日的 BUY 候选按排名进入候选池，同股连续 BUY 合并成簇，每簇只按首个可见 BUY 的 D+1 开盘买入，再按当前策略卖点卖出；不看现金、仓位、满仓、已有持仓或换仓。",
+        "entry_selection": "first_visible_buy",
+        "rank_limit": rank_cutoff,
+        "sample_limit": sample_cutoff,
+        "summary": _candidate_trade_metric_summary(evaluated),
+        "by_rank_bucket": by_rank_bucket,
+        "by_rank_limit": by_rank_limit,
+        "by_daily_rank_window": by_daily_rank_window,
+        "by_score_bucket": by_score_bucket,
+        "by_setup_family": by_setup_family,
+        "by_market_phase": by_market_phase,
+        "by_exit_reason": by_exit_reason,
+        "daily_summaries": daily_summaries,
+        "best_samples": list(reversed(sorted_by_return[-10:])),
+        "worst_samples": sorted_by_return[:10],
+        "items": sorted(ranked_samples, key=lambda item: (str(item.get("entry_signal_date") or ""), str(item.get("vt_symbol") or "")))[:sample_cutoff],
+        "coverage": {
+            "cluster_count": len(results),
+            "rank_limited_cluster_count": len(ranked_samples),
+            "evaluated_count": len(evaluated),
+            "missing_count": len(missing),
+            "no_execute_bar_count": sum(1 for item in missing if item.get("status") == "no_execute_bar"),
+            "limit_up_open_blocked_count": sum(1 for item in missing if item.get("status") == "limit_up_open_blocked"),
+        },
+        "uses_future_for_label_only": True,
+        "not_used_for_signal_score": True,
+        "note": "这是候选本身质量评估，不是组合收益；TopN 表示全历史每个信号日排名前 N 的独立候选交易汇总。买入只用当日可见 BUY，卖出逐日按当时可见状态触发。后验收益、MFE/MAE 只作为报告标签，不进入信号评分。",
+    }
+
+
 def fixed_horizon_outcome_row(
     *,
     signal_date: date,
@@ -1138,6 +1348,509 @@ def _with_timeline_display_markers(row: dict[str, Any]) -> dict[str, Any]:
         display_markers.append("SELL_FILLED")
     item["display_markers"] = _dedupe_list(display_markers)
     return item
+
+
+def _is_executable_buy_candidate(row: dict[str, Any]) -> bool:
+    feature = candidate_feature_row(row) if not row.get("entry_action") else row
+    action = str(feature.get("entry_action") or feature.get("action") or "").upper()
+    return action == "BUY" or bool(feature.get("executable_entry_signal") and action in {"", "BUY"})
+
+
+def _candidate_trading_day_gap(left: date, right: date, date_index: dict[date, int]) -> int:
+    left_index = date_index.get(left)
+    right_index = date_index.get(right)
+    if left_index is None or right_index is None:
+        return max((right - left).days, 0)
+    return max(right_index - left_index, 0)
+
+
+def _candidate_cluster(symbol: str, rows: list[dict[str, Any]]) -> CandidateCluster:
+    dates = [_date_or_none(row.get("_cluster_trade_date") or row.get("trade_date") or row.get("signal_date")) for row in rows]
+    valid_dates = [day for day in dates if day is not None]
+    cleaned_rows = []
+    for row in rows:
+        item = dict(row)
+        item.pop("_cluster_trade_date", None)
+        cleaned_rows.append(item)
+    return CandidateCluster(
+        vt_symbol=symbol,
+        rows=tuple(cleaned_rows),
+        cluster_start_date=min(valid_dates),
+        cluster_end_date=max(valid_dates),
+        entry_row=_select_first_visible_candidate_entry(cleaned_rows),
+    )
+
+
+def _select_first_visible_candidate_entry(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return min(
+        rows,
+        key=lambda row: (
+            _date_or_none(row.get("trade_date") or row.get("signal_date")) or date.max,
+            _int_or_none(row.get("rank")) or 10**9,
+            str(row.get("vt_symbol") or ""),
+        ),
+    )
+
+
+def _select_candidate_cluster_preferred_entry_for_audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    def key(row: dict[str, Any]) -> tuple[int, float, date]:
+        evidence = _candidate_evidence(row)
+        launch_confirmed = bool(
+            row.get("launch_confirmed")
+            or row.get("first_effective_lift")
+            or evidence.get("low_suction_launch_confirmed")
+            or evidence.get("first_effective_lift")
+        )
+        return (
+            1 if launch_confirmed else 0,
+            _float_or_none(row.get("total_score") or row.get("score") or evidence.get("total_score")) or -10**9,
+            _date_or_none(row.get("trade_date") or row.get("signal_date")) or date.min,
+        )
+
+    return max(rows, key=key)
+
+
+def _candidate_independent_position(cluster: CandidateCluster, entry_bar: Bar, entry_price: float) -> Position:
+    evidence = _candidate_evidence(cluster.entry_row)
+    return Position(
+        vt_symbol=cluster.vt_symbol,
+        name=cluster.entry_row.get("name"),
+        volume=100,
+        cost_price=entry_price,
+        entry_date=entry_bar.trade_date,
+        highest_price=float(entry_bar.high_price),
+        lowest_price=float(entry_bar.low_price),
+        reason={**evidence, "execution": {"mode": "candidate_quality_next_open", "price_source": "stock_daily_bars.open_price"}},
+        last_price=float(entry_bar.close_price),
+    )
+
+
+def _independent_trade_missing(
+    cluster: CandidateCluster,
+    signal_date: date,
+    status: str,
+    *,
+    execute_date: date | None = None,
+) -> IndependentTradeResult:
+    return IndependentTradeResult(
+        status=status,
+        cluster=cluster,
+        entry_signal_date=signal_date,
+        entry_execute_date=execute_date,
+        entry_price=None,
+        exit_signal_date=None,
+        exit_execute_date=None,
+        exit_price=None,
+        return_pct=None,
+        max_drawdown_pct=None,
+        max_runup_pct=None,
+        holding_days=None,
+        exit_reason=status,
+    )
+
+
+def _independent_trade_closed_result(
+    cluster: CandidateCluster,
+    *,
+    signal_date: date,
+    entry_execute_date: date,
+    entry_price: float,
+    exit_signal_date: date,
+    exit_execute_date: date,
+    exit_price: float,
+    exit_reason: str,
+    window: list[Bar],
+) -> IndependentTradeResult:
+    return IndependentTradeResult(
+        status="closed",
+        cluster=cluster,
+        entry_signal_date=signal_date,
+        entry_execute_date=entry_execute_date,
+        entry_price=round(entry_price, 4),
+        exit_signal_date=exit_signal_date,
+        exit_execute_date=exit_execute_date,
+        exit_price=round(exit_price, 4),
+        return_pct=_pct_return(exit_price, entry_price),
+        max_drawdown_pct=_window_mae(window, entry_price),
+        max_runup_pct=_window_mfe(window, entry_price),
+        holding_days=max(len(window) - 1, 0),
+        exit_reason=exit_reason,
+    )
+
+
+def _independent_trade_open_result(
+    cluster: CandidateCluster,
+    signal_date: date,
+    entry_execute_date: date,
+    entry_price: float,
+    window: list[Bar],
+) -> IndependentTradeResult:
+    last_bar = window[-1] if window else None
+    exit_price = float(last_bar.close_price) if last_bar else None
+    return IndependentTradeResult(
+        status="open",
+        cluster=cluster,
+        entry_signal_date=signal_date,
+        entry_execute_date=entry_execute_date,
+        entry_price=round(entry_price, 4),
+        exit_signal_date=None,
+        exit_execute_date=None,
+        exit_price=round(exit_price, 4) if exit_price is not None else None,
+        return_pct=_pct_return(exit_price, entry_price) if exit_price is not None else None,
+        max_drawdown_pct=_window_mae(window, entry_price),
+        max_runup_pct=_window_mfe(window, entry_price),
+        holding_days=max(len(window) - 1, 0) if window else 0,
+        exit_reason="open",
+    )
+
+
+def _candidate_trade_sample(result: IndependentTradeResult) -> dict[str, Any]:
+    cluster = result.cluster
+    entry = cluster.entry_row
+    evidence = _candidate_evidence(entry)
+    preferred_entry = _select_candidate_cluster_preferred_entry_for_audit(list(cluster.rows))
+    preferred_evidence = _candidate_evidence(preferred_entry)
+    rank = _int_or_none(entry.get("rank"))
+    score = _float_or_none(entry.get("total_score") or entry.get("score") or evidence.get("total_score"))
+    setup_family = _candidate_setup_family(entry, evidence)
+    market_phase = _candidate_market_phase(entry, evidence)
+    payload = {
+        "status": result.status,
+        "vt_symbol": cluster.vt_symbol,
+        "name": entry.get("name"),
+        "rank": rank,
+        "score": score,
+        "rank_bucket": _candidate_trade_rank_bucket(rank),
+        "daily_rank_window": _candidate_trade_rank_window(rank),
+        "score_bucket": _candidate_trade_score_bucket(score),
+        "setup_family": setup_family,
+        "setup_family_label": _candidate_setup_family_label(setup_family),
+        "market_phase": market_phase,
+        "market_phase_label": _candidate_market_phase_label(market_phase),
+        "entry_signal_date": _date_to_iso(result.entry_signal_date),
+        "entry_execute_date": _date_to_iso(result.entry_execute_date),
+        "entry_price": result.entry_price,
+        "exit_signal_date": _date_to_iso(result.exit_signal_date),
+        "exit_execute_date": _date_to_iso(result.exit_execute_date),
+        "exit_price": result.exit_price,
+        "return_pct": result.return_pct,
+        "max_drawdown_pct": result.max_drawdown_pct,
+        "max_runup_pct": result.max_runup_pct,
+        "holding_days": result.holding_days,
+        "exit_reason": result.exit_reason,
+        "cluster_start_date": _date_to_iso(cluster.cluster_start_date),
+        "cluster_end_date": _date_to_iso(cluster.cluster_end_date),
+        "cluster_size": len(cluster.rows),
+        "entry_selection": "first_visible_buy",
+        "cluster_preferred_entry_signal_date_for_audit": _date_to_iso(preferred_entry.get("trade_date") or preferred_entry.get("signal_date")),
+        "cluster_preferred_entry_score_for_audit": _float_or_none(
+            preferred_entry.get("total_score")
+            or preferred_entry.get("score")
+            or preferred_evidence.get("total_score")
+        ),
+        "cluster_preferred_entry_not_used_for_trade": preferred_entry is not entry,
+        "entry_reason": evidence,
+        "uses_future_for_label_only": True,
+        "not_used_for_signal_score": True,
+    }
+    payload.update(stock_board_payload(cluster.vt_symbol, entry.get("exchange")))
+    return payload
+
+
+def _candidate_trade_group_metrics(
+    rows: list[dict[str, Any]],
+    key: str,
+    order: dict[str, int] | None = None,
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(str(row.get(key) or "unknown"), []).append(row)
+    result = []
+    for bucket, bucket_rows in groups.items():
+        result.append({key: bucket, "label": _candidate_trade_bucket_label(key, bucket), **_candidate_trade_metric_summary(bucket_rows)})
+    result.sort(key=lambda item: ((order or {}).get(str(item.get(key) or ""), 10**6), -int(item.get("sample_count") or 0), str(item.get(key) or "")))
+    return result
+
+
+def _candidate_trade_rank_limit_metrics(rows: list[dict[str, Any]], *, rank_cutoff: int) -> list[dict[str, Any]]:
+    result = []
+    for limit in (10, 20, 50, 100):
+        if limit > rank_cutoff:
+            continue
+        bucket_rows = [row for row in rows if (_int_or_none(row.get("rank")) or 10**9) <= limit]
+        if not bucket_rows:
+            continue
+        result.append(
+            {
+                "rank_limit": limit,
+                "label": f"每日Top{limit}",
+                **_candidate_trade_metric_summary(bucket_rows),
+            }
+        )
+    if rank_cutoff not in {10, 20, 50, 100}:
+        bucket_rows = [row for row in rows if (_int_or_none(row.get("rank")) or 10**9) <= rank_cutoff]
+        if bucket_rows:
+            result.append(
+                {
+                    "rank_limit": rank_cutoff,
+                    "label": f"每日Top{rank_cutoff}",
+                    **_candidate_trade_metric_summary(bucket_rows),
+                }
+            )
+    return result
+
+
+def _candidate_trade_daily_summaries(rows: list[dict[str, Any]], *, rank_cutoff: int, limit: int = 60) -> list[dict[str, Any]]:
+    by_date: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        signal_date = str(row.get("entry_signal_date") or "")
+        if signal_date:
+            by_date.setdefault(signal_date, []).append(row)
+
+    summaries = []
+    for signal_date, date_rows in by_date.items():
+        evaluated = [
+            row
+            for row in date_rows
+            if row.get("status") in {"closed", "open"} and _float_or_none(row.get("return_pct")) is not None
+        ]
+        if not evaluated:
+            continue
+        top10_rows = [row for row in evaluated if (_int_or_none(row.get("rank")) or 10**9) <= 10]
+        top20_rows = [row for row in evaluated if (_int_or_none(row.get("rank")) or 10**9) <= 20]
+        topn_rows = [row for row in evaluated if (_int_or_none(row.get("rank")) or 10**9) <= rank_cutoff]
+        summaries.append(
+            {
+                "entry_signal_date": signal_date,
+                "candidate_count": len(date_rows),
+                "evaluated_count": len(evaluated),
+                "missing_count": len(date_rows) - len(evaluated),
+                "top10": _candidate_trade_metric_summary(top10_rows),
+                "top20": _candidate_trade_metric_summary(top20_rows),
+                "topn": _candidate_trade_metric_summary(topn_rows),
+                "best_candidate": _candidate_trade_daily_extreme(evaluated, reverse=True),
+                "worst_candidate": _candidate_trade_daily_extreme(evaluated, reverse=False),
+            }
+        )
+    summaries.sort(key=lambda item: str(item.get("entry_signal_date") or ""), reverse=True)
+    return summaries[: max(int(limit or 60), 1)]
+
+
+def _candidate_trade_daily_extreme(rows: list[dict[str, Any]], *, reverse: bool) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    row = sorted(
+        rows,
+        key=lambda item: (
+            _sort_float(item.get("return_pct")),
+            -(_int_or_none(item.get("rank")) or 10**9),
+            str(item.get("vt_symbol") or ""),
+        ),
+        reverse=reverse,
+    )[0]
+    return {
+        "vt_symbol": row.get("vt_symbol"),
+        "name": row.get("name"),
+        "rank": row.get("rank"),
+        "score": row.get("score"),
+        "return_pct": row.get("return_pct"),
+        "exit_reason": row.get("exit_reason"),
+    }
+
+
+def _candidate_trade_metric_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    returns = [value for row in rows if (value := _float_or_none(row.get("return_pct"))) is not None]
+    drawdowns = [value for row in rows if (value := _float_or_none(row.get("max_drawdown_pct"))) is not None]
+    runups = [value for row in rows if (value := _float_or_none(row.get("max_runup_pct"))) is not None]
+    holding_days = [value for row in rows if (value := _float_or_none(row.get("holding_days"))) is not None]
+    wins = [value for value in returns if value > 0]
+    return {
+        "sample_count": len(rows),
+        "evaluated_count": len(returns),
+        "win_count": len(wins),
+        "win_rate": _ratio_pct(len(wins), len(returns)),
+        "average_return_pct": round(sum(returns) / len(returns), 4) if returns else None,
+        "median_return_pct": round(median(returns), 4) if returns else None,
+        "average_max_drawdown_pct": round(sum(drawdowns) / len(drawdowns), 4) if drawdowns else None,
+        "average_max_runup_pct": round(sum(runups) / len(runups), 4) if runups else None,
+        "average_holding_days": round(sum(holding_days) / len(holding_days), 4) if holding_days else None,
+    }
+
+
+def _candidate_trade_rank_bucket(rank: int | None) -> str:
+    if rank is None or rank <= 0:
+        return "outside_top_100"
+    if rank <= 10:
+        return "top_10"
+    if rank <= 20:
+        return "top_20"
+    if rank <= 50:
+        return "top_50"
+    if rank <= 100:
+        return "top_100"
+    return "outside_top_100"
+
+
+def _candidate_trade_rank_window(rank: int | None) -> str:
+    if rank is None or rank <= 0:
+        return "outside_top_100"
+    if rank <= 10:
+        return "rank_1_10"
+    if rank <= 20:
+        return "rank_11_20"
+    if rank <= 50:
+        return "rank_21_50"
+    if rank <= 100:
+        return "rank_51_100"
+    return "outside_top_100"
+
+
+def _candidate_trade_score_bucket(score: float | None) -> str:
+    if score is None:
+        return "unknown"
+    if score < 75:
+        return "<75"
+    if score < 80:
+        return "75-80"
+    if score < 90:
+        return "80-90"
+    if score < 95:
+        return "90-95"
+    return "95+"
+
+
+def _candidate_setup_family(row: dict[str, Any], evidence: dict[str, Any]) -> str:
+    setup = str(row.get("setup_family") or row.get("entry_family") or row.get("setup_primary") or evidence.get("setup_family") or evidence.get("entry_family") or evidence.get("entry_setup") or "")
+    low_days = _float_or_none(row.get("low_suction_days") or evidence.get("low_suction_days")) or 0.0
+    launch_confirmed = bool(row.get("launch_confirmed") or evidence.get("low_suction_launch_confirmed") or row.get("first_effective_lift") or evidence.get("first_effective_lift"))
+    if setup in {"dragon_low_suction_overlap"}:
+        return "dragon_low_suction_overlap"
+    if setup == "dragon_pullback" and low_days >= 3:
+        return "dragon_low_suction_overlap"
+    if setup in {"stealth_low_suction", "low_position_reclaim", "low_suction_first_lift", "low_suction_buildup"} or low_days >= 3:
+        return "low_suction_first_lift" if launch_confirmed else "low_suction_buildup"
+    if setup == "dragon_pullback":
+        return "dragon_pullback"
+    return setup or "other"
+
+
+def _candidate_market_phase(row: dict[str, Any], evidence: dict[str, Any]) -> str:
+    phase = str(row.get("market_phase") or evidence.get("market_phase") or "").strip()
+    if phase:
+        return phase
+    regime = str(row.get("dynamic_market_regime") or evidence.get("dynamic_market_regime") or "").strip()
+    warning = _float_or_none(row.get("market_warning_level") or evidence.get("market_warning_level"))
+    recovery = str(row.get("recovery_state") or evidence.get("recovery_state") or "").strip()
+    if regime in {"strong_broad", "narrow_mainline_bull", "mainline_active", "mainline_pullback"}:
+        return "uptrend"
+    if warning is not None and warning >= 3:
+        return "retreat"
+    if regime in {"risk_off", "weak_breadth", "false_bull"}:
+        return "retreat"
+    if recovery in {"warming", "recovering"} or regime in {"warming", "recovery"}:
+        return "warming"
+    if regime:
+        return "rotation"
+    return "unknown"
+
+
+def _candidate_setup_family_label(value: str) -> str:
+    labels = {
+        "low_suction_first_lift": "低吸首启",
+        "dragon_pullback": "龙回头",
+        "low_suction_buildup": "低吸蓄势",
+        "dragon_low_suction_overlap": "重叠信号",
+        "other": "其他",
+        "unknown": "其他",
+    }
+    return labels.get(str(value or "unknown"), str(value or "其他"))
+
+
+def _candidate_market_phase_label(value: str) -> str:
+    labels = {
+        "uptrend": "主升",
+        "rotation": "震荡",
+        "retreat": "退潮",
+        "warming": "回暖",
+        "unknown": "未知",
+    }
+    return labels.get(str(value or "unknown"), str(value or "未知"))
+
+
+def _candidate_trade_bucket_label(key: str, bucket: str) -> str:
+    if key == "rank_bucket":
+        return _candidate_trade_rank_bucket_label(bucket)
+    if key == "daily_rank_window":
+        return _candidate_trade_rank_window_label(bucket)
+    if key == "setup_family":
+        return _candidate_setup_family_label(bucket)
+    if key == "market_phase":
+        return _candidate_market_phase_label(bucket)
+    if key == "exit_reason":
+        return bucket
+    return bucket
+
+
+def _candidate_trade_rank_bucket_label(bucket: str) -> str:
+    labels = {
+        "top_10": "排名1-10",
+        "top_20": "排名11-20",
+        "top_50": "排名21-50",
+        "top_100": "排名51-100",
+        "outside_top_100": "100名外",
+    }
+    return labels.get(bucket, bucket)
+
+
+def _candidate_trade_rank_window_label(bucket: str) -> str:
+    labels = {
+        "rank_1_10": "排名1-10",
+        "rank_11_20": "排名11-20",
+        "rank_21_50": "排名21-50",
+        "rank_51_100": "排名51-100",
+        "outside_top_100": "100名外",
+    }
+    return labels.get(bucket, bucket)
+
+
+def _window_mfe(window: list[Bar], base: float) -> float | None:
+    if not window:
+        return None
+    return _pct_return(max(float(bar.high_price) for bar in window), base)
+
+
+def _window_mae(window: list[Bar], base: float) -> float | None:
+    if not window:
+        return None
+    return _pct_return(min(float(bar.low_price) for bar in window), base)
+
+
+_candidate_trade_rank_bucket_order = {
+    "top_10": 10,
+    "top_20": 20,
+    "top_50": 50,
+    "top_100": 100,
+    "outside_top_100": 1000,
+}
+
+
+_candidate_trade_rank_window_order = {
+    "rank_1_10": 10,
+    "rank_11_20": 20,
+    "rank_21_50": 50,
+    "rank_51_100": 100,
+    "outside_top_100": 1000,
+}
+
+
+_candidate_trade_score_bucket_order = {
+    "<75": 0,
+    "75-80": 10,
+    "80-90": 20,
+    "90-95": 30,
+    "95+": 40,
+    "unknown": 1000,
+}
 
 
 def _timeline_buildup_cluster_row(rows: list[dict[str, Any]]) -> dict[str, Any]:

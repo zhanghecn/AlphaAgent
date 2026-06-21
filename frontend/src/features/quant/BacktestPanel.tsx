@@ -5,9 +5,11 @@ import type { BacktestRun, QuantStrategyOption } from "@/api/quant";
 import {
   backtestReportCsvUrl,
   fetchBacktestAudit,
+  fetchBacktestCandidateTradeQualityReport,
   fetchBacktestDataQuality,
   fetchBacktestFactorAudit,
   fetchBacktestPhaseStrategyFamilyMatrix,
+  fetchBacktestPerformanceAttributionReport,
   fetchBacktestReplacementQualityMatrix,
   fetchBacktestReport,
   fetchBacktestRotationOpportunityCostMatrix,
@@ -36,6 +38,8 @@ import {
 import { BacktestDrilldownPanel } from "@/features/quant/BacktestDrilldownPanel";
 import { BacktestDataQualityPanel } from "@/features/quant/BacktestDataQualityPanel";
 import {
+  CandidateTradeQualityPanel,
+  BacktestPerformanceAttributionPanel,
   BacktestDataAsOfAuditPanel,
   BacktestMarketAuditPanel,
   BacktestRealityStats,
@@ -77,55 +81,69 @@ export function BacktestPanel({
   onAddToPortfolio?: (vtSymbol: string) => void;
 }) {
   const selectedRun = runs.find((item) => item.id === selectedId) ?? runs[0] ?? null;
-  const [activeDetailTab, setActiveDetailTab] = useState("trades");
+  const [activeDetailTab, setActiveDetailTab] = useState("months");
   const shouldLoadValidation = Boolean(selectedId && activeDetailTab === "validation");
+  const shouldLoadCandidateQuality = Boolean(selectedId && activeDetailTab === "candidate-quality");
+  const shouldLoadPerformanceAttribution = Boolean(selectedId && activeDetailTab === "trades");
   const marketAuditReportQuery = useQuery({
     queryKey: ["backtestReport", selectedId, "market-audit"],
     queryFn: () => fetchBacktestReport(selectedId!, 80, { includeAnalysis: true }),
-    enabled: Boolean(selectedId),
+    enabled: shouldLoadValidation,
     staleTime: 60_000,
   });
   const marketAuditReport = marketAuditReportQuery.data ?? report;
   const topCandidateAuditQuery = useQuery({
     queryKey: ["backtestTopCandidateAudit", selectedId, 10],
     queryFn: () => fetchBacktestTopCandidateAudit(selectedId!, 10),
-    enabled: Boolean(selectedId),
+    enabled: shouldLoadValidation,
     staleTime: 60_000,
   });
   const factorAuditQuery = useQuery({
     queryKey: ["backtestFactorAudit", selectedId, 100],
     queryFn: () => fetchBacktestFactorAudit(selectedId!, 100),
-    enabled: Boolean(selectedId),
+    enabled: shouldLoadValidation,
+    staleTime: 60_000,
+  });
+  const candidateTradeQualityQuery = useQuery({
+    queryKey: ["backtestCandidateTradeQualityReport", selectedId, 100, 500],
+    queryFn: () => fetchBacktestCandidateTradeQualityReport(selectedId!, { rankLimit: 100, sampleLimit: 500 }),
+    enabled: shouldLoadCandidateQuality,
+    staleTime: 60_000,
+  });
+  const performanceAttributionQuery = useQuery({
+    queryKey: ["backtestPerformanceAttributionReport", selectedId, 20],
+    queryFn: () => fetchBacktestPerformanceAttributionReport(selectedId!, { sampleLimit: 20 }),
+    enabled: shouldLoadPerformanceAttribution,
     staleTime: 60_000,
   });
   const setupMarketExitAuditQuery = useQuery({
     queryKey: ["backtestSetupMarketExitAudit", selectedId, 10],
     queryFn: () => fetchBacktestSetupMarketExitAudit(selectedId!, 10),
-    enabled: Boolean(selectedId),
+    enabled: shouldLoadValidation,
     staleTime: 60_000,
   });
   const phaseStrategyFamilyMatrixQuery = useQuery({
     queryKey: ["backtestPhaseStrategyFamilyMatrix", selectedId, "10,20,100"],
     queryFn: () => fetchBacktestPhaseStrategyFamilyMatrix(selectedId!, [10, 20, 100]),
-    enabled: Boolean(selectedId),
+    enabled: shouldLoadValidation,
     staleTime: 60_000,
   });
   const replacementQualityMatrixQuery = useQuery({
     queryKey: ["backtestReplacementQualityMatrix", selectedId, 80],
     queryFn: () => fetchBacktestReplacementQualityMatrix(selectedId!, 80),
-    enabled: Boolean(selectedId),
+    enabled: shouldLoadValidation,
     staleTime: 60_000,
   });
   const rotationOpportunityCostMatrixQuery = useQuery({
     queryKey: ["backtestRotationOpportunityCostMatrix", selectedId, 20, 80, 20],
     queryFn: () => fetchBacktestRotationOpportunityCostMatrix(selectedId!, 20, 80, 20),
-    enabled: Boolean(selectedId),
+    enabled: shouldLoadValidation,
     staleTime: 60_000,
   });
   const trendWinnerProtectionMatrixQuery = useQuery({
     queryKey: ["backtestTrendWinnerProtectionMatrix", selectedId, 20, 80, 20],
     queryFn: () => fetchBacktestTrendWinnerProtectionMatrix(selectedId!, 20, 80, 20),
-    enabled: Boolean(selectedId),
+    enabled: shouldLoadValidation,
     staleTime: 60_000,
   });
   const validationReport = marketAuditReport;
@@ -206,23 +224,6 @@ export function BacktestPanel({
         ) : (
           <>
             <BacktestSummary report={report} audit={auditQuery.data} />
-            <BacktestMarketAuditPanel
-              report={marketAuditReport}
-              topCandidateAudit={topCandidateAuditQuery.data}
-              isTopCandidateAuditLoading={topCandidateAuditQuery.isFetching}
-              factorAudit={factorAuditQuery.data}
-              isFactorAuditLoading={factorAuditQuery.isFetching}
-              setupMarketExitAudit={setupMarketExitAuditQuery.data}
-              isSetupMarketExitAuditLoading={setupMarketExitAuditQuery.isFetching}
-              phaseStrategyFamilyMatrix={phaseStrategyFamilyMatrixQuery.data}
-              isPhaseStrategyFamilyMatrixLoading={phaseStrategyFamilyMatrixQuery.isFetching}
-              replacementQualityMatrix={replacementQualityMatrixQuery.data}
-              isReplacementQualityMatrixLoading={replacementQualityMatrixQuery.isFetching}
-              rotationOpportunityCostMatrix={rotationOpportunityCostMatrixQuery.data}
-              isRotationOpportunityCostMatrixLoading={rotationOpportunityCostMatrixQuery.isFetching}
-              trendWinnerProtectionMatrix={trendWinnerProtectionMatrixQuery.data}
-              isTrendWinnerProtectionMatrixLoading={trendWinnerProtectionMatrixQuery.isFetching}
-            />
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
               <section className="space-y-4">
                 <BacktestTradeTable backtestId={selectedId} trades={report.recent_trades ?? report.trades} total={report.trade_count} />
@@ -238,6 +239,7 @@ export function BacktestPanel({
               <TabsList className="h-auto rounded-none bg-transparent p-0">
                 <TabsTrigger value="validation" className="rounded-none px-3 py-2 shadow-none">验证</TabsTrigger>
                 <TabsTrigger value="trades" className="rounded-none px-3 py-2 shadow-none">交易归因</TabsTrigger>
+                <TabsTrigger value="candidate-quality" className="rounded-none px-3 py-2 shadow-none">候选质量</TabsTrigger>
                 <TabsTrigger value="months" className="rounded-none px-3 py-2 shadow-none">收益分段</TabsTrigger>
               </TabsList>
               <TabsContent value="validation" className="space-y-4">
@@ -247,6 +249,23 @@ export function BacktestPanel({
                     正在加载深度验证数据，回测收益和交易归因已可先查看。
                   </div>
                 )}
+                <BacktestMarketAuditPanel
+                  report={marketAuditReport}
+                  topCandidateAudit={topCandidateAuditQuery.data}
+                  isTopCandidateAuditLoading={topCandidateAuditQuery.isFetching}
+                  factorAudit={factorAuditQuery.data}
+                  isFactorAuditLoading={factorAuditQuery.isFetching}
+                  setupMarketExitAudit={setupMarketExitAuditQuery.data}
+                  isSetupMarketExitAuditLoading={setupMarketExitAuditQuery.isFetching}
+                  phaseStrategyFamilyMatrix={phaseStrategyFamilyMatrixQuery.data}
+                  isPhaseStrategyFamilyMatrixLoading={phaseStrategyFamilyMatrixQuery.isFetching}
+                  replacementQualityMatrix={replacementQualityMatrixQuery.data}
+                  isReplacementQualityMatrixLoading={replacementQualityMatrixQuery.isFetching}
+                  rotationOpportunityCostMatrix={rotationOpportunityCostMatrixQuery.data}
+                  isRotationOpportunityCostMatrixLoading={rotationOpportunityCostMatrixQuery.isFetching}
+                  trendWinnerProtectionMatrix={trendWinnerProtectionMatrixQuery.data}
+                  isTrendWinnerProtectionMatrixLoading={trendWinnerProtectionMatrixQuery.isFetching}
+                />
                 {validationReport?.data_as_of_audit && <BacktestDataAsOfAuditPanel audit={validationReport.data_as_of_audit} />}
                 {validationReport?.benchmark && <BacktestBenchmarkTable benchmarks={validationReport.benchmark.benchmarks} />}
                 {validationReport?.period_analysis && <BacktestPeriodTable analysis={validationReport.period_analysis} />}
@@ -268,9 +287,19 @@ export function BacktestPanel({
                 />
               </TabsContent>
               <TabsContent value="trades" className="space-y-4">
+                <BacktestPerformanceAttributionPanel
+                  report={performanceAttributionQuery.data}
+                  isLoading={performanceAttributionQuery.isFetching}
+                />
                 {selectedId && <BacktestDrilldownPanel backtestId={selectedId} report={report} />}
                 <BacktestSymbolTable rows={report.symbol_performance ?? []} onAddToPortfolio={onAddToPortfolio} />
                 <BacktestWorstTrades rows={report.worst_trades ?? []} />
+              </TabsContent>
+              <TabsContent value="candidate-quality" className="space-y-4">
+                <CandidateTradeQualityPanel
+                  report={candidateTradeQualityQuery.data}
+                  isLoading={candidateTradeQualityQuery.isFetching}
+                />
               </TabsContent>
               <TabsContent value="months">
                 <BacktestMonthlyTable rows={report.monthly_returns ?? []} />

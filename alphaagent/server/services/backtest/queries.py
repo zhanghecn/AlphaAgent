@@ -599,10 +599,10 @@ def backtest_market_phase_audit(
     closed_trades = _closed_trade_rows_by_entry_id([dict(row) for row in trade_rows])
     trade_items = _phase_audit_trade_rows(closed_trades.values())
     candidate_items = _phase_audit_candidate_rows([dict(row) for row in factor_rows])
-    if trade_items and not any(row.get("dynamic_market_regime") for row in trade_items):
+    if _needs_market_context_annotation(trade_items):
         with session_scope() as session:
             trade_items = market_context.annotate_rows_with_market_context(session, schema, trade_items, date_key="entry_date")
-    if candidate_items and not any(row.get("dynamic_market_regime") for row in candidate_items):
+    if _needs_market_context_annotation(candidate_items):
         with session_scope() as session:
             candidate_items = market_context.annotate_rows_with_market_context(session, schema, candidate_items, date_key="signal_date")
     summary = market_phase_strategy_audit_summary(trade_items, candidate_items, candidate_top_n=top_limit)
@@ -668,10 +668,10 @@ def backtest_phase_strategy_family_matrix(
     closed_trades = _closed_trade_rows_by_entry_id([dict(row) for row in trade_rows])
     trade_items = _phase_audit_trade_rows(closed_trades.values())
     candidate_items = _phase_audit_candidate_rows([dict(row) for row in factor_rows])
-    if trade_items and not any(row.get("dynamic_market_regime") for row in trade_items):
+    if _needs_market_context_annotation(trade_items):
         with session_scope() as session:
             trade_items = market_context.annotate_rows_with_market_context(session, schema, trade_items, date_key="entry_date")
-    if candidate_items and not any(row.get("dynamic_market_regime") for row in candidate_items):
+    if _needs_market_context_annotation(candidate_items):
         with session_scope() as session:
             candidate_items = market_context.annotate_rows_with_market_context(session, schema, candidate_items, date_key="signal_date")
     summary = phase_strategy_family_matrix_summary(
@@ -2510,8 +2510,8 @@ def market_phase_strategy_audit_summary(
     *,
     candidate_top_n: int = 20,
 ) -> dict[str, Any]:
-    enriched_trades = [_with_market_phase_fields(row) for row in trade_rows]
-    enriched_candidates = [_with_market_phase_fields(row) for row in candidate_rows]
+    enriched_trades = [_with_market_phase_fields(_with_nested_signal_evidence(row)) for row in trade_rows]
+    enriched_candidates = [_with_market_phase_fields(_with_nested_signal_evidence(row)) for row in candidate_rows]
     return {
         "method": "只读审计：交易结果按买入日行情四象限聚合；候选结果使用固定持有后验，只验证候选质量，不参与信号日交易。",
         "overall": _phase_trade_metric_summary(enriched_trades),
@@ -2535,8 +2535,8 @@ def phase_strategy_family_matrix_summary(
     """Return a stable phase x strategy-family matrix for product audit reports."""
 
     rank_limits = _normalized_candidate_rank_limits(candidate_rank_limits)
-    enriched_trades = [_with_market_phase_fields(row) for row in trade_rows]
-    enriched_candidates = [_with_market_phase_fields(row) for row in candidate_rows]
+    enriched_trades = [_with_market_phase_fields(_with_nested_signal_evidence(row)) for row in trade_rows]
+    enriched_candidates = [_with_market_phase_fields(_with_nested_signal_evidence(row)) for row in candidate_rows]
     candidate_matrices = []
     for limit in rank_limits:
         limited_candidates = [
@@ -4539,6 +4539,15 @@ def _with_market_phase_fields(row: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
+def _with_nested_signal_evidence(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
+    evidence = raw.get("evidence") if isinstance(raw.get("evidence"), dict) else {}
+    for key, value in evidence.items():
+        item.setdefault(key, value)
+    return item
+
+
 def market_phase_setup_family(row: dict[str, Any]) -> str:
     """Return the strategy-family bucket used by phase/family audits and experiments."""
 
@@ -4682,6 +4691,10 @@ def _normalized_candidate_rank_limits(values: list[int] | tuple[int, ...] | None
     raw_values = list(values or [10, 20, 100])
     limits = sorted({min(max(_safe_int(value, 20), 1), 100) for value in raw_values})
     return limits or [10, 20, 100]
+
+
+def _needs_market_context_annotation(rows: list[dict[str, Any]]) -> bool:
+    return bool(rows) and any(not row.get("dynamic_market_regime") for row in rows)
 
 
 def _phase_strategy_family_interpretation(

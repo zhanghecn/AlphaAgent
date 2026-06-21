@@ -118,6 +118,7 @@ class BacktestParams:
     persist: bool = False
     symbols: list[str] | None = None
     included_boards: tuple[str, ...] = DEFAULT_QUANT_INCLUDED_BOARDS
+    reuse_signal_cache: bool = False
 
     def __post_init__(self) -> None:
         self.included_boards = normalize_included_boards(self.included_boards)

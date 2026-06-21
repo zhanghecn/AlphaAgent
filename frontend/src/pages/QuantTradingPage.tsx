@@ -133,8 +133,8 @@ export function QuantTradingPage() {
   const activeBacktestId = selectedBacktest?.id ?? backtestRuns[0]?.id ?? null;
   const shouldLoadBacktestReport = activeTab === "backtest";
   const reportQuery = useQuery({
-    queryKey: ["backtestReport", activeBacktestId, "analysis"],
-    queryFn: () => fetchBacktestReport(activeBacktestId!, 80, { includeAnalysis: true }),
+    queryKey: ["backtestReport", activeBacktestId, "summary"],
+    queryFn: () => fetchBacktestReport(activeBacktestId!, 80),
     enabled: Boolean(activeBacktestId && shouldLoadBacktestReport),
     staleTime: 20_000,
   });
