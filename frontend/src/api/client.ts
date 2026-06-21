@@ -157,3 +157,21 @@ export async function plainGet<T>(path: string): Promise<T> {
   }
   return res.json() as Promise<T>;
 }
+
+/**
+ * Authenticated fetch — injects the JWT Authorization header via
+ * buildHeaders and applies 401 handling. Use for non-{success,data}
+ * responses (CSV/text downloads) that still require login. Returns the
+ * raw Response so the caller controls .text()/.json().
+ */
+export async function authFetch(path: string, init?: RequestInit): Promise<Response> {
+  const url = `${BASE_URL}${path}`;
+  const res = await fetch(url, {
+    ...init,
+    headers: buildHeaders(init?.headers),
+  });
+  if (res.status === 401 && !isPublicApiPath(path)) {
+    handleUnauthorized(url);
+  }
+  return res;
+}

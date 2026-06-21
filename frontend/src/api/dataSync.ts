@@ -1,4 +1,4 @@
-import { apiClient, apiUrl, authToken } from "./client";
+import { apiClient, authFetch } from "./client";
 import type { SyncCoverage } from "./types";
 
 /** Backend returns plain arrays for these endpoints, not {items, total} wrappers. */
@@ -67,13 +67,7 @@ export function runSyncSchedule(id: string) {
 }
 
 export async function fetchLatestSyncBatch() {
-  const token = authToken.get();
-  const response = await fetch(apiUrl("/data-sync/batches/latest"), {
-    headers: {
-      Accept: "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-  });
+  const response = await authFetch("/data-sync/batches/latest");
   if (!response.ok) {
     throw new Error(`请求失败: ${response.status} ${response.statusText}`);
   }
@@ -169,9 +163,9 @@ export async function fetchMinuteGapVendorManifestCsv(payload: {
   tail_entry_start?: string;
   tail_entry_end?: string;
 }) {
-  const response = await fetch(apiUrl("/data-sync/imports/minute-bars/vendor-manifest.csv"), {
+  const response = await authFetch("/data-sync/imports/minute-bars/vendor-manifest.csv", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "text/csv" },
+    headers: { Accept: "text/csv" },
     body: JSON.stringify(payload),
   });
   if (!response.ok) {
@@ -185,9 +179,9 @@ export async function fetchMinuteGapImportTemplate(payload: {
   gap_csv_text?: string;
   sample_limit?: number;
 }) {
-  const response = await fetch(apiUrl("/data-sync/imports/minute-bars/gap-template.csv"), {
+  const response = await authFetch("/data-sync/imports/minute-bars/gap-template.csv", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "text/csv" },
+    headers: { Accept: "text/csv" },
     body: JSON.stringify(payload),
   });
   if (!response.ok) {
