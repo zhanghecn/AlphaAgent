@@ -1,4 +1,4 @@
-import { apiClient, apiUrl } from "./client";
+import { apiClient, apiUrl, authToken } from "./client";
 import type { SyncCoverage } from "./types";
 
 /** Backend returns plain arrays for these endpoints, not {items, total} wrappers. */
@@ -67,8 +67,12 @@ export function runSyncSchedule(id: string) {
 }
 
 export async function fetchLatestSyncBatch() {
+  const token = authToken.get();
   const response = await fetch(apiUrl("/data-sync/batches/latest"), {
-    headers: { Accept: "application/json" },
+    headers: {
+      Accept: "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
   });
   if (!response.ok) {
     throw new Error(`请求失败: ${response.status} ${response.statusText}`);
