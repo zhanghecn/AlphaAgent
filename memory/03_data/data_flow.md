@@ -137,6 +137,37 @@ vn.py 中数据需要分清四类：
 - 前端「定时计划」区需 rebuild `alphaagent-web` 容器才能看到（`docker compose up -d --build alphaagent-web`）。
 - AkShare 当日分钟线依赖数据源更新（交易时段 14:00 有当日，盘外无）。
 
+## 数据健康仪表盘 + 推荐同步（基于数据更新节奏）
+
+2026-06-21 起，`/data` 默认首页从「尾盘准备」改为「数据健康」仪表盘，解决三个痛点：发版后空库不知从何下手、财报更新不知要同步、定时都是死时间。
+
+- 给 22 个同步任务打静态「更新节奏」标签（不入库、免迁移）：`intraday` 盘中实时 / `eod_daily` 盘后日K / `quarterly` 财报披露季(1/4/7/10月) / `lhb` 龙虎榜18:00后 / `irregular` 低频（板块清单/申万行业/供应链）。
+- `data_health()` 合并 `coverage()` + `tail_workflow_status()` + 节奏 + 本地 `stock_daily_bars.MAX(trade_date)` 反推的最新交易日，对每个任务算 `is_stale/severity/reason`，再汇总整体健康度（green/yellow/red）+ 推荐同步清单（只含"现在跑有意义"的任务，按依赖优先级排序）。
+- 判定要点：季报非披露季不进推荐（避免 6 月误报"财务落后"）；龙虎榜盘中（now<18）容忍本地停在上一交易日（跨周末最多 3 天），盘后才要求当日；eod_daily 对齐最新交易日，落后≥1 天算 stale。
+- 空库（`stocks`/`stock_daily_bars` 两表 count=0）→ overall=red + 醒目空库引导卡 + 「一键核心初始化」(profile=core)。
+- 前端 `/data` 默认 `health` tab；尾盘/状态/源 tab 保留不动。推荐同步和单任务同步都是手动触发，不自动跑。
+
+API：
+
+- `GET /api/data-sync/health` → `data_health()`。
+- `POST /api/data-sync/batches/run-all` 新增透传 `job_ids`（推荐同步一键全部用；`start_sync_batch` 收到 job_ids 时 profile 自动变 `custom`，已有「上游失败跳下游」保护）。
+
+关键源码：
+
+- `alphaagent/server/services/data_sync.py`：`JOB_CADENCES`/`JobCadence`/`CATEGORY_*`（节奏元数据）、`data_health()`、`_resolve_latest_trade_date`、`_evaluate_job_staleness`、`_is_disclosure_season`、`_is_empty_database`、`_compute_recommended_jobs`。
+- `alphaagent/server/api/data_sync.py`：`/health` 端点、`run_all` 透传 `job_ids`。
+- `frontend/src/api/dataSync.ts`：`DataHealth`/`DataHealthCategory`/`DataHealthJob` 类型 + `fetchDataHealth()` + `runAllSyncJobs` 加 `job_ids`。
+- `frontend/src/pages/DataManagementHealthTab.tsx`（新建）：健康仪表盘，复用 `DataManagementPage` 的 `BatchProgress`/`RunStatusBadge`/`SummaryCard`/`DataNotice`（已 export）。
+- `frontend/src/pages/DataManagementPage.tsx`：tab 前置 `health` 默认。
+
+验证：`uv run python -c "from alphaagent.server.services.data_sync import data_health; print(data_health()['overall'])"`（空库返回 health=red/bootstrap.needed=True）；`pnpm -C frontend exec tsc -b`（0 错误）；`pnpm -C frontend build`（通过）。后端改了需重启 API 服务前端 dev 热更新或 rebuild。
+
+已知边界 / 后续可做：
+
+- 最新交易日用本地 `stock_daily_bars.MAX(trade_date)` 反推（最可靠），未接 akshare 交易日历；空库时退化为按 staleness_days 兜底，不阻塞。
+- 手动执行为主；「统一晚上自动跑推荐项」留作后续可选增强（19:00 action=recommended_sync 档）。
+- 共表任务（financial_quarterly/indicators 都写 stock_financial_reports）首版共用 `MAX(updated_at)` 粗粒度判定。
+
 ## AlphaAgent 量化/回测核查路径
 
 当前 `/quant` 候选和回测核查不走 vn.py Datafeed，而是使用 AlphaAgent PostgreSQL 业务表：
@@ -170,12 +201,12 @@ vn.py 中数据需要分清四类：
 - 本地日线交易日范围：`2025-03-26` 至 `2026-06-16`；`2026-06-16` 本地日线覆盖约 `1302` 只股票，低于正常全市场覆盖。
 - 当前公开策略代码为 `mainline_dragon_pullback / 0.1.21`，低吸洗盘和经典龙回头是同一公开策略下的内部 setup；主要字段包括 `setup_type`、`entry_setup`、`low_suction_days`、`support_hold_days`、`ma_convergence_pct`、`low_suction_buildup_score`、`stealth_low_suction_score`、`low_suction_launch_confirmed`、`score_notes` 和 `score_breakdown`。
 - 候选默认只展示前 `20` 个推荐；组合执行按默认最大持仓 `10`、BUY 候选前 `20` 做模拟买卖。候选、自动回测和成交追踪是内部链路，不再作为多个用户主操作拆开理解。
-- 候选、股票详情、量化候选分组和组合执行 action 使用同一可执行入场口径：`entry_signal` 是原始诊断字段，只有 `executable_entry_signal=true` / `action=BUY` 才展示为 BUY、计入 BUY 次数并进入买入计划；硬信号低于 `min_entry_score` 或有失败规则时展示 `WATCH`。回测缓存和全局买卖记录也不再直接把原始 `entry_signal=true` 当作可买入。
+- 候选、股票详情、量化候选分组和组合执行 action 使用同一可执行入场口径：`entry_signal` 是原始诊断字段，只有 `executable_entry_signal=true` / `action=BUY` 才展示为 BUY、计入 BUY 次数并进入买入计划；硬信号低于 `min_entry_score` 或有失败规则时展示 `WATCH`。默认产品口径下，低吸蓄势未确认启动是质量/阶段标签，不是硬拒买；只有显式开启 `require_low_suction_launch_confirmation` 研究开关时才作为拒买规则。回测缓存和全局买卖记录也不再直接把原始 `entry_signal=true` 当作可买入。
 - `/quant` 候选表直接显示“为什么这个分数”，并通过 `score_notes` / `score_breakdown` 解释总分来源、低吸蓄势加分和失败规则；候选行明确写出“总分按分项贡献相加后扣风险”，并优先露出“低吸蓄势”贡献，避免用户把连续低吸理解成额外策略或额外页面。
 - `/quant` 普通视图只保留“候选/回测”两个入口；运行状态只显示覆盖区间、完成进度、最新候选数和自动回测编号，不展示“新生成/跳过/同步”等内部流水账。回测页首屏读取轻量报告并默认打开“交易归因”，用户打开“验证”子 tab 后才加载完整分析和数据质量审计，避免因为重分析耗时误判为“没数据”。
 - `/quant` 回测页普通子入口只保留“验证 / 交易归因 / 收益分段”；全股票理论信号计划不再作为普通 tab 暴露。候选行的“回测成交”追踪和股票详情 K 线仍会使用同一底层信号/订单数据解释买入、拒单和卖出。
 - `/stocks/:vtSymbol` 在“策略复盘”里固定显示“为什么这个分数”，即使该票在最新组合回测里已有实际成交，也能看到评分日、总分、状态、低吸蓄势天数、均线收敛、低吸蓄势分、评分构成，以及“低吸蓄势是同一回踩低吸策略里的连续加分”的解释。
-- 东山精密 `002384.SZSE` 在当前产品基线 `#175 / 0.1.21` 中修复了 `2026-03-27` 至 `2026-04-01` 低吸段：低吸天数从 `1/2/3/4` 累计，`2026-04-01` 为可执行 `stealth_low_suction` BUY，`low_suction_launch_confirmed=true`；组合候选追踪显示它进入执行池第 `7` 名，但执行日满仓 `10/10` 且未触发换仓，所以没有真实订单。
+- 东山精密 `002384.SZSE` 在当前产品基线 `#175 / 0.1.21` 中修复了 `2026-03-27` 至 `2026-04-01` 低吸段：低吸天数从 `1/2/3/4` 累计，`2026-04-01` 为可执行 `stealth_low_suction` BUY，`low_suction_launch_confirmed=true`；组合候选追踪显示它进入执行池第 `7` 名，但执行日满仓 `10/10` 且未触发换仓，所以没有真实订单。2026-06-22 复核 `2026-06-12`：逐日评分为 `stealth_low_suction`，低吸蓄势 `4` 天，总分 `95.81`，`low_suction_launch_confirmed=false` 但默认产品口径仍为 `BUY / executable_entry_signal=true`；`#275` 组合回测在 `2026-06-15` 按 D+1 开盘买入成交。
 - 当前完整全历史组合回测为 `mainline_dragon_pullback / 0.1.21` 的 `backtests #175`：范围 `2025-03-26` 至 `2026-06-17`，收益约 `+81.36%`，最大回撤约 `-15.59%`，买入/卖出/持仓中 `224 / 214 / 10`。它较 `#172/#169` 改善收益和回撤，但仍需多年 walk-forward、参数敏感性和市场分层验证。
 - 卖出侧失败边界：`0.1.19/#173` 买后早期连续破位止损收益约 `+54.40%`、最大回撤约 `-19.79%`；`0.1.20/#174` 买入当天硬破位次日撤退收益约 `+51.51%`、最大回撤约 `-19.00%`。二者已撤回，当前默认代码是 `0.1.21`。
 - `/quant` 已切换为后台研究任务接口；任务状态是进程内内存状态，服务重启后 `GET /api/quant/research-runs/latest` 可能返回空，但已落库候选、买卖记录和回测仍按普通 API 可查。短区间任务如果日线不足，会显示具体失败原因，避免只看到“组合回测失败”。

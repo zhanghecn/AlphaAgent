@@ -120,7 +120,7 @@ export function BacktestSignalEventsPanel({
       {eventsQuery.data?.note && <div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">{eventsQuery.data.note}</div>}
 
       {rows.length === 0 ? (
-        <EmptyState message="暂无信号计划" description="旧回测需要重跑组合回测后才会生成全股票理论信号。" />
+        <EmptyState message="暂无信号计划" description="旧回测缺少信号计划明细，重跑该区间的回测诊断后再查看。" />
       ) : (
         <div className="overflow-hidden rounded-lg border">
           <Table>

@@ -263,6 +263,101 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
     ),
 )
 
+# ─── Job cadence (data freshness rhythm) ─────────────────────────────────
+# 静态元数据：描述每个任务"什么时候才有新数据"，让健康仪表盘能区分
+# "落后了，该补" 与 "新鲜，无需更新"。不入库——这是数据源固有的更新节奏。
+
+CADENCE_INTRADAY = "intraday"    # 盘中实时：快照 / 资金流 / 热度 / 涨跌停池
+CADENCE_EOD_DAILY = "eod_daily"  # 每日盘后：日K / 指数 / 板块K线 / 周期评分
+CADENCE_QUARTERLY = "quarterly"  # 财报披露季(1/4/7/10月)：季报 / 财务指标 / 主营构成
+CADENCE_LHB = "lhb"              # 龙虎榜：交易日 18:00 后才有当日数据
+CADENCE_IRREGULAR = "irregular"  # 低频：板块清单 / 申万行业 / 供应链（每周/每月级）
+
+# 前端卡片分组 key（按展示顺序）
+CATEGORY_MARKET_BASIC = "market_basic"
+CATEGORY_MARKET_BARS = "market_bars"
+CATEGORY_MARKET_REALTIME = "market_realtime"
+CATEGORY_SECTOR_RESEARCH = "sector_research"
+CATEGORY_FINANCIALS = "financials"
+CATEGORY_EVENTS = "events"
+
+CATEGORY_LABELS: dict[str, str] = {
+    CATEGORY_MARKET_BASIC: "基础清单",
+    CATEGORY_MARKET_BARS: "行情 K 线",
+    CATEGORY_MARKET_REALTIME: "资金与热度",
+    CATEGORY_SECTOR_RESEARCH: "板块研究",
+    CATEGORY_FINANCIALS: "财务数据",
+    CATEGORY_EVENTS: "事件与公告",
+}
+
+CATEGORY_ORDER: tuple[str, ...] = (
+    CATEGORY_MARKET_BASIC,
+    CATEGORY_MARKET_BARS,
+    CATEGORY_MARKET_REALTIME,
+    CATEGORY_SECTOR_RESEARCH,
+    CATEGORY_FINANCIALS,
+    CATEGORY_EVENTS,
+)
+
+
+@dataclass(frozen=True)
+class JobCadence:
+    """单个同步任务的更新节奏与新鲜度探针配置。"""
+
+    cadence: str
+    category: str
+    staleness_days: int      # 兜底阈值（无法对齐交易日时按天判断）
+    freshness_table: str     # 取新鲜度的表
+    freshness_col: str       # 取新鲜度的列：updated_at/bar_time(时间戳) 或 trade_date(日期)
+
+
+# 22 个任务的节奏映射。共表任务（如 financial_quarterly 与 financial_indicators
+# 都写 stock_financial_reports）首版共用 MAX(updated_at) 粗粒度判定，前端同组展示。
+JOB_CADENCES: dict[str, JobCadence] = {
+    "sync_stock_list": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "stocks", "updated_at"),
+    "sync_stock_fund_flows": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "stock_fund_flows", "updated_at"),
+    "sync_sector_fund_flows": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "sector_fund_flows", "updated_at"),
+    "sync_stock_hot_ranks": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "stock_hot_ranks", "updated_at"),
+    "sync_limit_up_pools": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "stock_events", "updated_at"),
+    "sync_stock_daily_bars": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "stock_daily_bars", "trade_date"),
+    "sync_index_daily_bars": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "stock_daily_bars", "trade_date"),
+    "sync_sector_daily_bars": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "sector_daily_bars", "trade_date"),
+    "sync_stock_minute_bars": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_BARS, 1, "stock_minute_bars", "bar_time"),
+    "sync_stock_financial_quarterly": JobCadence(CADENCE_QUARTERLY, CATEGORY_FINANCIALS, 45, "stock_financial_reports", "updated_at"),
+    "sync_stock_financial_indicators": JobCadence(CADENCE_QUARTERLY, CATEGORY_FINANCIALS, 45, "stock_financial_reports", "updated_at"),
+    "sync_stock_business_segments_history": JobCadence(CADENCE_QUARTERLY, CATEGORY_FINANCIALS, 45, "stock_business_segments", "updated_at"),
+    "sync_stock_lhb_records": JobCadence(CADENCE_LHB, CATEGORY_EVENTS, 1, "stock_lhb_records", "trade_date"),
+    "sync_stock_notices": JobCadence(CADENCE_EOD_DAILY, CATEGORY_EVENTS, 2, "stock_events", "updated_at"),
+    "sync_sector_period_scores": JobCadence(CADENCE_EOD_DAILY, CATEGORY_SECTOR_RESEARCH, 1, "sector_period_scores", "updated_at"),
+    "sync_sector_list": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 7, "sectors", "updated_at"),
+    "sync_sector_members": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 7, "sector_memberships", "updated_at"),
+    "sync_stock_sector_memberships": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 7, "stock_sector_memberships", "updated_at"),
+    "sync_shenwan_industry_tree": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 30, "shenwan_industries", "updated_at"),
+    "sync_shenwan_industry_members": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 30, "shenwan_industry_members", "updated_at"),
+    "sync_industry_board_mapping": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 30, "industry_board_mapping", "updated_at"),
+    "sync_supply_chain_edges": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 30, "industry_chain_edges", "updated_at"),
+}
+
+# 核心表为空 = 数据库从未初始化过
+EMPTY_CORE_TABLES = ("stocks", "stock_daily_bars")
+
+# 推荐 job_ids 的展示顺序（上游依赖在前，与 DEFAULT_BATCH_SCHEDULES 优先级一致）
+_RECOMMENDED_PRIORITY: tuple[str, ...] = (
+    "sync_stock_list", "sync_sector_list", "sync_sector_members",
+    "sync_stock_sector_memberships", "sync_shenwan_industry_tree",
+    "sync_shenwan_industry_members", "sync_industry_board_mapping",
+    "sync_supply_chain_edges",
+    "sync_stock_daily_bars", "sync_index_daily_bars", "sync_sector_daily_bars",
+    "sync_stock_minute_bars",
+    "sync_stock_fund_flows", "sync_sector_fund_flows",
+    "sync_stock_hot_ranks", "sync_limit_up_pools",
+    "sync_sector_period_scores",
+    "sync_stock_financial_quarterly", "sync_stock_financial_indicators",
+    "sync_stock_business_segments_history",
+    "sync_stock_lhb_records", "sync_stock_notices",
+)
+
+
 # Unified batch-sync schedules. Execution priority = list order (upstream
 # jobs first to satisfy data dependencies). Replaces the per-job crons that
 # used to live on DEFAULT_JOBS. See
@@ -2433,6 +2528,266 @@ def usage() -> dict[str, Any]:
         "capabilities": _usage_capabilities(),
         "coverage": coverage(),
     }
+
+
+def data_health() -> dict[str, Any]:
+    """数据健康仪表盘：合并覆盖率 + 最新交易日 + 任务节奏，算出每类数据的新鲜度与推荐同步清单。
+
+    前端 `/data` 健康首页直消费。合并同表查询（每个 (table, col) 只探一次 MAX）。
+    """
+    now = _now_china()
+    cov = coverage()
+    tables_cov = cov.get("tables", {}) if isinstance(cov, dict) else {}
+
+    is_empty = _is_empty_database(tables_cov)
+    latest_trade_date, cal_source = _resolve_latest_trade_date()
+    disclosure_season = _is_disclosure_season(now)
+
+    probes = _collect_freshness_probes()
+
+    job_results: dict[str, dict[str, Any]] = {}
+    for job in DEFAULT_JOBS:
+        cad = JOB_CADENCES.get(job.id)
+        if cad is None:
+            continue
+        probe_value = probes.get((cad.freshness_table, cad.freshness_col))
+        severity, reason, is_stale = _evaluate_job_staleness(
+            cad, now, latest_trade_date, disclosure_season, probe_value,
+        )
+        job_results[job.id] = {
+            "job_id": job.id,
+            "name": job.name,
+            "cadence": cad.cadence,
+            "category": cad.category,
+            "is_stale": is_stale,
+            "severity": severity,
+            "local_latest": _iso_or_none(probe_value),
+            "staleness_days": cad.staleness_days,
+            "reason": reason,
+            "recommended": is_stale,
+        }
+
+    recommended = _compute_recommended_jobs(job_results)
+    categories = _group_health_categories(job_results)
+    stale_count = sum(1 for info in job_results.values() if info["is_stale"])
+    fresh_count = sum(1 for info in job_results.values() if not info["is_stale"])
+    overall_health, summary = _overall_health(is_empty, job_results, stale_count)
+
+    return {
+        "generated_at": now.isoformat(),
+        "overall": {
+            "health": overall_health,
+            "summary": summary,
+            "is_empty_database": is_empty,
+            "empty_core_tables": (
+                [t for t in EMPTY_CORE_TABLES if tables_cov.get(t, {}).get("count", 0) == 0]
+                if is_empty else []
+            ),
+            "stale_count": stale_count,
+            "fresh_count": fresh_count,
+            "recommended_count": len(recommended),
+        },
+        "market_context": {
+            "now": now.isoformat(),
+            "latest_trade_date": _iso_or_none(latest_trade_date),
+            "is_disclosure_season": disclosure_season,
+            "trade_calendar_source": cal_source,
+        },
+        "categories": categories,
+        "recommended": {
+            "job_ids": recommended,
+            "count": len(recommended),
+            "rationale": _recommended_rationale(recommended, job_results),
+        },
+        "bootstrap": {
+            "needed": is_empty,
+            "core_profile_job_ids": list(SYNC_BATCH_PROFILES["core"]),
+            "message": (
+                "检测到核心表为空，建议先执行「核心数据」初始化同步（首次全量耗时较长，建议非交易时段）。"
+                if is_empty else None
+            ),
+        },
+    }
+
+
+def _resolve_latest_trade_date() -> tuple[date | None, str]:
+    """用本地 stock_daily_bars.MAX(trade_date) 反推最新交易日（最可靠）。
+
+    空库时返回 (None, "unknown")，调用方走 staleness 兜底，不阻塞。
+    """
+    if not is_database_configured():
+        return None, "unknown"
+    try:
+        with session_scope() as session:
+            value = session.execute(
+                select(func.max(schema.stock_daily_bars.c.trade_date))
+            ).scalar()
+            if value is not None:
+                return _as_date(value), "stock_daily_bars"
+    except Exception as exc:  # noqa: BLE001 — 健康检查不能因查询失败而崩
+        logger.warning("resolve latest trade date failed: %s", exc)
+    return None, "unknown"
+
+
+def _collect_freshness_probes() -> dict[tuple[str, str], Any]:
+    """对每个唯一的 (table, col) 探一次 MAX(col)，结果缓存复用。"""
+    pairs: set[tuple[str, str]] = {(c.freshness_table, c.freshness_col) for c in JOB_CADENCES.values()}
+    probes: dict[tuple[str, str], Any] = {}
+    if not is_database_configured():
+        return probes
+    with session_scope() as session:
+        for table_name, col_name in pairs:
+            table_obj = getattr(schema, table_name, None)
+            if table_obj is None:
+                continue
+            column = getattr(table_obj.c, col_name, None)
+            if column is None:
+                continue
+            try:
+                probes[(table_name, col_name)] = session.execute(select(func.max(column))).scalar()
+            except Exception as exc:  # noqa: BLE001 — 列缺失/查询失败退化为 None
+                logger.debug("freshness probe %s.%s failed: %s", table_name, col_name, exc)
+                probes[(table_name, col_name)] = None
+    return probes
+
+
+def _as_date(value: Any) -> date | None:
+    """把 date/datetime/iso 字符串统一转 date。"""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except Exception:
+        return None
+
+
+def _is_disclosure_season(now: datetime) -> bool:
+    """A股财报披露窗口：一季报(4)、半年报(7-8)、三季报(10)、年报(1-4/15)。"""
+    month, day = now.month, now.day
+    return month in (1, 4, 7, 8, 10) or (month == 5 and day <= 15)
+
+
+def _is_empty_database(tables_cov: dict[str, Any]) -> bool:
+    return all(tables_cov.get(t, {}).get("count", 0) == 0 for t in EMPTY_CORE_TABLES)
+
+
+def _evaluate_job_staleness(
+    cad: JobCadence,
+    now: datetime,
+    latest_trade_date: date | None,
+    disclosure_season: bool,
+    probe_value: Any,
+) -> tuple[str, str, bool]:
+    """返回 (severity, reason, is_stale)。severity: fresh/stale/empty。"""
+    if probe_value is None:
+        return "empty", "本地暂无数据", True
+
+    # 季报：非披露季不提醒，避免 6 月误报"财务落后"
+    if cad.cadence == CADENCE_QUARTERLY:
+        if not disclosure_season:
+            return "fresh", "非财报披露季，无需同步", False
+        days = (now.date() - _as_date(probe_value)).days
+        if days > cad.staleness_days:
+            return "stale", f"披露季内已 {days} 天未更新", True
+        return "fresh", f"披露季内，{days} 天前更新", False
+
+    # 日线 / 龙虎榜：对齐最新交易日
+    if cad.cadence in (CADENCE_EOD_DAILY, CADENCE_LHB):
+        local_date = _as_date(probe_value)
+        if latest_trade_date is None or local_date is None:
+            days = (now.date() - (local_date or now.date())).days
+            return ("stale", f"已 {days} 天未同步（交易日历未知）", True) if days > cad.staleness_days else ("fresh", f"{days} 天前同步", False)
+        # 龙虎榜当日 18:00 后才发布：盘中（now<18）容忍本地停在上一交易日的龙虎榜（跨周末最多 3 天）
+        if cad.cadence == CADENCE_LHB and now.hour < 18:
+            if (latest_trade_date - local_date).days <= 3:
+                return "fresh", f"今日龙虎榜 18:00 后发布，本地已含 {local_date}", False
+        if local_date >= latest_trade_date:
+            return "fresh", f"已同步至 {local_date}", False
+        gap = (latest_trade_date - local_date).days
+        return "stale", f"落后约 {gap} 天（最新 {latest_trade_date}，本地 {local_date}）", True
+
+    # 盘中实时：按小时判定（时间戳列）
+    if isinstance(probe_value, datetime):
+        probe_aware = probe_value if probe_value.tzinfo else probe_value.replace(tzinfo=timezone.utc)
+        now_aware = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+        hours = (now_aware - probe_aware).total_seconds() / 3600
+        if hours > cad.staleness_days * 24:
+            return "stale", f"已 {int(hours)} 小时未刷新", True
+        return "fresh", f"{int(hours)} 小时前刷新", False
+
+    # 低频：按天判定
+    days = (now.date() - _as_date(probe_value)).days
+    if days > cad.staleness_days:
+        return "stale", f"已 {days} 天未同步", True
+    return "fresh", f"{days} 天前同步", False
+
+
+def _compute_recommended_jobs(job_results: dict[str, dict[str, Any]]) -> list[str]:
+    """筛 is_stale 的任务，按依赖优先级排序。"""
+    priority_index = {jid: i for i, jid in enumerate(_RECOMMENDED_PRIORITY)}
+    stale = [jid for jid, info in job_results.items() if info["is_stale"]]
+    return sorted(stale, key=lambda j: priority_index.get(j, 999))
+
+
+def _group_health_categories(job_results: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """按 category 分组，返回前端卡片网格用结构。"""
+    buckets: dict[str, list[dict[str, Any]]] = {key: [] for key in CATEGORY_ORDER}
+    for info in job_results.values():
+        buckets.setdefault(info["category"], []).append(info)
+    categories: list[dict[str, Any]] = []
+    for key in CATEGORY_ORDER:
+        jobs = buckets.get(key, [])
+        if not jobs:
+            continue
+        categories.append({
+            "key": key,
+            "label": CATEGORY_LABELS.get(key, key),
+            "health": _category_health(jobs),
+            "jobs": sorted(jobs, key=lambda j: j["job_id"]),
+        })
+    return categories
+
+
+def _category_health(jobs: list[dict[str, Any]]) -> str:
+    if any(j["severity"] == "empty" for j in jobs):
+        return "red"
+    if any(j["is_stale"] for j in jobs):
+        return "yellow"
+    return "green"
+
+
+def _overall_health(
+    is_empty: bool,
+    job_results: dict[str, dict[str, Any]],
+    stale_count: int,
+) -> tuple[str, str]:
+    if is_empty:
+        return "red", "核心表为空，需要初始化数据"
+    critical_empty = any(
+        info["severity"] == "empty"
+        and info["category"] in (CATEGORY_MARKET_BASIC, CATEGORY_MARKET_BARS)
+        for info in job_results.values()
+    )
+    if critical_empty or stale_count >= 5:
+        return "red", f"{stale_count} 项数据需要同步"
+    if stale_count > 0:
+        return "yellow", f"{stale_count} 项数据建议同步"
+    return "green", "数据新鲜，无需同步"
+
+
+def _recommended_rationale(
+    recommended: list[str],
+    job_results: dict[str, dict[str, Any]],
+) -> str:
+    if not recommended:
+        return "当前数据新鲜，暂无推荐同步项"
+    names = [job_results[jid]["name"] for jid in recommended[:5] if jid in job_results]
+    tail = f" 等 {len(recommended)} 项" if len(recommended) > len(names) else ""
+    return "建议同步：" + "、".join(names) + tail
 
 
 def tail_workflow_status() -> dict[str, Any]:

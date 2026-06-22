@@ -36,11 +36,17 @@ export function fetchDataUsage() {
   return apiClient.get<DataUsageResponse>("/data-sync/usage");
 }
 
+export function fetchDataHealth() {
+  return apiClient.get<DataHealth>("/data-sync/health");
+}
+
 export function runSyncJob(jobId: string, params: Record<string, unknown> = {}) {
   return apiClient.post<SyncRunItem>(`/data-sync/jobs/${encodeURIComponent(jobId)}/run`, params);
 }
 
-export function runAllSyncJobs(payload: { profile?: "core" | "all"; params?: Record<string, unknown> } = {}) {
+export function runAllSyncJobs(
+  payload: { profile?: "core" | "all"; job_ids?: string[]; params?: Record<string, unknown> } = {},
+) {
   return apiClient.post<SyncBatchStatus>("/data-sync/batches/run-all", payload);
 }
 
@@ -303,6 +309,59 @@ export interface BatchSchedule {
   last_started_at?: string | null;
   last_finished_at?: string | null;
   last_message?: string | null;
+}
+
+export type DataHealthSeverity = "fresh" | "stale" | "empty" | "future" | "unknown" | string;
+export type DataHealthLevel = "green" | "yellow" | "red" | string;
+
+export interface DataHealthJob {
+  job_id: string;
+  name: string;
+  cadence: string;
+  category: string;
+  is_stale: boolean;
+  severity: DataHealthSeverity;
+  local_latest?: string | null;
+  staleness_days: number;
+  reason: string;
+  recommended: boolean;
+}
+
+export interface DataHealthCategory {
+  key: string;
+  label: string;
+  health: DataHealthLevel;
+  jobs: DataHealthJob[];
+}
+
+export interface DataHealth {
+  generated_at: string;
+  overall: {
+    health: DataHealthLevel;
+    summary: string;
+    is_empty_database: boolean;
+    empty_core_tables: string[];
+    stale_count: number;
+    fresh_count: number;
+    recommended_count: number;
+  };
+  market_context: {
+    now: string;
+    latest_trade_date?: string | null;
+    is_disclosure_season: boolean;
+    trade_calendar_source: string;
+  };
+  categories: DataHealthCategory[];
+  recommended: {
+    job_ids: string[];
+    count: number;
+    rationale: string;
+  };
+  bootstrap: {
+    needed: boolean;
+    core_profile_job_ids: string[];
+    message: string | null;
+  };
 }
 
 export interface TailWorkflowStatus {

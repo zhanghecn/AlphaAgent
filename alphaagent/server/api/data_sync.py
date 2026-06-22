@@ -43,9 +43,11 @@ def run_job(job_id: str, params: dict[str, Any] = Body(default_factory=dict)):
 @router.post("/batches/run-all")
 def run_all(payload: dict[str, Any] = Body(default_factory=dict)):
     try:
+        job_ids = payload.get("job_ids")
         return ok(
             service.start_sync_batch(
                 profile=str(payload.get("profile") or "core"),
+                job_ids=job_ids if isinstance(job_ids, list) and job_ids else None,
                 params=payload.get("params") if isinstance(payload.get("params"), dict) else {},
             )
         )
@@ -137,6 +139,14 @@ def coverage():
 def usage():
     try:
         return ok(service.usage())
+    except Exception as exc:
+        return _sync_error(exc)
+
+
+@router.get("/health")
+def data_health():
+    try:
+        return ok(service.data_health())
     except Exception as exc:
         return _sync_error(exc)
 

@@ -47,6 +47,15 @@ def score_day(
     candidates = [_with_market_adaptive_setup_weighting(score, params) for score in candidates]
     candidates = [_with_low_suction_first_lift_bonus(score, params) for score in candidates]
     candidates = [_with_low_suction_lifecycle_ranking(score, params) for score in candidates]
+    candidates = [_with_low_suction_buildup_quality_lane(score, params) for score in candidates]
+    candidates = [_with_candidate_tail_risk_penalty(score, params) for score in candidates]
+    candidates = [_with_mainline_momentum_lane(score, params) for score in candidates]
+    candidates = [_with_mainline_momentum_risk_control(score, params) for score in candidates]
+    candidates = [_with_surge_quality_lane(score, params) for score in candidates]
+    candidates = _with_top20_day_quality_gate(candidates, params)
+    candidates = [_with_weekly_top_fractal_relief(score, params) for score in candidates]
+    candidates = [_with_pure_loss_weak_bucket_penalty(score, params) for score in candidates]
+    candidates = [_with_selective_setup_quality_lane(score, params) for score in candidates]
     candidates.sort(key=lambda item: (-item.total_score, item.vt_symbol))
     return candidates
 
@@ -157,7 +166,13 @@ def is_buy_candidate(score, params: BacktestParams) -> bool:
     if score.risk_score < 35 or score.liquidity_score < 25:
         return False
     if params.strict_entry:
-        return _is_executable_entry_signal_for_params(score, params) and _passes_backtest_entry_experiments(score, params)
+        return (
+            (
+                _is_executable_entry_signal_for_params(score, params)
+                or _is_mainline_momentum_entry_signal(score, params)
+            )
+            and _passes_backtest_entry_experiments(score, params)
+        )
     if score.total_score < screening_payloads.effective_entry_score_threshold(score, params.min_entry_score):
         return False
     return _passes_backtest_entry_experiments(score, params)
@@ -196,6 +211,10 @@ def executable_entry_failed_rules(
 
 def _passes_backtest_entry_experiments(score, params: BacktestParams) -> bool:
     evidence = getattr(score, "evidence", {}) or {}
+    if params.enable_candidate_tail_risk_penalty and _is_candidate_tail_risk_blocked(evidence):
+        return False
+    if params.enable_mainline_momentum_hard_filter and _mainline_momentum_hard_filter_reason(evidence):
+        return False
     setup = str(evidence.get("entry_setup") or evidence.get("setup_type") or "")
     if params.require_low_suction_launch_confirmation and setup == "stealth_low_suction":
         return bool(evidence.get("low_suction_launch_confirmed"))
@@ -337,6 +356,176 @@ def _with_low_suction_lifecycle_ranking(score, params: BacktestParams):
     adjusted.evidence["low_suction_lifecycle_score"] = round(adjusted.total_score, 4)
     adjusted.evidence["low_suction_lifecycle_profile"] = decision["profile"]
     adjusted.evidence["low_suction_lifecycle_notes"] = decision["notes"]
+    return adjusted
+
+
+def _with_low_suction_buildup_quality_lane(score, params: BacktestParams):
+    if not params.enable_low_suction_buildup_quality_lane:
+        return score
+    evidence = getattr(score, "evidence", {}) or {}
+    decision = low_suction_buildup_quality_lane_adjustment(evidence)
+    adjustment = float(decision["adjustment"])
+    if adjustment == 0:
+        return score
+    adjusted = copy(score)
+    adjusted.total_score = round(float(getattr(score, "total_score", 0) or 0) + adjustment, 4)
+    adjusted.evidence = dict(evidence)
+    adjusted.evidence["low_suction_buildup_quality_adjustment"] = round(adjustment, 4)
+    adjusted.evidence["low_suction_buildup_quality_score"] = round(adjusted.total_score, 4)
+    adjusted.evidence["low_suction_buildup_quality_profile"] = decision["profile"]
+    adjusted.evidence["low_suction_buildup_quality_notes"] = decision["notes"]
+    return adjusted
+
+
+def _with_candidate_tail_risk_penalty(score, params: BacktestParams):
+    if not params.enable_candidate_tail_risk_penalty:
+        return score
+    evidence = getattr(score, "evidence", {}) or {}
+    decision = candidate_tail_risk_penalty_adjustment(evidence)
+    adjustment = float(decision["adjustment"])
+    if adjustment == 0:
+        return score
+    adjusted = copy(score)
+    adjusted.total_score = round(float(getattr(score, "total_score", 0) or 0) + adjustment, 4)
+    adjusted.evidence = dict(evidence)
+    adjusted.evidence["candidate_tail_risk_adjustment"] = round(adjustment, 4)
+    adjusted.evidence["candidate_tail_risk_score"] = round(adjusted.total_score, 4)
+    adjusted.evidence["candidate_tail_risk_profile"] = decision["profile"]
+    adjusted.evidence["candidate_tail_risk_notes"] = decision["notes"]
+    return adjusted
+
+
+def _with_mainline_momentum_lane(score, params: BacktestParams):
+    if not params.enable_mainline_momentum_lane:
+        return score
+    evidence = getattr(score, "evidence", {}) or {}
+    decision = mainline_momentum_lane_adjustment(evidence)
+    adjustment = float(decision["adjustment"])
+    if adjustment == 0:
+        return score
+    adjusted = copy(score)
+    adjusted.total_score = round(float(getattr(score, "total_score", 0) or 0) + adjustment, 4)
+    adjusted.evidence = dict(evidence)
+    adjusted.evidence["mainline_momentum_lane_adjustment"] = round(adjustment, 4)
+    adjusted.evidence["mainline_momentum_lane_score"] = round(adjusted.total_score, 4)
+    adjusted.evidence["mainline_momentum_lane_profile"] = decision["profile"]
+    adjusted.evidence["mainline_momentum_lane_notes"] = decision["notes"]
+    return adjusted
+
+
+def _with_mainline_momentum_risk_control(score, params: BacktestParams):
+    if not params.enable_mainline_momentum_risk_control:
+        return score
+    evidence = getattr(score, "evidence", {}) or {}
+    decision = mainline_momentum_risk_control_adjustment(evidence)
+    adjustment = float(decision["adjustment"])
+    if adjustment == 0:
+        return score
+    adjusted = copy(score)
+    adjusted.total_score = round(float(getattr(score, "total_score", 0) or 0) + adjustment, 4)
+    adjusted.evidence = dict(evidence)
+    adjusted.evidence["mainline_momentum_risk_control_adjustment"] = round(adjustment, 4)
+    adjusted.evidence["mainline_momentum_risk_control_score"] = round(adjusted.total_score, 4)
+    adjusted.evidence["mainline_momentum_risk_control_profile"] = decision["profile"]
+    adjusted.evidence["mainline_momentum_risk_control_notes"] = decision["notes"]
+    return adjusted
+
+
+def _with_surge_quality_lane(score, params: BacktestParams):
+    if not params.enable_surge_quality_lane:
+        return score
+    evidence = getattr(score, "evidence", {}) or {}
+    decision = surge_quality_lane_adjustment(evidence)
+    adjustment = float(decision["adjustment"])
+    if adjustment == 0:
+        return score
+    adjusted = copy(score)
+    adjusted.total_score = round(float(getattr(score, "total_score", 0) or 0) + adjustment, 4)
+    adjusted.evidence = dict(evidence)
+    adjusted.evidence["surge_quality_lane_adjustment"] = round(adjustment, 4)
+    adjusted.evidence["surge_quality_lane_score"] = round(adjusted.total_score, 4)
+    adjusted.evidence["surge_quality_lane_profile"] = decision["profile"]
+    adjusted.evidence["surge_quality_lane_notes"] = decision["notes"]
+    return adjusted
+
+
+def _with_top20_day_quality_gate(candidates: list[Any], params: BacktestParams) -> list[Any]:
+    if not params.enable_top20_day_quality_gate or len(candidates) < 10:
+        return candidates
+    preselected = sorted(candidates, key=lambda item: (-item.total_score, item.vt_symbol))[:20]
+    day_profile = top20_day_quality_profile(preselected)
+    if day_profile["profile"] == "neutral_top20_day":
+        return candidates
+    return [_with_top20_day_quality_score(score, params, day_profile) for score in candidates]
+
+
+def _with_top20_day_quality_score(score, params: BacktestParams, day_profile: dict[str, Any]):
+    decision = top20_day_quality_adjustment(getattr(score, "evidence", {}) or {}, day_profile)
+    adjustment = float(decision["adjustment"])
+    if adjustment == 0:
+        return score
+    adjusted = copy(score)
+    adjusted.total_score = round(float(getattr(score, "total_score", 0) or 0) + adjustment, 4)
+    adjusted.evidence = dict(getattr(score, "evidence", {}) or {})
+    adjusted.evidence["top20_day_quality_adjustment"] = round(adjustment, 4)
+    adjusted.evidence["top20_day_quality_score"] = round(adjusted.total_score, 4)
+    adjusted.evidence["top20_day_quality_profile"] = decision["profile"]
+    adjusted.evidence["top20_day_quality_day_profile"] = day_profile
+    adjusted.evidence["top20_day_quality_notes"] = decision["notes"]
+    return adjusted
+
+
+def _with_weekly_top_fractal_relief(score, params: BacktestParams):
+    if not params.enable_weekly_top_fractal_relief:
+        return score
+    evidence = getattr(score, "evidence", {}) or {}
+    decision = weekly_top_fractal_relief_adjustment(evidence)
+    adjustment = float(decision["adjustment"])
+    if adjustment == 0:
+        return score
+    adjusted = copy(score)
+    adjusted.total_score = round(float(getattr(score, "total_score", 0) or 0) + adjustment, 4)
+    adjusted.evidence = dict(evidence)
+    adjusted.evidence["weekly_top_fractal_relief_adjustment"] = round(adjustment, 4)
+    adjusted.evidence["weekly_top_fractal_relief_score"] = round(adjusted.total_score, 4)
+    adjusted.evidence["weekly_top_fractal_relief_profile"] = decision["profile"]
+    adjusted.evidence["weekly_top_fractal_relief_notes"] = decision["notes"]
+    return adjusted
+
+
+def _with_pure_loss_weak_bucket_penalty(score, params: BacktestParams):
+    if not params.enable_pure_loss_weak_bucket_penalty:
+        return score
+    evidence = getattr(score, "evidence", {}) or {}
+    decision = pure_loss_weak_bucket_penalty(evidence)
+    adjustment = float(decision["adjustment"])
+    if adjustment == 0:
+        return score
+    adjusted = copy(score)
+    adjusted.total_score = round(float(getattr(score, "total_score", 0) or 0) + adjustment, 4)
+    adjusted.evidence = dict(evidence)
+    adjusted.evidence["pure_loss_weak_bucket_adjustment"] = round(adjustment, 4)
+    adjusted.evidence["pure_loss_weak_bucket_score"] = round(adjusted.total_score, 4)
+    adjusted.evidence["pure_loss_weak_bucket_profile"] = decision["profile"]
+    adjusted.evidence["pure_loss_weak_bucket_notes"] = decision["notes"]
+    return adjusted
+
+
+def _with_selective_setup_quality_lane(score, params: BacktestParams):
+    if not params.enable_selective_setup_quality_lane:
+        return score
+    evidence = getattr(score, "evidence", {}) or {}
+    decision = selective_setup_quality_lane_adjustment(evidence)
+    adjustment = float(decision["adjustment"])
+    if adjustment == 0:
+        return score
+    adjusted = copy(score)
+    adjusted.total_score = round(float(getattr(score, "total_score", 0) or 0) + adjustment, 4)
+    adjusted.evidence = dict(evidence)
+    adjusted.evidence["selective_setup_quality_adjustment"] = round(adjustment, 4)
+    adjusted.evidence["selective_setup_quality_score"] = round(adjusted.total_score, 4)
+    adjusted.evidence["selective_setup_quality_profile"] = decision["profile"]
+    adjusted.evidence["selective_setup_quality_notes"] = decision["notes"]
     return adjusted
 
 
@@ -541,6 +730,784 @@ def low_suction_lifecycle_ranking_adjustment(evidence: dict[str, Any]) -> dict[s
     )
 
 
+def low_suction_buildup_quality_lane_adjustment(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Reward clean low-suction buildup before launch confirmation."""
+
+    quality = _low_suction_buildup_quality(evidence)
+    if not quality["eligible"]:
+        return _low_suction_buildup_quality_decision(0.0, str(quality["profile"]), list(quality["notes"]))
+
+    launch_bucket = str(
+        evidence.get("low_suction_launch_quality_bucket")
+        or low_suction_launch_quality_bucket(evidence)
+        or ""
+    )
+    launch_confirmed = bool(evidence.get("low_suction_launch_confirmed"))
+    low_suction_days = _float_or_none(evidence.get("low_suction_days")) or 0.0
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    warning_level = _float_or_none(evidence.get("market_warning_level")) or 0.0
+    phase = str(evidence.get("dynamic_market_regime") or "")
+
+    adjustment = 0.35 + float(quality["score"]) * 0.17
+    notes = list(quality["notes"])
+    notes.append("低吸蓄势加分：蓄势质量独立计分，启动确认不是前置条件")
+
+    if low_suction_days >= 4:
+        adjustment += 0.2
+        notes.append("低吸蓄势加分：连续低吸天数达到4天以上")
+    if low_suction_days >= 6:
+        adjustment += 0.15
+        notes.append("低吸蓄势加分：蓄势时间更充分")
+
+    if launch_confirmed:
+        if launch_bucket == "balanced_first_lift":
+            adjustment += 0.55
+            notes.append("启动确认加分：低吸后出现均衡首个上拉")
+        elif launch_bucket == "other_confirmed_launch":
+            adjustment += 0.35
+            notes.append("启动确认加分：低吸后出现有效上拉")
+        elif launch_bucket == "high_close_launch":
+            notes.append("启动确认小加分：已上拉但收盘偏高，控制追涨权重")
+    elif launch_bucket == "unconfirmed_buildup":
+        notes.append("未确认蓄势：不扣分，只等待启动额外确认")
+
+    if close_location is not None and close_location > 0.72:
+        adjustment -= 0.3
+        notes.append("低吸蓄势收敛：收盘位置偏高，避免把追涨当低吸")
+    if latest_change is not None and latest_change >= 6.0:
+        adjustment -= 0.25
+        notes.append("低吸蓄势收敛：信号日涨幅偏大")
+    if phase in {"false_bull", "weak_defensive", "crash"} or warning_level >= 3:
+        adjustment -= 0.25
+        notes.append("低吸蓄势收敛：行情风险仍需压低权重")
+
+    relief = _low_suction_buildup_weekly_relief(quality, evidence)
+    if relief > 0:
+        adjustment += relief
+        notes.append("周线顶分型减免：强低吸蓄势仍在均线承接区")
+
+    return _low_suction_buildup_quality_decision(
+        max(min(adjustment, 2.4), 0.0),
+        "clean_low_suction_buildup",
+        notes,
+    )
+
+
+def candidate_tail_risk_penalty_adjustment(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Penalize visible Top20 buckets that showed poor no-position candidate quality."""
+
+    setup = str(evidence.get("entry_setup") or evidence.get("setup_primary") or evidence.get("setup_type") or "")
+    family = str(evidence.get("setup_family") or "")
+    phase = str(evidence.get("dynamic_market_regime") or "")
+    launch_bucket = str(
+        evidence.get("low_suction_launch_quality_bucket")
+        or low_suction_launch_quality_bucket(evidence)
+        or ""
+    )
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    warning_level = _float_or_none(evidence.get("market_warning_level")) or 0.0
+    risk_penalty = _float_or_none(evidence.get("risk_penalty")) or 0.0
+    mainline_strength = _mainline_momentum_strength(evidence)
+
+    adjustment = 0.0
+    notes: list[str] = []
+    is_dragon = setup == "dragon_pullback" or family == "dragon_pullback"
+    weak_phase = phase in {"choppy_rotation", "false_bull", "weak_defensive", "crash"}
+
+    if is_dragon and launch_bucket == "high_close_launch":
+        adjustment -= 4.2
+        notes.append("候选尾部风险降权：龙回头高位收盘启动历史亏损尾部较差")
+    if is_dragon and close_location is not None and close_location > 0.75 and volume_ratio is not None and 0.8 <= volume_ratio <= 1.6:
+        adjustment -= 2.4
+        notes.append("候选尾部风险降权：龙回头高位收盘且量能普通")
+    if is_dragon and ma_convergence is not None and 6.0 <= ma_convergence <= 10.0 and close_location is not None and close_location > 0.75:
+        adjustment -= 2.2
+        notes.append("候选尾部风险降权：龙回头高收盘但均线仍偏发散")
+    if weak_phase and launch_bucket in {"unconfirmed_buildup", "thin_volume_launch", "high_close_launch"}:
+        adjustment -= 2.4
+        notes.append("候选尾部风险降权：震荡/假强势中的未确认或弱量启动")
+    if launch_bucket == "unconfirmed_buildup" and ma_convergence is not None and ma_convergence >= 6.0:
+        adjustment -= 1.0
+        notes.append("候选尾部风险降权：蓄势未确认且均线没有充分收敛")
+    if warning_level >= 3 and close_location is not None and close_location > 0.72:
+        adjustment -= 1.0
+        notes.append("候选尾部风险降权：强风险环境下高位收盘追买")
+    if risk_penalty >= 4 and close_location is not None and close_location > 0.75:
+        adjustment -= 0.8
+        notes.append("候选尾部风险降权：结构风险叠加高位收盘")
+
+    if mainline_strength >= 3.0 and adjustment < 0:
+        adjustment += min(abs(adjustment), 1.8)
+        notes.append("主线动量保护：近期涨停/大阳活跃，降低尾部风险扣分强度")
+
+    if not notes:
+        return _candidate_tail_risk_decision(0.0, "neutral", [])
+    return _candidate_tail_risk_decision(max(adjustment, -8.0), "top20_tail_risk", notes)
+
+
+def mainline_momentum_lane_adjustment(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Give a default-off ranking bonus to visible mainline/momentum candidates."""
+
+    strength = _mainline_momentum_strength(evidence)
+    if strength < 3.5:
+        return _mainline_momentum_lane_decision(0.0, "no_mainline_momentum", [])
+
+    phase = str(evidence.get("dynamic_market_regime") or "")
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    liquidity = _float_or_none(evidence.get("liquidity_score"))
+    risk_penalty = _float_or_none(evidence.get("risk_penalty")) or 0.0
+    warning_level = _float_or_none(evidence.get("market_warning_level")) or 0.0
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    notes = ["主线动量加分：近期涨停/大阳活跃，属于当前策略漏选的大赢家特征"]
+    adjustment = 0.5 + min(strength, 5.0) * 0.35
+
+    if phase in {"strong_broad", "narrow_theme_bull", "mainline_pullback", "choppy_rotation"}:
+        adjustment += 0.6
+        notes.append("主线动量加分：行情阶段允许强趋势候选竞争")
+    elif phase in {"false_bull", "weak_defensive", "crash"}:
+        adjustment -= 1.4
+        notes.append("主线动量降温：假强势/弱势环境下不放大追高")
+
+    if close_location is not None:
+        if 0.4 <= close_location <= 0.82:
+            adjustment += 0.4
+            notes.append("主线动量加分：收盘位置仍有分歧")
+        elif close_location > 0.9:
+            adjustment -= 1.4
+            notes.append("主线动量降温：收盘过于一致")
+    if volume_ratio is not None:
+        if 0.75 <= volume_ratio <= 2.3:
+            adjustment += 0.3
+            notes.append("主线动量加分：量能活跃但未极端失控")
+        elif volume_ratio > 3.0:
+            adjustment -= 1.4
+            notes.append("主线动量降温：放量过猛")
+    if ma_convergence is not None:
+        if ma_convergence >= 18.0:
+            adjustment -= 1.4
+            notes.append("主线动量降温：均线极度发散，先控制回撤")
+        elif ma_convergence > 12.0:
+            adjustment -= 0.7
+            notes.append("主线动量降温：均线发散，控制追高幅度")
+    if latest_change is not None and latest_change >= 9.5:
+        adjustment -= 1.6
+        notes.append("主线动量降温：信号日接近涨停，D+1 可买性存疑")
+    if warning_level >= 3:
+        adjustment -= 1.4
+        notes.append("主线动量降温：市场风险等级偏高")
+    if risk_penalty >= 8:
+        adjustment -= 1.2
+        notes.append("主线动量降温：个股结构风险偏高")
+    if liquidity is not None and liquidity < 35:
+        adjustment = min(adjustment, 0.0)
+        notes.append("主线动量过滤：流动性不足")
+
+    return _mainline_momentum_lane_decision(max(min(adjustment, 3.0), 0.0), "mainline_momentum", notes)
+
+
+def mainline_momentum_risk_control_adjustment(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Demote overextended momentum candidates while keeping asymmetric pullbacks."""
+
+    strength = _mainline_momentum_strength(evidence)
+    lane_adjustment = _float_or_none(evidence.get("mainline_momentum_lane_adjustment")) or 0.0
+    if strength < 3.0 and lane_adjustment <= 0:
+        return _mainline_momentum_risk_control_decision(0.0, "no_mainline_momentum", [])
+
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    ma5_distance = _float_or_none(evidence.get("ma5_distance_pct"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    warning_level = _float_or_none(evidence.get("market_warning_level")) or 0.0
+    phase = str(evidence.get("dynamic_market_regime") or "")
+    launch_bucket = str(
+        evidence.get("low_suction_launch_quality_bucket")
+        or low_suction_launch_quality_bucket(evidence)
+        or ""
+    )
+    risk_penalty = _float_or_none(evidence.get("risk_penalty")) or 0.0
+
+    adjustment = 0.0
+    notes: list[str] = []
+
+    asymmetric_lower = (
+        close_location is not None
+        and close_location <= 0.58
+        and ma_convergence is not None
+        and 3.0 <= ma_convergence <= 14.0
+        and (ma5_distance is None or ma5_distance <= 3.5)
+    )
+    asymmetric_low_wide = (
+        close_location is not None
+        and close_location < 0.35
+        and ma_convergence is not None
+        and 6.0 <= ma_convergence <= 18.0
+        and (ma5_distance is None or ma5_distance <= 3.5)
+    )
+    if asymmetric_lower or asymmetric_low_wide:
+        adjustment += 0.6
+        notes.append("主线风控保留：活跃票仍在低位/中低位分歧承接区")
+
+    if close_location is not None:
+        if close_location > 0.88:
+            adjustment -= 2.4
+            notes.append("主线风控降权：收盘过高，D+1 追买回撤风险大")
+        elif close_location > 0.75 and ma_convergence is not None and ma_convergence >= 18.0:
+            adjustment -= 2.2
+            notes.append("主线风控降权：高收盘叠加均线极度发散")
+    if ma_convergence is not None:
+        if ma_convergence >= 22.0:
+            adjustment -= 2.2
+            notes.append("主线风控降权：均线极度发散，尾部回撤过深")
+        elif ma_convergence >= 18.0 and not asymmetric_low_wide:
+            adjustment -= 1.4
+            notes.append("主线风控降权：均线发散已接近尾部风险区")
+    if ma5_distance is not None:
+        if ma5_distance > 5.5:
+            adjustment -= 2.6
+            notes.append("主线风控降权：偏离5日线过远")
+        elif ma5_distance > 3.5 and close_location is not None and close_location > 0.75:
+            adjustment -= 1.8
+            notes.append("主线风控降权：高位收盘且偏离5日线")
+    if launch_bucket in {"repeated_launch", "thin_volume_launch", "other_confirmed_launch"}:
+        adjustment -= 1.2
+        notes.append("主线风控降权：弱启动/反复启动的动量候选先控制排名")
+    if launch_bucket == "high_close_launch" and close_location is not None and close_location > 0.75:
+        adjustment -= 1.0
+        notes.append("主线风控降权：高位启动追买性价比不足")
+    if phase == "false_bull" and warning_level >= 2 and close_location is not None and close_location > 0.58:
+        adjustment -= 1.2
+        notes.append("主线风控降权：假强势中不放大中高位动量")
+    if volume_ratio is not None and volume_ratio > 3.0:
+        adjustment -= 1.2
+        notes.append("主线风控降权：放量过猛")
+    if latest_change is not None and latest_change >= 8.5:
+        adjustment -= 1.1
+        notes.append("主线风控降权：信号日涨幅过大")
+    if risk_penalty >= 10:
+        adjustment -= 0.8
+        notes.append("主线风控降权：结构风险偏高")
+
+    if adjustment < 0 and asymmetric_lower and volume_ratio is not None and 0.75 <= volume_ratio <= 2.2:
+        relief = min(abs(adjustment), 0.9)
+        adjustment += relief
+        notes.append("主线风控减免：低位分歧且量能未失控")
+
+    if not notes:
+        return _mainline_momentum_risk_control_decision(0.0, "neutral_mainline_momentum", [])
+    return _mainline_momentum_risk_control_decision(
+        max(min(adjustment, 1.2), -7.0),
+        "mainline_momentum_risk_control",
+        notes,
+    )
+
+
+def mainline_momentum_hard_filter_reason(evidence: dict[str, Any]) -> str | None:
+    """Return a no-future hard-filter reason for extreme momentum tail risk."""
+
+    return _mainline_momentum_hard_filter_reason(evidence)
+
+
+def surge_quality_lane_adjustment(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Separate active surge setups from crowded or stale Top20 candidates."""
+
+    setup = str(evidence.get("entry_setup") or evidence.get("setup_primary") or evidence.get("setup_type") or "")
+    family = str(evidence.get("setup_family") or "")
+    phase = str(evidence.get("dynamic_market_regime") or "")
+    launch_bucket = str(
+        evidence.get("low_suction_launch_quality_bucket")
+        or low_suction_launch_quality_bucket(evidence)
+        or ""
+    )
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    ma5_distance = _float_or_none(evidence.get("ma5_distance_pct"))
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    warning_level = _float_or_none(evidence.get("market_warning_level")) or 0.0
+    risk_penalty = _float_or_none(evidence.get("risk_penalty")) or 0.0
+    low_suction_days = _float_or_none(evidence.get("low_suction_days")) or 0.0
+    large_bull_count = _float_or_none(evidence.get("large_bull_count_20d")) or 0.0
+    strength = _mainline_momentum_strength(evidence)
+
+    is_dragon = setup == "dragon_pullback" or family == "dragon_pullback"
+    is_low_reclaim = family in {"low_position_reclaim", "low_suction_first_lift", "low_suction_buildup"}
+    active_money = strength >= 3.0 or bool(evidence.get("recent_limit_up_20d")) or large_bull_count >= 3
+    lower_mid_close = close_location is not None and 0.35 <= close_location <= 0.58
+    tradable_close = close_location is not None and 0.20 <= close_location <= 0.75
+    balanced_close = close_location is not None and 0.58 <= close_location <= 0.75
+    healthy_volume = volume_ratio is None or 0.65 <= volume_ratio <= 2.2
+    stale_low_suction = low_suction_days >= 6 and not active_money
+    active_wide_trend = active_money and ma_convergence is not None and 10.0 <= ma_convergence <= 18.0
+
+    adjustment = 0.0
+    notes: list[str] = []
+
+    if active_wide_trend and tradable_close and healthy_volume:
+        adjustment += 0.6 + min(strength, 6.0) * 0.25
+        notes.append("猛拉质量加分：近期涨停/大阳活跃且均线趋势已打开")
+        if lower_mid_close:
+            adjustment += 0.55
+            notes.append("猛拉质量加分：收盘在中低位，历史更容易上拉")
+        elif balanced_close:
+            adjustment += 0.35
+            notes.append("猛拉质量加分：收盘在均衡上拉区")
+        if large_bull_count >= 3:
+            adjustment += 0.35
+            notes.append("猛拉质量加分：20日内多次大阳线")
+    elif (
+        is_low_reclaim
+        and launch_bucket in {"balanced_first_lift", "late_pullback_launch", "other_confirmed_launch"}
+        and balanced_close
+        and healthy_volume
+        and warning_level <= 1
+    ):
+        adjustment += 0.55
+        notes.append("低吸质量加分：低吸后已有可见上拉，且收盘位置均衡")
+
+    if is_dragon and launch_bucket == "balanced_first_lift" and balanced_close:
+        adjustment += 0.35
+        notes.append("猛拉质量加分：龙回头出现均衡首启")
+    if is_dragon and launch_bucket == "not_low_suction" and active_money and lower_mid_close:
+        adjustment += 0.25
+        notes.append("猛拉质量加分：活跃龙回头不依赖低吸确认")
+
+    if launch_bucket == "unconfirmed_buildup" and family == "low_suction_buildup":
+        adjustment -= 0.8
+        notes.append("弱启动降权：未确认低吸蓄势在当前卖点模型中胜率偏低")
+    if launch_bucket == "high_close_launch" and (
+        warning_level >= 3
+        or (ma5_distance is not None and ma5_distance > 4.5)
+        or (close_location is not None and close_location > 0.92 and not active_wide_trend)
+    ):
+        adjustment -= 1.0
+        notes.append("弱启动降权：高位启动叠加风险，D+1追买性价比低")
+    if launch_bucket == "thin_volume_launch" and (volume_ratio is None or volume_ratio < 0.75):
+        adjustment -= 1.2
+        notes.append("弱启动降权：启动量能偏薄，容易先回撤")
+    if launch_bucket == "other_confirmed_launch" and is_dragon:
+        adjustment -= 1.2
+        notes.append("弱启动降权：龙回头非均衡确认后的历史收益偏弱")
+    if launch_bucket == "repeated_launch" and close_location is not None and close_location > 0.72:
+        adjustment -= 1.2
+        notes.append("弱启动降权：重复启动叠加高位收盘")
+    if stale_low_suction and launch_bucket not in {"balanced_first_lift", "late_pullback_launch", "other_confirmed_launch"}:
+        adjustment -= 1.6
+        notes.append("弱启动降权：低吸蓄势超过6天但没有新激活")
+    if family == "unknown" and not active_money:
+        adjustment -= 1.2
+        notes.append("弱启动降权：未知形态且缺少活跃资金证据")
+    if close_location is not None and close_location > 0.88:
+        adjustment -= 1.1
+        notes.append("弱启动降权：收盘过高，D+1 追买性价比差")
+    if latest_change is not None and latest_change >= 8.5:
+        adjustment -= 0.9
+        notes.append("弱启动降权：信号日涨幅过大")
+    if ma5_distance is not None and ma5_distance > 4.5:
+        adjustment -= 0.8
+        notes.append("弱启动降权：偏离5日线过远")
+    if ma_convergence is not None and ma_convergence > 22.0 and not lower_mid_close:
+        adjustment -= 1.0
+        notes.append("弱启动降权：均线过度发散且收盘没有性价比")
+    if warning_level >= 3 and close_location is not None and close_location > 0.72:
+        adjustment -= 1.0
+        notes.append("弱启动降权：行情风险高时不追高位启动")
+    if phase in {"weak_defensive", "crash"}:
+        adjustment -= 0.8
+        notes.append("弱启动降权：弱势/崩盘环境收敛排名")
+    if risk_penalty >= 10:
+        adjustment -= 0.8
+        notes.append("弱启动降权：结构风险偏高")
+
+    if adjustment < 0 and active_money and lower_mid_close and healthy_volume:
+        relief = min(abs(adjustment), 1.2)
+        adjustment += relief
+        notes.append("活跃低位保护：有主线资金且收盘不拥挤，降低扣分强度")
+
+    if not notes:
+        return _surge_quality_lane_decision(0.0, "neutral", [])
+    return _surge_quality_lane_decision(
+        max(min(adjustment, 3.0), -5.5),
+        "surge_quality",
+        notes,
+    )
+
+
+def weekly_top_fractal_relief_adjustment(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Partially relax weekly-top-fractal risk only for supported strong trends."""
+
+    if not _has_weekly_top_fractal_risk(evidence):
+        return _weekly_top_fractal_relief_decision(0.0, "no_weekly_top_fractal_risk", [])
+
+    setup = str(evidence.get("entry_setup") or evidence.get("setup_primary") or evidence.get("setup_type") or "")
+    family = str(evidence.get("setup_family") or "")
+    launch_bucket = str(
+        evidence.get("low_suction_launch_quality_bucket")
+        or low_suction_launch_quality_bucket(evidence)
+        or ""
+    )
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    ma5_distance = _float_or_none(evidence.get("ma5_distance_pct"))
+    ma10_distance = _float_or_none(evidence.get("ma10_distance_pct"))
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    return_20d = _float_or_none(evidence.get("return_20d")) or 0.0
+    return_60d = _float_or_none(evidence.get("return_60d")) or 0.0
+    warning_level = _float_or_none(evidence.get("market_warning_level")) or 0.0
+    phase = str(evidence.get("dynamic_market_regime") or "")
+    support_type = str(evidence.get("support_type") or "")
+    notes: list[str] = []
+
+    is_dragon = setup == "dragon_pullback" or family == "dragon_pullback"
+    if not is_dragon:
+        return _weekly_top_fractal_relief_decision(0.0, "keep_non_dragon_weekly_risk", [])
+    if launch_bucket in {"high_close_launch", "thin_volume_launch", "unconfirmed_buildup"}:
+        return _weekly_top_fractal_relief_decision(0.0, "keep_weak_launch_weekly_risk", [])
+    if evidence.get("high_level_sideways_distribution_risk") or evidence.get("volume_stall_risk"):
+        return _weekly_top_fractal_relief_decision(0.0, "keep_distribution_weekly_risk", [])
+    if latest_change is not None and latest_change >= 9.5:
+        return _weekly_top_fractal_relief_decision(0.0, "keep_limit_like_weekly_risk", [])
+    if close_location is not None and close_location > 0.88:
+        return _weekly_top_fractal_relief_decision(0.0, "keep_high_close_weekly_risk", [])
+    if volume_ratio is not None and volume_ratio > 2.2:
+        return _weekly_top_fractal_relief_decision(0.0, "keep_volume_spike_weekly_risk", [])
+
+    support_ok = support_type in {"ma5_reclaim", "ma10_reclaim", "ma20_reclaim"} or (
+        ma5_distance is not None and -1.2 <= ma5_distance <= 3.4
+    )
+    trend_ok = return_20d >= 12.0 or return_60d >= 25.0 or _mainline_momentum_strength(evidence) >= 3.0
+    ma_ok = ma_convergence is None or ma_convergence <= 14.0
+    if not (support_ok and trend_ok and ma_ok):
+        return _weekly_top_fractal_relief_decision(0.0, "keep_unconfirmed_trend_weekly_risk", [])
+
+    adjustment = 2.0
+    notes.append("周线顶分型减免：强趋势龙回头仍在均线承接区")
+    if ma5_distance is not None and -0.8 <= ma5_distance <= 2.4:
+        adjustment += 0.4
+        notes.append("周线顶分型减免：贴近5日线承接")
+    if ma10_distance is not None and -1.2 <= ma10_distance <= 3.2:
+        adjustment += 0.3
+        notes.append("周线顶分型减免：10日线距离可控")
+    if phase in {"false_bull", "weak_defensive", "crash"} or warning_level >= 4:
+        adjustment -= 0.8
+        notes.append("周线顶分型减免收敛：行情风险偏高")
+    elif phase in {"choppy_rotation", "strong_broad", "narrow_theme_bull"} and warning_level <= 3:
+        adjustment += 0.2
+        notes.append("周线顶分型减免：行情允许强趋势竞争")
+
+    return _weekly_top_fractal_relief_decision(max(min(adjustment, 3.0), 0.0), "supported_strong_dragon", notes)
+
+
+def pure_loss_weak_bucket_penalty(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Demote signal-day buckets that mostly become pure losses."""
+
+    launch_bucket = str(
+        evidence.get("low_suction_launch_quality_bucket")
+        or low_suction_launch_quality_bucket(evidence)
+        or ""
+    )
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    low_suction_days = _float_or_none(evidence.get("low_suction_days")) or 0.0
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    warning_level = _float_or_none(evidence.get("market_warning_level")) or 0.0
+    active_strength = _mainline_momentum_strength(evidence)
+
+    high_close = close_location is not None and close_location > 0.75
+    mid_high_close = close_location is not None and 0.58 <= close_location <= 0.75
+    weak_volume = volume_ratio is not None and volume_ratio < 0.85
+    active = active_strength >= 3.0 or bool(evidence.get("recent_limit_up_20d"))
+
+    adjustment = 0.0
+    notes: list[str] = []
+
+    if high_close and launch_bucket == "thin_volume_launch":
+        adjustment -= 4.0
+        notes.append("纯亏弱桶降权：高位薄量启动")
+    if mid_high_close and launch_bucket == "other_confirmed_launch":
+        adjustment -= 3.2
+        notes.append("纯亏弱桶降权：中高位非均衡确认启动")
+    if high_close and launch_bucket == "repeated_launch":
+        adjustment -= 3.0
+        notes.append("纯亏弱桶降权：高位重复启动")
+    if high_close and launch_bucket == "unconfirmed_buildup":
+        adjustment -= 2.6
+        notes.append("纯亏弱桶降权：未确认蓄势但收盘偏高")
+    if mid_high_close and launch_bucket == "unconfirmed_buildup":
+        adjustment -= 1.6
+        notes.append("纯亏弱桶降权：未确认蓄势在中高位")
+    if high_close and launch_bucket == "high_close_launch":
+        adjustment -= 2.0
+        notes.append("纯亏弱桶降权：高收盘启动追买拥挤")
+    if low_suction_days >= 6 and not active and launch_bucket not in {"balanced_first_lift", "late_pullback_launch"}:
+        adjustment -= 2.0
+        notes.append("纯亏弱桶降权：低吸过久但缺少活跃资金")
+    if ma_convergence is not None and ma_convergence < 3.0 and not active and launch_bucket in {
+        "unconfirmed_buildup",
+        "thin_volume_launch",
+        "repeated_launch",
+    }:
+        adjustment -= 1.4
+        notes.append("纯亏弱桶降权：均线过紧且未激活")
+    if high_close and weak_volume:
+        adjustment -= 0.8
+        notes.append("纯亏弱桶降权：高位收盘但量能不足")
+    if high_close and latest_change is not None and latest_change >= 7.5:
+        adjustment -= 0.8
+        notes.append("纯亏弱桶降权：信号日高涨幅后追买")
+    if high_close and warning_level >= 3:
+        adjustment -= 0.8
+        notes.append("纯亏弱桶降权：行情风险高时追高")
+
+    if adjustment < 0 and active and close_location is not None and close_location < 0.58 and 3.0 <= (ma_convergence or 99.0) <= 6.0:
+        relief = min(abs(adjustment), 1.6)
+        adjustment += relief
+        notes.append("纯亏弱桶减免：活跃资金在低位/下中位承接")
+
+    if not notes:
+        return _pure_loss_weak_bucket_decision(0.0, "neutral", [])
+    return _pure_loss_weak_bucket_decision(max(adjustment, -6.0), "pure_loss_weak_bucket", notes)
+
+
+def selective_setup_quality_lane_adjustment(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Default-off score lane from the latest Top20 surge/decline audit."""
+
+    setup = str(evidence.get("entry_setup") or evidence.get("setup_primary") or evidence.get("setup_type") or "")
+    family = str(evidence.get("setup_family") or "")
+    phase = str(evidence.get("dynamic_market_regime") or "")
+    launch_bucket = str(
+        evidence.get("low_suction_launch_quality_bucket")
+        or low_suction_launch_quality_bucket(evidence)
+        or ""
+    )
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    ma5_distance = _float_or_none(evidence.get("ma5_distance_pct"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    low_suction_days = _float_or_none(evidence.get("low_suction_days")) or 0.0
+    warning_level = _float_or_none(evidence.get("market_warning_level")) or 0.0
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    risk_penalty = _float_or_none(evidence.get("risk_penalty")) or 0.0
+    strength = _mainline_momentum_strength(evidence)
+    active = strength >= 3.0 or bool(evidence.get("recent_limit_up_20d"))
+    strong_active = strength >= 5.0
+    healthy_volume = volume_ratio is None or 0.75 <= volume_ratio <= 2.3
+    weak_launch = launch_bucket in {
+        "high_close_launch",
+        "thin_volume_launch",
+        "other_confirmed_launch",
+        "repeated_launch",
+        "unconfirmed_buildup",
+    }
+    is_low_reclaim = family in {"low_position_reclaim", "low_suction_first_lift", "low_suction_buildup"}
+    has_low_suction_context = setup == "stealth_low_suction" or is_low_reclaim or low_suction_days >= 3
+
+    adjustment = 0.0
+    notes: list[str] = []
+
+    active_lower_mid = (
+        active
+        and close_location is not None
+        and close_location <= 0.58
+        and ma_convergence is not None
+        and 3.0 <= ma_convergence <= 18.0
+        and (ma5_distance is None or ma5_distance <= 3.5)
+        and healthy_volume
+    )
+    active_mid_high = (
+        active
+        and close_location is not None
+        and 0.58 < close_location <= 0.75
+        and ma_convergence is not None
+        and 6.0 <= ma_convergence <= 18.0
+        and (ma5_distance is None or ma5_distance <= 3.5)
+        and healthy_volume
+    )
+    if active_lower_mid:
+        adjustment += 1.9 if strong_active else 1.4
+        notes.append("精选质量加分：活跃资金在中低位承接，仍贴近5日线")
+    elif active_mid_high:
+        adjustment += 0.5
+        notes.append("精选质量小加分：活跃资金在趋势区但性价比一般")
+
+    if has_low_suction_context and 3 <= low_suction_days <= 5 and close_location is not None and close_location <= 0.58:
+        if ma_convergence is not None and ma_convergence <= 6.0 and healthy_volume and warning_level <= 2:
+            adjustment += 0.7
+            notes.append("精选质量加分：3-5天低吸蓄势且均线收敛")
+
+    if active and close_location is not None and close_location > 0.88:
+        adjustment -= 3.2
+        notes.append("精选质量降权：活跃票收盘极高，历史容易先回撤")
+    elif active and close_location is not None and close_location > 0.75 and ma_convergence is not None and 3.0 <= ma_convergence <= 10.0:
+        adjustment -= 1.4
+        notes.append("精选质量降权：活跃票高收盘但趋势结构未充分打开")
+
+    if close_location is not None and close_location > 0.75 and weak_launch:
+        adjustment -= 1.8
+        notes.append("精选质量降权：高收盘弱启动")
+        if warning_level >= 2 or phase in {"strong_broad", "false_bull", "choppy_rotation"}:
+            adjustment -= 0.7
+            notes.append("精选质量降权：行情/一致性环境下弱启动更容易失败")
+
+    if low_suction_days >= 6 and not active and launch_bucket not in {"balanced_first_lift", "late_pullback_launch"}:
+        adjustment -= 2.4
+        notes.append("精选质量降权：低吸蓄势过久但缺少新激活")
+    if ma_convergence is not None and ma_convergence < 3.0 and not active:
+        adjustment -= 1.8
+        notes.append("精选质量降权：均线过紧但没有活跃资金")
+
+    if warning_level >= 3 and ma5_distance is not None and ma5_distance > 5.5:
+        adjustment -= 2.2
+        notes.append("精选质量降权：风险日偏离5日线过远")
+    if latest_change is not None and latest_change >= 8.5 and close_location is not None and close_location > 0.75:
+        adjustment -= 1.0
+        notes.append("精选质量降权：信号日高涨幅后再追高")
+    if risk_penalty >= 10:
+        adjustment -= 0.8
+        notes.append("精选质量降权：结构风险偏高")
+
+    if adjustment < 0 and active_lower_mid:
+        relief = min(abs(adjustment), 1.2)
+        adjustment += relief
+        notes.append("精选质量减免：活跃中低位承接保留右尾机会")
+
+    if not notes:
+        return _selective_setup_quality_decision(0.0, "neutral", [])
+    return _selective_setup_quality_decision(
+        max(min(adjustment, 2.6), -6.0),
+        "selective_setup_quality",
+        notes,
+    )
+
+
+def top20_day_quality_profile(candidates: list[Any]) -> dict[str, Any]:
+    """Classify a signal day's pre-ranked Top20 composition with visible factors only."""
+
+    rows = list(candidates[:20])
+    count = len(rows)
+    if count < 10:
+        return _top20_day_quality_profile(0, "neutral_top20_day", 0.0, 0.0, 0.0, 0.0, 0.0, [])
+
+    active_count = 0
+    low_mid_count = 0
+    high_count = 0
+    weak_launch_count = 0
+    active_low_mid_count = 0
+    active_high_weak_count = 0
+    stale_quiet_count = 0
+    for score in rows:
+        features = _top20_day_candidate_features(getattr(score, "evidence", {}) or {})
+        active_count += int(features["active"])
+        low_mid_count += int(features["low_mid_close"])
+        high_count += int(features["high_close"])
+        weak_launch_count += int(features["weak_launch"])
+        active_low_mid_count += int(features["active_low_mid_acceptance"])
+        active_high_weak_count += int(features["active_high_weak_launch"])
+        stale_quiet_count += int(features["stale_quiet"])
+
+    active_ratio = active_count / count
+    low_mid_ratio = low_mid_count / count
+    high_ratio = high_count / count
+    weak_launch_ratio = weak_launch_count / count
+    active_low_mid_ratio = active_low_mid_count / count
+    notes: list[str] = []
+    quality_score = 0.0
+
+    if active_low_mid_ratio >= 0.30 and low_mid_ratio >= 0.45 and high_ratio <= 0.30 and weak_launch_ratio <= 0.30:
+        quality_score += 2.2
+        notes.append("候选日加分：Top20 集中在活跃中低位承接")
+    elif active_low_mid_ratio >= 0.22 and low_mid_ratio >= 0.35 and high_ratio <= 0.35:
+        quality_score += 1.2
+        notes.append("候选日加分：Top20 有较多活跃中低位承接")
+
+    if active_ratio >= 0.55 and high_ratio >= 0.50 and weak_launch_ratio >= 0.40:
+        quality_score -= 2.6
+        notes.append("候选日降权：Top20 活跃但高位弱启动拥挤")
+    elif high_ratio >= 0.55 and weak_launch_ratio >= 0.35:
+        quality_score -= 1.6
+        notes.append("候选日降权：Top20 高位弱启动占比偏高")
+    if active_high_weak_count >= 6:
+        quality_score -= 0.8
+        notes.append("候选日降权：活跃高位弱启动数量过多")
+    if stale_quiet_count >= 5 and active_low_mid_ratio < 0.25:
+        quality_score -= 0.8
+        notes.append("候选日降权：低吸过久但未激活的安静结构偏多")
+
+    if not notes:
+        return _top20_day_quality_profile(
+            count,
+            "neutral_top20_day",
+            round(active_ratio, 4),
+            round(low_mid_ratio, 4),
+            round(high_ratio, 4),
+            round(weak_launch_ratio, 4),
+            round(active_low_mid_ratio, 4),
+            [],
+        )
+    return _top20_day_quality_profile(
+        count,
+        "strong_top20_day" if quality_score > 0 else "weak_top20_day",
+        round(active_ratio, 4),
+        round(low_mid_ratio, 4),
+        round(high_ratio, 4),
+        round(weak_launch_ratio, 4),
+        round(active_low_mid_ratio, 4),
+        notes,
+        quality_score=max(min(quality_score, 3.0), -3.0),
+    )
+
+
+def top20_day_quality_adjustment(evidence: dict[str, Any], day_profile: dict[str, Any]) -> dict[str, Any]:
+    """Return candidate score adjustment from same-day Top20 composition."""
+
+    profile = str(day_profile.get("profile") or "neutral_top20_day")
+    day_score = _float_or_none(day_profile.get("quality_score")) or 0.0
+    if profile == "neutral_top20_day" or day_score == 0:
+        return _top20_day_quality_decision(0.0, profile, [])
+
+    features = _top20_day_candidate_features(evidence)
+    adjustment = 0.0
+    notes: list[str] = list(day_profile.get("notes") or [])
+
+    if day_score > 0:
+        if features["active_low_mid_acceptance"]:
+            adjustment += min(1.8, 0.75 + day_score * 0.35)
+            notes.append("候选日个股加分：活跃资金在中低位承接且贴近5日线")
+        elif features["active"] and features["low_mid_close"] and not features["weak_launch"]:
+            adjustment += min(0.7, 0.25 + day_score * 0.15)
+            notes.append("候选日个股小加分：收盘仍有分歧且弱启动风险不高")
+        if features["high_close"] and features["weak_launch"]:
+            adjustment -= 0.8
+            notes.append("候选日个股降权：好日中仍属于高位弱启动")
+    else:
+        if features["active_low_mid_acceptance"]:
+            adjustment += 0.5
+            notes.append("候选日个股保护：坏日中仍保留活跃中低位承接")
+        elif features["active"] and features["low_mid_close"] and not features["weak_launch"]:
+            adjustment += 0.2
+            notes.append("候选日个股保护：活跃但未拥挤")
+        elif features["high_close"] and features["weak_launch"]:
+            adjustment -= min(2.4, 0.8 + abs(day_score) * 0.45)
+            notes.append("候选日个股降权：弱日高位弱启动容易先回撤")
+        elif features["stale_quiet"]:
+            adjustment -= min(1.8, 0.6 + abs(day_score) * 0.35)
+            notes.append("候选日个股降权：弱日低吸过久但缺少激活")
+        elif features["high_close"]:
+            adjustment -= 0.6
+            notes.append("候选日个股降权：弱日高位收盘性价比不足")
+
+    if adjustment == 0:
+        return _top20_day_quality_decision(0.0, profile, [])
+    return _top20_day_quality_decision(max(min(adjustment, 2.0), -3.0), profile, notes)
+
+
 def phase_aware_setup_selector_decision(evidence: dict[str, Any]) -> dict[str, Any]:
     """Default-off selector combining market phase with strategy family.
 
@@ -637,6 +1604,415 @@ def _low_suction_lifecycle_decision(adjustment: float, profile: str, notes: list
         "notes": notes,
         "not_used_for_signal_score": False,
     }
+
+
+def _low_suction_buildup_quality_decision(adjustment: float, profile: str, notes: list[str]) -> dict[str, Any]:
+    return {
+        "adjustment": adjustment,
+        "profile": profile,
+        "notes": notes,
+        "not_used_for_signal_score": False,
+    }
+
+
+def _candidate_tail_risk_decision(adjustment: float, profile: str, notes: list[str]) -> dict[str, Any]:
+    return {
+        "adjustment": adjustment,
+        "profile": profile,
+        "notes": notes,
+        "not_used_for_signal_score": False,
+    }
+
+
+def _mainline_momentum_lane_decision(adjustment: float, profile: str, notes: list[str]) -> dict[str, Any]:
+    return {
+        "adjustment": adjustment,
+        "profile": profile,
+        "notes": notes,
+        "not_used_for_signal_score": False,
+    }
+
+
+def _mainline_momentum_risk_control_decision(adjustment: float, profile: str, notes: list[str]) -> dict[str, Any]:
+    return {
+        "adjustment": adjustment,
+        "profile": profile,
+        "notes": notes,
+        "not_used_for_signal_score": False,
+    }
+
+
+def _surge_quality_lane_decision(adjustment: float, profile: str, notes: list[str]) -> dict[str, Any]:
+    return {
+        "adjustment": adjustment,
+        "profile": profile,
+        "notes": notes,
+        "not_used_for_signal_score": False,
+    }
+
+
+def _weekly_top_fractal_relief_decision(adjustment: float, profile: str, notes: list[str]) -> dict[str, Any]:
+    return {
+        "adjustment": adjustment,
+        "profile": profile,
+        "notes": notes,
+        "not_used_for_signal_score": False,
+    }
+
+
+def _pure_loss_weak_bucket_decision(adjustment: float, profile: str, notes: list[str]) -> dict[str, Any]:
+    return {
+        "adjustment": adjustment,
+        "profile": profile,
+        "notes": notes,
+        "not_used_for_signal_score": False,
+    }
+
+
+def _selective_setup_quality_decision(adjustment: float, profile: str, notes: list[str]) -> dict[str, Any]:
+    return {
+        "adjustment": adjustment,
+        "profile": profile,
+        "notes": notes,
+        "not_used_for_signal_score": False,
+    }
+
+
+def _top20_day_quality_decision(adjustment: float, profile: str, notes: list[str]) -> dict[str, Any]:
+    return {
+        "adjustment": adjustment,
+        "profile": profile,
+        "notes": notes,
+        "not_used_for_signal_score": False,
+    }
+
+
+def _is_mainline_momentum_entry_signal(score, params: BacktestParams) -> bool:
+    if not params.enable_mainline_momentum_lane:
+        return False
+    evidence = getattr(score, "evidence", {}) or {}
+    if _mainline_momentum_strength(evidence) < 4.0:
+        return False
+    if float(getattr(score, "total_score", 0) or 0) < max(params.min_entry_score, 82.0):
+        return False
+    if evidence.get("key_support_break_risk") or evidence.get("illiquid_forgotten_risk"):
+        return False
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    if latest_change is not None and latest_change >= 9.5:
+        return False
+    liquidity = _float_or_none(evidence.get("liquidity_score"))
+    if liquidity is not None and liquidity < 35:
+        return False
+    return True
+
+
+def _mainline_momentum_hard_filter_reason(evidence: dict[str, Any]) -> str | None:
+    if not (evidence.get("mainline_momentum_lane_adjustment") or _mainline_momentum_strength(evidence) >= 3.0):
+        return None
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    ma5_distance = _float_or_none(evidence.get("ma5_distance_pct"))
+    warning_level = _float_or_none(evidence.get("market_warning_level")) or 0.0
+    phase = str(evidence.get("dynamic_market_regime") or "")
+    launch_bucket = str(
+        evidence.get("low_suction_launch_quality_bucket")
+        or low_suction_launch_quality_bucket(evidence)
+        or ""
+    )
+    active = _mainline_momentum_strength(evidence) >= 3.5 or bool(evidence.get("recent_limit_up_20d"))
+
+    if close_location is not None and close_location > 0.75 and launch_bucket in {
+        "repeated_launch",
+        "thin_volume_launch",
+        "other_confirmed_launch",
+    }:
+        return "high_close_weak_launch"
+    if ma5_distance is not None and ma5_distance > 5.5 and ma_convergence is not None and ma_convergence >= 14.0:
+        return "ma5_overextended_wide_ma"
+    if close_location is not None and close_location > 0.88 and ma5_distance is not None and ma5_distance > 3.5:
+        return "extreme_high_far_ma5"
+    if close_location is not None and close_location > 0.88 and launch_bucket in {"high_close_launch", "late_pullback_launch"}:
+        return "extreme_high_failed_launch"
+    if ma_convergence is not None and ma_convergence >= 18.0 and ma5_distance is not None and ma5_distance > 3.5:
+        return "extreme_ma_far_ma5"
+    if phase == "false_bull" and warning_level >= 2 and ma_convergence is not None and ma_convergence >= 18.0:
+        return "false_bull_extreme_ma"
+    if warning_level >= 3 and ma5_distance is not None and ma5_distance > 8.0:
+        return "risk_day_extreme_ma5_distance"
+    if ma5_distance is not None and ma5_distance > 3.5 and launch_bucket == "unconfirmed_buildup" and not active:
+        return "stale_unconfirmed_far_ma5"
+    return None
+
+
+def _is_candidate_tail_risk_blocked(evidence: dict[str, Any]) -> bool:
+    setup = str(evidence.get("entry_setup") or evidence.get("setup_primary") or evidence.get("setup_type") or "")
+    family = str(evidence.get("setup_family") or "")
+    phase = str(evidence.get("dynamic_market_regime") or "")
+    launch_bucket = str(
+        evidence.get("low_suction_launch_quality_bucket")
+        or low_suction_launch_quality_bucket(evidence)
+        or ""
+    )
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    is_dragon = setup == "dragon_pullback" or family == "dragon_pullback"
+    if _mainline_momentum_strength(evidence) >= 4.0:
+        return False
+    if is_dragon and launch_bucket == "high_close_launch" and phase in {"choppy_rotation", "false_bull"}:
+        return True
+    if (
+        is_dragon
+        and phase in {"choppy_rotation", "false_bull"}
+        and close_location is not None
+        and close_location > 0.82
+        and volume_ratio is not None
+        and 0.8 <= volume_ratio <= 1.6
+        and ma_convergence is not None
+        and ma_convergence >= 6.0
+    ):
+        return True
+    return False
+
+
+def _mainline_momentum_strength(evidence: dict[str, Any]) -> float:
+    recent_limit_up = bool(
+        evidence.get("recent_limit_up_20d")
+        or evidence.get("limit_up_count_20d")
+        or evidence.get("near_limit_up_count_20d")
+    )
+    large_bull_count = _float_or_none(evidence.get("large_bull_count_20d")) or 0.0
+    near_limit_up_count = _float_or_none(evidence.get("near_limit_up_count_20d")) or 0.0
+    consecutive_bull_closes = _float_or_none(evidence.get("consecutive_bull_closes")) or 0.0
+    theme_strength = _float_or_none(evidence.get("theme_strength"))
+    liquidity = _float_or_none(evidence.get("liquidity_score"))
+    score = 0.0
+    if recent_limit_up:
+        score += 1.6
+    score += min(large_bull_count, 6.0) * 0.55
+    score += min(near_limit_up_count, 5.0) * 0.25
+    if consecutive_bull_closes >= 4:
+        score += 0.8
+    if evidence.get("persistent_volume_expansion") or evidence.get("upward_gap_in_leg"):
+        score += 0.5
+    if theme_strength is not None and theme_strength >= 70:
+        score += 0.6
+    if liquidity is not None and liquidity >= 70:
+        score += 0.4
+    return score
+
+
+def _has_weekly_top_fractal_risk(evidence: dict[str, Any]) -> bool:
+    if bool(evidence.get("weekly_top_fractal_risk")):
+        return True
+    flags = evidence.get("risk_flags")
+    if isinstance(flags, list):
+        return "weekly_top_fractal_risk" in flags
+    return "weekly_top_fractal_risk" in str(flags or "")
+
+
+def _top20_day_candidate_features(evidence: dict[str, Any]) -> dict[str, bool]:
+    launch_bucket = str(
+        evidence.get("low_suction_launch_quality_bucket")
+        or low_suction_launch_quality_bucket(evidence)
+        or ""
+    )
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    ma5_distance = _float_or_none(evidence.get("ma5_distance_pct"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    low_suction_days = _float_or_none(evidence.get("low_suction_days")) or 0.0
+    active = _mainline_momentum_strength(evidence) >= 3.0 or bool(evidence.get("recent_limit_up_20d"))
+    low_mid_close = close_location is not None and close_location < 0.58
+    high_close = close_location is not None and close_location > 0.75
+    weak_launch = launch_bucket in {
+        "high_close_launch",
+        "thin_volume_launch",
+        "other_confirmed_launch",
+        "repeated_launch",
+        "unconfirmed_buildup",
+    }
+    healthy_volume = volume_ratio is None or 0.65 <= volume_ratio <= 2.3
+    active_low_mid_acceptance = bool(
+        active
+        and low_mid_close
+        and ma_convergence is not None
+        and 3.0 <= ma_convergence <= 18.0
+        and (ma5_distance is None or ma5_distance <= 3.5)
+        and healthy_volume
+    )
+    active_high_weak_launch = bool(active and high_close and weak_launch)
+    stale_quiet = bool(
+        low_suction_days >= 6
+        and not active
+        and launch_bucket not in {"balanced_first_lift", "late_pullback_launch", "other_confirmed_launch"}
+    )
+    return {
+        "active": active,
+        "low_mid_close": low_mid_close,
+        "high_close": high_close,
+        "weak_launch": weak_launch,
+        "active_low_mid_acceptance": active_low_mid_acceptance,
+        "active_high_weak_launch": active_high_weak_launch,
+        "stale_quiet": stale_quiet,
+    }
+
+
+def _top20_day_quality_profile(
+    count: int,
+    profile: str,
+    active_ratio: float,
+    low_mid_ratio: float,
+    high_ratio: float,
+    weak_launch_ratio: float,
+    active_low_mid_ratio: float,
+    notes: list[str],
+    *,
+    quality_score: float = 0.0,
+) -> dict[str, Any]:
+    return {
+        "count": count,
+        "profile": profile,
+        "quality_score": round(quality_score, 4),
+        "active_ratio": active_ratio,
+        "low_mid_ratio": low_mid_ratio,
+        "high_ratio": high_ratio,
+        "weak_launch_ratio": weak_launch_ratio,
+        "active_low_mid_ratio": active_low_mid_ratio,
+        "notes": notes,
+        "no_future_data": True,
+    }
+
+
+def _low_suction_buildup_quality(evidence: dict[str, Any]) -> dict[str, Any]:
+    setup = str(evidence.get("entry_setup") or evidence.get("setup_primary") or evidence.get("setup_type") or "")
+    family = str(evidence.get("setup_family") or "")
+    low_suction_days = _float_or_none(evidence.get("low_suction_days")) or 0.0
+    has_low_suction_context = (
+        setup == "stealth_low_suction"
+        or family in {"low_suction_buildup", "low_suction_first_lift", "dragon_low_suction_overlap"}
+        or low_suction_days >= 3
+    )
+    if not has_low_suction_context:
+        return {"eligible": False, "score": 0.0, "profile": "not_low_suction", "notes": []}
+
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    ma5_distance = _float_or_none(evidence.get("ma5_distance_pct"))
+    ma10_distance = _float_or_none(evidence.get("ma10_distance_pct"))
+    ma20_distance = _float_or_none(evidence.get("ma20_distance_pct"))
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    risk_penalty = _float_or_none(evidence.get("risk_penalty")) or 0.0
+    notes: list[str] = []
+    score = 0.0
+
+    if low_suction_days < 3:
+        notes.append("低吸蓄势不足：连续低吸天数少于3天")
+        return {"eligible": False, "score": 0.0, "profile": "insufficient_buildup_days", "notes": notes}
+    if low_suction_days <= 5:
+        score += 1.4
+        notes.append("低吸蓄势质量：3-5天蓄势不过久")
+    elif low_suction_days <= 7:
+        score += 0.9
+        notes.append("低吸蓄势质量：蓄势较充分")
+    else:
+        score += 0.2
+        notes.append("低吸蓄势收敛：蓄势过久，权重降低")
+
+    if ma_convergence is not None:
+        if ma_convergence <= 2.5:
+            score += 1.6
+            notes.append("低吸蓄势质量：均线高度收敛")
+        elif ma_convergence <= 4.0:
+            score += 1.1
+            notes.append("低吸蓄势质量：均线收敛良好")
+        elif ma_convergence <= 5.5:
+            score += 0.4
+            notes.append("低吸蓄势质量：均线收敛可接受")
+        else:
+            notes.append("低吸蓄势不足：均线仍偏发散")
+            return {"eligible": False, "score": 0.0, "profile": "loose_moving_averages", "notes": notes}
+
+    distance_score = _low_suction_ma_distance_score(ma5_distance, ma10_distance, ma20_distance)
+    if distance_score <= 0:
+        notes.append("低吸蓄势不足：价格没有贴近关键均线承接")
+        return {"eligible": False, "score": 0.0, "profile": "away_from_support_ma", "notes": notes}
+    score += distance_score
+    notes.append("低吸蓄势质量：价格贴近5/10/20日均线承接")
+
+    if volume_ratio is not None:
+        if 0.65 <= volume_ratio <= 1.15:
+            score += 1.0
+            notes.append("低吸蓄势质量：量能温和可控")
+        elif 0.55 <= volume_ratio < 0.65 or 1.15 < volume_ratio <= 1.35:
+            score += 0.3
+            notes.append("低吸蓄势质量：量能基本可接受")
+        else:
+            notes.append("低吸蓄势不足：量能过弱或放量偏急")
+            return {"eligible": False, "score": 0.0, "profile": "poor_buildup_volume", "notes": notes}
+
+    if close_location is not None:
+        if close_location <= 0.45:
+            score += 0.5
+            notes.append("低吸蓄势质量：收盘仍有分歧，不追高")
+        elif close_location <= 0.68:
+            score += 0.3
+            notes.append("低吸蓄势质量：收盘位置不过热")
+        elif close_location > 0.80:
+            notes.append("低吸蓄势不足：收盘过高，容易变成追涨")
+            return {"eligible": False, "score": 0.0, "profile": "high_close_not_buildup", "notes": notes}
+
+    if latest_change is not None:
+        if -1.5 <= latest_change <= 4.5:
+            score += 0.4
+            notes.append("低吸蓄势质量：当日涨跌幅仍在可低吸区")
+        elif latest_change > 6.5:
+            notes.append("低吸蓄势不足：当日涨幅过大")
+            return {"eligible": False, "score": 0.0, "profile": "overheated_signal_day", "notes": notes}
+
+    if evidence.get("key_support_break_risk") or evidence.get("volume_stall_risk"):
+        notes.append("低吸蓄势不足：存在破位或放量滞涨风险")
+        return {"eligible": False, "score": 0.0, "profile": "blocked_by_structure_risk", "notes": notes}
+    if evidence.get("high_level_sideways_distribution_risk") and risk_penalty >= 8:
+        notes.append("低吸蓄势不足：高位横盘派发风险较重")
+        return {"eligible": False, "score": 0.0, "profile": "blocked_by_distribution_risk", "notes": notes}
+
+    return {"eligible": True, "score": min(score, 6.0), "profile": "clean_low_suction_buildup", "notes": notes}
+
+
+def _low_suction_ma_distance_score(
+    ma5_distance: float | None,
+    ma10_distance: float | None,
+    ma20_distance: float | None,
+) -> float:
+    score = 0.0
+    if ma5_distance is not None and -1.2 <= ma5_distance <= 2.8:
+        score += 0.7
+    if ma10_distance is not None and -1.5 <= ma10_distance <= 3.2:
+        score += 0.6
+    if ma20_distance is not None and -2.0 <= ma20_distance <= 4.0:
+        score += 0.6
+    return min(score, 1.5)
+
+
+def _low_suction_buildup_weekly_relief(quality: dict[str, Any], evidence: dict[str, Any]) -> float:
+    if not _has_weekly_top_fractal_risk(evidence):
+        return 0.0
+    if not quality["eligible"] or float(quality["score"]) < 4.2:
+        return 0.0
+    if evidence.get("key_support_break_risk") or evidence.get("volume_stall_risk"):
+        return 0.0
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    if close_location is not None and close_location > 0.72:
+        return 0.0
+    if volume_ratio is not None and not (0.55 <= volume_ratio <= 1.25):
+        return 0.0
+    if ma_convergence is not None and ma_convergence > 4.5:
+        return 0.0
+    return 0.4
 
 
 def entry_launch_risk_penalty_adjustment(evidence: dict[str, Any]) -> float:

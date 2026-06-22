@@ -56,3 +56,4 @@ memory/06_backtests/*.png
 memory/06_backtests/*_raw.json
 memory/06_backtests/*.csv
 memory/06_backtests/*.log
+memory/06_backtests/cache/

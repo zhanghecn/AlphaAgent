@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import random
+import time
 from collections import defaultdict
 from dataclasses import replace
 from datetime import date, timedelta
 from math import sqrt
 from statistics import mean, pstdev
+from threading import RLock
 from typing import Any
 
 from sqlalchemy import and_, desc, func, select, text
@@ -58,6 +60,10 @@ SUPPORTED_BACKTEST_MINUTE_INTERVALS = execution_models.SUPPORTED_BACKTEST_MINUTE
 SUPPORTED_EXECUTION_MODELS = execution_models.SUPPORTED_EXECUTION_MODELS
 BACKTEST_LOOKBACK_DAYS = 160
 FACTOR_AUDIT_CACHE_SCHEMA_VERSION = 4
+CANDIDATE_TRADE_QUALITY_CACHE_TTL_SECONDS = 10 * 60
+CANDIDATE_TRADE_QUALITY_CACHE_MAX_ITEMS = 16
+_candidate_trade_quality_cache: dict[tuple[int, int, int, date | None, date | None], tuple[float, dict[str, Any]]] = {}
+_candidate_trade_quality_cache_lock = RLock()
 
 
 def run_backtest(params: BacktestParams) -> dict[str, Any]:
@@ -395,7 +401,7 @@ def backtest_signal_events(
         "run_type": _run_type_from_params(run.get("params") or {}),
         "items": [_mapping_to_api(row) for row in named_rows],
         "returned_count": len(rows),
-        "note": "旧回测未生成全股票信号计划，请重跑组合回测。" if not rows else None,
+        "note": "旧回测未生成全股票信号计划，请重跑该区间的回测诊断。" if not rows else None,
     }
 
 
@@ -1239,6 +1245,10 @@ def backtest_candidate_trade_quality_report(
     _ensure_backtest_schema()
     rank_cutoff = min(max(int(rank_limit or 100), 1), 200)
     sample_cutoff = min(max(int(sample_limit or 500), 1), 1000)
+    cache_key = (int(backtest_id), rank_cutoff, sample_cutoff, start_date, end_date)
+    cached = _candidate_trade_quality_cache_get(cache_key)
+    if cached is not None:
+        return {**cached, "quality_cache": "hit"}
     cache = ensure_factor_audit_cache(backtest_id, limit=20000)
     if cache.get("status") not in {"ready", "empty"}:
         return {**cache, "items": []}
@@ -1250,13 +1260,15 @@ def backtest_candidate_trade_quality_report(
         lower = max([day for day in [run_row["start_date"], start_date] if day is not None])
         upper = min([day for day in [run_row["end_date"], end_date] if day is not None])
         if lower > upper:
-            return {
+            report = {
                 "status": "empty",
                 "backtest_id": backtest_id,
                 "items": [],
                 "summary": candidate_trade_quality_report_from_results([], rank_limit=rank_cutoff, sample_limit=sample_cutoff)["summary"],
                 "message": "date range has no overlap with backtest window",
             }
+            _candidate_trade_quality_cache_set(cache_key, report)
+            return {**report, "quality_cache": "miss"}
         snapshot_rows = session.execute(
             select(schema.backtest_factor_snapshots, schema.backtest_factor_outcomes.c.payload.label("outcome_payload"))
             .outerjoin(
@@ -1305,7 +1317,7 @@ def backtest_candidate_trade_quality_report(
         for cluster in clusters
     ]
     report = candidate_trade_quality_report_from_results(results, rank_limit=rank_cutoff, sample_limit=sample_cutoff)
-    return {
+    payload = {
         **report,
         "backtest_id": backtest_id,
         "start_date": lower.isoformat(),
@@ -1320,6 +1332,34 @@ def backtest_candidate_trade_quality_report(
             "source_candidate_count": len(candidate_items),
         },
     }
+    _candidate_trade_quality_cache_set(cache_key, payload)
+    return {**payload, "quality_cache": "miss"}
+
+
+def _candidate_trade_quality_cache_get(
+    key: tuple[int, int, int, date | None, date | None],
+) -> dict[str, Any] | None:
+    now = time.monotonic()
+    with _candidate_trade_quality_cache_lock:
+        cached = _candidate_trade_quality_cache.get(key)
+        if cached is None:
+            return None
+        created_at, payload = cached
+        if now - created_at > CANDIDATE_TRADE_QUALITY_CACHE_TTL_SECONDS:
+            _candidate_trade_quality_cache.pop(key, None)
+            return None
+        return dict(payload)
+
+
+def _candidate_trade_quality_cache_set(
+    key: tuple[int, int, int, date | None, date | None],
+    payload: dict[str, Any],
+) -> None:
+    with _candidate_trade_quality_cache_lock:
+        _candidate_trade_quality_cache[key] = (time.monotonic(), dict(payload))
+        while len(_candidate_trade_quality_cache) > CANDIDATE_TRADE_QUALITY_CACHE_MAX_ITEMS:
+            oldest_key = min(_candidate_trade_quality_cache, key=lambda item: _candidate_trade_quality_cache[item][0])
+            _candidate_trade_quality_cache.pop(oldest_key, None)
 
 
 def backtest_performance_attribution_report(
@@ -2028,9 +2068,7 @@ def _score_day(
     score_cache: dict[date, list[Any]] | None = None,
     score_context: ScoreContext | None = None,
 ):
-    needs_market_context = params.enable_low_suction_market_risk_penalty
-    needs_market_context = needs_market_context or params.enable_phase_aware_setup_selector
-    if needs_market_context and (score_cache is None or trade_date not in score_cache):
+    if _params_need_market_context(params) and score_cache is not None and trade_date in score_cache:
         score_cache = _score_cache_with_market_context(session, score_cache, trade_date)
     return scoring.score_day(
         session,
@@ -2064,9 +2102,28 @@ def _score_candidates_for_day(
         load_lhb_scores=_load_lhb_scores,
         financial_scores_from_context=_financial_scores_from_context,
     )
-    if params.enable_low_suction_market_risk_penalty or params.enable_phase_aware_setup_selector:
+    if _params_need_market_context(params):
         _attach_scores_market_context(session, scores, trade_date)
     return scores
+
+
+def _params_need_market_context(params: BacktestParams) -> bool:
+    return bool(
+        params.enable_low_suction_market_risk_penalty
+        or params.enable_phase_aware_setup_selector
+        or params.enable_market_adaptive_setup_weighting
+        or params.enable_low_suction_buildup_quality_lane
+        or params.enable_candidate_tail_risk_penalty
+        or params.enable_mainline_momentum_lane
+        or params.enable_mainline_momentum_risk_control
+        or params.enable_mainline_momentum_hard_filter
+        or params.enable_surge_quality_lane
+        or params.enable_top20_day_quality_gate
+        or params.enable_weekly_top_fractal_relief
+        or params.enable_pure_loss_weak_bucket_penalty
+        or params.enable_selective_setup_quality_lane
+        or params.enable_low_suction_false_launch_watch_gate
+    )
 
 
 def _load_score_cache_from_persisted_signals(
@@ -2135,7 +2192,7 @@ def _load_score_cache_from_persisted_signals(
     if not any(by_date.values()):
         return None
 
-    if params.enable_low_suction_market_risk_penalty or params.enable_phase_aware_setup_selector:
+    if _params_need_market_context(params):
         by_date = _score_cache_with_market_context(session, by_date, *sorted(required_dates))
 
     for scores in by_date.values():
@@ -2511,13 +2568,13 @@ def _candidate_trace_summary(
 
     if buy_trades:
         status = "filled"
-        summary = "组合回测已按该信号日下单并成交。"
+        summary = "组合执行链路已按该信号日下单并成交。"
     elif first_order and str(first_order.get("status") or "") == "rejected":
         status = "rejected"
-        summary = f"候选进入买入计划，但真实组合订单被拒绝：{first_order.get('reason') or 'unknown'}。"
+        summary = f"候选进入买入计划，但组合订单被拒绝：{first_order.get('reason') or 'unknown'}。"
     elif action == "WATCH":
         status = "watch_not_bought"
-        summary = "候选是 WATCH，默认组合回测不会买入观察股。"
+        summary = "候选是 WATCH，默认组合执行不会买入观察股。"
     elif recommendation and not first_signal:
         status = "candidate_not_planned"
         summary = _candidate_not_planned_summary(not_planned_context)
@@ -2589,12 +2646,12 @@ def _signal_snapshot_not_persisted_summary(context: dict[str, Any] | None) -> st
     source = str(snapshot.get("source") or "").strip()
     score_text = f"，评分 {score}" if score is not None else ""
     source_text = "落库评分快照" if source == "quant_stock_signals" else "只读逐日评分"
-    return f"{source_text}显示该日存在{label}{score_text}，但当前组合回测的候选/理论计划链路没有对应记录；需要重建该日期候选缓存或核查候选到计划对齐。"
+    return f"{source_text}显示该日存在{label}{score_text}，但当前回测诊断的候选/理论计划链路没有对应记录；需要重建该日期候选缓存或核查候选到计划对齐。"
 
 
 def _candidate_planned_not_ordered_summary(context: dict[str, Any] | None, equity_row: dict[str, Any] | None) -> str:
     if not context:
-        return "理论信号存在，但没有找到对应真实组合订单，通常是组合资金、仓位或回测链路未记录完整。"
+        return "理论信号存在，但没有找到对应组合订单，通常是组合资金、仓位或回测链路未记录完整。"
     rank = _safe_int_or_none(context.get("target_signal_rank"))
     execution_rank = _safe_int_or_none(context.get("target_execution_candidate_rank"))
     candidate_limit = _safe_int_or_none(context.get("candidate_limit"))
@@ -2607,15 +2664,15 @@ def _candidate_planned_not_ordered_summary(context: dict[str, Any] | None, equit
         if position_count is not None and max_positions is not None and position_count >= max_positions:
             setup_text = f"{_setup_type_label(setup)}" if setup else ""
             return f"理论{setup_text}信号已进入{lane_text}执行池第 {execution_rank} 名，但执行日组合已满仓 {position_count}/{max_positions}，且未触发换仓规则。"
-        return f"理论信号已进入{lane_text}执行池第 {execution_rank} 名，但没有找到对应真实组合订单；请核查执行日涨跌停、持仓上限和订单记录。"
+        return f"理论信号已进入{lane_text}执行池第 {execution_rank} 名，但没有找到对应组合订单；请核查执行日涨跌停、持仓上限和订单记录。"
     if execution_rank is None and candidate_limit is not None and context.get("target_execution_candidate_selected") is False:
-        return f"理论{_setup_type_label(setup)}信号存在，但{lane_text}没有进入组合执行前 {candidate_limit} 名，因此没有下真实订单。"
+        return f"理论{_setup_type_label(setup)}信号存在，但{lane_text}没有进入组合执行前 {candidate_limit} 名，因此没有下组合订单。"
     if rank is not None and candidate_limit is not None and rank > candidate_limit:
-        return f"理论信号存在，但当日理论买入排名第 {rank}，超过组合执行前 {candidate_limit} 名，因此没有下真实订单。"
+        return f"理论信号存在，但当日理论买入排名第 {rank}，超过组合执行前 {candidate_limit} 名，因此没有下组合订单。"
     if position_count is not None and max_positions is not None and position_count >= max_positions:
         setup_text = f"{_setup_type_label(setup)}" if setup else ""
         return f"理论{setup_text}信号存在，但执行日组合已满仓 {position_count}/{max_positions}，且未触发换仓规则。"
-    return "理论信号存在，但没有找到对应真实组合订单；请核查当日候选排名、持仓上限和换仓规则。"
+    return "理论信号存在，但没有找到对应组合订单；请核查当日候选排名、持仓上限和换仓规则。"
 
 
 def _setup_type_label(value: str) -> str:
@@ -4059,6 +4116,19 @@ def _params_from_run(run: dict[str, Any]) -> BacktestParams:
         enable_market_adaptive_setup_weighting=_truthy(raw_params.get("enable_market_adaptive_setup_weighting", False)),
         enable_low_suction_first_lift_bonus=_truthy(raw_params.get("enable_low_suction_first_lift_bonus", False)),
         enable_low_suction_lifecycle_ranking=_truthy(raw_params.get("enable_low_suction_lifecycle_ranking", False)),
+        enable_low_suction_buildup_quality_lane=_truthy(raw_params.get("enable_low_suction_buildup_quality_lane", False)),
+        enable_candidate_tail_risk_penalty=_truthy(raw_params.get("enable_candidate_tail_risk_penalty", False)),
+        enable_mainline_momentum_lane=_truthy(raw_params.get("enable_mainline_momentum_lane", False)),
+        enable_mainline_momentum_risk_control=_truthy(raw_params.get("enable_mainline_momentum_risk_control", False)),
+        enable_mainline_momentum_hard_filter=_truthy(raw_params.get("enable_mainline_momentum_hard_filter", False)),
+        enable_surge_quality_lane=_truthy(raw_params.get("enable_surge_quality_lane", False)),
+        enable_top20_day_quality_gate=_truthy(raw_params.get("enable_top20_day_quality_gate", False)),
+        enable_weekly_top_fractal_relief=_truthy(raw_params.get("enable_weekly_top_fractal_relief", False)),
+        enable_pure_loss_weak_bucket_penalty=_truthy(raw_params.get("enable_pure_loss_weak_bucket_penalty", False)),
+        enable_selective_setup_quality_lane=_truthy(raw_params.get("enable_selective_setup_quality_lane", False)),
+        enable_high_risk_d2_follow_through_entry=_truthy(
+            raw_params.get("enable_high_risk_d2_follow_through_entry", False)
+        ),
         enable_dynamic_failed_launch_exit_stop=_truthy(raw_params.get("enable_dynamic_failed_launch_exit_stop", False)),
         enable_dynamic_failed_launch_replacement_quality_gate=_truthy(
             raw_params.get("enable_dynamic_failed_launch_replacement_quality_gate", False)

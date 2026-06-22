@@ -35,6 +35,7 @@ import type {
   TailWorkflowStatus,
 } from "@/api/dataSync";
 import { LoadingState } from "@/components/LoadingState";
+import DataManagementHealthTab from "./DataManagementHealthTab";
 import { cn } from "@/lib/utils";
 import {
   Database,
@@ -55,7 +56,7 @@ import {
   Trash2,
 } from "lucide-react";
 
-type TabKey = "tail" | "status" | "sources";
+type TabKey = "health" | "tail" | "status" | "sources";
 type MinuteSyncMode = "backtest_gaps" | "recent";
 type MinuteGapProvider = "akshare" | "tdx" | "tushare";
 
@@ -88,13 +89,14 @@ const DEFAULT_MINUTE_SYNC_FORM: MinuteSyncFormState = {
 };
 
 const TABS: { key: TabKey; label: string; icon: typeof Database }[] = [
+  { key: "health", label: "数据健康", icon: Activity },
   { key: "tail", label: "尾盘准备", icon: Clock },
   { key: "status", label: "数据状态", icon: Database },
   { key: "sources", label: "数据源", icon: Server },
 ];
 
 export default function DataManagementPage() {
-  const [activeTab, setActiveTab] = useState<TabKey>("tail");
+  const [activeTab, setActiveTab] = useState<TabKey>("health");
 
   return (
     <div className="space-y-4">
@@ -123,6 +125,7 @@ export default function DataManagementPage() {
       </div>
 
       {/* Tab content */}
+      {activeTab === "health" && <DataManagementHealthTab />}
       {activeTab === "tail" && <TailWorkflowTab />}
       {activeTab === "status" && <StatusTab />}
       {activeTab === "sources" && <SourcesTab />}
@@ -1216,7 +1219,7 @@ function syncRunParamsText(run: SyncRunItem): string {
   return keys.slice(0, 4).map((key) => `${key}=${String(params[key])}`).join(" · ");
 }
 
-function SummaryCard({
+export function SummaryCard({
   label,
   value,
   className,
@@ -1260,7 +1263,7 @@ function DataHealthPanel({
   );
 }
 
-function BatchProgress({ batch, isStarting }: { batch: SyncBatchStatus | null | undefined; isStarting: boolean }) {
+export function BatchProgress({ batch, isStarting }: { batch: SyncBatchStatus | null | undefined; isStarting: boolean }) {
   const [openJobs, setOpenJobs] = useState<Record<string, boolean>>({});
 
   if (isStarting && !batch) {
@@ -1470,7 +1473,7 @@ function formatSampleValue(value: SyncProgressSample[string]): string {
   return String(value ?? "");
 }
 
-function formatDateTime(value: string | null | undefined): string | null {
+export function formatDateTime(value: string | null | undefined): string | null {
   if (!value) return null;
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return value;
@@ -1513,7 +1516,7 @@ function formatStatusLabel(status: string): string {
   return labels[status] ?? status;
 }
 
-function DataNotice({ title, message, action }: { title: string; message: string; action: string }) {
+export function DataNotice({ title, message, action }: { title: string; message: string; action: string }) {
   return (
     <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm dark:border-amber-500/30 dark:bg-amber-500/10">
       <div className="font-medium text-amber-900 dark:text-amber-200">{title}</div>
@@ -1523,7 +1526,7 @@ function DataNotice({ title, message, action }: { title: string; message: string
   );
 }
 
-function RunStatusBadge({ status }: { status: string | null | undefined }) {
+export function RunStatusBadge({ status }: { status: string | null | undefined }) {
   if (!status) return <span className="text-xs text-muted-foreground">--</span>;
 
   const Icon =

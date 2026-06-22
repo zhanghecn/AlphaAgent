@@ -80,6 +80,22 @@ ADMIN_PASSWORD=x JWT_SECRET=$(openssl rand -hex 32) GATEWAY_PORT=18888 \
 
 ## Quant Debug
 
+统一策略测试通道：
+
+```bash
+uv run pytest tests/alphaagent/test_quant_strategy_acceptance.py -q
+```
+
+说明：
+
+- 当前 shell 没有 `DATABASE_URL` 时会跳过；连接本地 Docker PostgreSQL 时设置 `DATABASE_URL=postgresql+psycopg://...@<postgres-ip>:5432/alphaagent`。
+- 快速通道默认使用本地最新交易日窗口和小股票池，验证当前公开策略链路、no-cache 假设和基础指标，适合每次策略更新前先跑。
+- 完整慢测需显式设置 `ALPHAAGENT_RUN_FULL_STRATEGY_ACCEPTANCE=1`，使用本地 `stock_daily_bars` 最早/最新交易日作为回测起止，并对比 `baseline_only=true` 选出的历史产品基线。
+- 完整慢测还会做候选日 top10 cohort 对比：只比较同一候选日的当前策略 top10 与产品基线 top10，D+1 开盘独立入场并按当前策略卖点逐日退出；最终断言看所有共同候选日的整体路径汇总，不只数单日胜负。
+- 降低 `ALPHAAGENT_FULL_ACCEPTANCE_MAX_SYMBOLS` 只用于验证测试代码路径；只有全市场默认股票池下才执行收益/胜率/回撤晋升门槛。
+- 可用 `ALPHAAGENT_CANDIDATE_COHORT_MAX_DATES=<N>` 限制最近 N 个候选日来验证候选 cohort 代码路径；正式晋升不要设置该限制。
+- 测试通道固定 `reuse_signal_cache=false`、`persist=false`、`exclude_from_product_baseline=true`，不会写入真实产品基线。
+
 核心接口：
 
 - `GET /api/quant/trading-dates`: 从本地日线表聚合真实交易日。
@@ -154,12 +170,12 @@ pnpm --dir frontend run build
 - `#190` 不给低吸固定保留名额；低吸仍在同一候选池竞争。买入 setup 仍是 `dragon_pullback` 与 `stealth_low_suction` 两个内部 setup，不作为两个公开策略。
 - `#186 / 0.1.22` 高位重复龙回头硬拒实验已验证失败并从默认代码撤回：同区间收益约 `+59.39%`、最大回撤约 `-18.13%`，弱于 `#190 / 0.1.21`。`002119.SZSE` 类重复高位龙回头风险只作为诊断证据，不作为默认硬拒买规则。
 - `stealth_low_suction` 已作为独立 setup 与 `dragon_pullback` 并列计算并进入内部 lane；红星发展 `2026-02-11/02-12`、合肥城建 `2026-04-28/04-29/04-30`、埃斯顿 `2026-04-14` 起的多日低吸蓄势可由单股逐日评分识别。
-- 东山精密 `002384.SZSE` 的 `2026-03-27` 至 `2026-04-01` 低吸段已修复：单股逐日评分显示低吸天数从 `1/2/3/4` 累计，`2026-04-01` 为可执行 `stealth_low_suction` BUY，`low_suction_launch_confirmed=true`。此前 `#175` candidate trace 显示该信号进入执行池第 `7` 名，但执行日满仓 `10/10` 且未触发换仓，所以有理论计划但没有真实订单。
+- 东山精密 `002384.SZSE` 的低吸识别已复核：`2026-03-27` 至 `2026-04-01` 低吸天数从 `1/2/3/4` 累计，`2026-04-01` 为可执行 `stealth_low_suction` BUY，`low_suction_launch_confirmed=true`。`2026-06-12` 逐日评分为 `stealth_low_suction`，低吸蓄势 `4` 天，总分 `95.81`，默认读侧和组合执行口径均为 `BUY / executable_entry_signal=true`；`low_suction_launch_confirmed=false` 只作为“低吸蓄势等待上拉”质量标签。此前 `#175` 的 `2026-04-01` candidate trace 显示该信号进入执行池第 `7` 名，但执行日满仓 `10/10` 且未触发换仓，所以有理论计划但没有真实订单；`#275` 的 `2026-06-12` 信号在 `2026-06-15` 买入成交。
 - `#165` candidate-trace 关键结论：红星发展 `2026-02-11` 全部 BUY 原始排名 `238`，但进入低吸洗盘通道执行池第 `15` 名，执行日满仓 `10/10` 且未触发换仓；合肥城建 `2026-04-28` 原始排名 `293`，进入低吸洗盘通道执行池第 `8` 名，执行日满仓 `10/10` 且未触发换仓；埃斯顿 `2026-04-14` 原始排名 `250`，仍未进入执行前 `20`。
 - 低吸执行/换仓边界：`#162 / 0.1.12` 收益约 `+30.19%`、最大回撤约 `-23.37%`，拒绝；`#163 / 0.1.13` 收益约 `+46.88%`、最大回撤约 `-16.71%`，回撤改善但收益牺牲过大，拒绝作为基线；`#165 / 0.1.15` 收益约 `+55.41%`、最大回撤约 `-21.17%`，是中间方向；`#167 / 0.1.16` 收益约 `+28.80%`，过度保守；`#168 / 0.1.17` 收益约 `+39.16%`、最大回撤约 `-27.63%`，低吸机会加分过宽，拒绝。
 - 单股逐日评分接口 `GET /api/quant/symbols/{vt_symbol}/signal-history` 会重新按历史可见日线逐日计算，适合查连续低吸状态；`GET /api/backtests/{id}/candidate-trace` 查组合计划/订单/成交链路，适合解释为什么有信号但没买。两者不能混读。
 - 当前数据库没有目标历史日期同版本 `quant_recommendations` 落库候选记录，历史候选页和组合回测信号计划仍存在数据源差异；后续应统一候选落库与回测理论计划的数据源。
-- 最新源码验证：`uv run pytest tests/alphaagent/test_quant_backtest_portfolio.py -q` 为 `319 passed, 1 warning`；`uv run pytest tests/alphaagent/test_data_sync_schedule.py tests/alphaagent/test_akshare_adapter.py -q` 最近一次为 `60 passed, 1 warning`；`compileall` 通过。API 容器健康，`/api/quant/screen-runs?limit=3` 返回当前 schema run `#5768 / 2026-06-18`；`/api/backtests?...baseline_only=true&limit=5` 返回 `#203/#194 / 0.1.21`，不返回 `#204`。
+- 最新源码验证：`uv run pytest tests/alphaagent/test_quant_backtest_portfolio.py -q` 为 `474 passed, 1 warning`；`uv run python -m compileall alphaagent/server/services/quant alphaagent/server/services/backtest alphaagent/server/api` 通过。API 容器已重建；经网关登录后的 `GET /api/quant/symbols/002384.SZSE/signal-history?start=2026-06-12&end=2026-06-12&limit=5` 返回 `2026-06-12 BUY true [] 低吸蓄势买点`。`/api/quant/screen-runs?limit=3` 返回当前 schema run `#5768 / 2026-06-18`；`/api/backtests?...baseline_only=true&limit=5` 返回 `#203/#194 / 0.1.21`，不返回 `#204`。
 - `GET /api/backtests/194/setup-market-exit-audit?lookahead_days=10` 复核：`214` 笔闭合交易，胜率约 `32.24%`，平均收益约 `+3.14%`，中位数 `-4.29%`，总实现 PnL 约 `+658,856`；`support_stop` `125` 笔合计约 `-886,040`，但同时有 `81` 笔卖后反弹、`48` 笔浮盈回吐、`45` 笔买点质量问题。下一步应先做窄口径低吸启动确认与动态卖点实验，不应直接恢复宽泛硬拒买或早期破位止损。
 - `GET /api/backtests/203/path-diagnostics?vt_symbol=600352.SSE&lookahead_days=10` 复核：该股 `2026-03-12` 是 `stealth_low_suction` 买入，但标签为 `入场环境=震荡但未回暖`、`启动诊断=启动后立即失败`、`资金流覆盖=资金流数据不足`。`002240.SZSE` 同日同类；`002443.SZSE` 是 `买后资金跟随` 后浮盈回吐，更适合卖点研究。
 - 当前新增两个研究参数但默认关闭：`require_low_suction_launch_confirmation` 要求 `stealth_low_suction` 必须确认启动才进入组合执行；`enable_mid_profit_giveback_stop` 只对 `dragon_pullback` 开启中段浮盈回撤止盈。完整持久化组合实验已完成：`#195` 中段浮盈回撤止盈收益约 `+56.10%`，`#196` 低吸启动确认硬门槛收益约 `+65.69%`，`#197` 两者同时开启收益约 `+74.44%`，均弱于 `#194`；这些实验不会进入 `baseline_only=true` 产品默认列表。继续保留研究开关默认关闭。

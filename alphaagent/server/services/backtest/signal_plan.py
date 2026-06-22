@@ -62,14 +62,14 @@ def link_signal_events_to_orders(
 
 def candidate_trace_plan_summary(reason: str) -> str:
     if reason == "missing_1430_snapshot":
-        return "理论买入信号存在，但执行日缺少 14:30 的 1 分钟快照，因此没有下真实组合订单。"
+        return "理论买入信号存在，但执行日缺少 14:30 的 1 分钟快照，因此没有下组合订单。"
     if reason == "tail_entry_not_triggered":
-        return "理论买入信号存在，但执行日 14:30 价格没有满足尾盘入场条件，因此没有下真实组合订单。"
+        return "理论买入信号存在，但执行日 14:30 价格没有满足尾盘入场条件，因此没有下组合订单。"
     if reason == "tail_exit_not_triggered":
-        return "理论卖出信号存在，但执行日 14:30 缺快照或没有满足尾盘卖出条件，因此没有下真实组合订单。"
+        return "理论卖出信号存在，但执行日 14:30 缺快照或没有满足尾盘卖出条件，因此没有下组合订单。"
     if reason:
         return f"理论信号存在，但执行计划未触发：{reason}。"
-    return "理论信号存在，但执行计划未触发，因此没有下真实组合订单。"
+    return "理论信号存在，但执行计划未触发，因此没有下组合订单。"
 
 
 def candidate_trace_diagnostics(
@@ -132,13 +132,13 @@ def candidate_trace_diagnostics(
             "id": "real_order",
             "status": "pass" if filled_orders else "warning" if rejected_orders else "info" if first_untriggered else "missing",
             "message": (
-                "真实组合订单已成交。"
+                "组合订单已成交。"
                 if filled_orders
-                else f"真实组合订单被拒绝：{rejected_orders[0].get('reason') or 'unknown'}。"
+                else f"组合订单被拒绝：{rejected_orders[0].get('reason') or 'unknown'}。"
                 if rejected_orders
                 else candidate_trace_plan_summary(first_untriggered_reason)
                 if first_untriggered
-                else "没有找到真实组合订单。"
+                else "没有找到组合订单。"
             ),
         }
     )
@@ -146,7 +146,7 @@ def candidate_trace_diagnostics(
         {
             "id": "real_trade",
             "status": "pass" if trade_rows else "missing",
-            "message": "已形成真实组合成交。" if trade_rows else "没有真实组合成交。",
+            "message": "已形成组合成交。" if trade_rows else "没有组合成交。",
         }
     )
     return diagnostics

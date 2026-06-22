@@ -28,6 +28,8 @@ from alphaagent.server.services.quant.low_suction_quality import (
 
 
 DRAGON_PULLBACK_STRATEGY_VERSION = "0.1.21"
+LOW_SUCTION_CONFIRMED_LAUNCH_BONUS = 1.2
+LOW_SUCTION_BALANCED_FIRST_LIFT_BONUS = 1.6
 
 
 @dataclass(frozen=True)
@@ -156,6 +158,11 @@ def score_dragon_pullback(
     )
     setup_type = _setup_type(features, state, failed_rules, low_suction, stealth_low_suction)
     fresh_stealth_low_suction = _fresh_stealth_low_suction(visible_bars, setup_type, effective_low_suction_days)
+    low_suction_launch_bonus = _low_suction_launch_bonus(
+        features,
+        setup_type=setup_type,
+        low_suction_days=effective_low_suction_days,
+    )
 
     dragon_total = (
         0.20 * relative_strength
@@ -182,7 +189,7 @@ def score_dragon_pullback(
         + 0.08 * liquidity
         - risk_penalty
     )
-    total = clamp_score(max(dragon_total, stealth_total))
+    total = clamp_score(max(dragon_total, stealth_total) + low_suction_launch_bonus)
     executable_low_suction = _is_executable_low_suction_buildup(features, state, failed_rules, low_suction, setup_type=setup_type)
     evidence_failed_rules = _display_failed_rules(
         failed_rules,
@@ -248,6 +255,7 @@ def score_dragon_pullback(
         fresh_stealth_low_suction=fresh_stealth_low_suction,
         dragon_total=dragon_total,
         stealth_total=stealth_total,
+        low_suction_launch_bonus=low_suction_launch_bonus,
     )
     return result
 
@@ -611,6 +619,7 @@ def _is_stealth_low_suction_setup(
     if features.low_suction_days < 3:
         return False
     launch_confirmed = _is_low_suction_launch_confirmed(features, low_suction_days=features.low_suction_days)
+    strong_launch = _is_low_suction_strong_launch(features, low_suction_days=features.low_suction_days)
     if features.ma_convergence_pct is None:
         return False
     if launch_confirmed:
@@ -620,9 +629,9 @@ def _is_stealth_low_suction_setup(
         return False
     if features.ma20_distance_pct is None or features.ma20_distance_pct < -2.5:
         return False
-    if features.volume_ratio is None or not _stealth_volume_ok(features):
+    if features.volume_ratio is None or (not _stealth_volume_ok(features) and not strong_launch):
         return False
-    if features.latest_change_pct is not None and features.latest_change_pct > 6.5:
+    if features.latest_change_pct is not None and features.latest_change_pct > 6.5 and not strong_launch:
         return False
     hard_failures = {
         "distribution_risk",
@@ -636,12 +645,17 @@ def _is_stealth_low_suction_setup(
         "key_support_break_risk",
         "volume_stall_risk",
     }
+    if strong_launch:
+        hard_failures.discard("support_acceptance")
+        hard_failures.discard("overheat")
     return not any(rule in hard_failures for rule in failed_rules)
 
 
 def _is_low_suction_launch_confirmed(features: DragonFeatures, *, low_suction_days: int) -> bool:
     """Return whether repeated absorption has its first controlled lift."""
 
+    if _is_low_suction_strong_launch(features, low_suction_days=low_suction_days):
+        return True
     if low_suction_days < 3:
         return False
     if features.latest_change_pct is None or not (0.8 <= features.latest_change_pct <= 6.2):
@@ -660,6 +674,39 @@ def _is_low_suction_launch_confirmed(features: DragonFeatures, *, low_suction_da
         or (features.ma20_distance_pct is not None and -1.0 <= features.ma20_distance_pct <= 5.5)
     )
     return bool(near_short_or_medium)
+
+
+def _is_low_suction_strong_launch(features: DragonFeatures, *, low_suction_days: int) -> bool:
+    if low_suction_days < 3:
+        return False
+    if features.latest_change_pct is None or not (6.2 < features.latest_change_pct <= 10.5):
+        return False
+    if features.close_location_in_range is None or features.close_location_in_range < 0.88:
+        return False
+    if features.volume_ratio is None or features.volume_ratio > 1.25:
+        return False
+    if features.ma_convergence_pct is None or features.ma_convergence_pct > 3.2:
+        return False
+    if features.ma20_distance_pct is None or features.ma20_distance_pct < -2.5:
+        return False
+    if features.support_hold_days < 4:
+        return False
+    return not bool(
+        _is_distribution_risk(features)
+        or features.key_support_break_risk
+        or features.volume_stall_risk
+        or features.high_level_sideways_distribution_risk
+    )
+
+
+def _low_suction_launch_bonus(features: DragonFeatures, *, setup_type: str, low_suction_days: int) -> float:
+    if setup_type != "stealth_low_suction":
+        return 0.0
+    if not _is_low_suction_launch_confirmed(features, low_suction_days=low_suction_days):
+        return 0.0
+    if _low_suction_stage(features, setup_type, low_suction_days) == "balanced_first_lift":
+        return LOW_SUCTION_BALANCED_FIRST_LIFT_BONUS
+    return LOW_SUCTION_CONFIRMED_LAUNCH_BONUS
 
 
 def _fresh_stealth_low_suction(bars: list[Bar], setup_type: str, low_suction_days: int) -> bool:
@@ -695,6 +742,7 @@ def _display_failed_rules(failed_rules: list[str], *, executable_low_suction: bo
             "reclaim_confirmation",
             "pullback_too_short",
             "pullback_too_late",
+            "overheat",
         }
         return [rule for rule in failed_rules if rule not in setup_specific_rules]
     return [rule for rule in failed_rules if rule != "reclaim_confirmation"]
@@ -933,6 +981,7 @@ def _evidence(
     fresh_stealth_low_suction: bool,
     dragon_total: float,
     stealth_total: float,
+    low_suction_launch_bonus: float,
 ) -> dict[str, object]:
     recent_limit_up = features.near_limit_up_count_20d >= 1
     consecutive_bull = features.consecutive_bull_closes >= 4
@@ -1040,6 +1089,7 @@ def _evidence(
         "smart_money_note": "fund/hot/lhb are observable proxy signals, not proof of main-force intent",
         "fresh_stealth_low_suction": fresh_stealth_low_suction,
         "low_suction_launch_confirmed": low_suction_launch_confirmed,
+        "low_suction_launch_bonus": low_suction_launch_bonus,
         "low_suction_stage": low_suction_stage,
         "low_suction_stage_label": _low_suction_stage_label(low_suction_stage),
         "low_suction_launch_quality_bucket": low_suction_quality,
@@ -1056,6 +1106,7 @@ def _evidence(
             smart_money=smart_money,
             liquidity=liquidity,
             risk_penalty=risk_penalty,
+            low_suction_launch_bonus=low_suction_launch_bonus,
         ),
         "setup_scores": {
             "dragon_pullback": round(clamp_score(dragon_total), 4),
@@ -1094,6 +1145,7 @@ def _score_breakdown(
     smart_money: float,
     liquidity: float | None,
     risk_penalty: float,
+    low_suction_launch_bonus: float,
 ) -> list[dict[str, object]]:
     rows = [
         ("相对强度", relative_strength, 0.20),
@@ -1107,6 +1159,8 @@ def _score_breakdown(
         ("资金热度", smart_money, 0.06),
         ("流动性", liquidity, 0.10),
     ]
+    if low_suction_launch_bonus:
+        rows.append(("低吸启动确认", low_suction_launch_bonus, 1.0))
     breakdown = [
         {
             "name": name,
@@ -1391,11 +1445,13 @@ def _is_weekly_top_fractal_risk(bars: list[Bar]) -> bool:
 
 
 def _weekly_bars(bars: list[Bar]) -> list[Bar]:
+    grouped: dict[tuple[int, int], list[Bar]] = {}
+    for bar in bars:
+        iso_year, iso_week, _ = bar.trade_date.isocalendar()
+        grouped.setdefault((iso_year, iso_week), []).append(bar)
     result: list[Bar] = []
-    for start in range(0, len(bars), 5):
-        chunk = bars[start : start + 5]
-        if not chunk:
-            continue
+    for key in sorted(grouped):
+        chunk = sorted(grouped[key], key=lambda item: item.trade_date)
         result.append(
             Bar(
                 trade_date=chunk[-1].trade_date,

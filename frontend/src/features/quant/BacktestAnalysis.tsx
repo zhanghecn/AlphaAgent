@@ -306,9 +306,9 @@ export function BacktestMarketAuditPanel({
     <div className="space-y-3 rounded-lg border p-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <div className="text-sm font-medium">年度 / 大盘 / 前10候选审计</div>
+          <div className="text-sm font-medium">年度 / 大盘 / 前10成交审计</div>
           <div className="mt-1 text-xs text-muted-foreground">
-            用同一回测结果检查收益是否集中在强势行情；候选胜率只统计真实成交并闭仓的前10候选。
+            用同一回测结果检查组合成交收益是否集中在强势行情；这里统计已经进入执行并闭仓的前10成交，不代表候选池整体质量。
           </div>
         </div>
         {summary && (
@@ -420,12 +420,14 @@ export function CandidateTradeQualityPanel({
         <InfoCell label="候选簇" value={formatNumber(numberValue(coverage.cluster_count) ?? summary?.sample_count, 0)} />
         <InfoCell label="纳入排名" value={formatNumber(numberValue(coverage.rank_limited_cluster_count) ?? summary?.sample_count, 0)} />
         <InfoCell label="可评价" value={formatNumber(summary?.evaluated_count, 0)} />
+        <InfoCell label="年化参考" value={formatPct(summary?.annual_return_pct)} />
         <InfoCell label="胜率" value={formatRatioPct(summary?.win_rate)} />
         <InfoCell label="平均收益" value={formatPct(summary?.average_return_pct)} />
-        <InfoCell label="中位收益" value={formatPct(summary?.median_return_pct)} />
         <InfoCell label="平均最大回撤" value={formatPct(summary?.average_max_drawdown_pct)} />
         <InfoCell label="平均持有" value={formatHoldingDays(summary?.average_holding_days)} />
       </div>
+
+      <CandidateTradeQualityYearlyTable rows={report.yearly ?? []} />
 
       <div className="grid gap-3 text-sm md:grid-cols-4">
         <InfoCell label="缺失执行" value={formatNumber(numberValue(coverage.missing_count), 0)} />
@@ -464,6 +466,47 @@ export function CandidateTradeQualityPanel({
       <div className="text-xs text-muted-foreground">
         {report.note ?? "后验收益、MFE/MAE 只作为报告标签，不进入信号评分；候选质量和真实组合收益需要分开判断。"}
       </div>
+    </div>
+  );
+}
+
+function CandidateTradeQualityYearlyTable({
+  rows,
+}: {
+  rows: NonNullable<Awaited<ReturnType<typeof fetchBacktestCandidateTradeQualityReport>>["yearly"]>;
+}) {
+  if (!rows.length) return null;
+  return (
+    <div className="overflow-hidden rounded-md border">
+      <div className="border-b px-3 py-2 text-sm font-medium">候选年度胜率</div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>年份</TableHead>
+            <TableHead className="text-right">样本</TableHead>
+            <TableHead className="text-right">胜率</TableHead>
+            <TableHead className="text-right">年化参考</TableHead>
+            <TableHead className="text-right">平均收益</TableHead>
+            <TableHead className="text-right">平均回撤</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row) => (
+            <TableRow key={String(row.year ?? row.label)}>
+              <TableCell className="font-medium">{row.label ?? row.year ?? "--"}</TableCell>
+              <TableCell className="text-right tabular-nums">{formatNumber(row.evaluated_count ?? row.sample_count, 0)}</TableCell>
+              <TableCell className="text-right tabular-nums">{formatRatioPct(row.win_rate)}</TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.annual_return_pct))}>
+                {formatPct(row.annual_return_pct)}
+              </TableCell>
+              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.average_return_pct))}>
+                {formatPct(row.average_return_pct)}
+              </TableCell>
+              <TableCell className="text-right tabular-nums text-fall">{formatPct(row.average_max_drawdown_pct)}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
     </div>
   );
 }
@@ -1727,7 +1770,7 @@ function CandidateExecutionAttributionPanel({
         <div>
           <div className="text-sm font-medium">候选执行归因</div>
           <div className="mt-1 text-xs text-muted-foreground">
-            前{attribution.max_execution_rank ?? 20}名候选与真实组合成交对应；错过收益是后验审计，不参与排名。
+            前{attribution.max_execution_rank ?? 20}名候选与组合成交对应；错过收益是后验审计，不参与排名。
           </div>
         </div>
         <div className="grid grid-cols-3 gap-3 text-right text-xs">
@@ -2216,7 +2259,7 @@ export function BacktestRealityStats({
       <InfoCell label="换手估算" value={formatPct(metrics.turnover_pct)} />
       <InfoCell label="平均仓位" value={formatPct(metrics.average_exposure_pct)} />
       <InfoCell label="最大持仓数" value={`${metrics.max_position_count}只`} />
-      <InfoCell label="买入/卖出/持仓中" value={`${metrics.buy_count} / ${metrics.sell_count} / ${metrics.open_trade_count}笔`} />
+      <InfoCell label="组合买入/卖出/持仓中" value={`${metrics.buy_count} / ${metrics.sell_count} / ${metrics.open_trade_count}笔`} />
       <InfoCell label="成交订单" value={`${metrics.filled_order_count}笔`} />
       <InfoCell label="未成交订单" value={`${metrics.rejected_order_count}笔`} />
       <InfoCell label="涨停未买" value={`${metrics.limit_up_blocked_buy_count ?? 0}笔`} />

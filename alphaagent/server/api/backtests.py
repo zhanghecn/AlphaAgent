@@ -718,6 +718,31 @@ def _params_from_payload(payload: dict[str, Any]) -> BacktestParams:
             payload.get("enable_low_suction_lifecycle_ranking"),
             default=False,
         ),
+        enable_low_suction_buildup_quality_lane=_parse_bool(
+            payload.get("enable_low_suction_buildup_quality_lane"),
+            default=False,
+        ),
+        enable_candidate_tail_risk_penalty=_parse_bool(payload.get("enable_candidate_tail_risk_penalty"), default=False),
+        enable_mainline_momentum_lane=_parse_bool(payload.get("enable_mainline_momentum_lane"), default=False),
+        enable_mainline_momentum_risk_control=_parse_bool(
+            payload.get("enable_mainline_momentum_risk_control"),
+            default=False,
+        ),
+        enable_mainline_momentum_hard_filter=_parse_bool(
+            payload.get("enable_mainline_momentum_hard_filter"),
+            default=False,
+        ),
+        enable_surge_quality_lane=_parse_bool(payload.get("enable_surge_quality_lane"), default=False),
+        enable_top20_day_quality_gate=_parse_bool(payload.get("enable_top20_day_quality_gate"), default=False),
+        enable_weekly_top_fractal_relief=_parse_bool(payload.get("enable_weekly_top_fractal_relief"), default=False),
+        enable_pure_loss_weak_bucket_penalty=_parse_bool(
+            payload.get("enable_pure_loss_weak_bucket_penalty"),
+            default=False,
+        ),
+        enable_high_risk_d2_follow_through_entry=_parse_bool(
+            payload.get("enable_high_risk_d2_follow_through_entry"),
+            default=False,
+        ),
         enable_dynamic_failed_launch_exit_stop=_parse_bool(
             payload.get("enable_dynamic_failed_launch_exit_stop"),
             default=False,

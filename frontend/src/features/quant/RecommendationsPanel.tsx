@@ -508,7 +508,7 @@ function CandidateTracePanel({
         {trace && <span className="rounded-md border px-2 py-1 text-xs">{traceStatusLabel(trace.status)}</span>}
       </div>
       {!backtestId ? (
-        <div className="rounded-md border p-3 text-sm text-muted-foreground">先运行或选择一个组合回测，再追踪候选是否真实下单。</div>
+        <div className="rounded-md border p-3 text-sm text-muted-foreground">先运行或选择一个回测诊断，再查看候选进入组合执行链路的情况。</div>
       ) : isLoading ? (
         <div className="rounded-md border p-3 text-sm text-muted-foreground">正在查询候选到订单链路...</div>
       ) : error ? (
@@ -620,7 +620,7 @@ function TraceMiniList({
 
 function TraceOrderRows({ trace }: { trace: BacktestCandidateTrace }) {
   if (trace.orders.length === 0 && trace.trades.length === 0) {
-    return <div className="rounded-md border p-3 text-sm text-muted-foreground">没有真实组合订单或成交。</div>;
+    return <div className="rounded-md border p-3 text-sm text-muted-foreground">没有组合订单或成交。</div>;
   }
   return (
     <div className="overflow-hidden rounded-lg border">

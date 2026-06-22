@@ -1424,11 +1424,19 @@ export interface CandidateTradeQualityMetricSummary {
   evaluated_count?: number | null;
   win_count?: number | null;
   win_rate?: number | null;
+  annual_return_pct?: number | null;
+  annualized_return_method?: string | null;
+  signal_day_compound_annual_return_pct?: number | null;
   average_return_pct?: number | null;
   median_return_pct?: number | null;
   average_max_drawdown_pct?: number | null;
   average_max_runup_pct?: number | null;
   average_holding_days?: number | null;
+}
+
+export interface CandidateTradeQualityYearlySummary extends CandidateTradeQualityMetricSummary {
+  year?: string | null;
+  label?: string | null;
 }
 
 export interface CandidateTradeQualityBucket extends CandidateTradeQualityMetricSummary {
@@ -1513,6 +1521,7 @@ export interface CandidateTradeQualityReport {
   by_setup_family?: CandidateTradeQualityBucket[];
   by_market_phase?: CandidateTradeQualityBucket[];
   by_exit_reason?: CandidateTradeQualityBucket[];
+  yearly?: CandidateTradeQualityYearlySummary[];
   daily_summaries?: CandidateTradeQualityDailySummary[];
   best_samples?: CandidateTradeQualitySample[];
   worst_samples?: CandidateTradeQualitySample[];
@@ -3083,6 +3092,15 @@ export function createBacktest(payload: {
   enable_market_adaptive_setup_weighting?: boolean;
   enable_low_suction_first_lift_bonus?: boolean;
   enable_low_suction_lifecycle_ranking?: boolean;
+  enable_low_suction_buildup_quality_lane?: boolean;
+  enable_candidate_tail_risk_penalty?: boolean;
+  enable_mainline_momentum_lane?: boolean;
+  enable_mainline_momentum_risk_control?: boolean;
+  enable_mainline_momentum_hard_filter?: boolean;
+  enable_surge_quality_lane?: boolean;
+  enable_weekly_top_fractal_relief?: boolean;
+  enable_pure_loss_weak_bucket_penalty?: boolean;
+  enable_high_risk_d2_follow_through_entry?: boolean;
   enable_dynamic_failed_launch_exit_stop?: boolean;
   enable_dynamic_failed_launch_replacement_quality_gate?: boolean;
   enable_failed_launch_exit_stop?: boolean;
@@ -3131,6 +3149,15 @@ export function runBacktestStrategyComparison(payload: {
   enable_market_adaptive_setup_weighting?: boolean;
   enable_low_suction_first_lift_bonus?: boolean;
   enable_low_suction_lifecycle_ranking?: boolean;
+  enable_low_suction_buildup_quality_lane?: boolean;
+  enable_candidate_tail_risk_penalty?: boolean;
+  enable_mainline_momentum_lane?: boolean;
+  enable_mainline_momentum_risk_control?: boolean;
+  enable_mainline_momentum_hard_filter?: boolean;
+  enable_surge_quality_lane?: boolean;
+  enable_weekly_top_fractal_relief?: boolean;
+  enable_pure_loss_weak_bucket_penalty?: boolean;
+  enable_high_risk_d2_follow_through_entry?: boolean;
   enable_dynamic_failed_launch_exit_stop?: boolean;
   enable_dynamic_failed_launch_replacement_quality_gate?: boolean;
   enable_failed_launch_exit_stop?: boolean;
@@ -3167,6 +3194,15 @@ export function createSymbolBacktest(payload: {
   enable_market_adaptive_setup_weighting?: boolean;
   enable_low_suction_first_lift_bonus?: boolean;
   enable_low_suction_lifecycle_ranking?: boolean;
+  enable_low_suction_buildup_quality_lane?: boolean;
+  enable_candidate_tail_risk_penalty?: boolean;
+  enable_mainline_momentum_lane?: boolean;
+  enable_mainline_momentum_risk_control?: boolean;
+  enable_mainline_momentum_hard_filter?: boolean;
+  enable_surge_quality_lane?: boolean;
+  enable_weekly_top_fractal_relief?: boolean;
+  enable_pure_loss_weak_bucket_penalty?: boolean;
+  enable_high_risk_d2_follow_through_entry?: boolean;
   enable_dynamic_failed_launch_exit_stop?: boolean;
   enable_dynamic_failed_launch_replacement_quality_gate?: boolean;
   enable_failed_launch_exit_stop?: boolean;
@@ -3213,6 +3249,15 @@ export function runStrictMinuteBacktestPipeline(payload: {
   enable_market_adaptive_setup_weighting?: boolean;
   enable_low_suction_first_lift_bonus?: boolean;
   enable_low_suction_lifecycle_ranking?: boolean;
+  enable_low_suction_buildup_quality_lane?: boolean;
+  enable_candidate_tail_risk_penalty?: boolean;
+  enable_mainline_momentum_lane?: boolean;
+  enable_mainline_momentum_risk_control?: boolean;
+  enable_mainline_momentum_hard_filter?: boolean;
+  enable_surge_quality_lane?: boolean;
+  enable_weekly_top_fractal_relief?: boolean;
+  enable_pure_loss_weak_bucket_penalty?: boolean;
+  enable_high_risk_d2_follow_through_entry?: boolean;
   enable_dynamic_failed_launch_exit_stop?: boolean;
   enable_dynamic_failed_launch_replacement_quality_gate?: boolean;
   enable_failed_launch_exit_stop?: boolean;

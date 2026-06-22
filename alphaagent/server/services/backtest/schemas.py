@@ -52,6 +52,17 @@ class BacktestParams:
     enable_market_adaptive_setup_weighting: bool = False
     enable_low_suction_first_lift_bonus: bool = False
     enable_low_suction_lifecycle_ranking: bool = False
+    enable_low_suction_buildup_quality_lane: bool = False
+    enable_candidate_tail_risk_penalty: bool = False
+    enable_mainline_momentum_lane: bool = False
+    enable_mainline_momentum_risk_control: bool = False
+    enable_mainline_momentum_hard_filter: bool = False
+    enable_surge_quality_lane: bool = False
+    enable_top20_day_quality_gate: bool = False
+    enable_weekly_top_fractal_relief: bool = False
+    enable_pure_loss_weak_bucket_penalty: bool = False
+    enable_selective_setup_quality_lane: bool = False
+    enable_high_risk_d2_follow_through_entry: bool = False
     enable_dynamic_failed_launch_exit_stop: bool = False
     enable_dynamic_failed_launch_replacement_quality_gate: bool = False
     enable_failed_launch_exit_stop: bool = False

@@ -20,6 +20,7 @@ import { fetchLimitPools } from "@/api/market";
 import {
   createSymbolBacktest,
   fetchBacktestAudit,
+  fetchBacktestCandidateTrace,
   fetchBacktestSymbolDetail,
   fetchBacktests,
   fetchLatestSymbolBacktest,
@@ -29,6 +30,7 @@ import {
   type BacktestRun,
   type BacktestAudit,
   type BacktestAuditEvent,
+  type BacktestCandidateTrace,
   type BacktestSymbolDetail,
   type BacktestTrade,
   type BacktestTradeAttribution,
@@ -262,6 +264,17 @@ export function StockDetailPage() {
     () => backtestMarkers.find((marker) => marker.id === selectedBacktestMarkerId) ?? defaultSelectedMarker(backtestMarkers),
     [backtestMarkers, selectedBacktestMarkerId]
   );
+  const selectedSignalDate = selectedBacktestMarker?.signalDate ?? null;
+  const selectedSymbolBacktestId =
+    autoCreatedSymbolBacktestReady
+      ? autoCreateReviewQuery.data?.backtest_id
+      : latestSymbolBacktestUsable ? latestSymbolBacktestId : undefined;
+  const selectedCandidateTraceQuery = useQuery({
+    queryKey: ["symbolSelectedCandidateTrace", selectedSymbolBacktestId, vtSymbol, selectedSignalDate],
+    queryFn: () => fetchBacktestCandidateTrace(Number(selectedSymbolBacktestId), vtSymbol!, selectedSignalDate!),
+    enabled: Boolean(vtSymbol && selectedSymbolBacktestId && selectedSignalDate),
+    staleTime: 60_000,
+  });
   useEffect(() => {
     setSelectedBacktestMarkerId((current) => {
       if (current && backtestMarkers.some((marker) => marker.id === current)) return current;
@@ -347,7 +360,12 @@ export function StockDetailPage() {
           selectedMarkerId={selectedBacktestMarker?.id ?? null}
           onMarkerClick={handleBacktestMarkerClick}
         />
-        <BacktestMarkerInsight marker={selectedBacktestMarker} loading={isAutoReviewLoading && backtestMarkers.length === 0} />
+        <BacktestMarkerInsight
+          marker={selectedBacktestMarker}
+          loading={isAutoReviewLoading && backtestMarkers.length === 0}
+          candidateTrace={selectedCandidateTraceQuery.data}
+          candidateTraceLoading={selectedCandidateTraceQuery.isLoading || selectedCandidateTraceQuery.isFetching}
+        />
       </div>
 
       {/* Technical indicators */}
@@ -859,7 +877,17 @@ function LatestSignalScoreSummary({
   );
 }
 
-function BacktestMarkerInsight({ marker, loading }: { marker: KlineMarker | null; loading: boolean }) {
+function BacktestMarkerInsight({
+  marker,
+  loading,
+  candidateTrace,
+  candidateTraceLoading = false,
+}: {
+  marker: KlineMarker | null;
+  loading: boolean;
+  candidateTrace?: BacktestCandidateTrace;
+  candidateTraceLoading?: boolean;
+}) {
   if (!marker) {
     return (
       <div className="mt-4 border-t pt-3 text-sm text-muted-foreground">
@@ -887,6 +915,7 @@ function BacktestMarkerInsight({ marker, loading }: { marker: KlineMarker | null
         <InfoCell label="执行方式" value={executionModeLabel(marker.executionMode)} />
         <InfoCell label="价格" value={formatPrice(marker.price)} />
         <InfoCell label="收益率" value={formatPct(marker.returnPct)} valueClass={priceColorClass(marker.returnPct)} />
+        <InfoCell label="对应候选" value={candidateTraceLabel(candidateTrace, candidateTraceLoading)} />
       </div>
 
       <div className="mt-3 grid gap-3 text-sm lg:grid-cols-3">
@@ -1010,6 +1039,17 @@ function candidateLabelForSignal(signal?: SymbolQuantSignalRow | null, candidate
   if (!candidate) return "未找到同日候选";
   if (candidate.trade_date !== signal.trade_date) return `最新候选 ${candidate.trade_date ?? "--"} ${candidate.action ?? "--"} #${candidate.rank ?? "--"}`;
   return `${candidate.action ?? "--"} #${candidate.rank ?? "--"}`;
+}
+
+function candidateTraceLabel(trace?: BacktestCandidateTrace, loading = false) {
+  if (loading) return "查询中";
+  if (!trace) return "--";
+  const action = trace.action ?? trace.recommendation?.action ?? "--";
+  const rank = trace.rank ?? trace.recommendation?.rank;
+  const score = trace.total_score ?? trace.recommendation?.total_score;
+  const scoreText = score == null ? "" : ` ${formatNumber(score, 1)}分`;
+  const rankText = rank == null ? "未进候选" : `#${rank}`;
+  return `${trace.signal_date} ${action} ${rankText}${scoreText}`;
 }
 
 function quantSignalAction(signal?: SymbolQuantSignalRow | null) {

@@ -1089,6 +1089,11 @@ def candidate_trade_quality_report_from_results(
     by_market_phase = _candidate_trade_group_metrics(evaluated, "market_phase")
     by_exit_reason = _candidate_trade_group_metrics(evaluated, "exit_reason")
     daily_summaries = _candidate_trade_daily_summaries(ranked_samples, rank_cutoff=rank_cutoff)
+    yearly_summaries = _candidate_trade_yearly_summaries(evaluated, rank_cutoff=rank_cutoff)
+    summary = _candidate_trade_metric_summary(evaluated)
+    summary["annual_return_pct"] = _candidate_trade_average_holding_annualized_return_pct(evaluated)
+    summary["annualized_return_method"] = "average_trade_return_by_average_holding_days"
+    summary["signal_day_compound_annual_return_pct"] = _candidate_trade_signal_day_compound_annualized_return_pct(evaluated)
     sorted_by_return = sorted(evaluated, key=lambda item: (_sort_float(item.get("return_pct")), str(item.get("entry_signal_date") or ""), str(item.get("vt_symbol") or "")))
     sample_cutoff = min(max(int(sample_limit or 500), 1), 1000)
     return {
@@ -1097,7 +1102,7 @@ def candidate_trade_quality_report_from_results(
         "entry_selection": "first_visible_buy",
         "rank_limit": rank_cutoff,
         "sample_limit": sample_cutoff,
-        "summary": _candidate_trade_metric_summary(evaluated),
+        "summary": summary,
         "by_rank_bucket": by_rank_bucket,
         "by_rank_limit": by_rank_limit,
         "by_daily_rank_window": by_daily_rank_window,
@@ -1105,6 +1110,7 @@ def candidate_trade_quality_report_from_results(
         "by_setup_family": by_setup_family,
         "by_market_phase": by_market_phase,
         "by_exit_reason": by_exit_reason,
+        "yearly": yearly_summaries,
         "daily_summaries": daily_summaries,
         "best_samples": list(reversed(sorted_by_return[-10:])),
         "worst_samples": sorted_by_return[:10],
@@ -1119,7 +1125,7 @@ def candidate_trade_quality_report_from_results(
         },
         "uses_future_for_label_only": True,
         "not_used_for_signal_score": True,
-        "note": "这是候选本身质量评估，不是组合收益；TopN 表示全历史每个信号日排名前 N 的独立候选交易汇总。买入只用当日可见 BUY，卖出逐日按当时可见状态触发。后验收益、MFE/MAE 只作为报告标签，不进入信号评分。",
+        "note": "这是候选本身质量评估，不是组合收益；TopN 表示全历史每个信号日排名前 N 的独立候选交易汇总。候选年化参考按平均单笔收益和平均持有天数折算，不看资金、仓位、满仓或换仓。买入只用当日可见 BUY，卖出逐日按当时可见状态触发。后验收益、MFE/MAE 只作为报告标签，不进入信号评分。",
     }
 
 
@@ -1636,6 +1642,29 @@ def _candidate_trade_daily_summaries(rows: list[dict[str, Any]], *, rank_cutoff:
     return summaries[: max(int(limit or 60), 1)]
 
 
+def _candidate_trade_yearly_summaries(rows: list[dict[str, Any]], *, rank_cutoff: int) -> list[dict[str, Any]]:
+    by_year: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        if (_int_or_none(row.get("rank")) or 10**9) > rank_cutoff:
+            continue
+        signal_date = _date_or_none(row.get("entry_signal_date"))
+        if signal_date is None:
+            continue
+        if row.get("status") not in {"closed", "open"} or _float_or_none(row.get("return_pct")) is None:
+            continue
+        by_year.setdefault(str(signal_date.year), []).append(row)
+    return [
+        {
+            "year": year,
+            "label": f"{year}年",
+            **_candidate_trade_metric_summary(year_rows),
+            "annual_return_pct": _candidate_trade_average_holding_annualized_return_pct(year_rows),
+            "signal_day_compound_annual_return_pct": _candidate_trade_signal_day_compound_annualized_return_pct(year_rows),
+        }
+        for year, year_rows in sorted(by_year.items())
+    ]
+
+
 def _candidate_trade_daily_extreme(rows: list[dict[str, Any]], *, reverse: bool) -> dict[str, Any] | None:
     if not rows:
         return None
@@ -1675,6 +1704,40 @@ def _candidate_trade_metric_summary(rows: list[dict[str, Any]]) -> dict[str, Any
         "average_max_runup_pct": round(sum(runups) / len(runups), 4) if runups else None,
         "average_holding_days": round(sum(holding_days) / len(holding_days), 4) if holding_days else None,
     }
+
+
+def _candidate_trade_average_holding_annualized_return_pct(rows: list[dict[str, Any]]) -> float | None:
+    returns = [value for row in rows if (value := _float_or_none(row.get("return_pct"))) is not None]
+    holding_days = [value for row in rows if (value := _float_or_none(row.get("holding_days"))) is not None and value > 0]
+    if not returns or not holding_days:
+        return None
+    average_return = sum(returns) / len(returns)
+    average_holding_days = sum(holding_days) / len(holding_days)
+    if average_holding_days <= 0 or 1 + average_return / 100 <= 0:
+        return None
+    return round(((1 + average_return / 100) ** (252 / average_holding_days) - 1) * 100, 4)
+
+
+def _candidate_trade_signal_day_compound_annualized_return_pct(rows: list[dict[str, Any]]) -> float | None:
+    by_date: dict[str, list[float]] = {}
+    for row in rows:
+        signal_date = str(row.get("entry_signal_date") or "")
+        value = _float_or_none(row.get("return_pct"))
+        if not signal_date or value is None:
+            continue
+        by_date.setdefault(signal_date, []).append(value)
+    if not by_date:
+        return None
+    equity = 1.0
+    for signal_date in sorted(by_date):
+        values = by_date[signal_date]
+        if not values:
+            continue
+        equity *= 1 + (sum(values) / len(values)) / 100
+    days = len(by_date)
+    if days <= 0 or equity <= 0:
+        return None
+    return round((equity ** (252 / days) - 1) * 100, 4)
 
 
 def _candidate_trade_rank_bucket(rank: int | None) -> str:
@@ -2037,7 +2100,7 @@ def _candidate_execution_attribution_row(
             cache_coverage=cache_coverage,
         )
         if not filled and not planned
-        else _candidate_plan_gap_payload("planned_not_ordered", "候选进入理论计划但没有真实下单")
+        else _candidate_plan_gap_payload("planned_not_ordered", "候选进入理论计划但没有组合订单")
         if not filled and planned and order is None
         else _candidate_plan_gap_payload("ordered_not_filled", "候选已下单但没有成交")
         if not filled and order is not None

@@ -150,6 +150,8 @@ def signal_semantics(item: SignalScore, executable: bool) -> tuple[str, str, boo
     if setup == "stealth_low_suction":
         if executable and launch_confirmed:
             return "低吸启动买点", "key_buy", True
+        if executable:
+            return "低吸蓄势买点", "key_buy", True
         return "低吸蓄势观察", "watch", False
     if setup == "dragon_pullback" and (not fresh_tail_buy or repeat_days > 0):
         return "重复龙回头观察" if not executable else "龙回头买点", "key_buy" if executable else "watch", executable
@@ -259,7 +261,7 @@ def failed_entry_rules(
     item: SignalScore,
     min_entry_score: float,
     *,
-    include_low_suction_launch_gate: bool = True,
+    include_low_suction_launch_gate: bool = False,
 ) -> list[str]:
     evidence = item.evidence or {}
     failed_rules = []

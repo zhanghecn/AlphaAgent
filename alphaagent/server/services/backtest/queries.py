@@ -5749,7 +5749,7 @@ def backtest_top_candidate_audit(
         "top_n": top_limit,
         "summary": summary,
         "items": [to_api(row) for row in response_rows],
-        "note": "候选审计只用真实成交并闭仓的候选计算胜率；未成交候选只计数量，不用未来走势伪造收益。",
+        "note": "成交审计只用组合成交并闭仓的候选计算胜率；未成交候选只计数量，不用未来走势伪造收益。",
     }
 
 

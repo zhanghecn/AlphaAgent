@@ -81,9 +81,9 @@ export function BacktestPanel({
   onAddToPortfolio?: (vtSymbol: string) => void;
 }) {
   const selectedRun = runs.find((item) => item.id === selectedId) ?? runs[0] ?? null;
-  const [activeDetailTab, setActiveDetailTab] = useState("months");
+  const [activeDetailTab, setActiveDetailTab] = useState("portfolio-diagnostics");
   const shouldLoadValidation = Boolean(selectedId && activeDetailTab === "validation");
-  const shouldLoadCandidateQuality = Boolean(selectedId && activeDetailTab === "candidate-quality");
+  const shouldLoadCandidateQuality = Boolean(selectedId);
   const shouldLoadPerformanceAttribution = Boolean(selectedId && activeDetailTab === "trades");
   const marketAuditReportQuery = useQuery({
     queryKey: ["backtestReport", selectedId, "market-audit"],
@@ -105,8 +105,8 @@ export function BacktestPanel({
     staleTime: 60_000,
   });
   const candidateTradeQualityQuery = useQuery({
-    queryKey: ["backtestCandidateTradeQualityReport", selectedId, 100, 500],
-    queryFn: () => fetchBacktestCandidateTradeQualityReport(selectedId!, { rankLimit: 100, sampleLimit: 500 }),
+    queryKey: ["backtestCandidateTradeQualityReport", selectedId, 20, 500],
+    queryFn: () => fetchBacktestCandidateTradeQualityReport(selectedId!, { rankLimit: 20, sampleLimit: 500 }),
     enabled: shouldLoadCandidateQuality,
     staleTime: 60_000,
   });
@@ -219,27 +219,26 @@ export function BacktestPanel({
               <LoadingState rows={4} />
             </div>
           ) : (
-            <EmptyState message="暂无回测报告" description="请先在候选页刷新候选并回测，系统会自动生成组合回测。" />
+            <EmptyState message="暂无回测报告" description="请先在候选页刷新候选并回测，系统会生成候选质量检测和组合诊断。" />
           )
         ) : (
           <>
-            <BacktestSummary report={report} audit={auditQuery.data} />
-            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
-              <section className="space-y-4">
-                <BacktestTradeTable backtestId={selectedId} trades={report.recent_trades ?? report.trades} total={report.trade_count} />
-                <SignalCardList trades={report.recent_trades ?? report.trades} />
-              </section>
-              <section className="space-y-4">
-                {report.extended_metrics && <BacktestRealityStats metrics={report.extended_metrics} />}
-                <BacktestSymbolTable rows={report.symbol_performance ?? []} compact onAddToPortfolio={onAddToPortfolio} />
-              </section>
-            </div>
+            <BacktestSummary
+              report={report}
+              audit={auditQuery.data}
+              candidateQuality={candidateTradeQualityQuery.data}
+              candidateQualityLoading={candidateTradeQualityQuery.isFetching}
+            />
+            <CandidateTradeQualityPanel
+              report={candidateTradeQualityQuery.data}
+              isLoading={candidateTradeQualityQuery.isFetching}
+            />
 
             <Tabs value={activeDetailTab} onValueChange={setActiveDetailTab} className="space-y-3">
               <TabsList className="h-auto rounded-none bg-transparent p-0">
                 <TabsTrigger value="validation" className="rounded-none px-3 py-2 shadow-none">验证</TabsTrigger>
+                <TabsTrigger value="portfolio-diagnostics" className="rounded-none px-3 py-2 shadow-none">组合诊断</TabsTrigger>
                 <TabsTrigger value="trades" className="rounded-none px-3 py-2 shadow-none">交易归因</TabsTrigger>
-                <TabsTrigger value="candidate-quality" className="rounded-none px-3 py-2 shadow-none">候选质量</TabsTrigger>
                 <TabsTrigger value="months" className="rounded-none px-3 py-2 shadow-none">收益分段</TabsTrigger>
               </TabsList>
               <TabsContent value="validation" className="space-y-4">
@@ -286,6 +285,18 @@ export function BacktestPanel({
                   onRun={() => strategyComparisonQuery.refetch()}
                 />
               </TabsContent>
+              <TabsContent value="portfolio-diagnostics" className="space-y-4">
+                <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+                  <section className="space-y-4">
+                    <BacktestTradeTable backtestId={selectedId} trades={report.recent_trades ?? report.trades} total={report.trade_count} />
+                    <SignalCardList trades={report.recent_trades ?? report.trades} />
+                  </section>
+                  <section className="space-y-4">
+                    {report.extended_metrics && <BacktestRealityStats metrics={report.extended_metrics} />}
+                    <BacktestSymbolTable rows={report.symbol_performance ?? []} compact onAddToPortfolio={onAddToPortfolio} />
+                  </section>
+                </div>
+              </TabsContent>
               <TabsContent value="trades" className="space-y-4">
                 <BacktestPerformanceAttributionPanel
                   report={performanceAttributionQuery.data}
@@ -294,12 +305,6 @@ export function BacktestPanel({
                 {selectedId && <BacktestDrilldownPanel backtestId={selectedId} report={report} />}
                 <BacktestSymbolTable rows={report.symbol_performance ?? []} onAddToPortfolio={onAddToPortfolio} />
                 <BacktestWorstTrades rows={report.worst_trades ?? []} />
-              </TabsContent>
-              <TabsContent value="candidate-quality" className="space-y-4">
-                <CandidateTradeQualityPanel
-                  report={candidateTradeQualityQuery.data}
-                  isLoading={candidateTradeQualityQuery.isFetching}
-                />
               </TabsContent>
               <TabsContent value="months">
                 <BacktestMonthlyTable rows={report.monthly_returns ?? []} />
@@ -341,9 +346,9 @@ function BacktestReadonlyMethod({
     <div className="rounded-lg border p-3 text-sm">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b pb-3">
         <div>
-          <div className="font-medium">当前回测口径</div>
+          <div className="font-medium">候选质量检测口径</div>
           <div className="mt-1 text-xs text-muted-foreground">
-            回测由候选页一键研究自动生成；这里仅查看结果和归因。
+            主视图先看候选 Top20 本身质量；组合持仓和成交只作为执行诊断。
           </div>
         </div>
         <div className="text-xs text-muted-foreground">
@@ -354,8 +359,8 @@ function BacktestReadonlyMethod({
         <ReadonlyCell label="策略" value={strategyName} />
         <ReadonlyCell label="区间" value={report ? `${report.start_date} 至 ${report.end_date}` : run ? `${run.start_date} 至 ${run.end_date}` : "--"} />
         <ReadonlyCell label="股票池" value={`${boards} / ${maxSymbols}只`} />
-        <ReadonlyCell label="买入规则" value={`前${candidateLimit}名`} />
-        <ReadonlyCell label="最大持仓" value={`${maxPositions}只`} />
+        <ReadonlyCell label="候选主口径" value="Top20独立评估" />
+        <ReadonlyCell label="组合诊断" value={`前${candidateLimit}名 / ${maxPositions}只`} />
         <ReadonlyCell label="执行" value={executionModel === "legacy_next_open" ? "D+1开盘" : executionModel} />
       </div>
     </div>
