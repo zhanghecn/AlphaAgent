@@ -7,6 +7,7 @@ from alphaagent.server.api.data_sources import router as data_sources_router
 from alphaagent.server.api.data_sync import router as data_sync_router
 from alphaagent.server.api.backtests import router as backtests_router
 from alphaagent.server.api.health import router as health_router
+from alphaagent.server.api.system import router as system_router
 from alphaagent.server.api.indices import router as indices_router
 from alphaagent.server.api.industry_chains import router as industry_chains_router
 from alphaagent.server.api.market import router as market_router
@@ -26,6 +27,7 @@ except ImportError:
 
 api_router = APIRouter()
 api_router.include_router(health_router)
+api_router.include_router(system_router)
 api_router.include_router(data_status_router)
 api_router.include_router(data_sources_router)
 api_router.include_router(data_sync_router)

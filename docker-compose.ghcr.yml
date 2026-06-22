@@ -1,0 +1,140 @@
+services:
+  alphaagent-gateway:
+    # ghcr 镜像模式：统一入口 + 管理员登录 + 反向代理
+    image: ghcr.io/zhanghecn/alphaagent-gateway:latest
+    pull_policy: always
+    restart: unless-stopped
+    environment:
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_TOKEN_TTL: ${JWT_TOKEN_TTL:-24h}
+      GATEWAY_PORT: "80"
+      API_UPSTREAM: http://alphaagent-api:8000
+      WEB_UPSTREAM: http://alphaagent-web:80
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${GATEWAY_PORT:-8080}:80"
+    depends_on:
+      alphaagent-api:
+        condition: service_healthy
+      alphaagent-web:
+        condition: service_started
+    networks:
+      - alphaagent-network
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/gateway", "-healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  alphaagent-api:
+    image: ghcr.io/zhanghecn/alphaagent-api:latest
+    pull_policy: always
+    restart: unless-stopped
+    command:
+      - python
+      - -m
+      - uvicorn
+      - alphaagent.server.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    environment:
+      ALPHAAGENT_ENV: ${ALPHAAGENT_ENV:-local}
+      ALPHAAGENT_API_HOST: ${ALPHAAGENT_API_HOST:-0.0.0.0}
+      ALPHAAGENT_API_PORT: ${ALPHAAGENT_API_PORT:-8000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000}
+      MARKET_TIMEOUT_SECONDS: ${MARKET_TIMEOUT_SECONDS:-8}
+      MARKET_PAGE_SIZE: ${MARKET_PAGE_SIZE:-50}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-alphaagent}:${POSTGRES_PASSWORD:-alphaagent-local}@postgres:5432/${POSTGRES_DB:-alphaagent}
+      REDIS_URL: redis://redis:6379/0
+      TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
+      TUSHARE_API_URL: ${TUSHARE_API_URL:-https://api.tushare.pro}
+      TUSHARE_TIMEOUT_SECONDS: ${TUSHARE_TIMEOUT_SECONDS:-12}
+      TZ: ${TZ:-Asia/Shanghai}
+    expose:
+      - "8000"
+    volumes:
+      - alphaagent_data:/app/data
+      - alphaagent_vntrader:/app/.vntrader
+      # one-click self-update: api runs `docker compose` against host daemon
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - alphaagent-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  alphaagent-web:
+    image: ghcr.io/zhanghecn/alphaagent-web:latest
+    pull_policy: always
+    restart: unless-stopped
+    environment:
+      # 同源经网关访问，前端用相对 /api；docker-entrypoint.sh 据此生成 config.js。
+      VITE_API_BASE_URL: /api
+      TZ: ${TZ:-Asia/Shanghai}
+    expose:
+      - "80"
+    depends_on:
+      alphaagent-api:
+        condition: service_healthy
+    networks:
+      - alphaagent-network
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      PGDATA: /var/lib/postgresql/data
+      POSTGRES_USER: ${POSTGRES_USER:-alphaagent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-alphaagent-local}
+      POSTGRES_DB: ${POSTGRES_DB:-alphaagent}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - alphaagent_postgres_data:/var/lib/postgresql/data
+    networks:
+      - alphaagent-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-alphaagent} -d ${POSTGRES_DB:-alphaagent}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    command: redis-server --save 60 1 --appendonly yes --appendfsync everysec
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - alphaagent_redis_data:/data
+    networks:
+      - alphaagent-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  alphaagent_data:
+  alphaagent_vntrader:
+  alphaagent_postgres_data:
+  alphaagent_redis_data:
+
+networks:
+  alphaagent-network:
+    driver: bridge

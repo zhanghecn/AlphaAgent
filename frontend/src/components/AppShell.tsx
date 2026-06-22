@@ -17,6 +17,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/theme/useTheme";
 import { apiClient, authToken } from "@/api/client";
+import { VersionBadge } from "@/components/VersionBadge";
 
 const NAV_ITEMS = [
   { to: "/", label: "今日市场", icon: LayoutDashboard },
@@ -105,8 +106,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         )}
       >
         <div className="aurora relative flex h-14 items-center border-b px-4">
-          {!collapsed && (
-            <span className="font-display text-lg font-bold tracking-tight">AlphaAgent</span>
+          {!collapsed ? (
+            <div className="flex flex-col leading-none">
+              <span className="font-display text-lg font-bold tracking-tight">AlphaAgent</span>
+              <VersionBadge />
+            </div>
+          ) : (
+            <VersionBadge />
           )}
           <button
             type="button"

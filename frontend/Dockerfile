@@ -36,6 +36,8 @@ CMD ["pnpm", "run", "dev", "--", "--host", "0.0.0.0"]
 FROM deps AS build
 WORKDIR /app
 COPY . .
+ARG VERSION
+ENV VITE_APP_VERSION=${VERSION:-dev}
 RUN pnpm run build
 
 FROM nginx:1.27-alpine AS runtime
