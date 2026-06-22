@@ -64,11 +64,15 @@ def _parse_version(v: str) -> tuple[int, int, int]:
 
 
 def _fetch_latest_release(force: bool = False) -> dict[str, Any] | None:
-    """Query GitHub releases/latest with a 5-min cache. Returns None on error."""
+    """Query the latest version tag via GitHub /tags API with a 5-min cache.
+
+    Uses /tags (not /releases/latest) because AlphaAgent pushes git tags for
+    releases without creating GitHub Release objects — /releases/latest 404s.
+    """
     now = time.time()
     if not force and _release_cache["data"] and now - _release_cache["ts"] < _CACHE_TTL:
         return _release_cache["data"]
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/tags?per_page=100"
     req = urllib.request.Request(
         url,
         headers={
@@ -78,15 +82,28 @@ def _fetch_latest_release(force: bool = False) -> dict[str, Any] | None:
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            tags = json.loads(resp.read().decode("utf-8"))
     except Exception:
         return None
+    if not isinstance(tags, list) or not tags:
+        return None
+    # Pick the highest semver v* tag (filters out any non-v tags).
+    v_tags = [
+        t["name"]
+        for t in tags
+        if isinstance(t, dict) and (t.get("name") or "").startswith("v")
+    ]
+    v_tags = [t for t in v_tags if _parse_version(t) > (0, 0, 0)]
+    if not v_tags:
+        return None
+    v_tags.sort(key=_parse_version, reverse=True)
+    latest = v_tags[0]
     result = {
-        "tag": data.get("tag_name", ""),
-        "name": data.get("name", ""),
-        "html_url": data.get("html_url", ""),
-        "published_at": data.get("published_at", ""),
-        "body": (data.get("body") or "")[:2000],
+        "tag": latest,
+        "name": latest,
+        "html_url": f"https://github.com/{GITHUB_REPO}/releases/tag/{latest}",
+        "published_at": "",
+        "body": "",
     }
     _release_cache["data"] = result
     _release_cache["ts"] = now
