@@ -130,22 +130,30 @@ def _current_op() -> str | None:
         return _op_name
 
 
-def _run_compose(args: list[str], timeout: int = 600) -> tuple[bool, str]:
-    """Run a whitelisted `docker compose -f <file> <args>` in DEPLOY_DIR.
+# 一次性容器跑 compose：避免 api 自己跑 `up` 重建自己时被 stop 杀掉中断(self-update 自杀)。
+COMPOSE_RUNNER_IMAGE = os.environ.get("ALPHAAGENT_COMPOSE_IMAGE", "docker:27-cli")
 
-    Args are fixed internally (never concatenated from user input) to prevent
-    command injection. The Docker daemon takes over once the request reaches
-    it, so even if this process is killed during `up`, the deploy completes.
+
+def _run_compose(args: list[str], timeout: int = 900) -> tuple[bool, str]:
+    """Run a whitelisted `docker compose` via a short-lived throwaway container.
+
+    Critical: compose must NOT run inside the api container itself, because
+    `up` recreates the api container and would kill the compose process mid-
+    update (self-update suicide → api exits). Instead we launch a throwaway
+    container (docker:27-cli) that talks to the host daemon over the socket;
+    it survives the api recreation and finishes the deploy. Args are fixed
+    (never concatenated from user input) to prevent injection.
     """
-    cmd = ["docker", "compose", "-f", COMPOSE_FILE, *args]
+    cmd = [
+        "docker", "run", "--rm",
+        "-v", "/var/run/docker.sock:/var/run/docker.sock",
+        "-v", f"{DEPLOY_DIR}:{DEPLOY_DIR}",
+        "-w", DEPLOY_DIR,
+        COMPOSE_RUNNER_IMAGE,
+        "compose", "-f", COMPOSE_FILE, *args,
+    ]
     try:
-        proc = subprocess.run(
-            cmd,
-            cwd=DEPLOY_DIR,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         output = (proc.stdout or "") + (proc.stderr or "")
         return proc.returncode == 0, output[-2000:]
     except FileNotFoundError:
