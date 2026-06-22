@@ -62,6 +62,9 @@ services:
       - alphaagent_vntrader:/app/.vntrader
       # one-click self-update: api runs `docker compose` against host daemon
       - /var/run/docker.sock:/var/run/docker.sock
+      # mount host deploy dir to SAME path inside api, so compose (run via sock)
+      # resolves bind-mount sources against the host path namespace correctly
+      - /opt/1panel/project/AlphaAgent:/opt/1panel/project/AlphaAgent
     depends_on:
       postgres:
         condition: service_healthy
