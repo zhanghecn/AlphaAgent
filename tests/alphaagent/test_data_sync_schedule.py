@@ -538,6 +538,94 @@ def test_daily_bars_respects_concurrency_limit(monkeypatch):
     assert len(seen) == 10
 
 
+def test_sector_members_syncs_concurrently(monkeypatch):
+    """板块成分股应并发拉取(此前纯串行 1484 板块要 ~32min,拖慢盘后批次)。"""
+    import threading
+    import time
+
+    active = {"n": 0, "peak": 0}
+    seen: list[str] = []
+    lock = threading.Lock()
+
+    class FakeAdapter:
+        def sector_stocks(self, sector_id, page=1, page_size=50, **kw):
+            with lock:
+                active["n"] += 1
+                active["peak"] = max(active["peak"], active["n"])
+            time.sleep(0.02)
+            with lock:
+                active["n"] -= 1
+                seen.append(sector_id)
+            return {"items": [{"symbol": "000001", "exchange": "SSE"}]}
+
+    class FakeResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [{"id": f"BK{i:04d}", "type": "industry", "name": f"S{i}"} for i in range(12)]
+
+    class FakeSession:
+        def execute(self, stmt):
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+    monkeypatch.setattr(svc, "_upsert_sector_memberships", lambda sid, items: 0)
+
+    svc.DataSyncRunner(adapter=FakeAdapter(), concurrency=4)._run_sync_sector_members({"page_size": 50})
+
+    assert active["peak"] >= 2, f"应并发执行,peak={active['peak']}"
+    assert len(seen) == 12
+
+
+def test_sector_daily_bars_syncs_concurrently(monkeypatch):
+    """板块历史K线应并发拉取(此前纯串行 1484 板块要 ~28min,拖慢盘后批次)。"""
+    import threading
+    import time
+
+    active = {"n": 0, "peak": 0}
+    seen: list[str] = []
+    lock = threading.Lock()
+
+    class FakeAdapter:
+        def sector_daily_bars(self, sector_id, board_type=None, limit=250):
+            with lock:
+                active["n"] += 1
+                active["peak"] = max(active["peak"], active["n"])
+            time.sleep(0.02)
+            with lock:
+                active["n"] -= 1
+                seen.append(sector_id)
+            return {"items": [{"trade_date": "2026-06-23"}], "source": "test"}
+
+    class FakeResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [{"id": f"BK{i:04d}", "type": "industry", "name": f"S{i}"} for i in range(12)]
+
+    class FakeSession:
+        def execute(self, stmt):
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+    monkeypatch.setattr(svc, "_upsert_sector_daily_bars", lambda *a, **k: 0)
+
+    svc.DataSyncRunner(adapter=FakeAdapter(), concurrency=4)._run_sync_sector_daily_bars({"limit": 250})
+
+    assert active["peak"] >= 2, f"应并发执行,peak={active['peak']}"
+    assert len(seen) == 12
+
+
 # ── Task 6: daily bars true incremental (start_date from last bar) ─
 
 

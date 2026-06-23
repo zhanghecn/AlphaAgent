@@ -577,36 +577,54 @@ class DataSyncRunner:
             sector_rows = session.execute(select(schema.sectors)).mappings().all()
         if not sector_rows:
             return {"rows_read": 0, "rows_written": 0, "message": "No sectors in DB; run sync_sector_list first."}
-        total_read = 0
-        total_written = 0
+        sector_rows = [dict(row) for row in sector_rows]
         total_sectors = len(sector_rows)
         self._report_progress("同步板块成分股", current=0, total=total_sectors)
-        for index, sector_row in enumerate(sector_rows, start=1):
+
+        lock = threading.Lock()
+        counters = {"read": 0, "written": 0, "done": 0}
+
+        def _do_one(sector_row: dict[str, Any]) -> None:
             sector_id = str(sector_row["id"])
-            sector_type = str(sector_row["type"])
             sector_name = str(sector_row.get("name") or sector_id)
             label = f"{sector_name} {sector_id}"
-            self._report_progress("读取板块成分股", current=index - 1, total=total_sectors, current_label=label, rows_read=total_read, rows_written=total_written)
             try:
                 data = self.adapter.sector_stocks(sector_id, page=1, page_size=page_size)
             except Exception as exc:
                 logger.warning("sector_stocks(%s) failed: %s", sector_id, exc)
-                self._report_progress("读取板块成分股", current=index, total=total_sectors, current_label=label, rows_read=total_read, rows_written=total_written, message=f"{sector_id} 失败：{exc.__class__.__name__}")
-                continue
+                with lock:
+                    counters["done"] += 1
+                    cur_done, cur_read, cur_written = counters["done"], counters["read"], counters["written"]
+                self._report_progress(
+                    "读取板块成分股",
+                    current=cur_done,
+                    total=total_sectors,
+                    current_label=f"{label} 失败：{exc.__class__.__name__}",
+                    rows_read=cur_read,
+                    rows_written=cur_written,
+                )
+                return
             items = data.get("items") or []
-            total_read += len(items)
             written = _upsert_sector_memberships(sector_id, items)
-            total_written += written
+            with lock:
+                counters["read"] += len(items)
+                counters["written"] += written
+                counters["done"] += 1
+                cur_done, cur_read, cur_written = counters["done"], counters["read"], counters["written"]
             self._report_progress(
                 "写入板块成分股",
-                current=index,
+                current=cur_done,
                 total=total_sectors,
                 current_label=f"{label}，{len(items)} 只",
-                rows_read=total_read,
-                rows_written=total_written,
+                rows_read=cur_read,
+                rows_written=cur_written,
                 sample_items=items,
             )
-        return {"rows_read": total_read, "rows_written": total_written}
+
+        with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
+            list(pool.map(_do_one, sector_rows))
+
+        return {"rows_read": counters["read"], "rows_written": counters["written"]}
 
     def _run_sync_stock_daily_bars(self, params: dict[str, Any]) -> dict[str, Any]:
         limit = int(params.get("limit", 250))
@@ -917,50 +935,54 @@ class DataSyncRunner:
             return {"rows_read": 0, "rows_written": 0, "message": "No sectors in DB; run sync_sector_list first."}
         if sector_limit > 0:
             sector_rows = sector_rows[:sector_limit]
-        total_read = 0
-        total_written = 0
         total_sectors = len(sector_rows)
         self._report_progress("同步板块历史 K 线", current=0, total=total_sectors)
-        for index, sector_row in enumerate(sector_rows, start=1):
+
+        lock = threading.Lock()
+        counters = {"read": 0, "written": 0, "done": 0}
+
+        def _do_one(sector_row: dict[str, Any]) -> None:
             sector_id = str(sector_row["id"])
             sector_type = str(sector_row["type"])
             sector_name = str(sector_row.get("name") or sector_id)
             label = f"{sector_name} {sector_id}"
-            self._report_progress(
-                "读取板块历史 K 线",
-                current=index - 1,
-                total=total_sectors,
-                current_label=label,
-                rows_read=total_read,
-                rows_written=total_written,
-            )
             try:
                 data = self.adapter.sector_daily_bars(sector_id, board_type=sector_type, limit=limit)
             except Exception as exc:
                 logger.debug("sector_daily_bars(%s) failed: %s", sector_id, exc)
+                with lock:
+                    counters["done"] += 1
+                    cur_done, cur_read, cur_written = counters["done"], counters["read"], counters["written"]
                 self._report_progress(
                     "读取板块历史 K 线",
-                    current=index,
+                    current=cur_done,
                     total=total_sectors,
                     current_label=f"{label} 失败：{exc.__class__.__name__}",
-                    rows_read=total_read,
-                    rows_written=total_written,
+                    rows_read=cur_read,
+                    rows_written=cur_written,
                 )
-                continue
+                return
             items = data.get("items") or []
-            total_read += len(items)
             written = _upsert_sector_daily_bars(sector_id, items, data.get("source", "akshare"))
-            total_written += written
+            with lock:
+                counters["read"] += len(items)
+                counters["written"] += written
+                counters["done"] += 1
+                cur_done, cur_read, cur_written = counters["done"], counters["read"], counters["written"]
             self._report_progress(
                 "写入板块历史 K 线",
-                current=index,
+                current=cur_done,
                 total=total_sectors,
                 current_label=f"{label}，{len(items)} 根",
-                rows_read=total_read,
-                rows_written=total_written,
+                rows_read=cur_read,
+                rows_written=cur_written,
                 sample_items=[{**item, "id": sector_id, "name": sector_name} for item in items[-3:]],
             )
-        return {"rows_read": total_read, "rows_written": total_written}
+
+        with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
+            list(pool.map(_do_one, sector_rows))
+
+        return {"rows_read": counters["read"], "rows_written": counters["written"]}
 
     def _run_sync_sector_fund_flows(self, params: dict[str, Any]) -> dict[str, Any]:
         periods = params.get("periods", ["即时"])
