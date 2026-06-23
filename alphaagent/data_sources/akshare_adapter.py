@@ -815,25 +815,22 @@ class AkShareAdapter:
             df = _eastmoney_stock_kline(symbol, normalized_exchange, interval, limit, start_date, end_date)
             return df.tail(limit), "eastmoney.stock_kline_minute"
 
-        if not start_date and not end_date:
-            try:
-                df = _tencent_stock_kline_full(symbol, normalized_exchange, interval, limit)
-                if not df.empty:
+        # 日线优先 tencent_full:实测最快(~0.1s/股)且 OHLC/volume 与 akshare 逐位一致。
+        # 仅当其返回的最早日期能覆盖 start_date 时采用;长历史回填时过滤后覆盖不足,
+        # 自动 fallback 到 eastmoney/akshare,避免漏掉 start_date 到近期之间的数据。
+        try:
+            df = _tencent_stock_kline_full(symbol, normalized_exchange, interval, max(limit, 5))
+            if not df.empty:
+                earliest = str(df["date"].min())
+                if not start_date or earliest <= _date_key(start_date):
                     return df.tail(limit), "tencent.stock_kline_full"
-            except Exception:
-                pass
+        except Exception:
+            pass
 
         try:
             df = _eastmoney_stock_kline(symbol, normalized_exchange, interval, limit, start_date, end_date)
             if not df.empty:
                 return df.tail(limit), "eastmoney.stock_kline"
-        except Exception:
-            pass
-
-        try:
-            df = _tencent_stock_kline(symbol, normalized_exchange, interval, limit)
-            if not df.empty and not start_date and not end_date:
-                return df.tail(limit), "tencent.stock_kline"
         except Exception:
             pass
 

@@ -797,3 +797,70 @@ def test_runtime_market_client_prefers_local_synced_stock_list(monkeypatch) -> N
     client = RealMarketDataClient()
 
     assert client.list_stocks(page=1, page_size=50) is local_payload
+
+
+def _kline_row(date_str: str, close: float = 1.0) -> dict:
+    from datetime import date as _date
+
+    year, month, day = (int(part) for part in date_str.split("-"))
+    return {
+        "date": _date(year, month, day),
+        "open": close,
+        "close": close,
+        "high": close,
+        "low": close,
+        "volume": 1,
+        "turnover_rate": 0.0,
+        "turnover": 0.0,
+    }
+
+
+def test_daily_bars_incremental_prefers_tencent_when_covered(monkeypatch) -> None:
+    """日线增量同步(带 start_date)在 tencent 覆盖范围内时应优先 tencent_full,避免落到慢源 akshare。
+
+    回归:盘后 eod_18h 的 sync_stock_daily_bars 走增量(start_date=上一交易日+1),
+    此前因 tencent 被硬性排除而全部 fallback 到 akshare.stock_zh_a_hist(单股 ~3s),
+    导致 4057 只股票要 ~1 小时,候选生成被拖到 21:00 之后。
+    """
+    adapter = AkShareAdapter()
+    tencent_df = pd.DataFrame([_kline_row("2026-06-16"), _kline_row("2026-06-22")])
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter._tencent_stock_kline_full",
+        lambda *args, **kwargs: tencent_df,
+    )
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter._eastmoney_stock_kline",
+        lambda *args, **kwargs: pd.DataFrame(),
+    )
+
+    def _fail_akshare_import(name, *args, **kwargs):
+        raise AssertionError("akshare 兜底不应在 tencent 覆盖 start_date 时触发")
+
+    monkeypatch.setattr("importlib.import_module", _fail_akshare_import)
+
+    _df, source = adapter._stock_bars("600519", "1d", 250, "2026-06-22", None)
+
+    assert source == "tencent.stock_kline_full"
+
+
+def test_daily_bars_long_history_skips_tencent_when_not_covering(monkeypatch) -> None:
+    """start_date 早于 tencent 返回数据的最早日期时,应跳过 tencent 走 eastmoney,避免漏掉中间历史。
+
+    tencent 只能返回近期 N 根,长历史回填必须 fallback,否则 _filter_bars_by_date(>=start_date)
+    会把近期数据全留下、漏掉 start_date 到近期之间的数据。
+    """
+    adapter = AkShareAdapter()
+    tencent_df = pd.DataFrame([_kline_row("2026-06-22")])  # tencent 只有近期一根
+    eastmoney_df = pd.DataFrame([_kline_row("2024-01-02", 2.0), _kline_row("2024-01-03", 2.0)])
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter._tencent_stock_kline_full",
+        lambda *args, **kwargs: tencent_df,
+    )
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter._eastmoney_stock_kline",
+        lambda *args, **kwargs: eastmoney_df,
+    )
+
+    _df, source = adapter._stock_bars("600519", "1d", 250, "2024-01-01", None)
+
+    assert source == "eastmoney.stock_kline"
