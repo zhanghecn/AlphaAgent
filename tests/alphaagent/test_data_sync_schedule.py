@@ -70,6 +70,25 @@ def test_eod_schedule_has_daily_bars_and_lhb_last():
     assert eod["job_ids"].index(svc.EOD_QUANT_RESEARCH_BATCH_JOB_ID) > eod["job_ids"].index("sync_index_daily_bars")
 
 
+def test_eod_schedule_runs_quant_research_before_slow_enrichment_jobs():
+    """候选生成应在基础数据(daily_bars+板块系列)就绪后立即跑,不等慢/晚 job(financial_quarterly/lhb/notices),
+    以便候选在 daily_bars 完成后尽快出炉(约 18:15-18:20)。
+
+    候选评分读 DB 已有财报评分(_load_financial_scores 按 as_of),不强依赖当次 financial_quarterly;
+    财报季度更新,用前一日 DB 数据可接受。慢/晚 job 在候选之后跑,更新供下次候选使用。
+    """
+    eod = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "eod_18h")
+    jobs = eod["job_ids"]
+    quant_idx = jobs.index(svc.EOD_QUANT_RESEARCH_BATCH_JOB_ID)
+    # 候选硬依赖:日线 + 板块主线评分数据必须在候选之前
+    assert jobs.index("sync_stock_daily_bars") < quant_idx
+    assert jobs.index("sync_sector_period_scores") < quant_idx
+    # 慢/晚增强 job 必须在候选之后,不阻塞候选出炉
+    assert jobs.index("sync_stock_financial_quarterly") > quant_idx
+    assert jobs.index("sync_stock_lhb_records") > quant_idx
+    assert jobs.index("sync_stock_notices") > quant_idx
+
+
 def test_sector_daily_bars_default_limits_slow_eod_scope():
     job = next(item for item in svc.DEFAULT_JOBS if item.id == "sync_sector_daily_bars")
 

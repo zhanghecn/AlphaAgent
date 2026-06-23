@@ -412,12 +412,12 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_sector_daily_bars",
             "sync_sector_fund_flows",
             "sync_sector_period_scores",
+            "eod_quant_research",       # 候选生成:基础数据(daily+板块)就绪即跑,读DB已有财报评分,不等慢/晚job,让候选早出
             "sync_stock_lhb_records",   # LHB publishes after 18:00 -> run late
             "sync_stock_notices",
             "sync_stock_financial_quarterly",
             "sync_stock_financial_indicators",
             "sync_stock_business_segments_history",
-            "eod_quant_research",
         ],
     },
 ]
