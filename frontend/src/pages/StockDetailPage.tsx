@@ -967,22 +967,27 @@ function StrategyTimelinePanel({
             <TableHead className="w-28">日期</TableHead>
             <TableHead>状态</TableHead>
             <TableHead className="text-right">价格</TableHead>
+            <TableHead className="text-right">量化分数</TableHead>
             <TableHead className="text-right">收益率</TableHead>
             <TableHead>原因</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {rows.map((marker) => (
-            <TableRow key={marker.id ?? `${marker.time}-${marker.side}-${marker.price ?? ""}`}>
-              <TableCell className="font-mono text-xs">{marker.time}</TableCell>
-              <TableCell>{markerBadgeLabel(marker)}</TableCell>
-              <TableCell className="text-right tabular-nums">{marker.price == null ? "--" : formatPrice(marker.price)}</TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(marker.returnPct))}>
-                {marker.returnPct == null ? "--" : formatPct(marker.returnPct)}
-              </TableCell>
-              <TableCell className="text-muted-foreground">{marker.reasonLabel ?? marker.reasonText ?? marker.reason ?? "--"}</TableCell>
-            </TableRow>
-          ))}
+          {rows.map((marker) => {
+            const score = timelineMarkerScore(marker);
+            return (
+              <TableRow key={marker.id ?? `${marker.time}-${marker.side}-${marker.price ?? ""}`}>
+                <TableCell className="font-mono text-xs">{marker.time}</TableCell>
+                <TableCell>{markerBadgeLabel(marker)}</TableCell>
+                <TableCell className="text-right tabular-nums">{marker.price == null ? "--" : formatPrice(marker.price)}</TableCell>
+                <TableCell className="text-right tabular-nums">{score == null ? "--" : formatNumber(score, 1)}</TableCell>
+                <TableCell className={cn("text-right tabular-nums", priceColorClass(marker.returnPct))}>
+                  {marker.returnPct == null ? "--" : formatPct(marker.returnPct)}
+                </TableCell>
+                <TableCell className="text-muted-foreground">{marker.reasonLabel ?? marker.reasonText ?? marker.reason ?? "--"}</TableCell>
+              </TableRow>
+            );
+          })}
         </TableBody>
       </Table>
     </div>
@@ -1500,6 +1505,13 @@ function defaultSelectedMarker(markers: KlineMarker[]): KlineMarker | null {
 
 function markerScore(marker: KlineMarker) {
   return getRawNumber(safeRaw(marker.raw), "total_score") ?? getRawNumber(safeRaw(marker.raw), "score") ?? 0;
+}
+
+// 买入点时间线表格专用：卖出/平仓行不计入（其 raw 仅记录入场分数），其余行回放当时总分；取不到则返回 null 由表格显示 --。
+function timelineMarkerScore(marker: KlineMarker): number | null {
+  if (String(marker.side).toUpperCase() === "SELL") return null;
+  const raw = safeRaw(marker.raw);
+  return getRawNumber(raw, "total_score") ?? getRawNumber(raw, "score");
 }
 
 function markerReasonTextFromReason(reason?: string | null): string {
