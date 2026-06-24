@@ -22,7 +22,7 @@ class BacktestParams:
     commission_rate: float = 0.0003
     stamp_tax_rate: float = 0.0005
     slippage_bps: float = 10
-    stop_loss_pct: float = 0.07
+    stop_loss_pct: float = 0.08  # 0.07->0.08 (2026-06-24): CPCV 验证 PBO=0.33 稳健，0.07 在波动市误杀 55%（止损后5日回升），0.08 扛过回升
     take_profit_pct: float = 0.18
     trailing_stop_pct: float = 0.08
     time_stop_days: int = 15

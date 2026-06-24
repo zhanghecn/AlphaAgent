@@ -462,7 +462,7 @@ def recommendation_to_api(rank: int, item: SignalScore, stock: dict[str, Any] | 
 
 
 def default_risk_control(entry_price: float | None = None, trade_date: date | None = None) -> dict[str, Any]:
-    stop_loss_pct = 0.07
+    stop_loss_pct = 0.08  # 与 schemas 默认同步(2026-06-24 CPCV 验证 0.08 稳健)
     take_profit_pct = 0.18
     risk_control = {
         "max_position_pct": 0.125,

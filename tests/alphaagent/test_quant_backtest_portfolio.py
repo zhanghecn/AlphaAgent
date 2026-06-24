@@ -5510,6 +5510,46 @@ def test_dragon_pullback_exit_protects_large_floating_profit() -> None:
     assert sell_reason_for_position(position, bar, bar.trade_date, params) == "profit_protection_stop"
 
 
+def test_dragon_pullback_default_stop_loss_0p08_survives_seven_pct_drawdown() -> None:
+    """stop_loss_pct 默认 0.08（2026-06-24 CPCV 验证 PBO=0.33 稳健）。
+
+    跌幅 -7.5%（落在 0.07 线 93.0 与 0.08 线 92.0 之间）：默认 0.08 扛住不止损，
+    0.07 会触发 support_stop。背景：0.07 在波动市误杀 55%（止损后5日回升），0.08 让被
+    -7%~-8% 震出的交易扛住回升，全样本 return +16.6pp 且样本外 PBO=0.33 不过拟合。
+    """
+    from alphaagent.server.services.backtest.schemas import BacktestParams, Position
+    from alphaagent.server.services.backtest.simulation import sell_reason_for_position
+
+    params_default = BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID)
+    assert params_default.stop_loss_pct == 0.08
+    params_legacy = BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID, stop_loss_pct=0.07)
+
+    # close 92.5 = 成本 -7.5%，落在 0.07 线(93.0) 与 0.08 线(92.0) 之间。
+    # support_price=95 -> support×0.965=91.75（不触发）；ma20=95 -> ma20×0.97=92.15（close 92.5 不触发 trend_break）。
+    position = Position(
+        vt_symbol="002384.SZSE",
+        name="东山精密",
+        volume=100,
+        cost_price=100.0,
+        entry_date=date(2026, 6, 1),
+        highest_price=100.0,
+        reason={"ma10": 96.0, "ma20": 95.0, "support_price": 95.0},
+    )
+    bar = Bar(
+        trade_date=date(2026, 6, 10),
+        open_price=93.0,
+        high_price=94.0,
+        low_price=92.0,
+        close_price=92.5,
+        volume=1_000_000,
+        turnover=500_000_000,
+        change_pct=-7.5,
+    )
+
+    assert sell_reason_for_position(position, bar, bar.trade_date, params_default) is None
+    assert sell_reason_for_position(position, bar, bar.trade_date, params_legacy) == "support_stop"
+
+
 def test_dragon_pullback_experiment_protects_mid_profit_giveback() -> None:
     from alphaagent.server.services.backtest.schemas import BacktestParams, Position
     from alphaagent.server.services.backtest.simulation import sell_reason_for_position

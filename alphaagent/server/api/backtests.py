@@ -670,7 +670,7 @@ def _params_from_payload(payload: dict[str, Any]) -> BacktestParams:
         commission_rate=float(payload.get("commission_rate") or 0.0003),
         stamp_tax_rate=float(payload.get("stamp_tax_rate") or 0.0005),
         slippage_bps=float(payload.get("slippage_bps") or 10),
-        stop_loss_pct=float(payload.get("stop_loss_pct") or 0.07),
+        stop_loss_pct=float(payload.get("stop_loss_pct") or 0.08),  # 与 schemas 默认同步(2026-06-24 CPCV 验证 0.08 稳健)
         take_profit_pct=float(payload.get("take_profit_pct") or 0.18),
         trailing_stop_pct=float(payload.get("trailing_stop_pct") or 0.08),
         time_stop_days=int(payload.get("time_stop_days") or 15),

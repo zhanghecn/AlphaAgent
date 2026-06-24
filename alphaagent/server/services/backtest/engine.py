@@ -4084,7 +4084,7 @@ def _params_from_run(run: dict[str, Any]) -> BacktestParams:
         commission_rate=float(raw_params.get("commission_rate") or 0.0003),
         stamp_tax_rate=float(raw_params.get("stamp_tax_rate") or 0.0005),
         slippage_bps=float(raw_params.get("slippage_bps") or 10),
-        stop_loss_pct=float(raw_params.get("stop_loss_pct") or 0.07),
+        stop_loss_pct=float(raw_params.get("stop_loss_pct") or 0.08),  # 与 schemas 默认同步
         take_profit_pct=float(raw_params.get("take_profit_pct") or 0.18),
         trailing_stop_pct=float(raw_params.get("trailing_stop_pct") or 0.08),
         time_stop_days=int(raw_params.get("time_stop_days") or 15),

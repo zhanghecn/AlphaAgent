@@ -34,7 +34,7 @@ def create_replay_run(
     tail_entry_start: str = "14:30",
     tail_entry_end: str = "14:30",
     tail_entry_ma5_tolerance_pct: float = 1.5,
-    stop_loss_pct: float = 0.07,
+    stop_loss_pct: float = 0.08,  # 与 schemas 默认同步(2026-06-24)
     take_profit_pct: float = 0.18,
     trailing_stop_pct: float = 0.08,
     time_stop_days: int = 15,
