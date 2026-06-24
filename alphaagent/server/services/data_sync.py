@@ -667,6 +667,7 @@ class DataSyncRunner:
                 )
                 return
             items = data.get("items") or []
+            items = _fill_change_pct_from_close(items)
             written = _upsert_daily_bars(symbol, exchange, items)
             sample_items = [{**item, "vt_symbol": current_vts, "name": stock_name} for item in items[-3:]]
             with lock:
@@ -4660,6 +4661,31 @@ def _select_minute_bar_stocks(
         if stock_limit > 0:
             query = query.limit(min(stock_limit, 5000 if symbols else 500))
         return [dict(row) for row in session.execute(query).mappings().all()]
+
+
+def _fill_change_pct_from_close(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """从 close 序列补算 change_pct（%）。
+
+    tencent/eastmoney K 线源只返回 OHLCV 没有涨跌幅，导致 stock_daily_bars.change_pct
+    全空。这里按交易日期排序，change_pct = (close / prev_close - 1) * 100；
+    已有 change_pct 的保留。返回值同时按日期升序排序。
+    """
+    sorted_items = sorted(items, key=lambda x: x.get("trade_date") or "")
+    prev_close: float | None = None
+    for item in sorted_items:
+        close = item.get("close")
+        if close is None:
+            prev_close = None
+            continue
+        try:
+            close_f = float(close)
+        except (TypeError, ValueError):
+            prev_close = None
+            continue
+        if item.get("change_pct") is None and prev_close and prev_close > 0:
+            item["change_pct"] = round((close_f / prev_close - 1) * 100, 4)
+        prev_close = close_f
+    return sorted_items
 
 
 def _upsert_daily_bars(symbol: str, exchange: str, items: list[dict[str, Any]]) -> int:
