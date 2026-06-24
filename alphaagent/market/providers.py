@@ -2,7 +2,53 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime, time, timedelta, timezone
+from typing import Any
+
 from alphaagent.data_sources.akshare_adapter import AkShareAdapter
+
+
+_CHINA_TZ = timezone(timedelta(hours=8))
+
+
+def _to_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f else None  # NaN -> None
+
+
+def _parse_bar_date(value: Any) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_intraday_china(now: datetime | None = None) -> bool:
+    """是否在 A 股交易时段(周一-周五 9:30-15:00,中国时间)。
+
+    仅做时段过滤;实际"今天是否有行情"由实时 volume>0 判断(自动覆盖节假日/半天/异常停牌)。
+    """
+    now = now or datetime.now(_CHINA_TZ)
+    if now.weekday() >= 5:  # 周六、周日
+        return False
+    current = now.time()
+    return time(9, 30) <= current < time(15, 0)
+
+
+def _china_today() -> date:
+    """当前中国日期(可被测试注入)。"""
+    return datetime.now(_CHINA_TZ).date()
 
 
 class MarketDataError(RuntimeError):
@@ -25,8 +71,50 @@ class RealMarketDataClient(AkShareAdapter):
     ) -> dict[str, object]:
         local = _local_stock_bars(symbol, exchange, limit=limit, interval=interval)
         if local:
+            items = local.get("items") or []
+            if interval == "1d":
+                merged = self._with_today_realtime_bar(symbol, exchange, items)
+                if merged is not items:
+                    return {**local, "items": merged}
             return local
         return _mark_live_api(super().stock_bars(symbol, exchange, limit=limit, interval=interval), fallback_used=True)
+
+    def _with_today_realtime_bar(
+        self,
+        symbol: str,
+        exchange: str | None,
+        items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """交易时段 + DB最新<今天 + 实时volume>0 时,append 今天实时K线(同花顺式)。
+
+        不写 DB,仅读取时合并。节假日/盘前 volume=0 自动不补;
+        18:00 eod 同步今天日线后 DB 最新==今天,自动停补转正式日线。
+        """
+        if not items or not _is_intraday_china():
+            return items
+        today = _china_today()
+        last_date = _parse_bar_date(items[-1].get("trade_date"))
+        if last_date is None or last_date >= today:
+            return items
+        try:
+            quote = self.stock_detail(symbol, exchange) or {}
+        except Exception:
+            return items
+        volume = _to_float(quote.get("volume"))
+        last_price = _to_float(quote.get("last_price"))
+        if not volume or volume <= 0 or last_price is None:
+            return items
+        today_bar = {
+            "trade_date": today.isoformat(),
+            "open": _to_float(quote.get("open_price")) or last_price,
+            "close": last_price,
+            "high": _to_float(quote.get("high_price")) or last_price,
+            "low": _to_float(quote.get("low_price")) or last_price,
+            "volume": volume,
+            "turnover": _to_float(quote.get("turnover")) or _to_float(quote.get("amount")),
+            "change_pct": _to_float(quote.get("change_pct")),
+        }
+        return items + [today_bar]
 
     def market_overview(self) -> dict[str, object]:
         return _mark_live_api(super().market_overview(), fallback_used=False)
