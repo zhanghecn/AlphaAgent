@@ -196,6 +196,19 @@ def score_dragon_pullback(
         executable_low_suction=executable_low_suction,
         setup_type=setup_type,
     )
+    # 低吸蓄势后启动：低吸≥3天 + 当日温和启动(3~7%, >8.5已overheat) + 放量 + MA20未破。
+    # 识别金安6-4类"低吸后爆发启动"买点(脱离MA5无承接，但低吸蓄势充分)。统计验证
+    # 这类票后续盈亏不差于承接买入(见 scripts/low_suction_launch_study.py)。
+    low_suction_launch = (
+        effective_low_suction_days >= 4
+        and features.latest_change_pct is not None
+        and 3.0 <= features.latest_change_pct <= 7.0
+        and features.volume_ratio is not None
+        and features.volume_ratio >= 1.0
+        and features.ma20_distance_pct is not None
+        and features.ma20_distance_pct >= -3.2
+        and state not in ("INVALIDATED", "DISTRIBUTION_RISK", "TAIL_BUY_READY")
+    )
     entry_signal = (
         total >= 72
         and (
@@ -205,6 +218,7 @@ def score_dragon_pullback(
             )
             or setup_type == "stealth_low_suction"
             or executable_low_suction
+            or low_suction_launch
         )
         and liquidity >= 25
         and risk >= 35
