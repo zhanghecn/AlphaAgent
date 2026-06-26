@@ -390,7 +390,12 @@ def score_financial_report(report: dict[str, Any] | None) -> float:
     if not report:
         return 50.0
     score = 50.0
-    for key in ("revenue_yoy", "net_profit_yoy", "net_profit_qoq", "operating_cash_flow", "cash_flow_quality"):
+    # 经营现金流优先看「同比改善」而非绝对正负：周期反转股（如覆铜板涨价周期）
+    # 现金流常从大亏转微亏，绝对值仍为负但同比大幅改善，按绝对正负会错杀。
+    # 仅有同比数据时用同比（与 net_profit_yoy 同口径 /5 clamp），否则退回绝对正负兜底。
+    has_cash_flow_yoy = to_float(report.get("operating_cash_flow_yoy")) is not None
+    cash_flow_key = "operating_cash_flow_yoy" if has_cash_flow_yoy else "operating_cash_flow"
+    for key in ("revenue_yoy", "net_profit_yoy", "net_profit_qoq", cash_flow_key, "cash_flow_quality"):
         value = to_float(report.get(key))
         if value is None:
             continue

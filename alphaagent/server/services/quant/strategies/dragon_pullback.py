@@ -1314,7 +1314,12 @@ def _is_low_suction_day(bars: list[Bar]) -> bool:
     volume5 = moving_average(volumes, 5)
     volume20 = moving_average(volumes, 20)
     volume_ratio = volume5 / volume20 if volume5 is not None and volume20 else None
-    latest_change = _bar_change_pct(bars, len(bars) - 1, _derived_change_pcts(bars))
+    derived_changes = _derived_change_pcts(bars)
+    latest_change = _bar_change_pct(bars, len(bars) - 1, derived_changes)
+    # 近期涨停：涨停把均线拉发散，conv 暂超 8.8 是正常回踩形态（非低吸失败）
+    recent_limit_up = any(
+        (c is not None and c >= 9.5) for c in derived_changes[-8:]
+    )
     recent_high = max(highs[-20:])
     drawdown = pct_distance(latest.close_price, recent_high)
 
@@ -1340,6 +1345,15 @@ def _is_low_suction_day(bars: list[Bar]) -> bool:
             and quiet_volume
             and ma20_distance is not None
             and ma20_distance >= -2.5
+        )
+        # 涨停后回踩贴线：涨停拉发散均线使 conv 暂超 8.8，但贴短期均线且趋势未破，
+        # 属有效低吸（如5-28涨停后6-01~03贴MA5接货）。统计验证这类票后续收益不差于
+        # 正常低吸，故放宽至 conv<=13。见 scripts/convergence_pullback_study.py。
+        or (
+            recent_limit_up
+            and near_short_ma
+            and trend_not_broken
+            and convergence <= 13.0
         )
     )
     daily_not_broken = latest_change is None or (-4.5 <= latest_change <= 8.5)

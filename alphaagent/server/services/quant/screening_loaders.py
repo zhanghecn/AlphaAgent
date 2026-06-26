@@ -10,7 +10,8 @@ from sqlalchemy import and_, desc, func, select
 
 from alphaagent.market.boards import DEFAULT_QUANT_INCLUDED_BOARDS, normalize_included_boards, stock_board
 from alphaagent.server.db import schema
-from alphaagent.server.services.quant.factors import Bar, period_return, score_financial_report
+from alphaagent.server.services.quant.factors import Bar, period_return
+from alphaagent.server.services.quant.financials import financial_scores_from_rows_by_symbol
 
 
 def latest_trade_date(session) -> date | None:
@@ -279,6 +280,8 @@ def load_sector_scores(session, vt_symbols: list[str], trade_date: date) -> dict
 
 
 def load_financial_scores(session, vt_symbols: list[str], trade_date: date, parse_date) -> dict[str, float]:
+    # 复用 financial_scores_from_rows_by_symbol：经营现金流看同比改善（含去年同期），
+    # 与回测 engine 路径完全一致。parse_date 保留签名兼容，内部由 as_report_date 处理。
     if not vt_symbols:
         return {}
     rows = session.execute(
@@ -286,16 +289,10 @@ def load_financial_scores(session, vt_symbols: list[str], trade_date: date, pars
         .where(schema.stock_financial_reports.c.vt_symbol.in_(vt_symbols))
         .order_by(schema.stock_financial_reports.c.vt_symbol, desc(schema.stock_financial_reports.c.report_date))
     ).mappings().all()
-    result: dict[str, float] = {}
+    rows_by_symbol: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        vt_symbol = str(row["vt_symbol"])
-        if vt_symbol in result:
-            continue
-        publish_date = parse_date(row.get("publish_date"))
-        if publish_date is None or publish_date > trade_date:
-            continue
-        result[vt_symbol] = score_financial_report(dict(row))
-    return result
+        rows_by_symbol[str(row["vt_symbol"])].append(dict(row))
+    return financial_scores_from_rows_by_symbol(rows_by_symbol, trade_date)
 
 
 def load_fund_flow_scores(session, vt_symbols: list[str], trade_date: date, float_or_none, clamp) -> dict[str, float]:
