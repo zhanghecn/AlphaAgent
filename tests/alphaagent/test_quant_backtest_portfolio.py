@@ -239,6 +239,96 @@ def test_trend_acceleration_score_generates_entry_candidate() -> None:
     assert score.total_score >= 73
 
 
+def test_trend_acceleration_rejects_non_positive_change_pct() -> None:
+    """门控：进场当日须收涨（change_pct>0），过滤"当日下跌的追高假加速"。
+
+    数据驱动（2026-06-25）：真趋势进场当日 median +1.39，追高假加速 median -0.87。
+    其余 trend 条件均满足，唯独进场当日 change_pct=0 → 门控拦截 entry_signal。
+    """
+    start = date(2025, 1, 1)
+    bars: list[Bar] = []
+    price = 10.0
+    for index in range(85):
+        if index < 84:
+            change_pct = 0.1 if index < 25 else (0.35 if index < 60 else (0.75 if index < 80 else 1.8))
+        else:
+            change_pct = 0.0  # 进场当日平收（未涨）
+        price *= 1 + change_pct / 100
+        bars.append(
+            Bar(
+                trade_date=start + timedelta(days=index),
+                open_price=price * 0.99,
+                high_price=price * 1.015,
+                low_price=price * 0.985,
+                close_price=price,
+                volume=1_700_000 if index >= 75 else 1_000_000,
+                turnover=420_000_000,
+                change_pct=change_pct,
+            )
+        )
+
+    score = score_trend_acceleration(
+        "002636.SZSE",
+        bars,
+        bars[-1].trade_date,
+        index_return_20d=-2.0,
+        sector_score=82.0,
+        financial_score=70.0,
+        fund_flow_score=85.0,
+        hot_rank_score=80.0,
+        lhb_score=70.0,
+    )
+
+    # 进场当日未收涨（change_pct=0），门控拦截
+    assert score.entry_signal is False
+    assert score.evidence["status"] == "ready"
+    assert score.evidence["latest_change_pct"] == 0.0
+
+
+def test_trend_acceleration_does_not_use_future_bars() -> None:
+    """无未来函数：信号只用 <= trade_date 的 bar，传入未来 bar 不影响信号。
+
+    visible_bars 已用 bar.trade_date <= trade_date 过滤，即使传入未来 bar（trade_date 之后）
+    信号也必须与只用截断序列完全一致。
+    """
+    start = date(2025, 1, 1)
+    bars: list[Bar] = []
+    price = 10.0
+    for index in range(90):  # 90 天，后 5 天作为"未来"
+        change_pct = 0.1 if index < 25 else (0.35 if index < 60 else (0.75 if index < 80 else 1.8))
+        price *= 1 + change_pct / 100
+        bars.append(
+            Bar(
+                trade_date=start + timedelta(days=index),
+                open_price=price * 0.99,
+                high_price=price * 1.015,
+                low_price=price * 0.985,
+                close_price=price,
+                volume=1_700_000 if index >= 75 else 1_000_000,
+                turnover=420_000_000,
+                change_pct=change_pct,
+            )
+        )
+
+    signal_date = bars[84].trade_date  # 第 85 天作为信号日
+    common = dict(
+        index_return_20d=-2.0,
+        sector_score=82.0,
+        financial_score=70.0,
+        fund_flow_score=85.0,
+        hot_rank_score=80.0,
+        lhb_score=70.0,
+    )
+    # 传入含未来 bar 的完整序列 vs 只含 <= signal_date 的截断序列，信号必须一致
+    score_with_future = score_trend_acceleration("002636.SZSE", bars, signal_date, **common)
+    score_no_future = score_trend_acceleration("002636.SZSE", bars[:85], signal_date, **common)
+
+    assert score_with_future.entry_signal == score_no_future.entry_signal
+    assert score_with_future.total_score == score_no_future.total_score
+    assert score_with_future.evidence["return_5d"] == score_no_future.evidence["return_5d"]
+    assert score_with_future.evidence["latest_change_pct"] == score_no_future.evidence["latest_change_pct"]
+
+
 def test_dragon_pullback_score_accepts_ma10_support_reclaim() -> None:
     start = date(2026, 1, 1)
     closes = [20 + index * 0.12 for index in range(74)]

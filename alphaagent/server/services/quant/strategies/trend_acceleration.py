@@ -103,7 +103,7 @@ def score_trend_acceleration(
         and volume_ratio is not None
         and 1.05 <= volume_ratio <= 2.80
         and latest.change_pct is not None
-        and latest.change_pct <= 8.5
+        and 0 < latest.change_pct <= 8.5  # 趋势加速确认：进场当日须收涨（数据驱动，真趋势 median +1.39 vs 追高假加速 -0.87，2026-06-25）
         and trend_quality >= 65
         and risk >= 45
         and liquidity >= 30

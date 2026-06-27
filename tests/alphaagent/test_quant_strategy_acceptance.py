@@ -447,6 +447,7 @@ def _candidate_quality_postprocess_report(base_params: BacktestParams, *, top_n:
         {"label": "v5_v2_lift_guard_cap8_mfe8_keep6_giveback5", "mode": "v5_v2_lift_guard_cap8", "sell_params": mfe_keep6_params},
         {"label": "v6_v2_right_tail_guard_cap8_mfe8_keep6_giveback5", "mode": "v6_v2_right_tail_guard_cap8", "sell_params": mfe_keep6_params},
         {"label": "v7_v2_soft_right_tail_cap8_mfe8_keep6_giveback5", "mode": "v7_v2_soft_right_tail_cap8", "sell_params": mfe_keep6_params},
+        {"label": "v8_v2_strict_bad_bucket_cap8_mfe8_keep6_giveback5", "mode": "v8_v2_strict_bad_bucket_cap8", "sell_params": mfe_keep6_params},
     ]
     path_cache: dict[tuple[tuple[Any, ...], date, str], dict[str, Any] | None] = {}
     base_reports_by_sell_key = {
@@ -649,6 +650,7 @@ def _postprocess_stock_audit_report(
     specs = [
         {"label": "v2_cap8_overlay_mfe8_keep6_giveback5", "mode": "v2_cap8_overlay"},
         {"label": "v5_v2_lift_guard_cap8_mfe8_keep6_giveback5", "mode": "v5_v2_lift_guard_cap8"},
+        {"label": "v8_v2_strict_bad_bucket_cap8_mfe8_keep6_giveback5", "mode": "v8_v2_strict_bad_bucket_cap8"},
     ]
     path_cache: dict[tuple[tuple[Any, ...], date, str], dict[str, Any] | None] = {}
     base_report = _candidate_path_report_cached(
@@ -2737,7 +2739,7 @@ def _save_candidate_snapshot_cache(
     rows, bars_by_symbol = result
     CANDIDATE_SNAPSHOT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path = CANDIDATE_SNAPSHOT_CACHE_DIR / f"{cache_key}.pkl"
-    tmp_path = path.with_suffix(".tmp")
+    tmp_path = path.with_name(f"{path.stem}.{os.getpid()}.tmp")
     payload = {
         "version": CANDIDATE_SNAPSHOT_CACHE_VERSION,
         "rows": rows,
@@ -2796,6 +2798,8 @@ def _postprocess_candidate_pool(pool_rows: list[dict[str, Any]], *, top_n: int, 
             pick_limit = 8
         elif mode == "v7_v2_soft_right_tail_cap8" and (day_profile["weak_day"] or day_profile["warning_far"]):
             pick_limit = 8
+        elif mode == "v8_v2_strict_bad_bucket_cap8" and (day_profile["weak_day"] or day_profile["warning_far"]):
+            pick_limit = 8
 
         candidates = scored_rows if mode != "top80_strict_overlay" else [row for row in scored_rows if not row["quality_overlay_blocked"]]
         if mode in {
@@ -2811,6 +2815,7 @@ def _postprocess_candidate_pool(pool_rows: list[dict[str, Any]], *, top_n: int, 
             "v5_v2_lift_guard_cap8",
             "v6_v2_right_tail_guard_cap8",
             "v7_v2_soft_right_tail_cap8",
+            "v8_v2_strict_bad_bucket_cap8",
         }:
             candidates = [row for row in candidates if not row["quality_overlay_blocked"]]
         picked = sorted(
@@ -2830,6 +2835,9 @@ def _postprocess_scored_row(row: dict[str, Any], *, day_profile: dict[str, Any],
     adjustment, notes = (
         _postprocess_v7_v2_soft_right_tail_adjustment(row, day_profile=day_profile, mode=mode)
         if mode == "v7_v2_soft_right_tail_cap8"
+        else
+        _postprocess_v8_v2_strict_bad_bucket_adjustment(row, day_profile=day_profile, mode=mode)
+        if mode == "v8_v2_strict_bad_bucket_cap8"
         else
         _postprocess_v6_v2_right_tail_guard_adjustment(row, day_profile=day_profile, mode=mode)
         if mode == "v6_v2_right_tail_guard_cap8"
@@ -2857,6 +2865,9 @@ def _postprocess_scored_row(row: dict[str, Any], *, day_profile: dict[str, Any],
         "quality_overlay_blocked": (
             _postprocess_v7_v2_soft_right_tail_blocked(row, day_profile)
             if mode == "v7_v2_soft_right_tail_cap8"
+            else
+            _postprocess_v8_v2_strict_bad_bucket_blocked(row, day_profile)
+            if mode == "v8_v2_strict_bad_bucket_cap8"
             else
             _postprocess_v6_v2_right_tail_guard_blocked(row, day_profile)
             if mode == "v6_v2_right_tail_guard_cap8"
@@ -3473,6 +3484,110 @@ def _postprocess_v7_soft_context(row: dict[str, Any]) -> dict[str, Any]:
         "soft_low_lift": soft_low_lift,
         "weak_warning_soft_penalty": weak_warning_soft_penalty,
         "high_close_near_resistance": high_close_near_resistance,
+    }
+
+
+def _postprocess_v8_v2_strict_bad_bucket_adjustment(
+    row: dict[str, Any],
+    *,
+    day_profile: dict[str, Any],
+    mode: str,
+) -> tuple[float, list[str]]:
+    adjustment, notes = _postprocess_v2_overlay_adjustment(row, day_profile=day_profile, mode=mode)
+    context = _postprocess_v8_strict_bad_bucket_context(row, day_profile=day_profile)
+    adjusted_notes = list(notes)
+    for bad_note in context["strict_bad_notes"]:
+        adjustment -= 1.6
+        adjusted_notes.append(bad_note)
+    if not adjusted_notes:
+        return 0.0, []
+    return max(min(adjustment, 7.0), -11.0), adjusted_notes
+
+
+def _postprocess_v8_v2_strict_bad_bucket_blocked(row: dict[str, Any], day_profile: dict[str, Any]) -> bool:
+    context = _postprocess_v8_strict_bad_bucket_context(row, day_profile=day_profile)
+    if context["strict_bad_notes"]:
+        return True
+    return _postprocess_v2_overlay_blocked(row, day_profile)
+
+
+def _postprocess_v8_strict_bad_bucket_context(row: dict[str, Any], *, day_profile: dict[str, Any]) -> dict[str, Any]:
+    evidence = row.get("reason") if isinstance(row.get("reason"), dict) else {}
+    features = _postprocess_candidate_features(row)
+    close_location = features["close_location"]
+    ma5_distance = features["ma5_distance"]
+    low_suction_days = features["low_suction_days"]
+    launch_bucket = features["launch_bucket"]
+    warning_level = features["warning_level"]
+    ma_convergence = features["ma_convergence"]
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    ma5_slope = _float_or_none(evidence.get("ma5_slope_pct"))
+    ma10_distance = _float_or_none(evidence.get("ma10_distance_pct"))
+    ma20_distance = _float_or_none(evidence.get("ma20_distance_pct"))
+    active_strength = _candidate_active_strength(evidence)
+    fresh_lift = _candidate_fresh_lift(features, latest_change=latest_change, ma5_slope=ma5_slope)
+    support_signature = _candidate_support_lift_signature(
+        features,
+        fresh_lift=fresh_lift,
+        active_strength=active_strength,
+        ma5_slope=ma5_slope,
+        ma10_distance=ma10_distance,
+    )
+    high_close = close_location is not None and close_location > 0.75
+    extreme_close = close_location is not None and close_location > 0.88
+    low_mid_close = close_location is not None and close_location <= 0.58
+    controlled_close = close_location is not None and close_location <= 0.75
+    near_ma5 = ma5_distance is None or ma5_distance <= 3.5
+    ma_live = ma_convergence is not None and 3.0 <= ma_convergence <= 18.0
+    active = features["active"] or active_strength >= 3.0
+    right_tail_guard = bool(
+        high_close
+        and active_strength >= 4.0
+        and near_ma5
+        and ma_live
+        and warning_level <= 1.0
+        and ma5_slope is not None
+        and ma5_slope >= 0.10
+        and (ma20_distance is None or ma20_distance >= -2.5)
+    )
+    clean_stale_lift = bool(
+        6.0 <= low_suction_days <= 10.0
+        and active
+        and low_mid_close
+        and fresh_lift
+        and near_ma5
+        and ma_live
+        and warning_level <= 2.0
+    )
+    notes: list[str] = []
+    if ma5_distance is not None and ma5_distance > 6.0:
+        notes.append("v8_block_ma5_over_6")
+    if launch_bucket == "other_confirmed_launch" and close_location is not None and close_location > 0.58 and active_strength < 4.0:
+        notes.append("v8_block_other_confirmed_mid_high_no_strong")
+    if launch_bucket == "repeated_launch" and high_close and not right_tail_guard:
+        notes.append("v8_block_repeated_high_without_right_tail")
+    if launch_bucket == "unconfirmed_buildup" and extreme_close:
+        notes.append("v8_block_unconfirmed_extreme_high")
+    if day_profile.get("warning_far") and features["high_weak_launch"] and not right_tail_guard:
+        notes.append("v8_block_warning_far_high_weak")
+    if (
+        evidence.get("dynamic_market_regime") == "false_bull"
+        and warning_level >= 3.0
+        and support_signature not in {"active_low_mid_fresh_lift", "controlled_3_5d_low_suction_lift"}
+    ):
+        notes.append("v8_block_false_bull_w3_no_support")
+    if features["tight_quiet"] and warning_level >= 3.0:
+        notes.append("v8_block_tight_quiet_w3")
+    if 6.0 <= low_suction_days <= 10.0 and not clean_stale_lift:
+        notes.append("v8_block_stale_6_10_no_clean_lift")
+    if warning_level >= 3.0 and active_strength < 3.0 and (ma5_slope is None or ma5_slope < 0.10):
+        notes.append("v8_block_w3_ma5_not_turning_no_active")
+    if controlled_close and 3.0 <= low_suction_days <= 5.0 and active and near_ma5 and ma_live and fresh_lift:
+        notes = [note for note in notes if note != "v8_block_w3_ma5_not_turning_no_active"]
+    return {
+        "strict_bad_notes": notes,
+        "right_tail_guard": right_tail_guard,
+        "clean_stale_lift": clean_stale_lift,
     }
 
 

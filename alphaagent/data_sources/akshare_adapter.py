@@ -1283,28 +1283,28 @@ class AkShareAdapter:
         except Exception:
             pass
 
+        # 2026-06-25: 东财 stock_board_*_hist_em 被反爬(RemoteDisconnected)，换同花顺 ths 源。
+        # 同花顺板块指数接口（stock_board_*_index_ths）用板块名取历史K线，绕开东财反爬。
+        start_date_str = (date.today() - timedelta(days=max(limit * 2, 500))).strftime("%Y%m%d")
+        end_date_str = date.today().strftime("%Y%m%d")
         if normalized_type in {"concept", "theme"}:
-            module = importlib.import_module("akshare.stock.stock_board_concept_em")
+            module = importlib.import_module("akshare.stock_feature.stock_board_concept_ths")
             with _akshare_network_env():
-                df = module.stock_board_concept_hist_em(
+                df = module.stock_board_concept_index_ths(
                     symbol=board_name,
-                    start_date=(date.today() - timedelta(days=max(limit * 2, 500))).strftime("%Y%m%d"),
-                    end_date="20500101",
-                    period="日k",
-                    adjust="",
+                    start_date=start_date_str,
+                    end_date=end_date_str,
                 )
-            source = "akshare.stock_board_concept_hist_em"
+            source = "akshare.stock_board_concept_index_ths"
         else:
-            module = importlib.import_module("akshare.stock.stock_board_industry_em")
+            module = importlib.import_module("akshare.stock_feature.stock_board_industry_ths")
             with _akshare_network_env():
-                df = module.stock_board_industry_hist_em(
+                df = module.stock_board_industry_index_ths(
                     symbol=board_name,
-                    start_date=(date.today() - timedelta(days=max(limit * 2, 500))).strftime("%Y%m%d"),
-                    end_date="20500101",
-                    period="日k",
-                    adjust="",
+                    start_date=start_date_str,
+                    end_date=end_date_str,
                 )
-            source = "akshare.stock_board_industry_hist_em"
+            source = "akshare.stock_board_industry_index_ths"
 
         items = [_bar_row_to_api(row) for row in _tail_records(df, limit)]
         return {
@@ -1918,10 +1918,10 @@ def _bar_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
         volume = _number(normalized.get("amount"))
     return {
         "trade_date": trade_date,
-        "open": _number(normalized.get("开盘") or normalized.get("open")),
-        "close": _number(normalized.get("收盘") or normalized.get("close")),
-        "high": _number(normalized.get("最高") or normalized.get("high")),
-        "low": _number(normalized.get("最低") or normalized.get("low")),
+        "open": _number(normalized.get("开盘") or normalized.get("开盘价") or normalized.get("open")),
+        "close": _number(normalized.get("收盘") or normalized.get("收盘价") or normalized.get("close")),
+        "high": _number(normalized.get("最高") or normalized.get("最高价") or normalized.get("high")),
+        "low": _number(normalized.get("最低") or normalized.get("最低价") or normalized.get("low")),
         "volume": volume,
         "turnover": explicit_turnover,
         "change_pct": _number(normalized.get("涨跌幅")),

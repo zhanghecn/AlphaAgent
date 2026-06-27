@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Sequence
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import and_, desc, func, select
 from sqlalchemy.engine import Engine
 
 from alphaagent.server.db import schema
@@ -264,6 +264,60 @@ def compute_and_persist(
 
 # ── Data collection ──
 
+def _aggregate_member_bars(session, sector_id: str, as_of_date: date, trading_days: int) -> list[dict[str, Any]]:
+    """从成分股 K 线聚合板块指数（等权 close 均值），替代被反爬的 sector_daily_bars。
+
+    sector_daily_bars（东财源）被反爬全空，改用 stock_daily_bars（腾讯源，稳定）+
+    stock_sector_memberships（成分股映射）聚合算板块指数。return_pct 用 close，不受
+    change_pct/turnover 缺失影响。
+    """
+    members = session.execute(
+        select(schema.stock_sector_memberships.c.vt_symbol)
+        .where(schema.stock_sector_memberships.c.sector_id == sector_id)
+    ).scalars().all()
+    if not members:
+        return []
+    rows = session.execute(
+        select(
+            schema.stock_daily_bars.c.trade_date,
+            schema.stock_daily_bars.c.close_price,
+            schema.stock_daily_bars.c.turnover,
+        )
+        .where(
+            and_(
+                schema.stock_daily_bars.c.vt_symbol.in_(members),
+                schema.stock_daily_bars.c.trade_date <= as_of_date,
+            )
+        )
+        .order_by(desc(schema.stock_daily_bars.c.trade_date))
+        .limit((trading_days + 10) * len(members))
+    ).mappings().all()
+    if not rows:
+        return []
+    from collections import defaultdict
+
+    closes_by_date: dict[Any, list[float]] = defaultdict(list)
+    turnover_by_date: dict[Any, float] = defaultdict(float)
+    for r in rows:
+        d = r["trade_date"]
+        if r["close_price"] is not None:
+            closes_by_date[d].append(float(r["close_price"]))
+        if r["turnover"]:
+            turnover_by_date[d] += float(r["turnover"])
+    bars: list[dict[str, Any]] = []
+    for d in sorted(closes_by_date.keys(), reverse=True):
+        cs = closes_by_date[d]
+        if cs:
+            bars.append({
+                "trade_date": d,
+                "close": sum(cs) / len(cs),
+                "turnover": turnover_by_date.get(d, 0.0),
+            })
+            if len(bars) >= trading_days + 10:
+                break
+    return bars
+
+
 def _collect_score_input(
     sector_id: str,
     sector_type: str,
@@ -288,6 +342,9 @@ def _collect_score_input(
         )
         bar_rows = session.execute(bars_query).mappings().all()
         inp.bars = [dict(r) for r in bar_rows]
+        if not inp.bars:
+            # sector_daily_bars（东财）被反爬全空时，从成分股聚合（腾讯源 stock_daily_bars，稳定）
+            inp.bars = _aggregate_member_bars(session, sector_id, as_of_date, trading_days)
 
         # 2. Membership breadth (rise/fall counts from sectors table)
         sector_data = session.execute(
