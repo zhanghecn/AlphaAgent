@@ -756,6 +756,7 @@ function PortfolioClosedTradeTable({
             <TableHead>买入日期</TableHead>
             <TableHead>卖出日期</TableHead>
             <TableHead className="text-right">买入价</TableHead>
+            <TableHead className="text-right">买入分数</TableHead>
             <TableHead className="text-right">卖出价</TableHead>
             <TableHead className="text-right">收益率</TableHead>
             <TableHead className="text-right">最大浮盈</TableHead>
@@ -772,6 +773,7 @@ function PortfolioClosedTradeTable({
                 <TableCell className="tabular-nums">{row.entry_date ?? "--"}</TableCell>
                 <TableCell className="tabular-nums">{row.exit_date ?? (row.status === "open" ? "持有中" : "--")}</TableCell>
                 <TableCell className="text-right tabular-nums">{formatPrice(row.entry_price)}</TableCell>
+                <TableCell className="text-right tabular-nums">{row.entry_score == null ? "--" : formatNumber(row.entry_score, 1)}</TableCell>
                 <TableCell className="text-right tabular-nums">{formatPrice(row.exit_price)}</TableCell>
                 <TableCell className={cn("text-right tabular-nums", priceColorClass(displayReturnPct))}>
                   {formatPct(displayReturnPct)}
@@ -1504,14 +1506,15 @@ function defaultSelectedMarker(markers: KlineMarker[]): KlineMarker | null {
 }
 
 function markerScore(marker: KlineMarker) {
-  return getRawNumber(safeRaw(marker.raw), "total_score") ?? getRawNumber(safeRaw(marker.raw), "score") ?? 0;
+  const raw = safeRaw(marker.raw);
+  return getRawNumber(raw, "total_score") ?? getRawNumber(raw, "entry_total_score") ?? getRawNumber(raw, "score") ?? 0;
 }
 
 // 买入点时间线表格专用：卖出/平仓行不计入（其 raw 仅记录入场分数），其余行回放当时总分；取不到则返回 null 由表格显示 --。
 function timelineMarkerScore(marker: KlineMarker): number | null {
   if (String(marker.side).toUpperCase() === "SELL") return null;
   const raw = safeRaw(marker.raw);
-  return getRawNumber(raw, "total_score") ?? getRawNumber(raw, "score");
+  return getRawNumber(raw, "total_score") ?? getRawNumber(raw, "entry_total_score") ?? getRawNumber(raw, "score");
 }
 
 function markerReasonTextFromReason(reason?: string | null): string {
