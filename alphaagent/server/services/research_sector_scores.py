@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Sequence
 
-from sqlalchemy import and_, desc, func, select
+from sqlalchemy import and_, case, desc, func, select
 from sqlalchemy.engine import Engine
 
 from alphaagent.server.db import schema
@@ -92,6 +92,7 @@ class SectorScoreInput:
     # Fund flows
     main_net_inflow: float | None = None
     main_net_inflow_ratio: float | None = None
+    fund_period: str | None = None
 
     # Sentiment (limit-up/down counts)
     limit_up_count: int = 0
@@ -511,12 +512,22 @@ def _collect_score_input(
                     schema.sector_fund_flows.c.trade_date <= as_of_date.isoformat(),
                 )
             )
-            .order_by(desc(schema.sector_fund_flows.c.trade_date))
+            .order_by(
+                desc(schema.sector_fund_flows.c.trade_date),
+                case(
+                    (schema.sector_fund_flows.c.period == "即时", 0),
+                    (schema.sector_fund_flows.c.period == "5日", 1),
+                    (schema.sector_fund_flows.c.period == "10日", 2),
+                    else_=9,
+                ),
+                schema.sector_fund_flows.c.period.asc(),
+            )
             .limit(1)
         ).mappings().first()
         if fund_row:
             inp.main_net_inflow = fund_row.get("main_net_inflow")
             inp.main_net_inflow_ratio = fund_row.get("main_net_inflow_ratio")
+            inp.fund_period = fund_row.get("period")
 
         # 4. Limit-up events (sentiment)
         inp.limit_up_count = _count_limit_up_events(
@@ -754,6 +765,7 @@ def _score_fund(inp: SectorScoreInput) -> tuple[float, dict[str, Any]]:
     ev: dict[str, Any] = {
         "main_net_inflow": net_inflow,
         "main_net_inflow_ratio": net_ratio,
+        "period": inp.fund_period,
     }
     return round(max(0.0, min(100.0, score)), 2), ev
 

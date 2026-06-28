@@ -664,7 +664,9 @@ def test_sector_score_input_ignores_future_bars_and_fund_flows(monkeypatch):
             if "FROM sector_fund_flows" in sql:
                 params = stmt.compile().params
                 assert params["trade_date_1"] == "2026-06-25"
-                return _Result([{"main_net_inflow": 123.0, "main_net_inflow_ratio": 4.5}])
+                assert "sector_fund_flows.period" in sql
+                assert "CASE" in sql
+                return _Result([{"main_net_inflow": 123.0, "main_net_inflow_ratio": 4.5, "period": "即时"}])
             if "FROM stock_events" in sql:
                 params = stmt.compile().params
                 assert params["event_date_1"] == ["2026-06-25", "20260625"]
@@ -682,6 +684,7 @@ def test_sector_score_input_ignores_future_bars_and_fund_flows(monkeypatch):
     assert [bar["trade_date"] for bar in inp.bars] == [date(2026, 6, 25), date(2026, 6, 24)]
     assert inp.return_pct == 10.0
     assert inp.main_net_inflow == 123.0
+    assert inp.fund_period == "即时"
     assert inp.total_members == 3
     assert inp.rise_count == 2
     assert inp.fall_count == 1
@@ -729,6 +732,26 @@ def test_sector_score_breadth_and_leader_use_as_of_member_bars():
     assert leader_evidence["source"] == "stock_daily_bars.as_of_date"
     assert sentiment == 100.0
     assert sentiment_evidence["source"] == "stock_events.event_date"
+
+
+def test_sector_score_fund_evidence_includes_selected_period():
+    """Fund score evidence should show the selected sector_fund_flows period."""
+    from alphaagent.server.services import research_sector_scores as scores
+
+    inp = scores.SectorScoreInput(
+        sector_id="BK0001",
+        sector_type="concept",
+        period="20d",
+        as_of_date=date(2026, 6, 25),
+        main_net_inflow=100.0,
+        main_net_inflow_ratio=2.0,
+        fund_period="即时",
+    )
+
+    score, evidence = scores._score_fund(inp)
+
+    assert score == 66.0
+    assert evidence["period"] == "即时"
 
 
 # ══════════════════════════════════════════
