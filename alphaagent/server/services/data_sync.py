@@ -1114,8 +1114,12 @@ class DataSyncRunner:
     def _run_sync_sector_period_scores(self, params: dict[str, Any]) -> dict[str, Any]:
         raw_periods = params.get("periods", ["20d"])
         periods = [raw_periods] if isinstance(raw_periods, str) else list(raw_periods)
-        sector_limit = int(params.get("sector_limit", 300) or 0)
-        as_of = _parse_date(params.get("as_of_date")) if params.get("as_of_date") else None
+        sector_limit = int(params.get("sector_limit", 0) or 0)
+        as_of = (
+            _parse_date(params.get("as_of_date"))
+            if params.get("as_of_date")
+            else _latest_complete_daily_date_for_research()
+        )
         result = research_sector_scores.compute_and_persist(as_of_date=as_of, periods=periods, sector_limit=sector_limit)
         return {
             "rows_read": result.get("sectors_scored", 0),

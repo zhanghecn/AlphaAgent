@@ -63,6 +63,7 @@ TREND_STATES = ("MAINLINE_UP", "FAST_UP", "ROTATION", "FADING", "WEAK", "UNKNOWN
 # Minimum data points required for each sub-score
 MIN_BARS_FOR_SCORE = 5
 MIN_MEMBERS_FOR_BREADTH = 3
+MIN_COMPLETE_DAILY_SYMBOL_COUNT = 3000
 
 
 # ── Data classes ──
@@ -152,7 +153,7 @@ def compute_sector_period_scores(
         return []
 
     if as_of_date is None:
-        as_of_date = date.today()
+        as_of_date = _default_score_as_of_date()
     if periods is None:
         periods = PERIODS
 
@@ -253,16 +254,32 @@ def compute_and_persist(
     sector_limit: int = 0,
 ) -> dict[str, Any]:
     """Compute scores and persist. Returns summary."""
-    results = compute_sector_period_scores(as_of_date, periods, sector_limit)
+    resolved_as_of = as_of_date
+    if resolved_as_of is None and is_database_configured():
+        resolved_as_of = _default_score_as_of_date()
+    results = compute_sector_period_scores(resolved_as_of, periods, sector_limit)
     written = persist_scores(results)
     return {
         "sectors_scored": len(results),
         "rows_written": written,
-        "as_of_date": (as_of_date or date.today()).isoformat(),
+        "as_of_date": (resolved_as_of or date.today()).isoformat(),
     }
 
 
 # ── Data collection ──
+
+def _default_score_as_of_date() -> date:
+    row = None
+    with session_scope() as session:
+        row = session.execute(
+            select(schema.stock_daily_bars.c.trade_date)
+            .group_by(schema.stock_daily_bars.c.trade_date)
+            .having(func.count(func.distinct(schema.stock_daily_bars.c.vt_symbol)) >= MIN_COMPLETE_DAILY_SYMBOL_COUNT)
+            .order_by(desc(schema.stock_daily_bars.c.trade_date))
+            .limit(1)
+        ).first()
+    return row[0] if row else date.today()
+
 
 def _aggregate_member_bars(session, sector_id: str, as_of_date: date, trading_days: int) -> list[dict[str, Any]]:
     """从成分股 K 线聚合板块指数（等权 close 均值），替代被反爬的 sector_daily_bars。
@@ -336,7 +353,12 @@ def _collect_score_input(
         # 1. Sector daily bars (price history)
         bars_query = (
             select(schema.sector_daily_bars)
-            .where(schema.sector_daily_bars.c.sector_id == sector_id)
+            .where(
+                and_(
+                    schema.sector_daily_bars.c.sector_id == sector_id,
+                    schema.sector_daily_bars.c.trade_date <= as_of_date,
+                )
+            )
             .order_by(desc(schema.sector_daily_bars.c.trade_date))
             .limit(trading_days + 10)
         )
@@ -360,7 +382,12 @@ def _collect_score_input(
         # 3. Fund flows (latest)
         fund_row = session.execute(
             select(schema.sector_fund_flows)
-            .where(schema.sector_fund_flows.c.sector_id == sector_id)
+            .where(
+                and_(
+                    schema.sector_fund_flows.c.sector_id == sector_id,
+                    schema.sector_fund_flows.c.trade_date <= as_of_date.isoformat(),
+                )
+            )
             .order_by(desc(schema.sector_fund_flows.c.trade_date))
             .limit(1)
         ).mappings().first()

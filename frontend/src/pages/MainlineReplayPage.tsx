@@ -4,7 +4,7 @@
  * 视觉：indigo 深色终端感。Signature = 资金强弱矩阵（选中板块多维体检）。
  * 结构：时间轴 + 三栏（主线榜热度条 / 大盘+资金矩阵 / 详情+成分股+关联）。
  */
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { LoadingState } from "@/components/LoadingState";
@@ -27,6 +27,11 @@ export default function MainlineReplayPage() {
   const dates = timelineQ.data?.dates ?? [];
   const [selectedDate, setSelectedDate] = useState<string>("");
   const effectiveDate = selectedDate || dates[0] || "";
+  useEffect(() => {
+    if (selectedDate && dates.length > 0 && !dates.includes(selectedDate)) {
+      setSelectedDate(dates[0]);
+    }
+  }, [dates, selectedDate]);
 
   const snapshotQ = useQuery({
     queryKey: ["replaySnapshot", effectiveDate],
@@ -35,7 +40,12 @@ export default function MainlineReplayPage() {
     staleTime: 60_000,
   });
 
-  const [selectedSector, setSelectedSector] = useState<SectorRankItem | null>(null);
+  const ranking = snapshotQ.data?.ranking ?? [];
+  const [selectedSectorId, setSelectedSectorId] = useState<string>("");
+  const selectedSector = useMemo(() => {
+    if (ranking.length === 0) return null;
+    return ranking.find((item) => item.sector_id === selectedSectorId) ?? ranking[0];
+  }, [ranking, selectedSectorId]);
 
   return (
     <div className="space-y-4">
@@ -78,7 +88,7 @@ export default function MainlineReplayPage() {
                   item={r}
                   rank={i + 1}
                   selected={selectedSector?.sector_id === r.sector_id}
-                  onSelect={() => setSelectedSector(r)}
+                  onSelect={() => setSelectedSectorId(r.sector_id)}
                 />
               ))}
               {(snapshotQ.data?.ranking ?? []).length === 0 && (

@@ -83,6 +83,8 @@ vn.py 中数据需要分清四类：
 - `sync_sector_daily_bars` 如果对所有板块读取 0 行，会抛 `DataSyncError` 并记录失败，而不是静默显示成功 0 行。
 - `sync_sector_daily_bars` 和 `sync_sector_period_scores` 默认 `sector_limit=0`，即生产定时任务全量覆盖行业/概念板块；不能恢复成 300 的截断默认值，否则主线回放会只更新部分板块。
 - 主线回放依赖 `sector_period_scores`、`sector_fund_flows`、`sector_daily_bars`、`stock_daily_bars` 和 `quant_signal_runs`；生产 `sector_daily_bars` 为空会导致板块热度/主线数据与本地不一致。
+- `sector_period_scores` 历史评分必须只读取 `as_of_date` 当天及以前的 `sector_daily_bars` 和 `sector_fund_flows`。不能用最新板块 K 线重算历史日期，否则 `/mainline` 切换日期时板块榜会完全相同。
+- `sync_sector_period_scores` 未显式传 `as_of_date` 时默认使用最新完整股票日线日期，不使用系统当天日期；周末/休市日不能生成新的主线评分日期。`/api/mainline-replay/timeline` 也只返回有完整股票日线覆盖的评分日期，避免脏的非交易日排到首位。
 
 ## AlphaAgent 分钟线同步路径
 

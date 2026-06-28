@@ -16,7 +16,7 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 
 from alphaagent.server.core.responses import fail, ok
 from alphaagent.server.db import schema
@@ -36,6 +36,7 @@ _INDEX_VT_SYMBOLS = [
 ]
 _DEFAULT_PERIOD = "20d"
 _WINDOW_DAYS = 20  # 关联反推的行情窗口
+_MIN_COMPLETE_DAILY_SYMBOL_COUNT = 3000
 
 
 @router.get("/timeline", response_model=None)
@@ -44,9 +45,15 @@ def timeline(limit: int = Query(400, ge=1, le=2000)) -> dict[str, Any]:
     if not is_database_configured():
         return ok({"dates": [], "status": "unavailable", "message": "数据库未配置"})
     with session_scope() as session:
+        complete_trade_dates = (
+            select(schema.stock_daily_bars.c.trade_date)
+            .group_by(schema.stock_daily_bars.c.trade_date)
+            .having(func.count(func.distinct(schema.stock_daily_bars.c.vt_symbol)) >= _MIN_COMPLETE_DAILY_SYMBOL_COUNT)
+        ).subquery()
         rows = session.execute(
             select(schema.sector_period_scores.c.as_of_date)
             .where(schema.sector_period_scores.c.period == _DEFAULT_PERIOD)
+            .where(schema.sector_period_scores.c.as_of_date.in_(select(complete_trade_dates.c.trade_date)))
             .group_by(schema.sector_period_scores.c.as_of_date)
             .order_by(desc(schema.sector_period_scores.c.as_of_date))
             .limit(limit)

@@ -10,6 +10,9 @@ All tests monkeypatch database and AkShare adapter to avoid external dependencie
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from datetime import date
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -599,6 +602,70 @@ class TestServiceImports:
             get_stock_workbench,
         )
         assert callable(get_stock_workbench)
+
+
+def test_sector_score_input_ignores_future_bars_and_fund_flows(monkeypatch):
+    """Historical mainline scoring must not read data after as_of_date."""
+    from alphaagent.server.db import schema
+    from alphaagent.server.services import research_sector_scores as scores
+
+    class _Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+        def first(self):
+            return self._rows[0] if self._rows else None
+
+        def scalar(self):
+            return self._rows[0] if self._rows else 0
+
+    class _Session:
+        def execute(self, stmt):
+            sql = str(stmt)
+            if "FROM sector_daily_bars" in sql:
+                params = stmt.compile().params
+                assert params["trade_date_1"] == date(2026, 6, 25)
+                return _Result([
+                    {
+                        "sector_id": "BK0001",
+                        "trade_date": date(2026, 6, 25),
+                        "close_price": 110.0,
+                        "change_pct": 1.0,
+                        "turnover": 10.0,
+                    },
+                    {
+                        "sector_id": "BK0001",
+                        "trade_date": date(2026, 6, 24),
+                        "close_price": 100.0,
+                        "change_pct": -1.0,
+                        "turnover": 8.0,
+                    },
+                ])
+            if "FROM sectors" in sql:
+                return _Result([{"stock_count": 10, "rise_count": 6, "fall_count": 4}])
+            if "FROM sector_fund_flows" in sql:
+                params = stmt.compile().params
+                assert params["trade_date_1"] == "2026-06-25"
+                return _Result([{"main_net_inflow": 123.0, "main_net_inflow_ratio": 4.5}])
+            return _Result([0])
+
+    @contextmanager
+    def fake_session_scope():
+        yield _Session()
+
+    monkeypatch.setattr(scores, "session_scope", fake_session_scope)
+
+    inp = scores._collect_score_input("BK0001", "concept", date(2026, 6, 25), 2)
+
+    assert [bar["trade_date"] for bar in inp.bars] == [date(2026, 6, 25), date(2026, 6, 24)]
+    assert inp.return_pct == 10.0
+    assert inp.main_net_inflow == 123.0
 
 
 # ══════════════════════════════════════════

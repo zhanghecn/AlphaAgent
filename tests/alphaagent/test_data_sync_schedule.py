@@ -97,6 +97,69 @@ def test_sector_mainline_jobs_default_to_full_sector_coverage():
     assert scores_job.default_params["sector_limit"] == 0
 
 
+def test_sector_period_scores_default_to_latest_complete_daily_date(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(svc, "_latest_complete_daily_date_for_research", lambda: date(2026, 6, 26))
+
+    def fake_compute_and_persist(*, as_of_date, periods, sector_limit):
+        captured["as_of_date"] = as_of_date
+        captured["periods"] = periods
+        captured["sector_limit"] = sector_limit
+        return {"sectors_scored": 2, "rows_written": 2, "as_of_date": as_of_date.isoformat()}
+
+    monkeypatch.setattr(svc.research_sector_scores, "compute_and_persist", fake_compute_and_persist)
+
+    result = svc.DataSyncRunner(adapter=object())._run_sync_sector_period_scores({})
+
+    assert captured == {"as_of_date": date(2026, 6, 26), "periods": ["20d"], "sector_limit": 0}
+    assert result["message"] == "as_of_date=2026-06-26"
+
+
+def test_compute_sector_period_scores_defaults_to_latest_complete_daily_date(monkeypatch):
+    from alphaagent.server.services import research_sector_scores as scores
+
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(scores, "is_database_configured", lambda: True)
+    monkeypatch.setattr(scores, "_default_score_as_of_date", lambda: date(2026, 6, 26))
+
+    def fake_collect_score_input(sector_id, sector_type, as_of_date, trading_days):
+        del trading_days
+        captured["as_of_date"] = as_of_date
+        return scores.SectorScoreInput(
+            sector_id=sector_id,
+            sector_type=sector_type,
+            period="",
+            as_of_date=as_of_date,
+        )
+
+    monkeypatch.setattr(scores, "_collect_score_input", fake_collect_score_input)
+
+    class FakeRows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [{"id": "BK0001", "type": "concept"}]
+
+    class FakeSession:
+        def execute(self, stmt):
+            del stmt
+            return FakeRows()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(scores, "session_scope", fake_session_scope)
+
+    results = scores.compute_sector_period_scores(periods=["20d"], sector_limit=0)
+
+    assert captured["as_of_date"] == date(2026, 6, 26)
+    assert results[0].as_of_date == date(2026, 6, 26)
+
+
 # ── Startup recovery: interrupted schedules are retried programmatically ──
 
 

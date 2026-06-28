@@ -4,6 +4,9 @@
 若日后后端加全局鉴权依赖，需补 token / monkeypatch。
 """
 
+from contextlib import contextmanager
+from datetime import date
+
 from fastapi.testclient import TestClient
 
 from alphaagent.server.api import mainline_replay
@@ -59,6 +62,35 @@ def test_timeline_route_registered():
     # db off 时返回 200 + unavailable，证明路由可达
     res = client.get("/api/mainline-replay/timeline")
     assert res.status_code != 404
+
+
+def test_timeline_filters_to_complete_trade_dates(monkeypatch):
+    captured: dict[str, str] = {}
+
+    class FakeResult:
+        def all(self):
+            return [(date(2026, 6, 26),), (date(2026, 6, 25),)]
+
+    class FakeSession:
+        def execute(self, stmt):
+            compiled = stmt.compile()
+            captured["sql"] = str(compiled)
+            captured["params"] = str(compiled.params)
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(mainline_replay, "is_database_configured", lambda: True)
+    monkeypatch.setattr(mainline_replay, "session_scope", fake_session_scope)
+
+    body = mainline_replay.timeline(limit=10)
+
+    assert body["data"]["dates"] == ["2026-06-26", "2026-06-25"]
+    assert "stock_daily_bars" in captured["sql"]
+    assert "count(distinct" in captured["sql"].lower()
+    assert "3000" in captured["params"]
 
 
 def test_sector_stocks_unavailable_when_db_off(monkeypatch):
