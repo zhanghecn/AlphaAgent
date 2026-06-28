@@ -97,6 +97,37 @@ def test_sector_mainline_jobs_default_to_full_sector_coverage():
     assert scores_job.default_params["sector_limit"] == 0
 
 
+def test_stock_list_sync_uses_total_not_legacy_40_page_cap(monkeypatch):
+    seen_pages: list[int] = []
+    captured_items: list[dict[str, Any]] = []
+
+    class FakeAdapter:
+        def list_stocks(self, page=1, page_size=200, sort="mktcap"):
+            seen_pages.append(page)
+            total = 4100
+            start = (page - 1) * 100
+            if start >= total:
+                return {"items": [], "total": total}
+            count = min(100, total - start)
+            items = [
+                {"symbol": f"{start + i:06d}", "exchange": "SSE", "name": f"S{start + i}"}
+                for i in range(count)
+            ]
+            return {"items": items, "total": total}
+
+    def fake_upsert(items):
+        captured_items.extend(items)
+        return len(items)
+
+    monkeypatch.setattr(svc, "_upsert_stocks", fake_upsert)
+
+    result = svc.DataSyncRunner(adapter=FakeAdapter())._run_sync_stock_list({"page_size": 200})
+
+    assert result == {"rows_read": 4100, "rows_written": 4100}
+    assert max(seen_pages) == 41
+    assert len(captured_items) == 4100
+
+
 def test_sector_period_scores_default_to_latest_complete_daily_date(monkeypatch):
     captured: dict[str, Any] = {}
 

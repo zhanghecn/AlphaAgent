@@ -50,6 +50,7 @@ INTERRUPTED_SCHEDULE_RECOVERY_DELAY_SECONDS = 30
 INTERRUPTED_SCHEDULE_RECOVERY_WAIT_SECONDS = 6 * 60 * 60
 INTERRUPTED_SCHEDULE_RECOVERY_POLL_SECONDS = 5
 CANONICAL_SECTOR_DAILY_SOURCE = "eastmoney.board_kline"
+STOCK_LIST_MAX_PAGES = 200
 SECTOR_DAILY_MIN_COVERAGE_TOTAL = 100
 SECTOR_DAILY_MIN_COVERAGE_RATIO = 0.8
 
@@ -526,7 +527,7 @@ class DataSyncRunner:
             if total is not None and len(all_items) >= total:
                 break
             page += 1
-            if page > 40:
+            if page > STOCK_LIST_MAX_PAGES:
                 break
         self._report_progress("写入股票清单", current=0, total=len(all_items), rows_read=len(all_items), sample_items=all_items)
         rows_written = _upsert_stocks(all_items)
