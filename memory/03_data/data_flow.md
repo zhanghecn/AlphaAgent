@@ -81,6 +81,7 @@ vn.py 中数据需要分清四类：
 - `AkShareAdapter.sector_daily_bars()` 优先使用东方财富 `push2his` 直连板块 K 线接口，`secid=90.BKxxxx`，源码 helper 为 `_eastmoney_board_kline()`。
 - AkShare THS 板块指数函数仍作为兜底，但不再是首选路径。当前 Docker 镜像里的 `akracer 0.0.14` 缺 x86_64 `libmini_racer.glibc.so`，不能依赖 `py_mini_racer` 路径作为生产主路径。
 - `sync_sector_daily_bars` 如果对所有板块读取 0 行，会抛 `DataSyncError` 并记录失败，而不是静默显示成功 0 行。
+- `sync_sector_daily_bars` 和 `sync_sector_period_scores` 默认 `sector_limit=0`，即生产定时任务全量覆盖行业/概念板块；不能恢复成 300 的截断默认值，否则主线回放会只更新部分板块。
 - 主线回放依赖 `sector_period_scores`、`sector_fund_flows`、`sector_daily_bars`、`stock_daily_bars` 和 `quant_signal_runs`；生产 `sector_daily_bars` 为空会导致板块热度/主线数据与本地不一致。
 
 ## AlphaAgent 分钟线同步路径

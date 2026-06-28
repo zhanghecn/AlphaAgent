@@ -178,7 +178,7 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         description="同步行业/概念板块历史日 K 线数据。",
         source_id="akshare",
         target_table="sector_daily_bars",
-        default_params={"limit": 250, "sector_limit": 300},
+        default_params={"limit": 250, "sector_limit": 0},
     ),
     JobDefinition(
         id="sync_sector_fund_flows",
@@ -194,7 +194,7 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         description="根据板块 K 线、资金流、成员涨跌和情绪事件计算主线热度评分。",
         source_id="akshare",
         target_table="sector_period_scores",
-        default_params={"periods": ["20d"], "sector_limit": 300},
+        default_params={"periods": ["20d"], "sector_limit": 0},
     ),
     JobDefinition(
         id="sync_limit_up_pools",

@@ -89,10 +89,12 @@ def test_eod_schedule_runs_quant_research_before_slow_enrichment_jobs():
     assert jobs.index("sync_stock_notices") > quant_idx
 
 
-def test_sector_daily_bars_default_limits_slow_eod_scope():
-    job = next(item for item in svc.DEFAULT_JOBS if item.id == "sync_sector_daily_bars")
+def test_sector_mainline_jobs_default_to_full_sector_coverage():
+    bars_job = next(item for item in svc.DEFAULT_JOBS if item.id == "sync_sector_daily_bars")
+    scores_job = next(item for item in svc.DEFAULT_JOBS if item.id == "sync_sector_period_scores")
 
-    assert job.default_params["sector_limit"] == 300
+    assert bars_job.default_params["sector_limit"] == 0
+    assert scores_job.default_params["sector_limit"] == 0
 
 
 # ── Startup recovery: interrupted schedules are retried programmatically ──
