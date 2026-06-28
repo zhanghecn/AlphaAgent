@@ -647,13 +647,29 @@ def test_sector_score_input_ignores_future_bars_and_fund_flows(monkeypatch):
                         "turnover": 8.0,
                     },
                 ])
-            if "FROM sectors" in sql:
-                return _Result([{"stock_count": 10, "rise_count": 6, "fall_count": 4}])
+            if "FROM sector_memberships" in sql:
+                return _Result([
+                    {"vt_symbol": "000001.SZ", "name": "成员一"},
+                    {"vt_symbol": "000002.SZ", "name": "成员二"},
+                    {"vt_symbol": "000003.SZ", "name": "成员三"},
+                ])
+            if "FROM stock_daily_bars" in sql:
+                params = stmt.compile().params
+                assert params["trade_date_1"] == date(2026, 6, 25)
+                return _Result([
+                    {"vt_symbol": "000001.SZ", "change_pct": 3.0},
+                    {"vt_symbol": "000002.SZ", "change_pct": -1.0},
+                    {"vt_symbol": "000003.SZ", "change_pct": 6.0},
+                ])
             if "FROM sector_fund_flows" in sql:
                 params = stmt.compile().params
                 assert params["trade_date_1"] == "2026-06-25"
                 return _Result([{"main_net_inflow": 123.0, "main_net_inflow_ratio": 4.5}])
-            return _Result([0])
+            if "FROM stock_events" in sql:
+                params = stmt.compile().params
+                assert params["event_date_1"] == ["2026-06-25", "20260625"]
+                return _Result([1])
+            raise AssertionError(f"unexpected SQL: {sql}")
 
     @contextmanager
     def fake_session_scope():
@@ -666,6 +682,53 @@ def test_sector_score_input_ignores_future_bars_and_fund_flows(monkeypatch):
     assert [bar["trade_date"] for bar in inp.bars] == [date(2026, 6, 25), date(2026, 6, 24)]
     assert inp.return_pct == 10.0
     assert inp.main_net_inflow == 123.0
+    assert inp.total_members == 3
+    assert inp.rise_count == 2
+    assert inp.fall_count == 1
+    assert inp.leader_vt_symbol == "000003.SZ"
+    assert inp.leader_name == "成员三"
+    assert inp.leader_change_pct == 6.0
+    assert inp.limit_up_count == 1
+
+
+def test_sector_score_breadth_and_leader_use_as_of_member_bars():
+    """Breadth/leader evidence must come from historical member bars, not sector snapshots."""
+    from alphaagent.server.services import research_sector_scores as scores
+
+    inp = scores.SectorScoreInput(
+        sector_id="BK0001",
+        sector_type="concept",
+        period="20d",
+        as_of_date=date(2026, 6, 25),
+        total_members=4,
+        member_universe_count=6,
+        member_bar_count=4,
+        rise_count=3,
+        fall_count=1,
+        breadth_source="stock_daily_bars.as_of_date",
+        leader_vt_symbol="000003.SZ",
+        leader_name="成员三",
+        leader_change_pct=6.0,
+        leader_source="stock_daily_bars.as_of_date",
+        limit_up_count=1,
+        sentiment_source="stock_events.event_date",
+    )
+
+    breadth, breadth_evidence = scores._score_breadth(inp)
+    leader, leader_evidence = scores._score_leader(inp)
+    sentiment, sentiment_evidence = scores._score_sentiment(inp)
+
+    assert breadth == 75.0
+    assert breadth_evidence["source"] == "stock_daily_bars.as_of_date"
+    assert breadth_evidence["as_of_date"] == "2026-06-25"
+    assert breadth_evidence["member_universe_count"] == 6
+    assert breadth_evidence["member_bar_count"] == 4
+    assert leader == 68.0
+    assert leader_evidence["leader_vt_symbol"] == "000003.SZ"
+    assert leader_evidence["leader_name"] == "成员三"
+    assert leader_evidence["source"] == "stock_daily_bars.as_of_date"
+    assert sentiment == 100.0
+    assert sentiment_evidence["source"] == "stock_events.event_date"
 
 
 # ══════════════════════════════════════════

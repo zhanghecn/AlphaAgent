@@ -82,9 +82,12 @@ class SectorScoreInput:
     return_pct: float | None = None
 
     # Membership breadth
+    member_universe_count: int = 0
+    member_bar_count: int = 0
     total_members: int = 0
     rise_count: int = 0
     fall_count: int = 0
+    breadth_source: str | None = None
 
     # Fund flows
     main_net_inflow: float | None = None
@@ -93,11 +96,13 @@ class SectorScoreInput:
     # Sentiment (limit-up/down counts)
     limit_up_count: int = 0
     limit_down_count: int = 0
+    sentiment_source: str | None = None
 
     # Leader
     leader_vt_symbol: str | None = None
     leader_name: str | None = None
     leader_change_pct: float | None = None
+    leader_source: str | None = None
 
     # Liquidity
     total_turnover: float | None = None
@@ -281,6 +286,125 @@ def _default_score_as_of_date() -> date:
     return row[0] if row else date.today()
 
 
+def _load_sector_members(session, sector_id: str) -> list[dict[str, Any]]:
+    """Load the current member universe for a sector.
+
+    Membership history is not versioned yet. The score still reads member price
+    state strictly from ``as_of_date`` so breadth and leader do not use current
+    quote snapshots.
+    """
+    rows = session.execute(
+        select(
+            schema.sector_memberships.c.vt_symbol,
+            schema.sector_memberships.c.name,
+        ).where(schema.sector_memberships.c.sector_id == sector_id)
+    ).mappings().all()
+    if rows:
+        return _dedupe_members(rows)
+
+    rows = session.execute(
+        select(
+            schema.stock_sector_memberships.c.vt_symbol,
+            schema.stocks.c.name,
+        )
+        .select_from(
+            schema.stock_sector_memberships.outerjoin(
+                schema.stocks,
+                schema.stocks.c.vt_symbol == schema.stock_sector_memberships.c.vt_symbol,
+            )
+        )
+        .where(schema.stock_sector_memberships.c.sector_id == sector_id)
+    ).mappings().all()
+    return _dedupe_members(rows)
+
+
+def _dedupe_members(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    members: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        vt_symbol = row.get("vt_symbol")
+        if not vt_symbol:
+            continue
+        symbol = str(vt_symbol)
+        members.setdefault(symbol, {"vt_symbol": symbol, "name": row.get("name")})
+    return list(members.values())
+
+
+def _collect_member_daily_state(
+    session,
+    sector_id: str,
+    as_of_date: date,
+) -> dict[str, Any]:
+    """Collect constituent breadth and leader from stock bars on as_of_date."""
+    members = _load_sector_members(session, sector_id)
+    member_names = {str(row["vt_symbol"]): row.get("name") for row in members}
+    member_symbols = list(member_names)
+    if not member_symbols:
+        return {
+            "member_symbols": [],
+            "member_universe_count": 0,
+            "member_bar_count": 0,
+            "rise_count": 0,
+            "fall_count": 0,
+            "leader_vt_symbol": None,
+            "leader_name": None,
+            "leader_change_pct": None,
+        }
+
+    rows = session.execute(
+        select(
+            schema.stock_daily_bars.c.vt_symbol,
+            schema.stock_daily_bars.c.change_pct,
+        ).where(
+            and_(
+                schema.stock_daily_bars.c.vt_symbol.in_(member_symbols),
+                schema.stock_daily_bars.c.trade_date == as_of_date,
+            )
+        )
+    ).mappings().all()
+
+    daily_rows: list[dict[str, Any]] = []
+    for row in rows:
+        daily_rows.append({
+            "vt_symbol": str(row["vt_symbol"]),
+            "change_pct": _float_or_none(row.get("change_pct")),
+        })
+
+    change_rows = [row for row in daily_rows if row["change_pct"] is not None]
+    leader_row = max(change_rows, key=lambda row: row["change_pct"], default=None)
+
+    return {
+        "member_symbols": member_symbols,
+        "member_universe_count": len(member_symbols),
+        "member_bar_count": len(daily_rows),
+        "rise_count": sum(1 for row in change_rows if row["change_pct"] > 0),
+        "fall_count": sum(1 for row in change_rows if row["change_pct"] < 0),
+        "leader_vt_symbol": leader_row["vt_symbol"] if leader_row else None,
+        "leader_name": member_names.get(leader_row["vt_symbol"]) if leader_row else None,
+        "leader_change_pct": leader_row["change_pct"] if leader_row else None,
+    }
+
+
+def _count_limit_up_events(
+    session,
+    member_symbols: Sequence[str],
+    as_of_date: date,
+) -> int:
+    if not member_symbols:
+        return 0
+    event_dates = [as_of_date.isoformat(), as_of_date.strftime("%Y%m%d")]
+    count = session.execute(
+        select(func.count(func.distinct(schema.stock_events.c.vt_symbol))).select_from(schema.stock_events)
+        .where(
+            and_(
+                schema.stock_events.c.event_date.in_(event_dates),
+                schema.stock_events.c.event_type == "limit_pool_zt",
+                schema.stock_events.c.vt_symbol.in_(member_symbols),
+            )
+        )
+    ).scalar()
+    return int(count or 0)
+
+
 def _aggregate_member_bars(session, sector_id: str, as_of_date: date, trading_days: int) -> list[dict[str, Any]]:
     """从成分股 K 线聚合板块指数（等权 close 均值），替代被反爬的 sector_daily_bars。
 
@@ -288,10 +412,7 @@ def _aggregate_member_bars(session, sector_id: str, as_of_date: date, trading_da
     stock_sector_memberships（成分股映射）聚合算板块指数。return_pct 用 close，不受
     change_pct/turnover 缺失影响。
     """
-    members = session.execute(
-        select(schema.stock_sector_memberships.c.vt_symbol)
-        .where(schema.stock_sector_memberships.c.sector_id == sector_id)
-    ).scalars().all()
+    members = [row["vt_symbol"] for row in _load_sector_members(session, sector_id)]
     if not members:
         return []
     rows = session.execute(
@@ -368,16 +489,18 @@ def _collect_score_input(
             # sector_daily_bars（东财）被反爬全空时，从成分股聚合（腾讯源 stock_daily_bars，稳定）
             inp.bars = _aggregate_member_bars(session, sector_id, as_of_date, trading_days)
 
-        # 2. Membership breadth (rise/fall counts from sectors table)
-        sector_data = session.execute(
-            select(schema.sectors).where(schema.sectors.c.id == sector_id)
-        ).mappings().first()
-        if sector_data:
-            inp.total_members = int(sector_data.get("stock_count") or 0)
-            inp.rise_count = int(sector_data.get("rise_count") or 0)
-            inp.fall_count = int(sector_data.get("fall_count") or 0)
-            inp.leader_vt_symbol = sector_data.get("leader_stock")
-            inp.leader_change_pct = sector_data.get("leader_change_pct")
+        # 2. Membership breadth and leader from member bars on as_of_date.
+        member_state = _collect_member_daily_state(session, sector_id, as_of_date)
+        inp.member_universe_count = int(member_state["member_universe_count"])
+        inp.member_bar_count = int(member_state["member_bar_count"])
+        inp.total_members = inp.member_bar_count
+        inp.rise_count = int(member_state["rise_count"])
+        inp.fall_count = int(member_state["fall_count"])
+        inp.leader_vt_symbol = member_state["leader_vt_symbol"]
+        inp.leader_name = member_state["leader_name"]
+        inp.leader_change_pct = member_state["leader_change_pct"]
+        inp.breadth_source = "stock_daily_bars.as_of_date"
+        inp.leader_source = "stock_daily_bars.as_of_date"
 
         # 3. Fund flows (latest)
         fund_row = session.execute(
@@ -396,19 +519,12 @@ def _collect_score_input(
             inp.main_net_inflow_ratio = fund_row.get("main_net_inflow_ratio")
 
         # 4. Limit-up events (sentiment)
-        today_str = as_of_date.isoformat()
-        limit_events = session.execute(
-            select(func.count()).select_from(schema.stock_events)
-            .where(
-                (schema.stock_events.c.event_date == today_str)
-                & (schema.stock_events.c.event_type == "limit_pool_zt")
-                & (schema.stock_events.c.vt_symbol.in_(
-                    select(schema.sector_memberships.c.vt_symbol)
-                    .where(schema.sector_memberships.c.sector_id == sector_id)
-                ))
-            )
-        ).scalar()
-        inp.limit_up_count = int(limit_events or 0)
+        inp.limit_up_count = _count_limit_up_events(
+            session,
+            member_state["member_symbols"],
+            as_of_date,
+        )
+        inp.sentiment_source = "stock_events.event_date"
 
     # Calculate return from bars
     inp.return_pct = _calculate_return_from_bars(inp.bars, trading_days)
@@ -585,7 +701,14 @@ def _score_breadth(inp: SectorScoreInput) -> tuple[float, dict[str, Any]]:
     """
     total = inp.total_members
     if total < MIN_MEMBERS_FOR_BREADTH:
-        return 0.0, {"total_members": total, "reason": "too_few_members"}
+        return 0.0, {
+            "total_members": total,
+            "member_universe_count": inp.member_universe_count,
+            "member_bar_count": inp.member_bar_count,
+            "source": inp.breadth_source,
+            "as_of_date": inp.as_of_date.isoformat(),
+            "reason": "too_few_members",
+        }
 
     rise = inp.rise_count
     fall = inp.fall_count
@@ -596,9 +719,13 @@ def _score_breadth(inp: SectorScoreInput) -> tuple[float, dict[str, Any]]:
 
     ev: dict[str, Any] = {
         "total_members": total,
+        "member_universe_count": inp.member_universe_count,
+        "member_bar_count": inp.member_bar_count,
         "rise_count": rise,
         "fall_count": fall,
         "rise_ratio": round(rise_ratio, 3),
+        "source": inp.breadth_source,
+        "as_of_date": inp.as_of_date.isoformat(),
     }
     return round(max(0.0, min(100.0, score)), 2), ev
 
@@ -640,7 +767,14 @@ def _score_sentiment(inp: SectorScoreInput) -> tuple[float, dict[str, Any]]:
     zt_count = inp.limit_up_count
 
     if total < MIN_MEMBERS_FOR_BREADTH:
-        return 50.0, {"reason": "too_few_members"}
+        return 50.0, {
+            "total_members": total,
+            "member_universe_count": inp.member_universe_count,
+            "member_bar_count": inp.member_bar_count,
+            "source": inp.sentiment_source,
+            "as_of_date": inp.as_of_date.isoformat(),
+            "reason": "too_few_members",
+        }
 
     zt_ratio = zt_count / max(total, 1)
 
@@ -652,6 +786,8 @@ def _score_sentiment(inp: SectorScoreInput) -> tuple[float, dict[str, Any]]:
         "limit_up_count": zt_count,
         "total_members": total,
         "limit_up_ratio": round(zt_ratio, 4),
+        "source": inp.sentiment_source,
+        "as_of_date": inp.as_of_date.isoformat(),
     }
     return round(max(0.0, min(100.0, score)), 2), ev
 
@@ -664,14 +800,21 @@ def _score_leader(inp: SectorScoreInput) -> tuple[float, dict[str, Any]]:
     leader_change = inp.leader_change_pct
 
     if leader_change is None:
-        return 50.0, {"reason": "no_leader_data"}
+        return 50.0, {
+            "source": inp.leader_source,
+            "as_of_date": inp.as_of_date.isoformat(),
+            "reason": "no_leader_data",
+        }
 
     # Map leader change to score
     score = 50 + leader_change * 3.0
 
     ev: dict[str, Any] = {
         "leader_vt_symbol": inp.leader_vt_symbol,
+        "leader_name": inp.leader_name,
         "leader_change_pct": leader_change,
+        "source": inp.leader_source,
+        "as_of_date": inp.as_of_date.isoformat(),
     }
     return round(max(0.0, min(100.0, score)), 2), ev
 
@@ -825,6 +968,20 @@ def _sum_turnover(
     relevant = bars[:trading_days]
     total = sum(b.get("turnover") or 0 for b in relevant)
     return total if total > 0 else None
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, str) and not value.strip():
+            return None
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(numeric) or math.isinf(numeric):
+        return None
+    return numeric
 
 
 def _assign_return_ranks(results: list[SectorScoreResult]) -> None:
