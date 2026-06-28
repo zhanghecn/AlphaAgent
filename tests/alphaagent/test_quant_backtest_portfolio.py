@@ -5707,6 +5707,36 @@ def test_dragon_pullback_experiment_can_tighten_mfe8_giveback_stop() -> None:
     assert sell_reason_for_position(position, bar, bar.trade_date, mfe8_params) == "mid_profit_giveback_stop"
 
 
+def test_dragon_pullback_trend_trailing_buffer_delays_default_stop() -> None:
+    from alphaagent.server.services.backtest.schemas import BacktestParams, Position
+    from alphaagent.server.services.backtest.simulation import sell_reason_for_position
+
+    position = Position(
+        vt_symbol="603439.SSE",
+        name="贵州三力",
+        volume=100,
+        cost_price=10.0,
+        entry_date=date(2026, 5, 11),
+        highest_price=14.5,
+        reason={"ma10": 11.0, "ma20": 10.0, "support_price": 9.8},
+    )
+    bar = Bar(
+        trade_date=date(2026, 5, 25),
+        open_price=13.1,
+        high_price=13.2,
+        low_price=12.9,
+        close_price=13.0,
+        volume=1_000_000,
+        turnover=200_000_000,
+        change_pct=-2.0,
+    )
+    default_params = BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID)
+    buffered_params = BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID, trend_trailing_dd_buffer_pct=0.04)
+
+    assert sell_reason_for_position(position, bar, bar.trade_date, default_params) == "trend_trailing_stop"
+    assert sell_reason_for_position(position, bar, bar.trade_date, buffered_params) is None
+
+
 def test_mid_profit_giveback_experiment_does_not_force_sell_stealth_low_suction() -> None:
     from alphaagent.server.services.backtest.schemas import BacktestParams, Position
     from alphaagent.server.services.backtest.simulation import sell_reason_for_position

@@ -2156,9 +2156,10 @@ def dragon_pullback_sell_reason(
         return "profit_protection_stop"
     if high_gain >= 0.18 and gain <= 0.08 and drawdown_from_high <= -0.10:
         return "profit_protection_stop"
-    if gain >= 0.30 and drawdown_from_high <= -0.10:
+    trend_trailing_drawdown_buffer = max(params.trend_trailing_dd_buffer_pct, 0.0)
+    if gain >= 0.30 and drawdown_from_high <= -(0.10 + trend_trailing_drawdown_buffer):
         return "trend_trailing_stop"
-    if gain >= 0.18 and drawdown_from_high <= -0.12:
+    if gain >= 0.18 and drawdown_from_high <= -(0.12 + trend_trailing_drawdown_buffer):
         return "trend_trailing_stop"
     if ma10 is not None and gain > 0.08 and bar.close_price < ma10 * 0.98:
         if hold_soft_exit and ma20 is not None and bar.close_price >= ma20 * 0.99:

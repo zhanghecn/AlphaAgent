@@ -80,6 +80,7 @@ class BacktestParams:
     peak_giveback_max_current_gain_pct: float = 0.03
     peak_giveback_drawdown_pct: float = 0.07
     peak_giveback_min_holding_days: int = 5
+    trend_trailing_dd_buffer_pct: float = 0.0
     enable_low_suction_false_launch_watch_gate: bool = False
     low_suction_false_launch_min_days: int = 3
     low_suction_false_launch_min_warning_level: int = 2
