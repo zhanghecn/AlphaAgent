@@ -647,6 +647,122 @@ def test_sector_members_syncs_concurrently(monkeypatch):
     assert len(seen) == 12
 
 
+def test_sector_members_sync_fetches_all_pages_before_prune(monkeypatch):
+    calls: list[int] = []
+    captured: list[tuple[str, list[dict[str, Any]]]] = []
+
+    class FakeAdapter:
+        def sector_stocks(self, sector_id, page=1, page_size=50, **kw):
+            calls.append(page)
+            if page == 1:
+                return {"items": [{"symbol": "000001", "exchange": "SSE"}], "total": 2}
+            if page == 2:
+                return {"items": [{"symbol": "000002", "exchange": "SZSE"}], "total": 2}
+            return {"items": [], "total": 2}
+
+    class FakeResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [{"id": "BK0001", "type": "industry", "name": "S1"}]
+
+    class FakeSession:
+        def execute(self, stmt):
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    def fake_upsert(sector_id, items):
+        captured.append((sector_id, list(items)))
+        return len(items)
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+    monkeypatch.setattr(svc, "_upsert_sector_memberships", fake_upsert)
+
+    result = svc.DataSyncRunner(adapter=FakeAdapter(), concurrency=1)._run_sync_sector_members({"page_size": 1})
+
+    assert calls == [1, 2]
+    assert result["rows_read"] == 2
+    assert [item["symbol"] for _, items in captured for item in items] == ["000001", "000002"]
+
+
+def test_upsert_sector_memberships_prunes_missing_members(monkeypatch):
+    executed: list[str] = []
+
+    class FakeResult:
+        def first(self):
+            return None
+
+    class FakeSession:
+        def execute(self, stmt):
+            if getattr(stmt, "is_delete", False):
+                executed.append(str(stmt.compile(compile_kwargs={"literal_binds": True})))
+            else:
+                executed.append(str(stmt))
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+
+    written = svc._upsert_sector_memberships(
+        "BK0001",
+        [
+            {"symbol": "000001", "exchange": "SSE", "name": "A"},
+            {"symbol": "000002", "exchange": "SZSE", "name": "B"},
+        ],
+    )
+
+    assert written == 2
+    delete_sql = [sql for sql in executed if sql.startswith("DELETE FROM sector_memberships")]
+    assert delete_sql
+    assert "sector_memberships.sector_id = 'BK0001'" in delete_sql[-1]
+    assert "sector_memberships.vt_symbol NOT IN ('000001.SSE', '000002.SZSE')" in delete_sql[-1]
+
+
+def test_upsert_shenwan_industry_members_prunes_missing_members(monkeypatch):
+    executed: list[str] = []
+
+    class FakeResult:
+        def first(self):
+            return None
+
+    class FakeSession:
+        def execute(self, stmt):
+            if getattr(stmt, "is_delete", False):
+                executed.append(str(stmt.compile(compile_kwargs={"literal_binds": True})))
+            else:
+                executed.append(str(stmt))
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+
+    written = svc._upsert_shenwan_industry_members(
+        "801010",
+        [
+            {"symbol": "600000", "exchange": "SSE", "name": "A"},
+            {"symbol": "000001", "exchange": "SZSE", "name": "B"},
+        ],
+    )
+
+    assert written == 2
+    delete_sql = [sql for sql in executed if sql.startswith("DELETE FROM shenwan_industry_members")]
+    assert delete_sql
+    assert "shenwan_industry_members.industry_code = '801010'" in delete_sql[-1]
+    assert "shenwan_industry_members.vt_symbol NOT IN" in delete_sql[-1]
+    assert "'600000.SSE'" in delete_sql[-1]
+    assert "'000001.SZSE'" in delete_sql[-1]
+
+
 def test_sector_daily_bars_syncs_concurrently(monkeypatch):
     """板块历史K线应并发拉取(此前纯串行 1484 板块要 ~28min,拖慢盘后批次)。"""
     import threading
@@ -665,7 +781,7 @@ def test_sector_daily_bars_syncs_concurrently(monkeypatch):
             with lock:
                 active["n"] -= 1
                 seen.append(sector_id)
-            return {"items": [{"trade_date": "2026-06-23"}], "source": "test"}
+            return {"items": [{"trade_date": "2026-06-23"}], "source": svc.CANONICAL_SECTOR_DAILY_SOURCE}
 
     class FakeResult:
         def mappings(self):
@@ -689,6 +805,110 @@ def test_sector_daily_bars_syncs_concurrently(monkeypatch):
 
     assert active["peak"] >= 2, f"应并发执行,peak={active['peak']}"
     assert len(seen) == 12
+
+
+def test_upsert_sector_daily_bars_prunes_old_sources_for_sector(monkeypatch):
+    executed: list[str] = []
+
+    class FakeResult:
+        def first(self):
+            return None
+
+    class FakeSession:
+        def execute(self, stmt):
+            if getattr(stmt, "is_delete", False):
+                executed.append(str(stmt.compile(compile_kwargs={"literal_binds": True})))
+            else:
+                executed.append(str(stmt))
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+
+    written = svc._upsert_sector_daily_bars(
+        "BK0459",
+        [
+            {"trade_date": "2026-06-25", "open": 1, "close": 2, "high": 3, "low": 1},
+            {"trade_date": "2026-06-26", "open": 2, "close": 3, "high": 4, "low": 2},
+        ],
+        svc.CANONICAL_SECTOR_DAILY_SOURCE,
+    )
+
+    assert written == 2
+    delete_sql = [sql for sql in executed if sql.startswith("DELETE FROM sector_daily_bars")]
+    assert delete_sql
+    sql = delete_sql[0]
+    assert "sector_daily_bars.sector_id = 'BK0459'" in sql
+    assert "sector_daily_bars.source != 'eastmoney.board_kline'" in sql
+
+
+def test_sector_daily_bars_sync_rejects_non_canonical_source(monkeypatch):
+    class FakeAdapter:
+        def sector_daily_bars(self, sector_id, board_type=None, limit=250):
+            return {"items": [{"trade_date": "2026-06-23"}], "source": "akshare.stock_board_industry_index_ths"}
+
+    class FakeResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [{"id": f"BK{i:04d}", "type": "industry", "name": f"S{i}"} for i in range(3)]
+
+    class FakeSession:
+        def execute(self, stmt):
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+
+    try:
+        svc.DataSyncRunner(adapter=FakeAdapter(), concurrency=2)._run_sync_sector_daily_bars({"limit": 250})
+    except svc.DataSyncError as exc:
+        assert "read 0 rows" in str(exc)
+        assert "failed=3" in str(exc)
+    else:
+        raise AssertionError("expected non-canonical sector daily bars source to fail")
+
+
+def test_sector_daily_bars_sync_fails_when_full_coverage_too_low(monkeypatch):
+    class FakeAdapter:
+        def sector_daily_bars(self, sector_id, board_type=None, limit=250):
+            index = int(str(sector_id).replace("BK", ""))
+            if index < 60:
+                return {"items": [{"trade_date": "2026-06-23"}], "source": svc.CANONICAL_SECTOR_DAILY_SOURCE}
+            return {"items": [], "source": svc.CANONICAL_SECTOR_DAILY_SOURCE}
+
+    class FakeResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [{"id": f"BK{i:04d}", "type": "industry", "name": f"S{i}"} for i in range(120)]
+
+    class FakeSession:
+        def execute(self, stmt):
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+    monkeypatch.setattr(svc, "_upsert_sector_daily_bars", lambda *a, **k: 0)
+
+    try:
+        svc.DataSyncRunner(adapter=FakeAdapter(), concurrency=4)._run_sync_sector_daily_bars({"limit": 250})
+    except svc.DataSyncError as exc:
+        assert "coverage too low" in str(exc)
+        assert "covered=60/120" in str(exc)
+    else:
+        raise AssertionError("expected low-coverage sector daily bars sync to fail")
 
 
 def test_sector_daily_bars_sync_fails_when_source_reads_zero(monkeypatch):

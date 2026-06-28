@@ -30,6 +30,7 @@ from sqlalchemy import desc, func, select, text
 from sqlalchemy.engine import Engine
 
 from alphaagent.data_sources.akshare_adapter import AkShareAdapter
+from alphaagent.market.cache import market_cache
 from alphaagent.market.symbols import INDEX_SYMBOLS, normalize_exchange, vt_symbol
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
@@ -48,6 +49,9 @@ INTERRUPTED_SCHEDULE_MESSAGE = "API process restarted before this schedule finis
 INTERRUPTED_SCHEDULE_RECOVERY_DELAY_SECONDS = 30
 INTERRUPTED_SCHEDULE_RECOVERY_WAIT_SECONDS = 6 * 60 * 60
 INTERRUPTED_SCHEDULE_RECOVERY_POLL_SECONDS = 5
+CANONICAL_SECTOR_DAILY_SOURCE = "eastmoney.board_kline"
+SECTOR_DAILY_MIN_COVERAGE_TOTAL = 100
+SECTOR_DAILY_MIN_COVERAGE_RATIO = 0.8
 
 _INTERRUPTED_RECOVERY_LOCK = threading.Lock()
 _INTERRUPTED_SCHEDULE_RECOVERY_IDS: set[str] = set()
@@ -589,7 +593,7 @@ class DataSyncRunner:
             sector_name = str(sector_row.get("name") or sector_id)
             label = f"{sector_name} {sector_id}"
             try:
-                data = self.adapter.sector_stocks(sector_id, page=1, page_size=page_size)
+                items = _fetch_all_sector_stocks(self.adapter, sector_id, page_size)
             except Exception as exc:
                 logger.warning("sector_stocks(%s) failed: %s", sector_id, exc)
                 with lock:
@@ -604,7 +608,6 @@ class DataSyncRunner:
                     rows_written=cur_written,
                 )
                 return
-            items = data.get("items") or []
             written = _upsert_sector_memberships(sector_id, items)
             with lock:
                 counters["read"] += len(items)
@@ -930,6 +933,9 @@ class DataSyncRunner:
     def _run_sync_sector_daily_bars(self, params: dict[str, Any]) -> dict[str, Any]:
         limit = int(params.get("limit", 250))
         sector_limit = int(params.get("sector_limit", 0))
+        allow_fallback_source = _truthy(params.get("allow_fallback_source", False))
+        min_coverage_ratio = float(params.get("min_coverage_ratio", SECTOR_DAILY_MIN_COVERAGE_RATIO))
+        market_cache.clear()
         with session_scope() as session:
             sector_rows = session.execute(select(schema.sectors)).mappings().all()
         if not sector_rows:
@@ -940,7 +946,7 @@ class DataSyncRunner:
         self._report_progress("同步板块历史 K 线", current=0, total=total_sectors)
 
         lock = threading.Lock()
-        counters = {"read": 0, "written": 0, "done": 0, "failed": 0, "empty": 0}
+        counters = {"read": 0, "written": 0, "done": 0, "failed": 0, "empty": 0, "covered": 0, "fallback": 0}
 
         def _do_one(sector_row: dict[str, Any]) -> None:
             sector_id = str(sector_row["id"])
@@ -965,13 +971,32 @@ class DataSyncRunner:
                 )
                 return
             items = data.get("items") or []
-            written = _upsert_sector_daily_bars(sector_id, items, data.get("source", "akshare"))
+            source = str(data.get("source") or "akshare")
+            if source != CANONICAL_SECTOR_DAILY_SOURCE and not allow_fallback_source:
+                logger.warning("sector_daily_bars(%s) returned non-canonical source: %s", sector_id, source)
+                with lock:
+                    counters["done"] += 1
+                    counters["failed"] += 1
+                    counters["fallback"] += 1
+                    cur_done, cur_read, cur_written = counters["done"], counters["read"], counters["written"]
+                self._report_progress(
+                    "读取板块历史 K 线",
+                    current=cur_done,
+                    total=total_sectors,
+                    current_label=f"{label} 非规范来源：{source}",
+                    rows_read=cur_read,
+                    rows_written=cur_written,
+                )
+                return
+            written = _upsert_sector_daily_bars(sector_id, items, source)
             with lock:
                 counters["read"] += len(items)
                 counters["written"] += written
                 counters["done"] += 1
                 if not items:
                     counters["empty"] += 1
+                else:
+                    counters["covered"] += 1
                 cur_done, cur_read, cur_written = counters["done"], counters["read"], counters["written"]
             self._report_progress(
                 "写入板块历史 K 线",
@@ -991,10 +1016,20 @@ class DataSyncRunner:
                 "sync_sector_daily_bars read 0 rows "
                 f"from {total_sectors} sectors (failed={counters['failed']}, empty={counters['empty']})"
             )
+        min_covered = int(total_sectors * min_coverage_ratio)
+        if total_sectors >= SECTOR_DAILY_MIN_COVERAGE_TOTAL and counters["covered"] < min_covered:
+            raise DataSyncError(
+                "sync_sector_daily_bars coverage too low "
+                f"covered={counters['covered']}/{total_sectors}, "
+                f"failed={counters['failed']}, empty={counters['empty']}, fallback={counters['fallback']}"
+            )
         return {
             "rows_read": counters["read"],
             "rows_written": counters["written"],
-            "message": f"failed={counters['failed']}, empty={counters['empty']}",
+            "message": (
+                f"covered={counters['covered']}, failed={counters['failed']}, "
+                f"empty={counters['empty']}, fallback={counters['fallback']}"
+            ),
         }
 
     def _run_sync_sector_fund_flows(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -4508,11 +4543,15 @@ def _upsert_sector_memberships(sector_id: str, items: list[dict[str, Any]]) -> i
     if not items:
         return 0
     written = 0
+    current_symbols: set[str] = set()
     with session_scope() as session:
         for item in items:
             symbol = str(item.get("symbol") or "")
             exchange = str(item.get("exchange") or normalize_exchange(symbol))
             vts = vt_symbol(symbol, exchange)
+            if not symbol:
+                continue
+            current_symbols.add(vts)
             name = str(item.get("name") or symbol)
             values = {
                 "sector_id": sector_id,
@@ -4544,6 +4583,13 @@ def _upsert_sector_memberships(sector_id: str, items: list[dict[str, Any]]) -> i
             else:
                 session.execute(schema.sector_memberships.insert().values(**values))
             written += 1
+        if current_symbols:
+            session.execute(
+                schema.sector_memberships.delete().where(
+                    (schema.sector_memberships.c.sector_id == sector_id)
+                    & schema.sector_memberships.c.vt_symbol.not_in(sorted(current_symbols))
+                )
+            )
     return written
 
 
@@ -4588,6 +4634,31 @@ def _upsert_stock_sector_memberships(items: list[dict[str, Any]]) -> int:
                 session.execute(schema.stock_sector_memberships.insert().values(**values))
             written += 1
     return written
+
+
+def _fetch_all_sector_stocks(
+    adapter: AkShareAdapter,
+    sector_id: str,
+    page_size: int,
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    page = 1
+    bounded_page_size = min(max(page_size, 1), 500)
+    while True:
+        data = adapter.sector_stocks(sector_id, page=page, page_size=bounded_page_size)
+        page_items = data.get("items") or []
+        if not page_items:
+            break
+        items.extend(page_items)
+        total = data.get("total")
+        if total is not None and len(items) >= int(total):
+            break
+        if len(page_items) < bounded_page_size:
+            break
+        page += 1
+        if page > 20:
+            break
+    return items
 
 
 def _next_day(date_value: Any) -> str | None:
@@ -4896,11 +4967,15 @@ def _upsert_shenwan_industry_members(industry_code: str, items: list[dict[str, A
     if not items:
         return 0
     written = 0
+    current_symbols: set[str] = set()
     with session_scope() as session:
         for item in items:
             symbol = str(item.get("symbol") or "")
             exchange = str(item.get("exchange") or normalize_exchange(symbol))
+            if not symbol:
+                continue
             vts = vt_symbol(symbol, exchange)
+            current_symbols.add(vts)
             name = str(item.get("name") or symbol)
             values = {
                 "industry_code": industry_code,
@@ -4931,6 +5006,13 @@ def _upsert_shenwan_industry_members(industry_code: str, items: list[dict[str, A
             else:
                 session.execute(schema.shenwan_industry_members.insert().values(**values))
             written += 1
+        if current_symbols:
+            session.execute(
+                schema.shenwan_industry_members.delete().where(
+                    (schema.shenwan_industry_members.c.industry_code == industry_code)
+                    & schema.shenwan_industry_members.c.vt_symbol.not_in(sorted(current_symbols))
+                )
+            )
     return written
 
 
@@ -5248,14 +5330,28 @@ def _upsert_sector_daily_bars(
     if not items:
         return 0
     written = 0
+    source = str(source or "akshare")
+    parsed_items: list[tuple[dict[str, Any], date]] = []
+    for item in items:
+        trade_date_raw = item.get("trade_date")
+        if not trade_date_raw:
+            continue
+        trade_date = _parse_date(trade_date_raw)
+        if trade_date is None:
+            continue
+        parsed_items.append((item, trade_date))
+    if not parsed_items:
+        return 0
+
     with session_scope() as session:
-        for item in items:
-            trade_date_raw = item.get("trade_date")
-            if not trade_date_raw:
-                continue
-            trade_date = _parse_date(trade_date_raw)
-            if trade_date is None:
-                continue
+        if source == CANONICAL_SECTOR_DAILY_SOURCE:
+            session.execute(
+                schema.sector_daily_bars.delete().where(
+                    (schema.sector_daily_bars.c.sector_id == sector_id)
+                    & (schema.sector_daily_bars.c.source != source)
+                )
+            )
+        for item, trade_date in parsed_items:
             values = {
                 "sector_id": sector_id,
                 "trade_date": trade_date,
