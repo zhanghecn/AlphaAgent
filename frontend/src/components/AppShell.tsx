@@ -1,12 +1,11 @@
 import { useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
-  Compass,
   Database,
   LayoutDashboard,
-  Network,
   Activity,
   Briefcase,
+  History,
   TrendingUp,
   ChevronLeft,
   ChevronRight,
@@ -21,11 +20,10 @@ import { VersionBadge } from "@/components/VersionBadge";
 
 const NAV_ITEMS = [
   { to: "/", label: "今日市场", icon: LayoutDashboard },
-  { to: "/explore", label: "主线探索", icon: Compass },
+  { to: "/mainline", label: "主线回放", icon: History },
   { to: "/stocks", label: "全 A 股票", icon: TrendingUp },
   { to: "/quant", label: "量化交易", icon: Activity },
   { to: "/portfolio", label: "持仓", icon: Briefcase },
-  { to: "/chain", label: "产业链", icon: Network },
   { to: "/data", label: "数据管理", icon: Database },
 ];
 

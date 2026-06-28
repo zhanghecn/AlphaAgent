@@ -14,8 +14,7 @@ const IndexDetailPage = lazy(() => import("@/pages/IndexDetailPage").then((m) =>
 const SectorsPage = lazy(() => import("@/pages/SectorsPage").then((m) => ({ default: m.SectorsPage })));
 const QuantTradingPage = lazy(() => import("@/pages/QuantTradingPage").then((m) => ({ default: m.QuantTradingPage })));
 const PortfolioPage = lazy(() => import("@/pages/PortfolioPage").then((m) => ({ default: m.PortfolioPage })));
-const ThemeExplorerPage = lazy(() => import("@/pages/ThemeExplorerPage"));
-const ChainGraphPage = lazy(() => import("@/pages/ChainGraphPage"));
+const MainlineReplayPage = lazy(() => import("@/pages/MainlineReplayPage"));
 const DataManagementPage = lazy(() => import("@/pages/DataManagementPage"));
 
 /**
@@ -42,13 +41,14 @@ export default function App() {
                 <Suspense fallback={<LoadingState rows={6} />}>
                   <Routes>
                     <Route path="/" element={<MarketOverviewPage />} />
-                    <Route path="/explore" element={<ThemeExplorerPage />} />
+                    <Route path="/explore" element={<Navigate to="/mainline" replace />} />
                     <Route path="/stocks" element={<StocksPage />} />
                     <Route path="/stocks/:vtSymbol" element={<StockDetailPage />} />
                     <Route path="/indices/:key" element={<IndexDetailPage />} />
                     <Route path="/quant" element={<QuantTradingPage />} />
                     <Route path="/portfolio" element={<PortfolioPage />} />
-                    <Route path="/chain" element={<ChainGraphPage />} />
+                    <Route path="/chain" element={<Navigate to="/mainline" replace />} />
+                    <Route path="/mainline" element={<MainlineReplayPage />} />
                     <Route path="/data" element={<DataManagementPage />} />
                     {/* Legacy routes */}
                     <Route path="/sectors" element={<SectorsPage />} />
