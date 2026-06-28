@@ -12,9 +12,12 @@ import {
   type CandlestickData,
   type HistogramData,
   type IChartApi,
+  type ISeriesApi,
   type LineData,
   type MouseEventHandler,
+  type MouseEventParams,
   type SeriesMarker,
+  type SeriesType,
   type Time,
   ColorType,
   CrosshairMode,
@@ -173,7 +176,7 @@ export function StockKlineChart({
     chartsRef.current = null;
 
     try {
-      const priceChart = createBaseChart(priceContainerRef.current, 430, period, palette);
+      const priceChart = createBaseChart(priceContainerRef.current, 430, period, palette, true);
       const indicatorChart = createBaseChart(indicatorContainerRef.current, 150, period, palette);
       chartsRef.current = { price: priceChart, indicator: indicatorChart };
       setActiveBar(null);
@@ -214,13 +217,34 @@ export function StockKlineChart({
         priceChart.addLineSeries(lineOptions("#0f766e")).setData(bollingerData(bars, "lower", period));
       }
 
-      renderIndicatorChart(indicatorChart, bars, indicatorMode, period);
+      const indicatorResult = renderIndicatorChart(indicatorChart, bars, indicatorMode, period);
       syncCharts(priceChart, indicatorChart);
       applyDefaultVisibleRange(priceChart, indicatorChart, bars.length, priceContainerRef.current.clientWidth);
 
+      // 收盘价 time→value 映射，用于副图悬停时把十字线同步回主图（定位到当日收盘高度）
+      const closeByTime = new Map<string, number>();
+      for (const bar of bars) {
+        closeByTime.set(normalizeChartTime(chartTime(bar.trade_date, period)), bar.close);
+      }
+
+      // 双图十字线贯穿联动：syncingCrosshair 防止 setCrosshairPosition 反向触发的反馈循环
+      let syncingCrosshair = false;
       priceChart.subscribeCrosshairMove((param) => {
         const bar = findBarByTime(bars, period, param.time as Time | undefined);
         setActiveBar(bar);
+        if (syncingCrosshair) return;
+        syncingCrosshair = true;
+        syncCrosshair(param, indicatorChart, indicatorResult.mainSeries, indicatorResult.valueByTime);
+        syncingCrosshair = false;
+      });
+
+      indicatorChart.subscribeCrosshairMove((param) => {
+        const bar = findBarByTime(bars, period, param.time as Time | undefined);
+        setActiveBar(bar);
+        if (syncingCrosshair) return;
+        syncingCrosshair = true;
+        syncCrosshair(param, priceChart, candleSeries, closeByTime);
+        syncingCrosshair = false;
       });
 
       const clickHandler: MouseEventHandler<Time> = (param) => {
@@ -287,7 +311,10 @@ export function StockKlineChart({
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <ButtonGroup items={PERIODS} value={period} onChange={(value) => setPeriod(value)} />
-        <ButtonGroup items={OVERLAYS} value={overlayMode} onChange={(value) => setOverlayMode(value as OverlayMode)} />
+        <div className="flex flex-wrap items-center gap-1.5">
+          <ButtonGroup items={OVERLAYS} value={overlayMode} onChange={(value) => setOverlayMode(value as OverlayMode)} />
+          <ButtonGroup items={INDICATORS} value={indicatorMode} onChange={(value) => setIndicatorMode(value as IndicatorMode)} />
+        </div>
       </div>
 
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
@@ -316,7 +343,13 @@ export function StockKlineChart({
           <span>点击标记、K 线或指标柱查看细节</span>
         </div>
       )}
-      <div ref={priceContainerRef} className="h-[430px] w-full" />
+      {/* 价格主图与成交量副图紧贴同一容器，十字线贯穿联动（同花顺式） */}
+      <div className="overflow-hidden rounded-md border">
+        <div ref={priceContainerRef} className="h-[430px] w-full" />
+        <div ref={indicatorContainerRef} className="h-[150px] w-full border-t" />
+      </div>
+
+      <SubIndicatorText mode={indicatorMode} values={latestIndicators} />
 
       {markers.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
@@ -339,12 +372,6 @@ export function StockKlineChart({
           })}
         </div>
       )}
-
-      <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-3">
-        <ButtonGroup items={INDICATORS} value={indicatorMode} onChange={(value) => setIndicatorMode(value as IndicatorMode)} />
-        <SubIndicatorText mode={indicatorMode} values={latestIndicators} />
-      </div>
-      <div ref={indicatorContainerRef} className="h-[150px] w-full" />
 
       {focusedDiagnostic && (
         <BarDiagnosticPanel
@@ -373,7 +400,7 @@ function isLocalBars(source?: string) {
   return Boolean(source?.startsWith("postgresql"));
 }
 
-function createBaseChart(container: HTMLDivElement, height: number, period: string, palette: ChartPalette) {
+function createBaseChart(container: HTMLDivElement, height: number, period: string, palette: ChartPalette, hideTimeAxis = false) {
   return createChart(container, {
     layout: {
       background: { type: ColorType.Solid, color: "transparent" },
@@ -387,8 +414,11 @@ function createBaseChart(container: HTMLDivElement, height: number, period: stri
     width: container.clientWidth,
     height,
     crosshair: { mode: CrosshairMode.Normal },
-    rightPriceScale: { borderColor: palette.axis },
+    // minimumWidth 固定价格轴宽度，保证主图与副图绘图区宽度一致，
+    // 否则两个独立 chart 的价格轴宽度不同(价格短/成交量长)会导致同一日期 x 像素错位、十字竖线分裂。
+    rightPriceScale: { borderColor: palette.axis, minimumWidth: 80 },
     timeScale: {
+      visible: !hideTimeAxis,
       borderColor: palette.axis,
       timeVisible: period.endsWith("m"),
       secondsVisible: false,
@@ -427,6 +457,30 @@ function syncCharts(priceChart: IChartApi, indicatorChart: IChartApi) {
   syncTo(indicatorChart, [priceChart]);
 }
 
+/**
+ * 双图十字线联动：把源图当前悬停的时间点，同步到目标图的十字线上，
+ * 实现"一条竖线贯穿价格主图与成交量副图"的同花顺式体验。
+ * setCrosshairPosition 可能反向触发目标图的 crosshairMove 回调，
+ * 因此调用方需用 syncingCrosshair 标志位防止反馈循环（与 syncCharts 同思路）。
+ */
+function syncCrosshair(
+  param: MouseEventParams<Time>,
+  targetChart: IChartApi,
+  targetSeries: ISeriesApi<SeriesType>,
+  targetValueByTime: Map<string, number>
+) {
+  if (!param.time) {
+    targetChart.clearCrosshairPosition();
+    return;
+  }
+  const value = targetValueByTime.get(normalizeChartTime(param.time));
+  if (value == null || !Number.isFinite(value)) {
+    targetChart.clearCrosshairPosition();
+    return;
+  }
+  targetChart.setCrosshairPosition(value, param.time, targetSeries);
+}
+
 function applyDefaultVisibleRange(priceChart: IChartApi, indicatorChart: IChartApi, totalBars: number, width: number) {
   if (totalBars <= 0) return;
   const targetBars = width < 480 ? MOBILE_VISIBLE_BARS : VISIBLE_BARS;
@@ -439,42 +493,57 @@ function applyDefaultVisibleRange(priceChart: IChartApi, indicatorChart: IChartA
   indicatorChart.timeScale().setVisibleLogicalRange(range);
 }
 
-function renderIndicatorChart(chart: IChartApi, bars: Bar[], mode: IndicatorMode, period: string) {
+type IndicatorRenderResult = {
+  mainSeries: ISeriesApi<SeriesType>;
+  valueByTime: Map<string, number>;
+};
+
+function renderIndicatorChart(chart: IChartApi, bars: Bar[], mode: IndicatorMode, period: string): IndicatorRenderResult {
   if (mode === "volume") {
-    chart
-      .addHistogramSeries({ priceFormat: { type: "volume" } })
-      .setData(
-        bars.map((bar) => ({
-          time: chartTime(bar.trade_date, period),
-          value: bar.volume,
-          color: bar.close >= bar.open ? "rgba(239,68,68,0.42)" : "rgba(34,197,94,0.42)",
-        }))
+    const hist = chart.addHistogramSeries({ priceFormat: { type: "volume" } });
+    hist.setData(
+      bars.map((bar) => ({
+        time: chartTime(bar.trade_date, period),
+        value: bar.volume,
+        color: bar.close >= bar.open ? "rgba(239,68,68,0.42)" : "rgba(34,197,94,0.42)",
+      }))
     );
     chart.addLineSeries(lineOptions("#f59e0b")).setData(movingAverageData(bars, 5, "volume", period));
     chart.addLineSeries(lineOptions("#2563eb")).setData(movingAverageData(bars, 10, "volume", period));
-    return;
+    const valueByTime = new Map<string, number>();
+    for (const bar of bars) {
+      valueByTime.set(normalizeChartTime(chartTime(bar.trade_date, period)), bar.volume);
+    }
+    return { mainSeries: hist, valueByTime };
   }
 
   if (mode === "macd") {
     const macd = macdData(bars, period);
-    chart.addHistogramSeries().setData(macd.histogram);
+    const hist = chart.addHistogramSeries();
+    hist.setData(macd.histogram);
     chart.addLineSeries(lineOptions("#f59e0b")).setData(macd.dif);
     chart.addLineSeries(lineOptions("#2563eb")).setData(macd.dea);
-    return;
+    const valueByTime = new Map(macd.histogram.map((point) => [normalizeChartTime(point.time), point.value]));
+    return { mainSeries: hist, valueByTime };
   }
 
   if (mode === "kdj") {
     const kdj = kdjData(bars, period);
     chart.addLineSeries(lineOptions("#f59e0b")).setData(kdj.k);
     chart.addLineSeries(lineOptions("#2563eb")).setData(kdj.d);
-    chart.addLineSeries(lineOptions("#dc2626")).setData(kdj.j);
-    return;
+    const jSeries = chart.addLineSeries(lineOptions("#dc2626"));
+    jSeries.setData(kdj.j);
+    const valueByTime = new Map(kdj.j.map((point) => [normalizeChartTime(point.time), point.value]));
+    return { mainSeries: jSeries, valueByTime };
   }
 
   const rsi = rsiData(bars, period);
-  chart.addLineSeries(lineOptions("#f59e0b")).setData(rsi.rsi6);
+  const rsi6Series = chart.addLineSeries(lineOptions("#f59e0b"));
+  rsi6Series.setData(rsi.rsi6);
   chart.addLineSeries(lineOptions("#2563eb")).setData(rsi.rsi12);
   chart.addLineSeries(lineOptions("#7c3aed")).setData(rsi.rsi24);
+  const valueByTime = new Map(rsi.rsi6.map((point) => [normalizeChartTime(point.time), point.value]));
+  return { mainSeries: rsi6Series, valueByTime };
 }
 
 function ButtonGroup<T extends string>({
