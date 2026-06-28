@@ -634,6 +634,53 @@ def test_daily_bars_respects_concurrency_limit(monkeypatch):
     assert len(seen) == 10
 
 
+def test_stock_daily_incremental_refreshes_recent_window(monkeypatch):
+    captured_start_dates: list[str | None] = []
+
+    class FakeAdapter:
+        def stock_bars(self, symbol, exchange=None, limit=90, interval="1d", start_date=None, end_date=None):
+            captured_start_dates.append(start_date)
+            return {"items": [{"trade_date": "2026-06-26", "close": 11}]}
+
+    monkeypatch.setattr(
+        svc,
+        "_select_daily_bar_stocks",
+        lambda symbols, stock_limit: [{"symbol": "600000", "exchange": "SSE", "name": "A"}],
+    )
+    monkeypatch.setattr(svc, "_last_bar_dates_daily", lambda vt_symbols: {"600000.SSE": "2026-06-26"})
+    monkeypatch.setattr(svc, "_upsert_daily_bars", lambda s, e, items: len(items))
+
+    result = svc.DataSyncRunner(adapter=FakeAdapter(), concurrency=1)._run_sync_stock_daily_bars(
+        {"limit": 250, "incremental": True}
+    )
+
+    assert result == {"rows_read": 1, "rows_written": 1}
+    assert captured_start_dates == ["2026-06-21"]
+
+
+def test_stock_daily_incremental_can_disable_refresh_window(monkeypatch):
+    captured_start_dates: list[str | None] = []
+
+    class FakeAdapter:
+        def stock_bars(self, symbol, exchange=None, limit=90, interval="1d", start_date=None, end_date=None):
+            captured_start_dates.append(start_date)
+            return {"items": []}
+
+    monkeypatch.setattr(
+        svc,
+        "_select_daily_bar_stocks",
+        lambda symbols, stock_limit: [{"symbol": "600000", "exchange": "SSE", "name": "A"}],
+    )
+    monkeypatch.setattr(svc, "_last_bar_dates_daily", lambda vt_symbols: {"600000.SSE": "2026-06-26"})
+    monkeypatch.setattr(svc, "_upsert_daily_bars", lambda s, e, items: len(items))
+
+    svc.DataSyncRunner(adapter=FakeAdapter(), concurrency=1)._run_sync_stock_daily_bars(
+        {"limit": 250, "incremental": True, "refresh_days": 0}
+    )
+
+    assert captured_start_dates == ["2026-06-27"]
+
+
 def test_sector_members_syncs_concurrently(monkeypatch):
     """板块成分股应并发拉取(此前纯串行 1484 板块要 ~32min,拖慢盘后批次)。"""
     import threading
@@ -1075,7 +1122,7 @@ def test_daily_increment_uses_start_date_from_last_bar(monkeypatch):
     monkeypatch.setattr(svc, "_upsert_daily_bars", lambda *a, **k: 0)
 
     svc.DataSyncRunner(adapter=FakeAdapter(), concurrency=2)._run_sync_stock_daily_bars(
-        {"limit": 250, "incremental": True}
+        {"limit": 250, "incremental": True, "refresh_days": 0}
     )
 
     assert str(requested["000001"]).startswith("2026-06-11")  # last bar 2026-06-10 -> next day

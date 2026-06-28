@@ -52,6 +52,7 @@ INTERRUPTED_SCHEDULE_RECOVERY_POLL_SECONDS = 5
 CANONICAL_SECTOR_DAILY_SOURCE = "eastmoney.board_kline"
 LIMIT_POOL_EVENT_SOURCE = "akshare.stock_ztb_em"
 STOCK_LIST_MAX_PAGES = 200
+STOCK_DAILY_INCREMENTAL_REFRESH_DAYS = 5
 SECTOR_DAILY_MIN_COVERAGE_TOTAL = 100
 SECTOR_DAILY_MIN_COVERAGE_RATIO = 0.8
 
@@ -634,6 +635,7 @@ class DataSyncRunner:
     def _run_sync_stock_daily_bars(self, params: dict[str, Any]) -> dict[str, Any]:
         limit = int(params.get("limit", 250))
         stock_limit = int(params.get("stock_limit", 0) or 0)
+        refresh_days = max(int(params.get("refresh_days", STOCK_DAILY_INCREMENTAL_REFRESH_DAYS) or 0), 0)
         symbols = _param_list(params.get("symbols"))
         stock_rows = _select_daily_bar_stocks(symbols, stock_limit)
         if not stock_rows:
@@ -654,7 +656,7 @@ class DataSyncRunner:
             exchange = str(stock_row["exchange"])
             stock_name = str(stock_row.get("name") or symbol)
             current_vts = vt_symbol(symbol, exchange)
-            start_date = _next_day(last_dates.get(current_vts)) if last_dates.get(current_vts) else None
+            start_date = _incremental_daily_start_date(last_dates.get(current_vts), refresh_days) if incremental else None
             try:
                 data = self.adapter.stock_bars(symbol, exchange, limit=limit, interval="1d", start_date=start_date)
             except Exception as exc:
@@ -4670,6 +4672,19 @@ def _next_day(date_value: Any) -> str | None:
     except Exception:
         return None
     return (d + timedelta(days=1)).isoformat()
+
+
+def _incremental_daily_start_date(date_value: Any, refresh_days: int) -> str | None:
+    """Return the start date for an incremental daily-bar refresh window."""
+    if not date_value:
+        return None
+    if refresh_days <= 0:
+        return _next_day(date_value)
+    try:
+        d = date.fromisoformat(str(date_value)[:10])
+    except Exception:
+        return None
+    return (d - timedelta(days=refresh_days)).isoformat()
 
 
 def _last_bar_dates_daily(vt_symbols: list[str]) -> dict[str, str]:
