@@ -940,7 +940,7 @@ class DataSyncRunner:
         self._report_progress("同步板块历史 K 线", current=0, total=total_sectors)
 
         lock = threading.Lock()
-        counters = {"read": 0, "written": 0, "done": 0}
+        counters = {"read": 0, "written": 0, "done": 0, "failed": 0, "empty": 0}
 
         def _do_one(sector_row: dict[str, Any]) -> None:
             sector_id = str(sector_row["id"])
@@ -953,6 +953,7 @@ class DataSyncRunner:
                 logger.debug("sector_daily_bars(%s) failed: %s", sector_id, exc)
                 with lock:
                     counters["done"] += 1
+                    counters["failed"] += 1
                     cur_done, cur_read, cur_written = counters["done"], counters["read"], counters["written"]
                 self._report_progress(
                     "读取板块历史 K 线",
@@ -969,6 +970,8 @@ class DataSyncRunner:
                 counters["read"] += len(items)
                 counters["written"] += written
                 counters["done"] += 1
+                if not items:
+                    counters["empty"] += 1
                 cur_done, cur_read, cur_written = counters["done"], counters["read"], counters["written"]
             self._report_progress(
                 "写入板块历史 K 线",
@@ -983,7 +986,16 @@ class DataSyncRunner:
         with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
             list(pool.map(_do_one, sector_rows))
 
-        return {"rows_read": counters["read"], "rows_written": counters["written"]}
+        if counters["read"] == 0:
+            raise DataSyncError(
+                "sync_sector_daily_bars read 0 rows "
+                f"from {total_sectors} sectors (failed={counters['failed']}, empty={counters['empty']})"
+            )
+        return {
+            "rows_read": counters["read"],
+            "rows_written": counters["written"],
+            "message": f"failed={counters['failed']}, empty={counters['empty']}",
+        }
 
     def _run_sync_sector_fund_flows(self, params: dict[str, Any]) -> dict[str, Any]:
         periods = params.get("periods", ["即时"])

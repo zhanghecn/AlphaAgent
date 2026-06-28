@@ -67,6 +67,22 @@ vn.py 中数据需要分清四类：
 - `sync_stock_daily_bars` 支持 `symbols` 参数，可定向重跑单只股票，例如 `{"symbols":["002636.SZSE"],"limit":250}`。
 - 2026-06-12 已定向回填金安国纪 `002636.SZSE` 250 根日线，`turnover` 覆盖约 99.6%；全表历史旧数据仍需重跑补齐。
 
+## AlphaAgent 板块日线同步路径
+
+当前 AlphaAgent 自研服务的板块日线同步路径是：
+
+1. `alphaagent.server.services.data_sync.run_job("sync_sector_daily_bars")`
+2. `DataSyncRunner._run_sync_sector_daily_bars()`
+3. `AkShareAdapter.sector_daily_bars(...)`
+4. 写入 PostgreSQL `sector_daily_bars`
+
+当前已验证事实：
+
+- `AkShareAdapter.sector_daily_bars()` 优先使用东方财富 `push2his` 直连板块 K 线接口，`secid=90.BKxxxx`，源码 helper 为 `_eastmoney_board_kline()`。
+- AkShare THS 板块指数函数仍作为兜底，但不再是首选路径。当前 Docker 镜像里的 `akracer 0.0.14` 缺 x86_64 `libmini_racer.glibc.so`，不能依赖 `py_mini_racer` 路径作为生产主路径。
+- `sync_sector_daily_bars` 如果对所有板块读取 0 行，会抛 `DataSyncError` 并记录失败，而不是静默显示成功 0 行。
+- 主线回放依赖 `sector_period_scores`、`sector_fund_flows`、`sector_daily_bars`、`stock_daily_bars` 和 `quant_signal_runs`；生产 `sector_daily_bars` 为空会导致板块热度/主线数据与本地不一致。
+
 ## AlphaAgent 分钟线同步路径
 
 当前 `sync_stock_minute_bars` 是分钟线同步的主入口。分钟线不再是历史策略研究默认依赖，主要用于实时/盘中辅助、旧严格分钟报告复核和后续实盘确认：

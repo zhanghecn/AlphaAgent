@@ -626,6 +626,37 @@ def test_sector_daily_bars_syncs_concurrently(monkeypatch):
     assert len(seen) == 12
 
 
+def test_sector_daily_bars_sync_fails_when_source_reads_zero(monkeypatch):
+    class FakeAdapter:
+        def sector_daily_bars(self, sector_id, board_type=None, limit=250):
+            raise RuntimeError("source unavailable")
+
+    class FakeResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [{"id": f"BK{i:04d}", "type": "industry", "name": f"S{i}"} for i in range(3)]
+
+    class FakeSession:
+        def execute(self, stmt):
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+
+    try:
+        svc.DataSyncRunner(adapter=FakeAdapter(), concurrency=2)._run_sync_sector_daily_bars({"limit": 250})
+    except svc.DataSyncError as exc:
+        assert "read 0 rows" in str(exc)
+        assert "failed=3" in str(exc)
+    else:
+        raise AssertionError("expected zero-read sector daily bars sync to fail")
+
+
 # ── Task 6: daily bars true incremental (start_date from last bar) ─
 
 

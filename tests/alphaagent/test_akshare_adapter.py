@@ -8,6 +8,7 @@ from alphaagent.data_sources.akshare_adapter import (
     AkShareAdapter,
     AkShareSourceError,
     _bar_row_to_api,
+    _eastmoney_board_kline,
     _eastmoney_board_member_row_to_api,
     _eastmoney_board_row_to_api,
     _eastmoney_hsf10_sector_rows_to_api,
@@ -43,6 +44,88 @@ def test_adapter_exposes_akshare_submodules_without_full_init() -> None:
     module = sys.modules["akshare"]
     assert str(adapter.package_dir) in list(module.__path__)
     assert not hasattr(module, "stock_zh_a_spot_em")
+
+
+def test_eastmoney_board_kline_parses_bk_history(monkeypatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "data": {
+                    "klines": [
+                        "2026-06-25,10.00,10.50,10.70,9.90,12345,678900.00,2.0,1.5,0.15,3.0",
+                        "2026-06-26,10.50,10.80,10.90,10.30,22345,778900.00,2.1,2.86,0.30,3.2",
+                    ]
+                }
+            }
+
+    captured: dict[str, object] = {}
+
+    def fake_get(url, params=None, **kwargs):
+        captured["url"] = url
+        captured["params"] = params
+        return FakeResponse()
+
+    monkeypatch.setattr("alphaagent.data_sources.akshare_adapter.requests.get", fake_get)
+
+    df = _eastmoney_board_kline("BK0459", "industry", limit=2, start_date="20260601", end_date="20260630")
+
+    assert captured["params"]["secid"] == "90.BK0459"
+    assert list(df["close"]) == [10.5, 10.8]
+    assert list(df["change_pct"]) == [1.5, 2.86]
+
+
+def test_sector_daily_bars_uses_eastmoney_before_ths(monkeypatch) -> None:
+    market_cache.clear()
+    adapter = AkShareAdapter()
+
+    def fake_board_kline(sector_id, board_type, limit, start_date=None, end_date=None):
+        return pd.DataFrame(
+            [
+                {
+                    "date": "2026-06-26",
+                    "open": 10,
+                    "close": 11,
+                    "high": 12,
+                    "low": 9,
+                    "volume": 100,
+                    "turnover": 200,
+                    "change_pct": 3.2,
+                }
+            ]
+        )
+
+    monkeypatch.setattr("alphaagent.data_sources.akshare_adapter._eastmoney_board_kline", fake_board_kline)
+
+    data = adapter.sector_daily_bars("BK0459", board_type="industry", limit=1)
+
+    assert data["source"] == "eastmoney.board_kline"
+    assert data["items"][0]["trade_date"] == "2026-06-26"
+    assert data["items"][0]["close"] == 11
+    assert data["items"][0]["change_pct"] == 3.2
+
+
+def test_bar_row_to_api_preserves_zero_values() -> None:
+    item = _bar_row_to_api(
+        {
+            "日期": "2026-06-26",
+            "开盘价": 0,
+            "收盘价": 0,
+            "最高价": 0,
+            "最低价": 0,
+            "成交量": 0,
+            "成交额": 0,
+            "涨跌幅": 0,
+        }
+    )
+
+    assert item["open"] == 0
+    assert item["close"] == 0
+    assert item["volume"] == 0
+    assert item["turnover"] == 0
+    assert item["change_pct"] == 0
 
 
 def test_a_share_spot_normalizes_tencent_rows(monkeypatch) -> None:

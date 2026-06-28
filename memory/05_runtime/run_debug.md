@@ -133,6 +133,7 @@ uv run pytest tests/alphaagent/test_quant_strategy_acceptance.py -q
 
 当前数据事实：
 
+- 2026-06-28 复查生产 `/mainline` 与本地 `/mainline` 不一致：前端 HTML/JS/CSS 静态资源一致，差异来自生产 Docker PostgreSQL 数据。生产 `sector_daily_bars` 为 0 行、`sector_period_scores` 仅少量日期且最新热度为 0；本地有完整板块日线和约 990 个板块/日的分数。根因是生产同步 `sync_sector_daily_bars` 旧路径依赖 AkShare THS + `py_mini_racer`，而 Docker 中 `akracer 0.0.14` 只带 ARM native 库，x86_64 下报 `Native library not available ... libmini_racer.glibc.so`。当前修复改为东方财富 `90.BKxxxx` 板块 K 线直连，并让全 0 行同步失败可见。
 - 默认定时计划为工作日 `14:00` 的 `tail_preview_14h` 和 `14:30` 的 `tail_quant_1430`：两者都同步关键盘中数据、个股资金流、板块资金流、热度和涨停池，并生成今日尾盘预览缓存，不再触发历史策略研究；旧 `intraday_14h` 和 `tail_prepare_14h` 自动禁用。`18:00` 的 `eod_18h` 仍补完整盘后真实数据。历史候选和回测仍使用完整日线；今日尾盘预览通过“历史完整日线 + 今日分钟线/快照临时 Bar”只读计算，不能污染 `stock_daily_bars` 或历史候选表。`/data` 和 `/quant` 同时显示最新日线日期、最新完整日线日期、分钟线日期和尾盘预览状态，防止部分入库日期或快照更新时间被误判为交易日。
 - 2026-06-20 休市日复核：最新完整日线 `2026-06-18`，最新分钟线 `2026-06-18`，历史候选 `2026-06-18`；`stocks.updated_at` 更新到 `2026-06-20` 也不会生成 `2026-06-19` 预览。`GET /api/quant/tail-preview?limit=5` 返回 `waiting_for_intraday_data`，`GET /api/data-sync/tail-workflow` 返回尾盘预览 `waiting` 并显示 14:30/18:00 任务最近失败原因为 API 重启打断。
 - 2026-06-18 验证：手动触发 `tail_quant_1430` 成功生成 `quant_tail_preview_cache`，`trade_date=2026-06-18`，`base_daily_date=2026-06-17`，`total=2497`，`recommendation_count=100`；`GET /api/quant/tail-preview?limit=5` 返回缓存前五名：晶方科技、三力制药、能科科技、XD春秋电、中金岭南。盘后股票日线已补到完整 `2026-06-18`。
@@ -151,6 +152,13 @@ uv run pytest tests/alphaagent/test_quant_strategy_acceptance.py -q
 ```bash
 uv run python -m compileall alphaagent/server/api alphaagent/server/services alphaagent/market alphaagent/data_sources alphaagent/server/db
 uv run pytest tests/alphaagent/test_quant_backtest_portfolio.py -q
+uv run pytest tests/alphaagent/test_akshare_adapter.py tests/alphaagent/test_data_sync_schedule.py -q
+uv run python - <<'PY'
+from alphaagent.data_sources.akshare_adapter import AkShareAdapter
+from alphaagent.market.cache import market_cache
+market_cache.clear()
+print(AkShareAdapter().sector_daily_bars("BK0459", board_type="industry", limit=2))
+PY
 ```
 
 常用前端验证：

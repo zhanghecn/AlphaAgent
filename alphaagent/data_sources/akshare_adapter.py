@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib
 import importlib.machinery
 import json
+import logging
 import math
 import os
 import random
@@ -23,7 +24,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import pandas as pd
 import requests
@@ -33,6 +34,8 @@ from alphaagent.market.boards import stock_board_payload
 from alphaagent.market.models import DataSourceStatus, Quote
 from alphaagent.market.symbols import INDEX_SYMBOLS, eastmoney_secid, normalize_exchange, vt_symbol
 
+
+logger = logging.getLogger(__name__)
 
 QUOTE_TTL_SECONDS = 10
 LIST_TTL_SECONDS = 10
@@ -1283,10 +1286,32 @@ class AkShareAdapter:
         except Exception:
             pass
 
-        # 2026-06-25: 东财 stock_board_*_hist_em 被反爬(RemoteDisconnected)，换同花顺 ths 源。
-        # 同花顺板块指数接口（stock_board_*_index_ths）用板块名取历史K线，绕开东财反爬。
         start_date_str = (date.today() - timedelta(days=max(limit * 2, 500))).strftime("%Y%m%d")
         end_date_str = date.today().strftime("%Y%m%d")
+        try:
+            df = _eastmoney_board_kline(sector_id, normalized_type, limit, start_date_str, end_date_str)
+            source = "eastmoney.board_kline"
+        except Exception as eastmoney_exc:
+            logger.debug("eastmoney board kline failed for %s: %s", sector_id, eastmoney_exc)
+            df, source = self._sector_daily_bars_ths(board_name, normalized_type, start_date_str, end_date_str)
+
+        items = [_bar_row_to_api(row) for row in _tail_records(df, limit)]
+        return {
+            "sector_id": sector_id,
+            "board_type": normalized_type,
+            "items": items,
+            "total": len(items),
+            "source": source,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _sector_daily_bars_ths(
+        self,
+        board_name: str,
+        normalized_type: str,
+        start_date_str: str,
+        end_date_str: str,
+    ) -> tuple[pd.DataFrame, str]:
         if normalized_type in {"concept", "theme"}:
             module = importlib.import_module("akshare.stock_feature.stock_board_concept_ths")
             with _akshare_network_env():
@@ -1305,16 +1330,7 @@ class AkShareAdapter:
                     end_date=end_date_str,
                 )
             source = "akshare.stock_board_industry_index_ths"
-
-        items = [_bar_row_to_api(row) for row in _tail_records(df, limit)]
-        return {
-            "sector_id": sector_id,
-            "board_type": normalized_type,
-            "items": items,
-            "total": len(items),
-            "source": source,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
+        return df, source
 
     def sector_fund_flows(
         self,
@@ -1907,24 +1923,19 @@ def _bar_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
         or normalized.get("datetime")
         or normalized.get("date")
     )
-    volume = _number(normalized.get("成交量") or normalized.get("volume"))
-    explicit_turnover = _number(
-        normalized.get("成交额")
-        or normalized.get("turnover")
-        or normalized.get("turnover_yuan")
-        or normalized.get("amount_yuan")
-    )
+    volume = _first_number(normalized, "成交量", "volume")
+    explicit_turnover = _first_number(normalized, "成交额", "turnover", "turnover_yuan", "amount_yuan")
     if volume is None and "amount" in normalized and "成交额" not in normalized:
         volume = _number(normalized.get("amount"))
     return {
         "trade_date": trade_date,
-        "open": _number(normalized.get("开盘") or normalized.get("开盘价") or normalized.get("open")),
-        "close": _number(normalized.get("收盘") or normalized.get("收盘价") or normalized.get("close")),
-        "high": _number(normalized.get("最高") or normalized.get("最高价") or normalized.get("high")),
-        "low": _number(normalized.get("最低") or normalized.get("最低价") or normalized.get("low")),
+        "open": _first_number(normalized, "开盘", "开盘价", "open"),
+        "close": _first_number(normalized, "收盘", "收盘价", "close"),
+        "high": _first_number(normalized, "最高", "最高价", "high"),
+        "low": _first_number(normalized, "最低", "最低价", "low"),
         "volume": volume,
         "turnover": explicit_turnover,
-        "change_pct": _number(normalized.get("涨跌幅")),
+        "change_pct": _first_number(normalized, "涨跌幅", "change_pct"),
     }
 
 
@@ -1980,6 +1991,90 @@ def _eastmoney_stock_kline(
     rows = []
     for item in klines:
         parts = item.split(",")
+        if len(parts) == 11:
+            parts.append(None)
+        if len(parts) < 12:
+            continue
+        rows.append(parts[:12])
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(
+        rows,
+        columns=[
+            "date",
+            "open",
+            "close",
+            "high",
+            "low",
+            "volume",
+            "turnover",
+            "amplitude",
+            "change_pct",
+            "change",
+            "turnover_rate",
+            "market_cap",
+        ],
+    )
+    for column in ("open", "close", "high", "low", "volume", "turnover", "change_pct"):
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+    parsed_dates = pd.to_datetime(df["date"], errors="coerce")
+    df["date"] = parsed_dates if interval in {"1m", "5m", "15m", "30m", "60m"} else parsed_dates.dt.date
+    df.dropna(subset=["date", "open", "close"], inplace=True)
+    return df
+
+
+def _eastmoney_board_kline(
+    sector_id: str,
+    board_type: str,
+    limit: int,
+    start_date: str | date | None = None,
+    end_date: str | date | None = None,
+) -> pd.DataFrame:
+    normalized_type = _normalize_board_type(board_type)
+    if normalized_type == "theme":
+        normalized_type = "concept"
+    if normalized_type not in {"concept", "industry"}:
+        raise AkShareSourceError(f"Unsupported EastMoney board kline type: {board_type}")
+
+    raw_sector_id = str(sector_id).strip()
+    if _is_eastmoney_board_symbol(raw_sector_id):
+        board_code = raw_sector_id.upper()
+    else:
+        board = _resolve_eastmoney_board(normalized_type, sector_id)
+        board_code = str(board.get("id") or board.get("akshare_symbol") or sector_id).strip().upper()
+    if not _is_eastmoney_board_symbol(board_code):
+        raise AkShareSourceError(f"Unsupported EastMoney board symbol: {sector_id}")
+
+    params = {
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f116",
+        "ut": "7eea3edcaed734bea9cbfc24409ed989",
+        "klt": "101",
+        "fqt": "0",
+        "secid": f"90.{board_code}",
+        "beg": _date_key(start_date) if start_date else _history_start_for_limit(limit, "1d"),
+        "end": _date_key(end_date) if end_date else "20500101",
+    }
+    response = None
+    for host in ("https://push2his.eastmoney.com", "https://48.push2his.eastmoney.com", "https://push2delay.eastmoney.com"):
+        try:
+            with _akshare_network_env():
+                response = requests.get(f"{host}/api/qt/stock/kline/get", params=params, headers=EASTMONEY_HEADERS, timeout=8)
+            response.raise_for_status()
+            break
+        except Exception:
+            response = None
+    if response is None:
+        raise AkShareSourceError("EastMoney board kline request failed")
+
+    klines = (response.json().get("data") or {}).get("klines") or []
+    return _eastmoney_kline_rows_to_frame(klines, interval="1d")
+
+
+def _eastmoney_kline_rows_to_frame(klines: Sequence[str], interval: str = "1d") -> pd.DataFrame:
+    rows = []
+    for item in klines:
+        parts = str(item).split(",")
         if len(parts) == 11:
             parts.append(None)
         if len(parts) < 12:
@@ -4056,6 +4151,15 @@ def _number(value: Any) -> float | int | None:
         return float(str(value).replace(",", ""))
     except ValueError:
         return None
+
+
+def _first_number(row: dict[str, Any], *keys: str) -> float | int | None:
+    for key in keys:
+        if key in row:
+            value = _number(row.get(key))
+            if value is not None:
+                return value
+    return None
 
 
 def _payload_count(payload: Any) -> int | None:
