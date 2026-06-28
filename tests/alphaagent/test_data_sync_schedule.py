@@ -838,6 +838,82 @@ def test_sector_daily_bars_syncs_concurrently(monkeypatch):
     assert len(seen) == 12
 
 
+def test_limit_up_pool_events_replace_trade_date_pool(monkeypatch):
+    executed: list[str] = []
+    inserted_params: list[dict[str, Any]] = []
+
+    class FakeScalars:
+        def all(self):
+            return ["600000.SSE", "000001.SZSE"]
+
+    class FakeKnownResult:
+        def scalars(self):
+            return FakeScalars()
+
+    class FakeSession:
+        def execute(self, stmt):
+            if getattr(stmt, "is_insert", False):
+                sql = str(stmt)
+                inserted_params.append(dict(stmt.compile().params))
+            else:
+                sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+            executed.append(sql)
+            if sql.startswith("SELECT stocks.vt_symbol"):
+                return FakeKnownResult()
+            return object()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+
+    written = svc._upsert_limit_up_events(
+        [
+            {"vt_symbol": "600000.SSE", "name": "浦发银行", "raw": {"rank": 1}},
+            {"vt_symbol": "600000.SSE", "name": "浦发银行", "raw": {"rank": 1}},
+            {"vt_symbol": "999999.SSE", "name": "未知", "raw": {}},
+        ],
+        "zt",
+        "20260626",
+    )
+
+    assert written == 1
+    delete_sql = [sql for sql in executed if sql.startswith("DELETE FROM stock_events")]
+    insert_sql = [sql for sql in executed if sql.startswith("INSERT INTO stock_events")]
+    assert delete_sql
+    assert "stock_events.source = 'akshare.stock_ztb_em'" in delete_sql[0]
+    assert "stock_events.event_type = 'limit_pool_zt'" in delete_sql[0]
+    assert "'20260626'" in delete_sql[0]
+    assert "'2026-06-26'" in delete_sql[0]
+    assert len(insert_sql) == 1
+    assert inserted_params[0]["vt_symbol"] == "600000.SSE"
+    assert inserted_params[0]["event_date"] == "20260626"
+    assert inserted_params[0]["event_type"] == "limit_pool_zt"
+
+
+def test_limit_up_pool_events_clear_empty_pool(monkeypatch):
+    executed: list[str] = []
+
+    class FakeSession:
+        def execute(self, stmt):
+            executed.append(str(stmt.compile(compile_kwargs={"literal_binds": True})))
+            return object()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+
+    written = svc._upsert_limit_up_events([], "zt", "2026-06-26")
+
+    assert written == 0
+    delete_sql = [sql for sql in executed if sql.startswith("DELETE FROM stock_events")]
+    assert len(delete_sql) == 1
+    assert "stock_events.event_type = 'limit_pool_zt'" in delete_sql[0]
+
+
 def test_upsert_sector_daily_bars_prunes_old_sources_for_sector(monkeypatch):
     executed: list[str] = []
 

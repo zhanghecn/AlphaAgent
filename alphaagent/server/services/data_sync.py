@@ -50,6 +50,7 @@ INTERRUPTED_SCHEDULE_RECOVERY_DELAY_SECONDS = 30
 INTERRUPTED_SCHEDULE_RECOVERY_WAIT_SECONDS = 6 * 60 * 60
 INTERRUPTED_SCHEDULE_RECOVERY_POLL_SECONDS = 5
 CANONICAL_SECTOR_DAILY_SOURCE = "eastmoney.board_kline"
+LIMIT_POOL_EVENT_SOURCE = "akshare.stock_ztb_em"
 STOCK_LIST_MAX_PAGES = 200
 SECTOR_DAILY_MIN_COVERAGE_TOTAL = 100
 SECTOR_DAILY_MIN_COVERAGE_RATIO = 0.8
@@ -5462,35 +5463,62 @@ def _upsert_limit_up_events(
     pool_type: str,
     trade_date: str,
 ) -> int:
-    """Upsert limit-up/limit-down pool items as stock_events."""
-    if not items:
-        return 0
+    """Replace one trade date's limit-up/limit-down pool events."""
+    event_type = f"limit_pool_{pool_type}"
+    event_dates = _limit_pool_event_date_keys(trade_date)
     written = 0
     with session_scope() as session:
+        session.execute(
+            schema.stock_events.delete().where(
+                (schema.stock_events.c.source == LIMIT_POOL_EVENT_SOURCE)
+                & (schema.stock_events.c.event_type == event_type)
+                & (schema.stock_events.c.event_date.in_(event_dates))
+            )
+        )
+        if not items:
+            return 0
         known_symbols = set(
             session.execute(select(schema.stocks.c.vt_symbol)).scalars().all()
         )
+        seen_symbols: set[str] = set()
         for item in items:
             vts = str(item.get("vt_symbol") or "")
-            if not vts or vts not in known_symbols:
+            if not vts or vts in seen_symbols or vts not in known_symbols:
                 continue
+            seen_symbols.add(vts)
             title = f"{pool_type}: {item.get('name', vts)}"
             values = {
                 "vt_symbol": vts,
-                "event_date": trade_date,
-                "event_type": f"limit_pool_{pool_type}",
+                "event_date": event_dates[0],
+                "event_type": event_type,
                 "title": title,
                 "summary": str(item.get("raw") or {}),
                 "url": None,
                 "keywords": [pool_type],
                 "sentiment": "positive" if pool_type in ("zt", "strong") else "negative",
                 "importance": 0.8 if pool_type in ("zt", "strong") else 0.5,
-                "source": "akshare.stock_ztb_em",
+                "source": LIMIT_POOL_EVENT_SOURCE,
                 "raw": item.get("raw") or {},
             }
             session.execute(schema.stock_events.insert().values(**values))
             written += 1
     return written
+
+
+def _limit_pool_event_date_keys(trade_date: str) -> list[str]:
+    """Return both event_date formats used by historical limit-pool rows."""
+    raw = str(trade_date or date.today().strftime("%Y%m%d")).strip()
+    keys = [raw] if raw else []
+    parsed: date | None = None
+    for fmt in ("%Y%m%d", "%Y-%m-%d"):
+        try:
+            parsed = datetime.strptime(raw, fmt).date()
+            break
+        except ValueError:
+            continue
+    if parsed:
+        keys.extend([parsed.strftime("%Y%m%d"), parsed.isoformat()])
+    return list(dict.fromkeys(key for key in keys if key))
 
 
 def _upsert_stock_fund_flows(
