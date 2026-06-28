@@ -100,3 +100,49 @@ def test_sector_stocks_unavailable_when_db_off(monkeypatch):
     body = res.json()
     assert body["success"] is True
     assert body["data"]["status"] == "unavailable"
+
+
+def test_sector_stocks_does_not_use_previous_bar_as_selected_date(monkeypatch):
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, stmt):
+            del stmt
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResult([("AAA.SSE", "甲股票"), ("BBB.SSE", "乙股票")])
+            if self.calls == 2:
+                return FakeResult([("AAA.SSE", 11.0)])
+            if self.calls == 3:
+                return FakeResult([("AAA.SSE", 10.0), ("BBB.SSE", 20.0)])
+            return FakeResult([])
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(mainline_replay, "is_database_configured", lambda: True)
+    monkeypatch.setattr(mainline_replay, "session_scope", fake_session_scope)
+
+    body = mainline_replay.sector_stocks(
+        sector_id="BK0001",
+        date=date(2026, 6, 26),
+        sort_by="name",
+        limit=50,
+    )
+
+    items = {item["vt_symbol"]: item for item in body["data"]["items"]}
+    assert items["AAA.SSE"]["close"] == 11.0
+    assert items["AAA.SSE"]["change_pct"] == 10.0
+    assert items["AAA.SSE"]["price_date"] == "2026-06-26"
+    assert items["BBB.SSE"]["close"] is None
+    assert items["BBB.SSE"]["change_pct"] is None
+    assert items["BBB.SSE"]["price_date"] is None

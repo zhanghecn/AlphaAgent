@@ -52,8 +52,8 @@ export function SectorStocksTable({ sectorId, date }: { sectorId: string; date: 
             return (
               <button
                 key={it.vt_symbol}
-                onClick={() => navigate(`/stocks/${it.vt_symbol}`)}
-                title={`${it.vt_symbol}${it.main_net_inflow_ratio != null ? ` · 净流入占比 ${it.main_net_inflow_ratio.toFixed(2)}%` : ""} · 点击查看个股详情`}
+                onClick={() => navigate(`/stocks/${it.vt_symbol}?date=${date}`)}
+                title={`${it.vt_symbol}${it.main_net_inflow_ratio != null ? ` · 净流入占比 ${it.main_net_inflow_ratio.toFixed(2)}%` : ""} · 点击查看 ${date} 个股详情`}
                 className="group flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-indigo-500/10 focus:outline-none focus-visible:ring-1 focus-visible:ring-indigo-400"
               >
                 <span className="flex min-w-0 items-center gap-1.5">
@@ -86,4 +86,3 @@ export function SectorStocksTable({ sectorId, date }: { sectorId: string; date: 
     </div>
   );
 }
-

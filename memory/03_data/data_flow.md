@@ -86,6 +86,7 @@ vn.py 中数据需要分清四类：
 - `sector_period_scores` 历史评分必须只读取 `as_of_date` 当天及以前的 `sector_daily_bars` 和 `sector_fund_flows`。不能用最新板块 K 线重算历史日期，否则 `/mainline` 切换日期时板块榜会完全相同。
 - `sector_period_scores` 的宽度、龙头和涨停情绪也必须按 `as_of_date` 取数：宽度/龙头来自该日期的成分股 `stock_daily_bars`，不再读取 `sectors.rise_count/fall_count/leader_*` 当前快照；`stock_events.event_date` 同时兼容 `YYYY-MM-DD` 和 `YYYYMMDD`。
 - `sync_sector_period_scores` 未显式传 `as_of_date` 时默认使用最新完整股票日线日期，不使用系统当天日期；周末/休市日不能生成新的主线评分日期。`/api/mainline-replay/timeline` 也只返回有完整股票日线覆盖的评分日期，避免脏的非交易日排到首位。
+- 主线回放的成分股涨跌和从成分股点击进入的股票详情必须按所选回放日取 `stock_daily_bars`。缺少该日期日线时显示缺失/错误，不允许用上一交易日或实时公开源冒充历史行情。
 
 ## AlphaAgent 分钟线同步路径
 

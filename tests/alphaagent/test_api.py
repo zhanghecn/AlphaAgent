@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from alphaagent.server.api import stocks
 from alphaagent.server.main import create_app
 
 
@@ -525,6 +526,76 @@ def test_stocks(monkeypatch) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["data"]["items"][0]["vt_symbol"] == "600000.SSE"
+
+
+def test_stock_detail_date_uses_historical_daily_bar(monkeypatch) -> None:
+    from contextlib import contextmanager
+    from datetime import date
+
+    class FakeResult:
+        def __init__(self, row=None):
+            self._row = row
+
+        def mappings(self):
+            return self
+
+        def first(self):
+            return self._row
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, stmt):
+            del stmt
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResult({
+                    "symbol": "600000",
+                    "exchange": "SSE",
+                    "vt_symbol": "600000.SSE",
+                    "name": "浦发银行",
+                    "industry": "银行",
+                    "area": "上海",
+                    "market_cap": 100_000_000_000.0,
+                    "pe": 5.5,
+                    "pb": 0.6,
+                    "turnover_rate": 1.2,
+                    "volume_ratio": 0.9,
+                    "return_5d": 1.0,
+                    "return_10d": 2.0,
+                    "return_20d": 3.0,
+                })
+            if self.calls == 2:
+                return FakeResult({
+                    "trade_date": date(2026, 6, 26),
+                    "open_price": 10.2,
+                    "close_price": 11.0,
+                    "high_price": 11.2,
+                    "low_price": 10.1,
+                    "volume": 1_000_000.0,
+                    "turnover": 11_000_000.0,
+                    "source": "postgresql",
+                })
+            return FakeResult((10.0,))
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(stocks, "is_database_configured", lambda: True)
+    monkeypatch.setattr(stocks, "session_scope", fake_session_scope)
+
+    response = stocks.stock_detail("600000.SSE", date(2026, 6, 26))
+
+    assert response["data"]["vt_symbol"] == "600000.SSE"
+    assert response["data"]["name"] == "浦发银行"
+    assert response["data"]["last_price"] == 11.0
+    assert response["data"]["previous_close"] == 10.0
+    assert response["data"]["change"] == 1.0
+    assert round(response["data"]["change_pct"], 2) == 10.0
+    assert response["data"]["trade_time"] == "2026-06-26"
+    assert response["data"]["source"] == "postgresql.stock_daily_bars.as_of_date"
 
 
 def test_stock_search_route_does_not_resolve_as_symbol(monkeypatch) -> None:

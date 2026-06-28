@@ -1,13 +1,18 @@
 """Stock browsing endpoints for the first real-data display stage."""
 
+from datetime import date
+
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
+from sqlalchemy import desc, select
 
 from alphaagent.market.indicators import compute_bar_indicators
-from alphaagent.market.symbols import vt_symbol as build_vt_symbol
+from alphaagent.market.symbols import normalize_exchange, vt_symbol as build_vt_symbol
 from alphaagent.market.providers import RealMarketDataClient
 from alphaagent.server.core.config import get_settings
 from alphaagent.server.core.responses import fail, ok
+from alphaagent.server.db import schema
+from alphaagent.server.db.session import is_database_configured, session_scope
 
 router = APIRouter(prefix="/stocks", tags=["stocks"])
 
@@ -63,7 +68,13 @@ def search_stocks(
 
 
 @router.get("/{vt_symbol}", response_model=None)
-def stock_detail(vt_symbol: str):
+def stock_detail(
+    vt_symbol: str,
+    date: date | None = Query(default=None, description="历史回放日期 YYYY-MM-DD"),
+):
+    if date is not None:
+        return historical_stock_detail(vt_symbol, date)
+
     symbol, exchange = parse_vt_symbol(vt_symbol)
     try:
         return ok(client().stock_detail(symbol, exchange))
@@ -72,6 +83,83 @@ def stock_detail(vt_symbol: str):
             status_code=503,
             content=fail("MARKET_DATA_SOURCE_UNAVAILABLE", "真实股票详情暂时不可用。", {"reason": exc.__class__.__name__}),
         )
+
+
+def historical_stock_detail(vt_symbol: str, trade_date: date):
+    if not is_database_configured():
+        return JSONResponse(
+            status_code=503,
+            content=fail("DATABASE_UNAVAILABLE", "历史股票详情需要本地数据库。", {}),
+        )
+
+    symbol, exchange = parse_vt_symbol(vt_symbol)
+    normalized_vt_symbol = build_vt_symbol(symbol, exchange)
+    with session_scope() as session:
+        stock = session.execute(
+            select(schema.stocks)
+            .where(schema.stocks.c.vt_symbol == normalized_vt_symbol)
+            .limit(1)
+        ).mappings().first()
+        bar = session.execute(
+            select(schema.stock_daily_bars)
+            .where(
+                schema.stock_daily_bars.c.vt_symbol == normalized_vt_symbol,
+                schema.stock_daily_bars.c.trade_date == trade_date,
+            )
+            .limit(1)
+        ).mappings().first()
+        if bar is None:
+            return JSONResponse(
+                status_code=404,
+                content=fail(
+                    "HISTORICAL_BAR_NOT_FOUND",
+                    "该回放日期没有这只股票的日线数据，不能用最新行情代替历史行情。",
+                    {"vt_symbol": normalized_vt_symbol, "date": trade_date.isoformat()},
+                ),
+            )
+        prev = session.execute(
+            select(schema.stock_daily_bars.c.close_price)
+            .where(
+                schema.stock_daily_bars.c.vt_symbol == normalized_vt_symbol,
+                schema.stock_daily_bars.c.trade_date < trade_date,
+            )
+            .order_by(desc(schema.stock_daily_bars.c.trade_date))
+            .limit(1)
+        ).first()
+
+    previous_close = prev[0] if prev else None
+    close_price = bar["close_price"]
+    change = close_price - previous_close if previous_close is not None else None
+    change_pct = (close_price / previous_close - 1) * 100 if previous_close else None
+    resolved_exchange = str((stock or {}).get("exchange") or normalize_exchange(symbol, exchange))
+
+    return ok({
+        "symbol": str((stock or {}).get("symbol") or symbol),
+        "exchange": resolved_exchange,
+        "vt_symbol": normalized_vt_symbol,
+        "name": str((stock or {}).get("name") or normalized_vt_symbol),
+        "last_price": close_price,
+        "change": change,
+        "change_pct": change_pct,
+        "open_price": bar["open_price"],
+        "high_price": bar["high_price"],
+        "low_price": bar["low_price"],
+        "previous_close": previous_close,
+        "volume": bar["volume"],
+        "turnover": bar["turnover"],
+        "market_cap": (stock or {}).get("market_cap"),
+        "pe": (stock or {}).get("pe"),
+        "pb": (stock or {}).get("pb"),
+        "turnover_rate": (stock or {}).get("turnover_rate"),
+        "volume_ratio": (stock or {}).get("volume_ratio"),
+        "return_5d": (stock or {}).get("return_5d"),
+        "return_10d": (stock or {}).get("return_10d"),
+        "return_20d": (stock or {}).get("return_20d"),
+        "industry": (stock or {}).get("industry"),
+        "area": (stock or {}).get("area"),
+        "trade_time": trade_date.isoformat(),
+        "source": "postgresql.stock_daily_bars.as_of_date",
+    })
 
 
 @router.get("/{vt_symbol}/bars", response_model=None)

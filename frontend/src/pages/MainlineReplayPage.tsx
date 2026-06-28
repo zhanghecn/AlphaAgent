@@ -28,7 +28,8 @@ export default function MainlineReplayPage() {
   const [selectedDate, setSelectedDate] = useState<string>("");
   const effectiveDate = selectedDate || dates[0] || "";
   useEffect(() => {
-    if (selectedDate && dates.length > 0 && !dates.includes(selectedDate)) {
+    if (dates.length === 0) return;
+    if (!selectedDate || !dates.includes(selectedDate)) {
       setSelectedDate(dates[0]);
     }
   }, [dates, selectedDate]);
@@ -171,6 +172,7 @@ function DateScrubber({
   onChange: (d: string) => void;
 }) {
   const idx = Math.max(0, dates.indexOf(value));
+  const sliderValue = Math.max(0, dates.length - 1 - idx);
   return (
     <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
       <div className="flex items-baseline gap-2">
@@ -183,8 +185,8 @@ function DateScrubber({
           type="range"
           min={0}
           max={Math.max(0, dates.length - 1)}
-          value={idx}
-          onChange={(e) => onChange(dates[Number(e.target.value)])}
+          value={sliderValue}
+          onChange={(e) => onChange(dates[dates.length - 1 - Number(e.target.value)])}
           className="h-1 flex-1 cursor-pointer appearance-none rounded-full bg-muted accent-indigo-500"
         />
         <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">{dates[0]}</span>

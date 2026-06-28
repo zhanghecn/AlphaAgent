@@ -71,6 +71,7 @@ export function StockQuoteHeader({ quote, sealInfo }: StockQuoteHeaderProps) {
         <QuoteField label="PB" value={quote.pb != null ? quote.pb.toFixed(2) : "--"} />
         <QuoteField label="成交量" value={quote.volume != null ? `${(quote.volume / 10000).toFixed(0)}万手` : "--"} />
         <QuoteField label="地区" value={quote.area ?? "--"} />
+        <QuoteField label={quote.source.startsWith("postgresql.stock_daily_bars") ? "回放日" : "时间"} value={quote.trade_time ?? "--"} />
         <QuoteField label="数据" value={dataSourceLabel(quote.source)} />
       </div>
     </div>

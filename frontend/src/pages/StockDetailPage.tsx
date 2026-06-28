@@ -7,7 +7,7 @@
  * Layout: Quote header → Identity card (concept tag cloud) → K-line →
  *         Business + Financials → Fund flow + Events
  */
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -73,19 +73,21 @@ const STOCK_DETAIL_REVIEW_START = "2025-03-26";
 
 export function StockDetailPage() {
   const { vtSymbol } = useParams<{ vtSymbol: string }>();
+  const [searchParams] = useSearchParams();
+  const replayDate = searchParams.get("date") || "";
   const singleBacktestStrategy = DEFAULT_BACKTEST_PARAMS.strategy;
   const [selectedBacktestMarkerId, setSelectedBacktestMarkerId] = useState<string | null>(null);
 
   const quoteQuery = useQuery({
-    queryKey: ["stock-detail", vtSymbol],
-    queryFn: () => fetchStockDetail(vtSymbol!),
+    queryKey: ["stock-detail", vtSymbol, replayDate],
+    queryFn: () => fetchStockDetail(vtSymbol!, replayDate),
     enabled: !!vtSymbol,
   });
 
   const snapshotQuery = useQuery({
     queryKey: ["stock-snapshot", vtSymbol],
     queryFn: () => fetchStockSnapshot(vtSymbol!),
-    enabled: !!vtSymbol,
+    enabled: !!vtSymbol && !replayDate,
   });
 
   // Concept cards — the core innovation
@@ -108,7 +110,7 @@ export function StockDetailPage() {
     queryKey: ["limit-pools-seal", vtSymbol],
     queryFn: () => fetchLimitPools(),
     staleTime: 60_000,
-    enabled: !!vtSymbol,
+    enabled: !!vtSymbol && !replayDate,
   });
 
   const strategiesQuery = useQuery({
@@ -303,8 +305,8 @@ export function StockDetailPage() {
 
   const quote = quoteQuery.data!;
   const snapshot = snapshotQuery.data as StockSnapshot | undefined;
-  const missing = snapshot?.data_quality?.missing ?? [];
-  const sources: string[] = [];
+  const missing = replayDate ? [] : snapshot?.data_quality?.missing ?? [];
+  const sources: string[] = quote.source ? [quote.source] : [];
 
   const concepts = conceptQuery.data;
   const business = businessQuery.data as StockBusinessType | null | undefined;
@@ -313,7 +315,7 @@ export function StockDetailPage() {
   return (
     <div className="space-y-5">
       {/* Quote header (reused) */}
-      <StockQuoteHeader quote={quote} sealInfo={sealInfo} />
+      <StockQuoteHeader quote={quote} sealInfo={replayDate ? null : sealInfo} />
 
       {/* 加入持仓 entry (self-contained: pick a group to add this stock to) */}
       <div className="flex items-center gap-2">

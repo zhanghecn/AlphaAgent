@@ -28,8 +28,13 @@ export function fetchStocks(params: StockListParams = {}) {
   return apiClient.get<StockListData>(`/stocks${search ? `?${search}` : ""}`);
 }
 
-export function fetchStockDetail(vtSymbol: string) {
-  return apiClient.get<StockQuote>(`/stocks/${encodeURIComponent(vtSymbol)}`);
+export function fetchStockDetail(vtSymbol: string, date?: string | null) {
+  const qs = new URLSearchParams();
+  if (date) qs.set("date", date);
+  const search = qs.toString();
+  return apiClient.get<StockQuote>(
+    `/stocks/${encodeURIComponent(vtSymbol)}${search ? `?${search}` : ""}`,
+  );
 }
 
 export function fetchStockBars(vtSymbol: string, interval = "1d", limit = 120) {

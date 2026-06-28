@@ -10,7 +10,6 @@ Provides:
 
 from __future__ import annotations
 
-from collections import defaultdict
 from datetime import date, timedelta
 from typing import Any
 
@@ -425,25 +424,36 @@ def sector_stocks(
         vt_symbols = [m[0] for m in members]
         name_map = {m[0]: m[1] for m in members}
 
-        # 当日 + 前一日 close（算当日涨跌；change_pct 字段多为 NULL）
-        bar_rows = session.execute(
+        # 当日 close 必须来自所选回放日期；缺当天日线时不拿前一日冒充“当日”。
+        today_rows = session.execute(
             select(
                 schema.stock_daily_bars.c.vt_symbol,
                 schema.stock_daily_bars.c.close_price,
             )
             .where(
                 schema.stock_daily_bars.c.vt_symbol.in_(vt_symbols),
-                schema.stock_daily_bars.c.trade_date <= date,
+                schema.stock_daily_bars.c.trade_date == date,
+            )
+        ).all()
+        today_close = {vsym: close for vsym, close in today_rows}
+
+        prev_rows = session.execute(
+            select(
+                schema.stock_daily_bars.c.vt_symbol,
+                schema.stock_daily_bars.c.close_price,
+            )
+            .where(
+                schema.stock_daily_bars.c.vt_symbol.in_(list(today_close.keys())),
+                schema.stock_daily_bars.c.trade_date < date,
             )
             .order_by(
                 schema.stock_daily_bars.c.vt_symbol,
                 schema.stock_daily_bars.c.trade_date.desc(),
             )
         ).all()
-        closes: dict[str, list[float]] = defaultdict(list)
-        for vsym, close in bar_rows:
-            if len(closes[vsym]) < 2:
-                closes[vsym].append(close)
+        prev_close: dict[str, float] = {}
+        for vsym, close in prev_rows:
+            prev_close.setdefault(vsym, close)
 
         # 个股资金流（trade_date 是 String，近端覆盖）
         flow_rows = session.execute(
@@ -461,10 +471,12 @@ def sector_stocks(
 
         items: list[dict[str, Any]] = []
         for vsym in vt_symbols:
-            cl = closes.get(vsym, [])
-            close_today = cl[0] if cl else None
+            close_today = today_close.get(vsym)
+            previous = prev_close.get(vsym)
             change_pct = (
-                (cl[0] / cl[1] - 1) * 100 if len(cl) >= 2 and cl[1] else None
+                (close_today / previous - 1) * 100
+                if close_today is not None and previous
+                else None
             )
             net, ratio = flow_map.get(vsym, (None, None))
             items.append({
@@ -472,6 +484,7 @@ def sector_stocks(
                 "name": name_map.get(vsym, vsym),
                 "close": close_today,
                 "change_pct": round(change_pct, 2) if change_pct is not None else None,
+                "price_date": str(date) if close_today is not None else None,
                 "main_net_inflow": net,
                 "main_net_inflow_ratio": ratio,
                 "fund_inflow_available": net is not None,

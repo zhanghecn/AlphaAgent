@@ -89,6 +89,7 @@ export interface SectorStockItem {
   name: string;
   close: number | null;
   change_pct: number | null;
+  price_date?: string | null;
   main_net_inflow: number | null;
   main_net_inflow_ratio: number | null;
   fund_inflow_available: boolean;
