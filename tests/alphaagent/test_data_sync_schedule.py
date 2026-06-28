@@ -155,8 +155,9 @@ def test_compute_sector_period_scores_defaults_to_latest_complete_daily_date(mon
     monkeypatch.setattr(scores, "is_database_configured", lambda: True)
     monkeypatch.setattr(scores, "_default_score_as_of_date", lambda: date(2026, 6, 26))
 
-    def fake_collect_score_input(sector_id, sector_type, as_of_date, trading_days):
+    def fake_collect_score_input(sector_id, sector_type, as_of_date, trading_days, latest_complete_date=None):
         del trading_days
+        captured["latest_complete_date"] = latest_complete_date
         captured["as_of_date"] = as_of_date
         return scores.SectorScoreInput(
             sector_id=sector_id,
@@ -188,6 +189,7 @@ def test_compute_sector_period_scores_defaults_to_latest_complete_daily_date(mon
     results = scores.compute_sector_period_scores(periods=["20d"], sector_limit=0)
 
     assert captured["as_of_date"] == date(2026, 6, 26)
+    assert captured["latest_complete_date"] == date(2026, 6, 26)
     assert results[0].as_of_date == date(2026, 6, 26)
 
 

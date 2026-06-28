@@ -93,6 +93,7 @@ class SectorScoreInput:
     main_net_inflow: float | None = None
     main_net_inflow_ratio: float | None = None
     fund_period: str | None = None
+    fund_source: str | None = None
 
     # Sentiment (limit-up/down counts)
     limit_up_count: int = 0
@@ -160,6 +161,7 @@ def compute_sector_period_scores(
 
     if as_of_date is None:
         as_of_date = _default_score_as_of_date()
+    latest_complete_date = _default_score_as_of_date()
     if periods is None:
         periods = PERIODS
 
@@ -186,7 +188,13 @@ def compute_sector_period_scores(
             trading_days = PERIOD_TRADING_DAYS.get(period, 20)
 
             # Collect input data
-            inp = _collect_score_input(sector_id, sector_type, as_of_date, trading_days)
+            inp = _collect_score_input(
+                sector_id,
+                sector_type,
+                as_of_date,
+                trading_days,
+                latest_complete_date=latest_complete_date,
+            )
             inp.period = period
 
             # Compute sub-scores
@@ -462,6 +470,7 @@ def _collect_score_input(
     sector_type: str,
     as_of_date: date,
     trading_days: int,
+    latest_complete_date: date | None = None,
 ) -> SectorScoreInput:
     """Collect all input data needed for scoring one sector over N days."""
     inp = SectorScoreInput(
@@ -503,31 +512,35 @@ def _collect_score_input(
         inp.breadth_source = "stock_daily_bars.as_of_date"
         inp.leader_source = "stock_daily_bars.as_of_date"
 
-        # 3. Fund flows (latest)
-        fund_row = session.execute(
-            select(schema.sector_fund_flows)
-            .where(
-                and_(
-                    schema.sector_fund_flows.c.sector_id == sector_id,
-                    schema.sector_fund_flows.c.trade_date <= as_of_date.isoformat(),
+        # 3. Fund flows. EastMoney sector fund flow is a realtime snapshot, not
+        # a replayable historical source. Use it only for the latest complete
+        # daily date; historical replay dates stay deterministic without it.
+        inp.fund_source = "sector_fund_flows.latest_only"
+        if latest_complete_date is None or as_of_date >= latest_complete_date:
+            fund_row = session.execute(
+                select(schema.sector_fund_flows)
+                .where(
+                    and_(
+                        schema.sector_fund_flows.c.sector_id == sector_id,
+                        schema.sector_fund_flows.c.trade_date <= as_of_date.isoformat(),
+                    )
                 )
-            )
-            .order_by(
-                desc(schema.sector_fund_flows.c.trade_date),
-                case(
-                    (schema.sector_fund_flows.c.period == "即时", 0),
-                    (schema.sector_fund_flows.c.period == "5日", 1),
-                    (schema.sector_fund_flows.c.period == "10日", 2),
-                    else_=9,
-                ),
-                schema.sector_fund_flows.c.period.asc(),
-            )
-            .limit(1)
-        ).mappings().first()
-        if fund_row:
-            inp.main_net_inflow = fund_row.get("main_net_inflow")
-            inp.main_net_inflow_ratio = fund_row.get("main_net_inflow_ratio")
-            inp.fund_period = fund_row.get("period")
+                .order_by(
+                    desc(schema.sector_fund_flows.c.trade_date),
+                    case(
+                        (schema.sector_fund_flows.c.period == "即时", 0),
+                        (schema.sector_fund_flows.c.period == "5日", 1),
+                        (schema.sector_fund_flows.c.period == "10日", 2),
+                        else_=9,
+                    ),
+                    schema.sector_fund_flows.c.period.asc(),
+                )
+                .limit(1)
+            ).mappings().first()
+            if fund_row:
+                inp.main_net_inflow = fund_row.get("main_net_inflow")
+                inp.main_net_inflow_ratio = fund_row.get("main_net_inflow_ratio")
+                inp.fund_period = fund_row.get("period")
 
         # 4. Limit-up events (sentiment)
         inp.limit_up_count = _count_limit_up_events(
@@ -750,7 +763,7 @@ def _score_fund(inp: SectorScoreInput) -> tuple[float, dict[str, Any]]:
     net_ratio = inp.main_net_inflow_ratio
 
     if net_inflow is None:
-        return 50.0, {"reason": "no_fund_data"}
+        return 50.0, {"reason": "no_fund_data", "source": inp.fund_source}
 
     # Use net ratio if available, otherwise estimate from absolute value
     if net_ratio is not None:
@@ -766,6 +779,7 @@ def _score_fund(inp: SectorScoreInput) -> tuple[float, dict[str, Any]]:
         "main_net_inflow": net_inflow,
         "main_net_inflow_ratio": net_ratio,
         "period": inp.fund_period,
+        "source": inp.fund_source,
     }
     return round(max(0.0, min(100.0, score)), 2), ev
 

@@ -694,6 +694,62 @@ def test_sector_score_input_ignores_future_bars_and_fund_flows(monkeypatch):
     assert inp.limit_up_count == 1
 
 
+def test_historical_sector_score_input_skips_realtime_fund_flows(monkeypatch):
+    """Historical replay must not depend on non-replayable sector fund-flow snapshots."""
+    from alphaagent.server.services import research_sector_scores as scores
+
+    class _Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+        def first(self):
+            return self._rows[0] if self._rows else None
+
+        def scalar(self):
+            return self._rows[0] if self._rows else 0
+
+    class _Session:
+        def execute(self, stmt):
+            sql = str(stmt)
+            if "FROM sector_fund_flows" in sql:
+                raise AssertionError("historical replay should not read sector_fund_flows")
+            if "FROM sector_daily_bars" in sql:
+                return _Result([
+                    {"sector_id": "BK0001", "trade_date": date(2026, 6, 25), "close_price": 100.0, "turnover": 1.0},
+                ])
+            if "FROM sector_memberships" in sql or "FROM stock_sector_memberships" in sql or "FROM stock_daily_bars" in sql:
+                return _Result([])
+            if "FROM stock_events" in sql:
+                return _Result([0])
+            raise AssertionError(f"unexpected SQL: {sql}")
+
+    @contextmanager
+    def fake_session_scope():
+        yield _Session()
+
+    monkeypatch.setattr(scores, "session_scope", fake_session_scope)
+
+    inp = scores._collect_score_input(
+        "BK0001",
+        "concept",
+        date(2026, 6, 25),
+        2,
+        latest_complete_date=date(2026, 6, 26),
+    )
+
+    score, evidence = scores._score_fund(inp)
+
+    assert inp.main_net_inflow is None
+    assert score == 50.0
+    assert evidence["source"] == "sector_fund_flows.latest_only"
+
+
 def test_sector_score_breadth_and_leader_use_as_of_member_bars():
     """Breadth/leader evidence must come from historical member bars, not sector snapshots."""
     from alphaagent.server.services import research_sector_scores as scores
