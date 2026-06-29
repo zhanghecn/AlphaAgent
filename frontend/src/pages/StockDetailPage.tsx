@@ -375,7 +375,11 @@ export function StockDetailPage() {
       {/* Technical indicators */}
       <section className="rounded-lg border p-3 sm:p-4">
         <h3 className="mb-3 text-sm font-medium">技术指标</h3>
-        <StockIndicatorPanel vtSymbol={vtSymbol} indicators={isIntradayReplay ? snapshot?.technical_indicators : undefined} />
+        {isIntradayReplay && !snapshot?.technical_indicators ? (
+          <LoadingState rows={3} />
+        ) : (
+          <StockIndicatorPanel vtSymbol={vtSymbol} indicators={isIntradayReplay ? snapshot?.technical_indicators : undefined} />
+        )}
       </section>
 
       {/* Two-column: Business + Financial summary */}
