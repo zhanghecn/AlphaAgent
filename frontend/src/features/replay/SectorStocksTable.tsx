@@ -41,8 +41,10 @@ export function SectorStocksTable({ sectorId, date }: { sectorId: string; date: 
         <div className="max-h-72 space-y-px overflow-y-auto">
           <div className="flex items-center justify-between px-2 py-1 text-[10px] uppercase tracking-wide text-muted-foreground">
             <span>个股（点击看详情）</span>
-            <span className="flex gap-3">
+            <span className="flex gap-2">
               <span className="w-12 text-right">涨跌</span>
+              <span className="w-12 text-right">5日</span>
+              <span className="w-7 text-right">5板</span>
               <span className="w-16 text-right">主力净流入</span>
             </span>
           </div>
@@ -60,9 +62,15 @@ export function SectorStocksTable({ sectorId, date }: { sectorId: string; date: 
                   <span className="truncate font-medium">{it.name}</span>
                   <span className="shrink-0 text-[10px] text-muted-foreground/60 group-hover:text-indigo-300/70">{it.vt_symbol.split(".")[0]}</span>
                 </span>
-                <span className="ml-2 flex shrink-0 items-center gap-3 tabular-nums">
+                <span className="ml-2 flex shrink-0 items-center gap-2 tabular-nums">
                   <span className={cn("w-12 text-right", (it.change_pct ?? 0) >= 0 ? "text-rise" : "text-fall")}>
                     {it.change_pct == null ? "--" : `${it.change_pct > 0 ? "+" : ""}${it.change_pct.toFixed(2)}%`}
+                  </span>
+                  <span className={cn("w-12 text-right", (it.return_5d ?? 0) >= 0 ? "text-rise" : "text-fall")}>
+                    {it.return_5d == null ? "--" : `${it.return_5d > 0 ? "+" : ""}${it.return_5d.toFixed(2)}%`}
+                  </span>
+                  <span className={cn("w-7 text-right", it.limit_up_count_5d > 0 ? "text-rise" : "text-muted-foreground")}>
+                    {it.limit_up_count_5d}
                   </span>
                   <span className="flex w-16 items-center justify-end gap-1">
                     {it.fund_inflow_available && (

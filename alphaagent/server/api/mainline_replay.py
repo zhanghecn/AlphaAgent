@@ -60,6 +60,10 @@ _ROLLING_BOARD_DAYS = 7
 _ROLLING_BOARD_TOP_N = 10
 _LIVE_RANKING_CANDIDATE_LIMIT = 1000
 _MIN_COMPLETE_DAILY_SYMBOL_COUNT = 3000
+_STOCK_MOMENTUM_LOOKBACK_DAYS = 45
+_NORMAL_LIMIT_UP_THRESHOLD = 9.5
+_WIDE_LIMIT_UP_THRESHOLD = 19.0
+_BSE_LIMIT_UP_THRESHOLD = 29.0
 _RELATION_CANDIDATE_LIMIT = 360
 _STYLE_STATUS_KEYWORDS = (
     "大盘",
@@ -1133,6 +1137,31 @@ def sector_stocks(
         for vsym, close in prev_rows:
             prev_close.setdefault(vsym, close)
 
+        recent_rows = session.execute(
+            select(
+                schema.stock_daily_bars.c.vt_symbol,
+                schema.stock_daily_bars.c.trade_date,
+                schema.stock_daily_bars.c.close_price,
+                schema.stock_daily_bars.c.change_pct,
+            )
+            .where(
+                schema.stock_daily_bars.c.vt_symbol.in_(vt_symbols),
+                schema.stock_daily_bars.c.trade_date >= date - timedelta(days=_STOCK_MOMENTUM_LOOKBACK_DAYS),
+                schema.stock_daily_bars.c.trade_date <= date,
+            )
+            .order_by(
+                schema.stock_daily_bars.c.vt_symbol,
+                schema.stock_daily_bars.c.trade_date,
+            )
+        ).all()
+        recent_bars = _group_recent_stock_bars(recent_rows)
+        limit_up_events = _load_recent_limit_up_events(
+            session=session,
+            vt_symbols=vt_symbols,
+            start=date - timedelta(days=_STOCK_MOMENTUM_LOOKBACK_DAYS),
+            end=date,
+        )
+
         # 个股资金流（trade_date 是 String，近端覆盖）
         flow_rows = session.execute(
             select(
@@ -1166,12 +1195,23 @@ def sector_stocks(
             )
             if change_pct is None and snapshot_change is not None:
                 change_pct = snapshot_change
+            momentum = _recent_stock_momentum(
+                vt_symbol=vsym,
+                stock_name=name_map.get(vsym, vsym),
+                selected_date=date,
+                selected_close=close_today,
+                selected_change_pct=change_pct,
+                daily_bars=recent_bars.get(vsym, []),
+                limit_up_event_dates=limit_up_events.get(vsym, set()),
+            )
             net, ratio = flow_map.get(vsym, (None, None))
             items.append({
                 "vt_symbol": vsym,
                 "name": name_map.get(vsym, vsym),
                 "close": close_today,
                 "change_pct": round(change_pct, 2) if change_pct is not None else None,
+                "return_5d": momentum["return_5d"],
+                "limit_up_count_5d": momentum["limit_up_count_5d"],
                 "price_date": str(date) if close_today is not None else None,
                 "price_source": price_source,
                 "trade_time": trade_time,
@@ -1208,6 +1248,131 @@ def sector_stocks(
         "price_source": "daily_bar" if today_close else "intraday_snapshot" if snapshot_price else None,
         "status": "ready",
     })
+
+
+def _load_recent_limit_up_events(session, vt_symbols: list[str], start: date, end: date) -> dict[str, set[date]]:
+    if not vt_symbols:
+        return {}
+    event_dates = _event_date_keys_between(start, end)
+    rows = session.execute(
+        select(
+            schema.stock_events.c.vt_symbol,
+            schema.stock_events.c.event_date,
+        ).where(
+            schema.stock_events.c.vt_symbol.in_(vt_symbols),
+            schema.stock_events.c.event_type == "limit_pool_zt",
+            schema.stock_events.c.event_date.in_(event_dates),
+        )
+    ).all()
+    grouped: dict[str, set[date]] = {}
+    for vt_symbol, event_date in rows:
+        parsed_date = _parse_stock_event_date(event_date)
+        if parsed_date is not None:
+            grouped.setdefault(str(vt_symbol), set()).add(parsed_date)
+    return grouped
+
+
+def _event_date_keys_between(start: date, end: date) -> list[str]:
+    keys: list[str] = []
+    current = start
+    while current <= end:
+        keys.append(current.isoformat())
+        keys.append(current.strftime("%Y%m%d"))
+        current += timedelta(days=1)
+    return keys
+
+
+def _parse_stock_event_date(value: Any) -> date | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        if len(raw) == 8 and raw.isdigit():
+            return date(int(raw[:4]), int(raw[4:6]), int(raw[6:8]))
+        return _parse_date(raw)
+    except Exception:
+        return None
+
+
+def _group_recent_stock_bars(rows: list[Any]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for vsym, trade_date, close_price, change_pct in rows:
+        if close_price is None:
+            continue
+        grouped.setdefault(str(vsym), []).append({
+            "trade_date": trade_date,
+            "close": float(close_price),
+            "change_pct": float(change_pct) if change_pct is not None else None,
+        })
+    return grouped
+
+
+def _recent_stock_momentum(
+    *,
+    vt_symbol: str,
+    stock_name: str,
+    selected_date: date,
+    selected_close: float | None,
+    selected_change_pct: float | None,
+    daily_bars: list[dict[str, Any]],
+    limit_up_event_dates: set[date],
+) -> dict[str, Any]:
+    if selected_close is None:
+        return {"return_5d": None, "limit_up_count_5d": 0}
+
+    bars = [bar for bar in daily_bars if bar["trade_date"] <= selected_date]
+    if bars and bars[-1]["trade_date"] == selected_date:
+        bars[-1] = {
+            **bars[-1],
+            "close": float(selected_close),
+            "change_pct": selected_change_pct,
+        }
+    else:
+        bars.append({
+            "trade_date": selected_date,
+            "close": float(selected_close),
+            "change_pct": selected_change_pct,
+        })
+    bars = bars[-6:]
+
+    return_5d = None
+    if len(bars) >= 6 and bars[-6]["close"] > 0:
+        return_5d = round((bars[-1]["close"] / bars[-6]["close"] - 1) * 100, 2)
+
+    changes = _derived_stock_changes(bars)
+    threshold = _limit_up_threshold(vt_symbol, stock_name)
+    recent_pairs = zip(bars[-5:], changes[-5:])
+    limit_up_count_5d = sum(
+        1
+        for bar, change in recent_pairs
+        if bar["trade_date"] in limit_up_event_dates or (change is not None and change >= threshold)
+    )
+    return {"return_5d": return_5d, "limit_up_count_5d": limit_up_count_5d}
+
+
+def _derived_stock_changes(bars: list[dict[str, Any]]) -> list[float | None]:
+    changes: list[float | None] = []
+    previous_close: float | None = None
+    for bar in bars:
+        if bar.get("change_pct") is not None:
+            changes.append(float(bar["change_pct"]))
+        elif previous_close:
+            changes.append((float(bar["close"]) / previous_close - 1) * 100)
+        else:
+            changes.append(None)
+        previous_close = float(bar["close"])
+    return changes
+
+
+def _limit_up_threshold(vt_symbol: str, stock_name: str = "") -> float:
+    symbol, _, exchange = vt_symbol.partition(".")
+    if "ST" in stock_name.upper():
+        return 4.5
+    if symbol.startswith(("8", "4")) or exchange in {"BJSE", "BSE"}:
+        return _BSE_LIMIT_UP_THRESHOLD
+    if symbol.startswith(("30", "68")):
+        return _WIDE_LIMIT_UP_THRESHOLD
+    return _NORMAL_LIMIT_UP_THRESHOLD
 
 
 def _can_use_intraday_snapshot(session, d: date) -> bool:

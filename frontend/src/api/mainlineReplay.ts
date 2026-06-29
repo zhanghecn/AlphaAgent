@@ -144,6 +144,8 @@ export interface SectorStockItem {
   name: string;
   close: number | null;
   change_pct: number | null;
+  return_5d: number | null;
+  limit_up_count_5d: number;
   price_date?: string | null;
   price_source?: "daily_bar" | "intraday_snapshot" | string | null;
   trade_time?: string | null;

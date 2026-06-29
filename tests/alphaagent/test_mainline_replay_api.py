@@ -5,7 +5,7 @@
 """
 
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
 
@@ -535,6 +535,11 @@ def test_sector_stocks_does_not_use_previous_bar_as_selected_date(monkeypatch):
                 return FakeResult([("AAA.SSE", 11.0)])
             if self.calls == 3:
                 return FakeResult([("AAA.SSE", 10.0), ("BBB.SSE", 20.0)])
+            if self.calls == 4:
+                return FakeResult([
+                    ("AAA.SSE", date(2026, 6, 25), 10.0, None),
+                    ("AAA.SSE", date(2026, 6, 26), 11.0, None),
+                ])
             return FakeResult([])
 
     @contextmanager
@@ -558,6 +563,8 @@ def test_sector_stocks_does_not_use_previous_bar_as_selected_date(monkeypatch):
     assert items["BBB.SSE"]["close"] is None
     assert items["BBB.SSE"]["change_pct"] is None
     assert items["BBB.SSE"]["price_date"] is None
+    assert items["AAA.SSE"]["return_5d"] is None
+    assert items["AAA.SSE"]["limit_up_count_5d"] == 1
 
 
 def test_sector_stocks_default_sorts_by_change_pct(monkeypatch):
@@ -584,6 +591,8 @@ def test_sector_stocks_default_sorts_by_change_pct(monkeypatch):
                 return FakeResult([("AAA.SSE", 11.0), ("BBB.SSE", 21.0)])
             if self.calls == 3:
                 return FakeResult([("AAA.SSE", 10.0), ("BBB.SSE", 20.0)])
+            if self.calls == 4:
+                return FakeResult([])
             return FakeResult([])
 
     @contextmanager
@@ -633,6 +642,12 @@ def test_sector_stocks_uses_intraday_snapshot_when_daily_bar_missing(monkeypatch
                 return FakeResult([("AAA.SSE", 12.0, 3.21, "14:30:00")])
             if self.calls == 6:
                 return FakeResult([("AAA.SSE", 10.0)])
+            if self.calls == 7:
+                return FakeResult([
+                    ("AAA.SSE", date(2026, 6, 26), 10.0, None),
+                ])
+            if self.calls == 8:
+                return FakeResult([])
             return FakeResult([("AAA.SSE", 1000.0, 2.5)])
 
     @contextmanager
@@ -655,6 +670,7 @@ def test_sector_stocks_uses_intraday_snapshot_when_daily_bar_missing(monkeypatch
     assert item["price_date"] == "2026-06-29"
     assert item["price_source"] == "intraday_snapshot"
     assert item["trade_time"] == "14:30:00"
+    assert item["limit_up_count_5d"] == 1
     assert body["data"]["price_source"] == "intraday_snapshot"
 
 
@@ -684,6 +700,10 @@ def test_sector_stocks_does_not_use_snapshot_for_old_missing_daily_bar(monkeypat
                 return FakeResult([(date(2026, 6, 26),)])
             if self.calls == 4:
                 return FakeResult([])
+            if self.calls == 5:
+                return FakeResult([])
+            if self.calls == 6:
+                return FakeResult([])
             return FakeResult([("AAA.SSE", 1000.0, 2.5)])
 
     @contextmanager
@@ -706,3 +726,51 @@ def test_sector_stocks_does_not_use_snapshot_for_old_missing_daily_bar(monkeypat
     assert item["price_date"] is None
     assert item["price_source"] is None
     assert body["data"]["price_source"] is None
+
+
+def test_recent_stock_momentum_adds_return_and_limit_up_count():
+    d = date(2026, 6, 26)
+    daily_bars = [
+        {"trade_date": d - timedelta(days=7), "close": 10.0, "change_pct": None},
+        {"trade_date": d - timedelta(days=6), "close": 10.5, "change_pct": None},
+        {"trade_date": d - timedelta(days=5), "close": 11.55, "change_pct": 10.0},
+        {"trade_date": d - timedelta(days=4), "close": 11.0, "change_pct": None},
+        {"trade_date": d - timedelta(days=3), "close": 11.5, "change_pct": None},
+        {"trade_date": d, "close": 12.0, "change_pct": None},
+    ]
+
+    momentum = mainline_replay._recent_stock_momentum(
+        vt_symbol="AAA.SSE",
+        stock_name="甲股票",
+        selected_date=d,
+        selected_close=12.0,
+        selected_change_pct=None,
+        daily_bars=daily_bars,
+        limit_up_event_dates=set(),
+    )
+
+    assert momentum["return_5d"] == 20.0
+    assert momentum["limit_up_count_5d"] == 1
+
+
+def test_recent_stock_momentum_uses_limit_up_pool_events():
+    d = date(2026, 6, 26)
+    daily_bars = [
+        {"trade_date": d - timedelta(days=7), "close": 10.0, "change_pct": None},
+        {"trade_date": d - timedelta(days=6), "close": 10.2, "change_pct": None},
+        {"trade_date": d - timedelta(days=5), "close": 10.3, "change_pct": None},
+        {"trade_date": d - timedelta(days=4), "close": 10.4, "change_pct": None},
+        {"trade_date": d - timedelta(days=3), "close": 10.5, "change_pct": None},
+    ]
+
+    momentum = mainline_replay._recent_stock_momentum(
+        vt_symbol="AAA.SSE",
+        stock_name="甲股票",
+        selected_date=d,
+        selected_close=10.6,
+        selected_change_pct=1.0,
+        daily_bars=daily_bars,
+        limit_up_event_dates={d - timedelta(days=5)},
+    )
+
+    assert momentum["limit_up_count_5d"] == 1
