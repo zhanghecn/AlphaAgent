@@ -83,7 +83,6 @@ export default function MainlineReplayPage() {
     setSelectedSectorOverride({
       sector_id: item.sector_id,
       name: item.name ?? item.sector_id,
-      sector_type: item.sector_type,
     });
     setSelectedSectorId(item.sector_id);
   }

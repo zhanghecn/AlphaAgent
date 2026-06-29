@@ -1,9 +1,9 @@
-"""Mainline replay API — 历史日期回放概念主线/大盘/资金 + 行情反推关联.
+"""Mainline replay API — 历史日期回放概念主线/大盘/资金 + 概念共振关联.
 
 Provides:
   - GET /api/mainline-replay/timeline  可回放的交易日列表
   - GET /api/mainline-replay/snapshot  单日快照(date) 或 区间delta(t1+t2)
-  - GET /api/mainline-replay/relation  指定概念在指定日期的关联概念(行情反推)
+  - GET /api/mainline-replay/relation  指定概念在指定日期的共振概念
 
 设计文档：docs/superpowers/specs/2026-06-28-mainline-replay-design.md
 """
@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import desc, func, select
 
@@ -26,7 +26,23 @@ from alphaagent.server.services.mainline_replay import (
     compute_relations_aligned,
 )
 
-router = APIRouter(prefix="/mainline-replay", tags=["mainline-replay"])
+def _reject_sector_type_query(request: Request) -> None:
+    if "sector_type" in request.query_params:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "BAD_PARAMS",
+                "message": "概念主线固定只看题材概念，不接受 sector_type 参数。",
+                "data": {},
+            },
+        )
+
+
+router = APIRouter(
+    prefix="/mainline-replay",
+    tags=["mainline-replay"],
+    dependencies=[Depends(_reject_sector_type_query)],
+)
 
 # 大盘指数 vt_symbol（与 alphaagent.market.symbols.INDEX_SYMBOLS 一致）
 _INDEX_VT_SYMBOLS = [
@@ -35,7 +51,7 @@ _INDEX_VT_SYMBOLS = [
 ]
 _DEFAULT_PERIOD = "20d"
 _MAINLINE_SECTOR_TYPE = "concept"
-_WINDOW_DAYS = 20  # 关联反推的行情窗口
+_WINDOW_DAYS = 20  # 概念共振窗口
 _MIN_COMPLETE_DAILY_SYMBOL_COUNT = 3000
 _RELATION_CANDIDATE_LIMIT = 360
 _STYLE_STATUS_KEYWORDS = (
@@ -205,7 +221,6 @@ def snapshot(
         for item in ranking:
             meta = sectors_meta.get(item["sector_id"], {})
             item["name"] = meta.get("name", item["sector_id"])
-            item["sector_type"] = meta.get("type")
 
     return ok({"mode": mode, "ranking": ranking, "index": index_data, "status": "ready"})
 
@@ -216,7 +231,7 @@ def relation(
     date: date = Query(..., description="回放日期 YYYY-MM-DD"),
     limit: int = Query(12, ge=1, le=50),
 ) -> dict[str, Any]:
-    """指定概念在指定日期的关联概念（行情反推，涨跌共振为主权重）。"""
+    """指定概念在指定日期的关联概念（按走势/资金共振和成分重叠计算）。"""
     if not is_database_configured():
         return ok({"status": "unavailable", "message": "数据库未配置"})
 
@@ -227,8 +242,8 @@ def relation(
                 "target": sector_id,
                 "target_date": str(date),
                 "items": [],
-                "status": "unsupported_sector_type",
-                "message": "概念主线只支持题材概念，不再计算行业关联。",
+                "status": "unsupported_target",
+                "message": "概念主线只支持题材概念。",
             })
 
         # 目标概念最近 _WINDOW_DAYS 个评分日（as_of_date <= date，return_pct 非空）。
@@ -361,7 +376,6 @@ def relation(
         for it in items:
             meta = sectors_meta.get(it["sector_id"], {})
             it["name"] = meta.get("name", it["sector_id"])
-            it["sector_type"] = meta.get("type")
             it["relation_group"] = relation_groups.get(it["sector_id"], it.get("relation_group") or "theme")
 
     return ok({
@@ -543,7 +557,6 @@ def _live_ranking_for_date(
         ranking.append({
             "sector_id": sector_id,
             "name": name or sector_id,
-            "sector_type": row_sector_type,
             "heat_score": heat_score,
             "fund_score": fund_score,
             "momentum_score": momentum_score,

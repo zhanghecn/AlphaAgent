@@ -1,4 +1,4 @@
-/** RelationPanel — 从行情反推的关联概念（侧滑面板，列表模式）。 */
+/** RelationPanel — 概念共振关联（侧滑面板，列表模式）。 */
 import { useQuery } from "@tanstack/react-query";
 
 import { LoadingState } from "@/components/LoadingState";
@@ -23,12 +23,12 @@ export function RelationPanel({
 
   return (
     <div>
-      <div className="mb-1 text-xs text-muted-foreground">关联概念（行情反推 · {date}）</div>
+      <div className="mb-1 text-xs text-muted-foreground">共振概念 · {date}</div>
       {q.isLoading ? (
         <LoadingState rows={4} />
       ) : (q.data?.items ?? []).length === 0 ? (
         <div className="text-xs text-muted-foreground">
-          {q.data?.status === "unsupported_sector_type"
+          {q.data?.status === "unsupported_target"
             ? "该标的不是概念，已从概念主线排除。"
             : q.data?.status === "insufficient_data"
               ? "历史评分点不足，无法计算关联。"

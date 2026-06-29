@@ -9,7 +9,6 @@ export interface TimelineData {
 export interface SectorRankItem {
   sector_id: string;
   name?: string;
-  sector_type?: string;
   heat_score?: number | null;
   fund_score?: number | null;
   momentum_score?: number | null;
@@ -62,7 +61,6 @@ export interface SnapshotData {
 export interface RelationItem {
   sector_id: string;
   name?: string;
-  sector_type?: string;
   relation_score: number;
   corr?: number | null;
   fund_corr?: number | null;
@@ -98,26 +96,22 @@ export function fetchReplayTimeline() {
   return apiClient.get<TimelineData>("/mainline-replay/timeline");
 }
 
-const MAINLINE_SECTOR_TYPE = "concept";
-
-export function fetchLiveMainline(params: { trade_date?: string; sector_type?: string } = {}) {
+export function fetchLiveMainline(params: { trade_date?: string } = {}) {
   const qs = new URLSearchParams();
   if (params.trade_date) qs.set("trade_date", params.trade_date);
-  qs.set("sector_type", params.sector_type ?? MAINLINE_SECTOR_TYPE);
-  return apiClient.get<SnapshotData>(`/mainline-replay/live?${qs.toString()}`);
+  const query = qs.toString();
+  return apiClient.get<SnapshotData>(`/mainline-replay/live${query ? `?${query}` : ""}`);
 }
 
 export function fetchReplaySnapshot(params: {
   date?: string;
   t1?: string;
   t2?: string;
-  sector_type?: string;
 }) {
   const qs = new URLSearchParams();
   if (params.date) qs.set("date", params.date);
   if (params.t1) qs.set("t1", params.t1);
   if (params.t2) qs.set("t2", params.t2);
-  qs.set("sector_type", params.sector_type ?? MAINLINE_SECTOR_TYPE);
   return apiClient.get<SnapshotData>(`/mainline-replay/snapshot?${qs.toString()}`);
 }
 

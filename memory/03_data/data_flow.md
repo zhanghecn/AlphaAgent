@@ -82,7 +82,7 @@ vn.py 中数据需要分清四类：
 - AkShare THS 板块指数函数仍作为兜底，但不再是首选路径。当前 Docker 镜像里的 `akracer 0.0.14` 缺 x86_64 `libmini_racer.glibc.so`，不能依赖 `py_mini_racer` 路径作为生产主路径。
 - `sync_sector_daily_bars` 如果对所有板块读取 0 行，会抛 `DataSyncError` 并记录失败，而不是静默显示成功 0 行。
 - `sync_sector_daily_bars` 和 `sync_sector_period_scores` 默认 `sector_limit=0`，即生产定时任务全量覆盖行业/概念板块；不能恢复成 300 的截断默认值，否则概念主线会只更新部分概念。
-- `/mainline` 当前产品口径是“概念主线”，不是行业/板块混排。`/api/mainline-replay/timeline`、`snapshot`、`live` 和 `relation` 默认只返回 `sector_type=concept` 且过滤指数篮子/风格/昨日涨停/近期新高等状态类伪概念；行业如“元件、医药生物、化学制药”不进入概念主线。
+- `/mainline` 当前产品口径是“概念主线”，不是行业/板块混排。`/api/mainline-replay/timeline`、`snapshot`、`live` 和 `relation` 固定只读题材概念，拒绝外部 `sector_type` 参数，返回 payload 也不再暴露 `sector_type` 分类字段；指数篮子/风格/昨日涨停/近期新高等状态类伪概念会被过滤，行业如“元件、医药生物、化学制药”不进入概念主线。
 - 概念主线依赖 `sector_period_scores`、`sector_fund_flows`、`sector_daily_bars`、`stock_daily_bars` 和 `quant_signal_runs`；生产 `sector_daily_bars` 为空会导致概念热度/主线数据与本地不一致。
 - `sector_period_scores` 历史评分必须只读取 `as_of_date` 当天及以前的可回放数据。`sector_fund_flows` 来自东方财富实时/当日排行快照，不能稳定回放历史日期；因此只在最新完整交易日用于主线评分，历史回放日期资金流为中性 50 分，并在 evidence 中标记 `sector_fund_flows.latest_only`。
 - `/api/mainline-replay/relation` 当前使用 `mainline_replay_relation_v2`：按目标概念最近 20 个评分日，从 `sector_period_scores.return_pct/fund_score` 按共同日期对齐计算行情/资金共振；候选池由“共享成分股概念 + 同窗口活跃评分概念”组成；成分重叠使用完整 `sector_memberships` Jaccard，不再用仅交集候选高估 overlap；返回 `evidence`（共同交易点、共享股票样例、Jaccard、价格/资金相关性）。非概念目标会返回 `unsupported_sector_type`。

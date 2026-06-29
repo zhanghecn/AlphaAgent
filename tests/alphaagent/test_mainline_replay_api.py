@@ -47,6 +47,13 @@ def test_snapshot_single_date_unavailable_when_db_off(monkeypatch):
     assert body["data"]["status"] == "unavailable"
 
 
+def test_mainline_rejects_sector_type_query_param():
+    client = TestClient(create_app())
+    res = client.get("/api/mainline-replay/snapshot?date=2026-06-20&sector_type=industry")
+    assert res.status_code == 400
+    assert res.json()["detail"]["code"] == "BAD_PARAMS"
+
+
 def test_relation_unavailable_when_db_off(monkeypatch):
     _disable_db(monkeypatch)
     client = TestClient(create_app())
@@ -163,6 +170,44 @@ def test_live_ranking_is_concept_only_query(monkeypatch):
     assert "concept" in captured["params"]
 
 
+def test_live_ranking_payload_does_not_expose_sector_type():
+    class FakeResult:
+        def all(self):
+            return [
+                (
+                    "BK1431",
+                    1000.0,
+                    1.2,
+                    1,
+                    None,
+                    "存储芯片",
+                    "concept",
+                    None,
+                    [],
+                    2.3,
+                    80,
+                    "龙头股",
+                    5.5,
+                    88.0,
+                    70.0,
+                    60.0,
+                    "MAINLINE_UP",
+                    4.2,
+                    date(2026, 6, 26),
+                )
+            ]
+
+    class FakeSession:
+        def execute(self, stmt):
+            del stmt
+            return FakeResult()
+
+    items = mainline_replay._live_ranking_for_date(FakeSession(), date(2026, 6, 29), limit=10)
+
+    assert items[0]["name"] == "存储芯片"
+    assert "sector_type" not in items[0]
+
+
 def test_snapshot_ranking_is_concept_only_query(monkeypatch):
     captured: dict[str, str] = {}
 
@@ -184,6 +229,41 @@ def test_snapshot_ranking_is_concept_only_query(monkeypatch):
     assert "concept" in captured["params"]
 
 
+def test_snapshot_payload_does_not_expose_sector_type(monkeypatch):
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, stmt):
+            del stmt
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResult([("BK1431", 88.0, 70.0, 60.0, "MAINLINE_UP", 1, 4.2, 0.9, "存储芯片", "concept", None, [])])
+            if self.calls == 2:
+                return FakeResult([])
+            return FakeResult([("BK1431", "存储芯片", "concept", None, [])])
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(mainline_replay, "is_database_configured", lambda: True)
+    monkeypatch.setattr(mainline_replay, "session_scope", fake_session_scope)
+
+    body = mainline_replay.snapshot(date=date(2026, 6, 26), limit=10)
+
+    item = body["data"]["ranking"][0]
+    assert item["name"] == "存储芯片"
+    assert "sector_type" not in item
+
+
 def test_relation_rejects_industry_target(monkeypatch):
     class FakeResult:
         def all(self):
@@ -203,7 +283,7 @@ def test_relation_rejects_industry_target(monkeypatch):
 
     body = mainline_replay.relation(sector_id="BK1000", date=date(2026, 6, 26), limit=10)
 
-    assert body["data"]["status"] == "unsupported_sector_type"
+    assert body["data"]["status"] == "unsupported_target"
     assert body["data"]["items"] == []
 
 
