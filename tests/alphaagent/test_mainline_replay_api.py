@@ -324,6 +324,33 @@ def test_live_concept_sort_prefers_rolling_index_over_intraday_inflow():
     assert sorted_items[0]["sector_id"] == "STORAGE"
 
 
+def test_concept_sort_prefers_continuation_and_index_return_over_spike_count():
+    ranking = [
+        {
+            "sector_id": "SPIKE",
+            "continuation_status": "hot",
+            "rolling_board_count": 3,
+            "rolling_board_avg_change_pct": 5.84,
+            "continuation_days": 1,
+            "index_change_pct": -0.09,
+            "heat_score": 78.69,
+        },
+        {
+            "sector_id": "STORAGE",
+            "continuation_status": "hot",
+            "rolling_board_count": 2,
+            "rolling_board_avg_change_pct": 4.13,
+            "continuation_days": 20,
+            "index_change_pct": 30.13,
+            "heat_score": 69.72,
+        },
+    ]
+
+    sorted_items = mainline_replay._sort_live_concept_ranking(ranking)
+
+    assert sorted_items[0]["sector_id"] == "STORAGE"
+
+
 def test_snapshot_single_date_uses_concept_index_sort_after_enrichment(monkeypatch):
     class FakeResult:
         def __init__(self, rows):

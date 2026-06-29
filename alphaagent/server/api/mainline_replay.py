@@ -709,13 +709,15 @@ def _sort_live_concept_ranking(ranking: list[dict[str, Any]]) -> list[dict[str, 
         rolling_count = float(item.get("rolling_board_count") or 0)
         continuation_days = float(item.get("continuation_days") or 0)
         index_change_pct = float(item.get("index_change_pct") or 0)
+        rolling_avg_change_pct = float(item.get("rolling_board_avg_change_pct") or 0)
         heat_score = float(item.get("heat_score") or 0)
         main_net_inflow = float(item.get("main_net_inflow") or 0)
         return (
-            rolling_count,
             status_weight,
             continuation_days,
             index_change_pct,
+            rolling_count,
+            rolling_avg_change_pct,
             heat_score,
             main_net_inflow,
         )
