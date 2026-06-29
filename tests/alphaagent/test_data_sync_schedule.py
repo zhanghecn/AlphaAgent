@@ -25,6 +25,58 @@ def test_sync_batch_schedules_table_defined():
     assert {"last_status", "last_started_at", "last_finished_at"}.issubset(cols)
 
 
+def test_schema_patches_continue_when_one_patch_hits_lock_timeout():
+    executed: list[str] = []
+
+    class FakeConnection:
+        def exec_driver_sql(self, sql: str):
+            executed.append(sql)
+            if sql.startswith("ALTER TABLE stocks"):
+                raise TimeoutError("lock timeout")
+
+    class FakeBegin:
+        def __enter__(self):
+            return FakeConnection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeEngine:
+        def begin(self):
+            return FakeBegin()
+
+    schema._apply_compatible_schema_patches(FakeEngine())
+
+    assert any(sql.startswith("ALTER TABLE stocks") for sql in executed)
+    assert any("sync_batch_schedules" in sql for sql in executed)
+    assert any("quant_tail_preview_cache" in sql for sql in executed)
+
+
+def test_schema_patches_raise_unexpected_errors():
+    class FakeConnection:
+        def exec_driver_sql(self, sql: str):
+            if not sql.startswith("SET LOCAL"):
+                raise RuntimeError("syntax failure")
+
+    class FakeBegin:
+        def __enter__(self):
+            return FakeConnection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeEngine:
+        def begin(self):
+            return FakeBegin()
+
+    try:
+        schema._apply_compatible_schema_patches(FakeEngine())
+    except RuntimeError as exc:
+        assert "syntax failure" in str(exc)
+    else:
+        raise AssertionError("unexpected schema patch errors must not be swallowed")
+
+
 # ── Task 2: default schedules + clear single-job crons ───────────────────
 
 

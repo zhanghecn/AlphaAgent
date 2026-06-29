@@ -14,6 +14,7 @@ import {
   fetchReplaySnapshot,
   fetchReplayTimeline,
   type IndexQuote,
+  type RelationItem,
   type SectorRankItem,
 } from "@/api/mainlineReplay";
 import { cn, formatAmount, formatPct } from "@/lib/utils";
@@ -43,10 +44,29 @@ export default function MainlineReplayPage() {
 
   const ranking = snapshotQ.data?.ranking ?? [];
   const [selectedSectorId, setSelectedSectorId] = useState<string>("");
+  const [selectedSectorOverride, setSelectedSectorOverride] = useState<SectorRankItem | null>(null);
   const selectedSector = useMemo(() => {
     if (ranking.length === 0) return null;
-    return ranking.find((item) => item.sector_id === selectedSectorId) ?? ranking[0];
-  }, [ranking, selectedSectorId]);
+    return (
+      ranking.find((item) => item.sector_id === selectedSectorId)
+      ?? (selectedSectorOverride?.sector_id === selectedSectorId ? selectedSectorOverride : null)
+      ?? ranking[0]
+    );
+  }, [ranking, selectedSectorId, selectedSectorOverride]);
+
+  function selectRankedSector(item: SectorRankItem) {
+    setSelectedSectorOverride(null);
+    setSelectedSectorId(item.sector_id);
+  }
+
+  function selectRelatedSector(item: RelationItem) {
+    setSelectedSectorOverride({
+      sector_id: item.sector_id,
+      name: item.name ?? item.sector_id,
+      sector_type: item.sector_type,
+    });
+    setSelectedSectorId(item.sector_id);
+  }
 
   return (
     <div className="space-y-4">
@@ -89,7 +109,7 @@ export default function MainlineReplayPage() {
                   item={r}
                   rank={i + 1}
                   selected={selectedSector?.sector_id === r.sector_id}
-                  onSelect={() => setSelectedSectorId(r.sector_id)}
+                  onSelect={() => selectRankedSector(r)}
                 />
               ))}
               {(snapshotQ.data?.ranking ?? []).length === 0 && (
@@ -146,7 +166,11 @@ export default function MainlineReplayPage() {
                 <SectorStocksTable sectorId={selectedSector.sector_id} date={effectiveDate} />
               </div>
               <div className="rounded-lg border bg-card p-3">
-                <RelationPanel sectorId={selectedSector.sector_id} date={effectiveDate} />
+                <RelationPanel
+                  sectorId={selectedSector.sector_id}
+                  date={effectiveDate}
+                  onSelectSector={selectRelatedSector}
+                />
               </div>
             </>
           ) : (

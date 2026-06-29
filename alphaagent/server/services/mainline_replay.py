@@ -169,6 +169,10 @@ def _score_relation(
     overlap: float,
     overlap_count: int,
     weights: dict[str, float],
+    *,
+    common_points: int,
+    shared_symbols: list[str],
+    relation_group: str,
 ) -> dict[str, Any]:
     """单候选关联打分（纯函数，被 compute_relations_aligned 共享）。"""
     score = (
@@ -181,12 +185,24 @@ def _score_relation(
         reason_parts.append(f"资金{fund_corr:.2f}")
     if overlap_count:
         reason_parts.append(f"重叠{overlap_count}股")
+    if not overlap_count:
+        reason_parts.append("无成分重叠")
     return {
         "relation_score": round(score, 4),
         "corr": round(corr, 4) if corr is not None else None,
         "fund_corr": round(fund_corr, 4) if fund_corr is not None else None,
         "overlap": round(overlap, 4),
         "overlap_count": overlap_count,
+        "common_points": common_points,
+        "relation_group": relation_group,
+        "evidence": {
+            "common_points": common_points,
+            "shared_stock_count": overlap_count,
+            "shared_symbols": shared_symbols[:10],
+            "jaccard": round(overlap, 4),
+            "price_correlation": round(corr, 4) if corr is not None else None,
+            "fund_correlation": round(fund_corr, 4) if fund_corr is not None else None,
+        },
         "reason": " · ".join(reason_parts),
     }
 
@@ -199,6 +215,8 @@ def compute_relations_aligned(
     candidate_fund_maps: dict[str, dict[Any, float]] | None = None,
     target_members: set[str],
     candidate_members: dict[str, set[str]],
+    relation_groups: dict[str, str] | None = None,
+    target_relation_group: str = "theme",
     min_points: int = 3,
     weights: dict[str, float] | None = None,
     top_n: int = 10,
@@ -233,11 +251,32 @@ def compute_relations_aligned(
                 )
 
         cmembers = candidate_members.get(cid, set())
+        shared = target_members & cmembers
         union = target_members | cmembers
-        overlap = (len(target_members & cmembers) / len(union)) if union else 0.0
-        overlap_count = len(target_members & cmembers)
-        scored = _score_relation(corr, fund_corr, overlap, overlap_count, w)
+        overlap = (len(shared) / len(union)) if union else 0.0
+        overlap_count = len(shared)
+        relation_group = (relation_groups or {}).get(cid, "theme")
+        scored = _score_relation(
+            corr,
+            fund_corr,
+            overlap,
+            overlap_count,
+            w,
+            common_points=len(common),
+            shared_symbols=sorted(str(s) for s in shared),
+            relation_group=relation_group,
+        )
         scored["sector_id"] = cid
         results.append(scored)
-    results.sort(key=lambda r: r["relation_score"], reverse=True)
+    if target_relation_group == "style_status":
+        group_rank = {"style_status": 0, "theme": 1, "industry": 1, "region": 2}
+    else:
+        group_rank = {"industry": 0, "theme": 0, "region": 1, "style_status": 2}
+    results.sort(
+        key=lambda r: (
+            group_rank.get(str(r.get("relation_group") or "theme"), 1),
+            -float(r["relation_score"]),
+            str(r["sector_id"]),
+        )
+    )
     return results[:top_n]

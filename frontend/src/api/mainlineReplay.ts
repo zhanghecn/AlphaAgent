@@ -45,11 +45,22 @@ export interface SnapshotData {
 export interface RelationItem {
   sector_id: string;
   name?: string;
+  sector_type?: string;
   relation_score: number;
   corr?: number | null;
   fund_corr?: number | null;
   overlap: number;
   overlap_count: number;
+  common_points?: number;
+  relation_group?: "industry" | "theme" | "region" | "style_status" | string;
+  evidence?: {
+    common_points?: number;
+    shared_stock_count?: number;
+    shared_symbols?: string[];
+    jaccard?: number | null;
+    price_correlation?: number | null;
+    fund_correlation?: number | null;
+  };
   reason: string;
 }
 
@@ -58,6 +69,12 @@ export interface RelationData {
   target_date?: string;
   items: RelationItem[];
   status: string;
+  algorithm?: {
+    name?: string;
+    window_days?: number;
+    basis?: string;
+    candidate_basis?: string;
+  };
 }
 
 export function fetchReplayTimeline() {

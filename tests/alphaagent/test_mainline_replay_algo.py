@@ -123,3 +123,66 @@ def test_aligned_filters_low_common_and_ranks():
     assert "C" not in ids  # 共同点 <3 被过滤
     by = {r["sector_id"]: r for r in res}
     assert by["A"]["relation_score"] > by["B"]["relation_score"]
+
+
+def test_aligned_uses_full_candidate_members_for_jaccard():
+    from alphaagent.server.services.mainline_replay import compute_relations_aligned
+
+    target_map = {1: 0.1, 2: 0.2, 3: 0.3}
+    cand = {1: 0.1, 2: 0.2, 3: 0.3}
+    res = compute_relations_aligned(
+        target_map=target_map,
+        candidate_maps={"A": cand},
+        target_members={"S1", "S2", "S3", "S4"},
+        candidate_members={"A": {"S1", "S2", "S5", "S6", "S7", "S8"}},
+        min_points=3,
+    )
+
+    item = res[0]
+    assert item["overlap_count"] == 2
+    assert item["overlap"] == pytest.approx(0.25)
+    assert item["evidence"]["shared_symbols"] == ["S1", "S2"]
+    assert item["common_points"] == 3
+
+
+def test_aligned_keeps_zero_overlap_high_comovement_candidate():
+    from alphaagent.server.services.mainline_replay import compute_relations_aligned
+
+    target_map = {1: 0.1, 2: 0.2, 3: -0.1, 4: 0.05}
+    zero_overlap = {1: 0.2, 2: 0.4, 3: -0.2, 4: 0.1}
+    res = compute_relations_aligned(
+        target_map=target_map,
+        candidate_maps={"B": zero_overlap},
+        target_members={"S1", "S2"},
+        candidate_members={"B": {"S3", "S4"}},
+        relation_groups={"B": "theme"},
+        min_points=3,
+    )
+
+    assert [item["sector_id"] for item in res] == ["B"]
+    assert res[0]["overlap_count"] == 0
+    assert res[0]["corr"] == pytest.approx(1.0)
+    assert res[0]["relation_group"] == "theme"
+
+
+def test_aligned_prioritizes_status_relations_for_status_target():
+    from alphaagent.server.services.mainline_replay import compute_relations_aligned
+
+    target_map = {1: 0.1, 2: 0.2, 3: 0.0, 4: 0.3}
+    res = compute_relations_aligned(
+        target_map=target_map,
+        candidate_maps={
+            "THEME": {1: 0.1, 2: 0.2, 3: 0.0, 4: 0.3},
+            "STATUS": {1: 0.08, 2: 0.18, 3: 0.01, 4: 0.28},
+        },
+        target_members={"S1", "S2"},
+        candidate_members={
+            "THEME": {"S3", "S4"},
+            "STATUS": {"S1", "S5"},
+        },
+        relation_groups={"THEME": "theme", "STATUS": "style_status"},
+        target_relation_group="style_status",
+        min_points=3,
+    )
+
+    assert [item["sector_id"] for item in res][:2] == ["STATUS", "THEME"]

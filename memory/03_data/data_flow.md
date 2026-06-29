@@ -83,10 +83,18 @@ vn.py 中数据需要分清四类：
 - `sync_sector_daily_bars` 如果对所有板块读取 0 行，会抛 `DataSyncError` 并记录失败，而不是静默显示成功 0 行。
 - `sync_sector_daily_bars` 和 `sync_sector_period_scores` 默认 `sector_limit=0`，即生产定时任务全量覆盖行业/概念板块；不能恢复成 300 的截断默认值，否则主线回放会只更新部分板块。
 - 主线回放依赖 `sector_period_scores`、`sector_fund_flows`、`sector_daily_bars`、`stock_daily_bars` 和 `quant_signal_runs`；生产 `sector_daily_bars` 为空会导致板块热度/主线数据与本地不一致。
-- `sector_period_scores` 历史评分必须只读取 `as_of_date` 当天及以前的 `sector_daily_bars` 和 `sector_fund_flows`。不能用最新板块 K 线重算历史日期，否则 `/mainline` 切换日期时板块榜会完全相同。
+- `sector_period_scores` 历史评分必须只读取 `as_of_date` 当天及以前的可回放数据。`sector_fund_flows` 来自东方财富实时/当日排行快照，不能稳定回放历史日期；因此只在最新完整交易日用于主线评分，历史回放日期资金流为中性 50 分，并在 evidence 中标记 `sector_fund_flows.latest_only`。
+- `/api/mainline-replay/relation` 当前使用 `mainline_replay_relation_v2`：按目标板块最近 20 个评分日，从 `sector_period_scores.return_pct/fund_score` 按共同日期对齐计算行情/资金共振；候选池由“共享成分股板块 + 同窗口活跃评分板块”组成；成分重叠使用完整 `sector_memberships` Jaccard，不再用仅交集候选高估 overlap；返回 `evidence`（共同交易点、共享股票样例、Jaccard、价格/资金相关性）。产业/题材目标优先显示 industry/theme 关联，状态/涨停类目标优先显示 style_status 关联。
 - `sector_period_scores` 的宽度、龙头和涨停情绪也必须按 `as_of_date` 取数：宽度/龙头来自该日期的成分股 `stock_daily_bars`，不再读取 `sectors.rise_count/fall_count/leader_*` 当前快照；`stock_events.event_date` 同时兼容 `YYYY-MM-DD` 和 `YYYYMMDD`。
 - `sync_sector_period_scores` 未显式传 `as_of_date` 时默认使用最新完整股票日线日期，不使用系统当天日期；周末/休市日不能生成新的主线评分日期。`/api/mainline-replay/timeline` 也只返回有完整股票日线覆盖的评分日期，避免脏的非交易日排到首位。
 - 主线回放的成分股涨跌和从成分股点击进入的股票详情必须按所选回放日取 `stock_daily_bars`。缺少该日期日线时显示缺失/错误，不允许用上一交易日或实时公开源冒充历史行情。
+- 同步写库语义不是“全量清库重建”：股票/板块日线、资金流、股票/板块清单大多按主键 upsert，只在本次成功拉到同一主键时覆盖；不会自动删除旧来源、已消失的成员关系、未重新拉取日期范围内的旧行，也不会自动重算已经生成的派生评分。
+- 当前主线数据最需要显式清理的是 `sector_daily_bars` 的旧来源行：规范来源是 `eastmoney.board_kline`，历史 `akshare.stock_board_*_index_ths` 行如果未被同一 `(sector_id, trade_date)` 的新数据覆盖，会继续被 `sector_period_scores` 优先读取，导致同一算法在本地和生产使用不同输入。
+- 成员关系表 `sector_memberships` / `shenwan_industry_members` 是快照关系，但当前同步只 upsert 本次返回成员；某个板块/行业成功同步后，应删除该板块/行业中本次源结果已不存在的旧成员。`stock_sector_memberships` 已通过 `DELETE FROM stock_sector_memberships` 后从 `sector_memberships` 重建，但它继承上游旧成员残留。
+- `sector_period_scores` 是派生结果。上游 `sector_daily_bars`、`sector_memberships` 或 `stock_daily_bars` 口径改变后，必须按受影响 `as_of_date/period` 删除或覆盖重算；仅同步源表不会改变已经落库的历史评分。
+- `sync_stock_daily_bars` 的增量同步默认带最近 5 天回刷窗口，避免外部行情源事后修正或旧 `change_pct` 残留导致本地/生产历史评分不一致；显式传 `refresh_days=0` 才恢复“最后日期+1”的纯增量。
+- `sync_limit_up_pools` 写 `stock_events` 时按 `source + event_type + trade_date` 替换当天池数据，并兼容清理 `YYYYMMDD` / `YYYY-MM-DD` 两种历史日期格式；避免重复涨停事件或缺失当天涨停池影响情绪分。
+- 事件/公告/龙虎榜/热度排行属于历史事件或时间序列，不适合简单全表清理；如需去重/刷新，应按 `source + event_type/rank_time/trade_date` 的业务范围清理，避免误删真实历史事件。
 
 ## AlphaAgent 分钟线同步路径
 
@@ -212,7 +220,7 @@ API：
 16. 组合回测加载日线时会从用户开始日前额外加载预热历史 K 线，避免 MA60、60 日回撤等指标在回测初期因样本不足而缺失；但权益、持仓和交易记录仍只从用户选择的开始日期开始。
 17. 历史组合回测默认使用 `legacy_next_open`：D 日收盘信号，D+1 日线开盘买入/卖出，默认最大持仓 10、BUY 候选前 20 名、收益率和最大回撤为主要观察指标。
 18. 普通量化产品路径只公开 `mainline_dragon_pullback`；`GET /api/quant/strategies` 返回单一公开策略，旧策略仅保留内部兼容和旧报告/对比接口。
-19. 组合模拟支持 `mainline_dragon_pullback` 的有限换仓规则：组合满仓时，`total_score >= 98` 的新鲜 `TAIL_BUY_READY` BUY 可替换浮盈不超过 `+3%`、持有不少于 `3` 天且入场分不高于新信号的持仓；卖出原因写为 `rotation_for_stronger_signal`。该规则用于避免高分龙回头信号因满仓完全错过，不改变默认最大持仓 `10`。
+19. 组合模拟只按候选排序、D+1 执行价、涨跌停、现金、组合上限和当前卖点生成真实成交流水；旧的“强信号挤出已有票”规则已删除，不再作为当前产品路径或候选质量解释。
 20. 股票详情页 K 线标记优先来自产品基线组合回测：先取 `GET /api/backtests?run_type=portfolio&strategy=mainline_dragon_pullback&baseline_only=true` 当前版本全历史基线，再用 `GET /api/backtests/{id}/symbols/{vt_symbol}` 加载真实组合订单/成交/收益标记，并用 `GET /api/backtests/{id}/signal-events?vt_symbol=` 叠加同一回测内的理论 BUY/SELL 信号计划；已关联真实成交的同日理论 BUY 会被前端抑制，避免同一信号重复显示。股票详情收益口径区分“闭合收益率”“当前浮盈率”和“盯市合计”，避免持有中盈利票被历史闭合亏损误读为整票亏损。`latest-state` 的全局买卖记录和 BUY 信号只作为没有组合执行记录时的兜底。
 
 注意：`backtest_signal_events` 是理论信号计划，用于核查“历史上有没有买点/卖点”；真实组合资金曲线仍以 `backtest_trades`、`backtest_daily_equity` 和 `backtest_daily_positions` 为准。
@@ -227,7 +235,7 @@ API：
 - `/quant` 普通视图只保留“候选/回测”两个入口；运行状态只显示覆盖区间、完成进度、最新候选数和自动回测编号，不展示“新生成/跳过/同步”等内部流水账。回测页首屏读取轻量报告并默认打开“交易归因”，用户打开“验证”子 tab 后才加载完整分析和数据质量审计，避免因为重分析耗时误判为“没数据”。
 - `/quant` 回测页普通子入口只保留“验证 / 交易归因 / 收益分段”；全股票理论信号计划不再作为普通 tab 暴露。候选行的“回测成交”追踪和股票详情 K 线仍会使用同一底层信号/订单数据解释买入、拒单和卖出。
 - `/stocks/:vtSymbol` 在“策略复盘”里固定显示“为什么这个分数”，即使该票在最新组合回测里已有实际成交，也能看到评分日、总分、状态、低吸蓄势天数、均线收敛、低吸蓄势分、评分构成，以及“低吸蓄势是同一回踩低吸策略里的连续加分”的解释。
-- 东山精密 `002384.SZSE` 在当前产品基线 `#175 / 0.1.21` 中修复了 `2026-03-27` 至 `2026-04-01` 低吸段：低吸天数从 `1/2/3/4` 累计，`2026-04-01` 为可执行 `stealth_low_suction` BUY，`low_suction_launch_confirmed=true`；组合候选追踪显示它进入执行池第 `7` 名，但执行日满仓 `10/10` 且未触发换仓，所以没有真实订单。2026-06-22 复核 `2026-06-12`：逐日评分为 `stealth_low_suction`，低吸蓄势 `4` 天，总分 `95.81`，`low_suction_launch_confirmed=false` 但默认产品口径仍为 `BUY / executable_entry_signal=true`；`#275` 组合回测在 `2026-06-15` 按 D+1 开盘买入成交。
+- 东山精密 `002384.SZSE` 在 `0.1.21` 线索中修复了 `2026-03-27` 至 `2026-04-01` 低吸段：低吸天数从 `1/2/3/4` 累计，`2026-04-01` 为可执行 `stealth_low_suction` BUY，`low_suction_launch_confirmed=true`。2026-06-22 复核 `2026-06-12`：逐日评分为 `stealth_low_suction`，低吸蓄势 `4` 天，总分 `95.81`，`low_suction_launch_confirmed=false` 但默认产品口径仍为 `BUY / executable_entry_signal=true`；候选质量复核应按该信号 D+1 开盘独立入场并按当前卖点退出，不再用组合成交约束解释买点质量。
 - 当前完整全历史组合回测为 `mainline_dragon_pullback / 0.1.21` 的 `backtests #175`：范围 `2025-03-26` 至 `2026-06-17`，收益约 `+81.36%`，最大回撤约 `-15.59%`，买入/卖出/持仓中 `224 / 214 / 10`。它较 `#172/#169` 改善收益和回撤，但仍需多年 walk-forward、参数敏感性和市场分层验证。
 - 卖出侧失败边界：`0.1.19/#173` 买后早期连续破位止损收益约 `+54.40%`、最大回撤约 `-19.79%`；`0.1.20/#174` 买入当天硬破位次日撤退收益约 `+51.51%`、最大回撤约 `-19.00%`。二者已撤回，当前默认代码是 `0.1.21`。
 - `/quant` 已切换为后台研究任务接口；任务状态是进程内内存状态，服务重启后 `GET /api/quant/research-runs/latest` 可能返回空，但已落库候选、买卖记录和回测仍按普通 API 可查。短区间任务如果日线不足，会显示具体失败原因，避免只看到“组合回测失败”。

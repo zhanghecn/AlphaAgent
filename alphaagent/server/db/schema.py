@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 
 from sqlalchemy import (
@@ -26,6 +27,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 metadata = MetaData()
 _SCHEMA_READY = False
 _SCHEMA_LOCK = threading.Lock()
+logger = logging.getLogger(__name__)
 
 sync_sources = Table(
     "sync_sources",
@@ -1079,35 +1081,46 @@ def ensure_schema_once(engine) -> None:
 def _apply_compatible_schema_patches(engine) -> None:
     """Patch columns added after early local databases were created."""
 
-    with engine.begin() as connection:
-        connection.exec_driver_sql("ALTER TABLE stocks ADD COLUMN IF NOT EXISTS volume_ratio FLOAT")
-        connection.exec_driver_sql(
-            "ALTER TABLE sync_batch_schedules ADD COLUMN IF NOT EXISTS action VARCHAR(40) NOT NULL DEFAULT 'sync'"
+    patches = (
+        "ALTER TABLE stocks ADD COLUMN IF NOT EXISTS volume_ratio FLOAT",
+        "ALTER TABLE sync_batch_schedules ADD COLUMN IF NOT EXISTS action VARCHAR(40) NOT NULL DEFAULT 'sync'",
+        """
+        CREATE TABLE IF NOT EXISTS quant_tail_preview_cache (
+            id BIGSERIAL PRIMARY KEY,
+            trade_date DATE NOT NULL,
+            strategy_id VARCHAR(80) NOT NULL,
+            strategy_version VARCHAR(40) NOT NULL,
+            status VARCHAR(40) NOT NULL,
+            payload JSONB NOT NULL DEFAULT '{}',
+            source_schedule_id VARCHAR(80),
+            base_daily_date DATE,
+            latest_daily_date DATE,
+            recommendation_count INTEGER NOT NULL DEFAULT 0,
+            total INTEGER NOT NULL DEFAULT 0,
+            generated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            CONSTRAINT uq_quant_tail_preview_cache UNIQUE (trade_date, strategy_id, strategy_version)
         )
-        connection.exec_driver_sql(
-            """
-            CREATE TABLE IF NOT EXISTS quant_tail_preview_cache (
-                id BIGSERIAL PRIMARY KEY,
-                trade_date DATE NOT NULL,
-                strategy_id VARCHAR(80) NOT NULL,
-                strategy_version VARCHAR(40) NOT NULL,
-                status VARCHAR(40) NOT NULL,
-                payload JSONB NOT NULL DEFAULT '{}',
-                source_schedule_id VARCHAR(80),
-                base_daily_date DATE,
-                latest_daily_date DATE,
-                recommendation_count INTEGER NOT NULL DEFAULT 0,
-                total INTEGER NOT NULL DEFAULT 0,
-                generated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                CONSTRAINT uq_quant_tail_preview_cache UNIQUE (trade_date, strategy_id, strategy_version)
-            )
-            """
-        )
-        connection.exec_driver_sql(
-            "CREATE INDEX IF NOT EXISTS ix_quant_tail_preview_cache_date ON quant_tail_preview_cache (trade_date)"
-        )
-        connection.exec_driver_sql(
-            "CREATE INDEX IF NOT EXISTS ix_quant_tail_preview_cache_strategy ON quant_tail_preview_cache (strategy_id)"
-        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_quant_tail_preview_cache_date ON quant_tail_preview_cache (trade_date)",
+        "CREATE INDEX IF NOT EXISTS ix_quant_tail_preview_cache_strategy ON quant_tail_preview_cache (strategy_id)",
+    )
+    for sql in patches:
+        try:
+            with engine.begin() as connection:
+                connection.exec_driver_sql("SET LOCAL lock_timeout = '1500ms'")
+                connection.exec_driver_sql(sql)
+        except Exception as exc:
+            if not _is_schema_patch_lock_timeout(exc):
+                raise
+            logger.warning("compatible schema patch skipped: %s", exc.__class__.__name__)
+
+
+def _is_schema_patch_lock_timeout(exc: Exception) -> bool:
+    orig = getattr(exc, "orig", None)
+    pgcode = str(getattr(orig, "pgcode", "") or getattr(orig, "sqlstate", "") or "")
+    if pgcode == "55P03":
+        return True
+    message = str(exc).lower()
+    return isinstance(exc, TimeoutError) or "lock timeout" in message or "lock not available" in message

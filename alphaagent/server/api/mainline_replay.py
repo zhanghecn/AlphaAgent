@@ -36,6 +36,48 @@ _INDEX_VT_SYMBOLS = [
 _DEFAULT_PERIOD = "20d"
 _WINDOW_DAYS = 20  # 关联反推的行情窗口
 _MIN_COMPLETE_DAILY_SYMBOL_COUNT = 3000
+_RELATION_CANDIDATE_LIMIT = 360
+_STYLE_STATUS_KEYWORDS = (
+    "大盘",
+    "中盘",
+    "小盘",
+    "微盘",
+    "低价",
+    "高价",
+    "百元",
+    "破发",
+    "破净",
+    "次新",
+    "新股",
+    "亏损",
+    "扭亏",
+    "预增",
+    "预减",
+    "分红",
+    "送转",
+    "融资融券",
+    "沪股通",
+    "深股通",
+    "陆股通",
+    "MSCI",
+    "富时",
+    "标普",
+    "证金",
+    "社保",
+    "QFII",
+    "养老金",
+    "机构重仓",
+    "基金重仓",
+    "昨日",
+    "涨停",
+    "连板",
+    "打板",
+    "炸板",
+    "首板",
+    "二板",
+    "三板",
+    "龙虎榜",
+)
 
 
 @router.get("/timeline", response_model=None)
@@ -147,18 +189,51 @@ def relation(
                 )
             ).all()
         }
-        cand_rows = session.execute(
+        overlap_candidate_rows = session.execute(
             select(
                 schema.sector_memberships.c.sector_id,
-                schema.sector_memberships.c.vt_symbol,
             )
             .where(schema.sector_memberships.c.vt_symbol.in_(tgt_members))
             .where(schema.sector_memberships.c.sector_id != sector_id)
+            .group_by(schema.sector_memberships.c.sector_id)
+            .order_by(func.count().desc())
+            .limit(_RELATION_CANDIDATE_LIMIT)
         ).all()
-        cand_members: dict[str, set[str]] = {}
-        for sid, vsym in cand_rows:
-            cand_members.setdefault(sid, set()).add(vsym)
-        cand_ids = list(cand_members.keys())[:200]
+
+        max_heat = func.max(schema.sector_period_scores.c.heat_score).label("max_heat")
+        active_candidate_rows = session.execute(
+            select(
+                schema.sector_period_scores.c.sector_id,
+                max_heat,
+            )
+            .where(
+                schema.sector_period_scores.c.period == _DEFAULT_PERIOD,
+                schema.sector_period_scores.c.as_of_date.in_(tgt_dates),
+                schema.sector_period_scores.c.return_pct.isnot(None),
+                schema.sector_period_scores.c.sector_id != sector_id,
+            )
+            .group_by(schema.sector_period_scores.c.sector_id)
+            .order_by(max_heat.desc())
+            .limit(_RELATION_CANDIDATE_LIMIT)
+        ).all()
+        cand_ids: list[str] = []
+        for sid in [str(r[0]) for r in overlap_candidate_rows] + [str(r[0]) for r in active_candidate_rows]:
+            if sid in cand_ids:
+                continue
+            cand_ids.append(sid)
+            if len(cand_ids) >= _RELATION_CANDIDATE_LIMIT:
+                break
+
+        cand_members: dict[str, set[str]] = {sid: set() for sid in cand_ids}
+        if cand_ids:
+            member_rows = session.execute(
+                select(
+                    schema.sector_memberships.c.sector_id,
+                    schema.sector_memberships.c.vt_symbol,
+                ).where(schema.sector_memberships.c.sector_id.in_(cand_ids))
+            ).all()
+            for sid, vsym in member_rows:
+                cand_members.setdefault(str(sid), set()).add(str(vsym))
 
         # 候选同期 return_pct + fund_score（按共同日期自动对齐，候选仅需 ≥3 个共同点）
         candidate_maps: dict[str, dict[Any, float]] = {}
@@ -183,6 +258,10 @@ def relation(
                     candidate_fund_maps.setdefault(sid, {})[d] = float(fund)
 
         sectors_meta = _load_sectors_meta(session)
+        relation_groups = {
+            sid: _sector_relation_group(sectors_meta.get(sid, {}))
+            for sid in cand_ids
+        }
         items = compute_relations_aligned(
             target_map=target_map,
             candidate_maps=candidate_maps,
@@ -190,6 +269,8 @@ def relation(
             candidate_fund_maps=candidate_fund_maps if candidate_fund_maps else None,
             target_members=tgt_members,
             candidate_members=cand_members,
+            relation_groups=relation_groups,
+            target_relation_group=_sector_relation_group(sectors_meta.get(sector_id, {})),
             min_points=3,
             top_n=limit,
         )
@@ -197,8 +278,20 @@ def relation(
             meta = sectors_meta.get(it["sector_id"], {})
             it["name"] = meta.get("name", it["sector_id"])
             it["sector_type"] = meta.get("type")
+            it["relation_group"] = relation_groups.get(it["sector_id"], it.get("relation_group") or "theme")
 
-    return ok({"target": sector_id, "target_date": str(date), "items": items, "status": "ready"})
+    return ok({
+        "target": sector_id,
+        "target_date": str(date),
+        "items": items,
+        "status": "ready",
+        "algorithm": {
+            "name": "mainline_replay_relation_v2",
+            "window_days": _WINDOW_DAYS,
+            "basis": "sector_period_scores return_pct/fund_score aligned by common dates + full sector_memberships Jaccard",
+            "candidate_basis": "shared constituents plus active scored sectors in the replay window",
+        },
+    })
 
 
 # ── helpers ──
@@ -206,9 +299,33 @@ def relation(
 
 def _load_sectors_meta(session) -> dict[str, dict[str, Any]]:
     rows = session.execute(
-        select(schema.sectors.c.id, schema.sectors.c.name, schema.sectors.c.type)
+        select(
+            schema.sectors.c.id,
+            schema.sectors.c.name,
+            schema.sectors.c.type,
+            schema.sectors.c.category,
+            schema.sectors.c.path,
+        )
     ).all()
-    return {r[0]: {"name": r[1], "type": r[2]} for r in rows}
+    return {
+        r[0]: {"name": r[1], "type": r[2], "category": r[3], "path": r[4]}
+        for r in rows
+    }
+
+
+def _sector_relation_group(meta: dict[str, Any]) -> str:
+    sector_type = str(meta.get("type") or "").lower()
+    if sector_type == "industry":
+        return "industry"
+    if sector_type == "region":
+        return "region"
+    name = str(meta.get("name") or "")
+    category = str(meta.get("category") or "")
+    path_text = " ".join(str(v) for v in (meta.get("path") or []))
+    text = f"{name} {category} {path_text}".lower()
+    if any(keyword.lower() in text for keyword in _STYLE_STATUS_KEYWORDS):
+        return "style_status"
+    return "theme"
 
 
 def _ranking_for_date(session, d: date, sector_type: str | None, limit: int) -> list[dict[str, Any]]:
