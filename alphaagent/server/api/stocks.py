@@ -4,7 +4,7 @@ from datetime import date
 
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 
 from alphaagent.market.indicators import compute_bar_indicators
 from alphaagent.market.symbols import normalize_exchange, vt_symbol as build_vt_symbol
@@ -109,6 +109,10 @@ def historical_stock_detail(vt_symbol: str, trade_date: date):
             .limit(1)
         ).mappings().first()
         if bar is None:
+            if _can_use_intraday_snapshot(session, trade_date):
+                snapshot = _intraday_snapshot_detail(stock, normalized_vt_symbol, trade_date)
+                if snapshot is not None:
+                    return ok(snapshot)
             return JSONResponse(
                 status_code=404,
                 content=fail(
@@ -160,6 +164,77 @@ def historical_stock_detail(vt_symbol: str, trade_date: date):
         "trade_time": trade_date.isoformat(),
         "source": "postgresql.stock_daily_bars.as_of_date",
     })
+
+
+def _can_use_intraday_snapshot(session, trade_date: date) -> bool:
+    latest_complete = session.execute(select(func.max(schema.stock_daily_bars.c.trade_date))).scalar_one_or_none()
+    if latest_complete is not None and trade_date <= latest_complete:
+        return False
+
+    minute_row = session.execute(
+        select(schema.stock_minute_bars.c.vt_symbol)
+        .where(
+            schema.stock_minute_bars.c.trade_date == trade_date,
+            schema.stock_minute_bars.c.interval == "1m",
+        )
+        .limit(1)
+    ).first()
+    if minute_row:
+        return True
+
+    flow_row = session.execute(
+        select(schema.stock_fund_flows.c.vt_symbol)
+        .where(schema.stock_fund_flows.c.trade_date == trade_date.isoformat())
+        .limit(1)
+    ).first()
+    return bool(flow_row)
+
+
+def _intraday_snapshot_detail(stock: dict | None, normalized_vt_symbol: str, trade_date: date) -> dict | None:
+    if not stock or stock.get("last_price") is None:
+        return None
+
+    change_pct = stock.get("change_pct")
+    last_price = stock.get("last_price")
+    previous_close = None
+    change = None
+    if last_price is not None and change_pct not in (None, -100):
+        try:
+            previous_close = float(last_price) / (1 + float(change_pct) / 100)
+            change = float(last_price) - previous_close
+        except (TypeError, ValueError, ZeroDivisionError):
+            previous_close = None
+            change = None
+
+    trade_time = stock.get("trade_time")
+    return {
+        "symbol": str(stock.get("symbol") or normalized_vt_symbol.split(".")[0]),
+        "exchange": str(stock.get("exchange") or normalize_exchange(normalized_vt_symbol.split(".")[0])),
+        "vt_symbol": normalized_vt_symbol,
+        "name": str(stock.get("name") or normalized_vt_symbol),
+        "last_price": last_price,
+        "change": change,
+        "change_pct": change_pct,
+        "open_price": stock.get("open_price") or previous_close,
+        "high_price": stock.get("high_price") or last_price,
+        "low_price": stock.get("low_price") or last_price,
+        "previous_close": previous_close,
+        "volume": stock.get("volume"),
+        "turnover": stock.get("turnover"),
+        "market_cap": stock.get("market_cap"),
+        "pe": stock.get("pe"),
+        "pb": stock.get("pb"),
+        "turnover_rate": stock.get("turnover_rate"),
+        "volume_ratio": stock.get("volume_ratio"),
+        "return_5d": stock.get("return_5d"),
+        "return_10d": stock.get("return_10d"),
+        "return_20d": stock.get("return_20d"),
+        "industry": stock.get("industry"),
+        "area": stock.get("area"),
+        "trade_time": f"{trade_date.isoformat()} {trade_time}" if trade_time else trade_date.isoformat(),
+        "source": "postgresql.stocks.intraday_snapshot",
+        "price_source": "intraday_snapshot",
+    }
 
 
 @router.get("/{vt_symbol}/bars", response_model=None)
@@ -233,7 +308,10 @@ def stock_industry_chain(vt_symbol: str):
 
 
 @router.get("/{vt_symbol}/snapshot", response_model=None)
-def stock_snapshot(vt_symbol: str):
+def stock_snapshot(
+    vt_symbol: str,
+    date: date | None = Query(default=None, description="盘中日期 YYYY-MM-DD；用于把实时快照临时并入指标"),
+):
     symbol, exchange = parse_vt_symbol(vt_symbol)
     market_client = client()
     try:
@@ -251,7 +329,11 @@ def stock_snapshot(vt_symbol: str):
 
     try:
         bars = market_client.stock_bars(symbol, exchange, limit=120, interval="1d")
+        bar_items = _bars_with_intraday_snapshot(resolved_vt_symbol, bars["items"], quote, date)
+        bars = {**bars, "items": bar_items}
         indicators = compute_bar_indicators(resolved_vt_symbol, bars["items"], source=bars.get("source"))
+        if bar_items and date and str(bar_items[-1].get("trade_date")) == date.isoformat():
+            indicators = {**indicators, "temporary_bar": True, "temporary_bar_date": date.isoformat()}
     except Exception as exc:
         bars = empty_bar_series(symbol, exchange, "1d", exc)
         indicators = empty_indicators(resolved_vt_symbol, exc)
@@ -298,6 +380,46 @@ def stock_snapshot(vt_symbol: str):
             },
         }
     )
+
+
+def _bars_with_intraday_snapshot(
+    vt_symbol: str,
+    bars: list[dict],
+    quote: dict,
+    trade_date: date | None,
+) -> list[dict]:
+    if trade_date is None or not is_database_configured():
+        return bars
+    with session_scope() as session:
+        if not _can_use_intraday_snapshot(session, trade_date):
+            return bars
+    if not quote.get("last_price"):
+        return bars
+
+    if bars and str(bars[-1].get("trade_date")) >= trade_date.isoformat():
+        return bars
+
+    temp_bar = _quote_to_temp_bar(quote, trade_date)
+    if temp_bar is None:
+        return bars
+    return [*bars, temp_bar]
+
+
+def _quote_to_temp_bar(quote: dict, trade_date: date) -> dict | None:
+    last_price = quote.get("last_price")
+    if last_price is None:
+        return None
+    return {
+        "trade_date": trade_date.isoformat(),
+        "open": quote.get("open_price") or last_price,
+        "close": last_price,
+        "high": quote.get("high_price") or last_price,
+        "low": quote.get("low_price") or last_price,
+        "volume": quote.get("volume"),
+        "turnover": quote.get("turnover") or quote.get("amount"),
+        "change_pct": quote.get("change_pct"),
+        "source": "intraday_snapshot",
+    }
 
 
 def parse_vt_symbol(vt_symbol: str) -> tuple[str, str | None]:

@@ -489,7 +489,7 @@ def test_data_sync_routes(monkeypatch) -> None:
     monkeypatch.setattr(
         data_sync.service,
         "start_sync_batch",
-        lambda profile="core", params=None: {
+        lambda profile="core", params=None, **_kwargs: {
             "id": "batch1",
             "profile": profile,
             "status": "running",
@@ -598,6 +598,128 @@ def test_stock_detail_date_uses_historical_daily_bar(monkeypatch) -> None:
     assert response["data"]["source"] == "postgresql.stock_daily_bars.as_of_date"
 
 
+def test_stock_detail_date_uses_intraday_snapshot_for_live_day(monkeypatch) -> None:
+    from contextlib import contextmanager
+    from datetime import date
+
+    class FakeResult:
+        def __init__(self, row=None):
+            self._row = row
+
+        def mappings(self):
+            return self
+
+        def first(self):
+            return self._row
+
+        def scalar_one_or_none(self):
+            return self._row
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, stmt):
+            del stmt
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResult({
+                    "symbol": "600000",
+                    "exchange": "SSE",
+                    "vt_symbol": "600000.SSE",
+                    "name": "浦发银行",
+                    "industry": "银行",
+                    "area": "上海",
+                    "last_price": 12.3,
+                    "change_pct": 2.5,
+                    "open_price": 12.0,
+                    "high_price": 12.5,
+                    "low_price": 11.9,
+                    "previous_close": 12.0,
+                    "volume": 2_000_000.0,
+                    "turnover": 24_000_000.0,
+                    "market_cap": 100_000_000_000.0,
+                    "pe": 5.5,
+                    "pb": 0.6,
+                    "turnover_rate": 1.8,
+                    "volume_ratio": 1.2,
+                    "trade_time": "14:55:00",
+                })
+            if self.calls == 2:
+                return FakeResult(None)
+            if self.calls == 3:
+                return FakeResult(date(2026, 6, 26))
+            if self.calls == 4:
+                return FakeResult(("600000.SSE",))
+            return FakeResult(None)
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(stocks, "is_database_configured", lambda: True)
+    monkeypatch.setattr(stocks, "session_scope", fake_session_scope)
+
+    response = stocks.stock_detail("600000.SSE", date(2026, 6, 29))
+
+    assert response["data"]["vt_symbol"] == "600000.SSE"
+    assert response["data"]["name"] == "浦发银行"
+    assert response["data"]["last_price"] == 12.3
+    assert response["data"]["change_pct"] == 2.5
+    assert response["data"]["trade_time"] == "2026-06-29 14:55:00"
+    assert response["data"]["source"] == "postgresql.stocks.intraday_snapshot"
+    assert response["data"]["price_source"] == "intraday_snapshot"
+
+
+def test_stock_detail_date_keeps_old_missing_history_strict(monkeypatch) -> None:
+    from contextlib import contextmanager
+    from datetime import date
+
+    class FakeResult:
+        def __init__(self, row=None):
+            self._row = row
+
+        def mappings(self):
+            return self
+
+        def first(self):
+            return self._row
+
+        def scalar_one_or_none(self):
+            return self._row
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, stmt):
+            del stmt
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResult({
+                    "symbol": "600000",
+                    "exchange": "SSE",
+                    "vt_symbol": "600000.SSE",
+                    "name": "浦发银行",
+                })
+            if self.calls == 2:
+                return FakeResult(None)
+            if self.calls == 3:
+                return FakeResult(date(2026, 6, 26))
+            return FakeResult(None)
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(stocks, "is_database_configured", lambda: True)
+    monkeypatch.setattr(stocks, "session_scope", fake_session_scope)
+
+    response = stocks.stock_detail("600000.SSE", date(2026, 6, 20))
+
+    assert response.status_code == 404
+
+
 def test_stock_search_route_does_not_resolve_as_symbol(monkeypatch) -> None:
     patch_clients(monkeypatch)
     client = TestClient(create_app())
@@ -622,6 +744,30 @@ def test_stock_snapshot(monkeypatch) -> None:
     assert payload["data"]["bars"][0]["trade_date"] == "2026-06-05"
     assert "business" in payload["data"]
     assert "industry_chain" in payload["data"]
+
+
+def test_stock_snapshot_date_appends_intraday_bar_for_indicators(monkeypatch) -> None:
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fake_session_scope():
+        yield object()
+
+    patch_clients(monkeypatch)
+    monkeypatch.setattr(stocks, "is_database_configured", lambda: True)
+    monkeypatch.setattr(stocks, "session_scope", fake_session_scope)
+    monkeypatch.setattr(stocks, "_can_use_intraday_snapshot", lambda session, trade_date: True)
+    client = TestClient(create_app())
+
+    response = client.get("/api/stocks/600000.SSE/snapshot?date=2026-06-29")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["data"]["quote"]["last_price"] == 9.34
+    assert payload["data"]["bars"][-1]["trade_date"] == "2026-06-29"
+    assert payload["data"]["bars"][-1]["close"] == 9.34
+    assert payload["data"]["technical_indicators"]["latest_close"] == 9.34
+    assert payload["data"]["technical_indicators"]["temporary_bar"] is True
 
 
 def test_stock_optional_modules_degrade_to_empty_payloads(monkeypatch) -> None:

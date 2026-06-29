@@ -59,6 +59,11 @@ export function fetchStockIndustryChain(vtSymbol: string) {
   return apiClient.get<Record<string, unknown> | null>(`/stocks/${encodeURIComponent(vtSymbol)}/industry-chain`);
 }
 
-export function fetchStockSnapshot(vtSymbol: string) {
-  return apiClient.get<StockSnapshot>(`/stocks/${encodeURIComponent(vtSymbol)}/snapshot`);
+export function fetchStockSnapshot(vtSymbol: string, date?: string | null) {
+  const qs = new URLSearchParams();
+  if (date) qs.set("date", date);
+  const search = qs.toString();
+  return apiClient.get<StockSnapshot>(
+    `/stocks/${encodeURIComponent(vtSymbol)}/snapshot${search ? `?${search}` : ""}`,
+  );
 }

@@ -85,9 +85,9 @@ export function StockDetailPage() {
   });
 
   const snapshotQuery = useQuery({
-    queryKey: ["stock-snapshot", vtSymbol],
-    queryFn: () => fetchStockSnapshot(vtSymbol!),
-    enabled: !!vtSymbol && !replayDate,
+    queryKey: ["stock-snapshot", vtSymbol, replayDate],
+    queryFn: () => fetchStockSnapshot(vtSymbol!, replayDate),
+    enabled: !!vtSymbol,
   });
 
   // Concept cards — the core innovation
@@ -290,8 +290,10 @@ export function StockDetailPage() {
 
   if (!vtSymbol) return <ErrorState message="无效的股票代码" />;
 
-  if (quoteQuery.isLoading) return <LoadingState rows={6} />;
-  if (quoteQuery.isError)
+  const snapshot = snapshotQuery.data as StockSnapshot | undefined;
+  const canUseSnapshotQuote = Boolean(snapshot?.quote && (!replayDate || snapshot.quote.price_source === "intraday_snapshot"));
+  if (quoteQuery.isLoading && !canUseSnapshotQuote) return <LoadingState rows={6} />;
+  if (quoteQuery.isError && !canUseSnapshotQuote)
     return (
       <ErrorState
         message={
@@ -303,9 +305,9 @@ export function StockDetailPage() {
       />
     );
 
-  const quote = quoteQuery.data!;
-  const snapshot = snapshotQuery.data as StockSnapshot | undefined;
-  const missing = replayDate ? [] : snapshot?.data_quality?.missing ?? [];
+  const quote = canUseSnapshotQuote ? snapshot!.quote : quoteQuery.data!;
+  const isIntradayReplay = replayDate && quote.price_source === "intraday_snapshot";
+  const missing = isIntradayReplay || !replayDate ? snapshot?.data_quality?.missing ?? [] : [];
   const sources: string[] = quote.source ? [quote.source] : [];
 
   const concepts = conceptQuery.data;
@@ -315,7 +317,7 @@ export function StockDetailPage() {
   return (
     <div className="space-y-5">
       {/* Quote header (reused) */}
-      <StockQuoteHeader quote={quote} sealInfo={replayDate ? null : sealInfo} />
+      <StockQuoteHeader quote={quote} sealInfo={isIntradayReplay || !replayDate ? sealInfo : null} />
 
       {/* 加入持仓 entry (self-contained: pick a group to add this stock to) */}
       <div className="flex items-center gap-2">
@@ -373,7 +375,7 @@ export function StockDetailPage() {
       {/* Technical indicators */}
       <section className="rounded-lg border p-3 sm:p-4">
         <h3 className="mb-3 text-sm font-medium">技术指标</h3>
-        <StockIndicatorPanel vtSymbol={vtSymbol} />
+        <StockIndicatorPanel vtSymbol={vtSymbol} indicators={isIntradayReplay ? snapshot?.technical_indicators : undefined} />
       </section>
 
       {/* Two-column: Business + Financial summary */}

@@ -66,6 +66,7 @@ export interface StockQuote {
   area: string | null;
   trade_time: string | null;
   source: string;
+  price_source?: "daily_bar" | "intraday_snapshot" | string | null;
 }
 
 export interface StockListData {
@@ -113,6 +114,8 @@ export interface TechnicalIndicators {
   sample_size?: number;
   latest_close?: number | null;
   latest_change_pct?: number | null;
+  temporary_bar?: boolean;
+  temporary_bar_date?: string | null;
   moving_average?: {
     ma5?: number | null;
     ma10?: number | null;

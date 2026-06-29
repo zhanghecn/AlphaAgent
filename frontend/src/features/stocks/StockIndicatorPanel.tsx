@@ -8,14 +8,17 @@ import { dataSourceLabel, formatAmount, formatPct, formatPrice, priceColorClass 
 
 interface StockIndicatorPanelProps {
   vtSymbol: string;
+  indicators?: TechnicalIndicators;
 }
 
-export function StockIndicatorPanel({ vtSymbol }: StockIndicatorPanelProps) {
+export function StockIndicatorPanel({ vtSymbol, indicators: providedIndicators }: StockIndicatorPanelProps) {
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["stock-indicators", vtSymbol],
     queryFn: () => fetchStockIndicators(vtSymbol),
+    enabled: !providedIndicators,
   });
 
+  if (providedIndicators) return <TechnicalIndicatorView indicators={providedIndicators} />;
   if (isLoading) return <CardSkeleton />;
   if (isError)
     return (
