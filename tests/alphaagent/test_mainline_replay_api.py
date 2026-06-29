@@ -139,8 +139,83 @@ def test_live_uses_latest_sector_fund_flow_date(monkeypatch):
 
     assert body["data"]["mode"] == "live"
     assert body["data"]["trade_date"] == "2026-06-29"
-    assert body["data"]["source"] == "sector_fund_flows"
+    assert body["data"]["source"] == "sector_fund_flows:concept"
     assert any("sector_fund_flows.trade_date" in sql for sql in captured)
+
+
+def test_live_ranking_is_concept_only_query(monkeypatch):
+    captured: dict[str, str] = {}
+
+    class FakeResult:
+        def all(self):
+            return []
+
+    class FakeSession:
+        def execute(self, stmt):
+            compiled = stmt.compile()
+            captured["sql"] = str(compiled)
+            captured["params"] = str(compiled.params)
+            return FakeResult()
+
+    mainline_replay._live_ranking_for_date(FakeSession(), date(2026, 6, 29), limit=10)
+
+    assert "sectors.type" in captured["sql"]
+    assert "concept" in captured["params"]
+
+
+def test_snapshot_ranking_is_concept_only_query(monkeypatch):
+    captured: dict[str, str] = {}
+
+    class FakeResult:
+        def all(self):
+            return []
+
+    class FakeSession:
+        def execute(self, stmt):
+            compiled = stmt.compile()
+            captured["sql"] = str(compiled)
+            captured["params"] = str(compiled.params)
+            return FakeResult()
+
+    mainline_replay._ranking_for_date(FakeSession(), date(2026, 6, 26), limit=10)
+
+    assert "sector_period_scores.sector_type" in captured["sql"]
+    assert "sectors.type" in captured["sql"]
+    assert "concept" in captured["params"]
+
+
+def test_relation_rejects_industry_target(monkeypatch):
+    class FakeResult:
+        def all(self):
+            return [("BK1000", "元件", "industry", None, [])]
+
+    class FakeSession:
+        def execute(self, stmt):
+            del stmt
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(mainline_replay, "is_database_configured", lambda: True)
+    monkeypatch.setattr(mainline_replay, "session_scope", fake_session_scope)
+
+    body = mainline_replay.relation(sector_id="BK1000", date=date(2026, 6, 26), limit=10)
+
+    assert body["data"]["status"] == "unsupported_sector_type"
+    assert body["data"]["items"] == []
+
+
+def test_mainline_concept_meta_filters_style_status_and_index_baskets():
+    assert mainline_replay._is_mainline_concept_meta({"name": "存储芯片", "type": "concept"}) is True
+    assert mainline_replay._is_mainline_concept_meta({"name": "高带宽内存", "type": "concept"}) is True
+    assert mainline_replay._is_mainline_concept_meta({"name": "上证50_", "type": "concept"}) is False
+    assert mainline_replay._is_mainline_concept_meta({"name": "AH股", "type": "concept"}) is False
+    assert mainline_replay._is_mainline_concept_meta({"name": "昨日涨停", "type": "concept"}) is False
+    assert mainline_replay._is_mainline_concept_meta({"name": "趋势股", "type": "concept"}) is False
+    assert mainline_replay._is_mainline_concept_meta({"name": "创业成份", "type": "concept"}) is False
+    assert mainline_replay._is_mainline_concept_meta({"name": "元件", "type": "industry"}) is False
 
 
 def test_sector_stocks_unavailable_when_db_off(monkeypatch):

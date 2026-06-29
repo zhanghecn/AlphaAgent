@@ -81,14 +81,15 @@ vn.py 中数据需要分清四类：
 - `AkShareAdapter.sector_daily_bars()` 优先使用东方财富 `push2his` 直连板块 K 线接口，`secid=90.BKxxxx`，源码 helper 为 `_eastmoney_board_kline()`。
 - AkShare THS 板块指数函数仍作为兜底，但不再是首选路径。当前 Docker 镜像里的 `akracer 0.0.14` 缺 x86_64 `libmini_racer.glibc.so`，不能依赖 `py_mini_racer` 路径作为生产主路径。
 - `sync_sector_daily_bars` 如果对所有板块读取 0 行，会抛 `DataSyncError` 并记录失败，而不是静默显示成功 0 行。
-- `sync_sector_daily_bars` 和 `sync_sector_period_scores` 默认 `sector_limit=0`，即生产定时任务全量覆盖行业/概念板块；不能恢复成 300 的截断默认值，否则主线回放会只更新部分板块。
-- 主线回放依赖 `sector_period_scores`、`sector_fund_flows`、`sector_daily_bars`、`stock_daily_bars` 和 `quant_signal_runs`；生产 `sector_daily_bars` 为空会导致板块热度/主线数据与本地不一致。
+- `sync_sector_daily_bars` 和 `sync_sector_period_scores` 默认 `sector_limit=0`，即生产定时任务全量覆盖行业/概念板块；不能恢复成 300 的截断默认值，否则概念主线会只更新部分概念。
+- `/mainline` 当前产品口径是“概念主线”，不是行业/板块混排。`/api/mainline-replay/timeline`、`snapshot`、`live` 和 `relation` 默认只返回 `sector_type=concept` 且过滤指数篮子/风格/昨日涨停/近期新高等状态类伪概念；行业如“元件、医药生物、化学制药”不进入概念主线。
+- 概念主线依赖 `sector_period_scores`、`sector_fund_flows`、`sector_daily_bars`、`stock_daily_bars` 和 `quant_signal_runs`；生产 `sector_daily_bars` 为空会导致概念热度/主线数据与本地不一致。
 - `sector_period_scores` 历史评分必须只读取 `as_of_date` 当天及以前的可回放数据。`sector_fund_flows` 来自东方财富实时/当日排行快照，不能稳定回放历史日期；因此只在最新完整交易日用于主线评分，历史回放日期资金流为中性 50 分，并在 evidence 中标记 `sector_fund_flows.latest_only`。
-- `/api/mainline-replay/relation` 当前使用 `mainline_replay_relation_v2`：按目标板块最近 20 个评分日，从 `sector_period_scores.return_pct/fund_score` 按共同日期对齐计算行情/资金共振；候选池由“共享成分股板块 + 同窗口活跃评分板块”组成；成分重叠使用完整 `sector_memberships` Jaccard，不再用仅交集候选高估 overlap；返回 `evidence`（共同交易点、共享股票样例、Jaccard、价格/资金相关性）。产业/题材目标优先显示 industry/theme 关联，状态/涨停类目标优先显示 style_status 关联。
+- `/api/mainline-replay/relation` 当前使用 `mainline_replay_relation_v2`：按目标概念最近 20 个评分日，从 `sector_period_scores.return_pct/fund_score` 按共同日期对齐计算行情/资金共振；候选池由“共享成分股概念 + 同窗口活跃评分概念”组成；成分重叠使用完整 `sector_memberships` Jaccard，不再用仅交集候选高估 overlap；返回 `evidence`（共同交易点、共享股票样例、Jaccard、价格/资金相关性）。非概念目标会返回 `unsupported_sector_type`。
 - `sector_period_scores` 的宽度、龙头和涨停情绪也必须按 `as_of_date` 取数：宽度/龙头来自该日期的成分股 `stock_daily_bars`，不再读取 `sectors.rise_count/fall_count/leader_*` 当前快照；`stock_events.event_date` 同时兼容 `YYYY-MM-DD` 和 `YYYYMMDD`。
 - `sync_sector_period_scores` 未显式传 `as_of_date` 时默认使用最新完整股票日线日期，不使用系统当天日期；周末/休市日不能生成新的主线评分日期。`/api/mainline-replay/timeline` 也只返回有完整股票日线覆盖的评分日期，避免脏的非交易日排到首位。
-- 主线回放的成分股涨跌和从成分股点击进入的股票详情必须按所选回放日取 `stock_daily_bars`。缺少该日期日线时显示缺失/错误，不允许用上一交易日或实时公开源冒充历史行情。
-- `/api/mainline-replay/live` 是收盘前/盘中主线入口：默认取 `sector_fund_flows` 的最新 `trade_date`，按即时主力净流入排序，并叠加最近完整交易日的 `sector_period_scores` 作为历史评分参考；它只读实时源表，不写 `sector_period_scores`。`/mainline` 前端默认优先显示该实时模式；历史回放仍只读完整日线日期的 `sector_period_scores`。
+- 概念主线的成分股涨跌和从成分股点击进入的股票详情必须按所选回放日取 `stock_daily_bars`。缺少该日期日线时显示缺失/错误，不允许用上一交易日或实时公开源冒充历史行情。
+- `/api/mainline-replay/live` 是收盘前/盘中概念主线入口：默认取概念 `sector_fund_flows` 的最新 `trade_date`，按即时主力净流入排序，并叠加最近完整交易日的概念 `sector_period_scores` 作为历史评分参考；它只读实时源表，不写 `sector_period_scores`。`/mainline` 前端默认优先显示该实时模式；历史回放仍只读完整日线日期的概念 `sector_period_scores`。
 - `/api/mainline-replay/sector-stocks` 在所选日期没有完整日线时，只允许对晚于最新完整日线且存在当日分钟线/资金流的盘中日期使用 `stocks` 快照价，并返回 `price_source=intraday_snapshot`；旧历史日期缺日线仍显示缺失，不能拿当前快照冒充历史价格。
 - 同步写库语义不是“全量清库重建”：股票/板块日线、资金流、股票/板块清单大多按主键 upsert，只在本次成功拉到同一主键时覆盖；不会自动删除旧来源、已消失的成员关系、未重新拉取日期范围内的旧行，也不会自动重算已经生成的派生评分。
 - 当前主线数据最需要显式清理的是 `sector_daily_bars` 的旧来源行：规范来源是 `eastmoney.board_kline`，历史 `akshare.stock_board_*_index_ths` 行如果未被同一 `(sector_id, trade_date)` 的新数据覆盖，会继续被 `sector_period_scores` 优先读取，导致同一算法在本地和生产使用不同输入。

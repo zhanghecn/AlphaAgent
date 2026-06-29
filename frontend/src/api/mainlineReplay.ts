@@ -98,10 +98,12 @@ export function fetchReplayTimeline() {
   return apiClient.get<TimelineData>("/mainline-replay/timeline");
 }
 
+const MAINLINE_SECTOR_TYPE = "concept";
+
 export function fetchLiveMainline(params: { trade_date?: string; sector_type?: string } = {}) {
   const qs = new URLSearchParams();
   if (params.trade_date) qs.set("trade_date", params.trade_date);
-  if (params.sector_type) qs.set("sector_type", params.sector_type);
+  qs.set("sector_type", params.sector_type ?? MAINLINE_SECTOR_TYPE);
   return apiClient.get<SnapshotData>(`/mainline-replay/live?${qs.toString()}`);
 }
 
@@ -115,7 +117,7 @@ export function fetchReplaySnapshot(params: {
   if (params.date) qs.set("date", params.date);
   if (params.t1) qs.set("t1", params.t1);
   if (params.t2) qs.set("t2", params.t2);
-  if (params.sector_type) qs.set("sector_type", params.sector_type);
+  qs.set("sector_type", params.sector_type ?? MAINLINE_SECTOR_TYPE);
   return apiClient.get<SnapshotData>(`/mainline-replay/snapshot?${qs.toString()}`);
 }
 

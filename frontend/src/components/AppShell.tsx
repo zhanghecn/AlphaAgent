@@ -20,7 +20,7 @@ import { VersionBadge } from "@/components/VersionBadge";
 
 const NAV_ITEMS = [
   { to: "/", label: "今日市场", icon: LayoutDashboard },
-  { to: "/mainline", label: "主线回放", icon: History },
+  { to: "/mainline", label: "概念主线", icon: History },
   { to: "/stocks", label: "全 A 股票", icon: TrendingUp },
   { to: "/quant", label: "量化交易", icon: Activity },
   { to: "/portfolio", label: "持仓", icon: Briefcase },

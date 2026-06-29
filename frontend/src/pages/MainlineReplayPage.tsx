@@ -1,8 +1,8 @@
 /**
- * MainlineReplayPage — 主线回放（量化复盘终端）
+ * MainlineReplayPage — 概念主线（量化复盘终端）
  *
- * 视觉：indigo 深色终端感。Signature = 资金强弱矩阵（选中板块多维体检）。
- * 结构：时间轴 + 三栏（主线榜热度条 / 大盘+资金矩阵 / 详情+成分股+关联）。
+ * 视觉：indigo 深色终端感。Signature = 资金强弱矩阵（选中概念多维体检）。
+ * 结构：时间轴 + 三栏（概念榜热度条 / 大盘+资金矩阵 / 详情+成分股+关联）。
  */
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -92,9 +92,9 @@ export default function MainlineReplayPage() {
     <div className="space-y-4">
       {/* Header */}
       <div>
-        <h1 className="font-display text-xl font-bold tracking-tight">主线回放</h1>
+        <h1 className="font-display text-xl font-bold tracking-tight">概念主线</h1>
         <p className="mt-0.5 text-xs text-muted-foreground">
-          收盘前动态计算 · 历史读缓存 · 主线 · 资金 · 个股
+          收盘前动态计算 · 历史读缓存 · 概念 · 资金 · 个股
         </p>
       </div>
 
@@ -145,10 +145,10 @@ export default function MainlineReplayPage() {
 
       {/* 三栏 */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[300px_minmax(0,1fr)_340px]">
-        {/* 左：主线榜（热度条 signature）*/}
+        {/* 左：概念榜（热度条 signature）*/}
         <div className="rounded-lg border bg-card p-3">
           <div className="mb-2 flex items-baseline justify-between">
-            <span className="text-xs font-medium">主线板块榜</span>
+            <span className="text-xs font-medium">概念主线榜</span>
             <span className="text-[10px] text-muted-foreground">
               {viewMode === "live" ? "实时资金 · 涨跌" : "热度 · 20日收益率"}
             </span>
@@ -168,7 +168,7 @@ export default function MainlineReplayPage() {
               ))}
               {ranking.length === 0 && (
                 <div className="py-4 text-center text-xs text-muted-foreground">
-                  {viewMode === "live" ? "今日暂无实时资金流" : "该日无主线评分"}
+                  {viewMode === "live" ? "今日暂无概念资金流" : "该日无概念评分"}
                 </div>
               )}
             </div>
@@ -187,7 +187,7 @@ export default function MainlineReplayPage() {
               ))}
               {(activeData?.index ?? []).length === 0 && !activeLoading && (
                 <div className="col-span-full py-3 text-center text-xs text-muted-foreground">
-                  {viewMode === "live" ? "实时模式暂不展示指数；以板块资金流为准" : "该日无指数数据"}
+                  {viewMode === "live" ? "实时模式暂不展示指数；以概念资金流为准" : "该日无指数数据"}
                 </div>
               )}
             </div>
@@ -205,7 +205,7 @@ export default function MainlineReplayPage() {
             </div>
           ) : (
             <div className="flex h-32 items-center justify-center rounded-lg border border-dashed text-xs text-muted-foreground">
-              选中板块后显示资金强弱矩阵
+              选中概念后显示资金强弱矩阵
             </div>
           )}
         </div>
@@ -233,7 +233,7 @@ export default function MainlineReplayPage() {
             </>
           ) : (
             <div className="flex h-40 items-center justify-center rounded-lg border border-dashed text-sm text-muted-foreground">
-              ← 点左侧板块看成分股与关联
+              ← 点左侧概念看成分股与关联
             </div>
           )}
         </div>
@@ -298,7 +298,7 @@ function DateScrubber({
   );
 }
 
-// ── 主线榜行：排名 + 名称 + 热度条 + 收益率 ──
+// ── 概念榜行：排名 + 名称 + 热度条 + 收益率 ──
 
 function SectorRankRow({
   item,

@@ -1,4 +1,4 @@
-/** RelationPanel — 从行情反推的关联板块（侧滑面板，列表模式）。 */
+/** RelationPanel — 从行情反推的关联概念（侧滑面板，列表模式）。 */
 import { useQuery } from "@tanstack/react-query";
 
 import { LoadingState } from "@/components/LoadingState";
@@ -23,12 +23,16 @@ export function RelationPanel({
 
   return (
     <div>
-      <div className="mb-1 text-xs text-muted-foreground">关联板块（行情反推 · {date}）</div>
+      <div className="mb-1 text-xs text-muted-foreground">关联概念（行情反推 · {date}）</div>
       {q.isLoading ? (
         <LoadingState rows={4} />
       ) : (q.data?.items ?? []).length === 0 ? (
         <div className="text-xs text-muted-foreground">
-          {q.data?.status === "insufficient_data" ? "历史评分点不足，无法计算关联。" : "暂无关联数据。"}
+          {q.data?.status === "unsupported_sector_type"
+            ? "该标的不是概念，已从概念主线排除。"
+            : q.data?.status === "insufficient_data"
+              ? "历史评分点不足，无法计算关联。"
+              : "暂无关联数据。"}
         </div>
       ) : (
         <div className="space-y-1">
@@ -47,7 +51,7 @@ export function RelationPanel({
               </div>
               <div className="mt-0.5 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
                 <span className="truncate">{it.reason}</span>
-                <span className="shrink-0">{relationGroupLabel(it.relation_group)}</span>
+                <span className="shrink-0">题材</span>
               </div>
               <div className="mt-0.5 truncate text-[10px] text-muted-foreground/80">
                 {evidenceText(it)}
@@ -61,13 +65,6 @@ export function RelationPanel({
       )}
     </div>
   );
-}
-
-function relationGroupLabel(group: string | null | undefined): string {
-  if (group === "industry") return "行业";
-  if (group === "style_status") return "状态";
-  if (group === "region") return "地域";
-  return "题材";
 }
 
 function evidenceText(item: RelationItem): string {

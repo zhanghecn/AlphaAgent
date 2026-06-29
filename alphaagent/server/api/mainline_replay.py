@@ -1,9 +1,9 @@
-"""Mainline replay API — 历史日期回放主线板块/大盘/资金 + 行情反推关联.
+"""Mainline replay API — 历史日期回放概念主线/大盘/资金 + 行情反推关联.
 
 Provides:
   - GET /api/mainline-replay/timeline  可回放的交易日列表
   - GET /api/mainline-replay/snapshot  单日快照(date) 或 区间delta(t1+t2)
-  - GET /api/mainline-replay/relation  指定板块在指定日期的关联板块(行情反推)
+  - GET /api/mainline-replay/relation  指定概念在指定日期的关联概念(行情反推)
 
 设计文档：docs/superpowers/specs/2026-06-28-mainline-replay-design.md
 """
@@ -34,6 +34,7 @@ _INDEX_VT_SYMBOLS = [
     "000300.SSE", "000905.SSE", "000852.SSE", "000688.SSE",
 ]
 _DEFAULT_PERIOD = "20d"
+_MAINLINE_SECTOR_TYPE = "concept"
 _WINDOW_DAYS = 20  # 关联反推的行情窗口
 _MIN_COMPLETE_DAILY_SYMBOL_COUNT = 3000
 _RELATION_CANDIDATE_LIMIT = 360
@@ -69,20 +70,40 @@ _STYLE_STATUS_KEYWORDS = (
     "机构重仓",
     "基金重仓",
     "昨日",
+    "最近",
+    "近期",
+    "百日",
+    "趋势股",
+    "强势股",
     "涨停",
     "连板",
+    "多板",
     "打板",
     "炸板",
+    "触板",
     "首板",
     "二板",
     "三板",
+    "高振幅",
+    "高换手",
     "龙虎榜",
+    "上证",
+    "中证",
+    "沪深",
+    "央视",
+    "成份",
+    "成分",
+    "AH股",
+    "茅指数",
+    "宁组合",
+    "风格",
+    "股权激励",
 )
 
 
 @router.get("/timeline", response_model=None)
 def timeline(limit: int = Query(400, ge=1, le=2000)) -> dict[str, Any]:
-    """可回放的交易日列表（sector_period_scores 里存在的 as_of_date 去重降序）。"""
+    """可回放的交易日列表（概念 sector_period_scores 里存在的 as_of_date 去重降序）。"""
     if not is_database_configured():
         return ok({"dates": [], "status": "unavailable", "message": "数据库未配置"})
     with session_scope() as session:
@@ -94,6 +115,7 @@ def timeline(limit: int = Query(400, ge=1, le=2000)) -> dict[str, Any]:
         rows = session.execute(
             select(schema.sector_period_scores.c.as_of_date)
             .where(schema.sector_period_scores.c.period == _DEFAULT_PERIOD)
+            .where(schema.sector_period_scores.c.sector_type == _MAINLINE_SECTOR_TYPE)
             .where(schema.sector_period_scores.c.as_of_date.in_(select(complete_trade_dates.c.trade_date)))
             .group_by(schema.sector_period_scores.c.as_of_date)
             .order_by(desc(schema.sector_period_scores.c.as_of_date))
@@ -105,32 +127,27 @@ def timeline(limit: int = Query(400, ge=1, le=2000)) -> dict[str, Any]:
 
 @router.get("/live", response_model=None)
 def live(
-    trade_date: date | None = Query(None, description="盘中日期 YYYY-MM-DD；默认取最新板块资金流日期"),
-    sector_type: str | None = Query(None, description="板块类型过滤"),
+    trade_date: date | None = Query(None, description="盘中日期 YYYY-MM-DD；默认取最新概念资金流日期"),
     limit: int = Query(80, ge=1, le=300),
 ) -> dict[str, Any]:
-    """今日/盘中主线资金流。
+    """今日/盘中概念主线资金流。
 
     历史回放读 sector_period_scores；收盘前实时模式只读可覆盖当日的
-    sector_fund_flows + sectors 快照，不把盘中数据写成历史评分。
+    concept sector_fund_flows + sectors 快照，不把盘中数据写成历史评分。
     """
     if not is_database_configured():
         return ok({"status": "unavailable", "message": "数据库未配置"})
 
     if not isinstance(trade_date, date):
         trade_date = None
-    if not isinstance(sector_type, str):
-        sector_type = None
 
     with session_scope() as session:
-        latest_flow_date = session.execute(
-            select(func.max(schema.sector_fund_flows.c.trade_date))
-        ).scalar()
+        latest_flow_date = _latest_concept_flow_date(session)
         resolved_date = trade_date or _parse_optional_date(latest_flow_date)
         if resolved_date is None:
             return ok({"status": "empty", "ranking": [], "index": []})
 
-        ranking = _live_ranking_for_date(session, resolved_date, sector_type, limit)
+        ranking = _live_ranking_for_date(session, resolved_date, limit)
         latest_complete_daily = _latest_complete_daily_date(session)
         latest_snapshot_updated = session.execute(select(func.max(schema.stocks.c.updated_at))).scalar()
         latest_snapshot_trade_time = session.execute(select(func.max(schema.stocks.c.trade_time))).scalar()
@@ -148,12 +165,12 @@ def live(
         "ranking": ranking,
         "index": [],
         "status": "ready" if ranking else "empty",
-        "source": "sector_fund_flows",
+        "source": "sector_fund_flows:concept",
         "temporary_bar": True,
         "latest_minute_time": _iso_or_none(latest_minute_time),
         "snapshot_updated_at": _iso_or_none(latest_snapshot_updated),
         "snapshot_trade_time": str(latest_snapshot_trade_time) if latest_snapshot_trade_time else None,
-        "message": "收盘前动态计算：板块实时资金流 + 盘中快照；历史回放仍读 sector_period_scores。",
+        "message": "收盘前动态计算：概念实时资金流 + 盘中快照；历史回放仍读概念评分缓存。",
     })
 
 
@@ -162,12 +179,11 @@ def snapshot(
     date: date | None = Query(None, description="单日快照日期 YYYY-MM-DD"),
     t1: date | None = Query(None, description="区间起点"),
     t2: date | None = Query(None, description="区间终点"),
-    sector_type: str | None = Query(None, description="板块类型过滤"),
     limit: int = Query(50, ge=1, le=300),
 ) -> dict[str, Any]:
     """单日快照(date) 或 区间delta(t1+t2)。
 
-    返回主线板块榜(按 heat_score/fund_strength)、大盘指数。
+    返回概念主线榜(按 heat_score/fund_strength)、大盘指数。
     """
     if date is None and (t1 is None or t2 is None):
         return JSONResponse(
@@ -178,14 +194,14 @@ def snapshot(
         return ok({"status": "unavailable", "message": "数据库未配置"})
 
     with session_scope() as session:
-        sectors_meta = _load_sectors_meta(session)
         if date is not None:
-            ranking = _ranking_for_date(session, date, sector_type, limit)
+            ranking = _ranking_for_date(session, date, limit)
             mode = "single"
         else:
-            ranking = _ranking_for_range(session, t1, t2, sector_type, limit)  # type: ignore[arg-type]
+            ranking = _ranking_for_range(session, t1, t2, limit)  # type: ignore[arg-type]
             mode = "delta"
         index_data = _load_index(session, date or t2)  # type: ignore[arg-type]
+        sectors_meta = _load_sectors_meta(session)
         for item in ranking:
             meta = sectors_meta.get(item["sector_id"], {})
             item["name"] = meta.get("name", item["sector_id"])
@@ -196,18 +212,28 @@ def snapshot(
 
 @router.get("/relation", response_model=None)
 def relation(
-    sector_id: str = Query(..., description="目标板块ID"),
+    sector_id: str = Query(..., description="目标概念ID"),
     date: date = Query(..., description="回放日期 YYYY-MM-DD"),
     limit: int = Query(12, ge=1, le=50),
 ) -> dict[str, Any]:
-    """指定板块在指定日期的关联板块（行情反推，涨跌共振为主权重）。"""
+    """指定概念在指定日期的关联概念（行情反推，涨跌共振为主权重）。"""
     if not is_database_configured():
         return ok({"status": "unavailable", "message": "数据库未配置"})
 
     with session_scope() as session:
-        # 目标板块最近 _WINDOW_DAYS 个评分日（as_of_date <= date，return_pct 非空）
-        # 数据源用 sector_period_scores（覆盖广 ~240 板块），而非 sector_daily_bars（仅 ~42 板块），
-        # 保证关联反推对绝大多数板块可用。return_pct 为滚动周期收益率，序列共振仍反映板块间走势协同。
+        sectors_meta = _load_sectors_meta(session)
+        if not _is_mainline_concept_meta(sectors_meta.get(sector_id, {})):
+            return ok({
+                "target": sector_id,
+                "target_date": str(date),
+                "items": [],
+                "status": "unsupported_sector_type",
+                "message": "概念主线只支持题材概念，不再计算行业关联。",
+            })
+
+        # 目标概念最近 _WINDOW_DAYS 个评分日（as_of_date <= date，return_pct 非空）。
+        # 数据源用 sector_period_scores，return_pct 为滚动周期收益率，
+        # 序列共振仍反映概念间走势协同。
         tgt_rows = session.execute(
             select(
                 schema.sector_period_scores.c.as_of_date,
@@ -217,6 +243,7 @@ def relation(
             .where(
                 schema.sector_period_scores.c.sector_id == sector_id,
                 schema.sector_period_scores.c.period == _DEFAULT_PERIOD,
+                schema.sector_period_scores.c.sector_type == _MAINLINE_SECTOR_TYPE,
                 schema.sector_period_scores.c.as_of_date <= date,
                 schema.sector_period_scores.c.return_pct.isnot(None),
             )
@@ -249,6 +276,8 @@ def relation(
             )
             .where(schema.sector_memberships.c.vt_symbol.in_(tgt_members))
             .where(schema.sector_memberships.c.sector_id != sector_id)
+            .join(schema.sectors, schema.sectors.c.id == schema.sector_memberships.c.sector_id)
+            .where(schema.sectors.c.type == _MAINLINE_SECTOR_TYPE)
             .group_by(schema.sector_memberships.c.sector_id)
             .order_by(func.count().desc())
             .limit(_RELATION_CANDIDATE_LIMIT)
@@ -262,6 +291,7 @@ def relation(
             )
             .where(
                 schema.sector_period_scores.c.period == _DEFAULT_PERIOD,
+                schema.sector_period_scores.c.sector_type == _MAINLINE_SECTOR_TYPE,
                 schema.sector_period_scores.c.as_of_date.in_(tgt_dates),
                 schema.sector_period_scores.c.return_pct.isnot(None),
                 schema.sector_period_scores.c.sector_id != sector_id,
@@ -272,7 +302,7 @@ def relation(
         ).all()
         cand_ids: list[str] = []
         for sid in [str(r[0]) for r in overlap_candidate_rows] + [str(r[0]) for r in active_candidate_rows]:
-            if sid in cand_ids:
+            if sid in cand_ids or not _is_mainline_concept_meta(sectors_meta.get(sid, {})):
                 continue
             cand_ids.append(sid)
             if len(cand_ids) >= _RELATION_CANDIDATE_LIMIT:
@@ -302,6 +332,7 @@ def relation(
                 ).where(
                     schema.sector_period_scores.c.sector_id.in_(cand_ids),
                     schema.sector_period_scores.c.period == _DEFAULT_PERIOD,
+                    schema.sector_period_scores.c.sector_type == _MAINLINE_SECTOR_TYPE,
                     schema.sector_period_scores.c.as_of_date.in_(tgt_dates),
                 )
             ).all()
@@ -311,7 +342,6 @@ def relation(
                 if fund is not None:
                     candidate_fund_maps.setdefault(sid, {})[d] = float(fund)
 
-        sectors_meta = _load_sectors_meta(session)
         relation_groups = {
             sid: _sector_relation_group(sectors_meta.get(sid, {}))
             for sid in cand_ids
@@ -343,7 +373,7 @@ def relation(
             "name": "mainline_replay_relation_v2",
             "window_days": _WINDOW_DAYS,
             "basis": "sector_period_scores return_pct/fund_score aligned by common dates + full sector_memberships Jaccard",
-            "candidate_basis": "shared constituents plus active scored sectors in the replay window",
+            "candidate_basis": "shared constituents plus active scored concepts in the replay window",
         },
     })
 
@@ -382,6 +412,19 @@ def _sector_relation_group(meta: dict[str, Any]) -> str:
     return "theme"
 
 
+def _is_mainline_concept_meta(meta: dict[str, Any]) -> bool:
+    return str(meta.get("type") or "").lower() == _MAINLINE_SECTOR_TYPE and _sector_relation_group(meta) == "theme"
+
+
+def _latest_concept_flow_date(session) -> Any:
+    return session.execute(
+        select(func.max(schema.sector_fund_flows.c.trade_date))
+        .select_from(schema.sector_fund_flows)
+        .join(schema.sectors, schema.sectors.c.id == schema.sector_fund_flows.c.sector_id)
+        .where(schema.sectors.c.type == _MAINLINE_SECTOR_TYPE)
+    ).scalar()
+
+
 def _latest_complete_daily_date(session) -> date | None:
     row = session.execute(
         select(schema.stock_daily_bars.c.trade_date)
@@ -413,7 +456,6 @@ def _iso_or_none(value: Any) -> str | None:
 def _live_ranking_for_date(
     session,
     d: date,
-    sector_type: str | None,
     limit: int,
 ) -> list[dict[str, Any]]:
     latest_scores = (
@@ -423,6 +465,7 @@ def _live_ranking_for_date(
         )
         .where(
             schema.sector_period_scores.c.period == _DEFAULT_PERIOD,
+            schema.sector_period_scores.c.sector_type == _MAINLINE_SECTOR_TYPE,
             schema.sector_period_scores.c.as_of_date < d,
         )
         .group_by(schema.sector_period_scores.c.sector_id)
@@ -437,6 +480,8 @@ def _live_ranking_for_date(
             schema.sector_fund_flows.c.updated_at,
             schema.sectors.c.name,
             schema.sectors.c.type,
+            schema.sectors.c.category,
+            schema.sectors.c.path,
             schema.sectors.c.change_pct,
             schema.sectors.c.stock_count,
             schema.sectors.c.leader_stock,
@@ -460,15 +505,14 @@ def _live_ranking_for_date(
         .where(
             schema.sector_fund_flows.c.trade_date == d.isoformat(),
             schema.sector_fund_flows.c.period == "即时",
+            schema.sectors.c.type == _MAINLINE_SECTOR_TYPE,
         )
     )
-    if sector_type:
-        q = q.where(schema.sectors.c.type == sector_type)
     rows = session.execute(
         q.order_by(
             desc(schema.sector_fund_flows.c.main_net_inflow),
             schema.sector_fund_flows.c.rank.asc().nulls_last(),
-        ).limit(limit)
+        )
     ).all()
 
     ranking: list[dict[str, Any]] = []
@@ -481,6 +525,8 @@ def _live_ranking_for_date(
             updated_at,
             name,
             row_sector_type,
+            category,
+            path,
             change_pct,
             stock_count,
             leader_stock,
@@ -492,6 +538,8 @@ def _live_ranking_for_date(
             return_pct,
             score_date,
         ) = row
+        if not _is_mainline_concept_meta({"name": name, "type": row_sector_type, "category": category, "path": path}):
+            continue
         ranking.append({
             "sector_id": sector_id,
             "name": name or sector_id,
@@ -515,47 +563,79 @@ def _live_ranking_for_date(
             "flow_updated_at": _iso_or_none(updated_at),
             "data_mode": "live",
         })
+        if len(ranking) >= limit:
+            break
     return ranking
 
 
-def _ranking_for_date(session, d: date, sector_type: str | None, limit: int) -> list[dict[str, Any]]:
+def _ranking_for_date(session, d: date, limit: int) -> list[dict[str, Any]]:
     q = (
-        select(schema.sector_period_scores)
+        select(
+            schema.sector_period_scores.c.sector_id,
+            schema.sector_period_scores.c.heat_score,
+            schema.sector_period_scores.c.fund_score,
+            schema.sector_period_scores.c.momentum_score,
+            schema.sector_period_scores.c.trend_state,
+            schema.sector_period_scores.c.rank_return,
+            schema.sector_period_scores.c.return_pct,
+            schema.sector_period_scores.c.confidence,
+            schema.sectors.c.name,
+            schema.sectors.c.type,
+            schema.sectors.c.category,
+            schema.sectors.c.path,
+        )
+        .join(schema.sectors, schema.sectors.c.id == schema.sector_period_scores.c.sector_id)
         .where(
             schema.sector_period_scores.c.as_of_date == d,
             schema.sector_period_scores.c.period == _DEFAULT_PERIOD,
+            schema.sector_period_scores.c.sector_type == _MAINLINE_SECTOR_TYPE,
+            schema.sectors.c.type == _MAINLINE_SECTOR_TYPE,
         )
     )
-    if sector_type:
-        q = q.where(schema.sector_period_scores.c.sector_type == sector_type)
-    q = q.order_by(desc(schema.sector_period_scores.c.heat_score)).limit(limit)
-    rows = session.execute(q).mappings().all()
+    q = q.order_by(desc(schema.sector_period_scores.c.heat_score))
+    rows = session.execute(q).all()
     out: list[dict[str, Any]] = []
     for row in rows:
-        r = dict(row)
+        (
+            sector_id,
+            heat_score,
+            fund_score,
+            momentum_score,
+            trend_state,
+            rank_return,
+            return_pct,
+            confidence,
+            name,
+            sector_type,
+            category,
+            path,
+        ) = row
+        if not _is_mainline_concept_meta({"name": name, "type": sector_type, "category": category, "path": path}):
+            continue
         out.append({
-            "sector_id": r["sector_id"],
-            "heat_score": r.get("heat_score"),
-            "fund_score": r.get("fund_score"),
-            "momentum_score": r.get("momentum_score"),
-            "trend_state": r.get("trend_state"),
-            "rank_return": r.get("rank_return"),
-            "return_pct": r.get("return_pct"),
-            "confidence": r.get("confidence"),
+            "sector_id": sector_id,
+            "heat_score": heat_score,
+            "fund_score": fund_score,
+            "momentum_score": momentum_score,
+            "trend_state": trend_state,
+            "rank_return": rank_return,
+            "return_pct": return_pct,
+            "confidence": confidence,
         })
+        if len(out) >= limit:
+            break
     return out
 
 
 def _ranking_for_range(
-    session, t1: date, t2: date, sector_type: str | None, limit: int
+    session, t1: date, t2: date, limit: int
 ) -> list[dict[str, Any]]:
     """区间 delta：取 t1/t2 两日 scores + [t1,t2] 区间 bars 算 raw delta，再批量算 fund_strength。"""
     base = select(schema.sector_period_scores).where(
         schema.sector_period_scores.c.period == _DEFAULT_PERIOD,
+        schema.sector_period_scores.c.sector_type == _MAINLINE_SECTOR_TYPE,
         schema.sector_period_scores.c.as_of_date.in_([t1, t2]),
     )
-    if sector_type:
-        base = base.where(schema.sector_period_scores.c.sector_type == sector_type)
     score_rows = session.execute(base).mappings().all()
     by_sector: dict[str, dict] = {"t1": {}, "t2": {}}
     for r in score_rows:
@@ -563,7 +643,12 @@ def _ranking_for_range(
         key = "t1" if d == t1 else "t2"
         by_sector[key][r["sector_id"]] = r
 
-    sector_ids = list(set(by_sector["t1"].keys()) & set(by_sector["t2"].keys()))
+    sectors_meta = _load_sectors_meta(session)
+    sector_ids = [
+        sid
+        for sid in set(by_sector["t1"].keys()) & set(by_sector["t2"].keys())
+        if _is_mainline_concept_meta(sectors_meta.get(sid, {}))
+    ]
     if not sector_ids:
         return []
 
@@ -710,12 +795,12 @@ def _load_index(session, d: date) -> list[dict[str, Any]]:
 
 @router.get("/sector-stocks", response_model=None)
 def sector_stocks(
-    sector_id: str = Query(..., description="板块ID"),
+    sector_id: str = Query(..., description="概念ID"),
     date: date = Query(..., description="回放日期 YYYY-MM-DD"),
     sort_by: str = Query("net_inflow", description="net_inflow|change_pct|name"),
     limit: int = Query(50, ge=1, le=200),
 ) -> dict[str, Any]:
-    """板块成分股 + 当日涨跌(从close算) + 个股资金流向(近端)，用于排查个股流入流出。"""
+    """概念成分股 + 当日涨跌(从close算) + 个股资金流向(近端)，用于排查个股流入流出。"""
     if not is_database_configured():
         return ok({"status": "unavailable", "message": "数据库未配置"})
 

@@ -1,4 +1,4 @@
-/** SectorStocksTable — 板块成分股 + 当日涨跌 + 个股资金流向。点击个股跳详情页。*/
+/** SectorStocksTable — 概念成分股 + 当日涨跌 + 个股资金流向。点击个股跳详情页。*/
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
