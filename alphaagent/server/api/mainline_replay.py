@@ -95,7 +95,10 @@ _STYLE_STATUS_KEYWORDS = (
     "昨日",
     "最近",
     "近期",
+    "新高",
     "百日",
+    "热股",
+    "题材股",
     "趋势股",
     "强势股",
     "涨停",
@@ -220,7 +223,7 @@ def snapshot(
 
     with session_scope() as session:
         if date is not None:
-            ranking = _ranking_for_date(session, date, limit)
+            ranking = _ranking_for_date(session, date, max(limit, _LIVE_RANKING_CANDIDATE_LIMIT))
             mode = "single"
         else:
             ranking = _ranking_for_range(session, t1, t2, limit)  # type: ignore[arg-type]
@@ -231,6 +234,8 @@ def snapshot(
             meta = sectors_meta.get(item["sector_id"], {})
             item["name"] = meta.get("name", item["sector_id"])
         _enrich_concept_index_context(session, ranking, date or t2, include_live_projection=False)  # type: ignore[arg-type]
+        if date is not None:
+            ranking = _sort_live_concept_ranking(ranking)[:limit]
 
     return ok({"mode": mode, "ranking": ranking, "index": index_data, "status": "ready"})
 
@@ -692,22 +697,26 @@ def _continuation_status(item: dict[str, Any], stats: dict[str, Any], is_live: b
 
 
 def _sort_live_concept_ranking(ranking: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    def sort_key(item: dict[str, Any]) -> tuple[float, float, float, float, float]:
+    def sort_key(item: dict[str, Any]) -> tuple[float, float, float, float, float, float]:
         status_weight = {
             "maintained": 3.0,
+            "hot": 3.0,
             "new": 2.0,
             "watch": 1.0,
             "broken": 0.0,
+            "cold": 0.0,
         }.get(str(item.get("continuation_status") or ""), 0.0)
         rolling_count = float(item.get("rolling_board_count") or 0)
         continuation_days = float(item.get("continuation_days") or 0)
         index_change_pct = float(item.get("index_change_pct") or 0)
+        heat_score = float(item.get("heat_score") or 0)
         main_net_inflow = float(item.get("main_net_inflow") or 0)
         return (
             rolling_count,
             status_weight,
             continuation_days,
             index_change_pct,
+            heat_score,
             main_net_inflow,
         )
 

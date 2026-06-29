@@ -324,6 +324,59 @@ def test_live_concept_sort_prefers_rolling_index_over_intraday_inflow():
     assert sorted_items[0]["sector_id"] == "STORAGE"
 
 
+def test_snapshot_single_date_uses_concept_index_sort_after_enrichment(monkeypatch):
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+        def scalar(self):
+            return None
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, stmt):
+            del stmt
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResult([
+                    ("FLOW", 99.0, 100.0, 40.0, "ROTATION", 200, -2.0, None, "高资金概念", "concept", None, []),
+                    ("STORAGE", 60.0, 30.0, 100.0, "MAINLINE_UP", 8, 30.0, None, "存储芯片", "concept", None, []),
+                ])
+            if self.calls == 2:
+                return FakeResult([])
+            if self.calls == 3:
+                return FakeResult([
+                    ("FLOW", "高资金概念", "concept", None, []),
+                    ("STORAGE", "存储芯片", "concept", None, []),
+                ])
+            if self.calls == 4:
+                return FakeResult([
+                    ("FLOW", date(2026, 6, 26), 100.0, -2.0, 1000.0),
+                    ("STORAGE", date(2026, 6, 26), 100.0, 8.0, 1000.0),
+                    ("STORAGE", date(2026, 6, 29), 130.0, 30.0, 1000.0),
+                ])
+            return FakeResult([
+                ("FLOW", date(2026, 6, 29), 99.0, 100, "ROTATION"),
+                ("STORAGE", date(2026, 6, 29), 60.0, 8, "MAINLINE_UP"),
+            ])
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(mainline_replay, "is_database_configured", lambda: True)
+    monkeypatch.setattr(mainline_replay, "session_scope", fake_session_scope)
+
+    body = mainline_replay.snapshot(date=date(2026, 6, 29), limit=1)
+
+    assert body["data"]["ranking"][0]["sector_id"] == "STORAGE"
+
+
 def test_snapshot_ranking_is_concept_only_query(monkeypatch):
     captured: dict[str, str] = {}
 
@@ -412,6 +465,9 @@ def test_mainline_concept_meta_filters_style_status_and_index_baskets():
     assert mainline_replay._is_mainline_concept_meta({"name": "AH股", "type": "concept"}) is False
     assert mainline_replay._is_mainline_concept_meta({"name": "昨日涨停", "type": "concept"}) is False
     assert mainline_replay._is_mainline_concept_meta({"name": "趋势股", "type": "concept"}) is False
+    assert mainline_replay._is_mainline_concept_meta({"name": "历史新高", "type": "concept"}) is False
+    assert mainline_replay._is_mainline_concept_meta({"name": "东方财富热股", "type": "concept"}) is False
+    assert mainline_replay._is_mainline_concept_meta({"name": "题材股", "type": "concept"}) is False
     assert mainline_replay._is_mainline_concept_meta({"name": "创业成份", "type": "concept"}) is False
     assert mainline_replay._is_mainline_concept_meta({"name": "元件", "type": "industry"}) is False
 
