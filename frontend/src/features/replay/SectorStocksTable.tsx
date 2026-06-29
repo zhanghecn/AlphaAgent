@@ -41,10 +41,8 @@ export function SectorStocksTable({ sectorId, date }: { sectorId: string; date: 
         <div className="max-h-72 space-y-px overflow-y-auto">
           <div className="flex items-center justify-between px-2 py-1 text-[10px] uppercase tracking-wide text-muted-foreground">
             <span>个股（点击看详情）</span>
-            <span className="flex gap-2">
+            <span className="flex gap-3">
               <span className="w-12 text-right">涨跌</span>
-              <span className="w-12 text-right">5日</span>
-              <span className="w-7 text-right">5板</span>
               <span className="w-16 text-right">主力净流入</span>
             </span>
           </div>
@@ -58,19 +56,26 @@ export function SectorStocksTable({ sectorId, date }: { sectorId: string; date: 
                 title={`${it.vt_symbol}${it.main_net_inflow_ratio != null ? ` · 净流入占比 ${it.main_net_inflow_ratio.toFixed(2)}%` : ""} · 点击查看 ${date} 个股详情`}
                 className="group flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-indigo-500/10 focus:outline-none focus-visible:ring-1 focus-visible:ring-indigo-400"
               >
-                <span className="flex min-w-0 items-center gap-1.5">
-                  <span className="truncate font-medium">{it.name}</span>
-                  <span className="shrink-0 text-[10px] text-muted-foreground/60 group-hover:text-indigo-300/70">{it.vt_symbol.split(".")[0]}</span>
+                <span className="min-w-0">
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <span className="truncate font-medium">{it.name}</span>
+                    <span className="shrink-0 text-[10px] text-muted-foreground/60 group-hover:text-indigo-300/70">
+                      {it.vt_symbol.split(".")[0]}
+                    </span>
+                  </span>
+                  <span className="mt-0.5 flex items-center gap-1.5 text-[10px] leading-none text-muted-foreground/70">
+                    <span className={cn((it.return_5d ?? 0) >= 0 ? "text-rise/80" : "text-fall/80")}>
+                      5日 {it.return_5d == null ? "--" : `${it.return_5d > 0 ? "+" : ""}${it.return_5d.toFixed(2)}%`}
+                    </span>
+                    <span>·</span>
+                    <span className={cn(it.limit_up_count_5d > 0 ? "text-rise/80" : "")}>
+                      5板 {it.limit_up_count_5d}
+                    </span>
+                  </span>
                 </span>
-                <span className="ml-2 flex shrink-0 items-center gap-2 tabular-nums">
+                <span className="ml-2 flex shrink-0 items-center gap-3 tabular-nums">
                   <span className={cn("w-12 text-right", (it.change_pct ?? 0) >= 0 ? "text-rise" : "text-fall")}>
                     {it.change_pct == null ? "--" : `${it.change_pct > 0 ? "+" : ""}${it.change_pct.toFixed(2)}%`}
-                  </span>
-                  <span className={cn("w-12 text-right", (it.return_5d ?? 0) >= 0 ? "text-rise" : "text-fall")}>
-                    {it.return_5d == null ? "--" : `${it.return_5d > 0 ? "+" : ""}${it.return_5d.toFixed(2)}%`}
-                  </span>
-                  <span className={cn("w-7 text-right", it.limit_up_count_5d > 0 ? "text-rise" : "text-muted-foreground")}>
-                    {it.limit_up_count_5d}
                   </span>
                   <span className="flex w-16 items-center justify-end gap-1">
                     {it.fund_inflow_available && (
