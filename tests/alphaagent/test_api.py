@@ -764,6 +764,7 @@ def test_stock_snapshot_date_appends_intraday_bar_for_indicators(monkeypatch) ->
     assert response.status_code == 200
     payload = response.json()
     assert payload["data"]["quote"]["last_price"] == 9.34
+    assert payload["data"]["quote"]["price_source"] == "intraday_snapshot"
     assert payload["data"]["bars"][-1]["trade_date"] == "2026-06-29"
     assert payload["data"]["bars"][-1]["close"] == 9.34
     assert payload["data"]["technical_indicators"]["latest_close"] == 9.34

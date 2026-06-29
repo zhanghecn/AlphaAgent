@@ -333,6 +333,7 @@ def stock_snapshot(
         bars = {**bars, "items": bar_items}
         indicators = compute_bar_indicators(resolved_vt_symbol, bars["items"], source=bars.get("source"))
         if bar_items and date and str(bar_items[-1].get("trade_date")) == date.isoformat():
+            quote = {**quote, "price_source": "intraday_snapshot"}
             indicators = {**indicators, "temporary_bar": True, "temporary_bar_date": date.isoformat()}
     except Exception as exc:
         bars = empty_bar_series(symbol, exchange, "1d", exc)
