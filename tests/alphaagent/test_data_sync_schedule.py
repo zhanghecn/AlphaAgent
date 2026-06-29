@@ -824,6 +824,100 @@ def test_sector_members_sync_fetches_all_pages_before_prune(monkeypatch):
     assert [item["symbol"] for _, items in captured for item in items] == ["000001", "000002"]
 
 
+def test_sector_members_sync_uses_total_when_provider_caps_page_size(monkeypatch):
+    calls: list[int] = []
+    captured: list[dict[str, Any]] = []
+
+    class FakeAdapter:
+        def sector_stocks(self, sector_id, page=1, page_size=200, **kw):
+            del sector_id, page_size, kw
+            calls.append(page)
+            if page == 1:
+                return {
+                    "items": [{"symbol": f"{index:06d}", "exchange": "SSE"} for index in range(100)],
+                    "total": 127,
+                }
+            if page == 2:
+                return {
+                    "items": [{"symbol": f"{100 + index:06d}", "exchange": "SSE"} for index in range(27)],
+                    "total": 127,
+                }
+            return {"items": [], "total": 127}
+
+    class FakeResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [{"id": "BK1137", "type": "concept", "name": "存储芯片"}]
+
+    class FakeSession:
+        def execute(self, stmt):
+            del stmt
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    def fake_upsert(sector_id, items):
+        del sector_id
+        captured.extend(items)
+        return len(items)
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+    monkeypatch.setattr(svc, "_upsert_sector_memberships", fake_upsert)
+
+    result = svc.DataSyncRunner(adapter=FakeAdapter(), concurrency=1)._run_sync_sector_members({"page_size": 200})
+
+    assert calls == [1, 2]
+    assert result["rows_read"] == 127
+    assert len(captured) == 127
+
+
+def test_sector_members_sync_can_fetch_large_boards_beyond_legacy_page_cap(monkeypatch):
+    calls: list[int] = []
+
+    class FakeAdapter:
+        def sector_stocks(self, sector_id, page=1, page_size=200, **kw):
+            del sector_id, page_size, kw
+            calls.append(page)
+            total = 2101
+            start = (page - 1) * 100
+            if start >= total:
+                return {"items": [], "total": total}
+            count = min(100, total - start)
+            return {
+                "items": [{"symbol": f"{start + index:06d}", "exchange": "SSE"} for index in range(count)],
+                "total": total,
+            }
+
+    class FakeResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [{"id": "BK0596", "type": "concept", "name": "融资融券"}]
+
+    class FakeSession:
+        def execute(self, stmt):
+            del stmt
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+    monkeypatch.setattr(svc, "_upsert_sector_memberships", lambda sector_id, items: len(items))
+
+    result = svc.DataSyncRunner(adapter=FakeAdapter(), concurrency=1)._run_sync_sector_members({"page_size": 200})
+
+    assert calls == list(range(1, 23))
+    assert result["rows_read"] == 2101
+    assert result["rows_written"] == 2101
+
+
 def test_upsert_sector_memberships_prunes_missing_members(monkeypatch):
     executed: list[str] = []
 

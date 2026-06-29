@@ -52,6 +52,7 @@ INTERRUPTED_SCHEDULE_RECOVERY_POLL_SECONDS = 5
 CANONICAL_SECTOR_DAILY_SOURCE = "eastmoney.board_kline"
 LIMIT_POOL_EVENT_SOURCE = "akshare.stock_ztb_em"
 STOCK_LIST_MAX_PAGES = 200
+SECTOR_MEMBER_MAX_PAGES = 100
 STOCK_DAILY_INCREMENTAL_REFRESH_DAYS = 5
 SECTOR_DAILY_MIN_COVERAGE_TOTAL = 100
 SECTOR_DAILY_MIN_COVERAGE_RATIO = 0.8
@@ -4656,10 +4657,10 @@ def _fetch_all_sector_stocks(
         total = data.get("total")
         if total is not None and len(items) >= int(total):
             break
-        if len(page_items) < bounded_page_size:
+        if total is None and len(page_items) < bounded_page_size:
             break
         page += 1
-        if page > 20:
+        if page > SECTOR_MEMBER_MAX_PAGES:
             break
     return items
 

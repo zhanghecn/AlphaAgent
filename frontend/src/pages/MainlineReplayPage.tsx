@@ -1,11 +1,12 @@
 /**
- * MainlineReplayPage — 概念主线（量化复盘终端）
+ * MainlineReplayPage — 概念指数（量化复盘终端）
  *
- * 视觉：indigo 深色终端感。Signature = 资金强弱矩阵（选中概念多维体检）。
- * 结构：时间轴 + 三栏（概念榜热度条 / 大盘+资金矩阵 / 详情+成分股+关联）。
+ * 视觉：暗色行情磁带。Signature = 概念指数曲线 + 连续状态带。
+ * 结构：时间轴 + 三栏（概念指数榜 / 指数详情 / 成分股+共振）。
  */
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Activity, CircleSlash, Flame, Radio, Sparkles } from "lucide-react";
 
 import { LoadingState } from "@/components/LoadingState";
 import { RelationPanel } from "@/features/replay/RelationPanel";
@@ -21,6 +22,32 @@ import {
 import { cn, formatAmount, formatPct } from "@/lib/utils";
 
 type ReplayViewMode = "live" | "history";
+type ConceptTapeFilter = "all" | "maintained" | "new" | "broken";
+type NormalizedConceptStatus = "maintained" | "new" | "broken" | "watch";
+type ConceptTapeCounts = Record<ConceptTapeFilter, number>;
+type DrawablePoint = {
+  date: string;
+  close: number;
+  temporary?: boolean;
+};
+type ChartShape = {
+  width: number;
+  height: number;
+  path: string;
+  areaPath: string;
+  coords: Array<{ x: number; y: number; point: DrawablePoint }>;
+  first: DrawablePoint;
+  last: DrawablePoint;
+  min: number;
+  max: number;
+};
+
+const FILTERS: Array<{ value: ConceptTapeFilter; label: string }> = [
+  { value: "all", label: "全部" },
+  { value: "maintained", label: "维持" },
+  { value: "new", label: "新起" },
+  { value: "broken", label: "断档" },
+];
 
 export default function MainlineReplayPage() {
   const timelineQ = useQuery({
@@ -63,16 +90,23 @@ export default function MainlineReplayPage() {
   const activeData = viewMode === "live" ? liveQ.data : snapshotQ.data;
   const activeLoading = viewMode === "live" ? liveQ.isLoading : snapshotQ.isLoading;
   const ranking = activeData?.ranking ?? [];
+  const [tapeFilter, setTapeFilter] = useState<ConceptTapeFilter>("all");
+  const filteredRanking = useMemo(
+    () => ranking.filter((item) => matchesTapeFilter(item, tapeFilter)),
+    [ranking, tapeFilter],
+  );
+  const tapeCounts = useMemo(() => conceptTapeCounts(ranking), [ranking]);
   const [selectedSectorId, setSelectedSectorId] = useState<string>("");
   const [selectedSectorOverride, setSelectedSectorOverride] = useState<SectorRankItem | null>(null);
   const selectedSector = useMemo(() => {
-    if (ranking.length === 0) return null;
+    const source = filteredRanking.length > 0 ? filteredRanking : ranking;
+    if (source.length === 0) return null;
     return (
-      ranking.find((item) => item.sector_id === selectedSectorId)
+      source.find((item) => item.sector_id === selectedSectorId)
       ?? (selectedSectorOverride?.sector_id === selectedSectorId ? selectedSectorOverride : null)
-      ?? ranking[0]
+      ?? source[0]
     );
-  }, [ranking, selectedSectorId, selectedSectorOverride]);
+  }, [filteredRanking, ranking, selectedSectorId, selectedSectorOverride]);
 
   function selectRankedSector(item: SectorRankItem) {
     setSelectedSectorOverride(null);
@@ -91,9 +125,9 @@ export default function MainlineReplayPage() {
     <div className="space-y-4">
       {/* Header */}
       <div>
-        <h1 className="font-display text-xl font-bold tracking-tight">概念主线</h1>
+        <h1 className="font-display text-xl font-bold tracking-tight">概念指数</h1>
         <p className="mt-0.5 text-xs text-muted-foreground">
-          收盘前动态计算 · 历史读缓存 · 概念 · 资金 · 个股
+          指数走势 · 连续热度 · 今日资金 · 成分股
         </p>
       </div>
 
@@ -143,20 +177,21 @@ export default function MainlineReplayPage() {
       </div>
 
       {/* 三栏 */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[300px_minmax(0,1fr)_340px]">
-        {/* 左：概念榜（热度条 signature）*/}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[340px_minmax(0,1fr)_340px]">
+        {/* 左：概念指数榜 */}
         <div className="rounded-lg border bg-card p-3">
           <div className="mb-2 flex items-baseline justify-between">
-            <span className="text-xs font-medium">概念主线榜</span>
+            <span className="text-xs font-medium">概念指数榜</span>
             <span className="text-[10px] text-muted-foreground">
-              {viewMode === "live" ? "实时资金 · 涨跌" : "热度 · 20日收益率"}
+              {viewMode === "live" ? "今日涨跌 · 连续状态" : "指数走势 · 热度"}
             </span>
           </div>
+          <ConceptTapeFilters value={tapeFilter} counts={tapeCounts} onChange={setTapeFilter} />
           {activeLoading ? (
             <LoadingState rows={8} />
           ) : (
             <div className="max-h-[calc(100vh-320px)] space-y-0.5 overflow-y-auto">
-              {ranking.map((r, i) => (
+              {filteredRanking.map((r, i) => (
                 <SectorRankRow
                   key={r.sector_id}
                   item={r}
@@ -165,48 +200,27 @@ export default function MainlineReplayPage() {
                   onSelect={() => selectRankedSector(r)}
                 />
               ))}
-              {ranking.length === 0 && (
+              {filteredRanking.length === 0 && (
                 <div className="py-4 text-center text-xs text-muted-foreground">
-                  {viewMode === "live" ? "今日暂无概念资金流" : "该日无概念评分"}
+                  {ranking.length === 0
+                    ? viewMode === "live" ? "今日暂无概念资金流" : "该日无概念评分"
+                    : "当前分组暂无概念"}
                 </div>
               )}
             </div>
           )}
         </div>
 
-        {/* 中：大盘 + 资金矩阵 */}
+        {/* 中：概念指数详情 + 大盘 */}
         <div className="space-y-4">
-          <div className="rounded-lg border bg-card p-3">
-            <div className="mb-2 text-xs font-medium text-muted-foreground">
-              大盘指数 · {effectiveDate || "--"}
-            </div>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
-              {(activeData?.index ?? []).map((ix) => (
-                <IndexCard key={ix.vt_symbol} ix={ix} />
-              ))}
-              {(activeData?.index ?? []).length === 0 && !activeLoading && (
-                <div className="col-span-full py-3 text-center text-xs text-muted-foreground">
-                  {viewMode === "live" ? "实时模式暂不展示指数；以概念资金流为准" : "该日无指数数据"}
-                </div>
-              )}
-            </div>
-          </div>
-
           {selectedSector ? (
-            <div className="rounded-lg border bg-card p-3">
-              <div className="mb-2 flex items-baseline justify-between">
-                <span className="font-display text-sm font-semibold">
-                  {selectedSector.name ?? selectedSector.sector_id}
-                </span>
-                <span className="text-[11px] uppercase tracking-wide text-muted-foreground">资金强弱矩阵</span>
-              </div>
-              <FundMatrix item={selectedSector} />
-            </div>
+            <ConceptIndexDetail item={selectedSector} date={effectiveDate} />
           ) : (
             <div className="flex h-32 items-center justify-center rounded-lg border border-dashed text-xs text-muted-foreground">
-              选中概念后显示资金强弱矩阵
+              选中概念后显示指数走势
             </div>
           )}
+          <MarketIndexStrip data={activeData?.index ?? []} loading={activeLoading} live={viewMode === "live"} date={effectiveDate} />
         </div>
 
         {/* 右：成分股 + 关联 */}
@@ -297,7 +311,44 @@ function DateScrubber({
   );
 }
 
-// ── 概念榜行：排名 + 名称 + 热度条 + 收益率 ──
+function ConceptTapeFilters({
+  value,
+  counts,
+  onChange,
+}: {
+  value: ConceptTapeFilter;
+  counts: ConceptTapeCounts;
+  onChange: (filter: ConceptTapeFilter) => void;
+}) {
+  return (
+    <div className="mb-2 grid grid-cols-4 gap-1">
+      {FILTERS.map((filter) => {
+        const active = filter.value === value;
+        return (
+          <button
+            key={filter.value}
+            type="button"
+            onClick={() => onChange(filter.value)}
+            className={cn(
+              "flex min-w-0 items-center justify-between gap-1 rounded-md border px-2 py-1.5 text-left text-[11px] transition-colors",
+              active
+                ? "border-indigo-400/50 bg-indigo-500/15 text-indigo-200"
+                : "bg-background/40 text-muted-foreground hover:bg-muted/60",
+            )}
+          >
+            <span className="flex min-w-0 items-center gap-1">
+              {filterIcon(filter.value)}
+              <span className="truncate">{filter.label}</span>
+            </span>
+            <span className="shrink-0 tabular-nums">{counts[filter.value]}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── 概念榜行：排名 + 指数微线 + 连续状态 ──
 
 function SectorRankRow({
   item,
@@ -310,41 +361,346 @@ function SectorRankRow({
   selected: boolean;
   onSelect: () => void;
 }) {
-  const heat = item.heat_score ?? 0;
-  const live = item.data_mode === "live";
+  const status = conceptStatus(item);
   const amount = item.main_net_inflow ?? item.accumulated_main_inflow;
+  const priceChange = item.return_pct ?? item.index_change_pct;
+  const activeDays = item.activity_days_20 ?? 0;
+  const continuationDays = item.continuation_days ?? 0;
+  const rollingCount = item.rolling_board_count ?? 0;
   return (
     <button
+      type="button"
       onClick={onSelect}
       className={cn(
-        "flex w-full flex-col gap-1 rounded-md px-2 py-1.5 text-left transition-colors",
-        selected ? "bg-indigo-500/15 ring-1 ring-inset ring-indigo-400/40" : "hover:bg-muted/60",
+        "grid w-full grid-cols-[minmax(0,1fr)_78px] gap-2 rounded-md border border-transparent px-2 py-2 text-left transition-colors",
+        selected
+          ? "border-indigo-400/40 bg-indigo-500/10 ring-1 ring-inset ring-indigo-400/30"
+          : "hover:border-border hover:bg-muted/40",
       )}
     >
-      <div className="flex items-center justify-between gap-2">
-        <span className="flex min-w-0 items-center gap-1.5 text-sm">
-          <span className="w-4 shrink-0 text-[11px] tabular-nums text-muted-foreground">{rank}</span>
-          <span className={cn("truncate", selected ? "font-semibold text-indigo-200" : "font-medium")}>
+      <div className="min-w-0">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="w-5 shrink-0 text-[11px] tabular-nums text-muted-foreground">{rank}</span>
+          <span className={cn("min-w-0 truncate text-sm", selected ? "font-semibold text-indigo-200" : "font-medium")}>
             {item.name ?? item.sector_id}
           </span>
-        </span>
-        <span className={cn("shrink-0 text-xs tabular-nums", (item.return_pct ?? 0) >= 0 ? "text-rise" : "text-fall")}>
-          {formatPct(item.return_pct)}
-        </span>
-      </div>
-      <div className="flex items-center gap-1.5 pl-5">
-        <div className="h-1 flex-1 overflow-hidden rounded-full bg-muted">
-          <div
-            className={cn("h-full rounded-full", selected ? "bg-indigo-400" : "bg-indigo-500/60")}
-            style={{ width: `${live ? 100 : Math.min(100, Math.max(0, heat))}%` }}
-          />
         </div>
-        <span className="w-16 shrink-0 text-right text-[10px] tabular-nums text-muted-foreground">
-          {live ? formatAmount(amount) : heat.toFixed(0)}
+        <div className="mt-1 flex min-w-0 items-center gap-1.5 pl-5 text-[10px] text-muted-foreground">
+          <StatusPill status={status} compact />
+          <span className="truncate">
+            滚动 {rollingCount} 次 · 连续 {continuationDays} 天 · 活跃 {activeDays}/20
+          </span>
+        </div>
+      </div>
+      <div className="flex flex-col items-end justify-between">
+        <span className={cn("text-xs font-semibold tabular-nums", (priceChange ?? 0) >= 0 ? "text-rise" : "text-fall")}>
+          {formatPct(priceChange)}
+        </span>
+        <MiniIndexLine points={item.index_points} tone={(priceChange ?? 0) >= 0 ? "rise" : "fall"} />
+        <span className="max-w-[78px] truncate text-[10px] tabular-nums text-muted-foreground">
+          {formatAmount(amount)}
         </span>
       </div>
     </button>
   );
+}
+
+function ConceptIndexDetail({ item, date }: { item: SectorRankItem; date: string }) {
+  const status = conceptStatus(item);
+  const points = item.index_points ?? [];
+  const lastPoint = latestDrawablePoint(points);
+  const priceChange = item.index_change_pct ?? item.return_pct;
+  const activityRatio = item.activity_ratio_20 == null ? "--" : `${Math.round(item.activity_ratio_20 * 100)}%`;
+  const rollingAvg = item.rolling_board_avg_change_pct == null ? "--" : formatPct(item.rolling_board_avg_change_pct);
+  const temporary = Boolean(lastPoint?.temporary);
+
+  return (
+    <div className="rounded-lg border bg-card p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2">
+            <h2 className="min-w-0 truncate font-display text-lg font-semibold">
+              {item.name ?? item.sector_id}
+            </h2>
+            <StatusPill status={status} />
+          </div>
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+            <span>{item.sector_id}</span>
+            <span>{date || "--"}</span>
+            <span>{temporary ? "盘中临时指数点" : "历史指数缓存"}</span>
+          </div>
+        </div>
+        <div className="text-right">
+          <div className={cn("font-display text-2xl font-semibold tabular-nums", (priceChange ?? 0) >= 0 ? "text-rise" : "text-fall")}>
+            {formatPct(priceChange)}
+          </div>
+          <div className="text-[10px] text-muted-foreground">近 20 点指数涨跌</div>
+        </div>
+      </div>
+
+      <ConceptIndexChart points={points} />
+
+      <div className="mt-3 grid grid-cols-2 gap-2 xl:grid-cols-4">
+        <TapeNumber label="滚动上榜" value={`${item.rolling_board_count ?? 0} 次`} />
+        <TapeNumber label="连续热度" value={`${item.continuation_days ?? 0} 天`} tone={status === "broken" ? "fall" : "rise"} />
+        <TapeNumber label="20点活跃" value={`${item.activity_days_20 ?? 0}/20`} />
+        <TapeNumber label="上榜均涨" value={rollingAvg} tone={(item.rolling_board_avg_change_pct ?? 0) >= 0 ? "rise" : "fall"} />
+        <TapeNumber label="活跃占比" value={activityRatio} />
+        <TapeNumber label="指数点位" value={lastPoint ? lastPoint.close.toFixed(2) : "--"} />
+      </div>
+
+      <div className="mt-3">
+        <FundMatrix item={item} />
+      </div>
+    </div>
+  );
+}
+
+function ConceptIndexChart({ points }: { points: SectorRankItem["index_points"] }) {
+  const chart = buildChart(points, 560, 168, 10);
+  if (!chart) {
+    return (
+      <div className="mt-3 flex h-44 items-center justify-center rounded-md border bg-background/40 text-xs text-muted-foreground">
+        暂无概念指数曲线
+      </div>
+    );
+  }
+
+  const rising = chart.last.close >= chart.first.close;
+  const stroke = rising ? "#ef4444" : "#22c55e";
+  const lastCoord = chart.coords[chart.coords.length - 1];
+
+  return (
+    <div className="mt-3 rounded-md border bg-background/40 p-2">
+      <div className="h-40">
+        <svg className="h-full w-full" viewBox={`0 0 ${chart.width} ${chart.height}`} preserveAspectRatio="none">
+          <path d={chart.areaPath} fill={stroke} opacity={0.08} />
+          <path d={chart.path} fill="none" stroke={stroke} strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round" />
+          <line x1={0} x2={chart.width} y1={chart.height - 10} y2={chart.height - 10} stroke="currentColor" className="text-border" strokeWidth={1} />
+          {lastCoord && (
+            <circle cx={lastCoord.x} cy={lastCoord.y} r={3.2} fill={stroke} stroke="hsl(var(--card))" strokeWidth={2} />
+          )}
+        </svg>
+      </div>
+      <div className="mt-1 flex items-center justify-between text-[10px] text-muted-foreground">
+        <span>{chart.first.date}</span>
+        <span className="tabular-nums">
+          {chart.min.toFixed(2)} - {chart.max.toFixed(2)}
+        </span>
+        <span>{chart.last.date}</span>
+      </div>
+    </div>
+  );
+}
+
+function MarketIndexStrip({
+  data,
+  loading,
+  live,
+  date,
+}: {
+  data: IndexQuote[];
+  loading: boolean;
+  live: boolean;
+  date: string;
+}) {
+  return (
+    <div className="rounded-lg border bg-card p-3">
+      <div className="mb-2 flex items-baseline justify-between gap-2">
+        <span className="text-xs font-medium">大盘参照</span>
+        <span className="text-[10px] text-muted-foreground">{date || "--"}</span>
+      </div>
+      {loading ? (
+        <LoadingState rows={2} />
+      ) : data.length > 0 ? (
+        <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-7">
+          {data.map((ix) => (
+            <IndexCard key={ix.vt_symbol} ix={ix} />
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-md border border-dashed bg-background/30 px-3 py-4 text-xs text-muted-foreground">
+          {live ? "实时模式先按概念资金流和盘中快照判断，大盘指数收盘后进入历史回放。" : "该日暂无大盘指数缓存。"}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TapeNumber({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone?: "rise" | "fall";
+}) {
+  return (
+    <div className="rounded-md border bg-background/40 px-2 py-1.5">
+      <div className="text-[10px] text-muted-foreground">{label}</div>
+      <div className={cn("mt-0.5 font-display text-sm font-semibold tabular-nums", tone === "rise" && "text-rise", tone === "fall" && "text-fall")}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function StatusPill({ status, compact = false }: { status: NormalizedConceptStatus; compact?: boolean }) {
+  return (
+    <span className={cn(
+      "inline-flex shrink-0 items-center gap-1 rounded-md border px-1.5 py-0.5 font-medium",
+      compact ? "text-[10px]" : "text-[11px]",
+      statusClass(status),
+    )}>
+      {statusIcon(status)}
+      <span>{statusLabel(status)}</span>
+    </span>
+  );
+}
+
+function MiniIndexLine({
+  points,
+  tone,
+}: {
+  points: SectorRankItem["index_points"];
+  tone: "rise" | "fall";
+}) {
+  return (
+    <div className="h-7 w-[74px]">
+      <Sparkline points={points} stroke={tone === "rise" ? "#ef4444" : "#22c55e"} />
+    </div>
+  );
+}
+
+function Sparkline({
+  points,
+  stroke,
+}: {
+  points: SectorRankItem["index_points"];
+  stroke: string;
+}) {
+  const chart = buildChart(points, 74, 28, 2);
+  if (!chart) {
+    return <div className="h-full w-full rounded-sm border border-dashed border-border/80" />;
+  }
+  return (
+    <svg className="h-full w-full" viewBox={`0 0 ${chart.width} ${chart.height}`} preserveAspectRatio="none">
+      <path d={chart.path} fill="none" stroke={stroke} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function filterIcon(filter: ConceptTapeFilter) {
+  if (filter === "maintained") return <Flame size={12} />;
+  if (filter === "new") return <Sparkles size={12} />;
+  if (filter === "broken") return <CircleSlash size={12} />;
+  return <Activity size={12} />;
+}
+
+function statusIcon(status: NormalizedConceptStatus) {
+  if (status === "maintained") return <Flame size={12} />;
+  if (status === "new") return <Sparkles size={12} />;
+  if (status === "broken") return <CircleSlash size={12} />;
+  return <Radio size={12} />;
+}
+
+function statusLabel(status: NormalizedConceptStatus): string {
+  if (status === "maintained") return "维持";
+  if (status === "new") return "新起";
+  if (status === "broken") return "断档";
+  return "观察";
+}
+
+function statusClass(status: NormalizedConceptStatus): string {
+  if (status === "maintained") return "border-rise/30 bg-rise/10 text-rise";
+  if (status === "new") return "border-amber-400/35 bg-amber-400/10 text-amber-300";
+  if (status === "broken") return "border-fall/30 bg-fall/10 text-fall";
+  return "border-border bg-background/60 text-muted-foreground";
+}
+
+function conceptStatus(item: SectorRankItem): NormalizedConceptStatus {
+  const raw = String(item.continuation_status ?? "").toLowerCase();
+  if (raw === "maintained" || raw === "hot") return "maintained";
+  if (raw === "new") return "new";
+  if (raw === "broken" || raw === "cold") return "broken";
+  return "watch";
+}
+
+function matchesTapeFilter(item: SectorRankItem, filter: ConceptTapeFilter): boolean {
+  if (filter === "all") return true;
+  return conceptStatus(item) === filter;
+}
+
+function conceptTapeCounts(items: SectorRankItem[]): ConceptTapeCounts {
+  return items.reduce<ConceptTapeCounts>(
+    (acc, item) => {
+      acc.all += 1;
+      const status = conceptStatus(item);
+      if (status === "maintained" || status === "new" || status === "broken") {
+        acc[status] += 1;
+      }
+      return acc;
+    },
+    { all: 0, maintained: 0, new: 0, broken: 0 },
+  );
+}
+
+function latestDrawablePoint(points: SectorRankItem["index_points"]): DrawablePoint | null {
+  const drawable = drawablePoints(points);
+  return drawable[drawable.length - 1] ?? null;
+}
+
+function drawablePoints(points: SectorRankItem["index_points"]): DrawablePoint[] {
+  return (points ?? [])
+    .filter((point): point is NonNullable<typeof point> => Boolean(point))
+    .map((point) => ({
+      date: point.date,
+      close: Number(point.close),
+      temporary: point.temporary,
+    }))
+    .filter((point) => point.date && Number.isFinite(point.close));
+}
+
+function buildChart(
+  points: SectorRankItem["index_points"],
+  width: number,
+  height: number,
+  padding: number,
+): ChartShape | null {
+  const drawable = drawablePoints(points);
+  if (drawable.length < 2) return null;
+
+  const closes = drawable.map((point) => point.close);
+  const rawMin = Math.min(...closes);
+  const rawMax = Math.max(...closes);
+  const span = rawMax - rawMin || 1;
+  const min = rawMin - span * 0.08;
+  const max = rawMax + span * 0.08;
+  const xSpan = width - padding * 2;
+  const ySpan = height - padding * 2;
+
+  const coords = drawable.map((point, index) => {
+    const x = padding + (xSpan * index) / (drawable.length - 1);
+    const y = padding + (1 - (point.close - min) / (max - min || 1)) * ySpan;
+    return { x, y, point };
+  });
+  const path = coords.map((coord, index) => `${index === 0 ? "M" : "L"} ${coord.x.toFixed(2)} ${coord.y.toFixed(2)}`).join(" ");
+  const first = coords[0];
+  const last = coords[coords.length - 1];
+  const areaPath = `${path} L ${last.x.toFixed(2)} ${height - padding} L ${first.x.toFixed(2)} ${height - padding} Z`;
+
+  return {
+    width,
+    height,
+    path,
+    areaPath,
+    coords,
+    first: first.point,
+    last: last.point,
+    min: rawMin,
+    max: rawMax,
+  };
 }
 
 // ── 大盘指数卡 ──

@@ -52,6 +52,13 @@ _INDEX_VT_SYMBOLS = [
 _DEFAULT_PERIOD = "20d"
 _MAINLINE_SECTOR_TYPE = "concept"
 _WINDOW_DAYS = 20  # 概念共振窗口
+_CONCEPT_INDEX_POINTS = 20
+_CONCEPT_INDEX_LOOKBACK_DAYS = 90
+_ACTIVE_HEAT_THRESHOLD = 60.0
+_HISTORICAL_HOT_LIMIT = 120
+_ROLLING_BOARD_DAYS = 7
+_ROLLING_BOARD_TOP_N = 10
+_LIVE_RANKING_CANDIDATE_LIMIT = 1000
 _MIN_COMPLETE_DAILY_SYMBOL_COUNT = 3000
 _RELATION_CANDIDATE_LIMIT = 360
 _STYLE_STATUS_KEYWORDS = (
@@ -163,7 +170,9 @@ def live(
         if resolved_date is None:
             return ok({"status": "empty", "ranking": [], "index": []})
 
-        ranking = _live_ranking_for_date(session, resolved_date, limit)
+        ranking = _live_ranking_for_date(session, resolved_date, max(limit, _LIVE_RANKING_CANDIDATE_LIMIT))
+        _enrich_concept_index_context(session, ranking, resolved_date, include_live_projection=True)
+        ranking = _sort_live_concept_ranking(ranking)[:limit]
         latest_complete_daily = _latest_complete_daily_date(session)
         latest_snapshot_updated = session.execute(select(func.max(schema.stocks.c.updated_at))).scalar()
         latest_snapshot_trade_time = session.execute(select(func.max(schema.stocks.c.trade_time))).scalar()
@@ -221,6 +230,7 @@ def snapshot(
         for item in ranking:
             meta = sectors_meta.get(item["sector_id"], {})
             item["name"] = meta.get("name", item["sector_id"])
+        _enrich_concept_index_context(session, ranking, date or t2, include_live_projection=False)  # type: ignore[arg-type]
 
     return ok({"mode": mode, "ranking": ranking, "index": index_data, "status": "ready"})
 
@@ -465,6 +475,243 @@ def _iso_or_none(value: Any) -> str | None:
     if value is None:
         return None
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def _enrich_concept_index_context(
+    session,
+    ranking: list[dict[str, Any]],
+    d: date,
+    *,
+    include_live_projection: bool,
+) -> None:
+    sector_ids = [str(item["sector_id"]) for item in ranking if item.get("sector_id")]
+    if not sector_ids:
+        return
+
+    histories = _load_concept_index_histories(session, sector_ids, d)
+    activity = _load_concept_activity(session, sector_ids, d)
+    rolling = _rolling_board_stats(histories, d)
+    live_ids = {str(item["sector_id"]) for item in ranking if item.get("data_mode") == "live"}
+
+    for item in ranking:
+        sector_id = str(item["sector_id"])
+        points = histories.get(sector_id, [])
+        if include_live_projection:
+            points = _with_live_index_projection(points, item, d)
+        stats = activity.get(sector_id, _empty_activity_stats())
+        visible_points = points[-_CONCEPT_INDEX_POINTS:]
+        item["index_points"] = visible_points
+        item["index_change_pct"] = _index_change_pct(visible_points)
+        item["continuation_days"] = stats["continuation_days"]
+        item["activity_days_20"] = stats["activity_days_20"]
+        item["activity_ratio_20"] = stats["activity_ratio_20"]
+        item["continuation_status"] = _continuation_status(item, stats, sector_id in live_ids)
+        item["previous_hot"] = stats["previous_hot"]
+        rolling_stats = rolling.get(sector_id, _empty_rolling_board_stats())
+        item["rolling_board_count"] = rolling_stats["count"]
+        item["rolling_board_dates"] = rolling_stats["dates"]
+        item["rolling_board_avg_change_pct"] = rolling_stats["avg_change_pct"]
+
+
+def _load_concept_index_histories(session, sector_ids: list[str], d: date) -> dict[str, list[dict[str, Any]]]:
+    rows = session.execute(
+        select(
+            schema.sector_daily_bars.c.sector_id,
+            schema.sector_daily_bars.c.trade_date,
+            schema.sector_daily_bars.c.close_price,
+            schema.sector_daily_bars.c.change_pct,
+            schema.sector_daily_bars.c.turnover,
+        )
+        .where(
+            schema.sector_daily_bars.c.sector_id.in_(sector_ids),
+            schema.sector_daily_bars.c.trade_date <= d,
+            schema.sector_daily_bars.c.trade_date >= d - timedelta(days=_CONCEPT_INDEX_LOOKBACK_DAYS),
+        )
+        .order_by(schema.sector_daily_bars.c.sector_id, schema.sector_daily_bars.c.trade_date)
+    ).all()
+
+    histories: dict[str, list[dict[str, Any]]] = {}
+    for sector_id, trade_date, close_price, change_pct, turnover in rows:
+        histories.setdefault(str(sector_id), []).append({
+            "date": _iso_or_none(trade_date),
+            "close": close_price,
+            "change_pct": change_pct,
+            "turnover": turnover,
+        })
+    return histories
+
+
+def _load_concept_activity(session, sector_ids: list[str], d: date) -> dict[str, dict[str, Any]]:
+    rows = session.execute(
+        select(
+            schema.sector_period_scores.c.sector_id,
+            schema.sector_period_scores.c.as_of_date,
+            schema.sector_period_scores.c.heat_score,
+            schema.sector_period_scores.c.rank_return,
+            schema.sector_period_scores.c.trend_state,
+        )
+        .where(
+            schema.sector_period_scores.c.sector_id.in_(sector_ids),
+            schema.sector_period_scores.c.period == _DEFAULT_PERIOD,
+            schema.sector_period_scores.c.sector_type == _MAINLINE_SECTOR_TYPE,
+            schema.sector_period_scores.c.as_of_date <= d,
+        )
+        .order_by(schema.sector_period_scores.c.sector_id, schema.sector_period_scores.c.as_of_date.desc())
+    ).all()
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for sector_id, as_of_date, heat_score, rank_return, trend_state in rows:
+        grouped.setdefault(str(sector_id), []).append({
+            "date": as_of_date,
+            "active": _is_active_score(heat_score, rank_return, trend_state),
+        })
+
+    return {
+        sector_id: _activity_stats(score_rows)
+        for sector_id, score_rows in grouped.items()
+    }
+
+
+def _is_active_score(heat_score: Any, rank_return: Any, trend_state: Any) -> bool:
+    if heat_score is not None and float(heat_score) >= _ACTIVE_HEAT_THRESHOLD:
+        return True
+    if rank_return is not None and int(rank_return) <= _HISTORICAL_HOT_LIMIT:
+        return True
+    return str(trend_state or "") in {"MAINLINE_UP", "FAST_UP"}
+
+
+def _activity_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    recent = rows[:_CONCEPT_INDEX_POINTS]
+    continuation_days = 0
+    for row in recent:
+        if not row["active"]:
+            break
+        continuation_days += 1
+    activity_days = sum(1 for row in recent if row["active"])
+    return {
+        "continuation_days": continuation_days,
+        "activity_days_20": activity_days,
+        "activity_ratio_20": activity_days / len(recent) if recent else None,
+        "previous_hot": bool(recent[1]["active"]) if len(recent) > 1 else False,
+        "current_hot": bool(recent[0]["active"]) if recent else False,
+    }
+
+
+def _empty_activity_stats() -> dict[str, Any]:
+    return {
+        "continuation_days": 0,
+        "activity_days_20": 0,
+        "activity_ratio_20": None,
+        "previous_hot": False,
+        "current_hot": False,
+    }
+
+
+def _with_live_index_projection(
+    points: list[dict[str, Any]],
+    item: dict[str, Any],
+    d: date,
+) -> list[dict[str, Any]]:
+    change_pct = item.get("return_pct")
+    if change_pct is None:
+        return points
+    date_text = d.isoformat()
+    if points and points[-1].get("date") == date_text:
+        return points
+    last_close = points[-1].get("close") if points else None
+    projected_close = last_close * (1 + float(change_pct) / 100) if last_close else None
+    return points + [{
+        "date": date_text,
+        "close": projected_close,
+        "change_pct": change_pct,
+        "turnover": None,
+        "temporary": True,
+    }]
+
+
+def _rolling_board_stats(
+    histories: dict[str, list[dict[str, Any]]],
+    d: date,
+) -> dict[str, dict[str, Any]]:
+    by_date: dict[str, list[tuple[str, float]]] = {}
+    for sector_id, points in histories.items():
+        for point in points:
+            date_text = str(point.get("date") or "")
+            if not date_text:
+                continue
+            change_pct = point.get("change_pct")
+            if change_pct is None:
+                continue
+            by_date.setdefault(date_text, []).append((sector_id, float(change_pct)))
+
+    recent_dates = sorted(by_date.keys(), reverse=True)[:_ROLLING_BOARD_DAYS]
+    appearances: dict[str, list[float]] = {}
+    dates: dict[str, list[str]] = {}
+    for date_text in recent_dates:
+        ranked = sorted(by_date[date_text], key=lambda row: row[1], reverse=True)[:_ROLLING_BOARD_TOP_N]
+        for sector_id, change_pct in ranked:
+            appearances.setdefault(sector_id, []).append(change_pct)
+            dates.setdefault(sector_id, []).append(date_text)
+
+    return {
+        sector_id: {
+            "count": len(changes),
+            "dates": dates.get(sector_id, []),
+            "avg_change_pct": sum(changes) / len(changes) if changes else None,
+        }
+        for sector_id, changes in appearances.items()
+    }
+
+
+def _empty_rolling_board_stats() -> dict[str, Any]:
+    return {
+        "count": 0,
+        "dates": [],
+        "avg_change_pct": None,
+    }
+
+
+def _index_change_pct(points: list[dict[str, Any]]) -> float | None:
+    if len(points) < 2:
+        return None
+    first = points[0].get("close")
+    last = points[-1].get("close")
+    if not first or last is None:
+        return None
+    return (float(last) / float(first) - 1) * 100
+
+
+def _continuation_status(item: dict[str, Any], stats: dict[str, Any], is_live: bool) -> str:
+    if not is_live:
+        return "hot" if stats.get("current_hot") else "cold"
+    positive_price = item.get("return_pct") is not None and float(item["return_pct"]) > 0
+    positive_flow = item.get("main_net_inflow") is not None and float(item["main_net_inflow"]) > 0
+    if stats.get("current_hot"):
+        return "maintained" if positive_price or positive_flow else "broken"
+    return "new" if positive_price or positive_flow else "watch"
+
+
+def _sort_live_concept_ranking(ranking: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def sort_key(item: dict[str, Any]) -> tuple[float, float, float, float, float]:
+        status_weight = {
+            "maintained": 3.0,
+            "new": 2.0,
+            "watch": 1.0,
+            "broken": 0.0,
+        }.get(str(item.get("continuation_status") or ""), 0.0)
+        rolling_count = float(item.get("rolling_board_count") or 0)
+        continuation_days = float(item.get("continuation_days") or 0)
+        index_change_pct = float(item.get("index_change_pct") or 0)
+        main_net_inflow = float(item.get("main_net_inflow") or 0)
+        return (
+            rolling_count,
+            status_weight,
+            continuation_days,
+            index_change_pct,
+            main_net_inflow,
+        )
+
+    return sorted(ranking, key=sort_key, reverse=True)
 
 
 def _live_ranking_for_date(
@@ -810,7 +1057,7 @@ def _load_index(session, d: date) -> list[dict[str, Any]]:
 def sector_stocks(
     sector_id: str = Query(..., description="概念ID"),
     date: date = Query(..., description="回放日期 YYYY-MM-DD"),
-    sort_by: str = Query("net_inflow", description="net_inflow|change_pct|name"),
+    sort_by: str = Query("change_pct", description="change_pct|net_inflow|name"),
     limit: int = Query(50, ge=1, le=200),
 ) -> dict[str, Any]:
     """概念成分股 + 当日涨跌(从close算) + 个股资金流向(近端)，用于排查个股流入流出。"""
@@ -923,11 +1170,23 @@ def sector_stocks(
             })
 
         if sort_by == "change_pct":
-            items.sort(key=lambda x: (x["change_pct"] is not None, x["change_pct"] or -999), reverse=True)
+            items.sort(
+                key=lambda x: (
+                    x["change_pct"] is not None,
+                    x["change_pct"] if x["change_pct"] is not None else -1e18,
+                ),
+                reverse=True,
+            )
         elif sort_by == "name":
             items.sort(key=lambda x: x["name"])
         else:  # net_inflow（默认：主力净流入降序，None 在后）
-            items.sort(key=lambda x: (x["main_net_inflow"] is not None, x["main_net_inflow"] or -1e18), reverse=True)
+            items.sort(
+                key=lambda x: (
+                    x["main_net_inflow"] is not None,
+                    x["main_net_inflow"] if x["main_net_inflow"] is not None else -1e18,
+                ),
+                reverse=True,
+            )
 
     return ok({
         "sector_id": sector_id,

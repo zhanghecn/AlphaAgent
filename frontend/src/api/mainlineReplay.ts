@@ -25,6 +25,16 @@ export interface SectorRankItem {
   leader_change_pct?: number | null;
   score_date?: string | null;
   flow_updated_at?: string | null;
+  index_points?: ConceptIndexPoint[];
+  index_change_pct?: number | null;
+  continuation_status?: "maintained" | "new" | "broken" | "watch" | "hot" | "cold" | string;
+  continuation_days?: number;
+  activity_days_20?: number;
+  activity_ratio_20?: number | null;
+  previous_hot?: boolean;
+  rolling_board_count?: number;
+  rolling_board_dates?: string[];
+  rolling_board_avg_change_pct?: number | null;
   // delta 模式额外字段
   fund_strength?: number | null;
   volume_ratio?: number | null;
@@ -33,6 +43,14 @@ export interface SectorRankItem {
   accumulated_main_inflow?: number | null;
   fund_inflow_available?: boolean;
   trend_transition?: string | null;
+}
+
+export interface ConceptIndexPoint {
+  date: string;
+  close: number | null;
+  change_pct?: number | null;
+  turnover?: number | null;
+  temporary?: boolean;
 }
 
 export interface IndexQuote {
@@ -147,7 +165,7 @@ export interface SectorStocksData {
 export function fetchSectorStocks(
   sectorId: string,
   date: string,
-  sortBy: "net_inflow" | "change_pct" | "name" = "net_inflow",
+  sortBy: "net_inflow" | "change_pct" | "name" = "change_pct",
 ) {
   return apiClient.get<SectorStocksData>(
     `/mainline-replay/sector-stocks?sector_id=${encodeURIComponent(sectorId)}&date=${date}&sort_by=${sortBy}`,

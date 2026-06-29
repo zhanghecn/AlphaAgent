@@ -11,7 +11,7 @@ type SortBy = "net_inflow" | "change_pct" | "name";
 
 export function SectorStocksTable({ sectorId, date }: { sectorId: string; date: string }) {
   const navigate = useNavigate();
-  const [sortBy, setSortBy] = useState<SortBy>("net_inflow");
+  const [sortBy, setSortBy] = useState<SortBy>("change_pct");
   const q = useQuery({
     queryKey: ["replaySectorStocks", sectorId, date, sortBy],
     queryFn: () => fetchSectorStocks(sectorId, date, sortBy),
@@ -22,7 +22,7 @@ export function SectorStocksTable({ sectorId, date }: { sectorId: string; date: 
   return (
     <div>
       <div className="mb-1.5 flex items-center justify-between">
-        <span className="text-xs font-medium text-muted-foreground">📊 成分股资金流向</span>
+        <span className="text-xs font-medium text-muted-foreground">成分股涨幅排行</span>
         <select
           value={sortBy}
           onChange={(e) => setSortBy(e.target.value as SortBy)}

@@ -208,6 +208,122 @@ def test_live_ranking_payload_does_not_expose_sector_type():
     assert "sector_type" not in items[0]
 
 
+def test_concept_index_context_enriches_live_projection_and_status():
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, stmt):
+            del stmt
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResult([
+                    ("BK1431", date(2026, 6, 24), 100.0, 1.0, 1000.0),
+                    ("BK1431", date(2026, 6, 25), 104.0, 4.0, 1200.0),
+                    ("BK1431", date(2026, 6, 26), 105.0, 0.96, 1300.0),
+                ])
+            return FakeResult([
+                ("BK1431", date(2026, 6, 26), 72.0, 8, "MAINLINE_UP"),
+                ("BK1431", date(2026, 6, 25), 68.0, 12, "FAST_UP"),
+                ("BK1431", date(2026, 6, 24), 41.0, 200, "WEAK"),
+            ])
+
+    ranking = [{
+        "sector_id": "BK1431",
+        "data_mode": "live",
+        "return_pct": 2.0,
+        "main_net_inflow": 1000.0,
+    }]
+
+    mainline_replay._enrich_concept_index_context(
+        FakeSession(),
+        ranking,
+        date(2026, 6, 29),
+        include_live_projection=True,
+    )
+
+    item = ranking[0]
+    assert item["continuation_status"] == "maintained"
+    assert item["continuation_days"] == 2
+    assert item["activity_days_20"] == 2
+    assert item["index_points"][-1]["date"] == "2026-06-29"
+    assert item["index_points"][-1]["temporary"] is True
+    assert round(item["index_points"][-1]["close"], 2) == 107.10
+    assert item["index_change_pct"] is not None
+
+
+def test_concept_index_context_marks_live_new_when_previous_not_hot():
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, stmt):
+            del stmt
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResult([])
+            return FakeResult([
+                ("BK2000", date(2026, 6, 26), 30.0, 300, "WEAK"),
+                ("BK2000", date(2026, 6, 25), 29.0, 310, "WEAK"),
+            ])
+
+    ranking = [{
+        "sector_id": "BK2000",
+        "data_mode": "live",
+        "return_pct": 3.0,
+        "main_net_inflow": None,
+    }]
+
+    mainline_replay._enrich_concept_index_context(
+        FakeSession(),
+        ranking,
+        date(2026, 6, 29),
+        include_live_projection=True,
+    )
+
+    assert ranking[0]["continuation_status"] == "new"
+    assert ranking[0]["continuation_days"] == 0
+
+
+def test_live_concept_sort_prefers_rolling_index_over_intraday_inflow():
+    ranking = [
+        {
+            "sector_id": "FLOW",
+            "continuation_status": "maintained",
+            "rolling_board_count": 0,
+            "continuation_days": 1,
+            "index_change_pct": 3.0,
+            "main_net_inflow": 9_000_000_000.0,
+        },
+        {
+            "sector_id": "STORAGE",
+            "continuation_status": "maintained",
+            "rolling_board_count": 2,
+            "continuation_days": 20,
+            "index_change_pct": 30.0,
+            "main_net_inflow": -900_000_000.0,
+        },
+    ]
+
+    sorted_items = mainline_replay._sort_live_concept_ranking(ranking)
+
+    assert sorted_items[0]["sector_id"] == "STORAGE"
+
+
 def test_snapshot_ranking_is_concept_only_query(monkeypatch):
     captured: dict[str, str] = {}
 
@@ -248,7 +364,9 @@ def test_snapshot_payload_does_not_expose_sector_type(monkeypatch):
                 return FakeResult([("BK1431", 88.0, 70.0, 60.0, "MAINLINE_UP", 1, 4.2, 0.9, "存储芯片", "concept", None, [])])
             if self.calls == 2:
                 return FakeResult([])
-            return FakeResult([("BK1431", "存储芯片", "concept", None, [])])
+            if self.calls == 3:
+                return FakeResult([("BK1431", "存储芯片", "concept", None, [])])
+            return FakeResult([])
 
     @contextmanager
     def fake_session_scope():
@@ -357,6 +475,49 @@ def test_sector_stocks_does_not_use_previous_bar_as_selected_date(monkeypatch):
     assert items["BBB.SSE"]["close"] is None
     assert items["BBB.SSE"]["change_pct"] is None
     assert items["BBB.SSE"]["price_date"] is None
+
+
+def test_sector_stocks_default_sorts_by_change_pct(monkeypatch):
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+        def first(self):
+            return self._rows[0] if self._rows else None
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, stmt):
+            del stmt
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResult([("AAA.SSE", "甲股票"), ("BBB.SSE", "乙股票")])
+            if self.calls == 2:
+                return FakeResult([("AAA.SSE", 11.0), ("BBB.SSE", 21.0)])
+            if self.calls == 3:
+                return FakeResult([("AAA.SSE", 10.0), ("BBB.SSE", 20.0)])
+            return FakeResult([])
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(mainline_replay, "is_database_configured", lambda: True)
+    monkeypatch.setattr(mainline_replay, "session_scope", fake_session_scope)
+
+    body = mainline_replay.sector_stocks(
+        sector_id="BK0001",
+        date=date(2026, 6, 26),
+        limit=50,
+    )
+
+    assert [item["vt_symbol"] for item in body["data"]["items"]] == ["AAA.SSE", "BBB.SSE"]
+    assert [item["change_pct"] for item in body["data"]["items"]] == [10.0, 5.0]
 
 
 def test_sector_stocks_uses_intraday_snapshot_when_daily_bar_missing(monkeypatch):
