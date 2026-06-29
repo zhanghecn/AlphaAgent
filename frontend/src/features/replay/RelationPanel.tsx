@@ -23,7 +23,7 @@ export function RelationPanel({
 
   return (
     <div>
-      <div className="mb-1 text-xs text-muted-foreground">关联板块（行情反推）</div>
+      <div className="mb-1 text-xs text-muted-foreground">关联板块（行情反推 · {date}）</div>
       {q.isLoading ? (
         <LoadingState rows={4} />
       ) : (q.data?.items ?? []).length === 0 ? (

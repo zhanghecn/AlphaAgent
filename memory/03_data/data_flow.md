@@ -88,6 +88,8 @@ vn.py 中数据需要分清四类：
 - `sector_period_scores` 的宽度、龙头和涨停情绪也必须按 `as_of_date` 取数：宽度/龙头来自该日期的成分股 `stock_daily_bars`，不再读取 `sectors.rise_count/fall_count/leader_*` 当前快照；`stock_events.event_date` 同时兼容 `YYYY-MM-DD` 和 `YYYYMMDD`。
 - `sync_sector_period_scores` 未显式传 `as_of_date` 时默认使用最新完整股票日线日期，不使用系统当天日期；周末/休市日不能生成新的主线评分日期。`/api/mainline-replay/timeline` 也只返回有完整股票日线覆盖的评分日期，避免脏的非交易日排到首位。
 - 主线回放的成分股涨跌和从成分股点击进入的股票详情必须按所选回放日取 `stock_daily_bars`。缺少该日期日线时显示缺失/错误，不允许用上一交易日或实时公开源冒充历史行情。
+- `/api/mainline-replay/live` 是收盘前/盘中主线入口：默认取 `sector_fund_flows` 的最新 `trade_date`，按即时主力净流入排序，并叠加最近完整交易日的 `sector_period_scores` 作为历史评分参考；它只读实时源表，不写 `sector_period_scores`。`/mainline` 前端默认优先显示该实时模式；历史回放仍只读完整日线日期的 `sector_period_scores`。
+- `/api/mainline-replay/sector-stocks` 在所选日期没有完整日线时，只允许对晚于最新完整日线且存在当日分钟线/资金流的盘中日期使用 `stocks` 快照价，并返回 `price_source=intraday_snapshot`；旧历史日期缺日线仍显示缺失，不能拿当前快照冒充历史价格。
 - 同步写库语义不是“全量清库重建”：股票/板块日线、资金流、股票/板块清单大多按主键 upsert，只在本次成功拉到同一主键时覆盖；不会自动删除旧来源、已消失的成员关系、未重新拉取日期范围内的旧行，也不会自动重算已经生成的派生评分。
 - 当前主线数据最需要显式清理的是 `sector_daily_bars` 的旧来源行：规范来源是 `eastmoney.board_kline`，历史 `akshare.stock_board_*_index_ths` 行如果未被同一 `(sector_id, trade_date)` 的新数据覆盖，会继续被 `sector_period_scores` 优先读取，导致同一算法在本地和生产使用不同输入。
 - 成员关系表 `sector_memberships` / `shenwan_industry_members` 是快照关系，但当前同步只 upsert 本次返回成员；某个板块/行业成功同步后，应删除该板块/行业中本次源结果已不存在的旧成员。`stock_sector_memberships` 已通过 `DELETE FROM stock_sector_memberships` 后从 `sector_memberships` 重建，但它继承上游旧成员残留。
@@ -127,7 +129,7 @@ vn.py 中数据需要分清四类：
 2026-06-18 起，数据同步从「24 个分散单任务 cron」改为「统一的批量增量定时档」：
 
 - 新表 `sync_batch_schedules`（`schema.py`）：一条 = 一个 cron + 有序 `job_ids` + `concurrency` + `enabled`。
-- 默认 seed 三档：`tail_preview_14h`（14:00 盘中预备）、`tail_quant_1430`（14:30 尾盘确认）和 `eod_18h`（18:00 盘后补完整日K + 板块 + 龙虎榜 + 公告 + 财报；龙虎榜排末尾因 18:00 后才发布）。
+- 默认 seed 三档：`tail_preview_14h`（14:00 盘中预备）、`tail_quant_1430`（14:30 尾盘确认）和 `eod_18h`（18:00 盘后补完整日K + 板块 + 涨停池 + 龙虎榜 + 公告 + 财报；涨停池/龙虎榜排盘后慢链路，避免阻塞尾盘实时缓存）。
 - `DEFAULT_JOBS` 的 24 个单任务 `schedule_cron` 已全部清空；调度器 `_run_scheduled_jobs` 改为遍历 `sync_batch_schedules`，cron 匹配则触发 `start_sync_batch(job_ids=..., concurrency=..., source="schedule")`。
 - 批量执行 `_run_sync_batch`：任务按 `job_ids` 顺序串行（保证数据依赖），单任务失败不再中止整批（终态 `succeeded`/`partial`/`failed`）；基础任务（`sync_stock_list`/`sync_sector_list`）失败时用 `_depends_on` 跳过其下游。
 - 日K/分钟K 任务内 `ThreadPoolExecutor(concurrency)` 并发拉全A；真增量：按每只股票最后 bar 日期 `start_date` 续传（`_last_bar_dates_daily`/`_last_bar_dates_minute`），修复旧 `only_missing`「整只跳过」导致老股不更新当日新 bar 的缺陷。

@@ -11,6 +11,7 @@ import { LoadingState } from "@/components/LoadingState";
 import { RelationPanel } from "@/features/replay/RelationPanel";
 import { SectorStocksTable } from "@/features/replay/SectorStocksTable";
 import {
+  fetchLiveMainline,
   fetchReplaySnapshot,
   fetchReplayTimeline,
   type IndexQuote,
@@ -19,6 +20,8 @@ import {
 } from "@/api/mainlineReplay";
 import { cn, formatAmount, formatPct } from "@/lib/utils";
 
+type ReplayViewMode = "live" | "history";
+
 export default function MainlineReplayPage() {
   const timelineQ = useQuery({
     queryKey: ["replayTimeline"],
@@ -26,23 +29,40 @@ export default function MainlineReplayPage() {
     staleTime: 60_000,
   });
   const dates = timelineQ.data?.dates ?? [];
+  const liveQ = useQuery({
+    queryKey: ["mainlineLive"],
+    queryFn: () => fetchLiveMainline(),
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+  });
+  const liveReady = (liveQ.data?.ranking ?? []).length > 0;
+  const [viewMode, setViewMode] = useState<ReplayViewMode>("live");
   const [selectedDate, setSelectedDate] = useState<string>("");
-  const effectiveDate = selectedDate || dates[0] || "";
+  const historyDate = selectedDate || dates[0] || "";
+  const effectiveDate = viewMode === "live" ? (liveQ.data?.trade_date || historyDate) : historyDate;
+  const relationDate = viewMode === "live" ? (liveQ.data?.base_daily_date || historyDate) : historyDate;
   useEffect(() => {
     if (dates.length === 0) return;
     if (!selectedDate || !dates.includes(selectedDate)) {
       setSelectedDate(dates[0]);
     }
   }, [dates, selectedDate]);
+  useEffect(() => {
+    if (!liveQ.isLoading && !liveReady && dates.length > 0 && viewMode === "live") {
+      setViewMode("history");
+    }
+  }, [dates.length, liveQ.isLoading, liveReady, viewMode]);
 
   const snapshotQ = useQuery({
-    queryKey: ["replaySnapshot", effectiveDate],
-    queryFn: () => fetchReplaySnapshot({ date: effectiveDate }),
-    enabled: !!effectiveDate,
+    queryKey: ["replaySnapshot", historyDate],
+    queryFn: () => fetchReplaySnapshot({ date: historyDate }),
+    enabled: !!historyDate && viewMode === "history",
     staleTime: 60_000,
   });
 
-  const ranking = snapshotQ.data?.ranking ?? [];
+  const activeData = viewMode === "live" ? liveQ.data : snapshotQ.data;
+  const activeLoading = viewMode === "live" ? liveQ.isLoading : snapshotQ.isLoading;
+  const ranking = activeData?.ranking ?? [];
   const [selectedSectorId, setSelectedSectorId] = useState<string>("");
   const [selectedSectorOverride, setSelectedSectorOverride] = useState<SectorRankItem | null>(null);
   const selectedSector = useMemo(() => {
@@ -74,20 +94,52 @@ export default function MainlineReplayPage() {
       <div>
         <h1 className="font-display text-xl font-bold tracking-tight">主线回放</h1>
         <p className="mt-0.5 text-xs text-muted-foreground">
-          拖动时间轴回到任意交易日 · 主线 · 资金 · 个股
+          收盘前动态计算 · 历史读缓存 · 主线 · 资金 · 个股
         </p>
       </div>
 
       {/* 时间轴 */}
       <div className="rounded-lg border bg-card p-3">
-        {timelineQ.isLoading ? (
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex rounded-md border bg-background p-0.5">
+            <button
+              type="button"
+              onClick={() => setViewMode("live")}
+              disabled={!liveReady && !liveQ.isLoading}
+              className={cn(
+                "rounded px-2.5 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+                viewMode === "live" ? "bg-indigo-500 text-white" : "text-muted-foreground hover:bg-muted",
+              )}
+            >
+              今日实时
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode("history")}
+              className={cn(
+                "rounded px-2.5 py-1 text-xs transition-colors",
+                viewMode === "history" ? "bg-indigo-500 text-white" : "text-muted-foreground hover:bg-muted",
+              )}
+            >
+              历史回放
+            </button>
+          </div>
+          <div className="text-xs text-muted-foreground">
+            {viewMode === "live"
+              ? `实时 ${liveQ.data?.trade_date ?? "--"} · 基准日 ${liveQ.data?.base_daily_date ?? "--"}`
+              : `历史 ${historyDate || "--"}`}
+          </div>
+        </div>
+        {viewMode === "live" ? (
+          <LiveStatus data={liveQ.data} loading={liveQ.isLoading} />
+        ) : timelineQ.isLoading ? (
           <LoadingState rows={1} />
         ) : dates.length === 0 ? (
           <div className="text-sm text-muted-foreground">
             暂无回放数据。请先在 <a href="/data" className="underline">数据管理</a> 同步 sector_period_scores。
           </div>
         ) : (
-          <DateScrubber dates={dates} value={effectiveDate} onChange={setSelectedDate} />
+          <DateScrubber dates={dates} value={historyDate} onChange={setSelectedDate} />
         )}
       </div>
 
@@ -97,13 +149,15 @@ export default function MainlineReplayPage() {
         <div className="rounded-lg border bg-card p-3">
           <div className="mb-2 flex items-baseline justify-between">
             <span className="text-xs font-medium">主线板块榜</span>
-            <span className="text-[10px] text-muted-foreground">热度 · 20日收益率</span>
+            <span className="text-[10px] text-muted-foreground">
+              {viewMode === "live" ? "实时资金 · 涨跌" : "热度 · 20日收益率"}
+            </span>
           </div>
-          {snapshotQ.isLoading ? (
+          {activeLoading ? (
             <LoadingState rows={8} />
           ) : (
             <div className="max-h-[calc(100vh-320px)] space-y-0.5 overflow-y-auto">
-              {(snapshotQ.data?.ranking ?? []).map((r, i) => (
+              {ranking.map((r, i) => (
                 <SectorRankRow
                   key={r.sector_id}
                   item={r}
@@ -112,8 +166,10 @@ export default function MainlineReplayPage() {
                   onSelect={() => selectRankedSector(r)}
                 />
               ))}
-              {(snapshotQ.data?.ranking ?? []).length === 0 && (
-                <div className="py-4 text-center text-xs text-muted-foreground">该日无主线评分</div>
+              {ranking.length === 0 && (
+                <div className="py-4 text-center text-xs text-muted-foreground">
+                  {viewMode === "live" ? "今日暂无实时资金流" : "该日无主线评分"}
+                </div>
               )}
             </div>
           )}
@@ -126,11 +182,13 @@ export default function MainlineReplayPage() {
               大盘指数 · {effectiveDate || "--"}
             </div>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
-              {(snapshotQ.data?.index ?? []).map((ix) => (
+              {(activeData?.index ?? []).map((ix) => (
                 <IndexCard key={ix.vt_symbol} ix={ix} />
               ))}
-              {(snapshotQ.data?.index ?? []).length === 0 && !snapshotQ.isLoading && (
-                <div className="col-span-full py-3 text-center text-xs text-muted-foreground">该日无指数数据</div>
+              {(activeData?.index ?? []).length === 0 && !activeLoading && (
+                <div className="col-span-full py-3 text-center text-xs text-muted-foreground">
+                  {viewMode === "live" ? "实时模式暂不展示指数；以板块资金流为准" : "该日无指数数据"}
+                </div>
               )}
             </div>
           </div>
@@ -168,7 +226,7 @@ export default function MainlineReplayPage() {
               <div className="rounded-lg border bg-card p-3">
                 <RelationPanel
                   sectorId={selectedSector.sector_id}
-                  date={effectiveDate}
+                  date={relationDate}
                   onSelectSector={selectRelatedSector}
                 />
               </div>
@@ -185,6 +243,18 @@ export default function MainlineReplayPage() {
 }
 
 // ── 时间轴：当前日期 font-display 大字 + scrubber + 左右刻度 ──
+
+function LiveStatus({ data, loading }: { data?: { latest_minute_time?: string | null; snapshot_updated_at?: string | null; message?: string }; loading: boolean }) {
+  if (loading) return <LoadingState rows={1} />;
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+      <span>源表：sector_fund_flows</span>
+      <span>分钟线：{shortDateTime(data?.latest_minute_time)}</span>
+      <span>快照：{shortDateTime(data?.snapshot_updated_at)}</span>
+      <span className="text-indigo-300">{data?.message ?? "动态计算中"}</span>
+    </div>
+  );
+}
 
 function DateScrubber({
   dates,
@@ -242,6 +312,8 @@ function SectorRankRow({
   onSelect: () => void;
 }) {
   const heat = item.heat_score ?? 0;
+  const live = item.data_mode === "live";
+  const amount = item.main_net_inflow ?? item.accumulated_main_inflow;
   return (
     <button
       onClick={onSelect}
@@ -261,15 +333,16 @@ function SectorRankRow({
           {formatPct(item.return_pct)}
         </span>
       </div>
-      {/* 热度条 */}
       <div className="flex items-center gap-1.5 pl-5">
         <div className="h-1 flex-1 overflow-hidden rounded-full bg-muted">
           <div
             className={cn("h-full rounded-full", selected ? "bg-indigo-400" : "bg-indigo-500/60")}
-            style={{ width: `${Math.min(100, Math.max(0, heat))}%` }}
+            style={{ width: `${live ? 100 : Math.min(100, Math.max(0, heat))}%` }}
           />
         </div>
-        <span className="w-7 shrink-0 text-right text-[10px] tabular-nums text-muted-foreground">{heat.toFixed(0)}</span>
+        <span className="w-16 shrink-0 text-right text-[10px] tabular-nums text-muted-foreground">
+          {live ? formatAmount(amount) : heat.toFixed(0)}
+        </span>
       </div>
     </button>
   );
@@ -297,6 +370,9 @@ function IndexCard({ ix }: { ix: IndexQuote }) {
 
 function FundMatrix({ item }: { item: SectorRankItem }) {
   const trendColor = trendColorClass(item.trend_state);
+  const netInflow = item.main_net_inflow ?? item.accumulated_main_inflow;
+  const netRatio = item.main_net_inflow_ratio;
+  const live = item.data_mode === "live";
   return (
     <div className="grid grid-cols-3 gap-2">
       <Metric label="热度分" value={fmt1(item.heat_score)} bar={item.heat_score} barColor="bg-indigo-500" />
@@ -308,14 +384,14 @@ function FundMatrix({ item }: { item: SectorRankItem }) {
         valueClass={(item.return_pct ?? 0) >= 0 ? "text-rise" : "text-fall"}
       />
       <Metric
-        label="放量比"
-        value={fmtRatio(item.volume_ratio)}
-        valueClass={item.volume_ratio == null ? "" : item.volume_ratio >= 1 ? "text-indigo-300" : "text-muted-foreground"}
+        label={live ? "资金占比" : "放量比"}
+        value={live ? formatPct(netRatio) : fmtRatio(item.volume_ratio)}
+        valueClass={live ? ((netRatio ?? 0) >= 0 ? "text-rise" : "text-fall") : item.volume_ratio == null ? "" : item.volume_ratio >= 1 ? "text-indigo-300" : "text-muted-foreground"}
       />
       <Metric
         label="主力净流入"
-        value={item.fund_inflow_available ? formatAmount(item.accumulated_main_inflow) : "近端无"}
-        valueClass={item.fund_inflow_available ? ((item.accumulated_main_inflow ?? 0) >= 0 ? "text-rise" : "text-fall") : "text-muted-foreground"}
+        value={item.fund_inflow_available ? formatAmount(netInflow) : "近端无"}
+        valueClass={item.fund_inflow_available ? ((netInflow ?? 0) >= 0 ? "text-rise" : "text-fall") : "text-muted-foreground"}
       />
     </div>
   );
@@ -360,4 +436,10 @@ function fmt1(v: number | null | undefined): string {
 }
 function fmtRatio(v: number | null | undefined): string {
   return v == null ? "--" : `${v.toFixed(2)}x`;
+}
+
+function shortDateTime(value: string | null | undefined): string {
+  if (!value) return "--";
+  const text = String(value);
+  return text.length > 16 ? text.slice(0, 16).replace("T", " ") : text;
 }

@@ -17,6 +17,15 @@ export interface SectorRankItem {
   rank_return?: number | null;
   return_pct?: number | null;
   confidence?: number | null;
+  data_mode?: "live" | "history" | string;
+  main_net_inflow?: number | null;
+  main_net_inflow_ratio?: number | null;
+  historical_return_pct?: number | null;
+  stock_count?: number | null;
+  leader_stock?: string | null;
+  leader_change_pct?: number | null;
+  score_date?: string | null;
+  flow_updated_at?: string | null;
   // delta 模式额外字段
   fund_strength?: number | null;
   volume_ratio?: number | null;
@@ -36,10 +45,18 @@ export interface IndexQuote {
 }
 
 export interface SnapshotData {
-  mode: "single" | "delta";
+  mode: "single" | "delta" | "live";
+  trade_date?: string;
+  base_daily_date?: string | null;
   ranking: SectorRankItem[];
   index: IndexQuote[];
   status: string;
+  source?: string;
+  temporary_bar?: boolean;
+  latest_minute_time?: string | null;
+  snapshot_updated_at?: string | null;
+  snapshot_trade_time?: string | null;
+  message?: string;
 }
 
 export interface RelationItem {
@@ -81,6 +98,13 @@ export function fetchReplayTimeline() {
   return apiClient.get<TimelineData>("/mainline-replay/timeline");
 }
 
+export function fetchLiveMainline(params: { trade_date?: string; sector_type?: string } = {}) {
+  const qs = new URLSearchParams();
+  if (params.trade_date) qs.set("trade_date", params.trade_date);
+  if (params.sector_type) qs.set("sector_type", params.sector_type);
+  return apiClient.get<SnapshotData>(`/mainline-replay/live?${qs.toString()}`);
+}
+
 export function fetchReplaySnapshot(params: {
   date?: string;
   t1?: string;
@@ -107,6 +131,8 @@ export interface SectorStockItem {
   close: number | null;
   change_pct: number | null;
   price_date?: string | null;
+  price_source?: "daily_bar" | "intraday_snapshot" | string | null;
+  trade_time?: string | null;
   main_net_inflow: number | null;
   main_net_inflow_ratio: number | null;
   fund_inflow_available: boolean;
@@ -118,6 +144,7 @@ export interface SectorStocksData {
   items: SectorStockItem[];
   total: number;
   fund_flow_available: number;
+  price_source?: "daily_bar" | "intraday_snapshot" | string | null;
   status: string;
 }
 

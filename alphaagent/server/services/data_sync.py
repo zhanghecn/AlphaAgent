@@ -383,7 +383,6 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_stock_fund_flows",    # per-stock fund flow
             "sync_sector_fund_flows",   # sector fund flow for market/mainline context
             "sync_stock_hot_ranks",     # per-stock hotness
-            "sync_limit_up_pools",      # limit-up / limit-down pools
         ],
     },
     {
@@ -399,7 +398,6 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_stock_fund_flows",
             "sync_sector_fund_flows",
             "sync_stock_hot_ranks",
-            "sync_limit_up_pools",
         ],
     },
     {
@@ -420,6 +418,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_sector_fund_flows",
             "sync_sector_period_scores",
             "eod_quant_research",       # 候选生成:基础数据(daily+板块)就绪即跑,读DB已有财报评分,不等慢/晚job,让候选早出
+            "sync_limit_up_pools",       # 涨停池接口偶发慢/卡，放到盘后慢链路，不阻塞尾盘实时缓存
             "sync_stock_lhb_records",   # LHB publishes after 18:00 -> run late
             "sync_stock_notices",
             "sync_stock_financial_quarterly",

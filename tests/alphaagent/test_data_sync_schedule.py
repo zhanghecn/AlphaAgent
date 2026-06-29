@@ -96,6 +96,7 @@ def test_intraday_schedule_contains_intraday_jobs():
     assert intraday["action"] == "tail_preview"
     assert "sync_stock_minute_bars" in intraday["job_ids"]
     assert "sync_sector_fund_flows" in intraday["job_ids"]
+    assert "sync_limit_up_pools" not in intraday["job_ids"]
     # Daily bars are not available at 14:00, so they must NOT be in the intraday slot.
     assert "sync_stock_daily_bars" not in intraday["job_ids"]
 
@@ -106,6 +107,7 @@ def test_tail_quant_schedule_triggers_quant_research():
     assert tail_quant["cron"] == "30 14 * * 1-5"
     assert "sync_stock_minute_bars" in tail_quant["job_ids"]
     assert "sync_sector_fund_flows" in tail_quant["job_ids"]
+    assert "sync_limit_up_pools" not in tail_quant["job_ids"]
     assert "sync_stock_daily_bars" not in tail_quant["job_ids"]
 
 
@@ -114,6 +116,7 @@ def test_eod_schedule_has_daily_bars_and_lhb_last():
     assert eod["action"] == "sync"
     assert "sync_stock_daily_bars" in eod["job_ids"]
     assert "sync_index_daily_bars" in eod["job_ids"]
+    assert "sync_limit_up_pools" in eod["job_ids"]
     assert svc.EOD_QUANT_RESEARCH_BATCH_JOB_ID in eod["job_ids"]
     # LHB publishes after 18:00, so it must run after daily bars.
     assert eod["job_ids"].index("sync_stock_lhb_records") > eod["job_ids"].index("sync_stock_daily_bars")

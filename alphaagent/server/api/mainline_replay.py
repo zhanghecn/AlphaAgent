@@ -103,6 +103,60 @@ def timeline(limit: int = Query(400, ge=1, le=2000)) -> dict[str, Any]:
     return ok({"dates": dates, "status": "ready" if dates else "empty"})
 
 
+@router.get("/live", response_model=None)
+def live(
+    trade_date: date | None = Query(None, description="盘中日期 YYYY-MM-DD；默认取最新板块资金流日期"),
+    sector_type: str | None = Query(None, description="板块类型过滤"),
+    limit: int = Query(80, ge=1, le=300),
+) -> dict[str, Any]:
+    """今日/盘中主线资金流。
+
+    历史回放读 sector_period_scores；收盘前实时模式只读可覆盖当日的
+    sector_fund_flows + sectors 快照，不把盘中数据写成历史评分。
+    """
+    if not is_database_configured():
+        return ok({"status": "unavailable", "message": "数据库未配置"})
+
+    if not isinstance(trade_date, date):
+        trade_date = None
+    if not isinstance(sector_type, str):
+        sector_type = None
+
+    with session_scope() as session:
+        latest_flow_date = session.execute(
+            select(func.max(schema.sector_fund_flows.c.trade_date))
+        ).scalar()
+        resolved_date = trade_date or _parse_optional_date(latest_flow_date)
+        if resolved_date is None:
+            return ok({"status": "empty", "ranking": [], "index": []})
+
+        ranking = _live_ranking_for_date(session, resolved_date, sector_type, limit)
+        latest_complete_daily = _latest_complete_daily_date(session)
+        latest_snapshot_updated = session.execute(select(func.max(schema.stocks.c.updated_at))).scalar()
+        latest_snapshot_trade_time = session.execute(select(func.max(schema.stocks.c.trade_time))).scalar()
+        latest_minute_time = session.execute(
+            select(func.max(schema.stock_minute_bars.c.bar_time)).where(
+                schema.stock_minute_bars.c.trade_date == resolved_date,
+                schema.stock_minute_bars.c.interval == "1m",
+            )
+        ).scalar()
+
+    return ok({
+        "mode": "live",
+        "trade_date": resolved_date.isoformat(),
+        "base_daily_date": _iso_or_none(latest_complete_daily),
+        "ranking": ranking,
+        "index": [],
+        "status": "ready" if ranking else "empty",
+        "source": "sector_fund_flows",
+        "temporary_bar": True,
+        "latest_minute_time": _iso_or_none(latest_minute_time),
+        "snapshot_updated_at": _iso_or_none(latest_snapshot_updated),
+        "snapshot_trade_time": str(latest_snapshot_trade_time) if latest_snapshot_trade_time else None,
+        "message": "收盘前动态计算：板块实时资金流 + 盘中快照；历史回放仍读 sector_period_scores。",
+    })
+
+
 @router.get("/snapshot", response_model=None)
 def snapshot(
     date: date | None = Query(None, description="单日快照日期 YYYY-MM-DD"),
@@ -328,6 +382,142 @@ def _sector_relation_group(meta: dict[str, Any]) -> str:
     return "theme"
 
 
+def _latest_complete_daily_date(session) -> date | None:
+    row = session.execute(
+        select(schema.stock_daily_bars.c.trade_date)
+        .group_by(schema.stock_daily_bars.c.trade_date)
+        .having(func.count(func.distinct(schema.stock_daily_bars.c.vt_symbol)) >= _MIN_COMPLETE_DAILY_SYMBOL_COUNT)
+        .order_by(desc(schema.stock_daily_bars.c.trade_date))
+        .limit(1)
+    ).first()
+    return row[0] if row else None
+
+
+def _parse_optional_date(value: Any) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    try:
+        return _parse_date(str(value))
+    except Exception:
+        return None
+
+
+def _iso_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def _live_ranking_for_date(
+    session,
+    d: date,
+    sector_type: str | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    latest_scores = (
+        select(
+            schema.sector_period_scores.c.sector_id,
+            func.max(schema.sector_period_scores.c.as_of_date).label("latest_score_date"),
+        )
+        .where(
+            schema.sector_period_scores.c.period == _DEFAULT_PERIOD,
+            schema.sector_period_scores.c.as_of_date < d,
+        )
+        .group_by(schema.sector_period_scores.c.sector_id)
+    ).subquery()
+
+    q = (
+        select(
+            schema.sector_fund_flows.c.sector_id,
+            schema.sector_fund_flows.c.main_net_inflow,
+            schema.sector_fund_flows.c.main_net_inflow_ratio,
+            schema.sector_fund_flows.c.rank,
+            schema.sector_fund_flows.c.updated_at,
+            schema.sectors.c.name,
+            schema.sectors.c.type,
+            schema.sectors.c.change_pct,
+            schema.sectors.c.stock_count,
+            schema.sectors.c.leader_stock,
+            schema.sectors.c.leader_change_pct,
+            schema.sector_period_scores.c.heat_score,
+            schema.sector_period_scores.c.fund_score,
+            schema.sector_period_scores.c.momentum_score,
+            schema.sector_period_scores.c.trend_state,
+            schema.sector_period_scores.c.return_pct,
+            schema.sector_period_scores.c.as_of_date.label("score_date"),
+        )
+        .select_from(schema.sector_fund_flows)
+        .join(schema.sectors, schema.sectors.c.id == schema.sector_fund_flows.c.sector_id)
+        .outerjoin(latest_scores, latest_scores.c.sector_id == schema.sector_fund_flows.c.sector_id)
+        .outerjoin(
+            schema.sector_period_scores,
+            (schema.sector_period_scores.c.sector_id == schema.sector_fund_flows.c.sector_id)
+            & (schema.sector_period_scores.c.period == _DEFAULT_PERIOD)
+            & (schema.sector_period_scores.c.as_of_date == latest_scores.c.latest_score_date),
+        )
+        .where(
+            schema.sector_fund_flows.c.trade_date == d.isoformat(),
+            schema.sector_fund_flows.c.period == "即时",
+        )
+    )
+    if sector_type:
+        q = q.where(schema.sectors.c.type == sector_type)
+    rows = session.execute(
+        q.order_by(
+            desc(schema.sector_fund_flows.c.main_net_inflow),
+            schema.sector_fund_flows.c.rank.asc().nulls_last(),
+        ).limit(limit)
+    ).all()
+
+    ranking: list[dict[str, Any]] = []
+    for row in rows:
+        (
+            sector_id,
+            main_net_inflow,
+            main_net_inflow_ratio,
+            rank,
+            updated_at,
+            name,
+            row_sector_type,
+            change_pct,
+            stock_count,
+            leader_stock,
+            leader_change_pct,
+            heat_score,
+            fund_score,
+            momentum_score,
+            trend_state,
+            return_pct,
+            score_date,
+        ) = row
+        ranking.append({
+            "sector_id": sector_id,
+            "name": name or sector_id,
+            "sector_type": row_sector_type,
+            "heat_score": heat_score,
+            "fund_score": fund_score,
+            "momentum_score": momentum_score,
+            "trend_state": trend_state,
+            "rank_return": rank,
+            "return_pct": change_pct,
+            "historical_return_pct": return_pct,
+            "confidence": None,
+            "main_net_inflow": main_net_inflow,
+            "main_net_inflow_ratio": main_net_inflow_ratio,
+            "accumulated_main_inflow": main_net_inflow,
+            "fund_inflow_available": main_net_inflow is not None,
+            "stock_count": stock_count,
+            "leader_stock": leader_stock,
+            "leader_change_pct": leader_change_pct,
+            "score_date": _iso_or_none(score_date),
+            "flow_updated_at": _iso_or_none(updated_at),
+            "data_mode": "live",
+        })
+    return ranking
+
+
 def _ranking_for_date(session, d: date, sector_type: str | None, limit: int) -> list[dict[str, Any]]:
     q = (
         select(schema.sector_period_scores)
@@ -541,7 +731,7 @@ def sector_stocks(
         vt_symbols = [m[0] for m in members]
         name_map = {m[0]: m[1] for m in members}
 
-        # 当日 close 必须来自所选回放日期；缺当天日线时不拿前一日冒充“当日”。
+        # 历史回放必须使用所选日期日线；今天盘中允许使用股票快照做临时价。
         today_rows = session.execute(
             select(
                 schema.stock_daily_bars.c.vt_symbol,
@@ -553,6 +743,21 @@ def sector_stocks(
             )
         ).all()
         today_close = {vsym: close for vsym, close in today_rows}
+        snapshot_price: dict[str, tuple[float | None, float | None, str | None]] = {}
+        if not today_close and _can_use_intraday_snapshot(session, date):
+            snapshot_rows = session.execute(
+                select(
+                    schema.stocks.c.vt_symbol,
+                    schema.stocks.c.last_price,
+                    schema.stocks.c.change_pct,
+                    schema.stocks.c.trade_time,
+                ).where(schema.stocks.c.vt_symbol.in_(vt_symbols))
+            ).all()
+            snapshot_price = {
+                vsym: (last_price, change_pct, trade_time)
+                for vsym, last_price, change_pct, trade_time in snapshot_rows
+                if last_price is not None or change_pct is not None
+            }
 
         prev_rows = session.execute(
             select(
@@ -560,7 +765,7 @@ def sector_stocks(
                 schema.stock_daily_bars.c.close_price,
             )
             .where(
-                schema.stock_daily_bars.c.vt_symbol.in_(list(today_close.keys())),
+                schema.stock_daily_bars.c.vt_symbol.in_(list(today_close.keys()) or list(snapshot_price.keys())),
                 schema.stock_daily_bars.c.trade_date < date,
             )
             .order_by(
@@ -589,12 +794,22 @@ def sector_stocks(
         items: list[dict[str, Any]] = []
         for vsym in vt_symbols:
             close_today = today_close.get(vsym)
+            snapshot = snapshot_price.get(vsym)
+            price_source = "daily_bar" if close_today is not None else None
+            trade_time = None
+            if close_today is None and snapshot is not None:
+                close_today, snapshot_change, trade_time = snapshot
+                price_source = "intraday_snapshot"
+            else:
+                snapshot_change = None
             previous = prev_close.get(vsym)
             change_pct = (
                 (close_today / previous - 1) * 100
                 if close_today is not None and previous
                 else None
             )
+            if change_pct is None and snapshot_change is not None:
+                change_pct = snapshot_change
             net, ratio = flow_map.get(vsym, (None, None))
             items.append({
                 "vt_symbol": vsym,
@@ -602,6 +817,8 @@ def sector_stocks(
                 "close": close_today,
                 "change_pct": round(change_pct, 2) if change_pct is not None else None,
                 "price_date": str(date) if close_today is not None else None,
+                "price_source": price_source,
+                "trade_time": trade_time,
                 "main_net_inflow": net,
                 "main_net_inflow_ratio": ratio,
                 "fund_inflow_available": net is not None,
@@ -620,5 +837,41 @@ def sector_stocks(
         "items": items[:limit],
         "total": len(items),
         "fund_flow_available": sum(1 for it in items if it["fund_inflow_available"]),
+        "price_source": "daily_bar" if today_close else "intraday_snapshot" if snapshot_price else None,
         "status": "ready",
     })
+
+
+def _can_use_intraday_snapshot(session, d: date) -> bool:
+    latest_complete = _latest_complete_daily_date(session)
+    if latest_complete is not None and d <= latest_complete:
+        return False
+    minute_row = session.execute(
+        select(schema.stock_minute_bars.c.vt_symbol)
+        .where(
+            schema.stock_minute_bars.c.trade_date == d,
+            schema.stock_minute_bars.c.interval == "1m",
+        )
+        .limit(1)
+    ).first()
+    if minute_row:
+        return True
+    flow_row = session.execute(
+        select(schema.stock_fund_flows.c.vt_symbol)
+        .where(
+            schema.stock_fund_flows.c.trade_date == d.isoformat(),
+            schema.stock_fund_flows.c.period == "即时",
+        )
+        .limit(1)
+    ).first()
+    if flow_row:
+        return True
+    sector_flow_row = session.execute(
+        select(schema.sector_fund_flows.c.sector_id)
+        .where(
+            schema.sector_fund_flows.c.trade_date == d.isoformat(),
+            schema.sector_fund_flows.c.period == "即时",
+        )
+        .limit(1)
+    ).first()
+    return sector_flow_row is not None

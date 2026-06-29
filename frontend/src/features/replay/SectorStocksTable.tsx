@@ -80,9 +80,15 @@ export function SectorStocksTable({ sectorId, date }: { sectorId: string; date: 
       )}
       {q.data && (
         <div className="mt-1.5 text-[10px] text-muted-foreground">
-          共 {q.data.total} 只 · {q.data.fund_flow_available} 只有资金流（近端覆盖）
+          共 {q.data.total} 只 · {q.data.fund_flow_available} 只有资金流 · 价格源 {priceSourceLabel(q.data.price_source)}
         </div>
       )}
     </div>
   );
+}
+
+function priceSourceLabel(source: string | null | undefined): string {
+  if (source === "daily_bar") return "日线";
+  if (source === "intraday_snapshot") return "盘中快照";
+  return "--";
 }
