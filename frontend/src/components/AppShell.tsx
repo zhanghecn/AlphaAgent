@@ -7,6 +7,7 @@ import {
   Briefcase,
   History,
   TrendingUp,
+  Crosshair,
   ChevronLeft,
   ChevronRight,
   Sun,
@@ -20,6 +21,7 @@ import { VersionBadge } from "@/components/VersionBadge";
 
 const NAV_ITEMS = [
   { to: "/", label: "今日市场", icon: LayoutDashboard },
+  { to: "/market", label: "大盘择时", icon: Crosshair },
   { to: "/mainline", label: "概念主线", icon: History },
   { to: "/stocks", label: "全 A 股票", icon: TrendingUp },
   { to: "/quant", label: "量化交易", icon: Activity },

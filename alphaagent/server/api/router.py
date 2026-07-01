@@ -12,6 +12,7 @@ from alphaagent.server.api.indices import router as indices_router
 from alphaagent.server.api.industry_chains import router as industry_chains_router
 from alphaagent.server.api.mainline_replay import router as mainline_replay_router
 from alphaagent.server.api.market import router as market_router
+from alphaagent.server.api.market_timing import router as market_timing_router
 from alphaagent.server.api.portfolios import router as portfolios_router
 from alphaagent.server.api.quant import router as quant_router
 from alphaagent.server.api.research_graphs import router as research_graphs_router
@@ -33,6 +34,7 @@ api_router.include_router(data_status_router)
 api_router.include_router(data_sources_router)
 api_router.include_router(data_sync_router)
 api_router.include_router(market_router)
+api_router.include_router(market_timing_router)
 api_router.include_router(mainline_replay_router)
 api_router.include_router(stocks_router)
 api_router.include_router(indices_router)

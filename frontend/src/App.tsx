@@ -11,6 +11,7 @@ const MarketOverviewPage = lazy(() => import("@/pages/MarketOverviewPage").then(
 const StocksPage = lazy(() => import("@/pages/StocksPage").then((m) => ({ default: m.StocksPage })));
 const StockDetailPage = lazy(() => import("@/pages/StockDetailPage").then((m) => ({ default: m.StockDetailPage })));
 const IndexDetailPage = lazy(() => import("@/pages/IndexDetailPage").then((m) => ({ default: m.IndexDetailPage })));
+const MarketTimingPage = lazy(() => import("@/pages/MarketTimingPage").then((m) => ({ default: m.MarketTimingPage })));
 const SectorsPage = lazy(() => import("@/pages/SectorsPage").then((m) => ({ default: m.SectorsPage })));
 const QuantTradingPage = lazy(() => import("@/pages/QuantTradingPage").then((m) => ({ default: m.QuantTradingPage })));
 const PortfolioPage = lazy(() => import("@/pages/PortfolioPage").then((m) => ({ default: m.PortfolioPage })));
@@ -46,6 +47,7 @@ export default function App() {
                     <Route path="/stocks/:vtSymbol" element={<StockDetailPage />} />
                     <Route path="/indices/:key" element={<IndexDetailPage />} />
                     <Route path="/quant" element={<QuantTradingPage />} />
+                    <Route path="/market" element={<MarketTimingPage />} />
                     <Route path="/portfolio" element={<PortfolioPage />} />
                     <Route path="/chain" element={<Navigate to="/mainline" replace />} />
                     <Route path="/mainline" element={<MainlineReplayPage />} />

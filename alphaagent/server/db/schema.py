@@ -1052,6 +1052,15 @@ risk_events = Table(
 Index("ix_risk_events_account", risk_events.c.account_id)
 
 
+market_timing_panel = Table(
+    "market_timing_panel",
+    metadata,
+    Column("id", Integer, primary_key=True),  # 固定为 1: 单行存最新预计算面板
+    Column("panel", JSONB, nullable=False),
+    Column("computed_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+
 def create_schema(engine) -> None:
     """Create all AlphaAgent sync tables when they are missing."""
 
