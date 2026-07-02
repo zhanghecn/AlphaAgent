@@ -1,6 +1,7 @@
 export function ActionStatus({
   screen,
   backtestId,
+  candidateTradeQuality,
   status,
   message,
 }: {
@@ -20,6 +21,15 @@ export function ActionStatus({
     portfolio_sync?: { synced: number } | null;
   };
   backtestId?: number | null;
+  candidateTradeQuality?: {
+    summary?: {
+      evaluated_count?: number | null;
+      win_rate?: number | null;
+      average_return_pct?: number | null;
+      median_return_pct?: number | null;
+      average_max_drawdown_pct?: number | null;
+    };
+  } | null;
   status?: string;
   message?: string | null;
 }) {
@@ -33,8 +43,20 @@ export function ActionStatus({
       {screen && (
         <span className="mr-4">{screenText}</span>
       )}
+      {candidateTradeQuality?.summary && (
+        <span className="mr-4">
+          候选质量 {candidateTradeQuality.summary.evaluated_count ?? 0} 笔，
+          胜率 {formatPct(candidateTradeQuality.summary.win_rate)}，
+          均收 {formatPct(candidateTradeQuality.summary.average_return_pct)}，
+          均回撤 {formatPct(candidateTradeQuality.summary.average_max_drawdown_pct)}
+        </span>
+      )}
       {backtestId && <span className="mr-4">自动回测 #{backtestId}</span>}
       {message && <span className={status === "failed" ? "text-destructive" : "text-muted-foreground"}>{message}</span>}
     </div>
   );
+}
+
+function formatPct(value?: number | null) {
+  return value == null ? "--" : `${value.toFixed(2)}%`;
 }

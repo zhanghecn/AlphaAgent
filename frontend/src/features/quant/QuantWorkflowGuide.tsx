@@ -49,7 +49,7 @@ export function QuantWorkflowGuide({
       label: "回测",
       status: backtestCount > 0 ? "ready" : "pending",
       value: backtestCount > 0 ? `${backtestCount}份` : "未运行",
-      note: "历史回测使用日线口径，自动按候选评分前10名和最多10只持仓模拟买卖。",
+      note: "历史研究先统计每日Top20候选独立D+1开盘买入后的收益胜率；组合买卖只作为执行诊断。",
     },
     {
       label: "持仓",

@@ -56,6 +56,10 @@ def score_day(
     candidates = [_with_weekly_top_fractal_relief(score, params) for score in candidates]
     candidates = [_with_pure_loss_weak_bucket_penalty(score, params) for score in candidates]
     candidates = [_with_selective_setup_quality_lane(score, params) for score in candidates]
+    candidates = [_with_default_clean_watch_entry_fields(score, params) for score in candidates]
+    candidates = [_with_support_divergence_entry_fields(score, params) for score in candidates]
+    candidates = [_with_strong_trend_ma_pullback_entry_fields(score, params) for score in candidates]
+    candidates = [_with_default_candidate_quality_score(score, params) for score in candidates]
     candidates.sort(key=lambda item: (-item.total_score, item.vt_symbol))
     return candidates
 
@@ -163,13 +167,23 @@ def is_buy_candidate(score, params: BacktestParams) -> bool:
 
     if score.evidence.get("status") != "ready":
         return False
-    if score.risk_score < 35 or score.liquidity_score < 25:
+    default_clean_watch_entry = _default_clean_watch_entry_decision(score, params)
+    support_divergence_entry = _support_divergence_entry_decision(score, params)
+    strong_trend_ma_pullback_entry = _strong_trend_ma_pullback_entry_decision(score, params)
+    if score.risk_score < 35:
+        return False
+    if score.liquidity_score < 25 and not (
+        default_clean_watch_entry["eligible"] or support_divergence_entry["eligible"]
+    ):
         return False
     if params.strict_entry:
         return (
             (
                 _is_executable_entry_signal_for_params(score, params)
                 or _is_mainline_momentum_entry_signal(score, params)
+                or default_clean_watch_entry["eligible"]
+                or support_divergence_entry["eligible"]
+                or strong_trend_ma_pullback_entry["eligible"]
             )
             and _passes_backtest_entry_experiments(score, params)
         )
@@ -527,6 +541,897 @@ def _with_selective_setup_quality_lane(score, params: BacktestParams):
     adjusted.evidence["selective_setup_quality_profile"] = decision["profile"]
     adjusted.evidence["selective_setup_quality_notes"] = decision["notes"]
     return adjusted
+
+
+def _with_default_candidate_quality_score(score, params: BacktestParams):
+    """Apply the default candidate-layer quality adjustment before final rank."""
+
+    if params.strategy != "mainline_dragon_pullback":
+        return score
+    evidence = getattr(score, "evidence", {}) or {}
+    decision = default_candidate_quality_adjustment(evidence)
+    adjustment = float(decision["adjustment"])
+    if adjustment == 0:
+        return score
+    adjusted = copy(score)
+    adjusted.total_score = round(float(getattr(score, "total_score", 0) or 0) + adjustment, 4)
+    adjusted.evidence = dict(evidence)
+    adjusted.evidence["candidate_quality_adjustment"] = round(adjustment, 4)
+    adjusted.evidence["candidate_quality_score"] = round(adjusted.total_score, 4)
+    adjusted.evidence["candidate_quality_base_score"] = round(float(getattr(score, "total_score", 0) or 0), 4)
+    adjusted.evidence["candidate_quality_profile"] = decision["profile"]
+    adjusted.evidence["candidate_quality_notes"] = decision["notes"]
+    adjusted.evidence["total_score"] = adjusted.total_score
+    return adjusted
+
+
+def _with_default_clean_watch_entry_fields(score, params: BacktestParams):
+    decision = _default_clean_watch_entry_decision(score, params)
+    if not decision["eligible"]:
+        return score
+    evidence = dict(getattr(score, "evidence", {}) or {})
+    if evidence.get("default_clean_watch_entry_profile") == decision["profile"]:
+        return score
+    evidence["default_clean_watch_entry_profile"] = decision["profile"]
+    evidence["default_clean_watch_entry_notes"] = decision["notes"]
+    evidence["default_clean_watch_entry_signal"] = True
+    evidence["default_executable_entry_signal"] = True
+    evidence["raw_entry_signal"] = bool(getattr(score, "entry_signal", False))
+    evidence["executable_entry_signal"] = True
+    evidence["key_entry_signal"] = True
+    evidence["action"] = "BUY"
+    evidence["entry_action"] = "BUY"
+    evidence["signal_label"] = _default_clean_watch_entry_label(decision["profile"])
+    evidence["signal_role"] = "key_buy"
+    adjusted = copy(score)
+    adjusted.evidence = evidence
+    return adjusted
+
+
+def _default_clean_watch_entry_decision(score, params: BacktestParams) -> dict[str, Any]:
+    if params.strategy != "mainline_dragon_pullback":
+        return _default_clean_watch_decision(False, "not_dragon_pullback", [])
+    if bool(getattr(score, "entry_signal", False)):
+        return _default_clean_watch_decision(False, "raw_entry_signal", [])
+    evidence = getattr(score, "evidence", {}) or {}
+    if evidence.get("status") != "ready":
+        return _default_clean_watch_decision(False, "not_ready", [])
+    if float(getattr(score, "risk_score", 0) or 0) < 35:
+        return _default_clean_watch_decision(False, "risk_score_too_low", [])
+    if evidence.get("key_support_break_risk"):
+        return _default_clean_watch_decision(False, "key_support_break_risk", [])
+    if evidence.get("distribution_risk") or evidence.get("high_level_sideways_distribution_risk"):
+        return _default_clean_watch_decision(False, "distribution_risk", [])
+
+    failed_rules = set(_failed_rule_names(evidence))
+    if failed_rules & {"distribution_risk", "ma20_broken", "pullback_too_deep"}:
+        return _default_clean_watch_decision(False, "hard_failed_rule", [])
+
+    score_value = float(getattr(score, "total_score", 0) or 0)
+    liquidity = float(getattr(score, "liquidity_score", evidence.get("liquidity_score") or 0) or 0)
+    low_days = _float_or_none(evidence.get("low_suction_days")) or 0.0
+    ma5_distance = _float_or_none(evidence.get("ma5_distance_pct"))
+    ma10_distance = _float_or_none(evidence.get("ma10_distance_pct"))
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    ma5_slope = _float_or_none(evidence.get("ma5_slope_pct"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    return_60d = _float_or_none(evidence.get("return_60d"))
+    large_bull_count = _float_or_none(evidence.get("large_bull_count_20d")) or 0.0
+    near_limit_count = _float_or_none(evidence.get("near_limit_up_count_20d")) or 0.0
+    recent_limit = bool(evidence.get("recent_limit_up_20d")) or near_limit_count > 0
+    active_source = recent_limit or large_bull_count >= 1.0
+    fresh_lift = bool(evidence.get("first_effective_lift") or evidence.get("low_suction_launch_confirmed"))
+
+    if _default_clean_watch_hot_unconfirmed_after_big_run(
+        active_source=active_source,
+        recent_limit=recent_limit,
+        low_days=low_days,
+        fresh_lift=fresh_lift,
+        return_60d=return_60d,
+    ):
+        return _default_clean_watch_decision(False, "hot_unconfirmed_after_big_run", [])
+
+    low_liquidity = liquidity < 25.0
+    if low_liquidity:
+        if not _default_clean_watch_common_quality(
+            ma5_distance=ma5_distance,
+            ma10_distance=ma10_distance,
+            close_location=close_location,
+            volume_ratio=volume_ratio,
+            max_close_location=0.82,
+        ):
+            return _default_clean_watch_decision(False, "not_clean_low_liquidity_ma_support", [])
+        return _default_low_liquidity_watch_entry_decision(
+            score_value=score_value,
+            low_days=low_days,
+            fresh_lift=fresh_lift,
+            ma_convergence=ma_convergence,
+            ma5_slope=ma5_slope,
+            close_location=close_location,
+            failed_rules=failed_rules,
+        )
+
+    if liquidity < 40.0:
+        return _default_clean_watch_decision(False, "liquidity_middle_gap", [])
+    if not _default_clean_watch_common_quality(
+        ma5_distance=ma5_distance,
+        ma10_distance=ma10_distance,
+        close_location=close_location,
+        volume_ratio=volume_ratio,
+        max_close_location=0.72,
+    ):
+        return _default_clean_watch_decision(False, "not_clean_ma_support", [])
+    return _default_active_support_watch_entry_decision(
+        evidence,
+        score_value=score_value,
+        active_source=active_source,
+        low_days=low_days,
+        ma_convergence=ma_convergence,
+        latest_change=latest_change,
+        close_location=close_location,
+        failed_rules=failed_rules,
+    )
+
+
+def _default_clean_watch_common_quality(
+    *,
+    ma5_distance: float | None,
+    ma10_distance: float | None,
+    close_location: float | None,
+    volume_ratio: float | None,
+    max_close_location: float,
+) -> bool:
+    return bool(
+        ma5_distance is not None
+        and -2.8 <= ma5_distance <= 3.2
+        and ma10_distance is not None
+        and -3.2 <= ma10_distance <= 5.5
+        and close_location is not None
+        and close_location <= max_close_location
+        and volume_ratio is not None
+        and 0.55 <= volume_ratio <= 1.45
+    )
+
+
+def _default_low_liquidity_watch_entry_decision(
+    *,
+    score_value: float,
+    low_days: float,
+    fresh_lift: bool,
+    ma_convergence: float | None,
+    ma5_slope: float | None,
+    close_location: float | None,
+    failed_rules: set[str],
+) -> dict[str, Any]:
+    allowed_failed = {"strong_leg", "liquidity_score", "pullback_too_short", "reclaim_confirmation"}
+    if failed_rules and not failed_rules <= allowed_failed:
+        return _default_clean_watch_decision(False, "low_liquidity_failed_rule_quality", [])
+    if score_value < 58.0 or low_days < 1:
+        return _default_clean_watch_decision(False, "low_liquidity_score_or_days", [])
+    if ma_convergence is None or ma_convergence > 7.0:
+        return _default_clean_watch_decision(False, "low_liquidity_ma_convergence", [])
+    if ma5_slope is not None and ma5_slope < -0.95:
+        return _default_clean_watch_decision(False, "low_liquidity_ma5_slope", [])
+    if close_location is None or close_location > 0.82:
+        return _default_clean_watch_decision(False, "low_liquidity_close_location", [])
+    if low_days >= 3 and fresh_lift:
+        return _default_clean_watch_decision(
+            True,
+            "clean_low_liquidity_first_lift",
+            ["低流动性但 MA5/MA10 承接干净，低吸蓄势后出现首个上拉"],
+        )
+    return _default_clean_watch_decision(
+        True,
+        "clean_low_liquidity_accumulation",
+        ["低流动性但 MA5/MA10 连续承接，主要被流动性硬门槛挡住"],
+    )
+
+
+def _default_active_support_watch_entry_decision(
+    _evidence: dict[str, Any],
+    *,
+    score_value: float,
+    active_source: bool,
+    low_days: float,
+    ma_convergence: float | None,
+    latest_change: float | None,
+    close_location: float | None,
+    failed_rules: set[str],
+) -> dict[str, Any]:
+    _ = (score_value, active_source, low_days, ma_convergence, latest_change, close_location, failed_rules)
+    return _default_clean_watch_decision(False, "active_support_research_only", [])
+
+
+def _default_active_support_segment(evidence: dict[str, Any]) -> bool:
+    support_type = str(evidence.get("support_type") or "")
+    state = str(evidence.get("dragon_state") or "")
+    setup = str(evidence.get("entry_setup") or evidence.get("setup_type") or "")
+    strong_leg = _float_or_none(evidence.get("strong_leg_score")) or 0.0
+    pullback_days = _float_or_none(evidence.get("pullback_days")) or 0.0
+    ma5_distance = _float_or_none(evidence.get("ma5_distance_pct"))
+    ma10_distance = _float_or_none(evidence.get("ma10_distance_pct"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    return bool(
+        setup in {"support_accepted", "pullback_observe", "dragon_pullback"}
+        and state in {"SUPPORT_ACCEPTED", "PULLBACK_OBSERVE", "TAIL_BUY_READY", ""}
+        and strong_leg >= 78.0
+        and pullback_days >= 2
+        and support_type in {"ma5_reclaim", "ma5_support", "ma10_support", "ma10_reclaim"}
+        and ma5_distance is not None
+        and -2.8 <= ma5_distance <= 3.2
+        and ma10_distance is not None
+        and -3.2 <= ma10_distance <= 5.5
+        and close_location is not None
+        and close_location <= 0.72
+        and volume_ratio is not None
+        and 0.55 <= volume_ratio <= 1.45
+    )
+
+
+def _default_active_support_wide_ma_quality_ok(
+    *,
+    ma_convergence: float | None,
+    low_days: float,
+    latest_change: float | None,
+    close_location: float | None,
+    evidence: dict[str, Any],
+) -> bool:
+    if ma_convergence is None:
+        return False
+    if ma_convergence < 14.0 or low_days >= 3:
+        return True
+    ma10_distance = _float_or_none(evidence.get("ma10_distance_pct"))
+    return bool(
+        close_location is not None
+        and close_location <= 0.58
+        or latest_change is not None
+        and latest_change <= -4.0
+        or ma10_distance is not None
+        and ma10_distance <= 0.0
+    )
+
+
+def _default_clean_watch_hot_unconfirmed_after_big_run(
+    *,
+    active_source: bool,
+    recent_limit: bool,
+    low_days: float,
+    fresh_lift: bool,
+    return_60d: float | None,
+) -> bool:
+    return bool(
+        active_source
+        and recent_limit
+        and low_days >= 4
+        and not fresh_lift
+        and return_60d is not None
+        and return_60d >= 55.0
+    )
+
+
+def _default_clean_watch_entry_label(profile: str) -> str:
+    if profile == "clean_active_support_divergence":
+        return "支撑分歧低吸买点"
+    if profile == "clean_low_liquidity_first_lift":
+        return "低流动性低吸首启买点"
+    if profile == "clean_low_liquidity_accumulation":
+        return "低流动性承接低吸买点"
+    return "低吸承接买点"
+
+
+def _default_clean_watch_decision(eligible: bool, profile: str, notes: list[str]) -> dict[str, Any]:
+    return {"eligible": eligible, "profile": profile, "notes": notes}
+
+
+def _support_divergence_entry_decision(score, params: BacktestParams) -> dict[str, Any]:
+    if not params.enable_support_divergence_entry_lane:
+        return {"eligible": False, "profile": "disabled", "notes": []}
+    evidence = getattr(score, "evidence", {}) or {}
+    decision = support_divergence_entry_lane_decision(score, evidence, params)
+    if not decision["eligible"]:
+        return decision
+    if evidence.get("support_divergence_entry_profile") == decision["profile"]:
+        return decision
+    adjusted_evidence = dict(evidence)
+    adjusted_evidence["support_divergence_entry_profile"] = decision["profile"]
+    adjusted_evidence["support_divergence_entry_notes"] = decision["notes"]
+    adjusted_evidence["support_divergence_entry_signal"] = True
+    score.evidence = adjusted_evidence
+    return decision
+
+
+def _with_support_divergence_entry_fields(score, params: BacktestParams):
+    decision = _support_divergence_entry_decision(score, params)
+    if not decision["eligible"]:
+        return score
+    return _with_research_entry_fields(
+        score,
+        params,
+        label="支撑分歧低吸买点",
+        observation_key="support_divergence_entry_observation_only",
+    )
+
+
+def _with_strong_trend_ma_pullback_entry_fields(score, params: BacktestParams):
+    decision = _strong_trend_ma_pullback_entry_decision(score, params)
+    if not decision["eligible"]:
+        return score
+    evidence = dict(getattr(score, "evidence", {}) or {})
+    if evidence.get("strong_trend_ma_pullback_entry_profile") != decision["profile"]:
+        evidence["strong_trend_ma_pullback_entry_profile"] = decision["profile"]
+        evidence["strong_trend_ma_pullback_entry_notes"] = decision["notes"]
+        evidence["strong_trend_ma_pullback_entry_signal"] = True
+    adjusted = copy(score)
+    adjusted.evidence = evidence
+    return _with_research_entry_fields(
+        adjusted,
+        params,
+        label="强趋势均线回踩研究买点",
+        observation_key="strong_trend_ma_pullback_entry_observation_only",
+    )
+
+
+def _with_research_entry_fields(score, params: BacktestParams, *, label: str, observation_key: str):
+    evidence = dict(getattr(score, "evidence", {}) or {})
+    default_buy_signal = _is_default_buy_candidate_without_research_entry(score, params)
+    existing_research_label = str(evidence.get("signal_label") or "") if _has_research_entry_observation(evidence) else ""
+    evidence["action"] = "BUY"
+    evidence["entry_action"] = "BUY"
+    evidence["executable_entry_signal"] = True
+    evidence["key_entry_signal"] = True
+    evidence["default_executable_entry_signal"] = default_buy_signal
+    evidence["raw_entry_signal"] = bool(getattr(score, "entry_signal", False))
+    evidence["signal_label"] = existing_research_label or label
+    evidence["signal_role"] = "key_buy"
+    evidence[observation_key] = not default_buy_signal
+    adjusted = copy(score)
+    adjusted.evidence = evidence
+    return adjusted
+
+
+def _has_research_entry_observation(evidence: dict[str, Any]) -> bool:
+    return bool(
+        evidence.get("support_divergence_entry_observation_only")
+        or evidence.get("strong_trend_ma_pullback_entry_observation_only")
+    )
+
+
+def _is_buy_candidate_without_support_divergence_entry(score, params: BacktestParams) -> bool:
+    return _is_default_buy_candidate_without_research_entry(score, params)
+
+
+def _is_default_buy_candidate_without_research_entry(score, params: BacktestParams) -> bool:
+    evidence = getattr(score, "evidence", {}) or {}
+    if evidence.get("status") != "ready":
+        return False
+    if score.risk_score < 35:
+        return False
+    if _default_clean_watch_entry_decision(score, params)["eligible"]:
+        return True
+    if score.liquidity_score < 25:
+        return False
+    if params.strict_entry:
+        return (
+            (
+                _is_executable_entry_signal_for_params(score, params)
+                or _is_mainline_momentum_entry_signal(score, params)
+            )
+            and _passes_backtest_entry_experiments(score, params)
+        )
+    if score.total_score < screening_payloads.effective_entry_score_threshold(score, params.min_entry_score):
+        return False
+    return _passes_backtest_entry_experiments(score, params)
+
+
+def _strong_trend_ma_pullback_entry_decision(score, params: BacktestParams) -> dict[str, Any]:
+    if not params.enable_strong_trend_ma_pullback_entry_lane:
+        return _strong_trend_ma_pullback_decision(False, "disabled", [])
+    evidence = getattr(score, "evidence", {}) or {}
+    total_score = float(getattr(score, "total_score", 0) or 0)
+    risk_score = float(getattr(score, "risk_score", 0) or 0)
+    liquidity_score = float(getattr(score, "liquidity_score", evidence.get("liquidity_score") or 0) or 0)
+    failed_rules = set(_failed_rule_names(evidence))
+    setup = str(evidence.get("entry_setup") or evidence.get("setup_type") or "")
+    state = str(evidence.get("dragon_state") or "")
+    support_type = str(evidence.get("support_type") or "")
+    strong_leg = _float_or_none(evidence.get("strong_leg_score")) or 0.0
+    pullback_days = _float_or_none(evidence.get("pullback_days")) or 0.0
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    ma5_distance = _float_or_none(evidence.get("ma5_distance_pct"))
+    ma10_distance = _float_or_none(evidence.get("ma10_distance_pct"))
+    ma20_distance = _float_or_none(evidence.get("ma20_distance_pct"))
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    ma5_slope = _float_or_none(evidence.get("ma5_slope_pct"))
+    ma5_vs_ma10 = _float_or_none(evidence.get("ma5_vs_ma10_pct"))
+    return_20d = _float_or_none(evidence.get("return_20d"))
+    return_60d = _float_or_none(evidence.get("return_60d"))
+    warning_level = _float_or_none(evidence.get("market_warning_level")) or 0.0
+    market_regime = str(evidence.get("dynamic_market_regime") or "")
+    risk_penalty = _float_or_none(evidence.get("risk_penalty")) or 0.0
+    active_strength = _mainline_momentum_strength(evidence)
+
+    if risk_score < 35 or liquidity_score < 25:
+        return _strong_trend_ma_pullback_decision(False, "below_risk_or_liquidity", [])
+    if evidence.get("key_support_break_risk") or evidence.get("volume_stall_risk"):
+        return _strong_trend_ma_pullback_decision(False, "hard_risk", [])
+    if "distribution_risk" in failed_rules or evidence.get("distribution_risk"):
+        return _strong_trend_ma_pullback_decision(False, "distribution_risk", [])
+    if risk_penalty >= 20:
+        return _strong_trend_ma_pullback_decision(False, "risk_penalty_too_high", [])
+    if total_score < 76 or strong_leg < 90:
+        return _strong_trend_ma_pullback_decision(False, "below_threshold", [])
+    if market_regime in {"crash", "weak_defensive"} or warning_level >= 4:
+        return _strong_trend_ma_pullback_decision(False, "market_risk", [])
+    if return_20d is not None and return_20d < 25 and active_strength < 3.0:
+        return _strong_trend_ma_pullback_decision(False, "trend_not_strong", [])
+
+    allowed_rules = {
+        "pullback_too_short",
+        "ma_convergence_too_wide_without_low_suction",
+        "reclaim_confirmation",
+        "support_acceptance",
+    }
+    if failed_rules and not failed_rules <= allowed_rules:
+        return _strong_trend_ma_pullback_decision(False, "failed_rule_quality", [])
+
+    intraday_ma_pullback = (
+        setup in {"pullback_observe", "support_accepted"}
+        and state in {"PULLBACK_OBSERVE", "SUPPORT_ACCEPTED"}
+        and support_type in {"none", "ma5_reclaim", "ma10_support"}
+        and 1 <= pullback_days <= 3
+        and active_strength >= 2.0
+        and latest_change is not None
+        and -2.8 <= latest_change <= 2.8
+        and close_location is not None
+        and 0.55 <= close_location <= 0.88
+        and volume_ratio is not None
+        and 0.75 <= volume_ratio <= 2.8
+        and ma5_distance is not None
+        and 3.0 <= ma5_distance <= 7.2
+        and ma10_distance is not None
+        and 6.0 <= ma10_distance <= 18.0
+        and ma_convergence is not None
+        and 14.0 <= ma_convergence <= 31.0
+        and ma5_slope is not None
+        and ma5_slope >= 1.0
+        and (ma5_vs_ma10 is None or ma5_vs_ma10 >= 4.0)
+        and (ma20_distance is None or ma20_distance >= 15.0)
+        and not evidence.get("high_level_sideways_distribution_risk")
+        and failed_rules <= {"pullback_too_short"}
+    )
+    if intraday_ma_pullback:
+        return _strong_trend_ma_pullback_decision(
+            True,
+            "strong_trend_intraday_ma_pullback",
+            ["强趋势中日内触及短均线后收回，当前规则主要因回踩天数过短未给正式买点"],
+        )
+
+    deep_ma10_dislocation = (
+        setup in {"support_accepted", "pullback_observe"}
+        and state in {"SUPPORT_ACCEPTED", "PULLBACK_OBSERVE"}
+        and support_type in {"ma10_support", "ma5_reclaim"}
+        and pullback_days >= 5
+        and active_strength >= 3.0
+        and total_score >= 88
+        and ma5_distance is not None
+        and ma5_distance >= -3.2
+        and ma10_distance is not None
+        and -2.8 <= ma10_distance <= 3.2
+        and ma_convergence is not None
+        and 18.0 <= ma_convergence <= 30.0
+        and volume_ratio is not None
+        and 0.65 <= volume_ratio <= 1.6
+        and close_location is not None
+        and close_location >= 0.45
+        and (latest_change is None or latest_change >= -3.5)
+        and failed_rules <= {"reclaim_confirmation", "ma_convergence_too_wide_without_low_suction"}
+    )
+    if deep_ma10_dislocation:
+        return _strong_trend_ma_pullback_decision(
+            True,
+            "deep_trend_ma10_dislocation_observe",
+            ["强趋势深分歧后仍在 MA10/MA5 承接区，作为高位回踩研究买点观察"],
+        )
+
+    return _strong_trend_ma_pullback_decision(False, "no_match", [])
+
+
+def _strong_trend_ma_pullback_decision(eligible: bool, profile: str, notes: list[str]) -> dict[str, Any]:
+    return {"eligible": eligible, "profile": profile, "notes": notes}
+
+
+def support_divergence_entry_lane_decision(
+    score,
+    evidence: dict[str, Any],
+    params: BacktestParams,
+) -> dict[str, Any]:
+    """Default-off entry lane for 003004-style support divergence research."""
+
+    total_score = float(getattr(score, "total_score", 0) or 0)
+    risk_score = float(getattr(score, "risk_score", 0) or 0)
+    liquidity_score = float(getattr(score, "liquidity_score", 0) or 0)
+    failed_rules = set(_failed_rule_names(evidence))
+    setup = str(evidence.get("entry_setup") or evidence.get("setup_type") or "")
+    state = str(evidence.get("dragon_state") or "")
+    support_type = str(evidence.get("support_type") or "")
+    low_suction_days = _float_or_none(evidence.get("low_suction_days")) or 0.0
+    buildup_score = _float_or_none(evidence.get("low_suction_buildup_score")) or 0.0
+    suction_score = _float_or_none(evidence.get("stealth_low_suction_score")) or 0.0
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    strong_leg = _float_or_none(evidence.get("strong_leg_score")) or 0.0
+    pullback_days = _float_or_none(evidence.get("pullback_days")) or 0.0
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    market_warning = _float_or_none(evidence.get("market_warning_level")) or 0.0
+    market_regime = str(evidence.get("dynamic_market_regime") or "")
+
+    if total_score < max(params.min_entry_score, 72.0) or risk_score < 35:
+        return _support_divergence_decision(False, "below_threshold", [])
+    if evidence.get("key_support_break_risk") or evidence.get("volume_stall_risk"):
+        return _support_divergence_decision(False, "hard_risk", [])
+
+    low_liquidity_rules = {"strong_leg", "liquidity_score", "pullback_too_short"}
+    mature_low_suction = (
+        liquidity_score < 25
+        and total_score >= 76
+        and low_suction_days >= 3
+        and (bool(evidence.get("low_suction_launch_confirmed")) or buildup_score >= 95 or suction_score >= 95)
+        and ma_convergence is not None
+        and ma_convergence <= 6.2
+        and support_type != "none"
+        and bool(failed_rules)
+        and failed_rules <= low_liquidity_rules
+    )
+    if mature_low_suction:
+        return _support_divergence_decision(
+            True,
+            "mature_low_suction_launch",
+            ["成熟低吸蓄势/启动，主要被流动性或第一波强度硬门槛挡住"],
+        )
+
+    support_divergence_rules = {
+        "reclaim_confirmation",
+        "ma_convergence_too_wide_without_low_suction",
+        "pullback_too_short",
+    }
+    high_level_support_divergence = (
+        liquidity_score >= 40
+        and total_score >= 89
+        and strong_leg >= 90
+        and pullback_days >= 3
+        and ma_convergence is not None
+        and ma_convergence <= 30
+        and support_type in {"ma5_reclaim", "ma10_support"}
+        and setup in {"support_accepted", "pullback_observe"}
+        and state in {"SUPPORT_ACCEPTED", "PULLBACK_OBSERVE"}
+        and bool(failed_rules)
+        and failed_rules <= support_divergence_rules
+        and (latest_change is None or latest_change <= 5.5)
+        and _support_divergence_failed_rule_quality_ok(
+            failed_rules=failed_rules,
+            ma_convergence=ma_convergence,
+            latest_change=latest_change,
+            close_location=close_location,
+            market_warning=market_warning,
+            market_regime=market_regime,
+            support_type=support_type,
+        )
+    )
+    if high_level_support_divergence:
+        return _support_divergence_decision(
+            True,
+            "high_level_support_divergence",
+            ["高位分歧后 MA5/MA10 承接，主要缺弱转强确认或均线收敛"],
+        )
+
+    return _support_divergence_decision(False, "no_match", [])
+
+
+def _support_divergence_decision(eligible: bool, profile: str, notes: list[str]) -> dict[str, Any]:
+    return {"eligible": eligible, "profile": profile, "notes": notes}
+
+
+def _support_divergence_failed_rule_quality_ok(
+    *,
+    failed_rules: set[str],
+    ma_convergence: float | None,
+    latest_change: float | None,
+    close_location: float | None,
+    market_warning: float,
+    market_regime: str,
+    support_type: str,
+) -> bool:
+    if "ma_convergence_too_wide_without_low_suction" in failed_rules:
+        if ma_convergence is None or latest_change is None:
+            return False
+        if ma_convergence > 22.5:
+            return False
+        if latest_change < 2.0:
+            return False
+        if market_regime == "false_bull" and market_warning >= 2 and support_type != "ma10_support":
+            return False
+        if close_location is not None and close_location >= 0.90 and market_warning >= 2:
+            return False
+    if "reclaim_confirmation" in failed_rules:
+        if latest_change is not None and latest_change <= -4.5:
+            return False
+        if close_location is not None and close_location < 0.18:
+            return False
+    return True
+
+
+def _failed_rule_names(evidence: dict[str, Any]) -> list[str]:
+    rules = evidence.get("failed_rules")
+    if not isinstance(rules, list):
+        return []
+    return [str(rule) for rule in rules if str(rule)]
+
+
+def default_candidate_quality_adjustment(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Default no-future score adjustment for the public dragon-pullback rank."""
+
+    clean_watch_profile = str(evidence.get("default_clean_watch_entry_profile") or "")
+    low_suction_days = _float_or_none(evidence.get("low_suction_days")) or 0.0
+    ma5_distance = _float_or_none(evidence.get("ma5_distance_pct"))
+    ma10_distance = _float_or_none(evidence.get("ma10_distance_pct"))
+    ma20_distance = _float_or_none(evidence.get("ma20_distance_pct"))
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    large_bull_count = _float_or_none(evidence.get("large_bull_count_20d")) or 0.0
+    warning_level = _float_or_none(evidence.get("market_warning_level")) or 0.0
+    ma5_slope = _float_or_none(evidence.get("ma5_slope_pct"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    near_limit_up_count = _float_or_none(evidence.get("near_limit_up_count_20d")) or 0.0
+    pullback_days = _float_or_none(evidence.get("pullback_days")) or 0.0
+    launch_bucket = str(evidence.get("low_suction_launch_quality_bucket") or "")
+
+    fresh_lift = bool(evidence.get("first_effective_lift") or evidence.get("low_suction_launch_confirmed"))
+    recent_limit_source = bool(evidence.get("recent_limit_up_20d")) or near_limit_up_count > 0
+    stale_active_weak_decay_pullback = _default_candidate_stale_active_weak_decay_pullback(
+        low_suction_days=low_suction_days,
+        fresh_lift=fresh_lift,
+        recent_limit_source=recent_limit_source,
+        close_location=close_location,
+        volume_ratio=volume_ratio,
+        pullback_days=pullback_days,
+        strong_leg=_float_or_none(evidence.get("strong_leg_score")) or 0.0,
+    )
+    mature_low_suction_lift = _default_candidate_mature_low_suction_lift(
+        low_suction_days=low_suction_days,
+        fresh_lift=fresh_lift,
+        ma5_distance=ma5_distance,
+        ma10_distance=ma10_distance,
+        ma_convergence=ma_convergence,
+        volume_ratio=volume_ratio,
+    )
+    active_right_tail_source = _default_candidate_active_right_tail_source(
+        evidence,
+        large_bull_count=large_bull_count,
+        ma5_distance=ma5_distance,
+        warning_level=warning_level,
+        ma5_slope=ma5_slope,
+        latest_change=latest_change,
+    )
+
+    adjustment = 0.0
+    notes: list[str] = []
+    if clean_watch_profile == "clean_active_support_divergence":
+        adjustment += 2.0
+        notes.append("干净支撑分歧低吸默认买点加分")
+    elif clean_watch_profile == "clean_low_liquidity_first_lift":
+        adjustment += 2.6
+        notes.append("低流动性承接首启默认买点加分")
+    elif clean_watch_profile == "clean_low_liquidity_accumulation":
+        adjustment += 2.2
+        notes.append("低流动性连续承接默认买点加分")
+
+    if mature_low_suction_lift:
+        adjustment += 1.4
+        notes.append("成熟低吸首启加分")
+    if active_right_tail_source:
+        adjustment += 0.8
+        notes.append("近期活跃右尾来源加分")
+
+    if ma5_distance is not None and ma5_distance >= 6.0 and not active_right_tail_source:
+        adjustment -= 2.4
+        notes.append("偏离5日线过远降权")
+    if (
+        bool(evidence.get("volume_stall_risk") or evidence.get("high_position_volume_stall_risk"))
+        and not mature_low_suction_lift
+        and not active_right_tail_source
+    ):
+        adjustment -= 2.0
+        notes.append("放量滞涨降权")
+    if low_suction_days >= 3 and not fresh_lift and not active_right_tail_source:
+        adjustment -= 1.2
+        notes.append("低吸蓄势无首启降权")
+    if (
+        large_bull_count >= 3
+        and not bool(evidence.get("recent_limit_up_20d"))
+        and not mature_low_suction_lift
+        and close_location is not None
+        and close_location > 0.58
+    ):
+        adjustment -= 1.0
+        notes.append("多次大阳但无涨停且收盘偏拥挤降权")
+    if (
+        warning_level >= 3
+        and (ma5_slope is None or ma5_slope < 0.10)
+        and close_location is not None
+        and close_location > 0.58
+        and not mature_low_suction_lift
+        and not active_right_tail_source
+    ):
+        adjustment -= 1.1
+        notes.append("弱行情无5日线转强降权")
+    if ma20_distance is not None and ma20_distance < -3.0 and not mature_low_suction_lift:
+        adjustment -= 0.8
+        notes.append("MA20未收回降权")
+
+    tradable_ma5 = ma5_distance is not None and -2.0 <= ma5_distance <= 4.8
+    controlled_close = close_location is not None and close_location < 0.78
+    high_close = close_location is not None and close_location >= 0.78
+    ma5_turn_or_mild_change = (
+        (ma5_slope is not None and ma5_slope >= 0.0)
+        or (latest_change is not None and latest_change <= 6.2)
+    )
+    if recent_limit_source and tradable_ma5 and controlled_close and ma5_turn_or_mild_change and low_suction_days <= 5:
+        adjustment += 0.35
+        notes.append("活跃且可交易低中位轻加分")
+    if (
+        launch_bucket == "thin_volume_launch"
+        and controlled_close
+        and volume_ratio is not None
+        and volume_ratio <= 1.05
+    ):
+        adjustment += 0.35
+        notes.append("缩量启动收盘可控轻加分")
+    if (
+        high_close
+        and not recent_limit_source
+        and launch_bucket in {"high_close_launch", "repeated_launch", "other_confirmed_launch", "late_pullback_launch"}
+    ):
+        adjustment -= 1.6
+        notes.append("无涨停来源高位启动降权")
+    if large_bull_count >= 3 and not recent_limit_source and high_close:
+        adjustment -= 1.0
+        notes.append("多大阳无涨停高位拥挤降权")
+    if low_suction_days >= 6 and not fresh_lift and recent_limit_source:
+        adjustment -= 1.7
+        notes.append("活跃后低吸陈旧无首启降权")
+    if stale_active_weak_decay_pullback:
+        adjustment -= 1.1
+        notes.append("活跃陈旧弱量强势衰减无首启追加降权")
+    if (
+        low_suction_days >= 3
+        and fresh_lift
+        and high_close
+        and not recent_limit_source
+        and launch_bucket in {"high_close_launch", "repeated_launch", "other_confirmed_launch", "late_pullback_launch"}
+    ):
+        adjustment -= 0.5
+        notes.append("成熟低吸无涨停高位确认不足降权")
+    if (
+        low_suction_days >= 6
+        and fresh_lift
+        and high_close
+        and launch_bucket in {"high_close_launch", "repeated_launch", "late_pullback_launch"}
+    ):
+        adjustment -= 1.2
+        notes.append("后段高位启动轻降权")
+    if (
+        low_suction_days >= 6
+        and fresh_lift
+        and high_close
+        and recent_limit_source
+        and launch_bucket in {"high_close_launch", "repeated_launch", "late_pullback_launch"}
+    ):
+        adjustment -= 0.3
+        notes.append("活跃后段高位确认降权")
+    if ma5_distance is not None and 4.8 <= ma5_distance < 6.0 and recent_limit_source and high_close:
+        adjustment -= 0.4
+        notes.append("活跃高收盘偏离5日线轻降权")
+    if not notes:
+        return _default_candidate_quality_decision(0.0, "neutral_candidate_quality", [])
+    return _default_candidate_quality_decision(
+        max(min(adjustment, 3.0), -4.0),
+        "default_candidate_quality",
+        notes,
+    )
+
+
+def _default_candidate_stale_active_weak_decay_pullback(
+    *,
+    low_suction_days: float,
+    fresh_lift: bool,
+    recent_limit_source: bool,
+    close_location: float | None,
+    volume_ratio: float | None,
+    pullback_days: float,
+    strong_leg: float,
+) -> bool:
+    return bool(
+        low_suction_days >= 6.0
+        and not fresh_lift
+        and recent_limit_source
+        and close_location is not None
+        and close_location > 0.25
+        and volume_ratio is not None
+        and volume_ratio <= 1.05
+        and (pullback_days >= 6.0 or strong_leg >= 96.0)
+    )
+
+
+def _default_candidate_stale_active_long_weak_pullback(
+    *,
+    low_suction_days: float,
+    fresh_lift: bool,
+    recent_limit_source: bool,
+    close_location: float | None,
+    volume_ratio: float | None,
+    pullback_days: float,
+) -> bool:
+    return _default_candidate_stale_active_weak_decay_pullback(
+        low_suction_days=low_suction_days,
+        fresh_lift=fresh_lift,
+        recent_limit_source=recent_limit_source,
+        close_location=close_location,
+        volume_ratio=volume_ratio,
+        pullback_days=pullback_days,
+        strong_leg=0.0,
+    )
+
+
+def _default_candidate_mature_low_suction_lift(
+    *,
+    low_suction_days: float,
+    fresh_lift: bool,
+    ma5_distance: float | None,
+    ma10_distance: float | None,
+    ma_convergence: float | None,
+    volume_ratio: float | None,
+) -> bool:
+    return bool(
+        low_suction_days >= 3
+        and fresh_lift
+        and ma5_distance is not None
+        and -1.5 <= ma5_distance <= 3.5
+        and ma10_distance is not None
+        and -2.0 <= ma10_distance <= 4.8
+        and volume_ratio is not None
+        and 0.50 <= volume_ratio <= 1.35
+        and ma_convergence is not None
+        and ma_convergence <= 8.0
+    )
+
+
+def _default_candidate_active_right_tail_source(
+    evidence: dict[str, Any],
+    *,
+    large_bull_count: float,
+    ma5_distance: float | None,
+    warning_level: float,
+    ma5_slope: float | None,
+    latest_change: float | None,
+) -> bool:
+    has_recent_activity = bool(evidence.get("recent_limit_up_20d")) or large_bull_count >= 1
+    return bool(
+        has_recent_activity
+        and ma5_distance is not None
+        and ma5_distance <= 4.8
+        and warning_level <= 2.0
+        and (ma5_slope is not None and ma5_slope >= 0.05 or latest_change is not None and latest_change <= 6.2)
+    )
+
+
+def _default_candidate_quality_decision(adjustment: float, profile: str, notes: list[str]) -> dict[str, Any]:
+    return {"adjustment": round(adjustment, 4), "profile": profile, "notes": notes}
 
 
 def entry_launch_quality_adjustment(evidence: dict[str, Any]) -> float:

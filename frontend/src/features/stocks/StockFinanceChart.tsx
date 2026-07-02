@@ -98,9 +98,9 @@ function normalizeReportName(name: string): string {
     "一季报": "一季报", "中报": "中报",
     "三季报": "三季报", "年报": "年报",
   };
-  for (const [suffix, replacement] of Object.entries(map)) {
+  for (const [suffix, mappedSuffix] of Object.entries(map)) {
     if (name.endsWith(suffix)) {
-      return name.slice(0, -suffix.length) + replacement;
+      return name.slice(0, -suffix.length) + mappedSuffix;
     }
   }
   return name;

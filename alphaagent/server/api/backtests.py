@@ -34,14 +34,11 @@ from alphaagent.server.services.backtest.engine import (
     backtest_phase_strategy_family_matrix,
     backtest_path_diagnostics,
     backtest_performance_attribution_report,
-    backtest_replacement_quality_matrix,
     backtest_report,
-    backtest_rotation_opportunity_cost_matrix,
     backtest_report_csv,
     backtest_setup_market_exit_audit,
     backtest_strategy_timeline,
     backtest_support_stop_matrix,
-    backtest_trend_winner_protection_matrix,
     backtest_symbol_detail,
     backtest_top_candidate_audit,
     backtest_trade_attribution,
@@ -411,17 +408,6 @@ def get_phase_strategy_family_matrix(
         return _service_error(exc)
 
 
-@router.get("/{backtest_id}/replacement-quality-matrix")
-def get_replacement_quality_matrix(
-    backtest_id: int,
-    sample_limit: int = Query(default=80, ge=1, le=500),
-):
-    try:
-        return ok(backtest_replacement_quality_matrix(backtest_id, sample_limit=sample_limit))
-    except Exception as exc:
-        return _service_error(exc)
-
-
 @router.get("/{backtest_id}/execution-breakpoint-matrix")
 def get_execution_breakpoint_matrix(
     backtest_id: int,
@@ -434,46 +420,6 @@ def get_execution_breakpoint_matrix(
                 backtest_id,
                 candidate_rank_limit=candidate_rank_limit,
                 sample_limit=sample_limit,
-            )
-        )
-    except Exception as exc:
-        return _service_error(exc)
-
-
-@router.get("/{backtest_id}/rotation-opportunity-cost-matrix")
-def get_rotation_opportunity_cost_matrix(
-    backtest_id: int,
-    candidate_rank_limit: int = Query(default=20, ge=1, le=200),
-    sample_limit: int = Query(default=120, ge=1, le=500),
-    holding_days: int = Query(default=20, ge=1, le=60),
-):
-    try:
-        return ok(
-            backtest_rotation_opportunity_cost_matrix(
-                backtest_id,
-                candidate_rank_limit=candidate_rank_limit,
-                sample_limit=sample_limit,
-                holding_days=holding_days,
-            )
-        )
-    except Exception as exc:
-        return _service_error(exc)
-
-
-@router.get("/{backtest_id}/trend-winner-protection-matrix")
-def get_trend_winner_protection_matrix(
-    backtest_id: int,
-    candidate_rank_limit: int = Query(default=20, ge=1, le=200),
-    sample_limit: int = Query(default=120, ge=1, le=500),
-    holding_days: int = Query(default=20, ge=1, le=60),
-):
-    try:
-        return ok(
-            backtest_trend_winner_protection_matrix(
-                backtest_id,
-                candidate_rank_limit=candidate_rank_limit,
-                sample_limit=sample_limit,
-                holding_days=holding_days,
             )
         )
     except Exception as exc:
@@ -685,11 +631,6 @@ def _params_from_payload(payload: dict[str, Any]) -> BacktestParams:
         tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
         tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
         tail_entry_ma5_tolerance_pct=float(payload.get("tail_entry_ma5_tolerance_pct") or 1.5),
-        enable_signal_rotation=_parse_bool(payload.get("enable_signal_rotation"), default=True),
-        rotation_min_score=float(payload.get("rotation_min_score") or 98.0),
-        rotation_min_score_gap=float(payload.get("rotation_min_score_gap") or 8.0),
-        rotation_max_holding_return_pct=float(payload.get("rotation_max_holding_return_pct") or 3.0),
-        rotation_min_holding_days=int(payload.get("rotation_min_holding_days") or 3),
         require_low_suction_launch_confirmation=_parse_bool(payload.get("require_low_suction_launch_confirmation"), default=False),
         exclude_repeated_dragon_pullback=_parse_bool(payload.get("exclude_repeated_dragon_pullback"), default=False),
         require_low_suction_launch_for_low_suction_context=_parse_bool(
@@ -739,16 +680,24 @@ def _params_from_payload(payload: dict[str, Any]) -> BacktestParams:
             payload.get("enable_pure_loss_weak_bucket_penalty"),
             default=False,
         ),
+        enable_selective_setup_quality_lane=_parse_bool(
+            payload.get("enable_selective_setup_quality_lane"),
+            default=False,
+        ),
+        enable_support_divergence_entry_lane=_parse_bool(
+            payload.get("enable_support_divergence_entry_lane"),
+            default=False,
+        ),
+        enable_strong_trend_ma_pullback_entry_lane=_parse_bool(
+            payload.get("enable_strong_trend_ma_pullback_entry_lane"),
+            default=False,
+        ),
         enable_high_risk_d2_follow_through_entry=_parse_bool(
             payload.get("enable_high_risk_d2_follow_through_entry"),
             default=False,
         ),
         enable_dynamic_failed_launch_exit_stop=_parse_bool(
             payload.get("enable_dynamic_failed_launch_exit_stop"),
-            default=False,
-        ),
-        enable_dynamic_failed_launch_replacement_quality_gate=_parse_bool(
-            payload.get("enable_dynamic_failed_launch_replacement_quality_gate"),
             default=False,
         ),
         enable_failed_launch_exit_stop=_parse_bool(payload.get("enable_failed_launch_exit_stop"), default=False),
@@ -762,7 +711,6 @@ def _params_from_payload(payload: dict[str, Any]) -> BacktestParams:
         mid_profit_giveback_drawdown_pct=float(payload.get("mid_profit_giveback_drawdown_pct") or 0.07),
         enable_contextual_support_reclaim_delay=_parse_bool(payload.get("enable_contextual_support_reclaim_delay"), default=False),
         support_reclaim_delay_max_warning_level=int(payload.get("support_reclaim_delay_max_warning_level") or 2),
-        support_reclaim_delay_max_replacement_score_gap=float(payload.get("support_reclaim_delay_max_replacement_score_gap") or 6.0),
         support_reclaim_delay_min_sell_day_range_pct=float(payload.get("support_reclaim_delay_min_sell_day_range_pct") or 5.0),
         enable_contextual_peak_giveback_stop=_parse_bool(payload.get("enable_contextual_peak_giveback_stop"), default=False),
         peak_giveback_min_high_gain_pct=float(payload.get("peak_giveback_min_high_gain_pct") or 0.12),
@@ -773,29 +721,6 @@ def _params_from_payload(payload: dict[str, Any]) -> BacktestParams:
         low_suction_false_launch_min_days=int(payload.get("low_suction_false_launch_min_days") or 3),
         low_suction_false_launch_min_warning_level=int(payload.get("low_suction_false_launch_min_warning_level") or 2),
         low_suction_false_launch_max_recovery_level=int(payload.get("low_suction_false_launch_max_recovery_level") or 1),
-        enable_missed_candidate_quality_rotation=_parse_bool(payload.get("enable_missed_candidate_quality_rotation"), default=False),
-        missed_rotation_min_score=float(payload.get("missed_rotation_min_score") or 98.0),
-        missed_rotation_min_score_gap=float(payload.get("missed_rotation_min_score_gap") or 10.0),
-        missed_rotation_max_held_return_pct=float(payload.get("missed_rotation_max_held_return_pct") or 1.0),
-        missed_rotation_min_held_days=int(payload.get("missed_rotation_min_held_days") or 4),
-        enable_high_quality_trend_rotation=_parse_bool(payload.get("enable_high_quality_trend_rotation"), default=False),
-        high_quality_rotation_min_score=float(payload.get("high_quality_rotation_min_score") or 96.0),
-        high_quality_rotation_max_rank=int(payload.get("high_quality_rotation_max_rank") or 10),
-        high_quality_rotation_min_score_gap=float(payload.get("high_quality_rotation_min_score_gap") or 8.0),
-        high_quality_rotation_max_held_return_pct=float(payload.get("high_quality_rotation_max_held_return_pct") or 0.0),
-        high_quality_rotation_min_held_days=int(payload.get("high_quality_rotation_min_held_days") or 4),
-        enable_weak_holding_quality_rotation=_parse_bool(payload.get("enable_weak_holding_quality_rotation"), default=False),
-        weak_holding_rotation_min_score=float(payload.get("weak_holding_rotation_min_score") or 96.0),
-        weak_holding_rotation_max_rank=int(payload.get("weak_holding_rotation_max_rank") or 20),
-        weak_holding_rotation_min_score_gap=float(payload.get("weak_holding_rotation_min_score_gap") or 6.0),
-        weak_holding_rotation_max_held_return_pct=float(payload.get("weak_holding_rotation_max_held_return_pct") or -5.0),
-        weak_holding_rotation_min_held_days=int(payload.get("weak_holding_rotation_min_held_days") or 3),
-        weak_holding_rotation_max_ma_convergence_pct=float(payload.get("weak_holding_rotation_max_ma_convergence_pct") or 5.0),
-        weak_holding_rotation_min_low_suction_days=int(payload.get("weak_holding_rotation_min_low_suction_days") or 3),
-        enable_protected_weak_holding_rotation=_parse_bool(
-            payload.get("enable_protected_weak_holding_rotation"),
-            default=False,
-        ),
         enable_low_suction_pullback_entry=_parse_bool(payload.get("enable_low_suction_pullback_entry"), default=False),
         low_suction_pullback_entry_max_wait_days=int(payload.get("low_suction_pullback_entry_max_wait_days") or 3),
         low_suction_pullback_entry_buffer_pct=float(payload.get("low_suction_pullback_entry_buffer_pct") or 0.01),
@@ -813,28 +738,8 @@ def _params_from_payload(payload: dict[str, Any]) -> BacktestParams:
         low_suction_failed_follow_d3_close_pct=float(payload.get("low_suction_failed_follow_d3_close_pct") or -3.0),
         low_suction_opened_space_d5_high_pct=float(payload.get("low_suction_opened_space_d5_high_pct") or 6.0),
         low_suction_opened_space_d5_low_pct=float(payload.get("low_suction_opened_space_d5_low_pct") or -5.0),
-        enable_low_suction_branch_replacement_quality_gate=_parse_bool(
-            payload.get("enable_low_suction_branch_replacement_quality_gate"),
-            default=False,
-        ),
-        low_suction_branch_replacement_gate_wait_days=int(_payload_value(payload, "low_suction_branch_replacement_gate_wait_days", 3)),
-        low_suction_branch_replacement_min_score=float(_payload_value(payload, "low_suction_branch_replacement_min_score", 98.0)),
-        low_suction_branch_replacement_max_market_warning_level=int(
-            _payload_value(payload, "low_suction_branch_replacement_max_market_warning_level", 1)
-        ),
-        low_suction_branch_replacement_max_low_suction_ma_convergence_pct=float(
-            _payload_value(payload, "low_suction_branch_replacement_max_low_suction_ma_convergence_pct", 7.0)
-        ),
-        low_suction_branch_replacement_max_dragon_ma_convergence_pct=float(
-            _payload_value(payload, "low_suction_branch_replacement_max_dragon_ma_convergence_pct", 12.0)
-        ),
-        enable_low_suction_branch_replacement_strict_setup_gate=_parse_bool(
-            payload.get("enable_low_suction_branch_replacement_strict_setup_gate"),
-            default=False,
-        ),
         setup_family_filter=str(payload.get("setup_family_filter") or "").strip(),
         enable_phase_aware_setup_selector=_parse_bool(payload.get("enable_phase_aware_setup_selector"), default=False),
-        enable_phase_replacement_quality=_parse_bool(payload.get("enable_phase_replacement_quality"), default=False),
         reuse_signal_cache=_parse_bool(payload.get("reuse_signal_cache"), default=False),
         exclude_from_product_baseline=_parse_bool(payload.get("exclude_from_product_baseline"), default=False),
         symbols=_parse_symbols(payload.get("symbols") or payload.get("vt_symbols") or payload.get("vt_symbol")),

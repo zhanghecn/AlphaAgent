@@ -10,8 +10,9 @@ from sqlalchemy import and_, desc, select
 from alphaagent.market.boards import stock_board_payload
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
+from alphaagent.server.services.quant import screening_loaders, screening_payloads
 from alphaagent.server.services.quant.factors import STRATEGY_ID
-from alphaagent.server.services.quant.factors import STRATEGY_VERSION
+from alphaagent.server.services.quant.strategy_registry import get_strategy
 
 
 DEFAULT_COMMISSION_RATE = 0.0003
@@ -182,20 +183,31 @@ def auto_buy_recommendations(account_id: int | None = None, payload: dict[str, A
     limit = min(max(int(payload.get("limit") or 5), 1), 20)
     amount_per_order = float(payload.get("amount_per_order") or 100_000)
     strategy_id = str(payload.get("strategy_id") or STRATEGY_ID)
+    strategy = get_strategy(strategy_id)
+    if strategy is None:
+        return {"status": "unsupported_strategy", "strategy_id": strategy_id, "items": []}
 
     fills: list[dict[str, Any]] = []
     synced_group_items = 0
     with session_scope() as session:
+        screen_run = screening_loaders.latest_screen_run(
+            session,
+            strategy.id,
+            strategy.version,
+            signal_evidence_schema_version=screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+        )
+        if not screen_run:
+            return {"status": "empty", "account_id": account_id, "items": [], "message": "no BUY recommendations"}
         recommendations = session.execute(
             select(schema.quant_recommendations)
             .where(
                 and_(
-                    schema.quant_recommendations.c.strategy_id == strategy_id,
+                    schema.quant_recommendations.c.run_id == screen_run["id"],
                     schema.quant_recommendations.c.status == "active",
                     schema.quant_recommendations.c.action == "BUY",
                 )
             )
-            .order_by(desc(schema.quant_recommendations.c.trade_date), schema.quant_recommendations.c.rank)
+            .order_by(schema.quant_recommendations.c.rank)
             .limit(limit)
         ).mappings().all()
         if not recommendations:

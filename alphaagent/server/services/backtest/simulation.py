@@ -9,34 +9,28 @@ from typing import Any, Callable
 from alphaagent.server.services.backtest import ledger, scoring
 from alphaagent.server.services.backtest.schemas import BacktestParams, MinuteBar, Position, ScoreContext, Trade
 from alphaagent.server.services.quant import candidate_lanes
-from alphaagent.server.services.quant.factors import Bar, DRAGON_PULLBACK_STRATEGY_ID, evaluate_exit
+from alphaagent.server.services.quant.factors import Bar, DRAGON_PULLBACK_STRATEGY_ID, evaluate_exit, moving_average, pct_distance
 from alphaagent.server.services.quant.low_suction_quality import low_suction_launch_quality_bucket
 
-STEALTH_LOW_SUCTION_ROTATION_MIN_SCORE = 90.0
-STEALTH_LOW_SUCTION_ROTATION_MIN_HOLDING_DAYS = 5
-STEALTH_LOW_SUCTION_ROTATION_MAX_HOLDING_RETURN_PCT = -1.0
-STEALTH_LOW_SUCTION_ROTATION_MAX_PORTFOLIO_DRAWDOWN_PCT = -8.0
 LOW_SUCTION_PULLBACK_ENTRY_BUCKETS = {"balanced_first_lift", "late_pullback_launch"}
 LOW_SUCTION_CONFIRMED_ENTRY_MODE = "low_suction_trigger_day_confirmed_next_open"
 DYNAMIC_FAILED_LAUNCH_EXIT_STOP = "dynamic_failed_launch_exit_stop"
 LOW_SUCTION_FAILED_FOLLOW_BRANCH_STOP = "low_suction_failed_follow_branch_stop"
 LOW_SUCTION_OPENED_SPACE_GIVEBACK_STOP = "low_suction_opened_space_giveback_stop"
-WEAK_HOLDING_QUALITY_ROTATION_REASON = "rotation_for_weak_holding_quality_candidate"
-PROTECTED_WEAK_HOLDING_ROTATION_REASON = "rotation_for_protected_weak_holding_candidate"
-PROTECTED_WEAK_HOLDING_UPTREND_REPAIR_BUFFER_PCT = 3.0
-PROTECTED_WEAK_HOLDING_TREND_BUFFER_PCT = 2.0
-PROTECTED_WEAK_HOLDING_UPTREND_REGIMES = {"strong_broad", "narrow_mainline_bull", "mainline_pullback"}
-HIGH_QUALITY_ROTATION_HARD_FAILURES = {
-    "distribution_risk",
-    "high_level_sideways_distribution_risk",
-    "volume_stall_risk",
-    "weak_rebound_ma5_below_ma10",
-    "ma20_broken",
-    "pullback_too_deep",
-    "liquidity_score",
-    "risk_score",
-    "overheat",
-}
+GUARDED_HIGHCLOSE_GIVEBACK_STOP = "guarded_highclose_giveback_stop"
+SUPPORT_STOP_REENTRY_SOURCE = "support_stop_reentry"
+SUPPORT_STOP_REENTRY_ENTRY_MODE = "support_stop_ma5_reentry_next_open"
+SUPPORT_STOP_REENTRY_MAX_WAIT_DAYS = 5
+SUPPORT_STOP_REENTRY_MIN_CLOSE_LOCATION = 0.55
+SUPPORT_STOP_REENTRY_MAX_CLOSE_LOCATION = 1.00
+SUPPORT_STOP_REENTRY_MIN_CHANGE_PCT = 0.2
+SUPPORT_STOP_REENTRY_MAX_CHANGE_PCT = 5.5
+SUPPORT_STOP_REENTRY_MIN_VOLUME_RATIO = 0.80
+SUPPORT_STOP_REENTRY_MAX_VOLUME_RATIO = 1.15
+SUPPORT_STOP_REENTRY_MAX_MA5_DISTANCE_PCT = 4.0
+SUPPORT_STOP_REENTRY_MAX_MA10_DISTANCE_PCT = 6.0
+SUPPORT_STOP_REENTRY_SCORE = 88.0
+SUPPORT_STOP_REENTRY_SNAPSHOT_RANK_OFFSET = 1000
 
 
 @dataclass(frozen=True)
@@ -51,6 +45,8 @@ class SimulationCallbacks:
     order: Callable[[date, str, str, float | None, int | None, str, str, dict[str, Any] | None], dict[str, Any]]
     trade_to_api: Callable[[Trade], dict[str, Any]]
     mapping_to_api: Callable[[dict[str, Any]], dict[str, Any]]
+    candidate_snapshot: Callable[[date, list[Any], BacktestParams], list[dict[str, Any]]]
+    candidate_snapshot_from_payload: Callable[[date, dict[str, Any], BacktestParams], dict[str, Any]]
 
 
 def simulate_portfolio(
@@ -70,13 +66,14 @@ def simulate_portfolio(
     pending_pullback_buys: list[dict[str, Any]] = []
     pending_sells: list[dict[str, Any]] = []
     pending_reclaim_checks: dict[str, dict[str, Any]] = {}
-    branch_replacement_gates: list[dict[str, Any]] = []
+    support_stop_reentry_watchlist: dict[str, dict[str, Any]] = {}
     theoretical_positions: dict[str, Position] = {}
     trades: list[Trade] = []
     orders: list[dict[str, Any]] = []
     equity_curve: list[dict[str, Any]] = []
     position_snapshots: list[dict[str, Any]] = []
     signal_events: list[dict[str, Any]] = []
+    candidate_snapshots: list[dict[str, Any]] = []
     bar_index = bar_index_by_symbol(bars_by_symbol)
     if params.intraday_entry:
         minute_index = (
@@ -96,7 +93,6 @@ def simulate_portfolio(
     for index, current_day in enumerate(trading_days):
         today_bars = {symbol: bar_index[symbol][current_day] for symbol in bar_index if current_day in bar_index[symbol]}
         daily_candidates = None
-        age_low_suction_branch_replacement_gates(branch_replacement_gates, current_day)
 
         for order in list(pending_pullback_buys):
             if order["execute_date"] != current_day:
@@ -206,22 +202,6 @@ def simulate_portfolio(
                 if callbacks.is_limit_down_open(bar):
                     orders.append(callbacks.order(current_day, order["vt_symbol"], "SELL", None, position.volume, "rejected", "limit_down", raw))
                     continue
-                if weak_holding_rotation_sell_invalid_at_execute(order, position, bar, params):
-                    raw.update(weak_holding_rotation_cancel_raw(position, bar, params, order))
-                    orders.append(
-                        callbacks.order(
-                            current_day,
-                            order["vt_symbol"],
-                            "SELL",
-                            None,
-                            position.volume,
-                            "cancelled",
-                            str(order.get("reason") or WEAK_HOLDING_QUALITY_ROTATION_REASON),
-                            raw,
-                        )
-                    )
-                    continue
-                raw.update(weak_holding_rotation_execute_raw(order, position, bar, params))
                 sell_raw_price = bar.open_price
 
             sell_execution = ledger.calculate_sell_execution(
@@ -238,11 +218,10 @@ def simulate_portfolio(
             pnl = sell_execution.pnl
             cash += sell_execution.cash_delta
             del positions[order["vt_symbol"]]
-            replacement_gate = replacement_quality_gate_from_sell(order, current_day, params)
-            if replacement_gate:
-                branch_replacement_gates.append(replacement_gate)
             orders.append(callbacks.order(current_day, order["vt_symbol"], "SELL", fill_price, position.volume, "filled", order["reason"], raw))
             trades.append(Trade(current_day, order["vt_symbol"], "SELL", fill_price, position.volume, amount, fee, pnl, order["reason"], raw))
+            if support_stop_reentry_watch_applies(order, position, params):
+                support_stop_reentry_watchlist[order["vt_symbol"]] = support_stop_reentry_watch(order, position, current_day)
 
         for order in list(pending_buys):
             if order["execute_date"] != current_day:
@@ -279,27 +258,6 @@ def simulate_portfolio(
                 continue
             if len(positions) >= params.max_positions:
                 orders.append(callbacks.order(current_day, order["vt_symbol"], "BUY", None, None, "rejected", "position_slot_unavailable", None))
-                continue
-            gate_decision = low_suction_branch_replacement_gate_decision(
-                order,
-                positions,
-                branch_replacement_gates,
-                current_day,
-                params,
-            )
-            if gate_decision.get("status") == "rejected":
-                orders.append(
-                    callbacks.order(
-                        current_day,
-                        order["vt_symbol"],
-                        "BUY",
-                        None,
-                        0,
-                        "rejected",
-                        str(gate_decision.get("mode") or "low_suction_branch_replacement_quality_gate"),
-                        gate_decision,
-                    )
-                )
                 continue
             bar = today_bars.get(order["vt_symbol"])
             if not bar:
@@ -376,8 +334,6 @@ def simulate_portfolio(
             amount = buy_execution.amount
             fee = buy_execution.fee
             cash = buy_execution.cash_after
-            if gate_decision.get("status") == "accepted" and gate_decision.get("gate_id") is not None:
-                consume_low_suction_branch_replacement_gate(branch_replacement_gates, str(gate_decision["gate_id"]))
             entry_reason = dict(order["reason"])
             entry_reason["execution"] = fill
             order_raw = dict(entry_reason)
@@ -452,13 +408,42 @@ def simulate_portfolio(
             )
             orders.append(callbacks.order(current_day, vt_symbol, "SELL", None, position.volume, "pending", check["reason"], raw))
 
+        if index < len(trading_days) - 1 and support_stop_reentry_watchlist:
+            next_day = trading_days[index + 1]
+            reentry_rank = 1
+            blocked_symbols = (
+                set(positions)
+                | {str(order["vt_symbol"]) for order in pending_buys}
+                | {str(order["vt_symbol"]) for order in pending_pullback_buys}
+                | {str(order["vt_symbol"]) for order in pending_sells}
+            )
+            for vt_symbol, watch in list(support_stop_reentry_watchlist.items()):
+                if vt_symbol in blocked_symbols:
+                    continue
+                signal = support_stop_reentry_signal(
+                    bars_by_symbol.get(vt_symbol, []),
+                    current_day,
+                    watch,
+                    params,
+                )
+                if signal.get("status") == "waiting":
+                    continue
+                if signal.get("status") == "expired":
+                    support_stop_reentry_watchlist.pop(vt_symbol, None)
+                    continue
+                if signal.get("status") != "matched":
+                    continue
+                support_stop_reentry_watchlist.pop(vt_symbol, None)
+                snapshot = callbacks.candidate_snapshot_from_payload(
+                    current_day,
+                    support_stop_reentry_candidate_payload(vt_symbol, current_day, watch, signal, reentry_rank, params),
+                    params,
+                )
+                candidate_snapshots.append(snapshot)
+                reentry_rank += 1
+
         current_buy_signal_symbols: set[str] = set()
-        should_load_exit_candidates = (
-            params.enable_dynamic_failed_launch_exit_stop
-            or params.enable_failed_launch_exit_stop
-            or contextual_failed_launch_exit_needs_replacement_lookup(positions, today_bars, params)
-            or (params.enable_contextual_support_reclaim_delay and bool(positions))
-        )
+        should_load_exit_candidates = params.enable_dynamic_failed_launch_exit_stop or params.enable_failed_launch_exit_stop
         if should_load_exit_candidates and index < len(trading_days) - 1:
             if params.enable_dynamic_failed_launch_exit_stop or params.enable_failed_launch_exit_stop:
                 if score_cache is not None and current_day not in score_cache and session is None:
@@ -493,14 +478,6 @@ def simulate_portfolio(
                 current_day,
                 params,
                 current_buy_signal=vt_symbol in current_buy_signal_symbols,
-                replacement_available=has_strong_replacement_candidate(
-                    daily_candidates or [],
-                    positions,
-                    pending_buy_symbols,
-                    pending_sell_symbols,
-                    position,
-                    params,
-                ),
             )
             if not sell_reason:
                 continue
@@ -509,21 +486,12 @@ def simulate_portfolio(
             if index >= len(trading_days) - 1:
                 continue
             next_day = trading_days[index + 1]
-            replacement_score_gap = strongest_replacement_score_gap(
-                daily_candidates or [],
-                positions,
-                pending_buy_symbols,
-                pending_sell_symbols,
-                position,
-                params,
-            )
             if params.enable_contextual_support_reclaim_delay and sell_reason == "support_stop":
                 delay_decision = should_delay_contextual_support_reclaim(
                     exit_reason=sell_reason,
                     position=position,
                     bar=bar,
                     params=params,
-                    replacement_score_gap=replacement_score_gap,
                 )
                 if delay_decision["delay"]:
                     pending_reclaim_checks[vt_symbol] = {
@@ -539,7 +507,6 @@ def simulate_portfolio(
                         "entry_date": position.entry_date.isoformat(),
                         "reason": "contextual_support_reclaim_delay",
                         "original_reason": sell_reason,
-                        "replacement_score_gap": replacement_score_gap,
                         "delay_reasons": delay_decision["notes"],
                         "not_used_for_signal_score": True,
                     }
@@ -586,8 +553,7 @@ def simulate_portfolio(
             next_day = trading_days[index + 1]
             reserved_exit_count = len({str(order["vt_symbol"]) for order in pending_sells})
             free_slots = max(params.max_positions - len(positions) + reserved_exit_count - len(pending_buys), 0)
-            should_score_for_rotation = params.enable_signal_rotation and params.strategy == DRAGON_PULLBACK_STRATEGY_ID
-            if free_slots > 0 or should_score_for_rotation:
+            if free_slots > 0:
                 if score_cache is not None and current_day not in score_cache and session is None:
                     daily_candidates = []
                 else:
@@ -611,6 +577,7 @@ def simulate_portfolio(
                         daily_candidates = callbacks.score_day(session, bars_by_symbol, current_day, params, score_cache, score_context)
                     else:
                         daily_candidates = []
+                candidate_snapshots.extend(callbacks.candidate_snapshot(current_day, daily_candidates or [], params))
                 signal_events.extend(
                     signal_events_for_day(
                         current_day,
@@ -645,19 +612,10 @@ def simulate_portfolio(
         "equity": [callbacks.mapping_to_api(item) for item in equity_curve],
         "positions": [callbacks.mapping_to_api(item) for item in position_snapshots],
         "signal_events": [callbacks.mapping_to_api(item) for item in signal_events],
+        "candidate_snapshots": [callbacks.mapping_to_api(item) for item in candidate_snapshots],
         "trades": [callbacks.trade_to_api(trade) for trade in trades],
         "orders": [callbacks.mapping_to_api(item) for item in orders],
     }
-
-
-def age_low_suction_branch_replacement_gates(gates: list[dict[str, Any]], current_day: date) -> None:
-    for gate in list(gates):
-        if gate.get("last_seen_date") == current_day:
-            continue
-        gate["wait_count"] = int(gate.get("wait_count") or 0) + 1
-        gate["last_seen_date"] = current_day
-        if int(gate.get("wait_count") or 0) > int(gate.get("expires_after_trade_count") or 0):
-            gates.remove(gate)
 
 
 def schedule_entry_plans(
@@ -674,9 +632,10 @@ def schedule_entry_plans(
     pending_buy_symbols = {str(order["vt_symbol"]) for order in pending_buys}
     pending_pullback_symbols = {str(order["vt_symbol"]) for order in pending_pullback_buys}
     pending_sell_symbols = {str(order["vt_symbol"]) for order in pending_sells}
-    pool_context = candidate_lanes.execution_pool_context(candidates, params.candidate_limit, params.strategy)
+    executable_candidates = execution_pool_candidates(candidates)
+    pool_context = candidate_lanes.execution_pool_context(executable_candidates, params.candidate_limit, params.strategy)
 
-    for candidate in execution_candidate_pool(candidates, params):
+    for candidate in execution_candidate_pool(executable_candidates, params):
         vt_symbol = str(candidate.vt_symbol)
         if vt_symbol in positions or vt_symbol in pending_buy_symbols or vt_symbol in pending_pullback_symbols:
             continue
@@ -688,20 +647,7 @@ def schedule_entry_plans(
         reserved_exit_count = len({str(order["vt_symbol"]) for order in pending_sells})
         free_slots = max(params.max_positions - len(positions) + reserved_exit_count - len(pending_buys), 0)
         if free_slots <= 0:
-            replacement = rotation_replacement_for_candidate(candidate, positions, pending_sell_symbols, today_bars, params, signal_date)
-            if replacement is None:
-                continue
-            rotation_reason = rotation_reason_for_candidate(candidate, params)
-            pending_sells.append(
-                {
-                    "execute_date": execute_date,
-                    "signal_date": signal_date,
-                    "vt_symbol": replacement.vt_symbol,
-                    "reason": rotation_reason,
-                    "raw": rotation_sell_raw(candidate, replacement, signal_date, execute_date, today_bars.get(replacement.vt_symbol), rotation_reason),
-                }
-            )
-            pending_sell_symbols.add(replacement.vt_symbol)
+            continue
 
         pending_buys.append(
             {
@@ -709,168 +655,6 @@ def schedule_entry_plans(
             }
         )
         pending_buy_symbols.add(vt_symbol)
-
-
-def replacement_quality_gate_from_sell(
-    order: dict[str, Any],
-    current_day: date,
-    params: BacktestParams,
-) -> dict[str, Any] | None:
-    reason = str(order.get("reason") or "")
-    low_suction_branch_reasons = {LOW_SUCTION_FAILED_FOLLOW_BRANCH_STOP, LOW_SUCTION_OPENED_SPACE_GIVEBACK_STOP}
-    if reason in low_suction_branch_reasons and params.enable_low_suction_branch_replacement_quality_gate:
-        mode = "low_suction_branch_replacement_quality_gate"
-    elif reason == DYNAMIC_FAILED_LAUNCH_EXIT_STOP and params.enable_dynamic_failed_launch_replacement_quality_gate:
-        mode = "dynamic_failed_launch_replacement_quality_gate"
-    else:
-        return None
-    wait_days = max(int(params.low_suction_branch_replacement_gate_wait_days or 0), 1)
-    raw = order.get("raw") if isinstance(order.get("raw"), dict) else {}
-    gate_id = f"{order.get('vt_symbol')}:{current_day.isoformat()}:{reason}:{len(str(raw))}"
-    return {
-        "gate_id": gate_id,
-        "mode": mode,
-        "source_symbol": str(order.get("vt_symbol") or ""),
-        "source_reason": reason,
-        "sell_execute_date": current_day,
-        "expires_after_trade_count": wait_days,
-        "wait_count": 1,
-        "last_seen_date": current_day,
-        "source_raw": raw,
-        "not_used_for_signal_score": True,
-    }
-
-
-def low_suction_branch_replacement_gate_from_sell(
-    order: dict[str, Any],
-    current_day: date,
-    params: BacktestParams,
-) -> dict[str, Any] | None:
-    return replacement_quality_gate_from_sell(order, current_day, params)
-
-
-def low_suction_branch_replacement_gate_decision(
-    order: dict[str, Any],
-    positions: dict[str, Position],
-    gates: list[dict[str, Any]],
-    current_day: date,
-    params: BacktestParams,
-) -> dict[str, Any]:
-    if not replacement_quality_gate_enabled(params):
-        return {"status": "not_applicable"}
-    gate = first_active_low_suction_branch_replacement_gate(gates)
-    if not gate:
-        return {"status": "not_applicable"}
-    reason = order.get("reason") if isinstance(order.get("reason"), dict) else {}
-    strict_setup_note = low_suction_branch_replacement_strict_setup_note(reason, params)
-    open_slots = max(params.max_positions - len(positions), 0)
-    if open_slots > len(gates) and not strict_setup_note:
-        return {"status": "not_applicable"}
-    quality = low_suction_branch_replacement_quality(reason, params)
-    base = {
-        "mode": str(gate.get("mode") or "low_suction_branch_replacement_quality_gate"),
-        "status": "accepted" if quality["allowed"] else "rejected",
-        "execute_date": current_day.isoformat(),
-        "vt_symbol": order.get("vt_symbol"),
-        "gate_id": gate.get("gate_id"),
-        "gate_source_symbol": gate.get("source_symbol"),
-        "gate_source_reason": gate.get("source_reason"),
-        "gate_wait_count": gate.get("wait_count"),
-        "gate_max_wait_days": gate.get("expires_after_trade_count"),
-        "quality": quality,
-        "not_used_for_signal_score": True,
-    }
-    if quality["allowed"]:
-        return base
-    return base
-
-
-def replacement_quality_gate_enabled(params: BacktestParams) -> bool:
-    return bool(
-        params.enable_low_suction_branch_replacement_quality_gate
-        or params.enable_dynamic_failed_launch_replacement_quality_gate
-    )
-
-
-def first_active_low_suction_branch_replacement_gate(gates: list[dict[str, Any]]) -> dict[str, Any] | None:
-    return gates[0] if gates else None
-
-
-def consume_low_suction_branch_replacement_gate(gates: list[dict[str, Any]], gate_id: str) -> None:
-    for gate in list(gates):
-        if str(gate.get("gate_id") or "") == gate_id:
-            gates.remove(gate)
-            return
-
-
-def low_suction_branch_replacement_quality(reason: dict[str, Any], params: BacktestParams) -> dict[str, Any]:
-    score = _float_or_none(reason.get("entry_total_score") or reason.get("total_score") or reason.get("score")) or 0.0
-    setup = str(reason.get("entry_setup") or reason.get("setup_type") or "")
-    family = str(reason.get("setup_family") or "")
-    bucket = str(reason.get("low_suction_launch_quality_bucket") or "")
-    market_warning = _float_or_none(reason.get("market_warning_level")) or 0.0
-    ma_convergence = _float_or_none(reason.get("ma_convergence_pct"))
-    failed_rules = {str(rule) for rule in (reason.get("failed_rules") or [])}
-    risk_flags = {str(flag) for flag in (reason.get("risk_flags") or [])}
-    notes: list[str] = []
-    allowed = True
-    if score < params.low_suction_branch_replacement_min_score:
-        allowed = False
-        notes.append("score_below_gate")
-    if market_warning > params.low_suction_branch_replacement_max_market_warning_level:
-        allowed = False
-        notes.append("market_warning_too_high")
-    if failed_rules or risk_flags:
-        allowed = False
-        notes.append("has_failed_or_risk_flags")
-    strict_setup_note = low_suction_branch_replacement_strict_setup_note(reason, params)
-    if strict_setup_note:
-        allowed = False
-        notes.append(strict_setup_note)
-    if family in {"low_suction_buildup", "dragon_low_suction_overlap"} and not bool(reason.get("low_suction_launch_confirmed")):
-        allowed = False
-        notes.append("low_suction_overlap_unconfirmed")
-    if setup == "stealth_low_suction":
-        if bucket in {"unconfirmed_buildup", "repeated_launch"}:
-            allowed = False
-            notes.append("weak_low_suction_launch_bucket")
-        if ma_convergence is None or ma_convergence > params.low_suction_branch_replacement_max_low_suction_ma_convergence_pct:
-            allowed = False
-            notes.append("low_suction_ma_convergence_too_wide")
-    elif setup == "dragon_pullback":
-        if ma_convergence is None or ma_convergence > params.low_suction_branch_replacement_max_dragon_ma_convergence_pct:
-            allowed = False
-            notes.append("dragon_ma_convergence_too_wide")
-        if reason.get("fresh_tail_buy") is False:
-            allowed = False
-            notes.append("dragon_not_fresh_tail_buy")
-    else:
-        allowed = False
-        notes.append("unsupported_setup")
-    return {
-        "allowed": allowed,
-        "notes": notes,
-        "entry_score": score,
-        "entry_setup": setup,
-        "setup_family": family,
-        "low_suction_launch_quality_bucket": bucket,
-        "market_warning_level": market_warning,
-        "ma_convergence_pct": ma_convergence,
-        "not_used_for_signal_score": True,
-    }
-
-
-def low_suction_branch_replacement_strict_setup_note(reason: dict[str, Any], params: BacktestParams) -> str | None:
-    if not params.enable_low_suction_branch_replacement_strict_setup_gate:
-        return None
-    family = str(reason.get("setup_family") or "")
-    bucket = str(reason.get("low_suction_launch_quality_bucket") or "")
-    launch_confirmed = bool(reason.get("low_suction_launch_confirmed"))
-    if family in {"low_suction_buildup", "dragon_low_suction_overlap"} and not launch_confirmed:
-        return "strict_setup_gate_unconfirmed_buildup_or_overlap"
-    if bucket == "unconfirmed_buildup":
-        return "strict_setup_gate_unconfirmed_buildup_or_overlap"
-    return None
 
 
 def entry_plan_for_candidate(
@@ -1072,818 +856,217 @@ def low_suction_pullback_entry_decision(order: dict[str, Any], current_day: date
     }
 
 
-def rotation_replacement_for_candidate(
-    candidate: Any,
-    positions: dict[str, Position],
-    pending_sell_symbols: set[str],
-    today_bars: dict[str, Bar],
-    params: BacktestParams,
-    signal_date: date | None = None,
-) -> Position | None:
-    if not allow_signal_rotation(candidate, params):
-        return None
-    if params.enable_phase_replacement_quality:
-        replacement = phase_replacement_quality_replacement_for_candidate(
-            candidate,
-            positions,
-            pending_sell_symbols,
-            today_bars,
-            params,
-            signal_date,
-        )
-        if replacement is not None:
-            return replacement
-    if params.enable_missed_candidate_quality_rotation:
-        replacement = missed_candidate_quality_replacement_for_candidate(
-            candidate,
-            positions,
-            pending_sell_symbols,
-            today_bars,
-            params,
-            signal_date,
-        )
-        if replacement is not None:
-            return replacement
-    if params.enable_protected_weak_holding_rotation:
-        replacement = protected_weak_holding_rotation_replacement_for_candidate(
-            candidate,
-            positions,
-            pending_sell_symbols,
-            today_bars,
-            params,
-            signal_date,
-        )
-        if replacement is not None:
-            return replacement
-    if params.enable_weak_holding_quality_rotation:
-        replacement = weak_holding_quality_rotation_replacement_for_candidate(
-            candidate,
-            positions,
-            pending_sell_symbols,
-            today_bars,
-            params,
-            signal_date,
-        )
-        if replacement is not None:
-            return replacement
-    if params.enable_high_quality_trend_rotation:
-        replacement = high_quality_trend_rotation_replacement_for_candidate(
-            candidate,
-            positions,
-            pending_sell_symbols,
-            today_bars,
-            params,
-            signal_date,
-        )
-        if replacement is not None:
-            return replacement
-    if is_stealth_low_suction_rotation_candidate(candidate):
-        if portfolio_drawdown_pct(positions, today_bars, params.initial_cash) > STEALTH_LOW_SUCTION_ROTATION_MAX_PORTFOLIO_DRAWDOWN_PCT:
-            return None
-        return low_efficiency_replacement_for_stealth_low_suction(
-            positions,
-            pending_sell_symbols,
-            today_bars,
-            params,
-            signal_date,
-        )
+def support_stop_reentry_watch_applies(order: dict[str, Any], position: Position, params: BacktestParams) -> bool:
+    if params.strategy != DRAGON_PULLBACK_STRATEGY_ID or params.execution_model != "legacy_next_open":
+        return False
+    return str(order.get("reason") or "") == "support_stop" and isinstance(position.reason, dict)
 
-    candidate_score = float(getattr(candidate, "total_score", 0) or 0)
-    replacement_rows: list[tuple[float, float, Position]] = []
-    for vt_symbol, position in positions.items():
-        if vt_symbol in pending_sell_symbols:
-            continue
-        if low_suction_confirmed_opened_space_rotation_protected(position, today_bars.get(vt_symbol), params):
-            continue
-        if signal_date is not None and (signal_date - position.entry_date).days < params.rotation_min_holding_days:
-            continue
-        bar = today_bars.get(vt_symbol)
-        if not bar:
-            continue
-        holding_return_pct = position_return_pct(position, bar)
-        if holding_return_pct > params.rotation_max_holding_return_pct:
-            continue
-        entry_score = entry_score_for_position(position)
-        if candidate_score < entry_score + params.rotation_min_score_gap:
-            continue
-        replacement_rows.append((holding_return_pct, entry_score, position))
-    if not replacement_rows:
-        return None
-    replacement_rows.sort(key=lambda item: (item[0], item[1], item[2].entry_date, item[2].vt_symbol))
-    return replacement_rows[0][2]
+
+def support_stop_reentry_watch(order: dict[str, Any], position: Position, execute_date: date) -> dict[str, Any]:
+    reason = position.reason if isinstance(position.reason, dict) else {}
+    execution = reason.get("execution") if isinstance(reason.get("execution"), dict) else {}
+    signal_date = order.get("signal_date")
+    source_signal_date = _as_date(execution.get("signal_date")) or position.entry_date
+    return {
+        "vt_symbol": position.vt_symbol,
+        "source_signal_date": source_signal_date,
+        "source_entry_date": position.entry_date,
+        "source_reason": dict(reason),
+        "source_execution": dict(execution),
+        "support_stop_signal_date": signal_date if isinstance(signal_date, date) else execute_date,
+        "support_stop_execute_date": execute_date,
+        "checked_days": 0,
+    }
+
+
+def support_stop_reentry_signal(
+    bars: list[Bar],
+    current_day: date,
+    watch: dict[str, Any],
+    params: BacktestParams,
+) -> dict[str, Any]:
+    if params.strategy != DRAGON_PULLBACK_STRATEGY_ID or params.execution_model != "legacy_next_open":
+        return {"status": "disabled", "reason": "unsupported_strategy_or_execution_model"}
+    execute_date = watch.get("support_stop_execute_date")
+    if isinstance(execute_date, date) and current_day <= execute_date:
+        return {"status": "waiting", "reason": "same_day_or_before_support_stop_execute"}
+    index = next((offset for offset, bar in enumerate(bars) if bar.trade_date == current_day), None)
+    checked_days = int(watch.get("checked_days") or 0) + 1
+    watch["checked_days"] = checked_days
+    base = {
+        "source": SUPPORT_STOP_REENTRY_SOURCE,
+        "entry_execution_mode": SUPPORT_STOP_REENTRY_ENTRY_MODE,
+        "support_stop_execute_date": _iso_date(execute_date),
+        "reentry_signal_date": current_day.isoformat(),
+        "checked_days": checked_days,
+        "max_wait_days": SUPPORT_STOP_REENTRY_MAX_WAIT_DAYS,
+    }
+    if checked_days > SUPPORT_STOP_REENTRY_MAX_WAIT_DAYS:
+        return {**base, "status": "expired", "reason": "max_wait_days_exceeded"}
+    if index is None:
+        return {**base, "status": "waiting", "reason": "missing_signal_bar"}
+    features = support_stop_reentry_signal_features(bars, index)
+    match = support_stop_reentry_match(features)
+    if not match["matched"]:
+        if checked_days >= SUPPORT_STOP_REENTRY_MAX_WAIT_DAYS:
+            return {**base, **features, "status": "expired", "reason": str(match["reason"])}
+        return {**base, **features, "status": "waiting", "reason": str(match["reason"])}
+    return {**base, **features, "status": "matched", "reason": "visible_ma5_reclaim_normal_volume"}
+
+
+def support_stop_reentry_signal_features(bars: list[Bar], index: int) -> dict[str, Any]:
+    bar = bars[index]
+    closes = [float(item.close_price) for item in bars[: index + 1]]
+    volumes = [float(item.volume or 0.0) for item in bars[: index + 1]]
+    ma5 = moving_average(closes, 5)
+    ma10 = moving_average(closes, 10)
+    volume5 = moving_average(volumes, 5)
+    volume20 = moving_average(volumes, 20)
+    volume_ratio = volume5 / volume20 if volume5 is not None and volume20 not in (None, 0) else None
+    latest_change = pct_distance(float(bar.close_price), float(bars[index - 1].close_price)) if index > 0 else None
+    return {
+        "reentry_close_location": bar_close_location(bar),
+        "reentry_change_pct": latest_change,
+        "reentry_volume_ratio_5d_20d": volume_ratio,
+        "reentry_ma5": ma5,
+        "reentry_ma10": ma10,
+        "reentry_ma5_distance_pct": pct_distance(float(bar.close_price), ma5),
+        "reentry_ma10_distance_pct": pct_distance(float(bar.close_price), ma10),
+        "reentry_reclaimed_ma5": bool(ma5 is not None and float(bar.close_price) >= ma5),
+        "reentry_open_price": float(bar.open_price),
+        "reentry_high_price": float(bar.high_price),
+        "reentry_low_price": float(bar.low_price),
+        "reentry_close_price": float(bar.close_price),
+        "reentry_volume": float(bar.volume or 0.0),
+    }
+
+
+def support_stop_reentry_match(features: dict[str, Any]) -> dict[str, Any]:
+    close_location = _float_or_none(features.get("reentry_close_location"))
+    change_pct = _float_or_none(features.get("reentry_change_pct"))
+    volume_ratio = _float_or_none(features.get("reentry_volume_ratio_5d_20d"))
+    ma5_distance = _float_or_none(features.get("reentry_ma5_distance_pct"))
+    ma10_distance = _float_or_none(features.get("reentry_ma10_distance_pct"))
+    if close_location is None or not (SUPPORT_STOP_REENTRY_MIN_CLOSE_LOCATION <= close_location <= SUPPORT_STOP_REENTRY_MAX_CLOSE_LOCATION):
+        return {"matched": False, "reason": "close_location_out_of_range"}
+    if change_pct is None or not (SUPPORT_STOP_REENTRY_MIN_CHANGE_PCT <= change_pct <= SUPPORT_STOP_REENTRY_MAX_CHANGE_PCT):
+        return {"matched": False, "reason": "change_pct_out_of_range"}
+    if volume_ratio is None or not (SUPPORT_STOP_REENTRY_MIN_VOLUME_RATIO <= volume_ratio <= SUPPORT_STOP_REENTRY_MAX_VOLUME_RATIO):
+        return {"matched": False, "reason": "volume_ratio_out_of_range"}
+    if ma5_distance is None or ma5_distance > SUPPORT_STOP_REENTRY_MAX_MA5_DISTANCE_PCT:
+        return {"matched": False, "reason": "ma5_distance_out_of_range"}
+    if ma10_distance is None or ma10_distance > SUPPORT_STOP_REENTRY_MAX_MA10_DISTANCE_PCT:
+        return {"matched": False, "reason": "ma10_distance_out_of_range"}
+    if not features.get("reentry_reclaimed_ma5"):
+        return {"matched": False, "reason": "ma5_not_reclaimed"}
+    return {"matched": True, "reason": "matched"}
+
+
+def support_stop_reentry_reason(
+    vt_symbol: str,
+    signal_date: date,
+    watch: dict[str, Any],
+    signal: dict[str, Any],
+    reentry_rank: int,
+    params: BacktestParams,
+) -> dict[str, Any]:
+    features = {
+        "ma5": signal.get("reentry_ma5"),
+        "ma10": signal.get("reentry_ma10"),
+        "support_price": signal.get("reentry_ma5") or signal.get("reentry_close_price"),
+        "support_type": "ma5_reclaim",
+        "close_location_in_range": signal.get("reentry_close_location"),
+        "latest_change_pct": signal.get("reentry_change_pct"),
+        "volume_ratio_5d_20d": signal.get("reentry_volume_ratio_5d_20d"),
+        "ma5_distance_pct": signal.get("reentry_ma5_distance_pct"),
+        "ma10_distance_pct": signal.get("reentry_ma10_distance_pct"),
+    }
+    execution = {
+        "execution_lane": SUPPORT_STOP_REENTRY_SOURCE,
+        "raw_signal_rank": SUPPORT_STOP_REENTRY_SNAPSHOT_RANK_OFFSET + reentry_rank,
+        "execution_opportunity_score": SUPPORT_STOP_REENTRY_SCORE,
+        "execution_opportunity_bonus": 0.0,
+        "execution_volume_preparation_adjustment": 0.0,
+        "execution_candidate_rank": reentry_rank,
+        "execution_candidate_selected": True,
+        "execution_candidate_limit": int(params.candidate_limit or 0),
+    }
+    return {
+        "status": "ready",
+        "action": "BUY",
+        "entry_signal": True,
+        "executable_entry_signal": True,
+        "entry_setup": SUPPORT_STOP_REENTRY_SOURCE,
+        "setup_type": SUPPORT_STOP_REENTRY_SOURCE,
+        "entry_family": SUPPORT_STOP_REENTRY_SOURCE,
+        "entry_execution_mode": SUPPORT_STOP_REENTRY_ENTRY_MODE,
+        "candidate_source": SUPPORT_STOP_REENTRY_SOURCE,
+        "support_stop_reentry": True,
+        "support_stop_reentry_spec": "visible_ma5_reclaim_normal_volume_c055_100_v080_115_chg02_55",
+        "source_signal_date": _iso_date(watch.get("source_signal_date")),
+        "source_entry_date": _iso_date(watch.get("source_entry_date")),
+        "source_support_stop_signal_date": _iso_date(watch.get("support_stop_signal_date")),
+        "source_support_stop_execute_date": _iso_date(watch.get("support_stop_execute_date")),
+        "reentry_signal_date": signal_date.isoformat(),
+        "checked_days": signal.get("checked_days"),
+        "entry_total_score": SUPPORT_STOP_REENTRY_SCORE,
+        "entry_signal_type": SUPPORT_STOP_REENTRY_SOURCE,
+        "total_score": SUPPORT_STOP_REENTRY_SCORE,
+        "candidate_execution": execution,
+        "source_reason": dict(watch.get("source_reason") or {}),
+        **features,
+    }
+
+
+def support_stop_reentry_candidate_payload(
+    vt_symbol: str,
+    signal_date: date,
+    watch: dict[str, Any],
+    signal: dict[str, Any],
+    reentry_rank: int,
+    params: BacktestParams,
+) -> dict[str, Any]:
+    rank = SUPPORT_STOP_REENTRY_SNAPSHOT_RANK_OFFSET + reentry_rank
+    reason = support_stop_reentry_reason(vt_symbol, signal_date, watch, signal, reentry_rank, params)
+    execution = dict(reason["candidate_execution"])
+    return {
+        "trade_date": signal_date,
+        "vt_symbol": vt_symbol,
+        "rank": rank,
+        "action": "BUY",
+        "entry_signal": True,
+        "executable_entry_signal": True,
+        "total_score": SUPPORT_STOP_REENTRY_SCORE,
+        "reason": reason,
+        "source": SUPPORT_STOP_REENTRY_SOURCE,
+        "candidate_source": SUPPORT_STOP_REENTRY_SOURCE,
+        "candidate_execution": execution,
+        "raw_signal_rank": rank,
+        "execution_candidate_rank": reentry_rank,
+        "execution_candidate_selected": True,
+        "entry_family": SUPPORT_STOP_REENTRY_SOURCE,
+        "factor_cache_complete": True,
+    }
 
 
 def execution_candidate_pool(candidates: list[Any], params: BacktestParams) -> list[Any]:
-    return candidate_lanes.select_dragon_pullback_execution_pool(candidates, params.candidate_limit, params.strategy)
+    return candidate_lanes.select_dragon_pullback_execution_pool(execution_pool_candidates(candidates), params.candidate_limit, params.strategy)
 
 
-def has_strong_replacement_candidate(
-    candidates: list[Any],
-    positions: dict[str, Position],
-    pending_buy_symbols: set[str],
-    pending_sell_symbols: set[str],
-    position: Position,
-    params: BacktestParams,
-) -> bool:
-    if not params.enable_contextual_failed_launch_exit_stop:
-        return False
-
-    entry_score = entry_score_for_position(position)
-    held_symbols = set(positions)
-    for candidate in execution_candidate_pool(candidates, params):
-        vt_symbol = str(getattr(candidate, "vt_symbol", "") or "")
-        if not vt_symbol or vt_symbol in held_symbols:
-            continue
-        if vt_symbol in pending_buy_symbols or vt_symbol in pending_sell_symbols:
-            continue
-        if not bool(getattr(candidate, "entry_signal", False)):
-            continue
-        total_score = float(getattr(candidate, "total_score", 0) or 0)
-        if total_score < params.rotation_min_score:
-            continue
-        if entry_score and total_score < entry_score + params.rotation_min_score_gap:
-            continue
-        if not scoring.is_buy_candidate(candidate, params):
-            continue
-        return True
-    return False
+def execution_pool_candidates(candidates: list[Any]) -> list[Any]:
+    return [candidate for candidate in candidates if not research_entry_observation_only(candidate)]
 
 
-def strongest_replacement_score_gap(
-    candidates: list[Any],
-    positions: dict[str, Position],
-    pending_buy_symbols: set[str],
-    pending_sell_symbols: set[str],
-    position: Position,
-    params: BacktestParams,
-) -> float | None:
-    entry_score = entry_score_for_position(position)
-    held_symbols = set(positions)
-    best_gap: float | None = None
-    for candidate in execution_candidate_pool(candidates, params):
-        vt_symbol = str(getattr(candidate, "vt_symbol", "") or "")
-        if not vt_symbol or vt_symbol in held_symbols:
-            continue
-        if vt_symbol in pending_buy_symbols or vt_symbol in pending_sell_symbols:
-            continue
-        if not bool(getattr(candidate, "entry_signal", False)):
-            continue
-        if not scoring.is_buy_candidate(candidate, params):
-            continue
-        gap = float(getattr(candidate, "total_score", 0) or 0) - entry_score
-        if best_gap is None or gap > best_gap:
-            best_gap = gap
-    return best_gap
+def support_divergence_research_entry(candidate: Any) -> bool:
+    return research_entry_observation_only(candidate)
 
 
-def contextual_failed_launch_exit_needs_replacement_lookup(
-    positions: dict[str, Position],
-    today_bars: dict[str, Bar],
-    params: BacktestParams,
-) -> bool:
-    if params.strategy != DRAGON_PULLBACK_STRATEGY_ID or not params.enable_contextual_failed_launch_exit_stop:
-        return False
-    for vt_symbol, position in positions.items():
-        bar = today_bars.get(vt_symbol)
-        if bar and contextual_failed_launch_exit_preflight_applies(position, bar):
-            return True
-    return False
-
-
-def allow_signal_rotation(candidate: Any, params: BacktestParams) -> bool:
-    if params.strategy != DRAGON_PULLBACK_STRATEGY_ID or not params.enable_signal_rotation:
-        return False
-    if not bool(getattr(candidate, "entry_signal", False)):
-        return False
-    if params.enable_phase_replacement_quality and phase_replacement_quality_candidate(candidate, params):
-        return True
-    if params.enable_missed_candidate_quality_rotation and missed_candidate_quality_rotation_candidate(candidate, params):
-        return True
-    if params.enable_protected_weak_holding_rotation and protected_weak_holding_rotation_candidate(candidate, params):
-        return True
-    if params.enable_weak_holding_quality_rotation and weak_holding_quality_rotation_candidate(candidate, params):
-        return True
-    if params.enable_high_quality_trend_rotation and high_quality_trend_rotation_candidate(candidate, params):
-        return True
-    if is_stealth_low_suction_rotation_candidate(candidate):
-        return True
-    if float(getattr(candidate, "total_score", 0) or 0) < params.rotation_min_score:
-        return False
+def research_entry_observation_only(candidate: Any) -> bool:
     evidence = getattr(candidate, "evidence", {}) or {}
-    if evidence.get("dragon_state") != "TAIL_BUY_READY":
-        return False
-    if evidence.get("fresh_tail_buy") is False:
-        return False
-    return True
-
-
-def missed_candidate_quality_rotation_candidate(candidate: Any, params: BacktestParams) -> bool:
-    if float(getattr(candidate, "total_score", 0) or 0) < params.missed_rotation_min_score:
-        return False
-    evidence = getattr(candidate, "evidence", {}) or {}
-    if evidence.get("dragon_state") != "TAIL_BUY_READY" and str(evidence.get("entry_setup") or "") != "stealth_low_suction":
-        return False
-    if str(evidence.get("low_suction_launch_quality_bucket") or "") == "unconfirmed_buildup":
-        return False
-    if evidence.get("low_suction_launch_confirmed") is False and float(evidence.get("low_suction_days") or 0) >= 3:
-        return False
-    return True
-
-
-def high_quality_trend_rotation_candidate(candidate: Any, params: BacktestParams) -> bool:
-    if float(getattr(candidate, "total_score", 0) or 0) < params.high_quality_rotation_min_score:
-        return False
-    evidence = getattr(candidate, "evidence", {}) or {}
-    execution = evidence.get("candidate_execution") if isinstance(evidence.get("candidate_execution"), dict) else {}
-    execution_rank = _int_or_none(execution.get("execution_candidate_rank"))
-    if execution_rank is None:
-        execution_rank = _int_or_none(execution.get("raw_signal_rank"))
-    if execution_rank is not None and execution_rank > max(int(params.high_quality_rotation_max_rank or 10), 1):
-        return False
-    setup = str(evidence.get("entry_setup") or evidence.get("setup_type") or "")
-    dragon_ready = evidence.get("dragon_state") == "TAIL_BUY_READY" and evidence.get("fresh_tail_buy") is not False
-    low_suction_confirmed = (
-        setup == "stealth_low_suction"
-        and bool(evidence.get("low_suction_launch_confirmed"))
-        and str(evidence.get("low_suction_launch_quality_bucket") or low_suction_launch_quality_bucket(evidence))
-        in {"balanced_first_lift", "other_confirmed_launch"}
+    return bool(
+        evidence.get("support_divergence_entry_observation_only")
+        or evidence.get("strong_trend_ma_pullback_entry_observation_only")
     )
-    if not (dragon_ready or low_suction_confirmed):
-        return False
-    if str(evidence.get("low_suction_launch_quality_bucket") or "") == "unconfirmed_buildup":
-        return False
-    return not has_hard_rotation_risk(evidence)
-
-
-def weak_holding_quality_rotation_candidate(candidate: Any, params: BacktestParams) -> bool:
-    if not bool(getattr(candidate, "entry_signal", False)):
-        return False
-    if float(getattr(candidate, "total_score", 0) or 0) < params.weak_holding_rotation_min_score:
-        return False
-    evidence = getattr(candidate, "evidence", {}) or {}
-    execution = evidence.get("candidate_execution") if isinstance(evidence.get("candidate_execution"), dict) else {}
-    execution_rank = _int_or_none(execution.get("execution_candidate_rank"))
-    if execution_rank is None:
-        execution_rank = _int_or_none(execution.get("raw_signal_rank"))
-    if execution_rank is not None and execution_rank > max(int(params.weak_holding_rotation_max_rank or 20), 1):
-        return False
-    if str(evidence.get("low_suction_launch_quality_bucket") or "") == "unconfirmed_buildup":
-        return False
-    if has_hard_rotation_risk(evidence):
-        return False
-    return (
-        weak_rotation_tight_ma_candidate(evidence, params)
-        or weak_rotation_low_suction_candidate(evidence, params)
-        or weak_rotation_fresh_dragon_candidate(evidence)
-    )
-
-
-def protected_weak_holding_rotation_candidate(candidate: Any, params: BacktestParams) -> bool:
-    return weak_holding_quality_rotation_candidate(candidate, params)
-
-
-def weak_rotation_tight_ma_candidate(evidence: dict[str, Any], params: BacktestParams) -> bool:
-    convergence = _float_or_none(evidence.get("ma_convergence_pct"))
-    return bool(convergence is not None and convergence <= params.weak_holding_rotation_max_ma_convergence_pct)
-
-
-def weak_rotation_low_suction_candidate(evidence: dict[str, Any], params: BacktestParams) -> bool:
-    low_suction_days = _float_or_none(evidence.get("low_suction_days")) or 0.0
-    if low_suction_days < params.weak_holding_rotation_min_low_suction_days:
-        return False
-    if not bool(evidence.get("low_suction_launch_confirmed")):
-        return False
-    bucket = str(evidence.get("low_suction_launch_quality_bucket") or low_suction_launch_quality_bucket(evidence))
-    return bucket in {"balanced_first_lift", "other_confirmed_launch", "late_pullback_launch"}
-
-
-def weak_rotation_fresh_dragon_candidate(evidence: dict[str, Any]) -> bool:
-    return bool(evidence.get("dragon_state") == "TAIL_BUY_READY" and evidence.get("fresh_tail_buy") is not False)
-
-
-def has_hard_rotation_risk(evidence: dict[str, Any]) -> bool:
-    failures = {str(rule) for rule in (evidence.get("failed_rules") or [])}
-    risk_flags = {str(flag) for flag in (evidence.get("risk_flags") or [])}
-    return bool(failures & HIGH_QUALITY_ROTATION_HARD_FAILURES or risk_flags & HIGH_QUALITY_ROTATION_HARD_FAILURES)
-
-
-def phase_replacement_quality_candidate(candidate: Any, params: BacktestParams) -> bool:
-    if not params.enable_phase_replacement_quality:
-        return False
-    if float(getattr(candidate, "total_score", 0) or 0) < max(params.rotation_min_score, 98.0):
-        return False
-    evidence = getattr(candidate, "evidence", {}) or {}
-    family = str(evidence.get("setup_family") or "")
-    if family not in {"dragon_pullback", "low_suction_first_lift", "dragon_low_suction_overlap"}:
-        return False
-    if family == "low_suction_first_lift" and not bool(evidence.get("low_suction_launch_confirmed")):
-        return False
-    selector = evidence.get("phase_aware_setup_selector") if isinstance(evidence.get("phase_aware_setup_selector"), dict) else {}
-    if selector and selector.get("allowed") is False:
-        return False
-    return True
-
-
-def phase_replacement_quality_replacement_for_candidate(
-    candidate: Any,
-    positions: dict[str, Position],
-    pending_sell_symbols: set[str],
-    today_bars: dict[str, Bar],
-    params: BacktestParams,
-    signal_date: date | None,
-) -> Position | None:
-    if not phase_replacement_quality_candidate(candidate, params):
-        return None
-    candidate_score = float(getattr(candidate, "total_score", 0) or 0)
-    rows: list[tuple[float, float, Position]] = []
-    for vt_symbol, position in positions.items():
-        if vt_symbol in pending_sell_symbols:
-            continue
-        if low_suction_confirmed_opened_space_rotation_protected(position, today_bars.get(vt_symbol), params):
-            continue
-        if signal_date is not None and (signal_date - position.entry_date).days < max(params.rotation_min_holding_days, 4):
-            continue
-        bar = today_bars.get(vt_symbol)
-        if not bar:
-            continue
-        holding_return_pct = position_return_pct(position, bar)
-        if holding_return_pct > min(params.rotation_max_holding_return_pct, 1.0):
-            continue
-        entry_score = entry_score_for_position(position)
-        if candidate_score < entry_score + max(params.rotation_min_score_gap, 10.0):
-            continue
-        if current_same_stock_hold_signal(position, bar):
-            continue
-        rows.append((holding_return_pct, entry_score, position))
-    if not rows:
-        return None
-    rows.sort(key=lambda item: (item[0], item[1], item[2].entry_date, item[2].vt_symbol))
-    return rows[0][2]
-
-
-def missed_candidate_quality_replacement_for_candidate(
-    candidate: Any,
-    positions: dict[str, Position],
-    pending_sell_symbols: set[str],
-    today_bars: dict[str, Bar],
-    params: BacktestParams,
-    signal_date: date | None,
-) -> Position | None:
-    if not missed_candidate_quality_rotation_candidate(candidate, params):
-        return None
-    candidate_score = float(getattr(candidate, "total_score", 0) or 0)
-    rows: list[tuple[float, float, Position]] = []
-    for vt_symbol, position in positions.items():
-        if vt_symbol in pending_sell_symbols:
-            continue
-        if low_suction_confirmed_opened_space_rotation_protected(position, today_bars.get(vt_symbol), params):
-            continue
-        if signal_date is not None and (signal_date - position.entry_date).days < params.missed_rotation_min_held_days:
-            continue
-        bar = today_bars.get(vt_symbol)
-        if not bar:
-            continue
-        holding_return_pct = position_return_pct(position, bar)
-        if holding_return_pct > params.missed_rotation_max_held_return_pct:
-            continue
-        entry_score = entry_score_for_position(position)
-        if candidate_score < entry_score + params.missed_rotation_min_score_gap:
-            continue
-        if current_same_stock_hold_signal(position, bar):
-            continue
-        rows.append((holding_return_pct, entry_score, position))
-    if not rows:
-        return None
-    rows.sort(key=lambda item: (item[0], item[1], item[2].entry_date, item[2].vt_symbol))
-    return rows[0][2]
-
-
-def weak_holding_quality_rotation_replacement_for_candidate(
-    candidate: Any,
-    positions: dict[str, Position],
-    pending_sell_symbols: set[str],
-    today_bars: dict[str, Bar],
-    params: BacktestParams,
-    signal_date: date | None,
-) -> Position | None:
-    if not weak_holding_quality_rotation_candidate(candidate, params):
-        return None
-    candidate_score = float(getattr(candidate, "total_score", 0) or 0)
-    rows: list[tuple[float, float, date, str, Position]] = []
-    for vt_symbol, position in positions.items():
-        if vt_symbol in pending_sell_symbols:
-            continue
-        bar = today_bars.get(vt_symbol)
-        if not bar:
-            continue
-        if low_suction_confirmed_opened_space_rotation_protected(position, bar, params):
-            continue
-        if current_same_stock_hold_signal(position, bar):
-            continue
-        if signal_date is not None and (signal_date - position.entry_date).days < params.weak_holding_rotation_min_held_days:
-            continue
-        holding_return_pct = position_return_pct(position, bar)
-        if holding_return_pct > params.weak_holding_rotation_max_held_return_pct:
-            continue
-        entry_score = entry_score_for_position(position)
-        if candidate_score < entry_score + params.weak_holding_rotation_min_score_gap:
-            continue
-        rows.append((holding_return_pct, entry_score, position.entry_date, vt_symbol, position))
-    if not rows:
-        return None
-    rows.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
-    return rows[0][4]
-
-
-def protected_weak_holding_rotation_replacement_for_candidate(
-    candidate: Any,
-    positions: dict[str, Position],
-    pending_sell_symbols: set[str],
-    today_bars: dict[str, Bar],
-    params: BacktestParams,
-    signal_date: date | None,
-) -> Position | None:
-    if not protected_weak_holding_rotation_candidate(candidate, params):
-        return None
-    candidate_score = float(getattr(candidate, "total_score", 0) or 0)
-    rows: list[tuple[float, float, date, str, Position]] = []
-    for vt_symbol, position in positions.items():
-        if vt_symbol in pending_sell_symbols:
-            continue
-        bar = today_bars.get(vt_symbol)
-        if not bar:
-            continue
-        if signal_date is not None and (signal_date - position.entry_date).days < params.weak_holding_rotation_min_held_days:
-            continue
-        entry_score = entry_score_for_position(position)
-        if candidate_score < entry_score + params.weak_holding_rotation_min_score_gap:
-            continue
-        decision = protected_weak_holding_replacement_decision(
-            position,
-            bar,
-            params,
-            price=bar.close_price,
-            price_source="signal_close",
-            include_close_context=True,
-        )
-        if not decision["replaceable"]:
-            continue
-        rows.append((float(decision["current_return_pct"]), entry_score, position.entry_date, vt_symbol, position))
-    if not rows:
-        return None
-    rows.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
-    return rows[0][4]
-
-
-def high_quality_trend_rotation_replacement_for_candidate(
-    candidate: Any,
-    positions: dict[str, Position],
-    pending_sell_symbols: set[str],
-    today_bars: dict[str, Bar],
-    params: BacktestParams,
-    signal_date: date | None,
-) -> Position | None:
-    if not high_quality_trend_rotation_candidate(candidate, params):
-        return None
-    candidate_score = float(getattr(candidate, "total_score", 0) or 0)
-    rows: list[tuple[float, float, date, str, Position]] = []
-    for vt_symbol, position in positions.items():
-        if vt_symbol in pending_sell_symbols:
-            continue
-        bar = today_bars.get(vt_symbol)
-        if not bar:
-            continue
-        if low_suction_confirmed_opened_space_rotation_protected(position, bar, params):
-            continue
-        if current_same_stock_hold_signal(position, bar):
-            continue
-        if signal_date is not None and (signal_date - position.entry_date).days < params.high_quality_rotation_min_held_days:
-            continue
-        holding_return_pct = position_return_pct(position, bar)
-        if holding_return_pct > params.high_quality_rotation_max_held_return_pct:
-            continue
-        entry_score = entry_score_for_position(position)
-        if candidate_score < entry_score + params.high_quality_rotation_min_score_gap:
-            continue
-        rows.append((holding_return_pct, entry_score, position.entry_date, vt_symbol, position))
-    if not rows:
-        return None
-    rows.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
-    return rows[0][4]
-
-
-def current_same_stock_hold_signal(position: Position, bar: Bar) -> bool:
-    context = dragon_pullback_hold_context(position, bar)
-    return bool(context["low_base_accumulation"] or (context["ma_support_pullback"] and context["price_volume_sync"]))
-
-
-def low_efficiency_replacement_for_stealth_low_suction(
-    positions: dict[str, Position],
-    pending_sell_symbols: set[str],
-    today_bars: dict[str, Bar],
-    params: BacktestParams,
-    signal_date: date | None,
-) -> Position | None:
-    replacement_rows: list[tuple[float, int, float, Position]] = []
-    min_holding_days = max(params.rotation_min_holding_days, STEALTH_LOW_SUCTION_ROTATION_MIN_HOLDING_DAYS)
-    for vt_symbol, position in positions.items():
-        if vt_symbol in pending_sell_symbols:
-            continue
-        if low_suction_confirmed_opened_space_rotation_protected(position, today_bars.get(vt_symbol), params):
-            continue
-        if signal_date is not None and (signal_date - position.entry_date).days < min_holding_days:
-            continue
-        bar = today_bars.get(vt_symbol)
-        if not bar:
-            continue
-        holding_return_pct = position_return_pct(position, bar)
-        if holding_return_pct > STEALTH_LOW_SUCTION_ROTATION_MAX_HOLDING_RETURN_PCT:
-            continue
-        holding_days = (signal_date - position.entry_date).days if signal_date else 0
-        replacement_rows.append((holding_return_pct, -holding_days, entry_score_for_position(position), position))
-    if not replacement_rows:
-        return None
-    replacement_rows.sort(key=lambda item: (item[0], item[1], item[2], item[3].vt_symbol))
-    return replacement_rows[0][3]
-
-
-def is_stealth_low_suction_rotation_candidate(candidate: Any) -> bool:
-    if not bool(getattr(candidate, "entry_signal", False)):
-        return False
-    if float(getattr(candidate, "total_score", 0) or 0) < STEALTH_LOW_SUCTION_ROTATION_MIN_SCORE:
-        return False
-    evidence = getattr(candidate, "evidence", {}) or {}
-    setup = str(evidence.get("entry_setup") or evidence.get("setup_type") or "")
-    if setup != "stealth_low_suction":
-        return False
-    if _float_or_none(evidence.get("low_suction_days")) is None or float(evidence.get("low_suction_days") or 0) < 3:
-        return False
-    if float(evidence.get("low_suction_buildup_score") or 0) < 95:
-        return False
-    if float(evidence.get("stealth_low_suction_score") or 0) < 95:
-        return False
-    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
-    if ma_convergence is None or ma_convergence > 4.0:
-        return False
-    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
-    if volume_ratio is None or not (0.55 <= volume_ratio <= 1.45):
-        return False
-    ma20_distance = _float_or_none(evidence.get("ma20_distance_pct"))
-    if ma20_distance is None or ma20_distance < -2.5:
-        return False
-    hard_failures = {
-        "distribution_risk",
-        "weak_rebound_ma5_below_ma10",
-        "ma20_broken",
-        "pullback_too_deep",
-        "liquidity_score",
-        "risk_score",
-        "overheat",
-    }
-    failures = {str(rule) for rule in (evidence.get("failed_rules") or [])}
-    risk_flags = {str(flag) for flag in (evidence.get("risk_flags") or [])}
-    return not (failures & hard_failures or risk_flags & hard_failures)
-
-
-def stealth_low_suction_rotation_key(candidate: Any) -> tuple[float, float, float, float, str]:
-    evidence = getattr(candidate, "evidence", {}) or {}
-    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
-    return (
-        -float(evidence.get("stealth_low_suction_score") or 0),
-        -float(evidence.get("low_suction_buildup_score") or 0),
-        -float(evidence.get("low_suction_days") or 0),
-        ma_convergence if ma_convergence is not None else 999.0,
-        str(getattr(candidate, "vt_symbol", "")),
-    )
-
-
-def rotation_sell_raw(
-    candidate: Any,
-    replacement: Position,
-    signal_date: date,
-    execute_date: date,
-    bar: Bar | None,
-    reason: str = "rotation_for_stronger_signal",
-) -> dict[str, Any]:
-    holding_return_pct = position_return_pct(replacement, bar) if bar else None
-    return {
-        "mode": reason,
-        "signal_date": signal_date.isoformat(),
-        "execute_date": execute_date.isoformat(),
-        "entry_date": replacement.entry_date.isoformat(),
-        "reason": reason,
-        "replacement_symbol": str(candidate.vt_symbol),
-        "replacement_score": float(getattr(candidate, "total_score", 0) or 0),
-        "replaced_entry_score": entry_score_for_position(replacement),
-        "holding_return_pct": holding_return_pct,
-    }
-
-
-def weak_holding_rotation_sell_invalid_at_execute(
-    order: dict[str, Any],
-    position: Position,
-    bar: Bar,
-    params: BacktestParams,
-) -> bool:
-    reason = str(order.get("reason") or "")
-    if not weak_holding_rotation_reason(reason):
-        return False
-    if reason == PROTECTED_WEAK_HOLDING_ROTATION_REASON:
-        decision = protected_weak_holding_replacement_decision(
-            position,
-            bar,
-            params,
-            price=bar.open_price,
-            price_source="execute_open",
-            include_close_context=False,
-        )
-        return not bool(decision["replaceable"])
-    execute_return_pct = position_execute_return_pct(position, bar)
-    return execute_return_pct > params.weak_holding_rotation_max_held_return_pct
-
-
-def weak_holding_rotation_execute_raw(
-    order: dict[str, Any],
-    position: Position,
-    bar: Bar,
-    params: BacktestParams,
-) -> dict[str, Any]:
-    reason = str(order.get("reason") or "")
-    if not weak_holding_rotation_reason(reason):
-        return {}
-    raw: dict[str, Any] = {}
-    if reason == PROTECTED_WEAK_HOLDING_ROTATION_REASON:
-        raw["protected_weak_holding_decision"] = protected_weak_holding_replacement_decision(
-            position,
-            bar,
-            params,
-            price=bar.open_price,
-            price_source="execute_open",
-            include_close_context=False,
-        )
-    return {
-        **raw,
-        "execute_open_return_pct": position_execute_return_pct(position, bar),
-        "max_held_return_pct": params.weak_holding_rotation_max_held_return_pct,
-        "not_used_for_signal_score": True,
-    }
-
-
-def weak_holding_rotation_cancel_raw(position: Position, bar: Bar, params: BacktestParams, order: dict[str, Any] | None = None) -> dict[str, Any]:
-    reason = str((order or {}).get("reason") or "")
-    decision = (
-        protected_weak_holding_replacement_decision(
-            position,
-            bar,
-            params,
-            price=bar.open_price,
-            price_source="execute_open",
-            include_close_context=False,
-        )
-        if reason == PROTECTED_WEAK_HOLDING_ROTATION_REASON
-        else None
-    )
-    raw = {
-        "status": "cancelled",
-        "cancel_reason": "weak_holding_no_longer_below_threshold_at_execute",
-        "execute_open_return_pct": position_execute_return_pct(position, bar),
-        "max_held_return_pct": params.weak_holding_rotation_max_held_return_pct,
-        "not_used_for_signal_score": True,
-    }
-    if decision is not None:
-        raw["cancel_reason"] = str(decision["reason"])
-        raw["protection_bucket"] = decision["bucket"]
-        raw["protected_weak_holding_decision"] = decision
-    return raw
-
-
-def weak_holding_rotation_reason(reason: str) -> bool:
-    return reason in {WEAK_HOLDING_QUALITY_ROTATION_REASON, PROTECTED_WEAK_HOLDING_ROTATION_REASON}
-
-
-def rotation_reason_for_candidate(candidate: Any, params: BacktestParams | None = None) -> str:
-    if (
-        params is not None
-        and params.enable_protected_weak_holding_rotation
-        and protected_weak_holding_rotation_candidate(candidate, params)
-    ):
-        return PROTECTED_WEAK_HOLDING_ROTATION_REASON
-    if (
-        params is not None
-        and params.enable_weak_holding_quality_rotation
-        and weak_holding_quality_rotation_candidate(candidate, params)
-    ):
-        return WEAK_HOLDING_QUALITY_ROTATION_REASON
-    if params is not None and params.enable_high_quality_trend_rotation and high_quality_trend_rotation_candidate(candidate, params):
-        return "rotation_for_high_quality_trend_candidate"
-    if is_stealth_low_suction_rotation_candidate(candidate):
-        return "rotation_for_stealth_low_suction"
-    return "rotation_for_stronger_signal"
-
-
-def entry_score_for_position(position: Position) -> float:
-    reason = position.reason if isinstance(position.reason, dict) else {}
-    for key in ("entry_total_score", "total_score", "score"):
-        value = _float_or_none(reason.get(key))
-        if value is not None:
-            return value
-    return 0.0
-
-
-def protected_weak_holding_replacement_decision(
-    position: Position,
-    bar: Bar,
-    params: BacktestParams,
-    *,
-    price: float,
-    price_source: str,
-    include_close_context: bool,
-) -> dict[str, Any]:
-    current_return_pct = _position_return_pct_at_price(position, price)
-    high_return_pct = _position_return_pct_at_price(position, position.highest_price)
-    threshold = float(params.weak_holding_rotation_max_held_return_pct)
-    reason = position.reason if isinstance(position.reason, dict) else {}
-    uptrendish = position_market_is_uptrendish(reason)
-    recovery = str(reason.get("recovery_state") or "")
-    bucket = "replaceable_weak_holding"
-    protection_reason = "execute_open_still_weak" if price_source == "execute_open" else "signal_close_still_weak"
-    replaceable = True
-
-    if current_return_pct > threshold:
-        replaceable = False
-        bucket = "protect_open_profit" if current_return_pct >= 0 else "protect_repaired_holding"
-        protection_reason = "holding_no_longer_below_weak_threshold"
-    elif uptrendish and current_return_pct > threshold - PROTECTED_WEAK_HOLDING_UPTREND_REPAIR_BUFFER_PCT:
-        replaceable = False
-        bucket = "protect_uptrend_repair"
-        protection_reason = "uptrend_holding_near_repair"
-    elif recovery == "warming_confirmed" and current_return_pct > threshold - PROTECTED_WEAK_HOLDING_TREND_BUFFER_PCT:
-        replaceable = False
-        bucket = "protect_uptrend_repair"
-        protection_reason = "warming_holding_near_repair"
-    elif (
-        high_return_pct >= 12.0
-        and current_return_pct > threshold - PROTECTED_WEAK_HOLDING_TREND_BUFFER_PCT
-        and (uptrendish or (include_close_context and current_same_stock_hold_signal(position, bar)))
-    ):
-        replaceable = False
-        bucket = "protect_trend_winner"
-        protection_reason = "visible_trend_winner_not_deeply_weak"
-    elif include_close_context and (
-        low_suction_confirmed_opened_space_rotation_protected(position, bar, params)
-        or current_same_stock_hold_signal(position, bar)
-    ):
-        replaceable = False
-        bucket = "protect_same_stock_hold_signal"
-        protection_reason = "current_holding_still_has_support_signal"
-
-    return {
-        "replaceable": replaceable,
-        "bucket": bucket,
-        "reason": protection_reason,
-        "price_source": price_source,
-        "current_return_pct": round(current_return_pct, 4),
-        "high_return_pct": round(high_return_pct, 4),
-        "weak_threshold_pct": threshold,
-        "dynamic_market_regime": reason.get("dynamic_market_regime"),
-        "recovery_state": reason.get("recovery_state"),
-        "not_used_for_signal_score": True,
-    }
-
-
-def position_market_is_uptrendish(reason: dict[str, Any]) -> bool:
-    regime = str(reason.get("dynamic_market_regime") or "")
-    phase = str(reason.get("market_phase") or reason.get("trading_market_phase") or "")
-    if regime in PROTECTED_WEAK_HOLDING_UPTREND_REGIMES:
-        return True
-    return phase in {"uptrend", "主升"}
-
-
-def _position_return_pct_at_price(position: Position, price: float | None) -> float:
-    if not position.cost_price or price is None:
-        return 0.0
-    return (float(price) / float(position.cost_price) - 1) * 100
-
-
-def position_return_pct(position: Position, bar: Bar) -> float:
-    if not position.cost_price:
-        return 0.0
-    return (bar.close_price / position.cost_price - 1) * 100
-
-
-def position_execute_return_pct(position: Position, bar: Bar) -> float:
-    if not position.cost_price:
-        return 0.0
-    return (bar.open_price / position.cost_price - 1) * 100
-
-
-def portfolio_drawdown_pct(positions: dict[str, Position], today_bars: dict[str, Bar], initial_cash: float) -> float:
-    if not initial_cash:
-        return 0.0
-    total_cost = sum(position.cost_price * position.volume for position in positions.values())
-    cash_proxy = max(float(initial_cash) - total_cost, 0.0)
-    equity = cash_proxy + market_value(positions, today_bars)
-    return (equity / float(initial_cash) - 1) * 100
 
 
 def candidate_entry_reason(candidate: Any, execution_context: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1908,8 +1091,18 @@ def signal_events_for_day(
     callbacks: SimulationCallbacks,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    pool_context = candidate_lanes.execution_pool_context(scores, params.candidate_limit, params.strategy)
-    current_buy_signal_symbols = {str(score.vt_symbol) for score in scores if bool(getattr(score, "entry_signal", False))}
+    executable_scores = execution_pool_candidates(scores)
+    executable_pool = candidate_lanes.select_dragon_pullback_execution_pool(
+        executable_scores,
+        params.candidate_limit,
+        params.strategy,
+    )
+    pool_context = candidate_lanes.execution_pool_context(executable_scores, params.candidate_limit, params.strategy)
+    current_buy_signal_symbols = {
+        str(score.vt_symbol)
+        for score in executable_pool
+        if bool(getattr(score, "entry_signal", False)) and not research_entry_observation_only(score)
+    }
     for vt_symbol, position in list(theoretical_positions.items()):
         bar = today_bars.get(vt_symbol)
         if not bar:
@@ -1972,7 +1165,9 @@ def signal_events_for_day(
             }
         )
 
-    for score in scores:
+    for score in executable_pool:
+        if research_entry_observation_only(score):
+            continue
         if not scoring.is_buy_candidate(score, params):
             continue
         if score.vt_symbol in theoretical_positions:
@@ -2032,7 +1227,6 @@ def sell_reason_for_position(
     params: BacktestParams,
     *,
     current_buy_signal: bool = False,
-    replacement_available: bool = False,
 ) -> str | None:
     if params.strategy == DRAGON_PULLBACK_STRATEGY_ID:
         return dragon_pullback_sell_reason(
@@ -2041,7 +1235,6 @@ def sell_reason_for_position(
             current_day,
             params,
             current_buy_signal=current_buy_signal,
-            replacement_available=replacement_available,
         )
     # Backtest derives absolute exit levels from params coefficients and the
     # position's cost/highest; realtime holdings instead read the stored price
@@ -2065,7 +1258,6 @@ def dragon_pullback_sell_reason(
     params: BacktestParams,
     *,
     current_buy_signal: bool = False,
-    replacement_available: bool = False,
 ) -> str | None:
     """Trend-oriented exit for the dragon pullback strategy."""
 
@@ -2087,14 +1279,16 @@ def dragon_pullback_sell_reason(
         or (hold_context["ma_support_pullback"] and hold_context["price_volume_sync"])
         or current_buy_signal
     )
+    drawdown_from_high = bar.close_price / position.highest_price - 1 if position.highest_price else 0
+    high_gain = position.highest_price / cost_price - 1 if cost_price and position.highest_price else 0
+    if guarded_highclose_giveback_stop_applies(position, bar, gain, high_gain, drawdown_from_high, hold_soft_exit, current_buy_signal):
+        return GUARDED_HIGHCLOSE_GIVEBACK_STOP
     if fragile_entry and gain < 0.04:
         if bar.close_price <= cost_price * 0.95:
             return "fragile_structure_stop"
         if entry_support is not None and bar.close_price <= entry_support * 0.98:
             return "fragile_structure_stop"
 
-    drawdown_from_high = bar.close_price / position.highest_price - 1 if position.highest_price else 0
-    high_gain = position.highest_price / cost_price - 1 if cost_price and position.highest_price else 0
     low_suction_branch_decision = low_suction_confirmed_branch_decision(position, bar, params)
     if low_suction_branch_decision.get("triggered"):
         position.low_suction_confirmed_branch = str(low_suction_branch_decision.get("branch") or "")
@@ -2113,10 +1307,7 @@ def dragon_pullback_sell_reason(
         and dynamic_failed_launch_exit_stop_applies(position, bar, gain, high_gain, hold_soft_exit, current_buy_signal)
     ):
         return DYNAMIC_FAILED_LAUNCH_EXIT_STOP
-    if (
-        params.enable_contextual_failed_launch_exit_stop
-        and contextual_failed_launch_exit_stop_applies(position, bar, gain, high_gain, hold_soft_exit, replacement_available)
-    ):
+    if params.enable_contextual_failed_launch_exit_stop and failed_launch_exit_stop_applies(position, bar, gain, high_gain, hold_soft_exit):
         return "contextual_failed_launch_exit_stop"
     if (
         params.enable_failed_launch_exit_stop
@@ -2152,6 +1343,11 @@ def dragon_pullback_sell_reason(
         )
         if peak_decision["trigger"]:
             return str(peak_decision["reason"])
+    setup = str(reason.get("entry_setup") or reason.get("setup_type") or "")
+    launch_confirmed = bool(reason.get("first_effective_lift") or reason.get("low_suction_launch_confirmed"))
+    profit_protection_setup = setup == "dragon_pullback" or (not launch_confirmed and not fragile_entry)
+    if profit_protection_setup and not hold_soft_exit and high_gain >= 0.10 and gain <= 0.05 and drawdown_from_high <= -0.07:
+        return "profit_protection_stop"
     if high_gain >= 0.25 and gain <= 0.12 and drawdown_from_high <= -0.12:
         return "profit_protection_stop"
     if high_gain >= 0.18 and gain <= 0.08 and drawdown_from_high <= -0.10:
@@ -2243,7 +1439,7 @@ def is_low_suction_trigger_day_confirmed_position(position: Position) -> bool:
     return str(execution.get("mode") or "") == LOW_SUCTION_CONFIRMED_ENTRY_MODE
 
 
-def low_suction_confirmed_opened_space_rotation_protected(
+def low_suction_confirmed_opened_space_should_hold(
     position: Position,
     bar: Bar | None,
     params: BacktestParams,
@@ -2372,28 +1568,6 @@ def failed_launch_exit_stop_applies(
     )
 
 
-def contextual_failed_launch_exit_preflight_applies(position: Position, bar: Bar) -> bool:
-    cost_price = position.cost_price
-    if not cost_price:
-        return False
-    projected_highest_price = max(position.highest_price, bar.high_price)
-    gain = bar.close_price / cost_price - 1
-    high_gain = projected_highest_price / cost_price - 1 if projected_highest_price else 0
-    hold_context = dragon_pullback_hold_context(position, bar)
-    hold_soft_exit = hold_context["low_base_accumulation"] or (
-        hold_context["ma_support_pullback"] and hold_context["price_volume_sync"]
-    )
-    reason = position.reason if isinstance(position.reason, dict) else {}
-    return _failed_launch_exit_conditions_met(
-        visible_holding_bars=position.visible_holding_bars + 1,
-        reason=reason,
-        bar=bar,
-        gain=gain,
-        high_gain=high_gain,
-        hold_soft_exit=hold_soft_exit,
-    )
-
-
 def _failed_launch_exit_conditions_met(
     *,
     visible_holding_bars: int,
@@ -2424,26 +1598,12 @@ def _failed_launch_exit_conditions_met(
     return weak_close and (failed_support_reclaim or failed_ma_reclaim)
 
 
-def contextual_failed_launch_exit_stop_applies(
-    position: Position,
-    bar: Bar,
-    gain: float,
-    high_gain: float,
-    hold_soft_exit: bool,
-    replacement_available: bool,
-) -> bool:
-    if not replacement_available:
-        return False
-    return failed_launch_exit_stop_applies(position, bar, gain, high_gain, hold_soft_exit)
-
-
 def should_delay_contextual_support_reclaim(
     *,
     exit_reason: str,
     position: Position,
     bar: Bar,
     params: BacktestParams,
-    replacement_score_gap: float | None,
 ) -> dict[str, Any]:
     """Return whether a support stop should wait one close for reclaim."""
 
@@ -2457,8 +1617,6 @@ def should_delay_contextual_support_reclaim(
     range_pct = (bar.high_price / bar.low_price - 1) * 100 if bar.low_price else 0.0
     if range_pct < params.support_reclaim_delay_min_sell_day_range_pct:
         return {"delay": False, "notes": ["卖出日振幅不足，不像恐慌洗盘"]}
-    if replacement_score_gap is not None and replacement_score_gap > params.support_reclaim_delay_max_replacement_score_gap:
-        return {"delay": False, "notes": ["存在更强替换候选"]}
     reason = position.reason if isinstance(position.reason, dict) else {}
     warning = _float_or_none(reason.get("market_warning_level")) or 0
     regime = str(reason.get("dynamic_market_regime") or "")
@@ -2468,7 +1626,7 @@ def should_delay_contextual_support_reclaim(
         return {"delay": False, "notes": ["存在高位派发或放量滞涨风险"]}
     return {
         "delay": True,
-        "notes": ["支撑止损疑似恐慌洗盘，且无明显更强替换候选，等待一次支撑收复"],
+        "notes": ["支撑止损疑似恐慌洗盘，等待一次支撑收复"],
         "not_used_for_signal_score": True,
     }
 
@@ -2529,6 +1687,90 @@ def peak_giveback_support_reclaim_failed(position: Position, bar: Bar) -> bool:
     return failed_support or failed_ma or failed_mid_ma
 
 
+def guarded_highclose_giveback_stop_applies(
+    position: Position,
+    bar: Bar,
+    gain: float,
+    high_gain: float,
+    drawdown_from_high: float,
+    hold_soft_exit: bool,
+    current_buy_signal: bool,
+) -> bool:
+    """Default high-close giveback guard found from independent-candidate replay."""
+
+    del bar, hold_soft_exit
+    if current_buy_signal or int(position.visible_holding_bars or 0) < 4:
+        return False
+    reason = position.reason if isinstance(position.reason, dict) else {}
+    close_location = _float_or_none(reason.get("close_location_in_range"))
+    if close_location is None or close_location < 0.78:
+        return False
+    launch_bucket = str(reason.get("low_suction_launch_quality_bucket") or "")
+    near_limit_up_count = _float_or_none(reason.get("near_limit_up_count_20d")) or 0.0
+    large_bull_count = _float_or_none(reason.get("large_bull_count_20d")) or 0.0
+    active_source = bool(reason.get("recent_limit_up_20d")) or near_limit_up_count > 0 or large_bull_count >= 1.0
+    if active_source and not signal_day_bad_giveback_bucket(reason) and launch_bucket == "late_pullback_launch":
+        return False
+    if strong_ma10_continuation_guard(reason):
+        return False
+    return bool(high_gain >= 0.12 and gain <= 0.04 and drawdown_from_high <= -0.055)
+
+
+def strong_ma10_continuation_guard(reason: dict[str, Any]) -> bool:
+    near_limit_up_count = _float_or_none(reason.get("near_limit_up_count_20d")) or 0.0
+    large_bull_count = _float_or_none(reason.get("large_bull_count_20d")) or 0.0
+    active_source = bool(reason.get("recent_limit_up_20d")) or near_limit_up_count > 0 or large_bull_count >= 1
+    if not active_source:
+        return False
+    if signal_day_bad_giveback_bucket(reason):
+        return False
+    support_type = str(reason.get("support_type") or "")
+    strong_leg = _float_or_none(reason.get("strong_leg_score")) or 0.0
+    pullback_days = _float_or_none(reason.get("pullback_days")) or 0.0
+    ma5_vs_ma10 = _float_or_none(reason.get("ma5_vs_ma10_pct"))
+    ma10_distance = _float_or_none(reason.get("ma10_distance_pct"))
+    volume_ratio = _float_or_none(reason.get("volume_ratio_5d_20d"))
+    return bool(
+        support_type in {"ma10_support", "ma10_reclaim"}
+        and strong_leg >= 96.0
+        and pullback_days >= 5.0
+        and ma5_vs_ma10 is not None
+        and ma5_vs_ma10 <= 0.0
+        and ma10_distance is not None
+        and -1.5 <= ma10_distance <= 2.5
+        and volume_ratio is not None
+        and 0.55 <= volume_ratio <= 1.20
+    )
+
+
+def signal_day_bad_giveback_bucket(reason: dict[str, Any]) -> bool:
+    close_location = _float_or_none(reason.get("close_location_in_range"))
+    ma5_distance = _float_or_none(reason.get("ma5_distance_pct"))
+    low_suction_days = _float_or_none(reason.get("low_suction_days")) or 0.0
+    near_limit_up_count = _float_or_none(reason.get("near_limit_up_count_20d")) or 0.0
+    large_bull_count = _float_or_none(reason.get("large_bull_count_20d")) or 0.0
+    launch_bucket = str(reason.get("low_suction_launch_quality_bucket") or "")
+    recent_limit_source = bool(reason.get("recent_limit_up_20d")) or near_limit_up_count > 0
+    fresh_lift = bool(reason.get("first_effective_lift") or reason.get("low_suction_launch_confirmed"))
+    high_close = close_location is not None and close_location >= 0.78
+    return bool(
+        (
+            high_close
+            and not recent_limit_source
+            and launch_bucket in {"high_close_launch", "repeated_launch", "other_confirmed_launch", "late_pullback_launch"}
+        )
+        or (low_suction_days >= 6.0 and not fresh_lift and recent_limit_source)
+        or (
+            low_suction_days >= 6.0
+            and fresh_lift
+            and high_close
+            and launch_bucket in {"high_close_launch", "repeated_launch", "late_pullback_launch"}
+        )
+        or (recent_limit_source and high_close and ma5_distance is not None and ma5_distance >= 4.8)
+        or (large_bull_count >= 3.0 and not recent_limit_source and high_close)
+    )
+
+
 def dragon_pullback_hold_context(position: Position, bar: Bar) -> dict[str, bool]:
     reason = position.reason if isinstance(position.reason, dict) else {}
     low_base_days = int(reason.get("low_base_days") or 0)
@@ -2565,6 +1807,13 @@ def dragon_pullback_hold_context(position: Position, bar: Bar) -> dict[str, bool
 
 def bar_index_by_symbol(bars_by_symbol: dict[str, list[Bar]]) -> dict[str, dict[date, Bar]]:
     return {symbol: {bar.trade_date: bar for bar in bars} for symbol, bars in bars_by_symbol.items()}
+
+
+def bar_close_location(bar: Bar) -> float | None:
+    day_range = float(bar.high_price) - float(bar.low_price)
+    if day_range <= 0:
+        return None
+    return (float(bar.close_price) - float(bar.low_price)) / day_range
 
 
 def market_value(positions: dict[str, Position], today_bars: dict[str, Bar]) -> float:

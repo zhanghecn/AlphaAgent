@@ -26,6 +26,7 @@ import {
   fetchLatestSymbolBacktest,
   fetchQuantStrategies,
   fetchLatestSymbolQuantState,
+  fetchSymbolSignalHistory,
   fetchSymbolMarketLine,
   type BacktestRun,
   type BacktestAudit,
@@ -36,6 +37,7 @@ import {
   type BacktestTradeAttribution,
   type QuantStrategyOption,
   type SymbolQuantSignalRow,
+  type SymbolSignalHistoryRow,
   type SymbolLatestQuantState,
   type SymbolMarketLinePoint,
   type SymbolLatestBacktest,
@@ -180,6 +182,17 @@ export function StockDetailPage() {
     latestQuantStateQuery.data?.process?.latest_available_trade_date
     ?? latestQuantStateQuery.data?.process?.end_date
     ?? undefined;
+  const signalHistoryQuery = useQuery({
+    queryKey: ["symbolSignalHistory", vtSymbol, singleBacktestStrategy, STOCK_DETAIL_REVIEW_START, reviewEndDate],
+    queryFn: () => fetchSymbolSignalHistory(vtSymbol!, {
+      strategy: singleBacktestStrategy,
+      start: STOCK_DETAIL_REVIEW_START,
+      end: reviewEndDate,
+      limit: 1000,
+    }),
+    enabled: Boolean(vtSymbol && reviewEndDate),
+    staleTime: 60_000,
+  });
   const needsFullRangeSymbolBacktest =
     latestSymbolBacktest?.status === "ready"
     && (
@@ -254,9 +267,13 @@ export function StockDetailPage() {
     () => sortMarkers(autoReviewMarkers.length ? autoReviewMarkers : []),
     [autoReviewMarkers]
   );
+  const researchMarkers = useMemo(
+    () => signalHistoryResearchMarkers(signalHistoryQuery.data?.recent ?? []),
+    [signalHistoryQuery.data]
+  );
   const backtestMarkers = useMemo(
-    () => strategyPathDisplayMarkers(strategyPathMarkers),
-    [strategyPathMarkers]
+    () => sortMarkers([...strategyPathDisplayMarkers(strategyPathMarkers), ...researchMarkers]),
+    [researchMarkers, strategyPathMarkers]
   );
   const displayReview = useMemo(
     () => buildDisplayReview(backtestMarkers),
@@ -484,7 +501,7 @@ function SingleStockBacktestPanel({
         </div>
       </div>
       <div className="mt-3 rounded-md border bg-muted/20 p-3 text-sm text-muted-foreground">
-        股票详情不按候选排名、组合满仓或真实组合持仓决定买卖点；组合回测只作为辅助参考。牛熊线用于核对行情状态，不参与信号分。
+        股票详情按单股候选与卖点路径展示，不读取组合成交约束；组合回测只作为辅助参考。牛熊线用于核对行情状态，不参与信号分。
       </div>
       <UnifiedReviewSummary review={displayReview} latestMarketLine={latestMarketLine} />
       <StrategyTimelinePanel
@@ -731,17 +748,18 @@ function UnifiedReviewSummary({
   return (
     <div className="mt-4 space-y-3">
       <div className="grid gap-3 text-sm md:grid-cols-6">
-        <InfoCell label="买入" value={`${markerCounts.buy ?? 0} 次`} valueClass={(markerCounts.buy ?? 0) > 0 ? "text-rise" : undefined} />
+        <InfoCell label="买点" value={`${markerCounts.buy ?? 0} 次`} valueClass={(markerCounts.buy ?? 0) > 0 ? "text-rise" : undefined} />
+        <InfoCell label="研究买点" value={`${markerCounts.research_buy ?? 0} 次`} valueClass={(markerCounts.research_buy ?? 0) > 0 ? "text-blue-700 dark:text-blue-300" : undefined} />
         <InfoCell label="拒买" value={`${markerCounts.rejected_buy ?? 0} 次`} valueClass={(markerCounts.rejected_buy ?? 0) > 0 ? "text-fall" : undefined} />
         <InfoCell label="卖出" value={`${markerCounts.sell ?? 0} 次`} />
         <InfoCell label="闭合交易" value={`${summary.trade_count ?? 0} 笔`} />
         <InfoCell label="胜率" value={formatPct(summary.win_rate_pct)} />
-        <InfoCell label="牛熊线" value={latestMarketLine?.label ?? "--"} valueClass={marketLineTextClass(latestMarketLine?.state)} />
       </div>
       <div className="grid gap-3 text-sm md:grid-cols-4">
         <InfoCell label="累计收益" value={formatPct(summary.compound_return_pct)} valueClass={priceColorClass(summary.compound_return_pct)} />
         <InfoCell label="平均单笔" value={formatPct(summary.average_return_pct)} valueClass={priceColorClass(summary.average_return_pct)} />
         <InfoCell label="最大回撤" value={formatPct(summary.max_drawdown_pct)} valueClass={priceColorClass(summary.max_drawdown_pct)} />
+        <InfoCell label="牛熊线" value={latestMarketLine?.label ?? "--"} valueClass={marketLineTextClass(latestMarketLine?.state)} />
         <InfoCell label="行情分" value={formatMaybeNumber(latestMarketLine?.score, 1)} />
       </div>
     </div>
@@ -1014,6 +1032,7 @@ function InsightBlock({ title, text }: { title: string; text?: string }) {
 }
 
 function markerBadgeLabel(marker: KlineMarker) {
+  if (marker.status === "research") return "研究买点";
   if (marker.markerKind === "signal" || marker.status === "signal") return "买入";
   if (marker.markerKind === "rejected" || marker.status === "rejected") return "拒买";
   if (marker.side === "BUY") return "买入";
@@ -1088,13 +1107,65 @@ function strategyPathDisplayMarkers(strategyPath: KlineMarker[]): KlineMarker[] 
   return cleanDisplayMarkers(positionPathMarkers(pathMarkers));
 }
 
+function signalHistoryResearchMarkers(rows: SymbolSignalHistoryRow[]): KlineMarker[] {
+  return rows
+    .filter(isResearchSignalRow)
+    .map((row) => {
+      const evidence = safeRaw(row.evidence);
+      return {
+        id: `research-signal-${row.vt_symbol}-${row.trade_date}`,
+        time: row.trade_date,
+        side: "BUY",
+        markerKind: "signal",
+        status: "research",
+        price: getRawNumber(evidence, "close_price") ?? getRawNumber(evidence, "close"),
+        text: "研",
+        title: row.signal_label || "研究买点",
+        strategy: "研究观察买点，不代表组合成交或默认执行买入。",
+        signalText: `${row.trade_date} 收盘后识别为${row.signal_label || "研究买点"}。`,
+        executionText: "该标记只用于候选研究复核，不生成真实成交。",
+        reasonText: "依赖默认关闭研究通道才成立，已与组合执行隔离。",
+        signalDate: row.trade_date,
+        tradeDate: row.trade_date,
+        evidence: researchSignalEvidence(row),
+        raw: row as unknown as Record<string, unknown>,
+      };
+    });
+}
+
+function isResearchSignalRow(row: SymbolSignalHistoryRow) {
+  const evidence = safeRaw(row.evidence);
+  return Boolean(
+    row.research_entry_signal ||
+      evidence.support_divergence_entry_observation_only ||
+      evidence.strong_trend_ma_pullback_entry_observation_only
+  );
+}
+
+function researchSignalEvidence(row: SymbolSignalHistoryRow): KlineMarker["evidence"] {
+  const evidence = safeRaw(row.evidence);
+  const rows: NonNullable<KlineMarker["evidence"]> = [
+    { label: "信号日", value: row.trade_date },
+    { label: "类型", value: row.signal_label || "研究买点" },
+    { label: "执行口径", value: "研究观察，不进组合成交" },
+  ];
+  const profile = getRawText(evidence, "support_divergence_entry_profile");
+  if (profile) rows.push({ label: "研究画像", value: supportDivergenceProfileLabel(profile) });
+  pushPriceEvidence(rows, "收盘价", getRawNumber(evidence, "close_price") ?? getRawNumber(evidence, "close"));
+  pushPctEvidence(rows, "距MA5", getRawNumber(evidence, "ma5_distance_pct"));
+  pushPctEvidence(rows, "距MA10", getRawNumber(evidence, "ma10_distance_pct"));
+  if (row.failed_rules.length) rows.push({ label: "默认失败", value: row.failed_rules.map(strategyFailedRuleLabel).join("、") });
+  return rows;
+}
+
 function positionPathMarkers(markers: KlineMarker[]): KlineMarker[] {
   const selected: KlineMarker[] = [];
   let holding = false;
   for (const marker of sortMarkers(markers)) {
     const side = String(marker.side).toUpperCase();
     const rejected = marker.markerKind === "rejected" || marker.status === "rejected";
-    const buy = side === "BUY" && !rejected;
+    const research = marker.status === "research";
+    const buy = side === "BUY" && !rejected && !research;
     const sell = side === "SELL" && !rejected;
     if (holding && (buy || rejected)) continue;
     selected.push(marker);
@@ -1123,7 +1194,12 @@ function collapsePendingSellMarkers(markers: KlineMarker[]): KlineMarker[] {
   const selected: KlineMarker[] = [];
   let lastSellIndex = -1;
   for (const marker of sorted) {
-    if (String(marker.side).toUpperCase() === "BUY" && marker.markerKind !== "rejected" && marker.status !== "rejected") {
+    if (
+      String(marker.side).toUpperCase() === "BUY"
+      && marker.markerKind !== "rejected"
+      && marker.status !== "rejected"
+      && marker.status !== "research"
+    ) {
       lastSellIndex = -1;
       selected.push(marker);
       continue;
@@ -1155,7 +1231,9 @@ function buildDisplayReview(markers: KlineMarker[]): SymbolUnifiedReview {
 
 function displayMarkerToUnifiedMarker(marker: KlineMarker): SymbolUnifiedMarker {
   return {
-    kind: marker.markerKind === "rejected" || marker.status === "rejected" ? "rejected_buy" : String(marker.side).toUpperCase() === "SELL" ? "sell" : "buy",
+    kind: marker.status === "research"
+      ? "research_buy"
+      : marker.markerKind === "rejected" || marker.status === "rejected" ? "rejected_buy" : String(marker.side).toUpperCase() === "SELL" ? "sell" : "buy",
     label: markerBadgeLabel(marker),
     trade_date: marker.time,
     price: marker.price ?? null,
@@ -1170,6 +1248,7 @@ function displaySegments(markers: KlineMarker[]): SymbolUnifiedSegment[] {
   const segments: SymbolUnifiedSegment[] = [];
   let openBuy: KlineMarker | null = null;
   for (const marker of sortMarkers(markers)) {
+    if (marker.status === "research") continue;
     if (marker.markerKind === "rejected" || marker.status === "rejected") continue;
     if (String(marker.side).toUpperCase() === "BUY") {
       openBuy = marker;
@@ -1532,7 +1611,7 @@ function markerReasonTextFromReason(reason?: string | null): string {
   if (reason === "limit_down_open_blocked") return "执行日开盘跌停或接近跌停，保守判定卖不出。";
   if (reason === "no_execute_bar") return "缺少执行日 K 线，无法判断可执行价格。";
   if (reason === "missing_1430_snapshot") return "实时分钟快照缺失，需等待数据补齐。历史日线研究不依赖该数据。";
-  if (reason === "position_slot_unavailable") return "组合持仓名额已满，信号未转成实际买入。";
+  if (reason === "position_slot_unavailable") return "组合回测未形成实际买入。";
   if (reason === "insufficient_cash") return "组合可用资金不足，信号未转成实际买入。";
   return reason ? portfolioReasonLabel(reason) : "--";
 }
@@ -1690,11 +1769,9 @@ function exitReasonLabel(reason?: string | null) {
   if (reason === "trend_trailing_stop") return "趋势回撤";
   if (reason === "profit_protection_stop") return "浮盈保护";
   if (reason === "dynamic_failed_launch_exit_stop") return "动态失败启动撤退";
-  if (reason === "dynamic_failed_launch_replacement_quality_gate") return "动态失败启动后替换闸门";
+  if (reason === "guarded_highclose_giveback_stop") return "高位浮盈回撤保护";
   if (reason === "low_suction_failed_follow_branch_stop") return "低吸没拉起撤";
   if (reason === "low_suction_opened_space_giveback_stop") return "低吸回撤卖";
-  if (reason === "low_suction_branch_replacement_quality_gate") return "低吸替换质量闸门";
-  if (reason === "rotation_for_stronger_signal") return "轮动换强";
   if (reason === "time_efficiency_stop") return "时间效率";
   if (reason === "mid_profit_giveback_stop") return "中段浮盈回撤";
   return reason || "--";
@@ -1752,6 +1829,14 @@ function strategySupportTypeLabel(support?: string | null) {
   return support ? labels[support] ?? support : "--";
 }
 
+function supportDivergenceProfileLabel(profile?: string | null) {
+  const labels: Record<string, string> = {
+    mature_low_suction_launch: "成熟低吸启动",
+    high_level_support_divergence: "高位支撑分歧",
+  };
+  return profile ? labels[profile] ?? profile : "--";
+}
+
 function readableStrategyScoreNote(note: string) {
   if (note.startsWith("状态 ")) return `状态 ${strategyDragonStateLabel(note.slice(3))}`;
   if (note.startsWith("承接 ")) return `承接 ${strategySupportTypeLabel(note.slice(3))}`;
@@ -1779,7 +1864,7 @@ function portfolioReasonLabel(reason?: string | null) {
     no_execute_bar: "缺少执行日K线",
     limit_up_or_no_bar: "涨停或缺少执行日K线",
     no_bar: "无日线",
-    position_slot_unavailable: "仓位已满",
+    position_slot_unavailable: "未形成组合成交",
     insufficient_cash: "现金不足",
     stop_loss: "止损",
     take_profit: "止盈",

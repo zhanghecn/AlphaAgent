@@ -11,6 +11,7 @@ from datetime import date, timedelta
 from math import sqrt
 from statistics import mean, pstdev
 from threading import RLock
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import and_, desc, func, select, text
@@ -30,6 +31,7 @@ from alphaagent.server.services.backtest import data_quality as data_quality_ser
 from alphaagent.server.services.backtest import execution_models, performance_attribution, persistence, queries, reports, scoring, signal_plan, simulation, strategy_comparison, validation
 from alphaagent.server.services.backtest.baseline_policy import is_product_baseline_params, select_product_baselines
 from alphaagent.server.services.backtest.factor_audit import (
+    build_daily_candidate_clusters,
     build_candidate_clusters,
     candidate_feature_rows,
     candidate_execution_attribution_summary,
@@ -37,14 +39,16 @@ from alphaagent.server.services.backtest.factor_audit import (
     current_strategy_trade_outcome_map,
     factor_audit_summary,
     fixed_horizon_outcome_row,
+    CandidateCluster,
+    IndependentTradeResult,
     simulate_independent_candidate_trade,
     strategy_lifecycle_segments,
     strategy_timeline_rows,
 )
 from alphaagent.server.services.backtest.schemas import BacktestParams, MinuteBar, Position, ScoreContext, Trade
-from alphaagent.server.services.quant.factors import DRAGON_PULLBACK_STRATEGY_ID, STRATEGY_ID, STRATEGY_VERSION, Bar, SignalScore
+from alphaagent.server.services.quant.factors import DRAGON_PULLBACK_STRATEGY_ID, STRATEGY_ID, STRATEGY_VERSION, Bar, SignalScore, moving_average
 from alphaagent.server.services.quant.financials import financial_scores_from_rows_by_symbol
-from alphaagent.server.services.quant import market_context, screening_payloads
+from alphaagent.server.services.quant import candidate_lanes, market_context, screening_loaders, screening_payloads
 from alphaagent.server.services.quant.strategy_registry import get_strategy
 from alphaagent.server.services.quant.screening import (
     _load_financial_scores,
@@ -59,9 +63,22 @@ from alphaagent.server.services.quant.screening import (
 SUPPORTED_BACKTEST_MINUTE_INTERVALS = execution_models.SUPPORTED_BACKTEST_MINUTE_INTERVALS
 SUPPORTED_EXECUTION_MODELS = execution_models.SUPPORTED_EXECUTION_MODELS
 BACKTEST_LOOKBACK_DAYS = 160
-FACTOR_AUDIT_CACHE_SCHEMA_VERSION = 4
+FACTOR_AUDIT_CACHE_SCHEMA_VERSION = 21
 CANDIDATE_TRADE_QUALITY_CACHE_TTL_SECONDS = 10 * 60
 CANDIDATE_TRADE_QUALITY_CACHE_MAX_ITEMS = 16
+SUPPORT_STOP_REENTRY_OVERLAY_SPEC = {
+    "name": "visible_ma5_reclaim_gentle_c055_100_v080_100_chg02_12",
+    "max_wait_days": 5,
+    "min_close_location": 0.55,
+    "max_close_location": 1.00,
+    "min_change_pct": 0.2,
+    "max_change_pct": 1.2,
+    "min_volume_ratio_5d_20d": 0.80,
+    "max_volume_ratio_5d_20d": 1.00,
+    "require_ma5_reclaim": True,
+    "max_ma5_distance_pct": 4.0,
+    "max_ma10_distance_pct": 6.0,
+}
 _candidate_trade_quality_cache: dict[tuple[int, int, int, date | None, date | None], tuple[float, dict[str, Any]]] = {}
 _candidate_trade_quality_cache_lock = RLock()
 
@@ -1052,21 +1069,6 @@ def backtest_phase_strategy_family_matrix(backtest_id: int, candidate_rank_limit
     )
 
 
-def backtest_replacement_quality_matrix(backtest_id: int, sample_limit: int = 80) -> dict[str, Any]:
-    return queries.backtest_replacement_quality_matrix(
-        schema=schema,
-        session_scope=session_scope,
-        is_database_configured=is_database_configured,
-        ensure_schema=_ensure_backtest_schema,
-        load_stock_names=_load_stock_names,
-        symbols_from_rows=_symbols_from_rows,
-        with_stock_names=_with_stock_names,
-        to_api=_mapping_to_api,
-        backtest_id=backtest_id,
-        sample_limit=sample_limit,
-    )
-
-
 def backtest_execution_breakpoint_matrix(
     backtest_id: int,
     candidate_rank_limit: int = 100,
@@ -1084,50 +1086,6 @@ def backtest_execution_breakpoint_matrix(
         backtest_id=backtest_id,
         candidate_rank_limit=candidate_rank_limit,
         sample_limit=sample_limit,
-    )
-
-
-def backtest_rotation_opportunity_cost_matrix(
-    backtest_id: int,
-    candidate_rank_limit: int = 20,
-    sample_limit: int = 120,
-    holding_days: int = 20,
-) -> dict[str, Any]:
-    return queries.backtest_rotation_opportunity_cost_matrix(
-        schema=schema,
-        session_scope=session_scope,
-        is_database_configured=is_database_configured,
-        ensure_schema=_ensure_backtest_schema,
-        load_stock_names=_load_stock_names,
-        symbols_from_rows=_symbols_from_rows,
-        with_stock_names=_with_stock_names,
-        to_api=_mapping_to_api,
-        backtest_id=backtest_id,
-        candidate_rank_limit=candidate_rank_limit,
-        sample_limit=sample_limit,
-        holding_days=holding_days,
-    )
-
-
-def backtest_trend_winner_protection_matrix(
-    backtest_id: int,
-    candidate_rank_limit: int = 20,
-    sample_limit: int = 120,
-    holding_days: int = 20,
-) -> dict[str, Any]:
-    return queries.backtest_trend_winner_protection_matrix(
-        schema=schema,
-        session_scope=session_scope,
-        is_database_configured=is_database_configured,
-        ensure_schema=_ensure_backtest_schema,
-        load_stock_names=_load_stock_names,
-        symbols_from_rows=_symbols_from_rows,
-        with_stock_names=_with_stock_names,
-        to_api=_mapping_to_api,
-        backtest_id=backtest_id,
-        candidate_rank_limit=candidate_rank_limit,
-        sample_limit=sample_limit,
-        holding_days=holding_days,
     )
 
 
@@ -1294,11 +1252,8 @@ def backtest_candidate_trade_quality_report(
             if isinstance(outcome, dict):
                 item["outcome"] = outcome
             candidate_items.append(item)
-        clusters = [
-            cluster
-            for cluster in build_candidate_clusters(candidate_items)
-            if (_safe_int_or_none(cluster.entry_row.get("rank")) or 10**9) <= rank_cutoff
-        ]
+        scoped_candidate_items = _candidate_quality_scoped_items(candidate_items, rank_cutoff, run_row)
+        clusters = build_daily_candidate_clusters(scoped_candidate_items)
         symbols = sorted({cluster.vt_symbol for cluster in clusters})
         bars_by_symbol = _load_factor_candidate_bars(session, symbols, lower, upper)
         params = _params_from_run(run_row)
@@ -1317,6 +1272,14 @@ def backtest_candidate_trade_quality_report(
         for cluster in clusters
     ]
     report = candidate_trade_quality_report_from_results(results, rank_limit=rank_cutoff, sample_limit=sample_cutoff)
+    overlay = _support_stop_reentry_candidate_quality_overlay(
+        results,
+        bars_by_symbol=bars_by_symbol,
+        params=params,
+        buy_dates_by_symbol=buy_dates_by_symbol,
+        candidate_limit=_safe_int_or_none((run_row.get("params") or {}).get("candidate_limit")) or 20,
+        sample_limit=sample_cutoff,
+    )
     payload = {
         **report,
         "backtest_id": backtest_id,
@@ -1330,10 +1293,620 @@ def backtest_candidate_trade_quality_report(
             **(cache.get("coverage") or {}),
             "candidate_source": (cache.get("coverage") or {}).get("candidate_source"),
             "source_candidate_count": len(candidate_items),
+            "scoped_candidate_count": len(scoped_candidate_items),
         },
+        "support_stop_reentry_overlay": overlay,
     }
     _candidate_trade_quality_cache_set(cache_key, payload)
     return {**payload, "quality_cache": "miss"}
+
+
+def candidate_trade_quality_report_from_quant_recommendations(
+    *,
+    strategy_id: str,
+    strategy_version: str,
+    start: date,
+    end: date,
+    rank_limit: int = 20,
+    sample_limit: int = 500,
+    min_entry_score: float = 76.0,
+    strict_entry: bool = True,
+    execution_model: str = "legacy_next_open",
+    included_boards: tuple[str, ...] = DEFAULT_QUANT_INCLUDED_BOARDS,
+) -> dict[str, Any]:
+    """Evaluate daily TopN candidates as independent D+1-open trades.
+
+    This is the product candidate-quality path. It reads persisted daily
+    recommendations only, then independently simulates each candidate to its
+    sell point. It does not read portfolio orders, cash, positions, max
+    positions, or position sizing.
+    """
+
+    if not is_database_configured():
+        return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
+    _ensure_backtest_schema()
+    rank_cutoff = min(max(int(rank_limit or 20), 1), 200)
+    sample_cutoff = min(max(int(sample_limit or 500), 1), 1000)
+    with session_scope() as session:
+        rows = session.execute(
+            select(schema.quant_recommendations, schema.stocks.c.name.label("stock_name"), schema.stocks.c.exchange)
+            .select_from(
+                schema.quant_recommendations.outerjoin(
+                    schema.stocks,
+                    schema.quant_recommendations.c.vt_symbol == schema.stocks.c.vt_symbol,
+                )
+            )
+            .where(
+                schema.quant_recommendations.c.strategy_id == strategy_id,
+                schema.quant_recommendations.c.strategy_version == strategy_version,
+                schema.quant_recommendations.c.trade_date >= start,
+                schema.quant_recommendations.c.trade_date <= end,
+                schema.quant_recommendations.c.rank <= rank_cutoff,
+            )
+            .order_by(
+                schema.quant_recommendations.c.trade_date,
+                schema.quant_recommendations.c.rank,
+                schema.quant_recommendations.c.vt_symbol,
+            )
+        ).mappings().all()
+        candidate_items = [_candidate_quality_item_from_recommendation(dict(row)) for row in rows]
+        clusters = build_daily_candidate_clusters(candidate_items)
+        symbols = sorted({cluster.vt_symbol for cluster in clusters})
+        bars_by_symbol = _load_factor_candidate_bars(session, symbols, start, end)
+        buy_dates_by_symbol = _candidate_buy_signal_dates_by_symbol(candidate_items)
+
+    params = BacktestParams(
+        strategy=strategy_id,
+        start=start,
+        end=end,
+        min_entry_score=float(min_entry_score),
+        strict_entry=bool(strict_entry),
+        execution_model=execution_model,
+        included_boards=included_boards,
+        persist=False,
+    )
+    results = [
+        simulate_independent_candidate_trade(
+            cluster,
+            bars_by_symbol.get(cluster.vt_symbol, []),
+            params=params,
+            sell_reason_fn=simulation.sell_reason_for_position,
+            limit_up_open_fn=_is_limit_up_open,
+            limit_down_open_fn=_is_limit_down_open,
+            buy_signal_dates=buy_dates_by_symbol.get(cluster.vt_symbol, set()),
+        )
+        for cluster in clusters
+    ]
+    report = candidate_trade_quality_report_from_results(results, rank_limit=rank_cutoff, sample_limit=sample_cutoff)
+    return {
+        **report,
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "strategy_id": strategy_id,
+        "strategy_version": strategy_version,
+        "source": "quant_recommendations",
+        "coverage": {
+            **(report.get("coverage") or {}),
+            "candidate_source": "quant_recommendations",
+            "source_candidate_count": len(candidate_items),
+            "scoped_candidate_count": len(candidate_items),
+        },
+        "quality_cache": "not_used",
+    }
+
+
+def _candidate_quality_item_from_recommendation(row: dict[str, Any]) -> dict[str, Any]:
+    reason = row.get("reason") if isinstance(row.get("reason"), dict) else {}
+    item = {
+        "trade_date": row.get("trade_date"),
+        "vt_symbol": row.get("vt_symbol"),
+        "name": row.get("stock_name") or row.get("name"),
+        "rank": row.get("rank"),
+        "action": row.get("action"),
+        "total_score": row.get("total_score"),
+        "reason": reason,
+        "source": "quant_recommendations",
+        "candidate_source": "quant_recommendations",
+        "factor_cache_complete": True,
+        "factor_cache_schema_version": FACTOR_AUDIT_CACHE_SCHEMA_VERSION,
+    }
+    item.update(stock_board_payload(str(row.get("vt_symbol") or ""), row.get("exchange")))
+    return item
+
+
+def _candidate_quality_scoped_items(candidate_items: list[dict[str, Any]], rank_cutoff: int, run_row: dict[str, Any]) -> list[dict[str, Any]]:
+    clean_items = [
+        item
+        for item in candidate_items
+        if not _candidate_quality_excluded_synthetic_source(item)
+        and (_safe_int_or_none(item.get("rank")) or 10**9) <= max(rank_cutoff, 100)
+    ]
+    if rank_cutoff <= _candidate_quality_candidate_limit(run_row) and _candidate_quality_needs_execution_rebuild(clean_items):
+        return _candidate_quality_rebuild_execution_pool_items(clean_items, rank_cutoff, run_row)
+    return [
+        item
+        for item in clean_items
+        if _candidate_quality_cluster_in_scope(item, rank_cutoff, run_row)
+    ]
+
+
+def _candidate_quality_candidate_limit(run_row: dict[str, Any]) -> int:
+    params = run_row.get("params") if isinstance(run_row.get("params"), dict) else {}
+    return _safe_int_or_none(params.get("candidate_limit")) or 20
+
+
+def _candidate_quality_needs_execution_rebuild(candidate_items: list[dict[str, Any]]) -> bool:
+    return bool(candidate_items) and not any(isinstance(item.get("candidate_execution"), dict) for item in candidate_items)
+
+
+def _candidate_quality_rebuild_execution_pool_items(candidate_items: list[dict[str, Any]], rank_cutoff: int, run_row: dict[str, Any]) -> list[dict[str, Any]]:
+    by_date: dict[date, list[dict[str, Any]]] = defaultdict(list)
+    for item in candidate_items:
+        signal_date = _candidate_quality_item_date(item)
+        if signal_date is not None:
+            by_date[signal_date].append(item)
+
+    strategy_id = str(run_row.get("strategy_id") or "")
+    scoped: list[dict[str, Any]] = []
+    for _, date_items in sorted(by_date.items(), key=lambda pair: pair[0]):
+        ordered_items = sorted(
+            date_items,
+            key=lambda item: (
+                _safe_int_or_none(item.get("rank")) or 10**9,
+                str(item.get("vt_symbol") or ""),
+            ),
+        )
+        candidates = [_candidate_quality_signal_candidate(item) for item in ordered_items]
+        selected = candidate_lanes.select_dragon_pullback_execution_pool(candidates, rank_cutoff, strategy_id)
+        row_by_candidate_id = {id(candidate): item for candidate, item in zip(candidates, ordered_items, strict=False)}
+        for execution_rank, candidate in enumerate(selected, start=1):
+            item = row_by_candidate_id.get(id(candidate))
+            if item is not None:
+                scoped.append(_candidate_quality_with_execution(item, candidate, execution_rank, rank_cutoff, strategy_id))
+    return scoped
+
+
+def _candidate_quality_item_date(item: dict[str, Any]) -> date | None:
+    value = item.get("trade_date") or item.get("signal_date")
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def _candidate_quality_signal_candidate(item: dict[str, Any]) -> Any:
+    evidence = item.get("reason") if isinstance(item.get("reason"), dict) else item.get("evidence")
+    return SimpleNamespace(
+        vt_symbol=str(item.get("vt_symbol") or ""),
+        total_score=float(item.get("total_score") or item.get("score") or 0.0),
+        evidence=evidence if isinstance(evidence, dict) else {},
+    )
+
+
+def _candidate_quality_with_execution(item: dict[str, Any], candidate: Any, execution_rank: int, rank_cutoff: int, strategy_id: str) -> dict[str, Any]:
+    scoped = dict(item)
+    raw_rank = _safe_int_or_none(item.get("rank")) or 10**9
+    if strategy_id == DRAGON_PULLBACK_STRATEGY_ID:
+        opportunity_score = candidate_lanes.dragon_pullback_opportunity_score(candidate)
+        opportunity_bonus = candidate_lanes.default_clean_watch_entry_opportunity_bonus(candidate)
+    else:
+        opportunity_score = float(getattr(candidate, "total_score", 0) or 0.0)
+        opportunity_bonus = 0.0
+    scoped["candidate_execution"] = {
+        **(scoped.get("candidate_execution") if isinstance(scoped.get("candidate_execution"), dict) else {}),
+        "raw_signal_rank": raw_rank,
+        "execution_candidate_rank": execution_rank,
+        "execution_candidate_selected": True,
+        "execution_candidate_limit": rank_cutoff,
+        "execution_opportunity_score": round(opportunity_score, 4),
+        "execution_opportunity_bonus": round(opportunity_bonus, 4),
+        "execution_volume_preparation_adjustment": 0.0,
+    }
+    return scoped
+
+
+def _candidate_quality_cluster_in_scope(row: dict[str, Any], rank_cutoff: int, run_row: dict[str, Any]) -> bool:
+    if _candidate_quality_excluded_synthetic_source(row):
+        return False
+    rank = _safe_int_or_none(row.get("rank"))
+    execution = row.get("candidate_execution") if isinstance(row.get("candidate_execution"), dict) else {}
+    execution_rank = _safe_int_or_none(execution.get("execution_candidate_rank"))
+    effective_rank = execution_rank or rank
+    if effective_rank is None or effective_rank > rank_cutoff:
+        return False
+    candidate_limit = _candidate_quality_candidate_limit(run_row)
+    if execution_rank is not None:
+        if rank_cutoff > candidate_limit:
+            return bool(execution.get("execution_candidate_selected", True)) or execution_rank <= rank_cutoff
+        if "execution_candidate_selected" not in execution:
+            return True
+        return bool(execution.get("execution_candidate_selected"))
+    if rank_cutoff > candidate_limit:
+        return rank is not None and rank <= rank_cutoff
+    if "execution_candidate_selected" not in execution:
+        return True
+    return bool(execution.get("execution_candidate_selected"))
+
+
+def _candidate_quality_excluded_synthetic_source(row: dict[str, Any]) -> bool:
+    reason = row.get("reason") if isinstance(row.get("reason"), dict) else {}
+    candidate_source = str(row.get("candidate_source") or reason.get("candidate_source") or row.get("source") or "")
+    entry_setup = str(reason.get("entry_setup") or reason.get("setup_type") or "")
+    execution = row.get("candidate_execution") if isinstance(row.get("candidate_execution"), dict) else {}
+    execution_lane = str(execution.get("execution_lane") or reason.get("execution_lane") or "")
+    if candidate_source in {"support_stop_reentry", "support_stop_reentry_overlay"}:
+        return True
+    if entry_setup in {"support_stop_reentry", "support_stop_reentry_overlay"}:
+        return True
+    if execution_lane in {"support_stop_reentry", "support_stop_reentry_overlay"}:
+        return True
+    return bool(reason.get("not_used_for_portfolio_execution") or row.get("not_used_for_portfolio_execution"))
+
+
+def _support_stop_reentry_candidate_quality_overlay(
+    results: list[IndependentTradeResult],
+    *,
+    bars_by_symbol: dict[str, list[Bar]],
+    params: BacktestParams,
+    buy_dates_by_symbol: dict[str, set[date]],
+    candidate_limit: int,
+    sample_limit: int,
+) -> dict[str, Any]:
+    """Report an independent-path support-stop reentry candidate overlay.
+
+    This is deliberately read-only: it does not create real orders, signal
+    events, or strategy scores. It lets the candidate-quality endpoint evaluate
+    whether a post-support-stop reclaim would improve the fixed candidate
+    contract if considered as an additional deterministic candidate source.
+    """
+
+    top_results = [
+        result
+        for result in results
+        if _support_stop_reentry_effective_rank(result.cluster.entry_row) <= candidate_limit
+    ]
+    reentry_results = _support_stop_reentry_results(
+        top_results,
+        bars_by_symbol=bars_by_symbol,
+        params=params,
+        buy_dates_by_symbol=buy_dates_by_symbol,
+        candidate_limit=candidate_limit,
+    )
+    append_results = [*top_results, *reentry_results]
+    daily_cap_results = _support_stop_reentry_daily_cap_results(
+        top_results,
+        reentry_results,
+        candidate_limit=candidate_limit,
+    )
+    baseline_report = candidate_trade_quality_report_from_results(
+        top_results,
+        rank_limit=candidate_limit,
+        sample_limit=sample_limit,
+    )
+    reentry_report = candidate_trade_quality_report_from_results(
+        reentry_results,
+        rank_limit=candidate_limit,
+        sample_limit=sample_limit,
+    )
+    append_report = candidate_trade_quality_report_from_results(
+        append_results,
+        rank_limit=candidate_limit,
+        sample_limit=sample_limit,
+    )
+    daily_cap_report = candidate_trade_quality_report_from_results(
+        daily_cap_results,
+        rank_limit=candidate_limit,
+        sample_limit=sample_limit,
+    )
+    sample_report = candidate_trade_quality_report_from_results(
+        reentry_results,
+        rank_limit=candidate_limit,
+        sample_limit=min(max(sample_limit, 1), 20),
+    )
+    return {
+        "status": "ready",
+        "spec": dict(SUPPORT_STOP_REENTRY_OVERLAY_SPEC),
+        "entry_selection": "independent_candidate_path_support_stop_reentry",
+        "source_candidate_scope": f"execution_top{candidate_limit}",
+        "not_used_for_signal_score": True,
+        "not_used_for_portfolio_execution": True,
+        "uses_future_for_label_only": True,
+        "note": "只读 overlay：从每日执行候选的独立 support_stop 路径派生 D 日可见 MA5 温和收复信号，再按 D+1 开盘独立买入和当前卖点回放；不生成真实 BUY。",
+        "coverage": {
+            "source_candidate_count": len(top_results),
+            "source_support_stop_count": sum(1 for result in top_results if result.exit_reason == "support_stop"),
+            "reentry_candidate_count": len(reentry_results),
+            "merged_append_candidate_count": len(append_results),
+            "merged_daily_cap_candidate_count": len(daily_cap_results),
+        },
+        "baseline": baseline_report["summary"],
+        "reentry_only": reentry_report["summary"],
+        "merged_append": append_report["summary"],
+        "merged_daily_cap": daily_cap_report["summary"],
+        "deltas": {
+            "reentry_only": _support_stop_reentry_summary_delta(reentry_report["summary"], baseline_report["summary"]),
+            "merged_append": _support_stop_reentry_summary_delta(append_report["summary"], baseline_report["summary"]),
+            "merged_daily_cap": _support_stop_reentry_summary_delta(daily_cap_report["summary"], baseline_report["summary"]),
+        },
+        "reentry_samples": sample_report["items"],
+    }
+
+
+def _support_stop_reentry_summary_delta(summary: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "average_return_pct": _support_stop_reentry_numeric_delta(summary, baseline, "average_return_pct"),
+        "win_rate": _support_stop_reentry_numeric_delta(summary, baseline, "win_rate"),
+        "average_max_drawdown_pct": _support_stop_reentry_numeric_delta(summary, baseline, "average_max_drawdown_pct"),
+        "sample_count": int(summary.get("sample_count") or 0) - int(baseline.get("sample_count") or 0),
+        "evaluated_count": int(summary.get("evaluated_count") or 0) - int(baseline.get("evaluated_count") or 0),
+    }
+
+
+def _support_stop_reentry_numeric_delta(summary: dict[str, Any], baseline: dict[str, Any], key: str) -> float | None:
+    current = _safe_float(summary.get(key))
+    previous = _safe_float(baseline.get(key))
+    if current is None or previous is None:
+        return None
+    return round(current - previous, 4)
+
+
+def _support_stop_reentry_results(
+    source_results: list[IndependentTradeResult],
+    *,
+    bars_by_symbol: dict[str, list[Bar]],
+    params: BacktestParams,
+    buy_dates_by_symbol: dict[str, set[date]],
+    candidate_limit: int,
+) -> list[IndependentTradeResult]:
+    by_reentry_key: dict[tuple[str, date], tuple[tuple[int, int, str], IndependentTradeResult]] = {}
+    for source_result in source_results:
+        reentry = _support_stop_reentry_result(
+            source_result,
+            bars_by_symbol=bars_by_symbol,
+            params=params,
+            buy_dates=buy_dates_by_symbol.get(source_result.cluster.vt_symbol, set()),
+            candidate_limit=candidate_limit,
+        )
+        if reentry is None:
+            continue
+        key = (reentry.cluster.vt_symbol, reentry.entry_signal_date)
+        sort_key = (
+            _support_stop_reentry_effective_rank(source_result.cluster.entry_row),
+            -source_result.entry_signal_date.toordinal(),
+            source_result.cluster.vt_symbol,
+        )
+        existing = by_reentry_key.get(key)
+        if existing is None or sort_key < existing[0]:
+            by_reentry_key[key] = (sort_key, reentry)
+    return [
+        result
+        for _, result in sorted(
+            by_reentry_key.values(),
+            key=lambda item: (item[1].entry_signal_date, item[1].cluster.vt_symbol),
+        )
+    ]
+
+
+def _support_stop_reentry_result(
+    source_result: IndependentTradeResult,
+    *,
+    bars_by_symbol: dict[str, list[Bar]],
+    params: BacktestParams,
+    buy_dates: set[date],
+    candidate_limit: int,
+) -> IndependentTradeResult | None:
+    if source_result.exit_reason != "support_stop" or source_result.exit_execute_date is None:
+        return None
+    bars = sorted(bars_by_symbol.get(source_result.cluster.vt_symbol, []), key=lambda bar: bar.trade_date)
+    if data_quality_service.candidate_price_discontinuity(
+        list(source_result.window),
+        vt_symbol=source_result.cluster.vt_symbol,
+        signal_date=source_result.entry_signal_date,
+        entry_execute_date=source_result.entry_execute_date,
+        exit_execute_date=source_result.exit_execute_date,
+    ):
+        return None
+    start_index = next(
+        (index for index, bar in enumerate(bars) if bar.trade_date >= source_result.exit_execute_date),
+        None,
+    )
+    if start_index is None:
+        return None
+    checked_days = 0
+    for index in range(start_index, len(bars) - 1):
+        signal_bar = bars[index]
+        if signal_bar.trade_date <= source_result.exit_execute_date:
+            continue
+        checked_days += 1
+        if checked_days > SUPPORT_STOP_REENTRY_OVERLAY_SPEC["max_wait_days"]:
+            return None
+        features = _support_stop_reentry_overlay_features(bars, index)
+        if not _support_stop_reentry_overlay_match(features):
+            continue
+        cluster = _support_stop_reentry_overlay_cluster(
+            source_result,
+            signal_bar,
+            features,
+            candidate_limit=candidate_limit,
+        )
+        return simulate_independent_candidate_trade(
+            cluster,
+            bars,
+            params=params,
+            sell_reason_fn=simulation.sell_reason_for_position,
+            limit_up_open_fn=_is_limit_up_open,
+            limit_down_open_fn=_is_limit_down_open,
+            buy_signal_dates=buy_dates,
+        )
+    return None
+
+
+def _support_stop_reentry_overlay_features(bars: list[Bar], index: int) -> dict[str, Any]:
+    bar = bars[index]
+    closes = [float(item.close_price) for item in bars[: index + 1]]
+    volumes = [float(item.volume or 0.0) for item in bars[: index + 1]]
+    ma5 = moving_average(closes, 5)
+    ma10 = moving_average(closes, 10)
+    ma20 = moving_average(closes, 20)
+    volume5 = moving_average(volumes, 5)
+    volume20 = moving_average(volumes, 20)
+    volume_ratio = volume5 / volume20 if volume5 is not None and volume20 not in (None, 0) else None
+    change_pct = _support_stop_reentry_pct(float(bar.close_price), float(bars[index - 1].close_price)) if index > 0 else None
+    return {
+        "reentry_close_location": _support_stop_reentry_close_location(bar),
+        "reentry_change_pct": change_pct,
+        "reentry_volume_ratio_5d_20d": volume_ratio,
+        "reentry_ma5_distance_pct": _support_stop_reentry_pct(float(bar.close_price), ma5),
+        "reentry_ma10_distance_pct": _support_stop_reentry_pct(float(bar.close_price), ma10),
+        "reentry_ma20_distance_pct": _support_stop_reentry_pct(float(bar.close_price), ma20),
+        "reentry_reclaimed_ma5": bool(ma5 is not None and float(bar.close_price) >= ma5),
+        "reentry_reclaimed_ma10": bool(ma10 is not None and float(bar.close_price) >= ma10),
+        "reentry_ma5": ma5,
+        "reentry_ma10": ma10,
+        "reentry_ma20": ma20,
+    }
+
+
+def _support_stop_reentry_overlay_match(features: dict[str, Any]) -> bool:
+    spec = SUPPORT_STOP_REENTRY_OVERLAY_SPEC
+    close_location = _safe_float(features.get("reentry_close_location"))
+    change_pct = _safe_float(features.get("reentry_change_pct"))
+    volume_ratio = _safe_float(features.get("reentry_volume_ratio_5d_20d"))
+    ma5_distance = _safe_float(features.get("reentry_ma5_distance_pct"))
+    ma10_distance = _safe_float(features.get("reentry_ma10_distance_pct"))
+    if close_location is None or not (spec["min_close_location"] <= close_location <= spec["max_close_location"]):
+        return False
+    if change_pct is None or not (spec["min_change_pct"] <= change_pct <= spec["max_change_pct"]):
+        return False
+    if volume_ratio is None or not (spec["min_volume_ratio_5d_20d"] <= volume_ratio <= spec["max_volume_ratio_5d_20d"]):
+        return False
+    if ma5_distance is None or ma5_distance > spec["max_ma5_distance_pct"]:
+        return False
+    if ma10_distance is None or ma10_distance > spec["max_ma10_distance_pct"]:
+        return False
+    if spec["require_ma5_reclaim"] and not features.get("reentry_reclaimed_ma5"):
+        return False
+    return True
+
+
+def _support_stop_reentry_overlay_cluster(
+    source_result: IndependentTradeResult,
+    signal_bar: Bar,
+    features: dict[str, Any],
+    *,
+    candidate_limit: int,
+) -> CandidateCluster:
+    source_entry = source_result.cluster.entry_row
+    source_reason = source_entry.get("reason") or source_entry.get("evidence") or {}
+    reason = dict(source_reason if isinstance(source_reason, dict) else {})
+    support_price = features.get("reentry_ma10") or features.get("reentry_ma5") or float(signal_bar.close_price)
+    reason.update(features)
+    reason.update(
+        {
+            "entry_setup": "support_stop_reentry_overlay",
+            "entry_family": "support_stop_reentry",
+            "support_stop_reentry": True,
+            "support_stop_reentry_spec": SUPPORT_STOP_REENTRY_OVERLAY_SPEC["name"],
+            "support_stop_reentry_source_signal_date": source_result.entry_signal_date.isoformat(),
+            "support_stop_reentry_source_exit_execute_date": source_result.exit_execute_date.isoformat() if source_result.exit_execute_date else None,
+            "entry_execution_mode": "candidate_quality_support_stop_reentry_next_open",
+            "support_price": support_price,
+            "support_type": "ma10_reclaim" if features.get("reentry_reclaimed_ma10") else "ma5_reclaim",
+            "ma5": features.get("reentry_ma5"),
+            "ma10": features.get("reentry_ma10"),
+            "ma20": features.get("reentry_ma20"),
+            "close_location_in_range": features.get("reentry_close_location"),
+            "latest_change_pct": features.get("reentry_change_pct"),
+            "volume_ratio_5d_20d": features.get("reentry_volume_ratio_5d_20d"),
+            "ma5_distance_pct": features.get("reentry_ma5_distance_pct"),
+            "ma10_distance_pct": features.get("reentry_ma10_distance_pct"),
+            "ma20_distance_pct": features.get("reentry_ma20_distance_pct"),
+        }
+    )
+    raw_rank = _safe_int_or_none(source_entry.get("rank")) or 1001
+    execution_rank = min(
+        _support_stop_reentry_effective_rank(source_entry),
+        max(int(candidate_limit or 20), 1),
+    )
+    payload = {
+        **source_entry,
+        "trade_date": signal_bar.trade_date,
+        "signal_date": signal_bar.trade_date,
+        "rank": 1001,
+        "action": "BUY",
+        "entry_action": "BUY",
+        "reason": reason,
+        "evidence": reason,
+        "candidate_source": "support_stop_reentry_overlay",
+        "candidate_execution": {
+            "execution_lane": "support_stop_reentry_overlay",
+            "raw_signal_rank": raw_rank,
+            "execution_candidate_rank": execution_rank,
+            "execution_candidate_selected": True,
+            "execution_candidate_limit": candidate_limit,
+            "not_used_for_portfolio_execution": True,
+        },
+    }
+    return CandidateCluster(
+        vt_symbol=source_result.cluster.vt_symbol,
+        rows=(payload,),
+        cluster_start_date=signal_bar.trade_date,
+        cluster_end_date=signal_bar.trade_date,
+        entry_row=payload,
+    )
+
+
+def _support_stop_reentry_daily_cap_results(
+    source_results: list[IndependentTradeResult],
+    reentry_results: list[IndependentTradeResult],
+    *,
+    candidate_limit: int,
+) -> list[IndependentTradeResult]:
+    by_date: dict[date, dict[tuple[str, str], IndependentTradeResult]] = defaultdict(dict)
+    for result in [*source_results, *reentry_results]:
+        source = str(result.cluster.entry_row.get("candidate_source") or "original")
+        key = (result.cluster.vt_symbol, source)
+        existing = by_date[result.entry_signal_date].get(key)
+        if existing is None or _support_stop_reentry_effective_rank(result.cluster.entry_row) < _support_stop_reentry_effective_rank(existing.cluster.entry_row):
+            by_date[result.entry_signal_date][key] = result
+    selected: list[IndependentTradeResult] = []
+    for _, date_results_by_key in sorted(by_date.items(), key=lambda item: item[0]):
+        date_results = list(date_results_by_key.values())
+        date_results.sort(
+            key=lambda result: (
+                0 if str(result.cluster.entry_row.get("candidate_source") or "") == "support_stop_reentry_overlay" else 1,
+                _support_stop_reentry_effective_rank(result.cluster.entry_row),
+                result.cluster.vt_symbol,
+            )
+        )
+        selected.extend(date_results[: max(int(candidate_limit or 20), 1)])
+    return selected
+
+
+def _support_stop_reentry_effective_rank(row: dict[str, Any]) -> int:
+    execution = row.get("candidate_execution") if isinstance(row.get("candidate_execution"), dict) else {}
+    return (
+        _safe_int_or_none(execution.get("execution_candidate_rank"))
+        or _safe_int_or_none(row.get("rank"))
+        or 10**9
+    )
+
+
+def _support_stop_reentry_close_location(bar: Bar) -> float | None:
+    day_range = float(bar.high_price) - float(bar.low_price)
+    if day_range <= 0:
+        return None
+    return (float(bar.close_price) - float(bar.low_price)) / day_range
+
+
+def _support_stop_reentry_pct(price: float | None, base: float | None) -> float | None:
+    if price is None or base is None or base <= 0:
+        return None
+    return (float(price) / float(base) - 1.0) * 100.0
 
 
 def _candidate_trade_quality_cache_get(
@@ -1411,17 +1984,8 @@ def _factor_candidate_execution_attribution(
             .where(schema.backtest_trades.c.backtest_id == backtest_id)
             .order_by(schema.backtest_trades.c.trade_date, schema.backtest_trades.c.id)
         ).mappings().all()
-        position_rows = session.execute(
-            select(schema.backtest_daily_positions)
-            .where(schema.backtest_daily_positions.c.backtest_id == backtest_id)
-            .order_by(schema.backtest_daily_positions.c.trade_date, schema.backtest_daily_positions.c.vt_symbol)
-        ).mappings().all()
-    candidates_with_positions = _factor_candidates_with_signal_day_positions(
-        candidates,
-        [dict(row) for row in position_rows],
-    )
     return candidate_execution_attribution_summary(
-        candidates_with_positions,
+        candidates,
         signal_events=[dict(row) for row in signal_rows],
         orders=[dict(row) for row in order_rows],
         trades=[dict(row) for row in trade_rows],
@@ -1430,33 +1994,21 @@ def _factor_candidate_execution_attribution(
     )
 
 
-def _factor_candidates_with_signal_day_positions(
-    candidates: list[dict[str, Any]],
-    positions: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    if not candidates or not positions:
-        return candidates
-    positions_by_date: dict[date, list[dict[str, Any]]] = {}
-    for row in positions:
-        trade_date = _as_date(row.get("trade_date"))
-        if trade_date is not None:
-            positions_by_date.setdefault(trade_date, []).append(row)
-    result: list[dict[str, Any]] = []
-    for candidate in candidates:
-        signal_date = _as_date(candidate.get("trade_date") or candidate.get("signal_date"))
-        item = dict(candidate)
-        if signal_date is not None and signal_date in positions_by_date:
-            item["held_positions"] = [dict(row) for row in positions_by_date[signal_date]]
-        result.append(item)
-    return result
-
-
 def ensure_factor_audit_cache(backtest_id: int, *, limit: int = 2000) -> dict[str, Any]:
     if not is_database_configured():
         return {"status": "unavailable", "message": "DATABASE_URL not configured", "cache": "unavailable"}
     _ensure_backtest_schema()
     row_limit = min(max(int(limit or 2000), 1), 20000)
     with session_scope() as session:
+        complete_count = _complete_factor_cache_count(session, backtest_id)
+        if complete_count > 0:
+            _ensure_complete_factor_outcomes(session, backtest_id, row_limit=row_limit)
+            return {
+                "status": "ready",
+                "backtest_id": backtest_id,
+                "cache": "hit",
+                "coverage": _factor_cache_coverage(session, backtest_id),
+            }
         existing_count = _valid_factor_cache_count(session, backtest_id)
         if existing_count >= row_limit:
             return {
@@ -1466,6 +2018,15 @@ def ensure_factor_audit_cache(backtest_id: int, *, limit: int = 2000) -> dict[st
                 "coverage": _factor_cache_coverage(session, backtest_id),
             }
         _lock_factor_cache_build(session, backtest_id)
+        complete_count = _complete_factor_cache_count(session, backtest_id)
+        if complete_count > 0:
+            _ensure_complete_factor_outcomes(session, backtest_id, row_limit=row_limit)
+            return {
+                "status": "ready",
+                "backtest_id": backtest_id,
+                "cache": "hit_after_wait",
+                "coverage": _factor_cache_coverage(session, backtest_id),
+            }
         existing_count = _valid_factor_cache_count(session, backtest_id)
         if existing_count >= row_limit:
             return {
@@ -1477,7 +2038,21 @@ def ensure_factor_audit_cache(backtest_id: int, *, limit: int = 2000) -> dict[st
         run = session.execute(select(schema.backtest_runs).where(schema.backtest_runs.c.id == backtest_id)).mappings().first()
         if not run:
             return {"status": "not_found", "backtest_id": backtest_id, "cache": "miss"}
+        existing_snapshot_count = _factor_snapshot_count(session, backtest_id)
         items, coverage = _build_factor_cache_items(session, dict(run), row_limit)
+        if not items and existing_snapshot_count > 0:
+            return {
+                "status": "ready",
+                "backtest_id": backtest_id,
+                "cache": "existing_snapshots_preserved",
+                "coverage": {
+                    **_factor_cache_coverage(session, backtest_id),
+                    "candidate_source": "existing_backtest_factor_snapshots",
+                    "rebuild_candidate_source": coverage.get("candidate_source"),
+                    "rebuild_candidate_count": coverage.get("candidate_count"),
+                    "rebuild_signal_count": coverage.get("signal_count"),
+                },
+            }
         session.execute(schema.backtest_factor_outcomes.delete().where(schema.backtest_factor_outcomes.c.backtest_id == backtest_id))
         session.execute(schema.backtest_factor_snapshots.delete().where(schema.backtest_factor_snapshots.c.backtest_id == backtest_id))
         if items:
@@ -1531,34 +2106,58 @@ def _build_factor_cache_items(session: Any, run: dict[str, Any], row_limit: int)
             "candidate_source": "backtest_signal_events",
         }
 
-    filters = [
-        schema.quant_recommendations.c.strategy_id == run["strategy_id"],
-        schema.quant_recommendations.c.strategy_version == run["strategy_version"],
-        schema.quant_recommendations.c.trade_date >= run["start_date"],
-        schema.quant_recommendations.c.trade_date <= run["end_date"],
-    ]
+    params = _params_from_run(dict(run))
+    runs_by_date = screening_loaders.screen_runs_between(
+        session,
+        run["strategy_id"],
+        run["strategy_version"],
+        run["start_date"],
+        run["end_date"],
+        signal_evidence_schema_version=screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+        max_symbols=params.max_symbols,
+        included_boards=params.included_boards,
+    )
+    run_ids = sorted(int(screen_run["id"]) for screen_run in runs_by_date.values())
     recommendation_rows = session.execute(
         select(schema.quant_recommendations)
-        .where(and_(*filters))
+        .where(schema.quant_recommendations.c.run_id.in_(run_ids))
         .order_by(schema.quant_recommendations.c.trade_date, schema.quant_recommendations.c.rank)
         .limit(row_limit)
-    ).mappings().all()
+    ).mappings().all() if run_ids else []
     signal_rows = []
     if len(recommendation_rows) < row_limit:
         signal_rows = session.execute(
             select(schema.quant_stock_signals)
             .where(
-                schema.quant_stock_signals.c.strategy_id == run["strategy_id"],
-                schema.quant_stock_signals.c.strategy_version == run["strategy_version"],
-                schema.quant_stock_signals.c.trade_date >= run["start_date"],
-                schema.quant_stock_signals.c.trade_date <= run["end_date"],
+                schema.quant_stock_signals.c.run_id.in_(run_ids),
             )
             .order_by(schema.quant_stock_signals.c.trade_date, desc(schema.quant_stock_signals.c.total_score), schema.quant_stock_signals.c.vt_symbol)
             .limit(row_limit - len(recommendation_rows))
-        ).mappings().all()
+        ).mappings().all() if run_ids else []
     row_dicts = [dict(row) for row in recommendation_rows]
     signal_dicts = [_signal_row_as_candidate(dict(row)) for row in signal_rows]
     candidate_rows = [*row_dicts, *signal_dicts]
+    if not candidate_rows:
+        backtest_signal_rows = session.execute(
+            select(schema.backtest_signal_events)
+            .where(
+                schema.backtest_signal_events.c.backtest_id == int(run["id"]),
+                schema.backtest_signal_events.c.side == "BUY",
+            )
+            .order_by(
+                schema.backtest_signal_events.c.signal_date,
+                schema.backtest_signal_events.c.id,
+            )
+            .limit(row_limit)
+        ).mappings().all()
+        event_rows = _signal_event_candidate_rows([dict(row) for row in backtest_signal_rows], row_limit=row_limit)
+        return _factor_cache_items_from_candidate_rows(session, run, event_rows), {
+            "candidate_count": 0,
+            "signal_count": len(event_rows),
+            "used_signal_fallback_count": len(event_rows),
+            "signal_event_candidate_count": len(event_rows),
+            "candidate_source": "backtest_signal_events",
+        }
     items = _factor_cache_items_from_candidate_rows(session, run, candidate_rows)
     return items, {
         "candidate_count": len(row_dicts),
@@ -1583,8 +2182,8 @@ def _factor_cache_items_from_candidate_rows(
     )
     items = candidate_feature_rows(candidate_rows, stock_names)
     for item, source_row in zip(items, candidate_rows, strict=False):
-        signal_date = source_row.get("trade_date")
-        if isinstance(signal_date, date):
+        signal_date = _as_date(source_row.get("trade_date"))
+        if signal_date is not None:
             outcome = fixed_horizon_outcome_row(
                 signal_date=signal_date,
                 bars=bars_by_symbol.get(str(source_row.get("vt_symbol") or ""), []),
@@ -1601,7 +2200,6 @@ def _uses_experiment_candidate_pool(run: dict[str, Any]) -> bool:
     return bool(
         str(params.get("setup_family_filter") or "").strip()
         or _truthy(params.get("enable_phase_aware_setup_selector", False))
-        or _truthy(params.get("enable_phase_replacement_quality", False))
     )
 
 
@@ -1692,14 +2290,85 @@ def _valid_factor_cache_count(session: Any, backtest_id: int) -> int:
     )
 
 
-def _factor_cache_coverage(session: Any, backtest_id: int) -> dict[str, int]:
+def _factor_snapshot_count(session: Any, backtest_id: int) -> int:
+    return int(
+        session.execute(
+            select(func.count()).select_from(schema.backtest_factor_snapshots).where(schema.backtest_factor_snapshots.c.backtest_id == backtest_id)
+        ).scalar()
+        or 0
+    )
+
+
+def _complete_factor_cache_count(session: Any, backtest_id: int) -> int:
+    return int(
+        session.execute(
+            select(func.count())
+            .select_from(schema.backtest_factor_snapshots)
+            .where(
+                schema.backtest_factor_snapshots.c.backtest_id == backtest_id,
+                schema.backtest_factor_snapshots.c.payload["factor_cache_schema_version"].as_integer() == FACTOR_AUDIT_CACHE_SCHEMA_VERSION,
+                schema.backtest_factor_snapshots.c.payload["factor_cache_complete"].as_boolean().is_(True),
+            )
+        ).scalar()
+        or 0
+    )
+
+
+def _ensure_complete_factor_outcomes(session: Any, backtest_id: int, *, row_limit: int) -> None:
+    outcome_count = int(
+        session.execute(
+            select(func.count())
+            .select_from(schema.backtest_factor_outcomes)
+            .where(schema.backtest_factor_outcomes.c.backtest_id == backtest_id)
+        ).scalar()
+        or 0
+    )
+    complete_count = _complete_factor_cache_count(session, backtest_id)
+    if outcome_count >= complete_count:
+        return
+    run = session.execute(select(schema.backtest_runs).where(schema.backtest_runs.c.id == backtest_id)).mappings().first()
+    if not run:
+        return
+    snapshot_rows = session.execute(
+        select(schema.backtest_factor_snapshots)
+        .where(schema.backtest_factor_snapshots.c.backtest_id == backtest_id)
+        .order_by(schema.backtest_factor_snapshots.c.trade_date, schema.backtest_factor_snapshots.c.rank, schema.backtest_factor_snapshots.c.vt_symbol)
+        .limit(row_limit)
+    ).mappings().all()
+    candidate_rows = [dict(row.get("payload") or {}) for row in snapshot_rows]
+    if not candidate_rows:
+        return
+    items = _factor_cache_items_from_candidate_rows(session, dict(run), candidate_rows)
+    outcome_rows = [
+        _factor_outcome_values(backtest_id, item)
+        for item in items
+        if isinstance(item.get("outcome"), dict)
+    ]
+    if not outcome_rows:
+        return
+    session.execute(schema.backtest_factor_outcomes.delete().where(schema.backtest_factor_outcomes.c.backtest_id == backtest_id))
+    session.execute(schema.backtest_factor_outcomes.insert(), outcome_rows)
+
+
+def _factor_cache_coverage(session: Any, backtest_id: int) -> dict[str, Any]:
     snapshot_count = session.execute(
         select(func.count()).select_from(schema.backtest_factor_snapshots).where(schema.backtest_factor_snapshots.c.backtest_id == backtest_id)
     ).scalar() or 0
     outcome_count = session.execute(
         select(func.count()).select_from(schema.backtest_factor_outcomes).where(schema.backtest_factor_outcomes.c.backtest_id == backtest_id)
     ).scalar() or 0
-    return {"snapshot_count": int(snapshot_count), "outcome_count": int(outcome_count)}
+    complete_count = _complete_factor_cache_count(session, backtest_id)
+    coverage: dict[str, Any] = {"snapshot_count": int(snapshot_count), "outcome_count": int(outcome_count)}
+    if complete_count:
+        coverage.update(
+            {
+                "candidate_count": int(complete_count),
+                "candidate_source": "backtest_daily_candidates",
+                "snapshot_complete_count": int(complete_count),
+                "factor_cache_complete": True,
+            }
+        )
+    return coverage
 
 
 def _load_factor_backtest_trades(session: Any, backtest_id: int) -> list[dict[str, Any]]:
@@ -1714,8 +2383,8 @@ def _load_factor_backtest_trades(session: Any, backtest_id: int) -> list[dict[st
 def _candidate_signal_dates_by_symbol(rows: list[dict[str, Any]]) -> dict[str, list[date]]:
     result: dict[str, set[date]] = defaultdict(set)
     for row in rows:
-        trade_date = row.get("trade_date")
-        if isinstance(trade_date, date):
+        trade_date = _as_date(row.get("trade_date"))
+        if trade_date is not None:
             result[str(row.get("vt_symbol") or "").upper()].add(trade_date)
     return {symbol: sorted(dates) for symbol, dates in result.items() if symbol}
 
@@ -1751,17 +2420,28 @@ def backtest_strategy_timeline(backtest_id: int, vt_symbol: str) -> dict[str, An
         run = session.execute(select(schema.backtest_runs).where(schema.backtest_runs.c.id == backtest_id)).mappings().first()
         if not run:
             return {"status": "not_found", "backtest_id": backtest_id, "vt_symbol": symbol, "items": []}
+        params = _params_from_run(dict(run))
+        run_ids = [
+            int(screen_run["id"])
+            for screen_run in screening_loaders.screen_runs_between(
+                session,
+                run["strategy_id"],
+                run["strategy_version"],
+                run["start_date"],
+                run["end_date"],
+                signal_evidence_schema_version=screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+                max_symbols=params.max_symbols,
+                included_boards=params.included_boards,
+            ).values()
+        ]
         recommendations = session.execute(
             select(schema.quant_recommendations)
             .where(
-                schema.quant_recommendations.c.strategy_id == run["strategy_id"],
-                schema.quant_recommendations.c.strategy_version == run["strategy_version"],
+                schema.quant_recommendations.c.run_id.in_(run_ids),
                 schema.quant_recommendations.c.vt_symbol == symbol,
-                schema.quant_recommendations.c.trade_date >= run["start_date"],
-                schema.quant_recommendations.c.trade_date <= run["end_date"],
             )
             .order_by(schema.quant_recommendations.c.trade_date, schema.quant_recommendations.c.rank)
-        ).mappings().all()
+        ).mappings().all() if run_ids else []
         signals = session.execute(
             select(schema.backtest_signal_events)
             .where(
@@ -1925,16 +2605,27 @@ def backtest_drilldown_options(backtest_id: int) -> dict[str, Any]:
         signal_dicts = [dict(row) for row in signal_rows]
         position_dicts = [dict(row) for row in position_rows]
         signal_dates = sorted({row["signal_date"] for row in signal_dicts if row.get("signal_date")})
-        if signal_dates:
+        params = _params_from_run(dict(run))
+        run_ids = [
+            int(screen_run["id"])
+            for screen_run in screening_loaders.screen_runs_by_date(
+                session,
+                run["strategy_id"],
+                run["strategy_version"],
+                signal_dates,
+                signal_evidence_schema_version=screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+                max_symbols=params.max_symbols,
+                included_boards=params.included_boards,
+            ).values()
+        ]
+        if run_ids:
             recommendation_rows = session.execute(
                 select(
                     schema.quant_recommendations.c.trade_date,
                     schema.quant_recommendations.c.action,
                 )
                 .where(
-                    schema.quant_recommendations.c.trade_date.in_(signal_dates),
-                    schema.quant_recommendations.c.strategy_id == run["strategy_id"],
-                    schema.quant_recommendations.c.strategy_version == run["strategy_version"],
+                    schema.quant_recommendations.c.run_id.in_(run_ids),
                 )
                 .order_by(schema.quant_recommendations.c.trade_date, schema.quant_recommendations.c.rank)
             ).mappings().all()
@@ -2057,6 +2748,8 @@ def _simulation_callbacks() -> simulation.SimulationCallbacks:
         order=_order,
         trade_to_api=_trade_to_api,
         mapping_to_api=_mapping_to_api,
+        candidate_snapshot=_candidate_snapshot_rows,
+        candidate_snapshot_from_payload=_candidate_snapshot_row_from_payload,
     )
 
 
@@ -2122,6 +2815,8 @@ def _params_need_market_context(params: BacktestParams) -> bool:
         or params.enable_weekly_top_fractal_relief
         or params.enable_pure_loss_weak_bucket_penalty
         or params.enable_selective_setup_quality_lane
+        or params.enable_support_divergence_entry_lane
+        or params.enable_strong_trend_ma_pullback_entry_lane
         or params.enable_low_suction_false_launch_watch_gate
     )
 
@@ -2436,9 +3131,18 @@ def _load_symbol_universe(
         return [symbol for symbol in requested if symbol in found]
 
     rows = session.execute(
-        select(schema.stocks.c.vt_symbol, schema.stocks.c.exchange)
+        select(
+            schema.stocks.c.vt_symbol,
+            schema.stocks.c.exchange,
+            schema.stocks.c.turnover,
+            schema.stocks.c.market_cap,
+        )
         .where(schema.stocks.c.vt_symbol != "000001.SSE")
-        .order_by(schema.stocks.c.vt_symbol)
+        .order_by(
+            desc(func.coalesce(schema.stocks.c.turnover, 0.0)),
+            desc(func.coalesce(schema.stocks.c.market_cap, 0.0)),
+            schema.stocks.c.vt_symbol,
+        )
         .limit(5000)
     ).all()
     allowed = set(normalize_included_boards(included_boards))
@@ -2651,28 +3355,21 @@ def _signal_snapshot_not_persisted_summary(context: dict[str, Any] | None) -> st
 
 def _candidate_planned_not_ordered_summary(context: dict[str, Any] | None, equity_row: dict[str, Any] | None) -> str:
     if not context:
-        return "理论信号存在，但没有找到对应组合订单，通常是组合资金、仓位或回测链路未记录完整。"
+        return "理论信号存在，但没有形成组合成交；买点质量请以候选独立买卖报告为准。"
     rank = _safe_int_or_none(context.get("target_signal_rank"))
     execution_rank = _safe_int_or_none(context.get("target_execution_candidate_rank"))
     candidate_limit = _safe_int_or_none(context.get("candidate_limit"))
-    max_positions = _safe_int_or_none(context.get("max_positions"))
-    position_count = _safe_int_or_none((equity_row or {}).get("position_count"))
     setup = str(context.get("target_signal_setup") or "").strip()
     lane = str(context.get("target_execution_lane") or setup or "").strip()
     lane_text = f"{_setup_type_label(lane)}通道" if lane else ""
+    del equity_row
     if execution_rank is not None and candidate_limit is not None:
-        if position_count is not None and max_positions is not None and position_count >= max_positions:
-            setup_text = f"{_setup_type_label(setup)}" if setup else ""
-            return f"理论{setup_text}信号已进入{lane_text}执行池第 {execution_rank} 名，但执行日组合已满仓 {position_count}/{max_positions}，且未触发换仓规则。"
-        return f"理论信号已进入{lane_text}执行池第 {execution_rank} 名，但没有找到对应组合订单；请核查执行日涨跌停、持仓上限和订单记录。"
+        return f"理论信号已进入{lane_text}执行池第 {execution_rank} 名，但没有形成组合成交；买点质量请以候选独立买卖报告为准。"
     if execution_rank is None and candidate_limit is not None and context.get("target_execution_candidate_selected") is False:
         return f"理论{_setup_type_label(setup)}信号存在，但{lane_text}没有进入组合执行前 {candidate_limit} 名，因此没有下组合订单。"
     if rank is not None and candidate_limit is not None and rank > candidate_limit:
         return f"理论信号存在，但当日理论买入排名第 {rank}，超过组合执行前 {candidate_limit} 名，因此没有下组合订单。"
-    if position_count is not None and max_positions is not None and position_count >= max_positions:
-        setup_text = f"{_setup_type_label(setup)}" if setup else ""
-        return f"理论{setup_text}信号存在，但执行日组合已满仓 {position_count}/{max_positions}，且未触发换仓规则。"
-    return "理论信号存在，但没有找到对应组合订单；请核查当日候选排名、持仓上限和换仓规则。"
+    return "理论信号存在，但没有形成组合成交；买点质量请以候选独立买卖报告为准。"
 
 
 def _setup_type_label(value: str) -> str:
@@ -2685,7 +3382,7 @@ def _setup_type_label(value: str) -> str:
 
 def _candidate_not_planned_summary(context: dict[str, Any] | None) -> str:
     if not context:
-        return "候选存在，但没有进入该回测的理论买入计划，通常是排名、持仓上限、策略参数或回测区间不一致。"
+        return "候选存在，但没有进入该回测的理论买入计划，通常是排名、策略参数或回测区间不一致。"
     reason = str(context.get("likely_reason") or "")
     label = str(context.get("likely_reason_label") or "").strip()
     if context.get("target_theoretical_held_on_signal_date"):
@@ -3630,7 +4327,7 @@ def _robustness_checks(
         "random_baseline": random_baseline,
         "diagnostics": diagnostics,
         "limitations": [
-            "成本压力测试复用已发生交易和权益曲线做近似扣减，没有重新撮合涨跌停和仓位路径。",
+            "成本压力测试复用已发生交易和权益曲线做近似扣减，没有重新撮合涨跌停和组合成交路径。",
             "随机基准为固定种子、多组样本等权组合，不是完整蒙特卡洛执行策略。",
             "年度分段按当前本地样本区间切分；本地历史不足时不能覆盖完整 2020-2024 周期。",
         ],
@@ -3940,7 +4637,7 @@ def _run_validation_grid(
         "top_variants": _top_validation_variants(rows),
         "rows": rows,
         "limitations": [
-            "参数网格会重新跑选股、入场、出场和仓位路径，但仍使用日线数据，不能验证真实尾盘 14:30 后成交。",
+            "参数网格会重新跑选股、入场、出场和组合成交路径，但仍使用日线数据，不能验证真实尾盘 14:30 后成交。",
             "网格参数空间只覆盖第一版关键参数，不代表所有可调参数都已穷举。",
             "walk-forward 使用滚动训练/测试窗口，但当前本地历史过短，不能替代 3-5 年跨市场环境验证。",
             "外部财报、资金流、龙虎榜数据不足时，网格只能验证价格成交量代理信号的稳健性。",
@@ -4099,11 +4796,6 @@ def _params_from_run(run: dict[str, Any]) -> BacktestParams:
         tail_entry_start=str(raw_params.get("tail_entry_start") or "14:30"),
         tail_entry_end=str(raw_params.get("tail_entry_end") or "14:30"),
         tail_entry_ma5_tolerance_pct=float(raw_params.get("tail_entry_ma5_tolerance_pct") or 1.5),
-        enable_signal_rotation=_truthy(raw_params.get("enable_signal_rotation", True)),
-        rotation_min_score=float(raw_params.get("rotation_min_score") or 98.0),
-        rotation_min_score_gap=float(raw_params.get("rotation_min_score_gap") or 8.0),
-        rotation_max_holding_return_pct=float(raw_params.get("rotation_max_holding_return_pct") or 3.0),
-        rotation_min_holding_days=int(raw_params.get("rotation_min_holding_days") or 3),
         require_low_suction_launch_confirmation=_truthy(raw_params.get("require_low_suction_launch_confirmation", False)),
         exclude_repeated_dragon_pullback=_truthy(raw_params.get("exclude_repeated_dragon_pullback", False)),
         require_low_suction_launch_for_low_suction_context=_truthy(
@@ -4126,13 +4818,16 @@ def _params_from_run(run: dict[str, Any]) -> BacktestParams:
         enable_weekly_top_fractal_relief=_truthy(raw_params.get("enable_weekly_top_fractal_relief", False)),
         enable_pure_loss_weak_bucket_penalty=_truthy(raw_params.get("enable_pure_loss_weak_bucket_penalty", False)),
         enable_selective_setup_quality_lane=_truthy(raw_params.get("enable_selective_setup_quality_lane", False)),
+        enable_support_divergence_entry_lane=_truthy(
+            raw_params.get("enable_support_divergence_entry_lane", False)
+        ),
+        enable_strong_trend_ma_pullback_entry_lane=_truthy(
+            raw_params.get("enable_strong_trend_ma_pullback_entry_lane", False)
+        ),
         enable_high_risk_d2_follow_through_entry=_truthy(
             raw_params.get("enable_high_risk_d2_follow_through_entry", False)
         ),
         enable_dynamic_failed_launch_exit_stop=_truthy(raw_params.get("enable_dynamic_failed_launch_exit_stop", False)),
-        enable_dynamic_failed_launch_replacement_quality_gate=_truthy(
-            raw_params.get("enable_dynamic_failed_launch_replacement_quality_gate", False)
-        ),
         enable_failed_launch_exit_stop=_truthy(raw_params.get("enable_failed_launch_exit_stop", False)),
         enable_contextual_failed_launch_exit_stop=_truthy(raw_params.get("enable_contextual_failed_launch_exit_stop", False)),
         enable_mid_profit_giveback_stop=_truthy(raw_params.get("enable_mid_profit_giveback_stop", False)),
@@ -4141,7 +4836,6 @@ def _params_from_run(run: dict[str, Any]) -> BacktestParams:
         mid_profit_giveback_drawdown_pct=float(raw_params.get("mid_profit_giveback_drawdown_pct") or 0.07),
         enable_contextual_support_reclaim_delay=_truthy(raw_params.get("enable_contextual_support_reclaim_delay", False)),
         support_reclaim_delay_max_warning_level=int(raw_params.get("support_reclaim_delay_max_warning_level") or 2),
-        support_reclaim_delay_max_replacement_score_gap=float(raw_params.get("support_reclaim_delay_max_replacement_score_gap") or 6.0),
         support_reclaim_delay_min_sell_day_range_pct=float(raw_params.get("support_reclaim_delay_min_sell_day_range_pct") or 5.0),
         enable_contextual_peak_giveback_stop=_truthy(raw_params.get("enable_contextual_peak_giveback_stop", False)),
         peak_giveback_min_high_gain_pct=float(raw_params.get("peak_giveback_min_high_gain_pct") or 0.12),
@@ -4152,26 +4846,6 @@ def _params_from_run(run: dict[str, Any]) -> BacktestParams:
         low_suction_false_launch_min_days=int(raw_params.get("low_suction_false_launch_min_days") or 3),
         low_suction_false_launch_min_warning_level=int(raw_params.get("low_suction_false_launch_min_warning_level") or 2),
         low_suction_false_launch_max_recovery_level=int(raw_params.get("low_suction_false_launch_max_recovery_level") or 1),
-        enable_missed_candidate_quality_rotation=_truthy(raw_params.get("enable_missed_candidate_quality_rotation", False)),
-        missed_rotation_min_score=float(raw_params.get("missed_rotation_min_score") or 98.0),
-        missed_rotation_min_score_gap=float(raw_params.get("missed_rotation_min_score_gap") or 10.0),
-        missed_rotation_max_held_return_pct=float(raw_params.get("missed_rotation_max_held_return_pct") or 1.0),
-        missed_rotation_min_held_days=int(raw_params.get("missed_rotation_min_held_days") or 4),
-        enable_high_quality_trend_rotation=_truthy(raw_params.get("enable_high_quality_trend_rotation", False)),
-        high_quality_rotation_min_score=float(raw_params.get("high_quality_rotation_min_score") or 96.0),
-        high_quality_rotation_max_rank=int(raw_params.get("high_quality_rotation_max_rank") or 10),
-        high_quality_rotation_min_score_gap=float(raw_params.get("high_quality_rotation_min_score_gap") or 8.0),
-        high_quality_rotation_max_held_return_pct=float(raw_params.get("high_quality_rotation_max_held_return_pct") or 0.0),
-        high_quality_rotation_min_held_days=int(raw_params.get("high_quality_rotation_min_held_days") or 4),
-        enable_weak_holding_quality_rotation=_truthy(raw_params.get("enable_weak_holding_quality_rotation", False)),
-        weak_holding_rotation_min_score=float(raw_params.get("weak_holding_rotation_min_score") or 96.0),
-        weak_holding_rotation_max_rank=int(raw_params.get("weak_holding_rotation_max_rank") or 20),
-        weak_holding_rotation_min_score_gap=float(raw_params.get("weak_holding_rotation_min_score_gap") or 6.0),
-        weak_holding_rotation_max_held_return_pct=float(raw_params.get("weak_holding_rotation_max_held_return_pct") or -5.0),
-        weak_holding_rotation_min_held_days=int(raw_params.get("weak_holding_rotation_min_held_days") or 3),
-        weak_holding_rotation_max_ma_convergence_pct=float(raw_params.get("weak_holding_rotation_max_ma_convergence_pct") or 5.0),
-        weak_holding_rotation_min_low_suction_days=int(raw_params.get("weak_holding_rotation_min_low_suction_days") or 3),
-        enable_protected_weak_holding_rotation=_truthy(raw_params.get("enable_protected_weak_holding_rotation", False)),
         enable_low_suction_pullback_entry=_truthy(raw_params.get("enable_low_suction_pullback_entry", False)),
         low_suction_pullback_entry_max_wait_days=int(raw_params.get("low_suction_pullback_entry_max_wait_days") or 3),
         low_suction_pullback_entry_buffer_pct=float(raw_params.get("low_suction_pullback_entry_buffer_pct") or 0.01),
@@ -4185,30 +4859,11 @@ def _params_from_run(run: dict[str, Any]) -> BacktestParams:
         low_suction_failed_follow_d3_close_pct=float(raw_params.get("low_suction_failed_follow_d3_close_pct") or -3.0),
         low_suction_opened_space_d5_high_pct=float(raw_params.get("low_suction_opened_space_d5_high_pct") or 6.0),
         low_suction_opened_space_d5_low_pct=float(raw_params.get("low_suction_opened_space_d5_low_pct") or -5.0),
-        enable_low_suction_branch_replacement_quality_gate=_truthy(
-            raw_params.get("enable_low_suction_branch_replacement_quality_gate", False)
-        ),
-        low_suction_branch_replacement_gate_wait_days=int(
-            _raw_param_value(raw_params, "low_suction_branch_replacement_gate_wait_days", 3)
-        ),
-        low_suction_branch_replacement_min_score=float(_raw_param_value(raw_params, "low_suction_branch_replacement_min_score", 98.0)),
-        low_suction_branch_replacement_max_market_warning_level=int(
-            _raw_param_value(raw_params, "low_suction_branch_replacement_max_market_warning_level", 1)
-        ),
-        low_suction_branch_replacement_max_low_suction_ma_convergence_pct=float(
-            _raw_param_value(raw_params, "low_suction_branch_replacement_max_low_suction_ma_convergence_pct", 7.0)
-        ),
-        low_suction_branch_replacement_max_dragon_ma_convergence_pct=float(
-            _raw_param_value(raw_params, "low_suction_branch_replacement_max_dragon_ma_convergence_pct", 12.0)
-        ),
-        enable_low_suction_branch_replacement_strict_setup_gate=_truthy(
-            raw_params.get("enable_low_suction_branch_replacement_strict_setup_gate", False)
-        ),
         setup_family_filter=str(raw_params.get("setup_family_filter") or ""),
         enable_phase_aware_setup_selector=_truthy(raw_params.get("enable_phase_aware_setup_selector", False)),
-        enable_phase_replacement_quality=_truthy(raw_params.get("enable_phase_replacement_quality", False)),
         reuse_signal_cache=_truthy(raw_params.get("reuse_signal_cache", False)),
         exclude_from_product_baseline=_truthy(raw_params.get("exclude_from_product_baseline", False)),
+        baseline_policy=str(raw_params.get("baseline_policy") or ""),
         symbols=[_normalize_symbol(symbol) for symbol in (raw_params.get("symbols") or []) if _normalize_symbol(symbol)],
         included_boards=normalize_included_boards(raw_params.get("included_boards")),
         persist=False,
@@ -4388,7 +5043,7 @@ def _backtest_method(params: BacktestParams) -> dict[str, Any]:
     universe = (
         "指定股票"
         if params.symbols
-        else f"按稳定证券代码顺序取前 {params.max_symbols} 只本地股票；板块：{', '.join(board_labels)}；流动性由信号日历史成交额打分过滤"
+        else f"按最新流动性取前 {params.max_symbols} 只本地股票；板块：{', '.join(board_labels)}；流动性由信号日历史成交额打分过滤"
     )
     return {
         "id": "daily_dynamic_candidate_backtest",
@@ -4404,13 +5059,6 @@ def _backtest_method(params: BacktestParams) -> dict[str, Any]:
             "min_entry_score": params.min_entry_score,
             "strict_entry": params.strict_entry,
             "candidate_limit": params.candidate_limit,
-        },
-        "rotation": {
-            "enabled": params.enable_signal_rotation and params.strategy == DRAGON_PULLBACK_STRATEGY_ID,
-            "min_score": params.rotation_min_score,
-            "score_gap_reference": params.rotation_min_score_gap,
-            "max_holding_return_pct": params.rotation_max_holding_return_pct,
-            "min_holding_days": params.rotation_min_holding_days,
         },
         "execution": _execution_method_payload(params),
     }
@@ -4689,6 +5337,77 @@ def _daily_limit_threshold(vt_symbol: str) -> float:
 
 def _persist_run(session, params: BacktestParams, run: dict[str, Any], end: date) -> int:
     return persistence.persist_run(session, params, run, end, params_to_json=_params_to_json)
+
+
+def _candidate_snapshot_rows(signal_date: date, scores: list[Any], params: BacktestParams) -> list[dict[str, Any]]:
+    """Persist the visible daily candidate pool for candidate-quality reports."""
+
+    executable = simulation.execution_pool_candidates(scores)
+    pool_context = candidate_lanes.execution_pool_context(executable, params.candidate_limit, params.strategy)
+    rows: list[dict[str, Any]] = []
+    for score in executable:
+        vt_symbol = str(getattr(score, "vt_symbol", "") or "")
+        if not vt_symbol:
+            continue
+        evidence = getattr(score, "evidence", {}) or {}
+        execution = pool_context.get(vt_symbol) or {}
+        raw_rank = _safe_int_or_none(execution.get("raw_signal_rank"))
+        execution_rank = _safe_int_or_none(execution.get("execution_candidate_rank"))
+        rank = raw_rank
+        if rank is None or rank > 200:
+            continue
+        payload = {
+            "trade_date": signal_date,
+            "vt_symbol": vt_symbol,
+            "rank": rank,
+            "action": "BUY",
+            "total_score": _safe_float(getattr(score, "total_score", None)),
+            "reason": evidence,
+            "source": "backtest_daily_candidates",
+            "candidate_execution": execution,
+            "raw_signal_rank": raw_rank,
+            "execution_candidate_rank": execution_rank,
+            "execution_candidate_selected": bool(execution.get("execution_candidate_selected")),
+            "candidate_source": "backtest_daily_candidates",
+            "factor_cache_complete": True,
+            "factor_cache_schema_version": FACTOR_AUDIT_CACHE_SCHEMA_VERSION,
+        }
+        rows.append(
+            {
+                "trade_date": signal_date,
+                "vt_symbol": vt_symbol,
+                "rank": rank,
+                "entry_family": str(evidence.get("entry_family") or evidence.get("entry_setup") or evidence.get("setup_type") or ""),
+                "payload": _jsonable(payload),
+            }
+        )
+    rows.sort(
+        key=lambda item: (
+            _safe_int_or_none(item.get("rank")) or 10**9,
+            str(item.get("vt_symbol") or ""),
+        )
+    )
+    return rows
+
+
+def _candidate_snapshot_row_from_payload(signal_date: date, payload: dict[str, Any], params: BacktestParams) -> dict[str, Any]:
+    """Persist a synthetic visible candidate with the same snapshot shape."""
+
+    item = dict(payload)
+    item.setdefault("trade_date", signal_date)
+    item.setdefault("source", item.get("candidate_source") or "backtest_daily_candidates")
+    item.setdefault("factor_cache_complete", True)
+    item.setdefault("factor_cache_schema_version", FACTOR_AUDIT_CACHE_SCHEMA_VERSION)
+    vt_symbol = str(item.get("vt_symbol") or "")
+    rank = _safe_int_or_none(item.get("rank"))
+    reason = item.get("reason") if isinstance(item.get("reason"), dict) else {}
+    return {
+        "trade_date": signal_date,
+        "vt_symbol": vt_symbol,
+        "rank": rank,
+        "entry_family": str(item.get("entry_family") or reason.get("entry_family") or reason.get("entry_setup") or reason.get("setup_type") or ""),
+        "payload": _jsonable(item),
+    }
 
 
 def _trade_to_api(trade: Trade) -> dict[str, Any]:

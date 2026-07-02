@@ -84,6 +84,117 @@ def latest_screen_run(
     return None
 
 
+def screen_runs_by_date(
+    session,
+    strategy_id: str,
+    strategy_version: str,
+    trade_dates: list[date] | tuple[date, ...] | set[date],
+    *,
+    statuses: tuple[str, ...] = ("succeeded", "empty"),
+    signal_evidence_schema_version: str | None = None,
+    max_symbols: int | None = None,
+    included_boards: list[str] | tuple[str, ...] | str | None = None,
+) -> dict[date, dict[str, Any]]:
+    """Return the latest matching persisted screen run for each requested date."""
+
+    dates = sorted({item for item in trade_dates if item is not None})
+    if not dates:
+        return {}
+    query = select(schema.quant_signal_runs).where(
+        and_(
+            schema.quant_signal_runs.c.strategy_id == strategy_id,
+            schema.quant_signal_runs.c.strategy_version == strategy_version,
+            schema.quant_signal_runs.c.trade_date.in_(dates),
+        )
+    )
+    if statuses:
+        query = query.where(schema.quant_signal_runs.c.status.in_(statuses))
+    rows = session.execute(
+        query.order_by(schema.quant_signal_runs.c.trade_date, desc(schema.quant_signal_runs.c.id))
+    ).mappings().all()
+    return _latest_matching_runs_by_date(
+        rows,
+        signal_evidence_schema_version=signal_evidence_schema_version,
+        max_symbols=max_symbols,
+        included_boards=included_boards,
+    )
+
+
+def screen_runs_between(
+    session,
+    strategy_id: str,
+    strategy_version: str,
+    start: date,
+    end: date,
+    *,
+    statuses: tuple[str, ...] = ("succeeded", "empty"),
+    signal_evidence_schema_version: str | None = None,
+    max_symbols: int | None = None,
+    included_boards: list[str] | tuple[str, ...] | str | None = None,
+) -> dict[date, dict[str, Any]]:
+    """Return latest matching persisted screen runs in an inclusive date range."""
+
+    query = select(schema.quant_signal_runs).where(
+        and_(
+            schema.quant_signal_runs.c.strategy_id == strategy_id,
+            schema.quant_signal_runs.c.strategy_version == strategy_version,
+            schema.quant_signal_runs.c.trade_date >= start,
+            schema.quant_signal_runs.c.trade_date <= end,
+        )
+    )
+    if statuses:
+        query = query.where(schema.quant_signal_runs.c.status.in_(statuses))
+    rows = session.execute(
+        query.order_by(schema.quant_signal_runs.c.trade_date, desc(schema.quant_signal_runs.c.id))
+    ).mappings().all()
+    return _latest_matching_runs_by_date(
+        rows,
+        signal_evidence_schema_version=signal_evidence_schema_version,
+        max_symbols=max_symbols,
+        included_boards=included_boards,
+    )
+
+
+def _latest_matching_runs_by_date(
+    rows: list[dict[str, Any]],
+    *,
+    signal_evidence_schema_version: str | None,
+    max_symbols: int | None,
+    included_boards: list[str] | tuple[str, ...] | str | None,
+) -> dict[date, dict[str, Any]]:
+    result: dict[date, dict[str, Any]] = {}
+    for row in rows:
+        payload = dict(row)
+        trade_date = payload["trade_date"]
+        if trade_date in result:
+            continue
+        if _screen_run_matches(
+            payload,
+            signal_evidence_schema_version=signal_evidence_schema_version,
+            max_symbols=max_symbols,
+            included_boards=included_boards,
+        ):
+            result[trade_date] = payload
+    return result
+
+
+def _screen_run_matches(
+    run: dict[str, Any],
+    *,
+    signal_evidence_schema_version: str | None,
+    max_symbols: int | None,
+    included_boards: list[str] | tuple[str, ...] | str | None,
+) -> bool:
+    params = run.get("params") if isinstance(run.get("params"), dict) else {}
+    if signal_evidence_schema_version is not None and params.get("signal_evidence_schema_version") != signal_evidence_schema_version:
+        return False
+    if max_symbols is not None and int(params.get("max_symbols") or 0) != int(max_symbols):
+        return False
+    if included_boards is not None:
+        return tuple(normalize_included_boards(params.get("included_boards"))) == tuple(normalize_included_boards(included_boards))
+    return True
+
+
 def trading_dates_between(session, start: date, end: date) -> list[date]:
     rows = session.execute(
         select(schema.stock_daily_bars.c.trade_date)
@@ -215,7 +326,11 @@ def load_stock_universe(session, max_symbols: int, included_boards: tuple[str, .
     rows = session.execute(
         select(schema.stocks)
         .where(schema.stocks.c.vt_symbol != "000001.SSE")
-        .order_by(schema.stocks.c.vt_symbol)
+        .order_by(
+            desc(func.coalesce(schema.stocks.c.turnover, 0.0)),
+            desc(func.coalesce(schema.stocks.c.market_cap, 0.0)),
+            schema.stocks.c.vt_symbol,
+        )
         .limit(5000)
     ).mappings().all()
     allowed = set(included_boards or DEFAULT_QUANT_INCLUDED_BOARDS)

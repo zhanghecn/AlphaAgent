@@ -70,6 +70,11 @@ def build_unified_signal_review(rows: list[dict[str, Any]], *, cluster_days: int
 
     for row in ordered:
         row_date = _row_date(row)
+        if _is_research_buy_row(row):
+            flush_cluster()
+            markers.append(_research_buy_marker(row))
+            continue
+
         if _is_buy_row(row):
             if cluster_start is None:
                 cluster_start = row_date
@@ -175,11 +180,24 @@ def _market_line_level(score: float) -> int:
 
 
 def _is_buy_row(row: dict[str, Any]) -> bool:
+    if _is_research_buy_row(row):
+        return False
     return bool(row.get("executable_entry_signal")) and _score(row) >= 75
+
+
+def _is_research_buy_row(row: dict[str, Any]) -> bool:
+    evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+    return bool(
+        row.get("research_entry_signal")
+        or evidence.get("support_divergence_entry_observation_only")
+        or evidence.get("strong_trend_ma_pullback_entry_observation_only")
+    )
 
 
 def _is_rejected_buy_row(row: dict[str, Any]) -> bool:
     if str(row.get("action") or "").upper() != "WATCH":
+        return False
+    if _is_research_buy_row(row):
         return False
     return bool(row.get("entry_signal") or row.get("raw_entry_signal")) and bool(row.get("failed_rules") or [])
 
@@ -209,6 +227,17 @@ def _buy_marker(row: dict[str, Any], cluster: list[dict[str, Any]]) -> dict[str,
         "cluster_size": len(cluster),
         "cluster_start_date": dates[0] if dates else None,
         "cluster_end_date": dates[-1] if dates else None,
+        "raw": row,
+    }
+
+
+def _research_buy_marker(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "kind": "research_buy",
+        "label": str(row.get("signal_label") or "研究买点"),
+        "trade_date": _date_text(row),
+        "price": _row_close(row),
+        "score": _score(row),
         "raw": row,
     }
 

@@ -440,7 +440,7 @@ def classify_trading_market_phase(payload: dict[str, Any] | None) -> dict[str, A
         confidence = 86 if warning_level >= 3 or fund_flow_state in {"panic_outflow", "continuous_outflow"} else 76
         position_hint = "防守/空仓"
         preferred_setups = ["极强低吸首启"]
-        notes.append("市场风险优先，先控制仓位")
+        notes.append("市场风险优先，先控制资金占用")
     elif regime in {"weak_rebound"} or (
         recovery_state in {"warming_confirmed", "stabilizing"} and warning_level >= 2
     ):
@@ -454,7 +454,7 @@ def classify_trading_market_phase(payload: dict[str, Any] | None) -> dict[str, A
         phase = "uptrend"
         label = "主升"
         confidence = 82 if warning_level <= 1 else 68
-        position_hint = "积极但不满仓预设"
+        position_hint = "积极但保留风控余量"
         preferred_setups = ["主线龙回头", "低吸首启", "低吸+龙回头叠加"]
         notes.append("主升期仍需比较低吸和龙回头的实际胜率")
     elif regime in {"choppy_rotation", "false_bull"}:

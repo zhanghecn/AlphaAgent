@@ -9,7 +9,7 @@ from sqlalchemy import and_, desc, select
 from alphaagent.market.boards import stock_board_payload
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
-from alphaagent.server.services.quant import screening_payloads, strategy_replay
+from alphaagent.server.services.quant import screening_loaders, screening_payloads, strategy_replay
 from alphaagent.server.services.quant.factors import STRATEGY_ID
 from alphaagent.server.services.quant.symbol_diagnostics import display_candidate_markers
 from alphaagent.server.services.quant.symbol_review import attach_symbol_review
@@ -74,6 +74,7 @@ def latest_symbol_quant_state(vt_symbol: str, strategy_id: str = STRATEGY_ID) ->
                 str(replay_run["strategy_version"]),
                 replay_run["start_date"],
                 replay_run["end_date"],
+                process.get("params") if isinstance(process.get("params"), dict) else {},
             )
             recommendation = _latest_recommendation_for_range(
                 session,
@@ -82,6 +83,7 @@ def latest_symbol_quant_state(vt_symbol: str, strategy_id: str = STRATEGY_ID) ->
                 str(replay_run["strategy_version"]),
                 replay_run["start_date"],
                 replay_run["end_date"],
+                process.get("params") if isinstance(process.get("params"), dict) else {},
             )
             attempts = _attempts_for_replay(session, int(replay_run["id"]), symbol)
         else:
@@ -164,16 +166,35 @@ def _process_from_screen(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _signal_rows_for_range(session, symbol: str, strategy_id: str, strategy_version: str, start, end) -> list[dict[str, Any]]:
+def _signal_rows_for_range(
+    session,
+    symbol: str,
+    strategy_id: str,
+    strategy_version: str,
+    start,
+    end,
+    run_params: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    run_params = run_params or {}
+    runs = screening_loaders.screen_runs_between(
+        session,
+        strategy_id,
+        strategy_version,
+        start,
+        end,
+        signal_evidence_schema_version=screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+        max_symbols=int(run_params.get("max_symbols") or 5000),
+        included_boards=run_params.get("included_boards"),
+    )
+    run_ids = sorted(int(run["id"]) for run in runs.values())
+    if not run_ids:
+        return []
     rows = session.execute(
         select(schema.quant_stock_signals)
         .where(
             and_(
+                schema.quant_stock_signals.c.run_id.in_(run_ids),
                 schema.quant_stock_signals.c.vt_symbol == symbol,
-                schema.quant_stock_signals.c.strategy_id == strategy_id,
-                schema.quant_stock_signals.c.strategy_version == strategy_version,
-                schema.quant_stock_signals.c.trade_date >= start,
-                schema.quant_stock_signals.c.trade_date <= end,
             )
         )
         .order_by(desc(schema.quant_stock_signals.c.trade_date), desc(schema.quant_stock_signals.c.total_score))
@@ -195,7 +216,29 @@ def _signal_rows_for_run(session, run_id: int, symbol: str) -> list[dict[str, An
     return [screening_payloads.mapping_to_api(dict(row)) for row in rows]
 
 
-def _latest_recommendation_for_range(session, symbol: str, strategy_id: str, strategy_version: str, start, end) -> dict[str, Any] | None:
+def _latest_recommendation_for_range(
+    session,
+    symbol: str,
+    strategy_id: str,
+    strategy_version: str,
+    start,
+    end,
+    run_params: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    run_params = run_params or {}
+    runs = screening_loaders.screen_runs_between(
+        session,
+        strategy_id,
+        strategy_version,
+        start,
+        end,
+        signal_evidence_schema_version=screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+        max_symbols=int(run_params.get("max_symbols") or 5000),
+        included_boards=run_params.get("included_boards"),
+    )
+    run_ids = sorted(int(run["id"]) for run in runs.values())
+    if not run_ids:
+        return None
     row = session.execute(
         select(
             schema.quant_recommendations,
@@ -209,11 +252,8 @@ def _latest_recommendation_for_range(session, symbol: str, strategy_id: str, str
         )
         .where(
             and_(
+                schema.quant_recommendations.c.run_id.in_(run_ids),
                 schema.quant_recommendations.c.vt_symbol == symbol,
-                schema.quant_recommendations.c.strategy_id == strategy_id,
-                schema.quant_recommendations.c.strategy_version == strategy_version,
-                schema.quant_recommendations.c.trade_date >= start,
-                schema.quant_recommendations.c.trade_date <= end,
             )
         )
         .order_by(desc(schema.quant_recommendations.c.trade_date), schema.quant_recommendations.c.rank)

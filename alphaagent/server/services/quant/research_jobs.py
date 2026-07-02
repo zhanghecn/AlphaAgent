@@ -9,8 +9,7 @@ from uuid import uuid4
 
 from alphaagent.market.boards import normalize_included_boards
 from alphaagent.server.db.session import is_database_configured
-from alphaagent.server.services.backtest.engine import run_backtest
-from alphaagent.server.services.backtest.schemas import BacktestParams
+from alphaagent.server.services.backtest.engine import candidate_trade_quality_report_from_quant_recommendations
 from alphaagent.server.services.quant import screening
 from alphaagent.server.services.quant.factors import STRATEGY_ID
 from alphaagent.server.services.quant.strategy_registry import get_strategy
@@ -38,10 +37,7 @@ def start_research_run(
     persist: bool = True,
     auto_portfolio: bool = True,
     included_boards: list[str] | tuple[str, ...] | str | None = None,
-    initial_cash: float = 1_000_000,
-    max_positions: int = 10,
     candidate_limit: int = 20,
-    max_position_pct: float = 0.1,
     strict_entry: bool = True,
     execution_model: str = "legacy_next_open",
     force_refresh: bool = False,
@@ -75,10 +71,7 @@ def start_research_run(
         "persist": bool(persist),
         "auto_portfolio": bool(auto_portfolio),
         "included_boards": boards,
-        "initial_cash": float(initial_cash),
-        "max_positions": int(max_positions),
         "candidate_limit": int(candidate_limit),
-        "max_position_pct": float(max_position_pct),
         "strict_entry": bool(strict_entry),
         "execution_model": execution_model,
         "force_refresh": bool(force_refresh),
@@ -92,7 +85,7 @@ def start_research_run(
         "started_at": created_at,
         "finished_at": None,
         "stage": "queued",
-        "message": "准备刷新候选并回测",
+        "message": "准备刷新候选并统计候选质量",
         "progress_current": 0,
         "progress_total": 0,
         "progress_pct": 0,
@@ -102,6 +95,7 @@ def start_research_run(
         "replay_run_id": None,
         "backtest_id": None,
         "backtest": None,
+        "candidate_trade_quality": None,
         "error_type": None,
         "error_detail": None,
     }
@@ -158,8 +152,8 @@ def _run_research_job(run_id: str, start: date | None, end: date | None, params:
                 "screen_run": screen_result,
                 "replay_run": screen_result.get("replay_run"),
                 "replay_run_id": screen_result.get("replay_run_id"),
-                "stage": "backtest",
-                "message": "候选和买卖记录已生成，正在运行组合回测",
+                "stage": "candidate_quality",
+                "message": "候选已生成，正在统计Top20独立买卖质量",
                 "progress_current": 1,
                 "progress_total": 1,
                 "progress_pct": 90,
@@ -168,40 +162,35 @@ def _run_research_job(run_id: str, start: date | None, end: date | None, params:
         if screen_result.get("status") not in {"ready", "empty"}:
             _finish_job(run_id, "failed", str(screen_result.get("message") or "候选生成失败"))
             return
-        replay_run = screen_result.get("replay_run") if isinstance(screen_result.get("replay_run"), dict) else {}
-
         backtest_start = _parse_date_text(screen_result.get("start_date")) or start
         backtest_end = _parse_date_text(screen_result.get("end_date")) or end
-        backtest = run_backtest(
-            BacktestParams(
-                strategy=str(params["strategy"]),
-                start=backtest_start or date(2020, 1, 1),
-                end=backtest_end,
-                initial_cash=float(params["initial_cash"]),
-                max_positions=int(params["max_positions"]),
-                max_position_pct=float(params["max_position_pct"]),
-                candidate_limit=int(params["candidate_limit"]),
-                max_symbols=int(params["max_symbols"]),
-                min_entry_score=float(params["min_entry_score"]),
-                strict_entry=bool(params["strict_entry"]),
-                execution_model=str(params["execution_model"]),
-                included_boards=tuple(params["included_boards"]),
-                persist=bool(params["persist"]),
-            )
+        if backtest_start is None:
+            backtest_start = date(2020, 1, 1)
+        candidate_quality = candidate_trade_quality_report_from_quant_recommendations(
+            strategy_id=str(params["strategy"]),
+            strategy_version=str(screen_result.get("strategy_version") or ""),
+            start=backtest_start,
+            end=backtest_end or backtest_start,
+            rank_limit=int(params["candidate_limit"]),
+            sample_limit=500,
+            min_entry_score=float(params["min_entry_score"]),
+            strict_entry=bool(params["strict_entry"]),
+            execution_model=str(params["execution_model"]),
+            included_boards=tuple(params["included_boards"]),
         )
         _patch_job(
             run_id,
             {
-                "backtest": _compact_backtest(backtest),
-                "backtest_id": backtest.get("backtest_id"),
+                "candidate_trade_quality": _compact_candidate_trade_quality(candidate_quality),
                 "progress_pct": 100,
-                "message": "策略研究完成",
+                "stage": "candidate_quality",
+                "message": "策略研究完成：主结果为Top20候选独立买卖质量",
             },
         )
-        if backtest.get("status") != "ready":
-            _finish_job(run_id, "failed", _failure_message(backtest, replay_run))
+        if candidate_quality.get("status") not in {"ready", "empty"}:
+            _finish_job(run_id, "failed", str(candidate_quality.get("message") or "候选独立买卖质量统计失败"))
             return
-        _finish_job(run_id, "succeeded", "策略研究完成")
+        _finish_job(run_id, "succeeded", "策略研究完成：主结果为Top20候选独立买卖质量")
     except Exception as exc:
         _patch_job(run_id, {"error_type": exc.__class__.__name__, "error_detail": str(exc)})
         _finish_job(run_id, "failed", str(exc))
@@ -248,35 +237,26 @@ def _finish_job(run_id: str, status: str, message: str) -> None:
 def _copy_job(job: dict[str, Any]) -> dict[str, Any]:
     copied = dict(job)
     copied["params"] = dict(job.get("params") or {})
-    for key in ("screen_run", "replay_run", "backtest"):
+    for key in ("screen_run", "replay_run", "backtest", "candidate_trade_quality"):
         value = job.get(key)
         copied[key] = dict(value) if isinstance(value, dict) else value
     return copied
 
 
-def _compact_backtest(result: dict[str, Any]) -> dict[str, Any]:
+def _compact_candidate_trade_quality(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": result.get("status"),
-        "backtest_id": result.get("backtest_id"),
-        "strategy": result.get("strategy"),
+        "start_date": result.get("start_date"),
+        "end_date": result.get("end_date"),
+        "strategy_id": result.get("strategy_id"),
         "strategy_version": result.get("strategy_version"),
-        "start": result.get("start"),
-        "end": result.get("end"),
-        "metrics": result.get("metrics") if isinstance(result.get("metrics"), dict) else {},
-        "message": result.get("message"),
+        "rank_limit": result.get("rank_limit"),
+        "entry_selection": result.get("entry_selection"),
+        "method": result.get("method"),
+        "summary": result.get("summary") if isinstance(result.get("summary"), dict) else {},
+        "coverage": result.get("coverage") if isinstance(result.get("coverage"), dict) else {},
+        "note": result.get("note"),
     }
-
-
-def _failure_message(backtest: dict[str, Any], replay_run: dict[str, Any]) -> str:
-    explicit = backtest.get("message") or replay_run.get("message")
-    if explicit:
-        return str(explicit)
-    status = str(backtest.get("status") or replay_run.get("status") or "")
-    if status == "insufficient_data":
-        return "区间内日线数据不足，无法完成组合回测。请使用更长的历史区间。"
-    if status:
-        return f"组合回测失败：{status}"
-    return "组合回测失败"
 
 
 def _trim_jobs_locked() -> None:

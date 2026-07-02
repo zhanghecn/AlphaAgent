@@ -79,7 +79,7 @@ def test_quant_strategy_registry_dispatches_default_strategy() -> None:
     assert default_strategy.id == "mainline_dragon_pullback"
     assert strategy is not None
     assert strategy.version == "0.1.1"
-    assert default_strategy.version == "0.1.21"
+    assert default_strategy.version == "0.1.42"
     assert [item["id"] for item in list_strategies()] == ["mainline_dragon_pullback"]
     assert "mainline_leader_pullback" in {item["id"] for item in list_internal_strategies()}
     assert score.signal_type == "mainline_leader_pullback"
@@ -609,7 +609,7 @@ def test_recommendation_action_allows_unconfirmed_low_suction_by_default() -> No
         low_suction_buildup,
         None,
         DRAGON_PULLBACK_STRATEGY_ID,
-        "0.1.21",
+        "0.1.23",
         min_entry_score=76.0,
     )
     launch_row = screening_payloads.recommendation_to_db(
@@ -617,7 +617,7 @@ def test_recommendation_action_allows_unconfirmed_low_suction_by_default() -> No
         low_suction_launch,
         None,
         DRAGON_PULLBACK_STRATEGY_ID,
-        "0.1.21",
+        "0.1.23",
         min_entry_score=76.0,
     )
 
@@ -664,6 +664,163 @@ def test_recommendation_action_can_require_low_suction_launch_confirmation() -> 
     )
 
     assert failed_rules == ["low_suction_launch_unconfirmed"]
+
+
+def test_symbol_signal_row_marks_support_divergence_as_research_only() -> None:
+    from alphaagent.server.services.quant import screening_payloads
+
+    support_divergence = SignalScore(
+        vt_symbol="003004.SZSE",
+        trade_date=date(2026, 6, 12),
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=90.27,
+        liquidity_score=80.0,
+        risk_score=62.0,
+        entry_signal=False,
+        evidence={
+            "status": "ready",
+            "failed_rules": ["reclaim_confirmation"],
+            "support_divergence_entry_profile": "high_level_support_divergence",
+            "support_divergence_entry_observation_only": True,
+            "default_executable_entry_signal": False,
+            "raw_entry_signal": False,
+            "signal_label": "支撑分歧低吸买点",
+            "close_price": 32.1,
+        },
+    )
+
+    row = screening_payloads.symbol_signal_row(support_divergence, min_entry_score=76.0)
+
+    assert row["action"] == "WATCH"
+    assert row["executable_entry_signal"] is False
+    assert row["research_entry_signal"] is True
+    assert row["signal_label"] == "支撑分歧低吸买点"
+    assert row["signal_role"] == "research_buy"
+
+
+def test_symbol_signal_row_marks_strong_trend_ma_pullback_as_research_only() -> None:
+    from alphaagent.server.services.quant import screening_payloads
+
+    ma_pullback = SignalScore(
+        vt_symbol="003004.SZSE",
+        trade_date=date(2026, 5, 25),
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=78.49,
+        liquidity_score=80.0,
+        risk_score=62.0,
+        entry_signal=False,
+        evidence={
+            "status": "ready",
+            "failed_rules": ["pullback_too_short"],
+            "strong_trend_ma_pullback_entry_profile": "strong_trend_intraday_ma_pullback",
+            "strong_trend_ma_pullback_entry_observation_only": True,
+            "default_executable_entry_signal": False,
+            "raw_entry_signal": False,
+            "signal_label": "强趋势均线回踩研究买点",
+        },
+    )
+
+    row = screening_payloads.symbol_signal_row(ma_pullback, min_entry_score=76.0)
+
+    assert row["action"] == "WATCH"
+    assert row["executable_entry_signal"] is False
+    assert row["research_entry_signal"] is True
+    assert row["signal_label"] == "强趋势均线回踩研究买点"
+    assert row["signal_role"] == "research_buy"
+
+
+def test_symbol_signal_row_marks_default_clean_watch_entry_as_buy() -> None:
+    from alphaagent.server.services.quant import screening_payloads
+
+    clean_entry = SignalScore(
+        vt_symbol="003004.SZSE",
+        trade_date=date(2026, 4, 30),
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=64.6,
+        liquidity_score=15.0,
+        risk_score=62.0,
+        entry_signal=False,
+        evidence={
+            "status": "ready",
+            "failed_rules": ["liquidity_score", "strong_leg"],
+            "default_clean_watch_entry_profile": "clean_low_liquidity_accumulation",
+            "default_executable_entry_signal": True,
+            "raw_entry_signal": False,
+            "signal_label": "低流动性承接低吸买点",
+            "close_price": 19.2,
+        },
+    )
+
+    row = screening_payloads.symbol_signal_row(clean_entry, min_entry_score=76.0)
+
+    assert row["action"] == "BUY"
+    assert row["executable_entry_signal"] is True
+    assert row["research_entry_signal"] is False
+    assert row["key_entry_signal"] is True
+    assert row["entry_threshold_reason"] == "default_clean_watch_entry"
+    assert row["signal_label"] == "低流动性承接低吸买点"
+
+
+def test_screening_recommendation_buy_action_uses_normalized_entry_payload() -> None:
+    from alphaagent.server.services.quant import screening
+
+    clean_entry = SignalScore(
+        vt_symbol="003004.SZSE",
+        trade_date=date(2026, 4, 30),
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=64.6,
+        liquidity_score=15.0,
+        risk_score=62.0,
+        entry_signal=False,
+        evidence={
+            "status": "ready",
+            "default_clean_watch_entry_profile": "clean_low_liquidity_accumulation",
+            "default_executable_entry_signal": True,
+            "raw_entry_signal": False,
+            "signal_label": "低流动性承接低吸买点",
+        },
+    )
+
+    assert screening._recommendation_buy_action(clean_entry, min_entry_score=76.0) is True
+
+
+def test_screening_default_entry_fields_promote_clean_watch_before_recommendation_selection() -> None:
+    from alphaagent.server.services.quant import screening
+
+    clean_entry = SignalScore(
+        vt_symbol="003004.SZSE",
+        trade_date=date(2026, 4, 30),
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=62.4,
+        liquidity_score=15.0,
+        risk_score=62.0,
+        entry_signal=False,
+        evidence={
+            "status": "ready",
+            "entry_setup": "support_accepted",
+            "setup_type": "support_accepted",
+            "dragon_state": "SUPPORT_ACCEPTED",
+            "failed_rules": ["liquidity_score", "strong_leg", "pullback_too_short"],
+            "low_suction_days": 3,
+            "ma5_distance_pct": 0.4,
+            "ma10_distance_pct": 1.0,
+            "ma_convergence_pct": 4.0,
+            "close_location_in_range": 0.54,
+            "volume_ratio_5d_20d": 0.88,
+            "return_60d": 18.0,
+        },
+    )
+
+    adjusted = screening._with_default_screening_entry_fields(
+        clean_entry,
+        DRAGON_PULLBACK_STRATEGY_ID,
+        min_entry_score=76.0,
+    )
+
+    assert adjusted.evidence["default_clean_watch_entry_profile"] == "clean_low_liquidity_accumulation"
+    assert adjusted.evidence["default_executable_entry_signal"] is True
+    assert adjusted.evidence["candidate_quality_adjustment"] > 0
+    assert screening._recommendation_buy_action(adjusted, min_entry_score=76.0) is True
 
 
 def test_recommendation_reason_preserves_readable_low_suction_stage_and_market_summary() -> None:
@@ -713,7 +870,7 @@ def test_recommendation_reason_preserves_readable_low_suction_stage_and_market_s
         low_suction_launch,
         None,
         DRAGON_PULLBACK_STRATEGY_ID,
-        "0.1.21",
+        "0.1.23",
         min_entry_score=76.0,
     )
 
@@ -757,7 +914,7 @@ def test_recommendation_reason_normalizes_low_suction_launch_quality_for_old_evi
         low_suction_launch,
         None,
         DRAGON_PULLBACK_STRATEGY_ID,
-        "0.1.21",
+        "0.1.23",
         min_entry_score=76.0,
     )
 
@@ -827,7 +984,7 @@ def test_recommendation_reason_marks_early_dragon_without_low_suction_context() 
         early_dragon,
         None,
         DRAGON_PULLBACK_STRATEGY_ID,
-        "0.1.21",
+        "0.1.23",
         min_entry_score=76.0,
     )
 
@@ -957,6 +1114,9 @@ def test_factor_candidate_feature_row_extracts_readonly_setup_context() -> None:
                 "ma10_distance_pct": 1.2,
                 "ma20_distance_pct": 1.8,
                 "ma30_distance_pct": 2.1,
+                "support_price": 27.5,
+                "ma10": 27.8,
+                "ma20": 27.2,
                 "volume_ratio_5d_20d": 1.05,
                 "turnover_percentile_60d": 0.62,
                 "close_location_in_range": 0.68,
@@ -977,6 +1137,10 @@ def test_factor_candidate_feature_row_extracts_readonly_setup_context() -> None:
     assert row["rank_bucket"] == "top_10"
     assert row["ma_convergence_pct"] == 4.2
     assert row["dynamic_market_regime"] == "false_bull"
+    assert row["reason"]["entry_setup"] == "stealth_low_suction"
+    assert row["reason"]["support_price"] == 27.5
+    assert row["reason"]["ma10"] == 27.8
+    assert row["reason"]["ma20"] == 27.2
     assert row["name"] == "三力制药"
     assert row["industry"] == "医药"
     assert row["as_of_date"] == "2026-05-11"
@@ -1392,7 +1556,7 @@ def test_candidate_execution_attribution_summarizes_top20_missed_quality() -> No
     assert missed["not_used_for_signal_score"] is True
 
 
-def test_candidate_execution_attribution_reports_missed_opportunity_cost() -> None:
+def test_candidate_execution_attribution_reports_unfilled_candidate_quality() -> None:
     from alphaagent.server.services.backtest.factor_audit import candidate_execution_attribution_summary
 
     result = candidate_execution_attribution_summary(
@@ -1405,16 +1569,6 @@ def test_candidate_execution_attribution_reports_missed_opportunity_cost() -> No
                 "rank": 3,
                 "total_score": 99.0,
                 "entry_family": "low_position_reclaim",
-                "held_positions": [
-                    {
-                        "trade_date": "2026-04-01",
-                        "vt_symbol": "000001.SZSE",
-                        "floating_pnl_pct": -1.2,
-                        "holding_days": 6,
-                        "close_price": 9.8,
-                        "raw": {"entry_total_score": 88.0, "support_price": 10.0, "ma10": 10.1},
-                    }
-                ],
                 "outcome": {
                     "execute_date": "2026-04-02",
                     "return_20d": 18.0,
@@ -1431,80 +1585,19 @@ def test_candidate_execution_attribution_reports_missed_opportunity_cost() -> No
         max_execution_rank=20,
     )
 
-    row = result["missed_candidate_opportunity_cost"][0]
+    row = result["items"][0]
     assert row["signal_date"] == "2026-04-01"
-    assert row["missed_symbol"] == "002384.SZSE"
-    assert row["missed_rank"] == 3
-    assert row["missed_score"] == 99.0
+    assert row["vt_symbol"] == "002384.SZSE"
+    assert row["rank"] == 3
+    assert row["score"] == 99.0
     assert row["missed_return_20d"] == 18.0
-    assert row["held_symbol"] == "000001.SZSE"
-    assert row["held_entry_score"] == 88.0
-    assert row["held_unrealized_return_pct"] == -1.2
-    assert row["held_support_state"] == "weak"
-    assert row["rotation_score_gap"] == 11.0
-    assert row["replacement_quality_delta"] == 19.2
+    assert row["not_filled_reason"] == "candidate_not_planned"
     assert row["not_used_for_signal_score"] is True
 
 
-def test_missed_opportunity_cost_excludes_same_symbol_holding() -> None:
+def test_candidate_execution_attribution_summarizes_all_unfilled_top20_candidates() -> None:
     from alphaagent.server.services.backtest.factor_audit import candidate_execution_attribution_summary
 
-    result = candidate_execution_attribution_summary(
-        [
-            {
-                "trade_date": "2025-08-07",
-                "vt_symbol": "605255.SSE",
-                "entry_action": "BUY",
-                "rank": 1,
-                "total_score": 98.0,
-                "held_positions": [
-                    {
-                        "vt_symbol": "605255.SSE",
-                        "floating_pnl_pct": 4.2,
-                        "holding_days": 1,
-                        "raw": {"entry_total_score": 96.0},
-                    },
-                    {
-                        "vt_symbol": "000001.SZSE",
-                        "floating_pnl_pct": -2.0,
-                        "holding_days": 7,
-                        "raw": {"entry_total_score": 88.0},
-                    },
-                ],
-                "outcome": {
-                    "execute_date": "2025-08-08",
-                    "return_20d": 12.0,
-                    "mfe_20d": 20.0,
-                    "mae_20d": -2.5,
-                    "uses_future_for_label_only": True,
-                },
-            }
-        ],
-        signal_events=[],
-        orders=[],
-        trades=[],
-        cache_coverage={"candidate_count": 100, "signal_count": 0},
-        max_execution_rank=20,
-    )
-
-    rows = result["missed_candidate_opportunity_cost"]
-    assert len(rows) == 1
-    assert rows[0]["missed_symbol"] == "605255.SSE"
-    assert rows[0]["held_symbol"] == "000001.SZSE"
-
-
-def test_candidate_portfolio_opportunity_summary_separates_full_portfolio_misses() -> None:
-    from alphaagent.server.services.backtest.factor_audit import candidate_execution_attribution_summary
-
-    held_positions = [
-        {
-            "vt_symbol": f"00000{i}.SZSE",
-            "floating_pnl_pct": -5.0 + i,
-            "holding_days": i,
-            "raw": {"entry_total_score": 80.0 + i},
-        }
-        for i in range(10)
-    ]
     result = candidate_execution_attribution_summary(
         [
             {
@@ -1513,7 +1606,6 @@ def test_candidate_portfolio_opportunity_summary_separates_full_portfolio_misses
                 "entry_action": "BUY",
                 "rank": 3,
                 "total_score": 99.0,
-                "held_positions": held_positions,
                 "outcome": {
                     "execute_date": "2026-04-02",
                     "return_20d": 12.0,
@@ -1528,7 +1620,6 @@ def test_candidate_portfolio_opportunity_summary_separates_full_portfolio_misses
                 "entry_action": "BUY",
                 "rank": 4,
                 "total_score": 96.0,
-                "held_positions": [{"vt_symbol": "605255.SSE", "floating_pnl_pct": 3.0}],
                 "outcome": {
                     "execute_date": "2026-04-02",
                     "return_20d": 30.0,
@@ -1569,24 +1660,12 @@ def test_candidate_portfolio_opportunity_summary_separates_full_portfolio_misses
         max_execution_rank=20,
     )
 
-    summary = result["portfolio_opportunity_summary"]
-    assert summary["not_used_for_signal_score"] is True
-    assert summary["new_symbol_missed"]["sample_count"] == 1
-    assert summary["new_symbol_missed"]["average_return_20d"] == 12.0
-    assert summary["full_portfolio_missed"]["sample_count"] == 1
-    assert summary["full_portfolio_missed"]["average_delta_vs_weakest_held"] == 17.0
-
-    by_type = {row["opportunity_type"]: row for row in summary["by_opportunity_type"]}
-    assert by_type["filled"]["sample_count"] == 1
-    assert by_type["repeat_same_symbol_holding"]["sample_count"] == 1
-    assert by_type["new_symbol_missed_full_portfolio"]["sample_count"] == 1
-
-    by_delta = {row["delta_bucket"]: row for row in summary["by_delta_vs_weakest_held"]}
-    assert by_delta["10-20"]["sample_count"] == 1
-    top = summary["top_replacement_opportunities"][0]
-    assert top["missed_symbol"] == "002384.SZSE"
-    assert top["held_symbol"] == "000000.SZSE"
-    assert top["replacement_quality_delta"] == 17.0
+    assert result["filled_count"] == 1
+    assert result["missed_count"] == 2
+    assert result["top20_missed_quality"]["missed_count"] == 2
+    assert result["top20_missed_quality"]["missed_positive_20d_count"] == 2
+    by_reason = {row["not_filled_reason"]: row for row in result["by_not_filled_reason"]}
+    assert by_reason["candidate_not_planned"]["sample_count"] == 2
 
 
 def test_candidate_not_planned_subreason_separates_plan_gaps() -> None:
@@ -1823,6 +1902,134 @@ def test_signal_event_candidate_rows_fall_back_to_raw_rank_and_evidence_score() 
     assert candidates[0]["total_score"] == 88.6
 
 
+def test_factor_cache_falls_back_to_backtest_signal_events_when_candidate_runs_missing(monkeypatch) -> None:
+    from alphaagent.server.services.backtest import engine
+
+    captured = {}
+
+    class FakeResult:
+        def __init__(self, rows=None):
+            self._rows = rows or []
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+    class FakeSession:
+        def execute(self, statement):
+            text = str(statement)
+            if "FROM quant_recommendations" in text or "FROM quant_stock_signals" in text:
+                return FakeResult([])
+            if "FROM backtest_signal_events" in text:
+                return FakeResult(
+                    [
+                        {
+                            "id": 1,
+                            "trade_date": date(2026, 5, 12),
+                            "signal_date": date(2026, 5, 11),
+                            "execute_date": date(2026, 5, 12),
+                            "vt_symbol": "603439.SSE",
+                            "side": "BUY",
+                            "score": 88.6,
+                            "raw": {
+                                "evidence": {"entry_setup": "dragon_pullback"},
+                                "candidate_execution": {"execution_candidate_rank": 9},
+                            },
+                        }
+                    ]
+                )
+            raise AssertionError(text)
+
+    monkeypatch.setattr(engine.screening_loaders, "screen_runs_between", lambda *args, **kwargs: {})
+
+    def fake_items(session, run, candidate_rows):
+        captured["candidate_rows"] = candidate_rows
+        return [{"trade_date": candidate_rows[0]["trade_date"], "vt_symbol": candidate_rows[0]["vt_symbol"], "rank": candidate_rows[0]["rank"]}]
+
+    monkeypatch.setattr(engine, "_factor_cache_items_from_candidate_rows", fake_items)
+
+    items, coverage = engine._build_factor_cache_items(
+        FakeSession(),
+        {
+            "id": 203,
+            "strategy_id": "mainline_dragon_pullback",
+            "strategy_version": "0.1.23",
+            "start_date": date(2026, 5, 1),
+            "end_date": date(2026, 5, 31),
+            "params": {"max_symbols": 500, "included_boards": ["main"]},
+        },
+        row_limit=20,
+    )
+
+    assert coverage["candidate_source"] == "backtest_signal_events"
+    assert coverage["used_signal_fallback_count"] == 1
+    assert items[0]["vt_symbol"] == "603439.SSE"
+    assert captured["candidate_rows"][0]["rank"] == 9
+
+
+def test_factor_cache_preserves_existing_snapshots_when_rebuild_has_no_items(monkeypatch) -> None:
+    from alphaagent.server.services.backtest import engine
+
+    calls: list[object] = []
+
+    class FakeResult:
+        def __init__(self, row=None):
+            self._row = row
+
+        def mappings(self):
+            return self
+
+        def first(self):
+            return self._row
+
+    class FakeSession:
+        def execute(self, statement, *args, **kwargs):
+            del args, kwargs
+            calls.append(statement)
+            text = str(statement)
+            if "FROM backtest_runs" in text:
+                return FakeResult(
+                    {
+                        "id": 381,
+                        "strategy_id": "mainline_dragon_pullback",
+                        "strategy_version": "0.1.24",
+                        "start_date": date(2026, 1, 1),
+                        "end_date": date(2026, 6, 18),
+                        "params": {"max_symbols": 500, "included_boards": ["main"]},
+                    }
+                )
+            raise AssertionError(text)
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(engine, "is_database_configured", lambda: True)
+    monkeypatch.setattr(engine, "_ensure_backtest_schema", lambda: None)
+    monkeypatch.setattr(engine, "session_scope", fake_session_scope)
+    monkeypatch.setattr(engine, "_complete_factor_cache_count", lambda session, backtest_id: 0)
+    monkeypatch.setattr(engine, "_valid_factor_cache_count", lambda session, backtest_id: 12)
+    monkeypatch.setattr(engine, "_lock_factor_cache_build", lambda session, backtest_id: None)
+    monkeypatch.setattr(engine, "_factor_snapshot_count", lambda session, backtest_id: 12)
+    monkeypatch.setattr(
+        engine,
+        "_build_factor_cache_items",
+        lambda session, run, row_limit: ([], {"candidate_source": "backtest_signal_events", "candidate_count": 0, "signal_count": 0}),
+    )
+    monkeypatch.setattr(engine, "_factor_cache_coverage", lambda session, backtest_id: {"snapshot_count": 12})
+
+    result = engine.ensure_factor_audit_cache(381, limit=20000)
+
+    assert result["status"] == "ready"
+    assert result["cache"] == "existing_snapshots_preserved"
+    assert result["coverage"]["candidate_source"] == "existing_backtest_factor_snapshots"
+    assert result["coverage"]["rebuild_candidate_source"] == "backtest_signal_events"
+    assert not any("DELETE FROM backtest_factor_snapshots" in str(call) for call in calls)
+    assert not any("DELETE FROM backtest_factor_outcomes" in str(call) for call in calls)
+
+
 def test_strategy_timeline_rows_merge_candidate_plan_order_trade() -> None:
     from alphaagent.server.services.backtest.factor_audit import strategy_timeline_rows
 
@@ -1856,7 +2063,7 @@ def test_strategy_timeline_rows_merge_candidate_plan_order_trade() -> None:
                 "vt_symbol": "603439.SSE",
                 "side": "BUY",
                 "status": "rejected",
-                "reason": "portfolio_full_no_rotation",
+                "reason": "position_slot_unavailable",
                 "price": 18.8,
             }
         ],
@@ -1878,7 +2085,7 @@ def test_strategy_timeline_rows_merge_candidate_plan_order_trade() -> None:
     assert candidate_row["candidate"]["action"] == "BUY"
     assert candidate_row["candidate"]["rank"] == 8
     assert execute_row["execution"]["status"] == "planned_not_ordered"
-    assert execute_row["execution"]["reason_code"] == "portfolio_full_no_rotation"
+    assert execute_row["execution"]["reason_code"] == "position_slot_unavailable"
     assert sell_row["sell"]["reason"] == "trend_trailing_stop"
 
 
@@ -2619,7 +2826,8 @@ def test_backtest_experiment_mainline_momentum_risk_control_default_off() -> Non
         score_candidates_for_day=lambda *_args, **_kwargs: [overextended, plain],
     )
 
-    assert [row.vt_symbol for row in default_rows] == ["HOT.SZSE", "PLAIN.SZSE"]
+    assert [row.vt_symbol for row in default_rows] == ["PLAIN.SZSE", "HOT.SZSE"]
+    assert default_rows[1].evidence["candidate_quality_adjustment"] < 0
     assert [row.vt_symbol for row in experiment_rows] == ["PLAIN.SZSE", "HOT.SZSE"]
     assert "mainline_momentum_risk_control_adjustment" not in overextended.evidence
 
@@ -3195,6 +3403,358 @@ def test_backtest_experiment_selective_setup_quality_promotes_active_lower_mid_a
     assert "selective_setup_quality_adjustment" not in active_lower_mid.evidence
 
 
+def test_backtest_experiment_support_divergence_entry_lane_promotes_mature_low_suction() -> None:
+    from alphaagent.server.services.backtest import scoring
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    mature_low_suction = SignalScore(
+        vt_symbol="003004.SZSE",
+        trade_date=date(2026, 4, 30),
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=77.8449,
+        liquidity_score=15.0,
+        risk_score=61.0,
+        entry_signal=False,
+        evidence={
+            "status": "ready",
+            "entry_setup": "support_accepted",
+            "dragon_state": "SUPPORT_ACCEPTED",
+            "failed_rules": ["strong_leg", "liquidity_score"],
+            "support_type": "ma5_reclaim",
+            "low_suction_days": 4,
+            "low_suction_buildup_score": 100.0,
+            "stealth_low_suction_score": 100.0,
+            "low_suction_launch_confirmed": True,
+            "ma_convergence_pct": 5.1,
+        },
+    )
+
+    default_rows = scoring.score_day(
+        None,
+        {},
+        date(2026, 4, 30),
+        BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID, strict_entry=True, min_entry_score=76.0),
+        score_candidates_for_day=lambda *_args, **_kwargs: [mature_low_suction],
+    )
+    experiment_rows = scoring.score_day(
+        None,
+        {},
+        date(2026, 4, 30),
+        BacktestParams(
+            strategy=DRAGON_PULLBACK_STRATEGY_ID,
+            strict_entry=True,
+            min_entry_score=76.0,
+            enable_support_divergence_entry_lane=True,
+        ),
+        score_candidates_for_day=lambda *_args, **_kwargs: [mature_low_suction],
+    )
+
+    assert default_rows == []
+    assert [row.vt_symbol for row in experiment_rows] == ["003004.SZSE"]
+    assert experiment_rows[0].evidence["support_divergence_entry_profile"] == "mature_low_suction_launch"
+    assert experiment_rows[0].evidence["executable_entry_signal"] is True
+    assert experiment_rows[0].evidence["support_divergence_entry_observation_only"] is True
+
+
+def test_backtest_experiment_support_divergence_entry_lane_promotes_high_level_support() -> None:
+    from alphaagent.server.services.backtest import scoring
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    support_divergence = SignalScore(
+        vt_symbol="003004.SZSE",
+        trade_date=date(2026, 6, 12),
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=91.1248,
+        liquidity_score=80.0,
+        risk_score=62.0,
+        entry_signal=False,
+        evidence={
+            "status": "ready",
+            "entry_setup": "support_accepted",
+            "dragon_state": "SUPPORT_ACCEPTED",
+            "failed_rules": ["reclaim_confirmation"],
+            "support_type": "ma10_support",
+            "strong_leg_score": 100.0,
+            "pullback_days": 8,
+            "ma_convergence_pct": 24.8,
+            "latest_change_pct": -0.47,
+        },
+    )
+
+    rows = scoring.score_day(
+        None,
+        {},
+        date(2026, 6, 12),
+        BacktestParams(
+            strategy=DRAGON_PULLBACK_STRATEGY_ID,
+            strict_entry=True,
+            min_entry_score=76.0,
+            enable_support_divergence_entry_lane=True,
+        ),
+        score_candidates_for_day=lambda *_args, **_kwargs: [support_divergence],
+    )
+
+    assert [row.vt_symbol for row in rows] == ["003004.SZSE"]
+    assert rows[0].evidence["support_divergence_entry_profile"] == "high_level_support_divergence"
+    assert rows[0].evidence["signal_label"] == "支撑分歧低吸买点"
+    assert rows[0].evidence["support_divergence_entry_observation_only"] is True
+
+
+def test_backtest_experiment_support_divergence_entry_lane_marks_raw_failed_rule_as_observation_only() -> None:
+    from alphaagent.server.services.backtest import scoring
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    raw_support_divergence = SignalScore(
+        vt_symbol="605090.SSE",
+        trade_date=date(2026, 1, 8),
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=98.61,
+        liquidity_score=80.0,
+        risk_score=62.0,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "support_accepted",
+            "dragon_state": "SUPPORT_ACCEPTED",
+            "failed_rules": ["reclaim_confirmation"],
+            "support_type": "ma10_support",
+            "strong_leg_score": 100.0,
+            "pullback_days": 6,
+            "ma_convergence_pct": 18.8,
+            "latest_change_pct": 1.2,
+        },
+    )
+
+    rows = scoring.score_day(
+        None,
+        {},
+        date(2026, 1, 8),
+        BacktestParams(
+            strategy=DRAGON_PULLBACK_STRATEGY_ID,
+            strict_entry=True,
+            min_entry_score=76.0,
+            enable_support_divergence_entry_lane=True,
+        ),
+        score_candidates_for_day=lambda *_args, **_kwargs: [raw_support_divergence],
+    )
+
+    assert [row.vt_symbol for row in rows] == ["605090.SSE"]
+    assert rows[0].evidence["raw_entry_signal"] is True
+    assert rows[0].evidence["default_executable_entry_signal"] is False
+    assert rows[0].evidence["support_divergence_entry_observation_only"] is True
+
+
+def test_backtest_experiment_support_divergence_entry_lane_rejects_false_bull_wide_ma() -> None:
+    from alphaagent.server.services.backtest import scoring
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    weak_support_divergence = SignalScore(
+        vt_symbol="601969.SSE",
+        trade_date=date(2025, 11, 20),
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=92.0,
+        liquidity_score=80.0,
+        risk_score=62.0,
+        entry_signal=False,
+        evidence={
+            "status": "ready",
+            "entry_setup": "support_accepted",
+            "dragon_state": "SUPPORT_ACCEPTED",
+            "failed_rules": ["ma_convergence_too_wide_without_low_suction"],
+            "support_type": "ma5_reclaim",
+            "strong_leg_score": 100.0,
+            "pullback_days": 5,
+            "ma_convergence_pct": 25.45,
+            "latest_change_pct": 5.08,
+            "close_location_in_range": 0.80,
+            "market_warning_level": 2,
+            "dynamic_market_regime": "false_bull",
+        },
+    )
+
+    rows = scoring.score_day(
+        None,
+        {},
+        date(2025, 11, 20),
+        BacktestParams(
+            strategy=DRAGON_PULLBACK_STRATEGY_ID,
+            strict_entry=True,
+            min_entry_score=76.0,
+            enable_support_divergence_entry_lane=True,
+        ),
+        score_candidates_for_day=lambda *_args, **_kwargs: [weak_support_divergence],
+    )
+
+    assert rows == []
+
+
+def test_backtest_experiment_support_divergence_entry_lane_keeps_003004_wide_ma_reclaim() -> None:
+    from alphaagent.server.services.backtest import scoring
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    support_divergence = SignalScore(
+        vt_symbol="003004.SZSE",
+        trade_date=date(2026, 6, 15),
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=95.6243,
+        liquidity_score=80.0,
+        risk_score=62.0,
+        entry_signal=False,
+        evidence={
+            "status": "ready",
+            "entry_setup": "support_accepted",
+            "dragon_state": "SUPPORT_ACCEPTED",
+            "failed_rules": ["ma_convergence_too_wide_without_low_suction"],
+            "support_type": "ma5_reclaim",
+            "strong_leg_score": 100.0,
+            "pullback_days": 9,
+            "ma_convergence_pct": 22.31,
+            "latest_change_pct": 2.52,
+            "close_location_in_range": 0.8466,
+            "market_warning_level": 2,
+            "dynamic_market_regime": "narrow_theme_bull",
+        },
+    )
+
+    rows = scoring.score_day(
+        None,
+        {},
+        date(2026, 6, 15),
+        BacktestParams(
+            strategy=DRAGON_PULLBACK_STRATEGY_ID,
+            strict_entry=True,
+            min_entry_score=76.0,
+            enable_support_divergence_entry_lane=True,
+        ),
+        score_candidates_for_day=lambda *_args, **_kwargs: [support_divergence],
+    )
+
+    assert [row.vt_symbol for row in rows] == ["003004.SZSE"]
+    assert rows[0].evidence["support_divergence_entry_profile"] == "high_level_support_divergence"
+
+
+def test_backtest_experiment_strong_trend_ma_pullback_marks_003004_ma5_touch_research_only() -> None:
+    from alphaagent.server.services.backtest import scoring
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    ma_pullback = SignalScore(
+        vt_symbol="003004.SZSE",
+        trade_date=date(2026, 5, 25),
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=78.49,
+        liquidity_score=80.0,
+        risk_score=62.0,
+        entry_signal=False,
+        evidence={
+            "status": "ready",
+            "entry_setup": "pullback_observe",
+            "setup_type": "pullback_observe",
+            "dragon_state": "PULLBACK_OBSERVE",
+            "support_type": "none",
+            "failed_rules": ["pullback_too_short"],
+            "strong_leg_score": 95.0,
+            "pullback_days": 1,
+            "latest_change_pct": -0.0803,
+            "close_location_in_range": 0.8101,
+            "volume_ratio_5d_20d": 2.3395,
+            "ma5_distance_pct": 5.7104,
+            "ma10_distance_pct": 14.2385,
+            "ma20_distance_pct": 29.2367,
+            "ma_convergence_pct": 26.9454,
+            "ma5_slope_pct": 4.7534,
+            "ma5_vs_ma10_pct": 8.0674,
+            "return_20d": 53.4855,
+            "return_60d": 88.2709,
+            "recent_limit_up_20d": True,
+            "large_bull_count_20d": 2,
+            "near_limit_up_count_20d": 2,
+            "weekly_top_fractal_risk": True,
+            "risk_penalty": 4.0,
+            "dynamic_market_regime": "false_bull",
+            "market_warning_level": 2,
+        },
+    )
+
+    default_rows = scoring.score_day(
+        None,
+        {},
+        date(2026, 5, 25),
+        BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID, strict_entry=True, min_entry_score=76.0),
+        score_candidates_for_day=lambda *_args, **_kwargs: [ma_pullback],
+    )
+    experiment_rows = scoring.score_day(
+        None,
+        {},
+        date(2026, 5, 25),
+        BacktestParams(
+            strategy=DRAGON_PULLBACK_STRATEGY_ID,
+            strict_entry=True,
+            min_entry_score=76.0,
+            enable_strong_trend_ma_pullback_entry_lane=True,
+        ),
+        score_candidates_for_day=lambda *_args, **_kwargs: [ma_pullback],
+    )
+
+    assert default_rows == []
+    assert [row.vt_symbol for row in experiment_rows] == ["003004.SZSE"]
+    assert experiment_rows[0].evidence["strong_trend_ma_pullback_entry_profile"] == "strong_trend_intraday_ma_pullback"
+    assert experiment_rows[0].evidence["strong_trend_ma_pullback_entry_observation_only"] is True
+    assert experiment_rows[0].evidence["signal_label"] == "强趋势均线回踩研究买点"
+
+
+def test_backtest_experiment_strong_trend_ma_pullback_rejects_distribution_day() -> None:
+    from alphaagent.server.services.backtest import scoring
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    distribution_day = SignalScore(
+        vt_symbol="003004.SZSE",
+        trade_date=date(2026, 6, 4),
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=45.6773,
+        liquidity_score=80.0,
+        risk_score=62.0,
+        entry_signal=False,
+        evidence={
+            "status": "ready",
+            "entry_setup": "distribution_risk",
+            "setup_type": "distribution_risk",
+            "dragon_state": "DISTRIBUTION_RISK",
+            "support_type": "none",
+            "failed_rules": [
+                "total_score",
+                "distribution_risk",
+                "support_acceptance",
+                "reclaim_confirmation",
+                "pullback_too_short",
+            ],
+            "strong_leg_score": 95.0,
+            "pullback_days": 2,
+            "latest_change_pct": -4.7914,
+            "volume_ratio_5d_20d": 1.4252,
+            "ma10_distance_pct": 4.1702,
+            "ma_convergence_pct": 37.4613,
+            "return_20d": 76.6398,
+            "recent_limit_up_20d": True,
+            "risk_penalty": 35.0,
+        },
+    )
+
+    rows = scoring.score_day(
+        None,
+        {},
+        date(2026, 6, 4),
+        BacktestParams(
+            strategy=DRAGON_PULLBACK_STRATEGY_ID,
+            strict_entry=True,
+            min_entry_score=76.0,
+            enable_strong_trend_ma_pullback_entry_lane=True,
+        ),
+        score_candidates_for_day=lambda *_args, **_kwargs: [distribution_day],
+    )
+
+    assert rows == []
+
+
 def test_backtest_experiment_selective_setup_quality_demotes_extreme_high_active_candidate() -> None:
     from alphaagent.server.services.backtest import scoring
 
@@ -3664,7 +4224,10 @@ def test_low_suction_first_lift_bonus_only_rewards_clean_confirmed_lift() -> Non
         score_candidates_for_day=lambda *_args, **_kwargs: [hot_lift, plain_dragon, clean_lift],
     )
 
-    assert [row.vt_symbol for row in default_rows] == ["HOT.SZSE", "DRAGON.SZSE", "CLEAN.SZSE"]
+    assert [row.vt_symbol for row in default_rows] == ["CLEAN.SZSE", "HOT.SZSE", "DRAGON.SZSE"]
+    assert default_rows[0].evidence["candidate_quality_adjustment"] > 0
+    assert default_rows[1].evidence["candidate_quality_adjustment"] < 0
+    assert "成熟低吸无涨停高位确认不足降权" in default_rows[1].evidence["candidate_quality_notes"]
     assert [row.vt_symbol for row in experiment_rows] == ["CLEAN.SZSE", "HOT.SZSE", "DRAGON.SZSE"]
     assert experiment_rows[0].evidence["low_suction_first_lift_bonus_adjustment"] > 0
     assert "low_suction_first_lift_bonus_adjustment" not in experiment_rows[2].evidence
@@ -3757,7 +4320,9 @@ def test_low_suction_lifecycle_ranking_prefers_clean_lift_without_rewarding_buil
         score_candidates_for_day=lambda *_args, **_kwargs: [hot_lift, clean_lift, waiting_buildup],
     )
 
-    assert [row.vt_symbol for row in default_rows] == ["HOT.SZSE", "CLEAN.SZSE", "WAIT.SZSE"]
+    assert [row.vt_symbol for row in default_rows] == ["CLEAN.SZSE", "HOT.SZSE", "WAIT.SZSE"]
+    assert default_rows[1].evidence["candidate_quality_adjustment"] < 0
+    assert "成熟低吸无涨停高位确认不足降权" in default_rows[1].evidence["candidate_quality_notes"]
     assert [row.vt_symbol for row in experiment_rows] == ["CLEAN.SZSE", "WAIT.SZSE", "HOT.SZSE"]
     assert experiment_rows[0].evidence["low_suction_lifecycle_adjustment"] > 0
     assert "low_suction_lifecycle_adjustment" not in experiment_rows[1].evidence
@@ -4116,12 +4681,14 @@ def test_backtest_experiment_can_require_balanced_low_suction_launch_quality() -
     )
 
     assert [row.vt_symbol for row in default_rows] == [
-        "WAITING.SZSE",
         "DRAGON.SZSE",
+        "WAITING.SZSE",
         "LATE.SZSE",
-        "DRAGON_WAITING.SZSE",
         "BALANCED.SZSE",
+        "DRAGON_WAITING.SZSE",
     ]
+    assert default_rows[1].evidence["candidate_quality_adjustment"] < 0
+    assert default_rows[-1].evidence["candidate_quality_adjustment"] < 0
     assert [row.vt_symbol for row in experiment_rows] == ["DRAGON.SZSE", "BALANCED.SZSE"]
 
 
@@ -4227,7 +4794,9 @@ def test_backtest_experiment_can_require_low_suction_launch_for_low_suction_cont
         ],
     )
 
-    assert [row.vt_symbol for row in default_rows] == ["WAITING.SZSE", "DRAGON_WAITING.SZSE", "CONFIRMED.SZSE", "DRAGON.SZSE"]
+    assert [row.vt_symbol for row in default_rows] == ["WAITING.SZSE", "CONFIRMED.SZSE", "DRAGON_WAITING.SZSE", "DRAGON.SZSE"]
+    assert default_rows[0].evidence["candidate_quality_adjustment"] < 0
+    assert default_rows[2].evidence["candidate_quality_adjustment"] < 0
     assert [row.vt_symbol for row in experiment_rows] == ["CONFIRMED.SZSE", "DRAGON.SZSE"]
 
 
@@ -4577,6 +5146,52 @@ def test_candidate_signal_display_drops_pure_observation_watch_rows() -> None:
 
     assert [item["trade_date"] for item in markers] == [date(2026, 5, 13)]
     assert markers[0]["display_kind"] == "rejected_buy"
+
+
+def test_candidate_signal_display_excludes_support_divergence_research_from_buy_and_rejected() -> None:
+    from alphaagent.server.services.quant.symbol_diagnostics import display_candidate_markers
+
+    rows = [
+        {
+            "trade_date": date(2026, 6, 12),
+            "action": "WATCH",
+            "total_score": 90.27,
+            "raw_entry_signal": False,
+            "executable_entry_signal": False,
+            "research_entry_signal": True,
+            "failed_rules": ["reclaim_confirmation"],
+            "signal_label": "支撑分歧低吸买点",
+            "evidence": {
+                "support_divergence_entry_profile": "high_level_support_divergence",
+                "support_divergence_entry_observation_only": True,
+            },
+        },
+    ]
+
+    assert display_candidate_markers(rows) == []
+
+
+def test_candidate_signal_display_excludes_strong_trend_ma_pullback_research_from_buy_and_rejected() -> None:
+    from alphaagent.server.services.quant.symbol_diagnostics import display_candidate_markers
+
+    rows = [
+        {
+            "trade_date": date(2026, 5, 25),
+            "action": "WATCH",
+            "total_score": 78.49,
+            "raw_entry_signal": False,
+            "executable_entry_signal": False,
+            "research_entry_signal": True,
+            "failed_rules": ["pullback_too_short"],
+            "signal_label": "强趋势均线回踩研究买点",
+            "evidence": {
+                "strong_trend_ma_pullback_entry_profile": "strong_trend_intraday_ma_pullback",
+                "strong_trend_ma_pullback_entry_observation_only": True,
+            },
+        },
+    ]
+
+    assert display_candidate_markers(rows) == []
 
 
 def test_symbol_signal_payload_counts_only_executable_buy() -> None:
@@ -5341,12 +5956,12 @@ def test_dragon_pullback_rejects_high_volume_limit_down_distribution() -> None:
 def test_dragon_pullback_marks_top_fractal_and_volume_stall_risks() -> None:
     start = date(2026, 1, 1)
     closes = [10 + index * 0.06 for index in range(70)]
-    closes.extend([16.0, 17.2, 18.4, 19.6, 20.6, 20.4, 20.3, 20.2, 20.1, 20.0])
+    closes.extend([16.0, 17.2, 18.4, 19.6, 20.6, 20.2, 19.9, 19.7, 19.5, 19.4])
     bars = [
         Bar(
             trade_date=start + timedelta(days=index),
             open_price=close * 0.995,
-            high_price=close * (1.06 if index >= 70 else 1.02),
+            high_price=close * (1.06 if 70 <= index <= 73 else 1.0 if index >= 74 else 1.02),
             low_price=close * 0.985,
             close_price=close,
             volume=4_000_000 if index >= 75 else 1_000_000,
@@ -5640,7 +6255,7 @@ def test_dragon_pullback_default_stop_loss_0p08_survives_seven_pct_drawdown() ->
     assert sell_reason_for_position(position, bar, bar.trade_date, params_legacy) == "support_stop"
 
 
-def test_dragon_pullback_experiment_protects_mid_profit_giveback() -> None:
+def test_dragon_pullback_default_protects_mid_profit_giveback() -> None:
     from alphaagent.server.services.backtest.schemas import BacktestParams, Position
     from alphaagent.server.services.backtest.simulation import sell_reason_for_position
 
@@ -5666,9 +6281,109 @@ def test_dragon_pullback_experiment_protects_mid_profit_giveback() -> None:
     default_params = BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID)
     experiment_params = BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID, enable_mid_profit_giveback_stop=True)
 
-    assert sell_reason_for_position(position, bar, bar.trade_date, default_params) is None
+    assert sell_reason_for_position(position, bar, bar.trade_date, default_params) == "profit_protection_stop"
     assert sell_reason_for_position(position, bar, bar.trade_date, experiment_params) == "mid_profit_giveback_stop"
+    assert sell_reason_for_position(position, bar, bar.trade_date, default_params, current_buy_signal=True) is None
     assert sell_reason_for_position(position, bar, bar.trade_date, experiment_params, current_buy_signal=True) is None
+
+
+def test_dragon_pullback_default_sells_guarded_highclose_giveback() -> None:
+    from alphaagent.server.services.backtest.schemas import BacktestParams, Position
+    from alphaagent.server.services.backtest.simulation import sell_reason_for_position
+
+    params = BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID)
+    position = Position(
+        vt_symbol="605117.SSE",
+        name="德业股份",
+        volume=100,
+        cost_price=10.0,
+        entry_date=date(2026, 4, 23),
+        highest_price=11.4,
+        reason={
+            "entry_setup": "dragon_pullback",
+            "close_location_in_range": 0.88,
+            "low_suction_launch_quality_bucket": "repeated_launch",
+            "recent_limit_up_20d": True,
+            "large_bull_count_20d": 1,
+            "ma10": 10.4,
+            "ma20": 9.9,
+            "support_price": 9.8,
+        },
+        visible_holding_bars=4,
+    )
+    bar = Bar(
+        trade_date=date(2026, 4, 29),
+        open_price=10.35,
+        high_price=10.40,
+        low_price=10.20,
+        close_price=10.30,
+        volume=1_000_000,
+        turnover=200_000_000,
+        change_pct=-2.0,
+    )
+
+    assert sell_reason_for_position(position, bar, bar.trade_date, params) == "guarded_highclose_giveback_stop"
+    assert sell_reason_for_position(position, bar, bar.trade_date, params, current_buy_signal=True) is None
+
+
+def test_dragon_pullback_guarded_highclose_giveback_protects_ma10_continuation() -> None:
+    from alphaagent.server.services.backtest.schemas import BacktestParams, Position
+    from alphaagent.server.services.backtest.simulation import guarded_highclose_giveback_stop_applies, sell_reason_for_position
+
+    params = BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID)
+    position = Position(
+        vt_symbol="603876.SSE",
+        name="鼎胜新材",
+        volume=100,
+        cost_price=10.0,
+        entry_date=date(2026, 3, 9),
+        highest_price=11.4,
+        reason={
+            "entry_setup": "dragon_pullback",
+            "close_location_in_range": 0.86,
+            "recent_limit_up_20d": True,
+            "near_limit_up_count_20d": 1,
+            "large_bull_count_20d": 1,
+            "support_type": "ma10_support",
+            "strong_leg_score": 97.0,
+            "pullback_days": 5,
+            "ma5_vs_ma10_pct": -0.3,
+            "ma10_distance_pct": 1.1,
+            "volume_ratio_5d_20d": 0.82,
+            "ma10": 10.1,
+            "ma20": 9.8,
+            "support_price": 9.7,
+        },
+        visible_holding_bars=4,
+    )
+    bar = Bar(
+        trade_date=date(2026, 3, 13),
+        open_price=10.35,
+        high_price=10.40,
+        low_price=10.20,
+        close_price=10.30,
+        volume=1_000_000,
+        turnover=200_000_000,
+        change_pct=-2.0,
+    )
+
+    high_gain = position.highest_price / position.cost_price - 1
+    gain = bar.close_price / position.cost_price - 1
+    drawdown_from_high = bar.close_price / position.highest_price - 1
+
+    assert (
+        guarded_highclose_giveback_stop_applies(
+            position,
+            bar,
+            gain,
+            high_gain,
+            drawdown_from_high,
+            hold_soft_exit=False,
+            current_buy_signal=False,
+        )
+        is False
+    )
+    assert sell_reason_for_position(position, bar, bar.trade_date, params) == "profit_protection_stop"
 
 
 def test_dragon_pullback_experiment_can_tighten_mfe8_giveback_stop() -> None:
@@ -5772,6 +6487,51 @@ def test_mid_profit_giveback_experiment_does_not_force_sell_stealth_low_suction(
     assert sell_reason_for_position(position, bar, bar.trade_date, params) is None
 
 
+def test_default_profit_protection_sells_unconfirmed_giveback_but_keeps_confirmed_low_suction() -> None:
+    from alphaagent.server.services.backtest.schemas import BacktestParams, Position
+    from alphaagent.server.services.backtest.simulation import sell_reason_for_position
+
+    params = BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID)
+    bar = Bar(
+        trade_date=date(2026, 4, 10),
+        open_price=10.3,
+        high_price=10.35,
+        low_price=10.2,
+        close_price=10.30,
+        volume=1_000_000,
+        turnover=200_000_000,
+        change_pct=-2.0,
+    )
+    unconfirmed = Position(
+        vt_symbol="002384.SZSE",
+        name="东山精密",
+        volume=100,
+        cost_price=10.0,
+        entry_date=date(2026, 4, 1),
+        highest_price=11.2,
+        reason={"ma10": 10.6, "ma20": 10.1, "support_price": 10.0},
+    )
+    confirmed_low_suction = Position(
+        vt_symbol="002384.SZSE",
+        name="东山精密",
+        volume=100,
+        cost_price=10.0,
+        entry_date=date(2026, 4, 1),
+        highest_price=11.2,
+        reason={
+            "entry_setup": "stealth_low_suction",
+            "low_suction_days": 5,
+            "low_suction_launch_confirmed": True,
+            "ma10": 10.6,
+            "ma20": 10.1,
+            "support_price": 10.0,
+        },
+    )
+
+    assert sell_reason_for_position(unconfirmed, bar, bar.trade_date, params) == "profit_protection_stop"
+    assert sell_reason_for_position(confirmed_low_suction, bar, bar.trade_date, params) is None
+
+
 def test_contextual_peak_giveback_requires_visible_profit_and_no_current_buy_signal() -> None:
     from alphaagent.server.services.backtest.simulation import should_trigger_contextual_peak_giveback_stop
 
@@ -5872,19 +6632,10 @@ def test_contextual_support_reclaim_delay_only_delays_rebound_prone_support_stop
         position=position,
         bar=bar,
         params=params,
-        replacement_score_gap=2.0,
-    )
-    blocked = should_delay_contextual_support_reclaim(
-        exit_reason="support_stop",
-        position=position,
-        bar=bar,
-        params=params,
-        replacement_score_gap=10.0,
     )
 
     assert delay["delay"] is True
     assert delay["not_used_for_signal_score"] is True
-    assert blocked["delay"] is False
 
 
 def test_failed_launch_exit_experiment_is_default_off() -> None:
@@ -5989,48 +6740,6 @@ def test_failed_launch_exit_experiment_waits_for_current_buy_signal() -> None:
     assert sell_reason_for_position(position, bar, bar.trade_date, params, current_buy_signal=True) is None
 
 
-def test_contextual_failed_launch_exit_requires_replacement_candidate() -> None:
-    from alphaagent.server.services.backtest.schemas import BacktestParams, Position
-    from alphaagent.server.services.backtest.simulation import sell_reason_for_position
-
-    params = BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        enable_contextual_failed_launch_exit_stop=True,
-    )
-    position = Position(
-        vt_symbol="600352.SSE",
-        name="浙江龙盛",
-        volume=100,
-        cost_price=10.0,
-        entry_date=date(2026, 3, 12),
-        highest_price=10.15,
-        reason={
-            "entry_setup": "stealth_low_suction",
-            "support_price": 9.85,
-            "ma10": 9.95,
-            "ma20": 9.88,
-            "entry_total_score": 82.0,
-        },
-        visible_holding_bars=3,
-    )
-    bar = Bar(
-        trade_date=date(2026, 3, 16),
-        open_price=9.75,
-        high_price=9.82,
-        low_price=9.55,
-        close_price=9.70,
-        volume=1_000_000,
-        turnover=300_000_000,
-        change_pct=-2.8,
-    )
-
-    assert sell_reason_for_position(position, bar, bar.trade_date, params, replacement_available=False) is None
-    assert (
-        sell_reason_for_position(position, bar, bar.trade_date, params, replacement_available=True)
-        == "contextual_failed_launch_exit_stop"
-    )
-
-
 def test_contextual_failed_launch_exit_respects_current_buy_signal() -> None:
     from alphaagent.server.services.backtest.schemas import BacktestParams, Position
     from alphaagent.server.services.backtest.simulation import sell_reason_for_position
@@ -6073,7 +6782,6 @@ def test_contextual_failed_launch_exit_respects_current_buy_signal() -> None:
             bar.trade_date,
             params,
             current_buy_signal=True,
-            replacement_available=True,
         )
         is None
     )
@@ -6322,306 +7030,6 @@ def test_low_suction_confirmed_branch_exit_holds_opened_space_until_giveback() -
     assert position.low_suction_confirmed_branch == "opened_space"
     position.visible_holding_bars = 6
     assert sell_reason_for_position(position, giveback_bar, giveback_bar.trade_date, params) == "low_suction_opened_space_giveback_stop"
-
-
-def test_low_suction_branch_replacement_quality_gate_rejects_weak_follow_up() -> None:
-    from alphaagent.server.services.backtest.schemas import BacktestParams
-    from alphaagent.server.services.backtest import simulation
-
-    params = BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID, enable_low_suction_branch_replacement_quality_gate=True)
-    quality = simulation.low_suction_branch_replacement_quality(
-        {
-            "entry_total_score": 96.3,
-            "entry_setup": "dragon_pullback",
-            "setup_family": "dragon_pullback",
-            "market_warning_level": 2,
-            "ma_convergence_pct": 17.8,
-            "fresh_tail_buy": True,
-            "failed_rules": [],
-            "risk_flags": [],
-        },
-        params,
-    )
-
-    assert quality["allowed"] is False
-    assert "score_below_gate" in quality["notes"]
-    assert "market_warning_too_high" in quality["notes"]
-    assert "dragon_ma_convergence_too_wide" in quality["notes"]
-
-
-def test_low_suction_branch_replacement_quality_gate_accepts_strong_follow_up() -> None:
-    from alphaagent.server.services.backtest.schemas import BacktestParams
-    from alphaagent.server.services.backtest import simulation
-
-    params = BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID, enable_low_suction_branch_replacement_quality_gate=True)
-    quality = simulation.low_suction_branch_replacement_quality(
-        {
-            "entry_total_score": 99.2,
-            "entry_setup": "dragon_pullback",
-            "setup_family": "dragon_pullback",
-            "market_warning_level": 0,
-            "ma_convergence_pct": 8.5,
-            "fresh_tail_buy": True,
-            "failed_rules": [],
-            "risk_flags": [],
-        },
-        params,
-    )
-
-    assert quality["allowed"] is True
-    assert quality["notes"] == []
-
-
-def test_low_suction_branch_replacement_strict_setup_gate_rejects_unconfirmed_buildup() -> None:
-    from alphaagent.server.services.backtest.schemas import BacktestParams
-    from alphaagent.server.services.backtest import simulation
-
-    params = BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        enable_low_suction_branch_replacement_quality_gate=True,
-        enable_low_suction_branch_replacement_strict_setup_gate=True,
-    )
-    quality = simulation.low_suction_branch_replacement_quality(
-        {
-            "entry_total_score": 99.5,
-            "entry_setup": "stealth_low_suction",
-            "setup_family": "low_suction_buildup",
-            "low_suction_launch_confirmed": False,
-            "low_suction_launch_quality_bucket": "unconfirmed_buildup",
-            "market_warning_level": 0,
-            "ma_convergence_pct": 4.5,
-            "failed_rules": [],
-            "risk_flags": [],
-        },
-        params,
-    )
-
-    assert quality["allowed"] is False
-    assert "strict_setup_gate_unconfirmed_buildup_or_overlap" in quality["notes"]
-
-
-def test_low_suction_branch_replacement_gate_rejects_and_keeps_slot() -> None:
-    from alphaagent.server.services.backtest.schemas import BacktestParams
-    from alphaagent.server.services.backtest import simulation
-
-    params = BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        max_positions=1,
-        enable_low_suction_branch_replacement_quality_gate=True,
-    )
-    gates = [
-        {
-            "gate_id": "gate-1",
-            "source_symbol": "000404.SZSE",
-            "source_reason": "low_suction_opened_space_giveback_stop",
-            "sell_execute_date": date(2026, 5, 28),
-            "expires_after_trade_count": 3,
-            "wait_count": 1,
-        }
-    ]
-    order = {
-        "execute_date": date(2026, 5, 28),
-        "vt_symbol": "000672.SZSE",
-        "reason": {
-            "entry_total_score": 96.3,
-            "entry_setup": "dragon_pullback",
-            "setup_family": "dragon_pullback",
-            "market_warning_level": 2,
-            "ma_convergence_pct": 17.8,
-            "fresh_tail_buy": True,
-        },
-    }
-
-    decision = simulation.low_suction_branch_replacement_gate_decision(order, {}, gates, date(2026, 5, 28), params)
-
-    assert decision["status"] == "rejected"
-    assert decision["gate_id"] == "gate-1"
-    assert gates
-
-
-def test_dynamic_failed_launch_replacement_gate_from_sell_is_default_off() -> None:
-    from alphaagent.server.services.backtest.schemas import BacktestParams
-    from alphaagent.server.services.backtest import simulation
-
-    order = {
-        "execute_date": date(2026, 3, 18),
-        "signal_date": date(2026, 3, 17),
-        "vt_symbol": "600352.SSE",
-        "reason": "dynamic_failed_launch_exit_stop",
-        "raw": {"dynamic_failed_launch_exit_decision": {"triggered": True}},
-    }
-
-    assert simulation.replacement_quality_gate_from_sell(order, date(2026, 3, 18), BacktestParams()) is None
-
-
-def test_dynamic_failed_launch_replacement_gate_rejects_weak_follow_up() -> None:
-    from alphaagent.server.services.backtest.schemas import BacktestParams
-    from alphaagent.server.services.backtest import simulation
-
-    params = BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        max_positions=1,
-        enable_dynamic_failed_launch_replacement_quality_gate=True,
-    )
-    gate = simulation.replacement_quality_gate_from_sell(
-        {
-            "execute_date": date(2026, 3, 18),
-            "signal_date": date(2026, 3, 17),
-            "vt_symbol": "600352.SSE",
-            "reason": "dynamic_failed_launch_exit_stop",
-            "raw": {"dynamic_failed_launch_exit_decision": {"triggered": True}},
-        },
-        date(2026, 3, 18),
-        params,
-    )
-    assert gate is not None
-    assert gate["mode"] == "dynamic_failed_launch_replacement_quality_gate"
-    gates = [gate]
-    order = {
-        "execute_date": date(2026, 3, 18),
-        "vt_symbol": "002240.SZSE",
-        "reason": {
-            "entry_total_score": 96.0,
-            "entry_setup": "dragon_pullback",
-            "setup_family": "dragon_pullback",
-            "market_warning_level": 2,
-            "ma_convergence_pct": 16.0,
-            "fresh_tail_buy": True,
-        },
-    }
-
-    decision = simulation.low_suction_branch_replacement_gate_decision(order, {}, gates, date(2026, 3, 18), params)
-
-    assert decision["status"] == "rejected"
-    assert decision["mode"] == "dynamic_failed_launch_replacement_quality_gate"
-    assert "score_below_gate" in decision["quality"]["notes"]
-    assert gates
-
-
-def test_dynamic_failed_launch_replacement_gate_accepts_and_consumes_strong_follow_up() -> None:
-    from alphaagent.server.services.backtest.schemas import BacktestParams
-    from alphaagent.server.services.backtest import simulation
-
-    params = BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        max_positions=1,
-        enable_dynamic_failed_launch_replacement_quality_gate=True,
-    )
-    gate = simulation.replacement_quality_gate_from_sell(
-        {
-            "execute_date": date(2026, 2, 27),
-            "signal_date": date(2026, 2, 26),
-            "vt_symbol": "601179.SSE",
-            "reason": "dynamic_failed_launch_exit_stop",
-            "raw": {"dynamic_failed_launch_exit_decision": {"triggered": True}},
-        },
-        date(2026, 2, 27),
-        params,
-    )
-    assert gate is not None
-    gates = [gate]
-    order = {
-        "execute_date": date(2026, 2, 27),
-        "vt_symbol": "603439.SSE",
-        "reason": {
-            "entry_total_score": 99.1,
-            "entry_setup": "dragon_pullback",
-            "setup_family": "dragon_pullback",
-            "market_warning_level": 0,
-            "ma_convergence_pct": 8.0,
-            "fresh_tail_buy": True,
-            "failed_rules": [],
-            "risk_flags": [],
-        },
-    }
-
-    decision = simulation.low_suction_branch_replacement_gate_decision(order, {}, gates, date(2026, 2, 27), params)
-    simulation.consume_low_suction_branch_replacement_gate(gates, str(decision["gate_id"]))
-
-    assert decision["status"] == "accepted"
-    assert decision["mode"] == "dynamic_failed_launch_replacement_quality_gate"
-    assert gates == []
-
-
-def test_low_suction_branch_replacement_strict_setup_gate_applies_with_extra_slot() -> None:
-    from alphaagent.server.services.backtest.schemas import BacktestParams
-    from alphaagent.server.services.backtest import simulation
-
-    params = BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        max_positions=10,
-        enable_low_suction_branch_replacement_quality_gate=True,
-        enable_low_suction_branch_replacement_strict_setup_gate=True,
-    )
-    gates = [
-        {
-            "gate_id": "gate-1",
-            "source_symbol": "000404.SZSE",
-            "source_reason": "low_suction_opened_space_giveback_stop",
-            "sell_execute_date": date(2026, 5, 28),
-            "expires_after_trade_count": 3,
-            "wait_count": 1,
-        }
-    ]
-    order = {
-        "execute_date": date(2026, 5, 28),
-        "vt_symbol": "002100.SZSE",
-        "reason": {
-            "entry_total_score": 99.1,
-            "entry_setup": "stealth_low_suction",
-            "setup_family": "low_suction_buildup",
-            "low_suction_launch_confirmed": False,
-            "low_suction_launch_quality_bucket": "unconfirmed_buildup",
-            "market_warning_level": 0,
-            "ma_convergence_pct": 4.8,
-        },
-    }
-
-    decision = simulation.low_suction_branch_replacement_gate_decision(order, {}, gates, date(2026, 5, 28), params)
-
-    assert decision["status"] == "rejected"
-    assert decision["gate_id"] == "gate-1"
-    assert "strict_setup_gate_unconfirmed_buildup_or_overlap" in decision["quality"]["notes"]
-    assert gates
-
-
-def test_low_suction_branch_replacement_gate_accepts_and_consumes_slot() -> None:
-    from alphaagent.server.services.backtest.schemas import BacktestParams
-    from alphaagent.server.services.backtest import simulation
-
-    params = BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        max_positions=1,
-        enable_low_suction_branch_replacement_quality_gate=True,
-    )
-    gates = [
-        {
-            "gate_id": "gate-1",
-            "source_symbol": "002083.SZSE",
-            "source_reason": "low_suction_opened_space_giveback_stop",
-            "sell_execute_date": date(2026, 1, 9),
-            "expires_after_trade_count": 3,
-            "wait_count": 1,
-        }
-    ]
-    order = {
-        "execute_date": date(2026, 1, 9),
-        "vt_symbol": "603061.SSE",
-        "reason": {
-            "entry_total_score": 99.2,
-            "entry_setup": "dragon_pullback",
-            "setup_family": "dragon_pullback",
-            "market_warning_level": 0,
-            "ma_convergence_pct": 8.5,
-            "fresh_tail_buy": True,
-        },
-    }
-
-    decision = simulation.low_suction_branch_replacement_gate_decision(order, {}, gates, date(2026, 1, 9), params)
-    simulation.consume_low_suction_branch_replacement_gate(gates, str(decision["gate_id"]))
-
-    assert decision["status"] == "accepted"
-    assert gates == []
 
 
 def test_dragon_pullback_exit_holds_capacity_trend_until_trailing_break() -> None:
@@ -7127,7 +7535,7 @@ def test_symbol_diagnostics_prioritizes_rejected_order_reason(monkeypatch) -> No
             "status": "ready",
             "backtest_id": backtest_id,
             "vt_symbol": vt_symbol,
-            "orders": [{"status": "rejected", "reason": "position_slot_unavailable", "reason_label": "持仓名额不足"}],
+            "orders": [{"status": "rejected", "reason": "position_slot_unavailable", "reason_label": "未形成组合成交"}],
             "trades": [],
             "positions": [],
         }
@@ -7182,7 +7590,7 @@ def test_symbol_diagnostics_prioritizes_rejected_order_reason(monkeypatch) -> No
     assert summary["not_traded_context"]["planned_execute_date"] == "2026-02-10"
     assert summary["diagnostic_checks"][0] == {"label": "单股BUY信号", "status": "pass"}
     assert {"label": "真实买入成交", "status": "fail"} in summary["diagnostic_checks"]
-    assert "资金" in summary["next_action"]
+    assert "候选独立买卖质量" in summary["next_action"]
 
 
 def test_symbol_diagnostics_api_passes_backtest_and_signal_date(monkeypatch) -> None:
@@ -7805,6 +8213,44 @@ def test_run_backtest_returns_signal_events_for_strategy_comparison(monkeypatch)
     assert captured["load_end"] == trading_days[-1]
 
 
+def test_candidate_snapshot_rows_keep_daily_candidate_rank_and_execution_context() -> None:
+    from alphaagent.server.services.backtest import engine
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    scores = [
+        SignalScore(
+            vt_symbol="600001.SSE",
+            trade_date=date(2026, 1, 2),
+            total_score=90,
+            entry_signal=True,
+            evidence={"entry_setup": "dragon_pullback", "action": "BUY"},
+        ),
+        SignalScore(
+            vt_symbol="600002.SSE",
+            trade_date=date(2026, 1, 2),
+            total_score=89,
+            entry_signal=True,
+            evidence={"entry_setup": "stealth_low_suction", "low_suction_days": 6, "action": "BUY"},
+        ),
+    ]
+
+    rows = engine._candidate_snapshot_rows(
+        date(2026, 1, 2),
+        scores,
+        BacktestParams(candidate_limit=1),
+    )
+
+    assert [row["vt_symbol"] for row in rows] == ["600001.SSE", "600002.SSE"]
+    assert [row["rank"] for row in rows] == [1, 2]
+    payloads = [row["payload"] for row in rows]
+    assert payloads[0]["source"] == "backtest_daily_candidates"
+    assert payloads[0]["factor_cache_complete"] is True
+    assert payloads[0]["raw_signal_rank"] == 1
+    assert payloads[0]["execution_candidate_rank"] == 1
+    assert payloads[1]["raw_signal_rank"] == 2
+    assert payloads[1]["execution_candidate_rank"] is None
+
+
 def test_run_backtest_does_not_reuse_signal_cache_by_default(monkeypatch) -> None:
     from alphaagent.server.services.backtest import engine
 
@@ -7975,7 +8421,7 @@ def test_quant_recommendation_api_resolves_legacy_buy_action_from_reason() -> No
             "vt_symbol": "002240.SZSE",
             "stock_name": "盛新锂能",
             "strategy_id": DRAGON_PULLBACK_STRATEGY_ID,
-            "strategy_version": "0.1.21",
+            "strategy_version": "0.1.23",
             "rank": 1,
             "action": "BUY",
             "total_score": 99.5902,
@@ -8281,7 +8727,7 @@ def test_get_tail_preview_prefers_today_cache(monkeypatch) -> None:
         "status": "ready",
         "trade_date": "2026-06-18",
         "strategy_id": DRAGON_PULLBACK_STRATEGY_ID,
-        "strategy_version": "0.1.21",
+        "strategy_version": "0.1.23",
         "items": [{"vt_symbol": "A"}, {"vt_symbol": "B"}],
         "recommendations": [{"vt_symbol": "A"}, {"vt_symbol": "B"}],
         "latest_intraday_date": "2026-06-18",
@@ -8390,7 +8836,7 @@ def test_generate_tail_preview_cache_persists_preview_payload(monkeypatch) -> No
             "status": "ready",
             "trade_date": "2026-06-18",
             "strategy_id": DRAGON_PULLBACK_STRATEGY_ID,
-            "strategy_version": "0.1.21",
+            "strategy_version": "0.1.23",
             "base_daily_date": "2026-06-17",
             "latest_daily_date": "2026-06-18",
             "latest_intraday_date": "2026-06-18",
@@ -9451,7 +9897,9 @@ def test_quant_research_run_api_starts_background_workflow(monkeypatch) -> None:
     assert captured["start"] == date(2025, 3, 26)
     assert captured["end"] == date(2026, 6, 15)
     assert captured["strategy_id"] == "mainline_dragon_pullback"
-    assert captured["max_positions"] == 10
+    assert "initial_cash" not in captured
+    assert "max_positions" not in captured
+    assert "max_position_pct" not in captured
     assert captured["recommendation_limit"] == 20
     assert captured["candidate_limit"] == 10
     assert captured["execution_model"] == "legacy_next_open"
@@ -9487,6 +9935,79 @@ def test_quant_research_run_api_reads_latest_and_detail(monkeypatch) -> None:
     assert captured["run_id"] == "job-3"
 
 
+def test_quant_research_job_uses_candidate_quality_as_primary_result(monkeypatch) -> None:
+    from alphaagent.server.services.quant import research_jobs
+
+    captured: dict[str, object] = {}
+    run_id = "job-candidate-quality"
+    params = {
+        "strategy": DRAGON_PULLBACK_STRATEGY_ID,
+        "max_symbols": 5000,
+        "recommendation_limit": 100,
+        "min_recommendation_score": 60.0,
+        "min_entry_score": 76.0,
+        "persist": True,
+        "auto_portfolio": True,
+        "included_boards": ["main"],
+        "candidate_limit": 20,
+        "strict_entry": True,
+        "execution_model": "legacy_next_open",
+        "force_refresh": False,
+    }
+
+    def fake_screen_range(**kwargs):
+        captured["screen_kwargs"] = kwargs
+        return {
+            "status": "ready",
+            "strategy_id": DRAGON_PULLBACK_STRATEGY_ID,
+            "strategy_version": "0.test",
+            "start_date": "2026-01-02",
+            "end_date": "2026-01-31",
+            "replay_run": {"status": "ready"},
+            "replay_run_id": 7,
+        }
+
+    def fake_candidate_quality(**kwargs):
+        captured["candidate_quality_kwargs"] = kwargs
+        return {
+            "status": "ready",
+            "start_date": "2026-01-02",
+            "end_date": "2026-01-31",
+            "strategy_id": DRAGON_PULLBACK_STRATEGY_ID,
+            "strategy_version": "0.test",
+            "rank_limit": 20,
+            "entry_selection": "daily_candidate",
+            "summary": {"evaluated_count": 3, "win_rate": 66.6667, "average_return_pct": 4.2},
+            "coverage": {"candidate_source": "quant_recommendations"},
+        }
+
+    def fail_run_backtest(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("quant research must finish on candidate quality; portfolio diagnostics is not the primary result")
+
+    monkeypatch.setattr(research_jobs.screening, "screen_stocks_range", fake_screen_range)
+    monkeypatch.setattr(research_jobs, "candidate_trade_quality_report_from_quant_recommendations", fake_candidate_quality)
+    monkeypatch.setattr(research_jobs, "run_backtest", fail_run_backtest, raising=False)
+    with research_jobs._JOB_LOCK:
+        research_jobs._JOBS[run_id] = {
+            "id": run_id,
+            "status": "running",
+            "params": dict(params),
+            "backtest": None,
+            "backtest_id": None,
+        }
+
+    research_jobs._run_research_job(run_id, date(2026, 1, 2), date(2026, 1, 31), params)
+    result = research_jobs.get_research_run(run_id)
+
+    assert result["status"] == "succeeded"
+    assert result["candidate_trade_quality"]["summary"]["average_return_pct"] == 4.2
+    assert captured["candidate_quality_kwargs"]["rank_limit"] == 20
+    assert captured["candidate_quality_kwargs"]["strategy_version"] == "0.test"
+    assert result["backtest"] is None
+    assert result["backtest_id"] is None
+
+
 def test_backtest_service_bootstraps_schema_without_api_startup(monkeypatch) -> None:
     from alphaagent.server.services.backtest import engine
 
@@ -9511,6 +10032,7 @@ def test_backtest_service_bootstraps_schema_without_api_startup(monkeypatch) -> 
     monkeypatch.setattr(engine, "is_database_configured", lambda: True)
     monkeypatch.setattr(engine, "get_engine", lambda: "fake-engine")
     monkeypatch.setattr(engine.schema, "create_schema", lambda db_engine: calls.append(("create_schema", db_engine)))
+    monkeypatch.setattr(engine.schema, "_SCHEMA_READY", False)
     monkeypatch.setattr(engine, "session_scope", fake_session_scope)
 
     result = engine.list_backtests()
@@ -9736,7 +10258,7 @@ def test_backtest_list_filters_current_strategy_version_when_strategy_requested(
         if hasattr(element, "value")
     ]
     assert "mainline_dragon_pullback" in bind_values
-    assert "0.1.21" in bind_values
+    assert "0.1.42" in bind_values
     assert [item["strategy_version"] for item in result["items"]] == ["0.1.8"]
 
 
@@ -9748,7 +10270,7 @@ def test_product_baseline_prefers_complete_current_policy_over_longer_drift_run(
             "id": 213,
             "run_type": "portfolio",
             "strategy_id": "mainline_dragon_pullback",
-            "strategy_version": "0.1.21",
+            "strategy_version": "0.1.23",
             "start_date": "2024-05-28",
             "end_date": "2026-06-18",
             "params": {
@@ -9762,7 +10284,7 @@ def test_product_baseline_prefers_complete_current_policy_over_longer_drift_run(
             "id": 203,
             "run_type": "portfolio",
             "strategy_id": "mainline_dragon_pullback",
-            "strategy_version": "0.1.21",
+            "strategy_version": "0.1.23",
             "start_date": "2025-03-26",
             "end_date": "2026-06-18",
             "params": {
@@ -9776,7 +10298,7 @@ def test_product_baseline_prefers_complete_current_policy_over_longer_drift_run(
             "id": 208,
             "run_type": "portfolio",
             "strategy_id": "mainline_dragon_pullback",
-            "strategy_version": "0.1.21",
+            "strategy_version": "0.1.23",
             "start_date": "2025-03-26",
             "end_date": "2026-06-18",
             "params": {
@@ -9950,10 +10472,6 @@ def test_next_experiment_switches_default_off_and_excluded_from_baseline() -> No
         "enable_contextual_support_reclaim_delay",
         "enable_contextual_peak_giveback_stop",
         "enable_low_suction_false_launch_watch_gate",
-        "enable_missed_candidate_quality_rotation",
-        "enable_high_quality_trend_rotation",
-        "enable_weak_holding_quality_rotation",
-        "enable_protected_weak_holding_rotation",
         "enable_market_adaptive_setup_weighting",
         "enable_low_suction_first_lift_bonus",
         "enable_low_suction_lifecycle_ranking",
@@ -9966,9 +10484,10 @@ def test_next_experiment_switches_default_off_and_excluded_from_baseline() -> No
         "enable_top20_day_quality_gate",
         "enable_weekly_top_fractal_relief",
         "enable_pure_loss_weak_bucket_penalty",
+        "enable_support_divergence_entry_lane",
+        "enable_strong_trend_ma_pullback_entry_lane",
         "enable_high_risk_d2_follow_through_entry",
         "enable_dynamic_failed_launch_exit_stop",
-        "enable_dynamic_failed_launch_replacement_quality_gate",
     ]
     for switch in switches:
         assert getattr(params, switch) is False
@@ -10080,6 +10599,8 @@ def test_candidate_tail_risk_and_mainline_momentum_round_trip_and_exclude_baseli
             "enable_weekly_top_fractal_relief": True,
             "enable_low_suction_buildup_quality_lane": True,
             "enable_pure_loss_weak_bucket_penalty": True,
+            "enable_support_divergence_entry_lane": True,
+            "enable_strong_trend_ma_pullback_entry_lane": True,
             "enable_high_risk_d2_follow_through_entry": True,
         }
     )
@@ -10096,6 +10617,8 @@ def test_candidate_tail_risk_and_mainline_momentum_round_trip_and_exclude_baseli
     assert params.enable_weekly_top_fractal_relief is True
     assert params.enable_low_suction_buildup_quality_lane is True
     assert params.enable_pure_loss_weak_bucket_penalty is True
+    assert params.enable_support_divergence_entry_lane is True
+    assert params.enable_strong_trend_ma_pullback_entry_lane is True
     assert params.enable_high_risk_d2_follow_through_entry is True
     assert payload["enable_candidate_tail_risk_penalty"] is True
     assert payload["enable_mainline_momentum_lane"] is True
@@ -10106,6 +10629,8 @@ def test_candidate_tail_risk_and_mainline_momentum_round_trip_and_exclude_baseli
     assert payload["enable_weekly_top_fractal_relief"] is True
     assert payload["enable_low_suction_buildup_quality_lane"] is True
     assert payload["enable_pure_loss_weak_bucket_penalty"] is True
+    assert payload["enable_support_divergence_entry_lane"] is True
+    assert payload["enable_strong_trend_ma_pullback_entry_lane"] is True
     assert payload["enable_high_risk_d2_follow_through_entry"] is True
     assert replay_payload["enable_candidate_tail_risk_penalty"] is True
     assert replay_payload["enable_mainline_momentum_lane"] is True
@@ -10116,6 +10641,8 @@ def test_candidate_tail_risk_and_mainline_momentum_round_trip_and_exclude_baseli
     assert replay_payload["enable_weekly_top_fractal_relief"] is True
     assert replay_payload["enable_low_suction_buildup_quality_lane"] is True
     assert replay_payload["enable_pure_loss_weak_bucket_penalty"] is True
+    assert replay_payload["enable_support_divergence_entry_lane"] is True
+    assert replay_payload["enable_strong_trend_ma_pullback_entry_lane"] is True
     assert replay_payload["enable_high_risk_d2_follow_through_entry"] is True
     assert reloaded.enable_candidate_tail_risk_penalty is True
     assert reloaded.enable_mainline_momentum_lane is True
@@ -10126,83 +10653,9 @@ def test_candidate_tail_risk_and_mainline_momentum_round_trip_and_exclude_baseli
     assert reloaded.enable_weekly_top_fractal_relief is True
     assert reloaded.enable_low_suction_buildup_quality_lane is True
     assert reloaded.enable_pure_loss_weak_bucket_penalty is True
+    assert reloaded.enable_support_divergence_entry_lane is True
+    assert reloaded.enable_strong_trend_ma_pullback_entry_lane is True
     assert reloaded.enable_high_risk_d2_follow_through_entry is True
-    assert is_product_baseline_params(payload) is False
-
-
-def test_dynamic_failed_launch_exit_stop_round_trips_and_excludes_baseline() -> None:
-    from alphaagent.server.api.backtests import _params_from_payload
-    from alphaagent.server.services.backtest.engine import _params_from_run, _params_to_json
-    from alphaagent.server.services.backtest.baseline_policy import is_product_baseline_params
-    from alphaagent.server.services.quant.strategy_replay import _params_to_json as replay_params_to_json
-
-    params = _params_from_payload(
-        {
-            "enable_dynamic_failed_launch_exit_stop": True,
-            "enable_dynamic_failed_launch_replacement_quality_gate": True,
-        }
-    )
-    payload = _params_to_json(params)
-    replay_payload = replay_params_to_json(params)
-    reloaded = _params_from_run({"params": payload, "strategy_id": DRAGON_PULLBACK_STRATEGY_ID})
-
-    assert params.enable_dynamic_failed_launch_exit_stop is True
-    assert params.enable_dynamic_failed_launch_replacement_quality_gate is True
-    assert payload["enable_dynamic_failed_launch_exit_stop"] is True
-    assert payload["enable_dynamic_failed_launch_replacement_quality_gate"] is True
-    assert replay_payload["enable_dynamic_failed_launch_exit_stop"] is True
-    assert replay_payload["enable_dynamic_failed_launch_replacement_quality_gate"] is True
-    assert reloaded.enable_dynamic_failed_launch_exit_stop is True
-    assert reloaded.enable_dynamic_failed_launch_replacement_quality_gate is True
-    assert is_product_baseline_params(payload) is False
-
-
-def test_weak_holding_quality_rotation_round_trips_and_excludes_baseline() -> None:
-    from alphaagent.server.api.backtests import _params_from_payload
-    from alphaagent.server.services.backtest.engine import _params_from_run, _params_to_json
-    from alphaagent.server.services.backtest.baseline_policy import is_product_baseline_params
-    from alphaagent.server.services.quant.strategy_replay import _params_to_json as replay_params_to_json
-
-    params = _params_from_payload(
-        {
-            "enable_weak_holding_quality_rotation": True,
-            "weak_holding_rotation_min_score": 97.0,
-            "weak_holding_rotation_max_rank": 12,
-            "weak_holding_rotation_min_score_gap": 7.0,
-            "weak_holding_rotation_max_held_return_pct": -6.0,
-            "weak_holding_rotation_min_held_days": 5,
-            "weak_holding_rotation_max_ma_convergence_pct": 4.5,
-            "weak_holding_rotation_min_low_suction_days": 4,
-            "enable_protected_weak_holding_rotation": True,
-        }
-    )
-    payload = _params_to_json(params)
-    replay_payload = replay_params_to_json(params)
-    reloaded = _params_from_run({"params": payload, "strategy_id": DRAGON_PULLBACK_STRATEGY_ID})
-
-    assert params.enable_weak_holding_quality_rotation is True
-    assert params.weak_holding_rotation_min_score == 97.0
-    assert params.weak_holding_rotation_max_rank == 12
-    assert params.weak_holding_rotation_min_score_gap == 7.0
-    assert params.weak_holding_rotation_max_held_return_pct == -6.0
-    assert params.weak_holding_rotation_min_held_days == 5
-    assert params.weak_holding_rotation_max_ma_convergence_pct == 4.5
-    assert params.weak_holding_rotation_min_low_suction_days == 4
-    assert params.enable_protected_weak_holding_rotation is True
-    assert payload["enable_weak_holding_quality_rotation"] is True
-    assert payload["enable_protected_weak_holding_rotation"] is True
-    assert replay_payload["enable_weak_holding_quality_rotation"] is True
-    assert replay_payload["enable_protected_weak_holding_rotation"] is True
-    assert replay_payload["weak_holding_rotation_max_held_return_pct"] == -6.0
-    assert reloaded.enable_weak_holding_quality_rotation is True
-    assert reloaded.enable_protected_weak_holding_rotation is True
-    assert reloaded.weak_holding_rotation_min_score == 97.0
-    assert reloaded.weak_holding_rotation_max_rank == 12
-    assert reloaded.weak_holding_rotation_min_score_gap == 7.0
-    assert reloaded.weak_holding_rotation_max_held_return_pct == -6.0
-    assert reloaded.weak_holding_rotation_min_held_days == 5
-    assert reloaded.weak_holding_rotation_max_ma_convergence_pct == 4.5
-    assert reloaded.weak_holding_rotation_min_low_suction_days == 4
     assert is_product_baseline_params(payload) is False
 
 
@@ -10510,7 +10963,8 @@ def test_quant_universe_defaults_to_main_board_only() -> None:
 
     rows = [
         {"vt_symbol": "300750.SZSE", "exchange": "SZSE", "turnover": 300, "market_cap": 300},
-        {"vt_symbol": "600000.SSE", "exchange": "SSE", "turnover": 200, "market_cap": 200},
+        {"vt_symbol": "000001.SZSE", "exchange": "SZSE", "turnover": 200, "market_cap": 200},
+        {"vt_symbol": "600000.SSE", "exchange": "SSE", "turnover": 100, "market_cap": 100},
         {"vt_symbol": "688981.SSE", "exchange": "SSE", "turnover": 100, "market_cap": 100},
         {"vt_symbol": "920001.BSE", "exchange": "BSE", "turnover": 50, "market_cap": 50},
     ]
@@ -10527,13 +10981,13 @@ def test_quant_universe_defaults_to_main_board_only() -> None:
             del statement
             return FakeResult()
 
-    default_symbols = [row["vt_symbol"] for row in screening._load_stock_universe(FakeSession(), 10, ("main",))]
+    default_symbols = [row["vt_symbol"] for row in screening._load_stock_universe(FakeSession(), 1, ("main",))]
     all_symbols = [row["vt_symbol"] for row in screening._load_stock_universe(FakeSession(), 10, ("main", "chinext", "star", "bse"))]
 
     assert "300750.SZSE" not in default_symbols
     assert "688981.SSE" not in default_symbols
     assert "920001.BSE" not in default_symbols
-    assert default_symbols == ["600000.SSE"]
+    assert default_symbols == ["000001.SZSE"]
     assert "300750.SZSE" in all_symbols
     assert "688981.SSE" in all_symbols
     assert "920001.BSE" in all_symbols
@@ -10556,17 +11010,70 @@ def test_backtest_universe_filters_boards_only_for_generated_pool() -> None:
                 return FakeAllResult([("300750.SZSE",)])
             return FakeAllResult(
                 [
-                    ("300750.SZSE", "SZSE"),
-                    ("600000.SSE", "SSE"),
-                    ("688981.SSE", "SSE"),
+                    ("000001.SZSE", "SZSE", 300.0, 300.0),
+                    ("300750.SZSE", "SZSE", 500.0, 500.0),
+                    ("600000.SSE", "SSE", 100.0, 100.0),
+                    ("688981.SSE", "SSE", 400.0, 400.0),
                 ]
             )
 
-    generated = engine._load_symbol_universe(FakeSession(), 10, None, ("main",))
+    generated = engine._load_symbol_universe(FakeSession(), 1, None, ("main",))
     requested = engine._load_symbol_universe(FakeSession(), 10, ["300750.SZSE"], ("main",))
 
-    assert generated == ["600000.SSE"]
+    assert generated == ["000001.SZSE"]
     assert requested == ["300750.SZSE"]
+
+
+def test_candidate_trace_universe_context_uses_liquidity_order() -> None:
+    from alphaagent.server.services.backtest import queries
+    from alphaagent.server.db import schema
+
+    rows = [
+        {
+            "vt_symbol": "600000.SSE",
+            "name": "浦发银行",
+            "exchange": "SSE",
+            "turnover": 500.0,
+            "market_cap": 500.0,
+        },
+        {
+            "vt_symbol": "000001.SZSE",
+            "name": "平安银行",
+            "exchange": "SZSE",
+            "turnover": 100.0,
+            "market_cap": 100.0,
+        },
+    ]
+
+    class FakeResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return rows
+
+    class FakeSession:
+        def execute(self, statement):
+            text = str(statement)
+            assert "coalesce(stocks.turnover" in text
+            assert "coalesce(stocks.market_cap" in text
+            assert " DESC" in text
+            return FakeResult()
+
+    def board_payload(vt_symbol, stock):
+        del vt_symbol, stock
+        return {"board": "main"}
+
+    result = queries._universe_context(
+        FakeSession(),
+        schema,
+        "600000.SSE",
+        {"max_symbols": 1, "included_boards": ["main"]},
+        board_payload,
+    )
+
+    assert result["target_universe_rank"] == 1
+    assert result["target_in_universe"] is True
 
 
 def test_backtest_score_cache_requires_matching_screen_boards() -> None:
@@ -10738,7 +11245,7 @@ def test_backtest_score_cache_can_be_reused_for_non_persisted_backtest() -> None
                         "trade_date": date(2026, 1, 2),
                         "vt_symbol": f"600{index:03d}.SSE",
                         "strategy_id": DRAGON_PULLBACK_STRATEGY_ID,
-                        "strategy_version": "0.1.21",
+                        "strategy_version": "0.1.23",
                         "signal_type": DRAGON_PULLBACK_STRATEGY_ID,
                         "total_score": 80,
                         "relative_strength_score": 70,
@@ -10768,7 +11275,7 @@ def test_backtest_score_cache_can_be_reused_for_non_persisted_backtest() -> None
     result = engine._load_score_cache_from_persisted_signals(
         FakeSession(),
         params,
-        "0.1.21",
+        "0.1.23",
         [f"600{index:03d}.SSE" for index in range(50)],
         [date(2026, 1, 2), date(2026, 1, 3)],
     )
@@ -10814,7 +11321,7 @@ def test_backtest_score_cache_drops_sparse_stale_signal_rows() -> None:
                         "trade_date": date(2025, 8, 6),
                         "vt_symbol": "600000.SSE",
                         "strategy_id": DRAGON_PULLBACK_STRATEGY_ID,
-                        "strategy_version": "0.1.21",
+                        "strategy_version": "0.1.23",
                         "signal_type": DRAGON_PULLBACK_STRATEGY_ID,
                         "total_score": 80,
                         "relative_strength_score": 70,
@@ -10843,7 +11350,7 @@ def test_backtest_score_cache_drops_sparse_stale_signal_rows() -> None:
     result = engine._load_score_cache_from_persisted_signals(
         FakeSession(),
         params,
-        "0.1.21",
+        "0.1.23",
         [f"600{index:03d}.SSE" for index in range(50)],
         [date(2025, 8, 6), date(2025, 8, 7)],
         bars_by_symbol={
@@ -10900,7 +11407,7 @@ def test_backtest_score_cache_keeps_sparse_rows_when_daily_coverage_is_sparse() 
                         "trade_date": date(2025, 3, 26),
                         "vt_symbol": "600000.SSE",
                         "strategy_id": DRAGON_PULLBACK_STRATEGY_ID,
-                        "strategy_version": "0.1.21",
+                        "strategy_version": "0.1.23",
                         "signal_type": DRAGON_PULLBACK_STRATEGY_ID,
                         "total_score": 80,
                         "relative_strength_score": 70,
@@ -10929,7 +11436,7 @@ def test_backtest_score_cache_keeps_sparse_rows_when_daily_coverage_is_sparse() 
     result = engine._load_score_cache_from_persisted_signals(
         FakeSession(),
         params,
-        "0.1.21",
+        "0.1.23",
         ["600000.SSE"],
         [date(2025, 3, 26), date(2025, 3, 27)],
         bars_by_symbol={
@@ -10999,7 +11506,7 @@ def test_backtest_score_cache_reuses_complete_dates_and_skips_sparse_dates() -> 
                         "trade_date": complete_day,
                         "vt_symbol": f"600{index:03d}.SSE",
                         "strategy_id": DRAGON_PULLBACK_STRATEGY_ID,
-                        "strategy_version": "0.1.21",
+                        "strategy_version": "0.1.23",
                         "signal_type": DRAGON_PULLBACK_STRATEGY_ID,
                         "total_score": 80,
                         "relative_strength_score": 70,
@@ -11021,7 +11528,7 @@ def test_backtest_score_cache_reuses_complete_dates_and_skips_sparse_dates() -> 
                         "trade_date": sparse_day,
                         "vt_symbol": "601000.SSE",
                         "strategy_id": DRAGON_PULLBACK_STRATEGY_ID,
-                        "strategy_version": "0.1.21",
+                        "strategy_version": "0.1.23",
                         "signal_type": DRAGON_PULLBACK_STRATEGY_ID,
                         "total_score": 80,
                         "relative_strength_score": 70,
@@ -11050,7 +11557,7 @@ def test_backtest_score_cache_reuses_complete_dates_and_skips_sparse_dates() -> 
     result = engine._load_score_cache_from_persisted_signals(
         FakeSession(),
         params,
-        "0.1.21",
+        "0.1.23",
         [f"600{index:03d}.SSE" for index in range(50)] + ["601000.SSE"],
         [complete_day, sparse_day, execute_day],
     )
@@ -11117,7 +11624,7 @@ def test_backtest_score_cache_backfills_market_context_for_low_suction_experimen
                         "trade_date": date(2026, 3, 12),
                         "vt_symbol": "600352.SSE" if index == 0 else f"600{index:03d}.SSE",
                         "strategy_id": DRAGON_PULLBACK_STRATEGY_ID,
-                        "strategy_version": "0.1.21",
+                        "strategy_version": "0.1.23",
                         "signal_type": DRAGON_PULLBACK_STRATEGY_ID,
                         "total_score": 82,
                         "relative_strength_score": 70,
@@ -11160,7 +11667,7 @@ def test_backtest_score_cache_backfills_market_context_for_low_suction_experimen
     result = engine._load_score_cache_from_persisted_signals(
         FakeSession(),
         params,
-        "0.1.21",
+        "0.1.23",
         ["600352.SSE", *[f"600{index:03d}.SSE" for index in range(1, 50)]],
         [date(2026, 3, 12), date(2026, 3, 13)],
     )
@@ -11228,7 +11735,7 @@ def test_backtest_score_cache_backfills_market_context_for_candidate_quality_exp
                         "trade_date": date(2026, 5, 13),
                         "vt_symbol": f"600{index:03d}.SSE",
                         "strategy_id": DRAGON_PULLBACK_STRATEGY_ID,
-                        "strategy_version": "0.1.21",
+                        "strategy_version": "0.1.23",
                         "signal_type": DRAGON_PULLBACK_STRATEGY_ID,
                         "total_score": 88,
                         "relative_strength_score": 82,
@@ -11283,7 +11790,7 @@ def test_backtest_score_cache_backfills_market_context_for_candidate_quality_exp
         result = engine._load_score_cache_from_persisted_signals(
             FakeSession(),
             params,
-            "0.1.21",
+            "0.1.23",
             [f"600{index:03d}.SSE" for index in range(50)],
             [date(2026, 5, 13), date(2026, 5, 14)],
         )
@@ -11331,7 +11838,7 @@ def test_backtest_score_cache_backfills_read_only_early_dragon_risk() -> None:
                         "trade_date": date(2026, 2, 2),
                         "vt_symbol": "601179.SSE" if index == 0 else f"600{index:03d}.SSE",
                         "strategy_id": DRAGON_PULLBACK_STRATEGY_ID,
-                        "strategy_version": "0.1.21",
+                        "strategy_version": "0.1.23",
                         "signal_type": DRAGON_PULLBACK_STRATEGY_ID,
                         "total_score": 96.1786 if index == 0 else 80,
                         "relative_strength_score": 100 if index == 0 else 70,
@@ -11373,7 +11880,7 @@ def test_backtest_score_cache_backfills_read_only_early_dragon_risk() -> None:
     result = engine._load_score_cache_from_persisted_signals(
         FakeSession(),
         params,
-        "0.1.21",
+        "0.1.23",
         ["601179.SSE", *[f"600{index:03d}.SSE" for index in range(1, 50)]],
         [date(2026, 2, 2), date(2026, 2, 3)],
     )
@@ -11722,6 +12229,86 @@ def test_recommendations_use_latest_screen_run_id_not_same_day_old_versions(monk
     )
 
 
+def test_signals_use_latest_screen_run_id_not_same_day_old_versions(monkeypatch) -> None:
+    from alphaagent.server.services.quant import screening, screening_payloads
+
+    executed: list[str] = []
+
+    class FakeRows:
+        def __init__(self, rows=None):
+            self.rows = rows or []
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return self.rows
+
+    class FakeSession:
+        def execute(self, statement):
+            text = str(statement)
+            executed.append(text)
+            if "FROM quant_signal_runs" in text:
+                return FakeRows(
+                    [
+                        {
+                            "id": 6,
+                            "trade_date": date(2026, 6, 11),
+                            "strategy_id": "mainline_leader_pullback",
+                            "strategy_version": "0.1.1",
+                            "params": {
+                                "included_boards": ["main"],
+                                "signal_evidence_schema_version": screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+                            },
+                        }
+                    ]
+                )
+            assert "quant_stock_signals.run_id = :run_id_1" in text
+            return FakeRows(
+                [
+                    {
+                        "id": 1,
+                        "run_id": 6,
+                        "trade_date": date(2026, 6, 11),
+                        "vt_symbol": "003004.SZSE",
+                        "strategy_id": "mainline_leader_pullback",
+                        "strategy_version": "0.1.1",
+                        "signal_type": "mainline_leader_pullback",
+                        "total_score": 91.0,
+                        "relative_strength_score": 80.0,
+                        "washout_score": 70.0,
+                        "trend_quality_score": 75.0,
+                        "sector_mainline_score": 60.0,
+                        "financial_improvement_score": 50.0,
+                        "liquidity_score": 80.0,
+                        "risk_score": 80.0,
+                        "entry_signal": True,
+                        "risk_level": "LOW",
+                        "evidence": {"status": "ready"},
+                    }
+                ]
+            )
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(screening, "is_database_configured", lambda: True)
+    monkeypatch.setattr(screening, "_ensure_quant_schema", lambda: None)
+    monkeypatch.setattr(screening, "session_scope", fake_session_scope)
+
+    result = screening.list_signals()
+
+    assert result["run_id"] == 6
+    assert result["items"][0]["run_id"] == 6
+    assert any("quant_stock_signals.run_id = :run_id_1" in statement for statement in executed)
+    assert not any(
+        "quant_stock_signals.trade_date = :trade_date_1" in statement
+        and "quant_stock_signals.run_id = :run_id_1" not in statement
+        for statement in executed
+    )
+
+
 def test_latest_screen_run_skips_stale_signal_evidence_schema() -> None:
     from alphaagent.server.services.quant import screening_loaders, screening_payloads
 
@@ -11735,14 +12322,14 @@ def test_latest_screen_run_skips_stale_signal_evidence_schema() -> None:
                     "id": 8,
                     "trade_date": date(2026, 6, 18),
                     "strategy_id": DRAGON_PULLBACK_STRATEGY_ID,
-                    "strategy_version": "0.1.21",
+                    "strategy_version": "0.1.23",
                     "params": {"included_boards": ["main"]},
                 },
                 {
                     "id": 9,
                     "trade_date": date(2026, 6, 17),
                     "strategy_id": DRAGON_PULLBACK_STRATEGY_ID,
-                    "strategy_version": "0.1.21",
+                    "strategy_version": "0.1.23",
                     "params": {
                         "included_boards": ["main"],
                         "signal_evidence_schema_version": screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
@@ -11758,11 +12345,78 @@ def test_latest_screen_run_skips_stale_signal_evidence_schema() -> None:
     run = screening_loaders.latest_screen_run(
         FakeSession(),
         DRAGON_PULLBACK_STRATEGY_ID,
-        "0.1.21",
+        "0.1.23",
         signal_evidence_schema_version=screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
     )
 
     assert run["id"] == 9
+
+
+def test_screen_runs_by_date_picks_latest_matching_run_id() -> None:
+    from alphaagent.server.services.quant import screening_loaders, screening_payloads
+
+    class FakeRows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {
+                    "id": 12,
+                    "trade_date": date(2026, 6, 12),
+                    "strategy_id": DRAGON_PULLBACK_STRATEGY_ID,
+                    "strategy_version": "0.1.23",
+                    "status": "succeeded",
+                    "params": {
+                        "included_boards": ["chinext"],
+                        "max_symbols": 5000,
+                        "signal_evidence_schema_version": screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+                    },
+                },
+                {
+                    "id": 11,
+                    "trade_date": date(2026, 6, 12),
+                    "strategy_id": DRAGON_PULLBACK_STRATEGY_ID,
+                    "strategy_version": "0.1.23",
+                    "status": "succeeded",
+                    "params": {
+                        "included_boards": ["main"],
+                        "max_symbols": 5000,
+                        "signal_evidence_schema_version": screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+                    },
+                },
+                {
+                    "id": 10,
+                    "trade_date": date(2026, 6, 12),
+                    "strategy_id": DRAGON_PULLBACK_STRATEGY_ID,
+                    "strategy_version": "0.1.23",
+                    "status": "succeeded",
+                    "params": {
+                        "included_boards": ["main"],
+                        "max_symbols": 3000,
+                        "signal_evidence_schema_version": screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+                    },
+                },
+            ]
+
+    class FakeSession:
+        def execute(self, statement):
+            text = str(statement)
+            assert "FROM quant_signal_runs" in text
+            assert "quant_signal_runs.trade_date IN" in text
+            return FakeRows()
+
+    runs = screening_loaders.screen_runs_by_date(
+        FakeSession(),
+        DRAGON_PULLBACK_STRATEGY_ID,
+        "0.1.23",
+        [date(2026, 6, 12)],
+        signal_evidence_schema_version=screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+        max_symbols=5000,
+        included_boards=("main",),
+    )
+
+    assert runs[date(2026, 6, 12)]["id"] == 11
 
 
 def test_recommendations_do_not_fallback_to_stale_signal_evidence_schema(monkeypatch) -> None:
@@ -11804,6 +12458,87 @@ def test_recommendations_do_not_fallback_to_stale_signal_evidence_schema(monkeyp
     assert result["items"] == []
     assert "刷新候选" in result["message"]
     assert not any("FROM quant_recommendations" in statement for statement in executed)
+
+
+def test_latest_trade_plan_uses_latest_screen_run_id(monkeypatch) -> None:
+    from alphaagent.server.services.quant import screening, screening_payloads
+
+    executed: list[str] = []
+
+    class FakeRows:
+        def __init__(self, rows=None):
+            self.rows = rows or []
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return self.rows
+
+        def first(self):
+            return self.rows[0] if self.rows else None
+
+    class FakeSession:
+        def execute(self, statement):
+            text = str(statement)
+            executed.append(text)
+            if "FROM quant_signal_runs" in text:
+                return FakeRows(
+                    [
+                        {
+                            "id": 88,
+                            "trade_date": date(2026, 6, 18),
+                            "strategy_id": "mainline_leader_pullback",
+                            "strategy_version": "0.1.1",
+                            "status": "succeeded",
+                            "params": {
+                                "included_boards": ["main"],
+                                "max_symbols": 5000,
+                                "signal_evidence_schema_version": screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+                            },
+                        }
+                    ]
+                )
+            assert "quant_recommendations.run_id = :run_id_1" in text
+            return FakeRows(
+                [
+                    {
+                        "id": 1,
+                        "run_id": 88,
+                        "trade_date": date(2026, 6, 18),
+                        "vt_symbol": "003004.SZSE",
+                        "strategy_id": "mainline_leader_pullback",
+                        "strategy_version": "0.1.1",
+                        "rank": 3,
+                        "action": "BUY",
+                        "horizon": "SWING",
+                        "confidence": 0.8,
+                        "total_score": 90,
+                        "reason": {},
+                        "risk_control": {"trade_plan": {"entry_price": 32.1}},
+                        "status": "active",
+                        "stock_name": "声迅股份",
+                    }
+                ]
+            )
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(screening, "is_database_configured", lambda: True)
+    monkeypatch.setattr(screening, "_ensure_quant_schema", lambda: None)
+    monkeypatch.setattr(screening, "session_scope", fake_session_scope)
+
+    result = screening.latest_trade_plan("003004.SZSE")
+
+    assert result["status"] == "ready"
+    assert result["trade_plan"]["entry_price"] == 32.1
+    assert not any(
+        "quant_recommendations.vt_symbol = :vt_symbol_1" in statement
+        and "quant_recommendations.run_id = :run_id_1" not in statement
+        for statement in executed
+    )
 
 
 def test_list_screen_runs_returns_recent_runs(monkeypatch) -> None:
@@ -12930,6 +13665,104 @@ def test_strategy_replay_ignores_raw_entry_signal_with_failed_rules() -> None:
     assert attempts == []
 
 
+def test_strategy_replay_load_signal_rows_uses_latest_screen_run_ids() -> None:
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+    from alphaagent.server.services.quant import screening_payloads, strategy_replay
+
+    executed: list[str] = []
+
+    class FakeRows:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return self.rows
+
+    class FakeSession:
+        def execute(self, statement):
+            text = str(statement)
+            executed.append(text)
+            if "FROM quant_signal_runs" in text:
+                return FakeRows(
+                    [
+                        {
+                            "id": 42,
+                            "trade_date": date(2026, 1, 2),
+                            "status": "succeeded",
+                            "params": {
+                                "included_boards": ["main"],
+                                "max_symbols": 5000,
+                                "signal_evidence_schema_version": screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+                            },
+                        },
+                        {
+                            "id": 41,
+                            "trade_date": date(2026, 1, 2),
+                            "status": "succeeded",
+                            "params": {
+                                "included_boards": ["main"],
+                                "max_symbols": 5000,
+                                "signal_evidence_schema_version": screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+                            },
+                        },
+                    ]
+                )
+            assert "quant_stock_signals.run_id IN" in text
+            return FakeRows(
+                [
+                    {
+                        "id": 1,
+                        "run_id": 42,
+                        "trade_date": date(2026, 1, 2),
+                        "vt_symbol": "600000.SSE",
+                        "strategy_id": DRAGON_PULLBACK_STRATEGY_ID,
+                        "strategy_version": "0.1.23",
+                        "signal_type": DRAGON_PULLBACK_STRATEGY_ID,
+                        "total_score": 82.0,
+                        "relative_strength_score": 70.0,
+                        "washout_score": 70.0,
+                        "trend_quality_score": 70.0,
+                        "sector_mainline_score": 60.0,
+                        "financial_improvement_score": 60.0,
+                        "liquidity_score": 80.0,
+                        "risk_score": 80.0,
+                        "entry_signal": True,
+                        "risk_level": "LOW",
+                        "evidence": {"status": "ready"},
+                    }
+                ]
+            )
+
+    params = BacktestParams(
+        strategy=DRAGON_PULLBACK_STRATEGY_ID,
+        start=date(2026, 1, 2),
+        end=date(2026, 1, 3),
+        max_symbols=5000,
+        included_boards=("main",),
+        min_entry_score=76,
+    )
+
+    rows = strategy_replay._load_signal_rows(
+        FakeSession(),
+        DRAGON_PULLBACK_STRATEGY_ID,
+        "0.1.23",
+        date(2026, 1, 2),
+        date(2026, 1, 3),
+        params,
+    )
+
+    assert [row["run_id"] for row in rows] == [42]
+    assert not any(
+        "quant_stock_signals.trade_date >=" in statement
+        or "quant_stock_signals.trade_date <=" in statement
+        for statement in executed
+        if "FROM quant_stock_signals" in statement
+    )
+
+
 def test_latest_symbol_replay_prefers_recent_run_containing_symbol(monkeypatch) -> None:
     from alphaagent.server.services.quant import strategy_replay
 
@@ -12974,7 +13807,7 @@ def test_latest_symbol_replay_prefers_recent_run_containing_symbol(monkeypatch) 
 
 
 def test_latest_symbol_quant_state_ties_signal_candidate_to_latest_global_replay(monkeypatch) -> None:
-    from alphaagent.server.services.quant import symbol_quant_state
+    from alphaagent.server.services.quant import screening_payloads, symbol_quant_state
 
     symbol = "002536.SZSE"
     signal_date = date(2025, 12, 30)
@@ -13012,12 +13845,27 @@ def test_latest_symbol_quant_state_ties_signal_candidate_to_latest_global_replay
                         "start_date": signal_date,
                         "end_date": date(2026, 1, 5),
                         "status": "ready",
-                        "params": {"included_boards": ["main"]},
+                        "params": {"included_boards": ["main"], "max_symbols": 5000},
                         "metrics": {"attempt_count": 0},
                         "message": None,
                     }
                 )
             if "FROM quant_signal_runs" in text:
+                if "quant_signal_runs.trade_date >=" in text:
+                    return FakeResult(
+                        rows=[
+                            {
+                                "id": 11,
+                                "trade_date": signal_date,
+                                "status": "succeeded",
+                                "params": {
+                                    "included_boards": ["main"],
+                                    "max_symbols": 5000,
+                                    "signal_evidence_schema_version": screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+                                },
+                            }
+                        ]
+                    )
                 return FakeResult(first=None)
             if "FROM quant_stock_signals" in text:
                 return FakeResult(
@@ -13138,6 +13986,8 @@ def test_latest_symbol_quant_state_prefers_newer_screen_over_stale_replay(monkey
                     }
                 )
             if "FROM quant_signal_runs" in text:
+                if "quant_signal_runs.trade_date >=" in text:
+                    return FakeResult(rows=[])
                 return FakeResult(
                     first={
                         "id": 1685,
@@ -13391,6 +14241,154 @@ def test_backtest_strict_entry_accepts_stealth_low_suction_threshold() -> None:
     )
 
 
+def test_backtest_strict_entry_accepts_clean_low_liquidity_ma_support_watch() -> None:
+    from alphaagent.server.services.backtest import engine
+    from alphaagent.server.services.backtest import scoring
+
+    score = SignalScore(
+        vt_symbol="003004.SZSE",
+        trade_date=date(2026, 4, 30),
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=62.4,
+        liquidity_score=15.0,
+        risk_score=62.0,
+        entry_signal=False,
+        evidence={
+            "status": "ready",
+            "entry_setup": "support_accepted",
+            "setup_type": "support_accepted",
+            "dragon_state": "SUPPORT_ACCEPTED",
+            "failed_rules": ["liquidity_score", "strong_leg", "pullback_too_short"],
+            "low_suction_days": 4,
+            "low_suction_launch_confirmed": True,
+            "first_effective_lift": True,
+            "ma5_distance_pct": 0.6,
+            "ma10_distance_pct": 1.2,
+            "ma_convergence_pct": 4.8,
+            "ma5_slope_pct": 0.1,
+            "close_location_in_range": 0.58,
+            "volume_ratio_5d_20d": 0.92,
+            "return_60d": 18.0,
+        },
+    )
+
+    params = engine.BacktestParams(
+        strategy=DRAGON_PULLBACK_STRATEGY_ID,
+        min_entry_score=76.0,
+        strict_entry=True,
+    )
+
+    assert scoring.is_buy_candidate(score, params) is True
+
+    rows = scoring.score_day(
+        None,
+        {"003004.SZSE": []},
+        score.trade_date,
+        params,
+        score_cache={score.trade_date: [score]},
+    )
+
+    assert rows[0].evidence["default_clean_watch_entry_profile"] == "clean_low_liquidity_first_lift"
+    assert rows[0].evidence["default_executable_entry_signal"] is True
+    assert rows[0].evidence["signal_label"] == "低流动性低吸首启买点"
+
+
+def test_backtest_strict_entry_keeps_active_support_divergence_as_research_only() -> None:
+    from alphaagent.server.services.backtest import engine
+    from alphaagent.server.services.backtest import scoring
+
+    score = SignalScore(
+        vt_symbol="002484.SZSE",
+        trade_date=date(2026, 4, 24),
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=90.2,
+        liquidity_score=80.0,
+        risk_score=66.0,
+        entry_signal=False,
+        evidence={
+            "status": "ready",
+            "entry_setup": "support_accepted",
+            "setup_type": "support_accepted",
+            "dragon_state": "SUPPORT_ACCEPTED",
+            "support_type": "ma10_support",
+            "failed_rules": ["reclaim_confirmation"],
+            "strong_leg_score": 92.0,
+            "pullback_days": 4,
+            "low_suction_days": 1,
+            "recent_limit_up_20d": True,
+            "large_bull_count_20d": 1,
+            "ma5_distance_pct": 1.4,
+            "ma10_distance_pct": -0.4,
+            "ma_convergence_pct": 16.0,
+            "close_location_in_range": 0.52,
+            "volume_ratio_5d_20d": 0.98,
+            "latest_change_pct": -1.2,
+            "return_60d": 34.0,
+        },
+    )
+    params = engine.BacktestParams(
+        strategy=DRAGON_PULLBACK_STRATEGY_ID,
+        min_entry_score=76.0,
+        strict_entry=True,
+    )
+
+    assert scoring.is_buy_candidate(score, params) is False
+
+    rows = scoring.score_day(
+        None,
+        {"002484.SZSE": []},
+        score.trade_date,
+        params,
+        score_cache={score.trade_date: [score]},
+    )
+
+    assert rows == []
+
+
+def test_backtest_strict_entry_rejects_hot_unconfirmed_after_big_run_watch() -> None:
+    from alphaagent.server.services.backtest import engine
+    from alphaagent.server.services.backtest import scoring
+
+    score = SignalScore(
+        vt_symbol="605117.SSE",
+        trade_date=date(2026, 5, 18),
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=91.0,
+        liquidity_score=80.0,
+        risk_score=66.0,
+        entry_signal=False,
+        evidence={
+            "status": "ready",
+            "entry_setup": "support_accepted",
+            "setup_type": "support_accepted",
+            "dragon_state": "SUPPORT_ACCEPTED",
+            "support_type": "ma5_reclaim",
+            "failed_rules": ["reclaim_confirmation"],
+            "strong_leg_score": 94.0,
+            "pullback_days": 4,
+            "low_suction_days": 5,
+            "low_suction_launch_confirmed": False,
+            "recent_limit_up_20d": True,
+            "large_bull_count_20d": 3,
+            "ma5_distance_pct": 2.0,
+            "ma10_distance_pct": 3.0,
+            "ma_convergence_pct": 10.0,
+            "close_location_in_range": 0.66,
+            "volume_ratio_5d_20d": 1.1,
+            "return_60d": 68.0,
+        },
+    )
+
+    assert scoring.is_buy_candidate(
+        score,
+        engine.BacktestParams(
+            strategy=DRAGON_PULLBACK_STRATEGY_ID,
+            min_entry_score=76.0,
+            strict_entry=True,
+        ),
+    ) is False
+
+
 def test_setup_family_filter_keeps_only_requested_family() -> None:
     from alphaagent.server.services.backtest import engine
     from alphaagent.server.services.backtest import scoring
@@ -13501,7 +14499,6 @@ def test_phase_strategy_experiment_params_excluded_from_product_baseline() -> No
 
     assert not is_product_baseline_params({"setup_family_filter": "dragon_pullback"})
     assert not is_product_baseline_params({"enable_phase_aware_setup_selector": True})
-    assert not is_product_baseline_params({"enable_phase_replacement_quality": True})
     assert not is_product_baseline_params({"enable_low_suction_pullback_entry": True})
 
 
@@ -13524,13 +14521,6 @@ def test_low_suction_pullback_entry_params_round_trip_and_exclude_baseline() -> 
             "low_suction_failed_follow_d3_close_pct": -2.8,
             "low_suction_opened_space_d5_high_pct": 6.5,
             "low_suction_opened_space_d5_low_pct": -4.5,
-            "enable_low_suction_branch_replacement_quality_gate": True,
-            "low_suction_branch_replacement_gate_wait_days": 5,
-            "low_suction_branch_replacement_min_score": 99.0,
-            "low_suction_branch_replacement_max_market_warning_level": 0,
-            "low_suction_branch_replacement_max_low_suction_ma_convergence_pct": 6.5,
-            "low_suction_branch_replacement_max_dragon_ma_convergence_pct": 10.5,
-            "enable_low_suction_branch_replacement_strict_setup_gate": True,
         }
     )
     payload = _params_to_json(params)
@@ -13548,25 +14538,14 @@ def test_low_suction_pullback_entry_params_round_trip_and_exclude_baseline() -> 
     assert params.low_suction_failed_follow_d3_close_pct == -2.8
     assert params.low_suction_opened_space_d5_high_pct == 6.5
     assert params.low_suction_opened_space_d5_low_pct == -4.5
-    assert params.enable_low_suction_branch_replacement_quality_gate is True
-    assert params.low_suction_branch_replacement_gate_wait_days == 5
-    assert params.low_suction_branch_replacement_min_score == 99.0
-    assert params.low_suction_branch_replacement_max_market_warning_level == 0
-    assert params.low_suction_branch_replacement_max_low_suction_ma_convergence_pct == 6.5
-    assert params.low_suction_branch_replacement_max_dragon_ma_convergence_pct == 10.5
-    assert params.enable_low_suction_branch_replacement_strict_setup_gate is True
     assert payload["enable_low_suction_pullback_entry"] is True
     assert payload["low_suction_pullback_entry_reserve_slot"] is False
     assert payload["enable_low_suction_trigger_day_confirmation"] is True
     assert payload["enable_low_suction_confirmed_branch_exit"] is True
-    assert payload["enable_low_suction_branch_replacement_quality_gate"] is True
-    assert payload["enable_low_suction_branch_replacement_strict_setup_gate"] is True
     assert replay_payload["enable_low_suction_pullback_entry"] is True
     assert replay_payload["low_suction_pullback_entry_reserve_slot"] is False
     assert replay_payload["enable_low_suction_trigger_day_confirmation"] is True
     assert replay_payload["enable_low_suction_confirmed_branch_exit"] is True
-    assert replay_payload["enable_low_suction_branch_replacement_quality_gate"] is True
-    assert replay_payload["enable_low_suction_branch_replacement_strict_setup_gate"] is True
     assert reloaded.enable_low_suction_pullback_entry is True
     assert reloaded.low_suction_pullback_entry_max_wait_days == 4
     assert reloaded.low_suction_pullback_entry_buffer_pct == 0.02
@@ -13578,13 +14557,6 @@ def test_low_suction_pullback_entry_params_round_trip_and_exclude_baseline() -> 
     assert reloaded.low_suction_failed_follow_d3_close_pct == -2.8
     assert reloaded.low_suction_opened_space_d5_high_pct == 6.5
     assert reloaded.low_suction_opened_space_d5_low_pct == -4.5
-    assert reloaded.enable_low_suction_branch_replacement_quality_gate is True
-    assert reloaded.low_suction_branch_replacement_gate_wait_days == 5
-    assert reloaded.low_suction_branch_replacement_min_score == 99.0
-    assert reloaded.low_suction_branch_replacement_max_market_warning_level == 0
-    assert reloaded.low_suction_branch_replacement_max_low_suction_ma_convergence_pct == 6.5
-    assert reloaded.low_suction_branch_replacement_max_dragon_ma_convergence_pct == 10.5
-    assert reloaded.enable_low_suction_branch_replacement_strict_setup_gate is True
     assert is_product_baseline_params(payload) is False
 
 
@@ -13942,6 +14914,214 @@ def test_low_suction_trigger_day_confirmation_rejects_weak_trigger_day() -> None
     assert rejected[-1]["raw"]["trigger_volume_ge_signal_volume5"] is False
 
 
+def test_support_stop_reentry_signal_requires_visible_ma5_reclaim_shape() -> None:
+    from alphaagent.server.services.backtest import engine
+    from alphaagent.server.services.backtest import simulation
+
+    start = date(2026, 5, 1)
+    closes = [10.0] * 20 + [9.8, 9.6, 9.4, 9.2, 9.5]
+    bars = [
+        engine.Bar(
+            start + timedelta(days=index),
+            close * 0.995,
+            close * 1.01,
+            close * 0.97,
+            close,
+            volume=1_000_000,
+            turnover=100_000_000,
+            change_pct=0.2,
+        )
+        for index, close in enumerate(closes)
+    ]
+    watch = {
+        "support_stop_execute_date": bars[-2].trade_date,
+        "checked_days": 0,
+    }
+
+    signal = simulation.support_stop_reentry_signal(
+        bars,
+        bars[-1].trade_date,
+        watch,
+        engine.BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID),
+    )
+
+    assert signal["status"] == "matched"
+    assert signal["reason"] == "visible_ma5_reclaim_normal_volume"
+    assert signal["reentry_reclaimed_ma5"] is True
+    assert 0.55 <= signal["reentry_close_location"] <= 1.0
+    assert 0.80 <= signal["reentry_volume_ratio_5d_20d"] <= 1.15
+
+
+def test_support_stop_reentry_signal_rejects_overheated_volume() -> None:
+    from alphaagent.server.services.backtest import engine
+    from alphaagent.server.services.backtest import simulation
+
+    start = date(2026, 5, 1)
+    closes = [10.0] * 20 + [9.8, 9.6, 9.4, 9.2, 9.5]
+    bars = []
+    for index, close in enumerate(closes):
+        volume = 2_500_000 if index >= len(closes) - 5 else 1_000_000
+        bars.append(
+            engine.Bar(
+                start + timedelta(days=index),
+                close * 0.995,
+                close * 1.01,
+                close * 0.97,
+                close,
+                volume=volume,
+                turnover=100_000_000,
+                change_pct=0.2,
+            )
+        )
+    watch = {
+        "support_stop_execute_date": bars[-2].trade_date,
+        "checked_days": 0,
+    }
+
+    signal = simulation.support_stop_reentry_signal(
+        bars,
+        bars[-1].trade_date,
+        watch,
+        engine.BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID),
+    )
+
+    assert signal["status"] == "waiting"
+    assert signal["reason"] == "volume_ratio_out_of_range"
+    assert signal["reentry_volume_ratio_5d_20d"] > 1.15
+
+
+def test_support_stop_reentry_after_support_stop_generates_candidate_snapshot_without_real_buy() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    symbol = "002208.SZSE"
+    start = date(2026, 5, 1)
+    trading_days = [start + timedelta(days=index) for index in range(27)]
+    bars = []
+    for index, day in enumerate(trading_days):
+        if index == 0:
+            close = 10.0
+        elif index == 1:
+            close = 10.0
+        elif index == 23:
+            close = 8.8
+        elif index == 24:
+            close = 8.8
+        elif index == 25:
+            close = 9.1
+        elif index == 26:
+            close = 9.2
+        else:
+            close = 9.4
+        bars.append(
+            engine.Bar(
+                trade_date=day,
+                open_price=close,
+                high_price=close * 1.01,
+                low_price=close * 0.97,
+                close_price=close,
+                volume=1_000_000,
+                turnover=100_000_000,
+                change_pct=0.2,
+            )
+        )
+    candidate = SignalScore(
+        vt_symbol=symbol,
+        trade_date=trading_days[0],
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=90,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "support_price": 9.5,
+            "ma10": 9.5,
+        },
+    )
+    params = engine.BacktestParams(
+        start=trading_days[0],
+        end=trading_days[-1],
+        initial_cash=100_000,
+        max_positions=1,
+        max_position_pct=1.0,
+        commission_rate=0.0,
+        stamp_tax_rate=0.0,
+        slippage_bps=0.0,
+        stop_loss_pct=0.5,
+        time_stop_days=999,
+        min_entry_score=76,
+        strict_entry=True,
+        strategy=DRAGON_PULLBACK_STRATEGY_ID,
+        execution_model="legacy_next_open",
+    )
+
+    result = engine._simulate(
+        None,
+        params,
+        {symbol: bars},
+        trading_days,
+        {symbol: {"name": "测试股"}},
+        score_cache={trading_days[0]: [candidate]},
+        minute_index={},
+        score_context=engine.ScoreContext(),
+    )
+
+    sells = [trade for trade in result["trades"] if trade["side"] == "SELL"]
+    buys = [trade for trade in result["trades"] if trade["side"] == "BUY"]
+    snapshots = [
+        row
+        for row in result["candidate_snapshots"]
+        if (row.get("payload") or {}).get("candidate_source") == "support_stop_reentry"
+    ]
+
+    assert sells[0]["reason"] == "support_stop"
+    assert len(buys) == 1
+    assert not any((trade.get("raw") or {}).get("candidate_source") == "support_stop_reentry" for trade in buys)
+    assert not any((event.get("raw") or {}).get("candidate_source") == "support_stop_reentry" for event in result["signal_events"])
+    assert len(snapshots) == 1
+    payload = snapshots[0]["payload"]
+    assert snapshots[0]["rank"] == 1001
+    assert payload["action"] == "BUY"
+    assert payload["candidate_execution"]["execution_candidate_rank"] == 1
+    assert payload["candidate_execution"]["execution_candidate_selected"] is True
+    assert payload["reason"]["entry_execution_mode"] == "support_stop_ma5_reentry_next_open"
+
+
+def test_support_stop_reentry_snapshot_is_excluded_from_main_candidate_quality_scope() -> None:
+    from alphaagent.server.services.backtest import engine
+    from alphaagent.server.services.backtest.factor_audit import build_daily_candidate_clusters
+
+    payload = {
+        "trade_date": date(2026, 5, 26),
+        "vt_symbol": "002208.SZSE",
+        "rank": 1001,
+        "action": "BUY",
+        "total_score": 88.0,
+        "reason": {"entry_setup": "support_stop_reentry", "support_stop_reentry": True},
+        "candidate_source": "support_stop_reentry",
+        "candidate_execution": {
+            "execution_lane": "support_stop_reentry",
+            "raw_signal_rank": 1001,
+            "execution_candidate_rank": 1,
+            "execution_candidate_selected": True,
+            "execution_candidate_limit": 20,
+        },
+    }
+
+    clusters = build_daily_candidate_clusters([payload])
+    in_scope = engine._candidate_quality_cluster_in_scope(
+        clusters[0].entry_row,
+        20,
+        {"params": {"candidate_limit": 20}},
+    )
+
+    assert len(clusters) == 1
+    assert in_scope is False
+    assert clusters[0].entry_row["rank"] == 1001
+    assert clusters[0].entry_row["candidate_execution"]["execution_candidate_rank"] == 1
+
+
 def test_loose_research_mode_can_buy_watch_candidate_explicitly() -> None:
     from alphaagent.server.services.backtest import engine
 
@@ -14102,6 +15282,126 @@ def test_signal_events_keep_rejected_theoretical_buy_for_audit() -> None:
     assert positions == {}
 
 
+def test_signal_events_skip_buy_candidate_outside_execution_pool() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    signal_day = date(2026, 1, 5)
+    execute_day = date(2026, 1, 6)
+    selected_symbol = "600000.SSE"
+    skipped_symbol = "003004.SZSE"
+    bar_index = {
+        selected_symbol: {
+            signal_day: engine.Bar(signal_day, 10, 10.5, 9.8, 10.2),
+            execute_day: engine.Bar(execute_day, 10.1, 10.6, 10.0, 10.5),
+        },
+        skipped_symbol: {
+            signal_day: engine.Bar(signal_day, 32, 33, 31, 32.4),
+            execute_day: engine.Bar(execute_day, 32.5, 33.2, 32.1, 33.0),
+        },
+    }
+    selected = SignalScore(
+        vt_symbol=selected_symbol,
+        trade_date=signal_day,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=95,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={"status": "ready", "entry_setup": "dragon_pullback"},
+    )
+    skipped = SignalScore(
+        vt_symbol=skipped_symbol,
+        trade_date=signal_day,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=70,
+        liquidity_score=15,
+        risk_score=80,
+        entry_signal=False,
+        evidence={
+            "status": "ready",
+            "entry_setup": "support_accepted",
+            "default_clean_watch_entry_profile": "clean_low_liquidity_accumulation",
+            "default_executable_entry_signal": True,
+            "executable_entry_signal": True,
+            "failed_rules": ["liquidity_score", "strong_leg"],
+        },
+    )
+    params = engine.BacktestParams(
+        strategy=DRAGON_PULLBACK_STRATEGY_ID,
+        candidate_limit=1,
+        strict_entry=True,
+    )
+    positions: dict[str, engine.Position] = {}
+
+    events = engine._signal_events_for_day(
+        signal_day,
+        execute_day,
+        [selected, skipped],
+        positions,
+        {},
+        bar_index,
+        {},
+        {
+            selected_symbol: {"name": "浦发银行"},
+            skipped_symbol: {"name": "声迅股份"},
+        },
+        params,
+    )
+
+    assert [event["vt_symbol"] for event in events] == [selected_symbol]
+    assert skipped_symbol not in positions
+    assert events[0]["raw"]["candidate_execution"]["execution_candidate_selected"] is True
+
+
+def test_signal_events_skip_research_only_buy_markers() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    symbol = "003004.SZSE"
+    signal_day = date(2026, 5, 25)
+    execute_day = date(2026, 5, 26)
+    bar_index = {
+        symbol: {
+            signal_day: engine.Bar(signal_day, 50, 51, 47.2, 49.76),
+            execute_day: engine.Bar(execute_day, 50, 51, 49, 50),
+        }
+    }
+    score = SignalScore(
+        vt_symbol=symbol,
+        trade_date=signal_day,
+        total_score=78.49,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=False,
+        evidence={
+            "status": "ready",
+            "strong_trend_ma_pullback_entry_profile": "strong_trend_intraday_ma_pullback",
+            "strong_trend_ma_pullback_entry_observation_only": True,
+            "default_executable_entry_signal": False,
+            "raw_entry_signal": False,
+        },
+    )
+    params = engine.BacktestParams(
+        strategy=DRAGON_PULLBACK_STRATEGY_ID,
+        enable_strong_trend_ma_pullback_entry_lane=True,
+    )
+    positions: dict[str, engine.Position] = {}
+
+    events = engine._signal_events_for_day(
+        signal_day,
+        execute_day,
+        [score],
+        positions,
+        {},
+        bar_index,
+        {},
+        {symbol: {"name": "声迅股份"}},
+        params,
+    )
+
+    assert events == []
+    assert positions == {}
+
+
 def test_backtest_simulation_records_deterministic_cash_position_and_slot_rejection() -> None:
     from alphaagent.server.services.backtest import engine
 
@@ -14183,1216 +15483,6 @@ def test_backtest_simulation_records_deterministic_cash_position_and_slot_reject
     assert rejected[0]["raw"]["mode"] == "limit_up_open_blocked"
 
 
-def test_dragon_pullback_backtest_rotates_weak_holding_for_stronger_signal() -> None:
-    from alphaagent.server.services.backtest import engine
-
-    d0 = date(2026, 1, 1)
-    d1 = date(2026, 1, 2)
-    d2 = date(2026, 1, 3)
-    d3 = date(2026, 1, 4)
-    d4 = date(2026, 1, 5)
-    d5 = date(2026, 1, 6)
-    weak_symbol = "600000.SSE"
-    strong_symbol = "603629.SSE"
-    bars_by_symbol = {
-        weak_symbol: [
-            engine.Bar(d0, 10.0, 10.2, 9.8, 10.0, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d1, 10.0, 10.1, 9.8, 9.95, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d2, 9.95, 10.0, 9.8, 9.9, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d3, 9.9, 10.0, 9.7, 9.85, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d4, 9.85, 10.0, 9.7, 9.8, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d5, 9.8, 9.9, 9.6, 9.75, volume=1_000_000, turnover=120_000_000),
-        ],
-        strong_symbol: [
-            engine.Bar(d4, 20.0, 21.0, 19.8, 20.5, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d5, 20.5, 21.0, 20.0, 20.8, volume=1_000_000, turnover=120_000_000),
-        ],
-    }
-    score_cache = {
-        d0: [
-            SignalScore(
-                weak_symbol,
-                d0,
-                total_score=80,
-                liquidity_score=80,
-                risk_score=80,
-                entry_signal=True,
-                evidence={"status": "ready", "dragon_state": "TAIL_BUY_READY", "fresh_tail_buy": True},
-            )
-        ],
-        d4: [
-            SignalScore(
-                strong_symbol,
-                d4,
-                total_score=99,
-                liquidity_score=80,
-                risk_score=80,
-                entry_signal=True,
-                evidence={"status": "ready", "dragon_state": "TAIL_BUY_READY", "fresh_tail_buy": True},
-            )
-        ],
-    }
-    params = engine.BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        start=d0,
-        end=d2,
-        initial_cash=100_000,
-        max_positions=1,
-        max_position_pct=1.0,
-        commission_rate=0.0,
-        stamp_tax_rate=0.0,
-        slippage_bps=0.0,
-        min_entry_score=76,
-        strict_entry=True,
-        candidate_limit=10,
-    )
-
-    result = engine._simulate(
-        session=None,
-        params=params,
-        bars_by_symbol=bars_by_symbol,
-        trading_days=[d0, d1, d2, d3, d4, d5],
-        stock_meta={weak_symbol: {"name": "弱持仓"}, strong_symbol: {"name": "强信号"}},
-        score_cache=score_cache,
-        minute_index={},
-    )
-
-    trades = result["trades"]
-    orders = result["orders"]
-
-    assert [trade["side"] for trade in trades] == ["BUY", "SELL", "BUY"]
-    assert trades[0]["vt_symbol"] == weak_symbol
-    assert trades[1]["vt_symbol"] == weak_symbol
-    assert trades[1]["reason"] == "rotation_for_stronger_signal"
-    assert trades[2]["vt_symbol"] == strong_symbol
-    rotation_order = next(order for order in orders if order["side"] == "SELL" and order["reason"] == "rotation_for_stronger_signal")
-    assert rotation_order["trade_date"] == d5.isoformat()
-    assert rotation_order["raw"]["replacement_symbol"] == strong_symbol
-    assert rotation_order["raw"]["replacement_score"] == 99
-
-
-def test_high_quality_trend_rotation_backtest_rotates_top_candidate_below_default_rotation_score() -> None:
-    from alphaagent.server.services.backtest import engine
-
-    d0 = date(2026, 1, 1)
-    d1 = date(2026, 1, 2)
-    d2 = date(2026, 1, 3)
-    d3 = date(2026, 1, 4)
-    d4 = date(2026, 1, 5)
-    d5 = date(2026, 1, 6)
-    weak_symbol = "600000.SSE"
-    strong_symbol = "603115.SSE"
-    bars_by_symbol = {
-        weak_symbol: [
-            engine.Bar(d0, 10.0, 10.2, 9.8, 10.0, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d1, 10.0, 10.1, 9.8, 9.95, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d2, 9.95, 10.0, 9.8, 9.9, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d3, 9.9, 10.0, 9.7, 9.85, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d4, 9.85, 10.0, 9.7, 9.8, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d5, 9.8, 9.9, 9.6, 9.75, volume=1_000_000, turnover=120_000_000),
-        ],
-        strong_symbol: [
-            engine.Bar(d4, 20.0, 21.0, 19.8, 20.5, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d5, 20.5, 21.0, 20.0, 20.8, volume=1_000_000, turnover=120_000_000),
-        ],
-    }
-    score_cache = {
-        d0: [
-            SignalScore(
-                weak_symbol,
-                d0,
-                total_score=86,
-                liquidity_score=80,
-                risk_score=80,
-                entry_signal=True,
-                evidence={"status": "ready", "dragon_state": "TAIL_BUY_READY", "fresh_tail_buy": True},
-            )
-        ],
-        d4: [
-            SignalScore(
-                strong_symbol,
-                d4,
-                total_score=97,
-                liquidity_score=80,
-                risk_score=80,
-                entry_signal=True,
-                evidence={
-                    "status": "ready",
-                    "entry_setup": "dragon_pullback",
-                    "dragon_state": "TAIL_BUY_READY",
-                    "fresh_tail_buy": True,
-                    "candidate_execution": {"execution_candidate_rank": 3, "raw_signal_rank": 3},
-                },
-            )
-        ],
-    }
-    params = engine.BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        start=d0,
-        initial_cash=100_000,
-        max_positions=1,
-        max_position_pct=1.0,
-        commission_rate=0.0,
-        stamp_tax_rate=0.0,
-        slippage_bps=0.0,
-        min_entry_score=76,
-        strict_entry=True,
-        candidate_limit=10,
-        enable_high_quality_trend_rotation=True,
-        high_quality_rotation_min_score=96.0,
-        high_quality_rotation_max_rank=10,
-        high_quality_rotation_min_score_gap=8.0,
-        high_quality_rotation_max_held_return_pct=0.0,
-        high_quality_rotation_min_held_days=4,
-    )
-
-    result = engine._simulate(
-        session=None,
-        params=params,
-        bars_by_symbol=bars_by_symbol,
-        trading_days=[d0, d1, d2, d3, d4, d5],
-        stock_meta={weak_symbol: {"name": "弱持仓"}, strong_symbol: {"name": "强趋势候选"}},
-        score_cache=score_cache,
-        minute_index={},
-    )
-
-    trades = result["trades"]
-    rotation_order = next(order for order in result["orders"] if order["side"] == "SELL")
-
-    assert [trade["side"] for trade in trades] == ["BUY", "SELL", "BUY"]
-    assert trades[1]["reason"] == "rotation_for_high_quality_trend_candidate"
-    assert trades[2]["vt_symbol"] == strong_symbol
-    assert rotation_order["reason"] == "rotation_for_high_quality_trend_candidate"
-    assert rotation_order["raw"]["replacement_symbol"] == strong_symbol
-    assert rotation_order["raw"]["replacement_score"] == 97
-
-
-def test_weak_holding_quality_rotation_backtest_replaces_losing_holding() -> None:
-    from alphaagent.server.services.backtest import engine
-
-    d0 = date(2026, 1, 1)
-    d1 = date(2026, 1, 2)
-    d2 = date(2026, 1, 3)
-    d3 = date(2026, 1, 4)
-    d4 = date(2026, 1, 5)
-    d5 = date(2026, 1, 6)
-    weak_symbol = "600000.SSE"
-    strong_symbol = "002384.SZSE"
-    bars_by_symbol = {
-        weak_symbol: [
-            engine.Bar(d0, 10.0, 10.2, 9.8, 10.0, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d1, 10.0, 10.1, 9.8, 9.95, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d2, 9.95, 10.0, 9.7, 9.8, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d3, 9.8, 9.9, 9.5, 9.65, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d4, 9.65, 9.7, 9.4, 9.45, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d5, 9.45, 9.5, 9.2, 9.4, volume=1_000_000, turnover=120_000_000),
-        ],
-        strong_symbol: [
-            engine.Bar(d4, 20.0, 21.0, 19.8, 20.5, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d5, 20.5, 21.0, 20.0, 20.8, volume=1_000_000, turnover=120_000_000),
-        ],
-    }
-    score_cache = {
-        d0: [
-            SignalScore(
-                weak_symbol,
-                d0,
-                total_score=88,
-                liquidity_score=80,
-                risk_score=80,
-                entry_signal=True,
-                evidence={"status": "ready", "dragon_state": "TAIL_BUY_READY", "fresh_tail_buy": True},
-            )
-        ],
-        d4: [
-            SignalScore(
-                strong_symbol,
-                d4,
-                total_score=97,
-                liquidity_score=80,
-                risk_score=80,
-                entry_signal=True,
-                evidence={
-                    "status": "ready",
-                    "entry_setup": "stealth_low_suction",
-                    "low_suction_days": 5,
-                    "low_suction_launch_confirmed": True,
-                    "low_suction_launch_quality_bucket": "balanced_first_lift",
-                    "ma_convergence_pct": 4.2,
-                    "candidate_execution": {"execution_candidate_rank": 8, "raw_signal_rank": 8},
-                    "failed_rules": [],
-                    "risk_flags": [],
-                },
-            )
-        ],
-    }
-    params = engine.BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        start=d0,
-        initial_cash=100_000,
-        max_positions=1,
-        max_position_pct=1.0,
-        commission_rate=0.0,
-        stamp_tax_rate=0.0,
-        slippage_bps=0.0,
-        min_entry_score=76,
-        strict_entry=True,
-        candidate_limit=10,
-        enable_weak_holding_quality_rotation=True,
-        weak_holding_rotation_min_score=96.0,
-        weak_holding_rotation_max_rank=20,
-        weak_holding_rotation_min_score_gap=6.0,
-        weak_holding_rotation_max_held_return_pct=-5.0,
-        weak_holding_rotation_min_held_days=3,
-    )
-
-    result = engine._simulate(
-        session=None,
-        params=params,
-        bars_by_symbol=bars_by_symbol,
-        trading_days=[d0, d1, d2, d3, d4, d5],
-        stock_meta={weak_symbol: {"name": "弱持仓"}, strong_symbol: {"name": "低吸候选"}},
-        score_cache=score_cache,
-        minute_index={},
-    )
-
-    trades = result["trades"]
-    rotation_order = next(order for order in result["orders"] if order["side"] == "SELL")
-
-    assert [trade["side"] for trade in trades] == ["BUY", "SELL", "BUY"]
-    assert trades[1]["reason"] == "rotation_for_weak_holding_quality_candidate"
-    assert trades[2]["vt_symbol"] == strong_symbol
-    assert rotation_order["raw"]["holding_return_pct"] <= -5.0
-    assert rotation_order["raw"]["replacement_symbol"] == strong_symbol
-
-
-def test_weak_holding_quality_rotation_cancelled_when_execution_open_recovers() -> None:
-    from alphaagent.server.services.backtest import engine
-
-    d0 = date(2026, 1, 1)
-    d1 = date(2026, 1, 2)
-    d2 = date(2026, 1, 3)
-    d3 = date(2026, 1, 4)
-    d4 = date(2026, 1, 5)
-    d5 = date(2026, 1, 6)
-    weak_symbol = "600000.SSE"
-    strong_symbol = "002384.SZSE"
-    bars_by_symbol = {
-        weak_symbol: [
-            engine.Bar(d0, 10.0, 10.2, 9.8, 10.0, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d1, 10.0, 10.1, 9.8, 9.95, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d2, 9.95, 10.0, 9.7, 9.8, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d3, 9.8, 9.9, 9.5, 9.65, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d4, 9.65, 9.7, 9.4, 9.45, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d5, 10.3, 10.5, 10.1, 10.4, volume=1_000_000, turnover=120_000_000),
-        ],
-        strong_symbol: [
-            engine.Bar(d4, 20.0, 21.0, 19.8, 20.5, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d5, 20.5, 21.0, 20.0, 20.8, volume=1_000_000, turnover=120_000_000),
-        ],
-    }
-    score_cache = {
-        d0: [
-            SignalScore(
-                weak_symbol,
-                d0,
-                total_score=88,
-                liquidity_score=80,
-                risk_score=80,
-                entry_signal=True,
-                evidence={"status": "ready", "dragon_state": "TAIL_BUY_READY", "fresh_tail_buy": True},
-            )
-        ],
-        d4: [
-            SignalScore(
-                strong_symbol,
-                d4,
-                total_score=97,
-                liquidity_score=80,
-                risk_score=80,
-                entry_signal=True,
-                evidence={
-                    "status": "ready",
-                    "entry_setup": "stealth_low_suction",
-                    "low_suction_days": 5,
-                    "low_suction_launch_confirmed": True,
-                    "low_suction_launch_quality_bucket": "balanced_first_lift",
-                    "ma_convergence_pct": 4.2,
-                    "candidate_execution": {"execution_candidate_rank": 8, "raw_signal_rank": 8},
-                },
-            )
-        ],
-    }
-    params = engine.BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        start=d0,
-        initial_cash=100_000,
-        max_positions=1,
-        max_position_pct=1.0,
-        commission_rate=0.0,
-        stamp_tax_rate=0.0,
-        slippage_bps=0.0,
-        min_entry_score=76,
-        strict_entry=True,
-        candidate_limit=10,
-        enable_weak_holding_quality_rotation=True,
-        weak_holding_rotation_min_score=96.0,
-        weak_holding_rotation_max_held_return_pct=-5.0,
-        weak_holding_rotation_min_held_days=3,
-    )
-
-    result = engine._simulate(
-        session=None,
-        params=params,
-        bars_by_symbol=bars_by_symbol,
-        trading_days=[d0, d1, d2, d3, d4, d5],
-        stock_meta={weak_symbol: {"name": "弱持仓"}, strong_symbol: {"name": "低吸候选"}},
-        score_cache=score_cache,
-        minute_index={},
-    )
-
-    sell_order = next(order for order in result["orders"] if order["side"] == "SELL")
-    rejected_buy = next(order for order in result["orders"] if order["side"] == "BUY" and order["status"] == "rejected")
-
-    assert sell_order["status"] == "cancelled"
-    assert sell_order["raw"]["cancel_reason"] == "weak_holding_no_longer_below_threshold_at_execute"
-    assert sell_order["raw"]["execute_open_return_pct"] > -5.0
-    assert rejected_buy["reason"] == "position_slot_unavailable"
-    assert [trade["side"] for trade in result["trades"]] == ["BUY"]
-
-
-def test_protected_weak_holding_rotation_backtest_replaces_unprotected_weak_holding() -> None:
-    from alphaagent.server.services.backtest import engine
-
-    d0 = date(2026, 1, 1)
-    d1 = date(2026, 1, 2)
-    d2 = date(2026, 1, 3)
-    d3 = date(2026, 1, 4)
-    d4 = date(2026, 1, 5)
-    d5 = date(2026, 1, 6)
-    weak_symbol = "600000.SSE"
-    strong_symbol = "002384.SZSE"
-    bars_by_symbol = {
-        weak_symbol: [
-            engine.Bar(d0, 10.0, 10.2, 9.8, 10.0, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d1, 10.0, 10.1, 9.8, 9.95, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d2, 9.95, 10.0, 9.7, 9.8, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d3, 9.8, 9.9, 9.5, 9.65, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d4, 9.55, 9.6, 9.4, 9.45, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d5, 9.45, 9.5, 9.2, 9.4, volume=1_000_000, turnover=120_000_000),
-        ],
-        strong_symbol: [
-            engine.Bar(d4, 20.0, 21.0, 19.8, 20.5, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d5, 20.5, 21.0, 20.0, 20.8, volume=1_000_000, turnover=120_000_000),
-        ],
-    }
-    score_cache = {
-        d0: [
-            SignalScore(
-                weak_symbol,
-                d0,
-                total_score=88,
-                liquidity_score=80,
-                risk_score=80,
-                entry_signal=True,
-                evidence={"status": "ready", "dragon_state": "TAIL_BUY_READY", "fresh_tail_buy": True},
-            )
-        ],
-        d4: [
-            SignalScore(
-                strong_symbol,
-                d4,
-                total_score=97,
-                liquidity_score=80,
-                risk_score=80,
-                entry_signal=True,
-                evidence={
-                    "status": "ready",
-                    "entry_setup": "stealth_low_suction",
-                    "low_suction_days": 5,
-                    "low_suction_launch_confirmed": True,
-                    "low_suction_launch_quality_bucket": "balanced_first_lift",
-                    "ma_convergence_pct": 4.2,
-                    "candidate_execution": {"execution_candidate_rank": 8, "raw_signal_rank": 8},
-                    "failed_rules": [],
-                    "risk_flags": [],
-                },
-            )
-        ],
-    }
-    params = engine.BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        start=d0,
-        initial_cash=100_000,
-        max_positions=1,
-        max_position_pct=1.0,
-        commission_rate=0.0,
-        stamp_tax_rate=0.0,
-        slippage_bps=0.0,
-        min_entry_score=76,
-        strict_entry=True,
-        candidate_limit=10,
-        enable_protected_weak_holding_rotation=True,
-        weak_holding_rotation_min_score=96.0,
-        weak_holding_rotation_max_held_return_pct=-5.0,
-        weak_holding_rotation_min_held_days=3,
-    )
-
-    result = engine._simulate(
-        session=None,
-        params=params,
-        bars_by_symbol=bars_by_symbol,
-        trading_days=[d0, d1, d2, d3, d4, d5],
-        stock_meta={weak_symbol: {"name": "弱持仓"}, strong_symbol: {"name": "低吸候选"}},
-        score_cache=score_cache,
-        minute_index={},
-    )
-
-    trades = result["trades"]
-    rotation_order = next(order for order in result["orders"] if order["side"] == "SELL")
-
-    assert [trade["side"] for trade in trades] == ["BUY", "SELL", "BUY"]
-    assert trades[1]["reason"] == "rotation_for_protected_weak_holding_candidate"
-    assert trades[2]["vt_symbol"] == strong_symbol
-    assert rotation_order["raw"]["protected_weak_holding_decision"]["bucket"] == "replaceable_weak_holding"
-    assert rotation_order["raw"]["protected_weak_holding_decision"]["price_source"] == "execute_open"
-
-
-def test_protected_weak_holding_rotation_cancelled_when_execution_open_repairs() -> None:
-    from alphaagent.server.services.backtest import engine
-
-    d0 = date(2026, 1, 1)
-    d1 = date(2026, 1, 2)
-    d2 = date(2026, 1, 3)
-    d3 = date(2026, 1, 4)
-    d4 = date(2026, 1, 5)
-    d5 = date(2026, 1, 6)
-    weak_symbol = "600000.SSE"
-    strong_symbol = "002384.SZSE"
-    bars_by_symbol = {
-        weak_symbol: [
-            engine.Bar(d0, 10.0, 10.2, 9.8, 10.0, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d1, 10.0, 10.1, 9.8, 9.95, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d2, 9.95, 10.0, 9.7, 9.8, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d3, 9.8, 9.9, 9.5, 9.65, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d4, 9.55, 9.6, 9.4, 9.45, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d5, 9.7, 10.0, 9.6, 9.9, volume=1_000_000, turnover=120_000_000),
-        ],
-        strong_symbol: [
-            engine.Bar(d4, 20.0, 21.0, 19.8, 20.5, volume=1_000_000, turnover=120_000_000),
-            engine.Bar(d5, 20.5, 21.0, 20.0, 20.8, volume=1_000_000, turnover=120_000_000),
-        ],
-    }
-    score_cache = {
-        d0: [
-            SignalScore(
-                weak_symbol,
-                d0,
-                total_score=88,
-                liquidity_score=80,
-                risk_score=80,
-                entry_signal=True,
-                evidence={"status": "ready", "dragon_state": "TAIL_BUY_READY", "fresh_tail_buy": True},
-            )
-        ],
-        d4: [
-            SignalScore(
-                strong_symbol,
-                d4,
-                total_score=97,
-                liquidity_score=80,
-                risk_score=80,
-                entry_signal=True,
-                evidence={
-                    "status": "ready",
-                    "entry_setup": "stealth_low_suction",
-                    "low_suction_days": 5,
-                    "low_suction_launch_confirmed": True,
-                    "low_suction_launch_quality_bucket": "balanced_first_lift",
-                    "ma_convergence_pct": 4.2,
-                    "candidate_execution": {"execution_candidate_rank": 8, "raw_signal_rank": 8},
-                },
-            )
-        ],
-    }
-    params = engine.BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        start=d0,
-        initial_cash=100_000,
-        max_positions=1,
-        max_position_pct=1.0,
-        commission_rate=0.0,
-        stamp_tax_rate=0.0,
-        slippage_bps=0.0,
-        min_entry_score=76,
-        strict_entry=True,
-        candidate_limit=10,
-        enable_protected_weak_holding_rotation=True,
-        weak_holding_rotation_min_score=96.0,
-        weak_holding_rotation_max_held_return_pct=-5.0,
-        weak_holding_rotation_min_held_days=3,
-    )
-
-    result = engine._simulate(
-        session=None,
-        params=params,
-        bars_by_symbol=bars_by_symbol,
-        trading_days=[d0, d1, d2, d3, d4, d5],
-        stock_meta={weak_symbol: {"name": "弱持仓"}, strong_symbol: {"name": "低吸候选"}},
-        score_cache=score_cache,
-        minute_index={},
-    )
-
-    sell_order = next(order for order in result["orders"] if order["side"] == "SELL")
-    rejected_buy = next(order for order in result["orders"] if order["side"] == "BUY" and order["status"] == "rejected")
-
-    assert sell_order["status"] == "cancelled"
-    assert sell_order["reason"] == "rotation_for_protected_weak_holding_candidate"
-    assert sell_order["raw"]["protection_bucket"] == "protect_repaired_holding"
-    assert sell_order["raw"]["protected_weak_holding_decision"]["price_source"] == "execute_open"
-    assert rejected_buy["reason"] == "position_slot_unavailable"
-    assert [trade["side"] for trade in result["trades"]] == ["BUY"]
-
-
-def test_dragon_pullback_rotation_requires_score_gap() -> None:
-    from alphaagent.server.services.backtest import engine, simulation
-
-    signal_day = date(2026, 3, 10)
-    position = engine.Position(
-        vt_symbol="603629.SSE",
-        name="利通电子",
-        volume=100,
-        cost_price=58.8,
-        entry_date=date(2026, 3, 1),
-        highest_price=60.0,
-        reason={"entry_total_score": 94.5, "dragon_state": "TAIL_BUY_READY"},
-    )
-    candidate = SignalScore(
-        vt_symbol="000039.SZSE",
-        trade_date=signal_day,
-        total_score=99.0,
-        liquidity_score=80,
-        risk_score=80,
-        entry_signal=True,
-        evidence={"status": "ready", "dragon_state": "TAIL_BUY_READY", "fresh_tail_buy": True},
-    )
-    params = engine.BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID, rotation_min_score_gap=8.0)
-
-    replacement = simulation.rotation_replacement_for_candidate(
-        candidate,
-        {"603629.SSE": position},
-        set(),
-        {"603629.SSE": engine.Bar(signal_day, 58.0, 60.0, 57.0, 57.35)},
-        params,
-        signal_day,
-    )
-
-    assert replacement is None
-
-
-def test_dragon_pullback_rotation_accepts_large_score_gap() -> None:
-    from alphaagent.server.services.backtest import engine, simulation
-
-    signal_day = date(2026, 3, 10)
-    position = engine.Position(
-        vt_symbol="603629.SSE",
-        name="利通电子",
-        volume=100,
-        cost_price=58.8,
-        entry_date=date(2026, 3, 1),
-        highest_price=60.0,
-        reason={"entry_total_score": 90.0, "dragon_state": "TAIL_BUY_READY"},
-    )
-    candidate = SignalScore(
-        vt_symbol="000039.SZSE",
-        trade_date=signal_day,
-        total_score=99.0,
-        liquidity_score=80,
-        risk_score=80,
-        entry_signal=True,
-        evidence={"status": "ready", "dragon_state": "TAIL_BUY_READY", "fresh_tail_buy": True},
-    )
-    params = engine.BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID, rotation_min_score_gap=8.0)
-
-    replacement = simulation.rotation_replacement_for_candidate(
-        candidate,
-        {"603629.SSE": position},
-        set(),
-        {"603629.SSE": engine.Bar(signal_day, 58.0, 60.0, 57.0, 57.35)},
-        params,
-        signal_day,
-    )
-
-    assert replacement is position
-
-
-def test_missed_candidate_quality_rotation_requires_stronger_candidate_and_weak_holding() -> None:
-    from alphaagent.server.services.backtest import engine, simulation
-
-    signal_day = date(2026, 4, 1)
-    weak_position = engine.Position(
-        vt_symbol="000001.SZSE",
-        name="弱持仓",
-        volume=100,
-        cost_price=10.0,
-        entry_date=date(2026, 3, 20),
-        highest_price=10.2,
-        reason={"entry_total_score": 88.0, "support_price": 9.9, "ma10": 10.2, "ma20": 10.1},
-    )
-    strong_candidate = SignalScore(
-        vt_symbol="002384.SZSE",
-        trade_date=signal_day,
-        total_score=99.0,
-        liquidity_score=80,
-        risk_score=80,
-        entry_signal=True,
-        evidence={
-            "status": "ready",
-            "entry_setup": "stealth_low_suction",
-            "dragon_state": "LOW_SUCTION_BUILDUP",
-            "low_suction_days": 5,
-            "low_suction_launch_confirmed": True,
-            "low_suction_launch_quality_bucket": "balanced_first_lift",
-        },
-    )
-    params = engine.BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        enable_missed_candidate_quality_rotation=True,
-        missed_rotation_min_score=98.0,
-        missed_rotation_min_score_gap=10.0,
-        missed_rotation_max_held_return_pct=1.0,
-        missed_rotation_min_held_days=4,
-    )
-
-    replacement = simulation.rotation_replacement_for_candidate(
-        strong_candidate,
-        {"000001.SZSE": weak_position},
-        set(),
-        {"000001.SZSE": engine.Bar(signal_day, 9.9, 10.0, 9.7, 9.8)},
-        params,
-        signal_day,
-    )
-
-    assert replacement is weak_position
-
-
-def test_missed_candidate_quality_rotation_keeps_profitable_holding() -> None:
-    from alphaagent.server.services.backtest import engine, simulation
-
-    signal_day = date(2026, 4, 1)
-    profitable_position = engine.Position(
-        vt_symbol="000001.SZSE",
-        name="强持仓",
-        volume=100,
-        cost_price=10.0,
-        entry_date=date(2026, 3, 20),
-        highest_price=10.8,
-        reason={"entry_total_score": 88.0, "support_price": 10.1, "ma10": 10.2, "ma20": 10.0},
-    )
-    strong_candidate = SignalScore(
-        vt_symbol="002384.SZSE",
-        trade_date=signal_day,
-        total_score=99.0,
-        liquidity_score=80,
-        risk_score=80,
-        entry_signal=True,
-        evidence={
-            "status": "ready",
-            "entry_setup": "stealth_low_suction",
-            "dragon_state": "LOW_SUCTION_BUILDUP",
-            "low_suction_days": 5,
-            "low_suction_launch_confirmed": True,
-            "low_suction_launch_quality_bucket": "balanced_first_lift",
-        },
-    )
-    params = engine.BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        enable_missed_candidate_quality_rotation=True,
-        missed_rotation_min_score=98.0,
-        missed_rotation_min_score_gap=10.0,
-        missed_rotation_max_held_return_pct=1.0,
-        missed_rotation_min_held_days=4,
-    )
-
-    replacement = simulation.rotation_replacement_for_candidate(
-        strong_candidate,
-        {"000001.SZSE": profitable_position},
-        set(),
-        {"000001.SZSE": engine.Bar(signal_day, 10.7, 10.8, 10.6, 10.7)},
-        params,
-        signal_day,
-    )
-
-    assert replacement is None
-
-
-def test_high_quality_trend_rotation_replaces_weak_holding() -> None:
-    from alphaagent.server.services.backtest import engine, simulation
-
-    signal_day = date(2026, 4, 15)
-    weak_position = engine.Position(
-        vt_symbol="000001.SZSE",
-        name="弱持仓",
-        volume=100,
-        cost_price=10.0,
-        entry_date=date(2026, 4, 1),
-        highest_price=10.2,
-        reason={"entry_total_score": 86.0, "entry_setup": "dragon_pullback"},
-    )
-    strong_candidate = SignalScore(
-        vt_symbol="603115.SSE",
-        trade_date=signal_day,
-        total_score=97.0,
-        liquidity_score=80,
-        risk_score=80,
-        entry_signal=True,
-        evidence={
-            "status": "ready",
-            "entry_setup": "dragon_pullback",
-            "dragon_state": "TAIL_BUY_READY",
-            "fresh_tail_buy": True,
-            "candidate_execution": {"execution_candidate_rank": 3, "raw_signal_rank": 3},
-            "failed_rules": [],
-            "risk_flags": [],
-        },
-    )
-    params = engine.BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        enable_high_quality_trend_rotation=True,
-        high_quality_rotation_min_score=96.0,
-        high_quality_rotation_max_rank=10,
-        high_quality_rotation_min_score_gap=8.0,
-        high_quality_rotation_max_held_return_pct=0.0,
-        high_quality_rotation_min_held_days=4,
-    )
-
-    replacement = simulation.rotation_replacement_for_candidate(
-        strong_candidate,
-        {"000001.SZSE": weak_position},
-        set(),
-        {"000001.SZSE": engine.Bar(signal_day, 9.8, 10.0, 9.7, 9.75)},
-        params,
-        signal_day,
-    )
-
-    assert replacement is weak_position
-    assert simulation.rotation_reason_for_candidate(strong_candidate, params) == "rotation_for_high_quality_trend_candidate"
-
-
-def test_weak_holding_quality_rotation_replaces_only_deep_losing_holding() -> None:
-    from alphaagent.server.services.backtest import engine, simulation
-
-    signal_day = date(2026, 4, 15)
-    weak_position = engine.Position(
-        vt_symbol="000001.SZSE",
-        name="弱持仓",
-        volume=100,
-        cost_price=10.0,
-        entry_date=date(2026, 4, 8),
-        highest_price=10.2,
-        reason={"entry_total_score": 90.0, "entry_setup": "dragon_pullback"},
-    )
-    strong_candidate = SignalScore(
-        vt_symbol="002384.SZSE",
-        trade_date=signal_day,
-        total_score=97.0,
-        liquidity_score=80,
-        risk_score=80,
-        entry_signal=True,
-        evidence={
-            "status": "ready",
-            "entry_setup": "stealth_low_suction",
-            "low_suction_days": 5,
-            "low_suction_launch_confirmed": True,
-            "low_suction_launch_quality_bucket": "balanced_first_lift",
-            "ma_convergence_pct": 4.0,
-            "candidate_execution": {"execution_candidate_rank": 12, "raw_signal_rank": 12},
-            "failed_rules": [],
-            "risk_flags": [],
-        },
-    )
-    params = engine.BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        enable_weak_holding_quality_rotation=True,
-        weak_holding_rotation_min_score=96.0,
-        weak_holding_rotation_max_rank=20,
-        weak_holding_rotation_min_score_gap=6.0,
-        weak_holding_rotation_max_held_return_pct=-5.0,
-        weak_holding_rotation_min_held_days=3,
-    )
-
-    replacement = simulation.rotation_replacement_for_candidate(
-        strong_candidate,
-        {"000001.SZSE": weak_position},
-        set(),
-        {"000001.SZSE": engine.Bar(signal_day, 9.3, 9.4, 9.1, 9.2)},
-        params,
-        signal_day,
-    )
-
-    assert replacement is weak_position
-    assert simulation.rotation_reason_for_candidate(strong_candidate, params) == "rotation_for_weak_holding_quality_candidate"
-
-
-def test_weak_holding_quality_rotation_keeps_profitable_holding() -> None:
-    from alphaagent.server.services.backtest import engine, simulation
-
-    signal_day = date(2026, 4, 15)
-    profitable_position = engine.Position(
-        vt_symbol="000001.SZSE",
-        name="盈利持仓",
-        volume=100,
-        cost_price=10.0,
-        entry_date=date(2026, 4, 8),
-        highest_price=11.2,
-        reason={"entry_total_score": 90.0, "entry_setup": "dragon_pullback"},
-    )
-    strong_candidate = SignalScore(
-        vt_symbol="002384.SZSE",
-        trade_date=signal_day,
-        total_score=97.0,
-        liquidity_score=80,
-        risk_score=80,
-        entry_signal=True,
-        evidence={
-            "status": "ready",
-            "entry_setup": "stealth_low_suction",
-            "low_suction_days": 5,
-            "low_suction_launch_confirmed": True,
-            "low_suction_launch_quality_bucket": "balanced_first_lift",
-            "ma_convergence_pct": 4.0,
-            "candidate_execution": {"execution_candidate_rank": 12, "raw_signal_rank": 12},
-        },
-    )
-    params = engine.BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        enable_weak_holding_quality_rotation=True,
-        weak_holding_rotation_max_held_return_pct=-5.0,
-    )
-
-    replacement = simulation.rotation_replacement_for_candidate(
-        strong_candidate,
-        {"000001.SZSE": profitable_position},
-        set(),
-        {"000001.SZSE": engine.Bar(signal_day, 10.8, 11.0, 10.7, 10.9)},
-        params,
-        signal_day,
-    )
-
-    assert replacement is None
-
-
-def test_weak_holding_quality_rotation_rejects_loose_unconfirmed_candidate() -> None:
-    from alphaagent.server.services.backtest import engine, simulation
-
-    signal_day = date(2026, 4, 15)
-    weak_position = engine.Position(
-        vt_symbol="000001.SZSE",
-        name="弱持仓",
-        volume=100,
-        cost_price=10.0,
-        entry_date=date(2026, 4, 8),
-        highest_price=10.2,
-        reason={"entry_total_score": 90.0, "entry_setup": "dragon_pullback"},
-    )
-    loose_candidate = SignalScore(
-        vt_symbol="002384.SZSE",
-        trade_date=signal_day,
-        total_score=97.0,
-        liquidity_score=80,
-        risk_score=80,
-        entry_signal=True,
-        evidence={
-            "status": "ready",
-            "entry_setup": "stealth_low_suction",
-            "low_suction_days": 5,
-            "low_suction_launch_confirmed": False,
-            "low_suction_launch_quality_bucket": "unconfirmed_buildup",
-            "ma_convergence_pct": 9.0,
-            "candidate_execution": {"execution_candidate_rank": 12, "raw_signal_rank": 12},
-        },
-    )
-    params = engine.BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID, enable_weak_holding_quality_rotation=True)
-
-    replacement = simulation.rotation_replacement_for_candidate(
-        loose_candidate,
-        {"000001.SZSE": weak_position},
-        set(),
-        {"000001.SZSE": engine.Bar(signal_day, 9.3, 9.4, 9.1, 9.2)},
-        params,
-        signal_day,
-    )
-
-    assert replacement is None
-
-
-def test_protected_weak_holding_rotation_protects_visible_trend_winner() -> None:
-    from alphaagent.server.services.backtest import engine, simulation
-
-    signal_day = date(2026, 4, 15)
-    trend_position = engine.Position(
-        vt_symbol="000001.SZSE",
-        name="趋势修复持仓",
-        volume=100,
-        cost_price=10.0,
-        entry_date=date(2026, 4, 8),
-        highest_price=12.0,
-        reason={
-            "entry_total_score": 90.0,
-            "entry_setup": "dragon_pullback",
-            "dynamic_market_regime": "strong_broad",
-            "ma10": 9.4,
-            "ma20": 9.2,
-            "support_price": 9.3,
-            "volume_ratio_5d_20d": 1.1,
-            "latest_change_pct": 0.4,
-        },
-    )
-    strong_candidate = SignalScore(
-        vt_symbol="002384.SZSE",
-        trade_date=signal_day,
-        total_score=97.0,
-        liquidity_score=80,
-        risk_score=80,
-        entry_signal=True,
-        evidence={
-            "status": "ready",
-            "entry_setup": "stealth_low_suction",
-            "low_suction_days": 5,
-            "low_suction_launch_confirmed": True,
-            "low_suction_launch_quality_bucket": "balanced_first_lift",
-            "ma_convergence_pct": 4.0,
-            "candidate_execution": {"execution_candidate_rank": 12, "raw_signal_rank": 12},
-            "failed_rules": [],
-            "risk_flags": [],
-        },
-    )
-    params = engine.BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        enable_protected_weak_holding_rotation=True,
-        weak_holding_rotation_min_score=96.0,
-        weak_holding_rotation_max_held_return_pct=-5.0,
-        weak_holding_rotation_min_held_days=3,
-    )
-    bar = engine.Bar(signal_day, 9.35, 9.5, 9.2, 9.3)
-
-    decision = simulation.protected_weak_holding_replacement_decision(
-        trend_position,
-        bar,
-        params,
-        price=bar.close_price,
-        price_source="signal_close",
-        include_close_context=True,
-    )
-    replacement = simulation.rotation_replacement_for_candidate(
-        strong_candidate,
-        {"000001.SZSE": trend_position},
-        set(),
-        {"000001.SZSE": bar},
-        params,
-        signal_day,
-    )
-
-    assert decision["replaceable"] is False
-    assert decision["bucket"] == "protect_uptrend_repair"
-    assert replacement is None
-
-
-def test_protected_weak_holding_rotation_accepts_deep_unprotected_loss() -> None:
-    from alphaagent.server.services.backtest import engine, simulation
-
-    signal_day = date(2026, 4, 15)
-    weak_position = engine.Position(
-        vt_symbol="000001.SZSE",
-        name="深亏弱持仓",
-        volume=100,
-        cost_price=10.0,
-        entry_date=date(2026, 4, 8),
-        highest_price=10.2,
-        reason={"entry_total_score": 90.0, "entry_setup": "dragon_pullback"},
-    )
-    strong_candidate = SignalScore(
-        vt_symbol="002384.SZSE",
-        trade_date=signal_day,
-        total_score=97.0,
-        liquidity_score=80,
-        risk_score=80,
-        entry_signal=True,
-        evidence={
-            "status": "ready",
-            "entry_setup": "stealth_low_suction",
-            "low_suction_days": 5,
-            "low_suction_launch_confirmed": True,
-            "low_suction_launch_quality_bucket": "balanced_first_lift",
-            "ma_convergence_pct": 4.0,
-            "candidate_execution": {"execution_candidate_rank": 12, "raw_signal_rank": 12},
-            "failed_rules": [],
-            "risk_flags": [],
-        },
-    )
-    params = engine.BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        enable_protected_weak_holding_rotation=True,
-        weak_holding_rotation_min_score=96.0,
-        weak_holding_rotation_max_held_return_pct=-5.0,
-        weak_holding_rotation_min_held_days=3,
-    )
-    bar = engine.Bar(signal_day, 9.2, 9.3, 9.0, 9.1)
-
-    decision = simulation.protected_weak_holding_replacement_decision(
-        weak_position,
-        bar,
-        params,
-        price=bar.close_price,
-        price_source="signal_close",
-        include_close_context=True,
-    )
-    replacement = simulation.rotation_replacement_for_candidate(
-        strong_candidate,
-        {"000001.SZSE": weak_position},
-        set(),
-        {"000001.SZSE": bar},
-        params,
-        signal_day,
-    )
-
-    assert decision["replaceable"] is True
-    assert decision["bucket"] == "replaceable_weak_holding"
-    assert replacement is weak_position
-    assert simulation.rotation_reason_for_candidate(strong_candidate, params) == "rotation_for_protected_weak_holding_candidate"
-
-
-def test_high_quality_trend_rotation_keeps_trend_holding_with_support() -> None:
-    from alphaagent.server.services.backtest import engine, simulation
-
-    signal_day = date(2026, 4, 15)
-    trend_position = engine.Position(
-        vt_symbol="000001.SZSE",
-        name="趋势持仓",
-        volume=100,
-        cost_price=10.0,
-        entry_date=date(2026, 4, 1),
-        highest_price=12.0,
-        reason={
-            "entry_total_score": 86.0,
-            "entry_setup": "dragon_pullback",
-            "ma5": 11.3,
-            "ma10": 11.0,
-            "support_price": 10.8,
-            "volume_ratio_5d_20d": 1.2,
-        },
-    )
-    strong_candidate = SignalScore(
-        vt_symbol="603115.SSE",
-        trade_date=signal_day,
-        total_score=98.0,
-        liquidity_score=80,
-        risk_score=80,
-        entry_signal=True,
-        evidence={
-            "status": "ready",
-            "entry_setup": "dragon_pullback",
-            "dragon_state": "TAIL_BUY_READY",
-            "fresh_tail_buy": True,
-            "candidate_execution": {"execution_candidate_rank": 2, "raw_signal_rank": 2},
-        },
-    )
-    params = engine.BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID, enable_high_quality_trend_rotation=True)
-
-    replacement = simulation.rotation_replacement_for_candidate(
-        strong_candidate,
-        {"000001.SZSE": trend_position},
-        set(),
-        {"000001.SZSE": engine.Bar(signal_day, 11.2, 11.6, 11.0, 11.5)},
-        params,
-        signal_day,
-    )
-
-    assert replacement is None
-
-
-def test_high_quality_trend_rotation_requires_top_execution_rank() -> None:
-    from alphaagent.server.services.backtest import engine, simulation
-
-    signal_day = date(2026, 4, 15)
-    weak_position = engine.Position(
-        vt_symbol="000001.SZSE",
-        name="弱持仓",
-        volume=100,
-        cost_price=10.0,
-        entry_date=date(2026, 4, 1),
-        highest_price=10.2,
-        reason={"entry_total_score": 86.0, "entry_setup": "dragon_pullback"},
-    )
-    rank_too_low_candidate = SignalScore(
-        vt_symbol="603115.SSE",
-        trade_date=signal_day,
-        total_score=97.0,
-        liquidity_score=80,
-        risk_score=80,
-        entry_signal=True,
-        evidence={
-            "status": "ready",
-            "entry_setup": "dragon_pullback",
-            "dragon_state": "TAIL_BUY_READY",
-            "fresh_tail_buy": True,
-            "candidate_execution": {"execution_candidate_rank": 18, "raw_signal_rank": 18},
-        },
-    )
-    params = engine.BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        enable_high_quality_trend_rotation=True,
-        high_quality_rotation_max_rank=10,
-    )
-
-    replacement = simulation.rotation_replacement_for_candidate(
-        rank_too_low_candidate,
-        {"000001.SZSE": weak_position},
-        set(),
-        {"000001.SZSE": engine.Bar(signal_day, 9.8, 10.0, 9.7, 9.75)},
-        params,
-        signal_day,
-    )
-
-    assert replacement is None
-
-
-def test_dragon_pullback_rotation_keeps_fresh_higher_score_holding() -> None:
-    from alphaagent.server.services.backtest import engine, simulation
-
-    signal_day = date(2026, 3, 10)
-    position = engine.Position(
-        vt_symbol="603629.SSE",
-        name="利通电子",
-        volume=100,
-        cost_price=58.8,
-        entry_date=date(2026, 3, 10),
-        highest_price=60.0,
-        reason={"entry_total_score": 99.9325, "dragon_state": "TAIL_BUY_READY"},
-    )
-    candidate = SignalScore(
-        vt_symbol="000039.SZSE",
-        trade_date=signal_day,
-        total_score=99.72,
-        liquidity_score=80,
-        risk_score=80,
-        entry_signal=True,
-        evidence={"status": "ready", "dragon_state": "TAIL_BUY_READY", "fresh_tail_buy": True},
-    )
-    params = engine.BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID)
-
-    replacement = simulation.rotation_replacement_for_candidate(
-        candidate,
-        {"603629.SSE": position},
-        set(),
-        {"603629.SSE": engine.Bar(signal_day, 58.0, 60.0, 57.0, 57.35)},
-        params,
-        signal_day,
-    )
-
-    assert replacement is None
-
-
 def test_dragon_pullback_execution_pool_does_not_reserve_lane_for_fresh_stealth_low_suction() -> None:
     from alphaagent.server.services.backtest import engine, simulation
 
@@ -15458,7 +15548,7 @@ def test_dragon_pullback_execution_pool_does_not_reserve_lane_for_fresh_stealth_
     assert "002747.SZSE" not in {item.vt_symbol for item in pool}
 
 
-def test_dragon_pullback_execution_pool_rewards_mature_rising_stealth_low_suction() -> None:
+def test_dragon_pullback_execution_pool_does_not_reward_mature_low_suction_with_generic_bonus() -> None:
     from alphaagent.server.services.backtest import engine, simulation
 
     trade_date = date(2026, 4, 14)
@@ -15533,10 +15623,183 @@ def test_dragon_pullback_execution_pool_rewards_mature_rising_stealth_low_suctio
 
     pool = simulation.execution_candidate_pool([dragon, stale, fresh], params)
 
-    assert [item.vt_symbol for item in pool] == ["600001.SSE", "002747.SZSE", "600367.SSE"]
+    assert [item.vt_symbol for item in pool] == ["600001.SSE", "600367.SSE", "002747.SZSE"]
 
 
-def test_stealth_low_suction_opportunity_bonus_does_not_change_signal_score() -> None:
+def test_backtest_execution_pool_excludes_support_divergence_research_entry() -> None:
+    from alphaagent.server.services.backtest import engine, simulation
+
+    trade_date = date(2026, 6, 12)
+    normal = SignalScore(
+        vt_symbol="600001.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=88.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={"status": "ready", "dragon_state": "TAIL_BUY_READY"},
+    )
+    support_divergence = SignalScore(
+        vt_symbol="003004.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=96.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=False,
+        evidence={
+            "status": "ready",
+            "support_divergence_entry_profile": "high_level_support_divergence",
+            "raw_entry_signal": False,
+            "default_executable_entry_signal": False,
+            "support_divergence_entry_observation_only": True,
+            "entry_setup": "support_accepted",
+        },
+    )
+    params = engine.BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID, candidate_limit=2)
+
+    pool = simulation.execution_candidate_pool([support_divergence, normal], params)
+
+    assert [item.vt_symbol for item in pool] == ["600001.SSE"]
+
+
+def test_backtest_execution_pool_excludes_strong_trend_ma_pullback_research_entry() -> None:
+    from alphaagent.server.services.backtest import engine, simulation
+
+    trade_date = date(2026, 5, 25)
+    normal = SignalScore(
+        vt_symbol="600001.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=88.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={"status": "ready", "dragon_state": "TAIL_BUY_READY"},
+    )
+    ma_pullback = SignalScore(
+        vt_symbol="003004.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=96.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=False,
+        evidence={
+            "status": "ready",
+            "strong_trend_ma_pullback_entry_profile": "strong_trend_intraday_ma_pullback",
+            "raw_entry_signal": False,
+            "default_executable_entry_signal": False,
+            "strong_trend_ma_pullback_entry_observation_only": True,
+            "entry_setup": "pullback_observe",
+        },
+    )
+    params = engine.BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID, candidate_limit=2)
+
+    pool = simulation.execution_candidate_pool([ma_pullback, normal], params)
+
+    assert [item.vt_symbol for item in pool] == ["600001.SSE"]
+
+
+def test_backtest_execution_pool_keeps_profile_candidate_when_raw_entry_signal_exists() -> None:
+    from alphaagent.server.services.backtest import engine, simulation
+
+    trade_date = date(2026, 6, 17)
+    raw_buy_with_profile = SignalScore(
+        vt_symbol="003004.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=96.1,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "support_divergence_entry_profile": "high_level_support_divergence",
+            "raw_entry_signal": True,
+            "default_executable_entry_signal": True,
+            "support_divergence_entry_observation_only": False,
+            "entry_setup": "support_accepted",
+        },
+    )
+    params = engine.BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID, candidate_limit=2)
+
+    pool = simulation.execution_candidate_pool([raw_buy_with_profile], params)
+
+    assert [item.vt_symbol for item in pool] == ["003004.SZSE"]
+
+
+def test_backtest_execution_pool_keeps_default_clean_watch_entry() -> None:
+    from alphaagent.server.services.backtest import engine, simulation
+
+    trade_date = date(2026, 4, 30)
+    clean_watch = SignalScore(
+        vt_symbol="003004.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=64.6,
+        liquidity_score=15,
+        risk_score=80,
+        entry_signal=False,
+        evidence={
+            "status": "ready",
+            "default_clean_watch_entry_profile": "clean_low_liquidity_accumulation",
+            "raw_entry_signal": False,
+            "default_executable_entry_signal": True,
+            "executable_entry_signal": True,
+            "key_entry_signal": True,
+            "signal_label": "低流动性承接低吸买点",
+            "entry_setup": "support_accepted",
+            "low_suction_days": 3,
+        },
+    )
+    normal = SignalScore(
+        vt_symbol="600001.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=70.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={"status": "ready", "entry_setup": "dragon_pullback"},
+    )
+    params = engine.BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID, candidate_limit=2)
+
+    pool = simulation.execution_candidate_pool([normal, clean_watch], params)
+
+    assert [item.vt_symbol for item in pool] == ["003004.SZSE", "600001.SSE"]
+
+
+def test_backtest_execution_pool_excludes_raw_signal_if_only_support_divergence_makes_it_executable() -> None:
+    from alphaagent.server.services.backtest import engine, simulation
+
+    trade_date = date(2026, 1, 8)
+    support_divergence = SignalScore(
+        vt_symbol="605090.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=98.61,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "support_divergence_entry_profile": "high_level_support_divergence",
+            "raw_entry_signal": True,
+            "default_executable_entry_signal": False,
+            "support_divergence_entry_observation_only": True,
+            "entry_setup": "support_accepted",
+        },
+    )
+    params = engine.BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID, candidate_limit=2)
+
+    pool = simulation.execution_candidate_pool([support_divergence], params)
+
+    assert pool == []
+
+
+def test_generic_stealth_low_suction_opportunity_bonus_is_removed() -> None:
     from alphaagent.server.services.quant import candidate_lanes
 
     trade_date = date(2026, 4, 14)
@@ -15569,12 +15832,1094 @@ def test_stealth_low_suction_opportunity_bonus_does_not_change_signal_score() ->
         },
     )
 
-    bonus = candidate_lanes.stealth_low_suction_opportunity_bonus(mature)
     opportunity_score = candidate_lanes.dragon_pullback_opportunity_score(mature)
 
-    assert bonus > 0
+    assert not hasattr(candidate_lanes, "stealth_low_suction_opportunity_bonus")
     assert mature.total_score == 82.0
-    assert opportunity_score == mature.total_score + bonus
+    assert opportunity_score == mature.total_score
+
+
+def test_execution_pool_no_longer_reranks_by_volume_preparation() -> None:
+    from alphaagent.server.services.quant import candidate_lanes
+
+    trade_date = date(2026, 6, 12)
+    weak_preparation = SignalScore(
+        vt_symbol="WEAK.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=92.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "volume_ratio_5d_20d": 1.8,
+            "large_bull_count_20d": 3,
+            "recent_limit_up_20d": False,
+        },
+    )
+    prepared_active = SignalScore(
+        vt_symbol="GOOD.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=88.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "volume_ratio_5d_20d": 0.95,
+            "large_bull_count_20d": 1,
+            "recent_limit_up_20d": True,
+        },
+    )
+
+    assert candidate_lanes.select_dragon_pullback_execution_pool(
+        [weak_preparation, prepared_active],
+        1,
+        DRAGON_PULLBACK_STRATEGY_ID,
+    ) == [weak_preparation]
+    assert weak_preparation.total_score == 92.0
+    assert prepared_active.total_score == 88.0
+
+
+def test_execution_pool_keeps_healthy_quiet_low_suction_on_score_without_generic_bonus() -> None:
+    from alphaagent.server.services.quant import candidate_lanes
+
+    trade_date = date(2026, 1, 7)
+    quiet_low_suction = SignalScore(
+        vt_symbol="000338.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=85.5,
+        liquidity_score=100,
+        risk_score=68,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "stealth_low_suction",
+            "setup_type": "stealth_low_suction",
+            "low_suction_days": 6,
+            "latest_change_pct": 0.906,
+            "ma5_distance_pct": 1.898,
+            "ma10_distance_pct": 1.904,
+            "ma_convergence_pct": 0.593,
+            "close_location_in_range": 0.692,
+            "return_20d": 2.179,
+            "return_60d": 24.79,
+            "volume_ratio_5d_20d": 1.029,
+            "large_bull_count_20d": 0,
+            "recent_limit_up_20d": False,
+        },
+    )
+
+    assert not hasattr(candidate_lanes, "stealth_low_suction_opportunity_bonus")
+    assert candidate_lanes.dragon_pullback_opportunity_score(quiet_low_suction) == quiet_low_suction.total_score
+
+
+def test_execution_pool_drops_stale_active_weak_decay_pullback_without_refill() -> None:
+    from alphaagent.server.services.quant import candidate_lanes
+
+    trade_date = date(2026, 3, 9)
+    weak = SignalScore(
+        vt_symbol="002208.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=98.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "low_suction_days": 6,
+            "low_suction_launch_confirmed": False,
+            "first_effective_lift": False,
+            "recent_limit_up_20d": True,
+            "near_limit_up_count_20d": 1,
+            "pullback_days": 9,
+            "close_location_in_range": 0.65,
+            "volume_ratio_5d_20d": 0.98,
+        },
+    )
+    protected_low_close = SignalScore(
+        vt_symbol="000021.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=97.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "low_suction_days": 6,
+            "recent_limit_up_20d": True,
+            "near_limit_up_count_20d": 1,
+            "pullback_days": 9,
+            "close_location_in_range": 0.18,
+            "volume_ratio_5d_20d": 0.98,
+        },
+    )
+    strength_decay = SignalScore(
+        vt_symbol="002756.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=96.5,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "low_suction_days": 6,
+            "low_suction_launch_confirmed": False,
+            "first_effective_lift": False,
+            "recent_limit_up_20d": True,
+            "near_limit_up_count_20d": 1,
+            "pullback_days": 4,
+            "strong_leg_score": 100,
+            "close_location_in_range": 0.58,
+            "volume_ratio_5d_20d": 0.89,
+        },
+    )
+    old_low_suction_decay = SignalScore(
+        vt_symbol="605117.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=95.5,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "low_suction_days": 5,
+            "strong_leg_score": 98,
+            "volume_ratio_5d_20d": 1.0,
+        },
+    )
+    crowded_large_bull_stretch = SignalScore(
+        vt_symbol="600522.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=95.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "large_bull_count_20d": 3,
+            "recent_limit_up_20d": False,
+            "near_limit_up_count_20d": 0,
+            "ma20_distance_pct": 8.2,
+        },
+    )
+    crowded_large_bull_high_close = SignalScore(
+        vt_symbol="002851.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=94.8,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "large_bull_count_20d": 3,
+            "recent_limit_up_20d": False,
+            "near_limit_up_count_20d": 0,
+            "close_location_in_range": 0.89,
+            "ma20_distance_pct": 3.2,
+        },
+    )
+    old_ma10_no_limit_normal_volume = SignalScore(
+        vt_symbol="002230.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=94.5,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "low_suction_days": 5,
+            "support_type": "ma10_support",
+            "pullback_days": 9,
+            "strong_leg_score": 80,
+            "ma10_distance_pct": 2.8,
+            "recent_limit_up_20d": False,
+            "near_limit_up_count_20d": 0,
+            "volume_ratio_5d_20d": 0.95,
+        },
+    )
+    protected_low_volume_ma10 = SignalScore(
+        vt_symbol="002131.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=94.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "low_suction_days": 5,
+            "support_type": "ma10_support",
+            "pullback_days": 9,
+            "strong_leg_score": 80,
+            "ma10_distance_pct": 2.8,
+            "recent_limit_up_20d": False,
+            "near_limit_up_count_20d": 0,
+            "volume_ratio_5d_20d": 0.64,
+        },
+    )
+    old_ma10_ma5_stretch_decay = SignalScore(
+        vt_symbol="002624.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=93.8,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "stealth_low_suction",
+            "low_suction_days": 5,
+            "support_type": "ma10_support",
+            "pullback_days": 12,
+            "strong_leg_score": 84,
+            "ma5_distance_pct": 3.8,
+            "ma10_distance_pct": 2.3,
+            "recent_limit_up_20d": True,
+            "near_limit_up_count_20d": 1,
+            "close_location_in_range": 0.65,
+            "volume_ratio_5d_20d": 0.7,
+        },
+    )
+    protected_old_ma10_ma5_not_stretched = SignalScore(
+        vt_symbol="002916.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=93.6,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "stealth_low_suction",
+            "low_suction_days": 5,
+            "support_type": "ma10_support",
+            "pullback_days": 12,
+            "strong_leg_score": 84,
+            "ma5_distance_pct": 3.2,
+            "ma10_distance_pct": 2.3,
+            "recent_limit_up_20d": True,
+            "near_limit_up_count_20d": 1,
+            "close_location_in_range": 0.65,
+            "volume_ratio_5d_20d": 0.7,
+        },
+    )
+    strong_long_pullback_far_from_ma10 = SignalScore(
+        vt_symbol="002354.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=93.5,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "strong_leg_score": 100,
+            "pullback_days": 9,
+            "ma10_distance_pct": 5.6,
+        },
+    )
+    protected_strong_long_pullback_near_ma10 = SignalScore(
+        vt_symbol="600026.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=93.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "strong_leg_score": 100,
+            "pullback_days": 9,
+            "ma10_distance_pct": 4.2,
+        },
+    )
+    core_active_strong_shrink_ma10_upper = SignalScore(
+        vt_symbol="002831.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=92.8,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "recent_limit_up_20d": True,
+            "near_limit_up_count_20d": 1,
+            "large_bull_count_20d": 2,
+            "strong_leg_score": 98,
+            "support_type": "ma10_support",
+            "pullback_days": 6,
+            "support_hold_days": 6,
+            "drawdown_from_pivot_pct": -7.5,
+            "ma5_distance_pct": 1.6,
+            "ma10_distance_pct": 3.4,
+            "ma20_distance_pct": 6.8,
+            "close_location_in_range": 0.55,
+            "volume_ratio_5d_20d": 0.74,
+        },
+    )
+    protected_core_active_strong_tight_ma10 = SignalScore(
+        vt_symbol="002384.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=92.7,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "recent_limit_up_20d": True,
+            "near_limit_up_count_20d": 1,
+            "large_bull_count_20d": 2,
+            "strong_leg_score": 98,
+            "support_type": "ma10_support",
+            "pullback_days": 6,
+            "support_hold_days": 6,
+            "drawdown_from_pivot_pct": -7.5,
+            "ma5_distance_pct": 1.6,
+            "ma10_distance_pct": 2.2,
+            "ma20_distance_pct": 6.8,
+            "close_location_in_range": 0.55,
+            "volume_ratio_5d_20d": 0.74,
+        },
+    )
+    protected_core_active_strong_heavier_volume = SignalScore(
+        vt_symbol="600176.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=92.6,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "recent_limit_up_20d": True,
+            "near_limit_up_count_20d": 1,
+            "large_bull_count_20d": 2,
+            "strong_leg_score": 98,
+            "support_type": "ma10_support",
+            "pullback_days": 6,
+            "support_hold_days": 6,
+            "drawdown_from_pivot_pct": -7.5,
+            "ma5_distance_pct": 1.6,
+            "ma10_distance_pct": 3.4,
+            "ma20_distance_pct": 6.8,
+            "close_location_in_range": 0.55,
+            "volume_ratio_5d_20d": 0.96,
+        },
+    )
+    core_active_ma10_flat_mid_high_turnover = SignalScore(
+        vt_symbol="002536.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=92.55,
+        liquidity_score=100,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "recent_limit_up_20d": True,
+            "near_limit_up_count_20d": 1,
+            "large_bull_count_20d": 2,
+            "strong_leg_score": 84,
+            "support_type": "ma10_support",
+            "pullback_days": 6,
+            "support_hold_days": 5,
+            "drawdown_from_pivot_pct": -8.5,
+            "ma5_distance_pct": 0.4,
+            "ma10_distance_pct": 1.2,
+            "ma20_distance_pct": 4.2,
+            "ma_convergence_pct": 7.0,
+            "latest_change_pct": 1.2,
+            "close_location_in_range": 0.66,
+            "volume_ratio_5d_20d": 0.96,
+            "turnover20": 1_200_000_000,
+        },
+    )
+    wide_ma10_high_turnover_normal_volume = SignalScore(
+        vt_symbol="600188.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=92.5,
+        liquidity_score=100,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "support_type": "ma10_support",
+            "ma_convergence_pct": 16.0,
+            "low_suction_days": 0,
+            "close_location_in_range": 0.66,
+            "ma5_distance_pct": -2.0,
+            "volume_ratio_5d_20d": 1.02,
+            "turnover20": 1_200_000_000,
+        },
+    )
+    wide_ma_no_low_high_close_normal_volume = SignalScore(
+        vt_symbol="000878.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=92.3,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "ma_convergence_pct": 17.3,
+            "low_suction_days": 0,
+            "close_location_in_range": 0.85,
+            "volume_ratio_5d_20d": 1.22,
+            "ma5_distance_pct": -6.0,
+            "ma10_distance_pct": -0.8,
+        },
+    )
+    protected_low_turnover_wide_ma10 = SignalScore(
+        vt_symbol="603163.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=92.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "support_type": "ma10_support",
+            "ma_convergence_pct": 16.0,
+            "low_suction_days": 0,
+            "close_location_in_range": 0.66,
+            "ma5_distance_pct": -2.0,
+            "volume_ratio_5d_20d": 1.02,
+            "turnover20": 600_000_000,
+        },
+    )
+    protected_heavy_volume_wide_ma10 = SignalScore(
+        vt_symbol="002192.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=91.5,
+        liquidity_score=100,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "support_type": "ma10_support",
+            "ma_convergence_pct": 16.0,
+            "low_suction_days": 0,
+            "close_location_in_range": 0.66,
+            "ma5_distance_pct": -2.0,
+            "volume_ratio_5d_20d": 1.55,
+            "turnover20": 1_200_000_000,
+        },
+    )
+    protected_wide_high_close_heavy_volume_washout = SignalScore(
+        vt_symbol="000815.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=91.4,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "ma_convergence_pct": 17.3,
+            "low_suction_days": 0,
+            "close_location_in_range": 0.85,
+            "volume_ratio_5d_20d": 1.49,
+            "ma5_distance_pct": -5.5,
+            "ma10_distance_pct": 1.8,
+        },
+    )
+    overheated_ma5_reclaim_far_ma10 = SignalScore(
+        vt_symbol="605376.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=91.2,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "support_type": "ma5_reclaim",
+            "low_suction_days": 0,
+            "pullback_days": 3,
+            "strong_leg_score": 100,
+            "ma10_distance_pct": 8.2,
+            "return_20d": 63.0,
+        },
+    )
+    protected_far_ma10_not_extreme_return = SignalScore(
+        vt_symbol="603256.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=91.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "support_type": "ma5_reclaim",
+            "low_suction_days": 0,
+            "pullback_days": 3,
+            "strong_leg_score": 100,
+            "ma10_distance_pct": 8.2,
+            "return_20d": 50.0,
+        },
+    )
+    protected_large_bull_with_recent_limit = SignalScore(
+        vt_symbol="603688.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=90.9,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "large_bull_count_20d": 3,
+            "recent_limit_up_20d": False,
+            "near_limit_up_count_20d": 1,
+            "close_location_in_range": 0.90,
+            "ma20_distance_pct": 3.2,
+        },
+    )
+    protected_large_bull_controlled_close = SignalScore(
+        vt_symbol="603689.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=90.8,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "large_bull_count_20d": 3,
+            "recent_limit_up_20d": False,
+            "near_limit_up_count_20d": 0,
+            "close_location_in_range": 0.74,
+            "ma20_distance_pct": 3.2,
+        },
+    )
+    core_active_short_pullback_strong_lift = SignalScore(
+        vt_symbol="002025.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=90.75,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "recent_limit_up_20d": True,
+            "near_limit_up_count_20d": 1,
+            "large_bull_count_20d": 2,
+            "strong_leg_score": 100,
+            "support_type": "ma5_reclaim",
+            "pullback_days": 4,
+            "support_hold_days": 4,
+            "drawdown_from_pivot_pct": -8.0,
+            "ma5_distance_pct": 0.63,
+            "ma10_distance_pct": -0.69,
+            "ma20_distance_pct": 6.3,
+            "latest_change_pct": 4.36,
+            "close_location_in_range": 0.66,
+            "volume_ratio_5d_20d": 1.15,
+        },
+    )
+    protected_low_suction_first_lift = SignalScore(
+        vt_symbol="003004.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=90.7,
+        liquidity_score=15,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "stealth_low_suction",
+            "low_suction_days": 4,
+            "low_suction_launch_confirmed": True,
+            "first_effective_lift": True,
+            "strong_leg_score": 72,
+            "ma5_distance_pct": 2.68,
+            "ma10_distance_pct": 2.56,
+            "ma20_distance_pct": 4.2,
+            "latest_change_pct": 3.0,
+            "close_location_in_range": 0.72,
+            "volume_ratio_5d_20d": 0.75,
+        },
+    )
+    protected_long_washout_right_tail = SignalScore(
+        vt_symbol="600869.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=90.6,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "recent_limit_up_20d": True,
+            "near_limit_up_count_20d": 1,
+            "large_bull_count_20d": 2,
+            "strong_leg_score": 100,
+            "support_type": "ma5_reclaim",
+            "low_suction_days": 1,
+            "pullback_days": 10,
+            "support_hold_days": 4,
+            "drawdown_from_pivot_pct": -8.0,
+            "ma5_distance_pct": 0.76,
+            "ma10_distance_pct": -0.72,
+            "ma20_distance_pct": 4.34,
+            "latest_change_pct": 2.27,
+            "close_location_in_range": 0.37,
+            "volume_ratio_5d_20d": 0.96,
+        },
+    )
+    refill = SignalScore(
+        vt_symbol="600001.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=80.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={"status": "ready", "entry_setup": "dragon_pullback"},
+    )
+
+    pool = candidate_lanes.select_dragon_pullback_execution_pool(
+        [
+            weak,
+            protected_low_close,
+            strength_decay,
+            old_low_suction_decay,
+            crowded_large_bull_stretch,
+            crowded_large_bull_high_close,
+            old_ma10_no_limit_normal_volume,
+            protected_low_volume_ma10,
+            old_ma10_ma5_stretch_decay,
+            protected_old_ma10_ma5_not_stretched,
+            strong_long_pullback_far_from_ma10,
+            protected_strong_long_pullback_near_ma10,
+            core_active_strong_shrink_ma10_upper,
+            protected_core_active_strong_tight_ma10,
+            protected_core_active_strong_heavier_volume,
+            core_active_ma10_flat_mid_high_turnover,
+            wide_ma10_high_turnover_normal_volume,
+            wide_ma_no_low_high_close_normal_volume,
+            protected_low_turnover_wide_ma10,
+            protected_heavy_volume_wide_ma10,
+            protected_wide_high_close_heavy_volume_washout,
+            overheated_ma5_reclaim_far_ma10,
+            protected_far_ma10_not_extreme_return,
+            protected_large_bull_with_recent_limit,
+            protected_large_bull_controlled_close,
+            core_active_short_pullback_strong_lift,
+            protected_low_suction_first_lift,
+            protected_long_washout_right_tail,
+            refill,
+        ],
+        28,
+        DRAGON_PULLBACK_STRATEGY_ID,
+    )
+    context = candidate_lanes.execution_pool_context(
+        [
+            weak,
+            protected_low_close,
+            strength_decay,
+            old_low_suction_decay,
+            crowded_large_bull_stretch,
+            crowded_large_bull_high_close,
+            old_ma10_no_limit_normal_volume,
+            protected_low_volume_ma10,
+            old_ma10_ma5_stretch_decay,
+            protected_old_ma10_ma5_not_stretched,
+            strong_long_pullback_far_from_ma10,
+            protected_strong_long_pullback_near_ma10,
+            core_active_strong_shrink_ma10_upper,
+            protected_core_active_strong_tight_ma10,
+            protected_core_active_strong_heavier_volume,
+            core_active_ma10_flat_mid_high_turnover,
+            wide_ma10_high_turnover_normal_volume,
+            wide_ma_no_low_high_close_normal_volume,
+            protected_low_turnover_wide_ma10,
+            protected_heavy_volume_wide_ma10,
+            protected_wide_high_close_heavy_volume_washout,
+            overheated_ma5_reclaim_far_ma10,
+            protected_far_ma10_not_extreme_return,
+            protected_large_bull_with_recent_limit,
+            protected_large_bull_controlled_close,
+            core_active_short_pullback_strong_lift,
+            protected_low_suction_first_lift,
+            protected_long_washout_right_tail,
+            refill,
+        ],
+        28,
+        DRAGON_PULLBACK_STRATEGY_ID,
+    )
+
+    assert [item.vt_symbol for item in pool] == [
+        "000021.SZSE",
+        "002131.SZSE",
+        "002916.SZSE",
+        "600026.SSE",
+        "002384.SZSE",
+        "600176.SSE",
+        "002536.SZSE",
+        "603163.SSE",
+        "002192.SZSE",
+        "000815.SZSE",
+        "603256.SSE",
+        "603688.SSE",
+        "603689.SSE",
+        "003004.SZSE",
+        "600869.SSE",
+    ]
+    assert context["002208.SZSE"]["execution_candidate_selected"] is False
+    assert context["002208.SZSE"]["execution_quality_filtered"] is True
+    assert context["002208.SZSE"]["execution_quality_filter_reason"] == "stale_active_weak_decay_pullback"
+    assert context["002756.SZSE"]["execution_candidate_selected"] is False
+    assert context["002756.SZSE"]["execution_quality_filtered"] is True
+    assert context["002756.SZSE"]["execution_quality_filter_reason"] == "stale_active_weak_decay_pullback"
+    assert context["605117.SSE"]["execution_candidate_selected"] is False
+    assert context["605117.SSE"]["execution_quality_filtered"] is True
+    assert context["605117.SSE"]["execution_quality_filter_reason"] == "old_low_suction_strong_leg_normal_volume"
+    assert context["600522.SSE"]["execution_candidate_selected"] is False
+    assert context["600522.SSE"]["execution_quality_filtered"] is True
+    assert context["600522.SSE"]["execution_quality_filter_reason"] == "large_bull_no_limit_ma20_stretch"
+    assert context["002851.SZSE"]["execution_candidate_selected"] is False
+    assert context["002851.SZSE"]["execution_quality_filtered"] is True
+    assert context["002851.SZSE"]["execution_quality_filter_reason"] == "crowded_large_bull_no_limit_high_close_decay"
+    assert context["002230.SZSE"]["execution_candidate_selected"] is False
+    assert context["002230.SZSE"]["execution_quality_filtered"] is True
+    assert context["002230.SZSE"]["execution_quality_filter_reason"] == "old_ma10_support_no_limit_normal_volume_decay"
+    assert context["002624.SZSE"]["execution_candidate_selected"] is False
+    assert context["002624.SZSE"]["execution_quality_filtered"] is True
+    assert context["002624.SZSE"]["execution_quality_filter_reason"] == "old_ma10_support_ma5_stretch_decay"
+    assert context["002354.SZSE"]["execution_candidate_selected"] is False
+    assert context["002354.SZSE"]["execution_quality_filtered"] is True
+    assert context["002354.SZSE"]["execution_quality_filter_reason"] == "strong_leg_long_pullback_ma10_far_decay"
+    assert context["002831.SZSE"]["execution_candidate_selected"] is False
+    assert context["002831.SZSE"]["execution_quality_filtered"] is True
+    assert context["002831.SZSE"]["execution_quality_filter_reason"] == "core_active_strong_leg_shrink_ma10_upper_decay"
+    assert context["002536.SZSE"]["execution_candidate_selected"] is True
+    assert context["002536.SZSE"]["execution_quality_filtered"] is False
+    assert context["600188.SSE"]["execution_candidate_selected"] is False
+    assert context["600188.SSE"]["execution_quality_filtered"] is True
+    assert context["600188.SSE"]["execution_quality_filter_reason"] == "wide_ma10_high_turnover_normal_volume_decay"
+    assert context["000878.SZSE"]["execution_candidate_selected"] is False
+    assert context["000878.SZSE"]["execution_quality_filtered"] is True
+    assert context["000878.SZSE"]["execution_quality_filter_reason"] == "wide_ma_no_low_suction_high_close_volume_decay"
+    assert context["605376.SSE"]["execution_candidate_selected"] is False
+    assert context["605376.SSE"]["execution_quality_filtered"] is True
+    assert context["605376.SSE"]["execution_quality_filter_reason"] == "overheated_ma5_reclaim_ma10_far_decay"
+    assert context["002025.SZSE"]["execution_candidate_selected"] is False
+    assert context["002025.SZSE"]["execution_quality_filtered"] is True
+    assert context["002025.SZSE"]["execution_quality_filter_reason"] == "core_active_short_pullback_strong_leg_lift_decay"
+    assert context["000021.SZSE"]["execution_candidate_selected"] is True
+    assert context["002131.SZSE"]["execution_candidate_selected"] is True
+    assert context["002131.SZSE"]["execution_quality_filtered"] is False
+    assert context["002916.SZSE"]["execution_candidate_selected"] is True
+    assert context["603688.SSE"]["execution_candidate_selected"] is True
+    assert context["603688.SSE"]["execution_quality_filtered"] is False
+    assert context["603689.SSE"]["execution_candidate_selected"] is True
+    assert context["603689.SSE"]["execution_quality_filtered"] is False
+    assert context["002916.SZSE"]["execution_quality_filtered"] is False
+    assert context["600026.SSE"]["execution_candidate_selected"] is True
+    assert context["600026.SSE"]["execution_quality_filtered"] is False
+    assert context["002384.SZSE"]["execution_candidate_selected"] is True
+    assert context["002384.SZSE"]["execution_quality_filtered"] is False
+    assert context["600176.SSE"]["execution_candidate_selected"] is True
+    assert context["600176.SSE"]["execution_quality_filtered"] is False
+    assert context["603163.SSE"]["execution_candidate_selected"] is True
+    assert context["603163.SSE"]["execution_quality_filtered"] is False
+    assert context["002192.SZSE"]["execution_candidate_selected"] is True
+    assert context["002192.SZSE"]["execution_quality_filtered"] is False
+    assert context["000815.SZSE"]["execution_candidate_selected"] is True
+    assert context["000815.SZSE"]["execution_quality_filtered"] is False
+    assert context["603256.SSE"]["execution_candidate_selected"] is True
+    assert context["603256.SSE"]["execution_quality_filtered"] is False
+    assert context["003004.SZSE"]["execution_candidate_selected"] is True
+    assert context["003004.SZSE"]["execution_quality_filtered"] is False
+    assert context["600869.SSE"]["execution_candidate_selected"] is True
+    assert context["600869.SSE"]["execution_quality_filtered"] is False
+    assert context["600001.SSE"]["execution_candidate_selected"] is False
+
+
+def test_default_candidate_quality_score_rewards_mature_active_low_suction() -> None:
+    from alphaagent.server.services.backtest import scoring
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    trade_date = date(2026, 2, 4)
+    weaker_right_tail = SignalScore(
+        vt_symbol="001896.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=96.2,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "stealth_low_suction",
+            "low_suction_days": 4,
+            "low_suction_launch_confirmed": True,
+            "ma5_distance_pct": 1.6,
+            "ma10_distance_pct": 2.1,
+            "ma_convergence_pct": 4.0,
+            "volume_ratio_5d_20d": 0.9,
+            "recent_limit_up_20d": True,
+            "large_bull_count_20d": 1,
+            "market_warning_level": 1,
+            "ma5_slope_pct": 0.2,
+            "latest_change_pct": 2.0,
+            "close_location_in_range": 0.62,
+        },
+    )
+    higher_plain = SignalScore(
+        vt_symbol="600001.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=97.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={"status": "ready", "entry_setup": "dragon_pullback"},
+    )
+
+    rows = scoring.score_day(
+        None,
+        {"001896.SZSE": [], "600001.SSE": []},
+        trade_date,
+        BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID),
+        score_cache={trade_date: [higher_plain, weaker_right_tail]},
+    )
+
+    assert [row.vt_symbol for row in rows] == ["001896.SZSE", "600001.SSE"]
+    assert rows[0].evidence["candidate_quality_adjustment"] == 2.55
+    assert rows[0].evidence["candidate_quality_notes"] == [
+        "成熟低吸首启加分",
+        "近期活跃右尾来源加分",
+        "活跃且可交易低中位轻加分",
+    ]
+
+
+def test_default_candidate_quality_score_penalizes_overextended_non_right_tail() -> None:
+    from alphaagent.server.services.backtest import scoring
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    trade_date = date(2026, 5, 12)
+    overextended = SignalScore(
+        vt_symbol="600002.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=97.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "ma5_distance_pct": 7.2,
+            "volume_stall_risk": True,
+            "market_warning_level": 3,
+            "close_location_in_range": 0.76,
+            "ma5_slope_pct": -0.1,
+            "large_bull_count_20d": 0,
+        },
+    )
+    stable = SignalScore(
+        vt_symbol="600003.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=94.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={"status": "ready", "entry_setup": "dragon_pullback"},
+    )
+
+    rows = scoring.score_day(
+        None,
+        {"600002.SSE": [], "600003.SSE": []},
+        trade_date,
+        BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID),
+        score_cache={trade_date: [overextended, stable]},
+    )
+
+    assert [row.vt_symbol for row in rows] == ["600003.SSE", "600002.SSE"]
+    assert rows[1].evidence["candidate_quality_adjustment"] == -4.0
+    assert "偏离5日线过远降权" in rows[1].evidence["candidate_quality_notes"]
+    assert "放量滞涨降权" in rows[1].evidence["candidate_quality_notes"]
+
+
+def test_default_candidate_quality_score_penalizes_high_close_false_low_suction_launch() -> None:
+    from alphaagent.server.services.backtest import scoring
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    trade_date = date(2026, 5, 18)
+    high_close_false_launch = SignalScore(
+        vt_symbol="605117.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=94.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "stealth_low_suction",
+            "low_suction_days": 3,
+            "low_suction_launch_confirmed": True,
+            "low_suction_launch_quality_bucket": "high_close_launch",
+            "ma5_distance_pct": 2.3,
+            "ma10_distance_pct": 2.4,
+            "ma_convergence_pct": 7.9,
+            "volume_ratio_5d_20d": 0.92,
+            "recent_limit_up_20d": False,
+            "near_limit_up_count_20d": 0,
+            "large_bull_count_20d": 1,
+            "market_warning_level": 1,
+            "ma5_slope_pct": 0.2,
+            "latest_change_pct": 4.5,
+            "close_location_in_range": 0.95,
+        },
+    )
+    stable_low_mid_launch = SignalScore(
+        vt_symbol="600003.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=94.5,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={"status": "ready", "entry_setup": "dragon_pullback"},
+    )
+
+    rows = scoring.score_day(
+        None,
+        {"605117.SSE": [], "600003.SSE": []},
+        trade_date,
+        BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID),
+        score_cache={trade_date: [high_close_false_launch, stable_low_mid_launch]},
+    )
+
+    assert [row.vt_symbol for row in rows] == ["600003.SSE", "605117.SSE"]
+    assert rows[1].evidence["candidate_quality_adjustment"] == 0.1
+    assert "无涨停来源高位启动降权" in rows[1].evidence["candidate_quality_notes"]
+    assert "成熟低吸无涨停高位确认不足降权" in rows[1].evidence["candidate_quality_notes"]
+
+
+def test_default_candidate_quality_score_adds_stale_active_weak_decay_pullback_penalty() -> None:
+    from alphaagent.server.services.backtest import scoring
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    trade_date = date(2026, 3, 9)
+    stale_active_long_pullback = SignalScore(
+        vt_symbol="002208.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=94.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "low_suction_days": 6,
+            "low_suction_launch_confirmed": False,
+            "first_effective_lift": False,
+            "recent_limit_up_20d": True,
+            "near_limit_up_count_20d": 1,
+            "large_bull_count_20d": 1,
+            "pullback_days": 9,
+            "close_location_in_range": 0.65,
+            "volume_ratio_5d_20d": 0.98,
+            "ma5_distance_pct": 3.8,
+            "ma10_distance_pct": 2.4,
+            "ma5_slope_pct": 0.2,
+            "latest_change_pct": 1.5,
+            "market_warning_level": 1,
+        },
+    )
+    protected_low_close = SignalScore(
+        vt_symbol="000021.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=93.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "low_suction_days": 6,
+            "low_suction_launch_confirmed": False,
+            "first_effective_lift": False,
+            "recent_limit_up_20d": True,
+            "near_limit_up_count_20d": 1,
+            "large_bull_count_20d": 1,
+            "pullback_days": 9,
+            "close_location_in_range": 0.18,
+            "volume_ratio_5d_20d": 0.98,
+            "ma5_distance_pct": 1.0,
+            "ma10_distance_pct": 1.3,
+            "ma5_slope_pct": 0.2,
+            "latest_change_pct": 1.5,
+            "market_warning_level": 1,
+        },
+    )
+
+    rows = scoring.score_day(
+        None,
+        {"002208.SZSE": [], "000021.SZSE": []},
+        trade_date,
+        BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID),
+        score_cache={trade_date: [stale_active_long_pullback, protected_low_close]},
+    )
+    by_symbol = {row.vt_symbol: row for row in rows}
+
+    assert by_symbol["002208.SZSE"].evidence["candidate_quality_adjustment"] == -2.0
+    assert "活跃陈旧弱量强势衰减无首启追加降权" in by_symbol["002208.SZSE"].evidence["candidate_quality_notes"]
+    assert by_symbol["000021.SZSE"].evidence["candidate_quality_adjustment"] == -0.9
+    assert "活跃陈旧弱量强势衰减无首启追加降权" not in by_symbol["000021.SZSE"].evidence["candidate_quality_notes"]
 
 
 def test_candidate_entry_reason_records_execution_lane_context() -> None:
@@ -15678,166 +17023,6 @@ def test_backtest_buy_order_raw_keeps_entry_evidence() -> None:
     assert buy_order["raw"]["early_dragon_pullback_risk"] is True
 
 
-def test_dragon_pullback_stealth_low_suction_rotation_replaces_low_efficiency_holding() -> None:
-    from alphaagent.server.services.backtest import engine, simulation
-
-    signal_day = date(2026, 2, 11)
-    weak_position = engine.Position(
-        vt_symbol="603920.SSE",
-        name="世运电路",
-        volume=100,
-        cost_price=9000.0,
-        entry_date=date(2026, 2, 1),
-        highest_price=9100.0,
-        reason={"entry_total_score": 91.2, "entry_setup": "dragon_pullback"},
-    )
-    strong_position = engine.Position(
-        vt_symbol="600966.SSE",
-        name="博汇纸业",
-        volume=100,
-        cost_price=500.0,
-        entry_date=date(2026, 1, 1),
-        highest_price=560.0,
-        reason={"entry_total_score": 85.1, "entry_setup": "dragon_pullback"},
-    )
-    candidate = SignalScore(
-        vt_symbol="600367.SSE",
-        trade_date=signal_day,
-        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
-        total_score=92.0,
-        liquidity_score=80,
-        risk_score=80,
-        entry_signal=True,
-        evidence={
-            "status": "ready",
-            "entry_setup": "stealth_low_suction",
-            "setup_type": "stealth_low_suction",
-            "low_suction_days": 3,
-            "low_suction_buildup_score": 100.0,
-            "stealth_low_suction_score": 100.0,
-            "ma_convergence_pct": 3.1,
-            "volume_ratio_5d_20d": 0.6,
-            "ma20_distance_pct": -0.8,
-            "failed_rules": [],
-            "risk_flags": [],
-        },
-    )
-    params = engine.BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID)
-
-    replacement = simulation.rotation_replacement_for_candidate(
-        candidate,
-        {"603920.SSE": weak_position, "600966.SSE": strong_position},
-        set(),
-        {
-            "603920.SSE": engine.Bar(signal_day, 8000.0, 8050.0, 7900.0, 8000.0),
-            "600966.SSE": engine.Bar(signal_day, 550.0, 560.0, 540.0, 550.0),
-        },
-        params,
-        signal_day,
-    )
-
-    assert replacement is weak_position
-    assert simulation.rotation_reason_for_candidate(candidate) == "rotation_for_stealth_low_suction"
-
-
-def test_dragon_pullback_stealth_low_suction_rotation_requires_portfolio_drawdown() -> None:
-    from alphaagent.server.services.backtest import engine, simulation
-
-    signal_day = date(2026, 2, 11)
-    weak_position = engine.Position(
-        vt_symbol="603920.SSE",
-        name="世运电路",
-        volume=100,
-        cost_price=10.0,
-        entry_date=date(2026, 2, 1),
-        highest_price=10.4,
-        reason={"entry_total_score": 91.2, "entry_setup": "dragon_pullback"},
-    )
-    candidate = SignalScore(
-        vt_symbol="600367.SSE",
-        trade_date=signal_day,
-        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
-        total_score=92.0,
-        liquidity_score=80,
-        risk_score=80,
-        entry_signal=True,
-        evidence={
-            "status": "ready",
-            "entry_setup": "stealth_low_suction",
-            "setup_type": "stealth_low_suction",
-            "low_suction_days": 3,
-            "low_suction_buildup_score": 100.0,
-            "stealth_low_suction_score": 100.0,
-            "ma_convergence_pct": 3.1,
-            "volume_ratio_5d_20d": 0.6,
-            "ma20_distance_pct": -0.8,
-            "failed_rules": [],
-            "risk_flags": [],
-        },
-    )
-    params = engine.BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID)
-
-    replacement = simulation.rotation_replacement_for_candidate(
-        candidate,
-        {"603920.SSE": weak_position},
-        set(),
-        {"603920.SSE": engine.Bar(signal_day, 9.7, 10.1, 9.5, 9.7)},
-        params,
-        signal_day,
-    )
-
-    assert replacement is None
-
-
-def test_dragon_pullback_stealth_low_suction_rotation_keeps_profitable_holdings() -> None:
-    from alphaagent.server.services.backtest import engine, simulation
-
-    signal_day = date(2026, 4, 14)
-    profitable_position = engine.Position(
-        vt_symbol="603629.SSE",
-        name="利通电子",
-        volume=100,
-        cost_price=66.7,
-        entry_date=date(2026, 4, 8),
-        highest_price=88.0,
-        reason={"entry_total_score": 94.35, "entry_setup": "dragon_pullback"},
-    )
-    candidate = SignalScore(
-        vt_symbol="002747.SZSE",
-        trade_date=signal_day,
-        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
-        total_score=79.5,
-        liquidity_score=80,
-        risk_score=80,
-        entry_signal=True,
-        evidence={
-            "status": "ready",
-            "entry_setup": "stealth_low_suction",
-            "setup_type": "stealth_low_suction",
-            "low_suction_days": 3,
-            "low_suction_buildup_score": 100.0,
-            "stealth_low_suction_score": 100.0,
-            "ma_convergence_pct": 3.6,
-            "volume_ratio_5d_20d": 1.1,
-            "ma20_distance_pct": 2.8,
-            "failed_rules": [],
-            "risk_flags": [],
-        },
-    )
-    params = engine.BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID)
-
-    replacement = simulation.rotation_replacement_for_candidate(
-        candidate,
-        {"603629.SSE": profitable_position},
-        set(),
-        {"603629.SSE": engine.Bar(signal_day, 86.0, 88.0, 85.0, 87.95)},
-        params,
-        signal_day,
-    )
-
-    assert replacement is None
-
-
 def test_candidate_trace_summary_explains_filled_candidate() -> None:
     from alphaagent.server.services.backtest import engine
 
@@ -15906,7 +17091,7 @@ def test_candidate_trace_summary_explains_filled_candidate() -> None:
     assert result["action"] == "BUY"
     assert result["planned_execute_date"] == "2026-01-06"
     assert result["linked_order_status"] == "filled"
-    assert result["summary"] == "组合回测已按该信号日下单并成交。"
+    assert result["summary"] == "组合执行链路已按该信号日下单并成交。"
     assert result["equity"]["cash"] == 989_897
     assert result["trades"][0]["amount"] == 10_100
 
@@ -15957,13 +17142,13 @@ def test_candidate_trace_summary_uses_real_trade_without_signal_event() -> None:
     )
 
     assert result["status"] == "filled"
-    assert result["summary"] == "组合回测已按该信号日下单并成交。"
+    assert result["summary"] == "组合执行链路已按该信号日下单并成交。"
     assert result["planned_execute_date"] == "2026-06-15"
     assert result["linked_order_status"] == "filled"
     assert result["trades"][0]["vt_symbol"] == "002384.SZSE"
 
 
-def test_candidate_trace_summary_explains_planned_signal_blocked_by_full_position() -> None:
+def test_candidate_trace_summary_explains_planned_signal_without_combined_fill() -> None:
     from alphaagent.server.services.backtest import engine
 
     signal_date = date(2026, 4, 14)
@@ -16007,8 +17192,8 @@ def test_candidate_trace_summary_explains_planned_signal_blocked_by_full_positio
     assert result["status"] == "planned_not_ordered"
     assert result["not_planned_context"]["target_signal_rank"] == 12
     assert result["not_planned_context"]["target_signal_setup"] == "stealth_low_suction"
-    assert "满仓 10/10" in result["summary"]
-    assert "未触发换仓规则" in result["summary"]
+    assert "没有形成组合成交" in result["summary"]
+    assert "候选独立买卖报告" in result["summary"]
 
 
 def test_candidate_trace_summary_explains_planned_signal_outside_execution_limit() -> None:
@@ -16114,7 +17299,7 @@ def test_candidate_trace_summary_explains_lane_execution_limit() -> None:
     assert "执行前 20 名" in result["summary"]
 
 
-def test_candidate_trace_summary_explains_lane_selected_but_full_position() -> None:
+def test_candidate_trace_summary_explains_lane_selected_but_unfilled() -> None:
     from alphaagent.server.services.backtest import engine
 
     signal_date = date(2026, 4, 28)
@@ -16169,7 +17354,7 @@ def test_candidate_trace_summary_explains_lane_selected_but_full_position() -> N
 
     assert result["status"] == "planned_not_ordered"
     assert "执行池第 8 名" in result["summary"]
-    assert "满仓 10/10" in result["summary"]
+    assert "没有形成组合成交" in result["summary"]
     assert "超过组合执行前" not in result["summary"]
 
 
@@ -16199,7 +17384,7 @@ def test_candidate_trace_summary_explains_watch_not_bought() -> None:
 
     assert result["status"] == "watch_not_bought"
     assert result["linked_order_status"] == "not_ordered"
-    assert result["summary"] == "候选是 WATCH，默认组合回测不会买入观察股。"
+    assert result["summary"] == "候选是 WATCH，默认组合执行不会买入观察股。"
 
 
 def test_candidate_trace_summary_does_not_link_orders_without_signal_plan() -> None:
@@ -16250,7 +17435,7 @@ def test_candidate_trace_summary_explains_candidate_skipped_by_theoretical_holdi
         backtest_id=194,
         vt_symbol="002384.SZSE",
         signal_date=signal_date,
-        run={"strategy_id": "mainline_dragon_pullback", "strategy_version": "0.1.21", "params": {"candidate_limit": 20}},
+        run={"strategy_id": "mainline_dragon_pullback", "strategy_version": "0.1.23", "params": {"candidate_limit": 20}},
         recommendation={
             "trade_date": signal_date,
             "vt_symbol": "002384.SZSE",
@@ -16292,7 +17477,7 @@ def test_candidate_trace_summary_explains_signal_snapshot_without_candidate_plan
         backtest_id=203,
         vt_symbol="002747.SZSE",
         signal_date=signal_date,
-        run={"strategy_id": "mainline_dragon_pullback", "strategy_version": "0.1.21", "params": {"candidate_limit": 20}},
+        run={"strategy_id": "mainline_dragon_pullback", "strategy_version": "0.1.23", "params": {"candidate_limit": 20}},
         recommendation=None,
         signal_rows=[],
         order_rows=[],
@@ -16331,7 +17516,7 @@ def test_candidate_trace_summary_prioritizes_theoretical_holding_over_signal_sna
         backtest_id=203,
         vt_symbol="002747.SZSE",
         signal_date=signal_date,
-        run={"strategy_id": "mainline_dragon_pullback", "strategy_version": "0.1.21", "params": {"candidate_limit": 20}},
+        run={"strategy_id": "mainline_dragon_pullback", "strategy_version": "0.1.23", "params": {"candidate_limit": 20}},
         recommendation=None,
         signal_rows=[],
         order_rows=[],
@@ -17726,11 +18911,6 @@ def test_backtest_api_parses_strict_minute_entry_params(monkeypatch) -> None:
                 "tail_entry_start": "14:30",
                 "tail_entry_end": "14:30",
                 "tail_entry_ma5_tolerance_pct": 0.8,
-                "enable_signal_rotation": True,
-                "rotation_min_score": 96,
-                "rotation_min_score_gap": 10,
-                "rotation_max_holding_return_pct": 6,
-                "rotation_min_holding_days": 4,
                 "persist": False,
             },
     )
@@ -17743,11 +18923,6 @@ def test_backtest_api_parses_strict_minute_entry_params(monkeypatch) -> None:
     assert captured["params"].tail_entry_start == "14:30"
     assert captured["params"].tail_entry_end == "14:30"
     assert captured["params"].tail_entry_ma5_tolerance_pct == 0.8
-    assert captured["params"].enable_signal_rotation is True
-    assert captured["params"].rotation_min_score == 96
-    assert captured["params"].rotation_min_score_gap == 10
-    assert captured["params"].rotation_max_holding_return_pct == 6
-    assert captured["params"].rotation_min_holding_days == 4
 
 
 def test_backtest_api_derives_tail_hybrid_flags_from_execution_model(monkeypatch) -> None:
@@ -17803,30 +18978,6 @@ def test_backtest_api_defaults_to_daily_next_open(monkeypatch) -> None:
     assert captured["params"].max_positions == 10
     assert captured["params"].candidate_limit == 20
     assert captured["params"].max_position_pct == 0.1
-    assert captured["params"].enable_signal_rotation is True
-    assert captured["params"].rotation_min_score == 98.0
-
-
-def test_backtest_method_documents_dragon_pullback_rotation_policy() -> None:
-    from alphaagent.server.services.backtest import engine
-
-    params = engine.BacktestParams(
-        strategy=DRAGON_PULLBACK_STRATEGY_ID,
-        enable_signal_rotation=True,
-        rotation_min_score=96,
-        rotation_min_score_gap=10,
-        rotation_max_holding_return_pct=6,
-    )
-
-    method = engine._backtest_method(params)
-
-    assert method["rotation"] == {
-        "enabled": True,
-        "min_score": 96,
-        "score_gap_reference": 10,
-        "max_holding_return_pct": 6,
-        "min_holding_days": 3,
-    }
 
 
 def test_symbol_backtest_api_passes_single_symbol_and_returns_audit(monkeypatch) -> None:
@@ -18204,33 +19355,6 @@ def test_backtest_phase_strategy_family_matrix_api(monkeypatch) -> None:
     assert captured == {"backtest_id": 203, "candidate_rank_limits": [10, 20, 100]}
 
 
-def test_backtest_replacement_quality_matrix_api(monkeypatch) -> None:
-    from alphaagent.server.api import backtests
-
-    captured = {}
-
-    def fake_replacement_quality_matrix(backtest_id: int, sample_limit: int = 80):
-        captured.update({"backtest_id": backtest_id, "sample_limit": sample_limit})
-        return {
-            "status": "ready",
-            "backtest_id": backtest_id,
-            "audit_only": True,
-            "summary": {"not_used_for_signal_score": True},
-        }
-
-    monkeypatch.setattr(backtests, "backtest_replacement_quality_matrix", fake_replacement_quality_matrix)
-    client = TestClient(create_app())
-
-    response = client.get("/api/backtests/263/replacement-quality-matrix?sample_limit=25")
-
-    assert response.status_code == 200
-    payload = response.json()["data"]
-    assert payload["backtest_id"] == 263
-    assert payload["audit_only"] is True
-    assert payload["summary"]["not_used_for_signal_score"] is True
-    assert captured == {"backtest_id": 263, "sample_limit": 25}
-
-
 def test_execution_breakpoint_rows_classify_full_and_theoretical_holding_gap() -> None:
     from alphaagent.server.services.backtest import queries
 
@@ -18331,13 +19455,13 @@ def test_execution_breakpoint_rows_classify_full_and_theoretical_holding_gap() -
     gap_row = by_key[("002407.SZSE", date(2025, 10, 24))]
     no_order_row = by_key[("002938.SZSE", date(2026, 5, 8))]
     assert ("000001.SZSE", date(2026, 4, 20)) not in by_key
-    assert full_row["status"] == "planned_not_ordered_full"
+    assert full_row["status"] == "planned_not_ordered_unfilled"
     assert full_row["execution_candidate_rank"] == 3
     assert full_row["low_suction_days"] == 4
     assert full_row["ma_convergence_pct"] == 4.2
     assert full_row["setup_family"] == "dragon_low_suction_overlap"
-    assert "满仓" in full_row["summary"]
-    assert gap_row["status"] == "candidate_top_rank_full"
+    assert "没有形成组合成交" in full_row["summary"]
+    assert gap_row["status"] == "candidate_top_rank_unfilled"
     assert gap_row["theoretical_marker_gap"] is True
     assert gap_row["theoretical_entry_date"] == "2025-09-26"
     assert no_order_row["status"] == "candidate_top_rank_no_order"
@@ -18345,9 +19469,9 @@ def test_execution_breakpoint_rows_classify_full_and_theoretical_holding_gap() -
     summary = queries.execution_breakpoint_matrix_summary(rows)
     assert summary["audit_only"] is True
     assert summary["not_used_for_signal_score"] is True
-    assert summary["full_position_miss_count"] == 2
+    assert summary["unfilled_top_candidate_count"] == 2
     assert summary["theoretical_real_gap_count"] == 1
-    assert summary["interpretation"]["primary_issue"] == "full_position_without_rotation"
+    assert summary["interpretation"]["primary_issue"] == "top_candidate_unfilled"
 
 
 def test_execution_breakpoint_filled_trade_without_recommendation_counts_as_buy() -> None:
@@ -18445,333 +19569,6 @@ def test_backtest_execution_breakpoint_matrix_api(monkeypatch) -> None:
     assert payload["not_used_for_signal_score"] is True
     assert payload["summary"]["overall"]["candidate_count"] == 2
     assert captured == {"backtest_id": 267, "candidate_rank_limit": 50, "sample_limit": 30}
-
-
-def test_rotation_opportunity_cost_rows_compare_candidate_and_weak_holding() -> None:
-    from alphaagent.server.services.backtest import queries
-
-    signal_date = date(2026, 4, 15)
-    execute_date = date(2026, 4, 16)
-    rows = queries.rotation_opportunity_cost_rows(
-        breakpoint_rows=[
-            {
-                "signal_date": signal_date,
-                "execute_date": execute_date,
-                "vt_symbol": "603115.SSE",
-                "name": "海星股份",
-                "action": "BUY",
-                "rank": 3,
-                "total_score": 96.03,
-                "status": "planned_not_ordered_full",
-                "setup_family": "dragon_pullback",
-                "entry_setup": "dragon_pullback",
-                "low_suction_days": 4,
-                "low_suction_launch_confirmed": True,
-                "low_suction_launch_quality_bucket": "balanced_first_lift",
-                "ma_convergence_pct": 4.2,
-                "market_warning_level": 2,
-                "market_warning_label": "中性震荡",
-                "market_temperature": 62,
-                "breadth_up_ratio_20d": 52,
-            }
-        ],
-        positions=[
-            {
-                "trade_date": execute_date,
-                "vt_symbol": "000001.SZSE",
-                "name": "弱持仓",
-                "entry_date": date(2026, 4, 10),
-                "holding_days": 4,
-                "floating_pnl_pct": -2.0,
-            },
-            {
-                "trade_date": execute_date,
-                "vt_symbol": "000002.SZSE",
-                "name": "强持仓",
-                "entry_date": date(2026, 4, 9),
-                "holding_days": 5,
-                "floating_pnl_pct": 8.0,
-            },
-        ],
-        candidate_observations={
-            ("603115.SSE", signal_date): {
-                "status": "ready",
-                "entry_date": execute_date,
-                "exit_date": date(2026, 5, 20),
-                "entry_price": 10.0,
-                "exit_price": 12.5,
-                "return_pct": 25.0,
-            }
-        },
-        position_exit_returns={
-            ("000001.SZSE", date(2026, 4, 10)): {
-                "exit_date": date(2026, 4, 22),
-                "return_pct": -5.0,
-                "exit_reason": "support_stop",
-            }
-        },
-        candidate_rank_limit=20,
-        holding_days=20,
-    )
-
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["replaced_symbol"] == "000001.SZSE"
-    assert row["execute_date"] == execute_date
-    assert row["replaced_cost_price"] is None
-    assert row["replaced_snapshot_return_pct"] == -2.0
-    assert row["candidate_return_pct"] == 25.0
-    assert row["replaced_real_return_pct"] == -5.0
-    assert row["opportunity_delta_pct"] == 30.0
-    assert row["opportunity_bucket"] == "large_positive"
-    assert row["setup_family"] == "dragon_pullback"
-
-    summary = queries.rotation_opportunity_cost_matrix_summary(rows)
-    assert summary["audit_only"] is True
-    assert summary["not_used_for_signal_score"] is True
-    assert summary["overall"]["candidate_count"] == 1
-    assert summary["overall"]["positive_rate"] == 100.0
-    assert summary["interpretation"]["primary_issue"] == "promising_but_audit_only"
-    assert summary["by_candidate_rank"][0]["candidate_rank_bucket"] == "1-3"
-    assert summary["by_low_suction_days"][0]["low_suction_days_bucket"] == "3-4"
-    assert summary["by_launch_quality"][0]["low_suction_launch_quality_bucket"] == "balanced_first_lift"
-    assert summary["by_ma_convergence"][0]["ma_convergence_bucket"] == "<=5%"
-    assert summary["by_market_warning"][0]["market_warning_level"] == 2
-    assert summary["by_replaced_current_return"][0]["replaced_current_return_bucket"] == "-5-0%"
-    assert summary["by_replaced_execute_open_return"][0]["replaced_execute_open_return_bucket"] is None
-    assert summary["by_replaced_holding_days"][0]["replaced_holding_days_bucket"] == "4-7"
-
-
-def test_rotation_opportunity_cost_rows_use_next_position_date_for_candidate_without_execute_date() -> None:
-    from alphaagent.server.services.backtest import queries
-
-    signal_date = date(2026, 4, 15)
-    execute_date = date(2026, 4, 16)
-    rows = queries.rotation_opportunity_cost_rows(
-        breakpoint_rows=[
-            {
-                "signal_date": signal_date,
-                "execute_date": None,
-                "vt_symbol": "603115.SSE",
-                "name": "海星股份",
-                "action": "BUY",
-                "rank": 3,
-                "total_score": 96.03,
-                "status": "candidate_top_rank_full",
-                "setup_family": "dragon_pullback",
-                "entry_setup": "dragon_pullback",
-            }
-        ],
-        positions=[
-            {
-                "trade_date": signal_date,
-                "vt_symbol": "000001.SZSE",
-                "name": "信号日弱持仓",
-                "entry_date": date(2026, 4, 10),
-                "holding_days": 3,
-                "floating_pnl_pct": -8.0,
-            },
-            {
-                "trade_date": execute_date,
-                "vt_symbol": "000002.SZSE",
-                "name": "执行日弱持仓",
-                "entry_date": date(2026, 4, 11),
-                "holding_days": 4,
-                "floating_pnl_pct": -6.0,
-            },
-        ],
-        candidate_observations={
-            ("603115.SSE", signal_date): {
-                "status": "ready",
-                "entry_date": execute_date,
-                "exit_date": date(2026, 5, 20),
-                "entry_price": 10.0,
-                "exit_price": 12.0,
-                "return_pct": 20.0,
-            }
-        },
-        position_exit_returns={
-            ("000001.SZSE", date(2026, 4, 10)): {"return_pct": -9.0},
-            ("000002.SZSE", date(2026, 4, 11)): {"return_pct": -4.0},
-        },
-        candidate_rank_limit=20,
-        holding_days=20,
-    )
-
-    assert len(rows) == 1
-    assert rows[0]["execute_date"] == execute_date
-    assert rows[0]["replaced_symbol"] == "000002.SZSE"
-
-
-def test_trend_winner_protection_rows_bucket_protected_and_replaceable_holdings() -> None:
-    from alphaagent.server.services.backtest import queries
-
-    rows = queries.trend_winner_protection_rows(
-        rotation_rows=[
-            {
-                "signal_date": date(2026, 4, 15),
-                "execute_date": date(2026, 4, 16),
-                "vt_symbol": "603115.SSE",
-                "name": "高分候选",
-                "rank": 3,
-                "score": 98.0,
-                "setup_family": "dragon_pullback",
-                "market_phase": "uptrend",
-                "market_phase_label": "主升",
-                "candidate_return_pct": 18.0,
-                "replaced_symbol": "000001.SZSE",
-                "replaced_name": "趋势持仓",
-                "replaced_entry_date": date(2026, 4, 8),
-                "replaced_holding_days": 6,
-                "replaced_snapshot_return_pct": 4.0,
-                "replaced_execute_open_return_pct": 6.0,
-                "replaced_real_return_pct": 22.0,
-                "opportunity_delta_pct": -4.0,
-            },
-            {
-                "signal_date": date(2026, 4, 15),
-                "execute_date": date(2026, 4, 16),
-                "vt_symbol": "603116.SSE",
-                "name": "另一个高分候选",
-                "rank": 4,
-                "score": 97.0,
-                "setup_family": "stealth_low_suction",
-                "market_phase": "rotation",
-                "market_phase_label": "震荡",
-                "candidate_return_pct": 15.0,
-                "replaced_symbol": "000002.SZSE",
-                "replaced_name": "弱持仓",
-                "replaced_entry_date": date(2026, 4, 10),
-                "replaced_holding_days": 4,
-                "replaced_snapshot_return_pct": -7.0,
-                "replaced_execute_open_return_pct": -6.5,
-                "replaced_real_return_pct": -9.0,
-                "opportunity_delta_pct": 24.0,
-            },
-        ]
-    )
-
-    assert len(rows) == 2
-    protected = rows[0]
-    replaceable = rows[1]
-    assert protected["held_symbol"] == "000001.SZSE"
-    assert protected["protection_bucket"] == "protect_trend_winner"
-    assert protected["protection_label"] == "保护趋势赢家"
-    assert protected["protected"] is True
-    assert protected["replaceable"] is False
-    assert protected["reason"] == "执行开盘已盈利且真实退出仍盈利"
-    assert replaceable["held_symbol"] == "000002.SZSE"
-    assert replaceable["protection_bucket"] == "replaceable_weak_holding"
-    assert replaceable["protected"] is False
-    assert replaceable["replaceable"] is True
-
-    summary = queries.trend_winner_protection_matrix_summary(rows)
-    assert summary["audit_only"] is True
-    assert summary["not_used_for_signal_score"] is True
-    assert summary["overall"]["candidate_count"] == 2
-    assert summary["overall"]["protected_count"] == 1
-    assert summary["overall"]["replaceable_count"] == 1
-    assert summary["overall"]["harmful_replacement_count"] == 1
-    assert summary["by_protection_bucket"][0]["protection_bucket"] in {
-        "protect_trend_winner",
-        "replaceable_weak_holding",
-    }
-
-
-def test_backtest_rotation_opportunity_cost_matrix_api(monkeypatch) -> None:
-    from alphaagent.server.api import backtests
-
-    captured = {}
-
-    def fake_rotation_opportunity_cost_matrix(
-        backtest_id: int,
-        candidate_rank_limit: int = 20,
-        sample_limit: int = 120,
-        holding_days: int = 20,
-    ):
-        captured.update(
-            {
-                "backtest_id": backtest_id,
-                "candidate_rank_limit": candidate_rank_limit,
-                "sample_limit": sample_limit,
-                "holding_days": holding_days,
-            }
-        )
-        return {
-            "status": "ready",
-            "backtest_id": backtest_id,
-            "audit_only": True,
-            "not_used_for_signal_score": True,
-            "summary": {"overall": {"candidate_count": 3}},
-        }
-
-    monkeypatch.setattr(backtests, "backtest_rotation_opportunity_cost_matrix", fake_rotation_opportunity_cost_matrix)
-    client = TestClient(create_app())
-
-    response = client.get(
-        "/api/backtests/203/rotation-opportunity-cost-matrix?candidate_rank_limit=50&sample_limit=40&holding_days=10"
-    )
-
-    assert response.status_code == 200
-    payload = response.json()["data"]
-    assert payload["backtest_id"] == 203
-    assert payload["audit_only"] is True
-    assert payload["not_used_for_signal_score"] is True
-    assert payload["summary"]["overall"]["candidate_count"] == 3
-    assert captured == {
-        "backtest_id": 203,
-        "candidate_rank_limit": 50,
-        "sample_limit": 40,
-        "holding_days": 10,
-    }
-
-
-def test_backtest_trend_winner_protection_matrix_api(monkeypatch) -> None:
-    from alphaagent.server.api import backtests
-
-    captured = {}
-
-    def fake_trend_winner_protection_matrix(
-        backtest_id: int,
-        candidate_rank_limit: int = 20,
-        sample_limit: int = 120,
-        holding_days: int = 20,
-    ):
-        captured.update(
-            {
-                "backtest_id": backtest_id,
-                "candidate_rank_limit": candidate_rank_limit,
-                "sample_limit": sample_limit,
-                "holding_days": holding_days,
-            }
-        )
-        return {
-            "status": "ready",
-            "backtest_id": backtest_id,
-            "audit_only": True,
-            "not_used_for_signal_score": True,
-            "summary": {"overall": {"candidate_count": 2}},
-        }
-
-    monkeypatch.setattr(backtests, "backtest_trend_winner_protection_matrix", fake_trend_winner_protection_matrix)
-    client = TestClient(create_app())
-
-    response = client.get(
-        "/api/backtests/203/trend-winner-protection-matrix?candidate_rank_limit=50&sample_limit=40&holding_days=10"
-    )
-
-    assert response.status_code == 200
-    payload = response.json()["data"]
-    assert payload["backtest_id"] == 203
-    assert payload["audit_only"] is True
-    assert payload["not_used_for_signal_score"] is True
-    assert payload["summary"]["overall"]["candidate_count"] == 2
-    assert captured == {
-        "backtest_id": 203,
-        "candidate_rank_limit": 50,
-        "sample_limit": 40,
-        "holding_days": 10,
-    }
 
 
 def test_backtest_minute_coverage_classifies_proxy_and_gap_states(monkeypatch) -> None:
@@ -20566,6 +21363,72 @@ def test_trade_path_diagnostics_marks_rebound_prone_support_stop_review_from_vis
     assert row["sold_before_rebound"] is False
 
 
+def test_trade_path_diagnostics_marks_probable_unadjusted_price_discontinuity() -> None:
+    from alphaagent.server.services.backtest import queries
+
+    entry = {
+        "id": 1,
+        "trade_date": date(2026, 4, 1),
+        "vt_symbol": "001207.SZSE",
+        "side": "BUY",
+        "price": 10.0,
+        "raw": {"entry_setup": "stealth_low_suction", "entry_total_score": 86.0},
+    }
+    exit_trade = {
+        "id": 2,
+        "trade_date": date(2026, 4, 10),
+        "vt_symbol": "001207.SZSE",
+        "side": "SELL",
+        "price": 7.3,
+        "reason": "support_stop",
+        "raw": {},
+    }
+    daily_bars = [
+        {
+            "trade_date": date(2026, 4, 1),
+            "vt_symbol": "001207.SZSE",
+            "open_price": 10.0,
+            "high_price": 10.2,
+            "low_price": 9.8,
+            "close_price": 10.0,
+            "change_pct": 0.0,
+        },
+        {
+            "trade_date": date(2026, 4, 2),
+            "vt_symbol": "001207.SZSE",
+            "open_price": 10.0,
+            "high_price": 10.3,
+            "low_price": 9.9,
+            "close_price": 10.1,
+            "change_pct": 1.0,
+        },
+        {
+            "trade_date": date(2026, 4, 8),
+            "vt_symbol": "001207.SZSE",
+            "open_price": 7.1,
+            "high_price": 7.4,
+            "low_price": 7.0,
+            "close_price": 7.3,
+            "change_pct": -27.0608,
+        },
+        {
+            "trade_date": date(2026, 4, 10),
+            "vt_symbol": "001207.SZSE",
+            "open_price": 7.3,
+            "high_price": 7.5,
+            "low_price": 7.2,
+            "close_price": 7.35,
+            "change_pct": 0.68,
+        },
+    ]
+
+    row = queries.trade_path_diagnostic_row("001207.SZSE", entry, exit_trade, positions=[], daily_bars=daily_bars)
+
+    assert row["has_price_discontinuity"] is True
+    assert row["first_price_discontinuity_date"] == date(2026, 4, 8)
+    assert row["first_price_discontinuity_open_gap_pct"] < -20.0
+
+
 def test_rebound_prone_review_ignores_non_support_stop() -> None:
     from alphaagent.server.services.backtest import queries
 
@@ -20612,71 +21475,6 @@ def test_trade_path_diagnostics_pairs_buy_sell_trades_fifo() -> None:
     assert [row["entry_price"] for row in rows] == [10.0, 11.0]
     assert [row["exit_price"] for row in rows] == [12.0, 10.5]
     assert [round(row["return_pct"], 4) for row in rows] == [20.0, -4.5455]
-
-
-def test_trade_path_diagnostics_attaches_next_replacement_trade_quality() -> None:
-    from alphaagent.server.services.backtest import queries
-
-    trades = [
-        {"id": 1, "trade_date": date(2026, 4, 1), "vt_symbol": "A", "side": "BUY", "price": 10.0, "raw": {"entry_setup": "dragon_pullback", "entry_total_score": 84.0}},
-        {"id": 2, "trade_date": date(2026, 4, 5), "vt_symbol": "A", "side": "SELL", "price": 9.5, "reason": "support_stop", "pnl": -500.0, "raw": {}},
-        {"id": 3, "trade_date": date(2026, 4, 6), "vt_symbol": "B", "side": "BUY", "price": 20.0, "raw": {"entry_setup": "stealth_low_suction", "entry_total_score": 92.0}},
-        {"id": 4, "trade_date": date(2026, 4, 10), "vt_symbol": "B", "side": "SELL", "price": 23.0, "reason": "trend_trailing_stop", "pnl": 1500.0, "raw": {}},
-        {"id": 5, "trade_date": date(2026, 4, 12), "vt_symbol": "C", "side": "BUY", "price": 8.0, "raw": {"entry_setup": "dragon_pullback", "entry_total_score": 88.0}},
-        {"id": 6, "trade_date": date(2026, 4, 15), "vt_symbol": "C", "side": "SELL", "price": 7.6, "reason": "support_stop", "pnl": -400.0, "raw": {}},
-    ]
-
-    rows = queries.trade_path_diagnostics_from_trades(trades, positions=[], future_bars=[])
-    by_symbol = {row["vt_symbol"]: row for row in rows}
-
-    assert by_symbol["A"]["replacement_vt_symbol"] == "B"
-    assert by_symbol["A"]["replacement_entry_date"] == date(2026, 4, 6)
-    assert by_symbol["A"]["replacement_entry_setup"] == "stealth_low_suction"
-    assert by_symbol["A"]["replacement_return_pct"] == 15.0
-    assert by_symbol["A"]["replacement_return_delta_pct"] == 20.0
-    assert by_symbol["A"]["replacement_outcome"] == "strong_replacement"
-    assert by_symbol["B"]["replacement_vt_symbol"] == "C"
-    assert by_symbol["B"]["replacement_outcome"] == "bad_replacement"
-    assert by_symbol["C"]["replacement_outcome"] == "no_replacement"
-
-    summary = queries.trade_path_diagnostics_summary(rows)
-    buckets = {row["replacement_outcome"]: row for row in summary["by_replacement_outcome"]}
-
-    assert summary["replacement_trade_count"] == 2
-    assert summary["strong_replacement_count"] == 1
-    assert summary["bad_replacement_count"] == 1
-    assert buckets["strong_replacement"]["trade_count"] == 1
-    assert buckets["strong_replacement"]["avg_replacement_return_pct"] == 15.0
-    assert buckets["bad_replacement"]["trade_count"] == 1
-    assert buckets["bad_replacement"]["avg_replacement_return_pct"] == -5.0
-    assert buckets["no_replacement"]["trade_count"] == 1
-
-
-def test_trade_path_diagnostics_uses_portfolio_trades_for_filtered_replacement() -> None:
-    from alphaagent.server.services.backtest import queries
-
-    symbol_trades = [
-        {"id": 1, "trade_date": date(2026, 4, 1), "vt_symbol": "A", "side": "BUY", "price": 10.0, "raw": {"entry_setup": "dragon_pullback"}},
-        {"id": 2, "trade_date": date(2026, 4, 5), "vt_symbol": "A", "side": "SELL", "price": 9.5, "reason": "support_stop", "raw": {}},
-    ]
-    portfolio_trades = [
-        *symbol_trades,
-        {"id": 3, "trade_date": date(2026, 4, 6), "vt_symbol": "B", "side": "BUY", "price": 20.0, "raw": {"entry_setup": "stealth_low_suction"}},
-        {"id": 4, "trade_date": date(2026, 4, 10), "vt_symbol": "B", "side": "SELL", "price": 22.0, "reason": "trend_trailing_stop", "raw": {}},
-    ]
-
-    rows = queries.trade_path_diagnostics_from_trades(
-        symbol_trades,
-        positions=[],
-        future_bars=[],
-        replacement_trades=portfolio_trades,
-    )
-
-    assert len(rows) == 1
-    assert rows[0]["vt_symbol"] == "A"
-    assert rows[0]["replacement_vt_symbol"] == "B"
-    assert rows[0]["replacement_return_pct"] == 10.0
-    assert rows[0]["replacement_outcome"] == "strong_replacement"
 
 
 def test_theoretical_position_context_uses_execute_date_not_signal_date() -> None:
@@ -20859,93 +21657,6 @@ def test_backtest_path_diagnostics_attaches_read_only_market_context(monkeypatch
     assert result["summary"]["dynamic_market_sources"] == [{"source": "stock_daily_bars", "count": 1}]
 
 
-def test_backtest_path_diagnostics_uses_full_portfolio_replacement_when_symbol_filtered(monkeypatch) -> None:
-    from alphaagent.server.services.backtest import queries
-    from alphaagent.server.db import schema as db_schema
-
-    class FakeResult:
-        def __init__(self, rows=None, first=None):
-            self._rows = rows or []
-            self._first = first
-
-        def mappings(self):
-            return self
-
-        def first(self):
-            return self._first
-
-        def all(self):
-            return self._rows
-
-    class FakeSession:
-        def __init__(self):
-            self.trade_call_count = 0
-
-        def execute(self, statement):
-            text = str(statement)
-            if "FROM backtest_runs" in text:
-                return FakeResult(
-                    first={
-                        "id": 194,
-                        "start_date": date(2026, 4, 1),
-                        "end_date": date(2026, 4, 20),
-                    }
-                )
-            if "FROM backtest_trades" in text:
-                self.trade_call_count += 1
-                all_trades = [
-                    {"id": 1, "trade_date": date(2026, 4, 1), "vt_symbol": "A", "side": "BUY", "price": 10.0, "raw": {}},
-                    {"id": 2, "trade_date": date(2026, 4, 5), "vt_symbol": "A", "side": "SELL", "price": 9.5, "reason": "support_stop", "raw": {}},
-                    {
-                        "id": 3,
-                        "trade_date": date(2026, 4, 6),
-                        "vt_symbol": "B",
-                        "side": "BUY",
-                        "price": 20.0,
-                        "raw": {"entry_setup": "stealth_low_suction", "entry_total_score": 92.0},
-                    },
-                    {"id": 4, "trade_date": date(2026, 4, 10), "vt_symbol": "B", "side": "SELL", "price": 22.0, "reason": "trend_trailing_stop", "raw": {}},
-                ]
-                if self.trade_call_count == 1:
-                    return FakeResult(rows=all_trades)
-                return FakeResult(rows=[row for row in all_trades if row["vt_symbol"] == "A"])
-            if "FROM backtest_daily_positions" in text:
-                return FakeResult(rows=[])
-            if "FROM stock_daily_bars" in text:
-                return FakeResult(rows=[])
-            raise AssertionError(text)
-
-    sessions: list[FakeSession] = []
-
-    @contextmanager
-    def fake_session_scope():
-        session = FakeSession()
-        sessions.append(session)
-        yield session
-
-    monkeypatch.setattr(queries.market_context, "annotate_rows_with_market_context", lambda session, schema, rows, *, date_key: rows)
-
-    result = queries.backtest_path_diagnostics(
-        schema=db_schema,
-        session_scope=fake_session_scope,
-        is_database_configured=lambda: True,
-        ensure_schema=lambda: None,
-        load_stock_names=lambda session, symbols: {},
-        symbols_from_rows=lambda *rows: [],
-        with_stock_names=lambda rows, stock_names: rows,
-        to_api=lambda row: row,
-        backtest_id=194,
-        vt_symbol="A",
-    )
-
-    assert result["status"] == "ready"
-    assert len(result["items"]) == 1
-    assert result["items"][0]["vt_symbol"] == "A"
-    assert result["items"][0]["replacement_vt_symbol"] == "B"
-    assert result["items"][0]["replacement_return_pct"] == 10.0
-    assert result["items"][0]["replacement_outcome"] == "strong_replacement"
-
-
 def test_low_suction_start_factor_summary_compares_winners_and_losers() -> None:
     from alphaagent.server.services.backtest import queries
 
@@ -21005,7 +21716,6 @@ def test_setup_market_exit_audit_summary_finds_entry_and_exit_issue_buckets() ->
             "return_pct": -6.0,
             "mae_pct": -7.2,
             "mfe_pct": 1.5,
-            "replacement_outcome": "bad_replacement",
             "early_follow_through_state": "failed_launch",
             "early_follow_through_label": "启动后立即失败",
             "sold_before_rebound": False,
@@ -21085,10 +21795,6 @@ def test_setup_market_exit_audit_summary_exposes_plan_validation_nodes() -> None
             "mae_pct": -7.0,
             "early_follow_through_state": "failed_launch",
             "sold_before_rebound": False,
-            "replacement_trade_id": 22,
-            "replacement_outcome": "bad_replacement",
-            "replacement_return_pct": -5.0,
-            "replacement_return_delta_pct": -1.0,
         },
         {
             "entry_setup": "dragon_pullback",
@@ -21106,23 +21812,14 @@ def test_setup_market_exit_audit_summary_exposes_plan_validation_nodes() -> None
             "mae_pct": -1.0,
             "early_follow_through_state": "confirmed_follow_through",
             "sold_before_rebound": False,
-            "replacement_trade_id": 23,
-            "replacement_outcome": "strong_replacement",
-            "replacement_return_pct": 12.0,
-            "replacement_return_delta_pct": -3.0,
         },
     ]
 
     summary = queries.setup_market_exit_audit_summary(rows)
-    exit_quality = summary["exit_path_replacement_quality"]
     market_validation = summary["market_context_validation"]
 
-    assert exit_quality["not_used_for_signal_score"] is True
-    assert exit_quality["replacement_quality_summary"]["replacement_trade_count"] == 2
-    assert exit_quality["replacement_quality_summary"]["bad_replacement_count"] == 1
-    assert exit_quality["replacement_quality_summary"]["strong_replacement_count"] == 1
-    assert exit_quality["by_support_stop_context"][0]["support_stop_context"] == "true_failed_launch_stop"
-    assert any(row["trade_problem_type"] == "replacement_bad" for row in exit_quality["by_trade_problem_type"])
+    assert summary["support_stop_context_audit"]["by_context"][0]["support_stop_context"] == "true_failed_launch_stop"
+    assert summary["buy_sell_problem_matrix"]["by_problem"][0]["trade_problem_type"] in {"buy_point_bad", "healthy_trend_winner"}
     assert market_validation["not_used_for_signal_score"] is True
     assert market_validation["excluding_strong_market"]["trade_count"] == 1
     assert market_validation["fund_flow_coverage"]["insufficient_data_count"] == 1
@@ -21159,13 +21856,6 @@ def test_buy_sell_problem_matrix_classifies_trade_paths() -> None:
             "sold_before_rebound": True,
         },
         {
-            "vt_symbol": "REPLACE",
-            "entry_setup": "stealth_low_suction",
-            "dynamic_market_regime": "false_bull",
-            "return_pct": 1.0,
-            "replacement_return_pct": -5.0,
-        },
-        {
             "vt_symbol": "WINNER",
             "entry_setup": "dragon_pullback",
             "dynamic_market_regime": "strong_broad",
@@ -21180,7 +21870,6 @@ def test_buy_sell_problem_matrix_classifies_trade_paths() -> None:
     assert buckets["buy_point_bad"]["trade_count"] == 1
     assert buckets["sell_giveback"]["trade_count"] == 1
     assert buckets["sold_too_early"]["trade_count"] == 1
-    assert buckets["replacement_bad"]["trade_count"] == 1
     assert buckets["healthy_trend_winner"]["trade_count"] == 1
     assert any(row["entry_setup"] == "dragon_pullback" and row["trade_problem_type"] == "sell_giveback" for row in matrix["by_setup_problem"])
     assert matrix["focused_symbols"][0]["trade_problem_type"] in {"sell_giveback", "sold_too_early", "buy_point_bad"}
@@ -21198,6 +21887,8 @@ def test_support_stop_context_audit_splits_stop_loss_path_types() -> None:
             "mfe_pct": -1.5,
             "early_follow_through_state": "failed_launch",
             "sold_before_rebound": False,
+            "has_price_discontinuity": True,
+            "first_price_discontinuity_open_gap_pct": -29.0,
         },
         {
             "exit_reason": "support_stop",
@@ -21241,80 +21932,77 @@ def test_support_stop_context_audit_splits_stop_loss_path_types() -> None:
     buckets = {row["support_stop_context"]: row for row in audit["by_context"]}
 
     assert audit["overall"]["trade_count"] == 4
+    assert audit["data_quality"]["price_discontinuity_count"] == 1
+    assert audit["overall_without_price_discontinuity"]["trade_count"] == 3
     assert buckets["true_failed_launch_stop"]["trade_count"] == 1
     assert buckets["stopped_then_rebounded"]["trade_count"] == 1
     assert buckets["had_follow_through_but_lost_support"]["trade_count"] == 1
     assert buckets["high_mfe_then_rebound_after_stop"]["trade_count"] == 1
 
 
-def test_support_stop_matrix_summary_splits_context_phase_setup_and_replacement() -> None:
+def test_support_stop_matrix_exposes_clean_price_discontinuity_buckets() -> None:
     from alphaagent.server.services.backtest import queries
 
     rows = [
         {
             "exit_reason": "support_stop",
-            "entry_setup": "stealth_low_suction",
-            "low_suction_days": 5,
-            "low_suction_launch_confirmed": False,
-            "return_pct": -7.5,
-            "pnl": -7500.0,
-            "mae_pct": -8.2,
-            "mfe_pct": -1.5,
+            "return_pct": -29.0,
+            "pnl": -29000.0,
+            "mae_pct": -31.0,
+            "mfe_pct": 1.0,
             "early_follow_through_state": "failed_launch",
             "sold_before_rebound": False,
-            "dynamic_market_regime": "false_bull",
-            "market_warning_level": 2,
-            "recovery_state": "none",
-            "replacement_trade_id": 10,
-            "replacement_outcome": "bad_replacement",
-            "replacement_return_pct": -6.0,
-            "replacement_return_delta_pct": 1.5,
+            "has_price_discontinuity": True,
+            "first_price_discontinuity_open_gap_pct": -29.0,
+            "setup_family": "low_suction_first_lift",
+            "market_phase": "retreat",
         },
         {
             "exit_reason": "support_stop",
-            "entry_setup": "dragon_pullback",
-            "low_suction_days": 0,
+            "return_pct": -6.0,
+            "pnl": -6000.0,
+            "mae_pct": -8.0,
+            "mfe_pct": 2.0,
+            "early_follow_through_state": "failed_launch",
+            "sold_before_rebound": False,
+            "has_price_discontinuity": False,
+            "setup_family": "dragon_pullback",
+            "market_phase": "retreat",
+        },
+        {
+            "exit_reason": "support_stop",
             "return_pct": -4.0,
             "pnl": -4000.0,
             "mae_pct": -5.0,
             "mfe_pct": 12.0,
+            "giveback_pct": 16.0,
             "early_follow_through_state": "confirmed_follow_through",
-            "sold_before_rebound": True,
-            "dynamic_market_regime": "choppy_rotation",
-            "market_warning_level": 1,
-            "recovery_state": "none",
-            "replacement_trade_id": 11,
-            "replacement_outcome": "strong_replacement",
-            "replacement_return_pct": 10.0,
-            "replacement_return_delta_pct": 14.0,
-        },
-        {
-            "exit_reason": "trend_trailing_stop",
-            "entry_setup": "dragon_pullback",
-            "return_pct": 20.0,
-            "pnl": 20000.0,
-            "mfe_pct": 25.0,
-            "early_follow_through_state": "confirmed_follow_through",
+            "sold_before_rebound": False,
+            "has_price_discontinuity": False,
+            "setup_family": "low_suction_first_lift",
+            "market_phase": "warming",
         },
     ]
 
-    support_rows = [queries.support_stop_matrix_row(row) for row in rows if row["exit_reason"] == "support_stop"]
-    summary = queries.support_stop_matrix_summary(support_rows)
-    contexts = {row["support_stop_context"]: row for row in summary["by_support_stop_context"]}
-    setups = {row["setup_family"]: row for row in summary["by_setup_family"]}
-    replacements = {row["replacement_outcome"]: row for row in summary["by_replacement_outcome"]}
+    summary = queries.support_stop_matrix_summary(rows)
+    raw_context = {row["support_stop_context"]: row for row in summary["by_support_stop_context"]}
+    clean_context = {
+        row["support_stop_context"]: row
+        for row in summary["by_support_stop_context_without_price_discontinuity"]
+    }
+    clean_setups = {
+        row["setup_family"]: row
+        for row in summary["by_setup_family_without_price_discontinuity"]
+    }
 
-    assert summary["audit_only"] is True
-    assert summary["not_used_for_signal_score"] is True
-    assert summary["overall"]["trade_count"] == 2
-    assert contexts["true_failed_launch_stop"]["trade_count"] == 1
-    assert contexts["high_mfe_then_rebound_after_stop"]["trade_count"] == 1
-    assert setups["low_suction_buildup"]["trade_count"] == 1
-    assert setups["dragon_pullback"]["trade_count"] == 1
-    assert replacements["bad_replacement"]["trade_count"] == 1
-    assert summary["interpretation"]["needs_failed_launch_control"] is True
-    assert summary["interpretation"]["needs_rebound_guard"] is True
-    assert summary["interpretation"]["needs_replacement_quality_gate"] is True
+    assert summary["overall"]["trade_count"] == 3
+    assert summary["data_quality"]["price_discontinuity_count"] == 1
+    assert summary["overall_without_price_discontinuity"]["trade_count"] == 2
+    assert raw_context["true_failed_launch_stop"]["trade_count"] == 2
+    assert clean_context["true_failed_launch_stop"]["trade_count"] == 1
+    assert clean_context["clean_float_profit_giveback"]["trade_count"] == 1
+    assert clean_setups["low_suction_first_lift"]["trade_count"] == 1
+    assert summary["interpretation_without_price_discontinuity"]["needs_failed_launch_control"] is True
 
 
 def test_entry_launch_quality_audit_groups_visible_entry_factors() -> None:
@@ -21892,6 +22580,76 @@ def test_symbol_review_clusters_buys_and_matches_sell_without_future_pick() -> N
     assert result["not_used_for_signal_score"] is True
 
 
+def test_symbol_review_marks_support_divergence_research_without_trade_segment() -> None:
+    from alphaagent.server.services.quant import symbol_review
+
+    rows = [
+        {
+            "trade_date": "2026-06-12",
+            "vt_symbol": "003004.SZSE",
+            "total_score": 90.27,
+            "executable_entry_signal": False,
+            "research_entry_signal": True,
+            "action": "WATCH",
+            "signal_label": "支撑分歧低吸买点",
+            "failed_rules": ["reclaim_confirmation"],
+            "evidence": {
+                "close": 32.1,
+                "support_divergence_entry_profile": "high_level_support_divergence",
+                "support_divergence_entry_observation_only": True,
+            },
+        },
+        {
+            "trade_date": "2026-06-17",
+            "vt_symbol": "003004.SZSE",
+            "side": "SELL",
+            "evidence": {"close": 34.2},
+        },
+    ]
+
+    result = symbol_review.build_unified_signal_review(rows)
+
+    assert [marker["kind"] for marker in result["markers"]] == ["research_buy", "sell"]
+    assert result["markers"][0]["label"] == "支撑分歧低吸买点"
+    assert result["segments"] == []
+    assert result["summary"]["trade_count"] == 0
+
+
+def test_symbol_review_marks_strong_trend_ma_pullback_research_without_trade_segment() -> None:
+    from alphaagent.server.services.quant import symbol_review
+
+    rows = [
+        {
+            "trade_date": "2026-05-25",
+            "vt_symbol": "003004.SZSE",
+            "total_score": 78.49,
+            "executable_entry_signal": False,
+            "research_entry_signal": True,
+            "action": "WATCH",
+            "signal_label": "强趋势均线回踩研究买点",
+            "failed_rules": ["pullback_too_short"],
+            "evidence": {
+                "close": 49.76,
+                "strong_trend_ma_pullback_entry_profile": "strong_trend_intraday_ma_pullback",
+                "strong_trend_ma_pullback_entry_observation_only": True,
+            },
+        },
+        {
+            "trade_date": "2026-05-28",
+            "vt_symbol": "003004.SZSE",
+            "side": "SELL",
+            "evidence": {"close": 55.0},
+        },
+    ]
+
+    result = symbol_review.build_unified_signal_review(rows)
+
+    assert [marker["kind"] for marker in result["markers"]] == ["research_buy", "sell"]
+    assert result["markers"][0]["label"] == "强趋势均线回踩研究买点"
+    assert result["segments"] == []
+    assert result["summary"]["trade_count"] == 0
+
+
 def test_classify_dynamic_market_context_separates_mainline_pullback_and_missing_flow() -> None:
     from alphaagent.server.services.quant import market_context
 
@@ -22267,87 +23025,6 @@ def test_phase_strategy_family_matrix_summary_returns_rank_matrices() -> None:
     assert summary["interpretation"]["overlap_requires_conflict_resolution"] is True
 
 
-def test_replacement_quality_matrix_summary_splits_filled_and_rejected_rows() -> None:
-    from alphaagent.server.services.backtest import queries
-
-    trades = [
-        *[
-            {
-                "entry_setup": "stealth_low_suction",
-                "low_suction_days": 5,
-                "low_suction_launch_confirmed": False,
-                "low_suction_launch_quality_bucket": "unconfirmed_buildup",
-                "return_pct": -6.0,
-                "pnl": -600.0,
-                "dynamic_market_regime": "false_bull",
-                "market_warning_level": 2,
-                "recovery_state": "none",
-            }
-            for _ in range(5)
-        ],
-        *[
-            {
-                "entry_setup": "dragon_pullback",
-                "low_suction_days": 4,
-                "low_suction_launch_confirmed": False,
-                "low_suction_launch_quality_bucket": "unconfirmed_buildup",
-                "return_pct": -4.0,
-                "pnl": -400.0,
-                "dynamic_market_regime": "false_bull",
-                "market_warning_level": 2,
-                "recovery_state": "none",
-            }
-            for _ in range(5)
-        ],
-        {
-            "entry_setup": "dragon_pullback",
-            "low_suction_days": 0,
-            "return_pct": 12.0,
-            "pnl": 1200.0,
-            "dynamic_market_regime": "strong_broad",
-            "market_warning_level": 0,
-            "recovery_state": "warming_confirmed",
-        },
-    ]
-    rejects = [
-        {
-            "entry_setup": "stealth_low_suction",
-            "setup_family": "low_suction_buildup",
-            "low_suction_launch_quality_bucket": "unconfirmed_buildup",
-            "market_warning_level": 2,
-            "reject_reasons": ["score_below_gate", "market_warning_too_high"],
-            "dynamic_market_regime": "false_bull",
-            "recovery_state": "none",
-        },
-        {
-            "entry_setup": "dragon_pullback",
-            "setup_family": "dragon_low_suction_overlap",
-            "low_suction_launch_quality_bucket": "unconfirmed_buildup",
-            "market_warning_level": 1,
-            "reject_reasons": ["low_suction_overlap_unconfirmed"],
-            "dynamic_market_regime": "choppy_rotation",
-            "recovery_state": "none",
-        },
-    ]
-
-    summary = queries.replacement_quality_matrix_summary(trades, rejects)
-
-    assert summary["audit_only"] is True
-    assert summary["not_used_for_signal_score"] is True
-    assert summary["filled_overall"]["trade_count"] == 11
-    setup_rows = {row["setup_family"]: row for row in summary["filled_by_setup_family"]}
-    assert setup_rows["low_suction_buildup"]["trade_count"] == 5
-    assert setup_rows["low_suction_buildup"]["avg_return_pct"] == -6.0
-    assert setup_rows["dragon_low_suction_overlap"]["trade_count"] == 5
-    reject_reasons = {row["reason"]: row["count"] for row in summary["rejected_reason_counts"]}
-    assert reject_reasons["score_below_gate"] == 1
-    assert reject_reasons["market_warning_too_high"] == 1
-    assert reject_reasons["low_suction_overlap_unconfirmed"] == 1
-    assert summary["rejected_overall"]["reject_count"] == 2
-    assert summary["interpretation"]["low_suction_buildup_observation_only"] is True
-    assert summary["interpretation"]["overlap_requires_conflict_resolution"] is True
-
-
 def test_market_context_falls_back_to_benchmark_proxy_without_index_data() -> None:
     from alphaagent.server.services.quant import market_context
 
@@ -22467,6 +23144,26 @@ def test_candidate_trade_quality_clusters_consecutive_buy_rows() -> None:
     assert len(first.rows) == 2
 
 
+def test_candidate_trade_quality_daily_clusters_keep_each_candidate_day() -> None:
+    from alphaagent.server.services.backtest.factor_audit import build_daily_candidate_clusters
+
+    rows = [
+        _candidate_quality_row("600000.SSE", date(2026, 1, 2), rank=1),
+        _candidate_quality_row("600000.SSE", date(2026, 1, 3), rank=2),
+        _candidate_quality_row("600001.SSE", date(2026, 1, 3), rank=3),
+    ]
+
+    clusters = build_daily_candidate_clusters(rows)
+
+    assert len(clusters) == 3
+    assert [(cluster.vt_symbol, cluster.cluster_start_date) for cluster in clusters] == [
+        ("600000.SSE", date(2026, 1, 2)),
+        ("600000.SSE", date(2026, 1, 3)),
+        ("600001.SSE", date(2026, 1, 3)),
+    ]
+    assert all(len(cluster.rows) == 1 for cluster in clusters)
+
+
 def test_candidate_trade_quality_splits_cluster_after_gap() -> None:
     from alphaagent.server.services.backtest.factor_audit import build_candidate_clusters
 
@@ -22524,7 +23221,7 @@ def test_candidate_trade_quality_marks_missing_d1_bar() -> None:
     assert result.return_pct is None
 
 
-def test_candidate_trade_quality_independent_trade_ignores_portfolio_capacity() -> None:
+def test_candidate_trade_quality_independent_trade_ignores_transaction_constraints() -> None:
     from alphaagent.server.services.backtest.factor_audit import (
         build_candidate_clusters,
         candidate_trade_quality_report_from_results,
@@ -22560,8 +23257,209 @@ def test_candidate_trade_quality_independent_trade_ignores_portfolio_capacity() 
     assert result.return_pct == 8.0
     assert report["summary"]["sample_count"] == 1
     assert report["summary"]["win_rate"] == 100.0
+    assert report["coverage"]["sample_count"] == 1
+    assert report["coverage"]["daily_candidate_trade_count"] == 1
+    assert report["coverage"]["rank_limited_sample_count"] == 1
     assert report["items"][0]["uses_future_for_label_only"] is True
     assert report["items"][0]["not_used_for_signal_score"] is True
+
+
+def test_candidate_trade_quality_report_can_measure_reentry_overlay_when_explicitly_provided() -> None:
+    from alphaagent.server.services.backtest.factor_audit import (
+        build_daily_candidate_clusters,
+        candidate_trade_quality_report_from_results,
+        simulate_independent_candidate_trade,
+    )
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    row = _candidate_quality_row("600000.SSE", date(2026, 1, 2), rank=1001, setup="support_stop_reentry")
+    row["candidate_source"] = "support_stop_reentry"
+    row["candidate_execution"] = {
+        "execution_candidate_rank": 1,
+        "execution_candidate_selected": True,
+        "raw_signal_rank": 1001,
+    }
+    cluster = build_daily_candidate_clusters([row])[0]
+    bars = [
+        Bar(date(2026, 1, 2), 10.0, 10.2, 9.8, 10.0),
+        Bar(date(2026, 1, 3), 10.0, 10.6, 9.9, 10.5),
+        Bar(date(2026, 1, 4), 10.5, 11.0, 10.4, 10.9),
+        Bar(date(2026, 1, 5), 10.8, 11.0, 10.7, 10.9),
+    ]
+
+    def sell_next_day(position, bar, current_day, params, **kwargs):
+        del position, params, kwargs
+        return "test_exit" if current_day == date(2026, 1, 4) else None
+
+    result = simulate_independent_candidate_trade(
+        cluster,
+        bars,
+        params=BacktestParams(),
+        sell_reason_fn=sell_next_day,
+    )
+    report = candidate_trade_quality_report_from_results([result], rank_limit=20, sample_limit=5)
+
+    assert report["summary"]["sample_count"] == 1
+    assert report["coverage"]["rank_limited_sample_count"] == 1
+    assert report["items"][0]["rank"] == 1001
+    assert report["items"][0]["effective_rank"] == 1
+    assert report["items"][0]["rank_bucket"] == "top_10"
+
+
+def test_candidate_trade_quality_scope_excludes_support_stop_reentry_but_keeps_real_execution_rank() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    run_row = {"params": {"candidate_limit": 20}}
+    ordinary = {
+        "rank": 24,
+        "candidate_execution": {"execution_candidate_rank": 18, "execution_candidate_selected": True},
+    }
+    reentry = {
+        "rank": 1001,
+        "candidate_source": "support_stop_reentry",
+        "reason": {"entry_setup": "support_stop_reentry", "support_stop_reentry": True},
+        "candidate_execution": {
+            "execution_lane": "support_stop_reentry",
+            "execution_candidate_rank": 1,
+            "execution_candidate_selected": True,
+        },
+    }
+
+    assert engine._candidate_quality_cluster_in_scope(ordinary, 20, run_row) is True
+    assert engine._candidate_quality_cluster_in_scope(reentry, 20, run_row) is False
+
+
+def test_candidate_trade_quality_scoped_items_rebuilds_current_execution_pool_for_legacy_snapshots() -> None:
+    from alphaagent.server.services.backtest import engine
+    from alphaagent.server.services.quant.factors import DRAGON_PULLBACK_STRATEGY_ID
+
+    rows = [
+        _candidate_quality_row("600001.SSE", date(2026, 1, 2), rank=1, score=90, setup="dragon_pullback"),
+        _candidate_quality_row("600002.SSE", date(2026, 1, 2), rank=2, score=89, setup="dragon_pullback"),
+        _candidate_quality_row("600003.SSE", date(2026, 1, 2), rank=3, score=95, setup="dragon_pullback"),
+        _candidate_quality_row("600005.SSE", date(2026, 1, 2), rank=101, score=99, setup="dragon_pullback"),
+        {
+            **_candidate_quality_row("600004.SSE", date(2026, 1, 2), rank=1001, score=88, setup="support_stop_reentry"),
+            "candidate_source": "support_stop_reentry",
+        },
+    ]
+
+    scoped = engine._candidate_quality_scoped_items(
+        rows,
+        2,
+        {"strategy_id": DRAGON_PULLBACK_STRATEGY_ID, "params": {"candidate_limit": 20}},
+    )
+
+    assert [row["vt_symbol"] for row in scoped] == ["600003.SSE", "600001.SSE"]
+    assert [row["candidate_execution"]["execution_candidate_rank"] for row in scoped] == [1, 2]
+    assert all(row["vt_symbol"] != "600005.SSE" for row in scoped)
+    assert all(row["vt_symbol"] != "600004.SSE" for row in scoped)
+
+
+def test_candidate_trade_quality_support_stop_reentry_overlay_is_read_only_daily_cap() -> None:
+    from alphaagent.server.services.backtest import engine
+    from alphaagent.server.services.backtest.factor_audit import (
+        CandidateCluster,
+        IndependentTradeResult,
+        candidate_trade_quality_report_from_results,
+    )
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    symbol = "600000.SSE"
+    start = date(2026, 1, 1)
+    bars = []
+    for index in range(30):
+        day = start + timedelta(days=index)
+        close = 10.0
+        if day == date(2026, 1, 25):
+            close = 9.95
+        elif day == date(2026, 1, 26):
+            close = 10.03
+        elif day >= date(2026, 1, 27):
+            close = 10.12
+        bars.append(
+            Bar(
+                day,
+                close,
+                close * 1.01,
+                close * 0.98,
+                close,
+                volume=1_000_000,
+                turnover=100_000_000,
+                change_pct=0.8 if day == date(2026, 1, 26) else 0.0,
+            )
+        )
+    source_cluster = CandidateCluster(
+        vt_symbol=symbol,
+        rows=(
+            _candidate_quality_row(symbol, date(2026, 1, 20), rank=1, setup="dragon_pullback"),
+        ),
+        cluster_start_date=date(2026, 1, 20),
+        cluster_end_date=date(2026, 1, 20),
+        entry_row=_candidate_quality_row(symbol, date(2026, 1, 20), rank=1, setup="dragon_pullback"),
+    )
+    source_result = IndependentTradeResult(
+        status="closed",
+        cluster=source_cluster,
+        entry_signal_date=date(2026, 1, 20),
+        entry_execute_date=date(2026, 1, 21),
+        entry_price=10.0,
+        exit_signal_date=date(2026, 1, 23),
+        exit_execute_date=date(2026, 1, 24),
+        exit_price=9.8,
+        return_pct=-2.0,
+        max_drawdown_pct=-3.0,
+        max_runup_pct=1.0,
+        holding_days=3,
+        exit_reason="support_stop",
+        window=tuple(bar for bar in bars if date(2026, 1, 21) <= bar.trade_date <= date(2026, 1, 24)),
+    )
+    ordinary_cluster = CandidateCluster(
+        vt_symbol="600001.SSE",
+        rows=(
+            _candidate_quality_row("600001.SSE", date(2026, 1, 26), rank=1),
+        ),
+        cluster_start_date=date(2026, 1, 26),
+        cluster_end_date=date(2026, 1, 26),
+        entry_row=_candidate_quality_row("600001.SSE", date(2026, 1, 26), rank=1),
+    )
+    ordinary_result = IndependentTradeResult(
+        status="open",
+        cluster=ordinary_cluster,
+        entry_signal_date=date(2026, 1, 26),
+        entry_execute_date=date(2026, 1, 27),
+        entry_price=10.0,
+        exit_signal_date=None,
+        exit_execute_date=None,
+        exit_price=10.0,
+        return_pct=0.0,
+        max_drawdown_pct=0.0,
+        max_runup_pct=0.0,
+        holding_days=1,
+        exit_reason="open",
+        window=(),
+    )
+
+    baseline = candidate_trade_quality_report_from_results([source_result, ordinary_result], rank_limit=1)
+    overlay = engine._support_stop_reentry_candidate_quality_overlay(
+        [source_result, ordinary_result],
+        bars_by_symbol={symbol: bars},
+        params=BacktestParams(time_stop_days=999),
+        buy_dates_by_symbol={symbol: {date(2026, 1, 20)}},
+        candidate_limit=1,
+        sample_limit=10,
+    )
+
+    assert baseline["summary"]["sample_count"] == 2
+    assert overlay["not_used_for_signal_score"] is True
+    assert overlay["not_used_for_portfolio_execution"] is True
+    assert overlay["coverage"]["source_support_stop_count"] == 1
+    assert overlay["coverage"]["reentry_candidate_count"] == 1
+    assert overlay["reentry_only"]["sample_count"] == 1
+    assert overlay["merged_append"]["sample_count"] == 3
+    assert overlay["merged_daily_cap"]["sample_count"] == 2
+    assert overlay["reentry_samples"][0]["entry_signal_date"] == "2026-01-26"
+    assert overlay["reentry_samples"][0]["entry_reason"]["support_stop_reentry_spec"] == engine.SUPPORT_STOP_REENTRY_OVERLAY_SPEC["name"]
 
 
 def test_candidate_trade_quality_reports_daily_topn_and_rank_windows() -> None:
@@ -22619,6 +23517,147 @@ def test_candidate_trade_quality_reports_daily_topn_and_rank_windows() -> None:
     assert daily["2026-01-02"]["best_candidate"]["rank"] == 1
 
 
+def test_candidate_trade_quality_bucket_audit_classifies_loss_and_winner_paths() -> None:
+    from alphaagent.server.services.backtest.factor_audit import (
+        IndependentTradeResult,
+        build_daily_candidate_clusters,
+        candidate_trade_quality_report_from_results,
+    )
+
+    rows = [
+        _candidate_quality_row("600001.SSE", date(2026, 1, 2), rank=1),
+        _candidate_quality_row("600002.SSE", date(2026, 1, 2), rank=2),
+        _candidate_quality_row("600003.SSE", date(2026, 1, 2), rank=3, launch_confirmed=True),
+    ]
+    rows[0]["reason"]["ma5_distance_pct"] = 8.0
+    rows[1]["reason"]["volume_stall_risk"] = True
+    rows[2]["reason"]["low_suction_days"] = 5
+    rows[2]["reason"]["first_effective_lift"] = True
+    clusters = build_daily_candidate_clusters(rows)
+    returns = {
+        "600001.SSE": (-6.0, -7.0, 2.0),
+        "600002.SSE": (-2.0, -4.0, 10.0),
+        "600003.SSE": (12.0, -3.0, 18.0),
+    }
+    results = []
+    for cluster in clusters:
+        return_pct, mae, mfe = returns[cluster.vt_symbol]
+        results.append(
+            IndependentTradeResult(
+                status="closed",
+                cluster=cluster,
+                entry_signal_date=cluster.entry_row["trade_date"],
+                entry_execute_date=cluster.entry_row["trade_date"],
+                entry_price=10.0,
+                exit_signal_date=cluster.entry_row["trade_date"],
+                exit_execute_date=cluster.entry_row["trade_date"],
+                exit_price=10.0,
+                return_pct=return_pct,
+                max_drawdown_pct=mae,
+                max_runup_pct=mfe,
+                holding_days=4,
+                exit_reason="test_exit",
+            )
+        )
+
+    report = candidate_trade_quality_report_from_results(results, rank_limit=20)
+    audit = report["bucket_audit"]
+    loss_buckets = {row["bucket"]: row for row in audit["loss_buckets"]}
+    winner_buckets = {row["bucket"]: row for row in audit["winner_buckets"]}
+    path_buckets = {row["path_bucket"]: row for row in audit["path_buckets"]}
+
+    assert audit["entry_selection"] == "daily_candidate"
+    assert audit["coverage"]["sample_count"] == 3
+    assert loss_buckets["pure_loss"]["sample_count"] == 1
+    assert loss_buckets["ma5_overextended"]["sample_count"] == 1
+    assert loss_buckets["loss_mfe_giveback"]["sample_count"] == 1
+    assert loss_buckets["volume_stall"]["sample_count"] == 1
+    assert winner_buckets["right_tail_winner"]["sample_count"] == 1
+    assert winner_buckets["mature_low_suction_lift"]["sample_count"] == 1
+    assert path_buckets["mfe_giveback"]["sample_count"] == 1
+
+
+def test_candidate_trade_quality_volume_audit_groups_preparation_paths() -> None:
+    from alphaagent.server.services.backtest.factor_audit import (
+        IndependentTradeResult,
+        build_daily_candidate_clusters,
+        candidate_trade_quality_report_from_results,
+    )
+
+    rows = [
+        _candidate_quality_row("600001.SSE", date(2026, 1, 2), rank=1),
+        _candidate_quality_row("600002.SSE", date(2026, 1, 2), rank=2),
+        _candidate_quality_row("600003.SSE", date(2026, 1, 2), rank=3),
+    ]
+    rows[0]["reason"].update(
+        {
+            "volume_ratio_5d_20d": 1.8,
+            "volume_stall_risk": True,
+            "large_bull_count_20d": 1,
+        }
+    )
+    rows[1]["reason"].update(
+        {
+            "volume_ratio_5d_20d": 0.72,
+            "low_suction_days": 4,
+            "first_effective_lift": True,
+            "recent_limit_up_20d": True,
+        }
+    )
+    rows[2]["reason"].update(
+        {
+            "volume_ratio_5d_20d": 1.0,
+            "low_suction_days": 0,
+            "large_bull_count_20d": 0,
+            "recent_limit_up_20d": False,
+        }
+    )
+    clusters = build_daily_candidate_clusters(rows)
+    returns = {
+        "600001.SSE": (-10.0, -12.0, 2.0),
+        "600002.SSE": (15.0, -3.0, 20.0),
+        "600003.SSE": (-4.0, -5.0, 1.0),
+    }
+    results = []
+    for cluster in clusters:
+        return_pct, mae, mfe = returns[cluster.vt_symbol]
+        results.append(
+            IndependentTradeResult(
+                status="closed",
+                cluster=cluster,
+                entry_signal_date=cluster.entry_row["trade_date"],
+                entry_execute_date=cluster.entry_row["trade_date"],
+                entry_price=10.0,
+                exit_signal_date=cluster.entry_row["trade_date"],
+                exit_execute_date=cluster.entry_row["trade_date"],
+                exit_price=10.0,
+                return_pct=return_pct,
+                max_drawdown_pct=mae,
+                max_runup_pct=mfe,
+                holding_days=4,
+                exit_reason="test_exit",
+            )
+        )
+
+    audit = candidate_trade_quality_report_from_results(results, rank_limit=20)["volume_audit"]
+    by_volume = {row["volume_bucket"]: row for row in audit["by_volume_ratio"]}
+    by_preparation = {row["preparation_bucket"]: row for row in audit["by_preparation"]}
+    path_preparation = {
+        (row["loss_path"], row["preparation_bucket"]): row
+        for row in audit["loss_path_by_preparation"]
+    }
+
+    assert audit["entry_selection"] == "daily_candidate"
+    assert audit["coverage"]["sample_count"] == 3
+    assert by_volume["heavy_volume_expansion"]["sample_count"] == 1
+    assert by_volume["shrinking_volume"]["right_tail_count"] == 1
+    assert by_preparation["volume_stall_distribution"]["deep_drawdown_loss_count"] == 1
+    assert by_preparation["prepared_shrink_lift"]["right_tail_count"] == 1
+    assert by_preparation["no_active_no_lift"]["pure_loss_count"] == 1
+    assert path_preparation[("loss_deep_drawdown", "volume_stall_distribution")]["sample_count"] == 1
+    assert path_preparation[("winner_or_flat", "prepared_shrink_lift")]["sample_count"] == 1
+
+
 def test_candidate_trade_quality_marks_later_preferred_entry_audit_only() -> None:
     from alphaagent.server.services.backtest.factor_audit import (
         build_candidate_clusters,
@@ -22646,7 +23685,7 @@ def test_candidate_trade_quality_marks_later_preferred_entry_audit_only() -> Non
     report = candidate_trade_quality_report_from_results([result])
     item = report["items"][0]
 
-    assert item["entry_selection"] == "first_visible_buy"
+    assert item["entry_selection"] == "daily_candidate"
     assert item["entry_signal_date"] == "2026-01-02"
     assert item["entry_execute_date"] == "2026-01-03"
     assert item["cluster_preferred_entry_signal_date_for_audit"] == "2026-01-03"
@@ -22687,6 +23726,56 @@ def test_candidate_trade_quality_passes_current_buy_signal_to_sell_logic() -> No
     assert True in seen_current_buy_signals
     assert result.status == "closed"
     assert result.exit_signal_date == date(2026, 1, 4)
+
+
+def test_candidate_trade_quality_preserves_reason_for_contextual_failed_launch_exit() -> None:
+    from alphaagent.server.services.backtest import simulation
+    from alphaagent.server.services.backtest.factor_audit import (
+        build_daily_candidate_clusters,
+        candidate_feature_row,
+        simulate_independent_candidate_trade,
+    )
+    from alphaagent.server.services.backtest.schemas import BacktestParams
+
+    feature = candidate_feature_row(
+        {
+            "trade_date": date(2026, 1, 2),
+            "vt_symbol": "600000.SSE",
+            "rank": 1,
+            "action": "BUY",
+            "total_score": 88.0,
+            "reason": {
+                "action": "BUY",
+                "entry_setup": "stealth_low_suction",
+                "entry_family": "low_position_reclaim",
+                "executable_entry_signal": True,
+                "support_price": 10.0,
+                "ma10": 10.0,
+                "ma20": 9.7,
+                "low_suction_days": 4,
+            },
+        }
+    )
+    cluster = build_daily_candidate_clusters([feature])[0]
+    bars = [
+        Bar(date(2026, 1, 2), 10.0, 10.2, 9.9, 10.0),
+        Bar(date(2026, 1, 3), 10.0, 10.15, 9.9, 10.0),
+        Bar(date(2026, 1, 4), 10.0, 10.1, 9.7, 9.78),
+        Bar(date(2026, 1, 5), 9.78, 9.85, 9.65, 9.75),
+        Bar(date(2026, 1, 6), 9.65, 9.7, 9.45, 9.5),
+    ]
+
+    result = simulate_independent_candidate_trade(
+        cluster,
+        bars,
+        params=BacktestParams(enable_contextual_failed_launch_exit_stop=True),
+        sell_reason_fn=simulation.sell_reason_for_position,
+    )
+
+    assert cluster.entry_row["reason"]["entry_setup"] == "stealth_low_suction"
+    assert result.status == "closed"
+    assert result.exit_reason == "contextual_failed_launch_exit_stop"
+    assert result.exit_signal_date == date(2026, 1, 5)
 
 
 def test_candidate_trade_quality_report_endpoint_passes_params(monkeypatch) -> None:
@@ -22747,6 +23836,27 @@ def test_candidate_trade_quality_report_builds_full_candidate_cache(monkeypatch)
 
     assert result["status"] == "unavailable"
     assert captured == {"backtest_id": 203, "limit": 20000}
+
+
+def test_candidate_trade_quality_scope_uses_execution_selected_inside_candidate_limit() -> None:
+    from alphaagent.server.services.backtest import engine
+
+    run_row = {"params": {"candidate_limit": 20}}
+    selected = {
+        "rank": 24,
+        "candidate_execution": {"execution_candidate_rank": 18, "execution_candidate_selected": True},
+    }
+    filtered = {
+        "rank": 19,
+        "candidate_execution": {
+            "execution_candidate_selected": False,
+            "execution_quality_filtered": True,
+        },
+    }
+
+    assert engine._candidate_quality_cluster_in_scope(selected, 20, run_row) is True
+    assert engine._candidate_quality_cluster_in_scope(filtered, 20, run_row) is False
+    assert engine._candidate_quality_cluster_in_scope(filtered, 100, run_row) is True
 
 
 def test_backtest_performance_attribution_endpoint_passes_params(monkeypatch) -> None:

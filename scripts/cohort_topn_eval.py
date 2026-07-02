@@ -1,7 +1,7 @@
-"""top5/10/20 cohort 等权质量评估（无持仓算法）。
+"""top5/10/20 cohort 等权质量评估（候选独立买卖）。
 
 复用 acceptance test 的 cohort helper：每只候选独立 D+1 开盘入场、按策略卖点逐日退出，
-不看持仓/资金/满仓。分别按 top5/10/20 汇总收益/胜率/回撤。
+不读取组合成交约束。分别按 top5/10/20 汇总收益/胜率/回撤。
 宿主跑：DATABASE_URL=... uv run python scripts/cohort_topn_eval.py
 """
 
@@ -39,7 +39,7 @@ def main() -> int:
     print(f"path数={len(path_rows)}", flush=True)
 
     print("\n" + "=" * 64)
-    print("top5/10/20 cohort 质量（无持仓等权，每只独立入场退出）")
+    print("top5/10/20 cohort 质量（候选独立等权，每只独立入场退出）")
     print("=" * 64)
     print(f"{'topN':<6}{'样本':>6}{'胜率':>8}{'均收益':>10}{'中位收益':>10}{'均回撤':>10}{'均持仓天':>10}")
     for top_n in (5, 10, 20):

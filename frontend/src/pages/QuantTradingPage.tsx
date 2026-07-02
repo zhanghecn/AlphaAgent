@@ -172,10 +172,7 @@ export function QuantTradingPage() {
         persist: true,
         auto_portfolio: true,
         included_boards: backtestParams.included_boards,
-        initial_cash: backtestParams.initial_cash,
-        max_positions: backtestParams.max_positions,
         candidate_limit: DEFAULT_EXECUTION_CANDIDATE_LIMIT,
-        max_position_pct: 0.1,
         strict_entry: true,
         execution_model: "legacy_next_open",
         force_refresh: false,
@@ -299,6 +296,7 @@ export function QuantTradingPage() {
         <ActionStatus
           screen={latestResearchRun.screen_run ?? undefined}
           backtestId={latestResearchRun.backtest_id}
+          candidateTradeQuality={latestResearchRun.candidate_trade_quality}
           status={latestResearchRun.status}
           message={latestResearchRun.message}
         />

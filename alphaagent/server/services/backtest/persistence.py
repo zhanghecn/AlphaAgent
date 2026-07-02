@@ -62,6 +62,25 @@ def persist_run(
                 **table_values(schema.backtest_signal_events, item),
             )
         )
+    for item in run.get("candidate_snapshots") or []:
+        snapshot = dict(item)
+        outcome = snapshot.pop("outcome", None)
+        session.execute(
+            schema.backtest_factor_snapshots.insert().values(
+                backtest_id=backtest_id,
+                **table_values(schema.backtest_factor_snapshots, snapshot),
+            )
+        )
+        if isinstance(outcome, dict):
+            session.execute(
+                schema.backtest_factor_outcomes.insert().values(
+                    backtest_id=backtest_id,
+                    signal_date=snapshot.get("trade_date"),
+                    vt_symbol=snapshot.get("vt_symbol"),
+                    rank=snapshot.get("rank"),
+                    payload=outcome,
+                )
+            )
     for item in run["orders"]:
         session.execute(
             schema.backtest_orders.insert().values(

@@ -13,7 +13,7 @@ from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
 from alphaagent.server.services.backtest import execution_models, scoring, simulation
 from alphaagent.server.services.backtest.schemas import BacktestParams, MinuteBar, Position
-from alphaagent.server.services.quant import screening_payloads
+from alphaagent.server.services.quant import screening_loaders, screening_payloads
 from alphaagent.server.services.quant.factors import STRATEGY_ID, Bar, SignalScore
 from alphaagent.server.services.quant.strategy_registry import get_strategy
 
@@ -676,12 +676,24 @@ def _load_signal_rows(
     end: date,
     params: BacktestParams,
 ) -> list[dict[str, Any]]:
+    runs_by_date = screening_loaders.screen_runs_between(
+        session,
+        strategy_id,
+        strategy_version,
+        start,
+        end,
+        signal_evidence_schema_version=screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+        max_symbols=params.max_symbols,
+        included_boards=params.included_boards,
+    )
+    run_ids = sorted(int(run["id"]) for run in runs_by_date.values())
+    if not run_ids:
+        return []
     min_score_prefilter = screening_payloads.signal_score_prefilter_threshold(strategy_id, params.min_entry_score)
     filters = [
         schema.quant_stock_signals.c.strategy_id == strategy_id,
         schema.quant_stock_signals.c.strategy_version == strategy_version,
-        schema.quant_stock_signals.c.trade_date >= start,
-        schema.quant_stock_signals.c.trade_date <= end,
+        schema.quant_stock_signals.c.run_id.in_(run_ids),
         schema.quant_stock_signals.c.total_score >= min_score_prefilter,
         schema.quant_stock_signals.c.risk_score >= 35,
         schema.quant_stock_signals.c.liquidity_score >= 25,
@@ -901,11 +913,6 @@ def _params_to_json(params: BacktestParams) -> dict[str, Any]:
         "take_profit_pct": params.take_profit_pct,
         "trailing_stop_pct": params.trailing_stop_pct,
         "time_stop_days": params.time_stop_days,
-        "enable_signal_rotation": params.enable_signal_rotation,
-        "rotation_min_score": params.rotation_min_score,
-        "rotation_min_score_gap": params.rotation_min_score_gap,
-        "rotation_max_holding_return_pct": params.rotation_max_holding_return_pct,
-        "rotation_min_holding_days": params.rotation_min_holding_days,
         "require_low_suction_launch_confirmation": params.require_low_suction_launch_confirmation,
         "exclude_repeated_dragon_pullback": params.exclude_repeated_dragon_pullback,
         "require_low_suction_launch_for_low_suction_context": params.require_low_suction_launch_for_low_suction_context,
@@ -926,9 +933,10 @@ def _params_to_json(params: BacktestParams) -> dict[str, Any]:
         "enable_weekly_top_fractal_relief": params.enable_weekly_top_fractal_relief,
         "enable_pure_loss_weak_bucket_penalty": params.enable_pure_loss_weak_bucket_penalty,
         "enable_selective_setup_quality_lane": params.enable_selective_setup_quality_lane,
+        "enable_support_divergence_entry_lane": params.enable_support_divergence_entry_lane,
+        "enable_strong_trend_ma_pullback_entry_lane": params.enable_strong_trend_ma_pullback_entry_lane,
         "enable_high_risk_d2_follow_through_entry": params.enable_high_risk_d2_follow_through_entry,
         "enable_dynamic_failed_launch_exit_stop": params.enable_dynamic_failed_launch_exit_stop,
-        "enable_dynamic_failed_launch_replacement_quality_gate": params.enable_dynamic_failed_launch_replacement_quality_gate,
         "enable_failed_launch_exit_stop": params.enable_failed_launch_exit_stop,
         "enable_contextual_failed_launch_exit_stop": params.enable_contextual_failed_launch_exit_stop,
         "enable_mid_profit_giveback_stop": params.enable_mid_profit_giveback_stop,
@@ -937,7 +945,6 @@ def _params_to_json(params: BacktestParams) -> dict[str, Any]:
         "mid_profit_giveback_drawdown_pct": params.mid_profit_giveback_drawdown_pct,
         "enable_contextual_support_reclaim_delay": params.enable_contextual_support_reclaim_delay,
         "support_reclaim_delay_max_warning_level": params.support_reclaim_delay_max_warning_level,
-        "support_reclaim_delay_max_replacement_score_gap": params.support_reclaim_delay_max_replacement_score_gap,
         "support_reclaim_delay_min_sell_day_range_pct": params.support_reclaim_delay_min_sell_day_range_pct,
         "enable_contextual_peak_giveback_stop": params.enable_contextual_peak_giveback_stop,
         "peak_giveback_min_high_gain_pct": params.peak_giveback_min_high_gain_pct,
@@ -948,26 +955,6 @@ def _params_to_json(params: BacktestParams) -> dict[str, Any]:
         "low_suction_false_launch_min_days": params.low_suction_false_launch_min_days,
         "low_suction_false_launch_min_warning_level": params.low_suction_false_launch_min_warning_level,
         "low_suction_false_launch_max_recovery_level": params.low_suction_false_launch_max_recovery_level,
-        "enable_missed_candidate_quality_rotation": params.enable_missed_candidate_quality_rotation,
-        "missed_rotation_min_score": params.missed_rotation_min_score,
-        "missed_rotation_min_score_gap": params.missed_rotation_min_score_gap,
-        "missed_rotation_max_held_return_pct": params.missed_rotation_max_held_return_pct,
-        "missed_rotation_min_held_days": params.missed_rotation_min_held_days,
-        "enable_high_quality_trend_rotation": params.enable_high_quality_trend_rotation,
-        "high_quality_rotation_min_score": params.high_quality_rotation_min_score,
-        "high_quality_rotation_max_rank": params.high_quality_rotation_max_rank,
-        "high_quality_rotation_min_score_gap": params.high_quality_rotation_min_score_gap,
-        "high_quality_rotation_max_held_return_pct": params.high_quality_rotation_max_held_return_pct,
-        "high_quality_rotation_min_held_days": params.high_quality_rotation_min_held_days,
-        "enable_weak_holding_quality_rotation": params.enable_weak_holding_quality_rotation,
-        "weak_holding_rotation_min_score": params.weak_holding_rotation_min_score,
-        "weak_holding_rotation_max_rank": params.weak_holding_rotation_max_rank,
-        "weak_holding_rotation_min_score_gap": params.weak_holding_rotation_min_score_gap,
-        "weak_holding_rotation_max_held_return_pct": params.weak_holding_rotation_max_held_return_pct,
-        "weak_holding_rotation_min_held_days": params.weak_holding_rotation_min_held_days,
-        "weak_holding_rotation_max_ma_convergence_pct": params.weak_holding_rotation_max_ma_convergence_pct,
-        "weak_holding_rotation_min_low_suction_days": params.weak_holding_rotation_min_low_suction_days,
-        "enable_protected_weak_holding_rotation": params.enable_protected_weak_holding_rotation,
         "enable_low_suction_pullback_entry": params.enable_low_suction_pullback_entry,
         "low_suction_pullback_entry_max_wait_days": params.low_suction_pullback_entry_max_wait_days,
         "low_suction_pullback_entry_buffer_pct": params.low_suction_pullback_entry_buffer_pct,
@@ -979,16 +966,8 @@ def _params_to_json(params: BacktestParams) -> dict[str, Any]:
         "low_suction_failed_follow_d3_close_pct": params.low_suction_failed_follow_d3_close_pct,
         "low_suction_opened_space_d5_high_pct": params.low_suction_opened_space_d5_high_pct,
         "low_suction_opened_space_d5_low_pct": params.low_suction_opened_space_d5_low_pct,
-        "enable_low_suction_branch_replacement_quality_gate": params.enable_low_suction_branch_replacement_quality_gate,
-        "low_suction_branch_replacement_gate_wait_days": params.low_suction_branch_replacement_gate_wait_days,
-        "low_suction_branch_replacement_min_score": params.low_suction_branch_replacement_min_score,
-        "low_suction_branch_replacement_max_market_warning_level": params.low_suction_branch_replacement_max_market_warning_level,
-        "low_suction_branch_replacement_max_low_suction_ma_convergence_pct": params.low_suction_branch_replacement_max_low_suction_ma_convergence_pct,
-        "low_suction_branch_replacement_max_dragon_ma_convergence_pct": params.low_suction_branch_replacement_max_dragon_ma_convergence_pct,
-        "enable_low_suction_branch_replacement_strict_setup_gate": params.enable_low_suction_branch_replacement_strict_setup_gate,
         "setup_family_filter": params.setup_family_filter,
         "enable_phase_aware_setup_selector": params.enable_phase_aware_setup_selector,
-        "enable_phase_replacement_quality": params.enable_phase_replacement_quality,
         "reuse_signal_cache": params.reuse_signal_cache,
         "exclude_from_product_baseline": params.exclude_from_product_baseline,
         "included_boards": list(params.included_boards),

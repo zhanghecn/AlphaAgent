@@ -96,7 +96,7 @@ def backtest_performance_attribution_report(
             exit_rows=exit_rows,
             current_schema_version=current_schema_version,
         ),
-        "note": "只读归因报告；用于解释收益/胜率差异，不改变默认买卖、评分、仓位或换仓规则。",
+        "note": "只读归因报告；用于解释收益/胜率差异，不改变默认买卖或评分规则。",
     }
 
 
@@ -251,7 +251,6 @@ def _run_summary(run: dict[str, Any], trades: list[dict[str, Any]]) -> dict[str,
             "max_position_pct": _param_number(params, "max_position_pct"),
             "min_entry_score": _param_number(params, "min_entry_score"),
             "execution_model": params.get("execution_model") or "legacy_next_open",
-            "enable_signal_rotation": _param_bool(params, "enable_signal_rotation", True),
         },
     }
 
@@ -362,7 +361,7 @@ def _sell_trade_index(trades: list[dict[str, Any]]) -> dict[tuple[str, str], dic
 def _constraint_comparison(current_run: dict[str, Any], reference_run: dict[str, Any]) -> dict[str, Any]:
     current = _json_dict(current_run.get("params"))
     reference = _json_dict(reference_run.get("params"))
-    keys = ["candidate_limit", "max_positions", "max_position_pct", "min_entry_score", "execution_model", "enable_signal_rotation"]
+    keys = ["candidate_limit", "max_positions", "max_position_pct", "min_entry_score", "execution_model"]
     rows = []
     for key in keys:
         current_value = current.get(key)
@@ -443,7 +442,7 @@ def _interpretation(
     if return_delta is not None:
         notes.append(f"当前收益比历史参照低 {abs(return_delta):.2f} 个百分点。")
     if constraint_comparison.get("same_max_positions") and constraint_comparison.get("same_candidate_limit"):
-        notes.append("两组核心仓位参数相同：最大持仓和候选执行排名一致，收益下降不能归因于持仓上限从 10 改坏。")
+        notes.append("两组核心执行参数相同：候选执行排名和基础组合参数一致，收益下降应继续看候选质量、卖点和行情分桶。")
     if not _same_schema_lineage(current_schema, reference_schema):
         coverage = _safe_float(current_schema.get("buy_schema_coverage")) or 0.0
         notes.append(
@@ -469,10 +468,10 @@ def _interpretation(
             f"趋势跟踪止盈 {int(reference_trend.get('trade_count') or 0)} -> {int(current_trend.get('trade_count') or 0)} 笔，"
             f"贡献变化 {(_safe_float(delta.get('net_pnl')) or 0.0):,.0f}。"
         )
-        next_tests.append("先测趋势赢家保护：满仓时不要用普通高分候选轻易替换正在扩大利润的持仓。")
+        next_tests.append("先复核趋势赢家减少的卖点路径：用候选独立交易和逐笔退出原因拆分赢家丢失来源。")
     support_row = next((row for row in exit_rows if row.get("exit_reason") == "support_stop"), None)
     if support_row:
-        next_tests.append("再测支撑止损后的替换质量：止损释放仓位后必须验证新买入是否比继续持有/空仓更好。")
+        next_tests.append("再测支撑止损后的独立候选质量：按卖点前后分别统计候选收益和回撤。")
     next_tests.append("按 行情阶段 x setup 只读矩阵筛掉负期望桶，再做默认关闭实验；不要直接追求更高买入频率。")
     return {"notes": notes, "next_tests": next_tests}
 

@@ -1,8 +1,11 @@
-"""Data-quality summary for persisted backtests."""
+"""Data-quality helpers and summaries for persisted backtests."""
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Callable
+
+from alphaagent.market.boards import stock_board
 
 
 ReportLoader = Callable[[int, int], dict[str, Any]]
@@ -105,3 +108,124 @@ def _next_action(coverage: dict[str, Any], checks: list[dict[str, Any]]) -> str:
     if warning:
         return str(warning["message"])
     return "数据质量检查通过；仍需结合多年全 A、walk-forward 和参数敏感性验证。"
+
+
+def candidate_price_discontinuity(
+    bars: list[Any],
+    *,
+    vt_symbol: str,
+    signal_date: date,
+    entry_execute_date: date | None,
+    exit_execute_date: date | None,
+) -> dict[str, Any] | None:
+    """Return the first probable unadjusted-price discontinuity in a trade path."""
+
+    if entry_execute_date is None:
+        return None
+    sorted_bars = sorted(bars, key=lambda bar: _bar_date(bar) or date.min)
+    upper = exit_execute_date or (_bar_date(sorted_bars[-1]) if sorted_bars else entry_execute_date)
+    if upper is None:
+        upper = entry_execute_date
+    first_index = next(
+        (index for index, bar in enumerate(sorted_bars) if (_bar_date(bar) or date.min) >= entry_execute_date),
+        None,
+    )
+    if first_index is None:
+        return None
+    for index in range(max(first_index, 1), len(sorted_bars)):
+        bar = sorted_bars[index]
+        trade_date = _bar_date(bar)
+        if trade_date is None:
+            continue
+        if trade_date > upper:
+            break
+        previous = sorted_bars[index - 1]
+        previous_date = _bar_date(previous)
+        if previous_date is not None and previous_date < signal_date:
+            continue
+        discontinuity = bar_price_discontinuity(previous, bar, vt_symbol=vt_symbol)
+        if discontinuity:
+            return discontinuity
+    return None
+
+
+def bar_price_discontinuity(previous: Any, current: Any, *, vt_symbol: str, threshold: float | None = None) -> dict[str, Any] | None:
+    """Detect a price gap too large to be a normal board-limit move."""
+
+    previous_close = _bar_number(previous, "close_price")
+    open_price = _bar_number(current, "open_price")
+    close_price = _bar_number(current, "close_price")
+    if previous_close is None or open_price is None or close_price is None:
+        return None
+    open_gap = _pct_return(open_price, previous_close)
+    close_gap = _pct_return(close_price, previous_close)
+    if open_gap is None or close_gap is None:
+        return None
+    board_threshold = threshold if threshold is not None else price_discontinuity_threshold(vt_symbol)
+    change_pct = _bar_number(current, "change_pct")
+    if max(abs(open_gap), abs(close_gap)) < board_threshold:
+        return None
+    if (
+        change_pct is not None
+        and abs(change_pct) >= board_threshold - 0.5
+        and abs(change_pct) <= normal_daily_change_limit(vt_symbol) + 0.5
+    ):
+        return None
+    return {
+        "trade_date": _bar_date(current),
+        "open_gap_pct": round(open_gap, 4),
+        "close_gap_pct": round(close_gap, 4),
+        "change_pct": change_pct,
+        "previous_close": previous_close,
+        "open_price": open_price,
+        "close_price": close_price,
+    }
+
+
+def price_discontinuity_threshold(vt_symbol: str) -> float:
+    board = stock_board(vt_symbol)
+    if board == "bse":
+        return 32.0
+    if board in {"star", "chinext"}:
+        return 22.0
+    return 12.0
+
+
+def normal_daily_change_limit(vt_symbol: str) -> float:
+    board = stock_board(vt_symbol)
+    if board == "bse":
+        return 30.0
+    if board in {"star", "chinext"}:
+        return 20.0
+    return 10.0
+
+
+def _bar_date(bar: Any) -> date | None:
+    value = _bar_value(bar, "trade_date")
+    if isinstance(value, date):
+        return value
+    if value:
+        return date.fromisoformat(str(value)[:10])
+    return None
+
+
+def _bar_number(bar: Any, key: str) -> float | None:
+    value = _bar_value(bar, key)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _bar_value(bar: Any, key: str) -> Any:
+    if isinstance(bar, dict):
+        return bar.get(key)
+    return getattr(bar, key, None)
+
+
+def _pct_return(price: float, base: float) -> float | None:
+    if base <= 0:
+        return None
+    return (float(price) / float(base) - 1.0) * 100.0

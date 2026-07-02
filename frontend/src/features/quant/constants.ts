@@ -20,7 +20,6 @@ export const DEFAULT_BACKTEST_PARAMS = {
   start: DEFAULT_BACKTEST_START,
   initial_cash: 1_000_000,
   max_symbols: 5000,
-  max_positions: 10,
   candidate_limit: DEFAULT_EXECUTION_CANDIDATE_LIMIT,
   min_entry_score: 76,
   strict_entry: true,

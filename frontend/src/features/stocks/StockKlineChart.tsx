@@ -46,7 +46,7 @@ export interface KlineMarker {
   time: string;
   side: "BUY" | "SELL" | string;
   markerKind?: "signal" | "trade" | "rejected";
-  status?: "signal" | "filled" | "rejected" | string;
+  status?: "signal" | "filled" | "rejected" | "research" | string;
   reason?: string | null;
   reasonLabel?: string | null;
   price?: number | null;
@@ -612,6 +612,9 @@ function markerChartStyle(marker: KlineMarker): {
   shape: "circle" | "square" | "arrowUp" | "arrowDown";
   text: string;
 } {
+  if (marker.status === "research") {
+    return { position: "belowBar", color: "#2563eb", shape: "circle", text: "研究" };
+  }
   if (marker.markerKind === "signal" || marker.status === "signal") {
     return { position: "belowBar", color: "#ef4444", shape: "circle", text: "买入" };
   }
@@ -632,6 +635,7 @@ function markerListLabel(marker: KlineMarker) {
 }
 
 function markerToneClass(marker: KlineMarker) {
+  if (marker.status === "research") return "border-blue-200 text-blue-700 dark:border-blue-500/30 dark:text-blue-300";
   if (marker.markerKind === "signal" || marker.status === "signal") return "border-blue-200 text-blue-700 dark:border-blue-500/30 dark:text-blue-300";
   if (marker.markerKind === "rejected" || marker.status === "rejected") return "border-amber-200 text-amber-700 dark:border-amber-500/30 dark:text-amber-300";
   return String(marker.side).toUpperCase() === "BUY" ? "text-rise" : "text-fall";

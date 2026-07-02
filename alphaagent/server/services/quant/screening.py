@@ -13,6 +13,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from alphaagent.market.boards import DEFAULT_QUANT_INCLUDED_BOARDS, normalize_included_boards, stock_board_payload
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
+from alphaagent.server.services.backtest import scoring as backtest_scoring
+from alphaagent.server.services.backtest.schemas import BacktestParams
 from alphaagent.server.services.quant.factors import (
     DRAGON_PULLBACK_STRATEGY_ID,
     STRATEGY_ID,
@@ -120,13 +122,14 @@ def screen_stocks(
                 # 信号日收盘价随 evidence 存储，供买卖计划预算与单股回测复用（免重算）
                 score.evidence["close_price"] = float(bars[-1].close_price)
                 _attach_market_context(score, market_payload)
-                scored.append(score)
+                scored.append(_with_default_screening_entry_fields(score, strategy.id, strategy.default_min_entry_score))
 
         scored.sort(key=lambda item: (-item.total_score, item.vt_symbol))
         recommendations = [
             item
             for item in scored
-            if item.entry_signal or item.total_score >= min_recommendation_score
+            if _recommendation_buy_action(item, strategy.default_min_entry_score)
+            or item.total_score >= min_recommendation_score
         ]
         recommendations = _select_recommendations(
             recommendations,
@@ -285,13 +288,14 @@ def screen_tail_preview(
                 score.evidence["snapshot_updated_at"] = _iso_or_none(snapshot_updated_at)
                 score.evidence["snapshot_trade_time"] = str(snapshot_trade_time) if snapshot_trade_time else None
                 score.evidence["bar_mode"] = "minute_aggregate" if vt_symbol in intraday_bars else "snapshot_last_price"
-                scored.append(score)
+                scored.append(_with_default_screening_entry_fields(score, strategy.id, strategy.default_min_entry_score))
 
         scored.sort(key=lambda item: (-item.total_score, item.vt_symbol))
         recommendations = [
             item
             for item in scored
-            if item.entry_signal or item.total_score >= min_recommendation_score
+            if _recommendation_buy_action(item, strategy.default_min_entry_score)
+            or item.total_score >= min_recommendation_score
         ]
         recommendations = _select_recommendations(
             recommendations,
@@ -892,6 +896,9 @@ def latest_trade_plan(vt_symbol: str, strategy_id: str = STRATEGY_ID) -> dict[st
         return {"status": "unsupported_strategy", "strategy_id": strategy_id}
     _ensure_quant_schema()
     with session_scope() as session:
+        run = _latest_screen_run(session, strategy.id)
+        if not run:
+            return {"status": "empty", "vt_symbol": symbol, "message": "该股未在最新候选列表中"}
         row = session.execute(
             select(
                 schema.quant_recommendations,
@@ -905,15 +912,15 @@ def latest_trade_plan(vt_symbol: str, strategy_id: str = STRATEGY_ID) -> dict[st
             )
             .where(
                 and_(
+                    schema.quant_recommendations.c.run_id == run["id"],
                     schema.quant_recommendations.c.vt_symbol == symbol,
-                    schema.quant_recommendations.c.strategy_id == strategy.id,
                 )
             )
-            .order_by(desc(schema.quant_recommendations.c.trade_date))
+            .order_by(schema.quant_recommendations.c.rank)
             .limit(1)
         ).mappings().first()
     if not row:
-        return {"status": "empty", "vt_symbol": symbol, "message": "该股未在候选列表中"}
+        return {"status": "empty", "vt_symbol": symbol, "message": "该股未在最新候选列表中"}
     risk_control = row.get("risk_control") or {}
     trade_plan = risk_control.get("trade_plan") if isinstance(risk_control, dict) else None
     return {
@@ -1032,6 +1039,7 @@ def symbol_signal_history(
             if score.evidence.get("status") != "ready":
                 continue
             _attach_market_context(score, market_payload)
+            score = _with_signal_history_research_fields(score, strategy.id, effective_min_entry_score)
             rows.append(_symbol_signal_row(score, effective_min_entry_score))
 
     trigger_rows = [row for row in rows if row.get("executable_entry_signal")]
@@ -1286,28 +1294,15 @@ def _screen_runs_by_date(
     max_symbols: int = 5000,
     included_boards: tuple[str, ...] = DEFAULT_QUANT_INCLUDED_BOARDS,
 ) -> dict[date, dict[str, Any]]:
-    if not trade_dates:
-        return {}
-    rows = session.execute(
-        select(schema.quant_signal_runs)
-        .where(
-            and_(
-                schema.quant_signal_runs.c.strategy_id == strategy_id,
-                schema.quant_signal_runs.c.strategy_version == strategy_version,
-                schema.quant_signal_runs.c.status.in_(["succeeded", "empty"]),
-                schema.quant_signal_runs.c.trade_date.in_(trade_dates),
-            )
-        )
-        .order_by(schema.quant_signal_runs.c.trade_date, desc(schema.quant_signal_runs.c.id))
-    ).mappings().all()
-    result: dict[date, dict[str, Any]] = {}
-    for row in rows:
-        trade_date = row["trade_date"]
-        if trade_date not in result:
-            run = dict(row)
-            if _screen_run_matches_params(run, max_symbols=max_symbols, included_boards=included_boards):
-                result[trade_date] = run
-    return result
+    return screening_loaders.screen_runs_by_date(
+        session,
+        strategy_id,
+        strategy_version,
+        trade_dates,
+        signal_evidence_schema_version=screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+        max_symbols=max_symbols,
+        included_boards=included_boards,
+    )
 
 
 def _screen_run_matches_params(run: dict[str, Any], *, max_symbols: int, included_boards: tuple[str, ...]) -> bool:
@@ -1700,6 +1695,32 @@ def _symbol_signal_row(item: SignalScore, min_entry_score: float) -> dict[str, A
     return screening_payloads.symbol_signal_row(item, min_entry_score)
 
 
+def _with_default_screening_entry_fields(item: SignalScore, strategy_id: str, min_entry_score: float) -> SignalScore:
+    if strategy_id != DRAGON_PULLBACK_STRATEGY_ID:
+        return item
+    params = BacktestParams(
+        strategy=strategy_id,
+        min_entry_score=min_entry_score,
+        strict_entry=True,
+    )
+    item = backtest_scoring._with_default_clean_watch_entry_fields(item, params)
+    return backtest_scoring._with_default_candidate_quality_score(item, params)
+
+
+def _with_signal_history_research_fields(item: SignalScore, strategy_id: str, min_entry_score: float) -> SignalScore:
+    if strategy_id != DRAGON_PULLBACK_STRATEGY_ID:
+        return item
+    params = BacktestParams(
+        strategy=strategy_id,
+        min_entry_score=min_entry_score,
+        strict_entry=True,
+        enable_support_divergence_entry_lane=True,
+        enable_strong_trend_ma_pullback_entry_lane=True,
+    )
+    item = backtest_scoring._with_support_divergence_entry_fields(item, params)
+    return backtest_scoring._with_strong_trend_ma_pullback_entry_fields(item, params)
+
+
 def _symbol_signal_fit_key(row: dict[str, Any], strategy_id: str) -> tuple[int, float, float]:
     return screening_payloads.symbol_signal_fit_key(row, strategy_id)
 
@@ -1754,7 +1775,7 @@ def _select_recommendations(
 
 
 def _recommendation_buy_action(item: SignalScore, min_entry_score: float) -> bool:
-    return bool(item.entry_signal and not screening_payloads.failed_entry_rules(item, min_entry_score))
+    return bool(screening_payloads.entry_action_payload(item, min_entry_score)["executable_entry_signal"])
 
 
 def _float_or_default(value: Any, default: float) -> float:

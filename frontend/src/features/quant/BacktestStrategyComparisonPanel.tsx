@@ -131,7 +131,7 @@ function StrategyPhaseMatrix({ rows }: { rows: BacktestStrategyComparisonRow[] }
       <div className="border-b px-3 py-2">
         <div className="text-sm font-medium">按行情阶段评审</div>
         <div className="mt-0.5 text-xs text-muted-foreground">
-          按真实闭合成交的买入日行情聚合，只读审计，不参与默认信号、排序、卖点或仓位。
+          按真实闭合成交的买入日行情聚合，只读审计，不参与默认信号、排序或卖点。
         </div>
       </div>
       <Table>

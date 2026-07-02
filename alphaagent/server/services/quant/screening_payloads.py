@@ -78,6 +78,7 @@ def recommendation_to_db(
     reason["signal_label"] = action_payload["signal_label"]
     reason["signal_role"] = action_payload["signal_role"]
     reason["key_entry_signal"] = action_payload["key_entry_signal"]
+    reason["research_entry_signal"] = bool(action_payload.get("research_entry_signal"))
     entry_price = (item.evidence or {}).get("close_price")
     return {
         "run_id": run_id,
@@ -123,6 +124,58 @@ def symbol_signal_row(item: SignalScore, min_entry_score: float) -> dict[str, An
 
 
 def entry_action_payload(item: SignalScore, min_entry_score: float) -> dict[str, Any]:
+    evidence = item.evidence or {}
+    if evidence.get("default_clean_watch_entry_profile"):
+        executable = bool(evidence.get("default_executable_entry_signal", True))
+        failed_rules = list(evidence.get("failed_rules") or [])
+        return {
+            "raw_entry_signal": bool(evidence.get("raw_entry_signal", item.entry_signal)),
+            "executable_entry_signal": executable,
+            "action": "BUY" if executable else "WATCH",
+            "failed_rules": failed_rules,
+            "failed_rule_count": len(failed_rules),
+            "effective_min_entry_score": effective_entry_score_threshold(item, min_entry_score),
+            "entry_threshold_reason": "default_clean_watch_entry",
+            "signal_label": str(evidence.get("signal_label") or _default_clean_watch_entry_label(evidence)),
+            "signal_role": str(evidence.get("signal_role") or ("key_buy" if executable else "watch")),
+            "key_entry_signal": executable,
+            "research_entry_signal": False,
+        }
+    research_entry = research_entry_payload(evidence)
+    if research_entry is not None:
+        default_executable = bool(evidence.get("default_executable_entry_signal"))
+        observation_only = bool(evidence.get(research_entry["observation_key"]))
+        executable = default_executable and not observation_only
+        return {
+            "raw_entry_signal": bool(evidence.get("raw_entry_signal", item.entry_signal)),
+            "executable_entry_signal": executable,
+            "action": "BUY" if executable else "WATCH",
+            "failed_rules": list(evidence.get("failed_rules") or []),
+            "failed_rule_count": len(list(evidence.get("failed_rules") or [])),
+            "effective_min_entry_score": effective_entry_score_threshold(item, min_entry_score),
+            "entry_threshold_reason": research_entry["threshold_reason"],
+            "signal_label": str(evidence.get("signal_label") or research_entry["label"]),
+            "signal_role": "research_buy" if observation_only else str(evidence.get("signal_role") or "key_buy"),
+            "key_entry_signal": bool(evidence.get("key_entry_signal")) and not observation_only,
+            "research_entry_signal": observation_only,
+        }
+    if evidence.get("support_divergence_entry_profile"):
+        default_executable = bool(evidence.get("default_executable_entry_signal"))
+        observation_only = bool(evidence.get("support_divergence_entry_observation_only"))
+        executable = default_executable and not observation_only
+        return {
+            "raw_entry_signal": bool(evidence.get("raw_entry_signal", item.entry_signal)),
+            "executable_entry_signal": executable,
+            "action": "BUY" if executable else "WATCH",
+            "failed_rules": list(evidence.get("failed_rules") or []),
+            "failed_rule_count": len(list(evidence.get("failed_rules") or [])),
+            "effective_min_entry_score": effective_entry_score_threshold(item, min_entry_score),
+            "entry_threshold_reason": "support_divergence_research",
+            "signal_label": str(evidence.get("signal_label") or "支撑分歧低吸买点"),
+            "signal_role": "research_buy" if observation_only else str(evidence.get("signal_role") or "key_buy"),
+            "key_entry_signal": bool(evidence.get("key_entry_signal")) and not observation_only,
+            "research_entry_signal": observation_only,
+        }
     effective_min_entry_score = effective_entry_score_threshold(item, min_entry_score)
     failed_rules = failed_entry_rules(item, min_entry_score)
     executable = bool(item.entry_signal and not failed_rules)
@@ -139,6 +192,33 @@ def entry_action_payload(item: SignalScore, min_entry_score: float) -> dict[str,
         "signal_role": signal_role,
         "key_entry_signal": key_entry_signal,
     }
+
+
+def research_entry_payload(evidence: dict[str, Any]) -> dict[str, str] | None:
+    if evidence.get("support_divergence_entry_profile"):
+        return {
+            "observation_key": "support_divergence_entry_observation_only",
+            "threshold_reason": "support_divergence_research",
+            "label": "支撑分歧低吸买点",
+        }
+    if evidence.get("strong_trend_ma_pullback_entry_profile"):
+        return {
+            "observation_key": "strong_trend_ma_pullback_entry_observation_only",
+            "threshold_reason": "strong_trend_ma_pullback_research",
+            "label": "强趋势均线回踩研究买点",
+        }
+    return None
+
+
+def _default_clean_watch_entry_label(evidence: dict[str, Any]) -> str:
+    profile = str(evidence.get("default_clean_watch_entry_profile") or "")
+    if profile == "clean_active_support_divergence":
+        return "支撑分歧低吸买点"
+    if profile == "clean_low_liquidity_first_lift":
+        return "低流动性低吸首启买点"
+    if profile == "clean_low_liquidity_accumulation":
+        return "低流动性承接低吸买点"
+    return "低吸承接买点"
 
 
 def signal_semantics(item: SignalScore, executable: bool) -> tuple[str, str, bool]:

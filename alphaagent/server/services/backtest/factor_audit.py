@@ -8,6 +8,7 @@ from statistics import median
 from typing import Any
 
 from alphaagent.market.boards import stock_board_payload
+from alphaagent.server.services.backtest import data_quality
 from alphaagent.server.services.backtest.schemas import Position
 from alphaagent.server.services.quant.factors import Bar
 from alphaagent.server.services.quant.screening_payloads import normalize_quant_evidence
@@ -41,6 +42,7 @@ class IndependentTradeResult:
     max_runup_pct: float | None
     holding_days: int | None
     exit_reason: str | None
+    window: tuple[Bar, ...] = ()
 
 
 def rank_bucket(rank: int | None) -> str:
@@ -169,7 +171,7 @@ def factor_interaction_opportunity_cost_summary(rows: list[dict[str, Any]]) -> d
     """Return read-only factor interaction and opportunity-cost buckets."""
 
     return {
-        "method": "只读审计：用候选信号日可见特征分组，并用固定持有后验衡量胜率/MFE/MAE；机会成本字段不参与评分、买卖或仓位。",
+        "method": "只读审计：用候选信号日可见特征分组，并用固定持有后验衡量胜率/MFE/MAE；后验字段不参与评分或买卖。",
         "entry_family_rank": _interaction_bucket_rows(rows, ("entry_family", "rank_bucket")),
         "entry_family_market": _interaction_bucket_rows(rows, ("entry_family", "dynamic_market_regime")),
         "launch_quality_market": _interaction_bucket_rows(rows, ("low_suction_launch_quality_bucket", "dynamic_market_regime")),
@@ -193,8 +195,8 @@ def opportunity_cost_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "avoided_loser_return_sum": round(sum(losers), 4) if losers else 0.0,
         "added_loser_count": 0,
         "added_loser_return_sum": 0.0,
-        "replacement_quality_delta": 0.0,
-        "note": "这里是候选后验机会成本基线；具体实验的 removed/added/replacement delta 必须在实验对比报告中按真实组合路径计算。",
+        "net_opportunity_delta": 0.0,
+        "note": "这里是候选后验机会成本基线；后验统计只用于审计，不参与评分或买卖。",
     }
 
 
@@ -281,7 +283,6 @@ def candidate_execution_attribution_summary(
     trades: list[dict[str, Any]] | None = None,
     cache_coverage: dict[str, Any] | None = None,
     max_execution_rank: int = 20,
-    portfolio_full_threshold: int = 10,
 ) -> dict[str, Any]:
     """Summarize how top candidates flowed into real portfolio execution.
 
@@ -321,11 +322,6 @@ def candidate_execution_attribution_summary(
         "filled_count": sum(1 for row in rows if row.get("filled")),
         "missed_count": sum(1 for row in rows if not row.get("filled")),
         "top20_missed_quality": _top_missed_quality(rows),
-        "missed_candidate_opportunity_cost": missed_candidate_opportunity_cost_rows(rows),
-        "portfolio_opportunity_summary": candidate_portfolio_opportunity_summary(
-            rows,
-            portfolio_full_threshold=portfolio_full_threshold,
-        ),
         "by_status": _candidate_execution_status_buckets(rows),
         "by_not_filled_reason": _candidate_not_filled_reason_buckets(rows),
         "by_not_filled_subreason": _candidate_not_filled_subreason_buckets(rows),
@@ -333,266 +329,8 @@ def candidate_execution_attribution_summary(
     }
 
 
-def candidate_portfolio_opportunity_summary(
-    rows: list[dict[str, Any]],
-    *,
-    portfolio_full_threshold: int = 10,
-) -> dict[str, Any]:
-    """Summarize missed candidates against the real portfolio snapshot."""
-
-    full_threshold = max(int(portfolio_full_threshold or 10), 1)
-    missed_new_symbol_rows = [
-        row
-        for row in rows
-        if not row.get("filled") and not _candidate_same_symbol_held(row)
-    ]
-    full_portfolio_missed_rows = [
-        row
-        for row in missed_new_symbol_rows
-        if _candidate_held_count(row) >= full_threshold
-    ]
-    return {
-        "method": "只读归因：把候选 top-N 与信号日真实持仓快照对照，区分已持有同股的重复信号和满仓错过的新标的；后验收益只用于审计。",
-        "portfolio_full_threshold": full_threshold,
-        "new_symbol_missed": _candidate_portfolio_bucket_metrics(
-            "new_symbol_missed",
-            missed_new_symbol_rows,
-            "opportunity_type",
-            portfolio_full_threshold=full_threshold,
-        ),
-        "full_portfolio_missed": _candidate_portfolio_bucket_metrics(
-            "new_symbol_missed_full_portfolio",
-            full_portfolio_missed_rows,
-            "opportunity_type",
-            portfolio_full_threshold=full_threshold,
-        ),
-        "by_opportunity_type": _candidate_portfolio_group_buckets(
-            rows,
-            "opportunity_type",
-            lambda row: _candidate_opportunity_type(row, portfolio_full_threshold=full_threshold),
-            portfolio_full_threshold=full_threshold,
-        ),
-        "by_delta_vs_weakest_held": _candidate_portfolio_group_buckets(
-            [row for row in missed_new_symbol_rows if _delta_vs_weakest_held(row) is not None],
-            "delta_bucket",
-            lambda row: _delta_bucket(_delta_vs_weakest_held(row)),
-            portfolio_full_threshold=full_threshold,
-        ),
-        "top_replacement_opportunities": _top_replacement_opportunities(
-            missed_new_symbol_rows,
-            limit=20,
-        ),
-        "not_used_for_signal_score": True,
-    }
-
-
-def missed_candidate_opportunity_cost_rows(rows: list[dict[str, Any]], *, limit: int = 50) -> list[dict[str, Any]]:
-    """Return audit-only opportunity cost rows for missed candidates."""
-
-    result: list[dict[str, Any]] = []
-    for row in rows:
-        if row.get("filled"):
-            continue
-        held_rows = row.get("held_positions") if isinstance(row.get("held_positions"), list) else []
-        missed_score = _float_or_none(row.get("score"))
-        if missed_score is None:
-            continue
-        for held in held_rows:
-            if not isinstance(held, dict):
-                continue
-            if _same_symbol(row.get("vt_symbol"), held.get("vt_symbol")):
-                continue
-            held_score = _position_entry_score(held)
-            held_return = _float_or_none(held.get("floating_pnl_pct"))
-            score_gap = missed_score - held_score if held_score is not None else None
-            result.append(
-                {
-                    "signal_date": row.get("signal_date"),
-                    "execute_date": row.get("execute_date"),
-                    "missed_symbol": row.get("vt_symbol"),
-                    "missed_rank": row.get("rank"),
-                    "missed_score": missed_score,
-                    "missed_return_20d": row.get("missed_return_20d"),
-                    "missed_mfe_20d": row.get("missed_mfe_20d"),
-                    "missed_mae_20d": row.get("missed_mae_20d"),
-                    "held_symbol": held.get("vt_symbol"),
-                    "held_entry_score": held_score,
-                    "held_unrealized_return_pct": held_return,
-                    "held_days": _int_or_none(held.get("holding_days")),
-                    "held_support_state": _position_support_state(held),
-                    "rotation_score_gap": round(score_gap, 4) if score_gap is not None else None,
-                    "replacement_quality_delta": _quality_delta(row.get("missed_return_20d"), held_return),
-                    "not_used_for_signal_score": True,
-                }
-            )
-    result.sort(
-        key=lambda item: (
-            -(item.get("replacement_quality_delta") if item.get("replacement_quality_delta") is not None else -999.0),
-            -(item.get("rotation_score_gap") if item.get("rotation_score_gap") is not None else -999.0),
-            str(item.get("signal_date") or ""),
-            str(item.get("missed_symbol") or ""),
-        )
-    )
-    return result[: max(int(limit or 50), 1)]
-
-
-def _candidate_portfolio_group_buckets(
-    rows: list[dict[str, Any]],
-    bucket_key: str,
-    bucket_fn,
-    *,
-    portfolio_full_threshold: int,
-) -> list[dict[str, Any]]:
-    groups: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        groups.setdefault(str(bucket_fn(row) or "unknown"), []).append(row)
-    result = [
-        _candidate_portfolio_bucket_metrics(
-            bucket,
-            bucket_rows,
-            bucket_key,
-            portfolio_full_threshold=portfolio_full_threshold,
-        )
-        for bucket, bucket_rows in groups.items()
-    ]
-    result.sort(
-        key=lambda item: (
-            -int(item.get("sample_count") or 0),
-            -_sort_float(item.get("average_return_20d")),
-            str(item.get(bucket_key) or ""),
-        )
-    )
-    return result
-
-
-def _candidate_portfolio_bucket_metrics(
-    bucket: str,
-    rows: list[dict[str, Any]],
-    bucket_key: str,
-    *,
-    portfolio_full_threshold: int,
-) -> dict[str, Any]:
-    returns = [_candidate_audit_return(row) for row in rows]
-    returns = [value for value in returns if value is not None]
-    deltas = [_delta_vs_weakest_held(row) for row in rows]
-    deltas = [value for value in deltas if value is not None]
-    return {
-        bucket_key: bucket,
-        "sample_count": len(rows),
-        "filled_count": sum(1 for row in rows if row.get("filled")),
-        "missed_count": sum(1 for row in rows if not row.get("filled")),
-        "same_symbol_holding_count": sum(1 for row in rows if _candidate_same_symbol_held(row)),
-        "full_portfolio_count": sum(1 for row in rows if _candidate_held_count(row) >= portfolio_full_threshold),
-        "positive_20d_count": sum(1 for value in returns if value > 0),
-        "win_rate": _ratio_pct(sum(1 for value in returns if value > 0), len(returns)),
-        "average_return_20d": round(sum(returns) / len(returns), 4) if returns else None,
-        "median_return_20d": round(median(returns), 4) if returns else None,
-        "average_delta_vs_weakest_held": round(sum(deltas) / len(deltas), 4) if deltas else None,
-        "not_used_for_signal_score": True,
-    }
-
-
-def _top_replacement_opportunities(rows: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
-    candidates = []
-    for row in rows:
-        delta = _delta_vs_weakest_held(row)
-        weakest = _weakest_non_same_holding(row)
-        if delta is None or weakest is None:
-            continue
-        candidates.append(
-            {
-                "signal_date": row.get("signal_date"),
-                "execute_date": row.get("execute_date"),
-                "missed_symbol": row.get("vt_symbol"),
-                "missed_name": row.get("name"),
-                "missed_rank": row.get("rank"),
-                "missed_score": row.get("score"),
-                "missed_return_20d": row.get("missed_return_20d"),
-                "missed_mfe_20d": row.get("missed_mfe_20d"),
-                "missed_mae_20d": row.get("missed_mae_20d"),
-                "held_symbol": weakest.get("vt_symbol"),
-                "held_unrealized_return_pct": _float_or_none(weakest.get("floating_pnl_pct")),
-                "held_days": _int_or_none(weakest.get("holding_days")),
-                "replacement_quality_delta": delta,
-                "not_filled_subreason": row.get("not_filled_subreason"),
-                "not_used_for_signal_score": True,
-            }
-        )
-    candidates.sort(
-        key=lambda item: (
-            -_sort_float(item.get("replacement_quality_delta")),
-            -_sort_float(item.get("missed_return_20d")),
-            str(item.get("signal_date") or ""),
-            str(item.get("missed_symbol") or ""),
-        )
-    )
-    return candidates[: max(int(limit or 20), 1)]
-
-
 def _candidate_audit_return(row: dict[str, Any]) -> float | None:
     return _float_or_none(row.get("fixed_return_20d") if row.get("filled") else row.get("missed_return_20d"))
-
-
-def _candidate_opportunity_type(row: dict[str, Any], *, portfolio_full_threshold: int) -> str:
-    if row.get("filled"):
-        return "filled"
-    if _candidate_same_symbol_held(row):
-        return "repeat_same_symbol_holding"
-    if _candidate_held_count(row) >= portfolio_full_threshold:
-        return "new_symbol_missed_full_portfolio"
-    if _candidate_held_count(row) > 0:
-        return "new_symbol_missed_with_open_slots"
-    return "new_symbol_missed_without_position_snapshot"
-
-
-def _delta_bucket(value: float | None) -> str:
-    if value is None:
-        return "unknown"
-    if value < 0:
-        return "<0"
-    if value < 5:
-        return "0-5"
-    if value < 10:
-        return "5-10"
-    if value < 20:
-        return "10-20"
-    return "20+"
-
-
-def _delta_vs_weakest_held(row: dict[str, Any]) -> float | None:
-    missed_return = _float_or_none(row.get("missed_return_20d"))
-    weakest = _weakest_non_same_holding(row)
-    held_return = _float_or_none((weakest or {}).get("floating_pnl_pct"))
-    if missed_return is None or held_return is None:
-        return None
-    return round(missed_return - held_return, 4)
-
-
-def _weakest_non_same_holding(row: dict[str, Any]) -> dict[str, Any] | None:
-    holdings = [
-        holding
-        for holding in _candidate_held_positions(row)
-        if not _same_symbol(row.get("vt_symbol"), holding.get("vt_symbol"))
-    ]
-    if not holdings:
-        return None
-    return min(
-        holdings,
-        key=lambda holding: (
-            _float_or_none(holding.get("floating_pnl_pct"))
-            if _float_or_none(holding.get("floating_pnl_pct")) is not None
-            else 10**18,
-            str(holding.get("vt_symbol") or ""),
-        ),
-    )
-
-
-def _candidate_same_symbol_held(row: dict[str, Any]) -> bool:
-    return any(_same_symbol(row.get("vt_symbol"), holding.get("vt_symbol")) for holding in _candidate_held_positions(row))
-
-
-def _candidate_held_count(row: dict[str, Any]) -> int:
-    return len(_candidate_held_positions(row))
 
 
 def _same_symbol(left: Any, right: Any) -> bool:
@@ -935,6 +673,7 @@ def candidate_feature_row(row: dict[str, Any], *, stock: dict[str, Any] | None =
         "fund_flow_source": evidence.get("fund_flow_source"),
         "as_of_date": _date_to_iso(trade_date),
         "feature_window_end": _date_to_iso(trade_date),
+        "reason": evidence,
         "uses_future_for_label_only": False,
         "not_used_for_signal_score": True,
     }
@@ -1000,6 +739,39 @@ def build_candidate_clusters(
     return clusters
 
 
+def build_daily_candidate_clusters(rows: list[dict[str, Any]]) -> list[CandidateCluster]:
+    """Build one independent trade unit for each visible daily BUY candidate."""
+
+    clusters: list[CandidateCluster] = []
+    for row in rows:
+        if not _is_executable_buy_candidate(row):
+            continue
+        symbol = str(row.get("vt_symbol") or "").strip().upper()
+        trade_date = _date_or_none(row.get("trade_date") or row.get("signal_date"))
+        if not symbol or trade_date is None:
+            continue
+        item = dict(row)
+        item["trade_date"] = trade_date
+        item["vt_symbol"] = symbol
+        clusters.append(
+            CandidateCluster(
+                vt_symbol=symbol,
+                rows=(item,),
+                cluster_start_date=trade_date,
+                cluster_end_date=trade_date,
+                entry_row=item,
+            )
+        )
+    clusters.sort(
+        key=lambda cluster: (
+            cluster.cluster_start_date,
+            _int_or_none(cluster.entry_row.get("rank")) or 10**9,
+            cluster.vt_symbol,
+        )
+    )
+    return clusters
+
+
 def simulate_independent_candidate_trade(
     cluster: CandidateCluster,
     bars: list[Bar],
@@ -1014,8 +786,7 @@ def simulate_independent_candidate_trade(
 
     The entry is D+1 open. Exit signals are evaluated at daily close using the
     same sell reason function as the portfolio backtest, then executed at the
-    next trading day's open. No cash, position count, existing holding or
-    rotation constraint is consulted.
+    next trading day's open. It does not read portfolio execution constraints.
     """
 
     sorted_bars = sorted(bars, key=lambda bar: bar.trade_date)
@@ -1044,7 +815,6 @@ def simulate_independent_candidate_trade(
             bar.trade_date,
             params,
             current_buy_signal=bar.trade_date in current_buy_signal_dates,
-            replacement_available=False,
         )
         if not sell_reason or bar.trade_date <= position.entry_date:
             continue
@@ -1078,8 +848,9 @@ def candidate_trade_quality_report_from_results(
 
     rank_cutoff = min(max(int(rank_limit or 100), 1), 200)
     samples = [_candidate_trade_sample(result) for result in results]
-    ranked_samples = [item for item in samples if (_int_or_none(item.get("rank")) or 10**9) <= rank_cutoff]
+    ranked_samples = [item for item in samples if _candidate_effective_rank(item) <= rank_cutoff]
     evaluated = [item for item in ranked_samples if item.get("status") in {"closed", "open"} and _float_or_none(item.get("return_pct")) is not None]
+    clean_evaluated = [item for item in evaluated if not item.get("has_price_discontinuity")]
     missing = [item for item in ranked_samples if item.get("status") not in {"closed", "open"}]
     by_rank_bucket = _candidate_trade_group_metrics(evaluated, "rank_bucket", _candidate_trade_rank_bucket_order)
     by_rank_limit = _candidate_trade_rank_limit_metrics(evaluated, rank_cutoff=rank_cutoff)
@@ -1098,8 +869,8 @@ def candidate_trade_quality_report_from_results(
     sample_cutoff = min(max(int(sample_limit or 500), 1), 1000)
     return {
         "status": "ready" if ranked_samples else "empty",
-        "method": "候选质量只读评估：每个交易日的 BUY 候选按排名进入候选池，同股连续 BUY 合并成簇，每簇只按首个可见 BUY 的 D+1 开盘买入，再按当前策略卖点卖出；不看现金、仓位、满仓、已有持仓或换仓。",
-        "entry_selection": "first_visible_buy",
+        "method": "候选质量只读评估：每个交易日的 BUY 候选按排名进入候选池，每条 D 日候选独立按 D+1 开盘买入，再按当前策略卖点卖出；不读取组合成交约束。",
+        "entry_selection": "daily_candidate",
         "rank_limit": rank_cutoff,
         "sample_limit": sample_cutoff,
         "summary": summary,
@@ -1110,12 +881,21 @@ def candidate_trade_quality_report_from_results(
         "by_setup_family": by_setup_family,
         "by_market_phase": by_market_phase,
         "by_exit_reason": by_exit_reason,
+        "data_quality": _candidate_trade_data_quality_summary(evaluated),
+        "summary_without_price_discontinuity": _candidate_trade_metric_summary(clean_evaluated),
+        "by_exit_reason_without_price_discontinuity": _candidate_trade_group_metrics(clean_evaluated, "exit_reason"),
+        "bucket_audit": candidate_trade_bucket_audit_from_results(results, rank_limit=rank_cutoff, sample_limit=sample_cutoff),
+        "volume_audit": candidate_trade_volume_audit_from_results(results, rank_limit=rank_cutoff, sample_limit=sample_cutoff),
         "yearly": yearly_summaries,
         "daily_summaries": daily_summaries,
         "best_samples": list(reversed(sorted_by_return[-10:])),
         "worst_samples": sorted_by_return[:10],
         "items": sorted(ranked_samples, key=lambda item: (str(item.get("entry_signal_date") or ""), str(item.get("vt_symbol") or "")))[:sample_cutoff],
         "coverage": {
+            "sample_count": len(results),
+            "rank_limited_sample_count": len(ranked_samples),
+            "daily_candidate_trade_count": len(results),
+            # Backward-compatible aliases for older frontend clients.
             "cluster_count": len(results),
             "rank_limited_cluster_count": len(ranked_samples),
             "evaluated_count": len(evaluated),
@@ -1125,7 +905,103 @@ def candidate_trade_quality_report_from_results(
         },
         "uses_future_for_label_only": True,
         "not_used_for_signal_score": True,
-        "note": "这是候选本身质量评估，不是组合收益；TopN 表示全历史每个信号日排名前 N 的独立候选交易汇总。候选年化参考按平均单笔收益和平均持有天数折算，不看资金、仓位、满仓或换仓。买入只用当日可见 BUY，卖出逐日按当时可见状态触发。后验收益、MFE/MAE 只作为报告标签，不进入信号评分。",
+        "note": "这是候选本身质量评估，不是组合收益；TopN 表示全历史每个信号日排名前 N 的独立候选交易汇总。候选年化参考按平均单笔收益和平均持有天数折算。买入只用当日可见 BUY，卖出逐日按当时可见状态触发。后验收益、MFE/MAE 只作为报告标签，不进入信号评分。",
+    }
+
+
+def candidate_trade_bucket_audit_from_results(
+    results: list[IndependentTradeResult],
+    *,
+    rank_limit: int = 20,
+    sample_limit: int = 20,
+) -> dict[str, Any]:
+    """Classify candidate-quality samples into read-only loss and winner buckets."""
+
+    rank_cutoff = min(max(int(rank_limit or 20), 1), 200)
+    sample_cutoff = min(max(int(sample_limit or 20), 1), 100)
+    samples = [_candidate_trade_sample(result) for result in results]
+    evaluated = [
+        item
+        for item in samples
+        if _candidate_effective_rank(item) <= rank_cutoff
+        and item.get("status") in {"closed", "open"}
+        and _float_or_none(item.get("return_pct")) is not None
+    ]
+    return {
+        "status": "ready" if evaluated else "empty",
+        "method": "只读审计：复用候选质量样本，把每日候选独立交易按亏损路径、赢家路径和信号日可见结构分桶；后验收益/MFE/MAE只用于归因，不参与评分或买卖。",
+        "entry_selection": "daily_candidate",
+        "rank_limit": rank_cutoff,
+        "sample_limit": sample_cutoff,
+        "summary": _candidate_trade_metric_summary(evaluated),
+        "path_buckets": _candidate_trade_path_buckets(evaluated),
+        "loss_buckets": _candidate_trade_multi_buckets(
+            evaluated,
+            _candidate_loss_bucket_keys,
+            sample_limit=sample_cutoff,
+            reverse=False,
+        ),
+        "winner_buckets": _candidate_trade_multi_buckets(
+            evaluated,
+            _candidate_winner_bucket_keys,
+            sample_limit=sample_cutoff,
+            reverse=True,
+        ),
+        "coverage": {
+            "sample_count": len(evaluated),
+            "loss_sample_count": sum(1 for item in evaluated if (_float_or_none(item.get("return_pct")) or 0.0) < 0),
+            "winner_sample_count": sum(1 for item in evaluated if (_float_or_none(item.get("return_pct")) or 0.0) > 0),
+            "mfe8_giveback_count": sum(1 for item in evaluated if _candidate_is_mfe_giveback(item)),
+            "pure_loss_count": sum(1 for item in evaluated if _candidate_is_pure_loss(item)),
+            "right_tail_count": sum(1 for item in evaluated if _candidate_is_right_tail(item)),
+        },
+        "uses_future_for_label_only": True,
+        "not_used_for_signal_score": True,
+    }
+
+
+def candidate_trade_volume_audit_from_results(
+    results: list[IndependentTradeResult],
+    *,
+    rank_limit: int = 20,
+    sample_limit: int = 20,
+) -> dict[str, Any]:
+    """Audit whether visible volume/preparation factors explain candidate losses."""
+
+    rank_cutoff = min(max(int(rank_limit or 20), 1), 200)
+    sample_cutoff = min(max(int(sample_limit or 20), 1), 100)
+    samples = [_candidate_trade_sample(result) for result in results]
+    evaluated = [
+        item
+        for item in samples
+        if _candidate_effective_rank(item) <= rank_cutoff
+        and item.get("status") in {"closed", "open"}
+        and _float_or_none(item.get("return_pct")) is not None
+    ]
+    losers = [item for item in evaluated if (_float_or_none(item.get("return_pct")) or 0.0) < 0]
+    return {
+        "status": "ready" if evaluated else "empty",
+        "method": "只读审计：用信号日可见的成交量、近端活跃、低吸天数和 fresh lift 结构分桶，解释买后亏损是否来自量能/洗盘准备不足；后验收益/MFE/MAE只用于归因，不参与评分或买卖。",
+        "entry_selection": "daily_candidate",
+        "rank_limit": rank_cutoff,
+        "sample_limit": sample_cutoff,
+        "summary": _candidate_trade_metric_summary(evaluated),
+        "by_volume_ratio": _candidate_trade_labeled_group_metrics(evaluated, "volume_bucket", _candidate_volume_ratio_bucket),
+        "by_active_volume": _candidate_trade_labeled_group_metrics(evaluated, "active_volume_bucket", _candidate_active_volume_bucket),
+        "by_preparation": _candidate_trade_labeled_group_metrics(evaluated, "preparation_bucket", _candidate_preparation_bucket),
+        "loss_by_volume_ratio": _candidate_trade_labeled_group_metrics(losers, "volume_bucket", _candidate_volume_ratio_bucket),
+        "loss_by_preparation": _candidate_trade_labeled_group_metrics(losers, "preparation_bucket", _candidate_preparation_bucket),
+        "loss_path_by_preparation": _candidate_loss_path_preparation_buckets(evaluated, sample_limit=sample_cutoff),
+        "coverage": {
+            "sample_count": len(evaluated),
+            "loss_sample_count": len(losers),
+            "volume_ratio_missing_count": sum(1 for item in evaluated if _candidate_evidence_float(item, "volume_ratio_5d_20d") is None),
+            "volume_stall_count": sum(1 for item in evaluated if _candidate_volume_stall(_candidate_sample_evidence(item))),
+            "no_recent_active_bar_count": sum(1 for item in evaluated if _candidate_active_volume_bucket(item) == "no_recent_active_bar"),
+            "prepared_shrink_lift_count": sum(1 for item in evaluated if _candidate_preparation_bucket(item) == "prepared_shrink_lift"),
+        },
+        "uses_future_for_label_only": True,
+        "not_used_for_signal_score": True,
     }
 
 
@@ -1452,6 +1328,7 @@ def _independent_trade_missing(
         max_runup_pct=None,
         holding_days=None,
         exit_reason=status,
+        window=(),
     )
 
 
@@ -1481,6 +1358,7 @@ def _independent_trade_closed_result(
         max_runup_pct=_window_mfe(window, entry_price),
         holding_days=max(len(window) - 1, 0),
         exit_reason=exit_reason,
+        window=tuple(window),
     )
 
 
@@ -1507,6 +1385,7 @@ def _independent_trade_open_result(
         max_runup_pct=_window_mfe(window, entry_price),
         holding_days=max(len(window) - 1, 0) if window else 0,
         exit_reason="open",
+        window=tuple(window),
     )
 
 
@@ -1517,17 +1396,30 @@ def _candidate_trade_sample(result: IndependentTradeResult) -> dict[str, Any]:
     preferred_entry = _select_candidate_cluster_preferred_entry_for_audit(list(cluster.rows))
     preferred_evidence = _candidate_evidence(preferred_entry)
     rank = _int_or_none(entry.get("rank"))
+    execution = entry.get("candidate_execution") if isinstance(entry.get("candidate_execution"), dict) else {}
+    execution_rank = _int_or_none(execution.get("execution_candidate_rank"))
+    effective_rank = execution_rank or rank
     score = _float_or_none(entry.get("total_score") or entry.get("score") or evidence.get("total_score"))
     setup_family = _candidate_setup_family(entry, evidence)
     market_phase = _candidate_market_phase(entry, evidence)
+    price_discontinuity = data_quality.candidate_price_discontinuity(
+        list(result.window),
+        vt_symbol=cluster.vt_symbol,
+        signal_date=result.entry_signal_date,
+        entry_execute_date=result.entry_execute_date,
+        exit_execute_date=result.exit_execute_date,
+    )
     payload = {
         "status": result.status,
         "vt_symbol": cluster.vt_symbol,
         "name": entry.get("name"),
         "rank": rank,
+        "raw_rank": rank,
+        "execution_candidate_rank": execution_rank,
+        "effective_rank": effective_rank,
         "score": score,
-        "rank_bucket": _candidate_trade_rank_bucket(rank),
-        "daily_rank_window": _candidate_trade_rank_window(rank),
+        "rank_bucket": _candidate_trade_rank_bucket(effective_rank),
+        "daily_rank_window": _candidate_trade_rank_window(effective_rank),
         "score_bucket": _candidate_trade_score_bucket(score),
         "setup_family": setup_family,
         "setup_family_label": _candidate_setup_family_label(setup_family),
@@ -1544,10 +1436,15 @@ def _candidate_trade_sample(result: IndependentTradeResult) -> dict[str, Any]:
         "max_runup_pct": result.max_runup_pct,
         "holding_days": result.holding_days,
         "exit_reason": result.exit_reason,
+        "has_price_discontinuity": bool(price_discontinuity),
+        "first_price_discontinuity_date": _date_to_iso(price_discontinuity.get("trade_date")) if price_discontinuity else None,
+        "first_price_discontinuity_open_gap_pct": price_discontinuity.get("open_gap_pct") if price_discontinuity else None,
+        "first_price_discontinuity_close_gap_pct": price_discontinuity.get("close_gap_pct") if price_discontinuity else None,
+        "first_price_discontinuity_change_pct": price_discontinuity.get("change_pct") if price_discontinuity else None,
         "cluster_start_date": _date_to_iso(cluster.cluster_start_date),
         "cluster_end_date": _date_to_iso(cluster.cluster_end_date),
         "cluster_size": len(cluster.rows),
-        "entry_selection": "first_visible_buy",
+        "entry_selection": "daily_candidate",
         "cluster_preferred_entry_signal_date_for_audit": _date_to_iso(preferred_entry.get("trade_date") or preferred_entry.get("signal_date")),
         "cluster_preferred_entry_score_for_audit": _float_or_none(
             preferred_entry.get("total_score")
@@ -1555,12 +1452,16 @@ def _candidate_trade_sample(result: IndependentTradeResult) -> dict[str, Any]:
             or preferred_evidence.get("total_score")
         ),
         "cluster_preferred_entry_not_used_for_trade": preferred_entry is not entry,
-        "entry_reason": evidence,
+        "entry_reason": {**{key: value for key, value in entry.items() if key not in {"outcome", "reason"}}, **evidence},
         "uses_future_for_label_only": True,
         "not_used_for_signal_score": True,
     }
     payload.update(stock_board_payload(cluster.vt_symbol, entry.get("exchange")))
     return payload
+
+
+def _candidate_effective_rank(row: dict[str, Any]) -> int:
+    return _int_or_none(row.get("effective_rank") or row.get("execution_candidate_rank") or row.get("rank")) or 10**9
 
 
 def _candidate_trade_group_metrics(
@@ -1583,7 +1484,7 @@ def _candidate_trade_rank_limit_metrics(rows: list[dict[str, Any]], *, rank_cuto
     for limit in (10, 20, 50, 100):
         if limit > rank_cutoff:
             continue
-        bucket_rows = [row for row in rows if (_int_or_none(row.get("rank")) or 10**9) <= limit]
+        bucket_rows = [row for row in rows if _candidate_effective_rank(row) <= limit]
         if not bucket_rows:
             continue
         result.append(
@@ -1594,7 +1495,7 @@ def _candidate_trade_rank_limit_metrics(rows: list[dict[str, Any]], *, rank_cuto
             }
         )
     if rank_cutoff not in {10, 20, 50, 100}:
-        bucket_rows = [row for row in rows if (_int_or_none(row.get("rank")) or 10**9) <= rank_cutoff]
+        bucket_rows = [row for row in rows if _candidate_effective_rank(row) <= rank_cutoff]
         if bucket_rows:
             result.append(
                 {
@@ -1622,9 +1523,9 @@ def _candidate_trade_daily_summaries(rows: list[dict[str, Any]], *, rank_cutoff:
         ]
         if not evaluated:
             continue
-        top10_rows = [row for row in evaluated if (_int_or_none(row.get("rank")) or 10**9) <= 10]
-        top20_rows = [row for row in evaluated if (_int_or_none(row.get("rank")) or 10**9) <= 20]
-        topn_rows = [row for row in evaluated if (_int_or_none(row.get("rank")) or 10**9) <= rank_cutoff]
+        top10_rows = [row for row in evaluated if _candidate_effective_rank(row) <= 10]
+        top20_rows = [row for row in evaluated if _candidate_effective_rank(row) <= 20]
+        topn_rows = [row for row in evaluated if _candidate_effective_rank(row) <= rank_cutoff]
         summaries.append(
             {
                 "entry_signal_date": signal_date,
@@ -1645,7 +1546,7 @@ def _candidate_trade_daily_summaries(rows: list[dict[str, Any]], *, rank_cutoff:
 def _candidate_trade_yearly_summaries(rows: list[dict[str, Any]], *, rank_cutoff: int) -> list[dict[str, Any]]:
     by_year: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
-        if (_int_or_none(row.get("rank")) or 10**9) > rank_cutoff:
+        if _candidate_effective_rank(row) > rank_cutoff:
             continue
         signal_date = _date_or_none(row.get("entry_signal_date"))
         if signal_date is None:
@@ -1665,6 +1566,519 @@ def _candidate_trade_yearly_summaries(rows: list[dict[str, Any]], *, rank_cutoff
     ]
 
 
+def _candidate_trade_path_buckets(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return _candidate_trade_group_metrics(
+        [
+            {
+                **row,
+                "path_bucket": _candidate_path_bucket(row),
+            }
+            for row in rows
+        ],
+        "path_bucket",
+        {
+            "right_tail_winner": 10,
+            "steady_winner": 20,
+            "mfe_giveback": 30,
+            "ordinary_loss": 40,
+            "pure_loss": 50,
+            "deep_drawdown_loss": 60,
+            "flat": 70,
+        },
+    )
+
+
+def _candidate_trade_multi_buckets(
+    rows: list[dict[str, Any]],
+    key_fn,
+    *,
+    sample_limit: int,
+    reverse: bool,
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        for key in key_fn(row):
+            groups.setdefault(key, []).append(row)
+    result = []
+    for key, bucket_rows in groups.items():
+        if not bucket_rows:
+            continue
+        result.append(
+            {
+                "bucket": key,
+                "label": _candidate_audit_bucket_label(key),
+                **_candidate_trade_metric_summary(bucket_rows),
+                "examples": _candidate_bucket_examples(bucket_rows, limit=sample_limit, reverse=reverse),
+                "not_used_for_signal_score": True,
+                "uses_future_for_label_only": True,
+            }
+        )
+    result.sort(
+        key=lambda item: (
+            _candidate_audit_bucket_order(str(item.get("bucket") or "")),
+            -int(item.get("sample_count") or 0),
+            _sort_float(item.get("average_return_pct")),
+        )
+    )
+    return result
+
+
+def _candidate_trade_labeled_group_metrics(
+    rows: list[dict[str, Any]],
+    key: str,
+    bucket_fn,
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(str(bucket_fn(row) or "unknown"), []).append(row)
+    result = [
+        {
+            key: bucket,
+            "label": _candidate_volume_bucket_label(bucket),
+            **_candidate_trade_metric_summary(bucket_rows),
+            "loss_sample_count": sum(1 for item in bucket_rows if (_float_or_none(item.get("return_pct")) or 0.0) < 0),
+            "pure_loss_count": sum(1 for item in bucket_rows if _candidate_is_pure_loss(item)),
+            "deep_drawdown_loss_count": sum(1 for item in bucket_rows if (_float_or_none(item.get("return_pct")) or 0.0) < 0 and (_float_or_none(item.get("max_drawdown_pct")) or 0.0) <= -8.0),
+            "mfe_giveback_count": sum(1 for item in bucket_rows if _candidate_is_mfe_giveback(item)),
+            "right_tail_count": sum(1 for item in bucket_rows if _candidate_is_right_tail(item)),
+            "uses_future_for_label_only": True,
+            "not_used_for_signal_score": True,
+        }
+        for bucket, bucket_rows in groups.items()
+    ]
+    result.sort(
+        key=lambda item: (
+            _candidate_volume_bucket_order(str(item.get(key) or "")),
+            -int(item.get("sample_count") or 0),
+            _sort_float(item.get("average_return_pct")),
+        )
+    )
+    return result
+
+
+def _candidate_loss_path_preparation_buckets(
+    rows: list[dict[str, Any]],
+    *,
+    sample_limit: int,
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        path = _candidate_volume_loss_path(row)
+        preparation = _candidate_preparation_bucket(row)
+        groups.setdefault(f"{path}::{preparation}", []).append(row)
+    result = []
+    for key, bucket_rows in groups.items():
+        path, preparation = key.split("::", 1)
+        result.append(
+            {
+                "loss_path": path,
+                "loss_path_label": _candidate_volume_bucket_label(path),
+                "preparation_bucket": preparation,
+                "preparation_label": _candidate_volume_bucket_label(preparation),
+                **_candidate_trade_metric_summary(bucket_rows),
+                "examples": _candidate_volume_bucket_examples(bucket_rows, limit=sample_limit, reverse=path == "winner_or_flat"),
+                "uses_future_for_label_only": True,
+                "not_used_for_signal_score": True,
+            }
+        )
+    result.sort(
+        key=lambda item: (
+            _candidate_volume_bucket_order(str(item.get("loss_path") or "")),
+            _candidate_volume_bucket_order(str(item.get("preparation_bucket") or "")),
+            -int(item.get("sample_count") or 0),
+        )
+    )
+    return result
+
+
+def _candidate_volume_loss_path(row: dict[str, Any]) -> str:
+    return_pct = _float_or_none(row.get("return_pct")) or 0.0
+    if return_pct >= 0:
+        return "winner_or_flat"
+    mfe = _float_or_none(row.get("max_runup_pct")) or 0.0
+    mae = _float_or_none(row.get("max_drawdown_pct")) or 0.0
+    if mfe >= 8.0:
+        return "loss_mfe_giveback"
+    if mae <= -8.0:
+        return "loss_deep_drawdown"
+    if mfe < 3.0:
+        return "loss_no_mfe"
+    return "ordinary_loss"
+
+
+def _candidate_volume_ratio_bucket(row: dict[str, Any]) -> str:
+    ratio = _candidate_evidence_float(row, "volume_ratio_5d_20d")
+    if ratio is None:
+        return "volume_missing"
+    if ratio < 0.55:
+        return "extreme_shrink"
+    if ratio < 0.85:
+        return "shrinking_volume"
+    if ratio <= 1.15:
+        return "balanced_volume"
+    if ratio <= 1.55:
+        return "mild_volume_expansion"
+    if ratio <= 2.20:
+        return "heavy_volume_expansion"
+    return "extreme_volume_expansion"
+
+
+def _candidate_active_volume_bucket(row: dict[str, Any]) -> str:
+    evidence = _candidate_sample_evidence(row)
+    large_bull_count = _float_or_none(evidence.get("large_bull_count_20d")) or 0.0
+    if bool(evidence.get("recent_limit_up_20d")):
+        return "recent_limit_up"
+    if large_bull_count >= 3.0:
+        return "large_bull_ge3"
+    if large_bull_count >= 1.0:
+        return "large_bull_1_2"
+    return "no_recent_active_bar"
+
+
+def _candidate_preparation_bucket(row: dict[str, Any]) -> str:
+    evidence = _candidate_sample_evidence(row)
+    low_days = _float_or_none(evidence.get("low_suction_days")) or 0.0
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    fresh_lift = bool(evidence.get("first_effective_lift") or evidence.get("low_suction_launch_confirmed"))
+    if _candidate_volume_stall(evidence):
+        return "volume_stall_distribution"
+    if low_days >= 3 and fresh_lift and volume_ratio is not None and 0.55 <= volume_ratio <= 1.20:
+        return "prepared_shrink_lift"
+    if low_days >= 3 and not fresh_lift:
+        return "low_suction_no_fresh_lift"
+    if low_days >= 3 and fresh_lift:
+        return "prepared_lift_bad_volume"
+    if _candidate_active_volume_bucket(row) != "no_recent_active_bar" and volume_ratio is not None and 0.85 <= volume_ratio <= 1.55:
+        return "active_balanced_volume"
+    if _candidate_active_volume_bucket(row) != "no_recent_active_bar":
+        return "active_bad_volume"
+    return "no_active_no_lift"
+
+
+def _candidate_sample_evidence(row: dict[str, Any]) -> dict[str, Any]:
+    return row.get("entry_reason") if isinstance(row.get("entry_reason"), dict) else {}
+
+
+def _candidate_evidence_float(row: dict[str, Any], key: str) -> float | None:
+    return _float_or_none(_candidate_sample_evidence(row).get(key))
+
+
+def _candidate_volume_bucket_examples(rows: list[dict[str, Any]], *, limit: int, reverse: bool) -> list[dict[str, Any]]:
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            _sort_float(row.get("return_pct")),
+            _sort_float(row.get("max_runup_pct")),
+            -_candidate_effective_rank(row),
+            str(row.get("entry_signal_date") or ""),
+            str(row.get("vt_symbol") or ""),
+        ),
+        reverse=reverse,
+    )
+    result = []
+    for row in ordered[: max(int(limit or 20), 1)]:
+        evidence = _candidate_sample_evidence(row)
+        result.append(
+            {
+                "vt_symbol": row.get("vt_symbol"),
+                "name": row.get("name"),
+                "entry_signal_date": row.get("entry_signal_date"),
+                "rank": row.get("rank"),
+                "effective_rank": row.get("effective_rank"),
+                "score": row.get("score"),
+                "return_pct": row.get("return_pct"),
+                "max_drawdown_pct": row.get("max_drawdown_pct"),
+                "max_runup_pct": row.get("max_runup_pct"),
+                "volume_ratio_5d_20d": _float_or_none(evidence.get("volume_ratio_5d_20d")),
+                "low_suction_days": _float_or_none(evidence.get("low_suction_days")),
+                "first_effective_lift": bool(evidence.get("first_effective_lift") or evidence.get("low_suction_launch_confirmed")),
+                "recent_limit_up_20d": bool(evidence.get("recent_limit_up_20d")),
+                "large_bull_count_20d": _float_or_none(evidence.get("large_bull_count_20d")),
+                "volume_stall_risk": bool(evidence.get("volume_stall_risk") or evidence.get("high_position_volume_stall_risk")),
+            }
+        )
+    return result
+
+
+def _candidate_loss_bucket_keys(row: dict[str, Any]) -> list[str]:
+    return_pct = _float_or_none(row.get("return_pct")) or 0.0
+    if return_pct >= 0:
+        return []
+    evidence = row.get("entry_reason") if isinstance(row.get("entry_reason"), dict) else {}
+    keys = [_candidate_path_bucket(row)]
+    if abs(_float_or_none(row.get("max_runup_pct")) or 0.0) < 3.0:
+        keys.append("loss_no_mfe")
+    if (_float_or_none(row.get("max_drawdown_pct")) or 0.0) <= -8.0:
+        keys.append("loss_deep_drawdown")
+    if (_float_or_none(row.get("max_runup_pct")) or 0.0) >= 8.0:
+        keys.append("loss_mfe_giveback")
+    if _candidate_high_level_risk(evidence):
+        keys.append("visible_high_level_risk")
+    if _candidate_ma5_overextended(evidence):
+        keys.append("ma5_overextended")
+    if _candidate_volume_stall(evidence):
+        keys.append("volume_stall")
+    if _candidate_low_suction_without_lift(evidence):
+        keys.append("low_suction_without_fresh_lift")
+    if _candidate_weak_market(evidence):
+        keys.append("weak_market_context")
+    if _candidate_low_liquidity(evidence, row):
+        keys.append("low_liquidity_loss")
+    return _dedupe_list(keys)
+
+
+def _candidate_winner_bucket_keys(row: dict[str, Any]) -> list[str]:
+    return_pct = _float_or_none(row.get("return_pct")) or 0.0
+    if return_pct <= 0:
+        return []
+    evidence = row.get("entry_reason") if isinstance(row.get("entry_reason"), dict) else {}
+    keys = [_candidate_path_bucket(row)]
+    if (_float_or_none(row.get("max_runup_pct")) or 0.0) >= 15.0:
+        keys.append("right_tail_mfe15")
+    if _candidate_low_suction_mature_lift(evidence):
+        keys.append("mature_low_suction_lift")
+    if _candidate_strong_trend_ma_pullback(evidence):
+        keys.append("strong_trend_ma_pullback")
+    if _candidate_high_level_support_divergence(evidence):
+        keys.append("high_level_support_divergence")
+    if _candidate_low_liquidity(evidence, row):
+        keys.append("low_liquidity_winner")
+    if _candidate_recent_limit_activity(evidence):
+        keys.append("recent_limit_or_large_bull")
+    return _dedupe_list(keys)
+
+
+def _candidate_path_bucket(row: dict[str, Any]) -> str:
+    return_pct = _float_or_none(row.get("return_pct")) or 0.0
+    mfe = _float_or_none(row.get("max_runup_pct")) or 0.0
+    mae = _float_or_none(row.get("max_drawdown_pct")) or 0.0
+    if return_pct >= 8.0 or (return_pct > 0 and mfe >= 15.0):
+        return "right_tail_winner"
+    if return_pct > 0:
+        return "steady_winner"
+    if mfe >= 8.0:
+        return "mfe_giveback"
+    if mae <= -8.0:
+        return "deep_drawdown_loss"
+    if abs(mfe) < 3.0:
+        return "pure_loss"
+    if return_pct < 0:
+        return "ordinary_loss"
+    return "flat"
+
+
+def _candidate_bucket_examples(rows: list[dict[str, Any]], *, limit: int, reverse: bool) -> list[dict[str, Any]]:
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            _sort_float(row.get("return_pct")),
+            _sort_float(row.get("max_runup_pct")),
+            -_candidate_effective_rank(row),
+            str(row.get("entry_signal_date") or ""),
+            str(row.get("vt_symbol") or ""),
+        ),
+        reverse=reverse,
+    )
+    return [
+        {
+            "vt_symbol": row.get("vt_symbol"),
+            "name": row.get("name"),
+            "entry_signal_date": row.get("entry_signal_date"),
+            "entry_execute_date": row.get("entry_execute_date"),
+            "rank": row.get("rank"),
+            "effective_rank": row.get("effective_rank"),
+            "score": row.get("score"),
+            "return_pct": row.get("return_pct"),
+            "max_drawdown_pct": row.get("max_drawdown_pct"),
+            "max_runup_pct": row.get("max_runup_pct"),
+            "holding_days": row.get("holding_days"),
+            "exit_reason": row.get("exit_reason"),
+            "setup_family": row.get("setup_family"),
+            "market_phase": row.get("market_phase"),
+        }
+        for row in ordered[: max(int(limit or 20), 1)]
+    ]
+
+
+def _candidate_is_pure_loss(row: dict[str, Any]) -> bool:
+    return (_float_or_none(row.get("return_pct")) or 0.0) < 0 and (_float_or_none(row.get("max_runup_pct")) or 0.0) < 3.0
+
+
+def _candidate_is_mfe_giveback(row: dict[str, Any]) -> bool:
+    return (_float_or_none(row.get("return_pct")) or 0.0) < 0 and (_float_or_none(row.get("max_runup_pct")) or 0.0) >= 8.0
+
+
+def _candidate_is_right_tail(row: dict[str, Any]) -> bool:
+    return (_float_or_none(row.get("return_pct")) or 0.0) >= 8.0 or (_float_or_none(row.get("max_runup_pct")) or 0.0) >= 15.0
+
+
+def _candidate_high_level_risk(evidence: dict[str, Any]) -> bool:
+    return bool(
+        evidence.get("high_level_sideways_distribution_risk")
+        or evidence.get("distribution_risk")
+        or evidence.get("deep_trend_ma10_dislocation_observe")
+    )
+
+
+def _candidate_ma5_overextended(evidence: dict[str, Any]) -> bool:
+    distance = _float_or_none(evidence.get("ma5_distance_pct"))
+    return distance is not None and distance >= 6.0
+
+
+def _candidate_volume_stall(evidence: dict[str, Any]) -> bool:
+    return bool(evidence.get("volume_stall_risk") or evidence.get("high_position_volume_stall_risk"))
+
+
+def _candidate_low_suction_without_lift(evidence: dict[str, Any]) -> bool:
+    low_days = _float_or_none(evidence.get("low_suction_days")) or 0.0
+    return low_days >= 3 and not bool(evidence.get("first_effective_lift") or evidence.get("low_suction_launch_confirmed"))
+
+
+def _candidate_weak_market(evidence: dict[str, Any]) -> bool:
+    warning = _float_or_none(evidence.get("market_warning_level")) or 0.0
+    regime = str(evidence.get("dynamic_market_regime") or "")
+    return warning >= 3 or regime in {"risk_off", "weak_breadth", "false_bull"}
+
+
+def _candidate_low_liquidity(evidence: dict[str, Any], row: dict[str, Any]) -> bool:
+    score = _float_or_none(row.get("liquidity_score") or evidence.get("liquidity_score"))
+    return score is not None and score < 25.0
+
+
+def _candidate_low_suction_mature_lift(evidence: dict[str, Any]) -> bool:
+    low_days = _float_or_none(evidence.get("low_suction_days")) or 0.0
+    return low_days >= 3 and bool(evidence.get("first_effective_lift") or evidence.get("low_suction_launch_confirmed"))
+
+
+def _candidate_strong_trend_ma_pullback(evidence: dict[str, Any]) -> bool:
+    profile = str(evidence.get("research_entry_profile") or evidence.get("entry_profile") or "")
+    tags = " ".join(str(item) for item in evidence.get("research_entry_tags") or evidence.get("entry_tags") or [])
+    return "strong_trend" in profile or "strong_trend" in tags or "ma_pullback" in profile or "ma_pullback" in tags
+
+
+def _candidate_high_level_support_divergence(evidence: dict[str, Any]) -> bool:
+    profile = str(evidence.get("research_entry_profile") or evidence.get("entry_profile") or "")
+    tags = " ".join(str(item) for item in evidence.get("research_entry_tags") or evidence.get("entry_tags") or [])
+    return "support_divergence" in profile or "support_divergence" in tags or bool(evidence.get("high_level_support_divergence"))
+
+
+def _candidate_recent_limit_activity(evidence: dict[str, Any]) -> bool:
+    return bool(evidence.get("recent_limit_up_20d")) or (_float_or_none(evidence.get("large_bull_count_20d")) or 0.0) >= 1
+
+
+def _candidate_audit_bucket_label(bucket: str) -> str:
+    labels = {
+        "right_tail_winner": "右尾大赢家",
+        "steady_winner": "普通盈利",
+        "mfe_giveback": "冲高回落",
+        "ordinary_loss": "普通亏损",
+        "pure_loss": "买后纯亏",
+        "deep_drawdown_loss": "深回撤亏损",
+        "flat": "基本持平",
+        "loss_no_mfe": "无明显冲高亏损",
+        "loss_deep_drawdown": "亏损且深回撤",
+        "loss_mfe_giveback": "亏损但曾大幅冲高",
+        "visible_high_level_risk": "信号日高位/分歧风险",
+        "ma5_overextended": "MA5 偏离过大",
+        "volume_stall": "放量滞涨/量能风险",
+        "low_suction_without_fresh_lift": "低吸无 fresh lift",
+        "weak_market_context": "弱行情上下文",
+        "low_liquidity_loss": "低流动性亏损",
+        "right_tail_mfe15": "MFE >= 15%",
+        "mature_low_suction_lift": "成熟低吸启动",
+        "strong_trend_ma_pullback": "强趋势均线回踩",
+        "high_level_support_divergence": "高位支撑分歧",
+        "low_liquidity_winner": "低流动性赢家",
+        "recent_limit_or_large_bull": "近端涨停/大阳活跃",
+    }
+    return labels.get(bucket, bucket)
+
+
+def _candidate_audit_bucket_order(bucket: str) -> int:
+    order = {
+        "pure_loss": 10,
+        "loss_no_mfe": 20,
+        "deep_drawdown_loss": 30,
+        "loss_deep_drawdown": 40,
+        "mfe_giveback": 50,
+        "loss_mfe_giveback": 60,
+        "ordinary_loss": 70,
+        "visible_high_level_risk": 80,
+        "ma5_overextended": 90,
+        "volume_stall": 100,
+        "low_suction_without_fresh_lift": 110,
+        "weak_market_context": 120,
+        "low_liquidity_loss": 130,
+        "right_tail_winner": 10,
+        "right_tail_mfe15": 20,
+        "steady_winner": 30,
+        "mature_low_suction_lift": 40,
+        "strong_trend_ma_pullback": 50,
+        "high_level_support_divergence": 60,
+        "low_liquidity_winner": 70,
+        "recent_limit_or_large_bull": 80,
+    }
+    return order.get(bucket, 1000)
+
+
+def _candidate_volume_bucket_label(bucket: str) -> str:
+    labels = {
+        "volume_missing": "量能缺失",
+        "extreme_shrink": "极度缩量",
+        "shrinking_volume": "缩量承接",
+        "balanced_volume": "量能均衡",
+        "mild_volume_expansion": "温和放量",
+        "heavy_volume_expansion": "明显放量",
+        "extreme_volume_expansion": "极端放量",
+        "recent_limit_up": "近端涨停活跃",
+        "large_bull_ge3": "近20日大阳>=3",
+        "large_bull_1_2": "近20日大阳1-2",
+        "no_recent_active_bar": "缺少近端活跃痕迹",
+        "volume_stall_distribution": "放量滞涨/疑似派发",
+        "prepared_shrink_lift": "缩量洗盘后 fresh lift",
+        "low_suction_no_fresh_lift": "低吸蓄势但无 fresh lift",
+        "prepared_lift_bad_volume": "有 lift 但量能不理想",
+        "active_balanced_volume": "活跃痕迹+量能均衡",
+        "active_bad_volume": "活跃痕迹+量能异常",
+        "no_active_no_lift": "无活跃痕迹且无 lift",
+        "winner_or_flat": "盈利/持平",
+        "loss_mfe_giveback": "冲高回落亏损",
+        "loss_deep_drawdown": "深回撤亏损",
+        "loss_no_mfe": "无冲高亏损",
+        "ordinary_loss": "普通亏损",
+    }
+    return labels.get(bucket, bucket)
+
+
+def _candidate_volume_bucket_order(bucket: str) -> int:
+    order = {
+        "extreme_shrink": 10,
+        "shrinking_volume": 20,
+        "balanced_volume": 30,
+        "mild_volume_expansion": 40,
+        "heavy_volume_expansion": 50,
+        "extreme_volume_expansion": 60,
+        "volume_missing": 90,
+        "recent_limit_up": 100,
+        "large_bull_ge3": 110,
+        "large_bull_1_2": 120,
+        "no_recent_active_bar": 130,
+        "prepared_shrink_lift": 200,
+        "active_balanced_volume": 210,
+        "active_bad_volume": 220,
+        "low_suction_no_fresh_lift": 230,
+        "prepared_lift_bad_volume": 240,
+        "volume_stall_distribution": 250,
+        "no_active_no_lift": 260,
+        "loss_deep_drawdown": 300,
+        "loss_mfe_giveback": 310,
+        "loss_no_mfe": 320,
+        "ordinary_loss": 330,
+        "winner_or_flat": 400,
+    }
+    return order.get(bucket, 1000)
+
+
 def _candidate_trade_daily_extreme(rows: list[dict[str, Any]], *, reverse: bool) -> dict[str, Any] | None:
     if not rows:
         return None
@@ -1672,7 +2086,7 @@ def _candidate_trade_daily_extreme(rows: list[dict[str, Any]], *, reverse: bool)
         rows,
         key=lambda item: (
             _sort_float(item.get("return_pct")),
-            -(_int_or_none(item.get("rank")) or 10**9),
+            -_candidate_effective_rank(item),
             str(item.get("vt_symbol") or ""),
         ),
         reverse=reverse,
@@ -1681,6 +2095,7 @@ def _candidate_trade_daily_extreme(rows: list[dict[str, Any]], *, reverse: bool)
         "vt_symbol": row.get("vt_symbol"),
         "name": row.get("name"),
         "rank": row.get("rank"),
+        "effective_rank": row.get("effective_rank"),
         "score": row.get("score"),
         "return_pct": row.get("return_pct"),
         "exit_reason": row.get("exit_reason"),
@@ -1704,6 +2119,46 @@ def _candidate_trade_metric_summary(rows: list[dict[str, Any]]) -> dict[str, Any
         "average_max_runup_pct": round(sum(runups) / len(runups), 4) if runups else None,
         "average_holding_days": round(sum(holding_days) / len(holding_days), 4) if holding_days else None,
     }
+
+
+def _candidate_trade_data_quality_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    discontinuity_rows = [row for row in rows if row.get("has_price_discontinuity")]
+    return {
+        "sample_count": len(rows),
+        "price_discontinuity_count": len(discontinuity_rows),
+        "price_discontinuity_rate": _ratio(len(discontinuity_rows), len(rows)),
+        "price_discontinuity_quality": _candidate_trade_metric_summary(discontinuity_rows),
+        "worst_price_discontinuity_samples": _candidate_trade_worst_price_discontinuity_samples(discontinuity_rows),
+    }
+
+
+def _candidate_trade_worst_price_discontinuity_samples(rows: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
+    sorted_rows = sorted(
+        rows,
+        key=lambda row: (
+            _sort_float(row.get("return_pct")),
+            _sort_float(row.get("first_price_discontinuity_open_gap_pct")),
+            str(row.get("entry_signal_date") or ""),
+            str(row.get("vt_symbol") or ""),
+        ),
+    )
+    return [
+        {
+            "entry_signal_date": row.get("entry_signal_date"),
+            "entry_execute_date": row.get("entry_execute_date"),
+            "vt_symbol": row.get("vt_symbol"),
+            "name": row.get("name"),
+            "rank": row.get("rank"),
+            "return_pct": row.get("return_pct"),
+            "max_drawdown_pct": row.get("max_drawdown_pct"),
+            "max_runup_pct": row.get("max_runup_pct"),
+            "exit_reason": row.get("exit_reason"),
+            "first_price_discontinuity_date": row.get("first_price_discontinuity_date"),
+            "first_price_discontinuity_open_gap_pct": row.get("first_price_discontinuity_open_gap_pct"),
+            "first_price_discontinuity_close_gap_pct": row.get("first_price_discontinuity_close_gap_pct"),
+        }
+        for row in sorted_rows[:limit]
+    ]
 
 
 def _candidate_trade_average_holding_annualized_return_pct(rows: list[dict[str, Any]]) -> float | None:
@@ -2132,19 +2587,9 @@ def _candidate_execution_attribution_row(
         "missed_return_20d": None if filled else fixed_return,
         "missed_mfe_20d": None if filled else fixed_mfe,
         "missed_mae_20d": None if filled else fixed_mae,
-        "held_positions": _candidate_held_positions(candidate),
         "uses_future_for_label_only": bool(outcome.get("uses_future_for_label_only", True)),
         "not_used_for_signal_score": True,
     }
-
-
-def _candidate_held_positions(candidate: dict[str, Any]) -> list[dict[str, Any]]:
-    held = candidate.get("held_positions")
-    if not isinstance(held, list):
-        return []
-    rows = [dict(row) for row in held if isinstance(row, dict)]
-    rows.sort(key=lambda item: (_float_or_none(item.get("floating_pnl_pct")) or 0.0, _position_entry_score(item) or 0.0, str(item.get("vt_symbol") or "")))
-    return rows
 
 
 def _candidate_not_filled_reason(
@@ -2230,39 +2675,6 @@ def _candidate_group_buckets(rows: list[dict[str, Any]], key: str) -> list[dict[
     return result
 
 
-def _position_entry_score(position: dict[str, Any]) -> float | None:
-    raw = position.get("raw") if isinstance(position.get("raw"), dict) else {}
-    for key in ("entry_total_score", "total_score", "score"):
-        value = _float_or_none(raw.get(key) if raw else position.get(key))
-        if value is not None:
-            return value
-    return None
-
-
-def _position_support_state(position: dict[str, Any]) -> str:
-    raw = position.get("raw") if isinstance(position.get("raw"), dict) else {}
-    close_price = _float_or_none(position.get("close_price"))
-    support = _float_or_none(raw.get("support_price")) if raw else None
-    ma10 = _float_or_none(raw.get("ma10")) if raw else None
-    if close_price is None:
-        return "unknown"
-    if support is not None and close_price < support * 0.99:
-        return "weak"
-    if ma10 is not None and close_price < ma10 * 0.99:
-        return "weak"
-    if support is not None or ma10 is not None:
-        return "holding_support"
-    return "unknown"
-
-
-def _quality_delta(missed_return: Any, held_return: Any) -> float | None:
-    missed = _float_or_none(missed_return)
-    held = _float_or_none(held_return)
-    if missed is None or held is None:
-        return None
-    return round(missed - held, 4)
-
-
 def _outcome_return(row: dict[str, Any]) -> float | None:
     outcome = row.get("outcome") if isinstance(row.get("outcome"), dict) else {}
     for key in ("return_20d", "return_10d", "return_5d", "return_3d"):
@@ -2281,6 +2693,12 @@ def _ratio_pct(numerator: int, denominator: int) -> float | None:
     if denominator <= 0:
         return None
     return round(numerator / denominator * 100.0, 4)
+
+
+def _ratio(numerator: int, denominator: int) -> float | None:
+    if denominator <= 0:
+        return None
+    return numerator / denominator
 
 
 def _setup_score(evidence: dict[str, Any], *keys: str) -> float | None:

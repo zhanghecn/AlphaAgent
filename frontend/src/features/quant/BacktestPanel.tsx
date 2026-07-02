@@ -10,12 +10,9 @@ import {
   fetchBacktestFactorAudit,
   fetchBacktestPhaseStrategyFamilyMatrix,
   fetchBacktestPerformanceAttributionReport,
-  fetchBacktestReplacementQualityMatrix,
   fetchBacktestReport,
-  fetchBacktestRotationOpportunityCostMatrix,
   fetchBacktestSetupMarketExitAudit,
   fetchBacktestTopCandidateAudit,
-  fetchBacktestTrendWinnerProtectionMatrix,
   fetchBacktestValidationGrid,
   runBacktestStrategyComparison,
 } from "@/api/quant";
@@ -128,24 +125,6 @@ export function BacktestPanel({
     enabled: shouldLoadValidation,
     staleTime: 60_000,
   });
-  const replacementQualityMatrixQuery = useQuery({
-    queryKey: ["backtestReplacementQualityMatrix", selectedId, 80],
-    queryFn: () => fetchBacktestReplacementQualityMatrix(selectedId!, 80),
-    enabled: shouldLoadValidation,
-    staleTime: 60_000,
-  });
-  const rotationOpportunityCostMatrixQuery = useQuery({
-    queryKey: ["backtestRotationOpportunityCostMatrix", selectedId, 20, 80, 20],
-    queryFn: () => fetchBacktestRotationOpportunityCostMatrix(selectedId!, 20, 80, 20),
-    enabled: shouldLoadValidation,
-    staleTime: 60_000,
-  });
-  const trendWinnerProtectionMatrixQuery = useQuery({
-    queryKey: ["backtestTrendWinnerProtectionMatrix", selectedId, 20, 80, 20],
-    queryFn: () => fetchBacktestTrendWinnerProtectionMatrix(selectedId!, 20, 80, 20),
-    enabled: shouldLoadValidation,
-    staleTime: 60_000,
-  });
   const validationReport = marketAuditReport;
   const strategyComparisonQuery = useQuery({
     queryKey: ["backtestStrategyComparison", params],
@@ -219,7 +198,7 @@ export function BacktestPanel({
               <LoadingState rows={4} />
             </div>
           ) : (
-            <EmptyState message="暂无回测报告" description="请先在候选页刷新候选并回测，系统会生成候选质量检测和组合诊断。" />
+            <EmptyState message="暂无回测报告" description="请先在候选页刷新候选并研究，系统会生成候选质量检测；组合诊断可独立查看。" />
           )
         ) : (
           <>
@@ -258,12 +237,6 @@ export function BacktestPanel({
                   isSetupMarketExitAuditLoading={setupMarketExitAuditQuery.isFetching}
                   phaseStrategyFamilyMatrix={phaseStrategyFamilyMatrixQuery.data}
                   isPhaseStrategyFamilyMatrixLoading={phaseStrategyFamilyMatrixQuery.isFetching}
-                  replacementQualityMatrix={replacementQualityMatrixQuery.data}
-                  isReplacementQualityMatrixLoading={replacementQualityMatrixQuery.isFetching}
-                  rotationOpportunityCostMatrix={rotationOpportunityCostMatrixQuery.data}
-                  isRotationOpportunityCostMatrixLoading={rotationOpportunityCostMatrixQuery.isFetching}
-                  trendWinnerProtectionMatrix={trendWinnerProtectionMatrixQuery.data}
-                  isTrendWinnerProtectionMatrixLoading={trendWinnerProtectionMatrixQuery.isFetching}
                 />
                 {validationReport?.data_as_of_audit && <BacktestDataAsOfAuditPanel audit={validationReport.data_as_of_audit} />}
                 {validationReport?.benchmark && <BacktestBenchmarkTable benchmarks={validationReport.benchmark.benchmarks} />}
@@ -329,7 +302,6 @@ function BacktestReadonlyMethod({
   strategyName: string;
 }) {
   const rawParams = run?.params ?? {};
-  const maxPositions = numberOrDefault(rawParams.max_positions, params.max_positions);
   const candidateLimit = numberOrDefault(report?.method?.entry_filter?.candidate_limit ?? rawParams.candidate_limit, params.candidate_limit);
   const maxSymbols = numberOrDefault(rawParams.max_symbols, params.max_symbols);
   const boardValues = report?.method?.included_board_labels?.length
@@ -360,7 +332,7 @@ function BacktestReadonlyMethod({
         <ReadonlyCell label="区间" value={report ? `${report.start_date} 至 ${report.end_date}` : run ? `${run.start_date} 至 ${run.end_date}` : "--"} />
         <ReadonlyCell label="股票池" value={`${boards} / ${maxSymbols}只`} />
         <ReadonlyCell label="候选主口径" value="Top20独立评估" />
-        <ReadonlyCell label="组合诊断" value={`前${candidateLimit}名 / ${maxPositions}只`} />
+        <ReadonlyCell label="候选范围" value={`每日Top${candidateLimit}`} />
         <ReadonlyCell label="执行" value={executionModel === "legacy_next_open" ? "D+1开盘" : executionModel} />
       </div>
     </div>

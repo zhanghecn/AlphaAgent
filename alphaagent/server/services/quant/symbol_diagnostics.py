@@ -131,6 +131,8 @@ def _candidate_cluster_marker(rows: list[dict[str, Any]]) -> dict[str, Any] | No
 
 
 def _is_display_buy_row(row: dict[str, Any]) -> bool:
+    if _is_research_buy_row(row):
+        return False
     if not (str(row.get("action") or "").upper() == "BUY" or bool(row.get("executable_entry_signal"))):
         return False
     if _is_low_suction_unconfirmed_row(row):
@@ -196,10 +198,21 @@ def _candidate_evidence(row: dict[str, Any]) -> dict[str, Any]:
 def _is_display_rejected_buy_row(row: dict[str, Any]) -> bool:
     if str(row.get("action") or "").upper() != "WATCH":
         return False
+    if _is_research_buy_row(row):
+        return False
     if not _candidate_failed_rules(row):
         return False
     raw_entry_signal = row.get("raw_entry_signal")
     return bool(row.get("entry_signal")) or bool(raw_entry_signal) or raw_entry_signal is None
+
+
+def _is_research_buy_row(row: dict[str, Any]) -> bool:
+    evidence = _candidate_evidence(row)
+    return bool(
+        row.get("research_entry_signal")
+        or evidence.get("support_divergence_entry_observation_only")
+        or evidence.get("strong_trend_ma_pullback_entry_observation_only")
+    )
 
 
 def _is_actual_trade_or_sell_marker(row: dict[str, Any]) -> bool:
@@ -504,7 +517,7 @@ def _reason_payload(code: Any, label: Any = None, source: str = "", detail: Any 
 def _summary_next_action(status: str, best_signal_date: str | None, signal_date: date | None, reason: str | None = None) -> str:
     reason_code = str(reason or "")
     if reason_code in {"position_slot_unavailable", "insufficient_cash"}:
-        return "查看执行日组合资金、持仓数量和同日其它买入，判断是否被仓位或现金挤掉。"
+        return "查看执行日订单、成交和候选独立买卖质量，区分组合成交状态与单股买点质量。"
     if reason_code in {"limit_up_tail_unfilled", "limit_up_or_no_bar"}:
         return "查看执行日日线和 14:30 快照，确认是否涨停或缺执行日行情导致无法买入。"
     if reason_code == "tail_entry_not_triggered":
@@ -512,7 +525,7 @@ def _summary_next_action(status: str, best_signal_date: str | None, signal_date:
     if reason_code in {"missing_1430_snapshot", "strict_1430_required"}:
         return "先用数据同步按回测 ID 补齐执行日 14:30 的 1m 快照，再重跑严格 14:30 回测。"
     if reason_code == "candidate_not_planned":
-        return "查看该日候选排名、最大持仓、candidate_limit 和组合已有持仓，确认为什么没有进入买入计划。"
+        return "查看该日候选排名、candidate_limit 和理论计划链路，确认为什么没有进入买入计划。"
     if reason_code == "watch_not_bought":
         return "默认组合回测只买 BUY；WATCH 只有开启宽松研究买入才会参与。"
     if status == "needs_backtest":
@@ -522,7 +535,7 @@ def _summary_next_action(status: str, best_signal_date: str | None, signal_date:
     if status in {"entry_signal_not_traded", "signal_only"} and signal_date is None:
         return "选择一个 BUY 信号日，查看候选排名、计划执行日、订单和资金状态。"
     if status in {"rejected", "ordered_not_filled"}:
-        return "查看订单原因和执行日资金/持仓状态，区分现金、仓位、涨跌停和尾盘未触发。"
+        return "查看订单原因和执行日行情状态，区分现金、涨跌停和尾盘未触发。"
     if status == "no_entry_signal":
         return "查看策略失败规则，确认是分数、位置、风险、流动性还是数据可见性导致。"
     return "查看成交、持仓路径和卖出原因。"

@@ -13,13 +13,14 @@ from typing import Any
 import pytest
 from sqlalchemy import select, text
 
-from alphaagent.market.boards import stock_board
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
 from alphaagent.server.services.backtest import engine as backtest_engine
+from alphaagent.server.services.backtest import data_quality as backtest_data_quality
 from alphaagent.server.services.backtest.factor_audit import CandidateCluster, IndependentTradeResult, simulate_independent_candidate_trade
 from alphaagent.server.services.backtest.engine import list_backtests
 from alphaagent.server.services.backtest.schemas import BacktestParams
+from alphaagent.server.services.quant import candidate_lanes
 from alphaagent.server.services.quant.factors import DRAGON_PULLBACK_STRATEGY_ID, Bar
 from alphaagent.server.services.quant.low_suction_quality import low_suction_launch_quality_bucket
 
@@ -30,7 +31,7 @@ FULL_MAX_SYMBOLS = 5_000
 CANDIDATE_COHORT_TOP_N = 20
 MIN_FULL_COMMON_COHORT_DATES = 20
 NO_POSITION_SENTINEL_MAX_POSITIONS = 5_000
-CANDIDATE_SNAPSHOT_CACHE_VERSION = 1
+CANDIDATE_SNAPSHOT_CACHE_VERSION = 11
 CANDIDATE_SNAPSHOT_CACHE_DIR = Path("memory/06_backtests/cache")
 
 
@@ -296,8 +297,8 @@ def test_candidate_path_marks_probable_unadjusted_price_discontinuity() -> None:
 
 def _candidate_quality_params(*, start: date, end: date, max_symbols: int) -> BacktestParams:
     # Candidate quality simulation only uses these params for scoring and sell
-    # logic. Cash, position count, sizing and replacement are deliberately not
-    # consulted by simulate_independent_candidate_trade().
+    # logic. Portfolio execution constraints are deliberately not consulted by
+    # simulate_independent_candidate_trade().
     return BacktestParams(
         strategy=DRAGON_PULLBACK_STRATEGY_ID,
         start=start,
@@ -310,7 +311,6 @@ def _candidate_quality_params(*, start: date, end: date, max_symbols: int) -> Ba
         min_entry_score=76.0,
         strict_entry=True,
         execution_model="legacy_next_open",
-        enable_signal_rotation=True,
         enable_candidate_tail_risk_penalty=_truthy_env("ALPHAAGENT_ENABLE_CANDIDATE_TAIL_RISK_PENALTY"),
         enable_mainline_momentum_lane=_truthy_env("ALPHAAGENT_ENABLE_MAINLINE_MOMENTUM_LANE"),
         enable_mainline_momentum_risk_control=_truthy_env("ALPHAAGENT_ENABLE_MAINLINE_MOMENTUM_RISK_CONTROL"),
@@ -320,6 +320,7 @@ def _candidate_quality_params(*, start: date, end: date, max_symbols: int) -> Ba
         enable_weekly_top_fractal_relief=_truthy_env("ALPHAAGENT_ENABLE_WEEKLY_TOP_FRACTAL_RELIEF"),
         enable_pure_loss_weak_bucket_penalty=_truthy_env("ALPHAAGENT_ENABLE_PURE_LOSS_WEAK_BUCKET_PENALTY"),
         enable_selective_setup_quality_lane=_truthy_env("ALPHAAGENT_ENABLE_SELECTIVE_SETUP_QUALITY_LANE"),
+        enable_support_divergence_entry_lane=_truthy_env("ALPHAAGENT_ENABLE_SUPPORT_DIVERGENCE_ENTRY_LANE"),
         enable_low_suction_buildup_quality_lane=_truthy_env("ALPHAAGENT_ENABLE_LOW_SUCTION_BUILDUP_QUALITY_LANE"),
         enable_high_risk_d2_follow_through_entry=_truthy_env("ALPHAAGENT_ENABLE_HIGH_RISK_D2_FOLLOW_THROUGH_ENTRY"),
         persist=False,
@@ -393,10 +394,10 @@ def _candidate_quality_matrix_report(base_params: BacktestParams, *, top_n: int,
             }
     return {
         "method": (
-            "无仓位候选质量矩阵：每个候选日取 Top20，"
+            "候选独立买卖质量矩阵：每个候选日取 Top20，"
             "默认每只票独立 D+1 开盘入场，按当前卖点退出；"
             "带 entry 实验开关的 variant 会在对应字段中标明替代入场口径；"
-            "不看现金、仓位、满仓、已有持仓或换仓。"
+            "和组合成交约束解耦。"
         ),
         "scope": scope,
         "start": base_params.start,
@@ -535,7 +536,7 @@ def _candidate_quality_postprocess_report(base_params: BacktestParams, *, top_n:
         "method": (
             "测试通道 Top80 后处理：先按当前代码取每个候选日 Top80，"
             "只用信号日已存在 evidence 做质量重排或坏日压缩，再取 Top20/Top10/Top5 独立模拟；"
-            "不改变真实策略评分、买卖、仓位或缓存；"
+            "不改变真实策略评分、买卖或缓存；"
             "data_quality/overall_without_price_discontinuity 只用于审计疑似未复权价格断层。"
         ),
         "start": base_params.start,
@@ -743,7 +744,7 @@ def _postprocess_stock_audit_report(
     return {
         "method": (
             "测试通道个股对照：以 default Top20 + mfe8_keep6 为参照，"
-            "查看 V2/V5 后处理从同一候选日移除和替换了哪些股票；"
+            "查看 V2/V5 后处理从同一候选日移除和新增了哪些股票；"
             "样本展示信号日因子、资金/行情代理、MA/压力位和入场后路径。只读，不进入真实策略。"
         ),
         "start": base_params.start,
@@ -763,7 +764,7 @@ def _postprocess_stock_audit_report(
         "variants": variants,
         "inference": [
             "V2/V5 的收益变化要看 removed 和 added 的质量差，而不是只看总收益。",
-            "如果 added 仍是负收益，说明后处理只是删掉坏票，还没有找到足够好的替换票。",
+            "如果 added 仍是负收益，说明后处理只是删掉坏票，还没有找到足够好的新增票。",
             "若 removed_best_missed 很强，说明规则误伤了右尾赢家，需要从个股因子中找保护条件。",
         ],
     }
@@ -896,7 +897,7 @@ def _candidate_launch_path_report(
         "method": (
             "显式测试通道：每个候选日取当前 Top20，D+1 开盘独立入场，"
             "只用入场后 K 线做路径标签、只用信号日 evidence 做原因分桶；"
-            "路径标签只用于研究，不进入真实评分、买卖或仓位。"
+            "路径标签只用于研究，不进入真实评分或买卖。"
         ),
         "top_n": top_n,
         "overall": _candidate_launch_metric_summary(enriched),
@@ -2370,6 +2371,15 @@ def _candidate_quality_matrix_variants() -> list[dict[str, Any]]:
             "low_suction_buildup": False,
             "surge_quality": False,
         },
+        {
+            "label": "support_divergence_entry",
+            "tail_risk": False,
+            "mainline_momentum": False,
+            "mainline_momentum_risk_control": False,
+            "low_suction_buildup": False,
+            "surge_quality": False,
+            "support_divergence_entry": True,
+        },
     ]
 
 
@@ -2388,6 +2398,7 @@ def _candidate_variant_report(
     high_risk_d2_follow: bool = False,
     pure_loss_weak_bucket: bool = False,
     selective_setup_quality: bool = False,
+    support_divergence_entry: bool = False,
     weekly_relief: bool = False,
     top20_day_quality: bool = False,
     dynamic_failed_launch_exit: bool = False,
@@ -2410,6 +2421,7 @@ def _candidate_variant_report(
         enable_high_risk_d2_follow_through_entry=high_risk_d2_follow,
         enable_pure_loss_weak_bucket_penalty=pure_loss_weak_bucket,
         enable_selective_setup_quality_lane=selective_setup_quality,
+        enable_support_divergence_entry_lane=support_divergence_entry,
         enable_dynamic_failed_launch_exit_stop=dynamic_failed_launch_exit,
         enable_mid_profit_giveback_stop=mid_profit_giveback,
         mid_profit_giveback_min_high_gain_pct=(
@@ -2443,6 +2455,7 @@ def _candidate_variant_report(
         "enable_high_risk_d2_follow_through_entry": high_risk_d2_follow,
         "enable_pure_loss_weak_bucket_penalty": pure_loss_weak_bucket,
         "enable_selective_setup_quality_lane": selective_setup_quality,
+        "enable_support_divergence_entry_lane": support_divergence_entry,
         "enable_dynamic_failed_launch_exit_stop": dynamic_failed_launch_exit,
         "enable_mid_profit_giveback_stop": mid_profit_giveback,
         "mid_profit_giveback_min_high_gain_pct": params.mid_profit_giveback_min_high_gain_pct,
@@ -2480,6 +2493,7 @@ def _current_code_top_candidate_matrix_rows(
             enable_high_risk_d2_follow_through_entry=bool(variant.get("high_risk_d2_follow", False)),
             enable_pure_loss_weak_bucket_penalty=bool(variant.get("pure_loss_weak_bucket", False)),
             enable_selective_setup_quality_lane=bool(variant.get("selective_setup_quality", False)),
+            enable_support_divergence_entry_lane=bool(variant.get("support_divergence_entry", False)),
             enable_dynamic_failed_launch_exit_stop=bool(variant.get("dynamic_failed_launch_exit", False)),
             enable_mid_profit_giveback_stop=bool(variant.get("mid_profit_giveback", False)),
             mid_profit_giveback_min_high_gain_pct=float(
@@ -2524,7 +2538,10 @@ def _current_code_top_candidate_matrix_rows(
         for trade_date in scoring_dates:
             for label, params in variant_params.items():
                 scores = backtest_engine._score_day(session, bars_by_symbol, trade_date, params, score_cache, score_context)
-                for rank, score in enumerate(scores[:top_n], start=1):
+                pool = candidate_lanes.select_dragon_pullback_execution_pool(scores, top_n, params.strategy)
+                pool_context = candidate_lanes.execution_pool_context(scores, top_n, params.strategy)
+                for rank, score in enumerate(pool, start=1):
+                    execution = pool_context.get(str(score.vt_symbol)) or {}
                     rows_by_variant[label].append(
                         {
                             "trade_date": trade_date,
@@ -2533,7 +2550,8 @@ def _current_code_top_candidate_matrix_rows(
                             "rank": rank,
                             "action": "BUY",
                             "total_score": float(score.total_score or 0.0),
-                            "reason": dict(score.evidence or {}),
+                            "reason": dict(score.evidence or {}) | {"candidate_execution": execution},
+                            "candidate_execution": execution,
                             "source": f"current_code_matrix_{label}",
                         }
                     )
@@ -2635,7 +2653,10 @@ def _current_code_top_candidate_rows(params: BacktestParams, *, top_n: int) -> t
         rows: list[dict[str, Any]] = []
         for trade_date in _candidate_scoring_dates(trading_days):
             scores = backtest_engine._score_day(session, bars_by_symbol, trade_date, params, score_cache, score_context)
-            for rank, score in enumerate(scores[:top_n], start=1):
+            pool = candidate_lanes.select_dragon_pullback_execution_pool(scores, top_n, params.strategy)
+            pool_context = candidate_lanes.execution_pool_context(scores, top_n, params.strategy)
+            for rank, score in enumerate(pool, start=1):
+                execution = pool_context.get(str(score.vt_symbol)) or {}
                 rows.append(
                     {
                         "trade_date": trade_date,
@@ -2644,7 +2665,8 @@ def _current_code_top_candidate_rows(params: BacktestParams, *, top_n: int) -> t
                         "rank": rank,
                         "action": "BUY",
                         "total_score": float(score.total_score or 0.0),
-                        "reason": dict(score.evidence or {}),
+                        "reason": dict(score.evidence or {}) | {"candidate_execution": execution},
+                        "candidate_execution": execution,
                         "source": "current_code_no_cache_score_day",
                     }
                 )
@@ -4164,24 +4186,38 @@ def _bool_ratio(rows: list[dict[str, Any]], key: str) -> float:
 
 
 def _baseline_top_candidate_rows(backtest_id: int, *, start: date, end: date, top_n: int) -> list[dict[str, Any]]:
+    from alphaagent.server.services.quant import screening_loaders, screening_payloads
+
     with session_scope() as session:
         run = session.execute(select(schema.backtest_runs).where(schema.backtest_runs.c.id == backtest_id)).mappings().first()
         if not run:
             return []
         lower = max(start, run["start_date"])
         upper = min(end, run["end_date"])
+        run_ids = [
+            int(screen_run["id"])
+            for screen_run in screening_loaders.screen_runs_between(
+                session,
+                run["strategy_id"],
+                run["strategy_version"],
+                lower,
+                upper,
+                signal_evidence_schema_version=screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+                max_symbols=int((run.get("params") or {}).get("max_symbols") or 5000)
+                if isinstance(run.get("params"), dict)
+                else 5000,
+                included_boards=(run.get("params") or {}).get("included_boards") if isinstance(run.get("params"), dict) else None,
+            ).values()
+        ]
         recommendation_rows = session.execute(
             select(schema.quant_recommendations)
             .where(
-                schema.quant_recommendations.c.strategy_id == run["strategy_id"],
-                schema.quant_recommendations.c.strategy_version == run["strategy_version"],
-                schema.quant_recommendations.c.trade_date >= lower,
-                schema.quant_recommendations.c.trade_date <= upper,
+                schema.quant_recommendations.c.run_id.in_(run_ids),
                 schema.quant_recommendations.c.rank <= top_n,
                 schema.quant_recommendations.c.action == "BUY",
             )
             .order_by(schema.quant_recommendations.c.trade_date, schema.quant_recommendations.c.rank, schema.quant_recommendations.c.vt_symbol)
-        ).mappings().all()
+        ).mappings().all() if run_ids else []
         if recommendation_rows:
             return [dict(row) | {"source": "baseline_quant_recommendations"} for row in recommendation_rows]
         signal_rows = session.execute(
@@ -4321,7 +4357,7 @@ def _candidate_path_row(
     entry_model = "legacy_next_open"
     if params.enable_high_risk_d2_follow_through_entry and _is_high_risk_follow_through_candidate(candidate):
         entry_model = "high_risk_d2_follow_through"
-    discontinuity = _candidate_price_discontinuity(
+    discontinuity = backtest_data_quality.candidate_price_discontinuity(
         bars_by_symbol.get(symbol, []),
         vt_symbol=symbol,
         signal_date=signal_date,
@@ -4436,7 +4472,6 @@ def _simulate_d2_follow_through_candidate_trade(
             bar.trade_date,
             params,
             current_buy_signal=bar.trade_date in current_buy_signal_dates,
-            replacement_available=False,
         )
         if not sell_reason or bar.trade_date <= position.entry_date:
             continue
@@ -4472,65 +4507,6 @@ def _is_high_risk_follow_through_candidate(candidate: dict[str, Any]) -> bool:
     stale_low_suction = low_suction_days >= 6 and active_strength < 3.0
     tight_quiet = ma_convergence is not None and ma_convergence < 3.0 and active_strength < 3.0
     return (high_close and (weak_launch or active_strength < 3.0)) or stale_low_suction or tight_quiet
-
-
-def _candidate_price_discontinuity(
-    bars: list[Bar],
-    *,
-    vt_symbol: str,
-    signal_date: date,
-    entry_execute_date: date | None,
-    exit_execute_date: date | None,
-) -> dict[str, Any] | None:
-    if entry_execute_date is None:
-        return None
-    sorted_bars = sorted(bars, key=lambda bar: bar.trade_date)
-    upper = exit_execute_date or (sorted_bars[-1].trade_date if sorted_bars else entry_execute_date)
-    first_index = next((index for index, bar in enumerate(sorted_bars) if bar.trade_date >= entry_execute_date), None)
-    if first_index is None:
-        return None
-    for index in range(max(first_index, 1), len(sorted_bars)):
-        bar = sorted_bars[index]
-        if bar.trade_date > upper:
-            break
-        previous = sorted_bars[index - 1]
-        if previous.trade_date < signal_date:
-            continue
-        discontinuity = _bar_price_discontinuity(previous, bar, vt_symbol=vt_symbol)
-        if discontinuity:
-            return discontinuity
-    return None
-
-
-def _bar_price_discontinuity(previous: Bar, current: Bar, *, vt_symbol: str, threshold: float | None = None) -> dict[str, Any] | None:
-    open_gap = _pct_return(float(current.open_price), float(previous.close_price))
-    close_gap = _pct_return(float(current.close_price), float(previous.close_price))
-    if open_gap is None or close_gap is None:
-        return None
-    board_threshold = threshold if threshold is not None else _price_discontinuity_threshold(vt_symbol)
-    change_pct = _float_or_none(current.change_pct)
-    if max(abs(open_gap), abs(close_gap)) < board_threshold:
-        return None
-    if change_pct is not None and abs(change_pct) >= board_threshold - 0.5:
-        return None
-    return {
-        "trade_date": current.trade_date,
-        "open_gap_pct": round(open_gap, 4),
-        "close_gap_pct": round(close_gap, 4),
-        "change_pct": change_pct,
-        "previous_close": float(previous.close_price),
-        "open_price": float(current.open_price),
-        "close_price": float(current.close_price),
-    }
-
-
-def _price_discontinuity_threshold(vt_symbol: str) -> float:
-    board = stock_board(vt_symbol)
-    if board == "bse":
-        return 32.0
-    if board in {"star", "chinext"}:
-        return 22.0
-    return 12.0
 
 
 def _candidate_active_strength(evidence: dict[str, Any]) -> float:
@@ -4716,9 +4692,9 @@ def _paired_candidate_cohort_comparison(
         "paired_day_return_win_rate": _paired_day_win_rate(paired_days, "return_delta"),
         "paired_days_sample": paired_days[:20],
         "method": (
-            "无仓位候选质量同日配对：每个共同候选日分别取 top20，"
+            "候选独立买卖质量同日配对：每个共同候选日分别取 top20，"
             "每只票独立 D+1 开盘入场，按当前策略卖点逐日退出；"
-            "不看现金、最大持仓、满仓、已有持仓或换仓；"
+            "和组合成交约束解耦；"
             "最终以所有共同候选日的候选路径整体汇总为主，日胜负只作辅助。"
         ),
     }
@@ -4833,7 +4809,6 @@ def _candidate_sell_reason(position, bar, current_day: date, params: BacktestPar
         current_day,
         params,
         current_buy_signal=bool(kwargs.get("current_buy_signal")),
-        replacement_available=bool(kwargs.get("replacement_available")),
     )
 
 

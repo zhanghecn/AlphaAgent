@@ -49,7 +49,7 @@ export function BacktestParamsForm({
         <div className="text-sm">
           <div className="text-xs text-muted-foreground">规则</div>
           <div className="mt-1 flex h-9 items-center rounded-md border bg-muted/30 px-2 text-sm">
-            前10名 / 持仓10只
+            每日Top20独立评估
           </div>
         </div>
       </div>

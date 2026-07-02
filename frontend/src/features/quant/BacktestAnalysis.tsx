@@ -13,12 +13,7 @@ import {
   fetchBacktestPerformanceAttributionReport,
   type PhaseStrategyFamilyMatrixRow,
   fetchBacktestPhaseStrategyFamilyMatrix,
-  fetchBacktestReplacementQualityMatrix,
   fetchBacktestReport,
-  fetchBacktestRotationOpportunityCostMatrix,
-  fetchBacktestTrendWinnerProtectionMatrix,
-  type RotationOpportunityBucketRow,
-  type TrendWinnerProtectionBucketRow,
   fetchBacktestSetupMarketExitAudit,
   fetchBacktestTopCandidateAudit,
   fetchBacktestValidationGrid,
@@ -241,12 +236,6 @@ export function BacktestMarketAuditPanel({
   isSetupMarketExitAuditLoading,
   phaseStrategyFamilyMatrix,
   isPhaseStrategyFamilyMatrixLoading,
-  replacementQualityMatrix,
-  isReplacementQualityMatrixLoading,
-  rotationOpportunityCostMatrix,
-  isRotationOpportunityCostMatrixLoading,
-  trendWinnerProtectionMatrix,
-  isTrendWinnerProtectionMatrixLoading,
 }: {
   report?: Awaited<ReturnType<typeof fetchBacktestReport>>;
   topCandidateAudit?: Awaited<ReturnType<typeof fetchBacktestTopCandidateAudit>>;
@@ -257,12 +246,6 @@ export function BacktestMarketAuditPanel({
   isSetupMarketExitAuditLoading?: boolean;
   phaseStrategyFamilyMatrix?: Awaited<ReturnType<typeof fetchBacktestPhaseStrategyFamilyMatrix>>;
   isPhaseStrategyFamilyMatrixLoading?: boolean;
-  replacementQualityMatrix?: Awaited<ReturnType<typeof fetchBacktestReplacementQualityMatrix>>;
-  isReplacementQualityMatrixLoading?: boolean;
-  rotationOpportunityCostMatrix?: Awaited<ReturnType<typeof fetchBacktestRotationOpportunityCostMatrix>>;
-  isRotationOpportunityCostMatrixLoading?: boolean;
-  trendWinnerProtectionMatrix?: Awaited<ReturnType<typeof fetchBacktestTrendWinnerProtectionMatrix>>;
-  isTrendWinnerProtectionMatrixLoading?: boolean;
 }) {
   const yearlyRows = report?.robustness_checks?.yearly_periods ?? [];
   const regimeAnalysis = report?.regime_analysis ?? report?.robustness_checks?.market_regime_analysis;
@@ -276,9 +259,6 @@ export function BacktestMarketAuditPanel({
   const hasFactorAudit = factorAudit?.status === "ready" && Boolean(factorAudit.summary?.sample_count);
   const hasProblemMatrix = Boolean(setupMarketExitAudit?.summary?.buy_sell_problem_matrix?.by_problem?.length);
   const hasPhaseStrategyMatrix = Boolean(phaseStrategyFamilyMatrix?.summary?.real_trade_matrix?.length);
-  const hasReplacementQualityMatrix = Boolean(replacementQualityMatrix?.summary?.filled_by_setup_family?.length);
-  const hasRotationOpportunityMatrix = Boolean(rotationOpportunityCostMatrix?.summary?.overall?.candidate_count);
-  const hasTrendWinnerProtectionMatrix = Boolean(trendWinnerProtectionMatrix?.summary?.overall?.candidate_count);
   const hasAnalysis =
     yearlyRows.length > 0 ||
     Boolean(regimeAnalysis?.periods?.length) ||
@@ -286,20 +266,14 @@ export function BacktestMarketAuditPanel({
     Boolean(report?.data_quality) ||
     hasFactorAudit ||
     hasProblemMatrix ||
-    hasPhaseStrategyMatrix ||
-    hasReplacementQualityMatrix ||
-    hasRotationOpportunityMatrix ||
-    hasTrendWinnerProtectionMatrix;
+    hasPhaseStrategyMatrix;
 
   if (
     !hasAnalysis &&
     !isTopCandidateAuditLoading &&
     !isFactorAuditLoading &&
     !isSetupMarketExitAuditLoading &&
-    !isPhaseStrategyFamilyMatrixLoading &&
-    !isReplacementQualityMatrixLoading &&
-    !isRotationOpportunityCostMatrixLoading &&
-    !isTrendWinnerProtectionMatrixLoading
+    !isPhaseStrategyFamilyMatrixLoading
   ) return null;
 
   return (
@@ -336,9 +310,6 @@ export function BacktestMarketAuditPanel({
       )}
 
       <PhaseStrategyFamilyMatrixPanel matrix={phaseStrategyFamilyMatrix} isLoading={isPhaseStrategyFamilyMatrixLoading} />
-      <ReplacementQualityMatrixPanel matrix={replacementQualityMatrix} isLoading={isReplacementQualityMatrixLoading} />
-      <RotationOpportunityCostMatrixPanel matrix={rotationOpportunityCostMatrix} isLoading={isRotationOpportunityCostMatrixLoading} />
-      <TrendWinnerProtectionMatrixPanel matrix={trendWinnerProtectionMatrix} isLoading={isTrendWinnerProtectionMatrixLoading} />
       <FactorAuditSummaryPanel audit={factorAudit} isLoading={isFactorAuditLoading} />
       <BuySellProblemMatrixPanel audit={setupMarketExitAudit} isLoading={isSetupMarketExitAuditLoading} />
 
@@ -408,7 +379,7 @@ export function CandidateTradeQualityPanel({
         <div>
           <div className="text-sm font-medium">候选独立买卖质量</div>
           <div className="mt-1 text-xs text-muted-foreground">
-            每个信号日的候选按排名独立测算，D+1 开盘买入、当前卖点卖出；不看现金、仓位、满仓、已有持仓或换仓。这里不是组合收益。
+            每个信号日的候选按排名独立测算，D+1 开盘买入、当前卖点卖出；和组合成交约束解耦。这里不是组合收益。
           </div>
         </div>
         <div className="text-xs text-muted-foreground">
@@ -417,8 +388,8 @@ export function CandidateTradeQualityPanel({
       </div>
 
       <div className="grid gap-3 text-sm md:grid-cols-4 xl:grid-cols-8">
-        <InfoCell label="候选簇" value={formatNumber(numberValue(coverage.cluster_count) ?? summary?.sample_count, 0)} />
-        <InfoCell label="纳入排名" value={formatNumber(numberValue(coverage.rank_limited_cluster_count) ?? summary?.sample_count, 0)} />
+        <InfoCell label="候选样本" value={formatNumber(numberValue(coverage.sample_count) ?? numberValue(coverage.daily_candidate_trade_count) ?? summary?.sample_count, 0)} />
+        <InfoCell label="纳入排名" value={formatNumber(numberValue(coverage.rank_limited_sample_count) ?? summary?.sample_count, 0)} />
         <InfoCell label="可评价" value={formatNumber(summary?.evaluated_count, 0)} />
         <InfoCell label="年化参考" value={formatPct(summary?.annual_return_pct)} />
         <InfoCell label="胜率" value={formatRatioPct(summary?.win_rate)} />
@@ -438,7 +409,7 @@ export function CandidateTradeQualityPanel({
 
       {report.status === "empty" && !summary?.sample_count ? (
         <div className="rounded-md border p-3 text-sm text-muted-foreground">
-          {report.message ?? "当前回测区间暂无可评价的 BUY 候选簇。"}
+          {report.message ?? "当前回测区间暂无可评价的 BUY 候选样本。"}
         </div>
       ) : null}
 
@@ -562,9 +533,9 @@ export function BacktestPerformanceAttributionPanel({
       </div>
 
       <div className="grid gap-3 text-sm md:grid-cols-4">
-        <InfoCell label="持仓上限相同" value={constraints?.same_max_positions ? "是" : "否"} />
+        <InfoCell label="组合上限相同" value={constraints?.same_max_positions ? "是" : "否"} />
         <InfoCell label="候选排名相同" value={constraints?.same_candidate_limit ? "是" : "否"} />
-        <InfoCell label="单票仓位相同" value={constraints?.same_position_sizing ? "是" : "否"} />
+        <InfoCell label="单票资金权重相同" value={constraints?.same_position_sizing ? "是" : "否"} />
         <InfoCell label="候选schema同源" value={schema?.same_schema_lineage ? "是" : "否"} />
       </div>
 
@@ -861,8 +832,6 @@ function BuySellProblemMatrixPanel({
   isLoading?: boolean;
 }) {
   const rows = audit?.summary?.buy_sell_problem_matrix?.by_problem ?? [];
-  const exitQuality = audit?.summary?.exit_path_replacement_quality;
-  const replacementSummary = exitQuality?.replacement_quality_summary;
   const marketValidation = audit?.summary?.market_context_validation;
   if (!rows.length) {
     if (!isLoading) return null;
@@ -875,7 +844,7 @@ function BuySellProblemMatrixPanel({
         <div>
           <div className="text-sm font-medium">买卖问题归因</div>
           <div className="mt-1 text-xs text-muted-foreground">
-            用真实闭仓路径、卖后反弹和替换交易质量判断问题来源；仅用于审计，不改变买卖规则。
+            用真实闭仓路径和卖后反弹判断问题来源；仅用于审计，不改变买卖规则。
           </div>
         </div>
         <span className="text-xs text-muted-foreground">样本 {formatNumber(sumMetric(rows, "trade_count"), 0)}</span>
@@ -888,7 +857,6 @@ function BuySellProblemMatrixPanel({
             <TableHead className="text-right">胜率</TableHead>
             <TableHead className="text-right">均值</TableHead>
             <TableHead className="text-right">卖早</TableHead>
-            <TableHead className="text-right">坏替换</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -901,30 +869,10 @@ function BuySellProblemMatrixPanel({
                 {formatPct(numberValue(row.avg_return_pct))}
               </TableCell>
               <TableCell className="text-right tabular-nums">{formatNumber(row.sold_before_rebound_count, 0)}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatNumber(numberValue(row.bad_replacement_count), 0)}</TableCell>
             </TableRow>
           ))}
         </TableBody>
       </Table>
-      {replacementSummary ? (
-        <div className="border-t p-3">
-          <div className="mb-2 text-xs font-medium text-muted-foreground">卖点释放仓位后的替换质量</div>
-          <div className="grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-5">
-            <InfoCell label="替换交易" value={formatNumber(replacementSummary.replacement_trade_count, 0)} />
-            <InfoCell label="坏替换" value={formatNumber(replacementSummary.bad_replacement_count, 0)} />
-            <InfoCell label="强替换" value={formatNumber(replacementSummary.strong_replacement_count, 0)} />
-            <InfoCell label="替换均值" value={formatPct(replacementSummary.avg_replacement_return_pct)} />
-            <InfoCell label="质量差" value={formatPct(replacementSummary.avg_replacement_return_delta_pct)} />
-          </div>
-          {exitQuality?.by_support_stop_context?.length ? (
-            <CompactPathBucketTable
-              title="支撑止损上下文"
-              rows={exitQuality.by_support_stop_context.slice(0, 5)}
-              bucketKey="support_stop_context"
-            />
-          ) : null}
-        </div>
-      ) : null}
       {marketValidation ? (
         <div className="border-t p-3">
           <div className="mb-2 text-xs font-medium text-muted-foreground">市场环境验证</div>
@@ -1047,458 +995,6 @@ function PhaseStrategyFamilyTable({
   );
 }
 
-function ReplacementQualityMatrixPanel({
-  matrix,
-  isLoading,
-}: {
-  matrix?: Awaited<ReturnType<typeof fetchBacktestReplacementQualityMatrix>>;
-  isLoading?: boolean;
-}) {
-  const summary = matrix?.summary;
-  const setupRows = summary?.filled_by_setup_family ?? [];
-  const rejectReasons = summary?.rejected_reason_counts ?? [];
-  const bucketRows = summary?.filled_by_low_suction_bucket ?? [];
-  if (!setupRows.length && !rejectReasons.length) {
-    if (!isLoading) return null;
-    return <div className="rounded-md border p-3 text-sm text-muted-foreground">正在加载替换质量矩阵。</div>;
-  }
-
-  return (
-    <div className="overflow-hidden rounded-md border">
-      <div className="flex flex-wrap items-start justify-between gap-3 border-b px-3 py-2">
-        <div>
-          <div className="text-sm font-medium">卖后替换质量矩阵</div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            复查卖出释放仓位后买入了什么，以及闸门拒掉了什么；只读审计，不改变买卖规则。
-          </div>
-        </div>
-        <div className="grid grid-cols-2 gap-3 text-right text-xs">
-          <InfoCell label="闭合成交" value={formatNumber(matrix?.total?.filled_trade_count, 0)} />
-          <InfoCell label="闸门拒买" value={formatNumber(matrix?.total?.gate_reject_count, 0)} />
-        </div>
-      </div>
-
-      <div className="grid gap-3 p-3 text-sm md:grid-cols-4">
-        <InfoCell label="成交均值" value={formatPct(summary?.filled_overall?.avg_return_pct)} />
-        <InfoCell label="成交胜率" value={formatRatioPct(summary?.filled_overall?.win_rate)} />
-        <InfoCell label="拒买均分" value={formatNumber(summary?.rejected_overall?.avg_entry_score, 2)} />
-        <InfoCell label="高风险拒买" value={formatNumber(summary?.rejected_overall?.high_warning_count, 0)} />
-      </div>
-
-      <PhaseStrategyFamilyTable title="真实成交按策略族" rows={setupRows} mode="trade" />
-      {bucketRows.length ? <PhaseStrategyFamilyTable title="真实成交按低吸桶" rows={bucketRows.slice(0, 8)} mode="trade" /> : null}
-      {rejectReasons.length ? <ReplacementRejectReasonTable rows={rejectReasons.slice(0, 8)} /> : null}
-
-      {summary?.interpretation?.notes?.length ? (
-        <div className="border-t px-3 py-2 text-xs leading-6 text-muted-foreground">
-          {summary.interpretation.notes.join(" ")}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function ReplacementRejectReasonTable({
-  rows,
-}: {
-  rows: NonNullable<Awaited<ReturnType<typeof fetchBacktestReplacementQualityMatrix>>["summary"]>["rejected_reason_counts"];
-}) {
-  if (!rows?.length) return null;
-  return (
-    <div className="border-t">
-      <div className="px-3 py-2 text-xs font-medium text-muted-foreground">闸门拒买原因</div>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>原因</TableHead>
-            <TableHead className="text-right">次数</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.map((row) => (
-            <TableRow key={row.reason}>
-              <TableCell className="font-medium">{row.label ?? rejectReasonLabel(row.reason)}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatNumber(row.count, 0)}</TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </div>
-  );
-}
-
-function RotationOpportunityCostMatrixPanel({
-  matrix,
-  isLoading,
-}: {
-  matrix?: Awaited<ReturnType<typeof fetchBacktestRotationOpportunityCostMatrix>>;
-  isLoading?: boolean;
-}) {
-  const summary = matrix?.summary;
-  const overall = summary?.overall;
-  const phaseRows = summary?.by_phase ?? [];
-  const setupRows = summary?.by_setup_family ?? [];
-  const bucketRows = summary?.by_opportunity_bucket ?? [];
-  const proxyTables = [
-    { title: "按候选排名", rows: summary?.by_candidate_rank ?? [], labelKey: "candidateRank" as const },
-    { title: "按低吸天数", rows: summary?.by_low_suction_days ?? [], labelKey: "lowSuctionDays" as const },
-    { title: "按启动质量", rows: summary?.by_launch_quality ?? [], labelKey: "launchQuality" as const },
-    { title: "按均线收敛", rows: summary?.by_ma_convergence ?? [], labelKey: "maConvergence" as const },
-    { title: "按弱持仓状态", rows: summary?.by_replaced_current_return ?? [], labelKey: "replacedReturn" as const },
-    { title: "按执行开盘状态", rows: summary?.by_replaced_execute_open_return ?? [], labelKey: "replacedExecuteOpenReturn" as const },
-    { title: "按持仓天数", rows: summary?.by_replaced_holding_days ?? [], labelKey: "replacedHoldingDays" as const },
-  ].filter((table) => table.rows.length);
-  const sampleRows = matrix?.items ?? [];
-  if (!overall?.candidate_count && !phaseRows.length && !sampleRows.length) {
-    if (!isLoading) return null;
-    return <div className="rounded-md border p-3 text-sm text-muted-foreground">正在加载满仓换仓机会矩阵。</div>;
-  }
-
-  return (
-    <div className="overflow-hidden rounded-md border">
-      <div className="flex flex-wrap items-start justify-between gap-3 border-b px-3 py-2">
-        <div>
-          <div className="text-sm font-medium">满仓换仓机会矩阵</div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            满仓错过的前列买入候选，对比同日最弱持仓真实退出收益；只读审计，不改变策略。
-          </div>
-        </div>
-        <div className="text-xs text-muted-foreground">
-          Top{matrix?.candidate_rank_limit ?? 20} / {matrix?.holding_days ?? 20}日观察
-        </div>
-      </div>
-
-      <div className="grid gap-3 p-3 text-sm md:grid-cols-6">
-        <InfoCell label="满仓候选" value={formatNumber(overall?.candidate_count, 0)} />
-        <InfoCell label="可评价" value={formatNumber(overall?.evaluated_count, 0)} />
-        <InfoCell label="正机会率" value={formatRatioPct(overall?.positive_rate)} />
-        <InfoCell label="强正机会" value={formatRatioPct(overall?.strong_positive_rate)} />
-        <InfoCell label="有害率" value={formatRatioPct(overall?.harmful_rate)} />
-        <InfoCell label="开盘仍弱" value={formatRatioPct(overall?.execute_open_weak_rate)} />
-        <InfoCell label="开盘已盈利" value={formatRatioPct(overall?.execute_open_profitable_rate)} />
-        <div>
-          <div className="text-xs text-muted-foreground">平均差值</div>
-          <div className={cn("mt-0.5 font-medium tabular-nums", priceColorClass(overall?.avg_opportunity_delta_pct))}>
-            {formatPct(overall?.avg_opportunity_delta_pct)}
-          </div>
-        </div>
-      </div>
-
-      {summary?.interpretation?.message ? (
-        <div className="border-t px-3 py-2 text-xs text-muted-foreground">{summary.interpretation.message}</div>
-      ) : null}
-
-      <div className="grid gap-3 border-t p-3 lg:grid-cols-2">
-        {phaseRows.length ? <RotationOpportunityBucketTable title="按行情" rows={phaseRows.slice(0, 6)} labelKey="phase" /> : null}
-        {setupRows.length ? <RotationOpportunityBucketTable title="按策略族" rows={setupRows.slice(0, 6)} labelKey="setup" /> : null}
-      </div>
-      {proxyTables.length ? (
-        <div className="grid gap-3 border-t p-3 lg:grid-cols-2">
-          {proxyTables.slice(0, 6).map((table) => (
-            <RotationOpportunityBucketTable
-              key={table.title}
-              title={table.title}
-              rows={table.rows.slice(0, 5)}
-              labelKey={table.labelKey}
-            />
-          ))}
-        </div>
-      ) : null}
-      {bucketRows.length ? <RotationOpportunityBucketTable title="按机会差值" rows={bucketRows.slice(0, 6)} labelKey="bucket" /> : null}
-      {sampleRows.length ? <RotationOpportunitySampleTable rows={sampleRows.slice(0, 8)} /> : null}
-
-      {matrix?.note ? <div className="border-t px-3 py-2 text-xs text-muted-foreground">{matrix.note}</div> : null}
-    </div>
-  );
-}
-
-function RotationOpportunityBucketTable({
-  title,
-  rows,
-  labelKey,
-}: {
-  title: string;
-  rows: NonNullable<NonNullable<Awaited<ReturnType<typeof fetchBacktestRotationOpportunityCostMatrix>>["summary"]>["by_phase"]>;
-  labelKey:
-    | "phase"
-    | "setup"
-    | "bucket"
-    | "candidateRank"
-    | "lowSuctionDays"
-    | "launchQuality"
-    | "maConvergence"
-    | "replacedReturn"
-    | "replacedExecuteOpenReturn"
-    | "replacedHoldingDays";
-}) {
-  if (!rows?.length) return null;
-  return (
-    <div className="overflow-hidden rounded-md border">
-      <div className="border-b px-3 py-2 text-xs font-medium text-muted-foreground">{title}</div>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>分桶</TableHead>
-            <TableHead className="text-right">样本</TableHead>
-            <TableHead className="text-right">正机会</TableHead>
-            <TableHead className="text-right">候选均值</TableHead>
-            <TableHead className="text-right">替换均值</TableHead>
-            <TableHead className="text-right">开盘仍弱</TableHead>
-            <TableHead className="text-right">差值</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.map((row, index) => (
-            <TableRow key={`${title}-${rotationOpportunityRowKey(row, labelKey)}-${index}`}>
-              <TableCell className="font-medium">{rotationOpportunityRowLabel(row, labelKey)}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatNumber(row.evaluated_count ?? row.candidate_count, 0)}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatRatioPct(row.positive_rate)}</TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.avg_candidate_return_pct))}>
-                {formatPct(row.avg_candidate_return_pct)}
-              </TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.avg_replaced_real_return_pct))}>
-                {formatPct(row.avg_replaced_real_return_pct)}
-              </TableCell>
-              <TableCell className="text-right tabular-nums">{formatRatioPct(row.execute_open_weak_rate)}</TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.avg_opportunity_delta_pct))}>
-                {formatPct(row.avg_opportunity_delta_pct)}
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </div>
-  );
-}
-
-function RotationOpportunitySampleTable({
-  rows,
-}: {
-  rows: NonNullable<Awaited<ReturnType<typeof fetchBacktestRotationOpportunityCostMatrix>>["items"]>;
-}) {
-  if (!rows?.length) return null;
-  return (
-    <div className="border-t">
-      <div className="px-3 py-2 text-xs font-medium text-muted-foreground">机会差值样本</div>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>日期</TableHead>
-            <TableHead>候选</TableHead>
-            <TableHead>行情</TableHead>
-            <TableHead>策略族</TableHead>
-            <TableHead>被替换</TableHead>
-            <TableHead className="text-right">候选</TableHead>
-            <TableHead className="text-right">快照</TableHead>
-            <TableHead className="text-right">开盘</TableHead>
-            <TableHead className="text-right">退出</TableHead>
-            <TableHead className="text-right">差值</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.map((row, index) => (
-            <TableRow key={`${row.signal_date ?? "date"}-${row.vt_symbol ?? "symbol"}-${index}`}>
-              <TableCell className="whitespace-nowrap">{row.signal_date ?? "--"}</TableCell>
-              <TableCell>
-                <StockIdentityLink
-                  name={row.name}
-                  vtSymbol={row.vt_symbol}
-                  board={row.board}
-                  boardLabel={row.board_label}
-                  meta={row.rank ? `#${row.rank}` : undefined}
-                />
-              </TableCell>
-              <TableCell>{row.market_phase_label ?? phaseLabel(row.market_phase)}</TableCell>
-              <TableCell>{setupFamilyLabel(row.setup_family ?? row.entry_family)}</TableCell>
-              <TableCell>
-                <StockIdentityLink name={row.replaced_name} vtSymbol={row.replaced_symbol} meta={row.replaced_exit_reason ?? undefined} />
-              </TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.candidate_return_pct))}>
-                {formatPct(row.candidate_return_pct)}
-              </TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.replaced_snapshot_return_pct ?? row.replaced_current_return_pct))}>
-                {formatPct(row.replaced_snapshot_return_pct ?? row.replaced_current_return_pct)}
-              </TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.replaced_execute_open_return_pct))}>
-                {formatPct(row.replaced_execute_open_return_pct)}
-              </TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.replaced_real_return_pct))}>
-                {formatPct(row.replaced_real_return_pct)}
-              </TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.opportunity_delta_pct))}>
-                {formatPct(row.opportunity_delta_pct)}
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </div>
-  );
-}
-
-function TrendWinnerProtectionMatrixPanel({
-  matrix,
-  isLoading,
-}: {
-  matrix?: Awaited<ReturnType<typeof fetchBacktestTrendWinnerProtectionMatrix>>;
-  isLoading?: boolean;
-}) {
-  const summary = matrix?.summary;
-  const overall = summary?.overall;
-  const protectionRows = summary?.by_protection_bucket ?? [];
-  const openRows = summary?.by_execute_open_return ?? [];
-  const phaseRows = summary?.by_phase ?? [];
-  const sampleRows = matrix?.items ?? [];
-  if (!overall?.candidate_count && !protectionRows.length && !sampleRows.length) {
-    if (!isLoading) return null;
-    return <div className="rounded-md border p-3 text-sm text-muted-foreground">正在加载趋势赢家保护矩阵。</div>;
-  }
-
-  return (
-    <div className="overflow-hidden rounded-md border">
-      <div className="flex flex-wrap items-start justify-between gap-3 border-b px-3 py-2">
-        <div>
-          <div className="text-sm font-medium">趋势赢家保护矩阵</div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            复用满仓换仓样本，识别 D+1 开盘已盈利或已修复的持仓；只读审计，不改变策略。
-          </div>
-        </div>
-        <div className="text-xs text-muted-foreground">
-          Top{matrix?.candidate_rank_limit ?? 20} / {matrix?.holding_days ?? 20}日观察
-        </div>
-      </div>
-
-      <div className="grid gap-3 p-3 text-sm md:grid-cols-6">
-        <InfoCell label="样本" value={formatNumber(overall?.candidate_count, 0)} />
-        <InfoCell label="应保护" value={formatRatioPct(overall?.protected_rate)} />
-        <InfoCell label="可替换审计" value={formatRatioPct(overall?.replaceable_rate)} />
-        <InfoCell label="替换有害" value={formatRatioPct(overall?.harmful_replacement_rate)} />
-        <div>
-          <div className="text-xs text-muted-foreground">开盘收益</div>
-          <div className={cn("mt-0.5 font-medium tabular-nums", priceColorClass(overall?.avg_held_execute_open_return_pct))}>
-            {formatPct(overall?.avg_held_execute_open_return_pct)}
-          </div>
-        </div>
-        <div>
-          <div className="text-xs text-muted-foreground">真实退出</div>
-          <div className={cn("mt-0.5 font-medium tabular-nums", priceColorClass(overall?.avg_held_real_return_pct))}>
-            {formatPct(overall?.avg_held_real_return_pct)}
-          </div>
-        </div>
-      </div>
-
-      {summary?.interpretation?.message ? (
-        <div className="border-t px-3 py-2 text-xs text-muted-foreground">{summary.interpretation.message}</div>
-      ) : null}
-
-      <div className="grid gap-3 border-t p-3 lg:grid-cols-3">
-        {protectionRows.length ? <TrendWinnerProtectionBucketTable title="按保护状态" rows={protectionRows} labelKey="bucket" /> : null}
-        {openRows.length ? <TrendWinnerProtectionBucketTable title="按执行开盘" rows={openRows} labelKey="openReturn" /> : null}
-        {phaseRows.length ? <TrendWinnerProtectionBucketTable title="按行情" rows={phaseRows} labelKey="phase" /> : null}
-      </div>
-      {sampleRows.length ? <TrendWinnerProtectionSampleTable rows={sampleRows.slice(0, 8)} /> : null}
-      {matrix?.note ? <div className="border-t px-3 py-2 text-xs text-muted-foreground">{matrix.note}</div> : null}
-    </div>
-  );
-}
-
-function TrendWinnerProtectionBucketTable({
-  title,
-  rows,
-  labelKey,
-}: {
-  title: string;
-  rows: TrendWinnerProtectionBucketRow[];
-  labelKey: "bucket" | "openReturn" | "phase";
-}) {
-  if (!rows?.length) return null;
-  return (
-    <div className="overflow-hidden rounded-md border">
-      <div className="border-b px-3 py-2 text-xs font-medium text-muted-foreground">{title}</div>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>分桶</TableHead>
-            <TableHead className="text-right">样本</TableHead>
-            <TableHead className="text-right">保护</TableHead>
-            <TableHead className="text-right">可替换</TableHead>
-            <TableHead className="text-right">有害</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.map((row, index) => (
-            <TableRow key={`${title}-${trendWinnerRowLabel(row, labelKey)}-${index}`}>
-              <TableCell className="font-medium">{trendWinnerRowLabel(row, labelKey)}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatNumber(row.candidate_count, 0)}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatRatioPct(row.protected_rate)}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatRatioPct(row.replaceable_rate)}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatRatioPct(row.harmful_replacement_rate)}</TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </div>
-  );
-}
-
-function TrendWinnerProtectionSampleTable({
-  rows,
-}: {
-  rows: NonNullable<Awaited<ReturnType<typeof fetchBacktestTrendWinnerProtectionMatrix>>["items"]>;
-}) {
-  if (!rows?.length) return null;
-  return (
-    <div className="border-t">
-      <div className="px-3 py-2 text-xs font-medium text-muted-foreground">保护样本</div>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>执行日</TableHead>
-            <TableHead>持仓</TableHead>
-            <TableHead>候选</TableHead>
-            <TableHead>状态</TableHead>
-            <TableHead className="text-right">挡住</TableHead>
-            <TableHead className="text-right">开盘</TableHead>
-            <TableHead className="text-right">真实退出</TableHead>
-            <TableHead className="text-right">机会差</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.map((row, index) => (
-            <TableRow key={`${row.execute_date ?? "date"}-${row.held_symbol ?? "held"}-${index}`}>
-              <TableCell className="whitespace-nowrap">{row.execute_date ?? "--"}</TableCell>
-              <TableCell>
-                <StockIdentityLink name={row.held_name} vtSymbol={row.held_symbol} meta={row.held_exit_reason ?? undefined} />
-              </TableCell>
-              <TableCell>
-                <StockIdentityLink
-                  name={row.candidate_name}
-                  vtSymbol={row.candidate_symbol}
-                  meta={row.candidate_rank ? `#${row.candidate_rank}` : undefined}
-                />
-              </TableCell>
-              <TableCell>
-                <div className="font-medium">{row.protection_label ?? trendWinnerProtectionLabel(row.protection_bucket)}</div>
-                <div className="text-xs text-muted-foreground">{row.reason ?? row.market_phase_label ?? phaseLabel(row.market_phase)}</div>
-              </TableCell>
-              <TableCell className="text-right tabular-nums">{formatNumber(row.blocked_candidate_count, 0)}</TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.held_execute_open_return_pct))}>
-                {formatPct(row.held_execute_open_return_pct)}
-              </TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.held_real_return_pct))}>
-                {formatPct(row.held_real_return_pct)}
-              </TableCell>
-              <TableCell className={cn("text-right tabular-nums", priceColorClass(row.best_opportunity_delta_pct ?? row.opportunity_delta_pct))}>
-                {formatPct(row.best_opportunity_delta_pct ?? row.opportunity_delta_pct)}
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </div>
-  );
-}
-
 function phaseLabel(value?: string | null) {
   const labels: Record<string, string> = {
     uptrend: "主升",
@@ -1521,92 +1017,6 @@ function setupFamilyLabel(value?: string | null) {
   return labels[String(value || "unknown")] ?? String(value || "未归类");
 }
 
-function trendWinnerRowLabel(row: TrendWinnerProtectionBucketRow, labelKey: "bucket" | "openReturn" | "phase") {
-  if (labelKey === "bucket") return row.label ?? trendWinnerProtectionLabel(row.protection_bucket);
-  if (labelKey === "openReturn") return row.label ?? String(row.held_execute_open_return_bucket ?? "执行开盘未知");
-  return row.label ?? phaseLabel(row.market_phase);
-}
-
-function trendWinnerProtectionLabel(value?: string | null) {
-  const labels: Record<string, string> = {
-    protect_trend_winner: "保护趋势赢家",
-    protect_uptrend_repair: "主升修复保护",
-    protect_open_profit: "开盘盈利保护",
-    replaceable_weak_holding: "可研究弱持仓替换",
-    needs_manual_review: "需要人工复核",
-    unknown: "状态未知",
-  };
-  return labels[String(value || "unknown")] ?? String(value || "状态未知");
-}
-
-function rejectReasonLabel(value?: string | null) {
-  const labels: Record<string, string> = {
-    score_below_gate: "分数低于接力闸门",
-    market_warning_too_high: "市场风险等级过高",
-    has_failed_or_risk_flags: "候选带失败/风险标记",
-    low_suction_overlap_unconfirmed: "低吸/龙回头重叠未确认",
-    weak_low_suction_launch_bucket: "低吸启动桶偏弱",
-    low_suction_ma_convergence_too_wide: "低吸均线收敛过宽",
-    dragon_ma_convergence_too_wide: "龙回头均线收敛过宽",
-    dragon_not_fresh_tail_buy: "龙回头不是新鲜回踩",
-    unsupported_setup: "不支持的接力形态",
-  };
-  return labels[String(value || "")] ?? String(value || "未知拒买原因");
-}
-
-function rotationOpportunityRowKey(
-  row: RotationOpportunityBucketRow,
-  labelKey:
-    | "phase"
-    | "setup"
-    | "bucket"
-    | "candidateRank"
-    | "lowSuctionDays"
-    | "launchQuality"
-    | "maConvergence"
-    | "replacedReturn"
-    | "replacedExecuteOpenReturn"
-    | "replacedHoldingDays"
-) {
-  if (labelKey === "phase") return String(row.market_phase ?? row.label ?? "unknown");
-  if (labelKey === "setup") return String(row.setup_family ?? row.label ?? "unknown");
-  if (labelKey === "candidateRank") return String(row.candidate_rank_bucket ?? row.label ?? "unknown");
-  if (labelKey === "lowSuctionDays") return String(row.low_suction_days_bucket ?? row.label ?? "unknown");
-  if (labelKey === "launchQuality") return String(row.low_suction_launch_quality_bucket ?? row.label ?? "unknown");
-  if (labelKey === "maConvergence") return String(row.ma_convergence_bucket ?? row.label ?? "unknown");
-  if (labelKey === "replacedReturn") return String(row.replaced_current_return_bucket ?? row.label ?? "unknown");
-  if (labelKey === "replacedExecuteOpenReturn") return String(row.replaced_execute_open_return_bucket ?? row.label ?? "unknown");
-  if (labelKey === "replacedHoldingDays") return String(row.replaced_holding_days_bucket ?? row.label ?? "unknown");
-  return String(row.opportunity_bucket ?? row.label ?? "unknown");
-}
-
-function rotationOpportunityRowLabel(
-  row: RotationOpportunityBucketRow,
-  labelKey:
-    | "phase"
-    | "setup"
-    | "bucket"
-    | "candidateRank"
-    | "lowSuctionDays"
-    | "launchQuality"
-    | "maConvergence"
-    | "replacedReturn"
-    | "replacedExecuteOpenReturn"
-    | "replacedHoldingDays"
-) {
-  if (typeof row.label === "string" && row.label.trim()) return row.label;
-  if (labelKey === "phase") return String(row.market_phase_label ?? phaseLabel(String(row.market_phase ?? "")));
-  if (labelKey === "setup") return String(row.setup_family_label ?? setupFamilyLabel(String(row.setup_family ?? "")));
-  if (labelKey === "candidateRank") return String(row.candidate_rank_bucket ?? "排名未知");
-  if (labelKey === "lowSuctionDays") return String(row.low_suction_days_bucket ?? "低吸天数未知");
-  if (labelKey === "launchQuality") return String(row.low_suction_launch_quality_bucket ?? "启动质量未知");
-  if (labelKey === "maConvergence") return String(row.ma_convergence_bucket ?? "均线收敛未知");
-  if (labelKey === "replacedReturn") return String(row.replaced_current_return_bucket ?? "持仓浮盈未知");
-  if (labelKey === "replacedExecuteOpenReturn") return String(row.replaced_execute_open_return_bucket ?? "执行开盘未知");
-  if (labelKey === "replacedHoldingDays") return String(row.replaced_holding_days_bucket ?? "持仓天数未知");
-  return String(row.opportunity_bucket ?? "未归类");
-}
-
 function CompactPathBucketTable({
   title,
   rows,
@@ -1626,7 +1036,6 @@ function CompactPathBucketTable({
             <TableHead className="text-right">样本</TableHead>
             <TableHead className="text-right">胜率</TableHead>
             <TableHead className="text-right">均值</TableHead>
-            <TableHead className="text-right">坏替换</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -1638,7 +1047,6 @@ function CompactPathBucketTable({
               <TableCell className={cn("text-right tabular-nums", priceColorClass(numberValue(row.avg_return_pct)))}>
                 {formatPct(numberValue(row.avg_return_pct))}
               </TableCell>
-              <TableCell className="text-right tabular-nums">{formatNumber(numberValue(row.bad_replacement_count), 0)}</TableCell>
             </TableRow>
           ))}
         </TableBody>
@@ -1758,19 +1166,15 @@ function CandidateExecutionAttributionPanel({
 }) {
   if (!attribution?.candidate_count) return null;
   const missed = attribution.top20_missed_quality;
-  const portfolioSummary = attribution.portfolio_opportunity_summary;
   const reasonRows = attribution.by_not_filled_reason ?? missed?.by_reason ?? [];
   const subreasonRows = attribution.by_not_filled_subreason ?? [];
-  const opportunityRows = attribution.missed_candidate_opportunity_cost ?? [];
-  const fullPortfolioMissed = portfolioSummary?.full_portfolio_missed;
-  const opportunityTypeRows = portfolioSummary?.by_opportunity_type ?? [];
   return (
     <div className="overflow-hidden rounded-md border">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b px-3 py-2">
         <div>
           <div className="text-sm font-medium">候选执行归因</div>
           <div className="mt-1 text-xs text-muted-foreground">
-            前{attribution.max_execution_rank ?? 20}名候选与组合成交对应；错过收益是后验审计，不参与排名。
+            前{attribution.max_execution_rank ?? 20}名候选与实际成交做状态核对；后验收益只用于候选质量审计，不参与排名。
           </div>
         </div>
         <div className="grid grid-cols-3 gap-3 text-right text-xs">
@@ -1783,31 +1187,8 @@ function CandidateExecutionAttributionPanel({
         <InfoCell label="错过后验胜数" value={formatNumber(missed?.missed_positive_20d_count, 0)} />
         <InfoCell label="错过平均收益" value={formatPct(missed?.missed_avg_return_20d)} />
         <InfoCell label="错过平均MFE" value={formatPct(missed?.missed_avg_mfe_20d)} />
-        <InfoCell label="错过平均MAE" value={formatPct(missed?.missed_avg_mae_20d)} />
+          <InfoCell label="错过平均MAE" value={formatPct(missed?.missed_avg_mae_20d)} />
       </div>
-      {portfolioSummary ? (
-        <div className="border-t px-3 py-2">
-          <div className="mb-2 text-xs font-medium text-muted-foreground">满仓机会审计</div>
-          <div className="grid gap-2 md:grid-cols-4">
-            <InfoCell label="满仓错过新标的" value={formatNumber(fullPortfolioMissed?.sample_count, 0)} />
-            <InfoCell label="后验胜率" value={formatRatioPct(fullPortfolioMissed?.win_rate)} />
-            <InfoCell label="后验均值" value={formatPct(fullPortfolioMissed?.average_return_20d)} />
-            <InfoCell label="相对最弱持仓" value={formatPct(fullPortfolioMissed?.average_delta_vs_weakest_held)} />
-          </div>
-          {opportunityTypeRows.length ? (
-            <div className="mt-2 grid gap-2 md:grid-cols-3">
-              {opportunityTypeRows.slice(0, 3).map((row, index) => (
-                <div key={`${row.opportunity_type ?? "type"}-${index}`} className="rounded-md border bg-muted/20 p-2">
-                  <div className="text-xs font-medium">{opportunityTypeLabel(row.opportunity_type)}</div>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    样本 {formatNumber(row.sample_count, 0)}，均值 {formatPct(row.average_return_20d)}
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
       {reasonRows.length ? (
         <Table>
           <TableHeader>
@@ -1847,46 +1228,6 @@ function CandidateExecutionAttributionPanel({
               </div>
             ))}
           </div>
-        </div>
-      ) : null}
-      {opportunityRows.length ? (
-        <div className="border-t">
-          <div className="px-3 py-2 text-xs font-medium text-muted-foreground">错过候选机会成本</div>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>日期</TableHead>
-                <TableHead>错过候选</TableHead>
-                <TableHead>对比持仓</TableHead>
-                <TableHead className="text-right">分差</TableHead>
-                <TableHead className="text-right">候选20日</TableHead>
-                <TableHead className="text-right">持仓浮盈</TableHead>
-                <TableHead className="text-right">质量差</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {opportunityRows.slice(0, 6).map((row, index) => (
-                <TableRow key={`${row.signal_date ?? "date"}-${row.missed_symbol ?? "miss"}-${row.held_symbol ?? "held"}-${index}`}>
-                  <TableCell className="whitespace-nowrap">{row.signal_date ?? "--"}</TableCell>
-                  <TableCell className="font-medium">
-                    {row.missed_symbol ?? "--"}
-                    {row.missed_rank ? <span className="ml-1 text-xs text-muted-foreground">#{row.missed_rank}</span> : null}
-                  </TableCell>
-                  <TableCell>{row.held_symbol ?? "--"}</TableCell>
-                  <TableCell className="text-right tabular-nums">{formatNumber(row.rotation_score_gap, 2)}</TableCell>
-                  <TableCell className={cn("text-right tabular-nums", priceColorClass(numberValue(row.missed_return_20d)))}>
-                    {formatPct(numberValue(row.missed_return_20d))}
-                  </TableCell>
-                  <TableCell className={cn("text-right tabular-nums", priceColorClass(numberValue(row.held_unrealized_return_pct)))}>
-                    {formatPct(numberValue(row.held_unrealized_return_pct))}
-                  </TableCell>
-                  <TableCell className={cn("text-right tabular-nums", priceColorClass(numberValue(row.replacement_quality_delta)))}>
-                    {formatPct(numberValue(row.replacement_quality_delta))}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
         </div>
       ) : null}
     </div>
@@ -2257,7 +1598,7 @@ export function BacktestRealityStats({
       <InfoCell label="平均持仓" value={`${formatNumber(metrics.average_holding_days, 1)}天`} />
       <InfoCell label="持仓中位数" value={`${formatNumber(metrics.median_holding_days, 1)}天`} />
       <InfoCell label="换手估算" value={formatPct(metrics.turnover_pct)} />
-      <InfoCell label="平均仓位" value={formatPct(metrics.average_exposure_pct)} />
+      <InfoCell label="平均资金占用" value={formatPct(metrics.average_exposure_pct)} />
       <InfoCell label="最大持仓数" value={`${metrics.max_position_count}只`} />
       <InfoCell label="组合买入/卖出/持仓中" value={`${metrics.buy_count} / ${metrics.sell_count} / ${metrics.open_trade_count}笔`} />
       <InfoCell label="成交订单" value={`${metrics.filled_order_count}笔`} />
@@ -2442,8 +1783,6 @@ function problemLabel(value: unknown) {
     buy_point_bad: "买点问题",
     sell_giveback: "卖点回撤问题",
     sold_too_early: "卖早反弹",
-    portfolio_capacity_miss: "满仓错过",
-    replacement_bad: "替换交易变差",
     healthy_trend_winner: "趋势赢家",
     unknown: "未归类",
   };
@@ -2902,8 +2241,6 @@ function notFilledReasonLabel(value?: string | null) {
     planned_not_ordered: "计划未下单",
     ordered_not_filled: "下单未成交",
     outside_execution_top20: "不在执行前20",
-    portfolio_full_no_rotation: "满仓未换仓",
-    full_position_no_rotation: "满仓未换仓",
     limit_up_open_blocked: "开盘涨停买不到",
     no_execute_bar: "缺执行K线",
   };
@@ -2925,18 +2262,6 @@ function notFilledSubreasonLabel(value?: string | null) {
     unknown_plan_gap: "未知计划差异",
   };
   const key = String(value || "none");
-  return labels[key] ?? key;
-}
-
-function opportunityTypeLabel(value?: string | null) {
-  const labels: Record<string, string> = {
-    filled: "已成交",
-    repeat_same_symbol_holding: "同股已持有",
-    new_symbol_missed_full_portfolio: "满仓错过新标的",
-    new_symbol_missed_with_open_slots: "有持仓但未买",
-    new_symbol_missed_without_position_snapshot: "缺持仓快照",
-  };
-  const key = String(value || "unknown");
   return labels[key] ?? key;
 }
 

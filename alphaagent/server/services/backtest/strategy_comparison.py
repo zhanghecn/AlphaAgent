@@ -228,7 +228,7 @@ def _strategy_phase_summary(
         "best_phase": best_phase.get("phase") if best_phase else None,
         "best_phase_label": best_phase.get("label") if best_phase else None,
         "not_used_for_signal_score": True,
-        "method": "按真实闭合成交的买入日可见行情上下文聚合；不改变买卖、排序或仓位。",
+        "method": "按真实闭合成交的买入日可见行情上下文聚合；不改变买卖或排序。",
     }
 
 
@@ -334,7 +334,7 @@ def _strategy_candidate_phase_summary(
         "best_phase": best_phase.get("phase") if best_phase else None,
         "best_phase_label": best_phase.get("label") if best_phase else None,
         "not_used_for_signal_score": True,
-        "method": "按理论买入候选 Top-N 的信号日行情聚合，收益为后验审计；不改变默认买卖、排序或仓位。",
+        "method": "按理论买入候选 Top-N 的信号日行情聚合，收益为后验审计；不改变默认买卖或排序。",
     }
 
 

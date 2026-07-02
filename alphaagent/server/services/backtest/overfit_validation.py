@@ -7,7 +7,7 @@
 - Deflated Sharpe Ratio：修正多重检验 + 非正态的 Sharpe 显著性。
 
 纯加法模块：通过 ``run_backtest(persist=False)`` 只读调用现有回测引擎，
-不写库、不改任何策略代码，对 mainline_dragon_pullback / 0.1.21 零影响。
+不写库、不改任何策略代码，对 mainline_dragon_pullback / 0.1.22 零影响。
 
 参考：Bailey & López de Prado (2014/2018)。
 """

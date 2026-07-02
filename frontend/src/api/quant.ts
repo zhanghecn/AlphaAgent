@@ -97,7 +97,7 @@ export interface QuantResearchRun {
   created_at?: string;
   started_at?: string;
   finished_at?: string | null;
-  stage?: "queued" | "screening" | "backtest" | string;
+  stage?: "queued" | "screening" | "replay" | "candidate_quality" | string;
   message?: string | null;
   progress_current?: number;
   progress_total?: number;
@@ -117,6 +117,7 @@ export interface QuantResearchRun {
     metrics?: BacktestMetrics;
     message?: string | null;
   } | null;
+  candidate_trade_quality?: CandidateTradeQualityReport | null;
   error_type?: string | null;
   error_detail?: string | null;
 }
@@ -148,6 +149,7 @@ export interface SymbolSignalHistoryRow {
   entry_signal: boolean;
   raw_entry_signal?: boolean;
   executable_entry_signal?: boolean;
+  research_entry_signal?: boolean;
   action?: "BUY" | "WATCH" | string;
   ma5?: number | null;
   ma5_distance_pct?: number | null;
@@ -1295,7 +1297,6 @@ export interface CandidateExecutionAttributionRow {
   missed_mae_20d?: number | null;
   uses_future_for_label_only?: boolean | null;
   not_used_for_signal_score?: boolean | null;
-  held_positions?: Array<Record<string, unknown>>;
 }
 
 export interface CandidateExecutionAttributionBucket {
@@ -1308,53 +1309,6 @@ export interface CandidateExecutionAttributionBucket {
   positive_20d_count?: number | null;
   win_rate?: number | null;
   average_return_20d?: number | null;
-}
-
-export interface CandidateOpportunityCostRow {
-  signal_date?: string | null;
-  execute_date?: string | null;
-  missed_symbol?: string | null;
-  missed_name?: string | null;
-  missed_rank?: number | null;
-  missed_score?: number | null;
-  missed_return_20d?: number | null;
-  missed_mfe_20d?: number | null;
-  missed_mae_20d?: number | null;
-  held_symbol?: string | null;
-  held_entry_score?: number | null;
-  held_unrealized_return_pct?: number | null;
-  held_days?: number | null;
-  held_support_state?: string | null;
-  rotation_score_gap?: number | null;
-  replacement_quality_delta?: number | null;
-  not_used_for_signal_score?: boolean | null;
-}
-
-export interface CandidatePortfolioOpportunityBucket {
-  opportunity_type?: string | null;
-  delta_bucket?: string | null;
-  sample_count?: number | null;
-  filled_count?: number | null;
-  missed_count?: number | null;
-  same_symbol_holding_count?: number | null;
-  full_portfolio_count?: number | null;
-  positive_20d_count?: number | null;
-  win_rate?: number | null;
-  average_return_20d?: number | null;
-  median_return_20d?: number | null;
-  average_delta_vs_weakest_held?: number | null;
-  not_used_for_signal_score?: boolean | null;
-}
-
-export interface CandidatePortfolioOpportunitySummary {
-  method?: string | null;
-  portfolio_full_threshold?: number | null;
-  new_symbol_missed?: CandidatePortfolioOpportunityBucket;
-  full_portfolio_missed?: CandidatePortfolioOpportunityBucket;
-  by_opportunity_type?: CandidatePortfolioOpportunityBucket[];
-  by_delta_vs_weakest_held?: CandidatePortfolioOpportunityBucket[];
-  top_replacement_opportunities?: CandidateOpportunityCostRow[];
-  not_used_for_signal_score?: boolean | null;
 }
 
 export interface CandidateExecutionAttributionSummary {
@@ -1371,8 +1325,6 @@ export interface CandidateExecutionAttributionSummary {
     missed_avg_mae_20d?: number | null;
     by_reason?: CandidateExecutionAttributionBucket[];
   };
-  missed_candidate_opportunity_cost?: CandidateOpportunityCostRow[];
-  portfolio_opportunity_summary?: CandidatePortfolioOpportunitySummary;
   by_status?: CandidateExecutionAttributionBucket[];
   by_not_filled_reason?: CandidateExecutionAttributionBucket[];
   by_not_filled_subreason?: CandidateExecutionAttributionBucket[];
@@ -1408,7 +1360,6 @@ export interface FactorAuditResponse {
       avoided_loser_return_sum?: number | null;
       added_loser_count?: number | null;
       added_loser_return_sum?: number | null;
-      replacement_quality_delta?: number | null;
       note?: string | null;
     };
     not_used_for_signal_score?: boolean | null;
@@ -1471,6 +1422,83 @@ export interface CandidateTradeQualityDailySummary {
   worst_candidate?: CandidateTradeQualityDailyExtreme | null;
 }
 
+export interface CandidateTradeQualityBucketAuditRow extends CandidateTradeQualityMetricSummary {
+  bucket?: string | null;
+  label?: string | null;
+  path_bucket?: string | null;
+  examples?: CandidateTradeQualitySample[];
+  uses_future_for_label_only?: boolean | null;
+  not_used_for_signal_score?: boolean | null;
+}
+
+export interface CandidateTradeQualityBucketAudit {
+  status: string;
+  method?: string | null;
+  entry_selection?: string | null;
+  rank_limit?: number | null;
+  sample_limit?: number | null;
+  summary?: CandidateTradeQualityMetricSummary;
+  path_buckets?: CandidateTradeQualityBucketAuditRow[];
+  loss_buckets?: CandidateTradeQualityBucketAuditRow[];
+  winner_buckets?: CandidateTradeQualityBucketAuditRow[];
+  coverage?: Record<string, unknown>;
+  uses_future_for_label_only?: boolean | null;
+  not_used_for_signal_score?: boolean | null;
+}
+
+export interface CandidateTradeQualityVolumeAuditRow extends CandidateTradeQualityMetricSummary {
+  label?: string | null;
+  volume_bucket?: string | null;
+  active_volume_bucket?: string | null;
+  preparation_bucket?: string | null;
+  loss_path?: string | null;
+  loss_path_label?: string | null;
+  preparation_label?: string | null;
+  loss_sample_count?: number | null;
+  pure_loss_count?: number | null;
+  deep_drawdown_loss_count?: number | null;
+  mfe_giveback_count?: number | null;
+  right_tail_count?: number | null;
+  examples?: CandidateTradeQualityVolumeExample[];
+  uses_future_for_label_only?: boolean | null;
+  not_used_for_signal_score?: boolean | null;
+}
+
+export interface CandidateTradeQualityVolumeExample extends StockIdentityFields {
+  vt_symbol?: string | null;
+  name?: string | null;
+  entry_signal_date?: string | null;
+  rank?: number | null;
+  score?: number | null;
+  return_pct?: number | null;
+  max_drawdown_pct?: number | null;
+  max_runup_pct?: number | null;
+  volume_ratio_5d_20d?: number | null;
+  low_suction_days?: number | null;
+  first_effective_lift?: boolean | null;
+  recent_limit_up_20d?: boolean | null;
+  large_bull_count_20d?: number | null;
+  volume_stall_risk?: boolean | null;
+}
+
+export interface CandidateTradeQualityVolumeAudit {
+  status: string;
+  method?: string | null;
+  entry_selection?: string | null;
+  rank_limit?: number | null;
+  sample_limit?: number | null;
+  summary?: CandidateTradeQualityMetricSummary;
+  by_volume_ratio?: CandidateTradeQualityVolumeAuditRow[];
+  by_active_volume?: CandidateTradeQualityVolumeAuditRow[];
+  by_preparation?: CandidateTradeQualityVolumeAuditRow[];
+  loss_by_volume_ratio?: CandidateTradeQualityVolumeAuditRow[];
+  loss_by_preparation?: CandidateTradeQualityVolumeAuditRow[];
+  loss_path_by_preparation?: CandidateTradeQualityVolumeAuditRow[];
+  coverage?: Record<string, unknown>;
+  uses_future_for_label_only?: boolean | null;
+  not_used_for_signal_score?: boolean | null;
+}
+
 export interface CandidateTradeQualitySample extends StockIdentityFields {
   status: string;
   vt_symbol: string;
@@ -1521,6 +1549,8 @@ export interface CandidateTradeQualityReport {
   by_setup_family?: CandidateTradeQualityBucket[];
   by_market_phase?: CandidateTradeQualityBucket[];
   by_exit_reason?: CandidateTradeQualityBucket[];
+  bucket_audit?: CandidateTradeQualityBucketAudit;
+  volume_audit?: CandidateTradeQualityVolumeAudit;
   yearly?: CandidateTradeQualityYearlySummary[];
   daily_summaries?: CandidateTradeQualityDailySummary[];
   best_samples?: CandidateTradeQualitySample[];
@@ -1643,8 +1673,6 @@ export interface BacktestPathMetricBucket {
   avg_mfe_pct?: number | null;
   avg_mae_pct?: number | null;
   sold_before_rebound_count?: number | null;
-  bad_replacement_count?: number | null;
-  strong_replacement_count?: number | null;
   [key: string]: unknown;
 }
 
@@ -1653,23 +1681,6 @@ export interface BuySellProblemMatrix {
   by_setup_problem?: BacktestPathMetricBucket[];
   by_market_problem?: BacktestPathMetricBucket[];
   focused_symbols?: BacktestPathDiagnosticRow[];
-}
-
-export interface ExitPathReplacementQuality {
-  method?: string | null;
-  overall?: BacktestPathMetricBucket;
-  by_trade_problem_type?: BacktestPathMetricBucket[];
-  by_exit_reason?: BacktestPathMetricBucket[];
-  by_support_stop_context?: BacktestPathMetricBucket[];
-  replacement_quality_summary?: {
-    replacement_trade_count?: number | null;
-    bad_replacement_count?: number | null;
-    strong_replacement_count?: number | null;
-    avg_replacement_return_pct?: number | null;
-    avg_replacement_return_delta_pct?: number | null;
-    by_replacement_outcome?: BacktestPathMetricBucket[];
-  };
-  not_used_for_signal_score?: boolean | null;
 }
 
 export interface MarketContextValidationSummary {
@@ -1695,7 +1706,6 @@ export interface BacktestSetupMarketExitAuditResponse {
   lookahead_days?: number;
   summary?: {
     buy_sell_problem_matrix?: BuySellProblemMatrix;
-    exit_path_replacement_quality?: ExitPathReplacementQuality;
     market_context_validation?: MarketContextValidationSummary;
     [key: string]: unknown;
   };
@@ -1764,269 +1774,6 @@ export interface BacktestPhaseStrategyFamilyMatrix {
     audit_only?: boolean | null;
     not_used_for_signal_score?: boolean | null;
   };
-  note?: string | null;
-}
-
-export interface ReplacementRejectBucketRow {
-  market_phase?: string | null;
-  phase_label?: string | null;
-  setup_family?: string | null;
-  setup_label?: string | null;
-  low_suction_launch_quality_bucket?: string | null;
-  label?: string | null;
-  reject_count?: number | null;
-  avg_entry_score?: number | null;
-  avg_market_warning_level?: number | null;
-  high_warning_count?: number | null;
-  reason_count?: number | null;
-  unique_reason_count?: number | null;
-}
-
-export interface ReplacementRejectReasonCount {
-  reason: string;
-  label?: string | null;
-  count: number;
-}
-
-export interface BacktestReplacementQualityMatrix {
-  status: string;
-  backtest_id?: number;
-  start_date?: string;
-  end_date?: string;
-  audit_only?: boolean | null;
-  not_used_for_signal_score?: boolean | null;
-  summary?: {
-    method?: string | null;
-    filled_overall?: PhaseStrategyFamilyMatrixRow;
-    filled_by_phase?: PhaseStrategyFamilyMatrixRow[];
-    filled_by_setup_family?: PhaseStrategyFamilyMatrixRow[];
-    filled_by_phase_setup?: PhaseStrategyFamilyMatrixRow[];
-    filled_by_low_suction_bucket?: PhaseStrategyFamilyMatrixRow[];
-    filled_by_exit_reason?: PhaseStrategyFamilyMatrixRow[];
-    rejected_overall?: ReplacementRejectBucketRow;
-    rejected_by_phase?: ReplacementRejectBucketRow[];
-    rejected_by_setup_family?: ReplacementRejectBucketRow[];
-    rejected_by_low_suction_bucket?: ReplacementRejectBucketRow[];
-    rejected_by_warning_level?: ReplacementRejectBucketRow[];
-    rejected_reason_counts?: ReplacementRejectReasonCount[];
-    interpretation?: {
-      replacement_quality_needs_market_phase?: boolean | null;
-      low_suction_buildup_observation_only?: boolean | null;
-      overlap_requires_conflict_resolution?: boolean | null;
-      gate_reject_count?: number | null;
-      notes?: string[];
-    };
-    audit_only?: boolean | null;
-    not_used_for_signal_score?: boolean | null;
-  };
-  total?: {
-    filled_trade_count?: number | null;
-    gate_reject_count?: number | null;
-  };
-  items?: Array<Record<string, unknown>>;
-  rejected_items?: Array<Record<string, unknown>>;
-  note?: string | null;
-}
-
-export interface RotationOpportunityMetricSummary {
-  candidate_count?: number | null;
-  evaluated_count?: number | null;
-  positive_count?: number | null;
-  positive_rate?: number | null;
-  strong_positive_count?: number | null;
-  strong_positive_rate?: number | null;
-  harmful_count?: number | null;
-  harmful_rate?: number | null;
-  avg_candidate_return_pct?: number | null;
-  avg_replaced_real_return_pct?: number | null;
-  avg_opportunity_delta_pct?: number | null;
-  median_opportunity_delta_pct?: number | null;
-  best_opportunity_delta_pct?: number | null;
-  worst_opportunity_delta_pct?: number | null;
-  execute_open_evaluated_count?: number | null;
-  execute_open_weak_count?: number | null;
-  execute_open_weak_rate?: number | null;
-  execute_open_profitable_count?: number | null;
-  execute_open_profitable_rate?: number | null;
-}
-
-export interface RotationOpportunityBucketRow extends RotationOpportunityMetricSummary {
-  label?: string | null;
-  opportunity_bucket?: string | null;
-  market_phase?: string | null;
-  market_phase_label?: string | null;
-  setup_family?: string | null;
-  setup_family_label?: string | null;
-  candidate_rank_bucket?: string | null;
-  low_suction_days_bucket?: string | null;
-  low_suction_launch_quality_bucket?: string | null;
-  ma_convergence_bucket?: string | null;
-  replaced_current_return_bucket?: string | null;
-  replaced_execute_open_return_bucket?: string | null;
-  replaced_holding_days_bucket?: string | null;
-  market_warning_level?: number | null;
-}
-
-export interface RotationOpportunityItem {
-  signal_date?: string | null;
-  execute_date?: string | null;
-  vt_symbol?: string | null;
-  name?: string | null;
-  board?: string | null;
-  board_label?: string | null;
-  rank?: number | null;
-  score?: number | null;
-  status?: string | null;
-  status_label?: string | null;
-  setup_family?: string | null;
-  entry_family?: string | null;
-  entry_setup?: string | null;
-  market_phase?: string | null;
-  market_phase_label?: string | null;
-  candidate_observation_days?: number | null;
-  candidate_entry_date?: string | null;
-  candidate_exit_date?: string | null;
-  candidate_return_pct?: number | null;
-  candidate_entry_price?: number | null;
-  candidate_exit_price?: number | null;
-  replaced_symbol?: string | null;
-  replaced_name?: string | null;
-  replaced_entry_date?: string | null;
-  replaced_holding_days?: number | null;
-  replaced_cost_price?: number | null;
-  replaced_snapshot_close_price?: number | null;
-  replaced_snapshot_return_pct?: number | null;
-  replaced_current_return_pct?: number | null;
-  replaced_execute_open_price?: number | null;
-  replaced_execute_open_return_pct?: number | null;
-  replaced_execute_open_return_source?: string | null;
-  replaced_exit_date?: string | null;
-  replaced_real_return_pct?: number | null;
-  replaced_exit_reason?: string | null;
-  opportunity_delta_pct?: number | null;
-  opportunity_bucket?: string | null;
-  sample_summary?: string | null;
-}
-
-export interface BacktestRotationOpportunityCostMatrix {
-  status: string;
-  backtest_id?: number;
-  start_date?: string;
-  end_date?: string;
-  candidate_rank_limit?: number;
-  holding_days?: number;
-  audit_only?: boolean | null;
-  not_used_for_signal_score?: boolean | null;
-  summary?: {
-    method?: string | null;
-    not_used_for_signal_score?: boolean | null;
-    audit_only?: boolean | null;
-    overall?: RotationOpportunityMetricSummary;
-    by_opportunity_bucket?: RotationOpportunityBucketRow[];
-    by_phase?: RotationOpportunityBucketRow[];
-    by_setup_family?: RotationOpportunityBucketRow[];
-    by_phase_setup?: RotationOpportunityBucketRow[];
-    by_candidate_rank?: RotationOpportunityBucketRow[];
-    by_market_warning?: RotationOpportunityBucketRow[];
-    by_low_suction_days?: RotationOpportunityBucketRow[];
-    by_launch_quality?: RotationOpportunityBucketRow[];
-    by_ma_convergence?: RotationOpportunityBucketRow[];
-    by_replaced_current_return?: RotationOpportunityBucketRow[];
-    by_replaced_execute_open_return?: RotationOpportunityBucketRow[];
-    by_replaced_holding_days?: RotationOpportunityBucketRow[];
-    interpretation?: {
-      primary_issue?: string | null;
-      message?: string | null;
-    };
-  };
-  items?: RotationOpportunityItem[];
-  total?: number;
-  returned_count?: number;
-  has_more?: boolean;
-  limit?: number;
-  note?: string | null;
-}
-
-export interface TrendWinnerProtectionMetricSummary {
-  candidate_count?: number | null;
-  protected_count?: number | null;
-  protected_rate?: number | null;
-  replaceable_count?: number | null;
-  replaceable_rate?: number | null;
-  harmful_replacement_count?: number | null;
-  harmful_replacement_rate?: number | null;
-  avg_held_execute_open_return_pct?: number | null;
-  avg_held_real_return_pct?: number | null;
-  avg_opportunity_delta_pct?: number | null;
-}
-
-export interface TrendWinnerProtectionBucketRow extends TrendWinnerProtectionMetricSummary {
-  label?: string | null;
-  protection_bucket?: string | null;
-  market_phase?: string | null;
-  held_execute_open_return_bucket?: string | null;
-}
-
-export interface TrendWinnerProtectionItem {
-  signal_date?: string | null;
-  execute_date?: string | null;
-  candidate_symbol?: string | null;
-  candidate_name?: string | null;
-  candidate_rank?: number | null;
-  candidate_score?: number | null;
-  candidate_setup_family?: string | null;
-  candidate_return_pct?: number | null;
-  blocked_candidate_count?: number | null;
-  positive_opportunity_count?: number | null;
-  harmful_opportunity_count?: number | null;
-  best_opportunity_delta_pct?: number | null;
-  avg_opportunity_delta_pct?: number | null;
-  held_symbol?: string | null;
-  held_name?: string | null;
-  held_entry_date?: string | null;
-  held_holding_days?: number | null;
-  held_snapshot_return_pct?: number | null;
-  held_execute_open_return_pct?: number | null;
-  held_real_return_pct?: number | null;
-  held_exit_date?: string | null;
-  held_exit_reason?: string | null;
-  opportunity_delta_pct?: number | null;
-  market_phase?: string | null;
-  market_phase_label?: string | null;
-  protection_bucket?: string | null;
-  protection_label?: string | null;
-  protected?: boolean | null;
-  replaceable?: boolean | null;
-  reason?: string | null;
-}
-
-export interface BacktestTrendWinnerProtectionMatrix {
-  status: string;
-  backtest_id?: number;
-  start_date?: string;
-  end_date?: string;
-  candidate_rank_limit?: number;
-  holding_days?: number;
-  audit_only?: boolean | null;
-  not_used_for_signal_score?: boolean | null;
-  summary?: {
-    method?: string | null;
-    audit_only?: boolean | null;
-    not_used_for_signal_score?: boolean | null;
-    overall?: TrendWinnerProtectionMetricSummary;
-    by_protection_bucket?: TrendWinnerProtectionBucketRow[];
-    by_phase?: TrendWinnerProtectionBucketRow[];
-    by_execute_open_return?: TrendWinnerProtectionBucketRow[];
-    interpretation?: {
-      primary_issue?: string | null;
-      message?: string | null;
-    };
-  };
-  items?: TrendWinnerProtectionItem[];
-  total?: number;
-  returned_count?: number;
-  has_more?: boolean;
-  limit?: number;
   note?: string | null;
 }
 
@@ -2652,10 +2399,7 @@ export function createQuantResearchRun(payload: {
   persist?: boolean;
   auto_portfolio?: boolean;
   included_boards?: string[];
-  initial_cash?: number;
-  max_positions?: number;
   candidate_limit?: number;
-  max_position_pct?: number;
   strict_entry?: boolean;
   execution_model?: "legacy_next_open" | string;
   force_refresh?: boolean;
@@ -3100,9 +2844,10 @@ export function createBacktest(payload: {
   enable_surge_quality_lane?: boolean;
   enable_weekly_top_fractal_relief?: boolean;
   enable_pure_loss_weak_bucket_penalty?: boolean;
+  enable_support_divergence_entry_lane?: boolean;
+  enable_strong_trend_ma_pullback_entry_lane?: boolean;
   enable_high_risk_d2_follow_through_entry?: boolean;
   enable_dynamic_failed_launch_exit_stop?: boolean;
-  enable_dynamic_failed_launch_replacement_quality_gate?: boolean;
   enable_failed_launch_exit_stop?: boolean;
   enable_contextual_failed_launch_exit_stop?: boolean;
   enable_mid_profit_giveback_stop?: boolean;
@@ -3157,9 +2902,10 @@ export function runBacktestStrategyComparison(payload: {
   enable_surge_quality_lane?: boolean;
   enable_weekly_top_fractal_relief?: boolean;
   enable_pure_loss_weak_bucket_penalty?: boolean;
+  enable_support_divergence_entry_lane?: boolean;
+  enable_strong_trend_ma_pullback_entry_lane?: boolean;
   enable_high_risk_d2_follow_through_entry?: boolean;
   enable_dynamic_failed_launch_exit_stop?: boolean;
-  enable_dynamic_failed_launch_replacement_quality_gate?: boolean;
   enable_failed_launch_exit_stop?: boolean;
   enable_contextual_failed_launch_exit_stop?: boolean;
   enable_mid_profit_giveback_stop?: boolean;
@@ -3202,9 +2948,10 @@ export function createSymbolBacktest(payload: {
   enable_surge_quality_lane?: boolean;
   enable_weekly_top_fractal_relief?: boolean;
   enable_pure_loss_weak_bucket_penalty?: boolean;
+  enable_support_divergence_entry_lane?: boolean;
+  enable_strong_trend_ma_pullback_entry_lane?: boolean;
   enable_high_risk_d2_follow_through_entry?: boolean;
   enable_dynamic_failed_launch_exit_stop?: boolean;
-  enable_dynamic_failed_launch_replacement_quality_gate?: boolean;
   enable_failed_launch_exit_stop?: boolean;
   enable_contextual_failed_launch_exit_stop?: boolean;
   enable_mid_profit_giveback_stop?: boolean;
@@ -3257,9 +3004,10 @@ export function runStrictMinuteBacktestPipeline(payload: {
   enable_surge_quality_lane?: boolean;
   enable_weekly_top_fractal_relief?: boolean;
   enable_pure_loss_weak_bucket_penalty?: boolean;
+  enable_support_divergence_entry_lane?: boolean;
+  enable_strong_trend_ma_pullback_entry_lane?: boolean;
   enable_high_risk_d2_follow_through_entry?: boolean;
   enable_dynamic_failed_launch_exit_stop?: boolean;
-  enable_dynamic_failed_launch_replacement_quality_gate?: boolean;
   enable_failed_launch_exit_stop?: boolean;
   enable_contextual_failed_launch_exit_stop?: boolean;
   enable_mid_profit_giveback_stop?: boolean;
@@ -3414,42 +3162,6 @@ export function fetchBacktestPhaseStrategyFamilyMatrix(
 ): Promise<BacktestPhaseStrategyFamilyMatrix> {
   const search = new URLSearchParams({ candidate_rank_limits: candidateRankLimits.join(",") });
   return apiClient.get<BacktestPhaseStrategyFamilyMatrix>(`/backtests/${backtestId}/phase-strategy-family-matrix?${search.toString()}`);
-}
-
-export function fetchBacktestReplacementQualityMatrix(
-  backtestId: number,
-  sampleLimit = 80
-): Promise<BacktestReplacementQualityMatrix> {
-  const search = new URLSearchParams({ sample_limit: String(sampleLimit) });
-  return apiClient.get<BacktestReplacementQualityMatrix>(`/backtests/${backtestId}/replacement-quality-matrix?${search.toString()}`);
-}
-
-export function fetchBacktestRotationOpportunityCostMatrix(
-  backtestId: number,
-  candidateRankLimit = 20,
-  sampleLimit = 80,
-  holdingDays = 20
-): Promise<BacktestRotationOpportunityCostMatrix> {
-  const search = new URLSearchParams({
-    candidate_rank_limit: String(candidateRankLimit),
-    sample_limit: String(sampleLimit),
-    holding_days: String(holdingDays),
-  });
-  return apiClient.get<BacktestRotationOpportunityCostMatrix>(`/backtests/${backtestId}/rotation-opportunity-cost-matrix?${search.toString()}`);
-}
-
-export function fetchBacktestTrendWinnerProtectionMatrix(
-  backtestId: number,
-  candidateRankLimit = 20,
-  sampleLimit = 80,
-  holdingDays = 20
-): Promise<BacktestTrendWinnerProtectionMatrix> {
-  const search = new URLSearchParams({
-    candidate_rank_limit: String(candidateRankLimit),
-    sample_limit: String(sampleLimit),
-    holding_days: String(holdingDays),
-  });
-  return apiClient.get<BacktestTrendWinnerProtectionMatrix>(`/backtests/${backtestId}/trend-winner-protection-matrix?${search.toString()}`);
 }
 
 export function fetchBacktestFactorCandidates(backtestId: number, params: { vt_symbol?: string; limit?: number } = {}): Promise<FactorCandidateResponse> {

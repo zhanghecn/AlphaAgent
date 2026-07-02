@@ -17,13 +17,20 @@ export function ScreenProgress({
 }) {
   const fallbackPct = total > 0 ? Math.round((completed / total) * 100) : 0;
   const safePct = Math.min(100, Math.max(0, Math.round(pct ?? fallbackPct)));
-  const stageLabel = stage === "backtest" ? "自动回测" : stage === "screening" ? "刷新候选" : "准备中";
+  const stageLabel =
+    stage === "candidate_quality"
+      ? "候选质量"
+      : stage === "backtest"
+          ? "自动回测"
+          : stage === "screening"
+            ? "刷新候选"
+            : "准备中";
   return (
     <div className="rounded-lg border bg-muted/30 px-4 py-3">
       <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
         <span className="flex items-center gap-2 font-medium">
           <RefreshCw size={14} className="animate-spin text-primary" />
-          正在刷新候选并回测{strategyName ? `（${strategyName}）` : ""} · {stageLabel}
+          正在刷新候选并统计候选质量{strategyName ? `（${strategyName}）` : ""} · {stageLabel}
         </span>
         <span className="font-display tabular-nums text-muted-foreground">
           {total > 0 ? `${completed} / ${total} 交易日 · ` : ""}{safePct}%
@@ -36,7 +43,7 @@ export function ScreenProgress({
         />
       </div>
       <p className="mt-2 text-xs text-muted-foreground">
-        {message || "后台会按当前策略版本逐日评分，更新候选前20，并按 BUY 前10和最多10只持仓自动回测。"}
+        {message || "后台会按当前策略版本逐日评分，统计每日Top20候选独立买卖质量；组合结果只作为执行诊断。"}
       </p>
     </div>
   );

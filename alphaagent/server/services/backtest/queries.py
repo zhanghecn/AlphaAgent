@@ -11,6 +11,7 @@ from typing import Any, Callable
 from sqlalchemy import and_, desc, func, select
 
 from alphaagent.market.boards import DEFAULT_QUANT_INCLUDED_BOARDS, normalize_included_boards
+from alphaagent.server.services.backtest import data_quality
 from alphaagent.server.services.quant.factors import Bar, score_dragon_pullback
 from alphaagent.server.services.quant import market_context
 from alphaagent.server.services.quant import screening_payloads
@@ -35,8 +36,6 @@ ClosedTrades = Callable[[list[dict[str, Any]]], list[dict[str, Any]]]
 BUY_POINT_BAD = "buy_point_bad"
 SELL_GIVEBACK = "sell_giveback"
 SOLD_TOO_EARLY = "sold_too_early"
-PORTFOLIO_CAPACITY_MISS = "portfolio_capacity_miss"
-REPLACEMENT_BAD = "replacement_bad"
 HEALTHY_TREND_WINNER = "healthy_trend_winner"
 UNKNOWN = "unknown"
 
@@ -170,13 +169,12 @@ def backtest_daily_decisions(
             .order_by(schema.backtest_daily_positions.c.trade_date)
         ).mappings().all()
         signal_dates = sorted({row["signal_date"] for row in signal_rows if row.get("signal_date")})
-        if signal_dates:
+        run_ids = _screen_run_ids_for_dates(session, run["strategy_id"], run["strategy_version"], signal_dates, _run_params(dict(run)))
+        if run_ids:
             recommendation_rows = session.execute(
                 select(schema.quant_recommendations)
                 .where(
-                    schema.quant_recommendations.c.trade_date.in_(signal_dates),
-                    schema.quant_recommendations.c.strategy_id == run["strategy_id"],
-                    schema.quant_recommendations.c.strategy_version == run["strategy_version"],
+                    schema.quant_recommendations.c.run_id.in_(run_ids),
                 )
                 .order_by(schema.quant_recommendations.c.trade_date, schema.quant_recommendations.c.rank)
             ).mappings().all()
@@ -311,26 +309,19 @@ def backtest_path_diagnostics(
         if vt_symbol:
             trade_query = trade_query.where(schema.backtest_trades.c.vt_symbol == vt_symbol)
             position_query = position_query.where(schema.backtest_daily_positions.c.vt_symbol == vt_symbol)
-        all_trade_rows = session.execute(
-            select(schema.backtest_trades)
-            .where(schema.backtest_trades.c.backtest_id == backtest_id)
-            .order_by(schema.backtest_trades.c.trade_date, schema.backtest_trades.c.id)
-        ).mappings().all()
         trade_rows = session.execute(
             trade_query.order_by(schema.backtest_trades.c.trade_date, schema.backtest_trades.c.id)
         ).mappings().all()
         position_rows = session.execute(
             position_query.order_by(schema.backtest_daily_positions.c.trade_date, schema.backtest_daily_positions.c.vt_symbol)
         ).mappings().all()
-        all_trade_dicts = [dict(row) for row in all_trade_rows]
         trade_dicts = [dict(row) for row in trade_rows]
         position_dicts = [dict(row) for row in position_rows]
         future_bars = _future_daily_bars_for_trades(session, schema, trade_dicts, lookahead_days=lookahead, to_api=to_api)
         daily_bars = _daily_bars_for_trade_paths(session, schema, trade_dicts, to_api=to_api)
-        stock_names = load_stock_names(session, symbols_from_rows(all_trade_dicts, trade_dicts, position_dicts, future_bars))
+        stock_names = load_stock_names(session, symbols_from_rows(trade_dicts, position_dicts, future_bars))
 
     named_trades = with_stock_names(trade_dicts, stock_names)
-    named_all_trades = with_stock_names(all_trade_dicts, stock_names)
     named_positions = with_stock_names(position_dicts, stock_names)
     rows = trade_path_diagnostics_from_trades(
         named_trades,
@@ -338,7 +329,6 @@ def backtest_path_diagnostics(
         future_bars,
         lookahead_days=lookahead,
         daily_bars=daily_bars,
-        replacement_trades=named_all_trades,
     )
     with session_scope() as session:
         rows = market_context.annotate_rows_with_market_context(session, schema, rows, date_key="entry_date")
@@ -357,7 +347,7 @@ def backtest_path_diagnostics(
         "total": len(rows),
         "returned_count": len(page),
         "has_more": len(page) < len(rows),
-        "note": "路径诊断只用于复盘买点/卖点质量；卖出后反弹和替换交易质量都是事后归因，不参与当日交易决策。",
+        "note": "路径诊断只用于复盘买点/卖点质量；卖出后反弹是事后归因，不参与当日交易决策。",
     }
 
 
@@ -375,7 +365,7 @@ def backtest_support_stop_matrix(
     lookahead_days: int = 10,
     sample_limit: int = 40,
 ) -> dict[str, Any]:
-    """Return a read-only matrix that splits support-stop losses by path and replacement quality."""
+    """Return a read-only matrix that splits support-stop losses by path context."""
 
     diagnostics = backtest_path_diagnostics(
         schema=schema,
@@ -414,7 +404,7 @@ def backtest_support_stop_matrix(
         "items": [to_api(row) for row in samples],
         "total": len(support_rows),
         "limit": min(max(int(sample_limit or 40), 1), 200),
-        "note": "支撑止损矩阵只读复用已落库成交、路径诊断和卖后替换归因；用于拆分真失败、卖早反弹、浮盈回吐和替换质量，不改变评分、买卖、卖点、仓位或排序。",
+        "note": "支撑止损矩阵只读复用已落库成交和路径诊断；用于拆分真失败、卖早反弹和浮盈回吐，不改变评分、买卖、卖点或排序。",
     }
 
 
@@ -465,7 +455,7 @@ def backtest_setup_market_exit_audit(
         "total": diagnostics.get("total"),
         "returned_count": diagnostics.get("returned_count"),
         "has_more": diagnostics.get("has_more"),
-        "note": "该审计只用已落库成交和可见持仓路径做归因；大盘状态仅标记，不改变买卖、仓位或排序。",
+        "note": "该审计只用已落库成交路径做归因；大盘状态仅标记，不改变买卖或排序。",
     }
 
 
@@ -615,7 +605,7 @@ def backtest_market_phase_audit(
         "summary": summary,
         "items": [to_api(row) for row in trade_items[:120]],
         "candidate_items": [to_api(row) for row in candidate_items[:120]],
-        "note": "行情四象限审计只复用已落库成交、候选快照和后验候选结果；不改变评分、买卖、仓位或排序。",
+        "note": "行情四象限审计只复用已落库成交、候选快照和后验候选结果；不改变评分、买卖或排序。",
     }
 
 
@@ -688,92 +678,7 @@ def backtest_phase_strategy_family_matrix(
         "summary": summary,
         "items": [to_api(row) for row in summary.get("real_trade_matrix", [])],
         "candidate_items": [to_api(row) for row in summary.get("candidate_rank_matrices", [])],
-        "note": "策略族×行情阶段矩阵只读复用已落库成交、候选快照和候选后验；不改变评分、买卖、卖点、仓位或排序。",
-    }
-
-
-def backtest_replacement_quality_matrix(
-    *,
-    schema: Any,
-    session_scope: Any,
-    is_database_configured: Callable[[], bool],
-    ensure_schema: Callable[[], None],
-    load_stock_names: StockNameLoader,
-    symbols_from_rows: RowsSymbols,
-    with_stock_names: NameAppender,
-    to_api: ApiMapper,
-    backtest_id: int,
-    sample_limit: int = 80,
-) -> dict[str, Any]:
-    """Read-only matrix for sell/freed-slot replacement quality."""
-
-    if not is_database_configured():
-        return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
-    ensure_schema()
-    limit = min(max(int(sample_limit or 80), 1), 500)
-    with session_scope() as session:
-        run = session.execute(select(schema.backtest_runs).where(schema.backtest_runs.c.id == backtest_id)).mappings().first()
-        if not run:
-            return {"status": "not_found", "backtest_id": backtest_id, "items": []}
-        trade_rows = session.execute(
-            select(schema.backtest_trades)
-            .where(schema.backtest_trades.c.backtest_id == backtest_id)
-            .order_by(schema.backtest_trades.c.trade_date, schema.backtest_trades.c.id)
-        ).mappings().all()
-        order_rows = session.execute(
-            select(schema.backtest_orders)
-            .where(schema.backtest_orders.c.backtest_id == backtest_id)
-            .order_by(schema.backtest_orders.c.trade_date, schema.backtest_orders.c.id)
-        ).mappings().all()
-        trade_dicts = [dict(row) for row in trade_rows]
-        order_dicts = [dict(row) for row in order_rows]
-        stock_names = load_stock_names(session, symbols_from_rows(trade_dicts, order_dicts))
-
-    named_trades = with_stock_names(trade_dicts, stock_names)
-    named_orders = with_stock_names(order_dicts, stock_names)
-    closed_trades = list(_closed_trade_rows_by_entry_id(named_trades).values())
-    filled_rows = _phase_audit_trade_rows(closed_trades)
-    reject_rows = _replacement_quality_reject_rows(named_orders)
-    if filled_rows and not any(row.get("dynamic_market_regime") for row in filled_rows):
-        with session_scope() as session:
-            filled_rows = market_context.annotate_rows_with_market_context(session, schema, filled_rows, date_key="entry_date")
-    if reject_rows and not any(row.get("dynamic_market_regime") for row in reject_rows):
-        with session_scope() as session:
-            reject_rows = market_context.annotate_rows_with_market_context(session, schema, reject_rows, date_key="trade_date")
-    filled_rows = [_with_replacement_matrix_trade_fields(row) for row in filled_rows]
-    reject_rows = [_with_replacement_matrix_reject_fields(row) for row in reject_rows]
-    worst_filled = sorted(
-        filled_rows,
-        key=lambda row: (
-            _sort_number(row.get("return_pct"), default=10**18),
-            str(row.get("entry_date") or ""),
-            str(row.get("vt_symbol") or ""),
-        ),
-    )[:limit]
-    rejected_samples = sorted(
-        reject_rows,
-        key=lambda row: (
-            -int(row.get("reject_reason_count") or 0),
-            str(row.get("trade_date") or ""),
-            str(row.get("vt_symbol") or ""),
-        ),
-    )[:limit]
-    return {
-        "status": "ready" if filled_rows or reject_rows else "empty",
-        "backtest_id": backtest_id,
-        "start_date": run["start_date"].isoformat(),
-        "end_date": run["end_date"].isoformat(),
-        "audit_only": True,
-        "not_used_for_signal_score": True,
-        "summary": replacement_quality_matrix_summary(filled_rows, reject_rows),
-        "items": [to_api(row) for row in worst_filled],
-        "rejected_items": [to_api(row) for row in rejected_samples],
-        "total": {
-            "filled_trade_count": len(filled_rows),
-            "gate_reject_count": len(reject_rows),
-        },
-        "limit": limit,
-        "note": "替换质量矩阵只读复用已落库成交和拒单 raw；用于分析卖后接力质量，不改变评分、买卖、卖点、仓位或排序。",
+        "note": "策略族×行情阶段矩阵只读复用已落库成交、候选快照和候选后验；不改变评分、买卖、卖点或排序。",
     }
 
 
@@ -804,14 +709,19 @@ def backtest_execution_breakpoint_matrix(
             return {"status": "not_found", "backtest_id": backtest_id, "items": []}
         run_dict = dict(run)
         run_params = _run_params(run_dict)
+        run_ids = _screen_run_ids_for_range(
+            session,
+            run["strategy_id"],
+            run["strategy_version"],
+            run["start_date"],
+            run["end_date"],
+            run_params,
+        )
         recommendation_rows = session.execute(
             select(schema.quant_recommendations)
             .where(
                 and_(
-                    schema.quant_recommendations.c.trade_date >= run["start_date"],
-                    schema.quant_recommendations.c.trade_date <= run["end_date"],
-                    schema.quant_recommendations.c.strategy_id == run["strategy_id"],
-                    schema.quant_recommendations.c.strategy_version == run["strategy_version"],
+                    schema.quant_recommendations.c.run_id.in_(run_ids),
                     schema.quant_recommendations.c.rank <= rank_limit,
                 )
             )
@@ -820,7 +730,7 @@ def backtest_execution_breakpoint_matrix(
                 schema.quant_recommendations.c.rank,
                 schema.quant_recommendations.c.vt_symbol,
             )
-        ).mappings().all()
+        ).mappings().all() if run_ids else []
         signal_rows = session.execute(
             select(schema.backtest_signal_events)
             .where(schema.backtest_signal_events.c.backtest_id == backtest_id)
@@ -894,358 +804,8 @@ def backtest_execution_breakpoint_matrix(
         "returned_count": min(len(rows), limit),
         "has_more": len(rows) > limit,
         "limit": limit,
-        "note": "执行断点矩阵只读复用候选、理论信号、订单、成交和持仓快照；用于解释有信号为什么没买，不改变评分、买卖、仓位、卖点或产品基线。",
+        "note": "执行断点矩阵只读复用候选、理论信号、订单和成交快照；用于核对候选到订单链路，不改变评分、买卖、卖点或候选质量主口径。",
     }
-
-
-def backtest_rotation_opportunity_cost_matrix(
-    *,
-    schema: Any,
-    session_scope: Any,
-    is_database_configured: Callable[[], bool],
-    ensure_schema: Callable[[], None],
-    load_stock_names: StockNameLoader,
-    symbols_from_rows: RowsSymbols,
-    with_stock_names: NameAppender,
-    to_api: ApiMapper,
-    backtest_id: int,
-    candidate_rank_limit: int = 20,
-    sample_limit: int = 120,
-    holding_days: int = 20,
-) -> dict[str, Any]:
-    """Read-only opportunity-cost matrix for full-position missed candidates."""
-
-    if not is_database_configured():
-        return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
-    ensure_schema()
-    rank_limit = min(max(int(candidate_rank_limit or 20), 1), 200)
-    limit = min(max(int(sample_limit or 120), 1), 500)
-    hold_days = min(max(int(holding_days or 20), 1), 60)
-    run_dict, rows = _rotation_opportunity_cost_audit_rows(
-        schema=schema,
-        session_scope=session_scope,
-        load_stock_names=load_stock_names,
-        symbols_from_rows=symbols_from_rows,
-        with_stock_names=with_stock_names,
-        backtest_id=backtest_id,
-        candidate_rank_limit=rank_limit,
-        holding_days=hold_days,
-    )
-    if run_dict is None:
-        return {"status": "not_found", "backtest_id": backtest_id, "items": []}
-    return {
-        "status": "ready" if rows else "empty",
-        "backtest_id": backtest_id,
-        "start_date": run_dict["start_date"].isoformat(),
-        "end_date": run_dict["end_date"].isoformat(),
-        "candidate_rank_limit": rank_limit,
-        "holding_days": hold_days,
-        "audit_only": True,
-        "not_used_for_signal_score": True,
-        "summary": rotation_opportunity_cost_matrix_summary(rows),
-        "items": [to_api(row) for row in rows[:limit]],
-        "total": len(rows),
-        "returned_count": min(len(rows), limit),
-        "has_more": len(rows) > limit,
-        "limit": limit,
-        "note": "换仓机会成本矩阵只读复用候选、执行断点、真实持仓和固定持有后验；用于研究满仓时是否值得替换弱持仓，不改变评分、买卖、仓位、卖点或产品基线。",
-    }
-
-
-def backtest_trend_winner_protection_matrix(
-    *,
-    schema: Any,
-    session_scope: Any,
-    is_database_configured: Callable[[], bool],
-    ensure_schema: Callable[[], None],
-    load_stock_names: StockNameLoader,
-    symbols_from_rows: RowsSymbols,
-    with_stock_names: NameAppender,
-    to_api: ApiMapper,
-    backtest_id: int,
-    candidate_rank_limit: int = 20,
-    sample_limit: int = 120,
-    holding_days: int = 20,
-) -> dict[str, Any]:
-    """Read-only matrix for holdings that should not be rotated away."""
-
-    if not is_database_configured():
-        return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
-    rank_limit = min(max(int(candidate_rank_limit or 20), 1), 200)
-    hold_days = min(max(int(holding_days or 20), 1), 60)
-    run_dict, rotation_rows = _rotation_opportunity_cost_audit_rows(
-        schema=schema,
-        session_scope=session_scope,
-        load_stock_names=load_stock_names,
-        symbols_from_rows=symbols_from_rows,
-        with_stock_names=with_stock_names,
-        backtest_id=backtest_id,
-        candidate_rank_limit=rank_limit,
-        holding_days=hold_days,
-    )
-    if run_dict is None:
-        return {"status": "not_found", "backtest_id": backtest_id, "items": []}
-    rows = trend_winner_protection_rows(rotation_rows=rotation_rows)
-    rows.sort(
-        key=lambda row: (
-            0 if row.get("protected") else 1,
-            -(_safe_float(row.get("held_execute_open_return_pct")) or -10**9),
-            -(_safe_float(row.get("held_real_return_pct")) or -10**9),
-            str(row.get("execute_date") or ""),
-            str(row.get("held_symbol") or ""),
-        )
-    )
-    limit = min(max(int(sample_limit or 120), 1), 500)
-    return {
-        "status": "ready" if rows else "empty",
-        "backtest_id": backtest_id,
-        "start_date": run_dict["start_date"].isoformat(),
-        "end_date": run_dict["end_date"].isoformat(),
-        "candidate_rank_limit": rank_limit,
-        "holding_days": hold_days,
-        "audit_only": True,
-        "not_used_for_signal_score": True,
-        "summary": trend_winner_protection_matrix_summary(rows),
-        "items": [to_api(row) for row in rows[:limit]],
-        "total": len(rows),
-        "returned_count": min(len(rows), limit),
-        "has_more": len(rows) > limit,
-        "limit": limit,
-        "note": "趋势赢家保护矩阵只读复用满仓换仓机会矩阵；用于识别 D+1 开盘已盈利或后续证明为趋势赢家的持仓，避免把后验机会误写成粗放换仓规则。",
-    }
-
-
-def _rotation_opportunity_cost_audit_rows(
-    *,
-    schema: Any,
-    session_scope: Any,
-    load_stock_names: StockNameLoader,
-    symbols_from_rows: RowsSymbols,
-    with_stock_names: NameAppender,
-    backtest_id: int,
-    candidate_rank_limit: int = 20,
-    holding_days: int = 20,
-) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-    rank_limit = min(max(int(candidate_rank_limit or 20), 1), 200)
-    hold_days = min(max(int(holding_days or 20), 1), 60)
-    with session_scope() as session:
-        run = session.execute(select(schema.backtest_runs).where(schema.backtest_runs.c.id == backtest_id)).mappings().first()
-        if not run:
-            return None, []
-        run_dict = dict(run)
-        run_params = _run_params(run_dict)
-        recommendation_rows = session.execute(
-            select(schema.quant_recommendations)
-            .where(
-                and_(
-                    schema.quant_recommendations.c.trade_date >= run["start_date"],
-                    schema.quant_recommendations.c.trade_date <= run["end_date"],
-                    schema.quant_recommendations.c.strategy_id == run["strategy_id"],
-                    schema.quant_recommendations.c.strategy_version == run["strategy_version"],
-                    schema.quant_recommendations.c.rank <= rank_limit,
-                )
-            )
-            .order_by(
-                schema.quant_recommendations.c.trade_date,
-                schema.quant_recommendations.c.rank,
-                schema.quant_recommendations.c.vt_symbol,
-            )
-        ).mappings().all()
-        signal_rows = session.execute(
-            select(schema.backtest_signal_events)
-            .where(schema.backtest_signal_events.c.backtest_id == backtest_id)
-            .order_by(
-                schema.backtest_signal_events.c.signal_date,
-                schema.backtest_signal_events.c.trade_date,
-                desc(schema.backtest_signal_events.c.score),
-                schema.backtest_signal_events.c.id,
-            )
-        ).mappings().all()
-        order_rows = session.execute(
-            select(schema.backtest_orders)
-            .where(schema.backtest_orders.c.backtest_id == backtest_id)
-            .order_by(schema.backtest_orders.c.trade_date, schema.backtest_orders.c.id)
-        ).mappings().all()
-        trade_rows = session.execute(
-            select(schema.backtest_trades)
-            .where(schema.backtest_trades.c.backtest_id == backtest_id)
-            .order_by(schema.backtest_trades.c.trade_date, schema.backtest_trades.c.id)
-        ).mappings().all()
-        equity_rows = session.execute(
-            select(schema.backtest_daily_equity)
-            .where(schema.backtest_daily_equity.c.backtest_id == backtest_id)
-            .order_by(schema.backtest_daily_equity.c.trade_date)
-        ).mappings().all()
-        position_rows = session.execute(
-            select(schema.backtest_daily_positions)
-            .where(schema.backtest_daily_positions.c.backtest_id == backtest_id)
-            .order_by(schema.backtest_daily_positions.c.trade_date, schema.backtest_daily_positions.c.vt_symbol)
-        ).mappings().all()
-        recommendation_dicts = [_recommendation_read_view(dict(row)) for row in recommendation_rows]
-        signal_dicts = [dict(row) for row in signal_rows]
-        order_dicts = [dict(row) for row in order_rows]
-        trade_dicts = [dict(row) for row in trade_rows]
-        equity_dicts = [dict(row) for row in equity_rows]
-        position_dicts = [dict(row) for row in position_rows]
-        stock_names = load_stock_names(
-            session,
-            symbols_from_rows(recommendation_dicts, signal_dicts, order_dicts, trade_dicts, position_dicts),
-        )
-        named_recommendations = with_stock_names(recommendation_dicts, stock_names)
-        named_signals = with_stock_names(signal_dicts, stock_names)
-        named_orders = with_stock_names(order_dicts, stock_names)
-        named_trades = with_stock_names(trade_dicts, stock_names)
-        named_positions = with_stock_names(position_dicts, stock_names)
-        breakpoint_rows = execution_breakpoint_rows(
-            recommendations=named_recommendations,
-            signal_events=named_signals,
-            orders=named_orders,
-            trades=named_trades,
-            equities=equity_dicts,
-            positions=named_positions,
-            run_params=run_params,
-            candidate_rank_limit=rank_limit,
-        )
-        candidate_recommendations = [
-            row for row in named_recommendations if str(row.get("action") or "").upper() == "BUY"
-        ]
-        candidate_observations = _candidate_observation_returns(
-            session,
-            schema,
-            candidate_recommendations,
-            holding_days=hold_days,
-        )
-        position_exit_returns = _position_exit_returns_by_entry(named_trades)
-    rows = rotation_opportunity_cost_rows(
-        breakpoint_rows=breakpoint_rows,
-        positions=named_positions,
-        candidate_observations=candidate_observations,
-        position_exit_returns=position_exit_returns,
-        candidate_rank_limit=rank_limit,
-        holding_days=hold_days,
-    )
-    if rows:
-        with session_scope() as session:
-            _attach_replaced_execute_open_returns(session, schema, rows)
-    if rows and not any(row.get("dynamic_market_regime") for row in rows):
-        with session_scope() as session:
-            rows = market_context.annotate_rows_with_market_context(session, schema, rows, date_key="signal_date")
-            rows = [_rotation_opportunity_enrich_row(row) for row in rows]
-    rows.sort(
-        key=lambda row: (
-            -(_safe_float(row.get("opportunity_delta_pct")) or -10**9),
-            str(row.get("signal_date") or ""),
-            _safe_int(row.get("rank"), 10**9),
-            str(row.get("vt_symbol") or ""),
-        )
-    )
-    return run_dict, rows
-
-
-def rotation_opportunity_cost_rows(
-    *,
-    breakpoint_rows: list[dict[str, Any]],
-    positions: list[dict[str, Any]],
-    candidate_observations: dict[tuple[str, date | None], dict[str, Any]],
-    position_exit_returns: dict[tuple[str, date | None], dict[str, Any]],
-    candidate_rank_limit: int = 20,
-    holding_days: int = 20,
-) -> list[dict[str, Any]]:
-    """Build audit rows for full-position missed candidates and weakest held position."""
-
-    rank_limit = min(max(int(candidate_rank_limit or 20), 1), 200)
-    positions_by_date: dict[date, list[dict[str, Any]]] = {}
-    for position in positions:
-        trade_date = _as_date(position.get("trade_date"))
-        if trade_date is None:
-            continue
-        positions_by_date.setdefault(trade_date, []).append(position)
-    position_dates = sorted(positions_by_date)
-    rows: list[dict[str, Any]] = []
-    for candidate in breakpoint_rows:
-        if candidate.get("status") not in {"planned_not_ordered_full", "candidate_top_rank_full"}:
-            continue
-        if str(candidate.get("action") or "").upper() != "BUY":
-            continue
-        rank = _safe_int_or_none(candidate.get("rank"))
-        if rank is None or rank > rank_limit:
-            continue
-        signal_date = _as_date(candidate.get("signal_date"))
-        execute_date = _rotation_candidate_execute_date(candidate, signal_date, position_dates)
-        symbol = str(candidate.get("vt_symbol") or "")
-        if signal_date is None or execute_date is None or not symbol:
-            continue
-        held_positions = positions_by_date.get(execute_date) or []
-        replacement = _weakest_rotation_position(held_positions)
-        observation = candidate_observations.get((symbol, signal_date)) or {}
-        candidate_return = _safe_float(observation.get("return_pct"))
-        held_exit = position_exit_returns.get(
-            (str((replacement or {}).get("vt_symbol") or ""), _as_date((replacement or {}).get("entry_date")))
-        )
-        held_return = _safe_float((held_exit or {}).get("return_pct"))
-        held_current = _safe_float((replacement or {}).get("floating_pnl_pct"))
-        opportunity_delta = candidate_return - held_return if candidate_return is not None and held_return is not None else None
-        rows.append(
-            _rotation_opportunity_enrich_row(
-                {
-                    **_candidate_context_fields(candidate),
-                    "signal_date": signal_date,
-                    "execute_date": execute_date,
-                    "vt_symbol": symbol,
-                    "name": candidate.get("name"),
-                    "rank": rank,
-                    "score": candidate.get("total_score"),
-                    "status": candidate.get("status"),
-                    "status_label": candidate.get("status_label"),
-                    "setup_family": candidate.get("setup_family"),
-                    "entry_family": candidate.get("setup_family"),
-                    "entry_setup": candidate.get("entry_setup"),
-                    "candidate_observation_days": holding_days,
-                    "candidate_observation_status": observation.get("status"),
-                    "candidate_entry_date": observation.get("entry_date"),
-                    "candidate_exit_date": observation.get("exit_date"),
-                    "candidate_return_pct": candidate_return,
-                    "candidate_entry_price": observation.get("entry_price"),
-                    "candidate_exit_price": observation.get("exit_price"),
-                    "replaced_symbol": (replacement or {}).get("vt_symbol"),
-                    "replaced_name": (replacement or {}).get("name"),
-                    "replaced_entry_date": _as_date((replacement or {}).get("entry_date")),
-                    "replaced_cost_price": (replacement or {}).get("cost_price"),
-                    "replaced_snapshot_close_price": (replacement or {}).get("close_price"),
-                    "replaced_holding_days": (replacement or {}).get("holding_days"),
-                    "replaced_snapshot_return_pct": held_current,
-                    "replaced_current_return_pct": held_current,
-                    "replaced_exit_date": (held_exit or {}).get("exit_date"),
-                    "replaced_real_return_pct": held_return,
-                    "replaced_exit_reason": (held_exit or {}).get("exit_reason"),
-                    "opportunity_delta_pct": opportunity_delta,
-                    "opportunity_bucket": _rotation_opportunity_bucket(opportunity_delta),
-                    "sample_summary": _rotation_opportunity_summary_text(
-                        candidate_return=candidate_return,
-                        held_return=held_return,
-                        held_current=held_current,
-                        replacement=replacement,
-                    ),
-                }
-            )
-        )
-    return rows
-
-
-def _rotation_candidate_execute_date(
-    candidate: dict[str, Any],
-    signal_date: date | None,
-    position_dates: list[date],
-) -> date | None:
-    execute_date = _as_date(candidate.get("execute_date"))
-    if execute_date is not None:
-        return execute_date
-    if signal_date is None:
-        return None
-    for item in position_dates:
-        if item > signal_date:
-            return item
-    return signal_date
 
 
 def execution_breakpoint_rows(
@@ -1440,7 +1000,7 @@ def _execution_breakpoint_status(
         max_positions = _safe_int(run_params.get("max_positions"), 10)
         position_count = _safe_int(equity_row.get("position_count"), 0)
         if position_count >= max_positions:
-            return "planned_not_ordered_full"
+            return "planned_not_ordered_unfilled"
         return "planned_not_ordered_other"
     if action == "BUY" and has_recommendation:
         rank = _safe_int_or_none(candidate_rank)
@@ -1452,7 +1012,7 @@ def _execution_breakpoint_status(
         if real_position is not None:
             return "candidate_real_already_held"
         if position_count >= max_positions:
-            return "candidate_top_rank_full"
+            return "candidate_top_rank_unfilled"
         return "candidate_top_rank_no_order"
     if theoretical_position_context.get("held") and real_position is None:
         return "theoretical_held_real_not_held"
@@ -1489,8 +1049,8 @@ def execution_breakpoint_matrix_summary(rows: list[dict[str, Any]]) -> dict[str,
         "by_action": _execution_breakpoint_group_metrics(rows, "action", lambda value, _rows: str(value or "未知")),
         "theoretical_real_gap_count": sum(1 for row in rows if row.get("theoretical_marker_gap")),
         "marker_state_gap_count": sum(1 for row in rows if row.get("theoretical_marker_gap")),
-        "full_position_miss_count": sum(
-            1 for row in rows if row.get("status") in {"planned_not_ordered_full", "candidate_top_rank_full"}
+        "unfilled_top_candidate_count": sum(
+            1 for row in rows if row.get("status") in {"planned_not_ordered_unfilled", "candidate_top_rank_unfilled"}
         ),
         "execution_pool_miss_count": sum(
             1 for row in rows if row.get("status") in {"planned_not_ordered_limit", "candidate_rank_outside_execution_pool"}
@@ -1533,14 +1093,14 @@ def _execution_breakpoint_group_metrics(
 
 
 def _execution_breakpoint_interpretation(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    full = [row for row in rows if row.get("status") in {"planned_not_ordered_full", "candidate_top_rank_full"}]
+    unfilled = [row for row in rows if row.get("status") in {"planned_not_ordered_unfilled", "candidate_top_rank_unfilled"}]
     theoretical_gap = [row for row in rows if row.get("theoretical_marker_gap")]
     limit_rows = [row for row in rows if row.get("status") in {"planned_not_ordered_limit", "candidate_rank_outside_execution_pool"}]
     no_order = [row for row in rows if row.get("status") == "candidate_top_rank_no_order"]
     return {
         "primary_issue": (
-            "full_position_without_rotation"
-            if full
+            "top_candidate_unfilled"
+            if unfilled
             else "execution_limit"
             if limit_rows
             else "top_candidate_no_order"
@@ -1549,18 +1109,18 @@ def _execution_breakpoint_interpretation(rows: list[dict[str, Any]]) -> dict[str
             if theoretical_gap
             else "none"
         ),
-        "message": _execution_breakpoint_interpretation_message(full, theoretical_gap, limit_rows, no_order),
+        "message": _execution_breakpoint_interpretation_message(unfilled, theoretical_gap, limit_rows, no_order),
     }
 
 
 def _execution_breakpoint_interpretation_message(
-    full: list[dict[str, Any]],
+    unfilled: list[dict[str, Any]],
     theoretical_gap: list[dict[str, Any]],
     limit_rows: list[dict[str, Any]],
     no_order: list[dict[str, Any]],
 ) -> str:
-    if full:
-        return "存在进入执行池但满仓未换仓的候选；应审计高质量候选是否能替换弱持仓。"
+    if unfilled:
+        return "存在进入执行池但未形成组合成交的候选；买点质量请以候选独立买卖报告为准。"
     if limit_rows:
         return "主要断点是候选未进入执行池前列；应先看评分和策略族排序质量。"
     if no_order:
@@ -1568,350 +1128,6 @@ def _execution_breakpoint_interpretation_message(
     if theoretical_gap:
         return "存在理论信号标记账本与真实持仓不一致；该项主要用于解释股票详情/信号标记差异，不直接证明真实交易被压制。"
     return "未发现明显候选到真实成交断点。"
-
-
-def rotation_opportunity_cost_matrix_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Summarize full-position missed candidate opportunity costs."""
-
-    return {
-        "method": "只读矩阵：只分析满仓挡住的前列 BUY 候选，对比候选固定持有后验和同日最弱持仓真实退出收益。",
-        "not_used_for_signal_score": True,
-        "audit_only": True,
-        "overall": _rotation_opportunity_metric_summary(rows),
-        "by_opportunity_bucket": _rotation_opportunity_group_metrics(
-            rows,
-            "opportunity_bucket",
-            _rotation_opportunity_bucket_label,
-        ),
-        "by_phase": _rotation_opportunity_group_metrics(rows, "market_phase", _market_phase_label_for_bucket),
-        "by_setup_family": _rotation_opportunity_group_metrics(rows, "setup_family", _setup_family_label_for_bucket),
-        "by_phase_setup": _rotation_opportunity_phase_setup_matrix(rows),
-        "by_candidate_rank": _rotation_opportunity_derived_group_metrics(
-            rows,
-            "candidate_rank_bucket",
-            _rotation_candidate_rank_bucket,
-            _rotation_candidate_rank_label,
-        ),
-        "by_market_warning": _rotation_opportunity_group_metrics(
-            rows,
-            "market_warning_level",
-            _market_warning_level_label_for_bucket,
-        ),
-        "by_low_suction_days": _rotation_opportunity_derived_group_metrics(
-            rows,
-            "low_suction_days_bucket",
-            _low_suction_days_bucket,
-            _rotation_low_suction_days_label,
-        ),
-        "by_launch_quality": _rotation_opportunity_group_metrics(
-            rows,
-            "low_suction_launch_quality_bucket",
-            _low_suction_launch_quality_label_for_bucket,
-        ),
-        "by_ma_convergence": _rotation_opportunity_derived_group_metrics(
-            rows,
-            "ma_convergence_bucket",
-            _ma_convergence_bucket,
-            _rotation_ma_convergence_label,
-        ),
-        "by_replaced_current_return": _rotation_opportunity_derived_group_metrics(
-            rows,
-            "replaced_current_return_bucket",
-            _rotation_replaced_current_return_bucket,
-            _rotation_replaced_current_return_label,
-        ),
-        "by_replaced_execute_open_return": _rotation_opportunity_derived_group_metrics(
-            rows,
-            "replaced_execute_open_return_bucket",
-            _rotation_replaced_execute_open_return_bucket,
-            _rotation_replaced_execute_open_return_label,
-        ),
-        "by_replaced_holding_days": _rotation_opportunity_derived_group_metrics(
-            rows,
-            "replaced_holding_days_bucket",
-            _rotation_replaced_holding_days_bucket,
-            _rotation_replaced_holding_days_label,
-        ),
-        "interpretation": _rotation_opportunity_interpretation(rows),
-    }
-
-
-def _rotation_opportunity_metric_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    candidate_returns = [
-        value for row in rows if (value := _safe_float(row.get("candidate_return_pct"))) is not None
-    ]
-    held_returns = [
-        value for row in rows if (value := _safe_float(row.get("replaced_real_return_pct"))) is not None
-    ]
-    deltas = [value for row in rows if (value := _safe_float(row.get("opportunity_delta_pct"))) is not None]
-    execute_open_returns = [
-        value for row in rows if (value := _safe_float(row.get("replaced_execute_open_return_pct"))) is not None
-    ]
-    positive = [value for value in deltas if value > 0]
-    strong_positive = [value for value in deltas if value >= 10]
-    harmful = [value for value in deltas if value <= -5]
-    execute_open_weak = [value for value in execute_open_returns if value <= -5]
-    execute_open_profitable = [value for value in execute_open_returns if value >= 0]
-    return {
-        "candidate_count": len(rows),
-        "evaluated_count": len(deltas),
-        "positive_count": len(positive),
-        "positive_rate": _pct_ratio(len(positive), len(deltas)),
-        "strong_positive_count": len(strong_positive),
-        "strong_positive_rate": _pct_ratio(len(strong_positive), len(deltas)),
-        "harmful_count": len(harmful),
-        "harmful_rate": _pct_ratio(len(harmful), len(deltas)),
-        "avg_candidate_return_pct": _avg(candidate_returns),
-        "avg_replaced_real_return_pct": _avg(held_returns),
-        "avg_opportunity_delta_pct": _avg(deltas),
-        "median_opportunity_delta_pct": median(deltas) if deltas else None,
-        "best_opportunity_delta_pct": max(deltas) if deltas else None,
-        "worst_opportunity_delta_pct": min(deltas) if deltas else None,
-        "execute_open_evaluated_count": len(execute_open_returns),
-        "execute_open_weak_count": len(execute_open_weak),
-        "execute_open_weak_rate": _pct_ratio(len(execute_open_weak), len(execute_open_returns)),
-        "execute_open_profitable_count": len(execute_open_profitable),
-        "execute_open_profitable_rate": _pct_ratio(len(execute_open_profitable), len(execute_open_returns)),
-    }
-
-
-def _rotation_opportunity_group_metrics(
-    rows: list[dict[str, Any]],
-    key: str,
-    labeler: Callable[[Any, list[dict[str, Any]]], str] | Callable[[Any], str],
-) -> list[dict[str, Any]]:
-    grouped: dict[Any, list[dict[str, Any]]] = {}
-    for row in rows:
-        grouped.setdefault(row.get(key) or "unknown", []).append(row)
-    result = []
-    for value, group_rows in grouped.items():
-        try:
-            label = labeler(value, group_rows)  # type: ignore[misc]
-        except TypeError:
-            label = labeler(value)  # type: ignore[operator]
-        result.append({key: None if value == "unknown" else value, "label": label, **_rotation_opportunity_metric_summary(group_rows)})
-    result.sort(
-        key=lambda row: (
-            -int(row.get("evaluated_count") or 0),
-            -float(row.get("avg_opportunity_delta_pct") or -10**9),
-            str(row.get(key) or ""),
-        )
-    )
-    return result
-
-
-def _rotation_opportunity_derived_group_metrics(
-    rows: list[dict[str, Any]],
-    key: str,
-    bucket_func: Callable[[dict[str, Any]], str],
-    labeler: Callable[[Any, list[dict[str, Any]]], str] | Callable[[Any], str],
-) -> list[dict[str, Any]]:
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        grouped.setdefault(bucket_func(row) or "unknown", []).append(row)
-    result = []
-    for value, group_rows in grouped.items():
-        try:
-            label = labeler(value, group_rows)  # type: ignore[misc]
-        except TypeError:
-            label = labeler(value)  # type: ignore[operator]
-        result.append({key: None if value == "unknown" else value, "label": label, **_rotation_opportunity_metric_summary(group_rows)})
-    result.sort(
-        key=lambda row: (
-            -int(row.get("evaluated_count") or 0),
-            -float(row.get("avg_opportunity_delta_pct") or -10**9),
-            str(row.get(key) or ""),
-        )
-    )
-    return result
-
-
-def _rotation_opportunity_phase_setup_matrix(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for row in rows:
-        grouped.setdefault((str(row.get("market_phase") or "unknown"), str(row.get("setup_family") or "unknown")), []).append(row)
-    result = []
-    for (phase, family), group_rows in grouped.items():
-        result.append(
-            {
-                "market_phase": None if phase == "unknown" else phase,
-                "market_phase_label": _market_phase_label_for_bucket(phase, group_rows),
-                "setup_family": None if family == "unknown" else family,
-                "setup_family_label": _setup_family_label_for_bucket(family, group_rows),
-                **_rotation_opportunity_metric_summary(group_rows),
-            }
-        )
-    result.sort(key=lambda row: (-int(row.get("evaluated_count") or 0), str(row.get("market_phase") or ""), str(row.get("setup_family") or "")))
-    return result
-
-
-def _rotation_opportunity_bucket(delta: float | None) -> str:
-    if delta is None:
-        return "unknown"
-    if delta >= 20:
-        return "large_positive"
-    if delta >= 10:
-        return "positive"
-    if delta > 0:
-        return "small_positive"
-    if delta <= -10:
-        return "large_negative"
-    if delta <= -5:
-        return "negative"
-    return "flat_or_noise"
-
-
-def _rotation_opportunity_bucket_label(value: Any, _rows: list[dict[str, Any]] | None = None) -> str:
-    labels = {
-        "large_positive": "明显值得研究",
-        "positive": "中等正机会",
-        "small_positive": "小幅正机会",
-        "flat_or_noise": "差异不明显",
-        "negative": "可能有害",
-        "large_negative": "明显有害",
-        "unknown": "后验不足",
-    }
-    return labels.get(str(value or "unknown"), str(value or "后验不足"))
-
-
-def _rotation_candidate_rank_bucket(row: dict[str, Any]) -> str:
-    rank = _safe_int_or_none(row.get("rank"))
-    if rank is None:
-        return "unknown"
-    if rank <= 3:
-        return "1-3"
-    if rank <= 5:
-        return "4-5"
-    if rank <= 10:
-        return "6-10"
-    if rank <= 20:
-        return "11-20"
-    return "20+"
-
-
-def _rotation_candidate_rank_label(value: Any, _rows: list[dict[str, Any]] | None = None) -> str:
-    labels = {
-        "1-3": "候选前3",
-        "4-5": "候选4-5",
-        "6-10": "候选6-10",
-        "11-20": "候选11-20",
-        "20+": "候选20名后",
-        "unknown": "排名未知",
-    }
-    return labels.get(str(value or "unknown"), str(value or "排名未知"))
-
-
-def _rotation_low_suction_days_label(value: Any, _rows: list[dict[str, Any]] | None = None) -> str:
-    labels = {
-        "0": "无低吸蓄势",
-        "1-2": "低吸1-2天",
-        "3-4": "低吸3-4天",
-        "5+": "低吸5天以上",
-        "unknown": "低吸天数未知",
-    }
-    return labels.get(str(value or "unknown"), str(value or "低吸天数未知"))
-
-
-def _rotation_ma_convergence_label(value: Any, _rows: list[dict[str, Any]] | None = None) -> str:
-    labels = {
-        "<=5%": "均线收敛<=5%",
-        "5-8.8%": "均线收敛5-8.8%",
-        "8.8-13%": "均线收敛8.8-13%",
-        ">13%": "均线发散>13%",
-        "unknown": "均线收敛未知",
-    }
-    return labels.get(str(value or "unknown"), str(value or "均线收敛未知"))
-
-
-def _rotation_replaced_current_return_bucket(row: dict[str, Any]) -> str:
-    value = _safe_float(row.get("replaced_current_return_pct"))
-    if value is None:
-        return "unknown"
-    if value <= -5:
-        return "<=-5%"
-    if value < 0:
-        return "-5-0%"
-    if value < 5:
-        return "0-5%"
-    return ">=5%"
-
-
-def _rotation_replaced_current_return_label(value: Any, _rows: list[dict[str, Any]] | None = None) -> str:
-    labels = {
-        "<=-5%": "弱持仓浮亏<=-5%",
-        "-5-0%": "弱持仓小亏",
-        "0-5%": "弱持仓小赚",
-        ">=5%": "弱持仓浮盈>=5%",
-        "unknown": "持仓浮盈未知",
-    }
-    return labels.get(str(value or "unknown"), str(value or "持仓浮盈未知"))
-
-
-def _rotation_replaced_execute_open_return_bucket(row: dict[str, Any]) -> str:
-    value = _safe_float(row.get("replaced_execute_open_return_pct"))
-    if value is None:
-        return "unknown"
-    if value <= -5:
-        return "<=-5%"
-    if value < 0:
-        return "-5-0%"
-    if value < 5:
-        return "0-5%"
-    return ">=5%"
-
-
-def _rotation_replaced_execute_open_return_label(value: Any, _rows: list[dict[str, Any]] | None = None) -> str:
-    labels = {
-        "<=-5%": "执行开盘仍亏<=-5%",
-        "-5-0%": "执行开盘小亏",
-        "0-5%": "执行开盘小赚",
-        ">=5%": "执行开盘浮盈>=5%",
-        "unknown": "执行开盘收益未知",
-    }
-    return labels.get(str(value or "unknown"), str(value or "执行开盘收益未知"))
-
-
-def _rotation_replaced_holding_days_bucket(row: dict[str, Any]) -> str:
-    days = _safe_float(row.get("replaced_holding_days"))
-    if days is None:
-        return "unknown"
-    if days <= 3:
-        return "0-3"
-    if days <= 7:
-        return "4-7"
-    if days <= 15:
-        return "8-15"
-    return "15+"
-
-
-def _rotation_replaced_holding_days_label(value: Any, _rows: list[dict[str, Any]] | None = None) -> str:
-    labels = {
-        "0-3": "持仓0-3天",
-        "4-7": "持仓4-7天",
-        "8-15": "持仓8-15天",
-        "15+": "持仓15天以上",
-        "unknown": "持仓天数未知",
-    }
-    return labels.get(str(value or "unknown"), str(value or "持仓天数未知"))
-
-
-def _rotation_opportunity_interpretation(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    summary = _rotation_opportunity_metric_summary(rows)
-    positive_rate = _safe_float(summary.get("positive_rate")) or 0.0
-    avg_delta = _safe_float(summary.get("avg_opportunity_delta_pct"))
-    if not rows:
-        primary = "no_full_position_missed_candidates"
-        message = "没有找到满仓挡住的前列 BUY 候选。"
-    elif avg_delta is not None and avg_delta > 5 and positive_rate >= 55:
-        primary = "promising_but_audit_only"
-        message = "满仓前列候选存在后验正机会，但仍只能作为审计；需要继续找信号日可见代理后再做默认关闭实验。"
-    elif avg_delta is not None and avg_delta <= 0:
-        primary = "broad_rotation_not_supported"
-        message = "整体机会成本不支持宽泛换仓；应继续按行情、策略族和风险桶寻找更窄条件。"
-    else:
-        primary = "mixed_opportunity"
-        message = "机会成本分布混合，不能直接写成默认换仓规则；应优先查看分桶和样本。"
-    return {"primary_issue": primary, "message": message}
 
 
 def _candidate_context_fields(row: dict[str, Any]) -> dict[str, Any]:
@@ -1944,350 +1160,6 @@ def _candidate_context_fields(row: dict[str, Any]) -> dict[str, Any]:
         if value is not None:
             result[key] = value
     return result
-
-
-def _rotation_opportunity_enrich_row(row: dict[str, Any]) -> dict[str, Any]:
-    explicit_family = row.get("setup_family")
-    item = _with_market_phase_fields(row)
-    item["setup_family"] = explicit_family or item.get("setup_family") or _market_phase_setup_family(item)
-    item["setup_label"] = _setup_family_label_for_bucket(item.get("setup_family"), [item])
-    bucket = item.get("low_suction_launch_quality_bucket")
-    if bucket:
-        item["low_suction_launch_quality_label"] = low_suction_launch_quality_label(bucket)
-    return item
-
-
-def trend_winner_protection_rows(*, rotation_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Classify replacement targets by whether they should be protected."""
-
-    grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
-    for row in rotation_rows:
-        held_symbol = str(row.get("replaced_symbol") or "")
-        execute_date = _as_date(row.get("execute_date"))
-        if not held_symbol or execute_date is None:
-            continue
-        key = (execute_date, held_symbol, _as_date(row.get("replaced_entry_date")))
-        grouped.setdefault(key, []).append(row)
-
-    rows: list[dict[str, Any]] = []
-    for group_rows in grouped.values():
-        row = sorted(
-            group_rows,
-            key=lambda item: (
-                -(_safe_float(item.get("opportunity_delta_pct")) or -10**9),
-                _safe_int(item.get("rank"), 10**9),
-                str(item.get("vt_symbol") or ""),
-            ),
-        )[0]
-        held_symbol = str(row.get("replaced_symbol") or "")
-        execute_date = _as_date(row.get("execute_date"))
-        blocked_candidate_count = len(group_rows)
-        positive_opportunities = [
-            item for item in group_rows if (_safe_float(item.get("opportunity_delta_pct")) or 0.0) > 0
-        ]
-        harmful_opportunities = [
-            item for item in group_rows if (_safe_float(item.get("opportunity_delta_pct")) or 0.0) < 0
-        ]
-        best_delta = max(
-            (value for item in group_rows if (value := _safe_float(item.get("opportunity_delta_pct"))) is not None),
-            default=None,
-        )
-        avg_delta = _avg(
-            [value for item in group_rows if (value := _safe_float(item.get("opportunity_delta_pct"))) is not None]
-        )
-        open_return = _safe_float(row.get("replaced_execute_open_return_pct"))
-        snapshot_return = _safe_float(row.get("replaced_snapshot_return_pct") or row.get("replaced_current_return_pct"))
-        real_return = _safe_float(row.get("replaced_real_return_pct"))
-        delta = _safe_float(row.get("opportunity_delta_pct"))
-        bucket, reason = _trend_winner_protection_bucket(
-            open_return=open_return,
-            snapshot_return=snapshot_return,
-            real_return=real_return,
-            opportunity_delta=delta,
-            market_phase=row.get("market_phase"),
-        )
-        protected = bucket in {"protect_trend_winner", "protect_open_profit", "protect_uptrend_repair"}
-        replaceable = bucket == "replaceable_weak_holding"
-        item = {
-            "signal_date": _as_date(row.get("signal_date")),
-            "execute_date": execute_date,
-            "candidate_symbol": row.get("vt_symbol"),
-            "candidate_name": row.get("name"),
-            "candidate_rank": row.get("rank"),
-            "candidate_score": row.get("score"),
-            "candidate_setup_family": row.get("setup_family"),
-            "candidate_return_pct": row.get("candidate_return_pct"),
-            "blocked_candidate_count": blocked_candidate_count,
-            "positive_opportunity_count": len(positive_opportunities),
-            "harmful_opportunity_count": len(harmful_opportunities),
-            "best_opportunity_delta_pct": best_delta,
-            "avg_opportunity_delta_pct": avg_delta,
-            "held_symbol": held_symbol,
-            "held_name": row.get("replaced_name"),
-            "held_entry_date": _as_date(row.get("replaced_entry_date")),
-            "held_holding_days": row.get("replaced_holding_days"),
-            "held_snapshot_return_pct": snapshot_return,
-            "held_execute_open_return_pct": open_return,
-            "held_real_return_pct": real_return,
-            "held_exit_date": row.get("replaced_exit_date"),
-            "held_exit_reason": row.get("replaced_exit_reason"),
-            "opportunity_delta_pct": delta,
-            "market_phase": row.get("market_phase"),
-            "market_phase_label": row.get("market_phase_label"),
-            "protection_bucket": bucket,
-            "protection_label": _trend_winner_protection_label(bucket),
-            "protected": protected,
-            "replaceable": replaceable,
-            "reason": reason,
-        }
-        rows.append(item)
-    return rows
-
-
-def trend_winner_protection_matrix_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Summarize holdings that should be protected from rotation."""
-
-    return {
-        "method": "只读矩阵：复用满仓换仓机会矩阵，按 D+1 开盘收益、真实退出收益和行情阶段识别不能被替换的趋势持仓。",
-        "audit_only": True,
-        "not_used_for_signal_score": True,
-        "overall": _trend_winner_protection_metric_summary(rows),
-        "by_protection_bucket": _trend_winner_protection_group_metrics(rows, "protection_bucket", _trend_winner_protection_label),
-        "by_phase": _trend_winner_protection_group_metrics(rows, "market_phase", _market_phase_label_for_bucket),
-        "by_execute_open_return": _trend_winner_protection_derived_group_metrics(
-            rows,
-            "held_execute_open_return_bucket",
-            _trend_winner_execute_open_bucket,
-            _rotation_replaced_execute_open_return_label,
-        ),
-        "interpretation": _trend_winner_protection_interpretation(rows),
-    }
-
-
-def _trend_winner_protection_metric_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    protected = [row for row in rows if row.get("protected")]
-    replaceable = [row for row in rows if row.get("replaceable")]
-    deltas = [value for row in rows if (value := _safe_float(row.get("opportunity_delta_pct"))) is not None]
-    real_returns = [value for row in rows if (value := _safe_float(row.get("held_real_return_pct"))) is not None]
-    open_returns = [value for row in rows if (value := _safe_float(row.get("held_execute_open_return_pct"))) is not None]
-    harmful_replacements = [row for row in rows if (_safe_float(row.get("opportunity_delta_pct")) or 0) < 0]
-    return {
-        "candidate_count": len(rows),
-        "protected_count": len(protected),
-        "protected_rate": _pct_ratio(len(protected), len(rows)),
-        "replaceable_count": len(replaceable),
-        "replaceable_rate": _pct_ratio(len(replaceable), len(rows)),
-        "harmful_replacement_count": len(harmful_replacements),
-        "harmful_replacement_rate": _pct_ratio(len(harmful_replacements), len(rows)),
-        "avg_held_execute_open_return_pct": _avg(open_returns),
-        "avg_held_real_return_pct": _avg(real_returns),
-        "avg_opportunity_delta_pct": _avg(deltas),
-    }
-
-
-def _trend_winner_protection_group_metrics(
-    rows: list[dict[str, Any]],
-    key: str,
-    labeler: Callable[[Any, list[dict[str, Any]]], str] | Callable[[Any], str],
-) -> list[dict[str, Any]]:
-    grouped: dict[Any, list[dict[str, Any]]] = {}
-    for row in rows:
-        grouped.setdefault(row.get(key) or "unknown", []).append(row)
-    result: list[dict[str, Any]] = []
-    for value, group_rows in grouped.items():
-        try:
-            label = labeler(value, group_rows)  # type: ignore[misc]
-        except TypeError:
-            label = labeler(value)  # type: ignore[operator]
-        result.append({key: None if value == "unknown" else value, "label": label, **_trend_winner_protection_metric_summary(group_rows)})
-    result.sort(key=lambda row: (-int(row.get("candidate_count") or 0), str(row.get(key) or "")))
-    return result
-
-
-def _trend_winner_protection_derived_group_metrics(
-    rows: list[dict[str, Any]],
-    key: str,
-    bucket_func: Callable[[dict[str, Any]], str],
-    labeler: Callable[[Any, list[dict[str, Any]]], str] | Callable[[Any], str],
-) -> list[dict[str, Any]]:
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        grouped.setdefault(bucket_func(row) or "unknown", []).append(row)
-    result: list[dict[str, Any]] = []
-    for value, group_rows in grouped.items():
-        try:
-            label = labeler(value, group_rows)  # type: ignore[misc]
-        except TypeError:
-            label = labeler(value)  # type: ignore[operator]
-        result.append({key: None if value == "unknown" else value, "label": label, **_trend_winner_protection_metric_summary(group_rows)})
-    result.sort(key=lambda row: (-int(row.get("candidate_count") or 0), str(row.get(key) or "")))
-    return result
-
-
-def _trend_winner_protection_bucket(
-    *,
-    open_return: float | None,
-    snapshot_return: float | None,
-    real_return: float | None,
-    opportunity_delta: float | None,
-    market_phase: Any,
-) -> tuple[str, str]:
-    phase = str(market_phase or "")
-    visible_return = open_return if open_return is not None else snapshot_return
-    if visible_return is not None and visible_return >= 5 and (real_return is None or real_return >= 0):
-        return "protect_trend_winner", "执行开盘已盈利且真实退出仍盈利"
-    if visible_return is not None and visible_return >= 0 and phase == "uptrend":
-        return "protect_uptrend_repair", "主升环境下执行开盘已修复"
-    if visible_return is not None and visible_return >= 0:
-        return "protect_open_profit", "执行开盘已盈利或亏损已修复"
-    if visible_return is not None and visible_return <= -5 and (opportunity_delta is None or opportunity_delta > 0):
-        return "replaceable_weak_holding", "执行开盘仍明显亏损，才适合作为换仓审计对象"
-    return "needs_manual_review", "执行开盘状态不足以支持直接替换或保护"
-
-
-def _trend_winner_protection_label(value: Any, _rows: list[dict[str, Any]] | None = None) -> str:
-    labels = {
-        "protect_trend_winner": "保护趋势赢家",
-        "protect_uptrend_repair": "主升修复保护",
-        "protect_open_profit": "开盘盈利保护",
-        "replaceable_weak_holding": "可研究弱持仓替换",
-        "needs_manual_review": "需要人工复核",
-        "unknown": "状态未知",
-    }
-    return labels.get(str(value or "unknown"), str(value or "状态未知"))
-
-
-def _trend_winner_execute_open_bucket(row: dict[str, Any]) -> str:
-    return _rotation_replaced_execute_open_return_bucket({"replaced_execute_open_return_pct": row.get("held_execute_open_return_pct")})
-
-
-def _trend_winner_protection_interpretation(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    summary = _trend_winner_protection_metric_summary(rows)
-    protected_rate = _safe_float(summary.get("protected_rate")) or 0.0
-    replaceable_rate = _safe_float(summary.get("replaceable_rate")) or 0.0
-    if not rows:
-        primary = "no_full_position_rotation_samples"
-        message = "没有满仓换仓样本，无法评估趋势赢家保护。"
-    elif protected_rate >= replaceable_rate:
-        primary = "protect_winners_before_rotation"
-        message = "需要先保护 D+1 开盘已修复或盈利的持仓，再讨论换仓；否则容易卖掉趋势赢家。"
-    else:
-        primary = "weak_holding_rotation_needs_narrow_test"
-        message = "执行开盘仍弱的样本占比较高，但仍需默认关闭实验验证，不能直接改变默认策略。"
-    return {"primary_issue": primary, "message": message}
-
-
-def _attach_replaced_execute_open_returns(session: Any, schema: Any, rows: list[dict[str, Any]]) -> None:
-    symbols = sorted({str(row.get("replaced_symbol") or "") for row in rows if row.get("replaced_symbol")})
-    dates = sorted({_as_date(row.get("execute_date")) for row in rows if _as_date(row.get("execute_date"))})
-    if not symbols or not dates:
-        return
-    bar_rows = session.execute(
-        select(
-            schema.stock_daily_bars.c.vt_symbol,
-            schema.stock_daily_bars.c.trade_date,
-            schema.stock_daily_bars.c.open_price,
-        ).where(
-            schema.stock_daily_bars.c.vt_symbol.in_(symbols),
-            schema.stock_daily_bars.c.trade_date.in_(dates),
-        )
-    ).mappings().all()
-    opens = {
-        (str(row["vt_symbol"]), _as_date(row["trade_date"])): _safe_float(row.get("open_price"))
-        for row in bar_rows
-    }
-    for row in rows:
-        key = (str(row.get("replaced_symbol") or ""), _as_date(row.get("execute_date")))
-        open_price = opens.get(key)
-        cost_price = _safe_float(row.get("replaced_cost_price"))
-        row["replaced_execute_open_price"] = open_price
-        row["replaced_execute_open_return_pct"] = (
-            (open_price / cost_price - 1) * 100 if open_price is not None and cost_price else None
-        )
-        row["replaced_execute_open_return_source"] = (
-            "stock_daily_bars.open_price" if open_price is not None and cost_price else None
-        )
-
-
-def _weakest_rotation_position(positions: list[dict[str, Any]]) -> dict[str, Any] | None:
-    if not positions:
-        return None
-    return sorted(
-        positions,
-        key=lambda row: (
-            _safe_float(row.get("floating_pnl_pct")) if _safe_float(row.get("floating_pnl_pct")) is not None else 10**9,
-            -_safe_int(row.get("holding_days"), 0),
-            str(row.get("vt_symbol") or ""),
-        ),
-    )[0]
-
-
-def _position_exit_returns_by_entry(trades: list[dict[str, Any]]) -> dict[tuple[str, date | None], dict[str, Any]]:
-    result: dict[tuple[str, date | None], dict[str, Any]] = {}
-    for key, closed in _closed_trade_rows_by_entry(trades).items():
-        result[key] = {
-            **closed,
-            "exit_reason": closed.get("exit_reason") or closed.get("reason"),
-        }
-    open_by_symbol: dict[str, list[dict[str, Any]]] = {}
-    sell_reasons_by_key: dict[tuple[str, date | None], Any] = {}
-    for trade in sorted(trades, key=lambda item: (_as_date(item.get("trade_date")) or date.min, int(item.get("id") or 0))):
-        side = str(trade.get("side") or "").upper()
-        symbol = str(trade.get("vt_symbol") or "")
-        if side == "BUY":
-            open_by_symbol.setdefault(symbol, []).append(trade)
-            continue
-        if side != "SELL":
-            continue
-        entry = open_by_symbol.setdefault(symbol, []).pop(0) if open_by_symbol.get(symbol) else None
-        if not entry:
-            continue
-        sell_reasons_by_key[(symbol, _as_date(entry.get("trade_date")))] = trade.get("reason")
-    for key, reason in sell_reasons_by_key.items():
-        if key in result:
-            result[key]["exit_reason"] = result[key].get("exit_reason") or reason
-    if result:
-        return result
-    open_by_symbol: dict[str, list[dict[str, Any]]] = {}
-    for trade in sorted(trades, key=lambda item: (_as_date(item.get("trade_date")) or date.min, int(item.get("id") or 0))):
-        side = str(trade.get("side") or "").upper()
-        symbol = str(trade.get("vt_symbol") or "")
-        if side == "BUY":
-            open_by_symbol.setdefault(symbol, []).append(trade)
-            continue
-        if side != "SELL":
-            continue
-        entry = open_by_symbol.setdefault(symbol, []).pop(0) if open_by_symbol.get(symbol) else None
-        if not entry:
-            continue
-        amount = _safe_float(entry.get("amount")) or 0.0
-        pnl = _safe_float(trade.get("pnl")) or 0.0
-        result[(symbol, _as_date(entry.get("trade_date")))] = {
-            "vt_symbol": symbol,
-            "entry_date": _as_date(entry.get("trade_date")),
-            "exit_date": _as_date(trade.get("trade_date")),
-            "pnl": pnl,
-            "return_pct": pnl / amount * 100 if amount else None,
-            "exit_reason": trade.get("reason"),
-        }
-    return result
-
-
-def _rotation_opportunity_summary_text(
-    *,
-    candidate_return: float | None,
-    held_return: float | None,
-    held_current: float | None,
-    replacement: dict[str, Any] | None,
-) -> str:
-    if candidate_return is None:
-        return "候选固定持有后验不足。"
-    if held_return is None:
-        held_text = f"弱持仓当日浮盈 {held_current:.2f}%" if held_current is not None else "弱持仓后验不足"
-        return f"候选固定后验 {candidate_return:.2f}%；{held_text}。"
-    delta = candidate_return - held_return
-    symbol = str((replacement or {}).get("vt_symbol") or "弱持仓")
-    return f"候选固定后验 {candidate_return:.2f}%，对比 {symbol} 真实退出 {held_return:.2f}%，差值 {delta:.2f}%。"
 
 
 def _rows_by_signal_key(rows: list[dict[str, Any]], *, prefer_signal_date: bool = False) -> dict[tuple[date, str], list[dict[str, Any]]]:
@@ -2359,13 +1231,13 @@ def _execution_breakpoint_summary(
         return "候选为观察状态，默认组合不买入。"
     if status == "rejected":
         return "候选进入订单链路，但真实订单被拒绝。"
-    if status == "planned_not_ordered_full":
+    if status == "planned_not_ordered_unfilled":
         rank = execution.get("execution_candidate_rank")
-        return f"{setup_text}信号进入执行池第 {rank} 名，但执行日组合满仓 {equity_row.get('position_count')}/{_safe_int(run_params.get('max_positions'), 10)}，未触发换仓。"
+        return f"{setup_text}信号进入执行池第 {rank} 名，但没有形成组合成交。"
     if status == "planned_not_ordered_limit":
         return f"{setup_text}信号存在，但没有进入组合执行前 {_safe_int(run_params.get('candidate_limit'), 20)} 名。"
-    if status == "candidate_top_rank_full":
-        return f"候选排名在执行观察范围内，但当日组合满仓 {equity_row.get('position_count')}/{_safe_int(run_params.get('max_positions'), 10)}，没有触发换仓。"
+    if status == "candidate_top_rank_unfilled":
+        return "候选排名在执行观察范围内，但没有形成组合成交。"
     if status == "candidate_rank_outside_execution_pool":
         return f"候选排名未进入组合执行前 {_safe_int(run_params.get('candidate_limit'), 20)} 名，默认只作为观察。"
     if status == "candidate_top_rank_no_order":
@@ -2392,10 +1264,10 @@ def _execution_breakpoint_status_label(value: Any, _rows: list[dict[str, Any]] |
         "rejected": "订单拒买",
         "not_triggered": "理论未触发",
         "plan_rejected": "计划拒绝",
-        "planned_not_ordered_full": "满仓未换仓",
+        "planned_not_ordered_unfilled": "未形成组合成交",
         "planned_not_ordered_limit": "执行池外",
         "planned_not_ordered_other": "计划未下单",
-        "candidate_top_rank_full": "候选前列但满仓",
+        "candidate_top_rank_unfilled": "候选前列未成交",
         "candidate_rank_outside_execution_pool": "候选执行池外",
         "candidate_top_rank_no_order": "候选前列无订单",
         "candidate_real_already_held": "真实组合已持有",
@@ -2413,10 +1285,10 @@ def _execution_breakpoint_status_group(value: Any) -> str:
     if text in {"watch_not_bought", "rejected", "not_triggered", "plan_rejected"}:
         return "risk_or_condition"
     if text in {
-        "planned_not_ordered_full",
+        "planned_not_ordered_unfilled",
         "planned_not_ordered_limit",
         "planned_not_ordered_other",
-        "candidate_top_rank_full",
+        "candidate_top_rank_unfilled",
         "candidate_rank_outside_execution_pool",
         "candidate_top_rank_no_order",
     }:
@@ -2439,8 +1311,8 @@ def _execution_breakpoint_status_group_label(value: Any, _rows: list[dict[str, A
 
 def _execution_breakpoint_status_order(value: Any) -> int:
     order = {
-        "planned_not_ordered_full": 0,
-        "candidate_top_rank_full": 1,
+        "planned_not_ordered_unfilled": 0,
+        "candidate_top_rank_unfilled": 1,
         "candidate_top_rank_no_order": 2,
         "planned_not_ordered_limit": 3,
         "candidate_rank_outside_execution_pool": 4,
@@ -2460,8 +1332,11 @@ def _execution_breakpoint_status_order(value: Any) -> int:
 
 def setup_market_exit_audit_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     enriched = [_with_path_issue(row) for row in rows]
+    clean_rows = [row for row in enriched if not row.get("has_price_discontinuity")]
     return {
         "overall": _path_metric_summary(enriched),
+        "data_quality": path_data_quality_summary(enriched),
+        "overall_without_price_discontinuity": _path_metric_summary(clean_rows),
         "by_entry_setup": _group_path_metrics(enriched, "entry_setup", _entry_setup_label),
         "by_dynamic_market_regime": _group_path_metrics(enriched, "dynamic_market_regime", _dynamic_market_label_for_bucket),
         "by_market_warning": _group_path_metrics(enriched, "market_warning_label", lambda value, _rows: str(value or "未知")),
@@ -2496,7 +1371,6 @@ def setup_market_exit_audit_summary(rows: list[dict[str, Any]]) -> dict[str, Any
         ),
         "entry_launch_quality_audit": entry_launch_quality_audit(enriched),
         "support_stop_context_audit": support_stop_context_audit(enriched),
-        "exit_path_replacement_quality": exit_path_replacement_quality_summary(enriched),
         "market_context_validation": market_context_validation_summary(enriched),
         "setup_market_exit_matrix": _setup_market_exit_matrix(enriched),
         "buy_sell_problem_matrix": buy_sell_problem_matrix(enriched),
@@ -2577,46 +1451,6 @@ def phase_strategy_family_matrix_summary(
     }
 
 
-def replacement_quality_matrix_summary(
-    trade_rows: list[dict[str, Any]],
-    reject_rows: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """Summarize filled replacements/trades and gate rejects by phase/family."""
-
-    filled = [_with_replacement_matrix_trade_fields(row) for row in trade_rows]
-    rejects = [_with_replacement_matrix_reject_fields(row) for row in reject_rows]
-    return {
-        "method": "只读矩阵：真实成交按买入日行情/策略族聚合；闸门拒买按执行日可见行情和拒买原因聚合。",
-        "filled_overall": _phase_trade_metric_summary(filled),
-        "filled_by_phase": _phase_group_metrics(filled, "market_phase", _market_phase_label_for_bucket),
-        "filled_by_setup_family": _phase_group_metrics(filled, "setup_family", _setup_family_label_for_bucket),
-        "filled_by_phase_setup": _phase_setup_matrix(filled),
-        "filled_by_low_suction_bucket": _phase_group_metrics(
-            filled,
-            "low_suction_launch_quality_bucket",
-            _low_suction_launch_quality_label_for_bucket,
-        ),
-        "filled_by_exit_reason": _phase_group_metrics(filled, "exit_reason", _exit_reason_label_for_bucket),
-        "rejected_overall": _replacement_reject_metric_summary(rejects),
-        "rejected_by_phase": _replacement_reject_group_metrics(rejects, "market_phase", _market_phase_label_for_bucket),
-        "rejected_by_setup_family": _replacement_reject_group_metrics(rejects, "setup_family", _setup_family_label_for_bucket),
-        "rejected_by_low_suction_bucket": _replacement_reject_group_metrics(
-            rejects,
-            "low_suction_launch_quality_bucket",
-            _low_suction_launch_quality_label_for_bucket,
-        ),
-        "rejected_by_warning_level": _replacement_reject_group_metrics(
-            rejects,
-            "market_warning_level",
-            _market_warning_level_label_for_bucket,
-        ),
-        "rejected_reason_counts": _replacement_reject_reason_counts(rejects),
-        "interpretation": _replacement_quality_interpretation(filled, rejects),
-        "not_used_for_signal_score": True,
-        "audit_only": True,
-    }
-
-
 def backtest_day_detail(
     *,
     schema: Any,
@@ -2681,13 +1515,12 @@ def backtest_day_detail(
         order_dicts = [dict(row) for row in order_rows]
         signal_dicts = [dict(row) for row in signal_rows]
         signal_dates = sorted({row["signal_date"] for row in signal_dicts if row.get("signal_date")})
-        if signal_dates:
+        run_ids = _screen_run_ids_for_dates(session, run["strategy_id"], run["strategy_version"], signal_dates, _run_params(dict(run)))
+        if run_ids:
             recommendation_rows = session.execute(
                 select(schema.quant_recommendations)
                 .where(
-                    schema.quant_recommendations.c.trade_date.in_(signal_dates),
-                    schema.quant_recommendations.c.strategy_id == run["strategy_id"],
-                    schema.quant_recommendations.c.strategy_version == run["strategy_version"],
+                    schema.quant_recommendations.c.run_id.in_(run_ids),
                 )
                 .order_by(schema.quant_recommendations.c.trade_date, schema.quant_recommendations.c.rank)
             ).mappings().all()
@@ -3010,6 +1843,13 @@ def trade_path_diagnostic_row(
     mae_pct = _min_number(row.get("floating_pnl_pct") for row in path)
     mfe_pct = _max_number(row.get("floating_pnl_pct") for row in path)
     signal_bar_context = _sell_signal_bar_context(vt_symbol, exit_date, daily_bars or [])
+    price_discontinuity = data_quality.candidate_price_discontinuity(
+        daily_bars or [],
+        vt_symbol=vt_symbol,
+        signal_date=entry_date or date.min,
+        entry_execute_date=entry_date,
+        exit_execute_date=exit_date,
+    )
     review = _rebound_prone_support_stop_review(
         exit_reason=(exit_trade or {}).get("reason"),
         mfe_pct=mfe_pct,
@@ -3073,6 +1913,11 @@ def trade_path_diagnostic_row(
         **follow_through,
         **signal_bar_context,
         **review,
+        "has_price_discontinuity": bool(price_discontinuity),
+        "first_price_discontinuity_date": price_discontinuity.get("trade_date") if price_discontinuity else None,
+        "first_price_discontinuity_open_gap_pct": price_discontinuity.get("open_gap_pct") if price_discontinuity else None,
+        "first_price_discontinuity_close_gap_pct": price_discontinuity.get("close_gap_pct") if price_discontinuity else None,
+        "first_price_discontinuity_change_pct": price_discontinuity.get("change_pct") if price_discontinuity else None,
         "post_exit_max_return_pct": post_exit_max_return_pct,
         "sold_before_rebound": bool(post_exit_max_return_pct is not None and post_exit_max_return_pct >= 8.0),
     }
@@ -3163,7 +2008,6 @@ def trade_path_diagnostics_from_trades(
     *,
     lookahead_days: int = 10,
     daily_bars: list[dict[str, Any]] | None = None,
-    replacement_trades: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     positions_by_symbol: dict[str, list[dict[str, Any]]] = {}
     for row in positions:
@@ -3199,7 +2043,7 @@ def trade_path_diagnostics_from_trades(
                 daily_bars=daily_bars_by_symbol.get(vt_symbol, []),
             )
         )
-    return _attach_replacement_trade_quality(rows, replacement_trades or trades)
+    return rows
 
 
 def low_suction_confirmed_path_item(
@@ -3559,82 +2403,6 @@ def _low_suction_confirmed_path_read(rows: list[dict[str, Any]]) -> dict[str, An
     }
 
 
-def _attach_replacement_trade_quality(rows: list[dict[str, Any]], trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if not rows:
-        return rows
-    closed_by_entry_id = _closed_trade_rows_by_entry_id(trades)
-    closed_by_entry_id.update({row.get("entry_trade_id"): row for row in rows if row.get("entry_trade_id") is not None})
-    sorted_buys = [
-        trade
-        for trade in sorted(trades, key=_trade_sort_key)
-        if str(trade.get("side") or "").upper() == "BUY"
-    ]
-    buy_index = 0
-    for row in sorted(rows, key=lambda item: (_as_date(item.get("exit_date")) or date.max, int(item.get("exit_trade_id") or 0))):
-        exit_trade_id = row.get("exit_trade_id")
-        if exit_trade_id is None:
-            row.update(_replacement_quality_payload(None, None, row))
-            continue
-        exit_key = (_as_date(row.get("exit_date")) or date.min, int(exit_trade_id or 0))
-        while buy_index < len(sorted_buys) and _trade_sort_key(sorted_buys[buy_index]) <= exit_key:
-            buy_index += 1
-        if buy_index >= len(sorted_buys):
-            row.update(_replacement_quality_payload(None, None, row))
-            continue
-        replacement = sorted_buys[buy_index]
-        buy_index += 1
-        row.update(_replacement_quality_payload(replacement, closed_by_entry_id.get(replacement.get("id")), row))
-    return rows
-
-
-def _replacement_quality_payload(
-    replacement_entry: dict[str, Any] | None,
-    replacement_closed_row: dict[str, Any] | None,
-    source_row: dict[str, Any],
-) -> dict[str, Any]:
-    if replacement_entry is None:
-        return {
-            "replacement_status": "none",
-            "replacement_outcome": "no_replacement",
-            "replacement_outcome_label": "未释放到后续买入",
-        }
-    raw = _entry_raw_payload(replacement_entry)
-    replacement_return = _safe_float((replacement_closed_row or {}).get("return_pct"))
-    source_return = _safe_float(source_row.get("return_pct"))
-    delta = replacement_return - source_return if replacement_return is not None and source_return is not None else None
-    outcome, label = _replacement_outcome(replacement_return)
-    return {
-        "replacement_status": "closed" if replacement_closed_row else "open",
-        "replacement_trade_id": replacement_entry.get("id"),
-        "replacement_vt_symbol": replacement_entry.get("vt_symbol"),
-        "replacement_name": replacement_entry.get("name"),
-        "replacement_entry_date": _as_date(replacement_entry.get("trade_date")),
-        "replacement_entry_price": _safe_float(replacement_entry.get("price")),
-        "replacement_entry_setup": raw.get("entry_setup") or raw.get("setup_type"),
-        "replacement_entry_score": _entry_raw_number(raw, "entry_total_score", "total_score", "score"),
-        "replacement_exit_date": (replacement_closed_row or {}).get("exit_date"),
-        "replacement_exit_reason": (replacement_closed_row or {}).get("exit_reason"),
-        "replacement_exit_reason_label": (replacement_closed_row or {}).get("exit_reason_label"),
-        "replacement_return_pct": replacement_return,
-        "replacement_pnl": _safe_float((replacement_closed_row or {}).get("pnl")),
-        "replacement_return_delta_pct": round(delta, 4) if delta is not None else None,
-        "replacement_outcome": outcome,
-        "replacement_outcome_label": label,
-    }
-
-
-def _replacement_outcome(return_pct: float | None) -> tuple[str, str]:
-    if return_pct is None:
-        return "open_replacement", "替换持仓未闭合"
-    if return_pct >= 8.0:
-        return "strong_replacement", "替换买入强盈利"
-    if return_pct > 0:
-        return "profitable_replacement", "替换买入盈利"
-    if return_pct <= -5.0:
-        return "bad_replacement", "替换买入亏损"
-    return "weak_replacement", "替换买入弱表现"
-
-
 def _closed_trade_rows_by_entry_id(trades: list[dict[str, Any]]) -> dict[Any, dict[str, Any]]:
     open_trades: dict[str, list[dict[str, Any]]] = {}
     result: dict[Any, dict[str, Any]] = {}
@@ -3675,23 +2443,18 @@ def _trade_sort_key(trade: dict[str, Any]) -> tuple[date, int]:
 
 def trade_path_diagnostics_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     enriched = [_with_path_issue(row) for row in rows]
+    clean_rows = [row for row in enriched if not row.get("has_price_discontinuity")]
     losses = [row for row in rows if _safe_float(row.get("return_pct")) is not None and float(row["return_pct"]) < 0]
     rebounds = [row for row in rows if row.get("sold_before_rebound")]
     mae_values = [value for row in rows if (value := _safe_float(row.get("mae_pct"))) is not None]
     mfe_values = [value for row in rows if (value := _safe_float(row.get("mfe_pct"))) is not None]
-    replacement_returns = [value for row in rows if (value := _safe_float(row.get("replacement_return_pct"))) is not None]
-    replacement_deltas = [value for row in rows if (value := _safe_float(row.get("replacement_return_delta_pct"))) is not None]
     return {
         "trade_count": len(rows),
         "loss_count": len(losses),
         "sold_before_rebound_count": len(rebounds),
         "rebound_prone_support_stop_review_count": sum(1 for row in rows if row.get("rebound_prone_support_stop_review")),
-        "replacement_trade_count": sum(1 for row in rows if row.get("replacement_trade_id") is not None),
-        "bad_replacement_count": sum(1 for row in rows if row.get("replacement_outcome") == "bad_replacement"),
-        "strong_replacement_count": sum(1 for row in rows if row.get("replacement_outcome") == "strong_replacement"),
-        "avg_replacement_return_pct": _avg(replacement_returns),
-        "avg_replacement_return_delta_pct": _avg(replacement_deltas),
-        "by_replacement_outcome": _group_path_metrics(enriched, "replacement_outcome", _replacement_outcome_label_for_bucket),
+        "data_quality": path_data_quality_summary(enriched),
+        "overall_without_price_discontinuity": _path_metric_summary(clean_rows),
         "by_dynamic_market_regime": _group_path_metrics(enriched, "dynamic_market_regime", _dynamic_market_label_for_bucket),
         "by_market_warning": _group_path_metrics(enriched, "market_warning_label", lambda value, _rows: str(value or "未知")),
         "by_entry_context": _group_path_metrics(enriched, "entry_context_state", _entry_context_label_for_bucket),
@@ -3991,7 +2754,6 @@ def _short_term_trade_context_marker(row: dict[str, Any]) -> dict[str, Any]:
 
     entry_context = str(row.get("entry_context_state") or "")
     launch_state = str(row.get("entry_launch_diagnostic_state") or row.get("early_follow_through_state") or "")
-    replacement_outcome = str(row.get("replacement_outcome") or "")
     exit_reason = str(row.get("exit_reason") or "")
     setup = str(row.get("entry_setup") or "")
     fund_flow = str(row.get("fund_flow_state") or "")
@@ -4005,9 +2767,6 @@ def _short_term_trade_context_marker(row: dict[str, Any]) -> dict[str, Any]:
     if entry_context == "risk_off" or market_warning >= 3 or fund_flow in {"continuous_outflow", "panic_outflow"}:
         context, label = "defensive_tide", "退潮防守"
         notes.append("大盘/资金环境偏防守")
-    elif sold_before_rebound and replacement_outcome == "bad_replacement":
-        context, label = "failed_slot_replacement", "卖早且替换差"
-        notes.append("释放仓位后的替换交易质量差")
     elif exit_reason == "support_stop" and launch_state in {"failed_launch", "no_follow_through"}:
         context, label = "failed_launch_cut", "假启动止损"
         notes.append("买后三日无承接")
@@ -4052,10 +2811,14 @@ def support_stop_context_audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Split support-stop exits into context buckets for sell/hold research."""
 
     support_rows = [row for row in rows if str(row.get("exit_reason") or "") == "support_stop"]
+    clean_rows = [row for row in support_rows if not row.get("has_price_discontinuity")]
     return {
-        "method": "只读归因：用已成交路径的 MAE/MFE、买后三日承接和卖后10日反弹拆分 support_stop，不改变卖点规则。",
+        "method": "只读归因：用已成交路径的 MAE/MFE、买后三日承接、卖后10日反弹和疑似未复权价格断层拆分 support_stop，不改变卖点规则。",
         "overall": _path_metric_summary(support_rows),
+        "data_quality": path_data_quality_summary(support_rows),
+        "overall_without_price_discontinuity": _path_metric_summary(clean_rows),
         "by_context": _support_stop_context_bucket_rows(support_rows),
+        "by_context_without_price_discontinuity": _support_stop_context_bucket_rows(clean_rows),
     }
 
 
@@ -4063,29 +2826,42 @@ def support_stop_matrix_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Summarize support-stop rows for focused sell/risk-control research."""
 
     enriched = [support_stop_matrix_row(row) for row in rows]
+    clean_rows = [row for row in enriched if not row.get("has_price_discontinuity")]
     return {
-        "method": "只读矩阵：只看真实 support_stop 闭仓路径，按上下文、行情、策略族、买后三日承接和卖后替换质量拆分；不改变默认卖点。",
+        "method": "只读矩阵：只看真实 support_stop 闭仓路径，按上下文、行情、策略族、买后三日承接和疑似未复权价格断层拆分；不改变默认卖点。",
         "overall": _path_metric_summary(enriched),
+        "data_quality": path_data_quality_summary(enriched),
+        "overall_without_price_discontinuity": _path_metric_summary(clean_rows),
         "by_support_stop_context": _group_path_metrics(
             enriched,
             "support_stop_context",
             _support_stop_context_label_for_bucket,
         ),
+        "by_support_stop_context_without_price_discontinuity": _group_path_metrics(
+            clean_rows,
+            "support_stop_context",
+            _support_stop_context_label_for_bucket,
+        ),
         "by_path_issue": _group_path_metrics(enriched, "path_issue_type", _path_issue_label_for_bucket),
+        "by_path_issue_without_price_discontinuity": _group_path_metrics(clean_rows, "path_issue_type", _path_issue_label_for_bucket),
         "by_early_follow_through": _group_path_metrics(
             enriched,
             "early_follow_through_state",
             _early_follow_through_label_for_bucket,
         ),
-        "by_setup_family": _group_path_metrics(enriched, "setup_family", _setup_family_label_for_bucket),
-        "by_market_phase": _group_path_metrics(enriched, "market_phase", _market_phase_label_for_bucket),
-        "by_phase_setup": _support_stop_phase_setup_matrix(enriched),
-        "by_replacement_outcome": _group_path_metrics(
-            enriched,
-            "replacement_outcome",
-            _replacement_outcome_label_for_bucket,
+        "by_early_follow_through_without_price_discontinuity": _group_path_metrics(
+            clean_rows,
+            "early_follow_through_state",
+            _early_follow_through_label_for_bucket,
         ),
+        "by_setup_family": _group_path_metrics(enriched, "setup_family", _setup_family_label_for_bucket),
+        "by_setup_family_without_price_discontinuity": _group_path_metrics(clean_rows, "setup_family", _setup_family_label_for_bucket),
+        "by_market_phase": _group_path_metrics(enriched, "market_phase", _market_phase_label_for_bucket),
+        "by_market_phase_without_price_discontinuity": _group_path_metrics(clean_rows, "market_phase", _market_phase_label_for_bucket),
+        "by_phase_setup": _support_stop_phase_setup_matrix(enriched),
+        "by_phase_setup_without_price_discontinuity": _support_stop_phase_setup_matrix(clean_rows),
         "interpretation": _support_stop_matrix_interpretation(enriched),
+        "interpretation_without_price_discontinuity": _support_stop_matrix_interpretation(clean_rows),
         "audit_only": True,
         "not_used_for_signal_score": True,
     }
@@ -4156,12 +2932,10 @@ def _support_stop_matrix_interpretation(rows: list[dict[str, Any]]) -> dict[str,
     true_failed = [row for row in rows if row.get("support_stop_context") == "true_failed_launch_stop"]
     rebound = [row for row in rows if row.get("support_stop_context") in {"stopped_then_rebounded", "high_mfe_then_rebound_after_stop"}]
     giveback = [row for row in rows if row.get("support_stop_context") == "clean_float_profit_giveback"]
-    bad_replacements = [row for row in rows if row.get("replacement_outcome") == "bad_replacement"]
     return {
         "needs_failed_launch_control": bool(true_failed),
         "needs_rebound_guard": bool(rebound),
         "needs_profit_giveback_control": bool(giveback),
-        "needs_replacement_quality_gate": bool(bad_replacements),
         "notes": [
             "存在真失败启动止损样本，买后可见连续破位/无上冲可以继续做默认关闭风控实验。"
             if true_failed else "真失败启动样本不足，暂不支持新增失败启动卖点。",
@@ -4169,37 +2943,8 @@ def _support_stop_matrix_interpretation(rows: list[dict[str, Any]]) -> dict[str,
             if rebound else "卖后反弹样本不足，延迟卖出暂不优先。",
             "存在浮盈回吐后破位样本，动态最高收益回撤卖点仍值得窄口径审计。"
             if giveback else "浮盈回吐样本不足，不应新增宽泛高点回撤卖点。",
-            "卖后坏替换仍多，任何卖点实验都必须同时报告替换质量。"
-            if bad_replacements else "坏替换不明显，卖点实验可更关注原持仓路径。",
         ],
         "context_count": len(contexts),
-    }
-
-
-def exit_path_replacement_quality_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Summarize sell path, support-stop context and freed-slot replacement quality."""
-
-    return {
-        "method": "只读归因：按闭仓路径、支撑止损上下文和卖出后的下一笔真实 BUY 衡量替换质量；不改变卖点规则。",
-        "overall": _path_metric_summary(rows),
-        "by_trade_problem_type": buy_sell_problem_matrix(rows)["by_problem"],
-        "by_exit_reason": _group_path_metrics(rows, "exit_reason", _exit_reason_label_for_bucket),
-        "by_support_stop_context": support_stop_context_audit(rows)["by_context"],
-        "replacement_quality_summary": replacement_quality_summary(rows),
-        "not_used_for_signal_score": True,
-    }
-
-
-def replacement_quality_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    replacement_returns = [value for row in rows if (value := _safe_float(row.get("replacement_return_pct"))) is not None]
-    replacement_deltas = [value for row in rows if (value := _safe_float(row.get("replacement_return_delta_pct"))) is not None]
-    return {
-        "replacement_trade_count": sum(1 for row in rows if row.get("replacement_trade_id") is not None),
-        "bad_replacement_count": sum(1 for row in rows if row.get("replacement_outcome") == "bad_replacement"),
-        "strong_replacement_count": sum(1 for row in rows if row.get("replacement_outcome") == "strong_replacement"),
-        "avg_replacement_return_pct": _avg(replacement_returns),
-        "avg_replacement_return_delta_pct": _avg(replacement_deltas),
-        "by_replacement_outcome": _group_path_metrics(rows, "replacement_outcome", _replacement_outcome_label_for_bucket),
     }
 
 
@@ -4212,7 +2957,7 @@ def market_context_validation_summary(rows: list[dict[str, Any]]) -> dict[str, A
         if str(row.get("dynamic_market_regime") or "") not in {"strong_broad", "narrow_mainline_bull"}
     ]
     return {
-        "method": "只读归因：按买入日市场/主线/资金流环境分组，用于检查是否只依赖强势行情；不改变买卖、排序或仓位。",
+        "method": "只读归因：按买入日市场/主线/资金流环境分组，用于检查是否只依赖强势行情；不改变买卖或排序。",
         "by_market_regime": _group_path_metrics(rows, "dynamic_market_regime", _dynamic_market_label_for_bucket),
         "by_market_warning_level": _group_path_metrics(rows, "market_warning_level", _market_warning_level_label_for_bucket),
         "by_market_recovery_level": _group_path_metrics(rows, "market_recovery_level", _market_recovery_level_label_for_bucket),
@@ -4237,9 +2982,6 @@ def classify_buy_sell_problem(row: dict[str, Any]) -> str:
     actual_return = _first_number(row.get("return_pct"), row.get("current_strategy_return_pct"), row.get("closed_return_pct"))
     fixed_return = _first_number(row.get("return_20d"), row.get("fixed_return_20d"), row.get("observation_return_pct"))
     mfe = _first_number(row.get("mfe_pct"), row.get("mfe_20d"), row.get("current_strategy_mfe_pct"))
-    replacement_return = _safe_float(row.get("replacement_return_pct"))
-    not_filled_reason = str(row.get("not_filled_reason") or row.get("not_ordered_reason") or row.get("skip_reason") or "")
-
     if row.get("sold_before_rebound") and str(row.get("exit_reason") or "") == "support_stop":
         return SOLD_TOO_EARLY
     giveback = _safe_float(row.get("giveback_pct"))
@@ -4248,10 +2990,6 @@ def classify_buy_sell_problem(row: dict[str, Any]) -> str:
         or (mfe is not None and mfe >= 8.0 and (giveback is None or giveback >= 8.0))
     ):
         return SELL_GIVEBACK
-    if fixed_return is not None and fixed_return > 5.0 and actual_return is None and _is_capacity_miss_reason(not_filled_reason):
-        return PORTFOLIO_CAPACITY_MISS
-    if replacement_return is not None and replacement_return < -3.0:
-        return REPLACEMENT_BAD
     if (actual_return is not None and actual_return > 10.0) or (mfe is not None and mfe > 15.0 and (actual_return is None or actual_return >= 0)):
         return HEALTHY_TREND_WINNER
     if fixed_return is not None and fixed_return < -3.0 and (actual_return is None or actual_return < 0):
@@ -4366,8 +3104,6 @@ def _buy_sell_problem_focus_rows(rows: list[dict[str, Any]], *, limit: int = 20)
         SELL_GIVEBACK: 0,
         SOLD_TOO_EARLY: 1,
         BUY_POINT_BAD: 2,
-        REPLACEMENT_BAD: 3,
-        PORTFOLIO_CAPACITY_MISS: 4,
         UNKNOWN: 5,
         HEALTHY_TREND_WINNER: 6,
     }
@@ -4392,8 +3128,6 @@ def _buy_sell_problem_focus_rows(rows: list[dict[str, Any]], *, limit: int = 20)
             "mfe_pct": row.get("mfe_pct"),
             "mae_pct": row.get("mae_pct"),
             "sold_before_rebound": row.get("sold_before_rebound"),
-            "replacement_outcome": row.get("replacement_outcome"),
-            "replacement_return_pct": row.get("replacement_return_pct"),
             "trade_problem_type": row.get("trade_problem_type"),
             "trade_problem_label": row.get("trade_problem_label"),
         }
@@ -4410,23 +3144,10 @@ def _buy_sell_problem_label(value: Any) -> str:
         BUY_POINT_BAD: "买点问题",
         SELL_GIVEBACK: "卖点回撤问题",
         SOLD_TOO_EARLY: "卖早反弹",
-        PORTFOLIO_CAPACITY_MISS: "满仓错过",
-        REPLACEMENT_BAD: "替换交易变差",
         HEALTHY_TREND_WINNER: "趋势赢家",
         UNKNOWN: "未归类",
     }
     return labels.get(str(value or UNKNOWN), str(value or UNKNOWN))
-
-
-def _is_capacity_miss_reason(reason: str) -> bool:
-    return reason in {
-        "full_position",
-        "position_slot_unavailable",
-        "no_rotation",
-        "no_rotation_candidate",
-        "lower_rank",
-        "already_held",
-    }
 
 
 def _first_number(*values: Any) -> float | None:
@@ -4439,8 +3160,6 @@ def _first_number(*values: Any) -> float | None:
 
 def _path_metric_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     returns = [value for row in rows if (value := _safe_float(row.get("return_pct"))) is not None]
-    replacement_returns = [value for row in rows if (value := _safe_float(row.get("replacement_return_pct"))) is not None]
-    replacement_deltas = [value for row in rows if (value := _safe_float(row.get("replacement_return_delta_pct"))) is not None]
     pnl_values = [value for row in rows if (value := _safe_float(row.get("pnl"))) is not None]
     losses = [value for value in returns if value < 0]
     wins = [value for value in returns if value > 0]
@@ -4456,11 +3175,6 @@ def _path_metric_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "avg_return_pct": _avg(returns),
         "median_return_pct": median(returns) if returns else None,
         "total_return_pct": sum(returns) if returns else None,
-        "replacement_trade_count": sum(1 for row in rows if row.get("replacement_trade_id") is not None),
-        "bad_replacement_count": sum(1 for row in rows if row.get("replacement_outcome") == "bad_replacement"),
-        "strong_replacement_count": sum(1 for row in rows if row.get("replacement_outcome") == "strong_replacement"),
-        "avg_replacement_return_pct": _avg(replacement_returns),
-        "avg_replacement_return_delta_pct": _avg(replacement_deltas),
         "total_pnl": sum(pnl_values) if pnl_values else None,
         "avg_pnl": _avg(pnl_values),
         "avg_mae_pct": _avg(mae_values),
@@ -4480,6 +3194,43 @@ def _path_metric_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
             1 for row in rows if row.get("early_follow_through_state") == "confirmed_follow_through"
         ),
     }
+
+
+def path_data_quality_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    discontinuity_rows = [row for row in rows if row.get("has_price_discontinuity")]
+    return {
+        "trade_count": len(rows),
+        "price_discontinuity_count": len(discontinuity_rows),
+        "price_discontinuity_rate": _ratio(len(discontinuity_rows), len(rows)),
+        "price_discontinuity_quality": _path_metric_summary(discontinuity_rows),
+        "worst_price_discontinuity_samples": _worst_path_price_discontinuity_samples(discontinuity_rows),
+    }
+
+
+def _worst_path_price_discontinuity_samples(rows: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
+    sorted_rows = sorted(
+        rows,
+        key=lambda row: (
+            _sort_number(row.get("return_pct"), default=10**18),
+            _sort_number(row.get("first_price_discontinuity_open_gap_pct"), default=0),
+        ),
+    )
+    return [
+        {
+            "entry_date": row.get("entry_date"),
+            "exit_date": row.get("exit_date"),
+            "vt_symbol": row.get("vt_symbol"),
+            "name": row.get("name"),
+            "exit_reason": row.get("exit_reason"),
+            "return_pct": row.get("return_pct"),
+            "mae_pct": row.get("mae_pct"),
+            "mfe_pct": row.get("mfe_pct"),
+            "first_price_discontinuity_date": row.get("first_price_discontinuity_date"),
+            "first_price_discontinuity_open_gap_pct": row.get("first_price_discontinuity_open_gap_pct"),
+            "first_price_discontinuity_close_gap_pct": row.get("first_price_discontinuity_close_gap_pct"),
+        }
+        for row in sorted_rows[:limit]
+    ]
 
 
 def _phase_audit_trade_rows(rows: Any) -> list[dict[str, Any]]:
@@ -4555,7 +3306,7 @@ def market_phase_setup_family(row: dict[str, Any]) -> str:
 
 
 def _market_phase_setup_family(row: dict[str, Any]) -> str:
-    setup = str(row.get("entry_setup") or row.get("setup_primary") or row.get("entry_family") or "")
+    setup = str(row.get("entry_setup") or row.get("setup_primary") or row.get("entry_family") or row.get("setup_family") or "")
     low_suction_days = _safe_float(row.get("low_suction_days")) or 0.0
     launch_confirmed = bool(row.get("low_suction_launch_confirmed"))
     dragon_state = str(row.get("low_suction_dragon_state") or "")
@@ -4732,165 +3483,8 @@ def _phase_strategy_family_interpretation(
             if weak_real_buildup else "低吸蓄势仍需按样本继续观察。",
             "龙回头+低吸重叠需要冲突解析，不能自动叠分。"
             if weak_real_overlap else "重叠样本不足或未显示明显负向。",
-            "主升候选质量和真实成交质量存在差异，优先查执行/替换/卖点。"
+            "主升候选质量和真实成交质量存在差异，优先查候选质量、执行链路和卖点。"
             if strong_candidate_uptrend and weak_real_uptrend else "行情阶段仍保持只读分层。",
-        ],
-    }
-
-
-def _replacement_quality_reject_rows(orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    rows = []
-    for order in orders:
-        if str(order.get("side") or "").upper() != "BUY":
-            continue
-        if str(order.get("status") or "") != "rejected":
-            continue
-        if str(order.get("reason") or "") not in {
-            "low_suction_branch_replacement_quality_gate",
-            "dynamic_failed_launch_replacement_quality_gate",
-        }:
-            continue
-        raw = order.get("raw") if isinstance(order.get("raw"), dict) else {}
-        quality = raw.get("quality") if isinstance(raw.get("quality"), dict) else {}
-        item = {
-            "vt_symbol": order.get("vt_symbol") or raw.get("vt_symbol"),
-            "name": order.get("name"),
-            "trade_date": _as_date(order.get("trade_date")) or _as_date(raw.get("execute_date")),
-            "order_id": order.get("id"),
-            "reject_reason": order.get("reason"),
-            "reject_reason_label": reason_label(order.get("reason")) or "替换质量闸门",
-            "entry_setup": quality.get("entry_setup") or raw.get("entry_setup"),
-            "setup_family": quality.get("setup_family") or raw.get("setup_family"),
-            "entry_score": _safe_float(quality.get("entry_score")),
-            "low_suction_launch_quality_bucket": quality.get("low_suction_launch_quality_bucket"),
-            "market_warning_level": quality.get("market_warning_level"),
-            "ma_convergence_pct": quality.get("ma_convergence_pct"),
-            "gate_id": raw.get("gate_id"),
-            "gate_source_symbol": raw.get("gate_source_symbol"),
-            "gate_source_reason": raw.get("gate_source_reason"),
-            "gate_wait_count": raw.get("gate_wait_count"),
-            "gate_max_wait_days": raw.get("gate_max_wait_days"),
-            "reject_reasons": [str(note) for note in (quality.get("notes") or [])],
-            "raw": raw,
-        }
-        rows.append(item)
-    return rows
-
-
-def _with_replacement_matrix_trade_fields(row: dict[str, Any]) -> dict[str, Any]:
-    item = _with_market_phase_fields(row)
-    raw = _entry_raw_payload({"raw": item.get("raw") if isinstance(item.get("raw"), dict) else {}})
-    item["entry_setup"] = raw.get("entry_setup") or raw.get("setup_type") or item.get("entry_setup")
-    item["entry_score"] = _first_number(
-        _entry_raw_number(raw, "entry_total_score", "total_score", "score"),
-        item.get("entry_score"),
-    )
-    item["low_suction_days"] = _first_number(_entry_raw_number(raw, "low_suction_days"), item.get("low_suction_days"))
-    item["low_suction_launch_confirmed"] = bool(raw.get("low_suction_launch_confirmed", item.get("low_suction_launch_confirmed")))
-    item["low_suction_dragon_state"] = raw.get("low_suction_dragon_state") or item.get("low_suction_dragon_state")
-    item["low_suction_launch_quality_bucket"] = (
-        raw.get("low_suction_launch_quality_bucket")
-        or item.get("low_suction_launch_quality_bucket")
-        or low_suction_launch_quality_bucket(item)
-    )
-    item["low_suction_launch_quality_label"] = low_suction_launch_quality_label(item["low_suction_launch_quality_bucket"])
-    item["setup_family"] = _market_phase_setup_family(item)
-    item["setup_label"] = _setup_family_label_for_bucket(item.get("setup_family"), [item])
-    return item
-
-
-def _with_replacement_matrix_reject_fields(row: dict[str, Any]) -> dict[str, Any]:
-    explicit_family = row.get("setup_family")
-    item = _with_market_phase_fields(row)
-    bucket = item.get("low_suction_launch_quality_bucket") or low_suction_launch_quality_bucket(item)
-    item["low_suction_launch_quality_bucket"] = bucket
-    item["low_suction_launch_quality_label"] = low_suction_launch_quality_label(bucket)
-    item["setup_family"] = explicit_family or item.get("setup_family") or _market_phase_setup_family(item)
-    item["setup_label"] = _setup_family_label_for_bucket(item.get("setup_family"), [item])
-    item["reject_reason_count"] = len(item.get("reject_reasons") or [])
-    return item
-
-
-def _replacement_reject_metric_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    scores = [value for row in rows if (value := _safe_float(row.get("entry_score"))) is not None]
-    warnings = [value for row in rows if (value := _safe_float(row.get("market_warning_level"))) is not None]
-    return {
-        "reject_count": len(rows),
-        "avg_entry_score": _avg(scores),
-        "avg_market_warning_level": _avg(warnings),
-        "high_warning_count": sum(1 for row in rows if (_safe_float(row.get("market_warning_level")) or 0.0) >= 2),
-        "reason_count": sum(len(row.get("reject_reasons") or []) for row in rows),
-        "unique_reason_count": len({reason for row in rows for reason in (row.get("reject_reasons") or [])}),
-    }
-
-
-def _replacement_reject_group_metrics(
-    rows: list[dict[str, Any]],
-    key: str,
-    labeler: Callable[[Any, list[dict[str, Any]]], str],
-) -> list[dict[str, Any]]:
-    groups, values = _group_rows_by_key(rows, key)
-    result = [
-        {
-            key: None if group_key == "unknown" else values[group_key],
-            "label": labeler(values[group_key], bucket_rows),
-            **_replacement_reject_metric_summary(bucket_rows),
-        }
-        for group_key, bucket_rows in groups.items()
-    ]
-    result.sort(key=lambda item: (-int(item.get("reject_count") or 0), str(item.get(key) or "")))
-    return result
-
-
-def _replacement_reject_reason_counts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    counts: dict[str, int] = {}
-    for row in rows:
-        for reason in row.get("reject_reasons") or []:
-            counts[str(reason)] = counts.get(str(reason), 0) + 1
-    result = [{"reason": reason, "label": _replacement_reject_reason_label(reason), "count": count} for reason, count in counts.items()]
-    result.sort(key=lambda item: (-int(item["count"]), str(item["reason"])))
-    return result
-
-
-def _replacement_reject_reason_label(reason: Any) -> str:
-    labels = {
-        "score_below_gate": "分数低于接力闸门",
-        "market_warning_too_high": "市场风险等级过高",
-        "has_failed_or_risk_flags": "候选带失败/风险标记",
-        "low_suction_overlap_unconfirmed": "低吸/龙回头重叠未确认",
-        "strict_setup_gate_unconfirmed_buildup_or_overlap": "严格接力闸门：低吸蓄势/重叠未启动",
-        "weak_low_suction_launch_bucket": "低吸启动桶偏弱",
-        "low_suction_ma_convergence_too_wide": "低吸均线收敛过宽",
-        "dragon_ma_convergence_too_wide": "龙回头均线收敛过宽",
-        "dragon_not_fresh_tail_buy": "龙回头不是新鲜回踩",
-        "unsupported_setup": "不支持的接力形态",
-    }
-    return labels.get(str(reason or ""), str(reason or "未知拒买原因"))
-
-
-def _replacement_quality_interpretation(trade_rows: list[dict[str, Any]], reject_rows: list[dict[str, Any]]) -> dict[str, Any]:
-    filled_by_regime = _phase_group_metrics(trade_rows, "dynamic_market_regime", _dynamic_market_label_for_bucket)
-    filled_by_setup = _phase_group_metrics(trade_rows, "setup_family", _setup_family_label_for_bucket)
-    weak_regimes = [
-        row for row in filled_by_regime
-        if int(row.get("trade_count") or 0) >= 5 and (_safe_float(row.get("avg_return_pct")) or 0.0) <= 0
-    ]
-    weak_setups = [
-        row for row in filled_by_setup
-        if int(row.get("trade_count") or 0) >= 5 and (_safe_float(row.get("avg_return_pct")) or 0.0) <= 0
-    ]
-    return {
-        "replacement_quality_needs_market_phase": bool(weak_regimes),
-        "low_suction_buildup_observation_only": any(row.get("setup_family") == "low_suction_buildup" for row in weak_setups),
-        "overlap_requires_conflict_resolution": any(row.get("setup_family") == "dragon_low_suction_overlap" for row in weak_setups),
-        "gate_reject_count": len(reject_rows),
-        "notes": [
-            "卖后接力质量存在行情分层差异，应继续按行情阶段审计，而不是继续加单条阈值。"
-            if weak_regimes else "当前样本未显示明显的行情分层接力亏损。",
-            "低吸蓄势仍应作为观察簇，不应每天作为买点接力。"
-            if any(row.get("setup_family") == "low_suction_buildup" for row in weak_setups) else "低吸蓄势桶在当前样本未形成足够负向证据。",
-            "龙回头+低吸重叠需要冲突解析，不能自动叠分。"
-            if any(row.get("setup_family") == "dragon_low_suction_overlap" for row in weak_setups) else "重叠桶在当前样本未形成足够负向证据。",
         ],
     }
 
@@ -5418,7 +4012,6 @@ def _short_term_trade_context_label_for_bucket(value: Any, rows: list[dict[str, 
             return str(row["short_term_trade_context_label"])
     labels = {
         "defensive_tide": "退潮防守",
-        "failed_slot_replacement": "卖早且替换差",
         "failed_launch_cut": "假启动止损",
         "trend_profit_giveback": "趋势浮盈回吐",
         "warming_follow_through": "回暖后资金跟随",
@@ -5476,22 +4069,6 @@ def _fund_flow_coverage_label_for_bucket(value: Any, rows: list[dict[str, Any]])
         "partial_stock_fund_flow": "局部个股资金流",
         "available": "资金流可用",
         "missing": "资金流数据不足",
-        "unknown": "未知",
-    }
-    return labels.get(str(value or "unknown"), str(value or "未知"))
-
-
-def _replacement_outcome_label_for_bucket(value: Any, rows: list[dict[str, Any]]) -> str:
-    for row in rows:
-        if row.get("replacement_outcome_label"):
-            return str(row["replacement_outcome_label"])
-    labels = {
-        "no_replacement": "未释放到后续买入",
-        "open_replacement": "替换持仓未闭合",
-        "strong_replacement": "替换买入强盈利",
-        "profitable_replacement": "替换买入盈利",
-        "weak_replacement": "替换买入弱表现",
-        "bad_replacement": "替换买入亏损",
         "unknown": "未知",
     }
     return labels.get(str(value or "unknown"), str(value or "未知"))
@@ -5672,19 +4249,24 @@ def backtest_top_candidate_audit(
             return {"status": "not_found", "backtest_id": backtest_id, "items": []}
         strategy_id = str(run["strategy_id"])
         strategy_version = str(run["strategy_version"])
+        run_ids = _screen_run_ids_for_range(
+            session,
+            strategy_id,
+            strategy_version,
+            run["start_date"],
+            run["end_date"],
+            _run_params(dict(run)),
+        )
         recommendation_rows = session.execute(
             select(schema.quant_recommendations)
             .where(
                 and_(
-                    schema.quant_recommendations.c.trade_date >= run["start_date"],
-                    schema.quant_recommendations.c.trade_date <= run["end_date"],
-                    schema.quant_recommendations.c.strategy_id == strategy_id,
-                    schema.quant_recommendations.c.strategy_version == strategy_version,
+                    schema.quant_recommendations.c.run_id.in_(run_ids),
                     schema.quant_recommendations.c.rank <= max(top_limit * 3, top_limit + 20),
                 )
             )
             .order_by(schema.quant_recommendations.c.trade_date, schema.quant_recommendations.c.rank, schema.quant_recommendations.c.vt_symbol)
-        ).mappings().all()
+        ).mappings().all() if run_ids else []
         trade_rows = session.execute(
             select(schema.backtest_trades)
             .where(schema.backtest_trades.c.backtest_id == backtest_id)
@@ -5789,13 +4371,15 @@ def _daily_bars_for_trade_paths(
     if not sell_trades:
         return []
     symbols = sorted({str(trade.get("vt_symbol") or "") for trade in sell_trades if trade.get("vt_symbol")})
+    buy_dates = [parsed for trade in trades if str(trade.get("side") or "").upper() == "BUY" and (parsed := _as_date(trade.get("trade_date")))]
     sell_dates = [parsed for trade in sell_trades if (parsed := _as_date(trade.get("trade_date")))]
     if not symbols or not sell_dates:
         return []
+    start_date = min(buy_dates) if buy_dates else min(sell_dates) - timedelta(days=30)
     rows = session.execute(
         select(schema.stock_daily_bars)
         .where(schema.stock_daily_bars.c.vt_symbol.in_(symbols))
-        .where(schema.stock_daily_bars.c.trade_date >= min(sell_dates) - timedelta(days=30))
+        .where(schema.stock_daily_bars.c.trade_date >= start_date)
         .where(schema.stock_daily_bars.c.trade_date <= max(sell_dates))
         .order_by(schema.stock_daily_bars.c.vt_symbol, schema.stock_daily_bars.c.trade_date)
     ).mappings().all()
@@ -6575,29 +5159,24 @@ def candidate_trace_rows(
         strategy_id = str(run["strategy_id"])
         strategy_version = str(run["strategy_version"])
         run_params = _run_params(dict(run))
+        run_id = _screen_run_id_for_date(session, strategy_id, strategy_version, signal_date, run_params)
         recommendation = session.execute(
             select(schema.quant_recommendations)
             .where(
                 and_(
-                    schema.quant_recommendations.c.trade_date == signal_date,
+                    schema.quant_recommendations.c.run_id == run_id,
                     schema.quant_recommendations.c.vt_symbol == symbol,
-                    schema.quant_recommendations.c.strategy_id == strategy_id,
-                    schema.quant_recommendations.c.strategy_version == strategy_version,
                 )
             )
             .order_by(schema.quant_recommendations.c.rank, desc(schema.quant_recommendations.c.id))
-        ).mappings().first()
+        ).mappings().first() if run_id is not None else None
         same_day_recommendations = session.execute(
             select(schema.quant_recommendations)
             .where(
-                and_(
-                    schema.quant_recommendations.c.trade_date == signal_date,
-                    schema.quant_recommendations.c.strategy_id == strategy_id,
-                    schema.quant_recommendations.c.strategy_version == strategy_version,
-                )
+                schema.quant_recommendations.c.run_id == run_id,
             )
             .order_by(schema.quant_recommendations.c.rank, schema.quant_recommendations.c.vt_symbol)
-        ).mappings().all()
+        ).mappings().all() if run_id is not None else []
         signal_rows = session.execute(
             select(schema.backtest_signal_events)
             .where(
@@ -6736,6 +5315,7 @@ def candidate_trace_rows(
             strategy_id=strategy_id,
             strategy_version=strategy_version,
             min_entry_score=_safe_float(run_params.get("min_entry_score")) or 76.0,
+            run_params=run_params,
         )
         theoretical_position_context = _theoretical_position_context(symbol, target_theoretical_dicts, signal_date)
         stock_names = load_stock_names(session, _symbols_from_many([{"vt_symbol": symbol}], planned_dicts, recommendation_dicts))
@@ -6799,7 +5379,11 @@ def _universe_context(
             schema.stocks.c.market_cap,
         )
         .where(schema.stocks.c.vt_symbol != "000001.SSE")
-        .order_by(schema.stocks.c.vt_symbol)
+        .order_by(
+            desc(func.coalesce(schema.stocks.c.turnover, 0.0)),
+            desc(func.coalesce(schema.stocks.c.market_cap, 0.0)),
+            schema.stocks.c.vt_symbol,
+        )
         .limit(5000)
     ).mappings().all()
     allowed = set(included_boards)
@@ -7040,6 +5624,59 @@ def _recommendation_read_view(row: dict[str, Any]) -> dict[str, Any]:
     return screening_payloads.recommendation_row_to_api(row)
 
 
+def _screen_run_ids_for_dates(
+    session: Any,
+    strategy_id: str,
+    strategy_version: str,
+    trade_dates: list[date] | tuple[date, ...] | set[date],
+    run_params: dict[str, Any] | None = None,
+) -> list[int]:
+    run_params = run_params or {}
+    runs = screening_loaders.screen_runs_by_date(
+        session,
+        strategy_id,
+        strategy_version,
+        trade_dates,
+        signal_evidence_schema_version=screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+        max_symbols=_safe_int(run_params.get("max_symbols"), 5000),
+        included_boards=run_params.get("included_boards") or DEFAULT_QUANT_INCLUDED_BOARDS,
+    )
+    return sorted(int(run["id"]) for run in runs.values())
+
+
+def _screen_run_ids_for_range(
+    session: Any,
+    strategy_id: str,
+    strategy_version: str,
+    start: date,
+    end: date,
+    run_params: dict[str, Any] | None = None,
+) -> list[int]:
+    run_params = run_params or {}
+    runs = screening_loaders.screen_runs_between(
+        session,
+        strategy_id,
+        strategy_version,
+        start,
+        end,
+        signal_evidence_schema_version=screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
+        max_symbols=_safe_int(run_params.get("max_symbols"), 5000),
+        included_boards=run_params.get("included_boards") or DEFAULT_QUANT_INCLUDED_BOARDS,
+    )
+    return sorted(int(run["id"]) for run in runs.values())
+
+
+def _screen_run_id_for_date(
+    session: Any,
+    strategy_id: str,
+    strategy_version: str,
+    trade_date: date,
+    run_params: dict[str, Any] | None = None,
+) -> int | None:
+    run_ids = _screen_run_ids_for_dates(session, strategy_id, strategy_version, [trade_date], run_params)
+    return run_ids[0] if run_ids else None
+
+
 def _signal_snapshot_for_date(
     session: Any,
     schema: Any,
@@ -7049,19 +5686,19 @@ def _signal_snapshot_for_date(
     strategy_id: str,
     strategy_version: str,
     min_entry_score: float,
+    run_params: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    run_id = _screen_run_id_for_date(session, strategy_id, strategy_version, signal_date, run_params)
     persisted = session.execute(
         select(schema.quant_stock_signals)
         .where(
             and_(
-                schema.quant_stock_signals.c.trade_date == signal_date,
+                schema.quant_stock_signals.c.run_id == run_id,
                 schema.quant_stock_signals.c.vt_symbol == symbol,
-                schema.quant_stock_signals.c.strategy_id == strategy_id,
-                schema.quant_stock_signals.c.strategy_version == strategy_version,
             )
         )
         .order_by(desc(schema.quant_stock_signals.c.total_score), desc(schema.quant_stock_signals.c.id))
-    ).mappings().first()
+    ).mappings().first() if run_id is not None else None
     if persisted:
         return _signal_snapshot_from_score_row(dict(persisted), min_entry_score, source="quant_stock_signals")
 
@@ -7344,7 +5981,7 @@ def reason_label(reason: Any) -> str | None:
         "trend_trailing_stop": "趋势回撤",
         "time_efficiency_stop": "时间效率",
         "dynamic_failed_launch_exit_stop": "动态失败启动撤退",
-        "dynamic_failed_launch_replacement_quality_gate": "动态失败启动后替换质量闸门",
+        "guarded_highclose_giveback_stop": "高位浮盈回撤保护",
         "mid_profit_giveback_stop": "中段浮盈回撤",
         "low_suction_failed_follow_branch_stop": "低吸确认后没拉起撤",
         "low_suction_opened_space_giveback_stop": "低吸打开空间后回撤",
@@ -7363,7 +6000,7 @@ def reason_label(reason: Any) -> str | None:
         "limit_down_tail_blocked": "跌停卖不出",
         "no_execute_bar": "缺少执行日K线",
         "limit_up_or_no_bar": "涨停或缺少执行日K线",
-        "position_slot_unavailable": "持仓名额不足",
+        "position_slot_unavailable": "未形成组合成交",
         "insufficient_cash": "现金不足",
         "minute_tail_entry_unavailable_or_not_triggered": "尾盘分钟不可用或未触发",
         "not_ordered": "未下单",
@@ -7371,10 +6008,6 @@ def reason_label(reason: Any) -> str | None:
         "candidate_not_planned": "候选未进入组合计划",
         "watch_not_bought": "观察未买",
         "planned_not_ordered": "计划未下单",
-        "rotation_for_stronger_signal": "强信号换仓",
-        "rotation_for_stealth_low_suction": "低吸洗盘换仓",
-        "rotation_for_protected_weak_holding_candidate": "趋势保护弱持仓换仓",
-        "low_suction_branch_replacement_quality_gate": "低吸分支替换质量闸门",
     }
     return labels.get(text, text)
 
