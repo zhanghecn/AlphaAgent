@@ -66,7 +66,7 @@ def main() -> int:
         )
 
         print("检测信号事件(边沿触发) ...", flush=True)
-        events = sig.detect_events(factor_seq)
+        events = sig.detect_events(factor_seq, closes)
         gold = [e for e in events if e.direction == "GOLD"]
         silver = [e for e in events if e.direction == "SILVER"]
         print(

@@ -221,7 +221,7 @@ def _compute_panel(session: Any, schema: Any) -> dict:
         ctx_window = [c for c in ctx_list[: i + 1] if c is not None]
         factor_seq.append(fac.compute_factors(ctx_window, closes[: i + 1], turns[: i + 1]))
 
-    events = sig.detect_events(factor_seq)
+    events = sig.detect_events(factor_seq, [b.close for b in comp])
     accuracy = bt.evaluate(events, comp)
     index_bars = _load_index_ohlcv(session, schema, INDEX_FOR_CHART, PANEL_START, end)
 

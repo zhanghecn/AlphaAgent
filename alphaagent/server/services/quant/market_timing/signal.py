@@ -47,25 +47,32 @@ def _grade(direction: str, bull: float, bear: float) -> str:
     return "WEAK"
 
 
-def detect_events(factor_seq: list[MarketTimingFactors]) -> list[TimingSignal]:
-    """仓位状态机: 状态切换点 = 信号事件。
+def detect_events(
+    factor_seq: list[MarketTimingFactors],
+    closes: list[float] | None = None,
+) -> list[TimingSignal]:
+    """仓位状态机 + 次日确认。
 
     状态流转:
         FLAT ──金手指确认──▶ LONG ──银手指确认──▶ SHORT ──金手指确认──▶ LONG …
     进入任一状态后保持, 直到达成反向确认。同方向不会重复发事件。
+
+    次日确认(closes 可用时; 数据驱动: 金手指次日涨组 20日 100% vs 次日跌 33%):
+      - 金手指要求 closes[i+1] > closes[i](次日继续涨); 银手指要求次日继续跌。
+      - 次日同向 → 在确认日(次日 i+1)发出"已笃定"信号; 次日反向 → 过滤(假突破)。
+      - 最新一天无次日数据 → 不发(待确认); closes=None → 退回无确认(兼容旧调用/测试)。
+    closes 需与 factor_seq 同长度对齐(同交易日)。
     """
     events: list[TimingSignal] = []
-    state = "FLAT"          # FLAT / LONG / SHORT
-    pending: str | None = None  # 待确认的方向
+    state = "FLAT"
+    pending: str | None = None
     streak = 0
+    use_confirm = closes is not None and len(closes) == len(factor_seq)
 
-    for f in factor_seq:
+    for i, f in enumerate(factor_seq):
         bull = f.bull_force
         bear = f.bear_force
 
-        # 金手指过滤(数据驱动, 失败样本分析: 失败金手指 3/4 命中 MACD 顶背离):
-        #   - bear < TOP_GUARD: 顶部合力未抬头
-        #   - macd_top < MACD_TOP_GUARD: 排除 MACD 顶背离时的假金手指
         gold_ok = (
             bull >= GOLD_ENTER
             and bear < TOP_GUARD
@@ -74,35 +81,42 @@ def detect_events(factor_seq: list[MarketTimingFactors]) -> list[TimingSignal]:
         )
         silver_ok = bear >= SILVER_ENTER and bull < TOP_GUARD
 
-        # 当前状态下, 是否能朝某方向切换(同方向不重复)
         target: str | None = None
         if state != "LONG" and gold_ok:
             target = "GOLD"
         elif state != "SHORT" and silver_ok:
             target = "SILVER"
 
-        # 连续确认计数
         if target == pending:
             streak += 1
         else:
             pending = target
             streak = 1 if target else 0
 
-        # 确认期满 → 切换状态, 记事件
         if target and streak >= CONFIRM_DAYS:
+            # 次日同向确认(数据驱动: 金手指 75%→100%)
+            if use_confirm:
+                if i + 1 >= len(factor_seq):
+                    continue  # 最新一天无次日数据, 待确认不发
+                next_up = closes[i + 1] > closes[i]
+                if (target == "GOLD" and not next_up) or (target == "SILVER" and next_up):
+                    continue  # 次日反向 = 假突破, 过滤
+                cf = factor_seq[i + 1]  # 确认日的 factor, 信号记在确认日
+            else:
+                cf = f
             events.append(
                 TimingSignal(
-                    trade_date=f.trade_date,
+                    trade_date=cf.trade_date,
                     direction=target,
-                    grade=_grade(target, bull, bear),
-                    bull_force=bull,
-                    bear_force=bear,
-                    phase=f.phase,
+                    grade=_grade(target, cf.bull_force, cf.bear_force),
+                    bull_force=cf.bull_force,
+                    bear_force=cf.bear_force,
+                    phase=cf.phase,
                     reasons=[
-                        f"bull={bull:.1f}",
-                        f"bear={bear:.1f}",
-                        f"phase={f.phase}",
-                        f"确认{streak}天",
+                        f"bull={cf.bull_force:.1f}",
+                        f"bear={cf.bear_force:.1f}",
+                        f"phase={cf.phase}",
+                        "次日确认" if use_confirm else f"确认{streak}天",
                     ],
                 )
             )

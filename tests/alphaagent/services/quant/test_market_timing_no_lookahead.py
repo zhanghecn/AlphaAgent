@@ -127,13 +127,13 @@ def test_pipeline_prefix_stable_under_future_pollution():
         return out
 
     factor_full = build(closes, turns)
-    events_full = sig.detect_events(factor_full)
+    events_full = sig.detect_events(factor_full, closes)
 
     # 篡改后 40 天: 暴跌 + 缩量
     polluted_c = closes[:40] + [closes[39] * (0.9 ** (i - 39)) for i in range(40, 80)]
     polluted_t = turns[:40] + [1e8] * 40
     factor_poll = build(polluted_c, polluted_t)
-    events_poll = sig.detect_events(factor_poll)
+    events_poll = sig.detect_events(factor_poll, polluted_c)
 
     split = dates[40]
     early_full = [e for e in events_full if e.trade_date < split]
