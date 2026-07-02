@@ -156,6 +156,11 @@ export function TimingHero({ overview, loading }: { overview: TimingOverview | n
               </span>
             </div>
             <span className="text-xs text-muted-foreground">上证指数 · {overview.latest_date}</span>
+            {overview.is_intraday && (
+              <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-xs font-medium text-amber-300">
+                盘中实时
+              </span>
+            )}
             <span className="rounded-full bg-muted px-2.5 py-0.5 text-xs font-medium">
               阶段：{overview.phase_label}
             </span>

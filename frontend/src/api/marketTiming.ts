@@ -22,6 +22,7 @@ export interface TimingOverview {
   top_factors: Record<string, number | string | null>;
   index_close: number | null;
   index_change_pct: number | null;
+  is_intraday?: boolean;
   latest_signal: {
     direction: TimingDirection;
     grade: TimingGrade;

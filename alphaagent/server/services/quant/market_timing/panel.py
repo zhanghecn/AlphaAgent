@@ -14,6 +14,7 @@ from typing import Any
 
 from sqlalchemy import func, insert, select, update
 
+from alphaagent.market.providers import RealMarketDataClient, _china_today, _is_intraday_china
 from alphaagent.server.services.quant.market_context import compute_market_contexts
 from alphaagent.server.services.quant.market_timing import backtest as bt
 from alphaagent.server.services.quant.market_timing import factors as fac
@@ -236,8 +237,8 @@ def _compute_panel(session: Any, schema: Any) -> dict:
     }
 
 
-def get_market_timing_panel(session: Any, schema: Any, force_refresh: bool = False) -> dict:
-    """获取大盘择时面板(三层缓存: 内存 30min → 库 24h → 现算+落库)。
+def _base_panel(session: Any, schema: Any, force_refresh: bool = False) -> dict:
+    """基础面板(三层缓存: 内存 30min → 库 24h → 现算+落库), 不含盘中实时 overlay。
     内存命中 <1ms; 库命中 <100ms; 现算+落库 ~16s(仅首次/过期/force)。"""
     now = time.time()
     if not force_refresh and _cache["panel"] and now - _cache["ts"] < _CACHE_TTL:
@@ -259,3 +260,64 @@ def get_market_timing_panel(session: Any, schema: Any, force_refresh: bool = Fal
         _cache["panel"] = panel
         _cache["ts"] = time.time()
     return panel
+
+
+def _to_float(v: Any) -> float | None:
+    if v is None or v == "":
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f else None  # NaN -> None
+
+
+def _overlay_intraday(panel: dict) -> dict:
+    """盘中(交易时段)用实时指数 overlay: chart 最新K线 + overview 点位/涨跌。
+    因子/信号保持昨日收盘; 不落库(实时变化); 非交易时段原样返回。"""
+    if panel.get("empty") or not _is_intraday_china():
+        return panel
+    panel = dict(panel)  # 顶层浅 copy, 避免污染内存缓存里的 base panel
+    try:
+        detail = RealMarketDataClient().index_detail("000001", "SSE") or {}
+    except Exception:  # noqa: BLE001  实时源不可用则退回昨日 panel
+        return panel
+    last_price = _to_float(detail.get("last_price"))
+    volume = _to_float(detail.get("volume"))
+    if not last_price or not volume or volume <= 0:
+        return panel  # 盘前/停牌/节假日 volume=0 不 overlay
+    today = _china_today().isoformat()
+    today_bar = {
+        "date": today,
+        "open": _to_float(detail.get("open_price")) or last_price,
+        "close": last_price,
+        "high": _to_float(detail.get("high_price")) or last_price,
+        "low": _to_float(detail.get("low_price")) or last_price,
+        "volume": volume,
+        "turnover": _to_float(detail.get("turnover")) or _to_float(detail.get("amount")) or 0.0,
+    }
+    chart = dict(panel.get("chart") or {})
+    bars = list(chart.get("bars") or [])
+    if bars and bars[-1].get("date") == today:
+        bars[-1] = today_bar
+    else:
+        bars.append(today_bar)
+    panel["chart"] = {**chart, "bars": bars}
+    ov = dict(panel.get("overview") or {})
+    ov["index_close"] = last_price
+    chg = _to_float(detail.get("change_pct"))
+    if chg is not None:
+        ov["index_change_pct"] = round(chg, 2)
+    ov["latest_date"] = today
+    ov["is_intraday"] = True
+    panel["overview"] = ov
+    return panel
+
+
+def get_market_timing_panel(session: Any, schema: Any, force_refresh: bool = False) -> dict:
+    """获取大盘择时面板(基础面板 + 盘中实时 overlay)。
+
+    基础面板三层缓存(内存/库/现算), 含昨日收盘的因子与信号;
+    盘中交易时段再 overlay 今天实时点位到 chart 最新K线 + overview。
+    """
+    return _overlay_intraday(_base_panel(session, schema, force_refresh))
