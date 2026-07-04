@@ -94,6 +94,7 @@ export function SectorStocksTable({ sectorId, date }: { sectorId: string; date: 
       {q.data && (
         <div className="mt-1.5 text-[10px] text-muted-foreground">
           共 {q.data.total} 只 · {q.data.fund_flow_available} 只有资金流 · 价格源 {priceSourceLabel(q.data.price_source)}
+          {q.data.filtered_out ? ` · 已按核心行业过滤 ${q.data.filtered_out} 只杂股` : ""}
         </div>
       )}
     </div>

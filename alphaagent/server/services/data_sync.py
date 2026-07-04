@@ -372,6 +372,21 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
 # requirements/alphaagent_unified_incremental_schedule_plan.md.
 DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
     {
+        "id": "intraday_noon_1130",
+        "name": "盘中同步（11:30，上午收盘快照）",
+        "cron": "30 11 * * 1-5",
+        "action": "tail_preview",
+        "enabled": True,
+        "concurrency": 12,
+        "job_ids": [
+            "sync_stock_list",
+            "sync_stock_minute_bars",
+            "sync_stock_fund_flows",
+            "sync_sector_fund_flows",
+            "sync_stock_hot_ranks",
+        ],
+    },
+    {
         "id": "tail_preview_14h",
         "name": "尾盘预览缓存（14:00，快照后生成）",
         "cron": "0 14 * * 1-5",
@@ -390,6 +405,21 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "id": "tail_quant_1430",
         "name": "尾盘预览缓存（14:30，尾盘确认）",
         "cron": "30 14 * * 1-5",
+        "action": "tail_preview",
+        "enabled": True,
+        "concurrency": 12,
+        "job_ids": [
+            "sync_stock_list",
+            "sync_stock_minute_bars",
+            "sync_stock_fund_flows",
+            "sync_sector_fund_flows",
+            "sync_stock_hot_ranks",
+        ],
+    },
+    {
+        "id": "intraday_close_1500",
+        "name": "盘中同步（15:00，收盘快照）",
+        "cron": "0 15 * * 1-5",
         "action": "tail_preview",
         "enabled": True,
         "concurrency": 12,

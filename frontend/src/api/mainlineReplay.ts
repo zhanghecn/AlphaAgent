@@ -61,11 +61,23 @@ export interface IndexQuote {
   turnover: number | null;
 }
 
+export interface FlowTopItem {
+  sector_id: string;
+  name: string;
+  net_inflow: number;
+}
+export interface FlowTop {
+  inflows: FlowTopItem[];
+  outflows: FlowTopItem[];
+  period?: string;
+  actual_days?: number | null;
+}
 export interface SnapshotData {
   mode: "single" | "delta" | "live";
   trade_date?: string;
   base_daily_date?: string | null;
   ranking: SectorRankItem[];
+  flow_top?: FlowTop | null;
   index: IndexQuote[];
   status: string;
   source?: string;
@@ -114,9 +126,10 @@ export function fetchReplayTimeline() {
   return apiClient.get<TimelineData>("/mainline-replay/timeline");
 }
 
-export function fetchLiveMainline(params: { trade_date?: string } = {}) {
+export function fetchLiveMainline(params: { trade_date?: string; flow_period?: string } = {}) {
   const qs = new URLSearchParams();
   if (params.trade_date) qs.set("trade_date", params.trade_date);
+  if (params.flow_period) qs.set("flow_period", params.flow_period);
   const query = qs.toString();
   return apiClient.get<SnapshotData>(`/mainline-replay/live${query ? `?${query}` : ""}`);
 }
@@ -125,12 +138,27 @@ export function fetchReplaySnapshot(params: {
   date?: string;
   t1?: string;
   t2?: string;
+  flow_period?: string;
 }) {
   const qs = new URLSearchParams();
   if (params.date) qs.set("date", params.date);
   if (params.t1) qs.set("t1", params.t1);
   if (params.t2) qs.set("t2", params.t2);
+  if (params.flow_period) qs.set("flow_period", params.flow_period);
   return apiClient.get<SnapshotData>(`/mainline-replay/snapshot?${qs.toString()}`);
+}
+
+export interface ConceptSearchData {
+  items: FlowTopItem[];
+  q: string;
+  total: number;
+  status: string;
+}
+
+export function fetchConceptSearch(params: { q: string; trade_date: string; period?: string }) {
+  const qs = new URLSearchParams({ q: params.q, trade_date: params.trade_date });
+  if (params.period) qs.set("period", params.period);
+  return apiClient.get<ConceptSearchData>(`/mainline-replay/concept-search?${qs.toString()}`);
 }
 
 export function fetchReplayRelation(sectorId: string, date: string) {
@@ -160,6 +188,7 @@ export interface SectorStocksData {
   items: SectorStockItem[];
   total: number;
   fund_flow_available: number;
+  filtered_out?: number;
   price_source?: "daily_bar" | "intraday_snapshot" | string | null;
   status: string;
 }
@@ -168,8 +197,9 @@ export function fetchSectorStocks(
   sectorId: string,
   date: string,
   sortBy: "net_inflow" | "change_pct" | "name" = "change_pct",
+  industryFilter: boolean = true,
 ) {
   return apiClient.get<SectorStocksData>(
-    `/mainline-replay/sector-stocks?sector_id=${encodeURIComponent(sectorId)}&date=${date}&sort_by=${sortBy}`,
+    `/mainline-replay/sector-stocks?sector_id=${encodeURIComponent(sectorId)}&date=${date}&sort_by=${sortBy}&industry_filter=${industryFilter}`,
   );
 }

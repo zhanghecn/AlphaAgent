@@ -4,24 +4,27 @@
  * 视觉：暗色行情磁带。Signature = 概念指数曲线 + 连续状态带。
  * 结构：时间轴 + 三栏（概念指数榜 / 指数详情 / 成分股+共振）。
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Activity, CircleSlash, Flame, Radio, Sparkles } from "lucide-react";
 
 import { LoadingState } from "@/components/LoadingState";
 import { RelationPanel } from "@/features/replay/RelationPanel";
 import { SectorStocksTable } from "@/features/replay/SectorStocksTable";
+import { buildUnifiedDateList, pickDataSource } from "@/features/replay/unifiedTimeline";
 import {
+  fetchConceptSearch,
   fetchLiveMainline,
   fetchReplaySnapshot,
   fetchReplayTimeline,
+  type FlowTop,
+  type FlowTopItem,
   type IndexQuote,
   type RelationItem,
   type SectorRankItem,
 } from "@/api/mainlineReplay";
 import { cn, formatAmount, formatPct } from "@/lib/utils";
 
-type ReplayViewMode = "live" | "history";
 type ConceptTapeFilter = "all" | "maintained" | "new" | "broken";
 type NormalizedConceptStatus = "maintained" | "new" | "broken" | "watch";
 type ConceptTapeCounts = Record<ConceptTapeFilter, number>;
@@ -55,40 +58,49 @@ export default function MainlineReplayPage() {
     queryFn: fetchReplayTimeline,
     staleTime: 60_000,
   });
-  const dates = timelineQ.data?.dates ?? [];
+  const timelineDates = timelineQ.data?.dates ?? [];
+  const [flowPeriod, setFlowPeriod] = useState<string>("即时");
+  const [searchTerm, setSearchTerm] = useState<string>("");
   const liveQ = useQuery({
-    queryKey: ["mainlineLive"],
-    queryFn: () => fetchLiveMainline(),
+    queryKey: ["mainlineLive", flowPeriod],
+    queryFn: () => fetchLiveMainline({ flow_period: flowPeriod }),
     staleTime: 30_000,
     refetchInterval: 60_000,
   });
-  const liveReady = (liveQ.data?.ranking ?? []).length > 0;
-  const [viewMode, setViewMode] = useState<ReplayViewMode>("live");
+  const liveDate = liveQ.data?.trade_date;
+  // 统一时间轴：合并 live 最新日 + history 评分日，最新日期排在最前
+  const dates = useMemo(
+    () => buildUnifiedDateList(liveDate, timelineDates),
+    [liveDate, timelineDates],
+  );
   const [selectedDate, setSelectedDate] = useState<string>("");
-  const historyDate = selectedDate || dates[0] || "";
-  const effectiveDate = viewMode === "live" ? (liveQ.data?.trade_date || historyDate) : historyDate;
-  const relationDate = viewMode === "live" ? (liveQ.data?.base_daily_date || historyDate) : historyDate;
   useEffect(() => {
     if (dates.length === 0) return;
     if (!selectedDate || !dates.includes(selectedDate)) {
       setSelectedDate(dates[0]);
     }
   }, [dates, selectedDate]);
-  useEffect(() => {
-    if (!liveQ.isLoading && !liveReady && dates.length > 0 && viewMode === "live") {
-      setViewMode("history");
-    }
-  }, [dates.length, liveQ.isLoading, liveReady, viewMode]);
+  // 选中日期 == liveDate 走 live 实时数据；否则走历史 snapshot
+  const source = pickDataSource(selectedDate, liveDate);
+  const effectiveDate = source === "live" ? (liveDate ?? selectedDate) : selectedDate;
+  const relationDate =
+    source === "live" ? (liveQ.data?.base_daily_date ?? selectedDate) : selectedDate;
 
   const snapshotQ = useQuery({
-    queryKey: ["replaySnapshot", historyDate],
-    queryFn: () => fetchReplaySnapshot({ date: historyDate }),
-    enabled: !!historyDate && viewMode === "history",
+    queryKey: ["replaySnapshot", selectedDate, flowPeriod],
+    queryFn: () => fetchReplaySnapshot({ date: selectedDate, flow_period: flowPeriod }),
+    enabled: source === "history" && !!selectedDate,
+    staleTime: 60_000,
+  });
+  const searchQ = useQuery({
+    queryKey: ["conceptSearch", searchTerm.trim(), effectiveDate, flowPeriod],
+    queryFn: () => fetchConceptSearch({ q: searchTerm.trim(), trade_date: effectiveDate, period: flowPeriod }),
+    enabled: searchTerm.trim().length > 0 && !!effectiveDate,
     staleTime: 60_000,
   });
 
-  const activeData = viewMode === "live" ? liveQ.data : snapshotQ.data;
-  const activeLoading = viewMode === "live" ? liveQ.isLoading : snapshotQ.isLoading;
+  const activeData = source === "live" ? liveQ.data : snapshotQ.data;
+  const activeLoading = source === "live" ? liveQ.isLoading : snapshotQ.isLoading;
   const ranking = activeData?.ranking ?? [];
   const [tapeFilter, setTapeFilter] = useState<ConceptTapeFilter>("all");
   const filteredRanking = useMemo(
@@ -112,6 +124,12 @@ export default function MainlineReplayPage() {
     setSelectedSectorOverride(null);
     setSelectedSectorId(item.sector_id);
   }
+  const threeColRef = useRef<HTMLDivElement>(null);
+  function selectTopConcept(item: FlowTopItem) {
+    setSelectedSectorOverride({ sector_id: item.sector_id, name: item.name });
+    setSelectedSectorId(item.sector_id);
+    threeColRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 
   function selectRelatedSector(item: RelationItem) {
     setSelectedSectorOverride({
@@ -131,59 +149,60 @@ export default function MainlineReplayPage() {
         </p>
       </div>
 
-      {/* 时间轴 */}
+      {/* 统一时间轴 */}
       <div className="rounded-lg border bg-card p-3">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <div className="flex rounded-md border bg-background p-0.5">
-            <button
-              type="button"
-              onClick={() => setViewMode("live")}
-              disabled={!liveReady && !liveQ.isLoading}
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span
               className={cn(
-                "rounded px-2.5 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50",
-                viewMode === "live" ? "bg-indigo-500 text-white" : "text-muted-foreground hover:bg-muted",
+                "inline-block h-2 w-2 rounded-full",
+                source === "live" ? "bg-emerald-400" : "bg-muted-foreground/50",
               )}
-            >
-              今日实时
-            </button>
-            <button
-              type="button"
-              onClick={() => setViewMode("history")}
-              className={cn(
-                "rounded px-2.5 py-1 text-xs transition-colors",
-                viewMode === "history" ? "bg-indigo-500 text-white" : "text-muted-foreground hover:bg-muted",
-              )}
-            >
-              历史回放
-            </button>
+            />
+            {source === "live" ? "实时资金流 · 盘中 60s 刷新" : "历史评分缓存"}
           </div>
           <div className="text-xs text-muted-foreground">
-            {viewMode === "live"
+            {source === "live"
               ? `实时 ${liveQ.data?.trade_date ?? "--"} · 基准日 ${liveQ.data?.base_daily_date ?? "--"}`
-              : `历史 ${historyDate || "--"}`}
+              : `历史 ${selectedDate || "--"}`}
           </div>
         </div>
-        {viewMode === "live" ? (
-          <LiveStatus data={liveQ.data} loading={liveQ.isLoading} />
-        ) : timelineQ.isLoading ? (
-          <LoadingState rows={1} />
-        ) : dates.length === 0 ? (
-          <div className="text-sm text-muted-foreground">
-            暂无回放数据。请先在 <a href="/data" className="underline">数据管理</a> 同步 sector_period_scores。
-          </div>
+        {dates.length === 0 ? (
+          timelineQ.isLoading || liveQ.isLoading ? (
+            <LoadingState rows={1} />
+          ) : (
+            <div className="text-sm text-muted-foreground">
+              暂无回放数据。请先在 <a href="/data" className="underline">数据管理</a> 同步 sector_period_scores。
+            </div>
+          )
         ) : (
-          <DateScrubber dates={dates} value={historyDate} onChange={setSelectedDate} />
+          <>
+            <DateScrubber dates={dates} value={selectedDate} onChange={setSelectedDate} />
+            {source === "live" && <LiveStatus data={liveQ.data} loading={liveQ.isLoading} />}
+          </>
         )}
       </div>
 
+      {/* 主题资金流条带：游资真实看的主题级聚合 */}
+      <TopicFlowStrip
+        flowTop={activeData?.flow_top ?? null}
+        flowPeriod={flowPeriod}
+        onPeriodChange={setFlowPeriod}
+        searchTerm={searchTerm}
+        onSearchChange={setSearchTerm}
+        searchItems={searchQ.data?.items ?? null}
+        isSearching={searchQ.isLoading}
+        onSelect={selectTopConcept}
+      />
+
       {/* 三栏 */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[340px_minmax(0,1fr)_340px]">
+      <div ref={threeColRef} className="grid grid-cols-1 gap-4 lg:grid-cols-[340px_minmax(0,1fr)_340px]">
         {/* 左：概念指数榜 */}
         <div className="rounded-lg border bg-card p-3">
           <div className="mb-2 flex items-baseline justify-between">
             <span className="text-xs font-medium">概念指数榜</span>
             <span className="text-[10px] text-muted-foreground">
-              {viewMode === "live" ? "今日涨跌 · 连续状态" : "指数走势 · 热度"}
+              {source === "live" ? "今日涨跌 · 连续状态" : "指数走势 · 热度"}
             </span>
           </div>
           <ConceptTapeFilters value={tapeFilter} counts={tapeCounts} onChange={setTapeFilter} />
@@ -203,7 +222,7 @@ export default function MainlineReplayPage() {
               {filteredRanking.length === 0 && (
                 <div className="py-4 text-center text-xs text-muted-foreground">
                   {ranking.length === 0
-                    ? viewMode === "live" ? "今日暂无概念资金流" : "该日无概念评分"
+                    ? source === "live" ? "今日暂无概念资金流" : "该日无概念评分"
                     : "当前分组暂无概念"}
                 </div>
               )}
@@ -220,7 +239,7 @@ export default function MainlineReplayPage() {
               选中概念后显示指数走势
             </div>
           )}
-          <MarketIndexStrip data={activeData?.index ?? []} loading={activeLoading} live={viewMode === "live"} date={effectiveDate} />
+          <MarketIndexStrip data={activeData?.index ?? []} loading={activeLoading} live={source === "live"} date={effectiveDate} />
         </div>
 
         {/* 右：成分股 + 关联 */}
@@ -748,6 +767,161 @@ function FundMatrix({ item }: { item: SectorRankItem }) {
         value={item.fund_inflow_available ? formatAmount(netInflow) : "近端无"}
         valueClass={item.fund_inflow_available ? ((netInflow ?? 0) >= 0 ? "text-rise" : "text-fall") : "text-muted-foreground"}
       />
+    </div>
+  );
+}
+
+const FLOW_PERIODS: Array<{ value: string; label: string }> = [
+  { value: "即时", label: "今日" },
+  { value: "3日", label: "3日" },
+  { value: "5日", label: "5日" },
+  { value: "10日", label: "10日" },
+  { value: "20日", label: "20日" },
+];
+
+function TopicFlowStrip({
+  flowTop,
+  flowPeriod,
+  onPeriodChange,
+  searchTerm,
+  onSearchChange,
+  searchItems,
+  isSearching,
+  onSelect,
+}: {
+  flowTop: FlowTop | null;
+  flowPeriod: string;
+  onPeriodChange: (p: string) => void;
+  searchTerm: string;
+  onSearchChange: (q: string) => void;
+  searchItems: FlowTopItem[] | null;
+  isSearching: boolean;
+  onSelect: (item: FlowTopItem) => void;
+}) {
+  const showingSearch = searchTerm.trim().length > 0;
+  const actualDays = flowTop?.actual_days;
+  const periodLabel = FLOW_PERIODS.find((p) => p.value === flowPeriod)?.label ?? flowPeriod;
+  return (
+    <div className="rounded-lg border bg-card p-3">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <span className="text-xs font-medium">概念资金流</span>
+        <div className="flex rounded-md border bg-background p-0.5">
+          {FLOW_PERIODS.map((p) => (
+            <button
+              key={p.value}
+              type="button"
+              onClick={() => onPeriodChange(p.value)}
+              className={cn(
+                "rounded px-2 py-0.5 text-[11px] transition-colors",
+                flowPeriod === p.value ? "bg-indigo-500 text-white" : "text-muted-foreground hover:bg-muted",
+              )}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="mb-2">
+        <input
+          type="text"
+          value={searchTerm}
+          onChange={(e) => onSearchChange(e.target.value)}
+          placeholder="搜概念名定位（CPO / PCB / 半导体 ...），点击看成分股"
+          className="w-full rounded-md border bg-background px-2 py-1 text-xs outline-none focus:border-indigo-400"
+        />
+      </div>
+      {!showingSearch && actualDays != null && actualDays > 0 && actualDays < 20 && flowPeriod === "20日" && (
+        <div className="mb-1 text-[10px] text-amber-400">⚠ 即时资金流只保留近 {actualDays} 日，20日为累加近似</div>
+      )}
+      {showingSearch ? (
+        <SearchResultColumn items={searchItems ?? []} isSearching={isSearching} onSelect={onSelect} />
+      ) : !flowTop || (flowTop.inflows.length === 0 && flowTop.outflows.length === 0) ? (
+        <div className="py-2 text-center text-[11px] text-muted-foreground">{periodLabel}暂无资金流数据</div>
+      ) : (
+        <div className="grid grid-cols-1 gap-x-6 gap-y-2 md:grid-cols-2">
+          <ConceptFlowColumn title="流入" items={flowTop.inflows} tone="rise" onSelect={onSelect} />
+          <ConceptFlowColumn title="流出" items={flowTop.outflows} tone="fall" onSelect={onSelect} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SearchResultColumn({
+  items,
+  isSearching,
+  onSelect,
+}: {
+  items: FlowTopItem[];
+  isSearching: boolean;
+  onSelect: (item: FlowTopItem) => void;
+}) {
+  if (isSearching && items.length === 0) {
+    return <div className="py-2 text-center text-[11px] text-muted-foreground">搜索中...</div>;
+  }
+  if (items.length === 0) {
+    return <div className="py-2 text-center text-[11px] text-muted-foreground">无匹配概念</div>;
+  }
+  return (
+    <div>
+      <div className="mb-1 text-[11px] text-muted-foreground">匹配 {items.length} 个概念 · 点击看成分股</div>
+      <div>
+        {items.map((it, i) => (
+          <button
+            key={it.sector_id}
+            type="button"
+            onClick={() => onSelect(it)}
+            className="flex w-full items-center justify-between rounded px-1.5 py-0.5 text-left text-xs transition-colors hover:bg-indigo-500/10"
+          >
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span className="w-4 shrink-0 text-[10px] tabular-nums text-muted-foreground">{i + 1}</span>
+              <span className="truncate">{it.name}</span>
+            </span>
+            <span className={cn("ml-2 shrink-0 font-medium tabular-nums", it.net_inflow >= 0 ? "text-rise" : "text-fall")}>
+              {formatAmount(it.net_inflow)}
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ConceptFlowColumn({
+  title,
+  items,
+  tone,
+  onSelect,
+}: {
+  title: string;
+  items: FlowTopItem[];
+  tone: "rise" | "fall";
+  onSelect: (item: FlowTopItem) => void;
+}) {
+  return (
+    <div>
+      <div className={cn("mb-1 text-[11px] font-medium", tone === "rise" ? "text-rise" : "text-fall")}>
+        {title} TOP{items.length || ""}
+      </div>
+      <div>
+        {items.map((it, i) => (
+          <button
+            key={it.sector_id}
+            type="button"
+            onClick={() => onSelect(it)}
+            className="flex w-full items-center justify-between rounded px-1.5 py-0.5 text-left text-xs transition-colors hover:bg-indigo-500/10"
+          >
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span className="w-4 shrink-0 text-[10px] tabular-nums text-muted-foreground">{i + 1}</span>
+              <span className="truncate">{it.name}</span>
+            </span>
+            <span className={cn("ml-2 shrink-0 font-medium tabular-nums", tone === "rise" ? "text-rise" : "text-fall")}>
+              {formatAmount(it.net_inflow)}
+            </span>
+          </button>
+        ))}
+        {items.length === 0 && <div className="px-1.5 py-0.5 text-[11px] text-muted-foreground">无</div>}
+      </div>
     </div>
   );
 }

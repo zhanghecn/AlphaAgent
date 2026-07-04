@@ -128,6 +128,21 @@ _STYLE_STATUS_KEYWORDS = (
     "宁组合",
     "风格",
     "股权激励",
+    "专精特新",
+    "创业板综",
+    "科创板综",
+    "创业板指",
+    "科创板指",
+    "深证",
+    "深成",
+    "HS300",
+    "权重股",
+    "行业龙头",
+    "大盘成长",
+    "大盘价值",
+    "中盘成长",
+    "小盘成长",
+    "标准普尔",
 )
 
 
@@ -159,6 +174,7 @@ def timeline(limit: int = Query(400, ge=1, le=2000)) -> dict[str, Any]:
 def live(
     trade_date: date | None = Query(None, description="盘中日期 YYYY-MM-DD；默认取最新概念资金流日期"),
     limit: int = Query(80, ge=1, le=300),
+    flow_period: str = Query("即时", description="概念资金流周期：即时/3日/5日/10日/20日"),
 ) -> dict[str, Any]:
     """今日/盘中概念主线资金流。
 
@@ -179,6 +195,7 @@ def live(
 
         ranking = _live_ranking_for_date(session, resolved_date, max(limit, _LIVE_RANKING_CANDIDATE_LIMIT))
         _enrich_concept_index_context(session, ranking, resolved_date, include_live_projection=True)
+        flow_top = _compute_flow_top(session, resolved_date, flow_period)
         ranking = _sort_live_concept_ranking(ranking)[:limit]
         latest_complete_daily = _latest_complete_daily_date(session)
         latest_snapshot_updated = session.execute(select(func.max(schema.stocks.c.updated_at))).scalar()
@@ -195,6 +212,7 @@ def live(
         "trade_date": resolved_date.isoformat(),
         "base_daily_date": _iso_or_none(latest_complete_daily),
         "ranking": ranking,
+        "flow_top": flow_top,
         "index": [],
         "status": "ready" if ranking else "empty",
         "source": "sector_fund_flows:concept",
@@ -212,6 +230,7 @@ def snapshot(
     t1: date | None = Query(None, description="区间起点"),
     t2: date | None = Query(None, description="区间终点"),
     limit: int = Query(50, ge=1, le=300),
+    flow_period: str = Query("即时", description="概念资金流周期：即时/3日/5日/10日/20日"),
 ) -> dict[str, Any]:
     """单日快照(date) 或 区间delta(t1+t2)。
 
@@ -238,10 +257,11 @@ def snapshot(
             meta = sectors_meta.get(item["sector_id"], {})
             item["name"] = meta.get("name", item["sector_id"])
         _enrich_concept_index_context(session, ranking, date or t2, include_live_projection=False)  # type: ignore[arg-type]
+        flow_top = _compute_flow_top(session, date, flow_period) if date is not None else None
         if date is not None:
             ranking = _sort_live_concept_ranking(ranking)[:limit]
 
-    return ok({"mode": mode, "ranking": ranking, "index": index_data, "status": "ready"})
+    return ok({"mode": mode, "ranking": ranking, "flow_top": flow_top, "index": index_data, "status": "ready"})
 
 
 @router.get("/relation", response_model=None)
@@ -500,8 +520,6 @@ def _enrich_concept_index_context(
     histories = _load_concept_index_histories(session, sector_ids, d)
     activity = _load_concept_activity(session, sector_ids, d)
     rolling = _rolling_board_stats(histories, d)
-    live_ids = {str(item["sector_id"]) for item in ranking if item.get("data_mode") == "live"}
-
     for item in ranking:
         sector_id = str(item["sector_id"])
         points = histories.get(sector_id, [])
@@ -514,7 +532,8 @@ def _enrich_concept_index_context(
         item["continuation_days"] = stats["continuation_days"]
         item["activity_days_20"] = stats["activity_days_20"]
         item["activity_ratio_20"] = stats["activity_ratio_20"]
-        item["continuation_status"] = _continuation_status(item, stats, sector_id in live_ids)
+        # live/history（有 data_mode）走量价派发判定；delta/无 data_mode 保留 hot/cold
+        item["continuation_status"] = _continuation_status(item, stats, bool(item.get("data_mode")))
         item["previous_hot"] = stats["previous_hot"]
         rolling_stats = rolling.get(sector_id, _empty_rolling_board_stats())
         item["rolling_board_count"] = rolling_stats["count"]
@@ -694,10 +713,100 @@ def _continuation_status(item: dict[str, Any], stats: dict[str, Any], is_live: b
     if not is_live:
         return "hot" if stats.get("current_hot") else "cold"
     positive_price = item.get("return_pct") is not None and float(item["return_pct"]) > 0
-    positive_flow = item.get("main_net_inflow") is not None and float(item["main_net_inflow"]) > 0
-    if stats.get("current_hot"):
-        return "maintained" if positive_price or positive_flow else "broken"
-    return "new" if positive_price or positive_flow else "watch"
+    # 主力明确净流出视为顶部派发/撤退信号；资金流缺失(None) 不等同于流出，避免数据缺失误降级。
+    has_outflow = item.get("main_net_inflow") is not None and float(item["main_net_inflow"]) < 0
+    if has_outflow or not positive_price:
+        return "broken" if stats.get("current_hot") else "watch"
+    return "maintained" if stats.get("current_hot") else "new"
+
+
+def _fund_flow_map(
+    session, d: date, period: str = "即时"
+) -> tuple[list[tuple[str, str, float]], int | None]:
+    """返回 [(sector_id, name, net_inflow)] 按 period 查（过滤伪概念）。3日/20日累加即时。
+
+    即时/5日/10日：period 字段现成值。3日/20日：SUM(即时) 最近 N 交易日（约11天，actual_days 可能不足）。
+    """
+    if period in ("即时", "5日", "10日"):
+        rows = session.execute(
+            select(
+                schema.sector_fund_flows.c.sector_id,
+                schema.sectors.c.name,
+                schema.sectors.c.type,
+                schema.sectors.c.category,
+                schema.sectors.c.path,
+                schema.sector_fund_flows.c.main_net_inflow,
+            )
+            .join(schema.sectors, schema.sectors.c.id == schema.sector_fund_flows.c.sector_id)
+            .where(
+                schema.sector_fund_flows.c.trade_date == d.isoformat(),
+                schema.sector_fund_flows.c.period == period,
+                schema.sectors.c.type == _MAINLINE_SECTOR_TYPE,
+            )
+        ).all()
+        actual_days: int | None = None
+    else:
+        ndays = 3 if period == "3日" else 20
+        dates_rows = session.execute(
+            select(schema.stock_daily_bars.c.trade_date)
+            .group_by(schema.stock_daily_bars.c.trade_date)
+            .having(func.count(func.distinct(schema.stock_daily_bars.c.vt_symbol)) >= _MIN_COMPLETE_DAILY_SYMBOL_COUNT)
+            .where(schema.stock_daily_bars.c.trade_date <= d)
+            .order_by(desc(schema.stock_daily_bars.c.trade_date))
+            .limit(ndays)
+        ).all()
+        dates = [str(r[0]) for r in dates_rows]
+        if not dates:
+            return [], 0
+        # 实际有即时资金流的天数（即时资金流只保留约11天，20日 actual_days 可能 <20）
+        actual_days = session.execute(
+            select(func.count(func.distinct(schema.sector_fund_flows.c.trade_date)))
+            .where(
+                schema.sector_fund_flows.c.trade_date.in_(dates),
+                schema.sector_fund_flows.c.period == "即时",
+            )
+        ).scalar() or 0
+        rows = session.execute(
+            select(
+                schema.sector_fund_flows.c.sector_id,
+                schema.sectors.c.name,
+                schema.sectors.c.type,
+                schema.sectors.c.category,
+                schema.sectors.c.path,
+                func.sum(schema.sector_fund_flows.c.main_net_inflow).label("net"),
+            )
+            .join(schema.sectors, schema.sectors.c.id == schema.sector_fund_flows.c.sector_id)
+            .where(
+                schema.sector_fund_flows.c.trade_date.in_(dates),
+                schema.sector_fund_flows.c.period == "即时",
+                schema.sectors.c.type == _MAINLINE_SECTOR_TYPE,
+            )
+            .group_by(
+                schema.sector_fund_flows.c.sector_id,
+                schema.sectors.c.name,
+                schema.sectors.c.type,
+                schema.sectors.c.category,
+                schema.sectors.c.path,
+            )
+        ).all()
+    items = [
+        (r[0], r[1], float(r[5]))
+        for r in rows
+        if r[5] is not None
+        and _is_mainline_concept_meta({"name": r[1], "type": r[2], "category": r[3], "path": r[4]})
+    ]
+    return items, actual_days
+
+
+def _compute_flow_top(
+    session, d: date, period: str = "即时", n: int = 10
+) -> dict[str, Any]:
+    """概念资金流 top N（流入/流出），独立于 ranking _sort 截断。"""
+    items, actual_days = _fund_flow_map(session, d, period)
+    items.sort(key=lambda x: x[2], reverse=True)
+    inflows = [{"sector_id": s, "name": nm, "net_inflow": net} for s, nm, net in items if net > 0][:n]
+    outflows = [{"sector_id": s, "name": nm, "net_inflow": net} for s, nm, net in items if net < 0][-n:][::-1]
+    return {"inflows": inflows, "outflows": outflows, "period": period, "actual_days": actual_days}
 
 
 def _sort_live_concept_ranking(ranking: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -858,8 +967,16 @@ def _ranking_for_date(session, d: date, limit: int) -> list[dict[str, Any]]:
             schema.sectors.c.type,
             schema.sectors.c.category,
             schema.sectors.c.path,
+            schema.sector_fund_flows.c.main_net_inflow,
+            schema.sector_fund_flows.c.main_net_inflow_ratio,
         )
         .join(schema.sectors, schema.sectors.c.id == schema.sector_period_scores.c.sector_id)
+        .outerjoin(
+            schema.sector_fund_flows,
+            (schema.sector_fund_flows.c.sector_id == schema.sector_period_scores.c.sector_id)
+            & (schema.sector_fund_flows.c.trade_date == d.isoformat())
+            & (schema.sector_fund_flows.c.period == "即时"),
+        )
         .where(
             schema.sector_period_scores.c.as_of_date == d,
             schema.sector_period_scores.c.period == _DEFAULT_PERIOD,
@@ -884,6 +1001,8 @@ def _ranking_for_date(session, d: date, limit: int) -> list[dict[str, Any]]:
             sector_type,
             category,
             path,
+            main_net_inflow,
+            main_net_inflow_ratio,
         ) = row
         if not _is_mainline_concept_meta({"name": name, "type": sector_type, "category": category, "path": path}):
             continue
@@ -896,6 +1015,10 @@ def _ranking_for_date(session, d: date, limit: int) -> list[dict[str, Any]]:
             "rank_return": rank_return,
             "return_pct": return_pct,
             "confidence": confidence,
+            "main_net_inflow": main_net_inflow,
+            "main_net_inflow_ratio": main_net_inflow_ratio,
+            "fund_inflow_available": main_net_inflow is not None,
+            "data_mode": "history",
         })
         if len(out) >= limit:
             break
@@ -1068,14 +1191,41 @@ def _load_index(session, d: date) -> list[dict[str, Any]]:
     return out
 
 
+@router.get("/concept-search", response_model=None)
+def concept_search(
+    q: str = Query(..., min_length=1, description="概念名关键词"),
+    trade_date: date = Query(..., description="日期 YYYY-MM-DD"),
+    period: str = Query("即时", description="资金流周期：即时/3日/5日/10日/20日"),
+    limit: int = Query(30, ge=1, le=100),
+) -> dict[str, Any]:
+    """按名称搜概念，返回匹配概念的资金流，用于搜索定位（CPO/PCB 等不在 top10 的概念）。"""
+    if not is_database_configured():
+        return ok({"status": "unavailable", "message": "数据库未配置"})
+    with session_scope() as session:
+        items, _ = _fund_flow_map(session, trade_date, period)
+        q_upper = q.upper()
+        matched = [(s, nm, net) for s, nm, net in items if q_upper in nm.upper()]
+        matched.sort(key=lambda x: x[2], reverse=True)
+        result = [
+            {"sector_id": s, "name": nm, "net_inflow": net}
+            for s, nm, net in matched[:limit]
+        ]
+    return ok({"items": result, "q": q, "total": len(matched), "status": "ready"})
+
+
 @router.get("/sector-stocks", response_model=None)
 def sector_stocks(
     sector_id: str = Query(..., description="概念ID"),
     date: date = Query(..., description="回放日期 YYYY-MM-DD"),
     sort_by: str = Query("change_pct", description="change_pct|net_inflow|name"),
     limit: int = Query(50, ge=1, le=200),
+    industry_filter: bool = Query(True, description="只保留属概念核心行业的成分股，过滤东财宽泛杂股"),
 ) -> dict[str, Any]:
-    """概念成分股 + 当日涨跌(从close算) + 个股资金流向(近端)，用于排查个股流入流出。"""
+    """概念成分股 + 当日涨跌(从close算) + 个股资金流向(近端)，用于排查个股流入流出。
+
+    东财概念成分股定义宽泛（如"半导体概念"含家电/教育/照明），industry_filter=True 时
+    只保留属概念核心行业（成分股与 industry 板块重叠 top5）的股票。
+    """
     if not is_database_configured():
         return ok({"status": "unavailable", "message": "数据库未配置"})
 
@@ -1090,6 +1240,29 @@ def sector_stocks(
             return ok({"sector_id": sector_id, "items": [], "status": "no_members"})
         vt_symbols = [m[0] for m in members]
         name_map = {m[0]: m[1] for m in members}
+        filtered_out = 0
+        if industry_filter:
+            # 找概念核心行业（概念成分股与 industry 板块重叠 top5），过滤东财宽泛杂股
+            sc = schema.sector_memberships.alias()
+            si = schema.sector_memberships.alias()
+            core_industry_ids = session.execute(
+                select(si.c.sector_id)
+                .select_from(sc)
+                .join(si, si.c.vt_symbol == sc.c.vt_symbol)
+                .join(schema.sectors, schema.sectors.c.id == si.c.sector_id)
+                .where(sc.c.sector_id == sector_id, schema.sectors.c.type == "industry")
+                .group_by(si.c.sector_id)
+                .order_by(desc(func.count()))
+                .limit(2)
+            ).scalars().all()
+            if core_industry_ids:
+                valid = set(session.execute(
+                    select(schema.sector_memberships.c.vt_symbol)
+                    .where(schema.sector_memberships.c.sector_id.in_(core_industry_ids))
+                ).scalars().all())
+                kept = [s for s in vt_symbols if s in valid]
+                filtered_out = len(vt_symbols) - len(kept)
+                vt_symbols = kept
 
         # 历史回放必须使用所选日期日线；今天盘中允许使用股票快照做临时价。
         today_rows = session.execute(
@@ -1245,6 +1418,7 @@ def sector_stocks(
         "items": items[:limit],
         "total": len(items),
         "fund_flow_available": sum(1 for it in items if it["fund_inflow_available"]),
+        "filtered_out": filtered_out,
         "price_source": "daily_bar" if today_close else "intraday_snapshot" if snapshot_price else None,
         "status": "ready",
     })

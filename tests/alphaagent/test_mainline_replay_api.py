@@ -371,8 +371,8 @@ def test_snapshot_single_date_uses_concept_index_sort_after_enrichment(monkeypat
             self.calls += 1
             if self.calls == 1:
                 return FakeResult([
-                    ("FLOW", 99.0, 100.0, 40.0, "ROTATION", 200, -2.0, None, "高资金概念", "concept", None, []),
-                    ("STORAGE", 60.0, 30.0, 100.0, "MAINLINE_UP", 8, 30.0, None, "存储芯片", "concept", None, []),
+                    ("FLOW", 99.0, 100.0, 40.0, "ROTATION", 200, -2.0, None, "高资金概念", "concept", None, [], 50.0, 0.5),
+                    ("STORAGE", 60.0, 30.0, 100.0, "MAINLINE_UP", 8, 30.0, None, "存储芯片", "concept", None, [], 100.0, 1.2),
                 ])
             if self.calls == 2:
                 return FakeResult([])
@@ -387,10 +387,12 @@ def test_snapshot_single_date_uses_concept_index_sort_after_enrichment(monkeypat
                     ("STORAGE", date(2026, 6, 26), 100.0, 8.0, 1000.0),
                     ("STORAGE", date(2026, 6, 29), 130.0, 30.0, 1000.0),
                 ])
-            return FakeResult([
-                ("FLOW", date(2026, 6, 29), 99.0, 100, "ROTATION"),
-                ("STORAGE", date(2026, 6, 29), 60.0, 8, "MAINLINE_UP"),
-            ])
+            if self.calls == 5:
+                return FakeResult([
+                    ("FLOW", date(2026, 6, 29), 99.0, 100, "ROTATION"),
+                    ("STORAGE", date(2026, 6, 29), 60.0, 8, "MAINLINE_UP"),
+                ])
+            return FakeResult([])
 
     @contextmanager
     def fake_session_scope():
@@ -441,7 +443,7 @@ def test_snapshot_payload_does_not_expose_sector_type(monkeypatch):
             del stmt
             self.calls += 1
             if self.calls == 1:
-                return FakeResult([("BK1431", 88.0, 70.0, 60.0, "MAINLINE_UP", 1, 4.2, 0.9, "存储芯片", "concept", None, [])])
+                return FakeResult([("BK1431", 88.0, 70.0, 60.0, "MAINLINE_UP", 1, 4.2, 0.9, "存储芯片", "concept", None, [], 100.0, 1.2)])
             if self.calls == 2:
                 return FakeResult([])
             if self.calls == 3:
@@ -554,6 +556,7 @@ def test_sector_stocks_does_not_use_previous_bar_as_selected_date(monkeypatch):
         date=date(2026, 6, 26),
         sort_by="name",
         limit=50,
+        industry_filter=False,
     )
 
     items = {item["vt_symbol"]: item for item in body["data"]["items"]}
@@ -606,6 +609,7 @@ def test_sector_stocks_default_sorts_by_change_pct(monkeypatch):
         sector_id="BK0001",
         date=date(2026, 6, 26),
         limit=50,
+        industry_filter=False,
     )
 
     assert [item["vt_symbol"] for item in body["data"]["items"]] == ["AAA.SSE", "BBB.SSE"]
@@ -662,6 +666,7 @@ def test_sector_stocks_uses_intraday_snapshot_when_daily_bar_missing(monkeypatch
         date=date(2026, 6, 29),
         sort_by="net_inflow",
         limit=50,
+        industry_filter=False,
     )
 
     item = body["data"]["items"][0]
@@ -718,6 +723,7 @@ def test_sector_stocks_does_not_use_snapshot_for_old_missing_daily_bar(monkeypat
         date=date(2026, 6, 20),
         sort_by="net_inflow",
         limit=50,
+        industry_filter=False,
     )
 
     item = body["data"]["items"][0]
@@ -774,3 +780,103 @@ def test_recent_stock_momentum_uses_limit_up_pool_events():
     )
 
     assert momentum["limit_up_count_5d"] == 1
+
+
+def test_continuation_status_marks_top_distribution_as_broken():
+    """顶部派发：价格涨但主力明确净流出时，不应判 maintained。
+
+    复现 2026-07-03 半导体概念：return_pct=+2.7% 但 main_net_inflow=-358 亿，
+    旧 OR 逻辑因价格满足条件就标 maintained 排榜首，掩盖了资金撤退。
+    """
+    item = {"return_pct": 2.7, "main_net_inflow": -358e8}
+    stats = {"current_hot": True}
+    assert mainline_replay._continuation_status(item, stats, is_live=True) == "broken"
+
+
+def test_continuation_status_non_hot_outflow_not_new():
+    """非 hot 概念价格上涨但主力净流出时，不应判 new（应 watch）。"""
+    item = {"return_pct": 5.0, "main_net_inflow": -20e8}
+    stats = {"current_hot": False}
+    assert mainline_replay._continuation_status(item, stats, is_live=True) == "watch"
+
+
+def test_continuation_status_missing_flow_keeps_price_up_status():
+    """资金流缺失(None)时不等于流出，价格涨仍按价格判定，避免数据缺失误降级。"""
+    hot_item = {"return_pct": 3.0, "main_net_inflow": None}
+    assert (
+        mainline_replay._continuation_status(hot_item, {"current_hot": True}, is_live=True)
+        == "maintained"
+    )
+    new_item = {"return_pct": 3.0, "main_net_inflow": None}
+    assert (
+        mainline_replay._continuation_status(new_item, {"current_hot": False}, is_live=True)
+        == "new"
+    )
+
+
+def test_ranking_for_date_attaches_history_fund_flow_and_data_mode():
+    """history snapshot 补主力净流入 + data_mode='history'，让历史也走派发判定。
+
+    复现需求：07-02 等历史日的半导体主力流出也应被判断档，不能只看评分热度。
+    """
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class FakeSession:
+        def execute(self, stmt):
+            del stmt
+            # 14 字段：评分(8) + sectors(4) + main_net_inflow + main_net_inflow_ratio
+            return FakeResult([(
+                "BK1431", 88.0, 70.0, 60.0, "MAINLINE_UP", 8, 30.0, 0.9,
+                "半导体概念", "concept", None, [],
+                -358e8, -5.5,
+            )])
+
+    items = mainline_replay._ranking_for_date(FakeSession(), date(2026, 7, 2), limit=10)
+    assert items[0]["sector_id"] == "BK1431"
+    assert items[0]["main_net_inflow"] == -358e8
+    assert items[0]["data_mode"] == "history"
+    assert items[0]["fund_inflow_available"] is True
+
+
+def test_enrich_marks_history_distribution_as_broken():
+    """history item（data_mode='history' + 主力净流出 + current_hot）应判 broken，不是 hot。"""
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, stmt):
+            del stmt
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResult([])  # 概念指数历史
+            return FakeResult([
+                ("BK1431", date(2026, 7, 2), 88.0, 8, "MAINLINE_UP"),
+            ])  # activity → current_hot=True
+
+    ranking = [{
+        "sector_id": "BK1431",
+        "data_mode": "history",
+        "return_pct": 2.7,        # 滚动收益率仍为正
+        "main_net_inflow": -358e8,  # 但历史那天主力巨量流出
+    }]
+
+    mainline_replay._enrich_concept_index_context(
+        FakeSession(),
+        ranking,
+        date(2026, 7, 2),
+        include_live_projection=False,
+    )
+
+    assert ranking[0]["continuation_status"] == "broken"
