@@ -11,11 +11,12 @@ Provides:
 from __future__ import annotations
 
 from datetime import date, timedelta
+from time import monotonic
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, select, text
 
 from alphaagent.server.core.responses import fail, ok
 from alphaagent.server.db import schema
@@ -36,6 +37,23 @@ def _reject_sector_type_query(request: Request) -> None:
                 "data": {},
             },
         )
+
+
+def _cache_get(key: tuple[Any, ...]) -> dict[str, Any] | None:
+    cached = _RESPONSE_CACHE.get(key)
+    if cached is None:
+        return None
+    expires_at, payload = cached
+    if expires_at <= monotonic():
+        _RESPONSE_CACHE.pop(key, None)
+        return None
+    return payload
+
+
+def _cache_set(key: tuple[Any, ...], payload: dict[str, Any], ttl_seconds: int | None = None) -> None:
+    if ttl_seconds is None:
+        ttl_seconds = _CACHE_DEFAULT_TTL_SECONDS
+    _RESPONSE_CACHE[key] = (monotonic() + ttl_seconds, payload)
 
 
 router = APIRouter(
@@ -61,10 +79,16 @@ _ROLLING_BOARD_TOP_N = 10
 _LIVE_RANKING_CANDIDATE_LIMIT = 1000
 _MIN_COMPLETE_DAILY_SYMBOL_COUNT = 3000
 _STOCK_MOMENTUM_LOOKBACK_DAYS = 45
+_SENTIMENT_WARMUP_DAYS = 15
+_SENTIMENT_DEFAULT_LOOKBACK = 60
+_SENTIMENT_MAX_LOOKBACK = 180
 _NORMAL_LIMIT_UP_THRESHOLD = 9.5
 _WIDE_LIMIT_UP_THRESHOLD = 19.0
 _BSE_LIMIT_UP_THRESHOLD = 29.0
 _RELATION_CANDIDATE_LIMIT = 360
+_CACHE_DEFAULT_TTL_SECONDS = 300
+_CACHE_LIVE_TTL_SECONDS = 30
+_RESPONSE_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 _STYLE_STATUS_KEYWORDS = (
     "大盘",
     "中盘",
@@ -151,6 +175,10 @@ def timeline(limit: int = Query(400, ge=1, le=2000)) -> dict[str, Any]:
     """可回放的交易日列表（概念 sector_period_scores 里存在的 as_of_date 去重降序）。"""
     if not is_database_configured():
         return ok({"dates": [], "status": "unavailable", "message": "数据库未配置"})
+    cache_key = ("mainline_replay.timeline", int(limit))
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return ok(cached)
     with session_scope() as session:
         complete_trade_dates = (
             select(schema.stock_daily_bars.c.trade_date)
@@ -167,7 +195,9 @@ def timeline(limit: int = Query(400, ge=1, le=2000)) -> dict[str, Any]:
             .limit(limit)
         ).all()
     dates = [str(r[0]) for r in rows]
-    return ok({"dates": dates, "status": "ready" if dates else "empty"})
+    payload = {"dates": dates, "status": "ready" if dates else "empty"}
+    _cache_set(cache_key, payload)
+    return ok(payload)
 
 
 @router.get("/live", response_model=None)
@@ -192,6 +222,10 @@ def live(
         resolved_date = trade_date or _parse_optional_date(latest_flow_date)
         if resolved_date is None:
             return ok({"status": "empty", "ranking": [], "index": []})
+        cache_key = ("mainline_replay.live", resolved_date.isoformat(), int(limit), flow_period)
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return ok(cached)
 
         ranking = _live_ranking_for_date(session, resolved_date, max(limit, _LIVE_RANKING_CANDIDATE_LIMIT))
         _enrich_concept_index_context(session, ranking, resolved_date, include_live_projection=True)
@@ -207,7 +241,7 @@ def live(
             )
         ).scalar()
 
-    return ok({
+    payload = {
         "mode": "live",
         "trade_date": resolved_date.isoformat(),
         "base_daily_date": _iso_or_none(latest_complete_daily),
@@ -221,7 +255,9 @@ def live(
         "snapshot_updated_at": _iso_or_none(latest_snapshot_updated),
         "snapshot_trade_time": str(latest_snapshot_trade_time) if latest_snapshot_trade_time else None,
         "message": "收盘前动态计算：概念实时资金流 + 盘中快照；历史回放仍读概念评分缓存。",
-    })
+    }
+    _cache_set(cache_key, payload, _CACHE_LIVE_TTL_SECONDS)
+    return ok(payload)
 
 
 @router.get("/snapshot", response_model=None)
@@ -262,6 +298,115 @@ def snapshot(
             ranking = _sort_live_concept_ranking(ranking)[:limit]
 
     return ok({"mode": mode, "ranking": ranking, "flow_top": flow_top, "index": index_data, "status": "ready"})
+
+
+@router.get("/sentiment-cycle", response_model=None)
+def sentiment_cycle(
+    date: date | None = Query(None, description="情绪周期截止日期 YYYY-MM-DD；默认取最新实时资金流日或最新完整日线日"),
+    lookback: int = Query(_SENTIMENT_DEFAULT_LOOKBACK, ge=5, le=_SENTIMENT_MAX_LOOKBACK),
+    include_live: bool = Query(True, description="是否在可用时追加/替换当前日实时投影点"),
+) -> dict[str, Any]:
+    """短线情绪周期曲线。
+
+    历史点只读完整 `stock_daily_bars`；当前日投影只读 `stocks` 快照和
+    分钟高点，不写入历史评分。炸板/晋级是日K可见代理，不等同逐笔封板统计。
+    """
+    if not is_database_configured():
+        return ok({"status": "unavailable", "message": "数据库未配置"})
+
+    with session_scope() as session:
+        resolved_date = _resolve_sentiment_cycle_date(session, date)
+        if resolved_date is None:
+            return ok({
+                "status": "empty",
+                "mode": "history",
+                "trade_date": None,
+                "base_daily_date": None,
+                "points": [],
+                "ranges": [],
+                "current": None,
+                "source": "stock_daily_bars",
+            })
+
+        cache_key = (
+            "mainline_replay.sentiment_cycle",
+            resolved_date.isoformat(),
+            int(lookback),
+            bool(include_live),
+        )
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return ok(cached)
+
+        base_daily_date = _latest_complete_daily_date_at_or_before(session, resolved_date)
+        history_end = base_daily_date or resolved_date
+        dates = _complete_stock_trade_dates(
+            session,
+            history_end,
+            lookback + _SENTIMENT_WARMUP_DAYS,
+        )
+        output_dates = dates[-lookback:]
+        mode = "history"
+        source = "stock_daily_bars"
+        latest_snapshot_updated = None
+        latest_snapshot_trade_time = None
+        latest_minute_time = None
+
+        can_project_live = (
+            include_live
+            and resolved_date is not None
+            and _can_use_intraday_snapshot(session, resolved_date)
+        )
+        metric_rows = _load_sentiment_daily_metric_rows(session, dates)
+        points = _build_sentiment_cycle_points_from_metrics(metric_rows, output_dates)
+
+        if can_project_live:
+            symbol_state = _load_sentiment_symbol_state(session, dates)
+            live_point = _build_live_sentiment_point(session, resolved_date, symbol_state)
+            if live_point is not None:
+                points = [p for p in points if p["date"] != live_point["date"]]
+                points.append(live_point)
+                points.sort(key=lambda item: item["date"])
+                _attach_sentiment_score_changes(points)
+                mode = "live"
+                source = "stock_daily_bars,stocks_snapshot,stock_minute_bars"
+                latest_snapshot_updated = session.execute(select(func.max(schema.stocks.c.updated_at))).scalar()
+                latest_snapshot_trade_time = session.execute(select(func.max(schema.stocks.c.trade_time))).scalar()
+                latest_minute_time = session.execute(
+                    select(func.max(schema.stock_minute_bars.c.bar_time)).where(
+                        schema.stock_minute_bars.c.trade_date == resolved_date,
+                        schema.stock_minute_bars.c.interval == "1m",
+                    )
+                ).scalar()
+
+        ranges = _sentiment_ranges(points, lookback)
+        current = points[-1] if points else None
+
+    payload = {
+        "status": "ready" if points else "empty",
+        "mode": mode,
+        "trade_date": resolved_date.isoformat(),
+        "base_daily_date": _iso_or_none(base_daily_date),
+        "points": points,
+        "ranges": ranges,
+        "current": current,
+        "source": source,
+        "temporary_bar": bool(current and current.get("temporary")),
+        "latest_minute_time": _iso_or_none(latest_minute_time),
+        "snapshot_updated_at": _iso_or_none(latest_snapshot_updated),
+        "snapshot_trade_time": str(latest_snapshot_trade_time) if latest_snapshot_trade_time else None,
+        "limitations": [
+            "炸板率使用日K高点触板但收盘未封板的代理，不等同逐笔盘口封板统计。",
+            "晋级率使用昨日涨停股今日继续涨停的代理，不区分一进二、二进三等梯队。",
+            "实时点来自当前快照和分钟高点，只作盘中投影，收盘后以完整日线为准。",
+        ],
+    }
+    _cache_set(
+        cache_key,
+        payload,
+        _CACHE_LIVE_TTL_SECONDS if can_project_live else _CACHE_DEFAULT_TTL_SECONDS,
+    )
+    return ok(payload)
 
 
 @router.get("/relation", response_model=None)
@@ -479,12 +624,21 @@ def _latest_concept_flow_date(session) -> Any:
 
 
 def _latest_complete_daily_date(session) -> date | None:
-    row = session.execute(
+    return _latest_complete_daily_date_at_or_before(session, None)
+
+
+def _latest_complete_daily_date_at_or_before(session, d: date | None) -> date | None:
+    stmt = (
         select(schema.stock_daily_bars.c.trade_date)
         .group_by(schema.stock_daily_bars.c.trade_date)
         .having(func.count(func.distinct(schema.stock_daily_bars.c.vt_symbol)) >= _MIN_COMPLETE_DAILY_SYMBOL_COUNT)
         .order_by(desc(schema.stock_daily_bars.c.trade_date))
         .limit(1)
+    )
+    if d is not None:
+        stmt = stmt.where(schema.stock_daily_bars.c.trade_date <= d)
+    row = session.execute(
+        stmt
     ).first()
     return row[0] if row else None
 
@@ -497,6 +651,646 @@ def _parse_optional_date(value: Any) -> date | None:
     try:
         return _parse_date(str(value))
     except Exception:
+        return None
+
+
+def _resolve_sentiment_cycle_date(session, requested: date | None) -> date | None:
+    if requested is not None:
+        return requested
+    latest_flow_date = _parse_optional_date(_latest_concept_flow_date(session))
+    if latest_flow_date is not None:
+        return latest_flow_date
+    return _latest_complete_daily_date(session)
+
+
+def _complete_stock_trade_dates(session, end_date: date, limit: int) -> list[date]:
+    rows = session.execute(
+        select(schema.stock_daily_bars.c.trade_date)
+        .where(schema.stock_daily_bars.c.trade_date <= end_date)
+        .group_by(schema.stock_daily_bars.c.trade_date)
+        .having(func.count(func.distinct(schema.stock_daily_bars.c.vt_symbol)) >= _MIN_COMPLETE_DAILY_SYMBOL_COUNT)
+        .order_by(desc(schema.stock_daily_bars.c.trade_date))
+        .limit(limit)
+    ).all()
+    return sorted([r[0] for r in rows])
+
+
+def _load_sentiment_daily_metric_rows(session, dates: list[date]) -> list[Any]:
+    if not dates:
+        return []
+    return session.execute(
+        text(
+            """
+            WITH base AS (
+                SELECT
+                    b.vt_symbol,
+                    COALESCE(s.name, '') AS stock_name,
+                    b.trade_date,
+                    b.close_price,
+                    b.high_price,
+                    b.change_pct,
+                    LAG(b.close_price) OVER (
+                        PARTITION BY b.vt_symbol ORDER BY b.trade_date
+                    ) AS previous_close
+                FROM stock_daily_bars b
+                LEFT JOIN stocks s ON s.vt_symbol = b.vt_symbol
+                WHERE b.trade_date BETWEEN :start_date AND :end_date
+            ),
+            calc AS (
+                SELECT
+                    vt_symbol,
+                    stock_name,
+                    trade_date,
+                    close_price,
+                    CASE
+                        WHEN change_pct IS NOT NULL THEN change_pct
+                        WHEN previous_close IS NOT NULL AND previous_close <> 0
+                            THEN (close_price / previous_close - 1) * 100
+                        ELSE NULL
+                    END AS change_calc,
+                    CASE
+                        WHEN previous_close IS NOT NULL AND previous_close <> 0
+                            THEN (high_price / previous_close - 1) * 100
+                        ELSE NULL
+                    END AS high_change,
+                    CASE
+                        WHEN UPPER(COALESCE(stock_name, '')) LIKE '%ST%' THEN :st_threshold
+                        WHEN vt_symbol LIKE '8%' OR vt_symbol LIKE '4%' OR vt_symbol LIKE '920%' OR vt_symbol LIKE '%.BSE' OR vt_symbol LIKE '%.BJSE'
+                            THEN :bse_threshold
+                        WHEN vt_symbol LIKE '30%' OR vt_symbol LIKE '68%' THEN :wide_threshold
+                        ELSE :normal_threshold
+                    END AS limit_threshold
+                FROM base
+                WHERE close_price IS NOT NULL
+            ),
+            flags AS (
+                SELECT
+                    *,
+                    CASE WHEN change_calc >= limit_threshold THEN 1 ELSE 0 END AS is_limit_up,
+                    CASE WHEN change_calc <= -limit_threshold THEN 1 ELSE 0 END AS is_limit_down,
+                    CASE WHEN high_change >= limit_threshold THEN 1 ELSE 0 END AS touched_limit_up
+                FROM calc
+                WHERE change_calc IS NOT NULL
+            ),
+            grouped AS (
+                SELECT
+                    *,
+                    LAG(is_limit_up, 1, 0) OVER (
+                        PARTITION BY vt_symbol ORDER BY trade_date
+                    ) AS previous_is_limit_up,
+                    SUM(CASE WHEN is_limit_up = 1 THEN 0 ELSE 1 END) OVER (
+                        PARTITION BY vt_symbol ORDER BY trade_date ROWS UNBOUNDED PRECEDING
+                    ) AS streak_group
+                FROM flags
+            ),
+            streaks AS (
+                SELECT
+                    *,
+                    CASE
+                        WHEN is_limit_up = 1 THEN
+                            SUM(is_limit_up) OVER (
+                                PARTITION BY vt_symbol, streak_group
+                                ORDER BY trade_date ROWS UNBOUNDED PRECEDING
+                            )
+                        ELSE 0
+                    END AS limit_up_streak
+                FROM grouped
+            )
+            SELECT
+                trade_date,
+                COUNT(*)::int AS total_stocks,
+                SUM(CASE WHEN change_calc > 0 THEN 1 ELSE 0 END)::int AS rise_count,
+                SUM(CASE WHEN change_calc < 0 THEN 1 ELSE 0 END)::int AS fall_count,
+                SUM(CASE WHEN change_calc = 0 THEN 1 ELSE 0 END)::int AS flat_count,
+                SUM(is_limit_up)::int AS limit_up_count,
+                SUM(is_limit_down)::int AS limit_down_count,
+                SUM(CASE WHEN touched_limit_up = 1 AND is_limit_up = 0 THEN 1 ELSE 0 END)::int AS failed_limit_up_count,
+                SUM(previous_is_limit_up)::int AS previous_limit_up_count,
+                SUM(CASE WHEN previous_is_limit_up = 1 AND is_limit_up = 1 THEN 1 ELSE 0 END)::int AS promoted_limit_up_count,
+                MAX(limit_up_streak)::int AS max_limit_up_streak
+            FROM streaks
+            GROUP BY trade_date
+            ORDER BY trade_date
+            """
+        ),
+        {
+            "start_date": dates[0],
+            "end_date": dates[-1],
+            "st_threshold": 4.5,
+            "normal_threshold": _NORMAL_LIMIT_UP_THRESHOLD,
+            "wide_threshold": _WIDE_LIMIT_UP_THRESHOLD,
+            "bse_threshold": _BSE_LIMIT_UP_THRESHOLD,
+        },
+    ).all()
+
+
+def _build_sentiment_cycle_points_from_metrics(
+    rows: list[Any],
+    output_dates: list[date],
+) -> list[dict[str, Any]]:
+    metrics_by_date = {d: _empty_sentiment_metrics(d) for d in output_dates}
+    for row in rows:
+        (
+            trade_date,
+            total_stocks,
+            rise_count,
+            fall_count,
+            flat_count,
+            limit_up_count,
+            limit_down_count,
+            failed_limit_up_count,
+            previous_limit_up_count,
+            promoted_limit_up_count,
+            max_limit_up_streak,
+        ) = row
+        if trade_date not in metrics_by_date:
+            continue
+        metrics = metrics_by_date[trade_date]
+        metrics["total_stocks"] = int(total_stocks or 0)
+        metrics["rise_count"] = int(rise_count or 0)
+        metrics["fall_count"] = int(fall_count or 0)
+        metrics["flat_count"] = int(flat_count or 0)
+        metrics["limit_up_count"] = int(limit_up_count or 0)
+        metrics["limit_down_count"] = int(limit_down_count or 0)
+        metrics["failed_limit_up_count"] = int(failed_limit_up_count or 0)
+        metrics["previous_limit_up_count"] = int(previous_limit_up_count or 0)
+        metrics["promoted_limit_up_count"] = int(promoted_limit_up_count or 0)
+        metrics["max_limit_up_streak"] = int(max_limit_up_streak or 0)
+    points = [_finalize_sentiment_metrics(metrics_by_date[d]) for d in output_dates]
+    _attach_sentiment_score_changes(points)
+    return points
+
+
+def _load_sentiment_symbol_state(session, dates: list[date]) -> dict[str, dict[str, Any]]:
+    if not dates:
+        return {}
+    rows = session.execute(
+        text(
+            """
+            WITH base AS (
+                SELECT
+                    b.vt_symbol,
+                    COALESCE(s.name, '') AS stock_name,
+                    b.trade_date,
+                    b.close_price,
+                    b.change_pct,
+                    LAG(b.close_price) OVER (
+                        PARTITION BY b.vt_symbol ORDER BY b.trade_date
+                    ) AS previous_close
+                FROM stock_daily_bars b
+                LEFT JOIN stocks s ON s.vt_symbol = b.vt_symbol
+                WHERE b.trade_date BETWEEN :start_date AND :end_date
+            ),
+            calc AS (
+                SELECT
+                    vt_symbol,
+                    stock_name,
+                    trade_date,
+                    close_price,
+                    CASE
+                        WHEN change_pct IS NOT NULL THEN change_pct
+                        WHEN previous_close IS NOT NULL AND previous_close <> 0
+                            THEN (close_price / previous_close - 1) * 100
+                        ELSE NULL
+                    END AS change_calc,
+                    CASE
+                        WHEN UPPER(COALESCE(stock_name, '')) LIKE '%ST%' THEN :st_threshold
+                        WHEN vt_symbol LIKE '8%' OR vt_symbol LIKE '4%' OR vt_symbol LIKE '920%' OR vt_symbol LIKE '%.BSE' OR vt_symbol LIKE '%.BJSE'
+                            THEN :bse_threshold
+                        WHEN vt_symbol LIKE '30%' OR vt_symbol LIKE '68%' THEN :wide_threshold
+                        ELSE :normal_threshold
+                    END AS limit_threshold
+                FROM base
+                WHERE close_price IS NOT NULL
+            ),
+            flags AS (
+                SELECT
+                    *,
+                    CASE WHEN change_calc >= limit_threshold THEN 1 ELSE 0 END AS is_limit_up
+                FROM calc
+                WHERE change_calc IS NOT NULL
+            ),
+            grouped AS (
+                SELECT
+                    *,
+                    SUM(CASE WHEN is_limit_up = 1 THEN 0 ELSE 1 END) OVER (
+                        PARTITION BY vt_symbol ORDER BY trade_date ROWS UNBOUNDED PRECEDING
+                    ) AS streak_group
+                FROM flags
+            ),
+            streaks AS (
+                SELECT
+                    *,
+                    CASE
+                        WHEN is_limit_up = 1 THEN
+                            SUM(is_limit_up) OVER (
+                                PARTITION BY vt_symbol, streak_group
+                                ORDER BY trade_date ROWS UNBOUNDED PRECEDING
+                            )
+                        ELSE 0
+                    END AS limit_up_streak
+                FROM grouped
+            ),
+            latest AS (
+                SELECT DISTINCT ON (vt_symbol)
+                    vt_symbol,
+                    stock_name,
+                    close_price,
+                    limit_up_streak
+                FROM streaks
+                ORDER BY vt_symbol, trade_date DESC
+            )
+            SELECT vt_symbol, stock_name, close_price, limit_up_streak
+            FROM latest
+            """
+        ),
+        {
+            "start_date": dates[0],
+            "end_date": dates[-1],
+            "st_threshold": 4.5,
+            "normal_threshold": _NORMAL_LIMIT_UP_THRESHOLD,
+            "wide_threshold": _WIDE_LIMIT_UP_THRESHOLD,
+            "bse_threshold": _BSE_LIMIT_UP_THRESHOLD,
+        },
+    ).all()
+    return {
+        str(vt_symbol): {
+            "previous_close": float(close_price),
+            "limit_up_streak": int(limit_up_streak or 0),
+            "stock_name": str(stock_name or ""),
+        }
+        for vt_symbol, stock_name, close_price, limit_up_streak in rows
+        if close_price is not None
+    }
+
+
+def _load_sentiment_daily_rows(session, dates: list[date]) -> list[Any]:
+    if not dates:
+        return []
+    return session.execute(
+        select(
+            schema.stock_daily_bars.c.vt_symbol,
+            schema.stocks.c.name,
+            schema.stock_daily_bars.c.trade_date,
+            schema.stock_daily_bars.c.close_price,
+            schema.stock_daily_bars.c.high_price,
+            schema.stock_daily_bars.c.change_pct,
+        )
+        .select_from(schema.stock_daily_bars)
+        .outerjoin(schema.stocks, schema.stocks.c.vt_symbol == schema.stock_daily_bars.c.vt_symbol)
+        .where(schema.stock_daily_bars.c.trade_date.in_(dates))
+        .order_by(schema.stock_daily_bars.c.vt_symbol, schema.stock_daily_bars.c.trade_date)
+    ).all()
+
+
+def _build_sentiment_cycle_points(
+    rows: list[Any],
+    output_dates: list[date],
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    output_set = set(output_dates)
+    metrics_by_date = {d: _empty_sentiment_metrics(d) for d in output_dates}
+    symbol_state: dict[str, dict[str, Any]] = {}
+
+    for row in rows:
+        vt_symbol, stock_name, trade_date, close_price, high_price, change_pct = row
+        if close_price is None:
+            continue
+        vt_symbol = str(vt_symbol)
+        stock_name = str(stock_name or "")
+        close = float(close_price)
+        state = symbol_state.get(vt_symbol, {})
+        previous_close = _float_or_none(state.get("previous_close"))
+        previous_streak = int(state.get("limit_up_streak") or 0)
+        change = _float_or_none(change_pct)
+        if change is None and previous_close:
+            change = (close / previous_close - 1) * 100
+        high_change = None
+        if high_price is not None and previous_close:
+            high_change = (float(high_price) / previous_close - 1) * 100
+
+        threshold = _limit_up_threshold(vt_symbol, stock_name)
+        is_limit_up = change is not None and change >= threshold
+        is_limit_down = change is not None and change <= -threshold
+        touched_limit_up = high_change is not None and high_change >= threshold
+
+        if trade_date in output_set and change is not None:
+            metrics = metrics_by_date[trade_date]
+            _add_sentiment_sample(
+                metrics,
+                change=change,
+                is_limit_up=is_limit_up,
+                is_limit_down=is_limit_down,
+                touched_limit_up=touched_limit_up,
+                previous_streak=previous_streak,
+            )
+
+        symbol_state[vt_symbol] = {
+            "previous_close": close,
+            "limit_up_streak": previous_streak + 1 if is_limit_up else 0,
+            "stock_name": stock_name,
+        }
+
+    points = [_finalize_sentiment_metrics(metrics_by_date[d]) for d in output_dates]
+    _attach_sentiment_score_changes(points)
+    return points, symbol_state
+
+
+def _empty_sentiment_metrics(trade_date: date) -> dict[str, Any]:
+    return {
+        "date": trade_date,
+        "total_stocks": 0,
+        "rise_count": 0,
+        "fall_count": 0,
+        "flat_count": 0,
+        "limit_up_count": 0,
+        "limit_down_count": 0,
+        "failed_limit_up_count": 0,
+        "previous_limit_up_count": 0,
+        "promoted_limit_up_count": 0,
+        "max_limit_up_streak": 0,
+        "temporary": False,
+    }
+
+
+def _add_sentiment_sample(
+    metrics: dict[str, Any],
+    *,
+    change: float,
+    is_limit_up: bool,
+    is_limit_down: bool,
+    touched_limit_up: bool,
+    previous_streak: int,
+) -> None:
+    metrics["total_stocks"] += 1
+    if change > 0:
+        metrics["rise_count"] += 1
+    elif change < 0:
+        metrics["fall_count"] += 1
+    else:
+        metrics["flat_count"] += 1
+
+    if previous_streak >= 1:
+        metrics["previous_limit_up_count"] += 1
+
+    if is_limit_up:
+        metrics["limit_up_count"] += 1
+        next_streak = previous_streak + 1
+        metrics["max_limit_up_streak"] = max(metrics["max_limit_up_streak"], next_streak)
+        if previous_streak >= 1:
+            metrics["promoted_limit_up_count"] += 1
+    elif touched_limit_up:
+        metrics["failed_limit_up_count"] += 1
+
+    if is_limit_down:
+        metrics["limit_down_count"] += 1
+
+
+def _finalize_sentiment_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    total = int(metrics["total_stocks"])
+    limit_up = int(metrics["limit_up_count"])
+    failed = int(metrics["failed_limit_up_count"])
+    previous_limit_up = int(metrics["previous_limit_up_count"])
+    promoted = int(metrics["promoted_limit_up_count"])
+    up_ratio = metrics["rise_count"] / total if total else None
+    down_ratio = metrics["fall_count"] / total if total else None
+    limit_up_rate = limit_up / total if total else None
+    limit_down_rate = metrics["limit_down_count"] / total if total else None
+    failed_rate = failed / (failed + limit_up) if (failed + limit_up) else None
+    promotion_rate = promoted / previous_limit_up if previous_limit_up else None
+    score = _sentiment_score(
+        up_ratio=up_ratio,
+        down_ratio=down_ratio,
+        limit_up_count=limit_up,
+        limit_down_count=int(metrics["limit_down_count"]),
+        max_streak=int(metrics["max_limit_up_streak"]),
+        failed_rate=failed_rate,
+        promotion_rate=promotion_rate,
+    )
+    phase = _sentiment_phase(
+        score=score,
+        up_ratio=up_ratio,
+        down_ratio=down_ratio,
+        limit_up_count=limit_up,
+        limit_down_count=int(metrics["limit_down_count"]),
+        max_streak=int(metrics["max_limit_up_streak"]),
+        failed_rate=failed_rate,
+        promotion_rate=promotion_rate,
+    )
+    return {
+        "date": metrics["date"].isoformat(),
+        "score": round(score, 1),
+        "score_change": None,
+        "phase": phase,
+        "phase_label": _sentiment_phase_label(phase),
+        "total_stocks": total,
+        "rise_count": int(metrics["rise_count"]),
+        "fall_count": int(metrics["fall_count"]),
+        "flat_count": int(metrics["flat_count"]),
+        "up_ratio": _round4(up_ratio),
+        "down_ratio": _round4(down_ratio),
+        "limit_up_count": limit_up,
+        "limit_down_count": int(metrics["limit_down_count"]),
+        "limit_up_rate": _round4(limit_up_rate),
+        "limit_down_rate": _round4(limit_down_rate),
+        "failed_limit_up_count": failed,
+        "failed_limit_up_rate": _round4(failed_rate),
+        "max_limit_up_streak": int(metrics["max_limit_up_streak"]),
+        "previous_limit_up_count": previous_limit_up,
+        "promoted_limit_up_count": promoted,
+        "promotion_rate": _round4(promotion_rate),
+        "temporary": bool(metrics.get("temporary")),
+    }
+
+
+def _sentiment_score(
+    *,
+    up_ratio: float | None,
+    down_ratio: float | None,
+    limit_up_count: int,
+    limit_down_count: int,
+    max_streak: int,
+    failed_rate: float | None,
+    promotion_rate: float | None,
+) -> float:
+    if up_ratio is None:
+        return 0.0
+    failed_quality = 1 - min(max(failed_rate if failed_rate is not None else 0.25, 0.0), 1.0)
+    risk_quality = 1 - min(limit_down_count / 50, 1.0)
+    score = 100 * (
+        0.28 * up_ratio
+        + 0.22 * min(limit_up_count / 100, 1.0)
+        + 0.18 * min(max_streak / 7, 1.0)
+        + 0.14 * min(max(promotion_rate if promotion_rate is not None else 0.35, 0.0), 1.0)
+        + 0.10 * failed_quality
+        + 0.08 * risk_quality
+    )
+    score -= min(limit_down_count / 80, 1.0) * 12
+    if down_ratio is not None:
+        score -= max(0.0, down_ratio - up_ratio) * 12
+    return max(0.0, min(100.0, score))
+
+
+def _sentiment_phase(
+    *,
+    score: float,
+    up_ratio: float | None,
+    down_ratio: float | None,
+    limit_up_count: int,
+    limit_down_count: int,
+    max_streak: int,
+    failed_rate: float | None,
+    promotion_rate: float | None,
+) -> str:
+    failed = failed_rate if failed_rate is not None else 0.0
+    if limit_down_count >= 80 or (down_ratio is not None and down_ratio >= 0.70 and score < 45):
+        return "ice"
+    if score >= 72 and limit_up_count >= 50 and max_streak >= 3 and failed <= 0.42 and limit_down_count < 30:
+        return "climax"
+    if limit_down_count >= 30:
+        return "divergence"
+    if failed >= 0.45 and (limit_up_count >= 20 or score >= 50):
+        return "divergence"
+    if promotion_rate is not None and promotion_rate < 0.18 and limit_up_count >= 30:
+        return "divergence"
+    if score >= 55:
+        return "repair"
+    if score >= 38:
+        return "repair"
+    return "ebb"
+
+
+def _sentiment_phase_label(phase: str) -> str:
+    return {
+        "ice": "冰点",
+        "repair": "修复",
+        "divergence": "分歧",
+        "climax": "高潮",
+        "ebb": "退潮",
+    }.get(phase, "未知")
+
+
+def _attach_sentiment_score_changes(points: list[dict[str, Any]]) -> None:
+    previous: float | None = None
+    for point in points:
+        score = _float_or_none(point.get("score"))
+        point["score_change"] = round(score - previous, 1) if score is not None and previous is not None else None
+        previous = score
+
+
+def _build_live_sentiment_point(
+    session,
+    d: date,
+    symbol_state: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    rows = session.execute(
+        select(
+            schema.stocks.c.vt_symbol,
+            schema.stocks.c.name,
+            schema.stocks.c.last_price,
+            schema.stocks.c.change_pct,
+        )
+        .where(schema.stocks.c.change_pct.isnot(None))
+        .where(schema.stocks.c.last_price.isnot(None))
+    ).all()
+    if not rows:
+        return None
+
+    high_map = _load_live_high_map(session, d)
+    metrics = _empty_sentiment_metrics(d)
+    metrics["temporary"] = True
+
+    for vt_symbol, stock_name, last_price, change_pct in rows:
+        vt_symbol = str(vt_symbol)
+        stock_name = str(stock_name or "")
+        change = _float_or_none(change_pct)
+        if change is None:
+            continue
+        state = symbol_state.get(vt_symbol, {})
+        previous_close = _float_or_none(state.get("previous_close"))
+        previous_streak = int(state.get("limit_up_streak") or 0)
+        threshold = _limit_up_threshold(vt_symbol, stock_name)
+        high_change = None
+        if previous_close and vt_symbol in high_map:
+            high_change = (high_map[vt_symbol] / previous_close - 1) * 100
+        is_limit_up = change >= threshold
+        is_limit_down = change <= -threshold
+        touched_limit_up = high_change is not None and high_change >= threshold
+        _add_sentiment_sample(
+            metrics,
+            change=change,
+            is_limit_up=is_limit_up,
+            is_limit_down=is_limit_down,
+            touched_limit_up=touched_limit_up,
+            previous_streak=previous_streak,
+        )
+
+    return _finalize_sentiment_metrics(metrics)
+
+
+def _load_live_high_map(session, d: date) -> dict[str, float]:
+    rows = session.execute(
+        select(
+            schema.stock_minute_bars.c.vt_symbol,
+            func.max(schema.stock_minute_bars.c.high_price).label("high_price"),
+        )
+        .where(
+            schema.stock_minute_bars.c.trade_date == d,
+            schema.stock_minute_bars.c.interval == "1m",
+        )
+        .group_by(schema.stock_minute_bars.c.vt_symbol)
+    ).all()
+    out: dict[str, float] = {}
+    for vt_symbol, high_price in rows:
+        value = _float_or_none(high_price)
+        if value is not None:
+            out[str(vt_symbol)] = value
+    return out
+
+
+def _sentiment_ranges(points: list[dict[str, Any]], lookback: int) -> list[dict[str, Any]]:
+    windows = []
+    for days in (5, 20, lookback):
+        if days not in windows:
+            windows.append(days)
+    ranges: list[dict[str, Any]] = []
+    for days in windows:
+        subset = points[-days:] if days < len(points) else points[:]
+        if not subset:
+            continue
+        scores = [_float_or_none(p.get("score")) for p in subset]
+        scores = [s for s in scores if s is not None]
+        if not scores:
+            continue
+        phase_counts: dict[str, int] = {}
+        for point in subset:
+            phase = str(point.get("phase") or "unknown")
+            phase_counts[phase] = phase_counts.get(phase, 0) + 1
+        dominant_phase = max(phase_counts.items(), key=lambda item: item[1])[0]
+        ranges.append({
+            "label": f"近{min(days, len(subset))}日",
+            "days": len(subset),
+            "start_date": subset[0]["date"],
+            "end_date": subset[-1]["date"],
+            "min_score": round(min(scores), 1),
+            "max_score": round(max(scores), 1),
+            "avg_score": round(sum(scores) / len(scores), 1),
+            "score_change": round(scores[-1] - scores[0], 1) if len(scores) >= 2 else None,
+            "dominant_phase": dominant_phase,
+            "dominant_phase_label": _sentiment_phase_label(dominant_phase),
+        })
+    return ranges
+
+
+def _round4(value: float | None) -> float | None:
+    return round(value, 4) if value is not None else None
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
         return None
 
 

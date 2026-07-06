@@ -88,6 +88,63 @@ export interface SnapshotData {
   message?: string;
 }
 
+export type SentimentPhase = "ice" | "repair" | "divergence" | "climax" | "ebb" | string;
+
+export interface SentimentCyclePoint {
+  date: string;
+  score: number;
+  score_change?: number | null;
+  phase: SentimentPhase;
+  phase_label: string;
+  total_stocks: number;
+  rise_count: number;
+  fall_count: number;
+  flat_count: number;
+  up_ratio?: number | null;
+  down_ratio?: number | null;
+  limit_up_count: number;
+  limit_down_count: number;
+  limit_up_rate?: number | null;
+  limit_down_rate?: number | null;
+  failed_limit_up_count: number;
+  failed_limit_up_rate?: number | null;
+  max_limit_up_streak: number;
+  previous_limit_up_count: number;
+  promoted_limit_up_count: number;
+  promotion_rate?: number | null;
+  temporary?: boolean;
+}
+
+export interface SentimentCycleRange {
+  label: string;
+  days: number;
+  start_date: string;
+  end_date: string;
+  min_score: number;
+  max_score: number;
+  avg_score: number;
+  score_change?: number | null;
+  dominant_phase: SentimentPhase;
+  dominant_phase_label: string;
+}
+
+export interface SentimentCycleData {
+  status: "ready" | "empty" | "unavailable" | string;
+  mode: "live" | "history" | string;
+  trade_date?: string | null;
+  base_daily_date?: string | null;
+  points: SentimentCyclePoint[];
+  ranges: SentimentCycleRange[];
+  current?: SentimentCyclePoint | null;
+  source?: string;
+  temporary_bar?: boolean;
+  latest_minute_time?: string | null;
+  snapshot_updated_at?: string | null;
+  snapshot_trade_time?: string | null;
+  limitations?: string[];
+  message?: string;
+}
+
 export interface RelationItem {
   sector_id: string;
   name?: string;
@@ -146,6 +203,19 @@ export function fetchReplaySnapshot(params: {
   if (params.t2) qs.set("t2", params.t2);
   if (params.flow_period) qs.set("flow_period", params.flow_period);
   return apiClient.get<SnapshotData>(`/mainline-replay/snapshot?${qs.toString()}`);
+}
+
+export function fetchSentimentCycle(params: {
+  date?: string;
+  lookback?: number;
+  include_live?: boolean;
+} = {}) {
+  const qs = new URLSearchParams();
+  if (params.date) qs.set("date", params.date);
+  if (params.lookback) qs.set("lookback", String(params.lookback));
+  if (params.include_live != null) qs.set("include_live", String(params.include_live));
+  const query = qs.toString();
+  return apiClient.get<SentimentCycleData>(`/mainline-replay/sentiment-cycle${query ? `?${query}` : ""}`);
 }
 
 export interface ConceptSearchData {

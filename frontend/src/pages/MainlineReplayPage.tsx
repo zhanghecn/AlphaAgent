@@ -4,8 +4,8 @@
  * 视觉：暗色行情磁带。Signature = 概念指数曲线 + 连续状态带。
  * 结构：时间轴 + 三栏（概念指数榜 / 指数详情 / 成分股+共振）。
  */
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { Activity, CircleSlash, Flame, Radio, Sparkles } from "lucide-react";
 
 import { LoadingState } from "@/components/LoadingState";
@@ -17,11 +17,15 @@ import {
   fetchLiveMainline,
   fetchReplaySnapshot,
   fetchReplayTimeline,
+  fetchSentimentCycle,
   type FlowTop,
   type FlowTopItem,
   type IndexQuote,
   type RelationItem,
   type SectorRankItem,
+  type SentimentCycleData,
+  type SentimentCyclePoint,
+  type SentimentCycleRange,
 } from "@/api/mainlineReplay";
 import { cn, formatAmount, formatPct } from "@/lib/utils";
 
@@ -43,6 +47,23 @@ type ChartShape = {
   last: DrawablePoint;
   min: number;
   max: number;
+};
+type SentimentChartShape = {
+  width: number;
+  height: number;
+  path: string;
+  areaPath: string;
+  points: Array<{ x: number; y: number; point: SentimentCyclePoint }>;
+  first: { x: number; y: number; point: SentimentCyclePoint };
+  last: { x: number; y: number; point: SentimentCyclePoint };
+  step: number;
+  bandY: (score: number) => number;
+};
+type SentimentVersionHeatItem = {
+  lookback: number;
+  data?: SentimentCycleData;
+  loading: boolean;
+  error: boolean;
 };
 
 const FILTERS: Array<{ value: ConceptTapeFilter; label: string }> = [
@@ -74,6 +95,7 @@ export default function MainlineReplayPage() {
     [liveDate, timelineDates],
   );
   const [selectedDate, setSelectedDate] = useState<string>("");
+  const [sentimentLookback, setSentimentLookback] = useState<number>(20);
   useEffect(() => {
     if (dates.length === 0) return;
     if (!selectedDate || !dates.includes(selectedDate)) {
@@ -97,6 +119,17 @@ export default function MainlineReplayPage() {
     queryFn: () => fetchConceptSearch({ q: searchTerm.trim(), trade_date: effectiveDate, period: flowPeriod }),
     enabled: searchTerm.trim().length > 0 && !!effectiveDate,
     staleTime: 60_000,
+  });
+  const sentimentQ = useQuery({
+    queryKey: ["mainlineSentimentCycle", effectiveDate, sentimentLookback, source],
+    queryFn: () => fetchSentimentCycle({
+      date: effectiveDate,
+      lookback: sentimentLookback,
+      include_live: source === "live",
+    }),
+    enabled: !!effectiveDate,
+    staleTime: source === "live" ? 30_000 : 60_000,
+    refetchInterval: source === "live" ? 60_000 : false,
   });
 
   const activeData = source === "live" ? liveQ.data : snapshotQ.data;
@@ -182,6 +215,13 @@ export default function MainlineReplayPage() {
           </>
         )}
       </div>
+
+      <SentimentCyclePanel
+        data={sentimentQ.data}
+        loading={sentimentQ.isLoading}
+        lookback={sentimentLookback}
+        onLookbackChange={setSentimentLookback}
+      />
 
       {/* 主题资金流条带：游资真实看的主题级聚合 */}
       <TopicFlowStrip
@@ -327,6 +367,463 @@ function DateScrubber({
         ))}
       </select>
     </div>
+  );
+}
+
+const SENTIMENT_LOOKBACKS = [20, 60, 120];
+
+function SentimentCyclePanel({
+  data,
+  loading,
+  lookback,
+  onLookbackChange,
+}: {
+  data?: SentimentCycleData;
+  loading: boolean;
+  lookback: number;
+  onLookbackChange: (lookback: number) => void;
+}) {
+  const points = data?.points ?? [];
+  const current = data?.current ?? points[points.length - 1] ?? null;
+  const [hoveredDate, setHoveredDate] = useState<string | null>(null);
+  const [lockedDate, setLockedDate] = useState<string | null>(null);
+  const hoveredPoint = hoveredDate ? points.find((point) => point.date === hoveredDate) ?? null : null;
+  const lockedPoint = lockedDate ? points.find((point) => point.date === lockedDate) ?? null : null;
+  const detailPoint = hoveredPoint ?? lockedPoint ?? current;
+  const detailMode = hoveredPoint ? "hover" : lockedPoint ? "locked" : "current";
+  const versionQueries = useQueries({
+    queries: SENTIMENT_LOOKBACKS.map((days) => ({
+      queryKey: ["mainlineSentimentCycleVersionHeat", lockedDate, days, Boolean(lockedPoint?.temporary)],
+      queryFn: () => fetchSentimentCycle({
+        date: lockedDate ?? undefined,
+        lookback: days,
+        include_live: Boolean(lockedPoint?.temporary),
+      }),
+      enabled: Boolean(lockedDate),
+      staleTime: lockedPoint?.temporary ? 30_000 : 60_000,
+    })),
+  });
+  const versionHeat: SentimentVersionHeatItem[] = SENTIMENT_LOOKBACKS.map((days, index) => ({
+    lookback: days,
+    data: versionQueries[index].data,
+    loading: versionQueries[index].isLoading,
+    error: versionQueries[index].isError,
+  }));
+
+  useEffect(() => {
+    if (!lockedDate || loading || points.length === 0) return;
+    if (!points.some((point) => point.date === lockedDate)) {
+      setLockedDate(null);
+    }
+  }, [lockedDate, loading, points]);
+
+  return (
+    <div className="rounded-lg border bg-card p-3">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-medium">情绪周期</span>
+          {current && <PhasePill phase={current.phase} label={current.phase_label} />}
+          <span className="text-[10px] text-muted-foreground">
+            {data?.mode === "live" ? "实时投影 · 60s 刷新" : "历史日线"}
+          </span>
+        </div>
+        <div className="flex rounded-md border bg-background p-0.5">
+          {SENTIMENT_LOOKBACKS.map((days) => (
+            <button
+              key={days}
+              type="button"
+              onClick={() => onLookbackChange(days)}
+              className={cn(
+                "rounded px-2 py-0.5 text-[11px] transition-colors",
+                lookback === days ? "bg-indigo-500 text-white" : "text-muted-foreground hover:bg-muted",
+              )}
+            >
+              {days}日
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {loading ? (
+        <LoadingState rows={4} />
+      ) : points.length < 2 || !current ? (
+        <div className="rounded-md border border-dashed bg-background/30 px-3 py-5 text-center text-xs text-muted-foreground">
+          暂无情绪周期数据
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_320px]">
+            <SentimentScoreChart
+              points={points}
+              hoveredDate={hoveredDate}
+              selectedDate={lockedDate}
+              onHoverPoint={(point) => setHoveredDate(point?.date ?? null)}
+              onSelectPoint={(point) => setLockedDate(point.date)}
+            />
+            <SentimentPointDetails
+              point={detailPoint}
+              mode={detailMode}
+              locked={Boolean(lockedPoint)}
+              onClearLock={() => setLockedDate(null)}
+            />
+          </div>
+          <SentimentVersionHeat lockedDate={lockedDate} items={versionHeat} />
+          <SentimentRangeSummary ranges={data?.ranges ?? []} lookback={lookback} />
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-muted-foreground">
+            <span>{current.date}</span>
+            <span>样本 {current.total_stocks}</span>
+            {current.temporary && <span className="text-indigo-300">盘中临时点</span>}
+            {data?.latest_minute_time && <span>分钟 {shortDateTime(data.latest_minute_time)}</span>}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function SentimentScoreChart({
+  points,
+  hoveredDate,
+  selectedDate,
+  onHoverPoint,
+  onSelectPoint,
+}: {
+  points: SentimentCyclePoint[];
+  hoveredDate: string | null;
+  selectedDate: string | null;
+  onHoverPoint: (point: SentimentCyclePoint | null) => void;
+  onSelectPoint: (point: SentimentCyclePoint) => void;
+}) {
+  const frameRef = useRef<HTMLDivElement>(null);
+  const chart = buildSentimentChart(points, 640, 210, 14);
+  if (!chart) {
+    return (
+      <div className="flex h-[220px] items-center justify-center rounded-md border bg-background/40 text-xs text-muted-foreground">
+        情绪点不足
+      </div>
+    );
+  }
+  const chartShape = chart;
+  const current = chartShape.points[chartShape.points.length - 1];
+  const rising = (current.point.score_change ?? 0) >= 0;
+  const stroke = rising ? "#ef4444" : "#22c55e";
+  const hoveredCoord = hoveredDate ? chartShape.points.find((item) => item.point.date === hoveredDate) ?? null : null;
+  const selectedCoord = selectedDate ? chartShape.points.find((item) => item.point.date === selectedDate) ?? null : null;
+
+  function nearestPoint(clientX: number) {
+    const rect = frameRef.current?.getBoundingClientRect();
+    if (!rect || rect.width <= 0) return null;
+    const x = ((clientX - rect.left) / rect.width) * chartShape.width;
+    return chartShape.points.reduce((nearest, item) => (
+      Math.abs(item.x - x) < Math.abs(nearest.x - x) ? item : nearest
+    ));
+  }
+
+  function handlePointerMove(event: PointerEvent<HTMLDivElement>) {
+    const nearest = nearestPoint(event.clientX);
+    if (!nearest) return;
+    onHoverPoint(nearest.point);
+  }
+
+  function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
+    const nearest = nearestPoint(event.clientX);
+    if (!nearest) return;
+    onSelectPoint(nearest.point);
+  }
+
+  return (
+    <div className="rounded-md border bg-background/40 p-2">
+      <div
+        ref={frameRef}
+        className="relative h-[220px] cursor-crosshair select-none"
+        onPointerMove={handlePointerMove}
+        onPointerDown={handlePointerDown}
+        onPointerLeave={() => onHoverPoint(null)}
+      >
+        <svg className="h-full w-full" viewBox={`0 0 ${chart.width} ${chart.height}`} preserveAspectRatio="none">
+          <rect x="0" y="0" width={chart.width} height={chart.bandY(72)} fill="#ef4444" opacity="0.06" />
+          <rect x="0" y={chart.bandY(72)} width={chart.width} height={chart.bandY(55) - chart.bandY(72)} fill="#f59e0b" opacity="0.07" />
+          <rect x="0" y={chart.bandY(55)} width={chart.width} height={chart.bandY(35) - chart.bandY(55)} fill="#6366f1" opacity="0.07" />
+          <rect x="0" y={chart.bandY(35)} width={chart.width} height={chart.height - chart.bandY(35)} fill="#22c55e" opacity="0.06" />
+          {[35, 55, 72].map((line) => (
+            <line
+              key={line}
+              x1={0}
+              x2={chart.width}
+              y1={chart.bandY(line)}
+              y2={chart.bandY(line)}
+              stroke="currentColor"
+              className="text-border"
+              strokeDasharray="4 6"
+              strokeWidth={1}
+            />
+          ))}
+          <path d={chart.areaPath} fill={stroke} opacity={0.08} />
+          <path d={chart.path} fill="none" stroke={stroke} strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round" />
+          {chart.points.map((item) => (
+            <rect
+              key={item.point.date}
+              x={item.x - chart.step / 2}
+              y={chart.height - 8}
+              width={Math.max(1, chart.step)}
+              height={8}
+              fill={phaseColor(item.point.phase)}
+              opacity={item.point.temporary ? 0.95 : 0.55}
+            />
+          ))}
+          {selectedCoord && (
+            <>
+              <line
+                x1={selectedCoord.x}
+                x2={selectedCoord.x}
+                y1={10}
+                y2={chart.height - 8}
+                stroke="#a5b4fc"
+                strokeWidth={1.2}
+                strokeDasharray="3 4"
+                opacity={0.9}
+              />
+              <circle cx={selectedCoord.x} cy={selectedCoord.y} r={4.6} fill="hsl(var(--background))" stroke="#a5b4fc" strokeWidth={2} />
+            </>
+          )}
+          {hoveredCoord && (
+            <>
+              <line
+                x1={hoveredCoord.x}
+                x2={hoveredCoord.x}
+                y1={8}
+                y2={chart.height - 8}
+                stroke="currentColor"
+                className="text-foreground"
+                strokeWidth={1}
+                opacity={0.55}
+              />
+              <circle cx={hoveredCoord.x} cy={hoveredCoord.y} r={5} fill={stroke} stroke="hsl(var(--card))" strokeWidth={2} />
+            </>
+          )}
+          <circle cx={current.x} cy={current.y} r={3.8} fill={stroke} stroke="hsl(var(--card))" strokeWidth={2} />
+        </svg>
+        {hoveredCoord && (
+          <div
+            className="pointer-events-none absolute z-10 min-w-[132px] rounded-md border bg-popover px-2 py-1 text-[10px] shadow-sm"
+            style={{
+              left: `min(max(${(hoveredCoord.x / chart.width) * 100}%, 74px), calc(100% - 74px))`,
+              top: hoveredCoord.y > chart.height * 0.55
+                ? `calc(${(hoveredCoord.y / chart.height) * 100}% - 58px)`
+                : `calc(${(hoveredCoord.y / chart.height) * 100}% + 10px)`,
+              transform: "translateX(-50%)",
+            }}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-medium tabular-nums">{hoveredCoord.point.date}</span>
+              <span className="text-muted-foreground">{hoveredCoord.point.phase_label}</span>
+            </div>
+            <div className="mt-0.5 tabular-nums">
+              情绪 {hoveredCoord.point.score.toFixed(1)}
+              <span className={cn("ml-1", (hoveredCoord.point.score_change ?? 0) >= 0 ? "text-rise" : "text-fall")}>
+                {signedNumber(hoveredCoord.point.score_change)}
+              </span>
+            </div>
+            <div className="mt-0.5 text-muted-foreground">
+              涨停 {hoveredCoord.point.limit_up_count} · 跌停 {hoveredCoord.point.limit_down_count}
+            </div>
+          </div>
+        )}
+      </div>
+      <div className="mt-1 flex items-center justify-between text-[10px] text-muted-foreground">
+        <span>{chart.first.point.date}</span>
+        <div className="flex items-center gap-2">
+          <span>35 冰点</span>
+          <span>55 修复</span>
+          <span>72 高潮</span>
+        </div>
+        <span>{chart.last.point.date}</span>
+      </div>
+    </div>
+  );
+}
+
+function SentimentPointDetails({
+  point,
+  mode,
+  locked,
+  onClearLock,
+}: {
+  point: SentimentCyclePoint | null;
+  mode: "hover" | "locked" | "current";
+  locked: boolean;
+  onClearLock: () => void;
+}) {
+  if (!point) {
+    return (
+      <div className="rounded-md border border-dashed bg-background/30 px-3 py-5 text-center text-xs text-muted-foreground">
+        暂无交易日明细
+      </div>
+    );
+  }
+  const modeLabel = mode === "hover" ? "鼠标所指" : mode === "locked" ? "点击锁定" : "当前最新";
+  const scoreTone = point.score_change == null ? undefined : point.score_change >= 0 ? "rise" : "fall";
+
+  return (
+    <div className="rounded-md border bg-background/40 p-2.5">
+      <div className="mb-2 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="font-display text-base font-semibold tabular-nums">{point.date}</span>
+            <PhasePill phase={point.phase} label={point.phase_label} compact />
+          </div>
+          <div className="mt-0.5 text-[10px] text-muted-foreground">
+            {modeLabel} · 样本 {point.total_stocks}
+            {point.temporary ? " · 盘中临时点" : ""}
+          </div>
+        </div>
+        {locked && (
+          <button
+            type="button"
+            onClick={onClearLock}
+            className="shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-muted"
+          >
+            取消锁定
+          </button>
+        )}
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <SentimentMetric label="情绪分" value={point.score.toFixed(1)} tone={scoreTone} />
+        <SentimentMetric label="分数变化" value={signedNumber(point.score_change)} tone={scoreTone} />
+        <SentimentMetric label="涨跌家数" value={`${point.rise_count}/${point.fall_count}`} />
+        <SentimentMetric label="涨跌占比" value={`${fmtRate(point.up_ratio)}/${fmtRate(point.down_ratio)}`} />
+        <SentimentMetric label="涨停/跌停" value={`${point.limit_up_count}/${point.limit_down_count}`} tone={point.limit_down_count > 20 ? "fall" : "rise"} />
+        <SentimentMetric label="炸板率" value={fmtRate(point.failed_limit_up_rate)} tone={(point.failed_limit_up_rate ?? 0) >= 0.4 ? "fall" : undefined} />
+        <SentimentMetric label="连板高度" value={`${point.max_limit_up_streak || 0}板`} tone={point.max_limit_up_streak >= 3 ? "rise" : undefined} />
+        <SentimentMetric label="晋级率" value={`${point.promoted_limit_up_count}/${point.previous_limit_up_count} · ${fmtRate(point.promotion_rate)}`} tone={(point.promotion_rate ?? 0) >= 0.35 ? "rise" : undefined} />
+      </div>
+    </div>
+  );
+}
+
+function SentimentVersionHeat({
+  lockedDate,
+  items,
+}: {
+  lockedDate: string | null;
+  items: SentimentVersionHeatItem[];
+}) {
+  if (!lockedDate) {
+    return (
+      <div className="mt-3 rounded-md border border-dashed bg-background/30 px-3 py-2 text-[11px] text-muted-foreground">
+        未锁定交易日；锁定后显示 20/60/120 日版本热度。
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-3">
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <span className="text-xs font-medium">版本周期热度</span>
+        <span className="text-[10px] tabular-nums text-muted-foreground">{lockedDate}</span>
+      </div>
+      <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+        {items.map((item) => {
+          const range = largestSentimentRange(item.data?.ranges ?? []);
+          const latestPoint = item.data?.points ? item.data.points[item.data.points.length - 1] : null;
+          const latest = item.data?.current ?? latestPoint;
+          return (
+            <div key={item.lookback} className="rounded-md border bg-background/40 px-2.5 py-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] text-muted-foreground">{item.lookback}日版</span>
+                {range ? (
+                  <PhasePill phase={range.dominant_phase} label={range.dominant_phase_label} compact />
+                ) : (
+                  <span className="text-[10px] text-muted-foreground">{item.loading ? "加载中" : item.error ? "失败" : "--"}</span>
+                )}
+              </div>
+              <div className="mt-1 flex items-end justify-between gap-2">
+                <span className="font-display text-base font-semibold tabular-nums">
+                  {range ? range.avg_score.toFixed(1) : "--"}
+                </span>
+                <span className={cn("text-[11px] tabular-nums", (range?.score_change ?? 0) >= 0 ? "text-rise" : "text-fall")}>
+                  {range ? signedNumber(range.score_change) : "--"}
+                </span>
+              </div>
+              <div className="mt-0.5 text-[10px] tabular-nums text-muted-foreground">
+                {range ? `${range.start_date} - ${range.end_date}` : "无区间"}
+              </div>
+              <div className="mt-0.5 text-[10px] text-muted-foreground">
+                {range ? `区间 ${range.min_score.toFixed(1)}-${range.max_score.toFixed(1)}` : "区间 --"}
+                {latest ? ` · 当日 ${latest.score.toFixed(1)}` : ""}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function SentimentRangeSummary({ ranges, lookback }: { ranges: SentimentCycleRange[]; lookback: number }) {
+  if (ranges.length === 0) return null;
+  return (
+    <div className="mt-3">
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <span className="text-xs font-medium">当前版本区间</span>
+        <span className="text-[10px] text-muted-foreground">{lookback}日</span>
+      </div>
+      <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+      {ranges.slice(0, 3).map((range) => (
+        <div key={range.label} className="rounded-md border bg-background/40 px-2.5 py-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] text-muted-foreground">{range.label}</span>
+            <PhasePill phase={range.dominant_phase} label={range.dominant_phase_label} compact />
+          </div>
+          <div className="mt-1 flex items-end justify-between gap-2">
+            <span className="font-display text-base font-semibold tabular-nums">{range.avg_score.toFixed(1)}</span>
+            <span className={cn("text-[11px] tabular-nums", (range.score_change ?? 0) >= 0 ? "text-rise" : "text-fall")}>
+              {signedNumber(range.score_change)}
+            </span>
+          </div>
+          <div className="mt-0.5 text-[10px] text-muted-foreground">
+            {range.min_score.toFixed(1)} - {range.max_score.toFixed(1)}
+          </div>
+        </div>
+      ))}
+      </div>
+    </div>
+  );
+}
+
+function largestSentimentRange(ranges: SentimentCycleRange[]): SentimentCycleRange | null {
+  if (ranges.length === 0) return null;
+  return ranges.reduce((largest, range) => (range.days > largest.days ? range : largest), ranges[0]);
+}
+
+function SentimentMetric({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone?: "rise" | "fall";
+}) {
+  return (
+    <div className="rounded-md border bg-background/40 px-2 py-1.5">
+      <div className="text-[10px] text-muted-foreground">{label}</div>
+      <div className={cn("mt-0.5 font-display text-sm font-semibold tabular-nums", tone === "rise" && "text-rise", tone === "fall" && "text-fall")}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function PhasePill({ phase, label, compact = false }: { phase: string; label: string; compact?: boolean }) {
+  return (
+    <span className={cn(
+      "inline-flex shrink-0 items-center rounded-md border px-1.5 py-0.5 font-medium",
+      compact ? "text-[10px]" : "text-[11px]",
+      phaseClass(phase),
+    )}>
+      {label}
+    </span>
   );
 }
 
@@ -965,6 +1462,66 @@ function fmt1(v: number | null | undefined): string {
 }
 function fmtRatio(v: number | null | undefined): string {
   return v == null ? "--" : `${v.toFixed(2)}x`;
+}
+
+function buildSentimentChart(
+  points: SentimentCyclePoint[],
+  width: number,
+  height: number,
+  padding: number,
+): SentimentChartShape | null {
+  const drawable = points
+    .filter((point) => point.date && Number.isFinite(point.score))
+    .slice(-180);
+  if (drawable.length < 2) return null;
+  const xSpan = width - padding * 2;
+  const ySpan = height - padding * 2;
+  const bandY = (score: number) => padding + (1 - Math.min(100, Math.max(0, score)) / 100) * ySpan;
+  const coords = drawable.map((point, index) => {
+    const x = padding + (xSpan * index) / (drawable.length - 1);
+    const y = bandY(point.score);
+    return { x, y, point };
+  });
+  const path = coords.map((coord, index) => `${index === 0 ? "M" : "L"} ${coord.x.toFixed(2)} ${coord.y.toFixed(2)}`).join(" ");
+  const first = coords[0];
+  const last = coords[coords.length - 1];
+  const areaPath = `${path} L ${last.x.toFixed(2)} ${height - padding} L ${first.x.toFixed(2)} ${height - padding} Z`;
+  return {
+    width,
+    height,
+    path,
+    areaPath,
+    points: coords,
+    first,
+    last,
+    step: xSpan / Math.max(1, drawable.length - 1),
+    bandY,
+  };
+}
+
+function phaseClass(phase: string): string {
+  if (phase === "climax") return "border-rise/35 bg-rise/10 text-rise";
+  if (phase === "divergence") return "border-amber-400/35 bg-amber-400/10 text-amber-300";
+  if (phase === "repair") return "border-indigo-400/35 bg-indigo-500/10 text-indigo-200";
+  if (phase === "ice") return "border-fall/35 bg-fall/10 text-fall";
+  return "border-border bg-background/60 text-muted-foreground";
+}
+
+function phaseColor(phase: string): string {
+  if (phase === "climax") return "#ef4444";
+  if (phase === "divergence") return "#f59e0b";
+  if (phase === "repair") return "#6366f1";
+  if (phase === "ice") return "#22c55e";
+  return "#64748b";
+}
+
+function fmtRate(v: number | null | undefined): string {
+  return v == null ? "--" : `${Math.round(v * 100)}%`;
+}
+
+function signedNumber(v: number | null | undefined): string {
+  if (v == null) return "--";
+  return `${v > 0 ? "+" : ""}${v.toFixed(1)}`;
 }
 
 function shortDateTime(value: string | null | undefined): string {

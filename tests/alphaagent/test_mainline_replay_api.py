@@ -110,6 +110,53 @@ def test_live_unavailable_when_db_off(monkeypatch):
     assert body["data"]["status"] == "unavailable"
 
 
+def test_sentiment_cycle_unavailable_when_db_off(monkeypatch):
+    _disable_db(monkeypatch)
+    client = TestClient(create_app())
+    res = client.get("/api/mainline-replay/sentiment-cycle")
+    body = res.json()
+    assert res.status_code == 200
+    assert body["success"] is True
+    assert body["data"]["status"] == "unavailable"
+
+
+def test_sentiment_cycle_points_track_short_term_metrics():
+    d0 = date(2026, 6, 24)
+    d1 = date(2026, 6, 25)
+    d2 = date(2026, 6, 26)
+    rows = [
+        ("AAA.SSE", "甲股票", d0, 10.0, 10.0, None),
+        ("AAA.SSE", "甲股票", d1, 11.0, 11.0, 10.0),
+        ("AAA.SSE", "甲股票", d2, 12.1, 12.1, 10.0),
+        ("BBB.SSE", "乙股票", d0, 10.0, 10.0, None),
+        ("BBB.SSE", "乙股票", d1, 10.9, 11.1, 9.0),
+        ("BBB.SSE", "乙股票", d2, 9.9, 10.1, -9.17),
+        ("CCC.SSE", "丙股票", d0, 10.0, 10.0, None),
+        ("CCC.SSE", "丙股票", d1, 9.0, 9.5, -10.0),
+        ("CCC.SSE", "丙股票", d2, 9.45, 9.45, 5.0),
+    ]
+
+    points, state = mainline_replay._build_sentiment_cycle_points(rows, [d1, d2])
+
+    assert len(points) == 2
+    assert points[0]["date"] == "2026-06-25"
+    assert points[0]["rise_count"] == 2
+    assert points[0]["fall_count"] == 1
+    assert points[0]["limit_up_count"] == 1
+    assert points[0]["failed_limit_up_count"] == 1
+    assert points[0]["limit_down_count"] == 1
+    assert points[0]["max_limit_up_streak"] == 1
+    assert points[0]["promotion_rate"] is None
+
+    assert points[1]["limit_up_count"] == 1
+    assert points[1]["previous_limit_up_count"] == 1
+    assert points[1]["promoted_limit_up_count"] == 1
+    assert points[1]["promotion_rate"] == 1.0
+    assert points[1]["max_limit_up_streak"] == 2
+    assert points[1]["score_change"] is not None
+    assert state["AAA.SSE"]["limit_up_streak"] == 2
+
+
 def test_live_uses_latest_sector_fund_flow_date(monkeypatch):
     captured: list[str] = []
 
