@@ -14,6 +14,8 @@ import {
   fetchStockDetail,
   fetchStockSnapshot,
   fetchStockBusiness,
+  fetchStockLeaderIdentity,
+  type LeaderIdentity,
 } from "@/api/stocks";
 import { fetchConceptCards } from "@/api/research";
 import { fetchLimitPools } from "@/api/market";
@@ -69,6 +71,7 @@ import {
   ArrowRight,
   TrendingUp,
   BarChart3,
+  Crown,
 } from "lucide-react";
 
 const STOCK_DETAIL_REVIEW_START = "2025-03-26";
@@ -104,6 +107,14 @@ export function StockDetailPage() {
   const businessQuery = useQuery({
     queryKey: ["stock-business", vtSymbol],
     queryFn: () => fetchStockBusiness(vtSymbol!),
+    enabled: !!vtSymbol,
+  });
+
+  // 龙头身份 — 该股在行业概念里的综合分排名（市值+成交额+20日涨幅）
+  const leaderIdentityQuery = useQuery({
+    queryKey: ["stock-leader-identity", vtSymbol],
+    queryFn: () => fetchStockLeaderIdentity(vtSymbol!),
+    staleTime: 60_000,
     enabled: !!vtSymbol,
   });
 
@@ -348,6 +359,7 @@ export function StockDetailPage() {
       <IdentityCard
         conceptData={concepts}
         isLoading={conceptQuery.isLoading}
+        leaderIdentity={leaderIdentityQuery.data}
       />
 
       <SingleStockBacktestPanel
@@ -1897,9 +1909,11 @@ function executionModeLabel(mode?: string | null) {
 function IdentityCard({
   conceptData,
   isLoading,
+  leaderIdentity,
 }: {
   conceptData: StockConceptCardsResponse | undefined;
   isLoading: boolean;
+  leaderIdentity?: LeaderIdentity;
 }) {
   if (isLoading) return <LoadingState rows={3} />;
 
@@ -1931,6 +1945,9 @@ function IdentityCard({
 
       {/* ── 概念解读面板 ── */}
       {hint && hint.main_identity && <ConceptHintPanel hint={hint} />}
+
+      {/* ── 龙头身份（行业综合分排名）── */}
+      <LeaderIdentityBlock identity={leaderIdentity} />
 
       {/* Shenwan industry path */}
       {shenwan && (shenwan.level1 || shenwan.level2 || shenwan.level3) && (
@@ -1992,6 +2009,92 @@ function IdentityCard({
         </div>
       )}
     </section>
+  );
+}
+
+// ── Leader Identity Block (龙头身份) ────────────────────────────────────
+// 展示该股在所属「行业」概念里的综合分排名。龙一/龙二/龙三用金/银/铜徽章，
+// 龙四及以后灰色淡化展示「在大行业里排第几」。点击跳转对应概念页。
+
+function LeaderBadge({ rank }: { rank: number }) {
+  const label = (["龙一", "龙二", "龙三"] as const)[rank - 1] ?? `龙${rank}`;
+  const colorClass =
+    rank === 1
+      ? "bg-amber-100 text-amber-700 border-amber-300 dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-700"
+      : rank === 2
+        ? "bg-slate-200 text-slate-700 border-slate-300 dark:bg-slate-700/50 dark:text-slate-200 dark:border-slate-600"
+        : rank === 3
+          ? "bg-orange-100 text-orange-700 border-orange-300 dark:bg-orange-900/40 dark:text-orange-300 dark:border-orange-700"
+          : "bg-muted text-muted-foreground border-border";
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded border px-1.5 py-0.5 text-[11px] font-bold leading-none",
+        colorClass,
+      )}
+    >
+      {label}
+    </span>
+  );
+}
+
+function LeaderIdentityBlock({ identity }: { identity?: LeaderIdentity }) {
+  if (!identity || !identity.has_leader_identity) return null;
+  const leaders = identity.leader_concepts ?? [];
+  if (leaders.length === 0) return null;
+
+  const leaderCount = leaders.filter((c) => c.is_leader).length;
+
+  return (
+    <div className="mb-4 rounded-lg border border-primary/25 bg-gradient-to-br from-primary/5 to-transparent px-4 py-3">
+      <div className="mb-2 flex items-center gap-1.5">
+        <Crown size={14} className="text-amber-500" />
+        <span className="text-xs font-semibold">龙头身份</span>
+        <span className="text-xs text-muted-foreground">
+          {leaderCount > 0
+            ? `${leaderCount} 个行业的龙头`
+            : `在 ${leaders.length} 个行业的位次`}
+        </span>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        {leaders.map((c) => (
+          <Link
+            key={c.sector_id}
+            to={`/explore?sector=${encodeURIComponent(c.sector_id)}`}
+            title={`${c.concept} · 综合分排第 ${c.rank}/${c.total}`}
+            className={cn(
+              "group flex items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors hover:bg-muted/70",
+              c.is_leader
+                ? "border-primary/40 bg-card"
+                : "border-border bg-muted/20 opacity-75",
+            )}
+          >
+            <LeaderBadge rank={c.rank} />
+            <span className="font-medium">{c.concept}</span>
+            <span className="text-xs text-muted-foreground tabular-nums">
+              {c.rank}/{c.total}
+            </span>
+            {c.stock_change_pct != null && (
+              <span className={cn("text-xs tabular-nums", priceColorClass(c.stock_change_pct))}>
+                {formatPct(c.stock_change_pct)}
+              </span>
+            )}
+          </Link>
+        ))}
+      </div>
+
+      {identity.main_products && identity.main_products.length > 0 && (
+        <div className="mt-2.5 flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+          <span>主营</span>
+          {identity.main_products.slice(0, 6).map((p, i) => (
+            <span key={i} className="rounded bg-muted/70 px-1.5 py-0.5">
+              {p}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

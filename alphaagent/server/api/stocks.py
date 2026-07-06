@@ -13,6 +13,7 @@ from alphaagent.server.core.config import get_settings
 from alphaagent.server.core.responses import fail, ok
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import is_database_configured, session_scope
+from alphaagent.server.services.leaderboard_service import compute_leader_identity
 
 router = APIRouter(prefix="/stocks", tags=["stocks"])
 
@@ -305,6 +306,41 @@ def stock_industry_chain(vt_symbol: str):
         return ok(market_client.stock_industry_chain(symbol, exchange))
     except Exception as exc:
         return ok(empty_industry_chain(vt_symbol, exc))
+
+
+@router.get("/{vt_symbol}/leader-identity", response_model=None)
+def stock_leader_identity(vt_symbol: str):
+    """龙头身份：该股在哪些概念里综合分进 Top3 + 主营产品。
+
+    复用 leaderboard_service 的概念内三因子打分，以及现有 stock_business
+    数据返回主营产品，让前端身份卡自包含渲染。
+    """
+
+    symbol, exchange = parse_vt_symbol(vt_symbol)
+    # 归一化成数据库存储格式（.SSE/.SZSE/.BSE），兼容前端传入的 .SH/.SZ 等
+    normalized_vts = build_vt_symbol(symbol, exchange)
+    try:
+        identity = compute_leader_identity(normalized_vts)
+    except Exception:
+        identity = {
+            "vt_symbol": vt_symbol,
+            "has_leader_identity": False,
+            "leader_concepts": [],
+            "data_quality": {"reason": "compute_error"},
+        }
+
+    # 主营产品（复用 business 数据），身份卡自包含
+    try:
+        market_client = client()
+        resolved_symbol, resolved_exchange = resolve_symbol_exchange(market_client, symbol, exchange)
+        business = market_client.stock_business(resolved_symbol, resolved_exchange)
+        identity["main_products"] = business.get("main_products") or []
+        identity["business_summary"] = business.get("summary")
+    except Exception:
+        identity.setdefault("main_products", [])
+        identity.setdefault("business_summary", None)
+
+    return ok(identity)
 
 
 @router.get("/{vt_symbol}/snapshot", response_model=None)

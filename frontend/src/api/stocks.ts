@@ -67,3 +67,37 @@ export function fetchStockSnapshot(vtSymbol: string, date?: string | null) {
     `/stocks/${encodeURIComponent(vtSymbol)}/snapshot${search ? `?${search}` : ""}`,
   );
 }
+
+// ── 龙头身份 (leader-identity) ────────────────────────────────────────
+// 该股在所属「行业」概念里的综合分排名（市值+成交额+20日涨幅加权）。
+// is_leader=true 表示龙一/龙二/龙三，前端用奖牌标识；false 用灰色展示「在大行业排第几」。
+
+export interface LeaderConcept {
+  sector_id: string;
+  concept: string;
+  concept_type: string;
+  rank: number;
+  total: number;
+  score: number;
+  is_leader: boolean;
+  stock_change_pct: number | null;
+}
+
+export interface LeaderIdentity {
+  vt_symbol: string;
+  has_leader_identity: boolean;
+  leader_concepts: LeaderConcept[];
+  main_products?: string[];
+  business_summary?: string | null;
+  data_quality: {
+    scanned_concepts?: number;
+    skipped_small?: number;
+    reason?: string;
+  };
+}
+
+export function fetchStockLeaderIdentity(vtSymbol: string) {
+  return apiClient.get<LeaderIdentity>(
+    `/stocks/${encodeURIComponent(vtSymbol)}/leader-identity`,
+  );
+}
