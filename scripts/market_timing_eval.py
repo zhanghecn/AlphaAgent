@@ -65,12 +65,16 @@ def main() -> int:
             flush=True,
         )
 
-        print("检测信号事件(边沿触发) ...", flush=True)
+        print("检测信号事件(v4 候选+确认两状态) ...", flush=True)
         events = sig.detect_events(factor_seq, closes)
         gold = [e for e in events if e.direction == "GOLD"]
         silver = [e for e in events if e.direction == "SILVER"]
+        confirmed = [e for e in events if e.status == sig.STATUS_CONFIRMED]
+        invalidated = [e for e in events if e.status == sig.STATUS_INVALIDATED]
+        pending = [e for e in events if e.status == sig.STATUS_PENDING]
         print(
-            f"  事件 {len(events)} 个: 金手指={len(gold)} 银手指={len(silver)}",
+            f"  事件 {len(events)} 个: 金手指={len(gold)} 银手指={len(silver)} | "
+            f"已确认={len(confirmed)} 假突破否决={len(invalidated)} 待确认={len(pending)}",
             flush=True,
         )
 
@@ -83,7 +87,7 @@ def main() -> int:
 
 def _print_report(report: dict) -> None:
     print("\n" + "=" * 82)
-    print("金手指/银手指 准确率矩阵 (边沿触发事件)")
+    print("金手指/银手指 准确率矩阵 (v4 候选+确认两状态, 主表只算 CONFIRMED)")
     print("=" * 82)
     print(f"样本区间: {report['series_start']} ~ {report['series_end']}")
     header = f"{'方向':<7}{'档位':<8}{'周期':>5}{'次数':>6}{'胜率':>8}{'95%CI':>15}{'均收益':>10}{'最差':>9}"
@@ -119,7 +123,21 @@ def _print_report(report: dict) -> None:
             parts.append(f"{mark}{d[0]}{g[0]}{h}d={w}/{t}")
         print(f"  {label}: " + " ".join(parts))
 
-    print(f"\n事件总数 {report['n_events']} | 评估行数 {report['n_evaluable']}")
+    print(
+        f"\n事件总数 {report['n_events']} | "
+        f"已确认 {report.get('n_confirmed', 0)} | 假突破否决 {report.get('n_invalidated', 0)} | "
+        f"待确认 {report.get('n_pending', 0)} | 评估行数 {report['n_evaluable']}"
+    )
+    inval = report.get("invalidated_summary") or {}
+    if inval:
+        print("\n--- 假突破候选后续表现(对比 CONFIRMED, 揭示次日确认是否真有预测力) ---")
+        for h in (5, 10, 20):
+            row = inval.get(h)
+            if row:
+                print(
+                    f"  {h}日: 样本 {row['count']} | 均收益 {row['avg_return']:+.2f}% | "
+                    f"方向命中率 {row['win_rate'] * 100:.0f}%"
+                )
 
 
 if __name__ == "__main__":

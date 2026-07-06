@@ -3,6 +3,8 @@ import { apiClient } from "./client";
 /** 金手指=看多 / 银手指=看空 / 中性观望 */
 export type TimingDirection = "GOLD" | "SILVER" | "NEUTRAL";
 export type TimingGrade = "STRONG" | "MEDIUM" | "WEAK" | "";
+/** v4 候选确认状态: CONFIRMED 已确认 / INVALIDATED 假突破否决 / PENDING 待确认 */
+export type TimingStatus = "CONFIRMED" | "INVALIDATED" | "PENDING";
 
 export interface TimingFactors {
   trend: number;
@@ -25,8 +27,10 @@ export interface TimingOverview {
   is_intraday?: boolean;
   latest_signal: {
     direction: TimingDirection;
+    status: TimingStatus;
     grade: TimingGrade;
     date: string;
+    confirm_date: string | null;
     bull_force: number;
     bear_force: number;
   } | null;
@@ -35,7 +39,9 @@ export interface TimingOverview {
 export interface TimingSignal {
   date: string;
   direction: TimingDirection;
+  status: TimingStatus;
   grade: TimingGrade;
+  confirm_date: string | null;
   bull_force: number;
   bear_force: number;
   phase: string;
@@ -76,6 +82,14 @@ export interface TimingAccuracy {
   random_baseline: Record<string, number>;
   buy_hold_return_pct: number | null;
   n_events: number;
+  n_confirmed?: number;
+  n_invalidated?: number;
+  n_pending?: number;
+  /** 假突破候选的后续收益(按 horizon), 揭示次日确认是真预测力还是数据窥视 */
+  invalidated_summary?: Record<
+    number,
+    { count: number; avg_return: number; win_rate: number }
+  >;
   silver_caveat: string;
 }
 

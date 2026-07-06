@@ -16,7 +16,12 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from alphaagent.server.services.quant.market_timing.series import CompositeBar
-from alphaagent.server.services.quant.market_timing.signal import TimingSignal
+from alphaagent.server.services.quant.market_timing.signal import (
+    STATUS_CONFIRMED,
+    STATUS_INVALIDATED,
+    STATUS_PENDING,
+    TimingSignal,
+)
 
 HORIZONS = (5, 10, 20)
 _BOOT_SEED = 20260701  # 固定种子, 保证可复现(Math.random 在 workflow 外可用)
@@ -146,11 +151,48 @@ def _split_winrate(rows: list[dict], split_date: date) -> dict[str, dict[tuple[s
     return out
 
 
+def _summarize_by_horizon(
+    events: list[TimingSignal], series: list[CompositeBar]
+) -> dict[int, dict]:
+    """按 horizon 汇总事件的平均收益/胜率(从候选日起算)。
+
+    用于 INVALIDATED 摘要: 揭示假突破候选的后续表现。
+    对比 CONFIRMED 收益 → 若 INVALIDATED 显著差, 次日确认是真预测力;
+    若两组差不多, 次日确认是数据窥视。让数据说话, 回应循环论证质疑。
+    """
+    if not events:
+        return {}
+    rows = _evaluate_rows(events, series)
+    out: dict[int, dict] = {}
+    for h in HORIZONS:
+        sub = [r for r in rows if r["horizon"] == h]
+        if not sub:
+            continue
+        rets = [r["return"] for r in sub]
+        corrects = [r["correct"] for r in sub]
+        out[h] = {
+            "count": len(sub),
+            "avg_return": round(sum(rets) / len(rets), 4),
+            "win_rate": round(sum(corrects) / len(corrects), 4),
+        }
+    return out
+
+
 def evaluate(
     events: list[TimingSignal], series: list[CompositeBar]
 ) -> dict:
-    """完整准确率评估。返回矩阵 + 基准 + 时间切分。"""
-    rows = _evaluate_rows(events, series)
+    """完整准确率评估。
+
+    v4 候选+确认两状态后:
+    - 主 buckets 只算 CONFIRMED(已确认信号), 与历史语义一致
+    - invalidated_summary 揭示假突破候选的后续收益(从候选日起算)
+      → 对比两组: 若 INVALIDATED 显著差, 次日确认有效; 若差不多, 数据窥视
+    """
+    confirmed = [e for e in events if e.status == STATUS_CONFIRMED]
+    invalidated = [e for e in events if e.status == STATUS_INVALIDATED]
+    pending = [e for e in events if e.status == STATUS_PENDING]
+
+    rows = _evaluate_rows(confirmed, series)
     buckets = _build_buckets(rows)
 
     # 时间切分: 前 80% 为训练段(调阈值), 后 20% 为样本外
@@ -168,7 +210,11 @@ def evaluate(
         "split_date": split_date,
         "split_winrate": split_stats,
         "n_events": len(events),
+        "n_confirmed": len(confirmed),
+        "n_invalidated": len(invalidated),
+        "n_pending": len(pending),
         "n_evaluable": len(rows),
+        "invalidated_summary": _summarize_by_horizon(invalidated, series),
         "series_start": series[0].trade_date if series else None,
         "series_end": series[-1].trade_date if series else None,
     }

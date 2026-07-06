@@ -22,7 +22,9 @@ from alphaagent.server.services.quant.market_timing import series as ser
 from alphaagent.server.services.quant.market_timing import signal as sig
 
 PANEL_START = date(2024, 5, 28)  # 指数数据起点
-_CACHE_TTL = 1800  # 内存缓存 30 分钟
+def _cache_ttl() -> int:
+    """内存缓存 TTL: 盘中 5min(实时预警新鲜), 盘后 30min(日线一天一变)。"""
+    return 300 if _is_intraday_china() else 1800
 PANEL_FRESH_HOURS = 24  # 库内 panel 24h 内视为新鲜(日线数据一天一变)
 INDEX_FOR_CHART = "000001.SSE"  # 前端主图用上证指数(主人最熟悉)
 PHASE_LABELS = {
@@ -138,8 +140,12 @@ def _build_overview(latest: Any, latest_signal: Any, index_bars: list[dict]) -> 
         "latest_signal": (
             {
                 "direction": latest_signal.direction,
+                "status": latest_signal.status,
                 "grade": latest_signal.grade,
                 "date": str(latest_signal.trade_date),
+                "confirm_date": (
+                    str(latest_signal.confirm_date) if latest_signal.confirm_date else None
+                ),
                 "bull_force": latest_signal.bull_force,
                 "bear_force": latest_signal.bear_force,
             }
@@ -158,7 +164,9 @@ def _build_chart(index_bars: list[dict], comp: list, events: list) -> dict:
             {
                 "date": str(e.trade_date),
                 "direction": e.direction,
+                "status": e.status,
                 "grade": e.grade,
+                "confirm_date": str(e.confirm_date) if e.confirm_date else None,
                 "bull_force": e.bull_force,
                 "bear_force": e.bear_force,
                 "phase": e.phase,
@@ -190,6 +198,10 @@ def _build_accuracy(acc: dict) -> dict:
             round(acc["buy_hold_return_pct"], 2) if acc["buy_hold_return_pct"] is not None else None
         ),
         "n_events": acc["n_events"],
+        "n_confirmed": acc.get("n_confirmed", 0),
+        "n_invalidated": acc.get("n_invalidated", 0),
+        "n_pending": acc.get("n_pending", 0),
+        "invalidated_summary": acc.get("invalidated_summary") or {},
         "silver_caveat": (
             "样本期(2024-05~2026-06)为单边牛市(+71%), 缺乏真正顶部, "
             "银手指准确率仅供参考, 需更长含熊市数据验证"
@@ -209,9 +221,18 @@ def _compute_panel(session: Any, schema: Any) -> dict:
     comp = ser.load_composite_series(session, schema, PANEL_START, end)
     if not comp:
         return {"empty": True}
+    # 盘中: DB 还没今天日线时, 追加七大指数实时合成的今天 bar(实时预警)
+    today = _china_today()
+    if isinstance(last, date) and last < today:
+        today_bar = ser.intraday_today_bar(comp[-1].close, comp[-1].turnover)
+        if today_bar is not None:
+            comp = comp + [today_bar]
     dates = [b.trade_date for b in comp]
     ctx_map = compute_market_contexts(session, schema, dates)
     ctx_list = [ctx_map.get(d) for d in dates]
+    # 盘中今天 ctx 用昨天近似(广度滞后, 够预警; trend/momentum/structure/volume 仍用今天实时 close)
+    if len(ctx_list) >= 2 and ctx_list[-1] is None and ctx_list[-2] is not None:
+        ctx_list[-1] = ctx_list[-2]
     closes = [b.close for b in comp]
     turns = [b.turnover for b in comp]
     factor_seq = []
@@ -226,7 +247,10 @@ def _compute_panel(session: Any, schema: Any) -> dict:
     index_bars = _load_index_ohlcv(session, schema, INDEX_FOR_CHART, PANEL_START, end)
 
     latest = factor_seq[-1] if factor_seq else None
-    latest_signal = events[-1] if events else None  # 边沿触发: 最后一次方向切换 = 当前应做方向
+    # 当前应做方向 = 最后一个已确认(CONFIRMED)信号; PENDING/INVALIDATED 不代表当前持仓
+    latest_signal = next(
+        (e for e in reversed(events) if e.status == sig.STATUS_CONFIRMED), None
+    ) if events else None
 
     return {
         "overview": _build_overview(latest, latest_signal, index_bars),
@@ -241,10 +265,10 @@ def _base_panel(session: Any, schema: Any, force_refresh: bool = False) -> dict:
     """基础面板(三层缓存: 内存 30min → 库 24h → 现算+落库), 不含盘中实时 overlay。
     内存命中 <1ms; 库命中 <100ms; 现算+落库 ~16s(仅首次/过期/force)。"""
     now = time.time()
-    if not force_refresh and _cache["panel"] and now - _cache["ts"] < _CACHE_TTL:
+    if not force_refresh and _cache["panel"] and now - _cache["ts"] < _cache_ttl():
         return _cache["panel"]
     with _lock:
-        if not force_refresh and _cache["panel"] and time.time() - _cache["ts"] < _CACHE_TTL:
+        if not force_refresh and _cache["panel"] and time.time() - _cache["ts"] < _cache_ttl():
             return _cache["panel"]
         # 库内 panel 新鲜则直接读(避免现算)
         if not force_refresh:
@@ -321,3 +345,27 @@ def get_market_timing_panel(session: Any, schema: Any, force_refresh: bool = Fal
     盘中交易时段再 overlay 今天实时点位到 chart 最新K线 + overview。
     """
     return _overlay_intraday(_base_panel(session, schema, force_refresh))
+
+
+def start_intraday_refresher() -> None:
+    """启动后台 daemon thread: 盘中每 5min force_refresh panel。
+
+    保证主人访问 /market 读到的缓存 ≤5min 新鲜(含今天实时候选)。
+    非交易时段空转 sleep; 失败静默(下次 5min 重试), 不影响主服务。
+    在 main.py lifespan 启动一次即可。
+    """
+    def _loop() -> None:
+        # 函数内 import 避免模块加载期循环依赖
+        from alphaagent.server.db import schema as _schema
+        from alphaagent.server.db.session import session_scope
+
+        while True:
+            try:
+                if _is_intraday_china():
+                    with session_scope() as session:
+                        get_market_timing_panel(session, _schema, force_refresh=True)
+            except Exception:  # noqa: BLE001  后台任务不能挂
+                pass
+            time.sleep(300)
+
+    threading.Thread(target=_loop, daemon=True, name="intraday-mt-refresh").start()

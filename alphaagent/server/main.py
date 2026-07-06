@@ -10,6 +10,7 @@ from alphaagent.server.core.config import get_settings
 from alphaagent.server.services.portfolio.groups import ensure_default_groups
 from alphaagent.server.services.data_sync import ensure_sync_schema, start_data_sync_scheduler
 from alphaagent.market.warmup import start_market_cache_warmup
+from alphaagent.server.services.quant.market_timing.panel import start_intraday_refresher
 
 
 def create_app() -> FastAPI:
@@ -25,6 +26,7 @@ def create_app() -> FastAPI:
         except Exception:
             pass
         start_market_cache_warmup(timeout=settings.market_timeout_seconds)
+        start_intraday_refresher()  # 盘中每 5min 自动 refresh market-timing panel(实时预警)
         yield
 
     app = FastAPI(title="AlphaAgent API", version="0.1.0", lifespan=lifespan)

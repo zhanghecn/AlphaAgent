@@ -1,37 +1,43 @@
-import { type AccuracyBucket, type TimingAccuracy } from "@/api/marketTiming";
+import { type AccuracyBucket, type TimingDirection, type TimingAccuracy } from "@/api/marketTiming";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
 const HORIZONS = [5, 10, 20] as const;
 
-/** 胜率染色: ≥60% 金/绿(好), 40-60% 中性, <40% 红(差) */
+/** 胜率染色: ≥60% 好, 40-60% 中性, <40% 差 */
 function winRateClass(rate: number): string {
   if (rate >= 0.6) return "text-rise";
   if (rate < 0.4) return "text-fall";
   return "text-muted-foreground";
 }
 
-function gradeLabel(grade: string): string {
-  return { STRONG: "强", MEDIUM: "中", WEAK: "弱" }[grade] ?? "—";
-}
-
-/** 把 buckets 按 (direction, grade) 分组, 每个 cell 是某个 horizon 的统计 */
-function groupBuckets(buckets: AccuracyBucket[]) {
+/** 按 (direction, horizon) 聚合所有 grade, 简化到金/银两行。
+ *  win_rate/avg_return 按 count 加权; worst 取最差; ci 取保守并集区间。 */
+function aggregateByDirection(buckets: AccuracyBucket[]): AccuracyBucket[] {
   const map = new Map<string, AccuracyBucket[]>();
   for (const b of buckets) {
-    const key = `${b.direction}|${b.grade}`;
+    const key = `${b.direction}|${b.horizon}`;
     if (!map.has(key)) map.set(key, []);
     map.get(key)!.push(b);
   }
-  // 排序: 金手指在前, 档位 强>中>弱
-  const order = { GOLD: 0, SILVER: 1 } as const;
-  const gOrder = { STRONG: 0, MEDIUM: 1, WEAK: 2 } as const;
-  return [...map.entries()].sort((a, b) => {
-    const [da, ga] = a[0].split("|");
-    const [db, gb] = b[0].split("|");
-    if (da !== db) return order[da as keyof typeof order] - order[db as keyof typeof order];
-    return gOrder[ga as keyof typeof gOrder] - gOrder[gb as keyof typeof gOrder];
-  });
+  const out: AccuracyBucket[] = [];
+  for (const [key, cells] of map) {
+    const [direction, horizonStr] = key.split("|");
+    const horizon = Number(horizonStr);
+    const count = cells.reduce((s, c) => s + c.count, 0);
+    if (count === 0) continue;
+    const win_rate = cells.reduce((s, c) => s + c.win_rate * c.count, 0) / count;
+    const avg_return = cells.reduce((s, c) => s + c.avg_return * c.count, 0) / count;
+    const worst_return =
+      direction === "GOLD"
+        ? Math.min(...cells.map((c) => c.worst_return))
+        : Math.max(...cells.map((c) => c.worst_return));
+    const ci_low = Math.min(...cells.map((c) => c.ci_low));
+    const ci_high = Math.max(...cells.map((c) => c.ci_high));
+    out.push({ direction: direction as TimingDirection, grade: "", horizon, count, win_rate, avg_return, worst_return, ci_low, ci_high });
+  }
+  // 金在前, 银在后
+  return out.sort((a, b) => Number(a.direction === "GOLD") * -1 || a.horizon - b.horizon);
 }
 
 function Cell({ bucket }: { bucket: AccuracyBucket | undefined }) {
@@ -73,13 +79,40 @@ export function AccuracyMatrix({
       </Card>
     );
   }
-  const rows = groupBuckets(accuracy.buckets);
+  // 按 direction 两行
+  const gold = aggregateByDirection(
+    accuracy.buckets.filter((b) => b.direction === "GOLD"),
+  );
+  const silver = aggregateByDirection(
+    accuracy.buckets.filter((b) => b.direction === "SILVER"),
+  );
   const baseline = accuracy.random_baseline;
+  const inval = accuracy.invalidated_summary ?? {};
+
+  const renderRow = (label: string, isGold: boolean, cells: AccuracyBucket[]) => {
+    const byHorizon = new Map(cells.map((c) => [c.horizon, c]));
+    return (
+      <tr className="border-b border-border/40 last:border-0">
+        <td className="px-2 py-1.5">
+          <span
+            className={cn(
+              "inline-block w-2.5 h-2.5 rounded-full mr-1.5 align-middle",
+              isGold ? "bg-amber-400" : "bg-slate-500",
+            )}
+          />
+          <span className="font-medium">{label}</span>
+        </td>
+        {HORIZONS.map((h) => (
+          <Cell key={h} bucket={byHorizon.get(h)} />
+        ))}
+      </tr>
+    );
+  };
 
   return (
     <Card className="p-5">
       <div className="mb-3 flex items-baseline justify-between">
-        <h3 className="font-display text-base font-semibold">历史准确率矩阵</h3>
+        <h3 className="font-display text-base font-semibold">历史准确率</h3>
         <span className="text-xs text-muted-foreground">
           样本 {sampleRange?.[0] ?? ""} ~ {sampleRange?.[1] ?? ""}
         </span>
@@ -97,33 +130,35 @@ export function AccuracyMatrix({
             </tr>
           </thead>
           <tbody>
-            {rows.map(([key, cells]) => {
-              const [dir, grade] = key.split("|");
-              const byHorizon = new Map(cells.map((c) => [c.horizon, c]));
-              const isGold = dir === "GOLD";
-              return (
-                <tr key={key} className="border-b border-border/40 last:border-0">
-                  <td className="px-2 py-1.5">
-                    <span
-                      className={cn(
-                        "inline-block w-2.5 h-2.5 rounded-full mr-1.5 align-middle",
-                        isGold ? "bg-amber-400" : "bg-slate-300",
-                      )}
-                    />
-                    <span className="font-medium">{isGold ? "金手指" : "银手指"}</span>
-                    <span className="ml-1 text-xs text-muted-foreground">{gradeLabel(grade)}</span>
-                  </td>
-                  {HORIZONS.map((h) => (
-                    <Cell key={h} bucket={byHorizon.get(h)} />
-                  ))}
-                </tr>
-              );
-            })}
+            {renderRow("金手指（看多）", true, gold)}
+            {renderRow("银手指（看空）", false, silver)}
           </tbody>
         </table>
       </div>
 
-      <div className="mt-4 grid gap-2 text-xs text-muted-foreground sm:grid-cols-3">
+      {/* 假突破候选对比(回应"次日确认是否真有预测力") */}
+      {Object.keys(inval).length > 0 && (
+        <div className="mt-3 rounded-md border border-border/60 bg-muted/30 px-3 py-2">
+          <div className="mb-1 text-xs font-medium text-muted-foreground">
+            假突破候选（被否决，对比验证过滤价值）
+          </div>
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums text-muted-foreground">
+            {HORIZONS.map((h) => {
+              const row = inval[h];
+              if (!row) return null;
+              return (
+                <span key={h}>
+                  {h}日: 命中 {(row.win_rate * 100).toFixed(0)}% · 均
+                  {row.avg_return >= 0 ? "+" : ""}
+                  {row.avg_return.toFixed(1)}% · n={row.count}
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-3">
         <div>
           随机基准：{" "}
           {HORIZONS.map((h) => `${h}d=${((baseline[String(h)] ?? 0) * 100).toFixed(0)}%`).join(" · ")}
@@ -136,7 +171,9 @@ export function AccuracyMatrix({
             </span>
           </div>
         )}
-        <div>事件总数 {accuracy.n_events}</div>
+        <div>
+          事件 已确认 {accuracy.n_confirmed ?? 0} · 否决 {accuracy.n_invalidated ?? 0}
+        </div>
       </div>
 
       <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">

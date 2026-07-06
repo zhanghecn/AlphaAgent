@@ -18,6 +18,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from alphaagent.market.providers import RealMarketDataClient, _china_today, _is_intraday_china
 from alphaagent.market.symbols import INDEX_SYMBOLS
 from alphaagent.server.services.quant.market_context import INDEX_WEIGHTS
 
@@ -81,6 +82,56 @@ def load_composite_series(
         composite = composite * (1.0 + ret)
         series.append(CompositeBar(d, composite, weighted_turnover, ret * 100.0))
     return series
+
+
+def intraday_today_bar(prev_close: float, prev_turnover: float) -> CompositeBar | None:
+    """盘中拉七大指数实时点位, 加权合成今天的 composite bar。
+
+    用 ``change_pct`` 算每个指数的日收益率(等价 (last-prev_close)/prev_close),
+    按 INDEX_WEIGHTS 加权, 基于昨日 composite close 累乘得到今天。
+
+    返回 None 的情形(调用方退化为纯昨日 panel):
+    - 非交易时段(周末/盘前/盘后)
+    - 实时源拉取失败
+    - 所有指数 volume=0(节假日/半天/异常停牌)
+
+    注意: 这是「实时预警」用途的近似 bar, 不写 DB; 18:00 eod 同步今天日线后,
+    load_composite_series 会读到正式日线, 本函数在 last_date>=today 时不再追加。
+    """
+    if not _is_intraday_china():
+        return None
+    try:
+        quotes = RealMarketDataClient().get_indices() or []
+    except Exception:  # noqa: BLE001  实时源不可用则退回昨日 panel
+        return None
+    qmap = {q.vt_symbol: q for q in quotes}
+    weighted_ret = 0.0
+    weight_sum = 0.0
+    weighted_turnover = 0.0
+    any_volume = False
+    for sym, w in INDEX_WEIGHTS.items():
+        q = qmap.get(sym)
+        if not q or q.last_price is None:
+            continue
+        if q.change_pct is not None:
+            ret = q.change_pct / 100.0
+        elif q.previous_close:
+            ret = q.last_price / q.previous_close - 1.0
+        else:
+            continue
+        weighted_ret += w * ret
+        weight_sum += w
+        if q.turnover:
+            weighted_turnover += w * q.turnover
+        if q.volume and q.volume > 0:
+            any_volume = True
+    if weight_sum <= 0 or not any_volume:
+        return None
+    ret = weighted_ret / weight_sum
+    today = _china_today()
+    close = prev_close * (1.0 + ret)
+    turnover = weighted_turnover if weighted_turnover > 0 else prev_turnover
+    return CompositeBar(today, close, turnover, ret * 100.0)
 
 
 # ---------------- 技术指标(纯函数, 只用传入序列 ≤t 尾部) ----------------

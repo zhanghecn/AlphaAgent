@@ -2,11 +2,12 @@ import { type TimingOverview, type TimingDirection } from "@/api/marketTiming";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
-/** 金手指/银手指信号专色(页面独有, 不复用涨跌色) */
-export const GOLD = "#fbbf24"; // amber-400
-export const GOLD_DEEP = "#f59e0b";
-export const SILVER = "#cbd5e1"; // slate-300
-export const SILVER_DEEP = "#94a3b8";
+/** 金手指/银手指信号专色: 暖金 vs 冷银, 明度+色相双重对立, 深浅模式都清晰。
+ *  避开 A 股涨红(#ef4444)/跌绿(#22c55e)。金亮暖、银深冷, 一眼可辨。 */
+export const GOLD = "#fbbf24"; // amber-400 亮暖金
+export const GOLD_DEEP = "#f59e0b"; // amber-500
+export const SILVER = "#64748b"; // slate-500 深冷银(浅底深灰清晰, 深底中灰可见)
+export const SILVER_DEEP = "#475569"; // slate-600
 
 const DIRECTION_LABEL: Record<TimingDirection, string> = {
   GOLD: "金手指",
@@ -179,7 +180,7 @@ export function TimingHero({ overview, loading }: { overview: TimingOverview | n
                   color: direction === "GOLD" ? GOLD_DEEP : SILVER_DEEP,
                 }}
               >
-                {DIRECTION_LABEL[direction]} · {overview.latest_signal.grade || "—"}
+                {DIRECTION_LABEL[direction]}
               </span>
               <span className="text-muted-foreground">
                 {overview.latest_signal.date}（{daysAgo(overview.latest_signal.date)}）
