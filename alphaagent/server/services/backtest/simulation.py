@@ -31,6 +31,32 @@ SUPPORT_STOP_REENTRY_MAX_MA5_DISTANCE_PCT = 4.0
 SUPPORT_STOP_REENTRY_MAX_MA10_DISTANCE_PCT = 6.0
 SUPPORT_STOP_REENTRY_SCORE = 88.0
 SUPPORT_STOP_REENTRY_SNAPSHOT_RANK_OFFSET = 1000
+DEFAULT_DYNAMIC_FAILED_LAUNCH_BLOCKED_TIMING: dict[str, set[str]] = {
+    "low_suction_buildup": {
+        "after_gold_late|warming",
+        "after_gold_late|rotation",
+        "after_silver_0_5|warming",
+    },
+    "dragon_pullback": {
+        "after_gold_late|warming",
+        "after_gold_late|rotation",
+        "after_gold_0_5|warming",
+    },
+}
+DEFAULT_DYNAMIC_FAILED_LAUNCH_ALLOWED_TIMING: dict[str, set[str]] = {
+    "low_suction_first_lift": {
+        "after_silver_6_20|retreat",
+        "after_silver_late|rotation",
+        "after_gold_0_5|retreat",
+        "after_gold_6_20|retreat",
+    },
+    "dragon_low_suction_overlap": {
+        "after_silver_0_5|retreat",
+        "after_silver_6_20|rotation",
+        "after_silver_6_20|warming",
+        "after_silver_late|retreat",
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -1302,9 +1328,9 @@ def dragon_pullback_sell_reason(
         return "support_stop"
     if ma20 is not None and bar.close_price < ma20 * 0.97 and current_day > position.entry_date:
         return "trend_break"
-    if (
+    if dynamic_failed_launch_exit_stop_applies(position, bar, gain, high_gain, hold_soft_exit, current_buy_signal) and (
         params.enable_dynamic_failed_launch_exit_stop
-        and dynamic_failed_launch_exit_stop_applies(position, bar, gain, high_gain, hold_soft_exit, current_buy_signal)
+        or default_dynamic_failed_launch_exit_allowed(reason)
     ):
         return DYNAMIC_FAILED_LAUNCH_EXIT_STOP
     if params.enable_contextual_failed_launch_exit_stop and failed_launch_exit_stop_applies(position, bar, gain, high_gain, hold_soft_exit):
@@ -1490,8 +1516,39 @@ def dynamic_failed_launch_exit_stop_applies(
     )
 
 
+def default_dynamic_failed_launch_exit_allowed(reason: dict[str, Any]) -> bool:
+    """Return whether the default strategy should cut a verified failed launch."""
+
+    family = _default_dynamic_failed_launch_family(reason)
+    timing_phase = _default_dynamic_failed_launch_timing_phase(reason)
+    if not timing_phase:
+        return False
+    blocked_timing = DEFAULT_DYNAMIC_FAILED_LAUNCH_BLOCKED_TIMING.get(family)
+    if blocked_timing is not None:
+        return timing_phase not in blocked_timing
+    allowed_timing = DEFAULT_DYNAMIC_FAILED_LAUNCH_ALLOWED_TIMING.get(family)
+    return bool(allowed_timing is not None and timing_phase in allowed_timing)
+
+
+def _default_dynamic_failed_launch_family(reason: dict[str, Any]) -> str:
+    family = str(reason.get("setup_family") or reason.get("entry_setup") or reason.get("setup_type") or "")
+    if family == "stealth_low_suction":
+        if reason.get("first_effective_lift") or reason.get("low_suction_launch_confirmed"):
+            return "low_suction_first_lift"
+        return "low_suction_buildup"
+    return family
+
+
+def _default_dynamic_failed_launch_timing_phase(reason: dict[str, Any]) -> str:
+    timing_window = str(reason.get("timing_window") or "").strip()
+    market_phase = str(reason.get("market_phase") or "").strip()
+    if not timing_window or not market_phase:
+        return ""
+    return f"{timing_window}|{market_phase}"
+
+
 def dynamic_failed_launch_exit_decision(position: Position, bar: Bar, reason: dict[str, Any]) -> dict[str, Any]:
-    """Classify a narrow, visible failed-launch path for default-off sell experiments."""
+    """Classify a narrow, visible failed-launch path for default and experiment exits."""
 
     setup = str(reason.get("entry_setup") or reason.get("setup_type") or "")
     visible_bars = int(position.visible_holding_bars or 0)

@@ -43,6 +43,27 @@ def _bars(days: int = 80) -> list[Bar]:
     return result
 
 
+def _bars_from_closes_for_strategy_lane(closes: list[float], *, start: date) -> list[Bar]:
+    bars: list[Bar] = []
+    previous = closes[0]
+    for index, close in enumerate(closes):
+        change_pct = (close / previous - 1) * 100 if index else 0.0
+        bars.append(
+            Bar(
+                trade_date=start + timedelta(days=index),
+                open_price=previous,
+                high_price=max(previous, close) * 1.02,
+                low_price=min(previous, close) * 0.98,
+                close_price=close,
+                volume=1_000_000 if index < len(closes) - 1 else 1_100_000,
+                turnover=close * 100_000_000,
+                change_pct=change_pct,
+            )
+        )
+        previous = close
+    return bars
+
+
 def test_mainline_pullback_score_generates_entry_candidate() -> None:
     bars = _bars()
 
@@ -79,7 +100,7 @@ def test_quant_strategy_registry_dispatches_default_strategy() -> None:
     assert default_strategy.id == "mainline_dragon_pullback"
     assert strategy is not None
     assert strategy.version == "0.1.1"
-    assert default_strategy.version == "0.1.42"
+    assert default_strategy.version == "0.1.52"
     assert [item["id"] for item in list_strategies()] == ["mainline_dragon_pullback"]
     assert "mainline_leader_pullback" in {item["id"] for item in list_internal_strategies()}
     assert score.signal_type == "mainline_leader_pullback"
@@ -5522,6 +5543,128 @@ def test_dragon_pullback_detects_stealth_low_suction_as_separate_setup() -> None
     assert "pullback_too_late" not in score.evidence["failed_rules"]
 
 
+def test_dragon_pullback_routes_bottom_reclaim_inside_default_strategy() -> None:
+    closes = [55 + index * 0.02 for index in range(60)]
+    closes.extend([56, 55, 54, 53, 52, 51, 50, 49, 48, 47, 46, 45, 44, 43.5, 43, 42.5, 42, 41.8, 41.6, 41.5])
+    closes.extend([41.8, 42.2, 42.6, 43.0, 43.4])
+    bars = _bars_from_closes_for_strategy_lane(closes, start=date(2026, 1, 1))
+
+    score = score_dragon_pullback(
+        "002407.SZSE",
+        bars,
+        bars[-1].trade_date,
+        sector_score=70.0,
+        financial_score=60.0,
+        fund_flow_score=60.0,
+        hot_rank_score=60.0,
+        lhb_score=60.0,
+    )
+
+    assert score.entry_signal is True
+    assert score.evidence["entry_setup"] == "oversold_rebound_start"
+    assert score.evidence["rebound_subtype"] == "bottom_reclaim"
+    assert score.evidence["bottom_reclaim"] is True
+    assert score.evidence["selected_score_lane"] == "oversold_rebound_start"
+    assert score.evidence["setup_scores"]["oversold_rebound"] > score.evidence["setup_scores"]["dragon_pullback"]
+    assert score.evidence["setup_scores"]["oversold_rebound"] > score.evidence["setup_scores"]["stealth_low_suction"]
+    assert score.evidence["failed_rules"] == []
+
+
+def test_dragon_pullback_routes_secondary_breakout_confirm_inside_default_strategy() -> None:
+    closes = [48 + index * 0.01 for index in range(60)]
+    closes.extend([48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37.5, 37, 36.7, 36.4, 36.2, 36.0])
+    closes.extend([36.4, 36.2, 36.6, 37.2, 36.8, 37.4, 39.4])
+    bars = _bars_from_closes_for_strategy_lane(closes, start=date(2026, 1, 1))
+
+    score = score_dragon_pullback(
+        "603260.SSE",
+        bars,
+        bars[-1].trade_date,
+        sector_score=70.0,
+        financial_score=60.0,
+        fund_flow_score=60.0,
+        hot_rank_score=60.0,
+        lhb_score=60.0,
+    )
+
+    assert score.entry_signal is True
+    assert score.evidence["entry_setup"] == "oversold_rebound_start"
+    assert score.evidence["rebound_subtype"] == "secondary_breakout_confirm"
+    assert score.evidence["secondary_breakout_confirm"] is True
+    assert score.evidence["bottom_reclaim"] is False
+    assert score.evidence["selected_score_lane"] == "oversold_rebound_start"
+    assert score.evidence["setup_scores"]["oversold_rebound"] > score.evidence["setup_scores"]["dragon_pullback"]
+    assert score.evidence["failed_rules"] == []
+
+
+def test_dragon_pullback_routes_deep_cycle_secondary_breakout_when_20d_drawdown_is_shallow() -> None:
+    start = date(2026, 1, 1)
+    closes = [55.0 - index * 0.14 for index in range(70)]
+    closes.extend(
+        [
+            44.4,
+            43.9,
+            43.2,
+            42.6,
+            41.8,
+            41.0,
+            40.2,
+            39.6,
+            39.0,
+            38.4,
+            37.8,
+            37.2,
+            36.7,
+            36.2,
+            35.8,
+            35.5,
+            36.3,
+            37.2,
+            35.7,
+            39.3,
+        ]
+    )
+    bars: list[Bar] = []
+    previous = closes[0]
+    for index, close in enumerate(closes):
+        change_pct = (close / previous - 1) * 100 if index else 0.0
+        bars.append(
+            Bar(
+                trade_date=start + timedelta(days=index),
+                open_price=close,
+                high_price=close,
+                low_price=close * 0.985,
+                close_price=close,
+                volume=1_100_000 if index >= len(closes) - 5 else 1_000_000,
+                turnover=close * 100_000_000,
+                change_pct=change_pct,
+            )
+        )
+        previous = close
+
+    score = score_dragon_pullback(
+        "603260.SSE",
+        bars,
+        bars[-1].trade_date,
+        sector_score=70.0,
+        financial_score=60.0,
+        fund_flow_score=60.0,
+        hot_rank_score=60.0,
+        lhb_score=60.0,
+    )
+
+    assert score.entry_signal is True
+    assert score.evidence["entry_setup"] == "oversold_rebound_start"
+    assert score.evidence["rebound_subtype"] == "secondary_breakout_confirm"
+    assert score.evidence["secondary_breakout_confirm"] is True
+    assert score.evidence["deep_cycle_secondary_breakout_reversal"] is True
+    assert -12.0 < score.evidence["drawdown_from_20d_high_pct"] <= -10.5
+    assert score.evidence["max_drawdown_60d"] <= -24.0
+    assert score.evidence["return_20d"] <= -8.0
+    assert score.evidence["return_60d"] <= -12.0
+    assert score.evidence["failed_rules"] == []
+
+
 def test_stealth_low_suction_accumulates_before_first_lift_with_ma5_below_ma10() -> None:
     start = date(2026, 1, 1)
     closes = [50 + index * 0.18 for index in range(70)]
@@ -5781,6 +5924,7 @@ def test_dragon_pullback_marks_low_suction_limit_up_start_factors() -> None:
 
     score = score_dragon_pullback("002384.SZSE", bars, bars[-1].trade_date, index_return_20d=-3.0, sector_score=70.0)
 
+    assert score.evidence["sector_mainline_score"] == 70.0
     assert score.evidence["recent_limit_up_20d"] is True
     assert score.evidence["consecutive_bull_closes"] >= 4
     assert score.evidence["upward_gap_in_leg"] is True
@@ -6787,17 +6931,17 @@ def test_contextual_failed_launch_exit_respects_current_buy_signal() -> None:
     )
 
 
-def test_dynamic_failed_launch_exit_is_default_off() -> None:
+def test_dynamic_failed_launch_default_requires_verified_family_timing() -> None:
     from alphaagent.server.services.backtest.schemas import BacktestParams, Position
     from alphaagent.server.services.backtest.simulation import sell_reason_for_position
 
     params = BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID)
-    position = Position(
+    no_timing_position = Position(
         vt_symbol="600352.SSE",
         name="浙江龙盛",
         volume=100,
         cost_price=10.0,
-        entry_date=date(2026, 3, 12),
+        entry_date=date(2026, 6, 9),
         highest_price=10.08,
         lowest_price=9.72,
         reason={
@@ -6809,8 +6953,69 @@ def test_dynamic_failed_launch_exit_is_default_off() -> None:
         },
         visible_holding_bars=3,
     )
+    silver_retreat_position = Position(
+        vt_symbol="603040.SSE",
+        name="新坐标",
+        volume=100,
+        cost_price=10.0,
+        entry_date=date(2026, 6, 9),
+        highest_price=10.08,
+        lowest_price=9.72,
+        reason={
+            "entry_setup": "stealth_low_suction",
+            "setup_family": "low_suction_buildup",
+            "timing_window": "after_silver_6_20",
+            "market_phase": "retreat",
+            "support_price": 9.90,
+            "ma10": 9.92,
+            "ma20": 9.86,
+            "entry_total_score": 88.0,
+        },
+        visible_holding_bars=3,
+    )
     bar = Bar(
-        trade_date=date(2026, 3, 16),
+        trade_date=date(2026, 6, 12),
+        open_price=9.78,
+        high_price=9.84,
+        low_price=9.62,
+        close_price=9.66,
+        volume=1_000_000,
+        turnover=300_000_000,
+        change_pct=-2.4,
+    )
+
+    assert sell_reason_for_position(no_timing_position, bar, bar.trade_date, params) is None
+    assert sell_reason_for_position(silver_retreat_position, bar, bar.trade_date, params) == "dynamic_failed_launch_exit_stop"
+
+
+def test_dynamic_failed_launch_default_blocks_false_warming_family_timing() -> None:
+    from alphaagent.server.services.backtest.schemas import BacktestParams, Position
+    from alphaagent.server.services.backtest.simulation import sell_reason_for_position
+
+    params = BacktestParams(strategy=DRAGON_PULLBACK_STRATEGY_ID)
+    position = Position(
+        vt_symbol="001207.SZSE",
+        name="联科科技",
+        volume=100,
+        cost_price=10.0,
+        entry_date=date(2026, 3, 31),
+        highest_price=10.08,
+        lowest_price=9.72,
+        reason={
+            "entry_setup": "stealth_low_suction",
+            "setup_family": "low_suction_first_lift",
+            "timing_window": "after_silver_6_20",
+            "market_phase": "warming",
+            "low_suction_launch_confirmed": True,
+            "support_price": 9.90,
+            "ma10": 9.92,
+            "ma20": 9.86,
+            "entry_total_score": 88.0,
+        },
+        visible_holding_bars=3,
+    )
+    bar = Bar(
+        trade_date=date(2026, 4, 3),
         open_price=9.78,
         high_price=9.84,
         low_price=9.62,
@@ -10258,7 +10463,7 @@ def test_backtest_list_filters_current_strategy_version_when_strategy_requested(
         if hasattr(element, "value")
     ]
     assert "mainline_dragon_pullback" in bind_values
-    assert "0.1.42" in bind_values
+    assert "0.1.52" in bind_values
     assert [item["strategy_version"] for item in result["items"]] == ["0.1.8"]
 
 
@@ -15917,6 +16122,189 @@ def test_execution_pool_keeps_healthy_quiet_low_suction_on_score_without_generic
 
     assert not hasattr(candidate_lanes, "stealth_low_suction_opportunity_bonus")
     assert candidate_lanes.dragon_pullback_opportunity_score(quiet_low_suction) == quiet_low_suction.total_score
+
+
+def test_execution_pool_promotes_bottom_reclaim_only_with_positive_timing_bonus() -> None:
+    from alphaagent.server.services.quant import candidate_lanes
+
+    trade_date = date(2026, 3, 19)
+    bottom_reclaim = SignalScore(
+        vt_symbol="BOTTOM.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=82.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "oversold_rebound_start",
+            "setup_family": "oversold_rebound_start",
+            "rebound_subtype": "bottom_reclaim",
+            "bottom_reclaim": True,
+            "timing_window": "after_silver_6_20",
+            "market_phase": "retreat",
+            "close_location_in_range": 0.45,
+            "volume_ratio_5d_20d": 0.9,
+        },
+    )
+    plain_higher_score = SignalScore(
+        vt_symbol="PLAIN.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=86.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={"status": "ready", "entry_setup": "dragon_pullback"},
+    )
+
+    pool = candidate_lanes.select_dragon_pullback_execution_pool(
+        [plain_higher_score, bottom_reclaim],
+        1,
+        DRAGON_PULLBACK_STRATEGY_ID,
+    )
+    context = candidate_lanes.execution_pool_context(
+        [plain_higher_score, bottom_reclaim],
+        1,
+        DRAGON_PULLBACK_STRATEGY_ID,
+    )
+
+    assert pool == [bottom_reclaim]
+    assert candidate_lanes.dragon_pullback_timing_opportunity_bonus(bottom_reclaim) == 4.55
+    assert context["BOTTOM.SZSE"]["execution_timing_opportunity_bonus"] == 4.55
+    assert context["BOTTOM.SZSE"]["execution_opportunity_score"] == 86.55
+    assert context["BOTTOM.SZSE"]["execution_candidate_selected"] is True
+
+
+def test_execution_pool_does_not_penalize_weak_timing_window() -> None:
+    from alphaagent.server.services.quant import candidate_lanes
+
+    trade_date = date(2026, 3, 19)
+    warming_bottom_reclaim = SignalScore(
+        vt_symbol="WARM.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=82.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "oversold_rebound_start",
+            "setup_family": "oversold_rebound_start",
+            "rebound_subtype": "bottom_reclaim",
+            "bottom_reclaim": True,
+            "timing_window": "after_silver_6_20",
+            "market_phase": "warming",
+            "close_location_in_range": 0.45,
+            "volume_ratio_5d_20d": 0.9,
+        },
+    )
+
+    assert candidate_lanes.dragon_pullback_timing_opportunity_bonus(warming_bottom_reclaim) == 0.0
+    assert candidate_lanes.dragon_pullback_opportunity_score(warming_bottom_reclaim) == warming_bottom_reclaim.total_score
+
+
+def test_execution_pool_rewards_confirmed_bottom_reclaim_repair() -> None:
+    from alphaagent.server.services.quant import candidate_lanes
+
+    trade_date = date(2026, 6, 9)
+    confirmed = SignalScore(
+        vt_symbol="REPAIR.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=82.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "oversold_rebound_start",
+            "setup_family": "oversold_rebound_start",
+            "rebound_subtype": "bottom_reclaim",
+            "bottom_reclaim": True,
+            "timing_window": "after_silver_6_20",
+            "market_phase": "retreat",
+            "bottom_ma_repair_strength_score": 78.0,
+            "bottom_ma_repair_strength_bucket": "strong_repair",
+            "bottom_ma_repair_stage": "ma10_reclaim",
+            "close_location_in_range": 0.45,
+            "volume_ratio_5d_20d": 0.9,
+        },
+    )
+
+    reasons = candidate_lanes.dragon_pullback_timing_opportunity_reasons(confirmed)
+
+    assert candidate_lanes.dragon_pullback_timing_opportunity_bonus(confirmed) == 5.45
+    assert any(reason["key"] == "bottom_reclaim_confirmed_repair" for reason in reasons)
+
+
+def test_execution_pool_rewards_active_right_tail_source_context() -> None:
+    from alphaagent.server.services.quant import candidate_lanes
+
+    trade_date = date(2026, 3, 25)
+    right_tail = SignalScore(
+        vt_symbol="RIGHT.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=88.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_low_suction_overlap",
+            "setup_family": "dragon_low_suction_overlap",
+            "timing_window": "after_silver_late",
+            "market_phase": "retreat",
+            "recent_limit_up_20d": True,
+            "near_limit_up_count_20d": 1,
+            "large_bull_count_20d": 1,
+            "close_location_in_range": 0.61,
+            "volume_ratio_5d_20d": 0.86,
+        },
+    )
+
+    reasons = candidate_lanes.dragon_pullback_timing_opportunity_reasons(right_tail)
+    keys = {reason["key"] for reason in reasons}
+
+    assert candidate_lanes.dragon_pullback_timing_opportunity_bonus(right_tail) == 3.95
+    assert "right_tail_active_source_context" in keys
+    assert "right_tail_timing_context" in keys
+    assert "right_tail_controlled_volume" in keys
+
+
+def test_screening_attaches_visible_market_timing_context_to_evidence() -> None:
+    from alphaagent.server.services.quant import screening
+
+    score = SignalScore(
+        vt_symbol="600001.SSE",
+        trade_date=date(2026, 3, 19),
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=82.0,
+        entry_signal=True,
+        evidence={"status": "ready", "entry_setup": "oversold_rebound_start"},
+    )
+
+    screening._attach_market_timing_context(
+        score,
+        {
+            "nearest_timing_direction": "SILVER",
+            "nearest_timing_grade": "MEDIUM",
+            "nearest_timing_date": "2026-03-12",
+            "nearest_timing_days": 5,
+            "timing_window": "after_silver_0_5",
+            "market_phase": "retreat",
+            "bull_force": 42.0,
+            "bear_force": 68.0,
+        },
+    )
+
+    assert score.evidence["nearest_timing_direction"] == "SILVER"
+    assert score.evidence["timing_window"] == "after_silver_0_5"
+    assert score.evidence["market_phase"] == "retreat"
+    assert score.evidence["bear_force"] == 68.0
 
 
 def test_execution_pool_drops_stale_active_weak_decay_pullback_without_refill() -> None:

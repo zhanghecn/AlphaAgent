@@ -7,6 +7,28 @@ export interface StockIdentityFields {
   board_label?: string | null;
 }
 
+export interface QuantStrategyExplainFactor {
+  key: string;
+  label: string;
+  value?: string | number | null;
+  tone?: "positive" | "risk" | "context" | string;
+}
+
+export interface QuantStrategyExplain {
+  strategy_id: string;
+  strategy_version?: string | null;
+  strategy_name?: string | null;
+  candidate_family?: string | null;
+  candidate_family_label?: string | null;
+  setup_labels?: string[];
+  positive_factors?: QuantStrategyExplainFactor[];
+  risk_factors?: QuantStrategyExplainFactor[];
+  market_context?: QuantStrategyExplainFactor[];
+  action?: string | null;
+  research_only?: boolean;
+  not_used_for_signal_score?: boolean;
+}
+
 export interface QuantRecommendation extends StockIdentityFields {
   id?: number;
   rank: number;
@@ -20,6 +42,7 @@ export interface QuantRecommendation extends StockIdentityFields {
   confidence?: number | null;
   total_score?: number | null;
   reason?: Record<string, unknown> | null;
+  strategy_explain?: QuantStrategyExplain | null;
   risk_control?: Record<string, unknown> | null;
   signal_label?: string | null;
   signal_role?: string | null;

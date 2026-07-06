@@ -11,7 +11,7 @@ import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { TradingDateSelector } from "@/features/quant/TradingDateSelector";
-import { fetchBacktestCandidateTrace, type BacktestCandidateNotPlannedContext, type BacktestCandidateTrace, type QuantRecommendation, type QuantScreenRun, type QuantScreenRunItem, type QuantStrategyOption } from "@/api/quant";
+import { fetchBacktestCandidateTrace, type BacktestCandidateNotPlannedContext, type BacktestCandidateTrace, type QuantRecommendation, type QuantScreenRun, type QuantScreenRunItem, type QuantStrategyExplain, type QuantStrategyExplainFactor, type QuantStrategyOption } from "@/api/quant";
 import type { TailWorkflowStatus } from "@/api/dataSync";
 
 export function RecommendationsPanel({
@@ -301,6 +301,7 @@ export function RecommendationsPanel({
                     >
                       <CandidateScoreExplanation
                         reason={reason}
+                        explain={item.strategy_explain}
                         rules={itemFailedRules}
                         labels={failedRuleLabels}
                         risk={risk}
@@ -686,11 +687,13 @@ function candidateActionLabel(item: QuantRecommendation): string {
 
 function CandidateScoreExplanation({
   reason,
+  explain,
   rules,
   labels,
   risk,
 }: {
   reason: Record<string, unknown>;
+  explain?: QuantStrategyExplain | null;
   rules: string[];
   labels: Record<string, string>;
   risk: Record<string, unknown>;
@@ -702,6 +705,7 @@ function CandidateScoreExplanation({
   const fallback = candidateScoreReason(reason, rules, labels, risk);
   return (
     <div className="space-y-1 leading-5">
+      {explain && <StrategyFactorExplanation explain={explain} />}
       {facts.length > 0 ? (
         <div className="text-foreground">{facts.join(" · ")}</div>
       ) : (
@@ -721,6 +725,48 @@ function CandidateScoreExplanation({
       )}
     </div>
   );
+}
+
+function StrategyFactorExplanation({ explain }: { explain: QuantStrategyExplain }) {
+  const setupLabels = (explain.setup_labels ?? []).filter(Boolean).slice(0, 4);
+  const factors = (explain.positive_factors ?? []).filter(Boolean).slice(0, 5);
+  const market = (explain.market_context ?? []).filter(Boolean).slice(0, 3);
+  const flags = [
+    explain.research_only ? "研究观察" : null,
+    explain.not_used_for_signal_score ? "未入默认评分" : null,
+  ].filter((label): label is string => Boolean(label));
+
+  return (
+    <div className="space-y-1">
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="font-medium text-foreground">{explain.candidate_family_label ?? explain.strategy_name ?? "策略因子"}</span>
+        {setupLabels.map((label) => (
+          <span key={label} className="rounded-md border px-1.5 py-0.5 text-muted-foreground">
+            {label}
+          </span>
+        ))}
+        {flags.map((label) => (
+          <span key={label} className="rounded-md border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
+            {label}
+          </span>
+        ))}
+      </div>
+      {factors.length > 0 && (
+        <div className="text-foreground">因子: {factors.map(factorText).join(" · ")}</div>
+      )}
+      {market.length > 0 && (
+        <div className="text-muted-foreground">环境: {market.map(factorText).join(" · ")}</div>
+      )}
+      {(explain.risk_factors ?? []).length > 0 && (
+        <div className="text-fall">风险: {(explain.risk_factors ?? []).slice(0, 3).map(factorText).join(" / ")}</div>
+      )}
+    </div>
+  );
+}
+
+function factorText(factor: QuantStrategyExplainFactor): string {
+  const value = factor.value == null || factor.value === "" ? "" : `${factor.value}`;
+  return value ? `${factor.label}${value}` : factor.label;
 }
 
 function candidateScoreFacts(reason: Record<string, unknown>): string[] {

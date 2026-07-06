@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from bisect import bisect_right
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any, Callable
@@ -22,7 +23,10 @@ from alphaagent.server.services.quant.factors import (
     Bar,
     SignalScore,
 )
-from alphaagent.server.services.quant import candidate_lanes, market_context, symbol_review
+from alphaagent.server.services.quant import candidate_lanes, market_context, retreat_momentum_source, symbol_review
+from alphaagent.server.services.quant.market_timing import factors as timing_factors
+from alphaagent.server.services.quant.market_timing import series as timing_series
+from alphaagent.server.services.quant.market_timing import signal as timing_signal
 from alphaagent.server.services.quant import screening_loaders, screening_payloads, screening_persistence
 from alphaagent.server.services.quant.financials import financial_coverage_summary
 from alphaagent.server.services.quant.strategy_registry import get_strategy, score_strategy
@@ -40,6 +44,11 @@ class _ScreenRangeContext:
     symbols: list[str]
     bars_by_symbol: dict[str, list[Bar]]
     bar_dates_by_symbol: dict[str, list[date]]
+    market_timing_by_date: dict[date, dict[str, Any]]
+
+
+MARKET_TIMING_CONTEXT_START = date(2024, 5, 28)
+_MARKET_TIMING_BY_END_CACHE: dict[date, dict[date, dict[str, Any]]] = {}
 
 
 def list_available_strategies() -> dict[str, Any]:
@@ -90,6 +99,7 @@ def screen_stocks(
             bar_dates_by_symbol = _bar_dates_by_symbol(bars_by_symbol)
         index_return_20d = _load_index_return_20d(session, as_of)
         market_payload = market_context.market_context_for_date(session, schema, as_of)
+        market_timing_payload = _market_timing_payload_for_date(session, as_of, range_context)
         sector_scores = _load_sector_scores(session, symbols, as_of)
         financial_scores = _load_financial_scores(session, symbols, as_of)
         fund_flow_scores = _load_fund_flow_scores(session, symbols, as_of)
@@ -122,8 +132,25 @@ def screen_stocks(
                 # 信号日收盘价随 evidence 存储，供买卖计划预算与单股回测复用（免重算）
                 score.evidence["close_price"] = float(bars[-1].close_price)
                 _attach_market_context(score, market_payload)
+                _attach_market_timing_context(score, market_timing_payload)
                 scored.append(_with_default_screening_entry_fields(score, strategy.id, strategy.default_min_entry_score))
 
+        scored.sort(key=lambda item: (-item.total_score, item.vt_symbol))
+        _attach_frontrow_features(session, scored, as_of)
+        visible_bars_for_sources = {
+            vt_symbol: _visible_bars_for_date(
+                bars_by_symbol.get(vt_symbol, []),
+                bar_dates_by_symbol.get(vt_symbol, []),
+                as_of,
+            )
+            for vt_symbol in symbols
+        }
+        scored = retreat_momentum_source.append_board_survival_pressure_sources(
+            scored,
+            visible_bars=visible_bars_for_sources,
+            session=session,
+            stock_meta=stock_meta,
+        )
         scored.sort(key=lambda item: (-item.total_score, item.vt_symbol))
         recommendations = [
             item
@@ -291,6 +318,7 @@ def screen_tail_preview(
                 scored.append(_with_default_screening_entry_fields(score, strategy.id, strategy.default_min_entry_score))
 
         scored.sort(key=lambda item: (-item.total_score, item.vt_symbol))
+        _attach_frontrow_features(session, scored, base_daily_date)
         recommendations = [
             item
             for item in scored
@@ -1390,12 +1418,14 @@ def _build_screen_range_context(start: date, end: date, max_symbols: int, boards
         stock_rows = _load_stock_universe(session, max_symbols, boards)
         symbols = [str(row["vt_symbol"]) for row in stock_rows]
         bars_by_symbol = _load_bars(session, symbols, end, lookback_days=max((end - start).days + 160, 200))
+        market_timing_by_date = _build_market_timing_by_date(session, end)
     return _ScreenRangeContext(
         stock_rows=stock_rows,
         stock_meta={str(row["vt_symbol"]): dict(row) for row in stock_rows},
         symbols=symbols,
         bars_by_symbol=bars_by_symbol,
         bar_dates_by_symbol=_bar_dates_by_symbol(bars_by_symbol),
+        market_timing_by_date=market_timing_by_date,
     )
 
 
@@ -1617,6 +1647,298 @@ def _attach_market_context(score: SignalScore, payload: dict[str, Any] | None) -
     score.evidence["fund_flow_source"] = payload.get("fund_flow_source")
     score.evidence["recovery_state"] = payload.get("recovery_state")
     score.evidence["recovery_label"] = payload.get("recovery_label")
+
+
+def _attach_market_timing_context(score: SignalScore, payload: dict[str, Any] | None) -> None:
+    if not payload:
+        return
+    score.evidence["nearest_timing_direction"] = payload.get("nearest_timing_direction")
+    score.evidence["nearest_timing_grade"] = payload.get("nearest_timing_grade")
+    score.evidence["nearest_timing_date"] = payload.get("nearest_timing_date")
+    score.evidence["nearest_timing_days"] = payload.get("nearest_timing_days")
+    score.evidence["timing_window"] = payload.get("timing_window")
+    score.evidence["market_phase"] = payload.get("market_phase")
+    score.evidence["bull_force"] = payload.get("bull_force")
+    score.evidence["bear_force"] = payload.get("bear_force")
+
+
+def _attach_frontrow_features(session: Any, scores: list[SignalScore], trade_date: date) -> None:
+    """Attach D-day-visible sector front-row features used by the unified pool."""
+
+    if session is None or not hasattr(session, "execute") or not scores:
+        return
+    symbols = sorted({str(score.vt_symbol) for score in scores if getattr(score, "vt_symbol", None)})
+    if not symbols:
+        return
+
+    membership_rows = session.execute(
+        select(
+            schema.stock_sector_memberships.c.vt_symbol,
+            schema.stock_sector_memberships.c.sector_id,
+            schema.stock_sector_memberships.c.sector_name,
+            schema.stock_sector_memberships.c.sector_type,
+            schema.stock_sector_memberships.c.rank,
+            schema.stock_sector_memberships.c.confirmed,
+            schema.stock_sector_memberships.c.is_precise,
+        )
+        .where(schema.stock_sector_memberships.c.vt_symbol.in_(symbols))
+        .order_by(schema.stock_sector_memberships.c.vt_symbol, schema.stock_sector_memberships.c.rank.nullslast())
+    ).mappings().all()
+    if not membership_rows:
+        return
+
+    sectors_by_symbol: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    sector_ids: set[str] = set()
+    for row in membership_rows:
+        vt_symbol = str(row.get("vt_symbol") or "")
+        sector_id = str(row.get("sector_id") or "")
+        if not vt_symbol or not sector_id:
+            continue
+        sectors_by_symbol[vt_symbol].append(dict(row))
+        sector_ids.add(sector_id)
+    if not sector_ids:
+        return
+
+    sector_rows = session.execute(
+        select(
+            schema.sector_period_scores.c.sector_id,
+            schema.sector_period_scores.c.as_of_date,
+            schema.sector_period_scores.c.sector_type,
+            schema.sector_period_scores.c.return_pct,
+            schema.sector_period_scores.c.rank_return,
+            schema.sector_period_scores.c.heat_score,
+            schema.sector_period_scores.c.leader_score,
+            schema.sector_period_scores.c.breadth_score,
+            schema.sector_period_scores.c.continuity_score,
+        )
+        .where(
+            and_(
+                schema.sector_period_scores.c.sector_id.in_(sorted(sector_ids)),
+                schema.sector_period_scores.c.period == "20d",
+                schema.sector_period_scores.c.as_of_date <= trade_date,
+            )
+        )
+        .order_by(schema.sector_period_scores.c.sector_id, desc(schema.sector_period_scores.c.as_of_date))
+    ).mappings().all()
+    latest_by_sector: dict[str, dict[str, Any]] = {}
+    for row in sector_rows:
+        sector_id = str(row.get("sector_id") or "")
+        if sector_id and sector_id not in latest_by_sector:
+            latest_by_sector[sector_id] = dict(row)
+    if not latest_by_sector:
+        return
+
+    sector_by_symbol: dict[str, str] = {}
+    for score in scores:
+        vt_symbol = str(score.vt_symbol)
+        best = _best_frontrow_sector(sectors_by_symbol.get(vt_symbol, []), latest_by_sector)
+        if best is None:
+            continue
+        membership, sector_score = best
+        sector_id = str(membership.get("sector_id") or "")
+        sector_by_symbol[vt_symbol] = sector_id
+        evidence = score.evidence
+        as_of = sector_score.get("as_of_date")
+        heat = _float_or_none(sector_score.get("heat_score"))
+        evidence.update(
+            {
+                "frontrow_sector_id": sector_id,
+                "frontrow_sector_name": membership.get("sector_name"),
+                "frontrow_sector_type": sector_score.get("sector_type") or membership.get("sector_type"),
+                "frontrow_sector_membership_rank": membership.get("rank"),
+                "frontrow_sector_confirmed": bool(membership.get("confirmed")),
+                "frontrow_sector_precise": bool(membership.get("is_precise")),
+                "frontrow_sector_score": _frontrow_sector_strength(sector_score, membership),
+                "frontrow_sector_heat_score": heat,
+                "frontrow_sector_return_pct": _float_or_none(sector_score.get("return_pct")),
+                "frontrow_sector_rank_return": sector_score.get("rank_return"),
+                "frontrow_sector_leader_score": _float_or_none(sector_score.get("leader_score")),
+                "frontrow_sector_breadth_score": _float_or_none(sector_score.get("breadth_score")),
+                "frontrow_sector_continuity_score": _float_or_none(sector_score.get("continuity_score")),
+                "frontrow_sector_as_of_date": as_of.isoformat() if isinstance(as_of, date) else str(as_of or ""),
+            }
+        )
+        if heat is not None:
+            evidence["sector_mainline_score"] = max(_float_or_none(evidence.get("sector_mainline_score")) or 0.0, heat)
+
+    _attach_frontrow_theme_candidate_ranks(scores, sector_by_symbol)
+
+
+def _best_frontrow_sector(
+    memberships: list[dict[str, Any]],
+    latest_by_sector: dict[str, dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    best: tuple[float, dict[str, Any], dict[str, Any]] | None = None
+    for membership in memberships:
+        sector_score = latest_by_sector.get(str(membership.get("sector_id") or ""))
+        if not sector_score:
+            continue
+        strength = _frontrow_sector_strength(sector_score, membership)
+        if best is None or strength > best[0]:
+            best = (strength, membership, sector_score)
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
+def _frontrow_sector_strength(sector_score: dict[str, Any], membership: dict[str, Any] | None = None) -> float:
+    heat = _float_or_none(sector_score.get("heat_score")) or 50.0
+    leader = _float_or_none(sector_score.get("leader_score")) or 50.0
+    breadth = _float_or_none(sector_score.get("breadth_score")) or 50.0
+    continuity = _float_or_none(sector_score.get("continuity_score")) or 50.0
+    rank_score = _frontrow_rank_return_score(sector_score.get("rank_return"))
+    score = heat * 0.42 + leader * 0.20 + breadth * 0.14 + continuity * 0.14 + rank_score * 0.10
+    if membership:
+        membership_rank = _float_or_none(membership.get("rank"))
+        if membership.get("confirmed"):
+            score += 1.0
+        if membership.get("is_precise"):
+            score += 1.0
+        if membership_rank is not None:
+            score -= min(max(membership_rank - 1.0, 0.0) * 0.35, 2.5)
+    return round(max(0.0, min(score, 100.0)), 4)
+
+
+def _frontrow_rank_return_score(value: Any) -> float:
+    rank = _float_or_none(value)
+    if rank is None or rank <= 0:
+        return 50.0
+    if rank <= 20:
+        return 100.0
+    if rank <= 50:
+        return 86.0
+    if rank <= 100:
+        return 72.0
+    if rank <= 150:
+        return 60.0
+    if rank <= 250:
+        return 45.0
+    return 30.0
+
+
+def _attach_frontrow_theme_candidate_ranks(scores: list[SignalScore], sector_by_symbol: dict[str, str]) -> None:
+    by_sector: dict[str, list[SignalScore]] = defaultdict(list)
+    repair_by_sector: dict[str, list[SignalScore]] = defaultdict(list)
+    for score in scores:
+        sector_id = sector_by_symbol.get(str(score.vt_symbol))
+        if not sector_id:
+            continue
+        by_sector[sector_id].append(score)
+        if _frontrow_repair_type(score.evidence):
+            repair_by_sector[sector_id].append(score)
+
+    for bucket in by_sector.values():
+        ordered = sorted(bucket, key=lambda score: (-candidate_lanes.dragon_pullback_opportunity_score(score), str(score.vt_symbol)))
+        count = len(ordered)
+        for rank, score in enumerate(ordered, start=1):
+            score.evidence["frontrow_theme_candidate_rank"] = rank
+            score.evidence["frontrow_theme_candidate_count"] = count
+
+    for bucket in repair_by_sector.values():
+        ordered = sorted(
+            bucket,
+            key=lambda score: (
+                -candidate_lanes.frontrow_quality_score(score),
+                -candidate_lanes.dragon_pullback_opportunity_score(score),
+                str(score.vt_symbol),
+            ),
+        )
+        count = len(ordered)
+        for rank, score in enumerate(ordered, start=1):
+            score.evidence["frontrow_theme_repair_candidate_rank"] = rank
+            score.evidence["frontrow_theme_repair_candidate_count"] = count
+
+
+def _frontrow_repair_type(evidence: dict[str, Any]) -> str:
+    if bool(evidence.get("bottom_reclaim")) or str(evidence.get("rebound_subtype") or "") == "bottom_reclaim":
+        return "bottom_reclaim"
+    subtype = str(
+        evidence.get("oversold_rebound_candidate_subtype")
+        or evidence.get("oversold_rebound_subtype")
+        or evidence.get("rebound_subtype")
+        or ""
+    )
+    if subtype == "secondary_breakout_confirm" or bool(evidence.get("secondary_breakout_confirm")):
+        return "secondary_breakout_confirm"
+    return ""
+
+
+def _market_timing_payload_for_date(
+    session: Any,
+    trade_date: date,
+    range_context: _ScreenRangeContext | None,
+) -> dict[str, Any] | None:
+    if range_context is not None:
+        return range_context.market_timing_by_date.get(trade_date)
+    return _build_market_timing_by_date(session, trade_date).get(trade_date)
+
+
+def _build_market_timing_by_date(session: Any, end: date) -> dict[date, dict[str, Any]]:
+    if session is None or not hasattr(session, "execute"):
+        return {}
+    cached = _MARKET_TIMING_BY_END_CACHE.get(end)
+    if cached is not None:
+        return cached
+    composite = timing_series.load_composite_series(session, schema, MARKET_TIMING_CONTEXT_START, end)
+    if not composite:
+        _MARKET_TIMING_BY_END_CACHE[end] = {}
+        return {}
+    dates = [bar.trade_date for bar in composite]
+    closes = [bar.close for bar in composite]
+    turnovers = [bar.turnover for bar in composite]
+    context_map = market_context.compute_market_contexts(session, schema, dates)
+    factor_seq: list[timing_factors.MarketTimingFactors] = []
+    aligned_closes: list[float] = []
+    for index, trade_date in enumerate(dates):
+        if context_map.get(trade_date) is None:
+            continue
+        context_window = [context_map[day] for day in dates[: index + 1] if context_map.get(day) is not None]
+        factor_seq.append(timing_factors.compute_factors(context_window, closes[: index + 1], turnovers[: index + 1]))
+        aligned_closes.append(closes[index])
+    events = timing_signal.detect_events(factor_seq, closes=aligned_closes)
+    event_index = 0
+    payloads: dict[date, dict[str, Any]] = {}
+    latest_event: timing_signal.TimingSignal | None = None
+    trading_dates = [factor.trade_date for factor in factor_seq]
+    for factor in factor_seq:
+        while event_index < len(events) and events[event_index].trade_date <= factor.trade_date:
+            latest_event = events[event_index]
+            event_index += 1
+        nearest_days = _market_timing_day_distance(trading_dates, latest_event.trade_date, factor.trade_date) if latest_event else None
+        payloads[factor.trade_date] = {
+            "nearest_timing_direction": latest_event.direction if latest_event else "NONE",
+            "nearest_timing_grade": latest_event.grade if latest_event else "NONE",
+            "nearest_timing_date": latest_event.trade_date.isoformat() if latest_event else None,
+            "nearest_timing_days": nearest_days,
+            "timing_window": _market_timing_window(latest_event.direction if latest_event else "NONE", nearest_days),
+            "market_phase": factor.phase,
+            "bull_force": factor.bull_force,
+            "bear_force": factor.bear_force,
+        }
+    _MARKET_TIMING_BY_END_CACHE[end] = payloads
+    return payloads
+
+
+def _market_timing_window(direction: str, days: int | None) -> str:
+    if direction == "GOLD":
+        if days is not None and days <= 5:
+            return "after_gold_0_5"
+        if days is not None and days <= 20:
+            return "after_gold_6_20"
+        return "after_gold_late"
+    if direction == "SILVER":
+        if days is not None and days <= 5:
+            return "after_silver_0_5"
+        if days is not None and days <= 20:
+            return "after_silver_6_20"
+        return "after_silver_late"
+    return "no_recent_timing"
+
+
+def _market_timing_day_distance(trading_dates: list[date], start: date, target: date) -> int:
+    if not trading_dates:
+        return max((target - start).days, 0)
+    return sum(1 for trade_date in trading_dates if start < trade_date <= target)
 
 
 def _persist_screen_run(

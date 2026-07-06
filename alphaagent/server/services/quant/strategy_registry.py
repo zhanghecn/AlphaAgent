@@ -132,6 +132,8 @@ MAINLINE_DRAGON_PULLBACK = QuantStrategy(
         "high_level_sideways_distribution_risk": "高位久横派发风险",
         "pullback_too_deep": "回撤过深",
         "ma20_broken": "跌破MA20支撑",
+        "ma20_rebound_stretch": "超跌反弹距离MA20过远",
+        "rebound_chase": "反弹幅度过大偏追高",
         "overheat": "短期过热",
         "risk_score": "风险分不足",
         "liquidity_score": "流动性不足",

@@ -27,9 +27,12 @@ from alphaagent.server.services.quant.low_suction_quality import (
 )
 
 
-DRAGON_PULLBACK_STRATEGY_VERSION = "0.1.42"
+DRAGON_PULLBACK_STRATEGY_VERSION = "0.1.52"
 LOW_SUCTION_CONFIRMED_LAUNCH_BONUS = 1.2
 LOW_SUCTION_BALANCED_FIRST_LIFT_BONUS = 1.6
+SETUP_OVERSOLD_REBOUND_START = "oversold_rebound_start"
+SETUP_BOTTOM_RECLAIM = "bottom_reclaim"
+SETUP_SECONDARY_BREAKOUT_CONFIRM = "secondary_breakout_confirm"
 
 
 @dataclass(frozen=True)
@@ -88,6 +91,15 @@ class DragonFeatures:
     illiquid_forgotten_risk: bool
     high_level_sideways_days: int
     high_level_sideways_distribution_risk: bool
+
+
+@dataclass(frozen=True)
+class OversoldReboundLane:
+    score: float
+    subtype: str
+    entry_signal: bool
+    evidence: dict[str, object]
+    failed_rules: list[str]
 
 
 def score_dragon_pullback(
@@ -189,13 +201,35 @@ def score_dragon_pullback(
         + 0.08 * liquidity
         - risk_penalty
     )
-    total = clamp_score(max(dragon_total, stealth_total) + low_suction_launch_bonus)
-    executable_low_suction = _is_executable_low_suction_buildup(features, state, failed_rules, low_suction, setup_type=setup_type)
-    evidence_failed_rules = _display_failed_rules(
-        failed_rules,
-        executable_low_suction=executable_low_suction,
-        setup_type=setup_type,
+    oversold_lane = _score_oversold_rebound_lane(
+        vt_symbol,
+        visible_bars,
+        features=features,
+        liquidity=liquidity,
+        risk=risk,
+        sector=sector,
+        financial=financial,
+        smart_money=smart_money,
     )
+    dragon_lane_total = clamp_score(dragon_total)
+    stealth_lane_total = clamp_score(stealth_total + low_suction_launch_bonus)
+    oversold_lane_total = oversold_lane.score if oversold_lane else 0.0
+    selected_setup_type = _selected_setup_type(
+        base_setup_type=setup_type,
+        dragon_lane_total=dragon_lane_total,
+        stealth_lane_total=stealth_lane_total,
+        oversold_lane=oversold_lane,
+    )
+    total = clamp_score(max(dragon_lane_total, stealth_lane_total, oversold_lane_total))
+    executable_low_suction = _is_executable_low_suction_buildup(features, state, failed_rules, low_suction, setup_type=setup_type)
+    if selected_setup_type == SETUP_OVERSOLD_REBOUND_START and oversold_lane is not None:
+        evidence_failed_rules = list(oversold_lane.failed_rules)
+    else:
+        evidence_failed_rules = _display_failed_rules(
+            failed_rules,
+            executable_low_suction=executable_low_suction,
+            setup_type=setup_type,
+        )
     # 低吸蓄势后启动：低吸≥3天 + 当日温和启动(3~7%, >8.5已overheat) + 放量 + MA20未破。
     # 识别金安6-4类"低吸后爆发启动"买点(脱离MA5无承接，但低吸蓄势充分)。统计验证
     # 这类票后续盈亏不差于承接买入(见 scripts/low_suction_launch_study.py)。
@@ -218,6 +252,11 @@ def score_dragon_pullback(
             or setup_type == "stealth_low_suction"
             or executable_low_suction
             or low_suction_launch
+            or (
+                selected_setup_type == SETUP_OVERSOLD_REBOUND_START
+                and oversold_lane is not None
+                and oversold_lane.entry_signal
+            )
         )
         and liquidity >= 25
         and risk >= 35
@@ -264,11 +303,14 @@ def score_dragon_pullback(
         hot_rank=hot_rank,
         lhb=lhb,
         executable_low_suction=executable_low_suction,
-        setup_type=setup_type,
+        setup_type=selected_setup_type,
         fresh_stealth_low_suction=fresh_stealth_low_suction,
-        dragon_total=dragon_total,
-        stealth_total=stealth_total,
+        dragon_total=dragon_lane_total,
+        stealth_total=stealth_lane_total,
         low_suction_launch_bonus=low_suction_launch_bonus,
+        oversold_lane=oversold_lane,
+        selected_score_lane=selected_setup_type,
+        dragon_failed_rules=failed_rules,
     )
     return result
 
@@ -961,6 +1003,579 @@ def _is_distribution_risk(features: DragonFeatures) -> bool:
     return bool(high_level and (high_volume_break or (hot_turnover and upper_shadow and weak_close) or (recent_surge and big_bear and volume_spike)))
 
 
+def _score_oversold_rebound_lane(
+    vt_symbol: str,
+    visible_bars: list[Bar],
+    *,
+    features: DragonFeatures,
+    liquidity: float,
+    risk: float,
+    sector: float,
+    financial: float,
+    smart_money: float,
+) -> OversoldReboundLane | None:
+    base_signal = _bottom_reclaim_lane_evidence(visible_bars)
+    evidence: dict[str, object] | None = None
+    subtype = SETUP_OVERSOLD_REBOUND_START
+    raw_score = 0.0
+    if base_signal is not None:
+        evidence = base_signal
+        subtype = str(evidence.get("rebound_subtype") or SETUP_OVERSOLD_REBOUND_START)
+        raw_score = float(evidence.get("oversold_rebound_raw_score") or 0.0)
+    else:
+        secondary = _secondary_breakout_confirm_evidence(features)
+        if secondary is not None:
+            evidence = secondary
+            subtype = SETUP_SECONDARY_BREAKOUT_CONFIRM
+            raw_score = _secondary_breakout_confirm_raw_score(secondary)
+
+    if evidence is None:
+        return None
+
+    failed_rules = _oversold_rebound_failed_rules(features, evidence, liquidity=liquidity, risk=risk)
+    subtype_bonus = 4.0 if subtype == SETUP_BOTTOM_RECLAIM else (2.5 if subtype == SETUP_SECONDARY_BREAKOUT_CONFIRM else 0.0)
+    score = (
+        0.66 * raw_score
+        + 0.12 * liquidity
+        + 0.08 * risk
+        + 0.06 * sector
+        + 0.03 * financial
+        + 0.05 * smart_money
+        + subtype_bonus
+        - 6.0 * len([rule for rule in failed_rules if rule not in {"liquidity_score", "risk_score"}])
+    )
+    return OversoldReboundLane(
+        score=round(clamp_score(score), 4),
+        subtype=subtype,
+        entry_signal=not failed_rules,
+        evidence={
+            **evidence,
+            "oversold_rebound_raw_score": round(raw_score, 4),
+            "oversold_rebound_score": round(clamp_score(score), 4),
+            "oversold_rebound_subtype": subtype,
+            "oversold_rebound_failed_rules": failed_rules,
+        },
+        failed_rules=failed_rules,
+    )
+
+
+def _bottom_reclaim_lane_evidence(visible_bars: list[Bar]) -> dict[str, object] | None:
+    if len(visible_bars) < 20:
+        return None
+    latest = visible_bars[-1]
+    previous = visible_bars[-2]
+    closes = [bar.close_price for bar in visible_bars]
+    highs = [bar.high_price for bar in visible_bars]
+    lows = [bar.low_price for bar in visible_bars]
+    recent_high = max(highs[-20:])
+    recent_low = min(lows[-20:])
+    low_index_from_end = len(lows[-20:]) - 1 - lows[-20:].index(recent_low)
+    ma5 = moving_average(closes, 5)
+    ma10 = moving_average(closes, 10)
+    ma20 = moving_average(closes, 20)
+    prev_closes = closes[:-1]
+    prev_ma5 = moving_average(prev_closes, 5)
+    prev_ma10 = moving_average(prev_closes, 10)
+    if not all(value is not None for value in [ma5, ma10, ma20, prev_ma5, prev_ma10]):
+        return None
+
+    drawdown = pct_distance(latest.close_price, recent_high)
+    rebound = pct_distance(latest.close_price, recent_low)
+    ma5_distance = pct_distance(latest.close_price, ma5)
+    ma10_distance = pct_distance(latest.close_price, ma10)
+    ma20_distance = pct_distance(latest.close_price, ma20)
+    prev_ma5_distance = pct_distance(previous.close_price, prev_ma5)
+    prev_ma10_distance = pct_distance(previous.close_price, prev_ma10)
+    latest_change = _bar_change_pct(visible_bars, len(visible_bars) - 1, _derived_change_pcts(visible_bars))
+    return_5d = period_return(closes[-20:], 5)
+    return_10d = period_return(closes[-20:], 10)
+    if None in {drawdown, rebound, ma5_distance, ma10_distance, ma20_distance}:
+        return None
+    if drawdown > -12.0:
+        return None
+    if low_index_from_end > 6:
+        return None
+    if rebound < 2.0 or rebound > 18.0:
+        return None
+    if ma5_distance < -0.8 or ma5_distance > 5.2:
+        return None
+    if ma10_distance < -3.0 or ma10_distance > 6.5:
+        return None
+    if ma20_distance > 8.0:
+        return None
+    if latest_change is not None and latest_change >= 9.8:
+        return None
+    if return_5d is not None and return_5d > 16.0:
+        return None
+
+    first_ma5_reclaim = prev_ma5_distance is not None and prev_ma5_distance < 0 <= ma5_distance
+    first_ma10_reclaim = prev_ma10_distance is not None and prev_ma10_distance < 0 <= ma10_distance
+    near_ma10_start = -1.0 <= ma10_distance <= 4.5 and rebound <= 12.5
+    if not (first_ma5_reclaim or first_ma10_reclaim or near_ma10_start):
+        return None
+
+    ma5_history = _ma_distance_history(closes, 5, 6)
+    ma10_history = _ma_distance_history(closes, 10, 6)
+    strength = _bottom_reclaim_strength_score(
+        ma5_distance=ma5_distance,
+        ma10_distance=ma10_distance,
+        ma20_distance=ma20_distance,
+        ma5_history=ma5_history,
+        ma10_history=ma10_history,
+        first_ma5_reclaim=first_ma5_reclaim,
+        first_ma10_reclaim=first_ma10_reclaim,
+        near_ma10_start=near_ma10_start,
+        return_5d=return_5d,
+        latest_change=latest_change,
+    )
+    strict_bottom = _is_strict_bottom_reclaim(
+        drawdown=drawdown,
+        rebound=rebound,
+        low_index_from_end=low_index_from_end,
+        ma5_distance=ma5_distance,
+        ma10_distance=ma10_distance,
+        ma20_distance=ma20_distance,
+        latest_change=latest_change,
+        return_5d=return_5d,
+        reclaim_or_start=first_ma5_reclaim or first_ma10_reclaim or near_ma10_start,
+    )
+    raw_score = 50.0
+    if drawdown <= -20.0:
+        raw_score += 14.0
+    elif drawdown <= -16.0:
+        raw_score += 10.0
+    if 3.0 <= rebound <= 12.0:
+        raw_score += 12.0
+    if first_ma5_reclaim:
+        raw_score += 10.0
+    if first_ma10_reclaim:
+        raw_score += 12.0
+    if -4.0 <= ma20_distance <= 4.0:
+        raw_score += 8.0
+    if latest_change is not None and 0.2 <= latest_change <= 5.8:
+        raw_score += 8.0
+    if return_10d is not None and return_10d <= -6.0:
+        raw_score += 6.0
+    subtype = SETUP_BOTTOM_RECLAIM if strict_bottom else SETUP_OVERSOLD_REBOUND_START
+    return {
+        "setup_type": SETUP_OVERSOLD_REBOUND_START,
+        "entry_setup": SETUP_OVERSOLD_REBOUND_START,
+        "setup_family": SETUP_OVERSOLD_REBOUND_START,
+        "rebound_subtype": subtype,
+        "bottom_reclaim": strict_bottom,
+        "secondary_breakout_confirm": False,
+        "drawdown_from_20d_high_pct": round(drawdown, 4),
+        "rebound_from_20d_low_pct": round(rebound, 4),
+        "low_index_from_end_20d": low_index_from_end,
+        "ma5": ma5,
+        "ma10": ma10,
+        "ma20": ma20,
+        "ma5_distance_pct": ma5_distance,
+        "ma10_distance_pct": ma10_distance,
+        "ma20_distance_pct": ma20_distance,
+        "prev_ma5_distance_pct": prev_ma5_distance,
+        "prev_ma10_distance_pct": prev_ma10_distance,
+        "first_ma5_reclaim": first_ma5_reclaim,
+        "first_ma10_reclaim": first_ma10_reclaim,
+        "near_ma10_start": near_ma10_start,
+        "bottom_reclaim_notes": _bottom_reclaim_notes(first_ma5_reclaim, first_ma10_reclaim, near_ma10_start) if strict_bottom else [],
+        "bottom_ma_repair_stage": _bottom_reclaim_stage(ma5_distance, ma10_distance, ma5_history, ma10_history, first_ma5_reclaim, first_ma10_reclaim, near_ma10_start),
+        "bottom_ma_repair_strength_score": strength,
+        "bottom_ma_repair_strength_bucket": _bottom_repair_strength_bucket(strength),
+        "bottom_ma_repair_ma20_context": _oversold_ma20_context(ma20_distance),
+        "ma5_distance_delta_3d": _distance_delta(ma5_history, 3),
+        "ma10_distance_delta_3d": _distance_delta(ma10_history, 3),
+        "ma5_distance_delta_5d": _distance_delta(ma5_history, 5),
+        "ma10_distance_delta_5d": _distance_delta(ma10_history, 5),
+        "latest_change_pct": latest_change,
+        "return_5d": return_5d,
+        "return_10d": return_10d,
+        "oversold_rebound_raw_score": round(min(raw_score, 100.0), 4),
+        "score_notes": [
+            "超跌后低位反弹",
+            "刚站回或贴近MA5/MA10",
+            "MA20未远离，偏起步而非后段加速",
+        ],
+    }
+
+
+def _secondary_breakout_confirm_evidence(features: DragonFeatures) -> dict[str, object] | None:
+    if len(features.closes) < 20:
+        return None
+    recent_high = max(features.highs[-20:])
+    recent_low = min(features.lows[-20:])
+    low_index_from_end = len(features.lows[-20:]) - 1 - features.lows[-20:].index(recent_low)
+    drawdown = pct_distance(features.latest.close_price, recent_high)
+    rebound = pct_distance(features.latest.close_price, recent_low)
+    if drawdown is None or rebound is None:
+        return None
+    deep_cycle_reversal = _deep_cycle_secondary_breakout_reversal(
+        features,
+        drawdown=drawdown,
+        rebound=rebound,
+        low_index_from_end=low_index_from_end,
+    )
+    if drawdown > -12.0 and not deep_cycle_reversal:
+        return None
+    if low_index_from_end > 10:
+        return None
+    if rebound < 5.0 or rebound > 22.0:
+        return None
+    if features.latest_change_pct is None or not (4.0 <= features.latest_change_pct <= 10.8):
+        return None
+    if features.close_location_in_range is None or features.close_location_in_range < 0.70:
+        return None
+    if features.volume_ratio is None or not (0.75 <= features.volume_ratio <= 2.80):
+        return None
+    if features.ma5_distance_pct is None or not (0.0 <= features.ma5_distance_pct <= 7.5):
+        return None
+    if features.ma10_distance_pct is None or not (-0.5 <= features.ma10_distance_pct <= 8.5):
+        return None
+    if features.ma20_distance_pct is None or features.ma20_distance_pct > 10.0:
+        return None
+    if features.return_5d is not None and features.return_5d > 24.0:
+        return None
+    ma5_history = _ma_distance_history(features.closes, 5, 8)
+    ma10_history = _ma_distance_history(features.closes, 10, 8)
+    had_bottom_repair_attempt = (
+        any(-4.5 <= value <= 2.5 for value in ma5_history[:-1])
+        or any(-5.5 <= value <= 2.5 for value in ma10_history[:-1])
+    )
+    if not had_bottom_repair_attempt:
+        return None
+    ma5_delta_3d = _distance_delta(ma5_history, 3)
+    ma10_delta_3d = _distance_delta(ma10_history, 3)
+    return {
+        "setup_type": SETUP_OVERSOLD_REBOUND_START,
+        "entry_setup": SETUP_OVERSOLD_REBOUND_START,
+        "setup_family": SETUP_OVERSOLD_REBOUND_START,
+        "rebound_subtype": SETUP_SECONDARY_BREAKOUT_CONFIRM,
+        "bottom_reclaim": False,
+        "secondary_breakout_confirm": True,
+        "deep_cycle_secondary_breakout_reversal": deep_cycle_reversal,
+        "drawdown_from_20d_high_pct": round(drawdown, 4),
+        "rebound_from_20d_low_pct": round(rebound, 4),
+        "low_index_from_end_20d": low_index_from_end,
+        "ma5": features.ma5,
+        "ma10": features.ma10,
+        "ma20": features.ma20,
+        "ma5_distance_pct": features.ma5_distance_pct,
+        "ma10_distance_pct": features.ma10_distance_pct,
+        "ma20_distance_pct": features.ma20_distance_pct,
+        "ma5_distance_delta_3d": ma5_delta_3d,
+        "ma10_distance_delta_3d": ma10_delta_3d,
+        "bottom_ma_repair_stage": "secondary_ma10_confirm",
+        "bottom_ma_repair_strength_score": _secondary_repair_strength_score(features, ma5_delta_3d, ma10_delta_3d),
+        "bottom_ma_repair_strength_bucket": "strong_repair",
+        "bottom_ma_repair_ma20_context": _oversold_ma20_context(features.ma20_distance_pct),
+        "latest_change_pct": features.latest_change_pct,
+        "return_5d": features.return_5d,
+        "return_10d": period_return(features.closes[-20:], 10),
+        "score_notes": [
+            "底部二次转强确认",
+            "底部修复后重新收回MA5/MA10",
+            "确认日收盘位置较强",
+        ],
+    }
+
+
+def _deep_cycle_secondary_breakout_reversal(
+    features: DragonFeatures,
+    *,
+    drawdown: float,
+    rebound: float,
+    low_index_from_end: int,
+) -> bool:
+    """Catch deep-cycle bottom reversals with a shallow 20-day high reference."""
+
+    if drawdown > -10.5:
+        return False
+    if low_index_from_end > 4:
+        return False
+    if rebound < 6.0 or rebound > 16.0:
+        return False
+    if features.max_drawdown_60d is None or features.max_drawdown_60d > -24.0:
+        return False
+    if features.return_20d is None or features.return_20d > -8.0:
+        return False
+    if features.return_60d is None or features.return_60d > -12.0:
+        return False
+    if features.latest_change_pct is None or not (8.0 <= features.latest_change_pct <= 10.8):
+        return False
+    if features.close_location_in_range is None or features.close_location_in_range < 0.85:
+        return False
+    if features.volume_ratio is None or not (0.85 <= features.volume_ratio <= 1.80):
+        return False
+    if features.ma20_distance_pct is None or not (-6.0 <= features.ma20_distance_pct <= 3.0):
+        return False
+    return True
+
+
+def _secondary_breakout_confirm_raw_score(evidence: dict[str, object]) -> float:
+    score = 58.0
+    drawdown = _float(evidence.get("drawdown_from_20d_high_pct"))
+    rebound = _float(evidence.get("rebound_from_20d_low_pct"))
+    latest_change = _float(evidence.get("latest_change_pct"))
+    ma20_distance = _float(evidence.get("ma20_distance_pct"))
+    repair_score = _float(evidence.get("bottom_ma_repair_strength_score"))
+    if drawdown is not None and drawdown <= -18.0:
+        score += 10.0
+    if rebound is not None and 6.0 <= rebound <= 16.0:
+        score += 10.0
+    if latest_change is not None and 4.5 <= latest_change <= 9.8:
+        score += 10.0
+    if ma20_distance is not None and -5.0 <= ma20_distance <= 6.5:
+        score += 8.0
+    if repair_score is not None and repair_score >= 70.0:
+        score += 8.0
+    return round(min(score, 100.0), 4)
+
+
+def _bottom_reclaim_strength_score(
+    *,
+    ma5_distance: float,
+    ma10_distance: float,
+    ma20_distance: float,
+    ma5_history: list[float],
+    ma10_history: list[float],
+    first_ma5_reclaim: bool,
+    first_ma10_reclaim: bool,
+    near_ma10_start: bool,
+    return_5d: float | None,
+    latest_change: float | None,
+) -> float:
+    score = 0.0
+    ma5_delta_3d = _distance_delta(ma5_history, 3)
+    ma10_delta_3d = _distance_delta(ma10_history, 3)
+    ma5_negative_days = sum(1 for value in ma5_history if value < 0)
+    ma10_negative_days = sum(1 for value in ma10_history if value < 0)
+    if ma5_negative_days > 0 and ma5_distance >= -0.3:
+        score += 16.0
+    if ma10_negative_days > 0 and ma10_distance >= -2.5:
+        score += 16.0
+    if ma5_delta_3d is not None and ma5_delta_3d >= 1.0:
+        score += 12.0
+    if ma10_delta_3d is not None and ma10_delta_3d >= 1.0:
+        score += 12.0
+    if first_ma5_reclaim:
+        score += 12.0
+    if first_ma10_reclaim:
+        score += 14.0
+    elif near_ma10_start:
+        score += 8.0
+    if -8.0 <= ma20_distance <= 2.0:
+        score += 12.0
+    elif 2.0 < ma20_distance <= 4.5:
+        score += 6.0
+    if return_5d is not None and return_5d <= 8.0:
+        score += 6.0
+    if latest_change is not None and 0.0 <= latest_change <= 5.5:
+        score += 6.0
+    return round(min(score, 100.0), 4)
+
+
+def _bottom_reclaim_stage(
+    ma5_distance: float,
+    ma10_distance: float,
+    ma5_history: list[float],
+    ma10_history: list[float],
+    first_ma5_reclaim: bool,
+    first_ma10_reclaim: bool,
+    near_ma10_start: bool,
+) -> str:
+    ma5_negative_days = sum(1 for value in ma5_history if value < 0)
+    ma10_negative_days = sum(1 for value in ma10_history if value < 0)
+    if first_ma10_reclaim or (ma10_negative_days >= 2 and 0 <= ma10_distance <= 4.2):
+        return "ma10_reclaim"
+    if first_ma5_reclaim or (ma5_negative_days >= 2 and ma5_distance >= 0 and ma10_distance < 0):
+        return "ma5_reclaim_ma10_pending"
+    if ma5_distance >= 0 and -2.5 <= ma10_distance < 0:
+        return "ma5_above_ma10_near"
+    if ma5_distance < 0 and near_ma10_start:
+        return "pre_reclaim_near_ma10"
+    return "near_ma_repair"
+
+
+def _bottom_repair_strength_bucket(score: float) -> str:
+    if score >= 76.0:
+        return "strong_repair"
+    if score >= 56.0:
+        return "medium_repair"
+    if score >= 36.0:
+        return "weak_repair"
+    return "thin_repair"
+
+
+def _is_strict_bottom_reclaim(
+    *,
+    drawdown: float,
+    rebound: float,
+    low_index_from_end: int,
+    ma5_distance: float,
+    ma10_distance: float,
+    ma20_distance: float,
+    latest_change: float | None,
+    return_5d: float | None,
+    reclaim_or_start: bool,
+) -> bool:
+    if drawdown > -14.0:
+        return False
+    if rebound < 2.5 or rebound > 13.0:
+        return False
+    if low_index_from_end > 5:
+        return False
+    if ma5_distance < -0.3 or ma5_distance > 4.2:
+        return False
+    if ma10_distance < -2.5 or ma10_distance > 4.2:
+        return False
+    if ma20_distance > 4.5:
+        return False
+    if latest_change is not None and (latest_change < 0.0 or latest_change > 6.5):
+        return False
+    if return_5d is not None and return_5d > 12.0:
+        return False
+    return reclaim_or_start
+
+
+def _bottom_reclaim_notes(first_ma5_reclaim: bool, first_ma10_reclaim: bool, near_ma10_start: bool) -> list[str]:
+    notes = ["严格反弹起步点"]
+    if first_ma5_reclaim:
+        notes.append("首次收复MA5")
+    if first_ma10_reclaim:
+        notes.append("首次收复MA10")
+    if near_ma10_start:
+        notes.append("贴近MA10起步")
+    return notes
+
+
+def _secondary_repair_strength_score(features: DragonFeatures, ma5_delta_3d: float | None, ma10_delta_3d: float | None) -> float:
+    score = 40.0
+    if features.ma5_distance_pct is not None and 0.0 <= features.ma5_distance_pct <= 5.5:
+        score += 12.0
+    if features.ma10_distance_pct is not None and 0.0 <= features.ma10_distance_pct <= 6.5:
+        score += 14.0
+    if ma5_delta_3d is not None and ma5_delta_3d >= 2.0:
+        score += 10.0
+    if ma10_delta_3d is not None and ma10_delta_3d >= 2.0:
+        score += 10.0
+    if features.ma20_distance_pct is not None and -6.0 <= features.ma20_distance_pct <= 6.5:
+        score += 8.0
+    if features.close_location_in_range is not None and features.close_location_in_range >= 0.82:
+        score += 6.0
+    return round(min(score, 100.0), 4)
+
+
+def _oversold_rebound_failed_rules(
+    features: DragonFeatures,
+    evidence: dict[str, object],
+    *,
+    liquidity: float,
+    risk: float,
+) -> list[str]:
+    failed: list[str] = []
+    if liquidity < 25:
+        failed.append("liquidity_score")
+    if risk < 35:
+        failed.append("risk_score")
+    if features.high_level_sideways_distribution_risk or features.volume_stall_risk:
+        failed.append("distribution_risk")
+    if features.latest_change_pct is not None and features.latest_change_pct > 10.8:
+        failed.append("overheat")
+    ma20_distance = _float(evidence.get("ma20_distance_pct"))
+    if ma20_distance is not None and ma20_distance > 10.0:
+        failed.append("ma20_rebound_stretch")
+    rebound = _float(evidence.get("rebound_from_20d_low_pct"))
+    if rebound is not None and rebound > 22.0:
+        failed.append("rebound_chase")
+    return failed
+
+
+def _selected_setup_type(
+    *,
+    base_setup_type: str,
+    dragon_lane_total: float,
+    stealth_lane_total: float,
+    oversold_lane: OversoldReboundLane | None,
+) -> str:
+    if (
+        oversold_lane is not None
+        and oversold_lane.entry_signal
+        and oversold_lane.score >= max(dragon_lane_total, stealth_lane_total)
+        and oversold_lane.score >= 72.0
+    ):
+        return SETUP_OVERSOLD_REBOUND_START
+    return base_setup_type
+
+
+def _apply_oversold_rebound_lane_evidence(
+    payload: dict[str, object],
+    oversold_lane: OversoldReboundLane | None,
+    selected_score_lane: str,
+) -> None:
+    if oversold_lane is None:
+        payload["oversold_rebound_candidate"] = False
+        return
+    payload["oversold_rebound_candidate"] = True
+    payload["oversold_rebound_candidate_subtype"] = oversold_lane.subtype
+    payload["oversold_rebound_candidate_score"] = oversold_lane.score
+    if selected_score_lane != SETUP_OVERSOLD_REBOUND_START:
+        return
+
+    evidence = {key: value for key, value in oversold_lane.evidence.items() if key != "not_used_for_signal_score"}
+    payload.update(evidence)
+    payload["setup_type"] = SETUP_OVERSOLD_REBOUND_START
+    payload["entry_setup"] = SETUP_OVERSOLD_REBOUND_START
+    payload["setup_family"] = SETUP_OVERSOLD_REBOUND_START
+    payload["rebound_subtype"] = oversold_lane.subtype
+    payload["bottom_reclaim"] = oversold_lane.subtype == SETUP_BOTTOM_RECLAIM
+    payload["secondary_breakout_confirm"] = oversold_lane.subtype == SETUP_SECONDARY_BREAKOUT_CONFIRM
+    payload["failed_rules"] = list(oversold_lane.failed_rules)
+    payload["signal_label"] = "超跌反弹买点"
+    payload["signal_role"] = "key_buy"
+    notes = list(payload.get("score_notes") or [])
+    notes.extend(str(note) for note in evidence.get("score_notes") or [])
+    notes.append(f"超跌反弹内部通道胜出: {oversold_lane.subtype}")
+    payload["score_notes"] = list(dict.fromkeys(notes))
+
+
+def _ma_distance_history(closes: list[float], period: int, lookback: int) -> list[float]:
+    distances: list[float] = []
+    start = max(period - 1, len(closes) - max(int(lookback or 1), 1))
+    for index in range(start, len(closes)):
+        ma = moving_average(closes[: index + 1], period)
+        distance = pct_distance(closes[index], ma) if ma is not None else None
+        if distance is not None:
+            distances.append(distance)
+    return distances
+
+
+def _distance_delta(history: list[float], days: int) -> float | None:
+    if len(history) <= days:
+        return None
+    return round(history[-1] - history[-days - 1], 4)
+
+
+def _oversold_ma20_context(ma20_distance: float | None) -> str:
+    if ma20_distance is None:
+        return "unknown"
+    if ma20_distance <= -2.0:
+        return "below_ma20_repair"
+    if ma20_distance <= 2.0:
+        return "near_ma20_reclaim"
+    if ma20_distance <= 6.5:
+        return "slightly_above_ma20"
+    return "ma20_stretch"
+
+
+def _float(value: object) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _evidence(
     *,
     features: DragonFeatures,
@@ -995,6 +1610,9 @@ def _evidence(
     dragon_total: float,
     stealth_total: float,
     low_suction_launch_bonus: float,
+    oversold_lane: OversoldReboundLane | None,
+    selected_score_lane: str,
+    dragon_failed_rules: list[str],
 ) -> dict[str, object]:
     recent_limit_up = features.near_limit_up_count_20d >= 1
     consecutive_bull = features.consecutive_bull_closes >= 4
@@ -1093,8 +1711,10 @@ def _evidence(
         "tail_buy_repeat_days": repeat_days,
         "last_tail_buy_ready_date": last_ready_date.isoformat() if last_ready_date else None,
         "failed_rules": failed_rules,
+        "dragon_failed_rules": dragon_failed_rules,
         "risk_flags": risk_flags,
         "risk_penalty": risk_penalty,
+        "sector_mainline_score": sector,
         "smart_money_proxy_score": smart_money,
         "fund_flow_score": fund_flow,
         "hot_rank_score": hot_rank,
@@ -1124,7 +1744,9 @@ def _evidence(
         "setup_scores": {
             "dragon_pullback": round(clamp_score(dragon_total), 4),
             "stealth_low_suction": round(clamp_score(stealth_total), 4),
+            "oversold_rebound": round(oversold_lane.score, 4) if oversold_lane else 0.0,
         },
+        "selected_score_lane": selected_score_lane,
         "score_notes": _score_notes(
             features,
             state,
@@ -1141,6 +1763,7 @@ def _evidence(
         "selection_rule": "daily_close_visible_signal",
         "entry_setup": setup_type,
     }
+    _apply_oversold_rebound_lane_evidence(payload, oversold_lane, selected_score_lane)
     ensure_entry_family_context(payload)
     return payload
 

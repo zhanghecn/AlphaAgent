@@ -51,6 +51,9 @@ from alphaagent.server.services.quant.financials import financial_scores_from_ro
 from alphaagent.server.services.quant import candidate_lanes, market_context, screening_loaders, screening_payloads
 from alphaagent.server.services.quant.strategy_registry import get_strategy
 from alphaagent.server.services.quant.screening import (
+    _attach_frontrow_features,
+    _attach_market_timing_context,
+    _build_market_timing_by_date,
     _load_financial_scores,
     _load_fund_flow_scores,
     _load_hot_rank_scores,
@@ -2763,7 +2766,7 @@ def _score_day(
 ):
     if _params_need_market_context(params) and score_cache is not None and trade_date in score_cache:
         score_cache = _score_cache_with_market_context(session, score_cache, trade_date)
-    return scoring.score_day(
+    scores = scoring.score_day(
         session,
         bars_by_symbol,
         trade_date,
@@ -2772,6 +2775,8 @@ def _score_day(
         score_context,
         score_candidates_for_day=_score_candidates_for_day,
     )
+    _attach_frontrow_features(session, scores, trade_date)
+    return scores
 
 
 def _score_candidates_for_day(
@@ -2797,6 +2802,10 @@ def _score_candidates_for_day(
     )
     if _params_need_market_context(params):
         _attach_scores_market_context(session, scores, trade_date)
+    if params.strategy == DRAGON_PULLBACK_STRATEGY_ID:
+        timing_payload = _build_market_timing_by_date(session, trade_date).get(trade_date)
+        for score in scores:
+            _attach_market_timing_context(score, timing_payload)
     return scores
 
 

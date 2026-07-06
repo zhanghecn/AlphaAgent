@@ -233,6 +233,11 @@ def signal_semantics(item: SignalScore, executable: bool) -> tuple[str, str, boo
         if executable:
             return "低吸蓄势买点", "key_buy", True
         return "低吸蓄势观察", "watch", False
+    if setup == "oversold_rebound_start":
+        subtype = str(evidence.get("rebound_subtype") or evidence.get("oversold_rebound_subtype") or "")
+        if subtype == "secondary_breakout_confirm":
+            return "超跌反弹二次确认", "key_buy" if executable else "watch", executable
+        return "超跌反弹买点" if executable else "超跌反弹观察", "key_buy" if executable else "watch", executable
     if setup == "dragon_pullback" and (not fresh_tail_buy or repeat_days > 0):
         return "重复龙回头观察" if not executable else "龙回头买点", "key_buy" if executable else "watch", executable
     if executable:
@@ -536,6 +541,7 @@ def recommendation_to_api(rank: int, item: SignalScore, stock: dict[str, Any] | 
     payload.pop("run_id", None)
     payload["trade_date"] = item.trade_date.isoformat()
     payload["expires_at"] = payload["expires_at"].isoformat()
+    _apply_strategy_explain(payload)
     payload["name"] = stock.get("name") if stock else None
     payload.update(stock_board_payload(item.vt_symbol, (stock or {}).get("exchange")))
     return payload
@@ -571,6 +577,7 @@ def mapping_to_api(row: dict[str, Any]) -> dict[str, Any]:
     if isinstance(result.get("reason"), dict):
         result["reason"] = normalize_quant_evidence(result["reason"])
         _apply_read_action_from_reason(result)
+        _apply_strategy_explain(result)
     if isinstance(result.get("evidence"), dict):
         result["evidence"] = normalize_quant_evidence(result["evidence"])
     if "entry_signal" in result and "total_score" in result:
@@ -587,6 +594,304 @@ def recommendation_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
     result = mapping_to_api(row)
     result["name"] = result.pop("stock_name", None)
     return result
+
+
+def _apply_strategy_explain(result: dict[str, Any]) -> None:
+    reason = result.get("reason")
+    if not isinstance(reason, dict):
+        return
+    if result.get("rank") is None and result.get("total_score") is None:
+        return
+    strategy_id = str(result.get("strategy_id") or result.get("signal_type") or STRATEGY_ID)
+    strategy_version = str(result.get("strategy_version") or "")
+    result["strategy_explain"] = strategy_explain_payload(
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        reason=reason,
+        action=str(result.get("action") or ""),
+    )
+
+
+def strategy_explain_payload(
+    *,
+    strategy_id: str,
+    strategy_version: str | None,
+    reason: dict[str, Any],
+    action: str | None = None,
+) -> dict[str, Any]:
+    """Build a read-only explanation for the strategy/setup factors behind a candidate."""
+
+    try:
+        strategy = require_strategy(strategy_id)
+    except ValueError:
+        strategy = require_strategy(STRATEGY_ID)
+    family, family_label = _candidate_family(reason)
+    positive_factors = _strategy_positive_factors(reason)
+    risk_factors = _strategy_risk_factors(reason, strategy.failed_rule_labels)
+    return {
+        "strategy_id": strategy_id,
+        "strategy_version": strategy_version or strategy.version,
+        "strategy_name": strategy.name,
+        "candidate_family": family,
+        "candidate_family_label": family_label,
+        "setup_labels": _setup_labels(reason, family_label),
+        "positive_factors": positive_factors,
+        "risk_factors": risk_factors,
+        "market_context": _strategy_market_context(reason),
+        "action": str(action or reason.get("action") or "").upper() or None,
+        "research_only": bool(reason.get("research_entry_signal") or reason.get("not_used_for_signal_score")),
+        "not_used_for_signal_score": bool(reason.get("not_used_for_signal_score")),
+    }
+
+
+def _candidate_family(reason: dict[str, Any]) -> tuple[str, str]:
+    setup = str(reason.get("setup_type") or reason.get("entry_setup") or "")
+    if reason.get("rebound_subtype") == "secondary_breakout_confirm" or reason.get("secondary_breakout_confirm"):
+        return "secondary_breakout_confirm", "超跌反弹二次确认"
+    if bool(reason.get("bottom_reclaim")) or reason.get("rebound_subtype") == "bottom_reclaim":
+        return "bottom_reclaim", "超跌反弹起步"
+    if reason.get("setup_family") == "oversold_rebound_start" or setup == "oversold_rebound_start":
+        return "oversold_rebound_start", "超跌反弹观察"
+    if reason.get("support_divergence_entry_profile"):
+        return "support_divergence", "支撑分歧低吸"
+    if setup == "stealth_low_suction":
+        if bool(reason.get("low_suction_launch_confirmed")):
+            return "low_suction_launch", "低吸首启"
+        return "low_suction_buildup", "低吸蓄势"
+    if setup == "dragon_pullback":
+        return "dragon_pullback", "龙回头回踩"
+    entry_family = str(reason.get("entry_family") or "")
+    entry_family_label = str(reason.get("entry_family_label") or "")
+    if entry_family and entry_family != "unknown" and entry_family_label:
+        return entry_family, entry_family_label
+    signal_label = str(reason.get("signal_label") or "")
+    if signal_label:
+        return setup or "default", signal_label
+    return setup or "unknown", "未归类"
+
+
+def _setup_labels(reason: dict[str, Any], family_label: str) -> list[str]:
+    labels: list[str] = [family_label]
+    for key in (
+        "signal_label",
+        "entry_family_label",
+        "low_position_reclaim_label",
+        "low_suction_stage_label",
+        "low_suction_launch_quality_label",
+        "low_suction_dragon_label",
+    ):
+        _append_distinct(labels, reason.get(key))
+    for note in reason.get("entry_family_notes") or []:
+        _append_distinct(labels, note)
+    for note in reason.get("bottom_reclaim_notes") or []:
+        _append_distinct(labels, note)
+    _append_distinct(labels, _bottom_ma_repair_stage_label(reason.get("bottom_ma_repair_stage")))
+    _append_distinct(labels, _bottom_ma_repair_bucket_label(reason.get("bottom_ma_repair_strength_bucket")))
+    return [
+        label
+        for label in labels
+        if label
+        and label
+        not in {
+            "观察",
+            "未归类",
+            "非低位承接",
+            "非低吸蓄势",
+            "非低吸买点",
+            "非低吸龙回头",
+            "标准龙回头",
+        }
+    ][:8]
+
+
+def _strategy_positive_factors(reason: dict[str, Any]) -> list[dict[str, Any]]:
+    factors = [
+        _explain_factor(reason, "low_suction_days", "低吸蓄势", _format_days),
+        _explain_factor(reason, "support_hold_days", "支撑未破", _format_days),
+        _explain_factor(reason, "ma_convergence_pct", "均线收敛", _format_pct),
+        _explain_factor(reason, "ma5_distance_pct", "MA5距离", _format_pct),
+        _explain_factor(reason, "ma10_distance_pct", "MA10距离", _format_pct),
+        _explain_factor(reason, "ma20_distance_pct", "MA20距离", _format_pct),
+        _explain_factor(reason, "volume_ratio_5d_20d", "5/20日量比", _format_ratio),
+        _explain_factor(reason, "drawdown_from_20d_high_pct", "20日高点回撤", _format_pct),
+        _explain_factor(reason, "rebound_from_20d_low_pct", "20日低点反弹", _format_pct),
+        _explain_factor(reason, "bottom_ma_repair_strength_score", "底部均线修复", _format_score),
+        _explain_factor(reason, "ma5_distance_delta_3d", "MA5三日修复", _format_pct),
+        _explain_factor(reason, "ma10_distance_delta_3d", "MA10三日修复", _format_pct),
+        _candidate_quality_factor(reason),
+    ]
+    rows = [factor for factor in factors if factor is not None]
+    adjustment = _float_optional(reason.get("candidate_quality_adjustment"))
+    if adjustment is not None and adjustment > 0:
+        for note in reason.get("candidate_quality_notes") or []:
+            text = str(note or "").strip()
+            if text and "降权" not in text:
+                rows.append({"key": "candidate_quality_note", "label": text, "value": None, "tone": "positive"})
+    return rows[:12]
+
+
+def _strategy_risk_factors(reason: dict[str, Any], failed_rule_labels: dict[str, str]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for rule in reason.get("failed_rules") or []:
+        key = str(rule or "").strip()
+        if key:
+            rows.append({"key": key, "label": failed_rule_labels.get(key, key), "value": None, "tone": "risk"})
+    adjustment = _float_optional(reason.get("candidate_quality_adjustment"))
+    for note in reason.get("candidate_quality_notes") or []:
+        text = str(note or "").strip()
+        if text and (adjustment is not None and adjustment < 0 or "降权" in text or "风险" in text):
+            rows.append({"key": "candidate_quality_note", "label": text, "value": None, "tone": "risk"})
+    for key, label in (
+        ("weekly_top_fractal_risk", "周线顶分型风险"),
+        ("spiky_churn_risk", "毛刺剧烈震荡风险"),
+        ("volume_stall_risk", "放量滞涨风险"),
+        ("high_position_volume_stall_risk", "高位量能滞涨"),
+        ("key_support_break_risk", "关键支撑破位"),
+        ("illiquid_forgotten_risk", "成交萎靡"),
+        ("high_level_sideways_distribution_risk", "高位久横派发"),
+    ):
+        if reason.get(key):
+            rows.append({"key": key, "label": label, "value": None, "tone": "risk"})
+    return _dedupe_factor_rows(rows)[:10]
+
+
+def _strategy_market_context(reason: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = [
+        _label_factor("timing_window", "择时窗口", _timing_window_label(reason.get("timing_window"))),
+        _label_factor("market_phase", "市场阶段", _market_phase_label(reason.get("market_phase"))),
+        _label_factor("dynamic_market_label", "大盘状态", reason.get("dynamic_market_label")),
+        _label_factor("market_warning_label", "风险等级", reason.get("market_warning_label")),
+        _label_factor("fund_flow_label", "资金状态", reason.get("fund_flow_label")),
+        _label_factor("recovery_label", "修复状态", reason.get("recovery_label")),
+        _explain_factor(reason, "bull_force", "多方力量", _format_score),
+        _explain_factor(reason, "bear_force", "空方力量", _format_score),
+    ]
+    return _dedupe_factor_rows([row for row in rows if row is not None])[:8]
+
+
+def _candidate_quality_factor(reason: dict[str, Any]) -> dict[str, Any] | None:
+    value = _float_optional(reason.get("candidate_quality_adjustment"))
+    if value is None or abs(value) < 1e-9:
+        return None
+    if value < 0:
+        return None
+    return {"key": "candidate_quality_adjustment", "label": "候选质量加分", "value": _format_signed(value), "tone": "positive"}
+
+
+def _explain_factor(
+    reason: dict[str, Any],
+    key: str,
+    label: str,
+    formatter: Any,
+) -> dict[str, Any] | None:
+    value = _float_optional(reason.get(key))
+    if value is None:
+        return None
+    return {"key": key, "label": label, "value": formatter(value), "tone": "positive"}
+
+
+def _label_factor(key: str, label: str, value: Any) -> dict[str, Any] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return {"key": key, "label": label, "value": text, "tone": "context"}
+
+
+def _dedupe_factor_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        key = str(row.get("key") or "")
+        label = str(row.get("label") or "")
+        value = str(row.get("value") or "")
+        marker = (key, f"{label}|{value}")
+        if not label or marker in seen:
+            continue
+        seen.add(marker)
+        result.append(row)
+    return result
+
+
+def _append_distinct(values: list[str], value: Any) -> None:
+    text = str(value or "").strip()
+    if text and text not in values:
+        values.append(text)
+
+
+def _float_optional(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number
+
+
+def _format_pct(value: float) -> str:
+    return f"{value:+.2f}%"
+
+
+def _format_ratio(value: float) -> str:
+    return f"{value:.2f}x"
+
+
+def _format_days(value: float) -> str:
+    return f"{value:.0f}天"
+
+
+def _format_score(value: float) -> str:
+    return f"{value:.1f}"
+
+
+def _format_signed(value: float) -> str:
+    return f"{value:+.2f}"
+
+
+def _bottom_ma_repair_stage_label(value: Any) -> str:
+    labels = {
+        "ma10_reclaim": "MA10已收复",
+        "ma5_reclaim_ma10_pending": "MA5修复、MA10待收复",
+        "ma5_above_ma10_near": "MA5已修复并贴近MA10",
+        "pre_reclaim_near_ma10": "收复前贴近MA10",
+        "near_ma_repair": "底部均线修复",
+    }
+    return labels.get(str(value or ""), "")
+
+
+def _bottom_ma_repair_bucket_label(value: Any) -> str:
+    labels = {
+        "strong_repair": "底部强修复",
+        "medium_repair": "底部中等修复",
+        "weak_repair": "底部弱修复",
+    }
+    return labels.get(str(value or ""), "")
+
+
+def _timing_window_label(value: Any) -> str:
+    labels = {
+        "after_gold_0_5": "金手指后0-5日",
+        "after_gold_6_20": "金手指后6-20日",
+        "after_gold_late": "金手指后20日以上",
+        "after_silver_0_5": "银手指后0-5日",
+        "after_silver_6_20": "银手指后6-20日",
+        "after_silver_late": "银手指后20日以上",
+        "no_recent_timing": "近期无金/银手指",
+    }
+    return labels.get(str(value or ""), str(value or ""))
+
+
+def _market_phase_label(value: Any) -> str:
+    labels = {
+        "retreat": "退潮",
+        "warming": "回暖",
+        "rotation": "轮动",
+        "bull": "强势",
+        "bear": "弱势",
+        "range": "震荡",
+        "unknown": "未知",
+    }
+    return labels.get(str(value or ""), str(value or ""))
 
 
 def _apply_read_action_from_reason(result: dict[str, Any]) -> None:

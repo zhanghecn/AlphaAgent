@@ -9,6 +9,7 @@ from typing import Any, Callable
 from alphaagent.server.services.backtest.schemas import BacktestParams, ScoreContext
 from alphaagent.server.services.backtest.queries import market_phase_setup_family
 from alphaagent.server.services.quant import market_context
+from alphaagent.server.services.quant import retreat_momentum_source
 from alphaagent.server.services.quant import screening_payloads
 from alphaagent.server.services.quant.low_suction_quality import low_suction_launch_quality_bucket
 from alphaagent.server.services.quant.strategy_registry import score_strategy
@@ -26,13 +27,20 @@ def score_day(
 ) -> list[Any]:
     """Return sorted buy candidates for one signal date."""
 
+    visible_bars = bars_with_signal_date(bars_by_symbol, trade_date)
     if score_cache is not None and trade_date in score_cache:
         scores = score_cache[trade_date]
     else:
         scorer = score_candidates_for_day or globals()["score_candidates_for_day"]
-        scores = scorer(session, bars_with_signal_date(bars_by_symbol, trade_date), trade_date, params, score_context)
+        scores = scorer(session, visible_bars, trade_date, params, score_context)
         if score_cache is not None:
             score_cache[trade_date] = scores
+    if params.strategy == "mainline_dragon_pullback":
+        scores = retreat_momentum_source.append_board_survival_pressure_sources(
+            scores,
+            visible_bars=visible_bars,
+            session=session,
+        )
     candidates = [score for score in scores if is_buy_candidate(score, params)]
     candidates = [_with_strategy_family_fields(score) for score in candidates]
     candidates = [score for score in candidates if _passes_setup_family_filter(score, params)]
@@ -549,6 +557,8 @@ def _with_default_candidate_quality_score(score, params: BacktestParams):
     if params.strategy != "mainline_dragon_pullback":
         return score
     evidence = getattr(score, "evidence", {}) or {}
+    if evidence.get("retreat_momentum_board_survival_source"):
+        return score
     decision = default_candidate_quality_adjustment(evidence)
     adjustment = float(decision["adjustment"])
     if adjustment == 0:

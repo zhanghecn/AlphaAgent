@@ -9,11 +9,17 @@ from alphaagent.server.services.quant.factors import DRAGON_PULLBACK_STRATEGY_ID
 
 STEALTH_LOW_SUCTION_LANE = "stealth_low_suction"
 DRAGON_PULLBACK_LANE = "dragon_pullback"
+OVERSOLD_REBOUND_LANE = "oversold_rebound_start"
+RETREAT_MOMENTUM_SOURCE_LANE = "retreat_high_low_switch_momentum"
 
 
 def dragon_candidate_lane(candidate: Any) -> str:
     evidence = getattr(candidate, "evidence", {}) or {}
     setup = str(evidence.get("entry_setup") or evidence.get("setup_type") or "")
+    if evidence.get("retreat_momentum_board_survival_source") or setup == RETREAT_MOMENTUM_SOURCE_LANE:
+        return RETREAT_MOMENTUM_SOURCE_LANE
+    if setup == OVERSOLD_REBOUND_LANE:
+        return OVERSOLD_REBOUND_LANE
     if setup == STEALTH_LOW_SUCTION_LANE:
         return STEALTH_LOW_SUCTION_LANE
     return DRAGON_PULLBACK_LANE
@@ -33,62 +39,278 @@ def select_dragon_pullback_execution_pool(candidates: list[Any], candidate_limit
     if strategy_id != DRAGON_PULLBACK_STRATEGY_ID:
         return list(candidates[:limit])
 
-    selected = sorted(candidates, key=dragon_pullback_opportunity_key)[:limit]
-    return [candidate for candidate in selected if not dragon_pullback_quality_filter_reason(candidate)]
+    selected, _ = _dragon_pullback_execution_selection(candidates, limit, strategy_id)
+    return selected
 
 
 def execution_pool_context(candidates: list[Any], candidate_limit: int, strategy_id: str | None) -> dict[str, dict[str, Any]]:
     limit = max(int(candidate_limit or 0), 0)
-    pre_filter_pool = (
-        sorted(candidates, key=dragon_pullback_opportunity_key)[:limit]
-        if strategy_id == DRAGON_PULLBACK_STRATEGY_ID and limit > 0
-        else list(candidates[:limit])
-    )
-    filtered = {
-        str(getattr(candidate, "vt_symbol", ""))
-        for candidate in pre_filter_pool
-        if strategy_id == DRAGON_PULLBACK_STRATEGY_ID and dragon_pullback_quality_filter_reason(candidate)
-    }
-    filter_reasons = {
-        str(getattr(candidate, "vt_symbol", "")): dragon_pullback_quality_filter_reason(candidate)
-        for candidate in pre_filter_pool
-        if strategy_id == DRAGON_PULLBACK_STRATEGY_ID and dragon_pullback_quality_filter_reason(candidate)
-    }
-    pool = [candidate for candidate in pre_filter_pool if str(getattr(candidate, "vt_symbol", "")) not in filtered]
+    pool, selection = _dragon_pullback_execution_selection(candidates, limit, strategy_id)
     selected = {str(getattr(candidate, "vt_symbol", "")): index for index, candidate in enumerate(pool, start=1)}
+    pre_filter_symbols = selection.get("pre_filter_symbols", set())
+    filtered = selection.get("filtered_symbols", set())
+    filter_reasons = selection.get("filter_reasons", {})
+    vacancy_fills = selection.get("vacancy_fills", set())
     context: dict[str, dict[str, Any]] = {}
     for raw_rank, candidate in enumerate(candidates, start=1):
         vt_symbol = str(getattr(candidate, "vt_symbol", ""))
         lane = dragon_candidate_lane(candidate) if strategy_id == DRAGON_PULLBACK_STRATEGY_ID else "score"
+        default_bonus = default_clean_watch_entry_opportunity_bonus(candidate) if strategy_id == DRAGON_PULLBACK_STRATEGY_ID else 0.0
+        timing_bonus = dragon_pullback_timing_opportunity_bonus(candidate) if strategy_id == DRAGON_PULLBACK_STRATEGY_ID else 0.0
         context[vt_symbol] = {
             "execution_lane": lane,
             "raw_signal_rank": raw_rank,
             "execution_opportunity_score": round(dragon_pullback_opportunity_score(candidate), 4)
             if strategy_id == DRAGON_PULLBACK_STRATEGY_ID
             else float(getattr(candidate, "total_score", 0) or 0),
-            "execution_opportunity_bonus": round(default_clean_watch_entry_opportunity_bonus(candidate), 4)
+            "execution_default_opportunity_bonus": round(default_bonus, 4),
+            "execution_timing_opportunity_bonus": round(timing_bonus, 4),
+            "execution_opportunity_bonus": round(default_bonus + timing_bonus, 4),
+            "execution_opportunity_reasons": dragon_pullback_timing_opportunity_reasons(candidate)
             if strategy_id == DRAGON_PULLBACK_STRATEGY_ID
-            else 0.0,
+            else [],
             "execution_volume_preparation_adjustment": 0.0,
             "execution_candidate_rank": selected.get(vt_symbol),
             "execution_candidate_selected": vt_symbol in selected,
+            "execution_pre_filter_selected": vt_symbol in pre_filter_symbols,
             "execution_quality_filtered": vt_symbol in filtered,
             "execution_quality_filter_reason": filter_reasons.get(vt_symbol),
             "execution_candidate_limit": int(candidate_limit or 0),
+            "execution_policy": "frontrow_secondary_vacancy_fill" if vt_symbol in vacancy_fills else "baseline_opportunity_rank",
+            "execution_vacancy_fill_eligible": strict_secondary_frontrow_vacancy_fill_candidate(candidate)
+            if strategy_id == DRAGON_PULLBACK_STRATEGY_ID
+            else False,
+            "execution_filled_vacancy": vt_symbol in vacancy_fills,
+            "execution_frontrow_quality_score": frontrow_quality_score(candidate)
+            if strategy_id == DRAGON_PULLBACK_STRATEGY_ID
+            else 0.0,
         }
     return context
 
 
+def _dragon_pullback_execution_selection(
+    candidates: list[Any],
+    limit: int,
+    strategy_id: str | None,
+) -> tuple[list[Any], dict[str, Any]]:
+    if limit <= 0:
+        return [], {"pre_filter_symbols": set(), "filtered_symbols": set(), "filter_reasons": {}, "vacancy_fills": set()}
+    if strategy_id != DRAGON_PULLBACK_STRATEGY_ID:
+        pool = list(candidates[:limit])
+        return pool, {
+            "pre_filter_symbols": {str(getattr(candidate, "vt_symbol", "")) for candidate in pool},
+            "filtered_symbols": set(),
+            "filter_reasons": {},
+            "vacancy_fills": set(),
+        }
+
+    ordered = sorted(candidates, key=dragon_pullback_opportunity_key)
+    pre_filter_pool = ordered[:limit]
+    filter_reasons = {
+        str(getattr(candidate, "vt_symbol", "")): reason
+        for candidate in pre_filter_pool
+        if (reason := dragon_pullback_quality_filter_reason(candidate))
+    }
+    filtered = set(filter_reasons)
+    selected = [candidate for candidate in pre_filter_pool if str(getattr(candidate, "vt_symbol", "")) not in filtered]
+    selected_symbols = {str(getattr(candidate, "vt_symbol", "")) for candidate in selected}
+    vacancy_fills: set[str] = set()
+    if len(selected) < limit:
+        fill_candidates = sorted(
+            (
+                candidate
+                for candidate in ordered
+                if str(getattr(candidate, "vt_symbol", "")) not in selected_symbols
+                and not dragon_pullback_quality_filter_reason(candidate)
+                and strict_secondary_frontrow_vacancy_fill_candidate(candidate)
+            ),
+            key=_strict_secondary_frontrow_fill_key,
+        )
+        for candidate in fill_candidates:
+            if len(selected) >= limit:
+                break
+            vt_symbol = str(getattr(candidate, "vt_symbol", ""))
+            if vt_symbol in selected_symbols:
+                continue
+            selected.append(candidate)
+            selected_symbols.add(vt_symbol)
+            vacancy_fills.add(vt_symbol)
+
+    return selected, {
+        "pre_filter_symbols": {str(getattr(candidate, "vt_symbol", "")) for candidate in pre_filter_pool},
+        "filtered_symbols": filtered,
+        "filter_reasons": filter_reasons,
+        "vacancy_fills": vacancy_fills,
+    }
+
+
 def dragon_pullback_opportunity_key(candidate: Any) -> tuple[float, float, str]:
+    lane = dragon_candidate_lane(candidate)
     return (
         -dragon_pullback_opportunity_score(candidate),
-        0.0 if dragon_candidate_lane(candidate) == DRAGON_PULLBACK_LANE else 1.0,
+        1.0 if lane == STEALTH_LOW_SUCTION_LANE else 0.0,
         str(getattr(candidate, "vt_symbol", "")),
     )
 
 
 def dragon_pullback_opportunity_score(candidate: Any) -> float:
-    return float(getattr(candidate, "total_score", 0) or 0) + default_clean_watch_entry_opportunity_bonus(candidate)
+    return (
+        float(getattr(candidate, "total_score", 0) or 0)
+        + default_clean_watch_entry_opportunity_bonus(candidate)
+        + dragon_pullback_timing_opportunity_bonus(candidate)
+    )
+
+
+def strict_secondary_frontrow_vacancy_fill_candidate(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _secondary_subtype(evidence) != "secondary_breakout_confirm":
+        return False
+    timing = str(evidence.get("timing_window") or "")
+    phase = str(evidence.get("market_phase") or "")
+    repair_rank = _float_or_none(evidence.get("frontrow_theme_repair_candidate_rank"))
+    theme_rank = _float_or_none(evidence.get("frontrow_theme_candidate_rank"))
+    return bool(
+        timing == "after_silver_6_20"
+        and phase == "retreat"
+        and bool(evidence.get("deep_cycle_secondary_breakout_reversal"))
+        and frontrow_quality_score(candidate) >= 75.0
+        and _secondary_breakout_narrow_confirm_bonus(candidate) >= 8.0
+        and (repair_rank is None or repair_rank <= 1.0)
+        and (theme_rank is None or theme_rank <= (5.0 if repair_rank is not None and repair_rank <= 1.0 else 3.0))
+    )
+
+
+def frontrow_quality_score(candidate: Any) -> float:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    heat = _float_or_none(evidence.get("frontrow_sector_heat_score"))
+    sector_score = _float_or_none(evidence.get("frontrow_sector_score"))
+    rank_return = _float_or_none(evidence.get("frontrow_sector_rank_return"))
+    leader = _float_or_none(evidence.get("frontrow_sector_leader_score"))
+    breadth = _float_or_none(evidence.get("frontrow_sector_breadth_score"))
+    continuity = _float_or_none(evidence.get("frontrow_sector_continuity_score"))
+    theme_rank = _float_or_none(evidence.get("frontrow_theme_candidate_rank"))
+    theme_count = _float_or_none(evidence.get("frontrow_theme_candidate_count"))
+    repair_rank = _float_or_none(evidence.get("frontrow_theme_repair_candidate_rank"))
+    repair_type = _secondary_subtype(evidence)
+    if heat is None and sector_score is None:
+        return 0.0
+
+    score = 0.0
+    if sector_score is not None:
+        score += min(max(sector_score - 48.0, 0.0) * 0.75, 28.0)
+    if heat is not None and heat >= 60.0:
+        score += min((heat - 58.0) * 1.05, 18.0)
+    if rank_return is not None:
+        if rank_return <= 50:
+            score += 16.0
+        elif rank_return <= 100:
+            score += 12.0
+        elif rank_return <= 150:
+            score += 8.0
+        elif rank_return <= 220:
+            score += 4.0
+    for value, threshold, points in ((leader, 55.0, 10.0), (breadth, 45.0, 7.0), (continuity, 45.0, 7.0)):
+        if value is not None and value >= threshold:
+            score += min((value - threshold) * 0.25 + points, points + 5.0)
+    if theme_rank is not None:
+        if theme_rank <= 3:
+            score += 12.0
+        elif theme_rank <= 5:
+            score += 8.0
+        elif theme_count is not None and theme_count > 0 and theme_rank / theme_count <= 0.25:
+            score += 5.0
+    if repair_rank is not None:
+        if repair_rank <= 1:
+            score += 8.0
+        elif repair_rank <= 2:
+            score += 5.0
+    if repair_type == "secondary_breakout_confirm" and bool(evidence.get("deep_cycle_secondary_breakout_reversal")):
+        score += 5.0
+    if repair_type == "bottom_reclaim" and bool(evidence.get("bottom_reclaim_silver_6_20_retreat")):
+        score += 5.0
+    if _controlled_repair_price_volume(evidence):
+        score += 5.0
+    return round(max(0.0, min(score, 100.0)), 4)
+
+
+def _strict_secondary_frontrow_fill_key(candidate: Any) -> tuple[float, float, float, str]:
+    return (
+        -frontrow_quality_score(candidate),
+        -_secondary_breakout_narrow_confirm_bonus(candidate),
+        -dragon_pullback_opportunity_score(candidate),
+        str(getattr(candidate, "vt_symbol", "")),
+    )
+
+
+def _secondary_breakout_narrow_confirm_bonus(candidate: Any) -> float:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _secondary_subtype(evidence) != "secondary_breakout_confirm":
+        return 0.0
+    score = 0.0
+    score_value = _secondary_score(evidence)
+    repair_score = _float_or_default(evidence.get("bottom_ma_repair_strength_score"), 0.0)
+    timing = str(evidence.get("timing_window") or "")
+    phase = str(evidence.get("market_phase") or "")
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    ma20_distance = _float_or_none(evidence.get("ma20_distance_pct"))
+    rebound = _float_or_none(evidence.get("rebound_from_20d_low_pct"))
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    if bool(evidence.get("deep_cycle_secondary_breakout_reversal")):
+        score += 4.5
+    if timing in {"after_silver_6_20", "after_silver_late"} and phase == "retreat":
+        score += 2.0
+    if (
+        close_location is not None
+        and close_location >= 0.70
+        and volume_ratio is not None
+        and 0.75 <= volume_ratio <= 1.80
+        and ma20_distance is not None
+        and -6.0 <= ma20_distance <= 6.5
+    ):
+        score += 1.2
+    if (
+        score_value >= 76.0
+        and repair_score >= 70.0
+        and rebound is not None
+        and 6.0 <= rebound <= 16.0
+        and latest_change is not None
+        and 4.0 <= latest_change <= 10.5
+    ):
+        score += 1.0
+    return round(score, 4)
+
+
+def _secondary_subtype(evidence: dict[str, Any]) -> str:
+    return str(
+        evidence.get("oversold_rebound_candidate_subtype")
+        or evidence.get("oversold_rebound_subtype")
+        or evidence.get("rebound_subtype")
+        or ""
+    )
+
+
+def _secondary_score(evidence: dict[str, Any]) -> float:
+    return float(
+        _float_or_none(evidence.get("oversold_rebound_candidate_score"))
+        or _float_or_none(evidence.get("oversold_rebound_score"))
+        or _float_or_none(evidence.get("total_score"))
+        or 0.0
+    )
+
+
+def _controlled_repair_price_volume(evidence: dict[str, Any]) -> bool:
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    ma20 = _float_or_none(evidence.get("ma20_distance_pct"))
+    return bool(
+        close_location is not None
+        and 0.62 <= close_location <= 1.0
+        and volume_ratio is not None
+        and 0.55 <= volume_ratio <= 1.65
+        and ma20 is not None
+        and -7.0 <= ma20 <= 4.0
+    )
 
 
 def dragon_pullback_lane_key(candidate: Any) -> tuple[float, str]:
@@ -142,6 +364,98 @@ def default_clean_watch_entry_opportunity_bonus(candidate: Any) -> float:
     if profile == "clean_active_support_divergence":
         return 3.5
     return 0.0
+
+
+def dragon_pullback_timing_opportunity_bonus(candidate: Any) -> float:
+    return round(sum(float(reason["points"]) for reason in dragon_pullback_timing_opportunity_reasons(candidate)), 4)
+
+
+def dragon_pullback_timing_opportunity_reasons(candidate: Any) -> list[dict[str, Any]]:
+    """Positive-only setup/timing opportunity bonus for the unified execution pool.
+
+    This bonus intentionally does not subtract points. Weak gold/silver windows
+    simply receive no timing bonus, leaving the lane's base score untouched.
+    """
+
+    evidence = getattr(candidate, "evidence", {}) or {}
+    setup = _setup_family(evidence)
+    timing = str(evidence.get("timing_window") or "unknown")
+    phase = str(evidence.get("market_phase") or "unknown")
+    reasons: list[dict[str, Any]] = []
+
+    def add(key: str, label: str, points: float) -> None:
+        if points <= 0:
+            return
+        reasons.append({"key": key, "label": label, "points": round(points, 4)})
+
+    if setup == OVERSOLD_REBOUND_LANE and timing == "after_silver_6_20" and phase == "retreat":
+        add("oversold_silver_6_20_retreat", "超跌反弹：银手指后6-20日退潮修复", 3.0)
+        if _bottom_reclaim_setup(evidence):
+            add("bottom_reclaim_silver_6_20_retreat", "底部收复：银手指后6-20日退潮修复", 1.0)
+            if _confirmed_bottom_reclaim_repair(evidence):
+                add("bottom_reclaim_confirmed_repair", "底部收复：均线修复确认", 0.9)
+        if bool(evidence.get("secondary_breakout_confirm")):
+            add("secondary_breakout_silver_6_20_retreat", "二次确认：银手指后退潮转强", 0.6)
+            if _confirmed_secondary_breakout_repair(evidence):
+                add("secondary_breakout_confirmed_repair", "二次确认：底部修复后再转强", 0.7)
+
+    if setup == "low_suction_buildup" and timing == "after_silver_6_20" and phase == "retreat":
+        add("low_suction_buildup_silver_6_20_retreat", "低吸蓄势：银手指后6-20日退潮修复", 2.5)
+
+    if setup == "low_suction_first_lift" and timing == "after_gold_0_5" and phase == "warming":
+        add("low_suction_first_lift_gold_0_5_warming", "低吸首启：金手指后短窗回暖", 3.0)
+
+    if setup == "low_suction_first_lift" and timing == "after_gold_6_20" and phase == "retreat":
+        add("low_suction_first_lift_gold_6_20_retreat", "低吸首启：金手指后6-20日回踩", 2.5)
+
+    gold_late_stealth_crawl = _gold_late_stealth_low_base_crawl(evidence, setup=setup, timing=timing, phase=phase)
+    if gold_late_stealth_crawl is not None:
+        key, label, points = gold_late_stealth_crawl
+        add(key, label, points)
+        return reasons
+
+    if setup == DRAGON_PULLBACK_LANE and timing == "after_gold_6_20" and phase == "rotation":
+        add("dragon_pullback_gold_6_20_rotation", "龙回头：金手指后6-20日轮动", 2.0)
+
+    if setup == DRAGON_PULLBACK_LANE and timing == "after_gold_0_5" and phase == "warming":
+        add("dragon_pullback_gold_0_5_warming", "龙回头：金手指后短窗回暖", 1.5)
+
+    if _silver_rotation_strict_fresh_dragon(evidence, setup=setup, timing=timing, phase=phase):
+        add("silver_rotation_strict_fresh_dragon", "龙回头：银手指后轮动新鲜确认", 2.8)
+        return reasons
+
+    if _silver_rotation_washout_dragon(evidence, setup=setup, timing=timing, phase=phase):
+        add("silver_rotation_washout_dragon", "龙回头：银后6-20轮动低收盘洗盘", 5.8)
+        if frontrow_quality_score(candidate) >= 45.0:
+            add("washout_dragon_frontrow_floor", "洗盘龙回头：细分题材强度达标", 0.7)
+        return reasons
+
+    if _silver_rotation_flat_base_low_suction(evidence, setup=setup, timing=timing, phase=phase) and frontrow_quality_score(candidate) >= 64.0:
+        add("silver_rotation_flat_base_low_suction", "低吸：银后6-20轮动横盘蓄势", 8.1)
+        if frontrow_quality_score(candidate) >= 62.0:
+            add("flat_base_theme_rank_confirm", "横盘蓄势低吸：题材前三确认", 0.8)
+        return reasons
+
+    if _right_tail_source_context(evidence, setup=setup, timing=timing, phase=phase):
+        add("right_tail_active_source_context", "活跃来源：龙回头/低吸右尾结构", 1.5)
+        if _right_tail_timing_context(setup=setup, timing=timing, phase=phase):
+            add("right_tail_timing_context", "历史右尾setup/timing/phase共振", 1.2)
+        if _controlled_volume(evidence):
+            add("right_tail_controlled_volume", "右尾结构量能温和", 0.35)
+
+    if not reasons:
+        return []
+
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    if close_location is not None and 0.22 <= close_location <= 0.72:
+        add("controlled_close_location", "低中位可控收盘", 0.3)
+    if volume_ratio is not None and 0.55 <= volume_ratio <= 1.45:
+        add("controlled_volume_ratio", "量能温和可控", 0.25)
+    if _active_source(evidence):
+        add("active_source", "近端活跃来源", 0.35)
+
+    return reasons
 
 
 def stale_active_weak_decay_pullback(candidate: Any) -> bool:
@@ -364,6 +678,9 @@ def core_active_short_pullback_strong_leg_lift_decay(candidate: Any) -> bool:
 
 
 def dragon_pullback_quality_filter_reason(candidate: Any) -> str | None:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if evidence.get("retreat_momentum_board_survival_source"):
+        return None
     if stale_active_weak_decay_pullback(candidate):
         return "stale_active_weak_decay_pullback"
     if old_low_suction_strong_leg_normal_volume(candidate):
@@ -413,11 +730,289 @@ def _float_or_none(value: Any) -> float | None:
         return None
 
 
+def _setup_family(evidence: dict[str, Any]) -> str:
+    setup = str(evidence.get("setup_family") or evidence.get("entry_setup") or evidence.get("setup_type") or "")
+    if setup == OVERSOLD_REBOUND_LANE or _bottom_reclaim_setup(evidence) or bool(evidence.get("secondary_breakout_confirm")):
+        return OVERSOLD_REBOUND_LANE
+    if setup == STEALTH_LOW_SUCTION_LANE:
+        low_suction_stage = str(evidence.get("low_suction_stage") or "")
+        if bool(evidence.get("first_effective_lift") or evidence.get("low_suction_launch_confirmed")):
+            return "low_suction_first_lift"
+        if low_suction_stage == "first_lift":
+            return "low_suction_first_lift"
+        return "low_suction_buildup"
+    if setup in {"low_suction", "low_suction_buildup"}:
+        return "low_suction_buildup"
+    if setup == "low_suction_first_lift":
+        return "low_suction_first_lift"
+    if setup == "dragon_low_suction_overlap":
+        return "dragon_low_suction_overlap"
+    if setup == RETREAT_MOMENTUM_SOURCE_LANE:
+        return RETREAT_MOMENTUM_SOURCE_LANE
+    if setup == DRAGON_PULLBACK_LANE:
+        return DRAGON_PULLBACK_LANE
+    return setup or "other"
+
+
+def _bottom_reclaim_setup(evidence: dict[str, Any]) -> bool:
+    return bool(evidence.get("bottom_reclaim") or str(evidence.get("rebound_subtype") or "") == "bottom_reclaim")
+
+
+def _confirmed_bottom_reclaim_repair(evidence: dict[str, Any]) -> bool:
+    repair_score = _float_or_default(evidence.get("bottom_ma_repair_strength_score"), 0.0)
+    repair_bucket = str(evidence.get("bottom_ma_repair_strength_bucket") or "")
+    stage = str(evidence.get("bottom_ma_repair_stage") or "")
+    return bool(
+        repair_score >= 56.0
+        or repair_bucket in {"medium_repair", "strong_repair"}
+        or stage in {"ma10_reclaim", "ma5_reclaim_ma10_pending", "pre_reclaim_near_ma10"}
+    )
+
+
+def _confirmed_secondary_breakout_repair(evidence: dict[str, Any]) -> bool:
+    repair_score = _float_or_default(evidence.get("bottom_ma_repair_strength_score"), 0.0)
+    stage = str(evidence.get("bottom_ma_repair_stage") or "")
+    return bool(repair_score >= 70.0 or stage == "secondary_ma10_confirm")
+
+
+def _silver_rotation_strict_fresh_dragon(
+    evidence: dict[str, Any],
+    *,
+    setup: str,
+    timing: str,
+    phase: str,
+) -> bool:
+    if setup != DRAGON_PULLBACK_LANE or timing != "after_silver_6_20" or phase != "rotation":
+        return False
+    strong_leg = _float_or_default(evidence.get("strong_leg_score"), 0.0)
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    ma10_distance = _float_or_none(evidence.get("ma10_distance_pct"))
+    ma20_distance = _float_or_none(evidence.get("ma20_distance_pct"))
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    pullback_days = _float_or_default(evidence.get("pullback_days"), 0.0)
+    near_limit_count = _float_or_default(evidence.get("near_limit_up_count_20d"), 0.0)
+    return bool(
+        strong_leg >= 86.0
+        and _strong_active_source(evidence)
+        and close_location is not None
+        and 0.18 <= close_location <= 0.70
+        and volume_ratio is not None
+        and 0.70 <= volume_ratio <= 1.30
+        and ma10_distance is not None
+        and ma10_distance >= 0.0
+        and ma20_distance is not None
+        and ma20_distance <= 8.5
+        and ma_convergence is not None
+        and ma_convergence <= 10.5
+        and (pullback_days <= 6.0 or near_limit_count >= 3.0)
+    )
+
+
+def _silver_rotation_washout_dragon(
+    evidence: dict[str, Any],
+    *,
+    setup: str,
+    timing: str,
+    phase: str,
+) -> bool:
+    if setup != DRAGON_PULLBACK_LANE or timing != "after_silver_6_20" or phase != "rotation":
+        return False
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    ret5 = _float_or_none(evidence.get("return_5d"))
+    ret20 = _float_or_none(evidence.get("return_20d"))
+    ret60 = _float_or_none(evidence.get("return_60d"))
+    ma20 = _float_or_none(evidence.get("ma20_distance_pct"))
+    volume = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    low_days = _float_or_default(evidence.get("low_suction_days"), 0.0)
+    theme_rank = _float_or_none(evidence.get("frontrow_theme_candidate_rank"))
+    sector_heat = _float_or_default(evidence.get("frontrow_sector_heat_score"), 0.0)
+    return bool(
+        latest_change is not None
+        and -1.2 <= latest_change <= 1.6
+        and ret5 is not None
+        and -1.0 <= ret5 <= 6.0
+        and ret20 is not None
+        and 12.0 <= ret20 <= 28.0
+        and ret60 is not None
+        and ret60 <= 42.0
+        and ma20 is not None
+        and 4.0 <= ma20 <= 13.0
+        and volume is not None
+        and 1.35 <= volume <= 1.90
+        and close_location is not None
+        and close_location <= 0.25
+        and low_days <= 1.0
+        and theme_rank is not None
+        and theme_rank <= 1.0
+        and sector_heat >= 52.0
+    )
+
+
+def _silver_rotation_flat_base_low_suction(
+    evidence: dict[str, Any],
+    *,
+    setup: str,
+    timing: str,
+    phase: str,
+) -> bool:
+    if setup not in {"low_suction_buildup", "low_suction_first_lift"}:
+        return False
+    if timing != "after_silver_6_20" or phase != "rotation":
+        return False
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    ret5 = _float_or_none(evidence.get("return_5d"))
+    ret20 = _float_or_none(evidence.get("return_20d"))
+    ret60 = _float_or_none(evidence.get("return_60d"))
+    ma20 = _float_or_none(evidence.get("ma20_distance_pct"))
+    volume = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    low_days = _float_or_default(evidence.get("low_suction_days"), 0.0)
+    theme_rank = _float_or_none(evidence.get("frontrow_theme_candidate_rank"))
+    sector_heat = _float_or_default(evidence.get("frontrow_sector_heat_score"), 0.0)
+    return bool(
+        latest_change is not None
+        and -0.8 <= latest_change <= 1.4
+        and ret5 is not None
+        and -1.2 <= ret5 <= 1.8
+        and ret20 is not None
+        and -2.0 <= ret20 <= 5.0
+        and ret60 is not None
+        and -5.0 <= ret60 <= 15.0
+        and ma20 is not None
+        and -1.5 <= ma20 <= 2.5
+        and volume is not None
+        and 0.80 <= volume <= 1.05
+        and close_location is not None
+        and 0.45 <= close_location <= 0.72
+        and 6.0 <= low_days <= 7.0
+        and theme_rank is not None
+        and theme_rank <= 3.0
+        and sector_heat >= 48.0
+    )
+
+
+def _gold_late_stealth_low_base_crawl(
+    evidence: dict[str, Any],
+    *,
+    setup: str,
+    timing: str,
+    phase: str,
+) -> tuple[str, str, float] | None:
+    if timing != "after_gold_late" or phase != "warming":
+        return None
+    raw_setup = str(evidence.get("entry_setup") or evidence.get("setup_type") or "")
+    if raw_setup != STEALTH_LOW_SUCTION_LANE:
+        return None
+
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    ret5 = _float_or_none(evidence.get("return_5d"))
+    ret20 = _float_or_none(evidence.get("return_20d"))
+    ret60 = _float_or_none(evidence.get("return_60d"))
+    ma20 = _float_or_none(evidence.get("ma20_distance_pct"))
+    volume = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    low_days = _float_or_default(evidence.get("low_suction_days"), 0.0)
+    support_hold_days = _float_or_default(evidence.get("support_hold_days"), 0.0)
+    if None in {latest_change, ret5, ret20, ret60, ma20, volume, close_location}:
+        return None
+    if support_hold_days < 5.0:
+        return None
+
+    if (
+        setup == "low_suction_buildup"
+        and 4.0 <= low_days <= 7.0
+        and -0.7 <= latest_change <= 0.75
+        and -1.0 <= ret5 <= 4.2
+        and 5.5 <= ret20 <= 10.5
+        and -3.0 <= ret60 <= 12.0
+        and 2.2 <= ma20 <= 6.0
+        and 0.84 <= volume <= 1.16
+        and 0.45 <= close_location <= 0.98
+    ):
+        return ("gold_late_stealth_buildup_crawl", "低吸：金后期回暖底部蓄势爬升", 8.6)
+
+    if (
+        setup == "low_suction_first_lift"
+        and 4.0 <= low_days <= 6.0
+        and 0.75 <= latest_change <= 1.8
+        and -0.5 <= ret5 <= 6.2
+        and 1.5 <= ret20 < 14.0
+        and -6.5 <= ret60 <= 18.0
+        and 1.2 <= ma20 <= 7.4
+        and 0.90 <= volume <= 1.18
+        and 0.50 <= close_location <= 0.98
+    ):
+        return ("gold_late_stealth_first_lift_crawl", "低吸：金后期回暖首启小阳爬升", 6.8)
+
+    return None
+
+
+def _right_tail_source_context(evidence: dict[str, Any], *, setup: str, timing: str, phase: str) -> bool:
+    if setup not in {DRAGON_PULLBACK_LANE, "dragon_low_suction_overlap", "low_suction_buildup", "low_suction_first_lift"}:
+        return False
+    if not _active_source(evidence):
+        return False
+    if not _right_tail_timing_context(setup=setup, timing=timing, phase=phase):
+        return False
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    if volume_ratio is not None and not (0.50 <= volume_ratio <= 1.65):
+        return False
+    return True
+
+
+def _right_tail_timing_context(*, setup: str, timing: str, phase: str) -> bool:
+    timing_phase = f"{timing}|{phase}"
+    buckets = {
+        DRAGON_PULLBACK_LANE: {
+            "after_gold_0_5|warming",
+            "after_gold_6_20|rotation",
+            "after_gold_6_20|warming",
+        },
+        "dragon_low_suction_overlap": {
+            "after_gold_0_5|warming",
+            "after_gold_0_5|retreat",
+            "after_gold_6_20|retreat",
+            "after_gold_6_20|rotation",
+            "after_silver_late|warming",
+            "after_silver_late|retreat",
+        },
+        "low_suction_buildup": {
+            "after_gold_0_5|warming",
+            "after_gold_6_20|retreat",
+            "after_silver_6_20|retreat",
+            "after_silver_late|retreat",
+            "after_silver_late|uptrend",
+        },
+        "low_suction_first_lift": {
+            "after_gold_0_5|warming",
+            "after_gold_6_20|retreat",
+            "after_silver_0_5|warming",
+            "after_silver_6_20|retreat",
+        },
+    }
+    return timing_phase in buckets.get(setup, set())
+
+
+def _controlled_volume(evidence: dict[str, Any]) -> bool:
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    return bool(volume_ratio is not None and 0.55 <= volume_ratio <= 1.35)
+
+
 def _active_source(evidence: dict[str, Any]) -> bool:
     return bool(
         evidence.get("recent_limit_up_20d")
         or _float_or_default(evidence.get("near_limit_up_count_20d"), 0.0) > 0
         or _float_or_default(evidence.get("large_bull_count_20d"), 0.0) >= 1.0
+    )
+
+
+def _strong_active_source(evidence: dict[str, Any]) -> bool:
+    return bool(
+        evidence.get("recent_limit_up_20d")
+        or _float_or_default(evidence.get("near_limit_up_count_20d"), 0.0) >= 2.0
+        or _float_or_default(evidence.get("large_bull_count_20d"), 0.0) >= 3.0
     )
 
 
