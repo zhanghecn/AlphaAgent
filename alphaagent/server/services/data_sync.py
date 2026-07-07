@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import time
 import csv
 import io
@@ -49,6 +49,10 @@ INTERRUPTED_SCHEDULE_MESSAGE = "API process restarted before this schedule finis
 INTERRUPTED_SCHEDULE_RECOVERY_DELAY_SECONDS = 30
 INTERRUPTED_SCHEDULE_RECOVERY_WAIT_SECONDS = 6 * 60 * 60
 INTERRUPTED_SCHEDULE_RECOVERY_POLL_SECONDS = 5
+# 单只股/板块同步的超时上限：AkShare 正常请求数秒，超时则跳过该 item（防 hang 拖死整批）
+SYNC_PER_ITEM_TIMEOUT_SECONDS = 60.0
+# 内存批次 running 超过此时长视为僵尸，看门狗清理（防卡死批次挡住新调度）
+ZOMBIE_BATCH_THRESHOLD_SECONDS = 2 * 60 * 60
 CANONICAL_SECTOR_DAILY_SOURCE = "eastmoney.board_kline"
 LIMIT_POOL_EVENT_SOURCE = "akshare.stock_ztb_em"
 STOCK_LIST_MAX_PAGES = 200
@@ -60,6 +64,54 @@ SECTOR_DAILY_MIN_COVERAGE_RATIO = 0.8
 _INTERRUPTED_RECOVERY_LOCK = threading.Lock()
 _INTERRUPTED_SCHEDULE_RECOVERY_IDS: set[str] = set()
 _interrupted_recovery_thread: threading.Thread | None = None
+
+
+def _bounded_parallel_map(
+    fn: Callable[[Any], None],
+    items: Sequence[Any],
+    *,
+    concurrency: int,
+    per_item_timeout: float,
+    on_timeout: Callable[[Any], None] | None = None,
+) -> None:
+    """并发执行 ``fn(item)``，单 item 超时 ``per_item_timeout`` 秒后跳过，不阻塞整批。
+
+    替代无超时的 ``ThreadPoolExecutor.map``——后者在某 item 的底层请求 hang 住
+    （如 AkShare 对某只股不返回）时会永久阻塞，拖死整批同步并卡住后续调度。
+
+    超时项对应的底层线程仍在运行（Python 无法强制中止线程），但主流程不再
+    等它：超时项经 ``on_timeout`` 回调上报，其余 item 正常推进。业务异常由
+    ``fn`` 自身的 try-except 处理，这里不重复抛出。
+    """
+
+    if not items:
+        return
+    pool = ThreadPoolExecutor(max_workers=max(1, concurrency))
+    try:
+        future_to_item = {pool.submit(fn, item): item for item in items}
+        submitted_at = {future: time.monotonic() for future in future_to_item}
+        pending = set(future_to_item)
+        while pending:
+            done_set, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+            for future in done_set:
+                try:
+                    future.result()
+                except Exception:
+                    pass  # 业务异常由 fn 内部 try-except 处理
+            now = time.monotonic()
+            stale = [f for f in pending if now - submitted_at[f] >= per_item_timeout]
+            for future in stale:
+                pending.discard(future)
+                if on_timeout is not None:
+                    try:
+                        on_timeout(future_to_item[future])
+                    except Exception:
+                        logger.warning("on_timeout callback failed", exc_info=True)
+    finally:
+        # wait=False：超时未完成的 worker 在后台继续跑完（Python 无法强杀线程），
+        # 但主流程立即返回、不阻塞整批。cancel_futures 取消尚未开始的排队任务。
+        pool.shutdown(wait=False, cancel_futures=True)
+
 
 # ─── Source / Job constants ──────────────────────────────────────────────
 
@@ -657,8 +709,12 @@ class DataSyncRunner:
                 sample_items=items,
             )
 
-        with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
-            list(pool.map(_do_one, sector_rows))
+        _bounded_parallel_map(
+            _do_one,
+            sector_rows,
+            concurrency=self.concurrency,
+            per_item_timeout=SYNC_PER_ITEM_TIMEOUT_SECONDS,
+        )
 
         return {"rows_read": counters["read"], "rows_written": counters["written"]}
 
@@ -722,8 +778,12 @@ class DataSyncRunner:
                 sample_items=sample_items,
             )
 
-        with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
-            list(pool.map(_do_one, stock_rows))
+        _bounded_parallel_map(
+            _do_one,
+            stock_rows,
+            concurrency=self.concurrency,
+            per_item_timeout=SYNC_PER_ITEM_TIMEOUT_SECONDS,
+        )
 
         logger.info("sync_stock_daily_bars: processed %d stocks", counters["done"])
         return {"rows_read": counters["read"], "rows_written": counters["written"]}
@@ -866,8 +926,12 @@ class DataSyncRunner:
                 sample_items=sample_items,
             )
 
-        with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
-            list(pool.map(_do_one, stock_rows))
+        _bounded_parallel_map(
+            _do_one,
+            stock_rows,
+            concurrency=self.concurrency,
+            per_item_timeout=SYNC_PER_ITEM_TIMEOUT_SECONDS,
+        )
 
         logger.info("sync_stock_minute_bars: processed %d stocks", counters["done"])
         return {
@@ -1042,8 +1106,12 @@ class DataSyncRunner:
                 sample_items=[{**item, "id": sector_id, "name": sector_name} for item in items[-3:]],
             )
 
-        with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
-            list(pool.map(_do_one, sector_rows))
+        _bounded_parallel_map(
+            _do_one,
+            sector_rows,
+            concurrency=self.concurrency,
+            per_item_timeout=SYNC_PER_ITEM_TIMEOUT_SECONDS,
+        )
 
         if counters["read"] == 0:
             raise DataSyncError(
@@ -1744,6 +1812,78 @@ def mark_interrupted_runs() -> list[str]:
     return interrupted_schedule_ids
 
 
+def _select_zombie_batch_ids(
+    batches: list[dict[str, Any]],
+    now: datetime,
+    threshold_seconds: float,
+) -> list[str]:
+    """从批次列表挑出僵尸：status=running 且 started_at 早于 ``now - threshold``。
+
+    started_at 兼容 ISO 字符串与 datetime；None / 非 running 跳过。纯函数，
+    便于单测；DB/内存交互由 ``reap_zombie_batches`` 负责。
+    """
+    cutoff = now - timedelta(seconds=threshold_seconds)
+    ids: list[str] = []
+    for batch in batches:
+        if batch.get("status") != "running":
+            continue
+        started = batch.get("started_at")
+        if started is None:
+            continue
+        if isinstance(started, str):
+            try:
+                started = datetime.fromisoformat(started.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+        if started < cutoff:
+            ids.append(str(batch.get("id")))
+    return ids
+
+
+def reap_zombie_batches(
+    now: datetime | None = None,
+    threshold_seconds: float = ZOMBIE_BATCH_THRESHOLD_SECONDS,
+) -> list[str]:
+    """看门狗：清理内存 ``_SYNC_BATCHES`` 里 running 超过阈值的僵尸批次。
+
+    线上根因：内存批次 ``status='running'`` 永不结束 → ``start_sync_batch`` 检测
+    到上次还在 running 就拒绝新批次 → 后续调度全部被挡。重启能清（内存重置），
+    但不重启时由本函数自愈。顺带清理 DB 里残留的 running run。
+    """
+    if not is_database_configured():
+        return []
+    now = now or datetime.now(timezone.utc)
+    with _BATCH_LOCK:
+        batches = list(_SYNC_BATCHES.values())
+    zombie_ids = _select_zombie_batch_ids(batches, now, threshold_seconds)
+    if not zombie_ids:
+        return []
+    with _BATCH_LOCK:
+        for batch_id in zombie_ids:
+            batch = _SYNC_BATCHES.get(batch_id)
+            if batch is None:
+                continue
+            batch["status"] = "failed"
+            batch["finished_at"] = _utc_now_iso()
+            batch["message"] = f"Reaped by zombie watchdog (running > {int(threshold_seconds)}s)"
+    logger.warning("reap_zombie_batches: cleaned %d zombie batches: %s", len(zombie_ids), zombie_ids)
+    try:
+        with session_scope() as session:
+            session.execute(
+                schema.sync_job_runs.update()
+                .where(schema.sync_job_runs.c.status == "running")
+                .values(
+                    status="failed",
+                    message="Reaped by zombie watchdog",
+                    error_type="Zombie",
+                    finished_at=datetime.now(timezone.utc),
+                )
+            )
+    except Exception as exc:
+        logger.warning("reap_zombie_batches: DB cleanup failed: %s", exc)
+    return zombie_ids
+
+
 # ─── Public query API ────────────────────────────────────────────────────
 
 def list_sources() -> list[dict[str, Any]]:
@@ -2052,6 +2192,9 @@ def start_sync_batch(
 
     if not is_database_configured():
         raise DataSyncError("DATABASE_URL is not configured")
+
+    # 启动新批次前先清僵尸——避免上次卡死的 running 批次挡住本次调度
+    reap_zombie_batches()
 
     with _BATCH_LOCK:
         if _LATEST_BATCH_ID:
