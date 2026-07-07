@@ -143,6 +143,76 @@ def test_seed_default_registry_deletes_disabled_non_default_schedules(monkeypatc
     assert "custom_failed_disabled" in rows
 
 
+def test_seed_default_registry_clears_stale_partial_summary(monkeypatch):
+    current_partial = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "eod_finalize_2130")
+    rows: dict[str, dict[str, Any]] = {
+        "eod_18h": {
+            "id": "eod_18h",
+            "job_ids": ["old_job"] * 15,
+            "last_status": "partial",
+            "last_started_at": datetime(2026, 7, 7, 18, 0),
+            "last_finished_at": datetime(2026, 7, 7, 18, 30),
+            "last_message": "14 成功 / 1 失败",
+        },
+        "eod_finalize_2130": {
+            "id": "eod_finalize_2130",
+            "job_ids": current_partial["job_ids"],
+            "last_status": "partial",
+            "last_started_at": datetime(2026, 7, 7, 21, 30),
+            "last_finished_at": datetime(2026, 7, 7, 21, 40),
+            "last_message": "3 成功 / 1 失败",
+        },
+    }
+
+    class FakeResult:
+        def __init__(self, row=object()):
+            self.row = row
+
+        def first(self):
+            return self.row
+
+    class FakeSession:
+        def execute(self, statement):
+            table = getattr(getattr(statement, "table", None), "name", None)
+
+            if getattr(statement, "is_select", False) and "FROM sync_batch_schedules" in str(statement):
+                params = statement.compile().params
+                return FakeResult(rows.get(params["id_1"]))
+
+            if table == "sync_batch_schedules" and statement.is_insert:
+                params = statement.compile().params
+                rows[str(params["id"])] = dict(params)
+                return FakeResult()
+
+            if table == "sync_batch_schedules" and statement.is_update:
+                params = statement.compile().params
+                schedule_id = str(params["id_1"])
+                rows.setdefault(schedule_id, {}).update(
+                    {key: value for key, value in params.items() if key != "id_1"}
+                )
+                return FakeResult()
+
+            if table == "sync_batch_schedules" and statement.is_delete:
+                return FakeResult()
+
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+
+    svc.seed_default_registry()
+
+    assert rows["eod_18h"]["last_status"] is None
+    assert rows["eod_18h"]["last_started_at"] is None
+    assert rows["eod_18h"]["last_finished_at"] is None
+    assert rows["eod_18h"]["last_message"] is None
+    assert rows["eod_finalize_2130"]["last_status"] == "partial"
+    assert rows["eod_finalize_2130"]["last_message"] == "3 成功 / 1 失败"
+
+
 def test_default_jobs_have_no_cron():
     # After dropping single-job schedules, every DEFAULT_JOBS entry has no cron.
     for job in svc.DEFAULT_JOBS:

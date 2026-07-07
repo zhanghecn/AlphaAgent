@@ -15,6 +15,7 @@ Key public symbols consumed elsewhere:
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -492,6 +493,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
 TAIL_PREVIEW_BATCH_JOB_ID = "tail_preview_cache"
 EOD_QUANT_RESEARCH_BATCH_JOB_ID = "eod_quant_research"
 INTERNAL_BATCH_JOB_IDS = {TAIL_PREVIEW_BATCH_JOB_ID, EOD_QUANT_RESEARCH_BATCH_JOB_ID}
+STALE_BATCH_SUMMARY_RE = re.compile(r"^\s*(\d+)\s+成功\s*/\s*(\d+)\s+失败\s*$")
 
 
 SYNC_BATCH_PROFILES: dict[str, tuple[str, ...]] = {
@@ -1717,6 +1719,31 @@ def ensure_sync_schema() -> None:
     mark_interrupted_runs()
 
 
+def _stale_batch_summary_status_reset(existing_sched: Any, current_job_count: int) -> dict[str, Any]:
+    mapping = (
+        existing_sched
+        if isinstance(existing_sched, dict)
+        else getattr(existing_sched, "_mapping", None)
+    )
+    if not mapping or mapping.get("last_status") != "partial":
+        return {}
+
+    match = STALE_BATCH_SUMMARY_RE.match(str(mapping.get("last_message") or ""))
+    if not match:
+        return {}
+
+    previous_job_count = int(match.group(1)) + int(match.group(2))
+    if previous_job_count == current_job_count:
+        return {}
+
+    return {
+        "last_status": None,
+        "last_started_at": None,
+        "last_finished_at": None,
+        "last_message": None,
+    }
+
+
 def seed_default_registry() -> None:
     """Insert default sources and job definitions when they are missing."""
     try:
@@ -1777,6 +1804,9 @@ def seed_default_registry() -> None:
                 if existing_sched is None:
                     session.execute(schema.sync_batch_schedules.insert().values(**sched_values))
                 else:
+                    sched_values.update(
+                        _stale_batch_summary_status_reset(existing_sched, len(sched["job_ids"]))
+                    )
                     session.execute(
                         schema.sync_batch_schedules.update()
                         .where(schema.sync_batch_schedules.c.id == sched["id"])
