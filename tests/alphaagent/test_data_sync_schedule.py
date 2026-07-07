@@ -116,37 +116,34 @@ def test_tail_quant_schedule_triggers_quant_research():
     assert "sync_stock_daily_bars" not in tail_quant["job_ids"]
 
 
-def test_eod_schedule_has_daily_bars_and_lhb_last():
+def test_eod_schedule_keeps_daily_bars_out_of_early_slot():
     eod = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "eod_18h")
     assert eod["action"] == "sync"
-    assert "sync_stock_daily_bars" in eod["job_ids"]
-    assert "sync_index_daily_bars" in eod["job_ids"]
+    assert "sync_stock_daily_bars" not in eod["job_ids"]
+    assert "sync_index_daily_bars" not in eod["job_ids"]
+    assert "sync_sector_period_scores" not in eod["job_ids"]
+    assert svc.EOD_QUANT_RESEARCH_BATCH_JOB_ID not in eod["job_ids"]
     assert "sync_limit_up_pools" in eod["job_ids"]
-    assert svc.EOD_QUANT_RESEARCH_BATCH_JOB_ID in eod["job_ids"]
-    # LHB publishes after 18:00, so it must run after daily bars.
-    assert eod["job_ids"].index("sync_stock_lhb_records") > eod["job_ids"].index("sync_stock_daily_bars")
-    assert eod["job_ids"].index(svc.EOD_QUANT_RESEARCH_BATCH_JOB_ID) > eod["job_ids"].index("sync_stock_daily_bars")
-    assert eod["job_ids"].index("sync_index_daily_bars") > eod["job_ids"].index("sync_stock_daily_bars")
-    assert eod["job_ids"].index(svc.EOD_QUANT_RESEARCH_BATCH_JOB_ID) > eod["job_ids"].index("sync_index_daily_bars")
+    assert "sync_stock_lhb_records" in eod["job_ids"]
+    assert "sync_stock_financial_quarterly" in eod["job_ids"]
 
 
-def test_eod_schedule_runs_quant_research_before_slow_enrichment_jobs():
-    """候选生成应在基础数据(daily_bars+板块系列)就绪后立即跑,不等慢/晚 job(financial_quarterly/lhb/notices),
-    以便候选在 daily_bars 完成后尽快出炉(约 18:15-18:20)。
-
-    候选评分读 DB 已有财报评分(_load_financial_scores 按 as_of),不强依赖当次 financial_quarterly;
-    财报季度更新,用前一日 DB 数据可接受。慢/晚 job 在候选之后跑,更新供下次候选使用。
-    """
+def test_eod_schedule_only_runs_slow_enrichment_jobs():
     eod = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "eod_18h")
     jobs = eod["job_ids"]
-    quant_idx = jobs.index(svc.EOD_QUANT_RESEARCH_BATCH_JOB_ID)
-    # 候选硬依赖:日线 + 板块主线评分数据必须在候选之前
-    assert jobs.index("sync_stock_daily_bars") < quant_idx
-    assert jobs.index("sync_sector_period_scores") < quant_idx
-    # 慢/晚增强 job 必须在候选之后,不阻塞候选出炉
-    assert jobs.index("sync_stock_financial_quarterly") > quant_idx
-    assert jobs.index("sync_stock_lhb_records") > quant_idx
-    assert jobs.index("sync_stock_notices") > quant_idx
+    assert jobs == [
+        "sync_stock_list",
+        "sync_sector_list",
+        "sync_sector_members",
+        "sync_stock_sector_memberships",
+        "sync_sector_fund_flows",
+        "sync_limit_up_pools",
+        "sync_stock_lhb_records",
+        "sync_stock_notices",
+        "sync_stock_financial_quarterly",
+        "sync_stock_financial_indicators",
+        "sync_stock_business_segments_history",
+    ]
 
 
 def test_eod_finalize_schedule_retries_daily_bars_late_without_slow_jobs():

@@ -454,21 +454,17 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
     },
     {
         "id": "eod_18h",
-        "name": "盘后同步（18:00，补完整数据）",
+        "name": "盘后慢数据维护（18:00）",
         "cron": "0 18 * * 1-5",
         "action": "sync",
         "enabled": True,
         "concurrency": 8,
         "job_ids": [
             "sync_stock_list",
-            "sync_stock_daily_bars",    # full daily bars (true incremental)
-            "sync_index_daily_bars",    # market context benchmarks
             "sync_sector_list",
             "sync_sector_members",
             "sync_stock_sector_memberships",
             "sync_sector_fund_flows",
-            "sync_sector_period_scores",
-            "eod_quant_research",       # 候选生成:基础数据(daily+板块)就绪即跑,读DB已有财报评分,不等慢/晚job,让候选早出
             "sync_limit_up_pools",       # 涨停池接口偶发慢/卡，放到盘后慢链路，不阻塞尾盘实时缓存
             "sync_stock_lhb_records",   # LHB publishes after 18:00 -> run late
             "sync_stock_notices",
