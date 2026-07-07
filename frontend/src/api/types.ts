@@ -535,6 +535,11 @@ export interface SyncCoverageTable {
   stocks?: number;
   updated_at?: string | null;
   latest_trade_date?: string | null;
+  latest_trade_date_symbol_count?: number;
+  latest_trade_date_is_complete?: boolean;
+  latest_complete_trade_date?: string | null;
+  latest_complete_trade_date_symbol_count?: number;
+  min_complete_daily_symbol_count?: number;
 }
 
 export interface SyncCoverage {

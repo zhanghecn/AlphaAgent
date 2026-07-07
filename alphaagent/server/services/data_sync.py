@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import time
 import csv
@@ -86,27 +87,40 @@ def _bounded_parallel_map(
 
     if not items:
         return
+    queue = deque(items)
+    active: dict[Any, Any] = {}
+    submitted_at: dict[Any, float] = {}
+
+    def submit_available(pool: ThreadPoolExecutor) -> None:
+        while queue and len(active) < max(1, concurrency):
+            item = queue.popleft()
+            future = pool.submit(fn, item)
+            active[future] = item
+            submitted_at[future] = time.monotonic()
+
     pool = ThreadPoolExecutor(max_workers=max(1, concurrency))
     try:
-        future_to_item = {pool.submit(fn, item): item for item in items}
-        submitted_at = {future: time.monotonic() for future in future_to_item}
-        pending = set(future_to_item)
-        while pending:
-            done_set, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+        submit_available(pool)
+        while active:
+            done_set, _ = wait(set(active), timeout=0.1, return_when=FIRST_COMPLETED)
             for future in done_set:
+                active.pop(future, None)
+                submitted_at.pop(future, None)
                 try:
                     future.result()
                 except Exception:
                     pass  # 业务异常由 fn 内部 try-except 处理
             now = time.monotonic()
-            stale = [f for f in pending if now - submitted_at[f] >= per_item_timeout]
+            stale = [future for future in active if now - submitted_at[future] >= per_item_timeout]
             for future in stale:
-                pending.discard(future)
+                item = active.pop(future, None)
+                submitted_at.pop(future, None)
                 if on_timeout is not None:
                     try:
-                        on_timeout(future_to_item[future])
+                        on_timeout(item)
                     except Exception:
                         logger.warning("on_timeout callback failed", exc_info=True)
+            submit_available(pool)
     finally:
         # wait=False：超时未完成的 worker 在后台继续跑完（Python 无法强杀线程），
         # 但主流程立即返回、不阻塞整批。cancel_futures 取消尚未开始的排队任务。
@@ -2753,6 +2767,8 @@ def coverage() -> dict[str, Any]:
             except Exception:
                 pass
             tables[table_name] = {"count": count, "last_updated": freshness}
+            if table_name == "stock_daily_bars":
+                tables[table_name].update(_stock_daily_bar_coverage(session))
 
     return {
         "status": "ready" if any(t["count"] > 0 for t in tables.values()) else "empty",
@@ -2792,6 +2808,10 @@ def data_health() -> dict[str, Any]:
         severity, reason, is_stale = _evaluate_job_staleness(
             cad, now, latest_trade_date, disclosure_season, probe_value,
         )
+        if job.id == "sync_stock_daily_bars":
+            override = _stock_daily_incomplete_health(tables_cov.get("stock_daily_bars", {}))
+            if override is not None:
+                severity, reason, is_stale = override
         job_results[job.id] = {
             "job_id": job.id,
             "name": job.name,
@@ -2828,6 +2848,10 @@ def data_health() -> dict[str, Any]:
         "market_context": {
             "now": now.isoformat(),
             "latest_trade_date": _iso_or_none(latest_trade_date),
+            "latest_daily_trade_date": tables_cov.get("stock_daily_bars", {}).get("latest_trade_date"),
+            "latest_complete_trade_date": tables_cov.get("stock_daily_bars", {}).get("latest_complete_trade_date"),
+            "latest_trade_date_symbol_count": tables_cov.get("stock_daily_bars", {}).get("latest_trade_date_symbol_count"),
+            "min_complete_daily_symbol_count": screening.MIN_COMPLETE_DAILY_SYMBOL_COUNT,
             "is_disclosure_season": disclosure_season,
             "trade_calendar_source": cal_source,
         },
@@ -2849,7 +2873,7 @@ def data_health() -> dict[str, Any]:
 
 
 def _resolve_latest_trade_date() -> tuple[date | None, str]:
-    """用本地 stock_daily_bars.MAX(trade_date) 反推最新交易日（最可靠）。
+    """用本地完整 stock_daily_bars 反推历史研究可用交易日。
 
     空库时返回 (None, "unknown")，调用方走 staleness 兜底，不阻塞。
     """
@@ -2857,14 +2881,55 @@ def _resolve_latest_trade_date() -> tuple[date | None, str]:
         return None, "unknown"
     try:
         with session_scope() as session:
-            value = session.execute(
-                select(func.max(schema.stock_daily_bars.c.trade_date))
-            ).scalar()
+            value = _latest_complete_daily_date(session)
+            if value is not None:
+                return _as_date(value), "stock_daily_bars.complete"
+            value = session.execute(select(func.max(schema.stock_daily_bars.c.trade_date))).scalar()
             if value is not None:
                 return _as_date(value), "stock_daily_bars"
     except Exception as exc:  # noqa: BLE001 — 健康检查不能因查询失败而崩
         logger.warning("resolve latest trade date failed: %s", exc)
     return None, "unknown"
+
+
+def _stock_daily_bar_coverage(session) -> dict[str, Any]:
+    latest_trade_date = session.execute(select(func.max(schema.stock_daily_bars.c.trade_date))).scalar()
+    latest_complete_trade_date = _latest_complete_daily_date(session)
+    latest_count = _stock_daily_symbol_count(session, latest_trade_date)
+    latest_complete_count = _stock_daily_symbol_count(session, latest_complete_trade_date)
+    min_count = screening.MIN_COMPLETE_DAILY_SYMBOL_COUNT
+    return {
+        "latest_trade_date": _iso_or_none(latest_trade_date),
+        "latest_trade_date_symbol_count": latest_count,
+        "latest_trade_date_is_complete": bool(latest_trade_date and latest_count >= min_count),
+        "latest_complete_trade_date": _iso_or_none(latest_complete_trade_date),
+        "latest_complete_trade_date_symbol_count": latest_complete_count,
+        "min_complete_daily_symbol_count": min_count,
+    }
+
+
+def _stock_daily_symbol_count(session, trade_date: date | None) -> int:
+    if trade_date is None:
+        return 0
+    return int(
+        session.execute(
+            select(func.count(func.distinct(schema.stock_daily_bars.c.vt_symbol))).where(
+                schema.stock_daily_bars.c.trade_date == trade_date
+            )
+        ).scalar()
+        or 0
+    )
+
+
+def _stock_daily_incomplete_health(table_cov: dict[str, Any]) -> tuple[str, str, bool] | None:
+    latest_trade_date = table_cov.get("latest_trade_date")
+    latest_count = int(table_cov.get("latest_trade_date_symbol_count") or 0)
+    min_count = int(table_cov.get("min_complete_daily_symbol_count") or screening.MIN_COMPLETE_DAILY_SYMBOL_COUNT)
+    if not latest_trade_date or latest_count >= min_count:
+        return None
+    latest_complete = table_cov.get("latest_complete_trade_date")
+    suffix = f"，最新完整日线为 {latest_complete}" if latest_complete else ""
+    return "stale", f"{latest_trade_date} 日线仅覆盖 {latest_count}/{min_count} 只{suffix}", True
 
 
 def _collect_freshness_probes() -> dict[tuple[str, str], Any]:

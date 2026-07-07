@@ -113,3 +113,30 @@ def test_recommended_jobs_sorted_by_priority():
     rec = svc._compute_recommended_jobs(results)
     assert rec == ["sync_stock_daily_bars", "sync_stock_financial_quarterly", "sync_stock_lhb_records"]
     assert "sync_stock_list" not in rec
+
+
+def test_stock_daily_incomplete_health_marks_latest_partial_date_stale():
+    severity, reason, stale = svc._stock_daily_incomplete_health(
+        {
+            "latest_trade_date": "2026-07-07",
+            "latest_trade_date_symbol_count": 1446,
+            "latest_complete_trade_date": "2026-07-06",
+            "min_complete_daily_symbol_count": 3000,
+        }
+    )
+
+    assert stale is True
+    assert severity == "stale"
+    assert "1446/3000" in reason
+    assert "2026-07-06" in reason
+
+
+def test_stock_daily_incomplete_health_ignores_complete_latest_date():
+    assert svc._stock_daily_incomplete_health(
+        {
+            "latest_trade_date": "2026-07-07",
+            "latest_trade_date_symbol_count": 5524,
+            "latest_complete_trade_date": "2026-07-07",
+            "min_complete_daily_symbol_count": 3000,
+        }
+    ) is None

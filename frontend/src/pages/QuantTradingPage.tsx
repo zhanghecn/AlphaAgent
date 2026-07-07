@@ -80,10 +80,10 @@ export function QuantTradingPage() {
   const activeRecommendationDate =
     selectedRecommendationDate ||
     screenRunsQuery.data?.items[0]?.trade_date ||
-    (!screenRunsQuery.isLoading ? tradingDatesQuery.data?.latest_trade_date : "") ||
+    (!screenRunsQuery.isLoading ? tradingDatesQuery.data?.latest_complete_trade_date : "") ||
     "";
   const latestScreenDate = screenRunsQuery.data?.items[0]?.trade_date ?? null;
-  const latestTradeDate = tradingDatesQuery.data?.latest_trade_date ?? null;
+  const latestTradeDate = tradingDatesQuery.data?.latest_complete_trade_date ?? null;
   const earliestTradeDate = tradingDatesQuery.data?.earliest_trade_date ?? null;
 
   useEffect(() => {
@@ -164,7 +164,7 @@ export function QuantTradingPage() {
       const minEntryScore = strategyMinEntryScore(strategiesQuery.data?.items ?? [], selectedStrategy, backtestParams.min_entry_score);
       return createQuantResearchRun({
         start: backtestParams.start || earliestTradeDate || undefined,
-        end: tradingDatesQuery.data?.latest_trade_date ?? undefined,
+        end: tradingDatesQuery.data?.latest_complete_trade_date ?? undefined,
         strategy: selectedStrategy,
         max_symbols: backtestParams.max_symbols,
         recommendation_limit: DEFAULT_CANDIDATE_OBSERVATION_LIMIT,

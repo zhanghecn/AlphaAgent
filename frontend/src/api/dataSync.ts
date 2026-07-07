@@ -348,6 +348,10 @@ export interface DataHealth {
   market_context: {
     now: string;
     latest_trade_date?: string | null;
+    latest_daily_trade_date?: string | null;
+    latest_complete_trade_date?: string | null;
+    latest_trade_date_symbol_count?: number | null;
+    min_complete_daily_symbol_count?: number;
     is_disclosure_season: boolean;
     trade_calendar_source: string;
   };

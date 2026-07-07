@@ -190,10 +190,14 @@ def auto_buy_recommendations(account_id: int | None = None, payload: dict[str, A
     fills: list[dict[str, Any]] = []
     synced_group_items = 0
     with session_scope() as session:
+        latest_complete_trade_date = screening_loaders.latest_complete_trade_date(session)
+        if latest_complete_trade_date is None:
+            return {"status": "empty", "account_id": account_id, "items": [], "message": "no complete daily recommendations"}
         screen_run = screening_loaders.latest_screen_run(
             session,
             strategy.id,
             strategy.version,
+            max_trade_date=latest_complete_trade_date,
             signal_evidence_schema_version=screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
         )
         if not screen_run:

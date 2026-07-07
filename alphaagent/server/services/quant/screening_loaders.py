@@ -58,6 +58,7 @@ def latest_screen_run(
     strategy_version: str,
     trade_date: date | None = None,
     *,
+    max_trade_date: date | None = None,
     signal_evidence_schema_version: str | None = None,
 ) -> dict[str, Any] | None:
     query = select(schema.quant_signal_runs).where(
@@ -69,6 +70,8 @@ def latest_screen_run(
     )
     if trade_date is not None:
         query = query.where(schema.quant_signal_runs.c.trade_date == trade_date)
+    elif max_trade_date is not None:
+        query = query.where(schema.quant_signal_runs.c.trade_date <= max_trade_date)
     rows = session.execute(
         query
         .order_by(desc(schema.quant_signal_runs.c.trade_date), desc(schema.quant_signal_runs.c.id))
@@ -195,8 +198,8 @@ def _screen_run_matches(
     return True
 
 
-def trading_dates_between(session, start: date, end: date) -> list[date]:
-    rows = session.execute(
+def trading_dates_between(session, start: date, end: date, min_symbol_count: int | None = None) -> list[date]:
+    query = (
         select(schema.stock_daily_bars.c.trade_date)
         .where(
             and_(
@@ -206,7 +209,10 @@ def trading_dates_between(session, start: date, end: date) -> list[date]:
         )
         .group_by(schema.stock_daily_bars.c.trade_date)
         .order_by(schema.stock_daily_bars.c.trade_date)
-    ).all()
+    )
+    if min_symbol_count is not None:
+        query = query.having(func.count(func.distinct(schema.stock_daily_bars.c.vt_symbol)) >= min_symbol_count)
+    rows = session.execute(query).all()
     return [row[0] for row in rows]
 
 

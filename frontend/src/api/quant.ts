@@ -56,6 +56,9 @@ export interface QuantScreenRun {
   strategy_id: string;
   strategy_version: string;
   trade_date?: string;
+  latest_complete_trade_date?: string | null;
+  trade_date_daily_symbol_count?: number;
+  min_complete_daily_symbol_count?: number;
   run_id?: number | null;
   preview_mode?: string | null;
   data_source?: string | null;
@@ -2483,6 +2486,8 @@ export interface QuantScreenRunItem {
 export interface QuantTradingDateItem {
   trade_date: string;
   symbol_count: number;
+  is_complete?: boolean;
+  min_complete_daily_symbol_count?: number;
 }
 
 export function createScreenRun(payload: {
@@ -2610,6 +2615,8 @@ export function fetchTradingDates(params: { start?: string; end?: string; limit?
     status: string;
     items: QuantTradingDateItem[];
     latest_trade_date?: string | null;
+    latest_complete_trade_date?: string | null;
+    min_complete_daily_symbol_count?: number;
     earliest_trade_date?: string | null;
     returned_count?: number;
   }>(`/quant/trading-dates?${search.toString()}`);

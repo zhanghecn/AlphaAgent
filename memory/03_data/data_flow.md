@@ -148,6 +148,9 @@ AlphaAgent 自研服务的股票日线同步不走 vn.py Datafeed，路径是：
 当前产品口径：
 
 - 普通量化产品路径只公开 `mainline_dragon_pullback`。
+- 历史量化、历史候选缓存、默认 `/quant` 候选展示和自动买入只使用完整日线交易日；`stock_daily_bars` 当日只有部分股票覆盖时不能作为收盘历史结果，也不能复用已落库的半截日线 run。
+- `GET /api/quant/trading-dates` 同时返回本地最新有记录日期和 `latest_complete_trade_date`。前端历史候选和策略研究截止日期必须优先使用 `latest_complete_trade_date`。
+- 当日 14:30 结果走 `GET /api/quant/tail-preview`，用最新完整日线作为基准、叠加当日分钟线/快照临时 K 线，只读缓存，不写入 `quant_signal_runs` 或历史候选。
 - 候选质量主口径是全历史交易日每日 Top5/Top10/Top20，D 日 BUY 候选按 D 日收盘价买入，D+1 收盘收益作为主胜率和主收益；D+2/D+3 是否值得格局只作为辅助标签。
 - `GET /api/backtests/{id}/candidate-trade-quality-report` 会按买点区域、金/银手指窗口、行情阶段、月份、重点区间和 D+1 涨跌形态分桶；`alphaagent/server/services/backtest/tail_entry_next_day_label.py` 负责生成只读标签。
 - 组合模拟只按候选排序、D+1 执行价、涨跌停、现金、组合上限和当前卖点生成真实成交流水；组合层不能反向解释候选质量。

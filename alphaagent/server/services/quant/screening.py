@@ -82,13 +82,25 @@ def screen_stocks(
         return {"status": "unavailable", "message": "DATABASE_URL not configured", "items": [], "recommendations": []}
     if ensure_schema:
         _ensure_quant_schema()
+    boards = normalize_included_boards(included_boards)
 
     with session_scope() as session:
-        as_of = trade_date or _latest_trade_date(session)
+        latest_daily_date = _latest_trade_date(session)
+        latest_complete_date = _latest_complete_trade_date(session)
+        as_of = trade_date or latest_complete_date or latest_daily_date
         if as_of is None:
             return {"status": "empty", "message": "stock_daily_bars is empty", "items": [], "recommendations": []}
+        as_of_daily_symbol_count = _daily_symbol_count(session, as_of)
+        if as_of_daily_symbol_count < MIN_COMPLETE_DAILY_SYMBOL_COUNT:
+            return _incomplete_daily_data_payload(
+                strategy,
+                trade_date=as_of,
+                latest_daily_date=latest_daily_date,
+                latest_complete_trade_date=latest_complete_date,
+                daily_symbol_count=as_of_daily_symbol_count,
+                included_boards=boards,
+            )
 
-        boards = normalize_included_boards(included_boards)
         if range_context is not None:
             stock_rows = range_context.stock_rows
             symbols = range_context.symbols
@@ -188,6 +200,10 @@ def screen_stocks(
         "strategy_id": strategy.id,
         "strategy_version": strategy.version,
         "trade_date": as_of.isoformat(),
+        "latest_daily_date": latest_daily_date.isoformat() if latest_daily_date else None,
+        "latest_complete_trade_date": latest_complete_date.isoformat() if latest_complete_date else None,
+        "trade_date_daily_symbol_count": as_of_daily_symbol_count,
+        "min_complete_daily_symbol_count": MIN_COMPLETE_DAILY_SYMBOL_COUNT,
         "run_id": run_id,
         "items": [_score_to_api(item, stock_meta.get(item.vt_symbol)) for item in scored],
         "recommendations": [
@@ -624,12 +640,40 @@ def screen_stocks_range(
                 "runs": [],
             }
         trade_dates = _trading_dates_between(session, start_date, latest)
+        incomplete_range_payload = None
+        if not trade_dates:
+            target_daily_symbol_count = _daily_symbol_count(session, latest)
+            if 0 < target_daily_symbol_count < MIN_COMPLETE_DAILY_SYMBOL_COUNT:
+                incomplete_range_payload = _incomplete_daily_data_payload(
+                    strategy,
+                    trade_date=latest,
+                    latest_daily_date=_latest_trade_date(session),
+                    latest_complete_trade_date=_latest_complete_trade_date(session),
+                    daily_symbol_count=target_daily_symbol_count,
+                    included_boards=boards,
+                )
         existing_runs = _screen_runs_by_date(session, strategy.id, strategy.version, trade_dates, max_symbols=max_symbols, included_boards=tuple(boards))
 
     if not trade_dates:
+        if incomplete_range_payload is not None:
+            incomplete_range_payload.update(
+                {
+                    "start_date": start_date.isoformat(),
+                    "end_date": latest.isoformat(),
+                    "runs": [],
+                    "total_dates": 0,
+                    "succeeded_count": 0,
+                    "processed_count": 0,
+                    "generated_count": 0,
+                    "skipped_existing_count": 0,
+                    "force_refreshed_count": 0,
+                    "force_refresh": bool(force_refresh),
+                }
+            )
+            return incomplete_range_payload
         return {
             "status": "empty",
-            "message": "no local trading dates in range",
+            "message": "区间内没有完整日线交易日，历史量化不使用半截日线。",
             "start_date": start_date.isoformat(),
             "end_date": latest.isoformat(),
             "items": [],
@@ -771,9 +815,13 @@ def list_signals(trade_date: date | None = None, strategy_id: str = STRATEGY_ID,
         return {"status": "unsupported_strategy", "strategy_id": strategy_id, "items": []}
     _ensure_quant_schema()
     with session_scope() as session:
+        if trade_date is not None:
+            incomplete = _incomplete_daily_data_payload_if_needed(session, strategy, trade_date)
+            if incomplete is not None:
+                return incomplete
         run = _latest_screen_run(session, strategy.id, trade_date)
         if not run:
-            as_of = trade_date or _latest_trade_date(session)
+            as_of = trade_date or _latest_complete_trade_date(session) or _latest_trade_date(session)
             return {
                 "status": "empty",
                 "trade_date": as_of.isoformat() if as_of else None,
@@ -812,7 +860,10 @@ def list_screen_runs(strategy_id: str = STRATEGY_ID, limit: int = 120) -> dict[s
         return {"status": "unsupported_strategy", "strategy_id": strategy_id, "items": []}
     _ensure_quant_schema()
     with session_scope() as session:
-        rows = session.execute(
+        latest_complete_date = _latest_complete_trade_date(session)
+        if latest_complete_date is None:
+            return {"status": "empty", "items": []}
+        query = (
             select(schema.quant_signal_runs)
             .where(
                 and_(
@@ -820,7 +871,11 @@ def list_screen_runs(strategy_id: str = STRATEGY_ID, limit: int = 120) -> dict[s
                     schema.quant_signal_runs.c.strategy_version == strategy.version,
                 )
             )
-            .order_by(desc(schema.quant_signal_runs.c.trade_date), desc(schema.quant_signal_runs.c.id))
+        )
+        if latest_complete_date is not None:
+            query = query.where(schema.quant_signal_runs.c.trade_date <= latest_complete_date)
+        rows = session.execute(
+            query.order_by(desc(schema.quant_signal_runs.c.trade_date), desc(schema.quant_signal_runs.c.id))
             .limit(min(max(limit, 1), 500))
         ).mappings().all()
         row_dicts = [dict(row) for row in rows]
@@ -885,11 +940,14 @@ def list_trading_dates(start: date | None = None, end: date | None = None, limit
             max_query = max_query.where(and_(*filters))
         earliest = session.execute(min_query).scalar()
         latest = session.execute(max_query).scalar()
+        latest_complete = _latest_complete_trade_date(session)
 
     items = [
         {
             "trade_date": row["trade_date"].isoformat(),
             "symbol_count": int(row["symbol_count"] or 0),
+            "is_complete": int(row["symbol_count"] or 0) >= MIN_COMPLETE_DAILY_SYMBOL_COUNT,
+            "min_complete_daily_symbol_count": MIN_COMPLETE_DAILY_SYMBOL_COUNT,
         }
         for row in rows
     ]
@@ -897,6 +955,8 @@ def list_trading_dates(start: date | None = None, end: date | None = None, limit
         "status": "ready" if items else "empty",
         "items": items,
         "latest_trade_date": latest.isoformat() if latest else (items[0]["trade_date"] if items else None),
+        "latest_complete_trade_date": latest_complete.isoformat() if latest_complete else None,
+        "min_complete_daily_symbol_count": MIN_COMPLETE_DAILY_SYMBOL_COUNT,
         "earliest_trade_date": earliest.isoformat() if earliest else None,
         "returned_count": len(items),
     }
@@ -914,9 +974,13 @@ def list_recommendations(
         return {"status": "unsupported_strategy", "strategy_id": strategy_id, "items": []}
     _ensure_quant_schema()
     with session_scope() as session:
+        if trade_date is not None:
+            incomplete = _incomplete_daily_data_payload_if_needed(session, strategy, trade_date)
+            if incomplete is not None:
+                return incomplete
         run = _latest_screen_run(session, strategy.id, trade_date)
         if not run:
-            as_of = trade_date or _latest_trade_date(session)
+            as_of = trade_date or _latest_complete_trade_date(session) or _latest_trade_date(session)
             return {
                 "status": "empty",
                 "trade_date": as_of.isoformat() if as_of else None,
@@ -1336,6 +1400,63 @@ def _daily_symbol_count(session, trade_date: date | None) -> int:
     return screening_loaders.daily_symbol_count(session, trade_date)
 
 
+def _daily_data_is_complete(session, trade_date: date | None) -> bool:
+    return _daily_symbol_count(session, trade_date) >= MIN_COMPLETE_DAILY_SYMBOL_COUNT
+
+
+def _incomplete_daily_data_payload_if_needed(
+    session,
+    strategy,
+    trade_date: date,
+    *,
+    included_boards: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any] | None:
+    daily_symbol_count = _daily_symbol_count(session, trade_date)
+    if daily_symbol_count >= MIN_COMPLETE_DAILY_SYMBOL_COUNT:
+        return None
+    return _incomplete_daily_data_payload(
+        strategy,
+        trade_date=trade_date,
+        latest_daily_date=_latest_trade_date(session),
+        latest_complete_trade_date=_latest_complete_trade_date(session),
+        daily_symbol_count=daily_symbol_count,
+        included_boards=included_boards or DEFAULT_QUANT_INCLUDED_BOARDS,
+    )
+
+
+def _incomplete_daily_data_payload(
+    strategy,
+    *,
+    trade_date: date,
+    latest_daily_date: date | None,
+    latest_complete_trade_date: date | None,
+    daily_symbol_count: int,
+    included_boards: list[str] | tuple[str, ...],
+) -> dict[str, Any]:
+    latest_complete_text = latest_complete_trade_date.isoformat() if latest_complete_trade_date else None
+    suffix = f"；最新完整日线为 {latest_complete_text}" if latest_complete_text else ""
+    return {
+        "status": "incomplete_daily_data",
+        "strategy_id": strategy.id,
+        "strategy_version": strategy.version,
+        "trade_date": trade_date.isoformat(),
+        "latest_daily_date": latest_daily_date.isoformat() if latest_daily_date else None,
+        "latest_complete_trade_date": latest_complete_text,
+        "trade_date_daily_symbol_count": int(daily_symbol_count or 0),
+        "min_complete_daily_symbol_count": MIN_COMPLETE_DAILY_SYMBOL_COUNT,
+        "run_id": None,
+        "items": [],
+        "recommendations": [],
+        "total": 0,
+        "recommendation_count": 0,
+        "included_boards": list(normalize_included_boards(included_boards)),
+        "message": (
+            f"{trade_date.isoformat()} 日线覆盖 {int(daily_symbol_count or 0)}/{MIN_COMPLETE_DAILY_SYMBOL_COUNT} 只，"
+            f"不作为历史收盘量化结果{suffix}。14:30 当日结果请看实时尾盘量化。"
+        ),
+    }
+
+
 def _earliest_trade_date(session) -> date | None:
     return screening_loaders.earliest_trade_date(session)
 
@@ -1351,11 +1472,19 @@ def _latest_recommendation_date(session) -> date | None:
 def _latest_screen_run(session, strategy_id: str, trade_date: date | None = None) -> dict[str, Any] | None:
     strategy = get_strategy(strategy_id)
     strategy_version = strategy.version if strategy else STRATEGY_VERSION
+    max_trade_date = None
+    if trade_date is None:
+        max_trade_date = _latest_complete_trade_date(session)
+        if max_trade_date is None:
+            return None
+    elif not _daily_data_is_complete(session, trade_date):
+        return None
     return screening_loaders.latest_screen_run(
         session,
         strategy_id,
         strategy_version,
         trade_date,
+        max_trade_date=max_trade_date,
         signal_evidence_schema_version=screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
     )
 
@@ -1447,7 +1576,12 @@ def _recommendation_row_to_score(row: dict[str, Any]) -> SignalScore:
 
 
 def _trading_dates_between(session, start: date, end: date) -> list[date]:
-    return screening_loaders.trading_dates_between(session, start, end)
+    return screening_loaders.trading_dates_between(
+        session,
+        start,
+        end,
+        min_symbol_count=MIN_COMPLETE_DAILY_SYMBOL_COUNT,
+    )
 
 
 def _should_use_fast_range_context() -> bool:

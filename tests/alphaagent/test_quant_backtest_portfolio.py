@@ -8812,6 +8812,9 @@ def test_screen_stocks_skips_symbols_without_current_trade_date_bar(monkeypatch)
     monkeypatch.setattr(screening, "is_database_configured", lambda: True)
     monkeypatch.setattr(screening, "_ensure_quant_schema", lambda: None)
     monkeypatch.setattr(screening, "session_scope", fake_session_scope)
+    monkeypatch.setattr(screening, "_latest_trade_date", lambda session: trade_date)
+    monkeypatch.setattr(screening, "_latest_complete_trade_date", lambda session: trade_date)
+    monkeypatch.setattr(screening, "_daily_symbol_count", lambda session, target: 4064)
     monkeypatch.setattr(screening, "_load_stock_universe", lambda session, max_symbols, boards: [
         {"vt_symbol": "600000.SSE", "exchange": "SSE", "name": "浦发银行"},
         {"vt_symbol": "000001.SZSE", "exchange": "SZSE", "name": "平安银行"},
@@ -8833,6 +8836,76 @@ def test_screen_stocks_skips_symbols_without_current_trade_date_bar(monkeypatch)
     assert scored_symbols == ["600000.SSE"]
     assert result["total"] == 1
     assert result["recommendation_count"] == 1
+
+
+def test_screen_stocks_rejects_incomplete_daily_date_without_scoring(monkeypatch) -> None:
+    from alphaagent.server.services.quant import screening
+
+    trade_date = date(2026, 7, 7)
+    latest_complete = date(2026, 7, 6)
+    scored = {"called": False}
+
+    class FakeSession:
+        pass
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    def fail_score(*args, **kwargs):
+        del args, kwargs
+        scored["called"] = True
+        raise AssertionError("incomplete daily date must not be scored")
+
+    monkeypatch.setattr(screening, "is_database_configured", lambda: True)
+    monkeypatch.setattr(screening, "_ensure_quant_schema", lambda: None)
+    monkeypatch.setattr(screening, "session_scope", fake_session_scope)
+    monkeypatch.setattr(screening, "_latest_trade_date", lambda session: trade_date)
+    monkeypatch.setattr(screening, "_latest_complete_trade_date", lambda session: latest_complete)
+    monkeypatch.setattr(screening, "_daily_symbol_count", lambda session, target: 1446 if target == trade_date else 5524)
+    monkeypatch.setattr(screening, "score_strategy", fail_score)
+
+    result = screening.screen_stocks(trade_date, persist=True, included_boards=["main"])
+
+    assert result["status"] == "incomplete_daily_data"
+    assert result["trade_date"] == "2026-07-07"
+    assert result["latest_complete_trade_date"] == "2026-07-06"
+    assert result["trade_date_daily_symbol_count"] == 1446
+    assert result["min_complete_daily_symbol_count"] == 3000
+    assert result["run_id"] is None
+    assert result["items"] == []
+    assert result["recommendations"] == []
+    assert scored["called"] is False
+
+
+def test_latest_screen_run_defaults_to_latest_complete_daily_date(monkeypatch) -> None:
+    from alphaagent.server.services.quant import screening
+
+    captured: dict[str, object] = {}
+
+    class FakeSession:
+        pass
+
+    def fake_latest_screen_run(session, strategy_id, strategy_version, trade_date=None, **kwargs):
+        del session
+        captured.update(
+            {
+                "strategy_id": strategy_id,
+                "strategy_version": strategy_version,
+                "trade_date": trade_date,
+                "max_trade_date": kwargs.get("max_trade_date"),
+            }
+        )
+        return {"id": 9, "trade_date": date(2026, 7, 6)}
+
+    monkeypatch.setattr(screening, "_latest_complete_trade_date", lambda session: date(2026, 7, 6))
+    monkeypatch.setattr(screening.screening_loaders, "latest_screen_run", fake_latest_screen_run)
+
+    run = screening._latest_screen_run(FakeSession(), screening.STRATEGY_ID)
+
+    assert run["id"] == 9
+    assert captured["trade_date"] is None
+    assert captured["max_trade_date"] == date(2026, 7, 6)
 
 
 def test_screen_tail_preview_uses_intraday_temp_bar_without_persisting(monkeypatch) -> None:
@@ -9997,7 +10070,7 @@ def test_quant_tail_preview_api_passes_preview_payload(monkeypatch) -> None:
 
     captured: dict[str, object] = {}
 
-    def fake_screen_tail_preview(trade_date=None, **kwargs):
+    def fake_get_tail_preview(trade_date=None, **kwargs):
         captured.update({"trade_date": trade_date, **kwargs})
         return {
             "status": "ready",
@@ -10012,7 +10085,7 @@ def test_quant_tail_preview_api_passes_preview_payload(monkeypatch) -> None:
             "recommendation_count": 0,
         }
 
-    monkeypatch.setattr(screening, "screen_tail_preview", fake_screen_tail_preview)
+    monkeypatch.setattr(screening, "get_tail_preview", fake_get_tail_preview)
 
     client = TestClient(create_app())
     response = client.get(
@@ -12472,6 +12545,7 @@ def test_recommendations_use_latest_screen_run_id_when_latest_run_has_no_items(m
     monkeypatch.setattr(screening, "is_database_configured", lambda: True)
     monkeypatch.setattr(screening, "_ensure_quant_schema", lambda: None)
     monkeypatch.setattr(screening, "session_scope", fake_session_scope)
+    monkeypatch.setattr(screening, "_latest_complete_trade_date", lambda session: date(2026, 1, 3))
 
     result = screening.list_recommendations()
 
@@ -12529,6 +12603,7 @@ def test_recommendations_use_latest_screen_run_id_not_same_day_old_versions(monk
     monkeypatch.setattr(screening, "is_database_configured", lambda: True)
     monkeypatch.setattr(screening, "_ensure_quant_schema", lambda: None)
     monkeypatch.setattr(screening, "session_scope", fake_session_scope)
+    monkeypatch.setattr(screening, "_latest_complete_trade_date", lambda session: date(2026, 6, 11))
 
     result = screening.list_recommendations()
 
@@ -12613,6 +12688,7 @@ def test_signals_use_latest_screen_run_id_not_same_day_old_versions(monkeypatch)
     monkeypatch.setattr(screening, "is_database_configured", lambda: True)
     monkeypatch.setattr(screening, "_ensure_quant_schema", lambda: None)
     monkeypatch.setattr(screening, "session_scope", fake_session_scope)
+    monkeypatch.setattr(screening, "_latest_complete_trade_date", lambda session: date(2026, 6, 11))
 
     result = screening.list_signals()
 
@@ -12767,6 +12843,7 @@ def test_recommendations_do_not_fallback_to_stale_signal_evidence_schema(monkeyp
     monkeypatch.setattr(screening, "is_database_configured", lambda: True)
     monkeypatch.setattr(screening, "_ensure_quant_schema", lambda: None)
     monkeypatch.setattr(screening, "session_scope", fake_session_scope)
+    monkeypatch.setattr(screening, "_daily_symbol_count", lambda session, target: 4064)
 
     result = screening.list_recommendations(trade_date=date(2026, 6, 18))
 
@@ -12775,6 +12852,35 @@ def test_recommendations_do_not_fallback_to_stale_signal_evidence_schema(monkeyp
     assert result["items"] == []
     assert "刷新候选" in result["message"]
     assert not any("FROM quant_recommendations" in statement for statement in executed)
+
+
+def test_recommendations_reject_explicit_incomplete_daily_date(monkeypatch) -> None:
+    from alphaagent.server.services.quant import screening
+
+    trade_date = date(2026, 7, 7)
+
+    class FakeSession:
+        pass
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(screening, "is_database_configured", lambda: True)
+    monkeypatch.setattr(screening, "_ensure_quant_schema", lambda: None)
+    monkeypatch.setattr(screening, "session_scope", fake_session_scope)
+    monkeypatch.setattr(screening, "_daily_symbol_count", lambda session, target: 1687 if target == trade_date else 5524)
+    monkeypatch.setattr(screening, "_latest_trade_date", lambda session: trade_date)
+    monkeypatch.setattr(screening, "_latest_complete_trade_date", lambda session: date(2026, 7, 6))
+
+    result = screening.list_recommendations(trade_date=trade_date)
+
+    assert result["status"] == "incomplete_daily_data"
+    assert result["trade_date"] == "2026-07-07"
+    assert result["latest_complete_trade_date"] == "2026-07-06"
+    assert result["items"] == []
+    assert result["recommendations"] == []
+    assert "14:30" in result["message"]
 
 
 def test_latest_trade_plan_uses_latest_screen_run_id(monkeypatch) -> None:
@@ -12846,6 +12952,7 @@ def test_latest_trade_plan_uses_latest_screen_run_id(monkeypatch) -> None:
     monkeypatch.setattr(screening, "is_database_configured", lambda: True)
     monkeypatch.setattr(screening, "_ensure_quant_schema", lambda: None)
     monkeypatch.setattr(screening, "session_scope", fake_session_scope)
+    monkeypatch.setattr(screening, "_latest_complete_trade_date", lambda session: date(2026, 6, 18))
 
     result = screening.latest_trade_plan("003004.SZSE")
 
@@ -12905,6 +13012,7 @@ def test_list_screen_runs_returns_recent_runs(monkeypatch) -> None:
     monkeypatch.setattr(screening, "is_database_configured", lambda: True)
     monkeypatch.setattr(screening, "_ensure_quant_schema", lambda: None)
     monkeypatch.setattr(screening, "session_scope", fake_session_scope)
+    monkeypatch.setattr(screening, "_latest_complete_trade_date", lambda session: date(2026, 6, 12))
 
     result = screening.list_screen_runs()
 
@@ -12954,6 +13062,7 @@ def test_list_trading_dates_returns_local_daily_bar_dates(monkeypatch) -> None:
     monkeypatch.setattr(screening, "is_database_configured", lambda: True)
     monkeypatch.setattr(screening, "_ensure_quant_schema", lambda: None)
     monkeypatch.setattr(screening, "session_scope", fake_session_scope)
+    monkeypatch.setattr(screening, "_latest_complete_trade_date", lambda session: date(2026, 6, 12))
 
     result = screening.list_trading_dates(limit=20)
 
@@ -12962,8 +13071,18 @@ def test_list_trading_dates_returns_local_daily_bar_dates(monkeypatch) -> None:
     assert result["earliest_trade_date"] == "2026-06-11"
     assert result["returned_count"] == 2
     assert result["items"] == [
-        {"trade_date": "2026-06-12", "symbol_count": 2},
-        {"trade_date": "2026-06-11", "symbol_count": 1},
+        {
+            "trade_date": "2026-06-12",
+            "symbol_count": 2,
+            "is_complete": False,
+            "min_complete_daily_symbol_count": 3000,
+        },
+        {
+            "trade_date": "2026-06-11",
+            "symbol_count": 1,
+            "is_complete": False,
+            "min_complete_daily_symbol_count": 3000,
+        },
     ]
 
 
@@ -13023,6 +13142,41 @@ def test_screen_stocks_range_creates_replay_from_persisted_signals(monkeypatch) 
     assert calls[0]["end"] == date(2026, 1, 3)
     assert calls[0]["strategy_id"] == "mainline_dragon_pullback"
     assert calls[0]["execution_model"] == "legacy_next_open"
+
+
+def test_screen_stocks_range_rejects_explicit_incomplete_daily_date(monkeypatch) -> None:
+    from alphaagent.server.services.quant import screening
+
+    trade_date = date(2026, 7, 7)
+
+    class FakeSession:
+        pass
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(screening, "is_database_configured", lambda: True)
+    monkeypatch.setattr(screening, "_ensure_quant_schema", lambda: None)
+    monkeypatch.setattr(screening, "session_scope", fake_session_scope)
+    monkeypatch.setattr(screening, "_trading_dates_between", lambda session, start, end: [])
+    monkeypatch.setattr(screening, "_daily_symbol_count", lambda session, target: 1687 if target == trade_date else 5524)
+    monkeypatch.setattr(screening, "_latest_trade_date", lambda session: trade_date)
+    monkeypatch.setattr(screening, "_latest_complete_trade_date", lambda session: date(2026, 7, 6))
+    monkeypatch.setattr(screening, "_screen_runs_by_date", lambda session, strategy_id, strategy_version, trade_dates, **kwargs: {})
+
+    result = screening.screen_stocks_range(
+        start=trade_date,
+        end=trade_date,
+        persist=True,
+        included_boards=["main"],
+    )
+
+    assert result["status"] == "incomplete_daily_data"
+    assert result["trade_date"] == "2026-07-07"
+    assert result["latest_complete_trade_date"] == "2026-07-06"
+    assert result["total_dates"] == 0
+    assert result["runs"] == []
 
 
 def test_screen_stocks_range_keeps_candidates_when_replay_fails(monkeypatch) -> None:
