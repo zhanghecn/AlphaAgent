@@ -113,9 +113,11 @@ uv run pytest tests/alphaagent/test_quant_strategy_acceptance.py -q
 常用接口：
 
 - `GET /api/data-sync/health`: 数据健康和推荐同步。
-- `GET /api/data-sync/tail-workflow`: 尾盘准备状态。
-- `GET /api/quant/tail-preview?limit=50`: 今日尾盘候选预览，只读，不写历史候选。
-- `POST /api/data-sync/tail-workflow/prepare`: 手动执行尾盘准备。
+- `GET /api/data-sync/tail-workflow`: 实时尾盘量化状态。默认只展示
+  14:30 实时尾盘量化和 18:00 盘后补全；旧 11:30、14:00、15:00
+  盘中缓存档会被启动种子逻辑禁用。
+- `GET /api/quant/tail-preview?limit=50`: 今日实时尾盘量化结果，只读，不写历史候选。
+- `POST /api/data-sync/tail-workflow/run-tail-quant`: 手动执行 14:30 实时尾盘量化批次。
 - `POST /api/data-sync/batches/run-all`: 一键同步批次。
 - `GET /api/data-sync/batches/latest`: 最新批次进度。
 - `POST /api/data-sync/jobs/sync_stock_daily_bars/run`: 同步日线，可用 `symbols` 定向回填。
@@ -171,5 +173,5 @@ pnpm --dir frontend run build
 
 - vn.py A 股实盘 Gateway 和官方 A 股 Datafeed 插件仍未安装配置。
 - 多年全 A、walk-forward、参数敏感性、市场环境分层、基准超额和高摩擦压力测试仍是策略可信度的必要验证。
-- 旧严格 14:30 报告只作为分钟模型历史材料；当前历史主流程是日线 D+1 开盘执行。
+- 旧严格 14:30 报告只作为分钟模型历史材料；当前 `/quant` 候选质量主流程是 D 日收盘买入、D+1 收盘验证，组合执行诊断仍可显示 D+1 执行约束。
 - 候选页落库推荐、单股逐日评分和组合回测理论计划仍需继续保持口径一致。

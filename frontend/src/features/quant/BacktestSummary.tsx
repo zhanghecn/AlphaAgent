@@ -22,13 +22,13 @@ export function BacktestSummary({
       <BacktestTrustPanel report={report} />
       <BacktestMethodPanel report={report} audit={audit} />
       <div className="rounded-lg border p-3">
-        <div className="text-sm font-medium">候选 Top20 质量</div>
+        <div className="text-sm font-medium">候选 Top20 D+1 验证</div>
         <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
-          <MetricTile label="候选年化参考" value={formatCandidatePct(candidateSummary?.annual_return_pct, candidatePending)} tone={candidateSummary?.annual_return_pct} />
-          <MetricTile label="候选胜率" value={formatCandidateRate(candidateSummary?.win_rate, candidatePending)} />
+          <MetricTile label="D+1胜率" value={formatCandidateRate(candidateSummary?.win_rate, candidatePending)} />
+          <MetricTile label="D+1质量胜率" value={formatCandidateRate(candidateSummary?.quality_win_rate, candidatePending)} />
           <MetricTile label="年度胜率" value={formatYearlyWinRate(candidateQuality, candidatePending)} />
-          <MetricTile label="平均收益" value={formatCandidatePct(candidateSummary?.average_return_pct, candidatePending)} tone={candidateSummary?.average_return_pct} />
-          <MetricTile label="平均回撤" value={formatCandidatePct(candidateSummary?.average_max_drawdown_pct, candidatePending)} tone={candidateSummary?.average_max_drawdown_pct} />
+          <MetricTile label="D+1平均收益" value={formatCandidatePct(candidateSummary?.average_return_pct, candidatePending)} tone={candidateSummary?.average_return_pct} />
+          <MetricTile label="D+1接近涨停" value={formatCandidateRate(candidateSummary?.d1_near_limit_up_rate, candidatePending)} />
           <MetricTile label="可评价候选" value={formatCount(candidateSummary?.evaluated_count, candidatePending)} />
         </div>
       </div>
@@ -188,7 +188,7 @@ export function BacktestMethodPanel({
       </div>
       <div className="mt-3 grid gap-2 md:grid-cols-2">
         <InfoCell label="候选生成" value={method?.signal_timing ?? report.assumptions.candidate_generation} />
-        <InfoCell label="执行时点" value={method?.execution_timing ?? report.assumptions.execution} />
+        <InfoCell label="组合执行时点" value={method?.execution_timing ?? report.assumptions.execution} />
         <InfoCell label="股票池" value={method?.universe ?? `${report.sample.symbol_count} 只样本`} />
         <InfoCell label="候选口径" value={method?.candidate_policy ?? "历史逐日动态候选"} />
       </div>

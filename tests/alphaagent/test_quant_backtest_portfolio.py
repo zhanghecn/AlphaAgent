@@ -100,7 +100,7 @@ def test_quant_strategy_registry_dispatches_default_strategy() -> None:
     assert default_strategy.id == "mainline_dragon_pullback"
     assert strategy is not None
     assert strategy.version == "0.1.1"
-    assert default_strategy.version == "0.1.52"
+    assert default_strategy.version == "0.1.58"
     assert [item["id"] for item in list_strategies()] == ["mainline_dragon_pullback"]
     assert "mainline_leader_pullback" in {item["id"] for item in list_internal_strategies()}
     assert score.signal_type == "mainline_leader_pullback"
@@ -9013,9 +9013,9 @@ def test_get_tail_preview_ignores_cache_without_intraday_evidence(monkeypatch) -
 
     result = screening.get_tail_preview()
 
-    assert result["status"] == "waiting_for_intraday_data"
+    assert result["status"] == "unavailable"
     assert result["recommendations"] == []
-    assert calls["screen"] == 1
+    assert calls["screen"] == 0
 
 
 def test_generate_tail_preview_cache_persists_preview_payload(monkeypatch) -> None:
@@ -10181,9 +10181,18 @@ def test_quant_research_job_uses_candidate_quality_as_primary_result(monkeypatch
             "strategy_id": DRAGON_PULLBACK_STRATEGY_ID,
             "strategy_version": "0.test",
             "rank_limit": 20,
+            "sample_limit": 500,
             "entry_selection": "daily_candidate",
             "summary": {"evaluated_count": 3, "win_rate": 66.6667, "average_return_pct": 4.2},
             "coverage": {"candidate_source": "quant_recommendations"},
+            "by_rank_limit": [{"rank_limit": 5, "win_rate": 80.0}],
+            "by_setup_family_rank_limit": [{"setup_family": "bottom_reclaim", "rank_limit": 20, "win_rate": 70.0}],
+            "by_timing_window_rank_limit": [{"timing_window": "silver_pressure_zone", "rank_limit": 20, "win_rate": 60.0}],
+            "by_month_rank_limit": [{"month": "2026-01", "rank_limit": 20, "win_rate": 55.0}],
+            "yearly": [{"year": 2026, "win_rate": 66.6667}],
+            "daily_summaries": [{"trade_date": "2026-01-02", "win_rate": 66.6667}],
+            "worst_samples": [{"vt_symbol": "000001.SZSE", "return_pct": -3.0}],
+            "best_samples": [{"vt_symbol": "000002.SZSE", "return_pct": 5.0}],
         }
 
     def fail_run_backtest(*args, **kwargs):
@@ -10207,6 +10216,14 @@ def test_quant_research_job_uses_candidate_quality_as_primary_result(monkeypatch
 
     assert result["status"] == "succeeded"
     assert result["candidate_trade_quality"]["summary"]["average_return_pct"] == 4.2
+    assert result["candidate_trade_quality"]["by_rank_limit"][0]["rank_limit"] == 5
+    assert result["candidate_trade_quality"]["by_setup_family_rank_limit"][0]["setup_family"] == "bottom_reclaim"
+    assert result["candidate_trade_quality"]["by_timing_window_rank_limit"][0]["timing_window"] == "silver_pressure_zone"
+    assert result["candidate_trade_quality"]["by_month_rank_limit"][0]["month"] == "2026-01"
+    assert result["candidate_trade_quality"]["yearly"][0]["year"] == 2026
+    assert result["candidate_trade_quality"]["daily_summaries"][0]["trade_date"] == "2026-01-02"
+    assert result["candidate_trade_quality"]["worst_samples"][0]["vt_symbol"] == "000001.SZSE"
+    assert result["candidate_trade_quality"]["best_samples"][0]["vt_symbol"] == "000002.SZSE"
     assert captured["candidate_quality_kwargs"]["rank_limit"] == 20
     assert captured["candidate_quality_kwargs"]["strategy_version"] == "0.test"
     assert result["backtest"] is None
@@ -10463,7 +10480,7 @@ def test_backtest_list_filters_current_strategy_version_when_strategy_requested(
         if hasattr(element, "value")
     ]
     assert "mainline_dragon_pullback" in bind_values
-    assert "0.1.52" in bind_values
+    assert "0.1.58" in bind_values
     assert [item["strategy_version"] for item in result["items"]] == ["0.1.8"]
 
 
@@ -12199,6 +12216,73 @@ def test_persist_screen_run_clears_same_day_outputs_before_insert() -> None:
 
     assert run_id == 7
     assert calls == ["delete_recommendations", "delete_signals", "insert_signal", "insert_recommendation"]
+
+
+def test_persist_screen_run_dedupes_same_symbol_scores_before_insert() -> None:
+    from alphaagent.server.services.quant import screening
+
+    inserted_run: dict[str, object] = {}
+    inserted_signal_rows: list[dict[str, object]] = []
+    inserted_recommendation_rows: list[dict[str, object]] = []
+
+    class FakeReturning:
+        def scalar_one(self):
+            return 7
+
+    class FakeScalar:
+        def scalar_one_or_none(self):
+            return None
+
+    class FakeSession:
+        def execute(self, statement, params=None):
+            text = str(statement)
+            if text.startswith("INSERT INTO quant_signal_runs"):
+                inserted_run.update(dict(statement.compile().params))
+                return FakeReturning()
+            if text.startswith("INSERT INTO quant_stock_signals"):
+                inserted_signal_rows.extend(params or [])
+                return FakeScalar()
+            if text.startswith("INSERT INTO quant_recommendations"):
+                inserted_recommendation_rows.extend(params or [])
+                return FakeScalar()
+            return FakeScalar()
+
+    first = SignalScore(
+        vt_symbol="600000.SSE",
+        trade_date=date(2026, 4, 9),
+        total_score=95,
+        entry_signal=True,
+        evidence={"status": "ready"},
+    )
+    duplicate = SignalScore(
+        vt_symbol="600000.SSE",
+        trade_date=date(2026, 4, 9),
+        total_score=90,
+        entry_signal=True,
+        evidence={"status": "ready", "candidate_source": "duplicate_lane"},
+    )
+    other = SignalScore(
+        vt_symbol="600001.SSE",
+        trade_date=date(2026, 4, 9),
+        total_score=88,
+        entry_signal=False,
+        evidence={"status": "ready"},
+    )
+
+    run_id = screening._persist_screen_run(
+        FakeSession(),
+        date(2026, 4, 9),
+        [first, duplicate, other],
+        [first, duplicate],
+        "mainline_leader_pullback",
+        ("main",),
+    )
+
+    assert run_id == 7
+    assert inserted_run["candidate_count"] == 2
+    assert inserted_run["recommendation_count"] == 1
+    assert [row["vt_symbol"] for row in inserted_signal_rows] == ["600000.SSE", "600001.SSE"]
+    assert [row["vt_symbol"] for row in inserted_recommendation_rows] == ["600000.SSE"]
 
 
 def test_persist_screen_run_counts_only_executable_buy_signals() -> None:
@@ -16090,6 +16174,65 @@ def test_execution_pool_no_longer_reranks_by_volume_preparation() -> None:
     assert prepared_active.total_score == 88.0
 
 
+def test_execution_pool_keeps_active_washout_reclaim_inside_wide_ma_filter() -> None:
+    from alphaagent.server.services.quant import candidate_lanes
+
+    trade_date = date(2026, 3, 18)
+    active_reclaim = SignalScore(
+        vt_symbol="603629.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=100.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "support_type": "ma5_reclaim",
+            "recent_limit_up_20d": True,
+            "near_limit_up_count_20d": 4,
+            "latest_change_pct": 6.43,
+            "return_5d": -2.01,
+            "return_20d": 19.16,
+            "ma_convergence_pct": 14.09,
+            "ma20_distance_pct": 5.28,
+            "drawdown_from_pivot_pct": -6.23,
+            "volume_ratio_5d_20d": 0.85,
+            "close_location_in_range": 0.94,
+        },
+    )
+    stale_reclaim = SignalScore(
+        vt_symbol="603115.SSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=99.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "dragon_pullback",
+            "support_type": "ma5_reclaim",
+            "recent_limit_up_20d": True,
+            "near_limit_up_count_20d": 4,
+            "latest_change_pct": 1.21,
+            "return_5d": 11.72,
+            "return_20d": 43.49,
+            "ma_convergence_pct": 17.07,
+            "ma20_distance_pct": 12.68,
+            "drawdown_from_pivot_pct": -3.45,
+            "volume_ratio_5d_20d": 0.94,
+            "close_location_in_range": 0.88,
+        },
+    )
+
+    assert candidate_lanes.active_washout_reclaim_confirmation(active_reclaim) is True
+    assert candidate_lanes.dragon_pullback_quality_filter_reason(active_reclaim) is None
+    assert candidate_lanes.active_washout_reclaim_confirmation(stale_reclaim) is False
+    assert candidate_lanes.dragon_pullback_quality_filter_reason(stale_reclaim) == "wide_ma_no_low_suction_high_close_volume_decay"
+
+
 def test_execution_pool_keeps_healthy_quiet_low_suction_on_score_without_generic_bonus() -> None:
     from alphaagent.server.services.quant import candidate_lanes
 
@@ -16238,6 +16381,58 @@ def test_execution_pool_rewards_confirmed_bottom_reclaim_repair() -> None:
 
     assert candidate_lanes.dragon_pullback_timing_opportunity_bonus(confirmed) == 5.45
     assert any(reason["key"] == "bottom_reclaim_confirmed_repair" for reason in reasons)
+
+
+def test_execution_pool_promotes_gold_short_window_oversold_repair() -> None:
+    from alphaagent.server.services.quant import candidate_lanes
+
+    trade_date = date(2026, 7, 2)
+    gold_repair = SignalScore(
+        vt_symbol="GOLDREPAIR.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=82.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={
+            "status": "ready",
+            "entry_setup": "oversold_rebound_start",
+            "setup_family": "oversold_rebound_start",
+            "rebound_subtype": "bottom_reclaim",
+            "bottom_reclaim": True,
+            "timing_window": "after_gold_0_5",
+            "market_phase": "retreat",
+            "bottom_ma_repair_strength_score": 78.0,
+            "bottom_ma_repair_strength_bucket": "strong_repair",
+            "bottom_ma_repair_stage": "ma10_reclaim",
+            "close_location_in_range": 0.45,
+            "volume_ratio_5d_20d": 0.9,
+        },
+    )
+    plain_higher_score = SignalScore(
+        vt_symbol="PLAIN.SZSE",
+        trade_date=trade_date,
+        signal_type=DRAGON_PULLBACK_STRATEGY_ID,
+        total_score=86.0,
+        liquidity_score=80,
+        risk_score=80,
+        entry_signal=True,
+        evidence={"status": "ready", "entry_setup": "dragon_pullback"},
+    )
+
+    pool = candidate_lanes.select_dragon_pullback_execution_pool(
+        [plain_higher_score, gold_repair],
+        1,
+        DRAGON_PULLBACK_STRATEGY_ID,
+    )
+    reasons = candidate_lanes.dragon_pullback_timing_opportunity_reasons(gold_repair)
+    keys = {reason["key"] for reason in reasons}
+
+    assert pool == [gold_repair]
+    assert candidate_lanes.dragon_pullback_timing_opportunity_bonus(gold_repair) == 5.45
+    assert "oversold_gold_0_5_retreat_repair" in keys
+    assert "bottom_reclaim_gold_confirmed_repair" in keys
 
 
 def test_execution_pool_rewards_active_right_tail_source_context() -> None:
@@ -24181,14 +24376,14 @@ def test_candidate_trade_quality_report_endpoint_passes_params(monkeypatch) -> N
 
     response = client.get(
         "/api/backtests/203/candidate-trade-quality-report"
-        "?rank_limit=50&sample_limit=25&start_date=2026-01-01&end_date=2026-02-01"
+        "?rank_limit=20&sample_limit=25&start_date=2026-01-01&end_date=2026-02-01"
     )
 
     assert response.status_code == 200
     assert response.json()["data"]["status"] == "ready"
     assert captured == {
         "backtest_id": 203,
-        "rank_limit": 50,
+        "rank_limit": 20,
         "sample_limit": 25,
         "start_date": date(2026, 1, 1),
         "end_date": date(2026, 2, 1),
@@ -24201,7 +24396,7 @@ def test_candidate_trade_quality_report_endpoint_validates_limits(monkeypatch) -
     monkeypatch.setattr(backtests, "backtest_candidate_trade_quality_report", lambda *args, **kwargs: {"status": "ready"})
     client = TestClient(create_app())
 
-    response = client.get("/api/backtests/203/candidate-trade-quality-report?rank_limit=201")
+    response = client.get("/api/backtests/203/candidate-trade-quality-report?rank_limit=21")
 
     assert response.status_code == 422
 

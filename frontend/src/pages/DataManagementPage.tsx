@@ -14,7 +14,7 @@ import {
   fetchSyncRuns,
   fetchSyncCoverage,
   fetchSyncSources,
-  runTailPrepare,
+  runTailQuantNow,
   runAllSyncJobs,
   runSyncJob,
   fetchSyncSchedules,
@@ -90,7 +90,7 @@ const DEFAULT_MINUTE_SYNC_FORM: MinuteSyncFormState = {
 
 const TABS: { key: TabKey; label: string; icon: typeof Database }[] = [
   { key: "health", label: "数据健康", icon: Activity },
-  { key: "tail", label: "尾盘准备", icon: Clock },
+  { key: "tail", label: "实时尾盘量化", icon: Clock },
   { key: "status", label: "数据状态", icon: Database },
   { key: "sources", label: "数据源", icon: Server },
 ];
@@ -153,8 +153,8 @@ function TailWorkflowTab() {
     refetchInterval: (query) => (query.state.data?.status === "running" ? 2_000 : 8_000),
   });
 
-  const prepareMutation = useMutation({
-    mutationFn: runTailPrepare,
+  const tailQuantMutation = useMutation({
+    mutationFn: runTailQuantNow,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["tailWorkflowStatus"] });
       queryClient.invalidateQueries({ queryKey: ["syncBatchLatest"] });
@@ -166,18 +166,17 @@ function TailWorkflowTab() {
 
   const status = statusQuery.data;
   const batch = latestBatchQuery.data;
-  const tailPrepareBatch = batch?.schedule_id === "tail_preview_14h" || batch?.schedule_id === "tail_prepare_14h" ? batch : null;
-  const isPreparing = prepareMutation.isPending || tailPrepareBatch?.status === "running";
+  const tailQuantBatch = batch?.schedule_id === "tail_quant_1430" ? batch : null;
+  const isTailQuantRunning = tailQuantMutation.isPending || tailQuantBatch?.status === "running";
   const tailStateItems = [
     { label: "完整日线", value: status?.daily_bar_latest_complete_date ?? status?.daily_bar_latest_date, detail: formatDateTime(status?.daily_bar_updated_at) },
-    { label: "今日预览", value: status?.tail_preview?.trade_date ?? status?.tail_preview?.cached_trade_date, detail: status?.tail_preview?.status === "ready" ? `缓存 ${status?.tail_preview?.cached_recommendation_count ?? 0} 个推荐` : status?.tail_preview?.message },
+    { label: "量化结果", value: status?.tail_preview?.trade_date ?? status?.tail_preview?.cached_trade_date, detail: status?.tail_preview?.status === "ready" ? `已生成 ${status?.tail_preview?.cached_recommendation_count ?? 0} 个推荐` : status?.tail_preview?.message },
     { label: "盘中快照", value: formatDateTime(status?.intraday_snapshot_updated_at), detail: status?.intraday_snapshot_trade_time },
     { label: "分钟线", value: status?.minute_latest_date, detail: formatDateTime(status?.minute_latest_time) },
     { label: "量化候选", value: status?.candidate_latest_date, detail: formatDateTime(status?.candidate_updated_at) },
   ];
   const scheduleItems = [
-    { schedule: status?.tail_prepare_schedule, label: "14:00 预览缓存", fallbackCron: "0 14 * * 1-5" },
-    { schedule: status?.tail_quant_schedule, label: "14:30 预览缓存", fallbackCron: "30 14 * * 1-5" },
+    { schedule: status?.tail_quant_schedule, label: "14:30 实时尾盘量化", fallbackCron: "30 14 * * 1-5" },
     { schedule: status?.eod_schedule, label: "18:00 盘后补全", fallbackCron: "0 18 * * 1-5" },
   ];
 
@@ -185,7 +184,7 @@ function TailWorkflowTab() {
     <div className="space-y-4">
       {statusQuery.error ? (
         <DataNotice
-          title="尾盘准备状态不可用"
+          title="实时尾盘量化状态不可用"
           message={(statusQuery.error as Error).message}
           action="先确认 DATABASE_URL/PostgreSQL，再刷新本页。"
         />
@@ -202,11 +201,11 @@ function TailWorkflowTab() {
         <div className="grid gap-4 p-4 lg:grid-cols-[1fr_auto] lg:items-start">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-base font-semibold">尾盘准备</h2>
+              <h2 className="text-base font-semibold">实时尾盘量化</h2>
               <StatusBadge status={tailStatusBadge(status)} />
             </div>
             <div className="mt-2 text-sm text-muted-foreground">
-              14:00/14:30 同步快照、分钟线、资金、热度和涨停池并生成今日尾盘预览缓存；18:00 补完整日线和慢数据。
+              14:30 同步分钟线、资金和热度并生成实时尾盘量化结果；18:00 补完整日线和慢数据。
             </div>
             {status?.message ? (
               <div className="mt-2 text-xs text-amber-700 dark:text-amber-400">{status.message}</div>
@@ -215,11 +214,11 @@ function TailWorkflowTab() {
           <div className="flex flex-wrap gap-2 lg:justify-end">
             <button
               className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-              onClick={() => prepareMutation.mutate()}
-              disabled={isPreparing || status?.status === "unavailable"}
+              onClick={() => tailQuantMutation.mutate()}
+              disabled={isTailQuantRunning || status?.status === "unavailable"}
             >
-              {isPreparing ? <Loader2 size={16} className="animate-spin" /> : <PlayCircle size={16} />}
-              {isPreparing ? "准备中" : "立即尾盘准备"}
+              {isTailQuantRunning ? <Loader2 size={16} className="animate-spin" /> : <PlayCircle size={16} />}
+              {isTailQuantRunning ? "运行中" : "立即运行14:30量化"}
             </button>
             <button
               className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium transition-colors hover:bg-muted"
@@ -233,10 +232,10 @@ function TailWorkflowTab() {
             </button>
           </div>
         </div>
-        {prepareMutation.error ? (
-          <div className="border-t px-4 py-3 text-sm text-red-600">{(prepareMutation.error as Error).message}</div>
+        {tailQuantMutation.error ? (
+          <div className="border-t px-4 py-3 text-sm text-red-600">{(tailQuantMutation.error as Error).message}</div>
         ) : null}
-        <BatchProgress batch={tailPrepareBatch} isStarting={prepareMutation.isPending} />
+        <BatchProgress batch={tailQuantBatch} isStarting={tailQuantMutation.isPending} />
       </section>
 
       {statusQuery.isLoading ? <LoadingState rows={3} /> : null}
@@ -355,7 +354,7 @@ function ResearchRunSummary({ run }: { run?: TailWorkflowStatus["latest_research
 function tailStatusBadge(status: TailWorkflowStatus | undefined): string {
   if (!status) return "unknown";
   if (status.status === "unavailable") return "unavailable";
-  return status.tail_prepare_ready ? "ready" : "empty";
+  return status.tail_quant_ready ? "ready" : "empty";
 }
 
 // ── Status Tab ──
@@ -802,7 +801,7 @@ function BatchSchedulesPanel({ jobs }: { jobs: SyncJobItem[] }) {
       <div className="flex items-center justify-between border-b px-4 py-3">
         <div>
           <h3 className="text-sm font-semibold">定时计划</h3>
-          <div className="text-xs text-muted-foreground">统一的批量增量同步档，按数据依赖顺序执行。默认 14:00 盘中 + 18:00 盘后。</div>
+          <div className="text-xs text-muted-foreground">统一的批量增量同步档，按数据依赖顺序执行。默认 14:30 实时尾盘量化 + 18:00 盘后。</div>
         </div>
         <button
           className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90"
@@ -1357,8 +1356,7 @@ export function BatchProgress({ batch, isStarting }: { batch: SyncBatchStatus | 
 }
 
 function batchTitle(batch: SyncBatchStatus): string {
-  if (batch.schedule_id === "tail_preview_14h" || batch.schedule_id === "tail_prepare_14h") return "尾盘预览";
-  if (batch.schedule_id === "tail_quant_1430") return "尾盘预览";
+  if (batch.schedule_id === "tail_quant_1430") return "实时尾盘量化";
   if (batch.profile === "quant_research") return "策略研究";
   if (batch.profile === "all") return "全量同步";
   if (batch.profile === "core") return "核心同步";

@@ -49,12 +49,12 @@ export function BacktestParamsForm({
         <div className="text-sm">
           <div className="text-xs text-muted-foreground">规则</div>
           <div className="mt-1 flex h-9 items-center rounded-md border bg-muted/30 px-2 text-sm">
-            每日Top20独立评估
+            Top5/Top10/Top20独立评估
           </div>
         </div>
       </div>
       <div className="mt-3 border-t pt-3 text-xs text-muted-foreground">
-        历史研究使用日线口径：D日收盘产生信号，D+1按日线开盘价执行；页面默认只看收益率和买卖点。
+        历史研究使用候选质量口径：D日收盘产生信号，按D日收盘价买入，D+1收盘验证胜率收益；D+2/D+3只作为是否格局的辅助标签。
         {selectedStrategyMeta?.default_min_entry_score ? ` 当前策略默认最低分 ${selectedStrategyMeta.default_min_entry_score}。` : ""}
       </div>
     </div>

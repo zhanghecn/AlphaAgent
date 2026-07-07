@@ -89,6 +89,8 @@ export interface QuantScreenRunRange extends QuantScreenRun {
   skipped_existing_count?: number;
   force_refreshed_count?: number;
   force_refresh?: boolean;
+  persist_signal_details?: boolean;
+  create_replay?: boolean;
   range_recommendation_count?: number;
   replay_run_id?: number | null;
   replay_run?: {
@@ -1398,6 +1400,8 @@ export interface CandidateTradeQualityMetricSummary {
   evaluated_count?: number | null;
   win_count?: number | null;
   win_rate?: number | null;
+  quality_win_count?: number | null;
+  quality_win_rate?: number | null;
   annual_return_pct?: number | null;
   annualized_return_method?: string | null;
   signal_day_compound_annual_return_pct?: number | null;
@@ -1406,6 +1410,19 @@ export interface CandidateTradeQualityMetricSummary {
   average_max_drawdown_pct?: number | null;
   average_max_runup_pct?: number | null;
   average_holding_days?: number | null;
+  d1_limit_up_count?: number | null;
+  d1_limit_up_rate?: number | null;
+  d1_near_limit_up_count?: number | null;
+  d1_near_limit_up_rate?: number | null;
+  d1_big_drop_count?: number | null;
+  d1_big_drop_rate?: number | null;
+  average_d2_close_return_pct?: number | null;
+  average_d3_close_return_pct?: number | null;
+  average_d2_d3_best_runup_pct?: number | null;
+  hold_to_d3_worthwhile_count?: number | null;
+  hold_to_d3_worthwhile_rate?: number | null;
+  take_profit_next_day_count?: number | null;
+  take_profit_next_day_rate?: number | null;
 }
 
 export interface CandidateTradeQualityYearlySummary extends CandidateTradeQualityMetricSummary {
@@ -1421,7 +1438,36 @@ export interface CandidateTradeQualityBucket extends CandidateTradeQualityMetric
   score_bucket?: string | null;
   setup_family?: string | null;
   market_phase?: string | null;
+  timing_window?: string | null;
+  timing_phase?: string | null;
+  setup_timing_bucket?: string | null;
+  month?: string | null;
+  month_timing_window?: string | null;
+  month_timing_phase?: string | null;
+  setup_month_timing_bucket?: string | null;
+  setup_month_timing_phase_bucket?: string | null;
+  evaluation_window?: string | null;
+  d1_outcome?: string | null;
   exit_reason?: string | null;
+  examples?: CandidateTradeQualitySample[];
+}
+
+export interface CandidateTradeQualityRankLimitMatrixRow {
+  label?: string | null;
+  setup_family?: string | null;
+  market_phase?: string | null;
+  timing_window?: string | null;
+  timing_phase?: string | null;
+  setup_timing_bucket?: string | null;
+  month?: string | null;
+  month_timing_window?: string | null;
+  month_timing_phase?: string | null;
+  setup_month_timing_bucket?: string | null;
+  setup_month_timing_phase_bucket?: string | null;
+  evaluation_window?: string | null;
+  top5?: CandidateTradeQualityMetricSummary;
+  top10?: CandidateTradeQualityMetricSummary;
+  top20?: CandidateTradeQualityMetricSummary;
 }
 
 export interface CandidateTradeQualityDailyExtreme extends StockIdentityFields {
@@ -1430,6 +1476,11 @@ export interface CandidateTradeQualityDailyExtreme extends StockIdentityFields {
   rank?: number | null;
   score?: number | null;
   return_pct?: number | null;
+  d1_close_return_pct?: number | null;
+  d1_quality_success?: boolean | null;
+  d1_near_limit_up?: boolean | null;
+  d1_limit_up?: boolean | null;
+  d1_big_drop?: boolean | null;
   exit_reason?: string | null;
 }
 
@@ -1438,6 +1489,7 @@ export interface CandidateTradeQualityDailySummary {
   candidate_count?: number | null;
   evaluated_count?: number | null;
   missing_count?: number | null;
+  top5?: CandidateTradeQualityMetricSummary;
   top10?: CandidateTradeQualityMetricSummary;
   top20?: CandidateTradeQualityMetricSummary;
   topn?: CandidateTradeQualityMetricSummary;
@@ -1535,9 +1587,42 @@ export interface CandidateTradeQualitySample extends StockIdentityFields {
   setup_family_label?: string | null;
   market_phase?: string | null;
   market_phase_label?: string | null;
+  timing_window?: string | null;
+  timing_window_label?: string | null;
+  timing_phase?: string | null;
+  timing_phase_label?: string | null;
+  setup_timing_bucket?: string | null;
+  setup_timing_label?: string | null;
+  month_timing_window?: string | null;
+  month_timing_window_label?: string | null;
+  month_timing_phase?: string | null;
+  month_timing_phase_label?: string | null;
+  setup_month_timing_bucket?: string | null;
+  setup_month_timing_label?: string | null;
+  setup_month_timing_phase_bucket?: string | null;
+  setup_month_timing_phase_label?: string | null;
+  month?: string | null;
+  label_model?: string | null;
+  entry_model?: string | null;
   entry_signal_date?: string | null;
   entry_execute_date?: string | null;
   entry_price?: number | null;
+  tail_entry_date?: string | null;
+  tail_entry_price?: number | null;
+  d1_trade_date?: string | null;
+  d1_open_return_pct?: number | null;
+  d1_high_runup_pct?: number | null;
+  d1_low_drawdown_pct?: number | null;
+  d1_close_return_pct?: number | null;
+  d1_quality_success?: boolean | null;
+  d1_near_limit_up?: boolean | null;
+  d1_limit_up?: boolean | null;
+  d1_big_drop?: boolean | null;
+  d2_close_return_pct?: number | null;
+  d3_close_return_pct?: number | null;
+  d2_d3_best_runup_pct?: number | null;
+  hold_to_d3_worthwhile?: boolean | null;
+  take_profit_next_day?: boolean | null;
   exit_signal_date?: string | null;
   exit_execute_date?: string | null;
   exit_price?: number | null;
@@ -1571,6 +1656,23 @@ export interface CandidateTradeQualityReport {
   by_score_bucket?: CandidateTradeQualityBucket[];
   by_setup_family?: CandidateTradeQualityBucket[];
   by_market_phase?: CandidateTradeQualityBucket[];
+  by_timing_window?: CandidateTradeQualityBucket[];
+  by_timing_phase?: CandidateTradeQualityBucket[];
+  by_setup_x_timing?: CandidateTradeQualityBucket[];
+  by_month?: CandidateTradeQualityBucket[];
+  by_evaluation_window?: CandidateTradeQualityBucket[];
+  by_setup_family_rank_limit?: CandidateTradeQualityRankLimitMatrixRow[];
+  by_market_phase_rank_limit?: CandidateTradeQualityRankLimitMatrixRow[];
+  by_timing_window_rank_limit?: CandidateTradeQualityRankLimitMatrixRow[];
+  by_timing_phase_rank_limit?: CandidateTradeQualityRankLimitMatrixRow[];
+  by_setup_x_timing_rank_limit?: CandidateTradeQualityRankLimitMatrixRow[];
+  by_month_rank_limit?: CandidateTradeQualityRankLimitMatrixRow[];
+  by_month_timing_window_rank_limit?: CandidateTradeQualityRankLimitMatrixRow[];
+  by_month_timing_phase_rank_limit?: CandidateTradeQualityRankLimitMatrixRow[];
+  by_setup_month_timing_rank_limit?: CandidateTradeQualityRankLimitMatrixRow[];
+  by_setup_month_timing_phase_rank_limit?: CandidateTradeQualityRankLimitMatrixRow[];
+  by_evaluation_window_rank_limit?: CandidateTradeQualityRankLimitMatrixRow[];
+  by_d1_outcome?: CandidateTradeQualityBucket[];
   by_exit_reason?: CandidateTradeQualityBucket[];
   bucket_audit?: CandidateTradeQualityBucketAudit;
   volume_audit?: CandidateTradeQualityVolumeAudit;
@@ -2407,6 +2509,8 @@ export function createScreenRunRange(payload: {
   auto_portfolio?: boolean;
   included_boards?: string[];
   force_refresh?: boolean;
+  persist_signal_details?: boolean;
+  create_replay?: boolean;
 } = {}) {
   return apiClient.post<QuantScreenRunRange>("/quant/screen-runs/range", payload);
 }
@@ -2426,6 +2530,8 @@ export function createQuantResearchRun(payload: {
   strict_entry?: boolean;
   execution_model?: "legacy_next_open" | string;
   force_refresh?: boolean;
+  persist_signal_details?: boolean;
+  create_replay?: boolean;
 } = {}) {
   return apiClient.post<QuantResearchRun>("/quant/research-runs", payload);
 }
@@ -3154,7 +3260,7 @@ export function fetchBacktestCandidateTradeQualityReport(
   } = {}
 ): Promise<CandidateTradeQualityReport> {
   const search = new URLSearchParams({
-    rank_limit: String(params.rankLimit ?? 100),
+    rank_limit: String(params.rankLimit ?? 20),
     sample_limit: String(params.sampleLimit ?? 500),
   });
   if (params.startDate) search.set("start_date", params.startDate);

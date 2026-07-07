@@ -34,6 +34,7 @@ from alphaagent.server.services.quant.strategy_registry import get_strategy, sco
 
 DEFAULT_RECOMMENDATION_LIMIT = 20
 TAIL_PREVIEW_DATA_SOURCE = "intraday_snapshot_temp_bar"
+TAIL_QUANT_SOURCE_SCHEDULE_ID = "tail_quant_1430"
 MIN_COMPLETE_DAILY_SYMBOL_COUNT = 3000
 
 
@@ -70,6 +71,7 @@ def screen_stocks(
     included_boards: list[str] | tuple[str, ...] | str | None = None,
     ensure_schema: bool = True,
     range_context: _ScreenRangeContext | None = None,
+    persist_signal_details: bool = True,
 ) -> dict[str, Any]:
     """Run the daily stock screen."""
 
@@ -167,7 +169,17 @@ def screen_stocks(
         run_id = None
         portfolio_sync = None
         if persist:
-            run_id = _persist_screen_run(session, as_of, scored, recommendations, strategy.id, strategy.version, boards, max_symbols=max_symbols)
+            run_id = _persist_screen_run(
+                session,
+                as_of,
+                scored,
+                recommendations,
+                strategy.id,
+                strategy.version,
+                boards,
+                max_symbols=max_symbols,
+                persist_signal_details=persist_signal_details,
+            )
             if auto_portfolio:
                 portfolio_sync = _sync_quant_candidate_group(session, recommendations, stock_meta, strategy.id, strategy.version)
 
@@ -185,6 +197,7 @@ def screen_stocks(
         "total": len(scored),
         "recommendation_count": len(recommendations),
         "included_boards": list(boards),
+        "persist_signal_details": bool(persist_signal_details),
         "portfolio_sync": portfolio_sync,
     }
 
@@ -232,7 +245,7 @@ def screen_tail_preview(
                 latest_intraday_date=latest_intraday_date,
                 snapshot_updated_at=snapshot_updated_at,
                 snapshot_trade_time=snapshot_trade_time,
-                message="暂无晚于最新完整日线的盘中分钟线，不能生成新的尾盘预览。",
+                message="暂无晚于最新完整日线的盘中分钟线，不能生成新的实时尾盘量化结果。",
             )
         if as_of <= base_daily_date and as_of_daily_symbol_count >= MIN_COMPLETE_DAILY_SYMBOL_COUNT:
             return {
@@ -256,7 +269,7 @@ def screen_tail_preview(
                 latest_intraday_date=latest_intraday_date,
                 snapshot_updated_at=snapshot_updated_at,
                 snapshot_trade_time=snapshot_trade_time,
-                message="目标日期没有盘中分钟线，不能只用快照写库时间生成尾盘预览。",
+                message="目标日期没有盘中分钟线，不能只用快照写库时间生成实时尾盘量化结果。",
             )
 
         boards = normalize_included_boards(included_boards)
@@ -362,7 +375,7 @@ def screen_tail_preview(
         "recommendation_count": len(recommendations),
         "included_boards": list(boards),
         "persistence": "read_only_not_persisted",
-        "message": "今日尾盘预览使用盘中快照临时K线，不写入历史候选，不参与回测收益统计。",
+        "message": "14:30 实时尾盘量化使用盘中快照临时K线，不写入历史候选，不参与回测收益统计。",
     }
 
 
@@ -376,13 +389,39 @@ def get_tail_preview(
     included_boards: list[str] | tuple[str, ...] | str | None = None,
     refresh: bool = False,
 ) -> dict[str, Any]:
-    """Return today's tail preview, preferring the internal cache."""
+    """Return the cached 14:30 realtime tail quant result.
+
+    Normal page reads must not compute a fresh intraday result before the 14:30
+    schedule has produced a cache; that made early snapshots look like final
+    tail quant output.
+    """
 
     target_trade_date = trade_date or _tail_preview_default_trade_date()
     if target_trade_date is not None and not refresh:
         cached = latest_tail_preview_cache(target_trade_date, strategy_id=strategy_id)
         if cached is not None and _tail_preview_payload_has_intraday(cached):
             return _limit_tail_preview_payload(cached, recommendation_limit)
+        strategy = get_strategy(strategy_id)
+        if strategy is None:
+            return {"status": "unsupported_strategy", "strategy_id": strategy_id, "items": [], "recommendations": []}
+        if not is_database_configured():
+            return {"status": "unavailable", "message": "DATABASE_URL not configured", "items": [], "recommendations": []}
+        with session_scope() as session:
+            latest_daily_date = _latest_trade_date(session)
+            base_daily_date = _latest_complete_trade_date(session) or latest_daily_date
+            snapshot_updated_at = _latest_snapshot_updated_at(session)
+            snapshot_trade_time = _latest_snapshot_trade_time(session)
+            latest_intraday_date = _latest_tail_intraday_trade_date(session, base_daily_date) if base_daily_date else None
+        return _tail_preview_waiting_payload(
+            strategy,
+            trade_date=target_trade_date,
+            base_daily_date=base_daily_date,
+            latest_daily_date=latest_daily_date,
+            latest_intraday_date=latest_intraday_date,
+            snapshot_updated_at=snapshot_updated_at,
+            snapshot_trade_time=snapshot_trade_time,
+            message="等待 14:30 实时尾盘量化调度生成结果。",
+        )
     return screen_tail_preview(
         target_trade_date,
         strategy_id=strategy_id,
@@ -503,6 +542,8 @@ def latest_tail_preview_cache(
         ).mappings().first()
     if not row:
         return None
+    if row.get("source_schedule_id") != TAIL_QUANT_SOURCE_SCHEDULE_ID:
+        return None
     payload = dict(row.get("payload") or {})
     cache = dict(payload.get("cache") or {})
     if cache.get("signal_evidence_schema_version") != screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION:
@@ -518,6 +559,7 @@ def latest_tail_preview_cache(
         }
     )
     payload["cache"] = cache
+    payload["message"] = "14:30 实时尾盘量化使用盘中快照临时K线，不写入历史候选，不参与回测收益统计。"
     return payload
 
 
@@ -552,6 +594,8 @@ def screen_stocks_range(
     auto_portfolio: bool = True,
     included_boards: list[str] | tuple[str, ...] | str | None = None,
     force_refresh: bool = False,
+    persist_signal_details: bool = True,
+    create_replay: bool = True,
     progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Run daily screens for every local trading date in a range."""
@@ -625,6 +669,7 @@ def screen_stocks_range(
                 included_boards=boards,
                 ensure_schema=False,
                 range_context=range_context,
+                persist_signal_details=persist_signal_details,
             )
         if trade_date == latest_trade_date:
             latest_result = result
@@ -659,7 +704,7 @@ def screen_stocks_range(
     runs = [run_rows_by_date[trade_date] for trade_date in trade_dates if trade_date in run_rows_by_date]
 
     replay_run = None
-    if persist:
+    if persist and create_replay:
         from alphaagent.server.services.quant import strategy_replay
 
         if progress:
@@ -703,6 +748,8 @@ def screen_stocks_range(
         "skipped_existing_count": sum(1 for item in runs if item.get("skipped_existing")),
         "force_refreshed_count": force_refreshed_count,
         "force_refresh": bool(force_refresh),
+        "persist_signal_details": bool(persist_signal_details),
+        "create_replay": bool(create_replay),
         "range_recommendation_count": range_recommendation_count,
         "total": int(latest_result.get("total") or 0),
         "recommendation_count": int(latest_result.get("recommendation_count") or 0),
@@ -1950,6 +1997,7 @@ def _persist_screen_run(
     strategy_version: str | tuple[str, ...] = STRATEGY_VERSION,
     included_boards: tuple[str, ...] = DEFAULT_QUANT_INCLUDED_BOARDS,
     max_symbols: int = 5000,
+    persist_signal_details: bool = True,
 ) -> int:
     if isinstance(strategy_version, tuple):
         included_boards = strategy_version
@@ -1963,6 +2011,7 @@ def _persist_screen_run(
         strategy_version,
         included_boards,
         max_symbols=max_symbols,
+        persist_signal_details=persist_signal_details,
     )
 
 

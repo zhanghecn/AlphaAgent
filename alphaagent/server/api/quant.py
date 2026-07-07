@@ -52,6 +52,8 @@ def create_screen_runs_range(payload: dict[str, Any] = Body(default_factory=dict
                 auto_portfolio=bool(payload.get("auto_portfolio", True)),
                 included_boards=payload.get("included_boards"),
                 force_refresh=bool(payload.get("force_refresh", False)),
+                persist_signal_details=bool(payload.get("persist_signal_details", True)),
+                create_replay=bool(payload.get("create_replay", True)),
             )
         )
     except Exception as exc:
@@ -77,6 +79,8 @@ def create_research_run(payload: dict[str, Any] = Body(default_factory=dict)):
                 strict_entry=bool(payload.get("strict_entry", True)),
                 execution_model=str(payload.get("execution_model") or "legacy_next_open"),
                 force_refresh=bool(payload.get("force_refresh", False)),
+                persist_signal_details=_parse_bool(payload.get("persist_signal_details"), default=False),
+                create_replay=_parse_bool(payload.get("create_replay"), default=False),
             )
         )
     except Exception as exc:
@@ -387,6 +391,14 @@ def _parse_float(value: Any) -> float | None:
     if value in (None, ""):
         return None
     return float(value)
+
+
+def _parse_bool(value: Any, *, default: bool = False) -> bool:
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _service_error(exc: Exception) -> JSONResponse:

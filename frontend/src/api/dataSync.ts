@@ -28,8 +28,8 @@ export function fetchTailWorkflowStatus() {
   return apiClient.get<TailWorkflowStatus>("/data-sync/tail-workflow");
 }
 
-export function runTailPrepare() {
-  return apiClient.post<SyncBatchStatus>("/data-sync/tail-workflow/prepare");
+export function runTailQuantNow() {
+  return apiClient.post<SyncBatchStatus>("/data-sync/tail-workflow/run-tail-quant");
 }
 
 export function fetchDataUsage() {
@@ -376,10 +376,9 @@ export interface TailWorkflowStatus {
   candidate_latest_date?: string | null;
   candidate_updated_at?: string | null;
   latest_research_run?: TailResearchRun | null;
-  tail_prepare_schedule?: BatchSchedule | null;
   tail_quant_schedule?: BatchSchedule | null;
   eod_schedule?: BatchSchedule | null;
-  tail_prepare_ready?: boolean;
+  tail_quant_ready?: boolean;
   tail_preview?: {
     status?: string;
     trade_date?: string | null;

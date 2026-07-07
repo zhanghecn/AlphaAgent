@@ -70,7 +70,7 @@ AlphaAgent 自研服务的股票日线同步不走 vn.py Datafeed，路径是：
 - `AkShareAdapter.sector_daily_bars()` 优先使用东方财富 `push2his` 板块 K 线接口，`secid=90.BKxxxx`，helper 为 `_eastmoney_board_kline()`。
 - AkShare THS 板块指数函数只作为兜底；Docker x86_64 环境不能依赖 `py_mini_racer` 路径作为生产主路径。
 - `sync_sector_daily_bars` 如果对所有板块读取 0 行，会抛 `DataSyncError` 并记录失败，不静默成功。
-- `sync_sector_daily_bars` 和 `sync_sector_period_scores` 默认 `sector_limit=0`，即生产定时任务全量覆盖行业/概念板块。
+- `sync_sector_daily_bars` 和 `sync_sector_period_scores` 默认 `sector_limit=0`。当前默认 18:00 定时保留 `sync_sector_period_scores`，`sync_sector_daily_bars` 因公共板块 K 线源覆盖不稳定，不放入默认定时链路，避免每天把批次标成失败；需要时可手动跑。
 - `/mainline` 产品口径是“概念主线”，不是行业/板块混排。主线 API 固定只读题材概念，过滤指数篮子、风格、昨日涨停、近期新高等状态类伪概念。
 - `sector_period_scores` 历史评分必须只读取 `as_of_date` 当天及以前可回放数据；实时/当日资金流不能稳定回放历史日期。
 - `/api/mainline-replay/live` 是盘中概念主线入口，只读实时源表，不写 `sector_period_scores`。
@@ -106,11 +106,17 @@ AlphaAgent 自研服务的股票日线同步不走 vn.py Datafeed，路径是：
 
 ## Batch Sync And Health
 
-统一批量定时同步使用 `sync_batch_schedules`：
+统一批量定时同步使用 `sync_batch_schedules`，默认由
+`alphaagent/server/services/data_sync.py` 的 `DEFAULT_BATCH_SCHEDULES`
+写入/更新数据库：
 
-- `tail_preview_14h`: 盘中预备。
-- `tail_quant_1430`: 尾盘确认/预览。
-- `eod_18h`: 盘后完整日 K、板块、涨停池、龙虎榜、公告、财报等。
+- `tail_quant_1430`: 14:30 实时尾盘量化结果；只跑分钟线、个股/板块资金流和热度等快任务，然后生成缓存，不跑慢的全 A `sync_stock_list`。
+- `eod_18h`: 18:00 盘后完整日 K、板块、涨停池、龙虎榜、公告、财报等。
+
+11:30、14:00、15:00 旧盘中缓存档已停用；启动种子逻辑会把
+`intraday_noon_1130`、`tail_preview_14h`、`intraday_close_1500`
+以及更早的 `intraday_14h`、`tail_prepare_14h` 标记为禁用，避免页面读取到
+14:00 这类与 14:30 实时尾盘量化不一致的半成品。
 
 批量执行按 `job_ids` 顺序串行，单任务失败不再中止整批；基础任务失败时下游会跳过。日 K/分钟 K 内部按股票并发增量续传。
 
@@ -141,7 +147,8 @@ AlphaAgent 自研服务的股票日线同步不走 vn.py Datafeed，路径是：
 当前产品口径：
 
 - 普通量化产品路径只公开 `mainline_dragon_pullback`。
-- 候选质量主口径是 D 日每日候选 Top20，D+1 开盘逐只独立买入，按当前卖点退出。
+- 候选质量主口径是全历史交易日每日 Top5/Top10/Top20，D 日 BUY 候选按 D 日收盘价买入，D+1 收盘收益作为主胜率和主收益；D+2/D+3 是否值得格局只作为辅助标签。
+- `GET /api/backtests/{id}/candidate-trade-quality-report` 会按买点区域、金/银手指窗口、行情阶段、月份、重点区间和 D+1 涨跌形态分桶；`alphaagent/server/services/backtest/tail_entry_next_day_label.py` 负责生成只读标签。
 - 组合模拟只按候选排序、D+1 执行价、涨跌停、现金、组合上限和当前卖点生成真实成交流水；组合层不能反向解释候选质量。
 - 股票详情页 K 线标记优先来自当前公开策略对该股的独立复盘；组合真实成交只作执行层复核。
 

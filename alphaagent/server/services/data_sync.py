@@ -424,59 +424,13 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
 # requirements/alphaagent_unified_incremental_schedule_plan.md.
 DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
     {
-        "id": "intraday_noon_1130",
-        "name": "盘中同步（11:30，上午收盘快照）",
-        "cron": "30 11 * * 1-5",
-        "action": "tail_preview",
-        "enabled": True,
-        "concurrency": 12,
-        "job_ids": [
-            "sync_stock_list",
-            "sync_stock_minute_bars",
-            "sync_stock_fund_flows",
-            "sync_sector_fund_flows",
-            "sync_stock_hot_ranks",
-        ],
-    },
-    {
-        "id": "tail_preview_14h",
-        "name": "尾盘预览缓存（14:00，快照后生成）",
-        "cron": "0 14 * * 1-5",
-        "action": "tail_preview",
-        "enabled": True,
-        "concurrency": 12,
-        "job_ids": [
-            "sync_stock_list",          # realtime snapshot (price / change / volume ratio)
-            "sync_stock_minute_bars",   # intraday minute bars up to 14:00
-            "sync_stock_fund_flows",    # per-stock fund flow
-            "sync_sector_fund_flows",   # sector fund flow for market/mainline context
-            "sync_stock_hot_ranks",     # per-stock hotness
-        ],
-    },
-    {
         "id": "tail_quant_1430",
-        "name": "尾盘预览缓存（14:30，尾盘确认）",
+        "name": "实时尾盘量化（14:30）",
         "cron": "30 14 * * 1-5",
         "action": "tail_preview",
         "enabled": True,
         "concurrency": 12,
         "job_ids": [
-            "sync_stock_list",
-            "sync_stock_minute_bars",
-            "sync_stock_fund_flows",
-            "sync_sector_fund_flows",
-            "sync_stock_hot_ranks",
-        ],
-    },
-    {
-        "id": "intraday_close_1500",
-        "name": "盘中同步（15:00，收盘快照）",
-        "cron": "0 15 * * 1-5",
-        "action": "tail_preview",
-        "enabled": True,
-        "concurrency": 12,
-        "job_ids": [
-            "sync_stock_list",
             "sync_stock_minute_bars",
             "sync_stock_fund_flows",
             "sync_sector_fund_flows",
@@ -497,7 +451,6 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_sector_list",
             "sync_sector_members",
             "sync_stock_sector_memberships",
-            "sync_sector_daily_bars",
             "sync_sector_fund_flows",
             "sync_sector_period_scores",
             "eod_quant_research",       # 候选生成:基础数据(daily+板块)就绪即跑,读DB已有财报评分,不等慢/晚job,让候选早出
@@ -512,8 +465,11 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
 ]
 
 OBSOLETE_BATCH_SCHEDULE_IDS = {
-    "intraday_14h": "已由 tail_preview_14h 替代：14:00 生成今日尾盘预览缓存。",
-    "tail_prepare_14h": "已由 tail_preview_14h 替代：14:00 同步关键数据并生成预览缓存。",
+    "intraday_14h": "已停用：实时尾盘量化只保留 14:30 单一结果。",
+    "tail_prepare_14h": "已停用：实时尾盘量化只保留 14:30 单一结果。",
+    "intraday_noon_1130": "已停用：不再生成盘中尾盘缓存。",
+    "tail_preview_14h": "已停用：14:00 不再生成实时尾盘量化结果。",
+    "intraday_close_1500": "已停用：实时尾盘量化只保留 14:30 单一结果。",
 }
 TAIL_PREVIEW_BATCH_JOB_ID = "tail_preview_cache"
 EOD_QUANT_RESEARCH_BATCH_JOB_ID = "eod_quant_research"
@@ -2084,10 +2040,10 @@ def run_schedule_now(schedule_id: str) -> dict[str, Any]:
     return _start_sync_schedule(dict(row), source="manual")
 
 
-def run_tail_prepare_now() -> dict[str, Any]:
-    """Start the default fast tail-session preparation batch."""
+def run_tail_quant_now() -> dict[str, Any]:
+    """Start the single realtime tail quant batch."""
 
-    return run_schedule_now("tail_preview_14h")
+    return run_schedule_now("tail_quant_1430")
 
 
 def _quant_research_schedule_status(schedule_id: str, research_run: dict[str, Any]) -> dict[str, Any]:
@@ -2412,7 +2368,7 @@ def _run_tail_preview_cache_batch_job(params: dict[str, Any], *, schedule_id: st
         "rows_read": int(result.get("total") or 0),
         "rows_written": int(result.get("recommendation_count") or 0),
         "message": (
-            f"今日预览 {result.get('trade_date') or '-'}："
+            f"实时尾盘量化 {result.get('trade_date') or '-'}："
             f"{result.get('recommendation_count') or 0} 个推荐 / {result.get('total') or 0} 个候选"
         ),
         "trade_date": result.get("trade_date"),
@@ -3105,7 +3061,7 @@ def tail_workflow_status() -> dict[str, Any]:
     )
     candidate_date = latest_candidate["trade_date"] if latest_candidate else None
     tail_preview_trade_date = _tail_preview_trade_date(latest_tail_intraday_date, latest_complete_daily_date)
-    tail_preview_ready = bool(
+    tail_preview_data_ready = bool(
         tail_preview_trade_date
         and latest_complete_daily_date
         and tail_preview_trade_date > latest_complete_daily_date
@@ -3115,6 +3071,7 @@ def tail_workflow_status() -> dict[str, Any]:
         if latest_tail_cache
         and tail_preview_trade_date
         and latest_tail_cache.get("trade_date") == tail_preview_trade_date
+        and latest_tail_cache.get("source_schedule_id") == screening.TAIL_QUANT_SOURCE_SCHEDULE_ID
         and _tail_preview_cache_has_intraday(dict(latest_tail_cache))
         else None
     )
@@ -3135,12 +3092,11 @@ def tail_workflow_status() -> dict[str, Any]:
         "candidate_latest_date": _iso_or_none(candidate_date),
         "candidate_updated_at": _iso_or_none(latest_candidate.get("finished_at")) if latest_candidate else None,
         "latest_research_run": latest_research,
-        "tail_prepare_schedule": schedules.get("tail_preview_14h") or schedules.get("tail_prepare_14h"),
         "tail_quant_schedule": schedules.get("tail_quant_1430"),
         "eod_schedule": schedules.get("eod_18h"),
-        "tail_prepare_ready": bool(tail_preview_ready or usable_tail_cache),
+        "tail_quant_ready": bool(usable_tail_cache),
         "tail_preview": {
-            "status": "ready" if (tail_preview_ready or usable_tail_cache) else "waiting",
+            "status": "ready" if usable_tail_cache else "waiting",
             "trade_date": tail_preview_trade_date.isoformat() if tail_preview_trade_date else None,
             "data_source": screening.TAIL_PREVIEW_DATA_SOURCE,
             "temporary_bar": True,
@@ -3153,12 +3109,16 @@ def tail_workflow_status() -> dict[str, Any]:
             "latest_intraday_date": _iso_or_none(latest_tail_intraday_date),
             "minute_latest_date": _iso_or_none(latest_minute_date),
             "message": (
-                "今日尾盘预览可用；使用盘中快照/分钟线临时K线，不写入历史候选。"
-                if tail_preview_ready or usable_tail_cache
-                else "等待晚于最新完整日线的盘中分钟线；不会只用同步时间生成尾盘预览。"
+                "14:30 实时尾盘量化结果可用；使用盘中快照/分钟线临时K线，不写入历史候选。"
+                if usable_tail_cache
+                else (
+                    "盘中数据已就绪，等待 14:30 实时尾盘量化调度生成结果。"
+                    if tail_preview_data_ready
+                    else "等待晚于最新完整日线的盘中分钟线；不会只用同步时间生成尾盘量化结果。"
+                )
             ),
         },
-        "message": "历史候选仍使用完整日线；今日尾盘预览使用盘中临时K线，不参与回测收益统计。",
+        "message": "历史候选仍使用完整日线；14:30 实时尾盘量化使用盘中临时K线，不参与回测收益统计。",
     }
 
 

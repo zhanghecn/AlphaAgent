@@ -42,6 +42,7 @@ from alphaagent.server.services.backtest.factor_audit import (
     CandidateCluster,
     IndependentTradeResult,
     simulate_independent_candidate_trade,
+    simulate_tail_entry_next_day_candidate_trade,
     strategy_lifecycle_segments,
     strategy_timeline_rows,
 )
@@ -1196,7 +1197,7 @@ def backtest_factor_audit(backtest_id: int, top_limit: int = 100, exclude_strong
 def backtest_candidate_trade_quality_report(
     backtest_id: int,
     *,
-    rank_limit: int = 100,
+    rank_limit: int = 20,
     sample_limit: int = 500,
     start_date: date | None = None,
     end_date: date | None = None,
@@ -1204,7 +1205,7 @@ def backtest_candidate_trade_quality_report(
     if not is_database_configured():
         return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
     _ensure_backtest_schema()
-    rank_cutoff = min(max(int(rank_limit or 100), 1), 200)
+    rank_cutoff = min(max(int(rank_limit or 20), 1), 20)
     sample_cutoff = min(max(int(sample_limit or 500), 1), 1000)
     cache_key = (int(backtest_id), rank_cutoff, sample_cutoff, start_date, end_date)
     cached = _candidate_trade_quality_cache_get(cache_key)
@@ -1259,30 +1260,15 @@ def backtest_candidate_trade_quality_report(
         clusters = build_daily_candidate_clusters(scoped_candidate_items)
         symbols = sorted({cluster.vt_symbol for cluster in clusters})
         bars_by_symbol = _load_factor_candidate_bars(session, symbols, lower, upper)
-        params = _params_from_run(run_row)
-        buy_dates_by_symbol = _candidate_buy_signal_dates_by_symbol(candidate_items)
 
     results = [
-        simulate_independent_candidate_trade(
+        simulate_tail_entry_next_day_candidate_trade(
             cluster,
             bars_by_symbol.get(cluster.vt_symbol, []),
-            params=params,
-            sell_reason_fn=simulation.sell_reason_for_position,
-            limit_up_open_fn=_is_limit_up_open,
-            limit_down_open_fn=_is_limit_down_open,
-            buy_signal_dates=buy_dates_by_symbol.get(cluster.vt_symbol, set()),
         )
         for cluster in clusters
     ]
     report = candidate_trade_quality_report_from_results(results, rank_limit=rank_cutoff, sample_limit=sample_cutoff)
-    overlay = _support_stop_reentry_candidate_quality_overlay(
-        results,
-        bars_by_symbol=bars_by_symbol,
-        params=params,
-        buy_dates_by_symbol=buy_dates_by_symbol,
-        candidate_limit=_safe_int_or_none((run_row.get("params") or {}).get("candidate_limit")) or 20,
-        sample_limit=sample_cutoff,
-    )
     payload = {
         **report,
         "backtest_id": backtest_id,
@@ -1298,7 +1284,6 @@ def backtest_candidate_trade_quality_report(
             "source_candidate_count": len(candidate_items),
             "scoped_candidate_count": len(scoped_candidate_items),
         },
-        "support_stop_reentry_overlay": overlay,
     }
     _candidate_trade_quality_cache_set(cache_key, payload)
     return {**payload, "quality_cache": "miss"}
@@ -1317,18 +1302,18 @@ def candidate_trade_quality_report_from_quant_recommendations(
     execution_model: str = "legacy_next_open",
     included_boards: tuple[str, ...] = DEFAULT_QUANT_INCLUDED_BOARDS,
 ) -> dict[str, Any]:
-    """Evaluate daily TopN candidates as independent D+1-open trades.
+    """Evaluate daily Top5/Top10/Top20 candidates as D-close to D+1-close labels.
 
     This is the product candidate-quality path. It reads persisted daily
-    recommendations only, then independently simulates each candidate to its
-    sell point. It does not read portfolio orders, cash, positions, max
-    positions, or position sizing.
+    recommendations only, then labels each D signal by the next trading day's
+    close return. It does not read portfolio orders, cash, positions, max
+    positions, position sizing, or sell rules.
     """
 
     if not is_database_configured():
         return {"status": "unavailable", "items": [], "message": "DATABASE_URL not configured"}
     _ensure_backtest_schema()
-    rank_cutoff = min(max(int(rank_limit or 20), 1), 200)
+    rank_cutoff = min(max(int(rank_limit or 20), 1), 20)
     sample_cutoff = min(max(int(sample_limit or 500), 1), 1000)
     with session_scope() as session:
         rows = session.execute(
@@ -1356,27 +1341,10 @@ def candidate_trade_quality_report_from_quant_recommendations(
         clusters = build_daily_candidate_clusters(candidate_items)
         symbols = sorted({cluster.vt_symbol for cluster in clusters})
         bars_by_symbol = _load_factor_candidate_bars(session, symbols, start, end)
-        buy_dates_by_symbol = _candidate_buy_signal_dates_by_symbol(candidate_items)
-
-    params = BacktestParams(
-        strategy=strategy_id,
-        start=start,
-        end=end,
-        min_entry_score=float(min_entry_score),
-        strict_entry=bool(strict_entry),
-        execution_model=execution_model,
-        included_boards=included_boards,
-        persist=False,
-    )
     results = [
-        simulate_independent_candidate_trade(
+        simulate_tail_entry_next_day_candidate_trade(
             cluster,
             bars_by_symbol.get(cluster.vt_symbol, []),
-            params=params,
-            sell_reason_fn=simulation.sell_reason_for_position,
-            limit_up_open_fn=_is_limit_up_open,
-            limit_down_open_fn=_is_limit_down_open,
-            buy_signal_dates=buy_dates_by_symbol.get(cluster.vt_symbol, set()),
         )
         for cluster in clusters
     ]

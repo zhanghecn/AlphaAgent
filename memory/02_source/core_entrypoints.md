@@ -85,7 +85,7 @@
 
 - 提供主线龙头分歧低吸的日线量化信号。
 - 持久化筛选会把高分候选同步到“量化候选”分组；只有 `action=BUY` 的推荐会被自动模拟建仓。
-- 提供日线组合回测和 `/api/backtests/{id}/report` 回测表接口；当前普通历史研究默认是 `legacy_next_open / strict_entry=true`。规则为 D 日收盘可见候选生成 D+1 计划，D+1 按日线开盘价执行。`strict_1430` 和 `tail_close_hybrid` 保留为实时/分钟数据层和旧报告兼容能力，不再是普通历史研究默认口径。
+- 提供日线组合回测和 `/api/backtests/{id}/report` 回测表接口；组合执行诊断仍可用 `legacy_next_open / strict_entry=true` 表示 D 日收盘可见候选生成 D+1 计划、D+1 按日线开盘价执行。`/quant` 候选质量主口径已经独立为 D 日收盘价买入、D+1 收盘验证；`strict_1430` 和 `tail_close_hybrid` 保留为实时/分钟数据层和旧报告兼容能力。
 - 股票详情页 `/stocks/:vtSymbol` 的单股信号复盘会把 BUY 信号、买入拒绝和买卖成交分开显示在 K 线上；最新单股回测会额外读取 `/api/backtests/{id}/audit`，因此即使 BUY 信号未成交也能看到信号日标记和执行日拒绝原因。
 - 单股信号复盘不再展示模拟账户金额、现金、权益、成交金额、数量、费用或盈亏金额；收益统计改为按成交价格直接计算闭合交易收益率：`sell_price / buy_price - 1`，汇总使用单笔收益率连乘。
 - `/api/backtests/{id}/minute-coverage` 返回 14:30 覆盖摘要，状态包括 `ready`、`mixed_proxy`、`missing_snapshots`、`strategy_not_triggered` 和 `empty`；前端 `/quant` 的“14:30覆盖”面板使用它快速判断某次回测是否可按真实 14:30 成交解读。

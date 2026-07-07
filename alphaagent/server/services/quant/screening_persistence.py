@@ -24,9 +24,12 @@ def persist_screen_run(
     strategy_version: str = STRATEGY_VERSION,
     included_boards: tuple[str, ...] = DEFAULT_QUANT_INCLUDED_BOARDS,
     max_symbols: int = 5000,
+    persist_signal_details: bool = True,
 ) -> int:
     now = datetime.now(timezone.utc)
     strategy = require_strategy(strategy_id)
+    scored_candidates = _dedupe_scores_by_symbol(scored)
+    recommendation_candidates = _dedupe_scores_by_symbol(recommendations)
     run_id = session.execute(
         schema.quant_signal_runs.insert()
         .values(
@@ -39,13 +42,13 @@ def persist_screen_run(
                 "max_symbols": int(max_symbols),
                 "signal_evidence_schema_version": screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
             },
-            candidate_count=len(scored),
+            candidate_count=len(scored_candidates),
             signal_count=sum(
                 1
-                for item in scored
+                for item in scored_candidates
                 if screening_payloads.entry_action_payload(item, strategy.default_min_entry_score)["executable_entry_signal"]
             ),
-            recommendation_count=len(recommendations),
+            recommendation_count=len(recommendation_candidates),
             message="daily close observable signal; execution model selected by backtest",
             finished_at=now,
         )
@@ -54,12 +57,13 @@ def persist_screen_run(
 
     clear_existing_screen_outputs(session, trade_date, strategy_id, strategy_version)
 
-    signal_rows = [
-        screening_payloads.score_to_db(item, run_id, strategy_id, strategy_version)
-        for item in scored
-    ]
-    if signal_rows:
-        session.execute(schema.quant_stock_signals.insert(), signal_rows)
+    if persist_signal_details:
+        signal_rows = [
+            screening_payloads.score_to_db(item, run_id, strategy_id, strategy_version)
+            for item in scored_candidates
+        ]
+        if signal_rows:
+            session.execute(schema.quant_stock_signals.insert(), signal_rows)
 
     recommendation_rows = [
         screening_payloads.recommendation_to_db(
@@ -70,11 +74,22 @@ def persist_screen_run(
             strategy_version,
             min_entry_score=strategy.default_min_entry_score,
         )
-        for rank, item in enumerate(recommendations, start=1)
+        for rank, item in enumerate(recommendation_candidates, start=1)
     ]
     if recommendation_rows:
         session.execute(schema.quant_recommendations.insert(), recommendation_rows)
     return int(run_id)
+
+
+def _dedupe_scores_by_symbol(items: list[SignalScore]) -> list[SignalScore]:
+    result: list[SignalScore] = []
+    seen: set[str] = set()
+    for item in items:
+        if item.vt_symbol in seen:
+            continue
+        seen.add(item.vt_symbol)
+        result.append(item)
+    return result
 
 
 def clear_existing_screen_outputs(session, trade_date: date, strategy_id: str, strategy_version: str = STRATEGY_VERSION) -> None:

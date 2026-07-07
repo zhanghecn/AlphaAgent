@@ -159,10 +159,10 @@ def tail_workflow():
         return _sync_error(exc)
 
 
-@router.post("/tail-workflow/prepare")
-def run_tail_prepare():
+@router.post("/tail-workflow/run-tail-quant")
+def run_tail_quant():
     try:
-        return ok(service.run_tail_prepare_now())
+        return ok(service.run_tail_quant_now())
     except Exception as exc:
         return _sync_error(exc)
 

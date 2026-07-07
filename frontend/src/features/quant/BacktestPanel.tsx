@@ -331,9 +331,9 @@ function BacktestReadonlyMethod({
         <ReadonlyCell label="策略" value={strategyName} />
         <ReadonlyCell label="区间" value={report ? `${report.start_date} 至 ${report.end_date}` : run ? `${run.start_date} 至 ${run.end_date}` : "--"} />
         <ReadonlyCell label="股票池" value={`${boards} / ${maxSymbols}只`} />
-        <ReadonlyCell label="候选主口径" value="Top20独立评估" />
+        <ReadonlyCell label="候选主口径" value="D收盘买入/D+1收盘" />
         <ReadonlyCell label="候选范围" value={`每日Top${candidateLimit}`} />
-        <ReadonlyCell label="执行" value={executionModel === "legacy_next_open" ? "D+1开盘" : executionModel} />
+        <ReadonlyCell label="组合执行" value={executionModel === "legacy_next_open" ? "D+1开盘" : executionModel} />
       </div>
     </div>
   );

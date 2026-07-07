@@ -82,7 +82,10 @@ def test_schema_patches_raise_unexpected_errors():
 
 def test_default_batch_schedules_defined():
     ids = {s["id"] for s in svc.DEFAULT_BATCH_SCHEDULES}
-    assert {"tail_preview_14h", "tail_quant_1430", "eod_18h"}.issubset(ids)
+    assert {"tail_quant_1430", "eod_18h"}.issubset(ids)
+    assert "tail_preview_14h" not in ids
+    assert "intraday_noon_1130" not in ids
+    assert "intraday_close_1500" not in ids
 
 
 def test_default_jobs_have_no_cron():
@@ -92,12 +95,12 @@ def test_default_jobs_have_no_cron():
 
 
 def test_intraday_schedule_contains_intraday_jobs():
-    intraday = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "tail_preview_14h")
+    intraday = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "tail_quant_1430")
     assert intraday["action"] == "tail_preview"
     assert "sync_stock_minute_bars" in intraday["job_ids"]
     assert "sync_sector_fund_flows" in intraday["job_ids"]
     assert "sync_limit_up_pools" not in intraday["job_ids"]
-    # Daily bars are not available at 14:00, so they must NOT be in the intraday slot.
+    # Daily bars are not available at 14:30, so they must NOT be in the realtime tail slot.
     assert "sync_stock_daily_bars" not in intraday["job_ids"]
 
 
@@ -105,6 +108,7 @@ def test_tail_quant_schedule_triggers_quant_research():
     tail_quant = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "tail_quant_1430")
     assert tail_quant["action"] == "tail_preview"
     assert tail_quant["cron"] == "30 14 * * 1-5"
+    assert "sync_stock_list" not in tail_quant["job_ids"]
     assert "sync_stock_minute_bars" in tail_quant["job_ids"]
     assert "sync_sector_fund_flows" in tail_quant["job_ids"]
     assert "sync_limit_up_pools" not in tail_quant["job_ids"]
@@ -419,17 +423,17 @@ def test_tail_preview_schedule_appends_cache_job(monkeypatch):
 
     result = svc._start_sync_schedule(
         {
-            "id": "tail_preview_14h",
+            "id": "tail_quant_1430",
             "action": "tail_preview",
-            "job_ids": ["sync_stock_list", "sync_stock_minute_bars"],
+            "job_ids": ["sync_stock_minute_bars"],
             "concurrency": 12,
         },
         source="manual",
     )
 
     assert result["id"] == "tail_preview_batch"
-    assert captured["schedule_id"] == "tail_preview_14h"
-    assert captured["job_ids"] == ["sync_stock_list", "sync_stock_minute_bars", svc.TAIL_PREVIEW_BATCH_JOB_ID]
+    assert captured["schedule_id"] == "tail_quant_1430"
+    assert captured["job_ids"] == ["sync_stock_minute_bars", svc.TAIL_PREVIEW_BATCH_JOB_ID]
 
 
 def test_tail_preview_cache_batch_job_generates_cache(monkeypatch):
@@ -1450,7 +1454,7 @@ def test_scheduler_triggers_tail_preview_schedule(monkeypatch):
                 "cron": "30 14 * * 1-5",
                 "enabled": True,
                 "action": "tail_preview",
-                "job_ids": ["sync_stock_list", "sync_stock_minute_bars"],
+                "job_ids": ["sync_stock_minute_bars"],
                 "concurrency": 8,
                 "last_started_at": None,
             }
@@ -1463,7 +1467,7 @@ def test_scheduler_triggers_tail_preview_schedule(monkeypatch):
 
     assert triggered, "expected tail preview schedule to start a cache batch"
     assert triggered[0]["schedule_id"] == "tail_quant_1430"
-    assert triggered[0]["job_ids"] == ["sync_stock_list", "sync_stock_minute_bars", svc.TAIL_PREVIEW_BATCH_JOB_ID]
+    assert triggered[0]["job_ids"] == ["sync_stock_minute_bars", svc.TAIL_PREVIEW_BATCH_JOB_ID]
 
 
 def test_scheduler_skips_non_matching_cron(monkeypatch):

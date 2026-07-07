@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date
+from dataclasses import dataclass, field
+from datetime import date, timedelta
 from statistics import median
 from typing import Any
 
 from alphaagent.market.boards import stock_board_payload
 from alphaagent.server.services.backtest import data_quality
 from alphaagent.server.services.backtest.schemas import Position
+from alphaagent.server.services.backtest.tail_entry_next_day_label import build_tail_entry_next_day_label
 from alphaagent.server.services.quant.factors import Bar
 from alphaagent.server.services.quant.screening_payloads import normalize_quant_evidence
 
@@ -43,6 +44,7 @@ class IndependentTradeResult:
     holding_days: int | None
     exit_reason: str | None
     window: tuple[Bar, ...] = ()
+    labels: dict[str, Any] = field(default_factory=dict)
 
 
 def rank_bucket(rank: int | None) -> str:
@@ -838,39 +840,120 @@ def simulate_independent_candidate_trade(
     return _independent_trade_open_result(cluster, signal_date, entry_bar.trade_date, entry_price, sorted_bars[entry_index:])
 
 
+def simulate_tail_entry_next_day_candidate_trade(
+    cluster: CandidateCluster,
+    bars: list[Bar],
+) -> IndependentTradeResult:
+    """Label one daily candidate as D-close entry and D+1-close outcome."""
+
+    sorted_bars = sorted(bars, key=lambda bar: bar.trade_date)
+    signal_date = _date_or_none(cluster.entry_row.get("trade_date") or cluster.entry_row.get("signal_date")) or cluster.cluster_start_date
+    evidence = _candidate_evidence(cluster.entry_row)
+    labels = build_tail_entry_next_day_label(
+        signal_date=signal_date,
+        bars=sorted_bars,
+        vt_symbol=cluster.vt_symbol,
+        name=cluster.entry_row.get("name"),
+        evidence=evidence,
+    )
+    entry_date = _date_or_none(labels.get("tail_entry_date"))
+    entry_price = _float_or_none(labels.get("tail_entry_price"))
+    d1_date = _date_or_none(labels.get("d1_trade_date"))
+    d1_close_price = _float_or_none(labels.get("d1_close_price"))
+    status = str(labels.get("status") or "no_execute_bar")
+    label_window = _tail_entry_label_window(sorted_bars, signal_date, d1_date)
+
+    if status != "ready":
+        return IndependentTradeResult(
+            status=status,
+            cluster=cluster,
+            entry_signal_date=signal_date,
+            entry_execute_date=entry_date,
+            entry_price=entry_price,
+            exit_signal_date=None,
+            exit_execute_date=None,
+            exit_price=None,
+            return_pct=None,
+            max_drawdown_pct=None,
+            max_runup_pct=None,
+            holding_days=None,
+            exit_reason=status,
+            window=tuple(label_window),
+            labels=labels,
+        )
+
+    return IndependentTradeResult(
+        status="closed",
+        cluster=cluster,
+        entry_signal_date=signal_date,
+        entry_execute_date=entry_date or signal_date,
+        entry_price=entry_price,
+        exit_signal_date=d1_date,
+        exit_execute_date=d1_date,
+        exit_price=d1_close_price,
+        return_pct=_float_or_none(labels.get("d1_close_return_pct")),
+        max_drawdown_pct=_float_or_none(labels.get("d1_low_drawdown_pct")),
+        max_runup_pct=_float_or_none(labels.get("d1_high_runup_pct")),
+        holding_days=1,
+        exit_reason="d1_close_label",
+        window=tuple(label_window),
+        labels=labels,
+    )
+
+
 def candidate_trade_quality_report_from_results(
     results: list[IndependentTradeResult],
     *,
-    rank_limit: int = 100,
+    rank_limit: int = 20,
     sample_limit: int = 500,
 ) -> dict[str, Any]:
-    """Aggregate independent candidate-trade results into report buckets."""
+    """Aggregate independent candidate labels into Top5/Top10/Top20 buckets."""
 
-    rank_cutoff = min(max(int(rank_limit or 100), 1), 200)
+    rank_cutoff = min(max(int(rank_limit or 20), 1), 20)
     samples = [_candidate_trade_sample(result) for result in results]
     ranked_samples = [item for item in samples if _candidate_effective_rank(item) <= rank_cutoff]
     evaluated = [item for item in ranked_samples if item.get("status") in {"closed", "open"} and _float_or_none(item.get("return_pct")) is not None]
     clean_evaluated = [item for item in evaluated if not item.get("has_price_discontinuity")]
     missing = [item for item in ranked_samples if item.get("status") not in {"closed", "open"}]
+    is_tail_entry_report = bool(not evaluated or any(str(item.get("entry_model") or "") == "signal_day_close" for item in evaluated))
     by_rank_bucket = _candidate_trade_group_metrics(evaluated, "rank_bucket", _candidate_trade_rank_bucket_order)
     by_rank_limit = _candidate_trade_rank_limit_metrics(evaluated, rank_cutoff=rank_cutoff)
     by_daily_rank_window = _candidate_trade_group_metrics(evaluated, "daily_rank_window", _candidate_trade_rank_window_order)
     by_score_bucket = _candidate_trade_group_metrics(evaluated, "score_bucket", _candidate_trade_score_bucket_order)
     by_setup_family = _candidate_trade_group_metrics(evaluated, "setup_family")
     by_market_phase = _candidate_trade_group_metrics(evaluated, "market_phase")
+    by_timing_window = _candidate_trade_group_metrics(evaluated, "timing_window")
+    by_timing_phase = _candidate_trade_group_metrics(evaluated, "timing_phase")
+    by_setup_x_timing = _candidate_trade_group_metrics(evaluated, "setup_timing_bucket")
+    by_month = _candidate_trade_group_metrics(evaluated, "month")
+    by_evaluation_window = _candidate_trade_evaluation_window_metrics(evaluated)
+    by_setup_family_rank_limit = _candidate_trade_group_rank_limit_metrics(evaluated, "setup_family", rank_cutoff=rank_cutoff)
+    by_market_phase_rank_limit = _candidate_trade_group_rank_limit_metrics(evaluated, "market_phase", rank_cutoff=rank_cutoff)
+    by_timing_window_rank_limit = _candidate_trade_group_rank_limit_metrics(evaluated, "timing_window", rank_cutoff=rank_cutoff)
+    by_timing_phase_rank_limit = _candidate_trade_group_rank_limit_metrics(evaluated, "timing_phase", rank_cutoff=rank_cutoff)
+    by_setup_x_timing_rank_limit = _candidate_trade_group_rank_limit_metrics(evaluated, "setup_timing_bucket", rank_cutoff=rank_cutoff)
+    by_month_rank_limit = _candidate_trade_group_rank_limit_metrics(evaluated, "month", rank_cutoff=rank_cutoff)
+    by_month_timing_window_rank_limit = _candidate_trade_group_rank_limit_metrics(evaluated, "month_timing_window", rank_cutoff=rank_cutoff)
+    by_month_timing_phase_rank_limit = _candidate_trade_group_rank_limit_metrics(evaluated, "month_timing_phase", rank_cutoff=rank_cutoff)
+    by_setup_month_timing_rank_limit = _candidate_trade_group_rank_limit_metrics(evaluated, "setup_month_timing_bucket", rank_cutoff=rank_cutoff)
+    by_setup_month_timing_phase_rank_limit = _candidate_trade_group_rank_limit_metrics(evaluated, "setup_month_timing_phase_bucket", rank_cutoff=rank_cutoff)
+    by_evaluation_window_rank_limit = _candidate_trade_evaluation_window_rank_limit_metrics(evaluated, rank_cutoff=rank_cutoff)
+    by_d1_outcome = _candidate_trade_d1_outcome_metrics(evaluated, sample_limit=sample_limit)
     by_exit_reason = _candidate_trade_group_metrics(evaluated, "exit_reason")
     daily_summaries = _candidate_trade_daily_summaries(ranked_samples, rank_cutoff=rank_cutoff)
     yearly_summaries = _candidate_trade_yearly_summaries(evaluated, rank_cutoff=rank_cutoff)
     summary = _candidate_trade_metric_summary(evaluated)
-    summary["annual_return_pct"] = _candidate_trade_average_holding_annualized_return_pct(evaluated)
-    summary["annualized_return_method"] = "average_trade_return_by_average_holding_days"
+    summary["annual_return_pct"] = None if is_tail_entry_report else _candidate_trade_average_holding_annualized_return_pct(evaluated)
+    summary["annualized_return_method"] = "not_primary_next_day_label" if is_tail_entry_report else "average_trade_return_by_average_holding_days"
     summary["signal_day_compound_annual_return_pct"] = _candidate_trade_signal_day_compound_annualized_return_pct(evaluated)
     sorted_by_return = sorted(evaluated, key=lambda item: (_sort_float(item.get("return_pct")), str(item.get("entry_signal_date") or ""), str(item.get("vt_symbol") or "")))
     sample_cutoff = min(max(int(sample_limit or 500), 1), 1000)
     return {
         "status": "ready" if ranked_samples else "empty",
-        "method": "候选质量只读评估：每个交易日的 BUY 候选按排名进入候选池，每条 D 日候选独立按 D+1 开盘买入，再按当前策略卖点卖出；不读取组合成交约束。",
+        "method": "候选质量只读评估：全历史每个交易日只看每日Top5/Top10/Top20，D日BUY候选按D日收盘价买入，D+1收盘收益作为主胜率和主收益；D+2/D+3只作为是否格局的辅助标签。",
         "entry_selection": "daily_candidate",
+        "entry_model": "signal_day_close" if is_tail_entry_report else "legacy_next_open",
+        "primary_metric": "d1_close_return_pct" if is_tail_entry_report else "sell_exit_return_pct",
         "rank_limit": rank_cutoff,
         "sample_limit": sample_cutoff,
         "summary": summary,
@@ -880,6 +963,23 @@ def candidate_trade_quality_report_from_results(
         "by_score_bucket": by_score_bucket,
         "by_setup_family": by_setup_family,
         "by_market_phase": by_market_phase,
+        "by_timing_window": by_timing_window,
+        "by_timing_phase": by_timing_phase,
+        "by_setup_x_timing": by_setup_x_timing,
+        "by_month": by_month,
+        "by_evaluation_window": by_evaluation_window,
+        "by_setup_family_rank_limit": by_setup_family_rank_limit,
+        "by_market_phase_rank_limit": by_market_phase_rank_limit,
+        "by_timing_window_rank_limit": by_timing_window_rank_limit,
+        "by_timing_phase_rank_limit": by_timing_phase_rank_limit,
+        "by_setup_x_timing_rank_limit": by_setup_x_timing_rank_limit,
+        "by_month_rank_limit": by_month_rank_limit,
+        "by_month_timing_window_rank_limit": by_month_timing_window_rank_limit,
+        "by_month_timing_phase_rank_limit": by_month_timing_phase_rank_limit,
+        "by_setup_month_timing_rank_limit": by_setup_month_timing_rank_limit,
+        "by_setup_month_timing_phase_rank_limit": by_setup_month_timing_phase_rank_limit,
+        "by_evaluation_window_rank_limit": by_evaluation_window_rank_limit,
+        "by_d1_outcome": by_d1_outcome,
         "by_exit_reason": by_exit_reason,
         "data_quality": _candidate_trade_data_quality_summary(evaluated),
         "summary_without_price_discontinuity": _candidate_trade_metric_summary(clean_evaluated),
@@ -905,7 +1005,7 @@ def candidate_trade_quality_report_from_results(
         },
         "uses_future_for_label_only": True,
         "not_used_for_signal_score": True,
-        "note": "这是候选本身质量评估，不是组合收益；TopN 表示全历史每个信号日排名前 N 的独立候选交易汇总。候选年化参考按平均单笔收益和平均持有天数折算。买入只用当日可见 BUY，卖出逐日按当时可见状态触发。后验收益、MFE/MAE 只作为报告标签，不进入信号评分。",
+        "note": "这是候选本身质量评估，不是组合收益；Top5/Top10/Top20 表示全历史每个信号日排名前 N 的独立候选汇总。主口径只问 D 日收盘买入后 D+1 收盘是否上涨，D+2/D+3 是否值得格局只作为后验标签，不进入 D 日信号评分。",
     }
 
 
@@ -1389,6 +1489,16 @@ def _independent_trade_open_result(
     )
 
 
+def _tail_entry_label_window(sorted_bars: list[Bar], signal_date: date, d1_date: date | None) -> list[Bar]:
+    if d1_date is None:
+        return [bar for bar in sorted_bars if bar.trade_date == signal_date]
+    result = [bar for bar in sorted_bars if signal_date <= bar.trade_date <= d1_date]
+    d1_index = next((index for index, bar in enumerate(sorted_bars) if bar.trade_date == d1_date), None)
+    if d1_index is None:
+        return result
+    return sorted_bars[max(0, d1_index - 1): min(len(sorted_bars), d1_index + 3)]
+
+
 def _candidate_trade_sample(result: IndependentTradeResult) -> dict[str, Any]:
     cluster = result.cluster
     entry = cluster.entry_row
@@ -1402,6 +1512,14 @@ def _candidate_trade_sample(result: IndependentTradeResult) -> dict[str, Any]:
     score = _float_or_none(entry.get("total_score") or entry.get("score") or evidence.get("total_score"))
     setup_family = _candidate_setup_family(entry, evidence)
     market_phase = _candidate_market_phase(entry, evidence)
+    timing_window = _candidate_timing_window(entry, evidence)
+    timing_phase = f"{timing_window}::{market_phase}"
+    setup_timing_bucket = f"{setup_family}::{timing_window}"
+    month = result.entry_signal_date.strftime("%Y-%m")
+    month_timing_window = f"{month}::{timing_window}"
+    month_timing_phase = f"{month}::{timing_window}::{market_phase}"
+    setup_month_timing_bucket = f"{setup_family}::{month}::{timing_window}"
+    setup_month_timing_phase_bucket = f"{setup_family}::{month}::{timing_window}::{market_phase}"
     price_discontinuity = data_quality.candidate_price_discontinuity(
         list(result.window),
         vt_symbol=cluster.vt_symbol,
@@ -1425,6 +1543,22 @@ def _candidate_trade_sample(result: IndependentTradeResult) -> dict[str, Any]:
         "setup_family_label": _candidate_setup_family_label(setup_family),
         "market_phase": market_phase,
         "market_phase_label": _candidate_market_phase_label(market_phase),
+        "timing_window": timing_window,
+        "timing_window_label": _candidate_timing_window_label(timing_window),
+        "timing_phase": timing_phase,
+        "timing_phase_label": _candidate_timing_phase_label(timing_phase),
+        "setup_timing_bucket": setup_timing_bucket,
+        "setup_timing_label": _candidate_setup_timing_label(setup_timing_bucket),
+        "month": month,
+        "month_label": month,
+        "month_timing_window": month_timing_window,
+        "month_timing_window_label": _candidate_month_timing_window_label(month_timing_window),
+        "month_timing_phase": month_timing_phase,
+        "month_timing_phase_label": _candidate_month_timing_phase_label(month_timing_phase),
+        "setup_month_timing_bucket": setup_month_timing_bucket,
+        "setup_month_timing_label": _candidate_setup_month_timing_label(setup_month_timing_bucket),
+        "setup_month_timing_phase_bucket": setup_month_timing_phase_bucket,
+        "setup_month_timing_phase_label": _candidate_setup_month_timing_phase_label(setup_month_timing_phase_bucket),
         "entry_signal_date": _date_to_iso(result.entry_signal_date),
         "entry_execute_date": _date_to_iso(result.entry_execute_date),
         "entry_price": result.entry_price,
@@ -1456,6 +1590,10 @@ def _candidate_trade_sample(result: IndependentTradeResult) -> dict[str, Any]:
         "uses_future_for_label_only": True,
         "not_used_for_signal_score": True,
     }
+    for key, value in (result.labels or {}).items():
+        if key in {"status", "entry_signal_date", "entry_selection"}:
+            continue
+        payload[key] = value
     payload.update(stock_board_payload(cluster.vt_symbol, entry.get("exchange")))
     return payload
 
@@ -1479,9 +1617,33 @@ def _candidate_trade_group_metrics(
     return result
 
 
+def _candidate_trade_group_rank_limit_metrics(
+    rows: list[dict[str, Any]],
+    key: str,
+    *,
+    rank_cutoff: int,
+    order: dict[str, int] | None = None,
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(str(row.get(key) or "unknown"), []).append(row)
+
+    result = []
+    for bucket, bucket_rows in groups.items():
+        result.append(
+            {
+                key: bucket,
+                "label": _candidate_trade_bucket_label(key, bucket),
+                **_candidate_trade_topn_summaries(bucket_rows, rank_cutoff=rank_cutoff),
+            }
+        )
+    result.sort(key=lambda item: _candidate_trade_group_rank_limit_sort_key(item, key, order))
+    return result
+
+
 def _candidate_trade_rank_limit_metrics(rows: list[dict[str, Any]], *, rank_cutoff: int) -> list[dict[str, Any]]:
     result = []
-    for limit in (10, 20, 50, 100):
+    for limit in (5, 10, 20):
         if limit > rank_cutoff:
             continue
         bucket_rows = [row for row in rows if _candidate_effective_rank(row) <= limit]
@@ -1494,16 +1656,153 @@ def _candidate_trade_rank_limit_metrics(rows: list[dict[str, Any]], *, rank_cuto
                 **_candidate_trade_metric_summary(bucket_rows),
             }
         )
-    if rank_cutoff not in {10, 20, 50, 100}:
-        bucket_rows = [row for row in rows if _candidate_effective_rank(row) <= rank_cutoff]
-        if bucket_rows:
-            result.append(
-                {
-                    "rank_limit": rank_cutoff,
-                    "label": f"每日Top{rank_cutoff}",
-                    **_candidate_trade_metric_summary(bucket_rows),
-                }
-            )
+    return result
+
+
+def _candidate_trade_evaluation_window_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result = []
+    for key, label, start, end in _candidate_trade_evaluation_window_definitions(rows):
+        bucket_rows = _candidate_trade_rows_in_date_window(rows, start, end)
+        if not bucket_rows:
+            continue
+        result.append(
+            {
+                "evaluation_window": key,
+                "label": label,
+                **_candidate_trade_metric_summary(bucket_rows),
+            }
+        )
+    return result
+
+
+def _candidate_trade_evaluation_window_rank_limit_metrics(rows: list[dict[str, Any]], *, rank_cutoff: int) -> list[dict[str, Any]]:
+    result = []
+    for key, label, start, end in _candidate_trade_evaluation_window_definitions(rows):
+        bucket_rows = _candidate_trade_rows_in_date_window(rows, start, end)
+        if not bucket_rows:
+            continue
+        result.append(
+            {
+                "evaluation_window": key,
+                "label": label,
+                **_candidate_trade_topn_summaries(bucket_rows, rank_cutoff=rank_cutoff),
+            }
+        )
+    return result
+
+
+def _candidate_trade_evaluation_window_definitions(rows: list[dict[str, Any]]) -> list[tuple[str, str, date | None, date | None]]:
+    if not rows:
+        return []
+    signal_dates = [day for row in rows if (day := _date_or_none(row.get("entry_signal_date"))) is not None]
+    if not signal_dates:
+        return []
+    latest = max(signal_dates)
+    return [
+        ("full_sample", "全样本", None, None),
+        ("recent_3_months", "最近3个月", latest - timedelta(days=93), latest),
+        ("recent_6_months", "最近6个月", latest - timedelta(days=186), latest),
+        ("silver_pressure_2026_03_13_03_24", "银手指压力 2026-03-13..03-24", date(2026, 3, 13), date(2026, 3, 24)),
+        ("june_repair_2026_06_09_07_03", "6月底部修复 2026-06-09..07-03", date(2026, 6, 9), date(2026, 7, 3)),
+    ]
+
+
+def _candidate_trade_rows_in_date_window(
+    rows: list[dict[str, Any]],
+    start: date | None,
+    end: date | None,
+) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in rows
+        if (day := _date_or_none(row.get("entry_signal_date"))) is not None
+        and (start is None or day >= start)
+        and (end is None or day <= end)
+    ]
+
+
+def _candidate_trade_topn_summaries(rows: list[dict[str, Any]], *, rank_cutoff: int) -> dict[str, dict[str, Any]]:
+    summaries: dict[str, dict[str, Any]] = {}
+    for limit in (5, 10, 20):
+        if limit > rank_cutoff:
+            continue
+        limit_rows = [row for row in rows if _candidate_effective_rank(row) <= limit]
+        summaries[f"top{limit}"] = _candidate_trade_metric_summary(limit_rows)
+    return summaries
+
+
+def _candidate_trade_group_rank_limit_sort_key(
+    item: dict[str, Any],
+    key: str,
+    order: dict[str, int] | None,
+) -> tuple[Any, ...]:
+    bucket = str(item.get(key) or "")
+    if key == "month":
+        return (bucket,)
+    if key in {
+        "month_timing_window",
+        "month_timing_phase",
+        "setup_month_timing_bucket",
+        "setup_month_timing_phase_bucket",
+    }:
+        return _candidate_trade_month_composite_sort_key(bucket, key)
+    top20 = item.get("top20") if isinstance(item.get("top20"), dict) else {}
+    top10 = item.get("top10") if isinstance(item.get("top10"), dict) else {}
+    sample_count = int((top20 or top10 or {}).get("sample_count") or 0)
+    return ((order or {}).get(bucket, 10**6), -sample_count, bucket)
+
+
+def _candidate_trade_month_composite_sort_key(bucket: str, key: str) -> tuple[Any, ...]:
+    parts = bucket.split("::")
+    if key == "month_timing_window":
+        month, timing, phase, setup = _part(parts, 0), _part(parts, 1), "", ""
+    elif key == "month_timing_phase":
+        month, timing, phase, setup = _part(parts, 0), _part(parts, 1), _part(parts, 2), ""
+    elif key == "setup_month_timing_bucket":
+        setup, month, timing, phase = _part(parts, 0), _part(parts, 1), _part(parts, 2), ""
+    else:
+        setup, month, timing, phase = _part(parts, 0), _part(parts, 1), _part(parts, 2), _part(parts, 3)
+    return (
+        month or "9999-99",
+        _candidate_timing_window_order.get(timing, 10**6),
+        _candidate_market_phase_order.get(phase, 10**6),
+        _candidate_setup_family_order.get(setup, 10**6),
+        bucket,
+    )
+
+
+def _part(parts: list[str], index: int) -> str:
+    return parts[index] if index < len(parts) else ""
+
+
+def _candidate_trade_d1_outcome_metrics(rows: list[dict[str, Any]], *, sample_limit: int) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        for key in _candidate_d1_outcome_keys(row):
+            groups.setdefault(key, []).append(row)
+    result = []
+    for key, bucket_rows in groups.items():
+        reverse = key not in {"d1_big_drop", "d1_low_open_or_low_close", "d1_deep_intraday_drawdown"}
+        result.append(
+            {
+                "d1_outcome": key,
+                "label": _candidate_d1_outcome_label(key),
+                **_candidate_trade_metric_summary(bucket_rows),
+                "examples": _candidate_bucket_examples(
+                    bucket_rows,
+                    limit=min(max(int(sample_limit or 20), 1), 20),
+                    reverse=reverse,
+                ),
+                "uses_future_for_label_only": True,
+                "not_used_for_signal_score": True,
+            }
+        )
+    result.sort(
+        key=lambda item: (
+            _candidate_d1_outcome_order(str(item.get("d1_outcome") or "")),
+            -int(item.get("sample_count") or 0),
+        )
+    )
     return result
 
 
@@ -1523,6 +1822,7 @@ def _candidate_trade_daily_summaries(rows: list[dict[str, Any]], *, rank_cutoff:
         ]
         if not evaluated:
             continue
+        top5_rows = [row for row in evaluated if _candidate_effective_rank(row) <= 5]
         top10_rows = [row for row in evaluated if _candidate_effective_rank(row) <= 10]
         top20_rows = [row for row in evaluated if _candidate_effective_rank(row) <= 20]
         topn_rows = [row for row in evaluated if _candidate_effective_rank(row) <= rank_cutoff]
@@ -1532,6 +1832,7 @@ def _candidate_trade_daily_summaries(rows: list[dict[str, Any]], *, rank_cutoff:
                 "candidate_count": len(date_rows),
                 "evaluated_count": len(evaluated),
                 "missing_count": len(date_rows) - len(evaluated),
+                "top5": _candidate_trade_metric_summary(top5_rows),
                 "top10": _candidate_trade_metric_summary(top10_rows),
                 "top20": _candidate_trade_metric_summary(top20_rows),
                 "topn": _candidate_trade_metric_summary(topn_rows),
@@ -1891,10 +2192,27 @@ def _candidate_bucket_examples(rows: list[dict[str, Any]], *, limit: int, revers
             "return_pct": row.get("return_pct"),
             "max_drawdown_pct": row.get("max_drawdown_pct"),
             "max_runup_pct": row.get("max_runup_pct"),
+            "d1_open_return_pct": row.get("d1_open_return_pct"),
+            "d1_high_runup_pct": row.get("d1_high_runup_pct"),
+            "d1_low_drawdown_pct": row.get("d1_low_drawdown_pct"),
+            "d1_close_return_pct": row.get("d1_close_return_pct"),
+            "d1_quality_success": row.get("d1_quality_success"),
+            "d1_near_limit_up": row.get("d1_near_limit_up"),
+            "d1_limit_up": row.get("d1_limit_up"),
+            "d1_big_drop": row.get("d1_big_drop"),
+            "d2_close_return_pct": row.get("d2_close_return_pct"),
+            "d3_close_return_pct": row.get("d3_close_return_pct"),
+            "d2_d3_best_runup_pct": row.get("d2_d3_best_runup_pct"),
+            "hold_to_d3_worthwhile": row.get("hold_to_d3_worthwhile"),
+            "take_profit_next_day": row.get("take_profit_next_day"),
             "holding_days": row.get("holding_days"),
             "exit_reason": row.get("exit_reason"),
             "setup_family": row.get("setup_family"),
+            "setup_family_label": row.get("setup_family_label"),
             "market_phase": row.get("market_phase"),
+            "market_phase_label": row.get("market_phase_label"),
+            "timing_window": row.get("timing_window"),
+            "timing_window_label": row.get("timing_window_label"),
         }
         for row in ordered[: max(int(limit or 20), 1)]
     ]
@@ -2098,6 +2416,11 @@ def _candidate_trade_daily_extreme(rows: list[dict[str, Any]], *, reverse: bool)
         "effective_rank": row.get("effective_rank"),
         "score": row.get("score"),
         "return_pct": row.get("return_pct"),
+        "d1_close_return_pct": row.get("d1_close_return_pct"),
+        "d1_quality_success": row.get("d1_quality_success"),
+        "d1_near_limit_up": row.get("d1_near_limit_up"),
+        "d1_limit_up": row.get("d1_limit_up"),
+        "d1_big_drop": row.get("d1_big_drop"),
         "exit_reason": row.get("exit_reason"),
     }
 
@@ -2107,17 +2430,44 @@ def _candidate_trade_metric_summary(rows: list[dict[str, Any]]) -> dict[str, Any
     drawdowns = [value for row in rows if (value := _float_or_none(row.get("max_drawdown_pct"))) is not None]
     runups = [value for row in rows if (value := _float_or_none(row.get("max_runup_pct"))) is not None]
     holding_days = [value for row in rows if (value := _float_or_none(row.get("holding_days"))) is not None]
+    d2_returns = [value for row in rows if (value := _float_or_none(row.get("d2_close_return_pct"))) is not None]
+    d3_returns = [value for row in rows if (value := _float_or_none(row.get("d3_close_return_pct"))) is not None]
+    d2_d3_runups = [value for row in rows if (value := _float_or_none(row.get("d2_d3_best_runup_pct"))) is not None]
+    quality_rows = [row for row in rows if isinstance(row.get("d1_quality_success"), bool)]
+    hold_rows = [row for row in rows if isinstance(row.get("hold_to_d3_worthwhile"), bool)]
+    take_profit_rows = [row for row in rows if isinstance(row.get("take_profit_next_day"), bool)]
     wins = [value for value in returns if value > 0]
+    quality_wins = [row for row in quality_rows if bool(row.get("d1_quality_success"))]
+    hold_wins = [row for row in hold_rows if bool(row.get("hold_to_d3_worthwhile"))]
+    take_profit = [row for row in take_profit_rows if bool(row.get("take_profit_next_day"))]
+    limit_up_rows = [row for row in rows if bool(row.get("d1_limit_up"))]
+    near_limit_rows = [row for row in rows if bool(row.get("d1_near_limit_up"))]
+    big_drop_rows = [row for row in rows if bool(row.get("d1_big_drop"))]
     return {
         "sample_count": len(rows),
         "evaluated_count": len(returns),
         "win_count": len(wins),
         "win_rate": _ratio_pct(len(wins), len(returns)),
+        "quality_win_count": len(quality_wins),
+        "quality_win_rate": _ratio_pct(len(quality_wins), len(quality_rows)),
         "average_return_pct": round(sum(returns) / len(returns), 4) if returns else None,
         "median_return_pct": round(median(returns), 4) if returns else None,
         "average_max_drawdown_pct": round(sum(drawdowns) / len(drawdowns), 4) if drawdowns else None,
         "average_max_runup_pct": round(sum(runups) / len(runups), 4) if runups else None,
         "average_holding_days": round(sum(holding_days) / len(holding_days), 4) if holding_days else None,
+        "d1_limit_up_count": len(limit_up_rows),
+        "d1_limit_up_rate": _ratio_pct(len(limit_up_rows), len(returns)),
+        "d1_near_limit_up_count": len(near_limit_rows),
+        "d1_near_limit_up_rate": _ratio_pct(len(near_limit_rows), len(returns)),
+        "d1_big_drop_count": len(big_drop_rows),
+        "d1_big_drop_rate": _ratio_pct(len(big_drop_rows), len(returns)),
+        "average_d2_close_return_pct": round(sum(d2_returns) / len(d2_returns), 4) if d2_returns else None,
+        "average_d3_close_return_pct": round(sum(d3_returns) / len(d3_returns), 4) if d3_returns else None,
+        "average_d2_d3_best_runup_pct": round(sum(d2_d3_runups) / len(d2_d3_runups), 4) if d2_d3_runups else None,
+        "hold_to_d3_worthwhile_count": len(hold_wins),
+        "hold_to_d3_worthwhile_rate": _ratio_pct(len(hold_wins), len(hold_rows)),
+        "take_profit_next_day_count": len(take_profit),
+        "take_profit_next_day_rate": _ratio_pct(len(take_profit), len(take_profit_rows)),
     }
 
 
@@ -2238,7 +2588,32 @@ def _candidate_trade_score_bucket(score: float | None) -> str:
 
 
 def _candidate_setup_family(row: dict[str, Any], evidence: dict[str, Any]) -> str:
-    setup = str(row.get("setup_family") or row.get("entry_family") or row.get("setup_primary") or evidence.get("setup_family") or evidence.get("entry_family") or evidence.get("entry_setup") or "")
+    setup = str(
+        row.get("setup_family")
+        or evidence.get("setup_family")
+        or evidence.get("entry_setup")
+        or evidence.get("setup_type")
+        or row.get("entry_family")
+        or row.get("setup_primary")
+        or evidence.get("entry_family")
+        or ""
+    )
+    subtype = str(
+        evidence.get("oversold_rebound_candidate_subtype")
+        or evidence.get("oversold_rebound_subtype")
+        or evidence.get("rebound_subtype")
+        or ""
+    )
+    if setup in {"bottom_reclaim", "secondary_breakout_confirm", "oversold_rebound_start", "retreat_momentum_source"}:
+        return setup
+    if bool(evidence.get("bottom_reclaim")) or subtype == "bottom_reclaim":
+        return "bottom_reclaim"
+    if bool(evidence.get("secondary_breakout_confirm")) or subtype == "secondary_breakout_confirm":
+        return "secondary_breakout_confirm"
+    if bool(evidence.get("oversold_rebound_start")) or subtype in {"oversold_rebound_start", "oversold_rebound"}:
+        return "oversold_rebound_start"
+    if bool(evidence.get("retreat_momentum_source")) or setup == "silver_retreat_momentum_source":
+        return "retreat_momentum_source"
     low_days = _float_or_none(row.get("low_suction_days") or evidence.get("low_suction_days")) or 0.0
     launch_confirmed = bool(row.get("launch_confirmed") or evidence.get("low_suction_launch_confirmed") or row.get("first_effective_lift") or evidence.get("first_effective_lift"))
     if setup in {"dragon_low_suction_overlap"}:
@@ -2272,12 +2647,37 @@ def _candidate_market_phase(row: dict[str, Any], evidence: dict[str, Any]) -> st
     return "unknown"
 
 
+def _candidate_timing_window(row: dict[str, Any], evidence: dict[str, Any]) -> str:
+    value = str(row.get("timing_window") or evidence.get("timing_window") or "").strip()
+    if value:
+        return value
+    direction = str(row.get("nearest_timing_direction") or evidence.get("nearest_timing_direction") or "").upper()
+    days = _float_or_none(row.get("nearest_timing_days") or evidence.get("nearest_timing_days"))
+    if direction == "GOLD":
+        if days is not None and days <= 5:
+            return "after_gold_0_5"
+        if days is not None and days <= 20:
+            return "after_gold_6_20"
+        return "after_gold_late"
+    if direction == "SILVER":
+        if days is not None and days <= 5:
+            return "after_silver_0_5"
+        if days is not None and days <= 20:
+            return "after_silver_6_20"
+        return "after_silver_late"
+    return "no_recent_timing"
+
+
 def _candidate_setup_family_label(value: str) -> str:
     labels = {
         "low_suction_first_lift": "低吸首启",
         "dragon_pullback": "龙回头",
         "low_suction_buildup": "低吸蓄势",
         "dragon_low_suction_overlap": "重叠信号",
+        "bottom_reclaim": "超跌反弹-底部收复",
+        "secondary_breakout_confirm": "超跌反弹-二次确认",
+        "oversold_rebound_start": "超跌反弹-启动",
+        "retreat_momentum_source": "退潮高低切",
         "other": "其他",
         "unknown": "其他",
     }
@@ -2304,6 +2704,26 @@ def _candidate_trade_bucket_label(key: str, bucket: str) -> str:
         return _candidate_setup_family_label(bucket)
     if key == "market_phase":
         return _candidate_market_phase_label(bucket)
+    if key == "timing_window":
+        return _candidate_timing_window_label(bucket)
+    if key == "timing_phase":
+        return _candidate_timing_phase_label(bucket)
+    if key == "setup_timing_bucket":
+        return _candidate_setup_timing_label(bucket)
+    if key == "month":
+        return bucket
+    if key == "month_timing_window":
+        return _candidate_month_timing_window_label(bucket)
+    if key == "month_timing_phase":
+        return _candidate_month_timing_phase_label(bucket)
+    if key == "setup_month_timing_bucket":
+        return _candidate_setup_month_timing_label(bucket)
+    if key == "setup_month_timing_phase_bucket":
+        return _candidate_setup_month_timing_phase_label(bucket)
+    if key == "evaluation_window":
+        return _candidate_evaluation_window_label(bucket)
+    if key == "d1_outcome":
+        return _candidate_d1_outcome_label(bucket)
     if key == "exit_reason":
         return bucket
     return bucket
@@ -2318,6 +2738,123 @@ def _candidate_trade_rank_bucket_label(bucket: str) -> str:
         "outside_top_100": "100名外",
     }
     return labels.get(bucket, bucket)
+
+
+def _candidate_timing_window_label(value: str) -> str:
+    labels = {
+        "after_gold_0_5": "金手指后0-5日",
+        "after_gold_6_20": "金手指后6-20日",
+        "after_gold_late": "金手指后20日+",
+        "after_silver_0_5": "银手指后0-5日",
+        "after_silver_6_20": "银手指后6-20日",
+        "after_silver_late": "银手指后20日+",
+        "no_recent_timing": "无近期金银手指",
+        "unknown": "未知",
+    }
+    return labels.get(str(value or "unknown"), str(value or "未知"))
+
+
+def _candidate_timing_phase_label(value: str) -> str:
+    timing, _, phase = str(value or "").partition("::")
+    timing_label = _candidate_timing_window_label(timing)
+    phase_label = _candidate_market_phase_label(phase or "unknown")
+    return f"{timing_label} / {phase_label}"
+
+
+def _candidate_setup_timing_label(value: str) -> str:
+    setup, _, timing = str(value or "").partition("::")
+    setup_label = _candidate_setup_family_label(setup or "unknown")
+    timing_label = _candidate_timing_window_label(timing or "unknown")
+    return f"{setup_label} / {timing_label}"
+
+
+def _candidate_month_timing_window_label(value: str) -> str:
+    parts = str(value or "").split("::")
+    month = _part(parts, 0) or "未知月份"
+    timing = _part(parts, 1) or "unknown"
+    return f"{month} / {_candidate_timing_window_label(timing)}"
+
+
+def _candidate_month_timing_phase_label(value: str) -> str:
+    parts = str(value or "").split("::")
+    month = _part(parts, 0) or "未知月份"
+    timing = _part(parts, 1) or "unknown"
+    phase = _part(parts, 2) or "unknown"
+    return f"{month} / {_candidate_timing_window_label(timing)} / {_candidate_market_phase_label(phase)}"
+
+
+def _candidate_setup_month_timing_label(value: str) -> str:
+    parts = str(value or "").split("::")
+    setup = _part(parts, 0) or "unknown"
+    month = _part(parts, 1) or "未知月份"
+    timing = _part(parts, 2) or "unknown"
+    return f"{month} / {_candidate_setup_family_label(setup)} / {_candidate_timing_window_label(timing)}"
+
+
+def _candidate_setup_month_timing_phase_label(value: str) -> str:
+    parts = str(value or "").split("::")
+    setup = _part(parts, 0) or "unknown"
+    month = _part(parts, 1) or "未知月份"
+    timing = _part(parts, 2) or "unknown"
+    phase = _part(parts, 3) or "unknown"
+    return f"{month} / {_candidate_setup_family_label(setup)} / {_candidate_timing_window_label(timing)} / {_candidate_market_phase_label(phase)}"
+
+
+def _candidate_evaluation_window_label(value: str) -> str:
+    labels = {
+        "full_sample": "全样本",
+        "recent_3_months": "最近3个月",
+        "recent_6_months": "最近6个月",
+        "silver_pressure_2026_03_13_03_24": "银手指压力 2026-03-13..03-24",
+        "june_repair_2026_06_09_07_03": "6月底部修复 2026-06-09..07-03",
+    }
+    return labels.get(str(value or ""), str(value or "未知区间"))
+
+
+def _candidate_d1_outcome_keys(row: dict[str, Any]) -> list[str]:
+    keys: list[str] = []
+    return_pct = _float_or_none(row.get("return_pct")) or 0.0
+    if bool(row.get("d1_limit_up")):
+        keys.append("d1_limit_up")
+    if bool(row.get("d1_near_limit_up")):
+        keys.append("d1_near_limit_up")
+    if return_pct >= 5.0:
+        keys.append("d1_close_ge5")
+    if bool(row.get("d1_big_drop")):
+        keys.append("d1_big_drop")
+    if bool(row.get("d1_low_open")) or bool(row.get("d1_low_close")):
+        keys.append("d1_low_open_or_low_close")
+    if (_float_or_none(row.get("d1_low_drawdown_pct")) or 0.0) <= -5.0:
+        keys.append("d1_deep_intraday_drawdown")
+    if not keys:
+        keys.append("d1_ordinary")
+    return _dedupe_list(keys)
+
+
+def _candidate_d1_outcome_label(value: str) -> str:
+    labels = {
+        "d1_limit_up": "D+1涨停/封板代理",
+        "d1_near_limit_up": "D+1接近涨停",
+        "d1_close_ge5": "D+1收盘涨幅>=5%",
+        "d1_big_drop": "D+1大跌",
+        "d1_low_open_or_low_close": "D+1低开/低收",
+        "d1_deep_intraday_drawdown": "D+1盘中深回撤",
+        "d1_ordinary": "D+1普通波动",
+    }
+    return labels.get(str(value or ""), str(value or "未归类"))
+
+
+def _candidate_d1_outcome_order(value: str) -> int:
+    order = {
+        "d1_limit_up": 10,
+        "d1_near_limit_up": 20,
+        "d1_close_ge5": 30,
+        "d1_big_drop": 40,
+        "d1_low_open_or_low_close": 50,
+        "d1_deep_intraday_drawdown": 60,
+        "d1_ordinary": 100,
+    }
+    return order.get(str(value or ""), 1000)
 
 
 def _candidate_trade_rank_window_label(bucket: str) -> str:
@@ -2367,6 +2904,41 @@ _candidate_trade_score_bucket_order = {
     "80-90": 20,
     "90-95": 30,
     "95+": 40,
+    "unknown": 1000,
+}
+
+
+_candidate_timing_window_order = {
+    "after_gold_0_5": 10,
+    "after_gold_6_20": 20,
+    "after_gold_late": 30,
+    "after_silver_0_5": 40,
+    "after_silver_6_20": 50,
+    "after_silver_late": 60,
+    "no_recent_timing": 900,
+    "unknown": 1000,
+}
+
+
+_candidate_market_phase_order = {
+    "uptrend": 10,
+    "rotation": 20,
+    "retreat": 30,
+    "warming": 40,
+    "unknown": 1000,
+}
+
+
+_candidate_setup_family_order = {
+    "dragon_pullback": 10,
+    "low_suction_first_lift": 20,
+    "low_suction_buildup": 30,
+    "oversold_rebound_start": 40,
+    "bottom_reclaim": 50,
+    "secondary_breakout_confirm": 60,
+    "retreat_momentum_source": 70,
+    "dragon_low_suction_overlap": 80,
+    "other": 900,
     "unknown": 1000,
 }
 

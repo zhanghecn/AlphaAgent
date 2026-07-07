@@ -28,6 +28,7 @@ import { QuantWorkflowGuide } from "@/features/quant/QuantWorkflowGuide";
 import { QuantKpiBar, type QuantKpi } from "@/features/quant/QuantKpiBar";
 import { RecommendationsPanel } from "@/features/quant/RecommendationsPanel";
 import { BacktestPanel } from "@/features/quant/BacktestPanel";
+import { CandidateTradeQualityPanel } from "@/features/quant/BacktestAnalysis";
 import { AddToGroupDialog } from "@/features/portfolio/AddToGroupDialog";
 import { ManualBuyDialog } from "@/features/quant/ManualBuyDialog";
 import { Button } from "@/components/ui/button";
@@ -176,6 +177,8 @@ export function QuantTradingPage() {
         strict_entry: true,
         execution_model: "legacy_next_open",
         force_refresh: false,
+        persist_signal_details: false,
+        create_replay: false,
       });
     },
     onSuccess: (result) => {
@@ -300,6 +303,10 @@ export function QuantTradingPage() {
           status={latestResearchRun.status}
           message={latestResearchRun.message}
         />
+      )}
+
+      {latestResearchRun?.status === "succeeded" && latestResearchRun.candidate_trade_quality && (
+        <CandidateTradeQualityPanel report={latestResearchRun.candidate_trade_quality} />
       )}
 
       <QuantWorkflowGuide

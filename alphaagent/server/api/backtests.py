@@ -479,7 +479,7 @@ def get_performance_attribution_report(
 @router.get("/{backtest_id}/candidate-trade-quality-report")
 def get_candidate_trade_quality_report(
     backtest_id: int,
-    rank_limit: int = Query(default=100, ge=1, le=200),
+    rank_limit: int = Query(default=20, ge=1, le=20),
     sample_limit: int = Query(default=500, ge=1, le=1000),
     start_date: str = Query(default=""),
     end_date: str = Query(default=""),

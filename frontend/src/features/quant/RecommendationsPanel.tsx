@@ -138,7 +138,7 @@ export function RecommendationsPanel({
             <h2 className="text-sm font-semibold">量化候选</h2>
           </div>
           <div className="text-xs text-muted-foreground">
-            {tradeDate ?? "--"} · 观察前 {DEFAULT_CANDIDATE_OBSERVATION_LIMIT} · {isTailPreview ? "今日预览" : `执行前 ${DEFAULT_EXECUTION_CANDIDATE_LIMIT}`} · {runId ? `运行 #${runId}` : isTailPreview ? "未落库" : "未运行"} · {strategyVersion ?? "--"}
+            {tradeDate ?? "--"} · 观察前 {DEFAULT_CANDIDATE_OBSERVATION_LIMIT} · {isTailPreview ? "实时尾盘量化" : `执行前 ${DEFAULT_EXECUTION_CANDIDATE_LIMIT}`} · {runId ? `运行 #${runId}` : isTailPreview ? "未落库" : "未运行"} · {strategyVersion ?? "--"}
           </div>
         </div>
         <div className="flex w-fit rounded-md border bg-muted/30 p-1">
@@ -152,7 +152,7 @@ export function RecommendationsPanel({
             className={cn("rounded px-3 py-1.5 text-sm", isTailPreview ? "bg-background shadow-sm" : "text-muted-foreground")}
             onClick={() => onViewModeChange("tail_preview")}
           >
-            今日尾盘预览
+            实时尾盘量化
           </button>
         </div>
         <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_260px]">
@@ -316,7 +316,7 @@ export function RecommendationsPanel({
                           disabled={!activeBacktestId || isTailPreview}
                           title={
                             isTailPreview
-                              ? "今日尾盘预览未落库，暂无历史回测成交链路"
+                              ? "实时尾盘量化未落库，暂无历史回测成交链路"
                               : activeBacktestId
                                 ? "查看该候选在选中回测里的成交/拒单情况"
                                 : "先在「回测」tab选中一个回测，才能追踪候选的成交情况"
@@ -386,9 +386,9 @@ export function RecommendationsPanel({
 function TailPreviewSummary({ meta }: { meta?: QuantScreenRun }) {
   return (
     <div className="rounded-md border bg-muted/20 p-3 text-sm">
-      <div className="font-medium">今日尾盘预览</div>
+      <div className="font-medium">实时尾盘量化</div>
       <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-        <span>预览日 {meta?.trade_date ?? "--"}</span>
+        <span>量化日 {meta?.trade_date ?? "--"}</span>
         <span>基础日线 {meta?.base_daily_date ?? "--"}</span>
         <span>最新分钟线 {meta?.latest_intraday_date ?? "--"}</span>
         <span>快照 {compactDateTime(meta?.snapshot_updated_at) || "--"}</span>
@@ -437,14 +437,13 @@ function TailWorkflowSyncStrip({
     { label: "盘中快照", value: compactDateTime(workflow.intraday_snapshot_updated_at), detail: workflow.intraday_snapshot_trade_time },
     { label: "量化候选", value: workflow.candidate_latest_date, detail: compactDateTime(workflow.candidate_updated_at) },
     {
-      label: "尾盘预览",
+      label: "尾盘量化",
       value: preview?.trade_date ?? preview?.cached_trade_date ?? statusLabel(previewStatus),
       detail: preview?.message ?? (preview?.cached_recommendation_count != null ? `缓存 ${preview.cached_recommendation_count} 个推荐` : null),
     },
   ];
 
   const schedules = [
-    { label: "14:00", schedule: workflow.tail_prepare_schedule },
     { label: "14:30", schedule: workflow.tail_quant_schedule },
     { label: "18:00", schedule: workflow.eod_schedule },
   ];

@@ -29,8 +29,9 @@ def select_dragon_pullback_execution_pool(candidates: list[Any], candidate_limit
     """Return the execution pool without reserving slots for any setup lane.
 
     Low-suction setups compete in the same list as dragon-pullback setups. The
-    execution rank does not apply a generic low-suction lifecycle bonus; only
-    verified clean-watch profiles receive a narrow opportunity bonus.
+    execution rank does not apply a generic low-suction lifecycle bonus. Quality
+    filters are applied inside the requested TopN only; filtered slots are not
+    backfilled from lower ranks, so weak buckets remain visible in evaluation.
     """
 
     limit = max(int(candidate_limit or 0), 0)
@@ -50,7 +51,6 @@ def execution_pool_context(candidates: list[Any], candidate_limit: int, strategy
     pre_filter_symbols = selection.get("pre_filter_symbols", set())
     filtered = selection.get("filtered_symbols", set())
     filter_reasons = selection.get("filter_reasons", {})
-    vacancy_fills = selection.get("vacancy_fills", set())
     context: dict[str, dict[str, Any]] = {}
     for raw_rank, candidate in enumerate(candidates, start=1):
         vt_symbol = str(getattr(candidate, "vt_symbol", ""))
@@ -76,11 +76,9 @@ def execution_pool_context(candidates: list[Any], candidate_limit: int, strategy
             "execution_quality_filtered": vt_symbol in filtered,
             "execution_quality_filter_reason": filter_reasons.get(vt_symbol),
             "execution_candidate_limit": int(candidate_limit or 0),
-            "execution_policy": "frontrow_secondary_vacancy_fill" if vt_symbol in vacancy_fills else "baseline_opportunity_rank",
-            "execution_vacancy_fill_eligible": strict_secondary_frontrow_vacancy_fill_candidate(candidate)
-            if strategy_id == DRAGON_PULLBACK_STRATEGY_ID
-            else False,
-            "execution_filled_vacancy": vt_symbol in vacancy_fills,
+            "execution_policy": "filtered_opportunity_rank_no_backfill",
+            "execution_vacancy_fill_eligible": False,
+            "execution_filled_vacancy": False,
             "execution_frontrow_quality_score": frontrow_quality_score(candidate)
             if strategy_id == DRAGON_PULLBACK_STRATEGY_ID
             else 0.0,
@@ -111,36 +109,13 @@ def _dragon_pullback_execution_selection(
         for candidate in pre_filter_pool
         if (reason := dragon_pullback_quality_filter_reason(candidate))
     }
-    filtered = set(filter_reasons)
-    selected = [candidate for candidate in pre_filter_pool if str(getattr(candidate, "vt_symbol", "")) not in filtered]
-    selected_symbols = {str(getattr(candidate, "vt_symbol", "")) for candidate in selected}
-    vacancy_fills: set[str] = set()
-    if len(selected) < limit:
-        fill_candidates = sorted(
-            (
-                candidate
-                for candidate in ordered
-                if str(getattr(candidate, "vt_symbol", "")) not in selected_symbols
-                and not dragon_pullback_quality_filter_reason(candidate)
-                and strict_secondary_frontrow_vacancy_fill_candidate(candidate)
-            ),
-            key=_strict_secondary_frontrow_fill_key,
-        )
-        for candidate in fill_candidates:
-            if len(selected) >= limit:
-                break
-            vt_symbol = str(getattr(candidate, "vt_symbol", ""))
-            if vt_symbol in selected_symbols:
-                continue
-            selected.append(candidate)
-            selected_symbols.add(vt_symbol)
-            vacancy_fills.add(vt_symbol)
+    selected = [candidate for candidate in pre_filter_pool if str(getattr(candidate, "vt_symbol", "")) not in filter_reasons]
 
     return selected, {
         "pre_filter_symbols": {str(getattr(candidate, "vt_symbol", "")) for candidate in pre_filter_pool},
-        "filtered_symbols": filtered,
+        "filtered_symbols": set(filter_reasons),
         "filter_reasons": filter_reasons,
-        "vacancy_fills": vacancy_fills,
+        "vacancy_fills": set(),
     }
 
 
@@ -158,25 +133,6 @@ def dragon_pullback_opportunity_score(candidate: Any) -> float:
         float(getattr(candidate, "total_score", 0) or 0)
         + default_clean_watch_entry_opportunity_bonus(candidate)
         + dragon_pullback_timing_opportunity_bonus(candidate)
-    )
-
-
-def strict_secondary_frontrow_vacancy_fill_candidate(candidate: Any) -> bool:
-    evidence = getattr(candidate, "evidence", {}) or {}
-    if _secondary_subtype(evidence) != "secondary_breakout_confirm":
-        return False
-    timing = str(evidence.get("timing_window") or "")
-    phase = str(evidence.get("market_phase") or "")
-    repair_rank = _float_or_none(evidence.get("frontrow_theme_repair_candidate_rank"))
-    theme_rank = _float_or_none(evidence.get("frontrow_theme_candidate_rank"))
-    return bool(
-        timing == "after_silver_6_20"
-        and phase == "retreat"
-        and bool(evidence.get("deep_cycle_secondary_breakout_reversal"))
-        and frontrow_quality_score(candidate) >= 75.0
-        and _secondary_breakout_narrow_confirm_bonus(candidate) >= 8.0
-        and (repair_rank is None or repair_rank <= 1.0)
-        and (theme_rank is None or theme_rank <= (5.0 if repair_rank is not None and repair_rank <= 1.0 else 3.0))
     )
 
 
@@ -231,15 +187,6 @@ def frontrow_quality_score(candidate: Any) -> float:
     if _controlled_repair_price_volume(evidence):
         score += 5.0
     return round(max(0.0, min(score, 100.0)), 4)
-
-
-def _strict_secondary_frontrow_fill_key(candidate: Any) -> tuple[float, float, float, str]:
-    return (
-        -frontrow_quality_score(candidate),
-        -_secondary_breakout_narrow_confirm_bonus(candidate),
-        -dragon_pullback_opportunity_score(candidate),
-        str(getattr(candidate, "vt_symbol", "")),
-    )
 
 
 def _secondary_breakout_narrow_confirm_bonus(candidate: Any) -> float:
@@ -399,6 +346,17 @@ def dragon_pullback_timing_opportunity_reasons(candidate: Any) -> list[dict[str,
             if _confirmed_secondary_breakout_repair(evidence):
                 add("secondary_breakout_confirmed_repair", "二次确认：底部修复后再转强", 0.7)
 
+    if setup == OVERSOLD_REBOUND_LANE and timing == "after_gold_0_5" and phase == "retreat":
+        add("oversold_gold_0_5_retreat_repair", "超跌反弹：金手指短窗退潮修复", 3.4)
+        if _bottom_reclaim_setup(evidence):
+            add("bottom_reclaim_gold_0_5_retreat", "底部收复：金手指短窗退潮修复", 0.8)
+            if _confirmed_bottom_reclaim_repair(evidence):
+                add("bottom_reclaim_gold_confirmed_repair", "底部收复：金手指短窗均线修复", 0.7)
+        if bool(evidence.get("secondary_breakout_confirm")):
+            add("secondary_breakout_gold_0_5_retreat", "二次确认：金手指短窗退潮转强", 0.6)
+            if _confirmed_secondary_breakout_repair(evidence):
+                add("secondary_breakout_gold_confirmed_repair", "二次确认：金手指短窗底部修复", 0.6)
+
     if setup == "low_suction_buildup" and timing == "after_silver_6_20" and phase == "retreat":
         add("low_suction_buildup_silver_6_20_retreat", "低吸蓄势：银手指后6-20日退潮修复", 2.5)
 
@@ -424,16 +382,22 @@ def dragon_pullback_timing_opportunity_reasons(candidate: Any) -> list[dict[str,
         add("silver_rotation_strict_fresh_dragon", "龙回头：银手指后轮动新鲜确认", 2.8)
         return reasons
 
+    frontrow_score = frontrow_quality_score(candidate)
     if _silver_rotation_washout_dragon(evidence, setup=setup, timing=timing, phase=phase):
         add("silver_rotation_washout_dragon", "龙回头：银后6-20轮动低收盘洗盘", 5.8)
-        if frontrow_quality_score(candidate) >= 45.0:
+        if frontrow_score >= 45.0:
             add("washout_dragon_frontrow_floor", "洗盘龙回头：细分题材强度达标", 0.7)
         return reasons
 
-    if _silver_rotation_flat_base_low_suction(evidence, setup=setup, timing=timing, phase=phase) and frontrow_quality_score(candidate) >= 64.0:
+    if _silver_rotation_flat_base_low_suction(evidence, setup=setup, timing=timing, phase=phase) and frontrow_score >= 64.0:
         add("silver_rotation_flat_base_low_suction", "低吸：银后6-20轮动横盘蓄势", 8.1)
-        if frontrow_quality_score(candidate) >= 62.0:
-            add("flat_base_theme_rank_confirm", "横盘蓄势低吸：题材前三确认", 0.8)
+        add("flat_base_theme_rank_confirm", "横盘蓄势低吸：题材前三确认", 0.8)
+        return reasons
+
+    silver_pressure_low_suction_turn = _silver_pressure_fresh_low_suction_turn(evidence, setup=setup, timing=timing, phase=phase)
+    if silver_pressure_low_suction_turn is not None:
+        key, label, points = silver_pressure_low_suction_turn
+        add(key, label, points)
         return reasons
 
     if _right_tail_source_context(evidence, setup=setup, timing=timing, phase=phase):
@@ -625,6 +589,8 @@ def wide_ma10_high_turnover_normal_volume_decay(candidate: Any) -> bool:
 
 def wide_ma_no_low_suction_high_close_volume_decay(candidate: Any) -> bool:
     evidence = getattr(candidate, "evidence", {}) or {}
+    if active_washout_reclaim_confirmation(candidate):
+        return False
     ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
     low_suction_days = _float_or_default(evidence.get("low_suction_days"), 0.0)
     close_location = _float_or_none(evidence.get("close_location_in_range"))
@@ -637,6 +603,40 @@ def wide_ma_no_low_suction_high_close_volume_decay(candidate: Any) -> bool:
         and close_location >= 0.82
         and volume_ratio is not None
         and volume_ratio <= 1.35
+    )
+
+
+def active_washout_reclaim_confirmation(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    recent_limit_source = bool(evidence.get("recent_limit_up_20d")) or _float_or_default(
+        evidence.get("near_limit_up_count_20d"),
+        0.0,
+    ) >= 2.0
+    support_type = str(evidence.get("support_type") or "")
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    return_5d = _float_or_none(evidence.get("return_5d"))
+    return_20d = _float_or_none(evidence.get("return_20d"))
+    ma20_distance = _float_or_none(evidence.get("ma20_distance_pct"))
+    drawdown = _float_or_none(evidence.get("drawdown_from_pivot_pct"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    return bool(
+        recent_limit_source
+        and support_type in {"ma5_reclaim", "ma5_support"}
+        and latest_change is not None
+        and latest_change >= 4.0
+        and return_5d is not None
+        and return_5d <= 0.0
+        and return_20d is not None
+        and return_20d <= 25.0
+        and ma20_distance is not None
+        and ma20_distance <= 8.0
+        and drawdown is not None
+        and drawdown <= -5.0
+        and volume_ratio is not None
+        and 0.65 <= volume_ratio <= 1.20
+        and close_location is not None
+        and close_location >= 0.82
     )
 
 
@@ -677,10 +677,626 @@ def core_active_short_pullback_strong_leg_lift_decay(candidate: Any) -> bool:
     )
 
 
+def gold_late_overheated_dragon_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _audited_setup_family(evidence) != DRAGON_PULLBACK_LANE:
+        return False
+    if str(evidence.get("timing_window") or "") != "after_gold_late":
+        return False
+    if str(evidence.get("market_phase") or "") not in {"retreat", "rotation", "warming"}:
+        return False
+    low_suction_days = _float_or_default(evidence.get("low_suction_days"), 0.0)
+    return_20d = _float_or_none(evidence.get("return_20d"))
+    ma20_distance = _float_or_none(evidence.get("ma20_distance_pct"))
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    return bool(
+        low_suction_days <= 2.0
+        and return_20d is not None
+        and return_20d >= 22.0
+        and ma20_distance is not None
+        and ma20_distance >= 8.0
+        and (latest_change is None or latest_change <= 5.5)
+    )
+
+
+def gold_late_high_close_exhaustion_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    audited_family = _audited_setup_family(evidence)
+    setup_family = _setup_family(evidence)
+    if audited_family not in {DRAGON_PULLBACK_LANE, "dragon_low_suction_overlap", "low_suction_buildup"} and setup_family not in {
+        DRAGON_PULLBACK_LANE,
+        "dragon_low_suction_overlap",
+        "low_suction_buildup",
+    }:
+        return False
+    if str(evidence.get("timing_window") or "") != "after_gold_late":
+        return False
+    if str(evidence.get("market_phase") or "") not in {"uptrend", "warming"}:
+        return False
+    return_20d = _float_or_none(evidence.get("return_20d"))
+    ma20_distance = _float_or_none(evidence.get("ma20_distance_pct"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    return bool(
+        return_20d is not None
+        and return_20d >= 15.0
+        and ma20_distance is not None
+        and ma20_distance >= 6.0
+        and close_location is not None
+        and close_location >= 0.74
+        and latest_change is not None
+        and latest_change <= 4.5
+    )
+
+
+def gold_late_wide_ma_volume_churn_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _audited_setup_family(evidence) != DRAGON_PULLBACK_LANE:
+        return False
+    if str(evidence.get("timing_window") or "") != "after_gold_late":
+        return False
+    low_suction_days = _float_or_default(evidence.get("low_suction_days"), 0.0)
+    return_20d = _float_or_none(evidence.get("return_20d"))
+    ma20_distance = _float_or_none(evidence.get("ma20_distance_pct"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    return bool(
+        low_suction_days <= 1.0
+        and return_20d is not None
+        and return_20d >= 28.0
+        and ma20_distance is not None
+        and ma20_distance >= 12.0
+        and volume_ratio is not None
+        and volume_ratio >= 1.35
+        and close_location is not None
+        and close_location <= 0.65
+    )
+
+
+def gold_late_uptrend_extreme_stretch_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _audited_setup_family(evidence) != DRAGON_PULLBACK_LANE:
+        return False
+    if str(evidence.get("timing_window") or "") != "after_gold_late":
+        return False
+    if str(evidence.get("market_phase") or "") != "uptrend":
+        return False
+    low_suction_days = _float_or_default(evidence.get("low_suction_days"), 0.0)
+    return_20d = _float_or_none(evidence.get("return_20d"))
+    return_60d = _float_or_none(evidence.get("return_60d"))
+    ma20_distance = _float_or_none(evidence.get("ma20_distance_pct"))
+    near_limit_count = _float_or_default(evidence.get("near_limit_up_count_20d"), 0.0)
+    return bool(
+        low_suction_days <= 1.0
+        and return_20d is not None
+        and return_20d >= 40.0
+        and return_60d is not None
+        and return_60d >= 90.0
+        and ma20_distance is not None
+        and ma20_distance >= 18.0
+        and (bool(evidence.get("recent_limit_up_20d")) or near_limit_count >= 3.0)
+    )
+
+
+def gold_late_overlap_unconfirmed_highclose_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _audited_setup_family(evidence) != "dragon_low_suction_overlap":
+        return False
+    if str(evidence.get("timing_window") or "") != "after_gold_late":
+        return False
+    if str(evidence.get("market_phase") or "") not in {"warming", "retreat"}:
+        return False
+    launch_bucket = str(evidence.get("low_suction_launch_quality_bucket") or "")
+    if launch_bucket != "unconfirmed_buildup":
+        return False
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    return_60d = _float_or_none(evidence.get("return_60d"))
+    near_limit_count = _float_or_default(evidence.get("near_limit_up_count_20d"), 0.0)
+    return bool(
+        latest_change is not None
+        and latest_change >= 0.0
+        and close_location is not None
+        and close_location >= 0.62
+        and ((return_60d is not None and return_60d >= 55.0) or near_limit_count >= 1.0)
+    )
+
+
+def gold_late_overlap_late_pullback_highclose_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _audited_setup_family(evidence) != "dragon_low_suction_overlap":
+        return False
+    if str(evidence.get("timing_window") or "") != "after_gold_late":
+        return False
+    if str(evidence.get("low_suction_launch_quality_bucket") or "") != "late_pullback_launch":
+        return False
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    return_20d = _float_or_none(evidence.get("return_20d"))
+    return_60d = _float_or_none(evidence.get("return_60d"))
+    return bool(
+        close_location is not None
+        and close_location >= 0.70
+        and ((return_60d is not None and return_60d >= 55.0) or (return_20d is not None and return_20d >= 20.0))
+    )
+
+
+def gold_late_first_lift_other_confirmed_exhaustion_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _setup_family(evidence) != "low_suction_first_lift":
+        return False
+    if str(evidence.get("timing_window") or "") != "after_gold_late":
+        return False
+    if str(evidence.get("market_phase") or "") not in {"warming", "uptrend"}:
+        return False
+    if str(evidence.get("low_suction_launch_quality_bucket") or "") != "other_confirmed_launch":
+        return False
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    low_suction_days = _float_or_default(evidence.get("low_suction_days"), 0.0)
+    return_60d = _float_or_none(evidence.get("return_60d"))
+    return bool(
+        latest_change is not None
+        and latest_change <= 2.0
+        and close_location is not None
+        and close_location >= 0.74
+        and low_suction_days <= 4.0
+        and return_60d is not None
+        and (return_60d >= 25.0 or return_60d <= 0.0)
+    )
+
+
+def gold_late_rotation_highclose_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if str(evidence.get("timing_window") or "") != "after_gold_late":
+        return False
+    if str(evidence.get("market_phase") or "") != "rotation":
+        return False
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    return_20d = _float_or_none(evidence.get("return_20d"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    return bool(
+        latest_change is not None
+        and latest_change >= 1.0
+        and return_20d is not None
+        and return_20d >= 20.0
+        and close_location is not None
+        and close_location >= 0.72
+    )
+
+
+def gold_late_overlap_unconfirmed_short_reclaim_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _audited_setup_family(evidence) != "dragon_low_suction_overlap":
+        return False
+    if str(evidence.get("timing_window") or "") != "after_gold_late":
+        return False
+    if str(evidence.get("market_phase") or "") != "warming":
+        return False
+    if str(evidence.get("low_suction_launch_quality_bucket") or "") != "unconfirmed_buildup":
+        return False
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    pullback_days = _float_or_default(evidence.get("pullback_days"), 0.0)
+    low_suction_days = _float_or_default(evidence.get("low_suction_days"), 0.0)
+    return bool(
+        _no_recent_active_source(evidence)
+        and latest_change is not None
+        and latest_change < 0.0
+        and close_location is not None
+        and close_location <= 0.30
+        and pullback_days <= 3.0
+        and low_suction_days >= 4.0
+    )
+
+
+def gold_late_dragon_no_active_short_reclaim_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _audited_setup_family(evidence) != DRAGON_PULLBACK_LANE:
+        return False
+    if str(evidence.get("timing_window") or "") != "after_gold_late":
+        return False
+    if str(evidence.get("market_phase") or "") != "warming":
+        return False
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    return_60d = _float_or_none(evidence.get("return_60d"))
+    ma20_distance = _float_or_none(evidence.get("ma20_distance_pct"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    pullback_days = _float_or_default(evidence.get("pullback_days"), 0.0)
+    return bool(
+        _no_recent_active_source(evidence)
+        and latest_change is not None
+        and latest_change < 0.0
+        and return_60d is not None
+        and return_60d >= 55.0
+        and ma20_distance is not None
+        and ma20_distance >= 5.0
+        and close_location is not None
+        and close_location <= 0.40
+        and pullback_days <= 3.0
+    )
+
+
+def gold_late_overlap_retreat_lowclose_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _audited_setup_family(evidence) != "dragon_low_suction_overlap":
+        return False
+    if str(evidence.get("timing_window") or "") != "after_gold_late":
+        return False
+    if str(evidence.get("market_phase") or "") != "retreat":
+        return False
+    if str(evidence.get("low_suction_launch_quality_bucket") or "") != "unconfirmed_buildup":
+        return False
+    low_suction_days = _float_or_default(evidence.get("low_suction_days"), 0.0)
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    return bool(
+        _no_recent_active_source(evidence)
+        and low_suction_days >= 6.0
+        and close_location is not None
+        and close_location <= 0.08
+    )
+
+
+def gold_late_overlap_rotation_weak_washout_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _audited_setup_family(evidence) != "dragon_low_suction_overlap":
+        return False
+    if str(evidence.get("timing_window") or "") != "after_gold_late":
+        return False
+    if str(evidence.get("market_phase") or "") != "rotation":
+        return False
+    if str(evidence.get("low_suction_launch_quality_bucket") or "") != "unconfirmed_buildup":
+        return False
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    return_60d = _float_or_none(evidence.get("return_60d"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    return bool(
+        latest_change is not None
+        and latest_change <= -4.0
+        and return_60d is not None
+        and return_60d <= 20.0
+        and close_location is not None
+        and close_location <= 0.25
+    )
+
+
+def gold_late_first_lift_rotation_push_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _setup_family(evidence) != "low_suction_first_lift":
+        return False
+    if str(evidence.get("timing_window") or "") != "after_gold_late":
+        return False
+    if str(evidence.get("market_phase") or "") != "rotation":
+        return False
+    if str(evidence.get("low_suction_launch_quality_bucket") or "") != "balanced_first_lift":
+        return False
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    return_60d = _float_or_none(evidence.get("return_60d"))
+    pullback_days = _float_or_default(evidence.get("pullback_days"), 0.0)
+    return bool(
+        latest_change is not None
+        and latest_change >= 3.0
+        and return_60d is not None
+        and return_60d >= 40.0
+        and pullback_days <= 3.0
+    )
+
+
+def gold_late_first_lift_no_active_push_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _setup_family(evidence) != "low_suction_first_lift":
+        return False
+    if str(evidence.get("timing_window") or "") != "after_gold_late":
+        return False
+    if str(evidence.get("market_phase") or "") != "warming":
+        return False
+    if str(evidence.get("low_suction_launch_quality_bucket") or "") != "other_confirmed_launch":
+        return False
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    return_60d = _float_or_none(evidence.get("return_60d"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    return bool(
+        _no_recent_active_source(evidence)
+        and latest_change is not None
+        and 2.0 <= latest_change <= 3.0
+        and return_60d is not None
+        and return_60d >= 25.0
+        and close_location is not None
+        and close_location >= 0.74
+    )
+
+
+def gold_late_uptrend_no_active_long_pullback_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _audited_setup_family(evidence) != DRAGON_PULLBACK_LANE:
+        return False
+    if str(evidence.get("timing_window") or "") != "after_gold_late":
+        return False
+    if str(evidence.get("market_phase") or "") != "uptrend":
+        return False
+    pullback_days = _float_or_default(evidence.get("pullback_days"), 0.0)
+    return_20d = _float_or_none(evidence.get("return_20d"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    return bool(
+        _no_recent_active_source(evidence)
+        and pullback_days >= 8.0
+        and return_20d is not None
+        and return_20d >= 20.0
+        and close_location is not None
+        and close_location <= 0.35
+    )
+
+
+def silver_late_overlap_rotation_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _audited_setup_family(evidence) != "dragon_low_suction_overlap":
+        return False
+    if str(evidence.get("timing_window") or "") != "after_silver_late":
+        return False
+    if str(evidence.get("market_phase") or "") != "rotation":
+        return False
+    low_suction_days = _float_or_default(evidence.get("low_suction_days"), 0.0)
+    pullback_days = _float_or_default(evidence.get("pullback_days"), 0.0)
+    return_20d = _float_or_none(evidence.get("return_20d"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    launch_bucket = str(evidence.get("low_suction_launch_quality_bucket") or "")
+    return bool(
+        low_suction_days >= 3.0
+        and pullback_days >= 9.0
+        and (
+            (return_20d is not None and return_20d >= 16.0)
+            or (close_location is not None and close_location >= 0.70)
+        )
+        and launch_bucket in {"unconfirmed_buildup", "late_pullback_launch", "thin_volume_launch"}
+    )
+
+
+def silver_late_overlap_unconfirmed_midclose_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _audited_setup_family(evidence) != "dragon_low_suction_overlap":
+        return False
+    if str(evidence.get("timing_window") or "") != "after_silver_late":
+        return False
+    if str(evidence.get("market_phase") or "") not in {"retreat", "rotation", "warming"}:
+        return False
+    launch_bucket = str(evidence.get("low_suction_launch_quality_bucket") or "")
+    if launch_bucket != "unconfirmed_buildup" or bool(evidence.get("low_suction_launch_confirmed")):
+        return False
+    warning_level = _float_or_default(evidence.get("market_warning_level"), 0.0)
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    return bool(
+        warning_level >= 2.0
+        and close_location is not None
+        and 0.20 <= close_location <= 0.62
+        and volume_ratio is not None
+        and 0.75 <= volume_ratio <= 1.20
+    )
+
+
+def silver_late_midclose_ma5_reclaim_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _audited_setup_family(evidence) != DRAGON_PULLBACK_LANE:
+        return False
+    if str(evidence.get("timing_window") or "") != "after_silver_late":
+        return False
+    if str(evidence.get("market_phase") or "") != "retreat":
+        return False
+    support_type = str(evidence.get("support_type") or "")
+    return_20d = _float_or_none(evidence.get("return_20d"))
+    ma20_distance = _float_or_none(evidence.get("ma20_distance_pct"))
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    return bool(
+        support_type == "ma5_reclaim"
+        and return_20d is not None
+        and return_20d >= 30.0
+        and ma20_distance is not None
+        and ma20_distance >= 8.0
+        and ma_convergence is not None
+        and ma_convergence >= 14.0
+        and close_location is not None
+        and 0.30 <= close_location <= 0.50
+        and volume_ratio is not None
+        and volume_ratio <= 1.25
+    )
+
+
+def silver_6_20_exhausted_lowclose_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _audited_setup_family(evidence) != DRAGON_PULLBACK_LANE:
+        return False
+    if str(evidence.get("timing_window") or "") != "after_silver_6_20":
+        return False
+    if str(evidence.get("market_phase") or "") != "rotation":
+        return False
+    support_type = str(evidence.get("support_type") or "")
+    return_20d = _float_or_none(evidence.get("return_20d"))
+    return_60d = _float_or_none(evidence.get("return_60d"))
+    ma20_distance = _float_or_none(evidence.get("ma20_distance_pct"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    return bool(
+        support_type == "ma5_reclaim"
+        and return_20d is not None
+        and return_20d >= 35.0
+        and return_60d is not None
+        and return_60d >= 55.0
+        and ma20_distance is not None
+        and ma20_distance >= 8.0
+        and close_location is not None
+        and close_location <= 0.08
+    )
+
+
+def gold_late_retreat_no_buildup_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _audited_setup_family(evidence) != DRAGON_PULLBACK_LANE:
+        return False
+    if str(evidence.get("timing_window") or "") != "after_gold_late":
+        return False
+    if str(evidence.get("market_phase") or "") != "retreat":
+        return False
+    support_type = str(evidence.get("support_type") or "")
+    low_suction_days = _float_or_default(evidence.get("low_suction_days"), 0.0)
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    return bool(
+        support_type == "ma5_reclaim"
+        and low_suction_days <= 1.0
+        and ma_convergence is not None
+        and ma_convergence >= 12.0
+        and close_location is not None
+        and close_location <= 0.70
+        and volume_ratio is not None
+        and volume_ratio <= 1.25
+    )
+
+
+def silver_late_warming_stretched_dragon_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _audited_setup_family(evidence) != DRAGON_PULLBACK_LANE:
+        return False
+    if str(evidence.get("timing_window") or "") != "after_silver_late":
+        return False
+    if str(evidence.get("market_phase") or "") != "warming":
+        return False
+    support_type = str(evidence.get("support_type") or "")
+    low_suction_days = _float_or_default(evidence.get("low_suction_days"), 0.0)
+    return_20d = _float_or_none(evidence.get("return_20d"))
+    ma20_distance = _float_or_none(evidence.get("ma20_distance_pct"))
+    ma_convergence = _float_or_none(evidence.get("ma_convergence_pct"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    return bool(
+        support_type == "ma5_reclaim"
+        and low_suction_days <= 2.0
+        and return_20d is not None
+        and return_20d >= 15.0
+        and ma20_distance is not None
+        and ma20_distance >= 4.5
+        and ma_convergence is not None
+        and ma_convergence >= 9.5
+        and volume_ratio is not None
+        and volume_ratio <= 1.45
+    )
+
+
+def silver_late_oversold_stretched_shrink_body_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _setup_family(evidence) != OVERSOLD_REBOUND_LANE:
+        return False
+    if str(evidence.get("timing_window") or "") != "after_silver_late":
+        return False
+    ma5_distance = _float_or_none(evidence.get("ma5_distance_pct"))
+    body = _float_or_none(evidence.get("body_pct"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    return bool(
+        ma5_distance is not None
+        and ma5_distance >= 2.0
+        and body is not None
+        and body >= 2.0
+        and (
+            (volume_ratio is not None and volume_ratio <= 0.95)
+            or (close_location is not None and close_location >= 0.85)
+        )
+    )
+
+
+def silver_late_first_lift_stale_active_source_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _setup_family(evidence) != "low_suction_first_lift":
+        return False
+    if str(evidence.get("timing_window") or "") != "after_silver_late":
+        return False
+    timing_days = _float_or_none(evidence.get("nearest_timing_days"))
+    low_suction_days = _float_or_default(evidence.get("low_suction_days"), 0.0)
+    return bool(
+        bool(evidence.get("recent_limit_up_20d"))
+        and timing_days is not None
+        and timing_days < 40.0
+        and low_suction_days >= 5.0
+    )
+
+
+def gold_early_first_lift_no_active_source_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _setup_family(evidence) != "low_suction_first_lift":
+        return False
+    if str(evidence.get("timing_window") or "") != "after_gold_0_5":
+        return False
+    large_bull_count = _float_or_default(evidence.get("large_bull_count_20d"), 0.0)
+    return bool(_no_recent_active_source(evidence) and large_bull_count <= 1.0)
+
+
+def gold_early_oversold_no_active_low_close_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _setup_family(evidence) != OVERSOLD_REBOUND_LANE:
+        return False
+    if str(evidence.get("timing_window") or "") != "after_gold_0_5":
+        return False
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    return bool(
+        _no_recent_active_source(evidence)
+        and close_location is not None
+        and close_location <= 0.35
+    )
+
+
 def dragon_pullback_quality_filter_reason(candidate: Any) -> str | None:
     evidence = getattr(candidate, "evidence", {}) or {}
     if evidence.get("retreat_momentum_board_survival_source"):
         return None
+    if gold_late_overheated_dragon_decay(candidate):
+        return "gold_late_overheated_dragon_decay"
+    if gold_late_high_close_exhaustion_decay(candidate):
+        return "gold_late_high_close_exhaustion_decay"
+    if gold_late_wide_ma_volume_churn_decay(candidate):
+        return "gold_late_wide_ma_volume_churn_decay"
+    if gold_late_uptrend_extreme_stretch_decay(candidate):
+        return "gold_late_uptrend_extreme_stretch_decay"
+    if gold_late_overlap_unconfirmed_highclose_decay(candidate):
+        return "gold_late_overlap_unconfirmed_highclose_decay"
+    if gold_late_overlap_late_pullback_highclose_decay(candidate):
+        return "gold_late_overlap_late_pullback_highclose_decay"
+    if gold_late_first_lift_other_confirmed_exhaustion_decay(candidate):
+        return "gold_late_first_lift_other_confirmed_exhaustion_decay"
+    if gold_late_rotation_highclose_decay(candidate):
+        return "gold_late_rotation_highclose_decay"
+    if gold_late_overlap_unconfirmed_short_reclaim_decay(candidate):
+        return "gold_late_overlap_unconfirmed_short_reclaim_decay"
+    if gold_late_dragon_no_active_short_reclaim_decay(candidate):
+        return "gold_late_dragon_no_active_short_reclaim_decay"
+    if gold_late_overlap_retreat_lowclose_decay(candidate):
+        return "gold_late_overlap_retreat_lowclose_decay"
+    if gold_late_overlap_rotation_weak_washout_decay(candidate):
+        return "gold_late_overlap_rotation_weak_washout_decay"
+    if gold_late_first_lift_rotation_push_decay(candidate):
+        return "gold_late_first_lift_rotation_push_decay"
+    if gold_late_first_lift_no_active_push_decay(candidate):
+        return "gold_late_first_lift_no_active_push_decay"
+    if gold_late_uptrend_no_active_long_pullback_decay(candidate):
+        return "gold_late_uptrend_no_active_long_pullback_decay"
+    if silver_late_overlap_rotation_decay(candidate):
+        return "silver_late_overlap_rotation_decay"
+    if silver_late_overlap_unconfirmed_midclose_decay(candidate):
+        return "silver_late_overlap_unconfirmed_midclose_decay"
+    if silver_late_midclose_ma5_reclaim_decay(candidate):
+        return "silver_late_midclose_ma5_reclaim_decay"
+    if silver_6_20_exhausted_lowclose_decay(candidate):
+        return "silver_6_20_exhausted_lowclose_decay"
+    if gold_late_retreat_no_buildup_decay(candidate):
+        return "gold_late_retreat_no_buildup_decay"
+    if silver_late_warming_stretched_dragon_decay(candidate):
+        return "silver_late_warming_stretched_dragon_decay"
+    if silver_late_oversold_stretched_shrink_body_decay(candidate):
+        return "silver_late_oversold_stretched_shrink_body_decay"
+    if silver_late_first_lift_stale_active_source_decay(candidate):
+        return "silver_late_first_lift_stale_active_source_decay"
+    if gold_early_first_lift_no_active_source_decay(candidate):
+        return "gold_early_first_lift_no_active_source_decay"
+    if gold_early_oversold_no_active_low_close_decay(candidate):
+        return "gold_early_oversold_no_active_low_close_decay"
     if stale_active_weak_decay_pullback(candidate):
         return "stale_active_weak_decay_pullback"
     if old_low_suction_strong_leg_normal_volume(candidate):
@@ -728,6 +1344,22 @@ def _float_or_none(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _no_recent_active_source(evidence: dict[str, Any]) -> bool:
+    return not bool(evidence.get("recent_limit_up_20d")) and _float_or_default(evidence.get("near_limit_up_count_20d"), 0.0) <= 0.0
+
+
+def _audited_setup_family(evidence: dict[str, Any]) -> str:
+    setup_family = str(evidence.get("setup_family") or "")
+    entry_family = str(evidence.get("entry_family") or "")
+    setup = str(evidence.get("entry_setup") or evidence.get("setup_type") or "")
+    low_suction_days = _float_or_default(evidence.get("low_suction_days"), 0.0)
+    if setup_family == "dragon_low_suction_overlap":
+        return "dragon_low_suction_overlap"
+    if low_suction_days >= 3.0 and (entry_family == DRAGON_PULLBACK_LANE or setup_family == DRAGON_PULLBACK_LANE or setup == DRAGON_PULLBACK_LANE):
+        return "dragon_low_suction_overlap"
+    return _setup_family(evidence)
 
 
 def _setup_family(evidence: dict[str, Any]) -> str:
@@ -891,6 +1523,55 @@ def _silver_rotation_flat_base_low_suction(
         and theme_rank <= 3.0
         and sector_heat >= 48.0
     )
+
+
+def _silver_pressure_fresh_low_suction_turn(
+    evidence: dict[str, Any],
+    *,
+    setup: str,
+    timing: str,
+    phase: str,
+) -> tuple[str, str, float] | None:
+    if timing not in {"after_silver_6_20", "after_silver_late"} or phase != "retreat":
+        return None
+
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    ret20 = _float_or_none(evidence.get("return_20d"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    volume = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    low_days = _float_or_default(evidence.get("low_suction_days"), 0.0)
+    pullback_days = _float_or_default(evidence.get("pullback_days"), 0.0)
+    launch_bucket = str(evidence.get("low_suction_launch_quality_bucket") or "")
+    frontrow_rank = _float_or_none(evidence.get("frontrow_sector_rank_return"))
+    if None in {latest_change, ret20, close_location, volume}:
+        return None
+
+    if (
+        setup == "low_suction_first_lift"
+        and 3.0 <= low_days <= 5.0
+        and 5.0 <= pullback_days <= 9.0
+        and latest_change >= 2.0
+        and ret20 <= 16.0
+        and close_location >= 0.55
+        and 0.70 <= volume <= 1.30
+        and launch_bucket in {"balanced_first_lift", "repeated_launch", "high_close_launch", "thin_volume_launch"}
+    ):
+        return ("silver_pressure_fresh_first_lift_turn", "低吸首启：银后压力新鲜转强", 8.0)
+
+    if (
+        setup == "low_suction_buildup"
+        and 3.0 <= low_days <= 4.0
+        and 5.0 <= pullback_days <= 8.0
+        and latest_change >= 2.0
+        and ret20 <= 12.0
+        and close_location >= 0.35
+        and 0.80 <= volume <= 1.30
+        and frontrow_rank is not None
+        and frontrow_rank <= 120.0
+    ):
+        return ("silver_pressure_fresh_buildup_turn", "低吸蓄势：银后压力短周期转强", 7.0)
+
+    return None
 
 
 def _gold_late_stealth_low_base_crawl(

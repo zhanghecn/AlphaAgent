@@ -7,18 +7,19 @@ import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
   backtestValidationGridCsvUrl,
-  fetchBacktestCandidateTradeQualityReport,
   fetchBacktestExecutionModelComparison,
   fetchBacktestFactorAudit,
   fetchBacktestPerformanceAttributionReport,
-  type PhaseStrategyFamilyMatrixRow,
   fetchBacktestPhaseStrategyFamilyMatrix,
   fetchBacktestReport,
   fetchBacktestSetupMarketExitAudit,
   fetchBacktestTopCandidateAudit,
   fetchBacktestValidationGrid,
+  type CandidateTradeQualityReport,
+  type PhaseStrategyFamilyMatrixRow,
   type CandidateTradeQualityBucket,
   type CandidateTradeQualityDailySummary,
+  type CandidateTradeQualityRankLimitMatrixRow,
   type CandidateTradeQualitySample,
   type BacktestPerformanceExitReasonRow,
   type BacktestPerformanceTradeDelta,
@@ -349,7 +350,7 @@ export function CandidateTradeQualityPanel({
   report,
   isLoading,
 }: {
-  report?: Awaited<ReturnType<typeof fetchBacktestCandidateTradeQualityReport>>;
+  report?: CandidateTradeQualityReport;
   isLoading?: boolean;
 }) {
   if (!report && !isLoading) return null;
@@ -362,13 +363,32 @@ export function CandidateTradeQualityPanel({
 
   const summary = report.summary;
   const coverage = report.coverage ?? {};
+  const hasRankLimitMatrices = Boolean(
+    report.by_setup_family_rank_limit?.length ||
+    report.by_timing_window_rank_limit?.length ||
+    report.by_timing_phase_rank_limit?.length ||
+    report.by_setup_x_timing_rank_limit?.length ||
+    report.by_month_rank_limit?.length ||
+    report.by_month_timing_window_rank_limit?.length ||
+    report.by_month_timing_phase_rank_limit?.length ||
+    report.by_setup_month_timing_rank_limit?.length ||
+    report.by_setup_month_timing_phase_rank_limit?.length ||
+    report.by_evaluation_window_rank_limit?.length
+  );
   const hasBuckets = Boolean(
+    hasRankLimitMatrices ||
     report.by_rank_limit?.length ||
     report.by_daily_rank_window?.length ||
     report.by_rank_bucket?.length ||
     report.by_score_bucket?.length ||
     report.by_setup_family?.length ||
     report.by_market_phase?.length ||
+    report.by_timing_window?.length ||
+    report.by_timing_phase?.length ||
+    report.by_setup_x_timing?.length ||
+    report.by_month?.length ||
+    report.by_evaluation_window?.length ||
+    report.by_d1_outcome?.length ||
     report.by_exit_reason?.length
   );
   const hasSamples = Boolean(report.worst_samples?.length || report.best_samples?.length);
@@ -377,13 +397,13 @@ export function CandidateTradeQualityPanel({
     <div className="space-y-3 rounded-lg border p-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <div className="text-sm font-medium">候选独立买卖质量</div>
+          <div className="text-sm font-medium">尾盘候选 D+1 验证</div>
           <div className="mt-1 text-xs text-muted-foreground">
-            每个信号日的候选按排名独立测算，D+1 开盘买入、当前卖点卖出；和组合成交约束解耦。这里不是组合收益。
+            全历史每个交易日只评估 Top5/Top10/Top20，买入价按 D 日信号收盘价，主胜率和主收益看 D+1 收盘；D+2/D+3 只看是否值得格局。
           </div>
         </div>
         <div className="text-xs text-muted-foreground">
-          Top{report.rank_limit ?? 100} / 样本上限 {report.sample_limit ?? 500}
+          Top5/Top10/Top20 / 样本上限 {report.sample_limit ?? 500}
         </div>
       </div>
 
@@ -391,19 +411,19 @@ export function CandidateTradeQualityPanel({
         <InfoCell label="候选样本" value={formatNumber(numberValue(coverage.sample_count) ?? numberValue(coverage.daily_candidate_trade_count) ?? summary?.sample_count, 0)} />
         <InfoCell label="纳入排名" value={formatNumber(numberValue(coverage.rank_limited_sample_count) ?? summary?.sample_count, 0)} />
         <InfoCell label="可评价" value={formatNumber(summary?.evaluated_count, 0)} />
-        <InfoCell label="年化参考" value={formatPct(summary?.annual_return_pct)} />
-        <InfoCell label="胜率" value={formatRatioPct(summary?.win_rate)} />
-        <InfoCell label="平均收益" value={formatPct(summary?.average_return_pct)} />
-        <InfoCell label="平均最大回撤" value={formatPct(summary?.average_max_drawdown_pct)} />
-        <InfoCell label="平均持有" value={formatHoldingDays(summary?.average_holding_days)} />
+        <InfoCell label="D+1胜率" value={formatRatioPct(summary?.win_rate)} />
+        <InfoCell label="D+1质量胜率" value={formatRatioPct(summary?.quality_win_rate)} />
+        <InfoCell label="D+1平均收益" value={formatPct(summary?.average_return_pct)} />
+        <InfoCell label="D+1接近涨停" value={formatRatioPct(summary?.d1_near_limit_up_rate)} />
+        <InfoCell label="D+2/D+3格局" value={formatRatioPct(summary?.hold_to_d3_worthwhile_rate)} />
       </div>
 
       <CandidateTradeQualityYearlyTable rows={report.yearly ?? []} />
 
       <div className="grid gap-3 text-sm md:grid-cols-4">
-        <InfoCell label="缺失执行" value={formatNumber(numberValue(coverage.missing_count), 0)} />
+        <InfoCell label="缺失D+1" value={formatNumber(numberValue(coverage.missing_count), 0)} />
         <InfoCell label="无D+1日线" value={formatNumber(numberValue(coverage.no_execute_bar_count), 0)} />
-        <InfoCell label="涨停开盘阻塞" value={formatNumber(numberValue(coverage.limit_up_open_blocked_count), 0)} />
+        <InfoCell label="D+1大跌" value={formatNumber(summary?.d1_big_drop_count, 0)} />
         <InfoCell label="来源候选" value={formatNumber(numberValue(coverage.source_candidate_count), 0)} />
       </div>
 
@@ -414,18 +434,32 @@ export function CandidateTradeQualityPanel({
       ) : null}
 
       {hasBuckets ? (
-        <div className="grid gap-3 lg:grid-cols-2">
-          <CandidateTradeQualityBucketTable title="每日累计TopN" rows={report.by_rank_limit} bucketKey="rank_limit" />
-          <CandidateTradeQualityBucketTable title="每日排名段" rows={report.by_daily_rank_window ?? report.by_rank_bucket} bucketKey={report.by_daily_rank_window?.length ? "daily_rank_window" : "rank_bucket"} />
-          <CandidateTradeQualityBucketTable title="按分数段" rows={report.by_score_bucket} bucketKey="score_bucket" />
-          <CandidateTradeQualityBucketTable title="按 setup" rows={report.by_setup_family} bucketKey="setup_family" />
-          <CandidateTradeQualityBucketTable title="按行情阶段" rows={report.by_market_phase} bucketKey="market_phase" />
+        <div className="grid gap-3">
+          <CandidateTradeQualityBucketTable title="每日累计Top5/10/20" rows={report.by_rank_limit} bucketKey="rank_limit" />
+          <div className="grid gap-3 xl:grid-cols-2">
+            <CandidateTradeQualityRankLimitMatrixTable title="买点区域 Top5/10/20可靠性" rows={report.by_setup_family_rank_limit} bucketKey="setup_family" />
+            <CandidateTradeQualityRankLimitMatrixTable title="金银手指窗口 Top5/10/20可靠性" rows={report.by_timing_window_rank_limit} bucketKey="timing_window" />
+            <CandidateTradeQualityRankLimitMatrixTable title="金银窗口×行情阶段" rows={report.by_timing_phase_rank_limit} bucketKey="timing_phase" />
+            <CandidateTradeQualityRankLimitMatrixTable title="买点区域×金银窗口" rows={report.by_setup_x_timing_rank_limit} bucketKey="setup_timing_bucket" />
+            <CandidateTradeQualityRankLimitMatrixTable title="按月份评审" rows={report.by_month_rank_limit} bucketKey="month" />
+            <CandidateTradeQualityRankLimitMatrixTable title="月份×金银窗口" rows={report.by_month_timing_window_rank_limit} bucketKey="month_timing_window" />
+            <CandidateTradeQualityRankLimitMatrixTable title="月份×金银窗口×行情阶段" rows={report.by_month_timing_phase_rank_limit} bucketKey="month_timing_phase" />
+            <CandidateTradeQualityRankLimitMatrixTable title="买点区域×月份×金银窗口" rows={report.by_setup_month_timing_rank_limit} bucketKey="setup_month_timing_bucket" />
+            <CandidateTradeQualityRankLimitMatrixTable title="买点区域×月份×金银窗口×行情阶段" rows={report.by_setup_month_timing_phase_rank_limit} bucketKey="setup_month_timing_phase_bucket" />
+            <CandidateTradeQualityRankLimitMatrixTable title="重点区间评审" rows={report.by_evaluation_window_rank_limit} bucketKey="evaluation_window" />
+          </div>
+          <div className="grid gap-3 lg:grid-cols-2">
+            <CandidateTradeQualityBucketTable title="每日排名段" rows={report.by_daily_rank_window ?? report.by_rank_bucket} bucketKey={report.by_daily_rank_window?.length ? "daily_rank_window" : "rank_bucket"} />
+            <CandidateTradeQualityBucketTable title="按分数段" rows={report.by_score_bucket} bucketKey="score_bucket" />
+            <CandidateTradeQualityBucketTable title="按行情阶段" rows={report.by_market_phase} bucketKey="market_phase" />
+            <CandidateTradeQualityBucketTable title="D+1涨跌形态" rows={report.by_d1_outcome} bucketKey="d1_outcome" />
+          </div>
         </div>
       ) : null}
 
-      <CandidateTradeQualityDailyTable rows={(report.daily_summaries ?? []).slice(0, 12)} topN={report.rank_limit ?? 100} />
+      <CandidateTradeQualityDailyTable rows={(report.daily_summaries ?? []).slice(0, 12)} />
 
-      <CandidateTradeQualityBucketTable title="按卖出原因" rows={report.by_exit_reason} bucketKey="exit_reason" />
+      <CandidateTradeQualityBucketTable title="按标签出口" rows={report.by_exit_reason} bucketKey="exit_reason" />
 
       {hasSamples ? (
         <div className="grid gap-3 xl:grid-cols-2">
@@ -435,7 +469,7 @@ export function CandidateTradeQualityPanel({
       ) : null}
 
       <div className="text-xs text-muted-foreground">
-        {report.note ?? "后验收益、MFE/MAE 只作为报告标签，不进入信号评分；候选质量和真实组合收益需要分开判断。"}
+        {report.note ?? "D+1 收益是主口径；D+2/D+3、MFE/MAE 只作为后验标签，不进入信号评分。"}
       </div>
     </div>
   );
@@ -444,7 +478,7 @@ export function CandidateTradeQualityPanel({
 function CandidateTradeQualityYearlyTable({
   rows,
 }: {
-  rows: NonNullable<Awaited<ReturnType<typeof fetchBacktestCandidateTradeQualityReport>>["yearly"]>;
+  rows: NonNullable<CandidateTradeQualityReport["yearly"]>;
 }) {
   if (!rows.length) return null;
   return (
@@ -661,11 +695,14 @@ function CandidateTradeQualityBucketTable({
           <TableRow>
             <TableHead>分桶</TableHead>
             <TableHead className="text-right">样本</TableHead>
-            <TableHead className="text-right">胜率</TableHead>
-            <TableHead className="text-right">均值</TableHead>
+            <TableHead className="text-right">D+1胜率</TableHead>
+            <TableHead className="text-right">质量胜率</TableHead>
+            <TableHead className="text-right">D+1均值</TableHead>
             <TableHead className="text-right">中位数</TableHead>
-            <TableHead className="text-right">回撤</TableHead>
-            <TableHead className="text-right">持有</TableHead>
+            <TableHead className="text-right">D+1回撤</TableHead>
+            <TableHead className="text-right">接近涨停</TableHead>
+            <TableHead className="text-right">大跌</TableHead>
+            <TableHead className="text-right">D2/D3格局</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -674,6 +711,7 @@ function CandidateTradeQualityBucketTable({
               <TableCell className="font-medium">{candidateQualityBucketLabel(row, bucketKey)}</TableCell>
               <TableCell className="text-right tabular-nums">{formatNumber(row.sample_count, 0)}</TableCell>
               <TableCell className="text-right tabular-nums">{formatRatioPct(row.win_rate)}</TableCell>
+              <TableCell className="text-right tabular-nums">{formatRatioPct(row.quality_win_rate)}</TableCell>
               <TableCell className={cn("text-right tabular-nums", priceColorClass(row.average_return_pct))}>
                 {formatPct(row.average_return_pct)}
               </TableCell>
@@ -683,7 +721,9 @@ function CandidateTradeQualityBucketTable({
               <TableCell className={cn("text-right tabular-nums", priceColorClass(row.average_max_drawdown_pct))}>
                 {formatPct(row.average_max_drawdown_pct)}
               </TableCell>
-              <TableCell className="text-right tabular-nums">{formatHoldingDays(row.average_holding_days)}</TableCell>
+              <TableCell className="text-right tabular-nums">{formatRatioPct(row.d1_near_limit_up_rate)}</TableCell>
+              <TableCell className="text-right tabular-nums">{formatRatioPct(row.d1_big_drop_rate)}</TableCell>
+              <TableCell className="text-right tabular-nums">{formatRatioPct(row.hold_to_d3_worthwhile_rate)}</TableCell>
             </TableRow>
           ))}
         </TableBody>
@@ -692,12 +732,62 @@ function CandidateTradeQualityBucketTable({
   );
 }
 
+function CandidateTradeQualityRankLimitMatrixTable({
+  title,
+  rows,
+  bucketKey,
+}: {
+  title: string;
+  rows?: CandidateTradeQualityRankLimitMatrixRow[];
+  bucketKey: keyof CandidateTradeQualityRankLimitMatrixRow;
+}) {
+  if (!rows?.length) return null;
+  return (
+    <div className="overflow-hidden rounded-md border">
+      <div className="border-b px-3 py-2 text-sm font-medium">{title}</div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>分桶</TableHead>
+            <TableHead className="text-right">Top5</TableHead>
+            <TableHead className="text-right">Top10</TableHead>
+            <TableHead className="text-right">Top20</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row, index) => (
+            <TableRow key={`${title}-${candidateQualityMatrixKey(row, bucketKey)}-${index}`}>
+              <TableCell className="font-medium">{candidateQualityMatrixLabel(row, bucketKey)}</TableCell>
+              <CandidateTradeQualityRankLimitCell summary={row.top5} />
+              <CandidateTradeQualityRankLimitCell summary={row.top10} />
+              <CandidateTradeQualityRankLimitCell summary={row.top20} />
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+function CandidateTradeQualityRankLimitCell({ summary }: { summary?: CandidateTradeQualityRankLimitMatrixRow["top10"] }) {
+  return (
+    <TableCell className="text-right tabular-nums">
+      <div>{formatNumber(summary?.sample_count, 0)} 样本</div>
+      <div>
+        {formatRatioPct(summary?.win_rate)}
+        <span className={cn("ml-2", priceColorClass(summary?.average_return_pct))}>{formatPct(summary?.average_return_pct)}</span>
+      </div>
+      <div className="text-xs text-muted-foreground">
+        质{formatRatioPct(summary?.quality_win_rate)} / 跌{formatRatioPct(summary?.d1_big_drop_rate)}
+      </div>
+    </TableCell>
+  );
+}
+
 function CandidateTradeQualityDailyTable({
   rows,
-  topN,
 }: {
   rows: CandidateTradeQualityDailySummary[];
-  topN: number;
 }) {
   if (!rows.length) return null;
   return (
@@ -708,9 +798,9 @@ function CandidateTradeQualityDailyTable({
           <TableRow>
             <TableHead>信号日</TableHead>
             <TableHead className="text-right">候选/可评</TableHead>
+            <TableHead className="text-right">Top5</TableHead>
             <TableHead className="text-right">Top10</TableHead>
             <TableHead className="text-right">Top20</TableHead>
-            <TableHead className="text-right">Top{topN}</TableHead>
             <TableHead>最好候选</TableHead>
             <TableHead>最差候选</TableHead>
           </TableRow>
@@ -722,9 +812,9 @@ function CandidateTradeQualityDailyTable({
               <TableCell className="text-right tabular-nums">
                 {formatNumber(row.candidate_count, 0)} / {formatNumber(row.evaluated_count, 0)}
               </TableCell>
+              <CandidateTradeQualityDailyMetricCell summary={row.top5} />
               <CandidateTradeQualityDailyMetricCell summary={row.top10} />
               <CandidateTradeQualityDailyMetricCell summary={row.top20} />
-              <CandidateTradeQualityDailyMetricCell summary={row.topn} />
               <CandidateTradeQualityExtremeCell row={row.best_candidate} />
               <CandidateTradeQualityExtremeCell row={row.worst_candidate} />
             </TableRow>
@@ -742,6 +832,7 @@ function CandidateTradeQualityDailyMetricCell({ summary }: { summary?: Candidate
       <div className={cn("text-xs", priceColorClass(summary?.average_return_pct))}>
         {formatPct(summary?.average_return_pct)}
       </div>
+      <div className="text-xs text-muted-foreground">{formatRatioPct(summary?.quality_win_rate)}</div>
     </TableCell>
   );
 }
@@ -755,7 +846,7 @@ function CandidateTradeQualityExtremeCell({ row }: { row?: CandidateTradeQuality
         {row.rank != null ? ` #${row.rank}` : ""}
       </div>
       <div className={cn("text-xs tabular-nums", priceColorClass(row.return_pct))}>
-        {formatPct(row.return_pct)} · {candidateQualityExitReasonLabel(row.exit_reason)}
+        {formatPct(row.return_pct)} · {row.d1_limit_up ? "涨停" : row.d1_near_limit_up ? "近涨停" : candidateQualityExitReasonLabel(row.exit_reason)}
       </div>
     </TableCell>
   );
@@ -777,11 +868,12 @@ function CandidateTradeQualitySampleTable({
           <TableRow>
             <TableHead>信号</TableHead>
             <TableHead>候选</TableHead>
-            <TableHead>簇</TableHead>
-            <TableHead>执行</TableHead>
-            <TableHead className="text-right">收益</TableHead>
-            <TableHead className="text-right">回撤/MFE</TableHead>
-            <TableHead>卖出</TableHead>
+            <TableHead>买点区域</TableHead>
+            <TableHead>入场/D+1</TableHead>
+            <TableHead className="text-right">D+1收益</TableHead>
+            <TableHead className="text-right">D+1回撤/冲高</TableHead>
+            <TableHead className="text-right">D+2/D+3</TableHead>
+            <TableHead>标签</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -798,23 +890,27 @@ function CandidateTradeQualitySampleTable({
                 />
               </TableCell>
               <TableCell>
-                <div className="whitespace-nowrap">{candidateQualityClusterText(row)}</div>
                 <div className="text-xs text-muted-foreground">{row.setup_family_label ?? setupFamilyLabel(row.setup_family)}</div>
+                <div className="text-xs text-muted-foreground">{row.timing_window_label ?? row.timing_window ?? "--"}</div>
               </TableCell>
               <TableCell>
-                <div className="whitespace-nowrap">{row.entry_execute_date ?? "--"} 买</div>
-                <div className="whitespace-nowrap text-xs text-muted-foreground">{row.exit_execute_date ?? "未卖出"} 卖</div>
+                <div className="whitespace-nowrap">{row.tail_entry_date ?? row.entry_execute_date ?? "--"} 收盘买</div>
+                <div className="whitespace-nowrap text-xs text-muted-foreground">{row.d1_trade_date ?? row.exit_execute_date ?? "--"} 收盘验</div>
               </TableCell>
               <TableCell className={cn("text-right tabular-nums", priceColorClass(row.return_pct))}>
                 {formatPct(row.return_pct)}
               </TableCell>
               <TableCell className="text-right tabular-nums">
-                <div className={priceColorClass(row.max_drawdown_pct)}>{formatPct(row.max_drawdown_pct)}</div>
-                <div className={cn("text-xs", priceColorClass(row.max_runup_pct))}>{formatPct(row.max_runup_pct)}</div>
+                <div className={priceColorClass(row.d1_low_drawdown_pct ?? row.max_drawdown_pct)}>{formatPct(row.d1_low_drawdown_pct ?? row.max_drawdown_pct)}</div>
+                <div className={cn("text-xs", priceColorClass(row.d1_high_runup_pct ?? row.max_runup_pct))}>{formatPct(row.d1_high_runup_pct ?? row.max_runup_pct)}</div>
+              </TableCell>
+              <TableCell className="text-right tabular-nums">
+                <div className={priceColorClass(row.d2_close_return_pct)}>{formatPct(row.d2_close_return_pct)}</div>
+                <div className={cn("text-xs", priceColorClass(row.d3_close_return_pct))}>{formatPct(row.d3_close_return_pct)}</div>
               </TableCell>
               <TableCell>
-                <div>{candidateQualityExitReasonLabel(row.exit_reason)}</div>
-                <div className="text-xs text-muted-foreground">{row.market_phase_label ?? phaseLabel(row.market_phase)}</div>
+                <div>{candidateQualityD1Label(row)}</div>
+                <div className="text-xs text-muted-foreground">{candidateQualityHoldLabel(row)}</div>
               </TableCell>
             </TableRow>
           ))}
@@ -1012,6 +1108,10 @@ function setupFamilyLabel(value?: string | null) {
     low_suction_first_lift: "低吸首启",
     low_suction_buildup: "低吸蓄势",
     dragon_low_suction_overlap: "龙回头+低吸",
+    bottom_reclaim: "超跌反弹-底部收复",
+    secondary_breakout_confirm: "超跌反弹-二次确认",
+    oversold_rebound_start: "超跌反弹-启动",
+    retreat_momentum_source: "退潮高低切",
     unknown: "未归类",
   };
   return labels[String(value || "unknown")] ?? String(value || "未归类");
@@ -2059,10 +2159,6 @@ function formatRatioPct(value?: number | null) {
   return value == null ? "--" : formatPct(value);
 }
 
-function formatHoldingDays(value?: number | null) {
-  return value == null ? "--" : `${formatNumber(value, 1)}天`;
-}
-
 function ratioToPctDelta(value?: number | null) {
   return value == null ? null : value * 100;
 }
@@ -2095,6 +2191,19 @@ function candidateQualityBucketLabel(row: CandidateTradeQualityBucket, bucketKey
   if (bucketKey === "setup_family") return setupFamilyLabel(value);
   if (bucketKey === "market_phase") return phaseLabel(value);
   if (bucketKey === "exit_reason") return candidateQualityExitReasonLabel(value);
+  if (bucketKey === "d1_outcome") return candidateQualityD1OutcomeLabel(value);
+  return value;
+}
+
+function candidateQualityMatrixKey(row: CandidateTradeQualityRankLimitMatrixRow, bucketKey: keyof CandidateTradeQualityRankLimitMatrixRow) {
+  return String(row[bucketKey] ?? row.label ?? "unknown");
+}
+
+function candidateQualityMatrixLabel(row: CandidateTradeQualityRankLimitMatrixRow, bucketKey: keyof CandidateTradeQualityRankLimitMatrixRow) {
+  if (typeof row.label === "string" && row.label.trim()) return row.label;
+  const value = String(row[bucketKey] ?? "unknown");
+  if (bucketKey === "setup_family") return setupFamilyLabel(value);
+  if (bucketKey === "market_phase") return phaseLabel(value);
   return value;
 }
 
@@ -2105,24 +2214,47 @@ function candidateQualitySampleMeta(row: CandidateTradeQualitySample) {
   return parts.length ? parts.join(" / ") : undefined;
 }
 
-function candidateQualityClusterText(row: CandidateTradeQualitySample) {
-  const size = row.cluster_size == null ? "" : ` / ${row.cluster_size}天`;
-  if (row.cluster_start_date && row.cluster_end_date && row.cluster_start_date !== row.cluster_end_date) {
-    return `${row.cluster_start_date} - ${row.cluster_end_date}${size}`;
-  }
-  return `${row.cluster_start_date ?? row.entry_signal_date ?? "--"}${size}`;
-}
-
 function candidateQualityExitReasonLabel(value?: string | null) {
   const labels: Record<string, string> = {
     open: "仍持有",
     no_execute_bar: "无执行日线",
     limit_up_open_blocked: "涨停开盘阻塞",
+    d1_close_label: "D+1收盘验证",
     support_break: "跌破支撑",
     time_stop: "时间止损",
     take_profit: "止盈",
     trailing_stop: "回撤止盈",
     stop_loss: "止损",
+  };
+  return labels[String(value || "")] ?? String(value || "未归类");
+}
+
+function candidateQualityD1Label(row: CandidateTradeQualitySample) {
+  if (row.d1_limit_up) return "D+1涨停";
+  if (row.d1_near_limit_up) return "D+1接近涨停";
+  if (row.d1_big_drop) return "D+1大跌";
+  if (row.d1_quality_success) return "D+1质量上涨";
+  if ((row.return_pct ?? 0) > 0) return "D+1上涨";
+  if ((row.return_pct ?? 0) < 0) return "D+1下跌";
+  return candidateQualityExitReasonLabel(row.exit_reason);
+}
+
+function candidateQualityHoldLabel(row: CandidateTradeQualitySample) {
+  if (row.hold_to_d3_worthwhile === true) return "D+2/D+3可格局";
+  if (row.take_profit_next_day === true) return "次日止盈更优";
+  if (row.hold_to_d3_worthwhile === false) return "不宜格局";
+  return row.market_phase_label ?? phaseLabel(row.market_phase);
+}
+
+function candidateQualityD1OutcomeLabel(value?: string | null) {
+  const labels: Record<string, string> = {
+    d1_limit_up: "D+1涨停/封板代理",
+    d1_near_limit_up: "D+1接近涨停",
+    d1_close_ge5: "D+1收盘涨幅>=5%",
+    d1_big_drop: "D+1大跌",
+    d1_low_open_or_low_close: "D+1低开/低收",
+    d1_deep_intraday_drawdown: "D+1盘中深回撤",
+    d1_ordinary: "D+1普通波动",
   };
   return labels[String(value || "")] ?? String(value || "未归类");
 }

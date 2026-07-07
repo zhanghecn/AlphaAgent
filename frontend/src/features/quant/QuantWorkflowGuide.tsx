@@ -49,7 +49,7 @@ export function QuantWorkflowGuide({
       label: "回测",
       status: backtestCount > 0 ? "ready" : "pending",
       value: backtestCount > 0 ? `${backtestCount}份` : "未运行",
-      note: "历史研究先统计每日Top20候选独立D+1开盘买入后的收益胜率；组合买卖只作为执行诊断。",
+      note: "历史研究先统计每日Top5/Top10/Top20候选按D日收盘买入、D+1收盘验证的胜率收益；组合买卖只作为执行诊断。",
     },
     {
       label: "持仓",

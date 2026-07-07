@@ -19,6 +19,36 @@ _JOB_LOCK = threading.Lock()
 _JOBS: dict[str, dict[str, Any]] = {}
 _LATEST_JOB_ID: str | None = None
 _JOB_KEEP_LIMIT = 20
+_COMPACT_CANDIDATE_QUALITY_LIST_KEYS = (
+    "by_rank_bucket",
+    "by_rank_limit",
+    "by_daily_rank_window",
+    "by_score_bucket",
+    "by_setup_family",
+    "by_market_phase",
+    "by_timing_window",
+    "by_timing_phase",
+    "by_setup_x_timing",
+    "by_month",
+    "by_evaluation_window",
+    "by_setup_family_rank_limit",
+    "by_market_phase_rank_limit",
+    "by_timing_window_rank_limit",
+    "by_timing_phase_rank_limit",
+    "by_setup_x_timing_rank_limit",
+    "by_month_rank_limit",
+    "by_month_timing_window_rank_limit",
+    "by_month_timing_phase_rank_limit",
+    "by_setup_month_timing_rank_limit",
+    "by_setup_month_timing_phase_rank_limit",
+    "by_evaluation_window_rank_limit",
+    "by_d1_outcome",
+    "by_exit_reason",
+    "yearly",
+    "daily_summaries",
+    "best_samples",
+    "worst_samples",
+)
 
 
 class QuantResearchJobError(RuntimeError):
@@ -41,6 +71,8 @@ def start_research_run(
     strict_entry: bool = True,
     execution_model: str = "legacy_next_open",
     force_refresh: bool = False,
+    persist_signal_details: bool = False,
+    create_replay: bool = False,
 ) -> dict[str, Any]:
     """Start the full public research workflow in a daemon thread."""
 
@@ -75,6 +107,8 @@ def start_research_run(
         "strict_entry": bool(strict_entry),
         "execution_model": execution_model,
         "force_refresh": bool(force_refresh),
+        "persist_signal_details": bool(persist_signal_details),
+        "create_replay": bool(create_replay),
     }
     job = {
         "id": run_id,
@@ -144,6 +178,8 @@ def _run_research_job(run_id: str, start: date | None, end: date | None, params:
             auto_portfolio=bool(params["auto_portfolio"]),
             included_boards=params["included_boards"],
             force_refresh=bool(params.get("force_refresh")),
+            persist_signal_details=bool(params.get("persist_signal_details")),
+            create_replay=bool(params.get("create_replay")),
             progress=_screen_progress(run_id),
         )
         _patch_job(
@@ -244,19 +280,27 @@ def _copy_job(job: dict[str, Any]) -> dict[str, Any]:
 
 
 def _compact_candidate_trade_quality(result: dict[str, Any]) -> dict[str, Any]:
-    return {
+    payload = {
         "status": result.get("status"),
         "start_date": result.get("start_date"),
         "end_date": result.get("end_date"),
         "strategy_id": result.get("strategy_id"),
         "strategy_version": result.get("strategy_version"),
         "rank_limit": result.get("rank_limit"),
+        "sample_limit": result.get("sample_limit"),
         "entry_selection": result.get("entry_selection"),
+        "entry_model": result.get("entry_model"),
+        "primary_metric": result.get("primary_metric"),
         "method": result.get("method"),
         "summary": result.get("summary") if isinstance(result.get("summary"), dict) else {},
         "coverage": result.get("coverage") if isinstance(result.get("coverage"), dict) else {},
         "note": result.get("note"),
     }
+    for key in _COMPACT_CANDIDATE_QUALITY_LIST_KEYS:
+        value = result.get(key)
+        if isinstance(value, list):
+            payload[key] = value
+    return payload
 
 
 def _trim_jobs_locked() -> None:
