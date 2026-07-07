@@ -572,6 +572,7 @@ def test_eod_quant_research_batch_job_waits_for_completion(monkeypatch):
         poll_interval_seconds=0.01,
     )
 
+    assert calls[0]["start"].isoformat() == "2026-06-18"
     assert calls[0]["end"].isoformat() == "2026-06-18"
     assert calls[0]["candidate_limit"] == 20
     assert "initial_cash" not in calls[0]
@@ -582,6 +583,26 @@ def test_eod_quant_research_batch_job_waits_for_completion(monkeypatch):
     assert result["rows_written"] == 100
     assert result["backtest_id"] == 191
     assert any(event.get("stage") == "完成" for event in progress_events)
+
+
+def test_eod_quant_research_batch_job_preserves_explicit_start(monkeypatch):
+    calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(svc, "_latest_complete_daily_date_for_research", lambda: svc._parse_date("2026-06-18"))
+
+    def fake_start_research_run(**kwargs):
+        calls.append(kwargs)
+        return {"id": "research_1", "status": "succeeded", "screen_run": {}, "backtest": {}}
+
+    monkeypatch.setattr(svc.research_jobs, "start_research_run", fake_start_research_run)
+
+    svc._run_eod_quant_research_batch_job(
+        {"start": "2026-06-01", "end": "2026-06-18"},
+        poll_interval_seconds=0.01,
+    )
+
+    assert calls[0]["start"].isoformat() == "2026-06-01"
+    assert calls[0]["end"].isoformat() == "2026-06-18"
 
 
 def test_compact_latest_research_run_drops_full_candidate_items():

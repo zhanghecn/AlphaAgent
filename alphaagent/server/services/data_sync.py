@@ -2524,9 +2524,11 @@ def _run_eod_quant_research_batch_job(
                 "message": f"正在生成 {latest_complete_date.isoformat()} 真实候选并回测",
             }
         )
+    research_start = _parse_date(run_params.get("start") or run_params.get("start_date")) or latest_complete_date
+    research_end = _parse_date(run_params.get("end") or run_params.get("end_date")) or latest_complete_date
     research_run = research_jobs.start_research_run(
-        start=_parse_date(run_params.get("start") or run_params.get("start_date")),
-        end=_parse_date(run_params.get("end") or run_params.get("end_date")) or latest_complete_date,
+        start=research_start,
+        end=research_end,
         strategy_id=str(run_params.get("strategy") or screening.STRATEGY_ID),
         max_symbols=int(run_params.get("max_symbols") or 5000),
         recommendation_limit=int(run_params.get("recommendation_limit") or screening.DEFAULT_RECOMMENDATION_LIMIT),
