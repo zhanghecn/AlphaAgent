@@ -59,6 +59,7 @@ LIMIT_POOL_EVENT_SOURCE = "akshare.stock_ztb_em"
 STOCK_LIST_MAX_PAGES = 200
 SECTOR_MEMBER_MAX_PAGES = 100
 STOCK_DAILY_INCREMENTAL_REFRESH_DAYS = 5
+STOCK_DAILY_COMPLETE_COVERAGE_RATIO = 0.95
 SECTOR_DAILY_MIN_COVERAGE_TOTAL = 100
 SECTOR_DAILY_MIN_COVERAGE_RATIO = 0.8
 
@@ -476,6 +477,20 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_stock_business_segments_history",
         ],
     },
+    {
+        "id": "eod_finalize_2130",
+        "name": "晚间日线补全（21:30）",
+        "cron": "30 21 * * 1-5",
+        "action": "sync",
+        "enabled": True,
+        "concurrency": 8,
+        "job_ids": [
+            "sync_stock_daily_bars",
+            "sync_index_daily_bars",
+            "sync_sector_period_scores",
+            "eod_quant_research",
+        ],
+    },
 ]
 
 OBSOLETE_BATCH_SCHEDULE_IDS = {
@@ -705,7 +720,8 @@ class DataSyncRunner:
         self._report_progress("同步股票日 K 线", current=0, total=total_stocks)
 
         lock = threading.Lock()
-        counters = {"read": 0, "written": 0, "done": 0}
+        counters = {"read": 0, "written": 0, "done": 0, "timed_out": 0}
+        timed_out_symbols: set[str] = set()
 
         def _do_one(stock_row: dict[str, Any]) -> None:
             symbol = str(stock_row["symbol"])
@@ -716,6 +732,9 @@ class DataSyncRunner:
             try:
                 data = self.adapter.stock_bars(symbol, exchange, limit=limit, interval="1d", start_date=start_date)
             except Exception as exc:
+                with lock:
+                    if current_vts in timed_out_symbols:
+                        return
                 logger.debug("stock_bars(%s) failed: %s", symbol, exc)
                 with lock:
                     counters["done"] += 1
@@ -730,6 +749,9 @@ class DataSyncRunner:
                 )
                 return
             items = data.get("items") or []
+            with lock:
+                if current_vts in timed_out_symbols:
+                    return
             items = _fill_change_pct_from_close(items)
             written = _upsert_daily_bars(symbol, exchange, items)
             sample_items = [{**item, "vt_symbol": current_vts, "name": stock_name} for item in items[-3:]]
@@ -748,15 +770,44 @@ class DataSyncRunner:
                 sample_items=sample_items,
             )
 
+        def _on_timeout(stock_row: dict[str, Any]) -> None:
+            current_vts = vt_symbol(str(stock_row["symbol"]), str(stock_row["exchange"]))
+            stock_name = str(stock_row.get("name") or stock_row["symbol"])
+            with lock:
+                timed_out_symbols.add(current_vts)
+                counters["timed_out"] += 1
+                counters["done"] += 1
+                cur_done, cur_read, cur_written = counters["done"], counters["read"], counters["written"]
+            self._report_progress(
+                "读取股票日 K 线",
+                current=cur_done,
+                total=total_stocks,
+                current_label=f"{current_vts} {stock_name} 超时跳过",
+                rows_read=cur_read,
+                rows_written=cur_written,
+            )
+
         _bounded_parallel_map(
             _do_one,
             stock_rows,
             concurrency=self.concurrency,
             per_item_timeout=SYNC_PER_ITEM_TIMEOUT_SECONDS,
+            on_timeout=_on_timeout,
         )
 
+        coverage_cleanup = None
+        if _should_cleanup_partial_daily_sync(symbols, stock_limit, total_stocks):
+            coverage_cleanup = _discard_incomplete_latest_daily_bars(
+                _daily_sync_complete_min_symbol_count(total_stocks)
+            )
+
         logger.info("sync_stock_daily_bars: processed %d stocks", counters["done"])
-        return {"rows_read": counters["read"], "rows_written": counters["written"]}
+        result = {"rows_read": counters["read"], "rows_written": counters["written"]}
+        if counters["timed_out"]:
+            result["timed_out"] = counters["timed_out"]
+        if coverage_cleanup is not None:
+            result["coverage_cleanup"] = coverage_cleanup
+        return result
 
     def _run_sync_index_daily_bars(self, params: dict[str, Any]) -> dict[str, Any]:
         limit = int(params.get("limit", 500))
@@ -854,7 +905,8 @@ class DataSyncRunner:
         self._report_progress("同步股票分钟 K 线", current=0, total=total_stocks)
 
         lock = threading.Lock()
-        counters = {"read": 0, "written": 0, "done": 0}
+        counters = {"read": 0, "written": 0, "done": 0, "timed_out": 0}
+        timed_out_symbols: set[str] = set()
 
         def _do_one(stock_row: dict[str, Any]) -> None:
             symbol = str(stock_row["symbol"])
@@ -866,6 +918,9 @@ class DataSyncRunner:
             try:
                 data = self.adapter.stock_bars(symbol, exchange, limit=limit, interval=interval, start_date=adapter_start, end_date=end_date)
             except Exception as exc:
+                with lock:
+                    if current_vts in timed_out_symbols:
+                        return
                 logger.debug("stock_minute_bars(%s, %s) failed: %s", symbol, interval, exc)
                 with lock:
                     counters["done"] += 1
@@ -880,6 +935,9 @@ class DataSyncRunner:
                 )
                 return
             items = data.get("items") or []
+            with lock:
+                if current_vts in timed_out_symbols:
+                    return
             written = _upsert_minute_bars(symbol, exchange, items, interval, data.get("source", "akshare"))
             sample_items = [{**item, "vt_symbol": current_vts, "name": stock_name, "interval": interval} for item in items[-3:]]
             with lock:
@@ -897,11 +955,29 @@ class DataSyncRunner:
                 sample_items=sample_items,
             )
 
+        def _on_timeout(stock_row: dict[str, Any]) -> None:
+            current_vts = vt_symbol(str(stock_row["symbol"]), str(stock_row["exchange"]))
+            stock_name = str(stock_row.get("name") or stock_row["symbol"])
+            with lock:
+                timed_out_symbols.add(current_vts)
+                counters["timed_out"] += 1
+                counters["done"] += 1
+                cur_done, cur_read, cur_written = counters["done"], counters["read"], counters["written"]
+            self._report_progress(
+                "读取股票分钟 K 线",
+                current=cur_done,
+                total=total_stocks,
+                current_label=f"{current_vts} {stock_name} 超时跳过",
+                rows_read=cur_read,
+                rows_written=cur_written,
+            )
+
         _bounded_parallel_map(
             _do_one,
             stock_rows,
             concurrency=self.concurrency,
             per_item_timeout=SYNC_PER_ITEM_TIMEOUT_SECONDS,
+            on_timeout=_on_timeout,
         )
 
         logger.info("sync_stock_minute_bars: processed %d stocks", counters["done"])
@@ -911,6 +987,7 @@ class DataSyncRunner:
             "interval": interval,
             "rows_read": counters["read"],
             "rows_written": counters["written"],
+            "timed_out": counters["timed_out"],
         }
 
     def _run_sync_stock_minute_gap_bars(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2460,10 +2537,7 @@ def _run_eod_quant_research_batch_job(
         persist=bool(run_params.get("persist", True)),
         auto_portfolio=bool(run_params.get("auto_portfolio", True)),
         included_boards=run_params.get("included_boards"),
-        initial_cash=float(run_params.get("initial_cash") or 1_000_000),
-        max_positions=int(run_params.get("max_positions") or 10),
         candidate_limit=int(run_params.get("candidate_limit") or 20),
-        max_position_pct=float(run_params.get("max_position_pct") or 0.1),
         strict_entry=bool(run_params.get("strict_entry", True)),
         execution_model=str(run_params.get("execution_model") or "legacy_next_open"),
         force_refresh=bool(run_params.get("force_refresh", False)),
@@ -4999,6 +5073,52 @@ def _incremental_daily_start_date(date_value: Any, refresh_days: int) -> str | N
     except Exception:
         return None
     return (d - timedelta(days=refresh_days)).isoformat()
+
+
+def _should_cleanup_partial_daily_sync(symbols: list[str], stock_limit: int, total_stocks: int) -> bool:
+    """Only full-universe daily syncs may clean up partial cross-section dates."""
+
+    return not symbols and stock_limit <= 0 and total_stocks >= screening.MIN_COMPLETE_DAILY_SYMBOL_COUNT
+
+
+def _daily_sync_complete_min_symbol_count(total_stocks: int) -> int:
+    ratio_count = int(total_stocks * STOCK_DAILY_COMPLETE_COVERAGE_RATIO)
+    return max(screening.MIN_COMPLETE_DAILY_SYMBOL_COUNT, ratio_count)
+
+
+def _discard_incomplete_latest_daily_bars(min_symbol_count: int) -> dict[str, Any]:
+    """Remove a latest daily-bar date when the cross-section is still partial.
+
+    Public quote sources can expose the new trade date for only part of the
+    market during the evening. Keeping those rows makes MAX(trade_date) look
+    like a valid close, so full-universe syncs discard that date until a later
+    retry reaches the minimum cross-section coverage.
+    """
+
+    with session_scope() as session:
+        latest_trade_date = session.execute(select(func.max(schema.stock_daily_bars.c.trade_date))).scalar()
+        if latest_trade_date is None:
+            return {"status": "empty", "latest_trade_date": None, "min_symbol_count": int(min_symbol_count)}
+        latest_count = _stock_daily_symbol_count(session, latest_trade_date)
+        if latest_count >= min_symbol_count:
+            return {
+                "status": "complete",
+                "latest_trade_date": _iso_or_none(latest_trade_date),
+                "latest_symbol_count": latest_count,
+                "min_symbol_count": int(min_symbol_count),
+            }
+        latest_complete_date = _latest_complete_daily_date(session, min_symbol_count)
+        delete_result = session.execute(
+            schema.stock_daily_bars.delete().where(schema.stock_daily_bars.c.trade_date == latest_trade_date)
+        )
+        return {
+            "status": "discarded_incomplete",
+            "discarded_trade_date": _iso_or_none(latest_trade_date),
+            "discarded_symbol_count": latest_count,
+            "deleted_rows": int(delete_result.rowcount or latest_count or 0),
+            "latest_complete_trade_date": _iso_or_none(latest_complete_date),
+            "min_symbol_count": int(min_symbol_count),
+        }
 
 
 def _last_bar_dates_daily(vt_symbols: list[str]) -> dict[str, str]:

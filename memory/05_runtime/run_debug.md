@@ -114,8 +114,8 @@ uv run pytest tests/alphaagent/test_quant_strategy_acceptance.py -q
 
 - `GET /api/data-sync/health`: 数据健康和推荐同步。
 - `GET /api/data-sync/tail-workflow`: 实时尾盘量化状态。默认只展示
-  14:30 实时尾盘量化和 18:00 盘后补全；旧 11:30、14:00、15:00
-  盘中缓存档会被启动种子逻辑禁用。
+  14:30 实时尾盘量化、18:00 盘后同步和 21:30 晚间日线补全；旧
+  11:30、14:00、15:00 盘中缓存档会被启动种子逻辑禁用。
 - `GET /api/quant/tail-preview?limit=50`: 今日实时尾盘量化结果，只读，不写历史候选。
 - `POST /api/data-sync/tail-workflow/run-tail-quant`: 手动执行 14:30 实时尾盘量化批次。
 - `POST /api/data-sync/batches/run-all`: 一键同步批次。
@@ -125,6 +125,12 @@ uv run pytest tests/alphaagent/test_quant_strategy_acceptance.py -q
 - `POST /api/data-sync/imports/minute-bars/audit-gaps`: 审计严格 14:30 缺口覆盖。
 
 当前数据口径和维护风险见 `memory/03_data/data_flow.md`。
+
+验证重点：
+
+- 生产和本地 `/quant` 不一致时，先查 `GET /api/quant/trading-dates` 的 `latest_complete_trade_date` 和最新日期 `symbol_count`，历史候选默认只应读完整日线日期。
+- 18:00 公共源可能只发布部分当日日线；全市场日线同步会丢弃低于完整阈值的最新日期，21:30 再自动补全重试。
+- `QueuePool limit ... timed out` 优先检查是否有超时同步线程晚返回继续写库、生产连接池配置是否低于 `20 + 20` overflow，以及是否同时运行同步批次和策略研究。
 
 ## Mainline Debug
 

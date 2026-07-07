@@ -21,7 +21,7 @@ def test_bounded_parallel_map_skips_hung_item_without_blocking():
 
     def handler(item: str) -> None:
         if item == "hung":
-            time.sleep(30)  # 模拟 AkShare 对某只股 hang
+            time.sleep(1.0)  # 模拟 AkShare 对某只股 hang
         done.append(item)
 
     start = time.monotonic()
@@ -29,7 +29,7 @@ def test_bounded_parallel_map_skips_hung_item_without_blocking():
         handler,
         ["a", "b", "hung", "c", "d"],
         concurrency=4,
-        per_item_timeout=1.0,
+        per_item_timeout=0.05,
         on_timeout=timed_out.append,
     )
     elapsed = time.monotonic() - start
@@ -38,8 +38,8 @@ def test_bounded_parallel_map_skips_hung_item_without_blocking():
     assert set(done) == {"a", "b", "c", "d"}
     # hung item 被超时跳过并回调
     assert timed_out == ["hung"]
-    # 总耗时 << 30 秒（约 1 秒超时 + 余量），证明没有阻塞
-    assert elapsed < 5.0
+    # 总耗时明显小于 hang 时长，证明没有阻塞。
+    assert elapsed < 0.5
 
 
 def test_bounded_parallel_map_propagates_fast_items_normally():
@@ -58,6 +58,25 @@ def test_bounded_parallel_map_propagates_fast_items_normally():
     )
 
     assert sorted(done) == [2, 4, 6, 8, 10]
+
+
+def test_bounded_parallel_map_does_not_timeout_queued_items():
+    """总批次可以超过 per_item_timeout，但未开始排队项不能被提前取消。"""
+
+    done: list[int] = []
+
+    def handler(item: int) -> None:
+        time.sleep(0.03)
+        done.append(item)
+
+    svc._bounded_parallel_map(
+        handler,
+        list(range(30)),
+        concurrency=2,
+        per_item_timeout=0.12,
+    )
+
+    assert sorted(done) == list(range(30))
 
 
 def test_select_zombie_batch_ids_picks_only_stale_running():

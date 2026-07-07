@@ -82,7 +82,7 @@ def test_schema_patches_raise_unexpected_errors():
 
 def test_default_batch_schedules_defined():
     ids = {s["id"] for s in svc.DEFAULT_BATCH_SCHEDULES}
-    assert {"tail_quant_1430", "eod_18h"}.issubset(ids)
+    assert {"tail_quant_1430", "eod_18h", "eod_finalize_2130"}.issubset(ids)
     assert "tail_preview_14h" not in ids
     assert "intraday_noon_1130" not in ids
     assert "intraday_close_1500" not in ids
@@ -147,6 +147,23 @@ def test_eod_schedule_runs_quant_research_before_slow_enrichment_jobs():
     assert jobs.index("sync_stock_financial_quarterly") > quant_idx
     assert jobs.index("sync_stock_lhb_records") > quant_idx
     assert jobs.index("sync_stock_notices") > quant_idx
+
+
+def test_eod_finalize_schedule_retries_daily_bars_late_without_slow_jobs():
+    finalize = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "eod_finalize_2130")
+    jobs = finalize["job_ids"]
+
+    assert finalize["action"] == "sync"
+    assert finalize["cron"] == "30 21 * * 1-5"
+    assert jobs == [
+        "sync_stock_daily_bars",
+        "sync_index_daily_bars",
+        "sync_sector_period_scores",
+        svc.EOD_QUANT_RESEARCH_BATCH_JOB_ID,
+    ]
+    assert "sync_stock_financial_quarterly" not in jobs
+    assert "sync_stock_lhb_records" not in jobs
+    assert "sync_stock_notices" not in jobs
 
 
 def test_sector_mainline_jobs_default_to_full_sector_coverage():
@@ -557,6 +574,9 @@ def test_eod_quant_research_batch_job_waits_for_completion(monkeypatch):
 
     assert calls[0]["end"].isoformat() == "2026-06-18"
     assert calls[0]["candidate_limit"] == 20
+    assert "initial_cash" not in calls[0]
+    assert "max_positions" not in calls[0]
+    assert "max_position_pct" not in calls[0]
     assert poll_count["n"] == 1
     assert result["rows_read"] == 2497
     assert result["rows_written"] == 100
@@ -772,6 +792,100 @@ def test_stock_daily_incremental_can_disable_refresh_window(monkeypatch):
     )
 
     assert captured_start_dates == ["2026-06-27"]
+
+
+def test_full_stock_daily_sync_discards_incomplete_latest_cross_section(monkeypatch):
+    monkeypatch.setattr(svc.screening, "MIN_COMPLETE_DAILY_SYMBOL_COUNT", 3)
+    stock_rows = [{"symbol": f"{i:06d}", "exchange": "SSE", "name": "X"} for i in range(4)]
+    cleanup_calls: list[int] = []
+
+    class FakeAdapter:
+        def stock_bars(self, symbol, exchange=None, limit=90, interval="1d", start_date=None, end_date=None):
+            return {"items": [{"trade_date": "2026-07-07", "close": 10}]}
+
+    monkeypatch.setattr(svc, "_select_daily_bar_stocks", lambda symbols, stock_limit: stock_rows)
+    monkeypatch.setattr(svc, "_last_bar_dates_daily", lambda vt_symbols: {})
+    monkeypatch.setattr(svc, "_upsert_daily_bars", lambda s, e, items: len(items))
+
+    def fake_cleanup(min_symbol_count):
+        cleanup_calls.append(min_symbol_count)
+        return {
+            "status": "discarded_incomplete",
+            "discarded_trade_date": "2026-07-07",
+            "discarded_symbol_count": 1446,
+            "deleted_rows": 1446,
+            "latest_complete_trade_date": "2026-07-06",
+            "min_symbol_count": min_symbol_count,
+        }
+
+    monkeypatch.setattr(svc, "_discard_incomplete_latest_daily_bars", fake_cleanup)
+
+    result = svc.DataSyncRunner(adapter=FakeAdapter(), concurrency=8)._run_sync_stock_daily_bars(
+        {"limit": 250, "incremental": True, "stock_limit": 0}
+    )
+
+    assert cleanup_calls == [svc.screening.MIN_COMPLETE_DAILY_SYMBOL_COUNT]
+    assert result["coverage_cleanup"]["status"] == "discarded_incomplete"
+    assert result["coverage_cleanup"]["latest_complete_trade_date"] == "2026-07-06"
+
+
+def test_daily_sync_complete_threshold_uses_strict_full_market_ratio(monkeypatch):
+    monkeypatch.setattr(svc.screening, "MIN_COMPLETE_DAILY_SYMBOL_COUNT", 3000)
+
+    assert svc._daily_sync_complete_min_symbol_count(5539) == int(5539 * 0.95)
+    assert svc._daily_sync_complete_min_symbol_count(1000) == 3000
+
+
+def test_targeted_stock_daily_sync_does_not_cleanup_latest_cross_section(monkeypatch):
+    cleanup_calls: list[int] = []
+
+    class FakeAdapter:
+        def stock_bars(self, symbol, exchange=None, limit=90, interval="1d", start_date=None, end_date=None):
+            return {"items": [{"trade_date": "2026-07-07", "close": 10}]}
+
+    monkeypatch.setattr(
+        svc,
+        "_select_daily_bar_stocks",
+        lambda symbols, stock_limit: [{"symbol": "600000", "exchange": "SSE", "name": "X"}],
+    )
+    monkeypatch.setattr(svc, "_last_bar_dates_daily", lambda vt_symbols: {})
+    monkeypatch.setattr(svc, "_upsert_daily_bars", lambda s, e, items: len(items))
+    monkeypatch.setattr(svc, "_discard_incomplete_latest_daily_bars", lambda min_count: cleanup_calls.append(min_count))
+
+    result = svc.DataSyncRunner(adapter=FakeAdapter(), concurrency=1)._run_sync_stock_daily_bars(
+        {"symbols": "600000.SSE", "limit": 250, "incremental": True}
+    )
+
+    assert cleanup_calls == []
+    assert "coverage_cleanup" not in result
+
+
+def test_timed_out_stock_daily_item_does_not_write_late(monkeypatch):
+    import time
+
+    writes: list[tuple[str, list[dict[str, Any]]]] = []
+
+    class FakeAdapter:
+        def stock_bars(self, symbol, exchange=None, limit=90, interval="1d", start_date=None, end_date=None):
+            time.sleep(0.12)
+            return {"items": [{"trade_date": "2026-07-07", "close": 10}]}
+
+    monkeypatch.setattr(svc, "SYNC_PER_ITEM_TIMEOUT_SECONDS", 0.03)
+    monkeypatch.setattr(
+        svc,
+        "_select_daily_bar_stocks",
+        lambda symbols, stock_limit: [{"symbol": "600000", "exchange": "SSE", "name": "X"}],
+    )
+    monkeypatch.setattr(svc, "_last_bar_dates_daily", lambda vt_symbols: {})
+    monkeypatch.setattr(svc, "_upsert_daily_bars", lambda s, e, items: writes.append((s, items)) or len(items))
+
+    result = svc.DataSyncRunner(adapter=FakeAdapter(), concurrency=1)._run_sync_stock_daily_bars(
+        {"limit": 250, "incremental": False}
+    )
+    time.sleep(0.18)
+
+    assert result["timed_out"] == 1
+    assert writes == []
 
 
 def test_sector_members_syncs_concurrently(monkeypatch):
@@ -1486,6 +1600,38 @@ def test_minute_increment_refreshes_live_window_when_today_already_partial(monke
     )
 
     assert requested["000001"] is None
+
+
+def test_timed_out_stock_minute_item_does_not_write_late(monkeypatch):
+    import time
+
+    writes: list[tuple[str, list[dict[str, Any]]]] = []
+
+    class FakeAdapter:
+        def stock_bars(self, symbol, exchange=None, limit=90, interval="1m", start_date=None, end_date=None):
+            time.sleep(0.12)
+            return {"items": [{"trade_date": "2026-07-07 14:30:00", "close": 10}], "source": "akshare"}
+
+    monkeypatch.setattr(svc, "SYNC_PER_ITEM_TIMEOUT_SECONDS", 0.03)
+    monkeypatch.setattr(
+        svc,
+        "_select_minute_bar_stocks",
+        lambda *args, **kwargs: [{"symbol": "600000", "exchange": "SSE", "name": "X"}],
+    )
+    monkeypatch.setattr(svc, "_last_bar_dates_minute", lambda vt_symbols, interval: {})
+    monkeypatch.setattr(
+        svc,
+        "_upsert_minute_bars",
+        lambda s, e, items, interval, source: writes.append((s, items)) or len(items),
+    )
+
+    result = svc.DataSyncRunner(adapter=FakeAdapter(), concurrency=1)._run_sync_stock_minute_bars(
+        {"mode": "recent", "interval": "1m", "limit": 240, "stock_limit": 1, "incremental": False}
+    )
+    time.sleep(0.18)
+
+    assert result["timed_out"] == 1
+    assert writes == []
 
 
 # ── Task 8: scheduler drives batch schedules instead of per-job crons ─
