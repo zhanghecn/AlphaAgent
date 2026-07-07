@@ -27,7 +27,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Sequence
 from uuid import uuid4
 
-from sqlalchemy import desc, func, select, text
+from sqlalchemy import and_, desc, func, select, text
 from sqlalchemy.engine import Engine
 
 from alphaagent.data_sources.akshare_adapter import AkShareAdapter
@@ -489,13 +489,6 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
     },
 ]
 
-OBSOLETE_BATCH_SCHEDULE_IDS = {
-    "intraday_14h": "已停用：实时尾盘量化只保留 14:30 单一结果。",
-    "tail_prepare_14h": "已停用：实时尾盘量化只保留 14:30 单一结果。",
-    "intraday_noon_1130": "已停用：不再生成盘中尾盘缓存。",
-    "tail_preview_14h": "已停用：14:00 不再生成实时尾盘量化结果。",
-    "intraday_close_1500": "已停用：实时尾盘量化只保留 14:30 单一结果。",
-}
 TAIL_PREVIEW_BATCH_JOB_ID = "tail_preview_cache"
 EOD_QUANT_RESEARCH_BATCH_JOB_ID = "eod_quant_research"
 INTERNAL_BATCH_JOB_IDS = {TAIL_PREVIEW_BATCH_JOB_ID, EOD_QUANT_RESEARCH_BATCH_JOB_ID}
@@ -1789,17 +1782,16 @@ def seed_default_registry() -> None:
                         .where(schema.sync_batch_schedules.c.id == sched["id"])
                         .values(**sched_values)
                     )
-            for schedule_id, reason in OBSOLETE_BATCH_SCHEDULE_IDS.items():
-                session.execute(
-                    schema.sync_batch_schedules.update()
-                    .where(schema.sync_batch_schedules.c.id == schedule_id)
-                    .values(
-                        enabled=False,
-                        last_status="disabled",
-                        last_finished_at=datetime.now(timezone.utc),
-                        last_message=reason,
+            default_schedule_ids = [str(sched["id"]) for sched in DEFAULT_BATCH_SCHEDULES]
+            session.execute(
+                schema.sync_batch_schedules.delete().where(
+                    and_(
+                        schema.sync_batch_schedules.c.id.not_in(default_schedule_ids),
+                        schema.sync_batch_schedules.c.enabled == False,  # noqa: E712
+                        schema.sync_batch_schedules.c.last_status == "disabled",
                     )
                 )
+            )
     except Exception as exc:
         logger.warning("seed_default_registry failed: %s", exc)
 

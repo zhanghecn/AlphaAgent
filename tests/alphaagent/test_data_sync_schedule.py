@@ -82,10 +82,65 @@ def test_schema_patches_raise_unexpected_errors():
 
 def test_default_batch_schedules_defined():
     ids = {s["id"] for s in svc.DEFAULT_BATCH_SCHEDULES}
-    assert {"tail_quant_1430", "eod_18h", "eod_finalize_2130"}.issubset(ids)
-    assert "tail_preview_14h" not in ids
-    assert "intraday_noon_1130" not in ids
-    assert "intraday_close_1500" not in ids
+    assert ids == {"tail_quant_1430", "eod_18h", "eod_finalize_2130"}
+
+
+def test_seed_default_registry_deletes_disabled_non_default_schedules(monkeypatch):
+    default_ids = {s["id"] for s in svc.DEFAULT_BATCH_SCHEDULES}
+    rows: dict[str, dict[str, Any]] = {
+        "legacy_disabled_slot": {"id": "legacy_disabled_slot", "enabled": False, "last_status": "disabled"},
+        "custom_enabled": {"id": "custom_enabled", "enabled": True, "last_status": None},
+        "custom_failed_disabled": {
+            "id": "custom_failed_disabled",
+            "enabled": False,
+            "last_status": "failed",
+        },
+    }
+
+    class FakeResult:
+        def __init__(self, row=object()):
+            self.row = row
+
+        def first(self):
+            return self.row
+
+    class FakeSession:
+        def execute(self, statement):
+            table = getattr(getattr(statement, "table", None), "name", None)
+
+            if getattr(statement, "is_select", False) and "FROM sync_batch_schedules" in str(statement):
+                params = statement.compile().params
+                return FakeResult(rows.get(params["id_1"]))
+
+            if table == "sync_batch_schedules" and statement.is_insert:
+                params = statement.compile().params
+                rows[str(params["id"])] = dict(params)
+                return FakeResult()
+
+            if table == "sync_batch_schedules" and statement.is_delete:
+                for schedule_id, row in list(rows.items()):
+                    if (
+                        schedule_id not in default_ids
+                        and row.get("enabled") is False
+                        and row.get("last_status") == "disabled"
+                    ):
+                        del rows[schedule_id]
+                return FakeResult()
+
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+
+    svc.seed_default_registry()
+
+    assert "legacy_disabled_slot" not in rows
+    assert default_ids.issubset(rows)
+    assert "custom_enabled" in rows
+    assert "custom_failed_disabled" in rows
 
 
 def test_default_jobs_have_no_cron():
