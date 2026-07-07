@@ -206,7 +206,7 @@ export function RecommendationsPanel({
               <span>WATCH {stats.watchCount}</span>
               <span>按评分排名观察前 {DEFAULT_CANDIDATE_OBSERVATION_LIMIT}，不强行保留低吸名额</span>
               {isTailPreview ? (
-                <span>盘中临时K线只做尾盘观察，不参与回测</span>
+                <span>盘中临时K线只用于 14:30 决策参考，不参与回测</span>
               ) : (
                 <>
                   <span>回测只执行 BUY 前 {DEFAULT_EXECUTION_CANDIDATE_LIMIT}</span>
@@ -396,7 +396,7 @@ function TailPreviewSummary({ meta }: { meta?: QuantScreenRun }) {
         <span>快照价 {meta?.snapshot_price_count ?? 0} 只</span>
       </div>
       <div className="mt-1 text-xs text-muted-foreground">
-        使用盘中临时K线，只做尾盘观察，不写入历史候选和收益统计。
+        使用盘中临时K线，只用于 14:30 决策参考，不写入历史候选和收益统计。
       </div>
     </div>
   );
@@ -439,7 +439,7 @@ function TailWorkflowSyncStrip({
     {
       label: "尾盘量化",
       value: preview?.trade_date ?? preview?.cached_trade_date ?? statusLabel(previewStatus),
-      detail: preview?.message ?? (preview?.cached_recommendation_count != null ? `缓存 ${preview.cached_recommendation_count} 个推荐` : null),
+      detail: preview?.message ?? (preview?.cached_recommendation_count != null ? `已生成 ${preview.cached_recommendation_count} 个推荐` : null),
     },
   ];
 
