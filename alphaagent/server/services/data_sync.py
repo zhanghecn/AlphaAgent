@@ -23,7 +23,7 @@ import io
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 from uuid import uuid4
 
 from sqlalchemy import desc, func, select, text
@@ -847,7 +847,7 @@ class DataSyncRunner:
             exchange = str(stock_row["exchange"])
             stock_name = str(stock_row.get("name") or symbol)
             current_vts = vt_symbol(symbol, exchange)
-            stock_start = _next_day(last_dates.get(current_vts)) if last_dates.get(current_vts) else start_date
+            stock_start = _minute_incremental_start_date(last_dates.get(current_vts)) if last_dates.get(current_vts) else start_date
             adapter_start = _minute_adapter_start_date(stock_start, end_date)
             try:
                 data = self.adapter.stock_bars(symbol, exchange, limit=limit, interval=interval, start_date=adapter_start, end_date=end_date)
@@ -2103,12 +2103,42 @@ def _start_sync_schedule(row: dict[str, Any], *, source: str) -> dict[str, Any]:
     _assert_schedule_jobs(action, job_ids)
     if action == "tail_preview" and TAIL_PREVIEW_BATCH_JOB_ID not in job_ids:
         job_ids = [*job_ids, TAIL_PREVIEW_BATCH_JOB_ID]
+    params = _schedule_batch_params(row, action, job_ids)
     return start_sync_batch(
         job_ids=job_ids,
+        params=params,
         concurrency=int(row.get("concurrency") or 8),
         source=source,
         schedule_id=str(row["id"]),
     )
+
+
+def _schedule_batch_params(row: dict[str, Any], action: str, job_ids: list[str]) -> dict[str, Any]:
+    """Build per-job params for scheduled batches."""
+
+    if (
+        str(row.get("id") or "") == "tail_quant_1430"
+        and action == "tail_preview"
+        and "sync_stock_minute_bars" in job_ids
+    ):
+        minute_params = _tail_quant_minute_job_params()
+        if minute_params:
+            return {"jobs": {"sync_stock_minute_bars": minute_params}}
+    return {}
+
+
+def _tail_quant_minute_job_params() -> dict[str, Any]:
+    symbols = _latest_quant_candidate_symbols(limit=500)
+    if not symbols:
+        return {}
+    return {
+        "mode": "recent",
+        "symbols": symbols,
+        "stock_limit": len(symbols),
+        "limit": 240,
+        "interval": "1m",
+        "incremental": True,
+    }
 
 
 # ─── Sync batches ────────────────────────────────────────────────────────
@@ -4808,6 +4838,15 @@ def _next_day(date_value: Any) -> str | None:
     return (d + timedelta(days=1)).isoformat()
 
 
+def _minute_incremental_start_date(last_date: Any) -> str | None:
+    parsed = _parse_date(last_date)
+    if parsed is None:
+        return None
+    if parsed >= _now_china().date():
+        return None
+    return _next_day(parsed)
+
+
 def _minute_adapter_start_date(start_date: Any, end_date: date | None) -> Any:
     """Use the live minute endpoint for current-day incremental refreshes.
 
@@ -4823,6 +4862,65 @@ def _minute_adapter_start_date(start_date: Any, end_date: date | None) -> Any:
     if parsed == _now_china().date():
         return None
     return start_date
+
+
+def _latest_quant_candidate_symbols(limit: int = 500) -> list[str]:
+    """Return latest persisted quant signal symbols for tail-minute sync."""
+
+    if not is_database_configured():
+        return []
+    bounded_limit = min(max(int(limit), 1), 5000)
+    with session_scope() as session:
+        run = session.execute(
+            select(schema.quant_signal_runs.c.id)
+            .where(
+                (schema.quant_signal_runs.c.strategy_id == screening.STRATEGY_ID)
+                & (schema.quant_signal_runs.c.status == "succeeded")
+            )
+            .order_by(desc(schema.quant_signal_runs.c.trade_date), desc(schema.quant_signal_runs.c.id))
+            .limit(1)
+        ).mappings().first()
+        symbols: list[str] = []
+        if run:
+            rows = session.execute(
+                select(schema.quant_stock_signals.c.vt_symbol)
+                .where(schema.quant_stock_signals.c.run_id == run["id"])
+                .order_by(desc(schema.quant_stock_signals.c.total_score), schema.quant_stock_signals.c.vt_symbol)
+                .limit(bounded_limit)
+            ).all()
+            symbols = [str(row[0]) for row in rows if row[0]]
+        if symbols:
+            return _unique_vt_symbols(symbols)
+
+        latest_trade_date = session.execute(
+            select(func.max(schema.quant_recommendations.c.trade_date)).where(
+                schema.quant_recommendations.c.strategy_id == screening.STRATEGY_ID
+            )
+        ).scalar()
+        if latest_trade_date is None:
+            return []
+        rows = session.execute(
+            select(schema.quant_recommendations.c.vt_symbol)
+            .where(
+                (schema.quant_recommendations.c.strategy_id == screening.STRATEGY_ID)
+                & (schema.quant_recommendations.c.trade_date == latest_trade_date)
+            )
+            .order_by(schema.quant_recommendations.c.rank)
+            .limit(bounded_limit)
+        ).all()
+    return _unique_vt_symbols(str(row[0]) for row in rows if row[0])
+
+
+def _unique_vt_symbols(symbols: Iterable[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for symbol in symbols:
+        text = str(symbol or "").strip().upper()
+        if "." not in text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
 
 
 def _incremental_daily_start_date(date_value: Any, refresh_days: int) -> str | None:
