@@ -115,7 +115,7 @@ def test_recommended_jobs_sorted_by_priority():
     assert "sync_stock_list" not in rec
 
 
-def test_stock_daily_incomplete_health_marks_latest_partial_date_stale():
+def test_stock_daily_incomplete_health_marks_latest_partial_date_without_recommending_sync():
     severity, reason, stale = svc._stock_daily_incomplete_health(
         {
             "latest_trade_date": "2026-07-07",
@@ -125,8 +125,8 @@ def test_stock_daily_incomplete_health_marks_latest_partial_date_stale():
         }
     )
 
-    assert stale is True
-    assert severity == "stale"
+    assert stale is False
+    assert severity == "partial"
     assert "1446/3000" in reason
     assert "2026-07-06" in reason
 

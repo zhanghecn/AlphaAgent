@@ -64,6 +64,7 @@ function severityToRunStatus(severity: string): string {
   if (severity === "fresh") return "succeeded";
   if (severity === "stale") return "failed";
   if (severity === "empty") return "pending";
+  if (severity === "partial") return "pending";
   return severity;
 }
 

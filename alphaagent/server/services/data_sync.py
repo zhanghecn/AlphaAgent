@@ -2929,7 +2929,7 @@ def _stock_daily_incomplete_health(table_cov: dict[str, Any]) -> tuple[str, str,
         return None
     latest_complete = table_cov.get("latest_complete_trade_date")
     suffix = f"，最新完整日线为 {latest_complete}" if latest_complete else ""
-    return "stale", f"{latest_trade_date} 日线仅覆盖 {latest_count}/{min_count} 只{suffix}", True
+    return "partial", f"{latest_trade_date} 日线仅覆盖 {latest_count}/{min_count} 只{suffix}", False
 
 
 def _collect_freshness_probes() -> dict[tuple[str, str], Any]:
