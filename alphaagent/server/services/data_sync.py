@@ -797,9 +797,7 @@ class DataSyncRunner:
 
         coverage_cleanup = None
         if _should_cleanup_partial_daily_sync(symbols, stock_limit, total_stocks):
-            coverage_cleanup = _discard_incomplete_latest_daily_bars(
-                _daily_sync_complete_min_symbol_count(total_stocks)
-            )
+            coverage_cleanup = _discard_incomplete_latest_daily_bars(total_stocks)
 
         logger.info("sync_stock_daily_bars: processed %d stocks", counters["done"])
         result = {"rows_read": counters["read"], "rows_written": counters["written"]}
@@ -3531,6 +3529,22 @@ def _latest_complete_daily_date(session, min_symbol_count: int = screening.MIN_C
     return row[0] if row else None
 
 
+def _latest_complete_daily_date_before(
+    session,
+    before_date: date,
+    min_symbol_count: int = screening.MIN_COMPLETE_DAILY_SYMBOL_COUNT,
+) -> date | None:
+    row = session.execute(
+        select(schema.stock_daily_bars.c.trade_date)
+        .where(schema.stock_daily_bars.c.trade_date < before_date)
+        .group_by(schema.stock_daily_bars.c.trade_date)
+        .having(func.count(func.distinct(schema.stock_daily_bars.c.vt_symbol)) >= min_symbol_count)
+        .order_by(desc(schema.stock_daily_bars.c.trade_date))
+        .limit(1)
+    ).first()
+    return row[0] if row else None
+
+
 def minute_csv_template() -> str:
     """Return a minimal CSV template for importing historical minute bars."""
 
@@ -5086,7 +5100,12 @@ def _daily_sync_complete_min_symbol_count(total_stocks: int) -> int:
     return max(screening.MIN_COMPLETE_DAILY_SYMBOL_COUNT, ratio_count)
 
 
-def _discard_incomplete_latest_daily_bars(min_symbol_count: int) -> dict[str, Any]:
+def _daily_sync_cleanup_min_symbol_count(total_stocks: int, previous_complete_count: int) -> int:
+    reference_count = previous_complete_count if previous_complete_count > 0 else total_stocks
+    return _daily_sync_complete_min_symbol_count(reference_count)
+
+
+def _discard_incomplete_latest_daily_bars(total_stocks: int) -> dict[str, Any]:
     """Remove a latest daily-bar date when the cross-section is still partial.
 
     Public quote sources can expose the new trade date for only part of the
@@ -5097,17 +5116,26 @@ def _discard_incomplete_latest_daily_bars(min_symbol_count: int) -> dict[str, An
 
     with session_scope() as session:
         latest_trade_date = session.execute(select(func.max(schema.stock_daily_bars.c.trade_date))).scalar()
+        fallback_min_count = _daily_sync_complete_min_symbol_count(total_stocks)
         if latest_trade_date is None:
-            return {"status": "empty", "latest_trade_date": None, "min_symbol_count": int(min_symbol_count)}
+            return {"status": "empty", "latest_trade_date": None, "min_symbol_count": int(fallback_min_count)}
+        previous_complete_date = _latest_complete_daily_date_before(
+            session,
+            latest_trade_date,
+            screening.MIN_COMPLETE_DAILY_SYMBOL_COUNT,
+        )
+        previous_complete_count = _stock_daily_symbol_count(session, previous_complete_date)
+        min_symbol_count = _daily_sync_cleanup_min_symbol_count(total_stocks, previous_complete_count)
         latest_count = _stock_daily_symbol_count(session, latest_trade_date)
         if latest_count >= min_symbol_count:
             return {
                 "status": "complete",
                 "latest_trade_date": _iso_or_none(latest_trade_date),
                 "latest_symbol_count": latest_count,
+                "reference_trade_date": _iso_or_none(previous_complete_date),
+                "reference_symbol_count": previous_complete_count,
                 "min_symbol_count": int(min_symbol_count),
             }
-        latest_complete_date = _latest_complete_daily_date(session, min_symbol_count)
         delete_result = session.execute(
             schema.stock_daily_bars.delete().where(schema.stock_daily_bars.c.trade_date == latest_trade_date)
         )
@@ -5116,7 +5144,8 @@ def _discard_incomplete_latest_daily_bars(min_symbol_count: int) -> dict[str, An
             "discarded_trade_date": _iso_or_none(latest_trade_date),
             "discarded_symbol_count": latest_count,
             "deleted_rows": int(delete_result.rowcount or latest_count or 0),
-            "latest_complete_trade_date": _iso_or_none(latest_complete_date),
+            "latest_complete_trade_date": _iso_or_none(previous_complete_date),
+            "reference_symbol_count": previous_complete_count,
             "min_symbol_count": int(min_symbol_count),
         }
 

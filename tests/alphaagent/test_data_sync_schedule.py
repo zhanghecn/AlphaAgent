@@ -807,15 +807,15 @@ def test_full_stock_daily_sync_discards_incomplete_latest_cross_section(monkeypa
     monkeypatch.setattr(svc, "_last_bar_dates_daily", lambda vt_symbols: {})
     monkeypatch.setattr(svc, "_upsert_daily_bars", lambda s, e, items: len(items))
 
-    def fake_cleanup(min_symbol_count):
-        cleanup_calls.append(min_symbol_count)
+    def fake_cleanup(total_stocks):
+        cleanup_calls.append(total_stocks)
         return {
             "status": "discarded_incomplete",
             "discarded_trade_date": "2026-07-07",
             "discarded_symbol_count": 1446,
             "deleted_rows": 1446,
             "latest_complete_trade_date": "2026-07-06",
-            "min_symbol_count": min_symbol_count,
+            "min_symbol_count": svc._daily_sync_cleanup_min_symbol_count(total_stocks, 0),
         }
 
     monkeypatch.setattr(svc, "_discard_incomplete_latest_daily_bars", fake_cleanup)
@@ -824,7 +824,7 @@ def test_full_stock_daily_sync_discards_incomplete_latest_cross_section(monkeypa
         {"limit": 250, "incremental": True, "stock_limit": 0}
     )
 
-    assert cleanup_calls == [svc.screening.MIN_COMPLETE_DAILY_SYMBOL_COUNT]
+    assert cleanup_calls == [4]
     assert result["coverage_cleanup"]["status"] == "discarded_incomplete"
     assert result["coverage_cleanup"]["latest_complete_trade_date"] == "2026-07-06"
 
@@ -834,6 +834,8 @@ def test_daily_sync_complete_threshold_uses_strict_full_market_ratio(monkeypatch
 
     assert svc._daily_sync_complete_min_symbol_count(5539) == int(5539 * 0.95)
     assert svc._daily_sync_complete_min_symbol_count(1000) == 3000
+    assert svc._daily_sync_cleanup_min_symbol_count(total_stocks=5800, previous_complete_count=5524) == int(5524 * 0.95)
+    assert svc._daily_sync_cleanup_min_symbol_count(total_stocks=5800, previous_complete_count=0) == int(5800 * 0.95)
 
 
 def test_targeted_stock_daily_sync_does_not_cleanup_latest_cross_section(monkeypatch):

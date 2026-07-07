@@ -55,7 +55,7 @@ AlphaAgent 自研服务的股票日线同步不走 vn.py Datafeed，路径是：
 - 腾讯成交额字段单位为“万元”，入库前换算为“元”。
 - `stock_daily_bars.volume` 常见单位为“手”；旧数据缺 `turnover` 时，量化流动性兜底按 `close * volume * 100` 估算成交额。
 - `sync_stock_daily_bars` 支持 `symbols` 定向重跑，也支持增量同步和最近交易日回刷。
-- 全市场 `sync_stock_daily_bars` 完成后会检查最新日期横截面覆盖；低于 `max(3000, 股票数*95%)` 的最新日期会从 `stock_daily_bars` 丢弃，等待晚间重试补齐，避免公共源半发布的当日日线污染历史量化。
+- 全市场 `sync_stock_daily_bars` 完成后会检查最新日期横截面覆盖；低于 `max(3000, 上一完整交易日覆盖数*95%)` 的最新日期会从 `stock_daily_bars` 丢弃，等待晚间重试补齐，避免公共源半发布的当日日线污染历史量化。没有上一完整日时才回退到股票清单总数。
 
 ## AlphaAgent Sector And Mainline Data
 
