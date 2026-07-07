@@ -11,6 +11,7 @@ STEALTH_LOW_SUCTION_LANE = "stealth_low_suction"
 DRAGON_PULLBACK_LANE = "dragon_pullback"
 OVERSOLD_REBOUND_LANE = "oversold_rebound_start"
 RETREAT_MOMENTUM_SOURCE_LANE = "retreat_high_low_switch_momentum"
+EARLY_SILVER_LATE_DEEP_ABSORPTION_CAP = 82.0
 
 
 def dragon_candidate_lane(candidate: Any) -> str:
@@ -129,11 +130,14 @@ def dragon_pullback_opportunity_key(candidate: Any) -> tuple[float, float, str]:
 
 
 def dragon_pullback_opportunity_score(candidate: Any) -> float:
-    return (
+    score = (
         float(getattr(candidate, "total_score", 0) or 0)
         + default_clean_watch_entry_opportunity_bonus(candidate)
         + dragon_pullback_timing_opportunity_bonus(candidate)
     )
+    if deep_low_absorption_early_silver_late_retreat_decay(candidate):
+        return min(score, EARLY_SILVER_LATE_DEEP_ABSORPTION_CAP)
+    return score
 
 
 def frontrow_quality_score(candidate: Any) -> float:
@@ -337,6 +341,8 @@ def dragon_pullback_timing_opportunity_reasons(candidate: Any) -> list[dict[str,
 
     if setup == OVERSOLD_REBOUND_LANE and timing == "after_silver_6_20" and phase == "retreat":
         add("oversold_silver_6_20_retreat", "超跌反弹：银手指后6-20日退潮修复", 3.0)
+        if _oversold_silver_repair_low_turnover(evidence, setup=setup, timing=timing, phase=phase):
+            add("oversold_silver_repair_low_turnover", "超跌反弹：银后低位缩量修复", 4.0)
         if _bottom_reclaim_setup(evidence):
             add("bottom_reclaim_silver_6_20_retreat", "底部收复：银手指后6-20日退潮修复", 1.0)
             if _confirmed_bottom_reclaim_repair(evidence):
@@ -357,8 +363,24 @@ def dragon_pullback_timing_opportunity_reasons(candidate: Any) -> list[dict[str,
             if _confirmed_secondary_breakout_repair(evidence):
                 add("secondary_breakout_gold_confirmed_repair", "二次确认：金手指短窗底部修复", 0.6)
 
+    if _deep_low_absorption_reversal(evidence, setup=setup):
+        if _deep_low_absorption_early_silver_late_retreat_decay(evidence, setup=setup):
+            return reasons
+        add("deep_low_absorption_reversal", "超跌反弹：深跌长阴低收承接", 6.8)
+        if phase in {"retreat", "mixed"}:
+            add("deep_low_absorption_pressure_window", "超跌反弹：退潮/分化隔日修复窗口", 1.2)
+        if _controlled_latest_absorption_volume(evidence):
+            add("deep_low_absorption_controlled_volume", "超跌反弹：D日量能未失控", 0.7)
+        return reasons
+
     if setup == "low_suction_buildup" and timing == "after_silver_6_20" and phase == "retreat":
         add("low_suction_buildup_silver_6_20_retreat", "低吸蓄势：银手指后6-20日退潮修复", 2.5)
+
+    if _low_base_buildup_safe(evidence, setup=setup):
+        add("low_base_buildup_safe", "低吸蓄势：低位温和承接", 3.6)
+        if timing.startswith("after_silver") and phase in {"retreat", "rotation"}:
+            add("low_base_buildup_pressure_window", "低吸蓄势：银后压力窗口抗跌", 0.6)
+        return reasons
 
     if setup == "low_suction_first_lift" and timing == "after_gold_0_5" and phase == "warming":
         add("low_suction_first_lift_gold_0_5_warming", "低吸首启：金手指后短窗回暖", 3.0)
@@ -1243,10 +1265,129 @@ def gold_early_oversold_no_active_low_close_decay(candidate: Any) -> bool:
     )
 
 
+def overheated_crowded_high_turnover_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    setup = _setup_family(evidence)
+    if setup == OVERSOLD_REBOUND_LANE:
+        return False
+    ret20 = _float_or_default(evidence.get("return_20d"), 0.0)
+    ma20_distance = _float_or_default(evidence.get("ma20_distance_pct"), 0.0)
+    near_limit_count = _float_or_default(evidence.get("near_limit_up_count_20d"), 0.0)
+    latest_turnover_ratio = _float_or_none(evidence.get("latest_turnover_ratio_20d"))
+    turnover_percentile = _float_or_none(evidence.get("turnover_percentile_60d"))
+    volume_ratio = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    turnover20 = _float_or_none(evidence.get("turnover20"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    high_position = ret20 >= 25.0 or ma20_distance >= 8.0
+    high_turnover = bool(
+        (latest_turnover_ratio is not None and latest_turnover_ratio >= 1.25)
+        or (turnover_percentile is not None and turnover_percentile >= 0.82)
+        or (volume_ratio is not None and volume_ratio >= 1.25 and turnover20 is not None and turnover20 >= 1_000_000_000.0)
+    )
+    weak_or_fade_close = bool(
+        (close_location is not None and close_location <= 0.58)
+        or (latest_change is not None and latest_change <= 0.0)
+    )
+    crowded_source = near_limit_count >= 4.0
+    stale_multi_source = near_limit_count >= 2.0 and weak_or_fade_close
+    return bool(high_position and high_turnover and (crowded_source or stale_multi_source))
+
+
+def low_suction_hot_short_push_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _setup_family(evidence) != "low_suction_first_lift":
+        return False
+    launch_bucket = str(evidence.get("low_suction_launch_quality_bucket") or "")
+    if launch_bucket not in {"high_close_launch", "balanced_first_lift"}:
+        return False
+    pullback_days = _float_or_default(evidence.get("pullback_days"), 0.0)
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    ret5 = _float_or_none(evidence.get("return_5d"))
+    latest_turnover_ratio = _float_or_none(evidence.get("latest_turnover_ratio_20d"))
+    turnover_percentile = _float_or_none(evidence.get("turnover_percentile_60d"))
+    active_turnover = bool(
+        (latest_turnover_ratio is not None and latest_turnover_ratio >= 1.20)
+        or (turnover_percentile is not None and turnover_percentile >= 0.85)
+    )
+    return bool(
+        pullback_days <= 3.0
+        and close_location is not None
+        and close_location >= 0.70
+        and ret5 is not None
+        and ret5 >= 5.0
+        and active_turnover
+    )
+
+
+def gold_late_mid_high_close_stretch_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _setup_family(evidence) == OVERSOLD_REBOUND_LANE:
+        return False
+    if str(evidence.get("timing_window") or "") != "after_gold_late":
+        return False
+    ret20 = _float_or_none(evidence.get("return_20d"))
+    ma20_distance = _float_or_none(evidence.get("ma20_distance_pct"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    latest_turnover_ratio = _float_or_none(evidence.get("latest_turnover_ratio_20d"))
+    turnover_percentile = _float_or_none(evidence.get("turnover_percentile_60d"))
+    active_turnover = bool(
+        (latest_turnover_ratio is not None and latest_turnover_ratio >= 0.90)
+        or (turnover_percentile is not None and turnover_percentile >= 0.75)
+    )
+    return bool(
+        ret20 is not None
+        and ret20 >= 18.0
+        and ma20_distance is not None
+        and ma20_distance >= 4.0
+        and close_location is not None
+        and close_location >= 0.62
+        and latest_change is not None
+        and latest_change >= 0.0
+        and active_turnover
+    )
+
+
+def overlap_unconfirmed_fast_push_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    if _audited_setup_family(evidence) != "dragon_low_suction_overlap":
+        return False
+    if str(evidence.get("low_suction_launch_quality_bucket") or "") != "unconfirmed_buildup":
+        return False
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    ret20 = _float_or_none(evidence.get("return_20d"))
+    near_limit_count = _float_or_default(evidence.get("near_limit_up_count_20d"), 0.0)
+    return bool(
+        latest_change is not None
+        and latest_change >= 5.0
+        and close_location is not None
+        and close_location >= 0.75
+        and ret20 is not None
+        and ret20 >= 12.0
+        and near_limit_count >= 1.0
+    )
+
+
+def deep_low_absorption_early_silver_late_retreat_decay(candidate: Any) -> bool:
+    evidence = getattr(candidate, "evidence", {}) or {}
+    return _deep_low_absorption_early_silver_late_retreat_decay(
+        evidence,
+        setup=_setup_family(evidence),
+    )
+
+
 def dragon_pullback_quality_filter_reason(candidate: Any) -> str | None:
     evidence = getattr(candidate, "evidence", {}) or {}
     if evidence.get("retreat_momentum_board_survival_source"):
         return None
+    if low_suction_hot_short_push_decay(candidate):
+        return "low_suction_hot_short_push_decay"
+    if gold_late_mid_high_close_stretch_decay(candidate):
+        return "gold_late_mid_high_close_stretch_decay"
+    if overlap_unconfirmed_fast_push_decay(candidate):
+        return "overlap_unconfirmed_fast_push_decay"
     if gold_late_overheated_dragon_decay(candidate):
         return "gold_late_overheated_dragon_decay"
     if gold_late_high_close_exhaustion_decay(candidate):
@@ -1297,6 +1438,8 @@ def dragon_pullback_quality_filter_reason(candidate: Any) -> str | None:
         return "gold_early_first_lift_no_active_source_decay"
     if gold_early_oversold_no_active_low_close_decay(candidate):
         return "gold_early_oversold_no_active_low_close_decay"
+    if overheated_crowded_high_turnover_decay(candidate):
+        return "overheated_crowded_high_turnover_decay"
     if stale_active_weak_decay_pullback(candidate):
         return "stale_active_weak_decay_pullback"
     if old_low_suction_strong_leg_normal_volume(candidate):
@@ -1405,6 +1548,89 @@ def _confirmed_secondary_breakout_repair(evidence: dict[str, Any]) -> bool:
     repair_score = _float_or_default(evidence.get("bottom_ma_repair_strength_score"), 0.0)
     stage = str(evidence.get("bottom_ma_repair_stage") or "")
     return bool(repair_score >= 70.0 or stage == "secondary_ma10_confirm")
+
+
+def _deep_low_absorption_reversal(evidence: dict[str, Any], *, setup: str) -> bool:
+    return bool(
+        setup == OVERSOLD_REBOUND_LANE
+        and (
+            bool(evidence.get("deep_low_absorption_reversal"))
+            or str(evidence.get("rebound_subtype") or "") == "deep_low_absorption_reversal"
+        )
+    )
+
+
+def _deep_low_absorption_early_silver_late_retreat_decay(evidence: dict[str, Any], *, setup: str) -> bool:
+    timing = str(evidence.get("timing_window") or "")
+    phase = str(evidence.get("market_phase") or "")
+    nearest_days = _float_or_none(evidence.get("nearest_timing_days"))
+    return bool(
+        _deep_low_absorption_reversal(evidence, setup=setup)
+        and timing == "after_silver_late"
+        and phase == "retreat"
+        and nearest_days is not None
+        and nearest_days <= 25.0
+    )
+
+
+def _controlled_latest_absorption_volume(evidence: dict[str, Any]) -> bool:
+    latest_volume = _float_or_none(evidence.get("latest_volume_ratio_20d"))
+    latest_turnover = _float_or_none(evidence.get("latest_turnover_ratio_20d"))
+    return bool(
+        latest_volume is not None
+        and 0.65 <= latest_volume <= 1.45
+        and (latest_turnover is None or latest_turnover <= 1.35)
+    )
+
+
+def _oversold_silver_repair_low_turnover(
+    evidence: dict[str, Any],
+    *,
+    setup: str,
+    timing: str,
+    phase: str,
+) -> bool:
+    if setup != OVERSOLD_REBOUND_LANE or timing != "after_silver_6_20" or phase != "retreat":
+        return False
+    ret20 = _float_or_none(evidence.get("return_20d"))
+    ma20 = _float_or_none(evidence.get("ma20_distance_pct"))
+    latest_change = _float_or_none(evidence.get("latest_change_pct"))
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    latest_turnover = _float_or_none(evidence.get("latest_turnover_ratio_20d"))
+    near_limit_count = _float_or_default(evidence.get("near_limit_up_count_20d"), 0.0)
+    if None in {ret20, ma20, latest_change, close_location}:
+        return False
+    return bool(
+        ret20 <= -5.0
+        and ma20 <= -3.0
+        and -7.0 <= latest_change <= 4.0
+        and close_location <= 0.75
+        and (latest_turnover is None or latest_turnover <= 1.20)
+        and near_limit_count <= 1.0
+    )
+
+
+def _low_base_buildup_safe(evidence: dict[str, Any], *, setup: str) -> bool:
+    if setup != "low_suction_buildup":
+        return False
+    ret20 = _float_or_none(evidence.get("return_20d"))
+    ma20 = _float_or_none(evidence.get("ma20_distance_pct"))
+    volume = _float_or_none(evidence.get("volume_ratio_5d_20d"))
+    latest_turnover = _float_or_none(evidence.get("latest_turnover_ratio_20d"))
+    low_days = _float_or_default(evidence.get("low_suction_days"), 0.0)
+    pullback_days = _float_or_default(evidence.get("pullback_days"), 0.0)
+    close_location = _float_or_none(evidence.get("close_location_in_range"))
+    if None in {ret20, ma20, volume, close_location}:
+        return False
+    return bool(
+        0.0 <= ret20 <= 18.0
+        and -2.0 <= ma20 <= 7.0
+        and 0.75 <= volume <= 1.20
+        and (latest_turnover is None or latest_turnover <= 1.25)
+        and low_days >= 3.0
+        and pullback_days >= 5.0
+        and 0.30 <= close_location <= 0.85
+    )
 
 
 def _silver_rotation_strict_fresh_dragon(

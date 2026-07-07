@@ -100,7 +100,7 @@ def test_quant_strategy_registry_dispatches_default_strategy() -> None:
     assert default_strategy.id == "mainline_dragon_pullback"
     assert strategy is not None
     assert strategy.version == "0.1.1"
-    assert default_strategy.version == "0.1.58"
+    assert default_strategy.version == "0.1.66"
     assert [item["id"] for item in list_strategies()] == ["mainline_dragon_pullback"]
     assert "mainline_leader_pullback" in {item["id"] for item in list_internal_strategies()}
     assert score.signal_type == "mainline_leader_pullback"
@@ -5662,6 +5662,34 @@ def test_dragon_pullback_routes_deep_cycle_secondary_breakout_when_20d_drawdown_
     assert score.evidence["max_drawdown_60d"] <= -24.0
     assert score.evidence["return_20d"] <= -8.0
     assert score.evidence["return_60d"] <= -12.0
+    assert score.evidence["failed_rules"] == []
+
+
+def test_dragon_pullback_routes_deep_low_absorption_reversal_inside_default_strategy() -> None:
+    closes = [50 + index * 0.01 for index in range(60)]
+    closes.extend([50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37.5, 37, 36.5, 36, 35.5, 35, 32.5])
+    bars = _bars_from_closes_for_strategy_lane(closes, start=date(2026, 1, 1))
+
+    score = score_dragon_pullback(
+        "688711.SSE",
+        bars,
+        bars[-1].trade_date,
+        sector_score=60.0,
+        financial_score=55.0,
+        fund_flow_score=55.0,
+        hot_rank_score=55.0,
+        lhb_score=55.0,
+    )
+
+    assert score.entry_signal is True
+    assert score.evidence["entry_setup"] == "oversold_rebound_start"
+    assert score.evidence["rebound_subtype"] == "deep_low_absorption_reversal"
+    assert score.evidence["deep_low_absorption_reversal"] is True
+    assert score.evidence["selected_score_lane"] == "oversold_rebound_start"
+    assert score.evidence["latest_change_pct"] <= -5.0
+    assert score.evidence["close_location_in_range"] <= 0.25
+    assert score.evidence["near_limit_up_count_20d"] == 0
+    assert 0.5 <= score.evidence["latest_volume_ratio_20d"] <= 1.8
     assert score.evidence["failed_rules"] == []
 
 

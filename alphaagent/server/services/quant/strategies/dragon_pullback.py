@@ -27,12 +27,13 @@ from alphaagent.server.services.quant.low_suction_quality import (
 )
 
 
-DRAGON_PULLBACK_STRATEGY_VERSION = "0.1.63"
+DRAGON_PULLBACK_STRATEGY_VERSION = "0.1.66"
 LOW_SUCTION_CONFIRMED_LAUNCH_BONUS = 1.2
 LOW_SUCTION_BALANCED_FIRST_LIFT_BONUS = 1.6
 SETUP_OVERSOLD_REBOUND_START = "oversold_rebound_start"
 SETUP_BOTTOM_RECLAIM = "bottom_reclaim"
 SETUP_SECONDARY_BREAKOUT_CONFIRM = "secondary_breakout_confirm"
+SETUP_DEEP_LOW_ABSORPTION = "deep_low_absorption_reversal"
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,8 @@ class DragonFeatures:
     volume5: float | None
     volume20: float | None
     volume_ratio: float | None
+    latest_volume_ratio_20d: float | None
+    latest_turnover_ratio_20d: float | None
     turnover20: float | None
     turnover_percentile_60d: float | None
     pivot_high_20d: float
@@ -242,6 +245,7 @@ def score_dragon_pullback(
         and features.ma20_distance_pct >= -3.2
         and state not in ("INVALIDATED", "DISTRIBUTION_RISK", "TAIL_BUY_READY")
     )
+    entry_risk_ok = _entry_risk_gate_ok(risk, selected_setup_type=selected_setup_type, oversold_lane=oversold_lane)
     entry_signal = (
         total >= 72
         and (
@@ -259,7 +263,7 @@ def score_dragon_pullback(
             )
         )
         and liquidity >= 25
-        and risk >= 35
+        and entry_risk_ok
     )
 
     result.total_score = round(total, 4)
@@ -333,6 +337,8 @@ def _build_features(bars: list[Bar]) -> DragonFeatures:
     ma10_prev = moving_average(previous_closes, 10)
     volume5 = moving_average(volumes, 5)
     volume20 = moving_average(volumes, 20)
+    volume20_prev = moving_average(volumes[:-1], 20)
+    turnover20_prev = moving_average(turnovers[:-1], 20)
     turnover20 = moving_average(turnovers, 20)
     recent_highs = highs[-20:]
     pivot_high = max(recent_highs)
@@ -371,6 +377,8 @@ def _build_features(bars: list[Bar]) -> DragonFeatures:
         volume5=volume5,
         volume20=volume20,
         volume_ratio=volume5 / volume20 if volume5 is not None and volume20 else None,
+        latest_volume_ratio_20d=(latest.volume or 0) / volume20_prev if volume20_prev else None,
+        latest_turnover_ratio_20d=daily_turnover_yuan(latest) / turnover20_prev if turnover20_prev else None,
         turnover20=turnover20,
         turnover_percentile_60d=_percentile_rank(turnovers[-60:], latest.turnover or daily_turnover_yuan(latest)),
         pivot_high_20d=pivot_high,
@@ -1028,12 +1036,22 @@ def _score_oversold_rebound_lane(
             evidence = secondary
             subtype = SETUP_SECONDARY_BREAKOUT_CONFIRM
             raw_score = _secondary_breakout_confirm_raw_score(secondary)
+        else:
+            absorption = _deep_low_absorption_reversal_evidence(features)
+            if absorption is not None:
+                evidence = absorption
+                subtype = SETUP_DEEP_LOW_ABSORPTION
+                raw_score = _deep_low_absorption_raw_score(absorption)
 
     if evidence is None:
         return None
 
     failed_rules = _oversold_rebound_failed_rules(features, evidence, liquidity=liquidity, risk=risk)
-    subtype_bonus = 4.0 if subtype == SETUP_BOTTOM_RECLAIM else (2.5 if subtype == SETUP_SECONDARY_BREAKOUT_CONFIRM else 0.0)
+    subtype_bonus = (
+        7.5
+        if subtype == SETUP_DEEP_LOW_ABSORPTION
+        else (4.0 if subtype == SETUP_BOTTOM_RECLAIM else (2.5 if subtype == SETUP_SECONDARY_BREAKOUT_CONFIRM else 0.0))
+    )
     score = (
         0.66 * raw_score
         + 0.12 * liquidity
@@ -1197,6 +1215,117 @@ def _bottom_reclaim_lane_evidence(visible_bars: list[Bar]) -> dict[str, object] 
             "MA20未远离，偏起步而非后段加速",
         ],
     }
+
+
+def _deep_low_absorption_reversal_evidence(features: DragonFeatures) -> dict[str, object] | None:
+    if len(features.closes) < 60:
+        return None
+    if features.latest_change_pct is None or features.latest_change_pct > -5.0:
+        return None
+    if features.close_location_in_range is None or features.close_location_in_range > 0.25:
+        return None
+    deep_position = bool(
+        (features.return_20d is not None and features.return_20d <= -20.0)
+        or (features.ma20_distance_pct is not None and features.ma20_distance_pct <= -10.0)
+    )
+    if not deep_position:
+        return None
+    if features.near_limit_up_count_20d > 0:
+        return None
+    latest_volume_ratio = features.latest_volume_ratio_20d
+    if latest_volume_ratio is None or not (0.50 <= latest_volume_ratio <= 1.80):
+        return None
+    if features.latest_turnover_ratio_20d is not None and features.latest_turnover_ratio_20d > 2.20:
+        return None
+    if features.turnover_percentile_60d is not None and features.turnover_percentile_60d > 0.94:
+        return None
+    recent_high = max(features.highs[-20:])
+    recent_low = min(features.lows[-20:])
+    low_index_from_end = len(features.lows[-20:]) - 1 - features.lows[-20:].index(recent_low)
+    drawdown = pct_distance(features.latest.close_price, recent_high)
+    rebound = pct_distance(features.latest.close_price, recent_low)
+    if drawdown is None or rebound is None:
+        return None
+    if drawdown > -10.0:
+        return None
+    ma5_history = _ma_distance_history(features.closes, 5, 8)
+    ma10_history = _ma_distance_history(features.closes, 10, 8)
+    strength = _deep_low_absorption_strength_score(features, drawdown=drawdown, low_index_from_end=low_index_from_end)
+    return {
+        "setup_type": SETUP_OVERSOLD_REBOUND_START,
+        "entry_setup": SETUP_OVERSOLD_REBOUND_START,
+        "setup_family": SETUP_OVERSOLD_REBOUND_START,
+        "rebound_subtype": SETUP_DEEP_LOW_ABSORPTION,
+        "bottom_reclaim": False,
+        "secondary_breakout_confirm": False,
+        "deep_low_absorption_reversal": True,
+        "drawdown_from_20d_high_pct": round(drawdown, 4),
+        "rebound_from_20d_low_pct": round(rebound, 4),
+        "low_index_from_end_20d": low_index_from_end,
+        "ma5": features.ma5,
+        "ma10": features.ma10,
+        "ma20": features.ma20,
+        "ma5_distance_pct": features.ma5_distance_pct,
+        "ma10_distance_pct": features.ma10_distance_pct,
+        "ma20_distance_pct": features.ma20_distance_pct,
+        "ma5_distance_delta_3d": _distance_delta(ma5_history, 3),
+        "ma10_distance_delta_3d": _distance_delta(ma10_history, 3),
+        "bottom_ma_repair_stage": "panic_low_absorption",
+        "bottom_ma_repair_strength_score": strength,
+        "bottom_ma_repair_strength_bucket": _bottom_repair_strength_bucket(strength),
+        "bottom_ma_repair_ma20_context": _oversold_ma20_context(features.ma20_distance_pct),
+        "latest_change_pct": features.latest_change_pct,
+        "latest_volume_ratio_20d": round(latest_volume_ratio, 4),
+        "latest_turnover_ratio_20d": round(features.latest_turnover_ratio_20d, 4)
+        if features.latest_turnover_ratio_20d is not None
+        else None,
+        "return_5d": features.return_5d,
+        "return_10d": period_return(features.closes[-20:], 10),
+        "score_notes": [
+            "深度超跌低位承接",
+            "D日长阴低收但量能未失控",
+            "近20日无涨停源，按隔日恐慌反抽处理",
+        ],
+    }
+
+
+def _deep_low_absorption_strength_score(features: DragonFeatures, *, drawdown: float, low_index_from_end: int) -> float:
+    score = 42.0
+    if features.return_20d is not None and features.return_20d <= -20.0:
+        score += 16.0
+    if features.ma20_distance_pct is not None and features.ma20_distance_pct <= -10.0:
+        score += 16.0
+    if drawdown <= -20.0:
+        score += 10.0
+    if low_index_from_end <= 1:
+        score += 8.0
+    if features.latest_volume_ratio_20d is not None and 0.65 <= features.latest_volume_ratio_20d <= 1.45:
+        score += 8.0
+    if features.latest_turnover_ratio_20d is not None and features.latest_turnover_ratio_20d <= 1.35:
+        score += 5.0
+    if features.turnover_percentile_60d is not None and features.turnover_percentile_60d <= 0.75:
+        score += 5.0
+    return round(min(score, 100.0), 4)
+
+
+def _deep_low_absorption_raw_score(evidence: dict[str, object]) -> float:
+    score = 56.0
+    drawdown = _float(evidence.get("drawdown_from_20d_high_pct"))
+    ma20_distance = _float(evidence.get("ma20_distance_pct"))
+    latest_change = _float(evidence.get("latest_change_pct"))
+    latest_volume_ratio = _float(evidence.get("latest_volume_ratio_20d"))
+    repair_score = _float(evidence.get("bottom_ma_repair_strength_score"))
+    if drawdown is not None and drawdown <= -20.0:
+        score += 10.0
+    if ma20_distance is not None and ma20_distance <= -10.0:
+        score += 10.0
+    if latest_change is not None and -11.5 <= latest_change <= -5.0:
+        score += 9.0
+    if latest_volume_ratio is not None and 0.65 <= latest_volume_ratio <= 1.45:
+        score += 8.0
+    if repair_score is not None and repair_score >= 70.0:
+        score += 7.0
+    return round(min(score, 100.0), 4)
 
 
 def _secondary_breakout_confirm_evidence(features: DragonFeatures) -> dict[str, object] | None:
@@ -1473,9 +1602,11 @@ def _oversold_rebound_failed_rules(
     risk: float,
 ) -> list[str]:
     failed: list[str] = []
+    subtype = str(evidence.get("rebound_subtype") or "")
     if liquidity < 25:
         failed.append("liquidity_score")
-    if risk < 35:
+    min_risk = 20.0 if subtype == SETUP_DEEP_LOW_ABSORPTION else 35.0
+    if risk < min_risk:
         failed.append("risk_score")
     if features.high_level_sideways_distribution_risk or features.volume_stall_risk:
         failed.append("distribution_risk")
@@ -1488,6 +1619,17 @@ def _oversold_rebound_failed_rules(
     if rebound is not None and rebound > 22.0:
         failed.append("rebound_chase")
     return failed
+
+
+def _entry_risk_gate_ok(risk: float, *, selected_setup_type: str, oversold_lane: OversoldReboundLane | None) -> bool:
+    if risk >= 35.0:
+        return True
+    return bool(
+        selected_setup_type == SETUP_OVERSOLD_REBOUND_START
+        and oversold_lane is not None
+        and oversold_lane.subtype == SETUP_DEEP_LOW_ABSORPTION
+        and risk >= 20.0
+    )
 
 
 def _selected_setup_type(
@@ -1529,6 +1671,7 @@ def _apply_oversold_rebound_lane_evidence(
     payload["rebound_subtype"] = oversold_lane.subtype
     payload["bottom_reclaim"] = oversold_lane.subtype == SETUP_BOTTOM_RECLAIM
     payload["secondary_breakout_confirm"] = oversold_lane.subtype == SETUP_SECONDARY_BREAKOUT_CONFIRM
+    payload["deep_low_absorption_reversal"] = oversold_lane.subtype == SETUP_DEEP_LOW_ABSORPTION
     payload["failed_rules"] = list(oversold_lane.failed_rules)
     payload["signal_label"] = "超跌反弹买点"
     payload["signal_role"] = "key_buy"
@@ -1669,6 +1812,8 @@ def _evidence(
         "volume5": features.volume5,
         "volume20": features.volume20,
         "volume_ratio_5d_20d": features.volume_ratio,
+        "latest_volume_ratio_20d": features.latest_volume_ratio_20d,
+        "latest_turnover_ratio_20d": features.latest_turnover_ratio_20d,
         "turnover20": features.turnover20,
         "turnover_percentile_60d": features.turnover_percentile_60d,
         "turnover_estimated_from_volume": False,

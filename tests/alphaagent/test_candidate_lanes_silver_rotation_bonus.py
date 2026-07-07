@@ -218,6 +218,176 @@ def test_silver_pressure_fresh_buildup_bonus_requires_frontrow_quality() -> None
     assert candidate_lanes.dragon_pullback_timing_opportunity_bonus(weak_theme) == 0.0
 
 
+def test_oversold_silver_repair_low_turnover_bonus_matches_repair_winner_shape() -> None:
+    candidate = SimpleNamespace(
+        vt_symbol="603002.SSE",
+        total_score=88.0,
+        evidence={
+            "entry_setup": "oversold_rebound_start",
+            "setup_family": "oversold_rebound_start",
+            "timing_window": "after_silver_6_20",
+            "market_phase": "retreat",
+            "return_20d": -8.6,
+            "ma20_distance_pct": -4.2,
+            "latest_change_pct": 1.4,
+            "close_location_in_range": 0.58,
+            "volume_ratio_5d_20d": 0.96,
+            "latest_turnover_ratio_20d": 0.84,
+            "near_limit_up_count_20d": 0,
+        },
+    )
+
+    reasons = candidate_lanes.dragon_pullback_timing_opportunity_reasons(candidate)
+    keys = {reason["key"] for reason in reasons}
+
+    assert candidate_lanes.dragon_pullback_timing_opportunity_bonus(candidate) == 7.55
+    assert "oversold_silver_6_20_retreat" in keys
+    assert "oversold_silver_repair_low_turnover" in keys
+
+
+def test_oversold_silver_repair_low_turnover_rejects_crowded_high_turnover() -> None:
+    candidate = SimpleNamespace(
+        vt_symbol="RISK.SZSE",
+        total_score=88.0,
+        evidence={
+            "entry_setup": "oversold_rebound_start",
+            "setup_family": "oversold_rebound_start",
+            "timing_window": "after_silver_6_20",
+            "market_phase": "retreat",
+            "return_20d": -8.6,
+            "ma20_distance_pct": -4.2,
+            "latest_change_pct": 1.4,
+            "close_location_in_range": 0.58,
+            "volume_ratio_5d_20d": 0.96,
+            "latest_turnover_ratio_20d": 1.46,
+            "near_limit_up_count_20d": 2,
+        },
+    )
+
+    keys = {reason["key"] for reason in candidate_lanes.dragon_pullback_timing_opportunity_reasons(candidate)}
+
+    assert "oversold_silver_repair_low_turnover" not in keys
+    assert candidate_lanes.dragon_pullback_timing_opportunity_bonus(candidate) == 3.9
+
+
+def test_low_base_buildup_safe_bonus_matches_controlled_low_suction_shape() -> None:
+    candidate = SimpleNamespace(
+        vt_symbol="603738.SSE",
+        total_score=84.0,
+        evidence={
+            "entry_setup": "stealth_low_suction",
+            "setup_type": "stealth_low_suction",
+            "timing_window": "after_silver_6_20",
+            "market_phase": "retreat",
+            "low_suction_stage": "buildup",
+            "low_suction_days": 4,
+            "pullback_days": 6,
+            "return_20d": 9.2,
+            "ma20_distance_pct": 2.6,
+            "volume_ratio_5d_20d": 0.94,
+            "latest_turnover_ratio_20d": 0.91,
+            "close_location_in_range": 0.62,
+        },
+    )
+
+    reasons = candidate_lanes.dragon_pullback_timing_opportunity_reasons(candidate)
+    keys = {reason["key"] for reason in reasons}
+
+    assert candidate_lanes.dragon_pullback_timing_opportunity_bonus(candidate) == 6.7
+    assert "low_suction_buildup_silver_6_20_retreat" in keys
+    assert "low_base_buildup_safe" in keys
+    assert "low_base_buildup_pressure_window" in keys
+
+
+def test_low_base_buildup_safe_rejects_short_hot_push() -> None:
+    candidate = SimpleNamespace(
+        vt_symbol="HOT.SZSE",
+        total_score=84.0,
+        evidence={
+            "entry_setup": "stealth_low_suction",
+            "setup_type": "stealth_low_suction",
+            "timing_window": "after_silver_6_20",
+            "market_phase": "retreat",
+            "low_suction_stage": "buildup",
+            "low_suction_days": 2,
+            "pullback_days": 3,
+            "return_20d": 19.2,
+            "ma20_distance_pct": 7.6,
+            "volume_ratio_5d_20d": 1.34,
+            "latest_turnover_ratio_20d": 1.42,
+            "close_location_in_range": 0.88,
+        },
+    )
+
+    keys = {reason["key"] for reason in candidate_lanes.dragon_pullback_timing_opportunity_reasons(candidate)}
+
+    assert "low_base_buildup_safe" not in keys
+
+
+def test_low_suction_hot_short_push_filter_matches_failure_shape() -> None:
+    candidate = SimpleNamespace(
+        vt_symbol="002049.SZSE",
+        total_score=95.0,
+        evidence={
+            "entry_setup": "stealth_low_suction",
+            "setup_type": "stealth_low_suction",
+            "low_suction_launch_confirmed": True,
+            "low_suction_launch_quality_bucket": "high_close_launch",
+            "pullback_days": 3,
+            "return_5d": 10.79,
+            "close_location_in_range": 0.87,
+            "latest_turnover_ratio_20d": 1.54,
+            "turnover_percentile_60d": 0.88,
+        },
+    )
+
+    assert candidate_lanes.low_suction_hot_short_push_decay(candidate) is True
+    assert candidate_lanes.dragon_pullback_quality_filter_reason(candidate) == "low_suction_hot_short_push_decay"
+
+
+def test_gold_late_mid_high_close_stretch_filter_matches_failure_shape() -> None:
+    candidate = SimpleNamespace(
+        vt_symbol="603375.SSE",
+        total_score=94.0,
+        evidence={
+            "entry_setup": "dragon_pullback",
+            "setup_family": "dragon_pullback",
+            "timing_window": "after_gold_late",
+            "market_phase": "warming",
+            "return_20d": 24.91,
+            "ma20_distance_pct": 8.99,
+            "close_location_in_range": 0.74,
+            "latest_change_pct": 3.4,
+            "latest_turnover_ratio_20d": 0.96,
+        },
+    )
+
+    assert candidate_lanes.gold_late_mid_high_close_stretch_decay(candidate) is True
+    assert candidate_lanes.dragon_pullback_quality_filter_reason(candidate) == "gold_late_mid_high_close_stretch_decay"
+
+
+def test_overlap_unconfirmed_fast_push_filter_matches_failure_shape() -> None:
+    candidate = SimpleNamespace(
+        vt_symbol="001896.SZSE",
+        total_score=96.0,
+        evidence={
+            "entry_setup": "dragon_pullback",
+            "entry_family": "dragon_pullback",
+            "timing_window": "after_silver_late",
+            "market_phase": "retreat",
+            "low_suction_days": 3,
+            "low_suction_launch_quality_bucket": "unconfirmed_buildup",
+            "latest_change_pct": 7.63,
+            "close_location_in_range": 0.83,
+            "return_20d": 23.4,
+            "near_limit_up_count_20d": 2,
+        },
+    )
+
+    assert candidate_lanes.overlap_unconfirmed_fast_push_decay(candidate) is True
+    assert candidate_lanes.dragon_pullback_quality_filter_reason(candidate) == "overlap_unconfirmed_fast_push_decay"
+
+
 def test_gold_late_overheated_dragon_quality_filter_matches_may_failure_shape() -> None:
     candidate = SimpleNamespace(
         vt_symbol="002491.SZSE",
@@ -1314,4 +1484,123 @@ def test_gold_early_oversold_no_active_low_close_keeps_silver_repair_winner() ->
     )
 
     assert candidate_lanes.gold_early_oversold_no_active_low_close_decay(candidate) is False
+    assert candidate_lanes.dragon_pullback_quality_filter_reason(candidate) is None
+
+
+def test_deep_low_absorption_reversal_gets_unified_opportunity_bonus() -> None:
+    candidate = SimpleNamespace(
+        vt_symbol="688711.SSE",
+        total_score=82.0,
+        evidence={
+            "entry_setup": "oversold_rebound_start",
+            "setup_type": "oversold_rebound_start",
+            "setup_family": "oversold_rebound_start",
+            "rebound_subtype": "deep_low_absorption_reversal",
+            "deep_low_absorption_reversal": True,
+            "market_phase": "retreat",
+            "latest_volume_ratio_20d": 0.92,
+            "latest_turnover_ratio_20d": 1.05,
+        },
+    )
+
+    reasons = candidate_lanes.dragon_pullback_timing_opportunity_reasons(candidate)
+    keys = {reason["key"] for reason in reasons}
+
+    assert candidate_lanes.dragon_pullback_timing_opportunity_bonus(candidate) == 8.7
+    assert "deep_low_absorption_reversal" in keys
+    assert "deep_low_absorption_pressure_window" in keys
+    assert "deep_low_absorption_controlled_volume" in keys
+
+
+def test_deep_low_absorption_early_silver_late_retreat_is_capped() -> None:
+    candidate = SimpleNamespace(
+        vt_symbol="001270.SZSE",
+        total_score=94.0,
+        evidence={
+            "entry_setup": "oversold_rebound_start",
+            "setup_type": "oversold_rebound_start",
+            "setup_family": "oversold_rebound_start",
+            "rebound_subtype": "deep_low_absorption_reversal",
+            "deep_low_absorption_reversal": True,
+            "timing_window": "after_silver_late",
+            "market_phase": "retreat",
+            "nearest_timing_days": 23,
+            "latest_volume_ratio_20d": 0.82,
+            "latest_turnover_ratio_20d": 0.78,
+        },
+    )
+
+    assert candidate_lanes.deep_low_absorption_early_silver_late_retreat_decay(candidate) is True
+    assert candidate_lanes.dragon_pullback_timing_opportunity_bonus(candidate) == 0.0
+    assert candidate_lanes.dragon_pullback_opportunity_score(candidate) == 82.0
+
+
+def test_deep_low_absorption_later_silver_late_retreat_keeps_bonus() -> None:
+    candidate = SimpleNamespace(
+        vt_symbol="002414.SZSE",
+        total_score=84.0,
+        evidence={
+            "entry_setup": "oversold_rebound_start",
+            "setup_type": "oversold_rebound_start",
+            "setup_family": "oversold_rebound_start",
+            "rebound_subtype": "deep_low_absorption_reversal",
+            "deep_low_absorption_reversal": True,
+            "timing_window": "after_silver_late",
+            "market_phase": "retreat",
+            "nearest_timing_days": 30,
+            "latest_volume_ratio_20d": 0.89,
+            "latest_turnover_ratio_20d": 0.84,
+        },
+    )
+
+    assert candidate_lanes.deep_low_absorption_early_silver_late_retreat_decay(candidate) is False
+    assert candidate_lanes.dragon_pullback_timing_opportunity_bonus(candidate) == 8.7
+    assert candidate_lanes.dragon_pullback_opportunity_score(candidate) == 92.7
+
+
+def test_overheated_crowded_high_turnover_decay_matches_d1_big_down_shape() -> None:
+    candidate = SimpleNamespace(
+        vt_symbol="000890.SZSE",
+        total_score=92.0,
+        evidence={
+            "entry_setup": "dragon_pullback",
+            "setup_type": "dragon_pullback",
+            "setup_family": "dragon_pullback",
+            "return_20d": 86.7,
+            "ma20_distance_pct": 27.7,
+            "near_limit_up_count_20d": 8,
+            "latest_turnover_ratio_20d": 1.55,
+            "turnover_percentile_60d": 0.91,
+            "volume_ratio_5d_20d": 1.35,
+            "turnover20": 1_500_000_000,
+            "close_location_in_range": 0.42,
+            "latest_change_pct": 6.4,
+        },
+    )
+
+    assert candidate_lanes.overheated_crowded_high_turnover_decay(candidate) is True
+    assert candidate_lanes.dragon_pullback_quality_filter_reason(candidate) == "overheated_crowded_high_turnover_decay"
+
+
+def test_overheated_crowded_high_turnover_filter_keeps_strong_close_not_crowded_shape() -> None:
+    candidate = SimpleNamespace(
+        vt_symbol="002409.SZSE",
+        total_score=92.0,
+        evidence={
+            "entry_setup": "dragon_pullback",
+            "setup_type": "dragon_pullback",
+            "setup_family": "dragon_pullback",
+            "return_20d": 18.7,
+            "ma20_distance_pct": -1.8,
+            "near_limit_up_count_20d": 2,
+            "latest_turnover_ratio_20d": 1.35,
+            "turnover_percentile_60d": 0.83,
+            "volume_ratio_5d_20d": 1.15,
+            "turnover20": 800_000_000,
+            "close_location_in_range": 0.88,
+            "latest_change_pct": 5.5,
+        },
+    )
+
+    assert candidate_lanes.overheated_crowded_high_turnover_decay(candidate) is False
     assert candidate_lanes.dragon_pullback_quality_filter_reason(candidate) is None
