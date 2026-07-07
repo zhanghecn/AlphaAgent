@@ -191,6 +191,7 @@ def screen_stocks(
                 boards,
                 max_symbols=max_symbols,
                 persist_signal_details=persist_signal_details,
+                daily_symbol_count=as_of_daily_symbol_count,
             )
             if auto_portfolio:
                 portfolio_sync = _sync_quant_candidate_group(session, recommendations, stock_meta, strategy.id, strategy.version)
@@ -653,6 +654,14 @@ def screen_stocks_range(
                     included_boards=boards,
                 )
         existing_runs = _screen_runs_by_date(session, strategy.id, strategy.version, trade_dates, max_symbols=max_symbols, included_boards=tuple(boards))
+        latest_trade_date = trade_dates[-1] if trade_dates else None
+        if latest_trade_date is not None:
+            existing_latest_run = existing_runs.get(latest_trade_date)
+            if existing_latest_run and not _screen_run_daily_count_matches(
+                existing_latest_run,
+                _daily_symbol_count(session, latest_trade_date),
+            ):
+                existing_runs.pop(latest_trade_date, None)
 
     if not trade_dates:
         if incomplete_range_payload is not None:
@@ -1479,7 +1488,7 @@ def _latest_screen_run(session, strategy_id: str, trade_date: date | None = None
             return None
     elif not _daily_data_is_complete(session, trade_date):
         return None
-    return screening_loaders.latest_screen_run(
+    run = screening_loaders.latest_screen_run(
         session,
         strategy_id,
         strategy_version,
@@ -1487,6 +1496,18 @@ def _latest_screen_run(session, strategy_id: str, trade_date: date | None = None
         max_trade_date=max_trade_date,
         signal_evidence_schema_version=screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
     )
+    if not run:
+        return None
+    run_trade_date = run.get("trade_date")
+    try:
+        latest_daily_date = _latest_trade_date(session)
+    except Exception:
+        latest_daily_date = None
+    if run_trade_date == latest_daily_date:
+        daily_symbol_count = _daily_symbol_count(session, run_trade_date)
+        if not _screen_run_daily_count_matches(run, daily_symbol_count):
+            return None
+    return run
 
 
 def _screen_runs_by_date(
@@ -1516,6 +1537,15 @@ def _screen_run_matches_params(run: dict[str, Any], *, max_symbols: int, include
     if params.get("signal_evidence_schema_version") != screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION:
         return False
     return tuple(normalize_included_boards(params.get("included_boards"))) == tuple(normalize_included_boards(included_boards))
+
+
+def _screen_run_daily_count_matches(run: dict[str, Any], daily_symbol_count: int) -> bool:
+    params = run.get("params") if isinstance(run.get("params"), dict) else {}
+    try:
+        run_daily_symbol_count = int(params.get("daily_symbol_count"))
+    except (TypeError, ValueError):
+        return False
+    return run_daily_symbol_count == int(daily_symbol_count or 0)
 
 
 def _screen_result_from_existing_run(
@@ -2132,6 +2162,7 @@ def _persist_screen_run(
     included_boards: tuple[str, ...] = DEFAULT_QUANT_INCLUDED_BOARDS,
     max_symbols: int = 5000,
     persist_signal_details: bool = True,
+    daily_symbol_count: int | None = None,
 ) -> int:
     if isinstance(strategy_version, tuple):
         included_boards = strategy_version
@@ -2146,6 +2177,7 @@ def _persist_screen_run(
         included_boards,
         max_symbols=max_symbols,
         persist_signal_details=persist_signal_details,
+        daily_symbol_count=daily_symbol_count,
     )
 
 

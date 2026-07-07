@@ -25,6 +25,7 @@ def persist_screen_run(
     included_boards: tuple[str, ...] = DEFAULT_QUANT_INCLUDED_BOARDS,
     max_symbols: int = 5000,
     persist_signal_details: bool = True,
+    daily_symbol_count: int | None = None,
 ) -> int:
     now = datetime.now(timezone.utc)
     strategy = require_strategy(strategy_id)
@@ -40,6 +41,7 @@ def persist_screen_run(
             params={
                 "included_boards": list(included_boards),
                 "max_symbols": int(max_symbols),
+                "daily_symbol_count": int(daily_symbol_count or 0),
                 "signal_evidence_schema_version": screening_payloads.SIGNAL_EVIDENCE_SCHEMA_VERSION,
             },
             candidate_count=len(scored_candidates),
