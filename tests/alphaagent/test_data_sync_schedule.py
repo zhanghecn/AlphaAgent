@@ -108,6 +108,7 @@ def test_tail_quant_schedule_triggers_quant_research():
     tail_quant = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "tail_quant_1430")
     assert tail_quant["action"] == "tail_preview"
     assert tail_quant["cron"] == "30 14 * * 1-5"
+    assert tail_quant["concurrency"] <= 6
     assert "sync_stock_list" not in tail_quant["job_ids"]
     assert "sync_stock_minute_bars" in tail_quant["job_ids"]
     assert "sync_sector_fund_flows" in tail_quant["job_ids"]
@@ -1398,6 +1399,34 @@ def test_minute_increment_uses_start_date_from_last_bar(monkeypatch):
 
     assert str(requested["000001"]).startswith("2026-06-11")
     assert requested["000002"] in (None, "")
+
+
+def test_minute_increment_uses_live_window_for_current_day(monkeypatch):
+    import datetime as dt
+    from alphaagent.market.symbols import vt_symbol as make_vts
+
+    requested: dict[str, Any] = {}
+
+    class FakeAdapter:
+        def stock_bars(self, symbol, exchange=None, limit=90, interval="1m", start_date=None, end_date=None):
+            requested[symbol] = start_date
+            return {"items": [], "source": "akshare"}
+
+    key1 = make_vts("000001", "SSE")
+    monkeypatch.setattr(svc, "_now_china", lambda: dt.datetime(2026, 7, 7, 14, 30, tzinfo=dt.timezone(dt.timedelta(hours=8))))
+    monkeypatch.setattr(svc, "_last_bar_dates_minute", lambda vts, interval: {key1: "2026-07-06"})
+    monkeypatch.setattr(
+        svc,
+        "_select_minute_bar_stocks",
+        lambda *args, **kwargs: [{"symbol": "000001", "exchange": "SSE", "name": "X"}],
+    )
+    monkeypatch.setattr(svc, "_upsert_minute_bars", lambda *a, **k: 0)
+
+    svc.DataSyncRunner(adapter=FakeAdapter(), concurrency=1)._run_sync_stock_minute_bars(
+        {"mode": "recent", "interval": "1m", "limit": 240, "stock_limit": 100, "incremental": True}
+    )
+
+    assert requested["000001"] is None
 
 
 # ── Task 8: scheduler drives batch schedules instead of per-job crons ─

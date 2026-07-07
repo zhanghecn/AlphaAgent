@@ -22,6 +22,9 @@ class Settings(BaseSettings):
         alias="CORS_ORIGINS",
     )
     database_url: str = Field(default="", alias="DATABASE_URL")
+    database_pool_size: int = Field(default=20, alias="DATABASE_POOL_SIZE")
+    database_max_overflow: int = Field(default=20, alias="DATABASE_MAX_OVERFLOW")
+    database_pool_timeout_seconds: float = Field(default=60.0, alias="DATABASE_POOL_TIMEOUT_SECONDS")
     redis_url: str = Field(default="redis://host.docker.internal:6379/0", alias="REDIS_URL")
     market_timeout_seconds: float = Field(default=8.0, alias="MARKET_TIMEOUT_SECONDS")
     market_page_size: int = Field(default=50, alias="MARKET_PAGE_SIZE")

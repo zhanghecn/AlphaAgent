@@ -32,15 +32,17 @@ def get_engine() -> Engine:
     """Return the process-wide SQLAlchemy engine."""
 
     global _engine
-    database_url = get_settings().database_url.strip()
+    settings = get_settings()
+    database_url = settings.database_url.strip()
     if not database_url:
         raise DatabaseUnavailable("DATABASE_URL is not configured")
     if _engine is None:
         _engine = create_engine(
             database_url,
             pool_pre_ping=True,
-            pool_size=5,
-            max_overflow=5,
+            pool_size=max(1, int(settings.database_pool_size)),
+            max_overflow=max(0, int(settings.database_max_overflow)),
+            pool_timeout=max(1, float(settings.database_pool_timeout_seconds)),
             future=True,
         )
     return _engine
@@ -169,4 +171,3 @@ def safe_database_dsn() -> str:
 def _looks_like_missing_database(exc: OperationalError, database: str) -> bool:
     message = str(exc).lower()
     return database.lower() in message and ("does not exist" in message or "不存在" in message)
-

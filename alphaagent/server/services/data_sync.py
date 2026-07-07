@@ -429,7 +429,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "cron": "30 14 * * 1-5",
         "action": "tail_preview",
         "enabled": True,
-        "concurrency": 12,
+        "concurrency": 6,
         "job_ids": [
             "sync_stock_minute_bars",
             "sync_stock_fund_flows",
@@ -848,8 +848,9 @@ class DataSyncRunner:
             stock_name = str(stock_row.get("name") or symbol)
             current_vts = vt_symbol(symbol, exchange)
             stock_start = _next_day(last_dates.get(current_vts)) if last_dates.get(current_vts) else start_date
+            adapter_start = _minute_adapter_start_date(stock_start, end_date)
             try:
-                data = self.adapter.stock_bars(symbol, exchange, limit=limit, interval=interval, start_date=stock_start, end_date=end_date)
+                data = self.adapter.stock_bars(symbol, exchange, limit=limit, interval=interval, start_date=adapter_start, end_date=end_date)
             except Exception as exc:
                 logger.debug("stock_minute_bars(%s, %s) failed: %s", symbol, interval, exc)
                 with lock:
@@ -4805,6 +4806,23 @@ def _next_day(date_value: Any) -> str | None:
     except Exception:
         return None
     return (d + timedelta(days=1)).isoformat()
+
+
+def _minute_adapter_start_date(start_date: Any, end_date: date | None) -> Any:
+    """Use the live minute endpoint for current-day incremental refreshes.
+
+    AkShare/EastMoney historical minute queries can return empty rows for the
+    current trading day when a start date is supplied. For realtime 14:30 syncs
+    we fetch the latest live minute window and let the DB upsert skip existing
+    bars. Historical bounded requests keep their explicit start date.
+    """
+
+    if end_date is not None or not start_date:
+        return start_date
+    parsed = _parse_date(start_date)
+    if parsed == _now_china().date():
+        return None
+    return start_date
 
 
 def _incremental_daily_start_date(date_value: Any, refresh_days: int) -> str | None:
