@@ -140,6 +140,7 @@ stock_daily_bars = Table(
     Column("low_price", Float, nullable=False),
     Column("volume", Float, nullable=True),
     Column("turnover", Float, nullable=True),
+    Column("turnover_rate", Float, nullable=True),
     Column("change_pct", Float, nullable=True),
     Column("source", String(160), nullable=False),
     Column("raw", JSONB, nullable=False, server_default="{}"),
@@ -230,6 +231,34 @@ stock_sector_memberships = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
 )
 Index("ix_stock_sector_memberships_sector", stock_sector_memberships.c.sector_id)
+
+stock_sector_membership_snapshots = Table(
+    "stock_sector_membership_snapshots",
+    metadata,
+    Column("snapshot_date", Date, primary_key=True),
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("sector_id", String(64), primary_key=True),
+    Column("captured_at", DateTime(timezone=True), nullable=False),
+    Column("sector_name", String(160), nullable=False),
+    Column("sector_type", String(40), nullable=False),
+    Column("rank", Integer, nullable=True),
+    Column("confirmed", Boolean, nullable=True),
+    Column("is_precise", Boolean, nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index(
+    "ix_stock_sector_membership_snapshots_symbol_date",
+    stock_sector_membership_snapshots.c.vt_symbol,
+    stock_sector_membership_snapshots.c.snapshot_date,
+)
+Index(
+    "ix_stock_sector_membership_snapshots_sector_date",
+    stock_sector_membership_snapshots.c.sector_id,
+    stock_sector_membership_snapshots.c.snapshot_date,
+)
 
 stock_business_segments = Table(
     "stock_business_segments",
@@ -546,6 +575,78 @@ stock_events = Table(
 Index("ix_stock_events_vt_symbol", stock_events.c.vt_symbol)
 Index("ix_stock_events_date", stock_events.c.event_date)
 
+
+limit_up_signal_snapshots = Table(
+    "limit_up_signal_snapshots",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("trade_date", Date, nullable=False),
+    Column("captured_at", DateTime(timezone=True), nullable=False),
+    Column("captured_minute", DateTime(timezone=True), nullable=False),
+    Column("session_stage", String(32), nullable=False),
+    Column("strategy_version", String(40), nullable=False),
+    Column("mode", String(32), nullable=False, server_default="live_snapshot"),
+    Column("source", String(160), nullable=False),
+    Column("source_updated_at", DateTime(timezone=True), nullable=True),
+    Column("market_context", JSONB, nullable=False, server_default="{}"),
+    Column("candidates", JSONB, nullable=False, server_default="[]"),
+    Column("recommendations", JSONB, nullable=False, server_default="{}"),
+    Column("data_quality", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+    UniqueConstraint(
+        "trade_date",
+        "captured_minute",
+        "strategy_version",
+        name="uq_limit_up_signal_snapshot_minute_version",
+    ),
+)
+Index(
+    "ix_limit_up_signal_snapshots_date_time",
+    limit_up_signal_snapshots.c.trade_date,
+    limit_up_signal_snapshots.c.captured_at,
+)
+
+
+limit_up_history_replays = Table(
+    "limit_up_history_replays",
+    metadata,
+    Column("trade_date", Date, primary_key=True),
+    Column("strategy_version", String(40), primary_key=True),
+    Column("source_mode", String(40), nullable=False, server_default="daily_point_in_time"),
+    Column("payload", JSONB, nullable=False, server_default="{}"),
+    Column("coverage", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index(
+    "ix_limit_up_history_replays_version_date",
+    limit_up_history_replays.c.strategy_version,
+    limit_up_history_replays.c.trade_date,
+)
+
+
+limit_up_minute_backfill_attempts = Table(
+    "limit_up_minute_backfill_attempts",
+    metadata,
+    Column("vt_symbol", String(32), ForeignKey("stocks.vt_symbol", ondelete="CASCADE"), primary_key=True),
+    Column("trade_date", Date, primary_key=True),
+    Column("provider", String(40), primary_key=True),
+    Column("status", String(20), nullable=False),
+    Column("attempt_count", Integer, nullable=False, server_default="0"),
+    Column("last_rows_read", Integer, nullable=False, server_default="0"),
+    Column("last_error", Text, nullable=True),
+    Column("last_attempt_at", DateTime(timezone=True), nullable=False),
+    Column("next_retry_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index(
+    "ix_limit_up_minute_backfill_attempts_retry",
+    limit_up_minute_backfill_attempts.c.provider,
+    limit_up_minute_backfill_attempts.c.next_retry_at,
+)
+
 # ── Stock fund flows ──
 
 stock_fund_flows = Table(
@@ -584,6 +685,93 @@ sector_fund_flows = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
 )
 Index("ix_sector_fund_flows_date", sector_fund_flows.c.trade_date)
+
+sector_fund_flow_snapshots = Table(
+    "sector_fund_flow_snapshots",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("trade_date", Date, nullable=False),
+    Column("captured_at", DateTime(timezone=True), nullable=False),
+    Column("captured_minute", DateTime(timezone=True), nullable=False),
+    Column("session_stage", String(32), nullable=False),
+    Column("sector_id", String(64), nullable=False),
+    Column("sector_name", String(160), nullable=False),
+    Column("sector_type", String(40), nullable=False),
+    Column("period", String(20), nullable=False),
+    Column("change_pct", Float, nullable=True),
+    Column("main_net_inflow", Float, nullable=True),
+    Column("main_net_inflow_ratio", Float, nullable=True),
+    Column("super_large_net_inflow", Float, nullable=True),
+    Column("large_net_inflow", Float, nullable=True),
+    Column("medium_net_inflow", Float, nullable=True),
+    Column("small_net_inflow", Float, nullable=True),
+    Column("rank", Integer, nullable=True),
+    Column("rise_count", Integer, nullable=True),
+    Column("fall_count", Integer, nullable=True),
+    Column("flat_count", Integer, nullable=True),
+    Column("rise_ratio", Float, nullable=True),
+    Column("leader_stock", String(120), nullable=True),
+    Column("leader_stock_code", String(32), nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("source_updated_at", DateTime(timezone=True), nullable=True),
+    Column("is_stale", Boolean, nullable=False, server_default="false"),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+    UniqueConstraint(
+        "trade_date",
+        "sector_id",
+        "period",
+        "captured_minute",
+        name="uq_sector_fund_flow_snapshot_minute",
+    ),
+)
+Index(
+    "ix_sector_fund_flow_snapshots_date_time",
+    sector_fund_flow_snapshots.c.trade_date,
+    sector_fund_flow_snapshots.c.captured_at,
+)
+Index(
+    "ix_sector_fund_flow_snapshots_sector_time",
+    sector_fund_flow_snapshots.c.sector_id,
+    sector_fund_flow_snapshots.c.captured_at,
+)
+
+stock_auction_snapshots = Table(
+    "stock_auction_snapshots",
+    metadata,
+    Column("trade_date", Date, primary_key=True),
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("captured_at", DateTime(timezone=True), nullable=False),
+    Column("symbol", String(16), nullable=False),
+    Column("exchange", String(16), nullable=False),
+    Column("name", String(80), nullable=False),
+    Column("auction_price", Float, nullable=True),
+    Column("previous_close", Float, nullable=True),
+    Column("auction_change_pct", Float, nullable=True),
+    Column("matched_volume", Float, nullable=True),
+    Column("matched_amount", Float, nullable=True),
+    Column("unmatched_volume", Float, nullable=True),
+    Column("unmatched_side", String(20), nullable=True),
+    Column("auction_status", String(32), nullable=False),
+    Column("source_quote_time", String(40), nullable=True),
+    Column("source_updated_at", DateTime(timezone=True), nullable=True),
+    Column("strict_complete", Boolean, nullable=False, server_default="false"),
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index(
+    "ix_stock_auction_snapshots_date_capture",
+    stock_auction_snapshots.c.trade_date,
+    stock_auction_snapshots.c.captured_at,
+)
+Index(
+    "ix_stock_auction_snapshots_strict_date",
+    stock_auction_snapshots.c.strict_complete,
+    stock_auction_snapshots.c.trade_date,
+)
 
 # ── Stock hot ranks ──
 
@@ -1092,7 +1280,12 @@ def _apply_compatible_schema_patches(engine) -> None:
 
     patches = (
         "ALTER TABLE stocks ADD COLUMN IF NOT EXISTS volume_ratio FLOAT",
+        "ALTER TABLE stock_daily_bars ADD COLUMN IF NOT EXISTS turnover_rate FLOAT",
         "ALTER TABLE sync_batch_schedules ADD COLUMN IF NOT EXISTS action VARCHAR(40) NOT NULL DEFAULT 'sync'",
+        "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS rise_count INTEGER",
+        "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS fall_count INTEGER",
+        "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS flat_count INTEGER",
+        "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS rise_ratio FLOAT",
         """
         CREATE TABLE IF NOT EXISTS quant_tail_preview_cache (
             id BIGSERIAL PRIMARY KEY,

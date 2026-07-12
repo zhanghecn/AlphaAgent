@@ -196,6 +196,98 @@ export async function fetchMinuteGapImportTemplate(payload: {
   return response.text();
 }
 
+export function fetchLimitUpEvidenceImportStatus() {
+  return apiClient.get<LimitUpEvidenceImportStatus>(
+    "/data-sync/imports/limit-up-evidence/status",
+  );
+}
+
+export function importLimitUpEvidenceFromTushare(payload: {
+  dataset: LimitUpEvidenceDataset;
+  start_date: string;
+  end_date: string;
+  dry_run: boolean;
+  max_dates: number;
+  only_missing: boolean;
+}) {
+  return apiClient.post<LimitUpEvidenceImportResult>(
+    "/data-sync/imports/limit-up-evidence/tushare",
+    payload,
+  );
+}
+
+export function importLimitUpEvidenceFromCsv(payload: {
+  dataset: LimitUpEvidenceDataset;
+  csv_text: string;
+  dry_run: boolean;
+}) {
+  return apiClient.post<LimitUpEvidenceImportResult>(
+    "/data-sync/imports/limit-up-evidence/csv",
+    payload,
+  );
+}
+
+export function startLimitUpThsEvidenceImport(payload: {
+  max_dates?: number;
+  only_missing?: boolean;
+} = {}) {
+  return apiClient.post<SyncBatchStatus>(
+    "/data-sync/imports/limit-up-evidence/ths/start",
+    payload,
+  );
+}
+
+export function fetchLimitUpThsEvidenceBatch(batchId: string) {
+  return apiClient.get<SyncBatchStatus>(
+    `/data-sync/imports/limit-up-evidence/ths/batches/${encodeURIComponent(batchId)}`,
+  );
+}
+
+export async function fetchLimitUpEvidenceTemplate(dataset: LimitUpEvidenceDataset) {
+  const query = new URLSearchParams({ dataset });
+  const response = await authFetch(
+    `/data-sync/imports/limit-up-evidence/template.csv?${query.toString()}`,
+    { headers: { Accept: "text/csv" } },
+  );
+  if (!response.ok) {
+    throw new Error(`请求失败: ${response.status} ${response.statusText}`);
+  }
+  return response.text();
+}
+
+export function fetchLimitUpMembershipImportStatus() {
+  return apiClient.get<LimitUpMembershipImportStatus>(
+    "/data-sync/imports/limit-up-memberships/status",
+  );
+}
+
+export function importLimitUpMembershipsFromTushare(payload: LimitUpMembershipImportPayload) {
+  return apiClient.post<LimitUpMembershipImportResult>(
+    "/data-sync/imports/limit-up-memberships/tushare",
+    payload,
+  );
+}
+
+export function importLimitUpMembershipsFromCsv(
+  payload: LimitUpMembershipImportPayload & { csv_text: string },
+) {
+  return apiClient.post<LimitUpMembershipImportResult>(
+    "/data-sync/imports/limit-up-memberships/csv",
+    payload,
+  );
+}
+
+export async function fetchLimitUpMembershipTemplate() {
+  const response = await authFetch(
+    "/data-sync/imports/limit-up-memberships/template.csv",
+    { headers: { Accept: "text/csv" } },
+  );
+  if (!response.ok) {
+    throw new Error(`请求失败: ${response.status} ${response.statusText}`);
+  }
+  return response.text();
+}
+
 // ── Types matching actual backend responses ──
 
 export interface SyncSourceItem {
@@ -526,4 +618,156 @@ export interface MinuteGapVendorManifest {
   sample_rows?: MinuteGapVendorRow[];
   required_import_columns?: string[];
   provider_notes?: string[];
+}
+
+export type LimitUpEvidenceDataset = "events" | "auction";
+
+export interface LimitUpEvidenceCoverage {
+  start?: string | null;
+  end?: string | null;
+  trade_days?: number;
+  strict_trade_days?: number;
+  rows?: number;
+  strict_rows?: number;
+  mode?: string;
+}
+
+export interface LimitUpEvidenceDatasetStatus {
+  label: string;
+  api_name: string;
+  provider_start: string;
+  minimum_coverage_pct: number;
+  coverage: LimitUpEvidenceCoverage;
+}
+
+export interface LimitUpEvidenceImportStatus {
+  status: string;
+  provider: {
+    id: "tushare";
+    configured: boolean;
+    api_url: string;
+    token_exposed: false;
+  };
+  ths_provider?: {
+    id: "ths";
+    configured: boolean;
+    history_trade_days: number;
+    minimum_coverage_pct: number;
+    pools: string[];
+  };
+  datasets: Record<LimitUpEvidenceDataset, LimitUpEvidenceDatasetStatus>;
+  csv_import_available: boolean;
+  limitations: string[];
+}
+
+export interface LimitUpEvidenceDateResult {
+  trade_date: string;
+  status: string;
+  reason?: string;
+  rows_read?: number;
+  rows_accepted?: number;
+  rows_written?: number;
+  skipped_count?: number;
+  error_count?: number;
+  expected_count?: number;
+  covered_count?: number;
+  coverage_pct?: number;
+  missing_symbols?: string[];
+}
+
+export interface LimitUpEvidenceImportResult {
+  status: string;
+  dataset: LimitUpEvidenceDataset;
+  provider: string;
+  dry_run: boolean;
+  message?: string;
+  requested_start?: string;
+  requested_end?: string;
+  candidate_date_count?: number;
+  date_count: number;
+  accepted_date_count?: number;
+  provider_error_count?: number;
+  rows_read: number;
+  rows_accepted?: number;
+  rows_written: number;
+  date_results: LimitUpEvidenceDateResult[];
+  errors: string[];
+}
+
+export interface LimitUpMembershipCoverage extends LimitUpEvidenceCoverage {
+  raw_start?: string | null;
+  raw_end?: string | null;
+  raw_snapshot_trade_days?: number;
+  raw_rows?: number;
+  industry_start?: string | null;
+  industry_end?: string | null;
+  industry_snapshot_trade_days?: number;
+  industry_rows?: number;
+  concept_start?: string | null;
+  concept_end?: string | null;
+  concept_snapshot_trade_days?: number;
+  concept_rows?: number;
+  point_in_time_trade_days?: number;
+  minimum_daily_symbols?: number;
+  minimum_coverage_pct?: number;
+}
+
+export interface LimitUpMembershipImportStatus {
+  status: string;
+  provider: {
+    id: "tushare";
+    configured: boolean;
+    api_url: string;
+    token_exposed: false;
+    apis: string[];
+  };
+  dataset: {
+    label: string;
+    minimum_coverage_pct: number;
+    coverage: LimitUpMembershipCoverage;
+  };
+  csv_import_available: boolean;
+  limitations: string[];
+}
+
+export interface LimitUpMembershipImportPayload {
+  start_date: string;
+  end_date: string;
+  dry_run: boolean;
+  max_dates: number;
+  only_missing: boolean;
+}
+
+export interface LimitUpMembershipDateResult extends LimitUpEvidenceDateResult {
+  conflict_count?: number;
+}
+
+export interface LimitUpMembershipConflict {
+  trade_date: string;
+  vt_symbol: string;
+  candidate_sector_ids: string[];
+  selected_sector_id: string;
+}
+
+export interface LimitUpMembershipImportResult {
+  status: string;
+  dataset: "industry_memberships";
+  provider: string;
+  dry_run: boolean;
+  message?: string;
+  requested_start?: string;
+  requested_end?: string;
+  candidate_date_count?: number;
+  date_count: number;
+  accepted_date_count?: number;
+  rows_read: number;
+  rows_accepted?: number;
+  expanded_rows?: number;
+  rows_written: number;
+  skipped_count?: number;
+  duplicate_count?: number;
+  conflict_count?: number;
+  conflicts?: LimitUpMembershipConflict[];
+  date_results: LimitUpMembershipDateResult[];
+  errors: string[];
 }

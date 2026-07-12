@@ -35,6 +35,7 @@ import type {
   TailWorkflowStatus,
 } from "@/api/dataSync";
 import { LoadingState } from "@/components/LoadingState";
+import LimitUpEvidenceBackfillPanel from "@/features/limitUp/LimitUpEvidenceBackfillPanel";
 import DataManagementHealthTab from "./DataManagementHealthTab";
 import { cn } from "@/lib/utils";
 import {
@@ -54,9 +55,10 @@ import {
   Plus,
   Save,
   Trash2,
+  ShieldCheck,
 } from "lucide-react";
 
-type TabKey = "health" | "tail" | "status" | "sources";
+type TabKey = "health" | "limit-up-evidence" | "tail" | "status" | "sources";
 type MinuteSyncMode = "backtest_gaps" | "recent";
 type MinuteGapProvider = "akshare" | "tdx" | "tushare";
 
@@ -90,6 +92,7 @@ const DEFAULT_MINUTE_SYNC_FORM: MinuteSyncFormState = {
 
 const TABS: { key: TabKey; label: string; icon: typeof Database }[] = [
   { key: "health", label: "数据健康", icon: Activity },
+  { key: "limit-up-evidence", label: "打板证据", icon: ShieldCheck },
   { key: "tail", label: "实时尾盘量化", icon: Clock },
   { key: "status", label: "数据状态", icon: Database },
   { key: "sources", label: "数据源", icon: Server },
@@ -103,14 +106,14 @@ export default function DataManagementPage() {
       <h1 className="text-xl font-bold">数据管理</h1>
 
       {/* Tab bar */}
-      <div className="flex gap-1 border-b">
+      <div className="flex max-w-full gap-1 overflow-x-auto border-b">
         {TABS.map((tab) => {
           const Icon = tab.icon;
           return (
             <button
               key={tab.key}
               className={cn(
-                "flex items-center gap-1.5 px-4 py-2 text-sm font-medium transition-colors",
+                "flex shrink-0 items-center gap-1.5 px-4 py-2 text-sm font-medium transition-colors",
                 activeTab === tab.key
                   ? "border-b-2 border-primary text-primary"
                   : "text-muted-foreground hover:text-foreground"
@@ -126,6 +129,7 @@ export default function DataManagementPage() {
 
       {/* Tab content */}
       {activeTab === "health" && <DataManagementHealthTab />}
+      {activeTab === "limit-up-evidence" && <LimitUpEvidenceBackfillPanel />}
       {activeTab === "tail" && <TailWorkflowTab />}
       {activeTab === "status" && <StatusTab />}
       {activeTab === "sources" && <SourcesTab />}

@@ -13,6 +13,7 @@ import {
   Sun,
   Moon,
   LogOut,
+  Flame,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/theme/useTheme";
@@ -23,6 +24,7 @@ const NAV_ITEMS = [
   { to: "/", label: "今日市场", icon: LayoutDashboard },
   { to: "/market", label: "大盘择时", icon: Crosshair },
   { to: "/mainline", label: "概念主线", icon: History },
+  { to: "/limit-up", label: "打板研究", icon: Flame },
   { to: "/stocks", label: "全 A 股票", icon: TrendingUp },
   { to: "/quant", label: "量化交易", icon: Activity },
   { to: "/portfolio", label: "持仓", icon: Briefcase },
@@ -172,7 +174,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </aside>
 
       {/* Main content */}
-      <main className="min-w-0 flex-1 overflow-auto pt-28 md:pt-0">
+      <main className="min-w-0 flex-1 overflow-auto pt-36 md:pt-0">
         <div className="mx-auto max-w-[1600px] p-4 sm:p-6">{children}</div>
       </main>
     </div>

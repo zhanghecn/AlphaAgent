@@ -38,6 +38,11 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin && \
     rm -rf /var/lib/apt/lists/*
 
+RUN rm -f /etc/apt/sources.list.d/docker.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends libgomp1 && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY --from=python-deps /usr/local /usr/local
 
 COPY alphaagent ./alphaagent

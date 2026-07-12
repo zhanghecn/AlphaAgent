@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 from fastapi import APIRouter, Body, Query
@@ -12,6 +13,15 @@ from alphaagent.server.services import data_sync as service
 from alphaagent.server.services.data_providers.akshare_minute_import import import_akshare_minute_bars_for_gaps
 from alphaagent.server.services.data_providers.tdx_minute_import import import_tdx_minute_bars_for_gaps
 from alphaagent.server.services.data_providers.tushare_minute_import import import_tushare_minute_bars_for_gaps
+from alphaagent.server.services.limit_up import historical_evidence_import
+from alphaagent.server.services.limit_up import historical_membership_import
+from alphaagent.server.services.limit_up.historical_evidence_batch import (
+    MAX_DATE_BATCH_SIZE,
+    ThsEvidenceBatchBusyError,
+    ThsEvidenceBatchNotFoundError,
+    get_ths_evidence_batch,
+    start_ths_evidence_batch,
+)
 
 router = APIRouter(prefix="/data-sync", tags=["data-sync"])
 
@@ -372,6 +382,210 @@ def import_minute_bar_gaps_from_akshare(payload: dict[str, Any] = Body(default_f
         return _sync_error(exc)
 
 
+@router.get("/imports/limit-up-evidence/status")
+def limit_up_evidence_status():
+    try:
+        return ok(historical_evidence_import.historical_evidence_status())
+    except Exception as exc:
+        return _evidence_import_error(exc)
+
+
+@router.get("/imports/limit-up-evidence/template.csv")
+def limit_up_evidence_template(dataset: str = Query(default="events")):
+    try:
+        normalized = historical_evidence_import.normalize_dataset(dataset)
+        return Response(
+            content=historical_evidence_import.evidence_csv_template(normalized),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="alphaagent_limit_up_{normalized}_template.csv"'
+                )
+            },
+        )
+    except Exception as exc:
+        return _evidence_import_error(exc)
+
+
+@router.post("/imports/limit-up-evidence/tushare")
+def import_limit_up_evidence_from_tushare(
+    payload: dict[str, Any] = Body(default_factory=dict),
+):
+    try:
+        return ok(
+            historical_evidence_import.import_tushare_evidence(
+                dataset=str(payload.get("dataset") or "events"),
+                start_date=_required_payload_date(
+                    payload,
+                    "start_date",
+                    historical_evidence_import.HistoricalEvidenceImportError,
+                ),
+                end_date=_required_payload_date(
+                    payload,
+                    "end_date",
+                    historical_evidence_import.HistoricalEvidenceImportError,
+                ),
+                dry_run=_payload_bool(payload.get("dry_run"), default=True),
+                max_dates=int(payload.get("max_dates") or 20),
+                only_missing=_payload_bool(payload.get("only_missing"), default=True),
+            )
+        )
+    except Exception as exc:
+        return _evidence_import_error(exc)
+
+
+@router.post("/imports/limit-up-evidence/csv")
+def import_limit_up_evidence_from_csv(
+    payload: dict[str, Any] = Body(default_factory=dict),
+):
+    try:
+        return ok(
+            historical_evidence_import.import_csv_evidence(
+                dataset=str(payload.get("dataset") or "events"),
+                csv_text=str(payload.get("csv_text") or ""),
+                dry_run=_payload_bool(payload.get("dry_run"), default=True),
+            )
+        )
+    except Exception as exc:
+        return _evidence_import_error(exc)
+
+
+@router.post("/imports/limit-up-evidence/ths/start")
+def start_limit_up_evidence_from_ths(
+    payload: dict[str, Any] = Body(default_factory=dict),
+):
+    try:
+        max_dates = int(payload.get("max_dates") or MAX_DATE_BATCH_SIZE)
+    except (TypeError, ValueError):
+        max_dates = 0
+    try:
+        batch = start_ths_evidence_batch(
+            max_dates=max_dates,
+            only_missing=_payload_bool(payload.get("only_missing"), default=True),
+        )
+        return JSONResponse(status_code=202, content=ok(batch))
+    except ValueError:
+        return JSONResponse(
+            status_code=400,
+            content=fail(
+                "INVALID_THS_EVIDENCE_DATE_COUNT",
+                f"同花顺单次补数范围必须为1到{MAX_DATE_BATCH_SIZE}个交易日",
+            ),
+        )
+    except ThsEvidenceBatchBusyError as exc:
+        return JSONResponse(
+            status_code=409,
+            content=fail(
+                "DATA_SYNC_BATCH_BUSY",
+                "另一数据同步批次正在运行，请等待其完成后再补同花顺历史证据",
+                {
+                    "batch_id": exc.batch.get("id"),
+                    "jobs": [
+                        job.get("job_id")
+                        for job in exc.batch.get("jobs", [])
+                        if isinstance(job, dict)
+                    ],
+                },
+            ),
+        )
+    except Exception as exc:
+        return _sync_error(exc)
+
+
+@router.get("/imports/limit-up-evidence/ths/batches/{batch_id}")
+def limit_up_evidence_ths_batch(batch_id: str):
+    try:
+        return ok(get_ths_evidence_batch(batch_id))
+    except ThsEvidenceBatchNotFoundError:
+        return JSONResponse(
+            status_code=404,
+            content=fail(
+                "THS_EVIDENCE_BATCH_NOT_FOUND",
+                "同花顺历史证据批次不存在或不属于该补数流程",
+                {"batch_id": batch_id},
+            ),
+        )
+    except Exception as exc:
+        return _sync_error(exc)
+
+
+@router.get("/imports/limit-up-memberships/status")
+def limit_up_membership_status():
+    try:
+        return ok(historical_membership_import.historical_membership_status())
+    except Exception as exc:
+        return _membership_import_error(exc)
+
+
+@router.get("/imports/limit-up-memberships/template.csv")
+def limit_up_membership_template():
+    try:
+        return Response(
+            content=historical_membership_import.membership_csv_template(),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    'attachment; filename="alphaagent_limit_up_industry_memberships_template.csv"'
+                )
+            },
+        )
+    except Exception as exc:
+        return _membership_import_error(exc)
+
+
+@router.post("/imports/limit-up-memberships/tushare")
+def import_limit_up_memberships_from_tushare(
+    payload: dict[str, Any] = Body(default_factory=dict),
+):
+    try:
+        return ok(
+            historical_membership_import.import_tushare_memberships(
+                start_date=_required_payload_date(
+                    payload,
+                    "start_date",
+                    historical_membership_import.HistoricalMembershipImportError,
+                ),
+                end_date=_required_payload_date(
+                    payload,
+                    "end_date",
+                    historical_membership_import.HistoricalMembershipImportError,
+                ),
+                dry_run=_payload_bool(payload.get("dry_run"), default=True),
+                max_dates=int(payload.get("max_dates") or 20),
+                only_missing=_payload_bool(payload.get("only_missing"), default=True),
+            )
+        )
+    except Exception as exc:
+        return _membership_import_error(exc)
+
+
+@router.post("/imports/limit-up-memberships/csv")
+def import_limit_up_memberships_from_csv(
+    payload: dict[str, Any] = Body(default_factory=dict),
+):
+    try:
+        return ok(
+            historical_membership_import.import_membership_csv(
+                csv_text=str(payload.get("csv_text") or ""),
+                start_date=_required_payload_date(
+                    payload,
+                    "start_date",
+                    historical_membership_import.HistoricalMembershipImportError,
+                ),
+                end_date=_required_payload_date(
+                    payload,
+                    "end_date",
+                    historical_membership_import.HistoricalMembershipImportError,
+                ),
+                dry_run=_payload_bool(payload.get("dry_run"), default=True),
+                max_dates=int(payload.get("max_dates") or 20),
+                only_missing=_payload_bool(payload.get("only_missing"), default=False),
+            )
+        )
+    except Exception as exc:
+        return _membership_import_error(exc)
+
+
 def _gap_payload_source(payload: dict[str, Any]) -> tuple[str, str]:
     if payload.get("backtest_id") not in (None, ""):
         requirements = service.minute_gap_requirements_from_params(payload)
@@ -380,6 +594,28 @@ def _gap_payload_source(payload: dict[str, Any]) -> tuple[str, str]:
         str(payload.get("gap_csv_text") or payload.get("csv_text") or ""),
         str(payload.get("gap_file_path") or payload.get("file_path") or ""),
     )
+
+
+def _required_payload_date(
+    payload: dict[str, Any],
+    key: str,
+    error_type: type[Exception],
+) -> date:
+    value = str(payload.get(key) or "").strip()
+    if not value:
+        raise error_type(f"{key} is required")
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise error_type(f"{key} must use YYYY-MM-DD") from exc
+
+
+def _payload_bool(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _requirements_to_gap_csv(requirements: dict[str, Any]) -> str:
@@ -413,3 +649,35 @@ def _sync_error(exc: Exception) -> JSONResponse:
             {"reason": exc.__class__.__name__},
         ),
     )
+
+
+def _evidence_import_error(exc: Exception) -> JSONResponse:
+    if isinstance(
+        exc,
+        historical_evidence_import.HistoricalEvidenceImportError,
+    ):
+        return JSONResponse(
+            status_code=422,
+            content=fail(
+                "INVALID_LIMIT_UP_EVIDENCE_IMPORT",
+                str(exc),
+                {"reason": exc.__class__.__name__},
+            ),
+        )
+    return _sync_error(exc)
+
+
+def _membership_import_error(exc: Exception) -> JSONResponse:
+    if isinstance(
+        exc,
+        historical_membership_import.HistoricalMembershipImportError,
+    ):
+        return JSONResponse(
+            status_code=422,
+            content=fail(
+                "INVALID_LIMIT_UP_MEMBERSHIP_IMPORT",
+                str(exc),
+                {"reason": exc.__class__.__name__},
+            ),
+        )
+    return _sync_error(exc)

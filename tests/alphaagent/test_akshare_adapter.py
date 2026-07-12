@@ -1,4 +1,5 @@
 import sys
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -117,6 +118,7 @@ def test_bar_row_to_api_preserves_zero_values() -> None:
             "最低价": 0,
             "成交量": 0,
             "成交额": 0,
+            "换手率": 0,
             "涨跌幅": 0,
         }
     )
@@ -125,6 +127,7 @@ def test_bar_row_to_api_preserves_zero_values() -> None:
     assert item["close"] == 0
     assert item["volume"] == 0
     assert item["turnover"] == 0
+    assert item["turnover_rate"] == 0
     assert item["change_pct"] == 0
 
 
@@ -252,6 +255,31 @@ def test_list_stocks_uses_ttl_cache(monkeypatch) -> None:
     assert calls["count"] == 1
 
 
+def test_limit_up_pool_uses_short_ttl_only_for_current_date(monkeypatch) -> None:
+    adapter = AkShareAdapter()
+    calls: list[tuple[str, int]] = []
+
+    def fake_get_or_set(key: str, ttl_seconds: int, loader):
+        calls.append((key, ttl_seconds))
+        return loader()
+
+    monkeypatch.setattr(market_cache, "get_or_set", fake_get_or_set)
+    monkeypatch.setattr(
+        adapter,
+        "_limit_up_pools_uncached",
+        lambda trade_date: {"trade_date": trade_date, "pools": {}},
+    )
+
+    today = date.today().strftime("%Y%m%d")
+    adapter.limit_up_pools(today)
+    adapter.limit_up_pools("20200102")
+
+    assert calls == [
+        (f"limit_up_pools:{today}", adapter.LIVE_LIMIT_POOL_TTL_SECONDS),
+        ("limit_up_pools:20200102", adapter.LIMIT_POOL_TTL_SECONDS),
+    ]
+
+
 def test_source_status_cache_keeps_datetime_values(monkeypatch) -> None:
     market_cache.clear()
     adapter = AkShareAdapter()
@@ -355,6 +383,9 @@ def test_sector_fund_flows_use_eastmoney_rank_table(monkeypatch) -> None:
                         "f84": -2_305_550_848,
                         "f204": "工业富联",
                         "f205": "601138",
+                        "f104": 72,
+                        "f105": 24,
+                        "f106": 4,
                         "f124": 1_781_768_387,
                     }
                 ],
@@ -375,6 +406,10 @@ def test_sector_fund_flows_use_eastmoney_rank_table(monkeypatch) -> None:
     assert item["main_net_inflow"] == 11_423_465_472
     assert item["main_net_inflow_pct"] == 3.04
     assert item["leader_stock"] == "工业富联"
+    assert item["rise_count"] == 72
+    assert item["fall_count"] == 24
+    assert item["flat_count"] == 4
+    assert item["source_updated_at"] == "2026-06-18T07:39:47+00:00"
 
 
 def test_sector_fund_flows_map_5d_industry_fields(monkeypatch) -> None:
@@ -901,7 +936,7 @@ def _kline_row(date_str: str, close: float = 1.0) -> dict:
 def test_daily_bars_incremental_prefers_tencent_when_covered(monkeypatch) -> None:
     """日线增量同步(带 start_date)在 tencent 覆盖范围内时应优先 tencent_full,避免落到慢源 akshare。
 
-    回归:盘后 eod_18h 的 sync_stock_daily_bars 走增量(start_date=上一交易日+1),
+    回归:盘后 eod_1900 的 sync_stock_daily_bars 走增量(start_date=上一交易日+1),
     此前因 tencent 被硬性排除而全部 fallback 到 akshare.stock_zh_a_hist(单股 ~3s),
     导致 4057 只股票要 ~1 小时,候选生成被拖到 21:00 之后。
     """

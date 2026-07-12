@@ -1250,8 +1250,9 @@ class AkShareAdapter:
     # ── Research data methods (sector dashboard + stock workbench) ──
 
     SECTOR_BARS_TTL_SECONDS = 86400
-    FUND_FLOW_TTL_SECONDS = 600
+    FUND_FLOW_TTL_SECONDS = 60
     LIMIT_POOL_TTL_SECONDS = 600
+    LIVE_LIMIT_POOL_TTL_SECONDS = 20
     LHB_TTL_SECONDS = 86400
     HOT_RANK_TTL_SECONDS = 300
     FINANCIAL_TTL_SECONDS = 86400 * 3
@@ -1420,10 +1421,16 @@ class AkShareAdapter:
 
         if trade_date is None:
             trade_date = date.today().strftime("%Y%m%d")
+        trade_date = str(trade_date).replace("-", "")[:8]
+        ttl_seconds = (
+            self.LIVE_LIMIT_POOL_TTL_SECONDS
+            if trade_date == date.today().strftime("%Y%m%d")
+            else self.LIMIT_POOL_TTL_SECONDS
+        )
         key = f"limit_up_pools:{trade_date}"
         return market_cache.get_or_set(
             key,
-            self.LIMIT_POOL_TTL_SECONDS,
+            ttl_seconds,
             lambda: self._limit_up_pools_uncached(trade_date),
         )
 
@@ -1935,6 +1942,7 @@ def _bar_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
         "low": _first_number(normalized, "最低", "最低价", "low"),
         "volume": volume,
         "turnover": explicit_turnover,
+        "turnover_rate": _first_number(normalized, "换手率", "turnover_rate", "turnoverratio", "hsl"),
         "change_pct": _first_number(normalized, "涨跌幅", "change_pct"),
     }
 
@@ -2486,6 +2494,9 @@ def _eastmoney_sector_fund_flow_params(
             period_config["small_ratio_field"],
             period_config["leader_field"],
             period_config["leader_code_field"],
+            "f104",
+            "f105",
+            "f106",
             "f124",
         ]
     )
@@ -2514,6 +2525,7 @@ def _eastmoney_sector_fund_flow_row(
     period_config: dict[str, str],
 ) -> dict[str, Any]:
     update_date = _eastmoney_timestamp_date(row.get("f124"))
+    source_updated_at = _eastmoney_timestamp_datetime(row.get("f124"))
     period_label = period_config["period"]
     return {
         "id": row.get("f12"),
@@ -2532,10 +2544,14 @@ def _eastmoney_sector_fund_flow_row(
         f"{period_label}小单净流入-净占比": row.get(period_config["small_ratio_field"]),
         f"{period_label}主力净流入最大股": row.get(period_config["leader_field"]),
         f"{period_label}主力净流入最大股代码": row.get(period_config["leader_code_field"]),
+        "上涨家数": row.get("f104"),
+        "下跌家数": row.get("f105"),
+        "平盘家数": row.get("f106"),
         "rank": rank,
         "period": period_label,
         "type": board_type,
         "trade_date": update_date,
+        "source_updated_at": source_updated_at,
         "updated_timestamp": row.get("f124"),
         "source": "eastmoney.sector_fund_flow_rank",
         "raw": row,
@@ -2548,6 +2564,16 @@ def _eastmoney_timestamp_date(value: Any) -> str | None:
         return None
     try:
         return datetime.fromtimestamp(number, timezone(timedelta(hours=8))).date().isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _eastmoney_timestamp_datetime(value: Any) -> str | None:
+    number = _int_value(value)
+    if not number:
+        return None
+    try:
+        return datetime.fromtimestamp(number, timezone.utc).isoformat()
     except (OverflowError, OSError, ValueError):
         return None
 
@@ -3904,8 +3930,12 @@ def _fund_flow_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
         "name": n.get("名称") or n.get("板块") or n.get("name"),
         "code": n.get("代码") or n.get("板块代码") or n.get("code"),
         "trade_date": n.get("trade_date") or n.get("日期"),
+        "source_updated_at": n.get("source_updated_at"),
         "period": n.get("period"),
         "rank": _int_value(n.get("rank") or n.get("序号")),
+        "rise_count": _int_value(n.get("上涨家数") or n.get("rise_count")),
+        "fall_count": _int_value(n.get("下跌家数") or n.get("fall_count")),
+        "flat_count": _int_value(n.get("平盘家数") or n.get("flat_count")),
         "change_pct": _number(_period_value(n, period_prefix, "涨跌幅") or n.get("涨跌幅")),
         "main_net_inflow": _number(
             _period_value(n, period_prefix, "主力净流入-净额")

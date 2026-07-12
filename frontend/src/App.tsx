@@ -16,6 +16,7 @@ const SectorsPage = lazy(() => import("@/pages/SectorsPage").then((m) => ({ defa
 const QuantTradingPage = lazy(() => import("@/pages/QuantTradingPage").then((m) => ({ default: m.QuantTradingPage })));
 const PortfolioPage = lazy(() => import("@/pages/PortfolioPage").then((m) => ({ default: m.PortfolioPage })));
 const MainlineReplayPage = lazy(() => import("@/pages/MainlineReplayPage"));
+const LimitUpPage = lazy(() => import("@/pages/LimitUpPage").then((m) => ({ default: m.LimitUpPage })));
 const DataManagementPage = lazy(() => import("@/pages/DataManagementPage"));
 
 /**
@@ -51,6 +52,7 @@ export default function App() {
                     <Route path="/portfolio" element={<PortfolioPage />} />
                     <Route path="/chain" element={<Navigate to="/mainline" replace />} />
                     <Route path="/mainline" element={<MainlineReplayPage />} />
+                    <Route path="/limit-up" element={<LimitUpPage />} />
                     <Route path="/data" element={<DataManagementPage />} />
                     {/* Legacy routes */}
                     <Route path="/sectors" element={<SectorsPage />} />

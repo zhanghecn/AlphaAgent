@@ -36,8 +36,12 @@ from alphaagent.market.cache import market_cache
 from alphaagent.market.symbols import INDEX_SYMBOLS, normalize_exchange, vt_symbol
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
-from alphaagent.server.services import minute_gaps, minute_imports, minute_provider_imports
+from alphaagent.server.services import market_snapshot_repository, minute_gaps, minute_imports, minute_provider_imports
 from alphaagent.server.services import research_sector_scores
+from alphaagent.server.services.limit_up.data_quality import backfill_limit_up_event_minutes
+from alphaagent.server.services.limit_up.domain import is_eligible_main_board
+from alphaagent.server.services.limit_up.historical_evidence_import import import_ths_evidence
+from alphaagent.server.services.limit_up.live_service import refresh_live_snapshot
 from alphaagent.server.services.quant import research_jobs, screening
 
 logger = logging.getLogger(__name__)
@@ -140,6 +144,14 @@ DEFAULT_SOURCE: dict[str, dict[str, Any]] = {
         "enabled": True,
         "priority": 100,
     },
+    "tdx_public_hq": {
+        "id": "tdx_public_hq",
+        "name": "通达信公开行情",
+        "kind": "tdx",
+        "base_url": "",
+        "enabled": True,
+        "priority": 120,
+    },
 }
 
 
@@ -205,6 +217,22 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="stock_minute_bars",
         default_params={"mode": "recent", "stock_limit": 100, "limit": 240, "interval": "1m", "only_missing": True},
+    ),
+    JobDefinition(
+        id="sync_limit_up_event_minutes",
+        name="涨停事件分钟路径补数",
+        description="按持久化退避账本限量补齐涨停事件股票的09:15-15:00历史1分钟路径。",
+        source_id="tdx_public_hq",
+        target_table="stock_minute_bars",
+        default_params={"max_gaps": 200, "dry_run": False},
+    ),
+    JobDefinition(
+        id="sync_stock_auction_snapshots",
+        name="集合竞价快照",
+        description="在09:25集合竞价结束后保存主板非ST股票的价格、撮合量额和字段完整度。",
+        source_id="akshare",
+        target_table="stock_auction_snapshots",
+        default_params={"page_size": 200},
     ),
     JobDefinition(
         id="sync_stock_sector_memberships",
@@ -399,6 +427,8 @@ JOB_CADENCES: dict[str, JobCadence] = {
     "sync_index_daily_bars": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "stock_daily_bars", "trade_date"),
     "sync_sector_daily_bars": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "sector_daily_bars", "trade_date"),
     "sync_stock_minute_bars": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_BARS, 1, "stock_minute_bars", "bar_time"),
+    "sync_limit_up_event_minutes": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "limit_up_minute_backfill_attempts", "last_attempt_at"),
+    "sync_stock_auction_snapshots": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "stock_auction_snapshots", "captured_at"),
     "sync_stock_financial_quarterly": JobCadence(CADENCE_QUARTERLY, CATEGORY_FINANCIALS, 45, "stock_financial_reports", "updated_at"),
     "sync_stock_financial_indicators": JobCadence(CADENCE_QUARTERLY, CATEGORY_FINANCIALS, 45, "stock_financial_reports", "updated_at"),
     "sync_stock_business_segments_history": JobCadence(CADENCE_QUARTERLY, CATEGORY_FINANCIALS, 45, "stock_business_segments", "updated_at"),
@@ -425,6 +455,8 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
     "sync_supply_chain_edges",
     "sync_stock_daily_bars", "sync_index_daily_bars", "sync_sector_daily_bars",
     "sync_stock_minute_bars",
+    "sync_limit_up_event_minutes",
+    "sync_stock_auction_snapshots",
     "sync_stock_fund_flows", "sync_sector_fund_flows",
     "sync_stock_hot_ranks", "sync_limit_up_pools",
     "sync_sector_period_scores",
@@ -439,6 +471,37 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
 # used to live on DEFAULT_JOBS. See
 # requirements/alphaagent_unified_incremental_schedule_plan.md.
 DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
+    {
+        "id": "auction_0926",
+        "name": "集合竞价快照（09:26）",
+        "cron": "26 9 * * 1-5",
+        "action": "sync",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": ["sync_stock_auction_snapshots"],
+    },
+    {
+        "id": "limit_up_live_scan",
+        "name": "实时打板扫描（每分钟）",
+        "cron": "* 9-14 * * 1-5",
+        "action": "limit_up_live_scan",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": [],
+    },
+    {
+        "id": "intraday_hourly",
+        "name": "盘中低频同步（每小时）",
+        "cron": "30 9,10,11,13,14 * * 1-5",
+        "action": "sync",
+        "enabled": True,
+        "concurrency": 4,
+        "job_ids": [
+            "sync_sector_fund_flows",
+            "sync_stock_fund_flows",
+            "sync_stock_hot_ranks",
+        ],
+    },
     {
         "id": "tail_quant_1430",
         "name": "实时尾盘量化（14:30）",
@@ -486,13 +549,22 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_index_daily_bars",
             "sync_sector_period_scores",
             "eod_quant_research",
+            "sync_limit_up_event_minutes",
+            "limit_up_history_rebuild",
         ],
     },
 ]
 
 TAIL_PREVIEW_BATCH_JOB_ID = "tail_preview_cache"
 EOD_QUANT_RESEARCH_BATCH_JOB_ID = "eod_quant_research"
-INTERNAL_BATCH_JOB_IDS = {TAIL_PREVIEW_BATCH_JOB_ID, EOD_QUANT_RESEARCH_BATCH_JOB_ID}
+LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID = "sync_limit_up_ths_evidence"
+LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID = "limit_up_history_rebuild"
+INTERNAL_BATCH_JOB_IDS = {
+    TAIL_PREVIEW_BATCH_JOB_ID,
+    EOD_QUANT_RESEARCH_BATCH_JOB_ID,
+    LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID,
+    LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID,
+}
 STALE_BATCH_SUMMARY_RE = re.compile(r"^\s*(\d+)\s+成功\s*/\s*(\d+)\s+失败\s*$")
 
 
@@ -1012,9 +1084,114 @@ class DataSyncRunner:
         )
         return {**result, "rows_read": rows_read, "rows_written": rows_written, "fetch_interval": fetch_interval}
 
+    def _run_sync_limit_up_event_minutes(self, params: dict[str, Any]) -> dict[str, Any]:
+        result = backfill_limit_up_event_minutes(
+            max_gaps=int(params.get("max_gaps") or 200),
+            dry_run=_truthy(params.get("dry_run")),
+        )
+        backfill_status = str(result.get("status") or "unknown")
+        requested = int(result.get("requested_gap_count") or 0)
+        covered = int(result.get("covered_gap_count") or 0)
+        message = str(result.get("message") or "").strip()
+        if requested:
+            message = f"涨停事件分钟补数：覆盖 {covered} / {requested}，写入 {int(result.get('rows_written') or 0)} 根"
+        if backfill_status in {"error", "unavailable", "unsupported_interval"}:
+            raise DataSyncError(message or f"涨停事件分钟补数失败：{backfill_status}")
+        return {
+            **{key: value for key, value in result.items() if key != "status"},
+            "backfill_status": backfill_status,
+            "message": message,
+        }
+
+    def _run_sync_stock_auction_snapshots(self, params: dict[str, Any]) -> dict[str, Any]:
+        captured_at = _now_china()
+        if not _auction_capture_window_open(captured_at):
+            return {
+                "rows_read": 0,
+                "rows_written": 0,
+                "message": "集合竞价快照仅允许在交易日09:25-09:29采集",
+            }
+
+        probe = self.adapter.stock_detail("600000", "SSE")
+        market_time = _auction_market_datetime(probe.get("trade_time"))
+        if market_time is None:
+            raise DataSyncError("集合竞价行情缺少可验证的源时间")
+        if market_time.date() != captured_at.date():
+            raise DataSyncError(
+                f"集合竞价行情日期不是当天：source={market_time.date()} capture={captured_at.date()}"
+            )
+        if not _auction_source_time_ready(market_time):
+            raise DataSyncError(f"集合竞价行情尚未完成：source={market_time.time().isoformat()}")
+
+        page_size = min(max(int(params.get("page_size") or 200), 1), 200)
+        all_items: list[dict[str, Any]] = []
+        total: int | None = None
+        for page in range(1, STOCK_LIST_MAX_PAGES + 1):
+            data = self.adapter.list_stocks(page=page, page_size=page_size, sort="mktcap")
+            items = [dict(item) for item in (data.get("items") or []) if isinstance(item, dict)]
+            total = int(data["total"]) if data.get("total") is not None else total
+            if not items:
+                break
+            all_items.extend(items)
+            if total is not None and len(all_items) >= total:
+                break
+            if total is None and len(items) < page_size:
+                break
+        if total is not None and len(all_items) < total:
+            raise DataSyncError(
+                f"集合竞价全市场行情不完整：read={len(all_items)} total={total}"
+            )
+        unique_items = {
+            str(item.get("vt_symbol") or "").strip().upper(): item
+            for item in all_items
+            if item.get("vt_symbol")
+        }
+        if total is not None and len(unique_items) < total:
+            raise DataSyncError(
+                f"集合竞价全市场行情去重后不完整：unique={len(unique_items)} total={total}"
+            )
+        all_items = list(unique_items.values())
+
+        eligible = [
+            item
+            for item in all_items
+            if is_eligible_main_board(
+                str(item.get("vt_symbol") or ""),
+                str(item.get("name") or ""),
+            )
+        ]
+        rows_written = market_snapshot_repository.save_stock_auction_snapshots(
+            eligible,
+            trade_date=captured_at.date(),
+            captured_at=captured_at,
+        )
+        return {
+            "rows_read": len(all_items),
+            "rows_written": rows_written,
+            "eligible_rows": len(eligible),
+            "excluded_rows": len(all_items) - len(eligible),
+            "source_market_time": market_time.isoformat(),
+            "message": f"集合竞价主板快照 {rows_written} 条；公共源未提供未匹配量时严格门禁保持关闭",
+        }
+
     def _run_sync_stock_sector_memberships(self, params: dict[str, Any]) -> dict[str, Any]:
+        del params
+        captured_at = _now_china()
         rows_written = _rebuild_stock_sector_memberships()
-        return {"rows_read": rows_written, "rows_written": rows_written}
+        snapshot_rows_written = 0
+        if rows_written > 0:
+            snapshot_rows_written = (
+                market_snapshot_repository.save_current_stock_sector_membership_snapshot(
+                    snapshot_date=captured_at.date(),
+                    captured_at=captured_at,
+                )
+            )
+        return {
+            "rows_read": rows_written,
+            "rows_written": rows_written,
+            "snapshot_rows_written": snapshot_rows_written,
+            "message": f"反向索引 {rows_written} 条；逐日成员快照 {snapshot_rows_written} 条",
+        }
 
     # ── 4 Shenwan runners ──
 
@@ -1192,7 +1369,13 @@ class DataSyncRunner:
                     continue
                 items = data.get("items") or []
                 total_read += len(items)
-                written = _upsert_sector_fund_flows(items, period, sector_type)
+                captured_at = _parse_aware_datetime(data.get("updated_at")) or datetime.now(timezone.utc)
+                written = _upsert_sector_fund_flows(
+                    items,
+                    period,
+                    sector_type,
+                    captured_at=captured_at,
+                )
                 total_written += written
                 self._report_progress(
                     "写入板块资金流",
@@ -1600,6 +1783,8 @@ JOB_RUNNERS: dict[str, str] = {
     "sync_stock_daily_bars": "_run_sync_stock_daily_bars",
     "sync_index_daily_bars": "_run_sync_index_daily_bars",
     "sync_stock_minute_bars": "_run_sync_stock_minute_bars",
+    "sync_limit_up_event_minutes": "_run_sync_limit_up_event_minutes",
+    "sync_stock_auction_snapshots": "_run_sync_stock_auction_snapshots",
     "sync_stock_sector_memberships": "_run_sync_stock_sector_memberships",
     "sync_shenwan_industry_tree": "_run_sync_shenwan_industry_tree",
     "sync_shenwan_industry_members": "_run_sync_shenwan_industry_members",
@@ -2020,6 +2205,7 @@ def _assert_known_jobs(
     *,
     allow_tail_preview_cache: bool = False,
     allow_eod_quant_research: bool = False,
+    allow_limit_up_history_rebuild: bool = False,
 ) -> None:
     valid = {job.id for job in DEFAULT_JOBS}
     unknown = [
@@ -2027,6 +2213,10 @@ def _assert_known_jobs(
         if j not in valid
         and not (allow_tail_preview_cache and j == TAIL_PREVIEW_BATCH_JOB_ID)
         and not (allow_eod_quant_research and j == EOD_QUANT_RESEARCH_BATCH_JOB_ID)
+        and not (
+            allow_limit_up_history_rebuild
+            and j == LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID
+        )
     ]
     if unknown:
         raise DataSyncError(f"Unknown job_ids: {unknown}")
@@ -2049,12 +2239,13 @@ def _assert_schedule_jobs(action: str, job_ids: list[str]) -> None:
         job_ids,
         allow_tail_preview_cache=action == "tail_preview",
         allow_eod_quant_research=action == "sync",
+        allow_limit_up_history_rebuild=action == "sync",
     )
 
 
 def _schedule_action(payload: dict[str, Any]) -> str:
     action = str(payload.get("action") or "sync").strip()
-    if action not in {"sync", "quant_research", "tail_preview"}:
+    if action not in {"sync", "quant_research", "tail_preview", "limit_up_live_scan"}:
         raise DataSyncError(f"Unsupported schedule action: {action}")
     return action
 
@@ -2145,6 +2336,9 @@ def run_schedule_now(schedule_id: str) -> dict[str, Any]:
     if action == "quant_research":
         research_run = _run_schedule_action(dict(row), raise_errors=True) or {}
         return _quant_research_schedule_status(schedule_id, research_run)
+    if action == "limit_up_live_scan":
+        snapshot = _run_schedule_action(dict(row), raise_errors=True) or {}
+        return _live_scan_schedule_status(schedule_id, snapshot)
     return _start_sync_schedule(dict(row), source="manual")
 
 
@@ -2196,6 +2390,56 @@ def _quant_research_schedule_status(schedule_id: str, research_run: dict[str, An
                 "progress_total": int(research_run.get("progress_total") or 1),
                 "progress_pct": progress_pct,
                 "stage": str(research_run.get("stage") or ""),
+                "current_label": "",
+                "sample_items": [],
+                "message": message,
+            }
+        ],
+    }
+
+
+def _live_scan_schedule_status(schedule_id: str, snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Represent one synchronous live scan as a batch-like response."""
+
+    saved = _live_scan_snapshot_saved(snapshot)
+    status = "succeeded" if saved else "skipped"
+    rows_read = len(snapshot.get("candidates") or [])
+    rows_written = 1 if saved else 0
+    created_at = _utc_now_iso()
+    finished_at = created_at
+    message = _live_scan_status_message(snapshot, saved=saved)
+    return {
+        "id": f"live_scan_{uuid4().hex}",
+        "profile": "limit_up_live_scan",
+        "source": "manual",
+        "schedule_id": schedule_id,
+        "concurrency": 1,
+        "status": status,
+        "created_at": created_at,
+        "started_at": created_at,
+        "finished_at": finished_at,
+        "current_job_id": None,
+        "total_jobs": 1,
+        "completed_jobs": 1,
+        "succeeded_jobs": 1 if saved else 0,
+        "failed_jobs": 0,
+        "skipped_jobs": 0 if saved else 1,
+        "rows_read": rows_read,
+        "rows_written": rows_written,
+        "progress_pct": 100.0,
+        "message": message,
+        "jobs": [
+            {
+                "job_id": "limit_up_live_scan",
+                "status": status,
+                "started_at": created_at,
+                "finished_at": finished_at,
+                "rows_read": rows_read,
+                "rows_written": rows_written,
+                "progress_current": 1,
+                "progress_total": 1,
+                "progress_pct": 100.0,
+                "stage": str(snapshot.get("session_stage") or ""),
                 "current_label": "",
                 "sample_items": [],
                 "message": message,
@@ -2421,26 +2665,41 @@ def _run_sync_batch(
                     _batch_job_params(job_id, params),
                     progress=_batch_progress_callback(batch_id, job_id),
                 )
+            elif job_id == LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID:
+                result = _run_limit_up_ths_evidence_batch_job(
+                    _batch_job_params(job_id, params),
+                    progress=_batch_progress_callback(batch_id, job_id),
+                )
+            elif job_id == LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID:
+                result = _run_limit_up_history_rebuild_batch_job()
             else:
                 result = run_job(job_id, _batch_job_params(job_id, params), progress=_batch_progress_callback(batch_id, job_id))
             rows_read = int(result.get("rows_read") or 0)
             rows_written = int(result.get("rows_written") or 0)
+            skipped = str(result.get("status") or "") == "skipped"
             _update_batch_job(
                 batch_id,
                 job_id,
                 {
-                    "status": "succeeded",
+                    "status": "skipped" if skipped else "succeeded",
                     "finished_at": _utc_now_iso(),
                     "rows_read": rows_read,
                     "rows_written": rows_written,
                     "progress_pct": 100,
-                    "stage": "完成",
+                    "stage": "跳过" if skipped else "完成",
                     "current_label": "",
                     "message": str(result.get("message") or ""),
                     "run_id": result.get("run_id") or result.get("id"),
                 },
             )
-            _increment_batch(batch_id, completed=1, succeeded=1, rows_read=rows_read, rows_written=rows_written)
+            _increment_batch(
+                batch_id,
+                completed=1,
+                skipped=1 if skipped else 0,
+                succeeded=0 if skipped else 1,
+                rows_read=rows_read,
+                rows_written=rows_written,
+            )
         except Exception as exc:
             _update_batch_job(
                 batch_id,
@@ -2512,6 +2771,22 @@ def _run_tail_preview_cache_batch_job(params: dict[str, Any], *, schedule_id: st
         "trade_date": result.get("trade_date"),
         "status": result.get("status"),
     }
+
+
+def _run_limit_up_ths_evidence_batch_job(
+    params: dict[str, Any],
+    *,
+    progress: ProgressCallback | None = None,
+) -> dict[str, Any]:
+    result = import_ths_evidence(
+        max_dates=int(params.get("max_dates") or 252),
+        only_missing=_truthy(params.get("only_missing", True)),
+        progress=progress,
+    )
+    status = str(result.get("status") or "unknown")
+    if status in {"error", "rejected", "unavailable"}:
+        raise DataSyncError(str(result.get("message") or f"同花顺历史证据补数失败：{status}"))
+    return result
 
 
 def _run_eod_quant_research_batch_job(
@@ -2603,6 +2878,35 @@ def _run_eod_quant_research_batch_job(
             f"盘后真实量化完成：{latest_complete_date.isoformat()}，"
             f"候选 {screen_run.get('recommendation_count') or 0}，"
             f"回测 #{backtest.get('backtest_id') or latest.get('backtest_id') or '-'}"
+        ),
+    }
+
+
+def _run_limit_up_history_rebuild_batch_job() -> dict[str, Any]:
+    from alphaagent.server.services.limit_up import history_service
+
+    latest_reliable_date = _latest_complete_daily_date_for_research()
+    result = history_service.refresh_history_if_needed(latest_reliable_date)
+    if str(result.get("status") or "") == "skipped":
+        return {
+            **result,
+            "rows_read": 0,
+            "rows_written": 0,
+            "message": (
+                "打板历史账本已覆盖最新完整交易日，"
+                f"无需重建：{result.get('persisted_end') or '-'}"
+            ),
+        }
+
+    persisted_days = int(result.get("persisted_days") or 0)
+    return {
+        **result,
+        "rows_read": persisted_days,
+        "rows_written": persisted_days,
+        "message": (
+            "打板历史账本已刷新："
+            f"{result.get('start') or '-'}..{result.get('end') or '-'}，"
+            f"{persisted_days} 个交易日"
         ),
     }
 
@@ -4158,7 +4462,15 @@ def _run_scheduled_jobs() -> None:
         cron = row.get("cron")
         if not cron:
             continue
-        if _recently_started(row):
+        action = str(row.get("action") or "sync")
+        if action == "limit_up_live_scan" and not _limit_up_live_scan_window_open(now_china):
+            continue
+        recently_started = (
+            _recently_started(row, within_seconds=45)
+            if action == "limit_up_live_scan"
+            else _recently_started(row)
+        )
+        if recently_started:
             continue
         try:
             if _cron_matches(cron, now_china):
@@ -4171,6 +4483,21 @@ def _run_schedule_action(row: dict[str, Any], *, raise_errors: bool = False) -> 
     schedule_id = str(row["id"])
     action = str(row.get("action") or "sync")
     try:
+        if action == "limit_up_live_scan":
+            _touch_schedule(
+                schedule_id,
+                last_started_at=datetime.now(timezone.utc),
+                last_status="running",
+            )
+            snapshot = refresh_live_snapshot()
+            saved = _live_scan_snapshot_saved(snapshot)
+            _touch_schedule(
+                schedule_id,
+                last_status="succeeded" if saved else "skipped",
+                last_finished_at=datetime.now(timezone.utc),
+                last_message=_live_scan_status_message(snapshot, saved=saved),
+            )
+            return snapshot
         if action == "quant_research":
             _touch_schedule(schedule_id, last_started_at=datetime.now(timezone.utc), last_status="running")
             research_run = research_jobs.start_research_run(persist=True, auto_portfolio=True, force_refresh=False)
@@ -4194,6 +4521,44 @@ def _run_schedule_action(row: dict[str, Any], *, raise_errors: bool = False) -> 
         if raise_errors:
             raise
         return None
+
+
+def _live_scan_snapshot_saved(snapshot: dict[str, Any]) -> bool:
+    quality = snapshot.get("data_quality")
+    return (
+        snapshot.get("mode") == "live_snapshot"
+        and isinstance(quality, dict)
+        and quality.get("is_stale") is False
+    )
+
+
+def _live_scan_actionable_count(snapshot: dict[str, Any]) -> int:
+    recommendations = snapshot.get("recommendations")
+    recommendations = recommendations if isinstance(recommendations, dict) else {}
+    lanes = recommendations.get("lanes")
+    lanes = lanes if isinstance(lanes, dict) else {}
+    return sum(
+        1
+        for rows in lanes.values()
+        if isinstance(rows, list)
+        for signal in rows
+        if isinstance(signal, dict) and signal.get("action") in {"buy_now", "next_auction"}
+    )
+
+
+def _live_scan_status_message(snapshot: dict[str, Any], *, saved: bool) -> str:
+    actionable = _live_scan_actionable_count(snapshot)
+    if saved:
+        return f"已保存实时打板快照，{actionable} 个可执行动作"
+    return f"行情非有效实时状态，快照未保存，{actionable} 个可执行动作"
+
+
+def _limit_up_live_scan_window_open(now_china: datetime) -> bool:
+    minute = now_china.hour * 60 + now_china.minute
+    return (
+        9 * 60 + 20 <= minute <= 11 * 60 + 30
+        or 13 * 60 <= minute <= 14 * 60 + 57
+    )
 
 
 def _cron_matches(cron_expr: str, now: datetime) -> bool:
@@ -5306,6 +5671,7 @@ def _upsert_daily_bars(symbol: str, exchange: str, items: list[dict[str, Any]]) 
                 "low_price": float(item.get("low") or item.get("low_price") or 0),
                 "volume": item.get("volume"),
                 "turnover": item.get("turnover"),
+                "turnover_rate": item.get("turnover_rate"),
                 "change_pct": item.get("change_pct"),
                 "source": str(item.get("source") or "akshare"),
                 "raw": item.get("raw") or {},
@@ -5390,19 +5756,22 @@ def _upsert_minute_bars(
 
 
 def _rebuild_stock_sector_memberships() -> int:
-    """Rebuild stock_sector_memberships from sector_memberships."""
-    with session_scope() as session:
-        session.execute(text("DELETE FROM stock_sector_memberships"))
-    with session_scope() as session:
-        rows = session.execute(
-            select(schema.sector_memberships).distinct(schema.sector_memberships.c.vt_symbol)
-        ).mappings().all()
+    """Atomically rebuild the current reverse index from sector memberships."""
+
+    items = _load_stock_sector_membership_items()
+    if not items:
+        raise DataSyncError("板块成员为空，保留上一版股票-板块反向索引")
+    return _replace_stock_sector_memberships(items)
+
+
+def _load_stock_sector_membership_items() -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     with session_scope() as session:
         member_rows = session.execute(select(schema.sector_memberships)).mappings().all()
-        sector_by_id: dict[str, dict[str, Any]] = {}
-        for row in session.execute(select(schema.sectors)).mappings().all():
-            sector_by_id[str(row["id"])] = dict(row)
+        sector_by_id = {
+            str(row["id"]): dict(row)
+            for row in session.execute(select(schema.sectors)).mappings().all()
+        }
         for m in member_rows:
             sid = str(m["sector_id"])
             sector = sector_by_id.get(sid, {})
@@ -5413,7 +5782,34 @@ def _rebuild_stock_sector_memberships() -> int:
                 "sector_type": str(sector.get("type") or "concept"),
                 "source": str(m.get("source") or "akshare"),
             })
-    return _upsert_stock_sector_memberships(items)
+    return items
+
+
+def _replace_stock_sector_memberships(items: list[dict[str, Any]]) -> int:
+    table = schema.stock_sector_memberships
+    values = [
+        {
+            "vt_symbol": str(item.get("vt_symbol") or ""),
+            "sector_id": str(item.get("sector_id") or ""),
+            "sector_name": str(item.get("sector_name") or ""),
+            "sector_type": str(item.get("sector_type") or "concept"),
+            "rank": item.get("rank"),
+            "confirmed": item.get("confirmed"),
+            "is_precise": item.get("is_precise"),
+            "source": str(item.get("source") or "akshare"),
+            "raw": item.get("raw") or {},
+        }
+        for item in items
+        if item.get("vt_symbol") and item.get("sector_id")
+    ]
+    if not values:
+        raise DataSyncError("板块成员无有效主键，保留上一版股票-板块反向索引")
+
+    with session_scope() as session:
+        session.execute(table.delete())
+        for offset in range(0, len(values), 500):
+            session.execute(table.insert().values(values[offset:offset + 500]))
+    return len(values)
 
 
 # ─── Shenwan upsert helpers ──────────────────────────────────────────────
@@ -5890,11 +6286,14 @@ def _upsert_sector_fund_flows(
     items: list[dict[str, Any]],
     period: str,
     sector_type: str,
+    *,
+    captured_at: datetime | None = None,
 ) -> int:
     """Upsert sector fund flow records."""
     if not items:
         return 0
     written = 0
+    snapshot_captured_at = captured_at or datetime.now(timezone.utc)
     with session_scope() as session:
         for item in items:
             name = str(item.get("name") or "")
@@ -5902,7 +6301,10 @@ def _upsert_sector_fund_flows(
             sector_id = str(item.get("id") or item.get("akshare_symbol") or code)
             if not sector_id:
                 continue
-            trade_date = str(item.get("trade_date") or date.today().isoformat())
+            trade_date = str(
+                item.get("trade_date")
+                or snapshot_captured_at.astimezone(timezone(timedelta(hours=8))).date().isoformat()
+            )
             if name:
                 _ensure_sector_row(session, sector_id, name, sector_type, item)
             values = {
@@ -5935,6 +6337,12 @@ def _upsert_sector_fund_flows(
             else:
                 session.execute(schema.sector_fund_flows.insert().values(**values))
             written += 1
+    market_snapshot_repository.save_sector_fund_flow_snapshots(
+        items,
+        period=period,
+        sector_type=sector_type,
+        captured_at=snapshot_captured_at,
+    )
     return written
 
 
@@ -5962,6 +6370,8 @@ def _upsert_limit_up_events(
     trade_date: str,
 ) -> int:
     """Replace one trade date's limit-up/limit-down pool events."""
+    if not items:
+        return 0
     event_type = f"limit_pool_{pool_type}"
     event_dates = _limit_pool_event_date_keys(trade_date)
     written = 0
@@ -5973,8 +6383,6 @@ def _upsert_limit_up_events(
                 & (schema.stock_events.c.event_date.in_(event_dates))
             )
         )
-        if not items:
-            return 0
         known_symbols = set(
             session.execute(select(schema.stocks.c.vt_symbol)).scalars().all()
         )
@@ -6430,3 +6838,43 @@ def _parse_datetime(value: Any) -> datetime | None:
         return datetime.fromisoformat(text_value).replace(tzinfo=None)
     except ValueError:
         return None
+
+
+def _parse_aware_datetime(value: Any) -> datetime | None:
+    """Parse an adapter timestamp and normalize it to UTC."""
+
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text_value = str(value or "").strip()
+        if not text_value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text_value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _auction_capture_window_open(value: datetime) -> bool:
+    local = value.astimezone(timezone(timedelta(hours=8))) if value.tzinfo else value
+    minute = local.hour * 60 + local.minute
+    return 9 * 60 + 25 <= minute <= 9 * 60 + 29
+
+
+def _auction_market_datetime(value: Any) -> datetime | None:
+    text_value = str(value or "").strip()
+    if len(text_value) < 10:
+        return None
+    parsed = _parse_datetime(text_value)
+    if parsed is None:
+        return None
+    return parsed.replace(tzinfo=timezone(timedelta(hours=8)))
+
+
+def _auction_source_time_ready(value: datetime) -> bool:
+    local = value.astimezone(timezone(timedelta(hours=8)))
+    minute = local.hour * 60 + local.minute
+    return 9 * 60 + 25 <= minute <= 9 * 60 + 29

@@ -18,6 +18,7 @@ from alphaagent.server.services.vnpy_integration.local_data import parse_vt_symb
 SUPPORTED_INTERVALS = {"1m": 8}
 TDX_PAGE_SIZE = 800
 TDX_MAX_START = 65500
+TDX_MAX_RECONNECTS = 3
 
 
 def import_tdx_minute_bars_for_gaps(
@@ -94,6 +95,7 @@ def import_tdx_minute_bars_for_gaps(
     unsupported_symbols: list[str] = []
     fetched_counts: dict[tuple[str, date], int] = defaultdict(int)
     processed_symbol_count = 0
+    reconnect_count = 0
 
     try:
         for vt_symbol, target_dates in grouped.items():
@@ -117,6 +119,30 @@ def import_tdx_minute_bars_for_gaps(
                 tail_entry_end=tail_entry_end,
                 max_pages=max_pages_per_symbol,
             )
+            if errors and reconnect_count < TDX_MAX_RECONNECTS:
+                reconnect_count += 1
+                _disconnect_tdx(api)
+                try:
+                    api, host = _connect_tdx(timeout_seconds=timeout_seconds)
+                    retry_rows, retry_scanned, retry_empty_pages, retry_errors = (
+                        _fetch_symbol_tail_rows(
+                            api,
+                            category=category,
+                            market=market,
+                            symbol=symbol,
+                            vt_symbol=vt_symbol,
+                            target_dates=target_dates,
+                            tail_entry_start=tail_entry_start,
+                            tail_entry_end=tail_entry_end,
+                            max_pages=max_pages_per_symbol,
+                        )
+                    )
+                    symbol_rows = _merge_symbol_rows(symbol_rows, retry_rows)
+                    scanned += retry_scanned
+                    empty_pages += retry_empty_pages
+                    errors = [*errors, *retry_errors] if retry_errors else []
+                except Exception as exc:
+                    errors.append(f"{vt_symbol} reconnect: {exc.__class__.__name__}")
             remote_rows_scanned += scanned
             empty_page_count += empty_pages
             request_errors.extend(error for error in errors if len(request_errors) < 20)
@@ -126,10 +152,7 @@ def import_tdx_minute_bars_for_gaps(
             if symbol_rows and not dry_run:
                 rows_written += _upsert_minute_bars(symbol, exchange.value, symbol_rows, interval_key, "tdx_public_hq")
     finally:
-        try:
-            api.disconnect()
-        except Exception:
-            pass
+        _disconnect_tdx(api)
 
     audit_after = _audit_minute_gap_requirements(
         requirements,
@@ -165,6 +188,7 @@ def import_tdx_minute_bars_for_gaps(
         "rows_written": rows_written,
         "remote_rows_scanned": remote_rows_scanned,
         "empty_page_count": empty_page_count,
+        "reconnect_count": reconnect_count,
         "preview_covered_gap_count": len(preview_covered),
         "preview_covered_examples": preview_covered[:50],
         "unsupported_symbols": unsupported_symbols,
@@ -204,6 +228,25 @@ def _connect_tdx(*, timeout_seconds: float):
             except Exception:
                 pass
     raise RuntimeError(f"no available TDX host: {last_error.__class__.__name__ if last_error else 'empty'}")
+
+
+def _disconnect_tdx(api) -> None:
+    try:
+        api.disconnect()
+    except Exception:
+        pass
+
+
+def _merge_symbol_rows(
+    first: list[dict[str, Any]],
+    second: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    by_time = {
+        row.get("trade_date"): row
+        for row in [*first, *second]
+        if row.get("trade_date") is not None
+    }
+    return [by_time[key] for key in sorted(by_time)]
 
 
 def _fetch_symbol_tail_rows(

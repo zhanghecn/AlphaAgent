@@ -21314,6 +21314,72 @@ def test_tdx_gap_import_writes_real_minute_rows(monkeypatch) -> None:
     assert result["audit_after"]["status"] == "ready"
 
 
+def test_tdx_gap_import_reconnects_after_a_broken_quote_connection(monkeypatch) -> None:
+    from alphaagent.server.services.data_providers import tdx_minute_import
+
+    class BrokenApi:
+        def get_security_bars(self, *_args):
+            raise RuntimeError("connection lost")
+
+        @staticmethod
+        def disconnect():
+            return None
+
+    class HealthyApi:
+        def get_security_bars(self, _category, _market, _symbol, _start, _count):
+            return [{
+                "datetime": "2026-07-10 14:30",
+                "open": 10,
+                "high": 10.2,
+                "low": 9.9,
+                "close": 10.1,
+                "vol": 1200,
+                "amount": 12120,
+            }]
+
+        @staticmethod
+        def disconnect():
+            return None
+
+    connections = iter([
+        (BrokenApi(), {"name": "broken", "ip": "127.0.0.1", "port": 7709}),
+        (HealthyApi(), {"name": "healthy", "ip": "127.0.0.2", "port": 7709}),
+    ])
+    monkeypatch.setattr(tdx_minute_import, "is_database_configured", lambda: True)
+    monkeypatch.setattr(
+        tdx_minute_import,
+        "_connect_tdx",
+        lambda timeout_seconds: next(connections),
+    )
+    monkeypatch.setattr(
+        tdx_minute_import,
+        "_audit_minute_gap_requirements",
+        lambda requirements, **_kwargs: {
+            "status": "missing",
+            "gap_count": len(requirements["items"]),
+            "covered_count": 0,
+            "missing_count": len(requirements["items"]),
+            "coverage_pct": 0.0,
+        },
+    )
+    gap_csv = "trade_date,vt_symbol\n2026-07-10,002730.SZSE\n"
+
+    result = tdx_minute_import.import_tdx_minute_bars_for_gaps(
+        gap_csv_text=gap_csv,
+        tail_entry_start="09:15",
+        tail_entry_end="15:00",
+        dry_run=True,
+        max_pages_per_symbol=1,
+    )
+
+    assert result["status"] == "ready"
+    assert result["rows_read"] == 1
+    assert result["preview_covered_gap_count"] == 1
+    assert result["reconnect_count"] == 1
+    assert result["errors"] == []
+    assert result["host"]["name"] == "healthy"
+
+
 def test_tdx_gap_import_endpoint(monkeypatch) -> None:
     from alphaagent.server.api import data_sync
 
