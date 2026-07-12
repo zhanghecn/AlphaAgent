@@ -1201,7 +1201,13 @@ def test_portfolio_backtest_uses_one_shared_100k_cash_account(monkeypatch) -> No
             "next_close_return_pct": -5.31,
         },
     }
-    day["lane_portfolio"]["selected"] = [first, relay]
+    negative_one_to_two = {
+        **relay,
+        "vt_symbol": "600003.SSE",
+        "name": "一进二负期望样本",
+        "lane": "one_to_two",
+    }
+    day["lane_portfolio"]["selected"] = [first, relay, negative_one_to_two]
     day["board_lanes"]["two_to_three"] = [relay]
     monkeypatch.setattr(
         history_service.history_repository,
@@ -1223,11 +1229,13 @@ def test_portfolio_backtest_uses_one_shared_100k_cash_account(monkeypatch) -> No
 
     assert report["lane"] == "portfolio"
     assert report["account_config"]["initial_cash"] == 100_000
-    assert report["account_config"]["max_positions"] == 4
+    assert report["account_config"]["max_positions"] == 8
     assert report["summary"] == report["execution_summary"]
+    assert report["summary"]["signal_count"] == 2
     assert report["summary"]["trade_count"] == 2
     assert report["summary"]["total_return_pct"] == report["daily_results"][-1]["total_return_pct"]
     assert report["signal_summary"]["total_return_pct"] != report["summary"]["total_return_pct"]
+    assert report["portfolio_policy"]["excluded_lanes"] == ["one_to_two"]
 
 
 def test_lane_ledger_api_accepts_date_and_board_lane(monkeypatch) -> None:

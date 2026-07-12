@@ -199,6 +199,11 @@ export interface LimitUpLaneBacktest {
     slippage_bps: number;
     lot_size: number;
   };
+  portfolio_policy: {
+    included_lanes: BoardLaneKey[];
+    excluded_lanes: BoardLaneKey[];
+    selection_basis: string;
+  };
   daily_results: LimitUpDailyResult[];
   trades: Array<LimitUpLaneLedgerTrade & {
     signal_date: string;

@@ -73,7 +73,7 @@ export function LimitUpPage() {
   const [selectedDate, setSelectedDate] = useState("");
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
-  const [exitMode, setExitMode] = useState<ExitMode>("next_open");
+  const [exitMode, setExitMode] = useState<ExitMode>("next_close");
   const modelLane = backtestScope === "portfolio" ? null : backtestScope;
 
   const datesQuery = useQuery({
@@ -477,7 +477,7 @@ function BacktestView({ report, modelReport, modelLoading, modelError, loading, 
           <RefreshCw size={15} className={cn(fetching && "animate-spin")} />
         </Button>
         <div className="ml-auto pb-1 text-xs tabular-nums text-muted-foreground">
-          10 万元 · 最多 4 仓 · 100 股整数手 · 含费用滑点
+          10 万元 · 最多 8 仓 · 100 股整数手 · 含费用滑点
         </div>
       </div>
 
@@ -492,7 +492,7 @@ function BacktestView({ report, modelReport, modelLoading, modelError, loading, 
 
       {report && <SignalSummaryStrip report={report} />}
       {report?.lane === "portfolio" ? (
-        <div className="border-b px-3 py-2 text-xs text-muted-foreground sm:px-4">组合账户 · 共享现金 · 4 仓上限</div>
+        <div className="border-b px-3 py-2 text-xs text-muted-foreground sm:px-4">执行首板 / 二进三 / 高板 · 一进二仅研究 · 共享现金 / 8 仓</div>
       ) : (
         <ModelEvidenceStrip
           ruleTradeCount={summary?.trade_count ?? 0}

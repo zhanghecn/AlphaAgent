@@ -30,6 +30,7 @@ _BUILD_STATE: dict[str, object] = {
 }
 LANE_RULE_FREEZE_DATE = date(2026, 7, 12)
 BACKTEST_SCOPES = ("portfolio", *BOARD_LANES)
+PORTFOLIO_EXECUTION_LANES = ("first_board", "two_to_three", "high_board")
 
 
 def start_history_rebuild() -> dict[str, object]:
@@ -297,6 +298,12 @@ def get_lane_history_backtest(
     )
     lane_filter = None if lane == "portfolio" else lane
     orders = _selected_history_orders(rows, lane_filter)
+    if lane == "portfolio":
+        orders = [
+            order
+            for order in orders
+            if str(order.get("lane") or "") in PORTFOLIO_EXECUTION_LANES
+        ]
     signal_trades = [
         trade
         for order in orders
@@ -362,6 +369,11 @@ def get_lane_history_backtest(
         "account_config": account["account_config"],
         "execution_version": account["execution_version"],
         "execution_assumptions": account["execution_assumptions"],
+        "portfolio_policy": {
+            "included_lanes": list(PORTFOLIO_EXECUTION_LANES) if lane == "portfolio" else [lane],
+            "excluded_lanes": ["one_to_two"] if lane == "portfolio" else [],
+            "selection_basis": "warmup_and_expanding_oos_frozen_before_holdout",
+        },
         "orders": account["orders"][-trade_limit:],
         "signals": orders[-trade_limit:],
         "trades": account["executed_trades"][-trade_limit:],
