@@ -64,4 +64,5 @@
 - `uv run pytest tests/alphaagent/test_limit_up_cash_backtest.py tests/alphaagent/test_limit_up_lanes.py tests/alphaagent/test_limit_up_history.py tests/alphaagent/test_limit_up_walk_forward_model.py -q`：`93 passed`。
 - Python 编译检查与 `pnpm --dir frontend run build` 通过。
 - API 容器使用真实 PostgreSQL 重跑 5 个范围和 2 种退出方式，主收益等于 `final_equity / 100000 - 1`。
+- `docker compose up -d --build alphaagent-api alphaagent-web` 部署后，Playwright 在 1280x720 和 390x844 验证默认组合指标、非空权益曲线、交割表、跳单表和历史日期切换；控制台零错误，页面无全局横向溢出。
 - 日线和三分钟代理不能证明涨停排队成交；当前逐日行业成员仍有幸存者风险。历史结果不代表未来收益，严格前向样本达到门槛前保持研究状态。
