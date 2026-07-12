@@ -17,6 +17,7 @@ FIRST_BOARD_MIN_SUPPORT_SCORE = 35.0
 FIRST_BOARD_MIN_TOUCH_COUNT = 6
 FIRST_BOARD_MIN_NET_PROFIT_YOY = 10.0
 FIRST_BOARD_MIN_PRIOR_FAILED_RATE = 0.35
+TWO_TO_THREE_RISK_LIMIT = 4
 
 
 def classify_board_lane(candidate: Mapping[str, object]) -> str:
@@ -42,6 +43,11 @@ def evaluate_lane_candidate(candidate: Mapping[str, object]) -> dict[str, object
     blockers = _shared_blockers(candidate, lane)
     favorable: list[str] = []
     setup_type: str | None = None
+    two_to_three_quality: dict[str, object] = {
+        "two_to_three_quality_tier": None,
+        "two_to_three_risk_count": 0,
+        "two_to_three_risk_flags": [],
+    }
 
     if lane == "first_board":
         lane_blockers, favorable = _first_board_rules(candidate)
@@ -52,6 +58,9 @@ def evaluate_lane_candidate(candidate: Mapping[str, object]) -> dict[str, object
     elif lane == "two_to_three":
         lane_blockers, favorable, setup_type = _two_to_three_rules(candidate)
         blockers.extend(lane_blockers)
+        two_to_three_quality = _two_to_three_quality(candidate)
+        if two_to_three_quality["two_to_three_risk_count"] >= TWO_TO_THREE_RISK_LIMIT:
+            blockers.append("two_to_three_risk_stack")
     else:
         lane_blockers, favorable, setup_type = _high_board_rules(candidate)
         blockers.extend(lane_blockers)
@@ -89,6 +98,7 @@ def evaluate_lane_candidate(candidate: Mapping[str, object]) -> dict[str, object
             else None,
             "entry_quality_score": entry_quality_score,
             "rank_score": _lane_rank_score(candidate, lane, setup_type),
+            **two_to_three_quality,
         }
     )
     return result
@@ -98,11 +108,11 @@ def select_daily_lane_portfolio(
     candidates: Sequence[Mapping[str, object]],
     *,
     max_total: int = 4,
-    max_per_lane: int = 1,
     max_per_industry: int = 2,
 ) -> dict[str, object]:
-    """Select at most one independent idea per lane, with empty days allowed."""
+    """Select a diversified portfolio first, then fill remaining ranked slots."""
 
+    selection_limit = max(max_total, 0)
     evaluated = [evaluate_lane_candidate(candidate) for candidate in candidates]
     grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
     for candidate in evaluated:
@@ -119,37 +129,97 @@ def select_daily_lane_portfolio(
         ]
         displayed[lane] = [
             {**row, "lane_rank": rank, "pool_rank": rank}
-            for rank, row in enumerate(rows[:max(max_per_lane, 0)], start=1)
+            for rank, row in enumerate(rows[:selection_limit], start=1)
         ]
 
     selected: list[dict[str, object]] = []
     industry_counts: dict[str, int] = defaultdict(int)
+    selected_symbols: set[str] = set()
     for lane in BOARD_LANES:
         for candidate in displayed[lane]:
-            if candidate.get("decision") != "eligible":
-                continue
-            industry = str(candidate.get("industry_id") or candidate.get("industry_name") or "")
-            if industry and industry_counts[industry] >= max_per_industry:
-                continue
-            selected.append(candidate)
-            if industry:
-                industry_counts[industry] += 1
-            if len(selected) >= max_total:
+            if _append_if_allowed(
+                selected,
+                candidate,
+                max_total=selection_limit,
+                max_per_industry=max_per_industry,
+                industry_counts=industry_counts,
+                selected_symbols=selected_symbols,
+            ):
                 break
-        if len(selected) >= max_total:
+        if len(selected) >= selection_limit:
             break
 
+    remaining = [
+        candidate
+        for lane in BOARD_LANES
+        for candidate in displayed[lane]
+        if str(candidate.get("vt_symbol") or "") not in selected_symbols
+    ]
+    remaining.sort(key=_portfolio_fill_sort_key)
+    for candidate in remaining:
+        _append_if_allowed(
+            selected,
+            candidate,
+            max_total=selection_limit,
+            max_per_industry=max_per_industry,
+            industry_counts=industry_counts,
+            selected_symbols=selected_symbols,
+        )
+
+    selected_counts_by_lane: dict[str, int] = defaultdict(int)
+    for candidate in selected:
+        selected_counts_by_lane[str(candidate.get("lane") or "unknown")] += 1
     return {
         "action": "normal" if selected else "empty",
+        "selection_policy": "diversified_then_ranked_v1",
         "selected_count": len(selected),
-        "max_candidates": max_total,
+        "max_candidates": selection_limit,
+        "max_per_industry": max_per_industry,
         "selected": selected,
+        "selected_counts_by_lane": dict(selected_counts_by_lane),
+        "selected_counts_by_industry": dict(industry_counts),
         "lanes": displayed,
         "candidate_pool": candidate_pool,
         "candidate_count": len(evaluated),
         "blocked_count": sum(row.get("decision") == "blocked" for row in evaluated),
         "watch_count": sum(row.get("decision") == "watch" for row in evaluated),
     }
+
+
+def _append_if_allowed(
+    selected: list[dict[str, object]],
+    candidate: Mapping[str, object],
+    *,
+    max_total: int,
+    max_per_industry: int,
+    industry_counts: dict[str, int],
+    selected_symbols: set[str],
+) -> bool:
+    if len(selected) >= max_total or candidate.get("decision") != "eligible":
+        return False
+    symbol = str(candidate.get("vt_symbol") or "")
+    industry = str(
+        candidate.get("industry_id") or candidate.get("industry_name") or ""
+    )
+    if not symbol or symbol in selected_symbols:
+        return False
+    if industry and industry_counts[industry] >= max_per_industry:
+        return False
+    selected.append(dict(candidate))
+    selected_symbols.add(symbol)
+    if industry:
+        industry_counts[industry] += 1
+    return True
+
+
+def _portfolio_fill_sort_key(candidate: Mapping[str, object]) -> tuple[object, ...]:
+    quality_order = 0 if candidate.get("two_to_three_quality_tier") == "A" else 1
+    return (
+        quality_order,
+        -float(candidate.get("rank_score") or 0),
+        _integer(candidate.get("lane_rank")),
+        str(candidate.get("vt_symbol") or ""),
+    )
 
 
 def _shared_blockers(
@@ -459,6 +529,20 @@ def _two_to_three_rules(
     promotion = _number(candidate.get("prior_market_two_to_three_rate"))
     if promotion is not None and promotion < 0.12:
         blockers.append("two_to_three_market_success_low")
+    amount = _number(candidate.get("prior_amount_ratio_5d"))
+    failed_rate = _number(candidate.get("prior_market_failed_rate"))
+    if open_times is not None and 3 <= open_times <= 6:
+        favorable.append("prior_board_full_turnover_reseal")
+    if amount is not None and 1.2 <= amount < 2:
+        favorable.append("prior_amount_ratio_balanced")
+    if isinstance(candidate.get("financial_snapshot"), Mapping):
+        favorable.append("financial_snapshot_available")
+    if prior_low is not None and prior_low >= 0:
+        favorable.append("prior_low_held_positive")
+    if failed_rate is not None and failed_rate < 0.35:
+        favorable.append("prior_market_failed_rate_controlled")
+    if promotion is not None and promotion >= 0.30:
+        favorable.append("prior_market_two_to_three_active")
     return blockers, favorable, setup_type
 
 
@@ -497,6 +581,65 @@ def _high_board_rules(
     return blockers, favorable, setup_type
 
 
+def _two_to_three_quality(candidate: Mapping[str, object]) -> dict[str, object]:
+    gap = _number(candidate.get("auction_gap_pct"))
+    turnover = _number(candidate.get("prior_turnover_rate"))
+    amount = _number(candidate.get("prior_amount_ratio_5d"))
+    prior_low = _number(candidate.get("prior_low_change_pct"))
+    failed_rate = _number(candidate.get("prior_market_failed_rate"))
+    risks = [
+        code
+        for code, passed in (
+            ("auction_gap_outside_core", gap is not None and 2 <= gap < 5),
+            (
+                "prior_turnover_outside_core",
+                turnover is not None and 10 <= turnover < 20,
+            ),
+            (
+                "prior_amount_ratio_outside_core",
+                amount is not None and 1.2 <= amount < 2,
+            ),
+            (
+                "financial_snapshot_missing",
+                isinstance(candidate.get("financial_snapshot"), Mapping),
+            ),
+            ("prior_low_below_zero", prior_low is not None and prior_low >= 0),
+            (
+                "prior_market_failed_rate_high",
+                failed_rate is not None and failed_rate < 0.35,
+            ),
+        )
+        if not passed
+    ]
+    core_gap = gap is not None and 2 <= gap < 5
+    core_turnover = turnover is not None and 10 <= turnover < 20
+    return {
+        "two_to_three_quality_tier": "A" if core_gap and core_turnover else "B",
+        "two_to_three_risk_count": len(risks),
+        "two_to_three_risk_flags": risks,
+    }
+
+
+def _two_to_three_rank_adjustment(candidate: Mapping[str, object]) -> float:
+    quality = _two_to_three_quality(candidate)
+    prior_board = candidate.get("prior_board")
+    board = prior_board if isinstance(prior_board, Mapping) else {}
+    open_times = _number(board.get("open_times"))
+    amount = _number(candidate.get("prior_amount_ratio_5d"))
+    prior_low = _number(candidate.get("prior_low_change_pct"))
+    failed_rate = _number(candidate.get("prior_market_failed_rate"))
+    promotion = _number(candidate.get("prior_market_two_to_three_rate"))
+    score = 30.0 if quality["two_to_three_quality_tier"] == "A" else 0.0
+    score += 12.0 if open_times is not None and 3 <= open_times <= 6 else 0.0
+    score += 8.0 if amount is not None and 1.2 <= amount < 2 else 0.0
+    score += 6.0 if isinstance(candidate.get("financial_snapshot"), Mapping) else 0.0
+    score += 6.0 if prior_low is not None and prior_low >= 0 else 0.0
+    score += 6.0 if failed_rate is not None and failed_rate < 0.35 else 0.0
+    score += 6.0 if promotion is not None and promotion >= 0.30 else 0.0
+    score -= float(quality["two_to_three_risk_count"]) * 8.0
+    return score
+
+
 def _lane_rank_score(
     candidate: Mapping[str, object],
     lane: str,
@@ -518,6 +661,7 @@ def _lane_rank_score(
     elif lane == "two_to_three":
         score = heat * 0.4 - leader_rank * 5 + min(amount, 3) * 5
         score += 12 if setup_type == "weak_to_strong" else 7
+        score += _two_to_three_rank_adjustment(candidate)
     else:
         score = heat * 0.45 - leader_rank * 7 + min(gene, 5) * 3
         score += 8 if setup_type == "high_board_weak_to_strong" else 4

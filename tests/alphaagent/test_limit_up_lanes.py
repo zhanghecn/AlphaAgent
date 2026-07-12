@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from unittest.mock import patch
 
 import pandas as pd
 from fastapi.testclient import TestClient
@@ -403,6 +404,82 @@ def test_one_to_two_uses_previous_board_quality_and_auction_strength() -> None:
     assert {"auction_gap_out_of_range", "prior_turnover_extreme"} <= set(weak["blockers"])
 
 
+def test_two_to_three_marks_core_auction_quality() -> None:
+    result = evaluate_lane_candidate(
+        _candidate(
+            prior_streak=2,
+            target_board=3,
+            auction_gap_pct=3.2,
+            prior_turnover_rate=14.0,
+            prior_amount_ratio_5d=1.6,
+            prior_low_change_pct=0.5,
+            prior_market_failed_rate=0.30,
+            prior_market_two_to_three_rate=0.35,
+            prior_board={
+                "is_sealed": True,
+                "first_limit_time": "10:08:00",
+                "last_limit_time": "14:20:00",
+                "open_times": 4,
+            },
+        )
+    )
+
+    assert result["decision"] == "eligible"
+    assert result["two_to_three_quality_tier"] == "A"
+    assert result["two_to_three_risk_count"] == 0
+    assert result["two_to_three_risk_flags"] == []
+    assert {
+        "prior_board_full_turnover_reseal",
+        "prior_amount_ratio_balanced",
+        "financial_snapshot_available",
+        "prior_low_held_positive",
+        "prior_market_failed_rate_controlled",
+        "prior_market_two_to_three_active",
+    } <= set(result["favorable_factors"])
+
+
+def test_two_to_three_blocks_four_visible_risks() -> None:
+    result = evaluate_lane_candidate(
+        _candidate(
+            prior_streak=2,
+            target_board=3,
+            auction_gap_pct=5.5,
+            prior_turnover_rate=8.0,
+            prior_amount_ratio_5d=1.0,
+            financial_snapshot=None,
+            prior_low_change_pct=-1.0,
+            prior_market_failed_rate=0.40,
+            prior_market_two_to_three_rate=0.35,
+            prior_board={
+                "is_sealed": True,
+                "first_limit_time": "10:08:00",
+                "last_limit_time": "14:20:00",
+                "open_times": 4,
+            },
+        )
+    )
+
+    assert result["decision"] == "blocked"
+    assert result["two_to_three_risk_count"] == 6
+    assert result["two_to_three_risk_flags"] == [
+        "auction_gap_outside_core",
+        "prior_turnover_outside_core",
+        "prior_amount_ratio_outside_core",
+        "financial_snapshot_missing",
+        "prior_low_below_zero",
+        "prior_market_failed_rate_high",
+    ]
+    assert "two_to_three_risk_stack" in result["blockers"]
+
+
+def test_non_two_to_three_candidate_has_stable_quality_fields() -> None:
+    result = evaluate_lane_candidate(_candidate())
+
+    assert result["two_to_three_quality_tier"] is None
+    assert result["two_to_three_risk_count"] == 0
+    assert result["two_to_three_risk_flags"] == []
+
+
 def test_relay_lane_requires_auditable_previous_board_evidence() -> None:
     one_to_two = evaluate_lane_candidate(
         _candidate(
@@ -499,7 +576,7 @@ def test_high_board_auction_accepts_prior_divergence_weak_to_strong_without_l2()
     assert result["setup_type"] == "high_board_weak_to_strong"
 
 
-def test_selection_allows_empty_days_and_never_exceeds_four_lanes() -> None:
+def test_selection_allows_empty_days_and_never_exceeds_four_candidates() -> None:
     candidates = [
         _candidate(vt_symbol="600001.SSE"),
         _candidate(vt_symbol="600002.SSE", prior_streak=1, prior_limit_count_5=1, target_board=2, signal_time="09:25:00"),
@@ -515,7 +592,7 @@ def test_selection_allows_empty_days_and_never_exceeds_four_lanes() -> None:
 
     assert tuple(selected["lanes"]) == BOARD_LANES
     assert len(selected["selected"]) <= 4
-    assert all(len(selected["lanes"][lane]) <= 1 for lane in BOARD_LANES)
+    assert all(len(selected["lanes"][lane]) <= 4 for lane in BOARD_LANES)
     assert retreat["selected"] == []
     assert retreat["action"] == "empty"
 
@@ -528,7 +605,7 @@ def test_selection_preserves_the_complete_daily_candidate_pool() -> None:
 
     result = select_daily_lane_portfolio(candidates)
 
-    assert len(result["lanes"]["first_board"]) == 1
+    assert len(result["lanes"]["first_board"]) == 2
     assert [
         row["vt_symbol"] for row in result["candidate_pool"]["first_board"]
     ] == ["600001.SSE", "600002.SSE"]
@@ -572,9 +649,144 @@ def test_history_replay_persists_pool_separately_from_final_selection(monkeypatc
     )[0]
 
     assert len(replay["board_candidate_pool"]["first_board"]) == 2
-    assert len(replay["board_lanes"]["first_board"]) == 1
-    assert len(replay["lane_portfolio"]["selected"]) == 1
+    assert len(replay["board_lanes"]["first_board"]) == 2
+    assert len(replay["lane_portfolio"]["selected"]) == 2
     assert replay["lane_portfolio"]["candidate_pool"] == replay["board_candidate_pool"]
+
+
+def _pre_evaluated_candidate(
+    symbol: str,
+    lane: str,
+    *,
+    industry_id: str,
+    rank_score: float,
+    quality_tier: str | None = None,
+) -> dict[str, object]:
+    return {
+        "vt_symbol": symbol,
+        "name": symbol,
+        "lane": lane,
+        "decision": "eligible",
+        "industry_id": industry_id,
+        "industry_name": industry_id,
+        "rank_score": rank_score,
+        "two_to_three_quality_tier": quality_tier,
+    }
+
+
+def test_daily_portfolio_selects_multiple_candidates_from_one_lane() -> None:
+    candidates = [
+        _pre_evaluated_candidate(
+            f"60000{index}.SSE",
+            "two_to_three",
+            industry_id=f"BK{index % 3}",
+            rank_score=100 - index,
+            quality_tier="A",
+        )
+        for index in range(1, 6)
+    ]
+    with patch(
+        "alphaagent.server.services.limit_up.lane_research.evaluate_lane_candidate",
+        side_effect=lambda candidate: dict(candidate),
+    ):
+        result = select_daily_lane_portfolio(candidates)
+
+    assert len(result["selected"]) == 4
+    assert {row["lane"] for row in result["selected"]} == {"two_to_three"}
+    assert result["selected_counts_by_lane"] == {"two_to_three": 4}
+
+
+def test_daily_portfolio_diversifies_before_filling_extra_slots() -> None:
+    candidates = [
+        _pre_evaluated_candidate(
+            "600001.SSE", "first_board", industry_id="BK1", rank_score=80
+        ),
+        _pre_evaluated_candidate(
+            "600002.SSE", "one_to_two", industry_id="BK2", rank_score=80
+        ),
+        _pre_evaluated_candidate(
+            "600003.SSE",
+            "two_to_three",
+            industry_id="BK3",
+            rank_score=100,
+            quality_tier="A",
+        ),
+        _pre_evaluated_candidate(
+            "600004.SSE",
+            "two_to_three",
+            industry_id="BK4",
+            rank_score=90,
+            quality_tier="A",
+        ),
+        _pre_evaluated_candidate(
+            "600005.SSE",
+            "two_to_three",
+            industry_id="BK5",
+            rank_score=85,
+            quality_tier="A",
+        ),
+    ]
+    with patch(
+        "alphaagent.server.services.limit_up.lane_research.evaluate_lane_candidate",
+        side_effect=lambda candidate: dict(candidate),
+    ):
+        result = select_daily_lane_portfolio(candidates)
+
+    assert [row["vt_symbol"] for row in result["selected"][:3]] == [
+        "600001.SSE",
+        "600002.SSE",
+        "600003.SSE",
+    ]
+    assert len(result["selected"]) == 4
+    assert result["selection_policy"] == "diversified_then_ranked_v1"
+
+
+def test_daily_portfolio_enforces_industry_limit_and_symbol_deduplication() -> None:
+    candidates = [
+        _pre_evaluated_candidate(
+            "600001.SSE", "first_board", industry_id="BK1", rank_score=100
+        ),
+        _pre_evaluated_candidate(
+            "600001.SSE", "one_to_two", industry_id="BK1", rank_score=99
+        ),
+        _pre_evaluated_candidate(
+            "600002.SSE", "one_to_two", industry_id="BK1", rank_score=98
+        ),
+        _pre_evaluated_candidate(
+            "600003.SSE", "two_to_three", industry_id="BK1", rank_score=97
+        ),
+        _pre_evaluated_candidate(
+            "600004.SSE", "two_to_three", industry_id="BK2", rank_score=96
+        ),
+    ]
+    with patch(
+        "alphaagent.server.services.limit_up.lane_research.evaluate_lane_candidate",
+        side_effect=lambda candidate: dict(candidate),
+    ):
+        result = select_daily_lane_portfolio(candidates)
+
+    assert [row["vt_symbol"] for row in result["selected"]] == [
+        "600001.SSE",
+        "600002.SSE",
+        "600004.SSE",
+    ]
+    assert result["selected_counts_by_industry"] == {"BK1": 2, "BK2": 1}
+
+
+def test_daily_portfolio_returns_empty_when_max_total_is_zero() -> None:
+    candidate = _pre_evaluated_candidate(
+        "600001.SSE", "first_board", industry_id="BK1", rank_score=100
+    )
+    with patch(
+        "alphaagent.server.services.limit_up.lane_research.evaluate_lane_candidate",
+        side_effect=lambda row: dict(row),
+    ):
+        result = select_daily_lane_portfolio([candidate], max_total=0)
+
+    assert result["action"] == "empty"
+    assert result["selected"] == []
+    assert result["selected_count"] == 0
+    assert result["candidate_count"] == 1
 
 
 def test_final_board_result_cannot_change_pretrade_decision_or_rank() -> None:
