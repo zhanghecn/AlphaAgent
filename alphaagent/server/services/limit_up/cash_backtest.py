@@ -484,6 +484,10 @@ def _close_position(
     state.closed_trades.append(
         {
             **position.candidate,
+            "entry_date": position.entry_date.isoformat(),
+            "exit_date": trade_date.isoformat(),
+            "entry_price": position.buy_price,
+            "exit_price": fill.price,
             "buy_date": position.entry_date.isoformat(),
             "buy_time": position.buy_time,
             "buy_price": position.buy_price,
@@ -500,6 +504,8 @@ def _close_position(
             "return_pct": return_pct,
             "is_win": net_pnl > 0,
             "is_hard_loss": return_pct <= -5,
+            "d1_outcome": _d1_outcome(return_pct, position.candidate),
+            "d_board_status": _board_status(position.candidate),
             "exit_reason": exit_reason,
             "result_status": "closed",
         }
@@ -761,6 +767,32 @@ def _signal_seal_rate(signals: Sequence[PreparedSignal]) -> float | None:
         if isinstance(outcome, Mapping) and outcome.get("sealed") is not None:
             known.append(bool(outcome.get("sealed")))
     return round(sum(known) / len(known) * 100, 4) if known else None
+
+
+def _d1_outcome(
+    return_pct: float,
+    candidate: Mapping[str, object],
+) -> str:
+    outcome = candidate.get("outcome")
+    sealed = bool(outcome.get("sealed")) if isinstance(outcome, Mapping) else False
+    if return_pct >= 9:
+        return "continuation_limit_up" if sealed else "next_limit_up_after_failed_board"
+    if return_pct > 0:
+        return "d1_premium"
+    if return_pct <= -5:
+        return "direct_breakdown"
+    return "no_premium"
+
+
+def _board_status(candidate: Mapping[str, object]) -> str:
+    outcome = candidate.get("outcome")
+    if not isinstance(outcome, Mapping):
+        return "unknown"
+    if outcome.get("sealed"):
+        return "sealed"
+    if outcome.get("touched"):
+        return "failed"
+    return "no_limit"
 
 
 def _as_date(value: object) -> date:

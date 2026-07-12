@@ -231,9 +231,14 @@ def history_backtest(
     end: date | None = Query(default=None),
     exit_mode: Literal["next_open", "next_close"] = Query(default="next_open"),
     entry_mode: Literal["auction", "sweep", "tail", "next_auction"] = Query(default="auction"),
-    lane: Literal["first_board", "one_to_two", "two_to_three", "high_board"] | None = Query(
-        default=None
-    ),
+    lane: Literal[
+        "portfolio",
+        "first_board",
+        "one_to_two",
+        "two_to_three",
+        "high_board",
+    ]
+    | None = Query(default=None),
 ):
     if start and end and start > end:
         return JSONResponse(

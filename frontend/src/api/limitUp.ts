@@ -3,6 +3,7 @@ import { apiClient } from "./client";
 export type ExitMode = "next_open" | "next_close";
 export type EntryMode = "auction" | "sweep" | "tail" | "next_auction";
 export type BoardLaneKey = "first_board" | "one_to_two" | "two_to_three" | "high_board";
+export type LimitUpBacktestScope = "portfolio" | BoardLaneKey;
 export type HistoryValidationPhase = "warmup" | "expanding_oos" | "locked_holdout";
 export type LimitUpLiveAction = "buy_now" | "wait_tail" | "next_auction" | "pass";
 export type LimitUpLane = "now" | "tail" | "next_auction";
@@ -88,6 +89,8 @@ export interface LimitUpHistoryDates {
 }
 
 export interface LimitUpEntrySummary {
+  initial_cash?: number;
+  final_equity?: number;
   signal_count: number;
   filled_count: number;
   fill_rate: number | null;
@@ -106,6 +109,13 @@ export interface LimitUpEntrySummary {
   hard_loss_rate: number | null;
   seal_rate: number | null;
   profit_factor?: number | null;
+  buy_count?: number;
+  open_position_count?: number;
+  skipped_count?: number;
+  skipped_reasons?: Record<string, number>;
+  total_fees?: number;
+  average_utilization_pct?: number;
+  peak_utilization_pct?: number;
 }
 
 export interface LimitUpLaneLedgerTrade {
@@ -159,6 +169,11 @@ export interface LimitUpLaneLedger {
 export interface LimitUpDailyResult {
   result_date: string;
   trade_count: number;
+  cash: number;
+  market_value: number;
+  total_equity: number;
+  position_count: number;
+  utilization_pct: number;
   daily_return_pct: number;
   equity: number;
   total_return_pct: number;
@@ -169,9 +184,21 @@ export interface LimitUpLaneBacktest {
   status: string;
   mode: string;
   strategy_version: string;
-  lane: BoardLaneKey;
+  lane: LimitUpBacktestScope;
   exit_mode: ExitMode;
   summary: LimitUpEntrySummary;
+  execution_summary: LimitUpEntrySummary;
+  signal_summary: LimitUpEntrySummary;
+  account_config: {
+    initial_cash: number;
+    max_positions: number;
+    commission_rate: number;
+    minimum_commission: number;
+    stamp_tax_rate: number;
+    transfer_fee_rate: number;
+    slippage_bps: number;
+    lot_size: number;
+  };
   daily_results: LimitUpDailyResult[];
   trades: Array<LimitUpLaneLedgerTrade & {
     signal_date: string;
@@ -179,6 +206,35 @@ export interface LimitUpLaneBacktest {
     exit_date: string;
     entry_price: number;
     exit_price: number;
+    volume: number;
+    buy_amount: number;
+    buy_fee: number;
+    sell_amount: number;
+    sell_fee: number;
+    total_fee: number;
+    net_pnl: number;
+    exit_reason: string;
+  }>;
+  skipped_orders: Array<{
+    order_id: string;
+    vt_symbol: string;
+    name: string;
+    lane: BoardLaneKey;
+    trade_date: string;
+    trade_time: string;
+    reason: string;
+    cash_after: number;
+  }>;
+  open_positions: Array<{
+    vt_symbol: string;
+    name: string;
+    lane: BoardLaneKey;
+    buy_date: string;
+    buy_price: number;
+    volume: number;
+    last_close: number;
+    market_value: number;
+    unrealized_pnl: number;
   }>;
   validation: LimitUpLaneValidation;
   simulation_eligible: boolean;
@@ -235,7 +291,7 @@ export function fetchLimitUpHistoryLedger(params: {
 export function fetchLimitUpLaneBacktest(params: {
   start?: string;
   end?: string;
-  lane: BoardLaneKey;
+  lane: LimitUpBacktestScope;
   exitMode: ExitMode;
 }): Promise<LimitUpLaneBacktest> {
   const query = new URLSearchParams({

@@ -30,6 +30,7 @@ import {
   type BoardLaneKey,
   type EntryMode,
   type ExitMode,
+  type LimitUpBacktestScope,
   type LimitUpLaneBacktest,
   type LimitUpLaneLedger,
   type LimitUpLaneLedgerTrade,
@@ -59,14 +60,21 @@ const BOARD_LANES: Array<{ value: BoardLaneKey; label: string }> = [
   { value: "high_board", label: "高板" },
 ];
 
+const BACKTEST_SCOPES: Array<{ value: LimitUpBacktestScope; label: string }> = [
+  { value: "portfolio", label: "组合" },
+  ...BOARD_LANES,
+];
+
 export function LimitUpPage() {
   const queryClient = useQueryClient();
   const [view, setView] = useState<PrimaryView>("live");
   const [lane, setLane] = useState<BoardLaneKey>("first_board");
+  const [backtestScope, setBacktestScope] = useState<LimitUpBacktestScope>("portfolio");
   const [selectedDate, setSelectedDate] = useState("");
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
   const [exitMode, setExitMode] = useState<ExitMode>("next_open");
+  const modelLane = backtestScope === "portfolio" ? null : backtestScope;
 
   const datesQuery = useQuery({
     queryKey: ["limitUpHistoryDates"],
@@ -89,22 +97,22 @@ export function LimitUpPage() {
     refetchOnWindowFocus: false,
   });
   const backtestQuery = useQuery({
-    queryKey: ["limitUpLaneBacktest", start, end, lane, exitMode],
-    queryFn: () => fetchLimitUpLaneBacktest({ start, end, lane, exitMode }),
+    queryKey: ["limitUpLaneBacktest", start, end, backtestScope, exitMode],
+    queryFn: () => fetchLimitUpLaneBacktest({ start, end, lane: backtestScope, exitMode }),
     enabled: view === "backtest" && Boolean(start && end),
     staleTime: Infinity,
     refetchOnWindowFocus: false,
   });
   const modelQuery = useQuery({
-    queryKey: ["limitUpLaneModel", start, end, lane, exitMode],
+    queryKey: ["limitUpLaneModel", start, end, modelLane, exitMode],
     queryFn: () => fetchLimitUpHistoryModelReport({
       start,
       end,
-      lane,
-      entryMode: modelEntryModeForLane(lane),
+      lane: modelLane ?? "first_board",
+      entryMode: modelEntryModeForLane(modelLane ?? "first_board"),
       exitMode,
     }),
-    enabled: view === "backtest" && Boolean(start && end),
+    enabled: view === "backtest" && modelLane !== null && Boolean(start && end),
     staleTime: Infinity,
     refetchOnWindowFocus: false,
   });
@@ -188,7 +196,11 @@ export function LimitUpPage() {
         })}
       </nav>
 
-      <LaneTabs value={lane} onChange={setLane} />
+      {view === "backtest" ? (
+        <BacktestScopeTabs value={backtestScope} onChange={setBacktestScope} />
+      ) : (
+        <LaneTabs value={lane} onChange={setLane} />
+      )}
 
       {activeError ? (
         <ErrorState message={activeError} onRetry={() => void refreshActive(view, liveQuery.refetch, ledgerQuery.refetch, backtestQuery.refetch)} />
@@ -199,11 +211,11 @@ export function LimitUpPage() {
       ) : (
         <BacktestView
           report={backtestQuery.data}
-          modelReport={modelQuery.data}
-          modelLoading={modelQuery.isLoading || modelQuery.isFetching}
-          modelError={modelQuery.error}
+          modelReport={modelLane ? modelQuery.data : undefined}
+          modelLoading={Boolean(modelLane) && (modelQuery.isLoading || modelQuery.isFetching)}
+          modelError={modelLane ? modelQuery.error : null}
           loading={backtestQuery.isLoading}
-          fetching={backtestQuery.isFetching || modelQuery.isFetching}
+          fetching={backtestQuery.isFetching || (Boolean(modelLane) && modelQuery.isFetching)}
           start={start}
           end={end}
           exitMode={exitMode}
@@ -214,7 +226,7 @@ export function LimitUpPage() {
           onExitMode={setExitMode}
           onRun={() => {
             void backtestQuery.refetch();
-            void modelQuery.refetch();
+            if (modelLane) void modelQuery.refetch();
           }}
         />
       )}
@@ -240,6 +252,30 @@ function LaneTabs({ value, onChange }: { value: BoardLaneKey; onChange: (lane: B
           onClick={() => onChange(lane.value)}
         >
           {lane.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function BacktestScopeTabs({ value, onChange }: { value: LimitUpBacktestScope; onChange: (scope: LimitUpBacktestScope) => void }) {
+  return (
+    <div className="grid h-11 grid-cols-5 border-b" role="tablist" aria-label="回测范围">
+      {BACKTEST_SCOPES.map((scope) => (
+        <button
+          key={scope.value}
+          type="button"
+          role="tab"
+          aria-selected={value === scope.value}
+          className={cn(
+            "border-r px-1 text-sm last:border-r-0 sm:px-2",
+            value === scope.value
+              ? "bg-foreground font-semibold text-background"
+              : "bg-background text-muted-foreground hover:bg-muted hover:text-foreground",
+          )}
+          onClick={() => onChange(scope.value)}
+        >
+          {scope.label}
         </button>
       ))}
     </div>
@@ -426,7 +462,7 @@ function BacktestView({ report, modelReport, modelLoading, modelError, loading, 
   if (loading && !report) return <LoadingState rows={7} />;
   const summary = report?.summary;
   return (
-    <section aria-label="分战法回测">
+    <section aria-label="真实现金回测">
       <div className="flex flex-wrap items-end gap-2 border-b px-3 py-3 sm:px-4">
         <DateInput label="开始" value={start} min={minimumDate} max={maximumDate} onChange={onStart} />
         <DateInput label="结束" value={end} min={minimumDate} max={maximumDate} onChange={onEnd} />
@@ -440,33 +476,49 @@ function BacktestView({ report, modelReport, modelLoading, modelError, loading, 
         <Button type="button" size="icon" variant="outline" className="h-9 w-9" title="运行回测" disabled={fetching} onClick={onRun}>
           <RefreshCw size={15} className={cn(fetching && "animate-spin")} />
         </Button>
+        <div className="ml-auto pb-1 text-xs tabular-nums text-muted-foreground">
+          10 万元 · 最多 4 仓 · 100 股整数手 · 含费用滑点
+        </div>
       </div>
 
-      <div className="grid grid-cols-2 border-b sm:grid-cols-4 xl:grid-cols-8">
-        <SummaryCell
-          label="交易"
-          value={String(summary?.trade_count ?? 0)}
-          detail={`交易日 ${summary?.trade_day_count ?? 0} · 日均 ${formatNumber(summary?.average_trades_per_day, 1)} · 最多 ${summary?.max_trades_per_day ?? 0}`}
-        />
-        <SummaryCell label="胜率" value={formatPct(summary?.win_rate)} tone={rateTone(summary?.win_rate)} />
-        <SummaryCell label="平均单笔" value={formatPct(summary?.average_return_pct)} tone={amountTone(summary?.average_return_pct)} />
-        <SummaryCell label="复利" value={formatPct(summary?.total_return_pct)} tone={amountTone(summary?.total_return_pct)} />
+      <div className="grid grid-cols-2 border-b sm:grid-cols-3 xl:grid-cols-6">
+        <SummaryCell label="期末权益" value={formatCurrency(summary?.final_equity)} detail={`初始 ${formatCurrency(summary?.initial_cash)}`} />
+        <SummaryCell label="实盘复利" value={formatPct(summary?.total_return_pct)} tone={amountTone(summary?.total_return_pct)} detail={`费用 ${formatCurrency(summary?.total_fees)}`} />
+        <SummaryCell label="成交胜率" value={formatPct(summary?.win_rate)} tone={rateTone(summary?.win_rate)} detail={`闭合 ${summary?.trade_count ?? 0} · 未平 ${summary?.open_position_count ?? 0}`} />
         <SummaryCell label="最大回撤" value={formatPct(summary?.max_drawdown_pct)} tone="text-fall" />
-        <SummaryCell label="利润因子" value={formatNumber(summary?.profit_factor, 2)} />
-        <SummaryCell label="硬亏损" value={formatPct(summary?.hard_loss_rate)} tone="text-fall" />
-        <SummaryCell label="封板率" value={formatPct(summary?.seal_rate)} />
+        <SummaryCell label="平均仓位" value={formatPct(summary?.average_utilization_pct)} detail={`峰值 ${formatPct(summary?.peak_utilization_pct)}`} />
+        <SummaryCell label="跳过信号" value={String(summary?.skipped_count ?? 0)} detail={`实际买入 ${summary?.buy_count ?? 0}`} />
       </div>
 
-      <ModelEvidenceStrip
-        ruleTradeCount={summary?.trade_count ?? 0}
-        report={modelReport}
-        loading={modelLoading}
-        error={modelError}
-      />
+      {report && <SignalSummaryStrip report={report} />}
+      {report?.lane === "portfolio" ? (
+        <div className="border-b px-3 py-2 text-xs text-muted-foreground sm:px-4">组合账户 · 共享现金 · 4 仓上限</div>
+      ) : (
+        <ModelEvidenceStrip
+          ruleTradeCount={summary?.trade_count ?? 0}
+          report={modelReport}
+          loading={modelLoading}
+          error={modelError}
+        />
+      )}
       {report && <ValidationStrip report={report} />}
-      {report?.daily_results.length ? <EquityChart report={report} /> : <EmptyRow text="当前战法没有闭合交易" />}
+      {report?.daily_results.length ? <EquityChart report={report} /> : <EmptyRow text="当前范围没有账户权益记录" />}
       {report && <BacktestTrades report={report} />}
+      {report && <SkippedOrders report={report} />}
     </section>
+  );
+}
+
+function SignalSummaryStrip({ report }: { report: LimitUpLaneBacktest }) {
+  const summary = report.signal_summary;
+  return (
+    <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b bg-muted/20 px-3 py-2 text-xs sm:px-4">
+      <span className="font-medium text-foreground">信号研究</span>
+      <span className="text-muted-foreground">成熟 {summary.trade_count} / {summary.signal_count}</span>
+      <span className="text-muted-foreground">胜率 {formatPct(summary.win_rate)}</span>
+      <span className="text-muted-foreground">平均 D+1 {formatPct(summary.average_return_pct)}</span>
+      <span className="text-muted-foreground">信号日等权上界 {formatPct(summary.total_return_pct)}</span>
+    </div>
   );
 }
 
@@ -539,28 +591,44 @@ function BacktestTrades({ report }: { report: LimitUpLaneBacktest }) {
   const trades = [...report.trades].reverse().slice(0, 100);
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[900px] text-sm">
-        <thead className="border-b bg-muted/30 text-xs text-muted-foreground"><tr><th className="px-3 py-2 text-left">买入 / 卖出</th><th className="px-3 py-2 text-left">股票</th><th className="px-3 py-2 text-left">买点</th><th className="px-3 py-2 text-left">D 日</th><th className="px-3 py-2 text-left">D+1</th><th className="px-3 py-2 text-right">净收益</th><th className="px-3 py-2 text-left">成交证据</th></tr></thead>
+      <table className="w-full min-w-[980px] text-sm">
+        <thead className="border-b bg-muted/30 text-xs text-muted-foreground"><tr><th className="px-3 py-2 text-left">买入 / 卖出</th><th className="px-3 py-2 text-left">股票</th><th className="px-3 py-2 text-left">数量 / 价格</th><th className="px-3 py-2 text-left">D 日 / D+1</th><th className="px-3 py-2 text-right">费用</th><th className="px-3 py-2 text-right">净盈亏</th><th className="px-3 py-2 text-right">收益</th></tr></thead>
         <tbody className="divide-y">
           {trades.map((trade) => (
-            <tr key={`${trade.signal_date}:${trade.vt_symbol}`}>
-              <td className="px-3 py-3 text-xs tabular-nums"><div>{trade.buy_date} {trade.buy_time}</div><div className="text-muted-foreground">{trade.sell_date} {trade.sell_time}</div></td>
+            <tr key={`${trade.buy_date}:${trade.vt_symbol}:${trade.sell_date}`}>
+              <td className="px-3 py-3 text-xs tabular-nums"><div>{trade.buy_date} {trade.buy_time}</div><div className="text-muted-foreground">{trade.sell_date} {trade.sell_time} · {exitReasonLabel(trade.exit_reason)}</div></td>
               <td className="px-3 py-3"><StockIdentityLink name={trade.name} vtSymbol={trade.vt_symbol} meta={trade.industry_name ?? "行业待确认"} /></td>
-              <td className="px-3 py-3 text-xs">
-                <div>{entryKindLabel(trade.signal_kind ?? "")}</div>
-                {trade.lane === "two_to_three" && (
-                  <div className="text-muted-foreground" title={twoToThreeRiskTitle(trade.two_to_three_risk_flags)}>
-                    {twoToThreeQualityLabel(trade.two_to_three_quality_tier, trade.two_to_three_risk_count)}
-                  </div>
-                )}
-              </td>
-              <td className={cn("px-3 py-3 text-xs", trade.d_board_status === "sealed" ? "text-rise" : "text-fall")}>{boardStatusLabel(trade.d_board_status)}</td>
-              <td className="px-3 py-3 text-xs">{d1OutcomeLabel(trade.d1_outcome)}</td>
+              <td className="px-3 py-3 text-xs tabular-nums"><div>{trade.volume} 股 · {formatPrice(trade.buy_price)}</div><div className="text-muted-foreground">卖出 {formatPrice(trade.sell_price)}</div></td>
+              <td className="px-3 py-3 text-xs"><div className={trade.d_board_status === "sealed" ? "text-rise" : "text-fall"}>{boardStatusLabel(trade.d_board_status)}</div><div className="text-muted-foreground">{d1OutcomeLabel(trade.d1_outcome)}</div></td>
+              <td className="px-3 py-3 text-right text-xs tabular-nums">{formatCurrency(trade.total_fee)}</td>
+              <td className={cn("px-3 py-3 text-right text-xs font-medium tabular-nums", amountTone(trade.net_pnl))}>{formatCurrency(trade.net_pnl)}</td>
               <td className={cn("px-3 py-3 text-right font-semibold tabular-nums", amountTone(trade.return_pct))}>{formatPct(trade.return_pct)}</td>
-              <td className="px-3 py-3 text-xs text-muted-foreground">{confidenceLabel(trade.execution_confidence)}</td>
             </tr>
           ))}
           {!trades.length && <tr><td colSpan={7} className="px-3 py-10 text-center text-muted-foreground">没有闭合交易</td></tr>}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function SkippedOrders({ report }: { report: LimitUpLaneBacktest }) {
+  const rows = [...report.skipped_orders].reverse().slice(0, 100);
+  if (!rows.length) return null;
+  return (
+    <div className="overflow-x-auto border-t">
+      <table className="w-full min-w-[720px] text-sm">
+        <thead className="border-b bg-muted/30 text-xs text-muted-foreground"><tr><th className="px-3 py-2 text-left">未成交</th><th className="px-3 py-2 text-left">股票</th><th className="px-3 py-2 text-left">板位</th><th className="px-3 py-2 text-left">原因</th><th className="px-3 py-2 text-right">当时现金</th></tr></thead>
+        <tbody className="divide-y">
+          {rows.map((order) => (
+            <tr key={order.order_id}>
+              <td className="px-3 py-3 text-xs tabular-nums">{order.trade_date} {order.trade_time}</td>
+              <td className="px-3 py-3"><StockIdentityLink name={order.name} vtSymbol={order.vt_symbol} /></td>
+              <td className="px-3 py-3 text-xs">{boardLaneLabel(order.lane)}</td>
+              <td className="px-3 py-3 text-xs text-fall">{skipReasonLabel(order.reason)}</td>
+              <td className="px-3 py-3 text-right text-xs tabular-nums">{formatCurrency(order.cash_after)}</td>
+            </tr>
+          ))}
         </tbody>
       </table>
     </div>
@@ -617,6 +685,8 @@ function boardLaneForLevel(level: number): BoardLaneKey {
   return "high_board";
 }
 
+function boardLaneLabel(value: BoardLaneKey) { return ({ first_board: "首板", one_to_two: "一进二", two_to_three: "二进三", high_board: "高板" } as Record<BoardLaneKey, string>)[value]; }
+
 function modelEntryModeForLane(lane: BoardLaneKey): EntryMode {
   return lane === "first_board" ? "sweep" : "next_auction";
 }
@@ -628,7 +698,8 @@ function entryKindLabel(value: string) { return (({ none: "不执行", auction: 
 function phaseLabel(value?: string) { return ({ warmup: "预热期", expanding_oos: "滚动样本外", locked_holdout: "锁定留出", post_freeze_forward: "冻结后前向" } as Record<string, string>)[value ?? ""] ?? value ?? "阶段未知"; }
 function d1OutcomeLabel(value: string) { return ({ continuation_limit_up: "D+1 连板", next_limit_up_after_failed_board: "D+1 涨停", d1_premium: "D+1 有溢价", direct_breakdown: "D+1 直接砸", no_premium: "D+1 无溢价", awaiting_d1_bar: "待 D+1" } as Record<string, string>)[value] ?? value; }
 function boardStatusLabel(value: string) { return ({ sealed: "封住", failed: "触板后炸板", no_limit: "未触板" } as Record<string, string>)[value] ?? value; }
-function confidenceLabel(value: string) { return ({ three_minute_path_without_queue: "三分钟路径，队列未知", event_time_without_queue: "触板时间代理，队列未知", daily_open_proxy: "竞价开盘代理" } as Record<string, string>)[value] ?? value; }
+function exitReasonLabel(value: string) { return ({ planned_open: "开盘退出", planned_close: "收盘退出", emergency_close: "开盘未成后收盘退出", retry_open: "延期至开盘退出", retry_close: "延期至收盘退出" } as Record<string, string>)[value] ?? value; }
+function skipReasonLabel(value: string) { return ({ position_limit: "持仓已满", insufficient_cash: "现金不足", below_one_lot: "目标仓位不足一手", duplicate_position: "已有同股持仓", invalid_entry_price: "买入价无效" } as Record<string, string>)[value] ?? value; }
 function twoToThreeQualityLabel(tier?: "A" | "B" | null, riskCount?: number | null) { const quality = tier ?? "B"; const risks = riskCount ?? 0; return `${quality}级${risks > 0 ? ` · 风险${risks}` : ""}`; }
 function twoToThreeRiskTitle(flags?: string[]) { return (flags ?? []).map((flag) => ({ auction_gap_outside_core: "竞价不在2%-5%核心区", prior_turnover_outside_core: "前板换手不在10%-20%核心区", prior_amount_ratio_outside_core: "前板量能比不在1.2-2", financial_snapshot_missing: "财报快照缺失", prior_low_below_zero: "前板最低价翻绿或缺失", prior_market_failed_rate_high: "前日炸板率偏高或缺失" } as Record<string, string>)[flag] ?? flag).join("；"); }
 function factorLabel(value: string) {
@@ -672,6 +743,7 @@ function gateStateLabel(value?: boolean | null) { return value === true ? "通�
 function formatPct(value?: number | null) { return value == null || !Number.isFinite(value) ? "--" : `${value.toFixed(2)}%`; }
 function formatNumber(value?: number | null, digits = 2) { return value == null || !Number.isFinite(value) ? "--" : value.toFixed(digits); }
 function formatPrice(value?: number | null) { return value == null || !Number.isFinite(value) ? "--" : `¥${value.toFixed(2)}`; }
+function formatCurrency(value?: number | null) { if (value == null || !Number.isFinite(value)) return "--"; const sign = value < 0 ? "-" : ""; return `${sign}¥${Math.abs(value).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`; }
 function formatAmount(value?: number | null) { if (value == null || !Number.isFinite(value)) return "--"; const absolute = Math.abs(value); if (absolute >= 1e8) return `${(value / 1e8).toFixed(2)}亿`; if (absolute >= 1e4) return `${(value / 1e4).toFixed(0)}万`; return value.toFixed(0); }
 function formatTime(value: string) { try { return new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(value)); } catch { return value.slice(11, 19); } }
 function formatAge(seconds: number) { return seconds < 60 ? `${seconds}秒` : `${Math.floor(seconds / 60)}分${seconds % 60}秒`; }

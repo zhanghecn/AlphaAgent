@@ -1253,3 +1253,28 @@ def test_lane_ledger_api_accepts_date_and_board_lane(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["data"]["lane"] == "two_to_three"
+
+
+def test_history_backtest_api_accepts_shared_portfolio_scope(monkeypatch) -> None:
+    from alphaagent.server.api import limit_up
+
+    monkeypatch.setattr(limit_up, "is_database_configured", lambda: True)
+    monkeypatch.setattr(
+        limit_up,
+        "get_limit_up_lane_history_backtest",
+        lambda start, end, lane, exit_mode: {
+            "status": "ready",
+            "lane": lane,
+            "exit_mode": exit_mode,
+            "account_config": {"initial_cash": 100_000, "max_positions": 4},
+        },
+    )
+
+    response = TestClient(create_app()).get(
+        "/api/limit-up/history/backtest",
+        params={"lane": "portfolio", "exit_mode": "next_close"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["lane"] == "portfolio"
+    assert response.json()["data"]["account_config"]["initial_cash"] == 100_000
