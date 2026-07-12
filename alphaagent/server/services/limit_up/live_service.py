@@ -9,7 +9,6 @@ from typing import Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from alphaagent.data_sources.akshare_adapter import AkShareAdapter
-from alphaagent.market.cache import TTLCache
 from alphaagent.server.services.limit_up.domain import (
     is_eligible_main_board,
     main_board_limit_price,
@@ -35,11 +34,10 @@ from alphaagent.server.services.limit_up.versions import (
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 NEAR_LIMIT_MIN_CHANGE_PCT = 8.5
-LIVE_READ_CACHE_TTL_SECONDS = 10.0
-LIVE_SNAPSHOT_MAX_AGE_SECONDS = 10
+LIVE_SCAN_INTERVAL_SECONDS = 60
+LIVE_SNAPSHOT_MAX_AGE_SECONDS = 90
 HISTORY_EVIDENCE_UNAVAILABLE_REASON = "历史证据不可用，已禁止执行"
 EXECUTABLE_ACTIONS = frozenset({"buy_now", "next_auction"})
-_LIVE_READ_CACHE = TTLCache(max_items=2)
 ACTIVE_SESSION_STAGES = frozenset(
     {"auction", "morning", "afternoon", "tail", "close_auction"}
 )
@@ -106,7 +104,7 @@ def build_live_snapshot(
             "ranked_candidate_count": len(ranked),
             "snapshot_age_seconds": 0,
             "source_age_seconds": _source_age_seconds(source_updated_at, local_at),
-            "request_throttle_seconds": int(LIVE_READ_CACHE_TTL_SECONDS),
+            "background_refresh_seconds": LIVE_SCAN_INTERVAL_SECONDS,
             "rate_limit_status": _rate_limit_status(source_errors),
             "source_errors": source_errors,
             "limitations": [
@@ -159,31 +157,17 @@ def refresh_live_snapshot(
         return _stale_snapshot(fallback, exc)
 
 
-def clear_live_read_cache() -> None:
-    _LIVE_READ_CACHE.clear()
-
-
 def get_latest_live_snapshot(now: datetime | None = None) -> dict[str, object]:
-    """Return a fresh read-only quote during trading and saved data otherwise."""
+    """Return only persisted background snapshots; GET never calls quote providers."""
 
     local_now = _local_datetime(now or datetime.now(SHANGHAI))
-    latest_date = load_latest_daily_trade_date(local_now.date())
     if not _is_active_session(local_now):
         return _with_snapshot_age(_latest_snapshot_for_session(local_now), local_now)
 
     saved = load_latest_snapshot(local_now.date(), strategy_version=STRATEGY_VERSION)
-    if saved is not None and _is_fresh_live_snapshot(saved, local_now):
+    if saved is not None:
         return _with_snapshot_age(saved, local_now)
-
-    snapshot = _LIVE_READ_CACHE.get_or_set(
-        f"live-read:{local_now.date().isoformat()}",
-        LIVE_READ_CACHE_TTL_SECONDS,
-        lambda: refresh_live_snapshot(local_now, persist=False),
-    )
-    return _with_snapshot_age(
-        _snapshot_for_session(snapshot, local_now, latest_date),
-        local_now,
-    )
+    return _with_snapshot_age(_latest_snapshot_for_session(local_now), local_now)
 
 
 def _latest_snapshot_for_session(local_at: datetime) -> dict[str, object]:
@@ -246,7 +230,7 @@ def empty_live_snapshot(
             "has_l2": False,
             "snapshot_age_seconds": None,
             "source_age_seconds": None,
-            "request_throttle_seconds": int(LIVE_READ_CACHE_TTL_SECONDS),
+            "background_refresh_seconds": LIVE_SCAN_INTERVAL_SECONDS,
             "rate_limit_status": "unknown",
             "source_errors": [],
             "limitations": ["等待交易时段首次实时扫描。"],
@@ -467,6 +451,7 @@ def _enrich_candidate(
         "prior_return_20d_pct": _number(context.get("prior_return_20d_pct")),
         "prior_amplitude_pct": _number(context.get("prior_amplitude_pct")),
         "prior_streak": prior_streak,
+        "prior_break_streak": _integer(context.get("prior_break_streak"), 0),
         "prior_limit_count_126": _integer(context.get("prior_limit_count_126"), 0),
         "prior_touch_count_126": _integer(context.get("prior_touch_count_126"), 0),
         "prior_seal_success_rate_126": _number(context.get("prior_seal_success_rate_126")),
@@ -503,6 +488,8 @@ def _attach_lane_decisions(
                 {
                     "lane_decision": "blocked",
                     "lane_setup_type": None,
+                    "setup_tags": [],
+                    "setup_confidence": None,
                     "lane_blockers": ["lane_features_unavailable"],
                     "lane_favorable_factors": [],
                     "lane_quality_tier": None,
@@ -531,6 +518,8 @@ def _attach_lane_decisions(
                 "board_lane": evaluated.get("lane"),
                 "lane_decision": evaluated.get("decision"),
                 "lane_setup_type": evaluated.get("setup_type"),
+                "setup_tags": list(evaluated.get("setup_tags") or []),
+                "setup_confidence": evaluated.get("setup_confidence"),
                 "lane_blockers": list(evaluated.get("blockers") or []),
                 "lane_favorable_factors": list(
                     evaluated.get("favorable_factors") or []
@@ -627,6 +616,7 @@ def _apply_signal_validation(
     if str(result.get("action") or "") in EXECUTABLE_ACTIONS and not passed:
         original_reason = str(result.get("reason") or "买点成立")
         result["action"] = "pass"
+        result["execution_state"] = "cancelled"
         result["reason"] = f"只观察，不执行：{original_reason}；{reason}"
     return result
 
@@ -700,6 +690,7 @@ def _signal_without_history_evidence(
     result = dict(signal)
     if str(result.get("action") or "") in EXECUTABLE_ACTIONS:
         result["action"] = "pass"
+        result["execution_state"] = "cancelled"
         result["reason"] = HISTORY_EVIDENCE_UNAVAILABLE_REASON
     result["historical_evidence"] = {
         "status": "unavailable",
@@ -936,28 +927,31 @@ def _snapshot_for_session(
     )
 
 
-def _is_fresh_live_snapshot(snapshot: Mapping[str, object], now: datetime) -> bool:
-    quality = snapshot.get("data_quality")
-    quality = quality if isinstance(quality, Mapping) else {}
-    age_seconds = _snapshot_age_seconds(snapshot, now)
-    return bool(
-        snapshot.get("mode") == "live_snapshot"
-        and _parsed_date(snapshot.get("trade_date")) == now.date()
-        and quality.get("is_stale") is False
-        and age_seconds is not None
-        and age_seconds <= LIVE_SNAPSHOT_MAX_AGE_SECONDS
-    )
-
-
 def _with_snapshot_age(
     snapshot: Mapping[str, object],
     now: datetime,
 ) -> dict[str, object]:
+    local_now = _local_datetime(now)
     result = dict(snapshot)
     quality = result.get("data_quality")
     quality = dict(quality) if isinstance(quality, Mapping) else {}
-    quality["snapshot_age_seconds"] = _snapshot_age_seconds(snapshot, now)
+    age_seconds = _snapshot_age_seconds(snapshot, local_now)
+    quality["snapshot_age_seconds"] = age_seconds
     result["data_quality"] = quality
+    if (
+        _is_active_session(local_now)
+        and result.get("mode") == "live_snapshot"
+        and _parsed_date(result.get("trade_date")) == local_now.date()
+        and quality.get("is_stale") is False
+        and age_seconds is not None
+        and age_seconds > LIVE_SNAPSHOT_MAX_AGE_SECONDS
+    ):
+        return downgrade_snapshot_to_stale(
+            result,
+            local_now.date(),
+            reason=f"实时快照已延迟{age_seconds}秒，等待后台扫描更新",
+            resolved_session_stage=session_stage(local_now),
+        )
     return result
 
 
@@ -987,6 +981,7 @@ def downgrade_snapshot_to_stale(
                 **dict(signal),
                 "action": "pass",
                 "entry_kind": "none",
+                "execution_state": "cancelled",
                 "reason": reason,
             }
             for signal in signals

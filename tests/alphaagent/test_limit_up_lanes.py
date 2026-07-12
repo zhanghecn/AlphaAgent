@@ -944,6 +944,41 @@ def test_lane_ledger_exposes_d_buy_and_d1_sell_times(monkeypatch) -> None:
     assert trade["return_pct"] == 3.2
 
 
+def test_lane_ledger_uses_candidate_dynamic_exit_decision(monkeypatch) -> None:
+    day = _lane_replay_day()
+    candidate = day["lane_portfolio"]["selected"][0]
+    candidate["dynamic_exit"] = {
+        "mode": "auction_exit",
+        "reason": "高板强竞价兑现",
+        "policy_version": "limit-up-dynamic-exit-v1",
+    }
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "load_history_day",
+        lambda *_args: day,
+    )
+    monkeypatch.setattr(
+        history_service,
+        "get_lane_validation_status",
+        lambda *_args, **_kwargs: {
+            "passed": True,
+            "status": "validated",
+            "checks": [],
+        },
+    )
+
+    ledger = history_service.get_history_ledger(
+        date(2026, 6, 10),
+        lane="first_board",
+        exit_mode="dynamic",
+    )
+
+    assert ledger["exit_mode"] == "dynamic"
+    assert ledger["trades"][0]["sell_time"] == "09:30:00"
+    assert ledger["trades"][0]["return_pct"] == 3.2
+    assert ledger["trades"][0]["dynamic_exit"]["mode"] == "auction_exit"
+
+
 def test_lane_ledger_keeps_unvalidated_pick_as_observation(monkeypatch) -> None:
     monkeypatch.setattr(
         history_service.history_repository,
@@ -1261,6 +1296,7 @@ def test_lane_ledger_api_accepts_date_and_board_lane(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["data"]["lane"] == "two_to_three"
+    assert response.json()["data"]["exit_mode"] == "dynamic"
 
 
 def test_history_backtest_api_accepts_shared_portfolio_scope(monkeypatch) -> None:
@@ -1280,9 +1316,80 @@ def test_history_backtest_api_accepts_shared_portfolio_scope(monkeypatch) -> Non
 
     response = TestClient(create_app()).get(
         "/api/limit-up/history/backtest",
-        params={"lane": "portfolio", "exit_mode": "next_close"},
+        params={"lane": "portfolio"},
     )
 
     assert response.status_code == 200
     assert response.json()["data"]["lane"] == "portfolio"
+    assert response.json()["data"]["exit_mode"] == "dynamic"
     assert response.json()["data"]["account_config"]["initial_cash"] == 100_000
+
+
+def test_dynamic_lane_backtest_coalesces_repeated_requests(monkeypatch) -> None:
+    calls = 0
+    day = _lane_replay_day()
+    day["lane_portfolio"]["selected"][0]["dynamic_exit"] = {"mode": "tail_exit"}
+
+    def load_history_range(*_args):
+        nonlocal calls
+        calls += 1
+        return [day]
+
+    history_service._BACKTEST_REPORT_CACHE.clear()
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "load_history_range",
+        load_history_range,
+    )
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "load_account_daily_bars",
+        lambda *_args: [],
+    )
+
+    first = history_service.get_lane_history_backtest(
+        None,
+        None,
+        lane="first_board",
+        exit_mode="dynamic",
+    )
+    second = history_service.get_lane_history_backtest(
+        None,
+        None,
+        lane="first_board",
+        exit_mode="dynamic",
+    )
+
+    assert calls == 1
+    assert first == second
+
+
+def test_default_backtest_warmup_primes_portfolio_then_lane_validation(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        history_service,
+        "BACKTEST_SCOPES",
+        ("portfolio", "first_board", "high_board"),
+    )
+    monkeypatch.setattr(
+        history_service,
+        "get_lane_history_backtest",
+        lambda *_args, lane, **_kwargs: calls.append(f"backtest:{lane}"),
+    )
+    monkeypatch.setattr(
+        history_service,
+        "get_lane_validation_snapshot",
+        lambda exit_mode: calls.append(f"validation:{exit_mode}"),
+    )
+
+    history_service._warm_default_backtests()
+
+    assert calls == [
+        "backtest:portfolio",
+        "validation:dynamic",
+        "backtest:first_board",
+        "backtest:high_board",
+    ]

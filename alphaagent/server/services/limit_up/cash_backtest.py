@@ -11,8 +11,8 @@ from typing import Mapping, Sequence
 
 from alphaagent.server.services.backtest import ledger
 
-ACCOUNT_EXECUTION_VERSION = "limit-up-cash-v1"
-SUPPORTED_EXIT_MODES = {"next_open", "next_close"}
+ACCOUNT_EXECUTION_VERSION = "limit-up-cash-v2"
+SUPPORTED_EXIT_MODES = {"dynamic", "next_open", "next_close"}
 
 
 @dataclass(frozen=True)
@@ -68,6 +68,8 @@ class CashPosition:
     buy_fee: float
     cash_cost: float
     last_close: float
+    planned_exit_mode: str
+    uses_dynamic_exit: bool
     pending_exit: bool = False
 
 
@@ -127,6 +129,7 @@ def simulate_limit_up_account(
             bar_index,
             day_target_cash,
             account_config,
+            exit_mode,
         )
         _process_open_exits(
             state,
@@ -141,6 +144,7 @@ def simulate_limit_up_account(
             bar_index,
             day_target_cash,
             account_config,
+            exit_mode,
         )
         _process_close_exits(
             state,
@@ -193,6 +197,7 @@ def simulate_limit_up_account(
             "t_plus_one": True,
             "locked_limit_exit": "daily_bar_conservative_retry",
             "first_board_queue": "fill_proxy_without_l2",
+            "exit_policy": "per_position" if exit_mode == "dynamic" else exit_mode,
         },
     }
 
@@ -264,6 +269,7 @@ def _process_entries(
     bar_index: Mapping[tuple[str, date], Mapping[str, object]],
     target_cash: float,
     config: CashBacktestConfig,
+    exit_mode: str,
 ) -> None:
     for signal in signals:
         rejection = _entry_rejection_reason(state, signal, target_cash, config)
@@ -294,7 +300,7 @@ def _process_entries(
             )
             state.orders.append(_skipped_buy_order(signal, reason, state.cash))
             continue
-        _open_position(state, signal, fill, bar_index)
+        _open_position(state, signal, fill, bar_index, exit_mode)
 
 
 def _entry_rejection_reason(
@@ -317,6 +323,7 @@ def _open_position(
     signal: PreparedSignal,
     fill: ledger.BuyExecution,
     bar_index: Mapping[tuple[str, date], Mapping[str, object]],
+    exit_mode: str,
 ) -> None:
     bar = bar_index.get((signal.vt_symbol, signal.entry_date)) or {}
     outcome = signal.candidate.get("outcome")
@@ -340,6 +347,8 @@ def _open_position(
         buy_fee=fill.fee,
         cash_cost=cash_cost,
         last_close=close_price,
+        planned_exit_mode=_resolved_position_exit_mode(signal.candidate, exit_mode),
+        uses_dynamic_exit=exit_mode == "dynamic",
     )
     state.positions[signal.vt_symbol] = position
     state.cash = fill.cash_after
@@ -373,12 +382,17 @@ def _process_open_exits(
     config: CashBacktestConfig,
 ) -> None:
     for position in list(state.positions.values()):
-        planned_open = current_date == position.planned_exit_date and exit_mode == "next_open"
+        planned_open = (
+            current_date == position.planned_exit_date
+            and position.planned_exit_mode == "next_open"
+        )
         retry_open = current_date > position.planned_exit_date
         if not planned_open and not retry_open:
             continue
         bar = bar_index.get((position.vt_symbol, current_date))
-        reason = "planned_open" if planned_open else "retry_open"
+        reason = (
+            _planned_exit_reason(position, "open") if planned_open else "retry_open"
+        )
         if not _try_exit(state, position, current_date, "09:30:00", bar, "open_price", reason, config):
             position.pending_exit = True
 
@@ -391,14 +405,17 @@ def _process_close_exits(
     config: CashBacktestConfig,
 ) -> None:
     for position in list(state.positions.values()):
-        planned_close = current_date == position.planned_exit_date and exit_mode == "next_close"
+        planned_close = (
+            current_date == position.planned_exit_date
+            and position.planned_exit_mode == "next_close"
+        )
         if not planned_close and not position.pending_exit:
             continue
         if current_date < position.planned_exit_date:
             continue
         bar = bar_index.get((position.vt_symbol, current_date))
         if planned_close:
-            reason = "planned_close"
+            reason = _planned_exit_reason(position, "close")
         elif current_date == position.planned_exit_date:
             reason = "emergency_close"
         else:
@@ -511,6 +528,23 @@ def _close_position(
         }
     )
     del state.positions[position.vt_symbol]
+
+
+def _resolved_position_exit_mode(
+    candidate: Mapping[str, object],
+    exit_mode: str,
+) -> str:
+    if exit_mode != "dynamic":
+        return exit_mode
+    decision = candidate.get("dynamic_exit")
+    decision = decision if isinstance(decision, Mapping) else {}
+    return "next_open" if decision.get("mode") == "auction_exit" else "next_close"
+
+
+def _planned_exit_reason(position: CashPosition, session: str) -> str:
+    if position.uses_dynamic_exit:
+        return "dynamic_auction_exit" if session == "open" else "dynamic_tail_exit"
+    return "planned_open" if session == "open" else "planned_close"
 
 
 def _append_pending_sell(

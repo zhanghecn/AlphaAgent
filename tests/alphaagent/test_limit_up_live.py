@@ -273,7 +273,6 @@ def test_refresh_persists_verified_current_session_snapshot(monkeypatch) -> None
 
 
 def test_live_read_reuses_fresh_current_snapshot(monkeypatch) -> None:
-    live_service.clear_live_read_cache()
     now = datetime(2026, 7, 10, 10, 5, 30, tzinfo=SHANGHAI)
     snapshot = {
         "trade_date": "2026-07-10",
@@ -301,8 +300,7 @@ def test_live_read_reuses_fresh_current_snapshot(monkeypatch) -> None:
     assert result["data_quality"]["snapshot_age_seconds"] == 5
 
 
-def test_live_read_coalesces_old_snapshot_refresh_without_persisting(monkeypatch) -> None:
-    live_service.clear_live_read_cache()
+def test_live_read_returns_old_saved_snapshot_without_external_refresh(monkeypatch) -> None:
     now = datetime(2026, 7, 10, 10, 5, 30, tzinfo=SHANGHAI)
     old_snapshot = {
         "trade_date": "2026-07-10",
@@ -311,10 +309,6 @@ def test_live_read_coalesces_old_snapshot_refresh_without_persisting(monkeypatch
         "mode": "live_snapshot",
         "recommendations": {"lanes": {"now": [], "tail": [], "next_auction": []}},
         "data_quality": {"status": "ready", "is_stale": False},
-    }
-    fresh_snapshot = {
-        **old_snapshot,
-        "captured_at": now.isoformat(),
     }
     refresh_calls: list[dict[str, object]] = []
     monkeypatch.setattr(
@@ -330,17 +324,54 @@ def test_live_read_coalesces_old_snapshot_refresh_without_persisting(monkeypatch
 
     def refresh(captured_at, **kwargs):
         refresh_calls.append({"captured_at": captured_at, **kwargs})
-        return fresh_snapshot
+        raise AssertionError("GET must not call external quote refresh")
 
     monkeypatch.setattr(live_service, "refresh_live_snapshot", refresh)
 
     first = live_service.get_latest_live_snapshot(now)
     second = live_service.get_latest_live_snapshot(now)
 
-    assert refresh_calls == [{"captured_at": now, "persist": False}]
-    assert first["captured_at"] == now.isoformat()
-    assert second["captured_at"] == now.isoformat()
-    assert first["data_quality"]["snapshot_age_seconds"] == 0
+    assert refresh_calls == []
+    assert first["captured_at"] == old_snapshot["captured_at"]
+    assert second["captured_at"] == old_snapshot["captured_at"]
+    assert first["data_quality"]["snapshot_age_seconds"] == 90
+
+
+def test_live_read_fails_closed_when_background_snapshot_is_overdue(
+    monkeypatch,
+) -> None:
+    now = datetime(2026, 7, 10, 10, 5, 31, tzinfo=SHANGHAI)
+    snapshot = {
+        "trade_date": "2026-07-10",
+        "captured_at": "2026-07-10T10:04:00+08:00",
+        "session_stage": "morning",
+        "mode": "live_snapshot",
+        "recommendations": {
+            "market_gate": {"passed": True, "reasons": []},
+            "lanes": {
+                "now": [{"action": "buy_now", "entry_kind": "sweep"}],
+                "tail": [],
+                "next_auction": [],
+            },
+        },
+        "data_quality": {"status": "ready", "is_stale": False},
+    }
+    monkeypatch.setattr(
+        live_service,
+        "load_latest_snapshot",
+        lambda *_args, **_kwargs: snapshot,
+    )
+
+    result = live_service.get_latest_live_snapshot(now)
+
+    assert result["mode"] == "stale_snapshot"
+    assert result["data_quality"]["is_stale"] is True
+    assert result["data_quality"]["snapshot_age_seconds"] == 91
+    assert result["recommendations"]["market_gate"]["passed"] is False
+    signal = result["recommendations"]["lanes"]["now"][0]
+    assert signal["action"] == "pass"
+    assert signal["execution_state"] == "cancelled"
+    assert "等待后台扫描更新" in signal["reason"]
 
 
 def test_signal_dates_exclude_snapshots_outside_daily_bar_calendar(monkeypatch) -> None:
@@ -636,6 +667,25 @@ def test_morning_recommendation_buys_only_sufficiently_resealed_leader() -> None
     assert now_by_symbol["600002.SSE"]["action"] == "wait_tail"
     assert result["market_gate"]["passed"] is True
     assert result["market_gate"]["timing_used"] is False
+
+
+def test_live_signal_exposes_execution_state_and_operation_rules() -> None:
+    captured_at = datetime(2026, 7, 10, 10, 5, tzinfo=SHANGHAI)
+    candidate = rank_live_candidates(
+        [_candidate("600001.SSE", state="resealed", open_times=5, change_pct=9.98)]
+    )[0]
+
+    result = build_live_recommendations([candidate], _market(), captured_at)
+
+    actionable = result["lanes"]["now"][0]
+    waiting = result["lanes"]["tail"][0]
+    assert actionable["execution_state"] == "actionable"
+    assert "涨停" in actionable["buy_condition"]
+    assert "D+1" in actionable["sell_condition"]
+    assert actionable["state_updated_at"] == "2026-07-10T10:05:00+08:00"
+    assert waiting["execution_state"] == "waiting"
+    assert waiting["buy_condition"]
+    assert waiting["cancel_condition"]
 
 
 def test_live_signals_include_only_matured_point_in_time_analogs() -> None:

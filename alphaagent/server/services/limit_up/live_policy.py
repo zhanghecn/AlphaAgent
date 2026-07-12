@@ -365,6 +365,7 @@ def _signal(
         if entry_kind == "auction"
         else _number(candidate.get("limit_price"))
     )
+    valid_at = _local_datetime(captured_at).isoformat()
     return {
         "vt_symbol": candidate.get("vt_symbol"),
         "name": candidate.get("name"),
@@ -377,6 +378,8 @@ def _signal(
         or _board_lane(_integer(candidate.get("board_level"), 1)),
         "lane_decision": candidate.get("lane_decision"),
         "lane_setup_type": candidate.get("lane_setup_type"),
+        "setup_tags": list(candidate.get("setup_tags") or []),
+        "setup_confidence": candidate.get("setup_confidence"),
         "lane_blockers": list(candidate.get("lane_blockers") or []),
         "lane_favorable_factors": list(candidate.get("lane_favorable_factors") or []),
         "lane_quality_tier": candidate.get("lane_quality_tier"),
@@ -406,13 +409,44 @@ def _signal(
         "action": action,
         "entry_kind": entry_kind,
         "trigger_price": trigger_price,
-        "valid_at": _local_datetime(captured_at).isoformat(),
+        "valid_at": valid_at,
         "valid_until": _valid_until(captured_at, entry_kind),
+        "execution_state": _execution_state(action),
+        "buy_condition": _buy_condition(entry_kind, action),
+        "sell_condition": _sell_condition(candidate),
+        "state_updated_at": valid_at,
         "stable_minutes": stable_minutes,
         "reason": reason,
         "cancel_condition": _cancel_condition(entry_kind),
         "execution_confidence": "proxy_without_l2",
     }
+
+
+def _execution_state(action: str) -> str:
+    if action == "buy_now":
+        return "actionable"
+    if action in {"wait_tail", "next_auction"}:
+        return "waiting"
+    return "cancelled"
+
+
+def _buy_condition(entry_kind: str, action: str) -> str:
+    if entry_kind == "auction":
+        return "09:25竞价强度、板位、板块和情绪硬门保持通过后执行"
+    if entry_kind in {"sweep", "reseal"}:
+        return "价格触及涨停且封单、换手、回封稳定性保持通过后执行"
+    if entry_kind in {"tail_seal", "tail_watch"} or action == "wait_tail":
+        return "14:30后连续封板至少2分钟且封单未明显缩水后执行"
+    if entry_kind == "next_auction" or action == "next_auction":
+        return "次日09:25竞价强度、板块和情绪硬门通过后执行"
+    return "当前条件不成立，不执行买入"
+
+
+def _sell_condition(candidate: Mapping[str, object]) -> str:
+    lane = str(candidate.get("board_lane") or "")
+    if lane == "high_board":
+        return "D+1 09:25先评估高板竞价兑现优势；未触发则15:00退出"
+    return "D+1 09:25由动态退出策略评估；无竞价兑现优势则15:00退出"
 
 
 def _auction_entry_reason(candidate: Mapping[str, object]) -> str:

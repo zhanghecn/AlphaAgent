@@ -1,6 +1,6 @@
 import { apiClient } from "./client";
 
-export type ExitMode = "next_open" | "next_close";
+export type ExitMode = "dynamic" | "next_open" | "next_close";
 export type EntryMode = "auction" | "sweep" | "tail" | "next_auction";
 export type BoardLaneKey = "first_board" | "one_to_two" | "two_to_three" | "high_board";
 export type LimitUpBacktestScope = "portfolio" | BoardLaneKey;
@@ -27,6 +27,12 @@ export interface LimitUpLiveSignal {
   trigger_price?: number | null;
   reason: string;
   cancel_condition: string;
+  execution_state?: "watch" | "waiting" | "actionable" | "cancelled" | string;
+  buy_condition?: string;
+  sell_condition?: string;
+  state_updated_at?: string;
+  setup_tags?: string[];
+  setup_confidence?: string | null;
   execution_confidence: string;
   sector_heat?: number | null;
   turnover_rate?: number | null;
@@ -138,6 +144,13 @@ export interface LimitUpLaneLedgerTrade {
   two_to_three_risk_count?: number | null;
   two_to_three_risk_flags?: string[];
   favorable_factors?: string[];
+  setup_tags?: string[];
+  setup_confidence?: string | null;
+  dynamic_exit?: {
+    mode?: "auction_exit" | "tail_exit" | string;
+    reason?: string;
+    policy_version?: string;
+  };
 }
 
 export interface LimitUpLaneValidation {
@@ -203,6 +216,12 @@ export interface LimitUpLaneBacktest {
     included_lanes: BoardLaneKey[];
     excluded_lanes: BoardLaneKey[];
     selection_basis: string;
+  };
+  exit_summary: {
+    mode: ExitMode;
+    policy_version?: string;
+    auction_exit_count: number;
+    tail_exit_count: number;
   };
   daily_results: LimitUpDailyResult[];
   trades: Array<LimitUpLaneLedgerTrade & {
@@ -283,12 +302,8 @@ export function fetchLimitUpHistoryDates(): Promise<LimitUpHistoryDates> {
 export function fetchLimitUpHistoryLedger(params: {
   date: string;
   lane?: BoardLaneKey;
-  exitMode?: ExitMode;
 }): Promise<LimitUpLaneLedger> {
-  const query = new URLSearchParams({
-    date: params.date,
-    exit_mode: params.exitMode ?? "next_open",
-  });
+  const query = new URLSearchParams({ date: params.date });
   if (params.lane) query.set("lane", params.lane);
   return apiClient.get<LimitUpLaneLedger>(`/limit-up/history/ledger?${query.toString()}`);
 }
@@ -297,12 +312,8 @@ export function fetchLimitUpLaneBacktest(params: {
   start?: string;
   end?: string;
   lane: LimitUpBacktestScope;
-  exitMode: ExitMode;
 }): Promise<LimitUpLaneBacktest> {
-  const query = new URLSearchParams({
-    lane: params.lane,
-    exit_mode: params.exitMode,
-  });
+  const query = new URLSearchParams({ lane: params.lane });
   if (params.start) query.set("start", params.start);
   if (params.end) query.set("end", params.end);
   return apiClient.get<LimitUpLaneBacktest>(`/limit-up/history/backtest?${query.toString()}`);

@@ -477,6 +477,7 @@ def _prior_price_context(rows: list[Mapping[str, object]]) -> dict[str, object]:
             "previous_close": None,
             "previous_limit_up": False,
             "prior_streak": 0,
+            "prior_break_streak": 0,
             "prior_change_pct": None,
             "prior_return_5d_pct": None,
             "prior_return_20d_pct": None,
@@ -520,6 +521,12 @@ def _prior_price_context(rows: list[Mapping[str, object]]) -> dict[str, object]:
         else None
     )
     sealed_flags = [_daily_sealed(row) for row in ordered]
+    prior_break_streak = 0
+    if sealed_flags and not sealed_flags[-1]:
+        for is_sealed in reversed(sealed_flags[:-1]):
+            if not is_sealed:
+                break
+            prior_break_streak += 1
     touched_flags = [
         _daily_touched(row, ordered[index - 1] if index > 0 else None)
         for index, row in enumerate(ordered)
@@ -564,6 +571,7 @@ def _prior_price_context(rows: list[Mapping[str, object]]) -> dict[str, object]:
         "previous_close": latest_close,
         "previous_limit_up": streak > 0,
         "prior_streak": streak,
+        "prior_break_streak": prior_break_streak,
         "prior_change_pct": _rounded(prior_change_pct),
         "prior_return_5d_pct": _close_return(ordered, latest_close, 6),
         "prior_return_20d_pct": _close_return(ordered, latest_close, 21),

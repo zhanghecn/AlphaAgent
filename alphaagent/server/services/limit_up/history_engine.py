@@ -9,6 +9,7 @@ from typing import Mapping, Sequence
 
 import pandas as pd
 
+from alphaagent.server.services.limit_up.dynamic_exit import attach_replay_exit_decisions
 from alphaagent.server.services.limit_up.lane_features import (
     attach_limit_gene_features,
     first_reseal_time,
@@ -126,6 +127,9 @@ def build_daily_feature_frame(
     )
     prior_streak = frame.groupby("vt_symbol", sort=False)["current_streak"].shift(1).fillna(0)
     frame["prior_streak"] = prior_streak.where(frame["adjacent_prev"], 0).astype(int)
+    frame["prior_break_streak"] = (
+        frame.groupby("vt_symbol", sort=False)["prior_streak"].shift(1).fillna(0).astype(int)
+    )
     frame["board_level"] = frame["prior_streak"] + 1
 
     grouped = frame.groupby("vt_symbol", sort=False)
@@ -531,7 +535,7 @@ def build_history_replays(
                 result_date = str(candidate.get("result_date") or "")
                 if result_date:
                     pending[result_date].append(candidate)
-    return replays
+    return attach_replay_exit_decisions(replays)
 
 
 def build_analog_index(
@@ -1144,6 +1148,7 @@ def _lane_candidate_payload(
         "prior_touch_count_126": int(row.get("prior_touch_count_126") or 0),
         "prior_limit_count_5": int(row.get("prior_limit_count_5") or 0),
         "prior_limit_count_10": int(row.get("prior_limit_count_10") or 0),
+        "prior_break_streak": int(row.get("prior_break_streak") or 0),
         "prior_seal_success_rate_126": _rounded(
             row.get("prior_seal_success_rate_126")
         ),

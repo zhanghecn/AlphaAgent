@@ -24,8 +24,8 @@ def test_history_replay_schema_uses_date_and_version_primary_key() -> None:
     assert {"payload", "coverage", "source_mode"}.issubset(table.c.keys())
 
 
-def test_multi_candidate_history_uses_v10_version() -> None:
-    assert history_engine.HISTORY_STRATEGY_VERSION == "limit-up-history-v10"
+def test_dynamic_exit_history_uses_v11_version() -> None:
+    assert history_engine.HISTORY_STRATEGY_VERSION == "limit-up-history-v11"
 
 
 def test_reliable_date_window_rejects_sparse_prefix() -> None:

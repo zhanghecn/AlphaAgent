@@ -198,7 +198,7 @@ def history_ledger(
     lane: Literal["first_board", "one_to_two", "two_to_three", "high_board"] | None = Query(
         default=None
     ),
-    exit_mode: Literal["next_open", "next_close"] = Query(default="next_open"),
+    exit_mode: Literal["dynamic", "next_open", "next_close"] = Query(default="dynamic"),
 ):
     if not is_database_configured():
         return JSONResponse(
@@ -229,7 +229,7 @@ def history_ledger(
 def history_backtest(
     start: date | None = Query(default=None),
     end: date | None = Query(default=None),
-    exit_mode: Literal["next_open", "next_close"] = Query(default="next_open"),
+    exit_mode: Literal["dynamic", "next_open", "next_close"] = Query(default="dynamic"),
     entry_mode: Literal["auction", "sweep", "tail", "next_auction"] = Query(default="auction"),
     lane: Literal[
         "portfolio",

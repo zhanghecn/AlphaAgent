@@ -2887,6 +2887,7 @@ def _run_limit_up_history_rebuild_batch_job() -> dict[str, Any]:
 
     latest_reliable_date = _latest_complete_daily_date_for_research()
     result = history_service.refresh_history_if_needed(latest_reliable_date)
+    history_service.start_backtest_cache_warmup()
     if str(result.get("status") or "") == "skipped":
         return {
             **result,

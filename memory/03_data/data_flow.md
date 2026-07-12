@@ -127,6 +127,49 @@ AlphaAgent 自研服务的股票日线同步不走 vn.py Datafeed，路径是：
 - `POST /api/data-sync/batches/run-all`: 批量同步，可传 `job_ids`。
 - `/data` 默认应优先展示数据健康/同步状态，而不是要求用户理解底层 job。
 
+## Limit-up Research Data Path
+
+`/limit-up` 是独立的实时打板决策和历史研究路径，当前不接券商自动执行：
+
+1. `stock_events` 读取 `limit_pool_zt / limit_pool_zbgc`，同股同日只保留最后采集状态；每条事件必须与同股同日的 `stock_daily_bars` 最终价格和涨跌幅一致，否则剔除，避免错期快照污染研究。
+2. 只保留沪深主板非 ST 的 10cm 股票，排除创业板、科创板、北交所、新股/特殊股和退市整理。
+3. `stock_sector_memberships` 只取 `theme / industry`，并过滤指数、风格、财务状态和昨日表现等伪题材。
+4. `sector_fund_flows` 提供热门板块资金，`stock_fund_flows` 提供个股资金，日终封单/换手用于盘后证据展示。
+5. 实时横截面每个板块只留前二，再取全市场动态龙 Top5；按 D-1 情绪/金银手指时效、分板位成功率、当时板块热度/资金、个股资金/量能、首次触板、回封质量和板块扩散排名，市场龙位唯一编号为龙1-5。历史首板没有逐日概念成员时不再用 D-1 行业排名冒充当时核心，改由信号前盘中承接和热度做代理；接力仍要求行业龙一/龙二。历史账本同时保存完整板位候选池与最终 0-1 只选择。
+6. `stock_daily_bars` 提供涨停价代理和 D+1 开盘/收盘退出价。
+7. `limit_up_signal_snapshots` 以追加方式保存每分钟信号，不覆盖 `stock_events`；`limit_up_live_scan` 只在交易日 09:20-11:30、13:00-14:57 运行。实时服务自身还有第二层守卫：非有效交易阶段不请求外部行情也不落库；交易时段内若行情源仍停留在上一交易日，则返回 stale 结果但不保存。实时候选合并涨幅榜、涨停池和炸板池，并保存封板资金、封单/成交额、相邻快照封单保留率和变化率。只有间隔不超过 2 分钟的快照才累计连续封板时长和封单变化；封单较上一快照缩水超过 30% 时关闭可执行动作。缺 Tick/L2 时执行可信度固定标记为 `proxy_without_l2`。
+8. 严格时点证据分别写入 `stock_sector_membership_snapshots`、`sector_fund_flow_snapshots` 和 `stock_auction_snapshots`。19:00 成员反向索引重建成功后才冻结当日完整版本，空来源不会再先清空上一版；每次“即时”板块资金同步都按分钟追加主力净流入、超大/大/中/小单、来源时间和涨跌家数，资金加速度可由相邻快照计算，扩散宽度直接使用当时上涨/下跌/平盘家数。09:26 竞价表保存开盘价、撮合量额、未匹配量和字段完整度；公共源没有未匹配量时只算部分证据，不能开放模拟。
+9. `limit_up_history_replays` 以 `(trade_date, strategy_version)` 保存逐日点时账本；当前 `limit-up-history-v11` 覆盖 `2024-01-15..2026-07-10` 共 600 个可靠交易日，v10 固定退出账本保留为对照。每个交易日分别保存首板、一进二、二进三和高板的完整候选池、最佳观察行、最终选择、D 日结果、D+1 交割结果、战法标签和逐笔动态退出决定；交割单只读取 `lane_portfolio.selected`。回测读侧通过 PostgreSQL JSONB 投影只加载 `lane_portfolio.selected`，不再把完整候选池搬入 API 进程。`eod_finalize_2130` 只在最新完整日线日推进后串行全量重建。
+10. `limit-up-walk-forward-v5` 在普通买点研究中保持旧 Top5 兼容；传 `lane` 时消费对应 `board_candidate_pool`，首板模型允许仅因当前选择门失败的样本进入对照，不纳入其他风险硬门失败项。窗口按完整 600 日交易日历推进，首板特征包含信号前 15/30 分钟承接、回撤和攻击速度；触板事件池不再强拟合一类全真的成交标签，`fill_probability` 留空并由 Tick/L2 门禁独立控制。每条战法每日最多 1 只，单窗训练样本低于 300 时返回 `insufficient_training` 并空仓。
+11. `forward_validation.py` 只消费交易时段真实保存、`live_snapshot`、非 stale、采集日与交易日一致的快照；历史代理、周末和无效时段只进入排除统计。实时链路先做历史负期望否决，再把门禁前研究动作保存为 `research_action`，最后将未验证战法的用户动作 `action` 降为 `pass`。前向账本只读 `research_action` 并标记 `saved_research_action_not_executed`；普通严格动作回测仍只读 `action`，不能把研究观察冒充执行。老快照没有 `research_action` 时兼容回退到原 `action`。第一笔盘中动作不可被后续快照改写，明早竞价只取当日最后有效计划，D+1 使用明确交易日历闭合。
+12. `live_evidence.py` 为实时推荐和无严格快照的历史代理附加同路径成熟样本，只允许 `result_date < signal_date` 的闭合结果进入统计。样本不少于 60 笔且平均净收益非正、收缩胜率低于 40% 或硬亏损率不低于 20% 时，只否决 `buy_now / next_auction`，不以正样本直接证明可交易。证据查询失败时，历史代理保留原信号并写入 `data_quality`；实时快照必须 fail-closed，把 `buy_now / next_auction` 降为 `pass` 并显示“证据不可用，已禁止执行”。已经保存的严格历史快照仍原样返回，不能事后回填证据或改写动作。
+
+实时/事件接口为 `GET /api/limit-up/dates`、`GET /api/limit-up/dashboard?date=`、`GET /api/limit-up/live`、`POST /api/limit-up/live/refresh` 和 `GET /api/limit-up/signals?date=&as_of=`。自动调度和数据管理页的手动“立即执行”都复用 `limit_up_live_scan` 动作；手动接口为 `POST /api/data-sync/schedules/limit_up_live_scan/run`。只有 live、非 stale 的有效结果返回 `succeeded / rows_written=1`，其他结果返回 `skipped / rows_written=0` 和“未保存”。严格前向接口为 `GET /api/limit-up/forward-validation?start=&end=&entry_mode=&exit_mode=`；数据门禁接口为 `GET /api/limit-up/data-quality`。兼容同步补数接口为 `POST /api/limit-up/data-quality/minute-backfill`；产品入口使用 `POST /minute-backfill/start` 立即返回 `202` 和批次 ID，再每 2 秒读取 `GET /minute-backfill/batches/{batch_id}`，终态后刷新门禁。全历史接口为 `GET /api/limit-up/history/status`、`POST /api/limit-up/history/rebuild`、`GET /api/limit-up/history/dates`、`GET /api/limit-up/history/day?date=`、`GET /api/limit-up/history/backtest?entry_mode=auction|sweep|tail|next_auction`、`GET /api/limit-up/history/factors?entry_mode=&exit_mode=&start=&end=` 和 `GET /api/limit-up/history/model-report?entry_mode=&exit_mode=&start=&end=`。
+
+历史事件/竞价证据可在 `/data` 的“打板证据”页通过 Tushare 或完整 CSV 回补。接口为 `GET /api/data-sync/imports/limit-up-evidence/status`、`GET /template.csv?dataset=events|auction`、`POST /tushare` 和 `POST /csv`。事件导入把 `limit_list_d` 的首封、末封、开板次数、封单额和连板数规范到现有 `stock_events`；竞价导入把 `stk_auction` 的价格、成交量额、昨收、换手和量比写入 `stock_auction_snapshots`。导入先用本地日线构造当日预期触板/交易股票集合，事件覆盖至少 90%、竞价至少 95% 才允许逐日原子替换；空响应、跨日期、非主板/ST、字段错误和覆盖不足都只进入审计结果。`captured_at` 是真实导入时间，`source_updated_at/source_quote_time` 才是行情时点，不得把盘后历史导入冒充当时实时采集。Tushare 竞价没有未匹配量，导入后也只能算部分证据。
+
+同页的“同花顺近252日”只回补涨停/炸板事件：`POST /api/data-sync/imports/limit-up-evidence/ths/start` 立即返回后台批次，页面每 2 秒读取 `GET /ths/batches/{batch_id}`，刷新后也能恢复最近批次。供应商行来自 `ths.limit_up_pool/open_limit_pool`，规范化首封/末封时间、连板数、开板次数、封单额和盘中路径，并复用同一个 90% 逐日原子替换门槛。当前真实覆盖 `2025-06-27..2026-07-10` 共 252 个事件日、19,978 条事件；该公开接口上限是近 252 个交易日，不得称为 500 日全历史。
+
+逐日申万二级行业成员也在同一页面回补，接口为 `GET /api/data-sync/imports/limit-up-memberships/status`、`GET /template.csv`、`POST /tushare` 和 `POST /csv`。Tushare 路径先取 `index_classify(SW2021, L1)`，再按一级行业完整读取 `index_member_all`；CSV 使用相同区间字段。有效期固定为 `in_date <= trade_date < out_date`，重叠区间选择最新 `in_date` 并记录冲突。每个可靠交易日必须覆盖至少 90% 的当日沪深主板非 ST 日线股票才只替换该日 `sector_type=industry`，同日概念快照不会被删除；空响应、供应商错误和覆盖不足不写库。历史账本优先按 `snapshot_date + vt_symbol` 读取行业，缺失行才回退当前成员并标记 `current_proxy`。
+
+前端实时视图每 10 秒读取 `/live`，历史日期继续读取 `/signals`。`/live` 只读 `limit_up_live_scan` 每分钟保存的后台快照，任何 GET 都不直接访问外部行情源，也不写 `limit_up_signal_snapshots`。返回的 `data_quality.snapshot_age_seconds` 供页面显示年龄；交易时段内同日快照超过 90 秒未更新时，服务会 fail-closed，把市场门和所有买入动作降为 stale/pass。非交易时段同样只读已保存结果。
+
+`data_quality.py` 把研究账本和执行证据拆成 8 个独立门禁：点时历史账本、涨停事件路径、逐日行业成员、个股分钟路径、集合竞价、板块分钟资金、Tick/L2 队列和 60 日真实前向观察。门禁只读取真实落库计数；逐日行业先要求本地全市场日线至少 3000 只来确认日期可靠，再要求行业快照覆盖该日实际沪深主板非 ST 股票的 90%，并分开展示原始、行业、概念和合格快照日。板块分钟资金只统计交易时段、来源日期等于采集日且主力净流入非空的快照，竞价同时展示采集日和字段完整日。当前成员快照、覆盖不足的行业日、日终板块资金、公开源缺未匹配量的竞价或日线开盘代理都不能冒充严格证据。只有全部门禁达标时 `simulation_eligible` 才能为 `true`。
+
+分钟补数只查询沪深主板非 ST/退市/特殊状态且尚无任何本地 1 分钟数据的涨停事件股票-日期对，按最近交易日优先；创业板、科创板和北交所不进入事件总量、板块扩散、覆盖率或补数队列。事件门禁按 `vt_symbol + trade_date` 选择最后一次盘中状态，并要求同股同日存在日线；重复盘中快照和休市日原始记录保留审计，但不重复计数。产品后台入口和 `sync_limit_up_event_minutes` 夜间任务默认 200 个；夜间任务排在 21:30 盘后量化之后。全局已有无关同步批次时产品接口返回 `409`，同一目标批次则复用，不能因 HTTP 超时重复启动。TDX 固定读取 `09:15-15:00` 整日 `1m` 路径；单股瞬时错误会断开并重连重试一次，全批最多重连 3 次；写入后重新查询本地分钟表作为覆盖判据。`limit_up_minute_backfill_attempts` 按股票、日期和 provider 保存 `covered / empty / error`、尝试次数和下一重试时间；第 1/2/3 次及以后失败分别冷却 1/3/14 天。2026-07-12 同花顺事件导入后，有效事件路径为 252 日、19,978 个股票-日期对，本地分钟覆盖 `2,215/19,978 = 11.0872%`；尝试账本为 `1,928 covered / 0 empty / 0 error`，其余事件对尚未进入补数尝试。个股分钟日期仍只有 `2026-02-03..2026-07-10` 共 55 日；11.0872% 只是事件对路径覆盖，不是成交成功率，也不能解除 500 日模拟门禁。
+
+AkShare/东方财富 `stock_zt_pool_em + stock_zt_pool_zbgc_em` 只适合近期缺口恢复。2026-07-12 实测服务端仅 `2026-06-22..2026-07-10` 返回数据，更早交易日返回空池；近期逐日与本地日线触板集合的主板覆盖为 `94.8454%..98.6111%`。它不能承担 500 日历史回补，也不能用空表证明当日没有事件；同步空响应现在保留旧事件，不再先删库。全历史严格入口仍是 Tushare `limit_list_d` 或覆盖完整的 CSV。
+
+顶部事件日期列表的历史部分使用 `stock_daily_bars` 交易日历过滤周末、非交易日和异常快照；日线尚未收盘落库时，只允许“今天采集、`live_snapshot`、非 stale”的已验证当日快照临时进入。非交易时段会保留当日供复核但把动作降为 `pass`；旧快照日期无效时会校正到最近已验证交易日并标记 stale。600 日账本逐日只使用信号时点可见字段，历史相似样本只有在 `result_date < signal_date` 后才成熟；最终封板和 D+1 只进入结果栏。无严格快照的历史代理会展示该日当时可用的成熟样本胜率、平均净收益、硬亏率和样本数，但仍标记为未证明成交。`history/factors` 只审计每日 Top5 候选的 D/D+1 结果，不把候选冒充成交；因子按滚动样本外排序，锁定留出只验证方向，不能回灌排序或阈值。秒板封死不能视为成交，尾盘日线只能给出“假设可成交”的观察值且不计入主收益；逐日行业读取已支持点时快照，但当前尚未导入任何合格历史日期，现有账本仍会标记当前成员回退和幸存者风险。详细基线见 `memory/06_backtests/limit_up_top5_mvp.md` 和 `memory/06_backtests/limit_up_short_term_factor_research.md`。
+
+`history/model-report` 即使选择了较晚开始日，也会从账本起点保留前置训练上下文，只在展示和绩效层裁剪日期。每个窗口分别返回 63 日拟合校准诊断和未参与拟合的测试预测校准；顶层 `calibration` 固定读取锁定留出测试预测，留出标签不参与训练、校准器或门槛。报告缓存 1 小时，历史账本重建后清空。缺 Tick/L2 和逐日行业成员时 `simulation_eligible` 固定为 `false`。
+
+严格前向观察以 20 个有效交易日做流程检查、60 个有效交易日做策略复核；未闭合时胜率、平均收益、复利和回撤必须为 `null`。Tick/L2 队列证据补齐前，即使有闭合价格结果，`simulation_eligible` 仍固定为 `false`。
+
+后端 `services/limit_up/policy.py` 把 Top5 压缩为 0-2 个 `research_plan`；`live_policy.py` 进一步输出 `现在打 / 尾盘打 / 明早竞价` 三通道、`buy_now / wait_tail / next_auction / pass` 确定动作，以及观察/等待/可买/失效状态、买入条件、D+1 卖出条件和取消条件。夹板、回马板、弱转强突破、龙首阴接力、龙头弱转强、反核板六类标签只解释信号时点形态，不直接加分或绕过市场/验证硬门。分战法验证门会把所有未通过滚动样本外、旧留出和冻结后前向要求的可执行动作降为 `pass`；冻结后仍为 0 笔，因此四条战法均只观察。前端 `/limit-up` 只保留实时推荐、历史交割单和回测三个主视图。
+
+历史组合默认使用逐笔动态退出：每个 D+1 决策只训练 `result_date < decision_date` 的成熟结果，锁定留出使用开发期冻结策略；样本不足默认尾盘。v11 只有高板在开发样本同时改善胜率和对数增长时允许竞价兑现，其他板位持有到 D+1 尾盘。全历史竞价仍使用日线开盘价代理。默认动态组合报告和四板位验证在 API 启动、账本重建后由后台单飞预热，缓存 6 小时；完整范围页面请求复用默认缓存。
+
 ## Quant Data Path
 
 `/quant` 候选和回测核查使用 AlphaAgent PostgreSQL 业务表，不走 vn.py Datafeed。

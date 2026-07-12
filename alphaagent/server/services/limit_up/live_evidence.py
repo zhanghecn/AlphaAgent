@@ -118,6 +118,7 @@ def _with_evidence(
     result = {**dict(signal), "historical_evidence": evidence}
     if veto_reasons and str(result.get("action") or "") in {"buy_now", "next_auction"}:
         result["action"] = "pass"
+        result["execution_state"] = "cancelled"
         result["reason"] = "历史证据否决：" + "；".join(veto_reasons)
     return result
 

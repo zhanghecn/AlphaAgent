@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
   BarChart3,
@@ -23,20 +23,15 @@ import {
 import {
   fetchLimitUpHistoryDates,
   fetchLimitUpHistoryLedger,
-  fetchLimitUpHistoryModelReport,
   fetchLimitUpLaneBacktest,
   fetchLimitUpLive,
-  refreshLimitUpLive,
   type BoardLaneKey,
-  type EntryMode,
-  type ExitMode,
   type LimitUpBacktestScope,
   type LimitUpLaneBacktest,
   type LimitUpLaneLedger,
   type LimitUpLaneLedgerTrade,
   type LimitUpLiveSignal,
   type LimitUpSignalSnapshot,
-  type LimitUpWalkForwardModelReport,
 } from "@/api/limitUp";
 import { ErrorState } from "@/components/ErrorState";
 import { LoadingState } from "@/components/LoadingState";
@@ -66,15 +61,12 @@ const BACKTEST_SCOPES: Array<{ value: LimitUpBacktestScope; label: string }> = [
 ];
 
 export function LimitUpPage() {
-  const queryClient = useQueryClient();
   const [view, setView] = useState<PrimaryView>("live");
   const [lane, setLane] = useState<BoardLaneKey>("first_board");
   const [backtestScope, setBacktestScope] = useState<LimitUpBacktestScope>("portfolio");
   const [selectedDate, setSelectedDate] = useState("");
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
-  const [exitMode, setExitMode] = useState<ExitMode>("next_close");
-  const modelLane = backtestScope === "portfolio" ? null : backtestScope;
 
   const datesQuery = useQuery({
     queryKey: ["limitUpHistoryDates"],
@@ -90,39 +82,23 @@ export function LimitUpPage() {
     refetchOnWindowFocus: true,
   });
   const ledgerQuery = useQuery({
-    queryKey: ["limitUpLaneLedger", selectedDate, lane, exitMode],
-    queryFn: () => fetchLimitUpHistoryLedger({ date: selectedDate, lane, exitMode }),
+    queryKey: ["limitUpLaneLedger", selectedDate, lane],
+    queryFn: () => fetchLimitUpHistoryLedger({ date: selectedDate, lane }),
     enabled: view === "ledger" && Boolean(selectedDate),
     staleTime: Infinity,
     refetchOnWindowFocus: false,
   });
   const backtestQuery = useQuery({
-    queryKey: ["limitUpLaneBacktest", start, end, backtestScope, exitMode],
-    queryFn: () => fetchLimitUpLaneBacktest({ start, end, lane: backtestScope, exitMode }),
+    queryKey: ["limitUpLaneBacktest", start, end, backtestScope],
+    queryFn: () => fetchLimitUpLaneBacktest({
+      start: start === datesQuery.data?.start ? undefined : start,
+      end: end === datesQuery.data?.end ? undefined : end,
+      lane: backtestScope,
+    }),
     enabled: view === "backtest" && Boolean(start && end),
     staleTime: Infinity,
     refetchOnWindowFocus: false,
   });
-  const modelQuery = useQuery({
-    queryKey: ["limitUpLaneModel", start, end, modelLane, exitMode],
-    queryFn: () => fetchLimitUpHistoryModelReport({
-      start,
-      end,
-      lane: modelLane ?? "first_board",
-      entryMode: modelEntryModeForLane(modelLane ?? "first_board"),
-      exitMode,
-    }),
-    enabled: view === "backtest" && modelLane !== null && Boolean(start && end),
-    staleTime: Infinity,
-    refetchOnWindowFocus: false,
-  });
-  const refreshMutation = useMutation({
-    mutationFn: refreshLimitUpLive,
-    onSuccess: (snapshot) => {
-      queryClient.setQueryData(["limitUpLive"], snapshot);
-    },
-  });
-
   useEffect(() => {
     const latest = datesQuery.data?.latest;
     if (!selectedDate && latest) setSelectedDate(latest);
@@ -165,10 +141,10 @@ export function LimitUpPage() {
               variant="outline"
               className="h-9 w-9"
               title="刷新实时推荐"
-              disabled={liveQuery.isFetching || refreshMutation.isPending}
-              onClick={() => refreshMutation.mutate()}
+              disabled={liveQuery.isFetching}
+              onClick={() => void liveQuery.refetch()}
             >
-              <RefreshCw size={15} className={cn((liveQuery.isFetching || refreshMutation.isPending) && "animate-spin")} />
+              <RefreshCw size={15} className={cn(liveQuery.isFetching && "animate-spin")} />
             </Button>
           )}
         </div>
@@ -211,22 +187,16 @@ export function LimitUpPage() {
       ) : (
         <BacktestView
           report={backtestQuery.data}
-          modelReport={modelLane ? modelQuery.data : undefined}
-          modelLoading={Boolean(modelLane) && (modelQuery.isLoading || modelQuery.isFetching)}
-          modelError={modelLane ? modelQuery.error : null}
           loading={backtestQuery.isLoading}
-          fetching={backtestQuery.isFetching || (Boolean(modelLane) && modelQuery.isFetching)}
+          fetching={backtestQuery.isFetching}
           start={start}
           end={end}
-          exitMode={exitMode}
           minimumDate={datesQuery.data?.start}
           maximumDate={datesQuery.data?.end}
           onStart={setStart}
           onEnd={setEnd}
-          onExitMode={setExitMode}
           onRun={() => {
             void backtestQuery.refetch();
-            if (modelLane) void modelQuery.refetch();
           }}
         />
       )}
@@ -338,6 +308,7 @@ function LiveSignalRow({ signal, stale }: { signal: LimitUpLiveSignal; stale: bo
   const validationObservation = !stale && signal.validation_passed === false;
   const observation = signal.action === "wait_tail" || validationObservation;
   const factorSummary = liveFactorSummary(signal);
+  const setupSummary = (signal.setup_tags ?? []).map(setupTagLabel).join(" · ");
   return (
     <article className={cn("border-l-2 px-3 py-3 sm:px-4", actionable ? "border-l-rise" : observation ? "border-l-amber-500" : "border-l-border")}>
       <div className="grid gap-3 lg:grid-cols-[minmax(180px,1.1fr)_minmax(160px,0.8fr)_minmax(300px,1.8fr)_minmax(150px,0.8fr)] lg:items-center">
@@ -349,21 +320,25 @@ function LiveSignalRow({ signal, stale }: { signal: LimitUpLiveSignal; stale: bo
           />
         </div>
         <div>
-          <div className={cn("text-sm font-semibold", actionTone(signal.action, stale))}>{stale ? "数据过期" : validationObservation ? "观察，不执行" : actionLabel(signal.action)}</div>
+          <div className={cn("text-sm font-semibold", actionTone(signal.action, stale))}>{stale ? "数据过期" : validationObservation ? "观察，不执行" : executionStateLabel(signal.execution_state, signal.action)}</div>
           <div className="mt-0.5 text-xs text-muted-foreground">
             {entryKindLabel(signal.entry_kind)} · {formatPrice(signal.trigger_price)}
             {signal.board_lane === "two_to_three" ? ` · ${twoToThreeQualityLabel(signal.lane_quality_tier, signal.lane_risk_count)}` : ""}
+            {signal.state_updated_at ? ` · ${formatTime(signal.state_updated_at)}` : ""}
           </div>
         </div>
         <div className="min-w-0 text-xs leading-5">
           <div className="text-foreground">{signal.reason}</div>
+          {setupSummary && <div className="text-foreground">战法：{setupSummary}</div>}
           {signal.board_lane === "first_board" && (
             <div className="text-muted-foreground">
               封板门 {gateStateLabel(signal.seal_gate_passed)} · 溢价门 {gateStateLabel(signal.premium_gate_passed)}
             </div>
           )}
           {factorSummary && <div className="text-muted-foreground">{factorSummary}</div>}
-          <div className="truncate text-muted-foreground" title={signal.cancel_condition}>取消：{signal.cancel_condition}</div>
+          <div className="text-muted-foreground">买入：{signal.buy_condition ?? "条件待确认"}</div>
+          <div className="text-muted-foreground">卖出：{signal.sell_condition ?? "D+1动态判断"}</div>
+          <div className="text-muted-foreground">取消：{signal.cancel_condition}</div>
         </div>
         <div className="grid grid-cols-2 gap-x-3 text-xs tabular-nums">
           <Metric label="板块热度" value={formatNumber(signal.sector_heat, 1)} />
@@ -389,7 +364,7 @@ function LedgerView({ ledger, loading }: { ledger?: LimitUpLaneLedger; loading: 
         <span className={observationOnly ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground"}>
           {observationOnly
             ? `研究观察 ${observations.length} 只，不计入正式交割${ledger.validation?.reason ? `：${ledger.validation.reason}` : ""}`
-            : `正式交割 ${ledger.selected_count} 只 · ${ledger.exit_mode === "next_open" ? "D+1 开盘卖出" : "D+1 收盘卖出"}`}
+            : `正式交割 ${ledger.selected_count} 只 · 系统动态退出`}
         </span>
       </div>
       {displayRows.length ? (
@@ -419,6 +394,7 @@ function LedgerView({ ledger, loading }: { ledger?: LimitUpLaneLedger; loading: 
 }
 
 function LedgerTradeRow({ trade }: { trade: LimitUpLaneLedgerTrade }) {
+  const setups = (trade.setup_tags ?? []).map(setupTagLabel).join(" · ");
   return (
     <tr>
       <td className="px-3 py-3"><StockIdentityLink name={trade.name} vtSymbol={trade.vt_symbol} meta={trade.industry_name ?? "行业待确认"} /></td>
@@ -431,34 +407,29 @@ function LedgerTradeRow({ trade }: { trade: LimitUpLaneLedgerTrade }) {
           </div>
         )}
       </td>
-      <td className="px-3 py-3 text-xs tabular-nums"><div>{trade.sell_date ?? "待 D+1"} {trade.sell_time ?? ""}</div><div className="text-muted-foreground">{formatPrice(trade.sell_price)}</div></td>
+      <td className="px-3 py-3 text-xs tabular-nums"><div>{trade.sell_date ?? "待 D+1"} {trade.sell_time ?? ""}</div><div className="text-muted-foreground">{formatPrice(trade.sell_price)} · {dynamicExitLabel(trade.dynamic_exit?.mode)}</div>{trade.dynamic_exit?.reason && <div className="mt-1 max-w-64 text-muted-foreground">{trade.dynamic_exit.reason}</div>}</td>
       <td className={cn("px-3 py-3 text-xs font-medium", trade.d_board_status === "sealed" ? "text-rise" : "text-fall")}>{boardStatusLabel(trade.d_board_status)}</td>
       <td className="px-3 py-3 text-xs">{d1OutcomeLabel(trade.d1_outcome)}</td>
       <td className={cn("px-3 py-3 text-right font-semibold tabular-nums", amountTone(trade.return_pct))}>{formatPct(trade.return_pct)}</td>
-      <td className="max-w-[360px] px-3 py-3 text-xs leading-5 text-muted-foreground">{trade.favorable_factors?.map(factorLabel).join("；") || "无可执行证据"}</td>
+      <td className="max-w-[360px] px-3 py-3 text-xs leading-5 text-muted-foreground">{setups && <div className="text-foreground">{setups}</div>}{trade.favorable_factors?.map(factorLabel).join("；") || "无可执行证据"}</td>
     </tr>
   );
 }
 
 interface BacktestViewProps {
   report?: LimitUpLaneBacktest;
-  modelReport?: LimitUpWalkForwardModelReport;
-  modelLoading: boolean;
-  modelError: unknown;
   loading: boolean;
   fetching: boolean;
   start: string;
   end: string;
-  exitMode: ExitMode;
   minimumDate?: string | null;
   maximumDate?: string | null;
   onStart: (value: string) => void;
   onEnd: (value: string) => void;
-  onExitMode: (value: ExitMode) => void;
   onRun: () => void;
 }
 
-function BacktestView({ report, modelReport, modelLoading, modelError, loading, fetching, start, end, exitMode, minimumDate, maximumDate, onStart, onEnd, onExitMode, onRun }: BacktestViewProps) {
+function BacktestView({ report, loading, fetching, start, end, minimumDate, maximumDate, onStart, onEnd, onRun }: BacktestViewProps) {
   if (loading && !report) return <LoadingState rows={7} />;
   const summary = report?.summary;
   return (
@@ -466,13 +437,7 @@ function BacktestView({ report, modelReport, modelLoading, modelError, loading, 
       <div className="flex flex-wrap items-end gap-2 border-b px-3 py-3 sm:px-4">
         <DateInput label="开始" value={start} min={minimumDate} max={maximumDate} onChange={onStart} />
         <DateInput label="结束" value={end} min={minimumDate} max={maximumDate} onChange={onEnd} />
-        <label className="text-xs text-muted-foreground">
-          卖出
-          <select value={exitMode} onChange={(event) => onExitMode(event.target.value as ExitMode)} className="mt-1 block h-9 border bg-background px-2 text-sm text-foreground">
-            <option value="next_open">D+1 开盘</option>
-            <option value="next_close">D+1 收盘</option>
-          </select>
-        </label>
+        <div className="h-9 border bg-muted/20 px-3 text-xs leading-9 text-muted-foreground">系统动态退出</div>
         <Button type="button" size="icon" variant="outline" className="h-9 w-9" title="运行回测" disabled={fetching} onClick={onRun}>
           <RefreshCw size={15} className={cn(fetching && "animate-spin")} />
         </Button>
@@ -491,16 +456,14 @@ function BacktestView({ report, modelReport, modelLoading, modelError, loading, 
       </div>
 
       {report && <SignalSummaryStrip report={report} />}
+      {report && (
+        <div className="border-b px-3 py-2 text-xs text-muted-foreground sm:px-4">
+          动态退出 · 竞价 {report.exit_summary.auction_exit_count} 笔 · 尾盘 {report.exit_summary.tail_exit_count} 笔
+        </div>
+      )}
       {report?.lane === "portfolio" ? (
         <div className="border-b px-3 py-2 text-xs text-muted-foreground sm:px-4">执行首板 / 二进三 / 高板 · 一进二仅研究 · 共享现金 / 4 仓</div>
-      ) : (
-        <ModelEvidenceStrip
-          ruleTradeCount={summary?.trade_count ?? 0}
-          report={modelReport}
-          loading={modelLoading}
-          error={modelError}
-        />
-      )}
+      ) : null}
       {report && <ValidationStrip report={report} />}
       {report?.daily_results.length ? <EquityChart report={report} /> : <EmptyRow text="当前范围没有账户权益记录" />}
       {report && <BacktestTrades report={report} />}
@@ -518,34 +481,6 @@ function SignalSummaryStrip({ report }: { report: LimitUpLaneBacktest }) {
       <span className="text-muted-foreground">胜率 {formatPct(summary.win_rate)}</span>
       <span className="text-muted-foreground">平均 D+1 {formatPct(summary.average_return_pct)}</span>
       <span className="text-muted-foreground">信号日等权上界 {formatPct(summary.total_return_pct)}</span>
-    </div>
-  );
-}
-
-function ModelEvidenceStrip({ ruleTradeCount, report, loading, error }: {
-  ruleTradeCount: number;
-  report?: LimitUpWalkForwardModelReport;
-  loading: boolean;
-  error: unknown;
-}) {
-  if (loading && !report) {
-    return <div className="border-b px-3 py-2 text-xs text-muted-foreground sm:px-4">正在核验完整候选池</div>;
-  }
-  if (error || !report) {
-    return <div className="border-b px-3 py-2 text-xs text-fall sm:px-4">完整候选池模型暂不可用，规则回测不受影响</div>;
-  }
-  const maximumTraining = Math.max(0, ...report.windows.map((window) => window.training_samples));
-  const requiredTraining = report.model_contract.min_training_samples;
-  const fittedWindows = report.coverage.fitted_windows ?? 0;
-  const modelStatus = fittedWindows > 0
-    ? `模型选择 ${report.selected_candidates.length} 笔`
-    : "训练不足，模型空仓";
-  return (
-    <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b px-3 py-2 text-xs sm:px-4">
-      <span className={fittedWindows > 0 ? "text-foreground" : "text-amber-700 dark:text-amber-300"}>{modelStatus}</span>
-      <span className="text-muted-foreground">完整合格样本 {report.coverage.closed_candidate_count ?? 0}</span>
-      <span className="text-muted-foreground">最大训练窗 {maximumTraining} / 最低 {requiredTraining}</span>
-      <span className="text-muted-foreground">规则选择 {ruleTradeCount} 笔</span>
     </div>
   );
 }
@@ -687,18 +622,17 @@ function boardLaneForLevel(level: number): BoardLaneKey {
 
 function boardLaneLabel(value: BoardLaneKey) { return ({ first_board: "首板", one_to_two: "一进二", two_to_three: "二进三", high_board: "高板" } as Record<BoardLaneKey, string>)[value]; }
 
-function modelEntryModeForLane(lane: BoardLaneKey): EntryMode {
-  return lane === "first_board" ? "sweep" : "next_auction";
-}
-
 function actionPriority(action: string) { return ({ buy_now: 0, next_auction: 1, wait_tail: 2, pass: 3 } as Record<string, number>)[action] ?? 4; }
 function actionLabel(action: string) { return ({ buy_now: "现在打", next_auction: "明早竞价", wait_tail: "尾盘等确认", pass: "不打" } as Record<string, string>)[action] ?? action; }
+function executionStateLabel(state: string | undefined, action: string) { return ({ actionable: "条件满足，可买", waiting: "观察等待", watch: "提前观察", cancelled: "条件失效，不买" } as Record<string, string>)[state ?? ""] ?? actionLabel(action); }
 function actionTone(action: string, stale: boolean) { if (stale || action === "pass") return "text-fall"; if (action === "buy_now" || action === "next_auction") return "text-rise"; return "text-amber-600 dark:text-amber-300"; }
 function entryKindLabel(value: string) { return (({ none: "不执行", auction: "竞价", sweep: "扫板", reseal: "回封", tail_seal: "尾盘封板", next_auction: "竞价接力", first_touch: "首次触板", intraday: "盘中", wait: "等待确认" } as Record<string, string>)[value] ?? value) || "--"; }
 function phaseLabel(value?: string) { return ({ warmup: "预热期", expanding_oos: "滚动样本外", locked_holdout: "锁定留出", post_freeze_forward: "冻结后前向" } as Record<string, string>)[value ?? ""] ?? value ?? "阶段未知"; }
 function d1OutcomeLabel(value: string) { return ({ continuation_limit_up: "D+1 连板", next_limit_up_after_failed_board: "D+1 涨停", d1_premium: "D+1 有溢价", direct_breakdown: "D+1 直接砸", no_premium: "D+1 无溢价", awaiting_d1_bar: "待 D+1" } as Record<string, string>)[value] ?? value; }
 function boardStatusLabel(value: string) { return ({ sealed: "封住", failed: "触板后炸板", no_limit: "未触板" } as Record<string, string>)[value] ?? value; }
-function exitReasonLabel(value: string) { return ({ planned_open: "开盘退出", planned_close: "收盘退出", emergency_close: "开盘未成后收盘退出", retry_open: "延期至开盘退出", retry_close: "延期至收盘退出" } as Record<string, string>)[value] ?? value; }
+function exitReasonLabel(value: string) { return ({ dynamic_auction_exit: "动态竞价兑现", dynamic_tail_exit: "动态尾盘退出", planned_open: "开盘退出", planned_close: "收盘退出", emergency_close: "开盘未成后收盘退出", retry_open: "延期至开盘退出", retry_close: "延期至收盘退出" } as Record<string, string>)[value] ?? value; }
+function dynamicExitLabel(value?: string) { return ({ auction_exit: "竞价兑现", tail_exit: "尾盘退出" } as Record<string, string>)[value ?? ""] ?? "动态判断"; }
+function setupTagLabel(value: string) { return ({ sandwich_board: "夹板", return_board: "回马板", weak_to_strong_breakout: "弱转强突破", dragon_first_negative_relay: "龙首阴接力", dragon_weak_to_strong: "龙头弱转强", anti_nuclear_board: "反核板" } as Record<string, string>)[value] ?? value; }
 function skipReasonLabel(value: string) { return ({ position_limit: "持仓已满", insufficient_cash: "现金不足", below_one_lot: "目标仓位不足一手", duplicate_position: "已有同股持仓", invalid_entry_price: "买入价无效" } as Record<string, string>)[value] ?? value; }
 function twoToThreeQualityLabel(tier?: "A" | "B" | null, riskCount?: number | null) { const quality = tier ?? "B"; const risks = riskCount ?? 0; return `${quality}级${risks > 0 ? ` · 风险${risks}` : ""}`; }
 function twoToThreeRiskTitle(flags?: string[]) { return (flags ?? []).map((flag) => ({ auction_gap_outside_core: "竞价不在2%-5%核心区", prior_turnover_outside_core: "前板换手不在10%-20%核心区", prior_amount_ratio_outside_core: "前板量能比不在1.2-2", financial_snapshot_missing: "财报快照缺失", prior_low_below_zero: "前板最低价翻绿或缺失", prior_market_failed_rate_high: "前日炸板率偏高或缺失" } as Record<string, string>)[flag] ?? flag).join("；"); }

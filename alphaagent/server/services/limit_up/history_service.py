@@ -22,8 +22,11 @@ from alphaagent.server.services.limit_up.lane_research import BOARD_LANES
 
 _BUILD_LOCK = threading.RLock()
 _BUILD_THREAD: threading.Thread | None = None
+_BACKTEST_WARM_LOCK = threading.RLock()
+_BACKTEST_WARM_THREAD: threading.Thread | None = None
 _MODEL_REPORT_CACHE = TTLCache(max_items=16)
 _LANE_VALIDATION_CACHE = TTLCache(max_items=16)
+_BACKTEST_REPORT_CACHE = TTLCache(max_items=32)
 _BUILD_STATE: dict[str, object] = {
     "status": "idle",
     "strategy_version": history_engine.HISTORY_STRATEGY_VERSION,
@@ -73,6 +76,7 @@ def rebuild_history_sync() -> dict[str, object]:
         )
         _MODEL_REPORT_CACHE.clear()
         _LANE_VALIDATION_CACHE.clear()
+        _BACKTEST_REPORT_CACHE.clear()
         live_evidence.clear_live_evidence_cache()
         result = {
             "status": "ready",
@@ -84,6 +88,7 @@ def rebuild_history_sync() -> dict[str, object]:
             "finished_at": _utc_now(),
         }
         _set_build_state(**result)
+        start_backtest_cache_warmup()
         return result
 
 
@@ -148,6 +153,57 @@ def get_history_dates() -> dict[str, object]:
     }
 
 
+def start_backtest_cache_warmup() -> dict[str, object]:
+    """Precompute default dynamic reports after a history rebuild."""
+
+    global _BACKTEST_WARM_THREAD
+    try:
+        coverage = history_repository.history_coverage(
+            history_engine.HISTORY_STRATEGY_VERSION
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "skipped",
+            "reason": f"history_unavailable:{exc.__class__.__name__}",
+        }
+    if int(coverage.get("persisted_days") or 0) <= 0:
+        return {"status": "skipped", "reason": "history_unavailable"}
+    with _BACKTEST_WARM_LOCK:
+        if _BACKTEST_WARM_THREAD is not None and _BACKTEST_WARM_THREAD.is_alive():
+            return {"status": "running", "already_running": True}
+        _BACKTEST_WARM_THREAD = threading.Thread(
+            target=_warm_default_backtests,
+            name="limit-up-backtest-warmup",
+            daemon=True,
+        )
+        _BACKTEST_WARM_THREAD.start()
+    return {"status": "started", "scopes": list(BACKTEST_SCOPES)}
+
+
+def _warm_default_backtests() -> None:
+    scopes = iter(BACKTEST_SCOPES)
+    first_scope = next(scopes, None)
+    if first_scope is not None:
+        try:
+            get_lane_history_backtest(
+                None,
+                None,
+                lane=first_scope,
+                exit_mode="dynamic",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        get_lane_validation_snapshot("dynamic")
+    except Exception:  # noqa: BLE001
+        pass
+    for scope in scopes:
+        try:
+            get_lane_history_backtest(None, None, lane=scope, exit_mode="dynamic")
+        except Exception:  # noqa: BLE001
+            continue
+
+
 def get_history_day(trade_date: date) -> dict[str, object]:
     payload = history_repository.load_history_day(
         history_engine.HISTORY_STRATEGY_VERSION,
@@ -166,11 +222,11 @@ def get_history_ledger(
     trade_date: date,
     *,
     lane: str | None = None,
-    exit_mode: str = "next_open",
+    exit_mode: str = "dynamic",
 ) -> dict[str, object]:
     if lane is not None and lane not in BOARD_LANES:
         raise ValueError(f"unsupported board lane: {lane}")
-    if exit_mode not in {"next_open", "next_close"}:
+    if exit_mode not in cash_backtest.SUPPORTED_EXIT_MODES:
         raise ValueError(f"unsupported exit mode: {exit_mode}")
     payload = history_repository.load_history_day(
         history_engine.HISTORY_STRATEGY_VERSION,
@@ -238,21 +294,21 @@ def get_history_ledger(
 
 def get_lane_validation_status(
     lane: str,
-    exit_mode: str = "next_open",
+    exit_mode: str = "dynamic",
 ) -> dict[str, object]:
     """Return the cached out-of-sample gate used by ledger and live decisions."""
 
     if lane not in BOARD_LANES:
         raise ValueError(f"unsupported board lane: {lane}")
-    if exit_mode not in {"next_open", "next_close"}:
+    if exit_mode not in cash_backtest.SUPPORTED_EXIT_MODES:
         raise ValueError(f"unsupported exit mode: {exit_mode}")
     return get_lane_validation_snapshot(exit_mode)[lane]
 
 
 def get_lane_validation_snapshot(
-    exit_mode: str = "next_open",
+    exit_mode: str = "dynamic",
 ) -> dict[str, dict[str, object]]:
-    if exit_mode not in {"next_open", "next_close"}:
+    if exit_mode not in cash_backtest.SUPPORTED_EXIT_MODES:
         raise ValueError(f"unsupported exit mode: {exit_mode}")
     cache_key = f"{history_engine.HISTORY_STRATEGY_VERSION}:all:{exit_mode}"
 
@@ -261,6 +317,7 @@ def get_lane_validation_snapshot(
             history_engine.HISTORY_STRATEGY_VERSION,
             None,
             None,
+            True,
         )
         portfolio_orders = _selected_history_orders(rows, None)
         bars, trade_dates = _account_market_data(rows, portfolio_orders)
@@ -283,18 +340,36 @@ def get_lane_history_backtest(
     end: date | None,
     *,
     lane: str,
-    exit_mode: str = "next_open",
+    exit_mode: str = "dynamic",
     trade_limit: int = 500,
     account_config: cash_backtest.CashBacktestConfig | None = None,
 ) -> dict[str, object]:
     if lane not in BACKTEST_SCOPES:
         raise ValueError(f"unsupported board lane: {lane}")
-    if exit_mode not in {"next_open", "next_close"}:
+    if exit_mode not in cash_backtest.SUPPORTED_EXIT_MODES:
         raise ValueError(f"unsupported exit mode: {exit_mode}")
+    if exit_mode == "dynamic" and account_config is None:
+        cache_key = (
+            f"{history_engine.HISTORY_STRATEGY_VERSION}:dynamic:{start}:{end}:"
+            f"{lane}:{trade_limit}:{cash_backtest.ACCOUNT_EXECUTION_VERSION}"
+        )
+        return _BACKTEST_REPORT_CACHE.get_or_set(
+            cache_key,
+            21_600,
+            lambda: get_lane_history_backtest(
+                start,
+                end,
+                lane=lane,
+                exit_mode=exit_mode,
+                trade_limit=trade_limit,
+                account_config=cash_backtest.CashBacktestConfig(),
+            ),
+        )
     rows = history_repository.load_history_range(
         history_engine.HISTORY_STRATEGY_VERSION,
         start,
         end,
+        True,
     )
     lane_filter = None if lane == "portfolio" else lane
     orders = _selected_history_orders(rows, lane_filter)
@@ -374,9 +449,12 @@ def get_lane_history_backtest(
             "excluded_lanes": ["one_to_two"] if lane == "portfolio" else [],
             "selection_basis": "warmup_and_expanding_oos_frozen_before_holdout",
         },
+        "exit_summary": _exit_summary(orders, exit_mode),
         "orders": account["orders"][-trade_limit:],
-        "signals": orders[-trade_limit:],
-        "trades": account["executed_trades"][-trade_limit:],
+        "trades": [
+            _compact_account_trade(trade)
+            for trade in account["executed_trades"][-trade_limit:]
+        ],
         "skipped_orders": account["skipped_orders"][-trade_limit:],
         "open_positions": account["open_positions"],
         "validation": validation,
@@ -394,7 +472,7 @@ def get_lane_history_backtest(
         },
         "limitations": [
             "首板分时路径为三分钟代理，没有Tick/L2时不能证明排队成交。",
-            "接力竞价使用日线开盘成交代理；历史逐日板块成员仍可能存在幸存者偏差。",
+            "动态退出中的竞价价格使用日线开盘代理；历史逐日板块成员仍可能存在幸存者偏差。",
             "信号日等权收益仅作研究上界，主复利来自10万元共享现金账户。",
             "锁定留出结果不参与规则修改，未同时通过三段验证时保持研究状态。",
         ],
@@ -831,8 +909,15 @@ def _ledger_trade(
 ) -> dict[str, object]:
     outcome = candidate.get("outcome")
     outcome = outcome if isinstance(outcome, Mapping) else {}
-    return_field = "next_open_return_pct" if exit_mode == "next_open" else "next_close_return_pct"
-    price_field = "next_open_price" if exit_mode == "next_open" else "next_close_price"
+    resolved_exit_mode = _candidate_exit_mode(candidate, exit_mode)
+    return_field = (
+        "next_open_return_pct"
+        if resolved_exit_mode == "next_open"
+        else "next_close_return_pct"
+    )
+    price_field = (
+        "next_open_price" if resolved_exit_mode == "next_open" else "next_close_price"
+    )
     return_pct = _number(outcome.get(return_field))
     result_status = "closed" if return_pct is not None else "awaiting_d1_bar"
     return {
@@ -850,7 +935,9 @@ def _ledger_trade(
         "buy_price": _number(candidate.get("entry_price")),
         "sell_date": candidate.get("result_date"),
         "sell_time": candidate.get(
-            "sell_time_next_open" if exit_mode == "next_open" else "sell_time_next_close"
+            "sell_time_next_open"
+            if resolved_exit_mode == "next_open"
+            else "sell_time_next_close"
         ),
         "sell_price": _number(outcome.get(price_field)),
         "return_pct": round(return_pct, 4) if return_pct is not None else None,
@@ -872,12 +959,94 @@ def _ledger_trade(
         "two_to_three_risk_count": candidate.get("two_to_three_risk_count"),
         "two_to_three_risk_flags": candidate.get("two_to_three_risk_flags") or [],
         "favorable_factors": candidate.get("favorable_factors") or [],
+        "setup_tags": candidate.get("setup_tags") or [],
+        "setup_confidence": candidate.get("setup_confidence"),
+        "dynamic_exit": candidate.get("dynamic_exit") or {},
         "blockers": candidate.get("blockers") or [],
         "financial_risk": candidate.get("financial_risk") or {},
         "prior_board": candidate.get("prior_board"),
         "path_prefix": candidate.get("path_prefix"),
         "outcome": dict(outcome),
     }
+
+
+def _candidate_exit_mode(candidate: Mapping[str, object], exit_mode: str) -> str:
+    if exit_mode != "dynamic":
+        return exit_mode
+    decision = candidate.get("dynamic_exit")
+    decision = decision if isinstance(decision, Mapping) else {}
+    return "next_open" if decision.get("mode") == "auction_exit" else "next_close"
+
+
+def _exit_summary(
+    orders: Sequence[Mapping[str, object]],
+    exit_mode: str,
+) -> dict[str, object]:
+    if exit_mode != "dynamic":
+        return {
+            "mode": exit_mode,
+            "auction_exit_count": len(orders) if exit_mode == "next_open" else 0,
+            "tail_exit_count": len(orders) if exit_mode == "next_close" else 0,
+        }
+    auction_count = 0
+    tail_count = 0
+    for order in orders:
+        if _candidate_exit_mode(order, exit_mode) == "next_open":
+            auction_count += 1
+        else:
+            tail_count += 1
+    return {
+        "mode": "dynamic",
+        "policy_version": "limit-up-dynamic-exit-v1",
+        "auction_exit_count": auction_count,
+        "tail_exit_count": tail_count,
+    }
+
+
+def _compact_account_trade(trade: Mapping[str, object]) -> dict[str, object]:
+    fields = (
+        "lane",
+        "lane_label",
+        "vt_symbol",
+        "name",
+        "industry_id",
+        "industry_name",
+        "signal_kind",
+        "signal_date",
+        "entry_date",
+        "exit_date",
+        "entry_price",
+        "exit_price",
+        "buy_date",
+        "buy_time",
+        "buy_price",
+        "volume",
+        "buy_amount",
+        "buy_fee",
+        "sell_date",
+        "sell_time",
+        "sell_price",
+        "sell_amount",
+        "sell_fee",
+        "total_fee",
+        "net_pnl",
+        "return_pct",
+        "is_win",
+        "is_hard_loss",
+        "d1_outcome",
+        "d_board_status",
+        "exit_reason",
+        "result_status",
+        "execution_confidence",
+        "two_to_three_quality_tier",
+        "two_to_three_risk_count",
+        "two_to_three_risk_flags",
+        "favorable_factors",
+        "setup_tags",
+        "setup_confidence",
+        "dynamic_exit",
+    )
+    return {field: trade.get(field) for field in fields if field in trade}
 
 
 def _lane_closed_trade(

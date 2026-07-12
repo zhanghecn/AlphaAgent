@@ -77,6 +77,7 @@ def evaluate_lane_candidate(candidate: Mapping[str, object]) -> dict[str, object
         if lane == "first_board"
         else None
     )
+    setup_tags = detect_setup_tags(candidate, setup_type=setup_type)
     result.update(
         {
             "lane": lane,
@@ -86,6 +87,8 @@ def evaluate_lane_candidate(candidate: Mapping[str, object]) -> dict[str, object
             "blockers": blockers,
             "favorable_factors": favorable,
             "setup_type": setup_type,
+            "setup_tags": setup_tags,
+            "setup_confidence": "point_in_time_proxy" if setup_tags else None,
             "support_score": support_score,
             "seal_gate_passed": (
                 support_score is not None
@@ -102,6 +105,77 @@ def evaluate_lane_candidate(candidate: Mapping[str, object]) -> dict[str, object
         }
     )
     return result
+
+
+def detect_setup_tags(
+    candidate: Mapping[str, object],
+    *,
+    setup_type: str | None,
+) -> list[str]:
+    """Return descriptive setup tags using only fields known at signal time."""
+
+    tags: list[str] = []
+    days_since = _number(candidate.get("trade_days_since_prior_limit"))
+    pullback = _number(candidate.get("pullback_from_prior_limit_pct"))
+    recent_limits = _integer(candidate.get("prior_limit_count_5"))
+    gene_count = _integer(candidate.get("prior_limit_count_126"))
+    amplitude = _number(candidate.get("prior_amplitude_pct"))
+    position = _number(candidate.get("prior_position_120"))
+    prior_change = _number(candidate.get("prior_change_pct"))
+    auction_gap = _number(candidate.get("auction_gap_pct"))
+    leader_rank = _integer_or_none(candidate.get("prior_industry_leader_rank"))
+    break_streak = _integer(candidate.get("prior_break_streak"))
+    market_phase = str(candidate.get("prior_market_phase") or "")
+
+    if (
+        days_since is not None
+        and 2 <= days_since <= 4
+        and recent_limits >= 1
+        and pullback is not None
+        and -8 <= pullback <= 0
+        and amplitude is not None
+        and amplitude <= 5
+    ):
+        tags.append("sandwich_board")
+    if (
+        days_since is not None
+        and 5 <= days_since <= 30
+        and gene_count >= 2
+        and pullback is not None
+        and pullback <= -5
+        and position is not None
+        and position <= 0.65
+    ):
+        tags.append("return_board")
+    if setup_type in {"weak_to_strong", "high_board_weak_to_strong"} or (
+        prior_change is not None
+        and prior_change < 0
+        and amplitude is not None
+        and amplitude >= 6
+        and auction_gap is not None
+        and auction_gap >= 1
+    ):
+        tags.append("weak_to_strong_breakout")
+    if (
+        break_streak >= 2
+        and days_since is not None
+        and days_since == 2
+        and prior_change is not None
+        and prior_change < 0
+        and leader_rank == 1
+    ):
+        tags.append("dragon_first_negative_relay")
+    if setup_type == "high_board_weak_to_strong" and leader_rank == 1:
+        tags.append("dragon_weak_to_strong")
+    if (
+        prior_change is not None
+        and prior_change <= -7
+        and auction_gap is not None
+        and auction_gap >= 0
+        and market_phase in {"repair", "broad_rise"}
+    ):
+        tags.append("anti_nuclear_board")
+    return tags
 
 
 def select_daily_lane_portfolio(

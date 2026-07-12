@@ -205,6 +205,82 @@ def test_latest_signal_without_d1_stays_open_and_out_of_win_rate() -> None:
     assert summary["win_rate"] is None
 
 
+def test_dynamic_exit_can_sell_one_position_at_open_and_one_at_close() -> None:
+    auction_exit = _signal("600001.SSE", "2026-01-02", "2026-01-05")
+    auction_exit["dynamic_exit"] = {"mode": "auction_exit"}
+    tail_exit = _signal("600002.SSE", "2026-01-02", "2026-01-05")
+    tail_exit["dynamic_exit"] = {"mode": "tail_exit"}
+
+    result = simulate_limit_up_account(
+        signals=[auction_exit, tail_exit],
+        bars=[
+            _bar("600001.SSE", "2026-01-02", 10.0, 10.0),
+            _bar("600002.SSE", "2026-01-02", 10.0, 10.0),
+            _bar("600001.SSE", "2026-01-05", 11.0, 10.5),
+            _bar("600002.SSE", "2026-01-05", 11.0, 12.0),
+        ],
+        trade_dates=_dates("2026-01-02", "2026-01-05"),
+        exit_mode="dynamic",
+        config=CashBacktestConfig(initial_cash=100_000, max_positions=4),
+    )
+
+    trades = {trade["vt_symbol"]: trade for trade in result["executed_trades"]}
+    assert trades["600001.SSE"]["sell_time"] == "09:30:00"
+    assert trades["600001.SSE"]["exit_reason"] == "dynamic_auction_exit"
+    assert trades["600002.SSE"]["sell_time"] == "15:00:00"
+    assert trades["600002.SSE"]["exit_reason"] == "dynamic_tail_exit"
+
+
+def test_dynamic_auction_exit_releases_cash_for_later_intraday_entry() -> None:
+    old_position = _signal("600001.SSE", "2026-01-02", "2026-01-05")
+    old_position["dynamic_exit"] = {"mode": "auction_exit"}
+    intraday_candidate = _signal(
+        "600002.SSE",
+        "2026-01-05",
+        "2026-01-06",
+        buy_time="10:08:00",
+        lane="first_board",
+        signal_kind="first_touch",
+        limit_price=10.0,
+    )
+    intraday_candidate["dynamic_exit"] = {"mode": "tail_exit"}
+
+    result = simulate_limit_up_account(
+        signals=[old_position, intraday_candidate],
+        bars=[
+            _bar("600001.SSE", "2026-01-02", 10.0, 10.0),
+            _bar("600001.SSE", "2026-01-05", 11.0, 11.0),
+            _bar("600002.SSE", "2026-01-05", 9.8, 10.0),
+            _bar("600002.SSE", "2026-01-06", 11.0, 11.0),
+        ],
+        trade_dates=_dates("2026-01-02", "2026-01-05", "2026-01-06"),
+        exit_mode="dynamic",
+        config=CashBacktestConfig(initial_cash=100_000, max_positions=1),
+    )
+
+    assert _buy_order(result, "600002.SSE")["status"] == "filled"
+
+
+def test_fixed_exit_mode_does_not_report_dynamic_reason() -> None:
+    signal = _signal("600001.SSE", "2026-01-02", "2026-01-05")
+    signal["dynamic_exit"] = {"mode": "auction_exit"}
+
+    result = simulate_limit_up_account(
+        signals=[signal],
+        bars=[
+            _bar("600001.SSE", "2026-01-02", 10.0, 10.0),
+            _bar("600001.SSE", "2026-01-05", 11.0, 12.0),
+        ],
+        trade_dates=_dates("2026-01-02", "2026-01-05"),
+        exit_mode="next_close",
+        config=CashBacktestConfig(initial_cash=100_000, max_positions=1),
+    )
+
+    trade = result["executed_trades"][0]
+    assert trade["sell_time"] == "15:00:00"
+    assert trade["exit_reason"] == "planned_close"
+
+
 def _signal(
     vt_symbol: str,
     entry_date: str,

@@ -368,6 +368,7 @@ def load_history_range(
     version: str,
     start: date | None,
     end: date | None,
+    compact: bool = False,
 ) -> list[dict[str, object]]:
     schema.ensure_schema_once(get_engine())
     conditions = [schema.limit_up_history_replays.c.strategy_version == version]
@@ -375,16 +376,42 @@ def load_history_range(
         conditions.append(schema.limit_up_history_replays.c.trade_date >= start)
     if end is not None:
         conditions.append(schema.limit_up_history_replays.c.trade_date <= end)
+    if compact:
+        payload = schema.limit_up_history_replays.c.payload
+        statement = select(
+            schema.limit_up_history_replays.c.trade_date,
+            payload["validation_phase"].as_string().label("validation_phase"),
+            payload["lane_portfolio"]["selected"].label("selected"),
+            schema.limit_up_history_replays.c.coverage,
+        )
+    else:
+        statement = select(
+            schema.limit_up_history_replays.c.trade_date,
+            schema.limit_up_history_replays.c.payload,
+            schema.limit_up_history_replays.c.coverage,
+        )
     with session_scope() as session:
         rows = session.execute(
-            select(
-                schema.limit_up_history_replays.c.trade_date,
-                schema.limit_up_history_replays.c.payload,
-                schema.limit_up_history_replays.c.coverage,
+            statement.where(and_(*conditions)).order_by(
+                schema.limit_up_history_replays.c.trade_date
             )
-            .where(and_(*conditions))
-            .order_by(schema.limit_up_history_replays.c.trade_date)
         ).mappings().all()
+    if compact:
+        return [
+            {
+                "trade_date": row["trade_date"].isoformat(),
+                "validation_phase": str(row["validation_phase"] or "unknown"),
+                "lane_portfolio": {
+                    "selected": [
+                        dict(candidate)
+                        for candidate in (row["selected"] or [])
+                        if isinstance(candidate, Mapping)
+                    ]
+                },
+                "coverage": dict(row["coverage"] or {}),
+            }
+            for row in rows
+        ]
     return [
         {
             **dict(row["payload"] or {}),
