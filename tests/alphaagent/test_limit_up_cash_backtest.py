@@ -182,6 +182,24 @@ def test_first_board_buy_slippage_does_not_exceed_limit_price() -> None:
     assert _buy_order(result, "600001.SSE")["price"] == 10.0
 
 
+def test_latest_signal_without_d1_stays_open_and_out_of_win_rate() -> None:
+    signal = _signal("600001.SSE", "2026-01-02", "2026-01-05")
+    signal["result_date"] = None
+
+    result = simulate_limit_up_account(
+        signals=[signal],
+        bars=[_bar("600001.SSE", "2026-01-02", 10.0, 10.0)],
+        trade_dates=_dates("2026-01-02"),
+        exit_mode="next_close",
+    )
+
+    summary = result["execution_summary"]
+    assert summary["buy_count"] == 1
+    assert summary["trade_count"] == 0
+    assert summary["open_position_count"] == 1
+    assert summary["win_rate"] is None
+
+
 def _signal(
     vt_symbol: str,
     entry_date: str,

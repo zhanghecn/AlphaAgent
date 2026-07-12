@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 from statistics import mean, median
@@ -49,7 +49,7 @@ class PreparedSignal:
     candidate: dict[str, object]
     vt_symbol: str
     entry_date: date
-    result_date: date
+    result_date: date | None
     buy_time: str
     auction_entry: bool
 
@@ -93,9 +93,10 @@ def simulate_limit_up_account(
         raise ValueError(f"unsupported exit mode: {exit_mode}")
     account_config = config or CashBacktestConfig()
     prepared = [_prepare_signal(signal) for signal in signals]
-    entries = _group_entries(prepared)
     bar_index = _bar_index(bars)
     calendar = _simulation_calendar(prepared, bars, trade_dates)
+    prepared = [_resolve_result_date(signal, calendar) for signal in prepared]
+    entries = _group_entries(prepared)
     state = AccountState(
         cash=account_config.initial_cash,
         positions={},
@@ -202,8 +203,8 @@ def _prepare_signal(signal: Mapping[str, object]) -> PreparedSignal:
     if not vt_symbol:
         raise ValueError("signal vt_symbol is required")
     entry_date = _as_date(candidate.get("entry_date") or candidate.get("signal_date"))
-    result_date = _as_date(candidate.get("result_date") or candidate.get("exit_date"))
-    if result_date <= entry_date:
+    result_date = _optional_date(candidate.get("result_date") or candidate.get("exit_date"))
+    if result_date is not None and result_date <= entry_date:
         raise ValueError("result_date must be after entry_date")
     buy_time = str(candidate.get("buy_time") or candidate.get("signal_time") or "09:30:00")
     lane = str(candidate.get("lane") or "")
@@ -219,6 +220,19 @@ def _prepare_signal(signal: Mapping[str, object]) -> PreparedSignal:
         buy_time=buy_time,
         auction_entry=auction_entry,
     )
+
+
+def _resolve_result_date(
+    signal: PreparedSignal,
+    calendar: Sequence[date],
+) -> PreparedSignal:
+    if signal.result_date is not None:
+        return signal
+    next_trade_date = next(
+        (trade_date for trade_date in calendar if trade_date > signal.entry_date),
+        None,
+    )
+    return replace(signal, result_date=next_trade_date)
 
 
 def _group_entries(
@@ -319,7 +333,7 @@ def _open_position(
         vt_symbol=signal.vt_symbol,
         volume=fill.volume,
         entry_date=signal.entry_date,
-        planned_exit_date=signal.result_date,
+        planned_exit_date=signal.result_date or date.max,
         buy_time=signal.buy_time,
         buy_price=fill.price,
         buy_amount=fill.amount,
@@ -695,7 +709,7 @@ def _simulation_calendar(
 ) -> list[date]:
     dates = {_as_date(value) for value in trade_dates}
     dates.update(signal.entry_date for signal in signals)
-    dates.update(signal.result_date for signal in signals)
+    dates.update(signal.result_date for signal in signals if signal.result_date is not None)
     dates.update(
         _as_date(bar.get("trade_date"))
         for bar in bars
@@ -755,6 +769,12 @@ def _as_date(value: object) -> date:
     if value is None:
         raise ValueError("date value is required")
     return date.fromisoformat(str(value)[:10])
+
+
+def _optional_date(value: object) -> date | None:
+    if value in (None, ""):
+        return None
+    return _as_date(value)
 
 
 def _number(value: object) -> float | None:

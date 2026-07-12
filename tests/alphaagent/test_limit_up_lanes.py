@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from unittest.mock import patch
 
 import pandas as pd
@@ -872,6 +872,7 @@ def _lane_replay_day(
     return_pct: float = 3.2,
     phase: str = "locked_holdout",
 ) -> dict[str, object]:
+    result_date = (date.fromisoformat(trade_date) + timedelta(days=1)).isoformat()
     candidate = {
         **_candidate(),
         "lane": lane,
@@ -880,7 +881,7 @@ def _lane_replay_day(
         "action": "buy_first_board" if lane == "first_board" else "buy_auction",
         "signal_date": trade_date,
         "entry_date": trade_date,
-        "result_date": "2026-06-11",
+        "result_date": result_date,
         "entry_price": 11.0,
         "buy_time": "10:12:00" if lane == "first_board" else "09:30:00",
         "sell_time_next_open": "09:30:00",
@@ -1018,6 +1019,11 @@ def test_lane_backtest_only_counts_daily_selected_portfolio(monkeypatch) -> None
         "load_history_range",
         lambda *_args: [selected, empty],
     )
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "load_account_daily_bars",
+        lambda *_args: [],
+    )
 
     report = history_service.get_lane_history_backtest(
         None,
@@ -1068,6 +1074,11 @@ def test_lane_backtest_equal_weights_multiple_selected_candidates(monkeypatch) -
         lambda *_args: day,
     )
     monkeypatch.setattr(
+        history_service.history_repository,
+        "load_account_daily_bars",
+        lambda *_args: [],
+    )
+    monkeypatch.setattr(
         history_service,
         "get_lane_validation_status",
         lambda *_args, **_kwargs: {
@@ -1089,7 +1100,9 @@ def test_lane_backtest_equal_weights_multiple_selected_candidates(monkeypatch) -
         exit_mode="next_open",
     )
 
-    assert report["daily_results"][0]["daily_return_pct"] == 4.0
+    assert report["signal_summary"]["total_return_pct"] == 4.0
+    assert report["summary"]["initial_cash"] == 100_000
+    assert report["summary"]["total_return_pct"] != 4.0
     assert report["summary"]["trade_count"] == 2
     assert report["summary"]["trade_day_count"] == 1
     assert report["summary"]["average_trades_per_day"] == 2.0
@@ -1137,10 +1150,19 @@ def test_lane_validation_requires_samples_after_rule_freeze(monkeypatch) -> None
         )
         for day in range(1, 31)
     )
+    for index, row in enumerate(rows, start=100):
+        candidate = row["lane_portfolio"]["selected"][0]
+        candidate["vt_symbol"] = f"600{index:03d}.SSE"
+        candidate["name"] = f"验证样本{index}"
     monkeypatch.setattr(
         history_service.history_repository,
         "load_history_range",
         lambda *_args: rows,
+    )
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "load_account_daily_bars",
+        lambda *_args: [],
     )
 
     report = history_service.get_lane_history_backtest(
@@ -1156,6 +1178,56 @@ def test_lane_validation_requires_samples_after_rule_freeze(monkeypatch) -> None
     assert checks["post_freeze_forward"]["trade_count"] == 0
     assert checks["post_freeze_forward"]["passed"] is False
     assert report["validation"]["passed"] is False
+
+
+def test_portfolio_backtest_uses_one_shared_100k_cash_account(monkeypatch) -> None:
+    day = _lane_replay_day(lane="first_board", return_pct=8.0)
+    first = day["lane_portfolio"]["selected"][0]
+    relay = {
+        **first,
+        "vt_symbol": "600002.SSE",
+        "name": "接力样本",
+        "lane": "two_to_three",
+        "signal_kind": "auction",
+        "buy_time": "09:30:00",
+        "entry_price": 10.0,
+        "limit_price": 11.0,
+        "outcome": {
+            **first["outcome"],
+            "entry_day_close_price": 10.0,
+            "next_open_price": 9.8,
+            "next_close_price": 9.5,
+            "next_open_return_pct": -2.31,
+            "next_close_return_pct": -5.31,
+        },
+    }
+    day["lane_portfolio"]["selected"] = [first, relay]
+    day["board_lanes"]["two_to_three"] = [relay]
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "load_history_range",
+        lambda *_args: [day],
+    )
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "load_account_daily_bars",
+        lambda *_args: [],
+    )
+
+    report = history_service.get_lane_history_backtest(
+        None,
+        None,
+        lane="portfolio",
+        exit_mode="next_close",
+    )
+
+    assert report["lane"] == "portfolio"
+    assert report["account_config"]["initial_cash"] == 100_000
+    assert report["account_config"]["max_positions"] == 4
+    assert report["summary"] == report["execution_summary"]
+    assert report["summary"]["trade_count"] == 2
+    assert report["summary"]["total_return_pct"] == report["daily_results"][-1]["total_return_pct"]
+    assert report["signal_summary"]["total_return_pct"] != report["summary"]["total_return_pct"]
 
 
 def test_lane_ledger_api_accepts_date_and_board_lane(monkeypatch) -> None:

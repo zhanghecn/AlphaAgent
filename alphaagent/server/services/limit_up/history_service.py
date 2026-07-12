@@ -10,6 +10,7 @@ from typing import Mapping, Sequence
 
 from alphaagent.market.cache import TTLCache
 from alphaagent.server.services.limit_up import (
+    cash_backtest,
     factor_audit,
     history_engine,
     history_repository,
@@ -28,6 +29,7 @@ _BUILD_STATE: dict[str, object] = {
     "strategy_version": history_engine.HISTORY_STRATEGY_VERSION,
 }
 LANE_RULE_FREEZE_DATE = date(2026, 7, 12)
+BACKTEST_SCOPES = ("portfolio", *BOARD_LANES)
 
 
 def start_history_rebuild() -> dict[str, object]:
@@ -259,8 +261,16 @@ def get_lane_validation_snapshot(
             None,
             None,
         )
+        portfolio_orders = _selected_history_orders(rows, None)
+        bars, trade_dates = _account_market_data(rows, portfolio_orders)
         return {
-            lane: _lane_validation_from_rows(rows, lane, exit_mode)
+            lane: _lane_validation_from_rows(
+                rows,
+                lane,
+                exit_mode,
+                bars=bars,
+                trade_dates=trade_dates,
+            )
             for lane in BOARD_LANES
         }
 
@@ -274,8 +284,9 @@ def get_lane_history_backtest(
     lane: str,
     exit_mode: str = "next_open",
     trade_limit: int = 500,
+    account_config: cash_backtest.CashBacktestConfig | None = None,
 ) -> dict[str, object]:
-    if lane not in BOARD_LANES:
+    if lane not in BACKTEST_SCOPES:
         raise ValueError(f"unsupported board lane: {lane}")
     if exit_mode not in {"next_open", "next_close"}:
         raise ValueError(f"unsupported exit mode: {exit_mode}")
@@ -284,26 +295,32 @@ def get_lane_history_backtest(
         start,
         end,
     )
-    orders: list[dict[str, object]] = []
-    trades: list[dict[str, object]] = []
-    for day in rows:
-        phase = str(day.get("validation_phase") or "unknown")
-        for candidate in _selected_lane_candidates(day, lane):
-            order = {**candidate, "validation_phase": phase}
-            orders.append(order)
-            trade = _lane_closed_trade(order, exit_mode)
-            if trade is not None:
-                trades.append(trade)
-
-    daily_results, total_return, max_drawdown = _daily_equity(trades)
-    summary = _summary(
+    lane_filter = None if lane == "portfolio" else lane
+    orders = _selected_history_orders(rows, lane_filter)
+    signal_trades = [
+        trade
+        for order in orders
+        if (trade := _lane_closed_trade(order, exit_mode)) is not None
+    ]
+    signal_daily_results, signal_return, signal_drawdown = _signal_daily_equity(signal_trades)
+    signal_summary = _summary(
         orders,
-        trades,
-        total_return_pct=total_return,
-        max_drawdown_pct=max_drawdown,
+        signal_trades,
+        total_return_pct=signal_return,
+        max_drawdown_pct=signal_drawdown,
     )
+    bars, trade_dates = _account_market_data(rows, orders)
+    config = account_config or cash_backtest.CashBacktestConfig()
+    account = _simulate_account(orders, bars, trade_dates, exit_mode, config)
+    summary = account["execution_summary"]
     phase_summaries = {
-        phase: _subset_summary(orders, trades, phase=phase)
+        phase: _simulate_account(
+            [order for order in orders if order.get("validation_phase") == phase],
+            bars,
+            trade_dates,
+            exit_mode,
+            config,
+        )["execution_summary"]
         for phase in ("warmup", "expanding_oos", "locked_holdout")
     }
     coverage = (
@@ -312,22 +329,44 @@ def get_lane_history_backtest(
         else history_repository.history_coverage(history_engine.HISTORY_STRATEGY_VERSION)
     )
     segment_summaries = {
-        segment: _segment_summary(orders, trades, segment)
+        segment: _segment_summary(orders, signal_trades, segment)
         for segment in ("intraday_path_prefix", "event_time_proxy_without_path", "daily_auction_point_in_time")
     }
-    validation = _lane_validation(lane, phase_summaries, trades)
+    forward_orders = [
+        order
+        for order in orders
+        if _trade_is_after_freeze(order, LANE_RULE_FREEZE_DATE)
+    ]
+    forward_summary = _simulate_account(
+        forward_orders,
+        bars,
+        trade_dates,
+        exit_mode,
+        config,
+    )["execution_summary"]
+    validation = _lane_validation(lane, phase_summaries, forward_summary)
     return {
         "status": "ready" if rows else "insufficient_data",
-        "mode": "board_lane_point_in_time_replay",
+        "mode": "real_cash_point_in_time_replay",
         "strategy_version": history_engine.HISTORY_STRATEGY_VERSION,
         "lane": lane,
         "exit_mode": exit_mode,
         "summary": summary,
+        "execution_summary": summary,
+        "signal_summary": signal_summary,
         "phase_summaries": phase_summaries,
         "segment_summaries": segment_summaries,
-        "daily_results": daily_results,
-        "orders": orders[-trade_limit:],
-        "trades": trades[-trade_limit:],
+        "segment_summary_mode": "signal_research_upper_bound",
+        "daily_results": account["equity_curve"],
+        "signal_daily_results": signal_daily_results,
+        "account_config": account["account_config"],
+        "execution_version": account["execution_version"],
+        "execution_assumptions": account["execution_assumptions"],
+        "orders": account["orders"][-trade_limit:],
+        "signals": orders[-trade_limit:],
+        "trades": account["executed_trades"][-trade_limit:],
+        "skipped_orders": account["skipped_orders"][-trade_limit:],
+        "open_positions": account["open_positions"],
         "validation": validation,
         "simulation_eligible": bool(validation["passed"]),
         "coverage": {
@@ -335,16 +374,16 @@ def get_lane_history_backtest(
             "selected_start": rows[0].get("trade_date") if rows else None,
             "selected_end": rows[-1].get("trade_date") if rows else None,
             "selected_trade_days": len(rows),
+            "account_price_rows": len(bars),
         },
         "costs": {
-            "commission_rate": 0.0003,
-            "stamp_tax_rate": 0.0005,
-            "slippage_bps_each_side": 10.0,
-            "total_round_trip_cost_pct": 0.31,
+            **account["account_config"],
+            "slippage_bps_each_side": config.slippage_bps,
         },
         "limitations": [
             "首板分时路径为三分钟代理，没有Tick/L2时不能证明排队成交。",
             "接力竞价使用日线开盘成交代理；历史逐日板块成员仍可能存在幸存者偏差。",
+            "信号日等权收益仅作研究上界，主复利来自10万元共享现金账户。",
             "锁定留出结果不参与规则修改，未同时通过三段验证时保持研究状态。",
         ],
     }
@@ -394,7 +433,7 @@ def get_history_backtest(
                 if observational_trade is not None:
                     observational_trades.append(observational_trade)
 
-    daily_results, total_return, max_drawdown = _daily_equity(trades)
+    daily_results, total_return, max_drawdown = _signal_daily_equity(trades)
     summary = _summary(
         orders,
         trades,
@@ -443,7 +482,7 @@ def get_history_backtest(
         ],
     }
     if entry_mode == "tail":
-        _, observational_return, observational_drawdown = _daily_equity(observational_trades)
+        _, observational_return, observational_drawdown = _signal_daily_equity(observational_trades)
         report["observational_proxy"] = {
             "label": "假设尾盘涨停价可成交",
             "execution_confidence": "daily_close_proxy_unverifiable",
@@ -548,6 +587,143 @@ def _selected_lane_candidates(
     ]
 
 
+def _selected_history_orders(
+    rows: Sequence[Mapping[str, object]],
+    lane: str | None,
+) -> list[dict[str, object]]:
+    orders: list[dict[str, object]] = []
+    for day in rows:
+        phase = str(day.get("validation_phase") or "unknown")
+        orders.extend(
+            {**candidate, "validation_phase": phase}
+            for candidate in _selected_lane_candidates(day, lane)
+        )
+    return orders
+
+
+def _simulate_account(
+    orders: Sequence[Mapping[str, object]],
+    bars: Sequence[Mapping[str, object]],
+    trade_dates: Sequence[date],
+    exit_mode: str,
+    config: cash_backtest.CashBacktestConfig,
+) -> dict[str, object]:
+    return cash_backtest.simulate_limit_up_account(
+        orders,
+        bars,
+        trade_dates,
+        exit_mode,
+        config,
+    )
+
+
+def _account_market_data(
+    rows: Sequence[Mapping[str, object]],
+    orders: Sequence[Mapping[str, object]],
+) -> tuple[list[dict[str, object]], list[date]]:
+    trade_dates = {
+        parsed
+        for row in rows
+        if (parsed := _optional_date(row.get("trade_date"))) is not None
+    }
+    if not orders:
+        return [], sorted(trade_dates)
+
+    entry_dates = [
+        parsed
+        for order in orders
+        if (parsed := _optional_date(order.get("entry_date") or order.get("signal_date")))
+        is not None
+    ]
+    result_dates = [
+        parsed
+        for order in orders
+        if (parsed := _optional_date(order.get("result_date") or order.get("exit_date")))
+        is not None
+    ]
+    coverage_dates = [
+        parsed
+        for row in rows[-1:]
+        for key in ("reliable_end", "persisted_end")
+        if (parsed := _optional_date((row.get("coverage") or {}).get(key))) is not None
+    ]
+    if not entry_dates:
+        return _candidate_account_bars(orders), sorted(trade_dates)
+    load_start = min(entry_dates)
+    load_end = max([*entry_dates, *result_dates, *coverage_dates])
+    symbols = [str(order.get("vt_symbol") or "") for order in orders]
+    loaded = history_repository.load_account_daily_bars(symbols, load_start, load_end)
+    indexed = {
+        (str(bar.get("vt_symbol") or ""), str(bar.get("trade_date") or "")[:10]): dict(bar)
+        for bar in _candidate_account_bars(orders)
+    }
+    for bar in loaded:
+        indexed[
+            (str(bar.get("vt_symbol") or ""), str(bar.get("trade_date") or "")[:10])
+        ] = dict(bar)
+    bars = sorted(
+        indexed.values(),
+        key=lambda bar: (str(bar.get("trade_date") or ""), str(bar.get("vt_symbol") or "")),
+    )
+    trade_dates.update(entry_dates)
+    trade_dates.update(result_dates)
+    trade_dates.update(
+        parsed
+        for bar in bars
+        if (parsed := _optional_date(bar.get("trade_date"))) is not None
+    )
+    return bars, sorted(trade_dates)
+
+
+def _candidate_account_bars(
+    orders: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    indexed: dict[tuple[str, str], dict[str, object]] = {}
+    for order in orders:
+        symbol = str(order.get("vt_symbol") or "")
+        entry_date = str(order.get("entry_date") or order.get("signal_date") or "")[:10]
+        result_date = str(order.get("result_date") or order.get("exit_date") or "")[:10]
+        entry_price = _number(order.get("entry_price"))
+        outcome = order.get("outcome")
+        outcome = outcome if isinstance(outcome, Mapping) else {}
+        entry_close = _number(outcome.get("entry_day_close_price")) or entry_price
+        if symbol and entry_date and entry_price is not None and entry_close is not None:
+            indexed[(symbol, entry_date)] = _price_bar(
+                symbol,
+                entry_date,
+                entry_price,
+                entry_close,
+            )
+        next_open = _number(outcome.get("next_open_price"))
+        next_close = _number(outcome.get("next_close_price"))
+        result_open = next_open or next_close
+        result_close = next_close or next_open
+        if symbol and result_date and result_open is not None and result_close is not None:
+            indexed[(symbol, result_date)] = _price_bar(
+                symbol,
+                result_date,
+                result_open,
+                result_close,
+            )
+    return list(indexed.values())
+
+
+def _price_bar(
+    vt_symbol: str,
+    trade_date: str,
+    open_price: float,
+    close_price: float,
+) -> dict[str, object]:
+    return {
+        "vt_symbol": vt_symbol,
+        "trade_date": trade_date,
+        "open_price": open_price,
+        "high_price": max(open_price, close_price),
+        "low_price": min(open_price, close_price),
+        "close_price": close_price,
+    }
+
+
 def _safe_lane_validation_status(
     lane: str,
     exit_mode: str,
@@ -567,32 +743,41 @@ def _lane_validation_from_rows(
     rows: Sequence[Mapping[str, object]],
     lane: str,
     exit_mode: str,
+    *,
+    bars: Sequence[Mapping[str, object]] | None = None,
+    trade_dates: Sequence[date] | None = None,
 ) -> dict[str, object]:
-    orders: list[dict[str, object]] = []
-    trades: list[dict[str, object]] = []
-    for day in rows:
-        phase = str(day.get("validation_phase") or "unknown")
-        for candidate in _selected_lane_candidates(day, lane):
-            order = {**candidate, "validation_phase": phase}
-            orders.append(order)
-            trade = _lane_closed_trade(order, exit_mode)
-            if trade is not None:
-                trades.append(trade)
+    orders = _selected_history_orders(rows, lane)
+    if bars is None or trade_dates is None:
+        bars, trade_dates = _account_market_data(rows, orders)
+    config = cash_backtest.CashBacktestConfig()
+    account = _simulate_account(orders, bars, trade_dates, exit_mode, config)
     phase_summaries = {
-        phase: _subset_summary(orders, trades, phase=phase)
+        phase: _simulate_account(
+            [order for order in orders if order.get("validation_phase") == phase],
+            bars,
+            trade_dates,
+            exit_mode,
+            config,
+        )["execution_summary"]
         for phase in ("warmup", "expanding_oos", "locked_holdout")
     }
-    validation = _lane_validation(lane, phase_summaries, trades)
-    _, total_return, max_drawdown = _daily_equity(trades)
+    forward_summary = _simulate_account(
+        [
+            order
+            for order in orders
+            if _trade_is_after_freeze(order, LANE_RULE_FREEZE_DATE)
+        ],
+        bars,
+        trade_dates,
+        exit_mode,
+        config,
+    )["execution_summary"]
+    validation = _lane_validation(lane, phase_summaries, forward_summary)
     validation.update(
         {
             "reason": _lane_validation_reason(validation),
-            "summary": _summary(
-                orders,
-                trades,
-                total_return_pct=total_return,
-                max_drawdown_pct=max_drawdown,
-            ),
+            "summary": account["execution_summary"],
             "strategy_version": history_engine.HISTORY_STRATEGY_VERSION,
         }
     )
@@ -722,7 +907,7 @@ def _segment_summary(
 ) -> dict[str, object]:
     segment_orders = [row for row in orders if row.get("source_mode") == segment]
     segment_trades = [row for row in trades if row.get("source_mode") == segment]
-    _, total_return, max_drawdown = _daily_equity(segment_trades)
+    _, total_return, max_drawdown = _signal_daily_equity(segment_trades)
     return _summary(
         segment_orders,
         segment_trades,
@@ -734,24 +919,12 @@ def _segment_summary(
 def _lane_validation(
     lane: str,
     phase_summaries: Mapping[str, Mapping[str, object]],
-    trades: Sequence[Mapping[str, object]],
+    forward_summary: Mapping[str, object],
 ) -> dict[str, object]:
     checks: list[dict[str, object]] = []
     for phase in ("expanding_oos", "locked_holdout"):
         summary = phase_summaries.get(phase) or {}
         checks.append(_validation_check(phase, summary))
-    forward_trades = [
-        trade
-        for trade in trades
-        if _trade_is_after_freeze(trade, LANE_RULE_FREEZE_DATE)
-    ]
-    _, forward_return, forward_drawdown = _daily_equity(forward_trades)
-    forward_summary = _summary(
-        forward_trades,
-        forward_trades,
-        total_return_pct=forward_return,
-        max_drawdown_pct=forward_drawdown,
-    )
     checks.append(_validation_check("post_freeze_forward", forward_summary))
     passed = bool(checks and all(check["passed"] for check in checks))
     return {
@@ -929,7 +1102,7 @@ def _subset_summary(
 ) -> dict[str, object]:
     subset_orders = [row for row in orders if row.get("validation_phase") == phase]
     subset_trades = [row for row in trades if row.get("validation_phase") == phase]
-    _, total_return, max_drawdown = _daily_equity(subset_trades)
+    _, total_return, max_drawdown = _signal_daily_equity(subset_trades)
     return _summary(
         subset_orders,
         subset_trades,
@@ -947,7 +1120,7 @@ def _monthly_summaries(
     for month in months:
         month_orders = [row for row in orders if str(row.get("signal_date") or "").startswith(month)]
         month_trades = [row for row in trades if str(row.get("signal_date") or "").startswith(month)]
-        _, total_return, max_drawdown = _daily_equity(month_trades)
+        _, total_return, max_drawdown = _signal_daily_equity(month_trades)
         result.append(
             {
                 "month": month,
@@ -971,7 +1144,7 @@ def _board_summaries(
     for board in boards:
         board_orders = [row for row in orders if int(row.get("target_board") or 1) == board]
         board_trades = [row for row in trades if int(row.get("target_board") or 1) == board]
-        _, total_return, max_drawdown = _daily_equity(board_trades)
+        _, total_return, max_drawdown = _signal_daily_equity(board_trades)
         result.append(
             {
                 "target_board": board,
@@ -986,7 +1159,7 @@ def _board_summaries(
     return result
 
 
-def _daily_equity(
+def _signal_daily_equity(
     trades: Sequence[Mapping[str, object]],
 ) -> tuple[list[dict[str, object]], float, float]:
     grouped: dict[str, list[float]] = defaultdict(list)
