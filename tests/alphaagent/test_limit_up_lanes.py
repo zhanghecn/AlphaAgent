@@ -1032,6 +1032,94 @@ def test_lane_backtest_only_counts_daily_selected_portfolio(monkeypatch) -> None
     assert report["trades"][0]["signal_date"] == "2026-06-10"
 
 
+def test_lane_backtest_equal_weights_multiple_selected_candidates(monkeypatch) -> None:
+    day = _lane_replay_day(lane="two_to_three", return_pct=10.0)
+    first = day["lane_portfolio"]["selected"][0]
+    first.update(
+        {
+            "industry_id": "BK1",
+            "industry_name": "机器人",
+            "two_to_three_quality_tier": "A",
+            "two_to_three_risk_count": 0,
+            "two_to_three_risk_flags": [],
+        }
+    )
+    second = {
+        **first,
+        "vt_symbol": "600002.SSE",
+        "name": "主板样本二",
+        "industry_id": "BK2",
+        "industry_name": "算力",
+        "outcome": {
+            **first["outcome"],
+            "next_open_return_pct": -2.0,
+        },
+    }
+    day["lane_portfolio"]["selected"] = [first, second]
+    day["board_lanes"]["two_to_three"] = [first, second]
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "load_history_range",
+        lambda *_args: [day],
+    )
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "load_history_day",
+        lambda *_args: day,
+    )
+    monkeypatch.setattr(
+        history_service,
+        "get_lane_validation_status",
+        lambda *_args, **_kwargs: {
+            "passed": True,
+            "status": "validated",
+            "checks": [],
+        },
+    )
+
+    report = history_service.get_lane_history_backtest(
+        None,
+        None,
+        lane="two_to_three",
+        exit_mode="next_open",
+    )
+    ledger = history_service.get_history_ledger(
+        date(2026, 6, 10),
+        lane="two_to_three",
+        exit_mode="next_open",
+    )
+
+    assert report["daily_results"][0]["daily_return_pct"] == 4.0
+    assert report["summary"]["trade_count"] == 2
+    assert report["summary"]["trade_day_count"] == 1
+    assert report["summary"]["average_trades_per_day"] == 2.0
+    assert report["summary"]["max_trades_per_day"] == 2
+    assert report["summary"]["max_industry_concentration_pct"] == 50.0
+    assert len(report["trades"]) == 2
+    assert len(ledger["trades"]) == 2
+    assert ledger["trades"][0]["two_to_three_quality_tier"] == "A"
+    assert ledger["trades"][0]["two_to_three_risk_flags"] == []
+
+
+def test_portfolio_scale_reports_full_single_industry_concentration() -> None:
+    summary = history_service._portfolio_scale_summary(
+        [
+            {
+                "entry_date": "2026-06-10",
+                "industry_id": "BK1",
+                "return_pct": 10.0,
+            },
+            {
+                "entry_date": "2026-06-10",
+                "industry_id": "BK1",
+                "return_pct": -2.0,
+            },
+        ]
+    )
+
+    assert summary["max_industry_concentration_pct"] == 100.0
+
+
 def test_lane_validation_requires_samples_after_rule_freeze(monkeypatch) -> None:
     rows = [
         _lane_replay_day(

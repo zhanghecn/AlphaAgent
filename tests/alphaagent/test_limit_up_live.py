@@ -969,6 +969,88 @@ def test_live_snapshot_fails_closed_when_lane_features_are_unavailable() -> None
     assert "前置证据未就绪" in result["lanes"]["now"][0]["reason"]
 
 
+def test_live_two_to_three_exposes_auction_quality_and_risk() -> None:
+    candidate = _candidate(
+        "600001.SSE",
+        board_level=3,
+        lane_feature_ready=True,
+        auction_gap_pct=3.2,
+        prior_streak=2,
+        prior_limit_count_5=2,
+        prior_turnover_rate=14.0,
+        prior_amount_ratio_5d=1.6,
+        prior_low_change_pct=0.5,
+        sector_dragon_rank=1,
+        financial_snapshot={"net_profit_yoy": 18.0},
+        prior_board={
+            "is_sealed": True,
+            "first_limit_time": "10:08:00",
+            "last_limit_time": "14:20:00",
+            "open_times": 4,
+        },
+    )
+
+    live_service._attach_lane_decisions(
+        [candidate],
+        _market(sentiment={"phase": "repair", "failed_limit_up_rate": 0.30}),
+        datetime(2026, 7, 10, 9, 25, tzinfo=SHANGHAI),
+    )
+    recommendations = build_live_recommendations(
+        [candidate],
+        _market(sentiment={"phase": "repair", "failed_limit_up_rate": 0.30}),
+        datetime(2026, 7, 10, 9, 25, tzinfo=SHANGHAI),
+    )
+
+    assert candidate["lane_decision"] == "eligible"
+    assert candidate["lane_quality_tier"] == "A"
+    assert candidate["lane_risk_count"] == 0
+    assert candidate["lane_risk_flags"] == []
+    signal = recommendations["lanes"]["now"][0]
+    assert signal["lane_quality_tier"] == "A"
+    assert signal["lane_risk_count"] == 0
+    assert signal["lane_risk_flags"] == []
+
+
+def test_live_two_to_three_blocks_visible_risk_stack() -> None:
+    candidate = _candidate(
+        "600001.SSE",
+        board_level=3,
+        lane_feature_ready=True,
+        auction_gap_pct=5.5,
+        prior_streak=2,
+        prior_limit_count_5=2,
+        prior_turnover_rate=8.0,
+        prior_amount_ratio_5d=1.0,
+        prior_low_change_pct=-1.0,
+        sector_dragon_rank=1,
+        financial_snapshot=None,
+        prior_board={
+            "is_sealed": True,
+            "first_limit_time": "10:08:00",
+            "last_limit_time": "14:20:00",
+            "open_times": 4,
+        },
+    )
+
+    live_service._attach_lane_decisions(
+        [candidate],
+        _market(sentiment={"phase": "repair", "failed_limit_up_rate": 0.40}),
+        datetime(2026, 7, 10, 9, 25, tzinfo=SHANGHAI),
+    )
+    recommendations = build_live_recommendations(
+        [candidate],
+        _market(sentiment={"phase": "repair", "failed_limit_up_rate": 0.40}),
+        datetime(2026, 7, 10, 9, 25, tzinfo=SHANGHAI),
+    )
+
+    assert candidate["lane_decision"] == "blocked"
+    assert candidate["lane_quality_tier"] == "B"
+    assert candidate["lane_risk_count"] == 6
+    assert "two_to_three_risk_stack" in candidate["lane_blockers"]
+    assert recommendations["lanes"]["now"][0]["action"] == "pass"
+    assert "二进三可见风险达到4项" in recommendations["lanes"]["now"][0]["reason"]
+
+
 def test_live_first_board_uses_visible_quote_range_as_lower_confidence_support() -> None:
     captured_at = datetime(2026, 7, 10, 10, 12, tzinfo=SHANGHAI)
     quotes = {

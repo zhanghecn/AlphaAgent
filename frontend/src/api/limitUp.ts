@@ -15,6 +15,9 @@ export interface LimitUpLiveSignal {
   board_level: number;
   board_lane?: BoardLaneKey;
   lane_favorable_factors?: string[];
+  lane_quality_tier?: "A" | "B" | null;
+  lane_risk_count?: number;
+  lane_risk_flags?: string[];
   seal_gate_passed?: boolean | null;
   premium_gate_passed?: boolean | null;
   validation_passed?: boolean;
@@ -89,6 +92,10 @@ export interface LimitUpEntrySummary {
   filled_count: number;
   fill_rate: number | null;
   trade_count: number;
+  trade_day_count: number;
+  average_trades_per_day: number;
+  max_trades_per_day: number;
+  max_industry_concentration_pct: number | null;
   win_count: number;
   win_rate: number | null;
   average_return_pct: number | null;
@@ -117,6 +124,9 @@ export interface LimitUpLaneLedgerTrade {
   d1_outcome: string;
   d_board_status: "sealed" | "failed" | "no_limit";
   execution_confidence: string;
+  two_to_three_quality_tier?: "A" | "B" | null;
+  two_to_three_risk_count?: number | null;
+  two_to_three_risk_flags?: string[];
   favorable_factors?: string[];
 }
 

@@ -671,6 +671,9 @@ def _ledger_trade(
         "execution_confidence": candidate.get("execution_confidence"),
         "source_mode": candidate.get("source_mode"),
         "rank_score": candidate.get("rank_score"),
+        "two_to_three_quality_tier": candidate.get("two_to_three_quality_tier"),
+        "two_to_three_risk_count": candidate.get("two_to_three_risk_count"),
+        "two_to_three_risk_flags": candidate.get("two_to_three_risk_flags") or [],
         "favorable_factors": candidate.get("favorable_factors") or [],
         "blockers": candidate.get("blockers") or [],
         "financial_risk": candidate.get("financial_risk") or {},
@@ -868,6 +871,53 @@ def _summary(
         "hard_loss_rate": round(sum(value <= -5 for value in returns) / len(returns) * 100, 4) if returns else None,
         "seal_rate": _seal_rate(orders),
         "profit_factor": round(gains / losses, 4) if losses else None,
+        **_portfolio_scale_summary(trades),
+    }
+
+
+def _portfolio_scale_summary(
+    trades: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    if not trades:
+        return {
+            "trade_day_count": 0,
+            "average_trades_per_day": 0.0,
+            "max_trades_per_day": 0,
+            "max_industry_concentration_pct": None,
+        }
+
+    grouped: dict[str, list[Mapping[str, object]]] = defaultdict(list)
+    for trade in trades:
+        entry_date = str(
+            trade.get("entry_date")
+            or trade.get("signal_date")
+            or trade.get("buy_date")
+            or "unknown"
+        )
+        grouped[entry_date].append(trade)
+
+    concentrations: list[float] = []
+    for day_trades in grouped.values():
+        industry_counts: dict[str, int] = defaultdict(int)
+        for trade in day_trades:
+            industry = str(
+                trade.get("industry_id") or trade.get("industry_name") or ""
+            ).strip()
+            if industry:
+                industry_counts[industry] += 1
+        if industry_counts:
+            concentrations.append(
+                max(industry_counts.values()) / len(day_trades) * 100
+            )
+
+    trade_day_count = len(grouped)
+    return {
+        "trade_day_count": trade_day_count,
+        "average_trades_per_day": round(len(trades) / trade_day_count, 4),
+        "max_trades_per_day": max(len(rows) for rows in grouped.values()),
+        "max_industry_concentration_pct": (
+            round(max(concentrations), 4) if concentrations else None
+        ),
     }
 
 

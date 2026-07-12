@@ -505,6 +505,9 @@ def _attach_lane_decisions(
                     "lane_setup_type": None,
                     "lane_blockers": ["lane_features_unavailable"],
                     "lane_favorable_factors": [],
+                    "lane_quality_tier": None,
+                    "lane_risk_count": 0,
+                    "lane_risk_flags": [],
                     "lane_rank_score": None,
                 }
             )
@@ -536,6 +539,11 @@ def _attach_lane_decisions(
                 "lane_seal_gate_passed": evaluated.get("seal_gate_passed"),
                 "lane_premium_gate_passed": evaluated.get("premium_gate_passed"),
                 "lane_entry_quality_score": evaluated.get("entry_quality_score"),
+                "lane_quality_tier": evaluated.get("two_to_three_quality_tier"),
+                "lane_risk_count": evaluated.get("two_to_three_risk_count"),
+                "lane_risk_flags": list(
+                    evaluated.get("two_to_three_risk_flags") or []
+                ),
                 "lane_rank_score": evaluated.get("rank_score"),
             }
         )

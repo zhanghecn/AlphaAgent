@@ -314,7 +314,10 @@ function LiveSignalRow({ signal, stale }: { signal: LimitUpLiveSignal; stale: bo
         </div>
         <div>
           <div className={cn("text-sm font-semibold", actionTone(signal.action, stale))}>{stale ? "数据过期" : validationObservation ? "观察，不执行" : actionLabel(signal.action)}</div>
-          <div className="mt-0.5 text-xs text-muted-foreground">{entryKindLabel(signal.entry_kind)} · {formatPrice(signal.trigger_price)}</div>
+          <div className="mt-0.5 text-xs text-muted-foreground">
+            {entryKindLabel(signal.entry_kind)} · {formatPrice(signal.trigger_price)}
+            {signal.board_lane === "two_to_three" ? ` · ${twoToThreeQualityLabel(signal.lane_quality_tier, signal.lane_risk_count)}` : ""}
+          </div>
         </div>
         <div className="min-w-0 text-xs leading-5">
           <div className="text-foreground">{signal.reason}</div>
@@ -383,7 +386,15 @@ function LedgerTradeRow({ trade }: { trade: LimitUpLaneLedgerTrade }) {
   return (
     <tr>
       <td className="px-3 py-3"><StockIdentityLink name={trade.name} vtSymbol={trade.vt_symbol} meta={trade.industry_name ?? "行业待确认"} /></td>
-      <td className="px-3 py-3 text-xs tabular-nums"><div>{trade.buy_date} {trade.buy_time}</div><div className="text-muted-foreground">{formatPrice(trade.buy_price)} · {entryKindLabel(trade.signal_kind ?? "")}</div></td>
+      <td className="px-3 py-3 text-xs tabular-nums">
+        <div>{trade.buy_date} {trade.buy_time}</div>
+        <div className="text-muted-foreground">{formatPrice(trade.buy_price)} · {entryKindLabel(trade.signal_kind ?? "")}</div>
+        {trade.lane === "two_to_three" && (
+          <div className="text-muted-foreground" title={twoToThreeRiskTitle(trade.two_to_three_risk_flags)}>
+            {twoToThreeQualityLabel(trade.two_to_three_quality_tier, trade.two_to_three_risk_count)}
+          </div>
+        )}
+      </td>
       <td className="px-3 py-3 text-xs tabular-nums"><div>{trade.sell_date ?? "待 D+1"} {trade.sell_time ?? ""}</div><div className="text-muted-foreground">{formatPrice(trade.sell_price)}</div></td>
       <td className={cn("px-3 py-3 text-xs font-medium", trade.d_board_status === "sealed" ? "text-rise" : "text-fall")}>{boardStatusLabel(trade.d_board_status)}</td>
       <td className="px-3 py-3 text-xs">{d1OutcomeLabel(trade.d1_outcome)}</td>
@@ -432,7 +443,11 @@ function BacktestView({ report, modelReport, modelLoading, modelError, loading, 
       </div>
 
       <div className="grid grid-cols-2 border-b sm:grid-cols-4 xl:grid-cols-8">
-        <SummaryCell label="交易" value={String(summary?.trade_count ?? 0)} />
+        <SummaryCell
+          label="交易"
+          value={String(summary?.trade_count ?? 0)}
+          detail={`交易日 ${summary?.trade_day_count ?? 0} · 日均 ${formatNumber(summary?.average_trades_per_day, 1)} · 最多 ${summary?.max_trades_per_day ?? 0}`}
+        />
         <SummaryCell label="胜率" value={formatPct(summary?.win_rate)} tone={rateTone(summary?.win_rate)} />
         <SummaryCell label="平均单笔" value={formatPct(summary?.average_return_pct)} tone={amountTone(summary?.average_return_pct)} />
         <SummaryCell label="复利" value={formatPct(summary?.total_return_pct)} tone={amountTone(summary?.total_return_pct)} />
@@ -531,7 +546,14 @@ function BacktestTrades({ report }: { report: LimitUpLaneBacktest }) {
             <tr key={`${trade.signal_date}:${trade.vt_symbol}`}>
               <td className="px-3 py-3 text-xs tabular-nums"><div>{trade.buy_date} {trade.buy_time}</div><div className="text-muted-foreground">{trade.sell_date} {trade.sell_time}</div></td>
               <td className="px-3 py-3"><StockIdentityLink name={trade.name} vtSymbol={trade.vt_symbol} meta={trade.industry_name ?? "行业待确认"} /></td>
-              <td className="px-3 py-3 text-xs">{entryKindLabel(trade.signal_kind ?? "")}</td>
+              <td className="px-3 py-3 text-xs">
+                <div>{entryKindLabel(trade.signal_kind ?? "")}</div>
+                {trade.lane === "two_to_three" && (
+                  <div className="text-muted-foreground" title={twoToThreeRiskTitle(trade.two_to_three_risk_flags)}>
+                    {twoToThreeQualityLabel(trade.two_to_three_quality_tier, trade.two_to_three_risk_count)}
+                  </div>
+                )}
+              </td>
               <td className={cn("px-3 py-3 text-xs", trade.d_board_status === "sealed" ? "text-rise" : "text-fall")}>{boardStatusLabel(trade.d_board_status)}</td>
               <td className="px-3 py-3 text-xs">{d1OutcomeLabel(trade.d1_outcome)}</td>
               <td className={cn("px-3 py-3 text-right font-semibold tabular-nums", amountTone(trade.return_pct))}>{formatPct(trade.return_pct)}</td>
@@ -565,8 +587,8 @@ function Metric({ label, value, tone }: { label: string; value: string; tone?: s
   return <div><div className="text-[11px] text-muted-foreground">{label}</div><div className={cn("mt-0.5 font-medium", tone)}>{value}</div></div>;
 }
 
-function SummaryCell({ label, value, tone }: { label: string; value: string; tone?: string }) {
-  return <div className="border-b border-r px-3 py-2.5 last:border-r-0 xl:border-b-0"><div className="text-[11px] text-muted-foreground">{label}</div><div className={cn("mt-0.5 truncate text-sm font-semibold tabular-nums", tone)}>{value}</div></div>;
+function SummaryCell({ label, value, tone, detail }: { label: string; value: string; tone?: string; detail?: string }) {
+  return <div className="min-w-0 border-b border-r px-3 py-2.5 last:border-r-0 xl:border-b-0"><div className="text-[11px] text-muted-foreground">{label}</div><div className={cn("mt-0.5 truncate text-sm font-semibold tabular-nums", tone)}>{value}</div>{detail && <div className="mt-0.5 text-[10px] leading-4 text-muted-foreground">{detail}</div>}</div>;
 }
 
 function EmptyRow({ text }: { text: string }) {
@@ -607,6 +629,8 @@ function phaseLabel(value?: string) { return ({ warmup: "预热期", expanding_o
 function d1OutcomeLabel(value: string) { return ({ continuation_limit_up: "D+1 连板", next_limit_up_after_failed_board: "D+1 涨停", d1_premium: "D+1 有溢价", direct_breakdown: "D+1 直接砸", no_premium: "D+1 无溢价", awaiting_d1_bar: "待 D+1" } as Record<string, string>)[value] ?? value; }
 function boardStatusLabel(value: string) { return ({ sealed: "封住", failed: "触板后炸板", no_limit: "未触板" } as Record<string, string>)[value] ?? value; }
 function confidenceLabel(value: string) { return ({ three_minute_path_without_queue: "三分钟路径，队列未知", event_time_without_queue: "触板时间代理，队列未知", daily_open_proxy: "竞价开盘代理" } as Record<string, string>)[value] ?? value; }
+function twoToThreeQualityLabel(tier?: "A" | "B" | null, riskCount?: number | null) { const quality = tier ?? "B"; const risks = riskCount ?? 0; return `${quality}级${risks > 0 ? ` · 风险${risks}` : ""}`; }
+function twoToThreeRiskTitle(flags?: string[]) { return (flags ?? []).map((flag) => ({ auction_gap_outside_core: "竞价不在2%-5%核心区", prior_turnover_outside_core: "前板换手不在10%-20%核心区", prior_amount_ratio_outside_core: "前板量能比不在1.2-2", financial_snapshot_missing: "财报快照缺失", prior_low_below_zero: "前板最低价翻绿或缺失", prior_market_failed_rate_high: "前日炸板率偏高或缺失" } as Record<string, string>)[flag] ?? flag).join("；"); }
 function factorLabel(value: string) {
   return ({
     half_year_limit_up_gene: "半年有涨停",
