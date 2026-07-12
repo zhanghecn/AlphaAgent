@@ -11,9 +11,9 @@ from alphaagent.server.services.limit_up.cash_backtest import (
 )
 
 
-def test_default_account_uses_two_four_stock_cohorts() -> None:
+def test_default_account_uses_four_positions() -> None:
     assert CashBacktestConfig().initial_cash == 100_000
-    assert CashBacktestConfig().max_positions == 8
+    assert CashBacktestConfig().max_positions == 4
 
 
 def test_buy_execution_applies_minimum_commission_transfer_fee_and_limit_cap() -> None:

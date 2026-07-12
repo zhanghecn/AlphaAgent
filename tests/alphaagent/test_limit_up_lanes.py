@@ -1229,7 +1229,7 @@ def test_portfolio_backtest_uses_one_shared_100k_cash_account(monkeypatch) -> No
 
     assert report["lane"] == "portfolio"
     assert report["account_config"]["initial_cash"] == 100_000
-    assert report["account_config"]["max_positions"] == 8
+    assert report["account_config"]["max_positions"] == 4
     assert report["summary"] == report["execution_summary"]
     assert report["summary"]["signal_count"] == 2
     assert report["summary"]["trade_count"] == 2

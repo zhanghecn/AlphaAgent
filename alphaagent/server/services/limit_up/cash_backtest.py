@@ -18,7 +18,7 @@ SUPPORTED_EXIT_MODES = {"next_open", "next_close"}
 @dataclass(frozen=True)
 class CashBacktestConfig:
     initial_cash: float = 100_000.0
-    max_positions: int = 8
+    max_positions: int = 4
     commission_rate: float = 0.0003
     minimum_commission: float = 5.0
     stamp_tax_rate: float = 0.0005
