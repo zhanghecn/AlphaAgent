@@ -9,6 +9,31 @@ from alphaagent.market.cache import TTLCache
 from alphaagent.server.services.limit_up import history_engine, history_repository
 
 _ANALOG_CACHE = TTLCache(max_items=8)
+_CONFIDENCE_POINTS = {"low": 4.0, "medium": 7.0, "high": 10.0}
+
+
+def tbox_score(analog: Mapping[str, object]) -> float:
+    """Score prior-only board-trade evidence on a transparent 0-100 scale."""
+
+    win_rate = _number(analog.get("smoothed_win_rate"))
+    average_return = _number(analog.get("average_return_pct"))
+    hard_loss_rate = _number(analog.get("hard_loss_rate"))
+    seal_after_touch = _number(analog.get("seal_after_touch_rate"))
+    score = sum(
+        (
+            _scaled_points(win_rate, 40.0, 65.0, 35.0),
+            _scaled_points(average_return, -1.0, 3.0, 25.0),
+            _scaled_points(
+                25.0 - hard_loss_rate if hard_loss_rate is not None else None,
+                0.0,
+                25.0,
+                20.0,
+            ),
+            _scaled_points(seal_after_touch, 40.0, 80.0, 10.0),
+            _CONFIDENCE_POINTS.get(str(analog.get("confidence") or ""), 0.0),
+        )
+    )
+    return round(min(max(score, 0.0), 100.0), 2)
 
 
 def clear_live_evidence_cache() -> None:
@@ -113,6 +138,7 @@ def _with_evidence(
         "as_of_date": signal_date.isoformat(),
         "risk_vetoed": bool(veto_reasons),
         "risk_veto_reasons": veto_reasons,
+        "tbox_score": tbox_score(analog),
         **analog,
     }
     result = {**dict(signal), "historical_evidence": evidence}
@@ -147,7 +173,7 @@ def _route_context(
 ) -> tuple[str, int, str]:
     board_level = max(int(_number(signal.get("board_level")) or 1), 1)
     if lane == "next_auction":
-        return "next_auction", board_level + 1, "next_auction_gap_pending"
+        return "next_auction", board_level, "next_auction_gap_pending"
     if lane == "tail":
         return "tail", board_level, "point_in_time_match"
     if str(signal.get("entry_kind") or "") == "auction":
@@ -203,3 +229,15 @@ def _number(value: object) -> float | None:
         return float(value) if value not in (None, "", "-") else None
     except (TypeError, ValueError):
         return None
+
+
+def _scaled_points(
+    value: float | None,
+    floor: float,
+    ceiling: float,
+    weight: float,
+) -> float:
+    if value is None or ceiling <= floor:
+        return 0.0
+    ratio = (value - floor) / (ceiling - floor)
+    return min(max(ratio, 0.0), 1.0) * weight

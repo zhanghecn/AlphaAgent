@@ -156,8 +156,8 @@ uv run pytest tests/alphaagent/test_quant_strategy_acceptance.py -q
 
 常用接口：
 
-- `GET /api/limit-up/live`: 只读每分钟后台保存的最新实时信号，不访问外部行情；交易时段超过 90 秒未更新会 fail-closed。`POST /api/limit-up/live/refresh` 仅供调度/显式采集使用。
-- `limit_up_plan_1505`: 15:05 生成次交易时段初步观察；只有涨停池日期明确等于当天时才绕过尚未同步的收盘日线日期。`eod_1900` 和 `eod_finalize_2130` 最后执行 `limit_up_next_session_plan_final`，API 启动时会单飞补建缺失正式计划。
+- `GET /api/limit-up/live`: 只读后台约每 15 秒更新的最新实时信号，不访问外部行情；同一分钟使用同一审计行更新最新 `captured_at`，交易时段超过 90 秒未更新会 fail-closed。`POST /api/limit-up/live/refresh` 仅供调度/显式采集使用。
+- `limit_up_plan_1505`: 15:05 生成次交易时段初步观察；只有涨停池日期明确等于当天时才绕过尚未同步的收盘日线日期。严格 `next_auction` 为空时，只从完整雷达保留已封板且全部阻断项属于明确观察白名单的候选，每板位最多 4 只；已有空计划会自动重建。`eod_1900` 和 `eod_finalize_2130` 最后执行 `limit_up_next_session_plan_final`，API 启动时会单飞补建缺失或空的正式计划。
 - 09:15-09:19 后台扫描只更新竞价观察，09:20 后才可能转为“买点已触发（研究）”。每条计划必须包含战法、入选原因、触发检查、买入、卖出和取消纪律；`execution_permission` 当前固定为 `research_only`。
 - `GET /api/limit-up/signals?date=YYYY-MM-DD&as_of=`: 历史快照或历史代理；无严格快照的代理会附加只使用该日前已闭合结果的历史胜率、平均净收益、硬亏率和样本数。
 - `GET /api/limit-up/history/status` / `POST /api/limit-up/history/rebuild`: 全历史账本状态和后台重建。
@@ -187,7 +187,9 @@ uv run pytest tests/alphaagent/test_quant_strategy_acceptance.py -q
 
 前向表当前有 1 个周末快照，被 `non_trading_day` 排除；合格快照和有效前向交易日均为 0，状态为 `collecting`，胜率、收益和回撤均为空。新快照会同时保存历史风险门后的 `research_action` 和用户可执行 `action`；未验证战法仍显示 `pass`，但严格前向观察可据研究动作闭合 D+1，普通动作回测不会读取它。非交易时段刷新不请求外部行情、不写快照；交易时段内行情日期仍是上一交易日也不写。周末真实调用手动计划返回 `skipped / rows_written=0 / 未保存`，调用前后快照表都为 1 行。`/dates` 使用已验证事件日期轻查询；同一日期的 dashboard/signals 通过进程内单飞缓存共享一次单日计算。真实冷测 `/dates` 约 0.6 秒，同日 dashboard/signals 并发冷测约 7.7 秒，缓存后的 signals 约 30 毫秒。
 
-当前日期页面查询 `/live`，历史日期才查询 `/signals`。交易时段行情采集只由 `limit_up_live_scan` 每分钟后台执行；页面 10 秒轮询只读已保存快照，不触发行情源或新增审计行。同日快照年龄超过 90 秒时动作自动降为 stale/pass。调试实时性时要同时检查页面延迟、`limit_up_live_scan` 状态、network 路径和快照表行数。
+当前日期页面查询 `/live`，历史日期才查询 `/signals`。交易时段行情采集只由 `limit_up_live_scan` 以 15 秒目标间隔后台执行；真实采集耗时会把相邻启动拉长到约 14-20 秒。页面 10 秒轮询只读已保存快照，不触发行情源或新增审计行。同日快照年龄超过 90 秒时动作自动降为 stale/pass。调试实时性时要检查页面延迟、schedule 的 `last_started_at`、限流状态和同分钟快照的 `captured_at`，不能只用快照表行数判断频率。2026-07-13 盘中审计发现 `09:24:22..10:35:07` 没有任何实时快照，立方制药在该空档内于 `09:30:15` 首封、`09:34:24` 回封；09:26 竞价同步只运行约 35 秒，根因是 vendored AkShare 五类涨停池顺序请求且没有网络超时，单次公共请求可无限占住扫描线程。现已为六个涨停池请求统一增加 8 秒硬超时、五类实时池并行获取，并把板块前二的完整雷达池写入 `candidates`，Top5 仅负责推荐排序。重建后实测单轮约 2.45 秒、相邻启动约 14 秒，41 只原始候选压缩为 32 只完整雷达记录，数据源无错误和限流。
+
+2026-07-13 盘后观察缺失的独立根因是计划构建器把“次日竞价确认”错误用于“盘后提前观察”，使 30 只雷达候选全部消失。修复后按观察白名单从 30 只中保留 5 只：立方制药、贵绳股份、恒尚节能、哈药股份、联环药业；无涨停基因、财报不可用等硬伤不再漏入。真实重放 2026-07-10 盘后数据同样得到 5 只，二进三包含立方制药。Playwright 已验证 `/limit-up` 默认组合和二进三标签均显示观察原因、待确认竞价项及买入/卖出/取消纪律；观察保持 `research_only`，不冒充买点。
 
 2026-07-12 真实 `/data-quality` 结果：点时历史账本 `600/500` 日达标；主板非 ST 涨停事件路径 `252/500` 日、19,978 条；事件分钟路径 `2,215/19,978 = 11.0872%`，分钟交易日为 `55/500`；逐日板块成员、竞价、板块分钟资金和 Tick/L2 均为 0，合格前向观察日为 0。末封时间和封单额覆盖只在最终封板事件内计算，当前均为 100%，炸板行不再把覆盖率推到 100% 以上。当前 8 个门禁仍仅 1 个达标、2 个补数中、5 个缺失，`research_ledger_ready=true`、`simulation_eligible=false`。当前成员表虽有 5,611 只股票、86,701 条关系，仍只能按 `current_snapshot` 计 0 个逐日历史覆盖日。原始周末/休市事件和盘中重复快照继续保留审计，但必须有同股同日日线且只取最后状态才进入门禁。
 
@@ -210,7 +212,7 @@ docker compose up -d --build alphaagent-api alphaagent-web
 
 API runtime 需要 `libgomp1` 才能导入 LightGBM；该包在 `Dockerfile.alphaagent-api` 独立缓存层安装，并先删除只用于安装 Docker CLI 的 apt source，避免源码重建受 Docker 官方源波动阻塞。
 
-浏览器检查 `http://localhost:8080/limit-up`，桌面和 `390x844` 都要验证四板位、历史日期交割单、动态卖点/原因、回测区间、局部表格滚动、console 和 network。当前验证为打板后端 309 项、调度 90 项、前端 19 项和生产构建通过；正式计划标题、结构化规则、桌面/手机无整页横向溢出，console 0 error/0 warning。真实启动补偿已为 `2026-07-10` 保存 `next_session_final`，连续两次 GET 前后计划行数保持 1；当前计划候选为 0，系统未强行推荐。账本仍为 600 日，四板位均为 `research_only`，冻结后有效前向交易为 0，`simulation_eligible=false`；主结果见 `memory/06_backtests/limit_up_real_cash_backtest.md`。
+浏览器检查 `http://localhost:8080/limit-up`，桌面和 `390x844` 都要验证默认组合、四板位、历史日期交割单、动态卖点/原因、距板距离、TBOX、回测摘要、console 和 network。当前打板/调度相关 `415 passed`，前端 `28 passed` 且生产构建通过；桌面/手机无整页横向溢出，console 无错误。盘中真实扫描从 7% 雷达池约 39-41 只构造完整板块前二雷达，页面仍只展示 Top5/最多 4 只组合，已在未封板且距板约 `0.53%-2.71%` 时出现；调度相邻启动约 14-20 秒，页面快照年龄实测 7-10 秒，实时 GET 约 12-18ms，未出现限流。默认 10 万元组合仍为 244 笔闭合交易，期末 `317,900.98`、复利 `217.9010%`、胜率 `62.2951%`、最大回撤 `-10.3577%`。当前仍为 `research_only`；硬门失败显示今日拒买，不能因后来封板把它事后算成正确买点，主结果见 `memory/06_backtests/limit_up_real_cash_backtest.md`。
 
 ## Verification
 

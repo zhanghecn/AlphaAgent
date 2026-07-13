@@ -103,6 +103,22 @@ def rank_live_candidates(
     return market_front
 
 
+def rank_live_opportunities(
+    candidates: Sequence[Mapping[str, object]],
+    *,
+    limit: int = 5,
+) -> list[dict[str, object]]:
+    """Prefer candidates that can still be acted on over already sealed boards."""
+
+    ranked = sorted(
+        (dict(candidate) for candidate in candidates),
+        key=_opportunity_rank_key,
+    )[: max(int(limit), 0)]
+    for market_rank, candidate in enumerate(ranked, start=1):
+        candidate["market_dragon_rank"] = market_rank
+    return ranked
+
+
 def build_live_recommendations(
     candidates: Sequence[Mapping[str, object]],
     market_context: Mapping[str, object],
@@ -281,7 +297,15 @@ def _now_signal(
             action, entry_kind, reason = "buy_now", "reseal", f"已完成{open_times}次换手回封"
         elif state == "near_limit" and _sweep_ready(candidate):
             action, entry_kind, reason = "buy_now", "sweep", _sweep_entry_reason(candidate)
-        elif state in {"sealed", "resealed", "near_limit"}:
+        elif state == "near_limit":
+            distance = _number(candidate.get("distance_to_limit_pct"))
+            action, entry_kind = "observe", "sweep"
+            reason = (
+                f"距涨停约{distance:.2f}%，等待进入1%扫板触发区"
+                if distance is not None
+                else "接近涨停，等待进入1%扫板触发区"
+            )
+        elif state in {"sealed", "resealed"}:
             action, entry_kind, reason = "wait_tail", "wait", "先观察回封和封单稳定性"
     elif gate_passed and stage == "tail" and stable_minutes >= 2 and state in {"sealed", "resealed"}:
         action, entry_kind, reason = "buy_now", "tail_seal", f"尾盘连续封住{stable_minutes}分钟"
@@ -443,10 +467,13 @@ def _signal(
         "setup_tags": list(candidate.get("setup_tags") or []),
         "setup_confidence": candidate.get("setup_confidence"),
         "lane_blockers": list(candidate.get("lane_blockers") or []),
+        "lane_blocker_reasons": _lane_execution_reasons(candidate),
         "lane_favorable_factors": list(candidate.get("lane_favorable_factors") or []),
         "lane_quality_tier": candidate.get("lane_quality_tier"),
         "lane_risk_count": candidate.get("lane_risk_count"),
         "lane_risk_flags": list(candidate.get("lane_risk_flags") or []),
+        "lane_rank_score": _number(candidate.get("lane_rank_score")),
+        "portfolio_selected": candidate.get("portfolio_selected") is True,
         "seal_gate_passed": candidate.get("lane_seal_gate_passed"),
         "premium_gate_passed": candidate.get("lane_premium_gate_passed"),
         "state": candidate.get("state"),
@@ -474,7 +501,9 @@ def _signal(
         "valid_at": valid_at,
         "valid_until": _valid_until(captured_at, entry_kind),
         "execution_state": _execution_state(action),
-        "signal_state": _signal_state(action, entry_kind, stage),
+        "signal_state": _signal_state(candidate, action, entry_kind, stage),
+        "seen_before_seal": candidate.get("seen_before_seal") is True,
+        "missed_preseal_entry": candidate.get("missed_preseal_entry") is True,
         "execution_permission": "research_only",
         "strategy_name": _strategy_name(candidate),
         "selection_reasons": _selection_reasons(candidate, reason),
@@ -497,11 +526,25 @@ def _signal(
     }
 
 
-def _signal_state(action: str, entry_kind: str, stage: str) -> str:
+def _signal_state(
+    candidate: Mapping[str, object],
+    action: str,
+    entry_kind: str,
+    stage: str,
+) -> str:
     if action == "buy_now":
         return "trigger_ready"
+    if (
+        candidate.get("missed_preseal_entry") is True
+        and stage in {"morning", "afternoon"}
+    ):
+        return "missed"
     if action == "observe":
-        return "approaching_trigger" if entry_kind == "auction" else "observing"
+        return (
+            "approaching_trigger"
+            if entry_kind in {"auction", "sweep", "reseal"}
+            else "observing"
+        )
     if action in {"wait_tail", "next_auction"}:
         return "pending_auction" if action == "next_auction" else "observing"
     if stage in {"preopen", "auction_watch"} and entry_kind == "auction":
@@ -841,6 +884,30 @@ def _cancel_condition(entry_kind: str) -> str:
 
 def _rank_key(candidate: Mapping[str, object]) -> tuple[float, str]:
     return (-float(candidate.get("leadership_score") or 0.0), str(candidate.get("vt_symbol") or ""))
+
+
+def _opportunity_rank_key(candidate: Mapping[str, object]) -> tuple[object, ...]:
+    state = str(candidate.get("state") or "")
+    state_priority = {
+        "near_limit": 0,
+        "failed": 1,
+        "resealed": 1,
+        "sealed": 3,
+    }.get(state, 4)
+    decision_priority = {
+        "eligible": 0,
+        "watch": 1,
+        "blocked": 3,
+    }.get(str(candidate.get("lane_decision") or ""), 2)
+    distance = _number(candidate.get("distance_to_limit_pct"))
+    return (
+        state_priority + decision_priority,
+        0 if candidate.get("portfolio_selected") is True else 1,
+        distance if state == "near_limit" and distance is not None else 99.0,
+        -(_number(candidate.get("lane_rank_score")) or 0.0),
+        -(_number(candidate.get("leadership_score")) or 0.0),
+        str(candidate.get("vt_symbol") or ""),
+    )
 
 
 def _local_datetime(value: datetime) -> datetime:

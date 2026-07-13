@@ -41,9 +41,13 @@ import { Button } from "@/components/ui/button";
 import {
   isNextSessionPlan,
   liveHeader,
-  signalStatePresentation,
+  liveSignalPresentation,
   type PresentationTone,
 } from "@/features/limitUp/nextSessionPlan";
+import {
+  liveSignalsForScope,
+  type LimitUpLiveScope,
+} from "@/features/limitUp/livePortfolio";
 import { useChartColors } from "@/lib/chart-theme";
 import { cn } from "@/lib/utils";
 
@@ -62,6 +66,11 @@ const BOARD_LANES: Array<{ value: BoardLaneKey; label: string }> = [
   { value: "high_board", label: "高板" },
 ];
 
+const LIVE_SCOPES: Array<{ value: LimitUpLiveScope; label: string }> = [
+  { value: "portfolio", label: "组合" },
+  ...BOARD_LANES,
+];
+
 const BACKTEST_SCOPES: Array<{ value: LimitUpBacktestScope; label: string }> = [
   { value: "portfolio", label: "组合" },
   ...BOARD_LANES,
@@ -69,6 +78,7 @@ const BACKTEST_SCOPES: Array<{ value: LimitUpBacktestScope; label: string }> = [
 
 export function LimitUpPage() {
   const [view, setView] = useState<PrimaryView>("live");
+  const [liveScope, setLiveScope] = useState<LimitUpLiveScope>("portfolio");
   const [lane, setLane] = useState<BoardLaneKey>("first_board");
   const [backtestScope, setBacktestScope] = useState<LimitUpBacktestScope>("portfolio");
   const [selectedDate, setSelectedDate] = useState("");
@@ -103,6 +113,17 @@ export function LimitUpPage() {
       lane: backtestScope,
     }),
     enabled: view === "backtest" && Boolean(start && end),
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+  });
+  const portfolioBacktestQuery = useQuery({
+    queryKey: ["limitUpLaneBacktest", start, end, "portfolio"],
+    queryFn: () => fetchLimitUpLaneBacktest({
+      start: start === datesQuery.data?.start ? undefined : start,
+      end: end === datesQuery.data?.end ? undefined : end,
+      lane: "portfolio",
+    }),
+    enabled: view === "live" && Boolean(start && end),
     staleTime: Infinity,
     refetchOnWindowFocus: false,
   });
@@ -181,6 +202,8 @@ export function LimitUpPage() {
 
       {view === "backtest" ? (
         <BacktestScopeTabs value={backtestScope} onChange={setBacktestScope} />
+      ) : view === "live" ? (
+        <LiveScopeTabs value={liveScope} onChange={setLiveScope} />
       ) : (
         <LaneTabs value={lane} onChange={setLane} />
       )}
@@ -188,7 +211,12 @@ export function LimitUpPage() {
       {activeError ? (
         <ErrorState message={activeError} onRetry={() => void refreshActive(view, liveQuery.refetch, ledgerQuery.refetch, backtestQuery.refetch)} />
       ) : view === "live" ? (
-        <LiveView snapshot={liveQuery.data} lane={lane} loading={liveQuery.isLoading} />
+        <LiveView
+          snapshot={liveQuery.data}
+          scope={liveScope}
+          portfolioReport={portfolioBacktestQuery.data}
+          loading={liveQuery.isLoading}
+        />
       ) : view === "ledger" ? (
         <LedgerView ledger={ledgerQuery.data} loading={ledgerQuery.isLoading} />
       ) : (
@@ -207,6 +235,30 @@ export function LimitUpPage() {
           }}
         />
       )}
+    </div>
+  );
+}
+
+function LiveScopeTabs({ value, onChange }: { value: LimitUpLiveScope; onChange: (scope: LimitUpLiveScope) => void }) {
+  return (
+    <div className="grid h-11 grid-cols-5 border-b" role="tablist" aria-label="实时组合与板位">
+      {LIVE_SCOPES.map((scope) => (
+        <button
+          key={scope.value}
+          type="button"
+          role="tab"
+          aria-selected={value === scope.value}
+          className={cn(
+            "border-r px-1 text-sm last:border-r-0 sm:px-2",
+            value === scope.value
+              ? "bg-foreground font-semibold text-background"
+              : "bg-background text-muted-foreground hover:bg-muted hover:text-foreground",
+          )}
+          onClick={() => onChange(scope.value)}
+        >
+          {scope.label}
+        </button>
+      ))}
     </div>
   );
 }
@@ -277,17 +329,22 @@ function Freshness({ snapshot }: { snapshot?: LimitUpSignalSnapshot }) {
   );
 }
 
-function LiveView({ snapshot, lane, loading }: { snapshot?: LimitUpSignalSnapshot; lane: BoardLaneKey; loading: boolean }) {
-  const signals = useMemo(() => liveSignalsForLane(snapshot, lane), [lane, snapshot]);
+function LiveView({ snapshot, scope, portfolioReport, loading }: { snapshot?: LimitUpSignalSnapshot; scope: LimitUpLiveScope; portfolioReport?: LimitUpLaneBacktest; loading: boolean }) {
+  const signals = useMemo(() => liveSignalsForScope(snapshot, scope), [scope, snapshot]);
   if (loading) return <LoadingState rows={5} />;
   if (!snapshot) return <EmptyRow text="当前没有实时快照" />;
   const gate = snapshot.recommendations.market_gate;
-  const laneValidation = snapshot.recommendations.board_lane_validations?.[lane];
+  const laneValidation = scope === "portfolio"
+    ? undefined
+    : snapshot.recommendations.board_lane_validations?.[scope];
   const planMode = isNextSessionPlan(snapshot);
   const header = liveHeader(snapshot);
   const plan = snapshot.recommendations.plan ?? snapshot.data_quality.plan;
+  const strictPortfolioCount = snapshot.recommendations.portfolio?.length ?? signals.length;
+  const watchlistCount = snapshot.recommendations.watchlist?.length ?? 0;
   return (
     <section aria-label="实时推荐">
+      <LivePortfolioBacktestStrip report={portfolioReport} />
       <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b bg-muted/20 px-3 py-2 text-xs sm:px-4">
         <span className={planMode ? presentationToneClass(header.tone) : gate.passed ? "text-rise" : "text-fall"}>
           {planMode
@@ -307,6 +364,12 @@ function LiveView({ snapshot, lane, loading }: { snapshot?: LimitUpSignalSnapsho
             {laneValidation.passed ? "战法验证通过" : `战法仅观察：${laneValidation.reason}`}
           </span>
         )}
+        {scope === "portfolio" && (
+          <span className="text-muted-foreground">
+            {planMode ? "提前观察" : "可买组合"} {strictPortfolioCount} / 4
+            {!planMode && strictPortfolioCount === 0 && watchlistCount > 0 ? ` · 雷达候选 ${watchlistCount}` : ""}
+          </span>
+        )}
         <span className="ml-auto text-muted-foreground">
           封板 {snapshot.market_context.sealed_count ?? 0} · 炸板 {snapshot.market_context.failed_count ?? 0} · {snapshot.source}
         </span>
@@ -316,23 +379,51 @@ function LiveView({ snapshot, lane, loading }: { snapshot?: LimitUpSignalSnapsho
           {signals.map((signal) => <LiveSignalRow key={signal.vt_symbol} signal={signal} stale={snapshot.data_quality.is_stale} />)}
         </div>
       ) : (
-        <EmptyRow text={planMode ? "当前板位没有入选次交易时段的观察候选" : "当前板位没有候选，保持空仓"} />
+        <EmptyRow text={
+          scope === "portfolio"
+            ? "当前没有通过组合硬门的候选，保持空仓"
+            : planMode
+              ? "当前板位没有入选次交易时段的观察候选"
+              : "当前板位没有候选，保持空仓"
+        } />
       )}
     </section>
   );
 }
 
+function LivePortfolioBacktestStrip({ report }: { report?: LimitUpLaneBacktest }) {
+  const summary = report?.summary;
+  return (
+    <div className="flex min-h-10 flex-wrap items-center gap-x-5 gap-y-1 border-b px-3 py-2 text-xs tabular-nums sm:px-4">
+      <span className="font-medium text-foreground">10 万元组合验证</span>
+      {summary ? (
+        <>
+          <span>期末 {formatCurrency(summary.final_equity)}</span>
+          <span className={amountTone(summary.total_return_pct)}>复利 {formatPct(summary.total_return_pct)}</span>
+          <span className={rateTone(summary.win_rate)}>胜率 {formatPct(summary.win_rate)}</span>
+          <span className="text-fall">回撤 {formatPct(summary.max_drawdown_pct)}</span>
+          <span className="text-muted-foreground">{summary.trade_count} 笔</span>
+        </>
+      ) : (
+        <span className="text-muted-foreground">历史组合缓存读取中</span>
+      )}
+    </div>
+  );
+}
+
 function LiveSignalRow({ signal, stale }: { signal: LimitUpLiveSignal; stale: boolean }) {
-  const validationObservation = !stale && signal.validation_passed === false;
-  const state = validationObservation
-    ? { label: "观察，不执行", tone: "warning" as const }
-    : signalStatePresentation(signal, stale);
+  const state = liveSignalPresentation(signal, stale);
   const actionable = state.tone === "positive";
   const observation = state.tone === "warning";
+  const manualResearchTrigger = (
+    !stale
+    && signal.signal_state === "trigger_ready"
+    && signal.execution_permission === "research_only"
+  );
   const factorSummary = liveFactorSummary(signal);
   const setupSummary = (signal.setup_tags ?? []).map(setupTagLabel).join(" · ");
   const strategyName = signal.strategy_name ?? setupSummary;
-  const selectionReasons = signal.selection_reasons?.slice(0, 4).join(" · ") ?? factorSummary;
+  const selectionReasons = signal.selection_reasons?.slice(0, 4).map(factorLabel).join(" · ") ?? factorSummary;
   return (
     <article className={cn("border-l-2 px-3 py-3 sm:px-4", actionable ? "border-l-rise" : observation ? "border-l-amber-500" : "border-l-border")}>
       <div className="grid gap-3 lg:grid-cols-[minmax(180px,1.1fr)_minmax(160px,0.8fr)_minmax(300px,1.8fr)_minmax(150px,0.8fr)] lg:items-center">
@@ -347,6 +438,7 @@ function LiveSignalRow({ signal, stale }: { signal: LimitUpLiveSignal; stale: bo
           <div className={cn("text-sm font-semibold", presentationToneClass(state.tone))}>{state.label}</div>
           <div className="mt-0.5 text-xs text-muted-foreground">
             {entryKindLabel(signal.entry_kind)} · {formatPrice(signal.trigger_price)}
+            {signal.distance_to_limit_pct != null ? ` · 距板 ${formatPct(signal.distance_to_limit_pct)}` : ""}
             {signal.board_lane === "two_to_three" ? ` · ${twoToThreeQualityLabel(signal.lane_quality_tier, signal.lane_risk_count)}` : ""}
             {signal.state_updated_at ? ` · ${formatTime(signal.state_updated_at)}` : ""}
           </div>
@@ -354,6 +446,10 @@ function LiveSignalRow({ signal, stale }: { signal: LimitUpLiveSignal; stale: bo
         <div className="min-w-0 text-xs leading-5">
           {strategyName && <div className="font-medium text-foreground">战法：{strategyName}</div>}
           {selectionReasons && <div className="text-foreground">入选：{selectionReasons}</div>}
+          {manualResearchTrigger && (
+            <div className="font-medium text-rise">人工买点已到；自动下单仍未开放</div>
+          )}
+          {signal.reason && <div className="text-amber-700 dark:text-amber-300">结论：{signal.reason}</div>}
           <TriggerChecks checks={signal.trigger_checks} />
           {signal.board_lane === "first_board" && (
             <div className="text-muted-foreground">
@@ -363,12 +459,15 @@ function LiveSignalRow({ signal, stale }: { signal: LimitUpLiveSignal; stale: bo
           <div className="text-muted-foreground">买入：{signal.buy_instruction ?? signal.buy_condition ?? "条件待确认"}</div>
           <div className="text-muted-foreground">卖出：{signal.sell_instruction ?? signal.sell_condition ?? "D+1动态判断"}</div>
           <div className="text-muted-foreground">取消：{signal.cancel_checks?.join("；") ?? signal.cancel_condition}</div>
+          <div className="text-muted-foreground">
+            盘口：板块热度 {formatNumber(signal.sector_heat, 1)} · 换手 {formatPct(signal.turnover_rate)} · 封单 {formatAmount(signal.seal_amount)}
+          </div>
         </div>
         <div className="grid grid-cols-2 gap-x-3 text-xs tabular-nums">
-          <Metric label="板块热度" value={formatNumber(signal.sector_heat, 1)} />
-          <Metric label="换手" value={formatPct(signal.turnover_rate)} />
-          <Metric label="封单" value={formatAmount(signal.seal_amount)} />
-          <Metric label="D+1样本" value={formatPct(signal.historical_evidence?.smoothed_win_rate)} tone={rateTone(signal.historical_evidence?.smoothed_win_rate)} />
+          <Metric label="TBOX" value={formatNumber(signal.historical_evidence?.tbox_score, 1)} tone={tboxTone(signal.historical_evidence?.tbox_score)} />
+          <Metric label="历史胜率" value={formatPct(signal.historical_evidence?.smoothed_win_rate)} tone={rateTone(signal.historical_evidence?.smoothed_win_rate)} />
+          <Metric label="平均 D+1" value={formatPct(signal.historical_evidence?.average_return_pct)} tone={amountTone(signal.historical_evidence?.average_return_pct)} />
+          <Metric label="战法复利" value={formatPct(signal.strategy_evidence?.total_return_pct)} tone={amountTone(signal.strategy_evidence?.total_return_pct)} />
         </div>
       </div>
     </article>
@@ -639,31 +738,8 @@ function EmptyRow({ text }: { text: string }) {
   return <div className="px-4 py-16 text-center text-sm text-muted-foreground">{text}</div>;
 }
 
-function liveSignalsForLane(snapshot: LimitUpSignalSnapshot | undefined, lane: BoardLaneKey): LimitUpLiveSignal[] {
-  if (!snapshot) return [];
-  const lanes = snapshot.recommendations.lanes;
-  const rows = [...(lanes.now ?? []), ...(lanes.tail ?? []), ...(lanes.next_auction ?? [])];
-  const selected = new Map<string, LimitUpLiveSignal>();
-  for (const signal of rows) {
-    if ((signal.board_lane ?? boardLaneForLevel(signal.board_level)) !== lane) continue;
-    const current = selected.get(signal.vt_symbol);
-    if (!current || actionPriority(signal.action) < actionPriority(current.action)) selected.set(signal.vt_symbol, signal);
-  }
-  return [...selected.values()]
-    .sort((left, right) => actionPriority(left.action) - actionPriority(right.action) || (left.market_dragon_rank ?? 99) - (right.market_dragon_rank ?? 99))
-    .slice(0, 4);
-}
-
-function boardLaneForLevel(level: number): BoardLaneKey {
-  if (level <= 1) return "first_board";
-  if (level === 2) return "one_to_two";
-  if (level === 3) return "two_to_three";
-  return "high_board";
-}
-
 function boardLaneLabel(value: BoardLaneKey) { return ({ first_board: "首板", one_to_two: "一进二", two_to_three: "二进三", high_board: "高板" } as Record<BoardLaneKey, string>)[value]; }
 
-function actionPriority(action: string) { return ({ buy_now: 0, observe: 1, next_auction: 2, wait_tail: 3, pass: 4 } as Record<string, number>)[action] ?? 5; }
 function presentationToneClass(tone: PresentationTone) { return ({ positive: "text-rise", warning: "text-amber-700 dark:text-amber-300", negative: "text-fall", neutral: "text-foreground" } as Record<PresentationTone, string>)[tone]; }
 function entryKindLabel(value: string) { return (({ none: "不执行", auction: "竞价", sweep: "扫板", reseal: "回封", tail_seal: "尾盘封板", next_auction: "竞价接力", first_touch: "首次触板", intraday: "盘中", wait: "等待确认" } as Record<string, string>)[value] ?? value) || "--"; }
 function phaseLabel(value?: string) { return ({ warmup: "预热期", expanding_oos: "滚动样本外", locked_holdout: "锁定留出", post_freeze_forward: "冻结后前向" } as Record<string, string>)[value ?? ""] ?? value ?? "阶段未知"; }
@@ -722,5 +798,6 @@ function formatTime(value: string) { try { return new Intl.DateTimeFormat("zh-CN
 function formatAge(seconds: number) { return seconds < 60 ? `${seconds}秒` : `${Math.floor(seconds / 60)}分${seconds % 60}秒`; }
 function amountTone(value?: number | null) { return value == null || !Number.isFinite(value) ? "text-muted-foreground" : value >= 0 ? "text-rise" : "text-fall"; }
 function rateTone(value?: number | null) { return value == null ? "text-muted-foreground" : value >= 50 ? "text-rise" : "text-fall"; }
+function tboxTone(value?: number | null) { return value == null ? "text-muted-foreground" : value >= 60 ? "text-rise" : value >= 40 ? "text-amber-700 dark:text-amber-300" : "text-fall"; }
 function firstError(...values: unknown[]) { const error = values.find(Boolean); return error instanceof Error ? error.message : error ? "打板数据加载失败" : null; }
 async function refreshActive(view: PrimaryView, live: () => Promise<unknown>, ledger: () => Promise<unknown>, backtest: () => Promise<unknown>) { if (view === "live") await live(); else if (view === "ledger") await ledger(); else await backtest(); }

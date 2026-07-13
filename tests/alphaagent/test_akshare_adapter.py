@@ -1,6 +1,10 @@
+import importlib
+import os
 import sys
+import threading
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -278,6 +282,71 @@ def test_limit_up_pool_uses_short_ttl_only_for_current_date(monkeypatch) -> None
         (f"limit_up_pools:{today}", adapter.LIVE_LIMIT_POOL_TTL_SECONDS),
         ("limit_up_pools:20200102", adapter.LIMIT_POOL_TTL_SECONDS),
     ]
+
+
+def test_limit_up_pool_sources_are_fetched_concurrently(monkeypatch) -> None:
+    adapter = AkShareAdapter()
+    monkeypatch.setenv("HTTP_PROXY", "http://unused-proxy.invalid")
+    started: list[str] = []
+    lock = threading.Lock()
+    all_started = threading.Event()
+
+    def source(name: str):
+        def load(*, date: str):
+            assert date == "20260713"
+            assert "HTTP_PROXY" not in os.environ
+            with lock:
+                started.append(name)
+                if len(started) == 5:
+                    all_started.set()
+            assert all_started.wait(timeout=1)
+            return pd.DataFrame()
+
+        return load
+
+    module = SimpleNamespace(
+        stock_zt_pool_em=source("zt"),
+        stock_zt_pool_previous_em=source("zt_previous"),
+        stock_zt_pool_strong_em=source("strong"),
+        stock_zt_pool_zbgc_em=source("zbgc"),
+        stock_zt_pool_dtgc_em=source("dtgc"),
+    )
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter.importlib.import_module",
+        lambda _name: module,
+    )
+
+    result = adapter._limit_up_pools_uncached("20260713")
+
+    assert set(started) == {"zt", "zt_previous", "strong", "zbgc", "dtgc"}
+    assert set(result["pools"]) == set(started)
+    assert all(
+        pool.get("status") != "unavailable"
+        for pool in result["pools"].values()
+    )
+    assert os.environ["HTTP_PROXY"] == "http://unused-proxy.invalid"
+
+
+def test_limit_up_pool_requests_have_a_bounded_timeout(monkeypatch) -> None:
+    adapter = AkShareAdapter()
+    module = importlib.import_module("akshare.stock_feature.stock_ztb_em")
+    timeouts: list[object] = []
+
+    class Response:
+        def json(self):
+            return {"data": None}
+
+    def fake_get(_url, *, params, timeout):
+        assert params["date"] == "20260713"
+        timeouts.append(timeout)
+        return Response()
+
+    monkeypatch.setattr(module.requests, "get", fake_get)
+
+    result = module.stock_zt_pool_em(date="20260713")
+
+    assert result.empty
+    assert timeouts == [module.REQUEST_TIMEOUT_SECONDS]
 
 
 def test_source_status_cache_keeps_datetime_values(monkeypatch) -> None:

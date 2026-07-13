@@ -31,20 +31,28 @@ export interface LimitUpLiveSignal {
   board_level: number;
   board_lane?: BoardLaneKey;
   lane_favorable_factors?: string[];
+  lane_blocker_reasons?: string[];
   lane_quality_tier?: "A" | "B" | null;
   lane_risk_count?: number;
   lane_risk_flags?: string[];
+  lane_rank_score?: number | null;
+  portfolio_selected?: boolean;
   seal_gate_passed?: boolean | null;
   premium_gate_passed?: boolean | null;
   validation_passed?: boolean;
+  research_action?: LimitUpLiveAction;
   action: LimitUpLiveAction;
   entry_kind: string;
   trigger_price?: number | null;
   reason: string;
   cancel_condition: string;
   execution_state?: "watch" | "waiting" | "actionable" | "cancelled" | string;
-  signal_state?: "observing" | "approaching_trigger" | "pending_auction" | "trigger_ready" | "invalidated" | string;
+  signal_state?: "observing" | "approaching_trigger" | "pending_auction" | "trigger_ready" | "missed" | "rejected" | "invalidated" | string;
   execution_permission?: "research_only" | string;
+  state?: "near_limit" | "sealed" | "resealed" | "failed" | string;
+  distance_to_limit_pct?: number | null;
+  seen_before_seal?: boolean;
+  missed_preseal_entry?: boolean;
   strategy_name?: string;
   selection_reasons?: string[];
   trigger_checks?: LimitUpTriggerCheck[];
@@ -61,8 +69,21 @@ export interface LimitUpLiveSignal {
   turnover_rate?: number | null;
   seal_amount?: number | null;
   historical_evidence?: {
+    status?: string;
     smoothed_win_rate: number | null;
+    average_return_pct?: number | null;
+    hard_loss_rate?: number | null;
+    seal_after_touch_rate?: number | null;
+    effective_sample_count?: number;
+    confidence?: string;
+    tbox_score?: number;
   } | null;
+  strategy_evidence?: {
+    win_rate?: number | null;
+    total_return_pct?: number | null;
+    max_drawdown_pct?: number | null;
+    trade_count?: number;
+  };
 }
 
 export interface LimitUpSignalSnapshot {
@@ -84,6 +105,8 @@ export interface LimitUpSignalSnapshot {
       reasons: string[];
     };
     lanes: Record<LimitUpLane, LimitUpLiveSignal[]>;
+    portfolio?: LimitUpLiveSignal[];
+    watchlist?: LimitUpLiveSignal[];
     plan?: LimitUpPlanMetadata;
     board_lane_validations?: Partial<Record<BoardLaneKey, {
       passed: boolean;

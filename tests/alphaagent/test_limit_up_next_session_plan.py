@@ -74,6 +74,100 @@ def test_build_final_plan_keeps_only_next_auction_research_actions() -> None:
     assert rows[0]["execution_permission"] == "research_only"
 
 
+def test_plan_keeps_structural_observations_while_auction_checks_are_pending() -> None:
+    source = _source_snapshot()
+    source["recommendations"]["lanes"]["next_auction"] = []
+    source["candidates"] = [
+        {
+            "vt_symbol": "003020.SZSE",
+            "name": "立方制药",
+            "state": "resealed",
+            "board_level": 2,
+            "board_lane": "one_to_two",
+            "market_dragon_rank": 29,
+            "sector_dragon_rank": 1,
+            "lane_decision": "blocked",
+            "lane_blockers": [
+                "market_failed_rate_high",
+                "auction_gap_out_of_range",
+                "third_board_setup_unconfirmed",
+                "two_to_three_risk_stack",
+            ],
+            "lane_favorable_factors": [
+                "prior_board_changed_hands_and_resealed",
+                "prior_low_held_positive",
+            ],
+            "lane_quality_tier": "B",
+            "lane_rank_score": 15.6895,
+        },
+        {
+            "vt_symbol": "600002.SSE",
+            "name": "前板证据残缺",
+            "state": "sealed",
+            "board_level": 2,
+            "board_lane": "two_to_three",
+            "lane_blockers": ["prior_board_path_incomplete"],
+            "lane_rank_score": 80.0,
+        },
+        {
+            "vt_symbol": "600003.SSE",
+            "name": "没有涨停基因",
+            "state": "sealed",
+            "board_level": 1,
+            "board_lane": "first_board",
+            "lane_blockers": ["limit_up_gene_missing"],
+            "lane_rank_score": 90.0,
+        },
+    ]
+
+    result = next_session_plan.build_next_session_plan_snapshot(
+        source,
+        source_trade_date=date(2026, 7, 10),
+        captured_at=datetime(2026, 7, 10, 19, 5, tzinfo=SHANGHAI),
+        phase="final",
+    )
+
+    rows = result["recommendations"]["lanes"]["next_auction"]
+    assert [row["vt_symbol"] for row in rows] == ["003020.SZSE"]
+    assert rows[0]["board_level"] == 3
+    assert rows[0]["board_lane"] == "two_to_three"
+    assert rows[0]["action"] == "observe"
+    assert rows[0]["research_action"] == "next_auction"
+    assert rows[0]["strategy_name"] == "二进三竞价观察"
+
+
+def test_plan_limits_each_board_lane_to_four_observations() -> None:
+    source = _source_snapshot()
+    source["recommendations"]["lanes"]["next_auction"] = []
+    source["candidates"] = [
+        {
+            "vt_symbol": f"60000{index}.SSE",
+            "name": f"二板候选{index}",
+            "state": "sealed",
+            "board_level": 2,
+            "board_lane": "two_to_three",
+            "lane_blockers": ["auction_gap_out_of_range"],
+            "lane_rank_score": float(index),
+        }
+        for index in range(1, 7)
+    ]
+
+    result = next_session_plan.build_next_session_plan_snapshot(
+        source,
+        source_trade_date=date(2026, 7, 10),
+        captured_at=datetime(2026, 7, 10, 19, 5, tzinfo=SHANGHAI),
+        phase="final",
+    )
+
+    rows = result["recommendations"]["lanes"]["next_auction"]
+    assert [row["name"] for row in rows] == [
+        "二板候选6",
+        "二板候选5",
+        "二板候选4",
+        "二板候选3",
+    ]
+
+
 def test_plan_snapshot_is_json_serializable_before_persistence() -> None:
     source = _source_snapshot()
     source["candidates"] = [{"vt_symbol": "600001.SSE", "as_of_trade_date": date(2026, 7, 10)}]
@@ -110,6 +204,41 @@ def test_preliminary_plan_uses_same_day_pool_confirmed_after_close(monkeypatch) 
 
     assert requested_dates == ["20260713"]
     assert result["source_trade_date"] == "2026-07-13"
+
+
+def test_refresh_rebuilds_a_saved_empty_plan(monkeypatch) -> None:
+    requested_dates: list[str] = []
+
+    class Adapter:
+        def limit_up_pools(self, trade_key: str) -> dict[str, object]:
+            requested_dates.append(trade_key)
+            return {"trade_date": trade_key, "pools": {}}
+
+    empty = next_session_plan.build_next_session_plan_snapshot(
+        {
+            **_source_snapshot(),
+            "recommendations": {
+                "market_gate": {"passed": True, "reasons": []},
+                "lanes": {"now": [], "tail": [], "next_auction": []},
+            },
+        },
+        source_trade_date=date(2026, 7, 10),
+        captured_at=datetime(2026, 7, 10, 15, 5, tzinfo=SHANGHAI),
+        phase="preliminary",
+    )
+    monkeypatch.setattr(next_session_plan, "load_latest_next_session_plan", lambda *_args, **_kwargs: empty)
+    monkeypatch.setattr(next_session_plan, "_source_snapshot_from_pools", lambda *_args: _source_snapshot())
+    monkeypatch.setattr(next_session_plan, "save_snapshot", lambda snapshot: snapshot)
+
+    result = next_session_plan.refresh_next_session_plan(
+        "preliminary",
+        source_trade_date=date(2026, 7, 10),
+        captured_at=datetime(2026, 7, 10, 15, 10, tzinfo=SHANGHAI),
+        adapter=Adapter(),
+    )
+
+    assert requested_dates == ["20260710"]
+    assert result["status"] == "ready"
 
 
 def test_weekend_live_read_prefers_saved_final_plan(monkeypatch) -> None:

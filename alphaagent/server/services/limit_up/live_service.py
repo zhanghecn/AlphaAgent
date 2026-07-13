@@ -18,10 +18,14 @@ from alphaagent.server.services.limit_up.live_policy import (
     MAX_CONSECUTIVE_SNAPSHOT_GAP_MINUTES,
     build_live_recommendations,
     rank_live_candidates,
+    rank_live_opportunities,
     session_stage,
 )
 from alphaagent.server.services.limit_up.live_evidence import attach_historical_evidence
-from alphaagent.server.services.limit_up.lane_research import evaluate_lane_candidate
+from alphaagent.server.services.limit_up.lane_research import (
+    evaluate_lane_candidate,
+    select_daily_lane_portfolio,
+)
 from alphaagent.server.services.limit_up.live_repository import (
     load_latest_snapshot,
     load_latest_daily_trade_date,
@@ -33,11 +37,12 @@ from alphaagent.server.services.limit_up.versions import (
 )
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-NEAR_LIMIT_MIN_CHANGE_PCT = 8.5
-LIVE_SCAN_INTERVAL_SECONDS = 60
+NEAR_LIMIT_MIN_CHANGE_PCT = 7.0
+LIVE_SCAN_INTERVAL_SECONDS = 15
 LIVE_SNAPSHOT_MAX_AGE_SECONDS = 90
 HISTORY_EVIDENCE_UNAVAILABLE_REASON = "历史证据不可用，已禁止执行"
 EXECUTABLE_ACTIONS = frozenset({"buy_now", "next_auction"})
+PORTFOLIO_EXECUTION_LANES = frozenset({"first_board", "two_to_three", "high_board"})
 ACTIVE_SESSION_STAGES = frozenset(
     {"auction_watch", "auction", "morning", "afternoon", "tail", "close_auction"}
 )
@@ -65,10 +70,14 @@ def build_live_snapshot(
         include_previous=session_stage(local_at) in {"auction_watch", "auction"},
     )
     candidates = _enrich_candidates(source_rows, pool_payload, stock_context)
-    ranked = rank_live_candidates(candidates)
-    _attach_stability(ranked, previous_snapshot, local_at)
     market_context = _market_context(candidates, stock_context, previous_snapshot)
-    _attach_lane_decisions(ranked, market_context, local_at)
+    sector_front = rank_live_candidates(
+        candidates,
+        limit=max(len(candidates), 5),
+    )
+    _attach_lane_decisions(sector_front, market_context, local_at)
+    _attach_stability(sector_front, previous_snapshot, local_at)
+    ranked = rank_live_opportunities(sector_front)
     recommendations = build_live_recommendations(
         ranked,
         market_context,
@@ -92,7 +101,7 @@ def build_live_snapshot(
         "source": _source_name(quote_payload, pool_payload),
         "source_updated_at": source_updated_at,
         "market_context": market_context,
-        "candidates": ranked,
+        "candidates": sector_front,
         "recommendations": recommendations,
         "data_quality": {
             "status": "stale" if stale_market_date else ("degraded" if source_errors else "ready"),
@@ -101,6 +110,7 @@ def build_live_snapshot(
             "has_tick": False,
             "has_l2": False,
             "candidate_universe_count": len(candidates),
+            "radar_candidate_count": len(sector_front),
             "ranked_candidate_count": len(ranked),
             "snapshot_age_seconds": 0,
             "source_age_seconds": _source_age_seconds(source_updated_at, local_at),
@@ -554,6 +564,7 @@ def _attach_lane_decisions(
 ) -> None:
     sentiment = market_context.get("sentiment")
     sentiment = sentiment if isinstance(sentiment, Mapping) else {}
+    research_candidates: list[dict[str, object]] = []
     for candidate in candidates:
         board_level = _integer(candidate.get("board_level"), 1)
         candidate["board_lane"] = _board_lane(board_level)
@@ -573,19 +584,12 @@ def _attach_lane_decisions(
                 }
             )
             continue
-        research_candidate = {
-            **candidate,
-            "target_board": board_level,
-            "signal_time": captured_at.time().replace(microsecond=0).isoformat(),
-            "signal_kind": "auction"
-            if session_stage(captured_at) == "auction"
-            else "intraday",
-            "prior_industry_heat_score": candidate.get("sector_heat"),
-            "prior_industry_leader_rank": candidate.get("sector_dragon_rank"),
-            "prior_market_phase": sentiment.get("phase"),
-            "prior_market_failed_rate": sentiment.get("failed_limit_up_rate"),
-            "has_l2": False,
-        }
+        research_candidate = _live_research_candidate(
+            candidate,
+            sentiment,
+            captured_at,
+        )
+        research_candidates.append(research_candidate)
         evaluated = evaluate_lane_candidate(research_candidate)
         candidate.update(
             {
@@ -610,6 +614,38 @@ def _attach_lane_decisions(
                 "lane_rank_score": evaluated.get("rank_score"),
             }
         )
+
+    selected = select_daily_lane_portfolio(research_candidates).get("selected", [])
+    selected_symbols = {
+        str(row.get("vt_symbol") or "")
+        for row in selected
+        if isinstance(row, Mapping)
+    }
+    for candidate in candidates:
+        candidate["portfolio_selected"] = (
+            str(candidate.get("vt_symbol") or "") in selected_symbols
+        )
+
+
+def _live_research_candidate(
+    candidate: Mapping[str, object],
+    sentiment: Mapping[str, object],
+    captured_at: datetime,
+) -> dict[str, object]:
+    board_level = _integer(candidate.get("board_level"), 1)
+    return {
+        **candidate,
+        "target_board": board_level,
+        "signal_time": captured_at.time().replace(microsecond=0).isoformat(),
+        "signal_kind": (
+            "auction" if session_stage(captured_at) == "auction" else "intraday"
+        ),
+        "prior_industry_heat_score": candidate.get("sector_heat"),
+        "prior_industry_leader_rank": candidate.get("sector_dragon_rank"),
+        "prior_market_phase": sentiment.get("phase"),
+        "prior_market_failed_rate": sentiment.get("failed_limit_up_rate"),
+        "has_l2": False,
+    }
 
 
 def apply_lane_validation_veto(
@@ -654,13 +690,10 @@ def _apply_live_risk_gates(
     )
     recommendations = result.get("recommendations")
     recommendations = recommendations if isinstance(recommendations, Mapping) else {}
-    return {
-        **result,
-        "recommendations": apply_lane_validation_veto(
-            recommendations,
-            lane_validations,
-        ),
-    }
+    validated = apply_lane_validation_veto(recommendations, lane_validations)
+    validated["portfolio"] = _build_live_portfolio(validated)
+    validated["watchlist"] = _build_live_watchlist(validated)
+    return {**result, "recommendations": validated}
 
 
 def _apply_signal_validation(
@@ -679,12 +712,20 @@ def _apply_signal_validation(
     }
     passed = validation.get("passed") is True
     reason = str(validation.get("reason") or "尚未通过样本外验证")
+    summary = validation.get("summary")
+    summary = summary if isinstance(summary, Mapping) else {}
     result.update(
         {
             "board_lane": lane,
             "validation_passed": passed,
             "validation_status": str(validation.get("status") or "unavailable"),
             "validation_reason": reason,
+            "strategy_evidence": {
+                "win_rate": _number(summary.get("win_rate")),
+                "total_return_pct": _number(summary.get("total_return_pct")),
+                "max_drawdown_pct": _number(summary.get("max_drawdown_pct")),
+                "trade_count": _integer(summary.get("trade_count")),
+            },
         }
     )
     if str(result.get("action") or "") in EXECUTABLE_ACTIONS and not passed:
@@ -693,6 +734,154 @@ def _apply_signal_validation(
         result["execution_state"] = "cancelled"
         result["reason"] = f"只观察，不执行：{original_reason}；{reason}"
     return result
+
+
+def _build_live_portfolio(
+    recommendations: Mapping[str, object],
+) -> list[dict[str, object]]:
+    lanes = recommendations.get("lanes")
+    lanes = lanes if isinstance(lanes, Mapping) else {}
+    selected: dict[str, dict[str, object]] = {}
+    for channel in ("now", "tail", "next_auction"):
+        signals = lanes.get(channel)
+        signals = signals if isinstance(signals, list) else []
+        for raw_signal in signals:
+            if not isinstance(raw_signal, Mapping):
+                continue
+            signal = dict(raw_signal)
+            symbol = str(signal.get("vt_symbol") or "")
+            research_action = str(
+                signal.get("research_action") or signal.get("action") or "pass"
+            )
+            if (
+                not symbol
+                or signal.get("portfolio_selected") is not True
+                or str(signal.get("board_lane") or "") not in PORTFOLIO_EXECUTION_LANES
+                or research_action not in EXECUTABLE_ACTIONS
+                or (
+                    signal.get("missed_preseal_entry") is True
+                    and research_action != "buy_now"
+                )
+            ):
+                continue
+            current = selected.get(symbol)
+            if (
+                current is None
+                or _live_portfolio_sort_key(signal)
+                < _live_portfolio_sort_key(current)
+            ):
+                selected[symbol] = signal
+    return sorted(selected.values(), key=_live_portfolio_sort_key)[:4]
+
+
+def _live_portfolio_sort_key(signal: Mapping[str, object]) -> tuple[object, ...]:
+    action = str(signal.get("research_action") or signal.get("action") or "pass")
+    action_priority = {
+        "buy_now": 0,
+        "next_auction": 1,
+        "observe": 2,
+        "wait_tail": 2,
+        "pass": 3,
+    }.get(action, 4)
+    history = signal.get("historical_evidence")
+    history = history if isinstance(history, Mapping) else {}
+    strategy = signal.get("strategy_evidence")
+    strategy = strategy if isinstance(strategy, Mapping) else {}
+    return (
+        action_priority,
+        -(_number(history.get("tbox_score")) or 0.0),
+        -(_number(history.get("smoothed_win_rate")) or 0.0),
+        -(_number(strategy.get("total_return_pct")) or 0.0),
+        -(_number(signal.get("leadership_score")) or 0.0),
+        str(signal.get("vt_symbol") or ""),
+    )
+
+
+def _build_live_watchlist(
+    recommendations: Mapping[str, object],
+) -> list[dict[str, object]]:
+    lanes = recommendations.get("lanes")
+    lanes = lanes if isinstance(lanes, Mapping) else {}
+    observations: dict[str, dict[str, object]] = {}
+    for channel in ("now", "next_auction", "tail"):
+        signals = lanes.get(channel)
+        signals = signals if isinstance(signals, list) else []
+        for raw_signal in signals:
+            if not isinstance(raw_signal, Mapping):
+                continue
+            signal = dict(raw_signal)
+            symbol = str(signal.get("vt_symbol") or "")
+            strategy = signal.get("strategy_evidence")
+            strategy = strategy if isinstance(strategy, Mapping) else {}
+            if (
+                not symbol
+                or symbol in observations
+                or str(signal.get("board_lane") or "") not in PORTFOLIO_EXECUTION_LANES
+                or (_number(strategy.get("total_return_pct")) or 0.0) <= 0
+                or signal.get("missed_preseal_entry") is True
+            ):
+                continue
+            original_action = str(
+                signal.get("research_action") or signal.get("action") or "pass"
+            )
+            reason_parts = [str(signal.get("reason") or "组合硬门未通过")]
+            reason_parts.extend(
+                str(value)
+                for value in signal.get("lane_blocker_reasons") or []
+                if value
+            )
+            original_reason = "；".join(dict.fromkeys(reason_parts))
+            lane_blocked = str(signal.get("lane_decision") or "") == "blocked"
+            near_limit = str(signal.get("state") or "") == "near_limit"
+            observations[symbol] = {
+                **signal,
+                "action": "observe",
+                "research_action": original_action,
+                "execution_state": "watch",
+                "signal_state": (
+                    "rejected"
+                    if lane_blocked
+                    else "approaching_trigger"
+                    if near_limit
+                    else "observing"
+                ),
+                "entry_kind": "sweep" if near_limit else signal.get("entry_kind"),
+                "buy_instruction": (
+                    "板位硬门未通过，今日不买"
+                    if lane_blocked
+                    else "距涨停不超过1%且市场、板块、资金和盘口条件保持通过时触发"
+                ),
+                "reason": (
+                    f"今日拒买：{original_reason}"
+                    if lane_blocked
+                    else f"等待触发：{original_reason}"
+                ),
+            }
+    return sorted(observations.values(), key=_live_watchlist_sort_key)[:4]
+
+
+def _live_watchlist_sort_key(signal: Mapping[str, object]) -> tuple[object, ...]:
+    history = signal.get("historical_evidence")
+    history = history if isinstance(history, Mapping) else {}
+    strategy = signal.get("strategy_evidence")
+    strategy = strategy if isinstance(strategy, Mapping) else {}
+    state = str(signal.get("state") or "")
+    state_priority = {
+        "near_limit": 0,
+        "failed": 1,
+        "resealed": 2,
+        "sealed": 3,
+    }.get(state, 4)
+    distance = _number(signal.get("distance_to_limit_pct"))
+    return (
+        state_priority,
+        distance if state == "near_limit" and distance is not None else 99.0,
+        -(_number(history.get("tbox_score")) or 0.0),
+        -(_number(strategy.get("total_return_pct")) or 0.0),
+        -(_number(history.get("smoothed_win_rate")) or 0.0),
+        -(_number(signal.get("leadership_score")) or 0.0),
+        str(signal.get("vt_symbol") or ""),
+    )
 
 
 def _load_lane_validations() -> dict[str, dict[str, object]]:
@@ -845,8 +1034,19 @@ def _attach_stability(
     for candidate in candidates:
         symbol = str(candidate.get("vt_symbol") or "")
         previous = previous_by_symbol.get(symbol)
+        current_state = str(candidate.get("state") or "")
+        currently_sealed = current_state in {"sealed", "resealed"}
+        seen_before_seal = (
+            current_state in {"near_limit", "failed"}
+            or (
+                isinstance(previous, Mapping)
+                and previous.get("seen_before_seal") is True
+            )
+        )
+        candidate["seen_before_seal"] = seen_before_seal
+        candidate["missed_preseal_entry"] = currently_sealed and not seen_before_seal
         continuously_sealed = (
-            candidate.get("state") in {"sealed", "resealed"}
+            currently_sealed
             and consecutive_snapshot
             and isinstance(previous, Mapping)
             and previous.get("state") in {"sealed", "resealed"}

@@ -41,7 +41,10 @@ from alphaagent.server.services import research_sector_scores
 from alphaagent.server.services.limit_up.data_quality import backfill_limit_up_event_minutes
 from alphaagent.server.services.limit_up.domain import is_eligible_main_board
 from alphaagent.server.services.limit_up.historical_evidence_import import import_ths_evidence
-from alphaagent.server.services.limit_up.live_service import refresh_live_snapshot
+from alphaagent.server.services.limit_up.live_service import (
+    LIVE_SCAN_INTERVAL_SECONDS,
+    refresh_live_snapshot,
+)
 from alphaagent.server.services.limit_up.next_session_plan import refresh_next_session_plan
 from alphaagent.server.services.quant import research_jobs, screening
 
@@ -55,6 +58,7 @@ INTERRUPTED_SYNC_JOB_MESSAGE = "API process restarted before this sync job finis
 INTERRUPTED_SCHEDULE_MESSAGE = "API process restarted before this schedule finished."
 INTERRUPTED_SCHEDULE_RECOVERY_DELAY_SECONDS = 30
 INTERRUPTED_SCHEDULE_RECOVERY_WAIT_SECONDS = 6 * 60 * 60
+SCHEDULER_TICK_SECONDS = 5
 INTERRUPTED_SCHEDULE_RECOVERY_POLL_SECONDS = 5
 # 单只股/板块同步的超时上限：AkShare 正常请求数秒，超时则跳过该 item（防 hang 拖死整批）
 SYNC_PER_ITEM_TIMEOUT_SECONDS = 60.0
@@ -486,7 +490,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
     },
     {
         "id": "limit_up_live_scan",
-        "name": "实时打板扫描（每分钟）",
+        "name": "实时打板扫描（每15秒）",
         "cron": "* 9-14 * * 1-5",
         "action": "limit_up_live_scan",
         "enabled": True,
@@ -4484,13 +4488,13 @@ def _recover_interrupted_schedules(schedule_ids: Sequence[str]) -> None:
 
 
 def _scheduler_loop() -> None:
-    """Main scheduler loop — wakes up every 60 seconds."""
+    """Main scheduler loop with a fast tick for time-sensitive board scans."""
     while not _scheduler_stop.is_set():
         try:
             _run_scheduled_jobs()
         except Exception as exc:
             logger.error("Scheduler tick error: %s", exc)
-        _scheduler_stop.wait(timeout=60)
+        _scheduler_stop.wait(timeout=SCHEDULER_TICK_SECONDS)
 
 
 def _now_china() -> datetime:
@@ -4530,7 +4534,10 @@ def _run_scheduled_jobs() -> None:
         if action == "limit_up_live_scan" and not _limit_up_live_scan_window_open(now_china):
             continue
         recently_started = (
-            _recently_started(row, within_seconds=45)
+            _recently_started(
+                row,
+                within_seconds=max(LIVE_SCAN_INTERVAL_SECONDS - 1, 1),
+            )
             if action == "limit_up_live_scan"
             else _recently_started(row)
         )

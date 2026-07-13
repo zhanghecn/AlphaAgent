@@ -21,6 +21,9 @@ import pandas as pd
 import requests
 
 
+REQUEST_TIMEOUT_SECONDS = 8
+
+
 def stock_zt_pool_em(date: str = "20241008") -> pd.DataFrame:
     """
     东方财富网-行情中心-涨停板行情-涨停股池
@@ -39,7 +42,7 @@ def stock_zt_pool_em(date: str = "20241008") -> pd.DataFrame:
         "sort": "fbt:asc",
         "date": date,
     }
-    r = requests.get(url, params=params)
+    r = requests.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
     data_json = r.json()
     if data_json["data"] is None:
         return pd.DataFrame()
@@ -125,7 +128,7 @@ def stock_zt_pool_previous_em(date: str = "20240415") -> pd.DataFrame:
         "sort": "zs:desc",
         "date": date,
     }
-    r = requests.get(url, params=params)
+    r = requests.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
     data_json = r.json()
     if data_json["data"] is None:
         return pd.DataFrame()
@@ -202,7 +205,7 @@ def stock_zt_pool_strong_em(date: str = "20241231") -> pd.DataFrame:
         "sort": "zdp:desc",
         "date": date,
     }
-    r = requests.get(url, params=params)
+    r = requests.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
     data_json = r.json()
     if data_json["data"] is None:
         return pd.DataFrame()
@@ -291,7 +294,7 @@ def stock_zt_pool_sub_new_em(date: str = "20241231") -> pd.DataFrame:
         "sort": "ods:asc",
         "date": date,
     }
-    r = requests.get(url, params=params)
+    r = requests.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
     data_json = r.json()
     if len(data_json["data"]["pool"]) == 0:
         return pd.DataFrame()
@@ -377,7 +380,7 @@ def stock_zt_pool_zbgc_em(date: str = "20241011") -> pd.DataFrame:
         "sort": "fbt:asc",
         "date": date,
     }
-    r = requests.get(url, params=params)
+    r = requests.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
     data_json = r.json()
     if data_json["data"] is None:
         return pd.DataFrame()
@@ -459,7 +462,7 @@ def stock_zt_pool_dtgc_em(date: str = "20241011") -> pd.DataFrame:
         "sort": "fund:asc",
         "date": date,
     }
-    r = requests.get(url, params=params)
+    r = requests.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
     data_json = r.json()
     if len(data_json["data"]["pool"]) == 0:
         return pd.DataFrame()

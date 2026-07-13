@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { LimitUpLiveSignal, LimitUpSignalSnapshot } from "@/api/limitUp";
-import { liveHeader, signalStatePresentation } from "./nextSessionPlan";
+import { liveHeader, liveSignalPresentation, signalStatePresentation } from "./nextSessionPlan";
 
 function snapshot(mode: string): LimitUpSignalSnapshot {
   return { mode } as LimitUpSignalSnapshot;
@@ -34,9 +34,39 @@ describe("next-session plan presentation", () => {
 
   it.each([
     ["approaching_trigger", "接近触发", "warning"],
-    ["trigger_ready", "买点已触发（研究）", "positive"],
+    ["trigger_ready", "买点触发（人工确认）", "positive"],
+    ["missed", "已封板，错过不追", "negative"],
+    ["rejected", "硬门未过，今日不买", "negative"],
     ["invalidated", "条件失效", "negative"],
   ])("maps %s to a user-facing state", (state, label, tone) => {
     expect(signalStatePresentation(signal(state))).toEqual({ label, tone });
+  });
+
+  it("keeps a research buy trigger visible when automatic validation is locked", () => {
+    const triggered = {
+      ...signal("trigger_ready"),
+      action: "pass",
+      research_action: "buy_now",
+      validation_passed: false,
+    } as LimitUpLiveSignal;
+
+    expect(liveSignalPresentation(triggered)).toEqual({
+      label: "买点触发（人工确认）",
+      tone: "positive",
+    });
+  });
+
+  it("keeps a non-triggered validation failure as observation only", () => {
+    const observing = {
+      ...signal("observing"),
+      action: "pass",
+      research_action: "pass",
+      validation_passed: false,
+    } as LimitUpLiveSignal;
+
+    expect(liveSignalPresentation(observing)).toEqual({
+      label: "观察，不执行",
+      tone: "warning",
+    });
   });
 });

@@ -454,6 +454,8 @@ def test_limit_up_live_scan_is_a_separate_append_only_schedule():
     assert live_scan["cron"] == "* 9-14 * * 1-5"
     assert live_scan["job_ids"] == []
     assert "sync_limit_up_pools" not in live_scan["job_ids"]
+    assert svc.LIVE_SCAN_INTERVAL_SECONDS == 15
+    assert svc.SCHEDULER_TICK_SECONDS <= 5
 
 
 def test_next_session_plan_has_preliminary_and_final_schedule_paths():

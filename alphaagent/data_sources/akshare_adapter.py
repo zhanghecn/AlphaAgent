@@ -1444,20 +1444,41 @@ class AkShareAdapter:
             ("zbgc", "stock_zt_pool_zbgc_em", "炸板池"),
             ("dtgc", "stock_zt_pool_dtgc_em", "跌停池"),
         ]
-        for pool_key, func_name, pool_label in pool_configs:
-            func = getattr(module, func_name, None)
-            if func is None:
-                continue
-            try:
-                with _akshare_network_env():
-                    df = func(date=trade_date)
-                pools["pools"][pool_key] = {
-                    "label": pool_label,
-                    "items": [_zt_pool_row_to_api(row) for row in _records(df, 200)],
-                    "total": len(df),
-                }
-            except Exception:
-                pools["pools"][pool_key] = {"label": pool_label, "items": [], "total": 0, "status": "unavailable"}
+        futures: dict[Any, tuple[str, str]] = {}
+        with _akshare_network_env(), ThreadPoolExecutor(
+            max_workers=len(pool_configs)
+        ) as executor:
+            for pool_key, func_name, pool_label in pool_configs:
+                func = getattr(module, func_name, None)
+                if func is None:
+                    pools["pools"][pool_key] = {
+                        "label": pool_label,
+                        "items": [],
+                        "total": 0,
+                        "status": "unavailable",
+                    }
+                    continue
+                futures[executor.submit(func, date=trade_date)] = (
+                    pool_key,
+                    pool_label,
+                )
+
+            for future in as_completed(futures):
+                pool_key, pool_label = futures[future]
+                try:
+                    df = future.result()
+                    pools["pools"][pool_key] = {
+                        "label": pool_label,
+                        "items": [_zt_pool_row_to_api(row) for row in _records(df, 200)],
+                        "total": len(df),
+                    }
+                except Exception:
+                    pools["pools"][pool_key] = {
+                        "label": pool_label,
+                        "items": [],
+                        "total": 0,
+                        "status": "unavailable",
+                    }
         pools["source"] = "akshare.stock_ztb_em"
         pools["updated_at"] = datetime.now(timezone.utc).isoformat()
         return pools

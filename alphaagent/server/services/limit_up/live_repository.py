@@ -648,7 +648,7 @@ def _prior_board_context(
     price_context: Mapping[str, object],
 ) -> dict[str, object] | None:
     if event is not None:
-        return dict(event)
+        return _plain_row(event)
     if not price_context.get("previous_limit_up"):
         return None
     return {

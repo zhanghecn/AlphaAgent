@@ -26,6 +26,17 @@ PLAN_MODES = {
     "preliminary": "next_session_preliminary",
     "final": "next_session_final",
 }
+PLAN_LANE_LIMIT = 4
+_NEXT_SESSION_WATCH_BLOCKERS = frozenset(
+    {
+        "market_retreat",
+        "market_failed_rate_high",
+        "auction_gap_out_of_range",
+        "third_board_setup_unconfirmed",
+        "two_to_three_risk_stack",
+        "high_board_requires_l2",
+    }
+)
 
 _WARMUP_LOCK = threading.Lock()
 _WARMUP_THREAD: threading.Thread | None = None
@@ -45,12 +56,8 @@ def build_next_session_plan_snapshot(
     lanes = lanes if isinstance(lanes, Mapping) else {}
     raw_rows = lanes.get("next_auction")
     raw_rows = raw_rows if isinstance(raw_rows, list) else []
-    rows = [
-        _plan_signal(row, local_at)
-        for row in raw_rows
-        if isinstance(row, Mapping)
-        and str(row.get("action") or "") == "next_auction"
-    ]
+    plan_sources = _plan_sources(raw_rows, source_snapshot.get("candidates"))
+    rows = [_plan_signal(row, local_at) for row in plan_sources]
     quality = source_snapshot.get("data_quality")
     quality = dict(quality) if isinstance(quality, Mapping) else {}
     plan_metadata = {
@@ -125,7 +132,7 @@ def refresh_next_session_plan(
         phase=phase,
         strategy_version=LIVE_STRATEGY_VERSION,
     )
-    if existing is not None:
+    if existing is not None and _has_observations(existing):
         return existing
 
     if pools is None:
@@ -157,7 +164,7 @@ def start_next_session_plan_warmup() -> dict[str, object]:
         phase="final",
         strategy_version=LIVE_STRATEGY_VERSION,
     )
-    if existing is not None:
+    if existing is not None and _has_observations(existing):
         return {"status": "skipped", "reason": "plan_ready"}
     with _WARMUP_LOCK:
         if _WARMUP_THREAD is not None and _WARMUP_THREAD.is_alive():
@@ -233,6 +240,134 @@ def _plan_signal(signal: Mapping[str, object], captured_at: datetime) -> dict[st
         "valid_at": captured_at.isoformat(),
         "valid_until": "下一交易日09:25",
     }
+
+
+def _plan_sources(
+    raw_rows: object,
+    candidates: object,
+) -> list[dict[str, object]]:
+    strict: list[dict[str, object]] = []
+    if isinstance(raw_rows, list):
+        strict = [
+            dict(row)
+            for row in raw_rows
+            if isinstance(row, Mapping)
+            and str(row.get("action") or "") == "next_auction"
+        ]
+
+    fallback: list[dict[str, object]] = []
+    if isinstance(candidates, list):
+        fallback = [
+            source
+            for row in candidates
+            if isinstance(row, Mapping)
+            if (source := _candidate_plan_source(row)) is not None
+        ]
+        fallback.sort(key=_plan_source_sort_key)
+
+    selected: list[dict[str, object]] = []
+    selected_symbols: set[str] = set()
+    lane_counts: dict[str, int] = {}
+    for row in [*strict, *fallback]:
+        symbol = str(row.get("vt_symbol") or "")
+        lane = str(row.get("board_lane") or "")
+        if (
+            not symbol
+            or symbol in selected_symbols
+            or not lane
+            or lane_counts.get(lane, 0) >= PLAN_LANE_LIMIT
+        ):
+            continue
+        selected.append(row)
+        selected_symbols.add(symbol)
+        lane_counts[lane] = lane_counts.get(lane, 0) + 1
+    return selected
+
+
+def _candidate_plan_source(candidate: Mapping[str, object]) -> dict[str, object] | None:
+    if str(candidate.get("state") or "") not in {"sealed", "resealed"}:
+        return None
+    blockers = {
+        str(value)
+        for value in candidate.get("lane_blockers") or []
+        if value
+    }
+    if blockers - _NEXT_SESSION_WATCH_BLOCKERS:
+        return None
+
+    source_board = _integer(candidate.get("board_level"), 1)
+    classified_board = {
+        "first_board": 1,
+        "one_to_two": 2,
+        "two_to_three": 3,
+        "high_board": 4,
+    }.get(str(candidate.get("board_lane") or ""), source_board)
+    target_board = max(source_board + 1, classified_board)
+    target_lane = _board_lane(target_board)
+    favorable = [str(value) for value in candidate.get("lane_favorable_factors") or [] if value]
+    return {
+        **dict(candidate),
+        "source_board_level": source_board,
+        "board_level": target_board,
+        "board_lane": target_lane,
+        "action": "next_auction",
+        "entry_kind": "next_auction",
+        "strategy_name": f"{_lane_label(target_lane)}竞价观察",
+        "selection_reasons": favorable[:4] or ["D日封板进入次日接力观察池"],
+        "reason": "D日结构入选，等待次日竞价确认",
+    }
+
+
+def _plan_source_sort_key(candidate: Mapping[str, object]) -> tuple[object, ...]:
+    quality = str(candidate.get("lane_quality_tier") or "")
+    return (
+        0 if quality == "A" else 1 if quality == "B" else 2,
+        -(_number(candidate.get("lane_rank_score")) or 0.0),
+        _integer(candidate.get("market_dragon_rank"), 999),
+        str(candidate.get("vt_symbol") or ""),
+    )
+
+
+def _has_observations(snapshot: Mapping[str, object]) -> bool:
+    recommendations = snapshot.get("recommendations")
+    recommendations = recommendations if isinstance(recommendations, Mapping) else {}
+    lanes = recommendations.get("lanes")
+    lanes = lanes if isinstance(lanes, Mapping) else {}
+    rows = lanes.get("next_auction")
+    return isinstance(rows, list) and bool(rows)
+
+
+def _board_lane(board_level: int) -> str:
+    if board_level <= 1:
+        return "first_board"
+    if board_level == 2:
+        return "one_to_two"
+    if board_level == 3:
+        return "two_to_three"
+    return "high_board"
+
+
+def _lane_label(lane: str) -> str:
+    return {
+        "first_board": "首板",
+        "one_to_two": "一进二",
+        "two_to_three": "二进三",
+        "high_board": "高板",
+    }.get(lane, "接力")
+
+
+def _integer(value: object, default: int) -> int:
+    try:
+        return int(float(value)) if value not in (None, "", "-") else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _number(value: object) -> float | None:
+    try:
+        return float(value) if value not in (None, "", "-") else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _warmup() -> None:
