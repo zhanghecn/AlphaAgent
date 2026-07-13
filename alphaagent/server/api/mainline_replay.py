@@ -10,7 +10,8 @@ Provides:
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+import threading
+from datetime import date, datetime, time, timedelta, timezone
 from time import monotonic
 from typing import Any
 
@@ -18,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import desc, func, select, text
 
+from alphaagent.data_sources.akshare_adapter import AkShareAdapter
 from alphaagent.server.core.responses import fail, ok
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import is_database_configured, session_scope
@@ -56,6 +58,89 @@ def _cache_set(key: tuple[Any, ...], payload: dict[str, Any], ttl_seconds: int |
     _RESPONSE_CACHE[key] = (monotonic() + ttl_seconds, payload)
 
 
+def _now_china() -> datetime:
+    return datetime.now(_CHINA_TZ)
+
+
+def _is_trading_weekday(d: date) -> bool:
+    return d.weekday() < 5
+
+
+def _is_mainline_realtime_window(now: datetime | None = None) -> bool:
+    """Return whether /mainline should prefer today's realtime overlay.
+
+    This is a pragmatic weekday/time guard, not a full exchange holiday calendar.
+    The realtime source itself remains authoritative: if it only has yesterday,
+    the response is marked delayed/fallback instead of inventing today's data.
+    """
+
+    current = now or _now_china()
+    if not _is_trading_weekday(current.date()):
+        return False
+    t = current.time()
+    return time(9, 15) <= t <= time(19, 0)
+
+
+def _default_live_trade_date(session) -> date | None:
+    if _is_mainline_realtime_window():
+        return _now_china().date()
+    latest_flow_date = _parse_optional_date(_latest_concept_flow_date(session))
+    if latest_flow_date is not None:
+        return latest_flow_date
+    return _latest_complete_daily_date(session)
+
+
+def _fetch_live_concept_flow(period: str = "即时") -> dict[str, Any]:
+    """Fetch concept fund-flow rows for the UI hot path without writing DB.
+
+    The cache is intentionally separate from historical sync state. Page refreshes
+    read this cache and only one request can refresh it at a time; stale data is
+    returned on source failure so the UI remains usable under public-source limits.
+    """
+
+    normalized_period = str(period or "即时")
+    cache_key = ("concept", normalized_period)
+    cached = _LIVE_FLOW_CACHE.get(cache_key)
+    now_mono = monotonic()
+    if cached and cached[0] > now_mono:
+        return {**cached[1], "cache_state": "fresh"}
+
+    with _LIVE_FLOW_LOCK:
+        cached = _LIVE_FLOW_CACHE.get(cache_key)
+        now_mono = monotonic()
+        if cached and cached[0] > now_mono:
+            return {**cached[1], "cache_state": "fresh"}
+        try:
+            payload = AkShareAdapter().sector_fund_flows(sector_type="concept", period=normalized_period)
+            payload = {
+                **payload,
+                "cache_state": "fresh",
+                "fetched_at": _now_china().isoformat(),
+                "resolved_trade_date": _flow_payload_trade_date(payload),
+            }
+            _LIVE_FLOW_CACHE[cache_key] = (now_mono + _LIVE_FLOW_CACHE_TTL_SECONDS, payload)
+            return payload
+        except Exception as exc:
+            if cached:
+                stale = {
+                    **cached[1],
+                    "cache_state": "stale",
+                    "source_error": exc.__class__.__name__,
+                    "resolved_trade_date": cached[1].get("resolved_trade_date") or _flow_payload_trade_date(cached[1]),
+                }
+                return stale
+            raise
+
+
+def _flow_payload_trade_date(payload: dict[str, Any]) -> str | None:
+    dates: list[str] = []
+    for item in payload.get("items") or []:
+        parsed = _parse_optional_date(item.get("trade_date"))
+        if parsed is not None:
+            dates.append(parsed.isoformat())
+    return max(dates) if dates else None
+
+
 router = APIRouter(
     prefix="/mainline-replay",
     tags=["mainline-replay"],
@@ -88,7 +173,11 @@ _BSE_LIMIT_UP_THRESHOLD = 29.0
 _RELATION_CANDIDATE_LIMIT = 360
 _CACHE_DEFAULT_TTL_SECONDS = 300
 _CACHE_LIVE_TTL_SECONDS = 30
+_LIVE_FLOW_CACHE_TTL_SECONDS = 60
+_CHINA_TZ = timezone(timedelta(hours=8))
 _RESPONSE_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
+_LIVE_FLOW_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+_LIVE_FLOW_LOCK = threading.Lock()
 _STYLE_STATUS_KEYWORDS = (
     "大盘",
     "中盘",
@@ -218,19 +307,54 @@ def live(
         trade_date = None
 
     with session_scope() as session:
-        latest_flow_date = _latest_concept_flow_date(session)
-        resolved_date = trade_date or _parse_optional_date(latest_flow_date)
+        resolved_date = trade_date or _default_live_trade_date(session)
         if resolved_date is None:
             return ok({"status": "empty", "ranking": [], "index": []})
-        cache_key = ("mainline_replay.live", resolved_date.isoformat(), int(limit), flow_period)
+        can_try_realtime = trade_date is None and _is_mainline_realtime_window()
+        cache_key = (
+            "mainline_replay.live",
+            resolved_date.isoformat(),
+            int(limit),
+            flow_period,
+            "realtime" if can_try_realtime else "history",
+        )
         cached = _cache_get(cache_key)
         if cached is not None:
             return ok(cached)
 
-        ranking = _live_ranking_for_date(session, resolved_date, max(limit, _LIVE_RANKING_CANDIDATE_LIMIT))
+        realtime_payload: dict[str, Any] | None = None
+        realtime_source_error: str | None = None
+        if can_try_realtime:
+            try:
+                realtime_payload = _fetch_live_concept_flow("即时")
+                payload_date = _parse_optional_date(realtime_payload.get("resolved_trade_date"))
+                if payload_date is not None:
+                    resolved_date = payload_date
+                ranking = _live_ranking_from_flow_items(
+                    session,
+                    resolved_date,
+                    realtime_payload.get("items") or [],
+                    max(limit, _LIVE_RANKING_CANDIDATE_LIMIT),
+                )
+            except Exception as exc:
+                realtime_source_error = exc.__class__.__name__
+                ranking = []
+        else:
+            ranking = []
+
+        if not ranking:
+            ranking = _live_ranking_for_date(session, resolved_date, max(limit, _LIVE_RANKING_CANDIDATE_LIMIT))
+            if not ranking and trade_date is None:
+                fallback_date = _parse_optional_date(_latest_concept_flow_date(session))
+                if fallback_date is not None and fallback_date != resolved_date:
+                    resolved_date = fallback_date
+                    ranking = _live_ranking_for_date(session, resolved_date, max(limit, _LIVE_RANKING_CANDIDATE_LIMIT))
+
         _enrich_concept_index_context(session, ranking, resolved_date, include_live_projection=True)
-        flow_top = _compute_flow_top(session, resolved_date, flow_period)
-        ranking = _sort_live_concept_ranking(ranking)[:limit]
+        ranking = _sort_live_concept_ranking(ranking)
+        flow_top = _live_flow_top_or_history(session, resolved_date, flow_period, realtime_payload)
+        flow_top = _attach_ranking_context_to_flow_top(flow_top, ranking)
+        ranking = ranking[:limit]
         latest_complete_daily = _latest_complete_daily_date(session)
         latest_snapshot_updated = session.execute(select(func.max(schema.stocks.c.updated_at))).scalar()
         latest_snapshot_trade_time = session.execute(select(func.max(schema.stocks.c.trade_time))).scalar()
@@ -241,6 +365,14 @@ def live(
             )
         ).scalar()
 
+    data_state = "realtime" if realtime_payload and ranking else "history_fallback"
+    if realtime_payload and realtime_payload.get("cache_state") == "stale":
+        data_state = "realtime_delayed"
+    source_parts = ["sector_fund_flows:concept"]
+    if realtime_payload:
+        source_parts.insert(0, "eastmoney.sector_fund_flow_rank:hot_cache")
+    if realtime_source_error:
+        source_parts.append(f"realtime_error={realtime_source_error}")
     payload = {
         "mode": "live",
         "trade_date": resolved_date.isoformat(),
@@ -249,12 +381,18 @@ def live(
         "flow_top": flow_top,
         "index": [],
         "status": "ready" if ranking else "empty",
-        "source": "sector_fund_flows:concept",
+        "source": ",".join(source_parts),
+        "data_state": data_state,
         "temporary_bar": True,
         "latest_minute_time": _iso_or_none(latest_minute_time),
         "snapshot_updated_at": _iso_or_none(latest_snapshot_updated),
+        "realtime_updated_at": (
+            realtime_payload.get("fetched_at")
+            if realtime_payload
+            else _iso_or_none(latest_snapshot_updated)
+        ),
         "snapshot_trade_time": str(latest_snapshot_trade_time) if latest_snapshot_trade_time else None,
-        "message": "收盘前动态计算：概念实时资金流 + 盘中快照；历史回放仍读概念评分缓存。",
+        "message": _live_message(data_state),
     }
     _cache_set(cache_key, payload, _CACHE_LIVE_TTL_SECONDS)
     return ok(payload)
@@ -295,7 +433,10 @@ def snapshot(
         _enrich_concept_index_context(session, ranking, date or t2, include_live_projection=False)  # type: ignore[arg-type]
         flow_top = _compute_flow_top(session, date, flow_period) if date is not None else None
         if date is not None:
-            ranking = _sort_live_concept_ranking(ranking)[:limit]
+            ranking = _sort_live_concept_ranking(ranking)
+            if flow_top is not None:
+                flow_top = _attach_ranking_context_to_flow_top(flow_top, ranking)
+            ranking = ranking[:limit]
 
     return ok({"mode": mode, "ranking": ranking, "flow_top": flow_top, "index": index_data, "status": "ready"})
 
@@ -1632,6 +1773,218 @@ def _sort_live_concept_ranking(ranking: list[dict[str, Any]]) -> list[dict[str, 
     return sorted(ranking, key=sort_key, reverse=True)
 
 
+def _live_message(data_state: str) -> str:
+    if data_state == "realtime":
+        return "盘中实时：概念资金流走热缓存，页面刷新不写历史库。"
+    if data_state == "realtime_delayed":
+        return "实时源暂时延迟：继续展示最近一次成功热缓存。"
+    return "实时源不可用或未到交易时段：已回退到本地最近历史资金流。"
+
+
+def _live_flow_top_or_history(
+    session,
+    d: date,
+    period: str,
+    realtime_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if period in {"即时", "5日", "10日"}:
+        payload = realtime_payload if period == "即时" else None
+        if payload is None and _is_mainline_realtime_window():
+            try:
+                payload = _fetch_live_concept_flow(period)
+            except Exception:
+                payload = None
+        if payload:
+            return _compute_flow_top_from_items(payload.get("items") or [], period)
+    return _compute_flow_top(session, d, period)
+
+
+def _compute_flow_top_from_items(items: list[dict[str, Any]], period: str = "即时", n: int = 10) -> dict[str, Any]:
+    rows: list[tuple[str, str, float]] = []
+    for item in items:
+        sector_id = str(item.get("id") or item.get("code") or "")
+        name = str(item.get("name") or sector_id)
+        net = _float_or_none(item.get("main_net_inflow"))
+        if not sector_id or net is None:
+            continue
+        if not _is_mainline_concept_meta({"name": name, "type": _MAINLINE_SECTOR_TYPE}):
+            continue
+        rows.append((sector_id, name, net))
+    rows.sort(key=lambda item: item[2], reverse=True)
+    inflows = [{"sector_id": s, "name": nm, "net_inflow": net} for s, nm, net in rows if net > 0][:n]
+    outflows = [{"sector_id": s, "name": nm, "net_inflow": net} for s, nm, net in rows if net < 0][-n:][::-1]
+    return {"inflows": inflows, "outflows": outflows, "period": period, "actual_days": None}
+
+
+def _attach_ranking_context_to_flow_top(
+    flow_top: dict[str, Any],
+    ranking: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Attach display context to flow top rows without changing flow ordering.
+
+    The left ranking and the fund-flow strip intentionally use different
+    rankings.  But a clicked flow row still needs the same detail payload as a
+    ranking row: index curve, continuation state, activity stats, and live fund
+    fields.  Keep ``net_inflow`` as the selected period's value.
+    """
+
+    return {
+        **flow_top,
+        "inflows": _attach_ranking_context_to_flow_items(flow_top.get("inflows") or [], ranking),
+        "outflows": _attach_ranking_context_to_flow_items(flow_top.get("outflows") or [], ranking),
+    }
+
+
+def _attach_ranking_context_to_flow_items(
+    flow_items: list[dict[str, Any]],
+    ranking: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    ranking_by_id = {str(item.get("sector_id")): item for item in ranking if item.get("sector_id")}
+    enriched: list[dict[str, Any]] = []
+    for flow_item in flow_items:
+        sector_id = str(flow_item.get("sector_id") or "")
+        context = ranking_by_id.get(sector_id)
+        if context is None:
+            enriched.append(flow_item)
+            continue
+        merged = {**context, **flow_item}
+        if merged.get("main_net_inflow") is None and flow_item.get("net_inflow") is not None:
+            merged["main_net_inflow"] = flow_item["net_inflow"]
+        if merged.get("accumulated_main_inflow") is None and flow_item.get("net_inflow") is not None:
+            merged["accumulated_main_inflow"] = flow_item["net_inflow"]
+        if "fund_inflow_available" not in merged:
+            merged["fund_inflow_available"] = flow_item.get("net_inflow") is not None
+        enriched.append(merged)
+    return enriched
+
+
+def _live_ranking_from_flow_items(
+    session,
+    d: date,
+    flow_items: list[dict[str, Any]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    sector_ids = [
+        str(item.get("id") or item.get("code") or "")
+        for item in flow_items
+        if item.get("id") or item.get("code")
+    ]
+    sector_ids = list(dict.fromkeys(sector_ids))
+    if not sector_ids:
+        return []
+
+    meta_by_id = _live_sector_meta(session, sector_ids)
+    score_by_id = _latest_score_map(session, sector_ids, d)
+    ranking: list[dict[str, Any]] = []
+    for item in flow_items:
+        sector_id = str(item.get("id") or item.get("code") or "")
+        if not sector_id:
+            continue
+        meta = meta_by_id.get(sector_id, {})
+        name = meta.get("name") or item.get("name") or sector_id
+        sector_type = meta.get("type") or _MAINLINE_SECTOR_TYPE
+        category = meta.get("category")
+        path = meta.get("path") or []
+        if not _is_mainline_concept_meta({"name": name, "type": sector_type, "category": category, "path": path}):
+            continue
+        score = score_by_id.get(sector_id, {})
+        ranking.append({
+            "sector_id": sector_id,
+            "name": name,
+            "heat_score": score.get("heat_score"),
+            "fund_score": score.get("fund_score"),
+            "momentum_score": score.get("momentum_score"),
+            "trend_state": score.get("trend_state"),
+            "rank_return": item.get("rank"),
+            "return_pct": item.get("change_pct"),
+            "historical_return_pct": score.get("return_pct"),
+            "confidence": None,
+            "main_net_inflow": item.get("main_net_inflow"),
+            "main_net_inflow_ratio": item.get("main_net_inflow_pct"),
+            "accumulated_main_inflow": item.get("main_net_inflow"),
+            "fund_inflow_available": item.get("main_net_inflow") is not None,
+            "stock_count": meta.get("stock_count"),
+            "leader_stock": item.get("leader_stock") or meta.get("leader_stock"),
+            "leader_change_pct": meta.get("leader_change_pct"),
+            "score_date": _iso_or_none(score.get("as_of_date")),
+            "flow_updated_at": _now_china().isoformat(),
+            "data_mode": "live",
+        })
+        if len(ranking) >= limit:
+            break
+    return ranking
+
+
+def _live_sector_meta(session, sector_ids: list[str]) -> dict[str, dict[str, Any]]:
+    rows = session.execute(
+        select(
+            schema.sectors.c.id,
+            schema.sectors.c.name,
+            schema.sectors.c.type,
+            schema.sectors.c.category,
+            schema.sectors.c.path,
+            schema.sectors.c.stock_count,
+            schema.sectors.c.leader_stock,
+            schema.sectors.c.leader_change_pct,
+        ).where(schema.sectors.c.id.in_(sector_ids))
+    ).all()
+    return {
+        str(row[0]): {
+            "name": row[1],
+            "type": row[2],
+            "category": row[3],
+            "path": row[4],
+            "stock_count": row[5],
+            "leader_stock": row[6],
+            "leader_change_pct": row[7],
+        }
+        for row in rows
+    }
+
+
+def _latest_score_map(session, sector_ids: list[str], d: date) -> dict[str, dict[str, Any]]:
+    latest_scores = (
+        select(
+            schema.sector_period_scores.c.sector_id,
+            func.max(schema.sector_period_scores.c.as_of_date).label("latest_score_date"),
+        )
+        .where(
+            schema.sector_period_scores.c.sector_id.in_(sector_ids),
+            schema.sector_period_scores.c.period == _DEFAULT_PERIOD,
+            schema.sector_period_scores.c.sector_type == _MAINLINE_SECTOR_TYPE,
+            schema.sector_period_scores.c.as_of_date < d,
+        )
+        .group_by(schema.sector_period_scores.c.sector_id)
+    ).subquery()
+    rows = session.execute(
+        select(
+            schema.sector_period_scores.c.sector_id,
+            schema.sector_period_scores.c.heat_score,
+            schema.sector_period_scores.c.fund_score,
+            schema.sector_period_scores.c.momentum_score,
+            schema.sector_period_scores.c.trend_state,
+            schema.sector_period_scores.c.return_pct,
+            schema.sector_period_scores.c.as_of_date,
+        )
+        .join(
+            latest_scores,
+            (latest_scores.c.sector_id == schema.sector_period_scores.c.sector_id)
+            & (latest_scores.c.latest_score_date == schema.sector_period_scores.c.as_of_date),
+        )
+    ).all()
+    return {
+        str(row[0]): {
+            "heat_score": row[1],
+            "fund_score": row[2],
+            "momentum_score": row[3],
+            "trend_state": row[4],
+            "return_pct": row[5],
+            "as_of_date": row[6],
+        }
+        for row in rows
+    }
+
+
 def _live_ranking_for_date(
     session,
     d: date,
@@ -1996,7 +2349,20 @@ def concept_search(
     if not is_database_configured():
         return ok({"status": "unavailable", "message": "数据库未配置"})
     with session_scope() as session:
-        items, _ = _fund_flow_map(session, trade_date, period)
+        source_flow_items: list[dict[str, Any]] | None = None
+        if trade_date == _now_china().date() and period in {"即时", "5日", "10日"} and _is_mainline_realtime_window():
+            try:
+                payload = _fetch_live_concept_flow(period)
+                source_flow_items = payload.get("items") or []
+                items = [
+                    (str(item.get("id") or item.get("code") or ""), str(item.get("name") or ""), net)
+                    for item in source_flow_items
+                    if (net := _float_or_none(item.get("main_net_inflow"))) is not None
+                ]
+            except Exception:
+                items, _ = _fund_flow_map(session, trade_date, period)
+        else:
+            items, _ = _fund_flow_map(session, trade_date, period)
         q_upper = q.upper()
         matched = [(s, nm, net) for s, nm, net in items if q_upper in nm.upper()]
         matched.sort(key=lambda x: x[2], reverse=True)
@@ -2004,6 +2370,26 @@ def concept_search(
             {"sector_id": s, "name": nm, "net_inflow": net}
             for s, nm, net in matched[:limit]
         ]
+        if result:
+            if source_flow_items is not None:
+                context_ranking = _live_ranking_from_flow_items(
+                    session,
+                    trade_date,
+                    source_flow_items,
+                    _LIVE_RANKING_CANDIDATE_LIMIT,
+                )
+            else:
+                context_ranking = _live_ranking_for_date(session, trade_date, _LIVE_RANKING_CANDIDATE_LIMIT)
+            _enrich_concept_index_context(
+                session,
+                context_ranking,
+                trade_date,
+                include_live_projection=trade_date == _now_china().date() and _is_mainline_realtime_window(),
+            )
+            result = _attach_ranking_context_to_flow_items(
+                result,
+                _sort_live_concept_ranking(context_ranking),
+            )
     return ok({"items": result, "q": q, "total": len(matched), "status": "ready"})
 
 

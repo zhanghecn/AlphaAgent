@@ -5,7 +5,7 @@
 """
 
 from contextlib import contextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
@@ -188,6 +188,7 @@ def test_live_uses_latest_sector_fund_flow_date(monkeypatch):
 
     monkeypatch.setattr(mainline_replay, "is_database_configured", lambda: True)
     monkeypatch.setattr(mainline_replay, "session_scope", fake_session_scope)
+    monkeypatch.setattr(mainline_replay, "_is_mainline_realtime_window", lambda: False)
 
     body = mainline_replay.live(limit=10)
 
@@ -195,6 +196,63 @@ def test_live_uses_latest_sector_fund_flow_date(monkeypatch):
     assert body["data"]["trade_date"] == "2026-06-29"
     assert body["data"]["source"] == "sector_fund_flows:concept"
     assert any("sector_fund_flows.trade_date" in sql for sql in captured)
+
+
+def test_live_defaults_to_today_realtime_hot_cache(monkeypatch):
+    class FakeResult:
+        def __init__(self, value=None):
+            self._value = value
+
+        def scalar(self):
+            return self._value
+
+    class FakeSession:
+        def execute(self, stmt):
+            del stmt
+            return FakeResult(None)
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    ranking = [{
+        "sector_id": "BK1431",
+        "name": "存储芯片",
+        "data_mode": "live",
+        "return_pct": 2.0,
+        "main_net_inflow": 1000.0,
+    }]
+
+    monkeypatch.setattr(mainline_replay, "is_database_configured", lambda: True)
+    monkeypatch.setattr(mainline_replay, "session_scope", fake_session_scope)
+    monkeypatch.setattr(mainline_replay, "_is_mainline_realtime_window", lambda: True)
+    monkeypatch.setattr(
+        mainline_replay,
+        "_now_china",
+        lambda: datetime(2026, 7, 10, 10, 30, tzinfo=timezone(timedelta(hours=8))),
+    )
+    monkeypatch.setattr(
+        mainline_replay,
+        "_fetch_live_concept_flow",
+        lambda period="即时": {
+            "items": [{"id": "BK1431", "name": "存储芯片", "trade_date": "2026-07-10"}],
+            "resolved_trade_date": "2026-07-10",
+            "fetched_at": "2026-07-10T10:30:00+08:00",
+            "cache_state": "fresh",
+        },
+    )
+    monkeypatch.setattr(mainline_replay, "_live_ranking_from_flow_items", lambda *args, **kwargs: ranking)
+    monkeypatch.setattr(mainline_replay, "_enrich_concept_index_context", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mainline_replay, "_live_flow_top_or_history", lambda *args, **kwargs: {"inflows": [], "outflows": [], "period": "即时", "actual_days": None})
+    monkeypatch.setattr(mainline_replay, "_latest_complete_daily_date", lambda session: date(2026, 7, 9))
+
+    body = mainline_replay.live(limit=10)
+
+    assert body["data"]["trade_date"] == "2026-07-10"
+    assert body["data"]["data_state"] == "realtime"
+    assert body["data"]["realtime_updated_at"] == "2026-07-10T10:30:00+08:00"
+    assert "hot_cache" in body["data"]["source"]
+    assert body["data"]["ranking"][0]["sector_id"] == "BK1431"
 
 
 def test_live_ranking_is_concept_only_query(monkeypatch):
@@ -253,6 +311,52 @@ def test_live_ranking_payload_does_not_expose_sector_type():
 
     assert items[0]["name"] == "存储芯片"
     assert "sector_type" not in items[0]
+
+
+def test_live_ranking_from_flow_items_uses_realtime_flow_and_previous_score():
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, stmt):
+            del stmt
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResult([
+                    ("BK1431", "存储芯片", "concept", None, [], 120, "龙头股", 4.2),
+                ])
+            return FakeResult([
+                ("BK1431", 88.0, 70.0, 60.0, "MAINLINE_UP", 12.0, date(2026, 7, 9)),
+            ])
+
+    items = mainline_replay._live_ranking_from_flow_items(
+        FakeSession(),
+        date(2026, 7, 10),
+        [{
+            "id": "BK1431",
+            "name": "存储芯片",
+            "rank": 1,
+            "change_pct": 2.5,
+            "main_net_inflow": 1234.0,
+            "main_net_inflow_pct": 1.2,
+            "leader_stock": "龙头股",
+        }],
+        limit=10,
+    )
+
+    assert items[0]["sector_id"] == "BK1431"
+    assert items[0]["return_pct"] == 2.5
+    assert items[0]["historical_return_pct"] == 12.0
+    assert items[0]["main_net_inflow"] == 1234.0
+    assert items[0]["score_date"] == "2026-07-09"
+    assert items[0]["data_mode"] == "live"
 
 
 def test_concept_index_context_enriches_live_projection_and_status():
@@ -369,6 +473,41 @@ def test_live_concept_sort_prefers_rolling_index_over_intraday_inflow():
     sorted_items = mainline_replay._sort_live_concept_ranking(ranking)
 
     assert sorted_items[0]["sector_id"] == "STORAGE"
+
+
+def test_flow_top_items_keep_flow_order_and_gain_detail_context():
+    flow_top = {
+        "inflows": [
+            {"sector_id": "FLOW", "name": "资金概念", "net_inflow": 9_000_000_000.0},
+            {"sector_id": "STORAGE", "name": "存储芯片", "net_inflow": 1_000_000_000.0},
+        ],
+        "outflows": [],
+        "period": "即时",
+        "actual_days": None,
+    }
+    ranking = [
+        {
+            "sector_id": "STORAGE",
+            "name": "存储芯片",
+            "continuation_status": "maintained",
+            "index_points": [{"date": "2026-07-09", "close": 100.0}],
+            "main_net_inflow": 1_000_000_000.0,
+        },
+        {
+            "sector_id": "FLOW",
+            "name": "资金概念",
+            "continuation_status": "new",
+            "index_points": [{"date": "2026-07-09", "close": 88.0}],
+            "main_net_inflow": 9_000_000_000.0,
+        },
+    ]
+
+    enriched = mainline_replay._attach_ranking_context_to_flow_top(flow_top, ranking)
+
+    assert [item["sector_id"] for item in enriched["inflows"]] == ["FLOW", "STORAGE"]
+    assert enriched["inflows"][0]["continuation_status"] == "new"
+    assert enriched["inflows"][0]["index_points"][0]["close"] == 88.0
+    assert enriched["inflows"][0]["net_inflow"] == 9_000_000_000.0
 
 
 def test_concept_sort_prefers_continuation_and_index_return_over_spike_count():

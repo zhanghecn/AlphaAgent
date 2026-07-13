@@ -95,13 +95,23 @@ export default function MainlineReplayPage() {
     [liveDate, timelineDates],
   );
   const [selectedDate, setSelectedDate] = useState<string>("");
+  const [datePinnedByUser, setDatePinnedByUser] = useState<boolean>(false);
   const [sentimentLookback, setSentimentLookback] = useState<number>(20);
   useEffect(() => {
     if (dates.length === 0) return;
     if (!selectedDate || !dates.includes(selectedDate)) {
       setSelectedDate(dates[0]);
+      setDatePinnedByUser(false);
+      return;
     }
-  }, [dates, selectedDate]);
+    if (!datePinnedByUser && selectedDate !== dates[0]) {
+      setSelectedDate(dates[0]);
+    }
+  }, [dates, selectedDate, datePinnedByUser]);
+  function handleDateChange(date: string) {
+    setDatePinnedByUser(true);
+    setSelectedDate(date);
+  }
   // 选中日期 == liveDate 走 live 实时数据；否则走历史 snapshot
   const source = pickDataSource(selectedDate, liveDate);
   const effectiveDate = source === "live" ? (liveDate ?? selectedDate) : selectedDate;
@@ -144,14 +154,17 @@ export default function MainlineReplayPage() {
   const [selectedSectorId, setSelectedSectorId] = useState<string>("");
   const [selectedSectorOverride, setSelectedSectorOverride] = useState<SectorRankItem | null>(null);
   const selectedSector = useMemo(() => {
-    const source = filteredRanking.length > 0 ? filteredRanking : ranking;
-    if (source.length === 0) return null;
+    const fallback = filteredRanking[0] ?? ranking[0] ?? null;
+    if (!selectedSectorId) return fallback;
     return (
-      source.find((item) => item.sector_id === selectedSectorId)
+      ranking.find((item) => item.sector_id === selectedSectorId)
       ?? (selectedSectorOverride?.sector_id === selectedSectorId ? selectedSectorOverride : null)
-      ?? source[0]
+      ?? fallback
     );
   }, [filteredRanking, ranking, selectedSectorId, selectedSectorOverride]);
+  useEffect(() => {
+    setSelectedSectorOverride(null);
+  }, [effectiveDate, flowPeriod]);
 
   function selectRankedSector(item: SectorRankItem) {
     setSelectedSectorOverride(null);
@@ -159,7 +172,7 @@ export default function MainlineReplayPage() {
   }
   const threeColRef = useRef<HTMLDivElement>(null);
   function selectTopConcept(item: FlowTopItem) {
-    setSelectedSectorOverride({ sector_id: item.sector_id, name: item.name });
+    setSelectedSectorOverride(flowTopItemToSectorRankItem(item));
     setSelectedSectorId(item.sector_id);
     threeColRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
@@ -192,11 +205,11 @@ export default function MainlineReplayPage() {
                 source === "live" ? "bg-emerald-400" : "bg-muted-foreground/50",
               )}
             />
-            {source === "live" ? "实时资金流 · 盘中 60s 刷新" : "历史评分缓存"}
+            {source === "live" ? "最新主线 · 自动刷新" : "历史日期"}
           </div>
           <div className="text-xs text-muted-foreground">
             {source === "live"
-              ? `实时 ${liveQ.data?.trade_date ?? "--"} · 基准日 ${liveQ.data?.base_daily_date ?? "--"}`
+              ? `${liveQ.data?.trade_date ?? "--"} · 基准日 ${liveQ.data?.base_daily_date ?? "--"}`
               : `历史 ${selectedDate || "--"}`}
           </div>
         </div>
@@ -210,7 +223,7 @@ export default function MainlineReplayPage() {
           )
         ) : (
           <>
-            <DateScrubber dates={dates} value={selectedDate} onChange={setSelectedDate} />
+            <DateScrubber dates={dates} value={selectedDate} onChange={handleDateChange} />
             {source === "live" && <LiveStatus data={liveQ.data} loading={liveQ.isLoading} />}
           </>
         )}
@@ -242,7 +255,7 @@ export default function MainlineReplayPage() {
           <div className="mb-2 flex items-baseline justify-between">
             <span className="text-xs font-medium">概念指数榜</span>
             <span className="text-[10px] text-muted-foreground">
-              {source === "live" ? "今日涨跌 · 连续状态" : "指数走势 · 热度"}
+              {source === "live" ? "按连续状态/指数涨幅排序" : "按指数走势/热度排序"}
             </span>
           </div>
           <ConceptTapeFilters value={tapeFilter} counts={tapeCounts} onChange={setTapeFilter} />
@@ -316,13 +329,31 @@ export default function MainlineReplayPage() {
 
 // ── 时间轴：当前日期 font-display 大字 + scrubber + 左右刻度 ──
 
-function LiveStatus({ data, loading }: { data?: { latest_minute_time?: string | null; snapshot_updated_at?: string | null; message?: string }; loading: boolean }) {
+function LiveStatus({
+  data,
+  loading,
+}: {
+  data?: {
+    latest_minute_time?: string | null;
+    realtime_updated_at?: string | null;
+    snapshot_updated_at?: string | null;
+    data_state?: string;
+    message?: string;
+  };
+  loading: boolean;
+}) {
   if (loading) return <LoadingState rows={1} />;
+  const updatedAt = data?.realtime_updated_at ?? data?.snapshot_updated_at;
+  const stateLabel = data?.data_state === "realtime"
+    ? "盘中实时"
+    : data?.data_state === "realtime_delayed"
+      ? "实时源延迟"
+      : "最近可用";
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-      <span>源表：sector_fund_flows</span>
-      <span>分钟线：{shortDateTime(data?.latest_minute_time)}</span>
-      <span>快照：{shortDateTime(data?.snapshot_updated_at)}</span>
+      <span>{stateLabel}</span>
+      <span>更新于：{shortDateTime(updatedAt)}</span>
+      {data?.latest_minute_time && <span>分钟：{shortDateTime(data.latest_minute_time)}</span>}
       <span className="text-indigo-300">{data?.message ?? "动态计算中"}</span>
     </div>
   );
@@ -1143,6 +1174,15 @@ function conceptStatus(item: SectorRankItem): NormalizedConceptStatus {
   return "watch";
 }
 
+function flowTopItemToSectorRankItem(item: FlowTopItem): SectorRankItem {
+  return {
+    ...item,
+    main_net_inflow: item.main_net_inflow ?? item.net_inflow,
+    accumulated_main_inflow: item.accumulated_main_inflow ?? item.net_inflow,
+    fund_inflow_available: item.fund_inflow_available ?? item.net_inflow != null,
+  };
+}
+
 function matchesTapeFilter(item: SectorRankItem, filter: ConceptTapeFilter): boolean {
   if (filter === "all") return true;
   return conceptStatus(item) === filter;
@@ -1301,7 +1341,10 @@ function TopicFlowStrip({
   return (
     <div className="rounded-lg border bg-card p-3">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-        <span className="text-xs font-medium">概念资金流</span>
+        <div className="flex items-baseline gap-2">
+          <span className="text-xs font-medium">概念资金流</span>
+          <span className="text-[10px] text-muted-foreground">按主力净流入排序</span>
+        </div>
         <div className="flex rounded-md border bg-background p-0.5">
           {FLOW_PERIODS.map((p) => (
             <button

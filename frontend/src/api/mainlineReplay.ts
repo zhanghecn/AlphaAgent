@@ -61,7 +61,7 @@ export interface IndexQuote {
   turnover: number | null;
 }
 
-export interface FlowTopItem {
+export interface FlowTopItem extends Partial<Omit<SectorRankItem, "sector_id" | "name">> {
   sector_id: string;
   name: string;
   net_inflow: number;
@@ -81,8 +81,10 @@ export interface SnapshotData {
   index: IndexQuote[];
   status: string;
   source?: string;
+  data_state?: "realtime" | "realtime_delayed" | "history_fallback" | string;
   temporary_bar?: boolean;
   latest_minute_time?: string | null;
+  realtime_updated_at?: string | null;
   snapshot_updated_at?: string | null;
   snapshot_trade_time?: string | null;
   message?: string;
