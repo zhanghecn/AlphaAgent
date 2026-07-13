@@ -539,7 +539,31 @@ def _signal(
                 "warmup_main_net_inflow_ratio": _number(
                     candidate.get("warmup_main_net_inflow_ratio")
                 ),
+                "warmup_trend_state": candidate.get("warmup_trend_state"),
+                "warmup_flow_trade_date": candidate.get("warmup_flow_trade_date"),
+                "warmup_touch_count": candidate.get("warmup_touch_count"),
                 "warmup_execution_effect": "none_research_only",
+            }
+        )
+    if str(signal["board_lane"]) == "first_board" and candidate.get(
+        "rotation_shadow_state"
+    ):
+        signal.update(
+            {
+                "rotation_shadow_state": candidate.get("rotation_shadow_state"),
+                "rotation_shadow_passed": candidate.get("rotation_shadow_passed")
+                is True,
+                "rotation_shadow_reason_codes": list(
+                    candidate.get("rotation_shadow_reason_codes") or []
+                ),
+                "rotation_shadow_reason": candidate.get("rotation_shadow_reason"),
+                "rotation_shadow_signal_time": candidate.get(
+                    "rotation_shadow_signal_time"
+                ),
+                "rotation_shadow_entry_price": _number(
+                    candidate.get("rotation_shadow_entry_price")
+                ),
+                "rotation_shadow_execution_effect": "none_research_only",
             }
         )
     return signal

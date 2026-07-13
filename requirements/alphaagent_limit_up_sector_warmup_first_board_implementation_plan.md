@@ -232,3 +232,48 @@ Check `/limit-up` on desktop and mobile, confirm the first-board research compar
 - [ ] **Step 5: Inspect final diff and status**
 
 Run `git diff --check`, list only task-owned files, and leave all unrelated dirty worktree changes intact. Do not commit without an explicit user request.
+
+### Task 8: Post-Holdout Warmup Quality Gate
+
+**Files:**
+- Modify: `alphaagent/server/services/limit_up/sector_warmup.py`
+- Modify: `alphaagent/server/services/limit_up/sector_warmup_research.py`
+- Modify: `tests/alphaagent/test_limit_up_sector_warmup.py`
+- Modify: `frontend/src/api/limitUp.ts`
+- Modify: `frontend/src/features/limitUp/SectorWarmupResearchPanel.tsx`
+- Modify: `frontend/src/features/limitUp/SectorWarmupResearchPanel.spec.tsx`
+- Modify: `memory/06_backtests/limit_up_sector_warmup_first_board.md`
+- Modify: `memory/06_backtests/README.md`
+
+- [x] **Step 1: Add failing pure-rule and report tests**
+
+Prove that `warmup_quality_gate` requires confirmed warmup, a score below 70 and
+`prior_industry_sealed_count > 0`; missing fields and each failed rule must return a
+stable rejection code. Prove that the variant is distinct, research-only and cannot
+make `simulation_eligible` true from old holdout results.
+
+- [x] **Step 2: Add failing loss and missed-winner diagnostic tests**
+
+Build a locked-holdout fixture containing a failed-board loss, a crowded loss, a
+profitable baseline skipped by the original gate and a non-profitable skip. Assert
+that only the intended trades appear and all explanations use signal-time fields.
+
+- [x] **Step 3: Implement the frozen quality gate and report contract**
+
+Add the fifth comparison variant, phase summaries, selected trades, a separate
+`quality_gate_validation` object and bounded diagnostic lists. Keep the existing
+acceptance target as `warmup_gate`; quality rejection leaves that date empty instead
+of backfilling a lower-ranked candidate. Never read outcome fields when selecting or
+explaining a gate decision.
+
+- [x] **Step 4: Render the hypothesis and individual diagnostics**
+
+Extend the typed API contract and show the quality-gate row, its post-holdout warning,
+forward sample count, original-gate losses and top missed winners in the existing
+unframed panel. Do not add controls or alter live recommendations.
+
+- [x] **Step 5: Recompute evidence and run regression checks**
+
+Run the focused backend and frontend tests, all limit-up tests, frontend build and
+`git diff --check`. Recompute the PostgreSQL report and record full/OOS/holdout/forward
+metrics without relabeling the old holdout as new validation.

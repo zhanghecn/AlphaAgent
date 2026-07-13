@@ -22,6 +22,9 @@ from alphaagent.server.services.limit_up.live_policy import (
     session_stage,
 )
 from alphaagent.server.services.limit_up.live_evidence import attach_historical_evidence
+from alphaagent.server.services.limit_up.first_board_dual_lane import (
+    attach_rotation_shadow,
+)
 from alphaagent.server.services.limit_up.lane_research import (
     evaluate_lane_candidate,
     select_daily_lane_portfolio,
@@ -75,6 +78,8 @@ def build_live_snapshot(
     )
     candidates = _enrich_candidates(source_rows, pool_payload, stock_context)
     market_context = _market_context(candidates, stock_context, previous_snapshot)
+    stale_market_date = market_date != local_at.date() or session_stage(local_at) == "closed"
+    snapshot_mode = "stale_snapshot" if stale_market_date else "live_snapshot"
     sector_front = rank_live_candidates(
         candidates,
         limit=max(len(candidates), 5),
@@ -82,6 +87,16 @@ def build_live_snapshot(
     _attach_lane_decisions(sector_front, market_context, local_at)
     _attach_warmup_shadow(sector_front)
     _attach_stability(sector_front, previous_snapshot, local_at)
+    sector_front[:] = attach_rotation_shadow(
+        sector_front,
+        {
+            "trade_date": market_date.isoformat(),
+            "captured_at": local_at.isoformat(),
+            "session_stage": session_stage(local_at),
+            "mode": snapshot_mode,
+            "data_quality": {"is_stale": stale_market_date},
+        },
+    )
     ranked = rank_live_opportunities(sector_front)
     recommendations = build_live_recommendations(
         ranked,
@@ -95,14 +110,13 @@ def build_live_snapshot(
             lane_validations,
         )
     source_errors = list(stock_context.get("source_errors") or [])
-    stale_market_date = market_date != local_at.date() or session_stage(local_at) == "closed"
     source_updated_at = _latest_source_time(quote_payload, pool_payload)
     return {
         "trade_date": market_date.isoformat(),
         "captured_at": local_at.isoformat(),
         "session_stage": session_stage(local_at),
         "strategy_version": STRATEGY_VERSION,
-        "mode": "stale_snapshot" if stale_market_date else "live_snapshot",
+        "mode": snapshot_mode,
         "source": _source_name(quote_payload, pool_payload),
         "source_updated_at": source_updated_at,
         "market_context": market_context,
@@ -589,6 +603,8 @@ def _attach_warmup_shadow(candidates: list[dict[str, object]]) -> None:
                 "warmup_main_net_inflow_ratio": observation.get(
                     "main_net_inflow_ratio"
                 ),
+                "warmup_trend_state": observation.get("trend_state"),
+                "warmup_flow_trade_date": observation.get("flow_trade_date"),
             }
         )
     candidates[:] = attach_dynamic_group_leader_ranks(candidates)

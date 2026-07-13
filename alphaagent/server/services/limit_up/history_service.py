@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from copy import deepcopy
 from datetime import date, datetime, timezone
 from statistics import mean, median
 import threading
@@ -12,10 +13,12 @@ from alphaagent.market.cache import TTLCache
 from alphaagent.server.services.limit_up import (
     cash_backtest,
     factor_audit,
+    first_board_dual_lane,
     history_engine,
     history_repository,
     lane_repository,
     live_evidence,
+    live_repository,
     sector_warmup_research,
     walk_forward_model,
 )
@@ -36,6 +39,11 @@ _BUILD_STATE: dict[str, object] = {
 LANE_RULE_FREEZE_DATE = date(2026, 7, 12)
 BACKTEST_SCOPES = ("portfolio", *BOARD_LANES)
 PORTFOLIO_EXECUTION_LANES = ("first_board", "two_to_three", "high_board")
+SECTOR_WARMUP_CASH_VARIANTS = (
+    ("baseline", "baseline", "当前首板 Top1"),
+    ("warmup_gate", "warmup_gate", "原预热准入门"),
+    ("continuation_quality", "warmup_quality_gate", "延续质量门"),
+)
 
 
 def start_history_rebuild() -> dict[str, object]:
@@ -172,14 +180,270 @@ def get_sector_warmup_research(
             end,
         )
         data_coverage = history_repository.load_sector_warmup_data_coverage()
-        return sector_warmup_research.build_sector_warmup_research_report(
+        report = sector_warmup_research.build_sector_warmup_research_report(
             rows,
             start=start,
             end=end,
             data_coverage=data_coverage,
         )
+        selected = sector_warmup_research.select_sector_warmup_variant_trades(
+            rows,
+            start=start,
+            end=end,
+        )
+        return _sector_warmup_static_bundle(report, rows, selected)
 
-    return _SECTOR_WARMUP_REPORT_CACHE.get_or_set(cache_key, 21_600, load)
+    bundle = _SECTOR_WARMUP_REPORT_CACHE.get_or_set(cache_key, 21_600, load)
+    return _sector_warmup_report_with_forward_rotation(bundle, start=start, end=end)
+
+
+def _sector_warmup_static_bundle(
+    report: Mapping[str, object],
+    rows: Sequence[Mapping[str, object]],
+    selected: Mapping[str, Sequence[Mapping[str, object]]],
+) -> dict[str, object]:
+    config = cash_backtest.CashBacktestConfig()
+    orders_by_variant = {
+        variant: [
+            dict(order)
+            for order in selected.get(source_variant, ())
+            if _cash_signal_ready(order)
+        ]
+        for variant, source_variant, _ in SECTOR_WARMUP_CASH_VARIANTS
+    }
+    all_orders = [
+        order
+        for orders in orders_by_variant.values()
+        for order in orders
+    ]
+    bars, trade_dates = _account_market_data(rows, all_orders)
+    accounts = {
+        variant: _simulate_account(
+            orders_by_variant[variant],
+            bars,
+            trade_dates,
+            "next_open",
+            config,
+        )
+        for variant, _, _ in SECTOR_WARMUP_CASH_VARIANTS
+    }
+    comparisons = [
+        _sector_cash_comparison(variant, label, accounts[variant])
+        for variant, _, label in SECTOR_WARMUP_CASH_VARIANTS
+    ]
+    return {
+        "report": dict(report),
+        "orders_by_variant": orders_by_variant,
+        "bars": bars,
+        "trade_dates": trade_dates,
+        "accounts": accounts,
+        "comparisons": comparisons,
+    }
+
+
+def _sector_warmup_report_with_forward_rotation(
+    bundle: Mapping[str, object],
+    *,
+    start: date | None,
+    end: date | None,
+) -> dict[str, object]:
+    report = deepcopy(bundle["report"])
+    rotation = _load_forward_rotation(start=start, end=end)
+    trigger_signals = [
+        dict(signal) for signal in rotation.pop("trigger_signals", [])
+    ]
+    try:
+        matured, pending_count, rotation_bars, rotation_dates = (
+            _mature_rotation_signals(trigger_signals)
+        )
+    except Exception as exc:  # noqa: BLE001
+        matured, pending_count, rotation_bars, rotation_dates = (
+            [],
+            len(trigger_signals),
+            [],
+            [],
+        )
+        rotation["status"] = "unavailable"
+        rotation["unavailable_reason"] = (
+            f"rotation_outcome_load_failed:{exc.__class__.__name__}"
+        )
+    continuation_orders = [
+        dict(order)
+        for order in bundle["orders_by_variant"]["continuation_quality"]
+    ]
+    continuation_account = bundle["accounts"]["continuation_quality"]
+    if matured:
+        dual_orders = _deduplicate_signals([*continuation_orders, *matured])
+        dual_bars = _merge_account_bars(bundle["bars"], rotation_bars)
+        dual_dates = sorted({*bundle["trade_dates"], *rotation_dates})
+        dual_account = _simulate_account(
+            dual_orders,
+            dual_bars,
+            dual_dates,
+            "next_open",
+            cash_backtest.CashBacktestConfig(),
+        )
+    else:
+        dual_account = deepcopy(continuation_account)
+
+    rotation.update(
+        {
+            "pending_trade_count": pending_count,
+            "closed_trade_count": len(matured),
+            "account_effect": "none_until_d1_closed" if not matured else "included",
+        }
+    )
+    static_comparisons = deepcopy(bundle["comparisons"])
+    static_comparisons.append(
+        _sector_cash_comparison("dual_lane", "延续 + 日内轮动", dual_account)
+    )
+    report["cash_accounts"] = {
+        "execution_version": cash_backtest.ACCOUNT_EXECUTION_VERSION,
+        "exit_mode": "next_open",
+        "account_config": dict(dual_account["account_config"]),
+        "comparisons": static_comparisons,
+    }
+    report["rotation_forward"] = rotation
+    return report
+
+
+def _load_forward_rotation(
+    *,
+    start: date | None,
+    end: date | None,
+) -> dict[str, object]:
+    rotation_start = max(
+        start or first_board_dual_lane.ROTATION_FORWARD_START,
+        first_board_dual_lane.ROTATION_FORWARD_START,
+    )
+    if end is not None and end < rotation_start:
+        return first_board_dual_lane.collect_rotation_forward_evidence(
+            [],
+            forward_start=rotation_start,
+        )
+    try:
+        snapshots = live_repository.load_snapshots_between(rotation_start, end)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "unavailable",
+            "forward_start_date": rotation_start.isoformat(),
+            "historical_substitution": False,
+            "snapshot_count": 0,
+            "snapshot_day_count": 0,
+            "evaluated_candidate_count": 0,
+            "watch_count": 0,
+            "missed_count": 0,
+            "trigger_count": 0,
+            "trigger_signals": [],
+            "recent_observations": [],
+            "unavailable_reason": f"snapshot_load_failed:{exc.__class__.__name__}",
+        }
+    return first_board_dual_lane.collect_rotation_forward_evidence(
+        snapshots,
+        forward_start=rotation_start,
+    )
+
+
+def _mature_rotation_signals(
+    trigger_signals: Sequence[Mapping[str, object]],
+) -> tuple[list[dict[str, object]], int, list[dict[str, object]], list[date]]:
+    if not trigger_signals:
+        return [], 0, [], []
+    calendar = [
+        parsed
+        for value in live_repository.list_daily_trade_dates()
+        if (parsed := _optional_date(value)) is not None
+    ]
+    dated_signals: list[dict[str, object]] = []
+    for raw in trigger_signals:
+        signal = dict(raw)
+        entry_date = _optional_date(signal.get("entry_date"))
+        result_date = next(
+            (trade_date for trade_date in calendar if entry_date and trade_date > entry_date),
+            None,
+        )
+        if entry_date is not None and result_date is not None:
+            signal["result_date"] = result_date.isoformat()
+            dated_signals.append(signal)
+    if not dated_signals:
+        return [], len(trigger_signals), [], calendar
+
+    entry_dates = [_optional_date(signal.get("entry_date")) for signal in dated_signals]
+    result_dates = [_optional_date(signal.get("result_date")) for signal in dated_signals]
+    load_start = min(value for value in entry_dates if value is not None)
+    load_end = max(value for value in result_dates if value is not None)
+    symbols = [str(signal.get("vt_symbol") or "") for signal in dated_signals]
+    bars = history_repository.load_account_daily_bars(symbols, load_start, load_end)
+    bar_index = {
+        (str(bar.get("vt_symbol") or ""), str(bar.get("trade_date") or "")[:10]): bar
+        for bar in bars
+    }
+    matured: list[dict[str, object]] = []
+    for signal in dated_signals:
+        symbol = str(signal.get("vt_symbol") or "")
+        entry_date = str(signal.get("entry_date") or "")[:10]
+        result_date = str(signal.get("result_date") or "")[:10]
+        entry_bar = bar_index.get((symbol, entry_date))
+        result_bar = bar_index.get((symbol, result_date))
+        if entry_bar is None or result_bar is None:
+            continue
+        signal["outcome"] = {
+            "entry_day_close_price": entry_bar.get("close_price"),
+            "next_open_price": result_bar.get("open_price"),
+            "next_close_price": result_bar.get("close_price"),
+        }
+        matured.append(signal)
+    return matured, len(trigger_signals) - len(matured), bars, calendar
+
+
+def _sector_cash_comparison(
+    variant: str,
+    label: str,
+    account: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        "variant": variant,
+        "label": label,
+        "summary": dict(account.get("execution_summary") or {}),
+    }
+
+
+def _deduplicate_signals(
+    signals: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    unique: dict[tuple[str, str], dict[str, object]] = {}
+    for signal in signals:
+        key = (
+            str(signal.get("entry_date") or signal.get("signal_date") or "")[:10],
+            str(signal.get("vt_symbol") or ""),
+        )
+        unique.setdefault(key, dict(signal))
+    return list(unique.values())
+
+
+def _cash_signal_ready(signal: Mapping[str, object]) -> bool:
+    return bool(
+        signal.get("vt_symbol")
+        and _optional_date(signal.get("entry_date") or signal.get("signal_date"))
+        and _number(signal.get("entry_price"))
+    )
+
+
+def _merge_account_bars(
+    left: Sequence[Mapping[str, object]],
+    right: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    merged = {
+        (str(bar.get("vt_symbol") or ""), str(bar.get("trade_date") or "")[:10]): dict(bar)
+        for bar in [*left, *right]
+    }
+    return sorted(
+        merged.values(),
+        key=lambda bar: (
+            str(bar.get("trade_date") or ""),
+            str(bar.get("vt_symbol") or ""),
+        ),
+    )
 
 
 def start_backtest_cache_warmup() -> dict[str, object]:

@@ -11,6 +11,8 @@ MIN_SHARED_STOCKS = 5
 MIN_JACCARD = 0.35
 MIN_SMALLER_SET_COVERAGE = 0.70
 WARMUP_EXECUTION_EFFECT = "none_research_only"
+WARMUP_QUALITY_SCORE_CEILING = 70.0
+WARMUP_QUALITY_HYPOTHESIS_STATUS = "post_holdout_hypothesis"
 
 STYLE_SECTOR_KEYWORDS = (
     "昨日",
@@ -139,6 +141,52 @@ def historical_warmup_proxy(
     }
 
 
+def historical_warmup_quality_gate(
+    candidate: Mapping[str, object],
+) -> dict[str, object]:
+    """Evaluate the frozen post-holdout quality hypothesis using signal-time data."""
+
+    warmup = historical_warmup_proxy(candidate)
+    score = _number(warmup.get("score"))
+    sealed_count = _candidate_number(candidate, "prior_industry_sealed_count")
+    rejection_reasons: list[str] = []
+    if not warmup["available"]:
+        rejection_reasons.append("warmup_unavailable")
+    elif not warmup["confirmed"]:
+        rejection_reasons.append("warmup_not_confirmed")
+    if score is not None and score >= WARMUP_QUALITY_SCORE_CEILING:
+        rejection_reasons.append("warmup_score_crowded")
+    if sealed_count is None:
+        rejection_reasons.append("prior_industry_sealed_count_missing")
+    elif sealed_count <= 0:
+        rejection_reasons.append("prior_industry_no_sealed_expansion")
+
+    available = bool(warmup["available"] and sealed_count is not None)
+    passed = available and not rejection_reasons
+    if passed:
+        state = "qualified"
+    elif available:
+        state = "rejected"
+    else:
+        state = "unavailable"
+    return {
+        "available": available,
+        "passed": passed,
+        "state": state,
+        "hypothesis_status": WARMUP_QUALITY_HYPOTHESIS_STATUS,
+        "execution_effect": WARMUP_EXECUTION_EFFECT,
+        "rejection_reasons": rejection_reasons,
+        "components": {
+            "warmup_confirmed": bool(warmup["confirmed"]),
+            "warmup_score": score,
+            "score_ceiling_exclusive": WARMUP_QUALITY_SCORE_CEILING,
+            "prior_industry_sealed_count": (
+                int(sealed_count) if sealed_count is not None else None
+            ),
+        },
+    }
+
+
 def live_warmup_observation(
     contexts: Sequence[Mapping[str, object]],
 ) -> dict[str, object]:
@@ -184,6 +232,10 @@ def attach_dynamic_group_leader_ranks(
             grouped[group_id].append((index, candidate))
 
     for rows in grouped.values():
+        touch_count = sum(
+            str(candidate.get("state") or "") in {"sealed", "resealed", "failed"}
+            for _, candidate in rows
+        )
         ordered = sorted(
             rows,
             key=lambda item: (
@@ -193,6 +245,7 @@ def attach_dynamic_group_leader_ranks(
         )
         for rank, (index, _) in enumerate(ordered, start=1):
             result[index]["warmup_leader_rank"] = rank
+            result[index]["warmup_touch_count"] = touch_count
             result[index]["warmup_execution_effect"] = WARMUP_EXECUTION_EFFECT
     return result
 
@@ -251,6 +304,7 @@ def _live_context_observation(
         "main_net_inflow": main_net_inflow,
         "main_net_inflow_ratio": flow_ratio,
         "trend_state": context.get("trend_state"),
+        "flow_trade_date": context.get("flow_trade_date"),
         "sector_id": sector_id,
         "sector_name": sector_name,
     }

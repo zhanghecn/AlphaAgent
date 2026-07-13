@@ -502,6 +502,13 @@ def _concept_group_contexts(
         heat_values = _numbers_for_keys(scores, sector_ids, "heat_score")
         inflow_values = _numbers_for_keys(flows, sector_ids, "main_net_inflow")
         ratio_values = _numbers_for_keys(flows, sector_ids, "main_net_inflow_ratio")
+        flow_dates = sorted(
+            {
+                str(flows.get(sector_id, {}).get("trade_date") or "")[:10]
+                for sector_id in sector_ids
+                if flows.get(sector_id, {}).get("trade_date") not in (None, "")
+            }
+        )
         contexts.append(
             {
                 "group_id": group_id,
@@ -519,6 +526,7 @@ def _concept_group_contexts(
                 "main_net_inflow_ratio": (
                     round(median(ratio_values), 4) if ratio_values else None
                 ),
+                "flow_trade_date": flow_dates[0] if len(flow_dates) == 1 else None,
                 "source": group.get("source"),
             }
         )
