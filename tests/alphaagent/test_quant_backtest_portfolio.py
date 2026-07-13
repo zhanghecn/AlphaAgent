@@ -10585,8 +10585,10 @@ def test_backtest_list_filters_current_strategy_version_when_strategy_requested(
         for element in visitors.iterate(captured_statements[0])
         if hasattr(element, "value")
     ]
+    strategy = engine.get_strategy("mainline_dragon_pullback")
+    assert strategy is not None
     assert "mainline_dragon_pullback" in bind_values
-    assert "0.1.58" in bind_values
+    assert strategy.version in bind_values
     assert [item["strategy_version"] for item in result["items"]] == ["0.1.8"]
 
 
