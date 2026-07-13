@@ -249,6 +249,7 @@ def load_bars(session, vt_symbols: list[str], trade_date: date, lookback_days: i
                 close_price=float(row["close_price"]),
                 volume=row.get("volume"),
                 turnover=row.get("turnover"),
+                turnover_rate=row.get("turnover_rate"),
                 change_pct=row.get("change_pct"),
             )
         )

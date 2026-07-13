@@ -32,6 +32,7 @@ class Bar:
     volume: float | None = None
     turnover: float | None = None
     change_pct: float | None = None
+    turnover_rate: float | None = None
 
 
 @dataclass

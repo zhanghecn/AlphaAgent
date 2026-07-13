@@ -4457,6 +4457,7 @@ def _daily_bars_by_symbol(
                 close_price=float(row["close_price"]),
                 volume=row.get("volume"),
                 turnover=row.get("turnover"),
+                turnover_rate=row.get("turnover_rate"),
                 change_pct=row.get("change_pct"),
             )
         )
@@ -5722,6 +5723,7 @@ def _signal_snapshot_for_date(
             close_price=float(row["close_price"]),
             volume=row.get("volume"),
             turnover=row.get("turnover"),
+            turnover_rate=row.get("turnover_rate"),
             change_pct=row.get("change_pct"),
         )
         for row in rows

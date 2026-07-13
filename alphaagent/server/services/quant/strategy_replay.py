@@ -759,6 +759,7 @@ def _load_all_bars(session, vt_symbols: list[str], start: date, end: date) -> di
                 close_price=float(row["close_price"]),
                 volume=row.get("volume"),
                 turnover=row.get("turnover"),
+                turnover_rate=row.get("turnover_rate"),
                 change_pct=row.get("change_pct"),
             )
         )

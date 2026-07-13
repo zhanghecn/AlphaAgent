@@ -193,6 +193,7 @@ AkShare/东方财富 `stock_zt_pool_em + stock_zt_pool_zbgc_em` 只适合近期�
 当前产品口径：
 
 - 普通量化产品路径只公开 `mainline_dragon_pullback`。
+- 日线筛选、组合回测、查询复核和策略回放构造 `Bar` 时都保留 `stock_daily_bars.turnover_rate`；`Bar` 继续保持原有 `change_pct` 位置参数顺序，避免旧调用静默错位。
 - 历史量化、历史候选缓存、默认 `/quant` 候选展示和自动买入只使用完整日线交易日；`stock_daily_bars` 当日只有部分股票覆盖时不能作为收盘历史结果，也不能复用已落库的半截日线 run。
 - 最新完整交易日的 `quant_signal_runs.params.daily_symbol_count` 必须与当前日线覆盖数一致；缺失该字段或覆盖数不一致的最新日旧 run 不能复用，日线补全后要重新生成候选。
 - `GET /api/quant/trading-dates` 同时返回本地最新有记录日期和 `latest_complete_trade_date`。前端历史候选和策略研究截止日期必须优先使用 `latest_complete_trade_date`。
