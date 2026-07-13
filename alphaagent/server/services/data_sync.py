@@ -29,6 +29,7 @@ from typing import Any, Callable, Iterable, Literal, Sequence
 from uuid import uuid4
 
 from sqlalchemy import and_, desc, func, select, text
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.engine import Engine
 
 from alphaagent.data_sources.akshare_adapter import AkShareAdapter
@@ -5889,60 +5890,64 @@ def _fill_change_pct_from_close(items: list[dict[str, Any]]) -> list[dict[str, A
 
 
 def _upsert_daily_bars(symbol: str, exchange: str, items: list[dict[str, Any]]) -> int:
-    """Upsert daily bar rows for a single stock."""
+    """Upsert one stock's daily bars in a single PostgreSQL statement."""
     if not items:
         return 0
     normalized = normalize_exchange(symbol, exchange)
     vts = vt_symbol(symbol, normalized)
-    written = 0
+    values_by_date: dict[date, dict[str, Any]] = {}
+    for item in items:
+        trade_date_raw = item.get("trade_date")
+        if isinstance(trade_date_raw, date):
+            trade_date = trade_date_raw
+        elif isinstance(trade_date_raw, str):
+            try:
+                trade_date = date.fromisoformat(trade_date_raw[:10])
+            except ValueError:
+                continue
+        else:
+            continue
+        values_by_date[trade_date] = {
+            "vt_symbol": vts,
+            "trade_date": trade_date,
+            "open_price": float(item.get("open") or item.get("open_price") or 0),
+            "close_price": float(item.get("close") or item.get("close_price") or 0),
+            "high_price": float(item.get("high") or item.get("high_price") or 0),
+            "low_price": float(item.get("low") or item.get("low_price") or 0),
+            "volume": item.get("volume"),
+            "turnover": item.get("turnover"),
+            "turnover_rate": item.get("turnover_rate"),
+            "change_pct": item.get("change_pct"),
+            "source": str(item.get("source") or "akshare"),
+            "raw": item.get("raw") or {},
+        }
+    values = list(values_by_date.values())
+    if not values:
+        return 0
+
+    statement = postgresql_insert(schema.stock_daily_bars).values(values)
+    update_columns = (
+        "open_price",
+        "close_price",
+        "high_price",
+        "low_price",
+        "volume",
+        "turnover",
+        "turnover_rate",
+        "change_pct",
+        "source",
+        "raw",
+    )
+    statement = statement.on_conflict_do_update(
+        index_elements=(schema.stock_daily_bars.c.vt_symbol, schema.stock_daily_bars.c.trade_date),
+        set_={
+            **{column: getattr(statement.excluded, column) for column in update_columns},
+            "updated_at": func.now(),
+        },
+    )
     with session_scope() as session:
-        for item in items:
-            trade_date_raw = item.get("trade_date")
-            if trade_date_raw is None:
-                continue
-            # Parse trade_date
-            if isinstance(trade_date_raw, date):
-                trade_date = trade_date_raw
-            elif isinstance(trade_date_raw, str):
-                try:
-                    trade_date = date.fromisoformat(str(trade_date_raw)[:10])
-                except ValueError:
-                    continue
-            else:
-                continue
-            values = {
-                "vt_symbol": vts,
-                "trade_date": trade_date,
-                "open_price": float(item.get("open") or item.get("open_price") or 0),
-                "close_price": float(item.get("close") or item.get("close_price") or 0),
-                "high_price": float(item.get("high") or item.get("high_price") or 0),
-                "low_price": float(item.get("low") or item.get("low_price") or 0),
-                "volume": item.get("volume"),
-                "turnover": item.get("turnover"),
-                "turnover_rate": item.get("turnover_rate"),
-                "change_pct": item.get("change_pct"),
-                "source": str(item.get("source") or "akshare"),
-                "raw": item.get("raw") or {},
-            }
-            existing = session.execute(
-                select(schema.stock_daily_bars).where(
-                    (schema.stock_daily_bars.c.vt_symbol == vts)
-                    & (schema.stock_daily_bars.c.trade_date == trade_date)
-                )
-            ).first()
-            if existing:
-                session.execute(
-                    schema.stock_daily_bars.update()
-                    .where(
-                        (schema.stock_daily_bars.c.vt_symbol == vts)
-                        & (schema.stock_daily_bars.c.trade_date == trade_date)
-                    )
-                    .values(**values)
-                )
-            else:
-                session.execute(schema.stock_daily_bars.insert().values(**values))
-            written += 1
-    return written
+        session.execute(statement)
+    return len(values)
 
 
 def _upsert_minute_bars(

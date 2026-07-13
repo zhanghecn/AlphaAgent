@@ -1766,6 +1766,39 @@ def test_limit_up_pool_events_preserve_existing_rows_when_provider_returns_empty
     assert delete_sql == []
 
 
+def test_upsert_daily_bars_batches_and_deduplicates_dates(monkeypatch):
+    statements: list[Any] = []
+
+    class FakeSession:
+        def execute(self, statement):
+            statements.append(statement)
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+
+    written = svc._upsert_daily_bars(
+        "600000",
+        "SSE",
+        [
+            {"trade_date": "2026-07-10", "open": 10, "close": 11, "high": 12, "low": 9},
+            {"trade_date": "2026-07-10", "open": 10, "close": 12, "high": 13, "low": 9},
+            {"trade_date": "invalid", "open": 1, "close": 1, "high": 1, "low": 1},
+        ],
+    )
+
+    assert written == 1
+    assert len(statements) == 1
+    compiled = statements[0].compile()
+    assert "ON CONFLICT (vt_symbol, trade_date) DO UPDATE" in str(compiled)
+    assert compiled.params["vt_symbol_m0"] == "600000.SSE"
+    assert compiled.params["trade_date_m0"] == date(2026, 7, 10)
+    assert compiled.params["close_price_m0"] == 12.0
+    assert not any(key.endswith("_m1") for key in compiled.params)
+
+
 def test_upsert_sector_daily_bars_prunes_old_sources_for_sector(monkeypatch):
     executed: list[str] = []
 
