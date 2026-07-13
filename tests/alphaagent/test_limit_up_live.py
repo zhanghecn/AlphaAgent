@@ -64,6 +64,8 @@ def _market(**overrides: object) -> dict[str, object]:
 
 
 def test_session_stage_uses_a_share_trading_windows() -> None:
+    assert session_stage(datetime(2026, 7, 10, 9, 14, tzinfo=SHANGHAI)) == "preopen"
+    assert session_stage(datetime(2026, 7, 10, 9, 18, tzinfo=SHANGHAI)) == "auction_watch"
     assert session_stage(datetime(2026, 7, 10, 9, 25, tzinfo=SHANGHAI)) == "auction"
     assert session_stage(datetime(2026, 7, 10, 10, 30, tzinfo=SHANGHAI)) == "morning"
     assert session_stage(datetime(2026, 7, 10, 12, 0, tzinfo=SHANGHAI)) == "lunch"
@@ -877,6 +879,68 @@ def test_auction_recommendation_uses_previous_board_and_gap_range() -> None:
     assert signal["action"] == "buy_now"
     assert signal["entry_kind"] == "auction"
     assert signal["trigger_price"] == candidate["last_price"]
+
+
+def test_auction_watch_can_approach_but_not_trigger_before_0920() -> None:
+    captured_at = datetime(2026, 7, 10, 9, 18, tzinfo=SHANGHAI)
+    candidate = rank_live_candidates(
+        [
+            _candidate(
+                "600001.SSE",
+                previous_limit_up=True,
+                auction_gap_pct=3.0,
+                state="near_limit",
+            )
+        ]
+    )[0]
+
+    result = build_live_recommendations([candidate], _market(), captured_at)
+
+    signal = result["lanes"]["now"][0]
+    assert signal["action"] == "observe"
+    assert signal["signal_state"] == "approaching_trigger"
+    assert signal["execution_permission"] == "research_only"
+    assert signal["entry_kind"] == "auction"
+
+
+def test_auction_trigger_has_structured_strategy_and_rules() -> None:
+    captured_at = datetime(2026, 7, 10, 9, 25, tzinfo=SHANGHAI)
+    candidate = rank_live_candidates(
+        [
+            _candidate(
+                "600001.SSE",
+                previous_limit_up=True,
+                auction_gap_pct=3.0,
+                state="near_limit",
+                board_level=3,
+                board_lane="two_to_three",
+                lane_decision="eligible",
+                lane_favorable_factors=[
+                    "prior_board_changed_hands_and_resealed",
+                    "third_board_weak_to_strong",
+                ],
+                setup_tags=["weak_to_strong_breakout"],
+            )
+        ]
+    )[0]
+
+    result = build_live_recommendations([candidate], _market(), captured_at)
+
+    signal = result["lanes"]["now"][0]
+    assert signal["action"] == "buy_now"
+    assert signal["signal_state"] == "trigger_ready"
+    assert signal["execution_permission"] == "research_only"
+    assert signal["strategy_name"] == "二进三·弱转强突破"
+    assert signal["selection_reasons"] == ["前板换手回封", "三板弱转强"]
+    assert [check["code"] for check in signal["trigger_checks"]] == [
+        "market_gate",
+        "lane_gate",
+        "auction_gap",
+    ]
+    assert signal["trigger_checks"][2]["status"] == "passed"
+    assert signal["buy_instruction"]
+    assert signal["sell_instruction"]
+    assert signal["cancel_checks"]
 
 
 def test_auction_can_consider_first_board_when_live_gates_pass() -> None:

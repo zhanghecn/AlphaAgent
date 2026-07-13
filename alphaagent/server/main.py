@@ -12,6 +12,7 @@ from alphaagent.server.services.data_sync import ensure_sync_schema, start_data_
 from alphaagent.market.warmup import start_market_cache_warmup
 from alphaagent.server.services.quant.market_timing.panel import start_intraday_refresher
 from alphaagent.server.services.limit_up.history_service import start_backtest_cache_warmup
+from alphaagent.server.services.limit_up.next_session_plan import start_next_session_plan_warmup
 
 
 def create_app() -> FastAPI:
@@ -24,6 +25,7 @@ def create_app() -> FastAPI:
             ensure_sync_schema()
             ensure_default_groups()
             start_data_sync_scheduler()
+            start_next_session_plan_warmup()
         except Exception:
             pass
         start_backtest_cache_warmup()

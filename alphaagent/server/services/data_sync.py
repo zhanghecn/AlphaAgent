@@ -25,7 +25,7 @@ import io
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Literal, Sequence
 from uuid import uuid4
 
 from sqlalchemy import and_, desc, func, select, text
@@ -42,6 +42,7 @@ from alphaagent.server.services.limit_up.data_quality import backfill_limit_up_e
 from alphaagent.server.services.limit_up.domain import is_eligible_main_board
 from alphaagent.server.services.limit_up.historical_evidence_import import import_ths_evidence
 from alphaagent.server.services.limit_up.live_service import refresh_live_snapshot
+from alphaagent.server.services.limit_up.next_session_plan import refresh_next_session_plan
 from alphaagent.server.services.quant import research_jobs, screening
 
 logger = logging.getLogger(__name__)
@@ -470,6 +471,9 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
 # jobs first to satisfy data dependencies). Replaces the per-job crons that
 # used to live on DEFAULT_JOBS. See
 # requirements/alphaagent_unified_incremental_schedule_plan.md.
+CURRENT_EOD_SCHEDULE_ID = "eod_1900"
+LEGACY_DEFAULT_BATCH_SCHEDULE_IDS = {"eod_18h"}
+
 DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
     {
         "id": "auction_0926",
@@ -517,29 +521,43 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         ],
     },
     {
-        "id": "eod_18h",
-        "name": "盘后慢数据维护（18:00）",
-        "cron": "0 18 * * 1-5",
+        "id": "limit_up_plan_1505",
+        "name": "次交易时段初步观察（15:05）",
+        "cron": "5 15 * * 1-5",
+        "action": "sync",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": ["limit_up_next_session_plan_preliminary"],
+    },
+    {
+        "id": CURRENT_EOD_SCHEDULE_ID,
+        "name": "盘后统一更新（19:00）",
+        "cron": "0 19 * * 1-5",
         "action": "sync",
         "enabled": True,
         "concurrency": 8,
         "job_ids": [
             "sync_stock_list",
+            "sync_sector_fund_flows",
+            "sync_stock_daily_bars",
+            "sync_index_daily_bars",
+            "sync_sector_period_scores",
+            "eod_quant_research",
             "sync_sector_list",
             "sync_sector_members",
             "sync_stock_sector_memberships",
-            "sync_sector_fund_flows",
-            "sync_limit_up_pools",       # 涨停池接口偶发慢/卡，放到盘后慢链路，不阻塞尾盘实时缓存
-            "sync_stock_lhb_records",   # LHB publishes after 18:00 -> run late
+            "sync_limit_up_pools",       # Slow/enrichment jobs run after formal quant so /quant is available first.
+            "sync_stock_lhb_records",
             "sync_stock_notices",
             "sync_stock_financial_quarterly",
             "sync_stock_financial_indicators",
             "sync_stock_business_segments_history",
+            "limit_up_next_session_plan_final",
         ],
     },
     {
         "id": "eod_finalize_2130",
-        "name": "晚间日线补全（21:30）",
+        "name": "晚间补偿重试（21:30）",
         "cron": "30 21 * * 1-5",
         "action": "sync",
         "enabled": True,
@@ -551,6 +569,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "eod_quant_research",
             "sync_limit_up_event_minutes",
             "limit_up_history_rebuild",
+            "limit_up_next_session_plan_final",
         ],
     },
 ]
@@ -559,11 +578,15 @@ TAIL_PREVIEW_BATCH_JOB_ID = "tail_preview_cache"
 EOD_QUANT_RESEARCH_BATCH_JOB_ID = "eod_quant_research"
 LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID = "sync_limit_up_ths_evidence"
 LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID = "limit_up_history_rebuild"
+LIMIT_UP_NEXT_SESSION_PLAN_PRELIMINARY_BATCH_JOB_ID = "limit_up_next_session_plan_preliminary"
+LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID = "limit_up_next_session_plan_final"
 INTERNAL_BATCH_JOB_IDS = {
     TAIL_PREVIEW_BATCH_JOB_ID,
     EOD_QUANT_RESEARCH_BATCH_JOB_ID,
     LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID,
     LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID,
+    LIMIT_UP_NEXT_SESSION_PLAN_PRELIMINARY_BATCH_JOB_ID,
+    LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID,
 }
 STALE_BATCH_SUMMARY_RE = re.compile(r"^\s*(\d+)\s+成功\s*/\s*(\d+)\s+失败\s*$")
 
@@ -1998,6 +2021,12 @@ def seed_default_registry() -> None:
                         .values(**sched_values)
                     )
             default_schedule_ids = [str(sched["id"]) for sched in DEFAULT_BATCH_SCHEDULES]
+            if LEGACY_DEFAULT_BATCH_SCHEDULE_IDS:
+                session.execute(
+                    schema.sync_batch_schedules.delete().where(
+                        schema.sync_batch_schedules.c.id.in_(LEGACY_DEFAULT_BATCH_SCHEDULE_IDS)
+                    )
+                )
             session.execute(
                 schema.sync_batch_schedules.delete().where(
                     and_(
@@ -2206,6 +2235,7 @@ def _assert_known_jobs(
     allow_tail_preview_cache: bool = False,
     allow_eod_quant_research: bool = False,
     allow_limit_up_history_rebuild: bool = False,
+    allow_limit_up_next_session_plan: bool = False,
 ) -> None:
     valid = {job.id for job in DEFAULT_JOBS}
     unknown = [
@@ -2216,6 +2246,13 @@ def _assert_known_jobs(
         and not (
             allow_limit_up_history_rebuild
             and j == LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID
+        )
+        and not (
+            allow_limit_up_next_session_plan
+            and j in {
+                LIMIT_UP_NEXT_SESSION_PLAN_PRELIMINARY_BATCH_JOB_ID,
+                LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID,
+            }
         )
     ]
     if unknown:
@@ -2240,6 +2277,7 @@ def _assert_schedule_jobs(action: str, job_ids: list[str]) -> None:
         allow_tail_preview_cache=action == "tail_preview",
         allow_eod_quant_research=action == "sync",
         allow_limit_up_history_rebuild=action == "sync",
+        allow_limit_up_next_session_plan=action == "sync",
     )
 
 
@@ -2672,6 +2710,10 @@ def _run_sync_batch(
                 )
             elif job_id == LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID:
                 result = _run_limit_up_history_rebuild_batch_job()
+            elif job_id == LIMIT_UP_NEXT_SESSION_PLAN_PRELIMINARY_BATCH_JOB_ID:
+                result = _run_limit_up_next_session_plan_batch_job("preliminary")
+            elif job_id == LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID:
+                result = _run_limit_up_next_session_plan_batch_job("final")
             else:
                 result = run_job(job_id, _batch_job_params(job_id, params), progress=_batch_progress_callback(batch_id, job_id))
             rows_read = int(result.get("rows_read") or 0)
@@ -2770,6 +2812,27 @@ def _run_tail_preview_cache_batch_job(params: dict[str, Any], *, schedule_id: st
         ),
         "trade_date": result.get("trade_date"),
         "status": result.get("status"),
+    }
+
+
+def _run_limit_up_next_session_plan_batch_job(
+    phase: Literal["preliminary", "final"],
+) -> dict[str, Any]:
+    snapshot = refresh_next_session_plan(phase)
+    recommendations = snapshot.get("recommendations")
+    recommendations = recommendations if isinstance(recommendations, dict) else {}
+    lanes = recommendations.get("lanes")
+    lanes = lanes if isinstance(lanes, dict) else {}
+    observations = lanes.get("next_auction")
+    observations = observations if isinstance(observations, list) else []
+    quality = snapshot.get("data_quality")
+    quality = quality if isinstance(quality, dict) else {}
+    status = str(snapshot.get("status") or quality.get("status") or "empty")
+    return {
+        "rows_read": len(observations),
+        "rows_written": len(observations),
+        "status": "skipped" if status == "empty" else status,
+        "message": f"次交易时段{phase}观察计划：{len(observations)} 个候选",
     }
 
 
@@ -3586,7 +3649,7 @@ def tail_workflow_status() -> dict[str, Any]:
         "candidate_updated_at": _iso_or_none(latest_candidate.get("finished_at")) if latest_candidate else None,
         "latest_research_run": latest_research,
         "tail_quant_schedule": schedules.get("tail_quant_1430"),
-        "eod_schedule": schedules.get("eod_18h"),
+        "eod_schedule": schedules.get(CURRENT_EOD_SCHEDULE_ID),
         "tail_quant_ready": bool(usable_tail_cache),
         "tail_preview": {
             "status": "ready" if usable_tail_cache else "waiting",
@@ -4557,7 +4620,7 @@ def _live_scan_status_message(snapshot: dict[str, Any], *, saved: bool) -> str:
 def _limit_up_live_scan_window_open(now_china: datetime) -> bool:
     minute = now_china.hour * 60 + now_china.minute
     return (
-        9 * 60 + 20 <= minute <= 11 * 60 + 30
+        9 * 60 + 15 <= minute <= 11 * 60 + 30
         or 13 * 60 <= minute <= 14 * 60 + 57
     )
 

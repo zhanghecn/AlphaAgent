@@ -18,6 +18,29 @@ ACTIVE_TIMING_STATES = {
     "GOLD_FADING",
     "SILVER_FADING",
 }
+_FACTOR_LABELS = {
+    "sector_core": "板块核心",
+    "prior_board_changed_hands_and_resealed": "前板换手回封",
+    "prior_board_full_turnover_reseal": "前板充分换手回封",
+    "prior_amount_ratio_balanced": "前板温和放量",
+    "third_board_weak_to_strong": "三板弱转强",
+    "prior_divergence_next_auction_strength": "前日分歧次日转强",
+    "high_board_weak_to_strong": "高板弱转强",
+}
+_SETUP_LABELS = {
+    "sandwich_board": "夹板",
+    "return_board": "回马板",
+    "weak_to_strong_breakout": "弱转强突破",
+    "dragon_first_negative_relay": "龙首阴接力",
+    "dragon_weak_to_strong": "龙头弱转强",
+    "anti_nuclear_board": "反核板",
+}
+_LANE_LABELS = {
+    "first_board": "首板",
+    "one_to_two": "一进二",
+    "two_to_three": "二进三",
+    "high_board": "高板",
+}
 
 
 def session_stage(captured_at: datetime) -> str:
@@ -25,8 +48,10 @@ def session_stage(captured_at: datetime) -> str:
     if local.weekday() >= 5:
         return "closed"
     minute = local.hour * 60 + local.minute
-    if minute < 9 * 60 + 20:
+    if minute < 9 * 60 + 15:
         return "preopen"
+    if minute < 9 * 60 + 20:
+        return "auction_watch"
     if minute < 9 * 60 + 30:
         return "auction"
     if minute <= 11 * 60 + 30:
@@ -173,8 +198,9 @@ def _market_gate(context: Mapping[str, object], stage: str) -> dict[str, object]
     sealed_change = _integer(context.get("sealed_change"), 0)
     failed_change = _integer(context.get("failed_change"), 0)
     prior_weak = sentiment_phase in {"ice", "ebb", "retreat", "decline"}
+    auction_stage = stage in {"auction_watch", "auction"}
     repair_confirmed = bool(
-        stage != "auction"
+        not auction_stage
         and sealed_count >= 5
         and failed_rate is not None
         and failed_rate <= 0.35
@@ -184,9 +210,9 @@ def _market_gate(context: Mapping[str, object], stage: str) -> dict[str, object]
     reasons: list[str] = []
     if stage == "closed":
         reasons.append("当前为非交易时段")
-    if stage != "auction" and sealed_count < 5:
+    if not auction_stage and sealed_count < 5:
         reasons.append("主板封板家数不足5只")
-    if stage != "auction" and failed_rate is not None and failed_rate > 0.35:
+    if not auction_stage and failed_rate is not None and failed_rate > 0.35:
         reasons.append(f"实时炸板率{failed_rate * 100:.1f}%超过35%")
     if prior_weak and not repair_confirmed:
         reasons.append("D-1情绪偏弱且盘中尚未确认修复")
@@ -219,9 +245,13 @@ def _now_signal(
     state = str(candidate.get("state") or "")
     open_times = _integer(candidate.get("open_times"), 0)
     lane_reasons = _lane_execution_reasons(candidate)
-    execution_reasons = _candidate_execution_reasons(candidate, require_expansion=stage != "auction")
+    auction_stage = stage in {"auction_watch", "auction"}
+    execution_reasons = _candidate_execution_reasons(
+        candidate,
+        require_expansion=not auction_stage,
+    )
     board_allowed = board_level <= 2 or (
-        stage == "auction" and candidate.get("lane_decision") == "eligible"
+        auction_stage and candidate.get("lane_decision") == "eligible"
     )
     gate_passed = (
         bool(market_gate.get("passed"))
@@ -230,7 +260,16 @@ def _now_signal(
         and not execution_reasons
     )
 
-    if gate_passed and stage == "auction":
+    if gate_passed and stage == "auction_watch":
+        gap = _number(candidate.get("auction_gap_pct"))
+        entry_kind = "auction"
+        if gap is None:
+            action, reason = "observe", "竞价数据待确认"
+        elif 1 <= gap <= 7:
+            action, reason = "observe", "竞价强度接近触发区间，09:20后再确认"
+        else:
+            reason = "竞价涨幅不在1%-7%观察区间"
+    elif gate_passed and stage == "auction":
         gap = _number(candidate.get("auction_gap_pct"))
         if gap is not None and 1 <= gap <= 7:
             reason = _auction_entry_reason(candidate)
@@ -252,12 +291,21 @@ def _now_signal(
     elif lane_reasons:
         reason = "；".join(lane_reasons)
     elif board_level > 2 and not (
-        stage == "auction" and candidate.get("lane_decision") == "eligible"
+        auction_stage and candidate.get("lane_decision") == "eligible"
     ):
         reason = "三板及以上没有L2队列证据"
     elif execution_reasons:
         reason = "；".join(execution_reasons)
-    return _signal(candidate, action, entry_kind, reason, captured_at, stable_minutes)
+    return _signal(
+        candidate,
+        action,
+        entry_kind,
+        reason,
+        captured_at,
+        stable_minutes,
+        stage,
+        market_gate,
+    )
 
 
 def _tail_signal(
@@ -286,6 +334,8 @@ def _tail_signal(
             f"尾盘连续封住{stable_minutes}分钟",
             captured_at,
             stable_minutes,
+            stage,
+            market_gate,
         )
     if eligible:
         return _signal(
@@ -295,6 +345,8 @@ def _tail_signal(
             "等待14:30后连续快照确认",
             captured_at,
             stable_minutes,
+            stage,
+            market_gate,
         )
     return _signal(
         candidate,
@@ -305,6 +357,8 @@ def _tail_signal(
         else "不满足尾盘低板封住条件",
         captured_at,
         stable_minutes,
+        stage,
+        market_gate,
     )
 
 
@@ -339,6 +393,8 @@ def _auction_plan(
             f"保留至明早竞价观察{target_board}板，竞价强度通过对应战法硬门才转买入",
             captured_at,
             stable_minutes,
+            session_stage(captured_at),
+            market_gate,
         )
     return _signal(
         candidate,
@@ -349,6 +405,8 @@ def _auction_plan(
         else "未形成次日竞价计划",
         captured_at,
         stable_minutes,
+        session_stage(captured_at),
+        market_gate,
     )
 
 
@@ -359,6 +417,8 @@ def _signal(
     reason: str,
     captured_at: datetime,
     stable_minutes: int,
+    stage: str,
+    market_gate: Mapping[str, object],
 ) -> dict[str, object]:
     trigger_price = (
         _number(candidate.get("last_price"))
@@ -366,6 +426,8 @@ def _signal(
         else _number(candidate.get("limit_price"))
     )
     valid_at = _local_datetime(captured_at).isoformat()
+    buy_instruction = _buy_condition(entry_kind, action)
+    sell_instruction = _sell_condition(candidate)
     return {
         "vt_symbol": candidate.get("vt_symbol"),
         "name": candidate.get("name"),
@@ -412,19 +474,110 @@ def _signal(
         "valid_at": valid_at,
         "valid_until": _valid_until(captured_at, entry_kind),
         "execution_state": _execution_state(action),
-        "buy_condition": _buy_condition(entry_kind, action),
-        "sell_condition": _sell_condition(candidate),
+        "signal_state": _signal_state(action, entry_kind, stage),
+        "execution_permission": "research_only",
+        "strategy_name": _strategy_name(candidate),
+        "selection_reasons": _selection_reasons(candidate, reason),
+        "trigger_checks": _trigger_checks(
+            candidate,
+            market_gate,
+            entry_kind,
+            valid_at,
+        ),
+        "buy_condition": buy_instruction,
+        "sell_condition": sell_instruction,
+        "buy_instruction": buy_instruction,
+        "sell_instruction": sell_instruction,
         "state_updated_at": valid_at,
         "stable_minutes": stable_minutes,
         "reason": reason,
         "cancel_condition": _cancel_condition(entry_kind),
+        "cancel_checks": _cancel_checks(entry_kind),
         "execution_confidence": "proxy_without_l2",
     }
+
+
+def _signal_state(action: str, entry_kind: str, stage: str) -> str:
+    if action == "buy_now":
+        return "trigger_ready"
+    if action == "observe":
+        return "approaching_trigger" if entry_kind == "auction" else "observing"
+    if action in {"wait_tail", "next_auction"}:
+        return "pending_auction" if action == "next_auction" else "observing"
+    if stage in {"preopen", "auction_watch"} and entry_kind == "auction":
+        return "pending_auction"
+    return "invalidated"
+
+
+def _strategy_name(candidate: Mapping[str, object]) -> str:
+    lane = str(candidate.get("board_lane") or _board_lane(_integer(candidate.get("board_level"), 1)))
+    label = _LANE_LABELS.get(lane, "接力")
+    setups = [
+        _SETUP_LABELS.get(str(value), str(value))
+        for value in candidate.get("setup_tags") or []
+    ]
+    return f"{label}·{'/'.join(setups)}" if setups else label
+
+
+def _selection_reasons(
+    candidate: Mapping[str, object],
+    fallback_reason: str,
+) -> list[str]:
+    factors = [
+        _FACTOR_LABELS.get(str(value), str(value))
+        for value in candidate.get("lane_favorable_factors") or []
+    ][:4]
+    return factors or [fallback_reason or "等待交易条件确认"]
+
+
+def _trigger_checks(
+    candidate: Mapping[str, object],
+    market_gate: Mapping[str, object],
+    entry_kind: str,
+    evidence_time: str,
+) -> list[dict[str, object]]:
+    market_passed = bool(market_gate.get("passed"))
+    market_reasons = [str(value) for value in market_gate.get("reasons") or []]
+    lane_passed = candidate.get("lane_decision") in (None, "eligible")
+    checks: list[dict[str, object]] = [
+        {
+            "code": "market_gate",
+            "label": "市场环境",
+            "status": "passed" if market_passed else "failed",
+            "observed": "允许出手" if market_passed else "；".join(market_reasons),
+            "required": "市场门保持通过",
+            "evidence_time": evidence_time,
+        },
+        {
+            "code": "lane_gate",
+            "label": "板位结构",
+            "status": "passed" if lane_passed else "failed",
+            "observed": "战法硬门通过" if lane_passed else "战法硬门未通过",
+            "required": "对应板位硬门通过",
+            "evidence_time": evidence_time,
+        },
+    ]
+    if entry_kind == "auction":
+        gap = _number(candidate.get("auction_gap_pct"))
+        status = "pending" if gap is None else "passed" if 1 <= gap <= 7 else "failed"
+        checks.append(
+            {
+                "code": "auction_gap",
+                "label": "竞价强度",
+                "status": status,
+                "observed": None if gap is None else f"{gap:.2f}%",
+                "required": "1%-7%",
+                "evidence_time": evidence_time if gap is not None else None,
+            }
+        )
+    return checks
 
 
 def _execution_state(action: str) -> str:
     if action == "buy_now":
         return "actionable"
+    if action == "observe":
+        return "watch"
     if action in {"wait_tail", "next_auction"}:
         return "waiting"
     return "cancelled"
@@ -432,6 +585,8 @@ def _execution_state(action: str) -> str:
 
 def _buy_condition(entry_kind: str, action: str) -> str:
     if entry_kind == "auction":
+        if action == "observe":
+            return "09:20-09:24竞价强度、板位、板块和情绪硬门保持通过后触发研究买点"
         return "09:25竞价强度、板位、板块和情绪硬门保持通过后执行"
     if entry_kind in {"sweep", "reseal"}:
         return "价格触及涨停且封单、换手、回封稳定性保持通过后执行"
@@ -447,6 +602,14 @@ def _sell_condition(candidate: Mapping[str, object]) -> str:
     if lane == "high_board":
         return "D+1 09:25先评估高板竞价兑现优势；未触发则15:00退出"
     return "D+1 09:25由动态退出策略评估；无竞价兑现优势则15:00退出"
+
+
+def _cancel_checks(entry_kind: str) -> list[str]:
+    if entry_kind in {"auction", "next_auction"}:
+        return ["竞价低于1%或高于7%", "跌出动态Top5", "市场门关闭"]
+    if entry_kind in {"sweep", "reseal", "tail_seal", "tail_watch", "wait"}:
+        return ["再次开板", "封单一分钟缩水超过30%", "板块扩散转弱或市场门关闭"]
+    return ["买点未成立"]
 
 
 def _auction_entry_reason(candidate: Mapping[str, object]) -> str:

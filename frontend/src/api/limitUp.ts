@@ -5,8 +5,23 @@ export type EntryMode = "auction" | "sweep" | "tail" | "next_auction";
 export type BoardLaneKey = "first_board" | "one_to_two" | "two_to_three" | "high_board";
 export type LimitUpBacktestScope = "portfolio" | BoardLaneKey;
 export type HistoryValidationPhase = "warmup" | "expanding_oos" | "locked_holdout";
-export type LimitUpLiveAction = "buy_now" | "wait_tail" | "next_auction" | "pass";
+export type LimitUpLiveAction = "buy_now" | "observe" | "wait_tail" | "next_auction" | "pass";
 export type LimitUpLane = "now" | "tail" | "next_auction";
+
+export interface LimitUpTriggerCheck {
+  code: string;
+  label: string;
+  status: "passed" | "pending" | "failed" | string;
+  observed?: string | null;
+  required?: string | null;
+  evidence_time?: string | null;
+}
+
+export interface LimitUpPlanMetadata {
+  source_trade_date?: string | null;
+  target_session?: string | null;
+  plan_phase?: "preliminary" | "final" | string;
+}
 
 export interface LimitUpLiveSignal {
   vt_symbol: string;
@@ -28,8 +43,16 @@ export interface LimitUpLiveSignal {
   reason: string;
   cancel_condition: string;
   execution_state?: "watch" | "waiting" | "actionable" | "cancelled" | string;
+  signal_state?: "observing" | "approaching_trigger" | "pending_auction" | "trigger_ready" | "invalidated" | string;
+  execution_permission?: "research_only" | string;
+  strategy_name?: string;
+  selection_reasons?: string[];
+  trigger_checks?: LimitUpTriggerCheck[];
   buy_condition?: string;
   sell_condition?: string;
+  buy_instruction?: string;
+  sell_instruction?: string;
+  cancel_checks?: string[];
   state_updated_at?: string;
   setup_tags?: string[];
   setup_confidence?: string | null;
@@ -43,7 +66,11 @@ export interface LimitUpLiveSignal {
 }
 
 export interface LimitUpSignalSnapshot {
+  mode?: "live_snapshot" | "next_session_preliminary" | "next_session_final" | string;
   trade_date: string;
+  source_trade_date?: string | null;
+  target_session?: string | null;
+  plan_phase?: "preliminary" | "final" | string;
   captured_at: string | null;
   source: string;
   market_context: {
@@ -57,6 +84,7 @@ export interface LimitUpSignalSnapshot {
       reasons: string[];
     };
     lanes: Record<LimitUpLane, LimitUpLiveSignal[]>;
+    plan?: LimitUpPlanMetadata;
     board_lane_validations?: Partial<Record<BoardLaneKey, {
       passed: boolean;
       reason: string;
@@ -68,6 +96,7 @@ export interface LimitUpSignalSnapshot {
     snapshot_age_seconds?: number | null;
     rate_limit_status?: "normal" | "limited" | "degraded" | "unknown" | string;
     source_errors?: string[];
+    plan?: LimitUpPlanMetadata;
   };
 }
 

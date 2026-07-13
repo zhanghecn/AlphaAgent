@@ -89,7 +89,8 @@ def test_default_batch_schedules_defined():
         "limit_up_live_scan",
         "intraday_hourly",
         "tail_quant_1430",
-        "eod_18h",
+        "limit_up_plan_1505",
+        "eod_1900",
         "eod_finalize_2130",
     }
 
@@ -300,13 +301,13 @@ def test_seed_default_registry_deletes_disabled_non_default_schedules(monkeypatc
 def test_seed_default_registry_clears_stale_partial_summary(monkeypatch):
     current_partial = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "eod_finalize_2130")
     rows: dict[str, dict[str, Any]] = {
-        "eod_18h": {
-            "id": "eod_18h",
-            "job_ids": ["old_job"] * 15,
+        "eod_1900": {
+            "id": "eod_1900",
+            "job_ids": ["old_job"] * 11,
             "last_status": "partial",
-            "last_started_at": datetime(2026, 7, 7, 18, 0),
-            "last_finished_at": datetime(2026, 7, 7, 18, 30),
-            "last_message": "14 成功 / 1 失败",
+            "last_started_at": datetime(2026, 7, 7, 19, 0),
+            "last_finished_at": datetime(2026, 7, 7, 19, 30),
+            "last_message": "10 成功 / 1 失败",
         },
         "eod_finalize_2130": {
             "id": "eod_finalize_2130",
@@ -314,7 +315,7 @@ def test_seed_default_registry_clears_stale_partial_summary(monkeypatch):
             "last_status": "partial",
             "last_started_at": datetime(2026, 7, 7, 21, 30),
             "last_finished_at": datetime(2026, 7, 7, 21, 40),
-            "last_message": "5 成功 / 1 失败",
+            "last_message": "6 成功 / 1 失败",
         },
     }
 
@@ -359,12 +360,63 @@ def test_seed_default_registry_clears_stale_partial_summary(monkeypatch):
 
     svc.seed_default_registry()
 
-    assert rows["eod_18h"]["last_status"] is None
-    assert rows["eod_18h"]["last_started_at"] is None
-    assert rows["eod_18h"]["last_finished_at"] is None
-    assert rows["eod_18h"]["last_message"] is None
+    assert rows["eod_1900"]["last_status"] is None
+    assert rows["eod_1900"]["last_started_at"] is None
+    assert rows["eod_1900"]["last_finished_at"] is None
+    assert rows["eod_1900"]["last_message"] is None
     assert rows["eod_finalize_2130"]["last_status"] == "partial"
-    assert rows["eod_finalize_2130"]["last_message"] == "5 成功 / 1 失败"
+    assert rows["eod_finalize_2130"]["last_message"] == "6 成功 / 1 失败"
+
+
+def test_seed_default_registry_deletes_legacy_eod_18h(monkeypatch):
+    rows: dict[str, dict[str, Any]] = {
+        "eod_18h": {"id": "eod_18h", "enabled": True, "last_status": "succeeded"},
+    }
+
+    class FakeResult:
+        def __init__(self, row=object()):
+            self.row = row
+
+        def first(self):
+            return self.row
+
+    class FakeSession:
+        def execute(self, statement):
+            table = getattr(getattr(statement, "table", None), "name", None)
+
+            if getattr(statement, "is_select", False) and "FROM sync_batch_schedules" in str(statement):
+                params = statement.compile().params
+                return FakeResult(rows.get(params["id_1"]))
+
+            if table == "sync_batch_schedules" and statement.is_insert:
+                params = statement.compile().params
+                rows[str(params["id"])] = dict(params)
+                return FakeResult()
+
+            if table == "sync_batch_schedules" and statement.is_update:
+                params = statement.compile().params
+                schedule_id = str(params["id_1"])
+                rows.setdefault(schedule_id, {}).update(
+                    {key: value for key, value in params.items() if key != "id_1"}
+                )
+                return FakeResult()
+
+            if table == "sync_batch_schedules" and statement.is_delete:
+                rows.pop("eod_18h", None)
+                return FakeResult()
+
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+
+    svc.seed_default_registry()
+
+    assert "eod_18h" not in rows
+    assert "eod_1900" in rows
 
 
 def test_default_jobs_have_no_cron():
@@ -404,6 +456,49 @@ def test_limit_up_live_scan_is_a_separate_append_only_schedule():
     assert "sync_limit_up_pools" not in live_scan["job_ids"]
 
 
+def test_next_session_plan_has_preliminary_and_final_schedule_paths():
+    preliminary = next(
+        schedule
+        for schedule in svc.DEFAULT_BATCH_SCHEDULES
+        if schedule["id"] == "limit_up_plan_1505"
+    )
+    eod = next(schedule for schedule in svc.DEFAULT_BATCH_SCHEDULES if schedule["id"] == "eod_1900")
+    finalize = next(
+        schedule
+        for schedule in svc.DEFAULT_BATCH_SCHEDULES
+        if schedule["id"] == "eod_finalize_2130"
+    )
+
+    assert preliminary["cron"] == "5 15 * * 1-5"
+    assert preliminary["action"] == "sync"
+    assert preliminary["job_ids"] == [svc.LIMIT_UP_NEXT_SESSION_PLAN_PRELIMINARY_BATCH_JOB_ID]
+    assert eod["job_ids"][-1] == svc.LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID
+    assert finalize["job_ids"][-1] == svc.LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID
+
+
+def test_next_session_plan_batch_job_uses_persisted_quality_status(monkeypatch):
+    monkeypatch.setattr(
+        svc,
+        "refresh_next_session_plan",
+        lambda _phase: {
+            "recommendations": {"lanes": {"next_auction": [{"vt_symbol": "600001.SSE"}]}},
+            "data_quality": {"status": "ready"},
+        },
+    )
+
+    result = svc._run_limit_up_next_session_plan_batch_job("final")
+
+    assert result["status"] == "ready"
+    assert result["rows_written"] == 1
+
+
+def test_limit_up_live_scan_window_starts_at_0915():
+    tz = timezone.utc
+
+    assert not svc._limit_up_live_scan_window_open(datetime(2026, 7, 13, 9, 14, tzinfo=tz))
+    assert svc._limit_up_live_scan_window_open(datetime(2026, 7, 13, 9, 15, tzinfo=tz))
+
+
 def test_tail_quant_schedule_triggers_quant_research():
     tail_quant = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "tail_quant_1430")
     assert tail_quant["action"] == "tail_preview"
@@ -416,33 +511,39 @@ def test_tail_quant_schedule_triggers_quant_research():
     assert "sync_stock_daily_bars" not in tail_quant["job_ids"]
 
 
-def test_eod_schedule_keeps_daily_bars_out_of_early_slot():
-    eod = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "eod_18h")
+def test_eod_schedule_runs_unified_post_close_chain():
+    eod = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "eod_1900")
     assert eod["action"] == "sync"
-    assert "sync_stock_daily_bars" not in eod["job_ids"]
-    assert "sync_index_daily_bars" not in eod["job_ids"]
-    assert "sync_sector_period_scores" not in eod["job_ids"]
-    assert svc.EOD_QUANT_RESEARCH_BATCH_JOB_ID not in eod["job_ids"]
+    assert eod["cron"] == "0 19 * * 1-5"
+    assert "sync_stock_daily_bars" in eod["job_ids"]
+    assert "sync_index_daily_bars" in eod["job_ids"]
+    assert "sync_sector_period_scores" in eod["job_ids"]
+    assert svc.EOD_QUANT_RESEARCH_BATCH_JOB_ID in eod["job_ids"]
     assert "sync_limit_up_pools" in eod["job_ids"]
     assert "sync_stock_lhb_records" in eod["job_ids"]
     assert "sync_stock_financial_quarterly" in eod["job_ids"]
 
 
-def test_eod_schedule_only_runs_slow_enrichment_jobs():
-    eod = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "eod_18h")
+def test_eod_schedule_runs_formal_quant_before_slow_enrichment():
+    eod = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "eod_1900")
     jobs = eod["job_ids"]
     assert jobs == [
         "sync_stock_list",
+        "sync_sector_fund_flows",
+        "sync_stock_daily_bars",
+        "sync_index_daily_bars",
+        "sync_sector_period_scores",
+        svc.EOD_QUANT_RESEARCH_BATCH_JOB_ID,
         "sync_sector_list",
         "sync_sector_members",
         "sync_stock_sector_memberships",
-        "sync_sector_fund_flows",
         "sync_limit_up_pools",
         "sync_stock_lhb_records",
         "sync_stock_notices",
         "sync_stock_financial_quarterly",
         "sync_stock_financial_indicators",
         "sync_stock_business_segments_history",
+        svc.LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID,
     ]
 
 
@@ -459,6 +560,7 @@ def test_eod_finalize_schedule_retries_daily_bars_late_without_slow_jobs():
         svc.EOD_QUANT_RESEARCH_BATCH_JOB_ID,
         "sync_limit_up_event_minutes",
         svc.LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID,
+        svc.LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID,
     ]
     assert "sync_stock_financial_quarterly" not in jobs
     assert "sync_stock_lhb_records" not in jobs
@@ -664,14 +766,14 @@ def test_recover_interrupted_schedules_runs_only_still_interrupted(monkeypatch):
             "last_status": "failed",
             "last_message": svc.INTERRUPTED_SCHEDULE_MESSAGE,
         },
-        "eod_18h": None,
+        "eod_1900": None,
     }
     recovered: list[str] = []
 
     monkeypatch.setattr(svc, "_load_recoverable_interrupted_schedule", lambda schedule_id: rows.get(schedule_id), raising=False)
     monkeypatch.setattr(svc, "_run_schedule_action", lambda row: recovered.append(row["id"]))
 
-    svc._recover_interrupted_schedules(["tail_quant_1430", "eod_18h"])
+    svc._recover_interrupted_schedules(["tail_quant_1430", "eod_1900"])
 
     assert recovered == ["tail_quant_1430"]
 
@@ -697,10 +799,10 @@ def test_start_interrupted_schedule_recovery_drains_queue(monkeypatch):
     svc._interrupted_recovery_thread = None
     svc._INTERRUPTED_SCHEDULE_RECOVERY_IDS.clear()
 
-    svc._queue_interrupted_schedule_recovery(["eod_18h", "tail_quant_1430"])
+    svc._queue_interrupted_schedule_recovery(["eod_1900", "tail_quant_1430"])
     svc.start_interrupted_schedule_recovery(delay_seconds=0)
 
-    assert started == [(["eod_18h", "tail_quant_1430"], 0)]
+    assert started == [(["eod_1900", "tail_quant_1430"], 0)]
     assert not svc._INTERRUPTED_SCHEDULE_RECOVERY_IDS
     svc._interrupted_recovery_thread = None
 
@@ -729,11 +831,11 @@ def test_start_sync_batch_accepts_custom_job_ids(monkeypatch):
         job_ids=["sync_stock_list", "sync_stock_daily_bars"],
         concurrency=12,
         source="schedule",
-        schedule_id="eod_18h",
+        schedule_id="eod_1900",
     )
     assert captured["concurrency"] == 12
     assert captured["source"] == "schedule"
-    assert captured["schedule_id"] == "eod_18h"
+    assert captured["schedule_id"] == "eod_1900"
     assert captured["job_ids"] == ["sync_stock_list", "sync_stock_daily_bars"]
 
 
@@ -2045,16 +2147,16 @@ def test_scheduler_triggers_matching_batch_schedule(monkeypatch):
     monkeypatch.setattr(
         svc,
         "_load_batch_schedules",
-        lambda: [{"id": "eod_18h", "cron": "0 18 * * 1-5", "enabled": True, "action": "sync", "job_ids": ["sync_stock_list"], "concurrency": 8, "last_started_at": None}],
+        lambda: [{"id": "eod_1900", "cron": "0 19 * * 1-5", "enabled": True, "action": "sync", "job_ids": ["sync_stock_list"], "concurrency": 8, "last_started_at": None}],
     )
-    monkeypatch.setattr(svc, "_now_china", lambda: dt.datetime(2026, 6, 17, 18, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))))
+    monkeypatch.setattr(svc, "_now_china", lambda: dt.datetime(2026, 6, 17, 19, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))))
 
     svc._run_scheduled_jobs()
 
     assert triggered, "expected the matching schedule to trigger a batch"
     assert triggered[0]["job_ids"] == ["sync_stock_list"]
     assert triggered[0]["source"] == "schedule"
-    assert triggered[0]["schedule_id"] == "eod_18h"
+    assert triggered[0]["schedule_id"] == "eod_1900"
 
 
 def test_scheduler_skips_weekend_for_weekday_cron(monkeypatch):
@@ -2065,9 +2167,9 @@ def test_scheduler_skips_weekend_for_weekday_cron(monkeypatch):
     monkeypatch.setattr(
         svc,
         "_load_batch_schedules",
-        lambda: [{"id": "eod_18h", "cron": "0 18 * * 1-5", "enabled": True, "action": "sync", "job_ids": ["sync_stock_list"], "concurrency": 8, "last_started_at": None}],
+        lambda: [{"id": "eod_1900", "cron": "0 19 * * 1-5", "enabled": True, "action": "sync", "job_ids": ["sync_stock_list"], "concurrency": 8, "last_started_at": None}],
     )
-    monkeypatch.setattr(svc, "_now_china", lambda: dt.datetime(2026, 6, 20, 18, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))))
+    monkeypatch.setattr(svc, "_now_china", lambda: dt.datetime(2026, 6, 20, 19, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))))
 
     svc._run_scheduled_jobs()
 
@@ -2301,9 +2403,9 @@ def test_scheduler_skips_non_matching_cron(monkeypatch):
     monkeypatch.setattr(
         svc,
         "_load_batch_schedules",
-        lambda: [{"id": "eod_18h", "cron": "0 18 * * 1-5", "enabled": True, "action": "sync", "job_ids": ["sync_stock_list"], "concurrency": 8, "last_started_at": None}],
+        lambda: [{"id": "eod_1900", "cron": "0 19 * * 1-5", "enabled": True, "action": "sync", "job_ids": ["sync_stock_list"], "concurrency": 8, "last_started_at": None}],
     )
-    # now is 14:00, does not match the 18:00 cron
+    # now is 14:00, does not match the 19:00 cron
     monkeypatch.setattr(svc, "_now_china", lambda: dt.datetime(2026, 6, 17, 14, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))))
 
     svc._run_scheduled_jobs()
@@ -2320,7 +2422,7 @@ def test_schedule_endpoints_crud(monkeypatch):
     from alphaagent.server.api import data_sync as data_sync_api
     from alphaagent.server.main import create_app
 
-    monkeypatch.setattr(data_sync_api.service, "list_schedules", lambda: [{"id": "eod_18h", "name": "盘后同步"}])
+    monkeypatch.setattr(data_sync_api.service, "list_schedules", lambda: [{"id": "eod_1900", "name": "盘后同步"}])
     monkeypatch.setattr(data_sync_api.service, "create_schedule", lambda payload: {"id": "new_1", **payload})
     monkeypatch.setattr(data_sync_api.service, "update_schedule", lambda sid, payload: {"id": sid, **payload})
     monkeypatch.setattr(data_sync_api.service, "delete_schedule", lambda sid: {"id": sid, "deleted": True})
@@ -2330,7 +2432,7 @@ def test_schedule_endpoints_crud(monkeypatch):
 
     resp = client.get("/api/data-sync/schedules")
     assert resp.status_code == 200
-    assert resp.json()["data"][0]["id"] == "eod_18h"
+    assert resp.json()["data"][0]["id"] == "eod_1900"
 
     resp = client.post(
         "/api/data-sync/schedules",
@@ -2346,5 +2448,5 @@ def test_schedule_endpoints_crud(monkeypatch):
     resp = client.delete("/api/data-sync/schedules/new_1")
     assert resp.json()["data"]["deleted"] is True
 
-    resp = client.post("/api/data-sync/schedules/eod_18h/run")
-    assert resp.json()["data"]["schedule_id"] == "eod_18h"
+    resp = client.post("/api/data-sync/schedules/eod_1900/run")
+    assert resp.json()["data"]["schedule_id"] == "eod_1900"

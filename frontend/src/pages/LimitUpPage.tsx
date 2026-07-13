@@ -32,11 +32,18 @@ import {
   type LimitUpLaneLedgerTrade,
   type LimitUpLiveSignal,
   type LimitUpSignalSnapshot,
+  type LimitUpTriggerCheck,
 } from "@/api/limitUp";
 import { ErrorState } from "@/components/ErrorState";
 import { LoadingState } from "@/components/LoadingState";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { Button } from "@/components/ui/button";
+import {
+  isNextSessionPlan,
+  liveHeader,
+  signalStatePresentation,
+  type PresentationTone,
+} from "@/features/limitUp/nextSessionPlan";
 import { useChartColors } from "@/lib/chart-theme";
 import { cn } from "@/lib/utils";
 
@@ -276,13 +283,25 @@ function LiveView({ snapshot, lane, loading }: { snapshot?: LimitUpSignalSnapsho
   if (!snapshot) return <EmptyRow text="当前没有实时快照" />;
   const gate = snapshot.recommendations.market_gate;
   const laneValidation = snapshot.recommendations.board_lane_validations?.[lane];
+  const planMode = isNextSessionPlan(snapshot);
+  const header = liveHeader(snapshot);
+  const plan = snapshot.recommendations.plan ?? snapshot.data_quality.plan;
   return (
     <section aria-label="实时推荐">
       <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b bg-muted/20 px-3 py-2 text-xs sm:px-4">
-        <span className={gate.passed ? "text-rise" : "text-fall"}>
-          {gate.passed ? "市场允许出手" : `市场门关闭${gate.reasons.length ? `：${gate.reasons.join("；")}` : ""}`}
+        <span className={planMode ? presentationToneClass(header.tone) : gate.passed ? "text-rise" : "text-fall"}>
+          {planMode
+            ? header.title
+            : gate.passed
+              ? "市场允许出手"
+              : `市场门关闭${gate.reasons.length ? `：${gate.reasons.join("；")}` : ""}`}
         </span>
-        {gate.repair_confirmed && <span className="text-rise">分歧修复已确认</span>}
+        {planMode && (
+          <span className="text-muted-foreground">
+            来源 {snapshot.source_trade_date ?? plan?.source_trade_date ?? snapshot.trade_date}
+          </span>
+        )}
+        {!planMode && gate.repair_confirmed && <span className="text-rise">分歧修复已确认</span>}
         {laneValidation && (
           <span className={laneValidation.passed ? "text-rise" : "text-amber-700 dark:text-amber-300"}>
             {laneValidation.passed ? "战法验证通过" : `战法仅观察：${laneValidation.reason}`}
@@ -297,18 +316,23 @@ function LiveView({ snapshot, lane, loading }: { snapshot?: LimitUpSignalSnapsho
           {signals.map((signal) => <LiveSignalRow key={signal.vt_symbol} signal={signal} stale={snapshot.data_quality.is_stale} />)}
         </div>
       ) : (
-        <EmptyRow text="当前板位没有候选，保持空仓" />
+        <EmptyRow text={planMode ? "当前板位没有入选次交易时段的观察候选" : "当前板位没有候选，保持空仓"} />
       )}
     </section>
   );
 }
 
 function LiveSignalRow({ signal, stale }: { signal: LimitUpLiveSignal; stale: boolean }) {
-  const actionable = !stale && ["buy_now", "next_auction"].includes(signal.action);
   const validationObservation = !stale && signal.validation_passed === false;
-  const observation = signal.action === "wait_tail" || validationObservation;
+  const state = validationObservation
+    ? { label: "观察，不执行", tone: "warning" as const }
+    : signalStatePresentation(signal, stale);
+  const actionable = state.tone === "positive";
+  const observation = state.tone === "warning";
   const factorSummary = liveFactorSummary(signal);
   const setupSummary = (signal.setup_tags ?? []).map(setupTagLabel).join(" · ");
+  const strategyName = signal.strategy_name ?? setupSummary;
+  const selectionReasons = signal.selection_reasons?.slice(0, 4).join(" · ") ?? factorSummary;
   return (
     <article className={cn("border-l-2 px-3 py-3 sm:px-4", actionable ? "border-l-rise" : observation ? "border-l-amber-500" : "border-l-border")}>
       <div className="grid gap-3 lg:grid-cols-[minmax(180px,1.1fr)_minmax(160px,0.8fr)_minmax(300px,1.8fr)_minmax(150px,0.8fr)] lg:items-center">
@@ -320,7 +344,7 @@ function LiveSignalRow({ signal, stale }: { signal: LimitUpLiveSignal; stale: bo
           />
         </div>
         <div>
-          <div className={cn("text-sm font-semibold", actionTone(signal.action, stale))}>{stale ? "数据过期" : validationObservation ? "观察，不执行" : executionStateLabel(signal.execution_state, signal.action)}</div>
+          <div className={cn("text-sm font-semibold", presentationToneClass(state.tone))}>{state.label}</div>
           <div className="mt-0.5 text-xs text-muted-foreground">
             {entryKindLabel(signal.entry_kind)} · {formatPrice(signal.trigger_price)}
             {signal.board_lane === "two_to_three" ? ` · ${twoToThreeQualityLabel(signal.lane_quality_tier, signal.lane_risk_count)}` : ""}
@@ -328,17 +352,17 @@ function LiveSignalRow({ signal, stale }: { signal: LimitUpLiveSignal; stale: bo
           </div>
         </div>
         <div className="min-w-0 text-xs leading-5">
-          <div className="text-foreground">{signal.reason}</div>
-          {setupSummary && <div className="text-foreground">战法：{setupSummary}</div>}
+          {strategyName && <div className="font-medium text-foreground">战法：{strategyName}</div>}
+          {selectionReasons && <div className="text-foreground">入选：{selectionReasons}</div>}
+          <TriggerChecks checks={signal.trigger_checks} />
           {signal.board_lane === "first_board" && (
             <div className="text-muted-foreground">
               封板门 {gateStateLabel(signal.seal_gate_passed)} · 溢价门 {gateStateLabel(signal.premium_gate_passed)}
             </div>
           )}
-          {factorSummary && <div className="text-muted-foreground">{factorSummary}</div>}
-          <div className="text-muted-foreground">买入：{signal.buy_condition ?? "条件待确认"}</div>
-          <div className="text-muted-foreground">卖出：{signal.sell_condition ?? "D+1动态判断"}</div>
-          <div className="text-muted-foreground">取消：{signal.cancel_condition}</div>
+          <div className="text-muted-foreground">买入：{signal.buy_instruction ?? signal.buy_condition ?? "条件待确认"}</div>
+          <div className="text-muted-foreground">卖出：{signal.sell_instruction ?? signal.sell_condition ?? "D+1动态判断"}</div>
+          <div className="text-muted-foreground">取消：{signal.cancel_checks?.join("；") ?? signal.cancel_condition}</div>
         </div>
         <div className="grid grid-cols-2 gap-x-3 text-xs tabular-nums">
           <Metric label="板块热度" value={formatNumber(signal.sector_heat, 1)} />
@@ -590,6 +614,23 @@ function Metric({ label, value, tone }: { label: string; value: string; tone?: s
   return <div><div className="text-[11px] text-muted-foreground">{label}</div><div className={cn("mt-0.5 font-medium", tone)}>{value}</div></div>;
 }
 
+function TriggerChecks({ checks = [] }: { checks?: LimitUpTriggerCheck[] }) {
+  if (!checks.length) return null;
+  const unresolved = checks.filter((check) => check.status !== "passed");
+  if (!unresolved.length) return <div className="text-rise">触发检查：全部通过</div>;
+  return (
+    <div className="text-muted-foreground">
+      {unresolved.map((check) => (
+        <div key={check.code}>
+          {check.status === "failed" ? "未通过" : "待确认"}：{check.label}
+          {check.observed ? ` ${check.observed}` : ""}
+          {check.required ? `（要求 ${check.required}）` : ""}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function SummaryCell({ label, value, tone, detail }: { label: string; value: string; tone?: string; detail?: string }) {
   return <div className="min-w-0 border-b border-r px-3 py-2.5 last:border-r-0 xl:border-b-0"><div className="text-[11px] text-muted-foreground">{label}</div><div className={cn("mt-0.5 truncate text-sm font-semibold tabular-nums", tone)}>{value}</div>{detail && <div className="mt-0.5 text-[10px] leading-4 text-muted-foreground">{detail}</div>}</div>;
 }
@@ -622,10 +663,8 @@ function boardLaneForLevel(level: number): BoardLaneKey {
 
 function boardLaneLabel(value: BoardLaneKey) { return ({ first_board: "首板", one_to_two: "一进二", two_to_three: "二进三", high_board: "高板" } as Record<BoardLaneKey, string>)[value]; }
 
-function actionPriority(action: string) { return ({ buy_now: 0, next_auction: 1, wait_tail: 2, pass: 3 } as Record<string, number>)[action] ?? 4; }
-function actionLabel(action: string) { return ({ buy_now: "现在打", next_auction: "明早竞价", wait_tail: "尾盘等确认", pass: "不打" } as Record<string, string>)[action] ?? action; }
-function executionStateLabel(state: string | undefined, action: string) { return ({ actionable: "条件满足，可买", waiting: "观察等待", watch: "提前观察", cancelled: "条件失效，不买" } as Record<string, string>)[state ?? ""] ?? actionLabel(action); }
-function actionTone(action: string, stale: boolean) { if (stale || action === "pass") return "text-fall"; if (action === "buy_now" || action === "next_auction") return "text-rise"; return "text-amber-600 dark:text-amber-300"; }
+function actionPriority(action: string) { return ({ buy_now: 0, observe: 1, next_auction: 2, wait_tail: 3, pass: 4 } as Record<string, number>)[action] ?? 5; }
+function presentationToneClass(tone: PresentationTone) { return ({ positive: "text-rise", warning: "text-amber-700 dark:text-amber-300", negative: "text-fall", neutral: "text-foreground" } as Record<PresentationTone, string>)[tone]; }
 function entryKindLabel(value: string) { return (({ none: "不执行", auction: "竞价", sweep: "扫板", reseal: "回封", tail_seal: "尾盘封板", next_auction: "竞价接力", first_touch: "首次触板", intraday: "盘中", wait: "等待确认" } as Record<string, string>)[value] ?? value) || "--"; }
 function phaseLabel(value?: string) { return ({ warmup: "预热期", expanding_oos: "滚动样本外", locked_holdout: "锁定留出", post_freeze_forward: "冻结后前向" } as Record<string, string>)[value ?? ""] ?? value ?? "阶段未知"; }
 function d1OutcomeLabel(value: string) { return ({ continuation_limit_up: "D+1 连板", next_limit_up_after_failed_board: "D+1 涨停", d1_premium: "D+1 有溢价", direct_breakdown: "D+1 直接砸", no_premium: "D+1 无溢价", awaiting_d1_bar: "待 D+1" } as Record<string, string>)[value] ?? value; }

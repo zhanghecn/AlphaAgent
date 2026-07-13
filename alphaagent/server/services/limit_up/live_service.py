@@ -39,7 +39,7 @@ LIVE_SNAPSHOT_MAX_AGE_SECONDS = 90
 HISTORY_EVIDENCE_UNAVAILABLE_REASON = "历史证据不可用，已禁止执行"
 EXECUTABLE_ACTIONS = frozenset({"buy_now", "next_auction"})
 ACTIVE_SESSION_STAGES = frozenset(
-    {"auction", "morning", "afternoon", "tail", "close_auction"}
+    {"auction_watch", "auction", "morning", "afternoon", "tail", "close_auction"}
 )
 
 
@@ -62,7 +62,7 @@ def build_live_snapshot(
     source_rows = _merge_source_rows(
         quote_payload,
         pool_payload,
-        include_previous=session_stage(local_at) == "auction",
+        include_previous=session_stage(local_at) in {"auction_watch", "auction"},
     )
     candidates = _enrich_candidates(source_rows, pool_payload, stock_context)
     ranked = rank_live_candidates(candidates)
@@ -128,11 +128,20 @@ def refresh_live_snapshot(
         return _latest_snapshot_for_session(local_at)
     live_adapter = adapter or AkShareAdapter()
     try:
-        quotes, pools, source_errors = _fetch_live_payloads(live_adapter, local_at)
+        stage = session_stage(local_at)
+        planned_symbols = _planned_symbols() if stage in {"auction_watch", "auction"} else []
+        if planned_symbols:
+            quotes, pools, source_errors = _fetch_live_payloads(
+                live_adapter,
+                local_at,
+                planned_symbols=planned_symbols,
+            )
+        else:
+            quotes, pools, source_errors = _fetch_live_payloads(live_adapter, local_at)
         symbols = _candidate_symbols(
             quotes,
             pools,
-            include_previous=session_stage(local_at) == "auction",
+            include_previous=stage in {"auction_watch", "auction"},
         )
         market_date = _resolved_market_date(quotes, pools, local_at, {})
         context = load_live_context(symbols, market_date) if symbols else {"by_symbol": {}}
@@ -171,6 +180,13 @@ def get_latest_live_snapshot(now: datetime | None = None) -> dict[str, object]:
 
 
 def _latest_snapshot_for_session(local_at: datetime) -> dict[str, object]:
+    from alphaagent.server.services.limit_up.next_session_plan import (
+        get_latest_next_session_plan,
+    )
+
+    plan = get_latest_next_session_plan()
+    if plan is not None:
+        return plan
     latest_trade_date = load_latest_daily_trade_date(local_at.date())
     snapshot = load_latest_snapshot(strategy_version=STRATEGY_VERSION)
     if snapshot is None:
@@ -241,6 +257,8 @@ def empty_live_snapshot(
 def _fetch_live_payloads(
     adapter: AkShareAdapter,
     captured_at: datetime,
+    *,
+    planned_symbols: Sequence[str] = (),
 ) -> tuple[dict[str, object], dict[str, object], list[str]]:
     trade_key = captured_at.strftime("%Y%m%d")
     payloads: dict[str, dict[str, object]] = {}
@@ -263,9 +281,65 @@ def _fetch_live_payloads(
             except Exception as exc:  # noqa: BLE001
                 payloads[name] = {}
                 errors.append(_source_error(name, exc))
+    requests = _planned_quote_requests(planned_symbols)
+    if requests:
+        try:
+            targeted = [quote.to_api() for quote in adapter.get_quotes(requests)]
+            quote_payload = dict(payloads["quotes"])
+            rows = {
+                str(row.get("vt_symbol") or ""): dict(row)
+                for row in _items(quote_payload)
+                if row.get("vt_symbol")
+            }
+            for row in targeted:
+                if row.get("vt_symbol"):
+                    rows[str(row["vt_symbol"])] = row
+            sources = [str(quote_payload.get("source") or "").strip()]
+            sources.extend(str(row.get("source") or "").strip() for row in targeted)
+            payloads["quotes"] = {
+                **quote_payload,
+                "trade_date": quote_payload.get("trade_date") or trade_key,
+                "items": list(rows.values()),
+                "source": ",".join(dict.fromkeys(value for value in sources if value)),
+                "updated_at": quote_payload.get("updated_at") or captured_at.isoformat(),
+            }
+        except Exception as exc:  # noqa: BLE001
+            errors.append(_source_error("planned_quotes", exc))
     if not payloads["quotes"] and not payloads["pools"]:
         raise LiveSnapshotUnavailable("实时涨幅榜和涨停池均不可用")
     return payloads["quotes"], payloads["pools"], errors
+
+
+def _planned_symbols() -> list[str]:
+    from alphaagent.server.services.limit_up.next_session_plan import (
+        get_latest_next_session_plan,
+    )
+
+    plan = get_latest_next_session_plan()
+    if not isinstance(plan, Mapping):
+        return []
+    recommendations = plan.get("recommendations")
+    recommendations = recommendations if isinstance(recommendations, Mapping) else {}
+    lanes = recommendations.get("lanes")
+    lanes = lanes if isinstance(lanes, Mapping) else {}
+    rows = lanes.get("next_auction")
+    rows = rows if isinstance(rows, list) else []
+    return [
+        str(row.get("vt_symbol"))
+        for row in rows[:5]
+        if isinstance(row, Mapping) and row.get("vt_symbol")
+    ]
+
+
+def _planned_quote_requests(symbols: Sequence[str]) -> list[dict[str, str]]:
+    requests: list[dict[str, str]] = []
+    for vt_symbol in dict.fromkeys(str(value) for value in symbols if value):
+        symbol, separator, exchange = vt_symbol.partition(".")
+        if separator and symbol and exchange in {"SSE", "SZSE"}:
+            requests.append({"symbol": symbol, "exchange": exchange})
+        if len(requests) >= 5:
+            break
+    return requests
 
 
 def _merge_source_rows(

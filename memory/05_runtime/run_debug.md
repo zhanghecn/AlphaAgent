@@ -113,9 +113,9 @@ uv run pytest tests/alphaagent/test_quant_strategy_acceptance.py -q
 常用接口：
 
 - `GET /api/data-sync/health`: 数据健康和推荐同步。
-- `GET /api/data-sync/tail-workflow`: 实时尾盘量化状态。默认只展示
-  14:30 实时尾盘量化、18:00 盘后同步和 21:30 晚间日线补全；旧
-  11:30、14:00、15:00 盘中缓存档会被启动种子逻辑禁用。
+- `GET /api/data-sync/tail-workflow`: 实时尾盘量化和盘后更新状态。默认只展示
+  14:30 实时尾盘量化和 19:00 盘后更新；21:30 仅作为内部补偿重试。
+  旧 11:30、14:00、15:00 盘中缓存档和旧 `eod_18h` 档会被启动种子逻辑禁用或删除。
 - `GET /api/quant/tail-preview?limit=50`: 今日实时尾盘量化结果，只读，不写历史候选。
 - `POST /api/data-sync/tail-workflow/run-tail-quant`: 手动执行 14:30 实时尾盘量化批次。
 - `POST /api/data-sync/batches/run-all`: 一键同步批次。
@@ -157,6 +157,8 @@ uv run pytest tests/alphaagent/test_quant_strategy_acceptance.py -q
 常用接口：
 
 - `GET /api/limit-up/live`: 只读每分钟后台保存的最新实时信号，不访问外部行情；交易时段超过 90 秒未更新会 fail-closed。`POST /api/limit-up/live/refresh` 仅供调度/显式采集使用。
+- `limit_up_plan_1505`: 15:05 生成次交易时段初步观察；只有涨停池日期明确等于当天时才绕过尚未同步的收盘日线日期。`eod_1900` 和 `eod_finalize_2130` 最后执行 `limit_up_next_session_plan_final`，API 启动时会单飞补建缺失正式计划。
+- 09:15-09:19 后台扫描只更新竞价观察，09:20 后才可能转为“买点已触发（研究）”。每条计划必须包含战法、入选原因、触发检查、买入、卖出和取消纪律；`execution_permission` 当前固定为 `research_only`。
 - `GET /api/limit-up/signals?date=YYYY-MM-DD&as_of=`: 历史快照或历史代理；无严格快照的代理会附加只使用该日前已闭合结果的历史胜率、平均净收益、硬亏率和样本数。
 - `GET /api/limit-up/history/status` / `POST /api/limit-up/history/rebuild`: 全历史账本状态和后台重建。
 - `GET /api/limit-up/history/dates` / `GET /api/limit-up/history/day?date=`: 600 日日期与逐日四路径验证。
@@ -168,7 +170,7 @@ uv run pytest tests/alphaagent/test_quant_strategy_acceptance.py -q
 - `POST /api/limit-up/data-quality/minute-backfill`: 兼容的同步补数接口，默认 20 个、最大 200 个；长批次不要从产品调用。
 - `POST /api/limit-up/data-quality/minute-backfill/start` / `GET /batches/{batch_id}`: 产品后台补数入口，默认 200 个并立即返回 `202`；前端每 2 秒轮询，终态自动刷新门禁。全局无关同步批次运行时返回 `409`。
 - `sync_limit_up_event_minutes`: 夜间自动补主板非 ST 涨停事件分钟路径，默认 200 个；位于 `eod_finalize_2130` 的 `eod_quant_research` 之后，失败按 1/3/14 天持久化退避。
-- `limit_up_history_rebuild`: `eod_finalize_2130` 最后一个内部任务；仅当最新完整日线日晚于 v11 账本末日时重建，无新交易日返回 `skipped`。重建完成会清空并重新预热动态回测/战法验证缓存。
+- `limit_up_history_rebuild`: `eod_finalize_2130` 在事件分钟补数后执行；仅当最新完整日线日晚于 v11 账本末日时重建，无新交易日返回 `skipped`。重建完成会清空并重新预热动态回测/战法验证缓存，随后生成次交易时段正式计划。
 - `auction_0926` / `sync_stock_auction_snapshots`: 交易日 09:26 保存主板非 ST 集合竞价公开字段；行情日期不等于当天、源时间不在 09:25-09:29、分页不足或去重后缺股都会整批失败且不写快照。
 - `GET /api/data-sync/imports/limit-up-evidence/status`: 历史事件/竞价供应商配置和真实覆盖；不返回 token。
 - `GET /api/data-sync/imports/limit-up-evidence/template.csv?dataset=events|auction`: 完整 CSV 模板。
@@ -208,7 +210,7 @@ docker compose up -d --build alphaagent-api alphaagent-web
 
 API runtime 需要 `libgomp1` 才能导入 LightGBM；该包在 `Dockerfile.alphaagent-api` 独立缓存层安装，并先删除只用于安装 Docker CLI 的 apt source，避免源码重建受 Docker 官方源波动阻塞。
 
-浏览器检查 `http://localhost:8080/limit-up`，桌面和 `390x844` 都要验证四板位、历史日期交割单、动态卖点/原因、回测区间、局部表格滚动、console 和 network。v11 验证为打板后端 301 项、调度 87 项、前端 14 项和生产构建通过；桌面/手机无整页横向溢出，console 0 error/0 warning。部署后完整组合回测约 196ms、已预热交割单约 66ms、实时快照读取约 16ms。账本仍为 600 日，四板位均为 `research_only`，冻结后有效前向交易为 0，`simulation_eligible=false`；主结果见 `memory/06_backtests/limit_up_real_cash_backtest.md`。
+浏览器检查 `http://localhost:8080/limit-up`，桌面和 `390x844` 都要验证四板位、历史日期交割单、动态卖点/原因、回测区间、局部表格滚动、console 和 network。当前验证为打板后端 309 项、调度 90 项、前端 19 项和生产构建通过；正式计划标题、结构化规则、桌面/手机无整页横向溢出，console 0 error/0 warning。真实启动补偿已为 `2026-07-10` 保存 `next_session_final`，连续两次 GET 前后计划行数保持 1；当前计划候选为 0，系统未强行推荐。账本仍为 600 日，四板位均为 `research_only`，冻结后有效前向交易为 0，`simulation_eligible=false`；主结果见 `memory/06_backtests/limit_up_real_cash_backtest.md`。
 
 ## Verification
 

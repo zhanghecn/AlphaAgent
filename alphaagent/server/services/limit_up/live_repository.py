@@ -8,7 +8,7 @@ from statistics import mean
 from typing import Mapping
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import case, desc, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from alphaagent.server.db import schema
@@ -25,6 +25,7 @@ from alphaagent.server.services.limit_up.sentiment import load_sentiment_points
 from alphaagent.server.services.limit_up.versions import LIVE_STRATEGY_VERSION
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+NEXT_SESSION_PLAN_MODES = ("next_session_preliminary", "next_session_final")
 RESEARCH_SECTOR_TYPES = ("theme", "industry")
 STYLE_SECTOR_KEYWORDS = (
     "昨日",
@@ -98,6 +99,42 @@ def load_latest_snapshot(
         )
     statement = statement.order_by(
         desc(schema.limit_up_signal_snapshots.c.captured_at)
+    ).limit(1)
+    with session_scope() as session:
+        row = session.execute(statement).mappings().one_or_none()
+    return _snapshot_row(row) if row else None
+
+
+def load_latest_next_session_plan(
+    source_trade_date: date | str | None = None,
+    *,
+    phase: str | None = None,
+    strategy_version: str | None = None,
+) -> dict[str, object] | None:
+    modes = (
+        (f"next_session_{phase}",)
+        if phase in {"preliminary", "final"}
+        else NEXT_SESSION_PLAN_MODES
+    )
+    statement = select(schema.limit_up_signal_snapshots).where(
+        schema.limit_up_signal_snapshots.c.mode.in_(modes)
+    )
+    if source_trade_date is not None:
+        statement = statement.where(
+            schema.limit_up_signal_snapshots.c.trade_date == _date(source_trade_date)
+        )
+    if strategy_version:
+        statement = statement.where(
+            schema.limit_up_signal_snapshots.c.strategy_version == strategy_version
+        )
+    mode_priority = case(
+        (schema.limit_up_signal_snapshots.c.mode == "next_session_final", 0),
+        else_=1,
+    )
+    statement = statement.order_by(
+        desc(schema.limit_up_signal_snapshots.c.trade_date),
+        mode_priority,
+        desc(schema.limit_up_signal_snapshots.c.captured_at),
     ).limit(1)
     with session_scope() as session:
         row = session.execute(statement).mappings().one_or_none()
@@ -406,6 +443,13 @@ def _snapshot_row(row: Mapping[str, object]) -> dict[str, object]:
         value = result.get(key)
         if isinstance(value, (date, datetime)):
             result[key] = value.isoformat()
+    quality = result.get("data_quality")
+    quality = quality if isinstance(quality, Mapping) else {}
+    plan = quality.get("plan")
+    if isinstance(plan, Mapping):
+        for key in ("source_trade_date", "target_session", "plan_phase"):
+            if plan.get(key) not in (None, ""):
+                result[key] = plan[key]
     return result
 
 
