@@ -25,6 +25,7 @@ import {
   fetchLimitUpHistoryLedger,
   fetchLimitUpLaneBacktest,
   fetchLimitUpLive,
+  fetchLimitUpSectorWarmupResearch,
   type BoardLaneKey,
   type LimitUpBacktestScope,
   type LimitUpLaneBacktest,
@@ -32,6 +33,7 @@ import {
   type LimitUpLaneLedgerTrade,
   type LimitUpLiveSignal,
   type LimitUpSignalSnapshot,
+  type LimitUpSectorWarmupReport,
   type LimitUpTriggerCheck,
 } from "@/api/limitUp";
 import { ErrorState } from "@/components/ErrorState";
@@ -48,6 +50,7 @@ import {
   liveSignalsForScope,
   type LimitUpLiveScope,
 } from "@/features/limitUp/livePortfolio";
+import { SectorWarmupResearchPanel } from "@/features/limitUp/SectorWarmupResearchPanel";
 import { useChartColors } from "@/lib/chart-theme";
 import { cn } from "@/lib/utils";
 
@@ -113,6 +116,16 @@ export function LimitUpPage() {
       lane: backtestScope,
     }),
     enabled: view === "backtest" && Boolean(start && end),
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+  });
+  const warmupResearchQuery = useQuery({
+    queryKey: ["limitUpSectorWarmupResearch", start, end],
+    queryFn: () => fetchLimitUpSectorWarmupResearch({
+      start: start === datesQuery.data?.start ? undefined : start,
+      end: end === datesQuery.data?.end ? undefined : end,
+    }),
+    enabled: view === "backtest" && backtestScope === "first_board" && Boolean(start && end),
     staleTime: Infinity,
     refetchOnWindowFocus: false,
   });
@@ -222,6 +235,9 @@ export function LimitUpPage() {
       ) : (
         <BacktestView
           report={backtestQuery.data}
+          warmupReport={backtestScope === "first_board" ? warmupResearchQuery.data : undefined}
+          warmupLoading={backtestScope === "first_board" && warmupResearchQuery.isLoading}
+          warmupError={backtestScope === "first_board" ? firstError(warmupResearchQuery.error) : null}
           loading={backtestQuery.isLoading}
           fetching={backtestQuery.isFetching}
           start={start}
@@ -232,6 +248,7 @@ export function LimitUpPage() {
           onEnd={setEnd}
           onRun={() => {
             void backtestQuery.refetch();
+            if (backtestScope === "first_board") void warmupResearchQuery.refetch();
           }}
         />
       )}
@@ -456,6 +473,12 @@ function LiveSignalRow({ signal, stale }: { signal: LimitUpLiveSignal; stale: bo
               封板门 {gateStateLabel(signal.seal_gate_passed)} · 溢价门 {gateStateLabel(signal.premium_gate_passed)}
             </div>
           )}
+          {signal.board_lane === "first_board" && signal.warmup_group && (
+            <div className="text-muted-foreground">
+              板块预热研究：{signal.warmup_group_name ?? signal.sector_name ?? "概念待确认"} · {warmupStateLabel(signal.warmup_state)} {formatNumber(signal.warmup_score, 0)}
+              {signal.warmup_leader_rank ? ` · 动态龙${signal.warmup_leader_rank}` : ""} · 仅影子观察
+            </div>
+          )}
           <div className="text-muted-foreground">买入：{signal.buy_instruction ?? signal.buy_condition ?? "条件待确认"}</div>
           <div className="text-muted-foreground">卖出：{signal.sell_instruction ?? signal.sell_condition ?? "D+1动态判断"}</div>
           <div className="text-muted-foreground">取消：{signal.cancel_checks?.join("；") ?? signal.cancel_condition}</div>
@@ -541,6 +564,9 @@ function LedgerTradeRow({ trade }: { trade: LimitUpLaneLedgerTrade }) {
 
 interface BacktestViewProps {
   report?: LimitUpLaneBacktest;
+  warmupReport?: LimitUpSectorWarmupReport;
+  warmupLoading: boolean;
+  warmupError: string | null;
   loading: boolean;
   fetching: boolean;
   start: string;
@@ -552,7 +578,7 @@ interface BacktestViewProps {
   onRun: () => void;
 }
 
-function BacktestView({ report, loading, fetching, start, end, minimumDate, maximumDate, onStart, onEnd, onRun }: BacktestViewProps) {
+function BacktestView({ report, warmupReport, warmupLoading, warmupError, loading, fetching, start, end, minimumDate, maximumDate, onStart, onEnd, onRun }: BacktestViewProps) {
   if (loading && !report) return <LoadingState rows={7} />;
   const summary = report?.summary;
   return (
@@ -579,6 +605,7 @@ function BacktestView({ report, loading, fetching, start, end, minimumDate, maxi
       </div>
 
       {report && <SignalSummaryStrip report={report} />}
+      <SectorWarmupResearchPanel report={warmupReport} loading={warmupLoading} error={warmupError} />
       {report && (
         <div className="border-b px-3 py-2 text-xs text-muted-foreground sm:px-4">
           动态退出 · 竞价 {report.exit_summary.auction_exit_count} 笔 · 尾盘 {report.exit_summary.tail_exit_count} 笔
@@ -748,6 +775,7 @@ function boardStatusLabel(value: string) { return ({ sealed: "封住", failed: "
 function exitReasonLabel(value: string) { return ({ dynamic_auction_exit: "动态竞价兑现", dynamic_tail_exit: "动态尾盘退出", planned_open: "开盘退出", planned_close: "收盘退出", emergency_close: "开盘未成后收盘退出", retry_open: "延期至开盘退出", retry_close: "延期至收盘退出" } as Record<string, string>)[value] ?? value; }
 function dynamicExitLabel(value?: string) { return ({ auction_exit: "竞价兑现", tail_exit: "尾盘退出" } as Record<string, string>)[value ?? ""] ?? "动态判断"; }
 function setupTagLabel(value: string) { return ({ sandwich_board: "夹板", return_board: "回马板", weak_to_strong_breakout: "弱转强突破", dragon_first_negative_relay: "龙首阴接力", dragon_weak_to_strong: "龙头弱转强", anti_nuclear_board: "反核板" } as Record<string, string>)[value] ?? value; }
+function warmupStateLabel(value?: string) { return ({ cold: "冷却", observe: "观察", warming: "升温", launch: "启动", crowded: "拥挤", ebb: "退潮", unavailable: "数据不足" } as Record<string, string>)[value ?? ""] ?? value ?? "数据不足"; }
 function skipReasonLabel(value: string) { return ({ position_limit: "持仓已满", insufficient_cash: "现金不足", below_one_lot: "目标仓位不足一手", duplicate_position: "已有同股持仓", invalid_entry_price: "买入价无效" } as Record<string, string>)[value] ?? value; }
 function twoToThreeQualityLabel(tier?: "A" | "B" | null, riskCount?: number | null) { const quality = tier ?? "B"; const risks = riskCount ?? 0; return `${quality}级${risks > 0 ? ` · 风险${risks}` : ""}`; }
 function twoToThreeRiskTitle(flags?: string[]) { return (flags ?? []).map((flag) => ({ auction_gap_outside_core: "竞价不在2%-5%核心区", prior_turnover_outside_core: "前板换手不在10%-20%核心区", prior_amount_ratio_outside_core: "前板量能比不在1.2-2", financial_snapshot_missing: "财报快照缺失", prior_low_below_zero: "前板最低价翻绿或缺失", prior_market_failed_rate_high: "前日炸板率偏高或缺失" } as Record<string, string>)[flag] ?? flag).join("；"); }

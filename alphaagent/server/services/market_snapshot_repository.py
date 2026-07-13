@@ -14,6 +14,7 @@ from alphaagent.server.db.session import session_scope
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 INTRADAY_FUND_FLOW_PERIODS = frozenset({"即时", "今日", "1日", "当日"})
+MEMBERSHIP_SNAPSHOT_CHUNK_SIZE = 500
 
 
 def save_current_stock_sector_membership_snapshot(
@@ -52,26 +53,11 @@ def save_stock_sector_membership_snapshots(
         return 0
 
     table = schema.stock_sector_membership_snapshots
-    statement = postgresql_insert(table).values(rows)
-    statement = statement.on_conflict_do_update(
-        index_elements=[table.c.snapshot_date, table.c.vt_symbol, table.c.sector_id],
-        set_={
-            "captured_at": statement.excluded.captured_at,
-            "sector_name": statement.excluded.sector_name,
-            "sector_type": statement.excluded.sector_type,
-            "rank": statement.excluded.rank,
-            "confirmed": statement.excluded.confirmed,
-            "is_precise": statement.excluded.is_precise,
-            "source": statement.excluded.source,
-            "raw": statement.excluded.raw,
-            "updated_at": datetime.now(timezone.utc),
-        },
-    )
     with session_scope() as session:
         session.execute(
             table.delete().where(table.c.snapshot_date == snapshot_date)
         )
-        session.execute(statement)
+        _upsert_membership_snapshot_rows(session, table, rows)
     return len(rows)
 
 
@@ -100,21 +86,6 @@ def replace_stock_sector_membership_snapshot_scope(
         return 0
 
     table = schema.stock_sector_membership_snapshots
-    statement = postgresql_insert(table).values(rows)
-    statement = statement.on_conflict_do_update(
-        index_elements=[table.c.snapshot_date, table.c.vt_symbol, table.c.sector_id],
-        set_={
-            "captured_at": statement.excluded.captured_at,
-            "sector_name": statement.excluded.sector_name,
-            "sector_type": statement.excluded.sector_type,
-            "rank": statement.excluded.rank,
-            "confirmed": statement.excluded.confirmed,
-            "is_precise": statement.excluded.is_precise,
-            "source": statement.excluded.source,
-            "raw": statement.excluded.raw,
-            "updated_at": datetime.now(timezone.utc),
-        },
-    )
     with session_scope() as session:
         session.execute(
             table.delete().where(
@@ -122,8 +93,44 @@ def replace_stock_sector_membership_snapshot_scope(
                 table.c.sector_type == normalized_sector_type,
             )
         )
-        session.execute(statement)
+        _upsert_membership_snapshot_rows(session, table, rows)
     return len(rows)
+
+
+def _upsert_membership_snapshot_rows(
+    session,
+    table,
+    rows: Sequence[Mapping[str, Any]],
+) -> None:
+    updated_at = datetime.now(timezone.utc)
+    for chunk in _row_chunks(rows, chunk_size=MEMBERSHIP_SNAPSHOT_CHUNK_SIZE):
+        statement = postgresql_insert(table).values(chunk)
+        statement = statement.on_conflict_do_update(
+            index_elements=[table.c.snapshot_date, table.c.vt_symbol, table.c.sector_id],
+            set_={
+                "captured_at": statement.excluded.captured_at,
+                "sector_name": statement.excluded.sector_name,
+                "sector_type": statement.excluded.sector_type,
+                "rank": statement.excluded.rank,
+                "confirmed": statement.excluded.confirmed,
+                "is_precise": statement.excluded.is_precise,
+                "source": statement.excluded.source,
+                "raw": statement.excluded.raw,
+                "updated_at": updated_at,
+            },
+        )
+        session.execute(statement)
+
+
+def _row_chunks(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    chunk_size: int,
+):
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    for offset in range(0, len(rows), chunk_size):
+        yield list(rows[offset : offset + chunk_size])
 
 
 def build_stock_sector_membership_snapshot_rows(

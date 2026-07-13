@@ -452,7 +452,7 @@ def _signal(
     valid_at = _local_datetime(captured_at).isoformat()
     buy_instruction = _buy_condition(entry_kind, action)
     sell_instruction = _sell_condition(candidate)
-    return {
+    signal = {
         "vt_symbol": candidate.get("vt_symbol"),
         "name": candidate.get("name"),
         "sector_id": candidate.get("sector_id"),
@@ -524,6 +524,25 @@ def _signal(
         "cancel_checks": _cancel_checks(entry_kind),
         "execution_confidence": "proxy_without_l2",
     }
+    if str(signal["board_lane"]) == "first_board" and candidate.get("warmup_group"):
+        signal.update(
+            {
+                "warmup_group": candidate.get("warmup_group"),
+                "warmup_group_name": candidate.get("warmup_group_name"),
+                "warmup_state": candidate.get("warmup_state"),
+                "warmup_score": _number(candidate.get("warmup_score")),
+                "warmup_confidence": candidate.get("warmup_confidence"),
+                "warmup_leader_rank": candidate.get("warmup_leader_rank"),
+                "warmup_main_net_inflow": _number(
+                    candidate.get("warmup_main_net_inflow")
+                ),
+                "warmup_main_net_inflow_ratio": _number(
+                    candidate.get("warmup_main_net_inflow_ratio")
+                ),
+                "warmup_execution_effect": "none_research_only",
+            }
+        )
+    return signal
 
 
 def _signal_state(

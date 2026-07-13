@@ -32,6 +32,10 @@ from alphaagent.server.services.limit_up.live_repository import (
     load_live_context,
     save_snapshot,
 )
+from alphaagent.server.services.limit_up.sector_warmup import (
+    attach_dynamic_group_leader_ranks,
+    live_warmup_observation,
+)
 from alphaagent.server.services.limit_up.versions import (
     LIVE_STRATEGY_VERSION as STRATEGY_VERSION,
 )
@@ -76,6 +80,7 @@ def build_live_snapshot(
         limit=max(len(candidates), 5),
     )
     _attach_lane_decisions(sector_front, market_context, local_at)
+    _attach_warmup_shadow(sector_front)
     _attach_stability(sector_front, previous_snapshot, local_at)
     ranked = rank_live_opportunities(sector_front)
     recommendations = build_live_recommendations(
@@ -553,8 +558,40 @@ def _enrich_candidate(
         "financial_risk": context.get("financial_risk"),
         "financial_snapshot": context.get("financial_snapshot"),
         "lane_feature_ready": bool(context.get("lane_feature_ready")),
+        "warmup_contexts": [
+            dict(item)
+            for item in (context.get("concept_contexts") or [])
+            if isinstance(item, Mapping)
+        ],
         "pool_key": raw.get("pool_key"),
     }
+
+
+def _attach_warmup_shadow(candidates: list[dict[str, object]]) -> None:
+    for candidate in candidates:
+        contexts = candidate.pop("warmup_contexts", [])
+        if str(candidate.get("board_lane") or "") != "first_board":
+            continue
+        observation = live_warmup_observation(
+            contexts if isinstance(contexts, Sequence) else []
+        )
+        if not observation["available"]:
+            continue
+        candidate.update(
+            {
+                "warmup_group": observation["group_id"],
+                "warmup_group_name": observation["group_name"],
+                "warmup_state": observation["state"],
+                "warmup_score": observation["score"],
+                "warmup_confidence": observation["confidence"],
+                "warmup_execution_effect": observation["execution_effect"],
+                "warmup_main_net_inflow": observation.get("main_net_inflow"),
+                "warmup_main_net_inflow_ratio": observation.get(
+                    "main_net_inflow_ratio"
+                ),
+            }
+        )
+    candidates[:] = attach_dynamic_group_leader_ranks(candidates)
 
 
 def _attach_lane_decisions(

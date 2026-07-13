@@ -16,6 +16,7 @@ from alphaagent.server.services.limit_up import (
     history_repository,
     lane_repository,
     live_evidence,
+    sector_warmup_research,
     walk_forward_model,
 )
 from alphaagent.server.services.limit_up.lane_research import BOARD_LANES
@@ -27,6 +28,7 @@ _BACKTEST_WARM_THREAD: threading.Thread | None = None
 _MODEL_REPORT_CACHE = TTLCache(max_items=16)
 _LANE_VALIDATION_CACHE = TTLCache(max_items=16)
 _BACKTEST_REPORT_CACHE = TTLCache(max_items=32)
+_SECTOR_WARMUP_REPORT_CACHE = TTLCache(max_items=16)
 _BUILD_STATE: dict[str, object] = {
     "status": "idle",
     "strategy_version": history_engine.HISTORY_STRATEGY_VERSION,
@@ -77,6 +79,7 @@ def rebuild_history_sync() -> dict[str, object]:
         _MODEL_REPORT_CACHE.clear()
         _LANE_VALIDATION_CACHE.clear()
         _BACKTEST_REPORT_CACHE.clear()
+        _SECTOR_WARMUP_REPORT_CACHE.clear()
         live_evidence.clear_live_evidence_cache()
         result = {
             "status": "ready",
@@ -153,6 +156,32 @@ def get_history_dates() -> dict[str, object]:
     }
 
 
+def get_sector_warmup_research(
+    start: date | None,
+    end: date | None,
+) -> dict[str, object]:
+    cache_key = (
+        f"{history_engine.HISTORY_STRATEGY_VERSION}:"
+        f"{sector_warmup_research.RESEARCH_VERSION}:{start}:{end}"
+    )
+
+    def load() -> dict[str, object]:
+        rows = history_repository.load_history_range(
+            history_engine.HISTORY_STRATEGY_VERSION,
+            start,
+            end,
+        )
+        data_coverage = history_repository.load_sector_warmup_data_coverage()
+        return sector_warmup_research.build_sector_warmup_research_report(
+            rows,
+            start=start,
+            end=end,
+            data_coverage=data_coverage,
+        )
+
+    return _SECTOR_WARMUP_REPORT_CACHE.get_or_set(cache_key, 21_600, load)
+
+
 def start_backtest_cache_warmup() -> dict[str, object]:
     """Precompute default dynamic reports after a history rebuild."""
 
@@ -195,6 +224,10 @@ def _warm_default_backtests() -> None:
             pass
     try:
         get_lane_validation_snapshot("dynamic")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        get_sector_warmup_research(None, None)
     except Exception:  # noqa: BLE001
         pass
     for scope in scopes:

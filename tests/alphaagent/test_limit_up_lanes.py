@@ -1384,12 +1384,18 @@ def test_default_backtest_warmup_primes_portfolio_then_lane_validation(
         "get_lane_validation_snapshot",
         lambda exit_mode: calls.append(f"validation:{exit_mode}"),
     )
+    monkeypatch.setattr(
+        history_service,
+        "get_sector_warmup_research",
+        lambda *_args: calls.append("research:sector_warmup"),
+    )
 
     history_service._warm_default_backtests()
 
     assert calls == [
         "backtest:portfolio",
         "validation:dynamic",
+        "research:sector_warmup",
         "backtest:first_board",
         "backtest:high_board",
     ]

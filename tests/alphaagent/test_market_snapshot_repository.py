@@ -128,3 +128,14 @@ def test_membership_rows_keep_the_capture_date_as_a_separate_version() -> None:
 
     assert rows[0]["snapshot_date"] == date(2026, 7, 13)
     assert rows[0]["captured_at"] == captured_at.astimezone(timezone.utc)
+
+
+def test_large_membership_snapshots_are_split_below_postgres_parameter_limit() -> None:
+    chunks = list(
+        market_snapshot_repository._row_chunks(
+            [{"row": index} for index in range(1_201)],
+            chunk_size=500,
+        )
+    )
+
+    assert [len(chunk) for chunk in chunks] == [500, 500, 201]

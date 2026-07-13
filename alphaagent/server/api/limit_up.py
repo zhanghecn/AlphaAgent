@@ -25,6 +25,7 @@ from alphaagent.server.services.limit_up.history_service import (
     get_lane_history_backtest as get_limit_up_lane_history_backtest,
     get_history_model_report as get_limit_up_history_model_report,
     get_history_status as get_limit_up_history_status,
+    get_sector_warmup_research as get_limit_up_sector_warmup_research,
     start_history_rebuild as start_limit_up_history_rebuild,
 )
 from alphaagent.server.services.limit_up.signal_service import (
@@ -261,6 +262,27 @@ def history_backtest(
                 )
             )
         return ok(get_limit_up_history_backtest(start, end, entry_mode, exit_mode))
+    except Exception as exc:  # noqa: BLE001
+        return _service_error(exc)
+
+
+@router.get("/history/sector-warmup", response_model=None)
+def history_sector_warmup(
+    start: date | None = Query(default=None),
+    end: date | None = Query(default=None),
+):
+    if start and end and start > end:
+        return JSONResponse(
+            status_code=400,
+            content=fail("INVALID_DATE_RANGE", "开始日期不能晚于结束日期"),
+        )
+    if not is_database_configured():
+        return JSONResponse(
+            status_code=503,
+            content=fail("DATABASE_UNAVAILABLE", "数据库未配置，无法研究板块预热"),
+        )
+    try:
+        return ok(get_limit_up_sector_warmup_research(start, end))
     except Exception as exc:  # noqa: BLE001
         return _service_error(exc)
 

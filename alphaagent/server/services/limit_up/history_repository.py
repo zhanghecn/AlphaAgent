@@ -490,6 +490,101 @@ def history_coverage(version: str) -> dict[str, object]:
     }
 
 
+def load_sector_warmup_data_coverage() -> dict[str, object]:
+    """Return point-in-time concept evidence coverage for warmup research."""
+
+    schema.ensure_schema_once(get_engine())
+    concept_bars = schema.sector_daily_bars.join(
+        schema.sectors,
+        schema.sector_daily_bars.c.sector_id == schema.sectors.c.id,
+    )
+    with session_scope() as session:
+        concept_daily = session.execute(
+            select(
+                func.min(schema.sector_daily_bars.c.trade_date),
+                func.max(schema.sector_daily_bars.c.trade_date),
+                func.count(func.distinct(schema.sector_daily_bars.c.trade_date)),
+                func.count(),
+            )
+            .select_from(concept_bars)
+            .where(schema.sectors.c.type.in_(("concept", "theme")))
+        ).one()
+        period_scores = _date_coverage_row(
+            session,
+            schema.sector_period_scores,
+            schema.sector_period_scores.c.as_of_date,
+        )
+        fund_flows = _date_coverage_row(
+            session,
+            schema.sector_fund_flows,
+            schema.sector_fund_flows.c.trade_date,
+        )
+        fund_snapshots = _date_coverage_row(
+            session,
+            schema.sector_fund_flow_snapshots,
+            schema.sector_fund_flow_snapshots.c.trade_date,
+            schema.sector_fund_flow_snapshots.c.sector_type.in_(("concept", "theme")),
+        )
+        membership_snapshots = _date_coverage_row(
+            session,
+            schema.stock_sector_membership_snapshots,
+            schema.stock_sector_membership_snapshots.c.snapshot_date,
+            schema.stock_sector_membership_snapshots.c.sector_type.in_(("concept", "theme")),
+        )
+        relation_edges = _date_coverage_row(
+            session,
+            schema.sector_relation_edges,
+            schema.sector_relation_edges.c.as_of_date,
+        )
+    return {
+        "concept_daily_bar_start": _iso_or_none(concept_daily[0]),
+        "concept_daily_bar_end": _iso_or_none(concept_daily[1]),
+        "concept_daily_bar_days": int(concept_daily[2] or 0),
+        "concept_daily_bar_rows": int(concept_daily[3] or 0),
+        **_coverage_fields("period_score", period_scores),
+        **_coverage_fields("fund_flow", fund_flows),
+        **_coverage_fields("intraday_fund_snapshot", fund_snapshots),
+        **_coverage_fields("membership_snapshot", membership_snapshots),
+        **_coverage_fields("relation_edge", relation_edges),
+    }
+
+
+def _date_coverage_row(
+    session,
+    table,
+    date_column,
+    *conditions,
+) -> tuple[object, object, int, int]:
+    statement = select(
+        func.min(date_column),
+        func.max(date_column),
+        func.count(func.distinct(date_column)),
+        func.count(),
+    ).select_from(table)
+    if conditions:
+        statement = statement.where(*conditions)
+    row = session.execute(statement).one()
+    return row[0], row[1], int(row[2] or 0), int(row[3] or 0)
+
+
+def _coverage_fields(
+    prefix: str,
+    row: tuple[object, object, int, int],
+) -> dict[str, object]:
+    return {
+        f"{prefix}_start": _iso_or_none(row[0]),
+        f"{prefix}_end": _iso_or_none(row[1]),
+        f"{prefix}_days": row[2],
+        f"{prefix}_rows": row[3],
+    }
+
+
+def _iso_or_none(value: object) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
 def _as_date(value: object) -> date:
     if isinstance(value, date):
         return value

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
-from statistics import mean
+from statistics import mean, median
 from typing import Mapping
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import case, desc, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from alphaagent.market.cache import TTLCache
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import session_scope
 from alphaagent.server.services.limit_up.features import market_snapshot_for_trade
@@ -22,11 +23,15 @@ from alphaagent.server.services.limit_up.lane_repository import (
 )
 from alphaagent.server.services.limit_up.repository import LIMIT_EVENT_TYPES
 from alphaagent.server.services.limit_up.sentiment import load_sentiment_points
+from alphaagent.server.services.limit_up.sector_warmup import group_concepts
 from alphaagent.server.services.limit_up.versions import LIVE_STRATEGY_VERSION
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 NEXT_SESSION_PLAN_MODES = ("next_session_preliminary", "next_session_final")
 RESEARCH_SECTOR_TYPES = ("theme", "industry")
+LIVE_CONTEXT_SECTOR_TYPES = (*RESEARCH_SECTOR_TYPES, "concept")
+CONCEPT_GROUP_CACHE_SECONDS = 900
+_CONCEPT_GROUP_CACHE = TTLCache(max_items=2)
 STYLE_SECTOR_KEYWORDS = (
     "昨日",
     "近期",
@@ -265,10 +270,14 @@ def load_live_context(
         memberships = session.execute(
             select(schema.stock_sector_memberships).where(
                 schema.stock_sector_memberships.c.vt_symbol.in_(normalized_symbols),
-                schema.stock_sector_memberships.c.sector_type.in_(RESEARCH_SECTOR_TYPES),
+                schema.stock_sector_memberships.c.sector_type.in_(LIVE_CONTEXT_SECTOR_TYPES),
             )
         ).mappings().all()
         sector_ids = sorted({str(row["sector_id"]) for row in memberships if row.get("sector_id")})
+        has_concept_membership = any(
+            str(row.get("sector_type") or "") in {"theme", "concept"}
+            for row in memberships
+        )
 
         score_rows = []
         sector_flow_rows = []
@@ -375,6 +384,7 @@ def load_live_context(
         bars_by_symbol[str(row.get("vt_symbol") or "")].append(row)
     prior_events = merge_rich_event_rows(prior_event_rows)
     financial_index = build_financial_index(financial_rows)
+    concept_groups = _load_current_concept_groups() if has_concept_membership else []
 
     by_symbol: dict[str, dict[str, object]] = {}
     for symbol in normalized_symbols:
@@ -415,6 +425,13 @@ def load_live_context(
                 trade_date,
             ),
             "lane_feature_ready": len(bars) >= 20,
+            "concept_contexts": _concept_group_contexts(
+                memberships_by_symbol.get(symbol, []),
+                [],
+                score_by_sector,
+                sector_flow_by_sector,
+                groups=concept_groups,
+            ),
         }
 
     timing_signals = (
@@ -435,6 +452,118 @@ def load_live_context(
         "sentiment": dict(market.get("sentiment") or {}),
         "timing": dict(market.get("timing") or {}),
     }
+
+
+def _load_current_concept_groups() -> list[dict[str, object]]:
+    def load() -> list[dict[str, object]]:
+        with session_scope() as session:
+            rows = session.execute(
+                select(schema.stock_sector_memberships).where(
+                    schema.stock_sector_memberships.c.sector_type.in_(("theme", "concept"))
+                )
+            ).mappings().all()
+        return group_concepts(rows)
+
+    return _CONCEPT_GROUP_CACHE.get_or_set(
+        "current_memberships",
+        CONCEPT_GROUP_CACHE_SECONDS,
+        load,
+    )
+
+
+def _concept_group_contexts(
+    candidate_memberships: list[Mapping[str, object]],
+    all_memberships: list[Mapping[str, object]],
+    scores: Mapping[str, Mapping[str, object]],
+    flows: Mapping[str, Mapping[str, object]],
+    *,
+    groups: list[dict[str, object]] | None = None,
+) -> list[dict[str, object]]:
+    concept_groups = groups if groups is not None else group_concepts(all_memberships)
+    group_by_sector = {
+        str(sector_id): group
+        for group in concept_groups
+        for sector_id in group.get("sector_ids") or []
+    }
+    candidate_group_ids = {
+        str(group["group_id"])
+        for membership in candidate_memberships
+        if str(membership.get("sector_type") or "") in {"theme", "concept"}
+        and (group := group_by_sector.get(str(membership.get("sector_id") or "")))
+    }
+    contexts: list[dict[str, object]] = []
+    groups_by_id = {
+        str(group.get("group_id") or ""): group
+        for group in concept_groups
+    }
+    for group_id in sorted(candidate_group_ids):
+        group = groups_by_id[group_id]
+        sector_ids = [str(value) for value in group.get("sector_ids") or []]
+        heat_values = _numbers_for_keys(scores, sector_ids, "heat_score")
+        inflow_values = _numbers_for_keys(flows, sector_ids, "main_net_inflow")
+        ratio_values = _numbers_for_keys(flows, sector_ids, "main_net_inflow_ratio")
+        contexts.append(
+            {
+                "group_id": group_id,
+                "group_name": group.get("group_name"),
+                "sector_ids": sector_ids,
+                "sector_names": list(group.get("sector_names") or []),
+                "member_count": int(group.get("member_count") or 0),
+                "sector_id": sector_ids[0] if sector_ids else None,
+                "sector_name": (group.get("sector_names") or [None])[0],
+                "heat_score": round(median(heat_values), 4) if heat_values else None,
+                "trend_state": _group_trend_state(scores, sector_ids),
+                "main_net_inflow": (
+                    round(median(inflow_values), 4) if inflow_values else None
+                ),
+                "main_net_inflow_ratio": (
+                    round(median(ratio_values), 4) if ratio_values else None
+                ),
+                "source": group.get("source"),
+            }
+        )
+    return sorted(
+        contexts,
+        key=lambda context: (
+            -(_number(context.get("heat_score")) or -1.0),
+            str(context.get("group_id") or ""),
+        ),
+    )
+
+
+def _numbers_for_keys(
+    values: Mapping[str, Mapping[str, object]],
+    keys: list[str],
+    field: str,
+) -> list[float]:
+    return [
+        number
+        for key in keys
+        if (number := _number(values.get(key, {}).get(field))) is not None
+    ]
+
+
+def _group_trend_state(
+    scores: Mapping[str, Mapping[str, object]],
+    sector_ids: list[str],
+) -> str | None:
+    states = [
+        str(scores.get(sector_id, {}).get("trend_state") or "").lower()
+        for sector_id in sector_ids
+    ]
+    for risk_state in ("broken", "ebb", "retreat", "decline"):
+        if risk_state in states:
+            return risk_state
+    ranked = sorted(
+        sector_ids,
+        key=lambda sector_id: -(
+            _number(scores.get(sector_id, {}).get("heat_score")) or -1.0
+        ),
+    )
+    if not ranked:
+        return None
+    value = scores.get(ranked[0], {}).get("trend_state")
+    return str(value) if value not in (None, "") else None
 
 
 def _snapshot_row(row: Mapping[str, object]) -> dict[str, object]:
@@ -500,7 +629,12 @@ def _best_membership(
     scores: Mapping[str, Mapping[str, object]],
     flows: Mapping[str, Mapping[str, object]],
 ) -> Mapping[str, object]:
-    usable = [row for row in rows if _is_trade_sector(str(row.get("sector_name") or ""))]
+    usable = [
+        row
+        for row in rows
+        if str(row.get("sector_type") or "") in RESEARCH_SECTOR_TYPES
+        and _is_trade_sector(str(row.get("sector_name") or ""))
+    ]
     if not usable:
         return {}
     return max(
