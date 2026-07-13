@@ -5796,6 +5796,8 @@ def test_low_suction_strong_launch_counts_as_small_bonus_buy() -> None:
         volume5=993_000,
         volume20=1_155_000,
         volume_ratio=0.86,
+        latest_volume_ratio_20d=0.74,
+        latest_turnover_ratio_20d=1.10,
         turnover20=18_000_000_000,
         turnover_percentile_60d=0.62,
         pivot_high_20d=239.31,
