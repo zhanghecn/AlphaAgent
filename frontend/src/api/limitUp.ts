@@ -77,6 +77,7 @@ export interface LimitUpLiveSignal {
   warmup_main_net_inflow?: number | null;
   warmup_main_net_inflow_ratio?: number | null;
   warmup_execution_effect?: "none_research_only" | string;
+  rotation_shadow_state?: "unavailable" | "rejected" | "watch" | "trigger" | "missed" | string;
   historical_evidence?: {
     status?: string;
     smoothed_win_rate: number | null;
@@ -328,72 +329,6 @@ export interface LimitUpLaneBacktest {
   };
 }
 
-export interface LimitUpSectorWarmupComparison {
-  variant: string;
-  label: string;
-  formal: boolean;
-  trade_count: number;
-  trade_day_count: number;
-  win_rate: number | null;
-  average_net_return_pct: number | null;
-  total_return_pct: number;
-  max_drawdown_pct: number;
-  hard_loss_rate: number | null;
-  seal_rate: number | null;
-  initial_cash: number;
-  final_equity: number;
-  start: string | null;
-  end: string | null;
-  delta: null | {
-    trade_count: number;
-    win_rate: number | null;
-    average_net_return_pct: number | null;
-    total_return_pct: number | null;
-    max_drawdown_pct: number | null;
-  };
-}
-
-export interface LimitUpSectorWarmupReport {
-  status: string;
-  research_version: string;
-  research_status: "formal" | "proxy_only" | string;
-  simulation_eligible: boolean;
-  scope: "first_board";
-  primary_exit: "next_open";
-  initial_cash: number;
-  round_trip_cost_pct: number;
-  forward_start_date: string;
-  event_start: string | null;
-  event_end: string | null;
-  candidate_funnel: {
-    raw_first_board: number;
-    eligible: number;
-    closed: number;
-    warmup_confirmed: number;
-  };
-  comparisons: LimitUpSectorWarmupComparison[];
-  phase_summaries: Record<string, LimitUpSectorWarmupComparison[]>;
-  acceptance: {
-    passed: boolean;
-    evaluated_variant: string;
-    checks: Array<{ code: string; passed: boolean; label: string }>;
-  };
-  data_coverage: {
-    concept_daily_bar_days?: number;
-    membership_snapshot_days?: number;
-    intraday_fund_snapshot_days?: number;
-    signal_time_feature_linkage_ready?: boolean;
-    [key: string]: string | number | boolean | null | undefined;
-  };
-  formal_concept_backtest_ready: boolean;
-  lane_isolation: {
-    passed: boolean;
-    affected_lanes: BoardLaneKey[];
-    unchanged_lanes: BoardLaneKey[];
-  };
-  limitations: string[];
-}
-
 export interface LimitUpWalkForwardModelReport {
   status: string;
   model_version: string;
@@ -444,17 +379,6 @@ export function fetchLimitUpLaneBacktest(params: {
   if (params.start) query.set("start", params.start);
   if (params.end) query.set("end", params.end);
   return apiClient.get<LimitUpLaneBacktest>(`/limit-up/history/backtest?${query.toString()}`);
-}
-
-export function fetchLimitUpSectorWarmupResearch(params: {
-  start?: string;
-  end?: string;
-}): Promise<LimitUpSectorWarmupReport> {
-  const query = new URLSearchParams();
-  if (params.start) query.set("start", params.start);
-  if (params.end) query.set("end", params.end);
-  const suffix = query.size ? `?${query.toString()}` : "";
-  return apiClient.get<LimitUpSectorWarmupReport>(`/limit-up/history/sector-warmup${suffix}`);
 }
 
 export function fetchLimitUpHistoryModelReport(params: {
