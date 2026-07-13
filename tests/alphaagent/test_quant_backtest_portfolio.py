@@ -9240,6 +9240,11 @@ def test_sector_fund_flow_upsert_creates_sector_metadata(monkeypatch) -> None:
         yield FakeSession()
 
     monkeypatch.setattr(data_sync, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        data_sync.market_snapshot_repository,
+        "save_sector_fund_flow_snapshots",
+        lambda items, **kwargs: len(items),
+    )
 
     written = data_sync._upsert_sector_fund_flows(
         [
