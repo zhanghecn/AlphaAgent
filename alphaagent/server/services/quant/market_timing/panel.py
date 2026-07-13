@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import date, datetime, timedelta
+from dataclasses import replace
+from datetime import date, datetime, time as dt_time, timedelta
 from typing import Any
 
 from sqlalchemy import func, insert, select, update
 
-from alphaagent.market.providers import RealMarketDataClient, _china_today, _is_intraday_china
+from alphaagent.market.providers import RealMarketDataClient, _CHINA_TZ, _china_today, _is_intraday_china
 from alphaagent.server.services.quant.market_context import compute_market_contexts
 from alphaagent.server.services.quant.market_timing import backtest as bt
 from alphaagent.server.services.quant.market_timing import factors as fac
@@ -22,9 +23,14 @@ from alphaagent.server.services.quant.market_timing import series as ser
 from alphaagent.server.services.quant.market_timing import signal as sig
 
 PANEL_START = date(2024, 5, 28)  # 指数数据起点
+LIVE_OVERLAY_END = dt_time(19, 30)  # 覆盖 19:00 盘后日线同步启动和短暂执行时间
+
+
 def _cache_ttl() -> int:
     """内存缓存 TTL: 盘中 5min(实时预警新鲜), 盘后 30min(日线一天一变)。"""
     return 300 if _is_intraday_china() else 1800
+
+
 PANEL_FRESH_HOURS = 24  # 库内 panel 24h 内视为新鲜(日线数据一天一变)
 INDEX_FOR_CHART = "000001.SSE"  # 前端主图用上证指数(主人最熟悉)
 PHASE_LABELS = {
@@ -100,14 +106,136 @@ def _load_index_ohlcv(session: Any, schema: Any, vt_symbol: str, start: date, en
     ]
 
 
-def _build_overview(latest: Any, latest_signal: Any, index_bars: list[dict]) -> dict:
+def _is_live_today_overlay_window(now: datetime | None = None) -> bool:
+    """是否允许用实时快照补今天主图。
+
+    交易时段内用于实时预警; 15:00 后到日线同步前用于避免页面退回昨天。
+    """
+    now = now or datetime.now(_CHINA_TZ)
+    if _is_intraday_china(now):
+        return True
+    if now.weekday() >= 5:
+        return False
+    current = now.time()
+    return dt_time(15, 0) <= current < LIVE_OVERLAY_END
+
+
+def _live_index_bar_for_today() -> dict | None:
+    try:
+        detail = RealMarketDataClient().index_detail("000001", "SSE") or {}
+    except Exception:  # noqa: BLE001  实时源不可用则退回基础 panel
+        return None
+
+    last_price = _to_float(detail.get("last_price"))
+    volume = _to_float(detail.get("volume"))
+    if not last_price or not volume or volume <= 0:
+        return None
+
+    return {
+        "date": _china_today().isoformat(),
+        "open": _to_float(detail.get("open_price")) or last_price,
+        "close": last_price,
+        "high": _to_float(detail.get("high_price")) or last_price,
+        "low": _to_float(detail.get("low_price")) or last_price,
+        "volume": volume,
+        "turnover": _to_float(detail.get("turnover")) or _to_float(detail.get("amount")) or 0.0,
+    }
+
+
+def _upsert_latest_bar(bars: list[dict], latest_bar: dict | None) -> list[dict]:
+    if latest_bar is None:
+        return bars
+    updated = list(bars)
+    latest_date = latest_bar.get("date")
+    if updated and updated[-1].get("date") == latest_date:
+        updated[-1] = latest_bar
+    else:
+        updated.append(latest_bar)
+    return updated
+
+
+def _carry_context_to_date(context: Any, target_date: date) -> Any:
+    """复用滞后市场广度时保留数值，但把因子归属到目标交易日。"""
+    return replace(context, trade_date=target_date)
+
+
+def _resolve_current_direction(
+    latest: Any,
+    closes: list[float] | None = None,
+) -> str:
+    """当前方向只描述最新交易日区域，不把历史事件当作持仓状态。"""
+    if latest is None:
+        return "NEUTRAL"
+    reversal_gold = closes is not None and sig.is_reversal_gold(closes)
+    zone_direction, _ = sig.candidate_setup(
+        latest,
+        reversal_gold=reversal_gold,
+    )
+    return zone_direction or "NEUTRAL"
+
+
+def _build_timing_series(
+    factors: list[Any],
+    events: list[Any],
+    closes: list[float] | None = None,
+) -> list[dict]:
+    """构建逐日合力和候选事件序列，供日期表与审计共用。"""
+    event_by_date = {event.trade_date: event for event in events}
+    rows: list[dict] = []
+    aligned_closes = closes if closes is not None and len(closes) == len(factors) else None
+    for index, factor in enumerate(factors):
+        event = event_by_date.get(factor.trade_date)
+        reversal_gold = (
+            aligned_closes is not None
+            and sig.is_reversal_gold(aligned_closes, index)
+        )
+        zone_direction, _ = sig.candidate_setup(
+            factor,
+            reversal_gold=reversal_gold,
+        )
+        rows.append(
+            {
+                "date": str(factor.trade_date),
+                "bull_force": factor.bull_force,
+                "bear_force": factor.bear_force,
+                "zone_direction": zone_direction or "NEUTRAL",
+                "phase": factor.phase,
+                "event": (
+                    {
+                        "direction": event.direction,
+                        "status": event.status,
+                        "grade": event.grade,
+                        "setup_type": event.setup_type,
+                        "confirm_date": (
+                            str(event.confirm_date) if event.confirm_date else None
+                        ),
+                    }
+                    if event is not None
+                    else None
+                ),
+            }
+        )
+    return rows
+
+
+def _build_overview(
+    latest: Any,
+    latest_signal: Any,
+    index_bars: list[dict],
+    closes: list[float] | None = None,
+) -> dict:
     if latest is None:
         return {}
     idx_close = index_bars[-1]["close"] if index_bars else None
     idx_prev = index_bars[-2]["close"] if len(index_bars) >= 2 else None
     idx_chg = ((idx_close / idx_prev - 1) * 100) if idx_close and idx_prev else None
+    factor_date = str(latest.trade_date)
+    quote_date = str(index_bars[-1]["date"]) if index_bars else factor_date
     return {
-        "latest_date": str(latest.trade_date),
+        "latest_date": factor_date,
+        "factor_date": factor_date,
+        "quote_date": quote_date,
+        "current_direction": _resolve_current_direction(latest, closes),
         "phase": latest.phase,
         "phase_label": PHASE_LABELS.get(latest.phase, latest.phase),
         "bull_force": latest.bull_force,
@@ -142,6 +270,7 @@ def _build_overview(latest: Any, latest_signal: Any, index_bars: list[dict]) -> 
                 "direction": latest_signal.direction,
                 "status": latest_signal.status,
                 "grade": latest_signal.grade,
+                "setup_type": latest_signal.setup_type,
                 "date": str(latest_signal.trade_date),
                 "confirm_date": (
                     str(latest_signal.confirm_date) if latest_signal.confirm_date else None
@@ -166,6 +295,7 @@ def _build_chart(index_bars: list[dict], comp: list, events: list) -> dict:
                 "direction": e.direction,
                 "status": e.status,
                 "grade": e.grade,
+                "setup_type": e.setup_type,
                 "confirm_date": str(e.confirm_date) if e.confirm_date else None,
                 "bull_force": e.bull_force,
                 "bear_force": e.bear_force,
@@ -177,22 +307,49 @@ def _build_chart(index_bars: list[dict], comp: list, events: list) -> dict:
     }
 
 
+def _serialize_accuracy_buckets(buckets: list[Any]) -> list[dict]:
+    return [
+        {
+            "direction": bucket.direction,
+            "grade": bucket.grade,
+            "horizon": bucket.horizon,
+            "count": bucket.count,
+            "win_rate": round(bucket.win_rate, 4),
+            "avg_return": round(bucket.avg_return, 4),
+            "worst_return": round(bucket.worst_return, 4),
+            "ci_low": round(bucket.ci_low, 4),
+            "ci_high": round(bucket.ci_high, 4),
+        }
+        for bucket in buckets
+    ]
+
+
+def _serialize_accuracy_rows(rows: list[dict]) -> list[dict]:
+    return [
+        {
+            "date": str(row["date"]),
+            "candidate_date": str(row["candidate_date"]),
+            "confirm_date": str(row["confirm_date"]) if row["confirm_date"] else None,
+            "start_date": str(row["start_date"]),
+            "direction": row["direction"],
+            "setup_type": row["setup_type"],
+            "status": row["status"],
+            "grade": row["grade"],
+            "horizon": row["horizon"],
+            "return": round(row["return"], 4),
+            "correct": row["correct"],
+        }
+        for row in rows
+    ]
+
+
 def _build_accuracy(acc: dict) -> dict:
     return {
-        "buckets": [
-            {
-                "direction": b.direction,
-                "grade": b.grade,
-                "horizon": b.horizon,
-                "count": b.count,
-                "win_rate": round(b.win_rate, 4),
-                "avg_return": round(b.avg_return, 4),
-                "worst_return": round(b.worst_return, 4),
-                "ci_low": round(b.ci_low, 4),
-                "ci_high": round(b.ci_high, 4),
-            }
-            for b in acc["buckets"]
-        ],
+        "buckets": _serialize_accuracy_buckets(acc["buckets"]),
+        "rows": _serialize_accuracy_rows(acc["rows"]),
+        "candidate_buckets": _serialize_accuracy_buckets(acc["candidate_buckets"]),
+        "candidate_rows": _serialize_accuracy_rows(acc["candidate_rows"]),
+        "evaluation_basis": acc["evaluation_basis"],
         "random_baseline": {str(k): round(v, 4) for k, v in acc["random_baseline_up_rate"].items()},
         "buy_hold_return_pct": (
             round(acc["buy_hold_return_pct"], 2) if acc["buy_hold_return_pct"] is not None else None
@@ -203,8 +360,8 @@ def _build_accuracy(acc: dict) -> dict:
         "n_pending": acc.get("n_pending", 0),
         "invalidated_summary": acc.get("invalidated_summary") or {},
         "silver_caveat": (
-            "样本期(2024-05~2026-06)为单边牛市(+71%), 缺乏真正顶部, "
-            "银手指准确率仅供参考, 需更长含熊市数据验证"
+            "当前样本整体偏牛且缺乏完整熊市与大顶阶段，"
+            "银手指表现仅供参考，需更长历史数据验证"
         ),
     }
 
@@ -223,38 +380,52 @@ def _compute_panel(session: Any, schema: Any) -> dict:
         return {"empty": True}
     # 盘中: DB 还没今天日线时, 追加七大指数实时合成的今天 bar(实时预警)
     today = _china_today()
+    live_index_bar = None
     if isinstance(last, date) and last < today:
         today_bar = ser.intraday_today_bar(comp[-1].close, comp[-1].turnover)
         if today_bar is not None:
-            comp = comp + [today_bar]
+            live_index_bar = _live_index_bar_for_today()
+            if live_index_bar is not None:
+                comp = comp + [today_bar]
     dates = [b.trade_date for b in comp]
     ctx_map = compute_market_contexts(session, schema, dates)
     ctx_list = [ctx_map.get(d) for d in dates]
     # 盘中今天 ctx 用昨天近似(广度滞后, 够预警; trend/momentum/structure/volume 仍用今天实时 close)
     if len(ctx_list) >= 2 and ctx_list[-1] is None and ctx_list[-2] is not None:
-        ctx_list[-1] = ctx_list[-2]
+        ctx_list[-1] = _carry_context_to_date(ctx_list[-2], dates[-1])
     closes = [b.close for b in comp]
     turns = [b.turnover for b in comp]
     factor_seq = []
+    factor_bars = []
     for i in range(len(dates)):
         if ctx_list[i] is None:
             continue
         ctx_window = [c for c in ctx_list[: i + 1] if c is not None]
         factor_seq.append(fac.compute_factors(ctx_window, closes[: i + 1], turns[: i + 1]))
+        factor_bars.append(comp[i])
 
-    events = sig.detect_events(factor_seq, [b.close for b in comp])
-    accuracy = bt.evaluate(events, comp)
-    index_bars = _load_index_ohlcv(session, schema, INDEX_FOR_CHART, PANEL_START, end)
+    factor_closes = [bar.close for bar in factor_bars]
+
+    events = sig.detect_events(
+        factor_seq,
+        factor_closes,
+        [bar.up_ratio for bar in factor_bars],
+    )
+    accuracy = bt.evaluate(events, factor_bars)
+    index_bars = _upsert_latest_bar(
+        _load_index_ohlcv(session, schema, INDEX_FOR_CHART, PANEL_START, end),
+        live_index_bar,
+    )
 
     latest = factor_seq[-1] if factor_seq else None
-    # 当前应做方向 = 最后一个已确认(CONFIRMED)信号; PENDING/INVALIDATED 不代表当前持仓
     latest_signal = next(
         (e for e in reversed(events) if e.status == sig.STATUS_CONFIRMED), None
     ) if events else None
 
     return {
-        "overview": _build_overview(latest, latest_signal, index_bars),
+        "overview": _build_overview(latest, latest_signal, index_bars, factor_closes),
         "chart": _build_chart(index_bars, comp, events),
+        "timing_series": _build_timing_series(factor_seq, events, factor_closes),
         "accuracy": _build_accuracy(accuracy),
         "generated_at": int(time.time()),
         "sample_range": [str(comp[0].trade_date), str(comp[-1].trade_date)],
@@ -297,43 +468,29 @@ def _to_float(v: Any) -> float | None:
 
 
 def _overlay_intraday(panel: dict) -> dict:
-    """盘中(交易时段)用实时指数 overlay: chart 最新K线 + overview 点位/涨跌。
-    因子/信号保持昨日收盘; 不落库(实时变化); 非交易时段原样返回。"""
-    if panel.get("empty") or not _is_intraday_china():
+    """用今天实时指数 overlay: chart 最新K线 + overview 点位/涨跌。
+
+    交易时段用于实时预警; 盘后日线同步前用于避免页面主图停在昨天。
+    因子/信号保持基础 panel; 不落库。
+    """
+    if panel.get("empty") or not _is_live_today_overlay_window():
         return panel
     panel = dict(panel)  # 顶层浅 copy, 避免污染内存缓存里的 base panel
-    try:
-        detail = RealMarketDataClient().index_detail("000001", "SSE") or {}
-    except Exception:  # noqa: BLE001  实时源不可用则退回昨日 panel
+    today_bar = _live_index_bar_for_today()
+    if today_bar is None:
         return panel
-    last_price = _to_float(detail.get("last_price"))
-    volume = _to_float(detail.get("volume"))
-    if not last_price or not volume or volume <= 0:
-        return panel  # 盘前/停牌/节假日 volume=0 不 overlay
-    today = _china_today().isoformat()
-    today_bar = {
-        "date": today,
-        "open": _to_float(detail.get("open_price")) or last_price,
-        "close": last_price,
-        "high": _to_float(detail.get("high_price")) or last_price,
-        "low": _to_float(detail.get("low_price")) or last_price,
-        "volume": volume,
-        "turnover": _to_float(detail.get("turnover")) or _to_float(detail.get("amount")) or 0.0,
-    }
     chart = dict(panel.get("chart") or {})
-    bars = list(chart.get("bars") or [])
-    if bars and bars[-1].get("date") == today:
-        bars[-1] = today_bar
-    else:
-        bars.append(today_bar)
+    bars = _upsert_latest_bar(list(chart.get("bars") or []), today_bar)
     panel["chart"] = {**chart, "bars": bars}
     ov = dict(panel.get("overview") or {})
-    ov["index_close"] = last_price
-    chg = _to_float(detail.get("change_pct"))
-    if chg is not None:
-        ov["index_change_pct"] = round(chg, 2)
-    ov["latest_date"] = today
-    ov["is_intraday"] = True
+    ov["index_close"] = today_bar["close"]
+    if len(bars) >= 2:
+        prev_close = _to_float(bars[-2].get("close"))
+        if prev_close:
+            ov["index_change_pct"] = round((today_bar["close"] / prev_close - 1) * 100, 2)
+    ov["quote_date"] = today_bar["date"]
+    ov["is_intraday"] = _is_intraday_china()
+    ov["is_live_snapshot"] = True
     panel["overview"] = ov
     return panel
 

@@ -1,10 +1,10 @@
-"""大盘择时金手指/银手指准确率评估脚本。
+"""大盘择时金手指/银手指历史表现评估脚本。
 
 宿主跑(本地 docker postgres, 需能连到 vnpy-postgres-1):
   DATABASE_URL="postgresql+psycopg://alphaagent:***@<postgres_host>:5432/alphaagent" \
     uv run python scripts/market_timing_eval.py
 
-输出: 金手指/银手指各档 × 5/10/20 日 胜率矩阵 + bootstrap CI + 随机/持有基准 + 时间切分。
+输出: 确认后表现、全部候选表现、bootstrap CI、随机/持有基准和时间切分。
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from alphaagent.server.services.quant.market_timing import series as ser
 from alphaagent.server.services.quant.market_timing import signal as sig
 
 START = date(2024, 5, 28)
-END = date(2026, 6, 30)
+END = date.today()
 
 
 def main() -> int:
@@ -47,11 +47,13 @@ def main() -> int:
         turns = [b.turnover for b in comp]
         ctx_list = [ctx_map.get(d) for d in dates]
         factor_seq = []
+        factor_bars = []
         for i in range(len(dates)):
             if ctx_list[i] is None:
                 continue
             ctx_window = [c for c in ctx_list[: i + 1] if c is not None]
             factor_seq.append(fac.compute_factors(ctx_window, closes[: i + 1], turns[: i + 1]))
+            factor_bars.append(comp[i])
         print(f"  因子 {len(factor_seq)} 天", flush=True)
 
         # bull/bear 分布(帮判断阈值是否合理)
@@ -65,8 +67,12 @@ def main() -> int:
             flush=True,
         )
 
-        print("检测信号事件(v4 候选+确认两状态) ...", flush=True)
-        events = sig.detect_events(factor_seq, closes)
+        print("检测信号事件(v6 通用 setup+次日确认) ...", flush=True)
+        events = sig.detect_events(
+            factor_seq,
+            [bar.close for bar in factor_bars],
+            [bar.up_ratio for bar in factor_bars],
+        )
         gold = [e for e in events if e.direction == "GOLD"]
         silver = [e for e in events if e.direction == "SILVER"]
         confirmed = [e for e in events if e.status == sig.STATUS_CONFIRMED]
@@ -78,8 +84,8 @@ def main() -> int:
             flush=True,
         )
 
-        print("评估准确率 ...", flush=True)
-        report = bt.evaluate(events, comp)
+        print("评估历史表现 ...", flush=True)
+        report = bt.evaluate(events, factor_bars)
 
     _print_report(report)
     return 0
@@ -87,19 +93,24 @@ def main() -> int:
 
 def _print_report(report: dict) -> None:
     print("\n" + "=" * 82)
-    print("金手指/银手指 准确率矩阵 (v4 候选+确认两状态, 主表只算 CONFIRMED)")
+    print("金手指/银手指历史表现（观察性统计，非成交收益）")
     print("=" * 82)
     print(f"样本区间: {report['series_start']} ~ {report['series_end']}")
-    header = f"{'方向':<7}{'档位':<8}{'周期':>5}{'次数':>6}{'胜率':>8}{'95%CI':>15}{'均收益':>10}{'最差':>9}"
-    print(header)
-    print("-" * 82)
-    for b in report["buckets"]:
-        label = "金手指" if b.direction == "GOLD" else "银手指"
-        ci = f"[{b.ci_low * 100:.0f}%,{b.ci_high * 100:.0f}%]"
-        print(
-            f"{label:<7}{b.grade:<8}{b.horizon:>4}d{b.count:>6}"
-            f"{b.win_rate * 100:>7.0f}%{ci:>15}{b.avg_return:>+9.2f}%{b.worst_return:>+8.2f}%"
-        )
+    _print_bucket_table(
+        "确认后表现（仅 CONFIRMED，从确认日收盘起算）",
+        report["buckets"],
+    )
+    _print_bucket_table(
+        "全部候选表现（不经过次日筛选，从候选日收盘起算）",
+        report["candidate_buckets"],
+    )
+
+    basis = report["evaluation_basis"]
+    print(
+        "\n评估起点: "
+        f"确认后={basis['confirmed_start']} | 候选={basis['candidate_start']} | "
+        f"可执行收益={basis['executable']}"
+    )
 
     print("\n--- 基准对比 ---")
     base = report["random_baseline_up_rate"]
@@ -126,18 +137,23 @@ def _print_report(report: dict) -> None:
     print(
         f"\n事件总数 {report['n_events']} | "
         f"已确认 {report.get('n_confirmed', 0)} | 假突破否决 {report.get('n_invalidated', 0)} | "
-        f"待确认 {report.get('n_pending', 0)} | 评估行数 {report['n_evaluable']}"
+        f"待确认 {report.get('n_pending', 0)} | "
+        f"确认后评估行 {report['n_evaluable']} | 候选评估行 {report['n_candidate_evaluable']}"
     )
-    inval = report.get("invalidated_summary") or {}
-    if inval:
-        print("\n--- 假突破候选后续表现(对比 CONFIRMED, 揭示次日确认是否真有预测力) ---")
-        for h in (5, 10, 20):
-            row = inval.get(h)
-            if row:
-                print(
-                    f"  {h}日: 样本 {row['count']} | 均收益 {row['avg_return']:+.2f}% | "
-                    f"方向命中率 {row['win_rate'] * 100:.0f}%"
-                )
+
+
+def _print_bucket_table(title: str, buckets: list[bt.BucketStat]) -> None:
+    print(f"\n--- {title} ---")
+    header = f"{'方向':<7}{'档位':<8}{'周期':>5}{'次数':>6}{'胜率':>8}{'95%CI':>15}{'均收益':>10}{'最差':>9}"
+    print(header)
+    print("-" * 82)
+    for b in buckets:
+        label = "金手指" if b.direction == "GOLD" else "银手指"
+        ci = f"[{b.ci_low * 100:.0f}%,{b.ci_high * 100:.0f}%]"
+        print(
+            f"{label:<7}{b.grade:<8}{b.horizon:>4}d{b.count:>6}"
+            f"{b.win_rate * 100:>7.0f}%{ci:>15}{b.avg_return:>+9.2f}%{b.worst_return:>+8.2f}%"
+        )
 
 
 if __name__ == "__main__":

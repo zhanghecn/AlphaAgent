@@ -1,4 +1,4 @@
-"""金手指/银手指准确率回测。
+"""金手指/银手指历史表现评估。
 
 - 多周期胜率(5/10/20 日): 金手指判对=未来收益>0, 银手指判对=<0。
 - bootstrap 95% 置信区间: 强信号样本少, 给胜率加 CI, 区间过宽=样本不足。
@@ -12,8 +12,9 @@
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
+from typing import Literal
 
 from alphaagent.server.services.quant.market_timing.series import CompositeBar
 from alphaagent.server.services.quant.market_timing.signal import (
@@ -25,6 +26,7 @@ from alphaagent.server.services.quant.market_timing.signal import (
 
 HORIZONS = (5, 10, 20)
 _BOOT_SEED = 20260701  # 固定种子, 保证可复现(Math.random 在 workflow 外可用)
+EvaluationStart = Literal["trade_date", "confirm_date"]
 
 
 @dataclass
@@ -70,12 +72,16 @@ def _bootstrap_ci(corrects: list[bool], n_boot: int = 1000, ci: float = 0.95) ->
 
 
 def _evaluate_rows(
-    events: list[TimingSignal], series: list[CompositeBar]
+    events: list[TimingSignal],
+    series: list[CompositeBar],
+    *,
+    start_date_field: EvaluationStart,
 ) -> list[dict]:
     date_idx = {b.trade_date: i for i, b in enumerate(series)}
     rows: list[dict] = []
     for ev in events:
-        idx = date_idx.get(ev.trade_date)
+        start_date = getattr(ev, start_date_field)
+        idx = date_idx.get(start_date)
         if idx is None:
             continue
         for h, r in _future_returns(series, idx).items():
@@ -83,8 +89,13 @@ def _evaluate_rows(
                 continue
             rows.append(
                 {
-                    "date": ev.trade_date,
+                    "date": start_date,
+                    "candidate_date": ev.trade_date,
+                    "confirm_date": ev.confirm_date,
+                    "start_date": start_date,
                     "direction": ev.direction,
+                    "setup_type": ev.setup_type,
+                    "status": ev.status,
                     "grade": ev.grade,
                     "horizon": h,
                     "return": r,
@@ -156,13 +167,12 @@ def _summarize_by_horizon(
 ) -> dict[int, dict]:
     """按 horizon 汇总事件的平均收益/胜率(从候选日起算)。
 
-    用于 INVALIDATED 摘要: 揭示假突破候选的后续表现。
-    对比 CONFIRMED 收益 → 若 INVALIDATED 显著差, 次日确认是真预测力;
-    若两组差不多, 次日确认是数据窥视。让数据说话, 回应循环论证质疑。
+    保留 INVALIDATED 候选的旧审计摘要。它与确认后 buckets 的起点不同，
+    不应直接横向比较；未经次日筛选的主对照应使用 candidate_buckets。
     """
     if not events:
         return {}
-    rows = _evaluate_rows(events, series)
+    rows = _evaluate_rows(events, series, start_date_field="trade_date")
     out: dict[int, dict] = {}
     for h in HORIZONS:
         sub = [r for r in rows if r["horizon"] == h]
@@ -181,19 +191,20 @@ def _summarize_by_horizon(
 def evaluate(
     events: list[TimingSignal], series: list[CompositeBar]
 ) -> dict:
-    """完整准确率评估。
+    """分别评估确认后表现和未经次日状态筛选的全部候选表现。
 
-    v4 候选+确认两状态后:
-    - 主 buckets 只算 CONFIRMED(已确认信号), 与历史语义一致
-    - invalidated_summary 揭示假突破候选的后续收益(从候选日起算)
-      → 对比两组: 若 INVALIDATED 显著差, 次日确认有效; 若差不多, 数据窥视
+    - rows/buckets: 只含 CONFIRMED，从确认日收盘起算。
+    - candidate_rows/candidate_buckets: 包含所有候选，从候选日收盘起算。
+    - 两组都是观察性表现，不是包含成交价、滑点和费用的可执行收益。
     """
     confirmed = [e for e in events if e.status == STATUS_CONFIRMED]
     invalidated = [e for e in events if e.status == STATUS_INVALIDATED]
     pending = [e for e in events if e.status == STATUS_PENDING]
 
-    rows = _evaluate_rows(confirmed, series)
+    rows = _evaluate_rows(confirmed, series, start_date_field="confirm_date")
     buckets = _build_buckets(rows)
+    candidate_rows = _evaluate_rows(events, series, start_date_field="trade_date")
+    candidate_buckets = _build_buckets(candidate_rows)
 
     # 时间切分: 前 80% 为训练段(调阈值), 后 20% 为样本外
     split_date = series[int(len(series) * 0.8)].trade_date if series else None
@@ -205,6 +216,13 @@ def evaluate(
     return {
         "buckets": buckets,
         "rows": rows,
+        "candidate_buckets": candidate_buckets,
+        "candidate_rows": candidate_rows,
+        "evaluation_basis": {
+            "confirmed_start": "confirm_date_close",
+            "candidate_start": "candidate_date_close",
+            "executable": False,
+        },
         "random_baseline_up_rate": _random_baseline(series),
         "buy_hold_return_pct": buy_hold,
         "split_date": split_date,
@@ -214,6 +232,7 @@ def evaluate(
         "n_invalidated": len(invalidated),
         "n_pending": len(pending),
         "n_evaluable": len(rows),
+        "n_candidate_evaluable": len(candidate_rows),
         "invalidated_summary": _summarize_by_horizon(invalidated, series),
         "series_start": series[0].trade_date if series else None,
         "series_end": series[-1].trade_date if series else None,

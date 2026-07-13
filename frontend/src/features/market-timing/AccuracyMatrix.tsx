@@ -63,6 +63,68 @@ function Cell({ bucket }: { bucket: AccuracyBucket | undefined }) {
   );
 }
 
+function DirectionRow({
+  label,
+  direction,
+  buckets,
+}: {
+  label: string;
+  direction: "GOLD" | "SILVER";
+  buckets: AccuracyBucket[];
+}) {
+  const byHorizon = new Map(
+    aggregateByDirection(buckets.filter((bucket) => bucket.direction === direction)).map(
+      (bucket) => [bucket.horizon, bucket],
+    ),
+  );
+
+  return (
+    <tr className="border-b border-border/40 last:border-0">
+      <td className="px-2 py-1.5">
+        <span
+          className={cn(
+            "mr-1.5 inline-block h-2.5 w-2.5 rounded-full align-middle",
+            direction === "GOLD" ? "bg-amber-400" : "bg-slate-500",
+          )}
+        />
+        <span className="font-medium">{label}</span>
+      </td>
+      {HORIZONS.map((horizon) => (
+        <Cell key={horizon} bucket={byHorizon.get(horizon)} />
+      ))}
+    </tr>
+  );
+}
+
+function PerformanceTable({
+  buckets,
+  label,
+}: {
+  buckets: AccuracyBucket[];
+  label: string;
+}) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[420px] text-sm" aria-label={label}>
+        <thead>
+          <tr className="border-b text-xs text-muted-foreground">
+            <th className="px-2 py-1.5 text-left font-medium">信号</th>
+            {HORIZONS.map((horizon) => (
+              <th key={horizon} className="px-2 py-1.5 text-center font-medium">
+                {horizon} 日胜率
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          <DirectionRow label="金手指（看多）" direction="GOLD" buckets={buckets} />
+          <DirectionRow label="银手指（看空）" direction="SILVER" buckets={buckets} />
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 export function AccuracyMatrix({
   accuracy,
   loading,
@@ -79,84 +141,29 @@ export function AccuracyMatrix({
       </Card>
     );
   }
-  // 按 direction 两行
-  const gold = aggregateByDirection(
-    accuracy.buckets.filter((b) => b.direction === "GOLD"),
-  );
-  const silver = aggregateByDirection(
-    accuracy.buckets.filter((b) => b.direction === "SILVER"),
-  );
   const baseline = accuracy.random_baseline;
-  const inval = accuracy.invalidated_summary ?? {};
-
-  const renderRow = (label: string, isGold: boolean, cells: AccuracyBucket[]) => {
-    const byHorizon = new Map(cells.map((c) => [c.horizon, c]));
-    return (
-      <tr className="border-b border-border/40 last:border-0">
-        <td className="px-2 py-1.5">
-          <span
-            className={cn(
-              "inline-block w-2.5 h-2.5 rounded-full mr-1.5 align-middle",
-              isGold ? "bg-amber-400" : "bg-slate-500",
-            )}
-          />
-          <span className="font-medium">{label}</span>
-        </td>
-        {HORIZONS.map((h) => (
-          <Cell key={h} bucket={byHorizon.get(h)} />
-        ))}
-      </tr>
-    );
-  };
+  const candidateBuckets = accuracy.candidate_buckets ?? [];
 
   return (
-    <Card className="p-5">
-      <div className="mb-3 flex items-baseline justify-between">
-        <h3 className="font-display text-base font-semibold">历史准确率</h3>
+    <Card className="min-w-0 p-5">
+      <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
+        <div>
+          <h3 className="font-display text-base font-semibold">确认后表现</h3>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            从确认日收盘开始观察，非成交收益
+          </p>
+        </div>
         <span className="text-xs text-muted-foreground">
           样本 {sampleRange?.[0] ?? ""} ~ {sampleRange?.[1] ?? ""}
         </span>
       </div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b text-xs text-muted-foreground">
-              <th className="px-2 py-1.5 text-left font-medium">信号</th>
-              {HORIZONS.map((h) => (
-                <th key={h} className="px-2 py-1.5 text-center font-medium">
-                  {h} 日胜率
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {renderRow("金手指（看多）", true, gold)}
-            {renderRow("银手指（看空）", false, silver)}
-          </tbody>
-        </table>
-      </div>
+      <PerformanceTable buckets={accuracy.buckets} label="确认后表现" />
 
-      {/* 假突破候选对比(回应"次日确认是否真有预测力") */}
-      {Object.keys(inval).length > 0 && (
-        <div className="mt-3 rounded-md border border-border/60 bg-muted/30 px-3 py-2">
-          <div className="mb-1 text-xs font-medium text-muted-foreground">
-            假突破候选（被否决，对比验证过滤价值）
-          </div>
-          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums text-muted-foreground">
-            {HORIZONS.map((h) => {
-              const row = inval[h];
-              if (!row) return null;
-              return (
-                <span key={h}>
-                  {h}日: 命中 {(row.win_rate * 100).toFixed(0)}% · 均
-                  {row.avg_return >= 0 ? "+" : ""}
-                  {row.avg_return.toFixed(1)}% · n={row.count}
-                </span>
-              );
-            })}
-          </div>
-        </div>
-      )}
+      <div className="mb-2 mt-4 border-t border-border/60 pt-3">
+        <h4 className="text-sm font-semibold">全部候选表现（不经过次日筛选）</h4>
+        <p className="mt-0.5 text-xs text-muted-foreground">从候选日收盘开始观察</p>
+      </div>
+      <PerformanceTable buckets={candidateBuckets} label="全部候选表现" />
 
       <div className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-3">
         <div>
@@ -177,7 +184,7 @@ export function AccuracyMatrix({
       </div>
 
       <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">
-        ⚠️ {accuracy.silver_caveat}
+        样本限制：{accuracy.silver_caveat}
       </div>
     </Card>
   );

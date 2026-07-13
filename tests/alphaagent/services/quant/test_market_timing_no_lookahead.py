@@ -61,6 +61,31 @@ def _gen_series(n: int = 80, seed: int = 42) -> tuple[list[float], list[float]]:
     return closes, turns
 
 
+def _timing_factor(day: date, zone: str) -> fac.MarketTimingFactors:
+    bull, bear = {
+        "GOLD": (70.0, 40.0),
+        "SILVER": (40.0, 70.0),
+        "NEUTRAL": (50.0, 50.0),
+    }[zone]
+    return fac.MarketTimingFactors(
+        trade_date=day,
+        phase="warming" if zone == "GOLD" else "retreat",
+        trend=bull,
+        momentum=bull,
+        breadth=bull,
+        structure=50.0,
+        volume=50.0,
+        bull_force=bull,
+        bear_force=bear,
+        close_above_ma20=zone == "GOLD",
+        mom_5d=None,
+        mom_20d=None,
+        macd_top=40.0,
+        breadth_top=40.0,
+        evidence={},
+    )
+
+
 # ---- 1. 窗口指标: 篡改窗口外, 值不变 ----
 
 
@@ -254,3 +279,180 @@ def test_invalidated_candidates_not_erased():
         assert target_poll[0].direction == target.direction
         assert target_poll[0].status == sig.STATUS_INVALIDATED
         return  # 一个 seed 验证通过即足够
+
+
+# ---- 6. 区域进入事件: 同方向离开后可重新触发 ----
+
+
+def test_candidate_direction_uses_shared_zone_thresholds():
+    day = date(2026, 7, 1)
+
+    assert sig.candidate_direction(_timing_factor(day, "GOLD")) == "GOLD"
+    assert sig.candidate_direction(_timing_factor(day, "SILVER")) == "SILVER"
+    assert sig.candidate_direction(_timing_factor(day, "NEUTRAL")) is None
+
+
+def test_same_zone_is_one_event_but_reentry_creates_another():
+    start = date(2026, 6, 1)
+    zones = ["SILVER", "SILVER", "NEUTRAL", "SILVER", "SILVER"]
+    factors = [
+        _timing_factor(start + timedelta(days=i), zone)
+        for i, zone in enumerate(zones)
+    ]
+    closes = [100.0, 99.0, 100.0, 99.0, 98.0]
+
+    events = sig.detect_events(factors, closes)
+
+    assert [(event.trade_date, event.direction) for event in events] == [
+        (start, "SILVER"),
+        (start + timedelta(days=3), "SILVER"),
+    ]
+    assert events[1].status == sig.STATUS_CONFIRMED
+    assert events[1].confirm_date == start + timedelta(days=4)
+
+
+def test_silver_reappears_after_invalidated_gold_candidate():
+    start = date(2026, 6, 29)
+    zones = ["SILVER", "NEUTRAL", "GOLD", "NEUTRAL", "SILVER", "NEUTRAL"]
+    factors = [
+        _timing_factor(start + timedelta(days=i), zone)
+        for i, zone in enumerate(zones)
+    ]
+    closes = [100.0, 99.0, 100.0, 98.0, 97.0, 96.0]
+
+    events = sig.detect_events(factors, closes)
+
+    assert [(event.direction, event.status) for event in events] == [
+        ("SILVER", sig.STATUS_CONFIRMED),
+        ("GOLD", sig.STATUS_INVALIDATED),
+        ("SILVER", sig.STATUS_CONFIRMED),
+    ]
+    assert events[-1].trade_date == start + timedelta(days=4)
+    assert events[-1].confirm_date == start + timedelta(days=5)
+
+
+# ---- 7. v6 弱势衰竭反转金 ----
+
+
+def _reversal_gold_case() -> tuple[list[fac.MarketTimingFactors], list[float]]:
+    """候选日前先急跌，再用小阴线表达卖压衰竭。"""
+    closes = [100.0] * 19 + [98.0, 94.0, 93.5, 94.5]
+    start = date(2026, 5, 12)
+    factors = [
+        _timing_factor(start + timedelta(days=index), "SILVER")
+        for index in range(len(closes))
+    ]
+    return factors, closes
+
+
+def test_reversal_gold_overrides_weak_silver_zone_and_confirms_with_participation():
+    factors, closes = _reversal_gold_case()
+
+    events = sig.detect_events(
+        factors,
+        closes,
+        up_ratios=[1.0] * len(closes),
+    )
+
+    event = next(
+        item for item in events
+        if item.setup_type == sig.SETUP_REVERSAL_GOLD
+    )
+    assert event.trade_date == factors[-2].trade_date
+    assert event.direction == "GOLD"
+    assert event.status == sig.STATUS_CONFIRMED
+    assert event.confirm_date == factors[-1].trade_date
+
+
+def test_reversal_gold_is_invalidated_when_next_day_participation_is_too_narrow():
+    factors, closes = _reversal_gold_case()
+    up_ratios = [1.0] * len(closes)
+    up_ratios[-1] = 0.4
+
+    events = sig.detect_events(factors, closes, up_ratios=up_ratios)
+
+    event = next(
+        item for item in events
+        if item.setup_type == sig.SETUP_REVERSAL_GOLD
+    )
+    assert event.status == sig.STATUS_INVALIDATED
+    assert event.confirm_date == factors[-1].trade_date
+
+
+def test_reversal_gold_rejects_continuing_sharp_drop_and_high_position_pullback():
+    weak_then_sharp = [100.0] * 19 + [98.0, 95.2, 94.0]
+    high_position_pullback = [100.0 + index for index in range(21)] + [118.5]
+
+    assert sig.is_reversal_gold(weak_then_sharp) is False
+    assert sig.is_reversal_gold(high_position_pullback) is False
+
+
+def test_reversal_gold_candidate_is_prefix_stable_when_future_is_appended():
+    factors, closes = _reversal_gold_case()
+    candidate_factors = factors[:-1]
+    candidate_closes = closes[:-1]
+
+    pending = next(
+        item for item in sig.detect_events(candidate_factors, candidate_closes)
+        if item.setup_type == sig.SETUP_REVERSAL_GOLD
+    )
+    confirmed = next(
+        item for item in sig.detect_events(factors, closes)
+        if item.setup_type == sig.SETUP_REVERSAL_GOLD
+    )
+
+    assert pending.trade_date == confirmed.trade_date
+    assert pending.direction == confirmed.direction == "GOLD"
+    assert pending.setup_type == confirmed.setup_type == sig.SETUP_REVERSAL_GOLD
+    assert pending.status == sig.STATUS_PENDING
+    assert confirmed.status == sig.STATUS_CONFIRMED
+
+
+def test_reversal_gold_indexed_lookup_does_not_read_future_closes():
+    _, closes = _reversal_gold_case()
+    candidate_index = len(closes) - 2
+
+    from_prefix = sig.is_reversal_gold(closes[: candidate_index + 1])
+    from_full_series = sig.is_reversal_gold(closes, candidate_index)
+    polluted_future = closes[: candidate_index + 1] + [closes[-1] * 10.0]
+
+    assert from_prefix is True
+    assert from_full_series == from_prefix
+    assert sig.is_reversal_gold(polluted_future, candidate_index) == from_prefix
+
+
+def test_reversal_gold_cooldown_suppresses_early_reentry(monkeypatch):
+    start = date(2026, 5, 1)
+    factors = [
+        _timing_factor(start + timedelta(days=index), "NEUTRAL")
+        for index in range(32)
+    ]
+    closes = [100.0] * len(factors)
+    reversal_days = {20, 22, 30}
+    qualifying_metrics = {
+        "rsi2": 10.0,
+        "return_1d": -0.5,
+        "return_10d": -3.0,
+        "drawdown_20d": -4.0,
+    }
+
+    monkeypatch.setattr(
+        sig,
+        "_reversal_gold_metrics",
+        lambda _values, end_index=None: (
+            qualifying_metrics
+            if end_index in reversal_days
+            else None
+        ),
+    )
+
+    events = sig.detect_events(factors, closes)
+    reversal_events = [
+        event for event in events
+        if event.setup_type == sig.SETUP_REVERSAL_GOLD
+    ]
+
+    assert [event.trade_date for event in reversal_events] == [
+        factors[20].trade_date,
+        factors[30].trade_date,
+    ]

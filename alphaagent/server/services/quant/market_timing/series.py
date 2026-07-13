@@ -31,6 +31,7 @@ class CompositeBar:
     close: float
     turnover: float
     return_pct: float
+    up_ratio: float | None = None
 
 
 def load_composite_series(
@@ -69,6 +70,8 @@ def load_composite_series(
         weighted_ret = 0.0
         weight_sum = 0.0
         weighted_turnover = 0.0
+        up_count = 0
+        valid_count = 0
         for sym in weighted_syms:
             w = INDEX_WEIGHTS[sym]
             c = close_by[sym][d]
@@ -77,10 +80,16 @@ def load_composite_series(
             if pc:
                 weighted_ret += w * (c / pc - 1.0)
                 weight_sum += w
+                valid_count += 1
+                if c > pc:
+                    up_count += 1
             prev_close[sym] = c
         ret = (weighted_ret / weight_sum) if weight_sum > 0 else 0.0
         composite = composite * (1.0 + ret)
-        series.append(CompositeBar(d, composite, weighted_turnover, ret * 100.0))
+        up_ratio = up_count / valid_count if valid_count else None
+        series.append(
+            CompositeBar(d, composite, weighted_turnover, ret * 100.0, up_ratio)
+        )
     return series
 
 
@@ -95,7 +104,7 @@ def intraday_today_bar(prev_close: float, prev_turnover: float) -> CompositeBar 
     - 实时源拉取失败
     - 所有指数 volume=0(节假日/半天/异常停牌)
 
-    注意: 这是「实时预警」用途的近似 bar, 不写 DB; 18:00 eod 同步今天日线后,
+    注意: 这是「实时预警」用途的近似 bar, 不写 DB; 19:00 盘后更新同步今天日线后,
     load_composite_series 会读到正式日线, 本函数在 last_date>=today 时不再追加。
     """
     if not _is_intraday_china():
@@ -109,6 +118,8 @@ def intraday_today_bar(prev_close: float, prev_turnover: float) -> CompositeBar 
     weight_sum = 0.0
     weighted_turnover = 0.0
     any_volume = False
+    up_count = 0
+    valid_count = 0
     for sym, w in INDEX_WEIGHTS.items():
         q = qmap.get(sym)
         if not q or q.last_price is None:
@@ -121,6 +132,9 @@ def intraday_today_bar(prev_close: float, prev_turnover: float) -> CompositeBar 
             continue
         weighted_ret += w * ret
         weight_sum += w
+        valid_count += 1
+        if ret > 0:
+            up_count += 1
         if q.turnover:
             weighted_turnover += w * q.turnover
         if q.volume and q.volume > 0:
@@ -131,7 +145,8 @@ def intraday_today_bar(prev_close: float, prev_turnover: float) -> CompositeBar 
     today = _china_today()
     close = prev_close * (1.0 + ret)
     turnover = weighted_turnover if weighted_turnover > 0 else prev_turnover
-    return CompositeBar(today, close, turnover, ret * 100.0)
+    up_ratio = up_count / valid_count if valid_count else None
+    return CompositeBar(today, close, turnover, ret * 100.0, up_ratio)
 
 
 # ---------------- 技术指标(纯函数, 只用传入序列 ≤t 尾部) ----------------

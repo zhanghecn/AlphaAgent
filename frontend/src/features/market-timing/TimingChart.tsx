@@ -11,37 +11,24 @@ import { type TimingChart as TimingChartData, type TimingSignal } from "@/api/ma
 import { useChartColors } from "@/lib/chart-theme";
 import { Card } from "@/components/ui/card";
 import { GOLD, SILVER } from "./TimingHero";
+import { summarizeTimingEvents, visibleChartSignals } from "./timingPresentation";
 
 function buildMarkers(signals: TimingSignal[]): SeriesMarker<Time>[] {
   // lightweight-charts 要求 markers 按 time 升序; detect_events 已升序
-  // v4 按 status 区分显示(保留金/银方向色相, 用透明度+后缀表达状态):
-  //   CONFIRMED  - 实色金/银箭头(已确认信号)
-  //   INVALIDATED - 褪色方向色 + ✗(假突破否决, 一眼看出"被否决的金/银")
-  //   PENDING    - 略褪色方向色 + ?(序列末端待确认候选)
+  // 主图只显示正式和待确认事件；否决候选保留在摘要及最近日期表中。
   return signals.map((s) => {
     const isGold = s.direction === "GOLD";
     const baseColor = isGold ? GOLD : SILVER;
-    const invalidated = s.status === "INVALIDATED";
     const pending = s.status === "PENDING";
-    const color = invalidated
-      ? `${baseColor}66` // 0.4 褪色: 被否决, 保留金/银色相 + ✗
-      : pending
-        ? `${baseColor}B3` // 0.7 褪色: 待确认 + ?
-        : baseColor;
-    const text = invalidated
-      ? `${isGold ? "金" : "银"}✗`
-      : pending
-        ? `${isGold ? "金" : "银"}?`
-        : isGold
-          ? "金"
-          : "银";
+    const color = pending ? `${baseColor}B3` : baseColor;
+    const text = pending ? `${isGold ? "金" : "银"}?` : isGold ? "金" : "银";
     return {
       time: s.date as Time,
       position: isGold ? "belowBar" : "aboveBar",
       color,
       shape: isGold ? "arrowUp" : "arrowDown",
       text,
-      size: invalidated ? 1 : 2,
+      size: 2,
     };
   });
 }
@@ -91,7 +78,7 @@ export function TimingChart({
         close: b.close,
       })),
     );
-    const markers = buildMarkers(chart.signals);
+    const markers = buildMarkers(visibleChartSignals(chart.signals));
     if (markers.length) candle.setMarkers(markers);
 
     c.timeScale().fitContent();
@@ -109,11 +96,14 @@ export function TimingChart({
       </Card>
     );
   }
+  const summary = summarizeTimingEvents(chart.signals);
   return (
     <Card className="p-3">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2 px-2 pt-1 text-xs text-muted-foreground">
         <span>
-          {chart.index_symbol} · 上证指数日线 + 信号标记（{chart.signals.length} 个）
+          {chart.index_symbol} · 上证指数日线 · 已确认 金 {summary.confirmed.gold} / 银 {summary.confirmed.silver}
+          {summary.invalidated > 0 && ` · 已否决 ${summary.invalidated}`}
+          {summary.pending > 0 && ` · 待确认 ${summary.pending}`}
         </span>
         <span className="flex flex-wrap items-center gap-3">
           <span className="flex items-center gap-1">
@@ -121,9 +111,6 @@ export function TimingChart({
           </span>
           <span className="flex items-center gap-1">
             <span className="inline-block h-2 w-2 rounded-full bg-slate-500" /> 银手指（看空）
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="inline-block h-2 w-2 rounded-full bg-slate-400/50" /> 否决（假突破）
           </span>
           <span className="flex items-center gap-1">
             <span className="inline-block h-2 w-2 rounded-full bg-amber-400/50" /> 待确认

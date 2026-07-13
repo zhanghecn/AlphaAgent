@@ -5,6 +5,7 @@ import { AccuracyMatrix } from "@/features/market-timing/AccuracyMatrix";
 import { FactorBreakdown } from "@/features/market-timing/FactorBreakdown";
 import { TimingChart } from "@/features/market-timing/TimingChart";
 import { TimingHero } from "@/features/market-timing/TimingHero";
+import { TimingRecentTable } from "@/features/market-timing/TimingRecentTable";
 import { Button } from "@/components/ui/button";
 
 export function MarketTimingPage() {
@@ -39,6 +40,8 @@ export function MarketTimingPage() {
 
       <TimingChart chart={data?.chart ?? null} loading={isLoading} />
 
+      <TimingRecentTable series={data?.timing_series ?? []} loading={isLoading} />
+
       <div className="grid gap-5 lg:grid-cols-2">
         <AccuracyMatrix
           accuracy={data?.accuracy ?? null}
@@ -49,7 +52,7 @@ export function MarketTimingPage() {
       </div>
 
       <p className="pb-4 text-center text-xs text-muted-foreground/70">
-        信号只用 ≤t 数据(无未来函数) · 准确率含 bootstrap 置信区间 · 样本期单边牛市, 银手指有效性待更长历史验证
+        候选生成只用 ≤t 数据；确认需下一交易日；确认后表现从确认日收盘起算，非成交收益
       </p>
     </div>
   );

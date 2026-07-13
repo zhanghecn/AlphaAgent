@@ -3,7 +3,12 @@ import { apiClient } from "./client";
 /** 金手指=看多 / 银手指=看空 / 中性观望 */
 export type TimingDirection = "GOLD" | "SILVER" | "NEUTRAL";
 export type TimingGrade = "STRONG" | "MEDIUM" | "WEAK" | "";
-/** v4 候选确认状态: CONFIRMED 已确认 / INVALIDATED 假突破否决 / PENDING 待确认 */
+export type TimingSetupType =
+  | "TREND_GOLD"
+  | "REVERSAL_GOLD"
+  | "TOP_SILVER"
+  | "BREAKDOWN_SILVER";
+/** 候选确认状态: CONFIRMED 已确认 / INVALIDATED 假突破否决 / PENDING 待确认 */
 export type TimingStatus = "CONFIRMED" | "INVALIDATED" | "PENDING";
 
 export interface TimingFactors {
@@ -16,6 +21,9 @@ export interface TimingFactors {
 
 export interface TimingOverview {
   latest_date: string;
+  factor_date: string;
+  quote_date: string;
+  current_direction: TimingDirection;
   phase: string;
   phase_label: string;
   bull_force: number;
@@ -29,6 +37,7 @@ export interface TimingOverview {
     direction: TimingDirection;
     status: TimingStatus;
     grade: TimingGrade;
+    setup_type: TimingSetupType;
     date: string;
     confirm_date: string | null;
     bull_force: number;
@@ -41,6 +50,7 @@ export interface TimingSignal {
   direction: TimingDirection;
   status: TimingStatus;
   grade: TimingGrade;
+  setup_type: TimingSetupType;
   confirm_date: string | null;
   bull_force: number;
   bear_force: number;
@@ -65,6 +75,23 @@ export interface TimingChart {
   signals: TimingSignal[];
 }
 
+export interface TimingDailyEvent {
+  direction: TimingDirection;
+  status: TimingStatus;
+  grade: TimingGrade;
+  setup_type: TimingSetupType;
+  confirm_date: string | null;
+}
+
+export interface TimingDailyState {
+  date: string;
+  bull_force: number;
+  bear_force: number;
+  zone_direction: TimingDirection;
+  phase: string;
+  event: TimingDailyEvent | null;
+}
+
 export interface AccuracyBucket {
   direction: TimingDirection;
   grade: TimingGrade;
@@ -77,15 +104,39 @@ export interface AccuracyBucket {
   ci_high: number;
 }
 
+export interface AccuracyRow {
+  date: string;
+  candidate_date: string;
+  confirm_date: string | null;
+  start_date: string;
+  direction: TimingDirection;
+  status: TimingStatus;
+  grade: TimingGrade;
+  setup_type: TimingSetupType;
+  horizon: number;
+  return: number;
+  correct: boolean;
+}
+
+export interface AccuracyEvaluationBasis {
+  confirmed_start: "confirm_date_close";
+  candidate_start: "candidate_date_close";
+  executable: false;
+}
+
 export interface TimingAccuracy {
   buckets: AccuracyBucket[];
+  rows?: AccuracyRow[];
+  candidate_buckets?: AccuracyBucket[];
+  candidate_rows?: AccuracyRow[];
+  evaluation_basis?: AccuracyEvaluationBasis;
   random_baseline: Record<string, number>;
   buy_hold_return_pct: number | null;
   n_events: number;
   n_confirmed?: number;
   n_invalidated?: number;
   n_pending?: number;
-  /** 假突破候选的后续收益(按 horizon), 揭示次日确认是真预测力还是数据窥视 */
+  /** 兼容旧接口的否决候选摘要；起点与确认后表现不同，不应直接横向比较。 */
   invalidated_summary?: Record<
     number,
     { count: number; avg_return: number; win_rate: number }
@@ -96,6 +147,7 @@ export interface TimingAccuracy {
 export interface MarketTimingPanel {
   overview: TimingOverview;
   chart: TimingChart;
+  timing_series?: TimingDailyState[];
   accuracy: TimingAccuracy;
   generated_at: number;
   sample_range: [string, string];

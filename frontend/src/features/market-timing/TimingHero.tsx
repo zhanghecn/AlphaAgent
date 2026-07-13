@@ -100,7 +100,7 @@ function SignalRing({
         />
       </svg>
       <div className="absolute inset-0 flex flex-col items-center justify-center">
-        <span className="text-[10px] uppercase tracking-widest text-muted-foreground">当前信号</span>
+        <span className="text-[10px] text-muted-foreground">当前状态</span>
         <span
           className="font-display text-2xl font-bold leading-tight"
           style={{ color: centerColor, textShadow: direction === "NEUTRAL" ? "none" : `0 0 12px ${centerColor}66` }}
@@ -137,7 +137,10 @@ export function TimingHero({ overview, loading }: { overview: TimingOverview | n
       </Card>
     );
   }
-  const direction = overview.latest_signal?.direction ?? "NEUTRAL";
+  const direction = overview.current_direction;
+  const latestSignalDirection = overview.latest_signal?.direction ?? "NEUTRAL";
+  const quoteDate = overview.quote_date;
+  const factorDate = overview.factor_date;
   const indexUp = (overview.index_change_pct ?? 0) >= 0;
   return (
     <Card className="p-5">
@@ -156,7 +159,7 @@ export function TimingHero({ overview, loading }: { overview: TimingOverview | n
                 {overview.index_change_pct?.toFixed(2)}%
               </span>
             </div>
-            <span className="text-xs text-muted-foreground">上证指数 · {overview.latest_date}</span>
+            <span className="text-xs text-muted-foreground">上证指数 · 行情 {quoteDate}</span>
             {overview.is_intraday && (
               <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-xs font-medium text-amber-300">
                 盘中实时
@@ -165,6 +168,9 @@ export function TimingHero({ overview, loading }: { overview: TimingOverview | n
             <span className="rounded-full bg-muted px-2.5 py-0.5 text-xs font-medium">
               阶段：{overview.phase_label}
             </span>
+            {factorDate !== quoteDate && (
+              <span className="text-xs text-muted-foreground">因子截至 {factorDate}</span>
+            )}
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <ForceBar label="多头合力 bull（金手指区）" value={overview.bull_force} color={GOLD} />
@@ -176,14 +182,15 @@ export function TimingHero({ overview, loading }: { overview: TimingOverview | n
               <span
                 className="rounded-md px-2 py-0.5 text-xs font-semibold"
                 style={{
-                  background: `${direction === "GOLD" ? GOLD : SILVER}22`,
-                  color: direction === "GOLD" ? GOLD_DEEP : SILVER_DEEP,
+                  background: `${latestSignalDirection === "GOLD" ? GOLD : SILVER}22`,
+                  color: latestSignalDirection === "GOLD" ? GOLD_DEEP : SILVER_DEEP,
                 }}
               >
-                {DIRECTION_LABEL[direction]}
+                {DIRECTION_LABEL[latestSignalDirection]}
               </span>
               <span className="text-muted-foreground">
-                {overview.latest_signal.date}（{daysAgo(overview.latest_signal.date)}）
+                候选 {overview.latest_signal.date}（{daysAgo(overview.latest_signal.date)}）
+                {overview.latest_signal.confirm_date && ` · 确认 ${overview.latest_signal.confirm_date}`}
               </span>
             </div>
           )}
