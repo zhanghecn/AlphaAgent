@@ -181,7 +181,7 @@ function TailWorkflowTab() {
   ];
   const scheduleItems = [
     { schedule: status?.tail_quant_schedule, label: "14:30 实时尾盘量化", fallbackCron: "30 14 * * 1-5" },
-    { schedule: status?.eod_schedule, label: "18:00 盘后补全", fallbackCron: "0 18 * * 1-5" },
+    { schedule: status?.eod_schedule, label: "19:00 盘后更新", fallbackCron: "0 19 * * 1-5" },
   ];
 
   return (
@@ -209,7 +209,7 @@ function TailWorkflowTab() {
               <StatusBadge status={tailStatusBadge(status)} />
             </div>
             <div className="mt-2 text-sm text-muted-foreground">
-              14:30 同步分钟线、资金和热度并生成实时尾盘量化结果；18:00 补完整日线和慢数据。
+              14:30 生成实时尾盘量化结果；19:00 执行盘后统一更新，日线完整后生成正式候选，晚间自动补偿重试。
             </div>
             {status?.message ? (
               <div className="mt-2 text-xs text-amber-700 dark:text-amber-400">{status.message}</div>
@@ -805,7 +805,7 @@ function BatchSchedulesPanel({ jobs }: { jobs: SyncJobItem[] }) {
       <div className="flex items-center justify-between border-b px-4 py-3">
         <div>
           <h3 className="text-sm font-semibold">定时计划</h3>
-          <div className="text-xs text-muted-foreground">统一的批量增量同步档，按数据依赖顺序执行。默认 14:30 实时尾盘量化 + 18:00 盘后。</div>
+          <div className="text-xs text-muted-foreground">统一的批量增量同步档，按数据依赖顺序执行。默认 14:30 实时尾盘量化 + 19:00 盘后更新；21:30 仅作补偿重试。</div>
         </div>
         <button
           className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90"

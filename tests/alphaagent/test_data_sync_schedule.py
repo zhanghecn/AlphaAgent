@@ -2397,6 +2397,95 @@ def test_live_scan_schedule_status_marks_stale_snapshot_as_skipped():
     assert result["jobs"][0]["status"] == "skipped"
 
 
+def test_scheduler_catches_up_missed_default_schedule(monkeypatch):
+    import datetime as dt
+
+    triggered: list[dict[str, Any]] = []
+    monkeypatch.setattr(svc, "start_sync_batch", lambda **kw: triggered.append(kw) or {"id": "eod_batch"})
+    monkeypatch.setattr(
+        svc,
+        "_load_batch_schedules",
+        lambda: [
+            {
+                "id": "eod_1900",
+                "cron": "0 19 * * 1-5",
+                "enabled": True,
+                "action": "sync",
+                "job_ids": ["sync_stock_daily_bars", svc.EOD_QUANT_RESEARCH_BATCH_JOB_ID],
+                "concurrency": 8,
+                "last_started_at": dt.datetime(2026, 7, 8, 19, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))),
+            }
+        ],
+    )
+    monkeypatch.setattr(svc, "_now_china", lambda: dt.datetime(2026, 7, 9, 19, 20, tzinfo=dt.timezone(dt.timedelta(hours=8))))
+
+    svc._run_scheduled_jobs()
+
+    assert triggered
+    assert triggered[0]["schedule_id"] == "eod_1900"
+
+
+def test_scheduler_retries_when_current_strategy_artifact_missing(monkeypatch):
+    import datetime as dt
+
+    triggered: list[dict[str, Any]] = []
+    tz = dt.timezone(dt.timedelta(hours=8))
+    monkeypatch.setattr(svc, "start_sync_batch", lambda **kw: triggered.append(kw) or {"id": "tail_preview_batch"})
+    monkeypatch.setattr(svc, "_recently_started", lambda row: False)
+    monkeypatch.setattr(svc, "_schedule_expected_artifact_missing", lambda schedule_id: schedule_id == "tail_quant_1430")
+    monkeypatch.setattr(
+        svc,
+        "_load_batch_schedules",
+        lambda: [
+            {
+                "id": "tail_quant_1430",
+                "cron": "30 14 * * 1-5",
+                "enabled": True,
+                "action": "tail_preview",
+                "job_ids": ["sync_stock_minute_bars"],
+                "concurrency": 6,
+                "last_started_at": dt.datetime(2026, 7, 9, 14, 30, tzinfo=tz),
+            }
+        ],
+    )
+    monkeypatch.setattr(svc, "_now_china", lambda: dt.datetime(2026, 7, 9, 15, 20, tzinfo=tz))
+
+    svc._run_scheduled_jobs()
+
+    assert triggered
+    assert triggered[0]["schedule_id"] == "tail_quant_1430"
+
+
+def test_scheduler_does_not_catch_up_tail_preview_after_tail_window(monkeypatch):
+    import datetime as dt
+
+    triggered: list[dict[str, Any]] = []
+    tz = dt.timezone(dt.timedelta(hours=8))
+    monkeypatch.setattr(svc, "start_sync_batch", lambda **kw: triggered.append(kw) or {"id": "tail_preview_batch"})
+    monkeypatch.setattr(svc, "_recently_started", lambda row: False)
+    monkeypatch.setattr(svc, "_schedule_expected_artifact_missing", lambda schedule_id: True)
+    monkeypatch.setattr(
+        svc,
+        "_load_batch_schedules",
+        lambda: [
+            {
+                "id": "tail_quant_1430",
+                "cron": "30 14 * * 1-5",
+                "enabled": True,
+                "action": "tail_preview",
+                "job_ids": ["sync_stock_minute_bars"],
+                "concurrency": 6,
+                "last_started_at": dt.datetime(2026, 7, 9, 14, 30, tzinfo=tz),
+            }
+        ],
+    )
+    monkeypatch.setattr(svc, "_now_china", lambda: dt.datetime(2026, 7, 9, 19, 20, tzinfo=tz))
+
+    svc._run_scheduled_jobs()
+
+    assert not triggered
+
+
 def test_scheduler_skips_non_matching_cron(monkeypatch):
     import datetime as dt
 

@@ -445,7 +445,7 @@ function TailWorkflowSyncStrip({
 
   const schedules = [
     { label: "14:30", schedule: workflow.tail_quant_schedule },
-    { label: "18:00", schedule: workflow.eod_schedule },
+    { label: "19:00", schedule: workflow.eod_schedule },
   ];
 
   return (

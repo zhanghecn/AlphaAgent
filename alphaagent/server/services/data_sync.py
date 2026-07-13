@@ -58,8 +58,8 @@ INTERRUPTED_SYNC_JOB_MESSAGE = "API process restarted before this sync job finis
 INTERRUPTED_SCHEDULE_MESSAGE = "API process restarted before this schedule finished."
 INTERRUPTED_SCHEDULE_RECOVERY_DELAY_SECONDS = 30
 INTERRUPTED_SCHEDULE_RECOVERY_WAIT_SECONDS = 6 * 60 * 60
-SCHEDULER_TICK_SECONDS = 5
 INTERRUPTED_SCHEDULE_RECOVERY_POLL_SECONDS = 5
+SCHEDULER_TICK_SECONDS = 5
 # 单只股/板块同步的超时上限：AkShare 正常请求数秒，超时则跳过该 item（防 hang 拖死整批）
 SYNC_PER_ITEM_TIMEOUT_SECONDS = 60.0
 # 内存批次 running 超过此时长视为僵尸，看门狗清理（防卡死批次挡住新调度）
@@ -3587,6 +3587,18 @@ def tail_workflow_status() -> dict[str, Any]:
         ).mappings().first()
         latest_tail_cache = session.execute(
             select(schema.quant_tail_preview_cache)
+            .where(
+                schema.quant_tail_preview_cache.c.strategy_id == screening.STRATEGY_ID,
+                schema.quant_tail_preview_cache.c.strategy_version == screening.STRATEGY_VERSION,
+            )
+            .order_by(
+                desc(schema.quant_tail_preview_cache.c.trade_date),
+                desc(schema.quant_tail_preview_cache.c.generated_at),
+            )
+            .limit(1)
+        ).mappings().first()
+        latest_any_tail_cache = session.execute(
+            select(schema.quant_tail_preview_cache)
             .order_by(
                 desc(schema.quant_tail_preview_cache.c.trade_date),
                 desc(schema.quant_tail_preview_cache.c.generated_at),
@@ -3640,6 +3652,27 @@ def tail_workflow_status() -> dict[str, Any]:
         if usable_tail_cache and isinstance(usable_tail_cache.get("payload"), dict)
         else {}
     )
+    outdated_tail_cache = (
+        latest_any_tail_cache
+        if not usable_tail_cache
+        and latest_any_tail_cache
+        and tail_preview_trade_date
+        and latest_any_tail_cache.get("trade_date") == tail_preview_trade_date
+        and latest_any_tail_cache.get("source_schedule_id") == screening.TAIL_QUANT_SOURCE_SCHEDULE_ID
+        and _tail_preview_cache_has_intraday(dict(latest_any_tail_cache))
+        else None
+    )
+    outdated_tail_version = (
+        str(outdated_tail_cache.get("strategy_version"))
+        if outdated_tail_cache and outdated_tail_cache.get("strategy_version")
+        else None
+    )
+    tail_preview_message = _tail_preview_status_message(
+        usable=bool(usable_tail_cache),
+        outdated_version=outdated_tail_version,
+        catchup_window_open=_tail_preview_catchup_window_open(_now_china()),
+        intraday_ready=bool(tail_preview_data_ready),
+    )
     return {
         "status": "ready",
         "daily_bar_latest_date": _iso_or_none(latest_daily_date),
@@ -3665,18 +3698,14 @@ def tail_workflow_status() -> dict[str, Any]:
             "cached_generated_at": _iso_or_none(usable_tail_cache.get("generated_at")) if usable_tail_cache else None,
             "cached_recommendation_count": int(usable_tail_cache.get("recommendation_count") or 0) if usable_tail_cache else 0,
             "cached_total": int(usable_tail_cache.get("total") or 0) if usable_tail_cache else 0,
+            "cached_strategy_version": str(usable_tail_cache.get("strategy_version")) if usable_tail_cache else None,
+            "outdated_cached_strategy_version": outdated_tail_version,
+            "outdated_cached_generated_at": _iso_or_none(outdated_tail_cache.get("generated_at")) if outdated_tail_cache else None,
+            "outdated_cached_recommendation_count": int(outdated_tail_cache.get("recommendation_count") or 0) if outdated_tail_cache else 0,
             "snapshot_updated_at": _iso_or_none(latest_snapshot_updated),
             "latest_intraday_date": _iso_or_none(latest_tail_intraday_date),
             "minute_latest_date": _iso_or_none(latest_minute_date),
-            "message": (
-                "14:30 实时尾盘量化结果可用；使用盘中快照/分钟线临时K线，不写入历史候选。"
-                if usable_tail_cache
-                else (
-                    "盘中数据已就绪，等待 14:30 实时尾盘量化调度生成结果。"
-                    if tail_preview_data_ready
-                    else "等待晚于最新完整日线的盘中分钟线；不会只用同步时间生成尾盘量化结果。"
-                )
-            ),
+            "message": tail_preview_message,
         },
         "message": "历史候选仍使用完整日线；14:30 实时尾盘量化使用盘中临时K线，不参与回测收益统计。",
     }
@@ -3706,6 +3735,27 @@ def _tail_preview_trade_date(latest_intraday_date: Any, latest_complete_daily_da
     if complete is not None and candidate <= complete:
         return None
     return candidate
+
+
+def _tail_preview_status_message(
+    *,
+    usable: bool,
+    outdated_version: str | None,
+    catchup_window_open: bool,
+    intraday_ready: bool,
+) -> str:
+    if usable:
+        return "14:30 实时尾盘量化结果可用；使用盘中快照/分钟线临时K线，不写入历史候选。"
+    if outdated_version and catchup_window_open:
+        return f"已有 {outdated_version} 版本尾盘缓存，但当前策略 {screening.STRATEGY_VERSION} 尚未生成；调度补偿会自动重试。"
+    if outdated_version:
+        return (
+            f"已有 {outdated_version} 版本尾盘缓存，但当前策略 {screening.STRATEGY_VERSION} 尚未生成；"
+            "尾盘窗口已过，等待盘后正式候选或下一次 14:30。"
+        )
+    if intraday_ready:
+        return "盘中数据已就绪，等待 14:30 实时尾盘量化调度生成结果。"
+    return "等待晚于最新完整日线的盘中分钟线；不会只用同步时间生成尾盘量化结果。"
 
 
 def _tail_preview_cache_has_intraday(cache_row: dict[str, Any]) -> bool:
@@ -4524,7 +4574,13 @@ def _recently_started(row: dict[str, Any], within_seconds: int = 1800) -> bool:
 
 
 def _run_scheduled_jobs() -> None:
-    """Trigger batch schedules whose cron matches the current China time."""
+    """Trigger schedules whose cron matches or whose expected artifact is missing.
+
+    The cron matcher is only a wake-up signal. If the API process is down during
+    the exact cron minute, or a strategy version changes after the cron fired,
+    the page still needs the latest tail/eod quant artifact to appear without
+    manual intervention.
+    """
     now_china = _now_china()
     for row in _load_batch_schedules():
         cron = row.get("cron")
@@ -4544,10 +4600,95 @@ def _run_scheduled_jobs() -> None:
         if recently_started:
             continue
         try:
-            if _cron_matches(cron, now_china):
+            if _cron_matches(cron, now_china) or _schedule_catchup_due(row, now_china):
                 _run_schedule_action(row)
         except Exception:
             pass
+
+
+def _schedule_catchup_due(row: dict[str, Any], now_china: datetime) -> bool:
+    """Return whether a default schedule should run after a missed cron window."""
+
+    schedule_id = str(row.get("id") or "")
+    if schedule_id not in {"tail_quant_1430", CURRENT_EOD_SCHEDULE_ID, "eod_finalize_2130"}:
+        return False
+
+    scheduled_at = _cron_scheduled_at_today(str(row.get("cron") or ""), now_china)
+    if scheduled_at is None or now_china < scheduled_at:
+        return False
+    if schedule_id == "tail_quant_1430" and not _tail_preview_catchup_window_open(now_china):
+        return False
+
+    last_started = _as_aware_datetime(row.get("last_started_at"))
+    if last_started is None:
+        return True
+    if last_started.astimezone(scheduled_at.tzinfo) < scheduled_at:
+        return True
+
+    return _schedule_expected_artifact_missing(schedule_id)
+
+
+def _schedule_expected_artifact_missing(schedule_id: str) -> bool:
+    if schedule_id == "tail_quant_1430":
+        return _current_strategy_tail_preview_missing()
+    if schedule_id in {CURRENT_EOD_SCHEDULE_ID, "eod_finalize_2130"}:
+        return _current_strategy_eod_candidate_missing()
+    return False
+
+
+def _tail_preview_catchup_window_open(now_china: datetime) -> bool:
+    return now_china < now_china.replace(hour=15, minute=30, second=0, microsecond=0)
+
+
+def _current_strategy_tail_preview_missing() -> bool:
+    """Whether today's realtime tail preview is missing for the current strategy."""
+
+    if not is_database_configured():
+        return False
+    try:
+        with session_scope() as session:
+            latest_complete_daily_date = _latest_complete_daily_date(session)
+            latest_tail_intraday_date = session.execute(
+                select(func.max(schema.stock_minute_bars.c.trade_date)).where(
+                    schema.stock_minute_bars.c.interval == "1m"
+                )
+            ).scalar()
+        tail_trade_date = _tail_preview_trade_date(latest_tail_intraday_date, latest_complete_daily_date)
+        if tail_trade_date is None:
+            return False
+        return screening.latest_tail_preview_cache(
+            tail_trade_date,
+            strategy_id=screening.STRATEGY_ID,
+        ) is None
+    except Exception as exc:
+        logger.warning("tail preview catch-up check failed: %s", exc)
+        return False
+
+
+def _current_strategy_eod_candidate_missing() -> bool:
+    """Whether the latest complete daily bar lacks current-strategy candidates."""
+
+    if not is_database_configured():
+        return False
+    try:
+        latest_complete = _latest_complete_daily_date_for_research()
+        if latest_complete is None:
+            return False
+        with session_scope() as session:
+            row = session.execute(
+                select(schema.quant_signal_runs.c.id)
+                .where(
+                    schema.quant_signal_runs.c.trade_date == latest_complete,
+                    schema.quant_signal_runs.c.strategy_id == screening.STRATEGY_ID,
+                    schema.quant_signal_runs.c.strategy_version == screening.STRATEGY_VERSION,
+                    schema.quant_signal_runs.c.status == "succeeded",
+                )
+                .limit(1)
+            ).first()
+        return row is None
+    except Exception as exc:
+        logger.warning("eod quant catch-up check failed: %s", exc)
+        return False
 
 
 def _run_schedule_action(row: dict[str, Any], *, raise_errors: bool = False) -> dict[str, Any] | None:
@@ -4639,36 +4780,72 @@ def _cron_matches(cron_expr: str, now: datetime) -> bool:
         return False
     minute_pat, hour_pat, dom_pat, month_pat, dow_pat = parts
 
-    def _field_matches(pattern: str, value: int) -> bool:
-        if pattern == "*":
-            return True
-        for part in pattern.split(","):
-            if part == "*":
-                return True
-            if "/" in part:
-                base, step = part.split("/", 1)
-                base_val = int(base) if base != "*" else 0
-                step_val = int(step)
-                return (value - base_val) % step_val == 0
-            if "-" in part:
-                low, high = part.split("-", 1)
-                if int(low) <= value <= int(high):
-                    return True
-            elif int(part) == value:
-                return True
-        return False
-
     # Cron day-of-week uses 0/7 for Sunday and 1-6 for Monday-Saturday.
     # Python datetime.weekday() uses 0 for Monday, so translate explicitly.
     cron_dow = (now.weekday() + 1) % 7
 
     return (
-        _field_matches(minute_pat, now.minute)
-        and _field_matches(hour_pat, now.hour)
-        and _field_matches(dom_pat, now.day)
-        and _field_matches(month_pat, now.month)
-        and _field_matches(dow_pat, cron_dow)
+        _cron_field_matches(minute_pat, now.minute)
+        and _cron_field_matches(hour_pat, now.hour)
+        and _cron_field_matches(dom_pat, now.day)
+        and _cron_field_matches(month_pat, now.month)
+        and _cron_field_matches(dow_pat, cron_dow)
     )
+
+
+def _cron_scheduled_at_today(cron_expr: str, now: datetime) -> datetime | None:
+    """Return today's concrete scheduled time for simple minute/hour crons."""
+
+    parts = cron_expr.strip().split()
+    if len(parts) != 5:
+        return None
+    minute_pat, hour_pat, dom_pat, month_pat, dow_pat = parts
+    if not minute_pat.isdigit() or not hour_pat.isdigit():
+        return None
+
+    cron_dow = (now.weekday() + 1) % 7
+    if not (
+        _cron_field_matches(dom_pat, now.day)
+        and _cron_field_matches(month_pat, now.month)
+        and _cron_field_matches(dow_pat, cron_dow)
+    ):
+        return None
+    return now.replace(hour=int(hour_pat), minute=int(minute_pat), second=0, microsecond=0)
+
+
+def _cron_field_matches(pattern: str, value: int) -> bool:
+    if pattern == "*":
+        return True
+    for part in pattern.split(","):
+        if part == "*":
+            return True
+        if "/" in part:
+            base, step = part.split("/", 1)
+            base_val = int(base) if base != "*" else 0
+            step_val = int(step)
+            return (value - base_val) % step_val == 0
+        if "-" in part:
+            low, high = part.split("-", 1)
+            if int(low) <= value <= int(high):
+                return True
+        elif int(part) == value:
+            return True
+    return False
+
+
+def _as_aware_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 # ─── Local query functions ───────────────────────────────────────────────
