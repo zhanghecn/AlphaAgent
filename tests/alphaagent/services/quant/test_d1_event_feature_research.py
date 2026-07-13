@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from alphaagent.server.services.quant.d1_event_feature_research import classify_event_feature_groups
+import pandas as pd
+
+from alphaagent.server.services.quant.d1_event_feature_research import (
+    _main_board_mask,
+    classify_event_feature_groups,
+)
 
 
 def test_classifies_active_source_compressed_high_close() -> None:
@@ -23,6 +28,7 @@ def test_classifies_active_source_compressed_high_close() -> None:
 
     assert result["active_source_group"] == "single_limit_source"
     assert result["price_action_group"] == "first_sun_or_strong_close"
+    assert result["event_pattern_group"] == "active_source_compressed_high_close"
     assert result["active_source_compressed_high_close"] is True
     assert result["hot_reacceleration_exhaustion"] is False
 
@@ -47,6 +53,7 @@ def test_classifies_deep_low_close_rebound_absorption() -> None:
 
     assert result["position_group"] == "deep_oversold"
     assert result["price_action_group"] == "panic_low_close"
+    assert result["event_pattern_group"] == "deep_low_close_absorption"
     assert result["deep_low_close_rebound_absorption"] is True
     assert result["deep_low_first_sun_confirm"] is False
 
@@ -71,6 +78,7 @@ def test_classifies_deep_low_first_sun_confirm() -> None:
 
     assert result["position_group"] == "deep_oversold"
     assert result["price_action_group"] == "first_sun_or_strong_close"
+    assert result["event_pattern_group"] == "deep_low_first_sun_confirm"
     assert result["deep_low_first_sun_confirm"] is True
     assert result["deep_low_close_rebound_absorption"] is False
 
@@ -95,5 +103,48 @@ def test_classifies_overheated_reacceleration_and_fade_risk() -> None:
 
     assert result["position_group"] == "extreme_hot"
     assert result["volume_turnover_group"] == "extreme_high_turnover_proxy"
+    assert result["event_pattern_group"] == "hot_reacceleration_exhaustion"
     assert result["hot_reacceleration_exhaustion"] is True
     assert result["active_source_compressed_high_close"] is False
+
+
+def test_classifies_historical_turnover_rate_groups() -> None:
+    result = classify_event_feature_groups(
+        {
+            "turnover_rate": 7.2,
+            "turnover_rate_ratio_20d": 0.82,
+        }
+    )
+
+    assert result["historical_turnover_rate_available"] is True
+    assert result["turnover_rate_group"] == "turnover_rate_6_12"
+    assert result["turnover_rate_ratio_group"] == "turnover_ratio_0_70_0_90"
+
+
+def test_marks_missing_historical_turnover_rate() -> None:
+    result = classify_event_feature_groups({})
+
+    assert result["historical_turnover_rate_available"] is False
+    assert result["turnover_rate_group"] == "historical_turnover_missing"
+    assert result["turnover_rate_ratio_group"] == "turnover_ratio_missing"
+
+
+def test_main_board_research_pool_excludes_20cm_and_bse() -> None:
+    frame = pd.DataFrame(
+        {
+            "vt_symbol": [
+                "600000.SSE",
+                "000001.SZSE",
+                "002001.SZSE",
+                "300001.SZSE",
+                "688001.SSE",
+                "920001.BSE",
+            ]
+        }
+    )
+
+    assert frame.loc[_main_board_mask(frame), "vt_symbol"].tolist() == [
+        "600000.SSE",
+        "000001.SZSE",
+        "002001.SZSE",
+    ]

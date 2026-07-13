@@ -13,7 +13,7 @@ import pandas as pd
 from alphaagent.server.db.session import get_engine, is_database_configured
 
 
-DEFAULT_START = date(2026, 3, 1)
+DEFAULT_START = date(2025, 1, 1)
 DEFAULT_MIN_GROUP_SIZE = 120
 DEFAULT_SAMPLE_LIMIT = 16
 
@@ -24,6 +24,7 @@ class EventResearchResult:
     baseline: dict[str, Any]
     flag_summary: list[dict[str, Any]]
     stacked_group_summary: list[dict[str, Any]]
+    event_pattern_summary: list[dict[str, Any]]
     volume_turnover_summary: list[dict[str, Any]]
     target_feature_mix: list[dict[str, Any]]
     samples: dict[str, list[dict[str, Any]]]
@@ -86,6 +87,7 @@ def summarize_event_feature_frame(
             baseline={},
             flag_summary=[],
             stacked_group_summary=[],
+            event_pattern_summary=[],
             volume_turnover_summary=[],
             target_feature_mix=[],
             samples={},
@@ -98,6 +100,8 @@ def summarize_event_feature_frame(
         "days": int(frame["trade_date"].nunique()),
         "start_date": _date_text(frame["trade_date"].min()),
         "end_date": _date_text(frame["trade_date"].max()),
+        "historical_turnover_rate_rows": int(frame["turnover_rate"].notna().sum()),
+        "historical_turnover_rate_coverage_pct": _round(frame["turnover_rate"].notna().mean() * 100.0),
     }
     baseline = _metric_summary(frame)
     flag_summary = _flag_summary(frame)
@@ -106,10 +110,23 @@ def summarize_event_feature_frame(
         ["position_group", "price_action_group", "volume_turnover_group", "active_source_group"],
         min_group_size=min_group_size,
     )
+    event_pattern_summary = _group_summary(frame, ["event_pattern_group"], min_group_size=min_group_size)
     volume_turnover_summary = _group_summary(
         frame,
         ["pre_volume_pattern", "volume_turnover_group"],
         min_group_size=min_group_size,
+    )
+    historical_turnover_frame = frame[frame["historical_turnover_rate_available"].fillna(False)]
+    volume_turnover_summary.extend(
+        _group_summary(
+            historical_turnover_frame,
+            ["turnover_rate_group", "turnover_rate_ratio_group"],
+            min_group_size=min_group_size,
+        )
+    )
+    volume_turnover_summary.sort(
+        key=lambda row: (float(row.get("avg_return") or -999), float(row.get("d1_limit_rate") or 0)),
+        reverse=True,
     )
     target_feature_mix = _target_feature_mix(frame, sample_limit=18)
     samples = _sample_sets(frame, sample_limit=sample_limit)
@@ -118,6 +135,7 @@ def summarize_event_feature_frame(
         baseline=baseline,
         flag_summary=flag_summary,
         stacked_group_summary=stacked_group_summary,
+        event_pattern_summary=event_pattern_summary,
         volume_turnover_summary=volume_turnover_summary,
         target_feature_mix=target_feature_mix,
         samples=samples,
@@ -133,6 +151,8 @@ def classify_event_feature_groups(row: Mapping[str, Any]) -> dict[str, Any]:
     volume_ratio = _num(row.get("vol_vs_ma20"))
     amount_ratio = _num(row.get("amount_vs_ma20"))
     turnover_proxy = _num(row.get("turnover_to_market_cap_pct"))
+    turnover_rate = _num(row.get("turnover_rate"))
+    turnover_rate_ratio = _num(row.get("turnover_rate_ratio_20d"))
     ret20 = _num(row.get("ret20"))
     ma20_distance = _num(row.get("ma20_dist_pct"))
     amp = _num(row.get("intraday_amp_pct"))
@@ -209,12 +229,30 @@ def classify_event_feature_groups(row: Mapping[str, Any]) -> dict[str, Any]:
         and volume_ratio <= 1.0
     )
 
+    event_pattern_group = _event_pattern_group(
+        position_group=position_group,
+        price_action_group=price_action_group,
+        volume_turnover_group=volume_turnover_group,
+        active_source_group=active_source_group,
+        pre_volume_pattern=pre_volume_pattern,
+        active_source_compressed_high_close=active_source_compressed_high_close,
+        deep_low_close_rebound_absorption=deep_low_close_rebound_absorption,
+        deep_low_first_sun_confirm=deep_low_first_sun_confirm,
+        extreme_volume_intraday_fade=extreme_volume_intraday_fade,
+        active_source_breakdown=active_source_breakdown,
+        hot_reacceleration_exhaustion=hot_reacceleration_exhaustion,
+    )
+
     return {
         "position_group": position_group,
         "active_source_group": active_source_group,
         "volume_turnover_group": volume_turnover_group,
         "pre_volume_pattern": pre_volume_pattern,
+        "turnover_rate_group": _turnover_rate_group(turnover_rate),
+        "turnover_rate_ratio_group": _turnover_rate_ratio_group(turnover_rate_ratio),
+        "historical_turnover_rate_available": turnover_rate is not None,
         "price_action_group": price_action_group,
+        "event_pattern_group": event_pattern_group,
         "active_source_compressed_high_close": active_source_compressed_high_close,
         "deep_low_close_rebound_absorption": deep_low_close_rebound_absorption,
         "deep_low_first_sun_confirm": deep_low_first_sun_confirm,
@@ -240,6 +278,7 @@ def render_markdown_report(result: EventResearchResult) -> str:
         f"- symbols: `{result.dataset.get('symbols', 0)}`",
         f"- days: `{result.dataset.get('days', 0)}`",
         f"- range: `{result.dataset.get('start_date')}` .. `{result.dataset.get('end_date')}`",
+        f"- historical_turnover_rate_coverage_pct: `{result.dataset.get('historical_turnover_rate_coverage_pct')}`",
         "",
         "## Baseline",
         "",
@@ -261,6 +300,13 @@ def render_markdown_report(result: EventResearchResult) -> str:
                 "d1_big_up7_rate",
                 "d1_big_down7_rate",
             ],
+        )
+    )
+    lines.extend(["", "## Event Pattern Groups", ""])
+    lines.extend(
+        _markdown_table(
+            result.event_pattern_summary,
+            ["feature_group", "n", "win_rate", "avg_return", "median_return", "d1_limit_rate", "d1_big_down7_rate"],
         )
     )
     lines.extend(["", "## Volume And Turnover Groups", ""])
@@ -298,6 +344,10 @@ def render_markdown_report(result: EventResearchResult) -> str:
                     "turnover_proxy",
                     "lag1_turnover_proxy",
                     "lag2_turnover_proxy",
+                    "turnover_rate",
+                    "turnover_rate_ratio_20d",
+                    "turnover_rate_group",
+                    "turnover_rate_ratio_group",
                     "vol_vs_ma20",
                     "lag1_vol_vs_ma20",
                     "lag2_vol_vs_ma20",
@@ -351,7 +401,7 @@ def _load_daily_frame(*, start: date, end: date | None) -> pd.DataFrame:
         s.industry,
         s.area,
         s.market_cap,
-        s.turnover_rate as latest_turnover_rate
+        b.turnover_rate
     from stock_daily_bars b
     join stocks s on s.vt_symbol = b.vt_symbol
     where b.trade_date >= %(lookback)s
@@ -362,6 +412,7 @@ def _load_daily_frame(*, start: date, end: date | None) -> pd.DataFrame:
     if end:
         params["end"] = end
     frame = pd.read_sql(sql, get_engine(), params=params, parse_dates=["trade_date"])
+    frame = frame[_main_board_mask(frame)].copy()
     numeric_columns = (
         "open_price",
         "close_price",
@@ -371,7 +422,7 @@ def _load_daily_frame(*, start: date, end: date | None) -> pd.DataFrame:
         "turnover",
         "change_pct",
         "market_cap",
-        "latest_turnover_rate",
+        "turnover_rate",
     )
     for column in numeric_columns:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
@@ -414,6 +465,10 @@ def _add_point_in_time_features(frame: pd.DataFrame, *, start: date) -> pd.DataF
         lambda series: series.shift(1).rolling(20, min_periods=8).mean()
     )
     frame["turnover_proxy_vs_ma20"] = frame["turnover_to_market_cap_pct"] / frame["turnover_proxy_ma20_prev"]
+    frame["turnover_rate_ma20_prev"] = grouped["turnover_rate"].transform(
+        lambda series: series.shift(1).rolling(20, min_periods=8).mean()
+    )
+    frame["turnover_rate_ratio_20d"] = frame["turnover_rate"] / frame["turnover_rate_ma20_prev"]
 
     for window in (3, 5, 10, 20):
         frame[f"ret{window}"] = (frame["close_price"] / grouped["close_price"].shift(window) - 1.0) * 100.0
@@ -429,6 +484,8 @@ def _add_point_in_time_features(frame: pd.DataFrame, *, start: date) -> pd.DataF
         "amount_vs_ma20",
         "turnover_to_market_cap_pct",
         "turnover_proxy_vs_ma20",
+        "turnover_rate",
+        "turnover_rate_ratio_20d",
     )
     for lag in (1, 2, 5):
         for column in lag_columns:
@@ -518,7 +575,14 @@ def _target_feature_mix(frame: pd.DataFrame, *, sample_limit: int) -> list[dict[
         total = len(subset)
         if total <= 0:
             continue
-        for column in ("position_group", "price_action_group", "volume_turnover_group", "active_source_group", "pre_volume_pattern"):
+        for column in (
+            "event_pattern_group",
+            "position_group",
+            "price_action_group",
+            "volume_turnover_group",
+            "active_source_group",
+            "pre_volume_pattern",
+        ):
             counts = subset[column].value_counts().head(sample_limit)
             for feature, count in counts.items():
                 feature_subset = subset[subset[column].eq(feature)]
@@ -622,6 +686,10 @@ def _sample_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "turnover_proxy": _round(row.get("turnover_to_market_cap_pct")),
         "lag1_turnover_proxy": _round(row.get("lag1_turnover_to_market_cap_pct")),
         "lag2_turnover_proxy": _round(row.get("lag2_turnover_to_market_cap_pct")),
+        "turnover_rate": _round(row.get("turnover_rate")),
+        "turnover_rate_ratio_20d": _round(row.get("turnover_rate_ratio_20d")),
+        "turnover_rate_group": row.get("turnover_rate_group"),
+        "turnover_rate_ratio_group": row.get("turnover_rate_ratio_group"),
         "vol_vs_ma20": _round(row.get("vol_vs_ma20")),
         "lag1_vol_vs_ma20": _round(row.get("lag1_vol_vs_ma20")),
         "lag2_vol_vs_ma20": _round(row.get("lag2_vol_vs_ma20")),
@@ -679,6 +747,30 @@ def _volume_turnover_group(volume_ratio: float | None, amount_ratio: float | Non
     return base
 
 
+def _turnover_rate_group(turnover_rate: float | None) -> str:
+    if turnover_rate is None:
+        return "historical_turnover_missing"
+    if turnover_rate < 2.0:
+        return "turnover_rate_lt_2"
+    if turnover_rate < 6.0:
+        return "turnover_rate_2_6"
+    if turnover_rate <= 12.0:
+        return "turnover_rate_6_12"
+    return "turnover_rate_gt_12"
+
+
+def _turnover_rate_ratio_group(turnover_rate_ratio: float | None) -> str:
+    if turnover_rate_ratio is None:
+        return "turnover_ratio_missing"
+    if turnover_rate_ratio < 0.70:
+        return "turnover_ratio_lt_0_70"
+    if turnover_rate_ratio < 0.90:
+        return "turnover_ratio_0_70_0_90"
+    if turnover_rate_ratio <= 1.15:
+        return "turnover_ratio_0_90_1_15"
+    return "turnover_ratio_gt_1_15"
+
+
 def _pre_volume_pattern(
     volume_ratio: float | None,
     lag1_volume: float | None,
@@ -729,16 +821,87 @@ def _price_action_group(
     return "ordinary"
 
 
+def _event_pattern_group(
+    *,
+    position_group: str,
+    price_action_group: str,
+    volume_turnover_group: str,
+    active_source_group: str,
+    pre_volume_pattern: str,
+    active_source_compressed_high_close: bool,
+    deep_low_close_rebound_absorption: bool,
+    deep_low_first_sun_confirm: bool,
+    extreme_volume_intraday_fade: bool,
+    active_source_breakdown: bool,
+    hot_reacceleration_exhaustion: bool,
+) -> str:
+    """Name the D-day feature pattern for D+1 up/down contrast research."""
+
+    if deep_low_close_rebound_absorption:
+        return "deep_low_close_absorption"
+    if deep_low_first_sun_confirm:
+        return "deep_low_first_sun_confirm"
+    if active_source_compressed_high_close:
+        return "active_source_compressed_high_close"
+    if extreme_volume_intraday_fade:
+        return "extreme_volume_intraday_fade"
+    if active_source_breakdown:
+        return "active_source_breakdown"
+    if hot_reacceleration_exhaustion:
+        return "hot_reacceleration_exhaustion"
+    if (
+        position_group in {"deep_oversold", "low_repair"}
+        and price_action_group in {"panic_low_close", "low_close"}
+        and active_source_group == "no_limit_source"
+        and (
+            "contracted" in volume_turnover_group
+            or "normal" in volume_turnover_group
+            or volume_turnover_group == "active_low_turnover_proxy"
+        )
+    ):
+        return "low_position_no_source_low_close_repair"
+    if (
+        position_group in {"high_momentum", "extreme_hot"}
+        and active_source_group in {"multi_limit_source", "crowded_active_source"}
+        and ("high_turnover" in volume_turnover_group or volume_turnover_group in {"hot", "extreme"})
+    ):
+        return "crowded_high_turnover_momentum"
+    if (
+        position_group in {"low_repair", "neutral"}
+        and price_action_group in {"balanced_mid_close", "compressed_mid_close", "high_close"}
+        and active_source_group == "no_limit_source"
+        and ("contracted" in volume_turnover_group or "normal" in volume_turnover_group)
+    ):
+        return "no_source_controlled_repair"
+    if (
+        pre_volume_pattern in {"multi_day_contraction", "volume_contracting_three_day"}
+        and volume_turnover_group
+        in {"contracted", "normal", "contracted_low_turnover_proxy", "normal_low_turnover_proxy"}
+    ):
+        return "multi_day_contraction_base"
+    return "mixed"
+
+
 def _board_group(code: str) -> str:
     return "20cm" if str(code).startswith(("300", "301", "688", "689")) else "10cm"
 
 
+def _main_board_mask(frame: pd.DataFrame) -> pd.Series:
+    symbols = frame["vt_symbol"].astype(str).str.upper().str.strip()
+    codes = symbols.str.split(".", n=1).str[0]
+    return (
+        symbols.str.endswith(".SSE") & codes.str.startswith(("600", "601", "603", "605"))
+    ) | (
+        symbols.str.endswith(".SZSE") & codes.str.startswith(("000", "001", "002", "003"))
+    )
+
+
 def _research_notes() -> list[str]:
     return [
-        "stock_daily_bars 没有历史换手率字段；turnover_proxy 使用 D 日成交额 / 当前 market_cap 近似，只能作为成交活跃度代理，不是严格点位历史换手率。",
+        "turnover_rate 读取 stock_daily_bars 的 D 日历史换手率；只有该字段缺失时，旧的 turnover_proxy 分组仍使用 D 日成交额 / 当前 market_cap 代理。",
         "volume_ratio/amount_ratio 使用 D 日成交量或成交额相对前 20 日均值，前 20 日均值不包含 D 日。",
         "所有正向/负向 flag 都只使用 D 日收盘前可见信息；D+1 只作为标签。",
-        "主样本剔除北交所、ST/退市、非连续 D+1、新股/除权或数据异常导致的超涨跌幅样本。",
+        "主样本仅包含沪深主板，并剔除 ST/退市、非连续 D+1、新股/除权或数据异常导致的超涨跌幅样本。",
     ]
 
 
