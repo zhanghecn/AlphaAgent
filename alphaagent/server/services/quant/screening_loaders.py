@@ -344,8 +344,14 @@ def load_stock_universe(session, max_symbols: int, included_boards: tuple[str, .
         dict(row)
         for row in rows
         if stock_board(row.get("vt_symbol"), row.get("exchange")) in allowed
+        and not _excluded_shortline_stock_name(row.get("name"))
     ]
     return result[: min(max(max_symbols, 1), 5000)]
+
+
+def _excluded_shortline_stock_name(name: Any) -> bool:
+    text = str(name or "").strip().upper()
+    return bool("ST" in text or "退" in text or text.startswith(("N", "C")))
 
 
 def load_index_return_20d(session, trade_date: date) -> float | None:

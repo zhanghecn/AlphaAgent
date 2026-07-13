@@ -11292,6 +11292,9 @@ def test_quant_universe_defaults_to_main_board_only() -> None:
     rows = [
         {"vt_symbol": "300750.SZSE", "exchange": "SZSE", "turnover": 300, "market_cap": 300},
         {"vt_symbol": "000001.SZSE", "exchange": "SZSE", "turnover": 200, "market_cap": 200},
+        {"vt_symbol": "000078.SZSE", "exchange": "SZSE", "name": "ST海王", "turnover": 150, "market_cap": 150},
+        {"vt_symbol": "001001.SZSE", "exchange": "SZSE", "name": "N新股", "turnover": 140, "market_cap": 140},
+        {"vt_symbol": "001002.SZSE", "exchange": "SZSE", "name": "C新股", "turnover": 130, "market_cap": 130},
         {"vt_symbol": "600000.SSE", "exchange": "SSE", "turnover": 100, "market_cap": 100},
         {"vt_symbol": "688981.SSE", "exchange": "SSE", "turnover": 100, "market_cap": 100},
         {"vt_symbol": "920001.BSE", "exchange": "BSE", "turnover": 50, "market_cap": 50},
@@ -11317,6 +11320,9 @@ def test_quant_universe_defaults_to_main_board_only() -> None:
     assert "920001.BSE" not in default_symbols
     assert default_symbols == ["000001.SZSE"]
     assert "300750.SZSE" in all_symbols
+    assert "000078.SZSE" not in all_symbols
+    assert "001001.SZSE" not in all_symbols
+    assert "001002.SZSE" not in all_symbols
     assert "688981.SSE" in all_symbols
     assert "920001.BSE" in all_symbols
 
