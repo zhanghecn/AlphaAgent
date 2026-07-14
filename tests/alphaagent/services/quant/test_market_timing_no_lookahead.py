@@ -493,6 +493,7 @@ def _structural_danger_case(
     ]
     factors[20] = _structural_factor(factors[20].trade_date)
     factors[22] = _structural_factor(factors[22].trade_date)
+    factors[23] = _timing_factor(factors[23].trade_date, "SILVER")
     up_ratios: list[float | None] = [1.0] * 20 + [0.0, 1.0 if immediate_repair else 4 / 7, 0.0, 1.0, 1.0]
     return factors, closes, up_ratios
 
@@ -511,6 +512,12 @@ def test_structural_breakdown_enters_once_confirms_and_exits_on_repair():
     assert states[20:24] == [sig.DANGER] * 4
     assert states[24] == sig.NORMAL
     assert len(structural_events) == 1
+    assert [
+        event
+        for event in events
+        if event.direction == "SILVER"
+        and factors[20].trade_date <= event.trade_date <= factors[23].trade_date
+    ] == structural_events
     event = structural_events[0]
     assert event.trade_date == factors[20].trade_date
     assert event.direction == "SILVER"

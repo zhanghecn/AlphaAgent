@@ -385,6 +385,13 @@ def detect_events(
             continue
         zone = (direction, setup_type)
         if (
+            danger_states[i] == DANGER
+            and direction == "SILVER"
+            and setup_type != SETUP_STRUCTURAL_BREAKDOWN_SILVER
+        ):
+            previous_zone = zone
+            continue
+        if (
             setup_type == SETUP_STRUCTURAL_BREAKDOWN_SILVER
             and not entered_danger
         ):
