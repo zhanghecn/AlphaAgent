@@ -1,4 +1,4 @@
-"""金手指/银手指信号触发 v6: 通用 setup + 区域进入 + 次日确认。
+"""金手指/银手指信号触发 v7: 通用 setup + 结构危险区 + 次日确认。
 
 演进:
 - v1/v2: 单日边沿触发, bull/bear 在阈值附近抖动会让 GOLD/SILVER 频繁交替。
@@ -11,9 +11,11 @@
   事件存在性不依赖未来, 历史完整保留, 不再有「金手指消失」。
 - v5: 事件与仓位状态解耦。首次进入金区/银区时记录候选, 连续停留不重复;
   离开后再次进入可重新记录同方向候选。修复长期 SHORT/LONG 吞掉近期同向事件。
-- v6(本版): 增加独立 ``REVERSAL_GOLD`` 弱势衰竭 setup。候选只读取 <=i 的
+- v6: 增加独立 ``REVERSAL_GOLD`` 弱势衰竭 setup。候选只读取 <=i 的
   收盘前缀, 次日上涨且宽基参与度不窄时确认。镜像反转银未通过长历史验证,
   不因形式对称而上线。
+- v7(本版): 增加 ``STRUCTURAL_BREAKDOWN_SILVER`` 和独立危险状态。强破位
+  当日优先于反转金, 危险状态持续到价格、参与度和空头强度共同修复。
 
 无未来函数(关键修复):
 - 候选事件属性(trade_date/direction/grade/bull_force)只用 <=i 数据
@@ -41,6 +43,7 @@ SETUP_TREND_GOLD = "TREND_GOLD"
 SETUP_REVERSAL_GOLD = "REVERSAL_GOLD"
 SETUP_TOP_SILVER = "TOP_SILVER"
 SETUP_BREAKDOWN_SILVER = "BREAKDOWN_SILVER"
+SETUP_STRUCTURAL_BREAKDOWN_SILVER = "STRUCTURAL_BREAKDOWN_SILVER"
 
 # v6 反转金固定门槛(六指数 2015-2026 + 七指数共同期验证)
 REVERSAL_RSI2_MAX = 20.0
@@ -50,6 +53,18 @@ REVERSAL_RETURN_1D_MIN = -1.0
 REVERSAL_RETURN_1D_MAX = 0.5
 REVERSAL_CONFIRM_UP_RATIO_MIN = 0.5
 REVERSAL_COOLDOWN = 10
+
+# v7 结构性破位和风险修复门槛(标准化分数 + 宽基参与度)
+STRUCTURAL_BEAR_MIN = 65.0
+STRUCTURAL_BEAR_GAP_MIN = 15.0
+STRUCTURAL_BREAKDOWN_MIN = 80.0
+STRUCTURAL_MACD_TOP_MIN = 70.0
+STRUCTURAL_UP_RATIO_MAX = 0.5
+REPAIR_BEAR_MAX = 65.0
+REPAIR_UP_RATIO_MIN = 0.5
+
+NORMAL = "NORMAL"
+DANGER = "DANGER"
 
 # 候选确认状态
 STATUS_PENDING = "PENDING"  # 序列末端, 待次日确认(盘中最新候选)
@@ -150,12 +165,96 @@ def is_reversal_gold(
     return _matches_reversal_gold(_reversal_gold_metrics(closes, end_index))
 
 
+def _sma_at(closes: list[float], index: int, window: int) -> float | None:
+    """返回指定索引的因果均线，只读取 ``<=index`` 的固定窗口。"""
+    if index < window - 1 or index >= len(closes):
+        return None
+    return sum(closes[index - window + 1 : index + 1]) / window
+
+
+def is_structural_breakdown(
+    factor: MarketTimingFactors,
+    closes: list[float],
+    index: int,
+    up_ratio: float | None,
+) -> bool:
+    """判断当日是否为结构性破位；参与度缺失时严格不触发。"""
+    ma20 = _sma_at(closes, index, 20)
+    if ma20 is None or up_ratio is None:
+        return False
+    breakdown = float(factor.evidence.get("trend_breakdown") or 0.0)
+    return (
+        factor.bear_force >= STRUCTURAL_BEAR_MIN
+        and factor.bear_force - factor.bull_force >= STRUCTURAL_BEAR_GAP_MIN
+        and breakdown >= STRUCTURAL_BREAKDOWN_MIN
+        and closes[index] < ma20
+        and factor.macd_top >= STRUCTURAL_MACD_TOP_MIN
+        and up_ratio <= STRUCTURAL_UP_RATIO_MAX
+    )
+
+
+def _is_danger_repaired(
+    factor: MarketTimingFactors,
+    closes: list[float],
+    index: int,
+    up_ratio: float | None,
+) -> bool:
+    ma5 = _sma_at(closes, index, 5)
+    return bool(
+        ma5 is not None
+        and up_ratio is not None
+        and closes[index] > ma5
+        and up_ratio >= REPAIR_UP_RATIO_MIN
+        and factor.bear_force < REPAIR_BEAR_MAX
+    )
+
+
+def build_danger_states(
+    factor_seq: list[MarketTimingFactors],
+    closes: list[float] | None,
+    up_ratios: list[float | None] | None,
+) -> list[str]:
+    """构建逐日因果危险状态；输入不对齐时关闭该通道。"""
+    n = len(factor_seq)
+    if (
+        closes is None
+        or up_ratios is None
+        or len(closes) != n
+        or len(up_ratios) != n
+    ):
+        return [NORMAL] * n
+
+    active = False
+    states: list[str] = []
+    for index, factor in enumerate(factor_seq):
+        up_ratio = up_ratios[index]
+        if active and _is_danger_repaired(
+            factor,
+            closes,
+            index,
+            up_ratio,
+        ):
+            active = False
+        if not active and is_structural_breakdown(
+            factor,
+            closes,
+            index,
+            up_ratio,
+        ):
+            active = True
+        states.append(DANGER if active else NORMAL)
+    return states
+
+
 def candidate_setup(
     factor: MarketTimingFactors,
     *,
     reversal_gold: bool = False,
+    structural_breakdown: bool = False,
 ) -> tuple[str | None, str | None]:
     """根据当日因子和已计算的反转状态返回方向及 setup。"""
+    if structural_breakdown:
+        return "SILVER", SETUP_STRUCTURAL_BREAKDOWN_SILVER
     if reversal_gold:
         return "GOLD", SETUP_REVERSAL_GOLD
 
@@ -239,16 +338,39 @@ def detect_events(
         and len(up_ratios) == n
         else None
     )
+    danger_states = build_danger_states(
+        factor_seq,
+        aligned_closes,
+        aligned_up_ratios,
+    )
 
     for i, f in enumerate(factor_seq):
+        structural_breakdown = bool(
+            aligned_closes is not None
+            and aligned_up_ratios is not None
+            and is_structural_breakdown(
+                f,
+                aligned_closes,
+                i,
+                aligned_up_ratios[i],
+            )
+        )
+        entered_danger = (
+            danger_states[i] == DANGER
+            and (i == 0 or danger_states[i - 1] == NORMAL)
+        )
         reversal_metrics = (
             _reversal_gold_metrics(aligned_closes, i)
             if aligned_closes is not None
             else None
         )
         reversal_zone = _matches_reversal_gold(reversal_metrics)
-        entered_reversal_zone = reversal_zone and not previous_reversal_zone
-        previous_reversal_zone = reversal_zone
+        entered_reversal_zone = (
+            reversal_zone
+            and not structural_breakdown
+            and not previous_reversal_zone
+        )
+        previous_reversal_zone = reversal_zone if not structural_breakdown else False
         use_reversal_setup = (
             entered_reversal_zone
             and i - last_reversal_index >= REVERSAL_COOLDOWN
@@ -256,11 +378,18 @@ def detect_events(
         direction, setup_type = candidate_setup(
             f,
             reversal_gold=use_reversal_setup,
+            structural_breakdown=structural_breakdown,
         )
         if direction is None or setup_type is None:
             previous_zone = None
             continue
         zone = (direction, setup_type)
+        if (
+            setup_type == SETUP_STRUCTURAL_BREAKDOWN_SILVER
+            and not entered_danger
+        ):
+            previous_zone = zone
+            continue
         if zone == previous_zone:
             continue
         previous_zone = zone
@@ -268,13 +397,25 @@ def detect_events(
         if setup_type == SETUP_REVERSAL_GOLD:
             last_reversal_index = i
 
-        status, confirm_index = _evaluate_status(
-            direction,
-            setup_type,
-            i,
-            aligned_closes,
-            aligned_up_ratios,
-        )
+        if setup_type == SETUP_STRUCTURAL_BREAKDOWN_SILVER:
+            confirm_index = i + 1
+            if confirm_index >= n:
+                status = STATUS_PENDING
+                confirm_index = None
+            else:
+                status = (
+                    STATUS_CONFIRMED
+                    if danger_states[confirm_index] == DANGER
+                    else STATUS_INVALIDATED
+                )
+        else:
+            status, confirm_index = _evaluate_status(
+                direction,
+                setup_type,
+                i,
+                aligned_closes,
+                aligned_up_ratios,
+            )
         status_reason = status if aligned_closes is not None else "区域进入"
         reasons = [
             f"bull={f.bull_force:.1f}",
@@ -288,6 +429,15 @@ def detect_events(
                 f"return_10d={reversal_metrics['return_10d']:.1f}%",
                 f"drawdown_20d={reversal_metrics['drawdown_20d']:.1f}%",
                 f"return_1d={reversal_metrics['return_1d']:.1f}%",
+                status_reason,
+            ]
+        elif setup_type == SETUP_STRUCTURAL_BREAKDOWN_SILVER:
+            reasons = [
+                f"bear={f.bear_force:.1f}",
+                f"bear_gap={f.bear_force - f.bull_force:.1f}",
+                f"trend_breakdown={float(f.evidence.get('trend_breakdown') or 0.0):.1f}",
+                f"macd_top={f.macd_top:.1f}",
+                f"up_ratio={aligned_up_ratios[i]:.2f}",
                 status_reason,
             ]
         events.append(

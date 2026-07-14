@@ -456,3 +456,167 @@ def test_reversal_gold_cooldown_suppresses_early_reentry(monkeypatch):
         factors[20].trade_date,
         factors[30].trade_date,
     ]
+
+
+# ---- 8. v7 结构性破位银与因果危险状态 ----
+
+
+def _structural_factor(day: date) -> fac.MarketTimingFactors:
+    return fac.MarketTimingFactors(
+        trade_date=day,
+        phase="rotation",
+        trend=55.0,
+        momentum=50.0,
+        breadth=40.0,
+        structure=45.0,
+        volume=50.0,
+        bull_force=55.6,
+        bear_force=75.4,
+        close_above_ma20=False,
+        mom_5d=-0.2,
+        mom_20d=1.1,
+        macd_top=80.0,
+        breadth_top=82.0,
+        evidence={"trend_breakdown": 83.0},
+    )
+
+
+def _structural_danger_case(
+    *,
+    immediate_repair: bool = False,
+) -> tuple[list[fac.MarketTimingFactors], list[float], list[float | None]]:
+    start = date(2026, 3, 13) - timedelta(days=20)
+    closes = [100.0] * 20 + [99.0, 101.0 if immediate_repair else 99.1, 98.7, 99.0, 101.0]
+    factors = [
+        _timing_factor(start + timedelta(days=index), "NEUTRAL")
+        for index in range(len(closes))
+    ]
+    factors[20] = _structural_factor(factors[20].trade_date)
+    factors[22] = _structural_factor(factors[22].trade_date)
+    up_ratios: list[float | None] = [1.0] * 20 + [0.0, 1.0 if immediate_repair else 4 / 7, 0.0, 1.0, 1.0]
+    return factors, closes, up_ratios
+
+
+def test_structural_breakdown_enters_once_confirms_and_exits_on_repair():
+    factors, closes, up_ratios = _structural_danger_case()
+
+    states = sig.build_danger_states(factors, closes, up_ratios)
+    events = sig.detect_events(factors, closes, up_ratios)
+    structural_events = [
+        event
+        for event in events
+        if event.setup_type == sig.SETUP_STRUCTURAL_BREAKDOWN_SILVER
+    ]
+
+    assert states[20:24] == [sig.DANGER] * 4
+    assert states[24] == sig.NORMAL
+    assert len(structural_events) == 1
+    event = structural_events[0]
+    assert event.trade_date == factors[20].trade_date
+    assert event.direction == "SILVER"
+    assert event.status == sig.STATUS_CONFIRMED
+    assert event.confirm_date == factors[21].trade_date
+
+
+def test_structural_breakdown_candidate_is_retained_when_next_day_repairs():
+    factors, closes, up_ratios = _structural_danger_case(immediate_repair=True)
+
+    states = sig.build_danger_states(factors, closes, up_ratios)
+    event = next(
+        event
+        for event in sig.detect_events(factors, closes, up_ratios)
+        if event.setup_type == sig.SETUP_STRUCTURAL_BREAKDOWN_SILVER
+    )
+
+    assert states[20] == sig.DANGER
+    assert states[21] == sig.NORMAL
+    assert event.status == sig.STATUS_INVALIDATED
+    assert event.confirm_date == factors[21].trade_date
+
+
+def test_structural_breakdown_has_priority_but_residual_danger_does_not(monkeypatch):
+    factors, closes, up_ratios = _structural_danger_case()
+    qualifying_metrics = {
+        "rsi2": 10.0,
+        "return_1d": -0.5,
+        "return_10d": -3.0,
+        "drawdown_20d": -4.0,
+    }
+    monkeypatch.setattr(
+        sig,
+        "_reversal_gold_metrics",
+        lambda _values, end_index=None: (
+            qualifying_metrics if end_index in {20, 21} else None
+        ),
+    )
+
+    assert sig.candidate_setup(
+        factors[20],
+        reversal_gold=True,
+        structural_breakdown=True,
+    ) == ("SILVER", sig.SETUP_STRUCTURAL_BREAKDOWN_SILVER)
+    assert sig.candidate_setup(
+        factors[21],
+        reversal_gold=True,
+        structural_breakdown=False,
+    ) == ("GOLD", sig.SETUP_REVERSAL_GOLD)
+
+    events = sig.detect_events(factors, closes, up_ratios)
+    assert [
+        event.setup_type
+        for event in events
+        if event.trade_date in {factors[20].trade_date, factors[21].trade_date}
+    ] == [
+        sig.SETUP_STRUCTURAL_BREAKDOWN_SILVER,
+        sig.SETUP_REVERSAL_GOLD,
+    ]
+
+
+def test_structural_breakdown_requires_aligned_participation():
+    factors, closes, up_ratios = _structural_danger_case()
+
+    assert sig.is_structural_breakdown(factors[20], closes, 20, up_ratios[20]) is True
+    assert sig.is_structural_breakdown(factors[20], closes, 20, None) is False
+    assert sig.build_danger_states(factors, closes, None) == [sig.NORMAL] * len(factors)
+
+
+def test_structural_danger_prefix_is_stable_under_future_pollution():
+    factors, closes, up_ratios = _structural_danger_case()
+    cut = 21
+
+    prefix_states = sig.build_danger_states(
+        factors[:cut],
+        closes[:cut],
+        up_ratios[:cut],
+    )
+    prefix_event = next(
+        event
+        for event in sig.detect_events(
+            factors[:cut],
+            closes[:cut],
+            up_ratios[:cut],
+        )
+        if event.setup_type == sig.SETUP_STRUCTURAL_BREAKDOWN_SILVER
+    )
+
+    polluted_closes = closes[:cut] + [200.0] * (len(closes) - cut)
+    polluted_up_ratios = up_ratios[:cut] + [1.0] * (len(closes) - cut)
+    polluted_states = sig.build_danger_states(
+        factors,
+        polluted_closes,
+        polluted_up_ratios,
+    )
+    polluted_event = next(
+        event
+        for event in sig.detect_events(
+            factors,
+            polluted_closes,
+            polluted_up_ratios,
+        )
+        if event.setup_type == sig.SETUP_STRUCTURAL_BREAKDOWN_SILVER
+    )
+
+    assert polluted_states[:cut] == prefix_states
+    assert prefix_event.trade_date == polluted_event.trade_date
+    assert prefix_event.direction == polluted_event.direction == "SILVER"
+    assert prefix_event.status == sig.STATUS_PENDING
