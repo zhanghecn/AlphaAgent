@@ -1,6 +1,10 @@
 # 低位首板板块预热研究
 
-## Current State
+> 本文保留 2026-07-13 冻结时的研究快照。实时概念工程合入后的当前数据库复核、
+> 最新锁定留出切分和 2 日点时覆盖见
+> `limit_up_realtime_concept_backtest_20260715.md`；该复核不改变本文“预热未晋升”的结论。
+
+## Frozen Research Snapshot
 
 - 研究版本：`sector-warmup-research-v2`；日内轮动影子规则从 2026-07-13
   开始前向积累，不做历史替代。

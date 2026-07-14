@@ -18,6 +18,7 @@
 - 首板 D+1 盘中退出研究显示，固定 13:30 在 84 个分钟价锁定留出信号的 10 万元四仓账户中为 `+29.44% / 61.33% / -6.21%`，略高于同样本收盘退出的 `+26.88% / 64.38% / -4.57%`；但每天强制买一只尾盘首板的近期真实现金回放为 `-38.80% / 48.89% / -44.19%`，不能为交易频率放宽硬门。
 - 首板资本感知换仓可行性验证显示：只在新买点需要资金且最弱 D+1 旧仓 `current_return + intraday_fade <= 0` 时提前卖出，剩余仓位 14:30 退出；84 个分钟配对信号的 10 万元四仓收益由固定收盘 `+26.88%` 提高到 `+38.50%`，后半段时间验证由 `+16.91%` 提高到 `+26.84%`，双倍成本后仍为 `+33.83%`。历史新买点仍是扫板代理，因此只允许进入冻结前向研究。
 - 实时概念共振已完成工程落地：D 日严格读取 D-1 成员版本，全市场行情 30 秒刷新，所有主板非 ST 的 5% 雷达先评估概念再做 Top5/两仓排序。2026-07-14 的 739 帧回放只证明 PCB 分组和封板前可见性，不证明收益提升；真实 D+1 胜率、复利和回撤必须等待 20/60 个前向交易日，详见 `limit_up_realtime_concept_replay_20260714.md`。
+- `ef099769` 已补齐实时概念质量门：来源交易日错误或全市场覆盖低于 90% 时不落库、不替换有效快照，全局质量失败也会阻断每只候选的新买点。复核后历史买点、胜率和复利没有变化；预热代理未同时改善锁定留出胜率与复利，继续不进入执行，详见 `limit_up_realtime_concept_backtest_20260715.md`。
 
 ## Read First
 
@@ -31,6 +32,7 @@
 - `limit_up_capital_aware_rotation_feasibility.md`: 动态转弱换仓的替代研究证据；产品未采用。
 - `limit_up_live_gate_replay_20260714.md`: 2026-07-14 的 320 帧市场门、扫描速度、逐股无买点原因和 10 点前触板后回封对照。
 - `limit_up_realtime_concept_replay_20260714.md`: 2026-07-14 的 739 帧 PCB 分组、封板前可见性和无未来函数边界；不作为收益证据。
+- `limit_up_realtime_concept_backtest_20260715.md`: 实时概念质量修复后的同口径回测、板块预热对照、压力测试和前向验收结论。
 - `d1_event_feature_research_2025_01_01.md`: 从 `2025-01-01` 起的全市场 D+1 大涨/大跌前一日量价、成交额/换手代理和特征分组研究集合。
 - `d1_event_feature_research_2026_03_01.md`: 从 `2026-03-01` 起的 D+1 涨停/大涨/大跌前一日量价、成交额/换手代理和叠加特征分组研究集合。
 - `quant_overlay_d1_event_features_2025_08_06.md`: 0.1.63 合入超跌低位承接前的 overlay 证据，用于说明旧策略漏掉了 `deep_low_core_group`，不再作为当前基线。
@@ -42,7 +44,7 @@
 - 已验证：`uv run pytest tests/alphaagent/test_quant_backtest_portfolio.py -q -k "deep_low_absorption_reversal or bottom_reclaim or secondary_breakout or execution_pool or quant_strategy_registry_dispatches_default_strategy"`，`23 passed`。
 - 已验证：`python -m py_compile alphaagent/server/services/quant/strategies/dragon_pullback.py alphaagent/server/services/quant/candidate_lanes.py alphaagent/server/services/quant/factors.py alphaagent/server/services/quant/d1_event_feature_research.py`。
 - 已验证：`git diff --check`。
-- 打板相关完整套件已验证：后端 `593 passed`，前端 `45 passed`，Python 编译、生产构建和 Docker 健康检查通过。
+- 打板相关完整套件已验证：后端 `594 passed`，前端 `45 passed`，Python 编译、生产构建和 Docker 健康检查通过。
 
 ## Next Work
 

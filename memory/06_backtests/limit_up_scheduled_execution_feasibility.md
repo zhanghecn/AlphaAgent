@@ -92,12 +92,12 @@ candidate_proxy_only`，页面紧邻收益显示“候选代理，非实盘等�
 ## Verification
 
 ```bash
-uv run --group server pytest tests/alphaagent/test_limit_up_*.py tests/alphaagent/test_data_sync_schedule.py -q
+uv run --group server pytest tests/alphaagent/test_limit_up_*.py tests/alphaagent/test_data_sync_schedule.py tests/alphaagent/test_akshare_adapter.py tests/alphaagent/test_api.py -q
 pnpm --dir frontend test -- --run
 pnpm --dir frontend run build
 ```
 
-最终结果：后端 `593 passed`，前端 `45 passed`，生产构建通过。定时账户按
+最终结果：后端 `594 passed`，前端 `45 passed`，生产构建通过。定时账户按
 历史版本和日期范围完整缓存一次，交割单与回测的展示条数只在返回时切片；历史
 重建仍统一清空并预热缓存。容器重建后的命中实测为回测 API `130ms`、两次交割单
 API `39ms / 71ms`，页面交易日切换 `134-139ms`。桌面和 `390x844` 均无整页

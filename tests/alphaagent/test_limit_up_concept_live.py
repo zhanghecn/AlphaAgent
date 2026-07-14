@@ -165,6 +165,33 @@ def test_invalid_source_date_keeps_previous_snapshot_without_persisting(monkeypa
     assert persisted == []
 
 
+def test_low_market_coverage_keeps_previous_snapshot_without_persisting(monkeypatch) -> None:
+    previous = _runtime_snapshot("2026-07-14T13:03:00+08:00")
+    service._replace_runtime_snapshot(previous)
+    monkeypatch.setattr(
+        repository,
+        "load_frozen_membership_rows",
+        lambda _date: (date(2026, 7, 13), _pcb_memberships()),
+    )
+    persisted: list[object] = []
+    monkeypatch.setattr(
+        repository,
+        "save_strength_snapshots",
+        lambda rows: persisted.extend(rows),
+    )
+    payload = _full_market_payload(items=[_quote("600183.SSE", "生益科技", 8.2)])
+
+    result = service.refresh_live_concept_snapshot(
+        datetime(2026, 7, 14, 13, 3, 20, tzinfo=SHANGHAI),
+        adapter=FakeAdapter(payload),
+    )
+
+    assert result["captured_at"] == previous["captured_at"]
+    assert result["data_quality"]["trigger_allowed"] is False
+    assert "覆盖率仅 50.0%" in result["data_quality"]["source_errors"][0]
+    assert persisted == []
+
+
 def test_runtime_snapshot_builds_authoritative_main_board_five_percent_radar(monkeypatch) -> None:
     service.clear_runtime_snapshot()
     memberships = [
