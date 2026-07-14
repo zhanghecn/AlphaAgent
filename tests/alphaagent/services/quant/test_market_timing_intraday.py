@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 
 import pytest
@@ -108,6 +108,35 @@ def _factor(day: date, zone: str) -> fac.MarketTimingFactors:
         breadth_top=40.0,
         evidence={},
     )
+
+
+def _structural_factor(day: date) -> fac.MarketTimingFactors:
+    return replace(
+        _factor(day, "NEUTRAL"),
+        phase="rotation",
+        bull_force=55.6,
+        bear_force=75.4,
+        macd_top=80.0,
+        breadth_top=82.0,
+        evidence={"trend_breakdown": 83.0},
+    )
+
+
+def _structural_panel_case() -> tuple[
+    list[fac.MarketTimingFactors],
+    list[float],
+    list[float | None],
+]:
+    start = date(2026, 3, 13) - timedelta(days=20)
+    closes = [100.0] * 20 + [99.0, 99.1, 98.7, 99.0, 101.0]
+    factors = [
+        _factor(start + timedelta(days=index), "NEUTRAL")
+        for index in range(len(closes))
+    ]
+    factors[20] = _structural_factor(factors[20].trade_date)
+    factors[22] = _structural_factor(factors[22].trade_date)
+    up_ratios: list[float | None] = [1.0] * 20 + [0.0, 4 / 7, 0.0, 1.0, 1.0]
+    return factors, closes, up_ratios
 
 
 def _signal(
@@ -346,6 +375,32 @@ def test_current_direction_uses_latest_zone_without_carrying_historical_event():
     assert mt_panel._resolve_current_direction(None) == "NEUTRAL"
 
 
+def test_current_direction_prioritizes_same_day_structural_breakdown():
+    factors, closes, up_ratios = _structural_panel_case()
+
+    assert mt_panel._resolve_current_direction(
+        factors[20],
+        closes[:21],
+        up_ratios[:21],
+    ) == "SILVER"
+    assert mt_panel._resolve_current_direction(
+        factors[20],
+        closes[:21],
+        None,
+    ) == "NEUTRAL"
+
+    overview = mt_panel._build_overview(
+        factors[20],
+        None,
+        [{"date": str(factors[20].trade_date), "close": closes[20]}],
+        closes[:21],
+        up_ratios[:21],
+        sig.DANGER,
+    )
+    assert overview["current_direction"] == "SILVER"
+    assert overview["danger_state"] == sig.DANGER
+
+
 def test_timing_series_keeps_daily_dates_and_event_confirmation():
     start = date(2026, 7, 6)
     factors = [
@@ -393,3 +448,27 @@ def test_timing_series_uses_reversal_gold_zone_from_close_prefix():
     assert candidate["zone_direction"] == "GOLD"
     assert candidate["event"] is not None
     assert candidate["event"]["setup_type"] == sig.SETUP_REVERSAL_GOLD
+
+
+def test_timing_series_exposes_causal_structural_danger_state():
+    factors, closes, up_ratios = _structural_panel_case()
+    events = sig.detect_events(factors, closes, up_ratios)
+
+    rows = mt_panel._build_timing_series(
+        factors,
+        events,
+        closes,
+        up_ratios,
+    )
+
+    assert rows[20]["zone_direction"] == "SILVER"
+    assert rows[20]["danger_state"] == sig.DANGER
+    assert [row["danger_state"] for row in rows[20:24]] == [sig.DANGER] * 4
+    assert rows[24]["danger_state"] == sig.NORMAL
+    assert rows[20]["event"] == {
+        "direction": "SILVER",
+        "status": sig.STATUS_CONFIRMED,
+        "grade": "STRONG",
+        "setup_type": sig.SETUP_STRUCTURAL_BREAKDOWN_SILVER,
+        "confirm_date": str(factors[21].trade_date),
+    }

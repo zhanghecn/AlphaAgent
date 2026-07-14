@@ -162,14 +162,27 @@ def _carry_context_to_date(context: Any, target_date: date) -> Any:
 def _resolve_current_direction(
     latest: Any,
     closes: list[float] | None = None,
+    up_ratios: list[float | None] | None = None,
 ) -> str:
     """当前方向只描述最新交易日区域，不把历史事件当作持仓状态。"""
     if latest is None:
         return "NEUTRAL"
     reversal_gold = closes is not None and sig.is_reversal_gold(closes)
+    structural_breakdown = bool(
+        closes
+        and up_ratios is not None
+        and len(up_ratios) == len(closes)
+        and sig.is_structural_breakdown(
+            latest,
+            closes,
+            len(closes) - 1,
+            up_ratios[-1],
+        )
+    )
     zone_direction, _ = sig.candidate_setup(
         latest,
         reversal_gold=reversal_gold,
+        structural_breakdown=structural_breakdown,
     )
     return zone_direction or "NEUTRAL"
 
@@ -178,20 +191,44 @@ def _build_timing_series(
     factors: list[Any],
     events: list[Any],
     closes: list[float] | None = None,
+    up_ratios: list[float | None] | None = None,
 ) -> list[dict]:
     """构建逐日合力和候选事件序列，供日期表与审计共用。"""
     event_by_date = {event.trade_date: event for event in events}
     rows: list[dict] = []
     aligned_closes = closes if closes is not None and len(closes) == len(factors) else None
+    aligned_up_ratios = (
+        up_ratios
+        if aligned_closes is not None
+        and up_ratios is not None
+        and len(up_ratios) == len(factors)
+        else None
+    )
+    danger_states = sig.build_danger_states(
+        factors,
+        aligned_closes,
+        aligned_up_ratios,
+    )
     for index, factor in enumerate(factors):
         event = event_by_date.get(factor.trade_date)
         reversal_gold = (
             aligned_closes is not None
             and sig.is_reversal_gold(aligned_closes, index)
         )
+        structural_breakdown = bool(
+            aligned_closes is not None
+            and aligned_up_ratios is not None
+            and sig.is_structural_breakdown(
+                factor,
+                aligned_closes,
+                index,
+                aligned_up_ratios[index],
+            )
+        )
         zone_direction, _ = sig.candidate_setup(
             factor,
             reversal_gold=reversal_gold,
+            structural_breakdown=structural_breakdown,
         )
         rows.append(
             {
@@ -199,6 +236,7 @@ def _build_timing_series(
                 "bull_force": factor.bull_force,
                 "bear_force": factor.bear_force,
                 "zone_direction": zone_direction or "NEUTRAL",
+                "danger_state": danger_states[index],
                 "phase": factor.phase,
                 "event": (
                     {
@@ -223,6 +261,8 @@ def _build_overview(
     latest_signal: Any,
     index_bars: list[dict],
     closes: list[float] | None = None,
+    up_ratios: list[float | None] | None = None,
+    danger_state: str = sig.NORMAL,
 ) -> dict:
     if latest is None:
         return {}
@@ -235,7 +275,8 @@ def _build_overview(
         "latest_date": factor_date,
         "factor_date": factor_date,
         "quote_date": quote_date,
-        "current_direction": _resolve_current_direction(latest, closes),
+        "current_direction": _resolve_current_direction(latest, closes, up_ratios),
+        "danger_state": danger_state,
         "phase": latest.phase,
         "phase_label": PHASE_LABELS.get(latest.phase, latest.phase),
         "bull_force": latest.bull_force,
@@ -405,11 +446,12 @@ def _compute_panel(session: Any, schema: Any) -> dict:
         factor_bars.append(comp[i])
 
     factor_closes = [bar.close for bar in factor_bars]
+    factor_up_ratios = [bar.up_ratio for bar in factor_bars]
 
     events = sig.detect_events(
         factor_seq,
         factor_closes,
-        [bar.up_ratio for bar in factor_bars],
+        factor_up_ratios,
     )
     accuracy = bt.evaluate(events, factor_bars)
     index_bars = _upsert_latest_bar(
@@ -421,11 +463,29 @@ def _compute_panel(session: Any, schema: Any) -> dict:
     latest_signal = next(
         (e for e in reversed(events) if e.status == sig.STATUS_CONFIRMED), None
     ) if events else None
+    timing_series = _build_timing_series(
+        factor_seq,
+        events,
+        factor_closes,
+        factor_up_ratios,
+    )
+    latest_danger_state = (
+        timing_series[-1]["danger_state"]
+        if timing_series
+        else sig.NORMAL
+    )
 
     return {
-        "overview": _build_overview(latest, latest_signal, index_bars, factor_closes),
+        "overview": _build_overview(
+            latest,
+            latest_signal,
+            index_bars,
+            factor_closes,
+            factor_up_ratios,
+            latest_danger_state,
+        ),
         "chart": _build_chart(index_bars, comp, events),
-        "timing_series": _build_timing_series(factor_seq, events, factor_closes),
+        "timing_series": timing_series,
         "accuracy": _build_accuracy(accuracy),
         "generated_at": int(time.time()),
         "sample_range": [str(comp[0].trade_date), str(comp[-1].trade_date)],
