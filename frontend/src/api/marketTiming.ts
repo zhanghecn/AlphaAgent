@@ -3,11 +3,13 @@ import { apiClient } from "./client";
 /** 金手指=看多 / 银手指=看空 / 中性观望 */
 export type TimingDirection = "GOLD" | "SILVER" | "NEUTRAL";
 export type TimingGrade = "STRONG" | "MEDIUM" | "WEAK" | "";
+export type TimingDangerState = "NORMAL" | "DANGER";
 export type TimingSetupType =
   | "TREND_GOLD"
   | "REVERSAL_GOLD"
   | "TOP_SILVER"
-  | "BREAKDOWN_SILVER";
+  | "BREAKDOWN_SILVER"
+  | "STRUCTURAL_BREAKDOWN_SILVER";
 /** 候选确认状态: CONFIRMED 已确认 / INVALIDATED 假突破否决 / PENDING 待确认 */
 export type TimingStatus = "CONFIRMED" | "INVALIDATED" | "PENDING";
 
@@ -24,6 +26,7 @@ export interface TimingOverview {
   factor_date: string;
   quote_date: string;
   current_direction: TimingDirection;
+  danger_state: TimingDangerState;
   phase: string;
   phase_label: string;
   bull_force: number;
@@ -88,6 +91,7 @@ export interface TimingDailyState {
   bull_force: number;
   bear_force: number;
   zone_direction: TimingDirection;
+  danger_state: TimingDangerState;
   phase: string;
   event: TimingDailyEvent | null;
 }

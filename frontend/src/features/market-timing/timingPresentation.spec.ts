@@ -49,6 +49,7 @@ describe("market timing presentation", () => {
       bull_force: 50 + index,
       bear_force: 50 - index,
       zone_direction: "NEUTRAL",
+      danger_state: index === 23 ? "DANGER" : "NORMAL",
       phase: "rotation",
       event:
         index === 23
@@ -67,6 +68,7 @@ describe("market timing presentation", () => {
     expect(recent[0].date).toBe("2026-07-05");
     expect(recent[recent.length - 1]?.date).toBe("2026-07-24");
     expect(recent[recent.length - 1]?.event?.confirm_date).toBe("2026-07-25");
+    expect(recent[recent.length - 1]?.danger_state).toBe("DANGER");
   });
 
   it("keeps rejected candidates out of the primary chart", () => {
@@ -83,5 +85,6 @@ describe("market timing presentation", () => {
   it("names the internal setup without changing the public direction", () => {
     expect(timingSetupLabel("REVERSAL_GOLD")).toBe("弱势衰竭反转金手指");
     expect(timingSetupLabel("BREAKDOWN_SILVER")).toBe("趋势破位银手指");
+    expect(timingSetupLabel("STRUCTURAL_BREAKDOWN_SILVER")).toBe("结构性破位银手指");
   });
 });

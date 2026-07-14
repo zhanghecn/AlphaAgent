@@ -9,6 +9,7 @@ const TIMING_SETUP_LABELS: Record<TimingSetupType, string> = {
   REVERSAL_GOLD: "弱势衰竭反转金手指",
   TOP_SILVER: "顶部风险银手指",
   BREAKDOWN_SILVER: "趋势破位银手指",
+  STRUCTURAL_BREAKDOWN_SILVER: "结构性破位银手指",
 };
 
 export interface TimingEventSummary {

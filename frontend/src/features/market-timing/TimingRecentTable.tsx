@@ -71,6 +71,20 @@ export function TimingRecentTable({
               ))}
             </tr>
             <tr className="border-b border-border/50">
+              <th className="px-2 py-2 text-left font-medium text-muted-foreground">结构风险</th>
+              {rows.map((row) => (
+                <td
+                  key={row.date}
+                  className={cn(
+                    "px-1 py-2 text-center font-medium",
+                    row.danger_state === "DANGER" ? "text-destructive" : "text-muted-foreground",
+                  )}
+                >
+                  {row.danger_state === "DANGER" ? "危险" : "正常"}
+                </td>
+              ))}
+            </tr>
+            <tr className="border-b border-border/50">
               <th className="px-2 py-2 text-left font-medium text-muted-foreground">当日区域</th>
               {rows.map((row) => (
                 <td

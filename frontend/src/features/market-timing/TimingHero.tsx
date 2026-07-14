@@ -168,6 +168,11 @@ export function TimingHero({ overview, loading }: { overview: TimingOverview | n
             <span className="rounded-full bg-muted px-2.5 py-0.5 text-xs font-medium">
               阶段：{overview.phase_label}
             </span>
+            {overview.danger_state === "DANGER" && (
+              <span className="rounded-md bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">
+                结构风险：危险
+              </span>
+            )}
             {factorDate !== quoteDate && (
               <span className="text-xs text-muted-foreground">因子截至 {factorDate}</span>
             )}
