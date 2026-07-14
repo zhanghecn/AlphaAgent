@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sys
 from datetime import date
+from statistics import mean
 
 from alphaagent.server.db import schema, session as db_session
 from alphaagent.server.services.quant.market_context import compute_market_contexts
@@ -67,7 +68,7 @@ def main() -> int:
             flush=True,
         )
 
-        print("检测信号事件(v6 通用 setup+次日确认) ...", flush=True)
+        print("检测信号事件(v7 通用 setup+结构危险区+次日确认) ...", flush=True)
         events = sig.detect_events(
             factor_seq,
             [bar.close for bar in factor_bars],
@@ -86,9 +87,85 @@ def main() -> int:
 
         print("评估历史表现 ...", flush=True)
         report = bt.evaluate(events, factor_bars)
+        danger_report = _evaluate_danger_states(factor_seq, factor_bars)
 
     _print_report(report)
+    _print_danger_report(danger_report)
     return 0
+
+
+def _evaluate_danger_states(
+    factors: list[fac.MarketTimingFactors],
+    bars: list[ser.CompositeBar],
+) -> dict:
+    closes = [bar.close for bar in bars]
+    up_ratios = [bar.up_ratio for bar in bars]
+    states = sig.build_danger_states(factors, closes, up_ratios)
+    structural_flags = [
+        sig.is_structural_breakdown(
+            factor,
+            closes,
+            index,
+            up_ratios[index],
+        )
+        for index, factor in enumerate(factors)
+    ]
+    raw_entries = [
+        index
+        for index, active in enumerate(structural_flags)
+        if active and (index == 0 or not structural_flags[index - 1])
+    ]
+    episode_starts = [
+        index
+        for index, state in enumerate(states)
+        if state == sig.DANGER and (index == 0 or states[index - 1] == sig.NORMAL)
+    ]
+    return {
+        "raw_entries": len(raw_entries),
+        "episodes": _episode_metrics(episode_starts, closes),
+        "danger_days": _state_metrics(states, sig.DANGER, closes),
+        "normal_days": _state_metrics(states, sig.NORMAL, closes),
+    }
+
+
+def _episode_metrics(indices: list[int], closes: list[float]) -> dict:
+    valid = [index for index in indices if index + 5 < len(closes)]
+    returns = [
+        (closes[index + 5] / closes[index] - 1.0) * 100.0
+        for index in valid
+    ]
+    drawdowns = [
+        (min(closes[index + 1 : index + 6]) / closes[index] - 1.0) * 100.0
+        for index in valid
+    ]
+    return {
+        "total": len(indices),
+        "evaluable": len(valid),
+        "avg_return_5d": mean(returns) if returns else None,
+        "down_rate_5d": mean(value < 0 for value in returns) if returns else None,
+        "drawdown_3_rate": mean(value <= -3 for value in drawdowns) if drawdowns else None,
+    }
+
+
+def _state_metrics(states: list[str], target: str, closes: list[float]) -> dict:
+    valid = [
+        index
+        for index, state in enumerate(states)
+        if state == target and index + 5 < len(closes)
+    ]
+    next_returns = [
+        (closes[index + 1] / closes[index] - 1.0) * 100.0
+        for index in valid
+    ]
+    drawdowns = [
+        (min(closes[index + 1 : index + 6]) / closes[index] - 1.0) * 100.0
+        for index in valid
+    ]
+    return {
+        "count": len(valid),
+        "avg_return_1d": mean(next_returns) if next_returns else None,
+        "drawdown_3_rate": mean(value <= -3 for value in drawdowns) if drawdowns else None,
+    }
 
 
 def _print_report(report: dict) -> None:
@@ -139,6 +216,31 @@ def _print_report(report: dict) -> None:
         f"已确认 {report.get('n_confirmed', 0)} | 假突破否决 {report.get('n_invalidated', 0)} | "
         f"待确认 {report.get('n_pending', 0)} | "
         f"确认后评估行 {report['n_evaluable']} | 候选评估行 {report['n_candidate_evaluable']}"
+    )
+
+
+def _print_danger_report(report: dict) -> None:
+    episodes = report["episodes"]
+    danger = report["danger_days"]
+    normal = report["normal_days"]
+    print("\n--- v7 结构危险区（观察性风险富集，日级样本存在序列相关） ---")
+    print(
+        f"原始条件重入 {report['raw_entries']} 次 | "
+        f"独立阶段 {episodes['total']} 个（可评估 {episodes['evaluable']} 个）"
+    )
+    if episodes["evaluable"]:
+        print(
+            f"独立阶段未来5日: 平均 {episodes['avg_return_5d']:+.2f}% | "
+            f"下跌率 {episodes['down_rate_5d'] * 100:.1f}% | "
+            f"最大回撤<=-3% {episodes['drawdown_3_rate'] * 100:.1f}%"
+        )
+    print(
+        f"危险状态 {danger['count']} 日: 次日平均 {danger['avg_return_1d']:+.3f}% | "
+        f"未来5日最大回撤<=-3% {danger['drawdown_3_rate'] * 100:.1f}%"
+    )
+    print(
+        f"正常状态 {normal['count']} 日: 次日平均 {normal['avg_return_1d']:+.3f}% | "
+        f"未来5日最大回撤<=-3% {normal['drawdown_3_rate'] * 100:.1f}%"
     )
 
 
