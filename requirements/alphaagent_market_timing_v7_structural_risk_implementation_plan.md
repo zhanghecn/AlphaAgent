@@ -486,7 +486,7 @@ git commit -m "docs(market-timing): record structural risk evidence"
 **Files:**
 - No source changes expected
 
-- [ ] **Step 1: 运行后端目标测试与编译**
+- [x] **Step 1: 运行后端目标测试与编译**
 
 ```bash
 uv run pytest \
@@ -498,7 +498,7 @@ uv run python -m compileall alphaagent/server/services/quant/market_timing
 
 Expected: 全部 PASS，compileall 无错误。
 
-- [ ] **Step 2: 运行前端验证**
+- [x] **Step 2: 运行前端验证**
 
 ```bash
 pnpm --dir frontend test -- timingPresentation.spec.ts
@@ -507,7 +507,7 @@ pnpm --dir frontend run build
 
 Expected: PASS。
 
-- [ ] **Step 3: 检查变更边界**
+- [x] **Step 3: 检查变更边界**
 
 ```bash
 git diff --check HEAD~4..HEAD
@@ -517,7 +517,7 @@ git status --short
 Expected: 市场择时提交不包含工作区已有的涨停、数据同步或其他量化修改；其他
 用户变更可以继续留在工作区。
 
-- [ ] **Step 4: 重建服务并强制刷新面板**
+- [x] **Step 4: 重建服务并强制刷新面板**
 
 ```bash
 docker compose up --build -d alphaagent-api alphaagent-web
@@ -526,7 +526,7 @@ docker compose up --build -d alphaagent-api alphaagent-web
 通过已登录本地网关调用 `POST /api/market-timing/refresh`。若命令行没有登录
 cookie，使用浏览器登录态触发页面刷新，不绕过认证修改服务端安全配置。
 
-- [ ] **Step 5: 核对真实面板合同**
+- [x] **Step 5: 核对真实面板合同**
 
 检查 API/数据库 panel：
 
@@ -542,13 +542,13 @@ cookie，使用浏览器登录态触发页面刷新，不绕过认证修改服�
 
 同时核对候选/确认表现起点、`factor_date / quote_date` 和事件日期完全对齐。
 
-- [ ] **Step 6: 用 Playwright 验收桌面与移动端**
+- [x] **Step 6: 用 Playwright 验收桌面与移动端**
 
 打开 `http://localhost:8080/market`，检查 `1920x1080` 与 `390x844`：当前风险
 标签、最近交易日风险行、结构性 setup tooltip 正常；没有文字重叠、全页横向
 溢出、控制台错误或网络 5xx。
 
-- [ ] **Step 7: 报告提交和残余风险**
+- [x] **Step 7: 报告提交和残余风险**
 
 列出实现提交、设计提交 `39d828bf`、目标测试结果和真实日期回归。明确说明：
 完整广度只有 516 日、独立危险阶段仅 5 个，且 `2026-03-13` 参与需求定义，

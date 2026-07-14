@@ -124,6 +124,17 @@ pnpm --dir frontend run build
 - 后端市场择时目标测试 `41 passed`，其中 no-lookahead 23 项覆盖结构候选存在性、
   参与度缺失、危险迟滞、次日确认、冲突优先级、事件去重和未来污染；前端相关
   Vitest `42 passed`，生产构建通过。
+- 2026-07-14 本地端到端验证：重建 API/Web 镜像后，通过网关认证调用
+  `POST /api/market-timing/refresh` 强制刷新，再从真实 `GET /panel` 断言 98 个候选、
+  60 个确认、38 个否决、0 个待确认；`factor_date=2026-07-13`、
+  `quote_date=2026-07-14`，行情日与因子日拆分正常。
+- 同一真实 API 回归确认 `03-13` 结构性破位银并在 `03-16` 确认，危险状态
+  持续到 `03-26`、`03-27` 因当日修复退出；`03-20` 无反转金，`06-11` 反转金与
+  残余危险并存，`06-26` 中性，`07-07` 破位银保持。
+- Playwright 实页验收覆盖 `1920x1080` 和 `390x844`：全页无水平溢出，图表、
+  风险行和日期正常，控制台 0 错误/0 警告，面板请求均为 200。真实最新日为
+  `NORMAL`，所以顶部不显示危险标签；另用隔离的响应改写仅验证前端分支，确认
+  `DANGER` 标签、危险日期格和“结构性破位银手指”提示可正常渲染，未改服务端数据。
 - 设计和实施证据：`requirements/alphaagent_market_timing_v7_structural_risk_design.md`、
   `requirements/alphaagent_market_timing_v7_structural_risk_implementation_plan.md`。
 
