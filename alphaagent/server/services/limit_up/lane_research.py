@@ -301,7 +301,8 @@ def _shared_blockers(
     lane: str,
 ) -> list[str]:
     blockers: list[str] = []
-    if lane != "first_board":
+    live_repair_confirmed = candidate.get("live_market_repair_confirmed") is True
+    if lane != "first_board" and not live_repair_confirmed:
         phase = str(candidate.get("prior_market_phase") or "unknown")
         if phase in {"retreat", "ice", "decline"}:
             blockers.append("market_retreat")

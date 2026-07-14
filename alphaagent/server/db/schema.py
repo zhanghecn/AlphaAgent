@@ -608,6 +608,73 @@ Index(
 )
 
 
+limit_up_concept_strength_snapshots = Table(
+    "limit_up_concept_strength_snapshots",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("trade_date", Date, nullable=False),
+    Column("captured_at", DateTime(timezone=True), nullable=False),
+    Column("captured_minute", DateTime(timezone=True), nullable=False),
+    Column("membership_snapshot_date", Date, nullable=False),
+    Column("concept_id", String(64), nullable=False),
+    Column("concept_name", String(160), nullable=False),
+    Column("concept_state", String(32), nullable=False),
+    Column("strength_score", Float, nullable=False),
+    Column("strength_rank", Integer, nullable=False),
+    Column("strength_percentile", Float, nullable=False),
+    Column("coverage_ratio", Float, nullable=False),
+    Column("source", String(160), nullable=False),
+    Column("source_updated_at", DateTime(timezone=True), nullable=True),
+    Column("is_stale", Boolean, nullable=False, server_default="false"),
+    Column("metrics", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+    UniqueConstraint(
+        "trade_date",
+        "concept_id",
+        "captured_minute",
+        name="uq_limit_up_concept_strength_minute",
+    ),
+)
+Index(
+    "ix_limit_up_concept_strength_date_time",
+    limit_up_concept_strength_snapshots.c.trade_date,
+    limit_up_concept_strength_snapshots.c.captured_at,
+)
+
+
+limit_up_live_trace_snapshots = Table(
+    "limit_up_live_trace_snapshots",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("trade_date", Date, nullable=False),
+    Column("source_trade_date", Date, nullable=True),
+    Column("captured_at", DateTime(timezone=True), nullable=False),
+    Column("session_stage", String(32), nullable=False),
+    Column("strategy_version", String(40), nullable=False),
+    Column("mode", String(32), nullable=False, server_default="live_trace"),
+    Column("source", String(160), nullable=False),
+    Column("source_updated_at", DateTime(timezone=True), nullable=True),
+    Column("market_context", JSONB, nullable=False, server_default="{}"),
+    Column("radar_candidates", JSONB, nullable=False, server_default="[]"),
+    Column("ranked_candidates", JSONB, nullable=False, server_default="[]"),
+    Column("recommendations", JSONB, nullable=False, server_default="{}"),
+    Column("data_quality", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+Index(
+    "ix_limit_up_live_trace_date_time",
+    limit_up_live_trace_snapshots.c.trade_date,
+    limit_up_live_trace_snapshots.c.captured_at,
+)
+Index(
+    "ix_limit_up_live_trace_version_date_time",
+    limit_up_live_trace_snapshots.c.strategy_version,
+    limit_up_live_trace_snapshots.c.trade_date,
+    limit_up_live_trace_snapshots.c.captured_at,
+)
+
+
 limit_up_history_replays = Table(
     "limit_up_history_replays",
     metadata,

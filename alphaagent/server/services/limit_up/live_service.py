@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from datetime import date, datetime
-from typing import Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from alphaagent.data_sources.akshare_adapter import AkShareAdapter
@@ -14,8 +16,17 @@ from alphaagent.server.services.limit_up.domain import (
     main_board_limit_price,
     normalize_limit_time,
 )
+from alphaagent.server.services.limit_up.concept_live_service import (
+    get_latest_live_concept_snapshot,
+)
+from alphaagent.server.services.limit_up.concept_resonance import (
+    aggregate_concept_strength,
+    attach_candidate_concepts,
+    rank_concepts,
+)
 from alphaagent.server.services.limit_up.live_policy import (
     MAX_CONSECUTIVE_SNAPSHOT_GAP_MINUTES,
+    build_live_market_gate,
     build_live_recommendations,
     rank_live_candidates,
     rank_live_opportunities,
@@ -26,6 +37,7 @@ from alphaagent.server.services.limit_up.first_board_dual_lane import (
     attach_rotation_shadow,
 )
 from alphaagent.server.services.limit_up.lane_research import (
+    classify_board_lane,
     evaluate_lane_candidate,
     select_daily_lane_portfolio,
 )
@@ -35,24 +47,32 @@ from alphaagent.server.services.limit_up.live_repository import (
     load_live_context,
     save_snapshot,
 )
+from alphaagent.server.services.limit_up.live_trace_repository import (
+    save_live_trace_error,
+    save_live_trace_snapshot,
+)
 from alphaagent.server.services.limit_up.sector_warmup import (
     attach_dynamic_group_leader_ranks,
     live_warmup_observation,
 )
+from alphaagent.server.services.limit_up import scheduled_execution
 from alphaagent.server.services.limit_up.versions import (
     LIVE_STRATEGY_VERSION as STRATEGY_VERSION,
 )
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 NEAR_LIMIT_MIN_CHANGE_PCT = 7.0
+TRACE_RADAR_MIN_CHANGE_PCT = 5.0
 LIVE_SCAN_INTERVAL_SECONDS = 15
 LIVE_SNAPSHOT_MAX_AGE_SECONDS = 90
 HISTORY_EVIDENCE_UNAVAILABLE_REASON = "历史证据不可用，已禁止执行"
 EXECUTABLE_ACTIONS = frozenset({"buy_now", "next_auction"})
-PORTFOLIO_EXECUTION_LANES = frozenset({"first_board", "two_to_three", "high_board"})
+PORTFOLIO_EXECUTION_LANES = frozenset({"first_board"})
+LIVE_WATCHLIST_LIMIT = 6
 ACTIVE_SESSION_STAGES = frozenset(
     {"auction_watch", "auction", "morning", "afternoon", "tail", "close_auction"}
 )
+logger = logging.getLogger(__name__)
 
 
 class LiveSnapshotUnavailable(RuntimeError):
@@ -66,29 +86,57 @@ def build_live_snapshot(
     stock_context: Mapping[str, object],
     previous_snapshot: Mapping[str, object] | None = None,
     lane_validations: Mapping[str, Mapping[str, object]] | None = None,
+    *,
+    concept_snapshot: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Build a no-lookahead recommendation snapshot from visible market data."""
 
     local_at = _local_datetime(captured_at)
-    market_date = _resolved_market_date(quote_payload, pool_payload, local_at, stock_context)
-    source_rows = _merge_source_rows(
+    radar_quote_payload = _quote_payload_with_full_radar(
         quote_payload,
+        concept_snapshot,
+    )
+    market_date = _resolved_market_date(
+        radar_quote_payload,
+        pool_payload,
+        local_at,
+        stock_context,
+    )
+    source_rows = _merge_source_rows(
+        radar_quote_payload,
         pool_payload,
         include_previous=session_stage(local_at) in {"auction_watch", "auction"},
+        min_change_pct=TRACE_RADAR_MIN_CHANGE_PCT,
     )
-    candidates = _enrich_candidates(source_rows, pool_payload, stock_context)
+    candidates = _enrich_candidates(
+        source_rows,
+        pool_payload,
+        stock_context,
+        require_sector=False,
+    )
+    attach_candidate_concepts(candidates, concept_snapshot or {})
     market_context = _market_context(candidates, stock_context, previous_snapshot)
+    market_gate = build_live_market_gate(
+        market_context,
+        local_at,
+        previous_snapshot,
+    )
     stale_market_date = market_date != local_at.date() or session_stage(local_at) == "closed"
     snapshot_mode = "stale_snapshot" if stale_market_date else "live_snapshot"
-    sector_front = rank_live_candidates(
+    evaluated = rank_live_candidates(
         candidates,
-        limit=max(len(candidates), 5),
+        limit=len(candidates),
     )
-    _attach_lane_decisions(sector_front, market_context, local_at)
-    _attach_warmup_shadow(sector_front)
-    _attach_stability(sector_front, previous_snapshot, local_at)
-    sector_front[:] = attach_rotation_shadow(
-        sector_front,
+    _attach_lane_decisions(
+        evaluated,
+        market_context,
+        local_at,
+        market_gate=market_gate,
+    )
+    _attach_warmup_shadow(evaluated)
+    _attach_stability(evaluated, previous_snapshot, local_at)
+    evaluated[:] = attach_rotation_shadow(
+        evaluated,
         {
             "trade_date": market_date.isoformat(),
             "captured_at": local_at.isoformat(),
@@ -97,12 +145,13 @@ def build_live_snapshot(
             "data_quality": {"is_stale": stale_market_date},
         },
     )
-    ranked = rank_live_opportunities(sector_front)
+    ranked = rank_live_opportunities(evaluated, limit=len(evaluated))
     recommendations = build_live_recommendations(
         ranked,
         market_context,
         local_at,
         previous_snapshot=previous_snapshot,
+        market_gate=market_gate,
     )
     if lane_validations is not None:
         recommendations = apply_lane_validation_veto(
@@ -110,17 +159,30 @@ def build_live_snapshot(
             lane_validations,
         )
     source_errors = list(stock_context.get("source_errors") or [])
-    source_updated_at = _latest_source_time(quote_payload, pool_payload)
+    concept_quality = (
+        concept_snapshot.get("data_quality")
+        if isinstance(concept_snapshot, Mapping)
+        else None
+    )
+    concept_quality = concept_quality if isinstance(concept_quality, Mapping) else {}
+    if not concept_snapshot:
+        source_errors.append("concept_snapshot:unavailable")
+    source_updated_at = _latest_source_time(
+        radar_quote_payload,
+        pool_payload,
+        concept_snapshot or {},
+    )
     return {
         "trade_date": market_date.isoformat(),
         "captured_at": local_at.isoformat(),
         "session_stage": session_stage(local_at),
         "strategy_version": STRATEGY_VERSION,
         "mode": snapshot_mode,
-        "source": _source_name(quote_payload, pool_payload),
+        "source": _source_name(radar_quote_payload, pool_payload),
         "source_updated_at": source_updated_at,
         "market_context": market_context,
-        "candidates": sector_front,
+        "trace_radar_candidates": [dict(candidate) for candidate in ranked],
+        "candidates": ranked,
         "recommendations": recommendations,
         "data_quality": {
             "status": "stale" if stale_market_date else ("degraded" if source_errors else "ready"),
@@ -129,8 +191,20 @@ def build_live_snapshot(
             "has_tick": False,
             "has_l2": False,
             "candidate_universe_count": len(candidates),
-            "radar_candidate_count": len(sector_front),
+            "trace_radar_candidate_count": len(ranked),
+            "radar_candidate_count": len(ranked),
             "ranked_candidate_count": len(ranked),
+            "concept_status": concept_quality.get("status") or "unavailable",
+            "concept_snapshot_age_seconds": concept_quality.get("age_seconds"),
+            "concept_quote_coverage_ratio": concept_quality.get(
+                "quote_coverage_ratio"
+            ),
+            "concept_trigger_allowed": concept_quality.get("trigger_allowed") is True,
+            "concept_membership_snapshot_date": (
+                concept_snapshot.get("membership_snapshot_date")
+                if isinstance(concept_snapshot, Mapping)
+                else None
+            ),
             "snapshot_age_seconds": 0,
             "source_age_seconds": _source_age_seconds(source_updated_at, local_at),
             "background_refresh_seconds": LIVE_SCAN_INTERVAL_SECONDS,
@@ -167,12 +241,20 @@ def refresh_live_snapshot(
             )
         else:
             quotes, pools, source_errors = _fetch_live_payloads(live_adapter, local_at)
-        symbols = _candidate_symbols(
+        concept_snapshot = get_latest_live_concept_snapshot(local_at)
+        concept_snapshot = _concept_snapshot_with_incremental_quotes(
+            concept_snapshot,
             quotes,
+            pools,
+            local_at,
+        )
+        radar_quotes = _quote_payload_with_full_radar(quotes, concept_snapshot)
+        symbols = _candidate_symbols(
+            radar_quotes,
             pools,
             include_previous=stage in {"auction_watch", "auction"},
         )
-        market_date = _resolved_market_date(quotes, pools, local_at, {})
+        market_date = _resolved_market_date(radar_quotes, pools, local_at, {})
         context = load_live_context(symbols, market_date) if symbols else {"by_symbol": {}}
         context = {**context, "source_errors": source_errors}
         lane_validations = _load_lane_validations()
@@ -183,22 +265,45 @@ def refresh_live_snapshot(
             local_at,
             context,
             previous_snapshot=previous,
+            concept_snapshot=concept_snapshot,
         )
         snapshot = _apply_live_risk_gates(snapshot, lane_validations)
+        if persist:
+            _set_live_trace_cache_status(
+                snapshot,
+                _save_live_trace_safely(snapshot),
+            )
         if persist and _is_persistable_snapshot(snapshot, local_at):
             return save_snapshot(snapshot)
         return snapshot
     except Exception as exc:
+        trace_error = _save_live_trace_error_safely(local_at, exc) if persist else None
         fallback = load_latest_snapshot(strategy_version=STRATEGY_VERSION)
         if fallback is None:
             raise LiveSnapshotUnavailable(str(exc)) from exc
-        return _stale_snapshot(fallback, exc)
+        stale = _stale_snapshot(fallback, exc)
+        if persist:
+            _set_live_trace_cache_status(stale, trace_error)
+        return stale
 
 
 def get_latest_live_snapshot(now: datetime | None = None) -> dict[str, object]:
     """Return only persisted background snapshots; GET never calls quote providers."""
 
     local_now = _local_datetime(now or datetime.now(SHANGHAI))
+    if session_stage(local_now) == "lunch":
+        morning = load_latest_snapshot(
+            local_now.date(),
+            strategy_version=STRATEGY_VERSION,
+        )
+        if morning is not None and morning.get("mode") == "live_snapshot":
+            paused = downgrade_snapshot_to_stale(
+                morning,
+                local_now.date(),
+                reason="午间休市，展示上午最后快照；13:00后恢复实时扫描",
+                resolved_session_stage="lunch",
+            )
+            return _with_snapshot_age(paused, local_now)
     if not _is_active_session(local_now):
         return _with_snapshot_age(_latest_snapshot_for_session(local_now), local_now)
 
@@ -215,7 +320,12 @@ def _latest_snapshot_for_session(local_at: datetime) -> dict[str, object]:
 
     plan = get_latest_next_session_plan()
     if plan is not None:
-        return plan
+        recommendations = plan.get("recommendations")
+        recommendations = dict(recommendations) if isinstance(recommendations, Mapping) else {}
+        recommendations["execution_schedule"] = (
+            scheduled_execution.next_session_execution_clock()
+        )
+        return {**dict(plan), "recommendations": recommendations}
     latest_trade_date = load_latest_daily_trade_date(local_at.date())
     snapshot = load_latest_snapshot(strategy_version=STRATEGY_VERSION)
     if snapshot is None:
@@ -371,11 +481,121 @@ def _planned_quote_requests(symbols: Sequence[str]) -> list[dict[str, str]]:
     return requests
 
 
+def _quote_payload_with_full_radar(
+    quote_payload: Mapping[str, object],
+    concept_snapshot: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Overlay the latest strong-stock page on the authoritative 30s radar."""
+
+    rows: dict[str, dict[str, object]] = {}
+    if isinstance(concept_snapshot, Mapping):
+        for row in concept_snapshot.get("radar_quotes") or []:
+            if isinstance(row, Mapping) and row.get("vt_symbol"):
+                rows[str(row["vt_symbol"])] = dict(row)
+    for row in _items(quote_payload):
+        if row.get("vt_symbol"):
+            rows[str(row["vt_symbol"])] = {
+                **rows.get(str(row["vt_symbol"]), {}),
+                **row,
+            }
+    return {
+        **dict(quote_payload),
+        "trade_date": (
+            concept_snapshot.get("trade_date")
+            if isinstance(concept_snapshot, Mapping)
+            else None
+        )
+        or quote_payload.get("trade_date"),
+        "items": list(rows.values()),
+        "source": _source_name(quote_payload, concept_snapshot or {}),
+        "updated_at": _latest_source_time(quote_payload, concept_snapshot or {}),
+    }
+
+
+def _concept_snapshot_with_incremental_quotes(
+    concept_snapshot: Mapping[str, object] | None,
+    quote_payload: Mapping[str, object],
+    pool_payload: Mapping[str, object],
+    captured_at: datetime,
+) -> dict[str, object] | None:
+    """Re-aggregate cached full coverage with the latest 15-second strong rows."""
+
+    if not isinstance(concept_snapshot, Mapping):
+        return None
+    membership = concept_snapshot.get("membership")
+    if not isinstance(membership, Mapping):
+        return dict(concept_snapshot)
+    quote_by_symbol = {
+        str(row.get("vt_symbol") or ""): dict(row)
+        for row in concept_snapshot.get("quotes") or []
+        if isinstance(row, Mapping) and row.get("vt_symbol")
+    }
+    for row in _items(quote_payload):
+        symbol = str(row.get("vt_symbol") or "")
+        if symbol:
+            quote_by_symbol[symbol] = {**quote_by_symbol.get(symbol, {}), **row}
+    incremental_rows = _merge_source_rows(
+        quote_payload,
+        pool_payload,
+        min_change_pct=TRACE_RADAR_MIN_CHANGE_PCT,
+    )
+    for symbol, row in incremental_rows.items():
+        quote_by_symbol[symbol] = {**quote_by_symbol.get(symbol, {}), **row}
+
+    base_concepts = {
+        str(row.get("concept_id") or ""): row
+        for row in concept_snapshot.get("concepts") or []
+        if isinstance(row, Mapping) and row.get("concept_id")
+    }
+    recomputed = aggregate_concept_strength(
+        list(quote_by_symbol.values()),
+        membership,
+        captured_at=captured_at,
+        history_by_concept={
+            concept_id: [row]
+            for concept_id, row in base_concepts.items()
+        },
+    )
+    acceleration_fields = tuple(
+        f"{metric}_acceleration_{minutes}m"
+        for metric in ("change", "diffusion", "turnover")
+        for minutes in (1, 3, 5)
+    )
+    for row in recomputed:
+        previous = base_concepts.get(str(row.get("concept_id") or ""), {})
+        for field in acceleration_fields:
+            if row.get(field) is None and previous.get(field) is not None:
+                row[field] = previous[field]
+    concepts = rank_concepts(recomputed)
+    radar_quotes = [
+        dict(row)
+        for row in quote_by_symbol.values()
+        if is_eligible_main_board(
+            str(row.get("vt_symbol") or ""),
+            str(row.get("name") or ""),
+        )
+        and (_number(row.get("change_pct")) or -100.0) >= TRACE_RADAR_MIN_CHANGE_PCT
+    ]
+    return {
+        **deepcopy(dict(concept_snapshot)),
+        "evaluated_at": captured_at.isoformat(),
+        "quotes": list(quote_by_symbol.values()),
+        "radar_quotes": radar_quotes,
+        "concepts": concepts,
+        "concepts_by_id": {
+            str(row["concept_id"]): row
+            for row in concepts
+        },
+        "concept_count": len(concepts),
+    }
+
+
 def _merge_source_rows(
     quote_payload: Mapping[str, object],
     pool_payload: Mapping[str, object],
     *,
     include_previous: bool = False,
+    min_change_pct: float = NEAR_LIMIT_MIN_CHANGE_PCT,
 ) -> dict[str, dict[str, object]]:
     rows: dict[str, dict[str, object]] = {}
     previous_symbols = (
@@ -388,7 +608,7 @@ def _merge_source_rows(
         if (
             change_pct is None
             or (
-                change_pct < NEAR_LIMIT_MIN_CHANGE_PCT
+                change_pct < min_change_pct
                 and symbol not in previous_symbols
             )
             or not is_eligible_main_board(symbol, name)
@@ -424,6 +644,8 @@ def _enrich_candidates(
     rows: Mapping[str, Mapping[str, object]],
     pool_payload: Mapping[str, object],
     stock_context: Mapping[str, object],
+    *,
+    require_sector: bool = True,
 ) -> list[dict[str, object]]:
     by_symbol = stock_context.get("by_symbol")
     by_symbol = by_symbol if isinstance(by_symbol, Mapping) else {}
@@ -433,7 +655,7 @@ def _enrich_candidates(
         context = by_symbol.get(symbol)
         context = context if isinstance(context, Mapping) else {}
         candidate = _enrich_candidate(raw, context, symbol in previous_symbols)
-        if candidate.get("sector_id"):
+        if candidate.get("sector_id") or not require_sector:
             candidates.append(candidate)
 
     touched_by_sector = Counter(
@@ -614,6 +836,8 @@ def _attach_lane_decisions(
     candidates: list[dict[str, object]],
     market_context: Mapping[str, object],
     captured_at: datetime,
+    *,
+    market_gate: Mapping[str, object] | None = None,
 ) -> None:
     sentiment = market_context.get("sentiment")
     sentiment = sentiment if isinstance(sentiment, Mapping) else {}
@@ -641,6 +865,7 @@ def _attach_lane_decisions(
             candidate,
             sentiment,
             captured_at,
+            market_gate=market_gate,
         )
         research_candidates.append(research_candidate)
         evaluated = evaluate_lane_candidate(research_candidate)
@@ -684,19 +909,36 @@ def _live_research_candidate(
     candidate: Mapping[str, object],
     sentiment: Mapping[str, object],
     captured_at: datetime,
+    *,
+    market_gate: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     board_level = _integer(candidate.get("board_level"), 1)
+    evaluation_time = captured_at.time().replace(microsecond=0).isoformat()
+    state = str(candidate.get("state") or "")
+    actual_first_touch = (
+        normalize_limit_time(candidate.get("first_limit_time"))
+        if state in {"sealed", "resealed", "failed"}
+        else None
+    )
     return {
         **candidate,
         "target_board": board_level,
-        "signal_time": captured_at.time().replace(microsecond=0).isoformat(),
+        "evaluation_time": evaluation_time,
+        "signal_time": actual_first_touch or evaluation_time,
         "signal_kind": (
             "auction" if session_stage(captured_at) == "auction" else "intraday"
         ),
-        "prior_industry_heat_score": candidate.get("sector_heat"),
-        "prior_industry_leader_rank": candidate.get("sector_dragon_rank"),
+        "prior_industry_heat_score": candidate.get("concept_strength_score")
+        if candidate.get("concept_strength_score") is not None
+        else candidate.get("sector_heat"),
+        "prior_industry_leader_rank": candidate.get("concept_leader_rank")
+        if candidate.get("concept_leader_rank") is not None
+        else candidate.get("sector_dragon_rank"),
         "prior_market_phase": sentiment.get("phase"),
         "prior_market_failed_rate": sentiment.get("failed_limit_up_rate"),
+        "live_market_repair_confirmed": bool(
+            market_gate and market_gate.get("repair_confirmed")
+        ),
         "has_l2": False,
     }
 
@@ -744,7 +986,16 @@ def _apply_live_risk_gates(
     recommendations = result.get("recommendations")
     recommendations = recommendations if isinstance(recommendations, Mapping) else {}
     validated = apply_lane_validation_veto(recommendations, lane_validations)
-    validated["portfolio"] = _build_live_portfolio(validated)
+    captured_at = _parsed_datetime(result.get("captured_at")) or datetime.now(SHANGHAI)
+    quality = result.get("data_quality")
+    quality = quality if isinstance(quality, Mapping) else {}
+    snapshot_age = _integer(quality.get("snapshot_age_seconds"), 0)
+    validated["execution_schedule"] = scheduled_execution.execution_clock(captured_at)
+    validated["portfolio"] = _build_live_portfolio(
+        validated,
+        captured_at=captured_at,
+        snapshot_age_seconds=snapshot_age,
+    )
     validated["watchlist"] = _build_live_watchlist(validated)
     return {**result, "recommendations": validated}
 
@@ -791,11 +1042,14 @@ def _apply_signal_validation(
 
 def _build_live_portfolio(
     recommendations: Mapping[str, object],
+    *,
+    captured_at: datetime | None = None,
+    snapshot_age_seconds: int = 0,
 ) -> list[dict[str, object]]:
     lanes = recommendations.get("lanes")
     lanes = lanes if isinstance(lanes, Mapping) else {}
     selected: dict[str, dict[str, object]] = {}
-    for channel in ("now", "tail", "next_auction"):
+    for channel in ("now",):
         signals = lanes.get(channel)
         signals = signals if isinstance(signals, list) else []
         for raw_signal in signals:
@@ -810,11 +1064,8 @@ def _build_live_portfolio(
                 not symbol
                 or signal.get("portfolio_selected") is not True
                 or str(signal.get("board_lane") or "") not in PORTFOLIO_EXECUTION_LANES
-                or research_action not in EXECUTABLE_ACTIONS
-                or (
-                    signal.get("missed_preseal_entry") is True
-                    and research_action != "buy_now"
-                )
+                or research_action not in {"buy_now", "observe"}
+                or signal.get("missed_preseal_entry") is True
             ):
                 continue
             current = selected.get(symbol)
@@ -824,7 +1075,72 @@ def _build_live_portfolio(
                 < _live_portfolio_sort_key(current)
             ):
                 selected[symbol] = signal
-    return sorted(selected.values(), key=_live_portfolio_sort_key)[:4]
+    local_at = captured_at or datetime.now(SHANGHAI)
+    schedule = scheduled_execution.execution_clock(local_at)
+    return [
+        _scheduled_live_signal(signal, schedule, snapshot_age_seconds)
+        for signal in sorted(selected.values(), key=_live_portfolio_sort_key)[
+            : scheduled_execution.MAX_POSITIONS
+        ]
+    ]
+
+
+def _scheduled_live_signal(
+    signal: Mapping[str, object],
+    schedule: Mapping[str, object],
+    snapshot_age_seconds: int,
+) -> dict[str, object]:
+    result = {
+        **dict(signal),
+        "execution_permission": "research_only",
+        "scheduled_execution_version": scheduled_execution.SCHEDULED_EXECUTION_VERSION,
+        "buy_instruction": "仅在10:00-11:30或13:00-14:30满足全部条件时买入",
+        "sell_instruction": "D+1 14:30 统一卖出",
+        "target_position_pct": scheduled_execution.TARGET_POSITION_PCT,
+    }
+    if snapshot_age_seconds > scheduled_execution.MAX_SNAPSHOT_AGE_SECONDS:
+        reason = (
+            f"实时快照已超过{scheduled_execution.MAX_SNAPSHOT_AGE_SECONDS}秒，"
+            "本次买点失效"
+        )
+        return {
+            **result,
+            "action": "observe",
+            "execution_state": "cancelled",
+            "signal_state": "invalidated",
+            "reason": reason,
+            "pending_reasons": [reason],
+        }
+    research_action = str(
+        signal.get("research_action") or signal.get("action") or "pass"
+    )
+    if research_action != "buy_now":
+        return {
+            **result,
+            "action": "observe",
+            "execution_state": "watch",
+            "signal_state": str(signal.get("signal_state") or "observing"),
+            "reason": str(signal.get("reason") or "等待市场和盘口条件通过"),
+            "pending_reasons": list(signal.get("pending_reasons") or []),
+        }
+    if schedule.get("entry_allowed") is not True:
+        reason = str(schedule.get("message") or "当前不在固定买入窗口")
+        return {
+            **result,
+            "action": "observe",
+            "execution_state": "watch",
+            "signal_state": "observing",
+            "reason": reason,
+            "pending_reasons": [reason],
+        }
+    return {
+        **result,
+        "action": "buy_now",
+        "execution_state": "actionable",
+        "signal_state": "trigger_ready",
+        "reason": str(signal.get("reason") or "连续盘中评估条件全部通过"),
+        "pending_reasons": [],
+    }
 
 
 def _live_portfolio_sort_key(signal: Mapping[str, object]) -> tuple[object, ...]:
@@ -870,7 +1186,6 @@ def _build_live_watchlist(
                 not symbol
                 or symbol in observations
                 or str(signal.get("board_lane") or "") not in PORTFOLIO_EXECUTION_LANES
-                or (_number(strategy.get("total_return_pct")) or 0.0) <= 0
                 or signal.get("missed_preseal_entry") is True
             ):
                 continue
@@ -886,6 +1201,7 @@ def _build_live_watchlist(
             original_reason = "；".join(dict.fromkeys(reason_parts))
             lane_blocked = str(signal.get("lane_decision") or "") == "blocked"
             near_limit = str(signal.get("state") or "") == "near_limit"
+            current_signal_state = str(signal.get("signal_state") or "observing")
             observations[symbol] = {
                 **signal,
                 "action": "observe",
@@ -894,6 +1210,8 @@ def _build_live_watchlist(
                 "signal_state": (
                     "rejected"
                     if lane_blocked
+                    else "concept_warming"
+                    if current_signal_state == "concept_warming"
                     else "approaching_trigger"
                     if near_limit
                     else "observing"
@@ -902,6 +1220,8 @@ def _build_live_watchlist(
                 "buy_instruction": (
                     "板位硬门未通过，今日不买"
                     if lane_blocked
+                    else "板块已预热，等待进入距涨停1%触发区"
+                    if current_signal_state == "concept_warming"
                     else "距涨停不超过1%且市场、板块、资金和盘口条件保持通过时触发"
                 ),
                 "reason": (
@@ -910,7 +1230,9 @@ def _build_live_watchlist(
                     else f"等待触发：{original_reason}"
                 ),
             }
-    return sorted(observations.values(), key=_live_watchlist_sort_key)[:4]
+    return sorted(observations.values(), key=_live_watchlist_sort_key)[
+        :LIVE_WATCHLIST_LIMIT
+    ]
 
 
 def _live_watchlist_sort_key(signal: Mapping[str, object]) -> tuple[object, ...]:
@@ -926,8 +1248,17 @@ def _live_watchlist_sort_key(signal: Mapping[str, object]) -> tuple[object, ...]
         "sealed": 3,
     }.get(state, 4)
     distance = _number(signal.get("distance_to_limit_pct"))
+    signal_priority = {
+        "approaching_trigger": 0,
+        "concept_warming": 1,
+        "observing": 2,
+        "rejected": 3,
+    }.get(str(signal.get("signal_state") or ""), 4)
     return (
+        signal_priority,
         state_priority,
+        _integer(signal.get("concept_strength_rank"), 1_000_000),
+        _integer(signal.get("concept_leader_rank"), 1_000_000),
         distance if state == "near_limit" and distance is not None else 99.0,
         -(_number(history.get("tbox_score")) or 0.0),
         -(_number(strategy.get("total_return_pct")) or 0.0),
@@ -1136,8 +1467,74 @@ def _candidate_symbols(
             quotes,
             pools,
             include_previous=include_previous,
+            min_change_pct=TRACE_RADAR_MIN_CHANGE_PCT,
         )
     )
+
+
+def _trace_candidates_with_ranked_details(
+    trace_candidates: Sequence[Mapping[str, object]],
+    ranked_candidates: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    ranked_by_symbol = {
+        str(candidate.get("vt_symbol") or ""): candidate
+        for candidate in ranked_candidates
+        if candidate.get("vt_symbol")
+    }
+    result: list[dict[str, object]] = []
+    for candidate in trace_candidates:
+        merged = {
+            **candidate,
+            **dict(ranked_by_symbol.get(str(candidate.get("vt_symbol") or ""), {})),
+        }
+        if not merged.get("board_lane"):
+            merged["board_lane"] = classify_board_lane(
+                {
+                    **merged,
+                    "target_board": _integer(merged.get("board_level"), 1),
+                }
+            )
+        result.append(merged)
+    return result
+
+
+def _save_live_trace_safely(snapshot: Mapping[str, object]) -> str | None:
+    try:
+        save_live_trace_snapshot(snapshot)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("limit-up live trace write failed: %s", exc)
+        return str(exc)[:500]
+
+
+def _save_live_trace_error_safely(
+    captured_at: datetime,
+    error: Exception,
+) -> str | None:
+    try:
+        save_live_trace_error(
+            captured_at,
+            error,
+            strategy_version=STRATEGY_VERSION,
+        )
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("limit-up live trace error write failed: %s", exc)
+        return str(exc)[:500]
+
+
+def _set_live_trace_cache_status(
+    snapshot: dict[str, object],
+    error: str | None,
+) -> None:
+    quality = snapshot.get("data_quality")
+    quality = dict(quality) if isinstance(quality, Mapping) else {}
+    quality["trace_cache_status"] = "error" if error else "ready"
+    if error:
+        quality["trace_cache_error"] = error
+    else:
+        quality.pop("trace_cache_error", None)
+    snapshot["data_quality"] = quality
 
 
 def _pool_symbols(payload: Mapping[str, object], pool_key: str) -> set[str]:
@@ -1302,8 +1699,11 @@ def downgrade_snapshot_to_stale(
     recommendations = dict(recommendations) if isinstance(recommendations, Mapping) else {}
     lanes = recommendations.get("lanes")
     lanes = lanes if isinstance(lanes, Mapping) else {}
-    stale_lanes = {
-        str(lane): [
+
+    def cancelled_signals(signals: object) -> list[dict[str, object]]:
+        if not isinstance(signals, list):
+            return []
+        return [
             {
                 **dict(signal),
                 "action": "pass",
@@ -1314,24 +1714,36 @@ def downgrade_snapshot_to_stale(
             for signal in signals
             if isinstance(signal, Mapping)
         ]
+
+    stale_lanes = {
+        str(lane): cancelled_signals(signals)
         for lane, signals in lanes.items()
         if isinstance(signals, list)
     }
+    stale_recommendations = {
+        **recommendations,
+        "session_stage": resolved_session_stage,
+        "market_gate": {
+            **dict(recommendations.get("market_gate") or {}),
+            "passed": False,
+            "repair_confirmed": False,
+            "repair_state": "repair_revoked",
+            "repair_revoked_reason": reason,
+            "reasons": [reason],
+        },
+        "lanes": stale_lanes,
+    }
+    for collection in ("portfolio", "watchlist"):
+        if isinstance(recommendations.get(collection), list):
+            stale_recommendations[collection] = cancelled_signals(
+                recommendations[collection]
+            )
     return {
         **dict(snapshot),
         "trade_date": resolved_trade_date.isoformat(),
         "session_stage": resolved_session_stage,
         "mode": "stale_snapshot",
-        "recommendations": {
-            **recommendations,
-            "session_stage": resolved_session_stage,
-            "market_gate": {
-                **dict(recommendations.get("market_gate") or {}),
-                "passed": False,
-                "reasons": [reason],
-            },
-            "lanes": stale_lanes,
-        },
+        "recommendations": stale_recommendations,
         "data_quality": {
             **quality,
             "status": "stale",

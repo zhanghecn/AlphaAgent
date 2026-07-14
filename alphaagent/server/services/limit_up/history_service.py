@@ -19,6 +19,7 @@ from alphaagent.server.services.limit_up import (
     lane_repository,
     live_evidence,
     live_repository,
+    scheduled_execution,
     sector_warmup_research,
     walk_forward_model,
 )
@@ -536,6 +537,8 @@ def get_history_ledger(
             "lane": lane,
             "trades": [],
         }
+    if lane is None:
+        return _scheduled_history_ledger(trade_date, payload)
     selected = _selected_lane_candidates(payload, lane)
     validations = {
         lane_name: _safe_lane_validation_status(lane_name, exit_mode)
@@ -586,6 +589,56 @@ def get_history_ledger(
         "market_context": payload.get("market_context") or {},
         "data_quality": payload.get("data_quality") or {},
         "coverage": payload.get("coverage") or {},
+    }
+
+
+def _scheduled_history_ledger(
+    trade_date: date,
+    payload: Mapping[str, object],
+) -> dict[str, object]:
+    report = get_scheduled_history_backtest(None, None, trade_limit=None)
+    date_text = trade_date.isoformat()
+    trades = [
+        dict(trade)
+        for trade in report.get("trades") or []
+        if isinstance(trade, Mapping)
+        and str(trade.get("buy_date") or trade.get("entry_date") or "")[:10]
+        == date_text
+    ]
+    buy_orders = [
+        order
+        for order in report.get("orders") or []
+        if isinstance(order, Mapping)
+        and order.get("side") == "BUY"
+        and str(order.get("trade_date") or "")[:10] == date_text
+    ]
+    return {
+        "status": "ready",
+        "trade_date": date_text,
+        "strategy_version": scheduled_execution.SCHEDULED_EXECUTION_VERSION,
+        "validation_phase": (
+            "earlier_history"
+            if trade_date < scheduled_execution.RESEARCH_SAMPLE_START
+            else "design_sample"
+            if trade_date < scheduled_execution.VALIDATION_START
+            else "time_validation"
+            if trade_date <= scheduled_execution.RULE_FREEZE_DATE
+            else "post_freeze_forward"
+        ),
+        "lane": None,
+        "exit_mode": "next_1430",
+        "action": "normal" if trades else "empty",
+        "candidate_count": len(buy_orders),
+        "selected_count": len(trades),
+        "observation_count": 0,
+        "trades": trades,
+        "observations": [],
+        "validation": report.get("validation"),
+        "lane_validations": {},
+        "market_context": payload.get("market_context") or {},
+        "data_quality": payload.get("data_quality") or {},
+        "coverage": report.get("coverage") or {},
+        "execution_schedule": report.get("execution_schedule") or {},
     }
 
 
@@ -645,6 +698,12 @@ def get_lane_history_backtest(
         raise ValueError(f"unsupported board lane: {lane}")
     if exit_mode not in cash_backtest.SUPPORTED_EXIT_MODES:
         raise ValueError(f"unsupported exit mode: {exit_mode}")
+    if lane == "portfolio":
+        return get_scheduled_history_backtest(
+            start,
+            end,
+            trade_limit=trade_limit,
+        )
     if exit_mode == "dynamic" and account_config is None:
         cache_key = (
             f"{history_engine.HISTORY_STRATEGY_VERSION}:dynamic:{start}:{end}:"
@@ -774,6 +833,602 @@ def get_lane_history_backtest(
             "锁定留出结果不参与规则修改，未同时通过三段验证时保持研究状态。",
         ],
     }
+
+
+def get_scheduled_history_backtest(
+    start: date | None,
+    end: date | None,
+    *,
+    trade_limit: int | None = 500,
+) -> dict[str, object]:
+    """Return the frozen two-position first-board product account."""
+
+    cache_key = (
+        f"{history_engine.HISTORY_STRATEGY_VERSION}:"
+        f"{scheduled_execution.SCHEDULED_EXECUTION_VERSION}:"
+        f"{start}:{end}:{cash_backtest.ACCOUNT_EXECUTION_VERSION}"
+    )
+    report = _BACKTEST_REPORT_CACHE.get_or_set(
+        cache_key,
+        21_600,
+        lambda: _build_scheduled_history_backtest(start, end),
+    )
+    return _limit_scheduled_report(report, trade_limit)
+
+
+def _limit_scheduled_report(
+    report: Mapping[str, object],
+    trade_limit: int | None,
+) -> dict[str, object]:
+    if trade_limit is None:
+        return dict(report)
+    if trade_limit <= 0:
+        raise ValueError("trade_limit must be positive")
+    return {
+        **report,
+        "orders": list(report.get("orders") or [])[-trade_limit:],
+        "trades": list(report.get("trades") or [])[-trade_limit:],
+        "skipped_orders": list(report.get("skipped_orders") or [])[-trade_limit:],
+    }
+
+
+def _frozen_position_sizing_audit(
+    *,
+    rows: Sequence[Mapping[str, object]] | None = None,
+    orders: Sequence[Mapping[str, object]] | None = None,
+    bars: Sequence[Mapping[str, object]] | None = None,
+    trade_dates: Sequence[date] | None = None,
+) -> dict[str, object]:
+    cache_key = (
+        f"{history_engine.HISTORY_STRATEGY_VERSION}:"
+        f"{scheduled_execution.SCHEDULED_EXECUTION_VERSION}:"
+        f"{cash_backtest.ACCOUNT_EXECUTION_VERSION}:frozen-position-sizing"
+    )
+
+    def load() -> dict[str, object]:
+        if rows is not None:
+            full_rows = list(rows)
+        else:
+            full_rows = history_repository.load_history_range(
+                history_engine.HISTORY_STRATEGY_VERSION,
+                None,
+                None,
+                False,
+            )
+        full_orders = (
+            list(orders)
+            if orders is not None
+            else scheduled_execution.extract_scheduled_orders(full_rows)
+        )
+        if bars is not None and trade_dates is not None:
+            full_bars = list(bars)
+            full_trade_dates = list(trade_dates)
+        else:
+            full_bars, full_trade_dates = _account_market_data(full_rows, full_orders)
+            full_bars, _ = _attach_scheduled_exit_prices(full_bars, full_orders)
+        return _scheduled_position_sizing_audit(
+            full_orders,
+            full_bars,
+            full_trade_dates,
+        )
+
+    return _BACKTEST_REPORT_CACHE.get_or_set(cache_key, 21_600, load)
+
+
+def _build_scheduled_history_backtest(
+    start: date | None,
+    end: date | None,
+) -> dict[str, object]:
+    rows = history_repository.load_history_range(
+        history_engine.HISTORY_STRATEGY_VERSION,
+        start,
+        end,
+        False,
+    )
+    orders = scheduled_execution.extract_scheduled_orders(rows)
+    bars, trade_dates = _account_market_data(rows, orders)
+    bars, exit_coverage = _attach_scheduled_exit_prices(bars, orders)
+    config = cash_backtest.CashBacktestConfig(
+        initial_cash=100_000,
+        max_positions=scheduled_execution.MAX_POSITIONS,
+    )
+    account = _simulate_account(orders, bars, trade_dates, "next_1430", config)
+    summary = account["execution_summary"]
+
+    earlier_orders = [
+        order
+        for order in orders
+        if _order_date(order) < scheduled_execution.RESEARCH_SAMPLE_START
+    ]
+    design_orders = [
+        order
+        for order in orders
+        if scheduled_execution.RESEARCH_SAMPLE_START
+        <= _order_date(order)
+        < scheduled_execution.VALIDATION_START
+    ]
+    validation_orders = [
+        order
+        for order in orders
+        if scheduled_execution.VALIDATION_START
+        <= _order_date(order)
+        <= scheduled_execution.RULE_FREEZE_DATE
+    ]
+    forward_orders = [
+        order
+        for order in orders
+        if _order_date(order) > scheduled_execution.RULE_FREEZE_DATE
+    ]
+    phase_summaries = {
+        "earlier_history": _simulate_account(
+            earlier_orders, bars, trade_dates, "next_1430", config
+        )["execution_summary"],
+        "design_sample": _simulate_account(
+            design_orders, bars, trade_dates, "next_1430", config
+        )["execution_summary"],
+        "time_validation": _simulate_account(
+            validation_orders, bars, trade_dates, "next_1430", config
+        )["execution_summary"],
+        "post_freeze_forward": _simulate_account(
+            forward_orders, bars, trade_dates, "next_1430", config
+        )["execution_summary"],
+    }
+
+    double_cost_config = cash_backtest.CashBacktestConfig(
+        initial_cash=100_000,
+        max_positions=scheduled_execution.MAX_POSITIONS,
+        commission_rate=config.commission_rate * 2,
+        minimum_commission=config.minimum_commission * 2,
+        stamp_tax_rate=config.stamp_tax_rate * 2,
+        transfer_fee_rate=config.transfer_fee_rate * 2,
+        slippage_bps=config.slippage_bps * 2,
+    )
+    double_cost_summary = _simulate_account(
+        orders,
+        bars,
+        trade_dates,
+        "next_1430",
+        double_cost_config,
+    )["execution_summary"]
+    failed_board_orders = [order for order in orders if _is_failed_board(order)]
+    adverse_fill_summary = _simulate_account(
+        failed_board_orders,
+        bars,
+        trade_dates,
+        "next_1430",
+        config,
+    )["execution_summary"]
+    executed_trades = account["executed_trades"]
+    signal_daily_results, signal_return, signal_drawdown = _signal_daily_equity(
+        executed_trades
+    )
+    signal_summary = _summary(
+        orders,
+        executed_trades,
+        total_return_pct=signal_return,
+        max_drawdown_pct=signal_drawdown,
+    )
+    position_sizing_audit = _frozen_position_sizing_audit(
+        rows=rows if start is None and end is None else None,
+        orders=orders if start is None and end is None else None,
+        bars=bars if start is None and end is None else None,
+        trade_dates=trade_dates if start is None and end is None else None,
+    )
+    one_to_two_audit = _one_to_two_execution_audit(rows, config)
+    latest_coverage = (
+        dict(rows[-1].get("coverage") or {})
+        if rows
+        else history_repository.history_coverage(history_engine.HISTORY_STRATEGY_VERSION)
+    )
+    validation = _scheduled_validation(phase_summaries)
+    return {
+        "status": "ready" if rows else "insufficient_data",
+        "mode": "scheduled_first_board_cash_replay",
+        "strategy_version": scheduled_execution.SCHEDULED_EXECUTION_VERSION,
+        "history_strategy_version": history_engine.HISTORY_STRATEGY_VERSION,
+        "lane": "portfolio",
+        "exit_mode": "next_1430",
+        "summary": summary,
+        "execution_summary": summary,
+        "signal_summary": signal_summary,
+        "phase_summaries": phase_summaries,
+        "daily_results": account["equity_curve"],
+        "signal_daily_results": signal_daily_results,
+        "account_config": account["account_config"],
+        "execution_version": account["execution_version"],
+        "execution_assumptions": account["execution_assumptions"],
+        "execution_schedule": {
+            "entry_windows": [
+                f"{window_start[:5]}-{window_end[:5]}"
+                for window_start, window_end in scheduled_execution.ENTRY_WINDOWS
+            ],
+            "exit_time": scheduled_execution.EXIT_TIME[:5],
+            "exit_rule": "D+1 fixed time",
+            "target_position_pct": scheduled_execution.TARGET_POSITION_PCT,
+            "max_snapshot_age_seconds": scheduled_execution.MAX_SNAPSHOT_AGE_SECONDS,
+        },
+        "execution_comparability": {
+            "status": "candidate_proxy_only",
+            "live_equivalent": False,
+            "candidate_proxy_signal_count": len(orders),
+            "missing_evidence": [
+                "intraday_market_repair_frames",
+                "intraday_sector_fund_flow",
+                "intraday_stock_fund_flow",
+                "intraday_sector_expansion_frames",
+                "tick_l2_queue",
+            ],
+            "reason": (
+                "历史账户只验证信号时点结构硬门和时间覆盖；盘中市场、板块、资金"
+                "与排队证据缺失，不能视为实盘等价回放。"
+            ),
+        },
+        "portfolio_policy": {
+            "included_lanes": ["first_board"],
+            "excluded_lanes": ["one_to_two", "two_to_three", "high_board"],
+            "selection_basis": "complete_first_board_candidate_pool_in_event_order",
+            "candidate_source": "complete_first_board_candidate_pool",
+            "one_to_two_status": "internal_negative_control_only",
+        },
+        "exit_summary": _scheduled_exit_summary(executed_trades),
+        "stress_tests": {
+            "double_cost": double_cost_summary,
+            "failed_board_only_fill": adverse_fill_summary,
+        },
+        "position_sizing_audit": position_sizing_audit,
+        "one_to_two_audit": one_to_two_audit,
+        "orders": account["orders"],
+        "trades": [
+            _compact_account_trade(trade)
+            for trade in executed_trades
+        ],
+        "skipped_orders": account["skipped_orders"],
+        "open_positions": account["open_positions"],
+        "validation": validation,
+        "simulation_eligible": False,
+        "coverage": {
+            **latest_coverage,
+            "selected_start": rows[0].get("trade_date") if rows else None,
+            "selected_end": rows[-1].get("trade_date") if rows else None,
+            "selected_trade_days": len(rows),
+            "account_price_rows": len(bars),
+            **exit_coverage,
+        },
+        "costs": {
+            **account["account_config"],
+            "slippage_bps_each_side": config.slippage_bps,
+        },
+        "limitations": [
+            "首次触板是三分钟路径成交代理，没有Tick/L2时不能证明排队成交。",
+            "缺失的历史14:30分钟价使用日线收盘代理并单独计数，不冒充精确14:30成交。",
+            "一进二仅保留为内部负样本研究，不进入实时执行或组合复利。",
+            "历史收益是候选代理；缺少逐时点市场、板块资金和Tick/L2，非实盘等价结果。",
+            "冻结后尚未达到60个交易日和30笔闭合交易，保持research_only。",
+        ],
+    }
+
+
+def _attach_scheduled_exit_prices(
+    bars: Sequence[Mapping[str, object]],
+    orders: Sequence[Mapping[str, object]],
+) -> tuple[list[dict[str, object]], dict[str, int]]:
+    requests = [
+        (str(order.get("vt_symbol") or ""), result_date)
+        for order in orders
+        if (result_date := _optional_date(order.get("result_date"))) is not None
+        and order.get("vt_symbol")
+    ]
+    exact_rows = history_repository.load_account_1430_prices(requests)
+    exact_index = {
+        (
+            str(row.get("vt_symbol") or ""),
+            str(row.get("trade_date") or "")[:10],
+        ): row
+        for row in exact_rows
+    }
+    indexed = {
+        (
+            str(bar.get("vt_symbol") or ""),
+            str(bar.get("trade_date") or "")[:10],
+        ): dict(bar)
+        for bar in bars
+    }
+    minute_count = 0
+    proxy_count = 0
+    missing_count = 0
+    for vt_symbol, result_date in requests:
+        key = (vt_symbol, result_date.isoformat())
+        bar = indexed.get(key)
+        exact = exact_index.get(key)
+        exact_price = _number((exact or {}).get("price_1430"))
+        if exact_price is not None and exact_price > 0:
+            if bar is None:
+                bar = _price_bar(vt_symbol, result_date.isoformat(), exact_price, exact_price)
+                indexed[key] = bar
+            bar["price_1430"] = exact_price
+            bar["price_1430_source"] = "minute_1430"
+            minute_count += 1
+            continue
+        close_price = _number((bar or {}).get("close_price"))
+        if bar is not None and close_price is not None and close_price > 0:
+            bar["price_1430"] = close_price
+            bar["price_1430_source"] = "daily_close_proxy"
+            proxy_count += 1
+        else:
+            missing_count += 1
+    merged = sorted(
+        indexed.values(),
+        key=lambda bar: (
+            str(bar.get("trade_date") or ""),
+            str(bar.get("vt_symbol") or ""),
+        ),
+    )
+    return merged, {
+        "exit_price_request_count": len(requests),
+        "minute_1430_count": minute_count,
+        "daily_close_proxy_count": proxy_count,
+        "exit_price_missing_count": missing_count,
+    }
+
+
+def _one_to_two_execution_audit(
+    rows: Sequence[Mapping[str, object]],
+    config: cash_backtest.CashBacktestConfig,
+) -> dict[str, object]:
+    all_orders = _selected_history_orders(rows, None)
+    one_to_two_orders = [
+        order for order in all_orders if order.get("lane") == "one_to_two"
+    ]
+    execution_orders = [
+        order
+        for order in all_orders
+        if str(order.get("lane") or "") in PORTFOLIO_EXECUTION_LANES
+    ]
+    bars, trade_dates = _account_market_data(rows, all_orders)
+
+    def summary(selected: Sequence[Mapping[str, object]]) -> dict[str, object]:
+        return _simulate_account(
+            selected,
+            bars,
+            trade_dates,
+            "dynamic",
+            config,
+        )["execution_summary"]
+
+    independent = summary(one_to_two_orders)
+    without_one_to_two = summary(execution_orders)
+    with_one_to_two = summary(all_orders)
+    phase_summaries = {
+        phase: summary(
+            [
+                order
+                for order in one_to_two_orders
+                if order.get("validation_phase") == phase
+            ]
+        )
+        for phase in ("expanding_oos", "locked_holdout")
+    }
+    return {
+        "decision": "excluded_from_product_execution",
+        "reason": "独立、滚动样本外、锁定留出及组合消融均为负贡献",
+        "independent": independent,
+        "phase_summaries": phase_summaries,
+        "portfolio_without_one_to_two": without_one_to_two,
+        "portfolio_with_one_to_two": with_one_to_two,
+        "delta_when_included": {
+            "total_return_pct": _difference(
+                with_one_to_two.get("total_return_pct"),
+                without_one_to_two.get("total_return_pct"),
+            ),
+            "win_rate": _difference(
+                with_one_to_two.get("win_rate"),
+                without_one_to_two.get("win_rate"),
+            ),
+            "max_drawdown_pct": _difference(
+                with_one_to_two.get("max_drawdown_pct"),
+                without_one_to_two.get("max_drawdown_pct"),
+            ),
+        },
+    }
+
+
+def _scheduled_position_sizing_audit(
+    orders: Sequence[Mapping[str, object]],
+    bars: Sequence[Mapping[str, object]],
+    trade_dates: Sequence[date],
+) -> dict[str, object]:
+    development_orders = [
+        order
+        for order in orders
+        if _order_date(order) < scheduled_execution.VALIDATION_START
+    ]
+    validation_orders = [
+        order
+        for order in orders
+        if scheduled_execution.VALIDATION_START
+        <= _order_date(order)
+        <= scheduled_execution.RULE_FREEZE_DATE
+    ]
+    variants = _position_sizing_variants(orders, bars, trade_dates)
+    development_variants = _position_sizing_variants(
+        development_orders,
+        bars,
+        trade_dates,
+    )
+    validation_variants = _position_sizing_variants(
+        validation_orders,
+        bars,
+        trade_dates,
+    )
+    selected_by_development = _select_scheduled_position_count(development_variants)
+    selected_positions = scheduled_execution.MAX_POSITIONS
+    return {
+        "selected_max_positions": selected_positions,
+        "selected_by_development": selected_by_development,
+        "selection_matches_frozen_policy": selected_by_development == selected_positions,
+        "selection_rule": (
+            "pre_validation_maximum_return_with_drawdown_not_below_minus_10_pct"
+        ),
+        "selection_cutoff_exclusive": scheduled_execution.VALIDATION_START.isoformat(),
+        "drawdown_floor_pct": -10.0,
+        "target_position_pct": round(100 / selected_positions, 4),
+        "development_sample": _position_sizing_sample(development_orders),
+        "validation_sample": _position_sizing_sample(validation_orders),
+        "development_variants": development_variants,
+        "validation_variants": validation_variants,
+        "variants": variants,
+    }
+
+
+def _position_sizing_variants(
+    orders: Sequence[Mapping[str, object]],
+    bars: Sequence[Mapping[str, object]],
+    trade_dates: Sequence[date],
+) -> dict[str, Mapping[str, object]]:
+    variants: dict[str, Mapping[str, object]] = {}
+    for max_positions in (1, 2, 3, 4):
+        variant_config = cash_backtest.CashBacktestConfig(
+            initial_cash=100_000,
+            max_positions=max_positions,
+        )
+        variants[str(max_positions)] = _simulate_account(
+            orders,
+            bars,
+            trade_dates,
+            "next_1430",
+            variant_config,
+        )["execution_summary"]
+    return variants
+
+
+def _select_scheduled_position_count(
+    variants: Mapping[str, Mapping[str, object]],
+) -> int:
+    eligible = [
+        (int(position_count), summary)
+        for position_count, summary in variants.items()
+        if (_number(summary.get("max_drawdown_pct")) or 0.0) >= -10.0
+    ]
+    if not eligible:
+        return max(int(position_count) for position_count in variants)
+    return max(
+        eligible,
+        key=lambda item: (
+            _number(item[1].get("total_return_pct")) or 0.0,
+            -item[0],
+        ),
+    )[0]
+
+
+def _position_sizing_sample(
+    orders: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    signal_dates = sorted({_order_date(order) for order in orders})
+    return {
+        "signal_count": len(orders),
+        "signal_day_count": len(signal_dates),
+        "start": signal_dates[0].isoformat() if signal_dates else None,
+        "end": signal_dates[-1].isoformat() if signal_dates else None,
+    }
+
+
+def _scheduled_validation(
+    phase_summaries: Mapping[str, Mapping[str, object]],
+) -> dict[str, object]:
+    checks: list[dict[str, object]] = []
+    for phase in ("design_sample", "time_validation"):
+        summary = phase_summaries.get(phase) or {}
+        win_rate = _number(summary.get("win_rate"))
+        total_return = _number(summary.get("total_return_pct"))
+        max_drawdown = _number(summary.get("max_drawdown_pct"))
+        checks.append(
+            {
+                "phase": phase,
+                "passed": bool(
+                    int(summary.get("trade_count") or 0) > 0
+                    and win_rate is not None
+                    and win_rate >= 55
+                    and total_return is not None
+                    and total_return > 0
+                    and max_drawdown is not None
+                    and max_drawdown >= -10
+                ),
+                "trade_count": int(summary.get("trade_count") or 0),
+                "win_rate": win_rate,
+                "total_return_pct": total_return,
+                "max_drawdown_pct": max_drawdown,
+            }
+        )
+    forward = phase_summaries.get("post_freeze_forward") or {}
+    forward_trades = int(forward.get("trade_count") or 0)
+    checks.append(
+        {
+            "phase": "post_freeze_forward",
+            "passed": bool(
+                forward_trades >= 30
+                and (_number(forward.get("win_rate")) or 0) >= 55
+                and (_number(forward.get("total_return_pct")) or 0) > 0
+                and (_number(forward.get("max_drawdown_pct")) or -100) >= -10
+            ),
+            "trade_count": forward_trades,
+            "win_rate": _number(forward.get("win_rate")),
+            "total_return_pct": _number(forward.get("total_return_pct")),
+            "max_drawdown_pct": _number(forward.get("max_drawdown_pct")),
+        }
+    )
+    return {
+        "passed": False,
+        "status": "research_only",
+        "lane": "portfolio",
+        "checks": checks,
+        "reason": "冻结后尚未达到60个交易日和30笔真实闭合交易",
+        "requirements": {
+            "minimum_forward_trade_days": 60,
+            "minimum_forward_trades": 30,
+            "minimum_win_rate": 55,
+            "minimum_total_return_pct": 0,
+            "maximum_drawdown_pct": -10,
+            "rule_freeze_date": scheduled_execution.RULE_FREEZE_DATE.isoformat(),
+        },
+    }
+
+
+def _scheduled_exit_summary(
+    trades: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    minute_count = sum(trade.get("exit_price_source") == "minute_1430" for trade in trades)
+    proxy_count = sum(
+        trade.get("exit_price_source") == "daily_close_proxy" for trade in trades
+    )
+    return {
+        "mode": "next_1430",
+        "policy_version": scheduled_execution.SCHEDULED_EXECUTION_VERSION,
+        "auction_exit_count": 0,
+        "tail_exit_count": len(trades),
+        "minute_1430_count": minute_count,
+        "daily_close_proxy_count": proxy_count,
+    }
+
+
+def _is_failed_board(order: Mapping[str, object]) -> bool:
+    outcome = order.get("outcome")
+    return bool(
+        isinstance(outcome, Mapping)
+        and outcome.get("touched") is True
+        and outcome.get("sealed") is False
+    )
+
+
+def _order_date(order: Mapping[str, object]) -> date:
+    return _optional_date(order.get("entry_date") or order.get("signal_date")) or date.min
+
+
+def _difference(left: object, right: object) -> float | None:
+    left_number = _number(left)
+    right_number = _number(right)
+    if left_number is None or right_number is None:
+        return None
+    return round(left_number - right_number, 4)
 
 
 def get_history_backtest(
@@ -1333,6 +1988,8 @@ def _compact_account_trade(trade: Mapping[str, object]) -> dict[str, object]:
         "d1_outcome",
         "d_board_status",
         "exit_reason",
+        "exit_price_source",
+        "exit_price_proxy",
         "result_status",
         "execution_confidence",
         "two_to_three_quality_tier",

@@ -33,13 +33,53 @@ describe("next-session plan presentation", () => {
   });
 
   it.each([
-    ["approaching_trigger", "接近触发", "warning"],
+    ["approaching_trigger", "接近买点", "warning"],
     ["trigger_ready", "买点触发（人工确认）", "positive"],
     ["missed", "已封板，错过不追", "negative"],
-    ["rejected", "硬门未过，今日不买", "negative"],
+    ["rejected", "硬性排除", "negative"],
     ["invalidated", "条件失效", "negative"],
   ])("maps %s to a user-facing state", (state, label, tone) => {
     expect(signalStatePresentation(signal(state))).toEqual({ label, tone });
+  });
+
+  it("shows concept warming as a pre-limit observation", () => {
+    const warming = {
+      ...signal("concept_warming"),
+      concept_name: "PCB",
+      action: "observe",
+      validation_passed: false,
+    } as LimitUpLiveSignal;
+
+    expect(signalStatePresentation(warming)).toEqual({ label: "PCB板块预热", tone: "warning" });
+    expect(liveSignalPresentation(warming)).toEqual({ label: "PCB板块预热", tone: "warning" });
+  });
+
+  it("shows a pending market repair instead of a permanent rejection", () => {
+    const approaching = {
+      ...signal("approaching_trigger"),
+      blocking_scope: "market",
+      pending_reasons: ["D-1退潮，盘中尚未确认修复"],
+      validation_passed: false,
+    } as LimitUpLiveSignal;
+
+    expect(liveSignalPresentation(approaching)).toEqual({
+      label: "等待市场修复",
+      tone: "warning",
+    });
+  });
+
+  it("counts the remaining dynamic checks on an approaching signal", () => {
+    const approaching = {
+      ...signal("approaching_trigger"),
+      blocking_scope: "dynamic",
+      pending_reasons: ["等待板块扩散", "等待个股资金转正"],
+      validation_passed: false,
+    } as LimitUpLiveSignal;
+
+    expect(liveSignalPresentation(approaching)).toEqual({
+      label: "接近买点，还差 2 项",
+      tone: "warning",
+    });
   });
 
   it("keeps a research buy trigger visible when automatic validation is locked", () => {
@@ -66,6 +106,13 @@ describe("next-session plan presentation", () => {
 
     expect(liveSignalPresentation(observing)).toEqual({
       label: "观察，不执行",
+      tone: "warning",
+    });
+  });
+
+  it("labels the scheduled lunch pause without calling data expired", () => {
+    expect(liveSignalPresentation(signal("approaching_trigger"), true, true)).toEqual({
+      label: "午间休市，等待13:00",
       tone: "warning",
     });
   });

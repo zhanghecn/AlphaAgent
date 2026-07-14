@@ -54,7 +54,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-screen bg-background md:h-screen md:overflow-hidden">
       {/* Mobile top nav —— 玻璃质感 + 极光顶光晕（视觉保留，无动画） */}
-      <header className="glass aurora fixed inset-x-0 top-0 z-30 border-b md:hidden">
+      <header className="glass aurora !fixed inset-x-0 top-0 z-30 border-b md:hidden">
         <div className="flex h-14 items-center justify-between px-4">
           <span className="font-display text-lg font-bold tracking-tight">AlphaAgent</span>
           <div className="flex items-center gap-1">

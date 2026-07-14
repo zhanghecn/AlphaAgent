@@ -41,9 +41,22 @@ function snapshot(overrides: Partial<LimitUpSignalSnapshot["recommendations"]> =
 
 describe("live limit-up portfolio presentation", () => {
   it("uses the backend shared portfolio when present", () => {
-    const portfolio = [signal("600010.SSE", 4, "buy_now")];
+    const portfolio = [signal("600010.SSE", 1, "buy_now")];
 
     expect(liveSignalsForScope(snapshot({ portfolio }), "portfolio")).toEqual(portfolio);
+  });
+
+  it("keeps only the first two first-board product signals", () => {
+    const portfolio = [
+      signal("600010.SSE", 1, "buy_now"),
+      signal("600011.SSE", 1, "buy_now"),
+      signal("600012.SSE", 1, "buy_now"),
+      signal("600013.SSE", 2, "buy_now"),
+    ];
+
+    expect(
+      liveSignalsForScope(snapshot({ portfolio }), "portfolio").map((row) => row.vt_symbol),
+    ).toEqual(["600010.SSE", "600011.SSE"]);
   });
 
   it("shows the backend watchlist when the strict portfolio is empty", () => {
@@ -53,9 +66,9 @@ describe("live limit-up portfolio presentation", () => {
   });
 
   it("keeps observations behind executable portfolio signals", () => {
-    const portfolio = [signal("600010.SSE", 3, "buy_now")];
+    const portfolio = [signal("600010.SSE", 1, "buy_now")];
     const watchlist = [
-      signal("600010.SSE", 3, "observe"),
+      signal("600010.SSE", 1, "observe"),
       signal("600011.SSE", 1, "observe"),
     ];
 
@@ -64,6 +77,24 @@ describe("live limit-up portfolio presentation", () => {
         (row) => row.vt_symbol,
       ),
     ).toEqual(["600010.SSE", "600011.SSE"]);
+  });
+
+  it("keeps two portfolio rows plus six observations without duplicates", () => {
+    const portfolio = [
+      { ...signal("600010.SSE", 1, "buy_now"), portfolio_selected: true },
+      { ...signal("600011.SSE", 1, "observe"), portfolio_selected: true },
+    ];
+    const watchlist = Array.from({ length: 8 }, (_, index) => ({
+      ...signal(`6000${index + 10}.SSE`, 1, "observe"),
+      signal_state: index % 2 ? "concept_warming" : "approaching_trigger",
+      concept_strength_rank: index + 1,
+    }));
+
+    const rows = liveSignalsForScope(snapshot({ portfolio, watchlist }), "portfolio");
+
+    expect(rows).toHaveLength(8);
+    expect(new Set(rows.map((row) => row.vt_symbol)).size).toBe(8);
+    expect(rows.slice(0, 2).every((row) => row.portfolio_selected)).toBe(true);
   });
 
   it("falls back to deduplicated executable lanes for old responses", () => {
@@ -77,7 +108,6 @@ describe("live limit-up portfolio presentation", () => {
 
     expect(liveSignalsForScope(old, "portfolio").map((row) => row.vt_symbol)).toEqual([
       "600001.SSE",
-      "600002.SSE",
     ]);
   });
 

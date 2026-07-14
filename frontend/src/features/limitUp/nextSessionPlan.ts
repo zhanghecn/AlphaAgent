@@ -22,7 +22,7 @@ export function liveHeader(snapshot: LimitUpSignalSnapshot): { title: string; to
 }
 
 export function signalStatePresentation(
-  signal: Pick<LimitUpLiveSignal, "signal_state" | "execution_permission" | "execution_state" | "action">,
+  signal: Pick<LimitUpLiveSignal, "signal_state" | "execution_permission" | "execution_state" | "action" | "concept_name">,
   stale = false,
 ): StatusPresentation {
   if (stale) return { label: "数据过期", tone: "negative" };
@@ -32,10 +32,16 @@ export function signalStatePresentation(
       tone: "positive",
     };
   }
-  if (signal.signal_state === "approaching_trigger") return { label: "接近触发", tone: "warning" };
+  if (signal.signal_state === "concept_warming") {
+    return {
+      label: signal.concept_name ? `${signal.concept_name}板块预热` : "板块预热",
+      tone: "warning",
+    };
+  }
+  if (signal.signal_state === "approaching_trigger") return { label: "接近买点", tone: "warning" };
   if (signal.signal_state === "pending_auction") return { label: "等待竞价确认", tone: "warning" };
   if (signal.signal_state === "missed") return { label: "已封板，错过不追", tone: "negative" };
-  if (signal.signal_state === "rejected") return { label: "硬门未过，今日不买", tone: "negative" };
+  if (signal.signal_state === "rejected") return { label: "硬性排除", tone: "negative" };
   if (signal.signal_state === "invalidated") return { label: "条件失效", tone: "negative" };
   if (signal.signal_state === "observing" || signal.action === "observe") return { label: "观察中", tone: "warning" };
   if (signal.execution_state === "actionable") return { label: "条件满足，可买", tone: "positive" };
@@ -52,14 +58,38 @@ export function liveSignalPresentation(
     | "action"
     | "research_action"
     | "validation_passed"
+    | "blocking_scope"
+    | "pending_reasons"
+    | "concept_name"
   >,
   stale = false,
+  paused = false,
 ): StatusPresentation {
+  if (paused) return { label: "午间休市，等待13:00", tone: "warning" };
   const state = signalStatePresentation(signal, stale);
+  if (
+    !stale
+    && (signal.signal_state === "observing" || signal.signal_state === "approaching_trigger")
+    && signal.blocking_scope === "market"
+  ) {
+    return { label: "等待市场修复", tone: "warning" };
+  }
+  if (!stale && signal.signal_state === "approaching_trigger") {
+    const remaining = signal.pending_reasons?.length ?? 0;
+    return {
+      label: remaining > 0 ? `接近买点，还差 ${remaining} 项` : "接近买点",
+      tone: "warning",
+    };
+  }
   if (
     stale
     || state.tone === "positive"
     || state.tone === "negative"
+    || signal.signal_state === "concept_warming"
+    || signal.signal_state === "pending_auction"
+    || signal.signal_state === "missed"
+    || signal.signal_state === "rejected"
+    || signal.signal_state === "invalidated"
     || signal.validation_passed !== false
   ) {
     return state;

@@ -1,17 +1,33 @@
 import { apiClient } from "./client";
 
-export type ExitMode = "dynamic" | "next_open" | "next_close";
+export type ExitMode = "dynamic" | "next_open" | "next_close" | "next_1430";
 export type EntryMode = "auction" | "sweep" | "tail" | "next_auction";
 export type BoardLaneKey = "first_board" | "one_to_two" | "two_to_three" | "high_board";
 export type LimitUpBacktestScope = "portfolio" | BoardLaneKey;
 export type HistoryValidationPhase = "warmup" | "expanding_oos" | "locked_holdout";
 export type LimitUpLiveAction = "buy_now" | "observe" | "wait_tail" | "next_auction" | "pass";
 export type LimitUpLane = "now" | "tail" | "next_auction";
+export type LimitUpBlockingScope = "none" | "market" | "dynamic" | "structural";
+export type LimitUpMarketRepairState = "not_required" | "pending_repair" | "repair_confirmed" | "repair_revoked";
+export type LimitUpLiveTraceState =
+  | "radar_entered"
+  | "concept_warming"
+  | "recommended"
+  | "approaching_trigger"
+  | "trigger_ready"
+  | "dropped_from_top5"
+  | "source_missing"
+  | "missed"
+  | "sealed"
+  | "resealed"
+  | "failed"
+  | "rejected"
+  | "invalidated";
 
 export interface LimitUpTriggerCheck {
   code: string;
   label: string;
-  status: "passed" | "pending" | "failed" | string;
+  status: "passed" | "pending" | "failed" | "informational" | string;
   observed?: string | null;
   required?: string | null;
   evidence_time?: string | null;
@@ -23,10 +39,38 @@ export interface LimitUpPlanMetadata {
   plan_phase?: "preliminary" | "final" | string;
 }
 
+export interface LimitUpExecutionSchedule {
+  strategy_version: string;
+  state: string;
+  message: string;
+  entry_allowed: boolean;
+  target_at?: string | null;
+  entry_windows: string[];
+  exit_time: string;
+  max_positions: number;
+  target_position_pct: number;
+  max_snapshot_age_seconds: number;
+}
+
 export interface LimitUpLiveSignal {
   vt_symbol: string;
   name: string;
   sector_name?: string | null;
+  concept_id?: string | null;
+  concept_name?: string | null;
+  concept_state?: "unavailable" | "observe" | "warming" | "launch" | "ebb" | string;
+  concept_strength_score?: number | null;
+  concept_strength_rank?: number | null;
+  concept_strength_percentile?: number | null;
+  concept_leader_rank?: number | null;
+  concept_coverage_ratio?: number | null;
+  concept_strong_5_count?: number | null;
+  concept_near_limit_count?: number | null;
+  concept_sealed_count?: number | null;
+  concept_failed_count?: number | null;
+  concept_change_acceleration_3m?: number | null;
+  concept_turnover_acceleration_3m?: number | null;
+  concept_snapshot_age_seconds?: number | null;
   market_dragon_rank?: number | null;
   board_level: number;
   board_lane?: BoardLaneKey;
@@ -47,8 +91,12 @@ export interface LimitUpLiveSignal {
   reason: string;
   cancel_condition: string;
   execution_state?: "watch" | "waiting" | "actionable" | "cancelled" | string;
-  signal_state?: "observing" | "approaching_trigger" | "pending_auction" | "trigger_ready" | "missed" | "rejected" | "invalidated" | string;
+  signal_state?: "observing" | "concept_warming" | "approaching_trigger" | "pending_auction" | "trigger_ready" | "missed" | "rejected" | "invalidated" | string;
+  blocking_scope?: LimitUpBlockingScope | string;
+  pending_reasons?: string[];
   execution_permission?: "research_only" | string;
+  scheduled_execution_version?: string;
+  target_position_pct?: number;
   state?: "near_limit" | "sealed" | "resealed" | "failed" | string;
   distance_to_limit_pct?: number | null;
   seen_before_seal?: boolean;
@@ -103,6 +151,7 @@ export interface LimitUpSignalSnapshot {
   target_session?: string | null;
   plan_phase?: "preliminary" | "final" | string;
   captured_at: string | null;
+  session_stage?: string;
   source: string;
   market_context: {
     sealed_count?: number;
@@ -112,11 +161,16 @@ export interface LimitUpSignalSnapshot {
     market_gate: {
       passed: boolean;
       repair_confirmed?: boolean;
+      repair_state?: LimitUpMarketRepairState | string;
+      repair_confirmed_at?: string | null;
+      repair_evidence_at?: string | null;
+      repair_revoked_reason?: string | null;
       reasons: string[];
     };
     lanes: Record<LimitUpLane, LimitUpLiveSignal[]>;
     portfolio?: LimitUpLiveSignal[];
     watchlist?: LimitUpLiveSignal[];
+    execution_schedule?: LimitUpExecutionSchedule;
     plan?: LimitUpPlanMetadata;
     board_lane_validations?: Partial<Record<BoardLaneKey, {
       passed: boolean;
@@ -129,8 +183,127 @@ export interface LimitUpSignalSnapshot {
     snapshot_age_seconds?: number | null;
     rate_limit_status?: "normal" | "limited" | "degraded" | "unknown" | string;
     source_errors?: string[];
+    concept_status?: string;
+    concept_snapshot_age_seconds?: number | null;
+    concept_quote_coverage_ratio?: number | null;
+    concept_trigger_allowed?: boolean;
+    concept_membership_snapshot_date?: string | null;
     plan?: LimitUpPlanMetadata;
   };
+}
+
+export interface LimitUpLiveTraceDates {
+  status: "ready" | "empty" | string;
+  dates: string[];
+  latest: string | null;
+}
+
+export interface LimitUpLiveTraceItem {
+  vt_symbol: string;
+  name: string;
+  board_lane: BoardLaneKey | null;
+  board_level: number | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  highest_state: LimitUpLiveTraceState;
+  final_state: LimitUpLiveTraceState;
+  ever_recommended: boolean;
+  ever_triggered: boolean;
+  triggered_at: string | null;
+  last_price: number | null;
+  change_pct: number | null;
+  distance_to_limit_pct: number | null;
+  concept_name?: string | null;
+  concept_state?: string | null;
+  concept_strength_rank?: number | null;
+  concept_leader_rank?: number | null;
+  reason: string;
+  event_count: number;
+}
+
+export interface LimitUpLiveTraceDay {
+  status: "ready" | "not_found" | string;
+  trade_date: string;
+  snapshot_count?: number;
+  scan_error_count?: number;
+  lane_funnels?: Partial<Record<BoardLaneKey, LimitUpLiveTraceFunnel>>;
+  items: LimitUpLiveTraceItem[];
+}
+
+export interface LimitUpLiveTraceFunnel {
+  radar_count: number;
+  warming_count: number;
+  recommended_count: number;
+  approaching_count: number;
+  triggered_count: number;
+  sealed_without_trigger_count: number;
+  structural_rejected_count: number;
+  market_blocked_count: number;
+  dynamic_blocked_count: number;
+  primary_blockers: Array<{
+    code: string;
+    label: string;
+    count: number;
+  }>;
+}
+
+export interface LimitUpLiveTraceEvent {
+  event: LimitUpLiveTraceState;
+  captured_at: string;
+  triggered_at: string | null;
+  vt_symbol: string | null;
+  name: string | null;
+  board_lane: BoardLaneKey | null;
+  board_level: number | null;
+  state: "near_limit" | "sealed" | "resealed" | "failed" | string | null;
+  signal_state: string | null;
+  action: LimitUpLiveAction | null;
+  research_action: LimitUpLiveAction | null;
+  last_price: number | null;
+  change_pct: number | null;
+  distance_to_limit_pct: number | null;
+  concept_id?: string | null;
+  concept_name?: string | null;
+  concept_state?: string | null;
+  concept_strength_score?: number | null;
+  concept_strength_rank?: number | null;
+  concept_strength_percentile?: number | null;
+  concept_leader_rank?: number | null;
+  concept_coverage_ratio?: number | null;
+  concept_strong_5_count?: number | null;
+  concept_near_limit_count?: number | null;
+  concept_sealed_count?: number | null;
+  concept_failed_count?: number | null;
+  concept_change_acceleration_3m?: number | null;
+  concept_turnover_acceleration_3m?: number | null;
+  concept_snapshot_age_seconds?: number | null;
+  sector_heat: number | null;
+  sector_touch_count: number | null;
+  sector_main_net_inflow: number | null;
+  stock_main_net_inflow: number | null;
+  turnover_rate: number | null;
+  seal_amount: number | null;
+  seal_amount_retention_ratio: number | null;
+  seal_amount_change_pct: number | null;
+  portfolio_selected: boolean;
+  in_top5: boolean;
+  market_gate_passed: boolean;
+  market_gate_reasons: string[];
+  market_repair_state: LimitUpMarketRepairState | string | null;
+  market_repair_confirmed_at: string | null;
+  blocking_scope: LimitUpBlockingScope | string | null;
+  pending_reasons: string[];
+  trigger_checks: LimitUpTriggerCheck[];
+  blockers: string[];
+  reason: string;
+  data_quality_status: string | null;
+}
+
+export interface LimitUpLiveTraceSymbol {
+  status: "ready" | "not_found" | string;
+  trade_date: string;
+  vt_symbol: string;
+  events: LimitUpLiveTraceEvent[];
 }
 
 export interface LimitUpHistoryCoverage {
@@ -213,6 +386,8 @@ export interface LimitUpLaneLedgerTrade {
     reason?: string;
     policy_version?: string;
   };
+  exit_price_source?: "minute_1430" | "daily_close_proxy" | string;
+  exit_price_proxy?: boolean;
 }
 
 export interface LimitUpLaneValidation {
@@ -278,12 +453,71 @@ export interface LimitUpLaneBacktest {
     included_lanes: BoardLaneKey[];
     excluded_lanes: BoardLaneKey[];
     selection_basis: string;
+    candidate_source?: string;
+    one_to_two_status?: string;
+  };
+  execution_schedule?: {
+    entry_windows: string[];
+    exit_time: string;
+    exit_rule: string;
+    target_position_pct: number;
+    max_snapshot_age_seconds: number;
+  };
+  execution_comparability?: {
+    status: "candidate_proxy_only" | "live_equivalent" | string;
+    live_equivalent: boolean;
+    candidate_proxy_signal_count: number;
+    missing_evidence: string[];
+    reason: string;
   };
   exit_summary: {
     mode: ExitMode;
     policy_version?: string;
     auction_exit_count: number;
     tail_exit_count: number;
+    minute_1430_count?: number;
+    daily_close_proxy_count?: number;
+  };
+  stress_tests?: {
+    double_cost: LimitUpEntrySummary;
+    failed_board_only_fill: LimitUpEntrySummary;
+  };
+  position_sizing_audit?: {
+    selected_max_positions: number;
+    selected_by_development: number;
+    selection_matches_frozen_policy: boolean;
+    selection_rule: string;
+    selection_cutoff_exclusive: string;
+    drawdown_floor_pct: number;
+    target_position_pct: number;
+    development_sample: {
+      signal_count: number;
+      signal_day_count: number;
+      start: string | null;
+      end: string | null;
+    };
+    validation_sample: {
+      signal_count: number;
+      signal_day_count: number;
+      start: string | null;
+      end: string | null;
+    };
+    development_variants: Record<string, LimitUpEntrySummary>;
+    validation_variants: Record<string, LimitUpEntrySummary>;
+    variants: Record<string, LimitUpEntrySummary>;
+  };
+  one_to_two_audit?: {
+    decision: "excluded_from_product_execution" | string;
+    reason: string;
+    independent: LimitUpEntrySummary;
+    phase_summaries: Record<string, LimitUpEntrySummary>;
+    portfolio_without_one_to_two: LimitUpEntrySummary;
+    portfolio_with_one_to_two: LimitUpEntrySummary;
+    delta_when_included: {
+      total_return_pct: number | null;
+      win_rate: number | null;
+      max_drawdown_pct: number | null;
+    };
   };
   daily_results: LimitUpDailyResult[];
   trades: Array<LimitUpLaneLedgerTrade & {
@@ -326,6 +560,10 @@ export interface LimitUpLaneBacktest {
   simulation_eligible: boolean;
   coverage: LimitUpHistoryCoverage & {
     intraday_path_trade_days?: number;
+    exit_price_request_count?: number;
+    minute_1430_count?: number;
+    daily_close_proxy_count?: number;
+    exit_price_missing_count?: number;
   };
 }
 
@@ -351,6 +589,26 @@ export interface LimitUpWalkForwardModelReport {
 
 export function fetchLimitUpLive(): Promise<LimitUpSignalSnapshot> {
   return apiClient.get<LimitUpSignalSnapshot>("/limit-up/live");
+}
+
+export function fetchLimitUpLiveTraceDates(): Promise<LimitUpLiveTraceDates> {
+  return apiClient.get<LimitUpLiveTraceDates>("/limit-up/live-traces/dates");
+}
+
+export function fetchLimitUpLiveTraceDay(tradeDate: string): Promise<LimitUpLiveTraceDay> {
+  const query = new URLSearchParams({ date: tradeDate });
+  return apiClient.get<LimitUpLiveTraceDay>(`/limit-up/live-traces/day?${query.toString()}`);
+}
+
+export function fetchLimitUpLiveTraceSymbol(params: {
+  date: string;
+  vtSymbol: string;
+}): Promise<LimitUpLiveTraceSymbol> {
+  const query = new URLSearchParams({
+    date: params.date,
+    vt_symbol: params.vtSymbol,
+  });
+  return apiClient.get<LimitUpLiveTraceSymbol>(`/limit-up/live-traces/symbol?${query.toString()}`);
 }
 
 export function refreshLimitUpLive(): Promise<LimitUpSignalSnapshot> {

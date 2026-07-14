@@ -909,6 +909,7 @@ def _lane_replay_day(
             "action": "normal",
             "selected": [candidate],
             "lanes": lanes,
+            "candidate_pool": lanes,
         },
         "coverage": {"reliable_trade_days": 600, "intraday_path_trade_days": 233},
     }
@@ -942,6 +943,55 @@ def test_lane_ledger_exposes_d_buy_and_d1_sell_times(monkeypatch) -> None:
     assert trade["sell_date"] == "2026-06-11"
     assert trade["sell_time"] == "09:30:00"
     assert trade["return_pct"] == 3.2
+
+
+def test_product_ledger_uses_scheduled_account_when_lane_is_omitted(monkeypatch) -> None:
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "load_history_day",
+        lambda *_args: _lane_replay_day(),
+    )
+    monkeypatch.setattr(
+        history_service,
+        "get_scheduled_history_backtest",
+        lambda *_args, **_kwargs: {
+            "trades": [
+                {
+                    "lane": "first_board",
+                    "vt_symbol": "600001.SSE",
+                    "name": "固定窗口样本",
+                    "buy_date": "2026-06-10",
+                    "buy_time": "10:12:00",
+                    "buy_price": 11.0,
+                    "sell_date": "2026-06-11",
+                    "sell_time": "14:30:00",
+                    "sell_price": 11.6,
+                    "return_pct": 5.0,
+                    "d1_outcome": "d1_premium",
+                    "d_board_status": "sealed",
+                    "execution_confidence": "three_minute_path_without_queue",
+                    "exit_price_source": "minute_1430",
+                }
+            ],
+            "orders": [
+                {
+                    "side": "BUY",
+                    "status": "filled",
+                    "trade_date": "2026-06-10",
+                }
+            ],
+            "validation": {"passed": False, "status": "research_only", "checks": []},
+            "coverage": {"minute_1430_count": 1},
+            "execution_schedule": {"exit_time": "14:30"},
+        },
+    )
+
+    ledger = history_service.get_history_ledger(date(2026, 6, 10), lane=None)
+
+    assert ledger["lane"] is None
+    assert ledger["exit_mode"] == "next_1430"
+    assert ledger["selected_count"] == 1
+    assert ledger["trades"][0]["sell_time"] == "14:30:00"
 
 
 def test_lane_ledger_uses_candidate_dynamic_exit_decision(monkeypatch) -> None:
@@ -1215,8 +1265,13 @@ def test_lane_validation_requires_samples_after_rule_freeze(monkeypatch) -> None
     assert report["validation"]["passed"] is False
 
 
-def test_portfolio_backtest_uses_one_shared_100k_cash_account(monkeypatch) -> None:
+def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch) -> None:
     day = _lane_replay_day(lane="first_board", return_pct=8.0)
+    development_day = _lane_replay_day(
+        trade_date="2026-04-13",
+        lane="first_board",
+        return_pct=4.0,
+    )
     first = day["lane_portfolio"]["selected"][0]
     relay = {
         **first,
@@ -1243,34 +1298,132 @@ def test_portfolio_backtest_uses_one_shared_100k_cash_account(monkeypatch) -> No
         "lane": "one_to_two",
     }
     day["lane_portfolio"]["selected"] = [first, relay, negative_one_to_two]
+    day["lane_portfolio"]["candidate_pool"]["first_board"] = [first]
+    day["lane_portfolio"]["candidate_pool"]["one_to_two"] = [negative_one_to_two]
     day["board_lanes"]["two_to_three"] = [relay]
     monkeypatch.setattr(
         history_service.history_repository,
         "load_history_range",
-        lambda *_args: [day],
+        lambda _version, start, end, _compact: (
+            [development_day, day] if start is None and end is None else [day]
+        ),
     )
     monkeypatch.setattr(
         history_service.history_repository,
         "load_account_daily_bars",
         lambda *_args: [],
     )
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "load_account_1430_prices",
+        lambda requests: [
+            {
+                "vt_symbol": symbol,
+                "trade_date": trade_date.isoformat(),
+                "price_1430": 11.5,
+                "price_1430_source": "minute_1430",
+            }
+            for symbol, trade_date in requests
+            if symbol == first["vt_symbol"]
+        ],
+    )
+    history_service._BACKTEST_REPORT_CACHE.clear()
 
     report = history_service.get_lane_history_backtest(
-        None,
-        None,
+        date(2026, 6, 10),
+        date(2026, 6, 10),
         lane="portfolio",
         exit_mode="next_close",
     )
 
     assert report["lane"] == "portfolio"
+    assert report["mode"] == "scheduled_first_board_cash_replay"
+    assert report["exit_mode"] == "next_1430"
     assert report["account_config"]["initial_cash"] == 100_000
-    assert report["account_config"]["max_positions"] == 4
+    assert report["account_config"]["max_positions"] == 2
     assert report["summary"] == report["execution_summary"]
-    assert report["summary"]["signal_count"] == 2
-    assert report["summary"]["trade_count"] == 2
+    assert report["summary"]["signal_count"] == 1
+    assert report["summary"]["trade_count"] == 1
     assert report["summary"]["total_return_pct"] == report["daily_results"][-1]["total_return_pct"]
-    assert report["signal_summary"]["total_return_pct"] != report["summary"]["total_return_pct"]
-    assert report["portfolio_policy"]["excluded_lanes"] == ["one_to_two"]
+    assert report["execution_schedule"]["entry_windows"] == ["10:00-11:30", "13:00-14:30"]
+    assert report["execution_schedule"]["exit_time"] == "14:30"
+    assert report["execution_comparability"]["status"] == "candidate_proxy_only"
+    assert report["execution_comparability"]["live_equivalent"] is False
+    assert "intraday_sector_fund_flow" in report["execution_comparability"]["missing_evidence"]
+    assert report["coverage"]["minute_1430_count"] == 1
+    assert report["coverage"]["daily_close_proxy_count"] == 0
+    assert report["stress_tests"]["double_cost"]["total_return_pct"] is not None
+    assert report["position_sizing_audit"]["selected_max_positions"] == 2
+    assert report["position_sizing_audit"]["selection_rule"] == (
+        "pre_validation_maximum_return_with_drawdown_not_below_minus_10_pct"
+    )
+    assert report["position_sizing_audit"]["selection_cutoff_exclusive"] == "2026-04-14"
+    assert report["position_sizing_audit"]["development_sample"]["signal_count"] == 1
+    assert report["portfolio_policy"]["included_lanes"] == ["first_board"]
+    assert "one_to_two" in report["portfolio_policy"]["excluded_lanes"]
+    assert report["one_to_two_audit"]["decision"] == "excluded_from_product_execution"
+    assert report["one_to_two_audit"]["independent"]["trade_count"] == 1
+
+
+def test_scheduled_backtest_reuses_full_report_across_trade_limits(monkeypatch) -> None:
+    build_calls: list[tuple[date | None, date | None]] = []
+
+    def fake_build(start, end, **_kwargs):
+        build_calls.append((start, end))
+        return {
+            "orders": [{"id": value} for value in range(3)],
+            "trades": [{"id": value} for value in range(3)],
+            "skipped_orders": [{"id": value} for value in range(3)],
+        }
+
+    monkeypatch.setattr(history_service, "_build_scheduled_history_backtest", fake_build)
+    history_service._BACKTEST_REPORT_CACHE.clear()
+
+    latest = history_service.get_scheduled_history_backtest(None, None, trade_limit=1)
+    expanded = history_service.get_scheduled_history_backtest(None, None, trade_limit=2)
+    complete = history_service.get_scheduled_history_backtest(None, None, trade_limit=None)
+
+    assert build_calls == [(None, None)]
+    assert [row["id"] for row in latest["trades"]] == [2]
+    assert [row["id"] for row in expanded["trades"]] == [1, 2]
+    assert [row["id"] for row in complete["trades"]] == [0, 1, 2]
+    assert [row["id"] for row in latest["orders"]] == [2]
+    assert [row["id"] for row in latest["skipped_orders"]] == [2]
+    history_service._BACKTEST_REPORT_CACHE.clear()
+
+
+def test_scheduled_position_sizing_uses_only_pre_validation_orders(monkeypatch) -> None:
+    orders = [
+        {"entry_date": "2026-04-13", "vt_symbol": "600001.SSE"},
+        {"entry_date": "2026-04-14", "vt_symbol": "600002.SSE"},
+    ]
+
+    def fake_simulate(selected, _bars, _trade_dates, _exit_mode, config):
+        summaries = {
+            1: (20.0, -12.0),
+            2: (10.0, -6.0),
+            3: (5.0, -3.0),
+            4: (3.0, -2.0),
+        }
+        total_return, drawdown = summaries[config.max_positions]
+        return {
+            "execution_summary": {
+                "signal_count": len(selected),
+                "total_return_pct": total_return,
+                "max_drawdown_pct": drawdown,
+            }
+        }
+
+    monkeypatch.setattr(history_service, "_simulate_account", fake_simulate)
+
+    audit = history_service._scheduled_position_sizing_audit(orders, [], [])
+
+    assert audit["development_sample"]["signal_count"] == 1
+    assert audit["validation_sample"]["signal_count"] == 1
+    assert audit["development_variants"]["1"]["signal_count"] == 1
+    assert audit["validation_variants"]["1"]["signal_count"] == 1
+    assert audit["selected_by_development"] == 2
+    assert audit["selection_matches_frozen_policy"] is True
 
 
 def test_lane_ledger_api_accepts_date_and_board_lane(monkeypatch) -> None:
@@ -1309,8 +1462,8 @@ def test_history_backtest_api_accepts_shared_portfolio_scope(monkeypatch) -> Non
         lambda start, end, lane, exit_mode: {
             "status": "ready",
             "lane": lane,
-            "exit_mode": exit_mode,
-            "account_config": {"initial_cash": 100_000, "max_positions": 4},
+            "exit_mode": "next_1430" if lane == "portfolio" else exit_mode,
+            "account_config": {"initial_cash": 100_000, "max_positions": 2},
         },
     )
 
@@ -1321,8 +1474,9 @@ def test_history_backtest_api_accepts_shared_portfolio_scope(monkeypatch) -> Non
 
     assert response.status_code == 200
     assert response.json()["data"]["lane"] == "portfolio"
-    assert response.json()["data"]["exit_mode"] == "dynamic"
+    assert response.json()["data"]["exit_mode"] == "next_1430"
     assert response.json()["data"]["account_config"]["initial_cash"] == 100_000
+    assert response.json()["data"]["account_config"]["max_positions"] == 2
 
 
 def test_dynamic_lane_backtest_coalesces_repeated_requests(monkeypatch) -> None:

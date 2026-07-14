@@ -8,8 +8,6 @@ export type LimitUpLiveScope = "portfolio" | BoardLaneKey;
 
 const PORTFOLIO_LANES = new Set<BoardLaneKey>([
   "first_board",
-  "two_to_three",
-  "high_board",
 ]);
 
 export function liveSignalsForScope(
@@ -18,14 +16,28 @@ export function liveSignalsForScope(
 ): LimitUpLiveSignal[] {
   if (!snapshot) return [];
   if (scope === "portfolio" && snapshot.recommendations.portfolio !== undefined) {
-    const selected = new Map<string, LimitUpLiveSignal>();
-    for (const signal of [
-      ...snapshot.recommendations.portfolio,
-      ...(snapshot.recommendations.watchlist ?? []),
-    ]) {
-      if (!selected.has(signal.vt_symbol)) selected.set(signal.vt_symbol, signal);
+    const portfolio = new Map<string, LimitUpLiveSignal>();
+    for (const signal of snapshot.recommendations.portfolio) {
+      const lane = signal.board_lane ?? boardLaneForLevel(signal.board_level);
+      if (!PORTFOLIO_LANES.has(lane)) continue;
+      if (!portfolio.has(signal.vt_symbol)) portfolio.set(signal.vt_symbol, signal);
     }
-    return [...selected.values()].slice(0, 4);
+    const portfolioRows = [...portfolio.values()].slice(0, 2);
+    const selectedSymbols = new Set(portfolioRows.map((signal) => signal.vt_symbol));
+    const observations = new Map<string, LimitUpLiveSignal>();
+    for (const signal of snapshot.recommendations.watchlist ?? []) {
+      const lane = signal.board_lane ?? boardLaneForLevel(signal.board_level);
+      if (
+        !PORTFOLIO_LANES.has(lane)
+        || selectedSymbols.has(signal.vt_symbol)
+        || observations.has(signal.vt_symbol)
+      ) continue;
+      observations.set(signal.vt_symbol, signal);
+    }
+    const observationRows = [...observations.values()]
+      .sort(liveSignalSort)
+      .slice(0, 6);
+    return [...portfolioRows, ...observationRows].slice(0, 8);
   }
 
   const rows = Object.values(snapshot.recommendations.lanes).flat();
@@ -39,12 +51,8 @@ export function liveSignalsForScope(
     }
   }
   return [...selected.values()]
-    .sort((left, right) => (
-      actionPriority(left.action) - actionPriority(right.action)
-      || (left.market_dragon_rank ?? 99) - (right.market_dragon_rank ?? 99)
-      || left.vt_symbol.localeCompare(right.vt_symbol)
-    ))
-    .slice(0, 4);
+    .sort(liveSignalSort)
+    .slice(0, scope === "portfolio" ? 8 : 4);
 }
 
 function boardLaneForLevel(level: number): BoardLaneKey {
@@ -56,4 +64,25 @@ function boardLaneForLevel(level: number): BoardLaneKey {
 
 function actionPriority(action: string): number {
   return ({ buy_now: 0, observe: 1, next_auction: 2, wait_tail: 3, pass: 4 } as Record<string, number>)[action] ?? 5;
+}
+
+function liveSignalSort(left: LimitUpLiveSignal, right: LimitUpLiveSignal): number {
+  return (
+    signalPriority(left) - signalPriority(right)
+    || (left.concept_strength_rank ?? 9999) - (right.concept_strength_rank ?? 9999)
+    || (left.concept_leader_rank ?? 9999) - (right.concept_leader_rank ?? 9999)
+    || (left.distance_to_limit_pct ?? 99) - (right.distance_to_limit_pct ?? 99)
+    || (left.market_dragon_rank ?? 9999) - (right.market_dragon_rank ?? 9999)
+    || left.vt_symbol.localeCompare(right.vt_symbol)
+  );
+}
+
+function signalPriority(signal: LimitUpLiveSignal): number {
+  if (signal.signal_state === "trigger_ready" || signal.action === "buy_now") return 0;
+  if (signal.portfolio_selected) return 1;
+  if (signal.signal_state === "approaching_trigger") return 2;
+  if (signal.signal_state === "concept_warming") return 3;
+  if (signal.signal_state === "rejected") return 5;
+  if (signal.signal_state === "missed" || signal.signal_state === "invalidated") return 6;
+  return 4 + actionPriority(signal.action) / 10;
 }

@@ -66,6 +66,8 @@ def test_build_final_plan_keeps_only_next_auction_research_actions() -> None:
     assert result["target_session"] == "next_trading_session"
     assert result["plan_phase"] == "final"
     assert result["data_quality"]["is_stale"] is False
+    assert result["recommendations"]["execution_schedule"]["state"] == "next_session_wait"
+    assert "10:00" in result["recommendations"]["execution_schedule"]["message"]
     rows = result["recommendations"]["lanes"]["next_auction"]
     assert [row["vt_symbol"] for row in rows] == ["600001.SSE"]
     assert rows[0]["action"] == "observe"

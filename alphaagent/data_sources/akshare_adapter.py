@@ -25,6 +25,7 @@ from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Sequence
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -40,6 +41,9 @@ logger = logging.getLogger(__name__)
 QUOTE_TTL_SECONDS = 10
 LIST_TTL_SECONDS = 10
 FULL_LIST_TTL_SECONDS = 60
+FULL_MARKET_TTL_SECONDS = 20
+FULL_MARKET_PAGE_SIZE = 200
+FULL_MARKET_MAX_WORKERS = 6
 OVERVIEW_TTL_SECONDS = 30
 BARS_TTL_SECONDS = 600
 BUSINESS_TTL_SECONDS = 86400
@@ -48,6 +52,7 @@ SOURCE_STATUS_TTL_SECONDS = 60
 SW_TREE_TTL_SECONDS = 86400 * 7
 SW_CONSTITUENTS_TTL_SECONDS = 86400
 SW_CLASSIFY_TTL_SECONDS = 86400 * 3
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 class AkShareSourceError(RuntimeError):
@@ -254,6 +259,66 @@ class AkShareAdapter:
             "total": total,
             "source": "akshare.stock_zh_a_spot_tx",
             "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def all_stock_quotes(
+        self,
+        max_workers: int = FULL_MARKET_MAX_WORKERS,
+    ) -> dict[str, Any]:
+        """Return one complete A-share quote snapshot using bounded pagination."""
+
+        workers = min(max(int(max_workers), 1), FULL_MARKET_MAX_WORKERS)
+        return market_cache.get_or_set(
+            f"all_stock_quotes:{workers}",
+            FULL_MARKET_TTL_SECONDS,
+            lambda: self._all_stock_quotes_uncached(max_workers=workers),
+        )
+
+    def _all_stock_quotes_uncached(self, *, max_workers: int) -> dict[str, Any]:
+        module = importlib.import_module("akshare.stock.stock_zh_a_tx")
+        with _akshare_network_env():
+            first_page, total = _stock_zh_a_spot_tx_page(
+                module,
+                offset=0,
+                count=FULL_MARKET_PAGE_SIZE,
+                sort="price",
+            )
+            expected_rows = max(int(total or len(first_page)), len(first_page))
+            offsets = range(FULL_MARKET_PAGE_SIZE, expected_rows, FULL_MARKET_PAGE_SIZE)
+            frames = [first_page]
+            with ThreadPoolExecutor(
+                max_workers=min(max(int(max_workers), 1), FULL_MARKET_MAX_WORKERS),
+                thread_name_prefix="all-stock-quotes",
+            ) as executor:
+                futures = [
+                    executor.submit(
+                        _stock_zh_a_spot_tx_page,
+                        module,
+                        offset,
+                        FULL_MARKET_PAGE_SIZE,
+                        "price",
+                    )
+                    for offset in offsets
+                ]
+                for future in as_completed(futures):
+                    frame, _ = future.result()
+                    frames.append(frame)
+
+        rows: dict[str, dict[str, Any]] = {}
+        for frame in frames:
+            for raw_row in _all_records(frame):
+                item = _stock_row_to_api(raw_row)
+                symbol = str(item.get("vt_symbol") or "")
+                if symbol:
+                    rows[symbol] = item
+
+        captured_at = datetime.now(timezone.utc)
+        return {
+            "trade_date": captured_at.astimezone(SHANGHAI).date().isoformat(),
+            "updated_at": captured_at.isoformat(),
+            "items": list(rows.values()),
+            "total": len(rows),
+            "source": "tencent.full_a_share_pages",
         }
 
     def search_stocks(self, query: str, page_size: int = 50) -> dict[str, Any]:

@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
   BarChart3,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   CircleAlert,
@@ -25,12 +26,17 @@ import {
   fetchLimitUpHistoryLedger,
   fetchLimitUpLaneBacktest,
   fetchLimitUpLive,
-  type BoardLaneKey,
-  type LimitUpBacktestScope,
+  fetchLimitUpLiveTraceDates,
+  fetchLimitUpLiveTraceDay,
+  fetchLimitUpLiveTraceSymbol,
   type LimitUpLaneBacktest,
   type LimitUpLaneLedger,
   type LimitUpLaneLedgerTrade,
   type LimitUpLiveSignal,
+  type LimitUpLiveTraceDay,
+  type LimitUpLiveTraceEvent,
+  type LimitUpLiveTraceItem,
+  type LimitUpLiveTraceState,
   type LimitUpSignalSnapshot,
   type LimitUpTriggerCheck,
 } from "@/api/limitUp";
@@ -46,12 +52,16 @@ import {
 } from "@/features/limitUp/nextSessionPlan";
 import {
   liveSignalsForScope,
-  type LimitUpLiveScope,
 } from "@/features/limitUp/livePortfolio";
 import {
   firstBoardCompositeReasons,
   limitUpLaneLabel,
 } from "@/features/limitUp/limitUpPresentation";
+import {
+  liveTraceFunnelSummary,
+  liveTraceStatusLabel,
+  sortLiveTraceItems,
+} from "@/features/limitUp/liveTrace";
 import { useChartColors } from "@/lib/chart-theme";
 import { cn } from "@/lib/utils";
 
@@ -63,29 +73,10 @@ const PRIMARY_VIEWS: Array<{ value: PrimaryView; label: string; icon: typeof Act
   { value: "backtest", label: "回测", icon: BarChart3 },
 ];
 
-const BOARD_LANES: Array<{ value: BoardLaneKey; label: string }> = [
-  { value: "first_board", label: limitUpLaneLabel("first_board") },
-  { value: "one_to_two", label: limitUpLaneLabel("one_to_two") },
-  { value: "two_to_three", label: limitUpLaneLabel("two_to_three") },
-  { value: "high_board", label: limitUpLaneLabel("high_board") },
-];
-
-const LIVE_SCOPES: Array<{ value: LimitUpLiveScope; label: string }> = [
-  { value: "portfolio", label: "组合" },
-  ...BOARD_LANES,
-];
-
-const BACKTEST_SCOPES: Array<{ value: LimitUpBacktestScope; label: string }> = [
-  { value: "portfolio", label: "组合" },
-  ...BOARD_LANES,
-];
-
 export function LimitUpPage() {
   const [view, setView] = useState<PrimaryView>("live");
-  const [liveScope, setLiveScope] = useState<LimitUpLiveScope>("portfolio");
-  const [lane, setLane] = useState<BoardLaneKey>("first_board");
-  const [backtestScope, setBacktestScope] = useState<LimitUpBacktestScope>("portfolio");
   const [selectedDate, setSelectedDate] = useState("");
+  const [selectedTraceDate, setSelectedTraceDate] = useState("");
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
 
@@ -102,19 +93,35 @@ export function LimitUpPage() {
     refetchInterval: view === "live" ? 10_000 : false,
     refetchOnWindowFocus: true,
   });
+  const traceDatesQuery = useQuery({
+    queryKey: ["limitUpLiveTraceDates"],
+    queryFn: fetchLimitUpLiveTraceDates,
+    enabled: view === "live",
+    staleTime: 8_000,
+    refetchInterval: view === "live" ? 10_000 : false,
+    refetchOnWindowFocus: true,
+  });
+  const traceDayQuery = useQuery({
+    queryKey: ["limitUpLiveTraceDay", selectedTraceDate],
+    queryFn: () => fetchLimitUpLiveTraceDay(selectedTraceDate),
+    enabled: view === "live" && Boolean(selectedTraceDate),
+    staleTime: selectedTraceDate === traceDatesQuery.data?.latest ? 8_000 : Infinity,
+    refetchInterval: view === "live" && selectedTraceDate === traceDatesQuery.data?.latest ? 10_000 : false,
+    refetchOnWindowFocus: selectedTraceDate === traceDatesQuery.data?.latest,
+  });
   const ledgerQuery = useQuery({
-    queryKey: ["limitUpLaneLedger", selectedDate, lane],
-    queryFn: () => fetchLimitUpHistoryLedger({ date: selectedDate, lane }),
+    queryKey: ["limitUpScheduledLedger", selectedDate],
+    queryFn: () => fetchLimitUpHistoryLedger({ date: selectedDate }),
     enabled: view === "ledger" && Boolean(selectedDate),
     staleTime: Infinity,
     refetchOnWindowFocus: false,
   });
   const backtestQuery = useQuery({
-    queryKey: ["limitUpLaneBacktest", start, end, backtestScope],
+    queryKey: ["limitUpLaneBacktest", start, end, "portfolio"],
     queryFn: () => fetchLimitUpLaneBacktest({
       start: start === datesQuery.data?.start ? undefined : start,
       end: end === datesQuery.data?.end ? undefined : end,
-      lane: backtestScope,
+      lane: "portfolio",
     }),
     enabled: view === "backtest" && Boolean(start && end),
     staleTime: Infinity,
@@ -137,6 +144,12 @@ export function LimitUpPage() {
     if (!end && latest) setEnd(latest);
     if (!start && datesQuery.data?.start) setStart(datesQuery.data.start);
   }, [datesQuery.data?.latest, datesQuery.data?.start, end, selectedDate, start]);
+  useEffect(() => {
+    const traceDates = traceDatesQuery.data?.dates ?? [];
+    if (traceDates.length && (!selectedTraceDate || !traceDates.includes(selectedTraceDate))) {
+      setSelectedTraceDate(traceDatesQuery.data?.latest ?? traceDates[0]);
+    }
+  }, [selectedTraceDate, traceDatesQuery.data?.dates, traceDatesQuery.data?.latest]);
 
   const dates = datesQuery.data?.dates ?? [];
   const dateIndex = dates.indexOf(selectedDate);
@@ -173,10 +186,19 @@ export function LimitUpPage() {
               variant="outline"
               className="h-9 w-9"
               title="刷新实时推荐"
-              disabled={liveQuery.isFetching}
-              onClick={() => void liveQuery.refetch()}
+              disabled={liveQuery.isFetching || traceDatesQuery.isFetching || traceDayQuery.isFetching}
+              onClick={() => void Promise.all([
+                liveQuery.refetch(),
+                traceDatesQuery.refetch(),
+                ...(selectedTraceDate ? [traceDayQuery.refetch()] : []),
+              ])}
             >
-              <RefreshCw size={15} className={cn(liveQuery.isFetching && "animate-spin")} />
+              <RefreshCw
+                size={15}
+                className={cn(
+                  (liveQuery.isFetching || traceDatesQuery.isFetching || traceDayQuery.isFetching) && "animate-spin",
+                )}
+              />
             </Button>
           )}
         </div>
@@ -204,22 +226,23 @@ export function LimitUpPage() {
         })}
       </nav>
 
-      {view === "backtest" ? (
-        <BacktestScopeTabs value={backtestScope} onChange={setBacktestScope} />
-      ) : view === "live" ? (
-        <LiveScopeTabs value={liveScope} onChange={setLiveScope} />
-      ) : (
-        <LaneTabs value={lane} onChange={setLane} />
-      )}
-
       {activeError ? (
         <ErrorState message={activeError} onRetry={() => void refreshActive(view, liveQuery.refetch, ledgerQuery.refetch, backtestQuery.refetch)} />
       ) : view === "live" ? (
         <LiveView
           snapshot={liveQuery.data}
-          scope={liveScope}
           portfolioReport={portfolioBacktestQuery.data}
           loading={liveQuery.isLoading}
+          traceDates={traceDatesQuery.data?.dates ?? []}
+          selectedTraceDate={selectedTraceDate}
+          traceDay={traceDayQuery.data}
+          traceLoading={traceDatesQuery.isLoading || traceDayQuery.isLoading}
+          traceError={firstError(traceDatesQuery.error, traceDayQuery.error)}
+          onTraceDateChange={setSelectedTraceDate}
+          onTraceRetry={() => void Promise.all([
+            traceDatesQuery.refetch(),
+            ...(selectedTraceDate ? [traceDayQuery.refetch()] : []),
+          ])}
         />
       ) : view === "ledger" ? (
         <LedgerView ledger={ledgerQuery.data} loading={ledgerQuery.isLoading} />
@@ -237,78 +260,6 @@ export function LimitUpPage() {
           onRun={() => void backtestQuery.refetch()}
         />
       )}
-    </div>
-  );
-}
-
-function LiveScopeTabs({ value, onChange }: { value: LimitUpLiveScope; onChange: (scope: LimitUpLiveScope) => void }) {
-  return (
-    <div className="grid h-11 grid-cols-5 border-b" role="tablist" aria-label="实时组合与板位">
-      {LIVE_SCOPES.map((scope) => (
-        <button
-          key={scope.value}
-          type="button"
-          role="tab"
-          aria-selected={value === scope.value}
-          className={cn(
-            "border-r px-1 text-sm last:border-r-0 sm:px-2",
-            value === scope.value
-              ? "bg-foreground font-semibold text-background"
-              : "bg-background text-muted-foreground hover:bg-muted hover:text-foreground",
-          )}
-          onClick={() => onChange(scope.value)}
-        >
-          {scope.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function LaneTabs({ value, onChange }: { value: BoardLaneKey; onChange: (lane: BoardLaneKey) => void }) {
-  return (
-    <div className="grid h-11 grid-cols-4 border-b" role="tablist" aria-label="板位战法">
-      {BOARD_LANES.map((lane) => (
-        <button
-          key={lane.value}
-          type="button"
-          role="tab"
-          aria-selected={value === lane.value}
-          className={cn(
-            "border-r px-2 text-sm last:border-r-0",
-            value === lane.value
-              ? "bg-foreground font-semibold text-background"
-              : "bg-background text-muted-foreground hover:bg-muted hover:text-foreground",
-          )}
-          onClick={() => onChange(lane.value)}
-        >
-          {lane.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function BacktestScopeTabs({ value, onChange }: { value: LimitUpBacktestScope; onChange: (scope: LimitUpBacktestScope) => void }) {
-  return (
-    <div className="grid h-11 grid-cols-5 border-b" role="tablist" aria-label="回测范围">
-      {BACKTEST_SCOPES.map((scope) => (
-        <button
-          key={scope.value}
-          type="button"
-          role="tab"
-          aria-selected={value === scope.value}
-          className={cn(
-            "border-r px-1 text-sm last:border-r-0 sm:px-2",
-            value === scope.value
-              ? "bg-foreground font-semibold text-background"
-              : "bg-background text-muted-foreground hover:bg-muted hover:text-foreground",
-          )}
-          onClick={() => onChange(scope.value)}
-        >
-          {scope.label}
-        </button>
-      ))}
     </div>
   );
 }
@@ -331,75 +282,140 @@ function Freshness({ snapshot }: { snapshot?: LimitUpSignalSnapshot }) {
   );
 }
 
-function LiveView({ snapshot, scope, portfolioReport, loading }: { snapshot?: LimitUpSignalSnapshot; scope: LimitUpLiveScope; portfolioReport?: LimitUpLaneBacktest; loading: boolean }) {
-  const signals = useMemo(() => liveSignalsForScope(snapshot, scope), [scope, snapshot]);
-  if (loading) return <LoadingState rows={5} />;
-  if (!snapshot) return <EmptyRow text="当前没有实时快照" />;
+interface LiveViewProps {
+  snapshot?: LimitUpSignalSnapshot;
+  portfolioReport?: LimitUpLaneBacktest;
+  loading: boolean;
+  traceDates: string[];
+  selectedTraceDate: string;
+  traceDay?: LimitUpLiveTraceDay;
+  traceLoading: boolean;
+  traceError: string | null;
+  onTraceDateChange: (value: string) => void;
+  onTraceRetry: () => void;
+}
+
+function LiveView({
+  snapshot,
+  portfolioReport,
+  loading,
+  traceDates,
+  selectedTraceDate,
+  traceDay,
+  traceLoading,
+  traceError,
+  onTraceDateChange,
+  onTraceRetry,
+}: LiveViewProps) {
+  const signals = useMemo(() => liveSignalsForScope(snapshot, "portfolio"), [snapshot]);
+  const tracePanel = (
+    <LiveTracePanel
+      dates={traceDates}
+      selectedDate={selectedTraceDate}
+      day={traceDay}
+      loading={traceLoading}
+      error={traceError}
+      onDateChange={onTraceDateChange}
+      onRetry={onTraceRetry}
+    />
+  );
+  if (loading && !snapshot) {
+    return <section aria-label="实时推荐"><LoadingState rows={5} />{tracePanel}</section>;
+  }
+  if (!snapshot) {
+    return <section aria-label="实时推荐"><EmptyRow text="当前没有实时快照" />{tracePanel}</section>;
+  }
   const gate = snapshot.recommendations.market_gate;
-  const laneValidation = scope === "portfolio"
-    ? undefined
-    : snapshot.recommendations.board_lane_validations?.[scope];
   const planMode = isNextSessionPlan(snapshot);
   const header = liveHeader(snapshot);
   const plan = snapshot.recommendations.plan ?? snapshot.data_quality.plan;
-  const strictPortfolioCount = snapshot.recommendations.portfolio?.length ?? signals.length;
+  const strictPortfolioCount = snapshot.recommendations.portfolio?.length ?? Math.min(signals.length, 2);
   const watchlistCount = snapshot.recommendations.watchlist?.length ?? 0;
+  const lunchPaused = snapshot.session_stage === "lunch";
+  const waitingForRepair = gate.repair_state === "pending_repair";
+  const repairRevoked = gate.repair_state === "repair_revoked";
+  const schedule = snapshot.recommendations.execution_schedule;
   return (
     <section aria-label="实时推荐">
       <LivePortfolioBacktestStrip report={portfolioReport} />
+      {schedule && (
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b px-3 py-2 text-xs sm:px-4">
+          <span className={schedule.entry_allowed ? "font-semibold text-rise" : "font-medium text-foreground"}>{schedule.message}</span>
+          <span className="text-muted-foreground">两仓各 50% · D+1 14:30 卖出</span>
+          {schedule.target_at && <span className="ml-auto text-muted-foreground">下一节点 {formatTime(schedule.target_at)}</span>}
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b bg-muted/20 px-3 py-2 text-xs sm:px-4">
-        <span className={planMode ? presentationToneClass(header.tone) : gate.passed ? "text-rise" : "text-fall"}>
+        <span className={cn(
+          planMode
+            ? presentationToneClass(header.tone)
+            : lunchPaused
+              ? "text-amber-700 dark:text-amber-300"
+              : gate.passed
+                ? "text-rise"
+                : waitingForRepair
+                  ? "text-amber-700 dark:text-amber-300"
+                  : "text-fall",
+        )}>
           {planMode
             ? header.title
-            : gate.passed
-              ? "市场允许出手"
-              : `市场门关闭${gate.reasons.length ? `：${gate.reasons.join("；")}` : ""}`}
+            : lunchPaused
+              ? "午间休市：展示上午最后快照，13:00后恢复实时扫描"
+              : gate.passed
+                ? "市场允许出手"
+                : waitingForRepair
+                  ? `市场等待盘中修复${gate.reasons.length ? `：${gate.reasons.join("；")}` : ""}`
+                  : repairRevoked
+                    ? `市场修复已撤销${gate.repair_revoked_reason ? `：${gate.repair_revoked_reason}` : ""}`
+                    : `市场门关闭${gate.reasons.length ? `：${gate.reasons.join("；")}` : ""}`}
         </span>
         {planMode && (
           <span className="text-muted-foreground">
             来源 {snapshot.source_trade_date ?? plan?.source_trade_date ?? snapshot.trade_date}
           </span>
         )}
-        {!planMode && gate.repair_confirmed && <span className="text-rise">分歧修复已确认</span>}
-        {laneValidation && (
-          <span className={laneValidation.passed ? "text-rise" : "text-amber-700 dark:text-amber-300"}>
-            {laneValidation.passed ? "战法验证通过" : `战法仅观察：${laneValidation.reason}`}
+        {!planMode && gate.repair_confirmed && (
+          <span className="text-rise">
+            分歧修复已确认{gate.repair_confirmed_at ? ` · ${formatTime(gate.repair_confirmed_at)}` : ""}
           </span>
         )}
-        {scope === "portfolio" && (
-          <span className="text-muted-foreground">
-            {planMode ? "提前观察" : "可买组合"} {strictPortfolioCount} / 4
-            {!planMode && strictPortfolioCount === 0 && watchlistCount > 0 ? ` · 雷达候选 ${watchlistCount}` : ""}
-          </span>
-        )}
+        <span className="text-muted-foreground">
+          {planMode ? "提前观察" : "可买组合"} {strictPortfolioCount} / 2
+          {!planMode && strictPortfolioCount === 0 && watchlistCount > 0 ? ` · 雷达候选 ${watchlistCount}` : ""}
+        </span>
         <span className="ml-auto text-muted-foreground">
           封板 {snapshot.market_context.sealed_count ?? 0} · 炸板 {snapshot.market_context.failed_count ?? 0} · {snapshot.source}
         </span>
       </div>
       {signals.length ? (
         <div className="divide-y">
-          {signals.map((signal) => <LiveSignalRow key={signal.vt_symbol} signal={signal} stale={snapshot.data_quality.is_stale} />)}
+          {signals.map((signal) => (
+            <LiveSignalRow
+              key={signal.vt_symbol}
+              signal={signal}
+              stale={snapshot.data_quality.is_stale}
+              paused={lunchPaused}
+            />
+          ))}
         </div>
       ) : (
         <EmptyRow text={
-          scope === "portfolio"
-            ? "当前没有通过组合硬门的候选，保持空仓"
-            : scope === "first_board"
-              ? "综合首板暂无买点，保持空仓"
-            : planMode
-              ? "当前板位没有入选次交易时段的观察候选"
-              : "当前板位没有候选，保持空仓"
+          planMode
+            ? "当前没有入选次交易时段的综合首板观察候选"
+            : "综合首板暂无合格买点，保持现金"
         } />
       )}
+      {tracePanel}
     </section>
   );
 }
 
 function LivePortfolioBacktestStrip({ report }: { report?: LimitUpLaneBacktest }) {
   const summary = report?.summary;
+  const proxyOnly = report?.execution_comparability?.live_equivalent === false;
   return (
     <div className="flex min-h-10 flex-wrap items-center gap-x-5 gap-y-1 border-b px-3 py-2 text-xs tabular-nums sm:px-4">
-      <span className="font-medium text-foreground">10 万元组合验证</span>
+      <span className="font-medium text-foreground">10 万元 · 两仓连续评估</span>
       {summary ? (
         <>
           <span>期末 {formatCurrency(summary.final_equity)}</span>
@@ -407,6 +423,11 @@ function LivePortfolioBacktestStrip({ report }: { report?: LimitUpLaneBacktest }
           <span className={rateTone(summary.win_rate)}>胜率 {formatPct(summary.win_rate)}</span>
           <span className="text-fall">回撤 {formatPct(summary.max_drawdown_pct)}</span>
           <span className="text-muted-foreground">{summary.trade_count} 笔</span>
+          {proxyOnly && (
+            <span className="text-amber-700 dark:text-amber-300" title={report?.execution_comparability?.reason}>
+              候选代理 · 非实盘等价
+            </span>
+          )}
         </>
       ) : (
         <span className="text-muted-foreground">历史组合缓存读取中</span>
@@ -415,22 +436,33 @@ function LivePortfolioBacktestStrip({ report }: { report?: LimitUpLaneBacktest }
   );
 }
 
-function LiveSignalRow({ signal, stale }: { signal: LimitUpLiveSignal; stale: boolean }) {
-  const state = liveSignalPresentation(signal, stale);
+function LiveSignalRow({ signal, stale, paused }: { signal: LimitUpLiveSignal; stale: boolean; paused: boolean }) {
+  const state = liveSignalPresentation(signal, stale, paused);
   const actionable = state.tone === "positive";
   const observation = state.tone === "warning";
   const manualResearchTrigger = (
     !stale
+    && !paused
     && signal.signal_state === "trigger_ready"
     && signal.execution_permission === "research_only"
   );
   const factorSummary = liveFactorSummary(signal);
   const setupSummary = (signal.setup_tags ?? []).map(setupTagLabel).join(" · ");
   const strategyName = signal.strategy_name ?? setupSummary;
+  const primaryPendingReason = signal.pending_reasons?.[0];
+  const additionalPendingCount = Math.max((signal.pending_reasons?.length ?? 0) - 1, 0);
+  const conclusion = primaryPendingReason ?? signal.reason;
   const selectionReasons = [
     ...(signal.selection_reasons?.slice(0, 4).map(factorLabel) ?? []),
     ...firstBoardCompositeReasons(signal),
   ].slice(0, 5).join(" · ") || factorSummary;
+  const conceptEvidence = signal.concept_name
+    ? `${signal.concept_name} · 强度${signal.concept_strength_rank ?? "-"} · ${signal.concept_strong_5_count ?? 0}只涨超5% · 概念龙${signal.concept_leader_rank ?? "-"}`
+    : "概念共振待确认";
+  const conceptDegraded = (
+    (signal.concept_snapshot_age_seconds ?? 0) > 45
+    || (signal.concept_coverage_ratio ?? 1) < 0.9
+  );
   return (
     <article className={cn("border-l-2 px-3 py-3 sm:px-4", actionable ? "border-l-rise" : observation ? "border-l-amber-500" : "border-l-border")}>
       <div className="grid gap-3 lg:grid-cols-[minmax(180px,1.1fr)_minmax(160px,0.8fr)_minmax(300px,1.8fr)_minmax(150px,0.8fr)] lg:items-center">
@@ -438,7 +470,7 @@ function LiveSignalRow({ signal, stale }: { signal: LimitUpLiveSignal; stale: bo
           <StockIdentityLink
             name={signal.name}
             vtSymbol={signal.vt_symbol}
-            meta={`${signal.sector_name ?? "板块待确认"} · 龙${signal.market_dragon_rank ?? "-"}`}
+            meta={`${signal.concept_name ?? signal.sector_name ?? "板块待确认"} · 概念龙${signal.concept_leader_rank ?? "-"} · 市场${signal.market_dragon_rank ?? "-"}`}
           />
         </div>
         <div>
@@ -451,12 +483,22 @@ function LiveSignalRow({ signal, stale }: { signal: LimitUpLiveSignal; stale: bo
           </div>
         </div>
         <div className="min-w-0 text-xs leading-5">
+          <div className="font-medium text-foreground">{conceptEvidence}</div>
+          {conceptDegraded && (
+            <div className="text-fall">
+              概念快照 {formatNumber(signal.concept_snapshot_age_seconds, 0)} 秒 · 覆盖 {formatPct((signal.concept_coverage_ratio ?? 0) * 100)}
+            </div>
+          )}
           {strategyName && <div className="font-medium text-foreground">战法：{strategyName}</div>}
           {selectionReasons && <div className="text-foreground">入选：{selectionReasons}</div>}
           {manualResearchTrigger && (
             <div className="font-medium text-rise">人工买点已到；自动下单仍未开放</div>
           )}
-          {signal.reason && <div className="text-amber-700 dark:text-amber-300">结论：{signal.reason}</div>}
+          {conclusion && (
+            <div className="text-amber-700 dark:text-amber-300">
+              结论：{conclusion}{additionalPendingCount > 0 ? `（另有 ${additionalPendingCount} 项）` : ""}
+            </div>
+          )}
           <TriggerChecks checks={signal.trigger_checks} />
           {signal.board_lane === "first_board" && (
             <div className="text-muted-foreground">
@@ -466,9 +508,7 @@ function LiveSignalRow({ signal, stale }: { signal: LimitUpLiveSignal; stale: bo
           <div className="text-muted-foreground">买入：{signal.buy_instruction ?? signal.buy_condition ?? "条件待确认"}</div>
           <div className="text-muted-foreground">卖出：{signal.sell_instruction ?? signal.sell_condition ?? "D+1动态判断"}</div>
           <div className="text-muted-foreground">取消：{signal.cancel_checks?.join("；") ?? signal.cancel_condition}</div>
-          <div className="text-muted-foreground">
-            盘口：板块热度 {formatNumber(signal.sector_heat, 1)} · 换手 {formatPct(signal.turnover_rate)} · 封单 {formatAmount(signal.seal_amount)}
-          </div>
+          <div className="text-muted-foreground">盘口：换手 {formatPct(signal.turnover_rate)} · 封单 {formatAmount(signal.seal_amount)}</div>
         </div>
         <div className="grid grid-cols-2 gap-x-3 text-xs tabular-nums">
           <Metric label="TBOX" value={formatNumber(signal.historical_evidence?.tbox_score, 1)} tone={tboxTone(signal.historical_evidence?.tbox_score)} />
@@ -479,6 +519,345 @@ function LiveSignalRow({ signal, stale }: { signal: LimitUpLiveSignal; stale: bo
       </div>
     </article>
   );
+}
+
+interface LiveTracePanelProps {
+  dates: string[];
+  selectedDate: string;
+  day?: LimitUpLiveTraceDay;
+  loading: boolean;
+  error: string | null;
+  onDateChange: (value: string) => void;
+  onRetry: () => void;
+}
+
+function LiveTracePanel({
+  dates,
+  selectedDate,
+  day,
+  loading,
+  error,
+  onDateChange,
+  onRetry,
+}: LiveTracePanelProps) {
+  const items = useMemo(() => {
+    const scoped = (day?.items ?? []).filter((item) => item.board_lane === "first_board");
+    return sortLiveTraceItems(scoped);
+  }, [day?.items]);
+  const funnel = day?.lane_funnels?.first_board;
+  const funnelSummary = funnel ? liveTraceFunnelSummary(funnel) : null;
+
+  return (
+    <section className="border-t-4 border-double" aria-label="最近两交易日推荐轨迹">
+      <div className="flex flex-wrap items-center gap-3 border-b px-3 py-2 sm:px-4">
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold">当日轨迹</h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            {day
+              ? `${items.length} 只 · ${day.snapshot_count ?? 0} 次扫描${day.scan_error_count ? ` · ${day.scan_error_count} 次异常` : ""}`
+              : "保留推荐消失、买点触发、封板和炸板过程"}
+          </p>
+        </div>
+        <div className="ml-auto flex w-full min-w-0 border sm:w-auto" role="tablist" aria-label="轨迹交易日">
+          {dates.slice(0, 2).map((tradeDate, index) => (
+            <button
+              key={tradeDate}
+              type="button"
+              role="tab"
+              aria-selected={tradeDate === selectedDate}
+              className={cn(
+                "min-h-9 min-w-0 flex-1 border-r px-3 text-xs last:border-r-0 sm:min-w-[124px] sm:flex-none",
+                tradeDate === selectedDate
+                  ? "bg-foreground font-semibold text-background"
+                  : "bg-background text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+              onClick={() => onDateChange(tradeDate)}
+            >
+              <span>{index === 0 ? latestTraceDateLabel(tradeDate) : "上一交易日"}</span>
+              <span className="ml-1 tabular-nums opacity-75">{formatShortDate(tradeDate)}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {funnelSummary && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b bg-muted/20 px-3 py-2 text-xs sm:px-4">
+          {funnelSummary.stages.map((stage, index) => (
+            <span
+              key={stage}
+              className={index === 3 && funnel?.triggered_count === 0 ? "font-medium text-fall" : "text-muted-foreground"}
+            >
+              {stage}
+            </span>
+          ))}
+          <span className="sm:ml-auto text-amber-700 dark:text-amber-300">{funnelSummary.blockers}</span>
+        </div>
+      )}
+
+      {error ? (
+        <div className="flex min-h-16 items-center gap-3 border-b px-3 py-3 text-xs text-fall sm:px-4">
+          <CircleAlert size={15} className="shrink-0" />
+          <span className="min-w-0 flex-1 break-words">轨迹缓存读取失败：{error}</span>
+          <Button type="button" size="icon" variant="outline" className="h-8 w-8 shrink-0" title="重试轨迹查询" onClick={onRetry}>
+            <RefreshCw size={14} />
+          </Button>
+        </div>
+      ) : loading && !day ? (
+        <LoadingState rows={3} />
+      ) : dates.length === 0 ? (
+        <EmptyRow text="最近两个交易日尚无诊断扫描" />
+      ) : items.length === 0 ? (
+        <EmptyRow text={`${selectedDate || "所选交易日"} 当前板位没有进入 5% 预热雷达的股票`} />
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[1040px] table-fixed text-sm">
+            <thead className="border-b bg-muted/30 text-xs text-muted-foreground">
+              <tr>
+                <th className="w-10 px-2 py-2" aria-label="展开轨迹" />
+                <th className="w-44 px-2 py-2 text-left">股票</th>
+                <th className="w-20 px-2 py-2 text-left">板位</th>
+                <th className="w-24 px-2 py-2 text-left">首次发现</th>
+                <th className="w-40 px-2 py-2 text-left">最高状态</th>
+                <th className="w-40 px-2 py-2 text-left">最终状态</th>
+                <th className="w-28 px-2 py-2 text-right">最后盘口</th>
+                <th className="px-2 py-2 text-left">最后说明</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y">
+              {items.map((item) => (
+                <LiveTraceRow
+                  key={`${selectedDate}:${item.vt_symbol}`}
+                  tradeDate={selectedDate}
+                  item={item}
+                  latest={selectedDate === dates[0]}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function LiveTraceRow({
+  tradeDate,
+  item,
+  latest,
+}: {
+  tradeDate: string;
+  item: LimitUpLiveTraceItem;
+  latest: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const eventsQuery = useQuery({
+    queryKey: ["limitUpLiveTraceSymbol", tradeDate, item.vt_symbol],
+    queryFn: () => fetchLimitUpLiveTraceSymbol({ date: tradeDate, vtSymbol: item.vt_symbol }),
+    enabled: expanded,
+    staleTime: latest ? 8_000 : Infinity,
+    refetchInterval: expanded && latest ? 10_000 : false,
+    refetchOnWindowFocus: expanded && latest,
+  });
+
+  return (
+    <>
+      <tr className={cn(item.final_state === "trigger_ready" && "bg-rise/5")}>
+        <td className="px-2 py-2 align-middle">
+          <button
+            type="button"
+            className="flex h-7 w-7 items-center justify-center text-muted-foreground hover:bg-muted hover:text-foreground"
+            title={expanded ? "收起逐次轨迹" : "展开逐次轨迹"}
+            aria-label={expanded ? `收起 ${item.name} 逐次轨迹` : `展开 ${item.name} 逐次轨迹`}
+            aria-expanded={expanded}
+            onClick={() => setExpanded((value) => !value)}
+          >
+            {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+          </button>
+        </td>
+        <td className="px-2 py-2">
+          <StockIdentityLink
+            name={item.name || item.vt_symbol}
+            vtSymbol={item.vt_symbol}
+            meta={`${item.event_count} 次变化 · 最后 ${formatTime(item.last_seen_at)}`}
+          />
+        </td>
+        <td className="px-2 py-2 text-xs">{item.board_lane ? limitUpLaneLabel(item.board_lane) : `第${item.board_level ?? "-"}板`}</td>
+        <td className="px-2 py-2 text-xs tabular-nums">
+          <div>{formatTime(item.first_seen_at)}</div>
+          <div className="text-muted-foreground">首次进入雷达</div>
+        </td>
+        <td className={cn("px-2 py-2 text-xs font-medium", liveTraceTone(item.highest_state))}>
+          <div>{liveTraceStatusLabel(item.highest_state)}</div>
+          {item.triggered_at && <div className="mt-0.5 font-normal tabular-nums text-muted-foreground">触发 {formatTime(item.triggered_at)}</div>}
+        </td>
+        <td className={cn("px-2 py-2 text-xs font-medium", liveTraceTone(item.final_state))}>
+          {liveTraceStatusLabel(item.final_state)}
+        </td>
+        <td className="px-2 py-2 text-right text-xs tabular-nums">
+          <div>{formatPrice(item.last_price)}</div>
+          <div className={amountTone(item.change_pct)}>{formatPct(item.change_pct)}</div>
+        </td>
+        <td className="px-2 py-2 text-xs leading-5 text-muted-foreground">
+          <span className="line-clamp-2" title={item.reason}>{item.reason || "等待下一次状态变化"}</span>
+        </td>
+      </tr>
+      {expanded && (
+        <tr>
+          <td colSpan={8} className="border-t bg-muted/10 p-0">
+            <LiveTraceEvents
+              events={eventsQuery.data?.events}
+              loading={eventsQuery.isLoading}
+              error={firstError(eventsQuery.error)}
+              onRetry={() => void eventsQuery.refetch()}
+            />
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function LiveTraceEvents({
+  events,
+  loading,
+  error,
+  onRetry,
+}: {
+  events?: LimitUpLiveTraceEvent[];
+  loading: boolean;
+  error: string | null;
+  onRetry: () => void;
+}) {
+  if (loading && !events) return <LoadingState rows={2} />;
+  if (error) {
+    return (
+      <div className="flex min-h-12 items-center gap-3 px-12 py-2 text-xs text-fall">
+        <span className="flex-1">逐次轨迹读取失败：{error}</span>
+        <Button type="button" size="icon" variant="outline" className="h-7 w-7" title="重试逐次轨迹" onClick={onRetry}>
+          <RefreshCw size={13} />
+        </Button>
+      </div>
+    );
+  }
+  if (!events?.length) return <div className="px-12 py-3 text-xs text-muted-foreground">没有可展示的状态变化</div>;
+
+  return (
+    <ol className="divide-y px-10">
+      {events.map((event, index) => {
+        const evidence = traceEventEvidence(event);
+        return (
+          <li
+            key={`${event.captured_at}:${event.event}:${index}`}
+            className="grid grid-cols-[80px_150px_110px_minmax(0,1fr)] gap-3 px-2 py-2 text-xs leading-5"
+          >
+            <time className="tabular-nums text-muted-foreground">{formatTime(event.captured_at)}</time>
+            <span className={cn("font-medium", liveTraceTone(event.event))}>{liveTraceStatusLabel(event.event)}</span>
+            <span className="text-right tabular-nums">
+              {formatPrice(event.last_price)}
+              {event.change_pct != null ? ` · ${formatPct(event.change_pct)}` : ""}
+            </span>
+            <span className="min-w-0 text-muted-foreground">
+              <span className="text-foreground">{event.reason || "状态发生变化"}</span>
+              {evidence ? ` · ${evidence}` : ""}
+            </span>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function traceEventEvidence(event: LimitUpLiveTraceEvent): string {
+  const evidence = [
+    ...event.pending_reasons,
+    ...event.blockers.map(blockerLabel),
+    ...(event.market_gate_passed ? [] : event.market_gate_reasons),
+    ...event.trigger_checks
+      .filter((check) => check.status === "pending" || check.status === "failed")
+      .map((check) => `${check.label}${check.observed ? ` ${check.observed}` : ""}${check.required ? `（要求 ${check.required}）` : ""}`),
+  ].filter((value) => value && !event.reason.includes(value));
+  if (event.market_repair_state === "pending_repair") {
+    evidence.push("市场修复待确认");
+  } else if (event.market_repair_state === "repair_confirmed") {
+    evidence.push(`市场修复已确认${event.market_repair_confirmed_at ? ` ${formatTime(event.market_repair_confirmed_at)}` : ""}`);
+  } else if (event.market_repair_state === "repair_revoked") {
+    evidence.push("市场修复已撤销");
+  }
+  if (event.concept_name) {
+    evidence.push(
+      `${event.concept_name} 强度${event.concept_strength_rank ?? "-"} · ${event.concept_strong_5_count ?? 0}只涨超5% · 概念龙${event.concept_leader_rank ?? "-"}`,
+    );
+  }
+  if (event.sector_heat != null) evidence.push(`板块热度 ${formatNumber(event.sector_heat, 1)}`);
+  if (event.sector_touch_count != null) evidence.push(`板块触板 ${event.sector_touch_count}只`);
+  if (event.sector_main_net_inflow != null) evidence.push(`板块资金 ${formatAmount(event.sector_main_net_inflow)}`);
+  if (event.stock_main_net_inflow != null) evidence.push(`个股资金 ${formatAmount(event.stock_main_net_inflow)}`);
+  if (event.turnover_rate != null) evidence.push(`换手 ${formatPct(event.turnover_rate)}`);
+  if (event.seal_amount != null) evidence.push(`封单 ${formatAmount(event.seal_amount)}`);
+  if (event.seal_amount_retention_ratio != null) {
+    evidence.push(`封单保留 ${formatPct(event.seal_amount_retention_ratio * 100)}`);
+  }
+  if (event.seal_amount_change_pct != null) evidence.push(`封单变化 ${formatPct(event.seal_amount_change_pct)}`);
+  if (event.data_quality_status && event.data_quality_status !== "ready") {
+    evidence.push(`数据状态 ${event.data_quality_status}`);
+  }
+  return [...new Set(evidence)].join("；");
+}
+
+function blockerLabel(value: string): string {
+  return ({
+    high_board_prior_divergence_missing: "高板缺少前日分歧回封",
+    high_board_not_sector_core: "高板不是板块龙一",
+    high_board_requires_l2: "高板盘中接力缺少 L2 队列证据",
+    limit_up_gene_missing: "半年内缺少涨停基因",
+    first_board_touch_gene_weak: "半年触板不足 6 次",
+    financial_report_unavailable: "缺少信号日前已披露财报",
+    first_board_profit_growth_weak: "点时净利润同比低于 10%",
+    first_board_repair_setup_missing: "D-1 分歧修复条件未成立",
+    low_position_missing: "不属于低位或充分回调后的首次涨停",
+    first_touch_too_early: "10 点前仅观察，等待 10 点后确认",
+    industry_heat_unavailable: "缺少实时板块热度",
+    intraday_support_unavailable: "缺少信号时点盘中承接路径",
+    intraday_support_breakdown: "临近触板路径失速或回落",
+    first_board_local_setup_unconfirmed: "触板前承接结构未确认",
+    first_board_quality_below_threshold: "首板综合质量分不足",
+    intraday_support_out_of_range: "盘中承接区间未通过",
+    auction_gap_out_of_range: "竞价强度不在战法区间",
+    third_board_setup_unconfirmed: "三板分歧转强结构未确认",
+    two_to_three_risk_stack: "二进三可见风险达到 4 项",
+    fundamental_risk: "已披露基本面风险未通过",
+    lane_features_unavailable: "战法前置证据未就绪",
+    prior_board_evidence_missing: "缺少前一板盘口证据",
+    prior_board_path_incomplete: "前一板首封、开板或回封证据不完整",
+    industry_leader_rank_unverified: "行业龙位未确认",
+    stock_not_industry_top2: "不属于行业龙一或龙二",
+  } as Record<string, string>)[value] ?? value;
+}
+
+function liveTraceTone(state: LimitUpLiveTraceState): string {
+  if (state === "trigger_ready") return "text-rise";
+  if (state === "concept_warming" || state === "approaching_trigger" || state === "missed" || state === "sealed" || state === "resealed") {
+    return "text-amber-700 dark:text-amber-300";
+  }
+  if (state === "failed" || state === "rejected" || state === "invalidated") return "text-fall";
+  return "text-muted-foreground";
+}
+
+function latestTraceDateLabel(tradeDate: string): string {
+  return tradeDate === shanghaiDate(new Date()) ? "今天" : "最近交易日";
+}
+
+function shanghaiDate(value: Date): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(value);
+}
+
+function formatShortDate(value: string): string {
+  return value.length >= 10 ? value.slice(5) : value;
 }
 
 function LedgerView({ ledger, loading }: { ledger?: LimitUpLaneLedger; loading: boolean }) {
@@ -494,7 +873,7 @@ function LedgerView({ ledger, loading }: { ledger?: LimitUpLaneLedger; loading: 
         <span className={observationOnly ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground"}>
           {observationOnly
             ? `研究观察 ${observations.length} 只，不计入正式交割${ledger.validation?.reason ? `：${ledger.validation.reason}` : ""}`
-            : `正式交割 ${ledger.selected_count} 只 · 系统动态退出`}
+            : `连续评估交割 ${ledger.selected_count} 只 · D+1 14:30 卖出`}
         </span>
       </div>
       {displayRows.length ? (
@@ -537,7 +916,7 @@ function LedgerTradeRow({ trade }: { trade: LimitUpLaneLedgerTrade }) {
           </div>
         )}
       </td>
-      <td className="px-3 py-3 text-xs tabular-nums"><div>{trade.sell_date ?? "待 D+1"} {trade.sell_time ?? ""}</div><div className="text-muted-foreground">{formatPrice(trade.sell_price)} · {dynamicExitLabel(trade.dynamic_exit?.mode)}</div>{trade.dynamic_exit?.reason && <div className="mt-1 max-w-64 text-muted-foreground">{trade.dynamic_exit.reason}</div>}</td>
+      <td className="px-3 py-3 text-xs tabular-nums"><div>{trade.sell_date ?? "待 D+1"} {trade.sell_time ?? ""}</div><div className="text-muted-foreground">{formatPrice(trade.sell_price)} · {trade.exit_price_proxy ? "收盘代理" : "固定 14:30"}</div></td>
       <td className={cn("px-3 py-3 text-xs font-medium", trade.d_board_status === "sealed" ? "text-rise" : "text-fall")}>{boardStatusLabel(trade.d_board_status)}</td>
       <td className="px-3 py-3 text-xs">{d1OutcomeLabel(trade.d1_outcome)}</td>
       <td className={cn("px-3 py-3 text-right font-semibold tabular-nums", amountTone(trade.return_pct))}>{formatPct(trade.return_pct)}</td>
@@ -567,18 +946,18 @@ function BacktestView({ report, loading, fetching, start, end, minimumDate, maxi
       <div className="flex flex-wrap items-end gap-2 border-b px-3 py-3 sm:px-4">
         <DateInput label="开始" value={start} min={minimumDate} max={maximumDate} onChange={onStart} />
         <DateInput label="结束" value={end} min={minimumDate} max={maximumDate} onChange={onEnd} />
-        <div className="h-9 border bg-muted/20 px-3 text-xs leading-9 text-muted-foreground">系统动态退出</div>
+        <div className="h-9 border bg-muted/20 px-3 text-xs leading-9 text-muted-foreground">连续评估 / D+1 14:30</div>
         <Button type="button" size="icon" variant="outline" className="h-9 w-9" title="运行回测" disabled={fetching} onClick={onRun}>
           <RefreshCw size={15} className={cn(fetching && "animate-spin")} />
         </Button>
         <div className="ml-auto pb-1 text-xs tabular-nums text-muted-foreground">
-          10 万元 · 最多 4 仓 · 100 股整数手 · 含费用滑点
+          10 万元 · 两仓各 50% · 100 股整数手 · 含费用滑点
         </div>
       </div>
 
       <div className="grid grid-cols-2 border-b sm:grid-cols-3 xl:grid-cols-6">
         <SummaryCell label="期末权益" value={formatCurrency(summary?.final_equity)} detail={`初始 ${formatCurrency(summary?.initial_cash)}`} />
-        <SummaryCell label="实盘复利" value={formatPct(summary?.total_return_pct)} tone={amountTone(summary?.total_return_pct)} detail={`费用 ${formatCurrency(summary?.total_fees)}`} />
+        <SummaryCell label="账户复利" value={formatPct(summary?.total_return_pct)} tone={amountTone(summary?.total_return_pct)} detail={`费用 ${formatCurrency(summary?.total_fees)}`} />
         <SummaryCell label="成交胜率" value={formatPct(summary?.win_rate)} tone={rateTone(summary?.win_rate)} detail={`闭合 ${summary?.trade_count ?? 0} · 未平 ${summary?.open_position_count ?? 0}`} />
         <SummaryCell label="最大回撤" value={formatPct(summary?.max_drawdown_pct)} tone="text-fall" />
         <SummaryCell label="平均仓位" value={formatPct(summary?.average_utilization_pct)} detail={`峰值 ${formatPct(summary?.peak_utilization_pct)}`} />
@@ -588,17 +967,43 @@ function BacktestView({ report, loading, fetching, start, end, minimumDate, maxi
       {report && <SignalSummaryStrip report={report} />}
       {report && (
         <div className="border-b px-3 py-2 text-xs text-muted-foreground sm:px-4">
-          动态退出 · 竞价 {report.exit_summary.auction_exit_count} 笔 · 尾盘 {report.exit_summary.tail_exit_count} 笔
+          买入 {report.execution_schedule?.entry_windows.join(" / ") ?? "连续盘中"} · D+1 {report.execution_schedule?.exit_time ?? "14:30"} 卖出 ·
+          精确分钟价 {report.coverage.minute_1430_count ?? 0} · 收盘代理 {report.coverage.daily_close_proxy_count ?? 0}
+          {report.execution_comparability?.live_equivalent === false && (
+            <span className="ml-3 text-amber-700 dark:text-amber-300" title={report.execution_comparability.reason}>
+              候选代理，盘中资金门未历史重放
+            </span>
+          )}
         </div>
       )}
       {report?.lane === "portfolio" ? (
-        <div className="border-b px-3 py-2 text-xs text-muted-foreground sm:px-4">执行综合首板 / 二进三 / 高板 · 一进二仅研究 · 共享现金 / 4 仓</div>
+        <div className="border-b px-3 py-2 text-xs text-muted-foreground sm:px-4">综合首板 · 完整候选池按到达时间成交 · 两仓各 50% · 不用杂毛补仓</div>
       ) : null}
+      {report && <RobustnessStrip report={report} />}
       {report && <ValidationStrip report={report} />}
       {report?.daily_results.length ? <EquityChart report={report} /> : <EmptyRow text="当前范围没有账户权益记录" />}
       {report && <BacktestTrades report={report} />}
       {report && <SkippedOrders report={report} />}
     </section>
+  );
+}
+
+function RobustnessStrip({ report }: { report: LimitUpLaneBacktest }) {
+  const doubleCost = report.stress_tests?.double_cost;
+  const failedOnly = report.stress_tests?.failed_board_only_fill;
+  const sizing = report.position_sizing_audit;
+  if (!doubleCost && !failedOnly && !sizing) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b bg-muted/20 px-3 py-2 text-xs sm:px-4">
+      <span className="font-medium text-foreground">压力测试</span>
+      {doubleCost && <span className={amountTone(doubleCost.total_return_pct)}>双倍成本 {formatPct(doubleCost.total_return_pct)}</span>}
+      {failedOnly && <span className={amountTone(failedOnly.total_return_pct)}>只成交炸板 {formatPct(failedOnly.total_return_pct)}</span>}
+      {sizing && (
+        <span className="text-muted-foreground">
+          开发期选择 {sizing.selected_max_positions} 仓 · 单仓回撤 {formatPct(sizing.development_variants["1"]?.max_drawdown_pct)} · 后段只验证
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -619,7 +1024,7 @@ function ValidationStrip({ report }: { report: LimitUpLaneBacktest }) {
   return (
     <div className="grid border-b lg:grid-cols-[180px_repeat(3,minmax(0,1fr))]">
       <div className="border-b px-3 py-3 lg:border-b-0 lg:border-r sm:px-4">
-        <div className={cn("text-sm font-semibold", report.validation.passed ? "text-rise" : "text-fall")}>{report.validation.passed ? "验证通过" : "研究中，不可自动执行"}</div>
+        <div className={cn("text-sm font-semibold", report.validation.passed ? "text-rise" : "text-fall")}>{report.validation.passed ? "验证通过" : "研究账户，人工确认"}</div>
         <div className="mt-1 text-xs text-muted-foreground">分时路径 {report.coverage.intraday_path_trade_days ?? 0} 日</div>
       </div>
       {report.validation.checks.map((check) => (
@@ -661,7 +1066,7 @@ function BacktestTrades({ report }: { report: LimitUpLaneBacktest }) {
         <tbody className="divide-y">
           {trades.map((trade) => (
             <tr key={`${trade.buy_date}:${trade.vt_symbol}:${trade.sell_date}`}>
-              <td className="px-3 py-3 text-xs tabular-nums"><div>{trade.buy_date} {trade.buy_time}</div><div className="text-muted-foreground">{trade.sell_date} {trade.sell_time} · {exitReasonLabel(trade.exit_reason)}</div></td>
+              <td className="px-3 py-3 text-xs tabular-nums"><div>{trade.buy_date} {trade.buy_time}</div><div className="text-muted-foreground">{trade.sell_date} {trade.sell_time} · {exitReasonLabel(trade.exit_reason)}{trade.exit_price_proxy ? " · 收盘代理" : ""}</div></td>
               <td className="px-3 py-3"><StockIdentityLink name={trade.name} vtSymbol={trade.vt_symbol} meta={trade.industry_name ?? "行业待确认"} /></td>
               <td className="px-3 py-3 text-xs tabular-nums"><div>{trade.volume} 股 · {formatPrice(trade.buy_price)}</div><div className="text-muted-foreground">卖出 {formatPrice(trade.sell_price)}</div></td>
               <td className="px-3 py-3 text-xs"><div className={trade.d_board_status === "sealed" ? "text-rise" : "text-fall"}>{boardStatusLabel(trade.d_board_status)}</div><div className="text-muted-foreground">{d1OutcomeLabel(trade.d1_outcome)}</div></td>
@@ -722,17 +1127,15 @@ function Metric({ label, value, tone }: { label: string; value: string; tone?: s
 
 function TriggerChecks({ checks = [] }: { checks?: LimitUpTriggerCheck[] }) {
   if (!checks.length) return null;
-  const unresolved = checks.filter((check) => check.status !== "passed");
+  const unresolved = checks.filter((check) => check.status === "pending" || check.status === "failed");
   if (!unresolved.length) return <div className="text-rise">触发检查：全部通过</div>;
+  const [primary] = unresolved;
   return (
     <div className="text-muted-foreground">
-      {unresolved.map((check) => (
-        <div key={check.code}>
-          {check.status === "failed" ? "未通过" : "待确认"}：{check.label}
-          {check.observed ? ` ${check.observed}` : ""}
-          {check.required ? `（要求 ${check.required}）` : ""}
-        </div>
-      ))}
+      {primary.status === "failed" ? "未通过" : "待确认"}：{primary.label}
+      {primary.observed ? ` ${primary.observed}` : ""}
+      {primary.required ? `（要求 ${primary.required}）` : ""}
+      {unresolved.length > 1 ? ` · 另有 ${unresolved.length - 1} 项` : ""}
     </div>
   );
 }
@@ -747,11 +1150,10 @@ function EmptyRow({ text }: { text: string }) {
 
 function presentationToneClass(tone: PresentationTone) { return ({ positive: "text-rise", warning: "text-amber-700 dark:text-amber-300", negative: "text-fall", neutral: "text-foreground" } as Record<PresentationTone, string>)[tone]; }
 function entryKindLabel(value: string) { return (({ none: "不执行", auction: "竞价", sweep: "扫板", reseal: "回封", tail_seal: "尾盘封板", next_auction: "竞价接力", first_touch: "首次触板", intraday: "盘中", wait: "等待确认" } as Record<string, string>)[value] ?? value) || "--"; }
-function phaseLabel(value?: string) { return ({ warmup: "预热期", expanding_oos: "滚动样本外", locked_holdout: "锁定留出", post_freeze_forward: "冻结后前向" } as Record<string, string>)[value ?? ""] ?? value ?? "阶段未知"; }
+function phaseLabel(value?: string) { return ({ warmup: "预热期", earlier_history: "更早历史稳健性", design_sample: "前段设计样本", time_validation: "后段时间验证", expanding_oos: "滚动样本外", locked_holdout: "锁定留出", post_freeze_forward: "冻结后前向" } as Record<string, string>)[value ?? ""] ?? value ?? "阶段未知"; }
 function d1OutcomeLabel(value: string) { return ({ continuation_limit_up: "D+1 连板", next_limit_up_after_failed_board: "D+1 涨停", d1_premium: "D+1 有溢价", direct_breakdown: "D+1 直接砸", no_premium: "D+1 无溢价", awaiting_d1_bar: "待 D+1" } as Record<string, string>)[value] ?? value; }
 function boardStatusLabel(value: string) { return ({ sealed: "封住", failed: "触板后炸板", no_limit: "未触板" } as Record<string, string>)[value] ?? value; }
-function exitReasonLabel(value: string) { return ({ dynamic_auction_exit: "动态竞价兑现", dynamic_tail_exit: "动态尾盘退出", planned_open: "开盘退出", planned_close: "收盘退出", emergency_close: "开盘未成后收盘退出", retry_open: "延期至开盘退出", retry_close: "延期至收盘退出" } as Record<string, string>)[value] ?? value; }
-function dynamicExitLabel(value?: string) { return ({ auction_exit: "竞价兑现", tail_exit: "尾盘退出" } as Record<string, string>)[value ?? ""] ?? "动态判断"; }
+function exitReasonLabel(value: string) { return ({ dynamic_auction_exit: "动态竞价兑现", dynamic_tail_exit: "动态尾盘退出", planned_open: "开盘退出", planned_close: "收盘退出", planned_1430: "14:30退出", emergency_close: "开盘未成后收盘退出", retry_open: "延期至开盘退出", retry_close: "延期至收盘退出" } as Record<string, string>)[value] ?? value; }
 function setupTagLabel(value: string) { return ({ sandwich_board: "夹板", return_board: "回马板", weak_to_strong_breakout: "弱转强突破", dragon_first_negative_relay: "龙首阴接力", dragon_weak_to_strong: "龙头弱转强", anti_nuclear_board: "反核板" } as Record<string, string>)[value] ?? value; }
 function skipReasonLabel(value: string) { return ({ position_limit: "持仓已满", insufficient_cash: "现金不足", below_one_lot: "目标仓位不足一手", duplicate_position: "已有同股持仓", invalid_entry_price: "买入价无效" } as Record<string, string>)[value] ?? value; }
 function twoToThreeQualityLabel(tier?: "A" | "B" | null, riskCount?: number | null) { const quality = tier ?? "B"; const risks = riskCount ?? 0; return `${quality}级${risks > 0 ? ` · 风险${risks}` : ""}`; }

@@ -203,6 +203,47 @@ def test_a_share_spot_uses_prefixed_exchange_for_bse(monkeypatch) -> None:
     assert item["vt_symbol"] == "920206.BSE"
 
 
+def test_all_stock_quotes_fetches_every_page_and_deduplicates(monkeypatch) -> None:
+    import alphaagent.data_sources.akshare_adapter as adapter_module
+
+    pages = {
+        0: ([{"code": "sh600000", "name": "浦发银行", "zxj": "10", "zdf": "1"}], 401),
+        200: ([{"code": "sz000001", "name": "平安银行", "zxj": "11", "zdf": "2"}], 401),
+        400: ([{"code": "sh600000", "name": "浦发银行", "zxj": "10", "zdf": "1"}], 401),
+    }
+
+    def fake_page(_module, offset, count, sort="price"):
+        assert count == 200
+        assert sort == "price"
+        rows, total = pages[offset]
+        return pd.DataFrame(rows), total
+
+    monkeypatch.setattr(adapter_module, "_stock_zh_a_spot_tx_page", fake_page)
+
+    payload = adapter_module.AkShareAdapter()._all_stock_quotes_uncached(max_workers=2)
+
+    assert payload["total"] == 2
+    assert {item["vt_symbol"] for item in payload["items"]} == {
+        "600000.SSE",
+        "000001.SZSE",
+    }
+    assert payload["source"] == "tencent.full_a_share_pages"
+
+
+def test_all_stock_quotes_rejects_a_partial_page_failure(monkeypatch) -> None:
+    import alphaagent.data_sources.akshare_adapter as adapter_module
+
+    def fake_page(_module, offset, count, sort="price"):
+        if offset:
+            raise TimeoutError("page timed out")
+        return pd.DataFrame([{"code": "sh600000", "name": "浦发银行"}]), 201
+
+    monkeypatch.setattr(adapter_module, "_stock_zh_a_spot_tx_page", fake_page)
+
+    with pytest.raises(TimeoutError, match="page timed out"):
+        adapter_module.AkShareAdapter()._all_stock_quotes_uncached(max_workers=2)
+
+
 def test_stock_detail_uses_fast_tencent_quote(monkeypatch) -> None:
     market_cache.clear()
     adapter = AkShareAdapter()

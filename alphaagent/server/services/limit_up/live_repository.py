@@ -33,6 +33,18 @@ LIVE_CONTEXT_SECTOR_TYPES = (*RESEARCH_SECTOR_TYPES, "concept")
 CONCEPT_GROUP_CACHE_SECONDS = 900
 _CONCEPT_GROUP_CACHE = TTLCache(max_items=2)
 STYLE_SECTOR_KEYWORDS = (
+    "MSCI",
+    "中证",
+    "沪深300",
+    "上证50",
+    "深证100",
+    "大盘股",
+    "中盘股",
+    "小盘股",
+    "成长",
+    "价值",
+    "风格",
+    "热股",
     "昨日",
     "近期",
     "涨停",
@@ -45,6 +57,11 @@ STYLE_SECTOR_KEYWORDS = (
     "基金重仓",
     "成份股",
     "成分股",
+    "年报",
+    "季报",
+    "预增",
+    "扭亏",
+    "高振幅",
     "HS300",
 )
 
@@ -640,7 +657,7 @@ def _best_membership(
     usable = [
         row
         for row in rows
-        if str(row.get("sector_type") or "") in RESEARCH_SECTOR_TYPES
+        if str(row.get("sector_type") or "") == "industry"
         and _is_trade_sector(str(row.get("sector_name") or ""))
     ]
     if not usable:
@@ -648,7 +665,6 @@ def _best_membership(
     return max(
         usable,
         key=lambda row: (
-            1 if str(row.get("sector_type") or "") == "theme" else 0,
             _number(scores.get(str(row.get("sector_id") or ""), {}).get("heat_score")) or -1.0,
             _number(flows.get(str(row.get("sector_id") or ""), {}).get("main_net_inflow")) or -1e30,
             1 if row.get("is_precise") else 0,

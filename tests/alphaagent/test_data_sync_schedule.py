@@ -86,6 +86,7 @@ def test_default_batch_schedules_defined():
     ids = {s["id"] for s in svc.DEFAULT_BATCH_SCHEDULES}
     assert ids == {
         "auction_0926",
+        "limit_up_concept_scan",
         "limit_up_live_scan",
         "intraday_hourly",
         "tail_quant_1430",
@@ -315,7 +316,7 @@ def test_seed_default_registry_clears_stale_partial_summary(monkeypatch):
             "last_status": "partial",
             "last_started_at": datetime(2026, 7, 7, 21, 30),
             "last_finished_at": datetime(2026, 7, 7, 21, 40),
-            "last_message": "6 成功 / 1 失败",
+            "last_message": "7 成功 / 1 失败",
         },
     }
 
@@ -365,7 +366,7 @@ def test_seed_default_registry_clears_stale_partial_summary(monkeypatch):
     assert rows["eod_1900"]["last_finished_at"] is None
     assert rows["eod_1900"]["last_message"] is None
     assert rows["eod_finalize_2130"]["last_status"] == "partial"
-    assert rows["eod_finalize_2130"]["last_message"] == "6 成功 / 1 失败"
+    assert rows["eod_finalize_2130"]["last_message"] == "7 成功 / 1 失败"
 
 
 def test_seed_default_registry_deletes_legacy_eod_18h(monkeypatch):
@@ -458,6 +459,25 @@ def test_limit_up_live_scan_is_a_separate_append_only_schedule():
     assert svc.SCHEDULER_TICK_SECONDS <= 5
 
 
+def test_limit_up_concept_scan_is_independent_and_throttled_to_30_seconds():
+    schedule = next(
+        item
+        for item in svc.DEFAULT_BATCH_SCHEDULES
+        if item["id"] == "limit_up_concept_scan"
+    )
+
+    assert schedule["action"] == "limit_up_concept_scan"
+    assert schedule["cron"] == "* 9-14 * * 1-5"
+    assert schedule["job_ids"] == []
+    assert svc.CONCEPT_REFRESH_SECONDS == 30
+
+
+def test_stock_sector_reverse_index_is_frozen_daily():
+    cadence = svc.JOB_CADENCES["sync_stock_sector_memberships"]
+
+    assert cadence.cadence == svc.CADENCE_EOD_DAILY
+
+
 def test_next_session_plan_has_preliminary_and_final_schedule_paths():
     preliminary = next(
         schedule
@@ -474,8 +494,10 @@ def test_next_session_plan_has_preliminary_and_final_schedule_paths():
     assert preliminary["cron"] == "5 15 * * 1-5"
     assert preliminary["action"] == "sync"
     assert preliminary["job_ids"] == [svc.LIMIT_UP_NEXT_SESSION_PLAN_PRELIMINARY_BATCH_JOB_ID]
-    assert eod["job_ids"][-1] == svc.LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID
-    assert finalize["job_ids"][-1] == svc.LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID
+    assert eod["job_ids"][-2] == svc.LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID
+    assert finalize["job_ids"][-2] == svc.LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID
+    assert eod["job_ids"][-1] == svc.LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID
+    assert finalize["job_ids"][-1] == svc.LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID
 
 
 def test_next_session_plan_batch_job_uses_persisted_quality_status(monkeypatch):
@@ -492,6 +514,17 @@ def test_next_session_plan_batch_job_uses_persisted_quality_status(monkeypatch):
 
     assert result["status"] == "ready"
     assert result["rows_written"] == 1
+
+
+def test_live_trace_prune_batch_job_reports_deleted_rows(monkeypatch):
+    monkeypatch.setattr(svc, "prune_live_trace_snapshots", lambda: 321, raising=False)
+
+    result = svc._run_limit_up_live_trace_prune_batch_job()
+
+    assert result["rows_read"] == 321
+    assert result["rows_written"] == 321
+    assert result["status"] == "succeeded"
+    assert "最近2个交易日" in result["message"]
 
 
 def test_limit_up_live_scan_window_starts_at_0915():
@@ -546,6 +579,7 @@ def test_eod_schedule_runs_formal_quant_before_slow_enrichment():
         "sync_stock_financial_indicators",
         "sync_stock_business_segments_history",
         svc.LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID,
+        svc.LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID,
     ]
 
 
@@ -563,6 +597,7 @@ def test_eod_finalize_schedule_retries_daily_bars_late_without_slow_jobs():
         "sync_limit_up_event_minutes",
         svc.LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID,
         svc.LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID,
+        svc.LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID,
     ]
     assert "sync_stock_financial_quarterly" not in jobs
     assert "sync_stock_lhb_records" not in jobs
@@ -2329,6 +2364,54 @@ def test_scheduler_does_not_scan_limit_up_during_lunch(monkeypatch):
     svc._run_scheduled_jobs()
 
     assert refreshed == []
+
+
+def test_scheduler_refreshes_concepts_without_blocking_live_scan(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(
+        svc,
+        "refresh_live_concept_snapshot",
+        lambda: calls.append("concept")
+        or {"data_quality": {"status": "ready"}, "concept_count": 498},
+    )
+    monkeypatch.setattr(svc, "_touch_schedule", lambda *args, **kwargs: None)
+
+    result = svc._run_schedule_action(
+        {"id": "limit_up_concept_scan", "action": "limit_up_concept_scan"}
+    )
+
+    assert calls == ["concept"]
+    assert result["concept_count"] == 498
+
+
+def test_scheduler_does_not_refresh_concepts_during_lunch(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(
+        svc,
+        "refresh_live_concept_snapshot",
+        lambda: calls.append("concept") or {},
+    )
+    monkeypatch.setattr(
+        svc,
+        "_load_batch_schedules",
+        lambda: [
+            {
+                "id": "limit_up_concept_scan",
+                "cron": "* 9-14 * * 1-5",
+                "action": "limit_up_concept_scan",
+                "last_started_at": None,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        svc,
+        "_now_china",
+        lambda: datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc),
+    )
+
+    svc._run_scheduled_jobs()
+
+    assert calls == []
 
 
 def test_live_scan_reports_stale_result_as_skipped(monkeypatch):

@@ -281,6 +281,160 @@ def test_fixed_exit_mode_does_not_report_dynamic_reason() -> None:
     assert trade["exit_reason"] == "planned_close"
 
 
+def test_next_1430_exit_uses_visible_price_and_retains_source() -> None:
+    exit_bar = _bar("600001.SSE", "2026-01-05", 10.5, 11.0)
+    exit_bar.update(
+        {
+            "price_1430": 10.8,
+            "price_1430_source": "minute_1430",
+        }
+    )
+    result = simulate_limit_up_account(
+        signals=[
+            _signal(
+                "600001.SSE",
+                "2026-01-02",
+                "2026-01-05",
+                buy_time="10:05:00",
+                lane="first_board",
+                signal_kind="first_touch",
+                limit_price=10.0,
+            )
+        ],
+        bars=[
+            _bar("600001.SSE", "2026-01-02", 9.8, 10.0),
+            exit_bar,
+        ],
+        trade_dates=_dates("2026-01-02", "2026-01-05"),
+        exit_mode="next_1430",
+        config=CashBacktestConfig(initial_cash=100_000, max_positions=2),
+    )
+
+    trade = result["executed_trades"][0]
+    assert trade["sell_time"] == "14:30:00"
+    assert trade["exit_reason"] == "planned_1430"
+    assert trade["exit_price_source"] == "minute_1430"
+    assert trade["exit_price_proxy"] is False
+
+
+def test_next_1430_sale_cash_cannot_fund_same_day_morning_buy() -> None:
+    old_exit_bar = _bar("600001.SSE", "2026-01-05", 10.5, 11.0)
+    old_exit_bar.update(
+        {
+            "price_1430": 10.8,
+            "price_1430_source": "minute_1430",
+        }
+    )
+    new_exit_bar = _bar("600002.SSE", "2026-01-06", 10.5, 11.0)
+    new_exit_bar.update(
+        {
+            "price_1430": 10.8,
+            "price_1430_source": "minute_1430",
+        }
+    )
+    result = simulate_limit_up_account(
+        signals=[
+            _signal(
+                "600001.SSE",
+                "2026-01-02",
+                "2026-01-05",
+                buy_time="10:05:00",
+                lane="first_board",
+                signal_kind="first_touch",
+                limit_price=10.0,
+            ),
+            _signal(
+                "600002.SSE",
+                "2026-01-05",
+                "2026-01-06",
+                buy_time="10:05:00",
+                lane="first_board",
+                signal_kind="first_touch",
+                limit_price=10.0,
+            ),
+        ],
+        bars=[
+            _bar("600001.SSE", "2026-01-02", 9.8, 10.0),
+            old_exit_bar,
+            _bar("600002.SSE", "2026-01-05", 9.8, 10.0),
+            new_exit_bar,
+        ],
+        trade_dates=_dates("2026-01-02", "2026-01-05", "2026-01-06"),
+        exit_mode="next_1430",
+        config=CashBacktestConfig(initial_cash=100_000, max_positions=1),
+    )
+
+    assert _buy_order(result, "600002.SSE")["status"] == "skipped"
+    assert _buy_order(result, "600002.SSE")["reason"] == "position_limit"
+
+
+def test_next_1430_missing_quote_is_pending_then_retries_next_open() -> None:
+    result = simulate_limit_up_account(
+        signals=[
+            _signal(
+                "600001.SSE",
+                "2026-01-02",
+                "2026-01-05",
+                buy_time="10:05:00",
+                lane="first_board",
+                signal_kind="first_touch",
+                limit_price=10.0,
+            )
+        ],
+        bars=[
+            _bar("600001.SSE", "2026-01-02", 9.8, 10.0),
+            _bar("600001.SSE", "2026-01-05", 10.5, 11.0),
+            _bar("600001.SSE", "2026-01-06", 10.6, 10.7),
+        ],
+        trade_dates=_dates("2026-01-02", "2026-01-05", "2026-01-06"),
+        exit_mode="next_1430",
+        config=CashBacktestConfig(initial_cash=100_000, max_positions=2),
+    )
+
+    pending = next(
+        order
+        for order in result["orders"]
+        if order["side"] == "SELL" and order["status"] == "pending"
+    )
+    assert pending["trade_time"] == "14:30:00"
+    assert pending["reason"] == "exit_quote_missing"
+    trade = result["executed_trades"][0]
+    assert trade["sell_date"] == "2026-01-06"
+    assert trade["sell_time"] == "09:30:00"
+    assert trade["exit_reason"] == "retry_open"
+
+
+def test_next_1430_daily_close_proxy_is_disclosed() -> None:
+    exit_bar = _bar("600001.SSE", "2026-01-05", 10.5, 11.0)
+    exit_bar.update(
+        {
+            "price_1430": 11.0,
+            "price_1430_source": "daily_close_proxy",
+        }
+    )
+    result = simulate_limit_up_account(
+        signals=[
+            _signal(
+                "600001.SSE",
+                "2026-01-02",
+                "2026-01-05",
+                buy_time="10:05:00",
+                lane="first_board",
+                signal_kind="first_touch",
+                limit_price=10.0,
+            )
+        ],
+        bars=[_bar("600001.SSE", "2026-01-02", 9.8, 10.0), exit_bar],
+        trade_dates=_dates("2026-01-02", "2026-01-05"),
+        exit_mode="next_1430",
+        config=CashBacktestConfig(initial_cash=100_000, max_positions=2),
+    )
+
+    trade = result["executed_trades"][0]
+    assert trade["exit_price_source"] == "daily_close_proxy"
+    assert trade["exit_price_proxy"] is True
+
+
 def _signal(
     vt_symbol: str,
     entry_date: str,

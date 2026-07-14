@@ -1,7 +1,7 @@
 """Limit-up Top5 research dashboard and proxy backtest endpoints."""
 
 from datetime import date, datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Body, Query
 from fastapi.responses import JSONResponse
@@ -15,6 +15,11 @@ from alphaagent.server.services.limit_up.service import (
 from alphaagent.server.services.limit_up.live_service import (
     get_latest_live_snapshot,
     refresh_live_snapshot,
+)
+from alphaagent.server.services.limit_up.live_trace_service import (
+    get_live_trace_dates,
+    get_live_trace_day,
+    get_live_trace_symbol,
 )
 from alphaagent.server.services.limit_up.history_service import (
     get_history_backtest as get_limit_up_history_backtest,
@@ -100,6 +105,60 @@ def refresh_snapshot():
         )
     try:
         return ok(refresh_live_snapshot())
+    except Exception as exc:  # noqa: BLE001
+        return _service_error(exc)
+
+
+@router.get("/live-traces/dates", response_model=None)
+def live_trace_dates():
+    if not is_database_configured():
+        return JSONResponse(
+            status_code=503,
+            content=fail("DATABASE_UNAVAILABLE", "数据库未配置，无法读取实时打板轨迹"),
+        )
+    try:
+        return ok(get_live_trace_dates())
+    except Exception as exc:  # noqa: BLE001
+        return _service_error(exc)
+
+
+@router.get("/live-traces/day", response_model=None)
+def live_trace_day(trade_date: Annotated[date, Query(alias="date")]):
+    if not is_database_configured():
+        return JSONResponse(
+            status_code=503,
+            content=fail("DATABASE_UNAVAILABLE", "数据库未配置，无法读取实时打板轨迹"),
+        )
+    try:
+        result = get_live_trace_day(trade_date)
+        if result.get("status") == "not_found":
+            return JSONResponse(
+                status_code=404,
+                content=fail("LIVE_TRACE_DATE_NOT_FOUND", "没有该交易日的实时打板轨迹"),
+            )
+        return ok(result)
+    except Exception as exc:  # noqa: BLE001
+        return _service_error(exc)
+
+
+@router.get("/live-traces/symbol", response_model=None)
+def live_trace_symbol(
+    trade_date: Annotated[date, Query(alias="date")],
+    vt_symbol: Annotated[str, Query(min_length=8, max_length=32)],
+):
+    if not is_database_configured():
+        return JSONResponse(
+            status_code=503,
+            content=fail("DATABASE_UNAVAILABLE", "数据库未配置，无法读取实时打板轨迹"),
+        )
+    try:
+        result = get_live_trace_symbol(trade_date, vt_symbol.upper())
+        if result.get("status") == "not_found":
+            return JSONResponse(
+                status_code=404,
+                content=fail("LIVE_TRACE_SYMBOL_NOT_FOUND", "没有该股票的实时打板轨迹"),
+            )
+        return ok(result)
     except Exception as exc:  # noqa: BLE001
         return _service_error(exc)
 

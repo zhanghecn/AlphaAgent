@@ -41,10 +41,17 @@ from alphaagent.server.services import market_snapshot_repository, minute_gaps, 
 from alphaagent.server.services import research_sector_scores
 from alphaagent.server.services.limit_up.data_quality import backfill_limit_up_event_minutes
 from alphaagent.server.services.limit_up.domain import is_eligible_main_board
+from alphaagent.server.services.limit_up.concept_live_service import (
+    CONCEPT_REFRESH_SECONDS,
+    refresh_live_concept_snapshot,
+)
 from alphaagent.server.services.limit_up.historical_evidence_import import import_ths_evidence
 from alphaagent.server.services.limit_up.live_service import (
     LIVE_SCAN_INTERVAL_SECONDS,
     refresh_live_snapshot,
+)
+from alphaagent.server.services.limit_up.live_trace_repository import (
+    prune_live_trace_snapshots,
 )
 from alphaagent.server.services.limit_up.next_session_plan import refresh_next_session_plan
 from alphaagent.server.services.quant import research_jobs, screening
@@ -443,7 +450,7 @@ JOB_CADENCES: dict[str, JobCadence] = {
     "sync_sector_period_scores": JobCadence(CADENCE_EOD_DAILY, CATEGORY_SECTOR_RESEARCH, 1, "sector_period_scores", "updated_at"),
     "sync_sector_list": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 7, "sectors", "updated_at"),
     "sync_sector_members": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 7, "sector_memberships", "updated_at"),
-    "sync_stock_sector_memberships": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 7, "stock_sector_memberships", "updated_at"),
+    "sync_stock_sector_memberships": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BASIC, 1, "stock_sector_memberships", "updated_at"),
     "sync_shenwan_industry_tree": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 30, "shenwan_industries", "updated_at"),
     "sync_shenwan_industry_members": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 30, "shenwan_industry_members", "updated_at"),
     "sync_industry_board_mapping": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 30, "industry_board_mapping", "updated_at"),
@@ -494,6 +501,15 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "name": "实时打板扫描（每15秒）",
         "cron": "* 9-14 * * 1-5",
         "action": "limit_up_live_scan",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": [],
+    },
+    {
+        "id": "limit_up_concept_scan",
+        "name": "实时概念共振（每30秒）",
+        "cron": "* 9-14 * * 1-5",
+        "action": "limit_up_concept_scan",
         "enabled": True,
         "concurrency": 1,
         "job_ids": [],
@@ -558,6 +574,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_stock_financial_indicators",
             "sync_stock_business_segments_history",
             "limit_up_next_session_plan_final",
+            "limit_up_live_trace_prune",
         ],
     },
     {
@@ -575,6 +592,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_limit_up_event_minutes",
             "limit_up_history_rebuild",
             "limit_up_next_session_plan_final",
+            "limit_up_live_trace_prune",
         ],
     },
 ]
@@ -585,6 +603,7 @@ LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID = "sync_limit_up_ths_evidence"
 LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID = "limit_up_history_rebuild"
 LIMIT_UP_NEXT_SESSION_PLAN_PRELIMINARY_BATCH_JOB_ID = "limit_up_next_session_plan_preliminary"
 LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID = "limit_up_next_session_plan_final"
+LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID = "limit_up_live_trace_prune"
 INTERNAL_BATCH_JOB_IDS = {
     TAIL_PREVIEW_BATCH_JOB_ID,
     EOD_QUANT_RESEARCH_BATCH_JOB_ID,
@@ -592,6 +611,7 @@ INTERNAL_BATCH_JOB_IDS = {
     LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID,
     LIMIT_UP_NEXT_SESSION_PLAN_PRELIMINARY_BATCH_JOB_ID,
     LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID,
+    LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID,
 }
 STALE_BATCH_SUMMARY_RE = re.compile(r"^\s*(\d+)\s+成功\s*/\s*(\d+)\s+失败\s*$")
 
@@ -2241,6 +2261,7 @@ def _assert_known_jobs(
     allow_eod_quant_research: bool = False,
     allow_limit_up_history_rebuild: bool = False,
     allow_limit_up_next_session_plan: bool = False,
+    allow_limit_up_live_trace_prune: bool = False,
 ) -> None:
     valid = {job.id for job in DEFAULT_JOBS}
     unknown = [
@@ -2258,6 +2279,10 @@ def _assert_known_jobs(
                 LIMIT_UP_NEXT_SESSION_PLAN_PRELIMINARY_BATCH_JOB_ID,
                 LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID,
             }
+        )
+        and not (
+            allow_limit_up_live_trace_prune
+            and j == LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID
         )
     ]
     if unknown:
@@ -2283,12 +2308,19 @@ def _assert_schedule_jobs(action: str, job_ids: list[str]) -> None:
         allow_eod_quant_research=action == "sync",
         allow_limit_up_history_rebuild=action == "sync",
         allow_limit_up_next_session_plan=action == "sync",
+        allow_limit_up_live_trace_prune=action == "sync",
     )
 
 
 def _schedule_action(payload: dict[str, Any]) -> str:
     action = str(payload.get("action") or "sync").strip()
-    if action not in {"sync", "quant_research", "tail_preview", "limit_up_live_scan"}:
+    if action not in {
+        "sync",
+        "quant_research",
+        "tail_preview",
+        "limit_up_live_scan",
+        "limit_up_concept_scan",
+    }:
         raise DataSyncError(f"Unsupported schedule action: {action}")
     return action
 
@@ -2382,6 +2414,9 @@ def run_schedule_now(schedule_id: str) -> dict[str, Any]:
     if action == "limit_up_live_scan":
         snapshot = _run_schedule_action(dict(row), raise_errors=True) or {}
         return _live_scan_schedule_status(schedule_id, snapshot)
+    if action == "limit_up_concept_scan":
+        snapshot = _run_schedule_action(dict(row), raise_errors=True) or {}
+        return _concept_scan_schedule_status(schedule_id, snapshot)
     return _start_sync_schedule(dict(row), source="manual")
 
 
@@ -2485,6 +2520,55 @@ def _live_scan_schedule_status(schedule_id: str, snapshot: dict[str, Any]) -> di
                 "stage": str(snapshot.get("session_stage") or ""),
                 "current_label": "",
                 "sample_items": [],
+                "message": message,
+            }
+        ],
+    }
+
+
+def _concept_scan_schedule_status(
+    schedule_id: str,
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    quality = snapshot.get("data_quality")
+    quality = quality if isinstance(quality, dict) else {}
+    succeeded = quality.get("status") == "ready"
+    concept_count = int(snapshot.get("concept_count") or 0)
+    created_at = _utc_now_iso()
+    status = "succeeded" if succeeded else "skipped"
+    message = (
+        f"已更新 {concept_count} 个实时概念强度"
+        if succeeded
+        else f"概念行情不可用于新买点：{quality.get('status') or 'unavailable'}"
+    )
+    return {
+        "id": f"concept_scan_{uuid4().hex}",
+        "profile": "limit_up_concept_scan",
+        "source": "manual",
+        "schedule_id": schedule_id,
+        "concurrency": 1,
+        "status": status,
+        "created_at": created_at,
+        "started_at": created_at,
+        "finished_at": created_at,
+        "current_job_id": None,
+        "total_jobs": 1,
+        "completed_jobs": 1,
+        "succeeded_jobs": 1 if succeeded else 0,
+        "failed_jobs": 0,
+        "skipped_jobs": 0 if succeeded else 1,
+        "rows_read": int(quality.get("quote_count") or 0),
+        "rows_written": concept_count if succeeded else 0,
+        "progress_pct": 100.0,
+        "message": message,
+        "jobs": [
+            {
+                "job_id": "limit_up_concept_scan",
+                "status": status,
+                "started_at": created_at,
+                "finished_at": created_at,
+                "rows_read": int(quality.get("quote_count") or 0),
+                "rows_written": concept_count if succeeded else 0,
                 "message": message,
             }
         ],
@@ -2719,6 +2803,8 @@ def _run_sync_batch(
                 result = _run_limit_up_next_session_plan_batch_job("preliminary")
             elif job_id == LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID:
                 result = _run_limit_up_next_session_plan_batch_job("final")
+            elif job_id == LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID:
+                result = _run_limit_up_live_trace_prune_batch_job()
             else:
                 result = run_job(job_id, _batch_job_params(job_id, params), progress=_batch_progress_callback(batch_id, job_id))
             rows_read = int(result.get("rows_read") or 0)
@@ -2838,6 +2924,16 @@ def _run_limit_up_next_session_plan_batch_job(
         "rows_written": len(observations),
         "status": "skipped" if status == "empty" else status,
         "message": f"次交易时段{phase}观察计划：{len(observations)} 个候选",
+    }
+
+
+def _run_limit_up_live_trace_prune_batch_job() -> dict[str, Any]:
+    deleted = prune_live_trace_snapshots()
+    return {
+        "rows_read": deleted,
+        "rows_written": deleted,
+        "status": "succeeded",
+        "message": f"实时打板诊断缓存保留最近2个交易日，清理 {deleted} 行",
     }
 
 
@@ -4588,16 +4684,20 @@ def _run_scheduled_jobs() -> None:
         if not cron:
             continue
         action = str(row.get("action") or "sync")
-        if action == "limit_up_live_scan" and not _limit_up_live_scan_window_open(now_china):
+        if action in {"limit_up_live_scan", "limit_up_concept_scan"} and not _limit_up_live_scan_window_open(now_china):
             continue
-        recently_started = (
-            _recently_started(
+        if action == "limit_up_live_scan":
+            recently_started = _recently_started(
                 row,
                 within_seconds=max(LIVE_SCAN_INTERVAL_SECONDS - 1, 1),
             )
-            if action == "limit_up_live_scan"
-            else _recently_started(row)
-        )
+        elif action == "limit_up_concept_scan":
+            recently_started = _recently_started(
+                row,
+                within_seconds=max(CONCEPT_REFRESH_SECONDS - 1, 1),
+            )
+        else:
+            recently_started = _recently_started(row)
         if recently_started:
             continue
         try:
@@ -4696,6 +4796,27 @@ def _run_schedule_action(row: dict[str, Any], *, raise_errors: bool = False) -> 
     schedule_id = str(row["id"])
     action = str(row.get("action") or "sync")
     try:
+        if action == "limit_up_concept_scan":
+            _touch_schedule(
+                schedule_id,
+                last_started_at=datetime.now(timezone.utc),
+                last_status="running",
+            )
+            snapshot = refresh_live_concept_snapshot()
+            quality = snapshot.get("data_quality")
+            quality = quality if isinstance(quality, dict) else {}
+            succeeded = quality.get("status") == "ready"
+            _touch_schedule(
+                schedule_id,
+                last_status="succeeded" if succeeded else "skipped",
+                last_finished_at=datetime.now(timezone.utc),
+                last_message=(
+                    f"已更新 {int(snapshot.get('concept_count') or 0)} 个实时概念强度"
+                    if succeeded
+                    else f"概念行情不可用于新买点：{quality.get('status') or 'unavailable'}"
+                ),
+            )
+            return snapshot
         if action == "limit_up_live_scan":
             _touch_schedule(
                 schedule_id,
@@ -4761,9 +4882,16 @@ def _live_scan_actionable_count(snapshot: dict[str, Any]) -> int:
 
 def _live_scan_status_message(snapshot: dict[str, Any], *, saved: bool) -> str:
     actionable = _live_scan_actionable_count(snapshot)
+    quality = snapshot.get("data_quality")
+    quality = quality if isinstance(quality, dict) else {}
+    trace_suffix = (
+        f"；诊断缓存写入失败：{str(quality.get('trace_cache_error') or '未知错误')[:200]}"
+        if quality.get("trace_cache_status") == "error"
+        else ""
+    )
     if saved:
-        return f"已保存实时打板快照，{actionable} 个可执行动作"
-    return f"行情非有效实时状态，快照未保存，{actionable} 个可执行动作"
+        return f"已保存实时打板快照，{actionable} 个可执行动作{trace_suffix}"
+    return f"行情非有效实时状态，快照未保存，{actionable} 个可执行动作{trace_suffix}"
 
 
 def _limit_up_live_scan_window_open(now_china: datetime) -> bool:

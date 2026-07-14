@@ -11,8 +11,8 @@ from typing import Mapping, Sequence
 
 from alphaagent.server.services.backtest import ledger
 
-ACCOUNT_EXECUTION_VERSION = "limit-up-cash-v2"
-SUPPORTED_EXIT_MODES = {"dynamic", "next_open", "next_close"}
+ACCOUNT_EXECUTION_VERSION = "limit-up-cash-v3"
+SUPPORTED_EXIT_MODES = {"dynamic", "next_open", "next_close", "next_1430"}
 
 
 @dataclass(frozen=True)
@@ -405,15 +405,34 @@ def _process_close_exits(
     config: CashBacktestConfig,
 ) -> None:
     for position in list(state.positions.values()):
+        planned_1430 = (
+            current_date == position.planned_exit_date
+            and position.planned_exit_mode == "next_1430"
+        )
         planned_close = (
             current_date == position.planned_exit_date
             and position.planned_exit_mode == "next_close"
         )
-        if not planned_close and not position.pending_exit:
+        if not planned_1430 and not planned_close and not position.pending_exit:
             continue
         if current_date < position.planned_exit_date:
             continue
         bar = bar_index.get((position.vt_symbol, current_date))
+        if planned_1430:
+            if not _try_exit(
+                state,
+                position,
+                current_date,
+                "14:30:00",
+                bar,
+                "price_1430",
+                "planned_1430",
+                config,
+                price_source_field="price_1430_source",
+                missing_reason="exit_quote_missing",
+            ):
+                position.pending_exit = True
+            continue
         if planned_close:
             reason = _planned_exit_reason(position, "close")
         elif current_date == position.planned_exit_date:
@@ -433,11 +452,14 @@ def _try_exit(
     price_field: str,
     exit_reason: str,
     config: CashBacktestConfig,
+    *,
+    price_source_field: str | None = None,
+    missing_reason: str = "missing_market_data",
 ) -> bool:
     raw_price = _number((bar or {}).get(price_field))
     limit_down = _limit_down_price(position.last_close)
     if raw_price is None:
-        _append_pending_sell(state, position, trade_date, trade_time, "missing_market_data")
+        _append_pending_sell(state, position, trade_date, trade_time, missing_reason)
         return False
     if raw_price <= limit_down + 1e-9:
         _append_pending_sell(state, position, trade_date, trade_time, "limit_down_locked")
@@ -451,6 +473,13 @@ def _try_exit(
         limit_down,
         exit_reason,
         config,
+        exit_price_source=(
+            str((bar or {}).get(price_source_field) or "") or None
+            if price_source_field
+            else "daily_open"
+            if price_field == "open_price"
+            else "daily_close"
+        ),
     )
     return True
 
@@ -464,6 +493,8 @@ def _close_position(
     limit_down: float,
     exit_reason: str,
     config: CashBacktestConfig,
+    *,
+    exit_price_source: str | None,
 ) -> None:
     fill = ledger.calculate_sell_execution(
         raw_price=raw_price,
@@ -495,6 +526,8 @@ def _close_position(
         "volume": fill.volume,
         "amount": fill.amount,
         "fee": fill.fee,
+        "price_source": exit_price_source,
+        "price_proxy": exit_price_source == "daily_close_proxy",
         "cash_after": state.cash,
     }
     state.orders.append(sell_order)
@@ -524,6 +557,8 @@ def _close_position(
             "d1_outcome": _d1_outcome(return_pct, position.candidate),
             "d_board_status": _board_status(position.candidate),
             "exit_reason": exit_reason,
+            "exit_price_source": exit_price_source,
+            "exit_price_proxy": exit_price_source == "daily_close_proxy",
             "result_status": "closed",
         }
     )
@@ -544,6 +579,8 @@ def _resolved_position_exit_mode(
 def _planned_exit_reason(position: CashPosition, session: str) -> str:
     if position.uses_dynamic_exit:
         return "dynamic_auction_exit" if session == "open" else "dynamic_tail_exit"
+    if position.planned_exit_mode == "next_1430":
+        return "planned_1430"
     return "planned_open" if session == "open" else "planned_close"
 
 

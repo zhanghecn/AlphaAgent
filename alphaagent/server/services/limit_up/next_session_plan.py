@@ -18,6 +18,7 @@ from alphaagent.server.services.limit_up.live_repository import (
     load_live_context,
     save_snapshot,
 )
+from alphaagent.server.services.limit_up import scheduled_execution
 from alphaagent.server.services.limit_up.versions import LIVE_STRATEGY_VERSION
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,7 @@ def build_next_session_plan_snapshot(
             "market_gate": dict(recommendations.get("market_gate") or {}),
             "lanes": {"now": [], "tail": [], "next_auction": rows},
             "plan": plan_metadata,
+            "execution_schedule": scheduled_execution.next_session_execution_clock(),
         },
         "data_quality": {
             **quality,

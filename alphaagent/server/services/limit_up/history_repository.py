@@ -6,7 +6,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Mapping, Sequence
 
 import pandas as pd
-from sqlalchemy import and_, delete, func, not_, or_, select
+from sqlalchemy import and_, delete, func, not_, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from alphaagent.server.db import schema
@@ -461,6 +461,50 @@ def load_account_daily_bars(
             "high_price": float(row["high_price"]),
             "low_price": float(row["low_price"]),
             "close_price": float(row["close_price"]),
+        }
+        for row in rows
+    ]
+
+
+def load_account_1430_prices(
+    requests: Sequence[tuple[str, date]],
+) -> list[dict[str, object]]:
+    """Load exact D+1 14:30 one-minute closes in one database query."""
+
+    pairs = sorted(
+        {
+            (str(vt_symbol).strip(), trade_date)
+            for vt_symbol, trade_date in requests
+            if str(vt_symbol).strip()
+        }
+    )
+    if not pairs:
+        return []
+    schema.ensure_schema_once(get_engine())
+    minute = schema.stock_minute_bars
+    statement = (
+        select(
+            minute.c.vt_symbol,
+            minute.c.trade_date,
+            minute.c.bar_time,
+            minute.c.close_price,
+        )
+        .where(
+            tuple_(minute.c.vt_symbol, minute.c.trade_date).in_(pairs),
+            minute.c.interval == "1m",
+            func.to_char(minute.c.bar_time, "HH24:MI") == "14:30",
+        )
+        .order_by(minute.c.trade_date, minute.c.vt_symbol, minute.c.bar_time)
+    )
+    with session_scope() as session:
+        rows = session.execute(statement).mappings().all()
+    return [
+        {
+            "vt_symbol": str(row["vt_symbol"]),
+            "trade_date": row["trade_date"].isoformat(),
+            "bar_time": row["bar_time"].isoformat(),
+            "price_1430": float(row["close_price"]),
+            "price_1430_source": "minute_1430",
         }
         for row in rows
     ]

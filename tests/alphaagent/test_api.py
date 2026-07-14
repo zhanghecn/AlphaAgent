@@ -528,6 +528,105 @@ def test_stocks(monkeypatch) -> None:
     assert payload["data"]["items"][0]["vt_symbol"] == "600000.SSE"
 
 
+def test_limit_up_live_trace_read_endpoints(monkeypatch) -> None:
+    from alphaagent.server.api import limit_up
+
+    symbol_calls: list[tuple[object, str]] = []
+    monkeypatch.setattr(limit_up, "is_database_configured", lambda: True)
+    monkeypatch.setattr(
+        limit_up,
+        "get_live_trace_dates",
+        lambda: {"status": "ready", "dates": ["2026-07-14", "2026-07-13"]},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        limit_up,
+        "get_live_trace_day",
+        lambda trade_date: {
+            "status": "ready",
+            "trade_date": trade_date.isoformat(),
+            "items": [
+                {
+                    "vt_symbol": "600001.SSE",
+                    "concept_name": "PCB",
+                    "concept_state": "warming",
+                    "concept_strength_rank": 1,
+                    "concept_leader_rank": 2,
+                }
+            ],
+        },
+        raising=False,
+    )
+
+    def symbol_trace(trade_date, vt_symbol):
+        symbol_calls.append((trade_date, vt_symbol))
+        return {
+            "status": "ready",
+            "trade_date": trade_date.isoformat(),
+            "vt_symbol": vt_symbol,
+            "events": [
+                {
+                    "event": "concept_warming",
+                    "concept_name": "PCB",
+                    "concept_state": "warming",
+                    "concept_strength_rank": 1,
+                    "concept_leader_rank": 2,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(limit_up, "get_live_trace_symbol", symbol_trace, raising=False)
+    client = TestClient(create_app())
+
+    dates_response = client.get("/api/limit-up/live-traces/dates")
+    day_response = client.get("/api/limit-up/live-traces/day?date=2026-07-14")
+    symbol_response = client.get(
+        "/api/limit-up/live-traces/symbol?date=2026-07-14&vt_symbol=600001.sse"
+    )
+
+    assert dates_response.status_code == 200
+    assert dates_response.json()["data"]["dates"] == ["2026-07-14", "2026-07-13"]
+    assert day_response.status_code == 200
+    assert day_response.json()["data"]["items"][0]["vt_symbol"] == "600001.SSE"
+    assert day_response.json()["data"]["items"][0]["concept_name"] == "PCB"
+    assert day_response.json()["data"]["items"][0]["concept_leader_rank"] == 2
+    assert symbol_response.status_code == 200
+    event = symbol_response.json()["data"]["events"][0]
+    assert event["event"] == "concept_warming"
+    assert event["concept_state"] == "warming"
+    assert event["concept_strength_rank"] == 1
+    assert symbol_calls[0][1] == "600001.SSE"
+
+
+def test_limit_up_live_trace_endpoints_return_not_found(monkeypatch) -> None:
+    from alphaagent.server.api import limit_up
+
+    monkeypatch.setattr(limit_up, "is_database_configured", lambda: True)
+    monkeypatch.setattr(
+        limit_up,
+        "get_live_trace_day",
+        lambda _trade_date: {"status": "not_found", "items": []},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        limit_up,
+        "get_live_trace_symbol",
+        lambda _trade_date, _symbol: {"status": "not_found", "events": []},
+        raising=False,
+    )
+    client = TestClient(create_app())
+
+    day_response = client.get("/api/limit-up/live-traces/day?date=2026-07-12")
+    symbol_response = client.get(
+        "/api/limit-up/live-traces/symbol?date=2026-07-12&vt_symbol=600001.SSE"
+    )
+
+    assert day_response.status_code == 404
+    assert day_response.json()["error"]["code"] == "LIVE_TRACE_DATE_NOT_FOUND"
+    assert symbol_response.status_code == 404
+    assert symbol_response.json()["error"]["code"] == "LIVE_TRACE_SYMBOL_NOT_FOUND"
+
+
 def test_stock_detail_date_uses_historical_daily_bar(monkeypatch) -> None:
     from contextlib import contextmanager
     from datetime import date
