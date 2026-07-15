@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta
 from unittest.mock import patch
 
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
 from alphaagent.server.main import create_app
@@ -413,6 +414,15 @@ def test_non_consecutive_third_limit_is_routed_to_two_to_three() -> None:
     assert classify_board_lane(candidate) == "two_to_three"
 
 
+def test_one_to_two_is_not_an_active_research_lane() -> None:
+    assert BOARD_LANES == ("first_board", "two_to_three", "high_board")
+
+    with pytest.raises(ValueError, match="removed"):
+        evaluate_lane_candidate(
+            _candidate(prior_streak=1, prior_limit_count_5=1, target_board=2)
+        )
+
+
 def test_lane_selection_ignores_current_day_final_board_outcome() -> None:
     candidates = [
         _candidate(
@@ -646,9 +656,9 @@ def test_first_board_repair_branch_is_not_deleted_by_shared_retreat_gate() -> No
     )
     relay = evaluate_lane_candidate(
         _candidate(
-            prior_streak=1,
-            prior_limit_count_5=1,
-            target_board=2,
+            prior_streak=2,
+            prior_limit_count_5=2,
+            target_board=3,
             signal_time="09:25:00",
             prior_market_phase="retreat",
             prior_market_failed_rate=0.55,
@@ -674,39 +684,6 @@ def test_first_board_heat_is_a_score_not_a_fixed_hard_gate() -> None:
     assert rotating["decision"] == "eligible"
     assert "industry_not_hot" not in rotating["blockers"]
     assert float(hot["entry_quality_score"]) > float(rotating["entry_quality_score"])
-
-
-def test_one_to_two_uses_previous_board_quality_and_auction_strength() -> None:
-    eligible = evaluate_lane_candidate(
-        _candidate(
-            prior_streak=1,
-            prior_limit_count_5=1,
-            target_board=2,
-            signal_time="09:25:00",
-            prior_board={
-                "is_sealed": True,
-                "first_limit_time": "10:08:00",
-                "last_limit_time": "10:20:00",
-                "open_times": 1,
-                "seal_to_turnover_ratio": 0.06,
-            },
-        )
-    )
-    weak = evaluate_lane_candidate(
-        _candidate(
-            prior_streak=1,
-            prior_limit_count_5=1,
-            target_board=2,
-            signal_time="09:25:00",
-            auction_gap_pct=7.8,
-            prior_turnover_rate=31.0,
-        )
-    )
-
-    assert eligible["lane"] == "one_to_two"
-    assert eligible["decision"] == "eligible"
-    assert weak["decision"] == "blocked"
-    assert {"auction_gap_out_of_range", "prior_turnover_extreme"} <= set(weak["blockers"])
 
 
 def test_two_to_three_marks_core_auction_quality() -> None:
@@ -786,15 +763,6 @@ def test_non_two_to_three_candidate_has_stable_quality_fields() -> None:
 
 
 def test_relay_lane_requires_auditable_previous_board_evidence() -> None:
-    one_to_two = evaluate_lane_candidate(
-        _candidate(
-            prior_streak=1,
-            prior_limit_count_5=1,
-            target_board=2,
-            signal_time="09:25:00",
-            prior_board=None,
-        )
-    )
     two_to_three = evaluate_lane_candidate(
         _candidate(
             prior_streak=2,
@@ -805,8 +773,6 @@ def test_relay_lane_requires_auditable_previous_board_evidence() -> None:
         )
     )
 
-    assert one_to_two["decision"] == "blocked"
-    assert "prior_board_evidence_missing" in one_to_two["blockers"]
     assert two_to_three["decision"] == "blocked"
     assert "prior_board_path_incomplete" in two_to_three["blockers"]
 
@@ -816,9 +782,9 @@ def test_first_board_does_not_use_previous_day_industry_rank_as_live_core_proxy(
     unknown = evaluate_lane_candidate(_candidate(prior_industry_leader_rank=None))
     relay = evaluate_lane_candidate(
         _candidate(
-            prior_streak=1,
-            prior_limit_count_5=1,
-            target_board=2,
+            prior_streak=2,
+            prior_limit_count_5=2,
+            target_board=3,
             signal_time="09:25:00",
             prior_industry_leader_rank=3,
             prior_board={
@@ -877,14 +843,13 @@ def test_high_board_auction_accepts_prior_divergence_weak_to_strong_without_l2()
 
     assert result["lane"] == "high_board"
     assert result["decision"] == "eligible"
-    assert result["action"] == "buy_auction"
+    assert result["action"] == "observe"
     assert result["setup_type"] == "high_board_weak_to_strong"
 
 
 def test_selection_allows_empty_days_and_never_exceeds_four_candidates() -> None:
     candidates = [
         _candidate(vt_symbol="600001.SSE"),
-        _candidate(vt_symbol="600002.SSE", prior_streak=1, prior_limit_count_5=1, target_board=2, signal_time="09:25:00"),
         _candidate(vt_symbol="600003.SSE", prior_streak=2, prior_limit_count_5=2, target_board=3, signal_time="09:25:00"),
         _candidate(vt_symbol="600004.SSE", prior_streak=3, prior_limit_count_5=3, target_board=4, signal_time="09:25:00", has_l2=True, prior_market_phase="broad_rise", prior_industry_heat_rank=1),
         _candidate(vt_symbol="600005.SSE", industry_id="BK1002"),
@@ -965,6 +930,60 @@ def test_history_replay_persists_pool_separately_from_final_selection(monkeypatc
     assert replay["lane_portfolio"]["candidate_pool"] == replay["board_candidate_pool"]
 
 
+def test_history_relay_requires_current_day_event_and_uses_limit_entry() -> None:
+    trade_date = date(2026, 7, 10)
+    day = pd.DataFrame(
+        [
+            {
+                "trade_date": pd.Timestamp(trade_date),
+                "prev_trade_date": pd.Timestamp("2026-07-09"),
+                "next_trade_date": pd.Timestamp("2026-07-13"),
+                "vt_symbol": "600001.SSE",
+                "name": "接力样本",
+                "prev_close": 10.0,
+                "open_price": 10.3,
+                "close_price": 11.0,
+                "next_open_price": 12.0,
+                "next_close_price": 12.5,
+                "limit_price": 11.0,
+                "auction_gap_pct": 3.0,
+                "prior_streak": 2,
+                "prior_limit_count_5": 2,
+            }
+        ]
+    )
+    path = [0.0] * 80
+    path[12] = 9.8  # 10:06
+    event = {
+        "first_limit_time": "10:06:00",
+        "time_preview": path,
+        "path_source": "test",
+    }
+
+    ready = history_engine._board_lane_candidates_from_day(
+        day,
+        trade_date,
+        event_evidence={("600001.SSE", trade_date): event},
+        financial_index={},
+        total_cost_rate=0.0031,
+    )[0]
+    missing = history_engine._board_lane_candidates_from_day(
+        day,
+        trade_date,
+        event_evidence={},
+        financial_index={},
+        total_cost_rate=0.0031,
+    )[0]
+
+    assert ready["relay_trigger_status"] == "ready"
+    assert ready["buy_time"] == "10:06:00"
+    assert ready["signal_kind"] == "first_touch"
+    assert ready["entry_price"] == 11.0
+    assert missing["relay_trigger_status"] == "event_missing"
+    assert missing["buy_time"] is None
+    assert missing["entry_price"] is None
+
+
 def _pre_evaluated_candidate(
     symbol: str,
     lane: str,
@@ -1013,7 +1032,7 @@ def test_daily_portfolio_diversifies_before_filling_extra_slots() -> None:
             "600001.SSE", "first_board", industry_id="BK1", rank_score=80
         ),
         _pre_evaluated_candidate(
-            "600002.SSE", "one_to_two", industry_id="BK2", rank_score=80
+            "600002.SSE", "high_board", industry_id="BK2", rank_score=80
         ),
         _pre_evaluated_candidate(
             "600003.SSE",
@@ -1045,8 +1064,8 @@ def test_daily_portfolio_diversifies_before_filling_extra_slots() -> None:
 
     assert [row["vt_symbol"] for row in result["selected"][:3]] == [
         "600001.SSE",
-        "600002.SSE",
         "600003.SSE",
+        "600002.SSE",
     ]
     assert len(result["selected"]) == 4
     assert result["selection_policy"] == "diversified_then_ranked_v1"
@@ -1058,10 +1077,10 @@ def test_daily_portfolio_enforces_industry_limit_and_symbol_deduplication() -> N
             "600001.SSE", "first_board", industry_id="BK1", rank_score=100
         ),
         _pre_evaluated_candidate(
-            "600001.SSE", "one_to_two", industry_id="BK1", rank_score=99
+            "600001.SSE", "high_board", industry_id="BK1", rank_score=99
         ),
         _pre_evaluated_candidate(
-            "600002.SSE", "one_to_two", industry_id="BK1", rank_score=98
+            "600002.SSE", "high_board", industry_id="BK1", rank_score=98
         ),
         _pre_evaluated_candidate(
             "600003.SSE", "two_to_three", industry_id="BK1", rank_score=97
@@ -1078,7 +1097,7 @@ def test_daily_portfolio_enforces_industry_limit_and_symbol_deduplication() -> N
 
     assert [row["vt_symbol"] for row in result["selected"]] == [
         "600001.SSE",
-        "600002.SSE",
+        "600003.SSE",
         "600004.SSE",
     ]
     assert result["selected_counts_by_industry"] == {"BK1": 2, "BK2": 1}
@@ -1187,14 +1206,21 @@ def _lane_replay_day(
     candidate = {
         **_candidate(),
         "lane": lane,
-        "lane_label": {"first_board": "首板", "one_to_two": "一进二"}.get(lane, lane),
+        "lane_label": {
+            "first_board": "首板",
+            "two_to_three": "二进三",
+            "high_board": "高板",
+        }.get(lane, lane),
         "decision": "eligible",
-        "action": "buy_first_board" if lane == "first_board" else "buy_auction",
+        "action": "buy_first_board" if lane == "first_board" else "buy_intraday",
         "signal_date": trade_date,
         "entry_date": trade_date,
         "result_date": result_date,
         "entry_price": 11.0,
-        "buy_time": "10:12:00" if lane == "first_board" else "09:30:00",
+        "buy_time": "10:12:00",
+        "signal_time": "10:12:00",
+        "signal_kind": "first_touch",
+        "relay_trigger_status": "ready" if lane != "first_board" else None,
         "sell_time_next_open": "09:30:00",
         "sell_time_next_close": "15:00:00",
         "execution_confidence": "three_minute_path_without_queue",
@@ -1510,6 +1536,57 @@ def test_lane_backtest_equal_weights_multiple_selected_candidates(monkeypatch) -
     assert ledger["trades"][0]["two_to_three_risk_flags"] == []
 
 
+def test_independent_lane_next_1430_uses_scheduled_exit_prices(monkeypatch) -> None:
+    day = _lane_replay_day(lane="two_to_three", return_pct=10.0)
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "load_history_range",
+        lambda *_args: [day],
+    )
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "load_account_daily_bars",
+        lambda *_args: [],
+    )
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "load_account_1430_prices",
+        lambda requests: [
+            {
+                "vt_symbol": symbol,
+                "trade_date": trade_date.isoformat(),
+                "price_1430": 11.5,
+                "price_1430_source": "minute_1430",
+            }
+            for symbol, trade_date in requests
+        ],
+    )
+
+    report = history_service.get_lane_history_backtest(
+        None,
+        None,
+        lane="two_to_three",
+        exit_mode="next_1430",
+        account_config=history_service.cash_backtest.CashBacktestConfig(
+            max_positions=2,
+            commission_rate=0,
+            minimum_commission=0,
+            stamp_tax_rate=0,
+            transfer_fee_rate=0,
+            slippage_bps=0,
+        ),
+    )
+
+    assert report["summary"]["trade_count"] == 1
+    assert report["trades"][0]["sell_time"] == "14:30:00"
+    assert report["trades"][0]["sell_price"] == 11.5
+    assert report["trades"][0]["exit_price_source"] == "minute_1430"
+    assert report["signal_summary"]["average_return_pct"] == 4.5455
+    assert report["exit_summary"]["minute_1430_count"] == 1
+    assert report["coverage"]["minute_1430_count"] == 1
+    assert report["coverage"]["exit_price_missing_count"] == 0
+
+
 def test_portfolio_scale_reports_full_single_industry_concentration() -> None:
     summary = history_service._portfolio_scale_summary(
         [
@@ -1589,28 +1666,24 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
         "vt_symbol": "600002.SSE",
         "name": "接力样本",
         "lane": "two_to_three",
-        "signal_kind": "auction",
-        "buy_time": "09:30:00",
-        "entry_price": 10.0,
+        "signal_kind": "first_touch",
+        "signal_time": "10:06:00",
+        "buy_time": "10:06:00",
+        "relay_trigger_status": "ready",
+        "entry_price": 11.0,
         "limit_price": 11.0,
         "outcome": {
             **first["outcome"],
-            "entry_day_close_price": 10.0,
-            "next_open_price": 9.8,
-            "next_close_price": 9.5,
-            "next_open_return_pct": -2.31,
-            "next_close_return_pct": -5.31,
+            "entry_day_close_price": 11.0,
+            "next_open_price": 12.0,
+            "next_close_price": 12.5,
+            "next_open_return_pct": 8.78,
+            "next_close_return_pct": 13.33,
         },
     }
-    negative_one_to_two = {
-        **relay,
-        "vt_symbol": "600003.SSE",
-        "name": "一进二负期望样本",
-        "lane": "one_to_two",
-    }
-    day["lane_portfolio"]["selected"] = [first, relay, negative_one_to_two]
+    day["lane_portfolio"]["selected"] = [first, relay]
     day["lane_portfolio"]["candidate_pool"]["first_board"] = [first]
-    day["lane_portfolio"]["candidate_pool"]["one_to_two"] = [negative_one_to_two]
+    day["lane_portfolio"]["candidate_pool"]["two_to_three"] = [relay]
     day["board_lanes"]["two_to_three"] = [relay]
     monkeypatch.setattr(
         history_service.history_repository,
@@ -1648,13 +1721,13 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
     )
 
     assert report["lane"] == "portfolio"
-    assert report["mode"] == "scheduled_first_board_cash_replay"
+    assert report["mode"] == "scheduled_unified_intraday_cash_replay"
     assert report["exit_mode"] == "next_1430"
     assert report["account_config"]["initial_cash"] == 100_000
     assert report["account_config"]["max_positions"] == 2
     assert report["summary"] == report["execution_summary"]
-    assert report["summary"]["signal_count"] == 1
-    assert report["summary"]["trade_count"] == 1
+    assert report["summary"]["signal_count"] == 2
+    assert report["summary"]["trade_count"] == 2
     assert report["summary"]["total_return_pct"] == report["daily_results"][-1]["total_return_pct"]
     assert report["execution_schedule"]["entry_windows"] == ["10:00-11:30", "13:00-14:30"]
     assert report["execution_schedule"]["exit_time"] == "14:30"
@@ -1662,7 +1735,7 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
     assert report["execution_comparability"]["live_equivalent"] is False
     assert "intraday_sector_fund_flow" in report["execution_comparability"]["missing_evidence"]
     assert report["coverage"]["minute_1430_count"] == 1
-    assert report["coverage"]["daily_close_proxy_count"] == 0
+    assert report["coverage"]["daily_close_proxy_count"] == 1
     assert set(report["stress_tests"]) == {"double_cost"}
     assert report["stress_tests"]["double_cost"]["total_return_pct"] is not None
     assert report["position_sizing_audit"]["selected_max_positions"] == 2
@@ -1671,10 +1744,35 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
     )
     assert report["position_sizing_audit"]["selection_cutoff_exclusive"] == "2026-04-14"
     assert report["position_sizing_audit"]["development_sample"]["signal_count"] == 1
-    assert report["portfolio_policy"]["included_lanes"] == ["first_board"]
-    assert "one_to_two" in report["portfolio_policy"]["excluded_lanes"]
-    assert report["one_to_two_audit"]["decision"] == "excluded_from_product_execution"
-    assert report["one_to_two_audit"]["independent"]["trade_count"] == 1
+    assert report["portfolio_policy"]["included_lanes"] == [
+        "first_board",
+        "two_to_three",
+    ]
+    assert report["portfolio_policy"]["excluded_lanes"] == ["high_board"]
+    assert report["relay_comparison"]["selected_variant"] == (
+        "first_board_two_to_three"
+    )
+    assert "one_to_two_audit" not in report
+
+    monkeypatch.setattr(
+        history_service.scheduled_execution,
+        "PRODUCT_EXECUTION_LANES",
+        ("first_board", "high_board"),
+    )
+    history_service._BACKTEST_REPORT_CACHE.clear()
+    fallback = history_service.get_lane_history_backtest(
+        date(2026, 6, 10),
+        date(2026, 6, 10),
+        lane="portfolio",
+        exit_mode="next_close",
+    )
+
+    assert fallback["portfolio_policy"]["included_lanes"] == ["first_board"]
+    assert fallback["relay_comparison"]["selected_variant"] == "first_board"
+    assert fallback["relay_comparison"]["configured_variant"] == (
+        "first_board_high_board"
+    )
+    assert fallback["relay_comparison"]["configuration_matches_gate"] is False
 
 
 def test_scheduled_backtest_reuses_full_report_across_trade_limits(monkeypatch) -> None:

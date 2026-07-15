@@ -20,7 +20,7 @@ describe("limit-up history rebuild API", () => {
   it("reads the current background rebuild status", async () => {
     const fetchMock = vi.fn().mockResolvedValue(response({
       success: true,
-      data: { status: "ready", strategy_version: "limit-up-history-v14" },
+      data: { status: "ready", strategy_version: "limit-up-history-v15" },
       error: null,
       request_id: "test",
     }));
@@ -47,7 +47,7 @@ describe("limit-up history rebuild API", () => {
       }, 409))
       .mockResolvedValueOnce(response({
         success: true,
-        data: { status: "building", strategy_version: "limit-up-history-v14" },
+        data: { status: "building", strategy_version: "limit-up-history-v15" },
         error: null,
         request_id: "test",
       }));

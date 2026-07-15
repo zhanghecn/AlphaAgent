@@ -79,7 +79,7 @@ def test_board_lane_samples_use_the_complete_pool_not_the_displayed_pick() -> No
         days,
         entry_mode="next_auction",
         exit_mode="next_open",
-        board_lane="one_to_two",
+        board_lane="two_to_three",
     )
 
     assert len(samples) == 12
@@ -109,7 +109,6 @@ def test_first_board_model_keeps_selection_misses_but_not_risk_blockers() -> Non
     }
     day["board_candidate_pool"] = {
         "first_board": [premium_gate_miss, fundamental_risk],
-        "one_to_two": [],
         "two_to_three": [],
         "high_board": [],
     }
@@ -131,7 +130,7 @@ def test_board_lane_model_never_falls_back_to_legacy_top5() -> None:
         _history_days(32, candidates_per_day=4),
         entry_mode="next_auction",
         exit_mode="next_open",
-        board_lane="one_to_two",
+        board_lane="two_to_three",
     )
 
     assert report["status"] == "insufficient_training"
@@ -170,7 +169,7 @@ def test_board_lane_model_selects_at_most_one_candidate_per_day() -> None:
         _board_history_days(32, candidates_per_day=4),
         entry_mode="next_auction",
         exit_mode="next_open",
-        board_lane="one_to_two",
+        board_lane="two_to_three",
         config=config,
     )
 
@@ -178,7 +177,7 @@ def test_board_lane_model_selects_at_most_one_candidate_per_day() -> None:
     for row in report["selected_candidates"]:
         by_date[row["signal_date"]] = by_date.get(row["signal_date"], 0) + 1
     assert report["status"] == "ready"
-    assert report["board_lane"] == "one_to_two"
+    assert report["board_lane"] == "two_to_three"
     assert report["candidate_scope"] == "complete_board_lane_candidate_pool"
     assert report["model_contract"]["max_daily_plans"] == 1
     assert by_date and max(by_date.values()) == 1
@@ -490,12 +489,25 @@ def test_model_report_api_can_run_a_complete_board_lane_pool(monkeypatch) -> Non
 
     response = TestClient(create_app()).get(
         "/api/limit-up/history/model-report",
-        params={"lane": "one_to_two", "exit_mode": "next_open"},
+        params={"lane": "two_to_three", "exit_mode": "next_open"},
     )
 
     assert response.status_code == 200
-    assert captured["board_lane"] == "one_to_two"
+    assert captured["board_lane"] == "two_to_three"
     assert response.json()["data"]["candidate_scope"] == "complete_board_lane_candidate_pool"
+
+
+def test_model_report_api_rejects_removed_one_to_two_lane(monkeypatch) -> None:
+    from alphaagent.server.api import limit_up
+
+    monkeypatch.setattr(limit_up, "is_database_configured", lambda: True)
+
+    response = TestClient(create_app()).get(
+        "/api/limit-up/history/model-report",
+        params={"lane": "one_to_two", "exit_mode": "next_open"},
+    )
+
+    assert response.status_code == 422
 
 
 def test_model_report_api_rejects_invalid_date_range(monkeypatch) -> None:
@@ -578,7 +590,9 @@ def _board_history_days(
         pool = [
             {
                 **candidate,
-                "lane": "one_to_two",
+                "lane": "two_to_three",
+                "target_board": 3,
+                "prior_streak": 2,
                 "decision": "eligible",
                 "pool_rank": rank,
                 "prior_limit_count_126": 2 + rank,
@@ -602,14 +616,12 @@ def _board_history_days(
         ]
         day["board_candidate_pool"] = {
             "first_board": [],
-            "one_to_two": pool,
-            "two_to_three": [],
+            "two_to_three": pool,
             "high_board": [],
         }
         day["board_lanes"] = {
             "first_board": [],
-            "one_to_two": pool[:1],
-            "two_to_three": [],
+            "two_to_three": pool[:1],
             "high_board": [],
         }
     return days

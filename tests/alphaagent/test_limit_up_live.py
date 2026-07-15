@@ -210,7 +210,27 @@ def test_live_lane_decisions_mark_shared_portfolio_members(monkeypatch) -> None:
     assert candidates[1]["portfolio_selected"] is True
 
 
-def test_live_portfolio_keeps_two_scheduled_first_board_actions() -> None:
+def test_live_lane_decisions_skip_reclassified_one_to_two_candidate() -> None:
+    candidate = _candidate(
+        "600001.SSE",
+        board_level=1,
+        prior_streak=1,
+        lane_feature_ready=True,
+    )
+
+    live_service._attach_lane_decisions(
+        [candidate],
+        _market(),
+        datetime(2026, 7, 10, 10, 5, tzinfo=SHANGHAI),
+    )
+
+    assert candidate["board_lane"] == "one_to_two"
+    assert candidate["lane_decision"] == "removed"
+    assert candidate["lane_blockers"] == ["one_to_two_removed"]
+    assert candidate["portfolio_selected"] is False
+
+
+def test_live_portfolio_prefers_same_frame_relay_then_first_board() -> None:
     def signal(
         symbol: str,
         lane: str,
@@ -251,8 +271,7 @@ def test_live_portfolio_keeps_two_scheduled_first_board_actions() -> None:
                 signal("600007.SSE", "first_board", action="buy_now", tbox=90, win_rate=59, compound=18),
                 signal("600008.SSE", "first_board", action="buy_now", tbox=85, win_rate=58, compound=16),
                 signal("600002.SSE", "high_board", action="buy_now", tbox=70, win_rate=55, compound=12),
-                signal("600003.SSE", "two_to_three", action="observe", tbox=80, win_rate=58, compound=18),
-                signal("600004.SSE", "one_to_two", action="buy_now", tbox=99, win_rate=70, compound=40),
+                signal("600003.SSE", "two_to_three", action="buy_now", tbox=80, win_rate=58, compound=18),
                 signal("600005.SSE", "high_board", action="buy_now", tbox=100, win_rate=75, compound=50, selected=False),
                 missed,
             ],
@@ -268,10 +287,13 @@ def test_live_portfolio_keeps_two_scheduled_first_board_actions() -> None:
     )
 
     assert [row["vt_symbol"] for row in portfolio] == [
+        "600003.SSE",
         "600001.SSE",
-        "600007.SSE",
     ]
-    assert all(row["board_lane"] == "first_board" for row in portfolio)
+    assert [row["board_lane"] for row in portfolio] == [
+        "two_to_three",
+        "first_board",
+    ]
     assert all(row["action"] == "buy_now" for row in portfolio)
     assert all(row["signal_state"] == "trigger_ready" for row in portfolio)
     assert all(row["execution_permission"] == "research_only" for row in portfolio)
@@ -1625,9 +1647,10 @@ def test_auction_recommendation_uses_previous_board_and_gap_range() -> None:
     result = build_live_recommendations([candidate], _market(), captured_at)
 
     signal = result["lanes"]["now"][0]
-    assert signal["action"] == "buy_now"
+    assert signal["action"] == "observe"
     assert signal["entry_kind"] == "auction"
     assert signal["trigger_price"] == candidate["last_price"]
+    assert "10:00" in signal["reason"]
 
 
 def test_live_signal_exposes_point_in_time_quote() -> None:
@@ -1692,8 +1715,8 @@ def test_auction_trigger_has_structured_strategy_and_rules() -> None:
     result = build_live_recommendations([candidate], _market(), captured_at)
 
     signal = result["lanes"]["now"][0]
-    assert signal["action"] == "buy_now"
-    assert signal["signal_state"] == "trigger_ready"
+    assert signal["action"] == "observe"
+    assert signal["signal_state"] == "approaching_trigger"
     assert signal["execution_permission"] == "research_only"
     assert signal["strategy_name"] == "二进三·弱转强突破"
     assert signal["selection_reasons"] == ["前板换手回封", "三板弱转强"]
@@ -1728,9 +1751,56 @@ def test_auction_can_consider_first_board_when_live_gates_pass() -> None:
     result = build_live_recommendations([candidate], _market(), captured_at)
 
     signal = result["lanes"]["now"][0]
-    assert signal["action"] == "buy_now"
+    assert signal["action"] == "observe"
     assert signal["entry_kind"] == "auction"
-    assert "首板" in signal["reason"]
+    assert "10:00" in signal["reason"]
+
+
+def test_live_two_to_three_first_touch_can_trigger_in_shared_window() -> None:
+    captured_at = datetime(2026, 7, 10, 10, 6, 15, tzinfo=SHANGHAI)
+    candidate = rank_live_candidates(
+        [
+            _candidate(
+                "600001.SSE",
+                board_level=3,
+                board_lane="two_to_three",
+                lane_decision="eligible",
+                state="sealed",
+                first_limit_time="10:06:02",
+            )
+        ]
+    )[0]
+    candidate.update(live_service._live_relay_trigger(candidate, captured_at))
+
+    result = build_live_recommendations([candidate], _market(), captured_at)
+
+    signal = result["lanes"]["now"][0]
+    assert signal["action"] == "buy_now"
+    assert signal["entry_kind"] == "first_touch"
+
+
+def test_live_pre_ten_seal_without_new_window_reseal_is_not_bought() -> None:
+    captured_at = datetime(2026, 7, 10, 10, 5, tzinfo=SHANGHAI)
+    candidate = rank_live_candidates(
+        [
+            _candidate(
+                "600001.SSE",
+                board_level=3,
+                board_lane="two_to_three",
+                lane_decision="eligible",
+                state="sealed",
+                first_limit_time="09:35:00",
+                last_limit_time="09:35:00",
+            )
+        ]
+    )[0]
+    candidate.update(live_service._live_relay_trigger(candidate, captured_at))
+
+    result = build_live_recommendations([candidate], _market(), captured_at)
+
+    signal = result["lanes"]["now"][0]
+    assert signal["action"] == "observe"
+    assert "不追已经封住" in signal["reason"]
 
 
 def test_live_high_board_auction_requires_prior_divergence_reseal() -> None:
@@ -1762,8 +1832,8 @@ def test_live_high_board_auction_requires_prior_divergence_reseal() -> None:
     accepted = build_live_recommendations([eligible], _market(), captured_at)
     rejected = build_live_recommendations([missing_divergence], _market(), captured_at)
 
-    assert accepted["lanes"]["now"][0]["action"] == "buy_now"
-    assert "弱转强" in accepted["lanes"]["now"][0]["reason"]
+    assert accepted["lanes"]["now"][0]["action"] == "observe"
+    assert "10:00" in accepted["lanes"]["now"][0]["reason"]
     assert rejected["lanes"]["now"][0]["action"] == "pass"
     assert "前日分歧回封" in rejected["lanes"]["now"][0]["reason"]
 
@@ -2239,7 +2309,7 @@ def test_sweep_checks_expose_the_same_heat_and_expansion_thresholds_used_to_trig
     assert checks["sector_expansion"]["required"] == ">=3只"
 
 
-def test_next_auction_plan_is_classified_by_tomorrows_target_board() -> None:
+def test_first_board_does_not_create_tomorrows_one_to_two_plan() -> None:
     candidate = rank_live_candidates(
         [_candidate("600001.SSE", board_level=1, state="resealed", open_times=2)]
     )[0]
@@ -2251,8 +2321,9 @@ def test_next_auction_plan_is_classified_by_tomorrows_target_board() -> None:
     )
 
     signal = result["lanes"]["next_auction"][0]
-    assert signal["board_level"] == 2
-    assert signal["board_lane"] == "one_to_two"
+    assert signal["board_level"] == 1
+    assert signal["action"] == "pass"
+    assert "不生成一进二" in signal["reason"]
 
 
 def test_lane_validation_veto_downgrades_live_buy_to_observation() -> None:
@@ -2291,6 +2362,44 @@ def test_lane_validation_veto_downgrades_live_buy_to_observation() -> None:
     assert signal["signal_state"] == "trigger_ready"
     assert signal["validation_status"] == "research_only"
     assert "只观察" in signal["reason"]
+
+
+def test_live_two_to_three_uses_the_passing_product_portfolio_gate(monkeypatch) -> None:
+    from alphaagent.server.services.limit_up import history_service
+
+    monkeypatch.setattr(
+        history_service,
+        "get_lane_validation_snapshot",
+        lambda: {
+            "first_board": {"passed": True, "status": "validated"},
+            "two_to_three": {"passed": False, "status": "research_only"},
+            "high_board": {"passed": False, "status": "research_only"},
+        },
+    )
+    monkeypatch.setattr(
+        history_service,
+        "get_scheduled_history_backtest",
+        lambda *_args, **_kwargs: {
+            "relay_comparison": {
+                "configured_variant": "first_board_two_to_three",
+                "configuration_matches_gate": True,
+                "variants": {
+                    "first_board_two_to_three": {
+                        "passed": True,
+                        "summary": {"total_return_pct": 266.4},
+                    }
+                },
+            }
+        },
+    )
+
+    validations = live_service._load_lane_validations()
+
+    assert validations["first_board"]["passed"] is True
+    assert validations["first_board"]["status"] == "portfolio_gate_passed"
+    assert validations["two_to_three"]["passed"] is True
+    assert validations["two_to_three"]["status"] == "portfolio_gate_passed"
+    assert validations["high_board"]["passed"] is False
 
 
 def test_historical_veto_runs_before_lane_validation_and_blocks_research_action(
@@ -2560,14 +2669,18 @@ def test_live_snapshot_merges_quotes_and_pools_without_non_main_board() -> None:
     snapshot = build_live_snapshot(quotes, pools, captured_at, context)
 
     by_symbol = {row["vt_symbol"]: row for row in snapshot["candidates"]}
-    assert set(by_symbol) == {"600001.SSE", "600002.SSE", "600003.SSE"}
+    assert set(by_symbol) == {"600001.SSE", "600003.SSE"}
     assert by_symbol["600001.SSE"]["state"] == "near_limit"
     assert by_symbol["600001.SSE"]["auction_gap_pct"] == 3.0
     assert by_symbol["600001.SSE"]["previous_limit_up"] is True
-    assert by_symbol["600002.SSE"]["state"] == "resealed"
-    assert by_symbol["600002.SSE"]["open_times"] == 5
-    assert by_symbol["600002.SSE"]["seal_to_turnover_ratio"] > 0
     assert by_symbol["600003.SSE"]["state"] == "failed"
+    next_session = {
+        row["vt_symbol"]: row
+        for row in snapshot["recommendations"]["lanes"]["next_auction"]
+    }
+    assert next_session["600002.SSE"]["board_level"] == 3
+    assert next_session["600002.SSE"]["board_lane"] == "two_to_three"
+    assert next_session["600002.SSE"]["action"] == "observe"
     assert snapshot["market_context"]["sealed_count"] == 1
     assert snapshot["market_context"]["failed_count"] == 1
     assert snapshot["source_updated_at"] == "2026-07-10T10:05:02+08:00"

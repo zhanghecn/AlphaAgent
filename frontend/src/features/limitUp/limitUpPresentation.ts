@@ -7,7 +7,6 @@ type FirstBoardCompositeSignal = Pick<
 
 const BOARD_LANE_LABELS: Record<BoardLaneKey, string> = {
   first_board: "综合首板",
-  one_to_two: "一进二",
   two_to_three: "二进三",
   high_board: "高板",
 };

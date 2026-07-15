@@ -9,6 +9,7 @@ from typing import Mapping, Sequence
 
 import pandas as pd
 
+from alphaagent.server.services.limit_up import scheduled_execution
 from alphaagent.server.services.limit_up.dynamic_exit import attach_replay_exit_decisions
 from alphaagent.server.services.limit_up.lane_features import (
     attach_limit_gene_features,
@@ -1080,6 +1081,34 @@ def _board_lane_candidates_from_day(
         prior_streak = int(row.get("prior_streak") or 0)
         recent_limits = int(row.get("prior_limit_count_5") or 0)
         target_board = max(prior_streak + 1, recent_limits + 1, 2)
+        if target_board == 2:
+            continue
+        symbol = str(row.get("vt_symbol") or "")
+        current_event = event_evidence.get((symbol, trade_date))
+        current_path = (
+            _event_intraday_path(current_event, previous_close=row.get("prev_close"))
+            if current_event
+            else []
+        )
+        trigger = (
+            scheduled_execution.resolve_relay_entry_trigger(
+                current_event.get("first_limit_time"),
+                current_path,
+            )
+            if current_event
+            else {
+                "status": "event_missing",
+                "signal_time": None,
+                "signal_kind": None,
+                "reason": "current_day_limit_event_missing",
+            }
+        )
+        trigger_time = str(trigger.get("signal_time") or "")
+        path_prefix = (
+            path_prefix_features(current_path, trigger_time)
+            if current_path and trigger_time
+            else None
+        )
         base = _candidate_payload(
             row,
             "next_auction",
@@ -1089,22 +1118,27 @@ def _board_lane_candidates_from_day(
         prior_date_text = _date_text(row.get("prev_trade_date"))
         prior_event = (
             event_evidence.get(
-                (str(row.get("vt_symbol") or ""), date.fromisoformat(prior_date_text))
+                (symbol, date.fromisoformat(prior_date_text))
             )
             if prior_date_text
             else None
         )
+        candidate = _lane_candidate_payload(
+            row,
+            base,
+            signal_time=trigger_time or "09:25:00",
+            signal_kind=str(trigger.get("signal_kind") or "relay_watch"),
+            path_prefix=path_prefix,
+            current_event=current_event,
+            prior_event=prior_event,
+            financial_index=financial_index,
+            trade_date=trade_date,
+        )
         candidates.append(
-            _lane_candidate_payload(
-                row,
-                base,
-                signal_time="09:25:00",
-                signal_kind="auction",
-                path_prefix=None,
-                current_event=None,
-                prior_event=prior_event,
-                financial_index=financial_index,
-                trade_date=trade_date,
+            _with_relay_trigger(
+                candidate,
+                trigger,
+                total_cost_rate=total_cost_rate,
             )
         )
     return candidates
@@ -1124,6 +1158,61 @@ def _event_intraday_path(
     if not isinstance(prices, Sequence) or isinstance(prices, (str, bytes)):
         return []
     return price_path_to_return_path(prices, previous_close=previous_close)
+
+
+def _with_relay_trigger(
+    candidate: Mapping[str, object],
+    trigger: Mapping[str, object],
+    *,
+    total_cost_rate: float,
+) -> dict[str, object]:
+    result = dict(candidate)
+    status = str(trigger.get("status") or "missing_first_touch")
+    ready = status == "ready"
+    signal_time = str(trigger.get("signal_time") or "") or None
+    signal_kind = str(trigger.get("signal_kind") or "") or None
+    limit_price = _number(candidate.get("limit_price"))
+    outcome = candidate.get("outcome")
+    outcome = dict(outcome) if isinstance(outcome, Mapping) else {}
+    entry_price = limit_price if ready else None
+    outcome.update(
+        {
+            "next_open_return_pct": _net_return(
+                entry_price,
+                _number(outcome.get("next_open_price")),
+                total_cost_rate,
+            ),
+            "next_close_return_pct": _net_return(
+                entry_price,
+                _number(outcome.get("next_close_price")),
+                total_cost_rate,
+            ),
+        }
+    )
+    result.update(
+        {
+            "qualification_time": "09:25:00",
+            "qualification_kind": "auction",
+            "relay_trigger_status": status,
+            "relay_trigger_reason": trigger.get("reason"),
+            "signal_time": signal_time,
+            "buy_time": signal_time,
+            "signal_kind": signal_kind,
+            "entry_mode": "sweep" if ready else "relay_watch",
+            "entry_price": entry_price,
+            "outcome": outcome,
+            "data_cutoff": "D_INTRADAY_TRIGGER_AND_D_MINUS_1_EVIDENCE",
+            "execution_confidence": (
+                "three_minute_path_without_queue" if ready else "not_executable"
+            ),
+            "source_mode": (
+                str(candidate.get("source_mode") or "intraday_path_prefix")
+                if ready
+                else "relay_trigger_unavailable"
+            ),
+        }
+    )
+    return result
 
 
 def _lane_candidate_payload(

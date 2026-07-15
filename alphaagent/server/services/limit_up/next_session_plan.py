@@ -36,6 +36,7 @@ _NEXT_SESSION_WATCH_BLOCKERS = frozenset(
         "third_board_setup_unconfirmed",
         "two_to_three_risk_stack",
         "high_board_requires_l2",
+        "one_to_two_removed",
     }
 )
 
@@ -96,7 +97,7 @@ def build_next_session_plan_snapshot(
             "snapshot_age_seconds": 0,
             "plan": plan_metadata,
             "limitations": [
-                "盘后计划只用于下一交易时段观察，必须等待竞价硬门确认。",
+                "盘后计划只形成观察资格，必须等待10:00后的首次触板或可观察回封。",
                 "Tick/L2和冻结后前向证据未完成，执行许可保持research_only。",
             ],
         },
@@ -206,19 +207,19 @@ def _plan_signal(signal: Mapping[str, object], captured_at: datetime) -> dict[st
     return {
         **dict(signal),
         "action": "observe",
-        "research_action": "next_auction",
+        "research_action": "observe",
         "execution_state": "watch",
         "signal_state": "observing",
         "execution_permission": "research_only",
-        "strategy_name": str(signal.get("strategy_name") or "次日竞价观察"),
+        "strategy_name": str(signal.get("strategy_name") or "次日盘中观察"),
         "selection_reasons": selection_reasons[:4],
         "trigger_checks": [
             {
                 "code": "auction_gap",
-                "label": "竞价强度",
+                "label": "盘前资格",
                 "status": "pending",
                 "observed": None,
-                "required": "竞价涨幅1%-7%且对应板位硬门通过",
+                "required": "D-1结构与盘前可见硬门保持通过",
                 "evidence_time": None,
             },
             {
@@ -230,17 +231,17 @@ def _plan_signal(signal: Mapping[str, object], captured_at: datetime) -> dict[st
                 "evidence_time": None,
             },
         ],
-        "buy_instruction": "次交易日09:20-09:24竞价与全部硬门通过后触发研究买点",
+        "buy_instruction": "次交易日10:00后仅在首次触板或可观察回封时进入综合候选",
         "sell_instruction": str(signal.get("sell_condition") or "D+1动态评估竞价兑现，否则15:00退出"),
         "cancel_checks": [
-            "竞价低于1%或高于7%",
+            "盘前资格或对应板位硬门失效",
             "跌出动态Top5",
             "板块或市场门关闭",
         ],
-        "reason": "盘后已进入观察，等待次交易时段竞价确认",
+        "reason": "盘后已进入观察，等待次交易时段盘中触发",
         "state_updated_at": captured_at.isoformat(),
         "valid_at": captured_at.isoformat(),
-        "valid_until": "下一交易日09:25",
+        "valid_until": "下一交易日14:30",
     }
 
 
@@ -254,7 +255,10 @@ def _plan_sources(
             dict(row)
             for row in raw_rows
             if isinstance(row, Mapping)
-            and str(row.get("action") or "") == "next_auction"
+            and str(row.get("action") or "") in {"observe", "next_auction"}
+            and str(row.get("entry_kind") or "")
+            in {"next_session_watch", "next_auction"}
+            and _integer(row.get("board_level"), 0) >= 3
         ]
 
     fallback: list[dict[str, object]] = []
@@ -300,11 +304,12 @@ def _candidate_plan_source(candidate: Mapping[str, object]) -> dict[str, object]
     source_board = _integer(candidate.get("board_level"), 1)
     classified_board = {
         "first_board": 1,
-        "one_to_two": 2,
         "two_to_three": 3,
         "high_board": 4,
     }.get(str(candidate.get("board_lane") or ""), source_board)
     target_board = max(source_board + 1, classified_board)
+    if target_board == 2:
+        return None
     target_lane = _board_lane(target_board)
     favorable = [str(value) for value in candidate.get("lane_favorable_factors") or [] if value]
     return {
@@ -312,11 +317,11 @@ def _candidate_plan_source(candidate: Mapping[str, object]) -> dict[str, object]
         "source_board_level": source_board,
         "board_level": target_board,
         "board_lane": target_lane,
-        "action": "next_auction",
-        "entry_kind": "next_auction",
-        "strategy_name": f"{_lane_label(target_lane)}竞价观察",
+        "action": "observe",
+        "entry_kind": "next_session_watch",
+        "strategy_name": f"{_lane_label(target_lane)}盘中观察",
         "selection_reasons": favorable[:4] or ["D日封板进入次日接力观察池"],
-        "reason": "D日结构入选，等待次日竞价确认",
+        "reason": "D日结构入选，等待次日10:00后盘中触发",
     }
 
 
@@ -352,7 +357,6 @@ def _board_lane(board_level: int) -> str:
 def _lane_label(lane: str) -> str:
     return {
         "first_board": "首板",
-        "one_to_two": "一进二",
         "two_to_three": "二进三",
         "high_board": "高板",
     }.get(lane, "接力")

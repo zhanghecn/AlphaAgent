@@ -187,6 +187,47 @@ def test_first_board_buy_slippage_does_not_exceed_limit_price() -> None:
     assert _buy_order(result, "600001.SSE")["price"] == 10.0
 
 
+def test_same_time_relay_fills_before_first_board() -> None:
+    first_board = _signal(
+        "600001.SSE",
+        "2026-01-02",
+        "2026-01-05",
+        buy_time="10:06:00",
+        lane="first_board",
+        signal_kind="first_touch",
+        limit_price=10.0,
+    )
+    two_to_three = _signal(
+        "600002.SSE",
+        "2026-01-02",
+        "2026-01-05",
+        buy_time="10:06:00",
+        lane="two_to_three",
+        signal_kind="first_touch",
+        limit_price=10.0,
+    )
+    result = simulate_limit_up_account(
+        signals=[first_board, two_to_three],
+        bars=[
+            _bar("600001.SSE", "2026-01-02", 9.8, 10.0),
+            _bar("600002.SSE", "2026-01-02", 9.8, 10.0),
+            _bar("600001.SSE", "2026-01-05", 10.5, 10.5),
+            _bar("600002.SSE", "2026-01-05", 10.5, 10.5),
+        ],
+        trade_dates=_dates("2026-01-02", "2026-01-05"),
+        exit_mode="next_open",
+        config=CashBacktestConfig(initial_cash=100_000, max_positions=1),
+    )
+
+    filled = [
+        order
+        for order in result["orders"]
+        if order["side"] == "BUY" and order["status"] == "filled"
+    ]
+    assert len(filled) == 1
+    assert filled[0]["lane"] == "two_to_three"
+
+
 def test_latest_signal_without_d1_stays_open_and_out_of_win_rate() -> None:
     signal = _signal("600001.SSE", "2026-01-02", "2026-01-05")
     signal["result_date"] = None

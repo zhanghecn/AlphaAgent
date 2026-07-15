@@ -39,7 +39,13 @@ _BUILD_STATE: dict[str, object] = {
 }
 LANE_RULE_FREEZE_DATE = date(2026, 7, 12)
 BACKTEST_SCOPES = ("portfolio", *BOARD_LANES)
-PORTFOLIO_EXECUTION_LANES = ("first_board", "two_to_three", "high_board")
+PORTFOLIO_EXECUTION_LANES = scheduled_execution.PRODUCT_EXECUTION_LANES
+SCHEDULED_VARIANT_LANES = {
+    "first_board": ("first_board",),
+    "first_board_two_to_three": ("first_board", "two_to_three"),
+    "first_board_high_board": ("first_board", "high_board"),
+    "first_board_all_relays": ("first_board", "two_to_three", "high_board"),
+}
 SECTOR_WARMUP_CASH_VARIANTS = (
     ("baseline", "baseline", "当前首板 Top1"),
     ("warmup_gate", "warmup_gate", "原预热准入门"),
@@ -667,10 +673,15 @@ def get_lane_validation_snapshot(
             history_engine.HISTORY_STRATEGY_VERSION,
             None,
             None,
-            True,
+            False,
         )
-        portfolio_orders = _selected_history_orders(rows, None)
+        portfolio_orders = scheduled_execution.extract_scheduled_orders(
+            rows,
+            included_lanes=scheduled_execution.RESEARCH_EXECUTION_LANES,
+        )
         bars, trade_dates = _account_market_data(rows, portfolio_orders)
+        if exit_mode == "next_1430":
+            bars, _ = _attach_scheduled_exit_prices(bars, portfolio_orders)
         return {
             lane: _lane_validation_from_rows(
                 rows,
@@ -718,28 +729,33 @@ def get_lane_history_backtest(
                 lane=lane,
                 exit_mode=exit_mode,
                 trade_limit=trade_limit,
-                account_config=cash_backtest.CashBacktestConfig(),
+                account_config=cash_backtest.CashBacktestConfig(
+                    initial_cash=100_000,
+                    max_positions=scheduled_execution.MAX_POSITIONS,
+                ),
             ),
         )
     rows = history_repository.load_history_range(
         history_engine.HISTORY_STRATEGY_VERSION,
         start,
         end,
-        True,
+        False,
     )
-    lane_filter = None if lane == "portfolio" else lane
-    orders = _selected_history_orders(rows, lane_filter)
-    if lane == "portfolio":
-        orders = [
-            order
+    orders = scheduled_execution.extract_scheduled_orders(
+        rows,
+        included_lanes=(lane,),
+    )
+    bars, trade_dates = _account_market_data(rows, orders)
+    exit_coverage: dict[str, int] = {}
+    if exit_mode == "next_1430":
+        bars, exit_coverage = _attach_scheduled_exit_prices(bars, orders)
+        signal_trades = _next_1430_signal_trades(orders, bars)
+    else:
+        signal_trades = [
+            trade
             for order in orders
-            if str(order.get("lane") or "") in PORTFOLIO_EXECUTION_LANES
+            if (trade := _lane_closed_trade(order, exit_mode)) is not None
         ]
-    signal_trades = [
-        trade
-        for order in orders
-        if (trade := _lane_closed_trade(order, exit_mode)) is not None
-    ]
     signal_daily_results, signal_return, signal_drawdown = _signal_daily_equity(signal_trades)
     signal_summary = _summary(
         orders,
@@ -747,8 +763,10 @@ def get_lane_history_backtest(
         total_return_pct=signal_return,
         max_drawdown_pct=signal_drawdown,
     )
-    bars, trade_dates = _account_market_data(rows, orders)
-    config = account_config or cash_backtest.CashBacktestConfig()
+    config = account_config or cash_backtest.CashBacktestConfig(
+        initial_cash=100_000,
+        max_positions=scheduled_execution.MAX_POSITIONS,
+    )
     account = _simulate_account(orders, bars, trade_dates, exit_mode, config)
     summary = account["execution_summary"]
     phase_summaries = {
@@ -802,10 +820,14 @@ def get_lane_history_backtest(
         "execution_assumptions": account["execution_assumptions"],
         "portfolio_policy": {
             "included_lanes": list(PORTFOLIO_EXECUTION_LANES) if lane == "portfolio" else [lane],
-            "excluded_lanes": ["one_to_two"] if lane == "portfolio" else [],
+            "excluded_lanes": [],
             "selection_basis": "warmup_and_expanding_oos_frozen_before_holdout",
         },
-        "exit_summary": _exit_summary(orders, exit_mode),
+        "exit_summary": (
+            _scheduled_exit_summary(account["executed_trades"])
+            if exit_mode == "next_1430"
+            else _exit_summary(orders, exit_mode)
+        ),
         "orders": account["orders"][-trade_limit:],
         "trades": [
             _compact_account_trade(trade)
@@ -821,6 +843,7 @@ def get_lane_history_backtest(
             "selected_end": rows[-1].get("trade_date") if rows else None,
             "selected_trade_days": len(rows),
             "account_price_rows": len(bars),
+            **exit_coverage,
         },
         "costs": {
             **account["account_config"],
@@ -925,55 +948,23 @@ def _build_scheduled_history_backtest(
         end,
         False,
     )
-    orders = scheduled_execution.extract_scheduled_orders(rows)
-    bars, trade_dates = _account_market_data(rows, orders)
-    bars, exit_coverage = _attach_scheduled_exit_prices(bars, orders)
+    variant_orders = {
+        name: scheduled_execution.extract_scheduled_orders(
+            rows,
+            included_lanes=lanes,
+        )
+        for name, lanes in SCHEDULED_VARIANT_LANES.items()
+    }
+    union_orders = scheduled_execution.extract_scheduled_orders(
+        rows,
+        included_lanes=scheduled_execution.RESEARCH_EXECUTION_LANES,
+    )
+    bars, trade_dates = _account_market_data(rows, union_orders)
+    bars, _ = _attach_scheduled_exit_prices(bars, union_orders)
     config = cash_backtest.CashBacktestConfig(
         initial_cash=100_000,
         max_positions=scheduled_execution.MAX_POSITIONS,
     )
-    account = _simulate_account(orders, bars, trade_dates, "next_1430", config)
-    summary = account["execution_summary"]
-
-    earlier_orders = [
-        order
-        for order in orders
-        if _order_date(order) < scheduled_execution.RESEARCH_SAMPLE_START
-    ]
-    design_orders = [
-        order
-        for order in orders
-        if scheduled_execution.RESEARCH_SAMPLE_START
-        <= _order_date(order)
-        < scheduled_execution.VALIDATION_START
-    ]
-    validation_orders = [
-        order
-        for order in orders
-        if scheduled_execution.VALIDATION_START
-        <= _order_date(order)
-        <= scheduled_execution.RULE_FREEZE_DATE
-    ]
-    forward_orders = [
-        order
-        for order in orders
-        if _order_date(order) > scheduled_execution.RULE_FREEZE_DATE
-    ]
-    phase_summaries = {
-        "earlier_history": _simulate_account(
-            earlier_orders, bars, trade_dates, "next_1430", config
-        )["execution_summary"],
-        "design_sample": _simulate_account(
-            design_orders, bars, trade_dates, "next_1430", config
-        )["execution_summary"],
-        "time_validation": _simulate_account(
-            validation_orders, bars, trade_dates, "next_1430", config
-        )["execution_summary"],
-        "post_freeze_forward": _simulate_account(
-            forward_orders, bars, trade_dates, "next_1430", config
-        )["execution_summary"],
-    }
-
     double_cost_config = cash_backtest.CashBacktestConfig(
         initial_cash=100_000,
         max_positions=scheduled_execution.MAX_POSITIONS,
@@ -983,13 +974,55 @@ def _build_scheduled_history_backtest(
         transfer_fee_rate=config.transfer_fee_rate * 2,
         slippage_bps=config.slippage_bps * 2,
     )
-    double_cost_summary = _simulate_account(
-        orders,
-        bars,
-        trade_dates,
-        "next_1430",
-        double_cost_config,
-    )["execution_summary"]
+    variant_bundles = {
+        name: _scheduled_variant_bundle(
+            orders,
+            bars,
+            trade_dates,
+            config,
+            double_cost_config,
+        )
+        for name, orders in variant_orders.items()
+    }
+    baseline = variant_bundles["first_board"]
+    for name, bundle in variant_bundles.items():
+        if name == "first_board":
+            bundle["gate"] = {"passed": True, "checks": {"baseline": True}}
+            continue
+        bundle["gate"] = _relay_variant_gate(
+            bundle["summary"],
+            bundle["phase_summaries"]["time_validation"],
+            bundle["double_cost_summary"],
+            baseline["summary"],
+            baseline["phase_summaries"]["time_validation"],
+        )
+    passing = [
+        (name, bundle)
+        for name, bundle in variant_bundles.items()
+        if name != "first_board" and bool(bundle["gate"]["passed"])
+    ]
+    gate_selected_variant = (
+        max(
+            passing,
+            key=lambda item: float(item[1]["summary"]["total_return_pct"]),
+        )[0]
+        if passing
+        else "first_board"
+    )
+    configured_variant = _scheduled_variant_for_lanes(
+        scheduled_execution.PRODUCT_EXECUTION_LANES
+    )
+    configuration_matches_gate = gate_selected_variant == configured_variant
+    selected_variant = (
+        gate_selected_variant if configuration_matches_gate else "first_board"
+    )
+    selected_bundle = variant_bundles[selected_variant]
+    orders = variant_orders[selected_variant]
+    account = selected_bundle["account"]
+    summary = selected_bundle["summary"]
+    phase_summaries = selected_bundle["phase_summaries"]
+    double_cost_summary = selected_bundle["double_cost_summary"]
+    exit_coverage = _scheduled_exit_coverage(bars, orders)
     executed_trades = account["executed_trades"]
     signal_daily_results, signal_return, signal_drawdown = _signal_daily_equity(
         executed_trades
@@ -1006,16 +1039,17 @@ def _build_scheduled_history_backtest(
         bars=bars if start is None and end is None else None,
         trade_dates=trade_dates if start is None and end is None else None,
     )
-    one_to_two_audit = _one_to_two_execution_audit(rows, config)
     latest_coverage = (
         dict(rows[-1].get("coverage") or {})
         if rows
         else history_repository.history_coverage(history_engine.HISTORY_STRATEGY_VERSION)
     )
     validation = _scheduled_validation(phase_summaries)
+    selected_lanes = list(SCHEDULED_VARIANT_LANES[selected_variant])
+    configured_lanes = list(scheduled_execution.PRODUCT_EXECUTION_LANES)
     return {
         "status": "ready" if rows else "insufficient_data",
-        "mode": "scheduled_first_board_cash_replay",
+        "mode": "scheduled_unified_intraday_cash_replay",
         "strategy_version": scheduled_execution.SCHEDULED_EXECUTION_VERSION,
         "history_strategy_version": history_engine.HISTORY_STRATEGY_VERSION,
         "lane": "portfolio",
@@ -1056,18 +1090,44 @@ def _build_scheduled_history_backtest(
             ),
         },
         "portfolio_policy": {
-            "included_lanes": ["first_board"],
-            "excluded_lanes": ["one_to_two", "two_to_three", "high_board"],
-            "selection_basis": "complete_first_board_candidate_pool_in_event_order",
-            "candidate_source": "complete_first_board_candidate_pool",
-            "one_to_two_status": "internal_negative_control_only",
+            "included_lanes": selected_lanes,
+            "excluded_lanes": [
+                lane
+                for lane in scheduled_execution.RESEARCH_EXECUTION_LANES
+                if lane not in selected_lanes
+            ],
+            "selection_basis": "complete_active_candidate_pools_in_event_order",
+            "candidate_source": "complete_active_lane_candidate_pools",
+            "configured_lanes": configured_lanes,
+            "configuration_matches_gate": configuration_matches_gate,
         },
         "exit_summary": _scheduled_exit_summary(executed_trades),
         "stress_tests": {
             "double_cost": double_cost_summary,
         },
+        "relay_comparison": {
+            "selected_variant": selected_variant,
+            "configured_variant": configured_variant,
+            "configuration_matches_gate": configuration_matches_gate,
+            "variants": {
+                name: {
+                    "lanes": list(SCHEDULED_VARIANT_LANES[name]),
+                    "passed": bool(bundle["gate"]["passed"]),
+                    "gate_checks": dict(bundle["gate"]["checks"]),
+                    "summary": dict(bundle["summary"]),
+                    "phase_summaries": {
+                        phase: dict(phase_summary)
+                        for phase, phase_summary in bundle[
+                            "phase_summaries"
+                        ].items()
+                    },
+                    "double_cost": dict(bundle["double_cost_summary"]),
+                }
+                for name, bundle in variant_bundles.items()
+            },
+            "trigger_coverage": scheduled_execution.relay_trigger_coverage(rows),
+        },
         "position_sizing_audit": position_sizing_audit,
-        "one_to_two_audit": one_to_two_audit,
         "orders": account["orders"],
         "trades": [
             _compact_account_trade(trade)
@@ -1092,10 +1152,175 @@ def _build_scheduled_history_backtest(
         "limitations": [
             "首次触板是三分钟路径成交代理，没有Tick/L2时不能证明排队成交。",
             "缺失的历史14:30分钟价使用日线收盘代理并单独计数，不冒充精确14:30成交。",
-            "一进二仅保留为内部负样本研究，不进入实时执行或组合复利。",
+            "一进二已从候选、研究接口和组合复利中移除。",
+            "高板统一盘中触发未通过收益回撤门槛，仅保留独立研究。",
             "历史收益是候选代理；缺少逐时点市场、板块资金和Tick/L2，非实盘等价结果。",
             "冻结后尚未达到60个交易日和30笔闭合交易，保持research_only。",
         ],
+    }
+
+
+def _scheduled_variant_bundle(
+    orders: Sequence[Mapping[str, object]],
+    bars: Sequence[Mapping[str, object]],
+    trade_dates: Sequence[date],
+    config: cash_backtest.CashBacktestConfig,
+    double_cost_config: cash_backtest.CashBacktestConfig,
+) -> dict[str, object]:
+    account = _simulate_account(orders, bars, trade_dates, "next_1430", config)
+    phase_orders = {
+        "earlier_history": [
+            order
+            for order in orders
+            if _order_date(order) < scheduled_execution.RESEARCH_SAMPLE_START
+        ],
+        "design_sample": [
+            order
+            for order in orders
+            if scheduled_execution.RESEARCH_SAMPLE_START
+            <= _order_date(order)
+            < scheduled_execution.VALIDATION_START
+        ],
+        "time_validation": [
+            order
+            for order in orders
+            if scheduled_execution.VALIDATION_START
+            <= _order_date(order)
+            <= scheduled_execution.RULE_FREEZE_DATE
+        ],
+        "post_freeze_forward": [
+            order
+            for order in orders
+            if _order_date(order) > scheduled_execution.RULE_FREEZE_DATE
+        ],
+    }
+    phase_summaries = {
+        phase: _simulate_account(
+            phase_rows,
+            bars,
+            trade_dates,
+            "next_1430",
+            config,
+        )["execution_summary"]
+        for phase, phase_rows in phase_orders.items()
+    }
+    double_cost_summary = _simulate_account(
+        orders,
+        bars,
+        trade_dates,
+        "next_1430",
+        double_cost_config,
+    )["execution_summary"]
+    return {
+        "account": account,
+        "summary": account["execution_summary"],
+        "phase_summaries": phase_summaries,
+        "double_cost_summary": double_cost_summary,
+    }
+
+
+def _relay_variant_gate(
+    summary: Mapping[str, object],
+    validation: Mapping[str, object],
+    stress: Mapping[str, object],
+    baseline_summary: Mapping[str, object],
+    baseline_validation: Mapping[str, object],
+) -> dict[str, object]:
+    checks = {
+        "full_return_improved": _greater_than(
+            summary.get("total_return_pct"),
+            baseline_summary.get("total_return_pct"),
+        ),
+        "full_drawdown": _at_least(summary.get("max_drawdown_pct"), -10.0),
+        "validation_return_not_lower": _at_least(
+            validation.get("total_return_pct"),
+            _number(baseline_validation.get("total_return_pct")),
+        ),
+        "validation_drawdown": _at_least(
+            validation.get("max_drawdown_pct"),
+            -10.0,
+        ),
+        "double_cost_positive": _greater_than(
+            stress.get("total_return_pct"),
+            0.0,
+        ),
+        "double_cost_drawdown": _at_least(
+            stress.get("max_drawdown_pct"),
+            -10.0,
+        ),
+    }
+    return {"passed": all(checks.values()), "checks": checks}
+
+
+def _greater_than(left: object, right: object) -> bool:
+    left_number = _number(left)
+    right_number = _number(right)
+    return bool(
+        left_number is not None
+        and right_number is not None
+        and left_number > right_number
+    )
+
+
+def _at_least(left: object, right: float | None) -> bool:
+    left_number = _number(left)
+    return bool(
+        left_number is not None
+        and right is not None
+        and left_number >= right
+    )
+
+
+def _scheduled_variant_for_lanes(lanes: Sequence[str]) -> str | None:
+    normalized = tuple(lanes)
+    return next(
+        (
+            name
+            for name, variant_lanes in SCHEDULED_VARIANT_LANES.items()
+            if tuple(variant_lanes) == normalized
+        ),
+        None,
+    )
+
+
+def _scheduled_exit_coverage(
+    bars: Sequence[Mapping[str, object]],
+    orders: Sequence[Mapping[str, object]],
+) -> dict[str, int]:
+    index = {
+        (
+            str(bar.get("vt_symbol") or ""),
+            str(bar.get("trade_date") or "")[:10],
+        ): bar
+        for bar in bars
+    }
+    minute_count = 0
+    proxy_count = 0
+    missing_count = 0
+    request_count = 0
+    for order in orders:
+        result_date = _optional_date(order.get("result_date"))
+        symbol = str(order.get("vt_symbol") or "")
+        if result_date is None or not symbol:
+            continue
+        request_count += 1
+        source = str(
+            (index.get((symbol, result_date.isoformat())) or {}).get(
+                "price_1430_source"
+            )
+            or ""
+        )
+        if source == "minute_1430":
+            minute_count += 1
+        elif source == "daily_close_proxy":
+            proxy_count += 1
+        else:
+            missing_count += 1
+    return {
+        "exit_price_request_count": request_count,
+        "minute_1430_count": minute_count,
+        "daily_close_proxy_count": proxy_count,
+        "exit_price_missing_count": missing_count,
     }
 
 
@@ -1159,67 +1384,6 @@ def _attach_scheduled_exit_prices(
         "minute_1430_count": minute_count,
         "daily_close_proxy_count": proxy_count,
         "exit_price_missing_count": missing_count,
-    }
-
-
-def _one_to_two_execution_audit(
-    rows: Sequence[Mapping[str, object]],
-    config: cash_backtest.CashBacktestConfig,
-) -> dict[str, object]:
-    all_orders = _selected_history_orders(rows, None)
-    one_to_two_orders = [
-        order for order in all_orders if order.get("lane") == "one_to_two"
-    ]
-    execution_orders = [
-        order
-        for order in all_orders
-        if str(order.get("lane") or "") in PORTFOLIO_EXECUTION_LANES
-    ]
-    bars, trade_dates = _account_market_data(rows, all_orders)
-
-    def summary(selected: Sequence[Mapping[str, object]]) -> dict[str, object]:
-        return _simulate_account(
-            selected,
-            bars,
-            trade_dates,
-            "dynamic",
-            config,
-        )["execution_summary"]
-
-    independent = summary(one_to_two_orders)
-    without_one_to_two = summary(execution_orders)
-    with_one_to_two = summary(all_orders)
-    phase_summaries = {
-        phase: summary(
-            [
-                order
-                for order in one_to_two_orders
-                if order.get("validation_phase") == phase
-            ]
-        )
-        for phase in ("expanding_oos", "locked_holdout")
-    }
-    return {
-        "decision": "excluded_from_product_execution",
-        "reason": "独立、滚动样本外、锁定留出及组合消融均为负贡献",
-        "independent": independent,
-        "phase_summaries": phase_summaries,
-        "portfolio_without_one_to_two": without_one_to_two,
-        "portfolio_with_one_to_two": with_one_to_two,
-        "delta_when_included": {
-            "total_return_pct": _difference(
-                with_one_to_two.get("total_return_pct"),
-                without_one_to_two.get("total_return_pct"),
-            ),
-            "win_rate": _difference(
-                with_one_to_two.get("win_rate"),
-                without_one_to_two.get("win_rate"),
-            ),
-            "max_drawdown_pct": _difference(
-                with_one_to_two.get("max_drawdown_pct"),
-                without_one_to_two.get("max_drawdown_pct"),
-            ),
-        },
     }
 
 
@@ -1403,14 +1567,6 @@ def _scheduled_exit_summary(
 
 def _order_date(order: Mapping[str, object]) -> date:
     return _optional_date(order.get("entry_date") or order.get("signal_date")) or date.min
-
-
-def _difference(left: object, right: object) -> float | None:
-    left_number = _number(left)
-    right_number = _number(right)
-    if left_number is None or right_number is None:
-        return None
-    return round(left_number - right_number, 4)
 
 
 def get_history_backtest(
@@ -1607,22 +1763,9 @@ def _selected_lane_candidates(
         dict(candidate)
         for candidate in selected
         if isinstance(candidate, Mapping)
+        and str(candidate.get("lane") or "") in BOARD_LANES
         and (lane is None or candidate.get("lane") == lane)
     ]
-
-
-def _selected_history_orders(
-    rows: Sequence[Mapping[str, object]],
-    lane: str | None,
-) -> list[dict[str, object]]:
-    orders: list[dict[str, object]] = []
-    for day in rows:
-        phase = str(day.get("validation_phase") or "unknown")
-        orders.extend(
-            {**candidate, "validation_phase": phase}
-            for candidate in _selected_lane_candidates(day, lane)
-        )
-    return orders
 
 
 def _simulate_account(
@@ -1771,10 +1914,19 @@ def _lane_validation_from_rows(
     bars: Sequence[Mapping[str, object]] | None = None,
     trade_dates: Sequence[date] | None = None,
 ) -> dict[str, object]:
-    orders = _selected_history_orders(rows, lane)
-    if bars is None or trade_dates is None:
+    orders = scheduled_execution.extract_scheduled_orders(
+        rows,
+        included_lanes=(lane,),
+    )
+    loaded_market_data = bars is None or trade_dates is None
+    if loaded_market_data:
         bars, trade_dates = _account_market_data(rows, orders)
-    config = cash_backtest.CashBacktestConfig()
+    if loaded_market_data and exit_mode == "next_1430":
+        bars, _ = _attach_scheduled_exit_prices(bars, orders)
+    config = cash_backtest.CashBacktestConfig(
+        initial_cash=100_000,
+        max_positions=scheduled_execution.MAX_POSITIONS,
+    )
     account = _simulate_account(orders, bars, trade_dates, exit_mode, config)
     phase_summaries = {
         phase: _simulate_account(
@@ -2003,6 +2155,44 @@ def _lane_closed_trade(
         "exit_price": ledger.get("sell_price"),
         "return_pct": return_pct,
     }
+
+
+def _next_1430_signal_trades(
+    orders: Sequence[Mapping[str, object]],
+    bars: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    bar_index = {
+        (
+            str(bar.get("vt_symbol") or ""),
+            str(bar.get("trade_date") or "")[:10],
+        ): bar
+        for bar in bars
+    }
+    trades: list[dict[str, object]] = []
+    for order in orders:
+        symbol = str(order.get("vt_symbol") or "")
+        result_date = str(order.get("result_date") or "")[:10]
+        entry_price = _number(order.get("entry_price"))
+        exit_bar = bar_index.get((symbol, result_date))
+        exit_price = _number((exit_bar or {}).get("price_1430"))
+        if entry_price is None or entry_price <= 0 or exit_price is None:
+            continue
+        return_pct = round((exit_price / entry_price - 1) * 100, 4)
+        trades.append(
+            {
+                **dict(order),
+                "signal_date": order.get("entry_date") or order.get("signal_date"),
+                "entry_date": order.get("entry_date") or order.get("signal_date"),
+                "exit_date": result_date,
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "return_pct": return_pct,
+                "is_win": return_pct > 0,
+                "is_hard_loss": return_pct <= -5,
+                "exit_price_source": (exit_bar or {}).get("price_1430_source"),
+            }
+        )
+    return trades
 
 
 def _lane_d1_outcome(return_pct: float | None, sealed: bool) -> str:

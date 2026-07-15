@@ -6,10 +6,10 @@ from collections import defaultdict
 from datetime import time
 from typing import Mapping, Sequence
 
-BOARD_LANES = ("first_board", "one_to_two", "two_to_three", "high_board")
+BOARD_LANES = ("first_board", "two_to_three", "high_board")
+REMOVED_BOARD_LANES = frozenset({"one_to_two"})
 BOARD_LANE_LABELS = {
     "first_board": "首板",
-    "one_to_two": "一进二",
     "two_to_three": "二进三",
     "high_board": "高板",
 }
@@ -53,6 +53,8 @@ def evaluate_lane_candidate(candidate: Mapping[str, object]) -> dict[str, object
 
     result = dict(candidate)
     lane = classify_board_lane(candidate)
+    if lane in REMOVED_BOARD_LANES:
+        raise ValueError(f"board lane removed: {lane}")
     blockers = _shared_blockers(candidate, lane)
     favorable: list[str] = []
     setup_type: str | None = None
@@ -65,9 +67,6 @@ def evaluate_lane_candidate(candidate: Mapping[str, object]) -> dict[str, object
 
     if lane == "first_board":
         lane_blockers, favorable, first_board_route = _first_board_rules(candidate)
-        blockers.extend(lane_blockers)
-    elif lane == "one_to_two":
-        lane_blockers, favorable = _one_to_two_rules(candidate)
         blockers.extend(lane_blockers)
     elif lane == "two_to_three":
         lane_blockers, favorable, setup_type = _two_to_three_rules(candidate)
@@ -580,7 +579,7 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
     return min(max(value, minimum), maximum)
 
 
-def _one_to_two_rules(candidate: Mapping[str, object]) -> tuple[list[str], list[str]]:
+def _relay_base_rules(candidate: Mapping[str, object]) -> tuple[list[str], list[str]]:
     blockers: list[str] = []
     favorable: list[str] = []
     gap = _number(candidate.get("auction_gap_pct"))
@@ -625,7 +624,7 @@ def _prior_board_evidence_blocker(prior_board: object) -> str | None:
 def _two_to_three_rules(
     candidate: Mapping[str, object],
 ) -> tuple[list[str], list[str], str]:
-    blockers, favorable = _one_to_two_rules(candidate)
+    blockers, favorable = _relay_base_rules(candidate)
     gap = _number(candidate.get("auction_gap_pct"))
     if gap is not None and gap > 6:
         blockers.append("third_board_consensus_overheated")
@@ -689,8 +688,12 @@ def _high_board_rules(
         blockers.append("high_board_not_sector_core")
     prior_board = candidate.get("prior_board")
     open_times = _number(prior_board.get("open_times")) if isinstance(prior_board, Mapping) else None
-    signal_kind = str(candidate.get("signal_kind") or "")
-    if signal_kind == "auction":
+    qualification_kind = str(
+        candidate.get("qualification_kind")
+        or candidate.get("signal_kind")
+        or ""
+    )
+    if qualification_kind == "auction":
         gap = _number(candidate.get("auction_gap_pct"))
         weak_to_strong = bool(
             isinstance(prior_board, Mapping)
@@ -783,14 +786,10 @@ def _lane_rank_score(
     gene = min(_number(candidate.get("prior_limit_count_126")) or 0, 6)
     position = _number(candidate.get("prior_position_120"))
     pullback = abs(min(_number(candidate.get("pullback_from_prior_limit_pct")) or 0, 0))
-    gap = _number(candidate.get("auction_gap_pct")) or 0
     amount = _number(candidate.get("prior_amount_ratio_5d")) or 0
     if lane == "first_board":
         entry_quality = first_board_entry_quality_score(candidate)
         score = entry_quality if entry_quality is not None else 0.0
-    elif lane == "one_to_two":
-        score = heat * 0.35 - leader_rank * 4 + min(amount, 3) * 6
-        score += max(0, 8 - abs(gap - 3.5) * 2)
     elif lane == "two_to_three":
         score = heat * 0.4 - leader_rank * 5 + min(amount, 3) * 5
         score += 12 if setup_type == "weak_to_strong" else 7
@@ -826,7 +825,9 @@ def _action(lane: str, decision: str, candidate: Mapping[str, object]) -> str:
         path = candidate.get("path_prefix")
         reseals = _integer(path.get("reseal_count")) if isinstance(path, Mapping) else 0
         return "buy_reseal" if reseals else "buy_first_board"
-    return "buy_auction"
+    if candidate.get("relay_trigger_status") == "ready":
+        return "buy_intraday"
+    return "observe"
 
 
 def _time_value(value: object) -> time | None:

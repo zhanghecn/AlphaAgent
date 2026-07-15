@@ -67,7 +67,9 @@ LIVE_SCAN_INTERVAL_SECONDS = 15
 LIVE_SNAPSHOT_MAX_AGE_SECONDS = 90
 HISTORY_EVIDENCE_UNAVAILABLE_REASON = "历史证据不可用，已禁止执行"
 EXECUTABLE_ACTIONS = frozenset({"buy_now", "next_auction"})
-PORTFOLIO_EXECUTION_LANES = frozenset({"first_board"})
+PORTFOLIO_EXECUTION_LANES = frozenset(
+    scheduled_execution.PRODUCT_EXECUTION_LANES
+)
 LIVE_WATCHLIST_LIMIT = 6
 ACTIVE_SESSION_STAGES = frozenset(
     {"auction_watch", "auction", "morning", "afternoon", "tail", "close_auction"}
@@ -153,6 +155,12 @@ def build_live_snapshot(
         previous_snapshot=previous_snapshot,
         market_gate=market_gate,
     )
+    recommendations = _without_removed_lane_recommendations(recommendations)
+    ranked = [
+        candidate
+        for candidate in ranked
+        if str(candidate.get("board_lane") or "") != "one_to_two"
+    ]
     if lane_validations is not None:
         recommendations = apply_lane_validation_veto(
             recommendations,
@@ -844,7 +852,27 @@ def _attach_lane_decisions(
     research_candidates: list[dict[str, object]] = []
     for candidate in candidates:
         board_level = _integer(candidate.get("board_level"), 1)
-        candidate["board_lane"] = _board_lane(board_level)
+        candidate["board_lane"] = classify_board_lane(
+            {**candidate, "target_board": board_level}
+        )
+        if candidate["board_lane"] == "one_to_two":
+            candidate.update(
+                {
+                    "lane_decision": "removed",
+                    "lane_setup_type": None,
+                    "setup_tags": [],
+                    "setup_confidence": None,
+                    "lane_blockers": ["one_to_two_removed"],
+                    "lane_favorable_factors": [],
+                    "lane_quality_tier": None,
+                    "lane_risk_count": 0,
+                    "lane_risk_flags": [],
+                    "lane_rank_score": None,
+                }
+            )
+            continue
+        if candidate["board_lane"] in scheduled_execution.RELAY_LANES:
+            candidate.update(_live_relay_trigger(candidate, captured_at))
         if not candidate.get("lane_feature_ready"):
             candidate.update(
                 {
@@ -929,6 +957,9 @@ def _live_research_candidate(
         "signal_kind": (
             "auction" if session_stage(captured_at) == "auction" else "intraday"
         ),
+        "qualification_kind": (
+            "auction" if board_level >= 3 else candidate.get("signal_kind")
+        ),
         "prior_industry_heat_score": candidate.get("concept_strength_score")
         if candidate.get("concept_strength_score") is not None
         else candidate.get("sector_heat"),
@@ -941,6 +972,61 @@ def _live_research_candidate(
             market_gate and market_gate.get("repair_confirmed")
         ),
         "has_l2": False,
+    }
+
+
+def _live_relay_trigger(
+    candidate: Mapping[str, object],
+    captured_at: datetime,
+) -> dict[str, object]:
+    evaluation_time = captured_at.time().replace(microsecond=0).isoformat()
+    if not scheduled_execution.is_entry_time(evaluation_time):
+        return {
+            "relay_trigger_status": "outside_entry_window",
+            "relay_trigger_time": None,
+            "relay_trigger_kind": None,
+        }
+    state = str(candidate.get("state") or "")
+    if state not in {"sealed", "resealed"}:
+        return {
+            "relay_trigger_status": "waiting_touch_or_reseal",
+            "relay_trigger_time": None,
+            "relay_trigger_kind": None,
+        }
+    first_time = normalize_limit_time(candidate.get("first_limit_time"))
+    last_time = normalize_limit_time(candidate.get("last_limit_time"))
+    trigger_time: str | None = None
+    trigger_kind: str | None = None
+    if first_time and scheduled_execution.is_entry_time(first_time):
+        trigger_time = first_time
+        trigger_kind = "first_touch"
+    elif (
+        first_time
+        and first_time < "10:00:00"
+        and state == "resealed"
+        and _integer(candidate.get("open_times"), 0) > 0
+        and last_time
+        and scheduled_execution.is_entry_time(last_time)
+    ):
+        trigger_time = last_time
+        trigger_kind = "reseal"
+    if trigger_time is None:
+        return {
+            "relay_trigger_status": "waiting_touch_or_reseal",
+            "relay_trigger_time": None,
+            "relay_trigger_kind": None,
+        }
+    age_seconds = _session_second(evaluation_time) - _session_second(trigger_time)
+    if age_seconds < 0 or age_seconds > LIVE_SNAPSHOT_MAX_AGE_SECONDS:
+        return {
+            "relay_trigger_status": "stale_trigger",
+            "relay_trigger_time": trigger_time,
+            "relay_trigger_kind": trigger_kind,
+        }
+    return {
+        "relay_trigger_status": "ready",
+        "relay_trigger_time": trigger_time,
+        "relay_trigger_kind": trigger_kind,
     }
 
 
@@ -1159,6 +1245,7 @@ def _live_portfolio_sort_key(signal: Mapping[str, object]) -> tuple[object, ...]
     strategy = strategy if isinstance(strategy, Mapping) else {}
     return (
         action_priority,
+        scheduled_execution.execution_lane_priority(signal.get("board_lane")),
         -(_number(history.get("tbox_score")) or 0.0),
         -(_number(history.get("smoothed_win_rate")) or 0.0),
         -(_number(strategy.get("total_return_pct")) or 0.0),
@@ -1276,16 +1363,60 @@ def _live_watchlist_sort_key(signal: Mapping[str, object]) -> tuple[object, ...]
 def _load_lane_validations() -> dict[str, dict[str, object]]:
     try:
         from alphaagent.server.services.limit_up.history_service import (
+            get_scheduled_history_backtest,
             get_lane_validation_snapshot,
         )
 
-        return get_lane_validation_snapshot()
+        validations = {
+            lane: dict(validation)
+            for lane, validation in get_lane_validation_snapshot().items()
+        }
+        report = get_scheduled_history_backtest(None, None, trade_limit=1)
+        comparison = report.get("relay_comparison")
+        comparison = comparison if isinstance(comparison, Mapping) else {}
+        configured_variant = str(comparison.get("configured_variant") or "")
+        variants = comparison.get("variants")
+        variants = variants if isinstance(variants, Mapping) else {}
+        configured = variants.get(configured_variant)
+        configured = configured if isinstance(configured, Mapping) else {}
+        if (
+            comparison.get("configuration_matches_gate") is True
+            and configured.get("passed") is True
+        ):
+            summary = configured.get("summary")
+            summary = dict(summary) if isinstance(summary, Mapping) else {}
+            for lane in scheduled_execution.PRODUCT_EXECUTION_LANES:
+                validations[lane] = {
+                    "passed": True,
+                    "status": "portfolio_gate_passed",
+                    "reason": "统一盘中两仓组合已通过收益、回撤和双倍成本门槛",
+                    "summary": summary,
+                }
+        return validations
     except Exception as exc:  # noqa: BLE001
         reason = f"战法验证暂不可用：{exc.__class__.__name__}"
         return {
             lane: {"passed": False, "status": "unavailable", "reason": reason}
-            for lane in ("first_board", "one_to_two", "two_to_three", "high_board")
+            for lane in ("first_board", "two_to_three", "high_board")
         }
+
+
+def _without_removed_lane_recommendations(
+    recommendations: Mapping[str, object],
+) -> dict[str, object]:
+    result = dict(recommendations)
+    lanes = recommendations.get("lanes")
+    lanes = lanes if isinstance(lanes, Mapping) else {}
+    result["lanes"] = {
+        str(channel): [
+            dict(signal)
+            for signal in (signals if isinstance(signals, list) else [])
+            if isinstance(signal, Mapping)
+            and str(signal.get("board_lane") or "") != "one_to_two"
+        ]
+        for channel, signals in lanes.items()
+    }
+    return result
 
 
 def _board_lane(board_level: int) -> str:
@@ -1296,6 +1427,17 @@ def _board_lane(board_level: int) -> str:
     if board_level == 3:
         return "two_to_three"
     return "high_board"
+
+
+def _session_second(value: str) -> int:
+    parts = value.split(":")
+    if len(parts) != 3:
+        return -1
+    try:
+        hour, minute, second = (int(part) for part in parts)
+    except ValueError:
+        return -1
+    return hour * 3600 + minute * 60 + second
 
 
 def _with_historical_evidence(snapshot: Mapping[str, object]) -> dict[str, object]:

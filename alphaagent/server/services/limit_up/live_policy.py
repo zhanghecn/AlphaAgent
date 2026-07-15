@@ -446,8 +446,8 @@ def _now_signal(
         entry_kind=evaluated_entry_kind,
     )
     execution_reasons = _blocking_execution_reasons(execution_checks)
-    board_allowed = board_level <= 2 or (
-        auction_stage and candidate.get("lane_decision") == "eligible"
+    board_allowed = board_level == 1 or (
+        board_level >= 3 and candidate.get("lane_decision") == "eligible"
     )
     structural_reasons = list(hard_lane_reasons)
     if not board_allowed:
@@ -507,12 +507,29 @@ def _now_signal(
     elif stage == "auction":
         gap = _number(candidate.get("auction_gap_pct"))
         if gap is not None and 1 <= gap <= 7:
-            reason = _auction_entry_reason(candidate)
-            action, entry_kind = "buy_now", "auction"
+            action, entry_kind = "observe", "auction"
+            reason = "竞价只确认观察资格，10:00后等待盘中触板或回封"
+            signal_state = "approaching_trigger"
         else:
             reason = "竞价涨幅不在1%-7%观察区间"
     elif stage in {"morning", "afternoon"}:
-        if state == "resealed" and open_times >= 5:
+        if board_level >= 3 and candidate.get("relay_trigger_status") == "ready":
+            entry_kind = str(candidate.get("relay_trigger_kind") or "first_touch")
+            trigger_label = "首次触板" if entry_kind == "first_touch" else "首次可观察回封"
+            action, reason = "buy_now", f"{trigger_label}触发接力候选"
+        elif board_level >= 3 and state == "near_limit":
+            action, entry_kind = "observe", "sweep"
+            reason = "接力资格已通过，等待窗口内首次触板"
+            signal_state = "approaching_trigger"
+        elif board_level >= 3 and state == "failed":
+            action, entry_kind = "observe", "reseal"
+            reason = "已经触板开板，等待窗口内首次可观察回封"
+            signal_state = "observing"
+        elif board_level >= 3:
+            action, entry_kind = "observe", "wait"
+            reason = "没有新的窗口内首次触板或回封，不追已经封住的板"
+            signal_state = "observing"
+        elif state == "resealed" and open_times >= 5:
             action, entry_kind, reason = "buy_now", "reseal", f"已完成{open_times}次换手回封"
         elif state == "near_limit" and _sweep_ready(candidate):
             action, entry_kind, reason = "buy_now", "sweep", _sweep_entry_reason(candidate)
@@ -645,13 +662,13 @@ def _auction_plan(
         entry_kind="next_auction",
     )
     execution_reasons = _blocking_execution_reasons(execution_checks)
+    active_hard_reasons = [
+        reason for reason in hard_lane_reasons if reason != "one_to_two_removed"
+    ]
     if (
-        bool(market_gate.get("passed"))
-        and board_level <= 2
+        board_level >= 2
         and state in {"sealed", "resealed"}
-        and not hard_lane_reasons
-        and not dynamic_lane_reasons
-        and not execution_reasons
+        and not active_hard_reasons
     ):
         target_board = board_level + 1
         target_candidate = {
@@ -662,9 +679,9 @@ def _auction_plan(
         }
         return _signal(
             target_candidate,
-            "next_auction",
-            "next_auction",
-            f"保留至明早竞价观察{target_board}板，竞价强度通过对应战法硬门才转买入",
+            "observe",
+            "next_session_watch",
+            f"保留为下一交易日{target_board}板观察，10:00后等待盘中触板或回封",
             captured_at,
             stable_minutes,
             session_stage(captured_at),
@@ -673,9 +690,9 @@ def _auction_plan(
             lane_gate_passed=True,
         )
     market_reasons = [str(item) for item in market_gate.get("reasons") or []]
-    structural_reasons = list(hard_lane_reasons)
-    if board_level > 2:
-        structural_reasons.append("三板及以上不生成低板次日竞价计划")
+    structural_reasons = list(active_hard_reasons)
+    if board_level < 2:
+        structural_reasons.append("首板不生成一进二观察计划")
     pending_reasons = [
         *market_reasons,
         *dynamic_lane_reasons,
@@ -1002,7 +1019,7 @@ def _execution_state(action: str) -> str:
 def _buy_condition(entry_kind: str, action: str) -> str:
     if entry_kind == "auction":
         if action == "observe":
-            return "09:20-09:24竞价强度、板位、板块和情绪硬门保持通过后触发研究买点"
+            return "竞价仅形成观察资格，10:00后等待盘中首次触板或可观察回封"
         return "09:25竞价强度、板位、板块和情绪硬门保持通过后执行"
     if entry_kind in {"sweep", "reseal"}:
         return "价格触及涨停且封单、换手、回封稳定性保持通过后执行"
@@ -1026,21 +1043,6 @@ def _cancel_checks(entry_kind: str) -> list[str]:
     if entry_kind in {"sweep", "reseal", "tail_seal", "tail_watch", "wait"}:
         return ["再次开板", "封单一分钟缩水超过30%", "板块扩散转弱或市场门关闭"]
     return ["买点未成立"]
-
-
-def _auction_entry_reason(candidate: Mapping[str, object]) -> str:
-    lane = str(candidate.get("board_lane") or "")
-    if lane == "high_board":
-        return "前日分歧回封，今日竞价1%-5%弱转强"
-    if lane == "two_to_three":
-        return "二板结构通过，竞价确认三板弱转强"
-    if lane == "one_to_two":
-        return "首板质量通过，竞价确认一进二"
-    return (
-        "昨日核心板竞价强度处于可参与区间"
-        if bool(candidate.get("previous_limit_up"))
-        else "主线前排竞价处于首板观察区间"
-    )
 
 
 def _sweep_entry_reason(candidate: Mapping[str, object]) -> str:

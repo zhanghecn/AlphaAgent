@@ -255,7 +255,7 @@ def history_day(trade_date: date = Query(alias="date")):
 @router.get("/history/ledger", response_model=None)
 def history_ledger(
     trade_date: date = Query(alias="date"),
-    lane: Literal["first_board", "one_to_two", "two_to_three", "high_board"] | None = Query(
+    lane: Literal["first_board", "two_to_three", "high_board"] | None = Query(
         default=None
     ),
     exit_mode: Literal["dynamic", "next_open", "next_close"] = Query(default="dynamic"),
@@ -294,7 +294,6 @@ def history_backtest(
     lane: Literal[
         "portfolio",
         "first_board",
-        "one_to_two",
         "two_to_three",
         "high_board",
     ]
@@ -375,7 +374,7 @@ def history_model_report(
     end: date | None = Query(default=None),
     exit_mode: Literal["next_open", "next_close"] = Query(default="next_open"),
     entry_mode: Literal["auction", "sweep", "tail", "next_auction"] = Query(default="auction"),
-    lane: Literal["first_board", "one_to_two", "two_to_three", "high_board"] | None = Query(
+    lane: Literal["first_board", "two_to_three", "high_board"] | None = Query(
         default=None
     ),
 ):

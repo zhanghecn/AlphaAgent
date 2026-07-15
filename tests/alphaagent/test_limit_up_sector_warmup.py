@@ -585,7 +585,7 @@ def test_research_report_keeps_baseline_rank_gate_and_leader_proxy_distinct():
     assert report["lane_isolation"] == {
         "passed": True,
         "affected_lanes": ["first_board"],
-        "unchanged_lanes": ["one_to_two", "two_to_three", "high_board"],
+        "unchanged_lanes": ["two_to_three", "high_board"],
     }
     assert comparisons["baseline"]["trade_count"] == 3
     assert comparisons["baseline"]["average_net_return_pct"] == 0.0

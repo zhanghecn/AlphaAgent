@@ -55,7 +55,7 @@ export function evaluateBuyAlerts(
 
 export function buyAlertContent(signal: LimitUpLiveSignal): { title: string; body: string } {
   const name = signal.name || signal.vt_symbol;
-  const strategy = signal.strategy_name || "综合首板";
+  const strategy = signal.strategy_name || "综合推荐";
   return {
     title: `买点触发 · ${name}`,
     body: [

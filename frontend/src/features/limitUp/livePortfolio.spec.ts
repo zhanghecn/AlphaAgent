@@ -46,11 +46,24 @@ describe("live limit-up portfolio presentation", () => {
     expect(liveSignalsForScope(snapshot({ portfolio }), "portfolio")).toEqual(portfolio);
   });
 
-  it("keeps only the first two first-board product signals", () => {
+  it("keeps only the first two active product signals", () => {
     const portfolio = [
       signal("600010.SSE", 1, "buy_now"),
       signal("600011.SSE", 1, "buy_now"),
       signal("600012.SSE", 1, "buy_now"),
+      signal("600013.SSE", 3, "buy_now"),
+    ];
+
+    expect(
+      liveSignalsForScope(snapshot({ portfolio }), "portfolio").map((row) => row.vt_symbol),
+    ).toEqual(["600010.SSE", "600011.SSE"]);
+  });
+
+  it("keeps two-to-three and first-board in the single product portfolio", () => {
+    const portfolio = [
+      signal("600010.SSE", 3, "buy_now"),
+      signal("600011.SSE", 1, "buy_now"),
+      signal("600012.SSE", 4, "buy_now"),
       signal("600013.SSE", 2, "buy_now"),
     ];
 

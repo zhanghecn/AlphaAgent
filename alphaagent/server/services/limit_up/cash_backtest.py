@@ -11,7 +11,7 @@ from typing import Mapping, Sequence
 
 from alphaagent.server.services.backtest import ledger
 
-ACCOUNT_EXECUTION_VERSION = "limit-up-cash-v3"
+ACCOUNT_EXECUTION_VERSION = "limit-up-cash-v4"
 SUPPORTED_EXIT_MODES = {"dynamic", "next_open", "next_close", "next_1430"}
 
 
@@ -254,8 +254,14 @@ def _group_entries(
 def _entry_sort_key(signal: PreparedSignal) -> tuple[object, ...]:
     candidate = signal.candidate
     quality_order = 0 if candidate.get("two_to_three_quality_tier") == "A" else 1
+    lane_priority = (
+        0
+        if str(candidate.get("lane") or "") in {"two_to_three", "high_board"}
+        else 1
+    )
     return (
         signal.buy_time,
+        lane_priority,
         quality_order,
         -float(candidate.get("rank_score") or 0),
         int(candidate.get("lane_rank") or candidate.get("pool_rank") or 1_000_000),

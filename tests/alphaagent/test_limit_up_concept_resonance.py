@@ -7,6 +7,7 @@ from alphaagent.server.services.limit_up.concept_resonance import (
     aggregate_concept_strength,
     attach_candidate_concepts,
     build_membership_index,
+    concept_state,
     rank_concepts,
     replay_radar_concepts,
 )
@@ -116,6 +117,97 @@ def test_rank_concepts_assigns_best_strength_to_lowest_percentile() -> None:
     assert ranked[0]["concept_id"] == "A"
     assert ranked[0]["strength_rank"] == 1
     assert ranked[0]["strength_percentile"] == 0.5
+
+
+def test_concept_launch_uses_absolute_internal_breadth_not_market_percentile() -> None:
+    row = _concept(
+        "BK0896",
+        observed_count=43,
+        rise_ratio=41 / 43,
+        median_change_pct=2.73,
+        strong_5_count=4,
+        strong_7_count=2,
+        near_limit_count=2,
+        strength_percentile=0.50,
+    )
+
+    assert concept_state(row) == "launch"
+
+
+def test_concept_launch_scales_strong_stock_requirement_with_member_count() -> None:
+    below = _concept(
+        "LARGE",
+        observed_count=101,
+        rise_ratio=0.90,
+        median_change_pct=3.0,
+        strong_5_count=5,
+        strong_7_count=2,
+        near_limit_count=1,
+    )
+    passed = {**below, "strong_5_count": 6}
+
+    assert concept_state(below) != "launch"
+    assert concept_state(passed) == "launch"
+
+
+def test_concept_warming_uses_absolute_internal_acceleration() -> None:
+    row = _concept(
+        "WARM",
+        observed_count=30,
+        rise_ratio=0.65,
+        median_change_pct=1.0,
+        strong_5_count=2,
+        change_acceleration_3m=0.01,
+        strength_percentile=1.0,
+    )
+
+    assert concept_state(row) == "warming"
+
+
+def test_concept_state_keeps_coverage_and_ebb_ahead_of_launch() -> None:
+    launch = _concept(
+        "RISK",
+        observed_count=20,
+        rise_ratio=0.90,
+        median_change_pct=4.0,
+        strong_5_count=5,
+        strong_7_count=3,
+        near_limit_count=2,
+        touched_count=3,
+        failed_count=2,
+    )
+
+    assert concept_state({**launch, "coverage_ratio": 0.899}) == "unavailable"
+    assert concept_state(launch) == "ebb"
+
+
+def test_concept_launch_requires_rise_ratio_and_median_change_thresholds() -> None:
+    launch = _concept(
+        "BOUNDARY",
+        observed_count=20,
+        rise_ratio=0.80,
+        median_change_pct=2.5,
+        strong_5_count=3,
+        near_limit_count=1,
+    )
+
+    assert concept_state({**launch, "rise_ratio": 0.799}) != "launch"
+    assert concept_state({**launch, "median_change_pct": 2.499}) != "launch"
+    assert concept_state(launch) == "launch"
+
+
+def test_concept_launch_accepts_near_limit_or_two_strong_7_members() -> None:
+    launch = _concept(
+        "EVIDENCE",
+        observed_count=20,
+        rise_ratio=0.80,
+        median_change_pct=2.5,
+        strong_5_count=3,
+    )
+
+    assert concept_state(launch) != "launch"
+    assert concept_state({**launch, "near_limit_count": 1}) == "launch"
+    assert concept_state({**launch, "strong_7_count": 2}) == "launch"
 
 
 def test_attach_candidate_concepts_selects_strongest_execution_concept() -> None:

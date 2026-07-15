@@ -10,7 +10,7 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 def test_additive_concept_execution_contract_is_frozen() -> None:
-    assert scheduled_execution.SCHEDULED_EXECUTION_VERSION == "limit-up-scheduled-v3"
+    assert scheduled_execution.SCHEDULED_EXECUTION_VERSION == "limit-up-scheduled-v4"
     assert scheduled_execution.RULE_FREEZE_DATE == date(2026, 7, 15)
 
 
@@ -76,6 +76,44 @@ def test_scheduled_entry_window_boundaries() -> None:
     assert scheduled_execution.is_entry_time("14:30:00") is False
 
 
+def test_relay_trigger_uses_first_touch_inside_shared_window() -> None:
+    result = scheduled_execution.resolve_relay_entry_trigger("10:12:03", [])
+
+    assert result == {
+        "status": "ready",
+        "signal_time": "10:12:03",
+        "signal_kind": "first_touch",
+        "reason": None,
+    }
+
+
+def test_relay_trigger_requires_path_for_pre_ten_reseal() -> None:
+    result = scheduled_execution.resolve_relay_entry_trigger("09:35:00", [])
+
+    assert result == {
+        "status": "missing_reseal_path",
+        "signal_time": None,
+        "signal_kind": None,
+        "reason": "pre_ten_touch_without_reseal_path",
+    }
+
+
+def test_relay_trigger_uses_first_observable_window_reseal() -> None:
+    path = [0.0] * 80
+    path[2] = 9.8   # 09:36 first touch
+    path[3] = 8.8   # 09:39 break
+    path[11] = 9.8  # 10:03 reseal
+
+    result = scheduled_execution.resolve_relay_entry_trigger("09:36:00", path)
+
+    assert result == {
+        "status": "ready",
+        "signal_time": "10:03:00",
+        "signal_kind": "reseal",
+        "reason": None,
+    }
+
+
 def test_execution_clock_uses_five_minute_reminders_and_fixed_exit() -> None:
     first_reminder = scheduled_execution.execution_clock(_at(9, 55))
     assert first_reminder["state"] == "entry_reminder"
@@ -116,6 +154,31 @@ def test_extract_scheduled_orders_uses_complete_pool_not_end_of_day_selected() -
 
     assert [row["vt_symbol"] for row in orders] == ["600001.SSE"]
     assert orders[0]["candidate_source"] == "complete_first_board_candidate_pool"
+
+
+def test_extract_orders_includes_ready_two_to_three_but_not_high_board_by_default() -> None:
+    first_board = _candidate("600001.SSE", "10:06:00")
+    two_to_three = {
+        **_candidate("600002.SSE", "10:06:00", lane="two_to_three"),
+        "relay_trigger_status": "ready",
+        "signal_kind": "first_touch",
+    }
+    high_board = {
+        **_candidate("600003.SSE", "10:06:00", lane="high_board"),
+        "relay_trigger_status": "ready",
+        "signal_kind": "first_touch",
+    }
+    day = _history_day(candidate_pool=[first_board])
+    pools = day["lane_portfolio"]["candidate_pool"]
+    pools["two_to_three"] = [two_to_three]
+    pools["high_board"] = [high_board]
+
+    orders = scheduled_execution.extract_scheduled_orders([day])
+
+    assert [(row["lane"], row["vt_symbol"]) for row in orders] == [
+        ("two_to_three", "600002.SSE"),
+        ("first_board", "600001.SSE"),
+    ]
 
 
 def test_extract_scheduled_orders_filters_lane_decision_window_and_duplicates() -> None:

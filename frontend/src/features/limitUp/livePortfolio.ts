@@ -8,6 +8,7 @@ export type LimitUpLiveScope = "portfolio" | BoardLaneKey;
 
 const PORTFOLIO_LANES = new Set<BoardLaneKey>([
   "first_board",
+  "two_to_three",
 ]);
 const NON_ACTIONABLE_STATES = new Set(["rejected", "missed", "invalidated"]);
 
@@ -20,7 +21,7 @@ export function liveSignalsForScope(
     const portfolio = new Map<string, LimitUpLiveSignal>();
     for (const signal of snapshot.recommendations.portfolio) {
       const lane = signal.board_lane ?? boardLaneForLevel(signal.board_level);
-      if (!PORTFOLIO_LANES.has(lane) || !canTransitionToBuy(signal)) continue;
+      if (!lane || !PORTFOLIO_LANES.has(lane) || !canTransitionToBuy(signal)) continue;
       if (!portfolio.has(signal.vt_symbol)) portfolio.set(signal.vt_symbol, signal);
     }
     const portfolioRows = [...portfolio.values()].slice(0, 2);
@@ -29,7 +30,8 @@ export function liveSignalsForScope(
     for (const signal of snapshot.recommendations.watchlist ?? []) {
       const lane = signal.board_lane ?? boardLaneForLevel(signal.board_level);
       if (
-        !PORTFOLIO_LANES.has(lane)
+        !lane
+        || !PORTFOLIO_LANES.has(lane)
         || !canTransitionToBuy(signal)
         || selectedSymbols.has(signal.vt_symbol)
         || observations.has(signal.vt_symbol)
@@ -48,6 +50,7 @@ export function liveSignalsForScope(
     const lane = signal.board_lane ?? boardLaneForLevel(signal.board_level);
     if (
       !canTransitionToBuy(signal)
+      || !lane
       || (scope === "portfolio" ? !PORTFOLIO_LANES.has(lane) : lane !== scope)
     ) continue;
     const current = selected.get(signal.vt_symbol);
@@ -63,14 +66,15 @@ export function liveSignalsForScope(
 function canTransitionToBuy(signal: LimitUpLiveSignal): boolean {
   return (
     !NON_ACTIONABLE_STATES.has(signal.signal_state ?? "")
+    && signal.action !== "next_auction"
     && signal.blocking_scope !== "structural"
     && signal.missed_preseal_entry !== true
   );
 }
 
-function boardLaneForLevel(level: number): BoardLaneKey {
+function boardLaneForLevel(level: number): BoardLaneKey | null {
   if (level <= 1) return "first_board";
-  if (level === 2) return "one_to_two";
+  if (level === 2) return null;
   if (level === 3) return "two_to_three";
   return "high_board";
 }

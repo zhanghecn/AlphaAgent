@@ -2,7 +2,7 @@ import { ApiClientError, apiClient } from "./client";
 
 export type ExitMode = "dynamic" | "next_open" | "next_close" | "next_1430";
 export type EntryMode = "auction" | "sweep" | "tail" | "next_auction";
-export type BoardLaneKey = "first_board" | "one_to_two" | "two_to_three" | "high_board";
+export type BoardLaneKey = "first_board" | "two_to_three" | "high_board";
 export type LimitUpBacktestScope = "portfolio" | BoardLaneKey;
 export type HistoryValidationPhase = "warmup" | "expanding_oos" | "locked_holdout";
 export type LimitUpLiveAction = "buy_now" | "observe" | "wait_tail" | "next_auction" | "pass";
@@ -473,7 +473,8 @@ export interface LimitUpLaneBacktest {
     excluded_lanes: BoardLaneKey[];
     selection_basis: string;
     candidate_source?: string;
-    one_to_two_status?: string;
+    configured_lanes?: BoardLaneKey[];
+    configuration_matches_gate?: boolean;
   };
   execution_schedule?: {
     entry_windows: string[];
@@ -524,17 +525,21 @@ export interface LimitUpLaneBacktest {
     validation_variants: Record<string, LimitUpEntrySummary>;
     variants: Record<string, LimitUpEntrySummary>;
   };
-  one_to_two_audit?: {
-    decision: "excluded_from_product_execution" | string;
-    reason: string;
-    independent: LimitUpEntrySummary;
-    phase_summaries: Record<string, LimitUpEntrySummary>;
-    portfolio_without_one_to_two: LimitUpEntrySummary;
-    portfolio_with_one_to_two: LimitUpEntrySummary;
-    delta_when_included: {
-      total_return_pct: number | null;
-      win_rate: number | null;
-      max_drawdown_pct: number | null;
+  relay_comparison?: {
+    selected_variant: string;
+    configured_variant?: string | null;
+    configuration_matches_gate: boolean;
+    variants: Record<string, {
+      lanes: BoardLaneKey[];
+      passed: boolean;
+      gate_checks: Record<string, boolean>;
+      summary: LimitUpEntrySummary;
+      phase_summaries: Record<string, LimitUpEntrySummary>;
+      double_cost: LimitUpEntrySummary;
+    }>;
+    trigger_coverage: {
+      by_lane: Partial<Record<BoardLaneKey, Record<string, number>>>;
+      total: Record<string, number>;
     };
   };
   daily_results: LimitUpDailyResult[];

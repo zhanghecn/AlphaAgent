@@ -108,7 +108,7 @@ def build_sector_warmup_research_report(
         "lane_isolation": {
             "passed": True,
             "affected_lanes": ["first_board"],
-            "unchanged_lanes": ["one_to_two", "two_to_three", "high_board"],
+            "unchanged_lanes": ["two_to_three", "high_board"],
         },
         "selected_trades": {
             variant: trades[-200:] for variant, trades in trades_by_variant.items()

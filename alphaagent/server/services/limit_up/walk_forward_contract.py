@@ -13,10 +13,9 @@ from alphaagent.server.services.limit_up.versions import (
 
 ENTRY_MODES = ("auction", "sweep", "tail", "next_auction")
 EXIT_MODES = ("next_open", "next_close")
-BOARD_LANES = ("first_board", "one_to_two", "two_to_three", "high_board")
+BOARD_LANES = ("first_board", "two_to_three", "high_board")
 BOARD_LANE_ENTRY_MODES = {
     "first_board": "sweep",
-    "one_to_two": "next_auction",
     "two_to_three": "next_auction",
     "high_board": "next_auction",
 }

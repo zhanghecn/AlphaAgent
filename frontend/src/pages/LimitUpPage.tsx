@@ -532,7 +532,7 @@ function LiveView({
       ) : (
         <EmptyRow text={
           planMode
-            ? "当前没有入选次交易时段的综合首板观察候选"
+            ? "当前没有入选次交易时段的综合推荐观察候选"
             : "暂无可转买观察，保持现金；全部雷达结果见当日轨迹"
         } />
       )}
@@ -1125,7 +1125,7 @@ function BacktestView({
         </div>
       )}
       {report?.lane === "portfolio" ? (
-        <div className="border-b px-3 py-2 text-xs text-muted-foreground sm:px-4">综合首板 · 完整候选池按到达时间成交 · 两仓各 50% · 不用杂毛补仓</div>
+        <div className="border-b px-3 py-2 text-xs text-muted-foreground sm:px-4">综合推荐 · 首板与二进三按到达时间成交 · 两仓各 50% · 不预留仓位</div>
       ) : null}
       {report && <RobustnessStrip report={report} />}
       {report && <ValidationStrip report={report} />}

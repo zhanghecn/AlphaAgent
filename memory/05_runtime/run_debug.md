@@ -159,21 +159,21 @@ uv run pytest tests/alphaagent/test_quant_strategy_acceptance.py -q
 - `GET /api/limit-up/live`: 只读后台约每 15 秒更新的最新实时信号，不访问外部行情；同一分钟使用同一审计行更新最新 `captured_at`，交易时段超过 90 秒未更新会 fail-closed。`POST /api/limit-up/live/refresh` 仅供调度/显式采集使用。
 - `limit_up_concept_scan`: 交易时段每 30 秒最多 6 路分页抓取完整 A 股行情，以最近 D-1 题材成员聚合概念扩散、临板、封板、炸板、成交额和 1/3/5 分钟加速度。手动入口为 `POST /api/data-sync/schedules/limit_up_concept_scan/run`；盘后返回 `skipped/unavailable` 且不写概念快照。
 - `limit_up_plan_1505`、`eod_1900` 和 `eod_finalize_2130` 仍维护内部盘后观察数据；当前产品不执行旧次日竞价接力。盘后 `/live` 会为已有计划或空计划统一附加下一交易日 09:55 提醒、10:00 开始连续盘中评估和 D+1 14:30 卖出日程。
-- 09:15-09:19 后台扫描只更新竞价观察，09:20 后才可能转为“买点已触发（研究）”。每条计划必须包含战法、入选原因、触发检查、买入、卖出和取消纪律；`execution_permission` 当前固定为 `research_only`。
+- 09:15-09:59 和竞价阶段只更新观察资格，不得转为买点；10:00 后才按统一窗口检查首板触板或二进三的新鲜首次触板/回封。每条计划必须包含战法、入选原因、触发检查、买入、卖出和取消纪律；`execution_permission` 当前固定为 `research_only`。
 - `GET /api/limit-up/signals?date=YYYY-MM-DD&as_of=`: 历史快照或历史代理；无严格快照的代理会附加只使用该日前已闭合结果的历史胜率、平均净收益、硬亏率和样本数。
 - `GET /api/limit-up/history/status` / `POST /api/limit-up/history/rebuild`: 全历史账本状态和后台重建。
 - 正常重建优先调用 `POST /api/limit-up/history/rebuild`，由正在服务的进程清空并预热内存缓存。若运维通过 `docker compose exec ... rebuild_history_sync()` 在独立进程重建，完成后必须 `docker compose restart alphaagent-api`，否则服务进程可能在 TTL 内继续返回旧账本缓存。
-- `GET /api/limit-up/history/dates` / `GET /api/limit-up/history/day?date=`: 600 日日期与逐日四路径验证。
-- `GET /api/limit-up/history/backtest?lane=portfolio&start=&end=`: 当前产品回测，固定 10 万元、两仓各 50%、完整首板候选池、`10:00-11:30 / 13:00-14:30` 连续评估和 D+1 14:30；返回精确分钟价/收盘代理覆盖、候选代理边界、双倍成本、一至四仓审计和一进二消融。最终封板/炸板只作为盘后交割结果，不能进入候选、排序、成交或产品压力测试。其他 `lane` 与 `dynamic / next_open / next_close` 只保留内部研究兼容。
+- `GET /api/limit-up/history/dates` / `GET /api/limit-up/history/day?date=`: 603 日日期与逐日首板、二进三、高板账本。
+- `GET /api/limit-up/history/backtest?lane=portfolio&start=&end=`: 当前产品回测，固定 10 万元、两仓各 50%，从完整首板/二进三候选池按统一窗口和真实触发时间成交，D+1 14:30 退出；返回四个冻结组合、触发覆盖、双倍成本、仓位审计和分钟价/收盘代理覆盖。一进二 `lane` 返回 422，高板只保留独立研究。
 - 定时账户缓存键只包含历史版本、策略版本和日期范围；完整账户只计算一次，交割单与回测的不同展示条数在返回时切片。历史重建统一清空并后台预热该缓存，禁止为单个交易日再次重算 601 日账户。
 - `GET /api/limit-up/history/factors?start=&end=&entry_mode=&exit_mode=`: 每日 Top5 候选的成功板/直接砸盘分型、买前因子样本外差异和锁定留出方向验证；结果口径不是成交。
-- `GET /api/limit-up/history/model-report?start=&end=&entry_mode=&exit_mode=&lane=`: 不传 `lane` 时兼容旧买点 Top5；传首板/一进二/二进三/高板时读取完整板位候选池，按完整交易日历运行 252/63/63 Walk-forward，每日最多 1 只，训练不足 300 条时明确空仓。
+- `GET /api/limit-up/history/model-report?start=&end=&entry_mode=&exit_mode=&lane=`: 不传 `lane` 时兼容旧买点 Top5；活跃板位只接受首板、二进三和高板，一进二返回 422。按完整交易日历运行 252/63/63 Walk-forward，每日最多 1 只，训练不足 300 条时明确空仓。
 - `GET /api/limit-up/forward-validation?start=&end=&entry_mode=&exit_mode=`: 只读真实保存快照的严格前向观察账本，支持四种买点和 D+1 开/收盘。
 - `GET /api/limit-up/data-quality`: 研究账本、事件路径、历史成员、竞价、分钟、Tick/L2 和前向观察的真实覆盖门禁。
 - `POST /api/limit-up/data-quality/minute-backfill`: 兼容的同步补数接口，默认 20 个、最大 200 个；长批次不要从产品调用。
 - `POST /api/limit-up/data-quality/minute-backfill/start` / `GET /batches/{batch_id}`: 产品后台补数入口，默认 200 个并立即返回 `202`；前端每 2 秒轮询，终态自动刷新门禁。全局无关同步批次运行时返回 `409`。
 - `sync_limit_up_event_minutes`: 夜间自动补主板非 ST 涨停事件分钟路径，默认 200 个；位于 `eod_finalize_2130` 的 `eod_quant_research` 之后，失败按 1/3/14 天持久化退避。
-- `limit_up_history_rebuild`: `eod_finalize_2130` 在事件分钟补数后执行；仅当最新完整日线日晚于当前 v14 账本末日时重建，无新交易日返回 `skipped`。重建完成会清空并重新预热动态回测/战法验证缓存，随后生成次交易时段正式计划。
+- `limit_up_history_rebuild`: `eod_finalize_2130` 在事件分钟补数后执行；仅当最新完整日线日晚于当前 v15 账本末日时重建，无新交易日返回 `skipped`。重建完成会清空并重新预热组合回测/战法验证缓存，随后生成次交易时段观察计划。
 - `auction_0926` / `sync_stock_auction_snapshots`: 交易日 09:26 保存主板非 ST 集合竞价公开字段；行情日期不等于当天、源时间不在 09:25-09:29、分页不足或去重后缺股都会整批失败且不写快照。
 - `GET /api/data-sync/imports/limit-up-evidence/status`: 历史事件/竞价供应商配置和真实覆盖；不返回 token。
 - `GET /api/data-sync/imports/limit-up-evidence/template.csv?dataset=events|auction`: 完整 CSV 模板。
@@ -184,7 +184,7 @@ uv run pytest tests/alphaagent/test_quant_strategy_acceptance.py -q
 - `POST /api/data-sync/imports/limit-up-memberships/tushare` / `csv`: 按日期范围和批次数预检查/写入行业成员；每日覆盖不足 90% 不写，同日概念成员保持不变。
 - `POST /api/data-sync/schedules/limit_up_live_scan/run`: 手动执行与自动盘中计划相同的实时扫描；有效快照返回 `succeeded`，非交易时段或过期行情返回 `skipped / 未保存`。
 
-当前 `limit-up-history-v14` 点时账本覆盖 `2024-01-15..2026-07-14` 共 602 日，并保存完整候选池、最终选择、形态标签和内部退出研究。产品页不再按板位切换；历史交割单按买入日读取连续评估账户，显示 D 买入时间和 D+1 14:30 卖出。历史引擎优先读取事件原始分时路径，缺失时批量读取已落库 1 分钟线，按 D-1 收盘转换为既有 80 点路径。产品账户现有 290 个候选信号、139 笔买入、137 笔闭合和 2 笔待 D+1，胜率 `62.0438%`、复利 `+204.8622%`、最大回撤 `-7.9408%`；`limit-up-live-v4` 从新规则上线后独立累计真实前向证据，保持研究状态。当前本地财报覆盖 `1,524/3,481` 只主板股票，历史点时行业成员覆盖约 `0.3355%`，不能把候选代理称为实盘等价。
+当前 `limit-up-history-v15` 点时账本覆盖 `2024-01-15..2026-07-15` 共 603 日，活跃候选池只含首板、二进三和高板。产品页不按板位切换，综合推荐执行首板+二进三统一盘中队列；账户为 307 个信号、149 笔闭合交易，胜率 `63.0872%`、复利 `+266.4491%`、最大回撤 `-8.0275%`。接力竞价只观察，窗口内首次触板/回封才进入买入队列；高板未通过回撤门。一进二候选、入选和目标二板均为 0。当前版本为 `history-v15 / live-v6 / scheduled-v4 / cash-v4 / walk-forward-v6`，完整证据见 `memory/06_backtests/limit_up_unified_intraday_relay_backtest_20260715.md`。
 
 2026-07-12 同花顺事件导入后，事件门禁为 252 日、19,978 条（涨停 14,455，炸板 5,523）；已有分钟路径 `2,215/19,978 = 11.0872%`，分钟交易日门禁仍为 `55/500` 日。TDX 尝试账本为 `1,928 covered / 0 empty / 0 error`，这不代表其余 17,763 个事件对已尝试或无需补数。桌面 `1440x1000` 与手机 `390x844` 浏览器验证无整页横向溢出，按钮启动、批次查询和终态门禁刷新分别返回 `202/200/200`，console 为 0 error / 0 warning。
 
@@ -192,7 +192,7 @@ uv run pytest tests/alphaagent/test_quant_strategy_acceptance.py -q
 
 当前日期页面查询 `/live`，历史日期才查询 `/signals`。交易时段 `limit_up_live_scan` 以 15 秒目标间隔更新强势股、涨停池和两日轨迹，`limit_up_concept_scan` 以 30 秒目标间隔独立更新完整市场概念帧；页面 10 秒轮询只读内存/已保存快照，不触发行情源或新增审计行。同日全页快照超过 90 秒时动作降为 stale/pass，概念帧超过 45 秒或覆盖不足 90% 时禁止新买点。2026-07-14 的 319 个相邻逐次扫描中位数为 `18.22s`、P95 为 `19.13s`、最大 `53.06s`，0 个超过 60 秒；市场门逐帧回放见 `memory/06_backtests/limit_up_live_gate_replay_20260714.md`。调试实时性时要同时检查两个 schedule 的 `last_started_at`、概念快照年龄/覆盖率、公共源限流和正式快照 `captured_at`，不能只用分钟表行数判断频率。vendored 六个涨停池 HTTP 入口已有 8 秒硬超时，五类实时池并行；完整行情使用腾讯分页、最多 6 路并发，并在统一无错误代理环境内完成整批请求。所有主板非 ST 的 5% 雷达先完成概念和结构评估，Top5 只负责最终推荐排序。
 
-2026-07-13 盘后观察缺失的独立根因是计划构建器把“次日竞价确认”错误用于“盘后提前观察”，使 30 只雷达候选全部消失。修复后按观察白名单从 30 只中保留 5 只：立方制药、贵绳股份、恒尚节能、哈药股份、联环药业；无涨停基因、财报不可用等硬伤不再漏入。真实重放 2026-07-10 盘后数据同样得到 5 只，二进三包含立方制药。Playwright 已验证 `/limit-up` 默认组合和二进三标签均显示观察原因、待确认竞价项及买入/卖出/取消纪律；观察保持 `research_only`，不冒充买点。
+2026-07-13 盘后观察缺失的独立根因是计划构建器把“次日竞价确认”错误用于“盘后提前观察”，使 30 只雷达候选全部消失。修复后按观察白名单从 30 只中保留 5 只；v6 又彻底移除首板到一进二计划，二板结构只形成目标三板观察。盘前/竞价项只确认资格，买入必须等待 10:00 后首次触板或可观察回封；观察保持 `research_only`，不冒充买点。
 
 2026-07-12 真实 `/data-quality` 结果：点时历史账本 `600/500` 日达标；主板非 ST 涨停事件路径 `252/500` 日、19,978 条；事件分钟路径 `2,215/19,978 = 11.0872%`，分钟交易日为 `55/500`；逐日板块成员、竞价、板块分钟资金和 Tick/L2 均为 0，合格前向观察日为 0。末封时间和封单额覆盖只在最终封板事件内计算，当前均为 100%，炸板行不再把覆盖率推到 100% 以上。当前 8 个门禁仍仅 1 个达标、2 个补数中、5 个缺失，`research_ledger_ready=true`、`simulation_eligible=false`。当前成员表虽有 5,611 只股票、86,701 条关系，仍只能按 `current_snapshot` 计 0 个逐日历史覆盖日。原始周末/休市事件和盘中重复快照继续保留审计，但必须有同股同日日线且只取最后状态才进入门禁。
 
@@ -215,7 +215,7 @@ docker compose up -d --build alphaagent-api alphaagent-web
 
 API runtime 需要 `libgomp1` 才能导入 LightGBM；该包在 `Dockerfile.alphaagent-api` 独立缓存层安装，并先删除只用于安装 Docker CLI 的 apt source，避免源码重建受 Docker 官方源波动阻塞。
 
-浏览器检查 `http://localhost:8080/limit-up`，桌面和 `390x844` 都要验证：只有实时推荐/历史交割单/回测三个主入口；操作列表最多两只买点和六只可转买观察，不得出现“今日拒买/硬性排除”，永久淘汰、错过和失效股票只在当日轨迹展示；顶部数量分别显示“买点 N/2”和“可转买观察 M”。每行显示点时现涨、现价、距板、概念强度、5% 扩散和概念龙排名且无重叠；当日轨迹保留掉出 Top5 的股票；盘后仍显示下一交易日日程；回测显示 v14 同一账户、弱市题材进攻标签、精确 14:30/收盘代理覆盖、双倍成本和“候选代理，非实盘等价”，不得展示按最终封板/炸板筛选的反事实收益。实时页铃铛首次启用应申请通知权限，启用后扬声器按钮必须能手动播放双音并发送测试通知；权限拒绝时声音和 Toast 仍可用，测试不得新增快照或交易。概念增量路径通过时，未采用的旧行业检查只能显示为诊断，不能继续显示“待确认”；一进二负样本审计只保留在后端，不在产品页展示。当前仍为 `research_only`；硬门失败不能因后来封板事后改成正确买点，概念工程回放见 `memory/06_backtests/limit_up_realtime_concept_replay_20260714.md`。
+浏览器检查 `http://localhost:8080/limit-up`，桌面和 `390x844` 都要验证：只有实时推荐/历史交割单/回测三个主入口，没有板位筛选或策略开关；综合推荐同时承载首板和二进三，最多两只买点和六只可转买观察。一进二不得出现在页面，竞价不得显示买入。回测显示 v15 统一账户、四组组合结论、精确 14:30/收盘代理覆盖、双倍成本和候选代理边界。当前仍为 `research_only`；硬门失败不能因后来封板事后改成正确买点。
 
 ## Verification
 

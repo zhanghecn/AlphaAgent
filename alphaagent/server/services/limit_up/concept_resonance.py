@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
+from math import ceil
 from statistics import mean, median
 from typing import Any
 
@@ -43,10 +44,15 @@ STYLE_CONCEPT_KEYWORDS = (
     "高振幅",
     "高换手",
 )
-CONCEPT_WARMING_MAX_PERCENTILE = 0.05
-CONCEPT_LAUNCH_MAX_PERCENTILE = 0.03
 CONCEPT_MIN_COVERAGE_RATIO = 0.90
 CONCEPT_EBB_FAILED_RATE = 0.35
+CONCEPT_LAUNCH_MIN_RISE_RATIO = 0.80
+CONCEPT_LAUNCH_MIN_MEDIAN_CHANGE_PCT = 2.5
+CONCEPT_LAUNCH_MIN_STRONG_5_COUNT = 3
+CONCEPT_LAUNCH_MIN_STRONG_5_RATIO = 0.05
+CONCEPT_WARMING_MIN_RISE_RATIO = 0.65
+CONCEPT_WARMING_MIN_MEDIAN_CHANGE_PCT = 1.0
+CONCEPT_WARMING_MIN_STRONG_5_COUNT = 2
 _CONCEPT_STATES = {"launch": 0, "warming": 1, "observe": 2, "ebb": 3, "unavailable": 4}
 
 
@@ -277,10 +283,17 @@ def concept_state(row: Mapping[str, object]) -> str:
     failed_rate = _float(row.get("failed_count")) / max(touched, 1)
     if touched >= 3 and failed_rate > CONCEPT_EBB_FAILED_RATE:
         return "ebb"
-    percentile = _float(row.get("strength_percentile"), default=1.0)
+
+    observed = max(int(row.get("observed_count") or 0), 0)
+    strong_5_required = max(
+        CONCEPT_LAUNCH_MIN_STRONG_5_COUNT,
+        ceil(observed * CONCEPT_LAUNCH_MIN_STRONG_5_RATIO),
+    )
     if (
-        percentile <= CONCEPT_LAUNCH_MAX_PERCENTILE
-        and int(row.get("strong_5_count") or 0) >= 3
+        _float(row.get("rise_ratio")) >= CONCEPT_LAUNCH_MIN_RISE_RATIO
+        and _float(row.get("median_change_pct"))
+        >= CONCEPT_LAUNCH_MIN_MEDIAN_CHANGE_PCT
+        and int(row.get("strong_5_count") or 0) >= strong_5_required
         and (
             int(row.get("near_limit_count") or 0) >= 1
             or int(row.get("strong_7_count") or 0) >= 2
@@ -288,8 +301,11 @@ def concept_state(row: Mapping[str, object]) -> str:
     ):
         return "launch"
     if (
-        percentile <= CONCEPT_WARMING_MAX_PERCENTILE
-        and int(row.get("strong_5_count") or 0) >= 2
+        _float(row.get("rise_ratio")) >= CONCEPT_WARMING_MIN_RISE_RATIO
+        and _float(row.get("median_change_pct"))
+        >= CONCEPT_WARMING_MIN_MEDIAN_CHANGE_PCT
+        and int(row.get("strong_5_count") or 0)
+        >= CONCEPT_WARMING_MIN_STRONG_5_COUNT
         and _float(row.get("change_acceleration_3m")) > 0
     ):
         return "warming"

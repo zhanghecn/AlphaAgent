@@ -566,7 +566,7 @@ def _summary_sort_key(item: Mapping[str, object]) -> tuple[object, ...]:
 def _lane_funnels(
     events_by_symbol: Mapping[str, Sequence[Mapping[str, object]]],
 ) -> dict[str, dict[str, object]]:
-    lanes = ("first_board", "one_to_two", "two_to_three", "high_board")
+    lanes = ("first_board", "two_to_three", "high_board")
     return {
         lane: _lane_funnel(
             [

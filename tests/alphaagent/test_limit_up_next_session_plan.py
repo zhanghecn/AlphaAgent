@@ -18,14 +18,14 @@ def _source_snapshot() -> dict[str, object]:
         "name": "计划候选",
         "sector_name": "机器人",
         "market_dragon_rank": 1,
-        "board_level": 2,
-        "board_lane": "one_to_two",
-        "action": "next_auction",
-        "entry_kind": "next_auction",
-        "reason": "首板质量通过",
+        "board_level": 3,
+        "board_lane": "two_to_three",
+        "action": "observe",
+        "entry_kind": "next_session_watch",
+        "reason": "二进三观察资格通过",
         "lane_favorable_factors": ["sector_core", "prior_board_changed_hands_and_resealed"],
         "setup_tags": ["weak_to_strong_breakout"],
-        "buy_condition": "次日竞价硬门通过后执行",
+        "buy_condition": "次日10:00后等待触板或回封",
         "sell_condition": "D+1动态退出",
         "cancel_condition": "竞价不符合或市场门关闭",
         "execution_confidence": "proxy_without_l2",
@@ -51,7 +51,7 @@ def _source_snapshot() -> dict[str, object]:
     }
 
 
-def test_build_final_plan_keeps_only_next_auction_research_actions() -> None:
+def test_build_final_plan_keeps_only_next_session_observations() -> None:
     captured_at = datetime(2026, 7, 10, 19, 5, tzinfo=SHANGHAI)
 
     result = next_session_plan.build_next_session_plan_snapshot(
@@ -71,7 +71,7 @@ def test_build_final_plan_keeps_only_next_auction_research_actions() -> None:
     rows = result["recommendations"]["lanes"]["next_auction"]
     assert [row["vt_symbol"] for row in rows] == ["600001.SSE"]
     assert rows[0]["action"] == "observe"
-    assert rows[0]["research_action"] == "next_auction"
+    assert rows[0]["research_action"] == "observe"
     assert rows[0]["signal_state"] == "observing"
     assert rows[0]["execution_permission"] == "research_only"
 
@@ -134,8 +134,10 @@ def test_plan_keeps_structural_observations_while_auction_checks_are_pending() -
     assert rows[0]["board_level"] == 3
     assert rows[0]["board_lane"] == "two_to_three"
     assert rows[0]["action"] == "observe"
-    assert rows[0]["research_action"] == "next_auction"
-    assert rows[0]["strategy_name"] == "二进三竞价观察"
+    assert rows[0]["research_action"] == "observe"
+    assert rows[0]["strategy_name"] == "二进三盘中观察"
+    assert "10:00" in rows[0]["buy_instruction"]
+    assert rows[0]["valid_until"] == "下一交易日14:30"
 
 
 def test_plan_limits_each_board_lane_to_four_observations() -> None:
@@ -168,6 +170,30 @@ def test_plan_limits_each_board_lane_to_four_observations() -> None:
         "二板候选4",
         "二板候选3",
     ]
+
+
+def test_first_board_does_not_create_a_one_to_two_plan() -> None:
+    source = _source_snapshot()
+    source["recommendations"]["lanes"]["next_auction"] = []
+    source["candidates"] = [
+        {
+            "vt_symbol": "600001.SSE",
+            "name": "首板样本",
+            "state": "sealed",
+            "board_level": 1,
+            "board_lane": "first_board",
+            "lane_blockers": [],
+        }
+    ]
+
+    result = next_session_plan.build_next_session_plan_snapshot(
+        source,
+        source_trade_date=date(2026, 7, 10),
+        captured_at=datetime(2026, 7, 10, 19, 5, tzinfo=SHANGHAI),
+        phase="final",
+    )
+
+    assert result["recommendations"]["lanes"]["next_auction"] == []
 
 
 def test_plan_snapshot_is_json_serializable_before_persistence() -> None:
