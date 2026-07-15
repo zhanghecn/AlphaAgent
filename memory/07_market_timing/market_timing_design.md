@@ -23,9 +23,9 @@
   正式金银次数只统计 `CONFIRMED`，候选总数不冒充正式次数。
 - `active_direction` 保存最近一次已确认金银事件的因果方向：从 `confirm_date`
   起持续沿用，直到相反方向事件确认；`PENDING/INVALIDATED` 不切换。界面固定称为
-  “最近确认”，显示“金未反转 / 银未反转”，不再称为当日行情或手指区域。
-  `zone_direction` 是当日候选区域的唯一来源。行情和因子日期拆成
-  `quote_date` 与 `factor_date`。
+  “手指状态”，显示“金手指延续 / 银手指延续”，不再把当日中性候选区作为
+  用户结果。`zone_direction` 和否决候选保留在 API 中供内部审计，不在用户主结果
+  中展示。行情和因子日期拆成 `quote_date` 与 `factor_date`。
 - 产品用法：金/银手指不作为用户手动策略开关；市场择时面板同时输出
   `danger_state`，没有把它直接接入量化候选、涨停策略、仓位或下单。
 - 当前与 Top20 研究的关系：金/银手指单独不够精准，必须结合 setup、均线位置、量能、收盘位置、主线、右尾保护和失败风险。
@@ -105,10 +105,11 @@ pnpm --dir frontend run build
   状态。盘中追加 bar 通过 `confirmed_through` 截止正式确认，次日盘中涨跌不能
   提前改变最近确认方向。主 K 线只画已确认和待确认事件，否决候选保留在计数、
   日期表和准确率对照中。
-- 主摘要读取 `overview.current_direction`，但只展示为“最近确认”，并用
-  `overview.latest_signal.confirm_date` 解释起点。最近交易日表分别展示
-  `active_direction`、`zone_direction` 和事件确认状态。K 线悬停按日期展示中文
-  日期、OHLC、涨跌幅、当日区域、当日事件及 `confirm_date` 对应的确认结果。
+- 主摘要读取 `overview.current_direction`，展示为“手指状态”，并用
+  `overview.latest_signal.confirm_date` 解释延续起点。最近交易日表只向用户展示
+  `active_direction` 和有效手指事件。K 线悬停按日期展示 `YYYY-MM-DD`、OHLC、
+  涨跌幅、持续手指状态和当日有效新手指；`zone_direction=NEUTRAL` 与
+  `INVALIDATED` 候选不会覆盖用户看到的金银结果。
 
 ## Current Evidence Summary
 
@@ -139,11 +140,13 @@ pnpm --dir frontend run build
   `2026-07-14`，最后一日 `zone_direction=NEUTRAL`，但
   `overview.current_direction=timing_series[-1].active_direction=GOLD`。状态来源为
   `2026-06-11 REVERSAL_GOLD / CONFIRMED / 2026-06-12`，没有已确认银手指前持续为金。
-- 2026-07-02 悬停验证：前端测试 `59 passed`、生产构建通过。真实 K 线十字线
-  日期为完整 `2026-07-02`，摘要显示“候选区域 中性”和
-  “确认结果 7月1日金候选已否决”；“金未反转”只表示最近确认方向仍来自
-  `2026-06-12`，不表示 7 月 2 日是金区。页面不再显示“当前行情 / 金行情”。
-  `1440x1000` 与 `390x844` 横向溢出均为 0，控制台 0 错误/0 警告。
+- 2026-07-02 悬停验证：前端测试 `66 passed`、生产构建和 Docker Web 重建通过。
+  真实 K 线十字线日期为完整 `2026-07-02`，摘要显示“金手指延续 / 当日新手指
+  无”，不显示“中性”或“候选区域”。`2026-07-01` 的否决金候选不画箭头，
+  `2026-07-02` 也没有新金手指箭头；持续金仍来自 `2026-06-11` 事件在
+  `2026-06-12` 的确认。移出图表后恢复最新行情 `2026-07-15 / 金手指延续`。
+  `1440x1000` 与 `390x844` 横向溢出均为 0，控制台 0 错误/0 警告。实现提交为
+  `6479fe7d`。
 - 设计和实施证据：`requirements/alphaagent_market_timing_v8_precision_silver_design.md`、
   `requirements/alphaagent_market_timing_v8_precision_silver_implementation_plan.md`、
   `requirements/alphaagent_market_timing_persistent_regime_design.md`、
