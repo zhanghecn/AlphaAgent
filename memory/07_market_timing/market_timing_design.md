@@ -87,7 +87,7 @@ alphaagent/server/services/quant/market_timing/
 ```bash
 uv run python scripts/market_timing_eval.py
 uv run --group server pytest tests/alphaagent/services/quant/test_market_timing_backtest.py tests/alphaagent/services/quant/test_market_timing_no_lookahead.py tests/alphaagent/services/quant/test_market_timing_intraday.py -q
-pnpm --dir frontend test -- timingPresentation.spec.ts
+pnpm --dir frontend test
 pnpm --dir frontend run build
 ```
 
@@ -101,6 +101,9 @@ pnpm --dir frontend run build
   候选/确认信息）；overview 同步输出最新危险状态。前端最近 20 个交易日表
   显示结构风险行，顶部仅在危险时显示状态标签。主 K 线只画已确认和待确认事件，
   否决候选保留在计数、日期表和准确率对照中。
+- 当前摘要只读取 `overview.current_direction`：中性时显示“无信号 / 当前无金银
+  信号”，不再渲染可能已经过期的 `latest_signal`。该字段继续保留 API 兼容，
+  历史事件由 K 线、日期表和准确率记录展示。
 
 ## Current Evidence Summary
 
@@ -129,8 +132,13 @@ pnpm --dir frontend run build
 - 2026-07-15 验证：市场择时后端测试 `43 passed`；重建 API 后强制刷新返回 200，
   `sample_range=[2024-05-28, 2026-07-15]`，真实面板数量、关键日期和两组事件哈希
   全部通过断言。
+- 当前信号展示验证：前端测试 `48 passed`、生产构建通过；真实 `/market` 在
+  `1440x1000` 和 `390x844` 均只显示当前“无信号”，摘要不含 `2026-06-11`、
+  “最近信号”或当前“金手指”，横向溢出为 0，控制台 0 错误/0 警告。
 - 设计和实施证据：`requirements/alphaagent_market_timing_v8_precision_silver_design.md`、
-  `requirements/alphaagent_market_timing_v8_precision_silver_implementation_plan.md`。
+  `requirements/alphaagent_market_timing_v8_precision_silver_implementation_plan.md`、
+  `requirements/alphaagent_market_timing_current_signal_presentation_design.md`、
+  `requirements/alphaagent_market_timing_current_signal_presentation_implementation_plan.md`。
 
 ## How To Use In Quant Research
 

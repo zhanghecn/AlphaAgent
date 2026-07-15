@@ -5,23 +5,14 @@ import { cn } from "@/lib/utils";
 /** 金手指/银手指信号专色: 暖金 vs 冷银, 明度+色相双重对立, 深浅模式都清晰。
  *  避开 A 股涨红(#ef4444)/跌绿(#22c55e)。金亮暖、银深冷, 一眼可辨。 */
 export const GOLD = "#fbbf24"; // amber-400 亮暖金
-export const GOLD_DEEP = "#f59e0b"; // amber-500
 export const SILVER = "#64748b"; // slate-500 深冷银(浅底深灰清晰, 深底中灰可见)
 export const SILVER_DEEP = "#475569"; // slate-600
 
 const DIRECTION_LABEL: Record<TimingDirection, string> = {
   GOLD: "金手指",
   SILVER: "银手指",
-  NEUTRAL: "观望",
+  NEUTRAL: "无信号",
 };
-
-function daysAgo(dateStr: string): string {
-  const d = new Date(dateStr);
-  const diff = Math.round((Date.now() - d.getTime()) / 86400000);
-  if (Number.isNaN(diff)) return "";
-  if (diff <= 0) return "今天";
-  return `${diff} 天前`;
-}
 
 /**
  * 金/银指环 —— 页面 signature。
@@ -138,7 +129,6 @@ export function TimingHero({ overview, loading }: { overview: TimingOverview | n
     );
   }
   const direction = overview.current_direction;
-  const latestSignalDirection = overview.latest_signal?.direction ?? "NEUTRAL";
   const quoteDate = overview.quote_date;
   const factorDate = overview.factor_date;
   const indexUp = (overview.index_change_pct ?? 0) >= 0;
@@ -178,26 +168,13 @@ export function TimingHero({ overview, loading }: { overview: TimingOverview | n
             )}
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
-            <ForceBar label="多头合力 bull（金手指区）" value={overview.bull_force} color={GOLD} />
-            <ForceBar label="顶部合力 bear（银手指区）" value={overview.bear_force} color={SILVER_DEEP} />
+            <ForceBar label="多头合力 bull" value={overview.bull_force} color={GOLD} />
+            <ForceBar label="空头合力 bear" value={overview.bear_force} color={SILVER_DEEP} />
           </div>
-          {overview.latest_signal && (
-            <div className="flex items-center gap-2 text-sm">
-              <span className="text-muted-foreground">最近信号</span>
-              <span
-                className="rounded-md px-2 py-0.5 text-xs font-semibold"
-                style={{
-                  background: `${latestSignalDirection === "GOLD" ? GOLD : SILVER}22`,
-                  color: latestSignalDirection === "GOLD" ? GOLD_DEEP : SILVER_DEEP,
-                }}
-              >
-                {DIRECTION_LABEL[latestSignalDirection]}
-              </span>
-              <span className="text-muted-foreground">
-                候选 {overview.latest_signal.date}（{daysAgo(overview.latest_signal.date)}）
-                {overview.latest_signal.confirm_date && ` · 确认 ${overview.latest_signal.confirm_date}`}
-              </span>
-            </div>
+          {direction === "NEUTRAL" && (
+            <p className="text-sm text-muted-foreground">
+              当前无金银信号 · 因子截至 {factorDate}
+            </p>
           )}
         </div>
       </div>
