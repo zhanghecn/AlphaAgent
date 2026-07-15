@@ -87,5 +87,6 @@ describe("market timing presentation", () => {
     expect(timingSetupLabel("REVERSAL_GOLD")).toBe("弱势衰竭反转金手指");
     expect(timingSetupLabel("BREAKDOWN_SILVER")).toBe("趋势破位银手指");
     expect(timingSetupLabel("STRUCTURAL_BREAKDOWN_SILVER")).toBe("结构性破位银手指");
+    expect(timingSetupLabel("GOLD_FAILURE_SILVER")).toBe("金手指失效银手指");
   });
 });

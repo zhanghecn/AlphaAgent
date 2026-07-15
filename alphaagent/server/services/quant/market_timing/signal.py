@@ -1,4 +1,4 @@
-"""金手指/银手指信号触发 v8: 精度优先银手指 + 次日审计。
+"""金手指/银手指信号触发 v9: 精度优先银手指 + 金手指失效保护。
 
 演进:
 - v1/v2: 单日边沿触发, bull/bear 在阈值附近抖动会让 GOLD/SILVER 频繁交替。
@@ -16,8 +16,10 @@
   不因形式对称而上线。
 - v7: 增加 ``STRUCTURAL_BREAKDOWN_SILVER`` 和独立危险状态。强破位
   当日优先于反转金, 危险状态持续到价格、参与度和空头强度共同修复。
-- v8(本版): 停止生成样本外失效的普通 ``BREAKDOWN_SILVER``。银手指只保留
+- v8: 停止生成样本外失效的普通 ``BREAKDOWN_SILVER``。银手指只保留
   顶部风险和多类空头结构一致恶化两类 setup, 金手指行为不变。
+- v9(本版): 趋势金候选若被次日宽基急跌明确否决, 在失败日生成
+  ``GOLD_FAILURE_SILVER``，避免已失效金状态继续无限延续。
 
 无未来函数(关键修复):
 - 候选事件属性(trade_date/direction/grade/bull_force)只用 <=i 数据
@@ -46,6 +48,11 @@ SETUP_REVERSAL_GOLD = "REVERSAL_GOLD"
 SETUP_TOP_SILVER = "TOP_SILVER"
 SETUP_BREAKDOWN_SILVER = "BREAKDOWN_SILVER"
 SETUP_STRUCTURAL_BREAKDOWN_SILVER = "STRUCTURAL_BREAKDOWN_SILVER"
+SETUP_GOLD_FAILURE_SILVER = "GOLD_FAILURE_SILVER"
+
+# v9 趋势金失败保护：必须是宽基急跌且多空合力已经反转
+GOLD_FAILURE_RETURN_MAX = -2.0
+GOLD_FAILURE_UP_RATIO_MAX = 0.25
 
 # v6 反转金固定门槛(六指数 2015-2026 + 七指数共同期验证)
 REVERSAL_RSI2_MAX = 20.0
@@ -291,6 +298,30 @@ def candidate_setup(
     return None, None
 
 
+def is_gold_failure_silver(
+    setup_type: str,
+    factor: MarketTimingFactors,
+    previous_close: float,
+    current_close: float,
+    up_ratio: float | None,
+) -> bool:
+    """判断趋势金是否在下一交易日发生可确认的宽基失败。"""
+    if (
+        setup_type != SETUP_TREND_GOLD
+        or previous_close <= 0
+        or current_close <= 0
+        or up_ratio is None
+    ):
+        return False
+    return_pct = (current_close / previous_close - 1.0) * 100.0
+    return (
+        return_pct <= GOLD_FAILURE_RETURN_MAX
+        and up_ratio <= GOLD_FAILURE_UP_RATIO_MAX
+        and factor.bull_force < GOLD_ENTER
+        and factor.bear_force >= factor.bull_force
+    )
+
+
 def _evaluate_status(
     target: str,
     setup_type: str,
@@ -321,6 +352,85 @@ def _evaluate_status(
     return (
         STATUS_CONFIRMED if confirmed else STATUS_INVALIDATED,
         confirm_index,
+    )
+
+
+def _derive_gold_failure_events(
+    events: list[TimingSignal],
+    factor_seq: list[MarketTimingFactors],
+    closes: list[float],
+    up_ratios: list[float | None],
+    confirmed_through: date | None,
+) -> list[TimingSignal]:
+    """从趋势金次日失败派生银事件，并让失败银覆盖同日普通候选。"""
+    index_by_date = {
+        factor.trade_date: index
+        for index, factor in enumerate(factor_seq)
+    }
+    failure_events: list[TimingSignal] = []
+    failure_dates: set[date] = set()
+
+    for event in events:
+        if event.trade_date in failure_dates:
+            continue
+        candidate_index = index_by_date.get(event.trade_date)
+        if candidate_index is None:
+            continue
+        failure_index = candidate_index + 1
+        if failure_index >= len(factor_seq):
+            continue
+        factor = factor_seq[failure_index]
+        up_ratio = up_ratios[failure_index]
+        if not is_gold_failure_silver(
+            event.setup_type,
+            factor,
+            closes[candidate_index],
+            closes[failure_index],
+            up_ratio,
+        ):
+            continue
+
+        failure_date = factor.trade_date
+        finalized = (
+            confirmed_through is None
+            or failure_date <= confirmed_through
+        )
+        status = STATUS_CONFIRMED if finalized else STATUS_PENDING
+        return_pct = (
+            closes[failure_index] / closes[candidate_index] - 1.0
+        ) * 100.0
+        failure_events.append(
+            TimingSignal(
+                trade_date=failure_date,
+                direction="SILVER",
+                status=status,
+                grade=_grade("SILVER", factor.bull_force, factor.bear_force),
+                bull_force=factor.bull_force,
+                bear_force=factor.bear_force,
+                phase=factor.phase,
+                setup_type=SETUP_GOLD_FAILURE_SILVER,
+                confirm_date=failure_date if finalized else None,
+                reasons=[
+                    f"failed_gold={event.trade_date}",
+                    f"return_1d={return_pct:.1f}%",
+                    f"up_ratio={up_ratio:.2f}",
+                    f"bull={factor.bull_force:.1f}",
+                    f"bear={factor.bear_force:.1f}",
+                    status,
+                ],
+            )
+        )
+        failure_dates.add(failure_date)
+
+    if not failure_events:
+        return events
+    retained = [
+        event for event in events
+        if event.trade_date not in failure_dates
+    ]
+    return sorted(
+        [*retained, *failure_events],
+        key=lambda event: event.trade_date,
     )
 
 
@@ -494,4 +604,12 @@ def detect_events(
             )
         )
 
+    if aligned_closes is not None and aligned_up_ratios is not None:
+        return _derive_gold_failure_events(
+            events,
+            factor_seq,
+            aligned_closes,
+            aligned_up_ratios,
+            confirmed_through,
+        )
     return events

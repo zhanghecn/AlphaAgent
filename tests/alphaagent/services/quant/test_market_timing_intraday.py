@@ -139,6 +139,25 @@ def _structural_panel_case() -> tuple[
     return factors, closes, up_ratios
 
 
+def _gold_failure_panel_case() -> tuple[
+    list[fac.MarketTimingFactors],
+    list[float],
+    list[float | None],
+]:
+    start = date(2026, 6, 29)
+    factors = [
+        _factor(start, "GOLD"),
+        _factor(start + timedelta(days=1), "NEUTRAL"),
+        _factor(start + timedelta(days=2), "GOLD"),
+        replace(
+            _factor(start + timedelta(days=3), "NEUTRAL"),
+            bull_force=55.0,
+            bear_force=56.0,
+        ),
+    ]
+    return factors, [100.0, 101.0, 102.0, 98.0], [1.0, 1.0, 1.0, 0.0]
+
+
 def _signal(
     day: date,
     direction: str,
@@ -438,6 +457,68 @@ def test_confirmation_cutoff_keeps_next_day_intraday_event_pending():
     assert len(events) == 1
     assert events[0].status == sig.STATUS_PENDING
     assert events[0].confirm_date is None
+
+
+def test_gold_failure_silver_stays_pending_until_failure_day_is_final():
+    factors, closes, up_ratios = _gold_failure_panel_case()
+
+    intraday_events = sig.detect_events(
+        factors,
+        closes,
+        up_ratios,
+        confirmed_through=factors[-2].trade_date,
+    )
+    final_events = sig.detect_events(
+        factors,
+        closes,
+        up_ratios,
+        confirmed_through=factors[-1].trade_date,
+    )
+
+    intraday_failure = next(
+        event
+        for event in intraday_events
+        if event.setup_type == sig.SETUP_GOLD_FAILURE_SILVER
+    )
+    final_failure = next(
+        event
+        for event in final_events
+        if event.setup_type == sig.SETUP_GOLD_FAILURE_SILVER
+    )
+    assert intraday_failure.status == sig.STATUS_PENDING
+    assert intraday_failure.confirm_date is None
+    assert final_failure.status == sig.STATUS_CONFIRMED
+    assert final_failure.confirm_date == factors[-1].trade_date
+    assert sig.build_active_directions(
+        [factor.trade_date for factor in factors],
+        intraday_events,
+    )[-1] == "GOLD"
+    assert sig.build_active_directions(
+        [factor.trade_date for factor in factors],
+        final_events,
+    )[-1] == "SILVER"
+
+
+def test_timing_series_exposes_gold_failure_silver_as_the_day_event():
+    factors, closes, up_ratios = _gold_failure_panel_case()
+    events = sig.detect_events(factors, closes, up_ratios)
+
+    rows = mt_panel._build_timing_series(
+        factors,
+        events,
+        closes,
+        up_ratios,
+    )
+
+    assert rows[-1]["active_direction"] == "SILVER"
+    assert rows[-1]["zone_direction"] == "NEUTRAL"
+    assert rows[-1]["event"] == {
+        "direction": "SILVER",
+        "status": sig.STATUS_CONFIRMED,
+        "grade": "WEAK",
+        "setup_type": sig.SETUP_GOLD_FAILURE_SILVER,
+        "confirm_date": str(factors[-1].trade_date),
+    }
 
 
 def test_timing_series_keeps_daily_dates_and_event_confirmation():

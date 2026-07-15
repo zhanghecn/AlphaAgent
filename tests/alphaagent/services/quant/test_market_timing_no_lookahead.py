@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import random
+from dataclasses import replace
 from datetime import date, timedelta
 
 from alphaagent.server.services.quant.market_timing import factors as fac
@@ -395,6 +396,152 @@ def test_top_silver_remains_available():
         "SILVER",
         sig.SETUP_TOP_SILVER,
     )
+
+
+def _gold_failure_case() -> tuple[
+    list[fac.MarketTimingFactors],
+    list[float],
+    list[float | None],
+]:
+    start = date(2026, 6, 29)
+    factors = [
+        _timing_factor(start, "GOLD"),
+        _timing_factor(start + timedelta(days=1), "NEUTRAL"),
+        _timing_factor(start + timedelta(days=2), "GOLD"),
+        replace(
+            _timing_factor(start + timedelta(days=3), "NEUTRAL"),
+            bull_force=55.0,
+            bear_force=56.0,
+        ),
+    ]
+    return factors, [100.0, 101.0, 102.0, 98.0], [1.0, 1.0, 1.0, 0.0]
+
+
+def test_failed_trend_gold_creates_same_day_confirmed_silver():
+    factors, closes, up_ratios = _gold_failure_case()
+
+    events = sig.detect_events(factors, closes, up_ratios)
+
+    assert [
+        (
+            event.trade_date,
+            event.direction,
+            event.setup_type,
+            event.status,
+            event.confirm_date,
+        )
+        for event in events
+    ] == [
+        (
+            factors[0].trade_date,
+            "GOLD",
+            sig.SETUP_TREND_GOLD,
+            sig.STATUS_CONFIRMED,
+            factors[1].trade_date,
+        ),
+        (
+            factors[2].trade_date,
+            "GOLD",
+            sig.SETUP_TREND_GOLD,
+            sig.STATUS_INVALIDATED,
+            factors[3].trade_date,
+        ),
+        (
+            factors[3].trade_date,
+            "SILVER",
+            sig.SETUP_GOLD_FAILURE_SILVER,
+            sig.STATUS_CONFIRMED,
+            factors[3].trade_date,
+        ),
+    ]
+    assert sig.build_active_directions(
+        [factor.trade_date for factor in factors],
+        events,
+    ) == ["NEUTRAL", "GOLD", "GOLD", "SILVER"]
+
+
+def test_gold_failure_silver_requires_all_causal_guards():
+    factors, closes, up_ratios = _gold_failure_case()
+    failure = factors[-1]
+
+    assert sig.is_gold_failure_silver(
+        sig.SETUP_TREND_GOLD,
+        failure,
+        closes[-2],
+        closes[-1],
+        up_ratios[-1],
+    ) is True
+    assert sig.is_gold_failure_silver(
+        sig.SETUP_REVERSAL_GOLD,
+        failure,
+        closes[-2],
+        closes[-1],
+        up_ratios[-1],
+    ) is False
+    assert sig.is_gold_failure_silver(
+        sig.SETUP_TREND_GOLD,
+        failure,
+        closes[-2],
+        100.5,
+        up_ratios[-1],
+    ) is False
+    assert sig.is_gold_failure_silver(
+        sig.SETUP_TREND_GOLD,
+        failure,
+        closes[-2],
+        closes[-1],
+        None,
+    ) is False
+    assert sig.is_gold_failure_silver(
+        sig.SETUP_TREND_GOLD,
+        failure,
+        closes[-2],
+        closes[-1],
+        0.5,
+    ) is False
+    assert sig.is_gold_failure_silver(
+        sig.SETUP_TREND_GOLD,
+        replace(failure, bull_force=60.0),
+        closes[-2],
+        closes[-1],
+        up_ratios[-1],
+    ) is False
+    assert sig.is_gold_failure_silver(
+        sig.SETUP_TREND_GOLD,
+        replace(failure, bear_force=54.0),
+        closes[-2],
+        closes[-1],
+        up_ratios[-1],
+    ) is False
+
+
+def test_gold_failure_silver_appears_only_on_failure_day_and_ignores_later_future():
+    factors, closes, up_ratios = _gold_failure_case()
+
+    prefix_events = sig.detect_events(factors[:-1], closes[:-1], up_ratios[:-1])
+    full_events = sig.detect_events(factors, closes, up_ratios)
+    polluted_events = sig.detect_events(
+        factors + [_timing_factor(factors[-1].trade_date + timedelta(days=1), "NEUTRAL")],
+        closes + [500.0],
+        up_ratios + [1.0],
+    )
+
+    assert all(
+        event.setup_type != sig.SETUP_GOLD_FAILURE_SILVER
+        for event in prefix_events
+    )
+    failure = next(
+        event
+        for event in full_events
+        if event.setup_type == sig.SETUP_GOLD_FAILURE_SILVER
+    )
+    polluted_failure = next(
+        event
+        for event in polluted_events
+        if event.setup_type == sig.SETUP_GOLD_FAILURE_SILVER
+    )
+    assert failure == polluted_failure
+    assert failure.trade_date == factors[-1].trade_date
 
 
 def test_same_zone_is_one_event_but_reentry_creates_another():

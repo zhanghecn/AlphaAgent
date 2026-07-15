@@ -9,7 +9,8 @@ export type TimingSetupType =
   | "REVERSAL_GOLD"
   | "TOP_SILVER"
   | "BREAKDOWN_SILVER"
-  | "STRUCTURAL_BREAKDOWN_SILVER";
+  | "STRUCTURAL_BREAKDOWN_SILVER"
+  | "GOLD_FAILURE_SILVER";
 /** 候选确认状态: CONFIRMED 已确认 / INVALIDATED 假突破否决 / PENDING 待确认 */
 export type TimingStatus = "CONFIRMED" | "INVALIDATED" | "PENDING";
 
