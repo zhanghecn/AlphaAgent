@@ -181,9 +181,10 @@ export function TimingHero({ overview, loading }: { overview: TimingOverview | n
             </p>
           )}
           {direction !== "NEUTRAL" && activeSignal && (
-            <p className="text-sm text-muted-foreground">
-              本轮{DIRECTION_LABEL[direction]} · {activeSignal.confirm_date ?? activeSignal.date} 确认
-              · 持续至{reversalLabel}确认
+            <p className="flex flex-wrap gap-x-1 text-sm text-muted-foreground">
+              <span>本轮{DIRECTION_LABEL[direction]}</span>
+              <span>· {activeSignal.confirm_date ?? activeSignal.date} 确认</span>
+              <span>· 持续至{reversalLabel}确认</span>
             </p>
           )}
         </div>
