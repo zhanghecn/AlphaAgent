@@ -7,10 +7,15 @@
 - 金手指：大盘结构进入看多区域的方向事件，不代表加仓、重仓或实际仓位。
 - 银手指：大盘结构进入看空区域的方向事件，不代表减仓、空仓或实际仓位。
 - 对外方向固定为 `GOLD / SILVER / NEUTRAL`；`setup_type` 只解释事件来源：
-  `TREND_GOLD / REVERSAL_GOLD / TOP_SILVER / STRUCTURAL_BREAKDOWN_SILVER`。
+  `TREND_GOLD / REVERSAL_GOLD / TOP_SILVER / STRUCTURAL_BREAKDOWN_SILVER`
+  和 `GOLD_FAILURE_SILVER`。
   `BREAKDOWN_SILVER` 常量仅为历史载荷和前端类型兼容保留，v8 不再生成新事件。
+- v9（2026-07-15 起）增加金手指失效银：只在新的趋势金候选被次日宽基急跌
+  明确否决、多头退出金区且空头反超时，于失败日确认银手指。该保护不恢复普通
+  破位银，也不修改反转金、顶部银或结构银。
 - v8（2026-07-15 起）采用精度优先银手指：普通趋势破位银在完整广度样本和
-  长历史宽基代理中均未通过验证，因此只有顶部银和结构性破位银可生成银事件。
+  长历史宽基代理中均未通过验证，因此删除普通破位银，只保留顶部银和结构银
+  作为基础银通道。
 - v7（2026-07-14 起）增加结构性破位银和独立 `danger_state=NORMAL/DANGER`。
   危险状态表达市场风险是否修复，不代表仓位，也不直接决定当日金银方向。
 - 结构性破位银要求空头绝对强度、多空差值、趋势破位、MA20、MACD 顶部结构和
@@ -66,6 +71,16 @@
 - 普通银区若只有 `trend_breakdown>=60` 而未满足完整结构破位，不生成银事件；
   顶部空头合力且 `trend_breakdown<60` 时仍可生成 `TOP_SILVER`。
 
+金手指失效银固定规则：
+
+- 前一交易日必须已经产生 `TREND_GOLD` 候选；`REVERSAL_GOLD` 失败不触发。
+- 失败日综合指数跌幅 `<=-2%`、有效宽基上涨比例 `<=0.25`、
+  `bull_force<60` 且 `bear_force>=bull_force`。
+- 失败银事件记在失败日并在正式日线完成后同日确认；若
+  `confirmed_through` 尚未覆盖失败日，只输出 `PENDING`，不提前切换方向。
+- 日跌阈值 `-1.5%..-3.5%`、多头上限 `55..65`、参与度上限 `0..0.43`
+  的邻域检查均只命中同一个真实样本，但样本数仍只有 1。
+
 硬约束：
 
 - 所有特征严格只用 `<=t` 数据。
@@ -113,8 +128,9 @@ pnpm --dir frontend run build
 
 ## Current Evidence Summary
 
-- v8 研究快照区间为 `2024-05-28..2026-07-15`：64 个候选，金 55、银 9；
-  41 个确认、23 个否决、0 个待确认。普通 `BREAKDOWN_SILVER` 从 34 个降为 0。
+- v9 研究快照区间为 `2024-05-28..2026-07-15`：65 个候选，金 55、银 10；
+  42 个确认、23 个否决、0 个待确认。相对 v8 只增加 1 个
+  `GOLD_FAILURE_SILVER`，普通 `BREAKDOWN_SILVER` 仍为 0。
 - 金候选未来 5 日上涨率为 `63.6%`、平均收益 `+1.82%`；34 个确认金从确认日
   收盘起算的 5 日上涨率为 `79.4%`、平均收益 `+2.07%`。确认后口径经过次日
   状态筛选，不能替代全部候选口径。
@@ -122,10 +138,9 @@ pnpm --dir frontend run build
   2026 年下跌率均只有 `22.2%`。保留的顶部银和结构银合计 9 个，未来 5 日
   下跌率 `66.7%`、平均收益 `-1.2763%`，但 Wilson 95% 区间仍为
   `35.4%..87.9%`，不能宣称统计显著。
-- 55 个金事件的日期、setup、状态和确认日与 v7 逐项一致，事件签名 SHA-256 为
+- 55 个金事件的日期、setup、状态和确认日继续与 v7 逐项一致，事件签名 SHA-256 为
   `b30746cbe057084f798153d8ec1c5fc1a71acd573425d3182a35eecb0c90018e`；
-  9 个保留银事件签名为
-  `f50ad5ab8292f4731f9797b89d0db53cf4e208fa29f75120ffdbac0d118188ba`。
+  v8 的 9 个保留银事件也未改变，v9 在其上增加 1 个失败银。
 - 关键日期：`2026-03-13` 保持 `STRUCTURAL_BREAKDOWN_SILVER / CONFIRMED /
   2026-03-16`；`2026-06-11` 保持 `REVERSAL_GOLD / CONFIRMED / 2026-06-12`；
   `2026-06-26` 与 `2026-07-07` 均不再生成事件。
@@ -135,24 +150,29 @@ pnpm --dir frontend run build
 - 六宽基 `2015-2026` 价格代理显示结构破位在 `2015-2019` 较有效，但在
   `2020-2023` 只有约 `30.8%` 的未来 5 日下跌率、平均收益约 `+2.03%`。
   均线、动量、波动、长期趋势、滚动状态和浅层模型没有形成跨时期稳定过滤。
-- 2026-07-15 持续行情验证：市场择时后端测试 `46 passed`；重建 API 后强制刷新
-  返回 200。真实面板行情日期为 `2026-07-15`、因子和基础样本截至
-  `2026-07-14`，最后一日 `zone_direction=NEUTRAL`，但
-  `overview.current_direction=timing_series[-1].active_direction=GOLD`。状态来源为
-  `2026-06-11 REVERSAL_GOLD / CONFIRMED / 2026-06-12`，没有已确认银手指前持续为金。
-- 2026-07-02 悬停验证：前端测试 `66 passed`、生产构建和 Docker Web 重建通过。
-  真实 K 线十字线日期为完整 `2026-07-02`，摘要显示“金手指延续 / 当日新手指
-  无”，不显示“中性”或“候选区域”。`2026-07-01` 的否决金候选不画箭头，
-  `2026-07-02` 也没有新金手指箭头；持续金仍来自 `2026-06-11` 事件在
-  `2026-06-12` 的确认。移出图表后恢复最新行情 `2026-07-15 / 金手指延续`。
-  `1440x1000` 与 `390x844` 横向溢出均为 0，控制台 0 错误/0 警告。实现提交为
-  `6479fe7d`。
+- v9 回归验证：市场择时后端测试 `51 passed`，前端测试 `67 passed`，生产构建
+  通过；重建 API/Web 后强制刷新返回 200。真实面板行情、因子和基础样本均截至
+  `2026-07-15`，`overview.current_direction=timing_series[-1].active_direction=SILVER`。
+- 关键日期链保持因果：`2026-06-11 REVERSAL_GOLD / CONFIRMED / 2026-06-12`；
+  `2026-07-01 TREND_GOLD / INVALIDATED / 2026-07-02`；`2026-07-02
+  GOLD_FAILURE_SILVER / CONFIRMED / 2026-07-02`。失败银当日依据为综合指数
+  `-3.7%`、`up_ratio=0`、`bull=53.6`、`bear=55.4`，不读取 7 月 3 日数据。
+- v9 银候选未来 5 日下跌率为 `60.0%`、平均收益约 `-1.12%`；确认银 5 日
+  样本为 8 个，下跌率 `62.5%`、平均收益约 `-1.77%`。7 月 2 日失败银本身
+  未来 5 日收益约 `+0.29%`，因此该规则是金状态失效保护，不能宣传为稳定的
+  5 日下跌预测。
+- 2026-07-02 页面验证：真实 K 线十字线显示“银手指延续 / 当日新手指
+  银手指确认”，并在 7 月 2 日画银箭头；移出图表后恢复最新行情
+  `2026-07-15 / 银手指延续`。`1440x1000` 与 `390x844` 横向溢出均为 0，
+  控制台 0 错误/0 警告。实现提交为 `fc837bd5`。
 - 设计和实施证据：`requirements/alphaagent_market_timing_v8_precision_silver_design.md`、
   `requirements/alphaagent_market_timing_v8_precision_silver_implementation_plan.md`、
   `requirements/alphaagent_market_timing_persistent_regime_design.md`、
   `requirements/alphaagent_market_timing_persistent_regime_implementation_plan.md`、
   `requirements/alphaagent_market_timing_hover_semantics_design.md`、
-  `requirements/alphaagent_market_timing_hover_semantics_implementation_plan.md`。
+  `requirements/alphaagent_market_timing_hover_semantics_implementation_plan.md`、
+  `requirements/alphaagent_market_timing_v9_gold_failure_silver_design.md`、
+  `requirements/alphaagent_market_timing_v9_gold_failure_silver_implementation_plan.md`。
 
 ## How To Use In Quant Research
 
@@ -165,9 +185,12 @@ pnpm --dir frontend run build
 
 - 反转金已覆盖 2015、2018、2021 等压力期，但只有 33 个可评估样本且 bootstrap
   平均收益下沿仅略高于零；它是补充事件，不是保证上涨或重仓依据。
-- v8 严格银只有 9 个完整广度样本，结构性危险区只有 5 个独立阶段；
+- v9 银只有 10 个完整广度样本，其中失败银只有 1 个；结构性危险区只有 5 个独立阶段；
   `2026-03-13` 已参与需求定义，不是未触碰样本外。参数必须冻结并做前向观察，
   不能继续围绕该日期调参。
+- `2026-07-02` 参与了失败银需求定义，且该事件未来 5 日最终收益为正；它不是
+  未触碰样本外证据。若前向样本频繁在快速反弹前触发，应整体删除失败银 setup，
+  不能继续增加日期例外或叠加过滤条件。
 - 六宽基价格代理在 `2020-2023` 无法稳定区分破位延续和破位反弹；2024 年前
   缺少可靠个股广度，不能把当前短样本结果冒充 2015 年以来验证。
 - 危险区因无未来函数会比肉眼事后区间更晚解除：3 月真实状态到 `03-26`，而非
