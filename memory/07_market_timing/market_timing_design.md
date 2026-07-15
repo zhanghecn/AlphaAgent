@@ -138,6 +138,11 @@ pnpm --dir frontend run build
   `+0.44%/+0.13%`，转换从 v9 的 9 次膨胀到 35 次，最坏反弹为 `+34.45%`。
   生产 v9 未修改，最新仍为银手指。完整证据见
   `memory/06_backtests/market_timing_state_validation_2026_07_15.md`。
+- 三个银转金恢复版本也已拒绝。R1/R2/R3 都只改变
+  `2025-10-20..2025-12-22` 一个银区间；银 10 日命中降到 `31.1%..31.8%`，
+  银 5 日 `3%` 不利升到 `30.0%..30.6%`，五个逐银区间留一均只有 1 折不劣于
+  v9。当前 `2026-07-02` 开放银区间没有确认恢复金，生产 v9 和最新银状态未修改。
+  详细证据见 `memory/06_backtests/market_timing_recovery_gold_validation_2026_07_15.md`。
 - 金候选未来 5 日上涨率为 `63.6%`、平均收益 `+1.82%`；34 个确认金从确认日
   收盘起算的 5 日上涨率为 `79.4%`、平均收益 `+2.07%`。确认后口径经过次日
   状态筛选，不能替代全部候选口径。
@@ -157,7 +162,7 @@ pnpm --dir frontend run build
 - 六宽基 `2015-2026` 价格代理显示结构破位在 `2015-2019` 较有效，但在
   `2020-2023` 只有约 `30.8%` 的未来 5 日下跌率、平均收益约 `+2.03%`。
   均线、动量、波动、长期趋势、滚动状态和浅层模型没有形成跨时期稳定过滤。
-- 当前回归验证：市场择时后端测试 `60 passed`，前端测试 `67 passed`，生产构建
+- 当前回归验证：市场择时后端测试 `74 passed`，前端测试 `67 passed`，生产构建
   通过；重建 API/Web 后强制刷新返回 200。真实面板行情、因子和基础样本均截至
   `2026-07-15`，`overview.current_direction=timing_series[-1].active_direction=SILVER`。
 - 关键日期链保持因果：`2026-06-11 REVERSAL_GOLD / CONFIRMED / 2026-06-12`；
@@ -181,7 +186,9 @@ pnpm --dir frontend run build
   `requirements/alphaagent_market_timing_v9_gold_failure_silver_design.md`、
   `requirements/alphaagent_market_timing_v9_gold_failure_silver_implementation_plan.md`、
   `requirements/alphaagent_market_timing_state_validation_design.md`、
-  `requirements/alphaagent_market_timing_state_validation_implementation_plan.md`。
+  `requirements/alphaagent_market_timing_state_validation_implementation_plan.md`、
+  `requirements/alphaagent_market_timing_recovery_gold_research_design.md`、
+  `requirements/alphaagent_market_timing_recovery_gold_research_implementation_plan.md`。
 
 ## How To Use In Quant Research
 
@@ -200,6 +207,9 @@ pnpm --dir frontend run build
 - 持续状态日不是独立样本。v9 的 5 个银区间在 10/20 日方向上没有稳定看空优势；
   在取得更长同口径广度历史或新的冻结前向样本前，不能把当前银状态宣传为
   持续下跌预测，也不能据此直接控制仓位。
+- MA5 危险修复、广度多头反超和 MA20 确认三类恢复金都未形成跨银区间改善；
+  不再组合这三类条件或围绕 `2025-10` 调阈值。恢复时点问题继续保持未解决，
+  只能等待新独立区间或无幸存者偏差的更长广度数据。
 - `2026-07-02` 参与了失败银需求定义，且该事件未来 5 日最终收益为正；它不是
   未触碰样本外证据。若前向样本频繁在快速反弹前触发，应整体删除失败银 setup，
   不能继续增加日期例外或叠加过滤条件。

@@ -28,6 +28,17 @@ from alphaagent.server.services.quant.market_timing.signal import (
 
 HORIZONS = (5, 10, 20)
 STATE_HORIZONS = (1, 3, 5, 10, 20)
+SETUP_RECOVERY_GOLD = "RECOVERY_GOLD"
+RECOVERY_R1_REPAIR = "R1_REPAIR"
+RECOVERY_R2_BULL_CROSS = "R2_BULL_CROSS"
+RECOVERY_R3_MA20 = "R3_MA20"
+RECOVERY_VARIANTS = (
+    RECOVERY_R1_REPAIR,
+    RECOVERY_R2_BULL_CROSS,
+    RECOVERY_R3_MA20,
+)
+RECOVERY_UP_RATIO_MIN = 0.50
+RECOVERY_BEAR_MAX = 65.0
 _BOOT_SEED = 20260701  # 固定种子, 保证可复现(Math.random 在 workflow 外可用)
 EvaluationStart = Literal["trade_date", "confirm_date"]
 
@@ -256,30 +267,39 @@ def evaluate(
     }
 
 
+def _direction_run_ranges(
+    directions: list[str],
+) -> list[tuple[str, int, int]]:
+    runs: list[tuple[str, int, int]] = []
+    current: str | None = None
+    start = 0
+    for index, direction in enumerate(directions):
+        if direction not in {"GOLD", "SILVER"}:
+            if current is not None:
+                runs.append((current, start, index - 1))
+                current = None
+            continue
+        if direction == current:
+            continue
+        if current is not None:
+            runs.append((current, start, index - 1))
+        current = direction
+        start = index
+    if current is not None:
+        runs.append((current, start, len(directions) - 1))
+    return runs
+
+
 def _state_run_summary(directions: list[str]) -> dict:
     coverage = {
         direction: sum(value == direction for value in directions)
         for direction in ("GOLD", "SILVER", "NEUTRAL")
     }
-    runs: list[tuple[str, int]] = []
-    current: str | None = None
-    length = 0
-    for direction in directions:
-        if direction not in {"GOLD", "SILVER"}:
-            if current is not None:
-                runs.append((current, length))
-                current = None
-                length = 0
-            continue
-        if direction == current:
-            length += 1
-            continue
-        if current is not None:
-            runs.append((current, length))
-        current = direction
-        length = 1
-    if current is not None:
-        runs.append((current, length))
+    ranges = _direction_run_ranges(directions)
+    runs = [
+        (direction, end - start + 1)
+        for direction, start, end in ranges
+    ]
 
     run_count: dict[str, int] = {}
     avg_run_days: dict[str, float] = {}
@@ -496,3 +516,306 @@ def build_volatility_hysteresis_directions(
             active = "SILVER"
         directions.append(active)
     return directions
+
+
+def _recovery_grade(bull_force: float) -> str:
+    if bull_force >= 72.0:
+        return "STRONG"
+    if bull_force >= 66.0:
+        return "MEDIUM"
+    return "WEAK"
+
+
+def _matches_recovery_gold(
+    variant: str,
+    factor: MarketTimingFactors,
+    series: list[CompositeBar],
+    index: int,
+) -> bool:
+    up_ratio = series[index].up_ratio
+    if up_ratio is None or up_ratio < RECOVERY_UP_RATIO_MIN:
+        return False
+
+    closes = [bar.close for bar in series[: index + 1]]
+    above_ma5 = (
+        len(closes) >= 5
+        and closes[-1] > sum(closes[-5:]) / 5.0
+    )
+    if variant == RECOVERY_R1_REPAIR:
+        return above_ma5 and factor.bear_force < RECOVERY_BEAR_MAX
+
+    broad_bull_cross = (
+        factor.mom_5d is not None
+        and factor.mom_5d > 0
+        and factor.bull_force >= factor.bear_force
+    )
+    if variant == RECOVERY_R2_BULL_CROSS:
+        return above_ma5 and broad_bull_cross
+    return factor.close_above_ma20 and broad_bull_cross
+
+
+def _recovery_gold_confirmed(
+    factors: list[MarketTimingFactors],
+    series: list[CompositeBar],
+    candidate_index: int,
+) -> bool:
+    confirm_index = candidate_index + 1
+    if confirm_index >= len(series):
+        return False
+    up_ratio = series[confirm_index].up_ratio
+    factor = factors[confirm_index]
+    return bool(
+        series[confirm_index].close > series[candidate_index].close
+        and up_ratio is not None
+        and up_ratio >= RECOVERY_UP_RATIO_MIN
+        and factor.bull_force >= factor.bear_force
+    )
+
+
+def build_recovery_gold_state(
+    factors: list[MarketTimingFactors],
+    series: list[CompositeBar],
+    base_events: list[TimingSignal],
+    *,
+    variant: str,
+) -> dict:
+    """构造研究用银转金状态；基础 v9 事件始终优先。"""
+    if variant not in RECOVERY_VARIANTS:
+        raise ValueError(f"unknown recovery variant: {variant}")
+    if len(factors) != len(series):
+        raise ValueError("factors 与 series 长度必须一致")
+    if any(
+        factor.trade_date != bar.trade_date
+        for factor, bar in zip(factors, series, strict=True)
+    ):
+        raise ValueError("factors 与 series 日期必须对齐")
+
+    base_by_confirm: dict[date, str] = {}
+    for event in base_events:
+        if (
+            event.status != STATUS_CONFIRMED
+            or event.confirm_date is None
+            or event.direction not in {"GOLD", "SILVER"}
+        ):
+            continue
+        current = base_by_confirm.get(event.confirm_date)
+        if current != "SILVER" or event.direction == "SILVER":
+            base_by_confirm[event.confirm_date] = event.direction
+
+    recovery_by_confirm: dict[date, bool] = {}
+    recovery_events: list[TimingSignal] = []
+    directions: list[str] = []
+    active = "NEUTRAL"
+    recovery_zone = False
+
+    for index, (factor, bar) in enumerate(zip(factors, series, strict=True)):
+        base_direction = base_by_confirm.get(bar.trade_date)
+        if base_direction is not None:
+            active = base_direction
+        elif recovery_by_confirm.get(bar.trade_date):
+            active = "GOLD"
+
+        if base_direction is not None:
+            recovery_zone = False
+            directions.append(active)
+            continue
+
+        matches = active == "SILVER" and _matches_recovery_gold(
+            variant,
+            factor,
+            series,
+            index,
+        )
+        entered = matches and not recovery_zone
+        recovery_zone = matches if active == "SILVER" else False
+        if entered:
+            confirm_index = index + 1
+            if confirm_index >= len(series):
+                status = STATUS_PENDING
+                confirm_date = None
+            else:
+                confirm_date = series[confirm_index].trade_date
+                blocked = confirm_date in base_by_confirm
+                confirmed = (
+                    not blocked
+                    and _recovery_gold_confirmed(
+                        factors,
+                        series,
+                        index,
+                    )
+                )
+                status = (
+                    STATUS_CONFIRMED
+                    if confirmed
+                    else STATUS_INVALIDATED
+                )
+                if confirmed:
+                    recovery_by_confirm[confirm_date] = True
+            recovery_events.append(
+                TimingSignal(
+                    trade_date=bar.trade_date,
+                    direction="GOLD",
+                    status=status,
+                    grade=_recovery_grade(factor.bull_force),
+                    bull_force=factor.bull_force,
+                    bear_force=factor.bear_force,
+                    phase=factor.phase,
+                    setup_type=SETUP_RECOVERY_GOLD,
+                    confirm_date=confirm_date,
+                    reasons=[
+                        f"variant={variant}",
+                        f"up_ratio={bar.up_ratio:.2f}",
+                        f"bull={factor.bull_force:.1f}",
+                        f"bear={factor.bear_force:.1f}",
+                        status,
+                    ],
+                )
+            )
+        directions.append(active)
+
+    return {
+        "directions": directions,
+        "events": recovery_events,
+    }
+
+
+def evaluate_recovery_gold_runs(
+    base_directions: list[str],
+    recovery_events: list[TimingSignal],
+    series: list[CompositeBar],
+) -> list[dict]:
+    """按基础 v9 银区间判断恢复确认是否真正避开后续反弹。"""
+    if len(base_directions) != len(series):
+        raise ValueError("base_directions 与 series 长度必须一致")
+
+    index_by_date = {
+        bar.trade_date: index
+        for index, bar in enumerate(series)
+    }
+    confirmed_dates = sorted(
+        event.confirm_date
+        for event in recovery_events
+        if event.status == STATUS_CONFIRMED
+        and event.confirm_date is not None
+    )
+    rows: list[dict] = []
+    for direction, start, end in _direction_run_ranges(base_directions):
+        if direction != "SILVER":
+            continue
+        start_date = series[start].trade_date
+        end_date = series[end].trade_date
+        recovery_date = next(
+            (
+                value
+                for value in confirmed_dates
+                if start_date <= value <= end_date
+            ),
+            None,
+        )
+        recovery_index = index_by_date.get(recovery_date)
+        if recovery_index is None:
+            outcome = "NO_RECOVERY"
+            return_5d = None
+            advanced_days = 0
+        elif recovery_index + 5 >= len(series):
+            outcome = "IMMATURE"
+            return_5d = None
+            advanced_days = end - recovery_index + 1
+        else:
+            return_5d = (
+                series[recovery_index + 5].close
+                / series[recovery_index].close
+                - 1.0
+            ) * 100.0
+            outcome = (
+                "IMPROVED"
+                if return_5d > 0
+                else "FALSE_RECOVERY"
+            )
+            advanced_days = end - recovery_index + 1
+        rows.append(
+            {
+                "run_start": start_date,
+                "run_end": end_date,
+                "open_run": end == len(series) - 1,
+                "recovery_confirm_date": recovery_date,
+                "advanced_days": advanced_days,
+                "return_5d": return_5d,
+                "outcome": outcome,
+            }
+        )
+    return rows
+
+
+def _silver_five_day_bucket(report: dict) -> StateBucketStat | None:
+    return next(
+        (
+            item
+            for item in report["buckets"]
+            if item.period == "ALL"
+            and item.direction == "SILVER"
+            and item.horizon == 5
+        ),
+        None,
+    )
+
+
+def evaluate_silver_run_leave_one_out(
+    base_directions: list[str],
+    candidate_directions: list[str],
+    series: list[CompositeBar],
+) -> list[dict]:
+    """逐个删除基础银区间，检查整体改善是否依赖单一区间。"""
+    if (
+        len(base_directions) != len(series)
+        or len(candidate_directions) != len(series)
+    ):
+        raise ValueError("方向序列与 series 长度必须一致")
+    if not series:
+        return []
+
+    rows: list[dict] = []
+    for direction, start, end in _direction_run_ranges(base_directions):
+        if direction != "SILVER":
+            continue
+        omitted = set(range(start, end + 1))
+        base_filtered = [
+            "NEUTRAL" if index in omitted else value
+            for index, value in enumerate(base_directions)
+        ]
+        candidate_filtered = [
+            "NEUTRAL" if index in omitted else value
+            for index, value in enumerate(candidate_directions)
+        ]
+        base_bucket = _silver_five_day_bucket(
+            evaluate_direction_states(
+                base_filtered,
+                series,
+                split_date=series[0].trade_date,
+            )
+        )
+        candidate_bucket = _silver_five_day_bucket(
+            evaluate_direction_states(
+                candidate_filtered,
+                series,
+                split_date=series[0].trade_date,
+            )
+        )
+        row: dict[str, object] = {
+            "omitted_start": series[start].trade_date,
+            "omitted_end": series[end].trade_date,
+        }
+        for name, bucket in (
+            ("base", base_bucket),
+            ("candidate", candidate_bucket),
+        ):
+            row[f"{name}_count"] = bucket.count if bucket else 0
+            row[f"{name}_hit_rate"] = bucket.hit_rate if bucket else None
+            row[f"{name}_avg_return"] = bucket.avg_return if bucket else None
+            row[f"{name}_adverse_3pct_rate"] = (
+                bucket.adverse_3pct_rate
+                if bucket
+                else None
+            )
+        rows.append(row)
+    return rows

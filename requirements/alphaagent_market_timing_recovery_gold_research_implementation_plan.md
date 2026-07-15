@@ -15,7 +15,7 @@
 **Files:**
 - Modify: `tests/alphaagent/services/quant/test_market_timing_backtest.py`
 
-- [ ] **Step 1: 增加银事件测试帮助函数**
+- [x] **Step 1: 增加银事件测试帮助函数**
 
 在现有 `_event` 后增加明确方向和 setup 的帮助函数，避免每个测试手写完整数据类：
 
@@ -34,7 +34,7 @@ def _silver_event(
     )
 ```
 
-- [ ] **Step 2: 添加 R1/R2/R3 参数化测试**
+- [x] **Step 2: 添加 R1/R2/R3 参数化测试**
 
 用至少 8 根可手算 bar，先在第 2 根确认基础银，再让第 6 根分别满足 R1、R2、
 R3，第 7 根满足统一确认条件。断言候选和确认日、setup、状态及逐日方向：
@@ -89,12 +89,12 @@ def test_recovery_gold_variants_confirm_only_after_broad_follow_through(
 
 测试只替换候选日与确认日的 bearish 默认 factors，不能依赖未来标签帮助触发。
 
-- [ ] **Step 3: 添加确认否决和输入守护测试**
+- [x] **Step 3: 添加确认否决和输入守护测试**
 
 分别让 `t+1` 收跌、参与度缺失、多头未反超，断言候选为 `INVALIDATED` 且方向
 保持银。另断言未知 variant、长度不一致和日期错位抛 `ValueError`。
 
-- [ ] **Step 4: 运行测试确认接口缺失**
+- [x] **Step 4: 运行测试确认接口缺失**
 
 ```bash
 uv run --group server pytest \
@@ -110,7 +110,7 @@ Expected: 因缺少 `RECOVERY_R*`、`SETUP_RECOVERY_GOLD` 和构造函数失败�
 - Modify: `alphaagent/server/services/quant/market_timing/backtest.py`
 - Test: `tests/alphaagent/services/quant/test_market_timing_backtest.py`
 
-- [ ] **Step 1: 增加固定研究常量**
+- [x] **Step 1: 增加固定研究常量**
 
 从 `signal` 的现有导入中同时引入 `STATUS_INVALIDATED` 和 `STATUS_PENDING`，再增加：
 
@@ -136,7 +136,7 @@ def _recovery_grade(bull_force: float) -> str:
     return "WEAK"
 ```
 
-- [ ] **Step 2: 实现当日候选判断**
+- [x] **Step 2: 实现当日候选判断**
 
 增加 `_matches_recovery_gold`，只读当前索引及以前数据。R1 使用 MA5、参与度和
 `bear<65`；R2 使用 MA5、参与度、正 5 日动量和多头反超；R3 使用
@@ -168,7 +168,7 @@ def _matches_recovery_gold(
     )
 ```
 
-- [ ] **Step 3: 实现统一次日确认**
+- [x] **Step 3: 实现统一次日确认**
 
 ```python
 def _recovery_gold_confirmed(
@@ -191,7 +191,7 @@ def _recovery_gold_confirmed(
 
 基础 v9 在确认日存在任何已确认事件时优先，恢复候选不能与其争夺方向。
 
-- [ ] **Step 4: 实现 `build_recovery_gold_state`**
+- [x] **Step 4: 实现 `build_recovery_gold_state`**
 
 函数返回 `{"directions": list[str], "events": list[TimingSignal]}`。逐日先应用基础
 确认事件，再应用上一日恢复确认，最后仅在活动方向仍为银且恢复区从假变真时记录
@@ -285,7 +285,7 @@ def build_recovery_gold_state(
 
 实现必须保持事件存在性只取决于候选日；次日只决定 status 和 confirm_date。
 
-- [ ] **Step 5: 运行恢复金测试**
+- [x] **Step 5: 运行恢复金测试**
 
 Expected: Task 1 新测试全部 PASS。
 
@@ -295,26 +295,26 @@ Expected: Task 1 新测试全部 PASS。
 - Modify: `tests/alphaagent/services/quant/test_market_timing_backtest.py`
 - Modify: `alphaagent/server/services/quant/market_timing/backtest.py`
 
-- [ ] **Step 1: 添加恢复区去重测试**
+- [x] **Step 1: 添加恢复区去重测试**
 
 构造连续三日满足 R2、首个候选次日否决的序列，断言连续恢复区只有一个候选；
 条件先离开再重新进入后才出现第二个候选。
 
-- [ ] **Step 2: 添加基础事件优先级测试**
+- [x] **Step 2: 添加基础事件优先级测试**
 
 让恢复候选确认日同时存在基础确认银，断言恢复事件不确认且活动方向为银；让基础
 确认金先到达，断言当日不再新建恢复候选。
 
-- [ ] **Step 3: 添加银状态限定测试**
+- [x] **Step 3: 添加银状态限定测试**
 
 同样的 R1/R2/R3 因子出现在 `NEUTRAL` 或 `GOLD` 时不得生成恢复事件。
 
-- [ ] **Step 4: 添加前缀和未来污染测试**
+- [x] **Step 4: 添加前缀和未来污染测试**
 
 先对候选日截断，断言末日事件为 `PENDING`；追加确认日后只改变该事件状态并从
 确认日切金。把确认日之后的 bar、factor 和参与度改成极端值，历史前缀必须不变。
 
-- [ ] **Step 5: 运行全部市场择时后端测试**
+- [x] **Step 5: 运行全部市场择时后端测试**
 
 ```bash
 uv run --group server pytest \
@@ -331,17 +331,17 @@ Expected: PASS，生产 v9 测试签名不变。
 - Modify: `alphaagent/server/services/quant/market_timing/backtest.py`
 - Modify: `tests/alphaagent/services/quant/test_market_timing_backtest.py`
 
-- [ ] **Step 1: 提取带索引的方向区间**
+- [x] **Step 1: 提取带索引的方向区间**
 
 增加 `_direction_run_ranges(directions)`，输出 `(direction, start_index, end_index)`；
 让现有 `_state_run_summary` 复用它，保持原统计不变。
 
-- [ ] **Step 2: 添加逐银区间结果测试**
+- [x] **Step 2: 添加逐银区间结果测试**
 
 构造两个基础银区间：一个恢复确认后 5 日上涨，另一个确认后 5 日下跌。断言第一
 个为 `IMPROVED`，第二个为 `FALSE_RECOVERY`，不足 5 日为 `IMMATURE`。
 
-- [ ] **Step 3: 实现 `evaluate_recovery_gold_runs`**
+- [x] **Step 3: 实现 `evaluate_recovery_gold_runs`**
 
 ```python
 def evaluate_recovery_gold_runs(
@@ -408,12 +408,12 @@ def evaluate_recovery_gold_runs(
 每行固定输出基础银起止、是否开放、首个确认恢复日、提前交易日数、确认后 5 日
 收益和 `IMPROVED/FALSE_RECOVERY/IMMATURE/NO_RECOVERY`。
 
-- [ ] **Step 4: 添加逐区间留一测试**
+- [x] **Step 4: 添加逐区间留一测试**
 
 用两个银区间构造不同收益，断言每次删除的日期属于正确基础区间，且 base/candidate
 的 5 日命中率、平均收益和 `3%` 不利来自剩余日期。
 
-- [ ] **Step 5: 实现 `evaluate_silver_run_leave_one_out`**
+- [x] **Step 5: 实现 `evaluate_silver_run_leave_one_out`**
 
 ```python
 def evaluate_silver_run_leave_one_out(
@@ -478,7 +478,7 @@ def evaluate_silver_run_leave_one_out(
 对每个基础银区间，把该区间日期在两个方向序列中临时置为 `NEUTRAL`，复用
 `evaluate_direction_states` 提取 `ALL/SILVER/5d` 指标，不修改输入列表。
 
-- [ ] **Step 6: 运行状态评估测试**
+- [x] **Step 6: 运行状态评估测试**
 
 Expected: 新旧状态评估测试全部 PASS。
 
@@ -487,26 +487,26 @@ Expected: 新旧状态评估测试全部 PASS。
 **Files:**
 - Modify: `scripts/market_timing_eval.py`
 
-- [ ] **Step 1: 构造四个恢复版本**
+- [x] **Step 1: 构造四个恢复版本**
 
 保留现有 v8/v9/波动迟滞输出，另外从 `V9_CURRENT` 基础事件构造
 `R1_REPAIR/R2_BULL_CROSS/R3_MA20`。断言方向长度与 bar 完全一致。
 
-- [ ] **Step 2: 打印恢复候选和运行摘要**
+- [x] **Step 2: 打印恢复候选和运行摘要**
 
 为每个版本输出候选/确认/否决数量、最新方向、金银覆盖、转换和短区间。
 
-- [ ] **Step 3: 打印状态核心门槛**
+- [x] **Step 3: 打印状态核心门槛**
 
 输出 `ALL/EARLY/LATE` 的 5 日金银指标、全样本银 10 日指标、最坏反弹和
 `3%` 不利比例，并逐条打印设计门槛是否通过。
 
-- [ ] **Step 4: 打印逐银区间和留一结果**
+- [x] **Step 4: 打印逐银区间和留一结果**
 
 逐版本列出 5 个基础银区间的恢复分类，再列出每个 leave-one-run-out fold 相对
 v9 的银 5 日平均收益和 `3%` 不利差值。
 
-- [ ] **Step 5: 运行真实脚本**
+- [x] **Step 5: 运行真实脚本**
 
 ```bash
 docker compose exec -T alphaagent-api python - < scripts/market_timing_eval.py
@@ -522,16 +522,16 @@ Expected: v9 仍为 65 个候选、42 个确认、最新银；随后出现 R1/R2
 - Modify: `memory/07_market_timing/market_timing_design.md`
 - Modify: `requirements/alphaagent_market_timing_recovery_gold_research_implementation_plan.md`
 
-- [ ] **Step 1: 写入完整真实报告**
+- [x] **Step 1: 写入完整真实报告**
 
 记录数据区间、固定三候选、候选事件、四版本状态表、逐银区间、留一结果、每项
 决策门槛、样本限制和接受/拒绝结论。失败指标不得省略。
 
-- [ ] **Step 2: 更新市场择时概览**
+- [x] **Step 2: 更新市场择时概览**
 
 只记录当前结论、生产是否改变、验证命令及详细报告链接；不复制长表。
 
-- [ ] **Step 3: 最终验证**
+- [x] **Step 3: 最终验证**
 
 ```bash
 uv run --group server pytest \
@@ -547,7 +547,7 @@ pnpm --dir frontend run build
 git diff --check
 ```
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 只暂存本计划列出的市场择时文件，不纳入并行 `limit_up`、memory 或 requirements
 改动：

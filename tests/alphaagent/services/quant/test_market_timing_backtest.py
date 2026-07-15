@@ -54,6 +54,20 @@ def _event(
     )
 
 
+def _silver_event(
+    trade_date: date,
+    confirm_date: date,
+) -> sig.TimingSignal:
+    return replace(
+        _event(trade_date, sig.STATUS_CONFIRMED, confirm_date),
+        direction="SILVER",
+        bull_force=40.0,
+        bear_force=70.0,
+        phase="retreat",
+        setup_type=sig.SETUP_TOP_SILVER,
+    )
+
+
 def _factor(
     day: date,
     *,
@@ -95,6 +109,50 @@ def _state_bucket(
         and bucket.direction == direction
         and bucket.horizon == horizon
     )
+
+
+def _recovery_case(
+    *,
+    candidate_factor: dict[str, float | bool] | None = None,
+    confirmation_close: float = 99.0,
+    confirmation_up_ratio: float | None = 0.6,
+    confirmation_bull: float = 60.0,
+    confirmation_bear: float = 50.0,
+) -> tuple[list[fac.MarketTimingFactors], list[CompositeBar], sig.TimingSignal]:
+    bars = _bars(
+        [100.0, 99.0, 98.0, 97.0, 96.0, 98.0, confirmation_close, 100.0],
+        [0.1, 0.1, 0.1, 0.1, 0.1, 0.6, confirmation_up_ratio, 0.6],
+    )
+    factors = [
+        _factor(
+            bar.trade_date,
+            bull=40.0,
+            bear=70.0,
+            mom_5d=-1.0,
+            above_ma20=False,
+        )
+        for bar in bars
+    ]
+    factors[5] = _factor(
+        bars[5].trade_date,
+        **(
+            candidate_factor
+            or {
+                "bull": 60.0,
+                "bear": 50.0,
+                "mom_5d": 1.0,
+                "above_ma20": False,
+            }
+        ),
+    )
+    factors[6] = _factor(
+        bars[6].trade_date,
+        bull=confirmation_bull,
+        bear=confirmation_bear,
+        mom_5d=1.0,
+        above_ma20=True,
+    )
+    return factors, bars, _silver_event(bars[0].trade_date, bars[1].trade_date)
 
 
 def test_confirmed_performance_starts_after_confirmation_close() -> None:
@@ -394,3 +452,354 @@ def test_volatility_hysteresis_shock_is_prefix_stable_and_confirmed_gold_recover
     assert complete[-2] == "SILVER"
     assert complete[-1] == "GOLD"
     assert polluted[:-1] == complete[:-1]
+
+
+@pytest.mark.parametrize(
+    ("variant", "candidate_factor"),
+    [
+        (
+            bt.RECOVERY_R1_REPAIR,
+            {
+                "bull": 50.0,
+                "bear": 60.0,
+                "mom_5d": -1.0,
+                "above_ma20": False,
+            },
+        ),
+        (
+            bt.RECOVERY_R2_BULL_CROSS,
+            {
+                "bull": 60.0,
+                "bear": 50.0,
+                "mom_5d": 1.0,
+                "above_ma20": False,
+            },
+        ),
+        (
+            bt.RECOVERY_R3_MA20,
+            {
+                "bull": 60.0,
+                "bear": 50.0,
+                "mom_5d": 1.0,
+                "above_ma20": True,
+            },
+        ),
+    ],
+)
+def test_recovery_gold_variants_confirm_only_after_broad_follow_through(
+    variant: str,
+    candidate_factor: dict[str, float | bool],
+) -> None:
+    factors, bars, silver = _recovery_case(candidate_factor=candidate_factor)
+
+    result = bt.build_recovery_gold_state(
+        factors,
+        bars,
+        [silver],
+        variant=variant,
+    )
+
+    assert len(result["events"]) == 1
+    event = result["events"][0]
+    assert (event.trade_date, event.confirm_date, event.status) == (
+        bars[5].trade_date,
+        bars[6].trade_date,
+        sig.STATUS_CONFIRMED,
+    )
+    assert event.setup_type == bt.SETUP_RECOVERY_GOLD
+    assert result["directions"][0] == "NEUTRAL"
+    assert result["directions"][1:6] == ["SILVER"] * 5
+    assert result["directions"][6:] == ["GOLD"] * 2
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["down_close", "missing_participation", "bear_still_dominant"],
+)
+def test_recovery_gold_confirmation_fails_closed(case: str) -> None:
+    kwargs: dict[str, object] = {}
+    if case == "down_close":
+        kwargs["confirmation_close"] = 97.0
+    elif case == "missing_participation":
+        kwargs["confirmation_up_ratio"] = None
+    else:
+        kwargs["confirmation_bull"] = 49.0
+        kwargs["confirmation_bear"] = 60.0
+    factors, bars, silver = _recovery_case(**kwargs)
+
+    result = bt.build_recovery_gold_state(
+        factors,
+        bars,
+        [silver],
+        variant=bt.RECOVERY_R2_BULL_CROSS,
+    )
+
+    assert len(result["events"]) == 1
+    assert result["events"][0].status == sig.STATUS_INVALIDATED
+    assert result["directions"][-1] == "SILVER"
+
+
+def test_recovery_gold_rejects_invalid_inputs() -> None:
+    factors, bars, silver = _recovery_case()
+
+    with pytest.raises(ValueError, match="unknown recovery variant"):
+        bt.build_recovery_gold_state(factors, bars, [silver], variant="UNKNOWN")
+    with pytest.raises(ValueError, match="长度必须一致"):
+        bt.build_recovery_gold_state(
+            factors[:-1],
+            bars,
+            [silver],
+            variant=bt.RECOVERY_R2_BULL_CROSS,
+        )
+    misaligned = factors.copy()
+    misaligned[-1] = replace(misaligned[-1], trade_date=bars[-2].trade_date)
+    with pytest.raises(ValueError, match="日期必须对齐"):
+        bt.build_recovery_gold_state(
+            misaligned,
+            bars,
+            [silver],
+            variant=bt.RECOVERY_R2_BULL_CROSS,
+        )
+
+
+def test_recovery_gold_emits_once_per_continuous_zone_and_allows_reentry() -> None:
+    bars = _bars(
+        [100.0, 99.0, 98.0, 97.0, 96.0, 98.0, 98.0, 99.0, 97.0, 99.0, 100.0],
+        [0.1, 0.1, 0.1, 0.1, 0.1, 0.6, 0.6, 0.6, 0.1, 0.6, 0.6],
+    )
+    factors = [
+        _factor(
+            bar.trade_date,
+            bull=40.0,
+            bear=70.0,
+            mom_5d=-1.0,
+            above_ma20=False,
+        )
+        for bar in bars
+    ]
+    for index in (5, 6, 7, 9, 10):
+        factors[index] = _factor(
+            bars[index].trade_date,
+            bull=60.0,
+            bear=50.0,
+            mom_5d=1.0,
+            above_ma20=False,
+        )
+    silver = _silver_event(bars[0].trade_date, bars[1].trade_date)
+
+    result = bt.build_recovery_gold_state(
+        factors,
+        bars,
+        [silver],
+        variant=bt.RECOVERY_R2_BULL_CROSS,
+    )
+
+    assert [event.trade_date for event in result["events"]] == [
+        bars[5].trade_date,
+        bars[9].trade_date,
+    ]
+    assert [event.status for event in result["events"]] == [
+        sig.STATUS_INVALIDATED,
+        sig.STATUS_CONFIRMED,
+    ]
+
+
+def test_recovery_gold_respects_base_event_priority() -> None:
+    factors, bars, first_silver = _recovery_case()
+    second_silver = _silver_event(bars[5].trade_date, bars[6].trade_date)
+
+    silver_priority = bt.build_recovery_gold_state(
+        factors,
+        bars,
+        [first_silver, second_silver],
+        variant=bt.RECOVERY_R2_BULL_CROSS,
+    )
+
+    assert silver_priority["events"][0].status == sig.STATUS_INVALIDATED
+    assert silver_priority["directions"][6] == "SILVER"
+
+    base_gold = _event(
+        bars[4].trade_date,
+        sig.STATUS_CONFIRMED,
+        bars[5].trade_date,
+    )
+    gold_priority = bt.build_recovery_gold_state(
+        factors,
+        bars,
+        [first_silver, base_gold],
+        variant=bt.RECOVERY_R2_BULL_CROSS,
+    )
+
+    assert gold_priority["events"] == []
+    assert gold_priority["directions"][5:] == ["GOLD"] * 3
+
+
+@pytest.mark.parametrize("starting_direction", ["NEUTRAL", "GOLD"])
+def test_recovery_gold_only_triggers_while_silver(starting_direction: str) -> None:
+    factors, bars, _ = _recovery_case()
+    events = (
+        []
+        if starting_direction == "NEUTRAL"
+        else [
+            _event(
+                bars[0].trade_date,
+                sig.STATUS_CONFIRMED,
+                bars[1].trade_date,
+            )
+        ]
+    )
+
+    result = bt.build_recovery_gold_state(
+        factors,
+        bars,
+        events,
+        variant=bt.RECOVERY_R2_BULL_CROSS,
+    )
+
+    assert result["events"] == []
+    assert result["directions"][-1] == starting_direction
+
+
+def test_recovery_gold_candidate_is_prefix_stable_and_future_safe() -> None:
+    factors, bars, silver = _recovery_case()
+
+    prefix = bt.build_recovery_gold_state(
+        factors[:6],
+        bars[:6],
+        [silver],
+        variant=bt.RECOVERY_R2_BULL_CROSS,
+    )
+    complete = bt.build_recovery_gold_state(
+        factors,
+        bars,
+        [silver],
+        variant=bt.RECOVERY_R2_BULL_CROSS,
+    )
+    polluted_factors = factors[:-1] + [
+        replace(factors[-1], bull_force=0.0, bear_force=100.0, mom_5d=-99.0)
+    ]
+    polluted_bars = bars[:-1] + [
+        replace(bars[-1], close=bars[-1].close * 5.0, up_ratio=0.0)
+    ]
+    polluted = bt.build_recovery_gold_state(
+        polluted_factors,
+        polluted_bars,
+        [silver],
+        variant=bt.RECOVERY_R2_BULL_CROSS,
+    )
+
+    assert len(prefix["events"]) == 1
+    assert prefix["events"][0].status == sig.STATUS_PENDING
+    assert prefix["events"][0].confirm_date is None
+    assert complete["events"][0].trade_date == prefix["events"][0].trade_date
+    assert complete["events"][0].status == sig.STATUS_CONFIRMED
+    assert complete["directions"][:6] == prefix["directions"]
+    assert polluted["events"] == complete["events"]
+    assert polluted["directions"][:-1] == complete["directions"][:-1]
+
+
+def test_recovery_gold_run_evaluation_classifies_outcomes() -> None:
+    bars = _bars(
+        [
+            100.0,
+            99.0,
+            98.0,
+            100.0,
+            102.0,
+            104.0,
+            106.0,
+            108.0,
+            110.0,
+            109.0,
+            108.0,
+            109.0,
+            110.0,
+            108.0,
+            106.0,
+            104.0,
+            102.0,
+            100.0,
+            101.0,
+            100.0,
+            99.0,
+            100.0,
+            101.0,
+            102.0,
+            103.0,
+        ]
+    )
+    base_directions = (
+        ["NEUTRAL"]
+        + ["SILVER"] * 6
+        + ["GOLD"] * 3
+        + ["SILVER"] * 8
+        + ["GOLD"]
+        + ["SILVER"] * 6
+    )
+    recovery_events = [
+        replace(
+            _event(
+                bars[candidate].trade_date,
+                sig.STATUS_CONFIRMED,
+                bars[confirm].trade_date,
+            ),
+            setup_type=bt.SETUP_RECOVERY_GOLD,
+        )
+        for candidate, confirm in ((2, 3), (11, 12), (21, 22))
+    ]
+
+    rows = bt.evaluate_recovery_gold_runs(
+        base_directions,
+        recovery_events,
+        bars,
+    )
+
+    assert [row["outcome"] for row in rows] == [
+        "IMPROVED",
+        "FALSE_RECOVERY",
+        "IMMATURE",
+    ]
+    assert [row["advanced_days"] for row in rows] == [4, 6, 3]
+    assert rows[0]["return_5d"] == pytest.approx(10.0)
+    assert rows[1]["return_5d"] == pytest.approx((100.0 / 110.0 - 1.0) * 100.0)
+    assert rows[2]["return_5d"] is None
+    assert rows[2]["open_run"] is True
+
+
+def test_silver_run_leave_one_out_uses_only_remaining_runs() -> None:
+    bars = _bars([100.0 + index for index in range(20)])
+    base_directions = (
+        ["NEUTRAL"]
+        + ["SILVER"] * 3
+        + ["GOLD"] * 4
+        + ["SILVER"] * 5
+        + ["GOLD"] * 7
+    )
+    candidate_directions = (
+        ["NEUTRAL", "SILVER"]
+        + ["GOLD"] * 6
+        + ["SILVER"] * 2
+        + ["GOLD"] * 10
+    )
+
+    rows = bt.evaluate_silver_run_leave_one_out(
+        base_directions,
+        candidate_directions,
+        bars,
+    )
+
+    assert [
+        (row["omitted_start"], row["omitted_end"])
+        for row in rows
+    ] == [
+        (bars[1].trade_date, bars[3].trade_date),
+        (bars[8].trade_date, bars[12].trade_date),
+    ]
+    assert [(row["base_count"], row["candidate_count"]) for row in rows] == [
+        (5, 2),
+        (3, 1),
+    ]
+    assert all(row["base_hit_rate"] == 0.0 for row in rows)
+    assert all(row["candidate_hit_rate"] == 0.0 for row in rows)
+    assert all(row["base_adverse_3pct_rate"] == 1.0 for row in rows)
+    assert all(row["candidate_adverse_3pct_rate"] == 1.0 for row in rows)
