@@ -21,8 +21,10 @@
 - 候选事件标在【候选日 i】。普通金银和反转金由次日方向/参与度确认；结构性
   破位银由次日是否完成风险修复确认。所有否决候选继续保留，序列末端为 `PENDING`。
   正式金银次数只统计 `CONFIRMED`，候选总数不冒充正式次数。
-- “当前状态”直接使用最新交易日候选区；最新日没有合格区域就是 `NEUTRAL`，不沿用
-  最近已确认事件模拟持仓。行情和因子日期拆成 `quote_date` 与 `factor_date`。
+- “当前行情”使用最近一次已确认金银事件形成的因果状态：从 `confirm_date`
+  起持续沿用该方向，直到相反方向事件确认；`PENDING/INVALIDATED` 不切换。
+  `zone_direction` 仍仅表示当日候选区域，`active_direction` 表示逐日行情状态。
+  行情和因子日期拆成 `quote_date` 与 `factor_date`。
 - 产品用法：金/银手指不作为用户手动策略开关；市场择时面板同时输出
   `danger_state`，没有把它直接接入量化候选、涨停策略、仓位或下单。
 - 当前与 Top20 研究的关系：金/银手指单独不够精准，必须结合 setup、均线位置、量能、收盘位置、主线、右尾保护和失败风险。
@@ -97,17 +99,18 @@ pnpm --dir frontend run build
 - `POST /api/market-timing/refresh`: 强制刷新。
 - `GET /api/market-timing/panel`: 面板读取，优先内存缓存，再库缓存，再现算。
 - 盘中/盘后同步前实时：`panel.start_intraday_refresher()` daemon thread（`main.py` lifespan 启动）盘中每 5min force_refresh；`_compute_panel` 只有在七大指数实时 composite 和上证主图实时 K 线都可用时，才追加今天到基础 panel。今天 ctx 数值沿用昨天近似，但用 `dataclasses.replace` 把 `trade_date` 复制为今天，避免候选错记到昨天。`GET /panel` 的 transient overlay 覆盖交易时段和 15:00-19:30 的盘后日线同步窗口，只更新 `quote_date`、主图和点位，不覆盖 `factor_date`。限制仍是广度滞后一天、PENDING 非确认、5min 间隔。
-- 面板输出完整 `timing_series`（日期、多空合力、当日区域、`danger_state` 和
-  候选/确认信息）；overview 同步输出最新危险状态。前端最近 20 个交易日表
-  显示结构风险行，顶部仅在危险时显示状态标签。主 K 线只画已确认和待确认事件，
-  否决候选保留在计数、日期表和准确率对照中。
-- 当前摘要只读取 `overview.current_direction`：中性时显示“无信号 / 当前无金银
-  信号”，不再渲染可能已经过期的 `latest_signal`。该字段继续保留 API 兼容，
-  历史事件由 K 线、日期表和准确率记录展示。
+- 面板输出完整 `timing_series`（日期、多空合力、`active_direction`、
+  `zone_direction`、`danger_state` 和候选/确认信息）；overview 同步输出最新危险
+  状态。盘中追加 bar 通过 `confirmed_through` 截止正式确认，次日盘中涨跌不能
+  提前反转当前行情。主 K 线只画已确认和待确认事件，否决候选保留在计数、日期表
+  和准确率对照中。
+- 当前摘要读取 `overview.current_direction` 的持续行情状态，并用
+  `overview.latest_signal.confirm_date` 解释本轮起点。最近交易日表分别展示
+  `active_direction`、`zone_direction` 和事件确认状态，避免混淆行情、候选区和事件。
 
 ## Current Evidence Summary
 
-- v8 真实面板区间为 `2024-05-28..2026-07-15`：64 个候选，金 55、银 9；
+- v8 研究快照区间为 `2024-05-28..2026-07-15`：64 个候选，金 55、银 9；
   41 个确认、23 个否决、0 个待确认。普通 `BREAKDOWN_SILVER` 从 34 个降为 0。
 - 金候选未来 5 日上涨率为 `63.6%`、平均收益 `+1.82%`；34 个确认金从确认日
   收盘起算的 5 日上涨率为 `79.4%`、平均收益 `+2.07%`。确认后口径经过次日
@@ -129,16 +132,19 @@ pnpm --dir frontend run build
 - 六宽基 `2015-2026` 价格代理显示结构破位在 `2015-2019` 较有效，但在
   `2020-2023` 只有约 `30.8%` 的未来 5 日下跌率、平均收益约 `+2.03%`。
   均线、动量、波动、长期趋势、滚动状态和浅层模型没有形成跨时期稳定过滤。
-- 2026-07-15 验证：市场择时后端测试 `43 passed`；重建 API 后强制刷新返回 200，
-  `sample_range=[2024-05-28, 2026-07-15]`，真实面板数量、关键日期和两组事件哈希
-  全部通过断言。
-- 当前信号展示验证：前端测试 `48 passed`、生产构建通过；真实 `/market` 在
-  `1440x1000` 和 `390x844` 均只显示当前“无信号”，摘要不含 `2026-06-11`、
-  “最近信号”或当前“金手指”，横向溢出为 0，控制台 0 错误/0 警告。
+- 2026-07-15 持续行情验证：市场择时后端测试 `46 passed`；重建 API 后强制刷新
+  返回 200。真实面板行情日期为 `2026-07-15`、因子和基础样本截至
+  `2026-07-14`，最后一日 `zone_direction=NEUTRAL`，但
+  `overview.current_direction=timing_series[-1].active_direction=GOLD`。状态来源为
+  `2026-06-11 REVERSAL_GOLD / CONFIRMED / 2026-06-12`，没有已确认银手指前持续为金。
+- 当前行情展示验证：前端测试 `56 passed`、生产构建通过；真实 `/market` 在
+  `1440x1000` 和 `390x844` 均显示“当前行情 / 金手指”、“2026-06-12 确认”和
+  “持续至银手指确认”，并包含“行情状态 / 候选区域”两行。两种视口横向溢出均为
+  0，控制台 0 错误/0 警告。
 - 设计和实施证据：`requirements/alphaagent_market_timing_v8_precision_silver_design.md`、
   `requirements/alphaagent_market_timing_v8_precision_silver_implementation_plan.md`、
-  `requirements/alphaagent_market_timing_current_signal_presentation_design.md`、
-  `requirements/alphaagent_market_timing_current_signal_presentation_implementation_plan.md`。
+  `requirements/alphaagent_market_timing_persistent_regime_design.md`、
+  `requirements/alphaagent_market_timing_persistent_regime_implementation_plan.md`。
 
 ## How To Use In Quant Research
 
