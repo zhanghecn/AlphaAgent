@@ -1,4 +1,4 @@
-"""金手指/银手指信号触发 v7: 通用 setup + 结构危险区 + 次日确认。
+"""金手指/银手指信号触发 v8: 精度优先银手指 + 次日审计。
 
 演进:
 - v1/v2: 单日边沿触发, bull/bear 在阈值附近抖动会让 GOLD/SILVER 频繁交替。
@@ -14,8 +14,10 @@
 - v6: 增加独立 ``REVERSAL_GOLD`` 弱势衰竭 setup。候选只读取 <=i 的
   收盘前缀, 次日上涨且宽基参与度不窄时确认。镜像反转银未通过长历史验证,
   不因形式对称而上线。
-- v7(本版): 增加 ``STRUCTURAL_BREAKDOWN_SILVER`` 和独立危险状态。强破位
+- v7: 增加 ``STRUCTURAL_BREAKDOWN_SILVER`` 和独立危险状态。强破位
   当日优先于反转金, 危险状态持续到价格、参与度和空头强度共同修复。
+- v8(本版): 停止生成样本外失效的普通 ``BREAKDOWN_SILVER``。银手指只保留
+  顶部风险和多类空头结构一致恶化两类 setup, 金手指行为不变。
 
 无未来函数(关键修复):
 - 候选事件属性(trade_date/direction/grade/bull_force)只用 <=i 数据
@@ -263,12 +265,9 @@ def candidate_setup(
         return direction, SETUP_TREND_GOLD
     if direction == "SILVER":
         breakdown = float(factor.evidence.get("trend_breakdown") or 0.0)
-        setup_type = (
-            SETUP_BREAKDOWN_SILVER
-            if breakdown >= SILVER_ENTER
-            else SETUP_TOP_SILVER
-        )
-        return direction, setup_type
+        if breakdown >= SILVER_ENTER:
+            return None, None
+        return direction, SETUP_TOP_SILVER
     return None, None
 
 

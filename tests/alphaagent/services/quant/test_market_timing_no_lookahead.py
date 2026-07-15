@@ -86,6 +86,26 @@ def _timing_factor(day: date, zone: str) -> fac.MarketTimingFactors:
     )
 
 
+def _ordinary_breakdown_factor(day: date) -> fac.MarketTimingFactors:
+    return fac.MarketTimingFactors(
+        trade_date=day,
+        phase="retreat",
+        trend=40.0,
+        momentum=40.0,
+        breadth=40.0,
+        structure=50.0,
+        volume=50.0,
+        bull_force=40.0,
+        bear_force=70.0,
+        close_above_ma20=False,
+        mom_5d=-2.0,
+        mom_20d=-3.0,
+        macd_top=42.0,
+        breadth_top=68.0,
+        evidence={"trend_breakdown": 88.0},
+    )
+
+
 # ---- 1. 窗口指标: 篡改窗口外, 值不变 ----
 
 
@@ -290,6 +310,23 @@ def test_candidate_direction_uses_shared_zone_thresholds():
     assert sig.candidate_direction(_timing_factor(day, "GOLD")) == "GOLD"
     assert sig.candidate_direction(_timing_factor(day, "SILVER")) == "SILVER"
     assert sig.candidate_direction(_timing_factor(day, "NEUTRAL")) is None
+
+
+def test_ordinary_breakdown_silver_is_suppressed_without_structural_consensus():
+    factor = _ordinary_breakdown_factor(date(2026, 7, 7))
+
+    assert sig.candidate_direction(factor) == "SILVER"
+    assert sig.candidate_setup(factor) == (None, None)
+    assert sig.detect_events([factor], [100.0], [0.0]) == []
+
+
+def test_top_silver_remains_available():
+    factor = _timing_factor(date(2026, 5, 29), "SILVER")
+
+    assert sig.candidate_setup(factor) == (
+        "SILVER",
+        sig.SETUP_TOP_SILVER,
+    )
 
 
 def test_same_zone_is_one_event_but_reentry_creates_another():
