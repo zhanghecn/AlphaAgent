@@ -24,9 +24,7 @@ import {
   formatTimingAxisTick,
   formatTimingCrosshairDate,
   timingActiveLabel,
-  timingConfirmationLabels,
   timingEventLabel,
-  timingZoneLabel,
   type TimingHoverSummary,
 } from "./timingChartPresentation";
 
@@ -64,7 +62,6 @@ function TimingHoverStrip({ summary }: { summary: TimingHoverSummary | null }) {
   if (!summary) {
     return <div className="min-h-[52px] border-t px-2 py-2 text-xs text-muted-foreground">暂无悬停数据</div>;
   }
-  const confirmations = timingConfirmationLabels(summary.confirmations);
   const changeText = summary.changePct == null
     ? "--"
     : `${summary.changePct >= 0 ? "+" : ""}${summary.changePct.toFixed(2)}%`;
@@ -87,24 +84,15 @@ function TimingHoverStrip({ summary }: { summary: TimingHoverSummary | null }) {
       </div>
       <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-muted-foreground">
         <span>
-          候选区域{" "}
+          手指状态{" "}
           <span
-            data-testid="timing-hover-zone"
-            className={cn("font-medium", directionClass(summary.state?.zone_direction))}
+            data-testid="timing-hover-finger"
+            className={cn("font-medium", directionClass(summary.activeDirection))}
           >
-            {timingZoneLabel(summary.state)}
+            {timingActiveLabel(summary.activeDirection)}
           </span>
         </span>
-        <span>
-          最近确认{" "}
-          <span className={cn("font-medium", directionClass(summary.state?.active_direction))}>
-            {timingActiveLabel(summary.state)}
-          </span>
-        </span>
-        <span>当日事件 <span className="font-medium text-foreground">{timingEventLabel(summary.state?.event ?? null)}</span></span>
-        <span data-testid="timing-hover-confirmations">
-          确认结果 <span className="font-medium text-foreground">{confirmations.length ? confirmations.join("；") : "无"}</span>
-        </span>
+        <span>当日新手指 <span className="font-medium text-foreground">{timingEventLabel(summary.state?.event ?? null)}</span></span>
       </div>
     </div>
   );

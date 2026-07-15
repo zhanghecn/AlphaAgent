@@ -42,10 +42,10 @@ describe("TimingRecentTable", () => {
       <TimingRecentTable series={rows} loading={false} />,
     );
 
-    expect(html).toContain("最近确认");
-    expect(html).toContain("候选区域");
-    expect(html).toContain("金未反转");
-    expect(html).toContain("银未反转");
-    expect(html).not.toContain("金行情");
+    expect(html).toContain("手指状态");
+    expect(html).toContain("金延续");
+    expect(html).toContain("银延续");
+    expect(html).not.toContain("候选区域");
+    expect(html).not.toContain("中性");
   });
 });

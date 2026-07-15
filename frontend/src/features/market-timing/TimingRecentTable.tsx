@@ -85,28 +85,17 @@ export function TimingRecentTable({
               ))}
             </tr>
             <tr className="border-b border-border/50">
-              <th className="px-2 py-2 text-left font-medium text-muted-foreground">最近确认</th>
+              <th className="px-2 py-2 text-left font-medium text-muted-foreground">手指状态</th>
               {rows.map((row) => (
                 <td
                   key={row.date}
                   className={cn("px-1 py-2 text-center font-medium", directionClass(row.active_direction))}
                 >
                   {row.active_direction === "GOLD"
-                    ? "金未反转"
+                    ? "金延续"
                     : row.active_direction === "SILVER"
-                      ? "银未反转"
-                      : "尚无确认"}
-                </td>
-              ))}
-            </tr>
-            <tr className="border-b border-border/50">
-              <th className="px-2 py-2 text-left font-medium text-muted-foreground">候选区域</th>
-              {rows.map((row) => (
-                <td
-                  key={row.date}
-                  className={cn("px-1 py-2 text-center font-medium", directionClass(row.zone_direction))}
-                >
-                  {row.zone_direction === "GOLD" ? "金区" : row.zone_direction === "SILVER" ? "银区" : "中性"}
+                      ? "银延续"
+                      : "尚无手指"}
                 </td>
               ))}
             </tr>
@@ -114,7 +103,7 @@ export function TimingRecentTable({
               <th className="px-2 py-2 text-left font-medium text-muted-foreground">手指事件</th>
               {rows.map((row) => (
                 <td key={row.date} className="px-1 py-2 text-center">
-                  {row.event ? (
+                  {row.event && row.event.status !== "INVALIDATED" ? (
                     <span
                       className={cn("block font-medium leading-4", directionClass(row.event.direction))}
                       title={`${timingSetupLabel(row.event.setup_type)}，候选 ${row.date}${row.event.confirm_date ? `，确认 ${row.event.confirm_date}` : ""}`}

@@ -49,35 +49,37 @@ describe("TimingHero", () => {
     );
 
     expect(html).toContain("无信号");
-    expect(html).toContain("尚无已确认金银手指");
+    expect(html).toContain("尚无手指");
     expect(html).not.toContain("最近信号");
     expect(html).not.toContain("2026-06-11");
     expect(html).not.toContain("金手指");
     expect(html).not.toContain("银手指区");
   });
 
-  it("shows the latest confirmed gold direction without calling it today's zone", () => {
+  it("shows the confirmed gold finger as the ongoing user result", () => {
     const gold = renderToStaticMarkup(
       <TimingHero overview={overview("GOLD")} loading={false} />,
     );
 
-    expect(gold).toContain("最近确认");
+    expect(gold).toContain("手指状态");
     expect(gold).toContain("金手指");
-    expect(gold).toContain("2026-06-12 确认");
-    expect(gold).toContain("尚无银手指反转");
+    expect(gold).toContain("金手指延续");
+    expect(gold).toContain("2026-06-12 起");
+    expect(gold).toContain("等待银手指反转");
     expect(gold).not.toContain("当前行情");
-    expect(gold).not.toContain("尚无已确认金银手指");
+    expect(gold).not.toContain("尚无手指");
   });
 
-  it("shows the latest confirmed silver direction without calling it today's zone", () => {
+  it("shows the confirmed silver finger as the ongoing user result", () => {
     const silver = renderToStaticMarkup(
       <TimingHero overview={overview("SILVER")} loading={false} />,
     );
 
     expect(silver).toContain("银手指");
-    expect(silver).toContain("2026-07-08 确认");
-    expect(silver).toContain("尚无金手指反转");
+    expect(silver).toContain("银手指延续");
+    expect(silver).toContain("2026-07-08 起");
+    expect(silver).toContain("等待金手指反转");
     expect(silver).not.toContain("当前行情");
-    expect(silver).not.toContain("尚无已确认金银手指");
+    expect(silver).not.toContain("尚无手指");
   });
 });

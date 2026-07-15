@@ -5,8 +5,7 @@ import {
   formatTimingAxisTick,
   formatTimingCrosshairDate,
   timingActiveLabel,
-  timingConfirmationLabels,
-  timingZoneLabel,
+  timingEventLabel,
 } from "./timingChartPresentation";
 
 const bars: TimingBar[] = [
@@ -46,24 +45,23 @@ const series: TimingDailyState[] = [
 ];
 
 describe("market timing chart presentation", () => {
-  it("keeps July 2 neutral while exposing the rejected July 1 gold candidate", () => {
+  it("keeps July 2 on the confirmed gold finger until a silver reversal", () => {
     const summary = buildTimingHoverSummaries(bars, series).get("2026-07-02");
 
     expect(summary?.date).toBe("2026-07-02");
     expect(summary?.changePct).toBeCloseTo(-2.9412, 4);
-    expect(timingZoneLabel(summary?.state ?? null)).toBe("中性");
-    expect(timingActiveLabel(summary?.state ?? null)).toBe("金未反转");
-    expect(timingConfirmationLabels(summary?.confirmations ?? [])).toEqual([
-      "7月1日金候选已否决",
-    ]);
+    expect(summary?.state?.zone_direction).toBe("NEUTRAL");
+    expect(summary?.activeDirection).toBe("GOLD");
+    expect(timingActiveLabel(summary?.activeDirection ?? null)).toBe("金手指延续");
+    expect(timingEventLabel(series[0].event)).toBe("无");
   });
 
-  it("does not carry stale factors onto a newer quote bar", () => {
+  it("carries the confirmed finger onto a newer quote bar without copying factors", () => {
     const summary = buildTimingHoverSummaries(bars, series).get("2026-07-03");
 
     expect(summary?.state).toBeNull();
-    expect(timingZoneLabel(summary?.state ?? null)).toBe("因子未就绪");
-    expect(timingActiveLabel(summary?.state ?? null)).toBe("因子未就绪");
+    expect(summary?.activeDirection).toBe("GOLD");
+    expect(timingActiveLabel(summary?.activeDirection ?? null)).toBe("金手指延续");
   });
 
   it("formats crosshair and axis dates without English month names", () => {
