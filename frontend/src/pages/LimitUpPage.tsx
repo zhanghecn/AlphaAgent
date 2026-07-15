@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   BarChart3,
@@ -27,11 +27,14 @@ import {
 import {
   fetchLimitUpHistoryDates,
   fetchLimitUpHistoryLedger,
+  fetchLimitUpHistoryStatus,
   fetchLimitUpLaneBacktest,
   fetchLimitUpLive,
   fetchLimitUpLiveTraceDates,
   fetchLimitUpLiveTraceDay,
   fetchLimitUpLiveTraceSymbol,
+  startLimitUpHistoryRebuild,
+  type LimitUpHistoryRebuildStatus,
   type LimitUpLaneBacktest,
   type LimitUpLaneLedger,
   type LimitUpLaneLedgerTrade,
@@ -48,6 +51,7 @@ import { LoadingState } from "@/components/LoadingState";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
+import { BacktestRebuildControl } from "@/features/limitUp/BacktestRebuildControl";
 import {
   isNextSessionPlan,
   liveHeader,
@@ -83,11 +87,14 @@ const PRIMARY_VIEWS: Array<{ value: PrimaryView; label: string; icon: typeof Act
 
 export function LimitUpPage() {
   const toast = useToast();
+  const queryClient = useQueryClient();
+  const rebuildObservedStatus = useRef<string | null>(null);
   const [view, setView] = useState<PrimaryView>("live");
   const [selectedDate, setSelectedDate] = useState("");
   const [selectedTraceDate, setSelectedTraceDate] = useState("");
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
+  const [rebuildError, setRebuildError] = useState<string | null>(null);
 
   const datesQuery = useQuery({
     queryKey: ["limitUpHistoryDates"],
@@ -147,6 +154,34 @@ export function LimitUpPage() {
     staleTime: Infinity,
     refetchOnWindowFocus: false,
   });
+  const historyStatusQuery = useQuery({
+    queryKey: ["limitUpHistoryStatus"],
+    queryFn: fetchLimitUpHistoryStatus,
+    enabled: view === "backtest",
+    staleTime: 0,
+    refetchInterval: (query) => query.state.data?.status === "building" ? 2_000 : false,
+    refetchOnWindowFocus: true,
+  });
+  const historyRebuildMutation = useMutation({
+    mutationFn: startLimitUpHistoryRebuild,
+    onMutate: () => {
+      rebuildObservedStatus.current = "building";
+      setRebuildError(null);
+    },
+    onSuccess: (status) => {
+      queryClient.setQueryData<LimitUpHistoryRebuildStatus>(["limitUpHistoryStatus"], status);
+      toast({
+        title: status.already_running ? "已接入正在进行的重算" : "回测重算已开始",
+        description: "后台完成后会自动刷新历史交割单和回测结果",
+      });
+    },
+    onError: (error) => {
+      rebuildObservedStatus.current = "failed";
+      const message = error instanceof Error ? error.message : "无法启动历史回测重算";
+      setRebuildError(message);
+      toast({ title: "回测重算启动失败", description: message, variant: "error" });
+    },
+  });
   const buyAlerts = useBuyAlerts(liveQuery.data);
   useEffect(() => {
     const latest = datesQuery.data?.latest;
@@ -160,6 +195,39 @@ export function LimitUpPage() {
       setSelectedTraceDate(traceDatesQuery.data?.latest ?? traceDates[0]);
     }
   }, [selectedTraceDate, traceDatesQuery.data?.dates, traceDatesQuery.data?.latest]);
+  useEffect(() => {
+    const status = historyStatusQuery.data?.status;
+    if (!status) return;
+    const previous = rebuildObservedStatus.current;
+    rebuildObservedStatus.current = status;
+    if (previous !== "building") return;
+
+    if (status === "ready") {
+      setRebuildError(null);
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["limitUpHistoryDates"] }),
+        queryClient.invalidateQueries({ queryKey: ["limitUpScheduledLedger"] }),
+        queryClient.invalidateQueries({ queryKey: ["limitUpLaneBacktest"] }),
+      ]).then(() => {
+        toast({
+          title: "回测重算完成",
+          description: "当前日期、历史交割单和回测结果已刷新",
+          variant: "success",
+        });
+      }).catch(() => {
+        const message = "历史账本已更新，但页面刷新失败，请重新打开回测页";
+        setRebuildError(message);
+        toast({ title: "回测结果刷新失败", description: message, variant: "error" });
+      });
+      return;
+    }
+
+    if (status === "failed") {
+      const message = historyStatusQuery.data?.error?.message || "后台重建历史账本失败";
+      setRebuildError(message);
+      toast({ title: "回测重算失败", description: message, variant: "error" });
+    }
+  }, [historyStatusQuery.data?.error?.message, historyStatusQuery.data?.status, queryClient, toast]);
 
   const dates = datesQuery.data?.dates ?? [];
   const dateIndex = dates.indexOf(selectedDate);
@@ -310,14 +378,15 @@ export function LimitUpPage() {
         <BacktestView
           report={backtestQuery.data}
           loading={backtestQuery.isLoading}
-          fetching={backtestQuery.isFetching}
           start={start}
           end={end}
           minimumDate={datesQuery.data?.start}
           maximumDate={datesQuery.data?.end}
           onStart={setStart}
           onEnd={setEnd}
-          onRun={() => void backtestQuery.refetch()}
+          rebuildRunning={historyRebuildMutation.isPending || historyStatusQuery.data?.status === "building"}
+          rebuildError={rebuildError ?? firstError(historyStatusQuery.error)}
+          onRebuild={() => historyRebuildMutation.mutate()}
         />
       )}
     </div>
@@ -996,17 +1065,30 @@ function LedgerTradeRow({ trade }: { trade: LimitUpLaneLedgerTrade }) {
 interface BacktestViewProps {
   report?: LimitUpLaneBacktest;
   loading: boolean;
-  fetching: boolean;
   start: string;
   end: string;
   minimumDate?: string | null;
   maximumDate?: string | null;
   onStart: (value: string) => void;
   onEnd: (value: string) => void;
-  onRun: () => void;
+  rebuildRunning: boolean;
+  rebuildError: string | null;
+  onRebuild: () => void;
 }
 
-function BacktestView({ report, loading, fetching, start, end, minimumDate, maximumDate, onStart, onEnd, onRun }: BacktestViewProps) {
+function BacktestView({
+  report,
+  loading,
+  start,
+  end,
+  minimumDate,
+  maximumDate,
+  onStart,
+  onEnd,
+  rebuildRunning,
+  rebuildError,
+  onRebuild,
+}: BacktestViewProps) {
   if (loading && !report) return <LoadingState rows={7} />;
   const summary = report?.summary;
   return (
@@ -1015,9 +1097,7 @@ function BacktestView({ report, loading, fetching, start, end, minimumDate, maxi
         <DateInput label="开始" value={start} min={minimumDate} max={maximumDate} onChange={onStart} />
         <DateInput label="结束" value={end} min={minimumDate} max={maximumDate} onChange={onEnd} />
         <div className="h-9 border bg-muted/20 px-3 text-xs leading-9 text-muted-foreground">连续评估 / D+1 14:30</div>
-        <Button type="button" size="icon" variant="outline" className="h-9 w-9" title="运行回测" disabled={fetching} onClick={onRun}>
-          <RefreshCw size={15} className={cn(fetching && "animate-spin")} />
-        </Button>
+        <BacktestRebuildControl running={rebuildRunning} error={rebuildError} onRebuild={onRebuild} />
         <div className="ml-auto pb-1 text-xs tabular-nums text-muted-foreground">
           10 万元 · 两仓各 50% · 100 股整数手 · 含费用滑点
         </div>

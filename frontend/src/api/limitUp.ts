@@ -1,4 +1,4 @@
-import { apiClient } from "./client";
+import { ApiClientError, apiClient } from "./client";
 
 export type ExitMode = "dynamic" | "next_open" | "next_close" | "next_1430";
 export type EntryMode = "auction" | "sweep" | "tail" | "next_auction";
@@ -332,6 +332,22 @@ export interface LimitUpHistoryDates {
   coverage: LimitUpHistoryCoverage;
 }
 
+export interface LimitUpHistoryRebuildStatus {
+  status: "idle" | "building" | "ready" | "failed" | string;
+  strategy_version: string;
+  already_running?: boolean;
+  started_at?: string | null;
+  finished_at?: string | null;
+  persisted_days?: number;
+  start?: string | null;
+  end?: string | null;
+  coverage?: LimitUpHistoryCoverage;
+  error?: {
+    type?: string;
+    message?: string;
+  } | null;
+}
+
 export interface LimitUpEntrySummary {
   initial_cash?: number;
   final_equity?: number;
@@ -615,6 +631,22 @@ export function fetchLimitUpLiveTraceSymbol(params: {
 
 export function refreshLimitUpLive(): Promise<LimitUpSignalSnapshot> {
   return apiClient.post<LimitUpSignalSnapshot>("/limit-up/live/refresh");
+}
+
+export function fetchLimitUpHistoryStatus(): Promise<LimitUpHistoryRebuildStatus> {
+  return apiClient.get<LimitUpHistoryRebuildStatus>("/limit-up/history/status");
+}
+
+export async function startLimitUpHistoryRebuild(): Promise<LimitUpHistoryRebuildStatus> {
+  try {
+    return await apiClient.post<LimitUpHistoryRebuildStatus>("/limit-up/history/rebuild");
+  } catch (error) {
+    if (error instanceof ApiClientError && error.code === "HISTORY_REBUILD_RUNNING") {
+      const status = await fetchLimitUpHistoryStatus();
+      return { ...status, already_running: true };
+    }
+    throw error;
+  }
 }
 
 export function fetchLimitUpHistoryDates(): Promise<LimitUpHistoryDates> {

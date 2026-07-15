@@ -7,6 +7,10 @@ import {
   evaluateBuyAlerts,
   type BuyAlertState,
 } from "./buyAlert";
+import {
+  playBuyAlertSound,
+  unlockBuyAlertAudio,
+} from "./buyAlertSound";
 
 const ENABLED_STORAGE_KEY = "alphaagent.limitUpBuyAlerts.enabled";
 const STATE_STORAGE_KEY = "alphaagent.limitUpBuyAlerts.state";
@@ -19,8 +23,6 @@ interface BuyAlertControls {
   toggle: () => Promise<BuyAlertPermission>;
   test: () => Promise<BuyAlertPermission>;
 }
-
-let audioContext: AudioContext | null = null;
 
 export function useBuyAlerts(snapshot: LimitUpSignalSnapshot | undefined): BuyAlertControls {
   const [enabled, setEnabled] = useState(readEnabled);
@@ -46,7 +48,7 @@ export function useBuyAlerts(snapshot: LimitUpSignalSnapshot | undefined): BuyAl
       return currentPermission();
     }
 
-    const audioReady = unlockAlertAudio();
+    const audioReady = unlockBuyAlertAudio();
     const nextPermission = await requestNotificationPermission();
     await audioReady;
     setPermission(nextPermission);
@@ -99,47 +101,6 @@ function showNotification(
   } catch {
     // Sound and in-page state remain available when desktop notifications fail.
   }
-}
-
-async function unlockAlertAudio(): Promise<AudioContext | null> {
-  if (typeof window === "undefined") return null;
-  try {
-    const AudioContextConstructor = window.AudioContext
-      ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AudioContextConstructor) return null;
-    audioContext ??= new AudioContextConstructor();
-    if (audioContext.state === "suspended") await audioContext.resume();
-    return audioContext;
-  } catch {
-    return null;
-  }
-}
-
-async function playBuyAlertSound(): Promise<void> {
-  const context = await unlockAlertAudio();
-  if (!context) return;
-  const start = context.currentTime;
-  playTone(context, 880, start, 0.12);
-  playTone(context, 1_175, start + 0.14, 0.18);
-}
-
-function playTone(
-  context: AudioContext,
-  frequency: number,
-  start: number,
-  duration: number,
-): void {
-  const oscillator = context.createOscillator();
-  const gain = context.createGain();
-  oscillator.type = "sine";
-  oscillator.frequency.setValueAtTime(frequency, start);
-  gain.gain.setValueAtTime(0.0001, start);
-  gain.gain.exponentialRampToValueAtTime(0.16, start + 0.015);
-  gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
-  oscillator.connect(gain);
-  gain.connect(context.destination);
-  oscillator.start(start);
-  oscillator.stop(start + duration);
 }
 
 function currentPermission(): BuyAlertPermission {
