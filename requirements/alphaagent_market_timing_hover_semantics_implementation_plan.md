@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 让市场择时 K 线按 A 股软件习惯显示中文日期、OHLC、涨跌幅和当日金银审计信息，并停止把最近确认方向误称为当日金银区域。
+**Goal:** 让市场择时 K 线按 A 股软件习惯显示中文日期和行情数据，并把 6 月 11 日后的用户结果持续显示为金手指，直到银手指确认反转。
 
-**Architecture:** 新增纯展示映射模块，把 `chart.bars` 与 `timing_series` 按日期合并成可测试的悬停摘要；`TimingChart` 只负责十字线日期、固定摘要条和图表本地化。主摘要与最近交易日表统一把 `active_direction` 命名为“最近确认”，保留 `zone_direction` 作为唯一候选区域来源。
+**Architecture:** 纯展示映射模块把 `chart.bars` 与 `timing_series` 按日期合并，并将最近非中性的 `active_direction` 延续到后续实时报价日；`TimingChart` 只展示金手指或银手指延续，不展示内部候选区。主摘要和最近交易日表使用相同的“手指状态”语义。
 
 **Tech Stack:** React 18、TypeScript、Lightweight Charts 4.2、Vitest、Vite、Playwright CLI、Docker Compose。
 
@@ -64,11 +64,9 @@ const summary = buildTimingHoverSummaries(bars, series).get("2026-07-02");
 
 expect(summary?.date).toBe("2026-07-02");
 expect(summary?.changePct).toBeCloseTo(-2.9412, 4);
-expect(timingZoneLabel(summary?.state ?? null)).toBe("中性");
-expect(timingActiveLabel(summary?.state ?? null)).toBe("金未反转");
-expect(timingConfirmationLabels(summary?.confirmations ?? [])).toEqual([
-  "7月1日金候选已否决",
-]);
+expect(summary?.state?.zone_direction).toBe("NEUTRAL");
+expect(summary?.activeDirection).toBe("GOLD");
+expect(timingActiveLabel(summary?.activeDirection ?? null)).toBe("金手指延续");
 ```
 
 日期格式测试：
@@ -94,17 +92,12 @@ Expected: FAIL，错误为无法导入 `timingChartPresentation`。
 创建以下公开接口：
 
 ```ts
-export interface TimingConfirmation {
-  candidateDate: string;
-  event: TimingDailyEvent;
-}
-
 export interface TimingHoverSummary {
   date: string;
   bar: TimingBar;
   changePct: number | null;
   state: TimingDailyState | null;
-  confirmations: TimingConfirmation[];
+  activeDirection: TimingDirection;
 }
 
 export function formatTimingCrosshairDate(time: Time): string;
@@ -113,36 +106,29 @@ export function buildTimingHoverSummaries(
   bars: TimingBar[],
   series: TimingDailyState[],
 ): Map<string, TimingHoverSummary>;
-export function timingZoneLabel(state: TimingDailyState | null): string;
-export function timingActiveLabel(state: TimingDailyState | null): string;
+export function timingActiveLabel(direction: TimingDirection | null): string;
 export function timingEventLabel(event: TimingDailyEvent | null): string;
-export function timingConfirmationLabels(items: TimingConfirmation[]): string[];
 ```
 
 规则实现：
 
 ```ts
-export function timingZoneLabel(state: TimingDailyState | null): string {
-  if (!state) return "因子未就绪";
-  if (state.zone_direction === "GOLD") return "金候选区";
-  if (state.zone_direction === "SILVER") return "银候选区";
-  return "中性";
-}
-
-export function timingActiveLabel(state: TimingDailyState | null): string {
-  if (!state) return "因子未就绪";
-  if (state.active_direction === "GOLD") return "金未反转";
-  if (state.active_direction === "SILVER") return "银未反转";
-  return "尚无确认";
+export function timingActiveLabel(direction: TimingDirection | null): string {
+  if (direction === "GOLD") return "金手指延续";
+  if (direction === "SILVER") return "银手指延续";
+  return "尚无手指";
 }
 ```
+
+`timingEventLabel` 对 `INVALIDATED` 返回“无”，只把 `CONFIRMED/PENDING` 显示为
+当日新手指，避免同方向失败候选干扰持续状态。
 
 `buildTimingHoverSummaries` 必须：
 
 1. 用 `series[].date` 建立当日状态索引。
-2. 用 `series[].event.confirm_date` 建立确认结果索引，并保留候选日期。
+2. 按 K 线日期顺序维护最近非中性的 `active_direction`。
 3. 用前一根 K 线收盘计算涨跌幅。
-4. 实时 K 线没有同日因子行时令 `state=null`，不得沿用前一天。
+4. 实时 K 线没有同日因子行时，内部 `state=null`，但用户金银状态继续沿用。
 
 日期函数对字符串、Unix 秒和 `BusinessDay` 都输出稳定数字格式；日 K 轴刻度只输出
 `MM-DD`，十字线标签输出 `YYYY-MM-DD`。
@@ -179,10 +165,10 @@ git commit -m "test(market-timing): define hover audit semantics"
 `TimingHero.spec.tsx` 的金方向断言改为：
 
 ```ts
-expect(gold).toContain("最近确认");
+expect(gold).toContain("手指状态");
 expect(gold).toContain("金手指");
-expect(gold).toContain("2026-06-12 确认");
-expect(gold).toContain("尚无银手指反转");
+expect(gold).toContain("2026-06-12 起");
+expect(gold).toContain("等待银手指反转");
 expect(gold).not.toContain("当前行情");
 ```
 
@@ -191,11 +177,11 @@ expect(gold).not.toContain("当前行情");
 `TimingRecentTable.spec.tsx` 改为：
 
 ```ts
-expect(html).toContain("最近确认");
-expect(html).toContain("候选区域");
-expect(html).toContain("金未反转");
-expect(html).toContain("银未反转");
-expect(html).not.toContain("金行情");
+expect(html).toContain("手指状态");
+expect(html).toContain("金延续");
+expect(html).toContain("银延续");
+expect(html).not.toContain("候选区域");
+expect(html).not.toContain("中性");
 ```
 
 - [ ] **Step 2: 运行组件测试并确认旧文案失败**
@@ -208,22 +194,22 @@ pnpm --dir frontend exec vitest run \
   src/features/market-timing/TimingRecentTable.spec.tsx
 ```
 
-Expected: FAIL，旧组件仍显示“当前行情 / 行情状态 / 金行情”。
+Expected: FAIL，旧组件仍显示“最近确认 / 金未反转 / 候选区域”。
 
 - [ ] **Step 3: 修正主摘要和最近交易日表术语**
 
 `TimingHero.tsx`：
 
-- 指环小标题改为“最近确认”。
-- 说明改为三个可换行单元：“最近确认金手指”、“· 2026-06-12 确认”、
-  “· 尚无银手指反转”。
-- 中性保持“尚无已确认金银手指”。
+- 指环小标题改为“手指状态”。
+- 说明改为三个可换行单元：“金手指延续”、“· 2026-06-12 起”、
+  “· 等待银手指反转”。
+- 首个确认事件之前显示“尚无手指”。
 
 `TimingRecentTable.tsx`：
 
-- “行情状态”改为“最近确认”。
-- `GOLD/SILVER/NEUTRAL` 分别显示“金未反转 / 银未反转 / 尚无确认”。
-- “候选区域”继续读取 `zone_direction`，不改数据源。
+- 状态行标题改为“手指状态”。
+- `GOLD/SILVER/NEUTRAL` 分别显示“金延续 / 银延续 / 尚无手指”。
+- 删除“候选区域”行；被否决候选不在用户表格中渲染。
 
 - [ ] **Step 4: 在 K 线接入固定悬停摘要条**
 
@@ -261,12 +247,11 @@ localization: {
 
 ```text
 日期 | 开 | 高 | 低 | 收 | 涨跌
-候选区域 | 最近确认 | 当日事件 | 确认结果
+手指状态 | 当日新手指
 ```
 
-日期元素加 `data-testid="timing-hover-date"`，候选区域加
-`data-testid="timing-hover-zone"`，确认结果加
-`data-testid="timing-hover-confirmations"`，用于真实画布悬停验收。颜色仅复用现有
+日期元素加 `data-testid="timing-hover-date"`，手指状态加
+`data-testid="timing-hover-finger"`，用于真实画布悬停验收。颜色仅复用现有
 涨跌、金银和 muted 类，不增加卡片、徽章或装饰。
 
 - [ ] **Step 5: 页面把逐日序列传给图表**
@@ -327,9 +312,9 @@ Expected: 三个服务均 running/healthy，`http://localhost:8080/market` 返�
 `[data-testid="timing-hover-date"]` 为 `2026-07-02`，然后断言：
 
 ```text
-timing-hover-zone = 中性
-timing-hover-confirmations 包含 7月1日金候选已否决
-页面不包含 7月2日金手指区域
+timing-hover-finger = 金手指延续
+页面不包含中性或候选区域
+图表没有在 7 月 2 日新增金手指箭头
 ```
 
 截图保存到 `.playwright-cli/market-timing-hover-2026-07-02.png` 并目视检查日期、
@@ -349,11 +334,10 @@ OHLC、涨跌幅和状态词组无重叠。
 在 `memory/07_market_timing/market_timing_design.md` 当前展示语义中记录：
 
 ```markdown
-- `active_direction` 在界面固定称为“最近确认”，显示“金未反转 / 银未反转”，
-  不再称为当日行情或候选区域。K 线悬停按日期分别展示 OHLC、涨跌幅、
-  `zone_direction`、当日事件和 `confirm_date` 对应的确认结果。
-- 2026-07-02 验证：候选区域为中性；2026-07-01 金候选在该日被否决；
-  “金未反转”只表示最近确认方向仍来自 2026-06-12，不代表 7 月 2 日是金区。
+- `active_direction` 在界面固定称为“手指状态”，显示“金手指延续 / 银手指延续”。
+  K 线悬停按日期展示 OHLC、涨跌幅和持续金银状态，不展示中性候选诊断。
+- 2026-07-02 验证：用户结果为“金手指延续”；它承接 2026-06-12 已确认金手指，
+  不代表 7 月 2 日新增一个金手指事件。
 ```
 
 - [ ] **Step 5: 提交记忆更新并检查边界**
