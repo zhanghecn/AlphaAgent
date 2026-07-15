@@ -9,6 +9,7 @@ export type LimitUpLiveScope = "portfolio" | BoardLaneKey;
 const PORTFOLIO_LANES = new Set<BoardLaneKey>([
   "first_board",
 ]);
+const NON_ACTIONABLE_STATES = new Set(["rejected", "missed", "invalidated"]);
 
 export function liveSignalsForScope(
   snapshot: LimitUpSignalSnapshot | undefined,
@@ -19,7 +20,7 @@ export function liveSignalsForScope(
     const portfolio = new Map<string, LimitUpLiveSignal>();
     for (const signal of snapshot.recommendations.portfolio) {
       const lane = signal.board_lane ?? boardLaneForLevel(signal.board_level);
-      if (!PORTFOLIO_LANES.has(lane)) continue;
+      if (!PORTFOLIO_LANES.has(lane) || !canTransitionToBuy(signal)) continue;
       if (!portfolio.has(signal.vt_symbol)) portfolio.set(signal.vt_symbol, signal);
     }
     const portfolioRows = [...portfolio.values()].slice(0, 2);
@@ -29,6 +30,7 @@ export function liveSignalsForScope(
       const lane = signal.board_lane ?? boardLaneForLevel(signal.board_level);
       if (
         !PORTFOLIO_LANES.has(lane)
+        || !canTransitionToBuy(signal)
         || selectedSymbols.has(signal.vt_symbol)
         || observations.has(signal.vt_symbol)
       ) continue;
@@ -44,7 +46,10 @@ export function liveSignalsForScope(
   const selected = new Map<string, LimitUpLiveSignal>();
   for (const signal of rows) {
     const lane = signal.board_lane ?? boardLaneForLevel(signal.board_level);
-    if (scope === "portfolio" ? !PORTFOLIO_LANES.has(lane) : lane !== scope) continue;
+    if (
+      !canTransitionToBuy(signal)
+      || (scope === "portfolio" ? !PORTFOLIO_LANES.has(lane) : lane !== scope)
+    ) continue;
     const current = selected.get(signal.vt_symbol);
     if (!current || actionPriority(signal.action) < actionPriority(current.action)) {
       selected.set(signal.vt_symbol, signal);
@@ -53,6 +58,14 @@ export function liveSignalsForScope(
   return [...selected.values()]
     .sort(liveSignalSort)
     .slice(0, scope === "portfolio" ? 8 : 4);
+}
+
+function canTransitionToBuy(signal: LimitUpLiveSignal): boolean {
+  return (
+    !NON_ACTIONABLE_STATES.has(signal.signal_state ?? "")
+    && signal.blocking_scope !== "structural"
+    && signal.missed_preseal_entry !== true
+  );
 }
 
 function boardLaneForLevel(level: number): BoardLaneKey {

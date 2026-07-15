@@ -990,14 +990,6 @@ def _build_scheduled_history_backtest(
         "next_1430",
         double_cost_config,
     )["execution_summary"]
-    failed_board_orders = [order for order in orders if _is_failed_board(order)]
-    adverse_fill_summary = _simulate_account(
-        failed_board_orders,
-        bars,
-        trade_dates,
-        "next_1430",
-        config,
-    )["execution_summary"]
     executed_trades = account["executed_trades"]
     signal_daily_results, signal_return, signal_drawdown = _signal_daily_equity(
         executed_trades
@@ -1073,7 +1065,6 @@ def _build_scheduled_history_backtest(
         "exit_summary": _scheduled_exit_summary(executed_trades),
         "stress_tests": {
             "double_cost": double_cost_summary,
-            "failed_board_only_fill": adverse_fill_summary,
         },
         "position_sizing_audit": position_sizing_audit,
         "one_to_two_audit": one_to_two_audit,
@@ -1408,15 +1399,6 @@ def _scheduled_exit_summary(
         "minute_1430_count": minute_count,
         "daily_close_proxy_count": proxy_count,
     }
-
-
-def _is_failed_board(order: Mapping[str, object]) -> bool:
-    outcome = order.get("outcome")
-    return bool(
-        isinstance(outcome, Mapping)
-        and outcome.get("touched") is True
-        and outcome.get("sealed") is False
-    )
 
 
 def _order_date(order: Mapping[str, object]) -> date:

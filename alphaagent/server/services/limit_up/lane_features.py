@@ -79,6 +79,51 @@ def intraday_path_times() -> tuple[str, ...]:
     return tuple([*morning, *afternoon])
 
 
+def minute_bars_to_intraday_price_path(
+    bars: Sequence[Mapping[str, object]],
+) -> list[float | None]:
+    """Resample one-minute bars onto the existing 80-point session grid."""
+
+    bars_by_time: dict[time, Mapping[str, object]] = {}
+    for bar in bars:
+        bar_time = _bar_time(bar.get("bar_time"))
+        if bar_time is not None:
+            bars_by_time[bar_time] = bar
+
+    session_opens = {
+        time(9, 30): time(9, 31),
+        time(13, 0): time(13, 1),
+    }
+    prices: list[float | None] = []
+    for point_text in intraday_path_times():
+        point_time = _parse_time(point_text)
+        if point_time in session_opens:
+            bar = bars_by_time.get(session_opens[point_time])
+            prices.append(_number(bar.get("open_price")) if bar else None)
+            continue
+        bar = bars_by_time.get(point_time)
+        prices.append(_number(bar.get("close_price")) if bar else None)
+    return prices
+
+
+def price_path_to_return_path(
+    prices: Sequence[object],
+    *,
+    previous_close: object,
+) -> list[float | None]:
+    """Convert point-in-time prices to percentage changes from D-1 close."""
+
+    baseline = _number(previous_close)
+    if baseline is None or baseline <= 0:
+        return []
+    return [
+        round((price / baseline - 1) * 100, 4)
+        if (price := _number(raw_price)) is not None and price > 0
+        else None
+        for raw_price in prices
+    ]
+
+
 def path_prefix_features(
     path: Sequence[object],
     signal_time: str,
@@ -250,6 +295,25 @@ def _parse_time(value: str) -> time:
         return time.fromisoformat(str(value)[:8])
     except ValueError as exc:
         raise ValueError(f"invalid intraday time: {value}") from exc
+
+
+def _bar_time(value: object) -> time | None:
+    if isinstance(value, datetime):
+        return value.time().replace(microsecond=0)
+    if isinstance(value, time):
+        return value.replace(microsecond=0)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).time().replace(
+            microsecond=0
+        )
+    except ValueError:
+        try:
+            return time.fromisoformat(text[:8]).replace(microsecond=0)
+        except ValueError:
+            return None
 
 
 def _date_value(value: object) -> date | None:

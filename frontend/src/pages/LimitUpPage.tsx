@@ -3,6 +3,8 @@ import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
   BarChart3,
+  Bell,
+  BellRing,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -10,6 +12,7 @@ import {
   Clock3,
   RefreshCw,
   ReceiptText,
+  Volume2,
 } from "lucide-react";
 import {
   CartesianGrid,
@@ -44,6 +47,7 @@ import { ErrorState } from "@/components/ErrorState";
 import { LoadingState } from "@/components/LoadingState";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { Button } from "@/components/ui/button";
+import { useToast } from "@/components/ui/toast";
 import {
   isNextSessionPlan,
   liveHeader,
@@ -62,6 +66,10 @@ import {
   liveTraceStatusLabel,
   sortLiveTraceItems,
 } from "@/features/limitUp/liveTrace";
+import {
+  useBuyAlerts,
+  type BuyAlertPermission,
+} from "@/features/limitUp/useBuyAlerts";
 import { useChartColors } from "@/lib/chart-theme";
 import { cn } from "@/lib/utils";
 
@@ -74,6 +82,7 @@ const PRIMARY_VIEWS: Array<{ value: PrimaryView; label: string; icon: typeof Act
 ];
 
 export function LimitUpPage() {
+  const toast = useToast();
   const [view, setView] = useState<PrimaryView>("live");
   const [selectedDate, setSelectedDate] = useState("");
   const [selectedTraceDate, setSelectedTraceDate] = useState("");
@@ -138,6 +147,7 @@ export function LimitUpPage() {
     staleTime: Infinity,
     refetchOnWindowFocus: false,
   });
+  const buyAlerts = useBuyAlerts(liveQuery.data);
   useEffect(() => {
     const latest = datesQuery.data?.latest;
     if (!selectedDate && latest) setSelectedDate(latest);
@@ -161,6 +171,25 @@ export function LimitUpPage() {
     view === "ledger" ? ledgerQuery.error : null,
     view === "backtest" ? backtestQuery.error : null,
   );
+  const toggleBuyAlerts = async () => {
+    const enabling = !buyAlerts.enabled;
+    const permission = await buyAlerts.toggle();
+    toast({
+      title: enabling ? "买点提醒已开启" : "买点提醒已关闭",
+      description: enabling
+        ? buyAlertPermissionDescription(permission)
+        : "不会再播放声音或发送桌面通知",
+      variant: enabling ? "success" : "default",
+    });
+  };
+  const testBuyAlerts = async () => {
+    const permission = await buyAlerts.test();
+    toast({
+      title: "测试提醒已触发",
+      description: buyAlertPermissionDescription(permission),
+      variant: "success",
+    });
+  };
 
   return (
     <div className="min-w-0">
@@ -178,6 +207,37 @@ export function LimitUpPage() {
               next={nextDate}
               onChange={setSelectedDate}
             />
+          )}
+          {view === "live" && (
+            <>
+              <Button
+                type="button"
+                size="icon"
+                variant="outline"
+                className={cn("h-9 w-9", buyAlerts.enabled && "border-rise/50 text-rise")}
+                title={buyAlerts.enabled
+                  ? `关闭买点提醒 · ${buyAlertPermissionDescription(buyAlerts.permission)}`
+                  : "开启买点声音和桌面通知"}
+                aria-label={buyAlerts.enabled ? "关闭买点提醒" : "开启买点提醒"}
+                aria-pressed={buyAlerts.enabled}
+                onClick={() => void toggleBuyAlerts()}
+              >
+                {buyAlerts.enabled ? <BellRing size={15} /> : <Bell size={15} />}
+              </Button>
+              {buyAlerts.enabled && (
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="outline"
+                  className="h-9 w-9"
+                  title="测试买点声音和桌面通知"
+                  aria-label="测试买点提醒"
+                  onClick={() => void testBuyAlerts()}
+                >
+                  <Volume2 size={15} />
+                </Button>
+              )}
+            </>
           )}
           {view === "live" && (
             <Button
@@ -329,8 +389,10 @@ function LiveView({
   const planMode = isNextSessionPlan(snapshot);
   const header = liveHeader(snapshot);
   const plan = snapshot.recommendations.plan ?? snapshot.data_quality.plan;
-  const strictPortfolioCount = snapshot.recommendations.portfolio?.length ?? Math.min(signals.length, 2);
-  const watchlistCount = snapshot.recommendations.watchlist?.length ?? 0;
+  const buySignalCount = signals.filter(
+    (signal) => signal.signal_state === "trigger_ready" || signal.execution_state === "actionable",
+  ).length;
+  const observationCount = Math.max(signals.length - buySignalCount, 0);
   const lunchPaused = snapshot.session_stage === "lunch";
   const waitingForRepair = gate.repair_state === "pending_repair";
   const repairRevoked = gate.repair_state === "repair_revoked";
@@ -380,8 +442,8 @@ function LiveView({
           </span>
         )}
         <span className="text-muted-foreground">
-          {planMode ? "提前观察" : "可买组合"} {strictPortfolioCount} / 2
-          {!planMode && strictPortfolioCount === 0 && watchlistCount > 0 ? ` · 雷达候选 ${watchlistCount}` : ""}
+          {planMode ? `提前观察 ${signals.length}` : `买点 ${buySignalCount} / 2`}
+          {!planMode && observationCount > 0 ? ` · 可转买观察 ${observationCount}` : ""}
         </span>
         <span className="ml-auto text-muted-foreground">
           封板 {snapshot.market_context.sealed_count ?? 0} · 炸板 {snapshot.market_context.failed_count ?? 0} · {snapshot.source}
@@ -402,7 +464,7 @@ function LiveView({
         <EmptyRow text={
           planMode
             ? "当前没有入选次交易时段的综合首板观察候选"
-            : "综合首板暂无合格买点，保持现金"
+            : "暂无可转买观察，保持现金；全部雷达结果见当日轨迹"
         } />
       )}
       {tracePanel}
@@ -475,9 +537,15 @@ function LiveSignalRow({ signal, stale, paused }: { signal: LimitUpLiveSignal; s
         </div>
         <div>
           <div className={cn("text-sm font-semibold", presentationToneClass(state.tone))}>{state.label}</div>
+          <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 text-xs tabular-nums">
+            <span className={cn("font-semibold", amountTone(signal.change_pct))}>
+              现涨 {formatSignedPct(signal.change_pct)}
+            </span>
+            <span className="text-foreground">现价 {formatPrice(signal.last_price)}</span>
+            <span className="text-muted-foreground">距板 {formatPct(signal.distance_to_limit_pct)}</span>
+          </div>
           <div className="mt-0.5 text-xs text-muted-foreground">
-            {entryKindLabel(signal.entry_kind)} · {formatPrice(signal.trigger_price)}
-            {signal.distance_to_limit_pct != null ? ` · 距板 ${formatPct(signal.distance_to_limit_pct)}` : ""}
+            {entryKindLabel(signal.entry_kind)} · 触发价 {formatPrice(signal.trigger_price)}
             {signal.board_lane === "two_to_three" ? ` · ${twoToThreeQualityLabel(signal.lane_quality_tier, signal.lane_risk_count)}` : ""}
             {signal.state_updated_at ? ` · ${formatTime(signal.state_updated_at)}` : ""}
           </div>
@@ -811,7 +879,7 @@ function blockerLabel(value: string): string {
     high_board_requires_l2: "高板盘中接力缺少 L2 队列证据",
     limit_up_gene_missing: "半年内缺少涨停基因",
     first_board_touch_gene_weak: "半年触板不足 6 次",
-    financial_report_unavailable: "缺少信号日前已披露财报",
+    financial_report_unavailable: "本地财报数据未覆盖",
     first_board_profit_growth_weak: "点时净利润同比低于 10%",
     first_board_repair_setup_missing: "D-1 分歧修复条件未成立",
     low_position_missing: "不属于低位或充分回调后的首次涨停",
@@ -990,14 +1058,12 @@ function BacktestView({ report, loading, fetching, start, end, minimumDate, maxi
 
 function RobustnessStrip({ report }: { report: LimitUpLaneBacktest }) {
   const doubleCost = report.stress_tests?.double_cost;
-  const failedOnly = report.stress_tests?.failed_board_only_fill;
   const sizing = report.position_sizing_audit;
-  if (!doubleCost && !failedOnly && !sizing) return null;
+  if (!doubleCost && !sizing) return null;
   return (
     <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b bg-muted/20 px-3 py-2 text-xs sm:px-4">
       <span className="font-medium text-foreground">压力测试</span>
       {doubleCost && <span className={amountTone(doubleCost.total_return_pct)}>双倍成本 {formatPct(doubleCost.total_return_pct)}</span>}
-      {failedOnly && <span className={amountTone(failedOnly.total_return_pct)}>只成交炸板 {formatPct(failedOnly.total_return_pct)}</span>}
       {sizing && (
         <span className="text-muted-foreground">
           开发期选择 {sizing.selected_max_positions} 仓 · 单仓回撤 {formatPct(sizing.development_variants["1"]?.max_drawdown_pct)} · 后段只验证
@@ -1154,12 +1220,13 @@ function phaseLabel(value?: string) { return ({ warmup: "预热期", earlier_his
 function d1OutcomeLabel(value: string) { return ({ continuation_limit_up: "D+1 连板", next_limit_up_after_failed_board: "D+1 涨停", d1_premium: "D+1 有溢价", direct_breakdown: "D+1 直接砸", no_premium: "D+1 无溢价", awaiting_d1_bar: "待 D+1" } as Record<string, string>)[value] ?? value; }
 function boardStatusLabel(value: string) { return ({ sealed: "封住", failed: "触板后炸板", no_limit: "未触板" } as Record<string, string>)[value] ?? value; }
 function exitReasonLabel(value: string) { return ({ dynamic_auction_exit: "动态竞价兑现", dynamic_tail_exit: "动态尾盘退出", planned_open: "开盘退出", planned_close: "收盘退出", planned_1430: "14:30退出", emergency_close: "开盘未成后收盘退出", retry_open: "延期至开盘退出", retry_close: "延期至收盘退出" } as Record<string, string>)[value] ?? value; }
-function setupTagLabel(value: string) { return ({ sandwich_board: "夹板", return_board: "回马板", weak_to_strong_breakout: "弱转强突破", dragon_first_negative_relay: "龙首阴接力", dragon_weak_to_strong: "龙头弱转强", anti_nuclear_board: "反核板" } as Record<string, string>)[value] ?? value; }
+function setupTagLabel(value: string) { return ({ weak_market_theme_attack: "弱市题材进攻", sandwich_board: "夹板", return_board: "回马板", weak_to_strong_breakout: "弱转强突破", dragon_first_negative_relay: "龙首阴接力", dragon_weak_to_strong: "龙头弱转强", anti_nuclear_board: "反核板" } as Record<string, string>)[value] ?? value; }
 function skipReasonLabel(value: string) { return ({ position_limit: "持仓已满", insufficient_cash: "现金不足", below_one_lot: "目标仓位不足一手", duplicate_position: "已有同股持仓", invalid_entry_price: "买入价无效" } as Record<string, string>)[value] ?? value; }
 function twoToThreeQualityLabel(tier?: "A" | "B" | null, riskCount?: number | null) { const quality = tier ?? "B"; const risks = riskCount ?? 0; return `${quality}级${risks > 0 ? ` · 风险${risks}` : ""}`; }
 function twoToThreeRiskTitle(flags?: string[]) { return (flags ?? []).map((flag) => ({ auction_gap_outside_core: "竞价不在2%-5%核心区", prior_turnover_outside_core: "前板换手不在10%-20%核心区", prior_amount_ratio_outside_core: "前板量能比不在1.2-2", financial_snapshot_missing: "财报快照缺失", prior_low_below_zero: "前板最低价翻绿或缺失", prior_market_failed_rate_high: "前日炸板率偏高或缺失" } as Record<string, string>)[flag] ?? flag).join("；"); }
 function factorLabel(value: string) {
   return ({
+    weak_market_theme_attack_setup: "强题材龙一/龙二承接",
     half_year_limit_up_gene: "半年有涨停",
     half_year_strong_touch_gene: "半年触板至少6次",
     low_position_or_cooled_pullback: "低位/充分回调",
@@ -1186,6 +1253,7 @@ function liveFactorSummary(signal: LimitUpLiveSignal) {
   const factors = signal.lane_favorable_factors ?? [];
   const priority = signal.board_lane === "first_board"
     ? [
+      "weak_market_theme_attack_setup",
       "half_year_strong_touch_gene",
       "point_in_time_profit_growth",
       "prior_divergence_repair_setup",
@@ -1197,6 +1265,7 @@ function liveFactorSummary(signal: LimitUpLiveSignal) {
 }
 function gateStateLabel(value?: boolean | null) { return value === true ? "通过" : value === false ? "未通过" : "待数据"; }
 function formatPct(value?: number | null) { return value == null || !Number.isFinite(value) ? "--" : `${value.toFixed(2)}%`; }
+function formatSignedPct(value?: number | null) { return value == null || !Number.isFinite(value) ? "--" : `${value > 0 ? "+" : ""}${value.toFixed(2)}%`; }
 function formatNumber(value?: number | null, digits = 2) { return value == null || !Number.isFinite(value) ? "--" : value.toFixed(digits); }
 function formatPrice(value?: number | null) { return value == null || !Number.isFinite(value) ? "--" : `¥${value.toFixed(2)}`; }
 function formatCurrency(value?: number | null) { if (value == null || !Number.isFinite(value)) return "--"; const sign = value < 0 ? "-" : ""; return `${sign}¥${Math.abs(value).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`; }
@@ -1204,6 +1273,7 @@ function formatAmount(value?: number | null) { if (value == null || !Number.isFi
 function formatTime(value: string) { try { return new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(value)); } catch { return value.slice(11, 19); } }
 function formatAge(seconds: number) { return seconds < 60 ? `${seconds}秒` : `${Math.floor(seconds / 60)}分${seconds % 60}秒`; }
 function amountTone(value?: number | null) { return value == null || !Number.isFinite(value) ? "text-muted-foreground" : value >= 0 ? "text-rise" : "text-fall"; }
+function buyAlertPermissionDescription(permission: BuyAlertPermission) { return ({ granted: "声音和桌面通知均已启用", denied: "声音已启用；浏览器已拒绝桌面通知", default: "声音已启用；桌面通知尚未授权", unsupported: "声音已启用；当前浏览器不支持桌面通知" } as Record<BuyAlertPermission, string>)[permission]; }
 function rateTone(value?: number | null) { return value == null ? "text-muted-foreground" : value >= 50 ? "text-rise" : "text-fall"; }
 function tboxTone(value?: number | null) { return value == null ? "text-muted-foreground" : value >= 60 ? "text-rise" : value >= 40 ? "text-amber-700 dark:text-amber-300" : "text-fall"; }
 function firstError(...values: unknown[]) { const error = values.find(Boolean); return error instanceof Error ? error.message : error ? "打板数据加载失败" : null; }

@@ -1012,6 +1012,7 @@ def test_runtime_market_client_uses_akshare_public_methods() -> None:
 def test_runtime_market_client_prefers_local_synced_bars(monkeypatch) -> None:
     local_payload = {"items": [{"trade_date": "2026-06-05", "close": 10}], "source": "postgresql.stock_daily_bars"}
     monkeypatch.setattr("alphaagent.market.providers._local_stock_bars", lambda *args, **kwargs: local_payload)
+    monkeypatch.setattr("alphaagent.market.providers._is_intraday_china", lambda: False)
 
     client = RealMarketDataClient()
 

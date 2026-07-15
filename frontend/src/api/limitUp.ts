@@ -74,6 +74,7 @@ export interface LimitUpLiveSignal {
   market_dragon_rank?: number | null;
   board_level: number;
   board_lane?: BoardLaneKey;
+  first_board_route?: "divergence_repair" | "weak_market_theme_attack" | string | null;
   lane_favorable_factors?: string[];
   lane_blocker_reasons?: string[];
   lane_quality_tier?: "A" | "B" | null;
@@ -88,6 +89,8 @@ export interface LimitUpLiveSignal {
   action: LimitUpLiveAction;
   entry_kind: string;
   trigger_price?: number | null;
+  last_price?: number | null;
+  change_pct?: number | null;
   reason: string;
   cancel_condition: string;
   execution_state?: "watch" | "waiting" | "actionable" | "cancelled" | string;
@@ -480,7 +483,6 @@ export interface LimitUpLaneBacktest {
   };
   stress_tests?: {
     double_cost: LimitUpEntrySummary;
-    failed_board_only_fill: LimitUpEntrySummary;
   };
   position_sizing_audit?: {
     selected_max_positions: number;

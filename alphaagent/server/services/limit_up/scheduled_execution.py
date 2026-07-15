@@ -7,7 +7,7 @@ from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-SCHEDULED_EXECUTION_VERSION = "limit-up-scheduled-v2"
+SCHEDULED_EXECUTION_VERSION = "limit-up-scheduled-v3"
 MAX_POSITIONS = 2
 TARGET_POSITION_PCT = 50.0
 MAX_SNAPSHOT_AGE_SECONDS = 20
@@ -15,7 +15,7 @@ EXIT_TIME = "14:30:00"
 ENTRY_WINDOWS = (("10:00:00", "11:30:00"), ("13:00:00", "14:30:00"))
 RESEARCH_SAMPLE_START = date(2026, 1, 16)
 VALIDATION_START = date(2026, 4, 14)
-RULE_FREEZE_DATE = date(2026, 7, 14)
+RULE_FREEZE_DATE = date(2026, 7, 15)
 
 
 def is_entry_time(value: object) -> bool:

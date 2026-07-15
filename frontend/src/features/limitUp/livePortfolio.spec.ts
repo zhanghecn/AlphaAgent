@@ -65,6 +65,30 @@ describe("live limit-up portfolio presentation", () => {
     expect(liveSignalsForScope(snapshot({ portfolio: [], watchlist }), "portfolio")).toEqual(watchlist);
   });
 
+  it("shows only watchlist rows that can still transition to buy", () => {
+    const watchlist = [
+      { ...signal("600011.SSE", 1, "observe"), signal_state: "rejected" },
+      { ...signal("600012.SSE", 1, "observe"), signal_state: "missed" },
+      { ...signal("600013.SSE", 1, "observe"), signal_state: "invalidated" },
+      {
+        ...signal("600014.SSE", 1, "observe"),
+        signal_state: "approaching_trigger",
+        blocking_scope: "structural",
+      },
+      {
+        ...signal("600015.SSE", 1, "observe"),
+        signal_state: "approaching_trigger",
+        blocking_scope: "dynamic",
+      },
+    ];
+
+    expect(
+      liveSignalsForScope(snapshot({ portfolio: [], watchlist }), "portfolio").map(
+        (row) => row.vt_symbol,
+      ),
+    ).toEqual(["600015.SSE"]);
+  });
+
   it("keeps observations behind executable portfolio signals", () => {
     const portfolio = [signal("600010.SSE", 1, "buy_now")];
     const watchlist = [
@@ -100,7 +124,12 @@ describe("live limit-up portfolio presentation", () => {
   it("falls back to deduplicated executable lanes for old responses", () => {
     const old = snapshot({
       lanes: {
-        now: [signal("600001.SSE", 1, "observe"), signal("600001.SSE", 1, "buy_now")],
+        now: [
+          signal("600001.SSE", 1, "observe"),
+          signal("600001.SSE", 1, "buy_now"),
+          { ...signal("600004.SSE", 1, "observe"), signal_state: "rejected" },
+          { ...signal("600005.SSE", 1, "observe"), signal_state: "missed" },
+        ],
         tail: [],
         next_auction: [signal("600002.SSE", 3, "next_auction"), signal("600003.SSE", 2, "next_auction")],
       },

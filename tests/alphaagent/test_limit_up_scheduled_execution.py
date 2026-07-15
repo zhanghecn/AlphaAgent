@@ -9,6 +9,11 @@ from alphaagent.server.services.limit_up import scheduled_execution
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
+def test_additive_concept_execution_contract_is_frozen() -> None:
+    assert scheduled_execution.SCHEDULED_EXECUTION_VERSION == "limit-up-scheduled-v3"
+    assert scheduled_execution.RULE_FREEZE_DATE == date(2026, 7, 15)
+
+
 def _candidate(
     vt_symbol: str,
     buy_time: str,
@@ -132,6 +137,41 @@ def test_extract_scheduled_orders_filters_lane_decision_window_and_duplicates() 
     assert [(row["vt_symbol"], row["buy_time"]) for row in orders] == [
         ("600001.SSE", "10:05:00"),
         ("600005.SSE", "13:20:00"),
+    ]
+
+
+def test_extract_scheduled_orders_ignores_final_board_outcome() -> None:
+    candidates = [
+        {
+            **_candidate("600001.SSE", "10:05:00", rank_score=61),
+            "outcome": {"touched": True, "sealed": True},
+        },
+        {
+            **_candidate("600002.SSE", "10:08:00", rank_score=60),
+            "outcome": {"touched": True, "sealed": False},
+        },
+    ]
+    flipped = [
+        {
+            **candidate,
+            "outcome": {
+                "touched": not bool(candidate["outcome"]["touched"]),
+                "sealed": not bool(candidate["outcome"]["sealed"]),
+            },
+        }
+        for candidate in candidates
+    ]
+
+    baseline = scheduled_execution.extract_scheduled_orders(
+        [_history_day(candidate_pool=candidates)]
+    )
+    changed = scheduled_execution.extract_scheduled_orders(
+        [_history_day(candidate_pool=flipped)]
+    )
+
+    selection_fields = ("vt_symbol", "buy_time", "rank_score", "pool_rank")
+    assert [tuple(row[field] for field in selection_fields) for row in baseline] == [
+        tuple(row[field] for field in selection_fields) for row in changed
     ]
 
 

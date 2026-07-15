@@ -32,6 +32,7 @@ ACTIVE_TIMING_STATES = {
     "SILVER_FADING",
 }
 _FACTOR_LABELS = {
+    "weak_market_theme_attack_setup": "强题材龙一/龙二承接",
     "sector_core": "板块核心",
     "prior_board_changed_hands_and_resealed": "前板换手回封",
     "prior_board_full_turnover_reseal": "前板充分换手回封",
@@ -41,6 +42,7 @@ _FACTOR_LABELS = {
     "high_board_weak_to_strong": "高板弱转强",
 }
 _SETUP_LABELS = {
+    "weak_market_theme_attack": "弱市题材进攻",
     "sandwich_board": "夹板",
     "return_board": "回马板",
     "weak_to_strong_breakout": "弱转强突破",
@@ -443,11 +445,7 @@ def _now_signal(
         require_expansion=not auction_stage,
         entry_kind=evaluated_entry_kind,
     )
-    execution_reasons = [
-        str(check.get("reason") or check.get("label") or "执行条件未满足")
-        for check in execution_checks
-        if check.get("status") in {"pending", "failed"}
-    ]
+    execution_reasons = _blocking_execution_reasons(execution_checks)
     board_allowed = board_level <= 2 or (
         auction_stage and candidate.get("lane_decision") == "eligible"
     )
@@ -564,11 +562,7 @@ def _tail_signal(
         require_expansion=True,
         entry_kind="tail_seal",
     )
-    execution_reasons = [
-        str(check.get("reason") or check.get("label") or "执行条件未满足")
-        for check in execution_checks
-        if check.get("status") in {"pending", "failed"}
-    ]
+    execution_reasons = _blocking_execution_reasons(execution_checks)
     eligible = (
         bool(market_gate.get("passed"))
         and board_level <= 2
@@ -650,11 +644,7 @@ def _auction_plan(
         require_expansion=True,
         entry_kind="next_auction",
     )
-    execution_reasons = [
-        str(check.get("reason") or check.get("label") or "执行条件未满足")
-        for check in execution_checks
-        if check.get("status") in {"pending", "failed"}
-    ]
+    execution_reasons = _blocking_execution_reasons(execution_checks)
     if (
         bool(market_gate.get("passed"))
         and board_level <= 2
@@ -751,6 +741,7 @@ def _signal(
         or _board_lane(_integer(candidate.get("board_level"), 1)),
         "lane_decision": candidate.get("lane_decision"),
         "lane_setup_type": candidate.get("lane_setup_type"),
+        "first_board_route": candidate.get("first_board_route"),
         "setup_tags": list(candidate.get("setup_tags") or []),
         "setup_confidence": candidate.get("setup_confidence"),
         "lane_blockers": list(candidate.get("lane_blockers") or []),
@@ -768,6 +759,8 @@ def _signal(
         "leadership_score": _number(candidate.get("leadership_score")),
         "first_limit_time": candidate.get("first_limit_time"),
         "last_limit_time": candidate.get("last_limit_time"),
+        "last_price": _number(candidate.get("last_price")),
+        "change_pct": _number(candidate.get("change_pct")),
         "session_low_change_pct": _number(candidate.get("session_low_change_pct")),
         "distance_to_limit_pct": _number(candidate.get("distance_to_limit_pct")),
         "sector_touch_count": _integer(candidate.get("sector_touch_count"), 0),
@@ -797,6 +790,7 @@ def _signal(
         "concept_snapshot_age_seconds": _number(
             candidate.get("concept_snapshot_age_seconds")
         ),
+        "sector_route": _selected_sector_route(execution_checks),
         "turnover_rate": _number(candidate.get("turnover_rate")),
         "volume_ratio": _number(candidate.get("volume_ratio")),
         "seal_amount": _number(candidate.get("seal_amount")),
@@ -924,10 +918,16 @@ def _selection_reasons(
     candidate: Mapping[str, object],
     fallback_reason: str,
 ) -> list[str]:
+    raw_factors = [str(value) for value in candidate.get("lane_favorable_factors") or []]
+    priority = [
+        value
+        for value in ("weak_market_theme_attack_setup",)
+        if value in raw_factors
+    ]
     factors = [
-        _FACTOR_LABELS.get(str(value), str(value))
-        for value in candidate.get("lane_favorable_factors") or []
-    ][:4]
+        _FACTOR_LABELS.get(value, value)
+        for value in [*priority, *(value for value in raw_factors if value not in priority)][:4]
+    ]
     return factors or [fallback_reason or "等待交易条件确认"]
 
 
@@ -1046,6 +1046,12 @@ def _auction_entry_reason(candidate: Mapping[str, object]) -> str:
 def _sweep_entry_reason(candidate: Mapping[str, object]) -> str:
     support_score = _number(candidate.get("lane_support_score"))
     quality_score = _number(candidate.get("lane_entry_quality_score"))
+    if "weak_market_theme_attack" in set(candidate.get("setup_tags") or []):
+        concept_name = str(candidate.get("concept_name") or candidate.get("sector_name") or "强题材")
+        leader_rank = _integer(candidate.get("concept_leader_rank"), 0)
+        leader_text = f"龙{leader_rank}" if leader_rank in {1, 2} else "前排"
+        support_text = f"，承接{support_score:.0f}分" if support_score is not None else ""
+        return f"弱市题材进攻，{concept_name}{leader_text}{support_text}"
     if (
         candidate.get("board_lane") == "first_board"
         and support_score is not None
@@ -1080,7 +1086,7 @@ def _lane_execution_reason_groups(
         "high_board_requires_l2": "高板盘中接力缺少L2队列证据",
         "limit_up_gene_missing": "半年内缺少涨停基因",
         "first_board_touch_gene_weak": "半年触板不足6次",
-        "financial_report_unavailable": "缺少信号日前已披露财报",
+        "financial_report_unavailable": "本地财报数据未覆盖",
         "first_board_profit_growth_weak": "点时净利润同比低于10%",
         "first_board_repair_setup_missing": "D-1炸板率未达到分歧修复观察条件",
         "low_position_missing": "不属于低位或充分回调后的首次涨停",
@@ -1137,14 +1143,23 @@ def _candidate_execution_reasons(
     require_expansion: bool,
     entry_kind: str = "base",
 ) -> list[str]:
-    return [
-        str(check.get("reason") or check.get("label") or "执行条件未满足")
-        for check in _candidate_execution_checks(
+    return _blocking_execution_reasons(
+        _candidate_execution_checks(
             candidate,
             require_expansion=require_expansion,
             entry_kind=entry_kind,
         )
-        if check.get("status") in {"pending", "failed"}
+    )
+
+
+def _blocking_execution_reasons(
+    checks: Sequence[Mapping[str, object]],
+) -> list[str]:
+    return [
+        str(check.get("reason") or check.get("label") or "执行条件未满足")
+        for check in checks
+        if check.get("blocking", True) is not False
+        and check.get("status") in {"pending", "failed"}
     ]
 
 
@@ -1156,8 +1171,6 @@ def _candidate_execution_checks(
 ) -> list[dict[str, object]]:
     checks: list[dict[str, object]] = []
     sweep = entry_kind == "sweep"
-    uses_realtime_concept = "concept_state" in candidate
-
     if sweep:
         distance = _number(candidate.get("distance_to_limit_pct"))
         distance_passed = bool(
@@ -1178,60 +1191,42 @@ def _candidate_execution_checks(
             }
         )
 
-    sector_flow = _number(candidate.get("sector_main_net_inflow"))
     stock_flow = _number(candidate.get("stock_main_net_inflow"))
-    sector_flow_ratio = _number(candidate.get("sector_main_net_inflow_ratio"))
     stock_flow_ratio = _number(candidate.get("stock_main_net_inflow_ratio"))
     turnover_rate = _number(candidate.get("turnover_rate"))
     seal_retention = _number(candidate.get("seal_amount_retention_ratio"))
     seal_change = _number(candidate.get("seal_amount_change_pct"))
-    if uses_realtime_concept:
-        _append_realtime_concept_checks(checks, candidate)
-    else:
-        heat_required = SWEEP_MIN_SECTOR_HEAT if sweep else BASE_MIN_SECTOR_HEAT
-        touch_required = (
-            SWEEP_MIN_SECTOR_TOUCH_COUNT
-            if sweep
-            else BASE_MIN_SECTOR_TOUCH_COUNT
-        )
-        sector_heat = _number(candidate.get("sector_heat"))
-        heat_passed = sector_heat is not None and sector_heat >= heat_required
-        checks.append(
-            {
-                "code": "sector_heat",
-                "label": "板块热度",
-                "status": "passed" if heat_passed else "pending",
-                "observed": None if sector_heat is None else f"{sector_heat:.2f}",
-                "required": f">={heat_required:g}",
-                "reason": (
-                    f"板块热度缺失（要求{heat_required:g}）"
-                    if sector_heat is None
-                    else f"板块热度{sector_heat:.1f}/{heat_required:g}"
-                ),
-            }
-        )
-        if require_expansion:
-            touch_count = _integer(candidate.get("sector_touch_count"), 0)
-            checks.append(
-                {
-                    "code": "sector_expansion",
-                    "label": "板块扩散",
-                    "status": "passed" if touch_count >= touch_required else "pending",
-                    "observed": f"{touch_count}只",
-                    "required": f">={touch_required}只",
-                    "reason": f"板块触板{touch_count}/{touch_required}只",
-                }
-            )
-    checks.append(
-        {
-            "code": "sector_flow",
-            "label": "板块资金",
-            "status": _flow_check_status(sector_flow, sector_flow_ratio),
-            "observed": sector_flow,
-            "required": "严重净流出时否决",
-            "reason": _flow_check_reason("板块", sector_flow, sector_flow_ratio),
-        }
+    heat_required = SWEEP_MIN_SECTOR_HEAT if sweep else BASE_MIN_SECTOR_HEAT
+    touch_required = (
+        SWEEP_MIN_SECTOR_TOUCH_COUNT
+        if sweep
+        else BASE_MIN_SECTOR_TOUCH_COUNT
     )
+    lane = str(
+        candidate.get("board_lane")
+        or _board_lane(_integer(candidate.get("board_level"), 1))
+    )
+    uses_realtime_concept = "concept_state" in candidate
+    if lane == "first_board":
+        _append_additive_sector_route_checks(
+            checks,
+            candidate,
+            heat_required=heat_required,
+            touch_required=touch_required,
+            require_expansion=require_expansion,
+        )
+    elif uses_realtime_concept:
+        _append_realtime_concept_checks(checks, candidate)
+        checks.append(_sector_flow_check(candidate))
+    else:
+        checks.extend(
+            _legacy_sector_route_checks(
+                candidate,
+                heat_required=heat_required,
+                touch_required=touch_required,
+                require_expansion=require_expansion,
+            )
+        )
     checks.append(
         {
             "code": "stock_flow",
@@ -1273,6 +1268,158 @@ def _candidate_execution_checks(
             }
         )
     return checks
+
+
+def _append_additive_sector_route_checks(
+    checks: list[dict[str, object]],
+    candidate: Mapping[str, object],
+    *,
+    heat_required: float,
+    touch_required: int,
+    require_expansion: bool,
+) -> tuple[bool, bool]:
+    baseline_checks = _legacy_sector_route_checks(
+        candidate,
+        heat_required=heat_required,
+        touch_required=touch_required,
+        require_expansion=require_expansion,
+    )
+    concept_checks = _realtime_concept_route_checks(candidate)
+    baseline_passed = _route_passed(baseline_checks)
+    concept_passed = _route_passed(concept_checks)
+    checks.extend(_diagnostic_checks(baseline_checks))
+    checks.extend(_diagnostic_checks(concept_checks))
+
+    if baseline_passed:
+        observed = "行业基线通过"
+    elif concept_passed:
+        observed = "概念增量通过"
+    else:
+        observed = "两条路径均未通过"
+    failed_checks = [
+        check
+        for check in [*baseline_checks, *concept_checks]
+        if check.get("status") not in {"passed", "informational"}
+    ]
+    checks.append(
+        {
+            "code": "sector_route",
+            "label": "板块路径",
+            "status": (
+                "passed"
+                if baseline_passed or concept_passed
+                else "failed"
+                if any(check.get("status") == "failed" for check in failed_checks)
+                else "pending"
+            ),
+            "observed": observed,
+            "required": "行业基线或概念增量任一路径通过",
+            "reason": "；".join(
+                str(check.get("reason") or check.get("label") or "板块条件未满足")
+                for check in failed_checks[:4]
+            )
+            or "板块路径未通过",
+            "blocking": True,
+        }
+    )
+    return baseline_passed, concept_passed
+
+
+def _legacy_sector_route_checks(
+    candidate: Mapping[str, object],
+    *,
+    heat_required: float,
+    touch_required: int,
+    require_expansion: bool,
+) -> list[dict[str, object]]:
+    sector_heat = _number(candidate.get("sector_heat"))
+    heat_passed = sector_heat is not None and sector_heat >= heat_required
+    route_checks: list[dict[str, object]] = [
+        {
+            "code": "sector_heat",
+            "label": "板块热度",
+            "status": "passed" if heat_passed else "pending",
+            "observed": None if sector_heat is None else f"{sector_heat:.2f}",
+            "required": f">={heat_required:g}",
+            "reason": (
+                f"板块热度缺失（要求{heat_required:g}）"
+                if sector_heat is None
+                else f"板块热度{sector_heat:.1f}/{heat_required:g}"
+            ),
+        }
+    ]
+    if require_expansion:
+        touch_count = _integer(candidate.get("sector_touch_count"), 0)
+        route_checks.append(
+            {
+                "code": "sector_expansion",
+                "label": "板块扩散",
+                "status": "passed" if touch_count >= touch_required else "pending",
+                "observed": f"{touch_count}只",
+                "required": f">={touch_required}只",
+                "reason": f"板块触板{touch_count}/{touch_required}只",
+            }
+        )
+    route_checks.append(_sector_flow_check(candidate))
+    return route_checks
+
+
+def _sector_flow_check(candidate: Mapping[str, object]) -> dict[str, object]:
+    sector_flow = _number(candidate.get("sector_main_net_inflow"))
+    sector_flow_ratio = _number(candidate.get("sector_main_net_inflow_ratio"))
+    return {
+        "code": "sector_flow",
+        "label": "板块资金",
+        "status": _flow_check_status(sector_flow, sector_flow_ratio),
+        "observed": sector_flow,
+        "required": "严重净流出时否决",
+        "reason": _flow_check_reason("板块", sector_flow, sector_flow_ratio),
+    }
+
+
+def _realtime_concept_route_checks(
+    candidate: Mapping[str, object],
+) -> list[dict[str, object]]:
+    if "concept_state" not in candidate:
+        return []
+    route_checks: list[dict[str, object]] = []
+    _append_realtime_concept_checks(route_checks, candidate)
+    return route_checks
+
+
+def _route_passed(checks: Sequence[Mapping[str, object]]) -> bool:
+    return bool(checks) and all(
+        check.get("status") in {"passed", "informational"}
+        for check in checks
+    )
+
+
+def _diagnostic_checks(
+    checks: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    return [
+        {
+            **dict(check),
+            "diagnostic_status": check.get("status"),
+            "status": "informational",
+            "blocking": False,
+        }
+        for check in checks
+    ]
+
+
+def _selected_sector_route(
+    checks: Sequence[Mapping[str, object]],
+) -> str | None:
+    route = next(
+        (check for check in checks if check.get("code") == "sector_route"),
+        None,
+    )
+    observed = str(route.get("observed") or "") if route else ""
+    return {
+        "行业基线通过": "legacy_sector",
+        "概念增量通过": "concept_increment",
+    }.get(observed)
 
 
 def _append_realtime_concept_checks(

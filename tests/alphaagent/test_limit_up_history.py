@@ -12,6 +12,7 @@ from alphaagent.server.services.limit_up import history_engine
 from alphaagent.server.services.limit_up import factor_audit
 from alphaagent.server.services.limit_up import history_repository
 from alphaagent.server.services.limit_up import history_service
+from alphaagent.server.services.limit_up import versions
 
 
 def test_history_replay_schema_uses_date_and_version_primary_key() -> None:
@@ -24,8 +25,9 @@ def test_history_replay_schema_uses_date_and_version_primary_key() -> None:
     assert {"payload", "coverage", "source_mode"}.issubset(table.c.keys())
 
 
-def test_dynamic_exit_history_uses_v11_version() -> None:
-    assert history_engine.HISTORY_STRATEGY_VERSION == "limit-up-history-v11"
+def test_weak_market_attack_history_uses_v14_version() -> None:
+    assert history_engine.HISTORY_STRATEGY_VERSION == "limit-up-history-v14"
+    assert versions.LIVE_STRATEGY_VERSION == "limit-up-live-v4"
 
 
 def test_reliable_date_window_rejects_sparse_prefix() -> None:

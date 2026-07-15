@@ -874,6 +874,7 @@ def _attach_lane_decisions(
                 "board_lane": evaluated.get("lane"),
                 "lane_decision": evaluated.get("decision"),
                 "lane_setup_type": evaluated.get("setup_type"),
+                "first_board_route": evaluated.get("first_board_route"),
                 "setup_tags": list(evaluated.get("setup_tags") or []),
                 "setup_confidence": evaluated.get("setup_confidence"),
                 "lane_blockers": list(evaluated.get("blockers") or []),
@@ -1186,7 +1187,7 @@ def _build_live_watchlist(
                 not symbol
                 or symbol in observations
                 or str(signal.get("board_lane") or "") not in PORTFOLIO_EXECUTION_LANES
-                or signal.get("missed_preseal_entry") is True
+                or not _can_transition_to_live_buy(signal)
             ):
                 continue
             original_action = str(
@@ -1199,7 +1200,6 @@ def _build_live_watchlist(
                 if value
             )
             original_reason = "；".join(dict.fromkeys(reason_parts))
-            lane_blocked = str(signal.get("lane_decision") or "") == "blocked"
             near_limit = str(signal.get("state") or "") == "near_limit"
             current_signal_state = str(signal.get("signal_state") or "observing")
             observations[symbol] = {
@@ -1208,31 +1208,36 @@ def _build_live_watchlist(
                 "research_action": original_action,
                 "execution_state": "watch",
                 "signal_state": (
-                    "rejected"
-                    if lane_blocked
-                    else "concept_warming"
+                    "concept_warming"
                     if current_signal_state == "concept_warming"
+                    else "pending_auction"
+                    if current_signal_state == "pending_auction"
                     else "approaching_trigger"
                     if near_limit
                     else "observing"
                 ),
                 "entry_kind": "sweep" if near_limit else signal.get("entry_kind"),
                 "buy_instruction": (
-                    "板位硬门未通过，今日不买"
-                    if lane_blocked
-                    else "板块已预热，等待进入距涨停1%触发区"
+                    "板块已预热，等待进入距涨停1%触发区"
                     if current_signal_state == "concept_warming"
+                    else "等待竞价确认，满足竞价硬门后触发"
+                    if current_signal_state == "pending_auction"
                     else "距涨停不超过1%且市场、板块、资金和盘口条件保持通过时触发"
                 ),
-                "reason": (
-                    f"今日拒买：{original_reason}"
-                    if lane_blocked
-                    else f"等待触发：{original_reason}"
-                ),
+                "reason": f"等待触发：{original_reason}",
             }
     return sorted(observations.values(), key=_live_watchlist_sort_key)[
         :LIVE_WATCHLIST_LIMIT
     ]
+
+
+def _can_transition_to_live_buy(signal: Mapping[str, object]) -> bool:
+    signal_state = str(signal.get("signal_state") or "observing")
+    return (
+        str(signal.get("blocking_scope") or "") != "structural"
+        and signal_state not in {"rejected", "missed", "invalidated"}
+        and signal.get("missed_preseal_entry") is not True
+    )
 
 
 def _live_watchlist_sort_key(signal: Mapping[str, object]) -> tuple[object, ...]:

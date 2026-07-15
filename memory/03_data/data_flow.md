@@ -89,7 +89,7 @@ AlphaAgent 自研服务的股票日线同步不走 vn.py Datafeed，路径是：
 
 ## Minute Data
 
-`sync_stock_minute_bars` 是分钟线同步主入口。分钟线不再是历史策略研究默认依赖，主要用于实时/盘中辅助、旧严格分钟报告复核和未来实盘确认。
+`sync_stock_minute_bars` 是分钟线同步主入口。普通量化历史主流程不依赖分钟线；`/limit-up` 的首板点时账本在事件原始分时路径缺失时，会把已落库 1 分钟线作为盘中承接回退证据。
 
 模式：
 
@@ -101,7 +101,8 @@ AlphaAgent 自研服务的股票日线同步不走 vn.py Datafeed，路径是：
 
 约束：
 
-- 普通历史主流程不再依赖 14:30/分钟线。
+- 普通量化历史主流程不依赖 14:30/分钟线；`/limit-up` 回退只为缺少原始分时路径的事件批量取数，原始路径不得被替换。
+- `/limit-up` 的 09:30/13:00 网格点使用 09:31/13:01 首根 bar 开盘价，其余网格点使用对应分钟收盘价，再以 D-1 收盘转换涨跌幅；信号特征只读取信号时点及以前，至少 6 个有效点，否则继续拒绝。
 - 旧严格分钟缺口补数统一只支持 `1m` 快照；通用分钟 K 线导入可保留多周期供行情查看。
 - AkShare/东方财富公共分钟线可用于近端日期，但不能视为覆盖长历史严格回测缺口的数据源。
 - 当日分钟线增量如果本地已有当天部分 bar，不推进到下一交易日；仍刷新实时分钟窗口并用 upsert 去重，避免 14:30 后无法补齐 15:00 前后数据。
@@ -141,11 +142,11 @@ AlphaAgent 自研服务的股票日线同步不走 vn.py Datafeed，路径是：
    D-1 弱势只决定日内市场门从 `pending_repair` 开始；一次完整修复证据把它推进为 `repair_confirmed`，健康的零增量快照不会关门，封板少于 5 只、炸板率高于 35%、快照过期或日期错误才进入 `repair_revoked`。结构硬伤输出 `rejected`，市场/热度/扩散/资金/换手等可变化缺口输出 `observing / approaching_trigger`，未触发便封板输出 `missed`。
    同表仍复用 `next_session_preliminary / next_session_final` 保存内部盘后研究观察；产品不再执行旧的次日竞价接力计划。盘后、周末和盘前 `GET /live` 会在只读响应中附加固定执行日程：下一交易日 09:55 提醒，10:00-11:30 和 13:00-14:30 连续评估当日综合首板，D+1 14:30 卖出。已有盘后候选只作内部研究和数据采集，不进入产品两仓组合。
 8. 严格时点证据分别写入 `stock_sector_membership_snapshots`、`limit_up_concept_strength_snapshots`、`sector_fund_flow_snapshots` 和 `stock_auction_snapshots`。19:00 成员反向索引重建成功后才冻结当日完整版本，空来源不会再先清空上一版；D 日概念扫描只读取更早版本。概念强度表按分钟保存 Top30、包含 5% 雷达或进入预热/启动/退潮状态的概念，并保留 120 个交易日。每次“即时”板块资金同步都按分钟追加主力净流入、超大/大/中/小单、来源时间和涨跌家数，资金加速度可由相邻快照计算，扩散宽度直接使用当时上涨/下跌/平盘家数。09:26 竞价表保存开盘价、撮合量额、未匹配量和字段完整度；公共源没有未匹配量时只算部分证据，不能开放模拟。
-9. `limit_up_history_replays` 以 `(trade_date, strategy_version)` 保存逐日点时账本；当前 `limit-up-history-v11` 覆盖 `2024-01-15..2026-07-13` 共 601 个可靠交易日。每个交易日分别保存首板、一进二、二进三和高板的完整候选池、最终选择、D 日结果、D+1 结果、战法标签和内部动态退出研究。当前产品回测必须加载完整 `lane_portfolio.candidate_pool.first_board`，按 `buy_time` 推进，禁止用日终 `selected` 反选；旧板位验证和一进二消融仍可走 `selected` 的紧凑 JSONB 投影。D+1 14:30 价格由 `stock_minute_bars` 一次批量查询，缺失时明确标为 `daily_close_proxy`。`eod_finalize_2130` 只在最新完整日线日推进后串行全量重建。
+9. `limit_up_history_replays` 以 `(trade_date, strategy_version)` 保存逐日点时账本；当前 `limit-up-history-v14` 覆盖 `2024-01-15..2026-07-14` 共 602 个可靠交易日。每个交易日分别保存首板、一进二、二进三和高板的完整候选池、最终选择、D 日结果、D+1 结果、战法标签和内部动态退出研究。事件原始 `time_preview` 优先，缺失时才把 `stock_minute_bars` 批量降采样为 80 点价格路径并按 D-1 收盘换算，禁止用信号后的点改变当时特征。连续板位只由显式 `target_board` 和 `prior_streak` 决定，近 5 日非连续涨停只参与回马板等形态，不再自动改成一进二。首板规则在同一产品内保留 `divergence_repair`，并增加冻结的 `weak_market_theme_attack`：只软化触板基因偏弱、本地财报未覆盖和缺分歧修复三个阻断，仍要求至少 1 次涨停/3 次触板、低位或回调、10 点后、承接、板块热度和龙一/龙二；已披露弱利润和已知基本面风险继续否决。当前产品回测必须加载完整 `lane_portfolio.candidate_pool.first_board`，按 `buy_time` 推进，禁止用日终 `selected` 反选；旧板位验证和一进二消融仍可走 `selected` 的紧凑 JSONB 投影。D+1 14:30 价格由 `stock_minute_bars` 一次批量查询，缺失时明确标为 `daily_close_proxy`。`eod_finalize_2130` 只在最新完整日线日推进后串行全量重建。
 10. `limit-up-walk-forward-v5` 在普通买点研究中保持旧 Top5 兼容；传 `lane` 时消费对应 `board_candidate_pool`，首板模型允许仅因当前选择门失败的样本进入对照，不纳入其他风险硬门失败项。窗口按完整 600 日交易日历推进，首板特征包含信号前 15/30 分钟承接、回撤和攻击速度；触板事件池不再强拟合一类全真的成交标签，`fill_probability` 留空并由 Tick/L2 门禁独立控制。每条战法每日最多 1 只，单窗训练样本低于 300 时返回 `insufficient_training` 并空仓。
 11. `forward_validation.py` 只消费交易时段真实保存、`live_snapshot`、非 stale、采集日与交易日一致的快照；历史代理、周末和无效时段只进入排除统计。实时链路先做历史负期望否决，再把门禁前研究动作保存为 `research_action`，最后将未验证战法的用户动作 `action` 降为 `pass`。前向账本只读 `research_action` 并标记 `saved_research_action_not_executed`；普通严格动作回测仍只读 `action`，不能把研究观察冒充执行。老快照没有 `research_action` 时兼容回退到原 `action`。第一笔盘中动作不可被后续快照改写，明早竞价只取当日最后有效计划，D+1 使用明确交易日历闭合。
 12. `live_evidence.py` 为实时推荐和无严格快照的历史代理附加同路径成熟样本，只允许 `result_date < signal_date` 的闭合结果进入统计。样本不少于 60 笔且平均净收益非正、收缩胜率低于 40% 或硬亏损率不低于 20% 时，只否决 `buy_now / next_auction`，不以正样本直接证明可交易。证据同时生成透明的 `TBOX 0..100`：历史平滑胜率 35 分、平均 D+1 25 分、硬亏控制 20 分、触板封住率 10 分、样本可信度 10 分；缺失项不得分。证据查询失败时，历史代理保留原信号并写入 `data_quality`；实时快照必须 fail-closed，把 `buy_now / next_auction` 降为 `pass` 并显示“证据不可用，已禁止执行”。已经保存的严格历史快照仍原样返回，不能事后回填证据或改写动作。
-13. 产品实时组合和历史账户共用 `limit-up-scheduled-v2`：只执行综合首板、最多两只、每只目标 50%，在 `10:00-11:30 / 13:00-14:30` 连续评估，D+1 14:30 退出。实时仍先运行完整首板硬门和 TBOX/板块/资金排序；结构合格但动态门未齐的候选保留为观察，只有原始研究动作已触发才可由时钟放行，快照超过 20 秒取消买点。历史账户明确是缺少逐帧资金门的 `candidate_proxy_only`。完整 5% 雷达和两日轨迹保留候选变化并返回按股票去重的首板漏斗；一进二、二进三和高板不进入当前产品组合，底层研究数据不删除。
+13. 产品实时组合和历史账户共用 `limit-up-scheduled-v3`：只执行综合首板、最多两只、每只目标 50%，在 `10:00-11:30 / 13:00-14:30` 连续评估，D+1 14:30 退出。实时规则证据版本为 `limit-up-live-v4`，避免旧快照进入新路径前向账本。首板的板块门为“旧行业基线 OR 实时概念增量”；概念路径要求有效全市场帧、`launch`、至少两只涨超 5% 和概念龙 Top3，通过后旧单一行业标签不再否决，但市场、结构、距板、换手和个股风险硬门仍保留。弱市题材进攻实时使用当时情绪、概念强度和概念龙位，不读取收盘封板或 D+1 结果。结构合格但动态门未齐的候选保留为观察，只有原始研究动作已触发才可由时钟放行，快照超过 20 秒取消买点。历史账户明确是缺少逐帧资金门的 `candidate_proxy_only`。完整 5% 雷达和两日轨迹保留候选变化并返回按股票去重的首板漏斗；一进二、二进三和高板不进入当前产品组合，底层研究数据不删除。
 
 实时/事件接口为 `GET /api/limit-up/dates`、`GET /api/limit-up/dashboard?date=`、`GET /api/limit-up/live`、`POST /api/limit-up/live/refresh` 和 `GET /api/limit-up/signals?date=&as_of=`。两日逐次诊断读取使用 `GET /api/limit-up/live-traces/dates`、`GET /api/limit-up/live-traces/day?date=` 和 `GET /api/limit-up/live-traces/symbol?date=&vt_symbol=`；读侧按新增行增量聚合，股票跌出 Top5 后仍保留 `concept_warming / dropped_from_top5 / rejected / missed / sealed / failed / invalidated` 等变化。自动调度和数据管理页的手动“立即执行”复用 `limit_up_live_scan`；完整概念刷新由 `limit_up_concept_scan` 独立调度，手动接口分别为 `POST /api/data-sync/schedules/limit_up_live_scan/run` 和 `POST /api/data-sync/schedules/limit_up_concept_scan/run`。只有 live、非 stale 的有效结果返回 `succeeded`，其他结果返回 `skipped`，盘后不会伪造概念强度行。严格前向接口为 `GET /api/limit-up/forward-validation?start=&end=&entry_mode=&exit_mode=`；数据门禁接口为 `GET /api/limit-up/data-quality`。兼容同步补数接口为 `POST /api/limit-up/data-quality/minute-backfill`；产品入口使用 `POST /minute-backfill/start` 立即返回 `202` 和批次 ID，再每 2 秒读取 `GET /minute-backfill/batches/{batch_id}`，终态后刷新门禁。全历史接口为 `GET /api/limit-up/history/status`、`POST /api/limit-up/history/rebuild`、`GET /api/limit-up/history/dates`、`GET /api/limit-up/history/day?date=`、`GET /api/limit-up/history/backtest?entry_mode=auction|sweep|tail|next_auction`、`GET /api/limit-up/history/factors?entry_mode=&exit_mode=&start=&end=` 和 `GET /api/limit-up/history/model-report?entry_mode=&exit_mode=&start=&end=`。
 
@@ -155,7 +156,9 @@ AlphaAgent 自研服务的股票日线同步不走 vn.py Datafeed，路径是：
 
 逐日申万二级行业成员也在同一页面回补，接口为 `GET /api/data-sync/imports/limit-up-memberships/status`、`GET /template.csv`、`POST /tushare` 和 `POST /csv`。Tushare 路径先取 `index_classify(SW2021, L1)`，再按一级行业完整读取 `index_member_all`；CSV 使用相同区间字段。有效期固定为 `in_date <= trade_date < out_date`，重叠区间选择最新 `in_date` 并记录冲突。每个可靠交易日必须覆盖至少 90% 的当日沪深主板非 ST 日线股票才只替换该日 `sector_type=industry`，同日概念快照不会被删除；空响应、供应商错误和覆盖不足不写库。历史账本优先按 `snapshot_date + vt_symbol` 读取行业，缺失行才回退当前成员并标记 `current_proxy`。
 
-前端实时视图每 10 秒读取 `/live`，任何 GET 都不直接访问外部行情源或写快照。页面只保留实时推荐、历史交割单和回测三个主入口，不显示板位执行切换；实时候选、交割单和回测都使用同一两仓连续评估时钟。页面同时读取缓存账户摘要、5% 两日轨迹和固定日程；轨迹只显示综合首板，候选掉出 Top5 后仍保存触发、封板、炸板和失效历史，并在标题下显示雷达、Top5、接近、买点、错过及主要卡点。盘后任意时间显示下一交易日 09:55/10:00 日程。全页快照超过 90 秒 fail-closed，买点快照超过 20 秒先单独失效。
+前端实时视图每 10 秒读取 `/live`，任何 GET 都不直接访问外部行情源或写快照。页面只保留实时推荐、历史交割单和回测三个主入口，不显示板位执行切换；实时候选、交割单和回测都使用同一两仓连续评估时钟。实时操作列表只展示 `trigger_ready / concept_warming / approaching_trigger / observing / pending_auction` 等仍可转买状态；`rejected / missed / invalidated`、结构阻断和首次可见已封板只留在当日轨迹，不得以“今日拒买”占用观察位。粗粒度 `lane_decision=blocked` 也可能只包含 10 点确认、承接或板块热度等动态 blocker，不能单独作为永久排除依据；必须使用 `blocking_scope` 和最终 `signal_state`。前端对旧缓存响应重复执行同一过滤。页面同时读取缓存账户摘要、5% 两日轨迹和固定日程；轨迹只显示综合首板，候选掉出 Top5 后仍保存触发、封板、炸板和失效历史，并在标题下显示雷达、Top5、接近、买点、错过及主要卡点。盘后任意时间显示下一交易日 09:55/10:00 日程。全页快照超过 90 秒 fail-closed，买点快照超过 20 秒先单独失效。实时 signal 原样透传点时 `last_price/change_pct`，操作行显示现价、现涨和距板；不得用后续快照或最终封板结果回填触发时涨幅。
+
+买点声音和桌面通知是浏览器本地辅助功能，不改变 signal、快照、交割单或回测。用户必须通过铃铛按钮主动启用，`trigger_ready/actionable` 首次进入时提醒，同一股票离开后超过 60 秒重新触发才可再次提醒；stale、历史代理和盘后计划不提醒。扬声器按钮复用真实提醒链路作手动测试，但不写后端数据。页面完全关闭后当前版本不具备 Service Worker/服务端推送；通知权限被拒绝时仅保留声音和页面 Toast。
 
 `data_quality.py` 把研究账本和执行证据拆成 8 个独立门禁：点时历史账本、涨停事件路径、逐日行业成员、个股分钟路径、集合竞价、板块分钟资金、Tick/L2 队列和 60 日真实前向观察。门禁只读取真实落库计数；逐日行业先要求本地全市场日线至少 3000 只来确认日期可靠，再要求行业快照覆盖该日实际沪深主板非 ST 股票的 90%，并分开展示原始、行业、概念和合格快照日。板块分钟资金只统计交易时段、来源日期等于采集日且主力净流入非空的快照，竞价同时展示采集日和字段完整日。当前成员快照、覆盖不足的行业日、日终板块资金、公开源缺未匹配量的竞价或日线开盘代理都不能冒充严格证据。只有全部门禁达标时 `simulation_eligible` 才能为 `true`。
 

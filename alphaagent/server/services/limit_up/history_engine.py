@@ -14,6 +14,7 @@ from alphaagent.server.services.limit_up.lane_features import (
     attach_limit_gene_features,
     first_reseal_time,
     path_prefix_features,
+    price_path_to_return_path,
 )
 from alphaagent.server.services.limit_up.lane_repository import (
     EventIndex,
@@ -1039,8 +1040,7 @@ def _board_lane_candidates_from_day(
         first_time = str(event.get("first_limit_time") or "")
         if not first_time:
             continue
-        path = event.get("time_preview")
-        path = path if isinstance(path, Sequence) and not isinstance(path, (str, bytes)) else []
+        path = _event_intraday_path(event, previous_close=row.get("prev_close"))
         reseal_time = first_reseal_time(path) if path else None
         if first_time < "10:00:00" and reseal_time:
             signal_time = reseal_time
@@ -1108,6 +1108,22 @@ def _board_lane_candidates_from_day(
             )
         )
     return candidates
+
+
+def _event_intraday_path(
+    event: Mapping[str, object],
+    *,
+    previous_close: object,
+) -> list[object]:
+    preview = event.get("time_preview")
+    if isinstance(preview, Sequence) and not isinstance(preview, (str, bytes)):
+        values = list(preview)
+        if any(value is not None for value in values):
+            return values
+    prices = event.get("minute_price_path")
+    if not isinstance(prices, Sequence) or isinstance(prices, (str, bytes)):
+        return []
+    return price_path_to_return_path(prices, previous_close=previous_close)
 
 
 def _lane_candidate_payload(

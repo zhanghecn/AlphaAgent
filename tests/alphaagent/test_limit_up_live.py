@@ -362,7 +362,7 @@ def test_live_portfolio_keeps_structurally_selected_observation_without_promotin
     assert portfolio[0]["reason"] == "板块触板2/3只"
 
 
-def test_live_watchlist_keeps_positive_lane_observations_without_promoting_them() -> None:
+def test_live_watchlist_only_keeps_candidates_that_can_transition_to_buy() -> None:
     recommendations = {
         "lanes": {
             "now": [
@@ -373,6 +373,8 @@ def test_live_watchlist_keeps_positive_lane_observations_without_promoting_them(
                     "state": "near_limit",
                     "distance_to_limit_pct": 0.5,
                     "action": "pass",
+                    "signal_state": "rejected",
+                    "blocking_scope": "structural",
                     "reason": "缺少财报证据",
                     "leadership_score": 70.0,
                     "strategy_evidence": {"total_return_pct": 55.0},
@@ -380,32 +382,57 @@ def test_live_watchlist_keeps_positive_lane_observations_without_promoting_them(
                 },
                 {
                     "vt_symbol": "600002.SSE",
-                    "board_lane": "one_to_two",
-                    "action": "pass",
-                    "reason": "一进二历史负期望",
-                    "leadership_score": 90.0,
-                    "strategy_evidence": {"total_return_pct": -58.0},
-                    "historical_evidence": {"tbox_score": 90.0},
-                },
-                {
-                    "vt_symbol": "600004.SSE",
                     "board_lane": "first_board",
                     "lane_decision": "blocked",
                     "state": "near_limit",
-                    "distance_to_limit_pct": 2.0,
-                    "action": "pass",
-                    "reason": "利润增长不足",
-                    "strategy_evidence": {"total_return_pct": 55.0},
-                    "historical_evidence": {"tbox_score": 80.0},
+                    "distance_to_limit_pct": 1.4,
+                    "action": "observe",
+                    "signal_state": "approaching_trigger",
+                    "blocking_scope": "dynamic",
+                    "reason": "等待进入1%扫板触发区",
+                    "leadership_score": 90.0,
+                    "strategy_evidence": {"total_return_pct": 58.0},
+                    "historical_evidence": {"tbox_score": 90.0},
                 },
                 {
                     "vt_symbol": "600003.SSE",
                     "board_lane": "first_board",
+                    "lane_decision": "blocked",
+                    "state": "strong",
+                    "action": "observe",
+                    "signal_state": "concept_warming",
+                    "blocking_scope": "dynamic",
+                    "reason": "PCB板块预热",
+                    "strategy_evidence": {"total_return_pct": 50.0},
+                    "historical_evidence": {"tbox_score": 85.0},
+                },
+                {
+                    "vt_symbol": "600004.SSE",
+                    "board_lane": "first_board",
+                    "lane_decision": "eligible",
+                    "state": "sealed",
+                    "action": "wait_tail",
+                    "signal_state": "missed",
+                    "reason": "已封板，买点错过",
+                },
+                {
+                    "vt_symbol": "600005.SSE",
+                    "board_lane": "first_board",
+                    "lane_decision": "eligible",
+                    "state": "near_limit",
                     "action": "pass",
-                    "reason": "首次采到时已经封板",
-                    "missed_preseal_entry": True,
-                    "strategy_evidence": {"total_return_pct": 55.0},
-                    "historical_evidence": {"tbox_score": 95.0},
+                    "signal_state": "rejected",
+                    "blocking_scope": "structural",
+                    "reason": "首板结构硬门未通过",
+                },
+                {
+                    "vt_symbol": "600006.SSE",
+                    "board_lane": "first_board",
+                    "lane_decision": "eligible",
+                    "state": "near_limit",
+                    "action": "observe",
+                    "signal_state": "invalidated",
+                    "reason": "实时快照已失效",
                 },
             ],
             "tail": [],
@@ -416,15 +443,15 @@ def test_live_watchlist_keeps_positive_lane_observations_without_promoting_them(
     watchlist = live_service._build_live_watchlist(recommendations)
 
     assert [row["vt_symbol"] for row in watchlist] == [
-        "600001.SSE",
-        "600004.SSE",
+        "600002.SSE",
+        "600003.SSE",
     ]
-    assert watchlist[0]["action"] == "observe"
-    assert watchlist[0]["research_action"] == "pass"
-    assert watchlist[0]["signal_state"] == "rejected"
-    assert watchlist[0]["entry_kind"] == "sweep"
-    assert watchlist[0]["reason"] == "今日拒买：缺少财报证据"
-    assert watchlist[0]["buy_instruction"] == "板位硬门未通过，今日不买"
+    assert {row["signal_state"] for row in watchlist} == {
+        "approaching_trigger",
+        "concept_warming",
+    }
+    assert all(row["action"] == "observe" for row in watchlist)
+    assert all("今日拒买" not in str(row.get("reason") or "") for row in watchlist)
 
 
 def test_lane_validation_attaches_strategy_history_summary() -> None:
@@ -1601,6 +1628,22 @@ def test_auction_recommendation_uses_previous_board_and_gap_range() -> None:
     assert signal["action"] == "buy_now"
     assert signal["entry_kind"] == "auction"
     assert signal["trigger_price"] == candidate["last_price"]
+
+
+def test_live_signal_exposes_point_in_time_quote() -> None:
+    candidate = rank_live_candidates(
+        [_candidate("600001.SSE", last_price=10.87, change_pct=8.73)]
+    )[0]
+
+    result = build_live_recommendations(
+        [candidate],
+        _market(),
+        datetime(2026, 7, 10, 10, 5, tzinfo=SHANGHAI),
+    )
+
+    signal = result["lanes"]["now"][0]
+    assert signal["last_price"] == candidate["last_price"]
+    assert signal["change_pct"] == candidate["change_pct"]
 
 
 def test_auction_watch_can_approach_but_not_trigger_before_0920() -> None:
@@ -2792,8 +2835,11 @@ def test_sweep_requires_fresh_concept_launch_and_top3_leader() -> None:
     )
     by_code = {check["code"]: check for check in checks}
 
-    assert by_code["concept_state"]["status"] == "passed"
-    assert by_code["concept_leader"]["status"] == "passed"
+    assert by_code["concept_state"]["status"] == "informational"
+    assert by_code["concept_state"]["diagnostic_status"] == "passed"
+    assert by_code["concept_leader"]["status"] == "informational"
+    assert by_code["concept_leader"]["diagnostic_status"] == "passed"
+    assert by_code["sector_route"]["status"] == "passed"
     assert by_code["stock_flow"]["status"] == "informational"
     assert live_policy._candidate_execution_reasons(
         candidate,
@@ -2802,9 +2848,90 @@ def test_sweep_requires_fresh_concept_launch_and_top3_leader() -> None:
     ) == []
 
 
-def test_stale_concept_snapshot_blocks_new_trigger() -> None:
+def test_legacy_sector_route_survives_unavailable_concept() -> None:
     candidate = _candidate(
         "600001.SSE",
+        concept_state="unavailable",
+        concept_trigger_allowed=False,
+        concept_snapshot_age_seconds=None,
+        concept_coverage_ratio=0.0,
+        concept_strong_5_count=0,
+        concept_leader_rank=None,
+    )
+
+    checks = live_policy._candidate_execution_checks(
+        candidate,
+        require_expansion=True,
+        entry_kind="sweep",
+    )
+    by_code = {check["code"]: check for check in checks}
+
+    assert live_policy._sweep_ready(candidate) is True
+    assert by_code["sector_route"]["status"] == "passed"
+    assert by_code["sector_route"]["observed"] == "行业基线通过"
+    assert by_code["concept_state"]["status"] == "informational"
+    assert by_code["concept_state"]["diagnostic_status"] == "pending"
+
+
+def test_concept_increment_bypasses_wrong_legacy_sector_group() -> None:
+    candidate = _candidate(
+        "600001.SSE",
+        sector_heat=45.0,
+        sector_touch_count=0,
+        sector_main_net_inflow=-5_000_000_000.0,
+        concept_state="launch",
+        concept_trigger_allowed=True,
+        concept_snapshot_age_seconds=12,
+        concept_coverage_ratio=0.97,
+        concept_strong_5_count=9,
+        concept_leader_rank=2,
+    )
+
+    checks = live_policy._candidate_execution_checks(
+        candidate,
+        require_expansion=True,
+        entry_kind="sweep",
+    )
+    by_code = {check["code"]: check for check in checks}
+
+    assert live_policy._sweep_ready(candidate) is True
+    assert by_code["sector_route"]["status"] == "passed"
+    assert by_code["sector_route"]["observed"] == "概念增量通过"
+    assert by_code["sector_heat"]["status"] == "informational"
+    assert by_code["sector_heat"]["diagnostic_status"] == "pending"
+    assert by_code["sector_flow"]["blocking"] is False
+
+
+def test_both_sector_routes_failing_keeps_candidate_in_observation() -> None:
+    candidate = _candidate(
+        "600001.SSE",
+        sector_heat=45.0,
+        sector_touch_count=0,
+        concept_state="warming",
+        concept_trigger_allowed=True,
+        concept_snapshot_age_seconds=12,
+        concept_coverage_ratio=0.97,
+        concept_strong_5_count=4,
+        concept_leader_rank=1,
+    )
+
+    checks = live_policy._candidate_execution_checks(
+        candidate,
+        require_expansion=True,
+        entry_kind="sweep",
+    )
+    by_code = {check["code"]: check for check in checks}
+
+    assert live_policy._sweep_ready(candidate) is False
+    assert by_code["sector_route"]["status"] == "pending"
+    assert by_code["sector_route"]["observed"] == "两条路径均未通过"
+
+
+def test_stale_concept_snapshot_blocks_concept_only_trigger() -> None:
+    candidate = _candidate(
+        "600001.SSE",
+        sector_heat=45.0,
+        sector_touch_count=0,
         concept_state="launch",
         concept_snapshot_age_seconds=46,
         concept_coverage_ratio=0.97,
@@ -2818,12 +2945,14 @@ def test_stale_concept_snapshot_blocks_new_trigger() -> None:
         entry_kind="sweep",
     )
 
-    assert "概念行情已超过45秒" in reasons
+    assert any("概念行情已超过45秒" in reason for reason in reasons)
 
 
-def test_global_concept_quality_blocks_new_trigger() -> None:
+def test_global_concept_quality_blocks_concept_only_trigger() -> None:
     candidate = _candidate(
         "600001.SSE",
+        sector_heat=45.0,
+        sector_touch_count=0,
         concept_state="launch",
         concept_snapshot_age_seconds=12,
         concept_coverage_ratio=0.97,
@@ -2838,7 +2967,214 @@ def test_global_concept_quality_blocks_new_trigger() -> None:
         entry_kind="sweep",
     )
 
-    assert "概念完整行情未通过交易日或全市场覆盖检查" in reasons
+    assert any(
+        "概念完整行情未通过交易日或全市场覆盖检查" in reason
+        for reason in reasons
+    )
+
+
+def test_severe_stock_outflow_blocks_passing_concept_increment() -> None:
+    candidate = _candidate(
+        "600001.SSE",
+        sector_heat=45.0,
+        sector_touch_count=0,
+        sector_main_net_inflow=-5_000_000_000.0,
+        stock_main_net_inflow=-200_000_000.0,
+        concept_state="launch",
+        concept_trigger_allowed=True,
+        concept_snapshot_age_seconds=12,
+        concept_coverage_ratio=0.97,
+        concept_strong_5_count=9,
+        concept_leader_rank=2,
+    )
+
+    reasons = live_policy._candidate_execution_reasons(
+        candidate,
+        require_expansion=True,
+        entry_kind="sweep",
+    )
+
+    assert live_policy._sweep_ready(candidate) is False
+    assert any("个股主力净流出" in reason for reason in reasons)
+
+
+def test_short_cycle_pcb_increment_reaches_first_board_trigger() -> None:
+    captured_at = datetime(2026, 7, 14, 13, 1, 57, tzinfo=SHANGHAI)
+    market = _market(
+        sentiment={
+            "phase": "repair",
+            "phase_label": "修复",
+            "failed_limit_up_rate": 0.40,
+        }
+    )
+    candidate = _candidate(
+        "002384.SZSE",
+        name="东山精密式样本",
+        board_level=1,
+        lane_feature_ready=True,
+        previous_limit_up=False,
+        prior_streak=0,
+        prior_limit_count_5=1,
+        prior_limit_count_126=8,
+        prior_touch_count_126=13,
+        prior_seal_success_rate_126=0.6154,
+        trade_days_since_prior_limit=3,
+        pullback_from_prior_limit_pct=-9.42,
+        prior_position_120=0.8056,
+        prior_change_pct=-2.31,
+        prior_amplitude_pct=8.36,
+        auction_gap_pct=2.04,
+        prior_industry_heat_score=50.0,
+        prior_market_failed_rate=0.40,
+        path_prefix={
+            "point_count": 15,
+            "last_pct": 9.8,
+            "touch_count": 0,
+            "break_count": 0,
+            "reseal_count": 0,
+            "minimum_pct": 0.0,
+            "approach_3point_pct": 3.0,
+            "recent_15m_min_pct": 4.0,
+            "recent_15m_change_pct": 5.8,
+            "recent_15m_range_pct": 5.8,
+            "recent_15m_drawdown_pct": 0.0,
+            "recent_30m_min_pct": 1.8,
+            "recent_30m_change_pct": 8.0,
+        },
+        financial_risk={"level": "clear", "blocked": False, "reasons": []},
+        financial_snapshot={"net_profit_yoy": 563.64},
+        state="near_limit",
+        distance_to_limit_pct=0.2,
+        sector_heat=50.0,
+        sector_touch_count=0,
+        sector_main_net_inflow=-5_200_000_000.0,
+        stock_main_net_inflow=2_070_000_000.0,
+        turnover_rate=5.72,
+        concept_id="BK0877",
+        concept_name="PCB",
+        concept_state="launch",
+        concept_trigger_allowed=True,
+        concept_snapshot_age_seconds=12,
+        concept_coverage_ratio=0.97,
+        concept_strong_5_count=9,
+        concept_leader_rank=2,
+    )
+
+    live_service._attach_lane_decisions(
+        [candidate],
+        market,
+        captured_at,
+        market_gate={"repair_confirmed": True},
+    )
+    signal = build_live_recommendations(
+        [candidate],
+        market,
+        captured_at,
+    )["lanes"]["now"][0]
+
+    assert candidate["board_lane"] == "first_board"
+    assert candidate["lane_decision"] == "eligible"
+    assert signal["action"] == "buy_now"
+    assert signal["signal_state"] == "trigger_ready"
+    assert signal["sector_route"] == "concept_increment"
+    assert "prior_board_evidence_missing" not in signal["lane_blockers"]
+
+
+def test_weak_market_theme_attack_reaches_live_first_board_trigger() -> None:
+    captured_at = datetime(2026, 7, 15, 10, 12, tzinfo=SHANGHAI)
+    market = _market(
+        sentiment={
+            "phase": "divergence",
+            "phase_label": "分歧",
+            "failed_limit_up_rate": 0.30,
+        }
+    )
+    candidate = _candidate(
+        "600001.SSE",
+        name="弱市题材龙二",
+        lane_feature_ready=True,
+        prior_streak=0,
+        prior_limit_count_5=0,
+        prior_limit_count_126=3,
+        prior_touch_count_126=3,
+        prior_seal_success_rate_126=0.75,
+        trade_days_since_prior_limit=18,
+        pullback_from_prior_limit_pct=-12.0,
+        prior_position_120=0.28,
+        financial_risk={
+            "level": "unknown",
+            "blocked": False,
+            "reasons": ["financial_report_missing"],
+        },
+        financial_snapshot=None,
+        path_prefix={
+            "point_count": 15,
+            "last_pct": 9.2,
+            "touch_count": 0,
+            "break_count": 0,
+            "reseal_count": 0,
+            "minimum_pct": 5.0,
+            "approach_3point_pct": 0.0,
+            "recent_15m_min_pct": 5.0,
+            "recent_15m_change_pct": 0.0,
+            "recent_15m_range_pct": 0.0,
+            "recent_15m_drawdown_pct": 0.0,
+            "recent_30m_min_pct": 4.0,
+            "recent_30m_change_pct": 1.0,
+        },
+        state="near_limit",
+        distance_to_limit_pct=0.7,
+        sector_heat=45.0,
+        sector_touch_count=0,
+        sector_main_net_inflow=-5_000_000_000.0,
+        stock_main_net_inflow=120_000_000.0,
+        turnover_rate=8.0,
+        concept_id="BK1001",
+        concept_name="题材概念",
+        concept_state="launch",
+        concept_trigger_allowed=True,
+        concept_strength_score=60.0,
+        concept_snapshot_age_seconds=12,
+        concept_coverage_ratio=0.97,
+        concept_strong_5_count=6,
+        concept_leader_rank=2,
+    )
+
+    live_service._attach_lane_decisions([candidate], market, captured_at)
+    signal = build_live_recommendations(
+        [candidate],
+        market,
+        captured_at,
+    )["lanes"]["now"][0]
+
+    assert candidate["lane_decision"] == "eligible"
+    assert candidate["first_board_route"] == "weak_market_theme_attack"
+    assert candidate["lane_premium_gate_passed"] is True
+    assert "weak_market_theme_attack" in candidate["setup_tags"]
+    assert signal["action"] == "buy_now"
+    assert signal["signal_state"] == "trigger_ready"
+    assert signal["first_board_route"] == "weak_market_theme_attack"
+    assert signal["sector_route"] == "concept_increment"
+    assert not {
+        "first_board_touch_gene_weak",
+        "financial_report_unavailable",
+        "first_board_repair_setup_missing",
+    }.intersection(signal["lane_blockers"])
+
+    blocked = {
+        **candidate,
+        "financial_risk": {"level": "blocked", "blocked": True},
+    }
+    live_service._attach_lane_decisions([blocked], market, captured_at)
+    blocked_signal = build_live_recommendations(
+        [blocked],
+        market,
+        captured_at,
+    )["lanes"]["now"][0]
+
+    assert blocked["lane_decision"] == "blocked"
+    assert "fundamental_risk" in blocked["lane_blockers"]
+    assert blocked_signal["action"] == "pass"
 
 
 def test_warming_concept_outside_one_percent_zone_is_prelimit_observation() -> None:

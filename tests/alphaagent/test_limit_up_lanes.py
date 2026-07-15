@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from unittest.mock import patch
 
 import pandas as pd
@@ -12,7 +12,9 @@ from alphaagent.server.services.limit_up.lane_features import (
     attach_limit_gene_features,
     classify_financial_risk,
     intraday_path_times,
+    minute_bars_to_intraday_price_path,
     path_prefix_features,
+    price_path_to_return_path,
     select_latest_published_report,
 )
 from alphaagent.server.services.limit_up.lane_research import (
@@ -26,6 +28,7 @@ from alphaagent.server.services.limit_up.lane_repository import (
     build_financial_index,
     financial_report_as_of,
     financial_snapshot_as_of,
+    merge_event_minute_price_paths,
     merge_rich_event_rows,
 )
 
@@ -82,6 +85,137 @@ def test_intraday_path_uses_eighty_three_minute_points() -> None:
     assert times[39] == "11:27:00"
     assert times[40] == "13:00:00"
     assert times[-1] == "14:57:00"
+
+
+def test_minute_bars_are_resampled_without_crossing_session_boundaries() -> None:
+    bars = [
+        {
+            "bar_time": datetime(2026, 7, 14, 9, 31),
+            "open_price": 10.10,
+            "close_price": 10.20,
+        },
+        {
+            "bar_time": datetime(2026, 7, 14, 9, 33),
+            "open_price": 10.30,
+            "close_price": 10.50,
+        },
+        {
+            "bar_time": datetime(2026, 7, 14, 13, 1),
+            "open_price": 10.80,
+            "close_price": 10.90,
+        },
+        {
+            "bar_time": datetime(2026, 7, 14, 13, 3),
+            "open_price": 10.90,
+            "close_price": 11.00,
+        },
+    ]
+
+    prices = minute_bars_to_intraday_price_path(bars)
+    returns = price_path_to_return_path(prices, previous_close=10.0)
+
+    assert len(prices) == 80
+    assert prices[0] == 10.10
+    assert prices[1] == 10.50
+    assert prices[40] == 10.80
+    assert prices[41] == 11.00
+    assert returns[0] == 1.0
+    assert returns[1] == 5.0
+    assert returns[40] == 8.0
+    assert returns[41] == 10.0
+
+
+def test_event_preview_wins_over_minute_price_fallback() -> None:
+    preview_key = ("600001.SSE", date(2026, 7, 14))
+    fallback_key = ("600002.SSE", date(2026, 7, 14))
+    events = {
+        preview_key: {
+            "vt_symbol": preview_key[0],
+            "trade_date": preview_key[1],
+            "time_preview": [1.0, 2.0, 3.0],
+            "path_source": "ths.limit_up_pool",
+        },
+        fallback_key: {
+            "vt_symbol": fallback_key[0],
+            "trade_date": fallback_key[1],
+            "time_preview": [],
+            "path_source": None,
+        },
+    }
+    minute_paths = {
+        preview_key: {
+            "path": [10.0] * 80,
+            "source": "stock_minute_bars:tdx_public_hq",
+            "bar_count": 240,
+        },
+        fallback_key: {
+            "path": [11.0] * 80,
+            "source": "stock_minute_bars:tdx_public_hq",
+            "bar_count": 240,
+        },
+    }
+
+    merged = merge_event_minute_price_paths(events, minute_paths)
+
+    assert "minute_price_path" not in merged[preview_key]
+    assert merged[preview_key]["path_source"] == "ths.limit_up_pool"
+    assert merged[fallback_key]["minute_price_path"] == [11.0] * 80
+    assert merged[fallback_key]["path_source"] == "stock_minute_bars:tdx_public_hq"
+    assert merged[fallback_key]["minute_path_bar_count"] == 240
+
+
+def test_minute_fallback_prefix_ignores_prices_after_signal_time() -> None:
+    prices = [10.0 + index * 0.10 for index in range(80)]
+    baseline = history_engine._event_intraday_path(
+        {"time_preview": [], "minute_price_path": prices},
+        previous_close=10.0,
+    )
+    changed_prices = list(prices)
+    changed_prices[13] = 1.0
+    changed = history_engine._event_intraday_path(
+        {"time_preview": [], "minute_price_path": changed_prices},
+        previous_close=10.0,
+    )
+
+    baseline_prefix = path_prefix_features(baseline, "10:06:00")
+    changed_prefix = path_prefix_features(changed, "10:06:00")
+
+    assert baseline_prefix == changed_prefix
+    assert baseline_prefix["point_count"] == 13
+
+
+def test_minute_fallback_reaches_first_board_intraday_support_gate() -> None:
+    key = ("600001.SSE", date(2026, 7, 14))
+    returns = [0.5] * 9 + [2.0, 3.0, 4.5, 6.5, 8.0, 9.8]
+    prices = [10.0 * (1 + value / 100) for value in returns] + [None] * 65
+    merged = merge_event_minute_price_paths(
+        {
+            key: {
+                "vt_symbol": key[0],
+                "trade_date": key[1],
+                "time_preview": [],
+            }
+        },
+        {
+            key: {
+                "path": prices,
+                "source": "stock_minute_bars:tdx_public_hq",
+                "bar_count": 15,
+            }
+        },
+    )
+
+    path = history_engine._event_intraday_path(
+        merged[key],
+        previous_close=10.0,
+    )
+    evaluated = evaluate_lane_candidate(
+        _candidate(path_prefix=path_prefix_features(path, "10:12:00"))
+    )
+
+    assert "intraday_support_unavailable" not in evaluated["blockers"]
+    assert "intraday_support_confirmed" in evaluated["favorable_factors"]
+    assert evaluated["decision"] == "eligible"
 
 
 def test_path_prefix_excludes_samples_after_signal_time() -> None:
@@ -253,10 +387,101 @@ def _candidate(**overrides: object) -> dict[str, object]:
     return candidate
 
 
+def _weak_market_attack_candidate(**overrides: object) -> dict[str, object]:
+    candidate = _candidate(
+        prior_touch_count_126=3,
+        prior_industry_heat_score=60.0,
+        prior_industry_leader_rank=2,
+        prior_market_phase="mixed",
+        prior_market_failed_rate=0.30,
+        financial_snapshot=None,
+        path_prefix={
+            **dict(_candidate()["path_prefix"]),
+            "approach_3point_pct": 0.0,
+            "recent_15m_min_pct": 5.0,
+            "recent_15m_change_pct": 0.0,
+            "recent_15m_drawdown_pct": 0.0,
+        },
+    )
+    candidate.update(overrides)
+    return candidate
+
+
 def test_non_consecutive_third_limit_is_routed_to_two_to_three() -> None:
     candidate = _candidate(prior_streak=0, prior_limit_count_5=2, target_board=3)
 
     assert classify_board_lane(candidate) == "two_to_three"
+
+
+def test_lane_selection_ignores_current_day_final_board_outcome() -> None:
+    candidates = [
+        _candidate(
+            vt_symbol="600001.SSE",
+            outcome={"touched": True, "sealed": True},
+        ),
+        _candidate(
+            vt_symbol="600002.SSE",
+            outcome={"touched": True, "sealed": False},
+            prior_industry_leader_rank=2,
+        ),
+    ]
+    flipped = [
+        {
+            **candidate,
+            "outcome": {
+                "touched": not bool(candidate["outcome"]["touched"]),
+                "sealed": not bool(candidate["outcome"]["sealed"]),
+            },
+        }
+        for candidate in candidates
+    ]
+
+    baseline = select_daily_lane_portfolio(candidates)
+    changed = select_daily_lane_portfolio(flipped)
+
+    selection_fields = ("vt_symbol", "decision", "rank_score", "pool_rank")
+    assert [
+        tuple(row[field] for field in selection_fields)
+        for row in baseline["candidate_pool"]["first_board"]
+    ] == [
+        tuple(row[field] for field in selection_fields)
+        for row in changed["candidate_pool"]["first_board"]
+    ]
+    assert [row["vt_symbol"] for row in baseline["selected"]] == [
+        row["vt_symbol"] for row in changed["selected"]
+    ]
+
+
+def test_recent_nonconsecutive_limit_stays_in_first_board_lane() -> None:
+    candidate = _candidate(
+        prior_streak=0,
+        prior_limit_count_5=1,
+        target_board=1,
+        previous_limit_up=False,
+    )
+
+    assert classify_board_lane(candidate) == "first_board"
+
+
+def test_short_cycle_deep_pullback_is_first_board_return_setup() -> None:
+    result = evaluate_lane_candidate(
+        _candidate(
+            prior_streak=0,
+            prior_limit_count_5=1,
+            target_board=1,
+            previous_limit_up=False,
+            trade_days_since_prior_limit=3,
+            pullback_from_prior_limit_pct=-9.42,
+            prior_change_pct=-2.31,
+            auction_gap_pct=2.04,
+            prior_position_120=0.81,
+        )
+    )
+
+    assert result["lane"] == "first_board"
+    assert "return_board" in result["setup_tags"]
+    assert "not_first_board_after_cooling" not in result["blockers"]
+    assert "low_position_missing" not in result["blockers"]
 
 
 def test_first_board_requires_gene_low_position_and_post_ten_signal() -> None:
@@ -292,6 +517,86 @@ def test_first_board_requires_strong_touch_gene_profit_growth_and_divergence() -
     assert "first_board_profit_growth_weak" in weak_profit["blockers"]
     assert "first_board_repair_setup_missing" in no_divergence["blockers"]
     assert evaluate_lane_candidate(_candidate())["decision"] == "eligible"
+
+
+def test_weak_market_theme_attack_softens_only_the_frozen_three_blockers() -> None:
+    result = evaluate_lane_candidate(_weak_market_attack_candidate())
+
+    assert result["decision"] == "eligible"
+    assert result["first_board_route"] == "weak_market_theme_attack"
+    assert result["premium_gate_passed"] is True
+    assert "weak_market_theme_attack" in result["setup_tags"]
+    assert "weak_market_theme_attack_setup" in result["favorable_factors"]
+    assert not {
+        "first_board_touch_gene_weak",
+        "financial_report_unavailable",
+        "first_board_repair_setup_missing",
+    }.intersection(result["blockers"])
+
+
+def test_weak_market_theme_attack_keeps_thresholds_and_hard_risks() -> None:
+    below_support_path = {
+        **dict(_weak_market_attack_candidate()["path_prefix"]),
+        "recent_15m_min_pct": 4.995,
+    }
+    cases = (
+        ("first_board_touch_gene_weak", {"prior_touch_count_126": 2}),
+        ("first_board_touch_gene_weak", {"path_prefix": below_support_path}),
+        ("first_board_repair_setup_missing", {"prior_industry_heat_score": 59.99}),
+        ("first_board_repair_setup_missing", {"prior_industry_leader_rank": 3}),
+        ("first_board_repair_setup_missing", {"prior_market_phase": "broad_rise"}),
+        ("first_board_repair_setup_missing", {"prior_market_phase": "repair"}),
+        (
+            "first_board_profit_growth_weak",
+            {"financial_snapshot": {"net_profit_yoy": 9.99}},
+        ),
+        (
+            "low_position_missing",
+            {
+                "prior_position_120": 0.82,
+                "pullback_from_prior_limit_pct": -2.0,
+                "trade_days_since_prior_limit": 2,
+            },
+        ),
+        (
+            "fundamental_risk",
+            {"financial_risk": {"level": "blocked", "blocked": True}},
+        ),
+    )
+
+    for expected_blocker, overrides in cases:
+        result = evaluate_lane_candidate(
+            _weak_market_attack_candidate(**overrides)
+        )
+        assert result["decision"] == "blocked"
+        assert expected_blocker in result["blockers"]
+
+
+def test_weak_market_theme_attack_does_not_read_final_outcomes() -> None:
+    candidate = _weak_market_attack_candidate(
+        outcome={"touched": True, "sealed": True, "next_close_return_pct": 10.0}
+    )
+    changed = {
+        **candidate,
+        "outcome": {
+            "touched": False,
+            "sealed": False,
+            "next_close_return_pct": -10.0,
+        },
+    }
+
+    baseline = evaluate_lane_candidate(candidate)
+    flipped = evaluate_lane_candidate(changed)
+
+    for field in (
+        "decision",
+        "blockers",
+        "first_board_route",
+        "setup_tags",
+        "premium_gate_passed",
+        "rank_score",
+    ):
+        assert baseline[field] == flipped[field]
 
 
 def test_first_board_uses_support_gate_without_v8_four_to_six_range() -> None:
@@ -587,7 +892,13 @@ def test_selection_allows_empty_days_and_never_exceeds_four_candidates() -> None
 
     selected = select_daily_lane_portfolio(candidates)
     retreat = select_daily_lane_portfolio(
-        [_candidate(prior_market_phase="retreat", prior_market_failed_rate=0.20)]
+        [
+            _candidate(
+                prior_market_phase="retreat",
+                prior_market_failed_rate=0.20,
+                prior_industry_heat_score=59.99,
+            )
+        ]
     )
 
     assert tuple(selected["lanes"]) == BOARD_LANES
@@ -1352,6 +1663,7 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
     assert "intraday_sector_fund_flow" in report["execution_comparability"]["missing_evidence"]
     assert report["coverage"]["minute_1430_count"] == 1
     assert report["coverage"]["daily_close_proxy_count"] == 0
+    assert set(report["stress_tests"]) == {"double_cost"}
     assert report["stress_tests"]["double_cost"]["total_return_pct"] is not None
     assert report["position_sizing_audit"]["selected_max_positions"] == 2
     assert report["position_sizing_audit"]["selection_rule"] == (

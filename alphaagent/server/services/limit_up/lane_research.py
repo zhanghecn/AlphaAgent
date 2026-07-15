@@ -17,15 +17,28 @@ FIRST_BOARD_MIN_SUPPORT_SCORE = 35.0
 FIRST_BOARD_MIN_TOUCH_COUNT = 6
 FIRST_BOARD_MIN_NET_PROFIT_YOY = 10.0
 FIRST_BOARD_MIN_PRIOR_FAILED_RATE = 0.35
+FIRST_BOARD_ATTACK_MIN_TOUCH_COUNT = 3
+FIRST_BOARD_ATTACK_MIN_SUPPORT_SCORE = 55.0
+FIRST_BOARD_ATTACK_MIN_HEAT_SCORE = 60.0
+FIRST_BOARD_ATTACK_MAX_LEADER_RANK = 2
+FIRST_BOARD_ATTACK_PHASES = frozenset(
+    {"retreat", "mixed", "ice", "ebb", "divergence"}
+)
+FIRST_BOARD_ATTACK_SOFT_BLOCKERS = frozenset(
+    {
+        "first_board_touch_gene_weak",
+        "financial_report_unavailable",
+        "first_board_repair_setup_missing",
+    }
+)
 TWO_TO_THREE_RISK_LIMIT = 4
 
 
 def classify_board_lane(candidate: Mapping[str, object]) -> str:
-    """Classify both consecutive and recent non-consecutive board structure."""
+    """Classify the execution lane from explicit target and consecutive boards."""
 
     prior_streak = _integer(candidate.get("prior_streak"))
-    recent_limits = _integer(candidate.get("prior_limit_count_5"))
-    target = max(_integer(candidate.get("target_board")), prior_streak + 1, recent_limits + 1)
+    target = max(_integer(candidate.get("target_board")), prior_streak + 1)
     if target >= 4:
         return "high_board"
     if target == 3:
@@ -43,6 +56,7 @@ def evaluate_lane_candidate(candidate: Mapping[str, object]) -> dict[str, object
     blockers = _shared_blockers(candidate, lane)
     favorable: list[str] = []
     setup_type: str | None = None
+    first_board_route: str | None = None
     two_to_three_quality: dict[str, object] = {
         "two_to_three_quality_tier": None,
         "two_to_three_risk_count": 0,
@@ -50,7 +64,7 @@ def evaluate_lane_candidate(candidate: Mapping[str, object]) -> dict[str, object
     }
 
     if lane == "first_board":
-        lane_blockers, favorable = _first_board_rules(candidate)
+        lane_blockers, favorable, first_board_route = _first_board_rules(candidate)
         blockers.extend(lane_blockers)
     elif lane == "one_to_two":
         lane_blockers, favorable = _one_to_two_rules(candidate)
@@ -77,7 +91,11 @@ def evaluate_lane_candidate(candidate: Mapping[str, object]) -> dict[str, object
         if lane == "first_board"
         else None
     )
-    setup_tags = detect_setup_tags(candidate, setup_type=setup_type)
+    setup_tags = detect_setup_tags(
+        candidate,
+        setup_type=setup_type,
+        first_board_route=first_board_route,
+    )
     result.update(
         {
             "lane": lane,
@@ -87,6 +105,7 @@ def evaluate_lane_candidate(candidate: Mapping[str, object]) -> dict[str, object
             "blockers": blockers,
             "favorable_factors": favorable,
             "setup_type": setup_type,
+            "first_board_route": first_board_route if lane == "first_board" else None,
             "setup_tags": setup_tags,
             "setup_confidence": "point_in_time_proxy" if setup_tags else None,
             "support_score": support_score,
@@ -96,7 +115,7 @@ def evaluate_lane_candidate(candidate: Mapping[str, object]) -> dict[str, object
             )
             if lane == "first_board"
             else None,
-            "premium_gate_passed": _first_board_premium_gate_passed(candidate)
+            "premium_gate_passed": first_board_route is not None
             if lane == "first_board"
             else None,
             "entry_quality_score": entry_quality_score,
@@ -111,6 +130,7 @@ def detect_setup_tags(
     candidate: Mapping[str, object],
     *,
     setup_type: str | None,
+    first_board_route: str | None = None,
 ) -> list[str]:
     """Return descriptive setup tags using only fields known at signal time."""
 
@@ -127,6 +147,9 @@ def detect_setup_tags(
     break_streak = _integer(candidate.get("prior_break_streak"))
     market_phase = str(candidate.get("prior_market_phase") or "")
 
+    if first_board_route == "weak_market_theme_attack":
+        tags.append("weak_market_theme_attack")
+
     if (
         days_since is not None
         and 2 <= days_since <= 4
@@ -137,7 +160,7 @@ def detect_setup_tags(
         and amplitude <= 5
     ):
         tags.append("sandwich_board")
-    if (
+    if _short_cycle_return_board(candidate) or (
         days_since is not None
         and 5 <= days_since <= 30
         and gene_count >= 2
@@ -328,7 +351,9 @@ def _shared_blockers(
     return blockers
 
 
-def _first_board_rules(candidate: Mapping[str, object]) -> tuple[list[str], list[str]]:
+def _first_board_rules(
+    candidate: Mapping[str, object],
+) -> tuple[list[str], list[str], str | None]:
     blockers: list[str] = []
     favorable: list[str] = []
     gene_count = _integer(candidate.get("prior_limit_count_126"))
@@ -341,12 +366,13 @@ def _first_board_rules(candidate: Mapping[str, object]) -> tuple[list[str], list
         blockers.append("first_board_touch_gene_weak")
     else:
         favorable.append("half_year_strong_touch_gene")
-    recent_limits = _integer(candidate.get("prior_limit_count_5"))
-    if recent_limits > 0:
-        blockers.append("not_first_board_after_cooling")
     position = _number(candidate.get("prior_position_120"))
     pullback = _number(candidate.get("pullback_from_prior_limit_pct"))
     days_since = _number(candidate.get("trade_days_since_prior_limit"))
+    recent_limits = _integer(candidate.get("prior_limit_count_5"))
+    short_cycle_return = _short_cycle_return_board(candidate)
+    if recent_limits > 0 and not short_cycle_return:
+        blockers.append("not_first_board_after_cooling")
     low_position = position is not None and position <= 0.55
     cooled_pullback = (
         pullback is not None
@@ -354,7 +380,7 @@ def _first_board_rules(candidate: Mapping[str, object]) -> tuple[list[str], list
         and days_since is not None
         and days_since >= 5
     )
-    if not (low_position or cooled_pullback):
+    if not (low_position or cooled_pullback or short_cycle_return):
         blockers.append("low_position_missing")
     else:
         favorable.append("low_position_or_cooled_pullback")
@@ -397,23 +423,55 @@ def _first_board_rules(candidate: Mapping[str, object]) -> tuple[list[str], list
         blockers.append("first_board_repair_setup_missing")
     else:
         favorable.append("prior_divergence_repair_setup")
-    return blockers, favorable
+    route = "divergence_repair" if not blockers else None
+    if _first_board_attack_passed(candidate, blockers, support_score):
+        blockers.clear()
+        favorable.append("weak_market_theme_attack_setup")
+        route = "weak_market_theme_attack"
+    return blockers, favorable, route
 
 
-def _first_board_premium_gate_passed(candidate: Mapping[str, object]) -> bool:
-    financial = candidate.get("financial_snapshot")
-    net_profit_yoy = (
-        _number(financial.get("net_profit_yoy"))
-        if isinstance(financial, Mapping)
-        else None
-    )
-    failed_rate = _number(candidate.get("prior_market_failed_rate"))
+def _first_board_attack_passed(
+    candidate: Mapping[str, object],
+    blockers: Sequence[str],
+    support_score: float | None,
+) -> bool:
+    blocker_set = set(blockers)
+    leader_rank = _integer_or_none(candidate.get("prior_industry_leader_rank"))
+    heat = _number(candidate.get("prior_industry_heat_score"))
     return bool(
-        _integer(candidate.get("prior_touch_count_126")) >= FIRST_BOARD_MIN_TOUCH_COUNT
-        and net_profit_yoy is not None
-        and net_profit_yoy >= FIRST_BOARD_MIN_NET_PROFIT_YOY
-        and failed_rate is not None
-        and failed_rate >= FIRST_BOARD_MIN_PRIOR_FAILED_RATE
+        blocker_set
+        and blocker_set <= FIRST_BOARD_ATTACK_SOFT_BLOCKERS
+        and _integer(candidate.get("prior_touch_count_126"))
+        >= FIRST_BOARD_ATTACK_MIN_TOUCH_COUNT
+        and support_score is not None
+        and support_score >= FIRST_BOARD_ATTACK_MIN_SUPPORT_SCORE
+        and heat is not None
+        and heat >= FIRST_BOARD_ATTACK_MIN_HEAT_SCORE
+        and leader_rank is not None
+        and leader_rank <= FIRST_BOARD_ATTACK_MAX_LEADER_RANK
+        and str(candidate.get("prior_market_phase") or "")
+        in FIRST_BOARD_ATTACK_PHASES
+    )
+
+
+def _short_cycle_return_board(candidate: Mapping[str, object]) -> bool:
+    days_since = _number(candidate.get("trade_days_since_prior_limit"))
+    pullback = _number(candidate.get("pullback_from_prior_limit_pct"))
+    prior_change = _number(candidate.get("prior_change_pct"))
+    auction_gap = _number(candidate.get("auction_gap_pct"))
+    return bool(
+        _integer(candidate.get("prior_streak")) == 0
+        and candidate.get("previous_limit_up") is not True
+        and _integer(candidate.get("prior_limit_count_5")) == 1
+        and days_since is not None
+        and 2 <= days_since <= 4
+        and pullback is not None
+        and pullback <= -8
+        and prior_change is not None
+        and prior_change < 0
+        and auction_gap is not None
+        and 1 <= auction_gap <= 7
     )
 
 

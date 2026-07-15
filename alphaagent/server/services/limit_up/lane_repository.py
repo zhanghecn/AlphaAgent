@@ -7,16 +7,21 @@ from collections import defaultdict
 from datetime import date, datetime
 from typing import Mapping, Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, session_scope
 from alphaagent.server.services.limit_up.domain import normalize_limit_time
-from alphaagent.server.services.limit_up.lane_features import classify_financial_risk
+from alphaagent.server.services.limit_up.lane_features import (
+    classify_financial_risk,
+    minute_bars_to_intraday_price_path,
+)
 from alphaagent.server.services.limit_up.repository import LIMIT_EVENT_TYPES
 
 FinancialIndex = dict[str, list[tuple[date, dict[str, object]]]]
 EventIndex = dict[tuple[str, date], dict[str, object]]
+MINUTE_PATH_QUERY_BATCH_SIZE = 500
+MINUTE_PATH_MIN_POINTS = 6
 
 
 def load_lane_research_data(
@@ -50,9 +55,23 @@ def load_lane_research_data(
         ]
 
     events = merge_rich_event_rows(event_rows)
+    missing_path_pairs = [
+        key for key, event in events.items() if not event.get("time_preview")
+    ]
+    minute_paths = load_event_minute_price_paths(missing_path_pairs)
+    events = merge_event_minute_price_paths(events, minute_paths)
     financials = build_financial_index(report_rows)
-    path_events = [event for event in events.values() if event.get("time_preview")]
+    preview_path_events = [
+        event for event in events.values() if event.get("time_preview")
+    ]
+    minute_path_events = [
+        event for event in events.values() if event.get("minute_price_path")
+    ]
+    path_events = [*preview_path_events, *minute_path_events]
     path_dates = sorted({event["trade_date"] for event in path_events})
+    minute_path_dates = sorted(
+        {event["trade_date"] for event in minute_path_events}
+    )
     event_dates = sorted({event["trade_date"] for event in events.values()})
     return events, financials, {
         "lane_event_count": len(events),
@@ -63,9 +82,113 @@ def load_lane_research_data(
         "intraday_path_trade_days": len(path_dates),
         "intraday_path_start": path_dates[0].isoformat() if path_dates else None,
         "intraday_path_end": path_dates[-1].isoformat() if path_dates else None,
+        "event_preview_path_count": len(preview_path_events),
+        "minute_fallback_path_count": len(minute_path_events),
+        "minute_fallback_path_trade_days": len(minute_path_dates),
+        "minute_fallback_path_start": (
+            minute_path_dates[0].isoformat() if minute_path_dates else None
+        ),
+        "minute_fallback_path_end": (
+            minute_path_dates[-1].isoformat() if minute_path_dates else None
+        ),
         "financial_report_count": len(report_rows),
         "financial_symbol_count": len(financials),
     }
+
+
+def load_event_minute_price_paths(
+    pairs: Sequence[tuple[str, date]],
+) -> dict[tuple[str, date], dict[str, object]]:
+    """Load and downsample minute bars only for event pairs with no rich path."""
+
+    requested = sorted(
+        {
+            (str(vt_symbol).strip(), trade_date)
+            for vt_symbol, trade_date in pairs
+            if str(vt_symbol).strip()
+        }
+    )
+    if not requested:
+        return {}
+
+    minute = schema.stock_minute_bars
+    result: dict[tuple[str, date], dict[str, object]] = {}
+    with session_scope() as session:
+        for offset in range(0, len(requested), MINUTE_PATH_QUERY_BATCH_SIZE):
+            batch = requested[offset : offset + MINUTE_PATH_QUERY_BATCH_SIZE]
+            rows = session.execute(
+                select(
+                    minute.c.vt_symbol,
+                    minute.c.trade_date,
+                    minute.c.bar_time,
+                    minute.c.open_price,
+                    minute.c.close_price,
+                    minute.c.source,
+                )
+                .where(
+                    tuple_(minute.c.vt_symbol, minute.c.trade_date).in_(batch),
+                    minute.c.interval == "1m",
+                )
+                .order_by(minute.c.vt_symbol, minute.c.trade_date, minute.c.bar_time)
+            ).mappings().all()
+            grouped: dict[tuple[str, date], list[Mapping[str, object]]] = defaultdict(list)
+            for row in rows:
+                grouped[(str(row["vt_symbol"]), row["trade_date"])].append(row)
+            for key, minute_rows in grouped.items():
+                path = minute_bars_to_intraday_price_path(minute_rows)
+                valid_points = sum(price is not None for price in path)
+                if valid_points < MINUTE_PATH_MIN_POINTS:
+                    continue
+                sources = sorted(
+                    {
+                        str(row.get("source") or "").strip()
+                        for row in minute_rows
+                        if str(row.get("source") or "").strip()
+                    }
+                )
+                result[key] = {
+                    "path": path,
+                    "source": "stock_minute_bars:"
+                    + (",".join(sources) if sources else "unknown"),
+                    "bar_count": len(minute_rows),
+                    "valid_point_count": valid_points,
+                }
+    return result
+
+
+def merge_event_minute_price_paths(
+    events: Mapping[tuple[str, date], Mapping[str, object]],
+    minute_paths: Mapping[tuple[str, date], Mapping[str, object]],
+) -> EventIndex:
+    """Attach minute price paths without replacing richer event previews."""
+
+    merged: EventIndex = {}
+    for key, event in events.items():
+        row = dict(event)
+        fallback = minute_paths.get(key)
+        if row.get("time_preview") or not isinstance(fallback, Mapping):
+            merged[key] = row
+            continue
+        path = fallback.get("path")
+        if not isinstance(path, Sequence) or isinstance(path, (str, bytes)):
+            merged[key] = row
+            continue
+        values = [_number(value) for value in path]
+        if sum(value is not None for value in values) < MINUTE_PATH_MIN_POINTS:
+            merged[key] = row
+            continue
+        row.update(
+            {
+                "minute_price_path": values,
+                "minute_path_bar_count": _integer(fallback.get("bar_count")),
+                "minute_path_valid_point_count": sum(
+                    value is not None for value in values
+                ),
+                "path_source": str(fallback.get("source") or "stock_minute_bars"),
+            }
+        )
+        merged[key] = row
+    return merged
 
 
 def merge_rich_event_rows(rows: Sequence[Mapping[str, object]]) -> EventIndex:

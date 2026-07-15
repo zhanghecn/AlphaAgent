@@ -76,6 +76,26 @@ def test_setup_tags_do_not_read_outcome_fields() -> None:
     )
 
 
+def test_weak_market_theme_attack_tag_is_explicit_and_point_in_time() -> None:
+    candidate = {
+        "outcome": {"sealed": True, "next_close_return_pct": 20.0},
+    }
+    changed = {
+        "outcome": {"sealed": False, "next_close_return_pct": -20.0},
+    }
+
+    assert detect_setup_tags(
+        candidate,
+        setup_type=None,
+        first_board_route="weak_market_theme_attack",
+    ) == ["weak_market_theme_attack"]
+    assert detect_setup_tags(
+        changed,
+        setup_type=None,
+        first_board_route="weak_market_theme_attack",
+    ) == ["weak_market_theme_attack"]
+
+
 def test_setup_tags_reject_values_outside_their_point_in_time_boundaries() -> None:
     assert "sandwich_board" not in detect_setup_tags(
         {
