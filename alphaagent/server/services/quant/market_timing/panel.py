@@ -159,34 +159,6 @@ def _carry_context_to_date(context: Any, target_date: date) -> Any:
     return replace(context, trade_date=target_date)
 
 
-def _resolve_current_direction(
-    latest: Any,
-    closes: list[float] | None = None,
-    up_ratios: list[float | None] | None = None,
-) -> str:
-    """当前方向只描述最新交易日区域，不把历史事件当作持仓状态。"""
-    if latest is None:
-        return "NEUTRAL"
-    reversal_gold = closes is not None and sig.is_reversal_gold(closes)
-    structural_breakdown = bool(
-        closes
-        and up_ratios is not None
-        and len(up_ratios) == len(closes)
-        and sig.is_structural_breakdown(
-            latest,
-            closes,
-            len(closes) - 1,
-            up_ratios[-1],
-        )
-    )
-    zone_direction, _ = sig.candidate_setup(
-        latest,
-        reversal_gold=reversal_gold,
-        structural_breakdown=structural_breakdown,
-    )
-    return zone_direction or "NEUTRAL"
-
-
 def _build_timing_series(
     factors: list[Any],
     events: list[Any],
@@ -208,6 +180,10 @@ def _build_timing_series(
         factors,
         aligned_closes,
         aligned_up_ratios,
+    )
+    active_directions = sig.build_active_directions(
+        [factor.trade_date for factor in factors],
+        events,
     )
     for index, factor in enumerate(factors):
         event = event_by_date.get(factor.trade_date)
@@ -235,6 +211,7 @@ def _build_timing_series(
                 "date": str(factor.trade_date),
                 "bull_force": factor.bull_force,
                 "bear_force": factor.bear_force,
+                "active_direction": active_directions[index],
                 "zone_direction": zone_direction or "NEUTRAL",
                 "danger_state": danger_states[index],
                 "phase": factor.phase,
@@ -260,8 +237,7 @@ def _build_overview(
     latest: Any,
     latest_signal: Any,
     index_bars: list[dict],
-    closes: list[float] | None = None,
-    up_ratios: list[float | None] | None = None,
+    current_direction: str,
     danger_state: str = sig.NORMAL,
 ) -> dict:
     if latest is None:
@@ -275,7 +251,7 @@ def _build_overview(
         "latest_date": factor_date,
         "factor_date": factor_date,
         "quote_date": quote_date,
-        "current_direction": _resolve_current_direction(latest, closes, up_ratios),
+        "current_direction": current_direction,
         "danger_state": danger_state,
         "phase": latest.phase,
         "phase_label": PHASE_LABELS.get(latest.phase, latest.phase),
@@ -452,6 +428,7 @@ def _compute_panel(session: Any, schema: Any) -> dict:
         factor_seq,
         factor_closes,
         factor_up_ratios,
+        confirmed_through=end if live_index_bar is not None else None,
     )
     accuracy = bt.evaluate(events, factor_bars)
     index_bars = _upsert_latest_bar(
@@ -474,14 +451,18 @@ def _compute_panel(session: Any, schema: Any) -> dict:
         if timing_series
         else sig.NORMAL
     )
+    current_direction = (
+        timing_series[-1]["active_direction"]
+        if timing_series
+        else "NEUTRAL"
+    )
 
     return {
         "overview": _build_overview(
             latest,
             latest_signal,
             index_bars,
-            factor_closes,
-            factor_up_ratios,
+            current_direction,
             latest_danger_state,
         ),
         "chart": _build_chart(index_bars, comp, events),

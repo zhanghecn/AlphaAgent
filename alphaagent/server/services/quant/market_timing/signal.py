@@ -328,6 +328,7 @@ def detect_events(
     factor_seq: list[MarketTimingFactors],
     closes: list[float] | None = None,
     up_ratios: list[float | None] | None = None,
+    confirmed_through: date | None = None,
 ) -> list[TimingSignal]:
     """检测金银区域进入事件，并记录次日确认状态。
 
@@ -343,6 +344,7 @@ def detect_events(
       - PENDING:     i 是序列末端无次日数据, 待确认
 
     closes 需与 factor_seq 同长度对齐(同交易日); closes=None 退回无确认模式(兼容旧调用/测试)。
+    confirmed_through 用于盘中载荷，只允许截止日及以前的确认正式生效。
     """
     events: list[TimingSignal] = []
     previous_zone: tuple[str, str] | None = None
@@ -442,6 +444,13 @@ def detect_events(
                 aligned_closes,
                 aligned_up_ratios,
             )
+        if (
+            confirm_index is not None
+            and confirmed_through is not None
+            and factor_seq[confirm_index].trade_date > confirmed_through
+        ):
+            status = STATUS_PENDING
+            confirm_index = None
         status_reason = status if aligned_closes is not None else "区域进入"
         reasons = [
             f"bull={f.bull_force:.1f}",

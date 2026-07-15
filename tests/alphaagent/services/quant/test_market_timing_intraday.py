@@ -367,38 +367,77 @@ def test_carried_intraday_context_uses_target_trade_date():
     assert previous.trade_date == date(2026, 7, 10)
 
 
-def test_current_direction_uses_latest_zone_without_carrying_historical_event():
-    day = date(2026, 7, 13)
+def test_timing_series_carries_confirmed_direction_through_neutral_zones():
+    start = date(2026, 6, 11)
+    factors = [
+        _factor(start + timedelta(days=index), "GOLD" if index == 0 else "NEUTRAL")
+        for index in range(5)
+    ]
+    events = [
+        _signal(
+            start,
+            "GOLD",
+            confirm_date=start + timedelta(days=1),
+        ),
+        _signal(
+            start + timedelta(days=3),
+            "SILVER",
+            status=sig.STATUS_PENDING,
+        ),
+    ]
 
-    assert mt_panel._resolve_current_direction(_factor(day, "GOLD")) == "GOLD"
-    assert mt_panel._resolve_current_direction(_factor(day, "NEUTRAL")) == "NEUTRAL"
-    assert mt_panel._resolve_current_direction(None) == "NEUTRAL"
+    rows = mt_panel._build_timing_series(factors, events)
+
+    assert [row["active_direction"] for row in rows] == [
+        "NEUTRAL",
+        "GOLD",
+        "GOLD",
+        "GOLD",
+        "GOLD",
+    ]
+    assert rows[-1]["zone_direction"] == "NEUTRAL"
 
 
-def test_current_direction_prioritizes_same_day_structural_breakdown():
-    factors, closes, up_ratios = _structural_panel_case()
-
-    assert mt_panel._resolve_current_direction(
-        factors[20],
-        closes[:21],
-        up_ratios[:21],
-    ) == "SILVER"
-    assert mt_panel._resolve_current_direction(
-        factors[20],
-        closes[:21],
-        None,
-    ) == "NEUTRAL"
-
+def test_overview_uses_active_direction_instead_of_latest_candidate_zone():
+    day = date(2026, 7, 15)
+    latest = _factor(day, "NEUTRAL")
+    gold = _signal(
+        date(2026, 6, 11),
+        "GOLD",
+        confirm_date=date(2026, 6, 12),
+    )
     overview = mt_panel._build_overview(
-        factors[20],
-        None,
-        [{"date": str(factors[20].trade_date), "close": closes[20]}],
-        closes[:21],
-        up_ratios[:21],
+        latest,
+        gold,
+        [
+            {"date": "2026-07-14", "close": 100.0},
+            {"date": str(day), "close": 99.0},
+        ],
+        "GOLD",
         sig.DANGER,
     )
-    assert overview["current_direction"] == "SILVER"
+
+    assert overview["current_direction"] == "GOLD"
+    assert overview["latest_signal"]["confirm_date"] == "2026-06-12"
     assert overview["danger_state"] == sig.DANGER
+
+
+def test_confirmation_cutoff_keeps_next_day_intraday_event_pending():
+    start = date(2026, 7, 14)
+    factors = [
+        _factor(start, "GOLD"),
+        _factor(start + timedelta(days=1), "NEUTRAL"),
+    ]
+
+    events = sig.detect_events(
+        factors,
+        [100.0, 101.0],
+        confirmed_through=start,
+    )
+
+    assert len(events) == 1
+    assert events[0].status == sig.STATUS_PENDING
+    assert events[0].confirm_date is None
 
 
 def test_timing_series_keeps_daily_dates_and_event_confirmation():
@@ -417,6 +456,11 @@ def test_timing_series_keeps_daily_dates_and_event_confirmation():
     rows = mt_panel._build_timing_series(factors, [event])
 
     assert [row["date"] for row in rows] == ["2026-07-06", "2026-07-07", "2026-07-08"]
+    assert [row["active_direction"] for row in rows] == [
+        "NEUTRAL",
+        "NEUTRAL",
+        "SILVER",
+    ]
     assert rows[0]["zone_direction"] == "NEUTRAL"
     assert rows[1]["zone_direction"] == "SILVER"
     assert rows[1]["event"] == {
