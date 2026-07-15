@@ -88,6 +88,26 @@ class TimingSignal:
     reasons: list[str] = field(default_factory=list)
 
 
+def build_active_directions(
+    trade_dates: list[date],
+    events: list[TimingSignal],
+) -> list[str]:
+    """从确认日起延续最近金银方向，不读取确认日之后的数据。"""
+    confirmed_by_date = {
+        event.confirm_date: event.direction
+        for event in events
+        if event.status == STATUS_CONFIRMED and event.confirm_date is not None
+    }
+    active = "NEUTRAL"
+    directions: list[str] = []
+    for trade_date in trade_dates:
+        confirmed = confirmed_by_date.get(trade_date)
+        if confirmed in {"GOLD", "SILVER"}:
+            active = confirmed
+        directions.append(active)
+    return directions
+
+
 def _grade(direction: str, bull: float, bear: float) -> str:
     """候选日的强度档位(仅参考, 不影响状态逻辑)。"""
     v = bull if direction == "GOLD" else bear

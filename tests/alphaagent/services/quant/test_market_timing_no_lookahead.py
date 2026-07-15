@@ -86,6 +86,74 @@ def _timing_factor(day: date, zone: str) -> fac.MarketTimingFactors:
     )
 
 
+def _event(
+    candidate_date: date,
+    direction: str,
+    status: str,
+    confirm_date: date | None,
+) -> sig.TimingSignal:
+    return sig.TimingSignal(
+        trade_date=candidate_date,
+        direction=direction,
+        status=status,
+        grade="WEAK",
+        bull_force=70.0 if direction == "GOLD" else 40.0,
+        bear_force=70.0 if direction == "SILVER" else 40.0,
+        phase="warming" if direction == "GOLD" else "retreat",
+        setup_type=(
+            sig.SETUP_TREND_GOLD
+            if direction == "GOLD"
+            else sig.SETUP_TOP_SILVER
+        ),
+        confirm_date=confirm_date,
+        reasons=[],
+    )
+
+
+def test_active_direction_starts_on_confirmation_and_persists_until_reversal():
+    start = date(2026, 6, 11)
+    dates = [start + timedelta(days=index) for index in range(6)]
+    events = [
+        _event(dates[0], "GOLD", sig.STATUS_CONFIRMED, dates[1]),
+        _event(dates[2], "SILVER", sig.STATUS_INVALIDATED, dates[3]),
+        _event(dates[4], "SILVER", sig.STATUS_PENDING, None),
+    ]
+
+    assert sig.build_active_directions(dates, events) == [
+        "NEUTRAL",
+        "GOLD",
+        "GOLD",
+        "GOLD",
+        "GOLD",
+        "GOLD",
+    ]
+
+    confirmed_reversal = events + [
+        _event(dates[4], "SILVER", sig.STATUS_CONFIRMED, dates[5]),
+    ]
+    assert sig.build_active_directions(dates, confirmed_reversal) == [
+        "NEUTRAL",
+        "GOLD",
+        "GOLD",
+        "GOLD",
+        "GOLD",
+        "SILVER",
+    ]
+
+
+def test_active_direction_history_is_stable_when_future_reversal_is_appended():
+    start = date(2026, 6, 11)
+    dates = [start + timedelta(days=index) for index in range(5)]
+    gold = _event(dates[0], "GOLD", sig.STATUS_CONFIRMED, dates[1])
+    silver = _event(dates[3], "SILVER", sig.STATUS_CONFIRMED, dates[4])
+
+    prefix = sig.build_active_directions(dates[:4], [gold])
+    complete = sig.build_active_directions(dates, [gold, silver])
+
+    assert complete[:4] == prefix
+    assert complete[-1] == "SILVER"
+
+
 def _ordinary_breakdown_factor(day: date) -> fac.MarketTimingFactors:
     return fac.MarketTimingFactors(
         trade_date=day,
