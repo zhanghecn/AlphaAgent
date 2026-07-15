@@ -1,6 +1,6 @@
 import { apiClient } from "./client";
 
-/** 金手指=看多 / 银手指=看空 / 中性观望 */
+/** 金手指=金行情 / 银手指=银行情，直到相反已确认手指反转 */
 export type TimingDirection = "GOLD" | "SILVER" | "NEUTRAL";
 export type TimingGrade = "STRONG" | "MEDIUM" | "WEAK" | "";
 export type TimingDangerState = "NORMAL" | "DANGER";
@@ -90,6 +90,7 @@ export interface TimingDailyState {
   date: string;
   bull_force: number;
   bear_force: number;
+  active_direction: TimingDirection;
   zone_direction: TimingDirection;
   danger_state: TimingDangerState;
   phase: string;

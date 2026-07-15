@@ -48,6 +48,7 @@ describe("market timing presentation", () => {
       date: `2026-07-${String(index + 1).padStart(2, "0")}`,
       bull_force: 50 + index,
       bear_force: 50 - index,
+      active_direction: index < 12 ? "GOLD" : "SILVER",
       zone_direction: "NEUTRAL",
       danger_state: index === 23 ? "DANGER" : "NORMAL",
       phase: "rotation",

@@ -85,7 +85,22 @@ export function TimingRecentTable({
               ))}
             </tr>
             <tr className="border-b border-border/50">
-              <th className="px-2 py-2 text-left font-medium text-muted-foreground">当日区域</th>
+              <th className="px-2 py-2 text-left font-medium text-muted-foreground">行情状态</th>
+              {rows.map((row) => (
+                <td
+                  key={row.date}
+                  className={cn("px-1 py-2 text-center font-medium", directionClass(row.active_direction))}
+                >
+                  {row.active_direction === "GOLD"
+                    ? "金行情"
+                    : row.active_direction === "SILVER"
+                      ? "银行情"
+                      : "中性"}
+                </td>
+              ))}
+            </tr>
+            <tr className="border-b border-border/50">
+              <th className="px-2 py-2 text-left font-medium text-muted-foreground">候选区域</th>
               {rows.map((row) => (
                 <td
                   key={row.date}
