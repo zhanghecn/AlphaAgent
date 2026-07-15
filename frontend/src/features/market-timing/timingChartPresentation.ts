@@ -55,10 +55,11 @@ export function buildTimingHoverSummaries(
   const stateByDate = new Map(series.map((state) => [state.date, state]));
   const confirmationsByDate = new Map<string, TimingConfirmation[]>();
   for (const state of series) {
-    const confirmDate = state.event?.confirm_date;
-    if (!confirmDate) continue;
+    const event = state.event;
+    if (!event?.confirm_date) continue;
+    const confirmDate = event.confirm_date;
     const confirmations = confirmationsByDate.get(confirmDate) ?? [];
-    confirmations.push({ candidateDate: state.date, event: state.event });
+    confirmations.push({ candidateDate: state.date, event });
     confirmationsByDate.set(confirmDate, confirmations);
   }
 

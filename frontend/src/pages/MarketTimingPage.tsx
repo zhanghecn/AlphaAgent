@@ -38,7 +38,11 @@ export function MarketTimingPage() {
 
       <TimingHero overview={data?.overview ?? null} loading={isLoading} />
 
-      <TimingChart chart={data?.chart ?? null} loading={isLoading} />
+      <TimingChart
+        chart={data?.chart ?? null}
+        series={data?.timing_series ?? []}
+        loading={isLoading}
+      />
 
       <TimingRecentTable series={data?.timing_series ?? []} loading={isLoading} />
 

@@ -91,7 +91,7 @@ function SignalRing({
         />
       </svg>
       <div className="absolute inset-0 flex flex-col items-center justify-center">
-        <span className="text-[10px] text-muted-foreground">当前行情</span>
+        <span className="text-[10px] text-muted-foreground">最近确认</span>
         <span
           className="font-display text-2xl font-bold leading-tight"
           style={{ color: centerColor, textShadow: direction === "NEUTRAL" ? "none" : `0 0 12px ${centerColor}66` }}
@@ -177,14 +177,14 @@ export function TimingHero({ overview, loading }: { overview: TimingOverview | n
           </div>
           {direction === "NEUTRAL" && (
             <p className="text-sm text-muted-foreground">
-              当前无金银信号 · 因子截至 {factorDate}
+              尚无已确认金银手指 · 因子截至 {factorDate}
             </p>
           )}
           {direction !== "NEUTRAL" && activeSignal && (
             <p className="flex flex-wrap gap-x-1 text-sm text-muted-foreground">
-              <span>本轮{DIRECTION_LABEL[direction]}</span>
+              <span>最近确认{DIRECTION_LABEL[direction]}</span>
               <span>· {activeSignal.confirm_date ?? activeSignal.date} 确认</span>
-              <span>· 持续至{reversalLabel}确认</span>
+              <span>· 尚无{reversalLabel}反转</span>
             </p>
           )}
         </div>
