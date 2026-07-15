@@ -15,22 +15,22 @@
 **Files:**
 - Modify: `tests/alphaagent/services/quant/test_market_timing_backtest.py`
 
-- [ ] **Step 1: 添加逐日状态桶测试**
+- [x] **Step 1: 添加逐日状态桶测试**
 
 用可手算的收盘序列和金银状态断言 `1/3/5` 日收益、方向命中、方向收益、
 不利波动和 `adverse_3pct`。测试必须包含金和银，避免只验证方向翻转公式的一侧。
 
-- [ ] **Step 2: 添加时间切分测试**
+- [x] **Step 2: 添加时间切分测试**
 
 指定 `split_date`，断言 `ALL/EARLY/LATE` 的状态日数和结果来自正确日期，边界日
 属于 `LATE`。
 
-- [ ] **Step 3: 添加状态区间测试**
+- [x] **Step 3: 添加状态区间测试**
 
 构造 `NEUTRAL → GOLD → SILVER → GOLD`，断言覆盖天数、区间数、平均长度、
 转换次数和不超过 3 日的短区间数。
 
-- [ ] **Step 4: 运行测试确认缺少实现**
+- [x] **Step 4: 运行测试确认缺少实现**
 
 ```bash
 uv run --group server pytest tests/alphaagent/services/quant/test_market_timing_backtest.py -q
@@ -43,22 +43,22 @@ Expected: 新测试因缺少状态评估接口失败。
 **Files:**
 - Modify: `alphaagent/server/services/quant/market_timing/backtest.py`
 
-- [ ] **Step 1: 增加 `STATE_HORIZONS` 和 `StateBucketStat`**
+- [x] **Step 1: 增加 `STATE_HORIZONS` 和 `StateBucketStat`**
 
 固定周期为 `(1, 3, 5, 10, 20)`；数据类包含 period、direction、horizon、count、
 hit_rate、avg_return、avg_directional_return、avg_adverse_excursion、
 worst_adverse_excursion、adverse_3pct_rate。
 
-- [ ] **Step 2: 实现 `evaluate_direction_states`**
+- [x] **Step 2: 实现 `evaluate_direction_states`**
 
 要求状态和 bar 等长；空输入返回空报告，长度不一致抛 `ValueError`。函数只使用
 未来价格生成标签，并输出 `ALL/EARLY/LATE` 桶和 `executable=false`。
 
-- [ ] **Step 3: 实现状态运行统计**
+- [x] **Step 3: 实现状态运行统计**
 
 忽略首个确认前的中性，按连续金银区间统计覆盖、运行长度、转换和短区间。
 
-- [ ] **Step 4: 运行状态评估测试**
+- [x] **Step 4: 运行状态评估测试**
 
 Expected: PASS。
 
@@ -68,22 +68,22 @@ Expected: PASS。
 - Modify: `tests/alphaagent/services/quant/test_market_timing_backtest.py`
 - Modify: `alphaagent/server/services/quant/market_timing/backtest.py`
 
-- [ ] **Step 1: 添加波动冲击与趋势破位测试**
+- [x] **Step 1: 添加波动冲击与趋势破位测试**
 
 分别构造满足 A、B 分支的金状态日，断言只从该日开始切银。参与度缺失、空头未
 反超、动量非负时不得切换。
 
-- [ ] **Step 2: 添加确认金恢复和前缀稳定测试**
+- [x] **Step 2: 添加确认金恢复和前缀稳定测试**
 
 银状态只在已确认金事件到达时恢复；污染未来 bar 和 factor 后，切分日前状态完全
 不变。
 
-- [ ] **Step 3: 实现 `build_volatility_hysteresis_directions`**
+- [x] **Step 3: 实现 `build_volatility_hysteresis_directions`**
 
 输入 factors、bars 和 v8 确认事件，验证日期及长度对齐。波动率只使用当前日前
 20 日收益；基础确认事件先更新方向，再判断当日金转银保护。
 
-- [ ] **Step 4: 运行全部市场择时测试**
+- [x] **Step 4: 运行全部市场择时测试**
 
 ```bash
 uv run --group server pytest \
@@ -99,18 +99,18 @@ Expected: PASS。
 **Files:**
 - Modify: `scripts/market_timing_eval.py`
 
-- [ ] **Step 1: 构造三个状态版本**
+- [x] **Step 1: 构造三个状态版本**
 
 `v8` 排除 `GOLD_FAILURE_SILVER`，`v9` 使用全部事件，`VOL_HYSTERESIS` 使用 v8
 确认事件加研究保护。断言三个状态序列与 bar 等长。
 
-- [ ] **Step 2: 打印状态运行摘要和 5 日核心表**
+- [x] **Step 2: 打印状态运行摘要和 5 日核心表**
 
 输出各版本 `ALL/EARLY/LATE` 的金银 5 日命中率、平均收益、3% 不利波动率，
 以及覆盖天数、转换和短区间数。详细 1/3/5/10/20 日结果保留在返回结构中供报告
 提取。
 
-- [ ] **Step 3: 运行真实脚本**
+- [x] **Step 3: 运行真实脚本**
 
 ```bash
 docker compose exec -T alphaagent-api python - < scripts/market_timing_eval.py
@@ -124,16 +124,16 @@ Expected: 事件报告仍为 v9 的 65 个事件，随后出现三版本状态�
 - Create: `memory/06_backtests/market_timing_state_validation_2026_07_15.md`
 - Modify: `memory/07_market_timing/market_timing_design.md`
 
-- [ ] **Step 1: 写入真实对照报告**
+- [x] **Step 1: 写入真实对照报告**
 
 报告记录数据区间、三版本定义、完整核心统计、时间切分结果、是否达到决策标准和
 样本限制。不得只写结论而省略失败指标。
 
-- [ ] **Step 2: 更新概览记忆**
+- [x] **Step 2: 更新概览记忆**
 
 只加入当前结论、验证命令和详细报告链接；生产 v9 若未变，明确写“未修改”。
 
-- [ ] **Step 3: 最终验证**
+- [x] **Step 3: 最终验证**
 
 ```bash
 uv run --group server pytest \
@@ -145,7 +145,7 @@ pnpm --dir frontend run build
 git diff --check
 ```
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 只暂存市场择时 backtest、测试、评估脚本、requirements 和 memory 文件，不纳入
 其他并行需求文件。

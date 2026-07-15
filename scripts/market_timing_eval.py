@@ -22,6 +22,7 @@ from alphaagent.server.services.quant.market_timing import signal as sig
 
 START = date(2024, 5, 28)
 END = date.today()
+STATE_SPLIT = date(2025, 7, 1)
 
 
 def main() -> int:
@@ -68,7 +69,7 @@ def main() -> int:
             flush=True,
         )
 
-        print("检测信号事件(v7 通用 setup+结构危险区+次日确认) ...", flush=True)
+        print("检测信号事件(v9 精度银+金失败保护+次日审计) ...", flush=True)
         events = sig.detect_events(
             factor_seq,
             [bar.close for bar in factor_bars],
@@ -88,10 +89,46 @@ def main() -> int:
         print("评估历史表现 ...", flush=True)
         report = bt.evaluate(events, factor_bars)
         danger_report = _evaluate_danger_states(factor_seq, factor_bars)
+        state_directions = _build_state_variants(
+            factor_seq,
+            factor_bars,
+            events,
+        )
+        state_reports = {
+            name: bt.evaluate_direction_states(
+                directions,
+                factor_bars,
+                split_date=STATE_SPLIT,
+            )
+            for name, directions in state_directions.items()
+        }
 
     _print_report(report)
     _print_danger_report(danger_report)
+    _print_state_comparison(state_directions, state_reports, factor_bars)
     return 0
+
+
+def _build_state_variants(
+    factors: list[fac.MarketTimingFactors],
+    bars: list[ser.CompositeBar],
+    events: list[sig.TimingSignal],
+) -> dict[str, list[str]]:
+    dates = [bar.trade_date for bar in bars]
+    v8_events = [
+        event
+        for event in events
+        if event.setup_type != sig.SETUP_GOLD_FAILURE_SILVER
+    ]
+    return {
+        "V8_STRICT": sig.build_active_directions(dates, v8_events),
+        "V9_CURRENT": sig.build_active_directions(dates, events),
+        "VOL_HYSTERESIS": bt.build_volatility_hysteresis_directions(
+            factors,
+            bars,
+            v8_events,
+        ),
+    }
 
 
 def _evaluate_danger_states(
@@ -242,6 +279,109 @@ def _print_danger_report(report: dict) -> None:
         f"正常状态 {normal['count']} 日: 次日平均 {normal['avg_return_1d']:+.3f}% | "
         f"未来5日最大回撤<=-3% {normal['drawdown_3_rate'] * 100:.1f}%"
     )
+
+
+def _print_state_comparison(
+    variants: dict[str, list[str]],
+    reports: dict[str, dict],
+    bars: list[ser.CompositeBar],
+) -> None:
+    print("\n" + "=" * 110)
+    print("持续金银状态对照（日级样本重叠，观察性统计，非成交收益）")
+    print("=" * 110)
+    print(f"固定切分: EARLY < {STATE_SPLIT} <= LATE")
+
+    v8 = variants["V8_STRICT"]
+    v9 = variants["V9_CURRENT"]
+    first_difference = next(
+        (
+            (bars[index].trade_date, v8[index], v9[index])
+            for index in range(len(bars))
+            if v8[index] != v9[index]
+        ),
+        None,
+    )
+    print(f"v8/v9 首个状态差异: {first_difference or '无'}")
+
+    print("\n--- 状态运行摘要 ---")
+    print(
+        f"{'版本':<18}{'金天数':>8}{'银天数':>8}{'金区间':>8}"
+        f"{'银区间':>8}{'转换':>8}{'短金':>8}{'短银':>8}{'最新':>10}"
+    )
+    for name, report in reports.items():
+        runs = report["runs"]
+        print(
+            f"{name:<18}"
+            f"{runs['coverage_days']['GOLD']:>8}"
+            f"{runs['coverage_days']['SILVER']:>8}"
+            f"{runs['run_count']['GOLD']:>8}"
+            f"{runs['run_count']['SILVER']:>8}"
+            f"{runs['transition_count']:>8}"
+            f"{runs['short_run_count']['GOLD']:>8}"
+            f"{runs['short_run_count']['SILVER']:>8}"
+            f"{runs['latest_direction']:>10}"
+        )
+
+    print("\n--- 未来 5 日核心指标 ---")
+    print(
+        f"{'版本':<18}{'区间':<8}{'方向':<8}{'天数':>7}{'命中':>8}"
+        f"{'均收益':>10}{'方向均收益':>12}{'3%不利':>10}{'平均不利':>11}{'最坏不利':>11}"
+    )
+    for name, report in reports.items():
+        for period in ("ALL", "EARLY", "LATE"):
+            for direction in ("GOLD", "SILVER"):
+                bucket = next(
+                    (
+                        item
+                        for item in report["buckets"]
+                        if item.period == period
+                        and item.direction == direction
+                        and item.horizon == 5
+                    ),
+                    None,
+                )
+                if bucket is None:
+                    continue
+                direction_label = "金" if direction == "GOLD" else "银"
+                print(
+                    f"{name:<18}{period:<8}{direction_label:<8}{bucket.count:>7}"
+                    f"{bucket.hit_rate * 100:>7.1f}%"
+                    f"{bucket.avg_return:>+9.2f}%"
+                    f"{bucket.avg_directional_return:>+11.2f}%"
+                    f"{bucket.adverse_3pct_rate * 100:>9.1f}%"
+                    f"{bucket.avg_adverse_excursion:>+10.2f}%"
+                    f"{bucket.worst_adverse_excursion:>+10.2f}%"
+                )
+
+    print("\n--- 全样本多周期方向稳定性 ---")
+    print(
+        f"{'版本':<18}{'方向':<8}{'周期':>7}{'天数':>8}{'命中':>9}"
+        f"{'均收益':>11}{'方向均收益':>13}{'3%不利':>11}"
+    )
+    for name, report in reports.items():
+        for direction in ("GOLD", "SILVER"):
+            for horizon in bt.STATE_HORIZONS:
+                bucket = next(
+                    (
+                        item
+                        for item in report["buckets"]
+                        if item.period == "ALL"
+                        and item.direction == direction
+                        and item.horizon == horizon
+                    ),
+                    None,
+                )
+                if bucket is None:
+                    continue
+                direction_label = "金" if direction == "GOLD" else "银"
+                print(
+                    f"{name:<18}{direction_label:<8}{horizon:>6}d{bucket.count:>8}"
+                    f"{bucket.hit_rate * 100:>8.1f}%"
+                    f"{bucket.avg_return:>+10.2f}%"
+                    f"{bucket.avg_directional_return:>+12.2f}%"
+                    f"{bucket.adverse_3pct_rate * 100:>10.1f}%"
+                )
+    print("\n口径: 状态日收盘起算 | executable=False | overlapping_daily_samples=True")
 
 
 def _print_bucket_table(title: str, buckets: list[bt.BucketStat]) -> None:

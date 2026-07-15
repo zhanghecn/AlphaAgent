@@ -58,8 +58,8 @@ mom_5d < 0
 - `return_pct`：`close[t+h] / close[t] - 1`。
 - `correct`：金要求收益大于 0，银要求收益小于 0。
 - `directional_return_pct`：金使用原收益，银使用相反数；大于 0 统一表示方向正确。
-- `adverse_excursion_pct`：金取未来窗口最低价相对 `t` 的收益，银取未来窗口
-  最高价相对 `t` 的收益。
+- `adverse_excursion_pct`：金取 `min(0, 未来窗口最低收盘收益)`，银取
+  `max(0, 未来窗口最高收盘收益)`；整个窗口没有逆向走势时统一记为 0。
 - `adverse_3pct`：金的未来窗口最低收益 `<=-3%`，或银的未来窗口最高反弹
   `>=+3%`。
 
