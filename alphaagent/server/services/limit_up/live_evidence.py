@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
+from collections.abc import Mapping
 from datetime import date
-from typing import Mapping
+from math import isfinite
+from statistics import mean
 
 from alphaagent.market.cache import TTLCache
 from alphaagent.server.services.limit_up import history_engine, history_repository
+from alphaagent.server.services.limit_up.first_board_profitability import (
+    combined_historical_win_rate,
+)
 
 _ANALOG_CACHE = TTLCache(max_items=8)
+_STOCK_D1_CACHE = TTLCache(max_items=8)
 _CONFIDENCE_POINTS = {"low": 4.0, "medium": 7.0, "high": 10.0}
+_STOCK_GENE_HISTORY_WINDOW_DAYS = 252
+_STOCK_GENE_MINIMUM_D1_SAMPLES = 5
 
 
 def tbox_score(analog: Mapping[str, object]) -> float:
@@ -38,6 +47,7 @@ def tbox_score(analog: Mapping[str, object]) -> float:
 
 def clear_live_evidence_cache() -> None:
     _ANALOG_CACHE.clear()
+    _STOCK_D1_CACHE.clear()
 
 
 def load_history_analog_index(
@@ -67,10 +77,102 @@ def load_history_analog_index(
     return _ANALOG_CACHE.get_or_set(cache_key, 3600, load)
 
 
+def build_same_stock_first_board_d1_index(
+    replay_days: list[Mapping[str, object]],
+    *,
+    signal_date: date,
+    history_window_days: int = _STOCK_GENE_HISTORY_WINDOW_DAYS,
+) -> dict[str, dict[str, object]]:
+    """Build prior-only same-stock sealed first-board D+1 evidence."""
+
+    if history_window_days <= 0:
+        raise ValueError("history_window_days must be positive")
+    prior_days = [
+        day
+        for day in sorted(
+            replay_days,
+            key=lambda row: str(row.get("trade_date") or ""),
+        )
+        if (trade_date := _date_value(day.get("trade_date"))) is not None
+        and trade_date < signal_date
+    ][-history_window_days:]
+    returns_by_symbol: dict[str, list[float]] = defaultdict(list)
+    for day in prior_days:
+        portfolio = day.get("lane_portfolio")
+        portfolio = portfolio if isinstance(portfolio, Mapping) else {}
+        pools = portfolio.get("candidate_pool")
+        pools = pools if isinstance(pools, Mapping) else {}
+        candidates = pools.get("first_board")
+        candidates = candidates if isinstance(candidates, list) else []
+        for candidate in candidates:
+            if not isinstance(candidate, Mapping):
+                continue
+            result_date = _date_value(candidate.get("result_date"))
+            outcome = candidate.get("outcome")
+            outcome = outcome if isinstance(outcome, Mapping) else {}
+            return_pct = _number(outcome.get("next_close_return_pct"))
+            symbol = str(candidate.get("vt_symbol") or "")
+            if (
+                not symbol
+                or str(candidate.get("lane") or "first_board") != "first_board"
+                or result_date is None
+                or result_date >= signal_date
+                or outcome.get("touched") is not True
+                or outcome.get("sealed") is not True
+                or return_pct is None
+                or not isfinite(return_pct)
+            ):
+                continue
+            returns_by_symbol[symbol].append(return_pct)
+    return {
+        symbol: {
+            "sample_count": len(returns),
+            "win_count": sum(value > 0 for value in returns),
+            "win_rate": round(
+                sum(value > 0 for value in returns) / len(returns) * 100,
+                4,
+            ),
+            "average_return_pct": round(mean(returns), 4),
+        }
+        for symbol, returns in returns_by_symbol.items()
+        if returns
+    }
+
+
+def load_same_stock_first_board_d1_index(
+    signal_date: date,
+) -> Mapping[str, Mapping[str, object]]:
+    coverage = history_repository.history_coverage(
+        history_engine.HISTORY_STRATEGY_VERSION
+    )
+    cache_key = ":".join(
+        (
+            history_engine.HISTORY_STRATEGY_VERSION,
+            str(coverage.get("persisted_end") or "empty"),
+            str(coverage.get("persisted_days") or 0),
+            signal_date.isoformat(),
+        )
+    )
+
+    def load() -> dict[str, dict[str, object]]:
+        replays = history_repository.load_history_range(
+            history_engine.HISTORY_STRATEGY_VERSION,
+            None,
+            signal_date,
+        )
+        return build_same_stock_first_board_d1_index(
+            replays,
+            signal_date=signal_date,
+        )
+
+    return _STOCK_D1_CACHE.get_or_set(cache_key, 3600, load)
+
+
 def attach_historical_evidence(
     snapshot: Mapping[str, object],
     *,
     analog_index: Mapping[tuple[object, ...], object] | None = None,
+    stock_d1_index: Mapping[str, Mapping[str, object]] | None = None,
 ) -> dict[str, object]:
     """Attach prior-only analog statistics to every live recommendation lane."""
 
@@ -81,6 +183,11 @@ def attach_historical_evidence(
         analog_index
         if analog_index is not None
         else load_history_analog_index(signal_date)
+    )
+    resolved_stock_d1_index = (
+        stock_d1_index
+        if stock_d1_index is not None
+        else load_same_stock_first_board_d1_index(signal_date)
     )
     candidates = snapshot.get("candidates")
     candidates = candidates if isinstance(candidates, list) else []
@@ -106,6 +213,7 @@ def attach_historical_evidence(
                 str(lane),
                 signal_date,
                 resolved_index,
+                resolved_stock_d1_index,
             )
             for signal in signals
             if isinstance(signal, Mapping)
@@ -121,6 +229,7 @@ def _with_evidence(
     lane: str,
     signal_date: date,
     analog_index: Mapping[tuple[object, ...], object],
+    stock_d1_index: Mapping[str, Mapping[str, object]],
 ) -> dict[str, object]:
     entry_mode, target_board, feature_scope = _route_context(signal, candidate, lane)
     analog_candidate = {
@@ -141,12 +250,76 @@ def _with_evidence(
         "tbox_score": tbox_score(analog),
         **analog,
     }
+    if target_board == 1:
+        evidence.update(
+            _same_stock_first_board_evidence(
+                candidate,
+                stock_d1_index.get(str(signal.get("vt_symbol") or ""), {}),
+            )
+        )
+    else:
+        for key in (
+            "seal_sample_count",
+            "seal_success_rate",
+            "d1_money_effect_sample_count",
+            "d1_money_effect_win_rate",
+            "d1_money_effect_average_return_pct",
+            "historical_win_rate",
+        ):
+            evidence.pop(key, None)
     result = {**dict(signal), "historical_evidence": evidence}
     if veto_reasons and str(result.get("action") or "") in {"buy_now", "next_auction"}:
         result["action"] = "pass"
         result["execution_state"] = "cancelled"
         result["reason"] = "历史证据否决：" + "；".join(veto_reasons)
     return result
+
+
+def _same_stock_first_board_evidence(
+    candidate: Mapping[str, object],
+    stock_d1: Mapping[str, object],
+) -> dict[str, object]:
+    touch_count = int(_number(candidate.get("prior_touch_count_126")) or 0)
+    seal_count = int(_number(candidate.get("prior_limit_count_126")) or 0)
+    seal_rate = _fraction_percentage(
+        candidate.get("prior_seal_success_rate_126")
+    )
+    if seal_rate is None and touch_count > 0:
+        seal_rate = round(seal_count / touch_count * 100, 4)
+    sample_count = int(_number(stock_d1.get("sample_count")) or 0)
+    win_count = int(_number(stock_d1.get("win_count")) or 0)
+    d1_win_rate = _bounded_percentage(stock_d1.get("win_rate"))
+    average_return = _number(stock_d1.get("average_return_pct"))
+    return {
+        "stock_gene_status": (
+            "ready"
+            if sample_count >= _STOCK_GENE_MINIMUM_D1_SAMPLES
+            else "limited"
+            if sample_count > 0
+            else "insufficient"
+        ),
+        "historical_win_rate_method": (
+            "same_stock_126d_seal_x_same_stock_first_board_d1_close_net_profit"
+        ),
+        "d1_exit_proxy": "next_close",
+        "stock_gene_history_window_days": _STOCK_GENE_HISTORY_WINDOW_DAYS,
+        "stock_gene_minimum_d1_samples": _STOCK_GENE_MINIMUM_D1_SAMPLES,
+        "stock_gene_sample_qualified": (
+            sample_count >= _STOCK_GENE_MINIMUM_D1_SAMPLES
+        ),
+        "stock_gene_touch_count": touch_count,
+        "stock_gene_seal_count": seal_count,
+        "stock_d1_win_count": win_count,
+        "seal_sample_count": touch_count,
+        "seal_success_rate": seal_rate,
+        "d1_money_effect_sample_count": sample_count,
+        "d1_money_effect_win_rate": d1_win_rate,
+        "d1_money_effect_average_return_pct": average_return,
+        "historical_win_rate": combined_historical_win_rate(
+            d1_win_rate,
+            seal_rate,
+        ),
+    }
 
 
 def _risk_veto_reasons(analog: Mapping[str, object]) -> list[str]:
@@ -229,6 +402,20 @@ def _number(value: object) -> float | None:
         return float(value) if value not in (None, "", "-") else None
     except (TypeError, ValueError):
         return None
+
+
+def _bounded_percentage(value: object) -> float | None:
+    number = _number(value)
+    return number if number is not None and 0 <= number <= 100 else None
+
+
+def _fraction_percentage(value: object) -> float | None:
+    number = _number(value)
+    if number is None or number < 0:
+        return None
+    if number <= 1:
+        return round(number * 100, 4)
+    return round(number, 4) if number <= 100 else None
 
 
 def _scaled_points(

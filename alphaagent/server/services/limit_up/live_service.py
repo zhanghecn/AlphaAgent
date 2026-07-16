@@ -36,6 +36,9 @@ from alphaagent.server.services.limit_up.live_evidence import attach_historical_
 from alphaagent.server.services.limit_up.first_board_dual_lane import (
     attach_rotation_shadow,
 )
+from alphaagent.server.services.limit_up.first_board_profitability import (
+    rank_first_board_signals,
+)
 from alphaagent.server.services.limit_up.lane_research import (
     classify_board_lane,
     evaluate_lane_candidate,
@@ -1073,11 +1076,20 @@ def _apply_live_risk_gates(
     recommendations = result.get("recommendations")
     recommendations = recommendations if isinstance(recommendations, Mapping) else {}
     validated = apply_lane_validation_veto(recommendations, lane_validations)
+    validated = _rank_first_board_recommendations(validated)
+    validated = _apply_first_board_profitability_gate(validated)
     captured_at = _parsed_datetime(result.get("captured_at")) or datetime.now(SHANGHAI)
     quality = result.get("data_quality")
     quality = quality if isinstance(quality, Mapping) else {}
     snapshot_age = _integer(quality.get("snapshot_age_seconds"), 0)
     validated["execution_schedule"] = scheduled_execution.execution_clock(captured_at)
+    validated["actionable_recommendations"] = (
+        _build_live_actionable_recommendations(
+            validated,
+            captured_at=captured_at,
+            snapshot_age_seconds=snapshot_age,
+        )
+    )
     validated["portfolio"] = _build_live_portfolio(
         validated,
         captured_at=captured_at,
@@ -1085,6 +1097,45 @@ def _apply_live_risk_gates(
     )
     validated["watchlist"] = _build_live_watchlist(validated)
     return {**result, "recommendations": validated}
+
+
+def _rank_first_board_recommendations(
+    recommendations: Mapping[str, object],
+) -> dict[str, object]:
+    result = dict(recommendations)
+    lanes = recommendations.get("lanes")
+    lanes = lanes if isinstance(lanes, Mapping) else {}
+    result["lanes"] = {
+        str(lane): rank_first_board_signals(
+            signals if isinstance(signals, list) else []
+        )
+        for lane, signals in lanes.items()
+    }
+    return result
+
+
+def _apply_first_board_profitability_gate(
+    recommendations: Mapping[str, object],
+) -> dict[str, object]:
+    result = dict(recommendations)
+    lanes = recommendations.get("lanes")
+    lanes = lanes if isinstance(lanes, Mapping) else {}
+    annotated_lanes: dict[str, list[dict[str, object]]] = {}
+    for lane_name, raw_signals in lanes.items():
+        signals = raw_signals if isinstance(raw_signals, list) else []
+        annotated_lanes[str(lane_name)] = [
+            {
+                **dict(signal),
+                **scheduled_execution.first_board_profitability_gate(signal),
+            }
+            for signal in signals
+            if isinstance(signal, Mapping)
+        ]
+    result["lanes"] = annotated_lanes
+    result["profitability_filter"] = (
+        scheduled_execution.first_board_profitability_filter_metadata()
+    )
+    return result
 
 
 def _apply_signal_validation(
@@ -1133,6 +1184,38 @@ def _build_live_portfolio(
     captured_at: datetime | None = None,
     snapshot_age_seconds: int = 0,
 ) -> list[dict[str, object]]:
+    return _build_live_buy_list(
+        recommendations,
+        captured_at=captured_at,
+        snapshot_age_seconds=snapshot_age_seconds,
+        require_portfolio_selection=True,
+        limit=scheduled_execution.MAX_POSITIONS,
+    )
+
+
+def _build_live_actionable_recommendations(
+    recommendations: Mapping[str, object],
+    *,
+    captured_at: datetime | None = None,
+    snapshot_age_seconds: int = 0,
+) -> list[dict[str, object]]:
+    return _build_live_buy_list(
+        recommendations,
+        captured_at=captured_at,
+        snapshot_age_seconds=snapshot_age_seconds,
+        require_portfolio_selection=False,
+        limit=None,
+    )
+
+
+def _build_live_buy_list(
+    recommendations: Mapping[str, object],
+    *,
+    captured_at: datetime | None,
+    snapshot_age_seconds: int,
+    require_portfolio_selection: bool,
+    limit: int | None,
+) -> list[dict[str, object]]:
     lanes = recommendations.get("lanes")
     lanes = lanes if isinstance(lanes, Mapping) else {}
     selected: dict[str, dict[str, object]] = {}
@@ -1143,15 +1226,20 @@ def _build_live_portfolio(
             if not isinstance(raw_signal, Mapping):
                 continue
             signal = dict(raw_signal)
-            symbol = str(signal.get("vt_symbol") or "")
-            research_action = str(
-                signal.get("research_action") or signal.get("action") or "pass"
+            signal.update(
+                scheduled_execution.first_board_profitability_gate(signal)
             )
+            symbol = str(signal.get("vt_symbol") or "")
+            action = str(signal.get("action") or "pass")
             if (
                 not symbol
-                or signal.get("portfolio_selected") is not True
+                or (
+                    require_portfolio_selection
+                    and signal.get("portfolio_selected") is not True
+                )
                 or str(signal.get("board_lane") or "") not in PORTFOLIO_EXECUTION_LANES
-                or research_action not in {"buy_now", "observe"}
+                or action != "buy_now"
+                or signal.get("profitability_gate_passed") is not True
                 or signal.get("missed_preseal_entry") is True
             ):
                 continue
@@ -1164,12 +1252,14 @@ def _build_live_portfolio(
                 selected[symbol] = signal
     local_at = captured_at or datetime.now(SHANGHAI)
     schedule = scheduled_execution.execution_clock(local_at)
-    return [
+    ordered = sorted(selected.values(), key=_live_portfolio_sort_key)
+    if limit is not None:
+        ordered = ordered[:limit]
+    scheduled = [
         _scheduled_live_signal(signal, schedule, snapshot_age_seconds)
-        for signal in sorted(selected.values(), key=_live_portfolio_sort_key)[
-            : scheduled_execution.MAX_POSITIONS
-        ]
+        for signal in ordered
     ]
+    return [signal for signal in scheduled if signal.get("action") == "buy_now"]
 
 
 def _scheduled_live_signal(
@@ -1198,10 +1288,8 @@ def _scheduled_live_signal(
             "reason": reason,
             "pending_reasons": [reason],
         }
-    research_action = str(
-        signal.get("research_action") or signal.get("action") or "pass"
-    )
-    if research_action != "buy_now":
+    action = str(signal.get("action") or "pass")
+    if action != "buy_now":
         return {
             **result,
             "action": "observe",
@@ -1231,7 +1319,7 @@ def _scheduled_live_signal(
 
 
 def _live_portfolio_sort_key(signal: Mapping[str, object]) -> tuple[object, ...]:
-    action = str(signal.get("research_action") or signal.get("action") or "pass")
+    action = str(signal.get("action") or "pass")
     action_priority = {
         "buy_now": 0,
         "next_auction": 1,
@@ -1243,9 +1331,14 @@ def _live_portfolio_sort_key(signal: Mapping[str, object]) -> tuple[object, ...]
     history = history if isinstance(history, Mapping) else {}
     strategy = signal.get("strategy_evidence")
     strategy = strategy if isinstance(strategy, Mapping) else {}
+    first_board = str(signal.get("board_lane") or "") == "first_board"
     return (
         action_priority,
         scheduled_execution.execution_lane_priority(signal.get("board_lane")),
+        -(_number(history.get("historical_win_rate")) or 0.0)
+        if first_board
+        else 0.0,
+        -(_number(signal.get("change_pct")) or 0.0) if first_board else 0.0,
         -(_number(history.get("tbox_score")) or 0.0),
         -(_number(history.get("smoothed_win_rate")) or 0.0),
         -(_number(strategy.get("total_return_pct")) or 0.0),
@@ -1313,15 +1406,17 @@ def _build_live_watchlist(
                 ),
                 "reason": f"等待触发：{original_reason}",
             }
-    return sorted(observations.values(), key=_live_watchlist_sort_key)[
-        :LIVE_WATCHLIST_LIMIT
-    ]
+    ordered = rank_first_board_signals(
+        sorted(observations.values(), key=_live_watchlist_sort_key)
+    )
+    return ordered[:LIVE_WATCHLIST_LIMIT]
 
 
 def _can_transition_to_live_buy(signal: Mapping[str, object]) -> bool:
     signal_state = str(signal.get("signal_state") or "observing")
     return (
         str(signal.get("blocking_scope") or "") != "structural"
+        and signal.get("profitability_gate_passed") is not False
         and signal_state not in {"rejected", "missed", "invalidated"}
         and signal.get("missed_preseal_entry") is not True
     )
@@ -1880,7 +1975,11 @@ def downgrade_snapshot_to_stale(
         },
         "lanes": stale_lanes,
     }
-    for collection in ("portfolio", "watchlist"):
+    for collection in (
+        "actionable_recommendations",
+        "portfolio",
+        "watchlist",
+    ):
         if isinstance(recommendations.get(collection), list):
             stale_recommendations[collection] = cancelled_signals(
                 recommendations[collection]

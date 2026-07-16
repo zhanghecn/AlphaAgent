@@ -1446,7 +1446,6 @@ def test_lane_backtest_only_counts_daily_selected_portfolio(monkeypatch) -> None
         "load_account_daily_bars",
         lambda *_args: [],
     )
-
     report = history_service.get_lane_history_backtest(
         None,
         None,
@@ -1681,8 +1680,28 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
             "next_close_return_pct": 13.33,
         },
     }
-    day["lane_portfolio"]["selected"] = [first, relay]
-    day["lane_portfolio"]["candidate_pool"]["first_board"] = [first]
+    second_first = {
+        **first,
+        "vt_symbol": "600003.SSE",
+        "name": "首板负样本",
+        "signal_time": "10:08:00",
+        "buy_time": "10:08:00",
+        "entry_price": 10.0,
+        "limit_price": 10.0,
+        "outcome": {
+            **first["outcome"],
+            "entry_day_close_price": 10.0,
+            "next_open_price": 9.2,
+            "next_close_price": 9.2,
+            "next_open_return_pct": -8.0,
+            "next_close_return_pct": -8.0,
+        },
+    }
+    day["lane_portfolio"]["selected"] = [first, relay, second_first]
+    day["lane_portfolio"]["candidate_pool"]["first_board"] = [
+        first,
+        second_first,
+    ]
     day["lane_portfolio"]["candidate_pool"]["two_to_three"] = [relay]
     day["board_lanes"]["two_to_three"] = [relay]
     monkeypatch.setattr(
@@ -1696,6 +1715,24 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
         history_service.history_repository,
         "load_account_daily_bars",
         lambda *_args: [],
+    )
+    monkeypatch.setattr(
+        history_service.first_board_stock_gene_research,
+        "attach_prior_stock_gene_evidence_to_orders",
+        lambda _days, orders: [
+            {
+                **order,
+                **(
+                    {
+                        "stock_d1_sample_count": 5,
+                        "stock_gene_combined_win_rate": 30.0,
+                    }
+                    if order.get("lane") == "first_board"
+                    else {}
+                ),
+            }
+            for order in orders
+        ],
     )
     monkeypatch.setattr(
         history_service.history_repository,
@@ -1726,7 +1763,7 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
     assert report["account_config"]["initial_cash"] == 100_000
     assert report["account_config"]["max_positions"] == 2
     assert report["summary"] == report["execution_summary"]
-    assert report["summary"]["signal_count"] == 2
+    assert report["summary"]["signal_count"] == 3
     assert report["summary"]["trade_count"] == 2
     assert report["summary"]["total_return_pct"] == report["daily_results"][-1]["total_return_pct"]
     assert report["execution_schedule"]["entry_windows"] == ["10:00-11:30", "13:00-14:30"]
@@ -1735,7 +1772,7 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
     assert report["execution_comparability"]["live_equivalent"] is False
     assert "intraday_sector_fund_flow" in report["execution_comparability"]["missing_evidence"]
     assert report["coverage"]["minute_1430_count"] == 1
-    assert report["coverage"]["daily_close_proxy_count"] == 1
+    assert report["coverage"]["daily_close_proxy_count"] == 2
     assert set(report["stress_tests"]) == {"double_cost"}
     assert report["stress_tests"]["double_cost"]["total_return_pct"] is not None
     assert report["position_sizing_audit"]["selected_max_positions"] == 2
@@ -1749,6 +1786,39 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
         "two_to_three",
     ]
     assert report["portfolio_policy"]["excluded_lanes"] == ["high_board"]
+    assert report["profitability_filter"]["minimum_d1_samples"] == 5
+    assert report["profitability_filter"]["minimum_combined_rate"] == 30.0
+    assert report["profitability_filter"]["audit"]["input_count"] == 3
+    assert report["profitability_filter"]["audit"]["selected_count"] == 3
+    assert report["profitability_filter"]["audit"]["reason_counts"] == {
+        "not_first_board": 1,
+        "qualified": 2,
+    }
+    assert report["profitability_filter"]["selected_summary"] == report["summary"]
+    assert report["profitability_filter"]["unfiltered_summary"]["signal_count"] == 3
+    quality = report["recommendation_quality"]
+    assert quality["mode"] == "independent_standard_slot_daily_equal_weight"
+    assert quality["position_constraints_applied"] is False
+    assert quality["standard_slot_cash"] == 50_000
+    assert quality["summary"]["signal_count"] == 3
+    assert quality["summary"]["trade_count"] == 3
+    assert quality["summary"]["win_rate"] == pytest.approx(66.6667)
+    assert quality["summary"]["average_return_pct"] is not None
+    assert quality["summary"]["total_return_pct"] is not None
+    assert quality["summary"]["max_drawdown_pct"] is not None
+    assert report["signal_summary"] == quality["summary"]
+    selected_quality = report["profitability_filter"][
+        "selected_recommendation_quality"
+    ]
+    unfiltered_quality = report["profitability_filter"][
+        "unfiltered_recommendation_quality"
+    ]
+    assert selected_quality["summary"]["signal_count"] == 3
+    assert unfiltered_quality["summary"]["signal_count"] == 3
+    quality_delta = report["profitability_filter"]["delta"]
+    assert quality_delta["recommendation_win_rate_pct_points"] == 0.0
+    assert quality_delta["recommendation_average_return_pct_points"] == 0.0
+    assert quality_delta["recommendation_total_return_pct_points"] == 0.0
     assert report["relay_comparison"]["selected_variant"] == (
         "first_board_two_to_three"
     )

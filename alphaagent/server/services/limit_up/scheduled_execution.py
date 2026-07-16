@@ -5,12 +5,16 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, time
+from math import isfinite
 from zoneinfo import ZoneInfo
 
 from alphaagent.server.services.limit_up.lane_features import first_reseal_time
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-SCHEDULED_EXECUTION_VERSION = "limit-up-scheduled-v4"
+SCHEDULED_EXECUTION_VERSION = "limit-up-scheduled-v5"
+FIRST_BOARD_PROFITABILITY_FILTER_VERSION = "first-board-profitability-gate-v1"
+FIRST_BOARD_MIN_D1_SAMPLES = 5
+FIRST_BOARD_MIN_COMBINED_RATE = 30.0
 MAX_POSITIONS = 2
 TARGET_POSITION_PCT = 50.0
 MAX_SNAPSHOT_AGE_SECONDS = 20
@@ -162,6 +166,102 @@ def next_session_execution_clock() -> dict[str, object]:
         "max_positions": MAX_POSITIONS,
         "target_position_pct": TARGET_POSITION_PCT,
         "max_snapshot_age_seconds": MAX_SNAPSHOT_AGE_SECONDS,
+    }
+
+
+def first_board_profitability_filter_metadata() -> dict[str, object]:
+    """Return the single public contract for the frozen first-board gate."""
+
+    return {
+        "version": FIRST_BOARD_PROFITABILITY_FILTER_VERSION,
+        "minimum_d1_samples": FIRST_BOARD_MIN_D1_SAMPLES,
+        "minimum_combined_rate": FIRST_BOARD_MIN_COMBINED_RATE,
+        "applies_to": "first_board",
+        "two_to_three": "unchanged",
+    }
+
+
+def first_board_profitability_gate(
+    candidate: Mapping[str, object],
+) -> dict[str, object]:
+    """Evaluate the frozen same-stock profitability gate for one signal."""
+
+    applies = _is_first_board(candidate)
+    evidence = candidate.get("historical_evidence")
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    sample_value = candidate.get("stock_d1_sample_count")
+    if sample_value is None:
+        sample_value = evidence.get("d1_money_effect_sample_count")
+    combined_value = candidate.get("stock_gene_combined_win_rate")
+    if combined_value is None:
+        combined_value = evidence.get("historical_win_rate")
+    sample_count = max(_integer(sample_value), 0) if applies else None
+    combined_rate = _optional_number(combined_value) if applies else None
+    if combined_rate is not None and not 0 <= combined_rate <= 100:
+        combined_rate = None
+
+    passed = True
+    reason = "not_first_board"
+    if applies and sample_count < FIRST_BOARD_MIN_D1_SAMPLES:
+        passed = False
+        reason = f"same_stock_d1_samples_below_{FIRST_BOARD_MIN_D1_SAMPLES}"
+    elif applies and combined_rate is None:
+        passed = False
+        reason = "same_stock_joint_rate_unavailable"
+    elif applies and combined_rate < FIRST_BOARD_MIN_COMBINED_RATE:
+        passed = False
+        reason = (
+            "same_stock_joint_rate_below_"
+            f"{FIRST_BOARD_MIN_COMBINED_RATE:g}"
+        )
+    elif applies:
+        reason = "qualified"
+    return {
+        "profitability_gate_version": FIRST_BOARD_PROFITABILITY_FILTER_VERSION,
+        "profitability_gate_applies": applies,
+        "profitability_gate_passed": passed,
+        "profitability_gate_reason": reason,
+        "profitability_gate_minimum_d1_samples": FIRST_BOARD_MIN_D1_SAMPLES,
+        "profitability_gate_minimum_combined_rate": (
+            FIRST_BOARD_MIN_COMBINED_RATE
+        ),
+        "profitability_gate_sample_count": sample_count,
+        "profitability_gate_combined_rate": combined_rate,
+    }
+
+
+def filter_profitability_qualified_orders(
+    orders: Sequence[Mapping[str, object]],
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    """Keep chronological orders admitted by the frozen profitability gate."""
+
+    selected: list[dict[str, object]] = []
+    reason_counts: Counter[str] = Counter()
+    first_board_count = 0
+    first_board_selected_count = 0
+    for raw_order in orders:
+        order = dict(raw_order)
+        decision = first_board_profitability_gate(order)
+        order.update(decision)
+        reason_counts[str(decision["profitability_gate_reason"])] += 1
+        if decision["profitability_gate_applies"] is True:
+            first_board_count += 1
+        if decision["profitability_gate_passed"] is not True:
+            continue
+        if decision["profitability_gate_applies"] is True:
+            first_board_selected_count += 1
+        selected.append(order)
+    return selected, {
+        **first_board_profitability_filter_metadata(),
+        "input_count": len(orders),
+        "selected_count": len(selected),
+        "excluded_count": len(orders) - len(selected),
+        "first_board_input_count": first_board_count,
+        "first_board_selected_count": first_board_selected_count,
+        "first_board_excluded_count": (
+            first_board_count - first_board_selected_count
+        ),
+        "reason_counts": dict(sorted(reason_counts.items())),
     }
 
 
@@ -325,6 +425,22 @@ def _number(value: object) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _optional_number(value: object) -> float | None:
+    try:
+        number = float(value) if value not in (None, "", "-") else None
+    except (TypeError, ValueError):
+        return None
+    return number if number is not None and isfinite(number) else None
+
+
+def _is_first_board(candidate: Mapping[str, object]) -> bool:
+    lane = str(candidate.get("lane") or candidate.get("board_lane") or "")
+    if lane:
+        return lane == "first_board"
+    board_level = _optional_number(candidate.get("board_level"))
+    return board_level is not None and board_level <= 1
 
 
 def _integer(value: object, default: int = 0) -> int:

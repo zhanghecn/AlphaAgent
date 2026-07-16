@@ -52,6 +52,14 @@ export interface LimitUpExecutionSchedule {
   max_snapshot_age_seconds: number;
 }
 
+export interface LimitUpProfitabilityFilterMetadata {
+  version: string;
+  minimum_d1_samples: number;
+  minimum_combined_rate: number;
+  applies_to?: "first_board" | string;
+  two_to_three?: "unchanged" | string;
+}
+
 export interface LimitUpLiveSignal {
   vt_symbol: string;
   name: string;
@@ -99,6 +107,14 @@ export interface LimitUpLiveSignal {
   pending_reasons?: string[];
   execution_permission?: "research_only" | string;
   scheduled_execution_version?: string;
+  profitability_gate_version?: string;
+  profitability_gate_applies?: boolean;
+  profitability_gate_passed?: boolean;
+  profitability_gate_reason?: string;
+  profitability_gate_minimum_d1_samples?: number;
+  profitability_gate_minimum_combined_rate?: number;
+  profitability_gate_sample_count?: number | null;
+  profitability_gate_combined_rate?: number | null;
   target_position_pct?: number;
   state?: "near_limit" | "sealed" | "resealed" | "failed" | string;
   distance_to_limit_pct?: number | null;
@@ -132,6 +148,21 @@ export interface LimitUpLiveSignal {
   historical_evidence?: {
     status?: string;
     smoothed_win_rate: number | null;
+    historical_win_rate?: number | null;
+    historical_win_rate_method?: "seal_success_x_d1_close_net_profit" | string;
+    d1_money_effect_win_rate?: number | null;
+    d1_money_effect_average_return_pct?: number | null;
+    d1_money_effect_sample_count?: number;
+    seal_success_rate?: number | null;
+    seal_sample_count?: number;
+    stock_gene_status?: "ready" | "limited" | "insufficient" | string;
+    stock_gene_history_window_days?: number;
+    stock_gene_minimum_d1_samples?: number;
+    stock_gene_sample_qualified?: boolean;
+    stock_gene_touch_count?: number;
+    stock_gene_seal_count?: number;
+    stock_d1_win_count?: number;
+    d1_exit_proxy?: "next_close" | string;
     average_return_pct?: number | null;
     hard_loss_rate?: number | null;
     seal_after_touch_rate?: number | null;
@@ -171,9 +202,11 @@ export interface LimitUpSignalSnapshot {
       reasons: string[];
     };
     lanes: Record<LimitUpLane, LimitUpLiveSignal[]>;
+    actionable_recommendations?: LimitUpLiveSignal[];
     portfolio?: LimitUpLiveSignal[];
     watchlist?: LimitUpLiveSignal[];
     execution_schedule?: LimitUpExecutionSchedule;
+    profitability_filter?: LimitUpProfitabilityFilterMetadata;
     plan?: LimitUpPlanMetadata;
     board_lane_validations?: Partial<Record<BoardLaneKey, {
       passed: boolean;
@@ -378,6 +411,54 @@ export interface LimitUpEntrySummary {
   peak_utilization_pct?: number;
 }
 
+export interface LimitUpRecommendationQuality {
+  mode: "independent_standard_slot_daily_equal_weight" | string;
+  position_constraints_applied: false;
+  standard_slot_cash: number;
+  costs_included: boolean;
+  daily_aggregation: "mean_net_return_by_exit_date" | string;
+  summary: LimitUpEntrySummary;
+  daily_results: LimitUpRecommendationDailyResult[];
+  skipped_reasons: Record<string, number>;
+}
+
+export interface LimitUpRecommendationDailyResult {
+  result_date: string;
+  trade_count: number;
+  daily_return_pct: number;
+  equity: number;
+  total_return_pct: number;
+  drawdown_pct: number;
+}
+
+export interface LimitUpBacktestProfitabilityFilter extends LimitUpProfitabilityFilterMetadata {
+  audit: {
+    input_count: number;
+    selected_count: number;
+    excluded_count: number;
+    first_board_input_count: number;
+    first_board_selected_count: number;
+    first_board_excluded_count: number;
+    reason_counts: Record<string, number>;
+  };
+  selected_summary: LimitUpEntrySummary;
+  unfiltered_summary: LimitUpEntrySummary;
+  selected_recommendation_quality: LimitUpRecommendationQuality;
+  unfiltered_recommendation_quality: LimitUpRecommendationQuality;
+  selected_phase_summaries: Record<string, LimitUpEntrySummary>;
+  unfiltered_phase_summaries: Record<string, LimitUpEntrySummary>;
+  selected_double_cost: LimitUpEntrySummary;
+  unfiltered_double_cost: LimitUpEntrySummary;
+  delta: {
+    trade_count: number;
+    win_rate_pct_points: number;
+    total_return_pct_points: number;
+    recommendation_win_rate_pct_points: number;
+    recommendation_average_return_pct_points: number;
+    recommendation_total_return_pct_points: number;
+  };
+}
+
 export interface LimitUpLaneLedgerTrade {
   lane: BoardLaneKey;
   vt_symbol: string;
@@ -453,11 +534,13 @@ export interface LimitUpLaneBacktest {
   status: string;
   mode: string;
   strategy_version: string;
+  history_strategy_version?: string;
   lane: LimitUpBacktestScope;
   exit_mode: ExitMode;
   summary: LimitUpEntrySummary;
   execution_summary: LimitUpEntrySummary;
   signal_summary: LimitUpEntrySummary;
+  recommendation_quality?: LimitUpRecommendationQuality;
   account_config: {
     initial_cash: number;
     max_positions: number;
@@ -476,6 +559,7 @@ export interface LimitUpLaneBacktest {
     configured_lanes?: BoardLaneKey[];
     configuration_matches_gate?: boolean;
   };
+  profitability_filter?: LimitUpBacktestProfitabilityFilter;
   execution_schedule?: {
     entry_windows: string[];
     exit_time: string;

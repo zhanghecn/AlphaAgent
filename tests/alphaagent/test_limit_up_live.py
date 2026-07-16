@@ -248,10 +248,18 @@ def test_live_portfolio_prefers_same_frame_relay_then_first_board() -> None:
             "action": action,
             "research_action": action,
             "leadership_score": 80.0,
-            "historical_evidence": {
-                "tbox_score": tbox,
-                "smoothed_win_rate": win_rate,
-            },
+                "historical_evidence": {
+                    "tbox_score": tbox,
+                    "smoothed_win_rate": win_rate,
+                    **(
+                        {
+                            "d1_money_effect_sample_count": 5,
+                            "historical_win_rate": 30.0,
+                        }
+                        if lane == "first_board"
+                        else {}
+                    ),
+                },
             "strategy_evidence": {"total_return_pct": compound},
         }
 
@@ -300,7 +308,7 @@ def test_live_portfolio_prefers_same_frame_relay_then_first_board() -> None:
     assert all(row["sell_instruction"] == "D+1 14:30 统一卖出" for row in portfolio)
 
 
-def test_live_portfolio_observes_lunch_and_when_snapshot_is_old() -> None:
+def test_live_portfolio_is_empty_outside_entry_window_or_when_snapshot_is_old() -> None:
     recommendations = {
         "lanes": {
             "now": [
@@ -308,10 +316,14 @@ def test_live_portfolio_observes_lunch_and_when_snapshot_is_old() -> None:
                     "vt_symbol": "600001.SSE",
                     "board_lane": "first_board",
                     "portfolio_selected": True,
-                    "action": "pass",
+                    "action": "buy_now",
                     "research_action": "buy_now",
                     "reason": "研究买点成立",
-                    "historical_evidence": {"tbox_score": 80.0},
+                    "historical_evidence": {
+                        "tbox_score": 80.0,
+                        "d1_money_effect_sample_count": 5,
+                        "historical_win_rate": 30.0,
+                    },
                     "strategy_evidence": {"total_return_pct": 20.0},
                 }
             ],
@@ -327,27 +339,40 @@ def test_live_portfolio_observes_lunch_and_when_snapshot_is_old() -> None:
     )[0]
     assert continuous["action"] == "buy_now"
     assert continuous["signal_state"] == "trigger_ready"
+    assert len(
+        live_service._build_live_actionable_recommendations(
+            recommendations,
+            captured_at=datetime(2026, 7, 14, 10, 20, tzinfo=SHANGHAI),
+            snapshot_age_seconds=5,
+        )
+    ) == 1
 
     paused = live_service._build_live_portfolio(
         recommendations,
         captured_at=datetime(2026, 7, 14, 12, 0, tzinfo=SHANGHAI),
         snapshot_age_seconds=5,
-    )[0]
-    assert paused["action"] == "observe"
-    assert paused["signal_state"] == "observing"
-    assert paused["reason"] == "午间休市，13:00恢复连续评估"
+    )
+    assert paused == []
+    assert live_service._build_live_actionable_recommendations(
+        recommendations,
+        captured_at=datetime(2026, 7, 14, 12, 0, tzinfo=SHANGHAI),
+        snapshot_age_seconds=5,
+    ) == []
 
     stale = live_service._build_live_portfolio(
         recommendations,
         captured_at=datetime(2026, 7, 14, 10, 5, tzinfo=SHANGHAI),
         snapshot_age_seconds=21,
-    )[0]
-    assert stale["action"] == "observe"
-    assert stale["signal_state"] == "invalidated"
-    assert "超过20秒" in stale["reason"]
+    )
+    assert stale == []
+    assert live_service._build_live_actionable_recommendations(
+        recommendations,
+        captured_at=datetime(2026, 7, 14, 10, 5, tzinfo=SHANGHAI),
+        snapshot_age_seconds=21,
+    ) == []
 
 
-def test_live_portfolio_keeps_structurally_selected_observation_without_promoting_it() -> None:
+def test_live_portfolio_excludes_structurally_selected_observation() -> None:
     recommendations = {
         "lanes": {
             "now": [
@@ -377,11 +402,7 @@ def test_live_portfolio_keeps_structurally_selected_observation_without_promotin
         snapshot_age_seconds=5,
     )
 
-    assert len(portfolio) == 1
-    assert portfolio[0]["action"] == "observe"
-    assert portfolio[0]["signal_state"] == "approaching_trigger"
-    assert portfolio[0]["pending_reasons"] == ["板块触板2/3只"]
-    assert portfolio[0]["reason"] == "板块触板2/3只"
+    assert portfolio == []
 
 
 def test_live_watchlist_only_keeps_candidates_that_can_transition_to_buy() -> None:
@@ -982,6 +1003,9 @@ def test_live_read_prefers_same_day_snapshot_during_lunch(monkeypatch) -> None:
         "mode": "live_snapshot",
         "recommendations": {
             "market_gate": {"passed": True, "reasons": []},
+            "actionable_recommendations": [
+                {"action": "buy_now", "entry_kind": "sweep", "reason": "旧买点"}
+            ],
             "portfolio": [{"action": "buy_now", "entry_kind": "sweep", "reason": "旧买点"}],
             "watchlist": [{"action": "observe", "entry_kind": "sweep", "reason": "旧观察"}],
             "lanes": {
@@ -1005,6 +1029,7 @@ def test_live_read_prefers_same_day_snapshot_during_lunch(monkeypatch) -> None:
     assert result["session_stage"] == "lunch"
     assert result["mode"] == "stale_snapshot"
     assert result["recommendations"]["lanes"]["now"][0]["action"] == "pass"
+    assert result["recommendations"]["actionable_recommendations"][0]["action"] == "pass"
     assert result["recommendations"]["portfolio"][0]["action"] == "pass"
     assert result["recommendations"]["watchlist"][0]["action"] == "pass"
     assert "午间休市" in result["recommendations"]["lanes"]["now"][0]["reason"]
@@ -1491,7 +1516,11 @@ def test_live_signals_include_only_matured_point_in_time_analogs() -> None:
         result_before=date(2026, 7, 10),
     )
 
-    result = attach_historical_evidence(snapshot, analog_index=analog_index)
+    result = attach_historical_evidence(
+        snapshot,
+        analog_index=analog_index,
+        stock_d1_index={},
+    )
 
     evidence = result["recommendations"]["lanes"]["now"][0]["historical_evidence"]
     assert evidence["entry_mode"] == "sweep"
@@ -2491,7 +2520,11 @@ def test_negative_matured_history_vetoes_rule_buy() -> None:
         result_before=date(2026, 7, 10),
     )
 
-    result = attach_historical_evidence(snapshot, analog_index=analog_index)
+    result = attach_historical_evidence(
+        snapshot,
+        analog_index=analog_index,
+        stock_d1_index={},
+    )
 
     signal = result["recommendations"]["lanes"]["now"][0]
     assert signal["action"] == "pass"

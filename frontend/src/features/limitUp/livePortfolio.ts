@@ -17,31 +17,23 @@ export function liveSignalsForScope(
   scope: LimitUpLiveScope,
 ): LimitUpLiveSignal[] {
   if (!snapshot) return [];
-  if (scope === "portfolio" && snapshot.recommendations.portfolio !== undefined) {
+  const directRecommendations = (
+    snapshot.recommendations.actionable_recommendations
+    ?? snapshot.recommendations.portfolio
+  );
+  if (scope === "portfolio" && directRecommendations !== undefined) {
     const portfolio = new Map<string, LimitUpLiveSignal>();
-    for (const signal of snapshot.recommendations.portfolio) {
-      const lane = signal.board_lane ?? boardLaneForLevel(signal.board_level);
-      if (!lane || !PORTFOLIO_LANES.has(lane) || !canTransitionToBuy(signal)) continue;
-      if (!portfolio.has(signal.vt_symbol)) portfolio.set(signal.vt_symbol, signal);
-    }
-    const portfolioRows = [...portfolio.values()].slice(0, 2);
-    const selectedSymbols = new Set(portfolioRows.map((signal) => signal.vt_symbol));
-    const observations = new Map<string, LimitUpLiveSignal>();
-    for (const signal of snapshot.recommendations.watchlist ?? []) {
+    for (const signal of directRecommendations) {
       const lane = signal.board_lane ?? boardLaneForLevel(signal.board_level);
       if (
         !lane
         || !PORTFOLIO_LANES.has(lane)
+        || signal.action !== "buy_now"
         || !canTransitionToBuy(signal)
-        || selectedSymbols.has(signal.vt_symbol)
-        || observations.has(signal.vt_symbol)
       ) continue;
-      observations.set(signal.vt_symbol, signal);
+      if (!portfolio.has(signal.vt_symbol)) portfolio.set(signal.vt_symbol, signal);
     }
-    const observationRows = [...observations.values()]
-      .sort(liveSignalSort)
-      .slice(0, 6);
-    return [...portfolioRows, ...observationRows].slice(0, 8);
+    return [...portfolio.values()];
   }
 
   const rows = Object.values(snapshot.recommendations.lanes).flat();
@@ -52,15 +44,15 @@ export function liveSignalsForScope(
       !canTransitionToBuy(signal)
       || !lane
       || (scope === "portfolio" ? !PORTFOLIO_LANES.has(lane) : lane !== scope)
+      || (scope === "portfolio" && signal.action !== "buy_now")
     ) continue;
     const current = selected.get(signal.vt_symbol);
     if (!current || actionPriority(signal.action) < actionPriority(current.action)) {
       selected.set(signal.vt_symbol, signal);
     }
   }
-  return [...selected.values()]
-    .sort(liveSignalSort)
-    .slice(0, scope === "portfolio" ? 8 : 4);
+  const sorted = [...selected.values()].sort(liveSignalSort);
+  return scope === "portfolio" ? sorted : sorted.slice(0, 4);
 }
 
 function canTransitionToBuy(signal: LimitUpLiveSignal): boolean {

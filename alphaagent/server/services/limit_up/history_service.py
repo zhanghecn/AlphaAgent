@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from datetime import date, datetime, timezone
 from statistics import mean, median
 import threading
-from typing import Mapping, Sequence
 
 from alphaagent.market.cache import TTLCache
 from alphaagent.server.services.limit_up import (
     cash_backtest,
     factor_audit,
     first_board_dual_lane,
+    first_board_stock_gene_research,
     history_engine,
     history_repository,
     lane_repository,
@@ -895,6 +896,19 @@ def _limit_scheduled_report(
     }
 
 
+def _filtered_scheduled_orders(
+    rows: Sequence[Mapping[str, object]],
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    extracted = scheduled_execution.extract_scheduled_orders(rows)
+    enriched = (
+        first_board_stock_gene_research.attach_prior_stock_gene_evidence_to_orders(
+            rows,
+            extracted,
+        )
+    )
+    return scheduled_execution.filter_profitability_qualified_orders(enriched)
+
+
 def _frozen_position_sizing_audit(
     *,
     rows: Sequence[Mapping[str, object]] | None = None,
@@ -921,7 +935,7 @@ def _frozen_position_sizing_audit(
         full_orders = (
             list(orders)
             if orders is not None
-            else scheduled_execution.extract_scheduled_orders(full_rows)
+            else _filtered_scheduled_orders(full_rows)[0]
         )
         if bars is not None and trade_dates is not None:
             full_bars = list(bars)
@@ -948,12 +962,29 @@ def _build_scheduled_history_backtest(
         end,
         False,
     )
-    variant_orders = {
+    evidence_rows = (
+        rows
+        if start is None
+        else history_repository.load_history_range(
+            history_engine.HISTORY_STRATEGY_VERSION,
+            None,
+            end,
+            False,
+        )
+    )
+    extracted_variant_orders = {
         name: scheduled_execution.extract_scheduled_orders(
             rows,
             included_lanes=lanes,
         )
         for name, lanes in SCHEDULED_VARIANT_LANES.items()
+    }
+    variant_orders = {
+        name: first_board_stock_gene_research.attach_prior_stock_gene_evidence_to_orders(
+            evidence_rows,
+            orders,
+        )
+        for name, orders in extracted_variant_orders.items()
     }
     union_orders = scheduled_execution.extract_scheduled_orders(
         rows,
@@ -1016,23 +1047,40 @@ def _build_scheduled_history_backtest(
     selected_variant = (
         gate_selected_variant if configuration_matches_gate else "first_board"
     )
-    selected_bundle = variant_bundles[selected_variant]
-    orders = variant_orders[selected_variant]
+    unfiltered_bundle = variant_bundles[selected_variant]
+    unfiltered_orders = variant_orders[selected_variant]
+    orders, profitability_audit = (
+        scheduled_execution.filter_profitability_qualified_orders(
+            unfiltered_orders
+        )
+    )
+    selected_bundle = _scheduled_variant_bundle(
+        orders,
+        bars,
+        trade_dates,
+        config,
+        double_cost_config,
+    )
     account = selected_bundle["account"]
     summary = selected_bundle["summary"]
     phase_summaries = selected_bundle["phase_summaries"]
     double_cost_summary = selected_bundle["double_cost_summary"]
+    recommendation_quality = _recommendation_quality_report(
+        orders,
+        bars,
+        trade_dates,
+        config,
+    )
+    unfiltered_recommendation_quality = _recommendation_quality_report(
+        unfiltered_orders,
+        bars,
+        trade_dates,
+        config,
+    )
     exit_coverage = _scheduled_exit_coverage(bars, orders)
     executed_trades = account["executed_trades"]
-    signal_daily_results, signal_return, signal_drawdown = _signal_daily_equity(
-        executed_trades
-    )
-    signal_summary = _summary(
-        orders,
-        executed_trades,
-        total_return_pct=signal_return,
-        max_drawdown_pct=signal_drawdown,
-    )
+    signal_daily_results = recommendation_quality["daily_results"]
+    signal_summary = recommendation_quality["summary"]
     position_sizing_audit = _frozen_position_sizing_audit(
         rows=rows if start is None and end is None else None,
         orders=orders if start is None and end is None else None,
@@ -1057,6 +1105,7 @@ def _build_scheduled_history_backtest(
         "summary": summary,
         "execution_summary": summary,
         "signal_summary": signal_summary,
+        "recommendation_quality": recommendation_quality,
         "phase_summaries": phase_summaries,
         "daily_results": account["equity_curve"],
         "signal_daily_results": signal_daily_results,
@@ -1096,10 +1145,84 @@ def _build_scheduled_history_backtest(
                 for lane in scheduled_execution.RESEARCH_EXECUTION_LANES
                 if lane not in selected_lanes
             ],
-            "selection_basis": "complete_active_candidate_pools_in_event_order",
+            "selection_basis": (
+                "complete_active_candidate_pools_in_event_order_then_"
+                "first_board_profitability_gate"
+            ),
             "candidate_source": "complete_active_lane_candidate_pools",
             "configured_lanes": configured_lanes,
             "configuration_matches_gate": configuration_matches_gate,
+        },
+        "profitability_filter": {
+            **scheduled_execution.first_board_profitability_filter_metadata(),
+            "audit": profitability_audit,
+            "selected_summary": dict(summary),
+            "unfiltered_summary": dict(unfiltered_bundle["summary"]),
+            "selected_recommendation_quality": recommendation_quality,
+            "unfiltered_recommendation_quality": (
+                unfiltered_recommendation_quality
+            ),
+            "selected_phase_summaries": {
+                phase: dict(phase_summary)
+                for phase, phase_summary in phase_summaries.items()
+            },
+            "unfiltered_phase_summaries": {
+                phase: dict(phase_summary)
+                for phase, phase_summary in unfiltered_bundle[
+                    "phase_summaries"
+                ].items()
+            },
+            "selected_double_cost": dict(double_cost_summary),
+            "unfiltered_double_cost": dict(
+                unfiltered_bundle["double_cost_summary"]
+            ),
+            "delta": {
+                "trade_count": int(summary.get("trade_count") or 0)
+                - int(unfiltered_bundle["summary"].get("trade_count") or 0),
+                "win_rate_pct_points": round(
+                    (_number(summary.get("win_rate")) or 0.0)
+                    - (
+                        _number(
+                            unfiltered_bundle["summary"].get("win_rate")
+                        )
+                        or 0.0
+                    ),
+                    4,
+                ),
+                "total_return_pct_points": round(
+                    (_number(summary.get("total_return_pct")) or 0.0)
+                    - (
+                        _number(
+                            unfiltered_bundle["summary"].get(
+                                "total_return_pct"
+                            )
+                        )
+                        or 0.0
+                    ),
+                    4,
+                ),
+                "recommendation_win_rate_pct_points": (
+                    _summary_metric_delta(
+                        recommendation_quality["summary"],
+                        unfiltered_recommendation_quality["summary"],
+                        "win_rate",
+                    )
+                ),
+                "recommendation_average_return_pct_points": (
+                    _summary_metric_delta(
+                        recommendation_quality["summary"],
+                        unfiltered_recommendation_quality["summary"],
+                        "average_return_pct",
+                    )
+                ),
+                "recommendation_total_return_pct_points": (
+                    _summary_metric_delta(
+                        recommendation_quality["summary"],
+                        unfiltered_recommendation_quality["summary"],
+                        "total_return_pct",
+                    )
+                ),
+            },
         },
         "exit_summary": _scheduled_exit_summary(executed_trades),
         "stress_tests": {
@@ -1219,6 +1342,64 @@ def _scheduled_variant_bundle(
     }
 
 
+def _recommendation_quality_report(
+    orders: Sequence[Mapping[str, object]],
+    bars: Sequence[Mapping[str, object]],
+    trade_dates: Sequence[date],
+    config: cash_backtest.CashBacktestConfig,
+) -> dict[str, object]:
+    bars_by_symbol: dict[str, list[Mapping[str, object]]] = defaultdict(list)
+    for bar in bars:
+        bars_by_symbol[str(bar.get("vt_symbol") or "")].append(bar)
+
+    trades: list[dict[str, object]] = []
+    skipped_reasons: Counter[str] = Counter()
+    open_position_count = 0
+    for order in orders:
+        symbol = str(order.get("vt_symbol") or "")
+        account = _simulate_account(
+            [order],
+            bars_by_symbol.get(symbol, []),
+            trade_dates,
+            "next_1430",
+            config,
+        )
+        trades.extend(account["executed_trades"])
+        open_position_count += len(account["open_positions"])
+        skipped_reasons.update(
+            str(skipped.get("reason") or "unknown")
+            for skipped in account["skipped_orders"]
+        )
+
+    daily_results, total_return, max_drawdown = _signal_daily_equity(trades)
+    summary = _summary(
+        orders,
+        trades,
+        total_return_pct=total_return,
+        max_drawdown_pct=max_drawdown,
+    )
+    summary.update(
+        {
+            "open_position_count": open_position_count,
+            "skipped_count": sum(skipped_reasons.values()),
+            "skipped_reasons": dict(sorted(skipped_reasons.items())),
+        }
+    )
+    return {
+        "mode": "independent_standard_slot_daily_equal_weight",
+        "position_constraints_applied": False,
+        "standard_slot_cash": round(
+            config.initial_cash / config.max_positions,
+            4,
+        ),
+        "costs_included": True,
+        "daily_aggregation": "mean_net_return_by_exit_date",
+        "summary": summary,
+        "daily_results": daily_results,
+        "skipped_reasons": dict(sorted(skipped_reasons.items())),
+    }
+
+
 def _relay_variant_gate(
     summary: Mapping[str, object],
     validation: Mapping[str, object],
@@ -1268,6 +1449,18 @@ def _at_least(left: object, right: float | None) -> bool:
         left_number is not None
         and right is not None
         and left_number >= right
+    )
+
+
+def _summary_metric_delta(
+    selected: Mapping[str, object],
+    baseline: Mapping[str, object],
+    field: str,
+) -> float:
+    return round(
+        (_number(selected.get(field)) or 0.0)
+        - (_number(baseline.get(field)) or 0.0),
+        4,
     )
 
 

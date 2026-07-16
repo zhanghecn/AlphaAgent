@@ -10,8 +10,140 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 def test_additive_concept_execution_contract_is_frozen() -> None:
-    assert scheduled_execution.SCHEDULED_EXECUTION_VERSION == "limit-up-scheduled-v4"
+    assert scheduled_execution.SCHEDULED_EXECUTION_VERSION == "limit-up-scheduled-v5"
     assert scheduled_execution.RULE_FREEZE_DATE == date(2026, 7, 15)
+
+
+def test_first_board_profitability_gate_accepts_exact_boundary() -> None:
+    decision = scheduled_execution.first_board_profitability_gate(
+        {
+            "lane": "first_board",
+            "stock_d1_sample_count": 5,
+            "stock_gene_combined_win_rate": 30.0,
+        }
+    )
+
+    assert decision["profitability_gate_passed"] is True
+    assert decision["profitability_gate_reason"] == "qualified"
+    assert decision["profitability_gate_minimum_d1_samples"] == 5
+    assert decision["profitability_gate_minimum_combined_rate"] == 30.0
+
+
+def test_first_board_profitability_gate_rejects_weak_or_missing_evidence() -> None:
+    insufficient = scheduled_execution.first_board_profitability_gate(
+        {
+            "lane": "first_board",
+            "stock_d1_sample_count": 4,
+            "stock_gene_combined_win_rate": 90.0,
+        }
+    )
+    weak = scheduled_execution.first_board_profitability_gate(
+        {
+            "lane": "first_board",
+            "stock_d1_sample_count": 5,
+            "stock_gene_combined_win_rate": 29.9999,
+        }
+    )
+    unavailable = scheduled_execution.first_board_profitability_gate(
+        {
+            "lane": "first_board",
+            "stock_d1_sample_count": 5,
+            "stock_gene_combined_win_rate": None,
+        }
+    )
+
+    assert insufficient["profitability_gate_reason"] == (
+        "same_stock_d1_samples_below_5"
+    )
+    assert weak["profitability_gate_reason"] == (
+        "same_stock_joint_rate_below_30"
+    )
+    assert unavailable["profitability_gate_reason"] == (
+        "same_stock_joint_rate_unavailable"
+    )
+    assert not any(
+        decision["profitability_gate_passed"]
+        for decision in (insufficient, weak, unavailable)
+    )
+
+
+def test_profitability_gate_reads_live_evidence_and_bypasses_two_to_three() -> None:
+    live = scheduled_execution.first_board_profitability_gate(
+        {
+            "board_lane": "first_board",
+            "historical_evidence": {
+                "d1_money_effect_sample_count": 6,
+                "historical_win_rate": 35.0,
+            },
+        }
+    )
+    relay = scheduled_execution.first_board_profitability_gate(
+        {
+            "lane": "two_to_three",
+            "historical_evidence": {},
+        }
+    )
+
+    assert live["profitability_gate_passed"] is True
+    assert live["profitability_gate_sample_count"] == 6
+    assert live["profitability_gate_combined_rate"] == 35.0
+    assert relay["profitability_gate_applies"] is False
+    assert relay["profitability_gate_passed"] is True
+    assert relay["profitability_gate_reason"] == "not_first_board"
+
+
+def test_profitability_gate_recognizes_first_board_from_board_level() -> None:
+    decision = scheduled_execution.first_board_profitability_gate(
+        {
+            "board_level": 1,
+            "historical_evidence": {
+                "d1_money_effect_sample_count": 4,
+                "historical_win_rate": 90.0,
+            },
+        }
+    )
+
+    assert decision["profitability_gate_applies"] is True
+    assert decision["profitability_gate_passed"] is False
+    assert decision["profitability_gate_reason"] == (
+        "same_stock_d1_samples_below_5"
+    )
+
+
+def test_filter_profitability_orders_keeps_order_and_reports_rejections() -> None:
+    selected, audit = scheduled_execution.filter_profitability_qualified_orders(
+        [
+            {
+                "vt_symbol": "600001.SSE",
+                "lane": "first_board",
+                "stock_d1_sample_count": 4,
+                "stock_gene_combined_win_rate": 60.0,
+            },
+            {
+                "vt_symbol": "600002.SSE",
+                "lane": "two_to_three",
+            },
+            {
+                "vt_symbol": "600003.SSE",
+                "lane": "first_board",
+                "stock_d1_sample_count": 5,
+                "stock_gene_combined_win_rate": 30.0,
+            },
+        ]
+    )
+
+    assert [row["vt_symbol"] for row in selected] == [
+        "600002.SSE",
+        "600003.SSE",
+    ]
+    assert audit["input_count"] == 3
+    assert audit["selected_count"] == 2
+    assert audit["excluded_count"] == 1
+    assert audit["reason_counts"] == {
+        "not_first_board": 1,
+        "qualified": 1,
+        "same_stock_d1_samples_below_5": 1,
+    }
 
 
 def _candidate(

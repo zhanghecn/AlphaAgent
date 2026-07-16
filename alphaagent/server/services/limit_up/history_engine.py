@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import date
-from typing import Mapping, Sequence
 
 import pandas as pd
 
 from alphaagent.server.services.limit_up import scheduled_execution
 from alphaagent.server.services.limit_up.dynamic_exit import attach_replay_exit_decisions
+from alphaagent.server.services.limit_up.first_board_profitability import (
+    combined_historical_win_rate,
+)
 from alphaagent.server.services.limit_up.lane_features import (
     attach_limit_gene_features,
     first_reseal_time,
@@ -45,6 +48,12 @@ class AnalogStats:
     touch_rate: float | None
     seal_rate: float | None
     seal_after_touch_rate: float | None
+    seal_sample_count: int
+    seal_success_rate: float | None
+    d1_money_effect_sample_count: int
+    d1_money_effect_win_rate: float | None
+    d1_money_effect_average_return_pct: float | None
+    historical_win_rate: float | None
     confidence: str
 
 
@@ -56,6 +65,9 @@ class _Accumulator:
     hard_loss_count: int = 0
     touch_count: int = 0
     seal_count: int = 0
+    sealed_d1_count: int = 0
+    sealed_d1_win_count: int = 0
+    sealed_d1_return_sum: float = 0.0
     return_sum: float = 0.0
 
     def add(self, candidate: Mapping[str, object]) -> None:
@@ -64,6 +76,11 @@ class _Accumulator:
         self.sample_count += 1
         self.touch_count += int(bool(outcome.get("touched")))
         self.seal_count += int(bool(outcome.get("sealed")))
+        d1_close_return = _number(outcome.get("next_close_return_pct"))
+        if bool(outcome.get("sealed")) and d1_close_return is not None:
+            self.sealed_d1_count += 1
+            self.sealed_d1_win_count += int(d1_close_return > 0)
+            self.sealed_d1_return_sum += d1_close_return
         if not _candidate_filled(candidate):
             return
         value = _number(outcome.get("next_open_return_pct"))
@@ -601,7 +618,23 @@ def _resolve_analog(
         chosen = max((value for _, value in available), key=lambda item: item.return_count)
     baseline = accumulators.get(keys[-2]) or accumulators.get(keys[-1])
     if chosen is None or chosen.return_count <= 0:
-        return AnalogStats(0, 0, None, None, None, None, None, None, "insufficient")
+        return AnalogStats(
+            sample_count=0,
+            effective_sample_count=0,
+            smoothed_win_rate=None,
+            average_return_pct=None,
+            hard_loss_rate=None,
+            touch_rate=None,
+            seal_rate=None,
+            seal_after_touch_rate=None,
+            seal_sample_count=0,
+            seal_success_rate=None,
+            d1_money_effect_sample_count=0,
+            d1_money_effect_win_rate=None,
+            d1_money_effect_average_return_pct=None,
+            historical_win_rate=None,
+            confidence="insufficient",
+        )
     baseline = baseline if baseline is not None and baseline.return_count > 0 else chosen
     prior_strength = min(40, baseline.return_count)
     base_win = baseline.win_count / baseline.return_count
@@ -611,6 +644,24 @@ def _resolve_analog(
     win_rate = (chosen.win_count + base_win * prior_strength) / denominator * 100
     average_return = (chosen.return_sum + base_return * prior_strength) / denominator
     hard_loss_rate = (chosen.hard_loss_count + base_hard_loss * prior_strength) / denominator * 100
+    seal_success_rate = _smoothed_rate(
+        chosen.seal_count,
+        chosen.touch_count,
+        baseline.seal_count,
+        baseline.touch_count,
+    )
+    d1_money_effect_win_rate = _smoothed_rate(
+        chosen.sealed_d1_win_count,
+        chosen.sealed_d1_count,
+        baseline.sealed_d1_win_count,
+        baseline.sealed_d1_count,
+    )
+    d1_money_effect_average_return_pct = _smoothed_average(
+        chosen.sealed_d1_return_sum,
+        chosen.sealed_d1_count,
+        baseline.sealed_d1_return_sum,
+        baseline.sealed_d1_count,
+    )
     if chosen.return_count >= 300:
         confidence = "high"
     elif chosen.return_count >= 120:
@@ -632,8 +683,55 @@ def _resolve_analog(
             if chosen.touch_count
             else None
         ),
+        seal_sample_count=chosen.touch_count,
+        seal_success_rate=seal_success_rate,
+        d1_money_effect_sample_count=chosen.sealed_d1_count,
+        d1_money_effect_win_rate=d1_money_effect_win_rate,
+        d1_money_effect_average_return_pct=d1_money_effect_average_return_pct,
+        historical_win_rate=combined_historical_win_rate(
+            d1_money_effect_win_rate,
+            seal_success_rate,
+        ),
         confidence=confidence,
     )
+
+
+def _smoothed_rate(
+    numerator: int,
+    denominator: int,
+    baseline_numerator: int,
+    baseline_denominator: int,
+) -> float | None:
+    if denominator <= 0:
+        return None
+    if baseline_denominator > 0:
+        baseline_rate = baseline_numerator / baseline_denominator
+        prior_strength = min(40, baseline_denominator)
+    else:
+        baseline_rate = numerator / denominator
+        prior_strength = 0
+    value = (numerator + baseline_rate * prior_strength) / (
+        denominator + prior_strength
+    )
+    return round(value * 100, 4)
+
+
+def _smoothed_average(
+    total: float,
+    count: int,
+    baseline_total: float,
+    baseline_count: int,
+) -> float | None:
+    if count <= 0:
+        return None
+    if baseline_count > 0:
+        baseline_average = baseline_total / baseline_count
+        prior_strength = min(40, baseline_count)
+    else:
+        baseline_average = total / count
+        prior_strength = 0
+    value = (total + baseline_average * prior_strength) / (count + prior_strength)
+    return round(value, 4)
 
 
 def _analog_keys(candidate: Mapping[str, object]) -> list[tuple[object, ...]]:

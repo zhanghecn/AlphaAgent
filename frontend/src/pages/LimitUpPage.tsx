@@ -458,10 +458,7 @@ function LiveView({
   const planMode = isNextSessionPlan(snapshot);
   const header = liveHeader(snapshot);
   const plan = snapshot.recommendations.plan ?? snapshot.data_quality.plan;
-  const buySignalCount = signals.filter(
-    (signal) => signal.signal_state === "trigger_ready" || signal.execution_state === "actionable",
-  ).length;
-  const observationCount = Math.max(signals.length - buySignalCount, 0);
+  const buySignalCount = signals.length;
   const lunchPaused = snapshot.session_stage === "lunch";
   const waitingForRepair = gate.repair_state === "pending_repair";
   const repairRevoked = gate.repair_state === "repair_revoked";
@@ -472,7 +469,7 @@ function LiveView({
       {schedule && (
         <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b px-3 py-2 text-xs sm:px-4">
           <span className={schedule.entry_allowed ? "font-semibold text-rise" : "font-medium text-foreground"}>{schedule.message}</span>
-          <span className="text-muted-foreground">两仓各 50% · D+1 14:30 卖出</span>
+          <span className="text-muted-foreground">推荐不限数量 · 两仓账户按排序执行 · D+1 14:30 卖出</span>
           {schedule.target_at && <span className="ml-auto text-muted-foreground">下一节点 {formatTime(schedule.target_at)}</span>}
         </div>
       )}
@@ -511,8 +508,7 @@ function LiveView({
           </span>
         )}
         <span className="text-muted-foreground">
-          {planMode ? `提前观察 ${signals.length}` : `买点 ${buySignalCount} / 2`}
-          {!planMode && observationCount > 0 ? ` · 可转买观察 ${observationCount}` : ""}
+          {planMode ? `提前观察 ${signals.length}` : `正式买点 ${buySignalCount}`}
         </span>
         <span className="ml-auto text-muted-foreground">
           封板 {snapshot.market_context.sealed_count ?? 0} · 炸板 {snapshot.market_context.failed_count ?? 0} · {snapshot.source}
@@ -533,7 +529,7 @@ function LiveView({
         <EmptyRow text={
           planMode
             ? "当前没有入选次交易时段的综合推荐观察候选"
-            : "暂无可转买观察，保持现金；全部雷达结果见当日轨迹"
+            : "当前没有通过正式门禁和历史赚钱过滤的买点，保持现金"
         } />
       )}
       {tracePanel}
@@ -542,18 +538,20 @@ function LiveView({
 }
 
 function LivePortfolioBacktestStrip({ report }: { report?: LimitUpLaneBacktest }) {
-  const summary = report?.summary;
+  const cashSummary = report?.summary;
+  const qualitySummary = report?.recommendation_quality?.summary ?? report?.signal_summary;
   const proxyOnly = report?.execution_comparability?.live_equivalent === false;
   return (
     <div className="flex min-h-10 flex-wrap items-center gap-x-5 gap-y-1 border-b px-3 py-2 text-xs tabular-nums sm:px-4">
-      <span className="font-medium text-foreground">10 万元 · 两仓连续评估</span>
-      {summary ? (
+      <span className="font-medium text-foreground">全量推荐质量</span>
+      {cashSummary && qualitySummary ? (
         <>
-          <span>期末 {formatCurrency(summary.final_equity)}</span>
-          <span className={amountTone(summary.total_return_pct)}>复利 {formatPct(summary.total_return_pct)}</span>
-          <span className={rateTone(summary.win_rate)}>胜率 {formatPct(summary.win_rate)}</span>
-          <span className="text-fall">回撤 {formatPct(summary.max_drawdown_pct)}</span>
-          <span className="text-muted-foreground">{summary.trade_count} 笔</span>
+          <span className="text-muted-foreground">独立闭合 {qualitySummary.trade_count} / {qualitySummary.signal_count}</span>
+          <span className={rateTone(qualitySummary.win_rate)}>胜率 {formatPct(qualitySummary.win_rate)}</span>
+          <span className={amountTone(qualitySummary.average_return_pct)}>平均 D+1 {formatPct(qualitySummary.average_return_pct)}</span>
+          <span className={amountTone(qualitySummary.total_return_pct)}>逐日等权复利 {formatPct(qualitySummary.total_return_pct)}</span>
+          <span className={amountTone(cashSummary.total_return_pct)}>两仓复利 {formatPct(cashSummary.total_return_pct)}</span>
+          <span className="text-fall">两仓回撤 {formatPct(cashSummary.max_drawdown_pct)}</span>
           {proxyOnly && (
             <span className="text-amber-700 dark:text-amber-300" title={report?.execution_comparability?.reason}>
               候选代理 · 非实盘等价
@@ -587,6 +585,7 @@ function LiveSignalRow({ signal, stale, paused }: { signal: LimitUpLiveSignal; s
     ...(signal.selection_reasons?.slice(0, 4).map(factorLabel) ?? []),
     ...firstBoardCompositeReasons(signal),
   ].slice(0, 5).join(" · ") || factorSummary;
+  const stockEvidence = signal.historical_evidence;
   const conceptEvidence = signal.concept_name
     ? `${signal.concept_name} · 强度${signal.concept_strength_rank ?? "-"} · ${signal.concept_strong_5_count ?? 0}只涨超5% · 概念龙${signal.concept_leader_rank ?? "-"}`
     : "概念共振待确认";
@@ -648,10 +647,21 @@ function LiveSignalRow({ signal, stale, paused }: { signal: LimitUpLiveSignal; s
           <div className="text-muted-foreground">盘口：换手 {formatPct(signal.turnover_rate)} · 封单 {formatAmount(signal.seal_amount)}</div>
         </div>
         <div className="grid grid-cols-2 gap-x-3 text-xs tabular-nums">
-          <Metric label="TBOX" value={formatNumber(signal.historical_evidence?.tbox_score, 1)} tone={tboxTone(signal.historical_evidence?.tbox_score)} />
-          <Metric label="历史胜率" value={formatPct(signal.historical_evidence?.smoothed_win_rate)} tone={rateTone(signal.historical_evidence?.smoothed_win_rate)} />
-          <Metric label="平均 D+1" value={formatPct(signal.historical_evidence?.average_return_pct)} tone={amountTone(signal.historical_evidence?.average_return_pct)} />
-          <Metric label="战法复利" value={formatPct(signal.strategy_evidence?.total_return_pct)} tone={amountTone(signal.strategy_evidence?.total_return_pct)} />
+          {signal.board_lane === "first_board" ? (
+            <>
+              <Metric label="个股联合率" value={formatPct(stockEvidence?.historical_win_rate)} tone={rateTone(stockEvidence?.historical_win_rate)} />
+              <Metric label={`同股D+1 (${stockEvidence?.d1_money_effect_sample_count ?? 0})`} value={formatPct(stockEvidence?.d1_money_effect_win_rate)} tone={rateTone(stockEvidence?.d1_money_effect_win_rate)} />
+              <Metric label={`126日封停 (${stockEvidence?.seal_sample_count ?? 0})`} value={formatPct(stockEvidence?.seal_success_rate)} tone={rateTone(stockEvidence?.seal_success_rate)} />
+              <Metric label="同股D+1平均" value={formatPct(stockEvidence?.d1_money_effect_average_return_pct)} tone={amountTone(stockEvidence?.d1_money_effect_average_return_pct)} />
+            </>
+          ) : (
+            <>
+              <Metric label="TBOX" value={formatNumber(signal.historical_evidence?.tbox_score, 1)} tone={tboxTone(signal.historical_evidence?.tbox_score)} />
+              <Metric label="历史胜率" value={formatPct(signal.historical_evidence?.smoothed_win_rate)} tone={rateTone(signal.historical_evidence?.smoothed_win_rate)} />
+              <Metric label="平均 D+1" value={formatPct(signal.historical_evidence?.average_return_pct)} tone={amountTone(signal.historical_evidence?.average_return_pct)} />
+              <Metric label="战法复利" value={formatPct(signal.strategy_evidence?.total_return_pct)} tone={amountTone(signal.strategy_evidence?.total_return_pct)} />
+            </>
+          )}
         </div>
       </div>
     </article>
@@ -1154,14 +1164,18 @@ function RobustnessStrip({ report }: { report: LimitUpLaneBacktest }) {
 }
 
 function SignalSummaryStrip({ report }: { report: LimitUpLaneBacktest }) {
-  const summary = report.signal_summary;
+  const quality = report.recommendation_quality;
+  const summary = quality?.summary ?? report.signal_summary;
   return (
     <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b bg-muted/20 px-3 py-2 text-xs sm:px-4">
-      <span className="font-medium text-foreground">信号研究</span>
-      <span className="text-muted-foreground">成熟 {summary.trade_count} / {summary.signal_count}</span>
+      <span className="font-medium text-foreground">全量推荐质量</span>
+      <span className="text-muted-foreground">独立闭合 {summary.trade_count} / {summary.signal_count}</span>
       <span className="text-muted-foreground">胜率 {formatPct(summary.win_rate)}</span>
-      <span className="text-muted-foreground">平均 D+1 {formatPct(summary.average_return_pct)}</span>
-      <span className="text-muted-foreground">信号日等权上界 {formatPct(summary.total_return_pct)}</span>
+      <span className="text-muted-foreground">平均 D+1 净收益 {formatPct(summary.average_return_pct)}</span>
+      <span className="text-muted-foreground">逐日等权复利 {formatPct(summary.total_return_pct)}</span>
+      {quality && (
+        <span className="text-muted-foreground">标准槽位 {formatCurrency(quality.standard_slot_cash)} · 不受共享仓位限制</span>
+      )}
     </div>
   );
 }
