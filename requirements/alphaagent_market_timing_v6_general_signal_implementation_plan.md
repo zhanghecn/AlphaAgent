@@ -13,8 +13,8 @@
 ### Task 1: 用失败测试固定反转金和无未来函数语义
 
 **Files:**
-- Modify: `tests/alphaagent/services/quant/test_market_timing_no_lookahead.py`
-- Modify: `alphaagent/server/services/quant/market_timing/signal.py`
+- Modify: `tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py`
+- Modify: `alphaagent/server/services/market_timing/signal.py`
 
 - [ ] **Step 1: 添加可控弱势收盘序列 helper**
 
@@ -56,7 +56,7 @@ assert event.confirm_date == factors[-1].trade_date
 
 - [ ] **Step 5: 运行测试并确认失败**
 
-Run: `uv run pytest tests/alphaagent/services/quant/test_market_timing_no_lookahead.py -q`
+Run: `uv run pytest tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py -q`
 
 Expected: 新测试因缺少 `SETUP_REVERSAL_GOLD`、`setup_type` 和第三个参数失败。
 
@@ -99,15 +99,15 @@ def is_reversal_gold(closes: list[float]) -> bool:
 
 - [ ] **Step 7: 运行无未来函数测试**
 
-Run: `uv run pytest tests/alphaagent/services/quant/test_market_timing_no_lookahead.py -q`
+Run: `uv run pytest tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py -q`
 
 Expected: PASS。
 
 ### Task 2: 给综合指数增加宽基上涨参与度
 
 **Files:**
-- Modify: `alphaagent/server/services/quant/market_timing/series.py`
-- Modify: `tests/alphaagent/services/quant/test_market_timing_intraday.py`
+- Modify: `alphaagent/server/services/market_timing/series.py`
+- Modify: `tests/alphaagent/services/market_timing/test_market_timing_intraday.py`
 
 - [ ] **Step 1: 添加盘中参与度失败测试**
 
@@ -121,7 +121,7 @@ assert bar.up_ratio == pytest.approx(4 / 7)
 
 - [ ] **Step 2: 运行单测并确认失败**
 
-Run: `uv run pytest tests/alphaagent/services/quant/test_market_timing_intraday.py -q -k up_ratio`
+Run: `uv run pytest tests/alphaagent/services/market_timing/test_market_timing_intraday.py -q -k up_ratio`
 
 Expected: `CompositeBar` 没有 `up_ratio`。
 
@@ -149,15 +149,15 @@ class CompositeBar:
 
 - [ ] **Step 5: 运行序列和盘中测试**
 
-Run: `uv run pytest tests/alphaagent/services/quant/test_market_timing_intraday.py tests/alphaagent/services/quant/test_market_timing_no_lookahead.py -q`
+Run: `uv run pytest tests/alphaagent/services/market_timing/test_market_timing_intraday.py tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py -q`
 
 Expected: PASS。
 
 ### Task 3: 让面板按 v6 区域和 setup 输出
 
 **Files:**
-- Modify: `alphaagent/server/services/quant/market_timing/panel.py`
-- Modify: `tests/alphaagent/services/quant/test_market_timing_intraday.py`
+- Modify: `alphaagent/server/services/market_timing/panel.py`
+- Modify: `tests/alphaagent/services/market_timing/test_market_timing_intraday.py`
 
 - [ ] **Step 1: 修改当前方向测试为非持仓语义**
 
@@ -173,7 +173,7 @@ assert mt_panel._resolve_current_direction(_factor(day, "NEUTRAL"), silver) == "
 
 - [ ] **Step 2: 运行面板测试并确认失败**
 
-Run: `uv run pytest tests/alphaagent/services/quant/test_market_timing_intraday.py -q`
+Run: `uv run pytest tests/alphaagent/services/market_timing/test_market_timing_intraday.py -q`
 
 Expected: 中性日仍返回最后银手指，序列没有 `setup_type`。
 
@@ -200,15 +200,15 @@ events = sig.detect_events(
 
 - [ ] **Step 5: 运行后端目标测试**
 
-Run: `uv run pytest tests/alphaagent/services/quant/test_market_timing_no_lookahead.py tests/alphaagent/services/quant/test_market_timing_intraday.py tests/alphaagent/services/quant/test_market_timing_backtest.py -q`
+Run: `uv run pytest tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py tests/alphaagent/services/market_timing/test_market_timing_intraday.py tests/alphaagent/services/market_timing/test_market_timing_backtest.py -q`
 
 Expected: PASS。
 
 ### Task 4: 保留 setup 级表现审计和前端类型
 
 **Files:**
-- Modify: `alphaagent/server/services/quant/market_timing/backtest.py`
-- Modify: `tests/alphaagent/services/quant/test_market_timing_backtest.py`
+- Modify: `alphaagent/server/services/market_timing/backtest.py`
+- Modify: `tests/alphaagent/services/market_timing/test_market_timing_backtest.py`
 - Modify: `frontend/src/api/marketTiming.ts`
 - Modify: `frontend/src/features/market-timing/TimingRecentTable.tsx`
 - Modify: `frontend/src/features/market-timing/timingPresentation.spec.ts`
@@ -224,7 +224,7 @@ assert candidate_row["setup_type"] == sig.SETUP_REVERSAL_GOLD
 
 - [ ] **Step 2: 运行测试并确认失败**
 
-Run: `uv run pytest tests/alphaagent/services/quant/test_market_timing_backtest.py -q`
+Run: `uv run pytest tests/alphaagent/services/market_timing/test_market_timing_backtest.py -q`
 
 Expected: row 缺少 `setup_type`。
 
@@ -268,13 +268,13 @@ Expected: PASS。
 
 - [ ] **Step 1: 运行完整目标测试**
 
-Run: `uv run pytest tests/alphaagent/services/quant/test_market_timing_no_lookahead.py tests/alphaagent/services/quant/test_market_timing_intraday.py tests/alphaagent/services/quant/test_market_timing_backtest.py -q`
+Run: `uv run pytest tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py tests/alphaagent/services/market_timing/test_market_timing_intraday.py tests/alphaagent/services/market_timing/test_market_timing_backtest.py -q`
 
 Expected: PASS。
 
 - [ ] **Step 2: 运行后端编译和前端全量验证**
 
-Run: `uv run python -m compileall alphaagent/server/services/quant/market_timing`
+Run: `uv run python -m compileall alphaagent/server/services/market_timing`
 
 Run: `pnpm --dir frontend test`
 

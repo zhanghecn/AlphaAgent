@@ -52,6 +52,8 @@ SOURCE_STATUS_TTL_SECONDS = 60
 SW_TREE_TTL_SECONDS = 86400 * 7
 SW_CONSTITUENTS_TTL_SECONDS = 86400
 SW_CLASSIFY_TTL_SECONDS = 86400 * 3
+SECTOR_DAILY_DEFAULT_HISTORY_SESSIONS = 800
+SECTOR_DAILY_MAX_HISTORY_SESSIONS = 1_000
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
@@ -793,17 +795,6 @@ class AkShareAdapter:
         """Return industry-chain clues without reloading business and sector data."""
 
         main_products = business.get("main_products") or []
-        text = " ".join(
-            str(value)
-            for value in [
-                *(sector.get("name") for sector in sectors),
-                *(main_products or []),
-                *(segment.get("name") for segment in business.get("segments") or []),
-                business.get("summary"),
-                business.get("business_scope"),
-            ]
-            if value
-        )
         dynamic_terms = _dedupe_strings(
             [
                 *(sector.get("name") for sector in sectors if sector.get("name")),
@@ -1326,15 +1317,23 @@ class AkShareAdapter:
         self,
         sector_id: str,
         board_type: str = "concept",
-        limit: int = 250,
+        limit: int = SECTOR_DAILY_DEFAULT_HISTORY_SESSIONS,
     ) -> dict[str, Any]:
         """Return sector/board historical K-lines through AkShare EastMoney board hist."""
 
-        key = f"sector_daily_bars:{sector_id}:{board_type}:{limit}"
+        history_limit = min(
+            max(int(limit), 1),
+            SECTOR_DAILY_MAX_HISTORY_SESSIONS,
+        )
+        key = f"sector_daily_bars:{sector_id}:{board_type}:{history_limit}"
         return market_cache.get_or_set(
             key,
             self.SECTOR_BARS_TTL_SECONDS,
-            lambda: self._sector_daily_bars_uncached(sector_id, board_type, limit),
+            lambda: self._sector_daily_bars_uncached(
+                sector_id,
+                board_type,
+                history_limit,
+            ),
         )
 
     def _sector_daily_bars_uncached(
@@ -3603,7 +3602,6 @@ def _normalize_sector_query_type(sector_type: str) -> str:
 
 @lru_cache(maxsize=1)
 def _sina_classify_boards() -> dict[str, pd.DataFrame]:
-    adapter = AkShareAdapter()
     module = importlib.import_module("akshare.stock_feature.stock_classify_sina")
     with _akshare_network_env():
         return module.stock_classify_board()

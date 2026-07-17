@@ -13,7 +13,7 @@
 ### Task 1: Lock the signal boundary with failing tests
 
 **Files:**
-- Modify: `tests/alphaagent/services/quant/test_market_timing_no_lookahead.py`
+- Modify: `tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py`
 
 - [x] **Step 1: Add an ordinary-breakdown fixture and regression test**
 
@@ -60,7 +60,7 @@ def test_top_silver_remains_available():
 Run:
 
 ```bash
-uv run --group server pytest tests/alphaagent/services/quant/test_market_timing_no_lookahead.py -q -k "ordinary_breakdown or top_silver"
+uv run --group server pytest tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py -q -k "ordinary_breakdown or top_silver"
 ```
 
 Expected: the ordinary-breakdown assertion fails because v7 still returns `BREAKDOWN_SILVER`; the retained-top test passes.
@@ -68,8 +68,8 @@ Expected: the ordinary-breakdown assertion fails because v7 still returns `BREAK
 ### Task 2: Apply the minimal arbitration change
 
 **Files:**
-- Modify: `alphaagent/server/services/quant/market_timing/signal.py`
-- Test: `tests/alphaagent/services/quant/test_market_timing_no_lookahead.py`
+- Modify: `alphaagent/server/services/market_timing/signal.py`
+- Test: `tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py`
 
 - [x] **Step 1: Update the module history and suppress only ordinary breakdown silver**
 
@@ -89,7 +89,7 @@ Keep `SETUP_BREAKDOWN_SILVER` defined for stored payload and frontend compatibil
 Run:
 
 ```bash
-uv run --group server pytest tests/alphaagent/services/quant/test_market_timing_no_lookahead.py -q -k "ordinary_breakdown or top_silver or structural_breakdown"
+uv run --group server pytest tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py -q -k "ordinary_breakdown or top_silver or structural_breakdown"
 ```
 
 Expected: all selected tests pass.
@@ -99,7 +99,7 @@ Expected: all selected tests pass.
 Run:
 
 ```bash
-uv run --group server pytest tests/alphaagent/services/quant/test_market_timing_no_lookahead.py tests/alphaagent/services/quant/test_market_timing_backtest.py tests/alphaagent/services/quant/test_market_timing_intraday.py -q
+uv run --group server pytest tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py tests/alphaagent/services/market_timing/test_market_timing_backtest.py tests/alphaagent/services/market_timing/test_market_timing_intraday.py -q
 ```
 
 Expected: all tests pass with no gold or structural-silver regressions.
@@ -142,8 +142,8 @@ Replace stale v7 signal counts and limitations with v8 facts: ordinary breakdown
 - [x] **Step 4: Commit only market-timing files**
 
 ```bash
-git add alphaagent/server/services/quant/market_timing/signal.py \
-  tests/alphaagent/services/quant/test_market_timing_no_lookahead.py \
+git add alphaagent/server/services/market_timing/signal.py \
+  tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py \
   memory/07_market_timing/market_timing_design.md \
   requirements/alphaagent_market_timing_v8_precision_silver_implementation_plan.md
 git commit -m "fix(market-timing): remove unreliable breakdown silver signals"

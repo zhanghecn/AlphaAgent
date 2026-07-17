@@ -32,7 +32,6 @@ function status(): LimitUpMembershipImportStatus {
         minimum_coverage_pct: 90,
       },
     },
-    csv_import_available: true,
     limitations: ["覆盖不足90%的日期整日拒绝写入，旧行业快照保持不变。"],
   };
 }
@@ -41,7 +40,7 @@ function result(): LimitUpMembershipImportResult {
   return {
     status: "partial",
     dataset: "industry_memberships",
-    provider: "csv",
+    provider: "tushare",
     dry_run: false,
     date_count: 2,
     accepted_date_count: 1,
@@ -82,9 +81,6 @@ const handlers = {
   onDryRunChange: () => undefined,
   onOnlyMissingChange: () => undefined,
   onRunTushare: () => undefined,
-  onFileChange: () => undefined,
-  onRunCsv: () => undefined,
-  onDownloadTemplate: () => undefined,
 };
 
 describe("HistoricalMembershipBackfillView", () => {
@@ -99,7 +95,6 @@ describe("HistoricalMembershipBackfillView", () => {
         maxDates={20}
         dryRun
         onlyMissing
-        fileName=""
         isRunning={false}
       />,
     );
@@ -114,7 +109,8 @@ describe("HistoricalMembershipBackfillView", () => {
     expect(html).toContain("门禁合格");
     expect(html).toContain("10 日");
     expect(html).toContain("仅缺失或覆盖不足日期");
-    expect(html).toContain("下载模板");
+    expect(html).not.toContain("区间 CSV 文件");
+    expect(html).not.toContain("下载模板");
   });
 
   it("shows per-date audit without treating rejected dates as writes", () => {
@@ -128,7 +124,6 @@ describe("HistoricalMembershipBackfillView", () => {
         maxDates={20}
         dryRun={false}
         onlyMissing={false}
-        fileName="memberships.csv"
         isRunning={false}
       />,
     );

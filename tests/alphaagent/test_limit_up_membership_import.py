@@ -133,36 +133,6 @@ def test_membership_expansion_resolves_overlap_by_latest_in_date() -> None:
     assert expanded["conflict_count"] == 1
 
 
-def test_membership_csv_rejects_incomplete_date_without_writing(monkeypatch) -> None:
-    writes: list[object] = []
-    monkeypatch.setattr(
-        membership,
-        "replace_industry_membership_snapshot",
-        lambda *args, **kwargs: writes.append((args, kwargs)) or 1,
-    )
-    csv_text = (
-        "ts_code,name,l1_code,l1_name,l2_code,l2_name,in_date,out_date,is_new\n"
-        "600001.SH,沪市样本,801080.SI,电子,801081.SI,半导体,20240101,,Y\n"
-    )
-
-    result = membership.import_membership_csv(
-        csv_text=csv_text,
-        start_date=date(2024, 1, 2),
-        end_date=date(2024, 1, 2),
-        dry_run=False,
-        eligible_stocks=ELIGIBLE_STOCKS,
-        trade_dates=[date(2024, 1, 2)],
-        expected_symbols={
-            date(2024, 1, 2): {"600001.SSE", "000001.SZSE", "002001.SZSE"}
-        },
-    )
-
-    assert result["status"] == "rejected"
-    assert result["rows_written"] == 0
-    assert result["date_results"][0]["coverage_pct"] == 33.3333
-    assert writes == []
-
-
 def test_membership_tushare_import_requires_token(monkeypatch) -> None:
     monkeypatch.setattr(membership, "is_database_configured", lambda: True)
     monkeypatch.setattr(
@@ -205,13 +175,6 @@ def test_membership_tushare_query_rejects_any_empty_l1_response(monkeypatch) -> 
             api_url="https://api.tushare.pro",
             timeout=1,
         )
-
-
-def test_membership_template_matches_index_member_all_fields() -> None:
-    template = membership.membership_csv_template()
-
-    assert template.startswith("\ufeffts_code,name,l1_code,l1_name,l2_code,l2_name")
-    assert "in_date,out_date,is_new" in template
 
 
 def test_membership_status_reads_membership_coverage_without_full_gate(monkeypatch) -> None:
@@ -286,22 +249,8 @@ def test_historical_membership_api_contracts(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         data_sync_api.historical_membership_import,
-        "membership_csv_template",
-        lambda: "\ufeffts_code,l2_code\n600001.SH,801081.SI\n",
-    )
-    monkeypatch.setattr(
-        data_sync_api.historical_membership_import,
         "import_tushare_memberships",
         lambda **kwargs: {"status": "unavailable", "dry_run": kwargs["dry_run"]},
-    )
-    monkeypatch.setattr(
-        data_sync_api.historical_membership_import,
-        "import_membership_csv",
-        lambda **kwargs: {
-            "status": "ready",
-            "dry_run": kwargs["dry_run"],
-            "start_date": kwargs["start_date"].isoformat(),
-        },
     )
     client = TestClient(create_app())
 
@@ -331,16 +280,15 @@ def test_historical_membership_api_contracts(monkeypatch) -> None:
 
     assert status.status_code == 200
     assert status.json()["data"]["provider"]["configured"] is False
-    assert template.status_code == 200
-    assert "ts_code,l2_code" in template.text
+    assert template.status_code == 404
     assert tushare.status_code == 200
     assert tushare.json()["data"]["status"] == "unavailable"
-    assert csv_import.status_code == 200
-    assert csv_import.json()["data"] == {
-        "status": "ready",
-        "dry_run": True,
-        "start_date": "2024-01-15",
-    }
+    assert csv_import.status_code == 404
+
+
+def test_historical_membership_csv_service_is_removed() -> None:
+    assert not hasattr(membership, "import_membership_csv")
+    assert not hasattr(membership, "membership_csv_template")
 
 
 def test_historical_membership_api_rejects_invalid_date() -> None:

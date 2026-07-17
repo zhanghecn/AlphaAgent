@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -77,6 +78,66 @@ def test_bounded_parallel_map_does_not_timeout_queued_items():
     )
 
     assert sorted(done) == list(range(30))
+
+
+def test_financial_quarterly_skips_hung_stock_without_late_write(monkeypatch):
+    """A hung quarterly request must not block the batch or write after timeout."""
+
+    written_symbols: list[str] = []
+    progress: list[dict[str, object]] = []
+    release_hung_request = threading.Event()
+
+    class FakeAdapter:
+        def stock_financial_quarterly(self, symbol, exchange=None):
+            if symbol == "600001":
+                release_hung_request.wait(timeout=1.0)
+            return {
+                "items": [
+                    {
+                        "report_date": "2026-03-31",
+                        "revenue": 1.0,
+                        "net_profit": 1.0,
+                    }
+                ]
+            }
+
+        def stock_balance_sheet(self, symbol, exchange=None):
+            return {"items": []}
+
+        def stock_cash_flow_sheet(self, symbol, exchange=None):
+            return {"items": []}
+
+    monkeypatch.setattr(
+        svc,
+        "_financial_sync_stock_rows",
+        lambda stock_limit, only_missing: [
+            {"symbol": "600001", "exchange": "SSE", "name": "慢响应"},
+            {"symbol": "600002", "exchange": "SSE", "name": "正常"},
+        ],
+    )
+    monkeypatch.setattr(
+        svc,
+        "_upsert_stock_financial_reports",
+        lambda symbol, exchange, items, period_type: written_symbols.append(symbol) or len(items),
+    )
+    monkeypatch.setattr(svc, "SYNC_PER_ITEM_TIMEOUT_SECONDS", 0.03)
+
+    start = time.monotonic()
+    result = svc.DataSyncRunner(
+        adapter=FakeAdapter(),
+        progress=progress.append,
+        concurrency=2,
+    )._run_sync_stock_financial_quarterly({})
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 0.5
+    assert result == {"rows_read": 1, "rows_written": 1, "timed_out": 1}
+    assert written_symbols == ["600002"]
+    assert any("超时跳过" in str(item.get("current_label")) for item in progress)
+
+    release_hung_request.set()
+    time.sleep(0.05)
+    assert written_symbols == ["600002"]
 
 
 def test_select_zombie_batch_ids_picks_only_stale_running():

@@ -112,6 +112,47 @@ def test_sector_daily_bars_uses_eastmoney_before_ths(monkeypatch) -> None:
     assert data["items"][0]["change_pct"] == 3.2
 
 
+def test_sector_daily_bars_defaults_to_800_sessions(monkeypatch) -> None:
+    market_cache.clear()
+    adapter = AkShareAdapter()
+    captured: dict[str, object] = {}
+
+    def fake_board_kline(sector_id, board_type, limit, start_date=None, end_date=None):
+        captured.update(
+            {
+                "sector_id": sector_id,
+                "board_type": board_type,
+                "limit": limit,
+                "start_date": start_date,
+                "end_date": end_date,
+            }
+        )
+        return pd.DataFrame(
+            [
+                {
+                    "date": "2026-06-26",
+                    "open": 10,
+                    "close": 11,
+                    "high": 12,
+                    "low": 9,
+                    "volume": 100,
+                    "turnover": 200,
+                    "change_pct": 3.2,
+                }
+            ]
+        )
+
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter._eastmoney_board_kline",
+        fake_board_kline,
+    )
+
+    data = adapter.sector_daily_bars("BK0490", board_type="concept")
+
+    assert captured["limit"] == 800
+    assert data["source"] == "eastmoney.board_kline"
+
+
 def test_bar_row_to_api_preserves_zero_values() -> None:
     item = _bar_row_to_api(
         {
@@ -369,7 +410,6 @@ def test_limit_up_pool_sources_are_fetched_concurrently(monkeypatch) -> None:
 
 
 def test_limit_up_pool_requests_have_a_bounded_timeout(monkeypatch) -> None:
-    adapter = AkShareAdapter()
     module = importlib.import_module("akshare.stock_feature.stock_ztb_em")
     timeouts: list[object] = []
 

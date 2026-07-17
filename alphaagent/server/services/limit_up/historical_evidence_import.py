@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import csv
-import io
 import re
 import time as time_module
 from collections import defaultdict
@@ -50,39 +48,6 @@ THS_POOL_PATHS = {
     "limit_up": "limit_up_pool",
     "open_limit": "open_limit_pool",
 }
-
-EVENT_FIELDS = (
-    "trade_date",
-    "ts_code",
-    "name",
-    "limit_type",
-    "first_time",
-    "last_time",
-    "open_times",
-    "fd_amount",
-    "limit_times",
-    "industry",
-    "close",
-    "pct_chg",
-    "amount",
-    "turnover_ratio",
-    "up_stat",
-)
-AUCTION_FIELDS = (
-    "trade_date",
-    "ts_code",
-    "name",
-    "price",
-    "pre_close",
-    "vol",
-    "amount",
-    "turnover_rate",
-    "volume_ratio",
-    "float_share",
-    "unmatched_volume",
-    "unmatched_side",
-    "source_quote_time",
-)
 
 TUSHARE_FIELDS = {
     "events": (
@@ -162,43 +127,6 @@ def normalize_auction_rows(
             duplicates += 1
         rows[key] = normalized
     return _normalization_result(rows.values(), errors, skipped, duplicates)
-
-
-def import_csv_evidence(
-    *,
-    dataset: str,
-    csv_text: str,
-    dry_run: bool = True,
-    eligible_stocks: Mapping[str, str] | None = None,
-    expected_event_symbols: Mapping[date, set[str]] | None = None,
-    expected_auction_symbols: Mapping[date, set[str]] | None = None,
-) -> dict[str, Any]:
-    """Audit and optionally persist a complete vendor CSV export."""
-
-    normalized_dataset = normalize_dataset(dataset)
-    source_rows = _read_csv_rows(csv_text)
-    rows_by_date, date_errors = _group_source_rows_by_date(source_rows)
-    if eligible_stocks is None:
-        _require_database()
-        eligible_stocks = load_eligible_stocks()
-    dates = sorted(rows_by_date)
-    expected = _expected_symbols(
-        normalized_dataset,
-        dates,
-        expected_event_symbols=expected_event_symbols,
-        expected_auction_symbols=expected_auction_symbols,
-        eligible_stocks=eligible_stocks,
-    )
-    result = _import_grouped_rows(
-        normalized_dataset,
-        rows_by_date,
-        eligible_stocks=eligible_stocks,
-        expected_symbols=expected,
-        dry_run=dry_run,
-    )
-    result["rows_read"] = len(source_rows)
-    result["errors"] = [*date_errors, *result["errors"]][:MAX_ERROR_ITEMS]
-    return result
 
 
 def import_tushare_evidence(
@@ -706,7 +634,6 @@ def historical_evidence_status() -> dict[str, Any]:
                 "minimum_coverage_pct": MIN_AUCTION_COVERAGE_PCT,
             },
         },
-        "csv_import_available": True,
         "limitations": [
             "同花顺公开历史接口只覆盖最近252个交易日，不能当作500日全历史。",
             "Tushare竞价没有未匹配量，只能形成部分竞价证据。",
@@ -714,19 +641,6 @@ def historical_evidence_status() -> dict[str, Any]:
             "Tick/L2队列和逐日概念成员未补齐前，模拟执行门禁继续关闭。",
         ],
     }
-
-
-def evidence_csv_template(dataset: str) -> str:
-    """Return a UTF-8-BOM CSV template for one evidence dataset."""
-
-    normalized = normalize_dataset(dataset)
-    fields = EVENT_FIELDS if normalized == "events" else AUCTION_FIELDS
-    sample = _event_template_sample() if normalized == "events" else _auction_template_sample()
-    buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=fields, lineterminator="\n")
-    writer.writeheader()
-    writer.writerow(sample)
-    return "\ufeff" + buffer.getvalue()
 
 
 def query_tushare_evidence(
@@ -1042,7 +956,6 @@ def _import_grouped_rows(
     return {
         "status": status,
         "dataset": dataset,
-        "provider": "csv" if rows_by_date else "unknown",
         "dry_run": bool(dry_run),
         "date_count": len(rows_by_date),
         "accepted_date_count": sum(item["status"] == "ready" for item in date_results),
@@ -1114,30 +1027,6 @@ def _replace_dataset_date(dataset: str, trade_date: date, rows: Sequence[Mapping
     if dataset == "events":
         return replace_event_evidence(trade_date, rows)
     return replace_auction_evidence(trade_date, rows)
-
-
-def _read_csv_rows(csv_text: str) -> list[dict[str, Any]]:
-    text = str(csv_text or "").lstrip("\ufeff").strip()
-    if not text:
-        raise HistoricalEvidenceImportError("csv_text is empty")
-    reader = csv.DictReader(io.StringIO(text))
-    if not reader.fieldnames:
-        raise HistoricalEvidenceImportError("CSV header is missing")
-    return [dict(row) for row in reader]
-
-
-def _group_source_rows_by_date(
-    rows: Sequence[Mapping[str, Any]],
-) -> tuple[dict[date, list[dict[str, Any]]], list[str]]:
-    grouped: dict[date, list[dict[str, Any]]] = defaultdict(list)
-    errors: list[str] = []
-    for index, row in enumerate(rows, start=2):
-        trade_date = _date_value(row.get("trade_date"))
-        if trade_date is None:
-            _append_error(errors, f"row {index}: invalid trade_date")
-            continue
-        grouped[trade_date].append(dict(row))
-    return dict(grouped), errors
 
 
 def _normalization_result(
@@ -1451,41 +1340,3 @@ def _pct(numerator: int, denominator: int) -> float:
     if denominator <= 0:
         return 0.0
     return round(numerator / denominator * 100, 4)
-
-
-def _event_template_sample() -> dict[str, Any]:
-    return {
-        "trade_date": "2026-07-10",
-        "ts_code": "600000.SH",
-        "name": "浦发银行",
-        "limit_type": "U",
-        "first_time": "09:33:05",
-        "last_time": "14:31:52",
-        "open_times": 2,
-        "fd_amount": 128000000,
-        "limit_times": 2,
-        "industry": "通信设备",
-        "close": 10.45,
-        "pct_chg": 10.0,
-        "amount": 880000000,
-        "turnover_ratio": 12.4,
-        "up_stat": "2/2",
-    }
-
-
-def _auction_template_sample() -> dict[str, Any]:
-    return {
-        "trade_date": "2026-07-10",
-        "ts_code": "600000.SH",
-        "name": "浦发银行",
-        "price": 10.45,
-        "pre_close": 10.0,
-        "vol": 320000,
-        "amount": 3344000,
-        "turnover_rate": 0.8,
-        "volume_ratio": 2.1,
-        "float_share": 40000,
-        "unmatched_volume": "",
-        "unmatched_side": "",
-        "source_quote_time": "09:25:00",
-    }

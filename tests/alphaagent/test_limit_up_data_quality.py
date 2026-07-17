@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -11,6 +12,8 @@ from alphaagent.server.db import schema
 from alphaagent.server.main import create_app
 from alphaagent.server.services.limit_up import data_quality
 from alphaagent.server.services.limit_up import data_quality_repository
+from alphaagent.server.services.limit_up import history_repository
+from alphaagent.server.services.limit_up import live_repository
 from alphaagent.server.services.limit_up import minute_backfill_batch
 from alphaagent.server.services.limit_up.data_quality import build_data_quality_report
 
@@ -189,6 +192,405 @@ def test_point_in_time_market_evidence_tables_keep_daily_and_intraday_versions()
     }.issubset(auctions.c.keys())
 
 
+def test_history_candidate_pool_projection_returns_only_scheduled_inputs(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    candidate_pool = {
+        "first_board": [{"vt_symbol": "600000.SSE"}],
+        "two_to_three": [],
+    }
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {
+                    "trade_date": date(2026, 7, 9),
+                    "validation_phase": "locked_holdout",
+                    "candidate_pool": candidate_pool,
+                }
+            ]
+
+    class Session:
+        def execute(self, statement):
+            captured["statement"] = statement
+            return Result()
+
+    @contextmanager
+    def fake_session_scope():
+        yield Session()
+
+    monkeypatch.setattr(history_repository.schema, "ensure_schema_once", lambda _engine: None)
+    monkeypatch.setattr(history_repository, "get_engine", lambda: object())
+    monkeypatch.setattr(history_repository, "session_scope", fake_session_scope)
+
+    rows = history_repository.load_history_candidate_pools("limit-up-history-v15")
+
+    assert rows == [
+        {
+            "trade_date": "2026-07-09",
+            "validation_phase": "locked_holdout",
+            "lane_portfolio": {"candidate_pool": candidate_pool},
+        }
+    ]
+    sql = str(captured["statement"].compile(dialect=postgresql.dialect()))
+    assert "candidate_pool" in sql
+    assert "limit_up_history_replays.coverage" not in sql
+
+
+def test_account_1430_price_query_requires_exact_minute(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {
+                    "vt_symbol": "600000.SSE",
+                    "trade_date": date(2026, 7, 10),
+                    "bar_time": datetime(2026, 7, 10, 14, 30),
+                    "close_price": 10.8,
+                }
+            ]
+
+    class Session:
+        def execute(self, statement):
+            captured["statement"] = statement
+            return Result()
+
+    @contextmanager
+    def fake_session_scope():
+        yield Session()
+
+    monkeypatch.setattr(history_repository.schema, "ensure_schema_once", lambda _engine: None)
+    monkeypatch.setattr(history_repository, "get_engine", lambda: object())
+    monkeypatch.setattr(history_repository, "session_scope", fake_session_scope)
+
+    rows = history_repository.load_account_1430_prices(
+        [("600000.SSE", date(2026, 7, 10))]
+    )
+
+    assert rows[0]["price_1430"] == 10.8
+    sql = str(
+        captured["statement"].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "stock_minute_bars.interval = '1m'" in sql
+    assert "to_char(stock_minute_bars.bar_time, 'HH24:MI') = '14:30'" in sql
+
+
+def test_scheduled_exit_minute_requests_use_all_research_candidate_pools(monkeypatch) -> None:
+    history_rows = [
+        {
+            "trade_date": "2026-07-09",
+            "validation_phase": "locked_holdout",
+            "lane_portfolio": {
+                "candidate_pool": {
+                    "first_board": [
+                        {
+                            "decision": "eligible",
+                            "lane": "first_board",
+                            "buy_time": "10:05:00",
+                            "entry_date": "2026-07-09",
+                            "result_date": "2026-07-10",
+                            "vt_symbol": "600000.SSE",
+                        }
+                    ],
+                    "two_to_three": [
+                        {
+                            "decision": "eligible",
+                            "lane": "two_to_three",
+                            "relay_trigger_status": "ready",
+                            "buy_time": "10:10:00",
+                            "entry_date": "2026-07-09",
+                            "result_date": "2026-07-10",
+                            "vt_symbol": "000001.SZSE",
+                        }
+                    ],
+                    "high_board": [
+                        {
+                            "decision": "eligible",
+                            "lane": "high_board",
+                            "relay_trigger_status": "ready",
+                                "buy_time": "13:35:00",
+                            "entry_date": "2026-07-09",
+                            "result_date": "2026-07-10",
+                            "vt_symbol": "600001.SSE",
+                        },
+                        {
+                            "decision": "blocked",
+                            "lane": "high_board",
+                            "relay_trigger_status": "ready",
+                                "buy_time": "13:36:00",
+                            "entry_date": "2026-07-09",
+                            "result_date": "2026-07-10",
+                            "vt_symbol": "600002.SSE",
+                        },
+                    ],
+                }
+            },
+        }
+    ]
+    monkeypatch.setattr(
+        data_quality.history_repository,
+        "load_history_candidate_pools",
+        lambda _version: history_rows,
+    )
+    monkeypatch.setattr(
+        data_quality,
+        "_live_recommendation_exit_minute_requests",
+        lambda: [
+            ("600000.SSE", date(2026, 7, 10)),
+            ("600003.SSE", date(2026, 7, 10)),
+        ],
+    )
+
+    assert data_quality._scheduled_exit_minute_requests() == [
+        ("000001.SZSE", date(2026, 7, 10)),
+        ("600000.SSE", date(2026, 7, 10)),
+        ("600001.SSE", date(2026, 7, 10)),
+        ("600003.SSE", date(2026, 7, 10)),
+    ]
+
+
+def test_live_actionable_recommendation_repository_uses_compact_projection(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {
+                    "trade_date": date(2026, 7, 16),
+                    "actionable_recommendations": [
+                        {"vt_symbol": "600000.SSE", "action": "buy_now"},
+                    ],
+                }
+            ]
+
+    class Session:
+        def execute(self, statement):
+            captured["statement"] = statement
+            return Result()
+
+    @contextmanager
+    def fake_session_scope():
+        yield Session()
+
+    monkeypatch.setattr(live_repository, "session_scope", fake_session_scope)
+
+    rows = live_repository.load_actionable_recommendation_snapshots(
+        "limit-up-live-v10"
+    )
+
+    assert rows == [
+        {
+            "trade_date": "2026-07-16",
+            "actionable_recommendations": [
+                {"vt_symbol": "600000.SSE", "action": "buy_now"},
+            ],
+        }
+    ]
+    sql = str(
+        captured["statement"].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "actionable_recommendations" in sql
+    assert "limit_up_signal_snapshots.mode = 'live_snapshot'" in sql
+
+
+def test_live_recommendation_exit_requests_use_next_completed_trading_date(
+    monkeypatch,
+) -> None:
+    loaded_versions: list[str] = []
+
+    def fake_load(strategy_version: str):
+        loaded_versions.append(strategy_version)
+        return [
+            {
+                "trade_date": "2026-07-16",
+                "actionable_recommendations": [
+                    {"vt_symbol": "600000.SSE"},
+                    {"vt_symbol": "600001.SSE"},
+                ],
+            },
+            {
+                "trade_date": "2026-07-16",
+                "actionable_recommendations": [
+                    {"vt_symbol": "600000.SSE"},
+                ],
+            },
+            {
+                "trade_date": "2026-07-17",
+                "actionable_recommendations": [
+                    {"vt_symbol": "600002.SSE"},
+                ],
+            },
+        ]
+
+    monkeypatch.setattr(
+        data_quality.live_repository,
+        "load_actionable_recommendation_snapshots",
+        fake_load,
+    )
+    monkeypatch.setattr(
+        data_quality.live_repository,
+        "list_daily_trade_dates",
+        lambda: ["2026-07-15", "2026-07-16", "2026-07-17"],
+    )
+
+    assert data_quality._live_recommendation_exit_minute_requests() == [
+        ("600000.SSE", date(2026, 7, 17)),
+        ("600001.SSE", date(2026, 7, 17)),
+    ]
+    assert loaded_versions == [data_quality.LIVE_STRATEGY_VERSION]
+
+
+def test_retryable_minute_pairs_use_scoped_provider_and_due_time(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {
+                    "trade_date": date(2026, 7, 10),
+                    "vt_symbol": "600000.SSE",
+                    "next_retry_at": None,
+                },
+                {
+                    "trade_date": date(2026, 7, 10),
+                    "vt_symbol": "000001.SZSE",
+                    "next_retry_at": attempted_at + timedelta(days=1),
+                },
+            ]
+
+    class Session:
+        def execute(self, statement):
+            captured["statement"] = statement
+            return Result()
+
+    @contextmanager
+    def fake_session_scope():
+        yield Session()
+
+    monkeypatch.setattr(data_quality_repository.schema, "ensure_schema_once", lambda _engine: None)
+    monkeypatch.setattr(data_quality_repository, "get_engine", lambda: object())
+    monkeypatch.setattr(data_quality_repository, "session_scope", fake_session_scope)
+    attempted_at = datetime(2026, 7, 16, 13, 30, tzinfo=timezone.utc)
+
+    gaps = data_quality_repository.list_retryable_minute_pairs(
+        [
+            ("600000.SSE", date(2026, 7, 10)),
+            ("000001.SZSE", date(2026, 7, 10)),
+        ],
+        limit=20,
+        provider="tdx_exit_1430",
+        as_of=attempted_at,
+    )
+
+    assert gaps == [{"trade_date": "2026-07-10", "vt_symbol": "600000.SSE"}]
+    sql = str(
+        captured["statement"].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "limit_up_minute_backfill_attempts.provider = 'tdx_exit_1430'" in sql
+    assert "limit_up_minute_backfill_attempts.next_retry_at" in sql
+
+
+def test_missing_radar_minute_pairs_require_a_complete_240_bar_path(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {
+                    "trade_date": date(2026, 7, 20),
+                    "vt_symbol": "600001.SSE",
+                },
+                {
+                    "trade_date": date(2026, 7, 20),
+                    "vt_symbol": "600002.SSE",
+                },
+            ]
+
+    class Session:
+        def execute(self, statement):
+            captured["statement"] = statement
+            return Result()
+
+    @contextmanager
+    def fake_session_scope():
+        yield Session()
+
+    monkeypatch.setattr(
+        data_quality_repository.schema,
+        "ensure_schema_once",
+        lambda _engine: None,
+    )
+    monkeypatch.setattr(data_quality_repository, "get_engine", lambda: object())
+    monkeypatch.setattr(data_quality_repository, "session_scope", fake_session_scope)
+
+    gaps = data_quality_repository.list_missing_radar_minute_pairs(
+        300,
+        provider="tdx_radar_3pct",
+        as_of=datetime(2026, 7, 20, 11, 30, tzinfo=timezone.utc),
+    )
+
+    assert gaps == [
+        {"trade_date": "2026-07-20", "vt_symbol": "600001.SSE"},
+        {"trade_date": "2026-07-20", "vt_symbol": "600002.SSE"},
+    ]
+    sql = str(
+        captured["statement"].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    ).lower()
+    assert "select distinct" in sql
+    assert "limit_up_radar_frames.is_stale is false" in sql
+    assert "limit_up_radar_frames.quality_status = 'ready'" in sql
+    assert (
+        "limit_up_radar_frames.source_trade_date = "
+        "limit_up_radar_frames.trade_date"
+    ) in sql
+    assert "stock_minute_bars.interval = '1m'" in sql
+    assert "date_trunc('minute'" in sql
+    assert "09:31:00" in sql
+    assert "11:30:00" in sql
+    assert "13:01:00" in sql
+    assert "15:00:00" in sql
+    assert "coalesce" in sql
+    assert "< 240" in sql
+    assert "limit_up_minute_backfill_attempts.provider = 'tdx_radar_3pct'" in sql
+
+
+def test_radar_minute_path_is_complete_only_at_240_bars() -> None:
+    assert data_quality_repository.radar_minute_path_complete(239) is False
+    assert data_quality_repository.radar_minute_path_complete(240) is True
+    assert data_quality_repository.radar_minute_path_complete(241) is True
+
+
 def test_membership_gate_query_requires_reliable_daily_industry_coverage() -> None:
     statement = data_quality_repository._qualifying_membership_dates_query()
     sql = str(
@@ -201,7 +603,7 @@ def test_membership_gate_query_requires_reliable_daily_industry_coverage() -> No
     assert "stock_sector_membership_snapshots.sector_type = 'industry'" in sql
     assert "count(distinct" in sql.lower()
     assert f">= {data_quality_repository.MIN_RELIABLE_DAILY_SYMBOLS}" in sql
-    assert f"* 100.0 >=" in sql
+    assert "* 100.0 >=" in sql
     assert f"* {data_quality_repository.MIN_MEMBERSHIP_COVERAGE_PCT}" in sql
 
 
@@ -495,7 +897,10 @@ def test_event_minute_backfill_uses_only_missing_pairs_and_full_session(monkeypa
     assert captured["tail_entry_start"] == "09:15"
     assert captured["tail_entry_end"] == "15:00"
     assert captured["dry_run"] is False
-    assert "2026-07-10,000004.SZSE" in str(captured["gap_csv_text"])
+    assert captured["gaps"] == [
+        {"trade_date": "2026-07-10", "vt_symbol": "000004.SZSE"},
+        {"trade_date": "2026-07-10", "vt_symbol": "000021.SZSE"},
+    ]
     assert result["data_quality"]["minute_event_pair_coverage"]["covered"] == 208
     assert recorded["provider"] == "tdx"
     assert [item["status"] for item in recorded["attempts"]] == ["covered", "empty"]
@@ -577,6 +982,242 @@ def test_event_minute_backfill_reports_cooling_down_when_no_pair_is_retryable(mo
     assert result["status"] == "cooling_down"
     assert result["requested_gap_count"] == 0
     assert "10 个缺口处于冷却" in result["message"]
+
+
+def test_radar_minute_backfill_requires_240_bars_and_uses_its_own_retry_scope(
+    monkeypatch,
+) -> None:
+    gaps = [
+        {"trade_date": "2026-07-20", "vt_symbol": "600001.SSE"},
+        {"trade_date": "2026-07-20", "vt_symbol": "600002.SSE"},
+    ]
+    captured: dict[str, object] = {}
+    recorded: dict[str, object] = {}
+    monkeypatch.setattr(
+        data_quality.data_quality_repository,
+        "list_missing_radar_minute_pairs",
+        lambda limit, **kwargs: captured.update(
+            {"gap_limit": limit, "gap_query": kwargs}
+        )
+        or gaps[:limit],
+    )
+
+    def fake_import(params: dict[str, object]) -> dict[str, object]:
+        captured["import_params"] = dict(params)
+        return {"status": "ready", "rows_read": 479, "rows_written": 479}
+
+    monkeypatch.setattr(
+        data_quality.minute_provider_imports,
+        "import_minute_bars_for_gaps",
+        fake_import,
+    )
+    monkeypatch.setattr(
+        data_quality.data_quality_repository,
+        "load_radar_minute_pair_slot_counts",
+        lambda _gaps: {
+            ("600001.SSE", date(2026, 7, 20)): 240,
+            ("600002.SSE", date(2026, 7, 20)): 239,
+        },
+    )
+
+    def fake_record(attempts, *, provider, attempted_at):
+        recorded.update(
+            {
+                "attempts": attempts,
+                "provider": provider,
+                "attempted_at": attempted_at,
+            }
+        )
+
+    monkeypatch.setattr(
+        data_quality.data_quality_repository,
+        "record_minute_backfill_attempts",
+        fake_record,
+    )
+
+    result = data_quality.backfill_limit_up_radar_minutes(
+        max_gaps=300,
+        dry_run=False,
+    )
+
+    assert captured["gap_limit"] == 300
+    assert captured["gap_query"]["provider"] == "tdx_radar_3pct"
+    params = captured["import_params"]
+    assert params["provider"] == "tdx"
+    assert params["tail_entry_start"] == "09:15"
+    assert params["tail_entry_end"] == "15:00"
+    assert params["max_gaps"] == 2
+    assert params["gaps"] == gaps
+    assert recorded["provider"] == "tdx_radar_3pct"
+    assert [item["status"] for item in recorded["attempts"]] == [
+        "covered",
+        "empty",
+    ]
+    assert [item["last_rows_read"] for item in recorded["attempts"]] == [240, 239]
+    assert result["scope"] == "limit_up_radar_3pct_full_session"
+    assert result["covered_gap_count"] == 1
+    assert result["empty_gap_count"] == 1
+
+
+def test_radar_minute_backfill_does_not_record_dry_run(monkeypatch) -> None:
+    recorded: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        data_quality.data_quality_repository,
+        "list_missing_radar_minute_pairs",
+        lambda *_args, **_kwargs: [
+            {"trade_date": "2026-07-20", "vt_symbol": "600001.SSE"}
+        ],
+    )
+    monkeypatch.setattr(
+        data_quality.minute_provider_imports,
+        "import_minute_bars_for_gaps",
+        lambda _params: {
+            "status": "ready",
+            "rows_read": 240,
+            "rows_written": 0,
+            "preview_covered_gap_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        data_quality.data_quality_repository,
+        "record_minute_backfill_attempts",
+        lambda attempts, **_kwargs: recorded.extend(attempts),
+    )
+
+    result = data_quality.backfill_limit_up_radar_minutes(
+        max_gaps=1,
+        dry_run=True,
+    )
+
+    assert result["dry_run"] is True
+    assert result["covered_gap_count"] == 1
+    assert recorded == []
+
+
+def test_exit_minute_backfill_imports_only_missing_exact_1430_pairs(monkeypatch) -> None:
+    existing = ("000001.SZSE", date(2026, 7, 10))
+    covered_after_import = ("600000.SSE", date(2026, 7, 10))
+    still_missing = ("600001.SSE", date(2026, 7, 10))
+    captured: dict[str, object] = {}
+    recorded: dict[str, object] = {}
+    price_load_count = 0
+
+    monkeypatch.setattr(
+        data_quality,
+        "_scheduled_exit_minute_requests",
+        lambda: [existing, covered_after_import, still_missing],
+    )
+
+    def fake_load_1430(requests):
+        nonlocal price_load_count
+        price_load_count += 1
+        captured[f"price_requests_{price_load_count}"] = list(requests)
+        pair = existing if price_load_count == 1 else covered_after_import
+        return [
+            {
+                "vt_symbol": pair[0],
+                "trade_date": pair[1].isoformat(),
+                "bar_time": f"{pair[1].isoformat()}T14:30:00",
+                "price_1430": 10.8,
+            }
+        ]
+
+    monkeypatch.setattr(
+        data_quality.history_repository,
+        "load_account_1430_prices",
+        fake_load_1430,
+    )
+
+    def fake_retryable(pairs, *, provider, as_of, limit):
+        captured.update(
+            {
+                "retry_pairs": list(pairs),
+                "retry_provider": provider,
+                "retry_as_of": as_of,
+                "retry_limit": limit,
+            }
+        )
+        return [
+            {"vt_symbol": symbol, "trade_date": trade_date.isoformat()}
+            for symbol, trade_date in pairs[:limit]
+        ]
+
+    monkeypatch.setattr(
+        data_quality.data_quality_repository,
+        "list_retryable_minute_pairs",
+        fake_retryable,
+    )
+
+    def fake_import(params):
+        captured["import_params"] = dict(params)
+        return {"status": "ready", "rows_read": 2, "rows_written": 2}
+
+    monkeypatch.setattr(
+        data_quality.minute_provider_imports,
+        "import_minute_bars_for_gaps",
+        fake_import,
+    )
+
+    def fake_record(attempts, *, provider, attempted_at):
+        recorded.update(
+            {
+                "attempts": attempts,
+                "provider": provider,
+                "attempted_at": attempted_at,
+            }
+        )
+
+    monkeypatch.setattr(
+        data_quality.data_quality_repository,
+        "record_minute_backfill_attempts",
+        fake_record,
+    )
+
+    result = data_quality.backfill_limit_up_exit_minutes(max_gaps=2, dry_run=False)
+
+    assert captured["retry_pairs"] == [covered_after_import, still_missing]
+    assert captured["retry_provider"] == "tdx_exit_1430"
+    assert captured["retry_limit"] == 2
+    assert captured["price_requests_2"] == [covered_after_import, still_missing]
+    assert captured["import_params"]["provider"] == "tdx"
+    assert captured["import_params"]["tail_entry_start"] == "14:30"
+    assert captured["import_params"]["tail_entry_end"] == "14:30"
+    assert captured["import_params"]["gaps"] == [
+        {"vt_symbol": "600000.SSE", "trade_date": "2026-07-10"},
+        {"vt_symbol": "600001.SSE", "trade_date": "2026-07-10"},
+    ]
+    assert recorded["provider"] == "tdx_exit_1430"
+    assert [item["status"] for item in recorded["attempts"]] == ["covered", "empty"]
+    assert [item["last_rows_read"] for item in recorded["attempts"]] == [1, 0]
+    assert result["scope"] == "limit_up_candidate_exit_1430"
+    assert result["candidate_request_count"] == 3
+    assert result["existing_covered_pair_count"] == 1
+    assert result["covered_gap_count"] == 1
+    assert result["empty_gap_count"] == 1
+
+
+def test_exit_minute_backfill_reports_cooling_down_without_retryable_pairs(monkeypatch) -> None:
+    request = ("600000.SSE", date(2026, 7, 10))
+    monkeypatch.setattr(data_quality, "_scheduled_exit_minute_requests", lambda: [request])
+    monkeypatch.setattr(
+        data_quality.history_repository,
+        "load_account_1430_prices",
+        lambda _requests: [],
+    )
+    monkeypatch.setattr(
+        data_quality.data_quality_repository,
+        "list_retryable_minute_pairs",
+        lambda _pairs, **_kwargs: [],
+    )
+
+    result = data_quality.backfill_limit_up_exit_minutes(max_gaps=20, dry_run=False)
+
+    assert result["status"] == "cooling_down"
+    assert result["scope"] == "limit_up_candidate_exit_1430"
+    assert result["candidate_request_count"] == 1
+    assert result["missing_pair_count"] == 1
+    assert result["requested_gap_count"] == 0
+    assert "1 个候选卖出价缺口处于冷却" in result["message"]
 
 
 def test_event_minute_backfill_endpoint_validates_batch_size(monkeypatch) -> None:

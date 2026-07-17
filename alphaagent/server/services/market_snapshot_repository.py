@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime, time, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -15,6 +16,12 @@ from alphaagent.server.db.session import session_scope
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 INTRADAY_FUND_FLOW_PERIODS = frozenset({"即时", "今日", "1日", "当日"})
 MEMBERSHIP_SNAPSHOT_CHUNK_SIZE = 500
+MEMBERSHIP_CONCEPT_TYPES = frozenset({"concept", "theme"})
+MEMBERSHIP_SCOPE_TYPES = ("concept", "industry")
+
+
+class IncompleteMembershipSnapshotError(ValueError):
+    """Raised before persistence when a daily membership snapshot is incomplete."""
 
 
 def save_current_stock_sector_membership_snapshot(
@@ -31,16 +38,56 @@ def save_current_stock_sector_membership_snapshot(
                 select(schema.stock_sector_memberships)
             ).mappings().all()
         ]
-    return save_stock_sector_membership_snapshots(
-        items,
-        snapshot_date=snapshot_date,
-        captured_at=captured_at,
-    )
+        expected_sectors = [
+            dict(row)
+            for row in session.execute(select(schema.sectors)).mappings().all()
+        ]
+        captured_sector_ids = {
+            str(item.get("sector_id") or "").strip()
+            for item in items
+            if item.get("sector_id")
+        }
+        excluded_sector_ids = tuple(
+            sorted(
+                str(sector.get("id") or "").strip()
+                for sector in expected_sectors
+                if _membership_scope_type(str(sector.get("type") or "")) is not None
+                and str(sector.get("id") or "").strip() not in captured_sector_ids
+            )
+        )
+        return _replace_membership_snapshot(
+            session,
+            items,
+            expected_sectors=expected_sectors,
+            excluded_sector_ids=excluded_sector_ids,
+            snapshot_date=snapshot_date,
+            captured_at=captured_at,
+        )
 
 
 def save_stock_sector_membership_snapshots(
     items: Sequence[Mapping[str, Any]],
     *,
+    expected_sectors: Sequence[Mapping[str, Any]],
+    snapshot_date: date,
+    captured_at: datetime,
+) -> int:
+    with session_scope() as session:
+        return _replace_membership_snapshot(
+            session,
+            items,
+            expected_sectors=expected_sectors,
+            snapshot_date=snapshot_date,
+            captured_at=captured_at,
+        )
+
+
+def _replace_membership_snapshot(
+    session,
+    items: Sequence[Mapping[str, Any]],
+    *,
+    expected_sectors: Sequence[Mapping[str, Any]],
+    excluded_sector_ids: Sequence[str] = (),
     snapshot_date: date,
     captured_at: datetime,
 ) -> int:
@@ -50,15 +97,161 @@ def save_stock_sector_membership_snapshots(
         captured_at=captured_at,
     )
     if not rows:
-        return 0
+        raise IncompleteMembershipSnapshotError("membership snapshot rows are empty")
+    scopes = build_membership_snapshot_scopes(
+        rows,
+        expected_sectors=expected_sectors,
+        excluded_sector_ids=excluded_sector_ids,
+        snapshot_date=snapshot_date,
+        captured_at=captured_at,
+    )
 
     table = schema.stock_sector_membership_snapshots
-    with session_scope() as session:
-        session.execute(
-            table.delete().where(table.c.snapshot_date == snapshot_date)
-        )
-        _upsert_membership_snapshot_rows(session, table, rows)
+    scope_table = schema.stock_sector_membership_snapshot_scopes
+    session.execute(table.delete().where(table.c.snapshot_date == snapshot_date))
+    session.execute(
+        scope_table.delete().where(scope_table.c.snapshot_date == snapshot_date)
+    )
+    _upsert_membership_snapshot_rows(session, table, rows)
+    session.execute(scope_table.insert().values(scopes))
     return len(rows)
+
+
+def build_membership_snapshot_scopes(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    expected_sectors: Sequence[Mapping[str, Any]],
+    excluded_sector_ids: Sequence[str] = (),
+    snapshot_date: date,
+    captured_at: datetime,
+) -> list[dict[str, Any]]:
+    """Validate exact board coverage and return auditable daily scopes."""
+
+    captured_utc = _as_utc(captured_at)
+    catalog_expected_by_scope: dict[str, set[str]] = {
+        scope_type: set() for scope_type in MEMBERSHIP_SCOPE_TYPES
+    }
+    excluded = {
+        str(sector_id).strip()
+        for sector_id in excluded_sector_ids
+        if str(sector_id).strip()
+    }
+    seen_expected: set[str] = set()
+    for sector in expected_sectors:
+        sector_id = str(sector.get("id") or sector.get("sector_id") or "").strip()
+        sector_type = str(sector.get("type") or sector.get("sector_type") or "").strip()
+        scope_type = _membership_scope_type(sector_type)
+        if scope_type is None:
+            continue
+        if not sector_id:
+            raise IncompleteMembershipSnapshotError(
+                "expected membership sector ID is empty"
+            )
+        if sector_id in seen_expected:
+            raise IncompleteMembershipSnapshotError(
+                f"duplicate expected membership sector: {sector_id}"
+            )
+        seen_expected.add(sector_id)
+        catalog_expected_by_scope[scope_type].add(sector_id)
+
+    unknown_exclusions = sorted(excluded - seen_expected)
+    if unknown_exclusions:
+        raise IncompleteMembershipSnapshotError(
+            "excluded membership sectors are not in the catalog: "
+            + ",".join(unknown_exclusions[:20])
+        )
+
+    captured_by_scope: dict[str, set[str]] = {
+        scope_type: set() for scope_type in MEMBERSHIP_SCOPE_TYPES
+    }
+    rows_by_scope: dict[str, list[Mapping[str, Any]]] = {
+        scope_type: [] for scope_type in MEMBERSHIP_SCOPE_TYPES
+    }
+    sources: set[str] = set()
+    for row in rows:
+        if row.get("snapshot_date") != snapshot_date:
+            raise IncompleteMembershipSnapshotError(
+                "membership row snapshot_date does not match requested date"
+            )
+        scope_type = _membership_scope_type(str(row.get("sector_type") or ""))
+        if scope_type is None:
+            continue
+        sector_id = str(row.get("sector_id") or "").strip()
+        source = str(row.get("source") or "").strip()
+        if not sector_id or not source:
+            raise IncompleteMembershipSnapshotError(
+                "membership row sector ID and source are required"
+            )
+        captured_by_scope[scope_type].add(sector_id)
+        rows_by_scope[scope_type].append(row)
+        sources.add(source)
+
+    if len(sources) != 1:
+        raise IncompleteMembershipSnapshotError(
+            "membership snapshot must contain exactly one source"
+        )
+    source = next(iter(sources))
+    scopes: list[dict[str, Any]] = []
+    for scope_type in MEMBERSHIP_SCOPE_TYPES:
+        catalog_expected = catalog_expected_by_scope[scope_type]
+        scope_exclusions = sorted(catalog_expected & excluded)
+        expected = catalog_expected - excluded
+        captured = captured_by_scope[scope_type]
+        if not expected:
+            raise IncompleteMembershipSnapshotError(
+                f"expected {scope_type} membership sector inventory is empty"
+            )
+        missing = sorted(expected - captured)
+        unexpected = sorted(captured - expected)
+        if missing or unexpected:
+            details = []
+            if missing:
+                details.append("missing=" + ",".join(missing[:20]))
+            if unexpected:
+                details.append("unexpected=" + ",".join(unexpected[:20]))
+            raise IncompleteMembershipSnapshotError(
+                f"incomplete {scope_type} membership scope: {'; '.join(details)}"
+            )
+        scope_rows = rows_by_scope[scope_type]
+        symbols = {str(row.get("vt_symbol") or "") for row in scope_rows}
+        scopes.append(
+            {
+                "snapshot_date": snapshot_date,
+                "scope_type": scope_type,
+                "captured_at": captured_utc,
+                "expected_sector_count": len(expected),
+                "captured_sector_count": len(captured),
+                "row_count": len(scope_rows),
+                "symbol_count": len(symbols),
+                "complete": True,
+                "evidence_level": (
+                    "strict_exclusions"
+                    if scope_exclusions
+                    else "strict"
+                ),
+                "source": source,
+                "raw": {
+                    "catalog_expected_sector_count": len(catalog_expected),
+                    "excluded_sector_count": len(scope_exclusions),
+                    "excluded_sector_ids": scope_exclusions,
+                    "expected_sector_types": (
+                        ["concept", "theme"]
+                        if scope_type == "concept"
+                        else ["industry"]
+                    )
+                },
+            }
+        )
+    return scopes
+
+
+def _membership_scope_type(sector_type: str) -> str | None:
+    normalized = str(sector_type or "").strip().lower()
+    if normalized in MEMBERSHIP_CONCEPT_TYPES:
+        return "concept"
+    if normalized == "industry":
+        return "industry"
+    return None
 
 
 def replace_stock_sector_membership_snapshot_scope(
@@ -146,7 +339,12 @@ def build_stock_sector_membership_snapshot_rows(
         sector_id = str(item.get("sector_id") or "").strip()
         if not vt_symbol or not sector_id:
             continue
-        rows[(vt_symbol, sector_id)] = {
+        key = (vt_symbol, sector_id)
+        if key in rows:
+            raise IncompleteMembershipSnapshotError(
+                f"duplicate membership snapshot key: {vt_symbol}:{sector_id}"
+            )
+        rows[key] = {
             "snapshot_date": snapshot_date,
             "vt_symbol": vt_symbol,
             "sector_id": sector_id,

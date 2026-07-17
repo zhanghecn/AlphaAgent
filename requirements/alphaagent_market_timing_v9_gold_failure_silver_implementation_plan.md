@@ -13,8 +13,8 @@
 ### Task 1: 用测试固定失败银的因果边界
 
 **Files:**
-- Modify: `tests/alphaagent/services/quant/test_market_timing_no_lookahead.py`
-- Modify: `tests/alphaagent/services/quant/test_market_timing_intraday.py`
+- Modify: `tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py`
+- Modify: `tests/alphaagent/services/market_timing/test_market_timing_intraday.py`
 
 - [ ] **Step 1: 添加趋势金失败生成银手指测试**
 
@@ -40,8 +40,8 @@ Run:
 
 ```bash
 uv run --group server pytest \
-  tests/alphaagent/services/quant/test_market_timing_no_lookahead.py \
-  tests/alphaagent/services/quant/test_market_timing_intraday.py -q
+  tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py \
+  tests/alphaagent/services/market_timing/test_market_timing_intraday.py -q
 ```
 
 Expected: 新断言因缺少 `GOLD_FAILURE_SILVER` 失败，既有测试继续通过。
@@ -49,7 +49,7 @@ Expected: 新断言因缺少 `GOLD_FAILURE_SILVER` 失败，既有测试继续�
 ### Task 2: 实现最小失败银派生层
 
 **Files:**
-- Modify: `alphaagent/server/services/quant/market_timing/signal.py`
+- Modify: `alphaagent/server/services/market_timing/signal.py`
 
 - [ ] **Step 1: 增加 setup 和固定门槛**
 
@@ -73,9 +73,9 @@ Run:
 
 ```bash
 uv run --group server pytest \
-  tests/alphaagent/services/quant/test_market_timing_backtest.py \
-  tests/alphaagent/services/quant/test_market_timing_no_lookahead.py \
-  tests/alphaagent/services/quant/test_market_timing_intraday.py -q
+  tests/alphaagent/services/market_timing/test_market_timing_backtest.py \
+  tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py \
+  tests/alphaagent/services/market_timing/test_market_timing_intraday.py -q
 ```
 
 Expected: PASS。

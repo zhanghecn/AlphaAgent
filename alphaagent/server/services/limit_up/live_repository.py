@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from statistics import mean, median
+from threading import Lock
 from typing import Mapping
 from zoneinfo import ZoneInfo
 
@@ -32,6 +33,10 @@ RESEARCH_SECTOR_TYPES = ("theme", "industry")
 LIVE_CONTEXT_SECTOR_TYPES = (*RESEARCH_SECTOR_TYPES, "concept")
 CONCEPT_GROUP_CACHE_SECONDS = 900
 _CONCEPT_GROUP_CACHE = TTLCache(max_items=2)
+_prior_context_lock = Lock()
+_prior_context_trade_date: date | None = None
+_prior_context_by_symbol: dict[str, dict[str, object]] = {}
+_prior_context_meta: dict[str, object] = {}
 STYLE_SECTOR_KEYWORDS = (
     "MSCI",
     "中证",
@@ -213,6 +218,41 @@ def list_daily_trade_dates() -> list[str]:
     return [row.isoformat() if isinstance(row, date) else str(row) for row in rows]
 
 
+def load_actionable_recommendation_snapshots(
+    strategy_version: str,
+) -> list[dict[str, object]]:
+    """Load only formal live recommendations needed for D+1 exit backfill."""
+
+    table = schema.limit_up_signal_snapshots
+    actionable = table.c.recommendations["actionable_recommendations"].label(
+        "actionable_recommendations"
+    )
+    statement = (
+        select(
+            table.c.trade_date,
+            actionable,
+        )
+        .where(
+            table.c.strategy_version == strategy_version,
+            table.c.mode == "live_snapshot",
+        )
+        .order_by(table.c.trade_date, table.c.captured_at)
+    )
+    with session_scope() as session:
+        rows = session.execute(statement).mappings().all()
+    return [
+        {
+            "trade_date": row["trade_date"].isoformat(),
+            "actionable_recommendations": [
+                dict(item)
+                for item in (row["actionable_recommendations"] or [])
+                if isinstance(item, Mapping)
+            ],
+        }
+        for row in rows
+    ]
+
+
 def load_snapshots_between(
     start: date | None,
     end: date | None,
@@ -272,12 +312,108 @@ def load_live_context(
     symbols: list[str],
     trade_date: date,
 ) -> dict[str, object]:
-    """Load the latest context that was observable before the live session."""
+    """Load cached prior context and freshly queried intraday context."""
 
     normalized_symbols = sorted({str(symbol) for symbol in symbols if symbol})
     if not normalized_symbols:
         return {"by_symbol": {}, "sentiment": {}, "timing": {}}
 
+    prior = _cached_prior_symbol_context(normalized_symbols, trade_date)
+    intraday = _load_intraday_context(normalized_symbols, trade_date, prior)
+    prior_by_symbol = prior.get("by_symbol")
+    prior_by_symbol = (
+        prior_by_symbol if isinstance(prior_by_symbol, Mapping) else {}
+    )
+    intraday_by_symbol = intraday.get("by_symbol")
+    intraday_by_symbol = (
+        intraday_by_symbol if isinstance(intraday_by_symbol, Mapping) else {}
+    )
+    return {
+        "by_symbol": {
+            symbol: {
+                **{
+                    key: value
+                    for key, value in dict(prior_by_symbol.get(symbol) or {}).items()
+                    if not key.startswith("_")
+                },
+                **dict(intraday_by_symbol.get(symbol) or {}),
+            }
+            for symbol in normalized_symbols
+        },
+        "previous_trade_date": prior.get("previous_trade_date"),
+        "sentiment": dict(intraday.get("sentiment") or {}),
+        "timing": dict(intraday.get("timing") or {}),
+    }
+
+
+def clear_live_context_cache() -> None:
+    """Clear the per-trading-day D-1 context cache."""
+
+    global _prior_context_trade_date
+    with _prior_context_lock:
+        _prior_context_trade_date = None
+        _prior_context_by_symbol.clear()
+        _prior_context_meta.clear()
+
+
+def _cached_prior_symbol_context(
+    symbols: list[str],
+    trade_date: date,
+) -> dict[str, object]:
+    global _prior_context_trade_date
+    with _prior_context_lock:
+        if _prior_context_trade_date != trade_date:
+            _prior_context_trade_date = trade_date
+            _prior_context_by_symbol.clear()
+            _prior_context_meta.clear()
+        missing = [
+            symbol for symbol in symbols if symbol not in _prior_context_by_symbol
+        ]
+        if missing:
+            loaded = _load_prior_symbol_context(missing, trade_date)
+            loaded_by_symbol = loaded.get("by_symbol")
+            loaded_by_symbol = (
+                loaded_by_symbol if isinstance(loaded_by_symbol, Mapping) else {}
+            )
+            for symbol in missing:
+                _prior_context_by_symbol[symbol] = dict(
+                    loaded_by_symbol.get(symbol) or {}
+                )
+            loaded_scores = loaded.get("score_by_sector")
+            if isinstance(loaded_scores, Mapping):
+                scores = _prior_context_meta.setdefault("score_by_sector", {})
+                if isinstance(scores, dict):
+                    scores.update(
+                        {
+                            str(key): dict(value)
+                            for key, value in loaded_scores.items()
+                            if isinstance(value, Mapping)
+                        }
+                    )
+            for key in (
+                "previous_trade_date",
+                "sentiment_points",
+                "calendar_dates",
+                "concept_groups",
+            ):
+                if key in loaded:
+                    _prior_context_meta[key] = loaded[key]
+        return {
+            "by_symbol": {
+                symbol: dict(_prior_context_by_symbol.get(symbol) or {})
+                for symbol in symbols
+            },
+            **_prior_context_meta,
+        }
+
+
+def _load_prior_symbol_context(
+    symbols: list[str],
+    trade_date: date,
+) -> dict[str, object]:
+    """Load fields that cannot change during the current trading day."""
+
+    normalized_symbols = sorted({str(symbol) for symbol in symbols if symbol})
     with session_scope() as session:
         previous_date = session.execute(
             select(func.max(schema.stock_daily_bars.c.trade_date)).where(
@@ -297,7 +433,6 @@ def load_live_context(
         )
 
         score_rows = []
-        sector_flow_rows = []
         if sector_ids and previous_date is not None:
             score_rows = session.execute(
                 select(schema.sector_period_scores).where(
@@ -311,20 +446,6 @@ def load_live_context(
                     desc(schema.sector_period_scores.c.as_of_date),
                 )
             ).mappings().all()
-            sector_flow_rows = session.execute(
-                select(schema.sector_fund_flows).where(
-                    schema.sector_fund_flows.c.sector_id.in_(sector_ids),
-                    schema.sector_fund_flows.c.period == "即时",
-                    schema.sector_fund_flows.c.trade_date <= trade_date.isoformat(),
-                )
-                .distinct(schema.sector_fund_flows.c.sector_id)
-                .order_by(
-                    schema.sector_fund_flows.c.sector_id,
-                    desc(schema.sector_fund_flows.c.trade_date),
-                )
-            ).mappings().all()
-
-        stock_flow_rows = []
         bar_rows = []
         prior_event_rows = []
         financial_rows = []
@@ -332,18 +453,6 @@ def load_live_context(
         calendar_dates: list[str] = []
         if previous_date is not None:
             data_start = previous_date - timedelta(days=220)
-            stock_flow_rows = session.execute(
-                select(schema.stock_fund_flows).where(
-                    schema.stock_fund_flows.c.vt_symbol.in_(normalized_symbols),
-                    schema.stock_fund_flows.c.period == "即时",
-                    schema.stock_fund_flows.c.trade_date <= trade_date.isoformat(),
-                )
-                .distinct(schema.stock_fund_flows.c.vt_symbol)
-                .order_by(
-                    schema.stock_fund_flows.c.vt_symbol,
-                    desc(schema.stock_fund_flows.c.trade_date),
-                )
-            ).mappings().all()
             bar_rows = session.execute(
                 select(schema.stock_daily_bars).where(
                     schema.stock_daily_bars.c.vt_symbol.in_(normalized_symbols),
@@ -384,15 +493,7 @@ def load_live_context(
                 ).scalars().all()
             ]
 
-        timing_panel = session.execute(
-            select(schema.market_timing_panel.c.panel).where(
-                schema.market_timing_panel.c.id == 1
-            )
-        ).scalar_one_or_none()
-
     score_by_sector = _latest_by_key(score_rows, "sector_id")
-    sector_flow_by_sector = _latest_by_key(sector_flow_rows, "sector_id")
-    stock_flow_by_symbol = _latest_by_key(stock_flow_rows, "vt_symbol")
     memberships_by_symbol: dict[str, list[Mapping[str, object]]] = defaultdict(list)
     for row in memberships:
         memberships_by_symbol[str(row.get("vt_symbol") or "")].append(row)
@@ -404,32 +505,12 @@ def load_live_context(
     concept_groups = _load_current_concept_groups() if has_concept_membership else []
 
     by_symbol: dict[str, dict[str, object]] = {}
-    for symbol in normalized_symbols:
+    for symbol in symbols:
         bars = bars_by_symbol.get(symbol, [])
         price_context = _prior_price_context(bars)
-        stock_flow = stock_flow_by_symbol.get(symbol, {})
-        membership = _best_membership(
-            memberships_by_symbol.get(symbol, []),
-            score_by_sector,
-            sector_flow_by_sector,
-        )
-        sector_id = str(membership.get("sector_id") or "")
-        sector_score = score_by_sector.get(sector_id, {})
-        sector_flow = sector_flow_by_sector.get(sector_id, {})
         prior_board = prior_events.get((symbol, previous_date)) if previous_date else None
         by_symbol[symbol] = {
             **price_context,
-            "sector_id": sector_id,
-            "sector_name": membership.get("sector_name"),
-            "sector_type": membership.get("sector_type"),
-            "sector_heat": _number(sector_score.get("heat_score")),
-            "sector_trend_state": sector_score.get("trend_state"),
-            "sector_main_net_inflow": _number(sector_flow.get("main_net_inflow")),
-            "sector_main_net_inflow_ratio": _number(sector_flow.get("main_net_inflow_ratio")),
-            "sector_flow_trade_date": sector_flow.get("trade_date"),
-            "stock_main_net_inflow": _number(stock_flow.get("main_net_inflow")),
-            "stock_main_net_inflow_ratio": _number(stock_flow.get("main_net_inflow_ratio")),
-            "stock_flow_trade_date": stock_flow.get("trade_date"),
             "prior_board": _prior_board_context(prior_board, price_context),
             "financial_risk": financial_risk_as_of(
                 financial_index,
@@ -442,6 +523,115 @@ def load_live_context(
                 trade_date,
             ),
             "lane_feature_ready": len(bars) >= 20,
+            "_memberships": [
+                dict(item) for item in memberships_by_symbol.get(symbol, [])
+            ],
+        }
+    return {
+        "by_symbol": by_symbol,
+        "previous_trade_date": previous_date.isoformat() if previous_date else None,
+        "score_by_sector": score_by_sector,
+        "sentiment_points": sentiment_points,
+        "calendar_dates": calendar_dates,
+        "concept_groups": concept_groups,
+    }
+
+
+def _load_intraday_context(
+    symbols: list[str],
+    trade_date: date,
+    prior: Mapping[str, object],
+) -> dict[str, object]:
+    """Load fund-flow and timing fields that can change during the session."""
+
+    prior_by_symbol = prior.get("by_symbol")
+    prior_by_symbol = (
+        prior_by_symbol if isinstance(prior_by_symbol, Mapping) else {}
+    )
+    memberships_by_symbol: dict[str, list[Mapping[str, object]]] = {}
+    for symbol in symbols:
+        row = prior_by_symbol.get(symbol)
+        row = row if isinstance(row, Mapping) else {}
+        memberships_by_symbol[symbol] = [
+            item
+            for item in row.get("_memberships") or []
+            if isinstance(item, Mapping)
+        ]
+    sector_ids = sorted(
+        {
+            str(item.get("sector_id") or "")
+            for rows in memberships_by_symbol.values()
+            for item in rows
+            if item.get("sector_id")
+        }
+    )
+    with session_scope() as session:
+        sector_flow_rows = []
+        if sector_ids:
+            sector_flow_rows = session.execute(
+                select(schema.sector_fund_flows).where(
+                    schema.sector_fund_flows.c.sector_id.in_(sector_ids),
+                    schema.sector_fund_flows.c.period == "即时",
+                    schema.sector_fund_flows.c.trade_date <= trade_date.isoformat(),
+                )
+                .distinct(schema.sector_fund_flows.c.sector_id)
+                .order_by(
+                    schema.sector_fund_flows.c.sector_id,
+                    desc(schema.sector_fund_flows.c.trade_date),
+                )
+            ).mappings().all()
+        stock_flow_rows = session.execute(
+            select(schema.stock_fund_flows).where(
+                schema.stock_fund_flows.c.vt_symbol.in_(symbols),
+                schema.stock_fund_flows.c.period == "即时",
+                schema.stock_fund_flows.c.trade_date <= trade_date.isoformat(),
+            )
+            .distinct(schema.stock_fund_flows.c.vt_symbol)
+            .order_by(
+                schema.stock_fund_flows.c.vt_symbol,
+                desc(schema.stock_fund_flows.c.trade_date),
+            )
+        ).mappings().all()
+        timing_panel = session.execute(
+            select(schema.market_timing_panel.c.panel).where(
+                schema.market_timing_panel.c.id == 1
+            )
+        ).scalar_one_or_none()
+
+    scores = prior.get("score_by_sector")
+    score_by_sector = scores if isinstance(scores, Mapping) else {}
+    sector_flow_by_sector = _latest_by_key(sector_flow_rows, "sector_id")
+    stock_flow_by_symbol = _latest_by_key(stock_flow_rows, "vt_symbol")
+    concept_groups = prior.get("concept_groups")
+    concept_groups = concept_groups if isinstance(concept_groups, list) else []
+    by_symbol: dict[str, dict[str, object]] = {}
+    for symbol in symbols:
+        membership = _best_membership(
+            memberships_by_symbol.get(symbol, []),
+            score_by_sector,
+            sector_flow_by_sector,
+        )
+        sector_id = str(membership.get("sector_id") or "")
+        sector_score = score_by_sector.get(sector_id, {})
+        sector_score = sector_score if isinstance(sector_score, Mapping) else {}
+        sector_flow = sector_flow_by_sector.get(sector_id, {})
+        stock_flow = stock_flow_by_symbol.get(symbol, {})
+        by_symbol[symbol] = {
+            "sector_id": sector_id,
+            "sector_name": membership.get("sector_name"),
+            "sector_type": membership.get("sector_type"),
+            "sector_heat": _number(sector_score.get("heat_score")),
+            "sector_trend_state": sector_score.get("trend_state"),
+            "sector_main_net_inflow": _number(sector_flow.get("main_net_inflow")),
+            "sector_main_net_inflow_ratio": _number(
+                sector_flow.get("main_net_inflow_ratio")
+            ),
+            "sector_flow_trade_date": sector_flow.get("trade_date"),
+            "stock_main_net_inflow": _number(stock_flow.get("main_net_inflow")),
+            "stock_main_net_inflow_ratio": _number(
+                stock_flow.get("main_net_inflow_ratio")
+            ),
+            "stock_flow_trade_date": stock_flow.get("trade_date"),
             "concept_contexts": _concept_group_contexts(
                 memberships_by_symbol.get(symbol, []),
                 [],
@@ -451,11 +641,19 @@ def load_live_context(
             ),
         }
 
+    previous_text = str(prior.get("previous_trade_date") or "")
+    previous_date = date.fromisoformat(previous_text) if previous_text else None
     timing_signals = (
         list((timing_panel.get("chart") or {}).get("signals") or [])
         if isinstance(timing_panel, Mapping)
         else []
     )
+    sentiment_points = [
+        dict(item)
+        for item in prior.get("sentiment_points") or []
+        if isinstance(item, Mapping)
+    ]
+    calendar_dates = [str(item) for item in prior.get("calendar_dates") or []]
     market = market_snapshot_for_trade(
         trade_date,
         previous_date,
@@ -465,7 +663,6 @@ def load_live_context(
     )
     return {
         "by_symbol": by_symbol,
-        "previous_trade_date": previous_date.isoformat() if previous_date else None,
         "sentiment": dict(market.get("sentiment") or {}),
         "timing": dict(market.get("timing") or {}),
     }

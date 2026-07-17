@@ -140,3 +140,69 @@ def test_stock_daily_incomplete_health_ignores_complete_latest_date():
             "min_complete_daily_symbol_count": 3000,
         }
     ) is None
+
+
+def test_stock_daily_health_recommends_sync_when_history_depth_is_underfilled():
+    severity, reason, stale = svc._stock_daily_incomplete_health(
+        {
+            "latest_trade_date": "2026-07-15",
+            "latest_trade_date_symbol_count": 5532,
+            "latest_complete_trade_date": "2026-07-15",
+            "min_complete_daily_symbol_count": 3000,
+            "reliable_history_trade_days": 268,
+            "target_history_trade_days": 750,
+            "history_depth_ready": False,
+        }
+    )
+
+    assert stale is True
+    assert severity == "stale"
+    assert "268/750" in reason
+    assert "历史" in reason
+
+
+def test_stock_daily_health_accepts_ready_history_depth():
+    assert svc._stock_daily_incomplete_health(
+        {
+            "latest_trade_date": "2026-07-15",
+            "latest_trade_date_symbol_count": 5532,
+            "latest_complete_trade_date": "2026-07-15",
+            "min_complete_daily_symbol_count": 3000,
+            "reliable_history_trade_days": 800,
+            "target_history_trade_days": 750,
+            "history_depth_ready": True,
+        }
+    ) is None
+
+
+def test_data_health_exposes_stock_daily_history_depth(monkeypatch):
+    stock_daily_coverage = {
+        "count": 3_300_000,
+        "latest_trade_date": "2026-07-15",
+        "latest_complete_trade_date": "2026-07-15",
+        "latest_trade_date_symbol_count": 5_532,
+        "reliable_history_start": "2023-03-28",
+        "reliable_history_end": "2026-07-15",
+        "reliable_history_trade_days": 799,
+        "target_history_trade_days": 750,
+        "history_depth_ready": True,
+    }
+    monkeypatch.setattr(
+        svc,
+        "coverage",
+        lambda: {"tables": {"stock_daily_bars": stock_daily_coverage}},
+    )
+    monkeypatch.setattr(
+        svc,
+        "_resolve_latest_trade_date",
+        lambda: (date(2026, 7, 15), "stock_daily_bars.complete"),
+    )
+    monkeypatch.setattr(svc, "_collect_freshness_probes", lambda: {})
+
+    context = svc.data_health()["market_context"]
+
+    assert context["reliable_history_start"] == "2023-03-28"
+    assert context["reliable_history_end"] == "2026-07-15"
+    assert context["reliable_history_trade_days"] == 799
+    assert context["target_history_trade_days"] == 750
+    assert context["history_depth_ready"] is True

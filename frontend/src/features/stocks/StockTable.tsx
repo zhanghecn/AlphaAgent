@@ -23,7 +23,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { AddToGroupButton } from "@/features/portfolio/AddToGroupButton";
 import {
   Table,
   TableHeader,
@@ -264,19 +263,6 @@ export function StockTable() {
           return <span className="tabular-nums">{val != null ? val.toFixed(2) : "--"}</span>;
         },
         size: 60,
-      },
-      {
-        id: "actions",
-        header: "操作",
-        enableSorting: false,
-        cell: ({ row }) => (
-          <AddToGroupButton
-            vtSymbol={row.original.vt_symbol}
-            name={row.original.name}
-            compact
-          />
-        ),
-        size: 150,
       },
     ],
     [navigate],

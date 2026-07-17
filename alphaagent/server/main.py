@@ -7,10 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from alphaagent.server.api.router import api_router
 from alphaagent.server.core.config import get_settings
-from alphaagent.server.services.portfolio.groups import ensure_default_groups
 from alphaagent.server.services.data_sync import ensure_sync_schema, start_data_sync_scheduler
 from alphaagent.market.warmup import start_market_cache_warmup
-from alphaagent.server.services.quant.market_timing.panel import start_intraday_refresher
+from alphaagent.server.services.market_timing.panel import start_intraday_refresher
 from alphaagent.server.services.limit_up.history_service import start_backtest_cache_warmup
 from alphaagent.server.services.limit_up.next_session_plan import start_next_session_plan_warmup
 
@@ -23,7 +22,6 @@ def create_app() -> FastAPI:
         del app
         try:
             ensure_sync_schema()
-            ensure_default_groups()
             start_data_sync_scheduler()
             start_next_session_plan_warmup()
         except Exception:

@@ -9,7 +9,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from statistics import mean, median
 from typing import Mapping, Sequence
 
-from alphaagent.server.services.backtest import ledger
+from alphaagent.server.services.execution import cash_ledger
 
 ACCOUNT_EXECUTION_VERSION = "limit-up-cash-v4"
 SUPPORTED_EXIT_MODES = {"dynamic", "next_open", "next_close", "next_1430"}
@@ -287,7 +287,7 @@ def _process_entries(
             state.orders.append(_skipped_buy_order(signal, "invalid_entry_price", state.cash))
             continue
         limit_price = _number(signal.candidate.get("limit_price"))
-        fill = ledger.calculate_buy_execution(
+        fill = cash_ledger.calculate_buy_execution(
             raw_price=raw_price,
             cash=state.cash,
             target_cash=target_cash,
@@ -327,7 +327,7 @@ def _entry_rejection_reason(
 def _open_position(
     state: AccountState,
     signal: PreparedSignal,
-    fill: ledger.BuyExecution,
+    fill: cash_ledger.BuyExecution,
     bar_index: Mapping[tuple[str, date], Mapping[str, object]],
     exit_mode: str,
 ) -> None:
@@ -502,7 +502,7 @@ def _close_position(
     *,
     exit_price_source: str | None,
 ) -> None:
-    fill = ledger.calculate_sell_execution(
+    fill = cash_ledger.calculate_sell_execution(
         raw_price=raw_price,
         volume=position.volume,
         cost_price=position.buy_price,

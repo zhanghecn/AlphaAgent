@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from alphaagent.server.core.responses import fail, ok
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import is_database_configured, session_scope
-from alphaagent.server.services.quant.market_timing.panel import get_market_timing_panel
+from alphaagent.server.services.market_timing.panel import get_market_timing_panel
 
 router = APIRouter(prefix="/market-timing", tags=["market-timing"])
 

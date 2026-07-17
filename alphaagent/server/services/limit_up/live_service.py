@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import date, datetime
+from time import monotonic
 from zoneinfo import ZoneInfo
 
 from alphaagent.data_sources.akshare_adapter import AkShareAdapter
@@ -26,6 +27,7 @@ from alphaagent.server.services.limit_up.concept_resonance import (
 )
 from alphaagent.server.services.limit_up.live_policy import (
     MAX_CONSECUTIVE_SNAPSHOT_GAP_MINUTES,
+    build_early_radar_signals,
     build_live_market_gate,
     build_live_recommendations,
     rank_live_candidates,
@@ -58,6 +60,17 @@ from alphaagent.server.services.limit_up.sector_warmup import (
     attach_dynamic_group_leader_ranks,
     live_warmup_observation,
 )
+from alphaagent.server.services.limit_up.radar_contract import (
+    CAPTURE_MIN_CHANGE_PCT,
+    capture_state,
+    is_formal_candidate,
+)
+from alphaagent.server.services.limit_up.radar_observation_repository import (
+    build_fill_followup_observations,
+    load_recent_signal_observations,
+    project_observation as project_radar_observation,
+    save_frame as save_radar_frame,
+)
 from alphaagent.server.services.limit_up import scheduled_execution
 from alphaagent.server.services.limit_up.versions import (
     LIVE_STRATEGY_VERSION as STRATEGY_VERSION,
@@ -65,7 +78,7 @@ from alphaagent.server.services.limit_up.versions import (
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 NEAR_LIMIT_MIN_CHANGE_PCT = 7.0
-TRACE_RADAR_MIN_CHANGE_PCT = 5.0
+TRACE_RADAR_MIN_CHANGE_PCT = CAPTURE_MIN_CHANGE_PCT
 LIVE_SCAN_INTERVAL_SECONDS = 15
 LIVE_SNAPSHOT_MAX_AGE_SECONDS = 90
 HISTORY_EVIDENCE_UNAVAILABLE_REASON = "历史证据不可用，已禁止执行"
@@ -113,13 +126,22 @@ def build_live_snapshot(
         include_previous=session_stage(local_at) in {"auction_watch", "auction"},
         min_change_pct=TRACE_RADAR_MIN_CHANGE_PCT,
     )
-    candidates = _enrich_candidates(
+    capture_candidates = _enrich_candidates(
         source_rows,
         pool_payload,
         stock_context,
         require_sector=False,
     )
-    attach_candidate_concepts(candidates, concept_snapshot or {})
+    attach_candidate_concepts(capture_candidates, concept_snapshot or {})
+    candidates = [
+        dict(candidate)
+        for candidate in capture_candidates
+        if candidate.get("previous_limit_up") is True
+        or is_formal_candidate(
+            change_pct=_number(candidate.get("change_pct")) or -100.0,
+            state=str(candidate.get("state") or ""),
+        )
+    ]
     market_context = _market_context(candidates, stock_context, previous_snapshot)
     market_gate = build_live_market_gate(
         market_context,
@@ -159,6 +181,15 @@ def build_live_snapshot(
         market_gate=market_gate,
     )
     recommendations = _without_removed_lane_recommendations(recommendations)
+    early_candidates, early_recommendations = _build_early_radar_evaluation(
+        capture_candidates,
+        market_context,
+        local_at,
+        previous_snapshot,
+        market_gate,
+        market_date,
+        snapshot_mode,
+    )
     ranked = [
         candidate
         for candidate in ranked
@@ -192,6 +223,10 @@ def build_live_snapshot(
         "source": _source_name(radar_quote_payload, pool_payload),
         "source_updated_at": source_updated_at,
         "market_context": market_context,
+        "trace_capture_candidates": [
+            dict(candidate) for candidate in early_candidates
+        ],
+        "early_radar_recommendations": early_recommendations,
         "trace_radar_candidates": [dict(candidate) for candidate in ranked],
         "candidates": ranked,
         "recommendations": recommendations,
@@ -202,6 +237,7 @@ def build_live_snapshot(
             "has_tick": False,
             "has_l2": False,
             "candidate_universe_count": len(candidates),
+            "capture_candidate_count": len(capture_candidates),
             "trace_radar_candidate_count": len(ranked),
             "radar_candidate_count": len(ranked),
             "ranked_candidate_count": len(ranked),
@@ -229,6 +265,49 @@ def build_live_snapshot(
     }
 
 
+def _build_early_radar_evaluation(
+    capture_candidates: Sequence[Mapping[str, object]],
+    market_context: Mapping[str, object],
+    captured_at: datetime,
+    previous_snapshot: Mapping[str, object] | None,
+    market_gate: Mapping[str, object],
+    market_date: date,
+    snapshot_mode: str,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    """Evaluate the 3% universe without adding a second public recommendation."""
+
+    evaluated = rank_live_candidates(
+        [deepcopy(dict(candidate)) for candidate in capture_candidates],
+        limit=len(capture_candidates),
+    )
+    _attach_lane_decisions(
+        evaluated,
+        market_context,
+        captured_at,
+        market_gate=market_gate,
+    )
+    _attach_warmup_shadow(evaluated)
+    _attach_stability(evaluated, previous_snapshot, captured_at)
+    evaluated[:] = attach_rotation_shadow(
+        evaluated,
+        {
+            "trade_date": market_date.isoformat(),
+            "captured_at": captured_at.isoformat(),
+            "session_stage": session_stage(captured_at),
+            "mode": snapshot_mode,
+            "data_quality": {"is_stale": snapshot_mode != "live_snapshot"},
+        },
+    )
+    ranked = rank_live_opportunities(evaluated, limit=len(evaluated))
+    signals = build_early_radar_signals(ranked, market_gate, captured_at)
+    return ranked, {
+        "captured_at": captured_at.isoformat(),
+        "session_stage": session_stage(captured_at),
+        "market_gate": dict(market_gate),
+        "lanes": {"now": signals, "tail": [], "next_auction": []},
+    }
+
+
 def refresh_live_snapshot(
     captured_at: datetime | None = None,
     *,
@@ -241,6 +320,7 @@ def refresh_live_snapshot(
     if not _is_active_session(local_at):
         return _latest_snapshot_for_session(local_at)
     live_adapter = adapter or AkShareAdapter()
+    scan_started = monotonic()
     try:
         stage = session_stage(local_at)
         planned_symbols = _planned_symbols() if stage in {"auction_watch", "auction"} else []
@@ -266,10 +346,12 @@ def refresh_live_snapshot(
             include_previous=stage in {"auction_watch", "auction"},
         )
         market_date = _resolved_market_date(radar_quotes, pools, local_at, {})
+        quotes_done = monotonic()
         context = load_live_context(symbols, market_date) if symbols else {"by_symbol": {}}
         context = {**context, "source_errors": source_errors}
         lane_validations = _load_lane_validations()
         previous = load_latest_snapshot(market_date, strategy_version=STRATEGY_VERSION)
+        context_done = monotonic()
         snapshot = build_live_snapshot(
             quotes,
             pools,
@@ -279,14 +361,47 @@ def refresh_live_snapshot(
             concept_snapshot=concept_snapshot,
         )
         snapshot = _apply_live_risk_gates(snapshot, lane_validations)
+        policy_done = monotonic()
         if persist:
             _set_live_trace_cache_status(
                 snapshot,
                 _save_live_trace_safely(snapshot),
             )
-        if persist and _is_persistable_snapshot(snapshot, local_at):
-            return save_snapshot(snapshot)
-        return snapshot
+        trace_done = monotonic()
+        _set_scan_timing(
+            snapshot,
+            scan_started=scan_started,
+            quotes_done=quotes_done,
+            context_done=context_done,
+            policy_done=policy_done,
+            persistence_done=trace_done,
+        )
+        if persist and _is_radar_persistable_snapshot(snapshot, local_at):
+            full_quotes = (
+                concept_snapshot.get("quotes")
+                if isinstance(concept_snapshot, Mapping)
+                else None
+            )
+            full_quotes = full_quotes if isinstance(full_quotes, list) else []
+            quote_observed_at = _parsed_datetime(
+                concept_snapshot.get("source_updated_at")
+                if isinstance(concept_snapshot, Mapping)
+                else None
+            )
+            _set_radar_ledger_status(
+                snapshot,
+                _save_radar_ledger_safely(
+                    snapshot,
+                    full_quotes=full_quotes,
+                    quote_observed_at=quote_observed_at,
+                ),
+            )
+        elif persist:
+            _set_radar_ledger_status(snapshot, None, skipped=True)
+        public_snapshot = _without_internal_radar_fields(snapshot)
+        if persist and _is_persistable_snapshot(public_snapshot, local_at):
+            return save_snapshot(public_snapshot)
+        return public_snapshot
     except Exception as exc:
         trace_error = _save_live_trace_error_safely(local_at, exc) if persist else None
         fallback = load_latest_snapshot(strategy_version=STRATEGY_VERSION)
@@ -625,7 +740,18 @@ def _merge_source_rows(
             or not is_eligible_main_board(symbol, name)
         ):
             continue
-        rows[symbol] = {**raw, "state": "near_limit", "pool_key": "quote"}
+        rows[symbol] = {
+            **raw,
+            "state": (
+                "near_limit"
+                if symbol in previous_symbols
+                else capture_state(
+                    change_pct=change_pct,
+                    pool_state="quote",
+                )
+            ),
+            "pool_key": "quote",
+        }
 
     pools = pool_payload.get("pools")
     pools = pools if isinstance(pools, Mapping) else {}
@@ -1106,7 +1232,39 @@ def _apply_live_risk_gates(
         snapshot_age_seconds=snapshot_age,
     )
     validated["watchlist"] = _build_live_watchlist(validated)
-    return {**result, "recommendations": validated}
+    result = {**result, "recommendations": validated}
+    return _apply_early_radar_risk_gates(result, lane_validations)
+
+
+def _apply_early_radar_risk_gates(
+    snapshot: Mapping[str, object],
+    lane_validations: Mapping[str, Mapping[str, object]],
+) -> dict[str, object]:
+    """Apply the same prior-only and lane validation to internal 3% signals."""
+
+    early = snapshot.get("early_radar_recommendations")
+    capture = snapshot.get("trace_capture_candidates")
+    if not isinstance(early, Mapping) or not isinstance(capture, list):
+        return dict(snapshot)
+    early_snapshot = {
+        **dict(snapshot),
+        "candidates": capture,
+        "recommendations": dict(early),
+    }
+    enriched = _with_historical_evidence(early_snapshot) if capture else early_snapshot
+    recommendations = enriched.get("recommendations")
+    recommendations = (
+        recommendations if isinstance(recommendations, Mapping) else {}
+    )
+    validated = apply_lane_validation_veto(recommendations, lane_validations)
+    validated = _rank_first_board_recommendations(validated)
+    validated = _apply_first_board_profitability_gate(validated)
+    result = dict(snapshot)
+    result["early_radar_recommendations"] = validated
+    enriched_quality = enriched.get("data_quality")
+    if isinstance(enriched_quality, Mapping):
+        result["data_quality"] = dict(enriched_quality)
+    return result
 
 
 def _rank_first_board_recommendations(
@@ -1807,6 +1965,126 @@ def _set_live_trace_cache_status(
     else:
         quality.pop("trace_cache_error", None)
     snapshot["data_quality"] = quality
+
+
+def _is_radar_persistable_snapshot(
+    snapshot: Mapping[str, object],
+    captured_at: datetime,
+) -> bool:
+    quality = snapshot.get("data_quality")
+    return (
+        _is_persistable_snapshot(snapshot, captured_at)
+        and isinstance(quality, Mapping)
+        and quality.get("concept_trigger_allowed") is True
+    )
+
+
+def _save_radar_ledger_safely(
+    snapshot: Mapping[str, object],
+    *,
+    full_quotes: Sequence[Mapping[str, object]] = (),
+    quote_observed_at: datetime | None = None,
+) -> str | None:
+    try:
+        capture = snapshot.get("trace_capture_candidates")
+        capture = capture if isinstance(capture, list) else []
+        formal_by_symbol = _now_signals_by_symbol(snapshot.get("recommendations"))
+        early_by_symbol = _now_signals_by_symbol(
+            snapshot.get("early_radar_recommendations")
+        )
+        observations = [
+            project_radar_observation(
+                candidate,
+                formal_signal=formal_by_symbol.get(
+                    str(candidate.get("vt_symbol") or "")
+                ),
+                early_signal=early_by_symbol.get(
+                    str(candidate.get("vt_symbol") or "")
+                ),
+            )
+            for candidate in capture
+            if isinstance(candidate, Mapping)
+        ]
+        captured_at = _parsed_datetime(snapshot.get("captured_at"))
+        if captured_at is not None and full_quotes and quote_observed_at is not None:
+            recent_signals = load_recent_signal_observations(captured_at)
+            observations.extend(
+                build_fill_followup_observations(
+                    recent_signals,
+                    full_quotes,
+                    quote_observed_at=quote_observed_at,
+                    current_observation_symbols={
+                        str(row.get("vt_symbol") or "")
+                        for row in observations
+                    },
+                )
+            )
+        save_radar_frame(snapshot, observations)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("limit-up radar ledger write failed: %s", exc)
+        return str(exc)[:500]
+
+
+def _now_signals_by_symbol(value: object) -> dict[str, Mapping[str, object]]:
+    recommendations = value if isinstance(value, Mapping) else {}
+    lanes = recommendations.get("lanes")
+    lanes = lanes if isinstance(lanes, Mapping) else {}
+    signals = lanes.get("now")
+    signals = signals if isinstance(signals, list) else []
+    return {
+        str(signal.get("vt_symbol") or ""): signal
+        for signal in signals
+        if isinstance(signal, Mapping) and signal.get("vt_symbol")
+    }
+
+
+def _set_radar_ledger_status(
+    snapshot: dict[str, object],
+    error: str | None,
+    *,
+    skipped: bool = False,
+) -> None:
+    quality = snapshot.get("data_quality")
+    quality = dict(quality) if isinstance(quality, Mapping) else {}
+    quality["radar_ledger_status"] = (
+        "skipped_invalid_frame" if skipped else "error" if error else "ready"
+    )
+    if error:
+        quality["radar_ledger_error"] = error
+    else:
+        quality.pop("radar_ledger_error", None)
+    snapshot["data_quality"] = quality
+
+
+def _set_scan_timing(
+    snapshot: dict[str, object],
+    *,
+    scan_started: float,
+    quotes_done: float,
+    context_done: float,
+    policy_done: float,
+    persistence_done: float,
+) -> None:
+    quality = snapshot.get("data_quality")
+    quality = dict(quality) if isinstance(quality, Mapping) else {}
+    quality["scan_timing_ms"] = {
+        "quotes": round((quotes_done - scan_started) * 1000),
+        "context": round((context_done - quotes_done) * 1000),
+        "policy": round((policy_done - context_done) * 1000),
+        "persistence": round((persistence_done - policy_done) * 1000),
+        "total": round((persistence_done - scan_started) * 1000),
+    }
+    snapshot["data_quality"] = quality
+
+
+def _without_internal_radar_fields(
+    snapshot: Mapping[str, object],
+) -> dict[str, object]:
+    result = snapshot if isinstance(snapshot, dict) else dict(snapshot)
+    result.pop("trace_capture_candidates", None)
+    result.pop("early_radar_recommendations", None)
+    return result
 
 
 def _pool_symbols(payload: Mapping[str, object], pool_key: str) -> set[str]:

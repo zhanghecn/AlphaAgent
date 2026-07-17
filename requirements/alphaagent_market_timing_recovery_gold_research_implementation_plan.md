@@ -13,7 +13,7 @@
 ### Task 1: 固定恢复金候选和确认行为
 
 **Files:**
-- Modify: `tests/alphaagent/services/quant/test_market_timing_backtest.py`
+- Modify: `tests/alphaagent/services/market_timing/test_market_timing_backtest.py`
 
 - [x] **Step 1: 增加银事件测试帮助函数**
 
@@ -98,7 +98,7 @@ def test_recovery_gold_variants_confirm_only_after_broad_follow_through(
 
 ```bash
 uv run --group server pytest \
-  tests/alphaagent/services/quant/test_market_timing_backtest.py \
+  tests/alphaagent/services/market_timing/test_market_timing_backtest.py \
   -q -k recovery_gold
 ```
 
@@ -107,8 +107,8 @@ Expected: 因缺少 `RECOVERY_R*`、`SETUP_RECOVERY_GOLD` 和构造函数失败�
 ### Task 2: 实现因果恢复金研究状态
 
 **Files:**
-- Modify: `alphaagent/server/services/quant/market_timing/backtest.py`
-- Test: `tests/alphaagent/services/quant/test_market_timing_backtest.py`
+- Modify: `alphaagent/server/services/market_timing/backtest.py`
+- Test: `tests/alphaagent/services/market_timing/test_market_timing_backtest.py`
 
 - [x] **Step 1: 增加固定研究常量**
 
@@ -292,8 +292,8 @@ Expected: Task 1 新测试全部 PASS。
 ### Task 3: 固定去重、优先级和前缀稳定
 
 **Files:**
-- Modify: `tests/alphaagent/services/quant/test_market_timing_backtest.py`
-- Modify: `alphaagent/server/services/quant/market_timing/backtest.py`
+- Modify: `tests/alphaagent/services/market_timing/test_market_timing_backtest.py`
+- Modify: `alphaagent/server/services/market_timing/backtest.py`
 
 - [x] **Step 1: 添加恢复区去重测试**
 
@@ -318,9 +318,9 @@ Expected: Task 1 新测试全部 PASS。
 
 ```bash
 uv run --group server pytest \
-  tests/alphaagent/services/quant/test_market_timing_backtest.py \
-  tests/alphaagent/services/quant/test_market_timing_no_lookahead.py \
-  tests/alphaagent/services/quant/test_market_timing_intraday.py -q
+  tests/alphaagent/services/market_timing/test_market_timing_backtest.py \
+  tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py \
+  tests/alphaagent/services/market_timing/test_market_timing_intraday.py -q
 ```
 
 Expected: PASS，生产 v9 测试签名不变。
@@ -328,8 +328,8 @@ Expected: PASS，生产 v9 测试签名不变。
 ### Task 4: 实现逐银区间和留一评估
 
 **Files:**
-- Modify: `alphaagent/server/services/quant/market_timing/backtest.py`
-- Modify: `tests/alphaagent/services/quant/test_market_timing_backtest.py`
+- Modify: `alphaagent/server/services/market_timing/backtest.py`
+- Modify: `tests/alphaagent/services/market_timing/test_market_timing_backtest.py`
 
 - [x] **Step 1: 提取带索引的方向区间**
 
@@ -535,12 +535,12 @@ Expected: v9 仍为 65 个候选、42 个确认、最新银；随后出现 R1/R2
 
 ```bash
 uv run --group server pytest \
-  tests/alphaagent/services/quant/test_market_timing_backtest.py \
-  tests/alphaagent/services/quant/test_market_timing_no_lookahead.py \
-  tests/alphaagent/services/quant/test_market_timing_intraday.py -q
+  tests/alphaagent/services/market_timing/test_market_timing_backtest.py \
+  tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py \
+  tests/alphaagent/services/market_timing/test_market_timing_intraday.py -q
 uvx ruff check --ignore E702 \
-  alphaagent/server/services/quant/market_timing/backtest.py \
-  tests/alphaagent/services/quant/test_market_timing_backtest.py \
+  alphaagent/server/services/market_timing/backtest.py \
+  tests/alphaagent/services/market_timing/test_market_timing_backtest.py \
   scripts/market_timing_eval.py
 pnpm --dir frontend test
 pnpm --dir frontend run build
@@ -554,8 +554,8 @@ git diff --check
 
 ```bash
 git add -- \
-  alphaagent/server/services/quant/market_timing/backtest.py \
-  tests/alphaagent/services/quant/test_market_timing_backtest.py \
+  alphaagent/server/services/market_timing/backtest.py \
+  tests/alphaagent/services/market_timing/test_market_timing_backtest.py \
   scripts/market_timing_eval.py \
   memory/06_backtests/market_timing_recovery_gold_validation_2026_07_15.md \
   memory/07_market_timing/market_timing_design.md \

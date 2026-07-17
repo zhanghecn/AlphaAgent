@@ -25,6 +25,9 @@ def browser_context(playwright):
         viewport={"width": 1440, "height": 900},
         base_url="http://localhost:5173",
     )
+    context.add_init_script(
+        "window.localStorage.setItem('alphaagent_token', 'e2e-local-token')"
+    )
     yield context
     context.close()
     browser.close()
@@ -272,24 +275,26 @@ class TestFrontendFunctional:
         page.close()
 
     def test_explore_page_shows_ranking(self, browser_context):
-        """ThemeExplorer should show sector ranking."""
+        """Legacy ThemeExplorer route should open the merged mainline workspace."""
         page = browser_context.new_page()
         errors = []
         page.on("pageerror", lambda err: errors.append(str(err)))
         page.goto("/explore", wait_until="networkidle", timeout=15000)
         body_text = page.locator("body").inner_text()
-        assert "主线探索" in body_text
+        assert page.url.endswith("/mainline")
+        assert "概念指数" in body_text
         assert len(errors) == 0, f"JS errors: {errors}"
         page.close()
 
     def test_chain_page_shows_chains(self, browser_context):
-        """ChainGraph should show industry chain list or empty state."""
+        """Legacy industry-chain route should open the merged mainline workspace."""
         page = browser_context.new_page()
         errors = []
         page.on("pageerror", lambda err: errors.append(str(err)))
         page.goto("/chain", wait_until="networkidle", timeout=15000)
         body_text = page.locator("body").inner_text()
-        assert "产业链" in body_text
+        assert page.url.endswith("/mainline")
+        assert "概念指数" in body_text
         assert len(errors) == 0, f"JS errors: {errors}"
         page.close()
 

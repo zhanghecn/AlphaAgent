@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Mapping
 
-from sqlalchemy import Date, and_, case, cast, func, not_, or_, select, tuple_
+from sqlalchemy import Date, Time, and_, case, cast, func, not_, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from alphaagent.server.db import schema
@@ -16,6 +16,7 @@ ACTIVE_SESSION_STAGES = ("auction", "morning", "afternoon", "tail", "close_aucti
 MAIN_BOARD_PREFIXES = ("600", "601", "603", "605", "000", "001", "002", "003")
 MIN_RELIABLE_DAILY_SYMBOLS = 3000
 MIN_MEMBERSHIP_COVERAGE_PCT = 90.0
+RADAR_FULL_SESSION_MINUTE_COUNT = 240
 
 
 def load_data_quality_counts(
@@ -102,6 +103,148 @@ def list_missing_event_minute_pairs(
     ]
 
 
+def list_missing_radar_minute_pairs(
+    limit: int,
+    *,
+    provider: str,
+    as_of: datetime,
+) -> list[dict[str, object]]:
+    """Return fresh observed symbol/date pairs with fewer than 240 1m bars."""
+
+    schema.ensure_schema_once(get_engine())
+    frames = schema.limit_up_radar_frames
+    observations = schema.limit_up_radar_observations
+    minute = schema.stock_minute_bars
+    attempts = schema.limit_up_minute_backfill_attempts
+    observed_pairs = (
+        select(
+            observations.c.vt_symbol.label("vt_symbol"),
+            frames.c.trade_date.label("trade_date"),
+        )
+        .select_from(
+            observations.join(frames, observations.c.frame_id == frames.c.id)
+        )
+        .where(
+            frames.c.is_stale.is_(False),
+            frames.c.quality_status == "ready",
+            frames.c.source_trade_date == frames.c.trade_date,
+        )
+        .distinct()
+        .subquery()
+    )
+    minute_counts = (
+        select(
+            observed_pairs.c.vt_symbol,
+            observed_pairs.c.trade_date,
+            func.count(
+                func.distinct(func.date_trunc("minute", minute.c.bar_time))
+            ).label("bar_count"),
+        )
+        .select_from(
+            observed_pairs.outerjoin(
+                minute,
+                and_(
+                    observed_pairs.c.vt_symbol == minute.c.vt_symbol,
+                    observed_pairs.c.trade_date == minute.c.trade_date,
+                    minute.c.interval == "1m",
+                    _radar_minute_session_predicate(minute),
+                ),
+            )
+        )
+        .group_by(observed_pairs.c.vt_symbol, observed_pairs.c.trade_date)
+        .subquery()
+    )
+    capped_limit = min(max(int(limit), 1), 300)
+    statement = (
+        select(minute_counts.c.trade_date, minute_counts.c.vt_symbol)
+        .select_from(
+            minute_counts.outerjoin(
+                attempts,
+                and_(
+                    minute_counts.c.vt_symbol == attempts.c.vt_symbol,
+                    minute_counts.c.trade_date == attempts.c.trade_date,
+                    attempts.c.provider == provider,
+                ),
+            )
+        )
+        .where(
+            func.coalesce(minute_counts.c.bar_count, 0)
+            < RADAR_FULL_SESSION_MINUTE_COUNT,
+            or_(
+                attempts.c.vt_symbol.is_(None),
+                attempts.c.next_retry_at.is_(None),
+                attempts.c.next_retry_at <= as_of,
+            ),
+        )
+        .order_by(minute_counts.c.trade_date, minute_counts.c.vt_symbol)
+        .limit(capped_limit)
+    )
+    with session_scope() as session:
+        rows = session.execute(statement).mappings().all()
+    return [
+        {
+            "trade_date": _iso_date(row["trade_date"]) or "",
+            "vt_symbol": str(row["vt_symbol"]),
+        }
+        for row in rows
+    ]
+
+
+def radar_minute_path_complete(bar_count: int) -> bool:
+    return max(int(bar_count), 0) >= RADAR_FULL_SESSION_MINUTE_COUNT
+
+
+def list_retryable_minute_pairs(
+    pairs: list[tuple[str, date]],
+    *,
+    provider: str,
+    as_of: datetime,
+    limit: int = 20,
+) -> list[dict[str, str]]:
+    """Return requested pairs whose provider-scoped retry is due."""
+
+    requested = sorted(
+        {
+            (str(vt_symbol).strip(), _date_value(trade_date))
+            for vt_symbol, trade_date in pairs
+            if str(vt_symbol).strip()
+        },
+        key=lambda item: (item[1], item[0]),
+        reverse=True,
+    )
+    if not requested:
+        return []
+    schema.ensure_schema_once(get_engine())
+    attempts = schema.limit_up_minute_backfill_attempts
+    with session_scope() as session:
+        rows = session.execute(
+            select(
+                attempts.c.trade_date,
+                attempts.c.vt_symbol,
+                attempts.c.next_retry_at,
+            ).where(
+                attempts.c.provider == provider,
+                tuple_(attempts.c.vt_symbol, attempts.c.trade_date).in_(requested),
+            )
+        ).mappings().all()
+    retry_at = {
+        (str(row["vt_symbol"]), _date_value(row["trade_date"])): row["next_retry_at"]
+        for row in rows
+    }
+    retryable = [
+        pair
+        for pair in requested
+        if pair not in retry_at
+        or retry_at[pair] is None
+        or retry_at[pair] <= as_of
+    ]
+    capped_limit = min(max(int(limit), 1), 200)
+    return [
+        {"trade_date": trade_date.isoformat(), "vt_symbol": vt_symbol}
+        for vt_symbol, trade_date in retryable[:capped_limit]
+    ]
+
+
 def load_event_minute_pair_bar_counts(
     gaps: list[Mapping[str, object]],
 ) -> dict[tuple[str, date], int]:
@@ -125,6 +268,48 @@ def load_event_minute_pair_bar_counts(
         ).all()
     counts = {(str(row[0]), _date_value(row[1])): int(row[2] or 0) for row in rows}
     return {pair: counts.get(pair, 0) for pair in pairs}
+
+
+def load_radar_minute_pair_slot_counts(
+    gaps: list[Mapping[str, object]],
+) -> dict[tuple[str, date], int]:
+    """Count distinct official A-share session minute slots per requested pair."""
+
+    pairs = {
+        (str(gap.get("vt_symbol") or ""), _date_value(gap.get("trade_date")))
+        for gap in gaps
+        if gap.get("vt_symbol") and gap.get("trade_date")
+    }
+    if not pairs:
+        return {}
+    schema.ensure_schema_once(get_engine())
+    minute = schema.stock_minute_bars
+    with session_scope() as session:
+        rows = session.execute(
+            select(
+                minute.c.vt_symbol,
+                minute.c.trade_date,
+                func.count(
+                    func.distinct(func.date_trunc("minute", minute.c.bar_time))
+                ),
+            )
+            .where(
+                minute.c.interval == "1m",
+                tuple_(minute.c.vt_symbol, minute.c.trade_date).in_(sorted(pairs)),
+                _radar_minute_session_predicate(minute),
+            )
+            .group_by(minute.c.vt_symbol, minute.c.trade_date)
+        ).all()
+    counts = {(str(row[0]), _date_value(row[1])): int(row[2] or 0) for row in rows}
+    return {pair: counts.get(pair, 0) for pair in pairs}
+
+
+def _radar_minute_session_predicate(minute):
+    minute_time = cast(minute.c.bar_time, Time)
+    return or_(
+        minute_time.between(time(9, 31), time(11, 30)),
+        minute_time.between(time(13, 1), time(15, 0)),
+    )
 
 
 def record_minute_backfill_attempts(

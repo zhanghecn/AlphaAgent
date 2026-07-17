@@ -1,12 +1,36 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
+import pytest
+
+from alphaagent.server.db import schema
 from alphaagent.server.services import market_snapshot_repository
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+def _membership(
+    sector_id: str,
+    sector_type: str,
+    *,
+    vt_symbol: str = "600000.SSE",
+    source: str = "eastmoney.push2.board",
+) -> dict[str, object]:
+    return {
+        "vt_symbol": vt_symbol,
+        "sector_id": sector_id,
+        "sector_name": sector_id,
+        "sector_type": sector_type,
+        "source": source,
+    }
+
+
+def _sector(sector_id: str, sector_type: str) -> dict[str, str]:
+    return {"id": sector_id, "type": sector_type}
 
 
 def test_sector_fund_flow_rows_freeze_capture_minute_and_staleness() -> None:
@@ -139,3 +163,172 @@ def test_large_membership_snapshots_are_split_below_postgres_parameter_limit() -
     )
 
     assert [len(chunk) for chunk in chunks] == [500, 500, 201]
+
+
+def test_complete_membership_scope_combines_concept_and_theme() -> None:
+    captured_at = datetime(2026, 7, 16, 19, 8, tzinfo=SHANGHAI)
+    rows = market_snapshot_repository.build_stock_sector_membership_snapshot_rows(
+        [
+            _membership("BK0001", "concept"),
+            _membership("BK0002", "theme", vt_symbol="000001.SZSE"),
+            _membership("BK1001", "industry"),
+        ],
+        snapshot_date=date(2026, 7, 16),
+        captured_at=captured_at,
+    )
+
+    scopes = market_snapshot_repository.build_membership_snapshot_scopes(
+        rows,
+        expected_sectors=[
+            _sector("BK0001", "concept"),
+            _sector("BK0002", "theme"),
+            _sector("BK1001", "industry"),
+        ],
+        snapshot_date=date(2026, 7, 16),
+        captured_at=captured_at,
+    )
+
+    assert [scope["scope_type"] for scope in scopes] == ["concept", "industry"]
+    concept = scopes[0]
+    assert concept["expected_sector_count"] == 2
+    assert concept["captured_sector_count"] == 2
+    assert concept["row_count"] == 2
+    assert concept["symbol_count"] == 2
+    assert concept["complete"] is True
+    assert concept["evidence_level"] == "strict"
+    assert concept["source"] == "eastmoney.push2.board"
+
+
+def test_membership_scope_explicitly_excludes_unavailable_sectors() -> None:
+    captured_at = datetime(2026, 7, 16, 19, 8, tzinfo=SHANGHAI)
+    rows = market_snapshot_repository.build_stock_sector_membership_snapshot_rows(
+        [
+            _membership("BK0001", "concept"),
+            _membership("BK1001", "industry"),
+        ],
+        snapshot_date=date(2026, 7, 16),
+        captured_at=captured_at,
+    )
+
+    scopes = market_snapshot_repository.build_membership_snapshot_scopes(
+        rows,
+        expected_sectors=[
+            _sector("BK0001", "concept"),
+            _sector("BK0002", "theme"),
+            _sector("BK1001", "industry"),
+        ],
+        excluded_sector_ids=("BK0002",),
+        snapshot_date=date(2026, 7, 16),
+        captured_at=captured_at,
+    )
+
+    concept = scopes[0]
+    assert concept["expected_sector_count"] == 1
+    assert concept["captured_sector_count"] == 1
+    assert concept["complete"] is True
+    assert concept["evidence_level"] == "strict_exclusions"
+    assert concept["raw"]["catalog_expected_sector_count"] == 2
+    assert concept["raw"]["excluded_sector_ids"] == ["BK0002"]
+
+
+def test_membership_snapshot_rejects_a_missing_expected_sector() -> None:
+    captured_at = datetime(2026, 7, 16, 19, 8, tzinfo=SHANGHAI)
+    rows = market_snapshot_repository.build_stock_sector_membership_snapshot_rows(
+        [_membership("BK0001", "concept")],
+        snapshot_date=date(2026, 7, 16),
+        captured_at=captured_at,
+    )
+
+    with pytest.raises(
+        market_snapshot_repository.IncompleteMembershipSnapshotError,
+        match="BK0002",
+    ):
+        market_snapshot_repository.build_membership_snapshot_scopes(
+            rows,
+            expected_sectors=[
+                _sector("BK0001", "concept"),
+                _sector("BK0002", "concept"),
+            ],
+            snapshot_date=date(2026, 7, 16),
+            captured_at=captured_at,
+        )
+
+
+def test_membership_snapshot_rejects_mixed_sources() -> None:
+    captured_at = datetime(2026, 7, 16, 19, 8, tzinfo=SHANGHAI)
+    rows = market_snapshot_repository.build_stock_sector_membership_snapshot_rows(
+        [
+            _membership("BK0001", "concept"),
+            _membership("BK1001", "industry", source="another.provider"),
+        ],
+        snapshot_date=date(2026, 7, 16),
+        captured_at=captured_at,
+    )
+
+    with pytest.raises(
+        market_snapshot_repository.IncompleteMembershipSnapshotError,
+        match="one source",
+    ):
+        market_snapshot_repository.build_membership_snapshot_scopes(
+            rows,
+            expected_sectors=[
+                _sector("BK0001", "concept"),
+                _sector("BK1001", "industry"),
+            ],
+            snapshot_date=date(2026, 7, 16),
+            captured_at=captured_at,
+        )
+
+
+def test_membership_snapshot_scope_table_has_one_row_per_date_and_scope() -> None:
+    table = schema.stock_sector_membership_snapshot_scopes
+
+    assert table.name == "stock_sector_membership_snapshot_scopes"
+    assert [column.name for column in table.primary_key.columns] == [
+        "snapshot_date",
+        "scope_type",
+    ]
+
+
+def test_membership_rows_and_scopes_are_replaced_in_one_transaction(
+    monkeypatch,
+) -> None:
+    sessions: list[object] = []
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.calls: list[object] = []
+
+        def execute(self, statement):
+            self.calls.append(statement)
+            return None
+
+    @contextmanager
+    def fake_scope():
+        session = FakeSession()
+        sessions.append(session)
+        yield session
+
+    monkeypatch.setattr(market_snapshot_repository, "session_scope", fake_scope)
+    captured_at = datetime(2026, 7, 16, 19, 8, tzinfo=SHANGHAI)
+
+    written = market_snapshot_repository.save_stock_sector_membership_snapshots(
+        [
+            _membership("BK0001", "concept"),
+            _membership("BK1001", "industry"),
+        ],
+        expected_sectors=[
+            _sector("BK0001", "concept"),
+            _sector("BK1001", "industry"),
+        ],
+        snapshot_date=date(2026, 7, 16),
+        captured_at=captured_at,
+    )
+
+    assert written == 2
+    assert len(sessions) == 1
+    sql = [str(statement) for statement in sessions[0].calls]
+    assert sql[0].startswith("DELETE FROM stock_sector_membership_snapshots")
+    assert sql[1].startswith("DELETE FROM stock_sector_membership_snapshot_scopes")
+    assert "INSERT INTO stock_sector_membership_snapshots" in sql[2]
+    assert "INSERT INTO stock_sector_membership_snapshot_scopes" in sql[3]

@@ -72,7 +72,7 @@ def vnpy_status() -> dict[str, Any]:
         "plugins": plugins,
         "missing_required_for_a_share": missing_required,
         "capabilities": {
-            "alphaagent_local_daily_backtest": bool((daily_bars.get("count") or 0) > 0),
+            "alphaagent_local_daily_research": bool((daily_bars.get("count") or 0) > 0),
             "alphaagent_local_vnpy_bar_adapter": bool((daily_bars.get("count") or 0) > 0),
             "alphaagent_local_minute_tail_entry": bool((minute_bars.get("count") or 0) > 0),
             "alphaagent_stock_universe": bool((stocks.get("count") or 0) > 0),
@@ -84,9 +84,9 @@ def vnpy_status() -> dict[str, Any]:
             "vnpy_script_trader": "vnpy_scripttrader" in installed,
         },
         "notes": [
-            "AlphaAgent 当前回测使用 PostgreSQL 日线数据和自研组合回测服务。",
+            "AlphaAgent 当前短线研究使用 PostgreSQL 日线和分钟线数据。",
             "AlphaAgent 可通过 /api/vnpy/local-bars 把本地日线转换为 vn.py BarData 语义，供本地研究/适配使用。",
-            "stock_minute_bars 有执行日 14:30 快照时，AlphaAgent 回测可做严格 14:30 成交验证。",
+            "stock_minute_bars 可为打板研究和后续低吸研究提供分钟成交证据。",
             "vn.py GUI 当前只注册 CTP Gateway，不能直接连接 A 股券商。",
             "接入 A 股实盘前需要安装并配置 vnpy_xtp/vnpy_tora/vnpy_ost/vnpy_emt 之一。",
             "接入 vn.py 官方历史数据路径前需要安装并配置 vnpy_xt/vnpy_rqdata/vnpy_tushare 之一。",
@@ -96,7 +96,6 @@ def vnpy_status() -> dict[str, Any]:
             "在 vn.py 全局配置中设置 datafeed.name、datafeed.username、datafeed.password。",
             "安装并验证 A 股交易网关：vnpy_xtp/vnpy_tora/vnpy_ost/vnpy_emt 四选一。",
             "在 examples/veighna_trader/run.py 注册对应 Gateway，并用 Trader 查询合约确认全 A 合约可见。",
-            "把 AlphaAgent 选股结果导出为 vn.py ScriptTrader/PortfolioStrategy 可消费的候选池。",
             "把本地 BarData 适配层接入后续 vn.py 策略初始化和数据检查流程；该步骤不替代官方 Datafeed/Gateway。",
         ],
     }

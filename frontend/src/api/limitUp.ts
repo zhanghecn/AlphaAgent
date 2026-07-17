@@ -10,6 +10,37 @@ export type LimitUpLane = "now" | "tail" | "next_auction";
 export type LimitUpBlockingScope = "none" | "market" | "dynamic" | "structural";
 export type LimitUpMarketRepairState = "not_required" | "pending_repair" | "repair_confirmed" | "repair_revoked";
 
+export interface LimitUpRadarEvidence {
+  status: "collecting" | "process_ready" | "ready_for_review" | "accepted" | "rejected";
+  capture_min_change_pct: number;
+  formal_min_change_pct: number;
+  complete_trade_days: number;
+  target_trade_days: number;
+  minute_coverage_pct: number | null;
+  minute_sessions: string[];
+  minute_slot_count: number;
+  entry_fill_delay_seconds: [number, number];
+  entry_fill_same_window: boolean;
+  selected_contract: "formal_5pct" | "early_3pct_same_rules";
+}
+
+export interface LimitUpRadarValidation {
+  validation_version: string;
+  status: LimitUpRadarEvidence["status"];
+  coverage: {
+    complete_trade_days: number;
+    minute_pair_coverage_pct?: number | null;
+  };
+  acceptance: {
+    selected_contract: LimitUpRadarEvidence["selected_contract"];
+    production_contract: LimitUpRadarEvidence["selected_contract"];
+    recommended_contract: LimitUpRadarEvidence["selected_contract"];
+    eligible_for_activation: boolean;
+    activation_required: boolean;
+    production_contract_mismatch: boolean;
+  };
+}
+
 export interface LimitUpStrategyGuide {
   guide_version: string;
   strategy: {
@@ -47,6 +78,7 @@ export interface LimitUpStrategyGuide {
     selection_allowed: boolean;
     fields: string[];
   }>;
+  radar_evidence: LimitUpRadarEvidence;
   dataset: {
     name: string;
     kind: string;
@@ -790,6 +822,10 @@ export function fetchLimitUpLive(): Promise<LimitUpSignalSnapshot> {
 
 export function fetchLimitUpStrategyGuide(): Promise<LimitUpStrategyGuide> {
   return apiClient.get<LimitUpStrategyGuide>("/limit-up/strategy-guide");
+}
+
+export function fetchLimitUpRadarValidation(): Promise<LimitUpRadarValidation> {
+  return apiClient.get<LimitUpRadarValidation>("/limit-up/radar-validation");
 }
 
 export function fetchLimitUpLiveTraceDates(): Promise<LimitUpLiveTraceDates> {

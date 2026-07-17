@@ -1,248 +1,194 @@
-# Run and Debug
+# Run And Debug
 
-这个文件只记录当前有效的运行、调试和验证入口。历史回测结论看 `memory/06_backtests/`；生产事故复盘、长命令输出、截图清单、原始 JSON、CSV 和日志不作为长期记忆保留。
+## Local Development
 
-## Current State
+首选入口：
 
-- 项目外显名称是 AlphaAgent，Python 发行包名和源码包目录仍保留 `vnpy`，用于兼容 vn.py 插件。
-- 官方桌面 GUI 入口仍是 `examples/veighna_trader/run.py`，但当前不能视为 A 股实盘或全市场实时行情已接入。
-- AlphaAgent Web/API 是当前主要研发入口，包含 A 股数据同步、量化候选、组合回测、股票详情、持仓和数据管理。
-- 普通历史主流程是日线 D+1：D 日收盘产生候选，D+1 按日线开盘价执行买入/卖出。14:30/分钟线只保留为实时、盘中确认、分钟数据同步和旧报告兼容能力。
-- 当前策略状态和实验结论以 `memory/06_backtests/README.md` 和 `memory/06_backtests/strategy_optimization_ledger.md` 为准。
+```bash
+docker compose up --build
+```
 
-## Local Run
+Web：`http://localhost:8080`。API 由网关代理到 `/api/*`。
 
-桌面 vn.py GUI：
+只启动业务服务：
+
+```bash
+docker compose up -d --build alphaagent-api alphaagent-web
+docker compose ps
+```
+
+vn.py 官方桌面入口仍是：
 
 ```bash
 uv run python examples/veighna_trader/run.py
 ```
 
-API：
+当前 launcher 只有 CTP，不代表已具备 A 股实盘 Gateway。
+
+## Production
+
+- 正式入口：`http://agu.yantiandao.com`；数据管理页为 `/data`，短线研究页为
+  `/short-term`，旧 `/limit-up` 会跳转到 `/short-term`。
+- 远端正式环境当前仍是历史 v6 验收 API：`v2.5.20-exit1430.20260716`；Web、Gateway 仍为
+  `v2.5.19-autosync.20260716`。正式根目录 `/opt/1panel/project/AlphaAgent` 的
+  `docker-compose.ghcr.yml` 已固定本地镜像并设置 `pull_policy: never`，避免 GHCR
+  `latest` 回退；本地 v9 尚未发布到该远端环境。
+- 当前版本不是 GHCR 发布物。下一次正式发版必须先替换固定镜像标签和 pull policy；
+  在此之前不要把页面“一键更新”当成可升级到新版本的路径。
+- 正式 PostgreSQL 发布前备份：
+  `backups/pre-autosync-20260716T0945Z.dump`；Compose 发布前配置备份：
+  `backups/docker-compose.ghcr.pre-exit1430-20260716T142521.yml`，SHA-256 为
+  `73d7dd98c15b626d1bfd25a08d56b35b01189a3f4cff8b65ed61af5ac7ce8886`。
+- v6 增量复验批次：`fb361830c02f4eb384e8467c5788d30e`，由正式页面提前触发，
+  9/9 成功、读取/写入均为 73,301 行。事件分钟覆盖 200/200、写入 48,000 根；
+  候选 D+1 14:30 在批次内覆盖 12/12，重建后新发现的 4 个可重试缺口又由页面单任务
+  `run_id=560` 覆盖 4/4。最终 122/213 个候选有精确 14:30，剩余 91 个全部冷却、
+  当前可重试 0；历史账本再次刷新到 800 日。详细覆盖、质量门禁和未解除限制见
+  `memory/06_backtests/limit_up_production_local_parity_20260715.md`。
+
+正式机检查：
 
 ```bash
-uv run uvicorn alphaagent.server.main:app --host 0.0.0.0 --port 8000
+cd /opt/1panel/project/AlphaAgent
+docker compose -f docker-compose.ghcr.yml ps
+docker compose -f docker-compose.ghcr.yml config --images
 ```
 
-前端/全栈本地默认走 Docker Compose，入口 `http://localhost:8080`，不再把 Vite `5173` 直连作为默认验证环境。
+## Local V9/V15 Acceptance
+
+2026-07-17 本地 Compose 已重建并验收：
+
+- API 镜像 `sha256:3ad1bf58c388def6292e3a790dab9658c6652995db2f3f256d1bfcba6702dc6b`，
+  Web 镜像 `sha256:3014eff8aef1167a87f411ddc3381ce145ec121f7877bd574c5ed65c9d235c0c`；
+  API 为 `healthy`、重启 0、`OOMKilled=false`。
+- 盘后恢复批次 `2657ae6773d94f67b4515126720d4ac0` 已完成，季度财务从原先无超时卡在
+  `91/100` 修复为单股最多等待 60 秒；21:30 补偿批次
+  `d9a9b6cbead141f69f14a499f7f0198d` 为 15 成功、2 失败、1 跳过。两项失败分别是
+  东方财富正式板块日线空响应和 TDX 事件分钟冷却；3% 雷达分钟无到期缺口，历史账本
+  重建为 801 日，证券状态快照为 3191/3191。
+- 当前本地正式合同为 `limit-up-scheduled-v9 / limit-up-live-v15`：执行首板和二进三，
+  买入窗口 `10:00-11:30`、`13:00-14:30`，D+1 `15:00` 按官方日线收盘价卖出。
+- 3% 提前雷达已部署为内部点时采集，正式阈值仍为 5%；只读验证为
+  `collecting / 0 of 60`，`production_contract` 和 `selected_contract` 均为
+  `formal_5pct`。盘中页面只保留一套正式推荐，20/60 日验收未完成前不得发布 v16。
+- 已验收的冻结参考覆盖 800 日、168 个有效收盘价信号；两仓 97 笔、胜率 70.1031%、平均净
+  收益 +2.1953%、复利 +167.9810%、最大回撤 -8.3083%、利润因子 2.8721。二进三
+  15 笔、胜率 73.3333%、平均净收益 +3.2790%；全推荐独立口径 164 笔、胜率
+  62.1951%、平均净收益 +1.3011%，回撤为 -13.7650%。当前动态账本已增量到 801 日、
+  截止 `2026-07-17`；规则说明仍单独展示上述截止 `2026-07-16` 的冻结参考指纹。
+- 冻结后前向仍为 0 笔，状态是 `research_only`；以上只是历史候选代理，不是远端已发布
+  状态或实盘收益保证。正式前向已升级为 `limit-up-forward-validation-v2`，唯一读取
+  保存帧的 `actionable_recommendations`，并固定 `sweep + next_close`；竞价买入或 D+1
+  开盘退出参数返回 422，`research_action` 不再产生订单。完整对照见
+  `memory/06_backtests/limit_up_wide_window_next_close_two_to_three_20260717.md`。
+- v14 历史版本把首板实时买点从 5% 雷达按动能分至少 55 触发，不再等待距板 1%；
+  封板票满足全部条件时仍可提示尝试排队。板块门使用盘中行业或概念核心双路径，D-1 热度只诊断和
+  排序，当时 `launch` 只加分。首板研究层也禁止把 D-1 热度/龙位回退成实时概念字段；
+  二进三不变。
+- 2026-07-15..17 的 643 个保存快照反事实形成 15/20/10 个结构买点，正式风险门后为
+  0。7 月 15 日 15 个闭合结构样本胜率 `46.6667%`、平均净收益 `+1.0715%`；同股门
+  通过的 4 个平均 `-0.7525%`。v9 历史收益不属于 v14，详见
+  `memory/06_backtests/limit_up_dynamic_sector_entry_v14_20260717.md`。
+- 同快照旧板块门消融在三天分别形成 10/5/0 个信号，全部包含在 v14 内；唯一闭合日
+  旧门为 `60%/+2.8066%`，v14 新增组为 `20%/-2.3985%`。运行时继续保留正式历史
+  风险否决，不把扩大覆盖解释为收益提升。
+- v15 最终规则保留盘中行业路径，概念单路必须 `launch`；首板历史胜率和联合率只排序，
+  不再否决正式列表。643 帧重放的闭合日从 v14 `15笔/46.6667%/+1.0774%` 改善到
+  v15 `11笔/63.6364%/+2.9050%`；两仓 2 笔全胜，账户收益 `+5.7892%`。
+- 13:47 数据库验收有 48 个 v14 保存帧，其中 47 个是 13:00:53..13:46:32 的合格
+  `live_snapshot`，1 个非实时帧被来源审计排除。正式列表累计 0 条，独立抽取的首次
+  正式信号集合与前向接口订单集合均为空且精确相等；正式胜率、收益和回撤保持 `null`。
+- v2 重建后容器 `healthy`、重启 0、`OOMKilled=false`，API 日志无错误；当前本地 API
+  镜像只在本地环境运行，尚未发布到远端正式环境。
+- 14:19:23 首个 v15 实盘帧正式推荐华银电力、深南电A、赣能股份，14:24:45 新增
+  宁波能源；截至 14:26 的 4 个 v2 前向订单股票和首次时间逐项一致，等待 D+1 收盘。
+- 正式回放缓存预热后 API 容器内存约 3.7 GiB；内部连续 20 次健康请求全部成功，
+  最慢 27.2 ms。盘中实时扫描会短暂显示 schedule 为 `running`，未发现超时僵尸任务。
+
+## Focused Verification
 
 ```bash
-docker compose up --build
-```
-
-常用页面：
-
-- `/quant`: 刷新候选并研究；展示候选 Top20 独立买卖质量、候选解释和回测归因。
-- `/data`: 数据健康、同步状态、批量同步、定时计划、分钟线/日线同步。
-- `/portfolio`: 自选分组、量化候选分组、模拟持仓。
-- `/stocks/:vtSymbol`: 股票详情、财报口径、策略复盘和买卖点。
-- `/mainline`: 概念主线、实时/历史回放、概念指数和成分股。
-
-## Docker
-
-AlphaAgent 容器化由三个自研镜像 + postgres/redis 组成，统一入口是 Go 网关：
-
-- `alphaagent-gateway`: 唯一对外端口，处理管理员登录、JWT 和反向代理。
-- `alphaagent-api`: FastAPI，仅内部 `expose 8000`。
-- `alphaagent-web`: Vite build + nginx，仅内部 `expose 80`。
-- `postgres` / `redis`: 业务数据和缓存。
-
-本地全栈：
-
-```bash
-docker compose up --build
-# 打开 http://localhost:8080，用 ADMIN_USERNAME/ADMIN_PASSWORD 登录
-```
-
-日常改前端代码后只 rebuild web：
-
-```bash
-docker compose up -d --build alphaagent-web
-```
-
-部署：
-
-```bash
-cd deploy
-./docker-deploy.sh
-docker compose -f docker-compose.local.yml up -d
-```
-
-发版：推 `v*` tag，CI 构建并发布 `alphaagent-api/web/gateway` 到 GHCR。
-
-约束：
-
-- 不要恢复 api/web 对外 `ports:` 映射，必须经网关登录访问。
-- 不要把根目录 `.env` 改回 `host.docker.internal`；容器应使用 Compose 内部数据库。
-- 日常不要使用 `docker compose build --no-cache`，除非排查基础镜像或依赖缓存。
-- `JWT_SECRET` 必须 ≥32 字节，否则网关启动 fail-fast。
-
-## Quant Debug
-
-统一策略测试通道：
-
-```bash
-uv run pytest tests/alphaagent/test_quant_strategy_acceptance.py -q
-```
-
-说明：
-
-- 当前 shell 没有 `DATABASE_URL` 时会跳过。
-- 快速通道验证当前公开策略链路、no-cache 假设和基础指标。
-- 完整慢测需显式设置 `ALPHAAGENT_RUN_FULL_STRATEGY_ACCEPTANCE=1`。
-- 测试通道固定 `reuse_signal_cache=false`、`persist=false`、`exclude_from_product_baseline=true`，不会写入真实产品基线。
-
-常用接口：
-
-- `GET /api/quant/trading-dates`
-- `POST /api/quant/research-runs`
-- `POST /api/quant/screen-runs/range`
-- `GET /api/quant/screen-runs`
-- `POST /api/backtests`
-- `GET /api/backtests?run_type=portfolio`
-- `GET /api/backtests/{id}/report`
-- `GET /api/backtests/{id}/candidate-trade-quality-report`
-- `GET /api/backtests/{id}/candidate-trace?vt_symbol=&signal_date=`
-- `GET /api/backtests/{id}/setup-market-exit-audit`
-- `GET /api/backtests/{id}/path-diagnostics`
-
-当前基线和证据索引见 `memory/06_backtests/README.md`。
-
-## Data Debug
-
-常用接口：
-
-- `GET /api/data-sync/health`: 数据健康和推荐同步。
-- `GET /api/data-sync/tail-workflow`: 实时尾盘量化和盘后更新状态。默认只展示
-  14:30 实时尾盘量化和 19:00 盘后更新；21:30 仅作为内部补偿重试。
-  旧 11:30、14:00、15:00 盘中缓存档和旧 `eod_18h` 档会被启动种子逻辑禁用或删除。
-- `GET /api/quant/tail-preview?limit=50`: 今日实时尾盘量化结果，只读，不写历史候选。
-- `POST /api/data-sync/tail-workflow/run-tail-quant`: 手动执行 14:30 实时尾盘量化批次。
-- `POST /api/data-sync/batches/run-all`: 一键同步批次。
-- `GET /api/data-sync/batches/latest`: 最新批次进度。
-- `POST /api/data-sync/jobs/sync_stock_daily_bars/run`: 同步日线，可用 `symbols` 定向回填。
-- `POST /api/data-sync/jobs/sync_stock_minute_bars/run`: 分钟线同步。
-- `POST /api/data-sync/imports/minute-bars/audit-gaps`: 审计严格 14:30 缺口覆盖。
-
-当前数据口径和维护风险见 `memory/03_data/data_flow.md`。
-
-验证重点：
-
-- 生产和本地 `/quant` 不一致时，先查 `GET /api/quant/trading-dates` 的 `latest_complete_trade_date` 和最新日期 `symbol_count`，历史候选默认只应读完整日线日期。
-- 18:00 公共源可能只发布部分当日日线；全市场日线同步会丢弃低于完整阈值的最新日期，21:30 再自动补全重试。
-- `QueuePool limit ... timed out` 优先检查是否有超时同步线程晚返回继续写库、生产连接池配置是否低于 `20 + 20` overflow，以及是否同时运行同步批次和策略研究。
-
-## Mainline Debug
-
-常用接口：
-
-- `GET /api/mainline-replay/live?limit=80`: 今日实时概念主线。
-- `GET /api/mainline-replay/snapshot?date=YYYY-MM-DD&limit=80`: 历史概念主线。
-- `GET /api/mainline-replay/sentiment-cycle?date=YYYY-MM-DD&lookback=60`: 短线情绪周期图，返回情绪分、阶段、涨跌家数、涨跌停、炸板代理、连板高度、晋级率和区间摘要。
-- `GET /api/mainline-replay/timeline`: 可回放日期。
-- `GET /api/mainline-replay/relation?sector_id=&date=`: 关联概念。
-- `GET /api/mainline-replay/sector-stocks?sector_id=&date=&limit=`: 概念成分股。
-
-验证重点：
-
-- 生产和本地主线不一致时，优先查 PostgreSQL 数据覆盖和派生评分，不先怀疑前端资源。
-- 历史回放必须按 `as_of_date` 截断；盘中实时只能使用实时源表和最近完整日线参考。
-- 概念主线只展示题材概念，过滤行业、指数篮子和状态类伪概念。
-- 情绪周期历史点只读完整 `stock_daily_bars`；盘中点只作 `stocks` 快照和 `stock_minute_bars` 高点投影，不写入历史评分。
-- `/mainline-replay/timeline`、`live` 和 `sentiment-cycle` 有进程内短 TTL 缓存：timeline/历史情绪约 5 分钟，live/盘中情绪约 30 秒。冷请求仍会扫库，命中后用于页面刷新和切回加速。
-- 前端情绪周期曲线是交互图：鼠标移动显示交易日和关键值，点击锁定交易日明细；锁定后才请求 20/60/120 日版本热度，避免首屏额外加载。
-
-## Limit-up Debug
-
-常用接口：
-
-- `GET /api/limit-up/live`: 只读后台约每 15 秒更新的最新实时信号，不访问外部行情；同一分钟使用同一审计行更新最新 `captured_at`，交易时段超过 90 秒未更新会 fail-closed。`POST /api/limit-up/live/refresh` 仅供调度/显式采集使用。
-- `limit_up_concept_scan`: 交易时段每 30 秒最多 6 路分页抓取完整 A 股行情，以最近 D-1 题材成员聚合概念扩散、临板、封板、炸板、成交额和 1/3/5 分钟加速度。手动入口为 `POST /api/data-sync/schedules/limit_up_concept_scan/run`；盘后返回 `skipped/unavailable` 且不写概念快照。
-- `limit_up_plan_1505`、`eod_1900` 和 `eod_finalize_2130` 仍维护内部盘后观察数据；当前产品不执行旧次日竞价接力。盘后 `/live` 会为已有计划或空计划统一附加下一交易日 09:55 提醒、10:00 开始连续盘中评估和 D+1 14:30 卖出日程。
-- 09:15-09:59 和竞价阶段只更新观察资格，不得转为买点；10:00 后才按统一窗口检查首板触板或二进三的新鲜首次触板/回封。每条计划必须包含战法、入选原因、触发检查、买入、卖出和取消纪律；`execution_permission` 当前固定为 `research_only`。
-- `GET /api/limit-up/signals?date=YYYY-MM-DD&as_of=`: 历史快照或历史代理；无严格快照的代理会附加只使用该日前已闭合结果的历史胜率、平均净收益、硬亏率和样本数。
-- `GET /api/limit-up/history/status` / `POST /api/limit-up/history/rebuild`: 全历史账本状态和后台重建。
-- 正常重建优先调用 `POST /api/limit-up/history/rebuild`，由正在服务的进程清空并预热内存缓存。若运维通过 `docker compose exec ... rebuild_history_sync()` 在独立进程重建，完成后必须 `docker compose restart alphaagent-api`，否则服务进程可能在 TTL 内继续返回旧账本缓存。
-- `GET /api/limit-up/history/dates` / `GET /api/limit-up/history/day?date=`: 603 日日期与逐日首板、二进三、高板账本。
-- `GET /api/limit-up/history/backtest?lane=portfolio&start=&end=`: 当前产品回测，固定 10 万元、两仓各 50%，从完整首板/二进三候选池按统一窗口和真实触发时间成交，D+1 14:30 退出；返回四个冻结组合、触发覆盖、双倍成本、仓位审计和分钟价/收盘代理覆盖。一进二 `lane` 返回 422，高板只保留独立研究。
-- 定时账户缓存键只包含历史版本、策略版本和日期范围；完整账户只计算一次，交割单与回测的不同展示条数在返回时切片。历史重建统一清空并后台预热该缓存，禁止为单个交易日再次重算 601 日账户。
-- `GET /api/limit-up/history/factors?start=&end=&entry_mode=&exit_mode=`: 每日 Top5 候选的成功板/直接砸盘分型、买前因子样本外差异和锁定留出方向验证；结果口径不是成交。
-- `GET /api/limit-up/history/model-report?start=&end=&entry_mode=&exit_mode=&lane=`: 不传 `lane` 时兼容旧买点 Top5；活跃板位只接受首板、二进三和高板，一进二返回 422。按完整交易日历运行 252/63/63 Walk-forward，每日最多 1 只，训练不足 300 条时明确空仓。
-- `GET /api/limit-up/forward-validation?start=&end=&entry_mode=&exit_mode=`: 只读真实保存快照的严格前向观察账本，支持四种买点和 D+1 开/收盘。
-- `GET /api/limit-up/data-quality`: 研究账本、事件路径、历史成员、竞价、分钟、Tick/L2 和前向观察的真实覆盖门禁。
-- `POST /api/limit-up/data-quality/minute-backfill`: 兼容的同步补数接口，默认 20 个、最大 200 个；长批次不要从产品调用。
-- `POST /api/limit-up/data-quality/minute-backfill/start` / `GET /batches/{batch_id}`: 产品后台补数入口，默认 200 个并立即返回 `202`；前端每 2 秒轮询，终态自动刷新门禁。全局无关同步批次运行时返回 `409`。
-- `sync_limit_up_event_minutes`: 夜间自动补主板非 ST 涨停事件分钟路径，默认 200 个；位于 `eod_finalize_2130` 的 `eod_quant_research` 之后，失败按 1/3/14 天持久化退避。
-- `limit_up_history_rebuild`: `eod_finalize_2130` 在事件分钟补数后执行；仅当最新完整日线日晚于当前 v15 账本末日时重建，无新交易日返回 `skipped`。重建完成会清空并重新预热组合回测/战法验证缓存，随后生成次交易时段观察计划。
-- `auction_0926` / `sync_stock_auction_snapshots`: 交易日 09:26 保存主板非 ST 集合竞价公开字段；行情日期不等于当天、源时间不在 09:25-09:29、分页不足或去重后缺股都会整批失败且不写快照。
-- `GET /api/data-sync/imports/limit-up-evidence/status`: 历史事件/竞价供应商配置和真实覆盖；不返回 token。
-- `GET /api/data-sync/imports/limit-up-evidence/template.csv?dataset=events|auction`: 完整 CSV 模板。
-- `POST /api/data-sync/imports/limit-up-evidence/tushare` / `csv`: 限量 Tushare 或完整 CSV 预检查/写入。事件/竞价覆盖不足分别按 90%/95% 拒绝，失败日期不覆盖旧数据。
-- `POST /api/data-sync/imports/limit-up-evidence/ths/start` / `GET /ths/batches/{batch_id}`: 同花顺近 252 个交易日涨停/炸板证据后台批次；立即返回 `202`，前端每 2 秒轮询并可在刷新后恢复最近批次。
-- `sync_limit_up_ths_evidence`: 上述批次的内部任务；使用 `ths.limit_up_pool/open_limit_pool`，逐日覆盖不足 90%、空响应或供应商错误时保留旧数据。
-- `GET /api/data-sync/imports/limit-up-memberships/status` / `template.csv`: 逐日申万二级行业成员配置、四种覆盖口径和区间 CSV 模板。
-- `POST /api/data-sync/imports/limit-up-memberships/tushare` / `csv`: 按日期范围和批次数预检查/写入行业成员；每日覆盖不足 90% 不写，同日概念成员保持不变。
-- `POST /api/data-sync/schedules/limit_up_live_scan/run`: 手动执行与自动盘中计划相同的实时扫描；有效快照返回 `succeeded`，非交易时段或过期行情返回 `skipped / 未保存`。
-
-当前 `limit-up-history-v15` 点时账本覆盖 `2024-01-15..2026-07-15` 共 603 日，活跃候选池只含首板、二进三和高板。产品页不按板位切换，综合推荐执行首板+二进三统一盘中队列；账户为 307 个信号、149 笔闭合交易，胜率 `63.0872%`、复利 `+266.4491%`、最大回撤 `-8.0275%`。接力竞价只观察，窗口内首次触板/回封才进入买入队列；高板未通过回撤门。一进二候选、入选和目标二板均为 0。当前版本为 `history-v15 / live-v6 / scheduled-v4 / cash-v4 / walk-forward-v6`，完整证据见 `memory/06_backtests/limit_up_unified_intraday_relay_backtest_20260715.md`。
-
-2026-07-12 同花顺事件导入后，事件门禁为 252 日、19,978 条（涨停 14,455，炸板 5,523）；已有分钟路径 `2,215/19,978 = 11.0872%`，分钟交易日门禁仍为 `55/500` 日。TDX 尝试账本为 `1,928 covered / 0 empty / 0 error`，这不代表其余 17,763 个事件对已尝试或无需补数。桌面 `1440x1000` 与手机 `390x844` 浏览器验证无整页横向溢出，按钮启动、批次查询和终态门禁刷新分别返回 `202/200/200`，console 为 0 error / 0 warning。
-
-前向快照会同时保存历史风险门后的 `research_action` 和用户可执行 `action`；未验证战法仍显示 `pass`，但严格前向观察可据研究动作闭合 D+1，普通动作回测不会读取它。非交易时段刷新不请求外部行情、不写快照；交易时段内行情日期仍是上一交易日也不写。`/dates` 使用已验证事件日期轻查询；同一日期的 dashboard/signals 通过进程内单飞缓存共享一次单日计算。真实冷测 `/dates` 约 0.6 秒，同日 dashboard/signals 并发冷测约 7.7 秒，缓存后的 signals 约 30 毫秒。
-
-当前日期页面查询 `/live`，历史日期才查询 `/signals`。交易时段 `limit_up_live_scan` 以 15 秒目标间隔更新强势股、涨停池和两日轨迹，`limit_up_concept_scan` 以 30 秒目标间隔独立更新完整市场概念帧；页面 10 秒轮询只读内存/已保存快照，不触发行情源或新增审计行。同日全页快照超过 90 秒时动作降为 stale/pass，概念帧超过 45 秒或覆盖不足 90% 时禁止新买点。2026-07-14 的 319 个相邻逐次扫描中位数为 `18.22s`、P95 为 `19.13s`、最大 `53.06s`，0 个超过 60 秒；市场门逐帧回放见 `memory/06_backtests/limit_up_live_gate_replay_20260714.md`。调试实时性时要同时检查两个 schedule 的 `last_started_at`、概念快照年龄/覆盖率、公共源限流和正式快照 `captured_at`，不能只用分钟表行数判断频率。vendored 六个涨停池 HTTP 入口已有 8 秒硬超时，五类实时池并行；完整行情使用腾讯分页、最多 6 路并发，并在统一无错误代理环境内完成整批请求。所有主板非 ST 的 5% 雷达先完成概念和结构评估，Top5 只负责最终推荐排序。
-
-2026-07-13 盘后观察缺失的独立根因是计划构建器把“次日竞价确认”错误用于“盘后提前观察”，使 30 只雷达候选全部消失。修复后按观察白名单从 30 只中保留 5 只；v6 又彻底移除首板到一进二计划，二板结构只形成目标三板观察。盘前/竞价项只确认资格，买入必须等待 10:00 后首次触板或可观察回封；观察保持 `research_only`，不冒充买点。
-
-2026-07-12 真实 `/data-quality` 结果：点时历史账本 `600/500` 日达标；主板非 ST 涨停事件路径 `252/500` 日、19,978 条；事件分钟路径 `2,215/19,978 = 11.0872%`，分钟交易日为 `55/500`；逐日板块成员、竞价、板块分钟资金和 Tick/L2 均为 0，合格前向观察日为 0。末封时间和封单额覆盖只在最终封板事件内计算，当前均为 100%，炸板行不再把覆盖率推到 100% 以上。当前 8 个门禁仍仅 1 个达标、2 个补数中、5 个缺失，`research_ledger_ready=true`、`simulation_eligible=false`。当前成员表虽有 5,611 只股票、86,701 条关系，仍只能按 `current_snapshot` 计 0 个逐日历史覆盖日。原始周末/休市事件和盘中重复快照继续保留审计，但必须有同股同日日线且只取最后状态才进入门禁。
-
-概念成员、概念强度、板块资金、竞价和两日轨迹时点表均已在真实 PostgreSQL 注册。`2026-07-14` 成员版本已有 70,439 条题材关系，覆盖 5,609 只股票和 498 个题材，可供下一交易日严格读取；部署时已收盘，概念强度表保持 0 行，手动任务返回 `skipped/unavailable`，没有伪造盘中帧。公开竞价源仍缺未匹配量，Tick/L2 也未补齐，模拟资格继续关闭。
-
-`/data` 已增加“打板证据”页。当前真实状态为 Tushare 未配置、同花顺近 252 日已覆盖、竞价 0 日；状态、模板、Tushare 无令牌和 CSV 预检查接口均返回 200。同花顺后台批次补齐原缺失的 `233/233` 日，写入 17,833 条，供应商错误和覆盖不足日均为 0；最终覆盖 `2025-06-27..2026-07-10` 共 252 日、19,978 条。按钮使用后台批次和 2 秒轮询，刷新页面后可恢复最近批次；全部已覆盖时明确显示无缺失日期。该公开源只覆盖近 252 个交易日，不能当作 500 日全历史；空响应也不会删除已有可靠事件。桌面和 `390x844` 页面无整页横向溢出，逐日审计宽表局部滚动，console 0 error/0 warning。
-
-同页“逐日行业成员”已上线。2026-07-11 真实状态为 Tushare 未配置，原始/行业/概念/90% 合格历史日均为 0，当前成员仍为 5611 只、86701 行且不计入历史门禁。2026-07-10 单行区间 CSV 预检查以 3035 只有效主板日线股票为参照，只覆盖 1 只（`0.0329%`），结果 `rejected / rows_written=0`；错误的深市代码+沪市交易所组合已从资格分母排除。桌面和 `390x844` 下操作区无整页横向溢出，console 0 error/0 warning，状态、模板、Tushare 无令牌和 CSV 拒绝路径均返回 200。
-
-验证入口：
-
-```bash
-uv run --group server pytest tests/alphaagent/test_limit_up_*.py tests/alphaagent/test_data_sync_schedule.py -q
-uv run --group server pytest tests/alphaagent/test_market_snapshot_repository.py tests/alphaagent/services/quant/test_market_timing_intraday.py -q
-uv run --group server pytest tests/alphaagent/test_quant_backtest_portfolio.py -q -k "registry_dispatches_default_strategy"
+uv run python -m compileall alphaagent/server alphaagent/market alphaagent/data_sources
+uv run --group server pytest tests/alphaagent/test_legacy_product_removal.py -q
+uv run --group server pytest tests/alphaagent/test_limit_up*.py -q
+uv run --group server pytest tests/alphaagent/services/market_timing -q
 pnpm --dir frontend test -- --run
 pnpm --dir frontend run build
-docker compose up -d --build alphaagent-api alphaagent-web
+git diff --check
 ```
 
-API runtime 需要 `libgomp1` 才能导入 LightGBM；该包在 `Dockerfile.alphaagent-api` 独立缓存层安装，并先删除只用于安装 Docker CLI 的 apt source，避免源码重建受 Docker 官方源波动阻塞。
-
-浏览器检查 `http://localhost:8080/limit-up`，桌面和 `390x844` 都要验证：只有实时推荐/历史交割单/回测三个主入口，没有板位筛选或策略开关；综合推荐同时承载首板和二进三，最多两只买点和六只可转买观察。一进二不得出现在页面，竞价不得显示买入。回测显示 v15 统一账户、四组组合结论、精确 14:30/收盘代理覆盖、双倍成本和候选代理边界。当前仍为 `research_only`；硬门失败不能因后来封板事后改成正确买点。
-
-## Verification
-
-常用后端验证：
+低吸成员与题材门禁：
 
 ```bash
-uv run python -m compileall alphaagent/server/api alphaagent/server/services alphaagent/market alphaagent/data_sources alphaagent/server/db
-uv run pytest tests/alphaagent/test_quant_backtest_portfolio.py -q
-uv run pytest tests/alphaagent/test_akshare_adapter.py tests/alphaagent/test_data_sync_schedule.py -q
+docker compose exec -T alphaagent-api python -m alphaagent.server.services.low_suction.cli membership-source-status
+docker compose exec -T alphaagent-api python -m alphaagent.server.services.low_suction.cli audit --format json
+docker compose exec -T alphaagent-api python -m alphaagent.server.services.low_suction.cli theme-eligibility-research --start 2023-03-28 --end 2026-07-15 --format json
 ```
 
-常用前端验证：
+## Runtime Checks
 
 ```bash
-pnpm --dir frontend run build
+curl -fsS http://localhost:8080/api/health
+curl -fsS http://localhost:8080/api/limit-up/history/status
+curl -fsS http://localhost:8080/api/market-timing/panel
+curl -fsS http://localhost:8080/api/mainline-replay/timeline
 ```
 
-按变更范围补充更窄测试：
+旧 `/api/quant`、`/api/backtests`、`/api/portfolios` 和
+`/api/simulation` 应返回 404。
 
-- 量化策略：`tests/alphaagent/test_quant_strategy_acceptance.py` 和对应 research script tests。
-- 主线：`tests/alphaagent/test_mainline_replay_api.py`、`tests/alphaagent/test_mainline_replay_algo.py`。
-- 同步调度：`tests/alphaagent/test_data_sync_schedule.py`。
-- 网关：`cd gateway && go test ./...`。
+网关对外 `/api/health` 可能要求登录；容器自身健康检查使用 API 容器内的同一路径，
+以 `docker compose ps` 的 `healthy` 为本地无凭据检查结果。
 
-## Known Caveats
+## Free Forward Evidence
 
-- vn.py A 股实盘 Gateway 和官方 A 股 Datafeed 插件仍未安装配置。
-- 多年全 A、walk-forward、参数敏感性、市场环境分层、基准超额和高摩擦压力测试仍是策略可信度的必要验证。
-- 旧严格 14:30 报告只作为分钟模型历史材料；当前 `/quant` 候选质量主流程是 D 日收盘买入、D+1 收盘验证，组合执行诊断仍可显示 D+1 执行约束。
-- 候选页落库推荐、单股逐日评分和组合回测理论计划仍需继续保持口径一致。
+重建 API 后，应用启动流程会先建表、协调默认调度，再启动调度器：
+
+```bash
+docker compose up -d --build alphaagent-api
+docker compose ps alphaagent-api
+```
+
+不要在健康 API 旁边另起进程调用 `ensure_sync_schema()`；该入口包含旧进程中断恢复，
+会把当前 API 正在执行的同步任务误判为上一个进程残留。只需依赖
+`alphaagent/server/main.py` 的启动调用，随后从数据库核对 schedule 的 `job_ids`。
+
+默认 `eod_1900` 在 19:00 主采板块/个股资金、日线、成员、涨停池和盘后证据；
+`eod_finalize_2130` 在 21:30 重试资金、完整成员链路、
+`sync_low_suction_security_snapshot`、涨停池和事件分钟，再重建打板账本。旧
+`sync_limit_up_exit_minutes` 仍可手动用于 14:30 研究，但已从推荐任务和 21:30 正式链路
+移除；v9 正式退出直接使用日线同步得到的 D+1 官方收盘价。不要用旧的
+`ensure_sync_registry()` 名称，也不要在供应商空响应时手工插入 scope。Tick/L2 和真实
+成交不属于夜间可回填数据。
+
+2026-07-16 v6 历史运行验收：
+
+- API 镜像 `sha256:ffe2ce75e200b0ac18bc8ae3678d4ec415e8d5db31f415dd57c4aada3c182c72`
+  为 `healthy`；数据库中的 19:00/21:30 `job_ids` 与当时默认顺序一致。
+- 19:00 恢复批次在占用时，21:30 补偿没有丢失，而是在 21:46 自动接续；21:30 批次
+  首轮仍被东方财富部分板块成员响应阻断；无兜底合同上线后，`run_id=1125` 写入
+  85,675 条并剔除 `BK1677/BK1678/BK1679/BK0738/BK1200`，`run_id=1131` 随后成功
+  生成 85,675 条反向索引和逐日快照。概念 `495/498`、行业 `494/496` scope 均完整且
+  记录精确排除 ID；五个板块在当日冻结快照均为 0 行。
+- 超时晚写竞态修复部署后，正式成员任务 `run_id=1132` 写入 86,111 条，只剔除
+  `BK1677/BK1678/BK1679`；两个行业接口已恢复，三个失败概念当前成员仍为 0 行。
+  `run_id=1133` 因已过午夜而按可靠日期合同跳过，没有覆盖 7 月 16 日冻结快照。
+- `run_id=1101` 首轮处理 200 个 D+1 14:30 缺口，真实覆盖 98、空响应 102、错误 0；
+  `run_id=1102` 处理单批上限外的剩余 21 个，覆盖 0、空响应 21、错误 0。总精确覆盖
+  从 98/319 提升为 196/319，剩余 123 个全部进入退避，当前可重试为 0。
+- 第二轮缺口日期为 2025-06-30 至 2025-08-11；TDX 扫描 470,640 根远端分钟记录仍无
+  目标行，证明公开源回溯边界不能靠重复夜间任务消除。当时 `limit-up-live-v10` 成熟
+  正式推荐请求为 0；下一交易日闭合后才会自动加入。
+- 正式 `limit-up-scheduled-v6` 回放只认精确 D+1 14:30：151 个请求中 124 个精确、
+  27 个剔除、收盘代理 0。两仓 58 笔、胜率 63.7931%、复利 +66.9032%、回撤
+  -5.7239%；全推荐独立统计 121 笔、胜率 57.8512%。冻结后前向 0 笔，状态仍为
+  `research_only`。详见
+  `memory/06_backtests/limit_up_no_fallback_impact_20260716.md`。
+
+## Data Notes
+
+- `ensure_schema_once()` 在 API 进程内只执行一次。
+- `create_schema()` 先执行固定旧表清理，再创建保留 metadata。
+- schedule registry 会删除旧 `tail_quant_1430`、`quant_research` 和
+  `tail_preview` 行。
+- 不在通过静态、后端、前端和打板指纹门禁前重建 API 容器。

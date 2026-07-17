@@ -93,7 +93,7 @@
 模块：
 
 ```text
-alphaagent/server/services/quant/market_timing/
+alphaagent/server/services/market_timing/
   series.py
   factors.py
   signal.py
@@ -104,7 +104,7 @@ alphaagent/server/services/quant/market_timing/
 
 ```bash
 uv run python scripts/market_timing_eval.py
-uv run --group server pytest tests/alphaagent/services/quant/test_market_timing_backtest.py tests/alphaagent/services/quant/test_market_timing_no_lookahead.py tests/alphaagent/services/quant/test_market_timing_intraday.py -q
+uv run --group server pytest tests/alphaagent/services/market_timing/test_market_timing_backtest.py tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py tests/alphaagent/services/market_timing/test_market_timing_intraday.py -q
 pnpm --dir frontend test
 pnpm --dir frontend run build
 ```
@@ -223,5 +223,5 @@ pnpm --dir frontend run build
 - 线上 `agu.yantiandao.com` 是否已升级到 v5 尚未验证；本地变更需要后续 tag/发布流程对齐线上。
 - no-lookahead 守护测试覆盖候选存在性、次日确认、否决候选保留、连续区域去重、
   结构危险状态、参与度缺失、冲突优先级和未来污染。见
-  `tests/alphaagent/services/quant/test_market_timing_no_lookahead.py`。
-- `/market` 日期一致性守护覆盖盘后行情 overlay、当天 K 线替换、盘中 context 日期复制、当前方向和逐日序列。见 `tests/alphaagent/services/quant/test_market_timing_intraday.py`。
+  `tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py`。
+- `/market` 日期一致性守护覆盖盘后行情 overlay、当天 K 线替换、盘中 context 日期复制、当前方向和逐日序列。见 `tests/alphaagent/services/market_timing/test_market_timing_intraday.py`。

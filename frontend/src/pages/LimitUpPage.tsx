@@ -34,6 +34,7 @@ import {
   fetchLimitUpLiveTraceDates,
   fetchLimitUpLiveTraceDay,
   fetchLimitUpLiveTraceSymbol,
+  fetchLimitUpRadarValidation,
   fetchLimitUpStrategyGuide,
   startLimitUpHistoryRebuild,
   type LimitUpHistoryRebuildStatus,
@@ -118,6 +119,13 @@ export function LimitUpPage() {
     queryFn: fetchLimitUpStrategyGuide,
     enabled: guideOpen,
     staleTime: Infinity,
+    refetchOnWindowFocus: false,
+  });
+  const radarValidationQuery = useQuery({
+    queryKey: ["limitUpRadarValidation"],
+    queryFn: fetchLimitUpRadarValidation,
+    enabled: guideOpen,
+    staleTime: 60_000,
     refetchOnWindowFocus: false,
   });
   const traceDatesQuery = useQuery({
@@ -414,6 +422,9 @@ export function LimitUpPage() {
         open={guideOpen}
         onOpenChange={setGuideOpen}
         guide={strategyGuideQuery.data}
+        radarValidation={radarValidationQuery.data}
+        radarValidationLoading={radarValidationQuery.isLoading}
+        radarValidationError={firstError(radarValidationQuery.error)}
         loading={strategyGuideQuery.isLoading}
         error={firstError(strategyGuideQuery.error)}
         onRetry={() => void strategyGuideQuery.refetch()}

@@ -141,52 +141,6 @@ def test_tushare_auction_rows_remain_partial_without_unmatched_queue() -> None:
     assert row["source"] == "tushare.stk_auction"
 
 
-def test_csv_parser_accepts_bom_and_uses_the_same_normalizer() -> None:
-    csv_text = (
-        "\ufefftrade_date,ts_code,name,limit_type,first_time,last_time,open_times,fd_amount,limit_times\n"
-        "2026-07-10,600001.SH,沪市样本,U,09:33:05,14:31:52,2,128000000,2\n"
-    )
-
-    result = evidence.import_csv_evidence(
-        dataset="events",
-        csv_text=csv_text,
-        dry_run=True,
-        eligible_stocks=ELIGIBLE_STOCKS,
-        expected_event_symbols={date(2026, 7, 10): {"600001.SSE"}},
-    )
-
-    assert result["status"] == "ready"
-    assert result["dry_run"] is True
-    assert result["date_count"] == 1
-    assert result["rows_read"] == 1
-    assert result["rows_written"] == 0
-    assert result["date_results"][0]["coverage_pct"] == 100.0
-
-
-def test_csv_import_does_not_call_writer_when_date_coverage_is_incomplete(monkeypatch) -> None:
-    writes: list[object] = []
-    monkeypatch.setattr(evidence, "replace_event_evidence", lambda *args, **kwargs: writes.append((args, kwargs)) or 1)
-    csv_text = (
-        "trade_date,ts_code,name,limit_type,first_time,last_time,open_times,fd_amount,limit_times\n"
-        "2026-07-10,600001.SH,沪市样本,U,09:33:05,14:31:52,2,128000000,2\n"
-    )
-
-    result = evidence.import_csv_evidence(
-        dataset="events",
-        csv_text=csv_text,
-        dry_run=False,
-        eligible_stocks=ELIGIBLE_STOCKS,
-        expected_event_symbols={
-            date(2026, 7, 10): {"600001.SSE", "000001.SZSE", "002001.SZSE"}
-        },
-    )
-
-    assert result["status"] == "rejected"
-    assert result["rows_written"] == 0
-    assert result["date_results"][0]["status"] == "coverage_incomplete"
-    assert writes == []
-
-
 def test_tushare_import_requires_token_before_querying(monkeypatch) -> None:
     monkeypatch.setattr(evidence, "is_database_configured", lambda: True)
     monkeypatch.setattr(
@@ -488,16 +442,6 @@ def test_ths_batch_service_starts_only_the_internal_import_job(monkeypatch) -> N
     }
 
 
-def test_event_and_auction_templates_have_auditable_columns() -> None:
-    event_template = evidence.evidence_csv_template("events")
-    auction_template = evidence.evidence_csv_template("auction")
-
-    assert event_template.startswith("\ufefftrade_date,ts_code,name,limit_type")
-    assert "first_time,last_time,open_times,fd_amount,limit_times" in event_template
-    assert auction_template.startswith("\ufefftrade_date,ts_code,name,price,pre_close,vol,amount")
-    assert "unmatched_volume,unmatched_side,source_quote_time" in auction_template
-
-
 def test_historical_evidence_api_contracts(monkeypatch) -> None:
     monkeypatch.setattr(
         data_sync_api.historical_evidence_import,
@@ -506,18 +450,8 @@ def test_historical_evidence_api_contracts(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         data_sync_api.historical_evidence_import,
-        "evidence_csv_template",
-        lambda dataset: f"\ufeffdataset\n{dataset}\n",
-    )
-    monkeypatch.setattr(
-        data_sync_api.historical_evidence_import,
         "import_tushare_evidence",
         lambda **kwargs: {"status": "unavailable", "dataset": kwargs["dataset"]},
-    )
-    monkeypatch.setattr(
-        data_sync_api.historical_evidence_import,
-        "import_csv_evidence",
-        lambda **kwargs: {"status": "ready", "dataset": kwargs["dataset"], "dry_run": kwargs["dry_run"]},
     )
     client = TestClient(create_app())
 
@@ -540,16 +474,35 @@ def test_historical_evidence_api_contracts(monkeypatch) -> None:
 
     assert status.status_code == 200
     assert status.json()["data"]["provider"]["configured"] is False
-    assert template.status_code == 200
-    assert "dataset\nauction" in template.text
+    assert template.status_code == 404
     assert tushare.status_code == 200
     assert tushare.json()["data"]["status"] == "unavailable"
-    assert csv_import.status_code == 200
-    assert csv_import.json()["data"] == {
-        "status": "ready",
-        "dataset": "auction",
-        "dry_run": True,
-    }
+    assert csv_import.status_code == 404
+
+
+def test_manual_csv_and_file_data_sync_routes_are_not_exposed() -> None:
+    client = TestClient(create_app())
+    routes = [
+        ("GET", "/api/data-sync/imports/minute-bars/template.csv"),
+        ("POST", "/api/data-sync/imports/minute-bars"),
+        ("POST", "/api/data-sync/imports/minute-bars/audit-gaps"),
+        ("POST", "/api/data-sync/imports/minute-bars/gap-template.csv"),
+        ("POST", "/api/data-sync/imports/minute-bars/vendor-manifest"),
+        ("POST", "/api/data-sync/imports/minute-bars/vendor-manifest.csv"),
+        ("POST", "/api/data-sync/imports/minute-bars/tushare-gaps"),
+        ("POST", "/api/data-sync/imports/minute-bars/tdx-gaps"),
+        ("POST", "/api/data-sync/imports/minute-bars/akshare-gaps"),
+        ("POST", "/api/vnpy/import-minute-bars/gaps"),
+    ]
+
+    responses = [client.request(method, path, json={}) for method, path in routes]
+
+    assert [response.status_code for response in responses] == [404] * len(routes)
+
+
+def test_historical_evidence_csv_service_is_removed() -> None:
+    assert not hasattr(evidence, "import_csv_evidence")
+    assert not hasattr(evidence, "evidence_csv_template")
 
 
 def test_historical_evidence_api_rejects_invalid_dataset(monkeypatch) -> None:
@@ -557,8 +510,7 @@ def test_historical_evidence_api_rejects_invalid_dataset(monkeypatch) -> None:
         "/api/data-sync/imports/limit-up-evidence/template.csv?dataset=unknown"
     )
 
-    assert response.status_code == 422
-    assert response.json()["error"]["code"] == "INVALID_LIMIT_UP_EVIDENCE_IMPORT"
+    assert response.status_code == 404
 
 
 def test_historical_evidence_api_rejects_invalid_date_range(monkeypatch) -> None:

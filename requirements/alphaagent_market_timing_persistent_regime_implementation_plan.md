@@ -13,8 +13,8 @@
 ### Task 1: 建立因果的金银行情状态序列
 
 **Files:**
-- Modify: `tests/alphaagent/services/quant/test_market_timing_no_lookahead.py`
-- Modify: `alphaagent/server/services/quant/market_timing/signal.py`
+- Modify: `tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py`
+- Modify: `alphaagent/server/services/market_timing/signal.py`
 
 - [ ] **Step 1: 写持续状态与未来稳定性的失败测试**
 
@@ -100,7 +100,7 @@ def test_active_direction_history_is_stable_when_future_reversal_is_appended():
 Run:
 
 ```bash
-uv run --group server pytest tests/alphaagent/services/quant/test_market_timing_no_lookahead.py -q -k active_direction
+uv run --group server pytest tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py -q -k active_direction
 ```
 
 Expected: FAIL，错误包含 `signal has no attribute 'build_active_directions'`。
@@ -137,7 +137,7 @@ def build_active_directions(
 Run:
 
 ```bash
-uv run --group server pytest tests/alphaagent/services/quant/test_market_timing_no_lookahead.py -q
+uv run --group server pytest tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py -q
 ```
 
 Expected: PASS。
@@ -145,16 +145,16 @@ Expected: PASS。
 - [ ] **Step 5: 提交领域层变更**
 
 ```bash
-git add -- alphaagent/server/services/quant/market_timing/signal.py tests/alphaagent/services/quant/test_market_timing_no_lookahead.py
+git add -- alphaagent/server/services/market_timing/signal.py tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py
 git commit -m "feat(market-timing): carry confirmed direction state"
 ```
 
 ### Task 2: 让面板统一输出持续行情状态
 
 **Files:**
-- Modify: `tests/alphaagent/services/quant/test_market_timing_intraday.py`
-- Modify: `alphaagent/server/services/quant/market_timing/signal.py`
-- Modify: `alphaagent/server/services/quant/market_timing/panel.py`
+- Modify: `tests/alphaagent/services/market_timing/test_market_timing_intraday.py`
+- Modify: `alphaagent/server/services/market_timing/signal.py`
+- Modify: `alphaagent/server/services/market_timing/panel.py`
 
 - [ ] **Step 1: 把面板测试改成持续状态契约**
 
@@ -242,7 +242,7 @@ def test_confirmation_cutoff_keeps_next_day_intraday_event_pending():
 Run:
 
 ```bash
-uv run --group server pytest tests/alphaagent/services/quant/test_market_timing_intraday.py -q -k "active_direction or overview_uses_active or timing_series_keeps"
+uv run --group server pytest tests/alphaagent/services/market_timing/test_market_timing_intraday.py -q -k "active_direction or overview_uses_active or timing_series_keeps"
 ```
 
 Expected: FAIL，缺少 `active_direction`，`_build_overview` 尚未接受持续方向参数，
@@ -345,9 +345,9 @@ Run:
 
 ```bash
 uv run --group server pytest \
-  tests/alphaagent/services/quant/test_market_timing_backtest.py \
-  tests/alphaagent/services/quant/test_market_timing_no_lookahead.py \
-  tests/alphaagent/services/quant/test_market_timing_intraday.py -q
+  tests/alphaagent/services/market_timing/test_market_timing_backtest.py \
+  tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py \
+  tests/alphaagent/services/market_timing/test_market_timing_intraday.py -q
 ```
 
 Expected: PASS；事件检测、准确率与现有关键日期断言不变。
@@ -355,7 +355,7 @@ Expected: PASS；事件检测、准确率与现有关键日期断言不变。
 - [ ] **Step 7: 提交面板契约变更**
 
 ```bash
-git add -- alphaagent/server/services/quant/market_timing/signal.py alphaagent/server/services/quant/market_timing/panel.py tests/alphaagent/services/quant/test_market_timing_intraday.py
+git add -- alphaagent/server/services/market_timing/signal.py alphaagent/server/services/market_timing/panel.py tests/alphaagent/services/market_timing/test_market_timing_intraday.py
 git commit -m "feat(market-timing): expose persistent market regime"
 ```
 
@@ -568,9 +568,9 @@ Run:
 ```bash
 git diff --check
 uv run --group server pytest \
-  tests/alphaagent/services/quant/test_market_timing_backtest.py \
-  tests/alphaagent/services/quant/test_market_timing_no_lookahead.py \
-  tests/alphaagent/services/quant/test_market_timing_intraday.py -q
+  tests/alphaagent/services/market_timing/test_market_timing_backtest.py \
+  tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py \
+  tests/alphaagent/services/market_timing/test_market_timing_intraday.py -q
 pnpm --dir frontend test
 pnpm --dir frontend run build
 ```

@@ -87,6 +87,7 @@ server = [
     "TA-Lib>=0.6.8",
     "scikit-learn>=1.6.1",
     "lightgbm>=4.6.0",
+    "baostock>=0.9.3",
 ]
 
 [project.urls]

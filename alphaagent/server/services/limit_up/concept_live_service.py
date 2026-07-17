@@ -5,9 +5,8 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime
 from threading import Lock
-from typing import Any
 from zoneinfo import ZoneInfo
 
 from alphaagent.data_sources.akshare_adapter import AkShareAdapter
@@ -17,6 +16,9 @@ from alphaagent.server.services.limit_up.concept_resonance import (
     build_membership_index,
 )
 from alphaagent.server.services.limit_up.domain import is_eligible_main_board
+from alphaagent.server.services.limit_up.radar_contract import (
+    CAPTURE_MIN_CHANGE_PCT,
+)
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -70,9 +72,16 @@ def refresh_live_concept_snapshot(
     try:
         live_adapter = adapter or AkShareAdapter()
         quote_payload = live_adapter.all_stock_quotes()
+        required_membership_date = repository.required_prior_trade_date(local_at.date())
         snapshot_date, membership_rows = repository.load_frozen_membership_rows(local_at.date())
-        if snapshot_date is None or not membership_rows:
-            raise ConceptSnapshotUnavailable("缺少 D-1 概念成员版本")
+        if required_membership_date is None:
+            raise ConceptSnapshotUnavailable("缺少上一交易日，D-1概念成员不可用")
+        if snapshot_date != required_membership_date or not membership_rows:
+            raise ConceptSnapshotUnavailable(
+                "缺少严格D-1概念成员版本："
+                f"required={required_membership_date.isoformat()} "
+                f"actual={snapshot_date.isoformat() if snapshot_date else '-'}"
+            )
         membership = build_membership_index(
             membership_rows,
             snapshot_date=snapshot_date,
@@ -193,7 +202,8 @@ def _runtime_payload(
             str(quote.get("vt_symbol") or ""),
             str(quote.get("name") or ""),
         )
-        and _float(quote.get("change_pct"), default=-100.0) >= 5.0
+        and _float(quote.get("change_pct"), default=-100.0)
+        >= CAPTURE_MIN_CHANGE_PCT
     ]
     ready = coverage >= CONCEPT_MIN_QUOTE_COVERAGE and source_date_valid
     return {
@@ -223,6 +233,7 @@ def _runtime_payload(
             "quote_coverage_ratio": round(coverage, 6),
             "source_trade_date": source_trade_date,
             "source_trade_date_valid": source_date_valid,
+            "membership_snapshot_date_valid": True,
             "source_errors": [],
         },
     }

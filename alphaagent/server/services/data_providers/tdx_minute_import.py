@@ -3,19 +3,20 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from alphaagent.server.db.session import is_database_configured
-from alphaagent.server.services.data_sync import (
-    _audit_minute_gap_requirements,
-    _upsert_minute_bars,
-    load_minute_gap_requirements,
+from alphaagent.server.services.data_sync import _upsert_minute_bars
+from alphaagent.server.services.minute_gaps import (
+    audit_minute_gap_requirements,
+    normalize_minute_gap_requirements,
 )
 from alphaagent.server.services.vnpy_integration.local_data import parse_vt_symbol
 
 
-SUPPORTED_INTERVALS = {"1m": 8}
+SUPPORTED_INTERVALS = {"1m": 8, "5m": 0}
 TDX_PAGE_SIZE = 800
 TDX_MAX_START = 65500
 TDX_MAX_RECONNECTS = 3
@@ -23,8 +24,7 @@ TDX_MAX_RECONNECTS = 3
 
 def import_tdx_minute_bars_for_gaps(
     *,
-    gap_csv_text: str = "",
-    gap_file_path: str = "",
+    gaps: Sequence[Mapping[str, Any]],
     interval: str = "1m",
     tail_entry_start: str = "14:30",
     tail_entry_end: str = "14:30",
@@ -49,7 +49,7 @@ def import_tdx_minute_bars_for_gaps(
     if category is None:
         return {"status": "unsupported_interval", "interval": interval, "supported": sorted(SUPPORTED_INTERVALS)}
 
-    requirements = load_minute_gap_requirements(gap_csv_text, file_path=gap_file_path)
+    requirements = normalize_minute_gap_requirements(gaps)
     if requirements["errors"] and not requirements["items"]:
         return {
             "status": "empty",
@@ -84,7 +84,7 @@ def import_tdx_minute_bars_for_gaps(
             "status": "unavailable",
             "message": "TDX public quote server unavailable",
             "reason": exc.__class__.__name__,
-            "note": "通达信公开行情服务器可补部分历史 1 分钟线；网络不可达时请改用 Tushare/RQData/XT/QMT/券商导出 CSV。",
+            "note": "系统将按已配置的数据源继续补偿同步；数据仍不可得时保留缺口并保持质量门禁关闭。",
         }
 
     rows_read = 0
@@ -154,12 +154,17 @@ def import_tdx_minute_bars_for_gaps(
     finally:
         _disconnect_tdx(api)
 
-    audit_after = _audit_minute_gap_requirements(
+    required_tail_bars = required_tdx_tail_bars(
+        interval_key,
+        tail_entry_start,
+        tail_entry_end,
+    )
+    audit_after = audit_minute_gap_requirements(
         requirements,
         interval=interval_key,
         tail_entry_start=tail_entry_start,
         tail_entry_end=tail_entry_end,
-        min_tail_bars=1,
+        min_tail_bars=required_tail_bars,
     )
     preview_covered = [
         {"vt_symbol": vt_symbol, "trade_date": trade_date.isoformat(), "minute_bar_count": count}
@@ -178,6 +183,7 @@ def import_tdx_minute_bars_for_gaps(
         "tdx_category": category,
         "dry_run": dry_run,
         "tail_entry_window": f"{tail_entry_start}-{tail_entry_end}",
+        "required_tail_bars": required_tail_bars,
         "gap_count": len(requirements["items"]),
         "processed_gap_count": len(items),
         "unprocessed_gap_count": max(len(requirements["items"]) - len(items), 0),
@@ -197,8 +203,39 @@ def import_tdx_minute_bars_for_gaps(
         "audit_after": audit_after,
         "source": "tdx_public_hq",
         "host": host,
-        "note": "使用通达信公开行情服务器补真实历史 1 分钟线；公开服务器可回溯范围有限，缺口仍需由 audit_after 判定。",
+        "note": "使用通达信公开行情服务器补真实历史分钟线；公开服务器可回溯范围有限，缺口仍需由 audit_after 判定。",
     }
+
+
+def required_tdx_tail_bars(interval: str, start: str, end: str) -> int:
+    """Return the exact bar count required for the requested TDX tail window."""
+
+    interval_key = str(interval or "").strip().lower()
+    if interval_key == "1m":
+        return 1
+    if interval_key != "5m":
+        raise ValueError(f"unsupported TDX interval: {interval}")
+    start_time = datetime.strptime(str(start)[:5], "%H:%M").time()
+    end_time = datetime.strptime(str(end)[:5], "%H:%M").time()
+    closes = [
+        datetime.strptime(value, "%H:%M").time()
+        for value in _tdx_five_minute_close_times()
+    ]
+    count = sum(start_time <= value <= end_time for value in closes)
+    if count < 1:
+        raise ValueError("TDX 5m window contains no valid bar close")
+    return count
+
+
+def _tdx_five_minute_close_times() -> tuple[str, ...]:
+    def session(start: str, count: int) -> list[str]:
+        current = datetime.strptime(start, "%H:%M")
+        return [
+            (current + index * timedelta(minutes=5)).strftime("%H:%M")
+            for index in range(count)
+        ]
+
+    return tuple([*session("09:35", 24), *session("13:05", 24)])
 
 
 def _group_requirements(items: list[dict[str, Any]]) -> dict[str, set[date]]:

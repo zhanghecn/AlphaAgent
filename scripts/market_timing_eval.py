@@ -14,11 +14,11 @@ from datetime import date
 from statistics import mean
 
 from alphaagent.server.db import schema, session as db_session
-from alphaagent.server.services.quant.market_context import compute_market_contexts
-from alphaagent.server.services.quant.market_timing import backtest as bt
-from alphaagent.server.services.quant.market_timing import factors as fac
-from alphaagent.server.services.quant.market_timing import series as ser
-from alphaagent.server.services.quant.market_timing import signal as sig
+from alphaagent.server.services.market_context import compute_market_contexts
+from alphaagent.server.services.market_timing import backtest as bt
+from alphaagent.server.services.market_timing import factors as fac
+from alphaagent.server.services.market_timing import series as ser
+from alphaagent.server.services.market_timing import signal as sig
 
 START = date(2024, 5, 28)
 END = date.today()

@@ -144,9 +144,9 @@ TypeScript 和 Vite 生产构建通过。构建仅保留既有的大 chunk 体�
 ```bash
 docker compose exec -T alphaagent-api python - < scripts/market_timing_eval.py
 uv run --group server pytest \
-  tests/alphaagent/services/quant/test_market_timing_backtest.py \
-  tests/alphaagent/services/quant/test_market_timing_no_lookahead.py \
-  tests/alphaagent/services/quant/test_market_timing_intraday.py -q
+  tests/alphaagent/services/market_timing/test_market_timing_backtest.py \
+  tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py \
+  tests/alphaagent/services/market_timing/test_market_timing_intraday.py -q
 pnpm --dir frontend test
 pnpm --dir frontend run build
 git diff --check

@@ -179,8 +179,8 @@ bull_force[t+1] >= bear_force[t+1]
 预计只修改研究和验证边界：
 
 ```text
-alphaagent/server/services/quant/market_timing/backtest.py
-tests/alphaagent/services/quant/test_market_timing_backtest.py
+alphaagent/server/services/market_timing/backtest.py
+tests/alphaagent/services/market_timing/test_market_timing_backtest.py
 scripts/market_timing_eval.py
 memory/06_backtests/market_timing_recovery_gold_validation_2026_07_15.md
 memory/07_market_timing/market_timing_design.md

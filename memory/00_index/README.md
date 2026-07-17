@@ -1,76 +1,34 @@
 # Memory Map
 
-这个目录用于维护本项目的长期上下文地图。目标不是替代官方文档，而是让后续对话能快速定位：
+`memory/` 是 AlphaAgent 的当前项目地图，不是聊天记录或实验流水。
 
-- 这个 vn.py 项目有哪些模块。
-- 哪些源码文件负责某类能力。
-- 数据从哪里来、如何进入 vn.py。
-- A 股相关能力由哪些官方插件和核心抽象承接。
-- 当前环境实际安装了什么、缺什么。
-- 后续讨论中做过哪些决策。
+## Read Order
 
-## 分类
+1. `09_decisions/decisions.md`: 已确认的产品边界和研究约束。
+2. `01_project/structure.md`、`01_project/installed_state.md`: 仓库和插件状态。
+3. `02_source/core_entrypoints.md`: 当前源码入口。
+4. `03_data/data_flow.md`: 当前真实数据路径和覆盖约束。
+5. `05_runtime/run_debug.md`: 最短运行/验证命令。
+6. `06_backtests/README.md`: 保留研究的当前结论和证据链接。
+7. `07_market_timing/`: 金手指、银手指和大盘阶段研究。
 
-- `01_project/`: 项目结构、官方文档、examples、已安装插件。
-- `02_source/`: 核心源码入口和对象模型。
-- `03_data/`: Datafeed、Database、DataManager、历史数据/实时行情路径。
-- `04_a_share/`: A 股相关网关、数据源、策略/选股能力边界。
-- `05_runtime/`: 运行方式、调试方式、环境状态。
-- `06_backtests/`: 已执行回测的样本范围、参数、指标和限制；先读 `06_backtests/README.md` 和 `06_backtests/strategy_optimization_ledger.md`，旧报告按 `06_backtests/archive_index.md` 导航。
-- `07_market_timing/`: 大盘择时金手指/银手指设计、使用边界和验证入口。
-- `09_decisions/`: 和用户确认过的决策、取舍、待办。
+需求合同位于 `requirements/`。低吸研究先读
+`requirements/alphaagent_low_suction_research_reset_design.md`。
 
-需求分析文档单独放在项目根目录的 `requirements/`，例如 `requirements/alphaagent_requirement_map.md`。
+## Typed Folders
 
-## 建议读取顺序
+- `01_project/`: 项目结构、文档、插件和安装状态。
+- `02_source/`: vn.py 与 AlphaAgent 核心入口。
+- `03_data/`: Datafeed、数据库、同步和历史/实时数据路径。
+- `04_a_share/`: A 股插件能力和限制。
+- `05_runtime/`: 运行、调试和部署。
+- `06_backtests/`: 打板/择时等保留产品的验证证据。
+- `07_market_timing/`: 大盘择时设计和使用边界。
+- `09_decisions/`: 当前决策和未解决风险。
 
-处理普通项目问题：
+## Maintenance
 
-1. `memory/09_decisions/decisions.md`
-2. 对应 typed folder 的 overview，例如 `01_project/structure.md` 或 `03_data/data_flow.md`
-3. 具体源码、requirements 或证据文件
-
-处理量化策略问题：
-
-1. `memory/06_backtests/README.md`
-2. `memory/06_backtests/strategy_optimization_ledger.md`
-3. 对应日期实验报告或审计矩阵
-4. 需要实现新功能时再读对应 `requirements/` 计划；当前量化策略状态以 memory 台账为准
-
-不要把日期报告当成当前状态入口；日期报告只是证据。
-
-## 维护原则
-
-- 只记录已从本地源码、官方文档、实际命令输出验证过的事实。
-- 不把猜测写成结论；不确定内容必须标注“待验证”。
-- 每次新增教程或实现前，先查这个目录和 `AGENTS.md`。
-- 新发现按类型放入对应文件夹，不在根目录散放笔记。
-- 内容要短、可索引、能指向具体文件路径。
-
-## 维护方式
-
-`memory/` 是项目地图，不是流水日记。每次完成任务后，只有当任务改变了持久事实、架构、运行命令、验证结论、用户决策或已知限制时，才更新记忆。
-
-正确维护方式：
-
-- 优先改写已有段落，让文件反映“现在真实状态”。
-- 把重复、过期、冲突的旧记录合并或压缩。
-- 把长报告和回测结果放到专门目录，例如 `memory/06_backtests/`，概要文件只保留结论和链接；CSV、截图、原始 JSON 和长日志不作为长期记忆保留。
-- 每条重要记忆最好能回答：现在是什么状态、如何验证、证据在哪里、下一步风险是什么。
-- 对临时尝试、失败但无长期价值的过程，不为了“记录做过”而追加。
-
-不推荐维护方式：
-
-- 按日期无限追加“今天运行了什么”的长列表。
-- 在同一文件保留多个互相矛盾的旧状态。
-- 把命令大段输出、接口原始响应或 CSV 内容粘到 overview 文件。
-- 新建零散笔记文件代替更新已有项目地图。
-
-当某个 memory 文件开始膨胀时，先重写为四段：
-
-1. 当前状态。
-2. 验证/运行入口。
-3. 证据文件链接。
-4. 未解决问题和下一步。
-
-避免把日期作为主要组织方式。日期可以出现在证据文件名里，但 overview 文件必须围绕当前结论、验证入口和风险组织。
+- 优先改写现有总览，保持“当前状态、验证入口、证据、风险”四段结构。
+- 长表、原始输出和详细回放只放专门证据文件。
+- 删除已经失去产品对象的规则、脚本和报告，不在总览保留兼容说明。
+- 瞬时实验、失败命令和聊天过程不写入长期记忆。

@@ -39,7 +39,6 @@ function status(): LimitUpEvidenceImportStatus {
         coverage: { trade_days: 0, strict_trade_days: 0, rows: 0 },
       },
     },
-    csv_import_available: true,
     limitations: ["Tushare竞价没有未匹配量，只能形成部分竞价证据。"],
   };
 }
@@ -48,7 +47,7 @@ function result(): LimitUpEvidenceImportResult {
   return {
     status: "partial",
     dataset: "events",
-    provider: "csv",
+    provider: "tushare",
     dry_run: false,
     date_count: 2,
     accepted_date_count: 1,
@@ -113,7 +112,7 @@ function thsBatch(): SyncBatchStatus {
 }
 
 describe("LimitUpEvidenceBackfillView", () => {
-  it("keeps CSV available when Tushare is not configured", () => {
+  it("keeps autonomous providers visible without asking the user for CSV", () => {
     const html = renderToStaticMarkup(
       <LimitUpEvidenceBackfillView
         status={status()}
@@ -124,7 +123,6 @@ describe("LimitUpEvidenceBackfillView", () => {
         maxDates={20}
         dryRun
         onlyMissing
-        fileName=""
         isRunning={false}
         thsBatch={undefined}
         onDatasetChange={() => undefined}
@@ -135,18 +133,15 @@ describe("LimitUpEvidenceBackfillView", () => {
         onOnlyMissingChange={() => undefined}
         onRunTushare={() => undefined}
         onRunThs={() => undefined}
-        onFileChange={() => undefined}
-        onRunCsv={() => undefined}
-        onDownloadTemplate={() => undefined}
       />,
     );
 
     expect(html).toContain("打板历史证据");
     expect(html).toContain("Tushare 未配置");
-    expect(html).toContain("CSV 文件");
+    expect(html).not.toContain("CSV 文件");
     expect(html).toContain("涨停/炸板路径");
     expect(html).toContain("22 日");
-    expect(html).toContain("下载模板");
+    expect(html).not.toContain("下载模板");
     expect(html).toContain("同花顺近252日");
     expect(html).toContain("Tushare竞价没有未匹配量");
   });
@@ -162,7 +157,6 @@ describe("LimitUpEvidenceBackfillView", () => {
         maxDates={20}
         dryRun={false}
         onlyMissing
-        fileName="limit_list_d.csv"
         isRunning={false}
         thsBatch={undefined}
         onDatasetChange={() => undefined}
@@ -173,9 +167,6 @@ describe("LimitUpEvidenceBackfillView", () => {
         onOnlyMissingChange={() => undefined}
         onRunTushare={() => undefined}
         onRunThs={() => undefined}
-        onFileChange={() => undefined}
-        onRunCsv={() => undefined}
-        onDownloadTemplate={() => undefined}
       />,
     );
 
@@ -201,7 +192,6 @@ describe("LimitUpEvidenceBackfillView", () => {
         maxDates={20}
         dryRun
         onlyMissing
-        fileName=""
         isRunning
         thsBatch={thsBatch()}
         onDatasetChange={() => undefined}
@@ -212,9 +202,6 @@ describe("LimitUpEvidenceBackfillView", () => {
         onOnlyMissingChange={() => undefined}
         onRunTushare={() => undefined}
         onRunThs={() => undefined}
-        onFileChange={() => undefined}
-        onRunCsv={() => undefined}
-        onDownloadTemplate={() => undefined}
       />,
     );
 
@@ -250,7 +237,6 @@ describe("LimitUpEvidenceBackfillView", () => {
         maxDates={20}
         dryRun
         onlyMissing
-        fileName=""
         isRunning={false}
         thsBatch={batch}
         onDatasetChange={() => undefined}
@@ -261,9 +247,6 @@ describe("LimitUpEvidenceBackfillView", () => {
         onOnlyMissingChange={() => undefined}
         onRunTushare={() => undefined}
         onRunThs={() => undefined}
-        onFileChange={() => undefined}
-        onRunCsv={() => undefined}
-        onDownloadTemplate={() => undefined}
       />,
     );
 

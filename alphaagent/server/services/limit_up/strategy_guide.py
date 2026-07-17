@@ -6,8 +6,13 @@ from alphaagent.server.services.limit_up.versions import (
     HISTORY_STRATEGY_VERSION,
     LIVE_STRATEGY_VERSION,
 )
+from alphaagent.server.services.limit_up.radar_contract import (
+    CAPTURE_MIN_CHANGE_PCT,
+    FORMAL_MIN_CHANGE_PCT,
+    PRODUCTION_RADAR_CONTRACT,
+)
 
-GUIDE_VERSION = "limit-up-strategy-guide-v1"
+GUIDE_VERSION = "limit-up-strategy-guide-v2"
 
 
 def get_limit_up_strategy_guide() -> dict[str, object]:
@@ -52,10 +57,7 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
             {
                 "order": 3,
                 "title": "确认首板动能",
-                "rule": (
-                    "股票进入 5% 雷达后，点时承接与动能分至少 55；"
-                    "未封板、已封板和回封状态使用同一套质量检查。"
-                ),
+                "rule": _radar_momentum_rule(),
                 "timing": "盘中实时",
             },
             {
@@ -80,8 +82,11 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                 "order": 6,
                 "title": "首次信号成交与事后结算",
                 "rule": (
-                    "同股同日只取第一次正式出现的快照，最多两仓按真实到达顺序；"
-                    "D+1 以官方收盘价结算，缺价直接剔除。"
+                    "同股同日只取第一次规则通过的快照，买价取同一买入窗口内"
+                    "20至60秒后的首条保存报价；涨停价缺少L2排队证据时不算确定"
+                    "成交。买点后即使跌回3%以下，也只继续跟踪该股至60秒用于成交"
+                    "计价，不重新参与推荐。最多两仓按真实到达顺序，D+1以官方"
+                    "收盘价结算，缺价直接剔除。"
                 ),
                 "timing": "先选股，后结算",
             },
@@ -134,6 +139,19 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                 ],
             },
         ],
+        "radar_evidence": {
+            "status": "collecting",
+            "capture_min_change_pct": CAPTURE_MIN_CHANGE_PCT,
+            "formal_min_change_pct": FORMAL_MIN_CHANGE_PCT,
+            "complete_trade_days": 0,
+            "target_trade_days": 60,
+            "minute_coverage_pct": None,
+            "minute_sessions": ["09:31-11:30", "13:01-15:00"],
+            "minute_slot_count": 240,
+            "entry_fill_delay_seconds": [20, 60],
+            "entry_fill_same_window": True,
+            "selected_contract": PRODUCTION_RADAR_CONTRACT,
+        },
         "dataset": {
             "name": "v15保存快照点时反事实重放",
             "kind": "saved_point_in_time_counterfactual_replay",
@@ -185,3 +203,15 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
             ),
         },
     }
+
+
+def _radar_momentum_rule() -> str:
+    if FORMAL_MIN_CHANGE_PCT <= CAPTURE_MIN_CHANGE_PCT:
+        return (
+            "股票从 3% 开始进入正式同帧评估，点时承接与动能分至少 55；"
+            "未封板、已封板和回封状态使用同一套质量检查。"
+        )
+    return (
+        "股票从 3% 开始内部采集和预计算；当前正式推荐仍从 5% 开始，"
+        "点时承接与动能分至少 55；未封板、已封板和回封状态使用同一套质量检查。"
+    )

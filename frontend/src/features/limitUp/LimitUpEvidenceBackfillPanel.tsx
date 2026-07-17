@@ -4,8 +4,6 @@ import {
   fetchLatestSyncBatch,
   fetchLimitUpThsEvidenceBatch,
   fetchLimitUpEvidenceImportStatus,
-  fetchLimitUpEvidenceTemplate,
-  importLimitUpEvidenceFromCsv,
   importLimitUpEvidenceFromTushare,
   startLimitUpThsEvidenceImport,
 } from "@/api/dataSync";
@@ -21,10 +19,8 @@ import {
   AlertTriangle,
   DatabaseZap,
   Download,
-  FileCheck2,
   Loader2,
   Play,
-  Upload,
 } from "lucide-react";
 import HistoricalMembershipBackfillPanel from "./HistoricalMembershipBackfillPanel";
 
@@ -38,7 +34,6 @@ interface ViewProps {
   maxDates: number;
   dryRun: boolean;
   onlyMissing: boolean;
-  fileName: string;
   isRunning: boolean;
   thsBatch?: SyncBatchStatus;
   error?: string;
@@ -50,9 +45,6 @@ interface ViewProps {
   onOnlyMissingChange: (value: boolean) => void;
   onRunTushare: () => void;
   onRunThs: () => void;
-  onFileChange: (file: File | null) => void;
-  onRunCsv: () => void;
-  onDownloadTemplate: () => void;
 }
 
 
@@ -64,8 +56,6 @@ export default function LimitUpEvidenceBackfillPanel() {
   const [maxDates, setMaxDates] = useState(20);
   const [dryRun, setDryRun] = useState(true);
   const [onlyMissing, setOnlyMissing] = useState(true);
-  const [fileName, setFileName] = useState("");
-  const [csvText, setCsvText] = useState("");
   const [result, setResult] = useState<LimitUpEvidenceImportResult>();
   const [thsBatchId, setThsBatchId] = useState("");
 
@@ -93,17 +83,6 @@ export default function LimitUpEvidenceBackfillPanel() {
       refreshCoverage();
     },
   });
-  const csvMutation = useMutation({
-    mutationFn: () => importLimitUpEvidenceFromCsv({ dataset, csv_text: csvText, dry_run: dryRun }),
-    onSuccess: (next) => {
-      setResult(next);
-      refreshCoverage();
-    },
-  });
-  const templateMutation = useMutation({
-    mutationFn: () => fetchLimitUpEvidenceTemplate(dataset),
-    onSuccess: (content) => downloadCsv(content, `alphaagent_limit_up_${dataset}_template.csv`),
-  });
   const thsMutation = useMutation({
     mutationFn: () => startLimitUpThsEvidenceImport({ max_dates: 252, only_missing: true }),
     onSuccess: (batch) => setThsBatchId(batch.id),
@@ -127,16 +106,12 @@ export default function LimitUpEvidenceBackfillPanel() {
   const thsBatchStatus = thsBatch?.status;
   const thsBatchRunning = thsBatchStatus === "running";
   const isRunning = tushareMutation.isPending
-    || csvMutation.isPending
-    || templateMutation.isPending
     || thsMutation.isPending
     || thsBatchRunning;
   const error = thsMutation.error
     ?? thsBatchQuery.error
     ?? latestBatchQuery.error
     ?? tushareMutation.error
-    ?? csvMutation.error
-    ?? templateMutation.error
     ?? statusQuery.error;
 
   useEffect(() => {
@@ -155,14 +130,6 @@ export default function LimitUpEvidenceBackfillPanel() {
   const runTushare = () => {
     if (confirmWrite()) tushareMutation.mutate();
   };
-  const runCsv = () => {
-    if (csvText && confirmWrite()) csvMutation.mutate();
-  };
-  const readFile = (file: File | null) => {
-    setFileName(file?.name ?? "");
-    setCsvText("");
-    if (file) void file.text().then(setCsvText);
-  };
 
   if (statusQuery.isLoading) return <LoadingState rows={4} />;
   return (
@@ -176,7 +143,6 @@ export default function LimitUpEvidenceBackfillPanel() {
         maxDates={maxDates}
         dryRun={dryRun}
         onlyMissing={onlyMissing}
-        fileName={fileName}
         isRunning={isRunning}
         thsBatch={thsBatch}
         error={error instanceof Error ? error.message : undefined}
@@ -188,9 +154,6 @@ export default function LimitUpEvidenceBackfillPanel() {
         onOnlyMissingChange={setOnlyMissing}
         onRunTushare={runTushare}
         onRunThs={() => thsMutation.mutate()}
-        onFileChange={readFile}
-        onRunCsv={runCsv}
-        onDownloadTemplate={() => templateMutation.mutate()}
       />
       <HistoricalMembershipBackfillPanel />
     </div>
@@ -315,21 +278,6 @@ export function LimitUpEvidenceBackfillView(props: ViewProps) {
             </div>
           </div>
 
-          <div className="grid gap-3 border-t pt-4 lg:grid-cols-[minmax(220px,1fr)_auto_auto] lg:items-end">
-            <Field label="CSV 文件">
-              <label className="flex h-9 cursor-pointer items-center gap-2 border bg-background px-3 text-sm text-muted-foreground">
-                <Upload size={15} />
-                <span className="min-w-0 truncate">{props.fileName || "选择完整供应商导出文件"}</span>
-                <input className="sr-only" type="file" accept=".csv,text/csv" onChange={(event) => props.onFileChange(event.target.files?.[0] ?? null)} disabled={props.isRunning} />
-              </label>
-            </Field>
-            <button className="inline-flex h-9 items-center justify-center gap-2 border px-3 text-sm hover:bg-muted disabled:opacity-50" onClick={props.onDownloadTemplate} disabled={props.isRunning}>
-              <Download size={15} /> 下载模板
-            </button>
-            <button className="inline-flex h-9 items-center justify-center gap-2 border px-3 text-sm font-medium hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50" onClick={props.onRunCsv} disabled={props.isRunning || !props.fileName}>
-              <FileCheck2 size={15} /> {props.dryRun ? "预检查 CSV" : "写入 CSV"}
-            </button>
-          </div>
           {props.error ? <div className="text-sm text-destructive">{props.error}</div> : null}
         </div>
       </section>
@@ -446,14 +394,4 @@ function shanghaiToday(): string {
     month: "2-digit",
     day: "2-digit",
   }).format(new Date());
-}
-
-
-function downloadCsv(content: string, filename: string) {
-  const url = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8" }));
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
 }

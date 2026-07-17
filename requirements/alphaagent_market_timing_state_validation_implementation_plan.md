@@ -13,7 +13,7 @@
 ### Task 1: 固定状态评估指标
 
 **Files:**
-- Modify: `tests/alphaagent/services/quant/test_market_timing_backtest.py`
+- Modify: `tests/alphaagent/services/market_timing/test_market_timing_backtest.py`
 
 - [x] **Step 1: 添加逐日状态桶测试**
 
@@ -33,7 +33,7 @@
 - [x] **Step 4: 运行测试确认缺少实现**
 
 ```bash
-uv run --group server pytest tests/alphaagent/services/quant/test_market_timing_backtest.py -q
+uv run --group server pytest tests/alphaagent/services/market_timing/test_market_timing_backtest.py -q
 ```
 
 Expected: 新测试因缺少状态评估接口失败。
@@ -41,7 +41,7 @@ Expected: 新测试因缺少状态评估接口失败。
 ### Task 2: 实现纯状态评估
 
 **Files:**
-- Modify: `alphaagent/server/services/quant/market_timing/backtest.py`
+- Modify: `alphaagent/server/services/market_timing/backtest.py`
 
 - [x] **Step 1: 增加 `STATE_HORIZONS` 和 `StateBucketStat`**
 
@@ -65,8 +65,8 @@ Expected: PASS。
 ### Task 3: 固定研究迟滞版本的因果行为
 
 **Files:**
-- Modify: `tests/alphaagent/services/quant/test_market_timing_backtest.py`
-- Modify: `alphaagent/server/services/quant/market_timing/backtest.py`
+- Modify: `tests/alphaagent/services/market_timing/test_market_timing_backtest.py`
+- Modify: `alphaagent/server/services/market_timing/backtest.py`
 
 - [x] **Step 1: 添加波动冲击与趋势破位测试**
 
@@ -87,9 +87,9 @@ Expected: PASS。
 
 ```bash
 uv run --group server pytest \
-  tests/alphaagent/services/quant/test_market_timing_backtest.py \
-  tests/alphaagent/services/quant/test_market_timing_no_lookahead.py \
-  tests/alphaagent/services/quant/test_market_timing_intraday.py -q
+  tests/alphaagent/services/market_timing/test_market_timing_backtest.py \
+  tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py \
+  tests/alphaagent/services/market_timing/test_market_timing_intraday.py -q
 ```
 
 Expected: PASS。
@@ -137,9 +137,9 @@ Expected: 事件报告仍为 v9 的 65 个事件，随后出现三版本状态�
 
 ```bash
 uv run --group server pytest \
-  tests/alphaagent/services/quant/test_market_timing_backtest.py \
-  tests/alphaagent/services/quant/test_market_timing_no_lookahead.py \
-  tests/alphaagent/services/quant/test_market_timing_intraday.py -q
+  tests/alphaagent/services/market_timing/test_market_timing_backtest.py \
+  tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py \
+  tests/alphaagent/services/market_timing/test_market_timing_intraday.py -q
 pnpm --dir frontend test
 pnpm --dir frontend run build
 git diff --check

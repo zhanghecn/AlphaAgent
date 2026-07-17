@@ -4,7 +4,7 @@ from datetime import date
 
 import pytest
 
-from alphaagent.server.services.backtest import ledger
+from alphaagent.server.services.execution import cash_ledger
 from alphaagent.server.services.limit_up.cash_backtest import (
     CashBacktestConfig,
     simulate_limit_up_account,
@@ -17,7 +17,7 @@ def test_default_account_uses_four_positions() -> None:
 
 
 def test_buy_execution_applies_minimum_commission_transfer_fee_and_limit_cap() -> None:
-    fill = ledger.calculate_buy_execution(
+    fill = cash_ledger.calculate_buy_execution(
         raw_price=10.0,
         cash=10_000,
         target_cash=5_000,
@@ -36,7 +36,7 @@ def test_buy_execution_applies_minimum_commission_transfer_fee_and_limit_cap() -
 
 
 def test_sell_execution_applies_minimum_commission_transfer_fee_and_floor() -> None:
-    fill = ledger.calculate_sell_execution(
+    fill = cash_ledger.calculate_sell_execution(
         raw_price=9.0,
         volume=500,
         cost_price=10.0,

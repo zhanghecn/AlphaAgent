@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import csv
-import io
 from collections import defaultdict
 from datetime import date, datetime, timezone
 from typing import Any, Mapping, Sequence
@@ -133,59 +131,6 @@ def expand_membership_intervals(
         "conflict_count": conflict_count,
         "conflicts": conflicts,
     }
-
-
-def import_membership_csv(
-    *,
-    csv_text: str,
-    start_date: date,
-    end_date: date,
-    dry_run: bool = True,
-    max_dates: int = 20,
-    only_missing: bool = False,
-    eligible_stocks: Mapping[str, str] | None = None,
-    trade_dates: Sequence[date] | None = None,
-    expected_symbols: Mapping[date, set[str]] | None = None,
-) -> dict[str, Any]:
-    """Audit and optionally persist a complete interval CSV export."""
-
-    _validate_date_range(start_date, end_date)
-    source_rows = _read_csv_rows(csv_text)
-    if eligible_stocks is None:
-        _require_database()
-        eligible_stocks = load_eligible_stocks()
-    dates = _resolve_trade_dates(
-        start_date=start_date,
-        end_date=end_date,
-        max_dates=max_dates,
-        only_missing=only_missing,
-        trade_dates=trade_dates,
-    )
-    expected = (
-        expected_symbols
-        if expected_symbols is not None
-        else load_expected_symbols_by_date(dates)
-    )
-    normalized = normalize_membership_intervals(
-        source_rows,
-        eligible_stocks=eligible_stocks,
-    )
-    result = _import_normalized_intervals(
-        normalized,
-        trade_dates=dates,
-        expected_symbols=expected,
-        dry_run=dry_run,
-        provider="csv",
-    )
-    result.update(
-        {
-            "rows_read": len(source_rows),
-            "requested_start": start_date.isoformat(),
-            "requested_end": end_date.isoformat(),
-            "candidate_date_count": len(dates),
-        }
-    )
-    return result
 
 
 def import_tushare_memberships(
@@ -351,35 +296,12 @@ def historical_membership_status() -> dict[str, Any]:
             "minimum_coverage_pct": MIN_MEMBERSHIP_COVERAGE_PCT,
             "coverage": dict(coverage),
         },
-        "csv_import_available": True,
         "limitations": [
             "有效区间按 in_date <= 交易日 < out_date 展开。",
             "覆盖不足90%的日期整日拒绝写入，旧行业快照保持不变。",
             "这里只补行业归属；逐日概念题材、Tick/L2和严格竞价仍是独立门禁。",
         ],
     }
-
-
-def membership_csv_template() -> str:
-    """Return a UTF-8-BOM interval CSV template."""
-
-    buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=MEMBERSHIP_FIELDS, lineterminator="\n")
-    writer.writeheader()
-    writer.writerow(
-        {
-            "ts_code": "600000.SH",
-            "name": "浦发银行",
-            "l1_code": "801780.SI",
-            "l1_name": "银行",
-            "l2_code": "851911.SI",
-            "l2_name": "股份制银行Ⅱ",
-            "in_date": "20210101",
-            "out_date": "",
-            "is_new": "Y",
-        }
-    )
-    return "\ufeff" + buffer.getvalue()
 
 
 def replace_industry_membership_snapshot(
@@ -691,21 +613,6 @@ def _query_tushare_api(
     response_fields = data.get("fields") or []
     items = data.get("items") or []
     return [dict(zip(response_fields, item, strict=False)) for item in items]
-
-
-def _read_csv_rows(csv_text: str) -> list[dict[str, Any]]:
-    text = str(csv_text or "").lstrip("\ufeff").strip()
-    if not text:
-        raise HistoricalMembershipImportError("csv_text is empty")
-    reader = csv.DictReader(io.StringIO(text))
-    if not reader.fieldnames:
-        raise HistoricalMembershipImportError("CSV header is missing")
-    missing = [field for field in MEMBERSHIP_FIELDS if field not in reader.fieldnames]
-    if missing:
-        raise HistoricalMembershipImportError(
-            f"CSV missing required columns: {', '.join(missing)}"
-        )
-    return [dict(row) for row in reader]
 
 
 def _eligible_main_board_condition():

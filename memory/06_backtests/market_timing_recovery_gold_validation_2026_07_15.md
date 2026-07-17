@@ -209,12 +209,12 @@ docker compose run --rm -T \
   -v /root/project/ai/vnpy:/workspace -w /workspace \
   alphaagent-api python - < scripts/market_timing_eval.py
 uv run --group server pytest \
-  tests/alphaagent/services/quant/test_market_timing_backtest.py \
-  tests/alphaagent/services/quant/test_market_timing_no_lookahead.py \
-  tests/alphaagent/services/quant/test_market_timing_intraday.py -q
+  tests/alphaagent/services/market_timing/test_market_timing_backtest.py \
+  tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py \
+  tests/alphaagent/services/market_timing/test_market_timing_intraday.py -q
 uvx ruff check --ignore E702 \
-  alphaagent/server/services/quant/market_timing/backtest.py \
-  tests/alphaagent/services/quant/test_market_timing_backtest.py \
+  alphaagent/server/services/market_timing/backtest.py \
+  tests/alphaagent/services/market_timing/test_market_timing_backtest.py \
   scripts/market_timing_eval.py
 pnpm --dir frontend test
 pnpm --dir frontend run build

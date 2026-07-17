@@ -5,7 +5,10 @@ import {
   TriangleAlert,
 } from "lucide-react";
 
-import type { LimitUpStrategyGuide } from "@/api/limitUp";
+import type {
+  LimitUpRadarValidation,
+  LimitUpStrategyGuide,
+} from "@/api/limitUp";
 import { Button } from "@/components/ui/button";
 import { Modal, ModalBody, ModalHeader } from "@/components/ui/modal";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -15,6 +18,9 @@ interface StrategyGuideDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   guide?: LimitUpStrategyGuide;
+  radarValidation?: LimitUpRadarValidation;
+  radarValidationLoading?: boolean;
+  radarValidationError?: string | null;
   loading: boolean;
   error: string | null;
   onRetry: () => void;
@@ -25,6 +31,9 @@ export function StrategyGuideDialog({
   open,
   onOpenChange,
   guide,
+  radarValidation,
+  radarValidationLoading = false,
+  radarValidationError = null,
   loading,
   error,
   onRetry,
@@ -63,7 +72,12 @@ export function StrategyGuideDialog({
               <RulesView guide={guide} />
             </TabsContent>
             <TabsContent value="dataset" className="m-0">
-              <DatasetView guide={guide} />
+              <DatasetView
+                guide={guide}
+                radarValidation={radarValidation}
+                radarValidationLoading={radarValidationLoading}
+                radarValidationError={radarValidationError}
+              />
             </TabsContent>
           </Tabs>
         ) : null}
@@ -148,8 +162,40 @@ function RulesView({ guide }: { guide: LimitUpStrategyGuide }) {
   );
 }
 
-function DatasetView({ guide }: { guide: LimitUpStrategyGuide }) {
+function DatasetView({
+  guide,
+  radarValidation,
+  radarValidationLoading,
+  radarValidationError,
+}: {
+  guide: LimitUpStrategyGuide;
+  radarValidation?: LimitUpRadarValidation;
+  radarValidationLoading: boolean;
+  radarValidationError: string | null;
+}) {
   const { dataset, field_groups: groups, historical_reference: history } = guide;
+  const radar = {
+    ...guide.radar_evidence,
+    status: radarValidation?.status ?? guide.radar_evidence.status,
+    complete_trade_days:
+      radarValidation?.coverage.complete_trade_days
+      ?? guide.radar_evidence.complete_trade_days,
+    minute_coverage_pct:
+      radarValidation?.coverage.minute_pair_coverage_pct
+      ?? guide.radar_evidence.minute_coverage_pct,
+    selected_contract:
+      radarValidation?.acceptance.selected_contract
+      ?? guide.radar_evidence.selected_contract,
+    recommended_contract:
+      radarValidation?.acceptance.recommended_contract
+      ?? guide.radar_evidence.selected_contract,
+    activation_required:
+      radarValidation?.acceptance.activation_required ?? false,
+    production_contract_mismatch:
+      radarValidation?.acceptance.production_contract_mismatch ?? false,
+  };
+  const radarUnavailable = Boolean(radarValidationError) && !radarValidation;
+  const radarPending = radarValidationLoading && !radarValidation;
   return (
     <div className="px-4 py-5 sm:px-5">
       <section className="border-y bg-muted/20" aria-labelledby="evidence-scope-title">
@@ -168,6 +214,82 @@ function DatasetView({ guide }: { guide: LimitUpStrategyGuide }) {
             </p>
           </div>
         </div>
+      </section>
+
+      <section className="mt-5" aria-labelledby="radar-validation-title">
+        <h3 id="radar-validation-title" className="text-sm font-semibold">
+          3%提前雷达验证
+        </h3>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+          {radar.selected_contract === "formal_5pct"
+            ? "3%至5%仅保存同帧研究证据；达到固定样本门槛并正式发布前，页面仍只有5%正式推荐。"
+            : "3%同规则合同已经正式发布；页面仍只有一套正式推荐和一套执行口径。"}
+        </p>
+        <div className="mt-2 overflow-x-auto border-y">
+          <table className="w-full min-w-[720px] text-left text-xs">
+            <thead className="bg-muted/40 text-muted-foreground">
+              <tr>
+                <th className="px-3 py-2 font-medium">采集边界</th>
+                <th className="px-3 py-2 font-medium">正式边界</th>
+                <th className="px-3 py-2 font-medium">完整交易日</th>
+                <th className="px-3 py-2 font-medium">分钟覆盖</th>
+                <th className="px-3 py-2 font-medium">当前合同</th>
+                <th className="px-3 py-2 font-medium">验收建议</th>
+                <th className="px-3 py-2 font-medium">状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr className="border-t">
+                <td className="px-3 py-2 tabular-nums">
+                  {radar.capture_min_change_pct}% 开始采集
+                </td>
+                <td className="px-3 py-2 tabular-nums">
+                  {radar.formal_min_change_pct}% 正式推荐
+                </td>
+                <td className="px-3 py-2 tabular-nums">
+                  {radarUnavailable
+                    ? `-- / ${radar.target_trade_days} 日`
+                    : radarPending
+                      ? "读取中"
+                      : `${radar.complete_trade_days} / ${radar.target_trade_days} 日`}
+                </td>
+                <td className="px-3 py-2 tabular-nums">
+                  {radarUnavailable
+                    ? "读取失败"
+                    : radarPending
+                      ? "读取中"
+                      : radar.minute_coverage_pct == null
+                    ? "待补齐"
+                    : formatPct(radar.minute_coverage_pct, 4)}
+                </td>
+                <td className="px-3 py-2">
+                  {radar.selected_contract === "formal_5pct"
+                    ? "5%正式合同"
+                    : "3%同规则合同"}
+                </td>
+                <td className="px-3 py-2">
+                  {radar.recommended_contract === "early_3pct_same_rules"
+                    ? "建议3%合同"
+                    : "保持5%合同"}
+                </td>
+                <td className="px-3 py-2 text-muted-foreground">
+                  {radarUnavailable
+                    ? "读取失败"
+                    : radarPending
+                      ? "读取中"
+                      : radarStatusLabel(
+                          radar.status,
+                          radar.activation_required,
+                          radar.production_contract_mismatch,
+                        )}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
+          {`完整分钟分母：${radar.minute_sessions.join("、")}，共 ${radar.minute_slot_count} 个去重分钟槽位；成交报价只认${radar.entry_fill_same_window ? "同一买入窗口内 " : ""}${radar.entry_fill_delay_seconds[0]}-${radar.entry_fill_delay_seconds[1]} 秒。`}
+        </p>
       </section>
 
       <section aria-labelledby="dataset-title">
@@ -294,7 +416,9 @@ function DatasetView({ guide }: { guide: LimitUpStrategyGuide }) {
         <p className="mt-2 text-muted-foreground">买入：{dataset.entry}</p>
         <p className="text-muted-foreground">卖出：{dataset.exit}</p>
         <p className="text-muted-foreground">费用：{dataset.costs}</p>
-        <p className="mt-2 font-mono text-[11px] text-muted-foreground">{dataset.report}</p>
+        <p className="mt-2 break-all font-mono text-[11px] text-muted-foreground">
+          {dataset.report}
+        </p>
         <ul className="mt-3 space-y-1 text-muted-foreground">
           {dataset.limitations.map((item) => <li key={item}>· {item}</li>)}
         </ul>
@@ -330,6 +454,20 @@ function DatasetMetric({
       <dd className={cn("mt-1 text-sm font-semibold tabular-nums", positive && "text-rise")}>{value}</dd>
     </div>
   );
+}
+
+function radarStatusLabel(
+  status: LimitUpStrategyGuide["radar_evidence"]["status"],
+  activationRequired: boolean,
+  productionMismatch: boolean,
+) {
+  if (status === "accepted" && activationRequired) return "已通过，待发布";
+  if (productionMismatch) return "生产与验收不一致";
+  if (status === "accepted") return "已通过";
+  if (status === "rejected") return "未通过";
+  if (status === "ready_for_review") return "待最终复核";
+  if (status === "process_ready") return "过程检查可用";
+  return "采集中";
 }
 
 function GuideLoading() {

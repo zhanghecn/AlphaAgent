@@ -1,0 +1,664 @@
+{
+  "conditional_trade": {
+    "selected_rule_id": "prelaunch_leaf_6",
+    "signals": 15666,
+    "status": "completed_reused_history_diagnostic",
+    "trade_ledger_fingerprint": {
+      "algorithm": "sha256",
+      "columns": [
+        "block",
+        "double_cost_net_return_pct",
+        "entry_date",
+        "event_id",
+        "market_regime",
+        "net_return_pct",
+        "normal_status",
+        "stressed_status",
+        "verified_first_explosion",
+        "vt_symbol"
+      ],
+      "digest": "sha256:e82127d4b97beceba2967ac6cef0ca418743ed6317f646d08ffd227eee22eb44",
+      "rows": 15666
+    },
+    "trade_metrics": [
+      {
+        "closed_trades": 15394,
+        "compound_return_pct": 11.175337126157059,
+        "double_cost_mean_net_return_pct": -0.2859751459262497,
+        "maximum_drawdown_pct": -10.42721297973368,
+        "mean_net_return_pct": 0.022799852658548,
+        "median_net_return_pct": -0.5138137038949775,
+        "profit_factor": 1.0179037588700752,
+        "segment": "all",
+        "signals": 15666,
+        "source_days": 95,
+        "win_rate_pct": 42.84136676627258
+      },
+      {
+        "closed_trades": 10425,
+        "compound_return_pct": 9.639118068036122,
+        "double_cost_mean_net_return_pct": -0.3237245710522096,
+        "maximum_drawdown_pct": -9.632611452175144,
+        "mean_net_return_pct": -0.015185363385592874,
+        "median_net_return_pct": -0.6106273680000052,
+        "profit_factor": 0.9882264032234054,
+        "segment": "development",
+        "signals": 10438,
+        "source_days": 58,
+        "win_rate_pct": 41.05515587529976
+      },
+      {
+        "closed_trades": 4969,
+        "compound_return_pct": 1.4011596273217464,
+        "double_cost_mean_net_return_pct": -0.20677656332650496,
+        "maximum_drawdown_pct": -6.85979638011327,
+        "mean_net_return_pct": 0.10249312640782723,
+        "median_net_return_pct": -0.24294990653999093,
+        "profit_factor": 1.082706378807557,
+        "segment": "validation",
+        "signals": 5228,
+        "source_days": 37,
+        "win_rate_pct": 46.58885087542765
+      },
+      {
+        "closed_trades": 4083,
+        "compound_return_pct": 5.1798809765744025,
+        "double_cost_mean_net_return_pct": -0.16389381904351757,
+        "maximum_drawdown_pct": -2.660750605725759,
+        "mean_net_return_pct": 0.1459014715470155,
+        "median_net_return_pct": -0.46673498666999214,
+        "profit_factor": 1.1355598677541014,
+        "segment": "block_1",
+        "signals": 4092,
+        "source_days": 20,
+        "win_rate_pct": 42.934117070781284
+      },
+      {
+        "closed_trades": 3326,
+        "compound_return_pct": 7.44900678303968,
+        "double_cost_mean_net_return_pct": -0.07900970998657891,
+        "maximum_drawdown_pct": -3.7004328065703973,
+        "mean_net_return_pct": 0.22949448616544701,
+        "median_net_return_pct": -0.4630911893149847,
+        "profit_factor": 1.1904983651264487,
+        "segment": "block_2",
+        "signals": 3330,
+        "source_days": 19,
+        "win_rate_pct": 43.235117257967524
+      },
+      {
+        "closed_trades": 3016,
+        "compound_return_pct": -2.9868842358031222,
+        "double_cost_mean_net_return_pct": -0.8099681348306502,
+        "maximum_drawdown_pct": -9.632611452175155,
+        "mean_net_return_pct": -0.5030907767266402,
+        "median_net_return_pct": -1.086101416834978,
+        "profit_factor": 0.6992205734887618,
+        "segment": "block_3",
+        "signals": 3016,
+        "source_days": 19,
+        "win_rate_pct": 36.10742705570292
+      },
+      {
+        "closed_trades": 1606,
+        "compound_return_pct": -3.9086154245062343,
+        "double_cost_mean_net_return_pct": -0.6787846127762894,
+        "maximum_drawdown_pct": -6.85979638011327,
+        "mean_net_return_pct": -0.3719513596954249,
+        "median_net_return_pct": -0.771448341219988,
+        "profit_factor": 0.7945998719025209,
+        "segment": "block_4",
+        "signals": 1607,
+        "source_days": 19,
+        "win_rate_pct": 41.78082191780822
+      },
+      {
+        "closed_trades": 3363,
+        "compound_return_pct": 5.5257555870228625,
+        "double_cost_mean_net_return_pct": 0.0186307894586137,
+        "maximum_drawdown_pct": -1.7363115746687918,
+        "mean_net_return_pct": 0.3290639990458953,
+        "median_net_return_pct": -0.07038772559997408,
+        "profit_factor": 1.3405531844401835,
+        "segment": "block_5",
+        "signals": 3621,
+        "source_days": 18,
+        "win_rate_pct": 48.88492417484389
+      }
+    ],
+    "trade_outcomes_read": true
+  },
+  "coverage": {
+    "current_membership_rows_read": 0,
+    "eligible_universe_dates": 96,
+    "event_rows_with_reason": 4945,
+    "exact_reason_relations": 2947,
+    "historical_security_state_rows_read": 0,
+    "matched_concepts": 191,
+    "stock_bar_end": "2025-11-17",
+    "stock_bar_rows": 589160,
+    "stock_bar_start": "2025-01-23",
+    "target_dates": 96,
+    "target_end": "2025-11-17",
+    "target_start": "2025-06-27",
+    "universe_rows": 217819,
+    "universe_symbols": 3016,
+    "verified_positives": 576
+  },
+  "development_base_rate": 0.003401180986568729,
+  "discovery_end": "2025-11-17",
+  "discovery_start": "2023-03-28",
+  "evidence_level": "full_main_board_prelaunch_first_explosion_proxy",
+  "formal_metrics": null,
+  "formal_rule_selected": false,
+  "frozen_contract": {
+    "conditional_trade": "D official open to first sellable D+1 official close",
+    "denominator": "all eligible main-board stock-days on observed event dates",
+    "development_blocks": [
+      1,
+      2,
+      3
+    ],
+    "feature_cutoff": "D-1 completed daily bars",
+    "features": [
+      "return_1d_pct",
+      "return_3d_pct",
+      "return_5d_pct",
+      "return_10d_pct",
+      "distance_to_ma5_pct",
+      "distance_to_ma10_pct",
+      "distance_to_ma20_pct",
+      "distance_from_20d_high_pct",
+      "volume_ratio_1d_to_prior5",
+      "volume_ratio_5d_to_20d",
+      "log_turnover_median_20d",
+      "volatility_10d_pct"
+    ],
+    "prior_strong_guard": "no >=5% daily return in prior 10 sessions",
+    "tree": {
+      "class_weight": "balanced",
+      "max_depth": 2,
+      "min_samples_leaf": 1000,
+      "random_state": 0
+    },
+    "validation_blocks": [
+      4,
+      5
+    ]
+  },
+  "input_fingerprints": {
+    "conditional_trade_ledger": {
+      "algorithm": "sha256",
+      "columns": [
+        "block",
+        "double_cost_net_return_pct",
+        "entry_date",
+        "event_id",
+        "market_regime",
+        "net_return_pct",
+        "normal_status",
+        "stressed_status",
+        "verified_first_explosion",
+        "vt_symbol"
+      ],
+      "digest": "sha256:e82127d4b97beceba2967ac6cef0ca418743ed6317f646d08ffd227eee22eb44",
+      "rows": 15666
+    },
+    "exact_reason_relations": {
+      "algorithm": "sha256",
+      "columns": [
+        "amount",
+        "concept_name",
+        "event_id",
+        "fd_amount",
+        "float_market_cap",
+        "limit_times",
+        "limit_up_suc_rate",
+        "sector_id",
+        "source_date",
+        "stock_name",
+        "vt_symbol"
+      ],
+      "digest": "sha256:149fece365a1b65a8571d2423c5a699657102f235e058f428baaccdf8f6e1dd4",
+      "rows": 2947
+    },
+    "prelaunch_features": {
+      "algorithm": "sha256",
+      "columns": [
+        "context_date",
+        "distance_from_20d_high_pct",
+        "distance_to_ma10_pct",
+        "distance_to_ma20_pct",
+        "distance_to_ma5_pct",
+        "entry_date",
+        "event_id",
+        "exchange",
+        "feature_cutoff_date",
+        "log_turnover_median_20d",
+        "prior_sessions",
+        "prior_strong_days_10d",
+        "return_10d_pct",
+        "return_1d_pct",
+        "return_3d_pct",
+        "return_5d_pct",
+        "security_evidence_level",
+        "stock_name",
+        "symbol",
+        "volatility_10d_pct",
+        "volume_ratio_1d_to_prior5",
+        "volume_ratio_5d_to_20d",
+        "vt_symbol"
+      ],
+      "digest": "sha256:feafa0ad3680b4f8f4321a58134a0d41124a1e2a6bbe7572ab5956a3cf078b3a",
+      "rows": 217819
+    },
+    "prelaunch_labels": {
+      "algorithm": "sha256",
+      "columns": [
+        "active_direction",
+        "block",
+        "context_date",
+        "d_return_pct",
+        "danger_state",
+        "distance_from_20d_high_pct",
+        "distance_to_ma10_pct",
+        "distance_to_ma20_pct",
+        "distance_to_ma5_pct",
+        "entry_date",
+        "event_id",
+        "exchange",
+        "feature_cutoff_date",
+        "label_status",
+        "log_turnover_median_20d",
+        "market_phase",
+        "market_regime",
+        "prior_sessions",
+        "prior_strong_days_10d",
+        "return_10d_pct",
+        "return_1d_pct",
+        "return_3d_pct",
+        "return_5d_pct",
+        "security_evidence_level",
+        "stock_name",
+        "symbol",
+        "timing_source_date",
+        "verified_concept_count",
+        "verified_concept_names",
+        "verified_cycle_ids",
+        "verified_first_explosion",
+        "volatility_10d_pct",
+        "volume_ratio_1d_to_prior5",
+        "volume_ratio_5d_to_20d",
+        "vt_symbol"
+      ],
+      "digest": "sha256:f250e9282100749c514001f6f9929287d77d6ce02f083899d49843e8aec53868",
+      "rows": 217819
+    },
+    "stock_bars": {
+      "algorithm": "sha256",
+      "columns": [
+        "change_pct",
+        "close_price",
+        "exchange",
+        "high_price",
+        "low_price",
+        "name",
+        "open_price",
+        "source",
+        "symbol",
+        "trade_date",
+        "turnover",
+        "turnover_rate",
+        "volume",
+        "vt_symbol"
+      ],
+      "digest": "sha256:34697d60e44967ef1e0b1adaf9a5df83dae83d26b97f2e9f6582250c4389be05",
+      "rows": 589160
+    }
+  },
+  "label_evaluation": {
+    "failed_gates": [],
+    "overall_conclusion": "validated_prelaunch_label_edge",
+    "selected_rule": {
+      "conditions": [
+        {
+          "feature": "distance_to_ma20_pct",
+          "operator": ">",
+          "threshold": 1.7586095333099365
+        },
+        {
+          "feature": "distance_to_ma20_pct",
+          "operator": ">",
+          "threshold": 4.812109470367432
+        }
+      ],
+      "rule_id": "prelaunch_leaf_6"
+    },
+    "trade_gate_passed": true,
+    "trade_outcomes_read": false,
+    "validation_metrics": {
+      "positive_recall": 0.256,
+      "precision": 0.00612088752869166,
+      "precision_lift": 4.172878347360367,
+      "rows": 5228,
+      "source_days": 38,
+      "universe_base_rate": 0.0014668262573634678,
+      "universe_coverage": 0.06134854138796968,
+      "universe_positives": 125,
+      "universe_rows": 85218,
+      "verified_positives": 32
+    }
+  },
+  "label_metrics": [
+    {
+      "positive_recall": 1.0,
+      "precision": 0.0026443974125305875,
+      "precision_lift": 1.0,
+      "rows": 217819,
+      "segment": "all",
+      "source_days": 96,
+      "universe_base_rate": 0.0026443974125305875,
+      "universe_coverage": 1.0,
+      "universe_positives": 576,
+      "universe_rows": 217819,
+      "verified_positives": 576
+    },
+    {
+      "positive_recall": 1.0,
+      "precision": 0.003401180986568729,
+      "precision_lift": 1.0,
+      "rows": 132601,
+      "segment": "development",
+      "source_days": 58,
+      "universe_base_rate": 0.003401180986568729,
+      "universe_coverage": 1.0,
+      "universe_positives": 451,
+      "universe_rows": 132601,
+      "verified_positives": 451
+    },
+    {
+      "positive_recall": 1.0,
+      "precision": 0.0014668262573634678,
+      "precision_lift": 1.0,
+      "rows": 85218,
+      "segment": "validation",
+      "source_days": 38,
+      "universe_base_rate": 0.0014668262573634678,
+      "universe_coverage": 1.0,
+      "universe_positives": 125,
+      "universe_rows": 85218,
+      "verified_positives": 125
+    },
+    {
+      "positive_recall": 1.0,
+      "precision": 0.003943518636305814,
+      "precision_lift": 1.0,
+      "rows": 47166,
+      "segment": "block_1",
+      "source_days": 20,
+      "universe_base_rate": 0.003943518636305814,
+      "universe_coverage": 1.0,
+      "universe_positives": 186,
+      "universe_rows": 47166,
+      "verified_positives": 186
+    },
+    {
+      "positive_recall": 1.0,
+      "precision": 0.00392308041181006,
+      "precision_lift": 1.0,
+      "rows": 44098,
+      "segment": "block_2",
+      "source_days": 19,
+      "universe_base_rate": 0.00392308041181006,
+      "universe_coverage": 1.0,
+      "universe_positives": 173,
+      "universe_rows": 44098,
+      "verified_positives": 173
+    },
+    {
+      "positive_recall": 1.0,
+      "precision": 0.0022256090185548056,
+      "precision_lift": 1.0,
+      "rows": 41337,
+      "segment": "block_3",
+      "source_days": 19,
+      "universe_base_rate": 0.0022256090185548056,
+      "universe_coverage": 1.0,
+      "universe_positives": 92,
+      "universe_rows": 41337,
+      "verified_positives": 92
+    },
+    {
+      "positive_recall": 1.0,
+      "precision": 0.0013741470811220622,
+      "precision_lift": 1.0,
+      "rows": 42208,
+      "segment": "block_4",
+      "source_days": 19,
+      "universe_base_rate": 0.0013741470811220622,
+      "universe_coverage": 1.0,
+      "universe_positives": 58,
+      "universe_rows": 42208,
+      "verified_positives": 58
+    },
+    {
+      "positive_recall": 1.0,
+      "precision": 0.0015577772611020692,
+      "precision_lift": 1.0,
+      "rows": 43010,
+      "segment": "block_5",
+      "source_days": 19,
+      "universe_base_rate": 0.0015577772611020692,
+      "universe_coverage": 1.0,
+      "universe_positives": 67,
+      "universe_rows": 43010,
+      "verified_positives": 67
+    }
+  ],
+  "late_segment_is_unseen_validation": false,
+  "leaf_attempts": [
+    {
+      "leaf_node": 2,
+      "positive_recall": 0.30155210643015523,
+      "precision": 0.0018290386787885309,
+      "precision_lift": 0.5377657601907716,
+      "rejection_reasons": [
+        "precision_lift_below_2",
+        "universe_coverage_above_10pct"
+      ],
+      "rows": 74356,
+      "rule": {
+        "conditions": [
+          {
+            "feature": "distance_to_ma20_pct",
+            "operator": "<=",
+            "threshold": 1.7586095333099365
+          },
+          {
+            "feature": "volatility_10d_pct",
+            "operator": "<=",
+            "threshold": 1.9423627257347107
+          }
+        ],
+        "rule_id": "prelaunch_leaf_2"
+      },
+      "source_days": 58,
+      "status": "rejected",
+      "universe_coverage": 0.5607499189297215,
+      "verified_positives": 136
+    },
+    {
+      "leaf_node": 3,
+      "positive_recall": 0.13747228381374724,
+      "precision": 0.004383174266525274,
+      "precision_lift": 1.2887212658880662,
+      "rejection_reasons": [
+        "precision_lift_below_2",
+        "universe_coverage_above_10pct"
+      ],
+      "rows": 14145,
+      "rule": {
+        "conditions": [
+          {
+            "feature": "distance_to_ma20_pct",
+            "operator": "<=",
+            "threshold": 1.7586095333099365
+          },
+          {
+            "feature": "volatility_10d_pct",
+            "operator": ">",
+            "threshold": 1.9423627257347107
+          }
+        ],
+        "rule_id": "prelaunch_leaf_3"
+      },
+      "source_days": 58,
+      "status": "rejected",
+      "universe_coverage": 0.10667340366965558,
+      "verified_positives": 62
+    },
+    {
+      "leaf_node": 5,
+      "positive_recall": 0.328159645232816,
+      "precision": 0.004396649040461054,
+      "precision_lift": 1.292683058568018,
+      "rejection_reasons": [
+        "precision_lift_below_2",
+        "universe_coverage_above_10pct"
+      ],
+      "rows": 33662,
+      "rule": {
+        "conditions": [
+          {
+            "feature": "distance_to_ma20_pct",
+            "operator": ">",
+            "threshold": 1.7586095333099365
+          },
+          {
+            "feature": "distance_to_ma20_pct",
+            "operator": "<=",
+            "threshold": 4.812109470367432
+          }
+        ],
+        "rule_id": "prelaunch_leaf_5"
+      },
+      "source_days": 58,
+      "status": "rejected",
+      "universe_coverage": 0.25385932232788594,
+      "verified_positives": 148
+    },
+    {
+      "leaf_node": 6,
+      "positive_recall": 0.2328159645232816,
+      "precision": 0.010059398352174747,
+      "precision_lift": 2.9576192481080343,
+      "rejection_reasons": [],
+      "rows": 10438,
+      "rule": {
+        "conditions": [
+          {
+            "feature": "distance_to_ma20_pct",
+            "operator": ">",
+            "threshold": 1.7586095333099365
+          },
+          {
+            "feature": "distance_to_ma20_pct",
+            "operator": ">",
+            "threshold": 4.812109470367432
+          }
+        ],
+        "rule_id": "prelaunch_leaf_6"
+      },
+      "source_days": 58,
+      "status": "selected",
+      "universe_coverage": 0.07871735507273701,
+      "verified_positives": 105
+    }
+  ],
+  "limitations": [
+    "historical D-1 concept membership and strict security status are unavailable",
+    "current stock names provide reconstructed ST and delisting exclusions only",
+    "unverified rows are not proven true negatives because event evidence can be incomplete",
+    "exact main-rise concept relations are post-D outcome labels and cannot generate D orders",
+    "blocks 4-5 are reused history rather than an untouched outer holdout"
+  ],
+  "market_regime_attribution": [
+    {
+      "market_regime": "GOLD/NORMAL",
+      "rule_positives": 105,
+      "rule_precision": 0.010059398352174747,
+      "rule_precision_lift": 2.9576192481080343,
+      "rule_rows": 10438,
+      "segment": "development",
+      "universe_base_rate": 0.003401180986568729,
+      "universe_positives": 451,
+      "universe_rows": 132601
+    },
+    {
+      "market_regime": "GOLD/DANGER",
+      "rule_positives": 0,
+      "rule_precision": 0.0,
+      "rule_precision_lift": 0.0,
+      "rule_rows": 54,
+      "segment": "validation",
+      "universe_base_rate": 0.0008944543828264759,
+      "universe_positives": 2,
+      "universe_rows": 2236
+    },
+    {
+      "market_regime": "GOLD/NORMAL",
+      "rule_positives": 11,
+      "rule_precision": 0.007447528774542992,
+      "rule_precision_lift": 5.207891371398481,
+      "rule_rows": 1477,
+      "segment": "validation",
+      "universe_base_rate": 0.0014300468737586398,
+      "universe_positives": 54,
+      "universe_rows": 37761
+    },
+    {
+      "market_regime": "SILVER/DANGER",
+      "rule_positives": 0,
+      "rule_precision": 0.0,
+      "rule_precision_lift": 0.0,
+      "rule_rows": 76,
+      "segment": "validation",
+      "universe_base_rate": 0.0009045680687471732,
+      "universe_positives": 2,
+      "universe_rows": 2211
+    },
+    {
+      "market_regime": "SILVER/NORMAL",
+      "rule_positives": 21,
+      "rule_precision": 0.00579950289975145,
+      "rule_precision_lift": 3.7229346226613416,
+      "rule_rows": 3621,
+      "segment": "validation",
+      "universe_base_rate": 0.0015577772611020692,
+      "universe_positives": 67,
+      "universe_rows": 43010
+    }
+  ],
+  "outer_holdout_price_values_read": false,
+  "overall_conclusion": "validated_prelaunch_label_edge",
+  "selected_rule": {
+    "conditions": [
+      {
+        "feature": "distance_to_ma20_pct",
+        "operator": ">",
+        "threshold": 1.7586095333099365
+      },
+      {
+        "feature": "distance_to_ma20_pct",
+        "operator": ">",
+        "threshold": 4.812109470367432
+      }
+    ],
+    "rule_id": "prelaunch_leaf_6"
+  },
+  "strict_historical_top3_claim": false,
+  "study_track": "prelaunch_first_explosion_proxy",
+  "trade_outcomes_read": true,
+  "tree_depth": 2,
+  "tree_leaf_count": 4
+}

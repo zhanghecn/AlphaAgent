@@ -8,13 +8,11 @@ import { useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   fetchDataUsage,
-  fetchTailWorkflowStatus,
   fetchLatestSyncBatch,
   fetchSyncJobs,
   fetchSyncRuns,
   fetchSyncCoverage,
   fetchSyncSources,
-  runTailQuantNow,
   runAllSyncJobs,
   runSyncJob,
   fetchSyncSchedules,
@@ -32,7 +30,6 @@ import type {
   SyncBatchJobStatus,
   SyncProgressSample,
   BatchSchedule,
-  TailWorkflowStatus,
 } from "@/api/dataSync";
 import { LoadingState } from "@/components/LoadingState";
 import LimitUpEvidenceBackfillPanel from "@/features/limitUp/LimitUpEvidenceBackfillPanel";
@@ -58,18 +55,9 @@ import {
   ShieldCheck,
 } from "lucide-react";
 
-type TabKey = "health" | "limit-up-evidence" | "tail" | "status" | "sources";
-type MinuteSyncMode = "backtest_gaps" | "recent";
-type MinuteGapProvider = "akshare" | "tdx" | "tushare";
-
+type TabKey = "health" | "limit-up-evidence" | "sync" | "status" | "sources";
 interface MinuteSyncFormState {
-  mode: MinuteSyncMode;
-  provider: MinuteGapProvider;
   interval: "1m";
-  backtestId: string;
-  gapFilePath: string;
-  maxGaps: number;
-  dryRun: boolean;
   stockLimit: number;
   limit: number;
   startDate: string;
@@ -77,13 +65,7 @@ interface MinuteSyncFormState {
 }
 
 const DEFAULT_MINUTE_SYNC_FORM: MinuteSyncFormState = {
-  mode: "backtest_gaps",
-  provider: "akshare",
   interval: "1m",
-  backtestId: "",
-  gapFilePath: "",
-  maxGaps: 2000,
-  dryRun: true,
   stockLimit: 100,
   limit: 240,
   startDate: "",
@@ -93,7 +75,7 @@ const DEFAULT_MINUTE_SYNC_FORM: MinuteSyncFormState = {
 const TABS: { key: TabKey; label: string; icon: typeof Database }[] = [
   { key: "health", label: "数据健康", icon: Activity },
   { key: "limit-up-evidence", label: "打板证据", icon: ShieldCheck },
-  { key: "tail", label: "实时尾盘量化", icon: Clock },
+  { key: "sync", label: "同步任务", icon: RefreshCw },
   { key: "status", label: "数据状态", icon: Database },
   { key: "sources", label: "数据源", icon: Server },
 ];
@@ -130,235 +112,11 @@ export default function DataManagementPage() {
       {/* Tab content */}
       {activeTab === "health" && <DataManagementHealthTab />}
       {activeTab === "limit-up-evidence" && <LimitUpEvidenceBackfillPanel />}
-      {activeTab === "tail" && <TailWorkflowTab />}
+      {activeTab === "sync" && <SyncTab />}
       {activeTab === "status" && <StatusTab />}
       {activeTab === "sources" && <SourcesTab />}
     </div>
   );
-}
-
-// ── Tail Workflow Tab ──
-
-function TailWorkflowTab() {
-  const queryClient = useQueryClient();
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-
-  const statusQuery = useQuery({
-    queryKey: ["tailWorkflowStatus"],
-    queryFn: fetchTailWorkflowStatus,
-    staleTime: 10_000,
-    refetchInterval: 15_000,
-  });
-
-  const latestBatchQuery = useQuery({
-    queryKey: ["syncBatchLatest"],
-    queryFn: fetchLatestSyncBatch,
-    staleTime: 2_000,
-    refetchInterval: (query) => (query.state.data?.status === "running" ? 2_000 : 8_000),
-  });
-
-  const tailQuantMutation = useMutation({
-    mutationFn: runTailQuantNow,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["tailWorkflowStatus"] });
-      queryClient.invalidateQueries({ queryKey: ["syncBatchLatest"] });
-      queryClient.invalidateQueries({ queryKey: ["syncRuns"] });
-      queryClient.invalidateQueries({ queryKey: ["syncCoverage"] });
-      queryClient.invalidateQueries({ queryKey: ["dataUsage"] });
-    },
-  });
-
-  const status = statusQuery.data;
-  const batch = latestBatchQuery.data;
-  const tailQuantBatch = batch?.schedule_id === "tail_quant_1430" ? batch : null;
-  const isTailQuantRunning = tailQuantMutation.isPending || tailQuantBatch?.status === "running";
-  const tailStateItems = [
-    { label: "完整日线", value: status?.daily_bar_latest_complete_date ?? status?.daily_bar_latest_date, detail: formatDateTime(status?.daily_bar_updated_at) },
-    { label: "量化结果", value: status?.tail_preview?.trade_date ?? status?.tail_preview?.cached_trade_date, detail: status?.tail_preview?.status === "ready" ? `已生成 ${status?.tail_preview?.cached_recommendation_count ?? 0} 个推荐` : status?.tail_preview?.message },
-    { label: "盘中快照", value: formatDateTime(status?.intraday_snapshot_updated_at), detail: status?.intraday_snapshot_trade_time },
-    { label: "分钟线", value: status?.minute_latest_date, detail: formatDateTime(status?.minute_latest_time) },
-    { label: "量化候选", value: status?.candidate_latest_date, detail: formatDateTime(status?.candidate_updated_at) },
-  ];
-  const scheduleItems = [
-    { schedule: status?.tail_quant_schedule, label: "14:30 实时尾盘量化", fallbackCron: "30 14 * * 1-5" },
-    { schedule: status?.eod_schedule, label: "19:00 盘后更新", fallbackCron: "0 19 * * 1-5" },
-  ];
-
-  return (
-    <div className="space-y-4">
-      {statusQuery.error ? (
-        <DataNotice
-          title="实时尾盘量化状态不可用"
-          message={(statusQuery.error as Error).message}
-          action="先确认 DATABASE_URL/PostgreSQL，再刷新本页。"
-        />
-      ) : null}
-      {status?.status === "unavailable" ? (
-        <DataNotice
-          title="本地数据库未就绪"
-          message={status.message ?? "DATABASE_URL not configured"}
-          action="尾盘同步和量化需要本地数据库可用。"
-        />
-      ) : null}
-
-      <section className="rounded-lg border bg-card">
-        <div className="grid gap-4 p-4 lg:grid-cols-[1fr_auto] lg:items-start">
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-base font-semibold">实时尾盘量化</h2>
-              <StatusBadge status={tailStatusBadge(status)} />
-            </div>
-            <div className="mt-2 text-sm text-muted-foreground">
-              14:30 生成实时尾盘量化结果；19:00 执行盘后统一更新，日线完整后生成正式候选，晚间自动补偿重试。
-            </div>
-            {status?.message ? (
-              <div className="mt-2 text-xs text-amber-700 dark:text-amber-400">{status.message}</div>
-            ) : null}
-          </div>
-          <div className="flex flex-wrap gap-2 lg:justify-end">
-            <button
-              className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-              onClick={() => tailQuantMutation.mutate()}
-              disabled={isTailQuantRunning || status?.status === "unavailable"}
-            >
-              {isTailQuantRunning ? <Loader2 size={16} className="animate-spin" /> : <PlayCircle size={16} />}
-              {isTailQuantRunning ? "运行中" : "立即运行14:30量化"}
-            </button>
-            <button
-              className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium transition-colors hover:bg-muted"
-              onClick={() => {
-                statusQuery.refetch();
-                latestBatchQuery.refetch();
-              }}
-            >
-              <RefreshCw size={15} />
-              刷新状态
-            </button>
-          </div>
-        </div>
-        {tailQuantMutation.error ? (
-          <div className="border-t px-4 py-3 text-sm text-red-600">{(tailQuantMutation.error as Error).message}</div>
-        ) : null}
-        <BatchProgress batch={tailQuantBatch} isStarting={tailQuantMutation.isPending} />
-      </section>
-
-      {statusQuery.isLoading ? <LoadingState rows={3} /> : null}
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-        {tailStateItems.map((item) => (
-          <TailStateItem key={item.label} {...item} />
-        ))}
-      </div>
-
-      <section className="rounded-lg border">
-        <div className="border-b px-4 py-3">
-          <h3 className="text-sm font-semibold">自动计划</h3>
-        </div>
-        <div className="divide-y">
-          {scheduleItems.map((item) => (
-            <ScheduleSummary key={item.label} {...item} />
-          ))}
-        </div>
-      </section>
-
-      <ResearchRunSummary run={status?.latest_research_run} />
-
-      <section className="rounded-lg border">
-        <button
-          className="flex w-full items-center justify-between px-4 py-3 text-left text-sm font-semibold transition-colors hover:bg-muted/40"
-          onClick={() => setAdvancedOpen((value) => !value)}
-        >
-          <span>高级同步</span>
-          {advancedOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-        </button>
-        {advancedOpen ? (
-          <div className="border-t p-4">
-            <SyncTab />
-          </div>
-        ) : null}
-      </section>
-    </div>
-  );
-}
-
-function TailStateItem({ label, value, detail }: { label: string; value?: string | null; detail?: string | null }) {
-  return (
-    <div className="rounded-lg border p-3">
-      <div className="text-sm text-muted-foreground">{label}</div>
-      <div className="mt-1 text-base font-semibold tabular-nums">{value || "--"}</div>
-      {detail ? <div className="mt-1 truncate text-xs text-muted-foreground">{detail}</div> : null}
-    </div>
-  );
-}
-
-function ScheduleSummary({
-  schedule,
-  label,
-  fallbackCron,
-}: {
-  schedule?: BatchSchedule | null;
-  label: string;
-  fallbackCron: string;
-}) {
-  const enabled = schedule?.enabled ?? false;
-  return (
-    <div className="grid gap-2 px-4 py-3 sm:grid-cols-[1fr_auto] sm:items-center">
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm font-medium">{label}</span>
-          <StatusBadge status={enabled ? "ready" : "unknown"} />
-        </div>
-        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-          <span className="font-mono">{schedule?.cron ?? fallbackCron}</span>
-          {schedule?.last_finished_at ? <span>上次 {formatDateTime(schedule.last_finished_at)}</span> : null}
-          {schedule?.last_message ? <span>{schedule.last_message}</span> : null}
-        </div>
-      </div>
-      <RunStatusBadge status={schedule?.last_status} />
-    </div>
-  );
-}
-
-function ResearchRunSummary({ run }: { run?: TailWorkflowStatus["latest_research_run"] }) {
-  if (!run) {
-    return (
-      <section className="rounded-lg border px-4 py-3 text-sm text-muted-foreground">
-        暂无策略研究任务记录。
-      </section>
-    );
-  }
-  const pct = Math.max(0, Math.min(Number(run.progress_pct ?? 0), 100));
-  return (
-    <section className="rounded-lg border p-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <div className="flex items-center gap-2 text-sm font-semibold">
-            <Activity size={15} />
-            最近策略研究
-            <RunStatusBadge status={run.status} />
-          </div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            {run.message || run.stage || "--"}
-            {run.backtest_id ? ` · 回测 #${run.backtest_id}` : ""}
-          </div>
-        </div>
-        <div className="text-xs text-muted-foreground">{formatDateTime(run.finished_at ?? run.started_at ?? run.created_at)}</div>
-      </div>
-      {run.status === "running" ? (
-        <div className="mt-3 flex items-center gap-2">
-          <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
-            <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${pct}%` }} />
-          </div>
-          <span className="w-12 text-right text-xs tabular-nums text-muted-foreground">{pct.toFixed(0)}%</span>
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-function tailStatusBadge(status: TailWorkflowStatus | undefined): string {
-  if (!status) return "unknown";
-  if (status.status === "unavailable") return "unavailable";
-  return status.tail_quant_ready ? "ready" : "empty";
 }
 
 // ── Status Tab ──
@@ -805,7 +563,7 @@ function BatchSchedulesPanel({ jobs }: { jobs: SyncJobItem[] }) {
       <div className="flex items-center justify-between border-b px-4 py-3">
         <div>
           <h3 className="text-sm font-semibold">定时计划</h3>
-          <div className="text-xs text-muted-foreground">统一的批量增量同步档，按数据依赖顺序执行。默认 14:30 实时尾盘量化 + 19:00 盘后更新；21:30 仅作补偿重试。</div>
+          <div className="text-xs text-muted-foreground">统一的批量增量同步档，按数据依赖顺序执行；19:00 更新，21:30 补偿重试。</div>
         </div>
         <button
           className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90"
@@ -1006,98 +764,7 @@ function MinuteSyncParamsPanel({
 
   return (
     <div className="rounded-md border bg-muted/20 p-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="inline-flex rounded-md border bg-background p-1">
-          <button
-            className={cn(
-              "rounded px-3 py-1.5 text-xs transition-colors",
-              value.mode === "backtest_gaps" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
-            )}
-            type="button"
-            onClick={() => setValue("mode", "backtest_gaps")}
-            disabled={disabled}
-          >
-            回测缺口
-          </button>
-          <button
-            className={cn(
-              "rounded px-3 py-1.5 text-xs transition-colors",
-              value.mode === "recent" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
-            )}
-            type="button"
-            onClick={() => setValue("mode", "recent")}
-            disabled={disabled}
-          >
-            最近分钟线
-          </button>
-        </div>
-        <label className="flex items-center gap-2 text-xs">
-          <input
-            type="checkbox"
-            checked={value.dryRun}
-            onChange={(event) => setValue("dryRun", event.target.checked)}
-            disabled={disabled}
-          />
-          预检查
-        </label>
-      </div>
-
-      {value.mode === "backtest_gaps" ? (
-        <div className="mt-3 space-y-3">
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <Field label="回测 ID">
-              <input
-                className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
-                value={value.backtestId}
-                onChange={(event) => setValue("backtestId", event.target.value)}
-                placeholder="例如 42"
-                disabled={disabled || Boolean(value.gapFilePath.trim())}
-              />
-            </Field>
-            <Field label="数据源">
-              <select
-                className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
-                value={value.provider}
-                onChange={(event) => setValue("provider", event.target.value as MinuteGapProvider)}
-                disabled={disabled}
-              >
-                <option value="akshare">AkShare近端</option>
-                <option value="tdx">TDX公开源</option>
-                <option value="tushare">Tushare Pro</option>
-              </select>
-            </Field>
-            <Field label="周期">
-              <div className="mt-1 flex h-9 items-center rounded-md border bg-muted/30 px-2 text-sm">1分钟 / 14:30快照</div>
-            </Field>
-            <Field label="最大缺口">
-              <input
-                className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
-                type="number"
-                min={1}
-                max={20000}
-                value={value.maxGaps}
-                onChange={(event) => setValue("maxGaps", Number(event.target.value))}
-                disabled={disabled}
-              />
-            </Field>
-          </div>
-          <details className="rounded-md border bg-background/60 px-3 py-2">
-            <summary className="cursor-pointer text-xs text-muted-foreground">高级兜底：服务器缺口文件</summary>
-            <div className="mt-2 max-w-xl">
-              <Field label="缺口文件路径">
-                <input
-                  className="mt-1 h-9 w-full rounded-md border bg-background px-2 text-sm"
-                  value={value.gapFilePath}
-                  onChange={(event) => setValue("gapFilePath", event.target.value)}
-                  placeholder="memory/06_backtests/..."
-                  disabled={disabled}
-                />
-              </Field>
-            </div>
-          </details>
-        </div>
-      ) : (
-        <div className="mt-3 grid gap-3 md:grid-cols-3 xl:grid-cols-5">
+      <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-5">
           <Field label="周期">
             <div className="mt-1 flex h-9 items-center rounded-md border bg-muted/30 px-2 text-sm">1分钟</div>
           </Field>
@@ -1141,12 +808,9 @@ function MinuteSyncParamsPanel({
               disabled={disabled}
             />
           </Field>
-        </div>
-      )}
+      </div>
       <div className="mt-2 text-xs text-muted-foreground">
-        {value.mode === "backtest_gaps"
-          ? "执行仍走 sync_stock_minute_bars；严格缺口固定只补执行日 1分钟 / 14:30 快照。AkShare 适合近端交易日，历史缺口会明确标记未覆盖。"
-          : "最近分钟线适合收盘后补近端数据，不等于覆盖某次长区间回测缺口。"}
+        最近分钟线由系统数据源同步；涨停事件历史缺口由夜间任务自动发现并补齐。
       </div>
     </div>
   );
@@ -1162,30 +826,14 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 }
 
 function buildMinuteSyncParams(value: MinuteSyncFormState): Record<string, unknown> {
-  if (value.mode === "recent") {
-    return compactParams({
-      mode: "recent",
-      interval: value.interval,
-      stock_limit: value.stockLimit,
-      limit: value.limit,
-      start_date: value.startDate,
-      end_date: value.endDate,
-      only_missing: true,
-    });
-  }
-
   return compactParams({
-    mode: "backtest_gaps",
-    provider: value.provider,
+    mode: "recent",
     interval: value.interval,
-    backtest_id: value.gapFilePath.trim() ? "" : value.backtestId,
-    gap_file_path: value.gapFilePath,
-    tail_entry_start: "14:30",
-    tail_entry_end: "14:30",
-    dry_run: value.dryRun,
-    max_gaps: value.maxGaps,
-    max_pages_per_symbol: value.provider === "tdx" ? 32 : undefined,
-    timeout_seconds: value.provider === "tdx" ? 3 : undefined,
+    stock_limit: value.stockLimit,
+    limit: value.limit,
+    start_date: value.startDate,
+    end_date: value.endDate,
+    only_missing: true,
   });
 }
 
@@ -1198,17 +846,6 @@ function compactParams(params: Record<string, unknown>): Record<string, unknown>
 function syncRunParamsText(run: SyncRunItem): string {
   const params = run.params ?? {};
   const mode = String(params.mode ?? "");
-  if (run.job_id === "sync_stock_minute_bars" && mode === "backtest_gaps") {
-    const parts = [
-      "回测缺口",
-      params.provider ? `源 ${params.provider}` : "",
-      params.interval ? `周期 ${params.interval}` : "",
-      params.backtest_id ? `回测 #${params.backtest_id}` : "",
-      params.gap_file_path ? `文件 ${params.gap_file_path}` : "",
-      params.dry_run === true ? "预检查" : params.dry_run === false ? "写入" : "",
-    ].filter(Boolean);
-    return parts.join(" · ");
-  }
   if (run.job_id === "sync_stock_minute_bars" && mode === "recent") {
     return [
       "最近分钟线",
@@ -1360,8 +997,6 @@ export function BatchProgress({ batch, isStarting }: { batch: SyncBatchStatus | 
 }
 
 function batchTitle(batch: SyncBatchStatus): string {
-  if (batch.schedule_id === "tail_quant_1430") return "实时尾盘量化";
-  if (batch.profile === "quant_research") return "策略研究";
   if (batch.profile === "all") return "全量同步";
   if (batch.profile === "core") return "核心同步";
   return "同步批次";

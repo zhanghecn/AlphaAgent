@@ -6,13 +6,10 @@ from datetime import date
 from typing import Any
 
 from fastapi import APIRouter, Body, Query
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
 
 from alphaagent.server.core.responses import fail, ok
 from alphaagent.server.services import data_sync as service
-from alphaagent.server.services.data_providers.akshare_minute_import import import_akshare_minute_bars_for_gaps
-from alphaagent.server.services.data_providers.tdx_minute_import import import_tdx_minute_bars_for_gaps
-from alphaagent.server.services.data_providers.tushare_minute_import import import_tushare_minute_bars_for_gaps
 from alphaagent.server.services.limit_up import historical_evidence_import
 from alphaagent.server.services.limit_up import historical_membership_import
 from alphaagent.server.services.limit_up.historical_evidence_batch import (
@@ -161,248 +158,10 @@ def data_health():
         return _sync_error(exc)
 
 
-@router.get("/tail-workflow")
-def tail_workflow():
-    try:
-        return ok(service.tail_workflow_status())
-    except Exception as exc:
-        return _sync_error(exc)
-
-
-@router.post("/tail-workflow/run-tail-quant")
-def run_tail_quant():
-    try:
-        return ok(service.run_tail_quant_now())
-    except Exception as exc:
-        return _sync_error(exc)
-
-
-@router.get("/imports/minute-bars/template.csv")
-def minute_bars_template():
-    try:
-        return Response(
-            content=service.minute_csv_template(),
-            media_type="text/csv; charset=utf-8",
-            headers={"Content-Disposition": 'attachment; filename="alphaagent_minute_bars_template.csv"'},
-        )
-    except Exception as exc:
-        return _sync_error(exc)
-
-
-@router.post("/imports/minute-bars")
-def import_minute_bars(payload: dict[str, Any] = Body(default_factory=dict)):
-    try:
-        csv_text = str(payload.get("csv_text") or "")
-        file_path = str(payload.get("file_path") or "").strip()
-        if file_path:
-            return ok(
-                service.import_stock_minute_bars_file(
-                    file_path,
-                    interval=str(payload.get("interval") or "1m"),
-                    source=str(payload.get("source") or "manual_csv_file"),
-                    dry_run=bool(payload.get("dry_run") or False),
-                )
-            )
-        return ok(
-            service.import_stock_minute_bars_csv(
-                csv_text,
-                interval=str(payload.get("interval") or "1m"),
-                source=str(payload.get("source") or "manual_csv"),
-                dry_run=bool(payload.get("dry_run") or False),
-            )
-        )
-    except Exception as exc:
-        return _sync_error(exc)
-
-
-@router.post("/imports/minute-bars/audit-gaps")
-def audit_minute_bar_gaps(payload: dict[str, Any] = Body(default_factory=dict)):
-    try:
-        if payload.get("backtest_id") not in (None, ""):
-            requirements = service.minute_gap_requirements_from_params(payload)
-            return ok(
-                service._audit_minute_gap_requirements(
-                    requirements,
-                    interval="1m",
-                    tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
-                    tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
-                    min_tail_bars=int(payload.get("min_tail_bars") or 1),
-                )
-            )
-        file_path = str(payload.get("file_path") or "").strip()
-        if file_path:
-            return ok(
-                service.audit_minute_gap_file(
-                    file_path,
-                    interval="1m",
-                    tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
-                    tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
-                    min_tail_bars=int(payload.get("min_tail_bars") or 1),
-                )
-            )
-        return ok(
-            service.audit_minute_gap_csv(
-                str(payload.get("gap_csv_text") or payload.get("csv_text") or ""),
-                interval="1m",
-                tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
-                tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
-                min_tail_bars=int(payload.get("min_tail_bars") or 1),
-            )
-        )
-    except Exception as exc:
-        return _sync_error(exc)
-
-
-@router.post("/imports/minute-bars/gap-template.csv")
-def minute_gap_import_template(payload: dict[str, Any] = Body(default_factory=dict)):
-    try:
-        if payload.get("backtest_id") not in (None, ""):
-            requirements = service.minute_gap_requirements_from_params(payload)
-            gap_csv_text = _requirements_to_gap_csv(requirements)
-        else:
-            gap_csv_text = str(payload.get("gap_csv_text") or payload.get("csv_text") or "")
-        return Response(
-            content=service.minute_gap_import_template(
-                gap_csv_text,
-                sample_limit=int(payload.get("sample_limit") or 200),
-            ),
-            media_type="text/csv; charset=utf-8",
-            headers={"Content-Disposition": 'attachment; filename="alphaagent_minute_gap_import_template.csv"'},
-        )
-    except Exception as exc:
-        return _sync_error(exc)
-
-
-@router.post("/imports/minute-bars/vendor-manifest")
-def minute_gap_vendor_manifest(payload: dict[str, Any] = Body(default_factory=dict)):
-    try:
-        if payload.get("backtest_id") not in (None, ""):
-            requirements = service.minute_gap_requirements_from_params(payload)
-            return ok(
-                service.minute_gap_vendor_manifest(
-                    _requirements_to_gap_csv(requirements),
-                    tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
-                    tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
-                    sample_limit=int(payload.get("sample_limit") or 20),
-                )
-            )
-        return ok(
-            service.minute_gap_vendor_manifest(
-                str(payload.get("gap_csv_text") or payload.get("csv_text") or ""),
-                file_path=str(payload.get("file_path") or payload.get("gap_file_path") or ""),
-                tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
-                tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
-                sample_limit=int(payload.get("sample_limit") or 20),
-            )
-        )
-    except Exception as exc:
-        return _sync_error(exc)
-
-
-@router.post("/imports/minute-bars/vendor-manifest.csv")
-def minute_gap_vendor_manifest_csv(payload: dict[str, Any] = Body(default_factory=dict)):
-    try:
-        if payload.get("backtest_id") not in (None, ""):
-            requirements = service.minute_gap_requirements_from_params(payload)
-            gap_csv_text = _requirements_to_gap_csv(requirements)
-            gap_file_path = ""
-        else:
-            gap_csv_text = str(payload.get("gap_csv_text") or payload.get("csv_text") or "")
-            gap_file_path = str(payload.get("file_path") or payload.get("gap_file_path") or "")
-        return Response(
-            content=service.minute_gap_vendor_manifest_csv(
-                gap_csv_text,
-                file_path=gap_file_path,
-                tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
-                tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
-            ),
-            media_type="text/csv; charset=utf-8",
-            headers={"Content-Disposition": 'attachment; filename="alphaagent_minute_gap_vendor_manifest.csv"'},
-        )
-    except Exception as exc:
-        return _sync_error(exc)
-
-
-@router.post("/imports/minute-bars/tushare-gaps")
-def import_minute_bar_gaps_from_tushare(payload: dict[str, Any] = Body(default_factory=dict)):
-    try:
-        gap_csv_text, gap_file_path = _gap_payload_source(payload)
-        return ok(
-            import_tushare_minute_bars_for_gaps(
-                gap_csv_text=gap_csv_text,
-                gap_file_path=gap_file_path,
-                interval="1m",
-                tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
-                tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
-                dry_run=bool(payload.get("dry_run") if payload.get("dry_run") is not None else True),
-                max_gaps=int(payload.get("max_gaps") or 200),
-            )
-        )
-    except Exception as exc:
-        return _sync_error(exc)
-
-
-@router.post("/imports/minute-bars/tdx-gaps")
-def import_minute_bar_gaps_from_tdx(payload: dict[str, Any] = Body(default_factory=dict)):
-    try:
-        gap_csv_text, gap_file_path = _gap_payload_source(payload)
-        return ok(
-            import_tdx_minute_bars_for_gaps(
-                gap_csv_text=gap_csv_text,
-                gap_file_path=gap_file_path,
-                interval="1m",
-                tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
-                tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
-                dry_run=bool(payload.get("dry_run") if payload.get("dry_run") is not None else True),
-                max_gaps=int(payload.get("max_gaps") or 2000),
-                max_pages_per_symbol=int(payload.get("max_pages_per_symbol") or 32),
-                timeout_seconds=float(payload.get("timeout_seconds") or 3),
-            )
-        )
-    except Exception as exc:
-        return _sync_error(exc)
-
-
-@router.post("/imports/minute-bars/akshare-gaps")
-def import_minute_bar_gaps_from_akshare(payload: dict[str, Any] = Body(default_factory=dict)):
-    try:
-        gap_csv_text, gap_file_path = _gap_payload_source(payload)
-        return ok(
-            import_akshare_minute_bars_for_gaps(
-                gap_csv_text=gap_csv_text,
-                gap_file_path=gap_file_path,
-                interval="1m",
-                tail_entry_start=str(payload.get("tail_entry_start") or "14:30"),
-                tail_entry_end=str(payload.get("tail_entry_end") or "14:30"),
-                dry_run=bool(payload.get("dry_run") if payload.get("dry_run") is not None else True),
-                max_gaps=int(payload.get("max_gaps") or 200),
-            )
-        )
-    except Exception as exc:
-        return _sync_error(exc)
-
-
 @router.get("/imports/limit-up-evidence/status")
 def limit_up_evidence_status():
     try:
         return ok(historical_evidence_import.historical_evidence_status())
-    except Exception as exc:
-        return _evidence_import_error(exc)
-
-
-@router.get("/imports/limit-up-evidence/template.csv")
-def limit_up_evidence_template(dataset: str = Query(default="events")):
-    try:
-        normalized = historical_evidence_import.normalize_dataset(dataset)
-        return Response(
-            content=historical_evidence_import.evidence_csv_template(normalized),
-            media_type="text/csv; charset=utf-8",
-            headers={
-                "Content-Disposition": (
-                    f'attachment; filename="alphaagent_limit_up_{normalized}_template.csv"'
-                )
-            },
-        )
     except Exception as exc:
         return _evidence_import_error(exc)
 
@@ -428,22 +187,6 @@ def import_limit_up_evidence_from_tushare(
                 dry_run=_payload_bool(payload.get("dry_run"), default=True),
                 max_dates=int(payload.get("max_dates") or 20),
                 only_missing=_payload_bool(payload.get("only_missing"), default=True),
-            )
-        )
-    except Exception as exc:
-        return _evidence_import_error(exc)
-
-
-@router.post("/imports/limit-up-evidence/csv")
-def import_limit_up_evidence_from_csv(
-    payload: dict[str, Any] = Body(default_factory=dict),
-):
-    try:
-        return ok(
-            historical_evidence_import.import_csv_evidence(
-                dataset=str(payload.get("dataset") or "events"),
-                csv_text=str(payload.get("csv_text") or ""),
-                dry_run=_payload_bool(payload.get("dry_run"), default=True),
             )
         )
     except Exception as exc:
@@ -517,22 +260,6 @@ def limit_up_membership_status():
         return _membership_import_error(exc)
 
 
-@router.get("/imports/limit-up-memberships/template.csv")
-def limit_up_membership_template():
-    try:
-        return Response(
-            content=historical_membership_import.membership_csv_template(),
-            media_type="text/csv; charset=utf-8",
-            headers={
-                "Content-Disposition": (
-                    'attachment; filename="alphaagent_limit_up_industry_memberships_template.csv"'
-                )
-            },
-        )
-    except Exception as exc:
-        return _membership_import_error(exc)
-
-
 @router.post("/imports/limit-up-memberships/tushare")
 def import_limit_up_memberships_from_tushare(
     payload: dict[str, Any] = Body(default_factory=dict),
@@ -559,43 +286,6 @@ def import_limit_up_memberships_from_tushare(
         return _membership_import_error(exc)
 
 
-@router.post("/imports/limit-up-memberships/csv")
-def import_limit_up_memberships_from_csv(
-    payload: dict[str, Any] = Body(default_factory=dict),
-):
-    try:
-        return ok(
-            historical_membership_import.import_membership_csv(
-                csv_text=str(payload.get("csv_text") or ""),
-                start_date=_required_payload_date(
-                    payload,
-                    "start_date",
-                    historical_membership_import.HistoricalMembershipImportError,
-                ),
-                end_date=_required_payload_date(
-                    payload,
-                    "end_date",
-                    historical_membership_import.HistoricalMembershipImportError,
-                ),
-                dry_run=_payload_bool(payload.get("dry_run"), default=True),
-                max_dates=int(payload.get("max_dates") or 20),
-                only_missing=_payload_bool(payload.get("only_missing"), default=False),
-            )
-        )
-    except Exception as exc:
-        return _membership_import_error(exc)
-
-
-def _gap_payload_source(payload: dict[str, Any]) -> tuple[str, str]:
-    if payload.get("backtest_id") not in (None, ""):
-        requirements = service.minute_gap_requirements_from_params(payload)
-        return _requirements_to_gap_csv(requirements), ""
-    return (
-        str(payload.get("gap_csv_text") or payload.get("csv_text") or ""),
-        str(payload.get("gap_file_path") or payload.get("file_path") or ""),
-    )
-
-
 def _required_payload_date(
     payload: dict[str, Any],
     key: str,
@@ -616,28 +306,6 @@ def _payload_bool(value: Any, *, default: bool) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def _requirements_to_gap_csv(requirements: dict[str, Any]) -> str:
-    import csv
-    import io
-
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow(["trade_date", "vt_symbol", "reference_date", "window", "ma5"])
-    for item in requirements.get("items") or []:
-        trade_date = item.get("trade_date")
-        reference_date = item.get("reference_date")
-        writer.writerow(
-            [
-                trade_date.isoformat() if hasattr(trade_date, "isoformat") else trade_date,
-                item.get("vt_symbol") or "",
-                reference_date.isoformat() if hasattr(reference_date, "isoformat") else (reference_date or ""),
-                item.get("window") or "",
-                item.get("ma5") if item.get("ma5") is not None else "",
-            ]
-        )
-    return buffer.getvalue()
 
 
 def _sync_error(exc: Exception) -> JSONResponse:

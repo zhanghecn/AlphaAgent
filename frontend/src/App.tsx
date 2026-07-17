@@ -13,10 +13,8 @@ const StockDetailPage = lazy(() => import("@/pages/StockDetailPage").then((m) =>
 const IndexDetailPage = lazy(() => import("@/pages/IndexDetailPage").then((m) => ({ default: m.IndexDetailPage })));
 const MarketTimingPage = lazy(() => import("@/pages/MarketTimingPage").then((m) => ({ default: m.MarketTimingPage })));
 const SectorsPage = lazy(() => import("@/pages/SectorsPage").then((m) => ({ default: m.SectorsPage })));
-const QuantTradingPage = lazy(() => import("@/pages/QuantTradingPage").then((m) => ({ default: m.QuantTradingPage })));
-const PortfolioPage = lazy(() => import("@/pages/PortfolioPage").then((m) => ({ default: m.PortfolioPage })));
 const MainlineReplayPage = lazy(() => import("@/pages/MainlineReplayPage"));
-const LimitUpPage = lazy(() => import("@/pages/LimitUpPage").then((m) => ({ default: m.LimitUpPage })));
+const ShortTermResearchPage = lazy(() => import("@/pages/ShortTermResearchPage").then((m) => ({ default: m.ShortTermResearchPage })));
 const DataManagementPage = lazy(() => import("@/pages/DataManagementPage"));
 
 /**
@@ -47,12 +45,11 @@ export default function App() {
                     <Route path="/stocks" element={<StocksPage />} />
                     <Route path="/stocks/:vtSymbol" element={<StockDetailPage />} />
                     <Route path="/indices/:key" element={<IndexDetailPage />} />
-                    <Route path="/quant" element={<QuantTradingPage />} />
                     <Route path="/market" element={<MarketTimingPage />} />
-                    <Route path="/portfolio" element={<PortfolioPage />} />
                     <Route path="/chain" element={<Navigate to="/mainline" replace />} />
                     <Route path="/mainline" element={<MainlineReplayPage />} />
-                    <Route path="/limit-up" element={<LimitUpPage />} />
+                    <Route path="/short-term" element={<ShortTermResearchPage />} />
+                    <Route path="/limit-up" element={<Navigate to="/short-term" replace />} />
                     <Route path="/data" element={<DataManagementPage />} />
                     {/* Legacy routes */}
                     <Route path="/sectors" element={<SectorsPage />} />

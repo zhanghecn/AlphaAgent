@@ -688,6 +688,91 @@ def test_five_percent_radar_candidates_are_all_evaluated_before_ranking() -> Non
     }
 
 
+def test_three_percent_capture_does_not_change_the_formal_candidate_list() -> None:
+    captured_at = datetime(2026, 7, 14, 10, 5, tzinfo=SHANGHAI)
+    quotes = {
+        "items": [
+            {
+                "vt_symbol": "600001.SSE",
+                "name": "三成观察",
+                "change_pct": 3.8,
+                "last_price": 10.38,
+                "previous_close": 10.0,
+            },
+            {
+                "vt_symbol": "600002.SSE",
+                "name": "正式候选",
+                "change_pct": 5.0,
+                "last_price": 10.5,
+                "previous_close": 10.0,
+            },
+        ]
+    }
+    context = {
+        "by_symbol": {
+            "600001.SSE": {"sector_id": "BK1", "sector_name": "机器人"},
+            "600002.SSE": {"sector_id": "BK1", "sector_name": "机器人"},
+        }
+    }
+
+    snapshot = build_live_snapshot(
+        quotes,
+        {"trade_date": "20260714", "pools": {}},
+        captured_at,
+        context,
+    )
+
+    assert {row["vt_symbol"] for row in snapshot["trace_capture_candidates"]} == {
+        "600001.SSE",
+        "600002.SSE",
+    }
+    assert [row["vt_symbol"] for row in snapshot["candidates"]] == ["600002.SSE"]
+    assert all(
+        signal["vt_symbol"] != "600001.SSE"
+        for signal in snapshot["recommendations"]["lanes"]["now"]
+    )
+
+
+def test_early_radar_reuses_the_existing_first_board_momentum_gate() -> None:
+    captured_at = datetime(2026, 7, 14, 10, 5, tzinfo=SHANGHAI)
+    candidate = _candidate(
+        "600001.SSE",
+        state="pre_radar",
+        change_pct=3.8,
+        last_price=10.38,
+        distance_to_limit_pct=5.64,
+        board_lane="first_board",
+        lane_decision="eligible",
+        lane_blockers=[],
+        concept_state="launch",
+        concept_coverage_ratio=0.95,
+        concept_strong_5_count=2,
+        concept_leader_rank=2,
+        concept_snapshot_age_seconds=10,
+    )
+    market_gate = {
+        "passed": True,
+        "repair_confirmed": True,
+        "repair_state": "not_required",
+        "reasons": [],
+    }
+
+    strong = live_policy.build_early_radar_signals(
+        [candidate],
+        market_gate,
+        captured_at,
+    )[0]
+    weak = live_policy.build_early_radar_signals(
+        [{**candidate, "lane_support_score": 54.99}],
+        market_gate,
+        captured_at,
+    )[0]
+
+    assert strong["action"] == "buy_now"
+    assert strong["entry_kind"] == "momentum"
+    assert weak["action"] != "buy_now"
+
+
 def test_saved_weekend_snapshot_is_normalized_to_latest_market_date() -> None:
     snapshot = {
         "trade_date": "2026-07-11",
@@ -834,6 +919,215 @@ def test_refresh_persists_verified_current_session_snapshot(monkeypatch) -> None
     assert result["data_quality"]["is_stale"] is False
     assert persisted == [result]
     assert traces == [result]
+
+
+def test_refresh_persists_internal_radar_ledger_without_public_leak(monkeypatch) -> None:
+    persisted: list[dict[str, object]] = []
+    radar_frames: list[tuple[dict[str, object], list[dict[str, object]]]] = []
+    quote = {
+        "vt_symbol": "600001.SSE",
+        "name": "三成观察",
+        "change_pct": 3.8,
+        "last_price": 10.38,
+        "previous_close": 10.0,
+    }
+    monkeypatch.setattr(
+        live_service,
+        "_fetch_live_payloads",
+        lambda *_args, **_kwargs: (
+            {
+                "trade_date": "20260710",
+                "updated_at": "2026-07-10T10:05:00+08:00",
+                "items": [quote],
+            },
+            {"trade_date": "20260710", "pools": {}},
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "get_latest_live_concept_snapshot",
+        lambda _at: {
+            "trade_date": "2026-07-10",
+            "captured_at": "2026-07-10T10:05:00+08:00",
+            "source": "test.full_market",
+            "source_updated_at": "2026-07-10T10:05:00+08:00",
+            "quotes": [quote],
+            "radar_quotes": [quote],
+            "membership": {},
+            "concepts": [],
+            "concepts_by_id": {},
+            "data_quality": {
+                "status": "ready",
+                "is_stale": False,
+                "trigger_allowed": True,
+                "age_seconds": 0,
+                "quote_coverage_ratio": 1.0,
+                "source_trade_date_valid": True,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        live_service,
+        "load_live_context",
+        lambda *_args: {
+            "by_symbol": {
+                "600001.SSE": {
+                    "sector_id": "industry:通信",
+                    "sector_name": "通信",
+                    "sector_heat": 70.0,
+                    "sector_flow_trade_date": "2026-07-10",
+                    "sector_main_net_inflow": 2_000_000_000.0,
+                    "stock_main_net_inflow": 100_000_000.0,
+                    "lane_feature_ready": True,
+                }
+            },
+            "sentiment": {"phase": "repair"},
+            "timing": {},
+        },
+    )
+    monkeypatch.setattr(live_service, "load_latest_snapshot", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(live_service, "_load_lane_validations", lambda: {})
+    monkeypatch.setattr(
+        live_service,
+        "attach_historical_evidence",
+        lambda snapshot: dict(snapshot),
+    )
+    monkeypatch.setattr(live_service, "save_live_trace_snapshot", lambda _snapshot: {})
+    monkeypatch.setattr(
+        live_service,
+        "save_radar_frame",
+        lambda snapshot, observations: radar_frames.append(
+            (dict(snapshot), [dict(row) for row in observations])
+        )
+        or {"frame_id": 1},
+    )
+    monkeypatch.setattr(
+        live_service,
+        "load_recent_signal_observations",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        live_service,
+        "save_snapshot",
+        lambda snapshot: persisted.append(snapshot) or snapshot,
+    )
+
+    result = live_service.refresh_live_snapshot(
+        datetime(2026, 7, 10, 10, 5, tzinfo=SHANGHAI),
+        adapter=object(),
+    )
+
+    assert "trace_capture_candidates" not in result
+    assert "early_radar_recommendations" not in result
+    assert result["candidates"] == []
+    assert result["data_quality"]["radar_ledger_status"] == "ready"
+    assert result["data_quality"]["scan_timing_ms"]["total"] >= 0
+    assert persisted == [result]
+    assert len(radar_frames) == 1
+    assert radar_frames[0][1][0]["vt_symbol"] == "600001.SSE"
+    assert radar_frames[0][1][0]["formal_action"] == "pass"
+
+
+def test_radar_ledger_saves_below_three_percent_fill_followup(monkeypatch) -> None:
+    saved: list[list[dict[str, object]]] = []
+    recent = live_service.project_radar_observation(
+        {
+            "vt_symbol": "600001.SSE",
+            "name": "快速回落",
+            "change_pct": 3.6,
+            "last_price": 10.36,
+            "previous_close": 10.0,
+            "limit_price": 11.0,
+            "state": "pre_radar",
+            "board_lane": "first_board",
+        },
+        formal_signal=None,
+        early_signal={"action": "buy_now", "entry_kind": "momentum"},
+    )
+    recent["captured_at"] = "2026-07-10T10:05:00+08:00"
+    monkeypatch.setattr(
+        live_service,
+        "load_recent_signal_observations",
+        lambda *_args, **_kwargs: [recent],
+    )
+    monkeypatch.setattr(
+        live_service,
+        "save_radar_frame",
+        lambda _snapshot, observations: saved.append(
+            [dict(row) for row in observations]
+        ),
+    )
+    snapshot = {
+        "captured_at": "2026-07-10T10:05:30+08:00",
+        "trace_capture_candidates": [],
+        "early_radar_recommendations": {"lanes": {"now": []}},
+        "recommendations": {"lanes": {"now": []}},
+        "data_quality": {"status": "ready", "is_stale": False},
+    }
+
+    error = live_service._save_radar_ledger_safely(
+        snapshot,
+        full_quotes=[
+            {
+                "vt_symbol": "600001.SSE",
+                "name": "快速回落",
+                "last_price": 10.25,
+                "change_pct": 2.5,
+            }
+        ],
+        quote_observed_at=datetime.fromisoformat(
+            "2026-07-10T10:05:25+08:00"
+        ),
+    )
+
+    assert error is None
+    assert len(saved) == 1
+    assert saved[0][0]["capture_state"] == "fill_followup"
+    assert saved[0][0]["last_price"] == 10.25
+
+
+def test_radar_ledger_failure_is_explicit_without_changing_formal_actions(
+    monkeypatch,
+) -> None:
+    snapshot = {
+        "captured_at": "2026-07-10T10:05:00+08:00",
+        "trace_capture_candidates": [
+            {
+                "vt_symbol": "600001.SSE",
+                "name": "三成观察",
+                "change_pct": 3.8,
+                "last_price": 10.38,
+                "previous_close": 10.0,
+                "limit_price": 11.0,
+                "state": "pre_radar",
+                "board_lane": "first_board",
+            }
+        ],
+        "early_radar_recommendations": {
+            "lanes": {"now": [], "tail": [], "next_auction": []}
+        },
+        "recommendations": {
+            "lanes": {
+                "now": [{"vt_symbol": "600002.SSE", "action": "buy_now"}],
+                "tail": [],
+                "next_auction": [],
+            }
+        },
+        "data_quality": {"status": "ready", "is_stale": False},
+    }
+    monkeypatch.setattr(
+        live_service,
+        "save_radar_frame",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("ledger unavailable")),
+    )
+
+    error = live_service._save_radar_ledger_safely(snapshot)
+    live_service._set_radar_ledger_status(snapshot, error)
+
+    assert error == "ledger unavailable"
+    assert snapshot["data_quality"]["radar_ledger_status"] == "error"
+    assert snapshot["recommendations"]["lanes"]["now"][0]["action"] == "buy_now"
 
 
 def test_trace_write_failure_does_not_block_official_snapshot(monkeypatch) -> None:

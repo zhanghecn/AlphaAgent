@@ -2,8 +2,6 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   fetchLimitUpMembershipImportStatus,
-  fetchLimitUpMembershipTemplate,
-  importLimitUpMembershipsFromCsv,
   importLimitUpMembershipsFromTushare,
 } from "@/api/dataSync";
 import type {
@@ -15,12 +13,9 @@ import { LoadingState } from "@/components/LoadingState";
 import { cn } from "@/lib/utils";
 import {
   AlertTriangle,
-  Download,
-  FileCheck2,
   Loader2,
   Network,
   Play,
-  Upload,
 } from "lucide-react";
 
 interface ViewProps {
@@ -31,7 +26,6 @@ interface ViewProps {
   maxDates: number;
   dryRun: boolean;
   onlyMissing: boolean;
-  fileName: string;
   isRunning: boolean;
   error?: string;
   onStartDateChange: (value: string) => void;
@@ -40,9 +34,6 @@ interface ViewProps {
   onDryRunChange: (value: boolean) => void;
   onOnlyMissingChange: (value: boolean) => void;
   onRunTushare: () => void;
-  onFileChange: (file: File | null) => void;
-  onRunCsv: () => void;
-  onDownloadTemplate: () => void;
 }
 
 export default function HistoricalMembershipBackfillPanel() {
@@ -52,8 +43,6 @@ export default function HistoricalMembershipBackfillPanel() {
   const [maxDates, setMaxDates] = useState(20);
   const [dryRun, setDryRun] = useState(true);
   const [onlyMissing, setOnlyMissing] = useState(true);
-  const [fileName, setFileName] = useState("");
-  const [csvText, setCsvText] = useState("");
   const [result, setResult] = useState<LimitUpMembershipImportResult>();
 
   const statusQuery = useQuery({
@@ -80,32 +69,11 @@ export default function HistoricalMembershipBackfillPanel() {
       refreshCoverage();
     },
   });
-  const csvMutation = useMutation({
-    mutationFn: () => importLimitUpMembershipsFromCsv({ ...payload(), csv_text: csvText }),
-    onSuccess: (next) => {
-      setResult(next);
-      refreshCoverage();
-    },
-  });
-  const templateMutation = useMutation({
-    mutationFn: fetchLimitUpMembershipTemplate,
-    onSuccess: (content) => downloadCsv(
-      content,
-      "alphaagent_limit_up_industry_memberships_template.csv",
-    ),
-  });
-  const isRunning = tushareMutation.isPending || csvMutation.isPending || templateMutation.isPending;
-  const error = tushareMutation.error ?? csvMutation.error ?? templateMutation.error ?? statusQuery.error;
+  const isRunning = tushareMutation.isPending;
+  const error = tushareMutation.error ?? statusQuery.error;
   const confirmWrite = () => dryRun || window.confirm(
     "将只替换通过90%覆盖审计日期的行业成员，概念成员保持不变。确认写入？",
   );
-  const readFile = (file: File | null) => {
-    setFileName(file?.name ?? "");
-    setCsvText("");
-    setResult(undefined);
-    if (file) void file.text().then(setCsvText);
-  };
-
   if (statusQuery.isLoading) return <LoadingState rows={3} />;
   return (
     <HistoricalMembershipBackfillView
@@ -116,7 +84,6 @@ export default function HistoricalMembershipBackfillPanel() {
       maxDates={maxDates}
       dryRun={dryRun}
       onlyMissing={onlyMissing}
-      fileName={fileName}
       isRunning={isRunning}
       error={error instanceof Error ? error.message : undefined}
       onStartDateChange={setStartDate}
@@ -127,11 +94,6 @@ export default function HistoricalMembershipBackfillPanel() {
       onRunTushare={() => {
         if (confirmWrite()) tushareMutation.mutate();
       }}
-      onFileChange={readFile}
-      onRunCsv={() => {
-        if (csvText && confirmWrite()) csvMutation.mutate();
-      }}
-      onDownloadTemplate={() => templateMutation.mutate()}
     />
   );
 }
@@ -225,37 +187,6 @@ export function HistoricalMembershipBackfillView(props: ViewProps) {
             </div>
           </div>
 
-          <div className="grid gap-3 border-t pt-4 lg:grid-cols-[minmax(220px,1fr)_auto_auto] lg:items-end">
-            <Field label="区间 CSV 文件">
-              <label className="flex h-9 cursor-pointer items-center gap-2 border bg-background px-3 text-sm text-muted-foreground">
-                <Upload size={15} />
-                <span className="min-w-0 truncate">{props.fileName || "选择 index_member_all 完整导出"}</span>
-                <input
-                  className="sr-only"
-                  type="file"
-                  accept=".csv,text/csv"
-                  onChange={(event) => props.onFileChange(event.target.files?.[0] ?? null)}
-                  disabled={props.isRunning}
-                />
-              </label>
-            </Field>
-            <button
-              type="button"
-              className="inline-flex h-9 items-center justify-center gap-2 border px-3 text-sm hover:bg-muted disabled:opacity-50"
-              onClick={props.onDownloadTemplate}
-              disabled={props.isRunning}
-            >
-              <Download size={15} /> 下载模板
-            </button>
-            <button
-              type="button"
-              className="inline-flex h-9 items-center justify-center gap-2 border px-3 text-sm font-medium hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
-              onClick={props.onRunCsv}
-              disabled={props.isRunning || !props.fileName}
-            >
-              <FileCheck2 size={15} /> {props.dryRun ? "预检查 CSV" : "写入 CSV"}
-            </button>
-          </div>
           {props.error ? <div className="text-sm text-destructive">{props.error}</div> : null}
         </div>
       </section>
@@ -392,13 +323,4 @@ function shanghaiToday(): string {
     month: "2-digit",
     day: "2-digit",
   }).format(new Date());
-}
-
-function downloadCsv(content: string, filename: string) {
-  const url = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8" }));
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
 }

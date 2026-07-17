@@ -148,8 +148,8 @@
 
 ## Files In Scope
 
-- `alphaagent/server/services/quant/market_timing/panel.py`
-- `tests/alphaagent/services/quant/test_market_timing_intraday.py`
+- `alphaagent/server/services/market_timing/panel.py`
+- `tests/alphaagent/services/market_timing/test_market_timing_intraday.py`
 - `memory/07_market_timing/market_timing_design.md`
 
 前端预计无源码变更，仅执行真实页面验收。

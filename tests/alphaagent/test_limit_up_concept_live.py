@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -14,8 +14,14 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 @pytest.fixture(autouse=True)
-def clear_concept_runtime_between_tests():
+def clear_concept_runtime_between_tests(monkeypatch):
     service.clear_runtime_snapshot()
+    monkeypatch.setattr(
+        repository,
+        "required_prior_trade_date",
+        lambda trade_date: trade_date - timedelta(days=1),
+        raising=False,
+    )
     yield
     service.clear_runtime_snapshot()
 
@@ -65,6 +71,44 @@ def test_latest_prior_membership_date_never_uses_signal_day() -> None:
         [date(2026, 7, 13), date(2026, 7, 14)],
         date(2026, 7, 14),
     ) == date(2026, 7, 13)
+
+
+def test_required_prior_membership_date_uses_the_previous_trading_day() -> None:
+    assert repository.required_prior_membership_date(
+        [date(2026, 7, 16), date(2026, 7, 17)],
+        date(2026, 7, 20),
+    ) == date(2026, 7, 17)
+
+
+def test_refresh_rejects_a_membership_snapshot_older_than_d1(monkeypatch) -> None:
+    previous = _runtime_snapshot("2026-07-14T13:03:00+08:00")
+    service._replace_runtime_snapshot(previous)
+    monkeypatch.setattr(
+        repository,
+        "required_prior_trade_date",
+        lambda _date: date(2026, 7, 13),
+    )
+    monkeypatch.setattr(
+        repository,
+        "load_frozen_membership_rows",
+        lambda _date: (date(2026, 7, 12), _pcb_memberships()),
+    )
+    persisted: list[object] = []
+    monkeypatch.setattr(
+        repository,
+        "save_strength_snapshots",
+        lambda rows: persisted.extend(rows),
+    )
+
+    result = service.refresh_live_concept_snapshot(
+        datetime(2026, 7, 14, 13, 3, 25, tzinfo=SHANGHAI),
+        adapter=FakeAdapter(_full_market_payload("2026-07-14T13:03:20+08:00")),
+    )
+
+    assert result["captured_at"] == previous["captured_at"]
+    assert result["data_quality"]["trigger_allowed"] is False
+    assert "D-1" in result["data_quality"]["source_errors"][0]
+    assert persisted == []
 
 
 def test_select_persisted_concepts_keeps_top30_radar_and_warming() -> None:
@@ -192,7 +236,7 @@ def test_low_market_coverage_keeps_previous_snapshot_without_persisting(monkeypa
     assert persisted == []
 
 
-def test_runtime_snapshot_builds_authoritative_main_board_five_percent_radar(monkeypatch) -> None:
+def test_runtime_snapshot_builds_authoritative_main_board_three_percent_radar(monkeypatch) -> None:
     service.clear_runtime_snapshot()
     memberships = [
         {
@@ -206,7 +250,8 @@ def test_runtime_snapshot_builds_authoritative_main_board_five_percent_radar(mon
             ("600001.SSE", "上证主板"),
             ("000001.SZSE", "深证主板"),
             ("300001.SZSE", "创业板"),
-            ("600002.SSE", "低于雷达"),
+            ("600002.SSE", "三成雷达"),
+            ("600003.SSE", "低于雷达"),
         )
     ]
     monkeypatch.setattr(
@@ -218,7 +263,8 @@ def test_runtime_snapshot_builds_authoritative_main_board_five_percent_radar(mon
         _quote("600001.SSE", "上证主板", 5.0),
         _quote("000001.SZSE", "深证主板", 7.0),
         _quote("300001.SZSE", "创业板", 19.0),
-        _quote("600002.SSE", "低于雷达", 4.99),
+        _quote("600002.SSE", "三成雷达", 3.0),
+        _quote("600003.SSE", "低于雷达", 2.99),
     ]
 
     snapshot = service.refresh_live_concept_snapshot(
@@ -230,6 +276,7 @@ def test_runtime_snapshot_builds_authoritative_main_board_five_percent_radar(mon
     assert {row["vt_symbol"] for row in snapshot["radar_quotes"]} == {
         "600001.SSE",
         "000001.SZSE",
+        "600002.SSE",
     }
 
 

@@ -4,14 +4,15 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, datetime
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from alphaagent.data_sources.akshare_adapter import AkShareAdapter
 from alphaagent.server.db.session import is_database_configured
-from alphaagent.server.services.data_sync import (
-    _audit_minute_gap_requirements,
-    _upsert_minute_bars,
-    load_minute_gap_requirements,
+from alphaagent.server.services.data_sync import _upsert_minute_bars
+from alphaagent.server.services.minute_gaps import (
+    audit_minute_gap_requirements,
+    normalize_minute_gap_requirements,
 )
 from alphaagent.server.services.vnpy_integration.local_data import parse_vt_symbol
 
@@ -21,8 +22,7 @@ SUPPORTED_INTERVALS = {"1m"}
 
 def import_akshare_minute_bars_for_gaps(
     *,
-    gap_csv_text: str = "",
-    gap_file_path: str = "",
+    gaps: Sequence[Mapping[str, Any]],
     interval: str = "1m",
     tail_entry_start: str = "14:30",
     tail_entry_end: str = "14:30",
@@ -43,7 +43,7 @@ def import_akshare_minute_bars_for_gaps(
     if interval_key not in SUPPORTED_INTERVALS:
         return {"status": "unsupported_interval", "interval": interval, "supported": sorted(SUPPORTED_INTERVALS)}
 
-    requirements = load_minute_gap_requirements(gap_csv_text, file_path=gap_file_path)
+    requirements = normalize_minute_gap_requirements(gaps)
     if requirements["errors"] and not requirements["items"]:
         return {
             "status": "empty",
@@ -128,7 +128,7 @@ def import_akshare_minute_bars_for_gaps(
                     }
                 )
 
-    audit_after = _audit_minute_gap_requirements(
+    audit_after = audit_minute_gap_requirements(
         requirements,
         interval=interval_key,
         tail_entry_start=tail_entry_start,

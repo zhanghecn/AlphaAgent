@@ -43,21 +43,46 @@ def latest_prior_membership_date(
     return max(prior) if prior else None
 
 
+def required_prior_membership_date(
+    trade_dates: Sequence[date],
+    trade_date: date,
+) -> date | None:
+    """Return the immediately preceding local trading date."""
+
+    prior = [value for value in trade_dates if value < trade_date]
+    return max(prior) if prior else None
+
+
+def required_prior_trade_date(trade_date: date) -> date | None:
+    with session_scope() as session:
+        value = session.execute(
+            select(func.max(schema.stock_daily_bars.c.trade_date)).where(
+                schema.stock_daily_bars.c.trade_date < trade_date
+            )
+        ).scalar_one_or_none()
+    return value if isinstance(value, date) else None
+
+
 def load_frozen_membership_rows(
     trade_date: date,
 ) -> tuple[date | None, list[dict[str, object]]]:
     """Load the latest complete membership version strictly before D day."""
 
     snapshots = schema.stock_sector_membership_snapshots
+    required_date = required_prior_trade_date(trade_date)
+    if required_date is None:
+        return None, []
     with session_scope() as session:
-        snapshot_date = session.execute(
-            select(func.max(snapshots.c.snapshot_date)).where(
-                snapshots.c.snapshot_date < trade_date,
-                snapshots.c.sector_type.in_(("concept", "theme")),
+        scope_exists = session.execute(
+            select(schema.stock_sector_membership_snapshot_scopes.c.snapshot_date).where(
+                schema.stock_sector_membership_snapshot_scopes.c.snapshot_date
+                == required_date,
+                schema.stock_sector_membership_snapshot_scopes.c.scope_type == "concept",
+                schema.stock_sector_membership_snapshot_scopes.c.complete.is_(True),
             )
         ).scalar_one_or_none()
-        if snapshot_date is None:
-            return None, []
+        if scope_exists is None:
+            return required_date, []
         rows = session.execute(
             select(
                 snapshots,
@@ -70,12 +95,12 @@ def load_frozen_membership_rows(
                 )
             )
             .where(
-                snapshots.c.snapshot_date == snapshot_date,
+                snapshots.c.snapshot_date == required_date,
                 snapshots.c.sector_type.in_(("concept", "theme")),
             )
             .order_by(snapshots.c.sector_id, snapshots.c.vt_symbol)
         ).mappings().all()
-    return snapshot_date, [dict(row) for row in rows]
+    return required_date, [dict(row) for row in rows]
 
 
 def build_strength_snapshot_rows(

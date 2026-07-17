@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import requests
 
 from alphaagent.server.core.config import get_settings
 from alphaagent.server.db.session import is_database_configured
-from alphaagent.server.services.data_sync import (
-    _audit_minute_gap_requirements,
-    _upsert_minute_bars,
-    load_minute_gap_requirements,
+from alphaagent.server.services.data_sync import _upsert_minute_bars
+from alphaagent.server.services.minute_gaps import (
+    audit_minute_gap_requirements,
+    normalize_minute_gap_requirements,
 )
 from alphaagent.server.services.vnpy_integration.local_data import parse_vt_symbol
 
@@ -22,8 +23,7 @@ SUPPORTED_INTERVALS = {"1m": "1min"}
 
 def import_tushare_minute_bars_for_gaps(
     *,
-    gap_csv_text: str = "",
-    gap_file_path: str = "",
+    gaps: Sequence[Mapping[str, Any]],
     interval: str = "1m",
     tail_entry_start: str = "14:30",
     tail_entry_end: str = "14:30",
@@ -54,7 +54,7 @@ def import_tushare_minute_bars_for_gaps(
             "message": "Strict 14:30 gap workflows only support 1m snapshots",
         }
 
-    requirements = load_minute_gap_requirements(gap_csv_text, file_path=gap_file_path)
+    requirements = normalize_minute_gap_requirements(gaps)
     if requirements["errors"] and not requirements["items"]:
         return {
             "status": "empty",
@@ -128,7 +128,7 @@ def import_tushare_minute_bars_for_gaps(
         if not dry_run:
             rows_written += _upsert_minute_bars(symbol, exchange.value, normalized, interval_key, "tushare_stk_mins")
 
-    audit_after = _audit_minute_gap_requirements(
+    audit_after = audit_minute_gap_requirements(
         requirements,
         interval=interval_key,
         tail_entry_start=tail_entry_start,

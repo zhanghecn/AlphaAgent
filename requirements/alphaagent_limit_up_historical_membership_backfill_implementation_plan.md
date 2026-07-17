@@ -4,7 +4,7 @@
 
 **Goal:** Rebuild auditable daily Shenwan level-2 memberships and make limit-up history consume them point in time.
 
-**Architecture:** A dedicated import service fetches or parses membership intervals, expands them only across reliable local trade dates, audits daily main-board coverage, and atomically replaces the industry scope. Data-quality SQL validates actual daily coverage; history repository merges snapshots by date before current-membership fallback.
+**Architecture:** A dedicated import service fetches membership intervals from the configured provider, expands them only across reliable local trade dates, audits daily main-board coverage, and atomically replaces the industry scope. Data-quality SQL validates actual daily coverage; history repository merges snapshots by date before current-membership fallback. User CSV/template/file paths are intentionally absent.
 
 **Tech Stack:** Python 3.13, requests, SQLAlchemy/PostgreSQL, pandas, FastAPI, React 19, TanStack Query, pytest, Vitest, Playwright.
 
@@ -16,7 +16,7 @@
 - Create: `alphaagent/server/services/limit_up/historical_membership_import.py`
 - Create: `tests/alphaagent/test_limit_up_membership_import.py`
 
-- [ ] Normalize Tushare/CSV interval rows, main-board filter and L2 fields.
+- [ ] Normalize Tushare interval rows, main-board filter and L2 fields.
 - [ ] Expand `in_date <= D < out_date`, resolve overlaps by latest `in_date`, and report conflicts.
 - [ ] Audit each date against expected local daily symbols with a 90% minimum.
 
@@ -29,7 +29,7 @@
 
 - [ ] Add industry-scoped atomic replacement that preserves concept rows.
 - [ ] Query `index_classify(L1, SW2021)` then `index_member_all` per L1 code.
-- [ ] Add bounded reliable-date selection, token guard, dry-run, CSV template and per-date summaries.
+- [ ] Add bounded reliable-date selection, token guard, dry-run and per-date summaries.
 
 ### Task 3: Strict data quality and point-in-time history
 
@@ -53,7 +53,7 @@
 - Create: `frontend/src/features/limitUp/HistoricalMembershipBackfillPanel.spec.tsx`
 - Modify: `frontend/src/features/limitUp/LimitUpEvidenceBackfillPanel.tsx`
 
-- [ ] Add status, template, Tushare and CSV endpoints with bounded dates.
+- [ ] Add status and bounded Tushare endpoints; keep old template/CSV routes at `404`.
 - [ ] Add typed client contracts and an un-nested industry-membership section in the existing tab.
 - [ ] Render token state, daily coverage, date audit and write confirmation on desktop/mobile.
 
@@ -65,6 +65,6 @@
 - Modify: `memory/09_decisions/decisions.md`
 
 - [ ] Run focused/full backend and frontend tests, compile, build and `git diff --check`.
-- [ ] Rebuild API/Web and verify authenticated status/template/token-unavailable/CSV-rejected paths.
+- [ ] Rebuild API/Web and verify authenticated status, token-unavailable and removed-route `404` paths.
 - [ ] Verify `/data` and `/limit-up` desktop/mobile, console, network and no whole-page overflow.
 - [ ] Record actual coverage only; with no token/data imported, keep historical membership at zero and simulation blocked.

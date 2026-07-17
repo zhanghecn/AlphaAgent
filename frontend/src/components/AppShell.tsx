@@ -3,8 +3,6 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   Database,
   LayoutDashboard,
-  Activity,
-  Briefcase,
   History,
   TrendingUp,
   Crosshair,
@@ -24,10 +22,8 @@ const NAV_ITEMS = [
   { to: "/", label: "今日市场", icon: LayoutDashboard },
   { to: "/market", label: "大盘择时", icon: Crosshair },
   { to: "/mainline", label: "概念主线", icon: History },
-  { to: "/limit-up", label: "打板研究", icon: Flame },
+  { to: "/short-term", label: "短线研究", icon: Flame },
   { to: "/stocks", label: "全 A 股票", icon: TrendingUp },
-  { to: "/quant", label: "量化交易", icon: Activity },
-  { to: "/portfolio", label: "持仓", icon: Briefcase },
   { to: "/data", label: "数据管理", icon: Database },
 ];
 

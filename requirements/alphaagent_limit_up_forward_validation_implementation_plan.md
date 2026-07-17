@@ -1,5 +1,9 @@
 # AlphaAgent 打板严格前向验证实施计划
 
+> **Current contract (2026-07-17):** v1 的多买点研究观察口径已被 v2 取代。正式前向
+> 只读取保存的 `recommendations.actionable_recommendations`，固定盘中 `sweep` 买入和
+> D+1 `next_close` 卖出；`research_action` 不得产生正式订单。
+
 > **For agentic workers:** Execute this plan inline with test-first checkpoints. Steps use checkbox (`- [ ]`) syntax for tracking. Do not commit unless the user explicitly requests it.
 
 **Goal:** 只用系统在交易时段真实保存的非过期盘中信号建立前向观察账本，并在下一交易日行情到齐后闭合结果，让用户按日期、四种买点和 D+1 开盘/收盘口径核验真实推荐质量。
@@ -81,3 +85,11 @@
 - [x] Rebuild API/Web containers, verify health and call the new endpoint against the real database.
 - [x] Validate `/limit-up` with Playwright on desktop and `390x844`: date range, four buy points, both D+1 exits, collecting state, local table scrolling, console and completed network requests.
 - [x] Update durable memory with the exact eligible forward-day count and current limitation; do not describe proxy results as stable compounding.
+
+### Task 7: Remove recommendation/backtest divergence
+
+- [x] Add failing tests proving a lane or `research_action=buy_now` missing from the saved formal list produces no order.
+- [x] Add an explicit no-fallback `actionable_recommendations` source to the strict snapshot parser.
+- [x] Upgrade the formal report to `limit-up-forward-validation-v2` and invalidate v1 performance.
+- [x] Freeze the public endpoint to `sweep + next_close`; reject alternative execution contracts.
+- [x] Preserve first-seen point-in-time selection and keep all no-future-data audits active.

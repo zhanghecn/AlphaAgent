@@ -13,8 +13,8 @@
 ### Task 1: 用失败测试固定结构性破位与无未来函数语义
 
 **Files:**
-- Modify: `tests/alphaagent/services/quant/test_market_timing_no_lookahead.py`
-- Modify: `alphaagent/server/services/quant/market_timing/signal.py`
+- Modify: `tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py`
+- Modify: `alphaagent/server/services/market_timing/signal.py`
 
 - [x] **Step 1: 添加可控结构性因子 helper**
 
@@ -107,7 +107,7 @@ assert polluted_states[:cut] == prefix_states
 Run:
 
 ```bash
-uv run pytest tests/alphaagent/services/quant/test_market_timing_no_lookahead.py -q -k "structural or danger"
+uv run pytest tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py -q -k "structural or danger"
 ```
 
 Expected: 因缺少 setup 常量、危险状态函数和 `structural_breakdown` 参数而失败。
@@ -199,7 +199,7 @@ def candidate_setup(
 Run:
 
 ```bash
-uv run pytest tests/alphaagent/services/quant/test_market_timing_no_lookahead.py -q
+uv run pytest tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py -q
 ```
 
 Expected: PASS。
@@ -207,16 +207,16 @@ Expected: PASS。
 - [x] **Step 9: 提交纯信号层变更**
 
 ```bash
-git add alphaagent/server/services/quant/market_timing/signal.py \
-  tests/alphaagent/services/quant/test_market_timing_no_lookahead.py
+git add alphaagent/server/services/market_timing/signal.py \
+  tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py
 git commit -m "feat(market-timing): add structural danger state"
 ```
 
 ### Task 2: 让面板输出一致的当前方向和逐日危险状态
 
 **Files:**
-- Modify: `alphaagent/server/services/quant/market_timing/panel.py`
-- Modify: `tests/alphaagent/services/quant/test_market_timing_intraday.py`
+- Modify: `alphaagent/server/services/market_timing/panel.py`
+- Modify: `tests/alphaagent/services/market_timing/test_market_timing_intraday.py`
 
 - [x] **Step 1: 添加面板失败测试**
 
@@ -247,7 +247,7 @@ assert rows[repair_index]["danger_state"] == sig.NORMAL
 Run:
 
 ```bash
-uv run pytest tests/alphaagent/services/quant/test_market_timing_intraday.py -q -k "timing_series or current_direction"
+uv run pytest tests/alphaagent/services/market_timing/test_market_timing_intraday.py -q -k "timing_series or current_direction"
 ```
 
 Expected: `_build_timing_series` 不接收参与度且没有 `danger_state`。
@@ -312,9 +312,9 @@ Run:
 
 ```bash
 uv run pytest \
-  tests/alphaagent/services/quant/test_market_timing_no_lookahead.py \
-  tests/alphaagent/services/quant/test_market_timing_intraday.py \
-  tests/alphaagent/services/quant/test_market_timing_backtest.py -q
+  tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py \
+  tests/alphaagent/services/market_timing/test_market_timing_intraday.py \
+  tests/alphaagent/services/market_timing/test_market_timing_backtest.py -q
 ```
 
 Expected: PASS。
@@ -322,8 +322,8 @@ Expected: PASS。
 - [x] **Step 6: 提交面板变更**
 
 ```bash
-git add alphaagent/server/services/quant/market_timing/panel.py \
-  tests/alphaagent/services/quant/test_market_timing_intraday.py
+git add alphaagent/server/services/market_timing/panel.py \
+  tests/alphaagent/services/market_timing/test_market_timing_intraday.py
 git commit -m "feat(market-timing): expose structural danger state"
 ```
 
@@ -490,10 +490,10 @@ git commit -m "docs(market-timing): record structural risk evidence"
 
 ```bash
 uv run pytest \
-  tests/alphaagent/services/quant/test_market_timing_no_lookahead.py \
-  tests/alphaagent/services/quant/test_market_timing_intraday.py \
-  tests/alphaagent/services/quant/test_market_timing_backtest.py -q
-uv run python -m compileall alphaagent/server/services/quant/market_timing
+  tests/alphaagent/services/market_timing/test_market_timing_no_lookahead.py \
+  tests/alphaagent/services/market_timing/test_market_timing_intraday.py \
+  tests/alphaagent/services/market_timing/test_market_timing_backtest.py -q
+uv run python -m compileall alphaagent/server/services/market_timing
 ```
 
 Expected: 全部 PASS，compileall 无错误。
