@@ -1,4 +1,4 @@
-"""Strict forward observation ledger for saved live limit-up signals."""
+"""Forward ledger for formal recommendations saved during live trading."""
 
 from __future__ import annotations
 
@@ -26,8 +26,10 @@ from alphaagent.server.services.limit_up.versions import (
 )
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-VALIDATION_VERSION = "limit-up-forward-validation-v1"
-REPORT_MODE = "research_plan_forward_observation"
+VALIDATION_VERSION = "limit-up-forward-validation-v2"
+REPORT_MODE = "saved_actionable_recommendation_forward_validation"
+FORMAL_ENTRY_MODE = "sweep"
+FORMAL_EXIT_MODE = "next_close"
 PROCESS_CHECK_DAYS = 20
 STRATEGY_REVIEW_DAYS = 60
 ACTIVE_SESSION_STAGES = {"auction", "morning", "afternoon", "tail", "close_auction"}
@@ -47,8 +49,6 @@ EXCLUSION_LABELS = {
 def get_forward_validation(
     start: date | None,
     end: date | None,
-    entry_mode: str,
-    exit_mode: str,
     *,
     current_date: date | None = None,
 ) -> dict[str, object]:
@@ -81,8 +81,8 @@ def get_forward_validation(
         dataset,
         snapshots,
         trade_calendar=trade_calendar,
-        entry_mode=entry_mode,
-        exit_mode=exit_mode,
+        entry_mode=FORMAL_ENTRY_MODE,
+        exit_mode=FORMAL_EXIT_MODE,
         current_date=today,
     )
 
@@ -116,8 +116,8 @@ def build_forward_validation_report(
         entry_mode=entry_mode,
         exit_mode=exit_mode,
         historical_proxy_candidates=[],
-        strict_signal_action_field="research_action",
-        strict_fill_evidence="saved_research_action_not_executed",
+        strict_signal_source="actionable_recommendations",
+        strict_fill_evidence="saved_actionable_recommendation_proxy",
     )
     bars = _rows(dataset.get("daily_bars"))
     bar_index = {
@@ -155,7 +155,9 @@ def build_forward_validation_report(
         "entry_mode_label": ENTRY_MODE_LABELS[entry_mode],
         "exit_mode": exit_mode,
         "simulation_eligible": False,
-        "observation_scope": "saved_live_snapshots_only_no_historical_backfill",
+        "observation_scope": (
+            "saved_actionable_recommendations_only_no_historical_backfill"
+        ),
         "summary": summary,
         "progress": {
             "process_check": _milestone(observed_day_count, PROCESS_CHECK_DAYS),
@@ -178,6 +180,7 @@ def build_forward_validation_report(
             "observed_start": observed_dates[0] if observed_dates else None,
             "observed_end": observed_dates[-1] if observed_dates else None,
             "historical_proxy_snapshot_count": 0,
+            "signal_source": "recommendations.actionable_recommendations",
             "execution_confidence": "proxy_without_l2",
         },
         "observation_days": _observation_days(eligible, orders, trades),
@@ -185,7 +188,7 @@ def build_forward_validation_report(
         "orders": orders[-200:],
         "trades": trades[-200:],
         "limitations": [
-            "只统计系统当时真实保存且非过期的盘中信号，不用历史代理补齐空白日期。",
+            "只统计系统当时真实保存且非过期的正式可买列表，不把观察池或研究动作计为交易。",
             "当前没有Tick/L2队列证据，闭合交易仍是价格代理，simulation_eligible固定为false。",
             "20个交易日只做流程检查；满60个交易日后才重新评估收益稳定性和数据中断风险。",
         ],

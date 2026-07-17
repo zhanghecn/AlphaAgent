@@ -184,6 +184,22 @@ describe("live limit-up portfolio presentation", () => {
       "600002.SSE",
     ]);
   });
+
+  it("keeps a first-seen sealed momentum buy actionable", () => {
+    const momentum = {
+      ...signal("600009.SSE", 1, "buy_now"),
+      entry_kind: "momentum",
+      signal_state: "trigger_ready",
+      missed_preseal_entry: true,
+    };
+
+    expect(
+      liveSignalsForScope(
+        snapshot({ actionable_recommendations: [momentum] }),
+        "portfolio",
+      ).map((row) => row.vt_symbol),
+    ).toEqual(["600009.SSE"]);
+  });
 });
 
 function profitabilitySignal(

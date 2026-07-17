@@ -27,7 +27,7 @@ def test_history_replay_schema_uses_date_and_version_primary_key() -> None:
 
 def test_weak_market_attack_history_uses_v14_version() -> None:
     assert history_engine.HISTORY_STRATEGY_VERSION == "limit-up-history-v15"
-    assert versions.LIVE_STRATEGY_VERSION == "limit-up-live-v12"
+    assert versions.LIVE_STRATEGY_VERSION == "limit-up-live-v15"
 
 
 def test_reliable_date_window_rejects_sparse_prefix() -> None:

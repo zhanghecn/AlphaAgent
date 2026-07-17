@@ -22,6 +22,7 @@ from alphaagent.server.services.limit_up.history_service import get_history_back
 
 ENTRY_MODES = {"auction", "sweep", "tail", "next_auction"}
 EXIT_MODES = {"next_open", "next_close"}
+STRICT_SIGNAL_SOURCES = {"lanes", "actionable_recommendations"}
 ENTRY_MODE_LABELS = {
     "auction": "当日竞价",
     "sweep": "盘中扫板/回封",
@@ -115,13 +116,15 @@ def build_limit_up_entry_backtest(
     stamp_tax_rate: float = 0.0005,
     slippage_bps: float = 10.0,
     historical_proxy_candidates: Sequence[Mapping[str, object]] | None = None,
-    strict_signal_action_field: str = "action",
+    strict_signal_source: str = "lanes",
     strict_fill_evidence: str = "saved_buy_action",
 ) -> dict[str, object]:
     if entry_mode not in ENTRY_MODES:
         raise ValueError(f"Unsupported entry mode: {entry_mode}")
     if exit_mode not in EXIT_MODES:
         raise ValueError(f"Unsupported exit mode: {exit_mode}")
+    if strict_signal_source not in STRICT_SIGNAL_SOURCES:
+        raise ValueError(f"Unsupported strict signal source: {strict_signal_source}")
 
     bars = _rows(dataset.get("daily_bars"))
     bar_index = {
@@ -141,7 +144,7 @@ def build_limit_up_entry_backtest(
     strict_orders = _strict_snapshot_orders(
         snapshots,
         entry_mode,
-        action_field=strict_signal_action_field,
+        signal_source=strict_signal_source,
         fill_evidence=strict_fill_evidence,
     )
     proxy_orders = (
@@ -216,7 +219,7 @@ def _strict_snapshot_orders(
     snapshots: Sequence[Mapping[str, object]],
     entry_mode: str,
     *,
-    action_field: str = "action",
+    signal_source: str = "lanes",
     fill_evidence: str = "saved_buy_action",
 ) -> list[dict[str, object]]:
     ordered_snapshots = sorted(snapshots, key=_snapshot_sort_key)
@@ -227,22 +230,13 @@ def _strict_snapshot_orders(
     lane_name, entry_kinds, action = _strict_signal_filter(entry_mode)
     for snapshot in ordered_snapshots:
         trade_date = str(snapshot.get("trade_date") or "")[:10]
-        recommendations = snapshot.get("recommendations")
-        recommendations = recommendations if isinstance(recommendations, Mapping) else {}
-        lanes = recommendations.get("lanes")
-        lanes = lanes if isinstance(lanes, Mapping) else {}
-        rows = lanes.get(lane_name)
-        if not isinstance(rows, list):
-            continue
-        for signal in rows:
+        for signal in _strict_snapshot_signals(snapshot, lane_name, signal_source):
             if not isinstance(signal, Mapping):
                 continue
-            signal_action = (
-                signal.get(action_field)
-                if action_field in signal
-                else signal.get("action")
-            )
-            if signal_action != action or str(signal.get("entry_kind") or "") not in entry_kinds:
+            if (
+                signal.get("action") != action
+                or str(signal.get("entry_kind") or "") not in entry_kinds
+            ):
                 continue
             symbol = str(signal.get("vt_symbol") or "")
             if not symbol or not trade_date:
@@ -261,6 +255,24 @@ def _strict_snapshot_orders(
             if key not in selected:
                 selected[key] = order
     return list(selected.values())
+
+
+def _strict_snapshot_signals(
+    snapshot: Mapping[str, object],
+    lane_name: str,
+    signal_source: str,
+) -> list[object]:
+    recommendations = snapshot.get("recommendations")
+    if not isinstance(recommendations, Mapping):
+        return []
+    if signal_source == "actionable_recommendations":
+        rows = recommendations.get("actionable_recommendations")
+        return rows if isinstance(rows, list) else []
+    lanes = recommendations.get("lanes")
+    if not isinstance(lanes, Mapping):
+        return []
+    rows = lanes.get(lane_name)
+    return rows if isinstance(rows, list) else []
 
 
 def _latest_snapshots_by_date(
@@ -285,7 +297,7 @@ def _strict_signal_filter(entry_mode: str) -> tuple[str, set[str], str]:
     if entry_mode == "auction":
         return "now", {"auction"}, "buy_now"
     if entry_mode == "sweep":
-        return "now", {"sweep", "reseal"}, "buy_now"
+        return "now", {"momentum", "sweep", "reseal"}, "buy_now"
     if entry_mode == "tail":
         return "tail", {"tail_seal"}, "buy_now"
     return "next_auction", {"next_auction"}, "next_auction"

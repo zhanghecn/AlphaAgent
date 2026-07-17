@@ -40,8 +40,12 @@ def _candidate(symbol: str, **overrides: object) -> dict[str, object]:
         "sector_touch_count": 3,
         "sector_heat": 70.0,
         "sector_main_net_inflow": 2_000_000_000.0,
+        "sector_main_net_inflow_ratio": 2.0,
+        "sector_flow_current": True,
         "stock_main_net_inflow": 120_000_000.0,
         "turnover_rate": 8.0,
+        "lane_support_score": 60.0,
+        "lane_entry_quality_score": 65.0,
         "seal_amount": None,
         "turnover": 500_000_000.0,
         "limit_price": 11.0,
@@ -1487,7 +1491,7 @@ def test_live_ranking_assigns_sector_rank_without_dropping_candidates() -> None:
     ) == 3
 
 
-def test_morning_recommendation_buys_only_sufficiently_resealed_leader() -> None:
+def test_morning_recommendation_keeps_qualified_sealed_board_actionable() -> None:
     captured_at = datetime(2026, 7, 10, 10, 5, tzinfo=SHANGHAI)
     candidates = rank_live_candidates(
         [
@@ -1500,8 +1504,10 @@ def test_morning_recommendation_buys_only_sufficiently_resealed_leader() -> None
 
     now_by_symbol = {row["vt_symbol"]: row for row in result["lanes"]["now"]}
     assert now_by_symbol["600001.SSE"]["action"] == "buy_now"
-    assert now_by_symbol["600001.SSE"]["entry_kind"] == "reseal"
-    assert now_by_symbol["600002.SSE"]["action"] == "wait_tail"
+    assert now_by_symbol["600001.SSE"]["entry_kind"] == "momentum"
+    assert now_by_symbol["600002.SSE"]["action"] == "buy_now"
+    assert now_by_symbol["600002.SSE"]["entry_kind"] == "momentum"
+    assert "排队" in now_by_symbol["600002.SSE"]["reason"]
     assert result["market_gate"]["passed"] is True
     assert result["market_gate"]["timing_used"] is False
 
@@ -1695,7 +1701,8 @@ def test_live_buy_is_blocked_when_seal_amount_shrinks_sharply() -> None:
     )
 
     signal = result["lanes"]["now"][0]
-    assert signal["action"] == "pass"
+    assert signal["action"] == "observe"
+    assert signal["signal_state"] == "approaching_trigger"
     assert signal["seal_amount_change_pct"] == -40.0
     assert "封单较上一快照缩水40.0%" in signal["reason"]
 
@@ -2353,7 +2360,7 @@ def test_first_board_before_ten_is_dynamic_waiting_not_hard_rejection() -> None:
     assert signal["pending_reasons"] == ["10点前仅观察，等待10点后确认"]
 
 
-def test_sweep_checks_expose_the_same_heat_and_expansion_thresholds_used_to_trigger() -> None:
+def test_momentum_checks_keep_d1_heat_diagnostic_and_live_expansion_blocking() -> None:
     candidate = _candidate(
         "600001.SSE",
         state="near_limit",
@@ -2373,7 +2380,8 @@ def test_sweep_checks_expose_the_same_heat_and_expansion_thresholds_used_to_trig
     assert signal["blocking_scope"] == "dynamic"
     checks = {check["code"]: check for check in signal["trigger_checks"]}
     assert checks["sector_heat"]["observed"] == "55.00"
-    assert checks["sector_heat"]["required"] == ">=60"
+    assert checks["sector_heat"]["status"] == "informational"
+    assert checks["sector_heat"]["required"] == "仅用于排序，不作为盘中买点门"
     assert checks["sector_expansion"]["observed"] == "2只"
     assert checks["sector_expansion"]["required"] == ">=3只"
 
@@ -2531,7 +2539,7 @@ def test_historical_veto_runs_before_lane_validation_and_blocks_research_action(
     assert signal["reason"].startswith("历史证据否决")
 
 
-def test_negative_matured_history_vetoes_rule_buy() -> None:
+def test_negative_matured_history_ranks_first_board_without_vetoing_buy() -> None:
     candidate = _candidate(
         "600001.SSE",
         state="resealed",
@@ -2567,9 +2575,11 @@ def test_negative_matured_history_vetoes_rule_buy() -> None:
     )
 
     signal = result["recommendations"]["lanes"]["now"][0]
-    assert signal["action"] == "pass"
+    assert signal["action"] == "buy_now"
     assert signal["historical_evidence"]["risk_vetoed"] is True
-    assert "历史证据否决" in signal["reason"]
+    assert signal["historical_evidence"]["risk_veto_applied"] is False
+    assert signal["historical_evidence"]["risk_role"] == "ranking_only"
+    assert "历史证据否决" not in signal["reason"]
 
 
 def test_history_evidence_failure_blocks_trade_actions_but_keeps_observation(monkeypatch) -> None:
@@ -2625,7 +2635,8 @@ def test_market_gate_blocks_buy_when_failed_rate_is_too_high() -> None:
         captured_at,
     )
 
-    assert result["lanes"]["now"][0]["action"] == "pass"
+    assert result["lanes"]["now"][0]["action"] == "observe"
+    assert result["lanes"]["now"][0]["blocking_scope"] == "market"
     assert result["market_gate"]["passed"] is False
 
 
@@ -2645,7 +2656,8 @@ def test_live_buy_is_blocked_when_sector_fund_flow_is_negative() -> None:
     result = build_live_recommendations([candidate], _market(), captured_at)
 
     signal = result["lanes"]["now"][0]
-    assert signal["action"] == "pass"
+    assert signal["action"] == "observe"
+    assert signal["signal_state"] == "approaching_trigger"
     assert "板块主力净流出" in signal["reason"]
 
 
@@ -3003,7 +3015,7 @@ def test_fifteen_second_pool_increment_updates_cached_concept_seal_count() -> No
     assert result["concepts_by_id"]["BK0877"]["strong_5_count"] == 2
 
 
-def test_sweep_requires_fresh_concept_launch_and_top3_leader() -> None:
+def test_realtime_concept_launch_requires_fresh_diffusion_and_top3_leader() -> None:
     candidate = _candidate(
         "600001.SSE",
         concept_state="launch",
@@ -3034,7 +3046,7 @@ def test_sweep_requires_fresh_concept_launch_and_top3_leader() -> None:
     ) == []
 
 
-def test_legacy_sector_route_survives_unavailable_concept() -> None:
+def test_realtime_industry_route_survives_unavailable_concept() -> None:
     candidate = _candidate(
         "600001.SSE",
         concept_state="unavailable",
@@ -3054,18 +3066,18 @@ def test_legacy_sector_route_survives_unavailable_concept() -> None:
 
     assert live_policy._sweep_ready(candidate) is True
     assert by_code["sector_route"]["status"] == "passed"
-    assert by_code["sector_route"]["observed"] == "行业基线通过"
+    assert by_code["sector_route"]["observed"] == "盘中行业路径通过"
     assert by_code["concept_state"]["status"] == "informational"
     assert by_code["concept_state"]["diagnostic_status"] == "pending"
 
 
-def test_concept_increment_bypasses_wrong_legacy_sector_group() -> None:
+def test_concept_only_route_waits_for_launch() -> None:
     candidate = _candidate(
         "600001.SSE",
         sector_heat=45.0,
         sector_touch_count=0,
         sector_main_net_inflow=-5_000_000_000.0,
-        concept_state="launch",
+        concept_state="observe",
         concept_trigger_allowed=True,
         concept_snapshot_age_seconds=12,
         concept_coverage_ratio=0.97,
@@ -3080,25 +3092,26 @@ def test_concept_increment_bypasses_wrong_legacy_sector_group() -> None:
     )
     by_code = {check["code"]: check for check in checks}
 
-    assert live_policy._sweep_ready(candidate) is True
-    assert by_code["sector_route"]["status"] == "passed"
-    assert by_code["sector_route"]["observed"] == "概念增量通过"
+    assert live_policy._sweep_ready(candidate) is False
+    assert by_code["sector_route"]["status"] == "failed"
+    assert by_code["sector_route"]["observed"] == "两条实时路径均未通过"
+    assert by_code["concept_state"]["diagnostic_status"] == "pending"
     assert by_code["sector_heat"]["status"] == "informational"
     assert by_code["sector_heat"]["diagnostic_status"] == "pending"
     assert by_code["sector_flow"]["blocking"] is False
 
 
-def test_both_sector_routes_failing_keeps_candidate_in_observation() -> None:
+def test_both_dynamic_routes_failing_keeps_candidate_in_observation() -> None:
     candidate = _candidate(
         "600001.SSE",
         sector_heat=45.0,
         sector_touch_count=0,
-        concept_state="warming",
+        concept_state="observe",
         concept_trigger_allowed=True,
         concept_snapshot_age_seconds=12,
         concept_coverage_ratio=0.97,
-        concept_strong_5_count=4,
-        concept_leader_rank=1,
+        concept_strong_5_count=1,
+        concept_leader_rank=8,
     )
 
     checks = live_policy._candidate_execution_checks(
@@ -3110,7 +3123,79 @@ def test_both_sector_routes_failing_keeps_candidate_in_observation() -> None:
 
     assert live_policy._sweep_ready(candidate) is False
     assert by_code["sector_route"]["status"] == "pending"
-    assert by_code["sector_route"]["observed"] == "两条路径均未通过"
+    assert by_code["sector_route"]["observed"] == "两条实时路径均未通过"
+
+
+def test_realtime_industry_route_ignores_d1_heat() -> None:
+    candidate = _candidate(
+        "000037.SZSE",
+        sector_heat=28.8,
+        sector_touch_count=7,
+        sector_main_net_inflow=1_024_881_632.0,
+        sector_main_net_inflow_ratio=3.12,
+        sector_flow_current=True,
+        concept_state="observe",
+        concept_trigger_allowed=True,
+        concept_snapshot_age_seconds=5,
+        concept_coverage_ratio=1.0,
+        concept_strong_5_count=7,
+        concept_leader_rank=1,
+    )
+
+    checks = live_policy._candidate_execution_checks(
+        candidate,
+        require_expansion=True,
+        entry_kind="momentum",
+    )
+    by_code = {check["code"]: check for check in checks}
+
+    assert by_code["sector_route"]["status"] == "passed"
+    assert by_code["sector_route"]["observed"] == "盘中行业路径通过"
+    assert by_code["sector_heat"]["status"] == "informational"
+    assert by_code["sector_heat"]["blocking"] is False
+
+
+def test_concept_only_route_requires_launch_and_rejects_ebb() -> None:
+    base = _candidate(
+        "600001.SSE",
+        sector_touch_count=0,
+        sector_main_net_inflow=-500_000_000.0,
+        sector_main_net_inflow_ratio=-8.0,
+        sector_flow_current=True,
+        concept_trigger_allowed=True,
+        concept_snapshot_age_seconds=5,
+        concept_coverage_ratio=1.0,
+        concept_strong_5_count=7,
+        concept_leader_rank=1,
+    )
+
+    observe_checks = live_policy._candidate_execution_checks(
+        {**base, "concept_state": "observe"},
+        require_expansion=True,
+        entry_kind="momentum",
+    )
+    observe_by_code = {check["code"]: check for check in observe_checks}
+    assert observe_by_code["sector_route"]["status"] == "failed"
+    assert observe_by_code["concept_state"]["diagnostic_status"] == "pending"
+    assert observe_by_code["concept_state"]["required"] == "launch"
+
+    launch_checks = live_policy._candidate_execution_checks(
+        {**base, "concept_state": "launch"},
+        require_expansion=True,
+        entry_kind="momentum",
+    )
+    launch_by_code = {check["code"]: check for check in launch_checks}
+    assert launch_by_code["sector_route"]["status"] == "passed"
+    assert launch_by_code["sector_route"]["observed"] == "概念启动路径通过"
+
+    ebb_checks = live_policy._candidate_execution_checks(
+        {**base, "concept_state": "ebb"},
+        require_expansion=True,
+        entry_kind="momentum",
+    )
+    ebb_by_code = {check["code"]: check for check in ebb_checks}
+    assert ebb_by_code["sector_route"]["status"] == "failed"
+    assert ebb_by_code["concept_state"]["diagnostic_status"] == "failed"
 
 
 def test_stale_concept_snapshot_blocks_concept_only_trigger() -> None:
@@ -3262,7 +3347,7 @@ def test_short_cycle_pcb_increment_reaches_first_board_trigger() -> None:
     assert candidate["lane_decision"] == "eligible"
     assert signal["action"] == "buy_now"
     assert signal["signal_state"] == "trigger_ready"
-    assert signal["sector_route"] == "concept_increment"
+    assert signal["sector_route"] == "realtime_concept_launch"
     assert "prior_board_evidence_missing" not in signal["lane_blockers"]
 
 
@@ -3340,12 +3425,24 @@ def test_weak_market_theme_attack_reaches_live_first_board_trigger() -> None:
     assert signal["action"] == "buy_now"
     assert signal["signal_state"] == "trigger_ready"
     assert signal["first_board_route"] == "weak_market_theme_attack"
-    assert signal["sector_route"] == "concept_increment"
+    assert signal["sector_route"] == "realtime_concept_launch"
     assert not {
         "first_board_touch_gene_weak",
         "financial_report_unavailable",
         "first_board_repair_setup_missing",
     }.intersection(signal["lane_blockers"])
+
+    d1_only = {
+        **candidate,
+        "concept_strength_score": None,
+        "concept_leader_rank": None,
+        "sector_heat": 95.0,
+        "sector_dragon_rank": 1,
+    }
+    live_service._attach_lane_decisions([d1_only], market, captured_at)
+    assert d1_only["lane_decision"] == "blocked"
+    assert d1_only["first_board_route"] is None
+    assert "first_board_repair_setup_missing" in d1_only["lane_blockers"]
 
     blocked = {
         **candidate,
@@ -3363,7 +3460,7 @@ def test_weak_market_theme_attack_reaches_live_first_board_trigger() -> None:
     assert blocked_signal["action"] == "pass"
 
 
-def test_warming_concept_outside_one_percent_zone_is_prelimit_observation() -> None:
+def test_first_board_momentum_can_trigger_outside_one_percent_zone() -> None:
     candidate = rank_live_candidates(
         [
             _candidate(
@@ -3384,11 +3481,71 @@ def test_warming_concept_outside_one_percent_zone_is_prelimit_observation() -> N
         datetime(2026, 7, 14, 13, 3, tzinfo=SHANGHAI),
     )["lanes"]["now"][0]
 
+    assert signal["action"] == "buy_now"
+    assert signal["signal_state"] == "trigger_ready"
+    assert signal["entry_kind"] == "momentum"
+    assert signal["momentum_gate_passed"] is True
+    assert signal["trigger_price"] == candidate["last_price"]
+    checks = {check["code"]: check for check in signal["trigger_checks"]}
+    assert checks["stock_momentum"]["status"] == "passed"
+    assert "limit_distance" not in checks
+
+
+def test_first_board_momentum_below_threshold_remains_observation() -> None:
+    candidate = rank_live_candidates(
+        [
+            _candidate(
+                "600001.SSE",
+                distance_to_limit_pct=0.2,
+                lane_support_score=54.9,
+            )
+        ]
+    )[0]
+
+    signal = build_live_recommendations(
+        [candidate],
+        _market(),
+        datetime(2026, 7, 14, 10, 3, tzinfo=SHANGHAI),
+    )["lanes"]["now"][0]
+
     assert signal["action"] == "observe"
-    assert signal["signal_state"] == "concept_warming"
+    assert signal["entry_kind"] == "momentum"
+    assert signal["momentum_gate_passed"] is False
+    checks = {check["code"]: check for check in signal["trigger_checks"]}
+    assert checks["stock_momentum"]["status"] == "pending"
 
 
-def test_live_research_uses_actual_touch_time_for_a_sealed_board() -> None:
+def test_first_seen_sealed_momentum_can_enter_actionable_list() -> None:
+    candidate = rank_live_candidates(
+        [
+            _candidate(
+                "600001.SSE",
+                state="sealed",
+                missed_preseal_entry=True,
+            )
+        ]
+    )[0]
+    signal = build_live_recommendations(
+        [candidate],
+        _market(),
+        datetime(2026, 7, 14, 10, 3, tzinfo=SHANGHAI),
+    )["lanes"]["now"][0]
+    signal["historical_evidence"] = {
+        "d1_money_effect_sample_count": 8,
+        "historical_win_rate": 55.0,
+    }
+
+    actionable = live_service._build_live_actionable_recommendations(
+        {"lanes": {"now": [signal], "tail": [], "next_auction": []}},
+        captured_at=datetime(2026, 7, 14, 10, 3, tzinfo=SHANGHAI),
+    )
+
+    assert signal["action"] == "buy_now"
+    assert signal["entry_kind"] == "momentum"
+    assert [row["vt_symbol"] for row in actionable] == ["600001.SSE"]
+
+
+def test_live_first_board_momentum_uses_current_evaluation_time() -> None:
     research = live_service._live_research_candidate(
         _candidate(
             "600001.SSE",
@@ -3400,6 +3557,40 @@ def test_live_research_uses_actual_touch_time_for_a_sealed_board() -> None:
     )
 
     assert research["evaluation_time"] == "10:05:00"
+    assert research["signal_time"] == "10:05:00"
+
+
+def test_live_first_board_research_does_not_promote_d1_sector_data() -> None:
+    research = live_service._live_research_candidate(
+        _candidate(
+            "600001.SSE",
+            sector_heat=88.0,
+            sector_dragon_rank=1,
+            concept_strength_score=None,
+            concept_leader_rank=None,
+        ),
+        {},
+        datetime(2026, 7, 14, 10, 5, tzinfo=SHANGHAI),
+    )
+
+    assert research["prior_industry_heat_score"] is None
+    assert research["prior_industry_leader_rank"] is None
+    assert research["sector_heat"] == 88.0
+    assert research["live_sector_gate_managed"] is True
+
+
+def test_live_relay_research_preserves_actual_touch_time() -> None:
+    research = live_service._live_research_candidate(
+        _candidate(
+            "600001.SSE",
+            board_level=3,
+            state="sealed",
+            first_limit_time="09:53:06",
+        ),
+        {},
+        datetime(2026, 7, 14, 10, 5, tzinfo=SHANGHAI),
+    )
+
     assert research["signal_time"] == "09:53:06"
 
 

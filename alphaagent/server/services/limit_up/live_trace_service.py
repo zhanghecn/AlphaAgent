@@ -321,7 +321,12 @@ def _board_transition_events(
     if state == previous_state:
         return []
     if state in {"sealed", "resealed"}:
-        prefix = [] if current.get("ever_triggered") else ["missed"]
+        prefix = (
+            ["missed"]
+            if not current.get("ever_triggered")
+            and current.get("signal_state") == "missed"
+            else []
+        )
         return [*prefix, state]
     if state == "failed":
         return ["failed"]
@@ -367,6 +372,8 @@ def _signal_state_payload(signal: Mapping[str, object]) -> dict[str, object]:
         "entry_kind",
         "reason",
         "lane_blocker_reasons",
+        "lane_support_score",
+        "lane_entry_quality_score",
         "blocking_scope",
         "pending_reasons",
         "trigger_checks",

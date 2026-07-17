@@ -9,6 +9,9 @@ from zoneinfo import ZoneInfo
 
 from alphaagent.server.services.limit_up import scheduled_execution
 from alphaagent.server.services.limit_up.domain import is_eligible_main_board
+from alphaagent.server.services.limit_up.lane_research import (
+    FIRST_BOARD_MOMENTUM_MIN_SCORE,
+)
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 MIN_SEAL_AMOUNT_RETENTION_RATIO = 0.7
@@ -428,11 +431,17 @@ def _now_signal(
     pending_reasons: list[str] = []
     board_level = _integer(candidate.get("board_level"), 1)
     state = str(candidate.get("state") or "")
-    open_times = _integer(candidate.get("open_times"), 0)
     hard_lane_reasons, dynamic_lane_reasons = _lane_execution_reason_groups(candidate)
     auction_stage = stage in {"auction_watch", "auction"}
+    first_board_momentum_state = (
+        board_level == 1
+        and state in {"near_limit", "sealed", "resealed"}
+        and stage in {"morning", "afternoon"}
+    )
     if auction_stage:
         evaluated_entry_kind = "auction"
+    elif first_board_momentum_state:
+        evaluated_entry_kind = "momentum"
     elif stage in {"morning", "afternoon"} and state == "near_limit":
         evaluated_entry_kind = "sweep"
     elif stage in {"morning", "afternoon"} and state == "resealed":
@@ -464,7 +473,7 @@ def _now_signal(
         reason = "；".join(market_reasons)
         blocking_scope = "market"
         pending_reasons = market_reasons
-        if state == "near_limit" and stage in {
+        if (state == "near_limit" or first_board_momentum_state) and stage in {
             "auction_watch",
             "auction",
             "morning",
@@ -481,7 +490,7 @@ def _now_signal(
         reason = "；".join(dynamic_reasons)
         blocking_scope = "dynamic"
         pending_reasons = dynamic_reasons
-        if state == "near_limit" and stage in {
+        if (state == "near_limit" or first_board_momentum_state) and stage in {
             "auction_watch",
             "auction",
             "morning",
@@ -530,21 +539,9 @@ def _now_signal(
             action, entry_kind = "observe", "wait"
             reason = "没有新的窗口内首次触板或回封，不追已经封住的板"
             signal_state = "observing"
-        elif state == "resealed" and open_times >= 5:
-            action, entry_kind, reason = "buy_now", "reseal", f"已完成{open_times}次换手回封"
-        elif state == "near_limit" and _sweep_ready(candidate):
-            action, entry_kind, reason = "buy_now", "sweep", _sweep_entry_reason(candidate)
-        elif state == "near_limit":
-            distance = _number(candidate.get("distance_to_limit_pct"))
-            action, entry_kind = "observe", "sweep"
-            reason = (
-                f"距涨停约{distance:.2f}%，等待进入1%扫板触发区"
-                if distance is not None
-                else "接近涨停，等待进入1%扫板触发区"
-            )
-        elif state in {"sealed", "resealed"}:
-            action, entry_kind, reason = "wait_tail", "wait", "先观察回封和封单稳定性"
-            signal_state = "missed"
+        elif first_board_momentum_state:
+            action, entry_kind = "buy_now", "momentum"
+            reason = _momentum_entry_reason(candidate)
     elif stage == "tail" and stable_minutes >= 2 and state in {"sealed", "resealed"}:
         action, entry_kind, reason = "buy_now", "tail_seal", f"尾盘连续封住{stable_minutes}分钟"
 
@@ -741,7 +738,7 @@ def _signal(
 ) -> dict[str, object]:
     trigger_price = (
         _number(candidate.get("last_price"))
-        if entry_kind == "auction"
+        if entry_kind in {"auction", "momentum"}
         else _number(candidate.get("limit_price"))
     )
     valid_at = _local_datetime(captured_at).isoformat()
@@ -769,8 +766,18 @@ def _signal(
         "lane_risk_count": candidate.get("lane_risk_count"),
         "lane_risk_flags": list(candidate.get("lane_risk_flags") or []),
         "lane_rank_score": _number(candidate.get("lane_rank_score")),
+        "lane_support_score": _number(candidate.get("lane_support_score")),
+        "lane_entry_quality_score": _number(
+            candidate.get("lane_entry_quality_score")
+        ),
         "portfolio_selected": candidate.get("portfolio_selected") is True,
         "seal_gate_passed": candidate.get("lane_seal_gate_passed"),
+        "momentum_gate_passed": (
+            (_number(candidate.get("lane_support_score")) or 0.0)
+            >= FIRST_BOARD_MOMENTUM_MIN_SCORE
+        )
+        if _integer(candidate.get("board_level"), 1) == 1
+        else None,
         "premium_gate_passed": candidate.get("lane_premium_gate_passed"),
         "state": candidate.get("state"),
         "open_times": _integer(candidate.get("open_times"), 0),
@@ -788,6 +795,7 @@ def _signal(
         "concept_id": candidate.get("concept_id"),
         "concept_name": candidate.get("concept_name"),
         "concept_state": candidate.get("concept_state"),
+        "concept_launch_confirmed": candidate.get("concept_state") == "launch",
         "concept_strength_score": _number(candidate.get("concept_strength_score")),
         "concept_strength_rank": candidate.get("concept_strength_rank"),
         "concept_strength_percentile": _number(
@@ -907,12 +915,13 @@ def _signal_state(
     if (
         candidate.get("missed_preseal_entry") is True
         and stage in {"morning", "afternoon"}
+        and entry_kind != "momentum"
     ):
         return "missed"
     if action == "observe":
         return (
             "approaching_trigger"
-            if entry_kind in {"auction", "sweep", "reseal"}
+            if entry_kind in {"auction", "momentum", "sweep", "reseal"}
             else "observing"
         )
     if action in {"wait_tail", "next_auction"}:
@@ -1022,6 +1031,8 @@ def _buy_condition(entry_kind: str, action: str) -> str:
         if action == "observe":
             return "竞价仅形成观察资格，10:00后等待盘中首次触板或可观察回封"
         return "09:25竞价强度、板位、板块和情绪硬门保持通过后执行"
+    if entry_kind == "momentum":
+        return "盘中动能、板块、历史质量和风险门保持通过；已封板时仅尝试涨停价排队"
     if entry_kind in {"sweep", "reseal"}:
         return "价格触及涨停且封单、换手、回封稳定性保持通过后执行"
     if entry_kind in {"tail_seal", "tail_watch"} or action == "wait_tail":
@@ -1039,14 +1050,23 @@ def _sell_condition(candidate: Mapping[str, object]) -> str:
 def _cancel_checks(entry_kind: str) -> list[str]:
     if entry_kind in {"auction", "next_auction"}:
         return ["竞价低于1%或高于7%", "跌出动态Top5", "市场门关闭"]
-    if entry_kind in {"sweep", "reseal", "tail_seal", "tail_watch", "wait"}:
+    if entry_kind in {"momentum", "sweep", "reseal", "tail_seal", "tail_watch", "wait"}:
         return ["再次开板", "封单一分钟缩水超过30%", "板块扩散转弱或市场门关闭"]
     return ["买点未成立"]
 
 
-def _sweep_entry_reason(candidate: Mapping[str, object]) -> str:
+def _momentum_entry_reason(candidate: Mapping[str, object]) -> str:
     support_score = _number(candidate.get("lane_support_score"))
     quality_score = _number(candidate.get("lane_entry_quality_score"))
+    state = str(candidate.get("state") or "")
+    if state in {"sealed", "resealed"}:
+        state_text = "已回封" if state == "resealed" else "已封板"
+        return (
+            f"动能{support_score:.0f}分，{state_text}且全部质量门通过，"
+            "可尝试涨停价排队"
+            if support_score is not None
+            else f"{state_text}且全部质量门通过，可尝试涨停价排队"
+        )
     if "weak_market_theme_attack" in set(candidate.get("setup_tags") or []):
         concept_name = str(candidate.get("concept_name") or candidate.get("sector_name") or "强题材")
         leader_rank = _integer(candidate.get("concept_leader_rank"), 0)
@@ -1060,8 +1080,8 @@ def _sweep_entry_reason(candidate: Mapping[str, object]) -> str:
         quality_text = (
             f"、综合{quality_score:.0f}分" if quality_score is not None else ""
         )
-        return f"10点后接近涨停，封板门{support_score:.0f}分{quality_text}，强触板基因与利润增长通过"
-    return "接近涨停且板块扩散与热度同步"
+        return f"盘中动能{support_score:.0f}分{quality_text}，强触板基因与利润增长通过"
+    return "盘中动能、板块扩散与历史质量同步通过"
 
 
 def _lane_execution_reasons(candidate: Mapping[str, object]) -> list[str]:
@@ -1171,7 +1191,37 @@ def _candidate_execution_checks(
     entry_kind: str,
 ) -> list[dict[str, object]]:
     checks: list[dict[str, object]] = []
+    lane = str(
+        candidate.get("board_lane")
+        or _board_lane(_integer(candidate.get("board_level"), 1))
+    )
+    momentum = entry_kind == "momentum" and lane == "first_board"
     sweep = entry_kind == "sweep"
+    if momentum:
+        momentum_score = _number(candidate.get("lane_support_score"))
+        momentum_passed = bool(
+            momentum_score is not None
+            and momentum_score >= FIRST_BOARD_MOMENTUM_MIN_SCORE
+        )
+        checks.append(
+            {
+                "code": "stock_momentum",
+                "label": "个股动能",
+                "status": "passed" if momentum_passed else "pending",
+                "observed": (
+                    None if momentum_score is None else f"{momentum_score:.1f}分"
+                ),
+                "required": f">={FIRST_BOARD_MOMENTUM_MIN_SCORE:g}分",
+                "reason": (
+                    "盘中动能数据缺失"
+                    if momentum_score is None
+                    else (
+                        f"盘中动能{momentum_score:.1f}/"
+                        f"{FIRST_BOARD_MOMENTUM_MIN_SCORE:g}分"
+                    )
+                ),
+            }
+        )
     if sweep:
         distance = _number(candidate.get("distance_to_limit_pct"))
         distance_passed = bool(
@@ -1197,19 +1247,18 @@ def _candidate_execution_checks(
     turnover_rate = _number(candidate.get("turnover_rate"))
     seal_retention = _number(candidate.get("seal_amount_retention_ratio"))
     seal_change = _number(candidate.get("seal_amount_change_pct"))
-    heat_required = SWEEP_MIN_SECTOR_HEAT if sweep else BASE_MIN_SECTOR_HEAT
+    momentum_or_sweep = momentum or sweep
+    heat_required = (
+        SWEEP_MIN_SECTOR_HEAT if momentum_or_sweep else BASE_MIN_SECTOR_HEAT
+    )
     touch_required = (
         SWEEP_MIN_SECTOR_TOUCH_COUNT
-        if sweep
+        if momentum_or_sweep
         else BASE_MIN_SECTOR_TOUCH_COUNT
-    )
-    lane = str(
-        candidate.get("board_lane")
-        or _board_lane(_integer(candidate.get("board_level"), 1))
     )
     uses_realtime_concept = "concept_state" in candidate
     if lane == "first_board":
-        _append_additive_sector_route_checks(
+        _append_realtime_sector_route_checks(
             checks,
             candidate,
             heat_required=heat_required,
@@ -1271,7 +1320,7 @@ def _candidate_execution_checks(
     return checks
 
 
-def _append_additive_sector_route_checks(
+def _append_realtime_sector_route_checks(
     checks: list[dict[str, object]],
     candidate: Mapping[str, object],
     *,
@@ -1279,27 +1328,27 @@ def _append_additive_sector_route_checks(
     touch_required: int,
     require_expansion: bool,
 ) -> tuple[bool, bool]:
-    baseline_checks = _legacy_sector_route_checks(
+    industry_checks = _realtime_industry_route_checks(
         candidate,
-        heat_required=heat_required,
         touch_required=touch_required,
         require_expansion=require_expansion,
     )
-    concept_checks = _realtime_concept_route_checks(candidate)
-    baseline_passed = _route_passed(baseline_checks)
+    concept_checks = _realtime_concept_launch_route_checks(candidate)
+    industry_passed = _route_passed(industry_checks)
     concept_passed = _route_passed(concept_checks)
-    checks.extend(_diagnostic_checks(baseline_checks))
+    checks.append(_d1_sector_heat_diagnostic(candidate, heat_required))
+    checks.extend(_diagnostic_checks(industry_checks))
     checks.extend(_diagnostic_checks(concept_checks))
 
-    if baseline_passed:
-        observed = "行业基线通过"
+    if industry_passed:
+        observed = "盘中行业路径通过"
     elif concept_passed:
-        observed = "概念增量通过"
+        observed = "概念启动路径通过"
     else:
-        observed = "两条路径均未通过"
+        observed = "两条实时路径均未通过"
     failed_checks = [
         check
-        for check in [*baseline_checks, *concept_checks]
+        for check in [*industry_checks, *concept_checks]
         if check.get("status") not in {"passed", "informational"}
     ]
     checks.append(
@@ -1308,13 +1357,13 @@ def _append_additive_sector_route_checks(
             "label": "板块路径",
             "status": (
                 "passed"
-                if baseline_passed or concept_passed
+                if industry_passed or concept_passed
                 else "failed"
                 if any(check.get("status") == "failed" for check in failed_checks)
                 else "pending"
             ),
             "observed": observed,
-            "required": "行业基线或概念增量任一路径通过",
+            "required": "盘中行业或概念启动任一路径通过",
             "reason": "；".join(
                 str(check.get("reason") or check.get("label") or "板块条件未满足")
                 for check in failed_checks[:4]
@@ -1323,7 +1372,109 @@ def _append_additive_sector_route_checks(
             "blocking": True,
         }
     )
-    return baseline_passed, concept_passed
+    return industry_passed, concept_passed
+
+
+def _realtime_industry_route_checks(
+    candidate: Mapping[str, object],
+    *,
+    touch_required: int,
+    require_expansion: bool,
+) -> list[dict[str, object]]:
+    checks: list[dict[str, object]] = []
+    if require_expansion:
+        touch_count = _integer(candidate.get("sector_touch_count"), 0)
+        checks.append(
+            {
+                "code": "sector_expansion",
+                "label": "盘中行业扩散",
+                "status": "passed" if touch_count >= touch_required else "pending",
+                "observed": f"{touch_count}只",
+                "required": f">={touch_required}只",
+                "reason": f"盘中行业触板{touch_count}/{touch_required}只",
+            }
+        )
+
+    flow_check = _sector_flow_check(candidate)
+    if candidate.get("sector_flow_current") is not True:
+        flow_check.update(
+            {
+                "status": "pending",
+                "reason": "当日行业资金尚未就绪",
+            }
+        )
+    elif _number(candidate.get("sector_main_net_inflow")) is None:
+        flow_check.update(
+            {
+                "status": "pending",
+                "reason": "当日行业资金数据缺失",
+            }
+        )
+    flow_check["label"] = "盘中行业资金"
+    checks.append(flow_check)
+    return checks
+
+
+def _realtime_concept_launch_route_checks(
+    candidate: Mapping[str, object],
+) -> list[dict[str, object]]:
+    if "concept_state" not in candidate:
+        return []
+    checks = _realtime_concept_route_checks(candidate)
+    state = str(candidate.get("concept_state") or "unavailable")
+    for check in checks:
+        if check.get("code") != "concept_state":
+            continue
+        check.update(
+            {
+                "label": "概念实时状态",
+                "status": (
+                    "passed"
+                    if state == "launch"
+                    else "failed"
+                    if state == "ebb"
+                    else "pending"
+                ),
+                "required": "launch",
+                "reason": (
+                    "概念正在退潮"
+                    if state == "ebb"
+                    else "概念实时状态不可用"
+                    if state == "unavailable"
+                    else "概念尚未从预热转为启动"
+                    if state != "launch"
+                    else "概念已全面启动"
+                ),
+            }
+        )
+        break
+    return checks
+
+
+def _d1_sector_heat_diagnostic(
+    candidate: Mapping[str, object],
+    heat_required: float,
+) -> dict[str, object]:
+    sector_heat = _number(candidate.get("sector_heat"))
+    diagnostic_status = (
+        "passed"
+        if sector_heat is not None and sector_heat >= heat_required
+        else "pending"
+    )
+    return {
+        "code": "sector_heat",
+        "label": "D-1行业热度",
+        "status": "informational",
+        "diagnostic_status": diagnostic_status,
+        "observed": None if sector_heat is None else f"{sector_heat:.2f}",
+        "required": "仅用于排序，不作为盘中买点门",
+        "reason": (
+            "D-1行业热度缺失"
+            if sector_heat is None
+            else f"D-1行业热度{sector_heat:.1f}，仅作先验参考"
+        ),
+        "blocking": False,
+    }
 
 
 def _legacy_sector_route_checks(
@@ -1418,8 +1569,8 @@ def _selected_sector_route(
     )
     observed = str(route.get("observed") or "") if route else ""
     return {
-        "行业基线通过": "legacy_sector",
-        "概念增量通过": "concept_increment",
+        "盘中行业路径通过": "realtime_industry",
+        "概念启动路径通过": "realtime_concept_launch",
     }.get(observed)
 
 
@@ -1554,6 +1705,21 @@ def _flow_check_reason(
 
 
 def _pretrigger_signal_state(candidate: Mapping[str, object]) -> str:
+    lane = str(
+        candidate.get("board_lane")
+        or _board_lane(_integer(candidate.get("board_level"), 1))
+    )
+    momentum_score = _number(candidate.get("lane_support_score"))
+    if (
+        lane == "first_board"
+        and momentum_score is not None
+        and momentum_score >= FIRST_BOARD_MOMENTUM_MIN_SCORE
+    ):
+        return "approaching_trigger"
+    if lane == "first_board":
+        if str(candidate.get("concept_state") or "") in {"warming", "launch"}:
+            return "concept_warming"
+        return "observing"
     distance = _number(candidate.get("distance_to_limit_pct"))
     if distance is not None and distance <= SWEEP_MAX_DISTANCE_PCT:
         return "approaching_trigger"
@@ -1670,7 +1836,7 @@ def _valid_until(captured_at: datetime, entry_kind: str) -> str:
 
 
 def _cancel_condition(entry_kind: str) -> str:
-    if entry_kind in {"sweep", "reseal", "tail_seal", "tail_watch", "wait"}:
+    if entry_kind in {"momentum", "sweep", "reseal", "tail_seal", "tail_watch", "wait"}:
         return "再次开板、封单一分钟缩水超过30%、跌出动态Top5、板块扩散转弱或实时炸板率超过35%"
     if entry_kind in {"auction", "next_auction"}:
         return "竞价低于1%、高于7%、跌出动态Top5或市场门关闭"

@@ -379,7 +379,7 @@ def test_live_risk_gate_publishes_unbounded_actionable_recommendations() -> None
     ] == ["600001.SSE"]
 
 
-def test_live_portfolio_requires_profitability_gate_and_final_buy_action() -> None:
+def test_live_actionable_uses_profitability_for_ranking_not_exclusion() -> None:
     vetoed = _live_signal(
         "600004.SSE",
         historical_win_rate=60.0,
@@ -428,7 +428,12 @@ def test_live_portfolio_requires_profitability_gate_and_final_buy_action() -> No
         captured_at=datetime(2026, 7, 16, 10, 5, tzinfo=SHANGHAI),
         snapshot_age_seconds=5,
     )
-    assert [row["vt_symbol"] for row in actionable] == ["600003.SSE"]
+    assert [row["vt_symbol"] for row in actionable] == [
+        "600001.SSE",
+        "600003.SSE",
+        "600002.SSE",
+    ]
+    assert actionable[0]["profitability_gate_passed"] is False
 
 
 def test_live_first_board_watchlist_uses_change_pct_as_second_key() -> None:

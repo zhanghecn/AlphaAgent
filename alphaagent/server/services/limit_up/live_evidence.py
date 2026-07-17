@@ -240,12 +240,15 @@ def _with_evidence(
     analog = history_engine.resolve_analog(analog_index, analog_candidate)
     effective = int(analog.get("effective_sample_count") or 0)
     veto_reasons = _risk_veto_reasons(analog)
+    risk_veto_applied = bool(veto_reasons) and target_board != 1
     evidence = {
         "status": "ready" if effective else "insufficient",
         "entry_mode": entry_mode,
         "feature_scope": feature_scope,
         "as_of_date": signal_date.isoformat(),
         "risk_vetoed": bool(veto_reasons),
+        "risk_veto_applied": risk_veto_applied,
+        "risk_role": "ranking_only" if target_board == 1 else "execution_gate",
         "risk_veto_reasons": veto_reasons,
         "tbox_score": tbox_score(analog),
         **analog,
@@ -268,7 +271,7 @@ def _with_evidence(
         ):
             evidence.pop(key, None)
     result = {**dict(signal), "historical_evidence": evidence}
-    if veto_reasons and str(result.get("action") or "") in {"buy_now", "next_auction"}:
+    if risk_veto_applied and str(result.get("action") or "") in {"buy_now", "next_auction"}:
         result["action"] = "pass"
         result["execution_state"] = "cancelled"
         result["reason"] = "历史证据否决：" + "；".join(veto_reasons)

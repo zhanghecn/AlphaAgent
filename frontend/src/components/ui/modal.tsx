@@ -17,9 +17,10 @@ interface ModalProps {
   onOpenChange: (open: boolean) => void;
   children: ReactNode;
   className?: string;
+  ariaLabel?: string;
 }
 
-function Modal({ open, onOpenChange, children, className }: ModalProps) {
+function Modal({ open, onOpenChange, children, className, ariaLabel }: ModalProps) {
   useEffect(() => {
     if (!open) return;
     const handleKey = (event: KeyboardEvent) => {
@@ -37,6 +38,9 @@ function Modal({ open, onOpenChange, children, className }: ModalProps) {
       onClick={() => onOpenChange(false)}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={ariaLabel}
         className={cn(
           "w-full max-w-lg rounded-xl border bg-card text-card-foreground shadow-card-hover animate-scale-in",
           className,
@@ -62,7 +66,15 @@ function ModalHeader({
     <div className={cn("flex items-center justify-between border-b px-5 py-3", className)}>
       <h2 className="font-display text-base font-semibold tracking-tight">{title}</h2>
       {onClose && (
-        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={onClose}>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8"
+          aria-label="关闭"
+          title="关闭"
+          onClick={onClose}
+        >
           <X className="h-4 w-4" />
         </Button>
       )}

@@ -5,6 +5,7 @@ import {
   BarChart3,
   Bell,
   BellRing,
+  BookOpenText,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -33,6 +34,7 @@ import {
   fetchLimitUpLiveTraceDates,
   fetchLimitUpLiveTraceDay,
   fetchLimitUpLiveTraceSymbol,
+  fetchLimitUpStrategyGuide,
   startLimitUpHistoryRebuild,
   type LimitUpHistoryRebuildStatus,
   type LimitUpLaneBacktest,
@@ -52,6 +54,7 @@ import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
 import { BacktestRebuildControl } from "@/features/limitUp/BacktestRebuildControl";
+import { StrategyGuideDialog } from "@/features/limitUp/StrategyGuideDialog";
 import {
   isNextSessionPlan,
   liveHeader,
@@ -95,6 +98,7 @@ export function LimitUpPage() {
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
   const [rebuildError, setRebuildError] = useState<string | null>(null);
+  const [guideOpen, setGuideOpen] = useState(false);
 
   const datesQuery = useQuery({
     queryKey: ["limitUpHistoryDates"],
@@ -108,6 +112,13 @@ export function LimitUpPage() {
     staleTime: 8_000,
     refetchInterval: view === "live" ? 10_000 : false,
     refetchOnWindowFocus: true,
+  });
+  const strategyGuideQuery = useQuery({
+    queryKey: ["limitUpStrategyGuide"],
+    queryFn: fetchLimitUpStrategyGuide,
+    enabled: guideOpen,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
   });
   const traceDatesQuery = useQuery({
     queryKey: ["limitUpLiveTraceDates"],
@@ -267,6 +278,16 @@ export function LimitUpPage() {
           {view === "live" && <Freshness snapshot={liveQuery.data} />}
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-9 gap-2"
+            onClick={() => setGuideOpen(true)}
+          >
+            <BookOpenText size={15} />
+            规则说明
+          </Button>
           {view === "ledger" && (
             <DateNavigator
               dates={dates}
@@ -389,6 +410,14 @@ export function LimitUpPage() {
           onRebuild={() => historyRebuildMutation.mutate()}
         />
       )}
+      <StrategyGuideDialog
+        open={guideOpen}
+        onOpenChange={setGuideOpen}
+        guide={strategyGuideQuery.data}
+        loading={strategyGuideQuery.isLoading}
+        error={firstError(strategyGuideQuery.error)}
+        onRetry={() => void strategyGuideQuery.refetch()}
+      />
     </div>
   );
 }
@@ -618,6 +647,9 @@ function LiveSignalRow({ signal, stale, paused }: { signal: LimitUpLiveSignal; s
           </div>
           <div className="mt-0.5 text-xs text-muted-foreground">
             {entryKindLabel(signal.entry_kind)} · 触发价 {formatPrice(signal.trigger_price)}
+            {signal.board_lane === "first_board" && signal.lane_support_score != null
+              ? ` · 动能 ${formatNumber(signal.lane_support_score, 1)}`
+              : ""}
             {signal.board_lane === "two_to_three" ? ` · ${twoToThreeQualityLabel(signal.lane_quality_tier, signal.lane_risk_count)}` : ""}
             {signal.state_updated_at ? ` · ${formatTime(signal.state_updated_at)}` : ""}
           </div>
@@ -632,7 +664,11 @@ function LiveSignalRow({ signal, stale, paused }: { signal: LimitUpLiveSignal; s
           {strategyName && <div className="font-medium text-foreground">战法：{strategyName}</div>}
           {selectionReasons && <div className="text-foreground">入选：{selectionReasons}</div>}
           {manualResearchTrigger && (
-            <div className="font-medium text-rise">人工买点已到；自动下单仍未开放</div>
+            <div className="font-medium text-rise">
+              {signal.state === "sealed" || signal.state === "resealed"
+                ? "动能买点已到；可尝试涨停价排队，成交以委托回报为准"
+                : "动能买点已到；自动下单仍未开放"}
+            </div>
           )}
           {conclusion && (
             <div className="text-amber-700 dark:text-amber-300">
@@ -642,7 +678,9 @@ function LiveSignalRow({ signal, stale, paused }: { signal: LimitUpLiveSignal; s
           <TriggerChecks checks={signal.trigger_checks} />
           {signal.board_lane === "first_board" && (
             <div className="text-muted-foreground">
-              封板门 {gateStateLabel(signal.seal_gate_passed)} · 溢价门 {gateStateLabel(signal.premium_gate_passed)}
+              动能门 {gateStateLabel(signal.momentum_gate_passed)} · 溢价门 {gateStateLabel(signal.premium_gate_passed)}
+              {signal.sector_route ? ` · 实时路径 ${sectorRouteLabel(signal.sector_route)}` : ""}
+              {signal.concept_launch_confirmed ? " · 全面启动确认" : ""}
             </div>
           )}
           <div className="text-muted-foreground">买入：{signal.buy_instruction ?? signal.buy_condition ?? "条件待确认"}</div>
@@ -942,7 +980,7 @@ function traceEventEvidence(event: LimitUpLiveTraceEvent): string {
       `${event.concept_name} 强度${event.concept_strength_rank ?? "-"} · ${event.concept_strong_5_count ?? 0}只涨超5% · 概念龙${event.concept_leader_rank ?? "-"}`,
     );
   }
-  if (event.sector_heat != null) evidence.push(`板块热度 ${formatNumber(event.sector_heat, 1)}`);
+  if (event.sector_heat != null) evidence.push(`D-1行业热度 ${formatNumber(event.sector_heat, 1)}`);
   if (event.sector_touch_count != null) evidence.push(`板块触板 ${event.sector_touch_count}只`);
   if (event.sector_main_net_inflow != null) evidence.push(`板块资金 ${formatAmount(event.sector_main_net_inflow)}`);
   if (event.stock_main_net_inflow != null) evidence.push(`个股资金 ${formatAmount(event.stock_main_net_inflow)}`);
@@ -1316,7 +1354,8 @@ function EmptyRow({ text }: { text: string }) {
 }
 
 function presentationToneClass(tone: PresentationTone) { return ({ positive: "text-rise", warning: "text-amber-700 dark:text-amber-300", negative: "text-fall", neutral: "text-foreground" } as Record<PresentationTone, string>)[tone]; }
-function entryKindLabel(value: string) { return (({ none: "不执行", auction: "竞价", sweep: "扫板", reseal: "回封", tail_seal: "尾盘封板", next_auction: "竞价接力", first_touch: "首次触板", intraday: "盘中", wait: "等待确认" } as Record<string, string>)[value] ?? value) || "--"; }
+function entryKindLabel(value: string) { return (({ none: "不执行", auction: "竞价", momentum: "动能", sweep: "扫板", reseal: "回封", tail_seal: "尾盘封板", next_auction: "竞价接力", first_touch: "首次触板", intraday: "盘中", wait: "等待确认" } as Record<string, string>)[value] ?? value) || "--"; }
+function sectorRouteLabel(value: string) { return ({ realtime_industry: "盘中行业", realtime_concept_launch: "概念启动" } as Record<string, string>)[value] ?? value; }
 function phaseLabel(value?: string) { return ({ warmup: "预热期", earlier_history: "更早历史稳健性", design_sample: "前段设计样本", time_validation: "后段时间验证", expanding_oos: "滚动样本外", locked_holdout: "锁定留出", post_freeze_forward: "冻结后前向" } as Record<string, string>)[value ?? ""] ?? value ?? "阶段未知"; }
 function d1OutcomeLabel(value: string) { return ({ continuation_limit_up: "D+1 连板", next_limit_up_after_failed_board: "D+1 涨停", d1_premium: "D+1 有溢价", direct_breakdown: "D+1 直接砸", no_premium: "D+1 无溢价", awaiting_d1_bar: "待 D+1" } as Record<string, string>)[value] ?? value; }
 function boardStatusLabel(value: string) { return ({ sealed: "封住", failed: "触板后炸板", no_limit: "未触板" } as Record<string, string>)[value] ?? value; }

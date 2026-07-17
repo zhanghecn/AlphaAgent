@@ -9,6 +9,87 @@ export type LimitUpLiveAction = "buy_now" | "observe" | "wait_tail" | "next_auct
 export type LimitUpLane = "now" | "tail" | "next_auction";
 export type LimitUpBlockingScope = "none" | "market" | "dynamic" | "structural";
 export type LimitUpMarketRepairState = "not_required" | "pending_repair" | "repair_confirmed" | "repair_revoked";
+
+export interface LimitUpStrategyGuide {
+  guide_version: string;
+  strategy: {
+    live_version: string;
+    history_version: string;
+    selection_no_lookahead: boolean;
+    selection_contract: string;
+    entry_windows: string[];
+    entry_mode: string;
+    exit_mode: string;
+    max_positions: number;
+  };
+  verdict: {
+    title: string;
+    detail: string;
+    execution_boundary: string;
+  };
+  selection_steps: Array<{
+    order: number;
+    title: string;
+    rule: string;
+    timing: string;
+  }>;
+  ranking: {
+    first_board_primary: string;
+    first_board_secondary: string;
+    historical_win_rate_formula: string;
+    history_cutoff: string;
+    ranking_only: boolean;
+    portfolio_gate: string;
+  };
+  field_groups: Array<{
+    key: "intraday" | "prior" | "outcome" | string;
+    label: string;
+    selection_allowed: boolean;
+    fields: string[];
+  }>;
+  dataset: {
+    name: string;
+    kind: string;
+    table: string;
+    date_start: string;
+    date_end: string;
+    snapshot_count: number;
+    daily_snapshot_counts: Array<{
+      trade_date: string;
+      snapshot_count: number;
+    }>;
+    closed_through: string;
+    closed_signal_count: number;
+    win_count: number;
+    win_rate_pct: number;
+    average_net_return_pct: number;
+    portfolio_trade_count: number;
+    portfolio_win_count: number;
+    portfolio_return_pct: number;
+    portfolio_max_drawdown_pct: number;
+    entry: string;
+    exit: string;
+    costs: string;
+    report: string;
+    limitations: string[];
+  };
+  historical_reference: {
+    name: string;
+    kind: string;
+    tables: string[];
+    date_start: string;
+    date_end: string;
+    trade_day_count: number;
+    qualified_signal_count: number;
+    closed_recommendation_count: number;
+    account_trade_count: number;
+    recommendation_win_rate_pct: number;
+    account_win_rate_pct: number;
+    live_equivalent: boolean;
+    purpose: string;
+    limitation: string;
+  };
+}
 export type LimitUpLiveTraceState =
   | "radar_entered"
   | "concept_warming"
@@ -67,6 +148,7 @@ export interface LimitUpLiveSignal {
   concept_id?: string | null;
   concept_name?: string | null;
   concept_state?: "unavailable" | "observe" | "warming" | "launch" | "ebb" | string;
+  concept_launch_confirmed?: boolean;
   concept_strength_score?: number | null;
   concept_strength_rank?: number | null;
   concept_strength_percentile?: number | null;
@@ -89,8 +171,12 @@ export interface LimitUpLiveSignal {
   lane_risk_count?: number;
   lane_risk_flags?: string[];
   lane_rank_score?: number | null;
+  lane_support_score?: number | null;
+  lane_entry_quality_score?: number | null;
+  sector_route?: "realtime_industry" | "realtime_concept_launch" | string | null;
   portfolio_selected?: boolean;
   seal_gate_passed?: boolean | null;
+  momentum_gate_passed?: boolean | null;
   premium_gate_passed?: boolean | null;
   validation_passed?: boolean;
   research_action?: LimitUpLiveAction;
@@ -700,6 +786,10 @@ export interface LimitUpWalkForwardModelReport {
 
 export function fetchLimitUpLive(): Promise<LimitUpSignalSnapshot> {
   return apiClient.get<LimitUpSignalSnapshot>("/limit-up/live");
+}
+
+export function fetchLimitUpStrategyGuide(): Promise<LimitUpStrategyGuide> {
+  return apiClient.get<LimitUpStrategyGuide>("/limit-up/strategy-guide");
 }
 
 export function fetchLimitUpLiveTraceDates(): Promise<LimitUpLiveTraceDates> {

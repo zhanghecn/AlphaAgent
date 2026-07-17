@@ -60,7 +60,10 @@ function canTransitionToBuy(signal: LimitUpLiveSignal): boolean {
     !NON_ACTIONABLE_STATES.has(signal.signal_state ?? "")
     && signal.action !== "next_auction"
     && signal.blocking_scope !== "structural"
-    && signal.missed_preseal_entry !== true
+    && (
+      signal.missed_preseal_entry !== true
+      || signal.entry_kind === "momentum"
+    )
   );
 }
 

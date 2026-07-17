@@ -40,7 +40,8 @@ def test_forward_validation_excludes_unverified_snapshots() -> None:
         current_date=date(2026, 7, 10),
     )
 
-    assert report["mode"] == "research_plan_forward_observation"
+    assert report["mode"] == "saved_actionable_recommendation_forward_validation"
+    assert report["validation_version"] == "limit-up-forward-validation-v2"
     assert report["simulation_eligible"] is False
     assert report["coverage"]["raw_snapshot_count"] == 9
     assert report["coverage"]["eligible_snapshot_count"] == 1
@@ -123,8 +124,12 @@ def test_later_snapshot_cannot_rewrite_first_intraday_buy_action() -> None:
     assert report["trades"][0]["entry_price"] == 11.0
 
 
-def test_forward_validation_observes_research_action_without_claiming_execution() -> None:
-    snapshot = _snapshot(action="pass", research_action="buy_now")
+def test_forward_validation_does_not_execute_research_only_action() -> None:
+    snapshot = _snapshot(
+        action="pass",
+        research_action="buy_now",
+        actionable=False,
+    )
 
     report = forward_validation.build_forward_validation_report(
         _dataset(),
@@ -135,10 +140,42 @@ def test_forward_validation_observes_research_action_without_claiming_execution(
         current_date=date(2026, 7, 10),
     )
 
+    assert report["orders"] == []
+    assert report["trades"] == []
+    assert report["summary"]["plan_count"] == 0
+    assert report["summary"]["win_rate"] is None
+
+
+def test_forward_validation_does_not_execute_lane_buy_missing_from_formal_list() -> None:
+    snapshot = _snapshot(action="buy_now", actionable=False)
+
+    report = forward_validation.build_forward_validation_report(
+        _dataset(),
+        [snapshot],
+        trade_calendar=TRADE_CALENDAR,
+        entry_mode="sweep",
+        exit_mode="next_close",
+        current_date=date(2026, 7, 10),
+    )
+
+    assert report["orders"] == []
+    assert report["trades"] == []
+
+
+def test_forward_validation_executes_saved_formal_recommendation() -> None:
+    report = forward_validation.build_forward_validation_report(
+        _dataset(),
+        [_snapshot()],
+        trade_calendar=TRADE_CALENDAR,
+        entry_mode="sweep",
+        exit_mode="next_close",
+        current_date=date(2026, 7, 10),
+    )
+
     assert len(report["orders"]) == 1
-    assert report["orders"][0]["action"] == "pass"
-    assert report["orders"][0]["research_action"] == "buy_now"
-    assert report["orders"][0]["fill_evidence"] == "saved_research_action_not_executed"
+    assert report["orders"][0]["fill_evidence"] == (
+        "saved_actionable_recommendation_proxy"
+    )
     assert len(report["trades"]) == 1
 
 
@@ -222,27 +259,28 @@ def test_forward_validation_service_loads_only_saved_live_version(monkeypatch) -
     report = forward_validation.get_forward_validation(
         date(2026, 7, 10),
         date(2026, 7, 10),
-        "sweep",
-        "next_open",
         current_date=date(2026, 7, 10),
     )
 
     assert captured == {
         "start": date(2026, 7, 10),
         "end": date(2026, 7, 10),
-        "strategy_version": "limit-up-live-v12",
+        "strategy_version": "limit-up-live-v15",
     }
     assert report["coverage"]["eligible_snapshot_count"] == 1
 
 
-def test_forward_validation_api_passes_range_entry_and_exit(monkeypatch) -> None:
+def test_forward_validation_api_uses_frozen_execution_contract(monkeypatch) -> None:
     from alphaagent.server.api import limit_up
 
     captured: dict[str, object] = {}
 
-    def fake_forward(start, end, entry_mode, exit_mode):
-        captured.update(start=start, end=end, entry_mode=entry_mode, exit_mode=exit_mode)
-        return {"status": "collecting", "mode": "research_plan_forward_observation"}
+    def fake_forward(start, end):
+        captured.update(start=start, end=end)
+        return {
+            "status": "collecting",
+            "mode": "saved_actionable_recommendation_forward_validation",
+        }
 
     monkeypatch.setattr(limit_up, "is_database_configured", lambda: True)
     monkeypatch.setattr(limit_up, "get_limit_up_forward_validation", fake_forward)
@@ -252,7 +290,7 @@ def test_forward_validation_api_passes_range_entry_and_exit(monkeypatch) -> None
         params={
             "start": "2026-07-01",
             "end": "2026-07-10",
-            "entry_mode": "next_auction",
+            "entry_mode": "sweep",
             "exit_mode": "next_close",
         },
     )
@@ -260,8 +298,15 @@ def test_forward_validation_api_passes_range_entry_and_exit(monkeypatch) -> None
     assert response.status_code == 200
     assert str(captured["start"]) == "2026-07-01"
     assert str(captured["end"]) == "2026-07-10"
-    assert captured["entry_mode"] == "next_auction"
-    assert captured["exit_mode"] == "next_close"
+
+
+def test_forward_validation_api_rejects_non_formal_execution_contract() -> None:
+    response = TestClient(create_app()).get(
+        "/api/limit-up/forward-validation",
+        params={"entry_mode": "auction", "exit_mode": "next_open"},
+    )
+
+    assert response.status_code == 422
 
 
 def test_forward_validation_api_rejects_invalid_range() -> None:
@@ -314,6 +359,7 @@ def _snapshot(
     lane: str = "now",
     action: str = "buy_now",
     research_action: str | None = None,
+    actionable: bool = True,
     entry_kind: str = "sweep",
     trigger_price: float = 11.0,
 ) -> dict[str, object]:
@@ -347,7 +393,10 @@ def _snapshot(
         "strategy_version": "limit-up-live-v2",
         "mode": mode,
         "candidates": [signal],
-        "recommendations": {"lanes": lanes},
+        "recommendations": {
+            "lanes": lanes,
+            "actionable_recommendations": [signal] if actionable else [],
+        },
         "data_quality": {"status": "ready", "is_stale": is_stale},
     }
 

@@ -18,7 +18,8 @@ FIRST_BOARD_MIN_TOUCH_COUNT = 6
 FIRST_BOARD_MIN_NET_PROFIT_YOY = 10.0
 FIRST_BOARD_MIN_PRIOR_FAILED_RATE = 0.35
 FIRST_BOARD_ATTACK_MIN_TOUCH_COUNT = 3
-FIRST_BOARD_ATTACK_MIN_SUPPORT_SCORE = 55.0
+FIRST_BOARD_MOMENTUM_MIN_SCORE = 55.0
+FIRST_BOARD_ATTACK_MIN_SUPPORT_SCORE = FIRST_BOARD_MOMENTUM_MIN_SCORE
 FIRST_BOARD_ATTACK_MIN_HEAT_SCORE = 60.0
 FIRST_BOARD_ATTACK_MAX_LEADER_RANK = 2
 FIRST_BOARD_ATTACK_PHASES = frozenset(
@@ -394,7 +395,7 @@ def _first_board_rules(
     if success_rate is not None and success_rate < 0.35:
         blockers.append("historical_seal_gene_weak")
     heat = _number(candidate.get("prior_industry_heat_score"))
-    if heat is None:
+    if heat is None and candidate.get("live_sector_gate_managed") is not True:
         blockers.append("industry_heat_unavailable")
     support_score = first_board_support_score(candidate)
     if support_score is None:

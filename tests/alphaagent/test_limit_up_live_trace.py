@@ -237,7 +237,6 @@ def test_symbol_trace_preserves_fast_first_board_state_changes() -> None:
         "recommended",
         "approaching_trigger",
         "dropped_from_top5",
-        "missed",
         "sealed",
     ]
     assert not any(event["event"] == "trigger_ready" for event in events)
@@ -482,7 +481,7 @@ def test_day_trace_builds_first_board_zero_buy_funnel_by_symbol() -> None:
     assert funnel["recommended_count"] == 3
     assert funnel["approaching_count"] == 1
     assert funnel["triggered_count"] == 1
-    assert funnel["sealed_without_trigger_count"] == 1
+    assert funnel["sealed_without_trigger_count"] == 0
     assert funnel["structural_rejected_count"] == 1
     assert funnel["primary_blockers"] == [
         {"code": "sector_expansion", "label": "板块扩散", "count": 1}

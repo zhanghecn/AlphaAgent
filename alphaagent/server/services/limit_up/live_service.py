@@ -223,7 +223,7 @@ def build_live_snapshot(
             "source_errors": source_errors,
             "limitations": [
                 "公共行情没有L2排队位置、撤单速度和逐笔成交，成交判断仅为盘口代理。",
-                "秒板封死不视为可成交；实时推荐只供人工决策。",
+                "封板买点仅表示可尝试涨停价排队，不代表成交；必须以委托回报为准。",
             ],
         },
     }
@@ -854,6 +854,14 @@ def _attach_lane_decisions(
     sentiment = sentiment if isinstance(sentiment, Mapping) else {}
     research_candidates: list[dict[str, object]] = []
     for candidate in candidates:
+        evaluation_date = captured_at.date().isoformat()
+        sector_flow_date = _parsed_date(candidate.get("sector_flow_trade_date"))
+        candidate["evaluation_date"] = evaluation_date
+        candidate["sector_flow_current"] = (
+            sector_flow_date == captured_at.date()
+            if sector_flow_date is not None
+            else candidate.get("sector_flow_current") is True
+        )
         board_level = _integer(candidate.get("board_level"), 1)
         candidate["board_lane"] = classify_board_lane(
             {**candidate, "target_board": board_level}
@@ -945,11 +953,12 @@ def _live_research_candidate(
     market_gate: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     board_level = _integer(candidate.get("board_level"), 1)
+    is_first_board = board_level == 1
     evaluation_time = captured_at.time().replace(microsecond=0).isoformat()
     state = str(candidate.get("state") or "")
     actual_first_touch = (
         normalize_limit_time(candidate.get("first_limit_time"))
-        if state in {"sealed", "resealed", "failed"}
+        if board_level >= 3 and state in {"sealed", "resealed", "failed"}
         else None
     )
     return {
@@ -964,11 +973,12 @@ def _live_research_candidate(
             "auction" if board_level >= 3 else candidate.get("signal_kind")
         ),
         "prior_industry_heat_score": candidate.get("concept_strength_score")
-        if candidate.get("concept_strength_score") is not None
+        if is_first_board or candidate.get("concept_strength_score") is not None
         else candidate.get("sector_heat"),
         "prior_industry_leader_rank": candidate.get("concept_leader_rank")
-        if candidate.get("concept_leader_rank") is not None
+        if is_first_board or candidate.get("concept_leader_rank") is not None
         else candidate.get("sector_dragon_rank"),
+        "live_sector_gate_managed": is_first_board,
         "prior_market_phase": sentiment.get("phase"),
         "prior_market_failed_rate": sentiment.get("failed_limit_up_rate"),
         "live_market_repair_confirmed": bool(
@@ -1231,6 +1241,8 @@ def _build_live_buy_list(
             )
             symbol = str(signal.get("vt_symbol") or "")
             action = str(signal.get("action") or "pass")
+            first_board = str(signal.get("board_lane") or "") == "first_board"
+            profitability_required = require_portfolio_selection and first_board
             if (
                 not symbol
                 or (
@@ -1239,8 +1251,14 @@ def _build_live_buy_list(
                 )
                 or str(signal.get("board_lane") or "") not in PORTFOLIO_EXECUTION_LANES
                 or action != "buy_now"
-                or signal.get("profitability_gate_passed") is not True
-                or signal.get("missed_preseal_entry") is True
+                or (
+                    profitability_required
+                    and signal.get("profitability_gate_passed") is not True
+                )
+                or (
+                    signal.get("missed_preseal_entry") is True
+                    and signal.get("entry_kind") != "momentum"
+                )
             ):
                 continue
             current = selected.get(symbol)
@@ -1271,8 +1289,9 @@ def _scheduled_live_signal(
         **dict(signal),
         "execution_permission": "research_only",
         "scheduled_execution_version": scheduled_execution.SCHEDULED_EXECUTION_VERSION,
-        "buy_instruction": (
-            f"仅在{'或'.join(scheduled_execution.ENTRY_WINDOW_LABELS)}满足全部条件时买入"
+        "buy_instruction": str(
+            signal.get("buy_instruction")
+            or f"仅在{'或'.join(scheduled_execution.ENTRY_WINDOW_LABELS)}满足全部条件时买入"
         ),
         "sell_instruction": "D+1尾盘按官方收盘价统一卖出",
         "target_position_pct": scheduled_execution.TARGET_POSITION_PCT,
@@ -1382,7 +1401,11 @@ def _build_live_watchlist(
                 if value
             )
             original_reason = "；".join(dict.fromkeys(reason_parts))
-            near_limit = str(signal.get("state") or "") == "near_limit"
+            first_board_momentum = (
+                str(signal.get("board_lane") or "") == "first_board"
+                and str(signal.get("state") or "")
+                in {"near_limit", "sealed", "resealed"}
+            )
             current_signal_state = str(signal.get("signal_state") or "observing")
             observations[symbol] = {
                 **signal,
@@ -1395,16 +1418,18 @@ def _build_live_watchlist(
                     else "pending_auction"
                     if current_signal_state == "pending_auction"
                     else "approaching_trigger"
-                    if near_limit
+                    if first_board_momentum
                     else "observing"
                 ),
-                "entry_kind": "sweep" if near_limit else signal.get("entry_kind"),
+                "entry_kind": (
+                    "momentum" if first_board_momentum else signal.get("entry_kind")
+                ),
                 "buy_instruction": (
-                    "板块已预热，等待进入距涨停1%触发区"
+                    "板块已预热，等待个股动能和其余质量门同步通过"
                     if current_signal_state == "concept_warming"
                     else "等待竞价确认，满足竞价硬门后触发"
                     if current_signal_state == "pending_auction"
-                    else "距涨停不超过1%且市场、板块、资金和盘口条件保持通过时触发"
+                    else "个股动能、市场、板块、历史质量和风险门同步通过时触发"
                 ),
                 "reason": f"等待触发：{original_reason}",
             }
@@ -1420,7 +1445,10 @@ def _can_transition_to_live_buy(signal: Mapping[str, object]) -> bool:
         str(signal.get("blocking_scope") or "") != "structural"
         and signal.get("profitability_gate_passed") is not False
         and signal_state not in {"rejected", "missed", "invalidated"}
-        and signal.get("missed_preseal_entry") is not True
+        and (
+            signal.get("missed_preseal_entry") is not True
+            or signal.get("entry_kind") == "momentum"
+        )
     )
 
 

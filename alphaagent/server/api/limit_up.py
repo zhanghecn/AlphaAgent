@@ -40,6 +40,9 @@ from alphaagent.server.services.limit_up.signal_service import (
 from alphaagent.server.services.limit_up.forward_validation import (
     get_forward_validation as get_limit_up_forward_validation,
 )
+from alphaagent.server.services.limit_up.strategy_guide import (
+    get_limit_up_strategy_guide,
+)
 from alphaagent.server.services.limit_up.data_quality import (
     backfill_limit_up_event_minutes,
     get_limit_up_data_quality,
@@ -94,6 +97,13 @@ def live_snapshot():
         return ok(get_latest_live_snapshot())
     except Exception as exc:  # noqa: BLE001
         return _service_error(exc)
+
+
+@router.get("/strategy-guide", response_model=None)
+def strategy_guide():
+    """Expose the reviewed selection and dataset contract without a data refresh."""
+
+    return ok(get_limit_up_strategy_guide())
 
 
 @router.post("/live/refresh", response_model=None)
@@ -410,11 +420,10 @@ def history_model_report(
 def forward_validation(
     start: date | None = Query(default=None),
     end: date | None = Query(default=None),
-    exit_mode: Literal["next_open", "next_close"] = Query(default="next_open"),
-    entry_mode: Literal["auction", "sweep", "tail", "next_auction"] = Query(
-        default="auction"
-    ),
+    entry_mode: Literal["sweep"] = Query(default="sweep"),
+    exit_mode: Literal["next_close"] = Query(default="next_close"),
 ):
+    del entry_mode, exit_mode
     if start and end and start > end:
         return JSONResponse(
             status_code=400,
@@ -426,7 +435,7 @@ def forward_validation(
             content=fail("DATABASE_UNAVAILABLE", "数据库未配置，无法读取打板前向观察账本"),
         )
     try:
-        return ok(get_limit_up_forward_validation(start, end, entry_mode, exit_mode))
+        return ok(get_limit_up_forward_validation(start, end))
     except Exception as exc:  # noqa: BLE001
         return _service_error(exc)
 
