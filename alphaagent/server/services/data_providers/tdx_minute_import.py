@@ -77,8 +77,12 @@ def import_tdx_minute_bars_for_gaps(
             "errors": requirements["errors"],
         }
 
+    probe = _connection_probe(grouped, category)
     try:
-        api, host = _connect_tdx(timeout_seconds=timeout_seconds)
+        api, host = _connect_tdx(
+            timeout_seconds=timeout_seconds,
+            probe=probe,
+        )
     except Exception as exc:
         return {
             "status": "unavailable",
@@ -123,7 +127,10 @@ def import_tdx_minute_bars_for_gaps(
                 reconnect_count += 1
                 _disconnect_tdx(api)
                 try:
-                    api, host = _connect_tdx(timeout_seconds=timeout_seconds)
+                    api, host = _connect_tdx(
+                        timeout_seconds=timeout_seconds,
+                        probe=probe,
+                    )
                     retry_rows, retry_scanned, retry_empty_pages, retry_errors = (
                         _fetch_symbol_tail_rows(
                             api,
@@ -245,7 +252,24 @@ def _group_requirements(items: list[dict[str, Any]]) -> dict[str, set[date]]:
     return dict(grouped)
 
 
-def _connect_tdx(*, timeout_seconds: float):
+def _connection_probe(
+    grouped: Mapping[str, set[date]],
+    category: int,
+) -> tuple[int, int, str] | None:
+    for vt_symbol in grouped:
+        try:
+            symbol, exchange = parse_vt_symbol(vt_symbol)
+            return category, _tdx_market(exchange.value), symbol
+        except Exception:
+            continue
+    return None
+
+
+def _connect_tdx(
+    *,
+    timeout_seconds: float,
+    probe: tuple[int, int, str] | None = None,
+):
     try:
         from pytdx.config.hosts import hq_hosts
         from pytdx.hq import TdxHq_API
@@ -257,6 +281,9 @@ def _connect_tdx(*, timeout_seconds: float):
         api = TdxHq_API(raise_exception=True)
         try:
             if api.connect(ip, port, time_out=max(float(timeout_seconds or 3.0), 0.5)):
+                if probe is not None:
+                    category, market, symbol = probe
+                    api.get_security_bars(category, market, symbol, 0, 1)
                 return api, {"name": name, "ip": ip, "port": port}
         except Exception as exc:
             last_error = exc
