@@ -1271,8 +1271,10 @@ def _scheduled_live_signal(
         **dict(signal),
         "execution_permission": "research_only",
         "scheduled_execution_version": scheduled_execution.SCHEDULED_EXECUTION_VERSION,
-        "buy_instruction": "仅在10:00-11:30或13:00-14:30满足全部条件时买入",
-        "sell_instruction": "D+1 14:30 统一卖出",
+        "buy_instruction": (
+            f"仅在{'或'.join(scheduled_execution.ENTRY_WINDOW_LABELS)}满足全部条件时买入"
+        ),
+        "sell_instruction": "D+1尾盘按官方收盘价统一卖出",
         "target_position_pct": scheduled_execution.TARGET_POSITION_PCT,
     }
     if snapshot_age_seconds > scheduled_execution.MAX_SNAPSHOT_AGE_SECONDS:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
 from alphaagent.server.services.limit_up import scheduled_execution
@@ -10,7 +10,8 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 def test_additive_concept_execution_contract_is_frozen() -> None:
-    assert scheduled_execution.SCHEDULED_EXECUTION_VERSION == "limit-up-scheduled-v5"
+    assert scheduled_execution.SCHEDULED_EXECUTION_VERSION == "limit-up-scheduled-v9"
+    assert scheduled_execution.EXIT_MODE == "next_close"
     assert scheduled_execution.RULE_FREEZE_DATE == date(2026, 7, 15)
 
 
@@ -204,6 +205,7 @@ def test_scheduled_entry_window_boundaries() -> None:
     assert scheduled_execution.is_entry_time("11:30:00") is False
     assert scheduled_execution.is_entry_time("12:59:59") is False
     assert scheduled_execution.is_entry_time("13:00:00") is True
+    assert scheduled_execution.is_entry_time("13:15:00") is True
     assert scheduled_execution.is_entry_time("14:29:59") is True
     assert scheduled_execution.is_entry_time("14:30:00") is False
 
@@ -267,14 +269,23 @@ def test_execution_clock_uses_five_minute_reminders_and_fixed_exit() -> None:
     assert afternoon["entry_allowed"] is True
     assert afternoon["message"] == "连续评估 13:00-14:30"
 
-    sell_reminder = scheduled_execution.execution_clock(_at(14, 25))
-    assert sell_reminder["state"] == "entry_exit_reminder"
-    assert sell_reminder["entry_allowed"] is True
-    assert sell_reminder["message"] == "继续评估至14:30，同时准备卖出D+1持仓"
+    second_window = scheduled_execution.execution_clock(_at(14, 29, 59))
+    assert second_window["entry_allowed"] is True
+    assert second_window["message"] == "连续评估 13:00-14:30"
 
-    sell_time = scheduled_execution.execution_clock(_at(14, 30))
+    wait_close = scheduled_execution.execution_clock(_at(14, 30))
+    assert wait_close["state"] == "waiting_close"
+    assert wait_close["entry_allowed"] is False
+    assert wait_close["message"] == "买入窗口已结束，15:00执行D+1收盘卖出"
+
+    sell_reminder = scheduled_execution.execution_clock(_at(14, 55))
+    assert sell_reminder["state"] == "exit_reminder"
+    assert sell_reminder["entry_allowed"] is False
+    assert sell_reminder["message"] == "准备按官方收盘价卖出D+1持仓"
+
+    sell_time = scheduled_execution.execution_clock(_at(15, 0))
     assert sell_time["state"] == "exit_time"
-    assert sell_time["message"] == "卖出时间已到：执行 D+1 卖出清单"
+    assert sell_time["message"] == "D+1收盘卖出已结束"
 
 
 def test_extract_scheduled_orders_uses_complete_pool_not_end_of_day_selected() -> None:
@@ -288,7 +299,7 @@ def test_extract_scheduled_orders_uses_complete_pool_not_end_of_day_selected() -
     assert orders[0]["candidate_source"] == "complete_first_board_candidate_pool"
 
 
-def test_extract_orders_includes_ready_two_to_three_but_not_high_board_by_default() -> None:
+def test_default_product_orders_include_first_board_and_two_to_three() -> None:
     first_board = _candidate("600001.SSE", "10:06:00")
     two_to_three = {
         **_candidate("600002.SSE", "10:06:00", lane="two_to_three"),
@@ -323,6 +334,7 @@ def test_extract_scheduled_orders_filters_lane_decision_window_and_duplicates() 
                 _candidate("600003.SSE", "10:35:00", decision="blocked"),
                 _candidate("600004.SSE", "10:40:00", lane="one_to_two"),
                 _candidate("600005.SSE", "13:20:00"),
+                _candidate("600006.SSE", "13:35:00"),
             ]
         )
     ]
@@ -332,6 +344,7 @@ def test_extract_scheduled_orders_filters_lane_decision_window_and_duplicates() 
     assert [(row["vt_symbol"], row["buy_time"]) for row in orders] == [
         ("600001.SSE", "10:05:00"),
         ("600005.SSE", "13:20:00"),
+        ("600006.SSE", "13:35:00"),
     ]
 
 
@@ -373,7 +386,22 @@ def test_extract_scheduled_orders_ignores_final_board_outcome() -> None:
 def test_scheduled_position_policy_is_two_half_positions() -> None:
     assert scheduled_execution.MAX_POSITIONS == 2
     assert scheduled_execution.TARGET_POSITION_PCT == 50.0
-    assert scheduled_execution.EXIT_TIME == "14:30:00"
+    assert scheduled_execution.PRODUCT_EXECUTION_LANES == (
+        "first_board",
+        "two_to_three",
+    )
+    assert scheduled_execution.ENTRY_WINDOWS == (
+        ("10:00:00", "11:30:00"),
+        ("13:00:00", "14:30:00"),
+    )
+    assert scheduled_execution.ENTRY_WINDOW_LABELS == (
+        "10:00-11:30",
+        "13:00-14:30",
+    )
+    assert scheduled_execution.ENTRY_CUTOFF_TIME == time(14, 30)
+    assert scheduled_execution.ENTRY_CUTOFF_LABEL == "14:30"
+    assert scheduled_execution.EXIT_MODE == "next_close"
+    assert scheduled_execution.EXIT_TIME == "15:00:00"
     assert scheduled_execution.RESEARCH_SAMPLE_START == date(2026, 1, 16)
     assert scheduled_execution.VALIDATION_START == date(2026, 4, 14)
 
@@ -385,3 +413,4 @@ def test_next_session_clock_is_available_after_close_without_a_stock_pick() -> N
     assert clock["entry_allowed"] is False
     assert clock["message"] == "下一交易日09:55提醒，10:00开始连续盘中评估"
     assert clock["entry_windows"] == ["10:00-11:30", "13:00-14:30"]
+    assert clock["exit_time"] == "15:00"

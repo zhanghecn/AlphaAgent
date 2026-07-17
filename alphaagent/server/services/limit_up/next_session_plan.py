@@ -231,8 +231,11 @@ def _plan_signal(signal: Mapping[str, object], captured_at: datetime) -> dict[st
                 "evidence_time": None,
             },
         ],
-        "buy_instruction": "次交易日10:00后仅在首次触板或可观察回封时进入综合候选",
-        "sell_instruction": str(signal.get("sell_condition") or "D+1动态评估竞价兑现，否则15:00退出"),
+        "buy_instruction": (
+            f"次交易日仅在{'或'.join(scheduled_execution.ENTRY_WINDOW_LABELS)}"
+            "首次触板或回封时进入综合候选"
+        ),
+        "sell_instruction": "D+1尾盘按官方收盘价统一卖出",
         "cancel_checks": [
             "盘前资格或对应板位硬门失效",
             "跌出动态Top5",
@@ -241,7 +244,7 @@ def _plan_signal(signal: Mapping[str, object], captured_at: datetime) -> dict[st
         "reason": "盘后已进入观察，等待次交易时段盘中触发",
         "state_updated_at": captured_at.isoformat(),
         "valid_at": captured_at.isoformat(),
-        "valid_until": "下一交易日14:30",
+        "valid_until": f"下一交易日{scheduled_execution.ENTRY_CUTOFF_LABEL}",
     }
 
 

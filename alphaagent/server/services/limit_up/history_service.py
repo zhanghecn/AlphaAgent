@@ -111,17 +111,19 @@ def rebuild_history_sync() -> dict[str, object]:
         return result
 
 
-def refresh_history_if_needed(latest_reliable_date: date | None) -> dict[str, object]:
-    """Rebuild the versioned ledger only after the reliable daily calendar advances."""
+def refresh_history_if_needed(
+    latest_reliable_date: date | None,
+    *,
+    force: bool = False,
+) -> dict[str, object]:
+    """Rebuild after the calendar advances or historical inputs change."""
 
     with _BUILD_LOCK:
         coverage = history_repository.history_coverage(
             history_engine.HISTORY_STRATEGY_VERSION
         )
         persisted_end = _optional_date(coverage.get("persisted_end"))
-        if latest_reliable_date is None or (
-            persisted_end is not None and persisted_end >= latest_reliable_date
-        ):
+        if latest_reliable_date is None:
             return {
                 "status": "skipped",
                 "strategy_version": history_engine.HISTORY_STRATEGY_VERSION,
@@ -132,6 +134,25 @@ def refresh_history_if_needed(latest_reliable_date: date | None) -> dict[str, ob
                 ),
             }
 
+        rebuild_for_input_change = force
+        ledger_is_current = (
+            persisted_end is not None and persisted_end >= latest_reliable_date
+        )
+        if ledger_is_current and not rebuild_for_input_change:
+            rebuild_for_input_change = (
+                history_repository.history_inputs_newer_than_ledger(
+                    history_engine.HISTORY_STRATEGY_VERSION
+                )
+            )
+        if ledger_is_current and not rebuild_for_input_change:
+            return {
+                "status": "skipped",
+                "strategy_version": history_engine.HISTORY_STRATEGY_VERSION,
+                "persisted_days": int(coverage.get("persisted_days") or 0),
+                "persisted_end": persisted_end.isoformat() if persisted_end else None,
+                "latest_reliable_date": latest_reliable_date.isoformat(),
+            }
+
         result = rebuild_history_sync()
         rebuilt_end = _optional_date(result.get("end"))
         if rebuilt_end is None or rebuilt_end < latest_reliable_date:
@@ -140,6 +161,7 @@ def refresh_history_if_needed(latest_reliable_date: date | None) -> dict[str, ob
             )
         return {
             **result,
+            "forced": rebuild_for_input_change,
             "previous_persisted_end": persisted_end.isoformat() if persisted_end else None,
             "latest_reliable_date": latest_reliable_date.isoformat(),
         }
@@ -633,7 +655,7 @@ def _scheduled_history_ledger(
             else "post_freeze_forward"
         ),
         "lane": None,
-        "exit_mode": "next_1430",
+        "exit_mode": scheduled_execution.EXIT_MODE,
         "action": "normal" if trades else "empty",
         "candidate_count": len(buy_orders),
         "selected_count": len(trades),
@@ -750,6 +772,8 @@ def get_lane_history_backtest(
     exit_coverage: dict[str, int] = {}
     if exit_mode == "next_1430":
         bars, exit_coverage = _attach_scheduled_exit_prices(bars, orders)
+        orders, exact_exit_audit = _filter_orders_with_exact_1430(orders, bars)
+        exit_coverage.update(exact_exit_audit)
         signal_trades = _next_1430_signal_trades(orders, bars)
     else:
         signal_trades = [
@@ -825,7 +849,7 @@ def get_lane_history_backtest(
             "selection_basis": "warmup_and_expanding_oos_frozen_before_holdout",
         },
         "exit_summary": (
-            _scheduled_exit_summary(account["executed_trades"])
+            _scheduled_exit_summary(account["executed_trades"], exit_mode)
             if exit_mode == "next_1430"
             else _exit_summary(orders, exit_mode)
         ),
@@ -865,7 +889,7 @@ def get_scheduled_history_backtest(
     *,
     trade_limit: int | None = 500,
 ) -> dict[str, object]:
-    """Return the frozen two-position first-board product account."""
+    """Return the frozen two-position formal product account."""
 
     cache_key = (
         f"{history_engine.HISTORY_STRATEGY_VERSION}:"
@@ -942,7 +966,6 @@ def _frozen_position_sizing_audit(
             full_trade_dates = list(trade_dates)
         else:
             full_bars, full_trade_dates = _account_market_data(full_rows, full_orders)
-            full_bars, _ = _attach_scheduled_exit_prices(full_bars, full_orders)
         return _scheduled_position_sizing_audit(
             full_orders,
             full_bars,
@@ -986,12 +1009,19 @@ def _build_scheduled_history_backtest(
         )
         for name, orders in extracted_variant_orders.items()
     }
+    variant_filter_results = {
+        name: scheduled_execution.filter_profitability_qualified_orders(orders)
+        for name, orders in variant_orders.items()
+    }
+    qualified_variant_orders = {
+        name: filtered[0]
+        for name, filtered in variant_filter_results.items()
+    }
     union_orders = scheduled_execution.extract_scheduled_orders(
         rows,
         included_lanes=scheduled_execution.RESEARCH_EXECUTION_LANES,
     )
     bars, trade_dates = _account_market_data(rows, union_orders)
-    bars, _ = _attach_scheduled_exit_prices(bars, union_orders)
     config = cash_backtest.CashBacktestConfig(
         initial_cash=100_000,
         max_positions=scheduled_execution.MAX_POSITIONS,
@@ -1007,13 +1037,13 @@ def _build_scheduled_history_backtest(
     )
     variant_bundles = {
         name: _scheduled_variant_bundle(
-            orders,
+            qualified_variant_orders[name],
             bars,
             trade_dates,
             config,
             double_cost_config,
         )
-        for name, orders in variant_orders.items()
+        for name in variant_orders
     }
     baseline = variant_bundles["first_board"]
     for name, bundle in variant_bundles.items():
@@ -1043,24 +1073,25 @@ def _build_scheduled_history_backtest(
     configured_variant = _scheduled_variant_for_lanes(
         scheduled_execution.PRODUCT_EXECUTION_LANES
     )
-    configuration_matches_gate = gate_selected_variant == configured_variant
-    selected_variant = (
-        gate_selected_variant if configuration_matches_gate else "first_board"
+    if configured_variant is None:
+        raise ValueError("scheduled product lanes do not map to a replay variant")
+    configuration_matches_gate = bool(
+        variant_bundles[configured_variant]["gate"]["passed"]
     )
-    unfiltered_bundle = variant_bundles[selected_variant]
+    selected_variant = configured_variant
     unfiltered_orders = variant_orders[selected_variant]
-    orders, profitability_audit = (
-        scheduled_execution.filter_profitability_qualified_orders(
-            unfiltered_orders
-        )
-    )
-    selected_bundle = _scheduled_variant_bundle(
-        orders,
+    unfiltered_bundle = _scheduled_variant_bundle(
+        unfiltered_orders,
         bars,
         trade_dates,
         config,
         double_cost_config,
     )
+    orders = qualified_variant_orders[selected_variant]
+    profitability_audit = dict(
+        variant_filter_results[selected_variant][1]
+    )
+    selected_bundle = variant_bundles[selected_variant]
     account = selected_bundle["account"]
     summary = selected_bundle["summary"]
     phase_summaries = selected_bundle["phase_summaries"]
@@ -1077,7 +1108,7 @@ def _build_scheduled_history_backtest(
         trade_dates,
         config,
     )
-    exit_coverage = _scheduled_exit_coverage(bars, orders)
+    exit_coverage = _scheduled_close_coverage(bars, orders)
     executed_trades = account["executed_trades"]
     signal_daily_results = recommendation_quality["daily_results"]
     signal_summary = recommendation_quality["summary"]
@@ -1101,7 +1132,7 @@ def _build_scheduled_history_backtest(
         "strategy_version": scheduled_execution.SCHEDULED_EXECUTION_VERSION,
         "history_strategy_version": history_engine.HISTORY_STRATEGY_VERSION,
         "lane": "portfolio",
-        "exit_mode": "next_1430",
+        "exit_mode": scheduled_execution.EXIT_MODE,
         "summary": summary,
         "execution_summary": summary,
         "signal_summary": signal_summary,
@@ -1118,7 +1149,7 @@ def _build_scheduled_history_backtest(
                 for window_start, window_end in scheduled_execution.ENTRY_WINDOWS
             ],
             "exit_time": scheduled_execution.EXIT_TIME[:5],
-            "exit_rule": "D+1 fixed time",
+            "exit_rule": "D+1 official close",
             "target_position_pct": scheduled_execution.TARGET_POSITION_PCT,
             "max_snapshot_age_seconds": scheduled_execution.MAX_SNAPSHOT_AGE_SECONDS,
         },
@@ -1224,13 +1255,17 @@ def _build_scheduled_history_backtest(
                 ),
             },
         },
-        "exit_summary": _scheduled_exit_summary(executed_trades),
+        "exit_summary": _scheduled_exit_summary(
+            executed_trades,
+            scheduled_execution.EXIT_MODE,
+        ),
         "stress_tests": {
             "double_cost": double_cost_summary,
         },
         "relay_comparison": {
             "selected_variant": selected_variant,
             "configured_variant": configured_variant,
+            "gate_selected_variant": gate_selected_variant,
             "configuration_matches_gate": configuration_matches_gate,
             "variants": {
                 name: {
@@ -1274,7 +1309,8 @@ def _build_scheduled_history_backtest(
         },
         "limitations": [
             "首次触板是三分钟路径成交代理，没有Tick/L2时不能证明排队成交。",
-            "缺失的历史14:30分钟价使用日线收盘代理并单独计数，不冒充精确14:30成交。",
+            "D+1退出统一使用官方日线收盘价，并计入滑点；它是收盘集合竞价成交假设。",
+            "缺失D+1官方收盘价的历史订单直接剔除，不使用其他价格替代。",
             "一进二已从候选、研究接口和组合复利中移除。",
             "高板统一盘中触发未通过收益回撤门槛，仅保留独立研究。",
             "历史收益是候选代理；缺少逐时点市场、板块资金和Tick/L2，非实盘等价结果。",
@@ -1290,7 +1326,8 @@ def _scheduled_variant_bundle(
     config: cash_backtest.CashBacktestConfig,
     double_cost_config: cash_backtest.CashBacktestConfig,
 ) -> dict[str, object]:
-    account = _simulate_account(orders, bars, trade_dates, "next_1430", config)
+    exit_mode = scheduled_execution.EXIT_MODE
+    account = _simulate_account(orders, bars, trade_dates, exit_mode, config)
     phase_orders = {
         "earlier_history": [
             order
@@ -1322,7 +1359,7 @@ def _scheduled_variant_bundle(
             phase_rows,
             bars,
             trade_dates,
-            "next_1430",
+            exit_mode,
             config,
         )["execution_summary"]
         for phase, phase_rows in phase_orders.items()
@@ -1331,7 +1368,7 @@ def _scheduled_variant_bundle(
         orders,
         bars,
         trade_dates,
-        "next_1430",
+        exit_mode,
         double_cost_config,
     )["execution_summary"]
     return {
@@ -1348,6 +1385,7 @@ def _recommendation_quality_report(
     trade_dates: Sequence[date],
     config: cash_backtest.CashBacktestConfig,
 ) -> dict[str, object]:
+    orders, _ = _filter_orders_with_daily_close(orders, bars)
     bars_by_symbol: dict[str, list[Mapping[str, object]]] = defaultdict(list)
     for bar in bars:
         bars_by_symbol[str(bar.get("vt_symbol") or "")].append(bar)
@@ -1361,7 +1399,7 @@ def _recommendation_quality_report(
             [order],
             bars_by_symbol.get(symbol, []),
             trade_dates,
-            "next_1430",
+            scheduled_execution.EXIT_MODE,
             config,
         )
         trades.extend(account["executed_trades"])
@@ -1488,7 +1526,6 @@ def _scheduled_exit_coverage(
         for bar in bars
     }
     minute_count = 0
-    proxy_count = 0
     missing_count = 0
     request_count = 0
     for order in orders:
@@ -1505,14 +1542,34 @@ def _scheduled_exit_coverage(
         )
         if source == "minute_1430":
             minute_count += 1
-        elif source == "daily_close_proxy":
-            proxy_count += 1
         else:
             missing_count += 1
     return {
         "exit_price_request_count": request_count,
         "minute_1430_count": minute_count,
-        "daily_close_proxy_count": proxy_count,
+        "daily_close_proxy_count": 0,
+        "exit_price_missing_count": missing_count,
+        "excluded_no_exact_1430_count": missing_count,
+    }
+
+
+def _scheduled_close_coverage(
+    bars: Sequence[Mapping[str, object]],
+    orders: Sequence[Mapping[str, object]],
+) -> dict[str, int]:
+    available = _daily_close_keys(bars)
+    requested = [
+        (str(order.get("vt_symbol") or ""), result_date.isoformat())
+        for order in orders
+        if (result_date := _optional_date(order.get("result_date"))) is not None
+        and order.get("vt_symbol")
+    ]
+    close_count = sum(key in available for key in requested)
+    missing_count = len(requested) - close_count
+    return {
+        "exit_price_request_count": len(requested),
+        "daily_close_count": close_count,
+        "daily_close_missing_count": missing_count,
         "exit_price_missing_count": missing_count,
     }
 
@@ -1543,7 +1600,6 @@ def _attach_scheduled_exit_prices(
         for bar in bars
     }
     minute_count = 0
-    proxy_count = 0
     missing_count = 0
     for vt_symbol, result_date in requests:
         key = (vt_symbol, result_date.isoformat())
@@ -1558,13 +1614,10 @@ def _attach_scheduled_exit_prices(
             bar["price_1430_source"] = "minute_1430"
             minute_count += 1
             continue
-        close_price = _number((bar or {}).get("close_price"))
-        if bar is not None and close_price is not None and close_price > 0:
-            bar["price_1430"] = close_price
-            bar["price_1430_source"] = "daily_close_proxy"
-            proxy_count += 1
-        else:
-            missing_count += 1
+        if bar is not None:
+            bar.pop("price_1430", None)
+            bar.pop("price_1430_source", None)
+        missing_count += 1
     merged = sorted(
         indexed.values(),
         key=lambda bar: (
@@ -1575,8 +1628,9 @@ def _attach_scheduled_exit_prices(
     return merged, {
         "exit_price_request_count": len(requests),
         "minute_1430_count": minute_count,
-        "daily_close_proxy_count": proxy_count,
+        "daily_close_proxy_count": 0,
         "exit_price_missing_count": missing_count,
+        "excluded_no_exact_1430_count": missing_count,
     }
 
 
@@ -1643,7 +1697,7 @@ def _position_sizing_variants(
             orders,
             bars,
             trade_dates,
-            "next_1430",
+            scheduled_execution.EXIT_MODE,
             variant_config,
         )["execution_summary"]
     return variants
@@ -1743,7 +1797,18 @@ def _scheduled_validation(
 
 def _scheduled_exit_summary(
     trades: Sequence[Mapping[str, object]],
+    exit_mode: str,
 ) -> dict[str, object]:
+    if exit_mode == "next_close":
+        return {
+            "mode": exit_mode,
+            "policy_version": scheduled_execution.SCHEDULED_EXECUTION_VERSION,
+            "close_exit_count": sum(
+                trade.get("exit_price_source") == "daily_close"
+                for trade in trades
+            ),
+            "daily_close_proxy_count": 0,
+        }
     minute_count = sum(trade.get("exit_price_source") == "minute_1430" for trade in trades)
     proxy_count = sum(
         trade.get("exit_price_source") == "daily_close_proxy" for trade in trades
@@ -1968,6 +2033,10 @@ def _simulate_account(
     exit_mode: str,
     config: cash_backtest.CashBacktestConfig,
 ) -> dict[str, object]:
+    if exit_mode == "next_1430":
+        orders, _ = _filter_orders_with_exact_1430(orders, bars)
+    elif exit_mode == "next_close":
+        orders, _ = _filter_orders_with_daily_close(orders, bars)
     return cash_backtest.simulate_limit_up_account(
         orders,
         bars,
@@ -1975,6 +2044,69 @@ def _simulate_account(
         exit_mode,
         config,
     )
+
+
+def _filter_orders_with_exact_1430(
+    orders: Sequence[Mapping[str, object]],
+    bars: Sequence[Mapping[str, object]],
+) -> tuple[list[Mapping[str, object]], dict[str, int]]:
+    exact_keys = {
+        (
+            str(bar.get("vt_symbol") or ""),
+            str(bar.get("trade_date") or "")[:10],
+        )
+        for bar in bars
+        if bar.get("price_1430_source") == "minute_1430"
+        and (_number(bar.get("price_1430")) or 0) > 0
+    }
+    selected = [
+        order
+        for order in orders
+        if (
+            str(order.get("vt_symbol") or ""),
+            str(order.get("result_date") or "")[:10],
+        )
+        in exact_keys
+    ]
+    return selected, {
+        "input_count": len(orders),
+        "selected_count": len(selected),
+        "excluded_no_exact_1430_count": len(orders) - len(selected),
+    }
+
+
+def _filter_orders_with_daily_close(
+    orders: Sequence[Mapping[str, object]],
+    bars: Sequence[Mapping[str, object]],
+) -> tuple[list[Mapping[str, object]], dict[str, int]]:
+    close_keys = _daily_close_keys(bars)
+    selected = [
+        order
+        for order in orders
+        if (
+            str(order.get("vt_symbol") or ""),
+            str(order.get("result_date") or "")[:10],
+        )
+        in close_keys
+    ]
+    return selected, {
+        "input_count": len(orders),
+        "selected_count": len(selected),
+        "excluded_no_daily_close_count": len(orders) - len(selected),
+    }
+
+
+def _daily_close_keys(
+    bars: Sequence[Mapping[str, object]],
+) -> set[tuple[str, str]]:
+    return {
+        (
+            str(bar.get("vt_symbol") or ""),
+            str(bar.get("trade_date") or "")[:10],
+        )
+        for bar in bars
+        if (_number(bar.get("close_price")) or 0) > 0
+    }
 
 
 def _account_market_data(

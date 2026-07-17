@@ -68,12 +68,22 @@ def test_build_final_plan_keeps_only_next_session_observations() -> None:
     assert result["data_quality"]["is_stale"] is False
     assert result["recommendations"]["execution_schedule"]["state"] == "next_session_wait"
     assert "10:00" in result["recommendations"]["execution_schedule"]["message"]
+    assert result["recommendations"]["execution_schedule"]["entry_windows"] == [
+        "10:00-11:30",
+        "13:00-14:30",
+    ]
+    assert result["recommendations"]["execution_schedule"]["exit_time"] == "15:00"
     rows = result["recommendations"]["lanes"]["next_auction"]
     assert [row["vt_symbol"] for row in rows] == ["600001.SSE"]
     assert rows[0]["action"] == "observe"
     assert rows[0]["research_action"] == "observe"
     assert rows[0]["signal_state"] == "observing"
     assert rows[0]["execution_permission"] == "research_only"
+    assert rows[0]["buy_instruction"] == (
+        "次交易日仅在10:00-11:30或13:00-14:30首次触板或回封时进入综合候选"
+    )
+    assert rows[0]["sell_instruction"] == "D+1尾盘按官方收盘价统一卖出"
+    assert rows[0]["valid_until"] == "下一交易日14:30"
 
 
 def test_plan_keeps_structural_observations_while_auction_checks_are_pending() -> None:
@@ -138,6 +148,7 @@ def test_plan_keeps_structural_observations_while_auction_checks_are_pending() -
     assert rows[0]["strategy_name"] == "二进三盘中观察"
     assert "10:00" in rows[0]["buy_instruction"]
     assert rows[0]["valid_until"] == "下一交易日14:30"
+    assert rows[0]["sell_instruction"] == "D+1尾盘按官方收盘价统一卖出"
 
 
 def test_plan_limits_each_board_lane_to_four_observations() -> None:

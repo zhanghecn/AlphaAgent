@@ -15,6 +15,15 @@ from alphaagent.server.db.session import get_engine, session_scope
 MIN_RELIABLE_DAILY_SYMBOLS = 3000
 HISTORY_LOOKBACK_DATES = 35
 MAIN_BOARD_PREFIXES = ("600", "601", "603", "605", "000", "001", "002", "003")
+HISTORY_INPUT_TABLES = (
+    schema.stocks,
+    schema.stock_daily_bars,
+    schema.stock_minute_bars,
+    schema.stock_financial_reports,
+    schema.stock_events,
+    schema.stock_sector_memberships,
+    schema.stock_sector_membership_snapshots,
+)
 
 
 def reliable_date_window(
@@ -26,6 +35,29 @@ def reliable_date_window(
     if not dates:
         raise ValueError("reliable daily history is unavailable")
     return sorted(set(dates))
+
+
+def history_inputs_newer_than_ledger(strategy_version: str) -> bool:
+    """Return whether persisted replay inputs changed after the last rebuild."""
+
+    schema.ensure_schema_once(get_engine())
+    with session_scope() as session:
+        ledger_updated_at = session.execute(
+            select(func.max(schema.limit_up_history_replays.c.updated_at)).where(
+                schema.limit_up_history_replays.c.strategy_version
+                == strategy_version
+            )
+        ).scalar()
+        if ledger_updated_at is None:
+            return True
+
+        for table in HISTORY_INPUT_TABLES:
+            updated_at = session.execute(
+                select(func.max(table.c.updated_at))
+            ).scalar()
+            if updated_at is not None and updated_at > ledger_updated_at:
+                return True
+        return False
 
 
 def load_reliable_history_frame(
@@ -362,6 +394,34 @@ def load_history_day(version: str, trade_date: date) -> dict[str, object] | None
             )
         ).scalar_one_or_none()
     return dict(row) if isinstance(row, Mapping) else None
+
+
+def load_history_candidate_pools(version: str) -> list[dict[str, object]]:
+    """Load only persisted candidate pools needed for scheduled execution."""
+
+    schema.ensure_schema_once(get_engine())
+    payload = schema.limit_up_history_replays.c.payload
+    statement = (
+        select(
+            schema.limit_up_history_replays.c.trade_date,
+            payload["validation_phase"].as_string().label("validation_phase"),
+            payload["lane_portfolio"]["candidate_pool"].label("candidate_pool"),
+        )
+        .where(schema.limit_up_history_replays.c.strategy_version == version)
+        .order_by(schema.limit_up_history_replays.c.trade_date)
+    )
+    with session_scope() as session:
+        rows = session.execute(statement).mappings().all()
+    return [
+        {
+            "trade_date": row["trade_date"].isoformat(),
+            "validation_phase": str(row["validation_phase"] or "unknown"),
+            "lane_portfolio": {
+                "candidate_pool": dict(row["candidate_pool"] or {}),
+            },
+        }
+        for row in rows
+    ]
 
 
 def load_history_range(

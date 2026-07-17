@@ -64,7 +64,7 @@ describe("live limit-up portfolio presentation", () => {
     ]);
   });
 
-  it("keeps two-to-three and first-board in the single product portfolio", () => {
+  it("keeps first-board and two-to-three in the formal product portfolio", () => {
     const portfolio = [
       signal("600010.SSE", 3, "buy_now"),
       signal("600011.SSE", 1, "buy_now"),

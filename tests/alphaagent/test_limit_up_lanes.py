@@ -1301,13 +1301,13 @@ def test_product_ledger_uses_scheduled_account_when_lane_is_omitted(monkeypatch)
                     "buy_time": "10:12:00",
                     "buy_price": 11.0,
                     "sell_date": "2026-06-11",
-                    "sell_time": "14:30:00",
+                    "sell_time": "15:00:00",
                     "sell_price": 11.6,
                     "return_pct": 5.0,
                     "d1_outcome": "d1_premium",
                     "d_board_status": "sealed",
                     "execution_confidence": "three_minute_path_without_queue",
-                    "exit_price_source": "minute_1430",
+                    "exit_price_source": "daily_close",
                 }
             ],
             "orders": [
@@ -1318,17 +1318,17 @@ def test_product_ledger_uses_scheduled_account_when_lane_is_omitted(monkeypatch)
                 }
             ],
             "validation": {"passed": False, "status": "research_only", "checks": []},
-            "coverage": {"minute_1430_count": 1},
-            "execution_schedule": {"exit_time": "14:30"},
+            "coverage": {"daily_close_count": 1},
+            "execution_schedule": {"exit_time": "15:00"},
         },
     )
 
     ledger = history_service.get_history_ledger(date(2026, 6, 10), lane=None)
 
     assert ledger["lane"] is None
-    assert ledger["exit_mode"] == "next_1430"
+    assert ledger["exit_mode"] == "next_close"
     assert ledger["selected_count"] == 1
-    assert ledger["trades"][0]["sell_time"] == "14:30:00"
+    assert ledger["trades"][0]["sell_time"] == "15:00:00"
 
 
 def test_lane_ledger_uses_candidate_dynamic_exit_decision(monkeypatch) -> None:
@@ -1586,6 +1586,93 @@ def test_independent_lane_next_1430_uses_scheduled_exit_prices(monkeypatch) -> N
     assert report["coverage"]["exit_price_missing_count"] == 0
 
 
+def test_exact_1430_filter_removes_every_order_without_a_minute_price() -> None:
+    orders = [
+        {"vt_symbol": "600001.SSE", "result_date": "2026-07-17"},
+        {"vt_symbol": "600002.SSE", "result_date": "2026-07-17"},
+        {"vt_symbol": "600003.SSE", "result_date": "2026-07-17"},
+    ]
+    bars = [
+        {
+            "vt_symbol": "600001.SSE",
+            "trade_date": "2026-07-17",
+            "price_1430": 11.5,
+            "price_1430_source": "minute_1430",
+        },
+        {
+            "vt_symbol": "600002.SSE",
+            "trade_date": "2026-07-17",
+            "price_1430": 12.0,
+            "price_1430_source": "daily_close_proxy",
+        },
+    ]
+
+    selected, audit = history_service._filter_orders_with_exact_1430(orders, bars)
+
+    assert [order["vt_symbol"] for order in selected] == ["600001.SSE"]
+    assert audit == {
+        "input_count": 3,
+        "selected_count": 1,
+        "excluded_no_exact_1430_count": 2,
+    }
+
+
+def test_daily_close_filter_removes_an_order_without_an_official_close() -> None:
+    orders = [
+        {"vt_symbol": "600001.SSE", "result_date": "2026-07-17"},
+        {"vt_symbol": "600002.SSE", "result_date": "2026-07-17"},
+    ]
+    bars = [
+        {
+            "vt_symbol": "600001.SSE",
+            "trade_date": "2026-07-17",
+            "open_price": 11.0,
+            "close_price": 11.5,
+        },
+        {
+            "vt_symbol": "600002.SSE",
+            "trade_date": "2026-07-17",
+            "open_price": 12.0,
+            "price_1430": 12.2,
+            "price_1430_source": "minute_1430",
+        },
+    ]
+
+    selected, audit = history_service._filter_orders_with_daily_close(orders, bars)
+
+    assert [order["vt_symbol"] for order in selected] == ["600001.SSE"]
+    assert audit == {
+        "input_count": 2,
+        "selected_count": 1,
+        "excluded_no_daily_close_count": 1,
+    }
+
+
+def test_exit_price_attachment_removes_a_legacy_close_proxy(monkeypatch) -> None:
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "load_account_1430_prices",
+        lambda _requests: [],
+    )
+    orders = [{"vt_symbol": "600001.SSE", "result_date": "2026-07-17"}]
+    bars = [
+        {
+            "vt_symbol": "600001.SSE",
+            "trade_date": "2026-07-17",
+            "close_price": 12.0,
+            "price_1430": 12.0,
+            "price_1430_source": "daily_close_proxy",
+        }
+    ]
+
+    attached, coverage = history_service._attach_scheduled_exit_prices(bars, orders)
+
+    assert "price_1430" not in attached[0]
+    assert "price_1430_source" not in attached[0]
+    assert coverage["daily_close_proxy_count"] == 0
+    assert coverage["excluded_no_exact_1430_count"] == 1
+
+
 def test_portfolio_scale_reports_full_single_industry_concentration() -> None:
     summary = history_service._portfolio_scale_summary(
         [
@@ -1724,7 +1811,9 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
                 **order,
                 **(
                     {
-                        "stock_d1_sample_count": 5,
+                        "stock_d1_sample_count": (
+                            4 if order.get("vt_symbol") == "600003.SSE" else 5
+                        ),
                         "stock_gene_combined_win_rate": 30.0,
                     }
                     if order.get("lane") == "first_board"
@@ -1737,16 +1826,9 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
     monkeypatch.setattr(
         history_service.history_repository,
         "load_account_1430_prices",
-        lambda requests: [
-            {
-                "vt_symbol": symbol,
-                "trade_date": trade_date.isoformat(),
-                "price_1430": 11.5,
-                "price_1430_source": "minute_1430",
-            }
-            for symbol, trade_date in requests
-            if symbol == first["vt_symbol"]
-        ],
+        lambda _requests: (_ for _ in ()).throw(
+            AssertionError("formal next-close replay must not query 14:30 prices")
+        ),
     )
     history_service._BACKTEST_REPORT_CACHE.clear()
 
@@ -1759,20 +1841,26 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
 
     assert report["lane"] == "portfolio"
     assert report["mode"] == "scheduled_unified_intraday_cash_replay"
-    assert report["exit_mode"] == "next_1430"
+    assert report["exit_mode"] == "next_close"
     assert report["account_config"]["initial_cash"] == 100_000
     assert report["account_config"]["max_positions"] == 2
     assert report["summary"] == report["execution_summary"]
-    assert report["summary"]["signal_count"] == 3
+    assert report["summary"]["signal_count"] == 2
     assert report["summary"]["trade_count"] == 2
     assert report["summary"]["total_return_pct"] == report["daily_results"][-1]["total_return_pct"]
-    assert report["execution_schedule"]["entry_windows"] == ["10:00-11:30", "13:00-14:30"]
-    assert report["execution_schedule"]["exit_time"] == "14:30"
+    assert report["execution_schedule"]["entry_windows"] == [
+        "10:00-11:30",
+        "13:00-14:30",
+    ]
+    assert report["execution_schedule"]["exit_time"] == "15:00"
     assert report["execution_comparability"]["status"] == "candidate_proxy_only"
     assert report["execution_comparability"]["live_equivalent"] is False
     assert "intraday_sector_fund_flow" in report["execution_comparability"]["missing_evidence"]
-    assert report["coverage"]["minute_1430_count"] == 1
-    assert report["coverage"]["daily_close_proxy_count"] == 2
+    assert report["coverage"]["exit_price_request_count"] == 2
+    assert report["coverage"]["daily_close_count"] == 2
+    assert report["coverage"]["daily_close_missing_count"] == 0
+    assert report["exit_summary"]["mode"] == "next_close"
+    assert report["exit_summary"]["close_exit_count"] == 2
     assert set(report["stress_tests"]) == {"double_cost"}
     assert report["stress_tests"]["double_cost"]["total_return_pct"] is not None
     assert report["position_sizing_audit"]["selected_max_positions"] == 2
@@ -1789,10 +1877,11 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
     assert report["profitability_filter"]["minimum_d1_samples"] == 5
     assert report["profitability_filter"]["minimum_combined_rate"] == 30.0
     assert report["profitability_filter"]["audit"]["input_count"] == 3
-    assert report["profitability_filter"]["audit"]["selected_count"] == 3
+    assert report["profitability_filter"]["audit"]["selected_count"] == 2
     assert report["profitability_filter"]["audit"]["reason_counts"] == {
         "not_first_board": 1,
-        "qualified": 2,
+        "qualified": 1,
+        "same_stock_d1_samples_below_5": 1,
     }
     assert report["profitability_filter"]["selected_summary"] == report["summary"]
     assert report["profitability_filter"]["unfiltered_summary"]["signal_count"] == 3
@@ -1800,9 +1889,9 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
     assert quality["mode"] == "independent_standard_slot_daily_equal_weight"
     assert quality["position_constraints_applied"] is False
     assert quality["standard_slot_cash"] == 50_000
-    assert quality["summary"]["signal_count"] == 3
-    assert quality["summary"]["trade_count"] == 3
-    assert quality["summary"]["win_rate"] == pytest.approx(66.6667)
+    assert quality["summary"]["signal_count"] == 2
+    assert quality["summary"]["trade_count"] == 2
+    assert quality["summary"]["win_rate"] == 100.0
     assert quality["summary"]["average_return_pct"] is not None
     assert quality["summary"]["total_return_pct"] is not None
     assert quality["summary"]["max_drawdown_pct"] is not None
@@ -1813,16 +1902,48 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
     unfiltered_quality = report["profitability_filter"][
         "unfiltered_recommendation_quality"
     ]
-    assert selected_quality["summary"]["signal_count"] == 3
+    assert selected_quality["summary"]["signal_count"] == 2
     assert unfiltered_quality["summary"]["signal_count"] == 3
     quality_delta = report["profitability_filter"]["delta"]
-    assert quality_delta["recommendation_win_rate_pct_points"] == 0.0
-    assert quality_delta["recommendation_average_return_pct_points"] == 0.0
-    assert quality_delta["recommendation_total_return_pct_points"] == 0.0
+    assert quality_delta["recommendation_win_rate_pct_points"] == pytest.approx(
+        33.3333
+    )
+    assert quality_delta["recommendation_average_return_pct_points"] > 0
     assert report["relay_comparison"]["selected_variant"] == (
         "first_board_two_to_three"
     )
+    assert report["relay_comparison"]["configured_variant"] == (
+        "first_board_two_to_three"
+    )
+    assert report["relay_comparison"]["gate_selected_variant"] == (
+        "first_board_two_to_three"
+    )
+    assert report["relay_comparison"]["configuration_matches_gate"] is True
+    combined = report["relay_comparison"]["variants"][
+        "first_board_two_to_three"
+    ]
+    assert combined["passed"] is True
+    assert combined["summary"]["signal_count"] == 2
     assert "one_to_two_audit" not in report
+
+    monkeypatch.setattr(
+        history_service.scheduled_execution,
+        "PRODUCT_EXECUTION_LANES",
+        ("first_board",),
+    )
+    history_service._BACKTEST_REPORT_CACHE.clear()
+    first_only = history_service.get_lane_history_backtest(
+        date(2026, 6, 10),
+        date(2026, 6, 10),
+        lane="portfolio",
+        exit_mode="next_close",
+    )
+
+    assert first_only["relay_comparison"]["configured_variant"] == "first_board"
+    assert first_only["relay_comparison"]["gate_selected_variant"] == (
+        "first_board_two_to_three"
+    )
+    assert first_only["relay_comparison"]["configuration_matches_gate"] is True
 
     monkeypatch.setattr(
         history_service.scheduled_execution,
@@ -1830,19 +1951,24 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
         ("first_board", "high_board"),
     )
     history_service._BACKTEST_REPORT_CACHE.clear()
-    fallback = history_service.get_lane_history_backtest(
+    configured = history_service.get_lane_history_backtest(
         date(2026, 6, 10),
         date(2026, 6, 10),
         lane="portfolio",
         exit_mode="next_close",
     )
 
-    assert fallback["portfolio_policy"]["included_lanes"] == ["first_board"]
-    assert fallback["relay_comparison"]["selected_variant"] == "first_board"
-    assert fallback["relay_comparison"]["configured_variant"] == (
+    assert configured["portfolio_policy"]["included_lanes"] == [
+        "first_board",
+        "high_board",
+    ]
+    assert configured["relay_comparison"]["selected_variant"] == (
         "first_board_high_board"
     )
-    assert fallback["relay_comparison"]["configuration_matches_gate"] is False
+    assert configured["relay_comparison"]["configured_variant"] == (
+        "first_board_high_board"
+    )
+    assert configured["relay_comparison"]["configuration_matches_gate"] is False
 
 
 def test_scheduled_backtest_reuses_full_report_across_trade_limits(monkeypatch) -> None:

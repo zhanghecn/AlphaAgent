@@ -65,7 +65,7 @@ export function liveSignalPresentation(
   stale = false,
   paused = false,
 ): StatusPresentation {
-  if (paused) return { label: "午间休市，等待13:00", tone: "warning" };
+  if (paused) return { label: "午间休市，等待下午开盘", tone: "warning" };
   const state = signalStatePresentation(signal, stale);
   if (
     !stale

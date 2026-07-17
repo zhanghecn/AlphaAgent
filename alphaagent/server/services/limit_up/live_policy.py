@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Mapping, Sequence
 from zoneinfo import ZoneInfo
 
+from alphaagent.server.services.limit_up import scheduled_execution
 from alphaagent.server.services.limit_up.domain import is_eligible_main_board
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -1024,17 +1025,15 @@ def _buy_condition(entry_kind: str, action: str) -> str:
     if entry_kind in {"sweep", "reseal"}:
         return "价格触及涨停且封单、换手、回封稳定性保持通过后执行"
     if entry_kind in {"tail_seal", "tail_watch"} or action == "wait_tail":
-        return "14:30后连续封板至少2分钟且封单未明显缩水后执行"
+        return "尾盘形态仅观察，不执行买入；下一交易日按正式窗口重新评估"
     if entry_kind == "next_auction" or action == "next_auction":
         return "次日09:25竞价强度、板块和情绪硬门通过后执行"
     return "当前条件不成立，不执行买入"
 
 
 def _sell_condition(candidate: Mapping[str, object]) -> str:
-    lane = str(candidate.get("board_lane") or "")
-    if lane == "high_board":
-        return "D+1 09:25先评估高板竞价兑现优势；未触发则15:00退出"
-    return "D+1 09:25由动态退出策略评估；无竞价兑现优势则15:00退出"
+    del candidate
+    return "D+1尾盘按官方收盘价统一卖出"
 
 
 def _cancel_checks(entry_kind: str) -> list[str]:
@@ -1661,7 +1660,13 @@ def _valid_until(captured_at: datetime, entry_kind: str) -> str:
         return local.replace(hour=9, minute=30, second=0, microsecond=0).isoformat()
     if entry_kind == "next_auction":
         return "下一交易日09:30"
-    return local.replace(hour=14, minute=57, second=0, microsecond=0).isoformat()
+    cutoff = scheduled_execution.ENTRY_CUTOFF_TIME
+    return local.replace(
+        hour=cutoff.hour,
+        minute=cutoff.minute,
+        second=0,
+        microsecond=0,
+    ).isoformat()
 
 
 def _cancel_condition(entry_kind: str) -> str:

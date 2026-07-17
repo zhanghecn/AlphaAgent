@@ -112,7 +112,7 @@ describe("next-session plan presentation", () => {
 
   it("labels the scheduled lunch pause without calling data expired", () => {
     expect(liveSignalPresentation(signal("approaching_trigger"), true, true)).toEqual({
-      label: "午间休市，等待13:00",
+      label: "午间休市，等待下午开盘",
       tone: "warning",
     });
   });

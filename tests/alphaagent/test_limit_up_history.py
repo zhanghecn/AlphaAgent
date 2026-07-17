@@ -27,7 +27,7 @@ def test_history_replay_schema_uses_date_and_version_primary_key() -> None:
 
 def test_weak_market_attack_history_uses_v14_version() -> None:
     assert history_engine.HISTORY_STRATEGY_VERSION == "limit-up-history-v15"
-    assert versions.LIVE_STRATEGY_VERSION == "limit-up-live-v10"
+    assert versions.LIVE_STRATEGY_VERSION == "limit-up-live-v12"
 
 
 def test_reliable_date_window_rejects_sparse_prefix() -> None:
@@ -63,12 +63,50 @@ def test_history_refresh_skips_when_persisted_ledger_is_current(monkeypatch) -> 
         "rebuild_history_sync",
         lambda: rebuilt.append(True),
     )
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "history_inputs_newer_than_ledger",
+        lambda _version: False,
+        raising=False,
+    )
 
     result = history_service.refresh_history_if_needed(date(2026, 7, 10))
 
     assert result["status"] == "skipped"
     assert result["persisted_end"] == "2026-07-10"
     assert rebuilt == []
+
+
+def test_history_refresh_rebuilds_when_persisted_inputs_are_newer(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "history_coverage",
+        lambda _version: {"persisted_end": "2026-07-10", "persisted_days": 600},
+    )
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "history_inputs_newer_than_ledger",
+        lambda _version: True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        history_service,
+        "rebuild_history_sync",
+        lambda: {
+            "status": "ready",
+            "persisted_days": 600,
+            "start": "2024-01-15",
+            "end": "2026-07-10",
+        },
+    )
+
+    result = history_service.refresh_history_if_needed(date(2026, 7, 10))
+
+    assert result["status"] == "ready"
+    assert result["forced"] is True
+    assert result["previous_persisted_end"] == "2026-07-10"
 
 
 def test_history_refresh_rebuilds_when_complete_daily_bar_advances(monkeypatch) -> None:
@@ -92,6 +130,33 @@ def test_history_refresh_rebuilds_when_complete_daily_bar_advances(monkeypatch) 
 
     assert result["status"] == "ready"
     assert result["previous_persisted_end"] == "2026-07-09"
+    assert result["latest_reliable_date"] == "2026-07-10"
+
+
+def test_history_refresh_force_rebuilds_current_ledger(monkeypatch) -> None:
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "history_coverage",
+        lambda _version: {"persisted_end": "2026-07-10", "persisted_days": 600},
+    )
+    monkeypatch.setattr(
+        history_service,
+        "rebuild_history_sync",
+        lambda: {
+            "status": "ready",
+            "persisted_days": 600,
+            "start": "2024-01-15",
+            "end": "2026-07-10",
+        },
+    )
+
+    result = history_service.refresh_history_if_needed(
+        date(2026, 7, 10),
+        force=True,
+    )
+
+    assert result["status"] == "ready"
+    assert result["previous_persisted_end"] == "2026-07-10"
     assert result["latest_reliable_date"] == "2026-07-10"
 
 

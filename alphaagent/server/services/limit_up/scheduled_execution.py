@@ -1,4 +1,4 @@
-"""Continuous intraday first-board clock shared by replay and live views."""
+"""Continuous intraday limit-up clock shared by replay and live views."""
 
 from __future__ import annotations
 
@@ -11,15 +11,21 @@ from zoneinfo import ZoneInfo
 from alphaagent.server.services.limit_up.lane_features import first_reseal_time
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-SCHEDULED_EXECUTION_VERSION = "limit-up-scheduled-v5"
+SCHEDULED_EXECUTION_VERSION = "limit-up-scheduled-v9"
 FIRST_BOARD_PROFITABILITY_FILTER_VERSION = "first-board-profitability-gate-v1"
 FIRST_BOARD_MIN_D1_SAMPLES = 5
 FIRST_BOARD_MIN_COMBINED_RATE = 30.0
 MAX_POSITIONS = 2
 TARGET_POSITION_PCT = 50.0
 MAX_SNAPSHOT_AGE_SECONDS = 20
-EXIT_TIME = "14:30:00"
+EXIT_MODE = "next_close"
+EXIT_TIME = "15:00:00"
 ENTRY_WINDOWS = (("10:00:00", "11:30:00"), ("13:00:00", "14:30:00"))
+ENTRY_WINDOW_LABELS = tuple(
+    f"{start[:5]}-{end[:5]}" for start, end in ENTRY_WINDOWS
+)
+ENTRY_CUTOFF_TIME = time.fromisoformat(ENTRY_WINDOWS[-1][1])
+ENTRY_CUTOFF_LABEL = ENTRY_CUTOFF_TIME.strftime("%H:%M")
 RELAY_LANES = frozenset({"two_to_three", "high_board"})
 RESEARCH_EXECUTION_LANES = ("first_board", "two_to_three", "high_board")
 PRODUCT_EXECUTION_LANES = ("first_board", "two_to_three")
@@ -114,24 +120,27 @@ def execution_clock(captured_at: datetime) -> dict[str, object]:
         )
     elif clock < time(13, 0):
         state, message, target = "lunch_pause", "午间休市，13:00恢复连续评估", time(13, 0)
-    elif clock < time(14, 25):
+    elif clock < time(14, 30):
         state, message, entry_allowed, target = (
             "entry_window",
             "连续评估 13:00-14:30",
             True,
             time(14, 30),
         )
-    elif clock < time(14, 30):
-        state, message, entry_allowed, target = (
-            "entry_exit_reminder",
-            "继续评估至14:30，同时准备卖出D+1持仓",
-            True,
-            time(14, 30),
+    elif clock < time(14, 55):
+        state, message, target = (
+            "waiting_close",
+            "买入窗口已结束，15:00执行D+1收盘卖出",
+            time(14, 55),
         )
     elif clock < time(15, 0):
-        state, message = "exit_time", "卖出时间已到：执行 D+1 卖出清单"
+        state, message, target = (
+            "exit_reminder",
+            "准备按官方收盘价卖出D+1持仓",
+            time(15, 0),
+        )
     else:
-        state, message = "closed", "今日执行已结束，下个交易日 09:55 提醒"
+        state, message = "exit_time", "D+1收盘卖出已结束"
 
     target_at = (
         datetime.combine(local_at.date(), target, tzinfo=SHANGHAI).isoformat()
@@ -144,7 +153,7 @@ def execution_clock(captured_at: datetime) -> dict[str, object]:
         "message": message,
         "entry_allowed": entry_allowed,
         "target_at": target_at,
-        "entry_windows": [f"{start[:5]}-{end[:5]}" for start, end in ENTRY_WINDOWS],
+        "entry_windows": list(ENTRY_WINDOW_LABELS),
         "exit_time": EXIT_TIME[:5],
         "max_positions": MAX_POSITIONS,
         "target_position_pct": TARGET_POSITION_PCT,
@@ -161,7 +170,7 @@ def next_session_execution_clock() -> dict[str, object]:
         "message": "下一交易日09:55提醒，10:00开始连续盘中评估",
         "entry_allowed": False,
         "target_at": None,
-        "entry_windows": [f"{start[:5]}-{end[:5]}" for start, end in ENTRY_WINDOWS],
+        "entry_windows": list(ENTRY_WINDOW_LABELS),
         "exit_time": EXIT_TIME[:5],
         "max_positions": MAX_POSITIONS,
         "target_position_pct": TARGET_POSITION_PCT,

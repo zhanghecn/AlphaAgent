@@ -463,13 +463,17 @@ function LiveView({
   const waitingForRepair = gate.repair_state === "pending_repair";
   const repairRevoked = gate.repair_state === "repair_revoked";
   const schedule = snapshot.recommendations.execution_schedule;
+  const afternoonEntryStart = schedule?.entry_windows[1]?.split("-")[0];
+  const lunchMessage = afternoonEntryStart
+    ? `午间休市：展示上午最后快照，${afternoonEntryStart}后恢复买入评估`
+    : "午间休市：展示上午最后快照，等待下午恢复买入评估";
   return (
     <section aria-label="实时推荐">
       <LivePortfolioBacktestStrip report={portfolioReport} />
       {schedule && (
         <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b px-3 py-2 text-xs sm:px-4">
           <span className={schedule.entry_allowed ? "font-semibold text-rise" : "font-medium text-foreground"}>{schedule.message}</span>
-          <span className="text-muted-foreground">推荐不限数量 · 两仓账户按排序执行 · D+1 14:30 卖出</span>
+          <span className="text-muted-foreground">推荐不限数量 · 两仓账户按排序执行 · D+1尾盘按官方收盘价卖出</span>
           {schedule.target_at && <span className="ml-auto text-muted-foreground">下一节点 {formatTime(schedule.target_at)}</span>}
         </div>
       )}
@@ -488,7 +492,7 @@ function LiveView({
           {planMode
             ? header.title
             : lunchPaused
-              ? "午间休市：展示上午最后快照，13:00后恢复实时扫描"
+              ? lunchMessage
               : gate.passed
                 ? "市场允许出手"
                 : waitingForRepair
@@ -529,7 +533,7 @@ function LiveView({
         <EmptyRow text={
           planMode
             ? "当前没有入选次交易时段的综合推荐观察候选"
-            : "当前没有通过正式门禁和历史赚钱过滤的买点，保持现金"
+            : "当前没有通过正式门禁的买点，保持现金"
         } />
       )}
       {tracePanel}
@@ -642,7 +646,7 @@ function LiveSignalRow({ signal, stale, paused }: { signal: LimitUpLiveSignal; s
             </div>
           )}
           <div className="text-muted-foreground">买入：{signal.buy_instruction ?? signal.buy_condition ?? "条件待确认"}</div>
-          <div className="text-muted-foreground">卖出：{signal.sell_instruction ?? signal.sell_condition ?? "D+1动态判断"}</div>
+          <div className="text-muted-foreground">卖出：{signal.sell_instruction ?? signal.sell_condition ?? "D+1尾盘按官方收盘价统一卖出"}</div>
           <div className="text-muted-foreground">取消：{signal.cancel_checks?.join("；") ?? signal.cancel_condition}</div>
           <div className="text-muted-foreground">盘口：换手 {formatPct(signal.turnover_rate)} · 封单 {formatAmount(signal.seal_amount)}</div>
         </div>
@@ -688,7 +692,9 @@ function LiveTracePanel({
   onRetry,
 }: LiveTracePanelProps) {
   const items = useMemo(() => {
-    const scoped = (day?.items ?? []).filter((item) => item.board_lane === "first_board");
+    const scoped = (day?.items ?? []).filter(
+      (item) => item.board_lane === "first_board" || item.board_lane === "two_to_three",
+    );
     return sortLiveTraceItems(scoped);
   }, [day?.items]);
   const funnel = day?.lane_funnels?.first_board;
@@ -729,6 +735,7 @@ function LiveTracePanel({
 
       {funnelSummary && (
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b bg-muted/20 px-3 py-2 text-xs sm:px-4">
+          <span className="font-medium text-foreground">首板漏斗</span>
           {funnelSummary.stages.map((stage, index) => (
             <span
               key={stage}
@@ -1020,7 +1027,7 @@ function LedgerView({ ledger, loading }: { ledger?: LimitUpLaneLedger; loading: 
         <span className={observationOnly ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground"}>
           {observationOnly
             ? `研究观察 ${observations.length} 只，不计入正式交割${ledger.validation?.reason ? `：${ledger.validation.reason}` : ""}`
-            : `连续评估交割 ${ledger.selected_count} 只 · D+1 14:30 卖出`}
+            : `连续评估交割 ${ledger.selected_count} 只 · D+1尾盘按官方收盘价卖出`}
         </span>
       </div>
       {displayRows.length ? (
@@ -1063,7 +1070,7 @@ function LedgerTradeRow({ trade }: { trade: LimitUpLaneLedgerTrade }) {
           </div>
         )}
       </td>
-      <td className="px-3 py-3 text-xs tabular-nums"><div>{trade.sell_date ?? "待 D+1"} {trade.sell_time ?? ""}</div><div className="text-muted-foreground">{formatPrice(trade.sell_price)} · {trade.exit_price_proxy ? "收盘代理" : "固定 14:30"}</div></td>
+      <td className="px-3 py-3 text-xs tabular-nums"><div>{trade.sell_date ?? "待 D+1"} {trade.sell_time ?? ""}</div><div className="text-muted-foreground">{formatPrice(trade.sell_price)} · 官方收盘价</div></td>
       <td className={cn("px-3 py-3 text-xs font-medium", trade.d_board_status === "sealed" ? "text-rise" : "text-fall")}>{boardStatusLabel(trade.d_board_status)}</td>
       <td className="px-3 py-3 text-xs">{d1OutcomeLabel(trade.d1_outcome)}</td>
       <td className={cn("px-3 py-3 text-right font-semibold tabular-nums", amountTone(trade.return_pct))}>{formatPct(trade.return_pct)}</td>
@@ -1106,7 +1113,7 @@ function BacktestView({
       <div className="flex flex-wrap items-end gap-2 border-b px-3 py-3 sm:px-4">
         <DateInput label="开始" value={start} min={minimumDate} max={maximumDate} onChange={onStart} />
         <DateInput label="结束" value={end} min={minimumDate} max={maximumDate} onChange={onEnd} />
-        <div className="h-9 border bg-muted/20 px-3 text-xs leading-9 text-muted-foreground">连续评估 / D+1 14:30</div>
+        <div className="h-9 border bg-muted/20 px-3 text-xs leading-9 text-muted-foreground">双窗口买入 / D+1收盘</div>
         <BacktestRebuildControl running={rebuildRunning} error={rebuildError} onRebuild={onRebuild} />
         <div className="ml-auto pb-1 text-xs tabular-nums text-muted-foreground">
           10 万元 · 两仓各 50% · 100 股整数手 · 含费用滑点
@@ -1125,8 +1132,8 @@ function BacktestView({
       {report && <SignalSummaryStrip report={report} />}
       {report && (
         <div className="border-b px-3 py-2 text-xs text-muted-foreground sm:px-4">
-          买入 {report.execution_schedule?.entry_windows.join(" / ") ?? "连续盘中"} · D+1 {report.execution_schedule?.exit_time ?? "14:30"} 卖出 ·
-          精确分钟价 {report.coverage.minute_1430_count ?? 0} · 收盘代理 {report.coverage.daily_close_proxy_count ?? 0}
+          买入 {report.execution_schedule?.entry_windows.join(" / ") ?? "连续盘中"} · D+1 {report.execution_schedule?.exit_time ?? "15:00"} 收盘卖出 ·
+          官方收盘价 {report.coverage.daily_close_count ?? 0} · 缺失剔除 {report.coverage.daily_close_missing_count ?? 0}
           {report.execution_comparability?.live_equivalent === false && (
             <span className="ml-3 text-amber-700 dark:text-amber-300" title={report.execution_comparability.reason}>
               候选代理，盘中资金门未历史重放
@@ -1135,7 +1142,7 @@ function BacktestView({
         </div>
       )}
       {report?.lane === "portfolio" ? (
-        <div className="border-b px-3 py-2 text-xs text-muted-foreground sm:px-4">综合推荐 · 首板与二进三按到达时间成交 · 两仓各 50% · 不预留仓位</div>
+        <div className="border-b px-3 py-2 text-xs text-muted-foreground sm:px-4">首板 + 二进三 · 按到达时间成交 · 两仓各 50% · 不预留仓位</div>
       ) : null}
       {report && <RobustnessStrip report={report} />}
       {report && <ValidationStrip report={report} />}

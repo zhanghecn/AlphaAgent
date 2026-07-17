@@ -577,8 +577,9 @@ export interface LimitUpLaneBacktest {
   exit_summary: {
     mode: ExitMode;
     policy_version?: string;
-    auction_exit_count: number;
-    tail_exit_count: number;
+    auction_exit_count?: number;
+    tail_exit_count?: number;
+    close_exit_count?: number;
     minute_1430_count?: number;
     daily_close_proxy_count?: number;
   };
@@ -612,6 +613,7 @@ export interface LimitUpLaneBacktest {
   relay_comparison?: {
     selected_variant: string;
     configured_variant?: string | null;
+    gate_selected_variant?: string | null;
     configuration_matches_gate: boolean;
     variants: Record<string, {
       lanes: BoardLaneKey[];
@@ -668,6 +670,8 @@ export interface LimitUpLaneBacktest {
   coverage: LimitUpHistoryCoverage & {
     intraday_path_trade_days?: number;
     exit_price_request_count?: number;
+    daily_close_count?: number;
+    daily_close_missing_count?: number;
     minute_1430_count?: number;
     daily_close_proxy_count?: number;
     exit_price_missing_count?: number;

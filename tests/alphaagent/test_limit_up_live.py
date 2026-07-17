@@ -305,7 +305,15 @@ def test_live_portfolio_prefers_same_frame_relay_then_first_board() -> None:
     assert all(row["action"] == "buy_now" for row in portfolio)
     assert all(row["signal_state"] == "trigger_ready" for row in portfolio)
     assert all(row["execution_permission"] == "research_only" for row in portfolio)
-    assert all(row["sell_instruction"] == "D+1 14:30 统一卖出" for row in portfolio)
+    assert all(
+        row["buy_instruction"]
+        == "仅在10:00-11:30或13:00-14:30满足全部条件时买入"
+        for row in portfolio
+    )
+    assert all(
+        row["sell_instruction"] == "D+1尾盘按官方收盘价统一卖出"
+        for row in portfolio
+    )
 
 
 def test_live_portfolio_is_empty_outside_entry_window_or_when_snapshot_is_old() -> None:
@@ -358,6 +366,37 @@ def test_live_portfolio_is_empty_outside_entry_window_or_when_snapshot_is_old() 
         captured_at=datetime(2026, 7, 14, 12, 0, tzinfo=SHANGHAI),
         snapshot_age_seconds=5,
     ) == []
+
+    early_afternoon = live_service._build_live_actionable_recommendations(
+        recommendations,
+        captured_at=datetime(2026, 7, 14, 13, 15, tzinfo=SHANGHAI),
+        snapshot_age_seconds=5,
+    )
+    assert len(early_afternoon) == 1
+    assert early_afternoon[0]["action"] == "buy_now"
+
+    second_window = live_service._build_live_actionable_recommendations(
+        recommendations,
+        captured_at=datetime(2026, 7, 14, 13, 35, tzinfo=SHANGHAI),
+        snapshot_age_seconds=5,
+    )
+    assert len(second_window) == 1
+    assert second_window[0]["action"] == "buy_now"
+
+    before_window_close = live_service._build_live_actionable_recommendations(
+        recommendations,
+        captured_at=datetime(2026, 7, 14, 14, 29, 59, tzinfo=SHANGHAI),
+        snapshot_age_seconds=5,
+    )
+    assert len(before_window_close) == 1
+    assert before_window_close[0]["action"] == "buy_now"
+
+    at_window_close = live_service._build_live_actionable_recommendations(
+        recommendations,
+        captured_at=datetime(2026, 7, 14, 14, 30, tzinfo=SHANGHAI),
+        snapshot_age_seconds=5,
+    )
+    assert at_window_close == []
 
     stale = live_service._build_live_portfolio(
         recommendations,
@@ -1479,8 +1518,9 @@ def test_live_signal_exposes_execution_state_and_operation_rules() -> None:
     waiting = result["lanes"]["tail"][0]
     assert actionable["execution_state"] == "actionable"
     assert "涨停" in actionable["buy_condition"]
-    assert "D+1" in actionable["sell_condition"]
+    assert actionable["sell_condition"] == "D+1尾盘按官方收盘价统一卖出"
     assert actionable["state_updated_at"] == "2026-07-10T10:05:00+08:00"
+    assert actionable["valid_until"] == "2026-07-10T14:30:00+08:00"
     assert waiting["execution_state"] == "waiting"
     assert waiting["buy_condition"]
     assert waiting["cancel_condition"]
@@ -2393,7 +2433,7 @@ def test_lane_validation_veto_downgrades_live_buy_to_observation() -> None:
     assert "只观察" in signal["reason"]
 
 
-def test_live_two_to_three_uses_the_passing_product_portfolio_gate(monkeypatch) -> None:
+def test_live_two_to_three_uses_passing_formal_portfolio_gate(monkeypatch) -> None:
     from alphaagent.server.services.limit_up import history_service
 
     monkeypatch.setattr(

@@ -468,7 +468,7 @@ def test_live_first_board_watchlist_uses_change_pct_as_second_key() -> None:
     ]
 
 
-def test_live_portfolio_keeps_relay_priority_then_uses_first_board_joint_rate() -> None:
+def test_live_portfolio_prefers_relay_then_uses_first_board_joint_rate() -> None:
     recommendations = {
         "lanes": {
             "now": [
