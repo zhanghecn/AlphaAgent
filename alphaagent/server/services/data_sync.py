@@ -1834,7 +1834,15 @@ class DataSyncRunner:
     def _run_sync_stock_financial_quarterly(self, params: dict[str, Any]) -> dict[str, Any]:
         stock_limit = int(params.get("stock_limit", 100))
         only_missing = _truthy(params.get("only_missing", True))
-        stock_rows = _financial_sync_stock_rows(stock_limit, only_missing)
+        symbols = _param_list(params.get("symbols"))
+        if symbols:
+            stock_rows = _financial_sync_stock_rows(
+                stock_limit,
+                only_missing,
+                symbols=symbols,
+            )
+        else:
+            stock_rows = _financial_sync_stock_rows(stock_limit, only_missing)
         if not stock_rows:
             return {"rows_read": 0, "rows_written": 0, "message": "No stocks in DB."}
         total_stocks = len(stock_rows)
@@ -6610,7 +6618,12 @@ def _upsert_stock_lhb_records(items: list[dict[str, Any]]) -> int:
     return written
 
 
-def _financial_sync_stock_rows(stock_limit: int, only_missing: bool = True) -> list[dict[str, Any]]:
+def _financial_sync_stock_rows(
+    stock_limit: int,
+    only_missing: bool = True,
+    *,
+    symbols: list[str] | None = None,
+) -> list[dict[str, Any]]:
     limit = min(max(int(stock_limit or 100), 1), 1000)
     with session_scope() as session:
         query = select(schema.stocks).order_by(desc(schema.stocks.c.turnover), desc(schema.stocks.c.market_cap))
@@ -6630,6 +6643,8 @@ def _financial_sync_stock_rows(stock_limit: int, only_missing: bool = True) -> l
                 .where(func.coalesce(report_counts.c.report_count, 0) < 4)
                 .order_by(desc(schema.stocks.c.turnover), desc(schema.stocks.c.market_cap))
             )
+        if symbols:
+            query = query.where(schema.stocks.c.vt_symbol.in_(symbols))
         return session.execute(query.limit(limit)).mappings().all()
 
 

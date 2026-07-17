@@ -140,6 +140,39 @@ def test_financial_quarterly_skips_hung_stock_without_late_write(monkeypatch):
     assert written_symbols == ["600002"]
 
 
+def test_financial_quarterly_forwards_requested_symbols(monkeypatch):
+    selected: dict[str, object] = {}
+
+    def select_stocks(stock_limit, only_missing, *, symbols=None):
+        selected.update(
+            stock_limit=stock_limit,
+            only_missing=only_missing,
+            symbols=symbols,
+        )
+        return []
+
+    monkeypatch.setattr(svc, "_financial_sync_stock_rows", select_stocks)
+
+    result = svc.DataSyncRunner()._run_sync_stock_financial_quarterly(
+        {
+            "stock_limit": 24,
+            "only_missing": True,
+            "symbols": ["603989.SSE", "000506.SZSE"],
+        }
+    )
+
+    assert selected == {
+        "stock_limit": 24,
+        "only_missing": True,
+        "symbols": ["603989.SSE", "000506.SZSE"],
+    }
+    assert result == {
+        "rows_read": 0,
+        "rows_written": 0,
+        "message": "No stocks in DB.",
+    }
+
+
 def test_select_zombie_batch_ids_picks_only_stale_running():
     """看门狗只挑 started_at 早于阈值的 running 批次，跳过新鲜的和无开始时间的。
 
