@@ -128,6 +128,41 @@
   }
 }
 
+/* ── 作战指挥台工具：mono eyebrow 编号标签 ── */
+.eyebrow {
+  @apply font-mono text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground;
+}
+
+/* 作战导轨当前节点脉冲（全局 reduce-motion 保险层会自动禁用） */
+@keyframes ops-pulse {
+  0% {
+    box-shadow: 0 0 0 0 var(--pulse-color, hsl(var(--primary) / 0.45));
+  }
+  70% {
+    box-shadow: 0 0 0 8px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+.ops-pulse {
+  animation: ops-pulse 2.4s ease-out infinite;
+}
+
+/* 门禁状态灯呼吸（仅 live 数据节点使用，保持克制） */
+@keyframes gate-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+.gate-breathe {
+  animation: gate-breathe 2.4s ease-in-out infinite;
+}
+
 /* A-share convention: rise = red, fall = green */
 .text-rise {
   color: hsl(0 84% 60%);

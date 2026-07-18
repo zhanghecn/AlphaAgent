@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { LimitUpSignalSnapshot } from "@/api/limitUp";
+import type { LimitUpLiveSignal, LimitUpSignalSnapshot } from "@/api/limitUp";
 import {
   EMPTY_BUY_ALERT_STATE,
   buyAlertContent,
@@ -11,22 +11,43 @@ import {
   playBuyAlertSound,
   unlockBuyAlertAudio,
 } from "./buyAlertSound";
+import {
+  DEFAULT_SPEECH_RATE,
+  cancelBuyAlertSpeech,
+  speakBuyAlertTest,
+  speakBuyAlerts,
+  speechSupported,
+} from "./speechAlert";
 
 const ENABLED_STORAGE_KEY = "alphaagent.limitUpBuyAlerts.enabled";
 const STATE_STORAGE_KEY = "alphaagent.limitUpBuyAlerts.state";
+const RATE_STORAGE_KEY = "alphaagent.limitUpBuyAlerts.speechRate";
 
 export type BuyAlertPermission = NotificationPermission | "unsupported";
+
+export interface BuyAlertBannerItem {
+  key: string;
+  signal: LimitUpLiveSignal;
+  alertedAt: number;
+}
 
 interface BuyAlertControls {
   enabled: boolean;
   permission: BuyAlertPermission;
+  speechAvailable: boolean;
+  speechRate: number;
+  banner: BuyAlertBannerItem[];
   toggle: () => Promise<BuyAlertPermission>;
   test: () => Promise<BuyAlertPermission>;
+  setSpeechRate: (rate: number) => void;
+  dismissBanner: () => void;
 }
 
 export function useBuyAlerts(snapshot: LimitUpSignalSnapshot | undefined): BuyAlertControls {
   const [enabled, setEnabled] = useState(readEnabled);
   const [permission, setPermission] = useState<BuyAlertPermission>(currentPermission);
+  const [speechRate, setSpeechRateState] = useState(readSpeechRate);
+  const [banner, setBanner] = useState<BuyAlertBannerItem[]>([]);
   const alertState = useRef<BuyAlertState>(readAlertState());
 
   useEffect(() => {
@@ -36,15 +57,22 @@ export function useBuyAlerts(snapshot: LimitUpSignalSnapshot | undefined): BuyAl
     if (!result.alerts.length) return;
 
     void playBuyAlertSound();
+    speakBuyAlerts(result.alerts, { rate: speechRate });
+    setBanner(result.alerts.map((signal) => ({
+      key: `${snapshot?.trade_date}:${signal.vt_symbol}`,
+      signal,
+      alertedAt: Date.now(),
+    })));
     for (const signal of result.alerts) {
       showNotification(buyAlertContent(signal), `limit-up:${snapshot?.trade_date}:${signal.vt_symbol}`);
     }
-  }, [enabled, snapshot]);
+  }, [enabled, snapshot, speechRate]);
 
   const toggle = useCallback(async () => {
     if (enabled) {
       setEnabled(false);
       writeEnabled(false);
+      cancelBuyAlertSpeech();
       return currentPermission();
     }
 
@@ -61,18 +89,39 @@ export function useBuyAlerts(snapshot: LimitUpSignalSnapshot | undefined): BuyAl
     const sound = playBuyAlertSound();
     const nextPermission = await requestNotificationPermission();
     setPermission(nextPermission);
+    speakBuyAlertTest({ rate: speechRate });
     await sound;
     showNotification(
       {
         title: "AlphaAgent 买点提醒测试",
-        body: "声音和桌面通知测试完成；真实买点会附带股票、涨幅和距板。",
+        body: "声音、语音播报和桌面通知测试完成；真实买点会读出股票名、涨幅和距板。",
       },
       "limit-up:test",
     );
     return nextPermission;
+  }, [speechRate]);
+
+  const setSpeechRate = useCallback((rate: number) => {
+    setSpeechRateState(rate);
+    writeSpeechRate(rate);
   }, []);
 
-  return { enabled, permission, toggle, test };
+  const dismissBanner = useCallback(() => {
+    setBanner([]);
+    cancelBuyAlertSpeech();
+  }, []);
+
+  return {
+    enabled,
+    permission,
+    speechAvailable: speechSupported(),
+    speechRate,
+    banner,
+    toggle,
+    test,
+    setSpeechRate,
+    dismissBanner,
+  };
 }
 
 async function requestNotificationPermission(): Promise<BuyAlertPermission> {
@@ -122,6 +171,25 @@ function writeEnabled(enabled: boolean): void {
     window.localStorage.setItem(ENABLED_STORAGE_KEY, String(enabled));
   } catch {
     // Private browsing can reject storage while alerts still work for this page load.
+  }
+}
+
+function readSpeechRate(): number {
+  if (typeof window === "undefined") return DEFAULT_SPEECH_RATE;
+  try {
+    const raw = window.localStorage.getItem(RATE_STORAGE_KEY);
+    const value = raw == null ? NaN : Number(raw);
+    return Number.isFinite(value) && value > 0 ? value : DEFAULT_SPEECH_RATE;
+  } catch {
+    return DEFAULT_SPEECH_RATE;
+  }
+}
+
+function writeSpeechRate(rate: number): void {
+  try {
+    window.localStorage.setItem(RATE_STORAGE_KEY, String(rate));
+  } catch {
+    // Rate stays in memory when storage is unavailable.
   }
 }
 

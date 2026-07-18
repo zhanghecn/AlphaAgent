@@ -34,7 +34,7 @@
 - `frontend/src/App.tsx`: 页面路由。
 - `frontend/src/components/AppShell.tsx`: 当前产品导航。
 - `frontend/src/pages/ShortTermResearchPage.tsx`: `/short-term` 入口。
-- `frontend/src/pages/LimitUpPage.tsx`: 当前短线研究内容。
+- `frontend/src/pages/LimitUpPage.tsx`: 当前短线研究内容。作战指挥台布局：OpsFlowRail 作战步进器（`frontend/src/features/limitUp/OpsFlowRail.tsx` + `opsFlow.ts`）+ 门禁指挥条 + 折叠轨迹面板；回测视图 PanelHead 编号章节 01-06。
 - `frontend/src/pages/MainlineReplayPage.tsx`: 概念主线。
 - `frontend/src/pages/MarketTimingPage.tsx`: 大盘择时。
 - `frontend/src/pages/DataManagementPage.tsx`: 健康、同步、打板证据和显式分钟缺口。

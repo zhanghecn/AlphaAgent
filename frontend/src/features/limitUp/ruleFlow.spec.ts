@@ -1,0 +1,71 @@
+import { describe, expect, it } from "vitest";
+
+import type { LimitUpStrategyGuide } from "@/api/limitUp";
+import { STAGE_META, buildRuleFlow } from "./ruleFlow";
+
+const guide = {
+  strategy: {
+    entry_windows: ["10:00-11:30", "13:00-14:30"],
+    max_positions: 2,
+  },
+  selection_steps: [
+    { order: 1, title: "限定可交易范围", rule: "仅主板首板和二进三。", timing: "盘中已知" },
+  ],
+  radar_evidence: {
+    capture_min_change_pct: 3,
+    formal_min_change_pct: 5,
+  },
+  field_groups: [
+    { key: "intraday", label: "盘中实时字段", selection_allowed: true, fields: ["当前价"] },
+  ],
+} as unknown as LimitUpStrategyGuide;
+
+describe("buildRuleFlow", () => {
+  it("生成七步流程：市场门 → 板块筛选 → 雷达 → 动能 → 板块 → 排序 → 成交", () => {
+    const nodes = buildRuleFlow(guide);
+    expect(nodes).toHaveLength(7);
+    expect(nodes.map((node) => node.stage)).toEqual([
+      "gate", "filter", "radar", "momentum", "sector", "rank", "fill",
+    ]);
+  });
+
+  it("第一步是市场门禁，讲清封板家数与炸板率门槛", () => {
+    const gate = buildRuleFlow(guide)[0];
+    expect(gate.title).toContain("大盘环境");
+    const labels = gate.thresholds.map((t) => t.label);
+    expect(labels).toContain("主板封板家数");
+    expect(labels).toContain("实时炸板率");
+  });
+
+  it("雷达节点把 3% 与 5% 的动态阈值从 guide 取出", () => {
+    const radar = buildRuleFlow(guide).find((node) => node.stage === "radar")!;
+    expect(radar.thresholds.some((t) => t.value.includes("3%"))).toBe(true);
+    expect(radar.thresholds.some((t) => t.value.includes("5%"))).toBe(true);
+  });
+
+  it("成交节点含买入窗口与仓位动态值", () => {
+    const fill = buildRuleFlow(guide).find((node) => node.stage === "fill")!;
+    expect(fill.thresholds.some((t) => t.value.includes("10:00-11:30"))).toBe(true);
+    expect(fill.thresholds.some((t) => t.value.includes("2 仓"))).toBe(true);
+  });
+
+  it("每个节点都有阶段元数据（徽章配色）", () => {
+    const nodes = buildRuleFlow(guide);
+    for (const node of nodes) {
+      expect(STAGE_META[node.stage].label).toBeTruthy();
+      expect(STAGE_META[node.stage].tone).toBeTruthy();
+    }
+  });
+
+  it("文案不含裸露的英文术语", () => {
+    const forbidden = ["captured_at", "concept launch", "Top3", "close_price", "result_date", "sweep", "10bp"];
+    const nodes = buildRuleFlow(guide);
+    for (const node of nodes) {
+      const blob = [node.title, node.purpose, node.condition, node.dataNote, node.failHint ?? "",
+        ...node.thresholds.flatMap((t) => [t.label, t.value])].join(" ");
+      for (const term of forbidden) {
+        expect(blob).not.toContain(term);
+      }
+    }
+  });
+});

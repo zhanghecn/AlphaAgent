@@ -648,6 +648,180 @@ export interface LimitUpDailyResult {
   drawdown_pct: number;
 }
 
+export interface LimitUpDrawdownReturnMetrics {
+  count: number;
+  win_count: number;
+  win_rate: number | null;
+  average_return_pct: number | null;
+}
+
+export interface LimitUpDrawdownTrade {
+  vt_symbol: string;
+  name: string;
+  lane: BoardLaneKey;
+  entry_date?: string | null;
+  buy_date?: string | null;
+  exit_date?: string | null;
+  sell_date?: string | null;
+  return_pct: number;
+  net_pnl?: number | null;
+  d_board_status?: "sealed" | "failed" | "no_limit" | string | null;
+}
+
+export interface LimitUpDrawdownDiagnostics {
+  diagnostics_version: string;
+  status: "ready" | "insufficient_data" | string;
+  scope_explanation: string;
+  longest_losing_streak: {
+    count: number;
+    start_date: string | null;
+    end_date: string | null;
+    first_entry_date: string | null;
+    compound_return_pct: number;
+    trades: LimitUpDrawdownTrade[];
+  };
+  maximum_drawdown_episode: {
+    peak_date: string | null;
+    trough_date: string | null;
+    recovery_date: string | null;
+    drawdown_pct: number;
+    duration_trade_days: number;
+    recovery_trade_days: number | null;
+    principal_losses: LimitUpDrawdownTrade[];
+  };
+  execution_filter: {
+    all: LimitUpDrawdownCohort;
+    time_validation: LimitUpDrawdownCohort & {
+      start: string;
+      end: string;
+    };
+    latest_entry_month: LimitUpDrawdownCohort & {
+      month: string | null;
+    };
+  };
+  board_outcome_attribution: {
+    actionability: "outcome_only_not_entry_filter" | string;
+    note: string;
+    groups: Array<LimitUpDrawdownReturnMetrics & {
+      status: "sealed" | "failed" | "no_limit" | "unknown" | string;
+      hard_loss_count: number;
+    }>;
+    hard_loss_count: number;
+    hard_loss_failed_count: number;
+    hard_loss_failed_share_pct: number | null;
+  };
+  recommendation_regime: {
+    design_sample: LimitUpDrawdownReturnMetrics;
+    time_validation: LimitUpDrawdownReturnMetrics;
+    win_rate_delta_pct_points: number | null;
+    average_return_delta_pct_points: number | null;
+  };
+  stock_gene_calibration: {
+    field: string;
+    selection_action: "do_not_add_static_threshold" | string;
+    design_sample: LimitUpCalibrationBucket[];
+    time_validation: LimitUpCalibrationBucket[];
+    validation_monotonic: boolean | null;
+  };
+  causes: Array<{
+    code: string;
+    finding: string;
+    implication: string;
+  }>;
+  exit_research: {
+    research_version: string;
+    status: "blocked_by_execution_price_coverage" | string;
+    formal_strategy_changed: boolean;
+    formal_policy: {
+      policy_version: string;
+      mode: string;
+      decision_time: string;
+      execution_time: string;
+    };
+    withdrawn_policy: {
+      policy_version: string;
+      status: "invalidated_same_price_decision_fill_lookahead" | string;
+      invalidated_on: string;
+      published_metrics_withdrawn: boolean;
+      published_metrics: null;
+      reason_codes: Array<{
+        code: string;
+        detail: string;
+      }>;
+    };
+    d0_open_benchmark: {
+      policy_version: string;
+      status: "rejected_below_frozen_baseline" | string;
+      rule: string;
+      decision_time: string;
+      price_source: string;
+      baseline_summary: LimitUpEntrySummary;
+      summary: LimitUpEntrySummary;
+      return_delta_pct_points: number | null;
+      win_rate_delta_pct_points: number | null;
+    };
+    precommitted_limit_research: {
+      policy_version: string;
+      status: "blocked_by_auction_fill_evidence" | string;
+      rule: string;
+      decision_time: string;
+      selected_threshold_pct: null;
+      coverage: {
+        required_pair_count: number;
+        snapshot_covered_pair_count: number;
+        strict_complete_pair_count: number;
+        unmatched_volume_pair_count: number;
+        strict_coverage_pct: number;
+        minimum_strict_coverage_pct: number;
+        coverage_passed: boolean;
+      };
+      account_performance: null;
+      account_performance_reason: string;
+    };
+    post_auction_research: {
+      policy_version: string;
+      status: "blocked_by_execution_price_coverage" | string;
+      signal_time: string;
+      execution_time: string;
+      execution_price_proxy: string;
+      metric_scope: "covered_baseline_trades_signal_diagnostic" | string;
+      selected_threshold_pct: null;
+      coverage: {
+        required_pair_count: number;
+        covered_pair_count: number;
+        missing_pair_count: number;
+        coverage_pct: number;
+        minimum_coverage_pct: number;
+        coverage_passed: boolean;
+      };
+      baseline_covered_sample: LimitUpDrawdownReturnMetrics;
+      all_post_auction_exit_sample: LimitUpDrawdownReturnMetrics;
+      threshold_rows: Array<{
+        threshold_pct: number;
+        trigger_count: number;
+        sample_count: number;
+        win_rate: number | null;
+        average_return_pct: number | null;
+        average_return_delta_vs_close_pct_points: number | null;
+      }>;
+      account_performance: null;
+      account_performance_reason: string;
+    };
+  };
+}
+
+interface LimitUpDrawdownCohort {
+  executed: LimitUpDrawdownReturnMetrics;
+  skipped: LimitUpDrawdownReturnMetrics;
+}
+
+interface LimitUpCalibrationBucket {
+  bucket: string;
+  count: number;
+  win_rate: number | null;
+  average_return_pct: number | null;
+}
+
 export interface LimitUpLaneBacktest {
   status: string;
   mode: string;
@@ -704,6 +878,7 @@ export interface LimitUpLaneBacktest {
   stress_tests?: {
     double_cost: LimitUpEntrySummary;
   };
+  drawdown_diagnostics?: LimitUpDrawdownDiagnostics;
   position_sizing_audit?: {
     selected_max_positions: number;
     selected_by_development: number;
@@ -771,6 +946,12 @@ export interface LimitUpLaneBacktest {
     trade_time: string;
     reason: string;
     cash_after: number;
+    buy_price?: number | null;
+    result_date?: string | null;
+    d1_close_price?: number | null;
+    d1_return_pct?: number | null;
+    d_board_status?: "sealed" | "failed" | "no_limit" | null;
+    is_win?: boolean | null;
   }>;
   open_positions: Array<{
     vt_symbol: string;

@@ -1,177 +1,21 @@
-import {
-  BookOpenText,
-  CheckCircle2,
-  Database,
-  TriangleAlert,
-} from "lucide-react";
+import { Database } from "lucide-react";
 
 import type {
   LimitUpRadarValidation,
   LimitUpStrategyGuide,
 } from "@/api/limitUp";
-import { Button } from "@/components/ui/button";
-import { Modal, ModalBody, ModalHeader } from "@/components/ui/modal";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
-interface StrategyGuideDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  guide?: LimitUpStrategyGuide;
-  radarValidation?: LimitUpRadarValidation;
-  radarValidationLoading?: boolean;
-  radarValidationError?: string | null;
-  loading: boolean;
-  error: string | null;
-  onRetry: () => void;
-  initialTab?: "rules" | "dataset";
-}
-
-export function StrategyGuideDialog({
-  open,
-  onOpenChange,
+export function GuideDataset({
   guide,
   radarValidation,
   radarValidationLoading = false,
   radarValidationError = null,
-  loading,
-  error,
-  onRetry,
-  initialTab = "rules",
-}: StrategyGuideDialogProps) {
-  return (
-    <Modal
-      open={open}
-      onOpenChange={onOpenChange}
-      ariaLabel="打板规则说明"
-      className="max-h-[calc(100dvh-2rem)] max-w-4xl overflow-hidden rounded-md"
-    >
-      <ModalHeader
-        title={(
-          <span className="flex items-center gap-2">
-            <BookOpenText className="h-4 w-4" />
-            打板规则说明
-          </span>
-        )}
-        onClose={() => onOpenChange(false)}
-      />
-      <ModalBody className="max-h-[calc(100dvh-6rem)] overflow-y-auto p-0">
-        {loading && !guide ? (
-          <GuideLoading />
-        ) : error && !guide ? (
-          <GuideError message={error} onRetry={onRetry} />
-        ) : guide ? (
-          <Tabs defaultValue={initialTab}>
-            <div className="sticky top-0 z-10 border-b bg-card px-4 py-3 sm:px-5">
-              <TabsList className="grid h-9 w-full grid-cols-2 sm:w-64">
-                <TabsTrigger value="rules" className="py-1 text-xs">选取规则</TabsTrigger>
-                <TabsTrigger value="dataset" className="py-1 text-xs">验证数据</TabsTrigger>
-              </TabsList>
-            </div>
-            <TabsContent value="rules" className="m-0">
-              <RulesView guide={guide} />
-            </TabsContent>
-            <TabsContent value="dataset" className="m-0">
-              <DatasetView
-                guide={guide}
-                radarValidation={radarValidation}
-                radarValidationLoading={radarValidationLoading}
-                radarValidationError={radarValidationError}
-              />
-            </TabsContent>
-          </Tabs>
-        ) : null}
-      </ModalBody>
-    </Modal>
-  );
-}
-
-function RulesView({ guide }: { guide: LimitUpStrategyGuide }) {
-  const { strategy, verdict, selection_steps: steps, ranking } = guide;
-  return (
-    <div className="px-4 py-5 sm:px-5">
-      <section
-        className="border-l-2 border-rise bg-rise/5 px-4 py-3"
-        aria-label="无未来函数结论"
-      >
-        <div className="flex items-start gap-3">
-          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-rise" />
-          <div className="min-w-0">
-            <h3 className="text-sm font-semibold">{verdict.title}</h3>
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">{verdict.detail}</p>
-          </div>
-        </div>
-      </section>
-
-      <section className="mt-5" aria-labelledby="selection-flow-title">
-        <div className="flex flex-wrap items-end justify-between gap-2 border-b pb-2">
-          <div>
-            <h3 id="selection-flow-title" className="text-sm font-semibold">选取顺序</h3>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {strategy.live_version} · {strategy.entry_windows.join("、")}
-            </p>
-          </div>
-          <span className="text-xs tabular-nums text-muted-foreground">
-            最多 {strategy.max_positions} 仓
-          </span>
-        </div>
-        <ol>
-          {steps.map((step) => (
-            <li
-              key={step.order}
-              className="grid grid-cols-[1.75rem_minmax(0,1fr)] gap-3 border-b py-3 last:border-b-0"
-            >
-              <span className="flex h-7 w-7 items-center justify-center rounded-full border text-xs font-semibold tabular-nums">
-                {step.order}
-              </span>
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                  <h4 className="text-sm font-medium">{step.title}</h4>
-                  <span className="text-[11px] text-muted-foreground">{step.timing}</span>
-                </div>
-                <p className="mt-1 text-xs leading-5 text-muted-foreground">{step.rule}</p>
-              </div>
-            </li>
-          ))}
-        </ol>
-      </section>
-
-      <section className="mt-5 border-t pt-4" aria-labelledby="ranking-title">
-        <h3 id="ranking-title" className="text-sm font-semibold">首板排序</h3>
-        <dl className="mt-3 grid gap-x-6 gap-y-3 text-xs sm:grid-cols-2">
-          <Definition label="第一顺位" value={ranking.first_board_primary} />
-          <Definition label="第二顺位" value={ranking.first_board_secondary} />
-          <Definition label="历史胜率" value={ranking.historical_win_rate_formula} />
-          <Definition label="历史截止" value={ranking.history_cutoff} mono />
-        </dl>
-        <p className="mt-3 border-l-2 px-3 text-xs leading-5 text-muted-foreground">
-          历史胜率只改变展示顺序，不删除通过实时硬门的推荐。{ranking.portfolio_gate}。
-        </p>
-      </section>
-
-      <section className="mt-5 flex items-start gap-3 border-t pt-4" aria-label="成交边界">
-        <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-300" />
-        <div>
-          <h3 className="text-sm font-medium">成交边界</h3>
-          <p className="mt-1 text-xs leading-5 text-muted-foreground">
-            {verdict.execution_boundary}
-          </p>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function DatasetView({
-  guide,
-  radarValidation,
-  radarValidationLoading,
-  radarValidationError,
 }: {
   guide: LimitUpStrategyGuide;
   radarValidation?: LimitUpRadarValidation;
-  radarValidationLoading: boolean;
-  radarValidationError: string | null;
+  radarValidationLoading?: boolean;
+  radarValidationError?: string | null;
 }) {
   const { dataset, field_groups: groups, historical_reference: history } = guide;
   const radar = {
@@ -197,7 +41,7 @@ function DatasetView({
   const radarUnavailable = Boolean(radarValidationError) && !radarValidation;
   const radarPending = radarValidationLoading && !radarValidation;
   return (
-    <div className="px-4 py-5 sm:px-5">
+    <div>
       <section className="border-y bg-muted/20" aria-labelledby="evidence-scope-title">
         <h3 id="evidence-scope-title" className="sr-only">一套规则，两层证据</h3>
         <div className="grid sm:grid-cols-2">
@@ -218,12 +62,12 @@ function DatasetView({
 
       <section className="mt-5" aria-labelledby="radar-validation-title">
         <h3 id="radar-validation-title" className="text-sm font-semibold">
-          3%提前雷达验证
+          采集与正式推荐的边界：3% 开始盯、5% 才推荐
         </h3>
         <p className="mt-1 text-xs leading-5 text-muted-foreground">
           {radar.selected_contract === "formal_5pct"
-            ? "3%至5%仅保存同帧研究证据；达到固定样本门槛并正式发布前，页面仍只有5%正式推荐。"
-            : "3%同规则合同已经正式发布；页面仍只有一套正式推荐和一套执行口径。"}
+            ? "股票涨到 3% 系统就开始盯上它并保存研究证据，但只有涨到 5% 才会出现在正式推荐里。在积累到足够样本并正式发布前，页面上只有 5% 起的推荐。"
+            : "3% 起的同规则已经正式发布，页面上只有一套正式推荐和一套执行口径。"}
         </p>
         <div className="mt-2 overflow-x-auto border-y">
           <table className="w-full min-w-[720px] text-left text-xs">
@@ -259,8 +103,8 @@ function DatasetView({
                     : radarPending
                       ? "读取中"
                       : radar.minute_coverage_pct == null
-                    ? "待补齐"
-                    : formatPct(radar.minute_coverage_pct, 4)}
+                      ? "待补齐"
+                      : formatPct(radar.minute_coverage_pct, 4)}
                 </td>
                 <td className="px-3 py-2">
                   {radar.selected_contract === "formal_5pct"
@@ -297,14 +141,17 @@ function DatasetView({
           <Database className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
           <div className="min-w-0">
             <h3 id="dataset-title" className="text-sm font-semibold">{dataset.name}</h3>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              把当时保存下来的行情画面，按当时的规则原样重新跑一遍，看这套规则在过去到底赚不赚钱——而不是另搞一套执行算法。
+            </p>
             <p className="mt-1 break-all font-mono text-[11px] text-muted-foreground">
-              {dataset.table} · {dataset.date_start}..{dataset.date_end}
+              数据表 {dataset.table} · 区间 {dataset.date_start} 至 {dataset.date_end}
             </p>
           </div>
         </div>
 
         <dl className="mt-4 grid grid-cols-2 border-y sm:grid-cols-4">
-          <DatasetMetric label="保存快照" value={`${dataset.snapshot_count} 帧`} />
+          <DatasetMetric label="保存的行情画面" value={`${dataset.snapshot_count} 帧`} />
           <DatasetMetric
             label="已闭合信号"
             value={`${dataset.closed_signal_count} 只 · ${dataset.win_count} 胜`}
@@ -412,18 +259,35 @@ function DatasetView({
       </section>
 
       <section className="mt-5 border-t pt-4 text-xs leading-5" aria-labelledby="execution-contract-title">
-        <h3 id="execution-contract-title" className="text-sm font-semibold">结算口径</h3>
-        <p className="mt-2 text-muted-foreground">买入：{dataset.entry}</p>
-        <p className="text-muted-foreground">卖出：{dataset.exit}</p>
-        <p className="text-muted-foreground">费用：{dataset.costs}</p>
+        <h3 id="execution-contract-title" className="text-sm font-semibold">怎么算买入价、卖出价和费用</h3>
+        <dl className="mt-2 space-y-2">
+          <div className="flex gap-2">
+            <dt className="shrink-0 font-medium text-foreground">买入价</dt>
+            <dd className="text-muted-foreground">
+              取信号触发后 20–60 秒内的第一条保存报价，再在这个价格上加上 0.1% 的滑点（模拟实际买入会买贵一点点），且不超过涨停价。
+            </dd>
+          </div>
+          <div className="flex gap-2">
+            <dt className="shrink-0 font-medium text-foreground">卖出价</dt>
+            <dd className="text-muted-foreground">
+              次日（D+1）的官方日线收盘价，再扣掉 0.1% 的滑点。没有收盘价的票直接剔除，不用盘中价凑数。
+            </dd>
+          </div>
+          <div className="flex gap-2">
+            <dt className="shrink-0 font-medium text-foreground">费用</dt>
+            <dd className="text-muted-foreground">
+              佣金万分之三（每笔最低 5 元）、过户费万分之一（买卖都收）、卖出时另收印花税万分之五。
+            </dd>
+          </div>
+        </dl>
         <p className="mt-2 break-all font-mono text-[11px] text-muted-foreground">
-          {dataset.report}
+          详细回测报告：{dataset.report}
         </p>
         <ul className="mt-3 space-y-1 text-muted-foreground">
           {dataset.limitations.map((item) => <li key={item}>· {item}</li>)}
         </ul>
         <p className="mt-3 border-l-2 border-amber-500 px-3 text-muted-foreground">
-          D+1 收盘属于结果字段，只在同股同日首次合格快照确定后结算，绝不参与当日选股。
+          次日收盘价是「结果」，必须等选股全部完成后才能确定，绝不反过来参与当天的选股。
         </p>
       </section>
     </div>
@@ -468,28 +332,6 @@ function radarStatusLabel(
   if (status === "ready_for_review") return "待最终复核";
   if (status === "process_ready") return "过程检查可用";
   return "采集中";
-}
-
-function GuideLoading() {
-  return (
-    <div className="space-y-3 px-5 py-6" aria-label="规则说明读取中">
-      <div className="h-16 animate-pulse bg-muted" />
-      <div className="h-9 w-64 animate-pulse bg-muted" />
-      <div className="h-48 animate-pulse bg-muted" />
-    </div>
-  );
-}
-
-function GuideError({ message, onRetry }: { message: string; onRetry: () => void }) {
-  return (
-    <div className="px-5 py-12 text-center">
-      <TriangleAlert className="mx-auto h-6 w-6 text-destructive" />
-      <p className="mt-3 text-sm text-destructive">{message}</p>
-      <Button type="button" variant="outline" size="sm" className="mt-4" onClick={onRetry}>
-        重新读取
-      </Button>
-    </div>
-  );
 }
 
 function formatPct(value: number, digits = 2) {

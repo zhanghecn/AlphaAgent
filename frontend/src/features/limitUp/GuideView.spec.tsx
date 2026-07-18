@@ -2,10 +2,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { LimitUpRadarValidation, LimitUpStrategyGuide } from "@/api/limitUp";
-import { StrategyGuideDialog } from "./StrategyGuideDialog";
+import { GuideView } from "./GuideView";
 
 const guide: LimitUpStrategyGuide = {
-  guide_version: "limit-up-strategy-guide-v1",
+  guide_version: "limit-up-strategy-guide-v2",
   strategy: {
     live_version: "limit-up-live-v15",
     history_version: "limit-up-history-v15",
@@ -71,9 +71,9 @@ const guide: LimitUpStrategyGuide = {
     portfolio_win_count: 2,
     portfolio_return_pct: 5.7892,
     portfolio_max_drawdown_pct: -0.0309,
-    entry: "第一次规则通过的保存快照",
+    entry: "第一次规则通过的保存快照，盘中 sweep 价格代理",
     exit: "D+1官方日线close_price",
-    costs: "双边滑点和费用",
+    costs: "双边各10bp滑点、万三佣金、最低5元、万0.1过户、卖出万五印花税",
     report: "memory/06_backtests/limit_up_sector_quality_v15_20260717.md",
     limitations: ["只有2026-07-15具备D+1官方收盘。"],
   },
@@ -113,8 +113,6 @@ const radarValidation: LimitUpRadarValidation = {
 };
 
 const baseProps = {
-  open: true,
-  onOpenChange: () => undefined,
   guide,
   radarValidation,
   radarValidationLoading: false,
@@ -124,61 +122,92 @@ const baseProps = {
   onRetry: () => undefined,
 };
 
-describe("StrategyGuideDialog", () => {
-  it("explains the causal selection order and execution boundary", () => {
-    const html = renderToStaticMarkup(<StrategyGuideDialog {...baseProps} />);
+describe("GuideView", () => {
+  it("用一句话说清策略，并承诺不偷看未来", () => {
+    const html = renderToStaticMarkup(<GuideView {...baseProps} />);
 
-    expect(html).toContain("选股阶段没有使用未来数据");
-    expect(html).toContain("role=\"dialog\"");
-    expect(html).toContain("aria-label=\"关闭\"");
-    expect(html).toContain("captured_at");
-    expect(html).toContain("result_date &lt; signal_date");
-    expect(html).toContain("没有 Tick/L2");
+    expect(html).toContain("这是一个什么策略");
+    expect(html).toContain("买入即将涨停或刚涨停的强势股");
+    expect(html).toContain("规则保证不偷看未来数据");
   });
 
-  it("shows the frozen dataset and marks D+1 close as outcome-only", () => {
-    const html = renderToStaticMarkup(
-      <StrategyGuideDialog {...baseProps} initialTab="dataset" />,
-    );
+  it("渲染七步流程图，默认展开第一步（市场门禁）", () => {
+    const html = renderToStaticMarkup(<GuideView {...baseProps} />);
+
+    expect(html).toContain("aria-label=\"选股规则流程图\"");
+    expect(html).toContain("选股到成交，一共七步");
+    expect(html).toContain("大盘环境是否允许出手");
+    expect(html).toContain("圈定能打的股票");
+    expect(html).toContain("按到达顺序成交、次日尾盘卖");
+  });
+
+  it("展开节点显示成立条件、关键门槛、用到的数据、不通过会怎样", () => {
+    const html = renderToStaticMarkup(<GuideView {...baseProps} />);
+
+    expect(html).toContain("成立条件");
+    expect(html).toContain("关键门槛");
+    expect(html).toContain("主板封板家数");
+    expect(html).toContain("用到的数据");
+    expect(html).toContain("不通过会怎样");
+  });
+
+  it("讲解防未来函数三机制和字段分组", () => {
+    const html = renderToStaticMarkup(<GuideView {...baseProps} />);
+
+    expect(html).toContain("怎么做到不偷看未来");
+    expect(html).toContain("信号瞬间定格");
+    expect(html).toContain("历史只看已收盘");
+    expect(html).toContain("先选股，后算账");
+    expect(html).toContain("允许参与选股");
+    expect(html).toContain("禁止参与选股");
+    expect(html).toContain("事后才知道的结果");
+  });
+
+  it("成交边界用人话讲清排队不确定性，不出现裸 Tick/L2 英文", () => {
+    const html = renderToStaticMarkup(<GuideView {...baseProps} />);
+
+    expect(html).toContain("关于成交的诚实说明");
+    expect(html).toContain("逐笔成交和涨停价排队");
+    expect(html).not.toContain("没有 Tick/L2");
+  });
+
+  it("shows the frozen dataset metrics and marks D+1 close as outcome-only", () => {
+    const html = renderToStaticMarkup(<GuideView {...baseProps} />);
 
     expect(html).toContain("limit_up_signal_snapshots");
     expect(html).toContain("643 帧");
     expect(html).toContain("11 只 · 7 胜");
     expect(html).toContain("63.6364%");
     expect(html).toContain("+2.9050%");
-    expect(html).toContain("事后结果字段");
-    expect(html).toContain("禁止");
-    expect(html).toContain("D+1官方收盘价");
-    expect(html).toContain("绝不参与当日选股");
+    expect(html).toContain("绝不反过来参与当天的选股");
     expect(html).toContain("800日历史候选代理");
-    expect(html).toContain("不是另一套执行算法");
     expect(html).toContain("62.1951%");
     expect(html).toContain("70.1031%");
-    expect(html).toContain("3%提前雷达验证");
+  });
+
+  it("雷达边界、采集/正式阈值和覆盖统计用通顺中文", () => {
+    const html = renderToStaticMarkup(<GuideView {...baseProps} />);
+
+    expect(html).toContain("采集与正式推荐的边界");
     expect(html).toContain("3% 开始采集");
     expect(html).toContain("5% 正式推荐");
-    expect(html).toContain("09:31-11:30、13:01-15:00，共 240 个去重分钟槽位");
-    expect(html).toContain("同一买入窗口内 20-60 秒");
     expect(html).toContain("12 / 60 日");
     expect(html).toContain("96.5000%");
     expect(html).toContain("5%正式合同");
   });
 
   it("allows the long evidence report path to wrap on mobile", () => {
-    const html = renderToStaticMarkup(
-      <StrategyGuideDialog {...baseProps} initialTab="dataset" />,
-    );
+    const html = renderToStaticMarkup(<GuideView {...baseProps} />);
 
     expect(html).toMatch(
-      /<p class="[^"]*break-all[^"]*">memory\/06_backtests\/limit_up_sector_quality_v15_20260717\.md<\/p>/,
+      /<p class="[^"]*break-all[^"]*">详细回测报告：memory\/06_backtests\/limit_up_sector_quality_v15_20260717\.md<\/p>/,
     );
   });
 
   it("does not disguise a validation API failure as zero collected days", () => {
     const html = renderToStaticMarkup(
-      <StrategyGuideDialog
+      <GuideView
         {...baseProps}
-        initialTab="dataset"
         radarValidation={undefined}
         radarValidationError="验证接口不可用"
       />,
@@ -202,11 +231,7 @@ describe("StrategyGuideDialog", () => {
       },
     };
     const html = renderToStaticMarkup(
-      <StrategyGuideDialog
-        {...baseProps}
-        initialTab="dataset"
-        radarValidation={accepted}
-      />,
+      <GuideView {...baseProps} radarValidation={accepted} />,
     );
 
     expect(html).toContain("5%正式合同");
