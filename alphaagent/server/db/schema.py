@@ -896,6 +896,24 @@ stock_financial_reports = Table(
 )
 Index("ix_stock_financial_reports_date", stock_financial_reports.c.report_date)
 
+stock_financial_sync_attempts = Table(
+    "stock_financial_sync_attempts",
+    metadata,
+    Column("vt_symbol", String(32), ForeignKey("stocks.vt_symbol", ondelete="CASCADE"), primary_key=True),
+    Column("status", String(20), nullable=False),
+    Column("attempt_count", Integer, nullable=False, server_default="0"),
+    Column("last_error", Text, nullable=True),
+    Column("last_attempt_at", DateTime(timezone=True), nullable=False),
+    Column("next_retry_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index(
+    "ix_stock_financial_sync_attempts_retry",
+    stock_financial_sync_attempts.c.next_retry_at,
+    stock_financial_sync_attempts.c.last_attempt_at,
+)
+
 stock_financial_statement_items = Table(
     "stock_financial_statement_items",
     metadata,

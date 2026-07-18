@@ -9,7 +9,7 @@ requirements/alphaagent_unified_schedule_execution_plan.md
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -25,6 +25,103 @@ def test_sync_batch_schedules_table_defined():
     cols = {c.name for c in table.columns}
     assert {"id", "name", "cron", "job_ids", "enabled", "concurrency"}.issubset(cols)
     assert {"last_status", "last_started_at", "last_finished_at"}.issubset(cols)
+
+
+def test_stock_financial_sync_attempts_table_defined():
+    table = schema.stock_financial_sync_attempts
+
+    assert table.name == "stock_financial_sync_attempts"
+    assert {column.name for column in table.primary_key.columns} == {"vt_symbol"}
+    assert {
+        "status",
+        "attempt_count",
+        "last_error",
+        "last_attempt_at",
+        "next_retry_at",
+    }.issubset({column.name for column in table.columns})
+
+
+def test_financial_candidate_rotation_prioritizes_unattempted_and_oldest():
+    now = datetime(2026, 7, 18, 4, 0, tzinfo=timezone.utc)
+    stock_rows = [
+        {"vt_symbol": "new-low.SSE", "turnover": 10.0},
+        {"vt_symbol": "new-high.SSE", "turnover": 20.0},
+        {"vt_symbol": "oldest.SSE", "turnover": 30.0},
+        {"vt_symbol": "recent.SSE", "turnover": 40.0},
+        {"vt_symbol": "cooling.SSE", "turnover": 50.0},
+    ]
+    attempts = {
+        "oldest.SSE": {
+            "last_attempt_at": now - timedelta(days=3),
+            "next_retry_at": None,
+        },
+        "recent.SSE": {
+            "last_attempt_at": now - timedelta(hours=1),
+            "next_retry_at": None,
+        },
+        "cooling.SSE": {
+            "last_attempt_at": now - timedelta(days=4),
+            "next_retry_at": now + timedelta(hours=1),
+        },
+    }
+
+    selected = svc._select_financial_candidates(
+        stock_rows,
+        attempts,
+        stock_limit=4,
+        now=now,
+    )
+
+    assert [row["vt_symbol"] for row in selected] == [
+        "new-high.SSE",
+        "new-low.SSE",
+        "oldest.SSE",
+        "recent.SSE",
+    ]
+
+
+def test_explicit_financial_symbols_bypass_attempt_rotation(monkeypatch):
+    class FakeResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {
+                    "vt_symbol": "600001.SSE",
+                    "symbol": "600001",
+                    "exchange": "SSE",
+                    "name": "定向样本",
+                }
+            ]
+
+    class FakeSession:
+        def execute(self, statement):
+            del statement
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    def fail_if_attempts_loaded(symbols):
+        del symbols
+        raise AssertionError("explicit symbols must bypass automatic attempts")
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        svc,
+        "_load_financial_sync_attempts",
+        fail_if_attempts_loaded,
+    )
+
+    rows = svc._financial_sync_stock_rows(
+        1,
+        only_missing=True,
+        symbols=["600001.SSE"],
+    )
+
+    assert [row["vt_symbol"] for row in rows] == ["600001.SSE"]
 
 
 def test_schema_patches_continue_when_one_patch_hits_lock_timeout():

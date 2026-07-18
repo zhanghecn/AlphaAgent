@@ -76,6 +76,10 @@ INTERRUPTED_SCHEDULE_RECOVERY_POLL_SECONDS = 5
 SCHEDULER_TICK_SECONDS = 5
 # 单只股/板块同步的超时上限：AkShare 正常请求数秒，超时则跳过该 item（防 hang 拖死整批）
 SYNC_PER_ITEM_TIMEOUT_SECONDS = 60.0
+# 东方财富三张财报各自需要分页读取；单股使用独立预算，避免通用 60 秒在有效响应完成前取消。
+FINANCIAL_SYNC_PER_ITEM_TIMEOUT_SECONDS = 180.0
+FINANCIAL_SYNC_MAX_STOCK_CONCURRENCY = 3
+FINANCIAL_SYNC_RETRY_DELAY = timedelta(days=1)
 # 内存批次 running 超过此时长视为僵尸，看门狗清理（防卡死批次挡住新调度）
 ZOMBIE_BATCH_THRESHOLD_SECONDS = 2 * 60 * 60
 CANONICAL_SECTOR_DAILY_SOURCE = "eastmoney.board_kline"
@@ -94,6 +98,51 @@ SECTOR_DAILY_MIN_COVERAGE_RATIO = 0.8
 _INTERRUPTED_RECOVERY_LOCK = threading.Lock()
 _INTERRUPTED_SCHEDULE_RECOVERY_IDS: set[str] = set()
 _interrupted_recovery_thread: threading.Thread | None = None
+
+
+def _load_financial_quarterly_bundle(
+    adapter: Any,
+    symbol: str,
+    exchange: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Load independent financial statements concurrently for one stock."""
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        quarterly_future = pool.submit(
+            adapter.stock_financial_quarterly,
+            symbol,
+            exchange=exchange,
+        )
+        balance_future = pool.submit(
+            adapter.stock_balance_sheet,
+            symbol,
+            exchange=exchange,
+        )
+        cash_flow_future = pool.submit(
+            adapter.stock_cash_flow_sheet,
+            symbol,
+            exchange=exchange,
+        )
+        quarterly = quarterly_future.result()
+        balance_items = _optional_financial_items(balance_future, symbol, "balance")
+        cash_flow_items = _optional_financial_items(cash_flow_future, symbol, "cash_flow")
+
+    return (
+        quarterly if isinstance(quarterly, dict) else {},
+        balance_items,
+        cash_flow_items,
+    )
+
+
+def _optional_financial_items(future: Any, symbol: str, dataset: str) -> list[dict[str, Any]]:
+    try:
+        payload = future.result()
+    except Exception as exc:
+        logger.debug("financial %s enrichment failed for %s: %s", dataset, symbol, exc)
+        return []
+    if not isinstance(payload, dict):
+        return []
+    return [item for item in (payload.get("items") or []) if isinstance(item, dict)]
 
 
 def _bounded_parallel_map(
@@ -1872,7 +1921,36 @@ class DataSyncRunner:
             )
 
             try:
-                data = self.adapter.stock_financial_quarterly(symbol, exchange=exchange)
+                quarterly, balance_items, cash_flow_items = _load_financial_quarterly_bundle(
+                    self.adapter,
+                    symbol,
+                    exchange,
+                )
+                items = [
+                    item
+                    for item in (quarterly.get("items") or [])
+                    if isinstance(item, dict)
+                ]
+                with lock:
+                    if current_vts in timed_out_symbols:
+                        return
+                self._enrich_quarterly_with_roe(items, balance_items)
+                self._enrich_quarterly_with_cash_flow(items, cash_flow_items)
+                with lock:
+                    if current_vts in timed_out_symbols:
+                        return
+                    written = _upsert_stock_financial_reports(
+                        symbol,
+                        exchange,
+                        items,
+                        "quarterly",
+                    )
+                    counters["read"] += len(items)
+                    counters["written"] += written
+                    counters["done"] += 1
+                    current = counters["done"]
+                    rows_read = counters["read"]
+                    rows_written = counters["written"]
             except Exception as exc:
                 with lock:
                     if current_vts in timed_out_symbols:
@@ -1881,6 +1959,12 @@ class DataSyncRunner:
                     current = counters["done"]
                     rows_read = counters["read"]
                     rows_written = counters["written"]
+                _record_financial_sync_attempt(
+                    current_vts,
+                    "failed",
+                    error=exc.__class__.__name__,
+                    next_retry_at=_financial_retry_at(),
+                )
                 logger.debug("stock_financial_quarterly(%s) failed: %s", symbol, exc)
                 self._report_progress(
                     "读取个股季度财报",
@@ -1892,28 +1976,14 @@ class DataSyncRunner:
                     message=f"{current_vts} 失败：{exc.__class__.__name__}",
                 )
                 return
-            items = data.get("items") or []
-            with lock:
-                if current_vts in timed_out_symbols:
-                    return
 
-            self._enrich_quarterly_with_roe(items, symbol, exchange)
-            with lock:
-                if current_vts in timed_out_symbols:
-                    return
-            self._enrich_quarterly_with_cash_flow(items, symbol, exchange)
-            with lock:
-                if current_vts in timed_out_symbols:
-                    return
-                written = _upsert_stock_financial_reports(
-                    symbol, exchange, items, "quarterly",
-                )
-                counters["read"] += len(items)
-                counters["written"] += written
-                counters["done"] += 1
-                current = counters["done"]
-                rows_read = counters["read"]
-                rows_written = counters["written"]
+            attempt_status = "succeeded" if items else "empty"
+            _record_financial_sync_attempt(
+                current_vts,
+                attempt_status,
+                error=None if items else "provider returned no quarterly reports",
+                next_retry_at=None if items else _financial_retry_at(),
+            )
 
             sample_items = [{**item, "vt_symbol": current_vts, "name": stock_name} for item in items[-3:]]
             self._report_progress(
@@ -1940,6 +2010,12 @@ class DataSyncRunner:
                 current = counters["done"]
                 rows_read = counters["read"]
                 rows_written = counters["written"]
+            _record_financial_sync_attempt(
+                current_vts,
+                "timed_out",
+                error="financial item timeout",
+                next_retry_at=_financial_retry_at(),
+            )
             self._report_progress(
                 "读取个股季度财报",
                 current=current,
@@ -1952,8 +2028,8 @@ class DataSyncRunner:
         _bounded_parallel_map(
             _do_one,
             stock_rows,
-            concurrency=self.concurrency,
-            per_item_timeout=SYNC_PER_ITEM_TIMEOUT_SECONDS,
+            concurrency=min(self.concurrency, FINANCIAL_SYNC_MAX_STOCK_CONCURRENCY),
+            per_item_timeout=FINANCIAL_SYNC_PER_ITEM_TIMEOUT_SECONDS,
             on_timeout=_on_timeout,
         )
 
@@ -1976,8 +2052,7 @@ class DataSyncRunner:
     def _enrich_quarterly_with_roe(
         self,
         items: list[dict[str, Any]],
-        symbol: str,
-        exchange: str,
+        balance_items: list[dict[str, Any]],
     ) -> None:
         """Enrich quarterly items with computed ROE, margins, and EPS.
 
@@ -1989,21 +2064,15 @@ class DataSyncRunner:
         if not items:
             return
 
-        # Build report_date → TOTAL_PARENT_EQUITY from balance sheet
         equity_map: dict[str, float] = {}
-        try:
-            bs_data = self.adapter.stock_balance_sheet(symbol, exchange=exchange)
-            for bs in bs_data.get("items") or []:
-                bs_dict = bs if isinstance(bs, dict) else {}
-                report_date_raw = bs_dict.get("REPORT_DATE")
-                if not report_date_raw:
-                    continue
-                rd = str(report_date_raw)[:10]
-                equity = self._to_float(bs_dict.get("TOTAL_PARENT_EQUITY"))
-                if equity:
-                    equity_map[rd] = equity
-        except Exception:
-            pass
+        for balance_item in balance_items:
+            report_date_raw = balance_item.get("REPORT_DATE")
+            if not report_date_raw:
+                continue
+            report_date = str(report_date_raw)[:10]
+            equity = self._to_float(balance_item.get("TOTAL_PARENT_EQUITY"))
+            if equity:
+                equity_map[report_date] = equity
 
         for item in items:
             raw = item.get("raw") or {}
@@ -2040,21 +2109,14 @@ class DataSyncRunner:
     def _enrich_quarterly_with_cash_flow(
         self,
         items: list[dict[str, Any]],
-        symbol: str,
-        exchange: str,
+        cash_flow_items: list[dict[str, Any]],
     ) -> None:
         """Enrich quarterly items with operating cash flow and disclosure date."""
         if not items:
             return
 
         cash_flow_map: dict[str, dict[str, Any]] = {}
-        try:
-            cash_flow_data = self.adapter.stock_cash_flow_sheet(symbol, exchange=exchange)
-        except Exception:
-            return
-
-        for row in cash_flow_data.get("items") or []:
-            record = row if isinstance(row, dict) else {}
+        for record in cash_flow_items:
             report_date = str(record.get("REPORT_DATE") or record.get("报告期") or "")[:10]
             if report_date:
                 cash_flow_map[report_date] = record
@@ -2083,7 +2145,11 @@ class DataSyncRunner:
     def _run_sync_stock_financial_indicators(self, params: dict[str, Any]) -> dict[str, Any]:
         stock_limit = int(params.get("stock_limit", 100))
         only_missing = _truthy(params.get("only_missing", True))
-        stock_rows = _financial_sync_stock_rows(stock_limit, only_missing)
+        stock_rows = _financial_sync_stock_rows(
+            stock_limit,
+            only_missing,
+            rotate_attempts=False,
+        )
         if not stock_rows:
             return {"rows_read": 0, "rows_written": 0, "message": "No stocks in DB."}
         total_read = 0
@@ -6623,6 +6689,7 @@ def _financial_sync_stock_rows(
     only_missing: bool = True,
     *,
     symbols: list[str] | None = None,
+    rotate_attempts: bool = True,
 ) -> list[dict[str, Any]]:
     limit = min(max(int(stock_limit or 100), 1), 1000)
     with session_scope() as session:
@@ -6645,7 +6712,136 @@ def _financial_sync_stock_rows(
             )
         if symbols:
             query = query.where(schema.stocks.c.vt_symbol.in_(symbols))
-        return session.execute(query.limit(limit)).mappings().all()
+        rows = [dict(row) for row in session.execute(query).mappings().all()]
+
+    if symbols or not rotate_attempts:
+        return rows[:limit]
+    attempts = _load_financial_sync_attempts(
+        [str(row.get("vt_symbol") or "") for row in rows],
+    )
+    return _select_financial_candidates(
+        rows,
+        attempts,
+        stock_limit=limit,
+        now=datetime.now(timezone.utc),
+    )
+
+
+def _select_financial_candidates(
+    stock_rows: Sequence[Any],
+    attempts: dict[str, dict[str, Any]],
+    *,
+    stock_limit: int,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    """Rotate eligible stocks so slow symbols cannot starve the queue."""
+
+    aware_now = _financial_attempt_datetime(now) or datetime.now(timezone.utc)
+    eligible: list[dict[str, Any]] = []
+    for source_row in stock_rows:
+        row = dict(source_row)
+        attempt = attempts.get(str(row.get("vt_symbol") or ""), {})
+        next_retry_at = _financial_attempt_datetime(attempt.get("next_retry_at"))
+        if next_retry_at is not None and next_retry_at > aware_now:
+            continue
+        eligible.append(row)
+
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+    def sort_key(row: dict[str, Any]) -> tuple[bool, datetime, float, str]:
+        vt_symbol_value = str(row.get("vt_symbol") or "")
+        last_attempt_at = _financial_attempt_datetime(
+            attempts.get(vt_symbol_value, {}).get("last_attempt_at")
+        )
+        return (
+            last_attempt_at is not None,
+            last_attempt_at or epoch,
+            -_financial_turnover(row.get("turnover")),
+            vt_symbol_value,
+        )
+
+    eligible.sort(key=sort_key)
+    limit = min(max(int(stock_limit or 100), 1), 1000)
+    return eligible[:limit]
+
+
+def _financial_turnover(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _financial_attempt_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _financial_retry_at() -> datetime:
+    return datetime.now(timezone.utc) + FINANCIAL_SYNC_RETRY_DELAY
+
+
+def _load_financial_sync_attempts(
+    symbols: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    normalized_symbols = sorted({str(symbol) for symbol in symbols if symbol})
+    if not normalized_symbols or not is_database_configured():
+        return {}
+    try:
+        with session_scope() as session:
+            rows = session.execute(
+                select(schema.stock_financial_sync_attempts).where(
+                    schema.stock_financial_sync_attempts.c.vt_symbol.in_(normalized_symbols),
+                )
+            ).mappings().all()
+    except Exception:
+        logger.warning("load financial sync attempts failed", exc_info=True)
+        return {}
+    return {str(row["vt_symbol"]): dict(row) for row in rows}
+
+
+def _record_financial_sync_attempt(
+    vt_symbol_value: str,
+    status: str,
+    *,
+    error: str | None = None,
+    next_retry_at: datetime | None = None,
+) -> None:
+    if not is_database_configured():
+        return
+    attempted_at = datetime.now(timezone.utc)
+    table = schema.stock_financial_sync_attempts
+    statement = postgresql_insert(table).values(
+        vt_symbol=vt_symbol_value,
+        status=status,
+        attempt_count=1,
+        last_error=str(error)[:500] if error else None,
+        last_attempt_at=attempted_at,
+        next_retry_at=next_retry_at,
+    )
+    statement = statement.on_conflict_do_update(
+        index_elements=[table.c.vt_symbol],
+        set_={
+            "status": statement.excluded.status,
+            "attempt_count": table.c.attempt_count + 1,
+            "last_error": statement.excluded.last_error,
+            "last_attempt_at": statement.excluded.last_attempt_at,
+            "next_retry_at": statement.excluded.next_retry_at,
+            "updated_at": func.now(),
+        },
+    )
+    try:
+        with session_scope() as session:
+            session.execute(statement)
+    except Exception:
+        logger.warning(
+            "record financial sync attempt failed for %s",
+            vt_symbol_value,
+            exc_info=True,
+        )
 
 
 def _upsert_stock_financial_reports(
