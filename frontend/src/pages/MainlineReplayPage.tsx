@@ -301,7 +301,7 @@ export default function MainlineReplayPage() {
             <>
               <div className="rounded-lg border bg-card p-3">
                 <div className="mb-2 flex items-center gap-2">
-                  <span className="inline-block h-2 w-2 rounded-full bg-indigo-400" />
+                  <span className="inline-block h-2 w-2 rounded-full bg-brand-400" />
                   <span className="font-display text-sm font-semibold">
                     {selectedSector.name ?? selectedSector.sector_id}
                   </span>
@@ -354,7 +354,7 @@ function LiveStatus({
       <span>{stateLabel}</span>
       <span>更新于：{shortDateTime(updatedAt)}</span>
       {data?.latest_minute_time && <span>分钟：{shortDateTime(data.latest_minute_time)}</span>}
-      <span className="text-indigo-300">{data?.message ?? "动态计算中"}</span>
+      <span className="text-brand-300">{data?.message ?? "动态计算中"}</span>
     </div>
   );
 }
@@ -374,7 +374,7 @@ function DateScrubber({
     <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
       <div className="flex items-baseline gap-2">
         <span className="text-[10px] uppercase tracking-wider text-muted-foreground">回放至</span>
-        <span className="font-display text-lg font-bold tabular-nums text-indigo-300">{value || "--"}</span>
+        <span className="font-display text-lg font-bold tabular-nums text-brand-300">{value || "--"}</span>
       </div>
       <div className="flex min-w-[200px] flex-1 items-center gap-3">
         <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">{dates[dates.length - 1]}</span>
@@ -384,7 +384,7 @@ function DateScrubber({
           max={Math.max(0, dates.length - 1)}
           value={sliderValue}
           onChange={(e) => onChange(dates[dates.length - 1 - Number(e.target.value)])}
-          className="h-1 flex-1 cursor-pointer appearance-none rounded-full bg-muted accent-indigo-500"
+          className="h-1 flex-1 cursor-pointer appearance-none rounded-full bg-muted accent-brand-500"
         />
         <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">{dates[0]}</span>
       </div>
@@ -466,7 +466,7 @@ function SentimentCyclePanel({
               onClick={() => onLookbackChange(days)}
               className={cn(
                 "rounded px-2 py-0.5 text-[11px] transition-colors",
-                lookback === days ? "bg-indigo-500 text-white" : "text-muted-foreground hover:bg-muted",
+                lookback === days ? "bg-brand-500 text-ink-950" : "text-muted-foreground hover:bg-muted",
               )}
             >
               {days}日
@@ -503,7 +503,7 @@ function SentimentCyclePanel({
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-muted-foreground">
             <span>{current.date}</span>
             <span>样本 {current.total_stocks}</span>
-            {current.temporary && <span className="text-indigo-300">盘中临时点</span>}
+            {current.temporary && <span className="text-brand-300">盘中临时点</span>}
             {data?.latest_minute_time && <span>分钟 {shortDateTime(data.latest_minute_time)}</span>}
           </div>
         </>
@@ -574,7 +574,7 @@ function SentimentScoreChart({
         <svg className="h-full w-full" viewBox={`0 0 ${chart.width} ${chart.height}`} preserveAspectRatio="none">
           <rect x="0" y="0" width={chart.width} height={chart.bandY(72)} fill="#ef4444" opacity="0.06" />
           <rect x="0" y={chart.bandY(72)} width={chart.width} height={chart.bandY(55) - chart.bandY(72)} fill="#f59e0b" opacity="0.07" />
-          <rect x="0" y={chart.bandY(55)} width={chart.width} height={chart.bandY(35) - chart.bandY(55)} fill="#6366f1" opacity="0.07" />
+          <rect x="0" y={chart.bandY(55)} width={chart.width} height={chart.bandY(35) - chart.bandY(55)} fill="#d9a84e" opacity="0.07" />
           <rect x="0" y={chart.bandY(35)} width={chart.width} height={chart.height - chart.bandY(35)} fill="#22c55e" opacity="0.06" />
           {[35, 55, 72].map((line) => (
             <line
@@ -879,7 +879,7 @@ function ConceptTapeFilters({
             className={cn(
               "flex min-w-0 items-center justify-between gap-1 rounded-md border px-2 py-1.5 text-left text-[11px] transition-colors",
               active
-                ? "border-indigo-400/50 bg-indigo-500/15 text-indigo-200"
+                ? "border-brand-400/50 bg-brand-500/15 text-brand-200"
                 : "bg-background/40 text-muted-foreground hover:bg-muted/60",
             )}
           >
@@ -921,14 +921,14 @@ function SectorRankRow({
       className={cn(
         "grid w-full grid-cols-[minmax(0,1fr)_78px] gap-2 rounded-md border border-transparent px-2 py-2 text-left transition-colors",
         selected
-          ? "border-indigo-400/40 bg-indigo-500/10 ring-1 ring-inset ring-indigo-400/30"
+          ? "border-brand-400/40 bg-brand-500/10 ring-1 ring-inset ring-brand-400/30"
           : "hover:border-border hover:bg-muted/40",
       )}
     >
       <div className="min-w-0">
         <div className="flex min-w-0 items-center gap-1.5">
           <span className="w-5 shrink-0 text-[11px] tabular-nums text-muted-foreground">{rank}</span>
-          <span className={cn("min-w-0 truncate text-sm", selected ? "font-semibold text-indigo-200" : "font-medium")}>
+          <span className={cn("min-w-0 truncate text-sm", selected ? "font-semibold text-brand-200" : "font-medium")}>
             {item.name ?? item.sector_id}
           </span>
         </div>
@@ -1286,8 +1286,8 @@ function FundMatrix({ item }: { item: SectorRankItem }) {
   const live = item.data_mode === "live";
   return (
     <div className="grid grid-cols-3 gap-2">
-      <Metric label="热度分" value={fmt1(item.heat_score)} bar={item.heat_score} barColor="bg-indigo-500" />
-      <Metric label="资金分" value={fmt1(item.fund_score)} bar={item.fund_score} barColor="bg-indigo-500" />
+      <Metric label="热度分" value={fmt1(item.heat_score)} bar={item.heat_score} barColor="bg-brand-500" />
+      <Metric label="资金分" value={fmt1(item.fund_score)} bar={item.fund_score} barColor="bg-brand-500" />
       <Metric label="趋势" value={item.trend_state ?? "--"} valueClass={trendColor} />
       <Metric
         label="收益率"
@@ -1297,7 +1297,7 @@ function FundMatrix({ item }: { item: SectorRankItem }) {
       <Metric
         label={live ? "资金占比" : "放量比"}
         value={live ? formatPct(netRatio) : fmtRatio(item.volume_ratio)}
-        valueClass={live ? ((netRatio ?? 0) >= 0 ? "text-rise" : "text-fall") : item.volume_ratio == null ? "" : item.volume_ratio >= 1 ? "text-indigo-300" : "text-muted-foreground"}
+        valueClass={live ? ((netRatio ?? 0) >= 0 ? "text-rise" : "text-fall") : item.volume_ratio == null ? "" : item.volume_ratio >= 1 ? "text-brand-300" : "text-muted-foreground"}
       />
       <Metric
         label="主力净流入"
@@ -1353,7 +1353,7 @@ function TopicFlowStrip({
               onClick={() => onPeriodChange(p.value)}
               className={cn(
                 "rounded px-2 py-0.5 text-[11px] transition-colors",
-                flowPeriod === p.value ? "bg-indigo-500 text-white" : "text-muted-foreground hover:bg-muted",
+                flowPeriod === p.value ? "bg-brand-500 text-ink-950" : "text-muted-foreground hover:bg-muted",
               )}
             >
               {p.label}
@@ -1367,7 +1367,7 @@ function TopicFlowStrip({
           value={searchTerm}
           onChange={(e) => onSearchChange(e.target.value)}
           placeholder="搜概念名定位（CPO / PCB / 半导体 ...），点击看成分股"
-          className="w-full rounded-md border bg-background px-2 py-1 text-xs outline-none focus:border-indigo-400"
+          className="w-full rounded-md border bg-background px-2 py-1 text-xs outline-none focus:border-brand-400"
         />
       </div>
       {!showingSearch && actualDays != null && actualDays > 0 && actualDays < 20 && flowPeriod === "20日" && (
@@ -1411,7 +1411,7 @@ function SearchResultColumn({
             key={it.sector_id}
             type="button"
             onClick={() => onSelect(it)}
-            className="flex w-full items-center justify-between rounded px-1.5 py-0.5 text-left text-xs transition-colors hover:bg-indigo-500/10"
+            className="flex w-full items-center justify-between rounded px-1.5 py-0.5 text-left text-xs transition-colors hover:bg-brand-500/10"
           >
             <span className="flex min-w-0 items-center gap-1.5">
               <span className="w-4 shrink-0 text-[10px] tabular-nums text-muted-foreground">{i + 1}</span>
@@ -1449,7 +1449,7 @@ function ConceptFlowColumn({
             key={it.sector_id}
             type="button"
             onClick={() => onSelect(it)}
-            className="flex w-full items-center justify-between rounded px-1.5 py-0.5 text-left text-xs transition-colors hover:bg-indigo-500/10"
+            className="flex w-full items-center justify-between rounded px-1.5 py-0.5 text-left text-xs transition-colors hover:bg-brand-500/10"
           >
             <span className="flex min-w-0 items-center gap-1.5">
               <span className="w-4 shrink-0 text-[10px] tabular-nums text-muted-foreground">{i + 1}</span>
@@ -1545,7 +1545,7 @@ function buildSentimentChart(
 function phaseClass(phase: string): string {
   if (phase === "climax") return "border-rise/35 bg-rise/10 text-rise";
   if (phase === "divergence") return "border-amber-400/35 bg-amber-400/10 text-amber-300";
-  if (phase === "repair") return "border-indigo-400/35 bg-indigo-500/10 text-indigo-200";
+  if (phase === "repair") return "border-brand-400/35 bg-brand-500/10 text-brand-200";
   if (phase === "ice") return "border-fall/35 bg-fall/10 text-fall";
   return "border-border bg-background/60 text-muted-foreground";
 }

@@ -9,19 +9,19 @@ const config: Config = {
       colors: {
         rise: "#ef4444",
         fall: "#22c55e",
-        // 品牌主色 indigo 全色阶（金融科技，与 A 股涨红跌绿零冲突）
+        // 品牌主色：香槟金全色阶（取自产品金手指/银手指语言，与 A 股涨红跌绿零冲突）
         brand: {
-          50: "#eef2ff",
-          100: "#e0e7ff",
-          200: "#c7d2fe",
-          300: "#a5b4fc",
-          400: "#818cf8",
-          500: "#6366f1",
-          600: "#4f46e5",
-          700: "#4338ca",
-          800: "#3730a3",
-          900: "#312e81",
-          950: "#1e1b4b",
+          50: "#fcf8ee",
+          100: "#f8efd7",
+          200: "#f0dfae",
+          300: "#e9cd82",
+          400: "#e2bc61",
+          500: "#d9a84e",
+          600: "#c08a33",
+          700: "#9e6f27",
+          800: "#7d5720",
+          900: "#5f4119",
+          950: "#3a2810",
         },
         // 深色模式背景 slate 全色阶
         ink: {
@@ -88,7 +88,13 @@ const config: Config = {
           '"PingFang SC"',
           "sans-serif",
         ],
-        mono: ["ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
+        mono: [
+          '"JetBrains Mono Variable"',
+          "ui-monospace",
+          "SFMono-Regular",
+          "Menlo",
+          "monospace",
+        ],
       },
       borderRadius: {
         lg: "var(--radius)",
@@ -100,11 +106,10 @@ const config: Config = {
       boxShadow: {
         card: "0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.06)",
         "card-hover": "0 10px 40px rgba(0, 0, 0, 0.08)",
-        glow: "0 0 20px rgba(99, 102, 241, 0.20)",
+        glow: "0 0 20px rgba(217, 168, 78, 0.22)",
         "inner-glow": "inset 0 1px 0 rgba(255, 255, 255, 0.06)",
       },
       backgroundImage: {
-        "gradient-brand": "linear-gradient(135deg, #3b82f6 0%, #6366f1 100%)",
         // 顶部极光光晕（styles.css .aurora::before 通过 theme() 引用）
         "gradient-aurora":
           "radial-gradient(60% 80% at 50% -20%, hsl(var(--primary) / 0.18), transparent 70%)",

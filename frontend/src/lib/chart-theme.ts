@@ -13,8 +13,8 @@ import { useTheme } from "@/theme/useTheme";
 export const RISE_COLOR = "#ef4444"; // 红 = 涨
 export const FALL_COLOR = "#22c55e"; // 绿 = 跌
 
-/** 品牌主色 indigo */
-export const BRAND_COLOR = "#6366f1"; // indigo-500
+/** 品牌主色：香槟金（金手指语言） */
+export const BRAND_COLOR = "#d9a84e"; // brand-500
 
 export interface ChartPalette {
   mode: "light" | "dark";
@@ -39,7 +39,7 @@ export interface ChartPalette {
 
 const LIGHT: ChartPalette = {
   mode: "light",
-  brand: BRAND_COLOR,
+  brand: "#c08a33", // brand-600，浅底下加深保证金色可读
   rise: RISE_COLOR,
   fall: FALL_COLOR,
   grid: "#f1f5f9",
@@ -48,21 +48,21 @@ const LIGHT: ChartPalette = {
   tooltipBg: "rgba(255,255,255,0.96)",
   tooltipBorder: "#e5e7eb",
   tooltipText: "#374151",
-  linePalette: ["#f59e0b", "#8b5cf6", "#2563eb", "#475569"],
+  linePalette: ["#c08a33", "#8b5cf6", "#2563eb", "#475569"],
 };
 
 const DARK: ChartPalette = {
   mode: "dark",
-  brand: "#818cf8", // indigo-400，深色下稍亮
+  brand: "#e2bc61", // brand-400，深底下稍亮
   rise: RISE_COLOR,
   fall: FALL_COLOR,
-  grid: "#1e293b", // ink-800
+  grid: "#1a2233", // 墨蓝网格，比旧 slate 更贴深墨底
   text: "#94a3b8", // slate-400
-  axis: "#334155", // ink-700
-  tooltipBg: "rgba(15,23,42,0.96)",
-  tooltipBorder: "#334155",
+  axis: "#2a3448",
+  tooltipBg: "rgba(13,17,24,0.96)",
+  tooltipBorder: "#2a3448",
   tooltipText: "#e2e8f0",
-  linePalette: ["#fbbf24", "#a78bfa", "#60a5fa", "#94a3b8"],
+  linePalette: ["#e2bc61", "#a78bfa", "#60a5fa", "#94a3b8"],
 };
 
 /** hook：返回当前深浅模式下的图表配色。必须在组件内调用。 */

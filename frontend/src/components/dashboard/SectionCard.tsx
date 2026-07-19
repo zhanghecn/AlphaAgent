@@ -28,7 +28,7 @@ export function SectionCard({
 }: SectionCardProps) {
   const hasHeader = title || action || description;
   return (
-    <Card className={cn("overflow-hidden", className)}>
+    <Card className={cn("wick-top overflow-hidden", className)}>
       {hasHeader && (
         <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-3">
           <div className="min-w-0">

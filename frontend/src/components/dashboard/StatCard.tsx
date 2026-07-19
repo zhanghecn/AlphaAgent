@@ -35,14 +35,14 @@ export function StatCard({
           <p className="truncate text-xs font-medium text-muted-foreground">
             {label}
           </p>
-          <p className="mt-1 font-display text-2xl font-bold tabular-nums tracking-tight text-foreground">
+          <p className="mt-1 font-num text-2xl font-bold tabular-nums tracking-tight text-foreground">
             {value}
           </p>
           {delta != null && (
             <div className="mt-1 flex items-center gap-1">
               <span
                 className={cn(
-                  "text-xs font-semibold tabular-nums",
+                  "font-num text-xs font-semibold tabular-nums",
                   priceColorClass(delta),
                 )}
               >

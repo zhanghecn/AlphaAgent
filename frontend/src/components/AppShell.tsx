@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils";
 import { useTheme } from "@/theme/useTheme";
 import { apiClient, authToken } from "@/api/client";
 import { VersionBadge } from "@/components/VersionBadge";
+import { MarketPulse } from "@/components/MarketPulse";
 
 const NAV_ITEMS = [
   { to: "/", label: "今日市场", icon: LayoutDashboard },
@@ -171,6 +172,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       {/* Main content */}
       <main className="min-w-0 flex-1 overflow-auto pt-36 md:pt-0">
+        {/* 行情脉搏条：桌面端常驻顶部的终端签名（移动端顶栏拥挤不展示） */}
+        <div className="sticky top-0 z-20 hidden md:block">
+          <MarketPulse />
+        </div>
         <div className="mx-auto max-w-[1600px] p-4 sm:p-6">{children}</div>
       </main>
     </div>

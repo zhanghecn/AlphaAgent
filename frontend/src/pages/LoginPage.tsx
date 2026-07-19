@@ -9,7 +9,7 @@ import { apiClient, authToken } from "@/api/client";
 
 /**
  * 管理员登录页。
- * 视觉延续 AppShell 的「玻璃 + 极光」语言：glass.aurora 卡片 + indigo 氛围光晕。
+ * 视觉延续 AppShell 的「玻璃 + 极光」语言：glass.aurora 卡片 + 金色氛围光晕。
  * 签名元素是标题上方的迷你走势线 mark——量化研究终端独有的视觉记号。
  */
 export function LoginPage() {
@@ -41,7 +41,7 @@ export function LoginPage() {
 
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background p-4">
-      {/* 氛围光晕：两团 indigo 模糊圆，呼应 AppShell 极光语言；primary 跟随主题深浅。 */}
+      {/* 氛围光晕：两团金色模糊圆，呼应 AppShell 极光语言；primary 跟随主题深浅。 */}
       <div
         aria-hidden
         className="pointer-events-none absolute -top-40 left-1/2 h-[28rem] w-[28rem] -translate-x-1/2 rounded-full blur-3xl"

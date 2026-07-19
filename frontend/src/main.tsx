@@ -9,6 +9,7 @@ import { ToastProvider } from "@/components/ui/toast";
 // 一个 woff2 覆盖整条 weight 轴，中文 fallback 走系统字体，只下载 latin 子集。
 import "@fontsource-variable/inter/wght.css";
 import "@fontsource-variable/space-grotesk/wght.css";
+import "@fontsource-variable/jetbrains-mono/wght.css";
 import "./styles.css";
 
 const queryClient = new QueryClient({
