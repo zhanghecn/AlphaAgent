@@ -96,7 +96,9 @@ def test_timeline_filters_to_complete_trade_dates(monkeypatch):
 
     assert body["data"]["dates"] == ["2026-06-26", "2026-06-25"]
     assert "stock_daily_bars" in captured["sql"]
-    assert "count(distinct" in captured["sql"].lower()
+    # PK (vt_symbol, trade_date) 唯一：按日过滤完整交易日用 count(*) 即等价
+    # count(DISTINCT vt_symbol)，无需 distinct 聚合。
+    assert "count(*)" in captured["sql"].lower()
     assert "3000" in captured["params"]
 
 

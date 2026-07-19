@@ -150,6 +150,10 @@ stock_daily_bars = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
 )
 Index("ix_stock_daily_bars_trade_date", stock_daily_bars.c.trade_date)
+# 按日聚合计数（GROUP BY trade_date + count）走 index-only scan，避免 4.5M 行全表扫
+Index("ix_stock_daily_bars_date_symbol", stock_daily_bars.c.trade_date, stock_daily_bars.c.vt_symbol)
+# 覆盖率/新鲜度探测的 MAX(updated_at) 走索引
+Index("ix_stock_daily_bars_updated_at", stock_daily_bars.c.updated_at)
 
 stock_minute_bars = Table(
     "stock_minute_bars",
@@ -171,6 +175,9 @@ stock_minute_bars = Table(
 )
 Index("ix_stock_minute_bars_trade_date", stock_minute_bars.c.trade_date)
 Index("ix_stock_minute_bars_symbol_date", stock_minute_bars.c.vt_symbol, stock_minute_bars.c.trade_date)
+# MAX(bar_time)/MAX(updated_at) 新鲜度探测走索引（分钟线 3.2M 行）
+Index("ix_stock_minute_bars_bar_time", stock_minute_bars.c.bar_time)
+Index("ix_stock_minute_bars_updated_at", stock_minute_bars.c.updated_at)
 
 low_suction_concept_membership_history = Table(
     "low_suction_concept_membership_history",
@@ -1381,6 +1388,12 @@ def _apply_compatible_schema_patches(engine) -> None:
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS fall_count INTEGER",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS flat_count INTEGER",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS rise_ratio FLOAT",
+        # 大表性能索引（create_all 不会为已存在的表补建索引，需显式补丁）：
+        # 按日聚合 index-only scan / 新鲜度 MAX 探测走索引
+        "CREATE INDEX IF NOT EXISTS ix_stock_daily_bars_date_symbol ON stock_daily_bars (trade_date, vt_symbol)",
+        "CREATE INDEX IF NOT EXISTS ix_stock_daily_bars_updated_at ON stock_daily_bars (updated_at)",
+        "CREATE INDEX IF NOT EXISTS ix_stock_minute_bars_bar_time ON stock_minute_bars (bar_time)",
+        "CREATE INDEX IF NOT EXISTS ix_stock_minute_bars_updated_at ON stock_minute_bars (updated_at)",
     )
     for sql in patches:
         try:

@@ -73,7 +73,7 @@ export default function DataManagementHealthTab() {
 
   const healthQuery = useQuery({
     queryKey: ["data-health"],
-    queryFn: fetchDataHealth,
+    queryFn: () => fetchDataHealth(),
     staleTime: 30_000,
     refetchInterval: 60_000,
   });
@@ -132,7 +132,11 @@ export default function DataManagementHealthTab() {
       {health ? (
         <OverallHealthBanner
           health={health}
-          onRefresh={() => healthQuery.refetch()}
+          onRefresh={async () => {
+            // 手动刷新强制绕过服务端缓存，立即重算健康状态
+            const fresh = await fetchDataHealth(true);
+            queryClient.setQueryData(["data-health"], fresh);
+          }}
           isBatchRunning={isBatchRunning}
         />
       ) : null}
@@ -335,7 +339,7 @@ function CadenceTag({ cadence }: { cadence: string }) {
     cadence === "intraday"
       ? "bg-blue-50 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300"
       : cadence === "eod_daily"
-        ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300"
+        ? "bg-brand-50 text-brand-700 dark:bg-brand-500/15 dark:text-brand-300"
         : cadence === "quarterly"
           ? "bg-purple-50 text-purple-700 dark:bg-purple-500/15 dark:text-purple-300"
           : cadence === "lhb"

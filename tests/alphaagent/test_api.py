@@ -463,7 +463,7 @@ def test_data_sync_routes(monkeypatch) -> None:
     monkeypatch.setattr(data_sync.service, "list_sources", lambda: {"items": [{"id": "akshare", "name": "AkShare"}], "total": 1})
     monkeypatch.setattr(data_sync.service, "list_jobs", lambda: {"items": [{"id": "sync_stock_list", "name": "同步全 A 股票清单"}], "total": 1})
     monkeypatch.setattr(data_sync.service, "list_runs", lambda limit=20: {"items": [{"id": 1, "job_id": "sync_stock_list", "status": "succeeded"}], "total": 1})
-    monkeypatch.setattr(data_sync.service, "coverage", lambda: {"tables": {"stocks": {"rows": 1}}, "source": "postgresql"})
+    monkeypatch.setattr(data_sync.service, "coverage", lambda force_refresh=False: {"tables": {"stocks": {"rows": 1}}, "source": "postgresql"})
     monkeypatch.setattr(
         data_sync.service,
         "usage",

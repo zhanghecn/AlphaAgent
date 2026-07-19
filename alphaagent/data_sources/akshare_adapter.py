@@ -48,7 +48,7 @@ OVERVIEW_TTL_SECONDS = 30
 BARS_TTL_SECONDS = 600
 BUSINESS_TTL_SECONDS = 86400
 SECTOR_TTL_SECONDS = 86400
-SOURCE_STATUS_TTL_SECONDS = 60
+SOURCE_STATUS_TTL_SECONDS = 300
 SW_TREE_TTL_SECONDS = 86400 * 7
 SW_CONSTITUENTS_TTL_SECONDS = 86400
 SW_CLASSIFY_TTL_SECONDS = 86400 * 3
@@ -833,14 +833,21 @@ class AkShareAdapter:
             ("akshare_concept_boards", lambda: self.board_names("concept", limit=1)),
             ("akshare_industry_boards", lambda: self.board_names("industry", limit=1)),
         ]
-        statuses: list[DataSourceStatus] = []
-        for name, fn in checks:
+
+        def run(fn) -> tuple[bool, str]:
             try:
                 fn()
-                statuses.append(DataSourceStatus(name=name, ok=True, message="ok", checked_at=now))
+                return True, "ok"
             except Exception as exc:
-                statuses.append(DataSourceStatus(name=name, ok=False, message=exc.__class__.__name__, checked_at=now))
-        return statuses
+                return False, exc.__class__.__name__
+
+        # 外网探测并行执行：总耗时 = 最慢一路（原串行为 7 路累加，冷缓存 3-10s）
+        with ThreadPoolExecutor(max_workers=len(checks), thread_name_prefix="source-status") as pool:
+            results = list(pool.map(lambda item: run(item[1]), checks))
+        return [
+            DataSourceStatus(name=name, ok=ok, message=message, checked_at=now)
+            for (name, _), (ok, message) in zip(checks, results)
+        ]
 
     def _source_status_index_bars(self, limit: int = 2) -> dict[str, Any]:
         indices = [quote.to_api() for quote in self.get_indices()]

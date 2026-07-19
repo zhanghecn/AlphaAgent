@@ -163,6 +163,8 @@ _ROLLING_BOARD_DAYS = 7
 _ROLLING_BOARD_TOP_N = 10
 _LIVE_RANKING_CANDIDATE_LIMIT = 1000
 _MIN_COMPLETE_DAILY_SYMBOL_COUNT = 3000
+# 注：stock_daily_bars PK (vt_symbol, trade_date) 保证每日 symbol 唯一，
+# 各查询用 count(*) 代替 count(DISTINCT vt_symbol)（语义等价，省 distinct 排序）。
 _STOCK_MOMENTUM_LOOKBACK_DAYS = 45
 _SENTIMENT_WARMUP_DAYS = 15
 _SENTIMENT_DEFAULT_LOOKBACK = 60
@@ -272,7 +274,7 @@ def timeline(limit: int = Query(400, ge=1, le=2000)) -> dict[str, Any]:
         complete_trade_dates = (
             select(schema.stock_daily_bars.c.trade_date)
             .group_by(schema.stock_daily_bars.c.trade_date)
-            .having(func.count(func.distinct(schema.stock_daily_bars.c.vt_symbol)) >= _MIN_COMPLETE_DAILY_SYMBOL_COUNT)
+            .having(func.count() >= _MIN_COMPLETE_DAILY_SYMBOL_COUNT)
         ).subquery()
         rows = session.execute(
             select(schema.sector_period_scores.c.as_of_date)
@@ -772,7 +774,7 @@ def _latest_complete_daily_date_at_or_before(session, d: date | None) -> date | 
     stmt = (
         select(schema.stock_daily_bars.c.trade_date)
         .group_by(schema.stock_daily_bars.c.trade_date)
-        .having(func.count(func.distinct(schema.stock_daily_bars.c.vt_symbol)) >= _MIN_COMPLETE_DAILY_SYMBOL_COUNT)
+        .having(func.count() >= _MIN_COMPLETE_DAILY_SYMBOL_COUNT)
         .order_by(desc(schema.stock_daily_bars.c.trade_date))
         .limit(1)
     )
@@ -809,7 +811,7 @@ def _complete_stock_trade_dates(session, end_date: date, limit: int) -> list[dat
         select(schema.stock_daily_bars.c.trade_date)
         .where(schema.stock_daily_bars.c.trade_date <= end_date)
         .group_by(schema.stock_daily_bars.c.trade_date)
-        .having(func.count(func.distinct(schema.stock_daily_bars.c.vt_symbol)) >= _MIN_COMPLETE_DAILY_SYMBOL_COUNT)
+        .having(func.count() >= _MIN_COMPLETE_DAILY_SYMBOL_COUNT)
         .order_by(desc(schema.stock_daily_bars.c.trade_date))
         .limit(limit)
     ).all()
@@ -1685,7 +1687,7 @@ def _fund_flow_map(
         dates_rows = session.execute(
             select(schema.stock_daily_bars.c.trade_date)
             .group_by(schema.stock_daily_bars.c.trade_date)
-            .having(func.count(func.distinct(schema.stock_daily_bars.c.vt_symbol)) >= _MIN_COMPLETE_DAILY_SYMBOL_COUNT)
+            .having(func.count() >= _MIN_COMPLETE_DAILY_SYMBOL_COUNT)
             .where(schema.stock_daily_bars.c.trade_date <= d)
             .order_by(desc(schema.stock_daily_bars.c.trade_date))
             .limit(ndays)

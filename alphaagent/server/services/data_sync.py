@@ -25,7 +25,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Literal, Sequence
 from uuid import uuid4
 
-from sqlalchemy import and_, desc, func, select
+from sqlalchemy import and_, desc, func, select, text
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 
 from alphaagent.data_sources.akshare_adapter import (
@@ -3542,11 +3542,27 @@ def _utc_now_iso() -> str:
 
 # ─── Coverage / usage ────────────────────────────────────────────────────
 
-def coverage() -> dict[str, Any]:
+# 覆盖率/健康仪表盘走进程内 TTL 缓存：三端点（/data/status、/data-sync/coverage、
+# /data-sync/health）共享同一份结果，60s 内的重复请求零 DB 成本。
+_COVERAGE_CACHE_KEY = "data_sync.coverage"
+_COVERAGE_TTL_SECONDS = 60.0
+_HEALTH_CACHE_KEY = "data_sync.data_health"
+_HEALTH_TTL_SECONDS = 60.0
+
+# 行数超此阈值的大表用 pg_class.reltuples 估算（毫秒级），小表仍精确 COUNT。
+_COVERAGE_ESTIMATE_MIN_ROWS = 100_000
+
+
+def coverage(force_refresh: bool = False) -> dict[str, Any]:
     """Return per-table row counts and freshness."""
     if not is_database_configured():
         return {"status": "unavailable", "tables": {}, "message": "DATABASE_URL not configured"}
+    if force_refresh:
+        return market_cache.refresh(_COVERAGE_CACHE_KEY, _COVERAGE_TTL_SECONDS, _coverage_uncached)
+    return market_cache.get_or_set(_COVERAGE_CACHE_KEY, _COVERAGE_TTL_SECONDS, _coverage_uncached)
 
+
+def _coverage_uncached() -> dict[str, Any]:
     table_names = [
         "stocks", "stock_daily_bars", "stock_minute_bars", "sectors", "sector_memberships",
         "stock_sector_memberships", "stock_business_segments",
@@ -3561,20 +3577,16 @@ def coverage() -> dict[str, Any]:
     ]
     tables: dict[str, dict[str, Any]] = {}
     with session_scope() as session:
+        estimates = _table_row_estimates(session, table_names)
         for table_name in table_names:
             table_obj = getattr(schema, table_name, None)
             if table_obj is None:
                 continue
-            try:
-                count = session.execute(select(func.count()).select_from(table_obj)).scalar() or 0
-            except Exception:
-                count = 0
-            # Try to get latest updated_at
+            count = _coverage_table_count(session, table_obj, table_name, estimates)
+            # MAX(updated_at) 代替 ORDER BY + LIMIT（免排序），大表有 updated_at 索引
             freshness = None
             try:
-                latest = session.execute(
-                    select(table_obj.c.updated_at).order_by(desc(table_obj.c.updated_at)).limit(1)
-                ).scalar()
+                latest = session.execute(select(func.max(table_obj.c.updated_at))).scalar()
                 if latest is not None:
                     freshness = latest.isoformat() if hasattr(latest, "isoformat") else str(latest)
             except Exception:
@@ -3589,6 +3601,29 @@ def coverage() -> dict[str, Any]:
     }
 
 
+def _table_row_estimates(session, table_names: list[str]) -> dict[str, int]:
+    """pg_class.reltuples 批量行数估算：一次查询覆盖所有表（毫秒级）。"""
+    try:
+        rows = session.execute(
+            text("SELECT relname, GREATEST(reltuples, 0)::bigint AS estimate FROM pg_class WHERE relname = ANY(:names)"),
+            {"names": list(table_names)},
+        ).all()
+        return {str(name): int(estimate) for name, estimate in rows}
+    except Exception:
+        return {}
+
+
+def _coverage_table_count(session, table_obj, table_name: str, estimates: dict[str, int]) -> int:
+    """大表用估算（展示语义足够），小表精确 COUNT。"""
+    estimate = estimates.get(table_name)
+    if estimate is not None and estimate > _COVERAGE_ESTIMATE_MIN_ROWS:
+        return estimate
+    try:
+        return int(session.execute(select(func.count()).select_from(table_obj)).scalar() or 0)
+    except Exception:
+        return estimate or 0
+
+
 def usage() -> dict[str, Any]:
     """Return capability usage report for the health / readiness endpoint."""
     return {
@@ -3597,8 +3632,17 @@ def usage() -> dict[str, Any]:
     }
 
 
-def data_health() -> dict[str, Any]:
-    """数据健康仪表盘：合并覆盖率 + 最新交易日 + 任务节奏，算出每类数据的新鲜度与推荐同步清单。
+def data_health(force_refresh: bool = False) -> dict[str, Any]:
+    """数据健康仪表盘（60s TTL 缓存；force_refresh 由前端「刷新」按钮触发）。"""
+    if not is_database_configured():
+        return _data_health_uncached()
+    if force_refresh:
+        return market_cache.refresh(_HEALTH_CACHE_KEY, _HEALTH_TTL_SECONDS, _data_health_uncached)
+    return market_cache.get_or_set(_HEALTH_CACHE_KEY, _HEALTH_TTL_SECONDS, _data_health_uncached)
+
+
+def _data_health_uncached() -> dict[str, Any]:
+    """合并覆盖率 + 最新交易日 + 任务节奏，算出每类数据的新鲜度与推荐同步清单。
 
     前端 `/data` 健康首页直消费。合并同表查询（每个 (table, col) 只探一次 MAX）。
     """
@@ -3747,11 +3791,10 @@ def _stock_daily_bar_coverage(session) -> dict[str, Any]:
 def _stock_daily_symbol_count(session, trade_date: date | None) -> int:
     if trade_date is None:
         return 0
+    # PK (vt_symbol, trade_date) 唯一：count(*) 等价 count(DISTINCT vt_symbol)
     return int(
         session.execute(
-            select(func.count(func.distinct(schema.stock_daily_bars.c.vt_symbol))).where(
-                schema.stock_daily_bars.c.trade_date == trade_date
-            )
+            select(func.count()).where(schema.stock_daily_bars.c.trade_date == trade_date)
         ).scalar()
         or 0
     )
@@ -3953,7 +3996,7 @@ def _latest_complete_daily_date(session, min_symbol_count: int = MIN_COMPLETE_DA
         select(schema.stock_daily_bars.c.trade_date)
         .where(schema.stock_daily_bars.c.trade_date <= completed_cutoff)
         .group_by(schema.stock_daily_bars.c.trade_date)
-        .having(func.count(func.distinct(schema.stock_daily_bars.c.vt_symbol)) >= min_symbol_count)
+        .having(func.count() >= min_symbol_count)  # PK 唯一，count(*) 等价 distinct
         .order_by(desc(schema.stock_daily_bars.c.trade_date))
         .limit(1)
     ).first()
@@ -3969,7 +4012,7 @@ def _latest_complete_daily_date_before(
         select(schema.stock_daily_bars.c.trade_date)
         .where(schema.stock_daily_bars.c.trade_date < before_date)
         .group_by(schema.stock_daily_bars.c.trade_date)
-        .having(func.count(func.distinct(schema.stock_daily_bars.c.vt_symbol)) >= min_symbol_count)
+        .having(func.count() >= min_symbol_count)  # PK 唯一，count(*) 等价 distinct
         .order_by(desc(schema.stock_daily_bars.c.trade_date))
         .limit(1)
     ).first()
@@ -5481,12 +5524,13 @@ def _reliable_stock_daily_trade_days() -> int:
 
 
 def _reliable_stock_daily_history_coverage(session) -> dict[str, Any]:
+    # PK (vt_symbol, trade_date) 保证每 (symbol, date) 唯一：count(*) 与
+    # count(DISTINCT vt_symbol) 语义等价，但省掉 distinct 排序；配合
+    # ix_stock_daily_bars_date_symbol 复合索引走 index-only scan。
     daily_counts = (
         select(
             schema.stock_daily_bars.c.trade_date,
-            func.count(func.distinct(schema.stock_daily_bars.c.vt_symbol)).label(
-                "symbol_count"
-            ),
+            func.count().label("symbol_count"),
         )
         .group_by(schema.stock_daily_bars.c.trade_date)
         .subquery()

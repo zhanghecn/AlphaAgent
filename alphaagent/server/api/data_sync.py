@@ -135,9 +135,9 @@ def runs(limit: int = Query(default=20, ge=1, le=100)):
 
 
 @router.get("/coverage")
-def coverage():
+def coverage(force: bool = Query(default=False)):
     try:
-        return ok(service.coverage())
+        return ok(service.coverage(force_refresh=force))
     except Exception as exc:
         return _sync_error(exc)
 
@@ -151,9 +151,9 @@ def usage():
 
 
 @router.get("/health")
-def data_health():
+def data_health(force: bool = Query(default=False)):
     try:
-        return ok(service.data_health())
+        return ok(service.data_health(force_refresh=force))
     except Exception as exc:
         return _sync_error(exc)
 

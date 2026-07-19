@@ -28,8 +28,9 @@ export function fetchDataUsage() {
   return apiClient.get<DataUsageResponse>("/data-sync/usage");
 }
 
-export function fetchDataHealth() {
-  return apiClient.get<DataHealth>("/data-sync/health");
+export function fetchDataHealth(force = false) {
+  // force=1 绕过服务端 60s 缓存，由「刷新」按钮显式触发
+  return apiClient.get<DataHealth>(`/data-sync/health${force ? "?force=1" : ""}`);
 }
 
 export function runSyncJob(jobId: string, params: Record<string, unknown> = {}) {

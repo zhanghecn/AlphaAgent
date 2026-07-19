@@ -1,5 +1,17 @@
 # Run And Debug
 
+## API 性能基线（2026-07-19 优化后）
+
+- 数据健康三接口曾 10s 级（4.5M 行全表 distinct 聚合），已根治：PK 等价 `count(*)`
+  改写 + `ix_stock_daily_bars_date_symbol` 等 4 个索引 + `coverage()/data_health()`
+  60s 进程内缓存（端点支持 `?force=1` 强刷）+ pg_class 行数估算 + source_status
+  探测并行（TTL 300s）。稳态全部 <10ms，冷重算 <1s。
+- 排障先查缓存是否生效，再 `EXPLAIN` 看是否走 `ix_stock_daily_bars_date_symbol`
+  index-only scan。注意 `create_all` 不会给已存在的表补建索引，新索引必须加进
+  `schema.py::_apply_compatible_schema_patches`。
+- 遗留：`/api/mainline-replay/sentiment-cycle` 冷 ~3.2s（75 天窗口函数 CTE），
+  根治需物化日指标表；300s 响应缓存兜底。
+
 ## Local Development
 
 首选入口：
