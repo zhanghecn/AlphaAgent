@@ -130,10 +130,11 @@ export default function MainlineReplayPage() {
     enabled: searchTerm.trim().length > 0 && !!effectiveDate,
     staleTime: 60_000,
   });
+  // 情绪大周期与回放日期解耦：后端以最新完整日线为锚计算连续曲线，
+  // 切换回放日期不再重取（同一日在任何窗口下数值一致，曲线不断裂）。
   const sentimentQ = useQuery({
-    queryKey: ["mainlineSentimentCycle", effectiveDate, sentimentLookback, source],
+    queryKey: ["mainlineSentimentCycle", sentimentLookback, source],
     queryFn: () => fetchSentimentCycle({
-      date: effectiveDate,
       lookback: sentimentLookback,
       include_live: source === "live",
     }),

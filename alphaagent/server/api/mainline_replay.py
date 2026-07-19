@@ -166,9 +166,13 @@ _MIN_COMPLETE_DAILY_SYMBOL_COUNT = 3000
 # 注：stock_daily_bars PK (vt_symbol, trade_date) 保证每日 symbol 唯一，
 # 各查询用 count(*) 代替 count(DISTINCT vt_symbol)（语义等价，省 distinct 排序）。
 _STOCK_MOMENTUM_LOOKBACK_DAYS = 45
-_SENTIMENT_WARMUP_DAYS = 15
 _SENTIMENT_DEFAULT_LOOKBACK = 60
 _SENTIMENT_MAX_LOOKBACK = 180
+# 连续情绪大周期：以最新完整日线为锚，一次计算的历史跨度（完整交易日数）。
+# 所有 sentiment-cycle 请求（任意 date/lookback）都从这条曲线切片，
+# 避免窗口随日期移动导致连板 streak 截断、同一日数值跳变。
+_SENTIMENT_HISTORY_SPAN_DAYS = 250
+_SENTIMENT_FULL_HISTORY_TTL_SECONDS = 1800
 _NORMAL_LIMIT_UP_THRESHOLD = 9.5
 _WIDE_LIMIT_UP_THRESHOLD = 19.0
 _BSE_LIMIT_UP_THRESHOLD = 29.0
@@ -457,6 +461,18 @@ def sentiment_cycle(
     if not is_database_configured():
         return ok({"status": "unavailable", "message": "数据库未配置"})
 
+    # 缓存键只用请求参数（不含解析后日期）：重复请求跳过整个日期解析链，
+    # 命中即毫秒返回。
+    cache_key = (
+        "mainline_replay.sentiment_cycle",
+        date.isoformat() if date else "latest",
+        int(lookback),
+        bool(include_live),
+    )
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return ok(cached)
+
     with session_scope() as session:
         resolved_date = _resolve_sentiment_cycle_date(session, date)
         if resolved_date is None:
@@ -471,24 +487,25 @@ def sentiment_cycle(
                 "source": "stock_daily_bars",
             })
 
-        cache_key = (
-            "mainline_replay.sentiment_cycle",
-            resolved_date.isoformat(),
-            int(lookback),
-            bool(include_live),
-        )
-        cached = _cache_get(cache_key)
-        if cached is not None:
-            return ok(cached)
+        # 连续大周期：全量历史曲线只按最新完整日线锚点计算一次（带缓存），
+        # 任意 date/lookback 请求都从这里切片，同一日在任何窗口下数值一致。
+        anchor_date, full_points = _full_sentiment_history_points(session)
+        if anchor_date is None or not full_points:
+            return ok({
+                "status": "empty",
+                "mode": "history",
+                "trade_date": resolved_date.isoformat(),
+                "base_daily_date": _iso_or_none(anchor_date),
+                "points": [],
+                "ranges": [],
+                "current": None,
+                "source": "stock_daily_bars",
+            })
 
-        base_daily_date = _latest_complete_daily_date_at_or_before(session, resolved_date)
-        history_end = base_daily_date or resolved_date
-        dates = _complete_stock_trade_dates(
-            session,
-            history_end,
-            lookback + _SENTIMENT_WARMUP_DAYS,
-        )
-        output_dates = dates[-lookback:]
+        # as-of 切片：显式 date 时曲线截止到该日（版本热度回看）；否则锚定最新
+        end_iso = min(date, anchor_date).isoformat() if date else anchor_date.isoformat()
+        # dict(p) 浅拷贝：live 路径会重写 score_change，不能污染缓存里的全量曲线
+        points = [dict(p) for p in full_points if p["date"] <= end_iso][-lookback:]
         mode = "history"
         source = "stock_daily_bars"
         latest_snapshot_updated = None
@@ -500,11 +517,8 @@ def sentiment_cycle(
             and resolved_date is not None
             and _can_use_intraday_snapshot(session, resolved_date)
         )
-        metric_rows = _load_sentiment_daily_metric_rows(session, dates)
-        points = _build_sentiment_cycle_points_from_metrics(metric_rows, output_dates)
-
         if can_project_live:
-            symbol_state = _load_sentiment_symbol_state(session, dates)
+            symbol_state = _live_sentiment_symbol_state(session, anchor_date)
             live_point = _build_live_sentiment_point(session, resolved_date, symbol_state)
             if live_point is not None:
                 points = [p for p in points if p["date"] != live_point["date"]]
@@ -529,7 +543,7 @@ def sentiment_cycle(
         "status": "ready" if points else "empty",
         "mode": mode,
         "trade_date": resolved_date.isoformat(),
-        "base_daily_date": _iso_or_none(base_daily_date),
+        "base_daily_date": _iso_or_none(anchor_date),
         "points": points,
         "ranges": ranges,
         "current": current,
@@ -804,6 +818,46 @@ def _resolve_sentiment_cycle_date(session, requested: date | None) -> date | Non
     if latest_flow_date is not None:
         return latest_flow_date
     return _latest_complete_daily_date(session)
+
+
+def _full_sentiment_history_points(session) -> tuple[date | None, list[dict[str, Any]]]:
+    """连续情绪大周期曲线：以最新完整日线为锚，长历史一次计算并缓存。
+
+    每日情绪分由各日截面指标决定（涨跌停/晋级/炸板等），唯一的历史窗口
+    依赖是连板 streak 从窗口起点累计——用足够长的固定跨度（250 个完整
+    交易日）计算一次，任何 date/lookback 请求都从这条曲线切片，保证
+    同一日在任何窗口下数值一致、不再随日期切换而跳变。
+    """
+    anchor = _latest_complete_daily_date_at_or_before(session, None)
+    if anchor is None:
+        return None, []
+    cached = _cache_get(("mainline_replay.sentiment_full_history", anchor.isoformat()))
+    if cached is not None:
+        return anchor, cached
+    dates = _complete_stock_trade_dates(session, anchor, _SENTIMENT_HISTORY_SPAN_DAYS)
+    metric_rows = _load_sentiment_daily_metric_rows(session, dates)
+    points = _build_sentiment_cycle_points_from_metrics(metric_rows, dates)
+    _cache_set(
+        ("mainline_replay.sentiment_full_history", anchor.isoformat()),
+        points,
+        _SENTIMENT_FULL_HISTORY_TTL_SECONDS,
+    )
+    return anchor, points
+
+
+def _live_sentiment_symbol_state(session, anchor_date: date) -> dict[str, dict[str, Any]]:
+    """live 投影用的历史 streak 基线（随日线 anchor 变化，按 anchor 缓存）。"""
+    cached = _cache_get(("mainline_replay.sentiment_symbol_state", anchor_date.isoformat()))
+    if cached is not None:
+        return cached
+    dates = _complete_stock_trade_dates(session, anchor_date, _SENTIMENT_HISTORY_SPAN_DAYS)
+    state = _load_sentiment_symbol_state(session, dates)
+    _cache_set(
+        ("mainline_replay.sentiment_symbol_state", anchor_date.isoformat()),
+        state,
+        _SENTIMENT_FULL_HISTORY_TTL_SECONDS,
+    )
+    return state
 
 
 def _complete_stock_trade_dates(session, end_date: date, limit: int) -> list[date]:
