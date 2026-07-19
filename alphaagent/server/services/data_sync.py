@@ -5188,8 +5188,12 @@ def _upsert_sectors(items: list[dict[str, Any]]) -> int:
                 select(schema.sectors).where(schema.sectors.c.id == sector_id)
             ).first()
             if existing:
+                # 保留已知板块的原始分类：东财 concept/theme 清单是同一份板块 ID，
+                # 批量同步若按抓取标签覆盖 type，后抓的 theme 会把 concept 全量改写
+                # （2026-07-17 事故：495 个 concept 被覆盖导致概念评分断更）。
+                update_values = {k: v for k, v in values.items() if k != "type"}
                 session.execute(
-                    schema.sectors.update().where(schema.sectors.c.id == sector_id).values(**values)
+                    schema.sectors.update().where(schema.sectors.c.id == sector_id).values(**update_values)
                 )
             else:
                 session.execute(schema.sectors.insert().values(**values))
