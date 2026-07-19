@@ -26,6 +26,7 @@ import {
   type SentimentCycleData,
   type SentimentCyclePoint,
   type SentimentCycleRange,
+  type SentimentCycleShadow,
 } from "@/api/mainlineReplay";
 import { cn, formatAmount, formatPct } from "@/lib/utils";
 
@@ -728,6 +729,60 @@ function SentimentPointDetails({
         <SentimentMetric label="炸板率" value={fmtRate(point.failed_limit_up_rate)} tone={(point.failed_limit_up_rate ?? 0) >= 0.4 ? "fall" : undefined} />
         <SentimentMetric label="连板高度" value={`${point.max_limit_up_streak || 0}板`} tone={point.max_limit_up_streak >= 3 ? "rise" : undefined} />
         <SentimentMetric label="晋级率" value={`${point.promoted_limit_up_count}/${point.previous_limit_up_count} · ${fmtRate(point.promotion_rate)}`} tone={(point.promotion_rate ?? 0) >= 0.35 ? "rise" : undefined} />
+      </div>
+      {point.shadow && <SentimentShadowBlock shadow={point.shadow} />}
+    </div>
+  );
+}
+
+/** v2 影子指标：打板溢价 / 梯队晋级率 / 连板广度（观察用，不进情绪分） */
+function SentimentShadowBlock({ shadow }: { shadow: SentimentCycleShadow }) {
+  const premiumTone =
+    shadow.prev_limit_up_avg_change == null
+      ? undefined
+      : shadow.prev_limit_up_avg_change >= 0
+        ? "rise"
+        : "fall";
+  return (
+    <div className="mt-2 border-t border-border/60 pt-2">
+      <div className="mb-1.5 flex items-center justify-between">
+        <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+          v2 影子指标 · 观察中
+        </span>
+        <span className="text-[10px] tabular-nums text-muted-foreground">
+          连板 {shadow.consecutive_limit_up_count} 家
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <SentimentMetric
+          label="打板溢价"
+          value={
+            shadow.prev_limit_up_avg_change == null
+              ? "--"
+              : `${shadow.prev_limit_up_avg_change >= 0 ? "+" : ""}${shadow.prev_limit_up_avg_change.toFixed(2)}%`
+          }
+          tone={premiumTone}
+        />
+        <SentimentMetric
+          label="打板赚钱面"
+          value={fmtRate(shadow.prev_limit_up_rise_ratio)}
+          tone={(shadow.prev_limit_up_rise_ratio ?? 0) >= 0.5 ? "rise" : "fall"}
+        />
+        <SentimentMetric
+          label={`一进二 · 样本${shadow.tier_samples["1to2"]}`}
+          value={fmtRate(shadow.promotion_1to2_rate)}
+          tone={(shadow.promotion_1to2_rate ?? 0) >= 0.3 ? "rise" : undefined}
+        />
+        <SentimentMetric
+          label={`二进三 · 样本${shadow.tier_samples["2to3"]}`}
+          value={fmtRate(shadow.promotion_2to3_rate)}
+          tone={(shadow.promotion_2to3_rate ?? 0) >= 0.3 ? "rise" : undefined}
+        />
+        <SentimentMetric
+          label={`高标晋级 · 样本${shadow.tier_samples.high}`}
+          value={fmtRate(shadow.promotion_high_rate)}
+          tone={(shadow.promotion_high_rate ?? 0) >= 0.4 ? "rise" : undefined}
+        />
       </div>
     </div>
   );

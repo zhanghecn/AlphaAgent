@@ -92,6 +92,23 @@ export interface SnapshotData {
 
 export type SentimentPhase = "ice" | "repair" | "divergence" | "climax" | "ebb" | string;
 
+export interface SentimentCycleShadow {
+  /** 打板溢价：昨日涨停股今日平均涨幅（%） */
+  prev_limit_up_avg_change?: number | null;
+  /** 打板赚钱面：昨日涨停股今日上涨占比（0-1） */
+  prev_limit_up_rise_ratio?: number | null;
+  /** 一进二晋级率（0-1） */
+  promotion_1to2_rate?: number | null;
+  /** 二进三晋级率（0-1） */
+  promotion_2to3_rate?: number | null;
+  /** 高标（昨日 3 板+）晋级率（0-1） */
+  promotion_high_rate?: number | null;
+  /** 各梯队样本数（分母） */
+  tier_samples: { "1to2": number; "2to3": number; high: number };
+  /** 今日连板（streak≥2）家数 */
+  consecutive_limit_up_count: number;
+}
+
 export interface SentimentCyclePoint {
   date: string;
   score: number;
@@ -114,6 +131,8 @@ export interface SentimentCyclePoint {
   previous_limit_up_count: number;
   promoted_limit_up_count: number;
   promotion_rate?: number | null;
+  /** v2 影子指标（观察用，不进情绪分） */
+  shadow?: SentimentCycleShadow | null;
   temporary?: boolean;
 }
 

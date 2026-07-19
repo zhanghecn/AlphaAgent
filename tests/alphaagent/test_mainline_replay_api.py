@@ -158,6 +158,19 @@ def test_sentiment_cycle_points_track_short_term_metrics():
     assert points[1]["score_change"] is not None
     assert state["AAA.SSE"]["limit_up_streak"] == 2
 
+    # v2 影子指标：d2 昨日涨停仅 AAA（首板），今日续板且涨 10%
+    shadow = points[1]["shadow"]
+    assert shadow["prev_limit_up_avg_change"] == 10.0
+    assert shadow["prev_limit_up_rise_ratio"] == 1.0
+    assert shadow["promotion_1to2_rate"] == 1.0
+    assert shadow["promotion_2to3_rate"] is None
+    assert shadow["promotion_high_rate"] is None
+    assert shadow["tier_samples"] == {"1to2": 1, "2to3": 0, "high": 0}
+    assert shadow["consecutive_limit_up_count"] == 1
+    # d1 无昨日涨停样本，影子值全为 None / 0
+    assert points[0]["shadow"]["prev_limit_up_avg_change"] is None
+    assert points[0]["shadow"]["promotion_1to2_rate"] is None
+
 
 def test_live_uses_latest_sector_fund_flow_date(monkeypatch):
     captured: list[str] = []

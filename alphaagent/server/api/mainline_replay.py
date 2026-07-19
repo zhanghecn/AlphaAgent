@@ -952,6 +952,14 @@ def _load_sentiment_daily_metric_rows(session, dates: list[date]) -> list[Any]:
                         ELSE 0
                     END AS limit_up_streak
                 FROM grouped
+            ),
+            streaks_lag AS (
+                SELECT
+                    *,
+                    LAG(limit_up_streak, 1, 0) OVER (
+                        PARTITION BY vt_symbol ORDER BY trade_date
+                    ) AS previous_streak
+                FROM streaks
             )
             SELECT
                 trade_date,
@@ -964,8 +972,18 @@ def _load_sentiment_daily_metric_rows(session, dates: list[date]) -> list[Any]:
                 SUM(CASE WHEN touched_limit_up = 1 AND is_limit_up = 0 THEN 1 ELSE 0 END)::int AS failed_limit_up_count,
                 SUM(previous_is_limit_up)::int AS previous_limit_up_count,
                 SUM(CASE WHEN previous_is_limit_up = 1 AND is_limit_up = 1 THEN 1 ELSE 0 END)::int AS promoted_limit_up_count,
-                MAX(limit_up_streak)::int AS max_limit_up_streak
-            FROM streaks
+                MAX(limit_up_streak)::int AS max_limit_up_streak,
+                -- v2 影子指标（不进 score）：打板溢价 / 梯队晋级 / 连板家数
+                COALESCE(SUM(change_calc) FILTER (WHERE previous_is_limit_up = 1), 0) AS prev_lu_change_sum,
+                SUM(CASE WHEN previous_is_limit_up = 1 AND change_calc > 0 THEN 1 ELSE 0 END)::int AS prev_lu_rise_count,
+                SUM(CASE WHEN previous_streak = 1 THEN 1 ELSE 0 END)::int AS tier1_base,
+                SUM(CASE WHEN previous_streak = 1 AND is_limit_up = 1 THEN 1 ELSE 0 END)::int AS tier1_promoted,
+                SUM(CASE WHEN previous_streak = 2 THEN 1 ELSE 0 END)::int AS tier2_base,
+                SUM(CASE WHEN previous_streak = 2 AND is_limit_up = 1 THEN 1 ELSE 0 END)::int AS tier2_promoted,
+                SUM(CASE WHEN previous_streak >= 3 THEN 1 ELSE 0 END)::int AS tierh_base,
+                SUM(CASE WHEN previous_streak >= 3 AND is_limit_up = 1 THEN 1 ELSE 0 END)::int AS tierh_promoted,
+                SUM(CASE WHEN is_limit_up = 1 AND limit_up_streak >= 2 THEN 1 ELSE 0 END)::int AS consecutive_limit_up_count
+            FROM streaks_lag
             GROUP BY trade_date
             ORDER BY trade_date
             """
@@ -999,6 +1017,15 @@ def _build_sentiment_cycle_points_from_metrics(
             previous_limit_up_count,
             promoted_limit_up_count,
             max_limit_up_streak,
+            prev_lu_change_sum,
+            prev_lu_rise_count,
+            tier1_base,
+            tier1_promoted,
+            tier2_base,
+            tier2_promoted,
+            tierh_base,
+            tierh_promoted,
+            consecutive_limit_up_count,
         ) = row
         if trade_date not in metrics_by_date:
             continue
@@ -1013,6 +1040,16 @@ def _build_sentiment_cycle_points_from_metrics(
         metrics["previous_limit_up_count"] = int(previous_limit_up_count or 0)
         metrics["promoted_limit_up_count"] = int(promoted_limit_up_count or 0)
         metrics["max_limit_up_streak"] = int(max_limit_up_streak or 0)
+        # v2 影子指标累计值（与 Python 构建路径同键，_finalize 统一换算）
+        metrics["prev_lu_change_sum"] = float(prev_lu_change_sum or 0.0)
+        metrics["prev_lu_rise_count"] = int(prev_lu_rise_count or 0)
+        metrics["tier1_base"] = int(tier1_base or 0)
+        metrics["tier1_promoted"] = int(tier1_promoted or 0)
+        metrics["tier2_base"] = int(tier2_base or 0)
+        metrics["tier2_promoted"] = int(tier2_promoted or 0)
+        metrics["tierh_base"] = int(tierh_base or 0)
+        metrics["tierh_promoted"] = int(tierh_promoted or 0)
+        metrics["consecutive_limit_up_count"] = int(consecutive_limit_up_count or 0)
     points = [_finalize_sentiment_metrics(metrics_by_date[d]) for d in output_dates]
     _attach_sentiment_score_changes(points)
     return points
@@ -1205,6 +1242,16 @@ def _empty_sentiment_metrics(trade_date: date) -> dict[str, Any]:
         "previous_limit_up_count": 0,
         "promoted_limit_up_count": 0,
         "max_limit_up_streak": 0,
+        # ── v2 影子指标累计器（不进 score，只观察）──
+        "prev_lu_change_sum": 0.0,  # 昨日涨停股今日涨幅合计（打板溢价）
+        "prev_lu_rise_count": 0,  # 昨日涨停股今日上涨家数（打板赚钱面）
+        "tier1_base": 0,  # 昨日首板数（一进二分母）
+        "tier1_promoted": 0,  # 昨日首板今日续板数
+        "tier2_base": 0,  # 昨日二板数（二进三分母）
+        "tier2_promoted": 0,
+        "tierh_base": 0,  # 昨日 3 板及以上数（高标分母）
+        "tierh_promoted": 0,
+        "consecutive_limit_up_count": 0,  # 今日连板（streak≥2）家数
         "temporary": False,
     }
 
@@ -1228,6 +1275,17 @@ def _add_sentiment_sample(
 
     if previous_streak >= 1:
         metrics["previous_limit_up_count"] += 1
+        # v2 影子：打板溢价（昨日涨停股今日表现）
+        metrics["prev_lu_change_sum"] += change
+        if change > 0:
+            metrics["prev_lu_rise_count"] += 1
+        # v2 影子：梯队晋级分母（一进二 / 二进三 / 高标）
+        if previous_streak == 1:
+            metrics["tier1_base"] += 1
+        elif previous_streak == 2:
+            metrics["tier2_base"] += 1
+        else:
+            metrics["tierh_base"] += 1
 
     if is_limit_up:
         metrics["limit_up_count"] += 1
@@ -1235,6 +1293,14 @@ def _add_sentiment_sample(
         metrics["max_limit_up_streak"] = max(metrics["max_limit_up_streak"], next_streak)
         if previous_streak >= 1:
             metrics["promoted_limit_up_count"] += 1
+            metrics["consecutive_limit_up_count"] += 1
+            # v2 影子：梯队晋级分子
+            if previous_streak == 1:
+                metrics["tier1_promoted"] += 1
+            elif previous_streak == 2:
+                metrics["tier2_promoted"] += 1
+            else:
+                metrics["tierh_promoted"] += 1
     elif touched_limit_up:
         metrics["failed_limit_up_count"] += 1
 
@@ -1295,7 +1361,40 @@ def _finalize_sentiment_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "previous_limit_up_count": previous_limit_up,
         "promoted_limit_up_count": promoted,
         "promotion_rate": _round4(promotion_rate),
+        "shadow": _sentiment_shadow_metrics(metrics, previous_limit_up),
         "temporary": bool(metrics.get("temporary")),
+    }
+
+
+def _sentiment_shadow_metrics(metrics: dict[str, Any], previous_limit_up: int) -> dict[str, Any]:
+    """v2 影子指标（观察用，不进 score）：
+    - 打板溢价：昨日涨停股今日平均涨幅 / 上涨占比
+    - 梯队晋级率：一进二 / 二进三 / 高标（昨日 3 板+）分层
+    - 连板家数：今日 streak≥2 的广度
+    """
+    tier1_base = int(metrics["tier1_base"])
+    tier2_base = int(metrics["tier2_base"])
+    tierh_base = int(metrics["tierh_base"])
+    return {
+        "prev_limit_up_avg_change": (
+            round(metrics["prev_lu_change_sum"] / previous_limit_up, 2)
+            if previous_limit_up else None
+        ),
+        "prev_limit_up_rise_ratio": (
+            _round4(metrics["prev_lu_rise_count"] / previous_limit_up)
+            if previous_limit_up else None
+        ),
+        "promotion_1to2_rate": (
+            _round4(metrics["tier1_promoted"] / tier1_base) if tier1_base else None
+        ),
+        "promotion_2to3_rate": (
+            _round4(metrics["tier2_promoted"] / tier2_base) if tier2_base else None
+        ),
+        "promotion_high_rate": (
+            _round4(metrics["tierh_promoted"] / tierh_base) if tierh_base else None
+        ),
+        "tier_samples": {"1to2": tier1_base, "2to3": tier2_base, "high": tierh_base},
+        "consecutive_limit_up_count": int(metrics["consecutive_limit_up_count"]),
     }
 
 
