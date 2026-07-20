@@ -576,7 +576,7 @@ function SentimentScoreChart({
         <svg className="h-full w-full" viewBox={`0 0 ${chart.width} ${chart.height}`} preserveAspectRatio="none">
           <rect x="0" y="0" width={chart.width} height={chart.bandY(72)} fill="#ef4444" opacity="0.06" />
           <rect x="0" y={chart.bandY(72)} width={chart.width} height={chart.bandY(55) - chart.bandY(72)} fill="#f59e0b" opacity="0.07" />
-          <rect x="0" y={chart.bandY(55)} width={chart.width} height={chart.bandY(35) - chart.bandY(55)} fill="#d9a84e" opacity="0.07" />
+          <rect x="0" y={chart.bandY(55)} width={chart.width} height={chart.bandY(35) - chart.bandY(55)} fill="#3b82f6" opacity="0.07" />
           <rect x="0" y={chart.bandY(35)} width={chart.width} height={chart.height - chart.bandY(35)} fill="#22c55e" opacity="0.06" />
           {[35, 55, 72].map((line) => (
             <line

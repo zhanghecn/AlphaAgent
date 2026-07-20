@@ -13,8 +13,8 @@ import { useTheme } from "@/theme/useTheme";
 export const RISE_COLOR = "#ef4444"; // 红 = 涨
 export const FALL_COLOR = "#22c55e"; // 绿 = 跌
 
-/** 品牌主色：香槟金（金手指语言） */
-export const BRAND_COLOR = "#d9a84e"; // brand-500
+/** 品牌主色：终端蓝 */
+export const BRAND_COLOR = "#3b82f6"; // brand-500
 
 export interface ChartPalette {
   mode: "light" | "dark";
@@ -39,7 +39,7 @@ export interface ChartPalette {
 
 const LIGHT: ChartPalette = {
   mode: "light",
-  brand: "#c08a33", // brand-600，浅底下加深保证金色可读
+  brand: "#2563eb", // brand-600，浅底下加深保可读
   rise: RISE_COLOR,
   fall: FALL_COLOR,
   grid: "#f1f5f9",
@@ -48,12 +48,12 @@ const LIGHT: ChartPalette = {
   tooltipBg: "rgba(255,255,255,0.96)",
   tooltipBorder: "#e5e7eb",
   tooltipText: "#374151",
-  linePalette: ["#c08a33", "#8b5cf6", "#2563eb", "#475569"],
+  linePalette: ["#2563eb", "#8b5cf6", "#f59e0b", "#475569"],
 };
 
 const DARK: ChartPalette = {
   mode: "dark",
-  brand: "#e2bc61", // brand-400，深底下稍亮
+  brand: "#60a5fa", // brand-400，深底下稍亮
   rise: RISE_COLOR,
   fall: FALL_COLOR,
   grid: "#1a2233", // 墨蓝网格，比旧 slate 更贴深墨底
@@ -62,7 +62,7 @@ const DARK: ChartPalette = {
   tooltipBg: "rgba(13,17,24,0.96)",
   tooltipBorder: "#2a3448",
   tooltipText: "#e2e8f0",
-  linePalette: ["#e2bc61", "#a78bfa", "#60a5fa", "#94a3b8"],
+  linePalette: ["#60a5fa", "#a78bfa", "#fbbf24", "#94a3b8"],
 };
 
 /** hook：返回当前深浅模式下的图表配色。必须在组件内调用。 */

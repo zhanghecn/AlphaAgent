@@ -4,34 +4,34 @@
 
 @layer base {
   :root {
-    /* 浅色：暖白纸面底，品牌金降档为古铜保证白底对比度 ≥4.5 */
-    --background: 45 25% 98%;
+    /* 浅色：近白纸面底，品牌蓝降档保证白底对比度（#1d4ed8 ≈ 6.5:1） */
+    --background: 210 33% 98%;
     --foreground: 222.2 84% 4.9%;
     --card: 0 0% 100%;
     --card-foreground: 222.2 84% 4.9%;
     --popover: 0 0% 100%;
     --popover-foreground: 222.2 84% 4.9%;
-    --primary: 41 49% 36%;
-    --primary-foreground: 45 40% 97%;
-    --secondary: 42 18% 94%;
+    --primary: 224 76% 48%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 214 32% 94%;
     --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 42 18% 94%;
+    --muted: 214 32% 94%;
     --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 41 30% 92%;
+    --accent: 214 40% 92%;
     --accent-foreground: 222.2 47.4% 11.2%;
     --destructive: 0 84.2% 60.2%;
     --destructive-foreground: 210 40% 98%;
-    --border: 40 16% 89%;
-    --input: 40 16% 89%;
-    --ring: 41 49% 36%;
+    --border: 214 25% 89%;
+    --input: 214 25% 89%;
+    --ring: 224 76% 48%;
     --radius: 0.5rem;
     /* 玻璃质感变量（叠在 backdrop-blur 上，浅色透明白） */
-    --glass-bg: 45 30% 98% / 0.75;
-    --glass-border: 41 49% 36% / 0.16;
-    --aurora-opacity: 0.4;
+    --glass-bg: 210 33% 98% / 0.75;
+    --glass-border: 224 76% 48% / 0.14;
+    --aurora-opacity: 0.35;
   }
 
-  /* 金色终端深色：深墨蓝黑底 + 香槟金主交互，保留 A 股涨红跌绿语义不变 */
+  /* 终端蓝深色：深墨蓝黑底 + 亮蓝主交互，保留 A 股涨红跌绿语义不变 */
   .dark {
     --background: 218 27% 6%;
     --foreground: 210 40% 98%;
@@ -39,8 +39,8 @@
     --card-foreground: 210 40% 98%;
     --popover: 218 27% 7%;
     --popover-foreground: 210 40% 98%;
-    --primary: 39 65% 58%;
-    --primary-foreground: 40 30% 10%;
+    --primary: 213 94% 68%;
+    --primary-foreground: 222 60% 10%;
     --secondary: 219 22% 14%;
     --secondary-foreground: 210 40% 98%;
     --muted: 219 22% 14%;
@@ -51,11 +51,11 @@
     --destructive-foreground: 210 40% 98%;
     --border: 219 20% 17%;
     --input: 219 20% 17%;
-    --ring: 39 65% 58%;
-    /* 玻璃质感变量（深色透明墨蓝，金光晕更亮） */
+    --ring: 213 94% 68%;
+    /* 玻璃质感变量（深色透明墨蓝，蓝光晕更亮） */
     --glass-bg: 220 26% 9% / 0.75;
-    --glass-border: 39 65% 58% / 0.22;
-    --aurora-opacity: 0.6;
+    --glass-border: 213 94% 68% / 0.20;
+    --aurora-opacity: 0.5;
   }
 }
 
