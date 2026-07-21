@@ -23,11 +23,8 @@ class _InsertResult:
     def __init__(self, row: dict[str, object]) -> None:
         self.row = row
 
-    def mappings(self) -> _InsertResult:
-        return self
-
-    def one(self) -> dict[str, object]:
-        return self.row
+    def scalar_one(self) -> int:
+        return int(self.row["id"])
 
 
 class _InsertSession:
@@ -37,6 +34,29 @@ class _InsertSession:
     def execute(self, statement: object) -> _InsertResult:
         self.statements.append(statement)
         return _InsertResult({"id": len(self.statements)})
+
+
+class _SelectResult:
+    partition_size: int | None = None
+
+    def mappings(self) -> _SelectResult:
+        return self
+
+    def partitions(self, size: int):
+        type(self).partition_size = size
+        return iter(())
+
+    def all(self) -> list[dict[str, object]]:
+        raise AssertionError("trace rows must be streamed in bounded partitions")
+
+
+class _SelectSession:
+    def __init__(self) -> None:
+        self.statement: object | None = None
+
+    def execute(self, statement: object) -> _SelectResult:
+        self.statement = statement
+        return _SelectResult()
 
 
 def test_live_trace_table_is_registered() -> None:
@@ -54,6 +74,31 @@ def test_retention_cutoff_keeps_two_latest_trade_dates() -> None:
         trade_dates[:1],
         retain_trade_days=2,
     ) is None
+
+
+def test_live_trace_reader_selects_only_timeline_columns(monkeypatch) -> None:
+    session = _SelectSession()
+
+    @contextmanager
+    def fake_session_scope():
+        yield session
+
+    monkeypatch.setattr(live_trace_repository, "session_scope", fake_session_scope)
+
+    assert list(
+        live_trace_repository.iter_live_trace_row_batches(date(2026, 7, 14))
+    ) == []
+    assert session.statement is not None
+    assert tuple(session.statement.selected_columns.keys()) == (
+        "id",
+        "trade_date",
+        "captured_at",
+        "mode",
+        "radar_candidates",
+        "recommendations",
+        "data_quality",
+    )
+    assert _SelectResult.partition_size == 32
 
 
 def test_trace_projection_keeps_diagnostics_without_full_research_payload() -> None:
@@ -93,6 +138,55 @@ def test_trace_projection_keeps_diagnostics_without_full_research_payload() -> N
     ]
 
 
+def test_trace_recommendations_keep_one_best_signal_per_symbol() -> None:
+    symbol = "600001.SSE"
+
+    recommendations = live_trace_repository._trace_recommendations(
+        {
+            "market_gate": {"passed": True},
+            "lanes": {
+                "now": [
+                    {
+                        "vt_symbol": symbol,
+                        "signal_state": "observing",
+                        "action": "observe",
+                    }
+                ],
+                "tail": [
+                    {
+                        "vt_symbol": symbol,
+                        "signal_state": "trigger_ready",
+                        "action": "buy_now",
+                    }
+                ],
+                "next_auction": [
+                    {
+                        "vt_symbol": symbol,
+                        "signal_state": "rejected",
+                        "action": "pass",
+                    }
+                ],
+            },
+            "watchlist": [{"vt_symbol": symbol, "historical_evidence": {"large": True}}],
+        }
+    )
+
+    assert recommendations == {
+        "market_gate": {"passed": True},
+        "lanes": {
+            "now": [],
+            "tail": [
+                {
+                    "vt_symbol": symbol,
+                    "signal_state": "trigger_ready",
+                    "action": "buy_now",
+                }
+            ],
+            "next_auction": [],
+        },
+    }
+
+
 def test_same_minute_live_trace_scans_use_independent_inserts(monkeypatch) -> None:
     session = _InsertSession()
 
@@ -126,6 +220,46 @@ def test_same_minute_live_trace_scans_use_independent_inserts(monkeypatch) -> No
 
     assert len(session.statements) == 2
     assert all(getattr(statement, "is_insert", False) for statement in session.statements)
+    assert all(
+        tuple(column.key for column in statement._returning) == ("id",)
+        for statement in session.statements
+    )
+
+
+def test_trace_write_does_not_persist_duplicate_ranked_candidates(monkeypatch) -> None:
+    session = _InsertSession()
+
+    @contextmanager
+    def fake_session_scope():
+        yield session
+
+    monkeypatch.setattr(live_trace_repository, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        live_trace_repository,
+        "_prune_once_for_trade_date",
+        lambda _trade_date: None,
+    )
+    candidate = _trace_candidate("600001.SSE", 8.2, "near_limit")
+
+    live_trace_repository.save_live_trace_snapshot(
+        {
+            "trade_date": "2026-07-14",
+            "captured_at": datetime(2026, 7, 14, 10, 5, tzinfo=SHANGHAI),
+            "session_stage": "morning",
+            "strategy_version": "limit-up-live-test",
+            "mode": "live_snapshot",
+            "source": "test",
+            "market_context": {},
+            "trace_radar_candidates": [candidate],
+            "candidates": [candidate],
+            "recommendations": {},
+            "data_quality": {"status": "ready", "is_stale": False},
+        }
+    )
+
+    values = session.statements[0].compile().params
+    assert values["radar_candidates"] == [candidate]
+    assert values["ranked_candidates"] == []
 
 
 def _trace_candidate(
@@ -505,16 +639,20 @@ def test_read_cache_aggregates_only_new_scan_rows(monkeypatch) -> None:
     second["id"] = 2
     calls: list[int | None] = []
 
-    def load_rows(_trade_date: date, *, after_id: int | None = None):
+    def load_row_batches(_trade_date: date, *, after_id: int | None = None):
         calls.append(after_id)
         if after_id is None:
-            return [first]
+            return iter([[first]])
         if after_id == 1:
-            return [second]
-        return []
+            return iter([[second]])
+        return iter(())
 
     clear_live_trace_read_cache()
-    monkeypatch.setattr(live_trace_repository, "load_live_trace_rows", load_rows)
+    monkeypatch.setattr(
+        live_trace_repository,
+        "iter_live_trace_row_batches",
+        load_row_batches,
+    )
 
     first_result = get_live_trace_day(trade_date)
     second_result = get_live_trace_day(trade_date)

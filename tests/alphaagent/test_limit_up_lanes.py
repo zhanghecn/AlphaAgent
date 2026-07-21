@@ -8,7 +8,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from alphaagent.server.main import create_app
-from alphaagent.server.services.limit_up import history_engine, history_service
+from alphaagent.server.services.limit_up import (
+    history_engine,
+    history_service,
+    lane_research,
+    next_session_plan,
+)
 from alphaagent.server.services.limit_up.lane_features import (
     attach_limit_gene_features,
     classify_financial_risk,
@@ -54,6 +59,56 @@ def _daily_rows() -> pd.DataFrame:
     return frame
 
 
+def test_background_history_rebuild_refreshes_final_plan(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        history_service,
+        "_now_shanghai",
+        lambda: datetime(2026, 7, 20, 23, 50),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        history_service,
+        "rebuild_history_sync",
+        lambda: calls.append("rebuild") or {"status": "ready"},
+    )
+    monkeypatch.setattr(
+        next_session_plan,
+        "refresh_next_session_plan",
+        lambda phase: calls.append(phase) or {"status": "ready"},
+    )
+
+    history_service._background_rebuild()
+
+    assert calls == ["rebuild", "final"]
+
+
+def test_background_history_rebuild_does_not_save_plan_during_live_session(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        history_service,
+        "_now_shanghai",
+        lambda: datetime(2026, 7, 21, 10, 5),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        history_service,
+        "rebuild_history_sync",
+        lambda: calls.append("rebuild") or {"status": "ready"},
+    )
+    monkeypatch.setattr(
+        next_session_plan,
+        "refresh_next_session_plan",
+        lambda phase: calls.append(phase) or {"status": "ready"},
+    )
+
+    history_service._background_rebuild()
+
+    assert calls == ["rebuild"]
+
+
 def test_limit_gene_features_are_shifted_before_signal_day() -> None:
     result = attach_limit_gene_features(_daily_rows())
 
@@ -76,6 +131,72 @@ def test_current_day_limit_never_enters_its_own_gene_count() -> None:
     assert result.iloc[5]["prior_limit_count_126"] == 0
     assert result.iloc[100]["prior_limit_count_126"] == 1
     assert result.iloc[131]["prior_limit_count_126"] == 2
+
+
+def test_limit_gene_vectorized_windows_match_group_rolling_reference() -> None:
+    first = _daily_rows()
+    second = _daily_rows().assign(vt_symbol="000001.SZSE")
+    second["close_price"] = second["close_price"] * 1.3
+    second["low_price"] = second["low_price"] * 1.3
+    source = pd.concat([first, second], ignore_index=True).sample(
+        frac=1,
+        random_state=7,
+    )
+    original = source.copy(deep=True)
+    expected = source.copy().sort_values(
+        ["vt_symbol", "trade_date"],
+        kind="stable",
+    )
+    expected["high_price"] = expected["close_price"]
+    grouped = expected.groupby("vt_symbol", sort=False)
+    expected["prior_limit_count_126"] = grouped["sealed"].transform(
+        lambda values: values.shift(1).rolling(126, min_periods=1).sum()
+    ).fillna(0).astype(int)
+    expected["prior_touch_count_126"] = grouped["touched"].transform(
+        lambda values: values.shift(1).rolling(126, min_periods=1).sum()
+    ).fillna(0).astype(int)
+    expected["prior_limit_count_5"] = grouped["sealed"].transform(
+        lambda values: values.shift(1).rolling(5, min_periods=1).sum()
+    ).fillna(0).astype(int)
+    expected["prior_limit_count_10"] = grouped["sealed"].transform(
+        lambda values: values.shift(1).rolling(10, min_periods=1).sum()
+    ).fillna(0).astype(int)
+    expected["prior_low_120"] = grouped["low_price"].transform(
+        lambda values: values.shift(1).rolling(120, min_periods=20).min()
+    )
+    expected["prior_high_120"] = grouped["high_price"].transform(
+        lambda values: values.shift(1).rolling(120, min_periods=20).max()
+    )
+
+    result = attach_limit_gene_features(source)
+
+    pd.testing.assert_frame_equal(source, original)
+    pd.testing.assert_frame_equal(
+        result[
+            [
+                "prior_limit_count_126",
+                "prior_touch_count_126",
+                "prior_limit_count_5",
+                "prior_limit_count_10",
+            ]
+        ],
+        expected[
+            [
+                "prior_limit_count_126",
+                "prior_touch_count_126",
+                "prior_limit_count_5",
+                "prior_limit_count_10",
+            ]
+        ],
+    )
+    pd.testing.assert_series_equal(
+        result["prior_position_120"],
+        (
+            (grouped["close_price"].shift(1) - expected["prior_low_120"])
+            / (expected["prior_high_120"] - expected["prior_low_120"]).replace(0, pd.NA)
+        ).clip(lower=0, upper=1),
+        check_names=False,
+    )
 
 
 def test_intraday_path_uses_eighty_three_minute_points() -> None:
@@ -514,6 +635,23 @@ def test_first_board_requires_gene_low_position_and_post_ten_signal() -> None:
     assert eligible["lane"] == "first_board"
 
 
+def test_first_board_evaluation_reuses_support_score(monkeypatch) -> None:
+    calls = 0
+    original = lane_research.first_board_support_score
+
+    def counted(candidate):
+        nonlocal calls
+        calls += 1
+        return original(candidate)
+
+    monkeypatch.setattr(lane_research, "first_board_support_score", counted)
+
+    result = evaluate_lane_candidate(_candidate())
+
+    assert result["decision"] == "eligible"
+    assert calls == 1
+
+
 def test_first_board_requires_strong_touch_gene_profit_growth_and_divergence() -> None:
     weak_touch_gene = evaluate_lane_candidate(_candidate(prior_touch_count_126=5))
     missing_report = evaluate_lane_candidate(_candidate(financial_snapshot=None))
@@ -928,6 +1066,253 @@ def test_history_replay_persists_pool_separately_from_final_selection(monkeypatc
     assert len(replay["board_lanes"]["first_board"]) == 2
     assert len(replay["lane_portfolio"]["selected"]) == 2
     assert replay["lane_portfolio"]["candidate_pool"] == replay["board_candidate_pool"]
+
+
+def test_history_replay_indexes_event_evidence_once(monkeypatch) -> None:
+    class CountingEventIndex(dict):
+        items_calls = 0
+
+        def items(self):
+            self.items_calls += 1
+            return super().items()
+
+    first_date = date(2026, 7, 17)
+    second_date = date(2026, 7, 20)
+    events = CountingEventIndex(
+        {
+            ("600001.SSE", first_date): {"first_limit_time": "10:00:00"},
+            ("600002.SSE", second_date): {"first_limit_time": "10:30:00"},
+        }
+    )
+    frame = pd.DataFrame(
+        {
+            "trade_date": [pd.Timestamp(first_date), pd.Timestamp(second_date)],
+            "prev_close": [10.0, 11.0],
+        }
+    )
+    observed: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        history_engine,
+        "_route_candidates_from_day",
+        lambda *_args, **_kwargs: {mode: [] for mode in history_engine.ENTRY_MODES},
+    )
+
+    def fake_board_candidates(*_args, current_event_evidence=None, **_kwargs):
+        observed.append(dict(current_event_evidence or {}))
+        return []
+
+    monkeypatch.setattr(
+        history_engine,
+        "_board_lane_candidates_from_day",
+        fake_board_candidates,
+    )
+    monkeypatch.setattr(
+        history_engine,
+        "_day_market_context_from_day",
+        lambda *_args, **_kwargs: {},
+    )
+
+    history_engine.build_history_replays(
+        frame,
+        warmup_days=0,
+        holdout_days=0,
+        event_evidence=events,
+    )
+
+    assert events.items_calls == 1
+    assert observed == [
+        {"600001.SSE": {"first_limit_time": "10:00:00"}},
+        {"600002.SSE": {"first_limit_time": "10:30:00"}},
+    ]
+
+
+def test_history_replay_uses_daily_position_index(monkeypatch) -> None:
+    first_date = date(2026, 7, 17)
+    second_date = date(2026, 7, 20)
+    frame = pd.DataFrame(
+        {
+            "trade_date": [pd.Timestamp(second_date), pd.Timestamp(first_date)],
+            "vt_symbol": ["600002.SSE", "600001.SSE"],
+            "prev_close": [11.0, 10.0],
+        }
+    )
+    groupby_type = type(frame.groupby("trade_date", sort=False))
+
+    def fail_get_group(*_args, **_kwargs):
+        pytest.fail("daily replay must not copy every wide group through get_group")
+
+    monkeypatch.setattr(groupby_type, "get_group", fail_get_group)
+    observed: list[date] = []
+
+    def fake_routes(day, **_kwargs):
+        observed.append(day.iloc[0]["trade_date"].date())
+        return {mode: [] for mode in history_engine.ENTRY_MODES}
+
+    monkeypatch.setattr(history_engine, "_route_candidates_from_day", fake_routes)
+    monkeypatch.setattr(
+        history_engine,
+        "_board_lane_candidates_from_day",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        history_engine,
+        "_day_market_context_from_day",
+        lambda *_args, **_kwargs: {},
+    )
+
+    result = history_engine.build_history_replays(
+        frame,
+        warmup_days=0,
+        holdout_days=0,
+    )
+
+    assert observed == [first_date, second_date]
+    assert [row["trade_date"] for row in result] == [
+        first_date.isoformat(),
+        second_date.isoformat(),
+    ]
+
+
+def test_history_replay_materializes_only_potential_candidate_rows(
+    monkeypatch,
+) -> None:
+    trade_date = date(2026, 7, 20)
+    frame = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime([trade_date] * 3),
+            "vt_symbol": ["600001.SSE", "600002.SSE", "600003.SSE"],
+            "prev_close": [10.0, 10.0, 10.0],
+            "open_price": [10.3, 10.0, 10.0],
+            "auction_gap_pct": [3.0, 0.0, 0.0],
+        }
+    )
+    observed: list[list[str]] = []
+
+    def fake_routes(day, **_kwargs):
+        observed.append(day["vt_symbol"].tolist())
+        return {mode: [] for mode in history_engine.ENTRY_MODES}
+
+    monkeypatch.setattr(history_engine, "_route_candidates_from_day", fake_routes)
+    monkeypatch.setattr(
+        history_engine,
+        "_board_lane_candidates_from_day",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        history_engine,
+        "_day_market_context_from_day",
+        lambda *_args, **_kwargs: {},
+    )
+
+    history_engine.build_history_replays(
+        frame,
+        warmup_days=0,
+        holdout_days=0,
+        event_evidence={
+            ("600002.SSE", trade_date): {"first_limit_time": "10:00:00"},
+        },
+    )
+
+    assert observed == [["600001.SSE", "600002.SSE"]]
+
+
+def test_prior_market_features_are_attached_by_date_index() -> None:
+    frame = pd.DataFrame(
+        {
+            "expected_prev_trade_date": [
+                pd.Timestamp("2026-07-16"),
+                pd.Timestamp("2026-07-17"),
+                pd.NaT,
+            ]
+        }
+    )
+    market = pd.DataFrame(
+        {
+            "advancing_rate": [0.34, 0.65],
+            "sealed_count": [20, 40],
+            "failed_rate": [0.5, 0.2],
+            "max_board": [3, 5],
+            "first_board_count": [15, 30],
+            "one_to_two_rate": [0.2, 0.4],
+            "two_to_three_rate": [0.1, 0.3],
+        },
+        index=pd.to_datetime(["2026-07-16", "2026-07-17"]),
+    )
+
+    history_engine._attach_prior_market_features(frame, market)
+
+    assert frame["prior_market_advancing_rate"].tolist()[:2] == [0.34, 0.65]
+    assert frame["prior_market_sealed_count"].tolist()[:2] == [20.0, 40.0]
+    assert frame["prior_market_phase"].astype(str).tolist() == [
+        "retreat",
+        "broad_rise",
+        "unknown",
+    ]
+
+
+def test_history_replay_resolves_each_analog_bucket_once_per_day(
+    monkeypatch,
+) -> None:
+    trade_date = date(2026, 7, 20)
+    frame = pd.DataFrame(
+        {
+            "trade_date": [pd.Timestamp(trade_date)],
+            "prev_close": [10.0],
+        }
+    )
+    candidates = [
+        {
+            "vt_symbol": f"{600000 + index}.SSE",
+            "entry_mode": "auction",
+            "target_board": 1,
+            "known_at_signal": {
+                "auction_gap_pct": 3.5,
+                "prior_change_pct": 1.0,
+                "prior_turnover_rate": 5.0,
+                "prior_amount_ratio_5d": 1.1,
+                "prior_market_phase": "broad_rise",
+            },
+            "outcome": {},
+        }
+        for index in range(20)
+    ]
+    monkeypatch.setattr(
+        history_engine,
+        "_route_candidates_from_day",
+        lambda *_args, **_kwargs: {
+            "auction": candidates,
+            "sweep": [],
+            "tail": [],
+            "next_auction": [],
+        },
+    )
+    monkeypatch.setattr(
+        history_engine,
+        "_board_lane_candidates_from_day",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        history_engine,
+        "_day_market_context_from_day",
+        lambda *_args, **_kwargs: {},
+    )
+    original_resolve = history_engine._resolve_analog
+    resolve_calls = 0
+
+    def counted_resolve(*args, **kwargs):
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return original_resolve(*args, **kwargs)
+
+    monkeypatch.setattr(history_engine, "_resolve_analog", counted_resolve)
+
+    history_engine.build_history_replays(
+        frame,
+        warmup_days=0,
+        holdout_days=0,
+    )
+
+    assert resolve_calls == 1
 
 
 def test_history_relay_requires_current_day_event_and_uses_limit_entry() -> None:
@@ -1575,7 +1960,6 @@ def test_independent_lane_next_1430_uses_scheduled_exit_prices(monkeypatch) -> N
             slippage_bps=0,
         ),
     )
-
     assert report["summary"]["trade_count"] == 1
     assert report["trades"][0]["sell_time"] == "14:30:00"
     assert report["trades"][0]["sell_price"] == 11.5
@@ -1830,6 +2214,17 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
             AssertionError("formal next-close replay must not query 14:30 prices")
         ),
     )
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "load_account_post_auction_prices",
+        lambda _requests: [],
+    )
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "load_account_auction_evidence",
+        lambda _requests: [],
+        raising=False,
+    )
     history_service._BACKTEST_REPORT_CACHE.clear()
 
     report = history_service.get_lane_history_backtest(
@@ -1863,6 +2258,23 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
     assert report["exit_summary"]["close_exit_count"] == 2
     assert set(report["stress_tests"]) == {"double_cost"}
     assert report["stress_tests"]["double_cost"]["total_return_pct"] is not None
+    diagnostics = report["drawdown_diagnostics"]
+    assert diagnostics["diagnostics_version"] == (
+        "limit-up-drawdown-diagnostics-v1"
+    )
+    assert diagnostics["board_outcome_attribution"]["actionability"] == (
+        "outcome_only_not_entry_filter"
+    )
+    assert diagnostics["recommendation_regime"]["time_validation"]["count"] == 2
+    exit_research = diagnostics["exit_research"]
+    assert "shadow_exit" not in diagnostics
+    assert exit_research["formal_strategy_changed"] is False
+    assert exit_research["withdrawn_policy"]["status"] == (
+        "invalidated_same_price_decision_fill_lookahead"
+    )
+    assert exit_research["withdrawn_policy"]["published_metrics"] is None
+    assert exit_research["precommitted_limit_research"]["account_performance"] is None
+    assert exit_research["post_auction_research"]["account_performance"] is None
     assert report["position_sizing_audit"]["selected_max_positions"] == 2
     assert report["position_sizing_audit"]["selection_rule"] == (
         "pre_validation_maximum_return_with_drawdown_not_below_minus_10_pct"
@@ -1995,6 +2407,41 @@ def test_scheduled_backtest_reuses_full_report_across_trade_limits(monkeypatch) 
     assert [row["id"] for row in complete["trades"]] == [0, 1, 2]
     assert [row["id"] for row in latest["orders"]] == [2]
     assert [row["id"] for row in latest["skipped_orders"]] == [2]
+    history_service._BACKTEST_REPORT_CACHE.clear()
+
+
+def test_scheduled_backtest_cache_avoids_recursive_copy(monkeypatch) -> None:
+    class DeepCopyGuard:
+        def __deepcopy__(self, _memo):
+            raise AssertionError("large backtest report was recursively copied")
+
+    guard = DeepCopyGuard()
+    monkeypatch.setattr(
+        history_service,
+        "_build_scheduled_history_backtest",
+        lambda _start, _end: {
+            "orders": [],
+            "trades": [],
+            "skipped_orders": [],
+            "diagnostics": {"guard": guard},
+        },
+    )
+    history_service._BACKTEST_REPORT_CACHE.clear()
+
+    first = history_service.get_scheduled_history_backtest(
+        None,
+        None,
+        trade_limit=None,
+    )
+    second = history_service.get_scheduled_history_backtest(
+        None,
+        None,
+        trade_limit=None,
+    )
+
+    assert first is not second
+    assert first["diagnostics"]["guard"] is guard
+    assert second["diagnostics"]["guard"] is guard
     history_service._BACKTEST_REPORT_CACHE.clear()
 
 
@@ -2155,7 +2602,6 @@ def test_default_backtest_warmup_primes_portfolio_then_lane_validation(
     assert calls == [
         "backtest:portfolio",
         "validation:dynamic",
-        "research:sector_warmup",
         "backtest:first_board",
         "backtest:high_board",
     ]

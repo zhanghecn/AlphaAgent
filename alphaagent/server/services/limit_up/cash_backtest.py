@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 from statistics import mean, median
-from typing import Mapping, Sequence
 
 from alphaagent.server.services.execution import cash_ledger
 
-ACCOUNT_EXECUTION_VERSION = "limit-up-cash-v4"
+ACCOUNT_EXECUTION_VERSION = "limit-up-cash-v5"
 SUPPORTED_EXIT_MODES = {"dynamic", "next_open", "next_close", "next_1430"}
 
 
@@ -622,23 +622,47 @@ def _skipped_buy_order(
     reason: str,
     cash: float,
 ) -> dict[str, object]:
+    candidate = signal.candidate
+    outcome = candidate.get("outcome")
+    outcome = outcome if isinstance(outcome, Mapping) else {}
+    next_close_return = _number(outcome.get("next_close_return_pct"))
+    result_date_raw = candidate.get("result_date")
     return {
         "order_id": f"{signal.entry_date.isoformat()}:{signal.vt_symbol}:BUY",
         "side": "BUY",
         "status": "skipped",
         "reason": reason,
         "vt_symbol": signal.vt_symbol,
-        "name": signal.candidate.get("name"),
-        "lane": signal.candidate.get("lane"),
+        "name": candidate.get("name"),
+        "lane": candidate.get("lane"),
         "trade_date": signal.entry_date.isoformat(),
         "trade_time": signal.buy_time,
-        "raw_price": _number(signal.candidate.get("entry_price")),
+        "raw_price": _number(candidate.get("entry_price")),
         "price": None,
         "volume": 0,
         "amount": 0.0,
         "fee": 0.0,
         "cash_after": cash,
+        # 反事实收益：如果当时按规则买入，次日（D+1）尾盘按官方收盘价卖出能赚多少。
+        # 直接取候选自带的事后结果，口径与成交单一致（已扣双边费用和滑点）。
+        "buy_price": _number(candidate.get("entry_price")),
+        "result_date": result_date_raw.isoformat() if hasattr(result_date_raw, "isoformat") else (str(result_date_raw)[:10] or None),
+        "d1_close_price": _number(outcome.get("next_close_price")),
+        "d1_return_pct": next_close_return,
+        "d_board_status": _skipped_board_status(outcome),
+        "is_win": next_close_return is not None and next_close_return > 0,
     }
+
+
+def _skipped_board_status(outcome: Mapping[str, object]) -> str | None:
+    """把候选事后结果映射成与成交单一致的板上状态。"""
+    if not outcome:
+        return None
+    if outcome.get("sealed"):
+        return "sealed"
+    if outcome.get("touched"):
+        return "failed"
+    return "no_limit"
 
 
 def _mark_positions(

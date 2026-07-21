@@ -7,7 +7,11 @@ from datetime import date, timedelta
 import pandas as pd
 import pytest
 
-from alphaagent.server.services.low_suction import cli, concept_cycles
+from alphaagent.server.services.low_suction import (
+    cli,
+    concept_cycles,
+    research_protocol,
+)
 from alphaagent.server.services.low_suction.research_protocol import (
     HoldoutAccessError,
     HoldoutLock,
@@ -56,7 +60,9 @@ def test_protocol_split_rejects_short_history() -> None:
         build_protocol_split(_dates(99), default_protocol())
 
 
-def test_data_fingerprint_is_order_independent_but_value_sensitive() -> None:
+def test_data_fingerprint_is_stable_across_order_and_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     frame = pd.DataFrame(
         {
             "trade_date": pd.to_datetime(["2026-07-15", "2026-07-14"]),
@@ -65,10 +71,12 @@ def test_data_fingerprint_is_order_independent_but_value_sensitive() -> None:
         }
     )
 
-    original = fingerprint_frame(
+    monkeypatch.setattr(research_protocol, "FINGERPRINT_CHUNK_ROWS", 1)
+    chunked = fingerprint_frame(
         frame,
         identity_columns=("trade_date", "sector_id"),
     )
+    monkeypatch.setattr(research_protocol, "FINGERPRINT_CHUNK_ROWS", 100)
     reordered = fingerprint_frame(
         frame.iloc[::-1],
         identity_columns=("trade_date", "sector_id"),
@@ -78,9 +86,19 @@ def test_data_fingerprint_is_order_independent_but_value_sensitive() -> None:
         identity_columns=("trade_date", "sector_id"),
     )
 
-    assert original == reordered
-    assert original.digest != changed.digest
-    assert original.rows == 2
+    assert chunked == reordered
+    assert chunked.digest == (
+        "sha256:ea7bf685d9895e7807ec03b9e2d35d5822b0c6a103f8841a6a0ec749166d0943"
+    )
+    assert chunked.digest != changed.digest
+    assert chunked.rows == 2
+
+
+def test_data_fingerprint_rejects_duplicate_identity() -> None:
+    frame = pd.DataFrame({"trade_date": ["2026-07-15"] * 2, "value": [1, 2]})
+
+    with pytest.raises(ValueError, match="identity columns must be unique"):
+        fingerprint_frame(frame, identity_columns=("trade_date",))
 
 
 def test_protocol_hash_changes_when_protocol_changes() -> None:

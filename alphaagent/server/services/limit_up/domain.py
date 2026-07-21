@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from decimal import Decimal, ROUND_HALF_UP
 from math import prod
 from statistics import mean, median
-from typing import Any, Mapping
+
+from alphaagent.server.services.a_share_universe import (
+    is_eligible_main_board as is_eligible_main_board,
+)
 
 FILL_SCENARIOS = {"conservative", "optimistic"}
 FAST_BOARD_CUTOFF = "09:31:00"
@@ -42,23 +46,6 @@ def normalize_limit_time(value: object) -> str | None:
         return None
     digits = digits.zfill(6)[-6:]
     return f"{digits[:2]}:{digits[2:4]}:{digits[4:]}"
-
-
-def is_eligible_main_board(vt_symbol: str, name: str) -> bool:
-    """Return whether a symbol belongs to the non-ST Shanghai/Shenzhen main board."""
-
-    code, _, exchange = str(vt_symbol or "").upper().partition(".")
-    normalized_name = str(name or "").upper().replace("*", "")
-    if (
-        "ST" in normalized_name
-        or "退" in normalized_name
-        or normalized_name.startswith(("S", "N", "C"))
-        or exchange not in {"SSE", "SZSE"}
-    ):
-        return False
-    if exchange == "SSE":
-        return code.startswith(("600", "601", "603", "605"))
-    return code.startswith(("000", "001", "002", "003"))
 
 
 def event_fill_status(event: Mapping[str, object], scenario: str) -> str:

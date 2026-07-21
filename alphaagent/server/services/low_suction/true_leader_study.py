@@ -687,7 +687,10 @@ def evaluate_true_leader_identity(labels: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def load_true_leader_study_inputs() -> TrueLeaderStudyInputs:
+def load_true_leader_study_inputs(
+    *,
+    include_reference_bars: bool = True,
+) -> TrueLeaderStudyInputs:
     """Load broad discovery inputs and quarantined reference-stock history."""
 
     from sqlalchemy import func, select
@@ -775,30 +778,44 @@ def load_true_leader_study_inputs() -> TrueLeaderStudyInputs:
         )
     )
     stock_bars = pd.read_sql(stock_statement, engine, parse_dates=["trade_date"])
-    reference_symbols = tuple(item[0] for item in REFERENCE_CAMPAIGNS)
-    reference_statement = (
-        select(
-            schema.stock_daily_bars.c.vt_symbol,
-            schema.stock_daily_bars.c.trade_date,
-            schema.stock_daily_bars.c.open_price,
-            schema.stock_daily_bars.c.high_price,
-            schema.stock_daily_bars.c.low_price,
-            schema.stock_daily_bars.c.close_price,
-            schema.stock_daily_bars.c.volume,
-            schema.stock_daily_bars.c.turnover,
-            schema.stock_daily_bars.c.source,
+    reference_columns = [
+        "vt_symbol",
+        "trade_date",
+        "open_price",
+        "high_price",
+        "low_price",
+        "close_price",
+        "volume",
+        "turnover",
+        "source",
+    ]
+    if include_reference_bars:
+        reference_symbols = tuple(item[0] for item in REFERENCE_CAMPAIGNS)
+        reference_statement = (
+            select(
+                schema.stock_daily_bars.c.vt_symbol,
+                schema.stock_daily_bars.c.trade_date,
+                schema.stock_daily_bars.c.open_price,
+                schema.stock_daily_bars.c.high_price,
+                schema.stock_daily_bars.c.low_price,
+                schema.stock_daily_bars.c.close_price,
+                schema.stock_daily_bars.c.volume,
+                schema.stock_daily_bars.c.turnover,
+                schema.stock_daily_bars.c.source,
+            )
+            .where(schema.stock_daily_bars.c.vt_symbol.in_(reference_symbols))
+            .order_by(
+                schema.stock_daily_bars.c.vt_symbol,
+                schema.stock_daily_bars.c.trade_date,
+            )
         )
-        .where(schema.stock_daily_bars.c.vt_symbol.in_(reference_symbols))
-        .order_by(
-            schema.stock_daily_bars.c.vt_symbol,
-            schema.stock_daily_bars.c.trade_date,
+        reference_bars = pd.read_sql(
+            reference_statement,
+            engine,
+            parse_dates=["trade_date"],
         )
-    )
-    reference_bars = pd.read_sql(
-        reference_statement,
-        engine,
-        parse_dates=["trade_date"],
-    )
+    else:
+        reference_bars = pd.DataFrame(columns=reference_columns)
     discovery_end = cycle_inputs.split.discovery_dates[-1]
     with session_scope() as session:
         event_rows = session.execute(
@@ -871,6 +888,16 @@ def load_true_leader_study_inputs() -> TrueLeaderStudyInputs:
         "discovery_stock_symbols": int(stock_bars["vt_symbol"].nunique()),
         "discovery_concept_bar_rows": int(len(cycle_inputs.concept_bars)),
         "reason_event_rows": int(len(event_frame)),
+        "reason_event_source_start": (
+            event_frame["source_date"].min().date().isoformat()
+            if not event_frame.empty
+            else None
+        ),
+        "reason_event_source_end": (
+            event_frame["source_date"].max().date().isoformat()
+            if not event_frame.empty
+            else None
+        ),
         "normalized_reason_relations": int(len(reason_relations)),
         "reference_stock_bar_rows": int(len(reference_bars)),
         "reference_start": (

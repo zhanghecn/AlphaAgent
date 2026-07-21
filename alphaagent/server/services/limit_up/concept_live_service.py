@@ -1,11 +1,10 @@
-"""Atomic runtime cache for 30-second full-market concept snapshots."""
+"""Atomic runtime cache for minute-level full-market concept snapshots."""
 
 from __future__ import annotations
 
 from collections import defaultdict, deque
 from collections.abc import Mapping, Sequence
-from copy import deepcopy
-from datetime import datetime
+from datetime import date, datetime
 from threading import Lock
 from zoneinfo import ZoneInfo
 
@@ -29,6 +28,8 @@ _runtime_lock = Lock()
 _refresh_lock = Lock()
 _runtime_snapshot: dict[str, object] | None = None
 _history: deque[dict[str, object]] = deque(maxlen=16)
+_membership_cache_date: date | None = None
+_membership_cache: Mapping[str, object] | None = None
 
 
 class ConceptSnapshotUnavailable(RuntimeError):
@@ -43,12 +44,13 @@ def refresh_live_concept_snapshot(
 ) -> dict[str, object]:
     """Fetch, aggregate, persist, and atomically publish one complete frame."""
 
-    local_at = _local_datetime(captured_at or datetime.now(SHANGHAI))
-    if not _market_window_open(local_at):
-        latest = get_latest_live_concept_snapshot(local_at)
+    fixed_capture_time = captured_at is not None
+    requested_at = _local_datetime(captured_at or datetime.now(SHANGHAI))
+    if not _market_window_open(requested_at):
+        latest = get_latest_live_concept_snapshot(requested_at)
         if latest is None:
             return _snapshot_after_refresh_error(
-                local_at,
+                requested_at,
                 ConceptSnapshotUnavailable("当前不在A股盘中概念扫描时段"),
             )
         quality = dict(latest.get("data_quality") or {})
@@ -66,26 +68,32 @@ def refresh_live_concept_snapshot(
         return latest
     if not _refresh_lock.acquire(blocking=False):
         return _snapshot_after_refresh_error(
-            local_at,
+            requested_at,
             ConceptSnapshotUnavailable("上一轮全市场概念扫描仍在运行"),
         )
     try:
         live_adapter = adapter or AkShareAdapter()
         quote_payload = live_adapter.all_stock_quotes()
+        source_time = _optional_datetime(quote_payload.get("updated_at"))
+        local_at = _resolved_concept_capture_time(
+            requested_at,
+            source_time,
+            fixed_capture_time=fixed_capture_time,
+        )
         required_membership_date = repository.required_prior_trade_date(local_at.date())
-        snapshot_date, membership_rows = repository.load_frozen_membership_rows(local_at.date())
         if required_membership_date is None:
             raise ConceptSnapshotUnavailable("缺少上一交易日，D-1概念成员不可用")
-        if snapshot_date != required_membership_date or not membership_rows:
+        snapshot_date, membership = _load_frozen_membership_index(
+            local_at.date(),
+            required_membership_date,
+        )
+        if snapshot_date != required_membership_date or not membership:
             raise ConceptSnapshotUnavailable(
                 "缺少严格D-1概念成员版本："
                 f"required={required_membership_date.isoformat()} "
                 f"actual={snapshot_date.isoformat() if snapshot_date else '-'}"
             )
-        membership = build_membership_index(
-            membership_rows,
-            snapshot_date=snapshot_date,
-        )
+        _restore_persisted_history(local_at)
         concepts = aggregate_concept_strength(
             _mapping_rows(quote_payload.get("items")),
             membership,
@@ -110,13 +118,13 @@ def refresh_live_concept_snapshot(
                 captured_at=local_at,
                 membership_snapshot_date=snapshot_date,
                 source=str(quote_payload.get("source") or "unknown"),
-                source_updated_at=_optional_datetime(quote_payload.get("updated_at")),
+                source_updated_at=source_time,
             )
             repository.save_strength_snapshots(rows)
         _replace_runtime_snapshot(snapshot)
-        return deepcopy(snapshot)
+        return _snapshot_view(snapshot)
     except Exception as exc:
-        return _snapshot_after_refresh_error(local_at, exc)
+        return _snapshot_after_refresh_error(requested_at, exc)
     finally:
         _refresh_lock.release()
 
@@ -126,7 +134,7 @@ def get_latest_live_concept_snapshot(
 ) -> dict[str, object] | None:
     local_now = _local_datetime(now or datetime.now(SHANGHAI))
     with _runtime_lock:
-        snapshot = deepcopy(_runtime_snapshot)
+        snapshot = _snapshot_view(_runtime_snapshot)
     if snapshot is None:
         return None
     captured_at = _local_datetime(_required_datetime(snapshot.get("captured_at")))
@@ -153,15 +161,17 @@ def get_latest_live_concept_snapshot(
 
 
 def clear_runtime_snapshot() -> None:
-    global _runtime_snapshot
+    global _membership_cache, _membership_cache_date, _runtime_snapshot
     with _runtime_lock:
         _runtime_snapshot = None
+        _membership_cache_date = None
+        _membership_cache = None
         _history.clear()
 
 
 def _replace_runtime_snapshot(snapshot: Mapping[str, object]) -> None:
     global _runtime_snapshot
-    materialized = deepcopy(dict(snapshot))
+    materialized = dict(snapshot)
     with _runtime_lock:
         _runtime_snapshot = materialized
         _history.append(
@@ -170,6 +180,69 @@ def _replace_runtime_snapshot(snapshot: Mapping[str, object]) -> None:
                 "concepts": list(materialized.get("concepts") or []),
             }
         )
+
+
+def _resolved_concept_capture_time(
+    requested_at: datetime,
+    source_time: datetime | None,
+    *,
+    fixed_capture_time: bool,
+) -> datetime:
+    requested = _local_datetime(requested_at)
+    if source_time is None:
+        return requested
+    source = _local_datetime(source_time)
+    if fixed_capture_time:
+        if source > requested:
+            raise ConceptSnapshotUnavailable("行情来源时间晚于显式捕获时间")
+        return requested
+    return source
+
+
+def _restore_persisted_history(captured_at: datetime) -> None:
+    local_at = _local_datetime(captured_at)
+    with _runtime_lock:
+        same_day_history_exists = any(
+            (frame_at := _optional_datetime(frame.get("captured_at"))) is not None
+            and _local_datetime(frame_at).date() == local_at.date()
+            for frame in _history
+        )
+        if same_day_history_exists:
+            return
+        _history.clear()
+
+    rows = repository.load_strength_history(
+        local_at.date(),
+        before=local_at,
+        minutes=6,
+    )
+    restored = _persisted_history_frames(rows, before=local_at)
+    with _runtime_lock:
+        _history.extend(restored)
+
+
+def _persisted_history_frames(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    before: datetime,
+) -> list[dict[str, object]]:
+    grouped: dict[datetime, list[dict[str, object]]] = defaultdict(list)
+    local_before = _local_datetime(before)
+    for row in rows:
+        captured_at = _optional_datetime(row.get("captured_at"))
+        if captured_at is None:
+            continue
+        local_at = _local_datetime(captured_at)
+        if local_at.date() != local_before.date() or local_at > local_before:
+            continue
+        grouped[local_at].append(dict(row))
+    return [
+        {
+            "captured_at": captured_at.isoformat(),
+            "concepts": grouped[captured_at],
+        }
+        for captured_at in sorted(grouped)
+    ]
 
 
 def _runtime_payload(
@@ -212,9 +285,9 @@ def _runtime_payload(
         "membership_snapshot_date": membership.get("snapshot_date"),
         "source": str(quote_payload.get("source") or "unknown"),
         "source_updated_at": source_time.isoformat() if source_time else None,
-        "quotes": [dict(quote) for quote in quotes],
+        "quotes": list(quotes),
         "radar_quotes": radar_quotes,
-        "membership": deepcopy(dict(membership)),
+        "membership": membership,
         "concepts": [dict(concept) for concept in concepts],
         "concepts_by_id": {
             str(concept.get("concept_id") or ""): dict(concept)
@@ -244,7 +317,7 @@ def _snapshot_after_refresh_error(
     error: Exception,
 ) -> dict[str, object]:
     with _runtime_lock:
-        previous = deepcopy(_runtime_snapshot)
+        previous = _snapshot_view(_runtime_snapshot)
     if previous is None:
         return {
             "captured_at": captured_at.isoformat(),
@@ -280,6 +353,40 @@ def _snapshot_after_refresh_error(
     )
     previous["data_quality"] = quality
     return previous
+
+
+def _load_frozen_membership_index(
+    trade_date: date,
+    required_date: date,
+) -> tuple[date | None, Mapping[str, object]]:
+    """Reuse the immutable D-1 membership index throughout one session."""
+
+    global _membership_cache, _membership_cache_date
+    with _runtime_lock:
+        if _membership_cache_date == required_date and _membership_cache is not None:
+            return required_date, _membership_cache
+
+    snapshot_date, rows = repository.load_frozen_membership_rows(trade_date)
+    if snapshot_date != required_date or not rows:
+        return snapshot_date, {}
+    membership = build_membership_index(rows, snapshot_date=snapshot_date)
+    with _runtime_lock:
+        _membership_cache_date = required_date
+        _membership_cache = membership
+    return snapshot_date, membership
+
+
+def _snapshot_view(
+    snapshot: Mapping[str, object] | None,
+) -> dict[str, object] | None:
+    """Copy only fields that callers update; large payloads remain read-only."""
+
+    if snapshot is None:
+        return None
+    view = dict(snapshot)
+    quality = snapshot.get("data_quality")
+    view["data_quality"] = dict(quality) if isinstance(quality, Mapping) else {}
+    return view
 
 
 def _history_by_concept(

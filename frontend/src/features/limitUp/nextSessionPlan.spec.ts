@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import type { LimitUpLiveSignal, LimitUpSignalSnapshot } from "@/api/limitUp";
-import { liveHeader, liveSignalPresentation, signalStatePresentation } from "./nextSessionPlan";
+import {
+  ACTIVE_LIVE_POLL_INTERVAL_MS,
+  liveHeader,
+  liveSignalPresentation,
+  liveSnapshotPollingInterval,
+  shouldPollLiveTraces,
+  signalStatePresentation,
+} from "./nextSessionPlan";
 
 function snapshot(mode: string): LimitUpSignalSnapshot {
   return { mode } as LimitUpSignalSnapshot;
@@ -18,6 +25,31 @@ function signal(
 }
 
 describe("next-session plan presentation", () => {
+  it("slows snapshot polling and stops trace polling outside active trading", () => {
+    const active = {
+      ...snapshot("live_snapshot"),
+      session_stage: "afternoon",
+    };
+    const lunch = {
+      ...snapshot("stale_snapshot"),
+      session_stage: "lunch",
+    };
+    const preliminary = snapshot("next_session_preliminary");
+    const final = snapshot("next_session_final");
+
+    expect(ACTIVE_LIVE_POLL_INTERVAL_MS).toBe(60_000);
+    expect(liveSnapshotPollingInterval(undefined)).toBe(60_000);
+    expect(liveSnapshotPollingInterval(active)).toBe(60_000);
+    expect(liveSnapshotPollingInterval(lunch)).toBe(60_000);
+    expect(liveSnapshotPollingInterval(preliminary)).toBe(60_000);
+    expect(liveSnapshotPollingInterval(final)).toBe(300_000);
+    expect(shouldPollLiveTraces(undefined)).toBe(true);
+    expect(shouldPollLiveTraces(active)).toBe(true);
+    expect(shouldPollLiveTraces(lunch)).toBe(false);
+    expect(shouldPollLiveTraces(preliminary)).toBe(false);
+    expect(shouldPollLiveTraces(final)).toBe(false);
+  });
+
   it("labels final next-session plans without calling them a closed market", () => {
     expect(liveHeader(snapshot("next_session_final"))).toEqual({
       title: "次交易时段正式观察",

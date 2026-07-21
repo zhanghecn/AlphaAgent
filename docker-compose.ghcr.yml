@@ -32,6 +32,7 @@ services:
   alphaagent-api:
     image: ghcr.io/zhanghecn/alphaagent-api:latest
     pull_policy: always
+    cpus: ${ALPHAAGENT_API_CPUS:-0.25}
     restart: unless-stopped
     command:
       - python
@@ -49,11 +50,25 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000}
       MARKET_TIMEOUT_SECONDS: ${MARKET_TIMEOUT_SECONDS:-8}
       MARKET_PAGE_SIZE: ${MARKET_PAGE_SIZE:-50}
+      ALPHAAGENT_STARTUP_BACKTEST_WARMUP: ${ALPHAAGENT_STARTUP_BACKTEST_WARMUP:-false}
+      ALPHAAGENT_STARTUP_NEXT_SESSION_PLAN_WARMUP: ${ALPHAAGENT_STARTUP_NEXT_SESSION_PLAN_WARMUP:-false}
+      ALPHAAGENT_STARTUP_MARKET_CACHE_WARMUP: ${ALPHAAGENT_STARTUP_MARKET_CACHE_WARMUP:-false}
+      ALPHAAGENT_STARTUP_INTRADAY_REFRESHER: ${ALPHAAGENT_STARTUP_INTRADAY_REFRESHER:-false}
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-alphaagent}:${POSTGRES_PASSWORD:-alphaagent-local}@postgres:5432/${POSTGRES_DB:-alphaagent}
+      DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-20}
+      DATABASE_MAX_OVERFLOW: ${DATABASE_MAX_OVERFLOW:-20}
+      DATABASE_POOL_TIMEOUT_SECONDS: ${DATABASE_POOL_TIMEOUT_SECONDS:-60}
+      PGOPTIONS: >-
+        -c application_name=alphaagent-api
+        -c max_parallel_workers_per_gather=0
       REDIS_URL: redis://redis:6379/0
       TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
       TUSHARE_API_URL: ${TUSHARE_API_URL:-https://api.tushare.pro}
       TUSHARE_TIMEOUT_SECONDS: ${TUSHARE_TIMEOUT_SECONDS:-12}
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
       TZ: ${TZ:-Asia/Shanghai}
     expose:
       - "8000"
@@ -73,7 +88,7 @@ services:
     networks:
       - alphaagent-network
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=5).read()"]
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "5", "http://localhost:8000/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -97,6 +112,7 @@ services:
 
   postgres:
     image: postgres:16-alpine
+    cpus: ${ALPHAAGENT_POSTGRES_CPUS:-0.25}
     restart: unless-stopped
     environment:
       PGDATA: /var/lib/postgresql/data

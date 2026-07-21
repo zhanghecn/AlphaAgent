@@ -7,6 +7,35 @@ export interface StatusPresentation {
   tone: PresentationTone;
 }
 
+const ACTIVE_SESSION_STAGES = new Set([
+  "auction_watch",
+  "auction",
+  "morning",
+  "afternoon",
+  "tail",
+  "close_auction",
+]);
+
+// The background scanner persists at most one snapshot every five minutes.
+// Polling the same large JSON payload every ten seconds only burns API/DB CPU.
+export const ACTIVE_LIVE_POLL_INTERVAL_MS = 60_000;
+
+export function shouldPollLiveTraces(
+  snapshot: LimitUpSignalSnapshot | undefined,
+): boolean {
+  if (!snapshot) return true;
+  return snapshot.mode === "live_snapshot"
+    && ACTIVE_SESSION_STAGES.has(snapshot.session_stage ?? "");
+}
+
+export function liveSnapshotPollingInterval(
+  snapshot: LimitUpSignalSnapshot | undefined,
+): number {
+  if (!snapshot || shouldPollLiveTraces(snapshot)) return ACTIVE_LIVE_POLL_INTERVAL_MS;
+  if (snapshot.mode === "next_session_final") return 300_000;
+  return 60_000;
+}
+
 export function isNextSessionPlan(snapshot: LimitUpSignalSnapshot): boolean {
   return snapshot.mode === "next_session_preliminary" || snapshot.mode === "next_session_final";
 }

@@ -6,12 +6,12 @@ import logging
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from copy import deepcopy
 from datetime import date, datetime
 from time import monotonic
 from zoneinfo import ZoneInfo
 
 from alphaagent.data_sources.akshare_adapter import AkShareAdapter
+from alphaagent.market.cache import TTLCache
 from alphaagent.server.services.limit_up.domain import (
     is_eligible_main_board,
     main_board_limit_price,
@@ -47,8 +47,9 @@ from alphaagent.server.services.limit_up.lane_research import (
     select_daily_lane_portfolio,
 )
 from alphaagent.server.services.limit_up.live_repository import (
-    load_latest_snapshot,
     load_latest_daily_trade_date,
+    load_latest_lane_validations,
+    load_latest_snapshot,
     load_live_context,
     save_snapshot,
 )
@@ -71,7 +72,13 @@ from alphaagent.server.services.limit_up.radar_observation_repository import (
     project_observation as project_radar_observation,
     save_frame as save_radar_frame,
 )
-from alphaagent.server.services.limit_up import scheduled_execution
+from alphaagent.server.services.limit_up import (
+    history_engine,
+    history_repository,
+    preboard_point_trigger_service,
+    regime_shadow,
+    scheduled_execution,
+)
 from alphaagent.server.services.limit_up.versions import (
     LIVE_STRATEGY_VERSION as STRATEGY_VERSION,
 )
@@ -79,7 +86,18 @@ from alphaagent.server.services.limit_up.versions import (
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 NEAR_LIMIT_MIN_CHANGE_PCT = 7.0
 TRACE_RADAR_MIN_CHANGE_PCT = CAPTURE_MIN_CHANGE_PCT
-LIVE_SCAN_INTERVAL_SECONDS = 15
+FAST_QUOTE_PAGES = (1, 2, 3, 4)
+FAST_QUOTE_PAGE_SIZE = 100
+RESEARCH_QUOTE_ENRICHMENT_MAX_AGE_SECONDS = 20.0
+RESEARCH_QUOTE_ENRICHMENT_FIELDS = (
+    "quote_speed",
+    "quote_amplitude_pct",
+    "quote_main_net_inflow",
+    "quote_main_inflow",
+    "quote_main_outflow",
+    "quote_main_net_inflow_ratio",
+)
+LIVE_SCAN_INTERVAL_SECONDS = 10
 LIVE_SNAPSHOT_MAX_AGE_SECONDS = 90
 HISTORY_EVIDENCE_UNAVAILABLE_REASON = "历史证据不可用，已禁止执行"
 EXECUTABLE_ACTIONS = frozenset({"buy_now", "next_auction"})
@@ -91,6 +109,8 @@ ACTIVE_SESSION_STAGES = frozenset(
     {"auction_watch", "auction", "morning", "afternoon", "tail", "close_auction"}
 )
 logger = logging.getLogger(__name__)
+_LIVE_LANE_VALIDATION_CACHE = TTLCache(max_items=4)
+LIVE_LANE_VALIDATION_CACHE_SECONDS = 21_600
 
 
 class LiveSnapshotUnavailable(RuntimeError):
@@ -223,9 +243,9 @@ def build_live_snapshot(
         "source": _source_name(radar_quote_payload, pool_payload),
         "source_updated_at": source_updated_at,
         "market_context": market_context,
-        "trace_capture_candidates": [
-            dict(candidate) for candidate in early_candidates
-        ],
+        "trace_capture_candidates": _point_trigger_capture_candidates(
+            early_candidates
+        ),
         "early_radar_recommendations": early_recommendations,
         "trace_radar_candidates": [dict(candidate) for candidate in ranked],
         "candidates": ranked,
@@ -252,6 +272,25 @@ def build_live_snapshot(
                 if isinstance(concept_snapshot, Mapping)
                 else None
             ),
+            "fast_quote_pages_requested": quote_payload.get(
+                "fast_quote_pages_requested"
+            )
+            or [],
+            "fast_quote_pages_succeeded": quote_payload.get(
+                "fast_quote_pages_succeeded"
+            )
+            or [],
+            "fast_quote_pages_failed": quote_payload.get(
+                "fast_quote_pages_failed"
+            )
+            or [],
+            "fast_quote_page_coverage_ratio": _number(
+                quote_payload.get("fast_quote_page_coverage_ratio")
+            ),
+            "fast_quote_item_count": _integer(
+                quote_payload.get("fast_quote_item_count"),
+                len(_items(quote_payload)),
+            ),
             "snapshot_age_seconds": 0,
             "source_age_seconds": _source_age_seconds(source_updated_at, local_at),
             "background_refresh_seconds": LIVE_SCAN_INTERVAL_SECONDS,
@@ -263,6 +302,19 @@ def build_live_snapshot(
             ],
         },
     }
+
+
+def _point_trigger_capture_candidates(
+    candidates: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    return [
+        dict(candidate)
+        for candidate in candidates
+        if (
+            (change_pct := _number(candidate.get("change_pct"))) is not None
+            and change_pct >= TRACE_RADAR_MIN_CHANGE_PCT
+        )
+    ]
 
 
 def _build_early_radar_evaluation(
@@ -277,7 +329,7 @@ def _build_early_radar_evaluation(
     """Evaluate the 3% universe without adding a second public recommendation."""
 
     evaluated = rank_live_candidates(
-        [deepcopy(dict(candidate)) for candidate in capture_candidates],
+        capture_candidates,
         limit=len(capture_candidates),
     )
     _attach_lane_decisions(
@@ -316,7 +368,8 @@ def refresh_live_snapshot(
 ) -> dict[str, object]:
     """Collect current quotes, build recommendations, and optionally persist them."""
 
-    local_at = _local_datetime(captured_at or datetime.now(SHANGHAI))
+    fixed_capture_time = captured_at is not None
+    local_at = _local_datetime(captured_at or _now_shanghai())
     if not _is_active_session(local_at):
         return _latest_snapshot_for_session(local_at)
     live_adapter = adapter or AkShareAdapter()
@@ -332,12 +385,13 @@ def refresh_live_snapshot(
             )
         else:
             quotes, pools, source_errors = _fetch_live_payloads(live_adapter, local_at)
-        concept_snapshot = get_latest_live_concept_snapshot(local_at)
+        quotes_ready_at = local_at if fixed_capture_time else _now_shanghai()
+        concept_snapshot = get_latest_live_concept_snapshot(quotes_ready_at)
         concept_snapshot = _concept_snapshot_with_incremental_quotes(
             concept_snapshot,
             quotes,
             pools,
-            local_at,
+            quotes_ready_at,
         )
         radar_quotes = _quote_payload_with_full_radar(quotes, concept_snapshot)
         symbols = _candidate_symbols(
@@ -345,22 +399,30 @@ def refresh_live_snapshot(
             pools,
             include_previous=stage in {"auction_watch", "auction"},
         )
-        market_date = _resolved_market_date(radar_quotes, pools, local_at, {})
+        market_date = _resolved_market_date(radar_quotes, pools, quotes_ready_at, {})
         quotes_done = monotonic()
         context = load_live_context(symbols, market_date) if symbols else {"by_symbol": {}}
         context = {**context, "source_errors": source_errors}
         lane_validations = _load_lane_validations()
         previous = load_latest_snapshot(market_date, strategy_version=STRATEGY_VERSION)
         context_done = monotonic()
+        evaluation_at = local_at if fixed_capture_time else _now_shanghai()
         snapshot = build_live_snapshot(
             quotes,
             pools,
-            local_at,
+            evaluation_at,
             context,
             previous_snapshot=previous,
             concept_snapshot=concept_snapshot,
         )
         snapshot = _apply_live_risk_gates(snapshot, lane_validations)
+        snapshot = _attach_research_quote_enrichment(
+            snapshot,
+            quotes.get("_research_quote_enrichment"),
+            evaluation_at,
+        )
+        if persist:
+            snapshot = regime_shadow.attach_regime_failure_shadow(snapshot)
         policy_done = monotonic()
         if persist:
             _set_live_trace_cache_status(
@@ -376,30 +438,38 @@ def refresh_live_snapshot(
             policy_done=policy_done,
             persistence_done=trace_done,
         )
-        if persist and _is_radar_persistable_snapshot(snapshot, local_at):
+        if persist and _is_radar_persistable_snapshot(snapshot, evaluation_at):
             full_quotes = (
                 concept_snapshot.get("quotes")
                 if isinstance(concept_snapshot, Mapping)
                 else None
             )
             full_quotes = full_quotes if isinstance(full_quotes, list) else []
-            quote_observed_at = _parsed_datetime(
-                concept_snapshot.get("source_updated_at")
-                if isinstance(concept_snapshot, Mapping)
-                else None
+            quote_observed_at = _radar_quote_observed_at(
+                concept_snapshot,
+                radar_quotes,
             )
-            _set_radar_ledger_status(
+            radar_error = _save_radar_ledger_safely(
                 snapshot,
-                _save_radar_ledger_safely(
-                    snapshot,
-                    full_quotes=full_quotes,
-                    quote_observed_at=quote_observed_at,
-                ),
+                full_quotes=full_quotes,
+                quote_observed_at=quote_observed_at,
             )
+            _set_radar_ledger_status(snapshot, radar_error)
+            if radar_error is None:
+                _run_point_trigger_research_safely(snapshot)
+            else:
+                _set_point_trigger_research_status(
+                    snapshot,
+                    {"status": "skipped_radar_error"},
+                )
         elif persist:
             _set_radar_ledger_status(snapshot, None, skipped=True)
+            _set_point_trigger_research_status(
+                snapshot,
+                {"status": "skipped_invalid_frame"},
+            )
         public_snapshot = _without_internal_radar_fields(snapshot)
-        if persist and _is_persistable_snapshot(public_snapshot, local_at):
+        if persist and _is_persistable_snapshot(public_snapshot, evaluation_at):
             return save_snapshot(public_snapshot)
         return public_snapshot
     except Exception as exc:
@@ -429,14 +499,20 @@ def get_latest_live_snapshot(now: datetime | None = None) -> dict[str, object]:
                 reason="午间休市，展示上午最后快照；13:00后恢复实时扫描",
                 resolved_session_stage="lunch",
             )
-            return _with_snapshot_age(paused, local_now)
+            return _without_internal_radar_fields(
+                _with_snapshot_age(paused, local_now)
+            )
     if not _is_active_session(local_now):
-        return _with_snapshot_age(_latest_snapshot_for_session(local_now), local_now)
+        return _without_internal_radar_fields(
+            _with_snapshot_age(_latest_snapshot_for_session(local_now), local_now)
+        )
 
     saved = load_latest_snapshot(local_now.date(), strategy_version=STRATEGY_VERSION)
     if saved is not None:
-        return _with_snapshot_age(saved, local_now)
-    return _with_snapshot_age(_latest_snapshot_for_session(local_now), local_now)
+        return _without_internal_radar_fields(_with_snapshot_age(saved, local_now))
+    return _without_internal_radar_fields(
+        _with_snapshot_age(_latest_snapshot_for_session(local_now), local_now)
+    )
 
 
 def _latest_snapshot_for_session(local_at: datetime) -> dict[str, object]:
@@ -526,26 +602,71 @@ def _fetch_live_payloads(
     planned_symbols: Sequence[str] = (),
 ) -> tuple[dict[str, object], dict[str, object], list[str]]:
     trade_key = captured_at.strftime("%Y%m%d")
-    payloads: dict[str, dict[str, object]] = {}
+    quote_pages: dict[int, dict[str, object]] = {}
+    research_pages: dict[int, dict[str, object]] = {}
+    research_errors: list[str] = []
+    pool_payload: dict[str, object] = {}
     errors: list[str] = []
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = {
-            "quotes": executor.submit(
+    research_loader = getattr(adapter, "research_quote_flow_page", None)
+    research_enabled = callable(research_loader)
+    worker_count = len(FAST_QUOTE_PAGES) + 1
+    if research_enabled:
+        worker_count += len(FAST_QUOTE_PAGES)
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        quote_futures = {
+            page: executor.submit(
                 adapter.list_stocks,
-                page=1,
-                page_size=200,
+                page=page,
+                page_size=FAST_QUOTE_PAGE_SIZE,
                 sort="change_pct",
                 order="desc",
-            ),
-            "pools": executor.submit(adapter.limit_up_pools, trade_key),
+            )
+            for page in FAST_QUOTE_PAGES
         }
-        for name, future in futures.items():
+        research_futures = (
+            {
+                page: executor.submit(
+                    research_loader,
+                    page=page,
+                    page_size=FAST_QUOTE_PAGE_SIZE,
+                )
+                for page in FAST_QUOTE_PAGES
+            }
+            if research_enabled
+            else {}
+        )
+        pool_future = executor.submit(adapter.limit_up_pools, trade_key)
+        for page, future in quote_futures.items():
             try:
-                payload = future.result()
-                payloads[name] = dict(payload) if isinstance(payload, Mapping) else {}
+                quote_pages[page] = _validated_fast_quote_page(future.result())
             except Exception as exc:  # noqa: BLE001
-                payloads[name] = {}
-                errors.append(_source_error(name, exc))
+                errors.append(_source_error(f"quotes_page_{page}", exc))
+        for page, future in research_futures.items():
+            try:
+                research_pages[page] = _validated_research_quote_page(
+                    future.result()
+                )
+            except Exception as exc:  # noqa: BLE001
+                research_errors.append(
+                    _source_error(f"research_quotes_page_{page}", exc)
+                )
+        try:
+            raw_pool_payload = pool_future.result()
+            if not isinstance(raw_pool_payload, Mapping) or not raw_pool_payload:
+                raise ValueError("empty limit-up pool payload")
+            pool_payload = dict(raw_pool_payload)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(_source_error("pools", exc))
+
+    quote_payload = _merge_fast_quote_pages(quote_pages)
+    if research_enabled:
+        quote_payload["_research_quote_enrichment"] = (
+            _merge_research_quote_pages(research_pages, research_errors)
+        )
+    payloads = {
+        "quotes": quote_payload,
+        "pools": pool_payload,
+    }
     requests = _planned_quote_requests(planned_symbols)
     if requests:
         try:
@@ -558,7 +679,12 @@ def _fetch_live_payloads(
             }
             for row in targeted:
                 if row.get("vt_symbol"):
-                    rows[str(row["vt_symbol"])] = row
+                    rows[str(row["vt_symbol"])] = {
+                        **row,
+                        "quote_observed_at": (
+                            row.get("quote_observed_at") or captured_at.isoformat()
+                        ),
+                    }
             sources = [str(quote_payload.get("source") or "").strip()]
             sources.extend(str(row.get("source") or "").strip() for row in targeted)
             payloads["quotes"] = {
@@ -570,9 +696,148 @@ def _fetch_live_payloads(
             }
         except Exception as exc:  # noqa: BLE001
             errors.append(_source_error("planned_quotes", exc))
-    if not payloads["quotes"] and not payloads["pools"]:
+    if not quote_pages and not pool_payload:
         raise LiveSnapshotUnavailable("实时涨幅榜和涨停池均不可用")
     return payloads["quotes"], payloads["pools"], errors
+
+
+def _validated_fast_quote_page(payload: object) -> dict[str, object]:
+    if not isinstance(payload, Mapping):
+        raise TypeError("fast quote page must be a mapping")
+    result = dict(payload)
+    items = _items(result)
+    if not items or not any(row.get("vt_symbol") for row in items):
+        raise ValueError("fast quote page has no symbol rows")
+    if _parsed_datetime(result.get("updated_at")) is None:
+        raise ValueError("fast quote page has no valid source time")
+    result["items"] = items
+    return result
+
+
+def _validated_research_quote_page(payload: object) -> dict[str, object]:
+    if not isinstance(payload, Mapping):
+        raise TypeError("research quote page must be a mapping")
+    result = dict(payload)
+    items = _items(result)
+    if not items or not any(row.get("vt_symbol") for row in items):
+        raise ValueError("research quote page has no symbol rows")
+    result["items"] = items
+    return result
+
+
+def _merge_fast_quote_pages(
+    pages: Mapping[int, Mapping[str, object]],
+) -> dict[str, object]:
+    succeeded = [page for page in FAST_QUOTE_PAGES if page in pages]
+    failed = [page for page in FAST_QUOTE_PAGES if page not in pages]
+    payloads = [pages[page] for page in succeeded]
+    rows: dict[str, dict[str, object]] = {}
+    for payload in payloads:
+        for row in _items(payload):
+            symbol = str(row.get("vt_symbol") or "")
+            if symbol:
+                projected = dict(row)
+                projected.setdefault("quote_observed_at", payload.get("updated_at"))
+                rows.setdefault(symbol, projected)
+
+    first = dict(payloads[0]) if payloads else {}
+    sources = [str(payload.get("source") or "").strip() for payload in payloads]
+    trade_date = next(
+        (payload.get("trade_date") for payload in payloads if payload.get("trade_date")),
+        None,
+    )
+    total = next(
+        (payload.get("total") for payload in payloads if payload.get("total") is not None),
+        None,
+    )
+    return {
+        **first,
+        "items": list(rows.values()),
+        "page": 1,
+        "page_size": FAST_QUOTE_PAGE_SIZE,
+        "total": total,
+        "source": ",".join(dict.fromkeys(source for source in sources if source)),
+        "updated_at": _earliest_source_time(*payloads),
+        "trade_date": trade_date,
+        "fast_quote_pages_requested": list(FAST_QUOTE_PAGES),
+        "fast_quote_pages_succeeded": succeeded,
+        "fast_quote_pages_failed": failed,
+        "fast_quote_page_coverage_ratio": round(
+            len(succeeded) / len(FAST_QUOTE_PAGES),
+            4,
+        ),
+        "fast_quote_item_count": len(rows),
+    }
+
+
+def _merge_research_quote_pages(
+    pages: Mapping[int, Mapping[str, object]],
+    errors: Sequence[str],
+) -> dict[str, object]:
+    succeeded = [page for page in FAST_QUOTE_PAGES if page in pages]
+    rows: dict[str, dict[str, object]] = {}
+    for page in succeeded:
+        for row in _items(pages[page]):
+            symbol = str(row.get("vt_symbol") or "")
+            if symbol:
+                rows.setdefault(symbol, dict(row))
+    return {
+        "items": list(rows.values()),
+        "pages_requested": list(FAST_QUOTE_PAGES),
+        "pages_succeeded": succeeded,
+        "pages_failed": [page for page in FAST_QUOTE_PAGES if page not in pages],
+        "item_count": len(rows),
+        "source_errors": list(errors),
+    }
+
+
+def _attach_research_quote_enrichment(
+    snapshot: Mapping[str, object],
+    payload: object,
+    captured_at: datetime,
+) -> dict[str, object]:
+    """Attach fresh research fields without mutating any official live surface."""
+
+    source = payload if isinstance(payload, Mapping) else {}
+    enrichment_by_symbol = {
+        str(row.get("vt_symbol") or ""): row
+        for row in _items(source)
+        if row.get("vt_symbol")
+    }
+    raw_candidates = snapshot.get("trace_capture_candidates")
+    candidates = raw_candidates if isinstance(raw_candidates, list) else []
+    enriched_candidates: list[dict[str, object]] = []
+    for raw_candidate in candidates:
+        candidate = dict(raw_candidate) if isinstance(raw_candidate, Mapping) else {}
+        candidate.update({field: None for field in RESEARCH_QUOTE_ENRICHMENT_FIELDS})
+        candidate["quote_flow_observed_at"] = None
+        symbol = str(candidate.get("vt_symbol") or "")
+        enrichment = enrichment_by_symbol.get(symbol)
+        if enrichment is not None:
+            observed_at = _parsed_datetime(enrichment.get("quote_observed_at"))
+            candidate["quote_flow_observed_at"] = enrichment.get(
+                "quote_observed_at"
+            )
+            age = (
+                (captured_at - observed_at).total_seconds()
+                if observed_at is not None
+                else None
+            )
+            if (
+                age is not None
+                and 0.0 <= age <= RESEARCH_QUOTE_ENRICHMENT_MAX_AGE_SECONDS
+            ):
+                candidate.update(
+                    {
+                        field: _number(enrichment.get(field))
+                        for field in RESEARCH_QUOTE_ENRICHMENT_FIELDS
+                    }
+                )
+        enriched_candidates.append(candidate)
+    return {
+        **dict(snapshot),
+        "trace_capture_candidates": enriched_candidates,
+    }
 
 
 def _planned_symbols() -> list[str]:
@@ -614,16 +879,27 @@ def _quote_payload_with_full_radar(
     """Overlay the latest strong-stock page on the authoritative 30s radar."""
 
     rows: dict[str, dict[str, object]] = {}
+    concept_time = (
+        concept_snapshot.get("source_updated_at")
+        if isinstance(concept_snapshot, Mapping)
+        else None
+    )
     if isinstance(concept_snapshot, Mapping):
         for row in concept_snapshot.get("radar_quotes") or []:
             if isinstance(row, Mapping) and row.get("vt_symbol"):
-                rows[str(row["vt_symbol"])] = dict(row)
+                projected = dict(row)
+                projected.setdefault("quote_observed_at", concept_time)
+                rows[str(row["vt_symbol"])] = projected
+    quote_time = quote_payload.get("updated_at")
     for row in _items(quote_payload):
         if row.get("vt_symbol"):
-            rows[str(row["vt_symbol"])] = {
+            projected = {
                 **rows.get(str(row["vt_symbol"]), {}),
                 **row,
             }
+            if row.get("quote_observed_at") is None:
+                projected["quote_observed_at"] = quote_time
+            rows[str(row["vt_symbol"])] = projected
     return {
         **dict(quote_payload),
         "trade_date": (
@@ -644,7 +920,7 @@ def _concept_snapshot_with_incremental_quotes(
     pool_payload: Mapping[str, object],
     captured_at: datetime,
 ) -> dict[str, object] | None:
-    """Re-aggregate cached full coverage with the latest 15-second strong rows."""
+    """Re-aggregate cached full coverage with the latest fast strong-stock rows."""
 
     if not isinstance(concept_snapshot, Mapping):
         return None
@@ -652,35 +928,40 @@ def _concept_snapshot_with_incremental_quotes(
     if not isinstance(membership, Mapping):
         return dict(concept_snapshot)
     quote_by_symbol = {
-        str(row.get("vt_symbol") or ""): dict(row)
+        str(row.get("vt_symbol") or "").upper(): row
         for row in concept_snapshot.get("quotes") or []
         if isinstance(row, Mapping) and row.get("vt_symbol")
     }
-    for row in _items(quote_payload):
-        symbol = str(row.get("vt_symbol") or "")
-        if symbol:
-            quote_by_symbol[symbol] = {**quote_by_symbol.get(symbol, {}), **row}
-    incremental_rows = _merge_source_rows(
+    changed_symbols = _merge_incremental_concept_quotes(
+        quote_by_symbol,
         quote_payload,
         pool_payload,
-        min_change_pct=TRACE_RADAR_MIN_CHANGE_PCT,
     )
-    for symbol, row in incremental_rows.items():
-        quote_by_symbol[symbol] = {**quote_by_symbol.get(symbol, {}), **row}
 
     base_concepts = {
         str(row.get("concept_id") or ""): row
         for row in concept_snapshot.get("concepts") or []
         if isinstance(row, Mapping) and row.get("concept_id")
     }
-    recomputed = aggregate_concept_strength(
-        list(quote_by_symbol.values()),
+    affected_quotes, affected_membership = _affected_concept_inputs(
         membership,
-        captured_at=captured_at,
-        history_by_concept={
-            concept_id: [row]
-            for concept_id, row in base_concepts.items()
-        },
+        quote_by_symbol,
+        changed_symbols,
+        known_concept_ids=set(base_concepts),
+    )
+    recomputed = (
+        aggregate_concept_strength(
+            affected_quotes,
+            affected_membership,
+            captured_at=captured_at,
+            history_by_concept={
+                concept_id: [base_concepts[concept_id]]
+                for concept_id in affected_membership["by_concept"]
+                if concept_id in base_concepts
+            },
+        )
+        if affected_membership["by_concept"]
+        else []
     )
     acceleration_fields = tuple(
         f"{metric}_acceleration_{minutes}m"
@@ -692,7 +973,15 @@ def _concept_snapshot_with_incremental_quotes(
         for field in acceleration_fields:
             if row.get(field) is None and previous.get(field) is not None:
                 row[field] = previous[field]
-    concepts = rank_concepts(recomputed)
+    merged_concepts = dict(base_concepts)
+    merged_concepts.update(
+        {
+            str(row.get("concept_id") or ""): row
+            for row in recomputed
+            if row.get("concept_id")
+        }
+    )
+    concepts = rank_concepts(list(merged_concepts.values()))
     radar_quotes = [
         dict(row)
         for row in quote_by_symbol.values()
@@ -703,7 +992,7 @@ def _concept_snapshot_with_incremental_quotes(
         and (_number(row.get("change_pct")) or -100.0) >= TRACE_RADAR_MIN_CHANGE_PCT
     ]
     return {
-        **deepcopy(dict(concept_snapshot)),
+        **dict(concept_snapshot),
         "evaluated_at": captured_at.isoformat(),
         "quotes": list(quote_by_symbol.values()),
         "radar_quotes": radar_quotes,
@@ -713,6 +1002,69 @@ def _concept_snapshot_with_incremental_quotes(
             for row in concepts
         },
         "concept_count": len(concepts),
+    }
+
+
+def _merge_incremental_concept_quotes(
+    quote_by_symbol: dict[str, Mapping[str, object]],
+    quote_payload: Mapping[str, object],
+    pool_payload: Mapping[str, object],
+) -> set[str]:
+    changed_symbols: set[str] = set()
+    for row in _items(quote_payload):
+        symbol = str(row.get("vt_symbol") or "").upper()
+        if not symbol:
+            continue
+        quote_by_symbol[symbol] = {**quote_by_symbol.get(symbol, {}), **row}
+        changed_symbols.add(symbol)
+
+    incremental_rows = _merge_source_rows(
+        quote_payload,
+        pool_payload,
+        min_change_pct=TRACE_RADAR_MIN_CHANGE_PCT,
+    )
+    for raw_symbol, row in incremental_rows.items():
+        symbol = str(raw_symbol).upper()
+        quote_by_symbol[symbol] = {**quote_by_symbol.get(symbol, {}), **row}
+        changed_symbols.add(symbol)
+    return changed_symbols
+
+
+def _affected_concept_inputs(
+    membership: Mapping[str, object],
+    quote_by_symbol: Mapping[str, Mapping[str, object]],
+    changed_symbols: set[str],
+    *,
+    known_concept_ids: set[str],
+) -> tuple[list[Mapping[str, object]], dict[str, object]]:
+    by_symbol = membership.get("by_symbol")
+    by_symbol = by_symbol if isinstance(by_symbol, Mapping) else {}
+    by_concept = membership.get("by_concept")
+    by_concept = by_concept if isinstance(by_concept, Mapping) else {}
+    concept_ids = {
+        str(concept_id)
+        for symbol in changed_symbols
+        for concept_id in by_symbol.get(symbol, ())
+    }
+    concept_ids.update(str(value) for value in by_concept if str(value) not in known_concept_ids)
+    selected_concepts = {
+        concept_id: by_concept[concept_id]
+        for concept_id in concept_ids
+        if concept_id in by_concept and isinstance(by_concept[concept_id], Mapping)
+    }
+    member_symbols = {
+        str(symbol).upper()
+        for concept in selected_concepts.values()
+        for symbol in concept.get("members") or ()
+    }
+    quotes = [
+        quote_by_symbol[symbol]
+        for symbol in member_symbols
+        if symbol in quote_by_symbol
+    ]
+    return quotes, {
+        **dict(membership),
+        "by_concept": selected_concepts,
     }
 
 
@@ -768,6 +1120,11 @@ def _merge_source_rows(
             rows[symbol] = {
                 **rows.get(symbol, {}),
                 **raw,
+                "quote_observed_at": (
+                    rows.get(symbol, {}).get("quote_observed_at")
+                    or raw.get("quote_observed_at")
+                    or pool_payload.get("updated_at")
+                ),
                 "last_price": _number(raw.get("close_price"))
                 or _number(rows.get(symbol, {}).get("last_price")),
                 "state": state,
@@ -878,6 +1235,7 @@ def _enrich_candidate(
         "high_price": high_price,
         "low_price": low_price,
         "last_price": last_price,
+        "quote_observed_at": raw.get("quote_observed_at"),
         "previous_close": previous_close,
         "limit_price": limit_price,
         "distance_to_limit_pct": round(distance, 4) if distance is not None else None,
@@ -890,6 +1248,7 @@ def _enrich_candidate(
         "last_limit_time": normalize_limit_time(raw.get("last_limit_time")),
         "open_times": _integer(raw.get("open_times"), _pool_open_times(raw)),
         "seal_amount": seal_amount,
+        "volume": _number(raw.get("volume")),
         "turnover": turnover,
         "turnover_rate": _number(raw.get("turnover_rate")),
         "volume_ratio": _number(raw.get("volume_ratio")),
@@ -1192,6 +1551,7 @@ def apply_lane_validation_veto(
             "passed": validation.get("passed") is True,
             "status": str(validation.get("status") or "unavailable"),
             "reason": str(validation.get("reason") or "尚未通过样本外验证"),
+            "summary": _compact_validation_summary(validation.get("summary")),
         }
         for lane, validation in lane_validations.items()
     }
@@ -1645,6 +2005,37 @@ def _live_watchlist_sort_key(signal: Mapping[str, object]) -> tuple[object, ...]
 
 def _load_lane_validations() -> dict[str, dict[str, object]]:
     try:
+        ledger_updated_at = history_repository.history_ledger_updated_at(
+            history_engine.HISTORY_STRATEGY_VERSION
+        )
+    except Exception:  # noqa: BLE001
+        ledger_updated_at = None
+    cache_key = (
+        f"{STRATEGY_VERSION}:{history_engine.HISTORY_STRATEGY_VERSION}:"
+        f"{ledger_updated_at.isoformat() if ledger_updated_at else 'unavailable'}"
+    )
+    return _LIVE_LANE_VALIDATION_CACHE.get_or_set(
+        cache_key,
+        LIVE_LANE_VALIDATION_CACHE_SECONDS,
+        lambda: _load_lane_validations_uncached(ledger_updated_at),
+    )
+
+
+def _load_lane_validations_uncached(
+    ledger_updated_at: datetime | None,
+) -> dict[str, dict[str, object]]:
+    if ledger_updated_at is not None:
+        try:
+            persisted = load_latest_lane_validations(
+                strategy_version=STRATEGY_VERSION,
+                captured_after=ledger_updated_at,
+            )
+        except Exception:  # noqa: BLE001
+            persisted = None
+        if _persisted_lane_validations_complete(persisted):
+            return persisted
+
+    try:
         from alphaagent.server.services.limit_up.history_service import (
             get_scheduled_history_backtest,
             get_lane_validation_snapshot,
@@ -1682,6 +2073,28 @@ def _load_lane_validations() -> dict[str, dict[str, object]]:
             lane: {"passed": False, "status": "unavailable", "reason": reason}
             for lane in ("first_board", "two_to_three", "high_board")
         }
+
+
+def _persisted_lane_validations_complete(
+    validations: Mapping[str, Mapping[str, object]] | None,
+) -> bool:
+    if not isinstance(validations, Mapping):
+        return False
+    return all(
+        isinstance(validation := validations.get(lane), Mapping)
+        and isinstance(validation.get("summary"), Mapping)
+        for lane in scheduled_execution.RESEARCH_EXECUTION_LANES
+    )
+
+
+def _compact_validation_summary(value: object) -> dict[str, object]:
+    summary = value if isinstance(value, Mapping) else {}
+    return {
+        "trade_count": _integer(summary.get("trade_count")),
+        "win_rate": _number(summary.get("win_rate")),
+        "total_return_pct": _number(summary.get("total_return_pct")),
+        "max_drawdown_pct": _number(summary.get("max_drawdown_pct")),
+    }
 
 
 def _without_removed_lane_recommendations(
@@ -1971,12 +2384,19 @@ def _is_radar_persistable_snapshot(
     snapshot: Mapping[str, object],
     captured_at: datetime,
 ) -> bool:
-    quality = snapshot.get("data_quality")
-    return (
-        _is_persistable_snapshot(snapshot, captured_at)
-        and isinstance(quality, Mapping)
-        and quality.get("concept_trigger_allowed") is True
+    return _is_persistable_snapshot(snapshot, captured_at)
+
+
+def _radar_quote_observed_at(
+    concept_snapshot: Mapping[str, object] | None,
+    quote_payload: Mapping[str, object],
+) -> datetime | None:
+    concept_time = (
+        concept_snapshot.get("source_updated_at")
+        if isinstance(concept_snapshot, Mapping)
+        else None
     )
+    return _parsed_datetime(concept_time or quote_payload.get("updated_at"))
 
 
 def _save_radar_ledger_safely(
@@ -2001,6 +2421,7 @@ def _save_radar_ledger_safely(
                 early_signal=early_by_symbol.get(
                     str(candidate.get("vt_symbol") or "")
                 ),
+                quote_observed_at=quote_observed_at,
             )
             for candidate in capture
             if isinstance(candidate, Mapping)
@@ -2057,6 +2478,30 @@ def _set_radar_ledger_status(
     snapshot["data_quality"] = quality
 
 
+def _run_point_trigger_research_safely(
+    snapshot: dict[str, object],
+) -> dict[str, object]:
+    result = preboard_point_trigger_service.score_live_point_trigger_safely(snapshot)
+    _set_point_trigger_research_status(snapshot, result)
+    return result
+
+
+def _set_point_trigger_research_status(
+    snapshot: dict[str, object],
+    result: Mapping[str, object],
+) -> None:
+    quality = snapshot.get("data_quality")
+    quality = dict(quality) if isinstance(quality, Mapping) else {}
+    status = str(result.get("status") or "error")
+    quality["point_trigger_research_status"] = status
+    error = str(result.get("error") or "").strip()
+    if error:
+        quality["point_trigger_research_error"] = error[:500]
+    else:
+        quality.pop("point_trigger_research_error", None)
+    snapshot["data_quality"] = quality
+
+
 def _set_scan_timing(
     snapshot: dict[str, object],
     *,
@@ -2081,10 +2526,26 @@ def _set_scan_timing(
 def _without_internal_radar_fields(
     snapshot: Mapping[str, object],
 ) -> dict[str, object]:
-    result = snapshot if isinstance(snapshot, dict) else dict(snapshot)
-    result.pop("trace_capture_candidates", None)
-    result.pop("early_radar_recommendations", None)
-    return result
+    internal_fields = {
+        *RESEARCH_QUOTE_ENRICHMENT_FIELDS,
+        "quote_flow_observed_at",
+        "trace_capture_candidates",
+        "early_radar_recommendations",
+    }
+
+    def project(value: object) -> object:
+        if isinstance(value, Mapping):
+            return {
+                key: project(item)
+                for key, item in value.items()
+                if key not in internal_fields
+            }
+        if isinstance(value, list):
+            return [project(item) for item in value]
+        return value
+
+    result = project(snapshot)
+    return result if isinstance(result, dict) else {}
 
 
 def _pool_symbols(payload: Mapping[str, object], pool_key: str) -> set[str]:
@@ -2121,6 +2582,14 @@ def _latest_source_time(*payloads: Mapping[str, object]) -> str | None:
     if not values:
         return None
     return max(values, key=_timestamp_sort_key)
+
+
+def _earliest_source_time(*payloads: Mapping[str, object]) -> str | None:
+    values = [str(payload.get("updated_at")) for payload in payloads if payload.get("updated_at")]
+    valid = [value for value in values if _parsed_datetime(value) is not None]
+    if not valid:
+        return None
+    return min(valid, key=_timestamp_sort_key)
 
 
 def _source_age_seconds(value: str | None, captured_at: datetime) -> int | None:
@@ -2343,6 +2812,10 @@ def _local_datetime(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=SHANGHAI)
     return value.astimezone(SHANGHAI)
+
+
+def _now_shanghai() -> datetime:
+    return datetime.now(SHANGHAI)
 
 
 def _raw_number(row: Mapping[str, object], *keys: str) -> float | None:

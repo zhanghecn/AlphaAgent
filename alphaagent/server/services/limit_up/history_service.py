@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import ctypes
+import gc
+import logging
+import threading
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
-from copy import deepcopy
-from datetime import date, datetime, timezone
+from copy import copy, deepcopy
+from datetime import date, datetime, time, timezone
 from statistics import mean, median
-import threading
+from zoneinfo import ZoneInfo
 
 from alphaagent.market.cache import TTLCache
 from alphaagent.server.services.limit_up import (
     cash_backtest,
+    drawdown_diagnostics,
     factor_audit,
     first_board_dual_lane,
     first_board_stock_gene_research,
@@ -26,13 +31,16 @@ from alphaagent.server.services.limit_up import (
 )
 from alphaagent.server.services.limit_up.lane_research import BOARD_LANES
 
+
+logger = logging.getLogger(__name__)
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 _BUILD_LOCK = threading.RLock()
 _BUILD_THREAD: threading.Thread | None = None
 _BACKTEST_WARM_LOCK = threading.RLock()
 _BACKTEST_WARM_THREAD: threading.Thread | None = None
 _MODEL_REPORT_CACHE = TTLCache(max_items=16)
 _LANE_VALIDATION_CACHE = TTLCache(max_items=16)
-_BACKTEST_REPORT_CACHE = TTLCache(max_items=32)
+_BACKTEST_REPORT_CACHE = TTLCache(max_items=32, copier=copy)
 _SECTOR_WARMUP_REPORT_CACHE = TTLCache(max_items=16)
 _BUILD_STATE: dict[str, object] = {
     "status": "idle",
@@ -71,44 +79,64 @@ def start_history_rebuild() -> dict[str, object]:
 
 def rebuild_history_sync() -> dict[str, object]:
     with _BUILD_LOCK:
-        _set_build_state(status="building", started_at=_utc_now(), error=None)
-        frame, coverage = history_repository.load_reliable_history_frame()
-        reliable_start = date.fromisoformat(str(coverage["reliable_start"]))
-        reliable_end = date.fromisoformat(str(coverage["reliable_end"]))
-        event_evidence, financial_index, lane_coverage = lane_repository.load_lane_research_data(
+        try:
+            return _rebuild_history_locked()
+        finally:
+            _release_rebuild_memory()
+
+
+def _rebuild_history_locked() -> dict[str, object]:
+    _set_build_state(status="building", started_at=_utc_now(), error=None)
+    frame, coverage = history_repository.load_reliable_history_frame()
+    reliable_start = date.fromisoformat(str(coverage["reliable_start"]))
+    reliable_end = date.fromisoformat(str(coverage["reliable_end"]))
+    event_evidence, financial_index, lane_coverage = (
+        lane_repository.load_lane_research_data(
             reliable_start,
             reliable_end,
         )
-        coverage = {**coverage, **lane_coverage}
-        replays = history_engine.build_history_replays(
-            frame,
-            reliable_start=reliable_start,
-            reliable_end=reliable_end,
-            event_evidence=event_evidence,
-            financial_index=financial_index,
-        )
-        persisted = history_repository.replace_history_replays(
-            history_engine.HISTORY_STRATEGY_VERSION,
-            replays,
-            coverage,
-        )
-        _MODEL_REPORT_CACHE.clear()
-        _LANE_VALIDATION_CACHE.clear()
-        _BACKTEST_REPORT_CACHE.clear()
-        _SECTOR_WARMUP_REPORT_CACHE.clear()
-        live_evidence.clear_live_evidence_cache()
-        result = {
-            "status": "ready",
-            "strategy_version": history_engine.HISTORY_STRATEGY_VERSION,
-            "persisted_days": persisted,
-            "start": replays[0]["trade_date"] if replays else None,
-            "end": replays[-1]["trade_date"] if replays else None,
-            "coverage": coverage,
-            "finished_at": _utc_now(),
-        }
-        _set_build_state(**result)
-        start_backtest_cache_warmup()
-        return result
+    )
+    coverage = {**coverage, **lane_coverage}
+    frame = history_engine.build_daily_feature_frame(frame, copy_frame=False)
+    replays = history_engine.build_history_replays(
+        frame,
+        reliable_start=reliable_start,
+        reliable_end=reliable_end,
+        event_evidence=event_evidence,
+        financial_index=financial_index,
+    )
+    persisted = history_repository.replace_history_replays(
+        history_engine.HISTORY_STRATEGY_VERSION,
+        replays,
+        coverage,
+    )
+    _MODEL_REPORT_CACHE.clear()
+    _LANE_VALIDATION_CACHE.clear()
+    _BACKTEST_REPORT_CACHE.clear()
+    _SECTOR_WARMUP_REPORT_CACHE.clear()
+    live_evidence.clear_live_evidence_cache()
+    result = {
+        "status": "ready",
+        "strategy_version": history_engine.HISTORY_STRATEGY_VERSION,
+        "persisted_days": persisted,
+        "start": replays[0]["trade_date"] if replays else None,
+        "end": replays[-1]["trade_date"] if replays else None,
+        "coverage": coverage,
+        "finished_at": _utc_now(),
+    }
+    _set_build_state(**result)
+    return result
+
+
+def _release_rebuild_memory() -> None:
+    gc.collect()
+    try:
+        malloc_trim = ctypes.CDLL(None).malloc_trim
+    except (AttributeError, OSError):
+        return
+    malloc_trim.argtypes = [ctypes.c_size_t]
+    malloc_trim.restype = ctypes.c_int
+    malloc_trim(0)
 
 
 def refresh_history_if_needed(
@@ -518,10 +546,6 @@ def _warm_default_backtests() -> None:
             pass
     try:
         get_lane_validation_snapshot("dynamic")
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        get_sector_warmup_research(None, None)
     except Exception:  # noqa: BLE001
         pass
     for scope in scopes:
@@ -1126,6 +1150,32 @@ def _build_scheduled_history_backtest(
     validation = _scheduled_validation(phase_summaries)
     selected_lanes = list(SCHEDULED_VARIANT_LANES[selected_variant])
     configured_lanes = list(scheduled_execution.PRODUCT_EXECUTION_LANES)
+    diagnostic_orders, _ = _filter_orders_with_daily_close(orders, bars)
+    first_board_exit_requests = [
+        (str(trade.get("vt_symbol") or ""), result_date)
+        for trade in executed_trades
+        if str(trade.get("lane") or "") == "first_board"
+        and (result_date := _optional_date(trade.get("exit_date"))) is not None
+        and trade.get("vt_symbol")
+    ]
+    post_auction_prices = history_repository.load_account_post_auction_prices(
+        first_board_exit_requests
+    )
+    auction_evidence = history_repository.load_account_auction_evidence(
+        first_board_exit_requests
+    )
+    drawdown_report = drawdown_diagnostics.build_drawdown_diagnostics(
+        orders=diagnostic_orders,
+        bars=bars,
+        trade_dates=trade_dates,
+        baseline_account=account,
+        auction_evidence=auction_evidence,
+        post_auction_prices=post_auction_prices,
+        config=config,
+        design_start=scheduled_execution.RESEARCH_SAMPLE_START,
+        validation_start=scheduled_execution.VALIDATION_START,
+        freeze_date=scheduled_execution.RULE_FREEZE_DATE,
+    )
     return {
         "status": "ready" if rows else "insufficient_data",
         "mode": "scheduled_unified_intraday_cash_replay",
@@ -1262,6 +1312,7 @@ def _build_scheduled_history_backtest(
         "stress_tests": {
             "double_cost": double_cost_summary,
         },
+        "drawdown_diagnostics": drawdown_report,
         "relay_comparison": {
             "selected_variant": selected_variant,
             "configured_variant": configured_variant,
@@ -2006,6 +2057,29 @@ def _background_rebuild() -> None:
             error={"type": exc.__class__.__name__, "message": str(exc)},
             finished_at=_utc_now(),
         )
+        return
+    if not _post_rebuild_plan_refresh_allowed(_now_shanghai()):
+        return
+    try:
+        from alphaagent.server.services.limit_up import next_session_plan
+
+        next_session_plan.refresh_next_session_plan("final")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "post-rebuild next-session validation cache refresh failed: %s",
+            exc,
+        )
+
+
+def _post_rebuild_plan_refresh_allowed(local_at: datetime) -> bool:
+    return not (
+        local_at.weekday() < 5
+        and time(9, 15) <= local_at.time() <= time(15, 0)
+    )
+
+
+def _now_shanghai() -> datetime:
+    return datetime.now(SHANGHAI)
 
 
 def _selected_lane_candidates(

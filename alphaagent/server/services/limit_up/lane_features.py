@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime, time, timedelta
-from typing import Mapping, Sequence
+from functools import cache
 
 import pandas as pd
 
@@ -11,7 +12,11 @@ LIMIT_TOUCH_PCT = 9.7
 LIMIT_BREAK_PCT = 9.2
 
 
-def attach_limit_gene_features(frame: pd.DataFrame) -> pd.DataFrame:
+def attach_limit_gene_features(
+    frame: pd.DataFrame,
+    *,
+    copy_frame: bool = True,
+) -> pd.DataFrame:
     """Attach shifted limit-up gene and price-position features.
 
     Every rolling input is shifted by one trading row.  The signal day's
@@ -19,38 +24,49 @@ def attach_limit_gene_features(frame: pd.DataFrame) -> pd.DataFrame:
     """
 
     if frame.empty:
-        return frame.copy()
-    result = frame.copy().sort_values(["vt_symbol", "trade_date"], kind="stable")
+        return frame.copy() if copy_frame else frame
+    result = frame.copy() if copy_frame else frame
+    result.sort_values(["vt_symbol", "trade_date"], kind="stable", inplace=True)
     result["sealed"] = result["sealed"].fillna(False).astype(bool)
     result["touched"] = result["touched"].fillna(False).astype(bool)
     if "high_price" not in result:
         result["high_price"] = result["close_price"]
     grouped = result.groupby("vt_symbol", sort=False)
 
-    result["prior_limit_count_126"] = grouped["sealed"].transform(
-        lambda values: values.shift(1).rolling(126, min_periods=1).sum()
-    ).fillna(0).astype(int)
-    result["prior_touch_count_126"] = grouped["touched"].transform(
-        lambda values: values.shift(1).rolling(126, min_periods=1).sum()
-    ).fillna(0).astype(int)
-    result["prior_limit_count_5"] = grouped["sealed"].transform(
-        lambda values: values.shift(1).rolling(5, min_periods=1).sum()
-    ).fillna(0).astype(int)
-    result["prior_limit_count_10"] = grouped["sealed"].transform(
-        lambda values: values.shift(1).rolling(10, min_periods=1).sum()
-    ).fillna(0).astype(int)
+    sealed_cumulative = grouped["sealed"].cumsum()
+    touched_cumulative = grouped["touched"].cumsum()
+    result["prior_limit_count_126"] = _prior_group_count(
+        sealed_cumulative,
+        result["vt_symbol"],
+        126,
+    )
+    result["prior_touch_count_126"] = _prior_group_count(
+        touched_cumulative,
+        result["vt_symbol"],
+        126,
+    )
+    result["prior_limit_count_5"] = _prior_group_count(
+        sealed_cumulative,
+        result["vt_symbol"],
+        5,
+    )
+    result["prior_limit_count_10"] = _prior_group_count(
+        sealed_cumulative,
+        result["vt_symbol"],
+        10,
+    )
     result["prior_seal_success_rate_126"] = (
         result["prior_limit_count_126"]
         / result["prior_touch_count_126"].replace(0, pd.NA)
     )
 
     prior_close = grouped["close_price"].shift(1)
-    prior_low_120 = grouped["low_price"].transform(
-        lambda values: values.shift(1).rolling(120, min_periods=20).min()
+    prior_bounds = _prior_price_bounds(
+        result[["low_price", "high_price"]],
+        result["vt_symbol"],
     )
-    prior_high_120 = grouped["high_price"].transform(
-        lambda values: values.shift(1).rolling(120, min_periods=20).max()
-    )
+    prior_low_120 = prior_bounds["low_price"]
+    prior_high_120 = prior_bounds["high_price"]
     position_range = (prior_high_120 - prior_low_120).replace(0, pd.NA)
     result["prior_position_120"] = (
         (prior_close - prior_low_120) / position_range
@@ -71,6 +87,39 @@ def attach_limit_gene_features(frame: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def _prior_group_count(
+    cumulative: pd.Series,
+    groups: pd.Series,
+    window: int,
+) -> pd.Series:
+    grouped = cumulative.groupby(groups, sort=False)
+    prior_total = grouped.shift(1, fill_value=0)
+    before_window = grouped.shift(window + 1, fill_value=0)
+    return (prior_total - before_window).fillna(0).astype(int)
+
+
+def _prior_price_bounds(
+    prices: pd.DataFrame,
+    groups: pd.Series,
+) -> pd.DataFrame:
+    valid_groups = groups.notna()
+    bounds = pd.DataFrame(index=prices.index, columns=prices.columns, dtype=float)
+    if not valid_groups.any():
+        return bounds
+
+    shifted = prices.groupby(groups, sort=False).shift(1)
+    rolled = (
+        shifted.loc[valid_groups]
+        .groupby(groups.loc[valid_groups], sort=False)
+        .rolling(120, min_periods=20)
+        .agg({"low_price": "min", "high_price": "max"})
+    )
+    positions = valid_groups.to_numpy().nonzero()[0]
+    bounds.iloc[positions] = rolled.to_numpy()
+    return bounds
+
+
+@cache
 def intraday_path_times() -> tuple[str, ...]:
     """Return the documented 80-point, three-minute A-share session grid."""
 
@@ -290,6 +339,7 @@ def _time_grid(start: time, count: int) -> list[str]:
     return [(anchor + timedelta(minutes=index * 3)).time().isoformat() for index in range(count)]
 
 
+@cache
 def _parse_time(value: str) -> time:
     try:
         return time.fromisoformat(str(value)[:8])

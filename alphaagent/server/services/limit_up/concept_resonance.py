@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from math import ceil
 from statistics import mean, median
-from typing import Any
 
 from alphaagent.server.services.limit_up.domain import (
     is_eligible_main_board,
@@ -53,7 +54,20 @@ CONCEPT_LAUNCH_MIN_STRONG_5_RATIO = 0.05
 CONCEPT_WARMING_MIN_RISE_RATIO = 0.65
 CONCEPT_WARMING_MIN_MEDIAN_CHANGE_PCT = 1.0
 CONCEPT_WARMING_MIN_STRONG_5_COUNT = 2
+CONCEPT_ACCELERATION_ANCHOR_TOLERANCE_SECONDS = 90
 _CONCEPT_STATES = {"launch": 0, "warming": 1, "observe": 2, "ebb": 3, "unavailable": 4}
+
+
+@dataclass(frozen=True, slots=True)
+class _QuoteMetrics:
+    symbol: str
+    change: float
+    turnover: float
+    weight: float
+    distance: float | None
+    touched: bool
+    sealed: bool
+    failed: bool
 
 
 def is_execution_concept(name: str) -> bool:
@@ -122,6 +136,10 @@ def aggregate_concept_strength(
         for quote in quotes
         if quote.get("vt_symbol") and _optional_float(quote.get("change_pct")) is not None
     }
+    metrics_by_symbol = {
+        symbol: _quote_metrics(symbol, quote)
+        for symbol, quote in quote_by_symbol.items()
+    }
     concepts = membership.get("by_concept")
     if not isinstance(concepts, Mapping):
         return []
@@ -129,7 +147,7 @@ def aggregate_concept_strength(
     rows = [
         _aggregate_one_concept(
             concept,
-            quote_by_symbol,
+            metrics_by_symbol,
             captured_at=captured_at,
             history=history.get(str(concept_id), ()),
         )
@@ -141,33 +159,24 @@ def aggregate_concept_strength(
 
 def _aggregate_one_concept(
     concept: Mapping[str, object],
-    quote_by_symbol: Mapping[str, Mapping[str, object]],
+    metrics_by_symbol: Mapping[str, _QuoteMetrics],
     *,
     captured_at: datetime,
     history: Sequence[Mapping[str, object]],
 ) -> dict[str, object]:
     members = {str(value).upper() for value in concept.get("members") or set()}
-    observed = [quote_by_symbol[symbol] for symbol in members if symbol in quote_by_symbol]
-    changes = [_float(quote.get("change_pct")) for quote in observed]
-    turnovers = [max(_float(quote.get("turnover")), 0.0) for quote in observed]
-    weighted_change = _weighted_change(observed, changes)
-    states = [str(quote.get("state") or "").lower() for quote in observed]
-    distances = [_distance_to_limit(quote) for quote in observed]
-    touched = [
-        bool(quote.get("first_limit_time"))
-        or state in {"sealed", "resealed", "failed"}
-        or (distance is not None and distance <= 0.02)
-        for quote, state, distance in zip(observed, states, distances, strict=True)
+    observed = [
+        metrics_by_symbol[symbol]
+        for symbol in members
+        if symbol in metrics_by_symbol
     ]
-    sealed = [
-        state in {"sealed", "resealed"}
-        or (state != "failed" and distance is not None and distance <= 0.02)
-        for state, distance in zip(states, distances, strict=True)
-    ]
-    failed = [
-        state == "failed" or (was_touched and not is_sealed)
-        for state, was_touched, is_sealed in zip(states, touched, sealed, strict=True)
-    ]
+    changes = [metrics.change for metrics in observed]
+    turnovers = [metrics.turnover for metrics in observed]
+    distances = [metrics.distance for metrics in observed]
+    touched = [metrics.touched for metrics in observed]
+    sealed = [metrics.sealed for metrics in observed]
+    failed = [metrics.failed for metrics in observed]
+    weighted_change = _weighted_metrics_change(observed, changes)
     turnover = sum(turnovers)
     current_median = median(changes) if changes else 0.0
     row: dict[str, object] = {
@@ -194,18 +203,23 @@ def _aggregate_one_concept(
         "failed_count": sum(failed),
         "turnover": round(turnover, 2),
         "radar_symbols": sorted(
-            str(quote.get("vt_symbol") or "").upper()
-            for quote in observed
-            if _float(quote.get("change_pct")) >= 5
+            metrics.symbol
+            for metrics in observed
+            if metrics.change >= 5
         ),
         "near_limit_symbols": sorted(
-            str(quote.get("vt_symbol") or "").upper()
-            for quote, distance in zip(observed, distances, strict=True)
-            if distance is not None and distance <= 1
+            metrics.symbol
+            for metrics in observed
+            if metrics.distance is not None and metrics.distance <= 1
         ),
     }
-    for minutes in (1, 3, 5):
-        previous = _history_frame(history, captured_at - timedelta(minutes=minutes))
+    anchors = {
+        minutes: _history_frame(history, captured_at - timedelta(minutes=minutes))
+        for minutes in (1, 3, 5)
+    }
+    anchors_complete = all(anchor is not None for anchor in anchors.values())
+    for minutes, anchor in anchors.items():
+        previous = anchor if anchors_complete else None
         row[f"change_acceleration_{minutes}m"] = _delta(
             current_median,
             previous,
@@ -412,11 +426,38 @@ def replay_radar_concepts(
     }
 
 
-def _weighted_change(
-    observed: Sequence[Mapping[str, object]],
+def _quote_metrics(
+    symbol: str,
+    quote: Mapping[str, object],
+) -> _QuoteMetrics:
+    change = _float(quote.get("change_pct"))
+    distance = _distance_to_limit(quote)
+    state = str(quote.get("state") or "").lower()
+    touched = (
+        bool(quote.get("first_limit_time"))
+        or state in {"sealed", "resealed", "failed"}
+        or (distance is not None and distance <= 0.02)
+    )
+    sealed = state in {"sealed", "resealed"} or (
+        state != "failed" and distance is not None and distance <= 0.02
+    )
+    return _QuoteMetrics(
+        symbol=symbol,
+        change=change,
+        turnover=max(_float(quote.get("turnover")), 0.0),
+        weight=max(_float(quote.get("float_market_cap")), 0.0),
+        distance=distance,
+        touched=touched,
+        sealed=sealed,
+        failed=state == "failed" or (touched and not sealed),
+    )
+
+
+def _weighted_metrics_change(
+    observed: Sequence[_QuoteMetrics],
     changes: Sequence[float],
 ) -> float:
-    weights = [max(_float(quote.get("float_market_cap")), 0.0) for quote in observed]
+    weights = [metrics.weight for metrics in observed]
     total_weight = sum(weights)
     if total_weight <= 0:
         return mean(changes) if changes else 0.0
@@ -442,10 +483,14 @@ def _history_frame(
     history: Sequence[Mapping[str, object]],
     target: datetime,
 ) -> Mapping[str, object] | None:
+    earliest = target - timedelta(
+        seconds=CONCEPT_ACCELERATION_ANCHOR_TOLERANCE_SECONDS
+    )
     eligible = [
         row
         for row in history
-        if row.get("captured_at") and _as_datetime(row.get("captured_at")) <= target
+        if row.get("captured_at")
+        and earliest <= _as_datetime(row.get("captured_at")) <= target
     ]
     if not eligible:
         return None
@@ -468,7 +513,8 @@ def _cross_section_scores(
 ) -> list[float]:
     values = [_float(row.get(field)) for row in rows]
     total = len(values)
-    return [sum(other <= value for other in values) / total for value in values]
+    ordered = sorted(values)
+    return [bisect_right(ordered, value) / total for value in values]
 
 
 def _concept_selection_key(concept: Mapping[str, object]) -> tuple[object, ...]:
@@ -509,8 +555,13 @@ def _copy_concept_evidence(
             "concept_near_limit_count": concept.get("near_limit_count"),
             "concept_sealed_count": concept.get("sealed_count"),
             "concept_failed_count": concept.get("failed_count"),
-            "concept_change_acceleration_3m": concept.get("change_acceleration_3m"),
-            "concept_turnover_acceleration_3m": concept.get("turnover_acceleration_3m"),
+            **{
+                f"concept_{metric}_acceleration_{minutes}m": concept.get(
+                    f"{metric}_acceleration_{minutes}m"
+                )
+                for metric in ("change", "turnover")
+                for minutes in (1, 3, 5)
+            },
             "concept_snapshot_age_seconds": age_seconds,
             "concept_trigger_allowed": trigger_allowed,
         }

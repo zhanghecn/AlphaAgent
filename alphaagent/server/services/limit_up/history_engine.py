@@ -94,11 +94,15 @@ class _Accumulator:
 
 def build_daily_feature_frame(
     rows: Sequence[Mapping[str, object]] | pd.DataFrame,
+    *,
+    copy_frame: bool = True,
 ) -> pd.DataFrame:
-    frame = rows.copy() if isinstance(rows, pd.DataFrame) else pd.DataFrame([dict(row) for row in rows])
+    if isinstance(rows, pd.DataFrame):
+        frame = rows.copy() if copy_frame else rows
+    else:
+        frame = pd.DataFrame([dict(row) for row in rows])
     if frame.empty:
         return frame
-    frame = frame.copy()
     frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
     numeric_columns = (
         "open_price",
@@ -112,9 +116,14 @@ def build_daily_feature_frame(
     )
     for column in numeric_columns:
         frame[column] = pd.to_numeric(frame.get(column), errors="coerce")
-    frame = frame.dropna(subset=["vt_symbol", "trade_date", "open_price", "close_price"]).sort_values(
+    frame.dropna(
+        subset=["vt_symbol", "trade_date", "open_price", "close_price"],
+        inplace=True,
+    )
+    frame.sort_values(
         ["vt_symbol", "trade_date"],
         kind="stable",
+        inplace=True,
     )
     grouped = frame.groupby("vt_symbol", sort=False)
     frame["prev_trade_date"] = grouped["trade_date"].shift(1)
@@ -164,8 +173,12 @@ def build_daily_feature_frame(
     frame["prior_return_5d_pct"] = (grouped["close_price"].shift(1) / grouped["close_price"].shift(6) - 1) * 100
     frame["prior_return_20d_pct"] = (grouped["close_price"].shift(1) / grouped["close_price"].shift(21) - 1) * 100
     prior_turnover = grouped["turnover"].shift(1)
-    prior_amount_base = grouped["turnover"].transform(
-        lambda series: series.shift(2).rolling(5, min_periods=3).mean()
+    prior_amount_base = _grouped_rolling(
+        grouped["turnover"].shift(2),
+        frame["vt_symbol"],
+        window=5,
+        min_periods=3,
+        operation="mean",
     )
     frame["prior_amount_ratio_5d"] = prior_turnover / prior_amount_base
     if "industry_name" not in frame:
@@ -179,6 +192,7 @@ def build_daily_feature_frame(
     if "industry_id" not in frame:
         frame["industry_id"] = frame["industry_name"]
     frame["industry_id"] = frame["industry_id"].fillna("UNCLASSIFIED").astype(str)
+    frame["_is_advancing"] = frame["change_pct"].gt(0)
     frame = _attach_prior_industry_features(frame, next_global)
 
     leadership_groups = frame.groupby(["trade_date", "industry_id"], sort=False, observed=True)
@@ -194,9 +208,12 @@ def build_daily_feature_frame(
     ].rank(method="min", ascending=False)
     frame["prior_industry_stock_count"] = leadership_groups["vt_symbol"].transform("count")
     frame["auction_gap_pct"] = (frame["open_price"] / frame["prev_close"] - 1) * 100
-    frame["limit_price"] = frame["prev_close"].map(_limit_price)
+    valid_previous_close = frame["prev_close"].gt(0)
+    frame["limit_price"] = (
+        frame["prev_close"].mul(1.1).add(1e-8).round(2).where(valid_previous_close)
+    )
 
-    frame = frame.sort_values(["vt_symbol", "trade_date"], kind="stable")
+    frame.sort_values(["vt_symbol", "trade_date"], kind="stable", inplace=True)
     grouped = frame.groupby("vt_symbol", sort=False)
     frame["next_trade_date"] = grouped["trade_date"].shift(-1)
     frame["next_open_price"] = grouped["open_price"].shift(-1)
@@ -211,7 +228,7 @@ def build_daily_feature_frame(
     frame["market_two_board_base"] = frame["prior_streak"].eq(2).astype(int)
     frame["market_two_to_three"] = (frame["prior_streak"].eq(2) & frame["sealed"]).astype(int)
     market = frame.groupby("trade_date", sort=True).agg(
-        advancing_rate=("change_pct", lambda values: float((values > 0).mean())),
+        advancing_rate=("_is_advancing", "mean"),
         sealed_count=("sealed", "sum"),
         touched_count=("touched", "sum"),
         max_board=("current_streak", "max"),
@@ -225,31 +242,34 @@ def build_daily_feature_frame(
     market["failed_rate"] = market["failed_count"] / market["touched_count"].replace(0, pd.NA)
     market["one_to_two_rate"] = market["one_to_two_count"] / market["one_board_base"].replace(0, pd.NA)
     market["two_to_three_rate"] = market["two_to_three_count"] / market["two_board_base"].replace(0, pd.NA)
-    market_by_date = market.to_dict("index")
-    prior_market = frame["expected_prev_trade_date"].map(market_by_date)
-    frame["prior_market_advancing_rate"] = prior_market.map(
-        lambda item: _mapping_number(item, "advancing_rate")
+    _attach_prior_market_features(frame, market)
+    frame.drop(columns=["_is_advancing"], inplace=True)
+    attach_limit_gene_features(frame, copy_frame=False)
+    frame.reset_index(drop=True, inplace=True)
+    return frame
+
+
+def _grouped_rolling(
+    values: pd.Series,
+    groups: pd.Series,
+    *,
+    window: int,
+    min_periods: int,
+    operation: str,
+) -> pd.Series:
+    valid_groups = groups.notna()
+    result = pd.Series(index=values.index, dtype=float)
+    if not valid_groups.any():
+        return result
+    rolling = (
+        values.loc[valid_groups]
+        .groupby(groups.loc[valid_groups], sort=False)
+        .rolling(window, min_periods=min_periods)
     )
-    frame["prior_market_sealed_count"] = prior_market.map(
-        lambda item: _mapping_number(item, "sealed_count")
-    )
-    frame["prior_market_failed_rate"] = prior_market.map(
-        lambda item: _mapping_number(item, "failed_rate")
-    )
-    frame["prior_market_max_board"] = prior_market.map(
-        lambda item: _mapping_number(item, "max_board")
-    )
-    frame["prior_market_first_board_count"] = prior_market.map(
-        lambda item: _mapping_number(item, "first_board_count")
-    )
-    frame["prior_market_one_to_two_rate"] = prior_market.map(
-        lambda item: _mapping_number(item, "one_to_two_rate")
-    )
-    frame["prior_market_two_to_three_rate"] = prior_market.map(
-        lambda item: _mapping_number(item, "two_to_three_rate")
-    )
-    frame["prior_market_phase"] = frame["prior_market_advancing_rate"].map(_market_phase)
-    return attach_limit_gene_features(frame).reset_index(drop=True)
+    rolled = getattr(rolling, operation)()
+    positions = valid_groups.to_numpy().nonzero()[0]
+    result.iloc[positions] = rolled.to_numpy()
+    return result
 
 
 def _attach_prior_industry_features(
@@ -261,7 +281,7 @@ def _attach_prior_industry_features(
         .agg(
             industry_stock_count=("vt_symbol", "count"),
             industry_change_pct=("change_pct", "mean"),
-            industry_advancing_rate=("change_pct", lambda values: float((values > 0).mean())),
+            industry_advancing_rate=("_is_advancing", "mean"),
             industry_turnover=("turnover", "sum"),
             industry_sealed_count=("sealed", "sum"),
         )
@@ -269,12 +289,20 @@ def _attach_prior_industry_features(
         .sort_values(["industry_id", "trade_date"], kind="stable")
     )
     grouped = industry_daily.groupby("industry_id", sort=False, observed=True)
-    turnover_base = grouped["industry_turnover"].transform(
-        lambda series: series.shift(1).rolling(5, min_periods=3).mean()
+    turnover_base = _grouped_rolling(
+        grouped["industry_turnover"].shift(1),
+        industry_daily["industry_id"],
+        window=5,
+        min_periods=3,
+        operation="mean",
     )
     industry_daily["industry_turnover_ratio_5d"] = industry_daily["industry_turnover"] / turnover_base
-    industry_daily["industry_return_5d_pct"] = grouped["industry_change_pct"].transform(
-        lambda series: series.rolling(5, min_periods=3).sum()
+    industry_daily["industry_return_5d_pct"] = _grouped_rolling(
+        industry_daily["industry_change_pct"],
+        industry_daily["industry_id"],
+        window=5,
+        min_periods=3,
+        operation="sum",
     )
     industry_daily["industry_sealed_rate"] = (
         industry_daily["industry_sealed_count"]
@@ -328,6 +356,34 @@ def _attach_prior_industry_features(
     )
 
 
+def _attach_prior_market_features(
+    frame: pd.DataFrame,
+    market: pd.DataFrame,
+) -> None:
+    prior_market = market.reindex(frame["expected_prev_trade_date"].to_numpy())
+    column_names = {
+        "advancing_rate": "prior_market_advancing_rate",
+        "sealed_count": "prior_market_sealed_count",
+        "failed_rate": "prior_market_failed_rate",
+        "max_board": "prior_market_max_board",
+        "first_board_count": "prior_market_first_board_count",
+        "one_to_two_rate": "prior_market_one_to_two_rate",
+        "two_to_three_rate": "prior_market_two_to_three_rate",
+    }
+    for source, target in column_names.items():
+        frame[target] = prior_market[source].to_numpy(copy=False)
+
+    phases = pd.cut(
+        frame["prior_market_advancing_rate"],
+        bins=[float("-inf"), 0.35, 0.50, 0.65, float("inf")],
+        labels=["retreat", "mixed", "repair", "broad_rise"],
+        right=False,
+    )
+    frame["prior_market_phase"] = phases.cat.add_categories(["unknown"]).fillna(
+        "unknown"
+    )
+
+
 def route_candidates_for_date(
     frame: pd.DataFrame,
     trade_date: date,
@@ -358,18 +414,40 @@ def _route_candidates_from_day(
     ]
     first_board = valid[valid["prior_streak"].eq(0)]
     next_board = valid[valid["prior_streak"].isin((1, 2))]
-    auction = [
-        _candidate_payload(row, "auction", 1, total_cost_rate=total_cost_rate)
-        for _, row in first_board.iterrows()
-    ]
-    sweep = [
-        _candidate_payload(row, "sweep", 1, total_cost_rate=total_cost_rate)
-        for _, row in first_board.iterrows()
-    ]
-    tail = [
-        _candidate_payload(row, "tail", 1, total_cost_rate=total_cost_rate)
-        for _, row in first_board.iterrows()
-    ]
+    first_board_rows = first_board.to_dict("records")
+    next_board_rows = next_board.to_dict("records")
+    auction: list[dict[str, object]] = []
+    sweep: list[dict[str, object]] = []
+    tail: list[dict[str, object]] = []
+    for row in first_board_rows:
+        known_at_signal = _known_at_signal_payload(row)
+        auction.append(
+            _candidate_payload(
+                row,
+                "auction",
+                1,
+                total_cost_rate=total_cost_rate,
+                known_at_signal=known_at_signal,
+            )
+        )
+        sweep.append(
+            _candidate_payload(
+                row,
+                "sweep",
+                1,
+                total_cost_rate=total_cost_rate,
+                known_at_signal=known_at_signal,
+            )
+        )
+        tail.append(
+            _candidate_payload(
+                row,
+                "tail",
+                1,
+                total_cost_rate=total_cost_rate,
+                known_at_signal=known_at_signal,
+            )
+        )
     next_auction = [
         _candidate_payload(
             row,
@@ -377,7 +455,7 @@ def _route_candidates_from_day(
             int(row["prior_streak"]) + 1,
             total_cost_rate=total_cost_rate,
         )
-        for _, row in next_board.iterrows()
+        for row in next_board_rows
     ]
     return {
         "auction": auction,
@@ -403,7 +481,11 @@ def build_history_replays(
     financial_index: FinancialIndex | None = None,
 ) -> list[dict[str, object]]:
     total_cost_rate = commission_rate * 2 + stamp_tax_rate + slippage_bps * 2 / 10_000
-    frame = rows.copy() if isinstance(rows, pd.DataFrame) and "prev_close" in rows.columns else build_daily_feature_frame(rows)
+    frame = (
+        rows
+        if isinstance(rows, pd.DataFrame) and "prev_close" in rows.columns
+        else build_daily_feature_frame(rows)
+    )
     if frame.empty:
         return []
     dates = [item.date() for item in sorted(frame["trade_date"].dropna().unique())]
@@ -415,9 +497,11 @@ def build_history_replays(
     pending: dict[str, list[dict[str, object]]] = defaultdict(list)
     replays: list[dict[str, object]] = []
     holdout_start = max(len(dates) - max(holdout_days, 0), max(warmup_days, 0))
-    day_groups = frame.groupby("trade_date", sort=False)
+    day_positions = frame.groupby("trade_date", sort=False).indices
+    potential_rows = _potential_replay_rows(frame).to_numpy(copy=False)
 
     event_evidence = event_evidence or {}
+    events_by_date = _events_by_date(event_evidence)
     financial_index = financial_index or {}
     for index, current_date in enumerate(dates):
         current_text = current_date.isoformat()
@@ -435,11 +519,22 @@ def build_history_replays(
                 if update_analogs:
                     _add_analog_sample(accumulators, sample)
 
-        day_frame = day_groups.get_group(pd.Timestamp(current_date))
+        positions = day_positions[pd.Timestamp(current_date)]
+        selected_positions = potential_rows[positions].copy()
+        current_event_evidence = events_by_date.get(current_date, {})
+        if current_event_evidence and "vt_symbol" in frame.columns:
+            selected_positions |= pd.Index(
+                frame["vt_symbol"].iloc[positions]
+            ).isin(current_event_evidence)
+        day_frame = frame.iloc[positions[selected_positions]]
         raw_lanes = _route_candidates_from_day(
             day_frame,
             total_cost_rate=total_cost_rate,
         )
+        analogs_by_bucket: dict[
+            tuple[object, ...],
+            tuple[AnalogStats, dict[str, object]],
+        ] = {}
         selected_lanes: dict[str, list[dict[str, object]]] = {}
         candidate_counts: dict[str, int] = {}
         for entry_mode in ENTRY_MODES:
@@ -447,10 +542,21 @@ def build_history_replays(
             candidate_counts[entry_mode] = len(raw_candidates)
             ranked: list[dict[str, object]] = []
             for candidate in raw_candidates:
-                analog = _resolve_analog(accumulators, candidate, min_analogs=min_analogs)
+                bucket = tuple(_analog_keys(candidate)[0])
+                cached_analog = analogs_by_bucket.get(bucket)
+                if cached_analog is None:
+                    analog = _resolve_analog(
+                        accumulators,
+                        candidate,
+                        min_analogs=min_analogs,
+                    )
+                    analog_payload = asdict(analog)
+                    analogs_by_bucket[bucket] = (analog, analog_payload)
+                else:
+                    analog, analog_payload = cached_analog
                 enriched = {
                     **candidate,
-                    "analog": asdict(analog),
+                    "analog": dict(analog_payload),
                     "score": _candidate_score(candidate, analog),
                     "validation_phase": phase,
                     "favorable_factors": _favorable_factors(candidate, analog),
@@ -470,11 +576,12 @@ def build_history_replays(
                 for rank, candidate in enumerate(ranked[:top_n], start=1)
             ]
 
-        market_context = _day_market_context_from_day(day_frame)
+        market_context = _day_market_context_from_day(frame.iloc[positions[:1]])
         board_candidates = _board_lane_candidates_from_day(
             day_frame,
             current_date,
             event_evidence=event_evidence,
+            current_event_evidence=current_event_evidence,
             financial_index=financial_index,
             total_cost_rate=total_cost_rate,
         )
@@ -555,6 +662,17 @@ def build_history_replays(
                 if result_date:
                     pending[result_date].append(candidate)
     return attach_replay_exit_decisions(replays)
+
+
+def _potential_replay_rows(frame: pd.DataFrame) -> pd.Series:
+    required = {"prev_close", "open_price", "auction_gap_pct"}
+    if not required.issubset(frame.columns):
+        return pd.Series(True, index=frame.index)
+    return (
+        frame["prev_close"].gt(0)
+        & frame["open_price"].gt(0)
+        & frame["auction_gap_pct"].between(1.0, 7.0)
+    )
 
 
 def build_analog_index(
@@ -999,22 +1117,8 @@ def _amount_bucket(value: object) -> str:
     return "2_plus"
 
 
-def _candidate_payload(
-    row: pd.Series,
-    entry_mode: str,
-    target_board: int,
-    *,
-    total_cost_rate: float,
-) -> dict[str, object]:
-    signal_date = _date_text(row.get("trade_date"))
-    prior_date = _date_text(row.get("prev_trade_date"))
-    result_date = _date_text(row.get("next_trade_date"))
-    open_price = _number(row.get("open_price"))
-    limit_price = _number(row.get("limit_price"))
-    entry_price = open_price if entry_mode in {"auction", "next_auction"} else limit_price
-    next_open = _number(row.get("next_open_price"))
-    next_close = _number(row.get("next_close_price"))
-    known_at_signal = {
+def _known_at_signal_payload(row: Mapping[str, object]) -> dict[str, object]:
+    return {
         "data_cutoff": "D_OPEN_AND_D_MINUS_1_CLOSE",
         "auction_gap_pct": _rounded(row.get("auction_gap_pct")),
         "prior_change_pct": _rounded(row.get("prior_change_pct")),
@@ -1028,26 +1132,79 @@ def _candidate_payload(
         "prior_industry_id": str(row.get("industry_id") or "UNCLASSIFIED"),
         "prior_industry_name": str(row.get("industry_name") or "未分类"),
         "prior_industry_change_pct": _rounded(row.get("prior_industry_change_pct")),
-        "prior_industry_return_5d_pct": _rounded(row.get("prior_industry_return_5d_pct")),
-        "prior_industry_advancing_rate": _rounded(row.get("prior_industry_advancing_rate")),
-        "prior_industry_turnover_ratio_5d": _rounded(row.get("prior_industry_turnover_ratio_5d")),
-        "prior_industry_sealed_count": _integer_or_none(row.get("prior_industry_sealed_count")),
-        "prior_industry_sealed_rate": _rounded(row.get("prior_industry_sealed_rate")),
+        "prior_industry_return_5d_pct": _rounded(
+            row.get("prior_industry_return_5d_pct")
+        ),
+        "prior_industry_advancing_rate": _rounded(
+            row.get("prior_industry_advancing_rate")
+        ),
+        "prior_industry_turnover_ratio_5d": _rounded(
+            row.get("prior_industry_turnover_ratio_5d")
+        ),
+        "prior_industry_sealed_count": _integer_or_none(
+            row.get("prior_industry_sealed_count")
+        ),
+        "prior_industry_sealed_rate": _rounded(
+            row.get("prior_industry_sealed_rate")
+        ),
         "prior_industry_heat_score": _rounded(row.get("prior_industry_heat_score")),
-        "prior_industry_heat_rank": _integer_or_none(row.get("prior_industry_heat_rank")),
+        "prior_industry_heat_rank": _integer_or_none(
+            row.get("prior_industry_heat_rank")
+        ),
         "prior_industry_count": _integer_or_none(row.get("prior_industry_count")),
-        "prior_industry_leadership_score": _rounded(row.get("prior_industry_leadership_score")),
-        "prior_industry_leader_rank": _integer_or_none(row.get("prior_industry_leader_rank")),
-        "prior_industry_stock_count": _integer_or_none(row.get("prior_industry_stock_count")),
+        "prior_industry_leadership_score": _rounded(
+            row.get("prior_industry_leadership_score")
+        ),
+        "prior_industry_leader_rank": _integer_or_none(
+            row.get("prior_industry_leader_rank")
+        ),
+        "prior_industry_stock_count": _integer_or_none(
+            row.get("prior_industry_stock_count")
+        ),
         "prior_market_phase": str(row.get("prior_market_phase") or "unknown"),
-        "prior_market_advancing_rate": _rounded(row.get("prior_market_advancing_rate")),
-        "prior_market_sealed_count": _integer_or_none(row.get("prior_market_sealed_count")),
+        "prior_market_advancing_rate": _rounded(
+            row.get("prior_market_advancing_rate")
+        ),
+        "prior_market_sealed_count": _integer_or_none(
+            row.get("prior_market_sealed_count")
+        ),
         "prior_market_failed_rate": _rounded(row.get("prior_market_failed_rate")),
-        "prior_market_max_board": _integer_or_none(row.get("prior_market_max_board")),
-        "prior_market_first_board_count": _integer_or_none(row.get("prior_market_first_board_count")),
-        "prior_market_one_to_two_rate": _rounded(row.get("prior_market_one_to_two_rate")),
-        "prior_market_two_to_three_rate": _rounded(row.get("prior_market_two_to_three_rate")),
+        "prior_market_max_board": _integer_or_none(
+            row.get("prior_market_max_board")
+        ),
+        "prior_market_first_board_count": _integer_or_none(
+            row.get("prior_market_first_board_count")
+        ),
+        "prior_market_one_to_two_rate": _rounded(
+            row.get("prior_market_one_to_two_rate")
+        ),
+        "prior_market_two_to_three_rate": _rounded(
+            row.get("prior_market_two_to_three_rate")
+        ),
     }
+
+
+def _candidate_payload(
+    row: Mapping[str, object],
+    entry_mode: str,
+    target_board: int,
+    *,
+    total_cost_rate: float,
+    known_at_signal: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    signal_date = _date_text(row.get("trade_date"))
+    prior_date = _date_text(row.get("prev_trade_date"))
+    result_date = _date_text(row.get("next_trade_date"))
+    open_price = _number(row.get("open_price"))
+    limit_price = _number(row.get("limit_price"))
+    entry_price = open_price if entry_mode in {"auction", "next_auction"} else limit_price
+    next_open = _number(row.get("next_open_price"))
+    next_close = _number(row.get("next_close_price"))
+    known_at_signal = dict(
+        known_at_signal
+        if known_at_signal is not None
+        else _known_at_signal_payload(row)
+    )
     outcome = {
         "touched": bool(row.get("touched")),
         "sealed": bool(row.get("sealed")),
@@ -1110,11 +1267,21 @@ def _board_lane_candidates_for_date(
     )
 
 
+def _events_by_date(
+    event_evidence: EventIndex,
+) -> dict[date, dict[str, dict[str, object]]]:
+    grouped: dict[date, dict[str, dict[str, object]]] = defaultdict(dict)
+    for (symbol, event_date), event in event_evidence.items():
+        grouped[event_date][symbol] = event
+    return dict(grouped)
+
+
 def _board_lane_candidates_from_day(
     day: pd.DataFrame,
     trade_date: date,
     *,
     event_evidence: EventIndex,
+    current_event_evidence: Mapping[str, Mapping[str, object]] | None = None,
     financial_index: FinancialIndex,
     total_cost_rate: float,
 ) -> list[dict[str, object]]:
@@ -1124,15 +1291,22 @@ def _board_lane_candidates_from_day(
         day["prev_close"].gt(0)
         & day["open_price"].gt(0)
     ]
+    if current_event_evidence is None:
+        current_event_evidence = {
+            symbol: event
+            for (symbol, event_date), event in event_evidence.items()
+            if event_date == trade_date
+        }
+    event_rows = usable[
+        usable["vt_symbol"].isin(current_event_evidence)
+    ]
     rows_by_symbol = {
         str(row.get("vt_symbol") or ""): row
-        for _, row in usable.iterrows()
+        for row in event_rows.to_dict("records")
     }
     candidates: list[dict[str, object]] = []
 
-    for (symbol, event_date), event in event_evidence.items():
-        if event_date != trade_date:
-            continue
+    for symbol, event in current_event_evidence.items():
         row = rows_by_symbol.get(symbol)
         if row is None or int(row.get("prior_streak") or 0) != 0:
             continue
@@ -1175,14 +1349,14 @@ def _board_lane_candidates_from_day(
             | usable["prior_limit_count_5"].ge(1)
         )
     ]
-    for _, row in auction_rows.iterrows():
+    for row in auction_rows.to_dict("records"):
         prior_streak = int(row.get("prior_streak") or 0)
         recent_limits = int(row.get("prior_limit_count_5") or 0)
         target_board = max(prior_streak + 1, recent_limits + 1, 2)
         if target_board == 2:
             continue
         symbol = str(row.get("vt_symbol") or "")
-        current_event = event_evidence.get((symbol, trade_date))
+        current_event = current_event_evidence.get(symbol)
         current_path = (
             _event_intraday_path(current_event, previous_close=row.get("prev_close"))
             if current_event
@@ -1437,25 +1611,6 @@ def _net_return(
     if not entry_price or exit_price is None:
         return None
     return round(((exit_price / entry_price - 1) - total_cost_rate) * 100, 4)
-
-
-def _mapping_number(value: object, key: str) -> float | None:
-    if not isinstance(value, Mapping):
-        return None
-    return _number(value.get(key))
-
-
-def _market_phase(value: object) -> str:
-    number = _number(value)
-    if number is None:
-        return "unknown"
-    if number < 0.35:
-        return "retreat"
-    if number < 0.50:
-        return "mixed"
-    if number < 0.65:
-        return "repair"
-    return "broad_rise"
 
 
 def _date_text(value: object) -> str | None:

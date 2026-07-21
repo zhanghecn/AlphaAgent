@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import date, datetime
 from threading import Lock
 
@@ -13,6 +13,32 @@ from alphaagent.server.db.session import session_scope
 
 
 TRACE_RETAIN_TRADE_DAYS = 2
+TRACE_READ_COLUMNS = (
+    schema.limit_up_live_trace_snapshots.c.id,
+    schema.limit_up_live_trace_snapshots.c.trade_date,
+    schema.limit_up_live_trace_snapshots.c.captured_at,
+    schema.limit_up_live_trace_snapshots.c.mode,
+    schema.limit_up_live_trace_snapshots.c.radar_candidates,
+    schema.limit_up_live_trace_snapshots.c.recommendations,
+    schema.limit_up_live_trace_snapshots.c.data_quality,
+)
+_SIGNAL_STATE_PRIORITY = {
+    "trigger_ready": 0,
+    "approaching_trigger": 1,
+    "concept_warming": 2,
+    "pending_auction": 3,
+    "observing": 4,
+    "missed": 5,
+    "rejected": 6,
+    "invalidated": 7,
+}
+_ACTION_PRIORITY = {
+    "buy_now": 0,
+    "next_auction": 1,
+    "observe": 2,
+    "wait_tail": 3,
+    "pass": 4,
+}
 TRACE_CANDIDATE_FIELDS = (
     "vt_symbol",
     "name",
@@ -138,21 +164,20 @@ def save_live_trace_snapshot(snapshot: Mapping[str, object]) -> dict[str, object
             snapshot.get("trace_radar_candidates"),
             TRACE_CANDIDATE_FIELDS,
         ),
-        "ranked_candidates": _project_rows(
-            snapshot.get("candidates"),
-            TRACE_CANDIDATE_FIELDS,
-        ),
+        # trace_radar_candidates and candidates are the same ranked list in the
+        # live snapshot; keep the legacy column empty instead of persisting it twice.
+        "ranked_candidates": [],
         "recommendations": _trace_recommendations(snapshot.get("recommendations")),
         "data_quality": _mapping(snapshot.get("data_quality")),
     }
     with session_scope() as session:
-        row = session.execute(
+        row_id = session.execute(
             insert(schema.limit_up_live_trace_snapshots)
             .values(**values)
-            .returning(schema.limit_up_live_trace_snapshots)
-        ).mappings().one()
+            .returning(schema.limit_up_live_trace_snapshots.c.id)
+        ).scalar_one()
     _prune_once_for_trade_date(trade_date)
-    return dict(row)
+    return {"id": int(row_id)}
 
 
 def save_live_trace_error(
@@ -176,12 +201,12 @@ def save_live_trace_error(
         "data_quality": {"status": "error", "error": str(error)[:500]},
     }
     with session_scope() as session:
-        row = session.execute(
+        row_id = session.execute(
             insert(schema.limit_up_live_trace_snapshots)
             .values(**values)
-            .returning(schema.limit_up_live_trace_snapshots)
-        ).mappings().one()
-    return dict(row)
+            .returning(schema.limit_up_live_trace_snapshots.c.id)
+        ).scalar_one()
+    return {"id": int(row_id)}
 
 
 def load_live_trace_dates(limit: int = TRACE_RETAIN_TRADE_DAYS) -> list[date]:
@@ -200,8 +225,23 @@ def load_live_trace_rows(
     *,
     after_id: int | None = None,
 ) -> list[dict[str, object]]:
+    return [
+        row
+        for batch in iter_live_trace_row_batches(trade_date, after_id=after_id)
+        for row in batch
+    ]
+
+
+def iter_live_trace_row_batches(
+    trade_date: date,
+    *,
+    after_id: int | None = None,
+    batch_size: int = 32,
+) -> Iterator[list[dict[str, object]]]:
+    """Stream projected trace rows without retaining the full JSON day in memory."""
+
     statement = (
-        select(schema.limit_up_live_trace_snapshots)
+        select(*TRACE_READ_COLUMNS)
         .where(schema.limit_up_live_trace_snapshots.c.trade_date == trade_date)
         .order_by(
             schema.limit_up_live_trace_snapshots.c.captured_at,
@@ -212,9 +252,16 @@ def load_live_trace_rows(
         statement = statement.where(
             schema.limit_up_live_trace_snapshots.c.id > max(int(after_id), 0)
         )
+    partition_size = max(int(batch_size), 1)
     with session_scope() as session:
-        rows = session.execute(statement).mappings().all()
-    return [dict(row) for row in rows]
+        rows = session.execute(
+            statement.execution_options(
+                stream_results=True,
+                yield_per=partition_size,
+            )
+        ).mappings()
+        for partition in rows.partitions(partition_size):
+            yield [dict(row) for row in partition]
 
 
 def prune_live_trace_snapshots(
@@ -270,20 +317,49 @@ def _optional_date(value: object) -> date | None:
 def _trace_recommendations(value: object) -> dict[str, object]:
     recommendations = _mapping(value)
     lanes = _mapping(recommendations.get("lanes"))
-    result: dict[str, object] = {
-        "market_gate": _mapping(recommendations.get("market_gate")),
-        "lanes": {
-            channel: _project_rows(lanes.get(channel), TRACE_SIGNAL_FIELDS)
-            for channel in ("now", "tail", "next_auction")
-        },
+    projected_lanes = {
+        channel: _project_rows(lanes.get(channel), TRACE_SIGNAL_FIELDS)
+        for channel in ("now", "tail", "next_auction")
     }
-    for key in ("portfolio", "watchlist"):
-        if key in recommendations:
-            result[key] = _project_rows(recommendations.get(key), TRACE_SIGNAL_FIELDS)
-    for key in ("board_lane_validations", "plan"):
-        if key in recommendations:
-            result[key] = recommendations[key]
+    return {
+        "market_gate": _mapping(recommendations.get("market_gate")),
+        "lanes": _compact_trace_lanes(projected_lanes),
+    }
+
+
+def _compact_trace_lanes(
+    lanes: Mapping[str, Sequence[dict[str, object]]],
+) -> dict[str, list[dict[str, object]]]:
+    channels = ("now", "tail", "next_auction")
+    selected: dict[
+        str,
+        tuple[tuple[int, int], int, str, dict[str, object]],
+    ] = {}
+    position = 0
+    for channel in channels:
+        for signal in lanes.get(channel, ()):
+            symbol = str(signal.get("vt_symbol") or "").upper()
+            if not symbol:
+                continue
+            candidate = (trace_signal_sort_key(signal), position, channel, signal)
+            current = selected.get(symbol)
+            if current is None or candidate[0] < current[0]:
+                selected[symbol] = candidate
+            position += 1
+
+    result: dict[str, list[dict[str, object]]] = {channel: [] for channel in channels}
+    for _, _, channel, signal in sorted(selected.values(), key=lambda item: item[1]):
+        result[channel].append(signal)
     return result
+
+
+def trace_signal_sort_key(signal: Mapping[str, object]) -> tuple[int, int]:
+    signal_state = str(signal.get("signal_state") or "")
+    action = str(signal.get("research_action") or signal.get("action") or "pass")
+    return (
+        _SIGNAL_STATE_PRIORITY.get(signal_state, 99),
+        _ACTION_PRIORITY.get(action, 99),
+    )
 
 
 def _project_rows(value: object, fields: Sequence[str]) -> list[dict[str, object]]:

@@ -16,21 +16,23 @@ import os
 import random
 import re
 import sys
+import threading
 import time
 import types
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
 
-from alphaagent.market.cache import market_cache
+from alphaagent.market.cache import TTLCache, market_cache
 from alphaagent.market.boards import stock_board_payload
 from alphaagent.market.models import DataSourceStatus, Quote
 from alphaagent.market.symbols import INDEX_SYMBOLS, eastmoney_secid, normalize_exchange, vt_symbol
@@ -44,6 +46,8 @@ FULL_LIST_TTL_SECONDS = 60
 FULL_MARKET_TTL_SECONDS = 20
 FULL_MARKET_PAGE_SIZE = 200
 FULL_MARKET_MAX_WORKERS = 6
+EASTMONEY_LIVE_PAGE_MAX_AGE_SECONDS = 20
+EASTMONEY_LIVE_PAGE_MIN_FRESH_RATIO = 0.90
 OVERVIEW_TTL_SECONDS = 30
 BARS_TTL_SECONDS = 600
 BUSINESS_TTL_SECONDS = 86400
@@ -55,6 +59,28 @@ SW_CLASSIFY_TTL_SECONDS = 86400 * 3
 SECTOR_DAILY_DEFAULT_HISTORY_SESSIONS = 800
 SECTOR_DAILY_MAX_HISTORY_SESSIONS = 1_000
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+_EASTMONEY_SESSION_LOCAL = threading.local()
+
+
+def _copy_full_market_quote_payload(value: object) -> object:
+    """Isolate mutable containers while sharing only scalar quote values."""
+
+    if not isinstance(value, Mapping):
+        return value
+    copied = dict(value)
+    items = value.get("items")
+    if isinstance(items, list):
+        copied["items"] = [
+            dict(item) if isinstance(item, Mapping) else item
+            for item in items
+        ]
+    return copied
+
+
+_FULL_MARKET_QUOTE_CACHE = TTLCache(
+    max_items=FULL_MARKET_MAX_WORKERS,
+    copier=_copy_full_market_quote_payload,
+)
 
 
 class AkShareSourceError(RuntimeError):
@@ -236,9 +262,10 @@ class AkShareAdapter:
     def _list_stocks_uncached(self, page: int, page_size: int, sort: str, order: str = "desc") -> dict[str, Any]:
         offset = (max(page, 1) - 1) * min(max(page_size, 1), 200)
         count = min(max(page_size, 1), 200)
+        normalized_sort = sort.strip().lower()
 
         # Sina 不提供期间涨幅数据，排序相关字段时跳过以避免全 null 结果
-        skip_sina = sort.strip().lower() in ("return_5d", "return_10d", "return_20d")
+        skip_sina = normalized_sort in ("return_5d", "return_10d", "return_20d")
 
         if not skip_sina:
             try:
@@ -263,6 +290,40 @@ class AkShareAdapter:
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
+    def research_quote_flow_page(
+        self,
+        page: int,
+        page_size: int = 100,
+    ) -> dict[str, Any]:
+        """Return fresh EastMoney fields for the isolated pre-board study."""
+
+        normalized_page = max(int(page), 1)
+        normalized_size = min(max(int(page_size), 1), 200)
+        key = f"research_quote_flow:{normalized_page}:{normalized_size}"
+        return market_cache.get_or_set(
+            key,
+            LIST_TTL_SECONDS,
+            lambda: self._research_quote_flow_page_uncached(
+                normalized_page,
+                normalized_size,
+            ),
+        )
+
+    def _research_quote_flow_page_uncached(
+        self,
+        page: int,
+        page_size: int,
+    ) -> dict[str, Any]:
+        payload = _eastmoney_all_a_page(
+            page=page,
+            page_size=page_size,
+            sort="change_pct",
+            order="desc",
+        )
+        if not _eastmoney_stock_page_is_fresh(payload):
+            raise AkShareSourceError("EastMoney research quote page is stale")
+        return payload
+
     def all_stock_quotes(
         self,
         max_workers: int = FULL_MARKET_MAX_WORKERS,
@@ -270,7 +331,7 @@ class AkShareAdapter:
         """Return one complete A-share quote snapshot using bounded pagination."""
 
         workers = min(max(int(max_workers), 1), FULL_MARKET_MAX_WORKERS)
-        return market_cache.get_or_set(
+        return _FULL_MARKET_QUOTE_CACHE.get_or_set(
             f"all_stock_quotes:{workers}",
             FULL_MARKET_TTL_SECONDS,
             lambda: self._all_stock_quotes_uncached(max_workers=workers),
@@ -308,8 +369,8 @@ class AkShareAdapter:
 
         rows: dict[str, dict[str, Any]] = {}
         for frame in frames:
-            for raw_row in _all_records(frame):
-                item = _stock_row_to_api(raw_row)
+            for raw_row in frame.to_dict(orient="records"):
+                item = _compact_stock_row_to_api(raw_row)
                 symbol = str(item.get("vt_symbol") or "")
                 if symbol:
                     rows[symbol] = item
@@ -1042,6 +1103,22 @@ class AkShareAdapter:
         key = f"board_names:{board_type.strip().lower()}:{limit}"
         return market_cache.get_or_set(key, SECTOR_TTL_SECONDS, lambda: self._board_names_uncached(board_type, limit))
 
+    def live_board_quotes(
+        self,
+        board_type: str = "concept",
+        limit: int = 1000,
+    ) -> dict[str, Any]:
+        """Return a short-lived board quote snapshot for intraday decisions."""
+
+        normalized_type = board_type.strip().lower()
+        bounded_limit = min(max(int(limit), 1), 1000)
+        key = f"live_board_quotes:{normalized_type}:{bounded_limit}"
+        return market_cache.get_or_set(
+            key,
+            QUOTE_TTL_SECONDS,
+            lambda: self._board_names_uncached(normalized_type, bounded_limit),
+        )
+
     def _board_names_uncached(self, board_type: str = "concept", limit: int = 20) -> dict[str, Any]:
         normalized_type = _normalize_board_type(board_type)
         items: list[dict[str, Any]]
@@ -1365,9 +1442,26 @@ class AkShareAdapter:
             source = "eastmoney.board_kline"
         except Exception as eastmoney_exc:
             logger.debug("eastmoney board kline failed for %s: %s", sector_id, eastmoney_exc)
-            df, source = self._sector_daily_bars_ths(board_name, normalized_type, start_date_str, end_date_str)
+            try:
+                df = _eastmoney_board_daily_quote(sector_id)
+                source = "eastmoney.board_kline"
+            except Exception as quote_exc:
+                logger.debug(
+                    "eastmoney board daily quote failed for %s: %s",
+                    sector_id,
+                    quote_exc,
+                )
+                df, source = self._sector_daily_bars_ths(
+                    board_name,
+                    normalized_type,
+                    start_date_str,
+                    end_date_str,
+                )
 
-        items = [_bar_row_to_api(row) for row in _tail_records(df, limit)]
+        items = [
+            _sector_bar_row_to_api(row)
+            for row in _tail_records(df, limit)
+        ]
         return {
             "sector_id": sector_id,
             "board_type": normalized_type,
@@ -1980,16 +2074,39 @@ def _json_value(value: Any) -> Any:
 
 def _stock_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
     normalized = _normalize_record(row)
+    return _stock_values_to_api(normalized, include_raw=True)
+
+
+def _compact_stock_row_to_api(row: Mapping[str, Any]) -> dict[str, Any]:
+    return _stock_values_to_api(row, include_raw=False)
+
+
+def _stock_values_to_api(
+    normalized: Mapping[str, Any],
+    *,
+    include_raw: bool,
+) -> dict[str, Any]:
     raw_symbol = str(normalized.get("代码") or normalized.get("code") or "")
     symbol = _clean_stock_symbol(raw_symbol)
     exchange = _exchange_from_prefixed_symbol(raw_symbol, symbol)
     vts = vt_symbol(symbol, exchange)
-    return {
+    turnover = _tencent_amount_to_yuan(
+        normalized.get("成交额") or normalized.get("turnover")
+    )
+    quote_main_net_inflow = _tencent_amount_to_yuan(normalized.get("zljlr"))
+    quote_main_inflow = _tencent_amount_to_yuan(normalized.get("zllr"))
+    quote_main_outflow = _tencent_amount_to_yuan(normalized.get("zllc"))
+    quote_main_net_inflow_ratio = (
+        round(float(quote_main_net_inflow) / float(turnover) * 100, 6)
+        if quote_main_net_inflow is not None and turnover
+        else None
+    )
+    item = {
         "symbol": symbol,
         "exchange": exchange,
         "vt_symbol": vts,
         **stock_board_payload(vts, exchange),
-        "name": normalized.get("名称") or normalized.get("name"),
+        "name": _json_value(normalized.get("名称") or normalized.get("name")),
         "last_price": _number(normalized.get("最新价") or normalized.get("zxj")),
         "change": _number(normalized.get("涨跌额") or normalized.get("zd")),
         "change_pct": _number(normalized.get("涨跌幅") or normalized.get("zdf")),
@@ -1998,19 +2115,29 @@ def _stock_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
         "low_price": _number(normalized.get("最低")),
         "previous_close": _number(normalized.get("昨收")),
         "volume": _number(normalized.get("成交量") or normalized.get("volume")),
-        "turnover": _tencent_amount_to_yuan(normalized.get("成交额") or normalized.get("turnover")),
+        "turnover": turnover,
         "market_cap": _tencent_yi_yuan_to_yuan(normalized.get("总市值") or normalized.get("zsz")),
         "float_market_cap": _tencent_yi_yuan_to_yuan(normalized.get("流通市值") or normalized.get("ltsz")),
         "pe": _number(normalized.get("市盈率-动态") or normalized.get("pe_ttm")),
         "pb": _number(normalized.get("市净率")),
         "turnover_rate": _number(normalized.get("换手率") or normalized.get("hsl")),
         "volume_ratio": _number(normalized.get("量比") or normalized.get("lb")),
+        "quote_speed": _number(normalized.get("涨速") or normalized.get("speed")),
+        "quote_amplitude_pct": _number(
+            normalized.get("振幅") or normalized.get("zf")
+        ),
+        "quote_main_net_inflow": quote_main_net_inflow,
+        "quote_main_inflow": quote_main_inflow,
+        "quote_main_outflow": quote_main_outflow,
+        "quote_main_net_inflow_ratio": quote_main_net_inflow_ratio,
         "return_5d": _number(normalized.get("zdf_d5")),
         "return_10d": _number(normalized.get("zdf_d10")),
         "return_20d": _number(normalized.get("zdf_d20")),
-        "raw": normalized,
         "source": "akshare.stock_zh_a_spot_tx",
     }
+    if include_raw:
+        item["raw"] = dict(normalized)
+    return item
 
 
 def _bar_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
@@ -2155,20 +2282,199 @@ def _eastmoney_board_kline(
         "beg": _date_key(start_date) if start_date else _history_start_for_limit(limit, "1d"),
         "end": _date_key(end_date) if end_date else "20500101",
     }
-    response = None
     for host in ("https://push2his.eastmoney.com", "https://48.push2his.eastmoney.com", "https://push2delay.eastmoney.com"):
         try:
             with _akshare_network_env():
                 response = requests.get(f"{host}/api/qt/stock/kline/get", params=params, headers=EASTMONEY_HEADERS, timeout=8)
             response.raise_for_status()
-            break
+            klines = (response.json().get("data") or {}).get("klines") or []
+            frame = _eastmoney_kline_rows_to_frame(klines, interval="1d")
+            if not frame.empty:
+                return frame
         except Exception:
-            response = None
-    if response is None:
-        raise AkShareSourceError("EastMoney board kline request failed")
+            continue
+    raise AkShareSourceError("EastMoney board kline hosts returned no valid rows")
 
-    klines = (response.json().get("data") or {}).get("klines") or []
-    return _eastmoney_kline_rows_to_frame(klines, interval="1d")
+
+def _eastmoney_board_daily_quote(
+    sector_id: str,
+    *,
+    now: datetime | None = None,
+) -> pd.DataFrame:
+    """Return one completed official EastMoney board daily quote."""
+
+    board_code = str(sector_id).strip().upper()
+    if not _is_eastmoney_board_symbol(board_code):
+        raise AkShareSourceError(
+            f"Unsupported EastMoney board quote symbol: {sector_id}"
+        )
+    params = {
+        "secid": f"90.{board_code}",
+        "fields": (
+            "f43,f44,f45,f46,f47,f48,f57,f58,f59,f60,f86,f170"
+        ),
+        "ut": "7eea3edcaed734bea9cbfc24409ed989",
+    }
+    payload: dict[str, Any] | None = None
+    for host in (
+        "https://push2delay.eastmoney.com",
+        "http://push2delay.eastmoney.com",
+    ):
+        try:
+            with _akshare_network_env():
+                response = requests.get(
+                    f"{host}/api/qt/stock/get",
+                    params=params,
+                    headers=EASTMONEY_HEADERS,
+                    timeout=8,
+                )
+            response.raise_for_status()
+            candidate = response.json().get("data")
+            if isinstance(candidate, dict) and candidate:
+                payload = candidate
+                break
+        except Exception:
+            continue
+    if payload is None:
+        raise AkShareSourceError("EastMoney board daily quote request failed")
+    return _eastmoney_board_daily_quote_frame(
+        board_code,
+        payload,
+        now=now,
+    )
+
+
+def _eastmoney_board_daily_quote_frame(
+    board_code: str,
+    payload: Mapping[str, Any],
+    *,
+    now: datetime | None,
+) -> pd.DataFrame:
+    returned_code = str(payload.get("f57") or "").strip().upper()
+    if returned_code != board_code:
+        raise AkShareSourceError(
+            f"EastMoney board daily quote code mismatch: {returned_code}"
+        )
+    try:
+        source_timestamp = datetime.fromtimestamp(
+            int(payload["f86"]),
+            tz=SHANGHAI,
+        )
+    except (KeyError, TypeError, ValueError, OSError) as exc:
+        raise AkShareSourceError(
+            "EastMoney board daily quote timestamp is invalid"
+        ) from exc
+    if int(payload.get("f86") or 0) <= 0:
+        raise AkShareSourceError(
+            "EastMoney board daily quote timestamp is invalid"
+        )
+    observed_at = now or datetime.now(SHANGHAI)
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=SHANGHAI)
+    else:
+        observed_at = observed_at.astimezone(SHANGHAI)
+    if source_timestamp.date() > observed_at.date():
+        raise AkShareSourceError(
+            "EastMoney board daily quote timestamp is in the future"
+        )
+    if (
+        source_timestamp.date() == observed_at.date()
+        and (source_timestamp.hour, source_timestamp.minute) < (15, 0)
+    ):
+        raise AkShareSourceError(
+            "EastMoney board daily quote is incomplete"
+        )
+
+    decimal_places = _required_integer(payload, "f59", "decimal places")
+    if not 0 <= decimal_places <= 8:
+        raise AkShareSourceError(
+            "EastMoney board daily quote decimal places are invalid"
+        )
+    divisor = float(10**decimal_places)
+    prices = {
+        "close": _required_number(payload, "f43", "close") / divisor,
+        "high": _required_number(payload, "f44", "high") / divisor,
+        "low": _required_number(payload, "f45", "low") / divisor,
+        "open": _required_number(payload, "f46", "open") / divisor,
+        "previous_close": (
+            _required_number(payload, "f60", "previous close") / divisor
+        ),
+    }
+    if any(value <= 0 for value in prices.values()):
+        raise AkShareSourceError(
+            "EastMoney board daily quote OHLC values must be positive"
+        )
+    if not (
+        prices["low"]
+        <= min(prices["open"], prices["close"])
+        <= max(prices["open"], prices["close"])
+        <= prices["high"]
+    ):
+        raise AkShareSourceError(
+            "EastMoney board daily quote OHLC values are incoherent"
+        )
+    volume = _required_number(payload, "f47", "volume")
+    turnover = _required_number(payload, "f48", "turnover")
+    if volume < 0 or turnover < 0:
+        raise AkShareSourceError(
+            "EastMoney board daily quote volume is invalid"
+        )
+    change_pct = _required_number(payload, "f170", "change percent") / 100.0
+    return pd.DataFrame.from_records(
+        [
+            {
+                "date": source_timestamp.date(),
+                "open": prices["open"],
+                "close": prices["close"],
+                "high": prices["high"],
+                "low": prices["low"],
+                "volume": volume,
+                "turnover": turnover,
+                "change_pct": change_pct,
+                "previous_close": prices["previous_close"],
+                "source_detail": "eastmoney.board_quote_daily",
+                "source_timestamp": source_timestamp.isoformat(),
+            }
+        ]
+    )
+
+
+def _required_number(
+    payload: Mapping[str, Any],
+    field: str,
+    label: str,
+) -> float:
+    value = _number(payload.get(field))
+    if value is None or not math.isfinite(value):
+        raise AkShareSourceError(
+            f"EastMoney board daily quote {label} is invalid"
+        )
+    return float(value)
+
+
+def _required_integer(
+    payload: Mapping[str, Any],
+    field: str,
+    label: str,
+) -> int:
+    value = _required_number(payload, field, label)
+    if not value.is_integer():
+        raise AkShareSourceError(
+            f"EastMoney board daily quote {label} is invalid"
+        )
+    return int(value)
+
+
+def _sector_bar_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
+    item = _bar_row_to_api(row)
+    source_detail = row.get("source_detail")
+    if source_detail:
+        item["raw"] = {
+            "source_detail": str(source_detail),
+            "source_timestamp": row.get("source_timestamp"),
+            "previous_close": _number(row.get("previous_close")),
+        }
+    return item
 
 
 def _eastmoney_kline_rows_to_frame(klines: Sequence[str], interval: str = "1d") -> pd.DataFrame:
@@ -2849,14 +3155,21 @@ def _eastmoney_board_member_fields() -> str:
     return "f2,f3,f4,f5,f6,f8,f9,f12,f13,f14,f15,f16,f17,f18,f20,f21,f23"
 
 
+def _eastmoney_clist_session() -> requests.Session:
+    session = getattr(_EASTMONEY_SESSION_LOCAL, "session", None)
+    if session is None:
+        session = requests.Session()
+        session.trust_env = False
+        _EASTMONEY_SESSION_LOCAL.session = session
+    return session
+
+
 def _eastmoney_clist_get(hosts: tuple[str, ...], params: dict[str, Any], timeout: int = 12) -> dict[str, Any]:
     last_error: Exception | None = None
     for attempt in range(3):
         for host in hosts:
             try:
-                session = requests.Session()
-                session.trust_env = False
-                response = session.get(
+                response = _eastmoney_clist_session().get(
                     f"{host}/api/qt/clist/get",
                     params=params,
                     headers=EASTMONEY_HEADERS,
@@ -2871,11 +3184,6 @@ def _eastmoney_clist_get(hosts: tuple[str, ...], params: dict[str, Any], timeout
                 return data
             except Exception as exc:
                 last_error = exc
-            finally:
-                try:
-                    session.close()
-                except Exception:
-                    pass
         if attempt < 2:
             time.sleep(0.35 * (attempt + 1) + random.uniform(0.05, 0.25))
     raise AkShareSourceError(f"EastMoney board request failed: {last_error.__class__.__name__ if last_error else 'unknown'}")
@@ -3286,7 +3594,35 @@ def _sina_index_quotes() -> list[Quote]:
 
 
 def _eastmoney_quote_fields() -> str:
-    return "f2,f3,f4,f5,f6,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21,f23,f109,f110,f160"
+    return "f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21,f22,f23,f62,f109,f110,f124,f160,f184"
+
+
+def _eastmoney_stock_page_is_fresh(
+    payload: Mapping[str, Any],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    current_at = (now or datetime.now(SHANGHAI)).astimezone(SHANGHAI)
+    minute = current_at.hour * 60 + current_at.minute
+    if not (9 * 60 + 15 <= minute <= 11 * 60 + 30 or 13 * 60 <= minute <= 15 * 60):
+        return True
+
+    items = [row for row in payload.get("items") or [] if isinstance(row, Mapping)]
+    if not items:
+        return False
+    fresh_count = 0
+    for row in items:
+        raw_time = row.get("quote_observed_at")
+        try:
+            observed_at = datetime.fromisoformat(str(raw_time))
+        except (TypeError, ValueError):
+            continue
+        if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+            continue
+        age_seconds = (current_at - observed_at.astimezone(SHANGHAI)).total_seconds()
+        if -5.0 <= age_seconds <= EASTMONEY_LIVE_PAGE_MAX_AGE_SECONDS:
+            fresh_count += 1
+    return fresh_count / len(items) >= EASTMONEY_LIVE_PAGE_MIN_FRESH_RATIO
 
 
 def _eastmoney_stock_sort_field(sort: str) -> str:
@@ -3331,6 +3667,9 @@ def _eastmoney_quote_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
         **stock_board_payload(vts, exchange),
         "name": normalized.get("f14") or symbol,
         "last_price": _number(normalized.get("f2")),
+        "quote_observed_at": _eastmoney_timestamp_datetime(
+            normalized.get("f124")
+        ),
         "change": _number(normalized.get("f4")),
         "change_pct": _number(normalized.get("f3")),
         "open_price": _number(normalized.get("f17")),
@@ -3345,6 +3684,10 @@ def _eastmoney_quote_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
         "pb": _number(normalized.get("f23")),
         "turnover_rate": _number(normalized.get("f8")),
         "volume_ratio": _number(normalized.get("f10")),
+        "quote_speed": _number(normalized.get("f22")),
+        "quote_amplitude_pct": _number(normalized.get("f7")),
+        "quote_main_net_inflow": _number(normalized.get("f62")),
+        "quote_main_net_inflow_ratio": _number(normalized.get("f184")),
         "return_5d": _number(normalized.get("f109")),
         "return_10d": _number(normalized.get("f160")),
         "return_20d": _number(normalized.get("f110")),

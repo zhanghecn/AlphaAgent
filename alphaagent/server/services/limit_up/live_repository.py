@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from datetime import date, datetime, timedelta, timezone
 from statistics import mean, median
 from threading import Lock
-from typing import Mapping
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import case, desc, func, select
@@ -29,6 +29,7 @@ from alphaagent.server.services.limit_up.versions import LIVE_STRATEGY_VERSION
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 NEXT_SESSION_PLAN_MODES = ("next_session_preliminary", "next_session_final")
+LANE_VALIDATION_SNAPSHOT_MODES = ("live_snapshot", "next_session_final")
 RESEARCH_SECTOR_TYPES = ("theme", "industry")
 LIVE_CONTEXT_SECTOR_TYPES = (*RESEARCH_SECTOR_TYPES, "concept")
 CONCEPT_GROUP_CACHE_SECONDS = 900
@@ -130,6 +131,41 @@ def load_latest_snapshot(
     with session_scope() as session:
         row = session.execute(statement).mappings().one_or_none()
     return _snapshot_row(row) if row else None
+
+
+def load_latest_lane_validations(
+    *,
+    strategy_version: str,
+    captured_after: datetime,
+) -> dict[str, dict[str, object]] | None:
+    """Load the compact live validation gate produced after a ledger rebuild."""
+
+    recommendations = schema.limit_up_signal_snapshots.c.recommendations
+    statement = (
+        select(
+            recommendations["board_lane_validations"].label("validations")
+        )
+        .where(
+            schema.limit_up_signal_snapshots.c.strategy_version
+            == strategy_version,
+            schema.limit_up_signal_snapshots.c.mode.in_(
+                LANE_VALIDATION_SNAPSHOT_MODES
+            ),
+            schema.limit_up_signal_snapshots.c.captured_at >= captured_after,
+            recommendations["board_lane_validations"].is_not(None),
+        )
+        .order_by(desc(schema.limit_up_signal_snapshots.c.captured_at))
+        .limit(1)
+    )
+    with session_scope() as session:
+        payload = session.execute(statement).scalar_one_or_none()
+    if not isinstance(payload, Mapping):
+        return None
+    return {
+        str(lane): dict(validation)
+        for lane, validation in payload.items()
+        if isinstance(validation, Mapping)
+    }
 
 
 def load_latest_next_session_plan(
@@ -370,7 +406,11 @@ def _cached_prior_symbol_context(
             symbol for symbol in symbols if symbol not in _prior_context_by_symbol
         ]
         if missing:
-            loaded = _load_prior_symbol_context(missing, trade_date)
+            loaded = _load_prior_symbol_context(
+                missing,
+                trade_date,
+                include_global_context=not _prior_context_meta,
+            )
             loaded_by_symbol = loaded.get("by_symbol")
             loaded_by_symbol = (
                 loaded_by_symbol if isinstance(loaded_by_symbol, Mapping) else {}
@@ -410,6 +450,8 @@ def _cached_prior_symbol_context(
 def _load_prior_symbol_context(
     symbols: list[str],
     trade_date: date,
+    *,
+    include_global_context: bool = True,
 ) -> dict[str, object]:
     """Load fields that cannot change during the current trading day."""
 
@@ -427,11 +469,6 @@ def _load_prior_symbol_context(
             )
         ).mappings().all()
         sector_ids = sorted({str(row["sector_id"]) for row in memberships if row.get("sector_id")})
-        has_concept_membership = any(
-            str(row.get("sector_type") or "") in {"theme", "concept"}
-            for row in memberships
-        )
-
         score_rows = []
         if sector_ids and previous_date is not None:
             score_rows = session.execute(
@@ -482,16 +519,26 @@ def _load_prior_symbol_context(
                     <= trade_date.isoformat(),
                 )
             ).mappings().all()
-            sentiment_points = load_sentiment_points(session, previous_date, previous_date)
-            calendar_dates = [
-                item.isoformat()
-                for item in session.execute(
-                    select(schema.stock_daily_bars.c.trade_date)
-                    .where(schema.stock_daily_bars.c.trade_date.between(data_start, previous_date))
-                    .distinct()
-                    .order_by(schema.stock_daily_bars.c.trade_date)
-                ).scalars().all()
-            ]
+            if include_global_context:
+                sentiment_points = load_sentiment_points(
+                    session,
+                    previous_date,
+                    previous_date,
+                )
+                calendar_dates = [
+                    item.isoformat()
+                    for item in session.execute(
+                        select(schema.stock_daily_bars.c.trade_date)
+                        .where(
+                            schema.stock_daily_bars.c.trade_date.between(
+                                data_start,
+                                previous_date,
+                            )
+                        )
+                        .distinct()
+                        .order_by(schema.stock_daily_bars.c.trade_date)
+                    ).scalars().all()
+                ]
 
     score_by_sector = _latest_by_key(score_rows, "sector_id")
     memberships_by_symbol: dict[str, list[Mapping[str, object]]] = defaultdict(list)
@@ -502,7 +549,7 @@ def _load_prior_symbol_context(
         bars_by_symbol[str(row.get("vt_symbol") or "")].append(row)
     prior_events = merge_rich_event_rows(prior_event_rows)
     financial_index = build_financial_index(financial_rows)
-    concept_groups = _load_current_concept_groups() if has_concept_membership else []
+    concept_groups = _load_current_concept_groups() if include_global_context else []
 
     by_symbol: dict[str, dict[str, object]] = {}
     for symbol in symbols:
@@ -527,14 +574,20 @@ def _load_prior_symbol_context(
                 dict(item) for item in memberships_by_symbol.get(symbol, [])
             ],
         }
-    return {
+    result: dict[str, object] = {
         "by_symbol": by_symbol,
         "previous_trade_date": previous_date.isoformat() if previous_date else None,
         "score_by_sector": score_by_sector,
-        "sentiment_points": sentiment_points,
-        "calendar_dates": calendar_dates,
-        "concept_groups": concept_groups,
     }
+    if include_global_context:
+        result.update(
+            {
+                "sentiment_points": sentiment_points,
+                "calendar_dates": calendar_dates,
+                "concept_groups": concept_groups,
+            }
+        )
+    return result
 
 
 def _load_intraday_context(

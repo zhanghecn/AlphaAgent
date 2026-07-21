@@ -1,6 +1,65 @@
-import { LimitUpPage } from "@/pages/LimitUpPage";
+import { Flame, Waves } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 
+import { cn } from "@/lib/utils";
+import { LimitUpPage } from "@/pages/LimitUpPage";
+import { LowSuctionPage } from "@/pages/LowSuctionPage";
+
+type ResearchTab = "limit-up" | "low-suction";
+
+const RESEARCH_TABS = [
+  { value: "limit-up", label: "打板研究", icon: Flame },
+  { value: "low-suction", label: "低吸波段", icon: Waves },
+] as const;
 
 export function ShortTermResearchPage() {
-  return <LimitUpPage />;
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab: ResearchTab = searchParams.get("research") === "low-suction"
+    ? "low-suction"
+    : "limit-up";
+
+  const selectTab = (tab: ResearchTab) => {
+    const next = new URLSearchParams(searchParams);
+    if (tab === "limit-up") next.delete("research");
+    else next.set("research", tab);
+    setSearchParams(next, { replace: true });
+  };
+
+  return (
+    <div className="min-w-0">
+      <nav className="mb-3 flex h-11 items-end gap-6 overflow-x-auto border-b" role="tablist" aria-label="短线研究类型">
+        {RESEARCH_TABS.map((tab) => {
+          const Icon = tab.icon;
+          const active = activeTab === tab.value;
+          return (
+            <button
+              key={tab.value}
+              id={`research-tab-${tab.value}`}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              aria-controls={`research-panel-${tab.value}`}
+              className={cn(
+                "flex h-11 shrink-0 items-center gap-2 border-b-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                active
+                  ? "border-primary font-semibold text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground",
+              )}
+              onClick={() => selectTab(tab.value)}
+            >
+              <Icon size={15} />
+              {tab.label}
+            </button>
+          );
+        })}
+      </nav>
+      <div
+        id={`research-panel-${activeTab}`}
+        role="tabpanel"
+        aria-labelledby={`research-tab-${activeTab}`}
+      >
+        {activeTab === "limit-up" ? <LimitUpPage /> : <LowSuctionPage />}
+      </div>
+    </div>
+  );
 }

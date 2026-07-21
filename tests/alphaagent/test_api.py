@@ -1,5 +1,8 @@
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
+from alphaagent.server import main as main_module
 from alphaagent.server.api import stocks
 from alphaagent.server.main import create_app
 
@@ -13,6 +16,94 @@ class FakeQuote:
 
     def to_api(self) -> dict[str, object]:
         return self.payload
+
+
+def test_api_expensive_startup_warmups_are_opt_in(monkeypatch) -> None:
+    calls: list[str] = []
+    settings = SimpleNamespace(
+        cors_origin_list=[],
+        market_timeout_seconds=8.0,
+        startup_data_sync_scheduler=True,
+        startup_backtest_warmup=False,
+        startup_next_session_plan_warmup=False,
+        startup_market_cache_warmup=False,
+        startup_intraday_refresher=False,
+    )
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        main_module,
+        "ensure_sync_schema",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(main_module, "start_data_sync_scheduler", lambda: None)
+    monkeypatch.setattr(
+        main_module,
+        "start_next_session_plan_warmup",
+        lambda: calls.append("next_session_plan"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "start_backtest_cache_warmup",
+        lambda: calls.append("backtest"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "start_market_cache_warmup",
+        lambda **_kwargs: calls.append("market_cache"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "start_intraday_refresher",
+        lambda: calls.append("intraday_refresher"),
+    )
+
+    with TestClient(main_module.create_app()):
+        pass
+    assert calls == []
+
+    settings.startup_backtest_warmup = True
+    settings.startup_next_session_plan_warmup = True
+    settings.startup_market_cache_warmup = True
+    settings.startup_intraday_refresher = True
+    with TestClient(main_module.create_app()):
+        pass
+    assert calls == [
+        "next_session_plan",
+        "backtest",
+        "market_cache",
+        "intraday_refresher",
+    ]
+
+
+def test_api_can_delegate_data_sync_scheduler(monkeypatch) -> None:
+    calls: list[object] = []
+    settings = SimpleNamespace(
+        cors_origin_list=[],
+        market_timeout_seconds=8.0,
+        startup_data_sync_scheduler=False,
+        startup_backtest_warmup=False,
+        startup_next_session_plan_warmup=False,
+        startup_market_cache_warmup=False,
+        startup_intraday_refresher=False,
+    )
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        main_module,
+        "ensure_sync_schema",
+        lambda *, recover_interrupted=True: calls.append(
+            ("schema", recover_interrupted)
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "start_data_sync_scheduler",
+        lambda: calls.append("scheduler"),
+    )
+
+    with TestClient(main_module.create_app()):
+        pass
+
+    assert calls == [("schema", False)]
 
 
 class FakeStatus:
@@ -267,7 +358,9 @@ class FakeMarketClient:
 def patch_clients(monkeypatch) -> None:
     from alphaagent.server.api import data_status, indices, industry_chains, market, sectors, stocks
 
-    fake = lambda timeout=8.0: FakeMarketClient()
+    def fake(timeout=8.0):
+        del timeout
+        return FakeMarketClient()
     monkeypatch.setattr(data_status, "RealMarketDataClient", fake)
     monkeypatch.setattr(indices, "RealMarketDataClient", fake)
     monkeypatch.setattr(industry_chains, "RealMarketDataClient", fake)

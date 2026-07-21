@@ -5,6 +5,7 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from alphaagent.server.services.limit_up import history_engine
+from alphaagent.server.services.limit_up import live_evidence
 from alphaagent.server.services.limit_up import live_service
 from alphaagent.server.services.limit_up.first_board_profitability import (
     build_first_board_profitability_ranking_report,
@@ -18,6 +19,42 @@ from alphaagent.server.services.limit_up.live_evidence import (
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+def test_live_evidence_indexes_share_one_projected_history_load(monkeypatch) -> None:
+    signal_date = date(2026, 7, 20)
+    rows = [{"trade_date": "2026-07-17", "lanes": {}, "lane_portfolio": {}}]
+    calls: list[tuple[str, date]] = []
+    analog_value = object()
+    live_evidence.clear_live_evidence_cache()
+    monkeypatch.setattr(
+        live_evidence.history_repository,
+        "history_coverage",
+        lambda *_args: {"persisted_end": "2026-07-17", "persisted_days": 801},
+    )
+    monkeypatch.setattr(
+        live_evidence.history_repository,
+        "load_history_evidence_rows",
+        lambda version, end: calls.append((version, end)) or rows,
+    )
+    monkeypatch.setattr(
+        live_evidence.history_engine,
+        "build_analog_index",
+        lambda *_args, **_kwargs: {("analog",): analog_value},
+    )
+    monkeypatch.setattr(
+        live_evidence,
+        "build_same_stock_first_board_d1_index",
+        lambda *_args, **_kwargs: {"600001.SSE": {"sample_count": 6}},
+    )
+
+    analog = live_evidence.load_history_analog_index(signal_date)
+    stock = live_evidence.load_same_stock_first_board_d1_index(signal_date)
+
+    assert analog == {("analog",): analog_value}
+    assert analog[("analog",)] is analog_value
+    assert stock == {"600001.SSE": {"sample_count": 6}}
+    assert calls == [(history_engine.HISTORY_STRATEGY_VERSION, signal_date)]
 
 
 def test_combined_historical_win_rate_multiplies_both_probabilities() -> None:

@@ -51,6 +51,23 @@ def _source_snapshot() -> dict[str, object]:
     }
 
 
+def _lane_validations() -> dict[str, dict[str, object]]:
+    return {
+        lane: {
+            "passed": lane != "high_board",
+            "status": "portfolio_gate_passed",
+            "reason": "cached after history rebuild",
+            "summary": {
+                "trade_count": 11,
+                "win_rate": 63.6364,
+                "total_return_pct": 5.7892,
+                "max_drawdown_pct": -1.25,
+            },
+        }
+        for lane in ("first_board", "two_to_three", "high_board")
+    }
+
+
 def test_build_final_plan_keeps_only_next_session_observations() -> None:
     captured_at = datetime(2026, 7, 10, 19, 5, tzinfo=SHANGHAI)
 
@@ -84,6 +101,21 @@ def test_build_final_plan_keeps_only_next_session_observations() -> None:
     )
     assert rows[0]["sell_instruction"] == "D+1尾盘按官方收盘价统一卖出"
     assert rows[0]["valid_until"] == "下一交易日14:30"
+
+
+def test_build_final_plan_preserves_compact_lane_validations() -> None:
+    source = _source_snapshot()
+    validations = _lane_validations()
+    source["recommendations"]["board_lane_validations"] = validations
+
+    result = next_session_plan.build_next_session_plan_snapshot(
+        source,
+        source_trade_date=date(2026, 7, 10),
+        captured_at=datetime(2026, 7, 10, 21, 35, tzinfo=SHANGHAI),
+        phase="final",
+    )
+
+    assert result["recommendations"]["board_lane_validations"] == validations
 
 
 def test_plan_keeps_structural_observations_while_auction_checks_are_pending() -> None:
@@ -280,6 +312,68 @@ def test_refresh_rebuilds_a_saved_empty_plan(monkeypatch) -> None:
     assert result["status"] == "ready"
 
 
+def test_refresh_rebuilds_final_plan_older_than_history_ledger(monkeypatch) -> None:
+    from alphaagent.server.services.limit_up import history_repository
+
+    source_date = date(2026, 7, 20)
+    stale_plan = next_session_plan.build_next_session_plan_snapshot(
+        {
+            **_source_snapshot(),
+            "recommendations": {
+                **_source_snapshot()["recommendations"],
+                "board_lane_validations": _lane_validations(),
+            },
+        },
+        source_trade_date=source_date,
+        captured_at=datetime(2026, 7, 20, 22, 48, tzinfo=SHANGHAI),
+        phase="final",
+    )
+    saved: list[dict[str, object]] = []
+
+    class Adapter:
+        def limit_up_pools(self, trade_key: str) -> dict[str, object]:
+            assert trade_key == "20260720"
+            return {"trade_date": trade_key, "pools": {}}
+
+    monkeypatch.setattr(
+        history_repository,
+        "history_ledger_updated_at",
+        lambda _version: datetime(2026, 7, 20, 23, 48, tzinfo=SHANGHAI),
+    )
+    monkeypatch.setattr(
+        next_session_plan,
+        "load_latest_next_session_plan",
+        lambda *_args, **_kwargs: stale_plan,
+    )
+    monkeypatch.setattr(
+        next_session_plan,
+        "_source_snapshot_from_pools",
+        lambda *_args: {
+            **_source_snapshot(),
+            "recommendations": {
+                **_source_snapshot()["recommendations"],
+                "board_lane_validations": _lane_validations(),
+            },
+        },
+    )
+    monkeypatch.setattr(
+        next_session_plan,
+        "save_snapshot",
+        lambda snapshot: saved.append(snapshot) or snapshot,
+    )
+
+    result = next_session_plan.refresh_next_session_plan(
+        "final",
+        source_trade_date=source_date,
+        captured_at=datetime(2026, 7, 21, 0, 5, tzinfo=SHANGHAI),
+        adapter=Adapter(),
+    )
+
+    assert len(saved) == 1
+    assert result["captured_at"] == "2026-07-21T00:05:00+08:00"
+    assert result["recommendations"]["board_lane_validations"] == _lane_validations()
+
+
 def test_weekend_live_read_prefers_saved_final_plan(monkeypatch) -> None:
     plan = next_session_plan.build_next_session_plan_snapshot(
         _source_snapshot(),
@@ -342,10 +436,16 @@ def test_live_payload_fetch_adds_targeted_plan_quotes() -> None:
     class Adapter:
         requested: list[dict[str, str]] = []
 
-        def list_stocks(self, **_kwargs):
+        def list_stocks(self, page, **_kwargs):
             return {
                 "trade_date": "20260713",
-                "items": [],
+                "items": [
+                    {
+                        "vt_symbol": f"60010{page}.SSE",
+                        "name": f"快速页{page}",
+                        "change_pct": 3.0,
+                    }
+                ],
                 "source": "ranking",
                 "updated_at": "2026-07-13T09:18:00+08:00",
             }
@@ -394,5 +494,6 @@ def test_live_payload_fetch_adds_targeted_plan_quotes() -> None:
     )
 
     assert adapter.requested == [{"symbol": "600001", "exchange": "SSE"}]
-    assert [row["vt_symbol"] for row in quotes["items"]] == ["600001.SSE"]
+    assert [row["vt_symbol"] for row in quotes["items"]][-1] == "600001.SSE"
+    assert quotes["fast_quote_pages_succeeded"] == [1, 2, 3, 4]
     assert errors == []

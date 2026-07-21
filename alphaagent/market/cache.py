@@ -7,7 +7,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import TypeVar, cast
 
 T = TypeVar("T")
 
@@ -21,8 +21,14 @@ class _CacheEntry:
 class TTLCache:
     """Thread-safe cache with per-key request coalescing."""
 
-    def __init__(self, max_items: int = 512) -> None:
+    def __init__(
+        self,
+        max_items: int = 512,
+        *,
+        copier: Callable[[object], object] = copy.deepcopy,
+    ) -> None:
         self.max_items = max_items
+        self._copier = copier
         self._entries: dict[str, _CacheEntry] = {}
         self._locks: dict[str, threading.Lock] = {}
         self._lock = threading.Lock()
@@ -34,18 +40,18 @@ class TTLCache:
         now = time.monotonic()
         cached = self._get_fresh(key, now)
         if cached is not None:
-            return copy.deepcopy(cached)
+            return self._copy(cached)
 
         key_lock = self._key_lock(key)
         with key_lock:
             now = time.monotonic()
             cached = self._get_fresh(key, now)
             if cached is not None:
-                return copy.deepcopy(cached)
+                return self._copy(cached)
 
             value = loader()
             self._set(key, value, now + ttl_seconds)
-            return copy.deepcopy(value)
+            return self._copy(value)
 
     def refresh(self, key: str, ttl_seconds: float, loader: Callable[[], T]) -> T:
         """Recompute a cache value under the per-key lock."""
@@ -57,7 +63,7 @@ class TTLCache:
         with key_lock:
             value = loader()
             self._set(key, value, time.monotonic() + ttl_seconds)
-            return copy.deepcopy(value)
+            return self._copy(value)
 
     def clear(self) -> None:
         with self._lock:
@@ -79,7 +85,13 @@ class TTLCache:
             if len(self._entries) >= self.max_items:
                 oldest_key = min(self._entries, key=lambda item: self._entries[item].expires_at)
                 self._entries.pop(oldest_key, None)
-            self._entries[key] = _CacheEntry(expires_at=expires_at, value=copy.deepcopy(value))
+            self._entries[key] = _CacheEntry(
+                expires_at=expires_at,
+                value=self._copy(value),
+            )
+
+    def _copy(self, value: T) -> T:
+        return cast(T, self._copier(value))
 
     def _key_lock(self, key: str) -> threading.Lock:
         with self._lock:

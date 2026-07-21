@@ -28,6 +28,26 @@ class Settings(BaseSettings):
     redis_url: str = Field(default="redis://host.docker.internal:6379/0", alias="REDIS_URL")
     market_timeout_seconds: float = Field(default=8.0, alias="MARKET_TIMEOUT_SECONDS")
     market_page_size: int = Field(default=50, alias="MARKET_PAGE_SIZE")
+    startup_data_sync_scheduler: bool = Field(
+        default=True,
+        alias="ALPHAAGENT_STARTUP_DATA_SYNC_SCHEDULER",
+    )
+    startup_backtest_warmup: bool = Field(
+        default=False,
+        alias="ALPHAAGENT_STARTUP_BACKTEST_WARMUP",
+    )
+    startup_next_session_plan_warmup: bool = Field(
+        default=False,
+        alias="ALPHAAGENT_STARTUP_NEXT_SESSION_PLAN_WARMUP",
+    )
+    startup_market_cache_warmup: bool = Field(
+        default=False,
+        alias="ALPHAAGENT_STARTUP_MARKET_CACHE_WARMUP",
+    )
+    startup_intraday_refresher: bool = Field(
+        default=False,
+        alias="ALPHAAGENT_STARTUP_INTRADAY_REFRESHER",
+    )
     tushare_token: str = Field(default="", alias="TUSHARE_TOKEN")
     tushare_api_url: str = Field(default="https://api.tushare.pro", alias="TUSHARE_API_URL")
     tushare_timeout_seconds: float = Field(default=12.0, alias="TUSHARE_TIMEOUT_SECONDS")

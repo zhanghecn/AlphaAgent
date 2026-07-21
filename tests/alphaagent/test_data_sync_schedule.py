@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
+from threading import get_ident
 from typing import Any
 
 import pytest
@@ -183,13 +184,77 @@ def test_default_batch_schedules_defined():
     ids = {s["id"] for s in svc.DEFAULT_BATCH_SCHEDULES}
     assert ids == {
         "auction_0926",
+        "low_suction_open_0931",
         "limit_up_concept_scan",
         "limit_up_live_scan",
         "intraday_hourly",
+        "low_suction_preview_hourly",
+        "low_suction_signal_1450",
+        "low_suction_entry_1455",
         "limit_up_plan_1505",
         "eod_1900",
         "eod_finalize_2130",
     }
+
+
+def test_low_suction_swing_schedules_are_exact_and_independent():
+    schedules = {row["id"]: row for row in svc.DEFAULT_BATCH_SCHEDULES}
+
+    assert schedules["low_suction_open_0931"] == {
+        "id": "low_suction_open_0931",
+        "name": "低吸波段次日开盘退出（09:31）",
+        "cron": "31 9 * * 1-5",
+        "action": "low_suction_swing",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": ["sync_low_suction_swing_exits"],
+    }
+    assert schedules["low_suction_signal_1450"]["cron"] == "50 14 * * 1-5"
+    assert schedules["low_suction_signal_1450"]["job_ids"] == [
+        "sync_low_suction_swing_signals"
+    ]
+    assert schedules["low_suction_entry_1455"]["cron"] == "55 14 * * 1-5"
+    assert schedules["low_suction_entry_1455"]["job_ids"] == [
+        "sync_low_suction_swing_entries"
+    ]
+    assert schedules["low_suction_preview_hourly"]["cron"] == (
+        "30 9,10,11,13,14 * * 1-5"
+    )
+    assert schedules["low_suction_preview_hourly"]["job_ids"] == [
+        "sync_low_suction_swing_preview"
+    ]
+    assert all(
+        schedules[schedule_id]["action"] == "low_suction_swing"
+        for schedule_id in (
+            "low_suction_open_0931",
+            "low_suction_preview_hourly",
+            "low_suction_signal_1450",
+            "low_suction_entry_1455",
+        )
+    )
+
+
+def test_low_suction_settlement_runs_after_daily_bars_in_both_eod_batches():
+    schedules = {row["id"]: row for row in svc.DEFAULT_BATCH_SCHEDULES}
+    for schedule_id in ("eod_1900", "eod_finalize_2130"):
+        jobs = schedules[schedule_id]["job_ids"]
+        assert "sync_low_suction_swing_settlement" in jobs
+        assert jobs.index("sync_low_suction_swing_settlement") > jobs.index(
+            "sync_stock_daily_bars"
+        )
+
+
+def test_low_suction_exact_schedules_never_catch_up():
+    schedule = next(
+        row
+        for row in svc.DEFAULT_BATCH_SCHEDULES
+        if row["id"] == "low_suction_signal_1450"
+    )
+
+    assert svc._schedule_catchup_due(
+        schedule,
+        datetime.fromisoformat("2026-07-20T15:10:00+08:00"),
+    ) is False
 
 
 def test_auction_schedule_captures_the_finished_call_auction_before_continuous_trading():
@@ -253,6 +318,42 @@ def test_stock_sector_snapshot_skips_when_today_is_not_a_reliable_session(
     assert rebuilt == []
 
 
+def test_stock_sector_snapshot_skips_completed_automatic_session(monkeypatch):
+    now = datetime.fromisoformat("2026-07-20T21:35:00+08:00")
+
+    monkeypatch.setattr(svc, "_now_china", lambda: now)
+    monkeypatch.setattr(
+        svc,
+        "_latest_complete_daily_date_for_research",
+        lambda: now.date(),
+    )
+    monkeypatch.setattr(
+        svc,
+        "_completed_stock_sector_membership_session_coverage",
+        lambda snapshot_date: {
+            "status": "complete",
+            "snapshot_date": snapshot_date.isoformat(),
+            "scope_count": 2,
+            "row_count": 86_946,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        svc,
+        "_rebuild_stock_sector_memberships",
+        lambda: pytest.fail("completed automatic session must not rebuild"),
+    )
+
+    result = svc.DataSyncRunner()._run_sync_stock_sector_memberships(
+        {"skip_complete_session": True}
+    )
+
+    assert result["status"] == "skipped"
+    assert result["rows_written"] == 0
+    assert result["snapshot_rows_written"] == 0
+    assert result["session_coverage"]["row_count"] == 86_946
+
+
 def test_stock_sector_rebuild_keeps_the_previous_index_when_source_is_empty(monkeypatch):
     replaced: list[list[dict[str, Any]]] = []
 
@@ -297,6 +398,55 @@ def test_sector_fund_flow_sync_passes_the_real_capture_time_to_snapshot_writer(m
         datetime(2026, 7, 13, 2, 30, 42, tzinfo=timezone.utc),
         datetime(2026, 7, 13, 2, 30, 42, tzinfo=timezone.utc),
     ]
+
+
+def test_sector_fund_flow_upsert_uses_two_bulk_statements(monkeypatch):
+    executions = []
+    saved = []
+
+    class FakeResult:
+        def first(self):
+            return None
+
+    class FakeSession:
+        def execute(self, statement, params=None):
+            executions.append((statement, params))
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        svc.market_snapshot_repository,
+        "save_sector_fund_flow_snapshots",
+        lambda items, **kwargs: saved.append((items, kwargs)),
+    )
+    items = [
+        {
+            "id": "BK0001",
+            "name": "概念一",
+            "trade_date": "2026-07-20",
+            "main_net_inflow": 1.0,
+        },
+        {
+            "id": "BK0002",
+            "name": "概念二",
+            "trade_date": "2026-07-20",
+            "main_net_inflow": 2.0,
+        },
+    ]
+
+    written = svc._upsert_sector_fund_flows(items, "即时", "concept")
+
+    assert written == 2
+    assert [statement.table.name for statement, _ in executions] == [
+        "sectors",
+        "sector_fund_flows",
+    ]
+    assert [len(params) for _, params in executions] == [2, 2]
+    assert len(saved) == 1
 
 
 def test_auction_sync_filters_to_main_board_and_requires_a_current_market_clock(monkeypatch):
@@ -380,7 +530,7 @@ def test_seed_default_registry_deletes_disabled_non_default_schedules(monkeypatc
     }
 
     class FakeResult:
-        def __init__(self, row=object()):
+        def __init__(self, row=None):
             self.row = row
 
         def first(self):
@@ -447,7 +597,7 @@ def test_seed_default_registry_clears_stale_partial_summary(monkeypatch):
     }
 
     class FakeResult:
-        def __init__(self, row=object()):
+        def __init__(self, row=None):
             self.row = row
 
         def first(self):
@@ -513,7 +663,7 @@ def test_seed_default_registry_deletes_legacy_schedules(monkeypatch):
     }
 
     class FakeResult:
-        def __init__(self, row=object()):
+        def __init__(self, row=None):
             self.row = row
 
         def first(self):
@@ -575,6 +725,7 @@ def test_intraday_schedule_contains_intraday_jobs():
     hourly = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "intraday_hourly")
     assert hourly["action"] == "sync"
     assert hourly["cron"] == "30 9,10,11,13,14 * * 1-5"
+    assert hourly["concurrency"] == 2
     assert "sync_sector_fund_flows" in hourly["job_ids"]
     assert "sync_stock_fund_flows" in hourly["job_ids"]
     assert "sync_stock_hot_ranks" in hourly["job_ids"]
@@ -592,8 +743,29 @@ def test_limit_up_live_scan_is_a_separate_append_only_schedule():
     assert live_scan["cron"] == "* 9-14 * * 1-5"
     assert live_scan["job_ids"] == []
     assert "sync_limit_up_pools" not in live_scan["job_ids"]
-    assert svc.LIVE_SCAN_INTERVAL_SECONDS == 15
-    assert svc.SCHEDULER_TICK_SECONDS <= 5
+    assert svc.LIVE_SCAN_INTERVAL_SECONDS == 10
+    assert svc.SCHEDULER_TICK_SECONDS == 2
+
+
+def test_scheduler_uses_slow_tick_outside_live_scan_window() -> None:
+    shanghai = timezone(timedelta(hours=8))
+
+    assert svc._scheduler_tick_seconds(
+        datetime(2026, 7, 20, 10, 0, tzinfo=shanghai)
+    ) == svc.SCHEDULER_TICK_SECONDS
+    assert svc._scheduler_tick_seconds(
+        datetime(2026, 7, 20, 12, 0, tzinfo=shanghai)
+    ) == svc.SCHEDULER_IDLE_TICK_SECONDS
+    assert svc._scheduler_tick_seconds(
+        datetime(2026, 7, 20, 21, 30, tzinfo=shanghai)
+    ) == svc.SCHEDULER_IDLE_TICK_SECONDS
+
+
+def test_heavy_default_schedules_use_bounded_concurrency():
+    schedules = {row["id"]: row for row in svc.DEFAULT_BATCH_SCHEDULES}
+
+    assert schedules["eod_1900"]["concurrency"] == 1
+    assert schedules["eod_finalize_2130"]["concurrency"] == 1
 
 
 def test_limit_up_concept_scan_is_independent_and_throttled_to_30_seconds():
@@ -691,15 +863,17 @@ def test_eod_schedule_runs_market_data_and_limit_up_planning():
         "sync_stock_list",
         "sync_sector_fund_flows",
         "sync_stock_fund_flows",
-        "sync_stock_daily_bars",
-        "sync_index_daily_bars",
-        "sync_sector_list",
+            "sync_stock_daily_bars",
+            "sync_index_daily_bars",
+            "sync_low_suction_swing_settlement",
+            "sync_sector_list",
         "sync_sector_daily_bars",
         "sync_sector_period_scores",
         "sync_sector_members",
         "sync_stock_sector_memberships",
         "sync_low_suction_security_snapshot",
         "sync_low_suction_forward_top3",
+        "sync_low_suction_forward_ma5_shadow",
         "sync_limit_up_pools",
         "sync_limit_up_radar_minutes",
         "sync_stock_lhb_records",
@@ -721,6 +895,7 @@ def test_eod_finalize_schedule_retries_daily_bars_late_without_slow_jobs():
     assert jobs == [
         "sync_stock_daily_bars",
         "sync_index_daily_bars",
+        "sync_low_suction_swing_settlement",
         "sync_sector_fund_flows",
         "sync_stock_fund_flows",
         "sync_sector_list",
@@ -730,17 +905,54 @@ def test_eod_finalize_schedule_retries_daily_bars_late_without_slow_jobs():
         "sync_stock_sector_memberships",
         "sync_low_suction_security_snapshot",
         "sync_low_suction_forward_top3",
+        "sync_low_suction_forward_ma5_shadow",
         "sync_limit_up_pools",
         svc.LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID,
         "sync_limit_up_event_minutes",
         "sync_limit_up_radar_minutes",
         svc.LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID,
+        "sync_limit_up_preboard_point_trigger",
         svc.LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID,
         svc.LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID,
     ]
     assert "sync_stock_financial_quarterly" not in jobs
     assert "sync_stock_lhb_records" not in jobs
     assert "sync_stock_notices" not in jobs
+
+
+def test_point_trigger_freeze_runs_only_in_2130_after_reliable_inputs(monkeypatch):
+    job = next(
+        item
+        for item in svc.DEFAULT_JOBS
+        if item.id == "sync_limit_up_preboard_point_trigger"
+    )
+    schedules = {row["id"]: row for row in svc.DEFAULT_BATCH_SCHEDULES}
+    finalize_jobs = schedules["eod_finalize_2130"]["job_ids"]
+
+    assert job.source_id == "alphaagent_local"
+    assert job.target_table == "limit_up_preboard_point_day_scopes"
+    assert svc.JOB_RUNNERS[job.id] == "_run_sync_limit_up_preboard_point_trigger"
+    assert job.id not in schedules["eod_1900"]["job_ids"]
+    assert finalize_jobs.index(job.id) > finalize_jobs.index("sync_stock_daily_bars")
+    assert finalize_jobs.index(job.id) > finalize_jobs.index(
+        "sync_limit_up_radar_minutes"
+    )
+
+    monkeypatch.setattr(
+        svc.preboard_point_trigger_service,
+        "sync_limit_up_preboard_point_trigger",
+        lambda: {
+            "status": "collecting_fit",
+            "complete_day_count": 3,
+            "rows_written": 120,
+            "message": "collecting",
+        },
+    )
+
+    result = svc.DataSyncRunner()._run_sync_limit_up_preboard_point_trigger({})
+
+    assert result["point_trigger_status"] == "collecting_fit"
+    assert result["rows_written"] == 120
 
 
 def test_low_suction_security_snapshot_job_is_registered_and_scheduled():
@@ -837,6 +1049,43 @@ def test_low_suction_security_snapshot_writes_complete_provider_result(monkeypat
     assert result["suspended_rows"] == 34
 
 
+def test_low_suction_security_snapshot_skips_completed_automatic_session(
+    monkeypatch,
+):
+    now = datetime.fromisoformat("2026-07-20T21:35:00+08:00")
+
+    monkeypatch.setattr(svc, "_now_china", lambda: now)
+    monkeypatch.setattr(
+        svc,
+        "_latest_complete_daily_date_for_research",
+        lambda: now.date(),
+    )
+    monkeypatch.setattr(
+        svc,
+        "_completed_low_suction_security_session_coverage",
+        lambda source_trade_date: {
+            "status": "complete",
+            "source_trade_date": source_trade_date.isoformat(),
+            "expected_symbol_count": 3_191,
+            "returned_symbol_count": 3_191,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        svc.baostock_security_source,
+        "fetch_forward_security_snapshot",
+        lambda **kwargs: pytest.fail("completed automatic session must not refetch"),
+    )
+
+    result = svc.DataSyncRunner()._run_sync_low_suction_security_snapshot(
+        {"skip_complete_session": True}
+    )
+
+    assert result["status"] == "skipped"
+    assert result["rows_written"] == 0
+    assert result["session_coverage"]["returned_symbol_count"] == 3_191
+
+
 def test_low_suction_security_snapshot_provider_gap_fails_closed(monkeypatch):
     now = datetime.fromisoformat("2026-07-16T19:08:00+08:00")
     monkeypatch.setattr(svc, "_now_china", lambda: now)
@@ -886,6 +1135,131 @@ def test_low_suction_forward_top3_job_is_registered_after_strict_sources():
         assert jobs.index("sync_low_suction_security_snapshot") < jobs.index(job.id)
 
 
+def test_low_suction_cross_regime_forward_is_registered_after_top3():
+    job = next(
+        item
+        for item in svc.DEFAULT_JOBS
+        if item.id == "sync_low_suction_forward_ma5_shadow"
+    )
+
+    assert job.source_id == "alphaagent_local"
+    assert job.target_table == "low_suction_forward_ma5_candidates"
+    assert svc.JOB_RUNNERS[job.id] == "_run_sync_low_suction_forward_ma5_shadow"
+    assert job.name == "低吸研究跨行情因果前向"
+    assert svc.JOB_CADENCES[job.id].freshness_table == (
+        "low_suction_forward_ma5_scopes"
+    )
+    for schedule_id in ("eod_1900", "eod_finalize_2130"):
+        schedule = next(
+            item for item in svc.DEFAULT_BATCH_SCHEDULES if item["id"] == schedule_id
+        )
+        jobs = schedule["job_ids"]
+        assert jobs.index("sync_low_suction_forward_top3") < jobs.index(job.id)
+
+
+def test_low_suction_cross_regime_forward_advances_natural_complete_session(monkeypatch):
+    now = datetime.fromisoformat("2026-07-17T19:00:00+08:00")
+    as_of_date = date(2026, 7, 17)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(svc, "_now_china", lambda: now)
+    monkeypatch.setattr(
+        svc,
+        "_latest_complete_daily_date_for_research",
+        lambda: as_of_date,
+    )
+
+    def fake_advance(*, as_of_date, attempted_at):
+        captured.update({"as_of_date": as_of_date, "attempted_at": attempted_at})
+        return {
+            "captures": [
+                {
+                    "complete": False,
+                    "candidate_rows": 0,
+                    "signal_rows": 0,
+                }
+            ],
+            "blocking_reasons": ["strict_forward_inputs_incomplete"],
+            "outcomes": {
+                "evaluated": 2,
+                "inserted": 0,
+                "updated": 2,
+                "terminal_preserved": 0,
+            },
+            "formal_metrics": None,
+        }
+
+    monkeypatch.setattr(
+        svc.causal_leader_pullback_forward_repository,
+        "advance_causal_forward",
+        fake_advance,
+    )
+
+    result = svc.DataSyncRunner()._run_sync_low_suction_forward_ma5_shadow({})
+
+    assert captured == {"as_of_date": as_of_date, "attempted_at": now}
+    assert result["status"] == "skipped"
+    assert result["rows_read"] == 3
+    assert result["rows_written"] == 2
+    assert result["recommendations_created"] == 0
+    assert result["orders_created"] == 0
+    assert "strict_forward_inputs_incomplete" in result["message"]
+
+
+def test_low_suction_forward_ma5_shadow_skips_without_completed_daily_session(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        svc,
+        "_latest_complete_daily_date_for_research",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        svc.causal_leader_pullback_forward_repository,
+        "advance_causal_forward",
+        lambda **kwargs: pytest.fail("empty database must not advance MA5 shadow"),
+    )
+
+    result = svc.DataSyncRunner()._run_sync_low_suction_forward_ma5_shadow({})
+
+    assert result["status"] == "skipped"
+    assert result["rows_read"] == 0
+    assert result["rows_written"] == 0
+
+
+def test_low_suction_forward_ma5_minutes_is_manual_and_registered(monkeypatch):
+    job = next(
+        item
+        for item in svc.DEFAULT_JOBS
+        if item.id == "sync_low_suction_forward_ma5_minutes"
+    )
+    assert all(
+        job.id not in schedule["job_ids"]
+        for schedule in svc.DEFAULT_BATCH_SCHEDULES
+    )
+
+    monkeypatch.setattr(
+        svc.forward_ma5_minutes,
+        "backfill_forward_ma5_signal_5m",
+        lambda **kwargs: {
+            "status": "ready",
+            "rows_read": 48,
+            "rows_written": 48,
+            "requested_missing_pairs": 1,
+        },
+    )
+
+    result = svc.DataSyncRunner()._run_sync_low_suction_forward_ma5_minutes(
+        job.default_params
+    )
+
+    assert job.source_id == "tdx_public_hq"
+    assert job.target_table == "stock_minute_bars"
+    assert result["rows_read"] == 48
+    assert result["rows_written"] == 48
+    assert result["recommendations_created"] == 0
+    assert result["orders_created"] == 0
+
+
 def test_eod_schedule_passes_incremental_concept_index_params() -> None:
     schedule = next(
         item for item in svc.DEFAULT_BATCH_SCHEDULES if item["id"] == "eod_1900"
@@ -899,10 +1273,29 @@ def test_eod_schedule_passes_incremental_concept_index_params() -> None:
 
     assert params == {
         "jobs": {
+            "sync_stock_daily_bars": {
+                "skip_complete_session": True,
+            },
             "sync_sector_daily_bars": {
                 "limit": 30,
                 "sector_types": ["concept", "theme"],
-            }
+                "skip_complete_session": True,
+            },
+            "sync_sector_period_scores": {
+                "skip_complete_session": True,
+            },
+            "sync_sector_members": {
+                "skip_complete_session": True,
+            },
+            "sync_stock_sector_memberships": {
+                "skip_complete_session": True,
+            },
+            "sync_low_suction_security_snapshot": {
+                "skip_complete_session": True,
+            },
+            "sync_low_suction_forward_top3": {
+                "skip_complete_session": True,
+            },
         }
     }
 
@@ -968,6 +1361,45 @@ def test_low_suction_forward_top3_freezes_current_complete_session(monkeypatch):
     assert result["rows_written"] == 360
     assert result["top3_rows"] == 90
     assert "status" not in result
+
+
+def test_low_suction_forward_top3_skips_completed_automatic_session(monkeypatch):
+    now = datetime.fromisoformat("2026-07-20T21:35:00+08:00")
+
+    monkeypatch.setattr(svc, "_now_china", lambda: now)
+    monkeypatch.setattr(
+        svc,
+        "_latest_complete_daily_date_for_research",
+        lambda: now.date(),
+    )
+    monkeypatch.setattr(
+        svc,
+        "_completed_forward_top3_session_coverage",
+        lambda source_trade_date: {
+            "status": "complete",
+            "source_trade_date": source_trade_date.isoformat(),
+            "mode_count": 3,
+            "ranked_row_count": 2_291,
+            "top3_row_count": 302,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        svc.forward_leader_identity,
+        "freeze_forward_leader_source",
+        lambda *args, **kwargs: pytest.fail(
+            "completed automatic session must not recompute Top3"
+        ),
+    )
+
+    result = svc.DataSyncRunner()._run_sync_low_suction_forward_top3(
+        {"skip_complete_session": True}
+    )
+
+    assert result["status"] == "skipped"
+    assert result["rows_written"] == 0
+    assert result["top3_rows"] == 302
+    assert result["session_coverage"]["mode_count"] == 3
 
 
 def test_low_suction_forward_top3_exposes_closed_scope_as_skipped(monkeypatch):
@@ -1116,6 +1548,127 @@ def test_limit_up_radar_minute_backfill_job_fails_closed(
         )
 
 
+def test_preboard_hazard_minute_backfill_is_manual_and_registered(monkeypatch) -> None:
+    from alphaagent.server.services.limit_up import preboard_hazard_data
+
+    job = next(
+        item
+        for item in svc.DEFAULT_JOBS
+        if item.id == "sync_limit_up_preboard_hazard_minutes"
+    )
+    captured: dict[str, object] = {}
+
+    assert job.source_id == "tdx_public_hq"
+    assert job.target_table == "stock_minute_bars"
+    assert job.default_params == {
+        "session_count": 60,
+        "max_gaps": 2000,
+        "dry_run": False,
+    }
+    assert svc.JOB_RUNNERS[job.id] == "_run_sync_limit_up_preboard_hazard_minutes"
+    assert all(
+        job.id not in schedule["job_ids"]
+        for schedule in svc.DEFAULT_BATCH_SCHEDULES
+    )
+
+    def fake_backfill(*, session_count: int, max_gaps: int, dry_run: bool):
+        captured.update(
+            {
+                "session_count": session_count,
+                "max_gaps": max_gaps,
+                "dry_run": dry_run,
+            }
+        )
+        return {
+            "status": "ready",
+            "rows_read": 480,
+            "rows_written": 480,
+            "requested_gap_count": 2,
+            "covered_gap_count": 2,
+            "message": "ready",
+        }
+
+    monkeypatch.setattr(
+        preboard_hazard_data,
+        "backfill_preboard_hazard_minutes",
+        fake_backfill,
+    )
+
+    result = svc.DataSyncRunner()._run_sync_limit_up_preboard_hazard_minutes(
+        job.default_params
+    )
+
+    assert captured == {
+        "session_count": 60,
+        "max_gaps": 2000,
+        "dry_run": False,
+    }
+    assert result["rows_written"] == 480
+    assert result["backfill_status"] == "ready"
+
+
+def test_preboard_transaction_backfill_is_manual_and_registered(monkeypatch) -> None:
+    from alphaagent.server.services.limit_up import preboard_transaction_data
+
+    job = next(
+        item
+        for item in svc.DEFAULT_JOBS
+        if item.id == "sync_limit_up_preboard_transaction_features"
+    )
+    captured: dict[str, object] = {}
+
+    assert job.source_id == "tdx_public_hq"
+    assert job.target_table == "limit_up_transaction_features"
+    assert job.default_params == {
+        "session_count": 89,
+        "max_pairs": 500,
+        "dry_run": False,
+    }
+    assert svc.JOB_RUNNERS[job.id] == (
+        "_run_sync_limit_up_preboard_transaction_features"
+    )
+    assert all(
+        job.id not in schedule["job_ids"]
+        for schedule in svc.DEFAULT_BATCH_SCHEDULES
+    )
+
+    def fake_backfill(*, session_count: int, max_pairs: int, dry_run: bool):
+        captured.update(
+            {
+                "session_count": session_count,
+                "max_pairs": max_pairs,
+                "dry_run": dry_run,
+            }
+        )
+        return {
+            "status": "partial",
+            "rows_read": 8_000,
+            "rows_written": 362,
+            "requested_gap_count": 2,
+            "covered_gap_count": 2,
+            "remaining_pending_pair_count": 10,
+            "message": "partial",
+        }
+
+    monkeypatch.setattr(
+        preboard_transaction_data,
+        "backfill_preboard_transaction_features",
+        fake_backfill,
+    )
+
+    result = svc.DataSyncRunner()._run_sync_limit_up_preboard_transaction_features(
+        job.default_params
+    )
+
+    assert captured == {
+        "session_count": 89,
+        "max_pairs": 500,
+        "dry_run": False,
+    }
+    assert result["rows_written"] == 362
+    assert result["backfill_status"] == "partial"
+
+
 def test_limit_up_exit_minute_backfill_job_is_limited_and_registered(monkeypatch):
     job = next(item for item in svc.DEFAULT_JOBS if item.id == "sync_limit_up_exit_minutes")
     captured: dict[str, object] = {}
@@ -1211,6 +1764,40 @@ def test_sector_period_scores_default_to_latest_complete_daily_date(monkeypatch)
 
     assert captured == {"as_of_date": date(2026, 6, 26), "periods": ["20d"], "sector_limit": 0}
     assert result["message"] == "as_of_date=2026-06-26"
+
+
+def test_sector_period_scores_skips_completed_automatic_session(monkeypatch):
+    as_of = date(2026, 7, 20)
+
+    monkeypatch.setattr(
+        svc,
+        "_latest_complete_daily_date_for_research",
+        lambda: as_of,
+    )
+    monkeypatch.setattr(
+        svc,
+        "_completed_sector_score_session_coverage",
+        lambda score_date, periods: {
+            "status": "complete",
+            "as_of_date": score_date.isoformat(),
+            "expected_sector_count": 994,
+            "period_counts": {period: 994 for period in periods},
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        svc.research_sector_scores,
+        "compute_and_persist",
+        lambda **kwargs: pytest.fail("completed automatic session must not recompute"),
+    )
+
+    result = svc.DataSyncRunner(adapter=object())._run_sync_sector_period_scores(
+        {"periods": ["20d"], "skip_complete_session": True}
+    )
+
+    assert result["status"] == "skipped"
+    assert result["rows_written"] == 0
+    assert result["session_coverage"]["period_counts"] == {"20d": 994}
 
 
 def test_compute_sector_period_scores_defaults_to_latest_complete_daily_date(monkeypatch):
@@ -1309,14 +1896,101 @@ def test_recover_interrupted_schedules_runs_only_still_interrupted(monkeypatch):
         },
         "eod_finalize_2130": None,
     }
-    recovered: list[str] = []
+    recovered: list[tuple[str, str]] = []
 
     monkeypatch.setattr(svc, "_load_recoverable_interrupted_schedule", lambda schedule_id: rows.get(schedule_id), raising=False)
-    monkeypatch.setattr(svc, "_run_schedule_action", lambda row: recovered.append(row["id"]))
+    monkeypatch.setattr(
+        svc,
+        "_run_schedule_action",
+        lambda row, *, source="schedule": recovered.append((row["id"], source)),
+    )
+    monkeypatch.setattr(
+        svc,
+        "_now_china",
+        lambda: datetime.fromisoformat("2026-07-20T19:05:00+08:00"),
+    )
 
     svc._recover_interrupted_schedules(["eod_1900", "eod_finalize_2130"])
 
-    assert recovered == ["eod_1900"]
+    assert recovered == [("eod_1900", "recovery")]
+
+
+def test_interrupted_schedule_resumes_only_pending_jobs(monkeypatch):
+    started_at = datetime.fromisoformat("2026-07-20T21:30:00+08:00")
+    row = {
+        "job_ids": ["stock_bars", "index_bars", "sector_bars", "scores"],
+        "last_started_at": started_at,
+    }
+    captured: list[tuple[list[str], datetime]] = []
+
+    def fake_successful_jobs(job_ids, since):
+        captured.append((job_ids, since))
+        return {"stock_bars", "index_bars"}
+
+    monkeypatch.setattr(
+        svc,
+        "_successful_sync_job_ids_since",
+        fake_successful_jobs,
+        raising=False,
+    )
+
+    pending = svc._remaining_interrupted_schedule_jobs(row)
+
+    assert pending == ["sector_bars", "scores"]
+    assert captured == [
+        (["stock_bars", "index_bars", "sector_bars", "scores"], started_at)
+    ]
+
+
+def test_recover_interrupted_eod_waits_for_its_scheduled_time(monkeypatch):
+    row = {
+        "id": "eod_1900",
+        "cron": "0 19 * * 1-5",
+        "enabled": True,
+        "action": "sync",
+        "job_ids": ["sync_stock_daily_bars"],
+        "concurrency": 8,
+        "last_status": "failed",
+        "last_message": svc.INTERRUPTED_SCHEDULE_MESSAGE,
+    }
+    recovered: list[str] = []
+    monkeypatch.setattr(
+        svc,
+        "_load_recoverable_interrupted_schedule",
+        lambda _schedule_id: row,
+    )
+    monkeypatch.setattr(
+        svc,
+        "_now_china",
+        lambda: datetime.fromisoformat("2026-07-20T13:30:00+08:00"),
+    )
+    monkeypatch.setattr(
+        svc,
+        "_run_schedule_action",
+        lambda value: recovered.append(str(value["id"])),
+    )
+
+    svc._recover_interrupted_schedules(["eod_1900"])
+
+    assert recovered == []
+
+
+def test_primary_eod_recovery_defers_to_2130_retry_after_2100() -> None:
+    primary = {"id": "eod_1900", "cron": "0 19 * * 1-5"}
+    retry = {"id": "eod_finalize_2130", "cron": "30 21 * * 1-5"}
+
+    assert svc._interrupted_schedule_recovery_due(
+        primary,
+        datetime.fromisoformat("2026-07-20T20:59:00+08:00"),
+    ) is True
+    assert svc._interrupted_schedule_recovery_due(
+        primary,
+        datetime.fromisoformat("2026-07-20T21:00:00+08:00"),
+    ) is False
+    assert svc._interrupted_schedule_recovery_due(
+        retry,
+        datetime.fromisoformat("2026-07-20T21:31:00+08:00"),
+    ) is True
 
 
 def test_start_interrupted_schedule_recovery_drains_queue(monkeypatch):
@@ -1380,11 +2054,47 @@ def test_start_sync_batch_accepts_custom_job_ids(monkeypatch):
     assert captured["job_ids"] == ["sync_stock_list", "sync_stock_daily_bars"]
 
 
+def test_recovery_batch_preserves_original_schedule_start(monkeypatch):
+    touches: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_run_batch(
+        batch_id,
+        params,
+        *,
+        concurrency=8,
+        source="manual",
+        schedule_id=None,
+    ):
+        del params, concurrency, source, schedule_id
+        svc._SYNC_BATCHES[batch_id]["status"] = "succeeded"
+
+    monkeypatch.setattr(svc, "_run_sync_batch", fake_run_batch)
+    monkeypatch.setattr(svc, "is_database_configured", lambda: True)
+    monkeypatch.setattr(
+        svc,
+        "_touch_schedule",
+        lambda schedule_id, **values: touches.append((schedule_id, values)),
+    )
+    svc._SYNC_BATCHES.clear()
+    svc._LATEST_BATCH_ID = None
+
+    svc.start_sync_batch(
+        job_ids=["sync_stock_daily_bars"],
+        source="recovery",
+        schedule_id="eod_finalize_2130",
+    )
+
+    assert touches == [
+        ("eod_finalize_2130", {"last_status": "running"})
+    ]
+
+
 def test_start_sync_batch_explicit_empty_job_ids_does_not_fallback(monkeypatch):
     captured = {}
 
     def fake_run_batch(batch_id, params, *, concurrency=8, source="manual", schedule_id=None):
         captured["job_ids"] = params.get("_job_ids")
+        captured["concurrency"] = concurrency
         b = svc._SYNC_BATCHES[batch_id]
         b["status"] = "succeeded"
 
@@ -1395,6 +2105,29 @@ def test_start_sync_batch_explicit_empty_job_ids_does_not_fallback(monkeypatch):
 
     assert result["total_jobs"] == 0
     assert captured["job_ids"] == []
+    assert captured["concurrency"] == 2
+
+
+def test_run_job_builds_runner_with_safe_default_concurrency(monkeypatch):
+    captured = {}
+
+    class FakeRunner:
+        def __init__(self, adapter=None, progress=None, concurrency=8):
+            del adapter, progress
+            captured["concurrency"] = concurrency
+
+        def _run_sync_stock_list(self, params):
+            captured["params"] = params
+            return {"rows_read": 0, "rows_written": 0}
+
+    monkeypatch.setattr(svc, "is_database_configured", lambda: True)
+    monkeypatch.setattr(svc, "DataSyncRunner", FakeRunner)
+    monkeypatch.setattr(svc, "_create_run", lambda *_args: 1)
+    monkeypatch.setattr(svc, "_finish_run", lambda *_args, **_kwargs: None)
+
+    svc.run_job("sync_stock_list", {})
+
+    assert captured["concurrency"] == 2
 
 
 def test_sync_schedule_requires_job_ids():
@@ -1469,6 +2202,11 @@ def test_limit_up_history_rebuild_batch_job_skips_current_ledger(monkeypatch):
             "persisted_end": "2026-07-10",
         },
     )
+    monkeypatch.setattr(
+        history_service,
+        "start_backtest_cache_warmup",
+        lambda: pytest.fail("scheduled history checks must not eagerly warm backtests"),
+    )
 
     result = svc._run_limit_up_history_rebuild_batch_job()
 
@@ -1506,15 +2244,15 @@ def test_limit_up_history_rebuild_batch_job_forwards_force(monkeypatch):
     assert result["rows_written"] == 600
 
 
-def test_batch_continues_after_job_failure(monkeypatch):
+def test_batch_continues_after_job_failure_and_forwards_concurrency(monkeypatch):
     import time
 
     svc._SYNC_BATCHES.clear()
     svc._LATEST_BATCH_ID = None
     calls = []
 
-    def fake_run_job(job_id, params=None, progress=None):
-        calls.append(job_id)
+    def fake_run_job(job_id, params=None, progress=None, *, concurrency=8):
+        calls.append((job_id, concurrency))
         if job_id == "bad":
             raise RuntimeError("boom")
         return {"rows_read": 1, "rows_written": 1}
@@ -1522,7 +2260,10 @@ def test_batch_continues_after_job_failure(monkeypatch):
     monkeypatch.setattr(svc, "run_job", fake_run_job)
     monkeypatch.setattr(svc, "is_database_configured", lambda: True)
 
-    result = svc.start_sync_batch(job_ids=["good_a", "bad", "good_b"])
+    result = svc.start_sync_batch(
+        job_ids=["good_a", "bad", "good_b"],
+        concurrency=2,
+    )
 
     batch = svc.get_sync_batch(result["id"])
     for _ in range(200):
@@ -1534,7 +2275,8 @@ def test_batch_continues_after_job_failure(monkeypatch):
     assert batch["status"] == "partial"          # 1 failed, 2 succeeded
     assert batch["failed_jobs"] == 1
     assert batch["succeeded_jobs"] == 2
-    assert "good_b" in calls                      # continues after failure
+    assert ("good_b", 2) in calls                 # continues after failure
+    assert {concurrency for _, concurrency in calls} == {2}
 
 
 # ── Task 5: per-job inner concurrency (ThreadPoolExecutor) ─
@@ -1597,6 +2339,110 @@ def test_stock_daily_incremental_refreshes_recent_window(monkeypatch):
 
     assert result == {"rows_read": 1, "rows_written": 1}
     assert captured_start_dates == ["2026-06-21"]
+
+
+def test_scheduled_stock_daily_sync_skips_complete_session(monkeypatch):
+    stock_rows = [
+        {"symbol": f"60000{index}", "exchange": "SSE", "name": "A"}
+        for index in range(4)
+    ]
+
+    class FakeAdapter:
+        def stock_bars(self, *args, **kwargs):
+            del args, kwargs
+            pytest.fail("complete session must not fetch the full market again")
+
+    monkeypatch.setattr(
+        svc,
+        "_select_daily_bar_stocks",
+        lambda symbols, stock_limit: stock_rows,
+    )
+    monkeypatch.setattr(
+        svc,
+        "_stock_daily_history_bootstrap_plan",
+        lambda **_kwargs: {
+            "required": False,
+            "reliable_trade_days_before": 750,
+            "target_trade_days": 750,
+            "request_limit": 800,
+        },
+    )
+    monkeypatch.setattr(
+        svc,
+        "_completed_stock_daily_session_coverage",
+        lambda _total_stocks: {
+            "status": "complete",
+            "target_trade_date": "2026-07-20",
+            "symbol_count": 4,
+            "min_symbol_count": 3,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(svc, "_last_bar_dates_daily", lambda _symbols: {})
+
+    result = svc.DataSyncRunner(
+        adapter=FakeAdapter(),
+        concurrency=1,
+    )._run_sync_stock_daily_bars(
+        {
+            "limit": 250,
+            "incremental": True,
+            "skip_complete_session": True,
+        }
+    )
+
+    assert result == {
+        "status": "skipped",
+        "rows_read": 0,
+        "rows_written": 0,
+        "session_coverage": {
+            "status": "complete",
+            "target_trade_date": "2026-07-20",
+            "symbol_count": 4,
+            "min_symbol_count": 3,
+        },
+        "message": "2026-07-20 日线已完整覆盖 4/3 只，跳过重复全市场同步",
+    }
+
+
+def test_completed_stock_daily_session_uses_previous_cross_section(monkeypatch):
+    target_date = date(2026, 7, 20)
+    reference_date = date(2026, 7, 17)
+    session = object()
+
+    @contextmanager
+    def fake_session_scope():
+        yield session
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        svc,
+        "completed_daily_bar_cutoff",
+        lambda _at: target_date,
+    )
+    monkeypatch.setattr(
+        svc,
+        "_latest_complete_daily_date_before",
+        lambda current_session, before_date, min_symbol_count: reference_date,
+    )
+    monkeypatch.setattr(
+        svc,
+        "_stock_daily_symbol_count",
+        lambda current_session, trade_date: (
+            5_531 if trade_date == target_date else 5_529
+        ),
+    )
+
+    result = svc._completed_stock_daily_session_coverage(5_878)
+
+    assert result == {
+        "status": "complete",
+        "target_trade_date": "2026-07-20",
+        "symbol_count": 5_531,
+        "min_symbol_count": int(5_529 * 0.95),
+        "reference_trade_date": "2026-07-17",
+        "reference_symbol_count": 5_529,
+    }
 
 
 def test_stock_daily_history_bootstrap_targets_strict_three_year_buffer():
@@ -1987,6 +2833,194 @@ def test_sector_members_syncs_concurrently(monkeypatch):
 
     assert active["peak"] >= 2, f"应并发执行,peak={active['peak']}"
     assert len(seen) == 12
+
+
+def test_sector_members_sync_reuses_fresh_members_for_forward_capture(monkeypatch):
+    observed_at = datetime(2026, 7, 20, 11, 30, tzinfo=timezone.utc)
+    sector_rows = [
+        {
+            "id": "BK0001",
+            "type": "concept",
+            "name": "Fresh",
+            "members_refreshed_at": observed_at - timedelta(days=2),
+        }
+    ]
+    cached_members = {
+        "BK0001": (
+            {
+                "vt_symbol": "600000.SSE",
+                "symbol": "600000",
+                "exchange": "SSE",
+                "source": "eastmoney.push2.board",
+            },
+        )
+    }
+    remote_calls: list[str] = []
+    saved_captures: list[dict[str, object]] = []
+
+    class FakeAdapter:
+        def sector_stocks(self, sector_id, **kwargs):
+            del kwargs
+            remote_calls.append(sector_id)
+            raise AssertionError("fresh sector must not call the provider")
+
+    class FakeResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return sector_rows
+
+    class FakeSession:
+        def execute(self, statement):
+            del statement
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        svc,
+        "_load_sector_rows_with_member_freshness",
+        lambda: sector_rows,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        svc,
+        "_load_cached_sector_memberships",
+        lambda sector_ids: cached_members if set(sector_ids) == {"BK0001"} else {},
+        raising=False,
+    )
+    monkeypatch.setattr(svc, "_now_china", lambda: observed_at)
+    monkeypatch.setattr(
+        svc,
+        "_save_low_suction_forward_membership_capture",
+        lambda **kwargs: saved_captures.append(kwargs),
+    )
+    monkeypatch.setattr(svc, "_delete_sector_memberships", lambda sector_ids: 0)
+
+    result = svc.DataSyncRunner(
+        adapter=FakeAdapter(),
+        concurrency=1,
+    )._run_sync_sector_members({"page_size": 50})
+
+    assert remote_calls == []
+    assert result["status"] == "skipped"
+    assert result["requested_sector_count"] == 0
+    assert result["refreshed_sector_count"] == 0
+    assert result["reused_sector_count"] == 1
+    assert saved_captures[0]["members_by_sector"] == cached_members
+
+
+def test_sector_members_skips_completed_automatic_session(monkeypatch):
+    observed_at = datetime.fromisoformat("2026-07-20T21:35:00+08:00")
+
+    monkeypatch.setattr(svc, "_now_china", lambda: observed_at)
+    monkeypatch.setattr(
+        svc,
+        "_completed_forward_membership_session_coverage",
+        lambda source_trade_date: {
+            "status": "complete",
+            "source_trade_date": source_trade_date.isoformat(),
+            "expected_sector_count": 446,
+            "returned_sector_count": 446,
+            "row_count": 60_736,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        svc,
+        "_load_sector_rows_with_member_freshness",
+        lambda: pytest.fail("completed automatic session must not reload memberships"),
+    )
+
+    result = svc.DataSyncRunner(adapter=object())._run_sync_sector_members(
+        {"skip_complete_session": True}
+    )
+
+    assert result["status"] == "skipped"
+    assert result["rows_written"] == 0
+    assert result["session_coverage"]["row_count"] == 60_736
+
+
+def test_sector_members_sync_force_refreshes_fresh_members(monkeypatch):
+    observed_at = datetime(2026, 7, 20, 11, 30, tzinfo=timezone.utc)
+    sector_rows = [
+        {
+            "id": "BK0001",
+            "type": "concept",
+            "name": "Fresh",
+            "members_refreshed_at": observed_at - timedelta(hours=1),
+        }
+    ]
+    remote_calls: list[str] = []
+
+    class FakeAdapter:
+        def sector_stocks(self, sector_id, **kwargs):
+            del kwargs
+            remote_calls.append(sector_id)
+            return {
+                "items": [
+                    {
+                        "vt_symbol": "600000.SSE",
+                        "symbol": "600000",
+                        "exchange": "SSE",
+                        "source": "eastmoney.push2.board",
+                    }
+                ],
+                "total": 1,
+                "source": "eastmoney.push2.board",
+            }
+
+    class FakeResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return sector_rows
+
+    class FakeSession:
+        def execute(self, statement):
+            del statement
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        svc,
+        "_load_sector_rows_with_member_freshness",
+        lambda: sector_rows,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        svc,
+        "_load_cached_sector_memberships",
+        lambda sector_ids: pytest.fail(f"unexpected cached load: {sector_ids}"),
+        raising=False,
+    )
+    monkeypatch.setattr(svc, "_now_china", lambda: observed_at)
+    monkeypatch.setattr(svc, "_upsert_sector_memberships", lambda sector_id, items: len(items))
+    monkeypatch.setattr(
+        svc,
+        "_save_low_suction_forward_membership_capture",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(svc, "_delete_sector_memberships", lambda sector_ids: 0)
+
+    result = svc.DataSyncRunner(
+        adapter=FakeAdapter(),
+        concurrency=1,
+    )._run_sync_sector_members({"page_size": 50, "refresh_days": 0})
+
+    assert remote_calls == ["BK0001"]
+    assert result["requested_sector_count"] == 1
+    assert result["refreshed_sector_count"] == 1
+    assert result["reused_sector_count"] == 0
 
 
 def test_sector_members_provider_failure_removes_only_the_failed_sector(monkeypatch):
@@ -2478,6 +3512,7 @@ def test_sector_members_sync_can_fetch_large_boards_beyond_legacy_page_cap(monke
 
 def test_upsert_sector_memberships_prunes_missing_members(monkeypatch):
     executed: list[str] = []
+    owner_thread_id = get_ident()
 
     class FakeResult:
         def first(self):
@@ -2485,6 +3520,8 @@ def test_upsert_sector_memberships_prunes_missing_members(monkeypatch):
 
     class FakeSession:
         def execute(self, stmt):
+            if get_ident() != owner_thread_id:
+                return FakeResult()
             if getattr(stmt, "is_delete", False):
                 executed.append(str(stmt.compile(compile_kwargs={"literal_binds": True})))
             else:
@@ -2506,10 +3543,45 @@ def test_upsert_sector_memberships_prunes_missing_members(monkeypatch):
     )
 
     assert written == 2
+    assert not [sql for sql in executed if sql.startswith("SELECT")]
+    insert_sql = [sql for sql in executed if sql.startswith("INSERT INTO sector_memberships")]
+    assert len(insert_sql) == 1
+    assert "ON CONFLICT (sector_id, vt_symbol) DO UPDATE" in insert_sql[0]
     delete_sql = [sql for sql in executed if sql.startswith("DELETE FROM sector_memberships")]
     assert delete_sql
     assert "sector_memberships.sector_id = 'BK0001'" in delete_sql[-1]
     assert "sector_memberships.vt_symbol NOT IN ('000001.SSE', '000002.SZSE')" in delete_sql[-1]
+
+
+def test_upsert_sector_memberships_bounds_batch_size(monkeypatch):
+    statements: list[object] = []
+
+    class FakeSession:
+        def execute(self, statement):
+            statements.append(statement)
+            return object()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+
+    written = svc._upsert_sector_memberships(
+        "BK0001",
+        [
+            {
+                "symbol": f"{index:06d}",
+                "exchange": "SSE",
+                "name": f"S{index}",
+            }
+            for index in range(svc.SECTOR_MEMBERSHIP_UPSERT_BATCH_SIZE + 1)
+        ],
+    )
+
+    assert written == svc.SECTOR_MEMBERSHIP_UPSERT_BATCH_SIZE + 1
+    assert sum(bool(getattr(statement, "is_insert", False)) for statement in statements) == 2
+    assert sum(bool(getattr(statement, "is_delete", False)) for statement in statements) == 1
 
 
 def test_upsert_shenwan_industry_members_prunes_missing_members(monkeypatch):
@@ -2592,6 +3664,113 @@ def test_sector_daily_bars_syncs_concurrently(monkeypatch):
 
     assert active["peak"] >= 2, f"应并发执行,peak={active['peak']}"
     assert len(seen) == 12
+
+
+def test_scheduled_sector_daily_sync_skips_complete_session(monkeypatch):
+    sector_rows = [
+        {"id": f"BK{index:04d}", "type": "concept", "name": "概念"}
+        for index in range(5)
+    ]
+
+    class FakeAdapter:
+        def sector_daily_bars(self, *args, **kwargs):
+            del args, kwargs
+            pytest.fail("complete sector session must not be fetched again")
+
+    class FakeResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return sector_rows
+
+    class FakeSession:
+        def execute(self, statement):
+            del statement
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        svc,
+        "_completed_sector_daily_session_coverage",
+        lambda _sector_ids, _min_coverage_ratio: {
+            "status": "complete",
+            "target_trade_date": "2026-07-20",
+            "sector_count": 5,
+            "min_sector_count": 4,
+            "expected_sector_count": 5,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        svc.market_cache,
+        "clear",
+        lambda: pytest.fail("skip path must not clear the shared market cache"),
+    )
+
+    result = svc.DataSyncRunner(
+        adapter=FakeAdapter(),
+        concurrency=1,
+    )._run_sync_sector_daily_bars(
+        {
+            "limit": 30,
+            "sector_types": ["concept", "theme"],
+            "skip_complete_session": True,
+        }
+    )
+
+    assert result == {
+        "status": "skipped",
+        "rows_read": 0,
+        "rows_written": 0,
+        "session_coverage": {
+            "status": "complete",
+            "target_trade_date": "2026-07-20",
+            "sector_count": 5,
+            "min_sector_count": 4,
+            "expected_sector_count": 5,
+        },
+        "message": "2026-07-20 板块日线已完整覆盖 5/4 个，跳过重复同步",
+    }
+
+
+def test_completed_sector_daily_session_uses_job_coverage_ratio(monkeypatch):
+    class FakeResult:
+        def scalar(self):
+            return 495
+
+    class FakeSession:
+        def execute(self, statement):
+            del statement
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        svc,
+        "completed_daily_bar_cutoff",
+        lambda _at: date(2026, 7, 20),
+    )
+
+    result = svc._completed_sector_daily_session_coverage(
+        [f"BK{index:04d}" for index in range(498)],
+        0.8,
+    )
+
+    assert result == {
+        "status": "complete",
+        "target_trade_date": "2026-07-20",
+        "sector_count": 495,
+        "min_sector_count": int(498 * 0.8),
+        "expected_sector_count": 498,
+    }
 
 
 def test_sector_daily_bars_sync_filters_requested_sector_types(monkeypatch):
@@ -2774,7 +3953,17 @@ def test_upsert_sector_daily_bars_prunes_old_sources_for_sector(monkeypatch):
         [
             {"trade_date": "2026-06-25", "open": 1, "close": 2, "high": 3, "low": 1},
             {"trade_date": "2026-06-26", "open": 2, "close": 3, "high": 4, "low": 2},
-            {"trade_date": "2026-06-26", "open": 2, "close": 9, "high": 9, "low": 2},
+            {
+                "trade_date": "2026-06-26",
+                "open": 2,
+                "close": 9,
+                "high": 9,
+                "low": 2,
+                "raw": {
+                    "source_detail": "eastmoney.board_quote_daily",
+                    "source_timestamp": "2026-06-26T15:39:32+08:00",
+                },
+            },
         ],
         svc.CANONICAL_SECTOR_DAILY_SOURCE,
     )
@@ -2794,6 +3983,10 @@ def test_upsert_sector_daily_bars_prunes_old_sources_for_sector(monkeypatch):
     compiled = inserts[0].compile()
     assert "ON CONFLICT (sector_id, trade_date) DO UPDATE" in str(compiled)
     assert compiled.params["close_price_m1"] == 9.0
+    assert compiled.params["raw_m1"] == {
+        "source_detail": "eastmoney.board_quote_daily",
+        "source_timestamp": "2026-06-26T15:39:32+08:00",
+    }
 
 
 def test_sector_daily_bars_sync_rejects_non_canonical_source(monkeypatch):
@@ -3170,6 +4363,51 @@ def test_scheduler_skips_weekend_for_weekday_cron(monkeypatch):
     assert not triggered
 
 
+def test_low_suction_exact_schedule_runs_without_starting_a_shared_batch(monkeypatch):
+    calls: list[datetime] = []
+    touched: list[dict[str, Any]] = []
+    now = datetime.fromisoformat("2026-07-20T14:50:00+08:00")
+    monkeypatch.setattr(svc, "_now_china", lambda: now)
+    monkeypatch.setattr(
+        svc.swing_strategy_service,
+        "capture_swing_signals",
+        lambda **kwargs: calls.append(kwargs["now"])
+        or {
+            "status": "ready",
+            "candidate_rows": 12,
+            "recommendations_created": 2,
+            "positions_opened": 0,
+            "positions_closed": 0,
+            "blocking_reasons": [],
+        },
+    )
+    monkeypatch.setattr(
+        svc,
+        "_touch_schedule",
+        lambda _schedule_id, **fields: touched.append(fields),
+    )
+    monkeypatch.setattr(
+        svc,
+        "_start_sync_schedule",
+        lambda *_args, **_kwargs: pytest.fail("exact strategy action joined shared batch"),
+    )
+
+    result = svc._run_schedule_action(
+        {
+            "id": "low_suction_signal_1450",
+            "action": "low_suction_swing",
+            "job_ids": ["sync_low_suction_swing_signals"],
+        }
+    )
+
+    assert calls == [now]
+    assert result is not None
+    assert result["strategy_status"] == "ready"
+    assert result["rows_read"] == 12
+    assert result["rows_written"] == 2
+    assert touched[-1]["last_status"] == "succeeded"
+
+
 def test_scheduler_saves_limit_up_snapshot_each_live_minute(monkeypatch):
     import datetime as dt
 
@@ -3261,11 +4499,14 @@ def test_scheduler_does_not_scan_limit_up_during_lunch(monkeypatch):
 
 
 def test_scheduler_refreshes_concepts_without_blocking_live_scan(monkeypatch):
+    import threading
+
     calls: list[str] = []
+    caller_thread = threading.current_thread().name
     monkeypatch.setattr(
         svc,
         "refresh_live_concept_snapshot",
-        lambda: calls.append("concept")
+        lambda: calls.append(threading.current_thread().name)
         or {"data_quality": {"status": "ready"}, "concept_count": 498},
     )
     monkeypatch.setattr(svc, "_touch_schedule", lambda *args, **kwargs: None)
@@ -3274,8 +4515,74 @@ def test_scheduler_refreshes_concepts_without_blocking_live_scan(monkeypatch):
         {"id": "limit_up_concept_scan", "action": "limit_up_concept_scan"}
     )
 
-    assert calls == ["concept"]
+    assert calls == [caller_thread]
     assert result["concept_count"] == 498
+
+
+def test_due_concept_scan_runs_in_bounded_background_slot(monkeypatch):
+    import threading
+
+    concept_started = threading.Event()
+    concept_release = threading.Event()
+    live_seen = threading.Event()
+    scheduler_finished = threading.Event()
+    concept_threads: list[str] = []
+    now = datetime(2026, 7, 20, 10, 5, tzinfo=timezone(timedelta(hours=8)))
+    schedules = [
+        {
+            "id": "limit_up_concept_scan",
+            "cron": "* 9-14 * * 1-5",
+            "action": "limit_up_concept_scan",
+            "last_started_at": None,
+        },
+        {
+            "id": "limit_up_live_scan",
+            "cron": "* 9-14 * * 1-5",
+            "action": "limit_up_live_scan",
+            "last_started_at": None,
+        },
+    ]
+
+    def refresh_concepts():
+        concept_threads.append(threading.current_thread().name)
+        concept_started.set()
+        assert concept_release.wait(timeout=2)
+        return {"data_quality": {"status": "ready"}, "concept_count": 498}
+
+    def refresh_live():
+        live_seen.set()
+        return {
+            "mode": "live_snapshot",
+            "data_quality": {"is_stale": False},
+            "recommendations": {"lanes": {"now": []}},
+        }
+
+    def run_scheduler():
+        try:
+            svc._run_scheduled_jobs()
+        finally:
+            scheduler_finished.set()
+
+    monkeypatch.setattr(svc, "_concept_schedule_running", False)
+    monkeypatch.setattr(svc, "_load_batch_schedules", lambda: schedules)
+    monkeypatch.setattr(svc, "_now_china", lambda: now)
+    monkeypatch.setattr(svc, "_touch_schedule", lambda *args, **kwargs: None)
+    monkeypatch.setattr(svc, "refresh_live_concept_snapshot", refresh_concepts)
+    monkeypatch.setattr(svc, "refresh_live_snapshot", refresh_live)
+
+    scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+    scheduler_thread.start()
+    try:
+        assert concept_started.wait(timeout=1)
+        assert live_seen.wait(timeout=0.5)
+        assert scheduler_finished.wait(timeout=0.5)
+
+        svc._run_scheduled_jobs()
+        assert len(concept_threads) == 1
+        assert concept_threads[0] == "limit-up-concept-scan"
+    finally:
+        concept_release.set()
+        scheduler_thread.join(timeout=2)
 
 
 def test_scheduler_does_not_refresh_concepts_during_lunch(monkeypatch):
@@ -3454,6 +4761,34 @@ def test_scheduler_skips_non_matching_cron(monkeypatch):
 
 
 # ── Task 9: schedules API (CRUD + run) ─
+
+
+def test_schema_bootstrap_only_recovers_for_scheduler_owner(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(svc, "is_database_configured", lambda: True)
+    monkeypatch.setattr(svc, "get_engine", lambda: object())
+    monkeypatch.setattr(
+        svc.schema,
+        "ensure_schema_once",
+        lambda _engine: calls.append("schema"),
+    )
+    monkeypatch.setattr(
+        svc,
+        "seed_default_registry",
+        lambda: calls.append("registry"),
+    )
+    monkeypatch.setattr(
+        svc,
+        "mark_interrupted_runs",
+        lambda: calls.append("recover"),
+    )
+
+    svc.ensure_sync_schema(recover_interrupted=False)
+    assert calls == ["schema", "registry"]
+
+    calls.clear()
+    svc.ensure_sync_schema(recover_interrupted=True)
+    assert calls == ["schema", "registry", "recover"]
 
 
 def test_schedule_endpoints_crud(monkeypatch):

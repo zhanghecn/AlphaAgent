@@ -54,6 +54,12 @@ lab/
 # AlphaAgent memory should keep reports and decisions, not generated evidence blobs.
 memory/06_backtests/*.png
 memory/06_backtests/*_raw.json
+memory/06_backtests/*.json
+!memory/06_backtests/low_suction_leader_ma5_close_study_20260719.json
+!memory/06_backtests/low_suction_prebreakout_ignition_study_20260718.json
+!memory/06_backtests/low_suction_cross_regime_support_reclaim_v3_summary_20260720.json
+!memory/06_backtests/low_suction_cross_regime_rotation_timeliness_v5_20260721.json
+!memory/06_backtests/low_suction_three_phase_adaptive_diagnostic_20260721.json
 memory/06_backtests/*.csv
 memory/06_backtests/*.log
 memory/06_backtests/cache/

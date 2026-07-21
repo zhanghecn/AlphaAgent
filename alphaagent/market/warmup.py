@@ -6,12 +6,12 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from alphaagent.market.cache import market_cache
-from alphaagent.market.providers import RealMarketDataClient
+from alphaagent.market.providers import RealMarketDataClient, _is_intraday_china
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,6 +32,16 @@ def start_market_cache_warmup(timeout: float = 8.0) -> None:
 
 def _warm_market_cache(timeout: float) -> None:
     tasks = _warmup_tasks()
+    _warm_initial_market_cache(timeout, tasks)
+
+    refresh_tasks = [task for task in tasks if task.refresh]
+    if refresh_tasks:
+        threading.Thread(target=_refresh_market_cache, args=(timeout, refresh_tasks), daemon=True).start()
+
+
+def _warm_initial_market_cache(timeout: float, tasks: Sequence[WarmupTask]) -> None:
+    if not _is_intraday_china():
+        return
     with ThreadPoolExecutor(max_workers=3, thread_name_prefix="market-warmup") as executor:
         futures = {
             executor.submit(_run_warmup_task, timeout, task): task.name
@@ -43,18 +53,11 @@ def _warm_market_cache(timeout: float) -> None:
             except Exception as exc:
                 LOGGER.info("market cache warmup skipped %s: %s", name, exc.__class__.__name__)
 
-    refresh_tasks = [task for task in tasks if task.refresh]
-    if refresh_tasks:
-        threading.Thread(target=_refresh_market_cache, args=(timeout, refresh_tasks), daemon=True).start()
-
 
 def _warmup_tasks() -> tuple[WarmupTask, ...]:
     return (
         WarmupTask("indices", "indices", 10, lambda client: client._get_indices_uncached(), refresh=True),
         WarmupTask("market_overview", "market_overview", 30, lambda client: client._market_overview_uncached(), refresh=True),
-        WarmupTask("stock_list_mktcap", "list_stocks:1:50:mktcap", 10, lambda client: client._list_stocks_uncached(1, 50, "mktcap"), refresh=True),
-        WarmupTask("stock_list_change", "list_stocks:1:50:changepercent", 10, lambda client: client._list_stocks_uncached(1, 50, "changepercent"), refresh=True),
-        WarmupTask("stock_list_turnover", "list_stocks:1:50:amount", 10, lambda client: client._list_stocks_uncached(1, 50, "amount"), refresh=True),
         WarmupTask("stock_bars_sample", _sample_stock_bar_cache_key, 600, _warm_sample_stock_bars),
         WarmupTask("index_bars_sample", _sample_index_bar_cache_key, 600, _warm_sample_index_bars),
         WarmupTask("sectors_industry", "list_sectors:industry", 86400, lambda client: client._list_sectors_uncached("industry")),
@@ -74,13 +77,27 @@ def _run_warmup_task(timeout: float, task: WarmupTask) -> None:
 def _refresh_market_cache(timeout: float, tasks: list[WarmupTask]) -> None:
     while True:
         time.sleep(8)
-        client = RealMarketDataClient(timeout=timeout)
-        for task in tasks:
-            try:
-                cache_key = task.cache_key(client) if callable(task.cache_key) else task.cache_key
-                market_cache.refresh(cache_key, task.ttl_seconds, lambda task=task: task.loader(client))
-            except Exception as exc:
-                LOGGER.info("market cache refresh skipped %s: %s", task.name, exc.__class__.__name__)
+        _refresh_market_cache_tick(timeout, tasks)
+
+
+def _refresh_market_cache_tick(timeout: float, tasks: list[WarmupTask]) -> None:
+    if not _is_intraday_china():
+        return
+    _refresh_market_cache_once(timeout, tasks)
+
+
+def _refresh_market_cache_once(timeout: float, tasks: list[WarmupTask]) -> None:
+    client = RealMarketDataClient(timeout=timeout)
+    for task in tasks:
+        try:
+            cache_key = task.cache_key(client) if callable(task.cache_key) else task.cache_key
+            market_cache.get_or_set(
+                cache_key,
+                task.ttl_seconds,
+                lambda task=task: task.loader(client),
+            )
+        except Exception as exc:
+            LOGGER.info("market cache refresh skipped %s: %s", task.name, exc.__class__.__name__)
 
 
 def _warm_dynamic_industry_chains(client: RealMarketDataClient) -> dict[str, Any]:

@@ -17,6 +17,9 @@ import numpy as np
 import pandas as pd
 
 
+FINGERPRINT_CHUNK_ROWS = 25_000
+
+
 class ResearchStage(StrEnum):
     COVERAGE = "coverage"
     CYCLE_SELECTION = "cycle_selection"
@@ -248,30 +251,56 @@ def fingerprint_frame(
     missing = [column for column in identity if column not in frame]
     if missing:
         raise ValueError(f"missing fingerprint identity columns: {', '.join(missing)}")
-    if frame.duplicated(list(identity)).any():
+    identity_index = pd.MultiIndex.from_frame(frame.loc[:, list(identity)])
+    if identity_index.has_duplicates:
         raise ValueError("fingerprint identity columns must be unique")
 
     columns = tuple(sorted(str(column) for column in frame.columns))
-    ordered = frame.sort_values(list(identity), kind="stable").loc[:, columns]
-    payload = {
+    ordered = (
+        frame
+        if identity_index.is_monotonic_increasing
+        else frame.sort_values(list(identity), kind="stable")
+    )
+    metadata = {
         "columns": list(columns),
         "dtypes": {column: str(ordered[column].dtype) for column in columns},
-        "records": json.loads(
-            ordered.to_json(
+    }
+    digest = hashlib.sha256()
+    encoded_metadata = _canonical_json(metadata)
+    digest.update(encoded_metadata[:-1].encode("utf-8"))
+    digest.update(b',"records":[')
+    _update_fingerprint_records(digest, ordered, columns)
+    digest.update(b"]}")
+    return DataFingerprint(
+        algorithm="sha256",
+        digest=f"sha256:{digest.hexdigest()}",
+        rows=len(ordered),
+        columns=columns,
+    )
+
+
+def _update_fingerprint_records(
+    digest: Any,
+    ordered: pd.DataFrame,
+    columns: Sequence[str],
+) -> None:
+    wrote_records = False
+    for start in range(0, len(ordered), FINGERPRINT_CHUNK_ROWS):
+        chunk = ordered.iloc[start : start + FINGERPRINT_CHUNK_ROWS].loc[:, columns]
+        records = json.loads(
+            chunk.to_json(
                 orient="records",
                 date_format="iso",
                 date_unit="us",
                 double_precision=15,
             )
-        ),
-    }
-    digest = hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
-    return DataFingerprint(
-        algorithm="sha256",
-        digest=f"sha256:{digest}",
-        rows=len(ordered),
-        columns=columns,
-    )
+        )
+        if not records:
+            continue
+        if wrote_records:
+            digest.update(b",")
+        digest.update(_canonical_json(records)[1:-1].encode("utf-8"))
+        wrote_records = True
 
 
 def build_protocol_split(

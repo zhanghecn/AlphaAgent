@@ -48,6 +48,16 @@ COPY --from=python-deps /usr/local /usr/local
 COPY alphaagent ./alphaagent
 COPY vnpy ./vnpy
 COPY third_party ./third_party
+COPY memory/06_backtests/low_suction_leader_ma5_close_study_20260719.json \
+    ./memory/06_backtests/low_suction_leader_ma5_close_study_20260719.json
+COPY memory/06_backtests/low_suction_prebreakout_ignition_study_20260718.json \
+    ./memory/06_backtests/low_suction_prebreakout_ignition_study_20260718.json
+COPY memory/06_backtests/low_suction_cross_regime_support_reclaim_v3_summary_20260720.json \
+    ./memory/06_backtests/low_suction_cross_regime_support_reclaim_v3_summary_20260720.json
+COPY memory/06_backtests/low_suction_cross_regime_rotation_timeliness_v5_20260721.json \
+    ./memory/06_backtests/low_suction_cross_regime_rotation_timeliness_v5_20260721.json
+COPY memory/06_backtests/low_suction_three_phase_adaptive_diagnostic_20260721.json \
+    ./memory/06_backtests/low_suction_three_phase_adaptive_diagnostic_20260721.json
 
 ENV PYTHONPATH=/app/third_party/akshare:/app
 

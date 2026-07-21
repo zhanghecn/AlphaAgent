@@ -25,16 +25,6 @@ EVENT_PRIORITY = {
     "dropped_from_top5": 10,
     "source_missing": 11,
 }
-SIGNAL_STATE_PRIORITY = {
-    "trigger_ready": 0,
-    "approaching_trigger": 1,
-    "concept_warming": 2,
-    "pending_auction": 3,
-    "observing": 4,
-    "missed": 5,
-    "rejected": 6,
-    "invalidated": 7,
-}
 _day_trace_cache: dict[date, _DayTraceAccumulator] = {}
 _day_trace_cache_lock = Lock()
 
@@ -201,16 +191,17 @@ class _DayTraceAccumulator:
 
 def _refresh_day_trace_cache(trade_date: date) -> _DayTraceAccumulator | None:
     accumulator = _day_trace_cache.get(trade_date)
-    rows = live_trace_repository.load_live_trace_rows(
+    batches = live_trace_repository.iter_live_trace_row_batches(
         trade_date,
         after_id=accumulator.last_id if accumulator is not None else None,
     )
+    for rows in batches:
+        if accumulator is None:
+            accumulator = _DayTraceAccumulator()
+            _day_trace_cache[trade_date] = accumulator
+        accumulator.extend(rows)
     if accumulator is None:
-        if not rows:
-            return None
-        accumulator = _DayTraceAccumulator()
-        _day_trace_cache[trade_date] = accumulator
-    accumulator.extend(rows)
+        return None
     for expired_date in sorted(_day_trace_cache)[:-2]:
         _day_trace_cache.pop(expired_date, None)
     return accumulator
@@ -247,7 +238,11 @@ def _row_symbol_states(
         if not symbol or symbol in states:
             continue
         signals = signals_by_symbol.get(symbol, [])
-        signal = min(signals, key=_signal_sort_key) if signals else {}
+        signal = (
+            min(signals, key=live_trace_repository.trace_signal_sort_key)
+            if signals
+            else {}
+        )
         market_rank = _integer_or_none(
             signal.get("market_dragon_rank")
             or ranked_by_symbol.get(symbol, {}).get("market_dragon_rank")
@@ -427,16 +422,10 @@ def _signal_for_symbol(
         for signal in _mapping_rows(lanes.get(channel))
         if str(signal.get("vt_symbol") or "").upper() == vt_symbol
     ]
-    return min(signals, key=_signal_sort_key) if signals else {}
-
-
-def _signal_sort_key(signal: Mapping[str, object]) -> tuple[int, int]:
-    signal_state = str(signal.get("signal_state") or "")
-    action = str(signal.get("research_action") or signal.get("action") or "pass")
-    action_priority = {"buy_now": 0, "next_auction": 1, "observe": 2, "wait_tail": 3, "pass": 4}
     return (
-        SIGNAL_STATE_PRIORITY.get(signal_state, 99),
-        action_priority.get(action, 99),
+        min(signals, key=live_trace_repository.trace_signal_sort_key)
+        if signals
+        else {}
     )
 
 

@@ -317,15 +317,19 @@ def history_ledger(
 def history_backtest(
     start: date | None = Query(default=None),
     end: date | None = Query(default=None),
-    exit_mode: Literal["dynamic", "next_open", "next_close"] = Query(default="dynamic"),
-    entry_mode: Literal["auction", "sweep", "tail", "next_auction"] = Query(default="auction"),
+    exit_mode: Literal["dynamic", "next_open", "next_close"] = Query(
+        default="next_close"
+    ),
+    entry_mode: Literal["auction", "sweep", "tail", "next_auction"] = Query(
+        default="sweep"
+    ),
     lane: Literal[
         "portfolio",
         "first_board",
         "two_to_three",
         "high_board",
     ]
-    | None = Query(default=None),
+    | None = Query(default="portfolio"),
 ):
     if start and end and start > end:
         return JSONResponse(

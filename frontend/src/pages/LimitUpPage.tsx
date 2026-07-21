@@ -76,8 +76,11 @@ import {
   skipReasonLabel,
 } from "@/features/limitUp/liveFormat";
 import {
+  ACTIVE_LIVE_POLL_INTERVAL_MS,
   isNextSessionPlan,
   liveHeader,
+  liveSnapshotPollingInterval,
+  shouldPollLiveTraces,
 } from "@/features/limitUp/nextSessionPlan";
 import {
   liveSignalsForScope,
@@ -129,9 +132,12 @@ export function LimitUpPage() {
     queryFn: fetchLimitUpLive,
     enabled: view === "live",
     staleTime: 8_000,
-    refetchInterval: view === "live" ? 10_000 : false,
+    refetchInterval: (query) => view === "live"
+      ? liveSnapshotPollingInterval(query.state.data)
+      : false,
     refetchOnWindowFocus: true,
   });
+  const pollLiveTraces = shouldPollLiveTraces(liveQuery.data);
   const strategyGuideQuery = useQuery({
     queryKey: ["limitUpStrategyGuide"],
     queryFn: fetchLimitUpStrategyGuide,
@@ -151,7 +157,9 @@ export function LimitUpPage() {
     queryFn: fetchLimitUpLiveTraceDates,
     enabled: view === "live",
     staleTime: 8_000,
-    refetchInterval: view === "live" ? 10_000 : false,
+    refetchInterval: view === "live" && pollLiveTraces
+      ? ACTIVE_LIVE_POLL_INTERVAL_MS
+      : false,
     refetchOnWindowFocus: true,
   });
   const [selectedTraceDate, setSelectedTraceDate] = useState("");
@@ -160,8 +168,13 @@ export function LimitUpPage() {
     queryFn: () => fetchLimitUpLiveTraceDay(selectedTraceDate),
     enabled: view === "live" && Boolean(selectedTraceDate),
     staleTime: selectedTraceDate === traceDatesQuery.data?.latest ? 8_000 : Infinity,
-    refetchInterval: view === "live" && selectedTraceDate === traceDatesQuery.data?.latest ? 10_000 : false,
-    refetchOnWindowFocus: selectedTraceDate === traceDatesQuery.data?.latest,
+    refetchInterval: view === "live"
+      && pollLiveTraces
+      && selectedTraceDate === traceDatesQuery.data?.latest
+      ? ACTIVE_LIVE_POLL_INTERVAL_MS
+      : false,
+    refetchOnWindowFocus: pollLiveTraces
+      && selectedTraceDate === traceDatesQuery.data?.latest,
   });
   const dates = datesQuery.data?.dates ?? [];
   const timelineDates = useMemo(
@@ -576,6 +589,7 @@ function LiveView({
       error={traceError}
       onDateChange={onTraceDateChange}
       onRetry={onTraceRetry}
+      pollLatest={shouldPollLiveTraces(snapshot)}
     />
   );
   if (loading && !snapshot) {
@@ -768,6 +782,7 @@ interface LiveTracePanelProps {
   error: string | null;
   onDateChange: (value: string) => void;
   onRetry: () => void;
+  pollLatest: boolean;
 }
 
 /**
@@ -782,6 +797,7 @@ function LiveTracePanel({
   error,
   onDateChange,
   onRetry,
+  pollLatest,
 }: LiveTracePanelProps) {
   const [open, setOpen] = useState(false);
   const items = useMemo(() => {
@@ -900,6 +916,7 @@ function LiveTracePanel({
                     tradeDate={selectedDate}
                     item={item}
                     latest={selectedDate === dates[0]}
+                    pollLatest={pollLatest}
                   />
                 ))}
               </tbody>
@@ -915,10 +932,12 @@ function LiveTraceRow({
   tradeDate,
   item,
   latest,
+  pollLatest,
 }: {
   tradeDate: string;
   item: LimitUpLiveTraceItem;
   latest: boolean;
+  pollLatest: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const eventsQuery = useQuery({
@@ -926,8 +945,10 @@ function LiveTraceRow({
     queryFn: () => fetchLimitUpLiveTraceSymbol({ date: tradeDate, vtSymbol: item.vt_symbol }),
     enabled: expanded,
     staleTime: latest ? 8_000 : Infinity,
-    refetchInterval: expanded && latest ? 10_000 : false,
-    refetchOnWindowFocus: expanded && latest,
+    refetchInterval: expanded && latest && pollLatest
+      ? ACTIVE_LIVE_POLL_INTERVAL_MS
+      : false,
+    refetchOnWindowFocus: expanded && latest && pollLatest,
   });
 
   return (

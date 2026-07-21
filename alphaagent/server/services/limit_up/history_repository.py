@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import date, datetime, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import pandas as pd
 from sqlalchemy import and_, delete, func, not_, or_, select, tuple_
@@ -14,6 +15,7 @@ from alphaagent.server.db.session import get_engine, session_scope
 
 MIN_RELIABLE_DAILY_SYMBOLS = 3000
 HISTORY_LOOKBACK_DATES = 35
+HISTORY_REPLAY_WRITE_BATCH_SIZE = 20
 MAIN_BOARD_PREFIXES = ("600", "601", "603", "605", "000", "001", "002", "003")
 HISTORY_INPUT_TABLES = (
     schema.stocks,
@@ -58,6 +60,19 @@ def history_inputs_newer_than_ledger(strategy_version: str) -> bool:
             if updated_at is not None and updated_at > ledger_updated_at:
                 return True
         return False
+
+
+def history_ledger_updated_at(strategy_version: str) -> datetime | None:
+    """Return the latest write time for one persisted replay ledger."""
+
+    schema.ensure_schema_once(get_engine())
+    with session_scope() as session:
+        return session.execute(
+            select(func.max(schema.limit_up_history_replays.c.updated_at)).where(
+                schema.limit_up_history_replays.c.strategy_version
+                == strategy_version
+            )
+        ).scalar_one_or_none()
 
 
 def load_reliable_history_frame(
@@ -348,28 +363,67 @@ def replace_history_replays(
 ) -> int:
     schema.ensure_schema_once(get_engine())
     now = datetime.now(timezone.utc)
-    values = [
-        {
-            "trade_date": _as_date(row.get("trade_date")),
-            "strategy_version": version,
-            "source_mode": str(row.get("source_mode") or "daily_point_in_time"),
-            "payload": _json_mapping(row),
-            "coverage": dict(coverage),
-            "updated_at": now,
-        }
-        for row in rows
-    ]
     with session_scope() as session:
         session.execute(
             delete(schema.limit_up_history_replays).where(
                 schema.limit_up_history_replays.c.strategy_version == version
             )
         )
-        for offset in range(0, len(values), 100):
-            chunk = values[offset : offset + 100]
-            if chunk:
-                session.execute(pg_insert(schema.limit_up_history_replays).values(chunk))
-    return len(values)
+        for batch in _history_replay_value_batches(rows):
+            values = [
+                {
+                    **value,
+                    "strategy_version": version,
+                    "coverage": dict(coverage),
+                    "updated_at": now,
+                }
+                for value in batch
+            ]
+            session.execute(pg_insert(schema.limit_up_history_replays).values(values))
+    return len(rows)
+
+
+def _history_replay_value_batches(
+    rows: Sequence[Mapping[str, object]],
+) -> Iterator[list[dict[str, object]]]:
+    for offset in range(0, len(rows), HISTORY_REPLAY_WRITE_BATCH_SIZE):
+        yield [
+            _history_replay_value(row)
+            for row in rows[offset : offset + HISTORY_REPLAY_WRITE_BATCH_SIZE]
+        ]
+
+
+def _history_replay_value(row: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "trade_date": _as_date(row.get("trade_date")),
+        "source_mode": str(row.get("source_mode") or "daily_point_in_time"),
+        "payload": _history_payload_for_storage(row),
+    }
+
+
+def _history_payload_for_storage(replay: Mapping[str, object]) -> dict[str, Any]:
+    canonical = {
+        key: value
+        for key, value in replay.items()
+        if key not in {"board_lanes", "board_candidate_pool"}
+    }
+    return _json_mapping(canonical)
+
+
+def _expand_history_payload(stored: Mapping[str, object]) -> dict[str, object]:
+    payload = dict(stored)
+    portfolio = payload.get("lane_portfolio")
+    if not isinstance(portfolio, Mapping):
+        return payload
+    if "board_lanes" not in payload:
+        lanes = portfolio.get("lanes")
+        payload["board_lanes"] = dict(lanes) if isinstance(lanes, Mapping) else {}
+    if "board_candidate_pool" not in payload:
+        pool = portfolio.get("candidate_pool")
+        payload["board_candidate_pool"] = (
+            dict(pool) if isinstance(pool, Mapping) else {}
+        )
+    return payload
 
 
 def load_history_dates(version: str) -> list[date]:
@@ -393,7 +447,7 @@ def load_history_day(version: str, trade_date: date) -> dict[str, object] | None
                 schema.limit_up_history_replays.c.trade_date == trade_date,
             )
         ).scalar_one_or_none()
-    return dict(row) if isinstance(row, Mapping) else None
+    return _expand_history_payload(row) if isinstance(row, Mapping) else None
 
 
 def load_history_candidate_pools(version: str) -> list[dict[str, object]]:
@@ -416,6 +470,42 @@ def load_history_candidate_pools(version: str) -> list[dict[str, object]]:
         {
             "trade_date": row["trade_date"].isoformat(),
             "validation_phase": str(row["validation_phase"] or "unknown"),
+            "lane_portfolio": {
+                "candidate_pool": dict(row["candidate_pool"] or {}),
+            },
+        }
+        for row in rows
+    ]
+
+
+def load_history_evidence_rows(
+    version: str,
+    end: date,
+) -> list[dict[str, object]]:
+    """Load only the replay fields needed by live historical evidence."""
+
+    schema.ensure_schema_once(get_engine())
+    payload = schema.limit_up_history_replays.c.payload
+    statement = (
+        select(
+            schema.limit_up_history_replays.c.trade_date,
+            payload["lanes"].label("lanes"),
+            payload["lane_portfolio"]["candidate_pool"].label(
+                "candidate_pool"
+            ),
+        )
+        .where(
+            schema.limit_up_history_replays.c.strategy_version == version,
+            schema.limit_up_history_replays.c.trade_date <= end,
+        )
+        .order_by(schema.limit_up_history_replays.c.trade_date)
+    )
+    with session_scope() as session:
+        rows = session.execute(statement).mappings().all()
+    return [
+        {
+            "trade_date": row["trade_date"].isoformat(),
+            "lanes": dict(row["lanes"] or {}),
             "lane_portfolio": {
                 "candidate_pool": dict(row["candidate_pool"] or {}),
             },
@@ -474,7 +564,7 @@ def load_history_range(
         ]
     return [
         {
-            **dict(row["payload"] or {}),
+            **_expand_history_payload(row["payload"] or {}),
             "trade_date": row["trade_date"].isoformat(),
             "coverage": dict(row["coverage"] or {}),
         }
@@ -568,6 +658,104 @@ def load_account_1430_prices(
         }
         for row in rows
     ]
+
+
+def load_account_post_auction_prices(
+    requests: Sequence[tuple[str, date]],
+) -> list[dict[str, object]]:
+    """Load the first continuous-session one-minute open after a 09:25 decision."""
+
+    pairs = sorted(
+        {
+            (str(vt_symbol).strip(), trade_date)
+            for vt_symbol, trade_date in requests
+            if str(vt_symbol).strip()
+        }
+    )
+    if not pairs:
+        return []
+    schema.ensure_schema_once(get_engine())
+    minute = schema.stock_minute_bars
+    statement = (
+        select(
+            minute.c.vt_symbol,
+            minute.c.trade_date,
+            minute.c.bar_time,
+            minute.c.open_price,
+            minute.c.source,
+        )
+        .where(
+            tuple_(minute.c.vt_symbol, minute.c.trade_date).in_(pairs),
+            minute.c.interval == "1m",
+            func.to_char(minute.c.bar_time, "HH24:MI") == "09:31",
+        )
+        .order_by(minute.c.trade_date, minute.c.vt_symbol, minute.c.bar_time)
+    )
+    with session_scope() as session:
+        rows = session.execute(statement).mappings().all()
+    return [
+        {
+            "vt_symbol": str(row["vt_symbol"]),
+            "trade_date": row["trade_date"].isoformat(),
+            "bar_time": row["bar_time"].isoformat(),
+            "price_0931": float(row["open_price"]),
+            "price_source": f"minute_0931_open:{row['source']}",
+        }
+        for row in rows
+    ]
+
+
+def load_account_auction_evidence(
+    requests: Sequence[tuple[str, date]],
+) -> list[dict[str, object]]:
+    """Load point-in-time opening-auction fields for candidate exit pairs."""
+
+    pairs = sorted(
+        {
+            (str(vt_symbol).strip(), trade_date)
+            for vt_symbol, trade_date in requests
+            if str(vt_symbol).strip()
+        }
+    )
+    if not pairs:
+        return []
+    schema.ensure_schema_once(get_engine())
+    auction = schema.stock_auction_snapshots
+    statement = (
+        select(
+            auction.c.vt_symbol,
+            auction.c.trade_date,
+            auction.c.captured_at,
+            auction.c.auction_price,
+            auction.c.matched_volume,
+            auction.c.unmatched_volume,
+            auction.c.unmatched_side,
+            auction.c.strict_complete,
+            auction.c.source,
+        )
+        .where(tuple_(auction.c.vt_symbol, auction.c.trade_date).in_(pairs))
+        .order_by(auction.c.trade_date, auction.c.vt_symbol)
+    )
+    with session_scope() as session:
+        rows = session.execute(statement).mappings().all()
+    return [
+        {
+            "vt_symbol": str(row["vt_symbol"]),
+            "trade_date": row["trade_date"].isoformat(),
+            "captured_at": row["captured_at"].isoformat(),
+            "auction_price": _optional_float(row["auction_price"]),
+            "matched_volume": _optional_float(row["matched_volume"]),
+            "unmatched_volume": _optional_float(row["unmatched_volume"]),
+            "unmatched_side": row["unmatched_side"],
+            "strict_complete": bool(row["strict_complete"]),
+            "source": str(row["source"]),
+        }
+        for row in rows
+    ]
+
+
+def _optional_float(value: object) -> float | None:
+    return float(value) if value is not None else None
 
 
 def history_coverage(version: str) -> dict[str, object]:

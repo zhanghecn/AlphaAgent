@@ -21,14 +21,20 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI):
         del app
         try:
-            ensure_sync_schema()
-            start_data_sync_scheduler()
-            start_next_session_plan_warmup()
+            owns_scheduler = settings.startup_data_sync_scheduler
+            ensure_sync_schema(recover_interrupted=owns_scheduler)
+            if owns_scheduler:
+                start_data_sync_scheduler()
+            if settings.startup_next_session_plan_warmup:
+                start_next_session_plan_warmup()
         except Exception:
             pass
-        start_backtest_cache_warmup()
-        start_market_cache_warmup(timeout=settings.market_timeout_seconds)
-        start_intraday_refresher()  # 盘中每 5min 自动 refresh market-timing panel(实时预警)
+        if settings.startup_backtest_warmup:
+            start_backtest_cache_warmup()
+        if settings.startup_market_cache_warmup:
+            start_market_cache_warmup(timeout=settings.market_timeout_seconds)
+        if settings.startup_intraday_refresher:
+            start_intraday_refresher()
         yield
 
     app = FastAPI(title="AlphaAgent API", version="0.1.0", lifespan=lifespan)

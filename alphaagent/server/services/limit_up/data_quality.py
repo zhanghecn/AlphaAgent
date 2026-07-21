@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Mapping
 from datetime import date, datetime, timezone
-from typing import Mapping
 from zoneinfo import ZoneInfo
 
+from alphaagent.market.cache import market_cache
 from alphaagent.server.services import minute_provider_imports
 from alphaagent.server.services.limit_up import (
     data_quality_repository,
@@ -31,14 +32,34 @@ RADAR_MINUTE_BACKFILL_PROVIDER = "tdx_radar_3pct"
 RADAR_MINUTE_SCOPE = "limit_up_radar_3pct_full_session"
 REMOTE_FAILURE_STATUSES = {"error", "partial", "unavailable", "unsupported_interval"}
 _MINUTE_BACKFILL_LOCK = threading.Lock()
+_DATA_QUALITY_CACHE_KEY = "limit_up.data_quality"
+_DATA_QUALITY_CACHE_TTL_SECONDS = 60.0
 
 
 def get_limit_up_data_quality() -> dict[str, object]:
+    return market_cache.get_or_set(
+        _DATA_QUALITY_CACHE_KEY,
+        _DATA_QUALITY_CACHE_TTL_SECONDS,
+        _load_limit_up_data_quality,
+    )
+
+
+def _load_limit_up_data_quality() -> dict[str, object]:
     counts = data_quality_repository.load_data_quality_counts(
         history_engine.HISTORY_STRATEGY_VERSION,
         LIVE_STRATEGY_VERSION,
     )
     return build_data_quality_report(counts)
+
+
+def get_limit_up_event_minute_quality() -> dict[str, object]:
+    counts = data_quality_repository.load_event_minute_quality_counts()
+    stock_minute = _section(counts, "stock_minute")
+    minute_backfill = _section(counts, "minute_backfill")
+    return {
+        "minute_event_pair_coverage": _minute_pair_coverage(stock_minute),
+        "minute_backfill_attempts": dict(minute_backfill),
+    }
 
 
 def _scheduled_exit_minute_requests() -> list[tuple[str, date]]:
@@ -231,7 +252,7 @@ def backfill_limit_up_event_minutes(
             "scope": "limit_up_event_full_session",
             "requested_gap_count": len(gaps),
             "dry_run": dry_run,
-            "data_quality": get_limit_up_data_quality(),
+            "data_quality": get_limit_up_event_minute_quality(),
         }
     finally:
         _MINUTE_BACKFILL_LOCK.release()
@@ -534,7 +555,7 @@ def _provider_error_message(
 
 
 def _no_retryable_gap_result() -> dict[str, object]:
-    quality = get_limit_up_data_quality()
+    quality = get_limit_up_event_minute_quality()
     coverage = _section(quality, "minute_event_pair_coverage")
     attempts = _section(quality, "minute_backfill_attempts")
     missing = max(int(coverage.get("total") or 0) - int(coverage.get("covered") or 0), 0)

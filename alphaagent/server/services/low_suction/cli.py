@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from collections.abc import Sequence
 from datetime import date, datetime
 from pathlib import Path
@@ -22,6 +23,14 @@ def build_parser() -> argparse.ArgumentParser:
     audit = subparsers.add_parser("audit", help="audit strict historical input coverage")
     audit.add_argument("--format", choices=("json", "markdown"), default="json")
     audit.add_argument("--output", type=Path)
+    subparsers.add_parser(
+        "history-ledger-status",
+        help="read the materialized historical replay status without recomputation",
+    )
+    subparsers.add_parser(
+        "history-ledger-materialize",
+        help="explicitly recompute the database replay and save its immutable ledger",
+    )
     proxy = subparsers.add_parser(
         "proxy-discovery",
         help="run the bounded current-membership proxy study",
@@ -282,6 +291,319 @@ def build_parser() -> argparse.ArgumentParser:
         default="markdown",
     )
     true_leader_wave_study.add_argument("--output", type=Path)
+    true_leader_mismatch_study = subparsers.add_parser(
+        "v2-true-leader-mismatch-study",
+        help="audit frozen true-leader misses and one exploratory rank",
+    )
+    true_leader_mismatch_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    true_leader_mismatch_study.add_argument("--output", type=Path)
+    true_leader_relation_gap_study = subparsers.add_parser(
+        "v2-true-leader-relation-gap-study",
+        help="audit unconfirmed true-leader concept relations",
+    )
+    true_leader_relation_gap_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    true_leader_relation_gap_study.add_argument("--output", type=Path)
+    calculated_true_leader_study = subparsers.add_parser(
+        "v2-calculated-true-leader-study",
+        help="calculate concept relations and leader Top3 from daily prices",
+    )
+    calculated_true_leader_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    calculated_true_leader_study.add_argument("--output", type=Path)
+    dynamic_concept_campaign_study = subparsers.add_parser(
+        "v2-dynamic-concept-campaign-study",
+        help="compare dynamic concept campaigns and changing leader Top3",
+    )
+    dynamic_concept_campaign_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    dynamic_concept_campaign_study.add_argument("--output", type=Path)
+    daily_leader_spell_date_study = subparsers.add_parser(
+        "v2-daily-leader-spell-date-study",
+        help="date restart-aware daily concept leaders without future leakage",
+    )
+    daily_leader_spell_date_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    daily_leader_spell_date_study.add_argument("--output", type=Path)
+    stock_wave_case_study = subparsers.add_parser(
+        "v2-stock-wave-case-study",
+        help="study Xuguang first MA5/MA10/MA20 approaches across its rising waves",
+    )
+    stock_wave_case_study.add_argument(
+        "--campaign",
+        choices=("xuguang-2025", "xuguang-2026-continuation"),
+        default="xuguang-2025",
+    )
+    stock_wave_case_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    stock_wave_case_study.add_argument("--output", type=Path)
+    cross_leader_wave_study = subparsers.add_parser(
+        "v2-cross-leader-wave-study",
+        help="apply the frozen Xuguang wave contract to other causal leader proxies",
+    )
+    cross_leader_wave_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    cross_leader_wave_study.add_argument("--output", type=Path)
+    multi_wave_leader_identity_study = subparsers.add_parser(
+        "v2-multi-wave-leader-identity-study",
+        help="identify resolved second-wave leaders at the first rebreak close",
+    )
+    multi_wave_leader_identity_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    multi_wave_leader_identity_study.add_argument("--output", type=Path)
+    multi_wave_rank_trajectory_study = subparsers.add_parser(
+        "v2-multi-wave-rank-trajectory-study",
+        help="diagnose daily concept-rank persistence before the first rebreak",
+    )
+    multi_wave_rank_trajectory_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    multi_wave_rank_trajectory_study.add_argument("--output", type=Path)
+    confirmed_multi_wave_pullback_study = subparsers.add_parser(
+        "v2-confirmed-multi-wave-pullback-study",
+        help="study causal pullbacks after two confirmed higher highs",
+    )
+    confirmed_multi_wave_pullback_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    confirmed_multi_wave_pullback_study.add_argument("--output", type=Path)
+    ma5_case_attribution_study = subparsers.add_parser(
+        "v2-ma5-case-attribution-study",
+        help="compare every frozen primary MA5 winner and loser stock by stock",
+    )
+    ma5_case_attribution_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    ma5_case_attribution_study.add_argument("--output", type=Path)
+    leader_ma5_manifest = subparsers.add_parser(
+        "v2-leader-ma5-scheme-5m-manifest",
+        help="audit exact D/D+1 5-minute coverage for the fixed leader MA5 scheme",
+    )
+    leader_ma5_manifest.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="json",
+    )
+    leader_ma5_manifest.add_argument("--output", type=Path)
+    leader_ma5_backfill = subparsers.add_parser(
+        "v2-leader-ma5-scheme-5m-backfill",
+        help="backfill exact missing D/D+1 pairs for the fixed leader MA5 scheme",
+    )
+    leader_ma5_backfill_mode = leader_ma5_backfill.add_mutually_exclusive_group(
+        required=True
+    )
+    leader_ma5_backfill_mode.add_argument("--dry-run", action="store_true")
+    leader_ma5_backfill_mode.add_argument("--write", action="store_true")
+    leader_ma5_backfill.add_argument("--max-gaps", type=int, default=100)
+    leader_ma5_backfill.add_argument("--output", type=Path)
+    leader_ma5_study = subparsers.add_parser(
+        "v2-leader-ma5-scheme-study",
+        help="run the fixed leader MA5 structural and D-tail execution study",
+    )
+    leader_ma5_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    leader_ma5_study.add_argument("--output", type=Path)
+    leader_ma5_close_study = subparsers.add_parser(
+        "v2-leader-ma5-close-study",
+        help="run the frozen leader MA5 daily-close research proxy",
+    )
+    leader_ma5_close_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    leader_ma5_close_study.add_argument("--output", type=Path)
+    campaign_support_sequence_study = subparsers.add_parser(
+        "v2-campaign-support-sequence-study",
+        help="study campaign-wide support order and D+1 close failures",
+    )
+    campaign_support_sequence_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    campaign_support_sequence_study.add_argument("--output", type=Path)
+    individual_leader_wave_audit = subparsers.add_parser(
+        "v2-individual-leader-wave-audit",
+        help="audit every wave and D+1 loss exit in three inspected leaders",
+    )
+    individual_leader_wave_audit.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    individual_leader_wave_audit.add_argument("--output", type=Path)
+    causal_leader_pullback_study = subparsers.add_parser(
+        "v2-causal-leader-pullback-study",
+        help="run the complete dynamic Top3 main-rise close-pullback algorithm",
+    )
+    causal_leader_pullback_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    causal_leader_pullback_study.add_argument("--output", type=Path)
+    cross_regime_pullback_study = subparsers.add_parser(
+        "v3-cross-regime-pullback-study",
+        help="validate the phase-routed dynamic Top3 support-reclaim policy",
+    )
+    cross_regime_pullback_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    cross_regime_pullback_study.add_argument("--output", type=Path)
+    cross_regime_product_summary = subparsers.add_parser(
+        "v3-cross-regime-product-summary",
+        help="compact a frozen cross-regime replay for the read-only API",
+    )
+    cross_regime_product_summary.add_argument("--source", type=Path, required=True)
+    cross_regime_product_summary.add_argument("--output", type=Path)
+    warming_failure_study = subparsers.add_parser(
+        "v3-warming-failure-study",
+        help="attribute V3 warming failures and test one causal support correction",
+    )
+    warming_failure_study.add_argument("--source", type=Path, required=True)
+    warming_failure_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    warming_failure_study.add_argument("--output", type=Path)
+    support_contract_study = subparsers.add_parser(
+        "v4-support-contract-study",
+        help="compare exact MA5/MA10 support with the deeper reclaim contract",
+    )
+    support_contract_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    support_contract_study.add_argument("--output", type=Path)
+    support_day_study = subparsers.add_parser(
+        "v5-support-day-study",
+        help="freeze and evaluate support-test-day MA5/MA10 close entries",
+    )
+    support_day_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    support_day_study.add_argument(
+        "--input",
+        type=Path,
+        help="render a saved JSON report without running the database study",
+    )
+    support_day_study.add_argument("--output", type=Path)
+    support_quality_study = subparsers.add_parser(
+        "v6-support-quality-study",
+        help="test same-day main-rise quality on the frozen exact-support rule",
+    )
+    support_quality_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    support_quality_study.add_argument(
+        "--input",
+        type=Path,
+        help="render a saved JSON report without running the database study",
+    )
+    support_quality_study.add_argument("--output", type=Path)
+    support_reclaim_confirmation_study = subparsers.add_parser(
+        "v7-support-reclaim-confirmation-study",
+        help="test the first weak-to-strong close after exact MA5/MA10 support",
+    )
+    support_reclaim_confirmation_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    support_reclaim_confirmation_study.add_argument(
+        "--input",
+        type=Path,
+        help="render a saved JSON report without running the database study",
+    )
+    support_reclaim_confirmation_study.add_argument("--output", type=Path)
+    leader_tenure_study = subparsers.add_parser(
+        "v8-leader-tenure-study",
+        help="test persistent causal Top3 tenure with one primary concept",
+    )
+    leader_tenure_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    leader_tenure_study.add_argument(
+        "--input",
+        type=Path,
+        help="render a saved JSON report without running the database study",
+    )
+    leader_tenure_study.add_argument("--output", type=Path)
+    main_rise_weak_to_strong_study = subparsers.add_parser(
+        "v2-main-rise-weak-to-strong-study",
+        help="validate dynamic main-rise Top3 divergence-to-strength close entries",
+    )
+    main_rise_weak_to_strong_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    main_rise_weak_to_strong_study.add_argument("--output", type=Path)
+    main_rise_structural_exit_study = subparsers.add_parser(
+        "v2-main-rise-structural-exit-study",
+        help="validate dynamic main-rise entries with structural swing exits",
+    )
+    main_rise_structural_exit_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    main_rise_structural_exit_study.add_argument("--output", type=Path)
+    prebreakout_ignition_study = subparsers.add_parser(
+        "v2-prebreakout-ignition-study",
+        help="compare pre-breakout ignition with matched concept controls",
+    )
+    prebreakout_ignition_study.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    prebreakout_ignition_study.add_argument("--output", type=Path)
     prelaunch_first_explosion_study = subparsers.add_parser(
         "v2-prelaunch-first-explosion-study",
         help="study D-1 features before verified first strong explosions",
@@ -332,6 +654,69 @@ def build_parser() -> argparse.ArgumentParser:
         default="markdown",
     )
     forward_top3_report.add_argument("--output", type=Path)
+    forward_ma5_run = subparsers.add_parser(
+        "v2-forward-ma5-shadow-run",
+        help="advance the strict forward wave-three MA5 research shadow",
+    )
+    forward_ma5_run.add_argument(
+        "--as-of-date",
+        type=date.fromisoformat,
+        required=True,
+    )
+    forward_ma5_run.add_argument("--output", type=Path)
+    forward_ma5_report = subparsers.add_parser(
+        "v2-forward-ma5-shadow-report",
+        help="report the immutable forward wave-three MA5 shadow ledger",
+    )
+    forward_ma5_report.add_argument(
+        "--as-of-date",
+        type=date.fromisoformat,
+    )
+    forward_ma5_report.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    forward_ma5_report.add_argument("--output", type=Path)
+    cross_regime_forward_run = subparsers.add_parser(
+        "v4-cross-regime-forward-run",
+        help="capture only today's natural cross-regime causal close and settle outcomes",
+    )
+    cross_regime_forward_run.add_argument(
+        "--as-of-date",
+        type=date.fromisoformat,
+        required=True,
+    )
+    cross_regime_forward_run.add_argument("--output", type=Path)
+    cross_regime_forward_report = subparsers.add_parser(
+        "v4-cross-regime-forward-report",
+        help="read the immutable single-identity causal forward ledger",
+    )
+    cross_regime_forward_report.add_argument(
+        "--as-of-date",
+        type=date.fromisoformat,
+    )
+    cross_regime_forward_report.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="markdown",
+    )
+    cross_regime_forward_report.add_argument("--output", type=Path)
+    cross_regime_recent_audit = subparsers.add_parser(
+        "v4-cross-regime-recent-audit",
+        help="separate legacy shadow rows from labeled recent causal replays",
+    )
+    cross_regime_recent_audit.add_argument(
+        "--as-of-date",
+        type=date.fromisoformat,
+        required=True,
+    )
+    cross_regime_recent_audit.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="json",
+    )
+    cross_regime_recent_audit.add_argument("--output", type=Path)
     minute = subparsers.add_parser(
         "minute-manifest",
         help="audit candidate-only minute gaps from the bounded proxy study",
@@ -377,6 +762,38 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    requested_output = getattr(args, "output", None)
+    output_path = (
+        validated_output_path(requested_output)
+        if requested_output is not None
+        else None
+    )
+    if args.command == "history-ledger-status":
+        from .historical_replay_service import get_historical_replay_overview
+
+        print(
+            json.dumps(
+                get_historical_replay_overview(),
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        )
+        return 0
+    if args.command == "history-ledger-materialize":
+        from .historical_replay_service import (
+            materialize_exploratory_three_phase_replay,
+        )
+
+        print(
+            json.dumps(
+                materialize_exploratory_three_phase_replay(),
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        )
+        return 0
     if args.command == "audit":
         report = load_data_quality_report()
         rendered = (
@@ -729,6 +1146,410 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.format == "json"
             else render_true_leader_study_markdown(report)
         )
+    elif args.command == "v2-true-leader-mismatch-study":
+        from .true_leader_mismatch_study import (
+            render_mismatch_study_json,
+            render_mismatch_study_markdown,
+            run_true_leader_mismatch_study,
+        )
+
+        report = run_true_leader_mismatch_study()
+        rendered = (
+            render_mismatch_study_json(report)
+            if args.format == "json"
+            else render_mismatch_study_markdown(report)
+        )
+    elif args.command == "v2-true-leader-relation-gap-study":
+        from .true_leader_relation_gap_study import (
+            render_relation_gap_study_json,
+            render_relation_gap_study_markdown,
+            run_true_leader_relation_gap_study,
+        )
+
+        report = run_true_leader_relation_gap_study()
+        rendered = (
+            render_relation_gap_study_json(report)
+            if args.format == "json"
+            else render_relation_gap_study_markdown(report)
+        )
+    elif args.command == "v2-calculated-true-leader-study":
+        from .calculated_true_leader_study import (
+            render_calculated_true_leader_json,
+            render_calculated_true_leader_markdown,
+            run_calculated_true_leader_study,
+        )
+
+        report = run_calculated_true_leader_study()
+        rendered = (
+            render_calculated_true_leader_json(report)
+            if args.format == "json"
+            else render_calculated_true_leader_markdown(report)
+        )
+    elif args.command == "v2-dynamic-concept-campaign-study":
+        from .dynamic_concept_campaign_study import (
+            render_dynamic_campaign_json,
+            render_dynamic_campaign_markdown,
+            run_dynamic_concept_campaign_study,
+        )
+
+        report = run_dynamic_concept_campaign_study()
+        rendered = (
+            render_dynamic_campaign_json(report)
+            if args.format == "json"
+            else render_dynamic_campaign_markdown(report)
+        )
+    elif args.command == "v2-daily-leader-spell-date-study":
+        from .daily_leader_spell_date_study import (
+            render_daily_leader_spell_date_json,
+            render_daily_leader_spell_date_markdown,
+            run_daily_leader_spell_date_study,
+        )
+
+        report = run_daily_leader_spell_date_study()
+        rendered = (
+            render_daily_leader_spell_date_json(report)
+            if args.format == "json"
+            else render_daily_leader_spell_date_markdown(report)
+        )
+    elif args.command == "v2-stock-wave-case-study":
+        from .stock_wave_case_study import (
+            render_stock_wave_case_json,
+            render_stock_wave_case_markdown,
+            run_xuguang_2026_continuation_study,
+            run_xuguang_wave_case_study,
+        )
+
+        report = (
+            run_xuguang_2026_continuation_study()
+            if args.campaign == "xuguang-2026-continuation"
+            else run_xuguang_wave_case_study()
+        )
+        rendered = (
+            render_stock_wave_case_json(report)
+            if args.format == "json"
+            else render_stock_wave_case_markdown(report)
+        )
+    elif args.command == "v2-cross-leader-wave-study":
+        from .cross_leader_wave_study import (
+            render_cross_leader_wave_json,
+            render_cross_leader_wave_markdown,
+            run_cross_leader_wave_study,
+        )
+
+        report = run_cross_leader_wave_study()
+        rendered = (
+            render_cross_leader_wave_json(report)
+            if args.format == "json"
+            else render_cross_leader_wave_markdown(report)
+        )
+    elif args.command == "v2-multi-wave-leader-identity-study":
+        from .multi_wave_leader_identity_study import (
+            render_multi_wave_identity_json,
+            render_multi_wave_identity_markdown,
+            run_multi_wave_leader_identity_study,
+        )
+
+        report = run_multi_wave_leader_identity_study()
+        rendered = (
+            render_multi_wave_identity_json(report)
+            if args.format == "json"
+            else render_multi_wave_identity_markdown(report)
+        )
+    elif args.command == "v2-multi-wave-rank-trajectory-study":
+        from .multi_wave_rank_trajectory_study import (
+            render_rank_trajectory_json,
+            render_rank_trajectory_markdown,
+            run_multi_wave_rank_trajectory_study,
+        )
+
+        report = run_multi_wave_rank_trajectory_study()
+        rendered = (
+            render_rank_trajectory_json(report)
+            if args.format == "json"
+            else render_rank_trajectory_markdown(report)
+        )
+    elif args.command == "v2-confirmed-multi-wave-pullback-study":
+        from .confirmed_multi_wave_pullback_study import (
+            render_confirmed_pullback_json,
+            render_confirmed_pullback_markdown,
+            run_confirmed_multi_wave_pullback_study,
+        )
+
+        report = run_confirmed_multi_wave_pullback_study()
+        rendered = (
+            render_confirmed_pullback_json(report)
+            if args.format == "json"
+            else render_confirmed_pullback_markdown(report)
+        )
+    elif args.command == "v2-ma5-case-attribution-study":
+        from .ma5_case_attribution_study import (
+            render_ma5_case_attribution_json,
+            render_ma5_case_attribution_markdown,
+            run_ma5_case_attribution_study,
+        )
+
+        report = run_ma5_case_attribution_study()
+        rendered = (
+            render_ma5_case_attribution_json(report)
+            if args.format == "json"
+            else render_ma5_case_attribution_markdown(report)
+        )
+    elif args.command == "v2-leader-ma5-scheme-5m-manifest":
+        from .leader_ma5_scheme_minutes import (
+            build_scheme_5m_manifest_report,
+            load_scheme_5m_manifest,
+            render_scheme_5m_manifest_json,
+            render_scheme_5m_manifest_markdown,
+        )
+
+        report = build_scheme_5m_manifest_report(load_scheme_5m_manifest())
+        rendered = (
+            render_scheme_5m_manifest_json(report)
+            if args.format == "json"
+            else render_scheme_5m_manifest_markdown(report)
+        )
+    elif args.command == "v2-leader-ma5-scheme-5m-backfill":
+        from .leader_ma5_scheme_minutes import backfill_missing_scheme_5m
+
+        rendered = render_audit_json(
+            backfill_missing_scheme_5m(
+                dry_run=not args.write,
+                max_gaps=args.max_gaps,
+            )
+        )
+    elif args.command == "v2-leader-ma5-scheme-study":
+        from .leader_ma5_scheme_study import (
+            render_leader_ma5_scheme_json,
+            render_leader_ma5_scheme_markdown,
+            run_leader_ma5_scheme_study,
+        )
+
+        report = run_leader_ma5_scheme_study()
+        rendered = (
+            render_leader_ma5_scheme_json(report)
+            if args.format == "json"
+            else render_leader_ma5_scheme_markdown(report)
+        )
+    elif args.command == "v2-leader-ma5-close-study":
+        from .leader_ma5_close_study import (
+            render_leader_ma5_close_json,
+            render_leader_ma5_close_markdown,
+            run_leader_ma5_close_study,
+        )
+
+        report = run_leader_ma5_close_study()
+        rendered = (
+            render_leader_ma5_close_json(report)
+            if args.format == "json"
+            else render_leader_ma5_close_markdown(report)
+        )
+    elif args.command == "v2-campaign-support-sequence-study":
+        from .campaign_support_sequence_study import (
+            render_campaign_support_sequence_json,
+            render_campaign_support_sequence_markdown,
+            run_campaign_support_sequence_study,
+        )
+
+        report = run_campaign_support_sequence_study()
+        rendered = (
+            render_campaign_support_sequence_json(report)
+            if args.format == "json"
+            else render_campaign_support_sequence_markdown(report)
+        )
+    elif args.command == "v2-individual-leader-wave-audit":
+        from .individual_leader_wave_audit import (
+            render_individual_leader_wave_json,
+            render_individual_leader_wave_markdown,
+            run_individual_leader_wave_audit,
+        )
+
+        report = run_individual_leader_wave_audit()
+        rendered = (
+            render_individual_leader_wave_json(report)
+            if args.format == "json"
+            else render_individual_leader_wave_markdown(report)
+        )
+    elif args.command in {
+        "v2-causal-leader-pullback-study",
+        "v3-cross-regime-pullback-study",
+    }:
+        from .causal_leader_pullback_study import (
+            render_causal_leader_pullback_json,
+            render_causal_leader_pullback_markdown,
+            run_causal_leader_pullback_study,
+        )
+
+        report = run_causal_leader_pullback_study()
+        rendered = (
+            render_causal_leader_pullback_json(report)
+            if args.format == "json"
+            else render_causal_leader_pullback_markdown(report)
+        )
+    elif args.command == "v3-cross-regime-product-summary":
+        import hashlib
+
+        from .cross_regime_product_report import (
+            build_cross_regime_product_report,
+            load_json_report,
+            render_cross_regime_product_json,
+        )
+
+        source = args.source.resolve()
+        source_digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        report = build_cross_regime_product_report(
+            load_json_report(source),
+            source_path=str(source.relative_to(Path.cwd())),
+            source_sha256=source_digest,
+        )
+        rendered = render_cross_regime_product_json(report)
+    elif args.command == "v3-warming-failure-study":
+        import hashlib
+
+        from .cross_regime_warming_failure_study import (
+            archive_warming_failure_report,
+            render_warming_failure_json,
+            render_warming_failure_markdown,
+            run_warming_failure_study,
+        )
+
+        source = args.source.resolve()
+        source_bytes = source.read_bytes()
+        report = run_warming_failure_study(
+            json.loads(source_bytes),
+            source_path=str(source),
+            source_sha256=hashlib.sha256(source_bytes).hexdigest(),
+        )
+        if args.output is not None:
+            output_path = validated_output_path(args.output)
+            archived = archive_warming_failure_report(report, output_path)
+            print(archived["json"])
+            print(archived["markdown"])
+            return 0
+        rendered = (
+            render_warming_failure_json(report)
+            if args.format == "json"
+            else render_warming_failure_markdown(report)
+        )
+    elif args.command == "v4-support-contract-study":
+        from .support_contract_study import (
+            render_support_contract_json,
+            render_support_contract_markdown,
+            run_support_contract_study,
+        )
+
+        report = run_support_contract_study()
+        rendered = (
+            render_support_contract_json(report)
+            if args.format == "json"
+            else render_support_contract_markdown(report)
+        )
+    elif args.command == "v5-support-day-study":
+        from .support_day_study import (
+            render_support_day_json,
+            render_support_day_markdown,
+            run_support_day_study,
+        )
+
+        report = (
+            json.loads(args.input.read_text(encoding="utf-8"))
+            if args.input is not None
+            else run_support_day_study()
+        )
+        rendered = (
+            render_support_day_json(report)
+            if args.format == "json"
+            else render_support_day_markdown(report)
+        )
+    elif args.command == "v6-support-quality-study":
+        from .support_quality_study import (
+            render_support_quality_json,
+            render_support_quality_markdown,
+            run_support_quality_study,
+        )
+
+        report = (
+            json.loads(args.input.read_text(encoding="utf-8"))
+            if args.input is not None
+            else run_support_quality_study()
+        )
+        rendered = (
+            render_support_quality_json(report)
+            if args.format == "json"
+            else render_support_quality_markdown(report)
+        )
+    elif args.command == "v7-support-reclaim-confirmation-study":
+        from .support_reclaim_confirmation_study import (
+            render_support_reclaim_confirmation_json,
+            render_support_reclaim_confirmation_markdown,
+            run_support_reclaim_confirmation_study,
+        )
+
+        report = (
+            json.loads(args.input.read_text(encoding="utf-8"))
+            if args.input is not None
+            else run_support_reclaim_confirmation_study()
+        )
+        rendered = (
+            render_support_reclaim_confirmation_json(report)
+            if args.format == "json"
+            else render_support_reclaim_confirmation_markdown(report)
+        )
+    elif args.command == "v8-leader-tenure-study":
+        from .leader_tenure_study import (
+            render_leader_tenure_json,
+            render_leader_tenure_markdown,
+            run_leader_tenure_study,
+        )
+
+        report = (
+            json.loads(args.input.read_text(encoding="utf-8"))
+            if args.input is not None
+            else run_leader_tenure_study()
+        )
+        rendered = (
+            render_leader_tenure_json(report)
+            if args.format == "json"
+            else render_leader_tenure_markdown(report)
+        )
+    elif args.command == "v2-main-rise-weak-to-strong-study":
+        from .main_rise_weak_to_strong_study import (
+            render_main_rise_weak_to_strong_json,
+            render_main_rise_weak_to_strong_markdown,
+            run_main_rise_weak_to_strong_study,
+        )
+
+        report = run_main_rise_weak_to_strong_study()
+        rendered = (
+            render_main_rise_weak_to_strong_json(report)
+            if args.format == "json"
+            else render_main_rise_weak_to_strong_markdown(report)
+        )
+    elif args.command == "v2-main-rise-structural-exit-study":
+        from .main_rise_structural_exit_study import (
+            render_main_rise_structural_exit_json,
+            render_main_rise_structural_exit_markdown,
+            run_main_rise_structural_exit_study,
+        )
+
+        report = run_main_rise_structural_exit_study()
+        rendered = (
+            render_main_rise_structural_exit_json(report)
+            if args.format == "json"
+            else render_main_rise_structural_exit_markdown(report)
+        )
+    elif args.command == "v2-prebreakout-ignition-study":
+        from .prebreakout_ignition_study import (
+            render_prebreakout_json,
+            render_prebreakout_markdown,
+            run_prebreakout_ignition_study,
+        )
+
+        report = run_prebreakout_ignition_study()
+        rendered = (
+            render_prebreakout_json(report)
+            if args.format == "json"
+            else render_prebreakout_markdown(report)
+        )
     elif args.command == "v2-prelaunch-first-explosion-study":
         from .prelaunch_first_explosion_study import (
             render_prelaunch_first_explosion_json,
@@ -793,6 +1614,81 @@ def main(argv: Sequence[str] | None = None) -> int:
             render_forward_leader_report_json(report)
             if args.format == "json"
             else render_forward_leader_report_markdown(report)
+        )
+    elif args.command == "v2-forward-ma5-shadow-run":
+        from .forward_ma5_pullback_repository import (
+            advance_forward_ma5_shadow,
+            render_forward_ma5_json,
+        )
+
+        report = advance_forward_ma5_shadow(
+            as_of_date=args.as_of_date,
+            attempted_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+        )
+        rendered = render_forward_ma5_json(report)
+    elif args.command == "v2-forward-ma5-shadow-report":
+        from .forward_ma5_pullback_repository import (
+            load_forward_ma5_shadow_report,
+            render_forward_ma5_json,
+            render_forward_ma5_markdown,
+        )
+
+        report = load_forward_ma5_shadow_report(as_of_date=args.as_of_date)
+        rendered = (
+            render_forward_ma5_json(report)
+            if args.format == "json"
+            else render_forward_ma5_markdown(report)
+        )
+    elif args.command == "v4-cross-regime-forward-run":
+        from .causal_leader_pullback_forward_repository import (
+            advance_causal_forward,
+            render_causal_forward_json,
+        )
+
+        report = advance_causal_forward(
+            as_of_date=args.as_of_date,
+            attempted_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+        )
+        rendered = render_causal_forward_json(report)
+    elif args.command == "v4-cross-regime-forward-report":
+        from .causal_leader_pullback_forward_repository import (
+            load_causal_forward_report,
+            render_causal_forward_json,
+            render_causal_forward_markdown,
+        )
+
+        report = load_causal_forward_report(as_of_date=args.as_of_date)
+        rendered = (
+            render_causal_forward_json(report)
+            if args.format == "json"
+            else render_causal_forward_markdown(report)
+        )
+    elif args.command == "v4-cross-regime-recent-audit":
+        from .cross_regime_recent_candidate_audit import (
+            archive_recent_candidate_audit,
+            render_recent_candidate_audit_json,
+            render_recent_candidate_audit_markdown,
+            run_cross_regime_recent_candidate_audit,
+        )
+
+        output_path = (
+            validated_output_path(args.output)
+            if args.output is not None
+            else None
+        )
+        report = run_cross_regime_recent_candidate_audit(
+            as_of_date=args.as_of_date,
+            evaluated_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+        )
+        if output_path is not None:
+            archived = archive_recent_candidate_audit(report, output_path)
+            print(archived["json_path"])
+            print(archived["markdown_path"])
+            return 0
+        rendered = (
+            render_recent_candidate_audit_json(report)
+            if args.format == "json"
+            else render_recent_candidate_audit_markdown(report)
         )
     elif args.command == "minute-manifest":
         from .daily_discovery import run_membership_proxy_discovery
@@ -860,11 +1756,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     else:
         raise ValueError(f"unsupported command: {args.command}")
-    if args.output is None:
+    if output_path is None:
         print(rendered, end="" if rendered.endswith("\n") else "\n")
         return 0
 
-    output_path = validated_output_path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(rendered, encoding="utf-8")
     print(output_path)

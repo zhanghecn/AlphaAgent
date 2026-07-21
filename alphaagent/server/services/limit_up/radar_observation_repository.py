@@ -14,10 +14,35 @@ from alphaagent.server.db.session import session_scope
 from alphaagent.server.services.limit_up.radar_contract import (
     RADAR_CONTRACT_VERSION,
 )
+from alphaagent.server.services.limit_up.capture_runtime import (
+    capture_runtime_fingerprint_safely,
+)
 from alphaagent.server.services.limit_up import scheduled_execution
 
 
 RADAR_RETAIN_TRADE_DAYS = 90
+POINT_TRIGGER_AUDIT_OBSERVATION_FIELDS = (
+    "frame_id",
+    "vt_symbol",
+    "name",
+    "change_pct",
+    "last_price",
+    "quote_observed_at",
+    "limit_price",
+    "capture_state",
+    "board_lane",
+    "rank_score",
+    "history_sample_count",
+    "historical_combined_rate",
+    "formal_action",
+    "lane_blocker_codes",
+    "concept_change_acceleration_1m",
+    "concept_change_acceleration_3m",
+    "concept_change_acceleration_5m",
+    "concept_turnover_acceleration_1m",
+    "concept_turnover_acceleration_3m",
+    "concept_turnover_acceleration_5m",
+)
 _prune_lock = Lock()
 _last_pruned_trade_date: date | None = None
 
@@ -37,6 +62,7 @@ def project_observation(
     *,
     formal_signal: Mapping[str, object] | None,
     early_signal: Mapping[str, object] | None,
+    quote_observed_at: datetime | None = None,
 ) -> dict[str, object]:
     """Project one evaluated candidate into the bounded research contract."""
 
@@ -52,6 +78,31 @@ def project_observation(
         "name": _required_text(candidate.get("name"), "name"),
         "change_pct": _required_number(candidate.get("change_pct"), "change_pct"),
         "last_price": _required_positive(candidate.get("last_price"), "last_price"),
+        "quote_observed_at": _optional_datetime(
+            candidate.get("quote_observed_at")
+        )
+        or _optional_datetime(quote_observed_at),
+        "volume": _optional_number(candidate.get("volume")),
+        "turnover": _optional_number(candidate.get("turnover")),
+        "turnover_rate": _optional_number(candidate.get("turnover_rate")),
+        "volume_ratio": _optional_number(candidate.get("volume_ratio")),
+        "quote_speed": _optional_number(candidate.get("quote_speed")),
+        "quote_amplitude_pct": _optional_number(
+            candidate.get("quote_amplitude_pct")
+        ),
+        "quote_main_net_inflow": _optional_number(
+            candidate.get("quote_main_net_inflow")
+        ),
+        "quote_main_inflow": _optional_number(candidate.get("quote_main_inflow")),
+        "quote_main_outflow": _optional_number(
+            candidate.get("quote_main_outflow")
+        ),
+        "quote_main_net_inflow_ratio": _optional_number(
+            candidate.get("quote_main_net_inflow_ratio")
+        ),
+        "quote_flow_observed_at": _optional_datetime(
+            candidate.get("quote_flow_observed_at")
+        ),
         "previous_close": _required_positive(
             candidate.get("previous_close"),
             "previous_close",
@@ -67,6 +118,7 @@ def project_observation(
         "entry_quality_score": _optional_number(
             candidate.get("lane_entry_quality_score")
         ),
+        "rank_score": _optional_number(candidate.get("lane_rank_score")),
         "concept_id": _optional_text(candidate.get("concept_id")),
         "concept_state": _optional_text(candidate.get("concept_state")),
         "concept_strength_score": _optional_number(
@@ -78,10 +130,35 @@ def project_observation(
         "concept_strong_5_count": _optional_integer(
             candidate.get("concept_strong_5_count")
         ),
+        **{
+            f"concept_{metric}_acceleration_{minutes}m": _optional_number(
+                candidate.get(f"concept_{metric}_acceleration_{minutes}m")
+            )
+            for metric in ("change", "turnover")
+            for minutes in (1, 3, 5)
+        },
         "sector_id": _optional_text(candidate.get("sector_id")),
         "sector_heat": _optional_number(candidate.get("sector_heat")),
         "sector_touch_count": _optional_integer(
             candidate.get("sector_touch_count")
+        ),
+        "sector_main_net_inflow": _optional_number(
+            candidate.get("sector_main_net_inflow")
+        ),
+        "sector_main_net_inflow_ratio": _optional_number(
+            candidate.get("sector_main_net_inflow_ratio")
+        ),
+        "sector_flow_trade_date": _optional_date(
+            candidate.get("sector_flow_trade_date")
+        ),
+        "stock_main_net_inflow": _optional_number(
+            candidate.get("stock_main_net_inflow")
+        ),
+        "stock_main_net_inflow_ratio": _optional_number(
+            candidate.get("stock_main_net_inflow_ratio")
+        ),
+        "stock_flow_trade_date": _optional_date(
+            candidate.get("stock_flow_trade_date")
         ),
         "history_sample_count": _optional_integer(
             candidate.get("d1_money_effect_sample_count")
@@ -105,6 +182,7 @@ def project_observation(
             early.get("reason") or formal.get("reason"),
             max_length=500,
         ),
+        "lane_blocker_codes": _string_list(candidate.get("lane_blockers")),
         "blocker_codes": blocker_codes,
     }
 
@@ -199,6 +277,13 @@ def build_fill_followup_observations(
                 "name": str((quote or {}).get("name") or context.get("name") or symbol),
                 "change_pct": float(change_pct),
                 "last_price": price,
+                "quote_observed_at": quote_observed_at,
+                "volume": _optional_number((quote or {}).get("volume")),
+                "turnover": _optional_number((quote or {}).get("turnover")),
+                "turnover_rate": _optional_number(
+                    (quote or {}).get("turnover_rate")
+                ),
+                "volume_ratio": _optional_number((quote or {}).get("volume_ratio")),
                 "capture_state": "fill_followup",
                 "formal_action": "pass",
                 "early_action": "pass",
@@ -223,10 +308,15 @@ def save_frame(
     quality = quality if isinstance(quality, Mapping) else {}
     timing = quality.get("scan_timing_ms")
     timing = timing if isinstance(timing, Mapping) else {}
+    market_timing_state = _market_timing_state(snapshot)
+    formal_two_slot_symbols, formal_two_slot_observed = (
+        official_two_slot_evidence(snapshot)
+    )
     values = {
         "trade_date": captured_at.date(),
         "captured_at": captured_at,
         "strategy_version": str(snapshot.get("strategy_version") or "unknown"),
+        "capture_runtime_fingerprint": capture_runtime_fingerprint_safely(),
         "contract_version": RADAR_CONTRACT_VERSION,
         "source": str(snapshot.get("source") or "unknown"),
         "source_updated_at": _optional_datetime(snapshot.get("source_updated_at")),
@@ -240,6 +330,11 @@ def save_frame(
             if quality.get("concept_quote_coverage_ratio") is not None
             else quality.get("quote_coverage_ratio")
         ),
+        "market_timing_state": market_timing_state,
+        "formal_two_slot_observed": formal_two_slot_observed,
+        "formal_two_slot_symbols": (
+            formal_two_slot_symbols if formal_two_slot_observed else None
+        ),
     }
     frame_table = schema.limit_up_radar_frames
     observation_table = schema.limit_up_radar_observations
@@ -249,7 +344,12 @@ def save_frame(
         set_={
             key: getattr(frame_insert.excluded, key)
             for key in values
-            if key not in {"captured_at", "strategy_version"}
+            if key
+            not in {
+                "captured_at",
+                "strategy_version",
+                "capture_runtime_fingerprint",
+            }
         },
     ).returning(frame_table.c.id)
     with session_scope() as session:
@@ -259,7 +359,7 @@ def save_frame(
             for observation in observations
         ]
         if projected:
-            observation_insert = pg_insert(observation_table).values(projected)
+            observation_insert = pg_insert(observation_table)
             update_fields = {
                 column.name: getattr(observation_insert.excluded, column.name)
                 for column in observation_table.columns
@@ -272,10 +372,39 @@ def save_frame(
                         observation_table.c.vt_symbol,
                     ),
                     set_=update_fields,
-                )
+                ),
+                projected,
             )
     _prune_once_for_trade_date(captured_at.date())
     return {"frame_id": frame_id, **values}
+
+
+def official_two_slot_evidence(
+    snapshot: Mapping[str, object],
+) -> tuple[list[str], bool]:
+    """Extract the exact formal two-slot identity available in this snapshot."""
+
+    direct_sources = (
+        snapshot.get("portfolio"),
+        _mapping(snapshot.get("recommendations")).get("portfolio"),
+    )
+    for value in direct_sources:
+        parsed = _portfolio_symbols(value)
+        if parsed is not None:
+            return parsed
+
+    recommendations = _mapping(snapshot.get("recommendations"))
+    lanes = recommendations.get("lanes")
+    if isinstance(lanes, Mapping):
+        signals = [
+            signal
+            for lane in ("now", "tail", "next_auction")
+            for signal in _mapping_rows(lanes.get(lane))
+        ]
+        parsed = _selected_flag_symbols(signals, empty_is_observed=False)
+        if parsed is not None:
+            return parsed
+    return [], False
 
 
 def load_observations(start: date, end: date) -> list[dict[str, object]]:
@@ -295,6 +424,7 @@ def load_observations(start: date, end: date) -> list[dict[str, object]]:
             frame.c.is_stale,
             frame.c.scan_duration_ms,
             frame.c.quote_coverage_ratio,
+            frame.c.market_timing_state,
             observation,
         )
         .select_from(observation.join(frame, observation.c.frame_id == frame.c.id))
@@ -304,6 +434,153 @@ def load_observations(start: date, end: date) -> list[dict[str, object]]:
     with session_scope() as session:
         rows = session.execute(statement).mappings().all()
     return [dict(row) for row in rows]
+
+
+def load_frames(start: date, end: date) -> list[dict[str, object]]:
+    """Load every saved radar frame, including frames with zero observations."""
+
+    statement = (
+        select(schema.limit_up_radar_frames)
+        .where(schema.limit_up_radar_frames.c.trade_date.between(start, end))
+        .order_by(
+            schema.limit_up_radar_frames.c.captured_at,
+            schema.limit_up_radar_frames.c.id,
+        )
+    )
+    with session_scope() as session:
+        rows = session.execute(statement).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def load_point_trigger_audit_inputs(
+    start: date,
+    end: date,
+) -> tuple[list[Mapping[str, object]], list[Mapping[str, object]]]:
+    """Load only fields consumed by the point-trigger completeness gate."""
+
+    frame = schema.limit_up_radar_frames
+    observation = schema.limit_up_radar_observations
+    frame_statement = (
+        select(frame)
+        .where(frame.c.trade_date.between(start, end))
+        .order_by(frame.c.captured_at, frame.c.id)
+    )
+    observation_statement = (
+        select(
+            *(observation.c[field] for field in POINT_TRIGGER_AUDIT_OBSERVATION_FIELDS)
+        )
+        .select_from(observation.join(frame, observation.c.frame_id == frame.c.id))
+        .where(frame.c.trade_date.between(start, end))
+        .order_by(frame.c.captured_at, observation.c.vt_symbol)
+    )
+    with session_scope() as session:
+        frame_rows = session.execute(frame_statement).mappings().all()
+        observation_rows = session.execute(observation_statement).mappings().all()
+    return list(frame_rows), list(observation_rows)
+
+
+def load_point_trigger_live_window(
+    captured_at: datetime,
+    *,
+    lookback_seconds: int,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Load a bounded causal window plus earlier first-board event evidence."""
+
+    current_at = _local_datetime(captured_at)
+    seconds = int(lookback_seconds)
+    if seconds <= 0:
+        raise ValueError("lookback_seconds must be positive")
+    start_at = current_at - timedelta(seconds=seconds)
+    frame = schema.limit_up_radar_frames
+    observation = schema.limit_up_radar_observations
+    formal_event_exists = (
+        select(observation.c.frame_id)
+        .where(
+            observation.c.frame_id == frame.c.id,
+            observation.c.formal_action == "buy_now",
+            observation.c.board_lane == "first_board",
+        )
+        .exists()
+    )
+    frame_statement = (
+        select(frame)
+        .where(
+            frame.c.trade_date == current_at.date(),
+            frame.c.captured_at <= current_at,
+            or_(frame.c.captured_at >= start_at, formal_event_exists),
+        )
+        .order_by(frame.c.captured_at, frame.c.id)
+    )
+    observation_statement = (
+        select(
+            frame.c.trade_date,
+            frame.c.captured_at,
+            frame.c.strategy_version,
+            frame.c.contract_version,
+            frame.c.source_updated_at,
+            frame.c.source_trade_date,
+            frame.c.quality_status,
+            frame.c.is_stale,
+            frame.c.scan_duration_ms,
+            frame.c.quote_coverage_ratio,
+            frame.c.market_timing_state,
+            observation,
+        )
+        .select_from(observation.join(frame, observation.c.frame_id == frame.c.id))
+        .where(
+            frame.c.trade_date == current_at.date(),
+            frame.c.captured_at <= current_at,
+            or_(
+                frame.c.captured_at >= start_at,
+                (
+                    (observation.c.formal_action == "buy_now")
+                    & (observation.c.board_lane == "first_board")
+                ),
+            ),
+        )
+        .order_by(frame.c.captured_at, observation.c.vt_symbol)
+    )
+    with session_scope() as session:
+        frame_rows = session.execute(frame_statement).mappings().all()
+        observation_rows = session.execute(observation_statement).mappings().all()
+    return (
+        [dict(row) for row in frame_rows],
+        [dict(row) for row in observation_rows],
+    )
+
+
+def load_day_capture_runtime_fingerprint_state(
+    trade_date: date,
+) -> dict[str, object]:
+    """Aggregate one radar day's runtime identity without loading its frames."""
+
+    frame = schema.limit_up_radar_frames
+    normalized = func.nullif(func.btrim(frame.c.capture_runtime_fingerprint), "")
+    statement = select(
+        func.count(),
+        func.count(normalized),
+        func.count(func.distinct(normalized)),
+        func.min(normalized),
+        func.max(normalized),
+    ).where(frame.c.trade_date == trade_date)
+    with session_scope() as session:
+        row = session.execute(statement).one()
+    frame_count = int(row[0] or 0)
+    present_count = int(row[1] or 0)
+    unique_count = int(row[2] or 0)
+    minimum = str(row[3] or "").strip()
+    maximum = str(row[4] or "").strip()
+    fingerprint = (
+        minimum
+        if unique_count == 1 and minimum and minimum == maximum
+        else None
+    )
+    return {
+        "frame_count": frame_count,
+        "missing_count": max(frame_count - present_count, 0),
+        "unique_count": unique_count,
+        "capture_runtime_fingerprint": fingerprint,
+    }
 
 
 def load_frame_coverage(
@@ -403,6 +680,90 @@ def _blocker_codes(
     return list(dict.fromkeys(values))
 
 
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    return list(
+        dict.fromkeys(
+            text[:160]
+            for item in value
+            if (text := str(item).strip())
+        )
+    )
+
+
+def _market_timing_state(snapshot: Mapping[str, object]) -> str | None:
+    market = snapshot.get("market_context")
+    market = market if isinstance(market, Mapping) else {}
+    timing = market.get("timing")
+    timing = timing if isinstance(timing, Mapping) else {}
+    state = _optional_text(timing.get("signal_state"), max_length=24)
+    if state:
+        return state
+    recommendations = snapshot.get("recommendations")
+    recommendations = recommendations if isinstance(recommendations, Mapping) else {}
+    gate = recommendations.get("market_gate")
+    gate = gate if isinstance(gate, Mapping) else {}
+    return _optional_text(gate.get("timing_state"), max_length=24)
+
+
+def _mapping(value: object) -> Mapping[str, object]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _mapping_rows(value: object) -> list[Mapping[str, object]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    return [row for row in value if isinstance(row, Mapping)]
+
+
+def _portfolio_symbols(value: object) -> tuple[list[str], bool] | None:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return None
+    symbols: list[str] = []
+    for row in value:
+        if not isinstance(row, Mapping):
+            return [], False
+        symbol = str(row.get("vt_symbol") or "").strip()
+        if not symbol:
+            return [], False
+        symbols.append(symbol)
+    return _validated_two_slot_symbols(symbols)
+
+
+def _selected_flag_symbols(
+    value: object,
+    *,
+    empty_is_observed: bool = False,
+) -> tuple[list[str], bool] | None:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return None
+    if not value:
+        return ([], True) if empty_is_observed else None
+    if any(
+        not isinstance(row, Mapping) or "portfolio_selected" not in row
+        for row in value
+    ):
+        return [], False
+    symbols = [
+        str(row.get("vt_symbol") or "").strip()
+        for row in value
+        if isinstance(row, Mapping) and row.get("portfolio_selected") is True
+    ]
+    if any(not symbol for symbol in symbols):
+        return [], False
+    return _validated_two_slot_symbols(symbols)
+
+
+def _validated_two_slot_symbols(
+    symbols: Sequence[str],
+) -> tuple[list[str], bool]:
+    unique = list(dict.fromkeys(symbols))
+    if len(unique) != len(symbols) or len(unique) > 2:
+        return [], False
+    return unique, True
+
+
 def _required_text(value: object, field: str) -> str:
     text = str(value or "").strip()
     if not text:
@@ -473,9 +834,14 @@ def _optional_date(value: object) -> date | None:
     if isinstance(value, date) and not isinstance(value, datetime):
         return value
     text = str(value).strip()
-    if len(text) >= 10 and "-" in text[:10]:
-        return date.fromisoformat(text[:10])
-    digits = "".join(character for character in text if character.isdigit())
-    return date.fromisoformat(
-        f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
-    ) if len(digits) >= 8 else None
+    try:
+        if len(text) >= 10 and "-" in text[:10]:
+            return date.fromisoformat(text[:10])
+        digits = "".join(character for character in text if character.isdigit())
+        if len(digits) < 8:
+            return None
+        return date.fromisoformat(
+            f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
+        )
+    except ValueError:
+        return None

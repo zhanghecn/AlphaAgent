@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping
+from copy import copy
 from datetime import date
 from math import isfinite
 from statistics import mean
@@ -14,8 +15,7 @@ from alphaagent.server.services.limit_up.first_board_profitability import (
     combined_historical_win_rate,
 )
 
-_ANALOG_CACHE = TTLCache(max_items=8)
-_STOCK_D1_CACHE = TTLCache(max_items=8)
+_EVIDENCE_CACHE = TTLCache(max_items=8, copier=copy)
 _CONFIDENCE_POINTS = {"low": 4.0, "medium": 7.0, "high": 10.0}
 _STOCK_GENE_HISTORY_WINDOW_DAYS = 252
 _STOCK_GENE_MINIMUM_D1_SAMPLES = 5
@@ -46,35 +46,13 @@ def tbox_score(analog: Mapping[str, object]) -> float:
 
 
 def clear_live_evidence_cache() -> None:
-    _ANALOG_CACHE.clear()
-    _STOCK_D1_CACHE.clear()
+    _EVIDENCE_CACHE.clear()
 
 
 def load_history_analog_index(
     signal_date: date,
 ) -> Mapping[tuple[object, ...], object]:
-    coverage = history_repository.history_coverage(history_engine.HISTORY_STRATEGY_VERSION)
-    cache_key = ":".join(
-        (
-            history_engine.HISTORY_STRATEGY_VERSION,
-            str(coverage.get("persisted_end") or "empty"),
-            str(coverage.get("persisted_days") or 0),
-            signal_date.isoformat(),
-        )
-    )
-
-    def load() -> dict[tuple[object, ...], object]:
-        replays = history_repository.load_history_range(
-            history_engine.HISTORY_STRATEGY_VERSION,
-            None,
-            signal_date,
-        )
-        return history_engine.build_analog_index(
-            replays,
-            result_before=signal_date,
-        )
-
-    return _ANALOG_CACHE.get_or_set(cache_key, 3600, load)
+    return _history_evidence_bundle(signal_date)["analog_index"]
 
 
 def build_same_stock_first_board_d1_index(
@@ -142,6 +120,10 @@ def build_same_stock_first_board_d1_index(
 def load_same_stock_first_board_d1_index(
     signal_date: date,
 ) -> Mapping[str, Mapping[str, object]]:
+    return _history_evidence_bundle(signal_date)["stock_d1_index"]
+
+
+def _history_evidence_bundle(signal_date: date) -> dict[str, object]:
     coverage = history_repository.history_coverage(
         history_engine.HISTORY_STRATEGY_VERSION
     )
@@ -154,18 +136,23 @@ def load_same_stock_first_board_d1_index(
         )
     )
 
-    def load() -> dict[str, dict[str, object]]:
-        replays = history_repository.load_history_range(
+    def load() -> dict[str, object]:
+        replays = history_repository.load_history_evidence_rows(
             history_engine.HISTORY_STRATEGY_VERSION,
-            None,
             signal_date,
         )
-        return build_same_stock_first_board_d1_index(
-            replays,
-            signal_date=signal_date,
-        )
+        return {
+            "analog_index": history_engine.build_analog_index(
+                replays,
+                result_before=signal_date,
+            ),
+            "stock_d1_index": build_same_stock_first_board_d1_index(
+                replays,
+                signal_date=signal_date,
+            ),
+        }
 
-    return _STOCK_D1_CACHE.get_or_set(cache_key, 3600, load)
+    return _EVIDENCE_CACHE.get_or_set(cache_key, 21_600, load)
 
 
 def attach_historical_evidence(
@@ -179,15 +166,20 @@ def attach_historical_evidence(
     signal_date = _date_value(snapshot.get("trade_date"))
     if signal_date is None:
         return dict(snapshot)
+    bundle = (
+        _history_evidence_bundle(signal_date)
+        if analog_index is None or stock_d1_index is None
+        else {}
+    )
     resolved_index = (
         analog_index
         if analog_index is not None
-        else load_history_analog_index(signal_date)
+        else bundle["analog_index"]
     )
     resolved_stock_d1_index = (
         stock_d1_index
         if stock_d1_index is not None
-        else load_same_stock_first_board_d1_index(signal_date)
+        else bundle["stock_d1_index"]
     )
     candidates = snapshot.get("candidates")
     candidates = candidates if isinstance(candidates, list) else []

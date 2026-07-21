@@ -33,10 +33,12 @@ services:
       start_period: 10s
 
   alphaagent-api:
+    image: ${ALPHAAGENT_API_LOCAL_IMAGE:-alphaagent-api:local}
     build:
       context: .
       dockerfile: Dockerfile.alphaagent-api
       target: runtime
+    cpus: ${ALPHAAGENT_API_CPUS:-0.25}
     restart: unless-stopped
     command:
       - python
@@ -54,14 +56,26 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000}
       MARKET_TIMEOUT_SECONDS: ${MARKET_TIMEOUT_SECONDS:-8}
       MARKET_PAGE_SIZE: ${MARKET_PAGE_SIZE:-50}
+      ALPHAAGENT_STARTUP_DATA_SYNC_SCHEDULER: "false"
+      ALPHAAGENT_STARTUP_BACKTEST_WARMUP: ${ALPHAAGENT_STARTUP_BACKTEST_WARMUP:-false}
+      ALPHAAGENT_STARTUP_NEXT_SESSION_PLAN_WARMUP: ${ALPHAAGENT_STARTUP_NEXT_SESSION_PLAN_WARMUP:-false}
+      ALPHAAGENT_STARTUP_MARKET_CACHE_WARMUP: ${ALPHAAGENT_STARTUP_MARKET_CACHE_WARMUP:-false}
+      ALPHAAGENT_STARTUP_INTRADAY_REFRESHER: ${ALPHAAGENT_STARTUP_INTRADAY_REFRESHER:-false}
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-alphaagent}:${POSTGRES_PASSWORD:-alphaagent-local}@postgres:5432/${POSTGRES_DB:-alphaagent}
       DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-20}
       DATABASE_MAX_OVERFLOW: ${DATABASE_MAX_OVERFLOW:-20}
       DATABASE_POOL_TIMEOUT_SECONDS: ${DATABASE_POOL_TIMEOUT_SECONDS:-60}
+      PGOPTIONS: >-
+        -c application_name=alphaagent-api
+        -c max_parallel_workers_per_gather=0
       REDIS_URL: redis://redis:6379/0
       TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
       TUSHARE_API_URL: ${TUSHARE_API_URL:-https://api.tushare.pro}
       TUSHARE_TIMEOUT_SECONDS: ${TUSHARE_TIMEOUT_SECONDS:-12}
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
       TZ: ${TZ:-Asia/Shanghai}
     expose:
       - "8000"
@@ -76,11 +90,96 @@ services:
     networks:
       - alphaagent-network
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=5).read()"]
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "5", "http://localhost:8000/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  alphaagent-research:
+    extends:
+      service: alphaagent-api
+    profiles: ["research"]
+    restart: "no"
+    command:
+      - python
+      - -m
+      - alphaagent.server.services.limit_up.preboard_competing_risk_study
+      - --help
+    # Research must stay background-friendly even when callers export a larger limit.
+    cpus: 0.10
+    environment:
+      DATABASE_POOL_SIZE: "1"
+      DATABASE_MAX_OVERFLOW: "0"
+      # PostgreSQL work is outside the Python cgroup, so disable query fan-out too.
+      PGOPTIONS: >-
+        -c application_name=alphaagent-research
+        -c max_parallel_workers_per_gather=0
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    healthcheck:
+      disable: true
+
+  alphaagent-point-trigger-worker:
+    extends:
+      service: alphaagent-api
+    cpus: 0.10
+    restart: unless-stopped
+    command:
+      - python
+      - -m
+      - alphaagent.server.services.limit_up.preboard_point_trigger_worker
+    environment:
+      DATABASE_POOL_SIZE: "1"
+      DATABASE_MAX_OVERFLOW: "0"
+      ALPHAAGENT_POINT_TRIGGER_WORKER_INTERVAL_SECONDS: "300"
+      PGOPTIONS: >-
+        -c application_name=alphaagent-research
+        -c max_parallel_workers_per_gather=0
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    expose: []
+    depends_on:
+      alphaagent-api:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+
+  alphaagent-data-sync-worker:
+    extends:
+      service: alphaagent-api
+    cpus: ${ALPHAAGENT_SCHEDULER_CPUS:-0.25}
+    restart: unless-stopped
+    command:
+      - python
+      - -m
+      - alphaagent.server.services.data_sync_worker
+    environment:
+      DATABASE_POOL_SIZE: "4"
+      DATABASE_MAX_OVERFLOW: "0"
+      PGOPTIONS: >-
+        -c application_name=alphaagent-scheduler
+        -c max_parallel_workers_per_gather=0
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    expose: []
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "5", "http://127.0.0.1:8010/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 2
+      start_period: 60s
 
   alphaagent-web:
     build:
@@ -104,6 +203,7 @@ services:
 
   postgres:
     image: postgres:16-alpine
+    cpus: ${ALPHAAGENT_POSTGRES_CPUS:-0.25}
     restart: unless-stopped
     environment:
       PGDATA: /var/lib/postgresql/data

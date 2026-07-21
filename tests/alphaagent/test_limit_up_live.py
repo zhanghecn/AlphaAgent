@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
+import threading
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
+
+import pytest
 
 from alphaagent.server.services.limit_up.live_policy import (
     build_live_recommendations,
@@ -24,6 +28,223 @@ from alphaagent.server.services.limit_up.signal_service import build_historical_
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+def _fast_quote_page(
+    page: int,
+    symbols: list[str],
+    *,
+    updated_second: int | None = None,
+) -> dict[str, object]:
+    second = page if updated_second is None else updated_second
+    return {
+        "items": [
+            {
+                "vt_symbol": symbol,
+                "name": symbol,
+                "change_pct": 5.0,
+            }
+            for symbol in symbols
+        ],
+        "page": page,
+        "page_size": 100,
+        "total": 5_000,
+        "source": f"quotes.page.{page}",
+        "updated_at": f"2026-07-10T10:05:{second:02d}+08:00",
+    }
+
+
+def test_fetch_live_payloads_concurrently_merges_four_fast_quote_pages() -> None:
+    barrier = threading.Barrier(4)
+    calls: list[tuple[int, int, str, str]] = []
+
+    class Adapter:
+        def list_stocks(self, page, page_size, sort, order):
+            calls.append((page, page_size, sort, order))
+            barrier.wait(timeout=1)
+            start = (page - 1) * 100
+            symbols = [f"Q{index:04d}" for index in range(start, start + 100)]
+            return _fast_quote_page(page, symbols, updated_second=5 - page)
+
+        def limit_up_pools(self, trade_key):
+            return {"trade_date": trade_key, "pools": {}}
+
+    quotes, pools, errors = live_service._fetch_live_payloads(
+        Adapter(),
+        datetime(2026, 7, 10, 10, 5, 10, tzinfo=SHANGHAI),
+    )
+
+    assert sorted(calls) == [
+        (page, 100, "change_pct", "desc")
+        for page in range(1, 5)
+    ]
+    assert len(quotes["items"]) == 400
+    assert len({row["vt_symbol"] for row in quotes["items"]}) == 400
+    assert quotes["updated_at"] == "2026-07-10T10:05:01+08:00"
+    assert quotes["items"][0]["quote_observed_at"] == (
+        "2026-07-10T10:05:04+08:00"
+    )
+    assert quotes["items"][-1]["quote_observed_at"] == (
+        "2026-07-10T10:05:01+08:00"
+    )
+    assert quotes["fast_quote_pages_requested"] == [1, 2, 3, 4]
+    assert quotes["fast_quote_pages_succeeded"] == [1, 2, 3, 4]
+    assert quotes["fast_quote_pages_failed"] == []
+    assert quotes["fast_quote_page_coverage_ratio"] == 1.0
+    assert pools["trade_date"] == "20260710"
+    assert errors == []
+
+
+def test_fetch_live_payloads_deduplicates_cross_page_quotes_by_first_rank() -> None:
+    pages = {
+        1: _fast_quote_page(1, ["A.SSE", "DUP.SSE"]),
+        2: _fast_quote_page(2, ["DUP.SSE", "B.SSE"]),
+        3: _fast_quote_page(3, ["C.SSE"]),
+        4: _fast_quote_page(4, ["D.SSE"]),
+    }
+    pages[1]["items"][1]["change_pct"] = 9.0
+    pages[2]["items"][0]["change_pct"] = 8.0
+
+    class Adapter:
+        def list_stocks(self, page, **_kwargs):
+            return pages[page]
+
+        def limit_up_pools(self, trade_key):
+            return {"trade_date": trade_key, "pools": {}}
+
+    quotes, _pools, errors = live_service._fetch_live_payloads(
+        Adapter(),
+        datetime(2026, 7, 10, 10, 5, tzinfo=SHANGHAI),
+    )
+
+    duplicate = next(row for row in quotes["items"] if row["vt_symbol"] == "DUP.SSE")
+    assert [row["vt_symbol"] for row in quotes["items"]] == [
+        "A.SSE",
+        "DUP.SSE",
+        "B.SSE",
+        "C.SSE",
+        "D.SSE",
+    ]
+    assert duplicate["change_pct"] == 9.0
+    assert errors == []
+
+
+def test_research_enrichment_cannot_replace_formal_quotes_or_order() -> None:
+    class Adapter:
+        def list_stocks(self, page, **_kwargs):
+            return _fast_quote_page(
+                page,
+                [f"BASE{page}.SSE"],
+                updated_second=page,
+            )
+
+        def research_quote_flow_page(self, page, page_size):
+            assert page_size == 100
+            return {
+                "items": [
+                    {
+                        "vt_symbol": f"BASE{page}.SSE",
+                        "last_price": 99.0,
+                        "change_pct": 9.9,
+                        "quote_observed_at": (
+                            f"2026-07-10T10:05:0{page}+08:00"
+                        ),
+                        "quote_speed": 1.2,
+                        "quote_amplitude_pct": 6.4,
+                        "quote_main_net_inflow": 12_000_000.0,
+                        "quote_main_net_inflow_ratio": 2.63,
+                    }
+                ],
+                "source": "eastmoney.research",
+            }
+
+        def limit_up_pools(self, trade_key):
+            return {"trade_date": trade_key, "pools": {}}
+
+    quotes, _pools, errors = live_service._fetch_live_payloads(
+        Adapter(),
+        datetime(2026, 7, 10, 10, 5, 10, tzinfo=SHANGHAI),
+    )
+
+    assert [row["vt_symbol"] for row in quotes["items"]] == [
+        "BASE1.SSE",
+        "BASE2.SSE",
+        "BASE3.SSE",
+        "BASE4.SSE",
+    ]
+    assert all(row["change_pct"] == 5.0 for row in quotes["items"])
+    research = quotes["_research_quote_enrichment"]
+    assert [row["vt_symbol"] for row in research["items"]] == [
+        "BASE1.SSE",
+        "BASE2.SSE",
+        "BASE3.SSE",
+        "BASE4.SSE",
+    ]
+    assert research["items"][0]["quote_main_net_inflow_ratio"] == 2.63
+    assert errors == []
+
+
+def test_formal_candidate_projection_excludes_research_quote_fields() -> None:
+    candidate = live_service._enrich_candidate(
+        {
+            "vt_symbol": "600001.SSE",
+            "name": "正式候选",
+            "last_price": 10.5,
+            "previous_close": 10.0,
+            "change_pct": 5.0,
+            "quote_speed": 1.2,
+            "quote_amplitude_pct": 6.4,
+            "quote_main_net_inflow": 12_000_000.0,
+            "quote_main_inflow": 20_000_000.0,
+            "quote_main_outflow": 8_000_000.0,
+            "quote_main_net_inflow_ratio": 2.63,
+        },
+        {},
+        False,
+    )
+
+    assert not set(live_service.RESEARCH_QUOTE_ENRICHMENT_FIELDS).intersection(
+        candidate
+    )
+
+
+def test_fetch_live_payloads_marks_a_failed_fast_page_incomplete() -> None:
+    class Adapter:
+        def list_stocks(self, page, **_kwargs):
+            if page == 3:
+                raise RuntimeError("page unavailable")
+            return _fast_quote_page(page, [f"Q{page}.SSE"])
+
+        def limit_up_pools(self, trade_key):
+            return {"trade_date": trade_key, "pools": {}}
+
+    quotes, _pools, errors = live_service._fetch_live_payloads(
+        Adapter(),
+        datetime(2026, 7, 10, 10, 5, tzinfo=SHANGHAI),
+    )
+
+    assert quotes["fast_quote_pages_succeeded"] == [1, 2, 4]
+    assert quotes["fast_quote_pages_failed"] == [3]
+    assert quotes["fast_quote_page_coverage_ratio"] == 0.75
+    assert errors == ["quotes_page_3:RuntimeError"]
+
+
+def test_fetch_live_payloads_fails_closed_when_fast_pages_and_pool_fail() -> None:
+    class Adapter:
+        def list_stocks(self, page, **_kwargs):
+            raise RuntimeError(f"page {page} unavailable")
+
+        def limit_up_pools(self, _trade_key):
+            raise RuntimeError("pool unavailable")
+
+    with pytest.raises(
+        live_service.LiveSnapshotUnavailable,
+        match="实时涨幅榜和涨停池均不可用",
+    ):
+        live_service._fetch_live_payloads(
+            Adapter(),
+            datetime(2026, 7, 10, 10, 5, tzinfo=SHANGHAI),
+        )
 
 
 def _candidate(symbol: str, **overrides: object) -> dict[str, object]:
@@ -627,6 +848,32 @@ def test_weekend_snapshot_uses_source_trade_date_and_blocks_actions() -> None:
     )
 
 
+def test_snapshot_preserves_fast_quote_page_coverage_for_day_audit() -> None:
+    captured_at = datetime(2026, 7, 14, 10, 5, tzinfo=SHANGHAI)
+    quotes = {
+        "items": [],
+        "fast_quote_pages_requested": [1, 2, 3, 4],
+        "fast_quote_pages_succeeded": [1, 2, 4],
+        "fast_quote_pages_failed": [3],
+        "fast_quote_page_coverage_ratio": 0.75,
+        "fast_quote_item_count": 287,
+    }
+
+    snapshot = build_live_snapshot(
+        quotes,
+        {"trade_date": "20260714", "pools": {}},
+        captured_at,
+        {"by_symbol": {}},
+    )
+
+    quality = snapshot["data_quality"]
+    assert quality["fast_quote_pages_requested"] == [1, 2, 3, 4]
+    assert quality["fast_quote_pages_succeeded"] == [1, 2, 4]
+    assert quality["fast_quote_pages_failed"] == [3]
+    assert quality["fast_quote_page_coverage_ratio"] == 0.75
+    assert quality["fast_quote_item_count"] == 287
+
+
 def test_five_percent_radar_candidates_are_all_evaluated_before_ranking() -> None:
     captured_at = datetime(2026, 7, 14, 10, 5, tzinfo=SHANGHAI)
     quotes = {
@@ -733,6 +980,43 @@ def test_three_percent_capture_does_not_change_the_formal_candidate_list() -> No
     )
 
 
+def test_point_trigger_capture_excludes_below_three_auction_watch_stock() -> None:
+    captured_at = datetime(2026, 7, 14, 9, 18, tzinfo=SHANGHAI)
+    snapshot = build_live_snapshot(
+        {
+            "trade_date": "20260714",
+            "items": [
+                {
+                    "vt_symbol": "600032.SSE",
+                    "name": "昨日涨停观察",
+                    "change_pct": 0.0,
+                    "last_price": None,
+                    "previous_close": 7.78,
+                }
+            ],
+        },
+        {
+            "trade_date": "20260714",
+            "pools": {
+                "zt_previous": {"items": [{"vt_symbol": "600032.SSE"}]},
+            },
+        },
+        captured_at,
+        {
+            "by_symbol": {
+                "600032.SSE": {
+                    "previous_close": 7.78,
+                    "previous_limit_up": True,
+                    "prior_streak": 1,
+                }
+            }
+        },
+    )
+
+    assert snapshot["data_quality"]["capture_candidate_count"] == 1
+    assert snapshot["trace_capture_candidates"] == []
+
+
 def test_early_radar_reuses_the_existing_first_board_momentum_gate() -> None:
     captured_at = datetime(2026, 7, 14, 10, 5, tzinfo=SHANGHAI)
     candidate = _candidate(
@@ -808,6 +1092,8 @@ def test_saved_weekend_snapshot_is_normalized_to_latest_market_date() -> None:
 
 
 def test_refresh_outside_active_session_does_not_fetch_or_persist(monkeypatch) -> None:
+    from alphaagent.server.services.limit_up import next_session_plan
+
     fetched: list[bool] = []
     persisted: list[dict[str, object]] = []
     saved_snapshot = {
@@ -822,6 +1108,7 @@ def test_refresh_outside_active_session_does_not_fetch_or_persist(monkeypatch) -
         "data_quality": {"status": "ready", "is_stale": False},
     }
     monkeypatch.setattr(live_service, "load_latest_snapshot", lambda **_kwargs: saved_snapshot)
+    monkeypatch.setattr(next_session_plan, "get_latest_next_session_plan", lambda: None)
     monkeypatch.setattr(
         live_service,
         "load_latest_daily_trade_date",
@@ -848,6 +1135,65 @@ def test_refresh_outside_active_session_does_not_fetch_or_persist(monkeypatch) -
     assert result["trade_date"] == "2026-07-10"
     assert result["mode"] == "stale_snapshot"
     assert result["data_quality"]["is_stale"] is True
+
+
+def test_runtime_refresh_uses_post_fetch_evaluation_time(monkeypatch) -> None:
+    clock = iter(
+        [
+            datetime(2026, 7, 10, 10, 5, 0, tzinfo=SHANGHAI),
+            datetime(2026, 7, 10, 10, 5, 2, tzinfo=SHANGHAI),
+            datetime(2026, 7, 10, 10, 5, 4, tzinfo=SHANGHAI),
+        ]
+    )
+    concept_evaluated_at: list[datetime] = []
+    snapshot_evaluated_at: list[datetime] = []
+    monkeypatch.setattr(live_service, "_now_shanghai", lambda: next(clock))
+    monkeypatch.setattr(
+        live_service,
+        "_fetch_live_payloads",
+        lambda *_args, **_kwargs: (
+            {"items": []},
+            {"trade_date": "20260710", "pools": {}},
+            [],
+        ),
+    )
+    monkeypatch.setattr(live_service, "get_latest_live_concept_snapshot", lambda _at: None)
+    monkeypatch.setattr(
+        live_service,
+        "_concept_snapshot_with_incremental_quotes",
+        lambda _concept, _quotes, _pools, at: concept_evaluated_at.append(at),
+    )
+    monkeypatch.setattr(live_service, "_candidate_symbols", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(live_service, "_load_lane_validations", lambda: {})
+    monkeypatch.setattr(live_service, "load_latest_snapshot", lambda *_args, **_kwargs: None)
+
+    def build_snapshot(_quotes, _pools, at, _context, **_kwargs):
+        snapshot_evaluated_at.append(at)
+        return {
+            "trade_date": at.date().isoformat(),
+            "captured_at": at.isoformat(),
+            "strategy_version": live_service.STRATEGY_VERSION,
+            "mode": "live_snapshot",
+            "recommendations": {"lanes": {"now": [], "tail": [], "next_auction": []}},
+            "data_quality": {"status": "ready", "is_stale": False},
+        }
+
+    monkeypatch.setattr(live_service, "build_live_snapshot", build_snapshot)
+    monkeypatch.setattr(
+        live_service,
+        "_apply_live_risk_gates",
+        lambda snapshot, _validations: snapshot,
+    )
+
+    result = live_service.refresh_live_snapshot(adapter=object(), persist=False)
+
+    assert concept_evaluated_at == [
+        datetime(2026, 7, 10, 10, 5, 2, tzinfo=SHANGHAI)
+    ]
+    assert snapshot_evaluated_at == [
+        datetime(2026, 7, 10, 10, 5, 4, tzinfo=SHANGHAI)
+    ]
+    assert result["captured_at"] == "2026-07-10T10:05:04+08:00"
 
 
 def test_refresh_does_not_persist_previous_market_date_during_session(monkeypatch) -> None:
@@ -882,7 +1228,11 @@ def test_refresh_does_not_persist_previous_market_date_during_session(monkeypatc
     assert result["trade_date"] == "2026-07-10"
     assert result["mode"] == "stale_snapshot"
     assert persisted == []
-    assert traces == [result]
+    assert len(traces) == 1
+    assert "trace_capture_candidates" in traces[0]
+    assert "early_radar_recommendations" in traces[0]
+    assert "trace_capture_candidates" not in result
+    assert "early_radar_recommendations" not in result
 
 
 def test_refresh_persists_verified_current_session_snapshot(monkeypatch) -> None:
@@ -918,7 +1268,11 @@ def test_refresh_persists_verified_current_session_snapshot(monkeypatch) -> None
     assert result["mode"] == "live_snapshot"
     assert result["data_quality"]["is_stale"] is False
     assert persisted == [result]
-    assert traces == [result]
+    assert len(traces) == 1
+    assert "trace_capture_candidates" in traces[0]
+    assert "early_radar_recommendations" in traces[0]
+    assert "trace_capture_candidates" not in result
+    assert "early_radar_recommendations" not in result
 
 
 def test_refresh_persists_internal_radar_ledger_without_public_leak(monkeypatch) -> None:
@@ -1029,6 +1383,154 @@ def test_refresh_persists_internal_radar_ledger_without_public_leak(monkeypatch)
     assert radar_frames[0][1][0]["formal_action"] == "pass"
 
 
+def test_radar_persistence_keeps_live_frame_without_concept_trigger() -> None:
+    captured_at = datetime(2026, 7, 10, 10, 5, tzinfo=SHANGHAI)
+    snapshot = {
+        "trade_date": "2026-07-10",
+        "captured_at": captured_at.isoformat(),
+        "mode": "live_snapshot",
+        "data_quality": {
+            "is_stale": False,
+            "concept_trigger_allowed": False,
+        },
+    }
+
+    assert live_service._is_radar_persistable_snapshot(snapshot, captured_at)
+
+
+def test_radar_quote_time_falls_back_to_base_quote_payload() -> None:
+    observed_at = live_service._radar_quote_observed_at(
+        None,
+        {"updated_at": "2026-07-10T10:05:00+08:00"},
+    )
+
+    assert observed_at == datetime(2026, 7, 10, 10, 5, tzinfo=SHANGHAI)
+
+
+def test_research_quote_enrichment_only_changes_internal_radar_candidates() -> None:
+    captured_at = datetime(2026, 7, 10, 10, 5, 10, tzinfo=SHANGHAI)
+    snapshot = {
+        "market_context": {"sentiment": {"phase": "repair"}},
+        "candidates": [{"vt_symbol": "600001.SSE", "change_pct": 5.0}],
+        "recommendations": {
+            "lanes": {
+                "now": [{"vt_symbol": "600001.SSE", "action": "buy_now"}],
+                "tail": [],
+                "next_auction": [],
+            }
+        },
+        "trace_capture_candidates": [
+            {
+                "vt_symbol": "600001.SSE",
+                "last_price": 10.5,
+                "change_pct": 5.0,
+                "quote_observed_at": "2026-07-10T10:05:09+08:00",
+                "quote_speed": 99.0,
+                "quote_main_net_inflow_ratio": 99.0,
+            }
+        ],
+    }
+    before_public = live_service._without_internal_radar_fields(deepcopy(snapshot))
+    enrichment = {
+        "items": [
+            {
+                "vt_symbol": "600001.SSE",
+                "last_price": 99.0,
+                "change_pct": 9.9,
+                "quote_observed_at": "2026-07-10T10:05:03+08:00",
+                "quote_speed": 1.2,
+                "quote_amplitude_pct": 6.4,
+                "quote_main_net_inflow": 12_000_000.0,
+                "quote_main_net_inflow_ratio": 2.63,
+            }
+        ]
+    }
+
+    result = live_service._attach_research_quote_enrichment(
+        snapshot,
+        enrichment,
+        captured_at,
+    )
+
+    assert live_service._without_internal_radar_fields(deepcopy(result)) == before_public
+    row = result["trace_capture_candidates"][0]
+    assert row["last_price"] == 10.5
+    assert row["change_pct"] == 5.0
+    assert row["quote_observed_at"] == "2026-07-10T10:05:09+08:00"
+    assert row["quote_flow_observed_at"] == "2026-07-10T10:05:03+08:00"
+    assert row["quote_speed"] == 1.2
+    assert row["quote_amplitude_pct"] == 6.4
+    assert row["quote_main_net_inflow"] == 12_000_000.0
+    assert row["quote_main_net_inflow_ratio"] == 2.63
+
+
+def test_stale_research_quote_enrichment_is_explicitly_cleared() -> None:
+    captured_at = datetime(2026, 7, 10, 10, 5, 30, tzinfo=SHANGHAI)
+    snapshot = {
+        "trace_capture_candidates": [
+            {
+                "vt_symbol": "600001.SSE",
+                "quote_speed": 99.0,
+                "quote_amplitude_pct": 99.0,
+                "quote_main_net_inflow": 99.0,
+                "quote_main_net_inflow_ratio": 99.0,
+            }
+        ]
+    }
+    enrichment = {
+        "items": [
+            {
+                "vt_symbol": "600001.SSE",
+                "quote_observed_at": "2026-07-10T10:05:00+08:00",
+                "quote_speed": 1.2,
+                "quote_amplitude_pct": 6.4,
+                "quote_main_net_inflow": 12_000_000.0,
+                "quote_main_net_inflow_ratio": 2.63,
+            }
+        ]
+    }
+
+    result = live_service._attach_research_quote_enrichment(
+        snapshot,
+        enrichment,
+        captured_at,
+    )
+
+    row = result["trace_capture_candidates"][0]
+    assert row["quote_flow_observed_at"] == "2026-07-10T10:05:00+08:00"
+    for field in live_service.RESEARCH_QUOTE_ENRICHMENT_FIELDS:
+        assert row[field] is None
+
+
+def test_full_radar_keeps_per_symbol_quote_source_times() -> None:
+    payload = live_service._quote_payload_with_full_radar(
+        {
+            "updated_at": "2026-07-10T10:05:09+08:00",
+            "items": [
+                {
+                    "vt_symbol": "600001.SSE",
+                    "change_pct": 5.0,
+                }
+            ],
+        },
+        {
+            "source_updated_at": "2026-07-10T10:04:45+08:00",
+            "radar_quotes": [
+                {"vt_symbol": "600001.SSE", "change_pct": 4.0},
+                {"vt_symbol": "600002.SSE", "change_pct": 3.5},
+            ],
+        },
+    )
+
+    by_symbol = {row["vt_symbol"]: row for row in payload["items"]}
+    assert by_symbol["600001.SSE"]["quote_observed_at"] == (
+        "2026-07-10T10:05:09+08:00"
+    )
+    assert by_symbol["600002.SSE"]["quote_observed_at"] == (
+        "2026-07-10T10:04:45+08:00"
+    )
+
+
 def test_radar_ledger_saves_below_three_percent_fill_followup(monkeypatch) -> None:
     saved: list[list[dict[str, object]]] = []
     recent = live_service.project_radar_observation(
@@ -1128,6 +1630,48 @@ def test_radar_ledger_failure_is_explicit_without_changing_formal_actions(
     assert error == "ledger unavailable"
     assert snapshot["data_quality"]["radar_ledger_status"] == "error"
     assert snapshot["recommendations"]["lanes"]["now"][0]["action"] == "buy_now"
+
+
+def test_point_trigger_research_failure_cannot_change_official_live_fields(
+    monkeypatch,
+) -> None:
+    snapshot = {
+        "candidates": [{"vt_symbol": "600001.SSE", "rank": 1}],
+        "recommendations": {
+            "lanes": {
+                "now": [
+                    {
+                        "vt_symbol": "600001.SSE",
+                        "action": "buy_now",
+                        "rank": 1,
+                    }
+                ],
+                "tail": [],
+                "next_auction": [],
+            }
+        },
+        "portfolio": [{"vt_symbol": "600001.SSE", "action": "buy_now"}],
+        "action": "buy_now",
+        "rank": 1,
+        "data_quality": {"status": "ready", "is_stale": False},
+    }
+    before = deepcopy(snapshot)
+    monkeypatch.setattr(
+        live_service.preboard_point_trigger_service,
+        "score_live_point_trigger_safely",
+        lambda _snapshot: {"status": "error", "error": "research store down"},
+    )
+
+    live_service._run_point_trigger_research_safely(snapshot)
+
+    for field in ("candidates", "recommendations", "portfolio", "action", "rank"):
+        assert snapshot[field] == before[field]
+    assert snapshot["data_quality"]["status"] == "ready"
+    assert snapshot["data_quality"]["is_stale"] is False
+    assert snapshot["data_quality"]["point_trigger_research_status"] == "error"
+    assert snapshot["data_quality"]["point_trigger_research_error"] == (
+        "research store down"
+    )
 
 
 def test_trace_write_failure_does_not_block_official_snapshot(monkeypatch) -> None:
@@ -1292,6 +1836,50 @@ def test_live_read_reuses_fresh_current_snapshot(monkeypatch) -> None:
 
     assert result["captured_at"] == snapshot["captured_at"]
     assert result["data_quality"]["snapshot_age_seconds"] == 5
+
+
+def test_live_read_strips_research_quote_fields_from_legacy_snapshot(
+    monkeypatch,
+) -> None:
+    now = datetime(2026, 7, 10, 10, 5, 30, tzinfo=SHANGHAI)
+    research_fields = {
+        field: 1.0 for field in live_service.RESEARCH_QUOTE_ENRICHMENT_FIELDS
+    }
+    snapshot = {
+        "trade_date": "2026-07-10",
+        "captured_at": "2026-07-10T10:05:25+08:00",
+        "session_stage": "morning",
+        "mode": "live_snapshot",
+        "trace_capture_candidates": [{"vt_symbol": "600001.SSE"}],
+        "candidates": [{"vt_symbol": "600001.SSE", **research_fields}],
+        "recommendations": {
+            "lanes": {
+                "now": [
+                    {"vt_symbol": "600001.SSE", "action": "buy_now", **research_fields}
+                ],
+                "tail": [],
+                "next_auction": [],
+            }
+        },
+        "data_quality": {"status": "ready", "is_stale": False},
+    }
+    before = deepcopy(snapshot)
+    monkeypatch.setattr(
+        live_service,
+        "load_latest_snapshot",
+        lambda *_args, **_kwargs: snapshot,
+    )
+
+    result = live_service.get_latest_live_snapshot(now)
+
+    assert "trace_capture_candidates" not in result
+    assert not set(live_service.RESEARCH_QUOTE_ENRICHMENT_FIELDS).intersection(
+        result["candidates"][0]
+    )
+    assert not set(live_service.RESEARCH_QUOTE_ENRICHMENT_FIELDS).intersection(
+        result["recommendations"]["lanes"]["now"][0]
+    )
+    assert snapshot == before
 
 
 def test_live_read_returns_old_saved_snapshot_without_external_refresh(monkeypatch) -> None:
@@ -2738,6 +3326,12 @@ def test_lane_validation_veto_downgrades_live_buy_to_observation() -> None:
 def test_live_two_to_three_uses_passing_formal_portfolio_gate(monkeypatch) -> None:
     from alphaagent.server.services.limit_up import history_service
 
+    live_service._LIVE_LANE_VALIDATION_CACHE.clear()
+    monkeypatch.setattr(
+        live_service.history_repository,
+        "history_ledger_updated_at",
+        lambda *_args: None,
+    )
     monkeypatch.setattr(
         history_service,
         "get_lane_validation_snapshot",
@@ -2771,6 +3365,43 @@ def test_live_two_to_three_uses_passing_formal_portfolio_gate(monkeypatch) -> No
     assert validations["two_to_three"]["passed"] is True
     assert validations["two_to_three"]["status"] == "portfolio_gate_passed"
     assert validations["high_board"]["passed"] is False
+
+
+def test_live_lane_validations_reuse_complete_persisted_gate(monkeypatch) -> None:
+    ledger_updated_at = datetime(2026, 7, 17, 22, 7, tzinfo=SHANGHAI)
+    persisted = {
+        lane: {
+            "passed": lane != "high_board",
+            "status": "portfolio_gate_passed",
+            "reason": "cached",
+            "summary": {
+                "trade_count": 11,
+                "win_rate": 63.6364,
+                "total_return_pct": 5.7892,
+                "max_drawdown_pct": -1.25,
+            },
+        }
+        for lane in ("first_board", "two_to_three", "high_board")
+    }
+    calls: list[datetime] = []
+    live_service._LIVE_LANE_VALIDATION_CACHE.clear()
+    monkeypatch.setattr(
+        live_service.history_repository,
+        "history_ledger_updated_at",
+        lambda *_args: ledger_updated_at,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "load_latest_lane_validations",
+        lambda **kwargs: calls.append(kwargs["captured_after"]) or persisted,
+    )
+
+    first = live_service._load_lane_validations()
+    second = live_service._load_lane_validations()
+
+    assert first == persisted
+    assert second == persisted
+    assert calls == [ledger_updated_at]
 
 
 def test_historical_veto_runs_before_lane_validation_and_blocks_research_action(
@@ -3307,6 +3938,101 @@ def test_fifteen_second_pool_increment_updates_cached_concept_seal_count() -> No
     assert result is not None
     assert result["concepts_by_id"]["BK0877"]["sealed_count"] == 1
     assert result["concepts_by_id"]["BK0877"]["strong_5_count"] == 2
+
+
+def test_fifteen_second_increment_recomputes_only_affected_concepts(
+    monkeypatch,
+) -> None:
+    membership = {
+        "snapshot_date": "2026-07-13",
+        "by_symbol": {
+            "600001.SSE": ["CONCEPT_A"],
+            "600002.SSE": ["CONCEPT_A"],
+            "600003.SSE": ["CONCEPT_B"],
+            "600004.SSE": ["CONCEPT_B"],
+        },
+        "by_concept": {
+            "CONCEPT_A": {
+                "concept_id": "CONCEPT_A",
+                "concept_name": "概念A",
+                "sector_type": "theme",
+                "members": {"600001.SSE", "600002.SSE"},
+            },
+            "CONCEPT_B": {
+                "concept_id": "CONCEPT_B",
+                "concept_name": "概念B",
+                "sector_type": "theme",
+                "members": {"600003.SSE", "600004.SSE"},
+            },
+        },
+    }
+    quotes = [
+        {
+            "vt_symbol": f"60000{index}.SSE",
+            "name": f"样本{index}",
+            "change_pct": float(4 + index),
+            "last_price": float(10 + index),
+            "previous_close": 10.0,
+            "turnover": float(index * 100_000_000),
+        }
+        for index in range(1, 5)
+    ]
+    base_at = datetime(2026, 7, 14, 13, 3, tzinfo=SHANGHAI)
+    original_aggregate = live_service.aggregate_concept_strength
+    base_concepts = original_aggregate(
+        quotes,
+        membership,
+        captured_at=base_at,
+        history_by_concept={},
+    )
+    captured: dict[str, set[str]] = {}
+
+    def tracked_aggregate(rows, selected_membership, **kwargs):
+        captured["concept_ids"] = set(selected_membership["by_concept"])
+        captured["quote_symbols"] = {
+            str(row["vt_symbol"])
+            for row in rows
+        }
+        return original_aggregate(rows, selected_membership, **kwargs)
+
+    monkeypatch.setattr(
+        live_service,
+        "aggregate_concept_strength",
+        tracked_aggregate,
+    )
+    base = {
+        "captured_at": base_at.isoformat(),
+        "trade_date": "2026-07-14",
+        "quotes": quotes,
+        "radar_quotes": quotes,
+        "membership": membership,
+        "concepts": base_concepts,
+        "concepts_by_id": {
+            str(row["concept_id"]): row
+            for row in base_concepts
+        },
+        "data_quality": {"age_seconds": 15, "quote_coverage_ratio": 1.0},
+    }
+
+    result = live_service._concept_snapshot_with_incremental_quotes(
+        base,
+        {
+            "items": [
+                {
+                    **quotes[0],
+                    "change_pct": 9.8,
+                    "last_price": 10.98,
+                }
+            ]
+        },
+        {"pools": {}},
+        base_at + timedelta(seconds=15),
+    )
+
+    assert result is not None
+    assert captured["concept_ids"] == {"CONCEPT_A"}
+    assert captured["quote_symbols"] == {"600001.SSE", "600002.SSE"}
+    assert set(result["concepts_by_id"]) == {"CONCEPT_A", "CONCEPT_B"}
 
 
 def test_realtime_concept_launch_requires_fresh_diffusion_and_top3_leader() -> None:

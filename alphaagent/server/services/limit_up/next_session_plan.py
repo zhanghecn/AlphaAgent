@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta
-from typing import Literal, Mapping
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from fastapi.encoders import jsonable_encoder
@@ -18,7 +19,11 @@ from alphaagent.server.services.limit_up.live_repository import (
     load_live_context,
     save_snapshot,
 )
-from alphaagent.server.services.limit_up import scheduled_execution
+from alphaagent.server.services.limit_up import (
+    history_engine,
+    history_repository,
+    scheduled_execution,
+)
 from alphaagent.server.services.limit_up.versions import LIVE_STRATEGY_VERSION
 
 logger = logging.getLogger(__name__)
@@ -54,6 +59,10 @@ def build_next_session_plan_snapshot(
     local_at = _local_datetime(captured_at)
     recommendations = source_snapshot.get("recommendations")
     recommendations = recommendations if isinstance(recommendations, Mapping) else {}
+    lane_validations = recommendations.get("board_lane_validations")
+    lane_validations = (
+        lane_validations if isinstance(lane_validations, Mapping) else {}
+    )
     lanes = recommendations.get("lanes")
     lanes = lanes if isinstance(lanes, Mapping) else {}
     raw_rows = lanes.get("next_auction")
@@ -85,6 +94,7 @@ def build_next_session_plan_snapshot(
             "captured_at": local_at.isoformat(),
             "session_stage": "closed",
             "market_gate": dict(recommendations.get("market_gate") or {}),
+            "board_lane_validations": dict(lane_validations),
             "lanes": {"now": [], "tail": [], "next_auction": rows},
             "plan": plan_metadata,
             "execution_schedule": scheduled_execution.next_session_execution_clock(),
@@ -135,7 +145,14 @@ def refresh_next_session_plan(
         phase=phase,
         strategy_version=LIVE_STRATEGY_VERSION,
     )
-    if existing is not None and _has_observations(existing):
+    if (
+        existing is not None
+        and _has_observations(existing)
+        and (
+            phase != "final"
+            or _has_current_lane_validation_cache(existing)
+        )
+    ):
         return existing
 
     if pools is None:
@@ -167,7 +184,11 @@ def start_next_session_plan_warmup() -> dict[str, object]:
         phase="final",
         strategy_version=LIVE_STRATEGY_VERSION,
     )
-    if existing is not None and _has_observations(existing):
+    if (
+        existing is not None
+        and _has_observations(existing)
+        and _has_current_lane_validation_cache(existing)
+    ):
         return {"status": "skipped", "reason": "plan_ready"}
     with _WARMUP_LOCK:
         if _WARMUP_THREAD is not None and _WARMUP_THREAD.is_alive():
@@ -345,6 +366,35 @@ def _has_observations(snapshot: Mapping[str, object]) -> bool:
     lanes = lanes if isinstance(lanes, Mapping) else {}
     rows = lanes.get("next_auction")
     return isinstance(rows, list) and bool(rows)
+
+
+def _has_current_lane_validation_cache(
+    snapshot: Mapping[str, object],
+) -> bool:
+    recommendations = snapshot.get("recommendations")
+    recommendations = (
+        recommendations if isinstance(recommendations, Mapping) else {}
+    )
+    validations = recommendations.get("board_lane_validations")
+    if not isinstance(validations, Mapping) or not all(
+        isinstance(validation := validations.get(lane), Mapping)
+        and isinstance(validation.get("summary"), Mapping)
+        for lane in scheduled_execution.RESEARCH_EXECUTION_LANES
+    ):
+        return False
+    try:
+        ledger_updated_at = history_repository.history_ledger_updated_at(
+            history_engine.HISTORY_STRATEGY_VERSION
+        )
+        captured_at = datetime.fromisoformat(str(snapshot.get("captured_at") or ""))
+    except (TypeError, ValueError):
+        return False
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(
+        ledger_updated_at is not None
+        and _local_datetime(captured_at) >= _local_datetime(ledger_updated_at)
+    )
 
 
 def _board_lane(board_level: int) -> str:

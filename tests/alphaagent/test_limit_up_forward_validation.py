@@ -104,6 +104,34 @@ def test_current_live_trade_date_can_wait_for_daily_calendar_close() -> None:
     assert report["summary"]["total_return_pct"] is None
 
 
+def test_forward_validation_counts_regime_shadow_without_filtering_orders() -> None:
+    snapshot = _snapshot()
+    signal = snapshot["recommendations"]["actionable_recommendations"][0]
+    signal["regime_failure_shadow"] = {
+        "policy_version": "first-board-style-isolation-shadow-v1",
+        "status": "ready",
+        "risk_flag": True,
+        "execution_effect": "none_research_only",
+    }
+
+    report = forward_validation.build_forward_validation_report(
+        _dataset(),
+        [snapshot],
+        trade_calendar=TRADE_CALENDAR,
+        entry_mode="sweep",
+        exit_mode="next_open",
+        current_date=date(2026, 7, 10),
+    )
+
+    shadow = report["regime_failure_shadow"]
+    assert report["summary"]["plan_count"] == 1
+    assert shadow["plan_count"] == 1
+    assert shadow["eligible_plan_count"] == 1
+    assert shadow["risk_plan_count"] == 1
+    assert shadow["closed_risk_count"] == 1
+    assert shadow["execution_effect"] == "none_research_only"
+
+
 def test_later_snapshot_cannot_rewrite_first_intraday_buy_action() -> None:
     snapshots = [
         _snapshot(trigger_price=11.0),

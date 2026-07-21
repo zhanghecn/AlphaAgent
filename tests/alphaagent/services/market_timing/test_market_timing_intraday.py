@@ -221,7 +221,7 @@ def test_intraday_today_bar_tracks_index_up_ratio(monkeypatch):
     changes = [1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0]
     quotes = [
         _make_quote(vt_symbol, change_pct)
-        for vt_symbol, change_pct in zip(_SEVEN, changes)
+        for vt_symbol, change_pct in zip(_SEVEN, changes, strict=True)
     ]
     monkeypatch.setattr(ser, "RealMarketDataClient", lambda: _FakeClient(quotes))
 
@@ -235,6 +235,20 @@ def test_intraday_today_bar_returns_none_off_hours(monkeypatch):
     """非交易时段(周末/盘后): 直接返回 None, 不拉数据。"""
     monkeypatch.setattr(ser, "_is_intraday_china", lambda: False)
     assert ser.intraday_today_bar(100.0, 1e9) is None
+
+
+def test_panel_database_freshness_is_bounded_during_session(monkeypatch):
+    monkeypatch.setattr(mt_panel, "_is_intraday_china", lambda: True)
+    assert (
+        mt_panel._panel_fresh_seconds()
+        == mt_panel.PANEL_FRESH_INTRADAY_SECONDS
+    )
+
+    monkeypatch.setattr(mt_panel, "_is_intraday_china", lambda: False)
+    assert (
+        mt_panel._panel_fresh_seconds()
+        == mt_panel.PANEL_FRESH_OFF_HOURS_SECONDS
+    )
 
 
 def test_intraday_today_bar_none_when_fetch_fails(monkeypatch):

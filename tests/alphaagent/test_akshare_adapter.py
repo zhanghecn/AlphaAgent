@@ -2,9 +2,10 @@ import importlib
 import os
 import sys
 import threading
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
@@ -13,6 +14,8 @@ from alphaagent.data_sources.akshare_adapter import (
     AkShareAdapter,
     AkShareSourceError,
     _bar_row_to_api,
+    _compact_stock_row_to_api,
+    _eastmoney_board_daily_quote,
     _eastmoney_board_kline,
     _eastmoney_board_member_row_to_api,
     _eastmoney_board_row_to_api,
@@ -80,6 +83,202 @@ def test_eastmoney_board_kline_parses_bk_history(monkeypatch) -> None:
     assert captured["params"]["secid"] == "90.BK0459"
     assert list(df["close"]) == [10.5, 10.8]
     assert list(df["change_pct"]) == [1.5, 2.86]
+
+
+def test_eastmoney_board_kline_continues_after_http_200_empty_payload(
+    monkeypatch,
+) -> None:
+    responses = [
+        {"data": {"klines": []}},
+        {
+            "data": {
+                "klines": [
+                    "2026-07-17,10.00,10.50,10.70,9.90,12345,"
+                    "678900.00,2.0,5.0,0.50,3.0"
+                ]
+            }
+        },
+    ]
+    requested_urls: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.payload
+
+    def fake_get(url, **kwargs):
+        del kwargs
+        requested_urls.append(url)
+        return FakeResponse(responses.pop(0))
+
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter.requests.get",
+        fake_get,
+    )
+
+    frame = _eastmoney_board_kline(
+        "BK0459",
+        "industry",
+        limit=1,
+        start_date="20260701",
+        end_date="20260718",
+    )
+
+    assert len(requested_urls) == 2
+    assert frame.iloc[0]["date"] == date(2026, 7, 17)
+    assert frame.iloc[0]["close"] == pytest.approx(10.5)
+
+
+def test_eastmoney_board_daily_quote_parses_verified_completed_bar(
+    monkeypatch,
+) -> None:
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "data": {
+                    "f43": 298379,
+                    "f44": 319273,
+                    "f45": 296518,
+                    "f46": 309123,
+                    "f47": 8539633,
+                    "f48": 18472485669.0,
+                    "f57": "BK0949",
+                    "f58": "氦气概念",
+                    "f59": 2,
+                    "f60": 311235,
+                    "f86": 1784273972,
+                    "f170": -413,
+                }
+            }
+
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter.requests.get",
+        lambda *args, **kwargs: FakeResponse(),
+    )
+
+    frame = _eastmoney_board_daily_quote(
+        "BK0949",
+        now=datetime(2026, 7, 18, 10, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+
+    row = frame.iloc[0]
+    assert row["date"] == date(2026, 7, 17)
+    assert row["open"] == pytest.approx(3091.23)
+    assert row["high"] == pytest.approx(3192.73)
+    assert row["low"] == pytest.approx(2965.18)
+    assert row["close"] == pytest.approx(2983.79)
+    assert row["volume"] == pytest.approx(8539633)
+    assert row["turnover"] == pytest.approx(18472485669)
+    assert row["change_pct"] == pytest.approx(-4.13)
+    assert row["previous_close"] == pytest.approx(3112.35)
+    assert row["source_detail"] == "eastmoney.board_quote_daily"
+    assert row["source_timestamp"] == "2026-07-17T15:39:32+08:00"
+
+
+@pytest.mark.parametrize(
+    ("patch", "message"),
+    [
+        ({"f86": None}, "timestamp"),
+        ({"f57": "BK0000"}, "code"),
+        ({"f44": 290000}, "OHLC"),
+        ({"f86": 1784268000}, "incomplete"),
+    ],
+)
+def test_eastmoney_board_daily_quote_rejects_invalid_or_incomplete_rows(
+    monkeypatch,
+    patch,
+    message,
+) -> None:
+    payload = {
+        "f43": 298379,
+        "f44": 319273,
+        "f45": 296518,
+        "f46": 309123,
+        "f47": 8539633,
+        "f48": 18472485669.0,
+        "f57": "BK0949",
+        "f58": "氦气概念",
+        "f59": 2,
+        "f60": 311235,
+        "f86": 1784273972,
+        "f170": -413,
+    }
+    payload.update(patch)
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": payload}
+
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter.requests.get",
+        lambda *args, **kwargs: FakeResponse(),
+    )
+
+    with pytest.raises(AkShareSourceError, match=message):
+        _eastmoney_board_daily_quote(
+            "BK0949",
+            now=datetime(2026, 7, 17, 14, 30, tzinfo=ZoneInfo("Asia/Shanghai")),
+        )
+
+
+def test_sector_daily_bars_uses_completed_official_quote_after_kline_failure(
+    monkeypatch,
+) -> None:
+    market_cache.clear()
+    adapter = AkShareAdapter()
+    quote_frame = pd.DataFrame(
+        [
+            {
+                "date": date(2026, 7, 17),
+                "open": 3091.23,
+                "close": 2983.79,
+                "high": 3192.73,
+                "low": 2965.18,
+                "volume": 8539633,
+                "turnover": 18472485669,
+                "change_pct": -4.13,
+                "previous_close": 3112.35,
+                "source_detail": "eastmoney.board_quote_daily",
+                "source_timestamp": "2026-07-17T15:39:32+08:00",
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter._eastmoney_board_kline",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AkShareSourceError("history unavailable")
+        ),
+    )
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter._eastmoney_board_daily_quote",
+        lambda *args, **kwargs: quote_frame,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_sector_daily_bars_ths",
+        lambda *args, **kwargs: pytest.fail("official quote must precede THS"),
+    )
+
+    data = adapter.sector_daily_bars("BK0949", board_type="theme", limit=30)
+
+    assert data["source"] == "eastmoney.board_kline"
+    assert data["items"][0]["trade_date"] == "2026-07-17"
+    assert data["items"][0]["raw"] == {
+        "source_detail": "eastmoney.board_quote_daily",
+        "source_timestamp": "2026-07-17T15:39:32+08:00",
+        "previous_close": 3112.35,
+    }
 
 
 def test_sector_daily_bars_uses_eastmoney_before_ths(monkeypatch) -> None:
@@ -268,7 +467,73 @@ def test_all_stock_quotes_fetches_every_page_and_deduplicates(monkeypatch) -> No
         "600000.SSE",
         "000001.SZSE",
     }
+    assert all("raw" not in item for item in payload["items"])
     assert payload["source"] == "tencent.full_a_share_pages"
+
+
+def test_compact_tencent_quote_keeps_point_in_time_momentum_and_main_flow() -> None:
+    row = _compact_stock_row_to_api(
+        {
+            "code": "sh600000",
+            "name": "浦发银行",
+            "zxj": "10.50",
+            "zdf": "5.00",
+            "speed": "1.25",
+            "zf": "6.80",
+            "turnover": "1000",
+            "zljlr": "120",
+            "zllr": "610",
+            "zllc": "490",
+        }
+    )
+
+    assert row["quote_speed"] == 1.25
+    assert row["quote_amplitude_pct"] == 6.8
+    assert row["quote_main_net_inflow"] == 1_200_000
+    assert row["quote_main_inflow"] == 6_100_000
+    assert row["quote_main_outflow"] == 4_900_000
+    assert row["quote_main_net_inflow_ratio"] == 12.0
+
+
+def test_all_stock_quotes_cache_isolates_callers_without_recursive_copy(
+    monkeypatch,
+) -> None:
+    import alphaagent.data_sources.akshare_adapter as adapter_module
+
+    adapter_module._FULL_MARKET_QUOTE_CACHE.clear()
+    calls = 0
+
+    def load_snapshot(*, max_workers):
+        nonlocal calls
+        del max_workers
+        calls += 1
+        return {
+            "items": [
+                {
+                    "vt_symbol": "600000.SSE",
+                    "name": "浦发银行",
+                    "change_pct": 1.0,
+                }
+            ],
+            "total": 1,
+        }
+
+    adapter = adapter_module.AkShareAdapter()
+    monkeypatch.setattr(adapter, "_all_stock_quotes_uncached", load_snapshot)
+
+    first = adapter.all_stock_quotes(max_workers=2)
+    first["items"][0]["name"] = "caller mutation"
+    first["items"].append({"vt_symbol": "000001.SZSE"})
+    second = adapter.all_stock_quotes(max_workers=2)
+
+    assert calls == 1
+    assert second["items"] == [
+        {
+            "vt_symbol": "600000.SSE",
+            "name": "浦发银行",
+            "change_pct": 1.0,
+        }
+    ]
 
 
 def test_all_stock_quotes_rejects_a_partial_page_failure(monkeypatch) -> None:
@@ -341,6 +606,132 @@ def test_list_stocks_uses_ttl_cache(monkeypatch) -> None:
     assert calls["count"] == 1
 
 
+def test_change_pct_list_keeps_sina_as_the_formal_quote_source(monkeypatch) -> None:
+    adapter = AkShareAdapter()
+    calls: list[str] = []
+
+    def sina_page(page: int, page_size: int, sort: str):
+        calls.append("sina")
+        assert (page, page_size, sort) == (1, 100, "change_pct")
+        return {
+            "items": [{"vt_symbol": "600001.SSE", "last_price": 10.2}],
+            "page": page,
+            "page_size": page_size,
+            "total": 1,
+            "source": "sina.market_center.hs_a",
+        }
+
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter._sina_all_a_page",
+        sina_page,
+    )
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter._eastmoney_all_a_page",
+        lambda *_args, **_kwargs: pytest.fail(
+            "formal change ranking must not switch to EastMoney"
+        ),
+    )
+
+    result = adapter._list_stocks_uncached(1, 100, "change_pct", "desc")
+
+    assert result["source"] == "sina.market_center.hs_a"
+    assert result["items"][0]["last_price"] == 10.2
+    assert calls == ["sina"]
+
+
+def test_change_pct_list_uses_eastmoney_only_after_sina_failure(monkeypatch) -> None:
+    adapter = AkShareAdapter()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter._eastmoney_all_a_page",
+        lambda *_args, **_kwargs: calls.append("eastmoney")
+        or {"items": [], "source": "eastmoney.push2delay.clist"},
+    )
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter._sina_all_a_page",
+        lambda *_args, **_kwargs: calls.append("sina")
+        or (_ for _ in ()).throw(AkShareSourceError("sina unavailable")),
+    )
+
+    result = adapter._list_stocks_uncached(1, 100, "change_pct", "desc")
+
+    assert result["source"] == "eastmoney.push2delay.clist"
+    assert calls == ["sina", "eastmoney"]
+
+
+def test_research_quote_flow_page_reads_fresh_eastmoney_rows(monkeypatch) -> None:
+    market_cache.clear()
+    adapter = AkShareAdapter()
+    calls: list[tuple[int, int, str, str]] = []
+
+    def eastmoney_page(page: int, page_size: int, sort: str, order: str):
+        calls.append((page, page_size, sort, order))
+        return {
+            "items": [
+                {
+                    "vt_symbol": "600001.SSE",
+                    "quote_observed_at": "2026-07-21T02:05:00+00:00",
+                    "quote_speed": 1.2,
+                    "quote_amplitude_pct": 6.4,
+                    "quote_main_net_inflow": 12_000_000.0,
+                    "quote_main_net_inflow_ratio": 2.63,
+                }
+            ],
+            "source": "eastmoney.push2delay.clist",
+        }
+
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter._eastmoney_all_a_page",
+        eastmoney_page,
+    )
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter._eastmoney_stock_page_is_fresh",
+        lambda _payload: True,
+    )
+
+    result = adapter.research_quote_flow_page(1, 100)
+
+    assert calls == [(1, 100, "change_pct", "desc")]
+    assert result["items"][0]["quote_main_net_inflow_ratio"] == 2.63
+
+
+def test_research_quote_flow_page_rejects_stale_eastmoney_rows(monkeypatch) -> None:
+    market_cache.clear()
+    adapter = AkShareAdapter()
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter._eastmoney_all_a_page",
+        lambda *_args, **_kwargs: {"items": [{"vt_symbol": "600001.SSE"}]},
+    )
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter._eastmoney_stock_page_is_fresh",
+        lambda _payload: False,
+    )
+
+    with pytest.raises(AkShareSourceError, match="stale"):
+        adapter.research_quote_flow_page(1, 100)
+
+
+def test_eastmoney_change_page_freshness_uses_row_source_time() -> None:
+    import alphaagent.data_sources.akshare_adapter as adapter_module
+
+    now = datetime(2026, 7, 21, 10, 5, 10, tzinfo=ZoneInfo("Asia/Shanghai"))
+    fresh = {
+        "items": [
+            {"quote_observed_at": "2026-07-21T02:05:00+00:00"}
+            for _index in range(10)
+        ]
+    }
+    stale = {
+        "items": [
+            {"quote_observed_at": "2026-07-21T02:04:00+00:00"}
+            for _index in range(10)
+        ]
+    }
+
+    assert adapter_module._eastmoney_stock_page_is_fresh(fresh, now=now)
+    assert not adapter_module._eastmoney_stock_page_is_fresh(stale, now=now)
+
+
 def test_limit_up_pool_uses_short_ttl_only_for_current_date(monkeypatch) -> None:
     adapter = AkShareAdapter()
     calls: list[tuple[str, int]] = []
@@ -364,6 +755,32 @@ def test_limit_up_pool_uses_short_ttl_only_for_current_date(monkeypatch) -> None
         (f"limit_up_pools:{today}", adapter.LIVE_LIMIT_POOL_TTL_SECONDS),
         ("limit_up_pools:20200102", adapter.LIMIT_POOL_TTL_SECONDS),
     ]
+
+
+def test_live_board_quotes_do_not_use_the_daily_board_cache(monkeypatch) -> None:
+    adapter = AkShareAdapter()
+    calls: list[tuple[str, int]] = []
+
+    def fake_get_or_set(key: str, ttl_seconds: int, loader):
+        calls.append((key, ttl_seconds))
+        return loader()
+
+    monkeypatch.setattr(market_cache, "get_or_set", fake_get_or_set)
+    monkeypatch.setattr(
+        adapter,
+        "_board_names_uncached",
+        lambda board_type, limit: {
+            "type": board_type,
+            "items": [{"id": "BK_TEST", "change_pct": 1.2}],
+            "total": 1,
+            "updated_at": "2026-07-20T06:50:00+00:00",
+        },
+    )
+
+    payload = adapter.live_board_quotes("concept", limit=1000)
+
+    assert payload["items"][0]["id"] == "BK_TEST"
+    assert calls == [("live_board_quotes:concept:1000", 10)]
 
 
 def test_limit_up_pool_sources_are_fetched_concurrently(monkeypatch) -> None:
@@ -981,6 +1398,34 @@ def test_eastmoney_row_uses_code_fallback_for_bse() -> None:
     assert item["vt_symbol"] == "920206.BSE"
 
 
+def test_eastmoney_stock_page_exposes_realtime_momentum_and_flow_fields() -> None:
+    import alphaagent.data_sources.akshare_adapter as adapter_module
+
+    requested_fields = set(adapter_module._eastmoney_quote_fields().split(","))
+    assert {"f7", "f22", "f62", "f124", "f184"}.issubset(requested_fields)
+
+    item = _eastmoney_quote_row_to_api(
+        {
+            "f12": "600001",
+            "f13": 1,
+            "f14": "测试股份",
+            "f2": 10.5,
+            "f3": 5.0,
+            "f7": 7.2,
+            "f22": 1.4,
+            "f62": 125_000_000,
+            "f124": 1_784_532_895,
+            "f184": 8.6,
+        }
+    )
+
+    assert item["quote_observed_at"] == "2026-07-20T07:34:55+00:00"
+    assert item["quote_amplitude_pct"] == 7.2
+    assert item["quote_speed"] == 1.4
+    assert item["quote_main_net_inflow"] == 125_000_000
+    assert item["quote_main_net_inflow_ratio"] == 8.6
+
+
 def test_eastmoney_board_row_exposes_realtime_metrics() -> None:
     item = _eastmoney_board_row_to_api(
         {
@@ -1021,6 +1466,54 @@ def test_eastmoney_board_member_row_uses_quote_shape() -> None:
     assert item["name"] == "亨通光电"
     assert item["change_pct"] == 2.34
     assert item["source"] == "eastmoney.push2.board"
+
+
+def test_eastmoney_clist_reuses_thread_session(monkeypatch) -> None:
+    from alphaagent.data_sources import akshare_adapter
+
+    created_sessions: list[object] = []
+    requested_urls: list[str] = []
+
+    class FakeResponse:
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {"rc": 0, "data": {"diff": []}}
+
+    class FakeSession:
+        trust_env = True
+
+        def get(self, url, **kwargs):
+            del kwargs
+            requested_urls.append(url)
+            return FakeResponse()
+
+    def create_session() -> FakeSession:
+        session = FakeSession()
+        created_sessions.append(session)
+        return session
+
+    monkeypatch.setattr(
+        akshare_adapter,
+        "_EASTMONEY_SESSION_LOCAL",
+        threading.local(),
+        raising=False,
+    )
+    monkeypatch.setattr(akshare_adapter.requests, "Session", create_session)
+
+    hosts = ("https://push2.example.test",)
+    akshare_adapter._eastmoney_clist_get(hosts, {"pn": 1})
+    akshare_adapter._eastmoney_clist_get(hosts, {"pn": 2})
+
+    assert len(created_sessions) == 1
+    assert created_sessions[0].trust_env is False
+    assert requested_urls == [
+        "https://push2.example.test/api/qt/clist/get",
+        "https://push2.example.test/api/qt/clist/get",
+    ]
 
 
 def test_eastmoney_hsf10_sector_rows_confirm_real_stock_memberships() -> None:

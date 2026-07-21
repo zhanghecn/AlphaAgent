@@ -89,6 +89,7 @@ def test_aggregate_concept_strength_calculates_realtime_pcb_diffusion() -> None:
 def test_concept_strength_uses_only_earlier_frames_for_acceleration() -> None:
     history = {
         "BK0877": [
+            {"captured_at": "2026-07-14T12:58:00+08:00", "median_change_pct": 0.5, "strong_5_count": 0, "turnover": 500.0},
             {"captured_at": "2026-07-14T13:00:00+08:00", "median_change_pct": 1.0, "strong_5_count": 0, "turnover": 1_000.0},
             {"captured_at": "2026-07-14T13:02:00+08:00", "median_change_pct": 2.0, "strong_5_count": 1, "turnover": 2_000.0},
             {"captured_at": "2026-07-14T13:04:00+08:00", "median_change_pct": 99.0, "strong_5_count": 99, "turnover": 99_000.0},
@@ -104,6 +105,29 @@ def test_concept_strength_uses_only_earlier_frames_for_acceleration() -> None:
     assert row["change_acceleration_1m"] == 1.0
     assert row["change_acceleration_3m"] == 2.0
     assert row["turnover_acceleration_1m"] > 0
+
+
+def test_concept_acceleration_requires_all_fresh_anchors() -> None:
+    history = {
+        "BK0877": [
+            {"captured_at": "2026-07-14T12:56:00+08:00", "median_change_pct": 0.5, "strong_5_count": 0, "turnover": 500.0},
+            {"captured_at": "2026-07-14T13:00:00+08:00", "median_change_pct": 1.0, "strong_5_count": 0, "turnover": 1_000.0},
+            {"captured_at": "2026-07-14T13:02:00+08:00", "median_change_pct": 2.0, "strong_5_count": 1, "turnover": 2_000.0},
+        ]
+    }
+
+    row = aggregate_concept_strength(
+        [_quote(0, 3.0)],
+        _membership(1),
+        captured_at=datetime(2026, 7, 14, 13, 3, tzinfo=SHANGHAI),
+        history_by_concept=history,
+    )[0]
+
+    assert all(
+        row[f"{metric}_acceleration_{minutes}m"] is None
+        for metric in ("change", "turnover")
+        for minutes in (1, 3, 5)
+    )
 
 
 def test_rank_concepts_assigns_best_strength_to_lowest_percentile() -> None:
@@ -227,6 +251,12 @@ def test_attach_candidate_concepts_selects_strongest_execution_concept() -> None
                 "concept_state": "launch",
                 "strength_score": 92.0,
                 "strength_rank": 1,
+                "change_acceleration_1m": 0.2,
+                "change_acceleration_3m": 0.7,
+                "change_acceleration_5m": 1.1,
+                "turnover_acceleration_1m": 12_000_000.0,
+                "turnover_acceleration_3m": 30_000_000.0,
+                "turnover_acceleration_5m": 55_000_000.0,
             }
         },
         "data_quality": {"age_seconds": 12.0, "trigger_allowed": False},
@@ -239,6 +269,12 @@ def test_attach_candidate_concepts_selects_strongest_execution_concept() -> None
     assert candidates[0]["concept_leader_rank"] == 1
     assert candidates[0]["concept_snapshot_age_seconds"] == 12.0
     assert candidates[0]["concept_trigger_allowed"] is False
+    assert candidates[0]["concept_change_acceleration_1m"] == 0.2
+    assert candidates[0]["concept_change_acceleration_3m"] == 0.7
+    assert candidates[0]["concept_change_acceleration_5m"] == 1.1
+    assert candidates[0]["concept_turnover_acceleration_1m"] == 12_000_000.0
+    assert candidates[0]["concept_turnover_acceleration_3m"] == 30_000_000.0
+    assert candidates[0]["concept_turnover_acceleration_5m"] == 55_000_000.0
 
 
 def test_20260714_pcb_replay_uses_prior_membership_and_preseal_frames_only() -> None:

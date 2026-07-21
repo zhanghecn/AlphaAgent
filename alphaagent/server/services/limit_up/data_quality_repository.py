@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Mapping
 
-from sqlalchemy import Date, Time, and_, case, cast, func, not_, or_, select, tuple_
+from sqlalchemy import Date, Time, and_, case, cast, func, not_, or_, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from alphaagent.server.db import schema
@@ -55,6 +55,17 @@ def load_membership_data_quality_counts() -> dict[str, object]:
         return _membership_counts(session)
 
 
+def load_event_minute_quality_counts() -> dict[str, object]:
+    """Load only event-minute coverage and its retry ledger."""
+
+    schema.ensure_schema_once(get_engine())
+    with session_scope() as session:
+        return {
+            "stock_minute": _event_minute_pair_counts(session),
+            "minute_backfill": _minute_backfill_counts(session),
+        }
+
+
 def list_missing_event_minute_pairs(
     limit: int = 20,
     *,
@@ -63,7 +74,7 @@ def list_missing_event_minute_pairs(
 ) -> list[dict[str, str]]:
     schema.ensure_schema_once(get_engine())
     event_pairs = _event_pairs()
-    minute_pairs = _minute_pairs()
+    minute_exists = _event_minute_exists(event_pairs)
     attempts = schema.limit_up_minute_backfill_attempts
     capped_limit = min(max(int(limit), 1), 200)
     eligible_at = as_of or datetime.now(timezone.utc)
@@ -72,12 +83,6 @@ def list_missing_event_minute_pairs(
             select(event_pairs.c.trade_date, event_pairs.c.vt_symbol)
             .select_from(
                 event_pairs.outerjoin(
-                    minute_pairs,
-                    and_(
-                        event_pairs.c.vt_symbol == minute_pairs.c.vt_symbol,
-                        event_pairs.c.trade_date == minute_pairs.c.trade_date,
-                    ),
-                ).outerjoin(
                     attempts,
                     and_(
                         event_pairs.c.vt_symbol == attempts.c.vt_symbol,
@@ -87,7 +92,7 @@ def list_missing_event_minute_pairs(
                 )
             )
             .where(
-                minute_pairs.c.vt_symbol.is_(None),
+                not_(minute_exists),
                 or_(
                     attempts.c.vt_symbol.is_(None),
                     attempts.c.next_retry_at.is_(None),
@@ -614,41 +619,80 @@ def _qualifying_membership_dates_query():
 
 
 def _stock_minute_counts(session) -> dict[str, object]:
-    minute = schema.stock_minute_bars
-    row = session.execute(
-        select(
-            func.min(minute.c.trade_date),
-            func.max(minute.c.trade_date),
-            func.count(func.distinct(minute.c.trade_date)),
-            func.count(func.distinct(minute.c.vt_symbol)),
-            func.count(),
-        ).where(minute.c.interval == "1m")
-    ).one()
+    estimated_bars = session.execute(
+        text(
+            """
+            SELECT GREATEST(
+                table_stats.n_live_tup
+                * COALESCE(interval_stats.one_minute_fraction, 1),
+                0
+            )::bigint
+            FROM pg_stat_user_tables AS table_stats
+            LEFT JOIN LATERAL (
+                SELECT frequency.frequency AS one_minute_fraction
+                FROM pg_stats AS column_stats
+                CROSS JOIN LATERAL json_array_elements_text(
+                    to_json(column_stats.most_common_vals)
+                ) WITH ORDINALITY AS value(item, ordinal)
+                JOIN LATERAL unnest(
+                    column_stats.most_common_freqs
+                ) WITH ORDINALITY AS frequency(frequency, ordinal)
+                    USING (ordinal)
+                WHERE column_stats.schemaname = table_stats.schemaname
+                  AND column_stats.tablename = table_stats.relname
+                  AND column_stats.attname = 'interval'
+                  AND value.item = '1m'
+                LIMIT 1
+            ) AS interval_stats ON TRUE
+            WHERE table_stats.schemaname = current_schema()
+              AND table_stats.relname = 'stock_minute_bars'
+            """
+        )
+    ).scalar_one()
     return {
-        "start": _iso_date(row[0]),
-        "end": _iso_date(row[1]),
-        "trade_days": int(row[2] or 0),
-        "symbols": int(row[3] or 0),
-        "bars": int(row[4] or 0),
+        "bars": int(estimated_bars or 0),
+        "bar_count_mode": "postgres_statistics_estimate",
     }
 
 
-def _event_minute_pair_counts(session) -> dict[str, int]:
+def _event_minute_pair_counts(session) -> dict[str, object]:
     event_pairs = _event_pairs()
-    minute_pairs = _minute_pairs()
     total = session.execute(select(func.count()).select_from(event_pairs)).scalar_one()
     covered = session.execute(
-        select(func.count()).select_from(
-            event_pairs.join(
-                minute_pairs,
-                and_(
-                    event_pairs.c.vt_symbol == minute_pairs.c.vt_symbol,
-                    event_pairs.c.trade_date == minute_pairs.c.trade_date,
-                ),
-            )
+        select(
+            func.min(event_pairs.c.trade_date),
+            func.max(event_pairs.c.trade_date),
+            func.count(func.distinct(event_pairs.c.trade_date)),
+            func.count(func.distinct(event_pairs.c.vt_symbol)),
+            func.count(),
         )
-    ).scalar_one()
-    return {"event_pairs": int(total or 0), "covered_event_pairs": int(covered or 0)}
+        .select_from(event_pairs)
+        .where(_event_minute_exists(event_pairs))
+    ).one()
+    return {
+        "start": _iso_date(covered[0]),
+        "end": _iso_date(covered[1]),
+        "trade_days": int(covered[2] or 0),
+        "symbols": int(covered[3] or 0),
+        "event_pairs": int(total or 0),
+        "covered_event_pairs": int(covered[4] or 0),
+        "coverage_scope": "limit_up_event_pairs",
+    }
+
+
+def _event_minute_exists(event_pairs):
+    minute = schema.stock_minute_bars
+    return (
+        select(1)
+        .select_from(minute)
+        .where(
+            minute.c.vt_symbol == event_pairs.c.vt_symbol,
+            minute.c.trade_date == event_pairs.c.trade_date,
+            minute.c.interval == "1m",
+        )
+        .correlate(event_pairs)
+        .exists()
+    )
 
 
 def _minute_backfill_counts(session, provider: str = "tdx") -> dict[str, object]:
@@ -784,18 +828,6 @@ def _eligible_main_board_stock_condition():
             ),
         ),
         not_(excluded_name),
-    )
-
-
-def _minute_pairs():
-    return (
-        select(
-            schema.stock_minute_bars.c.vt_symbol.label("vt_symbol"),
-            schema.stock_minute_bars.c.trade_date.label("trade_date"),
-        )
-        .where(schema.stock_minute_bars.c.interval == "1m")
-        .distinct()
-        .subquery()
     )
 
 

@@ -16,6 +16,7 @@ from alphaagent.server.services.limit_up.entry_backtest import (
     build_limit_up_entry_backtest,
 )
 from alphaagent.server.services.limit_up.live_policy import session_stage
+from alphaagent.server.services.limit_up import regime_shadow
 from alphaagent.server.services.limit_up.live_repository import (
     list_daily_trade_dates,
     load_daily_bars_for_symbols,
@@ -144,6 +145,7 @@ def build_forward_validation_report(
     )
     result_status = _result_status(observed_day_count, summary)
     exclusion_counts = Counter(exclusions)
+    regime_failure_shadow = _regime_failure_shadow_summary(orders, trades)
 
     return {
         "status": status,
@@ -159,6 +161,7 @@ def build_forward_validation_report(
             "saved_actionable_recommendations_only_no_historical_backfill"
         ),
         "summary": summary,
+        "regime_failure_shadow": regime_failure_shadow,
         "progress": {
             "process_check": _milestone(observed_day_count, PROCESS_CHECK_DAYS),
             "strategy_review": _milestone(observed_day_count, STRATEGY_REVIEW_DAYS),
@@ -191,8 +194,55 @@ def build_forward_validation_report(
             "只统计系统当时真实保存且非过期的正式可买列表，不把观察池或研究动作计为交易。",
             "当前没有Tick/L2队列证据，闭合交易仍是价格代理，simulation_eligible固定为false。",
             "20个交易日只做流程检查；满60个交易日后才重新评估收益稳定性和数据中断风险。",
+            "风格失效影子只记录严格D-1输入，不改变正式推荐、仓位或退出。",
         ],
     }
+
+
+def _regime_failure_shadow_summary(
+    orders: Sequence[Mapping[str, object]],
+    trades: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    order_shadows = _captured_regime_shadows(orders)
+    trade_shadows = _captured_regime_shadows(trades)
+    eligible = [row for row in order_shadows if row.get("status") == "ready"]
+    risk_orders = [row for row in eligible if row.get("risk_flag") is True]
+    closed_risk = [
+        row
+        for row in trade_shadows
+        if row.get("status") == "ready" and row.get("risk_flag") is True
+    ]
+    status = (
+        "no_captured_input"
+        if not order_shadows
+        else "collecting"
+        if eligible
+        else "blocked_by_input"
+    )
+    return {
+        "policy_version": regime_shadow.POLICY_VERSION,
+        "status": status,
+        "execution_effect": "none_research_only",
+        "plan_count": len(order_shadows),
+        "eligible_plan_count": len(eligible),
+        "risk_plan_count": len(risk_orders),
+        "closed_risk_count": len(closed_risk),
+        "minimum_closed_risk_count": 30,
+    }
+
+
+def _captured_regime_shadows(
+    rows: Sequence[Mapping[str, object]],
+) -> list[Mapping[str, object]]:
+    result = []
+    for row in rows:
+        shadow = row.get("regime_failure_shadow")
+        if (
+            isinstance(shadow, Mapping)
+            and shadow.get("policy_version") == regime_shadow.POLICY_VERSION
+        ):
+            result.append(shadow)
+    return result
 
 
 def _audit_snapshots(

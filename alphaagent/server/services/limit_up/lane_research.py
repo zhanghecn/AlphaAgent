@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from datetime import time
-from typing import Mapping, Sequence
 
 BOARD_LANES = ("first_board", "two_to_three", "high_board")
 REMOVED_BOARD_LANES = frozenset({"one_to_two"})
@@ -57,6 +57,14 @@ def evaluate_lane_candidate(candidate: Mapping[str, object]) -> dict[str, object
     if lane in REMOVED_BOARD_LANES:
         raise ValueError(f"board lane removed: {lane}")
     blockers = _shared_blockers(candidate, lane)
+    support_score = (
+        first_board_support_score(candidate) if lane == "first_board" else None
+    )
+    entry_quality_score = (
+        first_board_entry_quality_score(candidate, support_score=support_score)
+        if lane == "first_board"
+        else None
+    )
     favorable: list[str] = []
     setup_type: str | None = None
     first_board_route: str | None = None
@@ -67,7 +75,10 @@ def evaluate_lane_candidate(candidate: Mapping[str, object]) -> dict[str, object
     }
 
     if lane == "first_board":
-        lane_blockers, favorable, first_board_route = _first_board_rules(candidate)
+        lane_blockers, favorable, first_board_route = _first_board_rules(
+            candidate,
+            support_score=support_score,
+        )
         blockers.extend(lane_blockers)
     elif lane == "two_to_three":
         lane_blockers, favorable, setup_type = _two_to_three_rules(candidate)
@@ -85,12 +96,6 @@ def evaluate_lane_candidate(candidate: Mapping[str, object]) -> dict[str, object
         decision = "watch" if lane == "high_board" and l2_only else "blocked"
     else:
         decision = "eligible"
-    support_score = first_board_support_score(candidate) if lane == "first_board" else None
-    entry_quality_score = (
-        first_board_entry_quality_score(candidate, support_score=support_score)
-        if lane == "first_board"
-        else None
-    )
     setup_tags = detect_setup_tags(
         candidate,
         setup_type=setup_type,
@@ -119,7 +124,12 @@ def evaluate_lane_candidate(candidate: Mapping[str, object]) -> dict[str, object
             if lane == "first_board"
             else None,
             "entry_quality_score": entry_quality_score,
-            "rank_score": _lane_rank_score(candidate, lane, setup_type),
+            "rank_score": _lane_rank_score(
+                candidate,
+                lane,
+                setup_type,
+                entry_quality_score=entry_quality_score,
+            ),
             **two_to_three_quality,
         }
     )
@@ -353,6 +363,8 @@ def _shared_blockers(
 
 def _first_board_rules(
     candidate: Mapping[str, object],
+    *,
+    support_score: float | None,
 ) -> tuple[list[str], list[str], str | None]:
     blockers: list[str] = []
     favorable: list[str] = []
@@ -397,7 +409,6 @@ def _first_board_rules(
     heat = _number(candidate.get("prior_industry_heat_score"))
     if heat is None and candidate.get("live_sector_gate_managed") is not True:
         blockers.append("industry_heat_unavailable")
-    support_score = first_board_support_score(candidate)
     if support_score is None:
         blockers.append("intraday_support_unavailable")
     elif support_score < FIRST_BOARD_MIN_SUPPORT_SCORE:
@@ -781,16 +792,15 @@ def _lane_rank_score(
     candidate: Mapping[str, object],
     lane: str,
     setup_type: str | None,
+    *,
+    entry_quality_score: float | None,
 ) -> float:
     heat = _number(candidate.get("prior_industry_heat_score")) or 0
     leader_rank = _number(candidate.get("prior_industry_leader_rank")) or 10
     gene = min(_number(candidate.get("prior_limit_count_126")) or 0, 6)
-    position = _number(candidate.get("prior_position_120"))
-    pullback = abs(min(_number(candidate.get("pullback_from_prior_limit_pct")) or 0, 0))
     amount = _number(candidate.get("prior_amount_ratio_5d")) or 0
     if lane == "first_board":
-        entry_quality = first_board_entry_quality_score(candidate)
-        score = entry_quality if entry_quality is not None else 0.0
+        score = entry_quality_score if entry_quality_score is not None else 0.0
     elif lane == "two_to_three":
         score = heat * 0.4 - leader_rank * 5 + min(amount, 3) * 5
         score += 12 if setup_type == "weak_to_strong" else 7

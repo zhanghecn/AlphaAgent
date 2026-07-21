@@ -27,6 +27,9 @@ from alphaagent.server.services.limit_up.radar_contract import (
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 VALIDATION_VERSION = "limit-up-radar-validation-v1"
+RESEARCH_PREPARE_STATE = "research_prepare"
+RESEARCH_ACTION_STATE = "research_action"
+RESEARCH_EXECUTION_EFFECT = "none_research_only"
 CONTRACT_ACTION_FIELDS = {
     "formal_5pct": "formal_action",
     "early_3pct_same_rules": "early_action",
@@ -71,6 +74,32 @@ COMPARISON_GATE = {
     "minimum_queue_unknown_reduction_pct": 20.0,
 }
 _REPORT_CACHE = TTLCache(max_items=2)
+
+
+def build_read_only_research_event(
+    row: Mapping[str, object],
+    *,
+    state: str,
+    prepare_score_field: str,
+    action_score_field: str,
+) -> dict[str, object]:
+    """Project a scored row without creating an executable recommendation."""
+
+    if state not in {RESEARCH_PREPARE_STATE, RESEARCH_ACTION_STATE}:
+        raise ValueError(f"unsupported research state: {state}")
+    captured_at = _as_datetime(row.get("captured_at"))
+    signal_date = _as_date(row.get("signal_date") or row.get("trade_date"))
+    return {
+        "research_state": state,
+        "vt_symbol": str(row.get("vt_symbol") or ""),
+        "signal_date": signal_date.isoformat() if signal_date is not None else None,
+        "signal_time": str(row.get("signal_time") or ""),
+        "captured_at": captured_at.isoformat() if captured_at is not None else None,
+        "prepare_score": _number(row.get(prepare_score_field)),
+        "action_score": _number(row.get(action_score_field)),
+        "execution_effect": RESEARCH_EXECUTION_EFFECT,
+        "actionable": False,
+    }
 
 
 def first_signal(

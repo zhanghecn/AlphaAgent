@@ -22,6 +22,11 @@ def clear_concept_runtime_between_tests(monkeypatch):
         lambda trade_date: trade_date - timedelta(days=1),
         raising=False,
     )
+    monkeypatch.setattr(
+        repository,
+        "load_strength_history",
+        lambda *_args, **_kwargs: [],
+    )
     yield
     service.clear_runtime_snapshot()
 
@@ -111,7 +116,7 @@ def test_refresh_rejects_a_membership_snapshot_older_than_d1(monkeypatch) -> Non
     assert persisted == []
 
 
-def test_select_persisted_concepts_keeps_top30_radar_and_warming() -> None:
+def test_select_persisted_concepts_keeps_top30_radar_warming_and_three_percent() -> None:
     concepts = [
         {
             "concept_id": f"BK{index:04d}",
@@ -119,16 +124,18 @@ def test_select_persisted_concepts_keeps_top30_radar_and_warming() -> None:
             "concept_state": "observe",
             "radar_symbols": [],
         }
-        for index in range(1, 36)
+        for index in range(1, 37)
     ]
     concepts[34]["radar_symbols"] = ["600000.SSE"]
     concepts[33]["concept_state"] = "warming"
+    concepts[35]["strong_3_count"] = 1
 
     selected = repository.select_persisted_concepts(concepts)
 
-    assert len(selected) == 32
+    assert len(selected) == 33
     assert "BK0035" in {row["concept_id"] for row in selected}
     assert "BK0034" in {row["concept_id"] for row in selected}
+    assert "BK0036" in {row["concept_id"] for row in selected}
 
 
 def test_refresh_builds_atomic_runtime_snapshot(monkeypatch) -> None:
@@ -152,12 +159,143 @@ def test_refresh_builds_atomic_runtime_snapshot(monkeypatch) -> None:
     assert len(snapshot["quotes"]) == len(_full_market_payload()["items"])
 
 
-def test_runtime_snapshot_over_45_seconds_is_observation_only() -> None:
+def test_refresh_cold_start_restores_persisted_acceleration_history(monkeypatch) -> None:
+    monkeypatch.setattr(
+        repository,
+        "load_frozen_membership_rows",
+        lambda _date: (date(2026, 7, 13), _pcb_memberships()),
+    )
+    loaded: list[tuple[date, datetime | None, int]] = []
+
+    def load_history(
+        trade_date: date,
+        *,
+        before: datetime | None = None,
+        minutes: int = 6,
+    ) -> list[dict[str, object]]:
+        loaded.append((trade_date, before, minutes))
+        return [
+            _persisted_strength("2026-07-14T12:58:20+08:00", 3.0, 800_000_000.0),
+            _persisted_strength("2026-07-14T13:00:20+08:00", 5.0, 1_000_000_000.0),
+            _persisted_strength("2026-07-14T13:02:20+08:00", 7.0, 1_500_000_000.0),
+        ]
+
+    monkeypatch.setattr(repository, "load_strength_history", load_history)
+    monkeypatch.setattr(repository, "save_strength_snapshots", lambda rows: len(rows))
+
+    snapshot = service.refresh_live_concept_snapshot(
+        datetime(2026, 7, 14, 13, 3, 25, tzinfo=SHANGHAI),
+        adapter=FakeAdapter(_full_market_payload("2026-07-14T13:03:20+08:00")),
+    )
+
+    concept = snapshot["concepts_by_id"]["BK0877"]
+    assert concept["change_acceleration_1m"] == 1.85
+    assert concept["change_acceleration_3m"] == 3.85
+    assert concept["change_acceleration_5m"] == 5.85
+    assert loaded == [
+        (
+            date(2026, 7, 14),
+            datetime(2026, 7, 14, 13, 3, 25, tzinfo=SHANGHAI),
+            6,
+        )
+    ]
+
+
+def test_explicit_replay_rejects_quote_source_from_the_future(monkeypatch) -> None:
+    monkeypatch.setattr(
+        repository,
+        "load_frozen_membership_rows",
+        lambda _date: (date(2026, 7, 13), _pcb_memberships()),
+    )
+
+    result = service.refresh_live_concept_snapshot(
+        datetime(2026, 7, 14, 13, 3, 25, tzinfo=SHANGHAI),
+        adapter=FakeAdapter(_full_market_payload("2026-07-14T13:03:26+08:00")),
+    )
+
+    assert result["data_quality"]["status"] == "unavailable"
+    assert result["data_quality"]["trigger_allowed"] is False
+    assert "晚于显式捕获时间" in result["data_quality"]["source_errors"][0]
+
+
+def test_implicit_capture_uses_quote_source_time() -> None:
+    requested_at = datetime(2026, 7, 14, 13, 3, 10, tzinfo=SHANGHAI)
+    source_at = datetime(2026, 7, 14, 13, 3, 20, tzinfo=SHANGHAI)
+
+    assert service._resolved_concept_capture_time(
+        requested_at,
+        source_at,
+        fixed_capture_time=False,
+    ) == source_at
+
+
+def test_runtime_payload_owns_quote_list_without_copying_each_row() -> None:
+    payload = _full_market_payload("2026-07-14T13:03:20+08:00")
+    quotes = payload["items"]
+    membership = service.build_membership_index(
+        _pcb_memberships(),
+        snapshot_date=date(2026, 7, 13),
+    )
+
+    snapshot = service._runtime_payload(
+        datetime(2026, 7, 14, 13, 3, 25, tzinfo=SHANGHAI),
+        payload,
+        membership,
+        [],
+    )
+
+    assert snapshot["quotes"] is not quotes
+    assert snapshot["quotes"][0] is quotes[0]
+
+
+def test_refresh_reuses_same_d1_membership_index(monkeypatch) -> None:
+    calls: list[date] = []
+
+    def load_rows(trade_date: date):
+        calls.append(trade_date)
+        return date(2026, 7, 13), _pcb_memberships()
+
+    monkeypatch.setattr(repository, "load_frozen_membership_rows", load_rows)
+    monkeypatch.setattr(repository, "save_strength_snapshots", lambda rows: len(rows))
+    adapter = FakeAdapter(_full_market_payload("2026-07-14T13:03:20+08:00"))
+
+    service.refresh_live_concept_snapshot(
+        datetime(2026, 7, 14, 13, 3, 25, tzinfo=SHANGHAI),
+        adapter=adapter,
+        persist=False,
+    )
+    adapter.payload = _full_market_payload("2026-07-14T13:04:20+08:00")
+    service.refresh_live_concept_snapshot(
+        datetime(2026, 7, 14, 13, 4, 25, tzinfo=SHANGHAI),
+        adapter=adapter,
+        persist=False,
+    )
+
+    assert calls == [date(2026, 7, 14)]
+
+
+def test_runtime_view_quality_changes_do_not_mutate_cached_snapshot() -> None:
+    service._replace_runtime_snapshot(_runtime_snapshot("2026-07-14T13:03:00+08:00"))
+
+    first = service.get_latest_live_concept_snapshot(
+        datetime(2026, 7, 14, 13, 3, 10, tzinfo=SHANGHAI)
+    )
+    assert first is not None
+    first["data_quality"]["status"] = "changed-by-caller"
+
+    second = service.get_latest_live_concept_snapshot(
+        datetime(2026, 7, 14, 13, 3, 11, tzinfo=SHANGHAI)
+    )
+    assert second is not None
+    assert second["data_quality"]["status"] != "changed-by-caller"
+
+
+def test_runtime_snapshot_over_90_seconds_is_observation_only() -> None:
     service.clear_runtime_snapshot()
     service._replace_runtime_snapshot(_runtime_snapshot("2026-07-14T13:03:00+08:00"))
 
     result = service.get_latest_live_concept_snapshot(
-        datetime(2026, 7, 14, 13, 3, 46, tzinfo=SHANGHAI)
+        datetime(2026, 7, 14, 13, 4, 31, tzinfo=SHANGHAI)
     )
 
     assert result is not None
@@ -194,7 +332,7 @@ def test_invalid_source_date_keeps_previous_snapshot_without_persisting(monkeypa
         lambda rows: persisted.extend(rows),
     )
     payload = {
-        **_full_market_payload("2026-07-15T09:30:00+08:00"),
+        **_full_market_payload("2026-07-14T13:03:19+08:00"),
         "trade_date": "2026-07-15",
     }
 
@@ -367,4 +505,18 @@ def _runtime_snapshot(captured_at: str) -> dict[str, object]:
             "source_trade_date_valid": True,
             "source_errors": [],
         },
+    }
+
+
+def _persisted_strength(
+    captured_at: str,
+    median_change_pct: float,
+    turnover: float,
+) -> dict[str, object]:
+    return {
+        "captured_at": captured_at,
+        "concept_id": "BK0877",
+        "median_change_pct": median_change_pct,
+        "strong_5_count": 1,
+        "turnover": turnover,
     }

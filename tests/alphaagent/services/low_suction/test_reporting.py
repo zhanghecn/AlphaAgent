@@ -205,6 +205,27 @@ def test_cli_prints_json_without_database_details(monkeypatch, capsys) -> None:
     assert "DATABASE_URL" not in output
 
 
+def test_cli_rejects_output_path_before_loading_report(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    def unexpected_load() -> dict[str, object]:
+        raise AssertionError("report loading must not start for an invalid output path")
+
+    monkeypatch.setattr(cli, "load_data_quality_report", unexpected_load)
+
+    with pytest.raises(ValueError, match="memory/06_backtests"):
+        cli.main(
+            [
+                "audit",
+                "--format",
+                "json",
+                "--output",
+                str(tmp_path / "outside.json"),
+            ]
+        )
+
+
 def test_membership_source_status_cli_never_exposes_credentials(
     monkeypatch,
     capsys,

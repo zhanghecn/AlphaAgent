@@ -284,6 +284,105 @@ def test_account_1430_price_query_requires_exact_minute(monkeypatch) -> None:
     assert "to_char(stock_minute_bars.bar_time, 'HH24:MI') = '14:30'" in sql
 
 
+def test_post_auction_price_query_uses_later_0931_bar_open(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {
+                    "vt_symbol": "600000.SSE",
+                    "trade_date": date(2026, 7, 10),
+                    "bar_time": datetime(2026, 7, 10, 9, 31),
+                    "open_price": 10.6,
+                    "source": "tdx_public_hq",
+                }
+            ]
+
+    class Session:
+        def execute(self, statement):
+            captured["statement"] = statement
+            return Result()
+
+    @contextmanager
+    def fake_session_scope():
+        yield Session()
+
+    monkeypatch.setattr(history_repository.schema, "ensure_schema_once", lambda _engine: None)
+    monkeypatch.setattr(history_repository, "get_engine", lambda: object())
+    monkeypatch.setattr(history_repository, "session_scope", fake_session_scope)
+
+    rows = history_repository.load_account_post_auction_prices(
+        [("600000.SSE", date(2026, 7, 10))]
+    )
+
+    assert rows[0]["price_0931"] == 10.6
+    assert rows[0]["price_source"] == "minute_0931_open:tdx_public_hq"
+    sql = str(
+        captured["statement"].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "stock_minute_bars.interval = '1m'" in sql
+    assert "to_char(stock_minute_bars.bar_time, 'HH24:MI') = '09:31'" in sql
+
+
+def test_auction_evidence_query_preserves_strict_fill_fields(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {
+                    "vt_symbol": "600000.SSE",
+                    "trade_date": date(2026, 7, 10),
+                    "captured_at": datetime(2026, 7, 10, 1, 26),
+                    "auction_price": 10.5,
+                    "matched_volume": 20_000.0,
+                    "unmatched_volume": None,
+                    "unmatched_side": None,
+                    "strict_complete": False,
+                    "source": "tushare.stk_auction",
+                }
+            ]
+
+    class Session:
+        def execute(self, statement):
+            captured["statement"] = statement
+            return Result()
+
+    @contextmanager
+    def fake_session_scope():
+        yield Session()
+
+    monkeypatch.setattr(history_repository.schema, "ensure_schema_once", lambda _engine: None)
+    monkeypatch.setattr(history_repository, "get_engine", lambda: object())
+    monkeypatch.setattr(history_repository, "session_scope", fake_session_scope)
+
+    rows = history_repository.load_account_auction_evidence(
+        [("600000.SSE", date(2026, 7, 10))]
+    )
+
+    assert rows[0]["matched_volume"] == 20_000.0
+    assert rows[0]["unmatched_volume"] is None
+    assert rows[0]["strict_complete"] is False
+    sql = str(
+        captured["statement"].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "stock_auction_snapshots.strict_complete" in sql
+    assert "stock_auction_snapshots.unmatched_volume" in sql
+
+
 def test_scheduled_exit_minute_requests_use_all_research_candidate_pools(monkeypatch) -> None:
     history_rows = [
         {
@@ -511,6 +610,142 @@ def test_retryable_minute_pairs_use_scoped_provider_and_due_time(monkeypatch) ->
     )
     assert "limit_up_minute_backfill_attempts.provider = 'tdx_exit_1430'" in sql
     assert "limit_up_minute_backfill_attempts.next_retry_at" in sql
+
+
+def test_missing_event_minute_pairs_probe_minutes_by_event_key(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {
+                    "trade_date": date(2026, 7, 20),
+                    "vt_symbol": "600001.SSE",
+                }
+            ]
+
+    class Session:
+        def execute(self, statement):
+            captured["statement"] = statement
+            return Result()
+
+    @contextmanager
+    def fake_session_scope():
+        yield Session()
+
+    monkeypatch.setattr(
+        data_quality_repository.schema,
+        "ensure_schema_once",
+        lambda _engine: None,
+    )
+    monkeypatch.setattr(data_quality_repository, "get_engine", lambda: object())
+    monkeypatch.setattr(data_quality_repository, "session_scope", fake_session_scope)
+
+    gaps = data_quality_repository.list_missing_event_minute_pairs(
+        20,
+        provider="tdx",
+        as_of=datetime(2026, 7, 20, 13, 30, tzinfo=timezone.utc),
+    )
+
+    assert gaps == [{"trade_date": "2026-07-20", "vt_symbol": "600001.SSE"}]
+    sql = " ".join(
+        str(
+            captured["statement"].compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        .lower()
+        .split()
+    )
+    assert "not (exists (select 1" in sql
+    assert "stock_minute_bars.interval = '1m'" in sql
+    assert "select distinct stock_minute_bars.vt_symbol" not in sql
+    assert "limit_up_minute_backfill_attempts.provider = 'tdx'" in sql
+
+
+def test_event_minute_coverage_probes_minutes_by_event_key() -> None:
+    captured: list[object] = []
+
+    class Result:
+        def __init__(self, value: object) -> None:
+            self.value = value
+
+        def scalar_one(self) -> int:
+            return int(self.value)
+
+        def one(self):
+            return self.value
+
+    class Session:
+        def execute(self, statement):
+            captured.append(statement)
+            if len(captured) == 1:
+                return Result(9)
+            return Result(
+                (
+                    date(2026, 7, 17),
+                    date(2026, 7, 20),
+                    2,
+                    3,
+                    4,
+                )
+            )
+
+    counts = data_quality_repository._event_minute_pair_counts(Session())
+
+    assert counts == {
+        "start": "2026-07-17",
+        "end": "2026-07-20",
+        "trade_days": 2,
+        "symbols": 3,
+        "event_pairs": 9,
+        "covered_event_pairs": 4,
+        "coverage_scope": "limit_up_event_pairs",
+    }
+    sql = " ".join(
+        str(
+            captured[1].compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        .lower()
+        .split()
+    )
+    assert "where exists (select 1" in sql
+    assert "stock_minute_bars.interval = '1m'" in sql
+    assert "select distinct stock_minute_bars.vt_symbol" not in sql
+
+
+def test_stock_minute_bar_count_uses_postgres_statistics_estimate() -> None:
+    captured: dict[str, object] = {}
+
+    class Result:
+        def one(self):
+            return (date(2026, 1, 20), date(2026, 7, 20), 110, 2_170, 4_891_743)
+
+        def scalar_one(self) -> int:
+            return 4_717_278
+
+    class Session:
+        def execute(self, statement):
+            captured["statement"] = statement
+            return Result()
+
+    counts = data_quality_repository._stock_minute_counts(Session())
+
+    assert counts == {
+        "bars": 4_717_278,
+        "bar_count_mode": "postgres_statistics_estimate",
+    }
+    sql = " ".join(str(captured["statement"]).lower().split())
+    assert "pg_stat_user_tables" in sql
+    assert "pg_stats" in sql
+    assert "from stock_minute_bars" not in sql
 
 
 def test_missing_radar_minute_pairs_require_a_complete_240_bar_path(
@@ -839,6 +1074,50 @@ def test_data_quality_endpoint_returns_service_payload(monkeypatch) -> None:
     assert response.json()["data"] == expected
 
 
+def test_data_quality_coalesces_repeated_global_count_reads(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+    data_quality.market_cache.clear()
+    monkeypatch.setattr(
+        data_quality.data_quality_repository,
+        "load_data_quality_counts",
+        lambda history_version, live_version: calls.append(
+            (history_version, live_version)
+        )
+        or _raw_coverage(),
+    )
+
+    try:
+        first = data_quality.get_limit_up_data_quality()
+        second = data_quality.get_limit_up_data_quality()
+    finally:
+        data_quality.market_cache.clear()
+
+    assert first == second
+    assert len(calls) == 1
+
+
+def test_event_minute_quality_uses_targeted_counts_only(monkeypatch) -> None:
+    monkeypatch.setattr(
+        data_quality.data_quality_repository,
+        "load_event_minute_quality_counts",
+        lambda: {
+            "stock_minute": {"event_pairs": 20, "covered_event_pairs": 12},
+            "minute_backfill": {"cooling_down_pair_count": 3},
+        },
+    )
+
+    result = data_quality.get_limit_up_event_minute_quality()
+
+    assert result == {
+        "minute_event_pair_coverage": {
+            "covered": 12,
+            "total": 20,
+            "coverage_pct": 60.0,
+        },
+        "minute_backfill_attempts": {"cooling_down_pair_count": 3},
+    }
+
+
 def test_data_quality_endpoint_fails_closed_without_database(monkeypatch) -> None:
     monkeypatch.setattr(limit_up, "is_database_configured", lambda: False)
 
@@ -884,7 +1163,7 @@ def test_event_minute_backfill_uses_only_missing_pairs_and_full_session(monkeypa
     )
     monkeypatch.setattr(
         data_quality,
-        "get_limit_up_data_quality",
+        "get_limit_up_event_minute_quality",
         lambda: {"minute_event_pair_coverage": {"covered": 208, "total": 2_839, "coverage_pct": 7.3265}},
     )
 
@@ -927,7 +1206,7 @@ def test_event_minute_backfill_records_remote_failure_and_dry_run_records_nothin
     )
     monkeypatch.setattr(
         data_quality,
-        "get_limit_up_data_quality",
+        "get_limit_up_event_minute_quality",
         lambda: {"minute_event_pair_coverage": {"covered": 0, "total": 1, "coverage_pct": 0}},
     )
     monkeypatch.setattr(
@@ -967,7 +1246,7 @@ def test_event_minute_backfill_reports_cooling_down_when_no_pair_is_retryable(mo
     )
     monkeypatch.setattr(
         data_quality,
-        "get_limit_up_data_quality",
+        "get_limit_up_event_minute_quality",
         lambda: {
             "minute_event_pair_coverage": {"covered": 10, "total": 20, "coverage_pct": 50},
             "minute_backfill_attempts": {

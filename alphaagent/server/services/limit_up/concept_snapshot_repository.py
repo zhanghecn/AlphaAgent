@@ -155,7 +155,13 @@ def select_persisted_concepts(
         state = str(concept.get("concept_state") or "observe")
         radar_symbols = concept.get("radar_symbols")
         has_radar = isinstance(radar_symbols, Sequence) and bool(radar_symbols)
-        if rank <= PERSISTED_STRENGTH_LIMIT or has_radar or state in {"warming", "launch", "ebb"}:
+        has_three_percent_member = int(concept.get("strong_3_count") or 0) > 0
+        if (
+            rank <= PERSISTED_STRENGTH_LIMIT
+            or has_radar
+            or has_three_percent_member
+            or state in {"warming", "launch", "ebb"}
+        ):
             selected[concept_id] = dict(concept)
     return sorted(
         selected.values(),

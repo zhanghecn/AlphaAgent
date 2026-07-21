@@ -24,6 +24,8 @@ from alphaagent.server.services.market_timing import signal as sig
 
 PANEL_START = date(2024, 5, 28)  # 指数数据起点
 LIVE_OVERLAY_END = dt_time(19, 30)  # 覆盖 19:00 盘后日线同步启动和短暂执行时间
+PANEL_FRESH_INTRADAY_SECONDS = 1800
+PANEL_FRESH_OFF_HOURS_SECONDS = 86_400
 
 
 def _cache_ttl() -> int:
@@ -31,7 +33,6 @@ def _cache_ttl() -> int:
     return 300 if _is_intraday_china() else 1800
 
 
-PANEL_FRESH_HOURS = 24  # 库内 panel 24h 内视为新鲜(日线数据一天一变)
 INDEX_FOR_CHART = "000001.SSE"  # 前端主图用上证指数(主人最熟悉)
 PHASE_LABELS = {
     "uptrend": "主升",
@@ -59,7 +60,17 @@ def _is_panel_fresh(computed_at: Any) -> bool:
     if computed_at is None:
         return False
     now = datetime.now(computed_at.tzinfo) if getattr(computed_at, "tzinfo", None) else datetime.utcnow()
-    return (now - computed_at) < timedelta(hours=PANEL_FRESH_HOURS)
+    return (now - computed_at) < timedelta(seconds=_panel_fresh_seconds())
+
+
+def _panel_fresh_seconds() -> int:
+    """Keep intraday factors useful without rebuilding full breadth every 5 minutes."""
+
+    return (
+        PANEL_FRESH_INTRADAY_SECONDS
+        if _is_intraday_china()
+        else PANEL_FRESH_OFF_HOURS_SECONDS
+    )
 
 
 def _save_panel_row(session: Any, schema: Any, panel: dict) -> None:
@@ -546,10 +557,10 @@ def get_market_timing_panel(session: Any, schema: Any, force_refresh: bool = Fal
 
 
 def start_intraday_refresher() -> None:
-    """启动后台 daemon thread: 盘中每 5min force_refresh panel。
+    """启动后台 daemon thread: 盘中每 5min 检查 panel 是否过期。
 
-    保证主人访问 /market 读到的缓存 ≤5min 新鲜(含今天实时候选)。
-    非交易时段空转 sleep; 失败静默(下次 5min 重试), 不影响主服务。
+    基础因子最多每 30min 重算一次，实时指数仍由读取时 overlay；非交易时段
+    空转 sleep。失败静默(下次 5min 重试)，不影响主服务。
     在 main.py lifespan 启动一次即可。
     """
     def _loop() -> None:
@@ -561,7 +572,7 @@ def start_intraday_refresher() -> None:
             try:
                 if _is_intraday_china():
                     with session_scope() as session:
-                        get_market_timing_panel(session, _schema, force_refresh=True)
+                        get_market_timing_panel(session, _schema, force_refresh=False)
             except Exception:  # noqa: BLE001  后台任务不能挂
                 pass
             time.sleep(300)

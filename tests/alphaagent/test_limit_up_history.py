@@ -160,6 +160,107 @@ def test_history_refresh_force_rebuilds_current_ledger(monkeypatch) -> None:
     assert result["latest_reliable_date"] == "2026-07-10"
 
 
+def test_history_rebuild_does_not_eagerly_warm_full_backtests(monkeypatch) -> None:
+    source = pd.DataFrame({"trade_date": [pd.Timestamp("2026-07-20")]})
+    released: list[bool] = []
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "load_reliable_history_frame",
+        lambda: (
+            source,
+            {
+                "reliable_start": "2026-07-20",
+                "reliable_end": "2026-07-20",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        history_service.lane_repository,
+        "load_lane_research_data",
+        lambda *_args: ({}, {}, {}),
+    )
+    monkeypatch.setattr(
+        history_service.history_engine,
+        "build_daily_feature_frame",
+        lambda frame, **_kwargs: frame,
+    )
+    monkeypatch.setattr(
+        history_service.history_engine,
+        "build_history_replays",
+        lambda *_args, **_kwargs: [
+            {
+                "trade_date": "2026-07-20",
+                "source_mode": "daily_point_in_time",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "replace_history_replays",
+        lambda *_args: 1,
+    )
+    monkeypatch.setattr(
+        history_service,
+        "start_backtest_cache_warmup",
+        lambda: pytest.fail("full backtests must remain on demand after rebuild"),
+    )
+    monkeypatch.setattr(
+        history_service,
+        "_release_rebuild_memory",
+        lambda: released.append(True),
+    )
+
+    result = history_service.rebuild_history_sync()
+
+    assert result["status"] == "ready"
+    assert result["persisted_days"] == 1
+    assert released == [True]
+
+
+def test_history_storage_omits_reconstructable_board_aliases() -> None:
+    displayed = {"first_board": [{"vt_symbol": "600001.SSE", "lane_rank": 1}]}
+    candidate_pool = {
+        "first_board": [{"vt_symbol": "600001.SSE", "pool_rank": 1}]
+    }
+    replay = {
+        "trade_date": "2026-07-20",
+        "board_lanes": displayed,
+        "board_candidate_pool": candidate_pool,
+        "lane_portfolio": {
+            "lanes": displayed,
+            "candidate_pool": candidate_pool,
+            "selected": displayed["first_board"],
+        },
+    }
+
+    stored = history_repository._history_payload_for_storage(replay)
+    restored = history_repository._expand_history_payload(stored)
+
+    assert "board_lanes" not in stored
+    assert "board_candidate_pool" not in stored
+    assert restored["board_lanes"] == displayed
+    assert restored["board_candidate_pool"] == candidate_pool
+    assert replay["board_lanes"] == displayed
+
+
+def test_history_storage_builds_bounded_batches_lazily(monkeypatch) -> None:
+    converted: list[str] = []
+
+    def convert(row):
+        converted.append(str(row["trade_date"]))
+        return {"trade_date": row["trade_date"]}
+
+    monkeypatch.setattr(history_repository, "_history_replay_value", convert)
+    rows = [{"trade_date": f"2026-07-{day:02d}"} for day in range(1, 26)]
+    batches = history_repository._history_replay_value_batches(rows)
+
+    first = next(batches)
+
+    assert len(first) == history_repository.HISTORY_REPLAY_WRITE_BATCH_SIZE
+    assert len(converted) == history_repository.HISTORY_REPLAY_WRITE_BATCH_SIZE
+    assert sum(len(batch) for batch in batches) + len(first) == len(rows)
+
+
 def test_history_industries_use_daily_snapshot_before_current_membership(monkeypatch) -> None:
     frame = pd.DataFrame(
         [
@@ -624,6 +725,31 @@ def test_legacy_entry_backtest_api_uses_full_history_service(monkeypatch) -> Non
 
     assert response.status_code == 200
     assert captured["entry_mode"] == "next_auction"
+
+
+def test_history_backtest_api_defaults_to_formal_portfolio_scope(
+    monkeypatch,
+) -> None:
+    from alphaagent.server.api import limit_up
+
+    captured: dict[str, object] = {}
+
+    def fake_lane_backtest(start, end, lane, exit_mode):
+        captured.update(start=start, end=end, lane=lane, exit_mode=exit_mode)
+        return {"status": "ready", "mode": "scheduled_unified_intraday_cash_replay"}
+
+    monkeypatch.setattr(limit_up, "is_database_configured", lambda: True)
+    monkeypatch.setattr(
+        limit_up,
+        "get_limit_up_lane_history_backtest",
+        fake_lane_backtest,
+    )
+
+    response = TestClient(create_app()).get("/api/limit-up/history/backtest")
+
+    assert response.status_code == 200
+    assert captured["lane"] == "portfolio"
+    assert captured["exit_mode"] == "next_close"
 
 
 def _persisted_replay_day(

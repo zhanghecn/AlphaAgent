@@ -18,11 +18,12 @@ import logging
 import re
 import threading
 from collections import deque
+from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable, Literal, Sequence
+from typing import Any, Literal
 from uuid import uuid4
 
 from sqlalchemy import and_, desc, func, select, text
@@ -42,10 +43,13 @@ from alphaagent.server.services import research_sector_scores
 from alphaagent.server.services.completed_session import completed_daily_bar_cutoff
 from alphaagent.server.services.low_suction import (
     baostock_security_source,
+    causal_leader_pullback_forward_repository,
+    forward_ma5_minutes,
     forward_leader_identity,
     forward_membership,
     forward_membership_repository,
     forward_security_repository,
+    swing_strategy_service,
 )
 from alphaagent.server.services.limit_up.data_quality import (
     backfill_limit_up_event_minutes,
@@ -58,6 +62,11 @@ from alphaagent.server.services.limit_up.concept_live_service import (
     refresh_live_concept_snapshot,
 )
 from alphaagent.server.services.limit_up.historical_evidence_import import import_ths_evidence
+from alphaagent.server.services.limit_up import (
+    preboard_hazard_data,
+    preboard_point_trigger_service,
+    preboard_transaction_data,
+)
 from alphaagent.server.services.limit_up.live_service import (
     LIVE_SCAN_INTERVAL_SECONDS,
     refresh_live_snapshot,
@@ -73,7 +82,9 @@ INTERRUPTED_SCHEDULE_MESSAGE = "API process restarted before this schedule finis
 INTERRUPTED_SCHEDULE_RECOVERY_DELAY_SECONDS = 30
 INTERRUPTED_SCHEDULE_RECOVERY_WAIT_SECONDS = 6 * 60 * 60
 INTERRUPTED_SCHEDULE_RECOVERY_POLL_SECONDS = 5
-SCHEDULER_TICK_SECONDS = 5
+SCHEDULER_TICK_SECONDS = 2
+SCHEDULER_IDLE_TICK_SECONDS = 30
+DEFAULT_SYNC_CONCURRENCY = 2
 # 单只股/板块同步的超时上限：AkShare 正常请求数秒，超时则跳过该 item（防 hang 拖死整批）
 SYNC_PER_ITEM_TIMEOUT_SECONDS = 60.0
 # 东方财富三张财报各自需要分页读取；单股使用独立预算，避免通用 60 秒在有效响应完成前取消。
@@ -86,6 +97,8 @@ CANONICAL_SECTOR_DAILY_SOURCE = "eastmoney.board_kline"
 LIMIT_POOL_EVENT_SOURCE = "akshare.stock_ztb_em"
 STOCK_LIST_MAX_PAGES = 200
 SECTOR_MEMBER_MAX_PAGES = 100
+SECTOR_MEMBERSHIP_REFRESH_DAYS = 7
+SECTOR_MEMBERSHIP_UPSERT_BATCH_SIZE = 500
 STOCK_DAILY_INCREMENTAL_REFRESH_DAYS = 5
 STOCK_DAILY_COMPLETE_COVERAGE_RATIO = 0.95
 MIN_COMPLETE_DAILY_SYMBOL_COUNT = 3000
@@ -280,7 +293,10 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         description="同步每个板块的成分股列表及实时行情。",
         source_id="akshare",
         target_table="sector_memberships",
-        default_params={"page_size": 200},
+        default_params={
+            "page_size": 200,
+            "refresh_days": SECTOR_MEMBERSHIP_REFRESH_DAYS,
+        },
     ),
     JobDefinition(
         id="sync_stock_daily_bars",
@@ -323,6 +339,30 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         default_params={"max_gaps": 300, "dry_run": False},
     ),
     JobDefinition(
+        id="sync_limit_up_preboard_hazard_minutes",
+        name="短时触板研究一分钟路径补数",
+        description="按因果同股历史质量门定向补齐3%以上候选的完整一分钟路径。",
+        source_id="tdx_public_hq",
+        target_table="stock_minute_bars",
+        default_params={"session_count": 60, "max_gaps": 2000, "dry_run": False},
+    ),
+    JobDefinition(
+        id="sync_limit_up_preboard_transaction_features",
+        name="首板提前逐笔资金流特征补数",
+        description="只为当前3%以上共用首板母池有界抓取完整TDX逐笔并冻结因果特征。",
+        source_id="tdx_public_hq",
+        target_table="limit_up_transaction_features",
+        default_params={"session_count": 89, "max_pairs": 500, "dry_run": False},
+    ),
+    JobDefinition(
+        id="sync_limit_up_preboard_point_trigger",
+        name="首板触板前点时前向冻结",
+        description="冻结10秒因果特征、走步模型及不可执行研究动作，只服务前向可靠性验证。",
+        source_id="alphaagent_local",
+        target_table="limit_up_preboard_point_day_scopes",
+        default_params={},
+    ),
+    JobDefinition(
         id="sync_limit_up_exit_minutes",
         name="候选D+1 14:30分钟补数",
         description="从历史候选池和正式实时推荐派生卖出日，限量补齐精确14:30历史1分钟价格。",
@@ -360,6 +400,30 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         description="按同源日严格成员、证券状态、概念主升和日线冻结三套无收益龙头身份。",
         source_id="alphaagent_local",
         target_table="low_suction_forward_leader_rank_snapshots",
+        default_params={},
+    ),
+    JobDefinition(
+        id="sync_low_suction_forward_ma5_shadow",
+        name="低吸研究跨行情因果前向",
+        description="按严格 D-1 快照冻结主升龙头支撑收复候选，并以日线推进只读研究结果。",
+        source_id="alphaagent_local",
+        target_table="low_suction_forward_ma5_candidates",
+        default_params={},
+    ),
+    JobDefinition(
+        id="sync_low_suction_forward_ma5_minutes",
+        name="低吸研究 MA5 信号日 5 分钟路径",
+        description="只补前向 MA5 有效候选信号日的完整 5 分钟路径，用于 14:50/14:55 因果验证。",
+        source_id="tdx_public_hq",
+        target_table="stock_minute_bars",
+        default_params={"max_gaps": 100, "dry_run": False},
+    ),
+    JobDefinition(
+        id="sync_low_suction_swing_settlement",
+        name="低吸波段纸面持仓结算",
+        description="按最新可靠完整日线更新低吸持仓标记并冻结结构退出触发。",
+        source_id="alphaagent_local",
+        target_table="low_suction_paper_positions",
         default_params={},
     ),
     # ── Shenwan Industry Classification ──
@@ -552,6 +616,9 @@ JOB_CADENCES: dict[str, JobCadence] = {
     "sync_stock_minute_bars": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_BARS, 1, "stock_minute_bars", "bar_time"),
     "sync_limit_up_event_minutes": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "limit_up_minute_backfill_attempts", "last_attempt_at"),
     "sync_limit_up_radar_minutes": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "limit_up_minute_backfill_attempts", "last_attempt_at"),
+    "sync_limit_up_preboard_hazard_minutes": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "stock_minute_bars", "bar_time"),
+    "sync_limit_up_preboard_transaction_features": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "limit_up_transaction_feature_scopes", "updated_at"),
+    "sync_limit_up_preboard_point_trigger": JobCadence(CADENCE_EOD_DAILY, CATEGORY_SECTOR_RESEARCH, 1, "limit_up_preboard_point_day_scopes", "frozen_at"),
     "sync_limit_up_exit_minutes": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "limit_up_minute_backfill_attempts", "last_attempt_at"),
     "sync_stock_auction_snapshots": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "stock_auction_snapshots", "captured_at"),
     "sync_stock_financial_quarterly": JobCadence(CADENCE_QUARTERLY, CATEGORY_FINANCIALS, 45, "stock_financial_reports", "updated_at"),
@@ -565,6 +632,9 @@ JOB_CADENCES: dict[str, JobCadence] = {
     "sync_stock_sector_memberships": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BASIC, 1, "stock_sector_memberships", "updated_at"),
     "sync_low_suction_security_snapshot": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BASIC, 1, "low_suction_security_snapshot_scopes", "updated_at"),
     "sync_low_suction_forward_top3": JobCadence(CADENCE_EOD_DAILY, CATEGORY_SECTOR_RESEARCH, 1, "low_suction_forward_leader_rank_snapshot_scopes", "updated_at"),
+    "sync_low_suction_forward_ma5_shadow": JobCadence(CADENCE_EOD_DAILY, CATEGORY_SECTOR_RESEARCH, 1, "low_suction_forward_ma5_scopes", "updated_at"),
+    "sync_low_suction_forward_ma5_minutes": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "stock_minute_bars", "bar_time"),
+    "sync_low_suction_swing_settlement": JobCadence(CADENCE_EOD_DAILY, CATEGORY_SECTOR_RESEARCH, 1, "low_suction_strategy_runs", "updated_at"),
     "sync_shenwan_industry_tree": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 30, "shenwan_industries", "updated_at"),
     "sync_shenwan_industry_members": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 30, "shenwan_industry_members", "updated_at"),
     "sync_industry_board_mapping": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 30, "industry_board_mapping", "updated_at"),
@@ -580,12 +650,16 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
     "sync_stock_sector_memberships", "sync_shenwan_industry_tree",
     "sync_low_suction_security_snapshot",
     "sync_low_suction_forward_top3",
+    "sync_low_suction_forward_ma5_shadow",
+    "sync_low_suction_forward_ma5_minutes",
+    "sync_low_suction_swing_settlement",
     "sync_shenwan_industry_members", "sync_industry_board_mapping",
     "sync_supply_chain_edges",
     "sync_stock_daily_bars", "sync_index_daily_bars", "sync_sector_daily_bars",
     "sync_stock_minute_bars",
     "sync_limit_up_event_minutes",
     "sync_limit_up_radar_minutes",
+    "sync_limit_up_preboard_point_trigger",
     "sync_stock_auction_snapshots",
     "sync_stock_fund_flows", "sync_sector_fund_flows",
     "sync_stock_hot_ranks", "sync_limit_up_pools",
@@ -601,6 +675,7 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
 # used to live on DEFAULT_JOBS. See
 # requirements/alphaagent_unified_incremental_schedule_plan.md.
 CURRENT_EOD_SCHEDULE_ID = "eod_1900"
+PRIMARY_EOD_RECOVERY_CUTOFF_HOUR = 21
 LEGACY_DEFAULT_BATCH_SCHEDULE_IDS = {"eod_18h", "tail_quant_1430"}
 LEGACY_SCHEDULE_ACTIONS = {"quant_research", "tail_preview"}
 
@@ -615,8 +690,17 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "job_ids": ["sync_stock_auction_snapshots"],
     },
     {
+        "id": "low_suction_open_0931",
+        "name": "低吸波段次日开盘退出（09:31）",
+        "cron": "31 9 * * 1-5",
+        "action": "low_suction_swing",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": ["sync_low_suction_swing_exits"],
+    },
+    {
         "id": "limit_up_live_scan",
-        "name": "实时打板扫描（每15秒）",
+        "name": "实时打板扫描（每10秒）",
         "cron": "* 9-14 * * 1-5",
         "action": "limit_up_live_scan",
         "enabled": True,
@@ -638,12 +722,39 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "cron": "30 9,10,11,13,14 * * 1-5",
         "action": "sync",
         "enabled": True,
-        "concurrency": 4,
+        "concurrency": 2,
         "job_ids": [
             "sync_sector_fund_flows",
             "sync_stock_fund_flows",
             "sync_stock_hot_ranks",
         ],
+    },
+    {
+        "id": "low_suction_preview_hourly",
+        "name": "低吸盘中预警（每小时）",
+        "cron": "30 9,10,11,13,14 * * 1-5",
+        "action": "low_suction_swing",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": ["sync_low_suction_swing_preview"],
+    },
+    {
+        "id": "low_suction_signal_1450",
+        "name": "低吸波段信号冻结（14:50）",
+        "cron": "50 14 * * 1-5",
+        "action": "low_suction_swing",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": ["sync_low_suction_swing_signals"],
+    },
+    {
+        "id": "low_suction_entry_1455",
+        "name": "低吸波段纸面买入（14:55）",
+        "cron": "55 14 * * 1-5",
+        "action": "low_suction_swing",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": ["sync_low_suction_swing_entries"],
     },
     {
         "id": "limit_up_plan_1505",
@@ -660,13 +771,14 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "cron": "0 19 * * 1-5",
         "action": "sync",
         "enabled": True,
-        "concurrency": 8,
+        "concurrency": 1,
         "job_ids": [
             "sync_stock_list",
             "sync_sector_fund_flows",
             "sync_stock_fund_flows",
             "sync_stock_daily_bars",
             "sync_index_daily_bars",
+            "sync_low_suction_swing_settlement",
             "sync_sector_list",
             "sync_sector_daily_bars",
             "sync_sector_period_scores",
@@ -674,6 +786,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_stock_sector_memberships",
             "sync_low_suction_security_snapshot",
             "sync_low_suction_forward_top3",
+            "sync_low_suction_forward_ma5_shadow",
             "sync_limit_up_pools",
             "sync_limit_up_radar_minutes",
             "sync_stock_lhb_records",
@@ -691,10 +804,11 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "cron": "30 21 * * 1-5",
         "action": "sync",
         "enabled": True,
-        "concurrency": 8,
+        "concurrency": 1,
         "job_ids": [
             "sync_stock_daily_bars",
             "sync_index_daily_bars",
+            "sync_low_suction_swing_settlement",
             "sync_sector_fund_flows",
             "sync_stock_fund_flows",
             "sync_sector_list",
@@ -704,11 +818,13 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_stock_sector_memberships",
             "sync_low_suction_security_snapshot",
             "sync_low_suction_forward_top3",
+            "sync_low_suction_forward_ma5_shadow",
             "sync_limit_up_pools",
             "sync_limit_up_ths_evidence",
             "sync_limit_up_event_minutes",
             "sync_limit_up_radar_minutes",
             "limit_up_history_rebuild",
+            "sync_limit_up_preboard_point_trigger",
             "limit_up_next_session_plan_final",
             "limit_up_live_trace_prune",
         ],
@@ -728,6 +844,13 @@ INTERNAL_BATCH_JOB_IDS = {
     LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID,
 }
 STALE_BATCH_SUMMARY_RE = re.compile(r"^\s*(\d+)\s+成功\s*/\s*(\d+)\s+失败\s*$")
+LOW_SUCTION_SWING_SCHEDULE_ACTION = "low_suction_swing"
+LOW_SUCTION_SWING_SCHEDULE_JOB_IDS = {
+    "sync_low_suction_swing_exits",
+    "sync_low_suction_swing_preview",
+    "sync_low_suction_swing_signals",
+    "sync_low_suction_swing_entries",
+}
 
 
 SYNC_BATCH_PROFILES: dict[str, tuple[str, ...]] = {
@@ -754,7 +877,12 @@ ProgressCallback = Callable[[dict[str, Any]], None]
 class DataSyncRunner:
     """Executes individual sync jobs against AkShare / local data."""
 
-    def __init__(self, adapter: AkShareAdapter | None = None, progress: ProgressCallback | None = None, concurrency: int = 8) -> None:
+    def __init__(
+        self,
+        adapter: AkShareAdapter | None = None,
+        progress: ProgressCallback | None = None,
+        concurrency: int = DEFAULT_SYNC_CONCURRENCY,
+    ) -> None:
         self.adapter = adapter or AkShareAdapter()
         self.progress = progress
         self.concurrency = max(1, int(concurrency))
@@ -871,20 +999,76 @@ class DataSyncRunner:
 
     def _run_sync_sector_members(self, params: dict[str, Any]) -> dict[str, Any]:
         page_size = min(int(params.get("page_size", 200)), 500)
-        # First load sectors from DB
-        with session_scope() as session:
-            sector_rows = session.execute(select(schema.sectors)).mappings().all()
+        refresh_days = max(
+            int(params.get("refresh_days", SECTOR_MEMBERSHIP_REFRESH_DAYS)),
+            0,
+        )
+        observed_at = _now_china()
+        if _truthy(params.get("skip_complete_session")):
+            session_coverage = _completed_forward_membership_session_coverage(
+                observed_at.date()
+            )
+            if session_coverage["status"] == "complete":
+                returned_count = int(session_coverage["returned_sector_count"])
+                expected_count = int(session_coverage["expected_sector_count"])
+                return {
+                    "status": "skipped",
+                    "rows_read": 0,
+                    "rows_written": 0,
+                    "session_coverage": session_coverage,
+                    "message": (
+                        f"{observed_at.date().isoformat()} 严格概念成员范围已完整覆盖 "
+                        f"{returned_count}/{expected_count} 个，跳过重复成员同步和快照"
+                    ),
+                }
+        sector_rows = _load_sector_rows_with_member_freshness()
         if not sector_rows:
             return {"rows_read": 0, "rows_written": 0, "message": "No sectors in DB; run sync_sector_list first."}
-        sector_rows = [dict(row) for row in sector_rows]
         total_sectors = len(sector_rows)
         self._report_progress("同步板块成分股", current=0, total=total_sectors)
 
+        refresh_rows: list[dict[str, Any]] = []
+        reusable_rows: list[dict[str, Any]] = []
+        for sector_row in sector_rows:
+            if _sector_membership_refresh_due(
+                sector_row.get("members_refreshed_at"),
+                observed_at=observed_at,
+                refresh_days=refresh_days,
+            ):
+                refresh_rows.append(sector_row)
+            else:
+                reusable_rows.append(sector_row)
+
+        reusable_ids = [str(row["id"]) for row in reusable_rows]
+        complete_members_by_sector = (
+            _load_cached_sector_memberships(reusable_ids)
+            if reusable_ids
+            else {}
+        )
+        missing_cached_ids = {
+            sector_id
+            for sector_id in reusable_ids
+            if not complete_members_by_sector.get(sector_id)
+        }
+        if missing_cached_ids:
+            refresh_rows.extend(
+                row for row in reusable_rows if str(row["id"]) in missing_cached_ids
+            )
+            reusable_ids = [
+                sector_id
+                for sector_id in reusable_ids
+                if sector_id not in missing_cached_ids
+            ]
+
         lock = threading.Lock()
-        counters = {"read": 0, "written": 0, "done": 0, "failed": 0}
+        counters = {
+            "read": 0,
+            "written": 0,
+            "done": len(reusable_ids),
+            "failed": 0,
+        }
         failed_sector_ids: list[str] = []
         failed_sector_id_set: set[str] = set()
-        complete_members_by_sector: dict[str, tuple[dict[str, Any], ...]] = {}
 
         def _record_failure(sector_id: str) -> tuple[int, int, int]:
             with lock:
@@ -945,7 +1129,7 @@ class DataSyncRunner:
 
         _bounded_parallel_map(
             _do_one,
-            sector_rows,
+            refresh_rows,
             concurrency=self.concurrency,
             per_item_timeout=SYNC_PER_ITEM_TIMEOUT_SECONDS,
             on_timeout=lambda row: _record_failure(str(row["id"])),
@@ -955,12 +1139,12 @@ class DataSyncRunner:
             sector_rows=sector_rows,
             members_by_sector=complete_members_by_sector,
             failed_sector_ids=tuple(sorted(failed_sector_id_set)),
-            observed_at=_now_china(),
+            observed_at=observed_at,
         )
 
         excluded_sector_ids = sorted(failed_sector_id_set)
         removed_rows = _delete_sector_memberships(excluded_sector_ids)
-        if counters["read"] == 0:
+        if counters["read"] == 0 and not complete_members_by_sector:
             failed = ", ".join(failed_sector_ids)
             suffix = " ..." if counters["failed"] > len(failed_sector_ids) else ""
             raise DataSyncError(
@@ -968,20 +1152,29 @@ class DataSyncRunner:
                 f"sectors={failed}{suffix}"
             )
 
-        message = ""
+        message_parts: list[str] = []
+        if reusable_ids:
+            message_parts.append(
+                f"复用 {len(reusable_ids)} 个仍在 {refresh_days} 天新鲜期内的板块"
+            )
         if excluded_sector_ids:
-            message = (
+            message_parts.append(
                 f"成员不可用板块已剔除 {len(excluded_sector_ids)} 个："
                 + ", ".join(excluded_sector_ids[:20])
                 + (" ..." if len(excluded_sector_ids) > 20 else "")
             )
         return {
+            "status": "skipped" if not refresh_rows else "succeeded",
             "rows_read": counters["read"],
             "rows_written": counters["written"],
+            "total_sector_count": total_sectors,
+            "requested_sector_count": len(refresh_rows),
+            "refreshed_sector_count": len(refresh_rows) - len(excluded_sector_ids),
+            "reused_sector_count": len(reusable_ids),
             "excluded_sector_count": len(excluded_sector_ids),
             "excluded_sector_ids": excluded_sector_ids,
             "removed_stale_membership_rows": removed_rows,
-            "message": message,
+            "message": "；".join(message_parts),
         }
 
     def _run_sync_stock_daily_bars(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1001,6 +1194,30 @@ class DataSyncRunner:
             total_stocks=len(stock_rows),
             incremental=incremental,
         )
+        if (
+            incremental
+            and not history_bootstrap["required"]
+            and not symbols
+            and stock_limit <= 0
+            and _truthy(params.get("skip_complete_session"))
+        ):
+            session_coverage = _completed_stock_daily_session_coverage(
+                len(stock_rows)
+            )
+            if session_coverage["status"] == "complete":
+                target_date = str(session_coverage["target_trade_date"])
+                symbol_count = int(session_coverage["symbol_count"])
+                min_symbol_count = int(session_coverage["min_symbol_count"])
+                return {
+                    "status": "skipped",
+                    "rows_read": 0,
+                    "rows_written": 0,
+                    "session_coverage": session_coverage,
+                    "message": (
+                        f"{target_date} 日线已完整覆盖 "
+                        f"{symbol_count}/{min_symbol_count} 只，跳过重复全市场同步"
+                    ),
+                }
         if history_bootstrap["required"]:
             incremental = False
             limit = max(limit, int(history_bootstrap["request_limit"]))
@@ -1338,6 +1555,63 @@ class DataSyncRunner:
             "message": message,
         }
 
+    def _run_sync_limit_up_preboard_hazard_minutes(
+        self,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        result = preboard_hazard_data.backfill_preboard_hazard_minutes(
+            session_count=int(params.get("session_count") or 60),
+            max_gaps=int(params.get("max_gaps") or 2000),
+            dry_run=_truthy(params.get("dry_run")),
+        )
+        backfill_status = str(result.get("status") or "unknown")
+        message = str(result.get("message") or "").strip()
+        if backfill_status in {"error", "unavailable", "unsupported_interval"}:
+            raise DataSyncError(
+                message or f"短时触板一分钟补数失败：{backfill_status}"
+            )
+        return {
+            **{key: value for key, value in result.items() if key != "status"},
+            "backfill_status": backfill_status,
+            "message": message,
+        }
+
+    def _run_sync_limit_up_preboard_transaction_features(
+        self,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        result = preboard_transaction_data.backfill_preboard_transaction_features(
+            session_count=int(params.get("session_count") or 89),
+            max_pairs=int(params.get("max_pairs") or 500),
+            dry_run=_truthy(params.get("dry_run")),
+        )
+        backfill_status = str(result.get("status") or "unknown")
+        message = str(result.get("message") or "").strip()
+        if backfill_status in {"error", "unavailable"}:
+            raise DataSyncError(
+                message or f"首板提前逐笔资金流特征补数失败：{backfill_status}"
+            )
+        return {
+            **{key: value for key, value in result.items() if key != "status"},
+            "backfill_status": backfill_status,
+            "message": message,
+        }
+
+    def _run_sync_limit_up_preboard_point_trigger(
+        self,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        del params
+        result = preboard_point_trigger_service.sync_limit_up_preboard_point_trigger()
+        point_trigger_status = str(result.get("status") or "unknown")
+        return {
+            **{key: value for key, value in result.items() if key != "status"},
+            "point_trigger_status": point_trigger_status,
+            "rows_read": int(result.get("complete_day_count") or 0),
+            "rows_written": int(result.get("rows_written") or 0),
+            "message": str(result.get("message") or point_trigger_status),
+        }
+
     def _run_sync_limit_up_exit_minutes(self, params: dict[str, Any]) -> dict[str, Any]:
         result = backfill_limit_up_exit_minutes(
             max_gaps=int(params.get("max_gaps") or 200),
@@ -1432,7 +1706,6 @@ class DataSyncRunner:
         }
 
     def _run_sync_stock_sector_memberships(self, params: dict[str, Any]) -> dict[str, Any]:
-        del params
         captured_at = _now_china()
         reliable_date = _latest_complete_daily_date_for_research()
         if reliable_date != captured_at.date():
@@ -1447,6 +1720,23 @@ class DataSyncRunner:
                     f"reliable_date={reliable_date.isoformat() if reliable_date else '-'}"
                 ),
             }
+        if _truthy(params.get("skip_complete_session")):
+            session_coverage = (
+                _completed_stock_sector_membership_session_coverage(reliable_date)
+            )
+            if session_coverage["status"] == "complete":
+                return {
+                    "status": "skipped",
+                    "rows_read": 0,
+                    "rows_written": 0,
+                    "snapshot_rows_written": 0,
+                    "session_coverage": session_coverage,
+                    "message": (
+                        f"{reliable_date.isoformat()} 股票-板块成员快照已完整覆盖 "
+                        f"{session_coverage['scope_count']} 个范围、"
+                        f"{session_coverage['row_count']} 条，跳过重复重建"
+                    ),
+                }
         rows_written = _rebuild_stock_sector_memberships()
         snapshot_rows_written = 0
         if rows_written > 0:
@@ -1467,7 +1757,6 @@ class DataSyncRunner:
         self,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        del params
         observed_at = _now_china()
         reliable_date = _latest_complete_daily_date_for_research()
         if reliable_date != observed_at.date():
@@ -1481,6 +1770,23 @@ class DataSyncRunner:
                     f"reliable_date={reliable_date.isoformat() if reliable_date else '-'}"
                 ),
             }
+        if _truthy(params.get("skip_complete_session")):
+            session_coverage = (
+                _completed_low_suction_security_session_coverage(reliable_date)
+            )
+            if session_coverage["status"] == "complete":
+                returned_count = int(session_coverage["returned_symbol_count"])
+                expected_count = int(session_coverage["expected_symbol_count"])
+                return {
+                    "status": "skipped",
+                    "rows_read": 0,
+                    "rows_written": 0,
+                    "session_coverage": session_coverage,
+                    "message": (
+                        f"{reliable_date.isoformat()} 低吸证券状态已严格覆盖 "
+                        f"{returned_count}/{expected_count} 只，跳过重复采集"
+                    ),
+                }
 
         snapshot = baostock_security_source.fetch_forward_security_snapshot(
             source_trade_date=reliable_date,
@@ -1506,7 +1812,6 @@ class DataSyncRunner:
         self,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        del params
         observed_at = _now_china()
         reliable_date = _latest_complete_daily_date_for_research()
         if reliable_date != observed_at.date():
@@ -1520,6 +1825,22 @@ class DataSyncRunner:
                     f"reliable_date={reliable_date.isoformat() if reliable_date else '-'}"
                 ),
             }
+        if _truthy(params.get("skip_complete_session")):
+            session_coverage = _completed_forward_top3_session_coverage(
+                reliable_date
+            )
+            if session_coverage["status"] == "complete":
+                return {
+                    "status": "skipped",
+                    "rows_read": 0,
+                    "rows_written": 0,
+                    "top3_rows": int(session_coverage["top3_row_count"]),
+                    "session_coverage": session_coverage,
+                    "message": (
+                        f"{reliable_date.isoformat()} 低吸前向 Top3 已冻结 "
+                        f"{session_coverage['mode_count']} 种身份模式，跳过重复计算"
+                    ),
+                }
 
         result = forward_leader_identity.freeze_forward_leader_source(
             reliable_date,
@@ -1549,6 +1870,98 @@ class DataSyncRunner:
             "input_fingerprint": result.get("input_fingerprint"),
             "message": message,
         }
+
+    def _run_sync_low_suction_forward_ma5_shadow(
+        self,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        del params
+        observed_at = _now_china()
+        reliable_date = _latest_complete_daily_date_for_research()
+        if reliable_date is None:
+            return {
+                "status": "skipped",
+                "rows_read": 0,
+                "rows_written": 0,
+                "recommendations_created": 0,
+                "orders_created": 0,
+                "message": "尚无可靠完整日线，跳过低吸跨行情因果前向账本",
+            }
+
+        result = causal_leader_pullback_forward_repository.advance_causal_forward(
+            as_of_date=reliable_date,
+            attempted_at=observed_at,
+        )
+        captures = [
+            item for item in (result.get("captures") or []) if isinstance(item, dict)
+        ]
+        outcomes = (
+            result.get("outcomes")
+            if isinstance(result.get("outcomes"), dict)
+            else {}
+        )
+        blockers = [
+            str(value)
+            for value in (result.get("blocking_reasons") or [])
+            if str(value)
+        ]
+        candidate_rows = sum(int(item.get("candidate_rows") or 0) for item in captures)
+        signal_rows = sum(int(item.get("signal_rows") or 0) for item in captures)
+        outcome_evaluated = int(outcomes.get("evaluated") or 0)
+        outcome_writes = int(outcomes.get("inserted") or 0) + int(
+            outcomes.get("updated") or 0
+        )
+        capture_writes = sum(int(item.get("rows_written") or 0) for item in captures)
+        rows_written = capture_writes + outcome_writes
+        message = (
+            f"低吸跨行情因果前向捕获 {len(captures)}；"
+            f"候选 {candidate_rows}；信号 {signal_rows}；"
+            f"结果推进 {outcome_writes}/{outcome_evaluated}"
+        )
+        if blockers:
+            message += "；关闭原因 " + ", ".join(blockers)
+        return {
+            **({} if not blockers else {"status": "skipped"}),
+            "rows_read": len(captures) + outcome_evaluated,
+            "rows_written": rows_written,
+            "candidate_rows": candidate_rows,
+            "signal_rows": signal_rows,
+            "recommendations_created": 0,
+            "orders_created": 0,
+            "formal_metrics": None,
+            "message": message,
+        }
+
+    def _run_sync_low_suction_forward_ma5_minutes(
+        self,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        result = forward_ma5_minutes.backfill_forward_ma5_signal_5m(
+            dry_run=_truthy(params.get("dry_run")),
+            max_gaps=int(params.get("max_gaps") or 100),
+        )
+        requested = int(result.get("requested_missing_pairs") or 0)
+        return {
+            **result,
+            "recommendations_created": 0,
+            "orders_created": 0,
+            "formal_metrics": None,
+            "message": (
+                "低吸 MA5 前向信号日 5 分钟路径："
+                f"请求 {requested} 对，读取 {int(result.get('rows_read') or 0)} 根，"
+                f"写入 {int(result.get('rows_written') or 0)} 根"
+            ),
+        }
+
+    def _run_sync_low_suction_swing_settlement(
+        self,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        del params
+        return _low_suction_swing_sync_result(
+            swing_strategy_service.settle_swing_positions(now=_now_china()),
+            job_id="sync_low_suction_swing_settlement",
+        )
 
     # ── 4 Shenwan runners ──
 
@@ -1630,7 +2043,6 @@ class DataSyncRunner:
                 raise DataSyncError(f"invalid sector_types: {invalid}")
         allow_fallback_source = _truthy(params.get("allow_fallback_source", False))
         min_coverage_ratio = float(params.get("min_coverage_ratio", SECTOR_DAILY_MIN_COVERAGE_RATIO))
-        market_cache.clear()
         with session_scope() as session:
             sector_rows = session.execute(select(schema.sectors)).mappings().all()
         if not sector_rows:
@@ -1649,6 +2061,26 @@ class DataSyncRunner:
         if sector_limit > 0:
             sector_rows = sector_rows[:sector_limit]
         total_sectors = len(sector_rows)
+        if _truthy(params.get("skip_complete_session")):
+            session_coverage = _completed_sector_daily_session_coverage(
+                [str(row["id"]) for row in sector_rows],
+                min_coverage_ratio,
+            )
+            if session_coverage["status"] == "complete":
+                target_date = str(session_coverage["target_trade_date"])
+                sector_count = int(session_coverage["sector_count"])
+                min_sector_count = int(session_coverage["min_sector_count"])
+                return {
+                    "status": "skipped",
+                    "rows_read": 0,
+                    "rows_written": 0,
+                    "session_coverage": session_coverage,
+                    "message": (
+                        f"{target_date} 板块日线已完整覆盖 "
+                        f"{sector_count}/{min_sector_count} 个，跳过重复同步"
+                    ),
+                }
+        market_cache.clear()
         self._report_progress("同步板块历史 K 线", current=0, total=total_sectors)
 
         lock = threading.Lock()
@@ -1871,6 +2303,27 @@ class DataSyncRunner:
             if params.get("as_of_date")
             else _latest_complete_daily_date_for_research()
         )
+        if (
+            as_of is not None
+            and sector_limit <= 0
+            and _truthy(params.get("skip_complete_session"))
+        ):
+            session_coverage = _completed_sector_score_session_coverage(
+                as_of,
+                periods,
+            )
+            if session_coverage["status"] == "complete":
+                return {
+                    "status": "skipped",
+                    "rows_read": 0,
+                    "rows_written": 0,
+                    "session_coverage": session_coverage,
+                    "message": (
+                        f"{as_of.isoformat()} 板块周期评分已完整覆盖 "
+                        f"{session_coverage['expected_sector_count']} 个板块、"
+                        f"{len(session_coverage['period_counts'])} 个周期，跳过重复计算"
+                    ),
+                }
         result = research_sector_scores.compute_and_persist(as_of_date=as_of, periods=periods, sector_limit=sector_limit)
         return {
             "rows_read": result.get("sectors_scored", 0),
@@ -2279,11 +2732,17 @@ JOB_RUNNERS: dict[str, str] = {
     "sync_stock_minute_bars": "_run_sync_stock_minute_bars",
     "sync_limit_up_event_minutes": "_run_sync_limit_up_event_minutes",
     "sync_limit_up_radar_minutes": "_run_sync_limit_up_radar_minutes",
+    "sync_limit_up_preboard_hazard_minutes": "_run_sync_limit_up_preboard_hazard_minutes",
+    "sync_limit_up_preboard_transaction_features": "_run_sync_limit_up_preboard_transaction_features",
+    "sync_limit_up_preboard_point_trigger": "_run_sync_limit_up_preboard_point_trigger",
     "sync_limit_up_exit_minutes": "_run_sync_limit_up_exit_minutes",
     "sync_stock_auction_snapshots": "_run_sync_stock_auction_snapshots",
     "sync_stock_sector_memberships": "_run_sync_stock_sector_memberships",
     "sync_low_suction_security_snapshot": "_run_sync_low_suction_security_snapshot",
     "sync_low_suction_forward_top3": "_run_sync_low_suction_forward_top3",
+    "sync_low_suction_forward_ma5_shadow": "_run_sync_low_suction_forward_ma5_shadow",
+    "sync_low_suction_forward_ma5_minutes": "_run_sync_low_suction_forward_ma5_minutes",
+    "sync_low_suction_swing_settlement": "_run_sync_low_suction_swing_settlement",
     "sync_shenwan_industry_tree": "_run_sync_shenwan_industry_tree",
     "sync_shenwan_industry_members": "_run_sync_shenwan_industry_members",
     "sync_industry_board_mapping": "_run_sync_industry_board_mapping",
@@ -2308,6 +2767,8 @@ JOB_RUNNERS: dict[str, str] = {
 
 _scheduler_thread: threading.Thread | None = None
 _scheduler_stop = threading.Event()
+_concept_schedule_lock = threading.Lock()
+_concept_schedule_running = False
 
 
 # ─── Error class ──────────────────────────────────────────────────────────
@@ -2345,13 +2806,14 @@ def _param_list(value: Any) -> list[str]:
 
 # ─── Schema bootstrap ────────────────────────────────────────────────────
 
-def ensure_sync_schema() -> None:
-    """Create sync tables if they are missing."""
+def ensure_sync_schema(*, recover_interrupted: bool = True) -> None:
+    """Create sync tables and optionally recover scheduler-owned state."""
     if not is_database_configured():
         return
     schema.ensure_schema_once(get_engine())
     seed_default_registry()
-    mark_interrupted_runs()
+    if recover_interrupted:
+        mark_interrupted_runs()
 
 
 def _stale_batch_summary_status_reset(existing_sched: Any, current_job_count: int) -> dict[str, Any]:
@@ -2706,6 +3168,12 @@ def _schedule_job_ids(value: Any) -> list[str]:
 
 
 def _assert_schedule_jobs(action: str, job_ids: list[str]) -> None:
+    if action == LOW_SUCTION_SWING_SCHEDULE_ACTION:
+        if len(job_ids) != 1 or job_ids[0] not in LOW_SUCTION_SWING_SCHEDULE_JOB_IDS:
+            raise DataSyncError(
+                "low_suction_swing schedules require one exact strategy job"
+            )
+        return
     if action != "sync":
         return
     if not job_ids:
@@ -2725,6 +3193,7 @@ def _schedule_action(payload: dict[str, Any]) -> str:
         "sync",
         "limit_up_live_scan",
         "limit_up_concept_scan",
+        LOW_SUCTION_SWING_SCHEDULE_ACTION,
     }:
         raise DataSyncError(f"Unsupported schedule action: {action}")
     return action
@@ -2747,7 +3216,9 @@ def create_schedule(payload: dict[str, Any]) -> dict[str, Any]:
         "action": action,
         "job_ids": job_ids,
         "enabled": bool(payload.get("enabled", True)),
-        "concurrency": int(payload.get("concurrency", 8)),
+        "concurrency": int(
+            payload.get("concurrency", DEFAULT_SYNC_CONCURRENCY)
+        ),
     }
     with session_scope() as session:
         existing = session.execute(
@@ -2816,7 +3287,55 @@ def run_schedule_now(schedule_id: str) -> dict[str, Any]:
     if action == "limit_up_concept_scan":
         snapshot = _run_schedule_action(dict(row), raise_errors=True) or {}
         return _concept_scan_schedule_status(schedule_id, snapshot)
+    if action == LOW_SUCTION_SWING_SCHEDULE_ACTION:
+        result = _run_schedule_action(dict(row), raise_errors=True) or {}
+        return _low_suction_swing_schedule_status(schedule_id, result)
     return _start_sync_schedule(dict(row), source="manual")
+
+
+def _low_suction_swing_schedule_status(
+    schedule_id: str,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    skipped = str(result.get("status") or "") == "skipped"
+    created_at = _utc_now_iso()
+    job_id = str(result.get("job_id") or "low_suction_swing")
+    rows_read = int(result.get("rows_read") or 0)
+    rows_written = int(result.get("rows_written") or 0)
+    message = str(result.get("message") or "")
+    status = "skipped" if skipped else "succeeded"
+    return {
+        "id": f"low_suction_swing_{uuid4().hex}",
+        "profile": LOW_SUCTION_SWING_SCHEDULE_ACTION,
+        "source": "manual",
+        "schedule_id": schedule_id,
+        "concurrency": 1,
+        "status": status,
+        "created_at": created_at,
+        "started_at": created_at,
+        "finished_at": created_at,
+        "current_job_id": None,
+        "total_jobs": 1,
+        "completed_jobs": 1,
+        "succeeded_jobs": 0 if skipped else 1,
+        "failed_jobs": 0,
+        "skipped_jobs": 1 if skipped else 0,
+        "rows_read": rows_read,
+        "rows_written": rows_written,
+        "progress_pct": 100.0,
+        "message": message,
+        "jobs": [
+            {
+                "job_id": job_id,
+                "status": status,
+                "started_at": created_at,
+                "finished_at": created_at,
+                "rows_read": rows_read,
+                "rows_written": rows_written,
+                "message": message,
+            }
+        ],
+    }
 
 
 def _live_scan_schedule_status(schedule_id: str, snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -2926,7 +3445,7 @@ def _start_sync_schedule(row: dict[str, Any], *, source: str) -> dict[str, Any]:
     return start_sync_batch(
         job_ids=job_ids,
         params=params,
-        concurrency=int(row.get("concurrency") or 8),
+        concurrency=int(row.get("concurrency") or DEFAULT_SYNC_CONCURRENCY),
         source=source,
         schedule_id=str(row["id"]),
     )
@@ -2935,21 +3454,35 @@ def _start_sync_schedule(row: dict[str, Any], *, source: str) -> dict[str, Any]:
 def _schedule_batch_params(row: dict[str, Any], action: str, job_ids: list[str]) -> dict[str, Any]:
     """Return explicit per-job parameters for a scheduled batch."""
 
-    if (
+    is_eod_schedule = (
         action == "sync"
         and str(row.get("id") or "")
         in {CURRENT_EOD_SCHEDULE_ID, "eod_finalize_2130"}
-        and "sync_sector_daily_bars" in job_ids
-    ):
-        return {
-            "jobs": {
-                "sync_sector_daily_bars": {
-                    "limit": 30,
-                    "sector_types": ["concept", "theme"],
-                }
-            }
+    )
+    if not is_eod_schedule:
+        return {}
+
+    job_params: dict[str, dict[str, Any]] = {}
+    if "sync_stock_daily_bars" in job_ids:
+        job_params["sync_stock_daily_bars"] = {
+            "skip_complete_session": True,
         }
-    return {}
+    if "sync_sector_daily_bars" in job_ids:
+        job_params["sync_sector_daily_bars"] = {
+            "limit": 30,
+            "sector_types": ["concept", "theme"],
+            "skip_complete_session": True,
+        }
+    for job_id in (
+        "sync_sector_period_scores",
+        "sync_sector_members",
+        "sync_stock_sector_memberships",
+        "sync_low_suction_security_snapshot",
+        "sync_low_suction_forward_top3",
+    ):
+        if job_id in job_ids:
+            job_params[job_id] = {"skip_complete_session": True}
+    return {"jobs": job_params} if job_params else {}
 
 
 # ─── Sync batches ────────────────────────────────────────────────────────
@@ -2977,7 +3510,7 @@ def start_sync_batch(
     profile: str = "core",
     job_ids: list[str] | None = None,
     params: dict[str, Any] | None = None,
-    concurrency: int = 8,
+    concurrency: int = DEFAULT_SYNC_CONCURRENCY,
     source: str = "manual",
     schedule_id: str | None = None,
 ) -> dict[str, Any]:
@@ -3039,7 +3572,10 @@ def start_sync_batch(
     )
     thread.start()
     if schedule_id:
-        _touch_schedule(schedule_id, last_started_at=datetime.now(timezone.utc), last_status="running")
+        schedule_values: dict[str, Any] = {"last_status": "running"}
+        if source != "recovery":
+            schedule_values["last_started_at"] = datetime.now(timezone.utc)
+        _touch_schedule(schedule_id, **schedule_values)
     return get_sync_batch(batch_id)
 
 
@@ -3096,7 +3632,7 @@ def _run_sync_batch(
     batch_id: str,
     params: dict[str, Any],
     *,
-    concurrency: int = 8,
+    concurrency: int = DEFAULT_SYNC_CONCURRENCY,
     source: str = "manual",
     schedule_id: str | None = None,
 ) -> None:
@@ -3147,7 +3683,12 @@ def _run_sync_batch(
             elif job_id == LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID:
                 result = _run_limit_up_live_trace_prune_batch_job()
             else:
-                result = run_job(job_id, _batch_job_params(job_id, params), progress=_batch_progress_callback(batch_id, job_id))
+                result = run_job(
+                    job_id,
+                    _batch_job_params(job_id, params),
+                    progress=_batch_progress_callback(batch_id, job_id),
+                    concurrency=concurrency,
+                )
             rows_read = int(result.get("rows_read") or 0)
             rows_written = int(result.get("rows_written") or 0)
             history_inputs_changed = history_inputs_changed or (
@@ -3303,7 +3844,6 @@ def _run_limit_up_history_rebuild_batch_job(
         latest_reliable_date,
         force=force,
     )
-    history_service.start_backtest_cache_warmup()
     if str(result.get("status") or "") == "skipped":
         return {
             **result,
@@ -4109,7 +4649,13 @@ def _default_jobs(status: str, message: str) -> list[dict[str, Any]]:
 
 # ─── Run job ─────────────────────────────────────────────────────────────
 
-def run_job(job_id: str, params: dict[str, Any] | None = None, progress: ProgressCallback | None = None) -> dict[str, Any]:
+def run_job(
+    job_id: str,
+    params: dict[str, Any] | None = None,
+    progress: ProgressCallback | None = None,
+    *,
+    concurrency: int = DEFAULT_SYNC_CONCURRENCY,
+) -> dict[str, Any]:
     """Execute a sync job immediately (synchronous, in-process)."""
     if not is_database_configured():
         raise DataSyncError("DATABASE_URL is not configured")
@@ -4133,7 +4679,7 @@ def run_job(job_id: str, params: dict[str, Any] | None = None, progress: Progres
     # Create run record
     run_id = _create_run(job_id, run_params)
     try:
-        runner = DataSyncRunner(progress=progress)
+        runner = DataSyncRunner(progress=progress, concurrency=concurrency)
         method = getattr(runner, method_name)
         merged_params = {**job_def.default_params, **run_params}
         result = method(merged_params)
@@ -4264,6 +4810,38 @@ def _latest_sync_batch_running() -> bool:
         return bool(latest and latest.get("status") == "running")
 
 
+def _successful_sync_job_ids_since(
+    job_ids: list[str],
+    started_at: datetime,
+) -> set[str]:
+    if not job_ids or not is_database_configured():
+        return set()
+    try:
+        with session_scope() as session:
+            rows = session.execute(
+                select(schema.sync_job_runs.c.job_id)
+                .where(
+                    schema.sync_job_runs.c.job_id.in_(job_ids),
+                    schema.sync_job_runs.c.status == "succeeded",
+                    schema.sync_job_runs.c.started_at >= started_at,
+                )
+                .distinct()
+            ).scalars().all()
+    except Exception as exc:
+        logger.warning("load interrupted schedule progress failed: %s", exc)
+        return set()
+    return {str(job_id) for job_id in rows}
+
+
+def _remaining_interrupted_schedule_jobs(row: dict[str, Any]) -> list[str]:
+    job_ids = _schedule_job_ids(row.get("job_ids"))
+    started_at = _as_aware_datetime(row.get("last_started_at"))
+    if started_at is None:
+        return job_ids
+    successful_job_ids = _successful_sync_job_ids_since(job_ids, started_at)
+    return [job_id for job_id in job_ids if job_id not in successful_job_ids]
+
+
 def _recover_interrupted_schedules(schedule_ids: Sequence[str]) -> None:
     """Retry schedules that were interrupted by the immediately previous process."""
     deadline = time.monotonic() + INTERRUPTED_SCHEDULE_RECOVERY_WAIT_SECONDS
@@ -4276,6 +4854,8 @@ def _recover_interrupted_schedules(schedule_ids: Sequence[str]) -> None:
             row = _load_recoverable_interrupted_schedule(schedule_id)
             if row is None:
                 break
+            if not _interrupted_schedule_recovery_due(row, _now_china()):
+                break
             if _latest_sync_batch_running():
                 if time.monotonic() >= deadline:
                     logger.warning("Interrupted schedule recovery %s timed out waiting for active batch", schedule_id)
@@ -4283,11 +4863,41 @@ def _recover_interrupted_schedules(schedule_ids: Sequence[str]) -> None:
                 time.sleep(INTERRUPTED_SCHEDULE_RECOVERY_POLL_SECONDS)
                 continue
             try:
-                _run_schedule_action(row)
+                pending_job_ids = _remaining_interrupted_schedule_jobs(row)
+                if not pending_job_ids:
+                    _touch_schedule(
+                        schedule_id,
+                        last_status="succeeded",
+                        last_finished_at=datetime.now(timezone.utc),
+                        last_message="中断恢复检查完成，无待执行任务",
+                    )
+                    break
+                _run_schedule_action(
+                    {**row, "job_ids": pending_job_ids},
+                    source="recovery",
+                )
                 break
             except Exception as exc:
                 logger.warning("Interrupted schedule recovery %s failed: %s", schedule_id, exc)
                 break
+
+
+def _interrupted_schedule_recovery_due(
+    row: dict[str, object],
+    now_china: datetime,
+) -> bool:
+    """Keep heavy EOD recovery out of the live trading session."""
+
+    schedule_id = str(row.get("id") or "")
+    if schedule_id not in {CURRENT_EOD_SCHEDULE_ID, "eod_finalize_2130"}:
+        return True
+    if (
+        schedule_id == CURRENT_EOD_SCHEDULE_ID
+        and now_china.hour >= PRIMARY_EOD_RECOVERY_CUTOFF_HOUR
+    ):
+        return False
+    scheduled_at = _cron_scheduled_at_today(str(row.get("cron") or ""), now_china)
+    return scheduled_at is not None and now_china >= scheduled_at
 
 
 def _scheduler_loop() -> None:
@@ -4297,7 +4907,13 @@ def _scheduler_loop() -> None:
             _run_scheduled_jobs()
         except Exception as exc:
             logger.error("Scheduler tick error: %s", exc)
-        _scheduler_stop.wait(timeout=SCHEDULER_TICK_SECONDS)
+        _scheduler_stop.wait(timeout=_scheduler_tick_seconds(_now_china()))
+
+
+def _scheduler_tick_seconds(now_china: datetime) -> int:
+    if _limit_up_live_scan_window_open(now_china):
+        return SCHEDULER_TICK_SECONDS
+    return SCHEDULER_IDLE_TICK_SECONDS
 
 
 def _now_china() -> datetime:
@@ -4326,6 +4942,39 @@ def _recently_started(row: dict[str, Any], within_seconds: int = 1800) -> bool:
     return (datetime.now(timezone.utc) - last_started).total_seconds() < within_seconds
 
 
+def _start_concept_scan_schedule(row: dict[str, Any]) -> bool:
+    """Run an automatic concept refresh without blocking the live scan loop."""
+
+    global _concept_schedule_running
+    with _concept_schedule_lock:
+        if _concept_schedule_running:
+            return False
+        _concept_schedule_running = True
+
+    thread = threading.Thread(
+        target=_run_concept_scan_schedule,
+        args=(dict(row),),
+        name="limit-up-concept-scan",
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except Exception:
+        with _concept_schedule_lock:
+            _concept_schedule_running = False
+        raise
+    return True
+
+
+def _run_concept_scan_schedule(row: dict[str, Any]) -> None:
+    global _concept_schedule_running
+    try:
+        _run_schedule_action(row)
+    finally:
+        with _concept_schedule_lock:
+            _concept_schedule_running = False
+
+
 def _run_scheduled_jobs() -> None:
     """Trigger schedules whose cron matches or whose cron window was missed."""
     now_china = _now_china()
@@ -4352,7 +5001,10 @@ def _run_scheduled_jobs() -> None:
             continue
         try:
             if _cron_matches(cron, now_china) or _schedule_catchup_due(row, now_china):
-                _run_schedule_action(row)
+                if action == "limit_up_concept_scan":
+                    _start_concept_scan_schedule(row)
+                else:
+                    _run_schedule_action(row)
         except Exception:
             pass
 
@@ -4376,10 +5028,32 @@ def _schedule_catchup_due(row: dict[str, Any], now_china: datetime) -> bool:
     return False
 
 
-def _run_schedule_action(row: dict[str, Any], *, raise_errors: bool = False) -> dict[str, Any] | None:
+def _run_schedule_action(
+    row: dict[str, Any],
+    *,
+    raise_errors: bool = False,
+    source: str = "schedule",
+) -> dict[str, Any] | None:
     schedule_id = str(row["id"])
     action = str(row.get("action") or "sync")
     try:
+        if action == LOW_SUCTION_SWING_SCHEDULE_ACTION:
+            job_ids = _schedule_job_ids(row.get("job_ids"))
+            _assert_schedule_jobs(action, job_ids)
+            _touch_schedule(
+                schedule_id,
+                last_started_at=datetime.now(timezone.utc),
+                last_status="running",
+            )
+            result = _run_low_suction_swing_schedule_job(job_ids[0])
+            skipped = str(result.get("status") or "") == "skipped"
+            _touch_schedule(
+                schedule_id,
+                last_status="skipped" if skipped else "succeeded",
+                last_finished_at=datetime.now(timezone.utc),
+                last_message=str(result.get("message") or "")[:500],
+            )
+            return result
         if action == "limit_up_concept_scan":
             _touch_schedule(
                 schedule_id,
@@ -4418,7 +5092,7 @@ def _run_schedule_action(row: dict[str, Any], *, raise_errors: bool = False) -> 
             return snapshot
         if action != "sync":
             raise DataSyncError(f"Unsupported schedule action: {action}")
-        _start_sync_schedule(row, source="schedule")
+        _start_sync_schedule(row, source=source)
         return None
     except Exception as exc:
         _touch_schedule(
@@ -4431,6 +5105,66 @@ def _run_schedule_action(row: dict[str, Any], *, raise_errors: bool = False) -> 
         if raise_errors:
             raise
         return None
+
+
+def _run_low_suction_swing_schedule_job(job_id: str) -> dict[str, Any]:
+    observed_at = _now_china()
+    if job_id == "sync_low_suction_swing_exits":
+        result = swing_strategy_service.fill_swing_exits(now=observed_at)
+    elif job_id == "sync_low_suction_swing_preview":
+        result = swing_strategy_service.capture_swing_preview(now=observed_at)
+    elif job_id == "sync_low_suction_swing_signals":
+        result = swing_strategy_service.capture_swing_signals(now=observed_at)
+    elif job_id == "sync_low_suction_swing_entries":
+        result = swing_strategy_service.fill_swing_entries(now=observed_at)
+    else:
+        raise DataSyncError(f"Unknown low-suction swing job: {job_id}")
+    return _low_suction_swing_sync_result(result, job_id=job_id)
+
+
+def _low_suction_swing_sync_result(
+    result: dict[str, object],
+    *,
+    job_id: str,
+) -> dict[str, Any]:
+    strategy_status = str(result.get("status") or "unknown")
+    rows_read = sum(
+        int(result.get(key) or 0)
+        for key in (
+            "candidate_rows",
+            "recommendations_read",
+            "open_positions_read",
+            "pending_positions_read",
+        )
+    )
+    rows_written = sum(
+        int(result.get(key) or 0)
+        for key in (
+            "recommendations_created",
+            "positions_opened",
+            "positions_marked",
+            "triggers_created",
+            "positions_closed",
+        )
+    )
+    blockers = [
+        str(reason)
+        for reason in (result.get("blocking_reasons") or [])
+        if str(reason)
+    ]
+    skipped = strategy_status in {"blocked", "market_closed"}
+    message = f"低吸波段 {job_id}：{strategy_status}"
+    if blockers:
+        message += "；关闭原因 " + ", ".join(blockers)
+    return {
+        **result,
+        "job_id": job_id,
+        "status": "skipped" if skipped else "succeeded",
+        "strategy_status": strategy_status,
+        "rows_read": rows_read,
+        "rows_written": rows_written,
+        "message": message,
+    }
 
 
 def _live_scan_snapshot_saved(snapshot: dict[str, Any]) -> bool:
@@ -5201,59 +5935,154 @@ def _upsert_sectors(items: list[dict[str, Any]]) -> int:
     return written
 
 
+def _load_sector_rows_with_member_freshness() -> list[dict[str, Any]]:
+    latest_membership = (
+        select(
+            schema.sector_memberships.c.sector_id,
+            func.max(schema.sector_memberships.c.updated_at).label(
+                "members_refreshed_at"
+            ),
+        )
+        .group_by(schema.sector_memberships.c.sector_id)
+        .subquery()
+    )
+    statement = select(
+        schema.sectors,
+        latest_membership.c.members_refreshed_at,
+    ).outerjoin(
+        latest_membership,
+        latest_membership.c.sector_id == schema.sectors.c.id,
+    )
+    with session_scope() as session:
+        rows = session.execute(statement).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _sector_membership_refresh_due(
+    refreshed_at: object,
+    *,
+    observed_at: datetime,
+    refresh_days: int,
+) -> bool:
+    if refresh_days <= 0:
+        return True
+    refreshed = _as_aware_datetime(refreshed_at)
+    if refreshed is None:
+        return True
+    return observed_at.astimezone(timezone.utc) - refreshed.astimezone(
+        timezone.utc
+    ) >= timedelta(days=refresh_days)
+
+
+def _load_cached_sector_memberships(
+    sector_ids: Sequence[str],
+) -> dict[str, tuple[dict[str, Any], ...]]:
+    normalized_ids = sorted(
+        {str(sector_id).strip() for sector_id in sector_ids if str(sector_id).strip()}
+    )
+    if not normalized_ids:
+        return {}
+    table = schema.sector_memberships
+    statement = (
+        select(
+            table.c.sector_id,
+            table.c.vt_symbol,
+            table.c.symbol,
+            table.c.exchange,
+            table.c.name,
+            table.c.source,
+            table.c.updated_at,
+        )
+        .where(table.c.sector_id.in_(normalized_ids))
+        .order_by(table.c.sector_id, table.c.vt_symbol)
+    )
+    with session_scope() as session:
+        rows = session.execute(statement).mappings().all()
+
+    members: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        item = dict(row)
+        sector_id = str(item.pop("sector_id"))
+        refreshed_at = item.pop("updated_at", None)
+        item["membership_refreshed_at"] = (
+            refreshed_at.isoformat()
+            if isinstance(refreshed_at, datetime)
+            else str(refreshed_at or "") or None
+        )
+        members.setdefault(sector_id, []).append(item)
+    return {
+        sector_id: tuple(items)
+        for sector_id, items in members.items()
+    }
+
+
 def _upsert_sector_memberships(sector_id: str, items: list[dict[str, Any]]) -> int:
     """Upsert sector membership rows for a single sector."""
     if not items:
         return 0
-    written = 0
+    values_by_symbol: dict[str, dict[str, Any]] = {}
     current_symbols: set[str] = set()
+    for item in items:
+        symbol = str(item.get("symbol") or "")
+        if not symbol:
+            continue
+        exchange = str(item.get("exchange") or normalize_exchange(symbol))
+        vts = vt_symbol(symbol, exchange)
+        current_symbols.add(vts)
+        values_by_symbol[vts] = {
+            "sector_id": sector_id,
+            "vt_symbol": vts,
+            "symbol": symbol,
+            "exchange": exchange,
+            "name": str(item.get("name") or symbol),
+            "change_pct": item.get("change_pct"),
+            "return_5d": item.get("return_5d"),
+            "return_10d": item.get("return_10d"),
+            "return_20d": item.get("return_20d"),
+            "turnover": item.get("turnover"),
+            "market_cap": item.get("market_cap"),
+            "source": str(item.get("source") or "akshare"),
+            "raw": item.get("raw") or {},
+        }
+    values = list(values_by_symbol.values())
+    if not values:
+        return 0
+
+    table = schema.sector_memberships
     with session_scope() as session:
-        for item in items:
-            symbol = str(item.get("symbol") or "")
-            exchange = str(item.get("exchange") or normalize_exchange(symbol))
-            vts = vt_symbol(symbol, exchange)
-            if not symbol:
-                continue
-            current_symbols.add(vts)
-            name = str(item.get("name") or symbol)
-            values = {
-                "sector_id": sector_id,
-                "vt_symbol": vts,
-                "symbol": symbol,
-                "exchange": exchange,
-                "name": name,
-                "change_pct": item.get("change_pct"),
-                "return_5d": item.get("return_5d"),
-                "return_10d": item.get("return_10d"),
-                "return_20d": item.get("return_20d"),
-                "turnover": item.get("turnover"),
-                "market_cap": item.get("market_cap"),
-                "source": str(item.get("source") or "akshare"),
-                "raw": item.get("raw") or {},
-            }
-            existing = session.execute(
-                select(schema.sector_memberships).where(
-                    (schema.sector_memberships.c.sector_id == sector_id)
-                    & (schema.sector_memberships.c.vt_symbol == vts)
-                )
-            ).first()
-            if existing:
-                session.execute(
-                    schema.sector_memberships.update()
-                    .where((schema.sector_memberships.c.sector_id == sector_id) & (schema.sector_memberships.c.vt_symbol == vts))
-                    .values(**values)
-                )
-            else:
-                session.execute(schema.sector_memberships.insert().values(**values))
-            written += 1
+        for offset in range(0, len(values), SECTOR_MEMBERSHIP_UPSERT_BATCH_SIZE):
+            statement = postgresql_insert(table).values(
+                values[offset : offset + SECTOR_MEMBERSHIP_UPSERT_BATCH_SIZE]
+            )
+            statement = statement.on_conflict_do_update(
+                index_elements=[table.c.sector_id, table.c.vt_symbol],
+                set_={
+                    column: getattr(statement.excluded, column)
+                    for column in (
+                        "symbol",
+                        "exchange",
+                        "name",
+                        "change_pct",
+                        "return_5d",
+                        "return_10d",
+                        "return_20d",
+                        "turnover",
+                        "market_cap",
+                        "source",
+                        "raw",
+                    )
+                }
+                | {"updated_at": func.now()},
+            )
+            session.execute(statement)
         if current_symbols:
             session.execute(
-                schema.sector_memberships.delete().where(
-                    (schema.sector_memberships.c.sector_id == sector_id)
-                    & schema.sector_memberships.c.vt_symbol.not_in(sorted(current_symbols))
+                table.delete().where(
+                    (table.c.sector_id == sector_id)
+                    & table.c.vt_symbol.not_in(sorted(current_symbols))
                 )
             )
-    return written
+    return len(values)
 
 
 def _delete_sector_memberships(sector_ids: Sequence[str]) -> int:
@@ -5576,6 +6405,297 @@ def _daily_sync_cleanup_min_symbol_count(total_stocks: int, previous_complete_co
     return _daily_sync_complete_min_symbol_count(reference_count)
 
 
+def _completed_stock_daily_session_coverage(
+    total_stocks: int,
+) -> dict[str, Any]:
+    target_date = completed_daily_bar_cutoff(_now_china())
+    with session_scope() as session:
+        symbol_count = _stock_daily_symbol_count(session, target_date)
+        reference_date = _latest_complete_daily_date_before(
+            session,
+            target_date,
+            MIN_COMPLETE_DAILY_SYMBOL_COUNT,
+        )
+        reference_count = _stock_daily_symbol_count(session, reference_date)
+    min_symbol_count = _daily_sync_cleanup_min_symbol_count(
+        total_stocks,
+        reference_count,
+    )
+    return {
+        "status": (
+            "complete" if symbol_count >= min_symbol_count else "incomplete"
+        ),
+        "target_trade_date": target_date.isoformat(),
+        "symbol_count": symbol_count,
+        "min_symbol_count": min_symbol_count,
+        "reference_trade_date": _iso_or_none(reference_date),
+        "reference_symbol_count": reference_count,
+    }
+
+
+def _completed_sector_daily_session_coverage(
+    sector_ids: list[str],
+    min_coverage_ratio: float,
+) -> dict[str, Any]:
+    expected_sector_ids = sorted(set(sector_ids))
+    target_date = completed_daily_bar_cutoff(_now_china())
+    with session_scope() as session:
+        sector_count = int(
+            session.execute(
+                select(func.count()).where(
+                    schema.sector_daily_bars.c.trade_date == target_date,
+                    schema.sector_daily_bars.c.sector_id.in_(expected_sector_ids),
+                )
+            ).scalar()
+            or 0
+        )
+    expected_count = len(expected_sector_ids)
+    min_sector_count = (
+        int(expected_count * min_coverage_ratio)
+        if expected_count >= SECTOR_DAILY_MIN_COVERAGE_TOTAL
+        else min(expected_count, 1)
+    )
+    return {
+        "status": (
+            "complete"
+            if expected_count > 0 and sector_count >= min_sector_count
+            else "incomplete"
+        ),
+        "target_trade_date": target_date.isoformat(),
+        "sector_count": sector_count,
+        "min_sector_count": min_sector_count,
+        "expected_sector_count": expected_count,
+    }
+
+
+def _completed_forward_membership_session_coverage(
+    source_trade_date: date,
+) -> dict[str, Any]:
+    table = schema.low_suction_forward_membership_snapshot_scopes
+    with session_scope() as session:
+        row = session.execute(
+            select(
+                table.c.observed_at,
+                table.c.expected_sector_count,
+                table.c.returned_sector_count,
+                table.c.row_count,
+                table.c.complete,
+                table.c.evidence_level,
+            ).where(
+                table.c.source_trade_date == source_trade_date,
+                table.c.scope_type == forward_membership.TRADABLE_SCOPE_TYPE,
+                table.c.source == forward_membership.FORWARD_MEMBERSHIP_SOURCE,
+                table.c.manifest_version == forward_membership.MANIFEST_VERSION,
+            )
+        ).mappings().first()
+
+    expected_count = int(row.get("expected_sector_count") or 0) if row else 0
+    returned_count = int(row.get("returned_sector_count") or 0) if row else 0
+    row_count = int(row.get("row_count") or 0) if row else 0
+    observed_at = _as_aware_datetime(row.get("observed_at")) if row else None
+    observed_on_source_date = bool(
+        observed_at
+        and observed_at.astimezone(forward_membership.SHANGHAI).date()
+        == source_trade_date
+    )
+    complete = bool(
+        row
+        and row.get("complete") is True
+        and row.get("evidence_level") == "strict"
+        and expected_count > 0
+        and returned_count == expected_count
+        and row_count > 0
+        and observed_on_source_date
+    )
+    return {
+        "status": "complete" if complete else "incomplete",
+        "source_trade_date": source_trade_date.isoformat(),
+        "expected_sector_count": expected_count,
+        "returned_sector_count": returned_count,
+        "row_count": row_count,
+        "observed_at": observed_at.isoformat() if observed_at else None,
+    }
+
+
+def _completed_low_suction_security_session_coverage(
+    source_trade_date: date,
+) -> dict[str, Any]:
+    table = schema.low_suction_security_snapshot_scopes
+    with session_scope() as session:
+        row = session.execute(
+            select(
+                table.c.observed_at,
+                table.c.expected_symbol_count,
+                table.c.returned_symbol_count,
+                table.c.complete,
+                table.c.evidence_level,
+            ).where(
+                table.c.source_trade_date == source_trade_date,
+                table.c.source == baostock_security_source.FORWARD_SECURITY_SOURCE,
+            )
+        ).mappings().first()
+
+    expected_count = int(row.get("expected_symbol_count") or 0) if row else 0
+    returned_count = int(row.get("returned_symbol_count") or 0) if row else 0
+    observed_at = _as_aware_datetime(row.get("observed_at")) if row else None
+    observed_on_source_date = bool(
+        observed_at
+        and observed_at.astimezone(baostock_security_source.SHANGHAI).date()
+        == source_trade_date
+    )
+    complete = bool(
+        row
+        and row.get("complete") is True
+        and row.get("evidence_level")
+        == baostock_security_source.FORWARD_EVIDENCE_LEVEL
+        and expected_count >= forward_security_repository.MIN_FORWARD_MAIN_BOARD_SYMBOLS
+        and returned_count == expected_count
+        and observed_on_source_date
+    )
+    return {
+        "status": "complete" if complete else "incomplete",
+        "source_trade_date": source_trade_date.isoformat(),
+        "expected_symbol_count": expected_count,
+        "returned_symbol_count": returned_count,
+        "observed_at": observed_at.isoformat() if observed_at else None,
+    }
+
+
+def _completed_forward_top3_session_coverage(
+    source_trade_date: date,
+) -> dict[str, Any]:
+    table = schema.low_suction_forward_leader_rank_snapshot_scopes
+    with session_scope() as session:
+        rows = session.execute(
+            select(
+                table.c.identity_mode,
+                table.c.complete,
+                table.c.ranked_row_count,
+                table.c.top3_row_count,
+                table.c.input_fingerprint,
+                table.c.evidence_level,
+            ).where(
+                table.c.source_trade_date == source_trade_date,
+                table.c.ranking_version
+                == forward_leader_identity.FORWARD_LEADER_RANKING_VERSION,
+            )
+        ).mappings().all()
+
+    expected_modes = {
+        mode.value for mode in forward_leader_identity.LeaderIdentityMode
+    }
+    observed_modes = {str(row.get("identity_mode") or "") for row in rows}
+    fingerprints = {str(row.get("input_fingerprint") or "") for row in rows}
+    complete = bool(
+        observed_modes == expected_modes
+        and len(rows) == len(expected_modes)
+        and all(row.get("complete") is True for row in rows)
+        and all(
+            row.get("evidence_level")
+            == forward_leader_identity.FORWARD_RANK_EVIDENCE_LEVEL
+            for row in rows
+        )
+        and len(fingerprints) == 1
+        and next(iter(fingerprints), "").startswith("sha256:")
+    )
+    return {
+        "status": "complete" if complete else "incomplete",
+        "source_trade_date": source_trade_date.isoformat(),
+        "mode_count": len(observed_modes & expected_modes),
+        "ranked_row_count": sum(
+            int(row.get("ranked_row_count") or 0) for row in rows
+        ),
+        "top3_row_count": sum(int(row.get("top3_row_count") or 0) for row in rows),
+        "input_fingerprint": next(iter(fingerprints), None),
+    }
+
+
+def _completed_stock_sector_membership_session_coverage(
+    snapshot_date: date,
+) -> dict[str, Any]:
+    table = schema.stock_sector_membership_snapshot_scopes
+    with session_scope() as session:
+        rows = session.execute(
+            select(
+                table.c.scope_type,
+                table.c.expected_sector_count,
+                table.c.captured_sector_count,
+                table.c.row_count,
+                table.c.complete,
+            ).where(table.c.snapshot_date == snapshot_date)
+        ).mappings().all()
+
+    required_scope_types = set(market_snapshot_repository.MEMBERSHIP_SCOPE_TYPES)
+    scopes = {str(row["scope_type"]): row for row in rows}
+    complete = bool(required_scope_types) and all(
+        scope_type in scopes
+        and scopes[scope_type].get("complete") is True
+        and int(scopes[scope_type].get("expected_sector_count") or 0) > 0
+        and int(scopes[scope_type].get("captured_sector_count") or 0)
+        == int(scopes[scope_type].get("expected_sector_count") or 0)
+        and int(scopes[scope_type].get("row_count") or 0) > 0
+        for scope_type in required_scope_types
+    )
+    return {
+        "status": "complete" if complete else "incomplete",
+        "snapshot_date": snapshot_date.isoformat(),
+        "scope_count": len(required_scope_types & scopes.keys()),
+        "row_count": sum(
+            int(scopes[scope_type].get("row_count") or 0)
+            for scope_type in required_scope_types & scopes.keys()
+        ),
+    }
+
+
+def _completed_sector_score_session_coverage(
+    as_of_date: date,
+    periods: Sequence[str],
+) -> dict[str, Any]:
+    normalized_periods = list(
+        dict.fromkeys(str(period).strip() for period in periods if str(period).strip())
+    )
+    with session_scope() as session:
+        expected_sector_count = int(
+            session.execute(select(func.count()).select_from(schema.sectors)).scalar()
+            or 0
+        )
+        rows = session.execute(
+            select(
+                schema.sector_period_scores.c.period,
+                func.count(func.distinct(schema.sector_period_scores.c.sector_id)).label(
+                    "sector_count"
+                ),
+            )
+            .select_from(
+                schema.sector_period_scores.join(
+                    schema.sectors,
+                    schema.sector_period_scores.c.sector_id == schema.sectors.c.id,
+                )
+            )
+            .where(
+                schema.sector_period_scores.c.as_of_date == as_of_date,
+                schema.sector_period_scores.c.period.in_(normalized_periods),
+            )
+            .group_by(schema.sector_period_scores.c.period)
+        ).mappings().all()
+
+    observed_counts = {
+        str(row["period"]): int(row.get("sector_count") or 0) for row in rows
+    }
+    period_counts = {
+        period: observed_counts.get(period, 0) for period in normalized_periods
+    }
+    complete = bool(normalized_periods) and expected_sector_count > 0 and all(
+        count >= expected_sector_count for count in period_counts.values()
+    )
+    return {
+        "status": "complete" if complete else "incomplete",
+        "as_of_date": as_of_date.isoformat(),
+        "expected_sector_count": expected_sector_count,
+        "period_counts": period_counts,
+    }
+
+
 def _discard_incomplete_latest_daily_bars(total_stocks: int) -> dict[str, Any]:
     """Remove a latest daily-bar date when the cross-section is still partial.
 
@@ -5817,50 +6937,64 @@ def _upsert_minute_bars(
         return 0
     normalized = normalize_exchange(symbol, exchange)
     vts = vt_symbol(symbol, normalized)
-    written = 0
+    values_by_key: dict[tuple[datetime, str], dict[str, Any]] = {}
+    for item in items:
+        bar_time = _parse_datetime(
+            item.get("trade_date") or item.get("bar_time") or item.get("time")
+        )
+        if bar_time is None:
+            continue
+        values_by_key[(bar_time, interval)] = {
+            "vt_symbol": vts,
+            "bar_time": bar_time,
+            "interval": interval,
+            "trade_date": bar_time.date(),
+            "open_price": float(item.get("open") or item.get("open_price") or 0),
+            "close_price": float(item.get("close") or item.get("close_price") or 0),
+            "high_price": float(item.get("high") or item.get("high_price") or 0),
+            "low_price": float(item.get("low") or item.get("low_price") or 0),
+            "volume": item.get("volume"),
+            "turnover": item.get("turnover"),
+            "source": str(item.get("source") or source or "akshare"),
+            "raw": item.get("raw") or item,
+        }
+    values = list(values_by_key.values())
+    if not values:
+        return 0
+
     with session_scope() as session:
         exists = session.execute(select(schema.stocks.c.vt_symbol).where(schema.stocks.c.vt_symbol == vts)).scalar()
         if not exists:
             return 0
-        for item in items:
-            bar_time = _parse_datetime(item.get("trade_date") or item.get("bar_time") or item.get("time"))
-            if bar_time is None:
-                continue
-            values = {
-                "vt_symbol": vts,
-                "bar_time": bar_time,
-                "interval": interval,
-                "trade_date": bar_time.date(),
-                "open_price": float(item.get("open") or item.get("open_price") or 0),
-                "close_price": float(item.get("close") or item.get("close_price") or 0),
-                "high_price": float(item.get("high") or item.get("high_price") or 0),
-                "low_price": float(item.get("low") or item.get("low_price") or 0),
-                "volume": item.get("volume"),
-                "turnover": item.get("turnover"),
-                "source": str(item.get("source") or source or "akshare"),
-                "raw": item.get("raw") or item,
-            }
-            existing = session.execute(
-                select(schema.stock_minute_bars).where(
-                    (schema.stock_minute_bars.c.vt_symbol == vts)
-                    & (schema.stock_minute_bars.c.bar_time == bar_time)
-                    & (schema.stock_minute_bars.c.interval == interval)
+        for start in range(0, len(values), 1_000):
+            statement = postgresql_insert(schema.stock_minute_bars).values(
+                values[start : start + 1_000]
+            )
+            session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=(
+                        schema.stock_minute_bars.c.vt_symbol,
+                        schema.stock_minute_bars.c.bar_time,
+                        schema.stock_minute_bars.c.interval,
+                    ),
+                    set_={
+                        column: getattr(statement.excluded, column)
+                        for column in (
+                            "trade_date",
+                            "open_price",
+                            "close_price",
+                            "high_price",
+                            "low_price",
+                            "volume",
+                            "turnover",
+                            "source",
+                            "raw",
+                        )
+                    }
+                    | {"updated_at": func.now()},
                 )
-            ).first()
-            if existing:
-                session.execute(
-                    schema.stock_minute_bars.update()
-                    .where(
-                        (schema.stock_minute_bars.c.vt_symbol == vts)
-                        & (schema.stock_minute_bars.c.bar_time == bar_time)
-                        & (schema.stock_minute_bars.c.interval == interval)
-                    )
-                    .values(**values)
-                )
-            else:
-                session.execute(schema.stock_minute_bars.insert().values(**values))
-            written += 1
-    return written
+            )
+    return len(values)
 
 
 def _rebuild_stock_sector_memberships() -> int:
@@ -6403,76 +7537,89 @@ def _upsert_sector_fund_flows(
     """Upsert sector fund flow records."""
     if not items:
         return 0
-    written = 0
     snapshot_captured_at = captured_at or datetime.now(timezone.utc)
-    with session_scope() as session:
-        for item in items:
-            name = str(item.get("name") or "")
-            code = str(item.get("code") or name)
-            sector_id = str(item.get("id") or item.get("akshare_symbol") or code)
-            if not sector_id:
-                continue
-            trade_date = str(
-                item.get("trade_date")
-                or snapshot_captured_at.astimezone(timezone(timedelta(hours=8))).date().isoformat()
-            )
-            if name:
-                _ensure_sector_row(session, sector_id, name, sector_type, item)
-            values = {
-                "sector_id": sector_id,
-                "trade_date": trade_date,
-                "period": period,
-                "main_net_inflow": item.get("main_net_inflow"),
-                "main_net_inflow_ratio": item.get("main_net_inflow_pct"),
-                "rank": item.get("rank"),
+    default_trade_date = snapshot_captured_at.astimezone(
+        timezone(timedelta(hours=8))
+    ).date().isoformat()
+    sectors_by_id: dict[str, dict[str, Any]] = {}
+    flows_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in items:
+        name = str(item.get("name") or "")
+        code = str(item.get("code") or name)
+        sector_id = str(item.get("id") or item.get("akshare_symbol") or code)
+        if not sector_id:
+            continue
+        trade_date = str(item.get("trade_date") or default_trade_date)
+        if name:
+            sectors_by_id[sector_id] = {
+                "id": sector_id,
+                "name": name,
+                "type": sector_type,
+                "category": item.get("category"),
+                "path": item.get("path") or [],
+                "change_pct": item.get("change_pct"),
                 "source": str(item.get("source") or "akshare"),
                 "raw": item.get("raw") or {},
             }
-            existing = session.execute(
-                select(schema.sector_fund_flows).where(
-                    (schema.sector_fund_flows.c.sector_id == sector_id)
-                    & (schema.sector_fund_flows.c.trade_date == trade_date)
-                    & (schema.sector_fund_flows.c.period == period)
-                )
-            ).first()
-            if existing:
-                session.execute(
-                    schema.sector_fund_flows.update()
-                    .where(
-                        (schema.sector_fund_flows.c.sector_id == sector_id)
-                        & (schema.sector_fund_flows.c.trade_date == trade_date)
-                        & (schema.sector_fund_flows.c.period == period)
+        flows_by_key[(sector_id, trade_date, period)] = {
+            "sector_id": sector_id,
+            "trade_date": trade_date,
+            "period": period,
+            "main_net_inflow": item.get("main_net_inflow"),
+            "main_net_inflow_ratio": item.get("main_net_inflow_pct"),
+            "rank": item.get("rank"),
+            "source": str(item.get("source") or "akshare"),
+            "raw": item.get("raw") or {},
+        }
+
+    with session_scope() as session:
+        if sectors_by_id:
+            sector_statement = postgresql_insert(schema.sectors)
+            sector_statement = sector_statement.on_conflict_do_update(
+                index_elements=[schema.sectors.c.id],
+                set_={
+                    column: getattr(sector_statement.excluded, column)
+                    for column in (
+                        "name",
+                        "type",
+                        "category",
+                        "path",
+                        "change_pct",
+                        "source",
+                        "raw",
                     )
-                    .values(**values)
-                )
-            else:
-                session.execute(schema.sector_fund_flows.insert().values(**values))
-            written += 1
+                }
+                | {"updated_at": func.now()},
+            )
+            session.execute(sector_statement, list(sectors_by_id.values()))
+        if flows_by_key:
+            flow_statement = postgresql_insert(schema.sector_fund_flows)
+            flow_statement = flow_statement.on_conflict_do_update(
+                index_elements=(
+                    schema.sector_fund_flows.c.sector_id,
+                    schema.sector_fund_flows.c.trade_date,
+                    schema.sector_fund_flows.c.period,
+                ),
+                set_={
+                    column: getattr(flow_statement.excluded, column)
+                    for column in (
+                        "main_net_inflow",
+                        "main_net_inflow_ratio",
+                        "rank",
+                        "source",
+                        "raw",
+                    )
+                }
+                | {"updated_at": func.now()},
+            )
+            session.execute(flow_statement, list(flows_by_key.values()))
     market_snapshot_repository.save_sector_fund_flow_snapshots(
         items,
         period=period,
         sector_type=sector_type,
         captured_at=snapshot_captured_at,
     )
-    return written
-
-
-def _ensure_sector_row(session, sector_id: str, name: str, sector_type: str, item: dict[str, Any]) -> None:
-    values = {
-        "id": sector_id,
-        "name": name,
-        "type": sector_type,
-        "category": item.get("category"),
-        "path": item.get("path") or [],
-        "change_pct": item.get("change_pct"),
-        "source": str(item.get("source") or "akshare"),
-        "raw": item.get("raw") or {},
-    }
-    existing = session.execute(select(schema.sectors).where(schema.sectors.c.id == sector_id)).first()
-    if existing:
-        session.execute(schema.sectors.update().where(schema.sectors.c.id == sector_id).values(**values))
-    else:
-        session.execute(schema.sectors.insert().values(**values))
+    return len(flows_by_key)
 
 
 def _upsert_limit_up_events(
@@ -6996,7 +8143,7 @@ def _upsert_stock_business_segments(
                 session.execute(
                     schema.stock_business_segments.update()
                     .where(
-                        (schema.stock_business_segments.c.id == existing[0])
+                        schema.stock_business_segments.c.id == existing[0]
                     )
                     .values(**values)
                 )

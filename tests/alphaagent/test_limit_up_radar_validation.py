@@ -718,3 +718,27 @@ def test_acceptance_gate_fails_closed_for_missing_metrics_and_bad_blocks() -> No
         "chronological_block_profit_factor",
         "positive_chronological_blocks",
     }.issubset(block_result["failed_gate_keys"])
+
+
+def test_research_shadow_event_never_becomes_an_actionable_recommendation() -> None:
+    row = {
+        "vt_symbol": "600001.SSE",
+        "signal_date": "2026-07-20",
+        "signal_time": "10:01:00",
+        "captured_at": "2026-07-20T10:01:05+08:00",
+        "prepare_probability": 0.7,
+        "action_probability": 0.4,
+    }
+
+    event = radar_validation.build_read_only_research_event(
+        row,
+        state=radar_validation.RESEARCH_ACTION_STATE,
+        prepare_score_field="prepare_probability",
+        action_score_field="action_probability",
+    )
+
+    assert event["research_state"] == "research_action"
+    assert event["execution_effect"] == "none_research_only"
+    assert event["actionable"] is False
+    assert "action" not in event
+    assert "actionable_recommendations" not in event
