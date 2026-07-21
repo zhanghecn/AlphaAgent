@@ -270,12 +270,15 @@ scope/feature/model/action `1/0/0/0`，阶段仍是 `0/40 + 0/15 + 0/60`。唯�
 成熟历史/lane 合同存在/静态门 `20/8/8/8/4/0/0`；旧 `3` 只来自混合 blocker 只读重建，
 不能冒充原生 lane 合同。新冻结日会把该漏斗和标签覆盖写入 scope audit，纯作诊断且不进
 模型或可靠门。冻结 artifact 与内存三层评分现已在多帧、多候选和行序扰动下逐项同分；
-实时端还会重算覆盖完整模型记录的 `record_fingerprint`，漂移时动作前失败关闭。当前首次
-事件标签测试为 `40 passed`，点触发及雷达仓储定向回归为 `184 passed`，打板与数据同步
-组合为 `1207 passed`（1 条既有 Starlette 弃用警告）；API、data-sync worker 和
+实时端还会重算覆盖完整模型记录的 `record_fingerprint`，漂移时动作前失败关闭。动作帧
+现与实时一致要求市场状态非空，并把 `action_market_timing_observed` 冻结进 feature cohort
+及其指纹；EOD 在加载完整模型观察前核对当前 worker 与日级采集指纹，实时评分还用单次
+聚合核对当前帧、当日全部帧和当前进程三者指纹一致。当前首次事件标签测试为
+`41 passed`，点触发及雷达仓储定向回归为 `191 passed`，打板与数据同步组合为
+`1214 passed`（1 条既有 Starlette 弃用警告）；API、data-sync worker 和
 point-trigger worker 统一运行镜像为
-`sha256:53ee907c237a1d51e140ef39ea11b74810e66f8e5f1f7d1ee1d7484f3f11929b`，下一完整交易日
-采集指纹为 `sha256:4ccbb7635e49ab257da20f991733848a47186ace91e7822be14b6edea5357462`；三者重启 0、
+`sha256:f2cbb878091cc385a751bf0b860505cb98c74daa345ab145789990ce9368590c`，下一完整交易日
+采集指纹为 `sha256:13bbeb52c73ed39eb0d56af8c83fb9959b3f6540d4f98ea1faf74fa291270f67`；三者重启 0、
 OOM false，API healthy，worker 为 `not_ready_model_scope`。运行库已有运行指纹、冻结
 结算证据及其指纹所需列。盘后正式新浪和研究东方财富各覆盖四页、400 个唯一
 代码，研究涨速、振幅、主力净流入、净流入率和来源时间均为 `400/400`；公开正式响应
@@ -292,6 +295,7 @@ OOM false，API healthy，worker 为 `not_ready_model_scope`。运行库已有�
 运行指纹缺失及盘中切换。日级较差值为 ready `95%`、扫描 P90/max
 `69.9095/98.4517s`、概念覆盖 `68.3489%`、运行指纹覆盖 `6.3978%`。下午虽有 `459` 帧、
 ready `98.6928%`、扫描 P50/P90/max `11.0012/14.6813/57.8240s`，仍不能稀释上午故障。
+全日轻量聚合仍原样显示 `970` 帧、`847` 帧缺指纹和 `3` 个不同指纹；部署没有回填旧帧。
 当前报告为 `collecting_fit`、`performance_visible=false`，绩效、账户和可靠门均为空。
 该排除日完整原始轨迹共有 970 帧、277,886 条观察。首次事件标签修复把持续 `buy_now`
 产生的伪可达事件由 65 个还原为 13/40 个严格可达首次事件，正例帧由 170 降为 53，领先

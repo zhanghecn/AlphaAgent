@@ -160,16 +160,19 @@ docker compose config --quiet
 
 冻结 artifact 的实时重建已用多帧、多候选和反转输入顺序逐项核对事件概率、身份分、
 Top1/margin/候选数、动作概率和三层模型指纹；实时评分还会在读取 active model 后重算
-覆盖完整 artifact 的 `record_fingerprint`，任何漂移均在动作前失败关闭。当前首次事件
-标签定向测试为 `40 passed`，点触发与雷达仓储定向回归为 `184 passed`；加入
-data-sync worker 后的打板与数据同步组合为 `1207 passed`，另有 1 条既有 Starlette
+覆盖完整 artifact 的 `record_fingerprint`，任何漂移均在动作前失败关闭。校准与实时动作
+帧现在对称要求市场状态非空，`action_market_timing_observed` 同时进入冻结行、数据库列和
+feature 指纹。EOD 在读取完整模型观察前核对当前 worker 与审计日指纹；实时评分用单次
+日级聚合核对当前帧合法、全日唯一且与当前进程一致，任一缺失、非法、切换或不匹配均
+no-action。当前首次事件标签定向测试为 `41 passed`，点触发与雷达仓储定向回归为
+`191 passed`；加入 data-sync worker 后的打板与数据同步组合为 `1214 passed`，另有 1 条既有 Starlette
 弃用警告；
 Ruff、compileall、`git diff --check` 和
 root/deploy 两套 Compose 配置检查均通过。API、data-sync worker 和 point-trigger worker 统一运行
 镜像为
-`sha256:53ee907c237a1d51e140ef39ea11b74810e66f8e5f1f7d1ee1d7484f3f11929b`，三者重启 0、
+`sha256:f2cbb878091cc385a751bf0b860505cb98c74daa345ab145789990ce9368590c`，三者重启 0、
 OOM false；当前采集运行指纹为
-`sha256:4ccbb7635e49ab257da20f991733848a47186ace91e7822be14b6edea5357462`，point-trigger
+`sha256:13bbeb52c73ed39eb0d56af8c83fb9959b3f6540d4f98ea1faf74fa291270f67`，point-trigger
 worker 限制 `0.10 CPU` 且状态为 `not_ready_model_scope`。盘后
 公开 `limit-up-live-v15` 递归审计不存在点触发概率、身份分、研究行情增强值或运行指纹；
 正式历史无参数入口固定为 `portfolio / next_close`，802 日两仓仍为
@@ -198,6 +201,7 @@ D1 正常闭合均有服务级回归覆盖；报告级反例还锁定收益篡�
 `40/23/20/20/16/16/14`（事件/原始 3%/新鲜报价/质量/成熟历史/lane 合同/静态门），只作
 采集归因，不进入模型。当前报告仍为 `collecting_fit`、`performance_visible=false`，
 绩效、账户和可靠门均为 `null`，最终归档文件不存在。
+全日指纹聚合仍为 `970` 帧、`847` 帧缺失、`3` 个唯一值；旧坏日没有因新部署被回填。
 
 上午持续慢节拍的根因已由运行库和保留 Docker 镜像交叉闭合。`10:42` 构建的镜像
 `sha256:27164ad6...` 实际固定为 `LIVE_SCAN_INTERVAL_SECONDS=60`、
