@@ -1,4 +1,5 @@
 import { renderToStaticMarkup } from "react-dom/server";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
 
 import type {
@@ -6,7 +7,7 @@ import type {
   LowSuctionHistoricalOverview,
   LowSuctionStrategyOverview,
 } from "@/api/lowSuction";
-import { LowSuctionResearchWorkspace } from "./LowSuctionResearchWorkspace";
+import { BacktestView, LowSuctionResearchWorkspace } from "./LowSuctionResearchWorkspace";
 
 const phase = (id: string, trades: number) => ({
   id,
@@ -40,6 +41,10 @@ const history = {
     run_id: "run-1",
     trade_count: 89,
     built_at: "2026-07-21T14:15:34+08:00",
+    metrics: {
+      all_trade_quality: { trades: 89, positive_rate_pct: 76.4045, mean_net_return_pct: 3.0767, profit_factor: 4.3761 },
+      two_slot_compound_backtest: { signals: 89, accepted_entries: 81, closed_trades: 81, winning_trades: 61, cash_win_rate_pct: 75.3086, compound_return_pct: 230.073, maximum_drawdown_pct: -7.889, skip_reasons: { capacity_full: 8 } },
+    },
   },
   latest_strict_run: null,
   formal_strategy: false,
@@ -76,5 +81,24 @@ describe("LowSuctionResearchWorkspace", () => {
     expect(html).not.toContain("账户权益");
     expect(html).not.toContain("持仓");
     expect(html).not.toContain("14:50 信号");
+  });
+
+  it("separates two-slot compounding from all recommendation quality", () => {
+    const queryClient = new QueryClient();
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={queryClient}>
+        <BacktestView validation={validation} history={history} />
+      </QueryClientProvider>,
+    );
+
+    expect(html).toContain("两仓真实账户");
+    expect(html).toContain("账户复利");
+    expect(html).toContain("230.07%");
+    expect(html).toContain("闭合成交");
+    expect(html).toContain("81 笔");
+    expect(html).toContain("全部推荐质量");
+    expect(html).toContain("全部交易");
+    expect(html).toContain("89 笔");
+    expect(html).toContain("不受两仓已满影响");
   });
 });

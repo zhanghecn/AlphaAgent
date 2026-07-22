@@ -450,7 +450,24 @@ export interface LowSuctionHistoricalRun {
     trades: number;
     positive_rate_pct: number;
     mean_net_return_pct: number;
-    two_slot_cash: Record<string, number>;
+    profit_factor?: number | null;
+    all_trade_quality: {
+      trades: number;
+      positive_rate_pct: number | null;
+      mean_net_return_pct: number | null;
+      profit_factor: number | null;
+    };
+    two_slot_compound_backtest: {
+      signals: number;
+      accepted_entries: number;
+      closed_trades: number;
+      winning_trades: number;
+      cash_win_rate_pct: number | null;
+      compound_return_pct: number;
+      maximum_drawdown_pct: number;
+      skip_reasons: Record<string, number>;
+    };
+    two_slot_cash: Record<string, number | Record<string, number>>;
   };
   built_at: string;
   raw: {

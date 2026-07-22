@@ -110,3 +110,34 @@ def test_overview_never_builds_replay(monkeypatch) -> None:
     assert result["strict_history_available"] is False
     assert result["exploratory_counts_toward_qualification"] is False
     assert calls == [None, "strict_point_in_time"]
+
+
+def test_overview_separates_all_trade_quality_from_two_slot_account(
+    monkeypatch,
+) -> None:
+    stored = {
+        "run_id": "run-1",
+        "trade_count": 89,
+        "metrics": {
+            "trades": 89,
+            "positive_rate_pct": 76.4,
+            "mean_net_return_pct": 3.08,
+            "two_slot_cash": {
+                "signals": 89,
+                "closed_trades": 81,
+                "compound_return_pct": 230.07,
+                "maximum_drawdown_pct": -7.89,
+            },
+        },
+    }
+    monkeypatch.setattr(
+        service,
+        "load_latest_replay_run",
+        lambda *, evidence_level=None: None if evidence_level else stored,
+    )
+
+    run = service.get_historical_replay_overview()["latest_run"]
+
+    assert run["metrics"]["all_trade_quality"]["trades"] == 89
+    assert run["metrics"]["two_slot_compound_backtest"]["closed_trades"] == 81
+    assert run["metrics"]["two_slot_compound_backtest"]["compound_return_pct"] == 230.07

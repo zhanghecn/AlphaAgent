@@ -74,7 +74,7 @@ export function LowSuctionResearchWorkspace({
   );
 }
 
-function BacktestView({
+export function BacktestView({
   validation,
   history,
 }: {
@@ -83,6 +83,9 @@ function BacktestView({
 }) {
   const candidate = validation.three_phase_candidate;
   const run = history.latest_run;
+  const quality = run?.metrics.all_trade_quality;
+  const account = run?.metrics.two_slot_compound_backtest;
+  const skipped = account ? Math.max(account.signals - account.accepted_entries, 0) : 0;
   const phaseRows = [
     ...candidate.development_market_phases.map((row) => ({ ...row, split: "开发段" })),
     ...candidate.validation_market_phases.map((row) => ({ ...row, split: "验证段" })),
@@ -100,14 +103,36 @@ function BacktestView({
         </div>
       </div>
 
-      <dl className="grid grid-cols-2 border-b border-l sm:grid-cols-3 lg:grid-cols-6">
-        <Metric label="交易" value={`${candidate.full_history.closed_trades} 笔`} />
-        <Metric label="胜率" value={formatRate(candidate.full_history.win_rate_pct)} tone={rateTone((candidate.full_history.win_rate_pct ?? 0) - 50)} />
-        <Metric label="单笔均值" value={formatPct(candidate.full_history.mean_net_return_pct)} tone={rateTone(candidate.full_history.mean_net_return_pct ?? 0)} />
-        <Metric label="利润因子" value={formatNumber(candidate.full_history.profit_factor)} />
-        <Metric label="两仓复利" value={formatPct(candidate.cash.compound_return_pct)} tone={rateTone(candidate.cash.compound_return_pct)} />
-        <Metric label="最大回撤" value={formatPct(candidate.cash.maximum_drawdown_pct)} tone="text-fall" />
-      </dl>
+      <div className="grid border-b lg:grid-cols-2">
+        <section className="border-b lg:border-b-0 lg:border-r" aria-label="两仓复利回测">
+          <div className="border-b px-3 py-2">
+            <h2 className="text-sm font-semibold">两仓真实账户</h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">受两仓上限、同概念和持仓冲突约束</p>
+          </div>
+          <dl className="grid grid-cols-2 border-l sm:grid-cols-3">
+            <Metric label="闭合成交" value={account ? `${account.closed_trades} 笔` : "--"} />
+            <Metric label="成交胜率" value={formatRate(account?.cash_win_rate_pct)} tone={rateTone((account?.cash_win_rate_pct ?? 0) - 50)} />
+            <Metric label="账户复利" value={formatPct(account?.compound_return_pct)} tone={rateTone(account?.compound_return_pct ?? 0)} />
+            <Metric label="最大回撤" value={formatPct(account?.maximum_drawdown_pct)} tone="text-fall" />
+            <Metric label="全部信号" value={account ? `${account.signals} 笔` : "--"} />
+            <Metric label="仓位跳过" value={account ? `${skipped} 笔` : "--"} />
+          </dl>
+        </section>
+        <section aria-label="全部交易质量">
+          <div className="border-b px-3 py-2">
+            <h2 className="text-sm font-semibold">全部推荐质量</h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">每笔规则信号独立统计，不受两仓已满影响</p>
+          </div>
+          <dl className="grid grid-cols-2 border-l sm:grid-cols-3">
+            <Metric label="全部交易" value={`${quality?.trades ?? run?.trade_count ?? candidate.full_history.closed_trades} 笔`} />
+            <Metric label="规则胜率" value={formatRate(quality?.positive_rate_pct ?? candidate.full_history.win_rate_pct)} tone={rateTone((quality?.positive_rate_pct ?? candidate.full_history.win_rate_pct ?? 0) - 50)} />
+            <Metric label="单笔均值" value={formatPct(quality?.mean_net_return_pct ?? candidate.full_history.mean_net_return_pct)} tone={rateTone(quality?.mean_net_return_pct ?? candidate.full_history.mean_net_return_pct ?? 0)} />
+            <Metric label="利润因子" value={formatNumber(quality?.profit_factor ?? candidate.full_history.profit_factor)} />
+            <Metric label="评价口径" value="独立逐笔" />
+            <Metric label="仓位影响" value="不剔除" />
+          </dl>
+        </section>
+      </div>
 
       <section className="border-b py-5" aria-labelledby="phase-result-title">
         <div className="mb-3 flex items-baseline justify-between gap-3">
@@ -325,11 +350,11 @@ function Definition({ label, value }: { label: string; value: string }) {
   return <div className="grid grid-cols-[minmax(140px,0.8fr)_minmax(0,1.2fr)] gap-4 border-b px-3 py-2.5 md:odd:border-r"><dt className="text-muted-foreground">{label}</dt><dd className="text-right">{value}</dd></div>;
 }
 
-function formatRate(value: number | null) {
+function formatRate(value: number | null | undefined) {
   return value == null ? "--" : `${value.toFixed(2)}%`;
 }
 
-function formatPct(value: number | null) {
+function formatPct(value: number | null | undefined) {
   return value == null ? "--" : `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
 }
 

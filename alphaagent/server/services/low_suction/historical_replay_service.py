@@ -118,8 +118,10 @@ def materialize_exploratory_three_phase_replay() -> dict[str, object]:
 def get_historical_replay_overview() -> dict[str, object]:
     """Read saved evidence only; this function never launches a replay."""
 
-    latest = load_latest_replay_run()
-    strict = load_latest_replay_run(evidence_level="strict_point_in_time")
+    latest = _with_metric_views(load_latest_replay_run())
+    strict = _with_metric_views(
+        load_latest_replay_run(evidence_level="strict_point_in_time")
+    )
     return {
         "latest_run": latest,
         "latest_strict_run": strict,
@@ -225,12 +227,50 @@ def _build_ledger(
 
 def _metrics(ledger: pd.DataFrame, cash: dict[str, Any]) -> dict[str, object]:
     returns = pd.to_numeric(ledger["net_return_pct"], errors="raise")
-    return {
+    positive = returns.loc[returns.gt(0.0)].sum()
+    negative = -returns.loc[returns.lt(0.0)].sum()
+    quality = {
         "trades": int(len(ledger)),
         "positive_rate_pct": float(returns.gt(0).mean() * 100.0),
         "mean_net_return_pct": float(returns.mean()),
-        "two_slot_cash": cash,
+        "profit_factor": (
+            float(positive / negative)
+            if negative > 0
+            else None
+        ),
     }
+    return {
+        **quality,
+        "two_slot_cash": cash,
+        "all_trade_quality": quality,
+        "two_slot_compound_backtest": cash,
+    }
+
+
+def _with_metric_views(run: dict[str, object] | None) -> dict[str, object] | None:
+    """Name the independent-quality and constrained-account views explicitly."""
+
+    if run is None:
+        return None
+    result = dict(run)
+    source = result.get("metrics")
+    metrics = dict(source) if isinstance(source, dict) else {}
+    quality = metrics.get("all_trade_quality")
+    if not isinstance(quality, dict):
+        quality = {
+            "trades": metrics.get("trades", result.get("trade_count", 0)),
+            "positive_rate_pct": metrics.get("positive_rate_pct"),
+            "mean_net_return_pct": metrics.get("mean_net_return_pct"),
+            "profit_factor": metrics.get("profit_factor"),
+        }
+    account = metrics.get("two_slot_compound_backtest")
+    if not isinstance(account, dict):
+        legacy = metrics.get("two_slot_cash")
+        account = dict(legacy) if isinstance(legacy, dict) else {}
+    metrics["all_trade_quality"] = quality
+    metrics["two_slot_compound_backtest"] = account
+    result["metrics"] = metrics
+    return result
 
 
 def _load_regression_artifact() -> dict[str, Any]:
