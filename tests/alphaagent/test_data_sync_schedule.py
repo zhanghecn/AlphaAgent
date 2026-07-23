@@ -911,7 +911,7 @@ def test_eod_finalize_schedule_retries_daily_bars_late_without_slow_jobs():
         "sync_limit_up_event_minutes",
         "sync_limit_up_radar_minutes",
         svc.LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID,
-        "sync_limit_up_preboard_point_trigger",
+        "sync_limit_up_preboard_decision",
         svc.LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID,
         svc.LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID,
     ]
@@ -920,18 +920,18 @@ def test_eod_finalize_schedule_retries_daily_bars_late_without_slow_jobs():
     assert "sync_stock_notices" not in jobs
 
 
-def test_point_trigger_freeze_runs_only_in_2130_after_reliable_inputs(monkeypatch):
+def test_preboard_decision_freeze_runs_only_in_2130_after_reliable_inputs(monkeypatch):
     job = next(
         item
         for item in svc.DEFAULT_JOBS
-        if item.id == "sync_limit_up_preboard_point_trigger"
+        if item.id == "sync_limit_up_preboard_decision"
     )
     schedules = {row["id"]: row for row in svc.DEFAULT_BATCH_SCHEDULES}
     finalize_jobs = schedules["eod_finalize_2130"]["job_ids"]
 
     assert job.source_id == "alphaagent_local"
     assert job.target_table == "limit_up_preboard_point_day_scopes"
-    assert svc.JOB_RUNNERS[job.id] == "_run_sync_limit_up_preboard_point_trigger"
+    assert svc.JOB_RUNNERS[job.id] == "_run_sync_limit_up_preboard_decision"
     assert job.id not in schedules["eod_1900"]["job_ids"]
     assert finalize_jobs.index(job.id) > finalize_jobs.index("sync_stock_daily_bars")
     assert finalize_jobs.index(job.id) > finalize_jobs.index(
@@ -939,19 +939,22 @@ def test_point_trigger_freeze_runs_only_in_2130_after_reliable_inputs(monkeypatc
     )
 
     monkeypatch.setattr(
-        svc.preboard_point_trigger_service,
-        "sync_limit_up_preboard_point_trigger",
+        svc.preboard_decision_service,
+        "freeze_and_settle",
         lambda: {
-            "status": "collecting_fit",
-            "complete_day_count": 3,
+            "status": "incomplete_scope",
+            "decision_version": "limit-up-preboard-decision-v1",
+            "feature_row_count": 3,
             "rows_written": 120,
             "message": "collecting",
         },
     )
 
-    result = svc.DataSyncRunner()._run_sync_limit_up_preboard_point_trigger({})
+    result = svc.DataSyncRunner()._run_sync_limit_up_preboard_decision({})
 
-    assert result["point_trigger_status"] == "collecting_fit"
+    assert result["decision_status"] == "incomplete_scope"
+    assert result["decision_version"] == "limit-up-preboard-decision-v1"
+    assert result["rows_read"] == 3
     assert result["rows_written"] == 120
 
 
@@ -1652,7 +1655,7 @@ def test_preboard_transaction_backfill_is_manual_and_registered(monkeypatch) -> 
 
     monkeypatch.setattr(
         preboard_transaction_data,
-        "backfill_preboard_transaction_features",
+        "backfill_preboard_decision_transaction_features",
         fake_backfill,
     )
 

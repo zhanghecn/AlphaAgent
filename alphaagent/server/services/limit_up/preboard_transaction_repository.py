@@ -13,7 +13,6 @@ from alphaagent.server.db.session import get_engine, session_scope
 
 
 FLOW_READY = "flow_ready"
-PAIR_MANIFEST_VERSION = "limit-up-preboard-transaction-pairs-v1"
 
 
 def save_transaction_pair_manifest(
@@ -59,21 +58,25 @@ def save_transaction_pair_manifest(
 
 def load_latest_transaction_pair_manifest(
     *,
-    manifest_version: str = PAIR_MANIFEST_VERSION,
+    manifest_version: str,
     session_count: int,
+    end_date: date | None = None,
 ) -> dict[str, object] | None:
-    """Load the latest frozen range for one bounded research scope."""
+    """Load the latest or exact-ended frozen range for one research scope."""
 
     engine = get_engine()
     schema.ensure_schema_once(engine)
     table = schema.limit_up_transaction_pair_manifests
+    conditions = [
+        table.c.manifest_version == str(manifest_version),
+        table.c.session_count == int(session_count),
+    ]
+    if end_date is not None:
+        conditions.append(table.c.end_date == end_date)
     with session_scope() as session:
         row = session.execute(
             select(table)
-            .where(
-                table.c.manifest_version == str(manifest_version),
-                table.c.session_count == int(session_count),
-            )
+            .where(*conditions)
             .order_by(table.c.end_date.desc(), table.c.start_date.desc())
             .limit(1)
         ).mappings().first()

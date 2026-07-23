@@ -1,45 +1,15 @@
 import { Database } from "lucide-react";
 
-import type {
-  LimitUpRadarValidation,
-  LimitUpStrategyGuide,
-} from "@/api/limitUp";
+import type { LimitUpStrategyGuide } from "@/api/limitUp";
 import { cn } from "@/lib/utils";
 
 export function GuideDataset({
   guide,
-  radarValidation,
-  radarValidationLoading = false,
-  radarValidationError = null,
 }: {
   guide: LimitUpStrategyGuide;
-  radarValidation?: LimitUpRadarValidation;
-  radarValidationLoading?: boolean;
-  radarValidationError?: string | null;
 }) {
   const { dataset, field_groups: groups, historical_reference: history } = guide;
-  const radar = {
-    ...guide.radar_evidence,
-    status: radarValidation?.status ?? guide.radar_evidence.status,
-    complete_trade_days:
-      radarValidation?.coverage.complete_trade_days
-      ?? guide.radar_evidence.complete_trade_days,
-    minute_coverage_pct:
-      radarValidation?.coverage.minute_pair_coverage_pct
-      ?? guide.radar_evidence.minute_coverage_pct,
-    selected_contract:
-      radarValidation?.acceptance.selected_contract
-      ?? guide.radar_evidence.selected_contract,
-    recommended_contract:
-      radarValidation?.acceptance.recommended_contract
-      ?? guide.radar_evidence.selected_contract,
-    activation_required:
-      radarValidation?.acceptance.activation_required ?? false,
-    production_contract_mismatch:
-      radarValidation?.acceptance.production_contract_mismatch ?? false,
-  };
-  const radarUnavailable = Boolean(radarValidationError) && !radarValidation;
-  const radarPending = radarValidationLoading && !radarValidation;
+  const preboard = guide.preboard_decision;
   return (
     <div>
       <section className="border-y bg-muted/20" aria-labelledby="evidence-scope-title">
@@ -60,79 +30,43 @@ export function GuideDataset({
         </div>
       </section>
 
-      <section className="mt-5" aria-labelledby="radar-validation-title">
-        <h3 id="radar-validation-title" className="text-sm font-semibold">
-          采集与正式推荐的边界：3% 开始盯、5% 才推荐
+      <section className="mt-5" aria-labelledby="preboard-contract-title">
+        <h3 id="preboard-contract-title" className="text-sm font-semibold">
+          板前概率观察与正式买点边界
         </h3>
         <p className="mt-1 text-xs leading-5 text-muted-foreground">
-          {radar.selected_contract === "formal_5pct"
-            ? "股票涨到 3% 系统就开始盯上它并保存研究证据，但只有涨到 5% 才会出现在正式推荐里。在积累到足够样本并正式发布前，页面上只有 5% 起的推荐。"
-            : "3% 起的同规则已经正式发布，页面上只有一套正式推荐和一套执行口径。"}
+          {preboard.quality_pool_rule}。3% 不是买点，涨幅、距离涨停、速度、加速度和资金增量只进入概率计算。
         </p>
         <div className="mt-2 overflow-x-auto border-y">
-          <table className="w-full min-w-[720px] text-left text-xs">
+          <table className="w-full min-w-[760px] text-left text-xs">
             <thead className="bg-muted/40 text-muted-foreground">
               <tr>
-                <th className="px-3 py-2 font-medium">采集边界</th>
-                <th className="px-3 py-2 font-medium">正式边界</th>
-                <th className="px-3 py-2 font-medium">完整交易日</th>
-                <th className="px-3 py-2 font-medium">分钟覆盖</th>
-                <th className="px-3 py-2 font-medium">当前合同</th>
-                <th className="px-3 py-2 font-medium">验收建议</th>
-                <th className="px-3 py-2 font-medium">状态</th>
+                <th className="px-3 py-2 font-medium">观察激活</th>
+                <th className="px-3 py-2 font-medium">动态输出</th>
+                <th className="px-3 py-2 font-medium">排序顺序</th>
+                <th className="px-3 py-2 font-medium">正式策略影响</th>
               </tr>
             </thead>
             <tbody>
               <tr className="border-t">
-                <td className="px-3 py-2 tabular-nums">
-                  {radar.capture_min_change_pct}% 开始采集
+                <td className="px-3 py-2 align-top tabular-nums">
+                  高质量首板达到 {preboard.observation_min_change_pct}%
                 </td>
-                <td className="px-3 py-2 tabular-nums">
-                  {radar.formal_min_change_pct}% 正式推荐
+                <td className="px-3 py-2 align-top">
+                  {preboard.probability_outputs.join("、")}
                 </td>
-                <td className="px-3 py-2 tabular-nums">
-                  {radarUnavailable
-                    ? `-- / ${radar.target_trade_days} 日`
-                    : radarPending
-                      ? "读取中"
-                      : `${radar.complete_trade_days} / ${radar.target_trade_days} 日`}
+                <td className="px-3 py-2 align-top">
+                  {preboard.ranking_order.join(" → ")}
                 </td>
-                <td className="px-3 py-2 tabular-nums">
-                  {radarUnavailable
-                    ? "读取失败"
-                    : radarPending
-                      ? "读取中"
-                      : radar.minute_coverage_pct == null
-                      ? "待补齐"
-                      : formatPct(radar.minute_coverage_pct, 4)}
-                </td>
-                <td className="px-3 py-2">
-                  {radar.selected_contract === "formal_5pct"
-                    ? "5%正式合同"
-                    : "3%同规则合同"}
-                </td>
-                <td className="px-3 py-2">
-                  {radar.recommended_contract === "early_3pct_same_rules"
-                    ? "建议3%合同"
-                    : "保持5%合同"}
-                </td>
-                <td className="px-3 py-2 text-muted-foreground">
-                  {radarUnavailable
-                    ? "读取失败"
-                    : radarPending
-                      ? "读取中"
-                      : radarStatusLabel(
-                          radar.status,
-                          radar.activation_required,
-                          radar.production_contract_mismatch,
-                        )}
+                <td className="px-3 py-2 align-top text-muted-foreground">
+                  {preboard.formal_baseline}
                 </td>
               </tr>
             </tbody>
           </table>
         </div>
         <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
-          {`完整分钟分母：${radar.minute_sessions.join("、")}，共 ${radar.minute_slot_count} 个去重分钟槽位；成交报价只认${radar.entry_fill_same_window ? "同一买入窗口内 " : ""}${radar.entry_fill_delay_seconds[0]}-${radar.entry_fill_delay_seconds[1]} 秒。`}
+          {preboard.promotion_rule}。合同：{preboard.decision_version}
         </p>
       </section>
 
@@ -262,9 +196,15 @@ export function GuideDataset({
         <h3 id="execution-contract-title" className="text-sm font-semibold">怎么算买入价、卖出价和费用</h3>
         <dl className="mt-2 space-y-2">
           <div className="flex gap-2">
-            <dt className="shrink-0 font-medium text-foreground">买入价</dt>
+            <dt className="shrink-0 font-medium text-foreground">板前 C 买入</dt>
             <dd className="text-muted-foreground">
-              取信号触发后 20–60 秒内的第一条保存报价，再在这个价格上加上 0.1% 的滑点（模拟实际买入会买贵一点点），且不超过涨停价。
+              只认行动后第一条严格低于涨停价的新报价；一分钟历史代理使用下一分钟开盘价，等于涨停价或缺少报价都算未成交。
+            </dd>
+          </div>
+          <div className="flex gap-2">
+            <dt className="shrink-0 font-medium text-foreground">正式 v15 买入</dt>
+            <dd className="text-muted-foreground">
+              触板基线仍取信号后 20–60 秒内第一条保存报价，并加 0.1% 滑点且不超过涨停价；涨停价信号只表示可尝试排队，不保证成交。
             </dd>
           </div>
           <div className="flex gap-2">
@@ -318,20 +258,6 @@ function DatasetMetric({
       <dd className={cn("mt-1 text-sm font-semibold tabular-nums", positive && "text-rise")}>{value}</dd>
     </div>
   );
-}
-
-function radarStatusLabel(
-  status: LimitUpStrategyGuide["radar_evidence"]["status"],
-  activationRequired: boolean,
-  productionMismatch: boolean,
-) {
-  if (status === "accepted" && activationRequired) return "已通过，待发布";
-  if (productionMismatch) return "生产与验收不一致";
-  if (status === "accepted") return "已通过";
-  if (status === "rejected") return "未通过";
-  if (status === "ready_for_review") return "待最终复核";
-  if (status === "process_ready") return "过程检查可用";
-  return "采集中";
 }
 
 function formatPct(value: number, digits = 2) {

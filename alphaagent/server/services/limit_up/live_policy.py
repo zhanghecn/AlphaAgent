@@ -816,6 +816,7 @@ def _signal(
         "first_limit_time": candidate.get("first_limit_time"),
         "last_limit_time": candidate.get("last_limit_time"),
         "last_price": _number(candidate.get("last_price")),
+        "limit_price": _number(candidate.get("limit_price")),
         "change_pct": _number(candidate.get("change_pct")),
         "session_low_change_pct": _number(candidate.get("session_low_change_pct")),
         "distance_to_limit_pct": _number(candidate.get("distance_to_limit_pct")),
@@ -1204,6 +1205,18 @@ def _candidate_execution_reasons(
     )
 
 
+def build_first_board_execution_checks_at_time(
+    candidate: Mapping[str, object],
+) -> list[dict[str, object]]:
+    """Return the formal first-board checks for one visible market frame."""
+
+    return _candidate_execution_checks(
+        {**dict(candidate), "board_lane": "first_board", "board_level": 1},
+        require_expansion=True,
+        entry_kind="momentum",
+    )
+
+
 def _blocking_execution_reasons(
     checks: Sequence[Mapping[str, object]],
 ) -> list[str]:
@@ -1348,7 +1361,28 @@ def _candidate_execution_checks(
                 "reason": f"封单较上一快照缩水{shrink_pct:.1f}%",
             }
         )
-    return checks
+    return [_execution_check_contract(check, candidate) for check in checks]
+
+
+def _execution_check_contract(
+    check: Mapping[str, object],
+    candidate: Mapping[str, object],
+) -> dict[str, object]:
+    code = str(check.get("code") or "unknown_execution_check")
+    raw_parity = candidate.get("execution_check_parity")
+    parity = raw_parity if isinstance(raw_parity, Mapping) else {}
+    known_at = (
+        candidate.get("decision_at")
+        or candidate.get("evaluation_time")
+        or candidate.get("signal_time")
+    )
+    return {
+        **dict(check),
+        "code": code,
+        "known_at": known_at,
+        "parity_status": str(parity.get(code) or "shared"),
+        "blocking": check.get("blocking", True) is not False,
+    }
 
 
 def _append_realtime_sector_route_checks(

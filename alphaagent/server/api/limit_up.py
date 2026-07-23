@@ -43,9 +43,6 @@ from alphaagent.server.services.limit_up.forward_validation import (
 from alphaagent.server.services.limit_up.strategy_guide import (
     get_limit_up_strategy_guide,
 )
-from alphaagent.server.services.limit_up.radar_validation import (
-    get_radar_validation,
-)
 from alphaagent.server.services.limit_up.data_quality import (
     backfill_limit_up_event_minutes,
     get_limit_up_data_quality,
@@ -107,21 +104,6 @@ def strategy_guide():
     """Expose the reviewed selection and dataset contract without a data refresh."""
 
     return ok(get_limit_up_strategy_guide())
-
-
-@router.get("/radar-validation", response_model=None)
-def radar_validation():
-    """Read saved 3%/5% evidence without refreshing quotes or writing rows."""
-
-    if not is_database_configured():
-        return JSONResponse(
-            status_code=503,
-            content=fail("DATABASE_UNAVAILABLE", "数据库未配置，无法读取雷达验证"),
-        )
-    try:
-        return ok(get_radar_validation())
-    except Exception as exc:  # noqa: BLE001
-        return _service_error(exc)
 
 
 @router.post("/live/refresh", response_model=None)

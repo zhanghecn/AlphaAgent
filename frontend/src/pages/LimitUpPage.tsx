@@ -34,7 +34,6 @@ import {
   fetchLimitUpLiveTraceDates,
   fetchLimitUpLiveTraceDay,
   fetchLimitUpLiveTraceSymbol,
-  fetchLimitUpRadarValidation,
   fetchLimitUpStrategyGuide,
   startLimitUpHistoryRebuild,
   type LimitUpHistoryRebuildStatus,
@@ -58,6 +57,7 @@ import { GuideView } from "@/features/limitUp/GuideView";
 import { LedgerTimeline } from "@/features/limitUp/LedgerTimeline";
 import { LiveSignalCard } from "@/features/limitUp/LiveSignalCard";
 import { OpsFlowRail } from "@/features/limitUp/OpsFlowRail";
+import { PreboardRanking } from "@/features/limitUp/PreboardRanking";
 import { buildBacktestChartPoints } from "@/features/limitUp/backtestChart";
 import {
   amountTone,
@@ -143,13 +143,6 @@ export function LimitUpPage() {
     queryFn: fetchLimitUpStrategyGuide,
     enabled: view === "guide",
     staleTime: Infinity,
-    refetchOnWindowFocus: false,
-  });
-  const radarValidationQuery = useQuery({
-    queryKey: ["limitUpRadarValidation"],
-    queryFn: fetchLimitUpRadarValidation,
-    enabled: view === "guide",
-    staleTime: 60_000,
     refetchOnWindowFocus: false,
   });
   const traceDatesQuery = useQuery({
@@ -413,9 +406,6 @@ export function LimitUpPage() {
       ) : (
         <GuideView
           guide={strategyGuideQuery.data}
-          radarValidation={radarValidationQuery.data}
-          radarValidationLoading={radarValidationQuery.isLoading}
-          radarValidationError={firstError(radarValidationQuery.error)}
           loading={strategyGuideQuery.isLoading}
           error={firstError(strategyGuideQuery.error)}
           onRetry={() => void strategyGuideQuery.refetch()}
@@ -608,6 +598,7 @@ function LiveView({
         report={portfolioReport}
         onOpenBacktest={onOpenBacktest}
       />
+      <PreboardRanking candidates={snapshot.preboard_candidates ?? []} />
       {signals.length ? (
         <div className="grid gap-3 px-3 py-3 sm:px-4 xl:grid-cols-2">
           {signals.map((signal) => (

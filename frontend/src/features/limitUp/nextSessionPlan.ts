@@ -16,9 +16,9 @@ const ACTIVE_SESSION_STAGES = new Set([
   "close_auction",
 ]);
 
-// The background scanner persists at most one snapshot every five minutes.
-// Polling the same large JSON payload every ten seconds only burns API/DB CPU.
 export const ACTIVE_LIVE_POLL_INTERVAL_MS = 60_000;
+// Match the background scanner so short-lived pre-board signals reach the page.
+export const ACTIVE_LIVE_SNAPSHOT_POLL_INTERVAL_MS = 10_000;
 
 export function shouldPollLiveTraces(
   snapshot: LimitUpSignalSnapshot | undefined,
@@ -31,7 +31,7 @@ export function shouldPollLiveTraces(
 export function liveSnapshotPollingInterval(
   snapshot: LimitUpSignalSnapshot | undefined,
 ): number {
-  if (!snapshot || shouldPollLiveTraces(snapshot)) return ACTIVE_LIVE_POLL_INTERVAL_MS;
+  if (!snapshot || shouldPollLiveTraces(snapshot)) return ACTIVE_LIVE_SNAPSHOT_POLL_INTERVAL_MS;
   if (snapshot.mode === "next_session_final") return 300_000;
   return 60_000;
 }

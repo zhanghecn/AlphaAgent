@@ -185,12 +185,14 @@ describe("live limit-up portfolio presentation", () => {
     ]);
   });
 
-  it("keeps a first-seen sealed momentum buy actionable", () => {
+  it("keeps a sealed first-board buy for limit-price queueing", () => {
     const momentum = {
       ...signal("600009.SSE", 1, "buy_now"),
       entry_kind: "momentum",
       signal_state: "trigger_ready",
       missed_preseal_entry: true,
+      state: "sealed",
+      quality_gate_passed: true,
     };
 
     expect(
@@ -199,6 +201,39 @@ describe("live limit-up portfolio presentation", () => {
         "portfolio",
       ).map((row) => row.vt_symbol),
     ).toEqual(["600009.SSE"]);
+  });
+
+  it("keeps a first-board buy when quote state lags at the limit price", () => {
+    const momentum = {
+      ...signal("600009.SSE", 1, "buy_now"),
+      board_lane: "first_board" as const,
+      state: "near_limit",
+      last_price: 11,
+      limit_price: 11,
+      quality_gate_passed: true,
+    };
+
+    expect(
+      liveSignalsForScope(
+        snapshot({ actionable_recommendations: [momentum] }),
+        "portfolio",
+      ).map((row) => row.vt_symbol),
+    ).toEqual(["600009.SSE"]);
+  });
+
+  it("does not display a failed first-board as an actionable buy", () => {
+    const failed = {
+      ...signal("600009.SSE", 1, "buy_now"),
+      board_lane: "first_board" as const,
+      state: "failed",
+    };
+
+    expect(
+      liveSignalsForScope(
+        snapshot({ actionable_recommendations: [failed] }),
+        "portfolio",
+      ),
+    ).toEqual([]);
   });
 });
 

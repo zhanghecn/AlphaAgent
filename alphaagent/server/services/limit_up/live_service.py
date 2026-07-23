@@ -27,6 +27,7 @@ from alphaagent.server.services.limit_up.concept_resonance import (
 )
 from alphaagent.server.services.limit_up.live_policy import (
     MAX_CONSECUTIVE_SNAPSHOT_GAP_MINUTES,
+    build_first_board_execution_checks_at_time,
     build_early_radar_signals,
     build_live_market_gate,
     build_live_recommendations,
@@ -35,6 +36,19 @@ from alphaagent.server.services.limit_up.live_policy import (
     session_stage,
 )
 from alphaagent.server.services.limit_up.live_evidence import attach_historical_evidence
+from alphaagent.server.services.limit_up.first_board_quality import (
+    build_preboard_pools,
+    evaluate_first_board_quality_at_time,
+)
+from alphaagent.server.services.limit_up.preboard_decision_contract import (
+    PREBOARD_DECISION_VERSION,
+    apply_preboard_parity_contract,
+    is_strictly_preboard,
+    preboard_market_gate,
+)
+from alphaagent.server.services.limit_up.preboard_live_minute_buffer import (
+    LiveMinuteBuffer,
+)
 from alphaagent.server.services.limit_up.first_board_dual_lane import (
     attach_rotation_shadow,
 )
@@ -75,7 +89,8 @@ from alphaagent.server.services.limit_up.radar_observation_repository import (
 from alphaagent.server.services.limit_up import (
     history_engine,
     history_repository,
-    preboard_point_trigger_service,
+    preboard_decision_repository,
+    preboard_decision_service,
     regime_shadow,
     scheduled_execution,
 )
@@ -108,9 +123,44 @@ LIVE_WATCHLIST_LIMIT = 6
 ACTIVE_SESSION_STAGES = frozenset(
     {"auction_watch", "auction", "morning", "afternoon", "tail", "close_auction"}
 )
+LIVE_PREBOARD_EVIDENCE_FIELDS = (
+    "historical_evidence",
+    "financial_risk",
+    "execution_checks",
+    "entry_window_passed",
+    "snapshot_fresh",
+    "quote_fresh",
+    "risk_gate_passed",
+    "concept_id",
+    "concept_strength_score",
+    "concept_leader_rank",
+    "transaction_status",
+    "transaction_features",
+)
+LIVE_PREBOARD_FORBIDDEN_FIELDS = frozenset(
+    {
+        "action",
+        "entry_kind",
+        "signal_state",
+        "buy_now",
+        "portfolio_selected",
+        "formal_action",
+        "formal_rank",
+        "daily_slot",
+        "physical_touch_at",
+        "first_limit_time",
+        "last_limit_time",
+        "final_sealed",
+        "d1_trade_date",
+        "d1_close_price",
+        "d1_net_return_pct",
+        "net_return_pct",
+    }
+)
 logger = logging.getLogger(__name__)
 _LIVE_LANE_VALIDATION_CACHE = TTLCache(max_items=4)
 LIVE_LANE_VALIDATION_CACHE_SECONDS = 21_600
+_PREBOARD_MINUTE_BUFFER = LiveMinuteBuffer()
 
 
 class LiveSnapshotUnavailable(RuntimeError):
@@ -243,7 +293,7 @@ def build_live_snapshot(
         "source": _source_name(radar_quote_payload, pool_payload),
         "source_updated_at": source_updated_at,
         "market_context": market_context,
-        "trace_capture_candidates": _point_trigger_capture_candidates(
+        "trace_capture_candidates": _preboard_capture_candidates(
             early_candidates
         ),
         "early_radar_recommendations": early_recommendations,
@@ -304,7 +354,7 @@ def build_live_snapshot(
     }
 
 
-def _point_trigger_capture_candidates(
+def _preboard_capture_candidates(
     candidates: Sequence[Mapping[str, object]],
 ) -> list[dict[str, object]]:
     return [
@@ -315,6 +365,78 @@ def _point_trigger_capture_candidates(
             and change_pct >= TRACE_RADAR_MIN_CHANGE_PCT
         )
     ]
+
+
+def live_preboard_adapter_rows(
+    snapshot: Mapping[str, object],
+) -> list[dict[str, object]]:
+    """Build pre-trigger inputs without letting old recommendations define membership."""
+
+    raw_rows = snapshot.get("trace_capture_candidates")
+    raw_rows = raw_rows if isinstance(raw_rows, list) else []
+    evidence_by_symbol = _early_preboard_evidence_by_symbol(snapshot)
+    result: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for raw in raw_rows:
+        if not isinstance(raw, Mapping):
+            continue
+        symbol = str(raw.get("vt_symbol") or "").strip()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        merged = {
+            key: value
+            for key, value in raw.items()
+            if key not in LIVE_PREBOARD_FORBIDDEN_FIELDS
+        }
+        evidence = evidence_by_symbol.get(symbol, {})
+        merged.update(
+            {
+                field: evidence[field]
+                for field in LIVE_PREBOARD_EVIDENCE_FIELDS
+                if field in evidence
+            }
+        )
+        merged["candidate_source_kind"] = "live_trace_capture"
+        result.append(apply_preboard_parity_contract(merged))
+    return result
+
+
+def _early_preboard_evidence_by_symbol(
+    snapshot: Mapping[str, object],
+) -> dict[str, dict[str, object]]:
+    recommendations = snapshot.get("early_radar_recommendations")
+    recommendations = recommendations if isinstance(recommendations, Mapping) else {}
+    lanes = recommendations.get("lanes")
+    lanes = lanes if isinstance(lanes, Mapping) else {}
+    result: dict[str, dict[str, object]] = {}
+    lane_names = [
+        *(
+            name
+            for name in ("now", "tail", "next_auction")
+            if name in lanes
+        ),
+        *(sorted(str(name) for name in lanes if name not in {"now", "tail", "next_auction"})),
+    ]
+    for lane_name in lane_names:
+        rows = lanes.get(lane_name)
+        if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+            continue
+        for raw in rows:
+            if not isinstance(raw, Mapping):
+                continue
+            symbol = str(raw.get("vt_symbol") or "").strip()
+            if not symbol:
+                continue
+            evidence = result.setdefault(symbol, {})
+            evidence.update(
+                {
+                    field: raw[field]
+                    for field in LIVE_PREBOARD_EVIDENCE_FIELDS
+                    if field in raw
+                }
+            )
+    return result
 
 
 def _build_early_radar_evaluation(
@@ -394,6 +516,7 @@ def refresh_live_snapshot(
             quotes_ready_at,
         )
         radar_quotes = _quote_payload_with_full_radar(quotes, concept_snapshot)
+        _PREBOARD_MINUTE_BUFFER.ingest(quotes_ready_at, _items(radar_quotes))
         symbols = _candidate_symbols(
             radar_quotes,
             pools,
@@ -421,6 +544,7 @@ def refresh_live_snapshot(
             quotes.get("_research_quote_enrichment"),
             evaluation_at,
         )
+        _attach_preboard_quality_pool_prefix(snapshot, evaluation_at)
         if persist:
             snapshot = regime_shadow.attach_regime_failure_shadow(snapshot)
         policy_done = monotonic()
@@ -438,6 +562,7 @@ def refresh_live_snapshot(
             policy_done=policy_done,
             persistence_done=trace_done,
         )
+        persisted_formal_snapshot: dict[str, object] | None = None
         if persist and _is_radar_persistable_snapshot(snapshot, evaluation_at):
             full_quotes = (
                 concept_snapshot.get("quotes")
@@ -456,23 +581,44 @@ def refresh_live_snapshot(
             )
             _set_radar_ledger_status(snapshot, radar_error)
             if radar_error is None:
-                _run_point_trigger_research_safely(snapshot)
+                if (
+                    _has_preboard_scoring_work(snapshot)
+                    and _is_persistable_snapshot(snapshot, evaluation_at)
+                ):
+                    persisted_formal_snapshot = save_snapshot(
+                        _without_internal_radar_fields(snapshot)
+                    )
+                # The formal 10-second scan must never wait for per-symbol
+                # minute or transaction network fallbacks.  The shared feature
+                # contract records an explicit missing-prefix state until the
+                # in-process completed-minute buffer is scoreable.
+                _run_preboard_decision_safely(snapshot)
             else:
-                _set_point_trigger_research_status(
+                _set_preboard_decision_status(
                     snapshot,
                     {"status": "skipped_radar_error"},
                 )
         elif persist:
             _set_radar_ledger_status(snapshot, None, skipped=True)
-            _set_point_trigger_research_status(
+            _set_preboard_decision_status(
                 snapshot,
                 {"status": "skipped_invalid_frame"},
             )
         public_snapshot = _without_internal_radar_fields(snapshot)
         if persist and _is_persistable_snapshot(public_snapshot, evaluation_at):
-            return save_snapshot(public_snapshot)
+            if persisted_formal_snapshot is None:
+                return save_snapshot(public_snapshot)
+            try:
+                return save_snapshot(public_snapshot)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "preboard-enriched live snapshot write failed: %s",
+                    exc,
+                )
+                return persisted_formal_snapshot
         return public_snapshot
     except Exception as exc:
+        logger.exception("limit-up live refresh failed")
         trace_error = _save_live_trace_error_safely(local_at, exc) if persist else None
         fallback = load_latest_snapshot(strategy_version=STRATEGY_VERSION)
         if fallback is None:
@@ -481,6 +627,46 @@ def refresh_live_snapshot(
         if persist:
             _set_live_trace_cache_status(stale, trace_error)
         return stale
+
+
+def _attach_preboard_quality_pool_prefix(
+    snapshot: dict[str, object],
+    decision_at: datetime,
+) -> None:
+    """Record the completed-minute quality cross-section for shared scoring."""
+
+    recommendations = snapshot.get("early_radar_recommendations")
+    recommendations = (
+        recommendations if isinstance(recommendations, Mapping) else {}
+    )
+    market_gate = recommendations.get("market_gate")
+    market_gate = market_gate if isinstance(market_gate, Mapping) else {}
+    quality = snapshot.get("data_quality")
+    quality = dict(quality) if isinstance(quality, Mapping) else {}
+    try:
+        pools = build_preboard_pools(
+            live_preboard_adapter_rows(snapshot),
+            decision_at=decision_at,
+            market_gate=preboard_market_gate(market_gate),
+        )
+        _PREBOARD_MINUTE_BUFFER.ingest_quality_pool(
+            decision_at,
+            pools.quality_pool,
+        )
+        quality["preboard_minute_buffer_status"] = "ready"
+        quality["preboard_adapter_input_count"] = pools.adapter_input_count
+        quality["preboard_capture_pool_count"] = len(pools.capture_pool)
+        quality["preboard_eligible_pool_count"] = len(
+            pools.eligible_first_board_pool
+        )
+        quality["preboard_quality_pool_count"] = len(pools.quality_pool)
+        quality["preboard_rejection_counts"] = dict(pools.rejection_counts)
+        quality.pop("preboard_minute_buffer_error", None)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("preboard minute quality pool failed: %s", exc)
+        quality["preboard_minute_buffer_status"] = "error"
+        quality["preboard_minute_buffer_error"] = str(exc)[:500]
+    snapshot["data_quality"] = quality
 
 
 def get_latest_live_snapshot(now: datetime | None = None) -> dict[str, object]:
@@ -573,6 +759,7 @@ def empty_live_snapshot(
         "source_updated_at": None,
         "market_context": {},
         "candidates": [],
+        "preboard_candidates": [],
         "recommendations": {
             "captured_at": None,
             "session_stage": session_stage(local_at),
@@ -1569,6 +1756,7 @@ def _apply_live_risk_gates(
         if snapshot.get("candidates")
         else dict(snapshot)
     )
+    result = _attach_shared_first_board_quality(result)
     recommendations = result.get("recommendations")
     recommendations = recommendations if isinstance(recommendations, Mapping) else {}
     validated = apply_lane_validation_veto(recommendations, lane_validations)
@@ -1612,6 +1800,7 @@ def _apply_early_radar_risk_gates(
         "recommendations": dict(early),
     }
     enriched = _with_historical_evidence(early_snapshot) if capture else early_snapshot
+    enriched = _attach_shared_first_board_quality(enriched)
     recommendations = enriched.get("recommendations")
     recommendations = (
         recommendations if isinstance(recommendations, Mapping) else {}
@@ -1624,6 +1813,146 @@ def _apply_early_radar_risk_gates(
     enriched_quality = enriched.get("data_quality")
     if isinstance(enriched_quality, Mapping):
         result["data_quality"] = dict(enriched_quality)
+    return result
+
+
+_SHARED_FIRST_BOARD_QUALITY_FIELDS = (
+    "universe_gate_passed",
+    "entry_window_passed",
+    "quality_gate_passed",
+    "preparation_environment_passed",
+    "execution_environment_passed",
+    "failed_environment_checks",
+    "lane_decision",
+    "lane_blockers",
+    "lane_support_score",
+    "lane_entry_quality_score",
+    "lane_rank_score",
+    "profitability_gate_version",
+    "profitability_gate_applies",
+    "profitability_gate_passed",
+    "profitability_gate_reason",
+    "profitability_gate_minimum_d1_samples",
+    "profitability_gate_minimum_combined_rate",
+    "profitability_gate_sample_count",
+    "profitability_gate_combined_rate",
+    "historical_prior_status",
+    "expected_d1_net_return_pct",
+    "d1_win_probability",
+    "seal_probability_given_touch",
+    "d1_win_probability_given_seal",
+)
+
+
+def _attach_shared_first_board_quality(
+    snapshot: Mapping[str, object],
+) -> dict[str, object]:
+    """Project live first boards through the shared point-in-time quality gate."""
+
+    result = dict(snapshot)
+    recommendations = result.get("recommendations")
+    if not isinstance(recommendations, Mapping):
+        return result
+    captured_at = _parsed_datetime(result.get("captured_at"))
+    if captured_at is None:
+        return result
+    market_context = result.get("market_context")
+    market_context = market_context if isinstance(market_context, Mapping) else {}
+    sentiment = market_context.get("sentiment")
+    sentiment = sentiment if isinstance(sentiment, Mapping) else {}
+    market_gate = recommendations.get("market_gate")
+    market_gate = market_gate if isinstance(market_gate, Mapping) else {}
+    quality = result.get("data_quality")
+    quality = quality if isinstance(quality, Mapping) else {}
+    snapshot_age = _number(quality.get("snapshot_age_seconds"))
+    snapshot_fresh = bool(
+        quality.get("is_stale") is not True
+        and snapshot_age is not None
+        and 0.0 <= snapshot_age <= scheduled_execution.MAX_SNAPSHOT_AGE_SECONDS
+    )
+    candidates = result.get("candidates")
+    candidates = candidates if isinstance(candidates, list) else []
+    by_symbol = {
+        str(candidate.get("vt_symbol") or ""): candidate
+        for candidate in candidates
+        if isinstance(candidate, Mapping) and candidate.get("vt_symbol")
+    }
+    lanes = recommendations.get("lanes")
+    lanes = lanes if isinstance(lanes, Mapping) else {}
+    projected_lanes: dict[str, list[dict[str, object]]] = {}
+    for lane_name, raw_signals in lanes.items():
+        signals = raw_signals if isinstance(raw_signals, list) else []
+        projected: list[dict[str, object]] = []
+        for raw_signal in signals:
+            if not isinstance(raw_signal, Mapping):
+                continue
+            signal = dict(raw_signal)
+            if str(signal.get("board_lane") or "") != "first_board":
+                projected.append(signal)
+                continue
+            candidate = by_symbol.get(str(signal.get("vt_symbol") or ""), {})
+            research_candidate = _live_research_candidate(
+                candidate,
+                sentiment,
+                captured_at,
+                market_gate=market_gate,
+            )
+            quote_observed_at = _parsed_datetime(
+                candidate.get("quote_observed_at")
+                or signal.get("quote_observed_at")
+            )
+            quote_age = (
+                (captured_at - quote_observed_at).total_seconds()
+                if quote_observed_at is not None
+                else None
+            )
+            financial_risk = research_candidate.get("financial_risk")
+            risk_gate_passed = bool(
+                isinstance(financial_risk, Mapping)
+                and financial_risk.get("blocked") is False
+            )
+            point_in_time = {
+                **research_candidate,
+                **signal,
+                "historical_evidence": signal.get("historical_evidence"),
+                "entry_window_passed": scheduled_execution.is_entry_time(
+                    captured_at.time().replace(microsecond=0).isoformat()
+                ),
+                "snapshot_fresh": snapshot_fresh,
+                "quote_fresh": bool(
+                    quote_age is not None
+                    and 0.0 <= quote_age <= scheduled_execution.MAX_SNAPSHOT_AGE_SECONDS
+                ),
+                "risk_gate_passed": risk_gate_passed,
+            }
+            checks = build_first_board_execution_checks_at_time(point_in_time)
+            evaluated = evaluate_first_board_quality_at_time(
+                point_in_time,
+                decision_at=captured_at,
+                market_gate=market_gate,
+                execution_checks=checks,
+            )
+            signal.update(
+                {
+                    field: evaluated.get(field)
+                    for field in _SHARED_FIRST_BOARD_QUALITY_FIELDS
+                }
+            )
+            signal.update(
+                {
+                    "preboard_decision_contract_version": (
+                        PREBOARD_DECISION_VERSION
+                    ),
+                    "strictly_preboard": is_strictly_preboard(evaluated),
+                    "quality_evaluated_at": captured_at.isoformat(),
+                }
+            )
+            projected.append(signal)
+        projected_lanes[str(lane_name)] = projected
+    result["recommendations"] = {
+        **dict(recommendations),
+        "lanes": projected_lanes,
+    }
     return result
 
 
@@ -1760,7 +2089,7 @@ def _build_live_buy_list(
             symbol = str(signal.get("vt_symbol") or "")
             action = str(signal.get("action") or "pass")
             first_board = str(signal.get("board_lane") or "") == "first_board"
-            profitability_required = require_portfolio_selection and first_board
+            profitability_required = first_board
             if (
                 not symbol
                 or (
@@ -2387,6 +2716,11 @@ def _is_radar_persistable_snapshot(
     return _is_persistable_snapshot(snapshot, captured_at)
 
 
+def _has_preboard_scoring_work(snapshot: Mapping[str, object]) -> bool:
+    capture = snapshot.get("trace_capture_candidates")
+    return isinstance(capture, list) and bool(capture)
+
+
 def _radar_quote_observed_at(
     concept_snapshot: Mapping[str, object] | None,
     quote_payload: Mapping[str, object],
@@ -2440,7 +2774,9 @@ def _save_radar_ledger_safely(
                     },
                 )
             )
-        save_radar_frame(snapshot, observations)
+        saved_frame = save_radar_frame(snapshot, observations)
+        if isinstance(snapshot, dict) and isinstance(saved_frame, Mapping):
+            snapshot["_preboard_frame_id"] = saved_frame.get("frame_id")
         return None
     except Exception as exc:  # noqa: BLE001
         logger.warning("limit-up radar ledger write failed: %s", exc)
@@ -2478,28 +2814,203 @@ def _set_radar_ledger_status(
     snapshot["data_quality"] = quality
 
 
-def _run_point_trigger_research_safely(
+def _run_preboard_decision_safely(
     snapshot: dict[str, object],
 ) -> dict[str, object]:
-    result = preboard_point_trigger_service.score_live_point_trigger_safely(snapshot)
-    _set_point_trigger_research_status(snapshot, result)
+    result = preboard_decision_service.score_active_live_preboard_snapshot_safely(
+        snapshot,
+        minute_buffer=_PREBOARD_MINUTE_BUFFER,
+    )
+    frame_id = _integer(snapshot.get("_preboard_frame_id"), 0)
+    feature_rows = result.get("feature_rows")
+    feature_rows = feature_rows if isinstance(feature_rows, list) else []
+    if frame_id > 0 and feature_rows:
+        try:
+            result["feature_rows_saved"] = (
+                preboard_decision_repository.save_decision_feature_rows(
+                    [
+                        {
+                            **dict(row),
+                            "frame_id": frame_id,
+                            "label_status": "pending",
+                        }
+                        for row in feature_rows
+                        if isinstance(row, Mapping)
+                    ]
+                )
+            )
+            result["feature_persistence_status"] = "ready"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("preboard live feature persistence failed: %s", exc)
+            result["feature_rows_saved"] = 0
+            result["feature_persistence_status"] = "error"
+            result["feature_persistence_error"] = str(exc)[:500]
+    _set_preboard_decision_status(snapshot, result)
     return result
 
 
-def _set_point_trigger_research_status(
+def _set_preboard_decision_status(
     snapshot: dict[str, object],
     result: Mapping[str, object],
 ) -> None:
     quality = snapshot.get("data_quality")
     quality = dict(quality) if isinstance(quality, Mapping) else {}
     status = str(result.get("status") or "error")
-    quality["point_trigger_research_status"] = status
+    quality["preboard_status"] = status
+    status_fields = {
+        "decision_version": "preboard_decision_version",
+        "probability_status": "preboard_probability_status",
+        "probability_qualification_status": (
+            "preboard_probability_qualification_status"
+        ),
+        "historical_promotion_status": "preboard_historical_promotion_status",
+        "execution_mode": "preboard_execution_mode",
+        "model_fingerprint": "preboard_model_fingerprint",
+        "feature_fingerprint": "preboard_feature_fingerprint",
+        "observation_count": "preboard_observation_count",
+        "action_saved": "preboard_action_saved",
+        "formal_strategy_changed": "preboard_formal_strategy_changed",
+        "feature_rows_saved": "preboard_feature_rows_saved",
+        "feature_persistence_status": "preboard_feature_persistence_status",
+    }
+    for source, target in status_fields.items():
+        if source in result:
+            quality[target] = result.get(source)
     error = str(result.get("error") or "").strip()
     if error:
-        quality["point_trigger_research_error"] = error[:500]
+        quality["preboard_error"] = error[:500]
     else:
-        quality.pop("point_trigger_research_error", None)
+        quality.pop("preboard_error", None)
+    snapshot["preboard_candidates"] = _public_preboard_candidates(
+        result.get("preboard_candidates")
+    )
+    _apply_formal_preboard_recommendations(snapshot, result)
     snapshot["data_quality"] = quality
+
+
+def _public_preboard_candidates(value: object) -> list[dict[str, object]]:
+    rows = value if isinstance(value, list) else []
+    result: list[dict[str, object]] = []
+    for raw in rows:
+        if not isinstance(raw, Mapping):
+            continue
+        state = str(raw.get("decision_state") or "observe")
+        if state in {"missed", "rejected"}:
+            continue
+        result.append(
+            {
+                "vt_symbol": str(raw.get("vt_symbol") or ""),
+                "name": str(raw.get("name") or raw.get("vt_symbol") or ""),
+                "decision_state": state,
+                "execution_mode": str(
+                    raw.get("execution_mode") or "research_only"
+                ),
+                "change_pct": _number(raw.get("change_pct")),
+                "distance_to_limit_pct": _number(
+                    raw.get("distance_to_limit_pct")
+                ),
+                "expected_d1_net_return_pct": _number(
+                    raw.get("expected_d1_net_return_pct")
+                ),
+                "d1_win_probability": _number(raw.get("d1_win_probability")),
+                "touch_probability_3m": _number(
+                    raw.get("touch_probability_3m")
+                ),
+                "eventual_touch_probability": _number(
+                    raw.get("eventual_touch_probability")
+                ),
+                "seal_probability_given_touch": _number(
+                    raw.get("seal_probability_given_touch")
+                ),
+                "probability_status": str(
+                    raw.get("probability_status") or "model_unavailable"
+                ),
+                "source_quality": str(raw.get("source_quality") or "unknown"),
+                "updated_at": str(
+                    raw.get("decision_at")
+                    or raw.get("known_at")
+                    or ""
+                ),
+            }
+        )
+    return result
+
+
+def _apply_formal_preboard_recommendations(
+    snapshot: dict[str, object],
+    result: Mapping[str, object],
+) -> None:
+    """Add promoted pre-board rows without removing the formal sweep fallback."""
+
+    if str(result.get("execution_mode") or "") != "formal":
+        return
+    recommendations = snapshot.get("recommendations")
+    if not isinstance(recommendations, Mapping):
+        return
+    updated = dict(recommendations)
+    candidates = result.get("preboard_candidates")
+    candidates = candidates if isinstance(candidates, list) else []
+    formal_rows = [
+        _formal_preboard_signal(row)
+        for row in candidates
+        if isinstance(row, Mapping)
+        and row.get("actionable") is True
+        and str(row.get("decision_state") or "") == "actionable"
+    ]
+    for field in ("actionable_recommendations", "portfolio"):
+        existing = updated.get(field)
+        existing = existing if isinstance(existing, list) else []
+        updated[field] = _merge_preboard_with_formal_rows(formal_rows, existing)
+    snapshot["recommendations"] = updated
+
+
+def _merge_preboard_with_formal_rows(
+    preboard_rows: Sequence[Mapping[str, object]],
+    formal_rows: Sequence[object],
+) -> list[dict[str, object]]:
+    existing = _deduplicate_signal_rows(formal_rows)
+    existing_symbols = {
+        str(row.get("vt_symbol") or "") for row in existing if row.get("vt_symbol")
+    }
+    new_rows = [
+        row
+        for row in _deduplicate_signal_rows(preboard_rows)
+        if str(row.get("vt_symbol") or "") not in existing_symbols
+    ]
+    return [*new_rows, *existing]
+
+
+def _deduplicate_signal_rows(
+    rows: Sequence[object],
+) -> list[dict[str, object]]:
+    result: list[dict[str, object]] = []
+    seen_symbols: set[str] = set()
+    for raw in rows:
+        if not isinstance(raw, Mapping):
+            continue
+        row = dict(raw)
+        symbol = str(row.get("vt_symbol") or "")
+        if symbol and symbol in seen_symbols:
+            continue
+        if symbol:
+            seen_symbols.add(symbol)
+        result.append(row)
+    return result
+
+
+def _formal_preboard_signal(row: Mapping[str, object]) -> dict[str, object]:
+    return {
+        **dict(row),
+        "board_lane": "first_board",
+        "action": "buy_now",
+        "entry_kind": "momentum",
+        "signal_state": "trigger_ready",
+        "execution_state": "actionable",
+        "execution_permission": "formal",
+        "portfolio_selected": True,
+        "reason": "板前概率排序通过正式双门",
+        "pending_reasons": [],
+    }
 
 
 def _set_scan_timing(
@@ -2531,6 +3042,7 @@ def _without_internal_radar_fields(
         "quote_flow_observed_at",
         "trace_capture_candidates",
         "early_radar_recommendations",
+        "_preboard_frame_id",
     }
 
     def project(value: object) -> object:
@@ -2545,7 +3057,11 @@ def _without_internal_radar_fields(
         return value
 
     result = project(snapshot)
-    return result if isinstance(result, dict) else {}
+    if not isinstance(result, dict):
+        return {"preboard_candidates": []}
+    if not isinstance(result.get("preboard_candidates"), list):
+        result["preboard_candidates"] = []
+    return result
 
 
 def _pool_symbols(payload: Mapping[str, object], pool_key: str) -> set[str]:

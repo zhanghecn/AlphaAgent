@@ -21,28 +21,6 @@ from alphaagent.server.services.limit_up import scheduled_execution
 
 
 RADAR_RETAIN_TRADE_DAYS = 90
-POINT_TRIGGER_AUDIT_OBSERVATION_FIELDS = (
-    "frame_id",
-    "vt_symbol",
-    "name",
-    "change_pct",
-    "last_price",
-    "quote_observed_at",
-    "limit_price",
-    "capture_state",
-    "board_lane",
-    "rank_score",
-    "history_sample_count",
-    "historical_combined_rate",
-    "formal_action",
-    "lane_blocker_codes",
-    "concept_change_acceleration_1m",
-    "concept_change_acceleration_3m",
-    "concept_change_acceleration_5m",
-    "concept_turnover_acceleration_1m",
-    "concept_turnover_acceleration_3m",
-    "concept_turnover_acceleration_5m",
-)
 _prune_lock = Lock()
 _last_pruned_trade_date: date | None = None
 
@@ -407,11 +385,21 @@ def official_two_slot_evidence(
     return [], False
 
 
-def load_observations(start: date, end: date) -> list[dict[str, object]]:
+def load_observations(
+    start: date,
+    end: date,
+    *,
+    symbols: Sequence[str] | None = None,
+) -> list[dict[str, object]]:
     """Load compact observations in point-in-time order."""
 
     frame = schema.limit_up_radar_frames
     observation = schema.limit_up_radar_observations
+    normalized_symbols = sorted(
+        {str(symbol).strip() for symbol in symbols or () if str(symbol).strip()}
+    )
+    if symbols is not None and not normalized_symbols:
+        return []
     statement = (
         select(
             frame.c.trade_date,
@@ -430,6 +418,36 @@ def load_observations(start: date, end: date) -> list[dict[str, object]]:
         .select_from(observation.join(frame, observation.c.frame_id == frame.c.id))
         .where(frame.c.trade_date.between(start, end))
         .order_by(frame.c.captured_at, observation.c.vt_symbol)
+    )
+    if normalized_symbols:
+        statement = statement.where(
+            observation.c.vt_symbol.in_(normalized_symbols)
+        )
+    with session_scope() as session:
+        rows = session.execute(statement).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def load_action_observation_pairs(
+    start: date,
+    end: date,
+) -> list[dict[str, object]]:
+    """Load only stock-days that emitted an old formal or early buy action."""
+
+    frame = schema.limit_up_radar_frames
+    observation = schema.limit_up_radar_observations
+    statement = (
+        select(frame.c.trade_date, observation.c.vt_symbol)
+        .select_from(observation.join(frame, observation.c.frame_id == frame.c.id))
+        .where(
+            frame.c.trade_date.between(start, end),
+            or_(
+                observation.c.formal_action == "buy_now",
+                observation.c.early_action == "buy_now",
+            ),
+        )
+        .distinct()
+        .order_by(frame.c.trade_date, observation.c.vt_symbol)
     )
     with session_scope() as session:
         rows = session.execute(statement).mappings().all()
@@ -450,103 +468,6 @@ def load_frames(start: date, end: date) -> list[dict[str, object]]:
     with session_scope() as session:
         rows = session.execute(statement).mappings().all()
     return [dict(row) for row in rows]
-
-
-def load_point_trigger_audit_inputs(
-    start: date,
-    end: date,
-) -> tuple[list[Mapping[str, object]], list[Mapping[str, object]]]:
-    """Load only fields consumed by the point-trigger completeness gate."""
-
-    frame = schema.limit_up_radar_frames
-    observation = schema.limit_up_radar_observations
-    frame_statement = (
-        select(frame)
-        .where(frame.c.trade_date.between(start, end))
-        .order_by(frame.c.captured_at, frame.c.id)
-    )
-    observation_statement = (
-        select(
-            *(observation.c[field] for field in POINT_TRIGGER_AUDIT_OBSERVATION_FIELDS)
-        )
-        .select_from(observation.join(frame, observation.c.frame_id == frame.c.id))
-        .where(frame.c.trade_date.between(start, end))
-        .order_by(frame.c.captured_at, observation.c.vt_symbol)
-    )
-    with session_scope() as session:
-        frame_rows = session.execute(frame_statement).mappings().all()
-        observation_rows = session.execute(observation_statement).mappings().all()
-    return list(frame_rows), list(observation_rows)
-
-
-def load_point_trigger_live_window(
-    captured_at: datetime,
-    *,
-    lookback_seconds: int,
-) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """Load a bounded causal window plus earlier first-board event evidence."""
-
-    current_at = _local_datetime(captured_at)
-    seconds = int(lookback_seconds)
-    if seconds <= 0:
-        raise ValueError("lookback_seconds must be positive")
-    start_at = current_at - timedelta(seconds=seconds)
-    frame = schema.limit_up_radar_frames
-    observation = schema.limit_up_radar_observations
-    formal_event_exists = (
-        select(observation.c.frame_id)
-        .where(
-            observation.c.frame_id == frame.c.id,
-            observation.c.formal_action == "buy_now",
-            observation.c.board_lane == "first_board",
-        )
-        .exists()
-    )
-    frame_statement = (
-        select(frame)
-        .where(
-            frame.c.trade_date == current_at.date(),
-            frame.c.captured_at <= current_at,
-            or_(frame.c.captured_at >= start_at, formal_event_exists),
-        )
-        .order_by(frame.c.captured_at, frame.c.id)
-    )
-    observation_statement = (
-        select(
-            frame.c.trade_date,
-            frame.c.captured_at,
-            frame.c.strategy_version,
-            frame.c.contract_version,
-            frame.c.source_updated_at,
-            frame.c.source_trade_date,
-            frame.c.quality_status,
-            frame.c.is_stale,
-            frame.c.scan_duration_ms,
-            frame.c.quote_coverage_ratio,
-            frame.c.market_timing_state,
-            observation,
-        )
-        .select_from(observation.join(frame, observation.c.frame_id == frame.c.id))
-        .where(
-            frame.c.trade_date == current_at.date(),
-            frame.c.captured_at <= current_at,
-            or_(
-                frame.c.captured_at >= start_at,
-                (
-                    (observation.c.formal_action == "buy_now")
-                    & (observation.c.board_lane == "first_board")
-                ),
-            ),
-        )
-        .order_by(frame.c.captured_at, observation.c.vt_symbol)
-    )
-    with session_scope() as session:
-        frame_rows = session.execute(frame_statement).mappings().all()
-        observation_rows = session.execute(observation_statement).mappings().all()
-    return (
-        [dict(row) for row in frame_rows],
-        [dict(row) for row in observation_rows],
-    )
 
 
 def load_day_capture_runtime_fingerprint_state(
@@ -580,46 +501,6 @@ def load_day_capture_runtime_fingerprint_state(
         "missing_count": max(frame_count - present_count, 0),
         "unique_count": unique_count,
         "capture_runtime_fingerprint": fingerprint,
-    }
-
-
-def load_frame_coverage(
-    start: date | None = None,
-    end: date | None = None,
-) -> dict[str, object]:
-    """Return bounded coverage fields used by the validation gate."""
-
-    frame = schema.limit_up_radar_frames
-    statement = select(
-        func.min(frame.c.trade_date),
-        func.max(frame.c.trade_date),
-        func.count(),
-        func.count(func.distinct(frame.c.trade_date)),
-        func.sum(frame.c.capture_count),
-        func.count().filter(frame.c.is_stale.is_(False)),
-        func.avg(frame.c.scan_duration_ms),
-    )
-    if start is not None:
-        statement = statement.where(frame.c.trade_date >= start)
-    if end is not None:
-        statement = statement.where(frame.c.trade_date <= end)
-    with session_scope() as session:
-        row = session.execute(statement).one()
-    frame_count = int(row[2] or 0)
-    valid_count = int(row[5] or 0)
-    return {
-        "date_start": row[0].isoformat() if row[0] else None,
-        "date_end": row[1].isoformat() if row[1] else None,
-        "frame_count": frame_count,
-        "trade_day_count": int(row[3] or 0),
-        "observation_count": int(row[4] or 0),
-        "valid_frame_count": valid_count,
-        "valid_frame_ratio_pct": (
-            round(valid_count / frame_count * 100, 4) if frame_count else None
-        ),
-        "average_scan_duration_ms": (
-            round(float(row[6]), 3) if row[6] is not None else None
-        ),
     }
 
 

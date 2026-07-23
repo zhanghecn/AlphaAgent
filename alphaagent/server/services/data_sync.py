@@ -64,7 +64,7 @@ from alphaagent.server.services.limit_up.concept_live_service import (
 from alphaagent.server.services.limit_up.historical_evidence_import import import_ths_evidence
 from alphaagent.server.services.limit_up import (
     preboard_hazard_data,
-    preboard_point_trigger_service,
+    preboard_decision_service,
     preboard_transaction_data,
 )
 from alphaagent.server.services.limit_up.live_service import (
@@ -349,15 +349,15 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
     JobDefinition(
         id="sync_limit_up_preboard_transaction_features",
         name="首板提前逐笔资金流特征补数",
-        description="只为当前3%以上共用首板母池有界抓取完整TDX逐笔并冻结因果特征。",
+        description="只为同源点时高质量首板母池有界抓取完整TDX逐笔并冻结因果特征。",
         source_id="tdx_public_hq",
         target_table="limit_up_transaction_features",
         default_params={"session_count": 89, "max_pairs": 500, "dry_run": False},
     ),
     JobDefinition(
-        id="sync_limit_up_preboard_point_trigger",
-        name="首板触板前点时前向冻结",
-        description="冻结10秒因果特征、走步模型及不可执行研究动作，只服务前向可靠性验证。",
+        id="sync_limit_up_preboard_decision",
+        name="首板板前决策冻结",
+        description="冻结点时因果特征并结算板前决策证据，只服务前向可靠性验证。",
         source_id="alphaagent_local",
         target_table="limit_up_preboard_point_day_scopes",
         default_params={},
@@ -618,7 +618,7 @@ JOB_CADENCES: dict[str, JobCadence] = {
     "sync_limit_up_radar_minutes": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "limit_up_minute_backfill_attempts", "last_attempt_at"),
     "sync_limit_up_preboard_hazard_minutes": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "stock_minute_bars", "bar_time"),
     "sync_limit_up_preboard_transaction_features": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "limit_up_transaction_feature_scopes", "updated_at"),
-    "sync_limit_up_preboard_point_trigger": JobCadence(CADENCE_EOD_DAILY, CATEGORY_SECTOR_RESEARCH, 1, "limit_up_preboard_point_day_scopes", "frozen_at"),
+    "sync_limit_up_preboard_decision": JobCadence(CADENCE_EOD_DAILY, CATEGORY_SECTOR_RESEARCH, 1, "limit_up_preboard_point_day_scopes", "frozen_at"),
     "sync_limit_up_exit_minutes": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "limit_up_minute_backfill_attempts", "last_attempt_at"),
     "sync_stock_auction_snapshots": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "stock_auction_snapshots", "captured_at"),
     "sync_stock_financial_quarterly": JobCadence(CADENCE_QUARTERLY, CATEGORY_FINANCIALS, 45, "stock_financial_reports", "updated_at"),
@@ -659,7 +659,7 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
     "sync_stock_minute_bars",
     "sync_limit_up_event_minutes",
     "sync_limit_up_radar_minutes",
-    "sync_limit_up_preboard_point_trigger",
+    "sync_limit_up_preboard_decision",
     "sync_stock_auction_snapshots",
     "sync_stock_fund_flows", "sync_sector_fund_flows",
     "sync_stock_hot_ranks", "sync_limit_up_pools",
@@ -824,7 +824,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_limit_up_event_minutes",
             "sync_limit_up_radar_minutes",
             "limit_up_history_rebuild",
-            "sync_limit_up_preboard_point_trigger",
+            "sync_limit_up_preboard_decision",
             "limit_up_next_session_plan_final",
             "limit_up_live_trace_prune",
         ],
@@ -1580,10 +1580,12 @@ class DataSyncRunner:
         self,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        result = preboard_transaction_data.backfill_preboard_transaction_features(
-            session_count=int(params.get("session_count") or 89),
-            max_pairs=int(params.get("max_pairs") or 500),
-            dry_run=_truthy(params.get("dry_run")),
+        result = (
+            preboard_transaction_data.backfill_preboard_decision_transaction_features(
+                session_count=int(params.get("session_count") or 89),
+                max_pairs=int(params.get("max_pairs") or 500),
+                dry_run=_truthy(params.get("dry_run")),
+            )
         )
         backfill_status = str(result.get("status") or "unknown")
         message = str(result.get("message") or "").strip()
@@ -1597,19 +1599,19 @@ class DataSyncRunner:
             "message": message,
         }
 
-    def _run_sync_limit_up_preboard_point_trigger(
+    def _run_sync_limit_up_preboard_decision(
         self,
         params: dict[str, Any],
     ) -> dict[str, Any]:
         del params
-        result = preboard_point_trigger_service.sync_limit_up_preboard_point_trigger()
-        point_trigger_status = str(result.get("status") or "unknown")
+        result = preboard_decision_service.freeze_and_settle()
+        decision_status = str(result.get("status") or "unknown")
         return {
             **{key: value for key, value in result.items() if key != "status"},
-            "point_trigger_status": point_trigger_status,
-            "rows_read": int(result.get("complete_day_count") or 0),
+            "decision_status": decision_status,
+            "rows_read": int(result.get("feature_row_count") or 0),
             "rows_written": int(result.get("rows_written") or 0),
-            "message": str(result.get("message") or point_trigger_status),
+            "message": str(result.get("message") or decision_status),
         }
 
     def _run_sync_limit_up_exit_minutes(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2734,7 +2736,7 @@ JOB_RUNNERS: dict[str, str] = {
     "sync_limit_up_radar_minutes": "_run_sync_limit_up_radar_minutes",
     "sync_limit_up_preboard_hazard_minutes": "_run_sync_limit_up_preboard_hazard_minutes",
     "sync_limit_up_preboard_transaction_features": "_run_sync_limit_up_preboard_transaction_features",
-    "sync_limit_up_preboard_point_trigger": "_run_sync_limit_up_preboard_point_trigger",
+    "sync_limit_up_preboard_decision": "_run_sync_limit_up_preboard_decision",
     "sync_limit_up_exit_minutes": "_run_sync_limit_up_exit_minutes",
     "sync_stock_auction_snapshots": "_run_sync_stock_auction_snapshots",
     "sync_stock_sector_memberships": "_run_sync_stock_sector_memberships",

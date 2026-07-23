@@ -8,6 +8,12 @@ from sqlalchemy.dialects import postgresql
 
 from alphaagent.server.db import schema
 from alphaagent.server.services.limit_up import preboard_transaction_repository as repo
+from alphaagent.server.services.limit_up.preboard_decision_contract import (
+    PREBOARD_DECISION_VERSION,
+)
+from alphaagent.server.services.limit_up.preboard_decision_replay import (
+    FROZEN_PATH_MANIFEST_VERSION,
+)
 
 
 FEATURE_VERSION = "limit-up-preboard-transaction-flow-v1"
@@ -64,12 +70,12 @@ def _rows(**overrides: object) -> list[dict[str, object]]:
 
 def _pair_manifest(**overrides: object) -> dict[str, object]:
     values: dict[str, object] = {
-        "manifest_version": repo.PAIR_MANIFEST_VERSION,
+        "manifest_version": FROZEN_PATH_MANIFEST_VERSION,
         "session_count": 89,
         "start_date": date(2026, 3, 9),
         "end_date": date(2026, 7, 16),
         "status": "ready",
-        "strategy_filter_version": "limit-up-current-strategy-preboard-replay-v2",
+        "strategy_filter_version": PREBOARD_DECISION_VERSION,
         "feature_version": FEATURE_VERSION,
         "input_fingerprint": FINGERPRINT,
         "manifest_pair_count": 15_921,
@@ -294,3 +300,26 @@ def test_coverage_uses_exact_requested_stock_days() -> None:
     assert coverage["pending_pairs"] == [
         {"vt_symbol": "600000.SSE", "trade_date": "2026-07-16"}
     ]
+
+
+def test_coverage_keeps_invalid_and_missing_separate_from_flow_ready() -> None:
+    pairs = [
+        ("000001.SZSE", date(2026, 7, 16)),
+        ("000002.SZSE", date(2026, 7, 16)),
+        ("600000.SSE", date(2026, 7, 16)),
+    ]
+    scopes = [
+        _scope(),
+        _scope(vt_symbol="000002.SZSE", status="invalid", feature_row_count=0),
+    ]
+
+    coverage = repo.build_transaction_feature_coverage(pairs, scopes)
+
+    assert coverage["ready_pair_count"] == 1
+    assert coverage["missing_pair_count"] == 1
+    assert coverage["status_counts"] == {
+        "flow_ready": 1,
+        "invalid": 1,
+        "missing": 1,
+    }
+    assert len(coverage["pending_pairs"]) == 2

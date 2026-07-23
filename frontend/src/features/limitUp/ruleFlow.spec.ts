@@ -11,9 +11,14 @@ const guide = {
   selection_steps: [
     { order: 1, title: "限定可交易范围", rule: "仅主板首板和二进三。", timing: "盘中已知" },
   ],
-  radar_evidence: {
-    capture_min_change_pct: 3,
-    formal_min_change_pct: 5,
+  preboard_decision: {
+    observation_min_change_pct: 3,
+    ranking_order: [
+      "同股D+1预期净收益",
+      "同股D+1胜率",
+      "3分钟触板概率",
+      "最终触板概率",
+    ],
   },
   field_groups: [
     { key: "intraday", label: "盘中实时字段", selection_allowed: true, fields: ["当前价"] },
@@ -29,24 +34,28 @@ describe("buildRuleFlow", () => {
     ]);
   });
 
-  it("第一步是市场门禁，讲清封板家数与炸板率门槛", () => {
+  it("第一步固定正式策略不变边界", () => {
     const gate = buildRuleFlow(guide)[0];
-    expect(gate.title).toContain("大盘环境");
+    expect(gate.title).toContain("正式策略边界");
     const labels = gate.thresholds.map((t) => t.label);
-    expect(labels).toContain("主板封板家数");
-    expect(labels).toContain("实时炸板率");
+    expect(labels).toContain("正式首板");
+    expect(labels).toContain("二进三");
   });
 
-  it("雷达节点把 3% 与 5% 的动态阈值从 guide 取出", () => {
+  it("雷达节点把 3% 定义为观察起点而非固定买点", () => {
     const radar = buildRuleFlow(guide).find((node) => node.stage === "radar")!;
     expect(radar.thresholds.some((t) => t.value.includes("3%"))).toBe(true);
-    expect(radar.thresholds.some((t) => t.value.includes("5%"))).toBe(true);
+    expect(radar.thresholds).toContainEqual({ label: "固定买点", value: "无" });
+    expect(radar.condition).toContain("5%、8%、9% 和 9.5% 都不是固定买点");
   });
 
   it("成交节点含买入窗口与仓位动态值", () => {
     const fill = buildRuleFlow(guide).find((node) => node.stage === "fill")!;
     expect(fill.thresholds.some((t) => t.value.includes("10:00-11:30"))).toBe(true);
     expect(fill.thresholds.some((t) => t.value.includes("2 仓"))).toBe(true);
+    expect(fill.title).toContain("补充正式板前买点");
+    expect(fill.condition).toContain("扫板兜底始终保留");
+    expect(fill.condition).not.toContain("整体替换");
   });
 
   it("每个节点都有阶段元数据（徽章配色）", () => {

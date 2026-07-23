@@ -149,33 +149,6 @@ services:
       retries: 2
       start_period: 60s
 
-  alphaagent-point-trigger-worker:
-    extends:
-      service: alphaagent-api
-    container_name: alphaagent-point-trigger-worker
-    cpus: 0.10
-    command:
-      - python
-      - -m
-      - alphaagent.server.services.limit_up.preboard_point_trigger_worker
-    environment:
-      DATABASE_POOL_SIZE: "1"
-      DATABASE_MAX_OVERFLOW: "0"
-      ALPHAAGENT_POINT_TRIGGER_WORKER_INTERVAL_SECONDS: "300"
-      PGOPTIONS: >-
-        -c application_name=alphaagent-research
-        -c max_parallel_workers_per_gather=0
-      OPENBLAS_NUM_THREADS: "1"
-      OMP_NUM_THREADS: "1"
-      MKL_NUM_THREADS: "1"
-      NUMEXPR_NUM_THREADS: "1"
-    expose: []
-    depends_on:
-      alphaagent-api:
-        condition: service_healthy
-    healthcheck:
-      disable: true
-
   alphaagent-web:
     image: ${ALPHAAGENT_WEB_IMAGE:-ghcr.io/zhanghecn/alphaagent-web:latest}
     container_name: alphaagent-web

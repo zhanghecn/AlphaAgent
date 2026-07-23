@@ -104,9 +104,9 @@ services:
     command:
       - python
       - -m
-      - alphaagent.server.services.limit_up.preboard_competing_risk_study
+      - alphaagent.server.services.limit_up.preboard_decision_replay
       - --help
-    # Research must stay background-friendly even when callers export a larger limit.
+    # Research stays background-friendly; replay no longer has a fixed RSS abort gate.
     cpus: 0.10
     environment:
       DATABASE_POOL_SIZE: "1"
@@ -119,33 +119,6 @@ services:
       OMP_NUM_THREADS: "1"
       MKL_NUM_THREADS: "1"
       NUMEXPR_NUM_THREADS: "1"
-    healthcheck:
-      disable: true
-
-  alphaagent-point-trigger-worker:
-    extends:
-      service: alphaagent-api
-    cpus: 0.10
-    restart: unless-stopped
-    command:
-      - python
-      - -m
-      - alphaagent.server.services.limit_up.preboard_point_trigger_worker
-    environment:
-      DATABASE_POOL_SIZE: "1"
-      DATABASE_MAX_OVERFLOW: "0"
-      ALPHAAGENT_POINT_TRIGGER_WORKER_INTERVAL_SECONDS: "300"
-      PGOPTIONS: >-
-        -c application_name=alphaagent-research
-        -c max_parallel_workers_per_gather=0
-      OPENBLAS_NUM_THREADS: "1"
-      OMP_NUM_THREADS: "1"
-      MKL_NUM_THREADS: "1"
-      NUMEXPR_NUM_THREADS: "1"
-    expose: []
-    depends_on:
-      alphaagent-api:
-        condition: service_healthy
     healthcheck:
       disable: true
 

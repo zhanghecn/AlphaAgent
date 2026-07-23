@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { LimitUpLiveSignal, LimitUpSignalSnapshot } from "@/api/limitUp";
 import {
   ACTIVE_LIVE_POLL_INTERVAL_MS,
+  ACTIVE_LIVE_SNAPSHOT_POLL_INTERVAL_MS,
   liveHeader,
   liveSignalPresentation,
   liveSnapshotPollingInterval,
@@ -25,7 +26,7 @@ function signal(
 }
 
 describe("next-session plan presentation", () => {
-  it("slows snapshot polling and stops trace polling outside active trading", () => {
+  it("polls live snapshots at scanner speed and slows non-live requests", () => {
     const active = {
       ...snapshot("live_snapshot"),
       session_stage: "afternoon",
@@ -38,8 +39,9 @@ describe("next-session plan presentation", () => {
     const final = snapshot("next_session_final");
 
     expect(ACTIVE_LIVE_POLL_INTERVAL_MS).toBe(60_000);
-    expect(liveSnapshotPollingInterval(undefined)).toBe(60_000);
-    expect(liveSnapshotPollingInterval(active)).toBe(60_000);
+    expect(ACTIVE_LIVE_SNAPSHOT_POLL_INTERVAL_MS).toBe(10_000);
+    expect(liveSnapshotPollingInterval(undefined)).toBe(10_000);
+    expect(liveSnapshotPollingInterval(active)).toBe(10_000);
     expect(liveSnapshotPollingInterval(lunch)).toBe(60_000);
     expect(liveSnapshotPollingInterval(preliminary)).toBe(60_000);
     expect(liveSnapshotPollingInterval(final)).toBe(300_000);

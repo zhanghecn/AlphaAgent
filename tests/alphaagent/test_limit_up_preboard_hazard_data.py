@@ -10,6 +10,7 @@ from alphaagent.server.services import data_sync
 from alphaagent.server.services.limit_up import preboard_hazard_data
 
 from alphaagent.server.services.limit_up.preboard_hazard_data import (
+    audit_static_hazard_manifest,
     build_one_minute_backfill_gaps,
     build_one_minute_coverage,
     filter_static_hazard_manifest,
@@ -70,9 +71,19 @@ def test_static_hazard_manifest_uses_only_mature_prior_quality() -> None:
     changed["sealed_limit"] = True
     changed["d1_close_price"] = 1.0
     selected_after_outcome_change = filter_static_hazard_manifest(changed)
+    audited = audit_static_hazard_manifest(frame).set_index("vt_symbol")
 
     assert selected["vt_symbol"].tolist() == ["600001.SSE"]
     assert selected_after_outcome_change["vt_symbol"].tolist() == ["600001.SSE"]
+    assert audited.loc["600001.SSE", "static_hazard_gate_reason"] == "qualified"
+    assert (
+        audited.loc["600002.SSE", "static_hazard_gate_reason"]
+        == "same_stock_d1_samples_below_5"
+    )
+    assert (
+        audited.loc["600003.SSE", "static_hazard_gate_reason"]
+        == "same_stock_joint_rate_below_30"
+    )
 
 
 def test_one_minute_coverage_requires_all_240_official_slots() -> None:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 
 import pandas as pd
 import pytest
@@ -8,10 +8,7 @@ import pytest
 from alphaagent.server.services.limit_up import preboard_momentum_data
 from alphaagent.server.services.limit_up.preboard_momentum_data import (
     attach_preboard_prior_evidence,
-    build_backfill_gaps,
-    build_five_minute_coverage,
     build_preboard_manifest,
-    official_five_minute_close_times,
 )
 
 
@@ -76,6 +73,99 @@ def test_manifest_loader_checks_research_runtime_before_database(
         preboard_momentum_data.load_preboard_manifest(session_count=95)
 
 
+def test_manifest_loader_can_end_on_a_frozen_research_date(monkeypatch) -> None:
+    frozen_end = date(2026, 7, 16)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(preboard_momentum_data, "require_research_runtime", lambda: None)
+
+    def reliable_dates(limit, *, end_date=None):
+        captured.update(limit=limit, end_date=end_date)
+        return [date(2026, 7, 16), date(2026, 7, 15)]
+
+    monkeypatch.setattr(preboard_momentum_data, "_load_reliable_dates", reliable_dates)
+    monkeypatch.setattr(
+        preboard_momentum_data,
+        "_load_next_reliable_date",
+        lambda after: date(2026, 7, 17) if after == frozen_end else None,
+    )
+    monkeypatch.setattr(
+        preboard_momentum_data,
+        "_load_manifest_candidates",
+        lambda dates: pd.DataFrame(
+            [
+                {
+                    "vt_symbol": "600001.SSE",
+                    "trade_date": pd.Timestamp("2026-07-16"),
+                    "d1_trade_date": pd.Timestamp("2026-07-17"),
+                }
+            ]
+        ),
+    )
+
+    result = preboard_momentum_data.load_preboard_manifest(
+        session_count=2,
+        end_date=frozen_end,
+    )
+
+    assert captured == {"limit": 2, "end_date": frozen_end}
+    assert result.iloc[0]["result_date"] == date(2026, 7, 17)
+
+
+def test_capture_manifest_does_not_require_or_retain_d1_outcome(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    start = date(2026, 7, 21)
+    end = date(2026, 7, 22)
+    monkeypatch.setattr(preboard_momentum_data, "require_research_runtime", lambda: None)
+    monkeypatch.setattr(
+        preboard_momentum_data,
+        "_load_reliable_dates_between",
+        lambda start_date, end_date: [start_date, end_date],
+    )
+
+    def load_candidates(dates, *, require_d1_result):
+        captured.update(dates=dates, require_d1_result=require_d1_result)
+        return pd.DataFrame(
+            [
+                {
+                    "vt_symbol": "600001.SSE",
+                    "trade_date": pd.Timestamp(end),
+                    "d1_trade_date": pd.NaT,
+                    "d1_close_price": None,
+                    "touched": True,
+                    "sealed": True,
+                    "touched_limit": True,
+                    "sealed_limit": True,
+                }
+            ]
+        )
+
+    monkeypatch.setattr(
+        preboard_momentum_data,
+        "_load_manifest_candidates",
+        load_candidates,
+    )
+
+    result = preboard_momentum_data.load_preboard_capture_manifest(
+        start_date=start,
+        end_date=end,
+    )
+
+    assert captured == {
+        "dates": [start, end],
+        "require_d1_result": False,
+    }
+    assert result["vt_symbol"].tolist() == ["600001.SSE"]
+    assert {
+        "d1_trade_date",
+        "d1_close_price",
+        "touched",
+        "sealed",
+        "touched_limit",
+        "sealed_limit",
+    }.isdisjoint(result.columns)
+
+
 def test_manifest_keeps_only_mature_first_board_three_percent_crossers() -> None:
     rows = pd.concat(
         [
@@ -116,36 +206,6 @@ def test_manifest_keeps_only_mature_first_board_three_percent_crossers() -> None
     assert row["prior_history_count"] >= 120
     assert row["previous_close"] == 10.0
     assert row["d1_close_price"] == 10.2
-
-
-def test_five_minute_coverage_requires_exact_official_slots() -> None:
-    manifest = pd.DataFrame(
-        [
-            {
-                "vt_symbol": "600001.SSE",
-                "name": "Alpha",
-                "trade_date": pd.Timestamp("2026-07-01"),
-            }
-        ]
-    )
-    complete_rows = _minute_rows("600001.SSE", "2026-07-01")
-
-    complete = build_five_minute_coverage(manifest, complete_rows)
-    duplicated = build_five_minute_coverage(
-        manifest,
-        pd.concat([complete_rows, complete_rows.iloc[[0]]], ignore_index=True),
-    )
-    shifted = complete_rows.copy()
-    shifted.loc[0, "bar_time"] = pd.Timestamp("2026-07-01 09:34:00")
-    invalid = build_five_minute_coverage(manifest, shifted)
-
-    assert len(official_five_minute_close_times()) == 48
-    assert complete.iloc[0]["coverage_status"] == "complete"
-    assert complete.iloc[0]["valid_slot_count"] == 48
-    assert duplicated.iloc[0]["coverage_status"] == "invalid"
-    assert duplicated.iloc[0]["duplicate_count"] == 1
-    assert invalid.iloc[0]["coverage_status"] == "invalid"
-    assert invalid.iloc[0]["unexpected_time_count"] == 1
 
 
 def test_manifest_gene_counts_are_shifted_before_the_signal_day() -> None:
@@ -196,42 +256,6 @@ def test_prior_d1_evidence_excludes_unmatured_and_future_results() -> None:
     assert row["stock_gene_combined_win_rate"] == 37.5
 
 
-def test_backfill_gaps_group_all_dates_for_selected_symbols() -> None:
-    coverage = pd.DataFrame(
-        [
-            {
-                "vt_symbol": "600001.SSE",
-                "trade_date": "2026-07-01",
-                "coverage_status": "missing",
-            },
-            {
-                "vt_symbol": "600001.SSE",
-                "trade_date": "2026-07-02",
-                "coverage_status": "incomplete",
-            },
-            {
-                "vt_symbol": "600002.SSE",
-                "trade_date": "2026-07-01",
-                "coverage_status": "missing",
-            },
-            {
-                "vt_symbol": "600003.SSE",
-                "trade_date": "2026-07-01",
-                "coverage_status": "complete",
-            },
-        ]
-    )
-
-    first = build_backfill_gaps(coverage, max_symbols=1, symbol_offset=0)
-    second = build_backfill_gaps(coverage, max_symbols=1, symbol_offset=1)
-
-    assert [(row["vt_symbol"], str(row["trade_date"])) for row in first] == [
-        ("600001.SSE", "2026-07-01"),
-        ("600001.SSE", "2026-07-02"),
-    ]
-    assert [row["vt_symbol"] for row in second] == ["600002.SSE"]
-
-
 def _daily_rows(
     vt_symbol: str,
     name: str,
@@ -267,27 +291,6 @@ def _daily_rows(
                 "low_price": min(close, 9.9),
                 "volume": 1_000_000.0,
                 "turnover": 10_000_000.0,
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-def _minute_rows(vt_symbol: str, trade_date: str) -> pd.DataFrame:
-    rows = []
-    for close_time in official_five_minute_close_times():
-        rows.append(
-            {
-                "vt_symbol": vt_symbol,
-                "trade_date": pd.Timestamp(trade_date),
-                "bar_time": datetime.fromisoformat(f"{trade_date}T{close_time}:00"),
-                "interval": "5m",
-                "open_price": 10.0,
-                "high_price": 10.1,
-                "low_price": 9.9,
-                "close_price": 10.0,
-                "volume": 1_000.0,
-                "turnover": 10_000.0,
-                "source": "fixture",
             }
         )
     return pd.DataFrame(rows)

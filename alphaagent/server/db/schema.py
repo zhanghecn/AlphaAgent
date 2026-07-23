@@ -22,6 +22,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    or_,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -1356,6 +1357,7 @@ limit_up_signal_snapshots = Table(
     Column("source_updated_at", DateTime(timezone=True), nullable=True),
     Column("market_context", JSONB, nullable=False, server_default="{}"),
     Column("candidates", JSONB, nullable=False, server_default="[]"),
+    Column("preboard_candidates", JSONB, nullable=False, server_default="[]"),
     Column("recommendations", JSONB, nullable=False, server_default="{}"),
     Column("data_quality", JSONB, nullable=False, server_default="{}"),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
@@ -1547,6 +1549,15 @@ Index(
     limit_up_radar_observations.c.vt_symbol,
     limit_up_radar_observations.c.frame_id,
 )
+Index(
+    "ix_limit_up_radar_observations_action_frame",
+    limit_up_radar_observations.c.frame_id,
+    limit_up_radar_observations.c.vt_symbol,
+    postgresql_where=or_(
+        limit_up_radar_observations.c.early_action == "buy_now",
+        limit_up_radar_observations.c.formal_action == "buy_now",
+    ),
+)
 
 
 limit_up_preboard_point_day_scopes = Table(
@@ -1604,6 +1615,16 @@ limit_up_preboard_point_feature_rows = Table(
     Column("frame_features", JSONB, nullable=False, server_default="{}"),
     Column("identity_features", JSONB, nullable=False, server_default="{}"),
     Column("feature_fingerprint", String(80), nullable=False),
+    Column("decision_payload", JSONB, nullable=False, server_default="{}"),
+    Column(
+        "feature_status",
+        String(48),
+        nullable=False,
+        server_default="legacy_unmigrated",
+    ),
+    Column("formal_touch_within_3m", Boolean, nullable=True),
+    Column("eventual_formal_touch", Boolean, nullable=True),
+    Column("source_quality", String(40), nullable=True),
     Column("label_status", String(40), nullable=False),
     Column("formal_event_within_60s", Boolean, nullable=True),
     Column("formal_identity_within_60s", Boolean, nullable=True),
@@ -1624,6 +1645,11 @@ limit_up_preboard_point_model_versions = Table(
     metadata,
     Column("model_fingerprint", String(80), primary_key=True),
     Column("contract_version", String(80), nullable=False),
+    Column("decision_version", String(80), nullable=True),
+    Column("feature_fingerprint", String(80), nullable=True),
+    Column("probability_qualification_status", String(40), nullable=True),
+    Column("historical_promotion_status", String(40), nullable=True),
+    Column("policy_thresholds", JSONB, nullable=False, server_default="{}"),
     Column("status", String(32), nullable=False),
     Column("fit_trade_dates", JSONB, nullable=False, server_default="[]"),
     Column("calibration_trade_dates", JSONB, nullable=False, server_default="[]"),
@@ -1679,6 +1705,23 @@ limit_up_preboard_point_actions = Table(
     Column("input_fingerprint", String(80), nullable=False),
     Column("decision_payload", JSONB, nullable=False, server_default="{}"),
     Column("decision_fingerprint", String(80), nullable=False),
+    Column(
+        "execution_mode",
+        String(24),
+        nullable=False,
+        server_default="research_only",
+    ),
+    Column(
+        "decision_state",
+        String(24),
+        nullable=False,
+        server_default="observe",
+    ),
+    Column("touch_probability_3m", Float, nullable=True),
+    Column("eventual_touch_probability", Float, nullable=True),
+    Column("expected_d1_net_return_pct", Float, nullable=True),
+    Column("d1_win_probability", Float, nullable=True),
+    Column("seal_probability_given_touch", Float, nullable=True),
     Column("actionable", Boolean, nullable=False, server_default="false"),
     Column("execution_effect", String(40), nullable=False),
     Column("action_kind", String(32), nullable=False),
@@ -2081,6 +2124,7 @@ def _apply_compatible_schema_patches(engine) -> None:
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS fall_count INTEGER",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS flat_count INTEGER",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS rise_ratio FLOAT",
+        "ALTER TABLE limit_up_signal_snapshots ADD COLUMN IF NOT EXISTS preboard_candidates JSONB NOT NULL DEFAULT '[]'::jsonb",
         "ALTER TABLE limit_up_radar_observations ADD COLUMN IF NOT EXISTS quote_observed_at TIMESTAMPTZ",
         "ALTER TABLE limit_up_radar_observations ADD COLUMN IF NOT EXISTS volume FLOAT",
         "ALTER TABLE limit_up_radar_observations ADD COLUMN IF NOT EXISTS turnover FLOAT",
@@ -2117,6 +2161,23 @@ def _apply_compatible_schema_patches(engine) -> None:
         "ALTER TABLE limit_up_preboard_point_feature_rows ADD COLUMN IF NOT EXISTS action_market_timing_observed BOOLEAN NOT NULL DEFAULT false",
         "ALTER TABLE limit_up_preboard_point_feature_rows ADD COLUMN IF NOT EXISTS formal_two_slot_observed BOOLEAN",
         "ALTER TABLE limit_up_preboard_point_feature_rows ADD COLUMN IF NOT EXISTS formal_two_slot_symbols JSONB",
+        "ALTER TABLE limit_up_preboard_point_feature_rows ADD COLUMN IF NOT EXISTS decision_payload JSONB NOT NULL DEFAULT '{}'::jsonb",
+        "ALTER TABLE limit_up_preboard_point_feature_rows ADD COLUMN IF NOT EXISTS feature_status VARCHAR(48) NOT NULL DEFAULT 'legacy_unmigrated'",
+        "ALTER TABLE limit_up_preboard_point_feature_rows ADD COLUMN IF NOT EXISTS formal_touch_within_3m BOOLEAN",
+        "ALTER TABLE limit_up_preboard_point_feature_rows ADD COLUMN IF NOT EXISTS eventual_formal_touch BOOLEAN",
+        "ALTER TABLE limit_up_preboard_point_feature_rows ADD COLUMN IF NOT EXISTS source_quality VARCHAR(40)",
+        "ALTER TABLE limit_up_preboard_point_model_versions ADD COLUMN IF NOT EXISTS decision_version VARCHAR(80)",
+        "ALTER TABLE limit_up_preboard_point_model_versions ADD COLUMN IF NOT EXISTS feature_fingerprint VARCHAR(80)",
+        "ALTER TABLE limit_up_preboard_point_model_versions ADD COLUMN IF NOT EXISTS probability_qualification_status VARCHAR(40)",
+        "ALTER TABLE limit_up_preboard_point_model_versions ADD COLUMN IF NOT EXISTS historical_promotion_status VARCHAR(40)",
+        "ALTER TABLE limit_up_preboard_point_model_versions ADD COLUMN IF NOT EXISTS policy_thresholds JSONB NOT NULL DEFAULT '{}'::jsonb",
+        "ALTER TABLE limit_up_preboard_point_actions ADD COLUMN IF NOT EXISTS execution_mode VARCHAR(24) NOT NULL DEFAULT 'research_only'",
+        "ALTER TABLE limit_up_preboard_point_actions ADD COLUMN IF NOT EXISTS decision_state VARCHAR(24) NOT NULL DEFAULT 'observe'",
+        "ALTER TABLE limit_up_preboard_point_actions ADD COLUMN IF NOT EXISTS touch_probability_3m FLOAT",
+        "ALTER TABLE limit_up_preboard_point_actions ADD COLUMN IF NOT EXISTS eventual_touch_probability FLOAT",
+        "ALTER TABLE limit_up_preboard_point_actions ADD COLUMN IF NOT EXISTS expected_d1_net_return_pct FLOAT",
+        "ALTER TABLE limit_up_preboard_point_actions ADD COLUMN IF NOT EXISTS d1_win_probability FLOAT",
+        "ALTER TABLE limit_up_preboard_point_actions ADD COLUMN IF NOT EXISTS seal_probability_given_touch FLOAT",
         "ALTER TABLE limit_up_preboard_point_day_scopes ADD COLUMN IF NOT EXISTS formal_baseline_order_projection_complete BOOLEAN NOT NULL DEFAULT false",
         "ALTER TABLE limit_up_preboard_point_day_scopes ADD COLUMN IF NOT EXISTS capture_runtime_fingerprint VARCHAR(80)",
         "ALTER TABLE limit_up_preboard_point_day_scopes ADD COLUMN IF NOT EXISTS formal_baseline_order_count INTEGER NOT NULL DEFAULT 0",
@@ -2137,6 +2198,9 @@ def _apply_compatible_schema_patches(engine) -> None:
         "CREATE INDEX IF NOT EXISTS ix_stock_daily_bars_updated_at ON stock_daily_bars (updated_at)",
         "CREATE INDEX IF NOT EXISTS ix_stock_minute_bars_bar_time ON stock_minute_bars (bar_time)",
         "CREATE INDEX IF NOT EXISTS ix_stock_minute_bars_updated_at ON stock_minute_bars (updated_at)",
+        "CREATE INDEX IF NOT EXISTS ix_limit_up_radar_observations_action_frame "
+        "ON limit_up_radar_observations (frame_id, vt_symbol) "
+        "WHERE early_action = 'buy_now' OR formal_action = 'buy_now'",
     )
     for sql in patches:
         try:

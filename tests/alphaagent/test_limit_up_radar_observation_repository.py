@@ -395,51 +395,6 @@ def test_recent_signal_context_keeps_the_earliest_buy_frame(monkeypatch) -> None
     assert rows[0]["captured_at"].isoformat() == "2026-07-20T10:05:00+08:00"
 
 
-def test_point_trigger_live_window_is_time_bounded_and_keeps_formal_events(
-    monkeypatch,
-) -> None:
-    captured_at = datetime.fromisoformat("2026-07-20T10:05:30+08:00")
-    statements: list[object] = []
-
-    class Result:
-        def mappings(self):
-            return self
-
-        def all(self):
-            return []
-
-    class Session:
-        def execute(self, statement):
-            statements.append(statement)
-            return Result()
-
-    @contextmanager
-    def fake_session_scope():
-        yield Session()
-
-    monkeypatch.setattr(repo, "session_scope", fake_session_scope)
-
-    frames, observations = repo.load_point_trigger_live_window(
-        captured_at,
-        lookback_seconds=220,
-    )
-
-    assert frames == []
-    assert observations == []
-    assert len(statements) == 2
-    compiled = [
-        statement.compile(dialect=postgresql.dialect()) for statement in statements
-    ]
-    for query in compiled:
-        assert captured_at in query.params.values()
-        assert captured_at - timedelta(seconds=220) in query.params.values()
-        sql = str(query)
-        assert "captured_at <=" in sql
-        assert "captured_at >=" in sql
-        assert "formal_action" in sql
-        assert "board_lane" in sql
-
-
 def test_day_capture_runtime_fingerprint_state_uses_one_aggregate_query(
     monkeypatch,
 ) -> None:
@@ -473,68 +428,6 @@ def test_day_capture_runtime_fingerprint_state_uses_one_aggregate_query(
     query = statements[0].compile(dialect=postgresql.dialect())
     assert date(2026, 7, 21) in query.params.values()
     assert "count(distinct" in str(query).lower()
-
-
-def test_point_trigger_audit_inputs_select_only_gate_fields(monkeypatch) -> None:
-    statements: list[object] = []
-
-    class Result:
-        def mappings(self):
-            return self
-
-        def all(self):
-            return []
-
-    class Session:
-        def execute(self, statement):
-            statements.append(statement)
-            return Result()
-
-    @contextmanager
-    def fake_session_scope():
-        yield Session()
-
-    monkeypatch.setattr(repo, "session_scope", fake_session_scope)
-
-    frames, observations = repo.load_point_trigger_audit_inputs(
-        date(2026, 7, 20),
-        date(2026, 7, 20),
-    )
-
-    assert frames == []
-    assert observations == []
-    assert len(statements) == 2
-    observation_fields = {
-        column.key for column in statements[1].selected_columns
-    }
-    assert observation_fields == {
-        "frame_id",
-        "vt_symbol",
-        "name",
-        "change_pct",
-        "last_price",
-        "quote_observed_at",
-        "limit_price",
-        "capture_state",
-        "board_lane",
-        "rank_score",
-        "history_sample_count",
-        "historical_combined_rate",
-        "formal_action",
-        "lane_blocker_codes",
-        "concept_change_acceleration_1m",
-        "concept_change_acceleration_3m",
-        "concept_change_acceleration_5m",
-        "concept_turnover_acceleration_1m",
-        "concept_turnover_acceleration_3m",
-        "concept_turnover_acceleration_5m",
-    }
-    assert {
-        "decision_reason",
-        "turnover",
-        "quote_main_inflow",
-        "blocker_codes",
-    }.isdisjoint(observation_fields)
 
 
 def test_frame_and_observations_use_one_transaction(monkeypatch) -> None:

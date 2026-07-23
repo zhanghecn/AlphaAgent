@@ -82,6 +82,56 @@ class AccountState:
     total_fees: float = 0.0
 
 
+def calculate_round_trip_outcome(
+    entry_price: float,
+    exit_price: float,
+    *,
+    limit_price: float | None,
+    cost_multiplier: float = 1.0,
+    position_cash: float = 50_000.0,
+) -> dict[str, float] | None:
+    """Price one independent A-share slot with the formal fee contract."""
+
+    multiplier = max(float(cost_multiplier), 0.0)
+    config = CashBacktestConfig(
+        max_positions=2,
+        commission_rate=0.0003 * multiplier,
+        minimum_commission=5.0 * multiplier,
+        stamp_tax_rate=0.0005 * multiplier,
+        transfer_fee_rate=0.00001 * multiplier,
+        slippage_bps=10.0 * multiplier,
+    )
+    buy = cash_ledger.calculate_buy_execution(
+        raw_price=entry_price,
+        cash=position_cash,
+        target_cash=position_cash,
+        commission_rate=config.commission_rate,
+        slippage_bps=config.slippage_bps,
+        lot_size=config.lot_size,
+        minimum_commission=config.minimum_commission,
+        transfer_fee_rate=config.transfer_fee_rate,
+        max_price=limit_price,
+    )
+    if buy.volume <= 0:
+        return None
+    sell = cash_ledger.calculate_sell_execution(
+        raw_price=exit_price,
+        volume=buy.volume,
+        cost_price=buy.price,
+        commission_rate=config.commission_rate,
+        stamp_tax_rate=config.stamp_tax_rate,
+        slippage_bps=config.slippage_bps,
+        minimum_commission=config.minimum_commission,
+        transfer_fee_rate=config.transfer_fee_rate,
+    )
+    cash_cost = buy.amount + buy.fee
+    return {
+        "entry_price": round(buy.price, 6),
+        "exit_price": round(sell.price, 6),
+        "net_return_pct": round((sell.cash_delta / cash_cost - 1.0) * 100.0, 10),
+    }
+
+
 def simulate_limit_up_account(
     signals: Sequence[Mapping[str, object]],
     bars: Sequence[Mapping[str, object]],

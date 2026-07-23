@@ -223,6 +223,38 @@ def _with_evidence(
     analog_index: Mapping[tuple[object, ...], object],
     stock_d1_index: Mapping[str, Mapping[str, object]],
 ) -> dict[str, object]:
+    evidence = resolve_candidate_historical_evidence(
+        signal,
+        candidate,
+        market_context,
+        lane,
+        signal_date,
+        analog_index,
+        stock_d1_index,
+    )
+    result = {**dict(signal), "historical_evidence": evidence}
+    if evidence["risk_veto_applied"] is True and str(
+        result.get("action") or ""
+    ) in {"buy_now", "next_auction"}:
+        result["action"] = "pass"
+        result["execution_state"] = "cancelled"
+        result["reason"] = "历史证据否决：" + "；".join(
+            str(value) for value in evidence["risk_veto_reasons"]
+        )
+    return result
+
+
+def resolve_candidate_historical_evidence(
+    signal: Mapping[str, object],
+    candidate: Mapping[str, object],
+    market_context: Mapping[str, object],
+    lane: str,
+    signal_date: date,
+    analog_index: Mapping[tuple[object, ...], object],
+    stock_d1_index: Mapping[str, Mapping[str, object]],
+) -> dict[str, object]:
+    """Resolve one prior-only evidence payload without mutating a snapshot."""
+
     entry_mode, target_board, feature_scope = _route_context(signal, candidate, lane)
     analog_candidate = {
         "entry_mode": entry_mode,
@@ -262,12 +294,7 @@ def _with_evidence(
             "historical_win_rate",
         ):
             evidence.pop(key, None)
-    result = {**dict(signal), "historical_evidence": evidence}
-    if risk_veto_applied and str(result.get("action") or "") in {"buy_now", "next_auction"}:
-        result["action"] = "pass"
-        result["execution_state"] = "cancelled"
-        result["reason"] = "历史证据否决：" + "；".join(veto_reasons)
-    return result
+    return evidence
 
 
 def _same_stock_first_board_evidence(

@@ -51,6 +51,35 @@ def test_reliable_date_window_requires_usable_dates() -> None:
         )
 
 
+def test_bounded_history_window_keeps_requested_lookback_and_end_date() -> None:
+    all_dates = [date(2026, 1, day) for day in range(1, 8)]
+    reliable_dates = all_dates[1:]
+
+    load_start, load_end = history_repository.bounded_history_load_window(
+        all_dates,
+        reliable_dates,
+        evaluation_start=date(2026, 1, 6),
+        evaluation_end=date(2026, 1, 7),
+        lookback_sessions=3,
+    )
+
+    assert load_start == date(2026, 1, 3)
+    assert load_end == date(2026, 1, 7)
+
+
+def test_bounded_history_window_rejects_reversed_evaluation_range() -> None:
+    dates = [date(2026, 1, day) for day in range(1, 4)]
+
+    with pytest.raises(ValueError, match="range is reversed"):
+        history_repository.bounded_history_load_window(
+            dates,
+            dates,
+            evaluation_start=date(2026, 1, 3),
+            evaluation_end=date(2026, 1, 2),
+            lookback_sessions=1,
+        )
+
+
 def test_history_refresh_skips_when_persisted_ledger_is_current(monkeypatch) -> None:
     rebuilt: list[bool] = []
     monkeypatch.setattr(

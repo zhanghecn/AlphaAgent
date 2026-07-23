@@ -3,6 +3,7 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from alphaagent.server.services.limit_up import live_repository
 
@@ -15,6 +16,71 @@ def clear_context_cache() -> None:
     live_repository.clear_live_context_cache()
     yield
     live_repository.clear_live_context_cache()
+
+
+def test_snapshot_round_trip_keeps_preboard_candidates(monkeypatch) -> None:
+    stored: dict[str, object] = {}
+
+    class Result:
+        def __init__(self, row: dict[str, object] | None) -> None:
+            self._row = row
+
+        def mappings(self):
+            return self
+
+        def one(self) -> dict[str, object]:
+            assert self._row is not None
+            return self._row
+
+        def one_or_none(self) -> dict[str, object] | None:
+            return self._row
+
+    class Session:
+        def execute(self, statement):
+            if getattr(statement, "is_insert", False):
+                stored.update(
+                    statement.compile(dialect=postgresql.dialect()).params
+                )
+                return Result(stored)
+            return Result(stored or None)
+
+    @contextmanager
+    def fake_session_scope():
+        yield Session()
+
+    monkeypatch.setattr(live_repository, "session_scope", fake_session_scope)
+    candidates = [
+        {
+            "vt_symbol": "600001.SSE",
+            "decision_state": "observe",
+            "touch_probability_3m": 0.72,
+        }
+    ]
+    snapshot = {
+        "trade_date": "2026-07-23",
+        "captured_at": "2026-07-23T10:05:20+08:00",
+        "session_stage": "morning",
+        "strategy_version": "limit-up-live-v15",
+        "mode": "live_snapshot",
+        "source": "test",
+        "source_updated_at": "2026-07-23T10:05:20+08:00",
+        "market_context": {},
+        "candidates": [],
+        "preboard_candidates": candidates,
+        "recommendations": {},
+        "data_quality": {"status": "ready", "is_stale": False},
+    }
+
+    saved = live_repository.save_snapshot(snapshot)
+    loaded = live_repository.load_latest_snapshot(
+        date(2026, 7, 23),
+        strategy_version="limit-up-live-v15",
+    )
+
+    assert "preboard_candidates" in live_repository.schema.limit_up_signal_snapshots.c
+    assert saved["preboard_candidates"] == candidates
+    assert loaded is not None
+    assert loaded["preboard_candidates"] == candidates
 
 
 def test_lane_validation_cache_reads_live_and_final_plan_modes(monkeypatch) -> None:

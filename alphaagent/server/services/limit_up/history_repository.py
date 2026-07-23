@@ -39,6 +39,45 @@ def reliable_date_window(
     return sorted(set(dates))
 
 
+def bounded_history_load_window(
+    all_dates: Sequence[date],
+    reliable_dates: Sequence[date],
+    *,
+    evaluation_start: date | None,
+    evaluation_end: date | None,
+    lookback_sessions: int,
+) -> tuple[date, date]:
+    """Resolve a causal SQL window while retaining the requested lag context."""
+
+    ordered = sorted(set(all_dates))
+    reliable = sorted(set(reliable_dates))
+    if not ordered or not reliable:
+        raise ValueError("reliable daily history is unavailable")
+    if (
+        evaluation_start is not None
+        and evaluation_end is not None
+        and evaluation_start > evaluation_end
+    ):
+        raise ValueError("history evaluation range is reversed")
+    if int(lookback_sessions) < 0:
+        raise ValueError("history lookback_sessions must be nonnegative")
+
+    requested_end = evaluation_end or reliable[-1]
+    usable_ends = [value for value in reliable if value <= requested_end]
+    if not usable_ends:
+        raise ValueError("history evaluation end precedes reliable history")
+    load_end = usable_ends[-1]
+    anchor = evaluation_start or reliable[0]
+    anchor_index = next(
+        (index for index, value in enumerate(ordered) if value >= anchor),
+        -1,
+    )
+    if anchor_index < 0 or ordered[anchor_index] > load_end:
+        raise ValueError("history evaluation start exceeds requested end")
+    load_start = ordered[max(anchor_index - int(lookback_sessions), 0)]
+    return load_start, load_end
+
+
 def history_inputs_newer_than_ledger(strategy_version: str) -> bool:
     """Return whether persisted replay inputs changed after the last rebuild."""
 
@@ -78,6 +117,9 @@ def history_ledger_updated_at(strategy_version: str) -> datetime | None:
 def load_reliable_history_frame(
     *,
     min_symbols: int = MIN_RELIABLE_DAILY_SYMBOLS,
+    evaluation_start: date | None = None,
+    evaluation_end: date | None = None,
+    lookback_sessions: int = HISTORY_LOOKBACK_DATES,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
     """Load the complete daily window plus enough leading bars for lag features."""
 
@@ -97,10 +139,13 @@ def load_reliable_history_frame(
         )
         first_reliable = reliable_dates[0]
         last_reliable = reliable_dates[-1]
-        lookback_dates = [row[0] for row in count_rows if row[0] < first_reliable][
-            -HISTORY_LOOKBACK_DATES:
-        ]
-        load_start = lookback_dates[0] if lookback_dates else first_reliable
+        load_start, load_end = bounded_history_load_window(
+            [row[0] for row in count_rows],
+            reliable_dates,
+            evaluation_start=evaluation_start,
+            evaluation_end=evaluation_end,
+            lookback_sessions=lookback_sessions,
+        )
 
     symbol = schema.stocks.c.symbol
     name = schema.stocks.c.name
@@ -143,7 +188,7 @@ def load_reliable_history_frame(
             )
         )
         .where(
-            schema.stock_daily_bars.c.trade_date.between(load_start, last_reliable),
+            schema.stock_daily_bars.c.trade_date.between(load_start, load_end),
             main_board,
             not_(excluded_name),
         )
@@ -161,6 +206,7 @@ def load_reliable_history_frame(
         "reliable_trade_days": len(reliable_dates),
         "minimum_daily_symbols": min_symbols,
         "load_start": load_start.isoformat(),
+        "load_end": load_end.isoformat(),
         "loaded_rows": int(len(frame)),
         "universe": "current_main_board_non_st",
         "survivorship_risk": "current_universe_survivorship_risk",

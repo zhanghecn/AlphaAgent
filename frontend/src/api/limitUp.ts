@@ -10,37 +10,6 @@ export type LimitUpLane = "now" | "tail" | "next_auction";
 export type LimitUpBlockingScope = "none" | "market" | "dynamic" | "structural";
 export type LimitUpMarketRepairState = "not_required" | "pending_repair" | "repair_confirmed" | "repair_revoked";
 
-export interface LimitUpRadarEvidence {
-  status: "collecting" | "process_ready" | "ready_for_review" | "accepted" | "rejected";
-  capture_min_change_pct: number;
-  formal_min_change_pct: number;
-  complete_trade_days: number;
-  target_trade_days: number;
-  minute_coverage_pct: number | null;
-  minute_sessions: string[];
-  minute_slot_count: number;
-  entry_fill_delay_seconds: [number, number];
-  entry_fill_same_window: boolean;
-  selected_contract: "formal_5pct" | "early_3pct_same_rules";
-}
-
-export interface LimitUpRadarValidation {
-  validation_version: string;
-  status: LimitUpRadarEvidence["status"];
-  coverage: {
-    complete_trade_days: number;
-    minute_pair_coverage_pct?: number | null;
-  };
-  acceptance: {
-    selected_contract: LimitUpRadarEvidence["selected_contract"];
-    production_contract: LimitUpRadarEvidence["selected_contract"];
-    recommended_contract: LimitUpRadarEvidence["selected_contract"];
-    eligible_for_activation: boolean;
-    activation_required: boolean;
-    production_contract_mismatch: boolean;
-  };
-}
-
 export interface LimitUpStrategyGuide {
   guide_version: string;
   strategy: {
@@ -48,10 +17,12 @@ export interface LimitUpStrategyGuide {
     history_version: string;
     selection_no_lookahead: boolean;
     selection_contract: string;
+    preboard_research_contract: string;
     entry_windows: string[];
     entry_mode: string;
     exit_mode: string;
     max_positions: number;
+    live_actionable_limit: number | null;
   };
   verdict: {
     title: string;
@@ -72,13 +43,22 @@ export interface LimitUpStrategyGuide {
     ranking_only: boolean;
     portfolio_gate: string;
   };
+  preboard_decision: {
+    decision_version: string;
+    observation_min_change_pct: number;
+    observation_is_buy_signal: boolean;
+    quality_pool_rule: string;
+    probability_outputs: string[];
+    ranking_order: string[];
+    promotion_rule: string;
+    formal_baseline: string;
+  };
   field_groups: Array<{
     key: "intraday" | "prior" | "outcome" | string;
     label: string;
     selection_allowed: boolean;
     fields: string[];
   }>;
-  radar_evidence: LimitUpRadarEvidence;
   dataset: {
     name: string;
     kind: string;
@@ -216,6 +196,7 @@ export interface LimitUpLiveSignal {
   entry_kind: string;
   trigger_price?: number | null;
   last_price?: number | null;
+  limit_price?: number | null;
   change_pct?: number | null;
   reason: string;
   cancel_condition: string;
@@ -233,6 +214,10 @@ export interface LimitUpLiveSignal {
   profitability_gate_minimum_combined_rate?: number;
   profitability_gate_sample_count?: number | null;
   profitability_gate_combined_rate?: number | null;
+  quality_gate_passed?: boolean;
+  preparation_environment_passed?: boolean;
+  execution_environment_passed?: boolean;
+  failed_environment_checks?: string[];
   target_position_pct?: number;
   state?: "near_limit" | "sealed" | "resealed" | "failed" | string;
   distance_to_limit_pct?: number | null;
@@ -296,6 +281,23 @@ export interface LimitUpLiveSignal {
   };
 }
 
+export interface PreboardCandidate {
+  vt_symbol: string;
+  name: string;
+  decision_state: "observe" | "prepare" | "actionable" | "missed" | "rejected";
+  execution_mode: "research_only" | "shadow" | "formal";
+  change_pct: number | null;
+  distance_to_limit_pct: number | null;
+  expected_d1_net_return_pct: number | null;
+  d1_win_probability: number | null;
+  touch_probability_3m: number | null;
+  eventual_touch_probability: number | null;
+  seal_probability_given_touch: number | null;
+  probability_status: string;
+  source_quality: string;
+  updated_at: string;
+}
+
 export interface LimitUpSignalSnapshot {
   mode?: "live_snapshot" | "next_session_preliminary" | "next_session_final" | string;
   trade_date: string;
@@ -309,6 +311,7 @@ export interface LimitUpSignalSnapshot {
     sealed_count?: number;
     failed_count?: number;
   };
+  preboard_candidates?: PreboardCandidate[];
   recommendations: {
     market_gate: {
       passed: boolean;
@@ -342,6 +345,18 @@ export interface LimitUpSignalSnapshot {
     concept_quote_coverage_ratio?: number | null;
     concept_trigger_allowed?: boolean;
     concept_membership_snapshot_date?: string | null;
+    preboard_status?: string;
+    preboard_error?: string;
+    preboard_decision_version?: string;
+    preboard_probability_status?: string;
+    preboard_probability_qualification_status?: string;
+    preboard_historical_promotion_status?: string;
+    preboard_execution_mode?: "research_only" | "shadow" | "formal" | string;
+    preboard_model_fingerprint?: string | null;
+    preboard_feature_fingerprint?: string | null;
+    preboard_observation_count?: number;
+    preboard_action_saved?: number;
+    preboard_formal_strategy_changed?: boolean;
     plan?: LimitUpPlanMetadata;
   };
 }
@@ -1003,10 +1018,6 @@ export function fetchLimitUpLive(): Promise<LimitUpSignalSnapshot> {
 
 export function fetchLimitUpStrategyGuide(): Promise<LimitUpStrategyGuide> {
   return apiClient.get<LimitUpStrategyGuide>("/limit-up/strategy-guide");
-}
-
-export function fetchLimitUpRadarValidation(): Promise<LimitUpRadarValidation> {
-  return apiClient.get<LimitUpRadarValidation>("/limit-up/radar-validation");
 }
 
 export function fetchLimitUpLiveTraceDates(): Promise<LimitUpLiveTraceDates> {

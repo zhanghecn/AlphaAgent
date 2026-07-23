@@ -6,10 +6,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 
-import type {
-  LimitUpRadarValidation,
-  LimitUpStrategyGuide,
-} from "@/api/limitUp";
+import type { LimitUpStrategyGuide } from "@/api/limitUp";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
@@ -18,9 +15,6 @@ import { RuleFlowDiagram } from "./RuleFlowDiagram";
 
 interface GuideViewProps {
   guide?: LimitUpStrategyGuide;
-  radarValidation?: LimitUpRadarValidation;
-  radarValidationLoading?: boolean;
-  radarValidationError?: string | null;
   loading: boolean;
   error: string | null;
   onRetry: () => void;
@@ -28,9 +22,6 @@ interface GuideViewProps {
 
 export function GuideView({
   guide,
-  radarValidation,
-  radarValidationLoading = false,
-  radarValidationError = null,
   loading,
   error,
   onRetry,
@@ -49,8 +40,8 @@ export function GuideView({
         <p className="mt-2 text-sm leading-6 text-foreground">
           在交易日的<strong className="font-semibold">{strategy.entry_windows.join("、")}</strong>
           两个时段里，买入即将涨停或刚涨停的强势股，第二个交易日（简称 D+1）尾盘按官方收盘价卖出。
-          赚的是「涨停的惯性」和「次日的高开溢价」。最多同时持有 {strategy.max_positions} 只，
-          每只大约用一半资金，按信号到达的先后顺序成交。
+          赚的是「涨停的惯性」和「次日的高开溢价」。实时全量买点列表不限制数量；
+          两仓资金组合最多同时持有 {strategy.max_positions} 只，每只大约用一半资金，按信号到达的先后顺序成交。
         </p>
         <div className="mt-3 flex items-start gap-2 rounded-md border border-rise/40 bg-rise/5 px-3 py-2">
           <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-rise" />
@@ -84,8 +75,8 @@ export function GuideView({
         <div className="mt-3 grid gap-3 sm:grid-cols-3">
           <NoLookaheadCard
             icon={<Eye className="h-4 w-4" />}
-            title="信号瞬间定格"
-            desc="每只票只用它第一次满足全部条件那一刻的行情画面。即便之后价格又跌回去，也不会回头重新推荐，避免「事后挑最好的那帧」。"
+            title="每个点时单独冻结"
+            desc="板前模型每次只用该时刻已经完成的分钟和逐笔前缀，后续触板、封板及次日结果只在特征冻结后连接。"
           />
           <NoLookaheadCard
             icon={<History className="h-4 w-4" />}
@@ -109,11 +100,10 @@ export function GuideView({
               label="盘中实时数据"
               hint="买入的那一刻能看到，允许参与选股"
               fields={[
-                "当前价、涨幅、涨停价、买卖盘口",
-                "盘中承接强度（动能分）与封单变化",
-                "封板、开板、回封的实时状态",
-                "同行业触板扩散、概念启动与龙头排名",
-                "市场情绪阶段与资金流向",
+                "当前价、涨幅、涨停价与已完成分钟",
+                "1/3/5分钟收益、速度、加速度与回撤恢复",
+                "量能、逐笔资金代理与质量池横截面",
+                "严格板前价格和正式买入窗口",
               ]}
             />
             <FieldGroupRow
@@ -125,6 +115,16 @@ export function GuideView({
                 "信号日之前已收盘的历史封停成功率",
                 "信号日之前已收盘的次日赚钱率",
                 "当时已经披露的财务报告与风险信息",
+              ]}
+            />
+            <FieldGroupRow
+              allowed={false}
+              label="当前仅作诊断的盘中环境"
+              hint="历史暂不能按同一可知时点复现，不得成为实时专属硬门"
+              fields={[
+                "板块扩散、概念启动与龙头排名",
+                "板块资金、个股资金与当前换手",
+                "市场状态、快照新鲜度与报价新鲜度",
               ]}
             />
             <FieldGroupRow
@@ -148,28 +148,27 @@ export function GuideView({
         <div>
           <h3 className="text-sm font-medium">关于成交的诚实说明</h3>
           <p className="mt-1 text-sm leading-6 text-muted-foreground">
-            本策略没有逐笔成交和涨停价排队（Level-2）数据。当买价已经到涨停价、需要排队时，
-            系统无法确认你的委托是否真的成交，会如实标注「待排队」，而不是假装一定买到了。
-            回测里的成交价也包含了滑点，不能理解成每笔委托都一定能按显示价格成交。
+            板前回放只认行动后的第一条严格低于涨停价的新报价；下一报价已经涨停就算未成交。
+            正式扫板缺少涨停价排队明细，仍只能标为可尝试排队，不能解释为一定成交。
           </p>
         </div>
       </section>
 
       {/* 排序说明 */}
       <section className="mt-6 rounded-lg border bg-card px-4 py-4" aria-labelledby="ranking-title">
-        <h3 id="ranking-title" className="text-sm font-semibold">同分票怎么排先后</h3>
+        <h3 id="ranking-title" className="text-sm font-semibold">板前候选怎么排先后</h3>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">
-          通过全部硬门的票都会保留在推荐里，排序只决定先做谁。首板先看历史胜率，胜率相同再看当前涨幅；
-          二进三则按自身的结构、质量和风险排序。
+          先按同股 D+1 预期净收益和胜率保证次日溢价质量，再看 3 分钟触板、最终触板、封板率和承接分。
+          当前涨幅只参与动态概率，不是固定买点，也不是第一排序键。二进三继续使用原排序。
         </p>
         <dl className="mt-3 grid gap-x-6 gap-y-3 text-xs sm:grid-cols-2">
           <Definition label="第一顺位" value={ranking.first_board_primary} />
           <Definition label="第二顺位" value={ranking.first_board_secondary} />
-          <Definition label="历史胜率怎么算" value={ranking.historical_win_rate_formula} />
+          <Definition label="同股基因怎么算" value={ranking.historical_win_rate_formula} />
           <Definition label="历史样本截止" value="只用信号日之前已收盘出结果的历史记录" />
         </dl>
         <p className="mt-3 border-l-2 pl-3 text-xs leading-5 text-muted-foreground">
-          历史胜率只调整展示顺序，不会删掉已经通过实时硬门的推荐。{ranking.portfolio_gate}。
+          当前板前排序为研究观察，不生成正式买点。{ranking.portfolio_gate}。
         </p>
       </section>
 
@@ -182,9 +181,6 @@ export function GuideView({
           <TabsContent value="dataset" className="m-0 mt-4">
             <GuideDataset
               guide={guide}
-              radarValidation={radarValidation}
-              radarValidationLoading={radarValidationLoading}
-              radarValidationError={radarValidationError}
             />
           </TabsContent>
         </Tabs>

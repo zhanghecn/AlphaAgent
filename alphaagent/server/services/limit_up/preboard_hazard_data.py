@@ -11,16 +11,18 @@ from sqlalchemy import bindparam, select, text, tuple_
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine
 from alphaagent.server.services.limit_up import history_repository
+from alphaagent.server.services.limit_up import scheduled_execution
 from alphaagent.server.services.limit_up.preboard_momentum_data import (
     attach_preboard_prior_evidence,
+    load_preboard_capture_manifest,
     load_preboard_manifest,
 )
 from alphaagent.server.services.limit_up.versions import HISTORY_STRATEGY_VERSION
 
 
 ONE_MINUTE_INTERVAL = "1m"
-MINIMUM_D1_SAMPLES = 5
-MINIMUM_COMBINED_RATE = 30.0
+MINIMUM_D1_SAMPLES = scheduled_execution.FIRST_BOARD_MIN_D1_SAMPLES
+MINIMUM_COMBINED_RATE = scheduled_execution.FIRST_BOARD_MIN_COMBINED_RATE
 EXPECTED_ONE_MINUTE_BARS = 240
 MAX_BACKFILL_GAPS = 20_000
 MINUTE_PAIR_QUERY_BATCH_SIZE = 128
@@ -39,13 +41,10 @@ def filter_static_hazard_manifest(frame: pd.DataFrame) -> pd.DataFrame:
 
     if frame.empty:
         return frame.copy()
-    samples = pd.to_numeric(frame.get("stock_d1_sample_count"), errors="coerce")
-    combined = pd.to_numeric(
-        frame.get("stock_gene_combined_win_rate"),
-        errors="coerce",
-    )
-    selected = frame.loc[
-        samples.ge(MINIMUM_D1_SAMPLES) & combined.ge(MINIMUM_COMBINED_RATE)
+    audited = audit_static_hazard_manifest(frame)
+    selected = audited.loc[
+        audited["static_hazard_gate_passed"].eq(True),  # noqa: E712
+        list(frame.columns),
     ].copy()
     return selected.sort_values(
         ["trade_date", "vt_symbol"],
@@ -53,10 +52,42 @@ def filter_static_hazard_manifest(frame: pd.DataFrame) -> pd.DataFrame:
     ).reset_index(drop=True)
 
 
-def load_static_hazard_manifest(*, session_count: int = 60) -> pd.DataFrame:
+def audit_static_hazard_manifest(frame: pd.DataFrame) -> pd.DataFrame:
+    """Annotate every label-free pair with the shared prior-only gate result."""
+
+    audited = frame.copy()
+    if audited.empty:
+        audited["static_hazard_gate_passed"] = pd.Series(dtype=bool)
+        audited["static_hazard_gate_reason"] = pd.Series(dtype=str)
+        return audited
+    decisions = []
+    for raw in audited.to_dict(orient="records"):
+        decisions.append(
+            scheduled_execution.first_board_profitability_gate(
+                {**raw, "board_lane": "first_board", "board_level": 1}
+            )
+        )
+    audited["static_hazard_gate_passed"] = [
+        decision["profitability_gate_passed"] for decision in decisions
+    ]
+    audited["static_hazard_gate_reason"] = [
+        decision["profitability_gate_reason"] for decision in decisions
+    ]
+    return audited
+
+
+def load_static_hazard_manifest(
+    *,
+    session_count: int = 60,
+    end_date: date | None = None,
+) -> pd.DataFrame:
     """Load the bounded all-3% manifest and attach strictly mature evidence."""
 
-    manifest = load_preboard_manifest(session_count=session_count)
+    manifest = (
+        load_preboard_manifest(session_count=session_count)
+        if end_date is None
+        else load_preboard_manifest(session_count=session_count, end_date=end_date)
+    )
     if manifest.empty:
         return manifest
     end = pd.to_datetime(manifest["trade_date"], errors="raise").max().date()
@@ -69,6 +100,39 @@ def load_static_hazard_manifest(*, session_count: int = 60) -> pd.DataFrame:
     return filter_static_hazard_manifest(
         attach_preboard_prior_evidence(manifest, history_days)
     )
+
+
+def load_static_hazard_capture_manifest_with_audit(
+    *,
+    start_date: date,
+    end_date: date,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return the selected recent manifest and every pair's static gate audit."""
+
+    manifest = load_preboard_capture_manifest(
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if manifest.empty:
+        return manifest, audit_static_hazard_manifest(manifest)
+    history_days = history_repository.load_history_range(
+        HISTORY_STRATEGY_VERSION,
+        None,
+        end_date,
+        False,
+    )
+    audited = audit_static_hazard_manifest(
+        attach_preboard_prior_evidence(manifest, history_days)
+    )
+    selected = audited.loc[
+        audited["static_hazard_gate_passed"].eq(True),  # noqa: E712
+        [column for column in audited.columns if not column.startswith("static_hazard_")],
+    ].copy()
+    selected = selected.sort_values(
+        ["trade_date", "vt_symbol"],
+        kind="stable",
+    ).reset_index(drop=True)
+    return selected, audited
 
 
 def build_one_minute_coverage(

@@ -58,6 +58,7 @@ export function liveSignalsForScope(
 function canTransitionToBuy(signal: LimitUpLiveSignal): boolean {
   return (
     !NON_ACTIONABLE_STATES.has(signal.signal_state ?? "")
+    && !isFailedFirstBoard(signal)
     && signal.action !== "next_auction"
     && signal.blocking_scope !== "structural"
     && (
@@ -65,6 +66,11 @@ function canTransitionToBuy(signal: LimitUpLiveSignal): boolean {
       || signal.entry_kind === "momentum"
     )
   );
+}
+
+function isFailedFirstBoard(signal: LimitUpLiveSignal): boolean {
+  const lane = signal.board_lane ?? boardLaneForLevel(signal.board_level);
+  return lane === "first_board" && signal.state === "failed";
 }
 
 function boardLaneForLevel(level: number): BoardLaneKey | null {
