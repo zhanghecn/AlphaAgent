@@ -14,7 +14,7 @@ def test_low_suction_swing_research_has_an_independent_endpoint(monkeypatch) -> 
     }
     monkeypatch.setattr(low_suction, "get_swing_research", lambda: expected)
 
-    response = TestClient(create_app()).get("/api/low-suction/swing-research")
+    response = TestClient(create_app()).get("/api/reverse-wrap/swing-research")
 
     assert response.status_code == 200
     assert response.json()["data"] == expected
@@ -34,7 +34,7 @@ def test_low_suction_strategy_has_an_independent_read_only_endpoint(monkeypatch)
         raising=False,
     )
 
-    response = TestClient(create_app()).get("/api/low-suction/strategy")
+    response = TestClient(create_app()).get("/api/reverse-wrap/strategy")
 
     assert response.status_code == 200
     assert response.json()["data"] == expected
@@ -52,7 +52,7 @@ def test_cross_regime_validation_has_a_read_only_endpoint(monkeypatch) -> None:
     )
 
     response = TestClient(create_app()).get(
-        "/api/low-suction/cross-regime-validation"
+        "/api/reverse-wrap/cross-regime-validation"
     )
 
     assert response.status_code == 200
@@ -71,7 +71,7 @@ def test_low_suction_history_endpoint_reads_materialized_overview(monkeypatch) -
     }
     monkeypatch.setattr(low_suction, "get_historical_replay_overview", lambda: expected)
 
-    response = TestClient(create_app()).get("/api/low-suction/history")
+    response = TestClient(create_app()).get("/api/reverse-wrap/history")
 
     assert response.status_code == 200
     assert response.json()["data"] == expected
@@ -87,7 +87,7 @@ def test_low_suction_history_trade_filters_are_forwarded(monkeypatch) -> None:
     monkeypatch.setattr(low_suction, "get_historical_replay_trades", fake_list)
 
     response = TestClient(create_app()).get(
-        "/api/low-suction/history/trades",
+        "/api/reverse-wrap/history/trades",
         params={
             "run_id": "replay-1",
             "page": 2,
@@ -108,7 +108,7 @@ def test_low_suction_history_trade_detail_returns_404(monkeypatch) -> None:
     monkeypatch.setattr(low_suction, "get_historical_replay_trade", lambda **_: None)
 
     response = TestClient(create_app()).get(
-        "/api/low-suction/history/trades/missing",
+        "/api/reverse-wrap/history/trades/missing",
         params={"run_id": "replay-1"},
     )
 
@@ -125,7 +125,7 @@ def test_low_suction_forward_ledger_is_read_only_and_paginated(monkeypatch) -> N
     }
     monkeypatch.setattr(low_suction, "list_causal_forward_ledger", lambda **_: expected)
 
-    response = TestClient(create_app()).get("/api/low-suction/forward-ledger")
+    response = TestClient(create_app()).get("/api/reverse-wrap/forward-ledger")
 
     assert response.status_code == 200
     assert response.json()["data"] == expected

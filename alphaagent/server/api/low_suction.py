@@ -25,7 +25,7 @@ from alphaagent.server.services.low_suction.causal_leader_pullback_forward_repos
 )
 
 
-router = APIRouter(prefix="/low-suction", tags=["low-suction"])
+router = APIRouter(prefix="/reverse-wrap", tags=["reverse-wrap"])
 
 
 @router.get("/forward-ledger", response_model=None)

@@ -1,130 +1,5 @@
 import { apiClient } from "./client";
 
-export interface LowSuctionExitContract {
-  mode: "structural";
-  take_profit: "reference_peak_rebreak";
-  defensive: "two_closes_below_ma20";
-  execution: "trigger_day_close";
-}
-
-export interface LowSuctionMainRiseEvidence {
-  study_version: "prebreakout-ignition-diffusion-v1";
-  research_status: "exploratory_not_frozen";
-  selection_effect: "research_only_no_signal_filter";
-  lead_days: number;
-  coverage: {
-    concepts: number;
-    matched_pairs: number;
-  };
-  features: Array<{
-    feature: string;
-    positive_median: number;
-    control_median: number;
-    matched_positive_higher_rate_pct: number;
-    rank_auc: number;
-    stable_blocks: number;
-    status: string;
-  }>;
-  rejected_patterns: Array<{
-    feature: string;
-    rank_auc: number;
-  }>;
-  leader_dynamics: {
-    retained_top3_rate_pct: LowSuctionEvidenceRange;
-    short_horizon_follower_return_difference_pct: LowSuctionEvidenceRange;
-    long_horizon_follower_return_difference_pct: LowSuctionEvidenceRange;
-  };
-  membership_evidence: string;
-  artifact: {
-    path: string;
-    sha256: string;
-  };
-}
-
-interface LowSuctionEvidenceRange {
-  minimum: number;
-  maximum: number;
-}
-
-export interface LowSuctionSwingResearch {
-  research_version: string;
-  research_kind: "main_rise_leader_swing";
-  research_status: string;
-  formal_strategy: boolean;
-  contract: {
-    universe: string;
-    pullback: string;
-    confirmation: string;
-    leader: string;
-    main_rise: string;
-    observation: string;
-    entry: string;
-    entry_assumption: "same_close_research_proxy";
-    execution_boundary: string;
-    holding_style: string;
-    exit: LowSuctionExitContract | Record<string, string>;
-    market_policy: Array<{
-      phase: string;
-      action: string;
-    }>;
-    portfolio: {
-      capacity: number;
-      position_target: "one_half_current_equity";
-      concept_limit: number;
-    };
-  };
-  coverage: {
-    selected_signals: number;
-    daily_close_signals: number;
-  };
-  performance: {
-    initial_cash: number;
-    final_equity: number;
-    closed_trades: number;
-    winning_trades: number;
-    win_rate_pct: number;
-    mean_trade_return_pct: number;
-    profit_factor: number;
-    compound_return_pct: number;
-    maximum_drawdown_pct: number;
-    total_fees?: number;
-  };
-  time_blocks: Array<{
-    id: string;
-    signals: number;
-    closed_trades: number;
-    win_rate_pct: number | null;
-    mean_net_return_pct: number | null;
-    profit_factor: number | null;
-  }>;
-  cases: Array<{
-    signal_id: string;
-    signal_date: string;
-    vt_symbol: string;
-    stock_name: string;
-    concept_name: string;
-    time_block: string;
-    dynamic_rank: number;
-    entry_price: number;
-    exit_date: string;
-    exit_price: number;
-    exit_reason: string;
-    net_return_pct: number;
-  }>;
-  boundaries: string[];
-  evidence_boundary: {
-    same_close_research_proxy: true;
-    point_in_time_executable: false;
-    forward_validation_required: true;
-  };
-  main_rise_evidence?: LowSuctionMainRiseEvidence;
-  artifact?: {
-    path: string;
-    sha256: string;
-  };
-  cross_regime_validation?: LowSuctionCrossRegimeValidation;
-}
-
 interface CrossRegimeReturnMetrics {
   closed_trades: number;
   win_rate_pct: number | null;
@@ -210,25 +85,6 @@ export interface LowSuctionCrossRegimeValidation {
     };
   };
   natural_forward: {
-    research_status: string;
-    coverage: {
-      candidate_rows: number;
-      closed_outcomes: number;
-      candidate_market_phases: Record<string, number>;
-      closed_market_phases: Record<string, number>;
-    };
-    qualification: {
-      sample_gates_passed: boolean;
-      performance_gates_passed: boolean;
-      confidence_gates_passed: boolean;
-      all_gates_passed: boolean;
-      failed_gates: string[];
-    };
-    four_slot_cash: CrossRegimeCashMetrics;
-    verified_forward_metrics: Record<string, unknown> | null;
-  };
-  three_phase_natural_forward: {
-    qualification_contract_version: string;
     research_status: string;
     coverage: {
       candidate_rows: number;
@@ -520,62 +376,18 @@ export interface LowSuctionHistoricalTradePage {
   page_size: number;
 }
 
-export interface LowSuctionForwardLedgerRow {
-  signal_trade_date: string;
-  source_trade_date: string;
-  vt_symbol: string;
-  stock_name: string;
-  sector_id: string;
-  sector_name: string;
-  rank: number;
-  current_wave_number: number;
-  confirmed_higher_highs: number;
-  support_line: string | null;
-  support_price: number | null;
-  reference_peak_price: number;
-  market_timing_direction: string | null;
-  signal_eligible: boolean;
-  decision_reason: string;
-  known_at: string;
-  evidence_level: string;
-  input_fingerprint: string;
-  outcome_status: string | null;
-  entry_date: string | null;
-  entry_price: number | null;
-  exit_date: string | null;
-  exit_price: number | null;
-  exit_reason: string | null;
-  net_return_pct: number | null;
-  terminal: boolean | null;
-  last_evaluated_trade_date: string | null;
-}
-
-export interface LowSuctionForwardLedgerPage {
-  items: LowSuctionForwardLedgerRow[];
-  total: number;
-  page: number;
-  page_size: number;
-  contract_version: string;
-  qualification_contract_version: string;
-  historical_backfill_allowed: false;
-}
-
-export async function fetchLowSuctionSwingResearch() {
-  const [research, validation] = await Promise.all([
-    apiClient.get<LowSuctionSwingResearch>("/low-suction/swing-research"),
-    apiClient.get<LowSuctionCrossRegimeValidation>(
-      "/low-suction/cross-regime-validation",
-    ),
-  ]);
-  return { ...research, cross_regime_validation: validation };
+export function fetchLowSuctionCrossRegimeValidation() {
+  return apiClient.get<LowSuctionCrossRegimeValidation>(
+    "/reverse-wrap/cross-regime-validation",
+  );
 }
 
 export function fetchLowSuctionStrategy() {
-  return apiClient.get<LowSuctionStrategyOverview>("/low-suction/strategy");
+  return apiClient.get<LowSuctionStrategyOverview>("/reverse-wrap/strategy");
 }
 
 export function fetchLowSuctionHistoricalOverview() {
-  return apiClient.get<LowSuctionHistoricalOverview>("/low-suction/history");
+  return apiClient.get<LowSuctionHistoricalOverview>("/reverse-wrap/history");
 }
 
 export function fetchLowSuctionHistoricalTrades(filters: {
@@ -593,20 +405,13 @@ export function fetchLowSuctionHistoricalTrades(filters: {
   if (filters.marketPhase) query.set("market_phase", filters.marketPhase);
   if (filters.outcome) query.set("outcome", filters.outcome);
   return apiClient.get<LowSuctionHistoricalTradePage>(
-    `/low-suction/history/trades?${query.toString()}`,
+    `/reverse-wrap/history/trades?${query.toString()}`,
   );
 }
 
 export function fetchLowSuctionHistoricalTrade(runId: string, signalId: string) {
   const query = new URLSearchParams({ run_id: runId });
   return apiClient.get<LowSuctionHistoricalTrade>(
-    `/low-suction/history/trades/${encodeURIComponent(signalId)}?${query.toString()}`,
-  );
-}
-
-export function fetchLowSuctionForwardLedger(page = 1, pageSize = 20) {
-  const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
-  return apiClient.get<LowSuctionForwardLedgerPage>(
-    `/low-suction/forward-ledger?${query.toString()}`,
+    `/reverse-wrap/history/trades/${encodeURIComponent(signalId)}?${query.toString()}`,
   );
 }

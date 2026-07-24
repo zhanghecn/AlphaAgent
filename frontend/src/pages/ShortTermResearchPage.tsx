@@ -1,22 +1,38 @@
-import { Flame, Waves } from "lucide-react";
+import { useEffect } from "react";
+import { FlaskConical, Flame, Waves } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 
 import { cn } from "@/lib/utils";
 import { LimitUpPage } from "@/pages/LimitUpPage";
 import { LowSuctionPage } from "@/pages/LowSuctionPage";
+import { PullbackStudyView } from "@/features/lowSuction/PullbackStudyView";
 
-type ResearchTab = "limit-up" | "low-suction";
+type ResearchTab = "limit-up" | "reverse-wrap" | "pullback-study";
 
 const RESEARCH_TABS = [
   { value: "limit-up", label: "打板研究", icon: Flame },
-  { value: "low-suction", label: "低吸波段", icon: Waves },
+  { value: "reverse-wrap", label: "反包", icon: Waves },
+  { value: "pullback-study", label: "回踩低吸(研究)", icon: FlaskConical },
 ] as const;
 
 export function ShortTermResearchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const activeTab: ResearchTab = searchParams.get("research") === "low-suction"
-    ? "low-suction"
-    : "limit-up";
+  const raw = searchParams.get("research");
+  // 旧书签 low-suction 重定向到 reverse-wrap（正名兼容）
+  const activeTab: ResearchTab = raw === "pullback-study"
+    ? "pullback-study"
+    : raw === "low-suction" || raw === "reverse-wrap"
+      ? "reverse-wrap"
+      : "limit-up";
+
+  // 旧 URL param 主动 replace 为新值（兼容书签）
+  useEffect(() => {
+    if (raw === "low-suction") {
+      const next = new URLSearchParams(searchParams);
+      next.set("research", "reverse-wrap");
+      setSearchParams(next, { replace: true });
+    }
+  }, [raw, searchParams, setSearchParams]);
 
   const selectTab = (tab: ResearchTab) => {
     const next = new URLSearchParams(searchParams);
@@ -58,7 +74,7 @@ export function ShortTermResearchPage() {
         role="tabpanel"
         aria-labelledby={`research-tab-${activeTab}`}
       >
-        {activeTab === "limit-up" ? <LimitUpPage /> : <LowSuctionPage />}
+        {activeTab === "limit-up" ? <LimitUpPage /> : activeTab === "reverse-wrap" ? <LowSuctionPage /> : <PullbackStudyView />}
       </div>
     </div>
   );
