@@ -31,6 +31,10 @@ def build_parser() -> argparse.ArgumentParser:
         "history-ledger-materialize",
         help="explicitly recompute the database replay and save its immutable ledger",
     )
+    subparsers.add_parser(
+        "support-day-entry-study",
+        help="compare support-touch-day entry against the official reclaim-day entry",
+    )
     proxy = subparsers.add_parser(
         "proxy-discovery",
         help="run the bounded current-membership proxy study",
@@ -788,6 +792,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             json.dumps(
                 materialize_exploratory_three_phase_replay(),
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        )
+        return 0
+    if args.command == "support-day-entry-study":
+        from .support_day_entry_variant_study import (
+            run_support_day_entry_variant_study,
+        )
+
+        print(
+            json.dumps(
+                run_support_day_entry_variant_study(),
                 ensure_ascii=False,
                 indent=2,
                 default=str,
