@@ -83,6 +83,44 @@ def test_snapshot_round_trip_keeps_preboard_candidates(monkeypatch) -> None:
     assert loaded["preboard_candidates"] == candidates
 
 
+def test_publication_audit_reads_only_public_live_minutes(monkeypatch) -> None:
+    captured = datetime(2026, 7, 23, 10, 5, tzinfo=SHANGHAI)
+    persisted = [
+        {
+            "captured_minute": captured,
+            "captured_at": captured.replace(second=15),
+            "created_at": captured.replace(second=20),
+        }
+    ]
+    statements = []
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return persisted
+
+    class Session:
+        def execute(self, statement):
+            statements.append(statement)
+            return Result()
+
+    @contextmanager
+    def fake_session_scope():
+        yield Session()
+
+    monkeypatch.setattr(live_repository, "session_scope", fake_session_scope)
+
+    rows = live_repository.load_publication_audit_rows(date(2026, 7, 23))
+
+    assert rows == persisted
+    params = statements[0].compile().params
+    assert date(2026, 7, 23) in params.values()
+    assert "limit-up-live-v15" in params.values()
+    assert "live_snapshot" in params.values()
+
+
 def test_lane_validation_cache_reads_live_and_final_plan_modes(monkeypatch) -> None:
     captured_after = datetime(2026, 7, 20, 21, 30, tzinfo=SHANGHAI)
     persisted = {

@@ -135,6 +135,32 @@ def load_latest_snapshot(
     return _snapshot_row(row) if row else None
 
 
+def load_publication_audit_rows(
+    trade_date: date | str,
+    *,
+    strategy_version: str = LIVE_STRATEGY_VERSION,
+) -> list[dict[str, object]]:
+    """Load one row per publicly readable live minute with its first write time."""
+
+    table = schema.limit_up_signal_snapshots
+    statement = (
+        select(
+            table.c.captured_minute,
+            table.c.captured_at,
+            table.c.created_at,
+        )
+        .where(
+            table.c.trade_date == _date(trade_date),
+            table.c.strategy_version == strategy_version,
+            table.c.mode == "live_snapshot",
+        )
+        .order_by(table.c.captured_minute)
+    )
+    with session_scope() as session:
+        rows = session.execute(statement).mappings().all()
+    return [dict(row) for row in rows]
+
+
 def load_latest_lane_validations(
     *,
     strategy_version: str,

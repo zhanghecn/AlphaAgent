@@ -11,7 +11,9 @@ from typing import TYPE_CHECKING
 from alphaagent.server.services.limit_up.preboard_decision_contract import (
     PREBOARD_DECISION_VERSION,
     PreboardExecutionMode,
+    PreboardOpportunityCalibration,
     PreboardPolicyThresholds,
+    PreboardRankingMode,
     PreboardState,
     is_observable_first_board,
     is_strictly_preboard,
@@ -32,6 +34,8 @@ def evaluate_preboard_decisions(
     prior_actions: Sequence[Mapping[str, object]] = (),
     unavailable_status: str = "model_unavailable",
     execution_mode: PreboardExecutionMode = PreboardExecutionMode.RESEARCH_ONLY,
+    ranking_mode: PreboardRankingMode = PreboardRankingMode.CURRENT_D1_FIRST,
+    opportunity_calibration: PreboardOpportunityCalibration | None = None,
 ) -> list[dict[str, object]]:
     """Run the shared scorer/state entry, failing closed without a promoted policy."""
 
@@ -48,6 +52,8 @@ def evaluate_preboard_decisions(
             thresholds,
             prior_actions=prior_actions,
             execution_mode=execution_mode,
+            ranking_mode=ranking_mode,
+            opportunity_calibration=opportunity_calibration,
         )
     decisions = [
         _research_only_decision(
@@ -57,7 +63,14 @@ def evaluate_preboard_decisions(
         )
         for row in projected
     ]
-    return sorted(decisions, key=preboard_action_sort_key)
+    return sorted(
+        decisions,
+        key=lambda row: preboard_action_sort_key(
+            row,
+            ranking_mode=ranking_mode,
+            opportunity_calibration=opportunity_calibration,
+        ),
+    )
 
 
 def can_compete_for_action(
@@ -86,18 +99,67 @@ def can_compete_for_action(
 
 def preboard_action_sort_key(
     row: Mapping[str, object],
+    *,
+    ranking_mode: PreboardRankingMode = PreboardRankingMode.CURRENT_D1_FIRST,
+    opportunity_calibration: PreboardOpportunityCalibration | None = None,
 ) -> tuple[object, ...]:
-    """Use the frozen business ordering, with deterministic final ties."""
+    """Return one preregistered ordering with deterministic final ties."""
 
+    stable_tail = (
+        -_sort_number(row.get("lane_support_score")),
+        str(row.get("decision_at") or row.get("signal_at") or ""),
+        str(row.get("vt_symbol") or ""),
+    )
+    if ranking_mode is PreboardRankingMode.CURRENT_D1_FIRST:
+        return (
+            -_sort_number(row.get("expected_d1_net_return_pct")),
+            -_sort_number(row.get("d1_win_probability")),
+            -_sort_number(row.get("touch_probability_3m")),
+            -_sort_number(row.get("eventual_touch_probability")),
+            -_sort_number(row.get("seal_probability_given_touch")),
+            *stable_tail,
+        )
+    if ranking_mode is PreboardRankingMode.PURE_TOUCH_PROBABILITY:
+        return (
+            -_sort_number(row.get("touch_probability_3m")),
+            -_sort_number(row.get("eventual_touch_probability")),
+            -_sort_number(row.get("seal_probability_given_touch")),
+            -_sort_number(row.get("expected_d1_net_return_pct")),
+            -_sort_number(row.get("d1_win_probability")),
+            *stable_tail,
+        )
+    if opportunity_calibration is None:
+        raise ValueError("combined opportunity ranking requires fit calibration")
     return (
-        -_sort_number(row.get("expected_d1_net_return_pct")),
+        -_sort_number(
+            preboard_opportunity_value_pct(row, opportunity_calibration)
+        ),
         -_sort_number(row.get("d1_win_probability")),
         -_sort_number(row.get("touch_probability_3m")),
         -_sort_number(row.get("eventual_touch_probability")),
         -_sort_number(row.get("seal_probability_given_touch")),
-        -_sort_number(row.get("lane_support_score")),
-        str(row.get("decision_at") or row.get("signal_at") or ""),
-        str(row.get("vt_symbol") or ""),
+        -_sort_number(row.get("expected_d1_net_return_pct")),
+        *stable_tail,
+    )
+
+
+def preboard_opportunity_value_pct(
+    row: Mapping[str, object],
+    calibration: PreboardOpportunityCalibration,
+) -> float | None:
+    """Estimate board-front net return across touch, seal, and failure branches."""
+
+    eventual = _probability(row.get("eventual_touch_probability"))
+    seal = _probability(row.get("seal_probability_given_touch"))
+    expected_d1 = _number(row.get("expected_d1_net_return_pct"))
+    if eventual is None or seal is None or expected_d1 is None:
+        return None
+    return (
+        eventual * seal * expected_d1
+        + eventual
+        * (1.0 - seal)
+        * calibration.touched_unsealed_expected_return_pct
+        + (1.0 - eventual) * calibration.non_touch_expected_return_pct
     )
 
 
@@ -133,6 +195,8 @@ def select_preboard_decisions(
     *,
     prior_actions: Sequence[Mapping[str, object]] = (),
     execution_mode: PreboardExecutionMode = PreboardExecutionMode.SHADOW,
+    ranking_mode: PreboardRankingMode = PreboardRankingMode.CURRENT_D1_FIRST,
+    opportunity_calibration: PreboardOpportunityCalibration | None = None,
 ) -> list[dict[str, object]]:
     """Advance chronologically and let false positives consume real slots."""
 
@@ -140,7 +204,11 @@ def select_preboard_decisions(
     grouped: defaultdict[datetime, list[tuple[int, dict[str, object]]]] = defaultdict(list)
     invalid: list[tuple[int, dict[str, object]]] = []
     for index, raw in enumerate(rows):
-        row = dict(raw)
+        row = _ranking_fields(
+            raw,
+            ranking_mode=ranking_mode,
+            opportunity_calibration=opportunity_calibration,
+        )
         decision_at = _decision_at(row)
         if decision_at is None:
             invalid.append((index, row))
@@ -163,7 +231,13 @@ def select_preboard_decisions(
             if (pair := _pair(row, trade_date)) not in acted_pairs
             and can_compete_for_action(row, thresholds)
         ]
-        competitors.sort(key=lambda item: preboard_action_sort_key(item[1]))
+        competitors.sort(
+            key=lambda item: preboard_action_sort_key(
+                item[1],
+                ranking_mode=ranking_mode,
+                opportunity_calibration=opportunity_calibration,
+            )
+        )
         selected = competitors[: len(available_slots)]
         selected_slots = {
             index: slot
@@ -206,6 +280,7 @@ def select_preboard_decisions(
                     "decision_version": PREBOARD_DECISION_VERSION,
                     "policy_version": PREBOARD_DECISION_VERSION,
                     "policy_fingerprint": thresholds.fingerprint,
+                    "ranking_mode": ranking_mode.value,
                     "action_locked": already_acted,
                     "execution_mode": execution_mode.value,
                     "actionable": bool(
@@ -229,6 +304,7 @@ def select_preboard_decisions(
                 "decision_version": PREBOARD_DECISION_VERSION,
                 "policy_version": PREBOARD_DECISION_VERSION,
                 "policy_fingerprint": thresholds.fingerprint,
+                "ranking_mode": ranking_mode.value,
                 "action_locked": False,
                 "execution_mode": execution_mode.value,
                 "actionable": False,
@@ -273,6 +349,22 @@ def _research_only_decision(
             }
         )
     return result
+
+
+def _ranking_fields(
+    raw: Mapping[str, object],
+    *,
+    ranking_mode: PreboardRankingMode,
+    opportunity_calibration: PreboardOpportunityCalibration | None,
+) -> dict[str, object]:
+    row = dict(raw)
+    row["ranking_mode"] = ranking_mode.value
+    row["opportunity_value_pct"] = (
+        preboard_opportunity_value_pct(row, opportunity_calibration)
+        if opportunity_calibration is not None
+        else None
+    )
+    return row
 
 
 def _meets_prepare_thresholds(
@@ -378,6 +470,11 @@ def _number(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if isfinite(parsed) else None
+
+
+def _probability(value: object) -> float | None:
+    parsed = _number(value)
+    return parsed if parsed is not None and 0.0 <= parsed <= 1.0 else None
 
 
 def _integer(value: object) -> int | None:

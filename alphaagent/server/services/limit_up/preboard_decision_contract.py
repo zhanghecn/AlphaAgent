@@ -48,6 +48,12 @@ class PreboardExecutionMode(StrEnum):
     FORMAL = "formal"
 
 
+class PreboardRankingMode(StrEnum):
+    CURRENT_D1_FIRST = "current_d1_first"
+    PURE_TOUCH_PROBABILITY = "pure_touch_probability"
+    COMBINED_OPPORTUNITY_VALUE = "combined_opportunity_value"
+
+
 @dataclass(frozen=True)
 class HistoricalPrior:
     expected_d1_net_return_pct: float | None
@@ -91,6 +97,30 @@ class PreboardPolicyThresholds:
             self.minimum_eventual_touch_probability,
             "minimum_eventual_touch_probability",
         )
+
+
+@dataclass(frozen=True)
+class PreboardOpportunityCalibration:
+    touched_unsealed_expected_return_pct: float
+    non_touch_expected_return_pct: float
+    touched_unsealed_sample_count: int
+    non_touch_sample_count: int
+    fit_dates: tuple[date, ...]
+    fingerprint: str
+
+    def __post_init__(self) -> None:
+        values = (
+            self.touched_unsealed_expected_return_pct,
+            self.non_touch_expected_return_pct,
+        )
+        if any(not isfinite(value) for value in values):
+            raise ValueError("opportunity calibration returns must be finite")
+        if self.touched_unsealed_sample_count < 1 or self.non_touch_sample_count < 1:
+            raise ValueError("opportunity calibration samples must be positive")
+        if not self.fit_dates:
+            raise ValueError("opportunity calibration fit dates are required")
+        if not self.fingerprint:
+            raise ValueError("opportunity calibration fingerprint is required")
 
 
 def apply_preboard_parity_contract(

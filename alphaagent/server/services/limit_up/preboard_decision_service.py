@@ -28,6 +28,7 @@ from alphaagent.server.services.limit_up.preboard_live_minute_buffer import (
     LiveMinuteBuffer,
 )
 from alphaagent.server.services.limit_up import (
+    live_repository,
     preboard_decision_repository,
     radar_observation_repository,
     scheduled_execution,
@@ -234,10 +235,16 @@ def freeze_and_settle(
         target_date,
         target_date,
     )
+    publication_rows = live_repository.load_publication_audit_rows(target_date)
     feature_rows = preboard_decision_repository.load_decision_feature_rows(
         [target_date]
     )
-    audit = _audit_label_scope(target_date, frames, observations)
+    audit = _audit_label_scope(
+        target_date,
+        frames,
+        observations,
+        publication_rows,
+    )
     missing_payload_count = sum(
         row.get("_decision_payload_present") is not True for row in feature_rows
     )
@@ -391,6 +398,7 @@ def _audit_label_scope(
     trade_date: date,
     frames: Sequence[Mapping[str, object]],
     observations: Sequence[Mapping[str, object]],
+    publication_rows: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     window_frames = [
         dict(row)
@@ -446,6 +454,8 @@ def _audit_label_scope(
         reasons.append("entry_window_max_gap_above_60s")
     if scan_p90 is None or scan_p90 > MAXIMUM_SCAN_P90_SECONDS:
         reasons.append("scan_interval_p90_above_20s")
+    publication = _publication_audit(trade_date, publication_rows)
+    reasons.extend(publication["reason_codes"])
     return {
         "frame_count": len(window_frames),
         "reason_codes": tuple(dict.fromkeys(reasons)),
@@ -455,6 +465,68 @@ def _audit_label_scope(
             "observation_capture_count_mismatch_count": mismatch_count,
             "entry_window_max_gap_seconds": maximum_gap,
             "scan_interval_p90_seconds": scan_p90,
+            **dict(publication["metrics"]),
+        },
+    }
+
+
+def _publication_audit(
+    trade_date: date,
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    expected_minutes: set[datetime] = set()
+    for start_text, end_text in scheduled_execution.ENTRY_WINDOWS:
+        current = datetime.combine(
+            trade_date,
+            time.fromisoformat(start_text),
+            tzinfo=SHANGHAI,
+        )
+        end = datetime.combine(
+            trade_date,
+            time.fromisoformat(end_text),
+            tzinfo=SHANGHAI,
+        )
+        while current < end:
+            expected_minutes.add(current)
+            current += timedelta(minutes=1)
+
+    published_minutes: set[datetime] = set()
+    first_write_delays: list[float] = []
+    for row in rows:
+        captured_minute = _optional_datetime(
+            row.get("captured_minute") or row.get("captured_at")
+        )
+        if captured_minute is None:
+            continue
+        local_minute = _local_datetime(captured_minute).replace(second=0, microsecond=0)
+        if local_minute not in expected_minutes:
+            continue
+        published_minutes.add(local_minute)
+        created_at = _optional_datetime(row.get("created_at"))
+        if created_at is not None:
+            first_write_delays.append(
+                max(
+                    (_local_datetime(created_at) - local_minute).total_seconds(),
+                    0.0,
+                )
+            )
+
+    expected_count = len(expected_minutes)
+    published_count = len(published_minutes)
+    coverage = _ratio(published_count, expected_count)
+    delay_p90 = _quantile(first_write_delays, 0.90)
+    reasons: list[str] = []
+    if coverage < 0.98:
+        reasons.append("public_snapshot_minute_coverage_below_98pct")
+    if delay_p90 is None or delay_p90 > 30.0:
+        reasons.append("public_first_write_delay_p90_above_30s")
+    return {
+        "reason_codes": tuple(reasons),
+        "metrics": {
+            "public_snapshot_expected_minute_count": expected_count,
+            "public_snapshot_minute_count": published_count,
+            "public_snapshot_minute_coverage_ratio": round(coverage, 6),
+            "public_first_write_delay_p90_seconds": delay_p90,
         },
     }
 

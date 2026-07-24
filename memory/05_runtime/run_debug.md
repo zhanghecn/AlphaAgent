@@ -65,8 +65,9 @@ docker compose -f docker-compose.ghcr.yml config --images
 - 唯一板前合同为 `limit-up-preboard-decision-v1`。概率资格为 `ready`，历史晋级为
   `historical_rejected`，执行模式为 `research_only`，正式激活为 `not_eligible`；模型指纹
   为 `sha256:b1d4ca83ca4dad25e1e74cda21c5b01c4f40d6e62ed9da62582d6eb8c651b71a`。
-- 双概率排序有效，但严格 C 首板账户只有 25 笔、52.00% 胜率、`+14.95%` 复利和
-  `-9.17%` 回撤，未通过相对 A 基线的冻结账户门。实时只展示
+- 双概率排序有效，但严格 C 首板账户只有 27 笔、51.85% 胜率、`+6.10%` 复利和
+  `-14.58%` 回撤，未通过相对 A 基线的冻结账户门。当前 D+1 优先与纯触板概率排序的
+  validation 结果完全相同；综合机会价值因 fit 触板未封仅 4 笔而不可评估。实时只展示
   `preboard_candidates` 概率观察，不写 action、不占两仓、不改正式买点。
 - `>=3%` 只对已通过正式同源高质量门的首板启动观察，不是全市场母池、训练分母或
   买点。普通 3% 股票不得进入模型、页面推荐或两仓。
@@ -104,8 +105,8 @@ npm --prefix frontend run build
 git diff --check
 ```
 
-2026-07-23 源码收口验收：打板后端 `794 passed`，数据同步 `155 passed`，前端提交态
-`120 passed`；compileall、前端生产构建、开发/部署 Compose 配置和 `git diff --check`
+2026-07-24 源码收口验收：打板后端 `808 passed`，数据同步 `155 passed`，前端提交态
+`140 passed`；compileall、前端生产构建、开发/部署 Compose 配置和 `git diff --check`
 均通过。Compose 只保留 API 与统一 data-sync worker，旧独立板前 worker 已删除；数据库
 只有 1 个当前 `active / ready / historical_rejected` 模型。镜像和页面运行态必须在下次
 重建部署后重新验收，不再沿用清理前的镜像哈希。
@@ -124,15 +125,17 @@ docker compose --profile research run --rm -T --no-deps \
   -e PYTHONPATH=/workspace:/app/third_party/akshare \
   alphaagent-research python -m \
   alphaagent.server.services.limit_up.preboard_decision_replay \
-  --sessions 180 \
-  --json-output memory/06_backtests/limit_up_preboard_decision_validation_20260723.json \
+  --sessions 89 \
+  --end-date 2026-07-20 \
+  --json-output /tmp/limit_up_preboard_decision_validation_20260723.json \
   --markdown-output memory/06_backtests/limit_up_preboard_decision_validation_20260723.md
 ```
 
 完成后必须核对数据/候选索引/模型指纹、44/15/30 日期切分和唯一终止状态；
 当前概率资格为 `ready`、最终状态为 `historical_rejected`，所以必须运行并核对严格 A/C
 账户，但执行模式只能是 `research_only`。任何指纹变化先定位，不得静默覆盖报告或在
-validation 上重新调参。
+validation 上重新调参。当前完整回放耗时 `2259.389s`、峰值 RSS `6925.750 MiB`；固定
+内存中止门已删除，只保留实际峰值审计。
 
 低吸成员与题材门禁：
 

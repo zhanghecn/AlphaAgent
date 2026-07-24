@@ -12,7 +12,8 @@ from hashlib import sha256
 import json
 from math import isfinite
 from pathlib import Path
-from statistics import median
+from statistics import mean, median
+import sys
 from time import monotonic
 from zoneinfo import ZoneInfo
 
@@ -45,7 +46,9 @@ from alphaagent.server.services.limit_up.lane_research import (
     FIRST_BOARD_MOMENTUM_MIN_SCORE,
 )
 from alphaagent.server.services.limit_up.preboard_decision_contract import (
+    PreboardOpportunityCalibration,
     PreboardPolicyThresholds,
+    PreboardRankingMode,
     apply_preboard_parity_contract,
     preboard_market_gate,
 )
@@ -95,6 +98,7 @@ RECENT_TIMING_AUDIT_END = date(2026, 7, 22)
 MINIMUM_FIT_DATES = 40
 MINIMUM_VALIDATION_ACTIONS = 20
 MINIMUM_CALIBRATION_ACTIONS = 10
+MINIMUM_OPPORTUNITY_SCENARIO_SAMPLES = 5
 HALF_HOUR_BUCKETS = (
     ("10:00-10:30", time(10, 0), time(10, 30)),
     ("10:30-11:00", time(10, 30), time(11, 0)),
@@ -206,6 +210,14 @@ class ReplayCalibration:
     selected_metrics: dict[str, object] | None
     metrics_by_threshold: tuple[dict[str, object], ...]
     calibration_dates: tuple[date, ...]
+
+
+@dataclass(frozen=True)
+class ReplayOpportunityCalibration:
+    status: str
+    calibration: PreboardOpportunityCalibration | None
+    fit_dates: tuple[date, ...]
+    scenario_metrics: dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -418,9 +430,22 @@ def load_frozen_replay_dataset(
     )
     if scope is None:
         return _blocked_dataset(str(scope_audit.get("status") or "blocked"), path_index)
-    scoped_manifest = _frame_for_pairs(scope.minute_manifest, set(path_index.pairs))
-    if len(scoped_manifest) != len(path_index.pairs):
-        return _blocked_dataset("blocked_by_frozen_static_scope_parity", path_index)
+    scoped_manifest, frozen_scope_audit = _reconstruct_frozen_static_scope(
+        scope.manifest,
+        scope.minute_manifest,
+        path_index.pairs,
+        scope.feature_by_pair,
+    )
+    scope_audit = {
+        **dict(scope_audit),
+        "frozen_path_reconstruction": frozen_scope_audit,
+    }
+    if frozen_scope_audit["status"] != "ready":
+        return _blocked_dataset(
+            "blocked_by_frozen_static_input_reconstruction",
+            path_index,
+            coverage={"static_scope": scope_audit},
+        )
     scoped_features, scoped_financials = _filter_static_scope_indexes(
         path_index.pairs,
         scope.feature_by_pair,
@@ -716,7 +741,11 @@ def _iter_prior_indexes(
 def _blocked_dataset(
     status: str,
     path_index: FrozenPreboardPathIndex,
+    *,
+    coverage: Mapping[str, object] | None = None,
 ) -> ReplayDataset:
+    coverage_report = {"frozen_path_index": asdict(path_index)}
+    coverage_report.update(dict(coverage or {}))
     return ReplayDataset(
         status=status,
         dates=tuple(sorted({trade_date for _symbol, trade_date in path_index.pairs})),
@@ -725,7 +754,7 @@ def _blocked_dataset(
         account_bars=(),
         trade_dates=(),
         market_diagnostics={},
-        coverage={"frozen_path_index": asdict(path_index)},
+        coverage=coverage_report,
         candidate_index_audit={},
         pool_audit={},
         profitability_audit={},
@@ -746,6 +775,76 @@ def _frame_for_pairs(
         ]
     ].copy()
     return selected.sort_values(["trade_date", "vt_symbol"], kind="stable")
+
+
+def _reconstruct_frozen_static_scope(
+    raw_manifest: pd.DataFrame,
+    current_static_manifest: pd.DataFrame,
+    frozen_pairs: Sequence[tuple[str, date]],
+    feature_by_pair: Mapping[tuple[str, date], Mapping[str, object]],
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    """Rebuild frozen paths while treating current static eligibility as an audit."""
+
+    requested = set(frozen_pairs)
+    scoped_manifest = _frame_for_pairs(raw_manifest, requested)
+    raw_pair_counts = Counter(
+        pair
+        for row in scoped_manifest.itertuples()
+        if (pair := (str(row.vt_symbol), _as_date(row.trade_date)))[1] is not None
+    )
+    raw_pairs = set(raw_pair_counts)
+    current_pairs = {
+        (str(row.vt_symbol), trade_date)
+        for row in current_static_manifest.itertuples()
+        if (trade_date := _as_date(row.trade_date)) is not None
+    }
+    feature_pairs = {
+        (str(pair[0]), trade_date)
+        for pair in feature_by_pair
+        if len(pair) == 2 and (trade_date := _as_date(pair[1])) is not None
+    }
+    missing_manifest = sorted(requested - raw_pairs, key=lambda pair: (pair[1], pair[0]))
+    duplicate_manifest = sorted(
+        (pair for pair, count in raw_pair_counts.items() if count != 1),
+        key=lambda pair: (pair[1], pair[0]),
+    )
+    missing_features = sorted(
+        requested - feature_pairs,
+        key=lambda pair: (pair[1], pair[0]),
+    )
+    static_drift = sorted(
+        requested - current_pairs,
+        key=lambda pair: (pair[1], pair[0]),
+    )
+    status = (
+        "ready"
+        if not missing_manifest and not duplicate_manifest and not missing_features
+        else "blocked_by_frozen_static_input_reconstruction"
+    )
+    audit = {
+        "status": status,
+        "membership_contract": "immutable_label_independent_frozen_pair_manifest",
+        "frozen_pair_count": len(requested),
+        "reconstructible_pair_count": len(requested & raw_pairs & feature_pairs),
+        "missing_raw_manifest_pair_count": len(missing_manifest),
+        "missing_raw_manifest_pairs": _pair_rows(missing_manifest),
+        "duplicate_raw_manifest_pair_count": len(duplicate_manifest),
+        "duplicate_raw_manifest_pairs": _pair_rows(duplicate_manifest),
+        "missing_feature_pair_count": len(missing_features),
+        "missing_feature_pairs": _pair_rows(missing_features),
+        "current_static_upper_bound_pair_count": len(requested & current_pairs),
+        "current_static_drift_pair_count": len(static_drift),
+        "current_static_drift_pairs": _pair_rows(static_drift),
+        "current_static_role": "audit_only_not_membership",
+    }
+    return scoped_manifest, audit
+
+
+def _pair_rows(pairs: Sequence[tuple[str, date]]) -> list[dict[str, str]]:
+    return [
+        {"vt_symbol": symbol, "trade_date": trade_date.isoformat()}
+        for symbol, trade_date in pairs
+    ]
 
 
 def _filter_static_scope_indexes(
@@ -1624,11 +1723,39 @@ def evaluate_preboard_replay(
     )
     if calibration.thresholds is None:
         order_sets = _baseline_only_order_sets(dataset.formal_orders)
+        opportunity_fit = ReplayOpportunityCalibration(
+            status="not_run_policy_unavailable",
+            calibration=None,
+            fit_dates=split.fit,
+            scenario_metrics={},
+        )
+        ranking_comparison = {
+            "status": "not_run_policy_unavailable",
+            "validation_role": "adversarial_reuse_research_only",
+            "opportunity_calibration": _opportunity_calibration_report(
+                opportunity_fit
+            ),
+            "strategies": {},
+        }
     else:
         order_sets = build_replay_order_sets(
             rows=scored_rows,
             thresholds=calibration.thresholds,
             formal_orders=dataset.formal_orders,
+        )
+        opportunity_fit = fit_opportunity_calibration(
+            scored_rows,
+            fit_dates=set(split.fit),
+            thresholds=calibration.thresholds,
+            model_fingerprint=model.fingerprint,
+        )
+        ranking_comparison = build_ranking_comparison(
+            rows=scored_rows,
+            thresholds=calibration.thresholds,
+            formal_orders=dataset.formal_orders,
+            dataset=dataset,
+            allowed_dates=set(split.validation),
+            opportunity_fit=opportunity_fit,
         )
 
     emit("stage=validation_accounts")
@@ -1710,6 +1837,7 @@ def evaluate_preboard_replay(
         "validation": {
             "probabilities": probability_qualification,
             "accounts": validation_accounts,
+            "ranking_comparison": ranking_comparison,
             "stability": stability,
             "identity_and_timing": _decision_quality_report(
                 order_sets.get("c_action_rows") or (),
@@ -1740,8 +1868,9 @@ def evaluate_preboard_replay(
             "市场、概念、行业、个股资金、当前换手与新鲜度尚不能历史实时同源，当前统一只作诊断。",
             "风险、正式窗口、完整分钟与严格板前价格继续按共享合同失败关闭。",
             "后30日已被既有研究查看，因此标记为adversarial_reuse而非全新盲测。",
+            "三排序共享同一质量池、概率门、成交与两仓；结果只作机制比较，不触发晋级。",
         ],
-        "performance": {"total_seconds": round(monotonic() - started, 3)},
+        "performance": _performance_report(started),
     }
     if publish_research_model:
         report["model_publication"] = preboard_decision_repository.save_decision_model(
@@ -1765,7 +1894,9 @@ def _baseline_only_order_sets(
     relay = [order for order in formal if _is_relay_order(order)]
     first_board = [order for order in formal if not _is_relay_order(order)]
     return {
+        "ranking_mode": PreboardRankingMode.CURRENT_D1_FIRST.value,
         "c_action_pool_rows": [],
+        "c_decision_rows": [],
         "c_action_rows": [],
         "c_first_board_orders": [],
         "a_first_board_orders": first_board,
@@ -3856,6 +3987,24 @@ def _recent_timing_blockers(
     return list(dict.fromkeys(reasons))
 
 
+def _performance_report(started: float) -> dict[str, object]:
+    return {
+        "total_seconds": round(monotonic() - started, 3),
+        "peak_rss_mib": _peak_rss_mib(),
+    }
+
+
+def _peak_rss_mib() -> float | None:
+    try:
+        import resource
+    except ImportError:
+        return None
+
+    peak = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    divisor = 1024.0 * 1024.0 if sys.platform == "darwin" else 1024.0
+    return round(peak / divisor, 3)
+
+
 def _blocked_report(dataset: ReplayDataset, started: float) -> dict[str, object]:
     return {
         "study_version": REPLAY_CONTRACT_VERSION,
@@ -3871,7 +4020,7 @@ def _blocked_report(dataset: ReplayDataset, started: float) -> dict[str, object]
             "coverage": dataset.coverage,
             "input_fingerprint": dataset.input_fingerprint,
         },
-        "performance": {"total_seconds": round(monotonic() - started, 3)},
+        "performance": _performance_report(started),
     }
 
 
@@ -3900,7 +4049,7 @@ def _insufficient_report(
             "pool_audit": dataset.pool_audit,
             "input_fingerprint": dataset.input_fingerprint,
         },
-        "performance": {"total_seconds": round(monotonic() - started, 3)},
+        "performance": _performance_report(started),
     }
 
 
@@ -3992,7 +4141,7 @@ def _probability_rejected_report(
             "概率资格失败后未搜索收益阈值，也未运行严格C账户；A触板基准仍独立报告。",
             "后30日已被既有研究查看，因此标记为adversarial_reuse。",
         ],
-        "performance": {"total_seconds": round(monotonic() - started, 3)},
+        "performance": _performance_report(started),
     }
 
 
@@ -4003,6 +4152,10 @@ def render_preboard_replay_markdown(report: Mapping[str, object]) -> str:
     quality = _mapping(coverage.get("quality_pool"))
     path_coverage = _mapping(coverage.get("one_minute_paths"))
     transaction_coverage = _mapping(coverage.get("transaction_flow"))
+    static_scope = _mapping(coverage.get("static_scope"))
+    frozen_reconstruction = _mapping(
+        static_scope.get("frozen_path_reconstruction")
+    )
     environment_coverage = _mapping(coverage.get("historical_environment"))
     environment_fields = _mapping(environment_coverage.get("field_coverage"))
     pool_audit = _mapping(dataset.get("pool_audit"))
@@ -4026,6 +4179,29 @@ def render_preboard_replay_markdown(report: Mapping[str, object]) -> str:
     probability_heads = _mapping(probability.get("heads"))
     loss_report = _mapping(validation.get("consecutive_losses"))
     half_hour_by_account = _mapping(validation.get("half_hour_by_account"))
+    ranking_comparison = _mapping(validation.get("ranking_comparison"))
+    performance = _mapping(report.get("performance"))
+    reconstruction_lines: list[str] = []
+    if frozen_reconstruction:
+        drift_pairs = _mapping_rows(
+            frozen_reconstruction.get("current_static_drift_pairs")
+        )
+        drift_text = "、".join(
+            f"{row.get('vt_symbol')}@{row.get('trade_date')}" for row in drift_pairs
+        )
+        reconstruction_lines = [
+            (
+                "- 冻结成员输入可重建："
+                f"{frozen_reconstruction.get('reconstructible_pair_count', 0)} / "
+                f"{frozen_reconstruction.get('frozen_pair_count', 0)} 股票日"
+            ),
+            (
+                "- 当前静态门重算漂移："
+                f"{frozen_reconstruction.get('current_static_drift_pair_count', 0)} "
+                "股票日；只作审计，逐时点共享质量门仍会重新判定。"
+                + (f"明细：{drift_text}。" if drift_text else "")
+            ),
+        ]
 
     def daily_distribution(
         field: str,
@@ -4084,6 +4260,7 @@ def render_preboard_replay_markdown(report: Mapping[str, object]) -> str:
         "## 数据真实性",
         "",
         f"- 数据指纹：`{dataset.get('input_fingerprint', '-')}`",
+        f"- 回放峰值 RSS：{_display(performance.get('peak_rss_mib'))} MiB",
         (
             "- 候选索引分层："
             f"{candidate_audit.get('raw_upper_bound_pair_count', 0)} -> "
@@ -4120,6 +4297,7 @@ def render_preboard_replay_markdown(report: Mapping[str, object]) -> str:
             "点时行 / "
             f"{quality.get('pair_count', 0)} 股票日"
         ),
+        *reconstruction_lines,
         (
             "- 历史实时环境："
             f"{environment_coverage.get('date_count', 0)} 日 / "
@@ -4326,6 +4504,78 @@ def render_preboard_replay_markdown(report: Mapping[str, object]) -> str:
                 "- 未触板误报率："
                 f"{_display_pct(identity.get('unreached_false_positive_rate_pct'))}"
             ),
+            "",
+            "## 三排序机制比较",
+            "",
+            "- 三种排序共享质量池、概率门、成交代理和两仓，不修改正式策略。",
+            "- validation 已查看，以下统一为 `adversarial_reuse/research_only`。",
+        ]
+    )
+    opportunity = _mapping(ranking_comparison.get("opportunity_calibration"))
+    lines.extend(
+        [
+            (
+                "- 综合值 fit 失败分支：触板未封 "
+                f"{opportunity.get('touched_unsealed_sample_count', 0)} 笔 / "
+                f"{_display_signed_pct(opportunity.get('touched_unsealed_expected_return_pct'))}；"
+                "未触板 "
+                f"{opportunity.get('non_touch_sample_count', 0)} 笔 / "
+                f"{_display_signed_pct(opportunity.get('non_touch_expected_return_pct'))}。"
+            ),
+            "",
+            "| 排序 | Top1覆盖 | Top2覆盖 | Top2提前P50 | 动作 | 最终触板 | 误报 | D+1胜率 | 单笔均值 | PF | 复利 | 回撤 | 误报占仓错过 |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    ranking_labels = {
+        PreboardRankingMode.CURRENT_D1_FIRST.value: "当前D+1优先",
+        PreboardRankingMode.PURE_TOUCH_PROBABILITY.value: "纯触板概率",
+        PreboardRankingMode.COMBINED_OPPORTUNITY_VALUE.value: "综合机会价值",
+    }
+    strategies = _mapping(ranking_comparison.get("strategies"))
+    for ranking_mode, label in ranking_labels.items():
+        strategy = _mapping(strategies.get(ranking_mode))
+        strategy_status = str(strategy.get("status") or "not_run")
+        if strategy_status != "ready":
+            lines.append(
+                f"| {label}（{strategy_status}） | "
+                + " | ".join("-" for _index in range(12))
+                + " |"
+            )
+            continue
+        topk = _mapping(strategy.get("topk"))
+        lead = _mapping(topk.get("top2_lead_seconds"))
+        action_quality = _mapping(strategy.get("action_quality"))
+        account = _mapping(strategy.get("first_board_account"))
+        occupancy = _mapping(strategy.get("false_positive_occupancy"))
+        lines.append(
+            "| "
+            + label
+            + " | "
+            + " | ".join(
+                (
+                    _display_pct(topk.get("top1_coverage_pct")),
+                    _display_pct(topk.get("top2_coverage_pct")),
+                    _display(lead.get("p50")),
+                    str(action_quality.get("action_count", 0)),
+                    _display_pct(
+                        action_quality.get("eventual_formal_touch_rate_pct")
+                    ),
+                    _display_pct(
+                        action_quality.get("unreached_false_positive_rate_pct")
+                    ),
+                    _display_pct(account.get("win_rate")),
+                    _display_signed_pct(account.get("average_return_pct")),
+                    _display(account.get("profit_factor")),
+                    _display_signed_pct(account.get("total_return_pct")),
+                    _display_signed_pct(account.get("max_drawdown_pct")),
+                    str(occupancy.get("missed_later_positive_pair_count", 0)),
+                )
+            )
+            + " |"
+        )
+    lines.extend(
+        [
             "",
             "## Validation 分段",
             "",
@@ -4973,11 +5223,113 @@ def calibrate_policy_thresholds(
     )
 
 
+def fit_opportunity_calibration(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    fit_dates: set[date] | Sequence[date],
+    thresholds: PreboardPolicyThresholds,
+    model_fingerprint: str,
+) -> ReplayOpportunityCalibration:
+    """Fit the two preregistered failure branches without validation rows."""
+
+    allowed_dates = tuple(sorted(set(fit_dates)))
+    allowed = set(allowed_dates)
+    earliest_by_pair: dict[tuple[str, date], dict[str, object]] = {}
+    eligible = sorted(
+        (
+            dict(row)
+            for row in rows
+            if _as_date(row.get("trade_date") or row.get("signal_date")) in allowed
+            and row.get("fillable") is True
+            and _number(row.get("d1_net_return_pct")) is not None
+            and can_compete_for_action(row, thresholds)
+        ),
+        key=lambda row: (
+            _as_datetime(row.get("decision_at")) or datetime.max,
+            str(row.get("vt_symbol") or ""),
+        ),
+    )
+    for row in eligible:
+        pair = _row_pair(row)
+        if pair is not None:
+            earliest_by_pair.setdefault(pair, row)
+
+    touched_unsealed_returns: list[float] = []
+    non_touch_returns: list[float] = []
+    for row in earliest_by_pair.values():
+        value = _number(row.get("d1_net_return_pct"))
+        if value is None:
+            continue
+        if row.get("eventual_formal_touch") is not True:
+            non_touch_returns.append(value)
+        elif row.get("sealed_limit") is not True:
+            touched_unsealed_returns.append(value)
+
+    scenario_metrics = {
+        "source": "fit_first_fillable_action_per_stock_day",
+        "fit_pair_count": len(earliest_by_pair),
+        "touched_unsealed_sample_count": len(touched_unsealed_returns),
+        "touched_unsealed_expected_return_pct": (
+            round(mean(touched_unsealed_returns), 10)
+            if touched_unsealed_returns
+            else None
+        ),
+        "non_touch_sample_count": len(non_touch_returns),
+        "non_touch_expected_return_pct": (
+            round(mean(non_touch_returns), 10) if non_touch_returns else None
+        ),
+    }
+    if (
+        len(touched_unsealed_returns) < MINIMUM_OPPORTUNITY_SCENARIO_SAMPLES
+        or len(non_touch_returns) < MINIMUM_OPPORTUNITY_SCENARIO_SAMPLES
+    ):
+        return ReplayOpportunityCalibration(
+            status="insufficient_fit_scenarios",
+            calibration=None,
+            fit_dates=allowed_dates,
+            scenario_metrics=scenario_metrics,
+        )
+
+    fingerprint_payload = {
+        "model_fingerprint": model_fingerprint,
+        "policy_fingerprint": thresholds.fingerprint,
+        "fit_dates": [value.isoformat() for value in allowed_dates],
+        **scenario_metrics,
+    }
+    fingerprint = "sha256:" + sha256(
+        json.dumps(
+            fingerprint_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+    ).hexdigest()
+    calibration = PreboardOpportunityCalibration(
+        touched_unsealed_expected_return_pct=float(
+            scenario_metrics["touched_unsealed_expected_return_pct"]
+        ),
+        non_touch_expected_return_pct=float(
+            scenario_metrics["non_touch_expected_return_pct"]
+        ),
+        touched_unsealed_sample_count=len(touched_unsealed_returns),
+        non_touch_sample_count=len(non_touch_returns),
+        fit_dates=allowed_dates,
+        fingerprint=fingerprint,
+    )
+    return ReplayOpportunityCalibration(
+        status="ready",
+        calibration=calibration,
+        fit_dates=allowed_dates,
+        scenario_metrics=scenario_metrics,
+    )
+
+
 def build_replay_order_sets(
     *,
     rows: Sequence[Mapping[str, object]],
     thresholds: PreboardPolicyThresholds,
     formal_orders: Sequence[Mapping[str, object]],
+    ranking_mode: PreboardRankingMode = PreboardRankingMode.CURRENT_D1_FIRST,
+    opportunity_calibration: PreboardOpportunityCalibration | None = None,
 ) -> dict[str, object]:
     """Build the formal A baseline and strict pre-board C account."""
 
@@ -4986,6 +5338,8 @@ def build_replay_order_sets(
         quality_rows,
         model_bundle=None,
         thresholds=thresholds,
+        ranking_mode=ranking_mode,
+        opportunity_calibration=opportunity_calibration,
     )
     c_action_pool = [
         row for row in quality_rows if can_compete_for_action(row, thresholds)
@@ -4998,13 +5352,257 @@ def build_replay_order_sets(
     relay = [order for order in formal if _is_relay_order(order)]
     formal_first_board = [order for order in formal if not _is_relay_order(order)]
     return {
+        "ranking_mode": ranking_mode.value,
         "c_action_pool_rows": c_action_pool,
+        "c_decision_rows": c_decisions,
         "c_action_rows": c_actions,
         "c_first_board_orders": c_orders,
         "a_first_board_orders": formal_first_board,
         "relay_orders": relay,
         "a_combined_orders": formal,
         "c_combined_orders": [*relay, *c_orders],
+    }
+
+
+def build_ranking_comparison(
+    *,
+    rows: Sequence[Mapping[str, object]],
+    thresholds: PreboardPolicyThresholds,
+    formal_orders: Sequence[Mapping[str, object]],
+    dataset: ReplayDataset,
+    allowed_dates: set[date],
+    opportunity_fit: ReplayOpportunityCalibration,
+) -> dict[str, object]:
+    """Compare three rankings without changing the frozen promotion account."""
+
+    strategies: dict[str, dict[str, object]] = {}
+    for ranking_mode in PreboardRankingMode:
+        calibration = (
+            opportunity_fit.calibration
+            if ranking_mode is PreboardRankingMode.COMBINED_OPPORTUNITY_VALUE
+            else None
+        )
+        if (
+            ranking_mode is PreboardRankingMode.COMBINED_OPPORTUNITY_VALUE
+            and calibration is None
+        ):
+            strategies[ranking_mode.value] = {
+                "status": opportunity_fit.status,
+                "ranking_mode": ranking_mode.value,
+            }
+            continue
+        order_sets = build_replay_order_sets(
+            rows=rows,
+            thresholds=thresholds,
+            formal_orders=formal_orders,
+            ranking_mode=ranking_mode,
+            opportunity_calibration=calibration,
+        )
+        accounts = _phase_accounts(
+            order_sets,
+            dataset,
+            allowed_dates=allowed_dates,
+        )
+        strategies[ranking_mode.value] = {
+            "status": "ready",
+            "ranking_mode": ranking_mode.value,
+            "validation_role": "adversarial_reuse_research_only",
+            "topk": _ranking_topk_report(
+                rows,
+                allowed_dates=allowed_dates,
+                thresholds=thresholds,
+                ranking_mode=ranking_mode,
+                opportunity_calibration=calibration,
+            ),
+            "action_quality": _decision_quality_report(
+                order_sets.get("c_action_rows") or (),
+                allowed_dates=allowed_dates,
+            ),
+            "first_board_account": _compact_account(
+                accounts.get("c_first_board") or {}
+            ),
+            "combined_account": _compact_account(accounts.get("c_combined") or {}),
+            "false_positive_occupancy": _false_positive_occupancy_report(
+                order_sets,
+                thresholds=thresholds,
+                allowed_dates=allowed_dates,
+            ),
+        }
+    return {
+        "status": (
+            "ready"
+            if opportunity_fit.calibration is not None
+            else "partial_opportunity_unavailable"
+        ),
+        "validation_role": "adversarial_reuse_research_only",
+        "shared_contract": {
+            "quality_pool": "same",
+            "probability_thresholds": thresholds.fingerprint,
+            "entry": ENTRY_CONTRACT,
+            "exit": EXIT_CONTRACT,
+            "maximum_first_board_positions": MAXIMUM_FIRST_BOARD_POSITIONS,
+            "later_candidates_replace_filled_slots": False,
+        },
+        "opportunity_calibration": _opportunity_calibration_report(opportunity_fit),
+        "strategies": strategies,
+    }
+
+
+def _opportunity_calibration_report(
+    result: ReplayOpportunityCalibration,
+) -> dict[str, object]:
+    calibration = result.calibration
+    return {
+        "status": result.status,
+        "fit_dates": [value.isoformat() for value in result.fit_dates],
+        "fingerprint": calibration.fingerprint if calibration is not None else None,
+        **dict(result.scenario_metrics),
+    }
+
+
+def _ranking_topk_report(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    allowed_dates: set[date],
+    thresholds: PreboardPolicyThresholds,
+    ranking_mode: PreboardRankingMode,
+    opportunity_calibration: PreboardOpportunityCalibration | None,
+) -> dict[str, object]:
+    frames: defaultdict[datetime, list[dict[str, object]]] = defaultdict(list)
+    for raw in rows:
+        row = dict(raw)
+        trade_date = _as_date(row.get("trade_date") or row.get("signal_date"))
+        decision_at = _as_datetime(row.get("decision_at"))
+        if (
+            trade_date not in allowed_dates
+            or decision_at is None
+            or not can_compete_for_action(row, thresholds)
+        ):
+            continue
+        frames[decision_at].append(row)
+
+    positive_pairs: set[tuple[str, date]] = set()
+    top1_pairs: set[tuple[str, date]] = set()
+    top2_pairs: set[tuple[str, date]] = set()
+    top2_all_pairs: set[tuple[str, date]] = set()
+    first_top2_at: dict[tuple[str, date], datetime] = {}
+    touch_at_by_pair: dict[tuple[str, date], datetime] = {}
+    touched_by_pair: dict[tuple[str, date], bool] = {}
+    for decision_at in sorted(frames):
+        ranked = sorted(
+            frames[decision_at],
+            key=lambda row: preboard_action_sort_key(
+                row,
+                ranking_mode=ranking_mode,
+                opportunity_calibration=opportunity_calibration,
+            ),
+        )
+        for row in ranked:
+            pair = _row_pair(row)
+            if pair is None:
+                continue
+            touched = row.get("eventual_formal_touch") is True
+            touched_by_pair[pair] = touched_by_pair.get(pair, False) or touched
+            if touched:
+                positive_pairs.add(pair)
+                touch_at = _as_datetime(row.get("physical_touch_at"))
+                if touch_at is not None:
+                    touch_at_by_pair[pair] = touch_at
+        for rank, row in enumerate(ranked[:MAX_POSITIONS], start=1):
+            pair = _row_pair(row)
+            if pair is None:
+                continue
+            top2_all_pairs.add(pair)
+            first_top2_at.setdefault(pair, decision_at)
+            if row.get("eventual_formal_touch") is True:
+                top2_pairs.add(pair)
+                if rank == 1:
+                    top1_pairs.add(pair)
+
+    lead_seconds = [
+        max((touch_at_by_pair[pair] - first_at).total_seconds(), 0.0)
+        for pair, first_at in first_top2_at.items()
+        if pair in positive_pairs
+        and pair in touch_at_by_pair
+        and touch_at_by_pair[pair] >= first_at
+    ]
+    false_positive_top2 = {
+        pair for pair in top2_all_pairs if touched_by_pair.get(pair) is not True
+    }
+    return {
+        "formal_positive_pair_count": len(positive_pairs),
+        "top1_covered_count": len(top1_pairs),
+        "top1_coverage_pct": _percentage(len(top1_pairs), len(positive_pairs)),
+        "top2_covered_count": len(top2_pairs),
+        "top2_coverage_pct": _percentage(len(top2_pairs), len(positive_pairs)),
+        "top2_unique_pair_count": len(top2_all_pairs),
+        "top2_false_positive_pair_count": len(false_positive_top2),
+        "top2_precision_pct": _percentage(len(top2_pairs), len(top2_all_pairs)),
+        "top2_lead_seconds": _distribution(lead_seconds),
+    }
+
+
+def _false_positive_occupancy_report(
+    order_sets: Mapping[str, object],
+    *,
+    thresholds: PreboardPolicyThresholds,
+    allowed_dates: set[date],
+) -> dict[str, object]:
+    actions = [
+        dict(row)
+        for row in _mapping_rows(order_sets.get("c_action_rows"))
+        if _as_date(row.get("trade_date") or row.get("signal_date")) in allowed_dates
+    ]
+    selected_pairs = {
+        pair for row in actions if (pair := _row_pair(row)) is not None
+    }
+    false_action_times: defaultdict[date, list[datetime]] = defaultdict(list)
+    for row in actions:
+        trade_date = _as_date(row.get("trade_date") or row.get("signal_date"))
+        decision_at = _as_datetime(row.get("decision_at"))
+        if (
+            trade_date is not None
+            and decision_at is not None
+            and row.get("eventual_formal_touch") is not True
+        ):
+            false_action_times[trade_date].append(decision_at)
+
+    missed_pairs: set[tuple[str, date]] = set()
+    for row in _mapping_rows(order_sets.get("c_decision_rows")):
+        pair = _row_pair(row)
+        if pair is None or pair in selected_pairs or pair[1] not in allowed_dates:
+            continue
+        decision_at = _as_datetime(row.get("decision_at"))
+        if (
+            row.get("decision_state") != "prepare"
+            or not can_compete_for_action(row, thresholds)
+            or (_number(row.get("d1_net_return_pct")) or 0.0) <= 0.0
+            or decision_at is None
+            or not any(value <= decision_at for value in false_action_times[pair[1]])
+        ):
+            continue
+        missed_pairs.add(pair)
+    return {
+        "false_positive_action_count": sum(
+            row.get("eventual_formal_touch") is not True for row in actions
+        ),
+        "missed_later_positive_pair_count": len(missed_pairs),
+    }
+
+
+def _compact_account(account: Mapping[str, object]) -> dict[str, object]:
+    return {
+        key: account.get(key)
+        for key in (
+            "signal_count",
+            "filled_count",
+            "closed_count",
+            "win_rate",
+            "average_return_pct",
+            "profit_factor",
+            "total_return_pct",
+            "max_drawdown_pct",
+        )
     }
 
 

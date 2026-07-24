@@ -4,9 +4,12 @@ from copy import deepcopy
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
+import pandas as pd
+
 from alphaagent.server.services.limit_up import preboard_decision_replay as replay
 from alphaagent.server.services.limit_up.preboard_decision_contract import (
     PreboardPolicyThresholds,
+    PreboardRankingMode,
 )
 from alphaagent.server.services.limit_up.preboard_decision_replay import (
     ENTRY_CONTRACT,
@@ -18,6 +21,7 @@ from alphaagent.server.services.limit_up.preboard_decision_replay import (
     calibrate_policy_thresholds,
     candidate_index_fingerprint,
     decide_historical_promotion,
+    fit_opportunity_calibration,
     load_frozen_preboard_path_index,
     render_preboard_replay_markdown,
     split_replay_dates,
@@ -36,6 +40,15 @@ def test_main_requires_explicit_flag_to_publish_research_model(monkeypatch) -> N
     replay.main(["--sessions", "1", "--publish-research-model"])
 
     assert calls[0]["publish_research_model"] is True
+
+
+def test_performance_report_records_peak_rss(monkeypatch) -> None:
+    monkeypatch.setattr(replay, "_peak_rss_mib", lambda: 123.456)
+
+    report = replay._performance_report(replay.monotonic())
+
+    assert report["total_seconds"] >= 0
+    assert report["peak_rss_mib"] == 123.456
 
 
 def test_point_rows_are_causal_and_ignore_future_bars_and_labels() -> None:
@@ -166,6 +179,52 @@ def test_frozen_scope_indexes_drop_unrequested_pairs_and_symbols() -> None:
     assert features[kept_pair] is kept_feature
     assert financials == {kept_pair[0]: kept_financial}
     assert financials[kept_pair[0]] is kept_financial
+
+
+def test_frozen_scope_membership_survives_current_static_gate_drift() -> None:
+    first = ("600001.SSE", date(2026, 7, 20))
+    drifted = ("600002.SSE", date(2026, 7, 20))
+    raw_manifest = pd.DataFrame(
+        [
+            {"vt_symbol": first[0], "trade_date": pd.Timestamp(first[1])},
+            {"vt_symbol": drifted[0], "trade_date": pd.Timestamp(drifted[1])},
+        ]
+    )
+    current_static_manifest = raw_manifest.iloc[:1].copy()
+
+    scoped, audit = replay._reconstruct_frozen_static_scope(
+        raw_manifest,
+        current_static_manifest,
+        (first, drifted),
+        {first: {"feature": 1}, drifted: {"feature": 2}},
+    )
+
+    assert audit["status"] == "ready"
+    assert len(scoped) == 2
+    assert audit["current_static_upper_bound_pair_count"] == 1
+    assert audit["current_static_drift_pairs"] == [
+        {"vt_symbol": drifted[0], "trade_date": drifted[1].isoformat()}
+    ]
+    assert audit["current_static_role"] == "audit_only_not_membership"
+
+
+def test_frozen_scope_reconstruction_fails_when_a_frozen_feature_is_missing() -> None:
+    pair = ("600001.SSE", date(2026, 7, 20))
+    manifest = pd.DataFrame(
+        [{"vt_symbol": pair[0], "trade_date": pd.Timestamp(pair[1])}]
+    )
+
+    _scoped, audit = replay._reconstruct_frozen_static_scope(
+        manifest,
+        manifest,
+        (pair,),
+        {},
+    )
+
+    assert audit["status"] == "blocked_by_frozen_static_input_reconstruction"
+    assert audit["missing_feature_pairs"] == [
+        {"vt_symbol": pair[0], "trade_date": pair[1].isoformat()}
+    ]
 
 
 def test_recent_static_candidate_excludes_outcome_labels() -> None:
@@ -531,6 +590,153 @@ def test_threshold_calibration_reads_only_calibration_dates() -> None:
     assert baseline.status == after.status == "ready"
     assert baseline.thresholds == after.thresholds
     assert baseline.selected_metrics == after.selected_metrics
+
+
+def test_opportunity_calibration_uses_fit_only_and_one_row_per_stock_day() -> None:
+    fit_date = date(2026, 6, 1)
+    rows = []
+    for index in range(5):
+        touched = _scored_row(
+            fit_date,
+            f"6001{index:02d}.SSE",
+            probability=0.80,
+            net_return=-2.0,
+        )
+        touched.update(eventual_formal_touch=True, sealed_limit=False)
+        rows.append(touched)
+        non_touch = _scored_row(
+            fit_date,
+            f"6002{index:02d}.SSE",
+            probability=0.80,
+            net_return=-4.0,
+        )
+        non_touch.update(eventual_formal_touch=False, sealed_limit=False)
+        rows.append(non_touch)
+
+    duplicate = {**rows[0], "decision_at": "2026-06-01T10:11:00", "d1_net_return_pct": 50.0}
+    validation_outlier = {
+        **rows[-1],
+        "trade_date": "2026-07-01",
+        "signal_date": "2026-07-01",
+        "decision_at": "2026-07-01T10:10:00",
+        "d1_net_return_pct": -99.0,
+    }
+
+    result = fit_opportunity_calibration(
+        [*rows, duplicate, validation_outlier],
+        fit_dates={fit_date},
+        thresholds=_thresholds(),
+        model_fingerprint="sha256:model",
+    )
+
+    assert result.status == "ready"
+    assert result.calibration is not None
+    assert result.calibration.touched_unsealed_sample_count == 5
+    assert result.calibration.non_touch_sample_count == 5
+    assert result.calibration.touched_unsealed_expected_return_pct == -2.0
+    assert result.calibration.non_touch_expected_return_pct == -4.0
+
+
+def test_opportunity_calibration_fails_closed_when_a_failure_branch_is_small() -> None:
+    fit_date = date(2026, 6, 1)
+    rows = []
+    for index in range(4):
+        row = _scored_row(
+            fit_date,
+            f"6003{index:02d}.SSE",
+            probability=0.80,
+            net_return=-3.0,
+        )
+        row.update(eventual_formal_touch=False, sealed_limit=False)
+        rows.append(row)
+
+    result = fit_opportunity_calibration(
+        rows,
+        fit_dates={fit_date},
+        thresholds=_thresholds(),
+        model_fingerprint="sha256:model",
+    )
+
+    assert result.status == "insufficient_fit_scenarios"
+    assert result.calibration is None
+
+
+def test_replay_order_sets_can_compare_touch_first_without_changing_action_pool() -> None:
+    trade_date = date(2026, 7, 1)
+    high_d1 = _scored_row(
+        trade_date,
+        "600001.SSE",
+        probability=0.71,
+        net_return=1.0,
+    )
+    high_d1["expected_d1_net_return_pct"] = 5.0
+    high_touch = _scored_row(
+        trade_date,
+        "600002.SSE",
+        probability=0.95,
+        net_return=1.0,
+    )
+    high_touch["expected_d1_net_return_pct"] = 1.0
+    middle_touch = _scored_row(
+        trade_date,
+        "600003.SSE",
+        probability=0.90,
+        net_return=1.0,
+    )
+    middle_touch["expected_d1_net_return_pct"] = 0.5
+
+    current = build_replay_order_sets(
+        rows=[high_d1, high_touch, middle_touch],
+        thresholds=_thresholds(),
+        formal_orders=[],
+    )
+    touch_first = build_replay_order_sets(
+        rows=[high_d1, high_touch, middle_touch],
+        thresholds=_thresholds(),
+        formal_orders=[],
+        ranking_mode=PreboardRankingMode.PURE_TOUCH_PROBABILITY,
+    )
+
+    assert len(current["c_action_pool_rows"]) == len(
+        touch_first["c_action_pool_rows"]
+    ) == 3
+    assert [row["vt_symbol"] for row in current["c_action_rows"]] == [
+        "600001.SSE",
+        "600002.SSE",
+    ]
+    assert [row["vt_symbol"] for row in touch_first["c_action_rows"]] == [
+        "600002.SSE",
+        "600003.SSE",
+    ]
+
+
+def test_ranking_topk_uses_the_same_action_gate_as_slot_selection() -> None:
+    trade_date = date(2026, 7, 1)
+    eligible = _scored_row(
+        trade_date,
+        "600001.SSE",
+        probability=0.80,
+        net_return=1.0,
+    )
+    environment_blocked = _scored_row(
+        trade_date,
+        "600002.SSE",
+        probability=0.99,
+        net_return=1.0,
+    )
+    environment_blocked["execution_environment_passed"] = False
+
+    report = replay._ranking_topk_report(
+        [eligible, environment_blocked],
+        allowed_dates={trade_date},
+        thresholds=_thresholds(),
+        ranking_mode=PreboardRankingMode.PURE_TOUCH_PROBABILITY,
+        opportunity_calibration=None,
+    )
+
+    assert report["formal_positive_pair_count"] == 1
+    assert report["top1_covered_count"] == 1
+    assert report["top2_unique_pair_count"] == 1
 
 
 def test_date_split_is_exact_44_15_30() -> None:
@@ -1098,6 +1304,7 @@ def test_markdown_reports_only_formal_and_strict_accounts() -> None:
             "calibration": {"status": "insufficient_calibration_actions"},
             "validation": {"accounts": {}, "identity_and_timing": {}},
             "recent_live_timing": {"rows": []},
+            "performance": {"peak_rss_mib": 123.456},
         }
     )
 
@@ -1106,6 +1313,34 @@ def test_markdown_reports_only_formal_and_strict_accounts() -> None:
     assert "A 正式触板首板" in markdown
     assert "C 新严格板前首板" in markdown
     assert "market_gate" in markdown
+    assert "回放峰值 RSS：123.4560 MiB" in markdown
+
+
+def test_markdown_does_not_render_unavailable_combined_ranking_as_zero() -> None:
+    markdown = render_preboard_replay_markdown(
+        {
+            "status": "historical_rejected",
+            "decision": {},
+            "dataset": {},
+            "model": {},
+            "calibration": {},
+            "validation": {
+                "ranking_comparison": {
+                    "strategies": {
+                        "combined_opportunity_value": {
+                            "status": "insufficient_fit_scenarios"
+                        }
+                    }
+                }
+            },
+        }
+    )
+
+    combined_row = next(
+        line for line in markdown.splitlines() if line.startswith("| 综合机会价值")
+    )
+    assert "insufficient_fit_scenarios" in combined_row
+    assert "| 0 |" not in combined_row
 
 
 def _point(

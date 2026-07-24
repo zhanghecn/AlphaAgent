@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from alphaagent.server.services.limit_up import preboard_decision_service as service
 from alphaagent.server.services.limit_up.first_board_quality import PreboardPools
@@ -313,6 +313,11 @@ def test_day_freeze_does_not_reconstruct_missing_intraday_decisions(
         lambda *_: [observation],
     )
     monkeypatch.setattr(
+        service.live_repository,
+        "load_publication_audit_rows",
+        lambda *_: [],
+    )
+    monkeypatch.setattr(
         service.preboard_decision_repository,
         "load_decision_feature_rows",
         lambda _dates: [],
@@ -381,6 +386,11 @@ def test_complete_day_labels_the_actual_saved_shared_payload(monkeypatch) -> Non
         lambda *_: observations,
     )
     monkeypatch.setattr(
+        service.live_repository,
+        "load_publication_audit_rows",
+        lambda *_: [],
+    )
+    monkeypatch.setattr(
         service.preboard_decision_repository,
         "load_decision_feature_rows",
         lambda _dates: [feature_row],
@@ -416,3 +426,51 @@ def test_complete_day_labels_the_actual_saved_shared_payload(monkeypatch) -> Non
     assert persisted["labels"][(10, "600001.SSE")]["formal_touch_within_3m"] is True
     assert persisted["scope"]["feature_rows"][0]["label_status"] == "known"
     assert "_decision_payload_present" not in persisted["scope"]["feature_rows"][0]
+
+
+def test_publication_audit_accepts_complete_prompt_public_minutes() -> None:
+    trade_date = date(2026, 7, 21)
+    rows = _publication_rows(trade_date, delay_seconds=10)
+
+    audit = service._publication_audit(trade_date, rows)
+
+    assert audit["reason_codes"] == ()
+    assert audit["metrics"]["public_snapshot_expected_minute_count"] == 180
+    assert audit["metrics"]["public_snapshot_minute_coverage_ratio"] == 1.0
+    assert audit["metrics"]["public_first_write_delay_p90_seconds"] == 10.0
+
+
+def test_publication_audit_blocks_missing_or_late_public_minutes() -> None:
+    trade_date = date(2026, 7, 21)
+    rows = _publication_rows(trade_date, delay_seconds=40)[:-4]
+
+    audit = service._publication_audit(trade_date, rows)
+
+    assert set(audit["reason_codes"]) == {
+        "public_snapshot_minute_coverage_below_98pct",
+        "public_first_write_delay_p90_above_30s",
+    }
+    assert audit["metrics"]["public_snapshot_minute_count"] == 176
+
+
+def _publication_rows(
+    trade_date: date,
+    *,
+    delay_seconds: int,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for start_text, end_text in service.scheduled_execution.ENTRY_WINDOWS:
+        current = datetime.fromisoformat(
+            f"{trade_date.isoformat()}T{start_text}+08:00"
+        )
+        end = datetime.fromisoformat(f"{trade_date.isoformat()}T{end_text}+08:00")
+        while current < end:
+            rows.append(
+                {
+                    "captured_minute": current,
+                    "captured_at": current + timedelta(seconds=5),
+                    "created_at": current + timedelta(seconds=delay_seconds),
+                }
+            )
+            current += timedelta(minutes=1)
+    return rows

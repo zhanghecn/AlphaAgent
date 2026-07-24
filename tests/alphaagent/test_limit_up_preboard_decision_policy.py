@@ -6,13 +6,16 @@ from alphaagent.server.services.limit_up import preboard_decision_model
 from alphaagent.server.services.limit_up.preboard_decision_contract import (
     PREBOARD_DECISION_VERSION,
     PreboardExecutionMode,
+    PreboardOpportunityCalibration,
     PreboardPolicyThresholds,
+    PreboardRankingMode,
     PreboardState,
 )
 from alphaagent.server.services.limit_up.preboard_decision_policy import (
     can_compete_for_action,
     evaluate_preboard_decisions,
     preboard_action_sort_key,
+    preboard_opportunity_value_pct,
     select_preboard_decisions,
 )
 
@@ -115,6 +118,80 @@ def test_eight_percent_high_d1_quality_outranks_nine_percent_low_quality() -> No
     assert preboard_action_sort_key(high_quality) < preboard_action_sort_key(
         low_quality
     )
+
+
+def test_pure_touch_ranking_reverses_the_current_d1_first_order() -> None:
+    high_d1 = _row(
+        "600001.SSE",
+        "10:15:00",
+        expected_return=4.0,
+        touch_3m=0.61,
+        eventual=0.71,
+    )
+    high_touch = _row(
+        "600002.SSE",
+        "10:15:00",
+        expected_return=1.0,
+        touch_3m=0.95,
+        eventual=0.96,
+    )
+
+    current = select_preboard_decisions([high_d1, high_touch], _thresholds())
+    touch_first = select_preboard_decisions(
+        [high_d1, high_touch],
+        _thresholds(),
+        ranking_mode=PreboardRankingMode.PURE_TOUCH_PROBABILITY,
+    )
+
+    assert current[0]["vt_symbol"] == "600001.SSE"
+    assert touch_first[0]["vt_symbol"] == "600002.SSE"
+    assert touch_first[0]["ranking_mode"] == "pure_touch_probability"
+
+
+def test_combined_opportunity_value_prices_non_touch_failure() -> None:
+    calibration = _opportunity_calibration()
+    high_d1_low_touch = _row(
+        "600001.SSE",
+        "10:15:00",
+        expected_return=5.0,
+        touch_3m=0.61,
+        eventual=0.71,
+    )
+    lower_d1_high_touch = _row(
+        "600002.SSE",
+        "10:15:00",
+        expected_return=2.5,
+        touch_3m=0.95,
+        eventual=0.96,
+    )
+
+    decisions = select_preboard_decisions(
+        [high_d1_low_touch, lower_d1_high_touch],
+        _thresholds(),
+        ranking_mode=PreboardRankingMode.COMBINED_OPPORTUNITY_VALUE,
+        opportunity_calibration=calibration,
+    )
+
+    assert decisions[0]["vt_symbol"] == "600002.SSE"
+    assert decisions[0]["opportunity_value_pct"] == preboard_opportunity_value_pct(
+        lower_d1_high_touch,
+        calibration,
+    )
+
+
+def test_combined_opportunity_ranking_fails_closed_without_fit_calibration() -> None:
+    row = _row("600001.SSE", "10:15:00")
+
+    try:
+        select_preboard_decisions(
+            [row],
+            _thresholds(),
+            ranking_mode=PreboardRankingMode.COMBINED_OPPORTUNITY_VALUE,
+        )
+    except ValueError as exc:
+        assert "requires fit calibration" in str(exc)
+    else:
+        raise AssertionError("combined ranking must require fit calibration")
 
 
 def test_false_positive_occupies_slot_and_later_strong_stock_cannot_replace_it() -> None:
@@ -240,6 +317,17 @@ def _thresholds() -> PreboardPolicyThresholds:
         minimum_eventual_touch_probability=0.70,
         calibrated_dates=(date(2026, 7, 1),),
         fingerprint="sha256:thresholds",
+    )
+
+
+def _opportunity_calibration() -> PreboardOpportunityCalibration:
+    return PreboardOpportunityCalibration(
+        touched_unsealed_expected_return_pct=-2.0,
+        non_touch_expected_return_pct=-4.0,
+        touched_unsealed_sample_count=8,
+        non_touch_sample_count=20,
+        fit_dates=(date(2026, 6, 1),),
+        fingerprint="sha256:opportunity",
     )
 
 
