@@ -336,7 +336,11 @@ def load_signal_static_context(
             )
         ).mappings().all()
         open_positions = session.execute(
-            select(schema.low_suction_paper_positions).where(
+            select(
+                schema.low_suction_paper_positions.c.vt_symbol,
+                schema.low_suction_paper_positions.c.sector_id,
+                schema.low_suction_paper_positions.c.status,
+            ).where(
                 schema.low_suction_paper_positions.c.strategy_version
                 == STRATEGY_VERSION,
                 schema.low_suction_paper_positions.c.status.in_(OPEN_POSITION_STATUSES),
@@ -410,7 +414,7 @@ def load_signal_static_context(
         completed_dates=completed_dates,
         open_positions=pd.DataFrame(
             open_positions,
-            columns=schema.low_suction_paper_positions.c.keys(),
+            columns=("vt_symbol", "sector_id", "status"),
         ),
     )
 

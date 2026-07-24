@@ -11,6 +11,7 @@ import { ErrorState } from "@/components/ErrorState";
 import { LoadingState } from "@/components/LoadingState";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { cn } from "@/lib/utils";
+import { formatPct, phaseLabel, rateTone } from "./format";
 import { LowSuctionRuleEvidenceModal } from "./LowSuctionRuleEvidenceModal";
 
 const PAGE_SIZE = 20;
@@ -47,7 +48,7 @@ export function LowSuctionHistoryLedger() {
 
   if (overview.isLoading) return <div className="py-5"><LoadingState rows={6} /></div>;
   if (overview.error) {
-    return <div className="py-5"><ErrorState message="低吸历史逐笔账本暂时不可用" onRetry={() => void overview.refetch()} /></div>;
+    return <div className="py-5"><ErrorState message="反包历史逐笔账本暂时不可用" onRetry={() => void overview.refetch()} /></div>;
   }
   if (!run) {
     return (
@@ -133,9 +134,9 @@ export function LowSuctionHistoryLedger() {
                   <td className="px-3 py-2.5 text-right tabular-nums">龙{trade.dynamic_rank} / 第{trade.wave_number}波</td>
                   <td className="px-3 py-2.5"><div>{trade.support_line} · {trade.support_price.toFixed(2)}</div><div className="font-mono text-xs text-muted-foreground">{trade.support_test_date}</div></td>
                   <td className="px-3 py-2.5 text-right tabular-nums">{trade.entry_price.toFixed(2)}</td>
-                  <td className={cn("px-3 py-2.5 text-right tabular-nums", returnTone(trade.d1_net_return_pct))}>{formatPct(trade.d1_net_return_pct)}</td>
+                  <td className={cn("px-3 py-2.5 text-right tabular-nums", rateTone(trade.d1_net_return_pct))}>{formatPct(trade.d1_net_return_pct)}</td>
                   <td className="px-3 py-2.5"><div>{trade.holding_sessions} 日 · <span className="font-mono text-xs">{trade.exit_date}</span></div><div className="text-xs text-muted-foreground">{exitReasonLabel(trade.exit_reason)}</div></td>
-                  <td className={cn("px-3 py-2.5 text-right font-semibold tabular-nums", returnTone(trade.net_return_pct))}>{formatPct(trade.net_return_pct)}</td>
+                  <td className={cn("px-3 py-2.5 text-right font-semibold tabular-nums", rateTone(trade.net_return_pct))}>{formatPct(trade.net_return_pct)}</td>
                 </tr>
               ))}
             </tbody>
@@ -175,10 +176,6 @@ export function LowSuctionHistoryLedger() {
   );
 }
 
-function phaseLabel(phase: string) {
-  return phase === "uptrend" ? "主升" : phase === "rotation" ? "轮动" : "升温";
-}
-
 function exitReasonLabel(reason: string) {
   const labels: Record<string, string> = {
     higher_high_confirmed: "创新高确认退出",
@@ -187,12 +184,4 @@ function exitReasonLabel(reason: string) {
     campaign_ended: "概念行情结束退出",
   };
   return labels[reason] ?? reason;
-}
-
-function formatPct(value: number) {
-  return `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
-}
-
-function returnTone(value: number) {
-  return value > 0 ? "text-rise" : value < 0 ? "text-fall" : "text-muted-foreground";
 }

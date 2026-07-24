@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Activity, ArrowRight, BarChart3, BookOpenText, Info } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
+import { Activity, BarChart3, BookOpenText, Info } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import type {
@@ -8,9 +9,15 @@ import type {
   LowSuctionStrategyOverview,
   LowSuctionStrategySignal,
 } from "@/api/lowSuction";
+import { FlowRail } from "@/components/FlowRail";
+import { PanelHead } from "@/components/PanelHead";
 import { cn } from "@/lib/utils";
+import { Definition, Metric, dateText, formatNumber, formatPct, formatRate, formatTime, phaseLabel, rateTone } from "./format";
+import { buildLowSuctionPhases } from "./lowSuctionFlow";
+import { deriveLiveStatus, type LiveStatus, type LiveTone } from "./liveStatus";
 import { LowSuctionHistoryLedger } from "./LowSuctionHistoryLedger";
 import { LowSuctionRuleEvidenceModal, type LowSuctionRuleEvidence } from "./LowSuctionRuleEvidenceModal";
+import { LowSuctionRulesView } from "./LowSuctionRulesView";
 
 type View = "live" | "backtest" | "rules";
 
@@ -29,20 +36,28 @@ export function LowSuctionResearchWorkspace({
   history: LowSuctionHistoricalOverview;
   strategy: LowSuctionStrategyOverview;
 }) {
-  const [view, setView] = useState<View>("live");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const viewParam = searchParams.get("view");
+  const view: View = viewParam === "backtest" || viewParam === "rules" ? viewParam : "live";
+  const setView = (next: View) => {
+    const params = new URLSearchParams(searchParams);
+    if (next === "live") params.delete("view");
+    else params.set("view", next);
+    setSearchParams(params, { replace: true });
+  };
   return (
     <div className="min-w-0">
       <header className="flex min-h-14 flex-wrap items-center justify-between gap-3 border-b pb-3">
         <div className="flex min-w-0 items-baseline gap-3">
-          <h1 className="font-display text-lg font-semibold">低吸研究</h1>
-          <span className="text-xs text-muted-foreground">主升龙头 · 日线收盘回测</span>
+          <h1 className="font-display text-lg font-semibold">反包研究</h1>
+          <span className="text-xs text-muted-foreground">主升龙头 · 反包确认</span>
         </div>
         <div className="text-xs text-muted-foreground">
           主板 · 动态 Top3 · 第一次 MA5 / 后续 MA10
         </div>
       </header>
 
-      <nav className="flex h-11 items-end gap-6 overflow-x-auto border-b" role="tablist" aria-label="低吸研究视图">
+      <nav className="flex h-11 items-end gap-6 overflow-x-auto border-b" role="tablist" aria-label="反包研究视图">
         {VIEWS.map((item) => {
           const Icon = item.icon;
           const active = view === item.value;
@@ -68,7 +83,7 @@ export function LowSuctionResearchWorkspace({
       <section role="tabpanel" className="min-w-0">
         {view === "live" && <LiveView strategy={strategy} />}
         {view === "backtest" && <BacktestView validation={validation} history={history} />}
-        {view === "rules" && <RulesView validation={validation} />}
+        {view === "rules" && <LowSuctionRulesView validation={validation} />}
       </section>
     </div>
   );
@@ -92,23 +107,20 @@ export function BacktestView({
   ];
   return (
     <div className="min-w-0">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b py-4">
-        <div>
-          <div className="text-sm font-semibold">三行情自适应回测</div>
-          <div className="mt-1 text-xs text-muted-foreground">{candidate.policy_version}</div>
-        </div>
-        <div className="text-right text-xs text-muted-foreground">
-          <div>{run ? `${run.trade_count} 笔 · ${dateText(run.built_at)} 重算` : "回测账本未生成"}</div>
-          <div>当前成分历史代理，不计入正式资格</div>
-        </div>
+      <PanelHead
+        no="01"
+        zh="参数与口径"
+        en="SETUP"
+        note={candidate.policy_version}
+        aside={run ? `${run.trade_count} 笔 · ${dateText(run.built_at)} 重算` : "回测账本未生成"}
+      />
+      <div className="border-b px-3 py-2 text-[11px] text-muted-foreground sm:px-4">
+        当前成分历史代理 · 信号日收盘近涨停成交不保证（D+1 开盘压力口径收益大幅下降）· 仅作探索，不计入正式资格门
       </div>
 
       <div className="grid border-b lg:grid-cols-2">
-        <section className="border-b lg:border-b-0 lg:border-r" aria-label="两仓复利回测">
-          <div className="border-b px-3 py-2">
-            <h2 className="text-sm font-semibold">两仓真实账户</h2>
-            <p className="mt-0.5 text-xs text-muted-foreground">受两仓上限、同概念和持仓冲突约束</p>
-          </div>
+        <section aria-label="两仓复利回测">
+          <PanelHead no="02" zh="两仓真实账户" en="ACCOUNT" note="受两仓上限、同概念和持仓冲突约束" accent />
           <dl className="grid grid-cols-2 border-l sm:grid-cols-3">
             <Metric label="闭合成交" value={account ? `${account.closed_trades} 笔` : "--"} />
             <Metric label="成交胜率" value={formatRate(account?.cash_win_rate_pct)} tone={rateTone((account?.cash_win_rate_pct ?? 0) - 50)} />
@@ -119,10 +131,7 @@ export function BacktestView({
           </dl>
         </section>
         <section aria-label="全部交易质量">
-          <div className="border-b px-3 py-2">
-            <h2 className="text-sm font-semibold">全部推荐质量</h2>
-            <p className="mt-0.5 text-xs text-muted-foreground">每笔规则信号独立统计，不受两仓已满影响</p>
-          </div>
+          <PanelHead no="03" zh="全部推荐质量" en="QUALITY" note="每笔规则信号独立统计，不受两仓已满影响" />
           <dl className="grid grid-cols-2 border-l sm:grid-cols-3">
             <Metric label="全部交易" value={`${quality?.trades ?? run?.trade_count ?? candidate.full_history.closed_trades} 笔`} />
             <Metric label="规则胜率" value={formatRate(quality?.positive_rate_pct ?? candidate.full_history.win_rate_pct)} tone={rateTone((quality?.positive_rate_pct ?? candidate.full_history.win_rate_pct ?? 0) - 50)} />
@@ -135,10 +144,7 @@ export function BacktestView({
       </div>
 
       <section className="border-b py-5" aria-labelledby="phase-result-title">
-        <div className="mb-3 flex items-baseline justify-between gap-3">
-          <h2 id="phase-result-title" className="text-sm font-semibold">分行情结果</h2>
-          <span className="text-xs text-muted-foreground">开发段与验证段分别统计</span>
-        </div>
+        <PanelHead no="04" zh="分行情结果" en="REGIME" aside="开发段与验证段分别统计" />
         <div className="overflow-x-auto border-t">
           <table className="w-full min-w-[680px] text-left text-sm">
             <thead className="bg-muted/30 text-xs text-muted-foreground">
@@ -168,7 +174,7 @@ export function BacktestView({
       </section>
 
       <section className="py-5" aria-labelledby="robustness-title">
-        <h2 id="robustness-title" className="mb-3 text-sm font-semibold">稳健性检查</h2>
+        <PanelHead no="05" zh="稳健性检查" en="ROBUSTNESS" />
         <dl className="grid border-t text-sm md:grid-cols-2">
           <Definition label="全历史 95% 胜率下界" value={formatRate(candidate.robustness.full_history.wilson_95_lower_pct)} />
           <Definition label="删除单一概念后的最低胜率" value={formatRate(candidate.robustness.full_history.leave_one_campaign_out_min_win_rate_pct)} />
@@ -179,13 +185,33 @@ export function BacktestView({
 
       <section className="border-t" aria-labelledby="history-ledger-title">
         <div className="pt-5">
-          <h2 id="history-ledger-title" className="text-sm font-semibold">回测买卖记录</h2>
-          <p className="mt-1 text-xs text-muted-foreground">每一笔信号的买入价、D+1 表现、持有周期和退出收益</p>
+          <PanelHead no="06" zh="逐笔交割" en="TRADES" note="每一笔信号的买入价、D+1 表现、持有周期和退出收益" />
         </div>
         <LowSuctionHistoryLedger />
       </section>
     </div>
   );
+}
+
+const STATUS_TONE_CLASS: Record<LiveTone, string> = {
+  go: "bg-rise gate-breathe",
+  wait: "bg-amber-500",
+  stop: "bg-fall",
+  info: "bg-primary",
+  muted: "bg-muted-foreground/40",
+};
+
+function StatusLamp({ status }: { status: LiveStatus }) {
+  return (
+    <span className="flex items-center gap-2">
+      <span className={cn("h-2.5 w-2.5 rounded-full", STATUS_TONE_CLASS[status.tone])} aria-hidden />
+      <span className="text-sm font-semibold">{status.label}</span>
+    </span>
+  );
+}
+
+function qualificationLabel(status?: "collecting_forward_evidence" | "not_qualified" | "qualified") {
+  return status === "qualified" ? "已达标" : status === "not_qualified" ? "未达标" : "前向收集中";
 }
 
 function LiveView({ strategy }: { strategy: LowSuctionStrategyOverview }) {
@@ -195,28 +221,75 @@ function LiveView({ strategy }: { strategy: LowSuctionStrategyOverview }) {
   const signals = effectiveRecommendations.length > 0 ? effectiveRecommendations : strategy.today_candidates;
   const isRecommendation = effectiveRecommendations.length > 0;
   const usingCache = strategy.recommendations.length === 0 && cachedRecommendations.length > 0;
+  const blocked = strategy.session.status === "blocked";
   const hasRun = strategy.session.status !== "not_run";
   const finalConfirmed = strategy.session.alert_stage === "final_confirmation";
+  const liveStatus = deriveLiveStatus(strategy);
+  const forward = strategy.forward_performance;
+  const qualification = forward?.qualification;
+  const d2Shadow = strategy.d2_fast_limit_shadow;
   return (
     <div className="min-w-0">
+      <FlowRail
+        label="作战流程 OPS FLOW"
+        phases={buildLowSuctionPhases(strategy)}
+        nextAt={strategy.session.next_scan_at ? formatTime(strategy.session.next_scan_at) : undefined}
+      />
+
+      <div className="border-b px-3 py-3 sm:px-4">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <StatusLamp status={liveStatus} />
+          {liveStatus.detail && <span className="text-xs font-medium text-fall">{liveStatus.detail}</span>}
+          <span className="ml-auto text-xs text-muted-foreground">
+            候选 <span className="font-semibold tabular-nums text-foreground">{strategy.today_candidates.length}</span> 只
+          </span>
+          <span className="text-xs text-muted-foreground">
+            推荐 <span className="font-semibold tabular-nums text-foreground">{effectiveRecommendations.length}</span> 只
+          </span>
+          <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
+            {strategy.session.last_scan_at ? `跟踪于 ${formatTime(strategy.session.last_scan_at)}` : `更新于 ${formatTime(strategy.generated_at)}`}
+            {strategy.session.next_scan_at ? ` · 下次跟踪 ${formatTime(strategy.session.next_scan_at)}` : ""}
+          </span>
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+          <span>
+            前向账本 {forward ? `${forward.closed_trades}/${qualification?.thresholds.closed_trades ?? 300} 笔` : "--"} · {qualificationLabel(qualification?.status)}
+          </span>
+          <span>执行方式 研究推荐，不自动下单</span>
+          <span>
+            D+2 快速涨停影子 已结算 {d2Shadow?.settled ?? 0}/{d2Shadow?.target_samples ?? 20} 笔
+            {(d2Shadow?.settled ?? 0) > 0 && d2Shadow ? ` · 改善 ${d2Shadow.improved} 笔 · 平均增量 ${formatPct(d2Shadow.mean_return_delta_pct_points)}` : ""}
+          </span>
+        </div>
+      </div>
+
       <div className="flex flex-wrap items-center justify-between gap-3 border-b py-4">
         <div>
           <h2 className="text-sm font-semibold">{strategy.session.trade_date} {finalConfirmed ? "尾盘确认" : "盘中预警"}</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            {isRecommendation ? `${effectiveRecommendations.length} 只满足买入条件${usingCache ? ` · 缓存自 ${strategy.recommendation_cache?.source_trade_date ?? signals[0]?.signal_trade_date}` : ""}` : hasRun ? "当前没有满足全部买入条件的股票" : "等待首次盘中跟踪"}
+            {blocked
+              ? "信号计算受阻，今日推荐可能不完整，请先修复数据管道"
+              : isRecommendation
+                ? `${effectiveRecommendations.length} 只满足买入条件${usingCache ? ` · 缓存自 ${strategy.recommendation_cache?.source_trade_date ?? signals[0]?.signal_trade_date}` : ""}`
+                : hasRun
+                  ? "当前没有满足全部买入条件的股票"
+                  : "等待首次盘中跟踪"}
           </p>
-        </div>
-        <div className="text-right text-xs text-muted-foreground">
-          <div>{sessionStatusLabel(strategy.session.status)}</div>
-          <div>{strategy.session.last_scan_at ? `跟踪于 ${formatTime(strategy.session.last_scan_at)}` : `更新于 ${formatTime(strategy.generated_at)}`}</div>
-          {strategy.session.next_scan_at && <div>下次跟踪 {formatTime(strategy.session.next_scan_at)}</div>}
         </div>
       </div>
 
       {signals.length === 0 ? (
         <div className="border-b py-12 text-center">
-          <div className="text-sm font-medium">{hasRun ? "今日暂无买入推荐" : "盘中预警尚未计算"}</div>
-          <div className="mt-1 text-xs text-muted-foreground">{hasRun ? "没有股票同时通过主升、动态 Top3、回踩和转强条件" : "等待当日数据更新与低吸筛选任务执行"}</div>
+          <div className="text-sm font-medium">
+            {blocked ? "信号计算受阻" : hasRun ? "今日暂无买入推荐" : "盘中预警尚未计算"}
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            {blocked
+              ? "阻塞原因已显示在上方指挥条，修复后将在下个扫描窗口自动重试"
+              : hasRun
+                ? "没有股票同时通过主升、动态 Top3、回踩和转强条件"
+                : "等待当日数据更新与反包筛选任务执行"}
+          </div>
         </div>
       ) : (
         <div className="overflow-x-auto border-b">
@@ -238,18 +311,9 @@ function LiveView({ strategy }: { strategy: LowSuctionStrategyOverview }) {
         </div>
       )}
 
-      <div className="grid border-b text-sm sm:grid-cols-3">
-        <Definition label="候选" value={`${strategy.today_candidates.length} 只`} />
-        <Definition label="推荐买入" value={`${effectiveRecommendations.length} 只${usingCache ? "（早盘缓存）" : ""}`} />
-        <Definition label="执行方式" value="研究推荐，不自动下单" />
-      </div>
       <p className="py-3 text-xs leading-5 text-muted-foreground">
         交易日 09:30、10:30、11:30、13:30、14:30 跟踪盘面并提前预警；14:50 尾盘最终确认。盘中预警不占仓，只有尾盘确认才进入 14:55 纸面买入与后续验证账本。
       </p>
-      <div className="border-t py-3 text-xs text-muted-foreground">
-        D+2 快速涨停影子：已结算 {strategy.d2_fast_limit_shadow?.settled ?? 0} / 20 笔
-        {(strategy.d2_fast_limit_shadow?.settled ?? 0) > 0 && ` · 改善 ${strategy.d2_fast_limit_shadow.improved} 笔 · 平均增量 ${formatPct(strategy.d2_fast_limit_shadow.mean_return_delta_pct_points)}`}
-      </div>
       <LowSuctionRuleEvidenceModal open={Boolean(selectedEvidence)} onOpenChange={(open) => { if (!open) setSelectedEvidence(null); }} evidence={selectedEvidence} />
     </div>
   );
@@ -282,113 +346,4 @@ function liveEvidence(signal: LowSuctionStrategySignal): LowSuctionRuleEvidence 
     signalEligible: signal.signal_eligible,
     decisionReason: signal.decision_reason,
   };
-}
-
-type RuleNode = {
-  id: string;
-  title: string;
-  summary: string;
-  algorithm: string;
-  data: string;
-  reject: string;
-};
-
-function RulesView({ validation }: { validation: LowSuctionCrossRegimeValidation }) {
-  const contract = validation.three_phase_candidate.execution_contract;
-  const nodes: RuleNode[] = [
-    { id: "universe", title: "股票池", summary: "只保留可交易主板", algorithm: contract.universe, data: "证券基础信息、上市状态、ST 标记、交易板块", reject: "排除，不进入当日候选。" },
-    { id: "campaign", title: "概念主升", summary: "确认资金推动的概念行情", algorithm: contract.concept_campaign, data: "概念成分日线、概念涨幅、换手与回撤序列", reject: "概念未启动或已经退潮，整组股票不参与。" },
-    { id: "leader", title: "动态龙头", summary: "计算概念内 Top3", algorithm: contract.leader_identity, data: "截至当日的波段涨幅、强势日、概念超额、换手扩张", reject: "排名在 Top3 之外，不做低吸。" },
-    { id: "structure", title: "个股主升", summary: "确认仍有创新高能力", algorithm: contract.main_rise_structure, data: "个股日线、可见前高、波段结构与均线", reject: "结构破坏或无法形成更高点，停止跟踪。" },
-    { id: "support", title: "回踩支撑", summary: "第一次看 MA5，后续看 MA10", algorithm: contract.wave_support, data: "信号日前完整日线、MA5、MA10、波段次数", reject: "未触及目标支撑或有效跌破支撑，不买。" },
-    { id: "reclaim", title: "分歧转强", summary: "支撑测试后重新走强", algorithm: contract.common_reclaim, data: "支撑测试后 1-2 日的收盘、涨幅、最低价和参考前高", reject: "只有回踩、没有转强确认，继续等待。" },
-    { id: "entry", title: "收盘买入", summary: "信号日按收盘价成交", algorithm: `${contract.uptrend_entry}；${contract.warming_entry}；${contract.rotation_entry}。${contract.entry_execution}`, data: "行情阶段、信号日完整收盘价、组合可用仓位", reject: `退潮时${contract.retreat_entry}；仓位或概念限制不通过也不买。` },
-    { id: "exit", title: "退出结算", summary: "D+1 止损，盈利单跟随结构", algorithm: `${contract.d1_exit}；${contract.winner_exit}`, data: "D+1 及后续完整日线、前高、个股结构、概念行情状态", reject: "成本后 D+1 不盈利直接退出；盈利单在创新高确认或结构结束时退出。" },
-  ];
-  const [selectedId, setSelectedId] = useState(nodes[0].id);
-  const selected = nodes.find((node) => node.id === selectedId) ?? nodes[0];
-  return (
-    <div className="min-w-0 py-5">
-      <div className="overflow-x-auto pb-3">
-        <ol className="flex min-w-[980px] items-stretch" aria-label="低吸规则流程图">
-          {nodes.map((node, index) => (
-            <li key={node.id} className="flex min-w-0 flex-1 items-center">
-              <button type="button" aria-current={selected.id === node.id ? "step" : undefined} onClick={() => setSelectedId(node.id)} className={cn("h-full w-full border px-3 py-3 text-left transition-colors", selected.id === node.id ? "border-foreground bg-muted/40" : "border-border hover:bg-muted/20")}>
-                <span className="block font-mono text-xs text-muted-foreground">{String(index + 1).padStart(2, "0")}</span>
-                <span className="mt-1 block text-sm font-semibold">{node.title}</span>
-                <span className="mt-1 block text-xs leading-4 text-muted-foreground">{node.summary}</span>
-              </button>
-              {index < nodes.length - 1 && <ArrowRight size={16} className="mx-1 shrink-0 text-muted-foreground" aria-hidden />}
-            </li>
-          ))}
-        </ol>
-      </div>
-
-      <section className="mt-3 border-t" aria-live="polite">
-        <div className="grid text-sm lg:grid-cols-[180px_minmax(0,1fr)]">
-          <div className="border-b px-3 py-3 font-medium lg:border-r">算法条件</div>
-          <div className="border-b px-3 py-3 leading-6">{selected.algorithm}</div>
-          <div className="border-b px-3 py-3 font-medium lg:border-r">使用数据</div>
-          <div className="border-b px-3 py-3 leading-6 text-muted-foreground">{selected.data}</div>
-          <div className="border-b px-3 py-3 font-medium lg:border-r">不通过</div>
-          <div className="border-b px-3 py-3 leading-6 text-muted-foreground">{selected.reject}</div>
-        </div>
-      </section>
-
-      <div className="mt-5 border-t py-3 text-xs text-muted-foreground">
-        成交口径：{contract.portfolio}；{contract.data_frequency}
-      </div>
-    </div>
-  );
-}
-
-function Metric({ label, value, tone }: { label: string; value: string; tone?: string }) {
-  return <div className="border-b border-r px-3 py-3"><dt className="text-xs text-muted-foreground">{label}</dt><dd className={cn("mt-1 font-semibold tabular-nums", tone)}>{value}</dd></div>;
-}
-
-function Definition({ label, value }: { label: string; value: string }) {
-  return <div className="grid grid-cols-[minmax(140px,0.8fr)_minmax(0,1.2fr)] gap-4 border-b px-3 py-2.5 md:odd:border-r"><dt className="text-muted-foreground">{label}</dt><dd className="text-right">{value}</dd></div>;
-}
-
-function formatRate(value: number | null | undefined) {
-  return value == null ? "--" : `${value.toFixed(2)}%`;
-}
-
-function formatPct(value: number | null | undefined) {
-  return value == null ? "--" : `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
-}
-
-function formatNumber(value: number | null) {
-  return value == null ? "--" : value.toFixed(2);
-}
-
-function rateTone(value: number) {
-  return value > 0 ? "text-rise" : value < 0 ? "text-fall" : "text-muted-foreground";
-}
-
-function phaseLabel(value: string) {
-  return value === "uptrend" ? "主升" : value === "rotation" ? "轮动" : "升温";
-}
-
-function dateText(value: string) {
-  return value.slice(0, 10);
-}
-
-function formatTime(value: string) {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-}
-
-function sessionStatusLabel(value: string) {
-  const labels: Record<string, string> = {
-    pre_market: "盘前等待",
-    trading: "盘中计算中",
-    market_closed: "今日已收盘",
-    closed: "今日已收盘",
-    not_run: "今日尚未计算",
-    preview_ready: "盘中预警已更新",
-    signal_frozen: "尾盘信号已确认",
-    paper_account_active: "尾盘买入已记录",
-  };
-  return labels[value] ?? value;
 }

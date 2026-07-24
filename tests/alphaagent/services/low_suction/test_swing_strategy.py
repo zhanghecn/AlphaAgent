@@ -277,6 +277,33 @@ def test_future_or_outcome_columns_are_never_signal_inputs() -> None:
         build_swing_signal_capture(replace(_inputs(), stock_bars=bars))
 
 
+def test_open_position_ledger_columns_do_not_trip_the_no_lookahead_guard() -> None:
+    positions = pd.DataFrame(
+        [
+            {
+                "signal_id": "holding-1",
+                "vt_symbol": "600001.SSE",
+                "sector_id": "BK_TEST",
+                "status": "open",
+                "entry_trade_date": date(2026, 7, 17),
+                "entry_at": datetime(2026, 7, 17, 14, 55, tzinfo=SHANGHAI),
+                "entry_price": 20.0,
+                "entry_amount": 20_000.0,
+                "exit_trigger_date": None,
+                "exit_trigger_reason": None,
+                "exit_deferred_sessions": 0,
+            }
+        ]
+    )
+
+    capture = build_swing_signal_capture(replace(_inputs(), open_positions=positions))
+
+    signal = capture.candidates[0]
+    assert signal.recommendation_state == "skipped"
+    assert signal.portfolio_reason == "same_concept_position"
+    assert capture.recommendation_count == 0
+
+
 def test_non_main_board_candidate_is_never_recommended() -> None:
     inputs = replace(
         _inputs(),

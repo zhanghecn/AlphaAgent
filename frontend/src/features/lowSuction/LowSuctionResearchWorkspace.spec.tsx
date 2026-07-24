@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 
 import type {
@@ -68,7 +69,9 @@ const strategy = {
 describe("LowSuctionResearchWorkspace", () => {
   it("uses the same primary information architecture as limit-up research", () => {
     const html = renderToStaticMarkup(
-      <LowSuctionResearchWorkspace validation={validation} history={history} strategy={strategy} />,
+      <MemoryRouter>
+        <LowSuctionResearchWorkspace validation={validation} history={history} strategy={strategy} />
+      </MemoryRouter>,
     );
 
     expect(html).toContain("实时推荐");
@@ -83,11 +86,55 @@ describe("LowSuctionResearchWorkspace", () => {
     expect(html).not.toContain("14:50 信号");
   });
 
+  it("surfaces blocked runs instead of a silent empty state", () => {
+    const blocked = {
+      ...strategy,
+      session: {
+        ...strategy.session,
+        status: "blocked",
+        phases: {
+          signal_preview: {
+            status: "blocked",
+            complete: false,
+            attempted_at: "2026-07-21T13:30:00+08:00",
+            candidate_count: 0,
+            recommendation_count: 0,
+            positions_opened: 0,
+            positions_closed: 0,
+            blocking_reasons: ["future_or_outcome_columns_prohibited"],
+          },
+        },
+      },
+    } as unknown as LowSuctionStrategyOverview;
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LowSuctionResearchWorkspace validation={validation} history={history} strategy={blocked} />
+      </MemoryRouter>,
+    );
+
+    expect(html).toContain("信号计算受阻");
+    expect(html).toContain("输入校验未通过（防未来函数守护）");
+    expect(html).not.toContain("今日暂无买入推荐");
+  });
+
+  it("never leaks a raw english session status", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LowSuctionResearchWorkspace validation={validation} history={history} strategy={strategy} />
+      </MemoryRouter>,
+    );
+
+    expect(html).not.toContain("awaiting_signal_window");
+    expect(html).not.toContain("preview_ready");
+  });
+
   it("separates two-slot compounding from all recommendation quality", () => {
     const queryClient = new QueryClient();
     const html = renderToStaticMarkup(
       <QueryClientProvider client={queryClient}>
-        <BacktestView validation={validation} history={history} />
+        <MemoryRouter>
+          <BacktestView validation={validation} history={history} />
+        </MemoryRouter>
       </QueryClientProvider>,
     );
 
@@ -100,5 +147,24 @@ describe("LowSuctionResearchWorkspace", () => {
     expect(html).toContain("全部交易");
     expect(html).toContain("89 笔");
     expect(html).toContain("不受两仓已满影响");
+  });
+
+  it("orders the backtest report into numbered chapters", () => {
+    const queryClient = new QueryClient();
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <BacktestView validation={validation} history={history} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    for (const chapter of ["01", "02", "03", "04", "05", "06"]) {
+      expect(html).toContain(`>${chapter}<`);
+    }
+    expect(html).toContain("参数与口径");
+    expect(html).toContain("分行情结果");
+    expect(html).toContain("稳健性检查");
+    expect(html).toContain("逐笔交割");
   });
 });

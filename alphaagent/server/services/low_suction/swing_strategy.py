@@ -216,6 +216,9 @@ def _validate_and_prepare_inputs(
     completed_dates = tuple(sorted(set(inputs.completed_dates)))
     if not completed_dates or completed_dates[-1] != inputs.source_trade_date:
         raise SwingSignalInputError("d_minus_one_completed_session_missing")
+    # Portfolio state is not a signal feature frame: its entry_*/exit_* ledger
+    # columns record past fills, so the no-lookahead prefix guard must not
+    # inspect it. Column requirements are enforced separately below.
     _reject_future_or_outcome_columns(
         inputs.leader_rows,
         inputs.leader_history,
@@ -225,7 +228,6 @@ def _validate_and_prepare_inputs(
         inputs.stock_quotes,
         inputs.concept_quotes,
         inputs.benchmark_quotes,
-        inputs.open_positions,
     )
     leaders = _prepare_leaders(inputs.leader_rows, inputs.source_trade_date)
     history = _prepare_leader_history(inputs.leader_history, inputs.source_trade_date)
