@@ -5,6 +5,9 @@
 ## Current Contracts
 
 - `alphaagent_requirement_map.md`: 当前用户目标、产品边界和优先级。
+- `alphaagent_limit_up_leader_cycle_factor_research_plan.md`: 从首板点火、连续/反包二进三、
+  空间妖股和容量中军出发，分日级周期与严格分钟传播研究龙头带动板块，并只在正式打板
+  质量池内验证 D+1 排序增量。
 - `alphaagent_functional_design.md`: 当前模块、数据流和隔离规则。
 - `alphaagent_service_frontend_execution_plan.md`: 当前后端/前端运行形态与接口边界。
 - `alphaagent_low_suction_research_reset_design.md`: v2 唯一设计基线；从无预设分钟状态面板

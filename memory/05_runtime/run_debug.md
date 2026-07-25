@@ -57,11 +57,12 @@ docker compose -f docker-compose.ghcr.yml config --images
 - 本地唯一正式合同为 `limit-up-history-v15 / limit-up-live-v15 /
   limit-up-scheduled-v9 / limit-up-cash-v5`。首板、二进三、两仓、正式费用和 D+1
   官方收盘退出保持不变。
-- 本地运行数据已自然推进到 `2026-07-22` 的 804 个可靠交易日；板前最终报告继续固定
-  使用 802 日输入，不因新增交易日重选模型或阈值。
-- 冻结的 802 日正式组合基线为 170 个信号、99 笔两仓成交，胜率 `69.6970%`、复利
-  `+171.7614%`、最大回撤 `-8.3083%`、利润因子 `2.8454`。该结果是触板执行基线，
-  不是板前可成交胜率。
+- 本地运行数据已自然推进到 `2026-07-24` 的 806 个可靠交易日；板前模型最终报告继续
+  固定使用 802 日输入，不因新增交易日重选模型或阈值。
+- 财报点时修复后的当前正式账本为 243 个信号；全量独立推荐闭合 239 笔、胜率
+  `54.8117%`、平均 `+0.5687%`，两仓闭合 127 笔、胜率 `58.2677%`、复利
+  `+54.7953%`、最大回撤 `-20.6187%`。旧 802 日 `69.6970%` 是两仓成交子集且受旧财报
+  覆盖偏差影响，只保留为历史审计证据，不再是当前正式质量基线。
 - 唯一板前合同为 `limit-up-preboard-decision-v1`。概率资格为 `ready`，历史晋级为
   `historical_rejected`，执行模式为 `research_only`，正式激活为 `not_eligible`；模型指纹
   为 `sha256:b1d4ca83ca4dad25e1e74cda21c5b01c4f40d6e62ed9da62582d6eb8c651b71a`。
@@ -105,11 +106,13 @@ npm --prefix frontend run build
 git diff --check
 ```
 
-2026-07-24 源码收口验收：打板后端 `808 passed`，数据同步 `155 passed`，前端提交态
-`140 passed`；compileall、前端生产构建、开发/部署 Compose 配置和 `git diff --check`
-均通过。Compose 只保留 API 与统一 data-sync worker，旧独立板前 worker 已删除；数据库
-只有 1 个当前 `active / ready / historical_rejected` 模型。镜像和页面运行态必须在下次
-重建部署后重新验收，不再沿用清理前的镜像哈希。
+2026-07-24 当前源码验收：打板后端 `820 passed`，数据同步调度 `156 passed`，前端
+`141 passed`；compileall、前端生产构建和 `git diff --check` 均通过。Compose 只保留
+API 与统一 data-sync worker，旧独立板前 worker 已删除；数据库
+只有 1 个当前 `active / ready / historical_rejected` 模型。API、Web、统一 data-sync
+worker 已用当前源码重建并健康运行。`/short-term` 已完成 1280px 桌面和 390px 移动端
+验收：板前动态龙头影子与正式扫板卡相互独立，表格仅在自身容器横向滚动，页面无横向
+溢出，浏览器控制台无错误或警告。
 
 ## Heavy Research Jobs
 
