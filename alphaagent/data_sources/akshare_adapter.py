@@ -51,6 +51,10 @@ EASTMONEY_LIVE_PAGE_MIN_FRESH_RATIO = 0.90
 OVERVIEW_TTL_SECONDS = 30
 BARS_TTL_SECONDS = 600
 BUSINESS_TTL_SECONDS = 86400
+FINANCIAL_PERFORMANCE_TTL_SECONDS = 6 * 60 * 60
+FINANCIAL_PERFORMANCE_PAGE_SIZE = 500
+FINANCIAL_PERFORMANCE_MAX_PAGES = 100
+FINANCIAL_PERFORMANCE_REQUEST_TIMEOUT_SECONDS = 20
 SECTOR_TTL_SECONDS = 86400
 SOURCE_STATUS_TTL_SECONDS = 300
 SW_TREE_TTL_SECONDS = 86400 * 7
@@ -907,7 +911,7 @@ class AkShareAdapter:
             results = list(pool.map(lambda item: run(item[1]), checks))
         return [
             DataSourceStatus(name=name, ok=ok, message=message, checked_at=now)
-            for (name, _), (ok, message) in zip(checks, results)
+            for (name, _), (ok, message) in zip(checks, results, strict=True)
         ]
 
     def _source_status_index_bars(self, limit: int = 2) -> dict[str, Any]:
@@ -1812,6 +1816,77 @@ class AkShareAdapter:
             "items": items,
             "total": len(df),
             "source": "akshare.stock_profit_sheet_by_quarterly_em",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def stock_financial_performance(
+        self,
+        report_date: date | datetime | str,
+    ) -> dict[str, Any]:
+        """Return the market-wide point-in-time performance report for one quarter."""
+
+        normalized_date = _financial_report_date(report_date)
+        key = f"stock_financial_performance:{normalized_date}"
+        return market_cache.get_or_set(
+            key,
+            FINANCIAL_PERFORMANCE_TTL_SECONDS,
+            lambda: self._stock_financial_performance_uncached(normalized_date),
+        )
+
+    def _stock_financial_performance_uncached(
+        self,
+        report_date: str,
+    ) -> dict[str, Any]:
+        url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+        params: dict[str, Any] = {
+            "sortColumns": "UPDATE_DATE,SECURITY_CODE",
+            "sortTypes": "-1,-1",
+            "pageSize": str(FINANCIAL_PERFORMANCE_PAGE_SIZE),
+            "pageNumber": "1",
+            "reportName": "RPT_LICO_FN_CPD",
+            "columns": "ALL",
+            "filter": f"(REPORTDATE='{report_date}')",
+        }
+        rows: list[dict[str, Any]] = []
+        page = 1
+        pages = 1
+        with _akshare_network_env():
+            while page <= pages and page <= FINANCIAL_PERFORMANCE_MAX_PAGES:
+                params["pageNumber"] = str(page)
+                response = requests.get(
+                    url,
+                    params=params,
+                    headers=EASTMONEY_HEADERS,
+                    timeout=FINANCIAL_PERFORMANCE_REQUEST_TIMEOUT_SECONDS,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                result = payload.get("result") if isinstance(payload, Mapping) else None
+                if not isinstance(result, Mapping):
+                    message = payload.get("message") if isinstance(payload, Mapping) else None
+                    raise AkShareSourceError(
+                        f"Eastmoney financial performance unavailable for {report_date}: {message or 'empty result'}"
+                    )
+                raw_rows = result.get("data") or []
+                rows.extend(dict(row) for row in raw_rows if isinstance(row, Mapping))
+                pages = max(int(result.get("pages") or 1), 1)
+                page += 1
+        if pages > FINANCIAL_PERFORMANCE_MAX_PAGES:
+            raise AkShareSourceError(
+                f"Eastmoney financial performance exceeded {FINANCIAL_PERFORMANCE_MAX_PAGES} pages"
+            )
+
+        items = [
+            item
+            for row in rows
+            if (item := _financial_performance_row_to_api(row)).get("vt_symbol")
+        ]
+        return {
+            "report_date": report_date,
+            "period_type": "quarterly",
+            "items": items,
+            "total": len(items),
+            "source": "eastmoney.RPT_LICO_FN_CPD",
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -4551,19 +4626,39 @@ def _financial_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
             or n.get("OPERATE_INCOME"),
         ),
         "revenue_yoy": _number(
-            n.get("营业总收入同比增长")
-            or n.get("营业总收入同比增长率")
-            or n.get("TOTAL_OPERATE_INCOME_QOQ")
-            or n.get("OPERATE_INCOME_QOQ"),
+            _first_present(
+                n.get("营业总收入同比增长"),
+                n.get("营业总收入同比增长率"),
+            ),
+        ),
+        "revenue_qoq": _number(
+            _first_present(
+                n.get("营业总收入季度环比增长"),
+                n.get("TOTAL_OPERATE_INCOME_QOQ"),
+                n.get("OPERATE_INCOME_QOQ"),
+            ),
         ),
         "net_profit": _number(
-            n.get("净利润")
-            or n.get("NETPROFIT"),
+            _first_present(
+                n.get("归属于母公司股东的净利润"),
+                n.get("PARENT_NETPROFIT"),
+                n.get("净利润"),
+                n.get("NETPROFIT"),
+            ),
         ),
         "net_profit_yoy": _number(
-            n.get("净利润同比增长")
-            or n.get("净利润同比增长率")
-            or n.get("NETPROFIT_QOQ"),
+            _first_present(
+                n.get("归母净利润同比增长"),
+                n.get("净利润同比增长"),
+                n.get("净利润同比增长率"),
+            ),
+        ),
+        "net_profit_qoq": _number(
+            _first_present(
+                n.get("归母净利润季度环比增长"),
+                n.get("PARENT_NETPROFIT_QOQ"),
+                n.get("NETPROFIT_QOQ"),
+            ),
         ),
         "gross_margin": _number(
             n.get("销售毛利率"),
@@ -4584,6 +4679,95 @@ def _financial_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
         "operating_cash_flow": _number(n.get("经营活动产生的现金流量净额") or n.get("NETCASH_OPERATE")),
         "raw": n,
     }
+
+
+def _financial_performance_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
+    """Normalize Eastmoney's market-wide performance report by raw field name."""
+
+    n = _normalize_record(row)
+    symbol = str(n.get("SECURITY_CODE") or "").strip()
+    secucode = str(n.get("SECUCODE") or "").strip().upper()
+    exchange_hint = secucode.rsplit(".", 1)[-1] if "." in secucode else None
+    exchange = normalize_exchange(symbol, exchange_hint)
+    net_profit = _number(n.get("PARENT_NETPROFIT"))
+    revenue = _number(n.get("TOTAL_OPERATE_INCOME"))
+    eps = _number(n.get("BASIC_EPS"))
+    cash_flow_per_share = _number(n.get("MGJYXJJE"))
+    return {
+        "symbol": symbol,
+        "exchange": exchange,
+        "vt_symbol": vt_symbol(symbol, exchange) if symbol else None,
+        "name": n.get("SECURITY_NAME_ABBR"),
+        "report_date": _financial_storage_timestamp(n.get("REPORTDATE")),
+        "publish_date": _financial_storage_timestamp(
+            _first_present(n.get("NOTICE_DATE"), n.get("UPDATE_DATE"))
+        ),
+        "revenue": revenue,
+        "revenue_yoy": _number(n.get("YSTZ")),
+        "revenue_qoq": _number(n.get("YSHZ")),
+        "net_profit": net_profit,
+        "net_profit_yoy": _number(n.get("SJLTZ")),
+        "net_profit_qoq": _number(n.get("SJLHZ")),
+        "deducted_net_profit": _number(n.get("DEDUCT_PARENT_NETPROFIT")),
+        "eps": eps,
+        "gross_margin": _number(n.get("XSMLL")),
+        "net_margin": _financial_ratio_pct(net_profit, revenue),
+        "roe": _number(n.get("WEIGHTAVG_ROE")),
+        "cash_flow_quality": _financial_ratio(cash_flow_per_share, eps),
+        "source": "eastmoney.RPT_LICO_FN_CPD",
+        "raw": n,
+    }
+
+
+def _financial_report_date(value: date | datetime | str) -> str:
+    if isinstance(value, datetime):
+        parsed = value.date()
+    elif isinstance(value, date):
+        parsed = value
+    else:
+        text = str(value or "").strip()[:10]
+        for fmt in ("%Y-%m-%d", "%Y%m%d", "%Y/%m/%d"):
+            try:
+                parsed = datetime.strptime(text, fmt).date()
+                break
+            except ValueError:
+                continue
+        else:
+            raise ValueError(f"Invalid financial report date: {value!r}")
+    if (parsed.month, parsed.day) not in {(3, 31), (6, 30), (9, 30), (12, 31)}:
+        raise ValueError(f"Financial report date is not a quarter end: {parsed.isoformat()}")
+    return parsed.isoformat()
+
+
+def _financial_storage_timestamp(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = date.fromisoformat(text[:10])
+    except ValueError:
+        return text
+    return f"{parsed.isoformat()} 00:00:00"
+
+
+def _financial_ratio(numerator: Any, denominator: Any) -> float | None:
+    numerator_value = _number(numerator)
+    denominator_value = _number(denominator)
+    if numerator_value is None or denominator_value in (None, 0):
+        return None
+    return round(float(numerator_value) / float(denominator_value), 4)
+
+
+def _financial_ratio_pct(numerator: Any, denominator: Any) -> float | None:
+    numerator_value = _number(numerator)
+    denominator_value = _number(denominator)
+    if numerator_value is None or denominator_value in (None, 0):
+        return None
+    return round(float(numerator_value) / float(denominator_value) * 100, 4)
+
+
+def _first_present(*values: Any) -> Any:
+    return next((value for value in values if value not in (None, "", "-", "--")), None)
 
 
 def _indicator_row_to_api(row: dict[str, Any]) -> dict[str, Any]:

@@ -25,6 +25,7 @@ from alphaagent.data_sources.akshare_adapter import (
     _eastmoney_stock_kline,
     _eastmoney_stock_hot_rank_items,
     _filter_bars_by_date,
+    _financial_performance_row_to_api,
     _financial_row_to_api,
     _sina_member_row_to_api,
     _tencent_stock_kline_full,
@@ -881,6 +882,104 @@ def test_financial_row_to_api_maps_publish_and_cash_flow_fields() -> None:
     assert item["net_profit"] == 12_000_000
     assert item["deducted_net_profit"] == 10_000_000
     assert item["operating_cash_flow"] == 18_000_000
+
+
+def test_financial_row_to_api_does_not_treat_quarterly_change_as_yoy() -> None:
+    item = _financial_row_to_api(
+        {
+            "REPORT_DATE": "2026-03-31 00:00:00",
+            "PARENT_NETPROFIT": -11_700_143.61,
+            "NETPROFIT": -3_276_119.8,
+            "PARENT_NETPROFIT_QOQ": 70.0043,
+            "NETPROFIT_QOQ": 85.9097,
+            "TOTAL_OPERATE_INCOME_QOQ": -28.5024,
+        }
+    )
+
+    assert item["net_profit"] == -11_700_143.61
+    assert item["net_profit_yoy"] is None
+    assert item["net_profit_qoq"] == 70.0043
+    assert item["revenue_yoy"] is None
+    assert item["revenue_qoq"] == -28.5024
+
+
+def test_financial_performance_row_maps_parent_profit_yoy() -> None:
+    item = _financial_performance_row_to_api(
+        {
+            "SECURITY_CODE": "000670",
+            "SECUCODE": "000670.SZ",
+            "SECURITY_NAME_ABBR": "盈方微",
+            "REPORTDATE": "2026-03-31 00:00:00",
+            "NOTICE_DATE": "2026-04-21 00:00:00",
+            "TOTAL_OPERATE_INCOME": 933_292_145.7,
+            "PARENT_NETPROFIT": -11_700_143.61,
+            "YSTZ": 24.2824,
+            "SJLTZ": 10.30,
+            "YSHZ": -28.5024,
+            "SJLHZ": 70.0043,
+            "BASIC_EPS": -0.0142,
+            "DEDUCT_PARENT_NETPROFIT": -18_500_000,
+            "MGJYXJJE": -0.026257730722,
+            "WEIGHTAVG_ROE": -30.8,
+            "XSMLL": 3.1045,
+        }
+    )
+
+    assert item["vt_symbol"] == "000670.SZSE"
+    assert item["report_date"] == "2026-03-31 00:00:00"
+    assert item["publish_date"] == "2026-04-21 00:00:00"
+    assert item["revenue_yoy"] == 24.2824
+    assert item["revenue_qoq"] == -28.5024
+    assert item["net_profit"] == -11_700_143.61
+    assert item["net_profit_yoy"] == 10.30
+    assert item["net_profit_qoq"] == 70.0043
+    assert item["deducted_net_profit"] == -18_500_000
+    assert item["net_margin"] == -1.2536
+    assert item["cash_flow_quality"] == 1.8491
+
+
+def test_stock_financial_performance_reads_every_page(monkeypatch) -> None:
+    adapter = AkShareAdapter()
+    requested_pages: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, page: str) -> None:
+            self.page = page
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "pages": 2,
+                    "data": [
+                        {
+                            "SECURITY_CODE": f"60000{self.page}",
+                            "SECUCODE": f"60000{self.page}.SH",
+                            "REPORTDATE": "2026-03-31 00:00:00",
+                            "NOTICE_DATE": "2026-04-30 00:00:00",
+                            "SJLTZ": float(self.page),
+                        }
+                    ],
+                }
+            }
+
+    def fake_get(url, *, params, headers, timeout):
+        del url, headers, timeout
+        page = str(params["pageNumber"])
+        requested_pages.append(page)
+        return FakeResponse(page)
+
+    monkeypatch.setattr("alphaagent.data_sources.akshare_adapter.requests.get", fake_get)
+
+    payload = adapter._stock_financial_performance_uncached("2026-03-31")
+
+    assert requested_pages == ["1", "2"]
+    assert [item["vt_symbol"] for item in payload["items"]] == [
+        "600001.SSE",
+        "600002.SSE",
+    ]
 
 
 def test_stock_fund_flows_prefers_eastmoney_main_rank_table(monkeypatch) -> None:

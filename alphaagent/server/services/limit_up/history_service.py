@@ -62,6 +62,18 @@ SECTOR_WARMUP_CASH_VARIANTS = (
 )
 
 
+def _history_cache_revision() -> str:
+    """Return a cross-process cache revision for the persisted history ledger."""
+
+    try:
+        updated_at = history_repository.history_ledger_updated_at(
+            history_engine.HISTORY_STRATEGY_VERSION
+        )
+    except Exception:  # noqa: BLE001
+        return "ledger-unavailable"
+    return updated_at.isoformat() if updated_at is not None else "ledger-empty"
+
+
 def start_history_rebuild() -> dict[str, object]:
     global _BUILD_THREAD
     with _BUILD_LOCK:
@@ -228,6 +240,7 @@ def get_sector_warmup_research(
 ) -> dict[str, object]:
     cache_key = (
         f"{history_engine.HISTORY_STRATEGY_VERSION}:"
+        f"{_history_cache_revision()}:"
         f"{sector_warmup_research.RESEARCH_VERSION}:{start}:{end}"
     )
 
@@ -713,7 +726,10 @@ def get_lane_validation_snapshot(
 ) -> dict[str, dict[str, object]]:
     if exit_mode not in cash_backtest.SUPPORTED_EXIT_MODES:
         raise ValueError(f"unsupported exit mode: {exit_mode}")
-    cache_key = f"{history_engine.HISTORY_STRATEGY_VERSION}:all:{exit_mode}"
+    cache_key = (
+        f"{history_engine.HISTORY_STRATEGY_VERSION}:"
+        f"{_history_cache_revision()}:all:{exit_mode}"
+    )
 
     def load() -> dict[str, dict[str, object]]:
         rows = history_repository.load_history_range(
@@ -764,7 +780,8 @@ def get_lane_history_backtest(
         )
     if exit_mode == "dynamic" and account_config is None:
         cache_key = (
-            f"{history_engine.HISTORY_STRATEGY_VERSION}:dynamic:{start}:{end}:"
+            f"{history_engine.HISTORY_STRATEGY_VERSION}:"
+            f"{_history_cache_revision()}:dynamic:{start}:{end}:"
             f"{lane}:{trade_limit}:{cash_backtest.ACCOUNT_EXECUTION_VERSION}"
         )
         return _BACKTEST_REPORT_CACHE.get_or_set(
@@ -917,6 +934,7 @@ def get_scheduled_history_backtest(
 
     cache_key = (
         f"{history_engine.HISTORY_STRATEGY_VERSION}:"
+        f"{_history_cache_revision()}:"
         f"{scheduled_execution.SCHEDULED_EXECUTION_VERSION}:"
         f"{start}:{end}:{cash_backtest.ACCOUNT_EXECUTION_VERSION}"
     )
@@ -966,6 +984,7 @@ def _frozen_position_sizing_audit(
 ) -> dict[str, object]:
     cache_key = (
         f"{history_engine.HISTORY_STRATEGY_VERSION}:"
+        f"{_history_cache_revision()}:"
         f"{scheduled_execution.SCHEDULED_EXECUTION_VERSION}:"
         f"{cash_backtest.ACCOUNT_EXECUTION_VERSION}:frozen-position-sizing"
     )
@@ -2026,7 +2045,8 @@ def get_history_model_report(
     if board_lane is not None and board_lane not in BOARD_LANES:
         raise ValueError(f"unsupported board lane: {board_lane}")
     cache_key = (
-        f"{history_engine.HISTORY_STRATEGY_VERSION}:{start}:{end}:"
+        f"{history_engine.HISTORY_STRATEGY_VERSION}:"
+        f"{_history_cache_revision()}:{start}:{end}:"
         f"{entry_mode}:{exit_mode}:{board_lane}:{walk_forward_model.MODEL_VERSION}"
     )
 

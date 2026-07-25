@@ -42,87 +42,54 @@ def test_stock_financial_sync_attempts_table_defined():
     }.issubset({column.name for column in table.columns})
 
 
-def test_financial_candidate_rotation_prioritizes_unattempted_and_oldest():
-    now = datetime(2026, 7, 18, 4, 0, tzinfo=timezone.utc)
-    stock_rows = [
-        {"vt_symbol": "new-low.SSE", "turnover": 10.0},
-        {"vt_symbol": "new-high.SSE", "turnover": 20.0},
-        {"vt_symbol": "oldest.SSE", "turnover": 30.0},
-        {"vt_symbol": "recent.SSE", "turnover": 40.0},
-        {"vt_symbol": "cooling.SSE", "turnover": 50.0},
-    ]
-    attempts = {
-        "oldest.SSE": {
-            "last_attempt_at": now - timedelta(days=3),
-            "next_retry_at": None,
-        },
-        "recent.SSE": {
-            "last_attempt_at": now - timedelta(hours=1),
-            "next_retry_at": None,
-        },
-        "cooling.SSE": {
-            "last_attempt_at": now - timedelta(days=4),
-            "next_retry_at": now + timedelta(hours=1),
-        },
-    }
-
-    selected = svc._select_financial_candidates(
-        stock_rows,
-        attempts,
-        stock_limit=4,
-        now=now,
-    )
-
-    assert [row["vt_symbol"] for row in selected] == [
-        "new-high.SSE",
-        "new-low.SSE",
-        "oldest.SSE",
-        "recent.SSE",
+def test_recent_quarter_ends_include_latest_finished_quarter():
+    assert svc._recent_quarter_ends(date(2026, 7, 24), count=4) == [
+        "2025-09-30",
+        "2025-12-31",
+        "2026-03-31",
+        "2026-06-30",
     ]
 
 
-def test_explicit_financial_symbols_bypass_attempt_rotation(monkeypatch):
-    class FakeResult:
-        def mappings(self):
-            return self
-
-        def all(self):
-            return [
-                {
-                    "vt_symbol": "600001.SSE",
-                    "symbol": "600001",
-                    "exchange": "SSE",
-                    "name": "定向样本",
-                }
-            ]
-
-    class FakeSession:
-        def execute(self, statement):
-            del statement
-            return FakeResult()
-
-    @contextmanager
-    def fake_session_scope():
-        yield FakeSession()
-
-    def fail_if_attempts_loaded(symbols):
-        del symbols
-        raise AssertionError("explicit symbols must bypass automatic attempts")
-
-    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+def test_financial_report_dates_bootstrap_missing_periods_and_refresh_latest(monkeypatch):
     monkeypatch.setattr(
         svc,
-        "_load_financial_sync_attempts",
-        fail_if_attempts_loaded,
+        "_financial_batch_covered_report_dates",
+        lambda report_dates: {"2025-12-31", "2026-03-31"},
     )
 
-    rows = svc._financial_sync_stock_rows(
-        1,
-        only_missing=True,
-        symbols=["600001.SSE"],
+    report_dates = svc._financial_report_dates_for_sync(
+        {"bootstrap_quarters": 4},
+        today=date(2026, 7, 24),
     )
 
-    assert [row["vt_symbol"] for row in rows] == ["600001.SSE"]
+    assert report_dates == ["2025-09-30", "2026-06-30"]
+
+
+def test_merge_financial_report_values_preserves_only_enrichment_fields():
+    existing = {
+        "net_profit_yoy": 85.91,
+        "cash_flow_quality": 1.5,
+        "debt_asset_ratio": 45.0,
+        "raw": {"NETPROFIT_QOQ": 85.91, "legacy": True},
+    }
+    incoming = {
+        "net_profit_yoy": 10.30,
+        "cash_flow_quality": None,
+        "debt_asset_ratio": None,
+        "raw": {"SJLTZ": 10.30},
+    }
+
+    merged = svc._merge_financial_report_values(existing, incoming)
+
+    assert merged["net_profit_yoy"] == 10.30
+    assert merged["cash_flow_quality"] == 1.5
+    assert merged["debt_asset_ratio"] == 45.0
+    assert merged["raw"] == {
+        "NETPROFIT_QOQ": 85.91,
+        "legacy": True,
+        "SJLTZ": 10.30,
+    }
 
 
 def test_schema_patches_continue_when_one_patch_hits_lock_timeout():

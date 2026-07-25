@@ -1580,6 +1580,30 @@ def test_financial_index_never_returns_a_future_publication() -> None:
     assert snapshot["net_profit_yoy"] == 18.0
 
 
+def test_financial_index_does_not_use_same_day_publication_intraday() -> None:
+    index = build_financial_index(
+        [
+            {
+                "vt_symbol": "600001.SSE",
+                "publish_date": "2026-04-29",
+                "report_date": "2025-12-31",
+                "net_profit_yoy": 18.0,
+            },
+            {
+                "vt_symbol": "600001.SSE",
+                "publish_date": "2026-04-30",
+                "report_date": "2026-03-31",
+                "net_profit_yoy": -40.0,
+            },
+        ]
+    )
+
+    report = financial_report_as_of(index, "600001.SSE", date(2026, 4, 30))
+
+    assert report is not None
+    assert report["report_date"] == "2025-12-31"
+
+
 def _lane_replay_day(
     trade_date: str = "2026-06-10",
     *,

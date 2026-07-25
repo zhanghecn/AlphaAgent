@@ -49,6 +49,7 @@ from alphaagent.server.services.low_suction import (
     forward_membership,
     forward_membership_repository,
     forward_security_repository,
+    reclaim_minutes,
     swing_strategy_service,
 )
 from alphaagent.server.services.limit_up.data_quality import (
@@ -71,6 +72,7 @@ from alphaagent.server.services.limit_up.live_service import (
     LIVE_SCAN_INTERVAL_SECONDS,
     refresh_live_snapshot,
 )
+from alphaagent.server.services.limit_up.live_repository import clear_live_context_cache
 from alphaagent.server.services.limit_up.live_trace_repository import (
     prune_live_trace_snapshots,
 )
@@ -87,10 +89,10 @@ SCHEDULER_IDLE_TICK_SECONDS = 30
 DEFAULT_SYNC_CONCURRENCY = 2
 # 单只股/板块同步的超时上限：AkShare 正常请求数秒，超时则跳过该 item（防 hang 拖死整批）
 SYNC_PER_ITEM_TIMEOUT_SECONDS = 60.0
-# 东方财富三张财报各自需要分页读取；单股使用独立预算，避免通用 60 秒在有效响应完成前取消。
-FINANCIAL_SYNC_PER_ITEM_TIMEOUT_SECONDS = 180.0
-FINANCIAL_SYNC_MAX_STOCK_CONCURRENCY = 3
-FINANCIAL_SYNC_RETRY_DELAY = timedelta(days=1)
+FINANCIAL_BATCH_SOURCE = "eastmoney.RPT_LICO_FN_CPD"
+FINANCIAL_BOOTSTRAP_QUARTERS = 16
+FINANCIAL_BATCH_BOOTSTRAP_MIN_ROWS = 1_000
+FINANCIAL_REPORT_UPSERT_BATCH_SIZE = 1_000
 # 内存批次 running 超过此时长视为僵尸，看门狗清理（防卡死批次挡住新调度）
 ZOMBIE_BATCH_THRESHOLD_SECONDS = 2 * 60 * 60
 CANONICAL_SECTOR_DAILY_SOURCE = "eastmoney.board_kline"
@@ -111,51 +113,6 @@ SECTOR_DAILY_MIN_COVERAGE_RATIO = 0.8
 _INTERRUPTED_RECOVERY_LOCK = threading.Lock()
 _INTERRUPTED_SCHEDULE_RECOVERY_IDS: set[str] = set()
 _interrupted_recovery_thread: threading.Thread | None = None
-
-
-def _load_financial_quarterly_bundle(
-    adapter: Any,
-    symbol: str,
-    exchange: str,
-) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Load independent financial statements concurrently for one stock."""
-
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        quarterly_future = pool.submit(
-            adapter.stock_financial_quarterly,
-            symbol,
-            exchange=exchange,
-        )
-        balance_future = pool.submit(
-            adapter.stock_balance_sheet,
-            symbol,
-            exchange=exchange,
-        )
-        cash_flow_future = pool.submit(
-            adapter.stock_cash_flow_sheet,
-            symbol,
-            exchange=exchange,
-        )
-        quarterly = quarterly_future.result()
-        balance_items = _optional_financial_items(balance_future, symbol, "balance")
-        cash_flow_items = _optional_financial_items(cash_flow_future, symbol, "cash_flow")
-
-    return (
-        quarterly if isinstance(quarterly, dict) else {},
-        balance_items,
-        cash_flow_items,
-    )
-
-
-def _optional_financial_items(future: Any, symbol: str, dataset: str) -> list[dict[str, Any]]:
-    try:
-        payload = future.result()
-    except Exception as exc:
-        logger.debug("financial %s enrichment failed for %s: %s", dataset, symbol, exc)
-        return []
-    if not isinstance(payload, dict):
-        return []
-    return [item for item in (payload.get("items") or []) if isinstance(item, dict)]
 
 
 def _bounded_parallel_map(
@@ -419,6 +376,14 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         default_params={"max_gaps": 100, "dry_run": False},
     ),
     JobDefinition(
+        id="sync_low_suction_reclaim_minutes",
+        name="低吸强势收复信号日 5 分钟路径",
+        description="只补历史回放强势收复(≥8% 接近前高)信号日的完整 5 分钟路径，用于盘中低吸点研究。manual-only。",
+        source_id="tdx_public_hq",
+        target_table="stock_minute_bars",
+        default_params={"max_gaps": 100, "dry_run": False},
+    ),
+    JobDefinition(
         id="sync_low_suction_swing_settlement",
         name="低吸波段纸面持仓结算",
         description="按最新可靠完整日线更新低吸持仓标记并冻结结构退出触发。",
@@ -523,10 +488,10 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
     JobDefinition(
         id="sync_stock_financial_quarterly",
         name="个股季度财报",
-        description="同步个股利润表/资产负债表/现金流季度数据。",
+        description="按报告期批量同步全市场归母净利润同比等点时财报数据。",
         source_id="akshare",
         target_table="stock_financial_reports",
-        default_params={"stock_limit": 100},
+        default_params={"bootstrap_quarters": FINANCIAL_BOOTSTRAP_QUARTERS},
     ),
     JobDefinition(
         id="sync_stock_financial_indicators",
@@ -634,6 +599,7 @@ JOB_CADENCES: dict[str, JobCadence] = {
     "sync_low_suction_forward_top3": JobCadence(CADENCE_EOD_DAILY, CATEGORY_SECTOR_RESEARCH, 1, "low_suction_forward_leader_rank_snapshot_scopes", "updated_at"),
     "sync_low_suction_forward_ma5_shadow": JobCadence(CADENCE_EOD_DAILY, CATEGORY_SECTOR_RESEARCH, 1, "low_suction_forward_ma5_scopes", "updated_at"),
     "sync_low_suction_forward_ma5_minutes": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "stock_minute_bars", "bar_time"),
+    "sync_low_suction_reclaim_minutes": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "stock_minute_bars", "bar_time"),
     "sync_low_suction_swing_settlement": JobCadence(CADENCE_EOD_DAILY, CATEGORY_SECTOR_RESEARCH, 1, "low_suction_strategy_runs", "updated_at"),
     "sync_shenwan_industry_tree": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 30, "shenwan_industries", "updated_at"),
     "sync_shenwan_industry_members": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 30, "shenwan_industry_members", "updated_at"),
@@ -1955,6 +1921,27 @@ class DataSyncRunner:
             ),
         }
 
+    def _run_sync_low_suction_reclaim_minutes(
+        self,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        result = reclaim_minutes.backfill_reclaim_signal_5m(
+            dry_run=_truthy(params.get("dry_run")),
+            max_gaps=int(params.get("max_gaps") or 100),
+        )
+        requested = int(result.get("requested_missing_pairs") or 0)
+        return {
+            **result,
+            "recommendations_created": 0,
+            "orders_created": 0,
+            "formal_metrics": None,
+            "message": (
+                "低吸强势收复信号日 5 分钟路径："
+                f"请求 {requested} 对，读取 {int(result.get('rows_read') or 0)} 根，"
+                f"写入 {int(result.get('rows_written') or 0)} 根"
+            ),
+        }
+
     def _run_sync_low_suction_swing_settlement(
         self,
         params: dict[str, Any],
@@ -2336,266 +2323,89 @@ class DataSyncRunner:
     # ── Research data runners: stock financials ──
 
     def _run_sync_stock_financial_quarterly(self, params: dict[str, Any]) -> dict[str, Any]:
-        stock_limit = int(params.get("stock_limit", 100))
-        only_missing = _truthy(params.get("only_missing", True))
+        report_dates = _financial_report_dates_for_sync(params)
         symbols = _param_list(params.get("symbols"))
-        if symbols:
-            stock_rows = _financial_sync_stock_rows(
-                stock_limit,
-                only_missing,
-                symbols=symbols,
-            )
-        else:
-            stock_rows = _financial_sync_stock_rows(stock_limit, only_missing)
-        if not stock_rows:
-            return {"rows_read": 0, "rows_written": 0, "message": "No stocks in DB."}
-        total_stocks = len(stock_rows)
-        self._report_progress("同步个股季度财报", current=0, total=total_stocks)
-
-        lock = threading.Lock()
-        counters = {"read": 0, "written": 0, "done": 0, "timed_out": 0}
-        timed_out_symbols: set[str] = set()
-
-        def _do_one(stock_row: dict[str, Any]) -> None:
-            symbol = str(stock_row["symbol"])
-            exchange = str(stock_row["exchange"])
-            stock_name = str(stock_row.get("name") or symbol)
-            current_vts = vt_symbol(symbol, exchange)
-            label = f"{current_vts} {stock_name}"
-            with lock:
-                current = counters["done"]
-                rows_read = counters["read"]
-                rows_written = counters["written"]
-            self._report_progress(
-                "读取个股季度财报",
-                current=current,
-                total=total_stocks,
-                current_label=label,
-                rows_read=rows_read,
-                rows_written=rows_written,
-            )
-
-            try:
-                quarterly, balance_items, cash_flow_items = _load_financial_quarterly_bundle(
-                    self.adapter,
-                    symbol,
-                    exchange,
-                )
-                items = [
-                    item
-                    for item in (quarterly.get("items") or [])
-                    if isinstance(item, dict)
-                ]
-                with lock:
-                    if current_vts in timed_out_symbols:
-                        return
-                self._enrich_quarterly_with_roe(items, balance_items)
-                self._enrich_quarterly_with_cash_flow(items, cash_flow_items)
-                with lock:
-                    if current_vts in timed_out_symbols:
-                        return
-                    written = _upsert_stock_financial_reports(
-                        symbol,
-                        exchange,
-                        items,
-                        "quarterly",
-                    )
-                    counters["read"] += len(items)
-                    counters["written"] += written
-                    counters["done"] += 1
-                    current = counters["done"]
-                    rows_read = counters["read"]
-                    rows_written = counters["written"]
-            except Exception as exc:
-                with lock:
-                    if current_vts in timed_out_symbols:
-                        return
-                    counters["done"] += 1
-                    current = counters["done"]
-                    rows_read = counters["read"]
-                    rows_written = counters["written"]
-                _record_financial_sync_attempt(
-                    current_vts,
-                    "failed",
-                    error=exc.__class__.__name__,
-                    next_retry_at=_financial_retry_at(),
-                )
-                logger.debug("stock_financial_quarterly(%s) failed: %s", symbol, exc)
-                self._report_progress(
-                    "读取个股季度财报",
-                    current=current,
-                    total=total_stocks,
-                    current_label=label,
-                    rows_read=rows_read,
-                    rows_written=rows_written,
-                    message=f"{current_vts} 失败：{exc.__class__.__name__}",
-                )
-                return
-
-            attempt_status = "succeeded" if items else "empty"
-            _record_financial_sync_attempt(
-                current_vts,
-                attempt_status,
-                error=None if items else "provider returned no quarterly reports",
-                next_retry_at=None if items else _financial_retry_at(),
-            )
-
-            sample_items = [{**item, "vt_symbol": current_vts, "name": stock_name} for item in items[-3:]]
-            self._report_progress(
-                "写入个股季度财报",
-                current=current,
-                total=total_stocks,
-                current_label=f"{label}，{len(items)} 期",
-                rows_read=rows_read,
-                rows_written=rows_written,
-                sample_items=sample_items,
-            )
-
-        def _on_timeout(stock_row: dict[str, Any]) -> None:
-            symbol = str(stock_row["symbol"])
-            exchange = str(stock_row["exchange"])
-            stock_name = str(stock_row.get("name") or symbol)
-            current_vts = vt_symbol(symbol, exchange)
-            with lock:
-                if current_vts in timed_out_symbols:
-                    return
-                timed_out_symbols.add(current_vts)
-                counters["timed_out"] += 1
-                counters["done"] += 1
-                current = counters["done"]
-                rows_read = counters["read"]
-                rows_written = counters["written"]
-            _record_financial_sync_attempt(
-                current_vts,
-                "timed_out",
-                error="financial item timeout",
-                next_retry_at=_financial_retry_at(),
-            )
-            self._report_progress(
-                "读取个股季度财报",
-                current=current,
-                total=total_stocks,
-                current_label=f"{current_vts} {stock_name} 超时跳过",
-                rows_read=rows_read,
-                rows_written=rows_written,
-            )
-
-        _bounded_parallel_map(
-            _do_one,
-            stock_rows,
-            concurrency=min(self.concurrency, FINANCIAL_SYNC_MAX_STOCK_CONCURRENCY),
-            per_item_timeout=FINANCIAL_SYNC_PER_ITEM_TIMEOUT_SECONDS,
-            on_timeout=_on_timeout,
+        symbol_filter = set(symbols)
+        total_read = 0
+        total_written = 0
+        total_invalidated = 0
+        failures: list[str] = []
+        self._report_progress(
+            "同步全市场季度财报",
+            current=0,
+            total=len(report_dates),
         )
-
-        return {
-            "rows_read": counters["read"],
-            "rows_written": counters["written"],
-            "timed_out": counters["timed_out"],
-        }
-
-    @staticmethod
-    def _to_float(value: Any) -> float | None:
-        """Convert a value to float, returning None for missing / invalid."""
-        if value is None or value == "" or value == "-":
-            return None
-        try:
-            return float(value)
-        except (ValueError, TypeError):
-            return None
-
-    def _enrich_quarterly_with_roe(
-        self,
-        items: list[dict[str, Any]],
-        balance_items: list[dict[str, Any]],
-    ) -> None:
-        """Enrich quarterly items with computed ROE, margins, and EPS.
-
-        ROE requires equity from the balance sheet.
-        Gross margin = (revenue - cost) / revenue * 100.
-        Net margin = net_profit / revenue * 100.
-        EPS is extracted from BASIC_EPS in raw data.
-        """
-        if not items:
-            return
-
-        equity_map: dict[str, float] = {}
-        for balance_item in balance_items:
-            report_date_raw = balance_item.get("REPORT_DATE")
-            if not report_date_raw:
-                continue
-            report_date = str(report_date_raw)[:10]
-            equity = self._to_float(balance_item.get("TOTAL_PARENT_EQUITY"))
-            if equity:
-                equity_map[report_date] = equity
-
-        for item in items:
-            raw = item.get("raw") or {}
-            rd = str(item.get("report_date", ""))[:10]
-
-            # --- EPS from raw fallback ---
-            if item.get("eps") is None:
-                eps = self._to_float(raw.get("BASIC_EPS"))
-                if eps is not None:
-                    item["eps"] = eps
-
-            # --- Gross margin = (income - cost) / income * 100 ---
-            if item.get("gross_margin") is None:
-                income = self._to_float(raw.get("TOTAL_OPERATE_INCOME") or raw.get("OPERATE_INCOME"))
-                cost = self._to_float(raw.get("OPERATE_COST"))
-                if income and cost is not None:
-                    item["gross_margin"] = round(((income - cost) / income) * 100, 4)
-
-            # --- Net margin = net_profit / income * 100 ---
-            if item.get("net_margin") is None:
-                income = self._to_float(raw.get("TOTAL_OPERATE_INCOME") or raw.get("OPERATE_INCOME"))
-                np = self._to_float(raw.get("NETPROFIT"))
-                if income and np is not None:
-                    item["net_margin"] = round((np / income) * 100, 4)
-
-            # --- ROE = parent_net_profit / parent_equity * 100 ---
-            if item.get("roe") is None:
-                equity = equity_map.get(rd)
-                if equity:
-                    pnp = self._to_float(raw.get("PARENT_NETPROFIT"))
-                    if pnp is not None:
-                        item["roe"] = round((pnp / equity) * 100, 4)
-
-    def _enrich_quarterly_with_cash_flow(
-        self,
-        items: list[dict[str, Any]],
-        cash_flow_items: list[dict[str, Any]],
-    ) -> None:
-        """Enrich quarterly items with operating cash flow and disclosure date."""
-        if not items:
-            return
-
-        cash_flow_map: dict[str, dict[str, Any]] = {}
-        for record in cash_flow_items:
-            report_date = str(record.get("REPORT_DATE") or record.get("报告期") or "")[:10]
-            if report_date:
-                cash_flow_map[report_date] = record
-
-        for item in items:
-            report_date = str(item.get("report_date") or "")[:10]
-            cash_flow_row = cash_flow_map.get(report_date)
-            if not cash_flow_row:
-                continue
-
-            if item.get("publish_date") is None:
-                item["publish_date"] = cash_flow_row.get("NOTICE_DATE") or cash_flow_row.get("公告日期")
-
-            if item.get("operating_cash_flow") is None:
-                item["operating_cash_flow"] = self._to_float(
-                    cash_flow_row.get("NETCASH_OPERATE")
-                    or cash_flow_row.get("经营活动产生的现金流量净额")
+        for index, report_date in enumerate(report_dates, start=1):
+            self._report_progress(
+                "读取全市场季度财报",
+                current=index - 1,
+                total=len(report_dates),
+                current_label=report_date,
+                rows_read=total_read,
+                rows_written=total_written,
+            )
+            try:
+                payload = self.adapter.stock_financial_performance(report_date)
+                items = [
+                    dict(item)
+                    for item in (payload.get("items") or [])
+                    if isinstance(item, dict)
+                    and (
+                        not symbol_filter
+                        or str(item.get("vt_symbol") or "").upper() in symbol_filter
+                    )
+                ]
+                written = _upsert_stock_financial_report_batch(items)
+                invalidated = _invalidate_legacy_financial_growth_fields(
+                    report_date,
+                    symbols=symbols or None,
                 )
-
-            if item.get("cash_flow_quality") is None:
-                operating_cash_flow = self._to_float(item.get("operating_cash_flow"))
-                net_profit = self._to_float(item.get("net_profit") or cash_flow_row.get("NETPROFIT"))
-                if operating_cash_flow is not None and net_profit not in (None, 0):
-                    item["cash_flow_quality"] = round(operating_cash_flow / net_profit, 4)
+            except Exception as exc:
+                failures.append(f"{report_date}:{exc.__class__.__name__}")
+                logger.warning(
+                    "stock_financial_performance(%s) failed: %s",
+                    report_date,
+                    exc,
+                )
+                self._report_progress(
+                    "读取全市场季度财报",
+                    current=index,
+                    total=len(report_dates),
+                    current_label=report_date,
+                    rows_read=total_read,
+                    rows_written=total_written,
+                    message=f"{report_date} 失败：{exc.__class__.__name__}",
+                )
+                continue
+            total_read += len(items)
+            total_written += written
+            total_invalidated += invalidated
+            self._report_progress(
+                "写入全市场季度财报",
+                current=index,
+                total=len(report_dates),
+                current_label=f"{report_date}，读取 {len(items)} 条，写入 {written} 条",
+                rows_read=total_read,
+                rows_written=total_written,
+                sample_items=items[-3:],
+            )
+        if total_written or total_invalidated:
+            clear_live_context_cache()
+        if failures:
+            raise DataSyncError(
+                "季度财报报告期同步失败：" + "，".join(failures)
+            )
+        return {
+            "rows_read": total_read,
+            "rows_written": total_written,
+            "report_dates": report_dates,
+            "legacy_growth_rows_invalidated": total_invalidated,
+            "message": (
+                f"按报告期同步 {len(report_dates)} 期，"
+                f"读取 {total_read} 条，写入本地股票 {total_written} 条，"
+                f"停用旧错误同比 {total_invalidated} 条"
+            ),
+        }
 
     def _run_sync_stock_financial_indicators(self, params: dict[str, Any]) -> dict[str, Any]:
         stock_limit = int(params.get("stock_limit", 100))
@@ -2603,7 +2413,6 @@ class DataSyncRunner:
         stock_rows = _financial_sync_stock_rows(
             stock_limit,
             only_missing,
-            rotate_attempts=False,
         )
         if not stock_rows:
             return {"rows_read": 0, "rows_written": 0, "message": "No stocks in DB."}
@@ -2744,6 +2553,7 @@ JOB_RUNNERS: dict[str, str] = {
     "sync_low_suction_forward_top3": "_run_sync_low_suction_forward_top3",
     "sync_low_suction_forward_ma5_shadow": "_run_sync_low_suction_forward_ma5_shadow",
     "sync_low_suction_forward_ma5_minutes": "_run_sync_low_suction_forward_ma5_minutes",
+    "sync_low_suction_reclaim_minutes": "_run_sync_low_suction_reclaim_minutes",
     "sync_low_suction_swing_settlement": "_run_sync_low_suction_swing_settlement",
     "sync_shenwan_industry_tree": "_run_sync_shenwan_industry_tree",
     "sync_shenwan_industry_members": "_run_sync_shenwan_industry_members",
@@ -7886,8 +7696,9 @@ def _financial_sync_stock_rows(
     only_missing: bool = True,
     *,
     symbols: list[str] | None = None,
-    rotate_attempts: bool = True,
 ) -> list[dict[str, Any]]:
+    """Select stocks missing the separate, non-point-in-time indicator dataset."""
+
     limit = min(max(int(stock_limit or 100), 1), 1000)
     with session_scope() as session:
         query = select(schema.stocks).order_by(desc(schema.stocks.c.turnover), desc(schema.stocks.c.market_cap))
@@ -7897,7 +7708,7 @@ def _financial_sync_stock_rows(
                     schema.stock_financial_reports.c.vt_symbol.label("vt_symbol"),
                     func.count().label("report_count"),
                 )
-                .where(schema.stock_financial_reports.c.publish_date.is_not(None))
+                .where(schema.stock_financial_reports.c.period_type == "indicator")
                 .group_by(schema.stock_financial_reports.c.vt_symbol)
                 .subquery()
             )
@@ -7909,136 +7720,287 @@ def _financial_sync_stock_rows(
             )
         if symbols:
             query = query.where(schema.stocks.c.vt_symbol.in_(symbols))
-        rows = [dict(row) for row in session.execute(query).mappings().all()]
-
-    if symbols or not rotate_attempts:
-        return rows[:limit]
-    attempts = _load_financial_sync_attempts(
-        [str(row.get("vt_symbol") or "") for row in rows],
-    )
-    return _select_financial_candidates(
-        rows,
-        attempts,
-        stock_limit=limit,
-        now=datetime.now(timezone.utc),
-    )
+        return [
+            dict(row)
+            for row in session.execute(query.limit(limit)).mappings().all()
+        ]
 
 
-def _select_financial_candidates(
-    stock_rows: Sequence[Any],
-    attempts: dict[str, dict[str, Any]],
+def _recent_quarter_ends(today: date, *, count: int) -> list[str]:
+    current_quarter = today.year * 4 + (today.month - 1) // 3
+    quarter_in_year = current_quarter % 4 + 1
+    quarter_month = quarter_in_year * 3
+    quarter_day = 31 if quarter_month in {3, 12} else 30
+    current_end = date(current_quarter // 4, quarter_month, quarter_day)
+    latest_quarter = current_quarter if today >= current_end else current_quarter - 1
+    result: list[str] = []
+    for quarter_index in range(latest_quarter - max(count, 1) + 1, latest_quarter + 1):
+        year = quarter_index // 4
+        quarter = quarter_index % 4 + 1
+        month = quarter * 3
+        day = 31 if month in {3, 12} else 30
+        result.append(date(year, month, day).isoformat())
+    return result
+
+
+def _financial_report_dates_for_sync(
+    params: dict[str, Any],
     *,
-    stock_limit: int,
-    now: datetime,
-) -> list[dict[str, Any]]:
-    """Rotate eligible stocks so slow symbols cannot starve the queue."""
-
-    aware_now = _financial_attempt_datetime(now) or datetime.now(timezone.utc)
-    eligible: list[dict[str, Any]] = []
-    for source_row in stock_rows:
-        row = dict(source_row)
-        attempt = attempts.get(str(row.get("vt_symbol") or ""), {})
-        next_retry_at = _financial_attempt_datetime(attempt.get("next_retry_at"))
-        if next_retry_at is not None and next_retry_at > aware_now:
-            continue
-        eligible.append(row)
-
-    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-
-    def sort_key(row: dict[str, Any]) -> tuple[bool, datetime, float, str]:
-        vt_symbol_value = str(row.get("vt_symbol") or "")
-        last_attempt_at = _financial_attempt_datetime(
-            attempts.get(vt_symbol_value, {}).get("last_attempt_at")
-        )
-        return (
-            last_attempt_at is not None,
-            last_attempt_at or epoch,
-            -_financial_turnover(row.get("turnover")),
-            vt_symbol_value,
-        )
-
-    eligible.sort(key=sort_key)
-    limit = min(max(int(stock_limit or 100), 1), 1000)
-    return eligible[:limit]
+    today: date | None = None,
+) -> list[str]:
+    explicit = _financial_report_date_params(params.get("report_dates"))
+    if explicit:
+        return explicit
+    quarter_count = min(
+        max(int(params.get("bootstrap_quarters") or FINANCIAL_BOOTSTRAP_QUARTERS), 1),
+        40,
+    )
+    report_dates = _recent_quarter_ends(today or date.today(), count=quarter_count)
+    if _truthy(params.get("force_all")):
+        return report_dates
+    covered = _financial_batch_covered_report_dates(report_dates)
+    latest = report_dates[-1]
+    return [
+        report_date
+        for report_date in report_dates
+        if report_date not in covered or report_date == latest
+    ]
 
 
-def _financial_turnover(value: Any) -> float:
-    try:
-        return float(value or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
+def _financial_report_date_params(value: Any) -> list[str]:
+    if value is None:
+        return []
+    raw_values = value.replace("\n", ",").split(",") if isinstance(value, str) else value
+    if not isinstance(raw_values, (list, tuple, set)):
+        raw_values = [raw_values]
+    result: list[str] = []
+    for raw_value in raw_values:
+        parsed = _parse_date(raw_value)
+        if parsed is None or (parsed.month, parsed.day) not in {
+            (3, 31),
+            (6, 30),
+            (9, 30),
+            (12, 31),
+        }:
+            raise DataSyncError(f"无效季度报告期：{raw_value}")
+        text_value = parsed.isoformat()
+        if text_value not in result:
+            result.append(text_value)
+    return sorted(result)
 
 
-def _financial_attempt_datetime(value: Any) -> datetime | None:
-    if not isinstance(value, datetime):
+def _financial_batch_covered_report_dates(report_dates: Sequence[str]) -> set[str]:
+    if not report_dates or not is_database_configured():
+        return set()
+    normalized_report_date = func.substr(
+        schema.stock_financial_reports.c.report_date,
+        1,
+        10,
+    )
+    with session_scope() as session:
+        rows = session.execute(
+            select(normalized_report_date, func.count())
+            .where(
+                schema.stock_financial_reports.c.period_type == "quarterly",
+                schema.stock_financial_reports.c.source == FINANCIAL_BATCH_SOURCE,
+                normalized_report_date.in_(list(report_dates)),
+            )
+            .group_by(normalized_report_date)
+        ).all()
+    return {
+        str(report_date)
+        for report_date, row_count in rows
+        if int(row_count or 0) >= FINANCIAL_BATCH_BOOTSTRAP_MIN_ROWS
+    }
+
+
+_FINANCIAL_AUTHORITATIVE_FIELDS = (
+    "publish_date",
+    "revenue",
+    "revenue_yoy",
+    "revenue_qoq",
+    "net_profit",
+    "net_profit_yoy",
+    "net_profit_qoq",
+    "eps",
+    "gross_margin",
+    "roe",
+)
+_FINANCIAL_ENRICHMENT_FIELDS = (
+    "deducted_net_profit",
+    "net_margin",
+    "debt_asset_ratio",
+    "operating_cash_flow",
+    "cash_flow_quality",
+)
+_FINANCIAL_REPORT_FIELDS = (
+    "vt_symbol",
+    "report_date",
+    "period_type",
+    *_FINANCIAL_AUTHORITATIVE_FIELDS,
+    *_FINANCIAL_ENRICHMENT_FIELDS,
+    "source",
+    "raw",
+)
+
+
+def _financial_report_values(item: dict[str, Any]) -> dict[str, Any] | None:
+    vts = str(item.get("vt_symbol") or "").upper()
+    if not vts:
+        symbol = str(item.get("symbol") or "")
+        if not symbol:
+            return None
+        vts = vt_symbol(symbol, str(item.get("exchange") or ""))
+    report_date = _financial_storage_timestamp(item.get("report_date"))
+    if report_date is None:
         return None
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+    return {
+        "vt_symbol": vts,
+        "report_date": report_date,
+        "period_type": "quarterly",
+        "publish_date": _financial_storage_timestamp(item.get("publish_date")),
+        "revenue": item.get("revenue"),
+        "revenue_yoy": item.get("revenue_yoy"),
+        "revenue_qoq": item.get("revenue_qoq"),
+        "net_profit": item.get("net_profit"),
+        "net_profit_yoy": item.get("net_profit_yoy"),
+        "net_profit_qoq": item.get("net_profit_qoq"),
+        "deducted_net_profit": item.get("deducted_net_profit"),
+        "eps": item.get("eps"),
+        "gross_margin": item.get("gross_margin"),
+        "net_margin": item.get("net_margin"),
+        "roe": item.get("roe"),
+        "debt_asset_ratio": item.get("debt_asset_ratio") or item.get("debt_ratio"),
+        "operating_cash_flow": item.get("operating_cash_flow"),
+        "cash_flow_quality": item.get("cash_flow_quality"),
+        "source": str(item.get("source") or FINANCIAL_BATCH_SOURCE),
+        "raw": dict(item.get("raw") or {}),
+    }
 
 
-def _financial_retry_at() -> datetime:
-    return datetime.now(timezone.utc) + FINANCIAL_SYNC_RETRY_DELAY
+def _financial_storage_timestamp(value: Any) -> str | None:
+    parsed = _parse_date(value)
+    return f"{parsed.isoformat()} 00:00:00" if parsed is not None else None
 
 
-def _load_financial_sync_attempts(
-    symbols: Sequence[str],
-) -> dict[str, dict[str, Any]]:
-    normalized_symbols = sorted({str(symbol) for symbol in symbols if symbol})
-    if not normalized_symbols or not is_database_configured():
-        return {}
-    try:
-        with session_scope() as session:
-            rows = session.execute(
-                select(schema.stock_financial_sync_attempts).where(
-                    schema.stock_financial_sync_attempts.c.vt_symbol.in_(normalized_symbols),
-                )
-            ).mappings().all()
-    except Exception:
-        logger.warning("load financial sync attempts failed", exc_info=True)
-        return {}
-    return {str(row["vt_symbol"]): dict(row) for row in rows}
+def _merge_financial_report_values(
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    merged = {column: incoming.get(column) for column in _FINANCIAL_REPORT_FIELDS}
+    for column in _FINANCIAL_ENRICHMENT_FIELDS:
+        if merged.get(column) is None:
+            merged[column] = existing.get(column)
+    raw = dict(existing.get("raw") or {})
+    raw.update(dict(incoming.get("raw") or {}))
+    merged["raw"] = raw
+    return merged
 
 
-def _record_financial_sync_attempt(
-    vt_symbol_value: str,
-    status: str,
-    *,
-    error: str | None = None,
-    next_retry_at: datetime | None = None,
-) -> None:
-    if not is_database_configured():
-        return
-    attempted_at = datetime.now(timezone.utc)
-    table = schema.stock_financial_sync_attempts
-    statement = postgresql_insert(table).values(
-        vt_symbol=vt_symbol_value,
-        status=status,
-        attempt_count=1,
-        last_error=str(error)[:500] if error else None,
-        last_attempt_at=attempted_at,
-        next_retry_at=next_retry_at,
-    )
-    statement = statement.on_conflict_do_update(
-        index_elements=[table.c.vt_symbol],
-        set_={
-            "status": statement.excluded.status,
-            "attempt_count": table.c.attempt_count + 1,
-            "last_error": statement.excluded.last_error,
-            "last_attempt_at": statement.excluded.last_attempt_at,
-            "next_retry_at": statement.excluded.next_retry_at,
-            "updated_at": func.now(),
-        },
-    )
-    try:
-        with session_scope() as session:
-            session.execute(statement)
-    except Exception:
-        logger.warning(
-            "record financial sync attempt failed for %s",
-            vt_symbol_value,
-            exc_info=True,
+def _upsert_stock_financial_report_batch(items: list[dict[str, Any]]) -> int:
+    incoming_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in items:
+        values = _financial_report_values(item)
+        if values is None:
+            continue
+        key = (
+            str(values["vt_symbol"]),
+            str(values["report_date"]),
+            str(values["period_type"]),
         )
+        incoming_by_key[key] = values
+    if not incoming_by_key:
+        return 0
+
+    candidate_symbols = sorted({key[0] for key in incoming_by_key})
+    candidate_dates = sorted({key[1] for key in incoming_by_key})
+    table = schema.stock_financial_reports
+    with session_scope() as session:
+        local_symbols = set(
+            session.execute(
+                select(schema.stocks.c.vt_symbol).where(
+                    schema.stocks.c.vt_symbol.in_(candidate_symbols)
+                )
+            ).scalars().all()
+        )
+        incoming_by_key = {
+            key: values
+            for key, values in incoming_by_key.items()
+            if key[0] in local_symbols
+        }
+        if not incoming_by_key:
+            return 0
+        existing_rows = session.execute(
+            select(table).where(
+                table.c.vt_symbol.in_(sorted(local_symbols)),
+                table.c.report_date.in_(candidate_dates),
+                table.c.period_type == "quarterly",
+            )
+        ).mappings().all()
+        existing_by_key = {
+            (
+                str(row["vt_symbol"]),
+                str(row["report_date"]),
+                str(row["period_type"]),
+            ): dict(row)
+            for row in existing_rows
+        }
+        values = [
+            _merge_financial_report_values(existing_by_key.get(key, {}), incoming)
+            for key, incoming in incoming_by_key.items()
+        ]
+        update_fields = [
+            field
+            for field in _FINANCIAL_REPORT_FIELDS
+            if field not in {"vt_symbol", "report_date", "period_type"}
+        ]
+        for offset in range(0, len(values), FINANCIAL_REPORT_UPSERT_BATCH_SIZE):
+            statement = postgresql_insert(table).values(
+                values[offset : offset + FINANCIAL_REPORT_UPSERT_BATCH_SIZE]
+            )
+            statement = statement.on_conflict_do_update(
+                index_elements=[table.c.vt_symbol, table.c.report_date, table.c.period_type],
+                set_={
+                    **{field: getattr(statement.excluded, field) for field in update_fields},
+                    "updated_at": func.now(),
+                },
+            )
+            session.execute(statement)
+    return len(values)
+
+
+def _invalidate_legacy_financial_growth_fields(
+    report_date: str,
+    *,
+    symbols: Sequence[str] | None = None,
+) -> int:
+    """Disable legacy per-stock QOQ values that were mislabeled as YOY."""
+
+    if not is_database_configured():
+        return 0
+    parsed = _parse_date(report_date)
+    if parsed is None:
+        return 0
+    table = schema.stock_financial_reports
+    conditions = [
+        table.c.period_type == "quarterly",
+        func.substr(table.c.report_date, 1, 10) == parsed.isoformat(),
+        table.c.source != FINANCIAL_BATCH_SOURCE,
+    ]
+    if symbols:
+        conditions.append(table.c.vt_symbol.in_(list(symbols)))
+    with session_scope() as session:
+        result = session.execute(
+            table.update()
+            .where(*conditions)
+            .values(
+                revenue_yoy=None,
+                net_profit_yoy=None,
+                source="akshare.legacy_quarterly_no_yoy",
+                updated_at=func.now(),
+            )
+        )
+    return max(int(result.rowcount or 0), 0)
 
 
 def _upsert_stock_financial_reports(

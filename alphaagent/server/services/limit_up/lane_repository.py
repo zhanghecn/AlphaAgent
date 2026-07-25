@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from bisect import bisect_right
+from bisect import bisect_left
 from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime
-from typing import Mapping, Sequence
 
 from sqlalchemy import func, select, tuple_
 
@@ -286,7 +286,8 @@ def financial_report_as_of(
     reports = index.get(vt_symbol) or []
     if not reports:
         return None
-    position = bisect_right([item[0] for item in reports], signal_date) - 1
+    # 公告源只有日期、没有盘中发布时间；D 日交易统一只使用 D 日之前已公告的报告。
+    position = bisect_left([item[0] for item in reports], signal_date) - 1
     return dict(reports[position][1]) if position >= 0 else None
 
 

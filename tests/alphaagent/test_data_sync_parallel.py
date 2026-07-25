@@ -6,9 +6,10 @@
 
 from __future__ import annotations
 
-import threading
 import time
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from alphaagent.server.services import data_sync as svc
 
@@ -80,220 +81,116 @@ def test_bounded_parallel_map_does_not_timeout_queued_items():
     assert sorted(done) == list(range(30))
 
 
-def test_financial_quarterly_skips_hung_stock_without_late_write(monkeypatch):
-    """A hung quarterly request must not block the batch or write after timeout."""
-
-    written_symbols: list[str] = []
-    attempts: list[tuple[str, str]] = []
-    progress: list[dict[str, object]] = []
-    release_hung_request = threading.Event()
-
-    class FakeAdapter:
-        def stock_financial_quarterly(self, symbol, exchange=None):
-            if symbol == "600001":
-                release_hung_request.wait()
-            return {
-                "items": [
-                    {
-                        "report_date": "2026-03-31",
-                        "revenue": 1.0,
-                        "net_profit": 1.0,
-                    }
-                ]
-            }
-
-        def stock_balance_sheet(self, symbol, exchange=None):
-            return {"items": []}
-
-        def stock_cash_flow_sheet(self, symbol, exchange=None):
-            return {"items": []}
-
-    monkeypatch.setattr(
-        svc,
-        "_financial_sync_stock_rows",
-        lambda stock_limit, only_missing: [
-            {"symbol": "600001", "exchange": "SSE", "name": "慢响应"},
-            {"symbol": "600002", "exchange": "SSE", "name": "正常"},
-        ],
-    )
-    monkeypatch.setattr(
-        svc,
-        "_upsert_stock_financial_reports",
-        lambda symbol, exchange, items, period_type: written_symbols.append(symbol) or len(items),
-    )
-    monkeypatch.setattr(
-        svc,
-        "_record_financial_sync_attempt",
-        lambda vt_symbol_value, status, **kwargs: attempts.append(
-            (vt_symbol_value, status)
-        ),
-    )
-    monkeypatch.setattr(svc, "FINANCIAL_SYNC_PER_ITEM_TIMEOUT_SECONDS", 0.03)
-
-    start = time.monotonic()
-    try:
-        result = svc.DataSyncRunner(
-            adapter=FakeAdapter(),
-            progress=progress.append,
-            concurrency=2,
-        )._run_sync_stock_financial_quarterly({})
-        elapsed = time.monotonic() - start
-    finally:
-        release_hung_request.set()
-
-    assert elapsed < 0.5
-    assert result == {"rows_read": 1, "rows_written": 1, "timed_out": 1}
-    assert written_symbols == ["600002"]
-    assert any("超时跳过" in str(item.get("current_label")) for item in progress)
-
-    time.sleep(0.05)
-    assert written_symbols == ["600002"]
-    assert sorted(attempts) == [
-        ("600001.SSE", "timed_out"),
-        ("600002.SSE", "succeeded"),
-    ]
-
-
-def test_financial_quarterly_uses_dedicated_timeout_and_capped_concurrency(monkeypatch):
-    captured: dict[str, object] = {}
-
-    monkeypatch.setattr(
-        svc,
-        "_financial_sync_stock_rows",
-        lambda stock_limit, only_missing: [
-            {"symbol": "600001", "exchange": "SSE", "name": "样本"},
-        ],
-    )
-
-    def capture_map(fn, items, *, concurrency, per_item_timeout, on_timeout):
-        del fn, items, on_timeout
-        captured.update(
-            concurrency=concurrency,
-            per_item_timeout=per_item_timeout,
-        )
-
-    monkeypatch.setattr(svc, "_bounded_parallel_map", capture_map)
-    monkeypatch.setattr(svc, "FINANCIAL_SYNC_PER_ITEM_TIMEOUT_SECONDS", 180.0)
-    monkeypatch.setattr(svc, "FINANCIAL_SYNC_MAX_STOCK_CONCURRENCY", 3)
-
-    svc.DataSyncRunner(concurrency=8)._run_sync_stock_financial_quarterly({})
-
-    assert captured == {
-        "concurrency": 3,
-        "per_item_timeout": 180.0,
-    }
-
-
-def test_financial_quarterly_fetches_statement_bundle_concurrently(monkeypatch):
-    barrier = threading.Barrier(3, timeout=0.5)
+def test_financial_quarterly_syncs_complete_report_periods(monkeypatch):
+    requested_dates: list[str] = []
     written: list[dict[str, object]] = []
-    attempts: list[tuple[str, str]] = []
+    cache_clears: list[bool] = []
 
     class FakeAdapter:
-        def stock_financial_quarterly(self, symbol, exchange=None):
-            del symbol, exchange
-            barrier.wait()
+        def stock_financial_performance(self, report_date):
+            requested_dates.append(report_date)
             return {
                 "items": [
                     {
-                        "report_date": "2026-03-31",
-                        "publish_date": "2026-04-30",
-                        "revenue": 100.0,
-                        "net_profit": 10.0,
-                        "raw": {"PARENT_NETPROFIT": 10.0},
-                    }
-                ]
-            }
-
-        def stock_balance_sheet(self, symbol, exchange=None):
-            del symbol, exchange
-            barrier.wait()
-            return {
-                "items": [
-                    {
-                        "REPORT_DATE": "2026-03-31",
-                        "TOTAL_PARENT_EQUITY": 100.0,
-                    }
-                ]
-            }
-
-        def stock_cash_flow_sheet(self, symbol, exchange=None):
-            del symbol, exchange
-            barrier.wait()
-            return {
-                "items": [
-                    {
-                        "REPORT_DATE": "2026-03-31",
-                        "NOTICE_DATE": "2026-04-30",
-                        "NETCASH_OPERATE": 15.0,
-                        "NETPROFIT": 10.0,
+                        "vt_symbol": "600001.SSE",
+                        "report_date": f"{report_date} 00:00:00",
+                        "net_profit_yoy": 18.0,
                     }
                 ]
             }
 
     monkeypatch.setattr(
         svc,
-        "_financial_sync_stock_rows",
-        lambda stock_limit, only_missing: [
-            {"symbol": "600001", "exchange": "SSE", "name": "并发样本"},
-        ],
+        "_financial_report_dates_for_sync",
+        lambda params: ["2025-12-31", "2026-03-31"],
     )
     monkeypatch.setattr(
         svc,
-        "_upsert_stock_financial_reports",
-        lambda symbol, exchange, items, period_type: written.extend(items) or len(items),
+        "_upsert_stock_financial_report_batch",
+        lambda items: written.extend(items) or len(items),
     )
     monkeypatch.setattr(
         svc,
-        "_record_financial_sync_attempt",
-        lambda vt_symbol_value, status, **kwargs: attempts.append(
-            (vt_symbol_value, status)
-        ),
+        "clear_live_context_cache",
+        lambda: cache_clears.append(True),
     )
 
-    result = svc.DataSyncRunner(
-        adapter=FakeAdapter(),
-        concurrency=1,
-    )._run_sync_stock_financial_quarterly({})
+    result = svc.DataSyncRunner(adapter=FakeAdapter())._run_sync_stock_financial_quarterly({})
 
-    assert result == {"rows_read": 1, "rows_written": 1, "timed_out": 0}
-    assert written[0]["roe"] == 10.0
-    assert written[0]["operating_cash_flow"] == 15.0
-    assert written[0]["cash_flow_quality"] == 1.5
-    assert attempts == [("600001.SSE", "succeeded")]
+    assert requested_dates == ["2025-12-31", "2026-03-31"]
+    assert [item["net_profit_yoy"] for item in written] == [18.0, 18.0]
+    assert result["rows_read"] == 2
+    assert result["rows_written"] == 2
+    assert result["report_dates"] == ["2025-12-31", "2026-03-31"]
+    assert cache_clears == [True]
 
 
-def test_financial_quarterly_forwards_requested_symbols(monkeypatch):
-    selected: dict[str, object] = {}
+def test_financial_quarterly_filters_explicit_symbols(monkeypatch):
+    written: list[dict[str, object]] = []
 
-    def select_stocks(stock_limit, only_missing, *, symbols=None):
-        selected.update(
-            stock_limit=stock_limit,
-            only_missing=only_missing,
-            symbols=symbols,
-        )
-        return []
+    class FakeAdapter:
+        def stock_financial_performance(self, report_date):
+            return {
+                "items": [
+                    {"vt_symbol": "603989.SSE", "report_date": report_date},
+                    {"vt_symbol": "000506.SZSE", "report_date": report_date},
+                ]
+            }
 
-    monkeypatch.setattr(svc, "_financial_sync_stock_rows", select_stocks)
+    monkeypatch.setattr(
+        svc,
+        "_upsert_stock_financial_report_batch",
+        lambda items: written.extend(items) or len(items),
+    )
 
-    result = svc.DataSyncRunner()._run_sync_stock_financial_quarterly(
+    result = svc.DataSyncRunner(adapter=FakeAdapter())._run_sync_stock_financial_quarterly(
         {
-            "stock_limit": 24,
-            "only_missing": True,
-            "symbols": ["603989.SSE", "000506.SZSE"],
+            "report_dates": ["2026-03-31"],
+            "symbols": ["603989.SSE"],
         }
     )
 
-    assert selected == {
-        "stock_limit": 24,
-        "only_missing": True,
-        "symbols": ["603989.SSE", "000506.SZSE"],
-    }
-    assert result == {
-        "rows_read": 0,
-        "rows_written": 0,
-        "message": "No stocks in DB.",
-    }
+    assert [item["vt_symbol"] for item in written] == ["603989.SSE"]
+    assert result["rows_read"] == 1
+    assert result["rows_written"] == 1
+
+
+def test_financial_quarterly_clears_live_cache_after_partial_write(monkeypatch):
+    cache_clears: list[bool] = []
+
+    class FakeAdapter:
+        def stock_financial_performance(self, report_date):
+            if report_date == "2026-03-31":
+                return {
+                    "items": [
+                        {
+                            "vt_symbol": "000670.SZSE",
+                            "report_date": report_date,
+                        }
+                    ]
+                }
+            raise TimeoutError("quarter unavailable")
+
+    monkeypatch.setattr(
+        svc,
+        "_financial_report_dates_for_sync",
+        lambda params: ["2026-03-31", "2026-06-30"],
+    )
+    monkeypatch.setattr(
+        svc,
+        "_upsert_stock_financial_report_batch",
+        lambda items: len(items),
+    )
+    monkeypatch.setattr(
+        svc,
+        "clear_live_context_cache",
+        lambda: cache_clears.append(True),
+    )
+
+    with pytest.raises(svc.DataSyncError, match="2026-06-30:TimeoutError"):
+        svc.DataSyncRunner(adapter=FakeAdapter())._run_sync_stock_financial_quarterly({})
+
+    assert cache_clears == [True]
 
 
 def test_select_zombie_batch_ids_picks_only_stale_running():

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pandas as pd
 import pytest
@@ -28,6 +28,37 @@ def test_history_replay_schema_uses_date_and_version_primary_key() -> None:
 def test_weak_market_attack_history_uses_v14_version() -> None:
     assert history_engine.HISTORY_STRATEGY_VERSION == "limit-up-history-v15"
     assert versions.LIVE_STRATEGY_VERSION == "limit-up-live-v15"
+
+
+def test_scheduled_backtest_cache_key_changes_after_external_ledger_rebuild(
+    monkeypatch,
+) -> None:
+    revisions = iter(
+        [
+            datetime(2026, 7, 24, 10, 0, tzinfo=timezone.utc),
+            datetime(2026, 7, 24, 10, 5, tzinfo=timezone.utc),
+        ]
+    )
+    keys: list[str] = []
+
+    class RecordingCache:
+        def get_or_set(self, key, _ttl, _loader):
+            keys.append(key)
+            return {"orders": [], "trades": [], "skipped_orders": []}
+
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "history_ledger_updated_at",
+        lambda _version: next(revisions),
+    )
+    monkeypatch.setattr(history_service, "_BACKTEST_REPORT_CACHE", RecordingCache())
+
+    history_service.get_scheduled_history_backtest(None, None, trade_limit=None)
+    history_service.get_scheduled_history_backtest(None, None, trade_limit=None)
+
+    assert keys[0] != keys[1]
+    assert "2026-07-24T10:00:00+00:00" in keys[0]
+    assert "2026-07-24T10:05:00+00:00" in keys[1]
 
 
 def test_reliable_date_window_rejects_sparse_prefix() -> None:
