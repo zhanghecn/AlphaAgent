@@ -296,6 +296,25 @@ export interface PreboardCandidate {
   probability_status: string;
   source_quality: string;
   updated_at: string;
+  dynamic_leader_shadow?: {
+    policy_version: string;
+    status: "locked" | "cooling" | "waiting_theme" | "unavailable" | string;
+    execution_effect: "none_research_only" | string;
+    market_gate_passed: boolean | null;
+    concept_id: string | null;
+    concept_name: string | null;
+    concept_state: "warming" | "launch" | "observe" | "ebb" | "unavailable" | string | null;
+    concept_leader_rank: number | null;
+    locked_at: string | null;
+    observed_frames: number;
+    eligible_frames: number;
+    consecutive_eligible_frames: number;
+    persistence_ratio: number | null;
+    drop_count: number;
+    current_concept_top5: boolean;
+    global_rank: number | null;
+    global_top5: boolean;
+  };
 }
 
 export interface LimitUpSignalSnapshot {

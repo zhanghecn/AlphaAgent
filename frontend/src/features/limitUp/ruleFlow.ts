@@ -115,7 +115,7 @@ export function buildRuleFlow(guide: LimitUpStrategyGuide): RuleFlowNode[] {
       ],
       dataNote: "历史与实时调用同一特征投影和同一模型；来源不同只允许发生在分钟行情适配器。",
       dataGroupKeys: ["intraday"],
-      failHint: "分钟前缀不足或模型不可用时只观察，不补零、不猜概率、不产生行动。",
+      failHint: "分钟前缀不足或模型不可用时只保留内部审计样本，不公开板前候选、不补零、不猜概率。",
     },
     {
       id: "sector",

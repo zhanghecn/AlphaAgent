@@ -44,6 +44,31 @@ STYLE_CONCEPT_KEYWORDS = (
     "扭亏",
     "高振幅",
     "高换手",
+    "标准普尔",
+    "标普",
+    "富时",
+    "罗素",
+    "百元股",
+    "低价股",
+    "微盘股",
+    "权重股",
+    "破净",
+    "破发",
+    "破增发",
+    "QFII",
+    "社保重仓",
+    "证金持股",
+    "养老金",
+    "AB股",
+    "AH股",
+    "B股",
+    "HS300",
+    "央视50",
+    "上证180",
+    "上证380",
+    "深成500",
+    "创业成份",
+    "创业板综",
 )
 CONCEPT_MIN_COVERAGE_RATIO = 0.90
 CONCEPT_EBB_FAILED_RATE = 0.35
@@ -56,6 +81,28 @@ CONCEPT_WARMING_MIN_MEDIAN_CHANGE_PCT = 1.0
 CONCEPT_WARMING_MIN_STRONG_5_COUNT = 2
 CONCEPT_ACCELERATION_ANCHOR_TOLERANCE_SECONDS = 90
 _CONCEPT_STATES = {"launch": 0, "warming": 1, "observe": 2, "ebb": 3, "unavailable": 4}
+CONCEPT_SHADOW_METRIC_FIELDS = (
+    "coverage_ratio",
+    "observed_count",
+    "rise_ratio",
+    "median_change_pct",
+    "weighted_change_pct",
+    "strong_5_count",
+    "strong_5_ratio",
+    "strong_7_count",
+    "near_limit_count",
+    "near_limit_ratio",
+    "touched_count",
+    "sealed_count",
+    "failed_count",
+    "seal_quality",
+    "change_acceleration_1m",
+    "change_acceleration_3m",
+    "change_acceleration_5m",
+    "turnover_acceleration_1m",
+    "turnover_acceleration_3m",
+    "turnover_acceleration_5m",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,6 +393,7 @@ def attach_candidate_concepts(
 
     candidates_by_concept: dict[str, list[dict[str, object]]] = defaultdict(list)
     selected_concept_by_symbol: dict[str, str] = {}
+    available_concepts_by_symbol: dict[str, list[Mapping[str, object]]] = {}
     for candidate in candidates:
         symbol = str(candidate.get("vt_symbol") or "").upper()
         concept_ids = by_symbol.get(symbol)
@@ -358,6 +406,7 @@ def attach_candidate_concepts(
         if not available:
             _attach_unavailable_concept(candidate, age_seconds, trigger_allowed)
             continue
+        available_concepts_by_symbol[symbol] = available
         selected = min(available, key=_concept_selection_key)
         concept_id = str(selected.get("concept_id") or "")
         selected_concept_by_symbol[symbol] = concept_id
@@ -378,6 +427,17 @@ def attach_candidate_concepts(
         concept_id = selected_concept_by_symbol.get(symbol)
         if concept_id:
             candidate["concept_leader_rank"] = leader_ranks.get((concept_id, symbol))
+        available = available_concepts_by_symbol.get(symbol, [])
+        candidate["concept_candidates"] = [
+            _candidate_concept_evidence(
+                concept,
+                leader_ranks.get((str(concept.get("concept_id") or ""), symbol)),
+            )
+            for concept in sorted(available, key=_concept_selection_key)
+        ]
+        candidate["concept_candidate_count"] = len(
+            candidate["concept_candidates"]
+        )
 
 
 def replay_radar_concepts(
@@ -568,6 +628,27 @@ def _copy_concept_evidence(
     )
 
 
+def _candidate_concept_evidence(
+    concept: Mapping[str, object],
+    leader_rank: int | None,
+) -> dict[str, object]:
+    """Keep every real theme needed to audit a stable leader identity."""
+
+    return {
+        "concept_id": concept.get("concept_id"),
+        "concept_name": concept.get("concept_name"),
+        "concept_state": concept.get("concept_state") or "unavailable",
+        "strength_score": concept.get("strength_score"),
+        "strength_rank": concept.get("strength_rank"),
+        "strength_percentile": concept.get("strength_percentile"),
+        "leader_rank": leader_rank,
+        **{
+            field: concept.get(field)
+            for field in CONCEPT_SHADOW_METRIC_FIELDS
+        },
+    }
+
+
 def _attach_unavailable_concept(
     candidate: dict[str, object],
     age_seconds: float | None,
@@ -582,6 +663,8 @@ def _attach_unavailable_concept(
             "concept_coverage_ratio": 0.0,
             "concept_snapshot_age_seconds": age_seconds,
             "concept_trigger_allowed": trigger_allowed,
+            "concept_candidates": [],
+            "concept_candidate_count": 0,
         }
     )
 

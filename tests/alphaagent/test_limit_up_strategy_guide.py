@@ -53,8 +53,10 @@ def test_strategy_guide_exposes_the_frozen_v15_dataset_fingerprint() -> None:
     assert dataset["win_rate_pct"] == 63.6364
     assert dataset["average_net_return_pct"] == 2.905
     historical = guide["historical_reference"]
-    assert historical["trade_day_count"] == 800
-    assert historical["qualified_signal_count"] == 168
+    assert historical["trade_day_count"] == 806
+    assert historical["qualified_signal_count"] == 243
+    assert historical["closed_recommendation_count"] == 239
+    assert historical["recommendation_win_rate_pct"] == 54.8117
     assert historical["live_equivalent"] is False
     preboard = guide["preboard_decision"]
     assert preboard["decision_version"] == "limit-up-preboard-decision-v1"

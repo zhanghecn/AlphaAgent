@@ -286,15 +286,13 @@ def test_quality_pool_excludes_plain_three_percent_failed_and_touched_stocks(
     assert pool[0]["quality_gate_passed"] is True
 
 
-def test_preboard_pool_defers_touch_time_route_blockers_to_probability_model() -> None:
+def test_preboard_pool_defers_only_intraday_route_blockers() -> None:
     candidate = _candidate(
         "600003.SSE",
         change_pct=8.9,
         last_price=10.89,
         path_prefix={},
         prior_industry_heat_score=None,
-        financial_snapshot=None,
-        prior_market_failed_rate=0.10,
     )
 
     pools = build_preboard_pools(
@@ -312,6 +310,30 @@ def test_preboard_pool_defers_touch_time_route_blockers_to_probability_model() -
     assert set(row["preboard_deferred_blockers"]) == {
         "industry_heat_unavailable",
         "intraday_support_unavailable",
+    }
+
+
+def test_preboard_pool_rejects_fixed_formal_lane_blockers() -> None:
+    candidate = _candidate(
+        "600003.SSE",
+        change_pct=8.9,
+        last_price=10.89,
+        financial_snapshot=None,
+        prior_market_failed_rate=0.10,
+    )
+
+    pools = build_preboard_pools(
+        [candidate],
+        decision_at=DECISION_AT,
+        market_gate={"passed": True},
+    )
+
+    assert len(pools.capture_pool) == 1
+    assert pools.eligible_first_board_pool == ()
+    assert pools.quality_pool == ()
+    rejected = pools.candidate_audit[0]
+    assert rejected["pool_stage"] == "quality_rejected"
+    assert set(rejected["preboard_hard_blockers"]) == {
         "financial_report_unavailable",
         "first_board_repair_setup_missing",
     }

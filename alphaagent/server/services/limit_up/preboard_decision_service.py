@@ -5,11 +5,15 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, time, timedelta
+from math import isfinite
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from alphaagent.server.services.limit_up.first_board_quality import (
     build_preboard_pools,
+)
+from alphaagent.server.services.limit_up.dynamic_leader_shadow import (
+    DynamicLeaderTracker,
 )
 from alphaagent.server.services.limit_up.preboard_decision_contract import (
     PREBOARD_DECISION_VERSION,
@@ -48,6 +52,7 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 CURRENT_DAY_FREEZE_TIME = time(15, 0)
 MAXIMUM_SCAN_GAP_SECONDS = 60.0
 MAXIMUM_SCAN_P90_SECONDS = 20.0
+_LIVE_DYNAMIC_LEADER_TRACKER = DynamicLeaderTracker()
 
 
 def score_live_preboard_snapshot(
@@ -58,6 +63,7 @@ def score_live_preboard_snapshot(
     execution_mode: PreboardExecutionMode,
     minute_buffer: LiveMinuteBuffer,
     historical_promotion_status: str | None = None,
+    leader_tracker: DynamicLeaderTracker | None = None,
 ) -> dict[str, object]:
     """Score the current high-quality pool with the shared causal pipeline."""
 
@@ -104,6 +110,15 @@ def score_live_preboard_snapshot(
         ),
         key=preboard_action_sort_key,
     )
+    ranked = (leader_tracker or DynamicLeaderTracker()).attach(
+        ranked,
+        captured_at=decision_at,
+        market_gate_passed=_market_gate(snapshot).get("passed") is True,
+        universe_rows=candidates,
+    )
+    public_candidates = [
+        row for row in ranked if _has_real_touch_probabilities(row)
+    ]
     formal_changed = any(
         row.get("formal_strategy_changed") is True for row in ranked
     )
@@ -133,9 +148,9 @@ def score_live_preboard_snapshot(
             "quality": len(pools.quality_pool),
         },
         "rejection_counts": dict(pools.rejection_counts),
-        "preboard_candidates": ranked,
+        "preboard_candidates": public_candidates,
         "feature_rows": ranked,
-        "observation_count": len(ranked),
+        "observation_count": len(public_candidates),
         "action_saved": action_saved,
         "formal_strategy_changed": formal_changed,
     }
@@ -158,6 +173,7 @@ def score_active_live_preboard_snapshot(
             thresholds=None,
             execution_mode=PreboardExecutionMode.RESEARCH_ONLY,
             minute_buffer=minute_buffer,
+            leader_tracker=_LIVE_DYNAMIC_LEADER_TRACKER,
         )
     result = score_live_preboard_snapshot(
         snapshot,
@@ -168,6 +184,7 @@ def score_active_live_preboard_snapshot(
         historical_promotion_status=str(
             runtime.get("historical_promotion_status") or ""
         ),
+        leader_tracker=_LIVE_DYNAMIC_LEADER_TRACKER,
     )
     return {
         **result,
@@ -340,7 +357,12 @@ def _project_candidate(
         "transaction_features": {},
         "transaction_source": "unavailable",
     }
-    return {**dict(row), **project_live_decision_features(prepared)}
+    return {
+        **dict(row),
+        "trade_date": prepared["trade_date"],
+        "decision_at": prepared["decision_at"],
+        **project_live_decision_features(prepared),
+    }
 
 
 def _live_adapter_rows(snapshot: Mapping[str, object]) -> list[dict[str, object]]:
@@ -641,10 +663,25 @@ def _quantile(values: Sequence[float], quantile: float) -> float | None:
 
 
 def _probability_status(rows: list[dict[str, object]]) -> str:
-    return (
-        "ready"
-        if any(row.get("probability_status") == "ready" for row in rows)
-        else "model_unavailable"
+    if any(_has_real_touch_probabilities(row) for row in rows):
+        return "ready"
+    for row in rows:
+        status = str(row.get("probability_status") or "").strip()
+        if status and status != "ready":
+            return status
+    return "model_unavailable"
+
+
+def _has_real_touch_probabilities(row: Mapping[str, object]) -> bool:
+    if str(row.get("probability_status") or "") != "ready":
+        return False
+    probabilities = (
+        _number(row.get("touch_probability_3m")),
+        _number(row.get("eventual_touch_probability")),
+    )
+    return all(
+        value is not None and isfinite(value) and 0.0 <= value <= 1.0
+        for value in probabilities
     )
 
 

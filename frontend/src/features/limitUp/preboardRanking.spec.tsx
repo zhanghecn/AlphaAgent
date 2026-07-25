@@ -20,6 +20,25 @@ const candidate: PreboardCandidate = {
   probability_status: "ready",
   source_quality: "sampled_quote_proxy",
   updated_at: "2026-07-23T10:18:20+08:00",
+  dynamic_leader_shadow: {
+    policy_version: "dynamic-concept-leader-shadow-v1",
+    status: "locked",
+    execution_effect: "none_research_only",
+    market_gate_passed: false,
+    concept_id: "BK0815",
+    concept_name: "存储芯片",
+    concept_state: "launch",
+    concept_leader_rank: 2,
+    locked_at: "2026-07-23T10:17:50+08:00",
+    observed_frames: 4,
+    eligible_frames: 3,
+    consecutive_eligible_frames: 2,
+    persistence_ratio: 0.75,
+    drop_count: 1,
+    current_concept_top5: true,
+    global_rank: 1,
+    global_top5: true,
+  },
 };
 
 describe("pre-board probability ranking", () => {
@@ -36,6 +55,10 @@ describe("pre-board probability ranking", () => {
     expect(html).toContain("3分钟触板");
     expect(html).toContain("72.00%");
     expect(html).toContain("84.00%");
+    expect(html).toContain("存储芯片");
+    expect(html).toContain("题材第2");
+    expect(html).toContain("跟踪 Top 1");
+    expect(html).toContain("市场暂停");
     expect(html).not.toContain("买入条件");
   });
 

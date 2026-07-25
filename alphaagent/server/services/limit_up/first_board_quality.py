@@ -10,10 +10,7 @@ from math import isfinite
 
 from alphaagent.server.services.limit_up import scheduled_execution
 from alphaagent.server.services.limit_up.domain import is_eligible_main_board
-from alphaagent.server.services.limit_up.lane_research import (
-    FIRST_BOARD_ATTACK_MIN_TOUCH_COUNT,
-    evaluate_lane_candidate,
-)
+from alphaagent.server.services.limit_up.lane_research import evaluate_lane_candidate
 from alphaagent.server.services.limit_up.preboard_decision_contract import (
     historical_prior_from_evidence,
     historical_prior_status,
@@ -24,17 +21,12 @@ from alphaagent.server.services.limit_up.preboard_decision_contract import (
 REPLACED_TRIGGER_CHECK_CODES = frozenset({"stock_momentum"})
 PREBOARD_DEFERRED_LANE_BLOCKERS = frozenset(
     {
-        "first_board_touch_gene_weak",
         "first_touch_too_early",
-        "first_touch_too_late",
         "industry_heat_unavailable",
         "intraday_support_unavailable",
         "intraday_support_breakdown",
         "first_board_local_setup_unconfirmed",
-        "first_board_quality_below_threshold",
         "intraday_support_out_of_range",
-        "financial_report_unavailable",
-        "first_board_repair_setup_missing",
     }
 )
 
@@ -69,10 +61,7 @@ def evaluate_first_board_quality_at_time(
     lane = evaluate_lane_candidate(point_in_time)
     with_lane = {**point_in_time, **lane}
     lane_blockers = tuple(str(value) for value in lane.get("blockers") or ())
-    hard_blockers, deferred_blockers = _preboard_lane_blockers(
-        point_in_time,
-        lane_blockers,
-    )
+    hard_blockers, deferred_blockers = _preboard_lane_blockers(lane_blockers)
     profitability = scheduled_execution.first_board_profitability_gate(with_lane)
     environment = first_board_action_environment_gate(
         with_lane,
@@ -369,19 +358,12 @@ def _execution_checks(
 
 
 def _preboard_lane_blockers(
-    candidate: Mapping[str, object],
     blockers: Sequence[str],
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     hard: list[str] = []
     deferred: list[str] = []
-    touch_count = _integer(candidate.get("prior_touch_count_126"), 0)
     for blocker in blockers:
-        if (
-            blocker == "first_board_touch_gene_weak"
-            and touch_count < FIRST_BOARD_ATTACK_MIN_TOUCH_COUNT
-        ):
-            hard.append(blocker)
-        elif blocker in PREBOARD_DEFERRED_LANE_BLOCKERS:
+        if blocker in PREBOARD_DEFERRED_LANE_BLOCKERS:
             deferred.append(blocker)
         else:
             hard.append(blocker)

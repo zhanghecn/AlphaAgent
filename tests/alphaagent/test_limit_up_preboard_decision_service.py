@@ -113,6 +113,99 @@ def test_live_service_scores_trace_capture_without_old_lanes(monkeypatch) -> Non
         "quality": 1,
     }
     assert [row["vt_symbol"] for row in result["feature_rows"]] == ["600001.SSE"]
+    assert result["feature_rows"][0]["trade_date"] == "2026-07-21"
+    assert result["feature_rows"][0]["decision_at"] == DECISION_AT.isoformat()
+    assert result["preboard_candidates"] == []
+    assert result["action_saved"] == 0
+    assert result["formal_strategy_changed"] is False
+
+
+def test_live_service_attaches_dynamic_leader_without_creating_action(
+    monkeypatch,
+) -> None:
+    candidate = {
+        "vt_symbol": "600001.SSE",
+        "name": "板前样本",
+        "change_pct": 8.0,
+        "last_price": 10.8,
+        "limit_price": 11.0,
+        "quality_gate_passed": True,
+        "board_lane": "first_board",
+        "concept_trigger_allowed": True,
+        "concept_candidates": [
+            {
+                "concept_id": "BK0815",
+                "concept_name": "存储芯片",
+                "concept_state": "launch",
+                "leader_rank": 2,
+                "strength_rank": 1,
+                "strength_score": 92.0,
+                "strong_5_ratio": 0.4,
+                "near_limit_ratio": 0.2,
+            }
+        ],
+    }
+    monkeypatch.setattr(service, "_live_adapter_rows", lambda _snapshot: [candidate])
+    monkeypatch.setattr(
+        service,
+        "build_preboard_pools",
+        lambda *_args, **_kwargs: PreboardPools(
+            adapter_input_count=1,
+            capture_pool=(candidate,),
+            eligible_first_board_pool=(candidate,),
+            quality_pool=(candidate,),
+            rejection_counts={},
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "project_live_decision_features",
+        lambda _row: {
+            "feature_contract_version": PREBOARD_DECISION_VERSION,
+            "feature_status": "scoreable",
+            "feature_fingerprint": "sha256:" + "a" * 64,
+            "feature_values": {},
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "evaluate_preboard_decisions",
+        lambda rows, **_kwargs: [
+            {
+                **dict(rows[0]),
+                "decision_state": "observe",
+                "probability_status": "ready",
+                "execution_mode": "research_only",
+                "formal_strategy_changed": False,
+                "expected_d1_net_return_pct": 2.1,
+                "d1_win_probability": 0.68,
+                "touch_probability_3m": 0.72,
+                "eventual_touch_probability": 0.84,
+                "seal_probability_given_touch": 0.75,
+            }
+        ],
+    )
+
+    result = service.score_live_preboard_snapshot(
+        {
+            "captured_at": DECISION_AT.isoformat(),
+            "trace_capture_candidates": [candidate],
+            "early_radar_recommendations": {
+                "market_gate": {"passed": True}
+            },
+        },
+        model_bundle=object(),
+        thresholds=None,
+        execution_mode=PreboardExecutionMode.RESEARCH_ONLY,
+        minute_buffer=_MinuteBuffer(),
+    )
+
+    shadow = result["preboard_candidates"][0]["dynamic_leader_shadow"]
+    assert shadow["concept_name"] == "存储芯片"
+    assert shadow["concept_leader_rank"] == 2
+    assert shadow["global_rank"] == 1
+    assert shadow["components"]["concept_strong_5_ratio"] == 0.4
+    assert shadow["execution_effect"] == "none_research_only"
     assert result["action_saved"] == 0
     assert result["formal_strategy_changed"] is False
 
@@ -130,6 +223,12 @@ def test_invalid_capture_time_fails_explicitly() -> None:
         assert str(exc) == "captured_at must be an ISO datetime"
     else:
         raise AssertionError("invalid captured_at was accepted")
+
+
+def test_probability_status_distinguishes_ineligible_input_from_missing_model() -> None:
+    assert service._probability_status(
+        [{"probability_status": "model_input_ineligible"}]
+    ) == "model_input_ineligible"
 
 
 def test_active_rejected_runtime_keeps_probabilities_research_only(

@@ -137,6 +137,25 @@ LIVE_PREBOARD_EVIDENCE_FIELDS = (
     "transaction_status",
     "transaction_features",
 )
+DYNAMIC_LEADER_PUBLIC_FIELDS = (
+    "policy_version",
+    "status",
+    "execution_effect",
+    "market_gate_passed",
+    "concept_id",
+    "concept_name",
+    "concept_state",
+    "concept_leader_rank",
+    "locked_at",
+    "observed_frames",
+    "eligible_frames",
+    "consecutive_eligible_frames",
+    "persistence_ratio",
+    "drop_count",
+    "current_concept_top5",
+    "global_rank",
+    "global_top5",
+)
 LIVE_PREBOARD_FORBIDDEN_FIELDS = frozenset(
     {
         "action",
@@ -2897,43 +2916,53 @@ def _public_preboard_candidates(value: object) -> list[dict[str, object]]:
         state = str(raw.get("decision_state") or "observe")
         if state in {"missed", "rejected"}:
             continue
-        result.append(
-            {
-                "vt_symbol": str(raw.get("vt_symbol") or ""),
-                "name": str(raw.get("name") or raw.get("vt_symbol") or ""),
-                "decision_state": state,
-                "execution_mode": str(
-                    raw.get("execution_mode") or "research_only"
-                ),
-                "change_pct": _number(raw.get("change_pct")),
-                "distance_to_limit_pct": _number(
-                    raw.get("distance_to_limit_pct")
-                ),
-                "expected_d1_net_return_pct": _number(
-                    raw.get("expected_d1_net_return_pct")
-                ),
-                "d1_win_probability": _number(raw.get("d1_win_probability")),
-                "touch_probability_3m": _number(
-                    raw.get("touch_probability_3m")
-                ),
-                "eventual_touch_probability": _number(
-                    raw.get("eventual_touch_probability")
-                ),
-                "seal_probability_given_touch": _number(
-                    raw.get("seal_probability_given_touch")
-                ),
-                "probability_status": str(
-                    raw.get("probability_status") or "model_unavailable"
-                ),
-                "source_quality": str(raw.get("source_quality") or "unknown"),
-                "updated_at": str(
-                    raw.get("decision_at")
-                    or raw.get("known_at")
-                    or ""
-                ),
-            }
+        touch_probability = _number(raw.get("touch_probability_3m"))
+        eventual_probability = _number(raw.get("eventual_touch_probability"))
+        if (
+            str(raw.get("probability_status") or "") != "ready"
+            or touch_probability is None
+            or not 0.0 <= touch_probability <= 1.0
+            or eventual_probability is None
+            or not 0.0 <= eventual_probability <= 1.0
+        ):
+            continue
+        candidate = {
+            "vt_symbol": str(raw.get("vt_symbol") or ""),
+            "name": str(raw.get("name") or raw.get("vt_symbol") or ""),
+            "decision_state": state,
+            "execution_mode": str(raw.get("execution_mode") or "research_only"),
+            "change_pct": _number(raw.get("change_pct")),
+            "distance_to_limit_pct": _number(raw.get("distance_to_limit_pct")),
+            "expected_d1_net_return_pct": _number(
+                raw.get("expected_d1_net_return_pct")
+            ),
+            "d1_win_probability": _number(raw.get("d1_win_probability")),
+            "touch_probability_3m": touch_probability,
+            "eventual_touch_probability": eventual_probability,
+            "seal_probability_given_touch": _number(
+                raw.get("seal_probability_given_touch")
+            ),
+            "probability_status": str(
+                raw.get("probability_status") or "model_unavailable"
+            ),
+            "source_quality": str(raw.get("source_quality") or "unknown"),
+            "updated_at": str(
+                raw.get("decision_at") or raw.get("known_at") or ""
+            ),
+        }
+        dynamic_leader = _public_dynamic_leader_shadow(
+            raw.get("dynamic_leader_shadow")
         )
+        if dynamic_leader is not None:
+            candidate["dynamic_leader_shadow"] = dynamic_leader
+        result.append(candidate)
     return result
+
+
+def _public_dynamic_leader_shadow(value: object) -> dict[str, object] | None:
+    if not isinstance(value, Mapping):
+        return None
+    return {field: value.get(field) for field in DYNAMIC_LEADER_PUBLIC_FIELDS}
 
 
 def _apply_formal_preboard_recommendations(

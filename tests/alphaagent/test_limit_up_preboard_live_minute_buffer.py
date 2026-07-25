@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from alphaagent.server.services.limit_up.preboard_live_minute_buffer import (
     LiveMinuteBuffer,
@@ -126,6 +127,27 @@ def test_source_quality_requires_eight_completed_labels() -> None:
     bars = buffer.completed_bars(SYMBOL, datetime(2026, 7, 20, 10, 8))
     assert len(bars) == 8
     assert all(bar["volume"] is not None for bar in bars[-7:])
+
+
+def test_utc_quote_timestamps_are_normalized_to_shanghai_session() -> None:
+    buffer = LiveMinuteBuffer()
+    shanghai = ZoneInfo("Asia/Shanghai")
+    start = datetime(2026, 7, 20, 10, 0, 5, tzinfo=shanghai)
+    for index in range(8):
+        captured_at = start + timedelta(minutes=index)
+        quote = _quote(
+            10.0 + index * 0.01,
+            volume=100.0 + index * 10.0,
+            turnover=1_000.0 + index * 100.0,
+        )
+        quote["quote_observed_at"] = captured_at.astimezone(timezone.utc).isoformat()
+        buffer.ingest(captured_at, [quote])
+
+    cutoff = datetime(2026, 7, 20, 10, 8, tzinfo=shanghai)
+    assert buffer.source_quality(SYMBOL, cutoff) == "sampled_quote_proxy"
+    bars = buffer.completed_bars(SYMBOL, cutoff)
+    assert len(bars) == 8
+    assert all(bar["bar_time"].tzinfo == shanghai for bar in bars)
 
 
 def test_quality_pool_snapshots_use_only_completed_minutes() -> None:

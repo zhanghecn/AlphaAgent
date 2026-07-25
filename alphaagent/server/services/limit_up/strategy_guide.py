@@ -75,7 +75,8 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                 "title": "计算双触板概率",
                 "rule": (
                     "共享模型输出未来3个交易分钟内触板概率和当日执行窗口内最终"
-                    "触板概率；概率不可用时只能观察。"
+                    "触板概率；双概率同时有效后才公开排序，概率不可用时只保留"
+                    "内部审计样本。"
                 ),
                 "timing": "每个新快照重新评分",
             },
@@ -223,22 +224,23 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
             ],
         },
         "historical_reference": {
-            "name": "800日历史候选代理",
+            "name": "806日历史候选代理（截至2026-07-24）",
             "kind": "historical_candidate_proxy",
             "tables": ["limit_up_history_replays", "stock_daily_bars"],
             "date_start": "2023-03-28",
-            "date_end": "2026-07-16",
-            "trade_day_count": 800,
-            "qualified_signal_count": 168,
-            "closed_recommendation_count": 164,
-            "account_trade_count": 97,
-            "recommendation_win_rate_pct": 62.1951,
-            "account_win_rate_pct": 70.1031,
+            "date_end": "2026-07-24",
+            "trade_day_count": 806,
+            "qualified_signal_count": 243,
+            "closed_recommendation_count": 239,
+            "account_trade_count": 127,
+            "recommendation_win_rate_pct": 54.8117,
+            "account_win_rate_pct": 58.2677,
             "live_equivalent": False,
             "purpose": "长期检验候选结构、时间窗口、费用、仓位和D+1收盘退出",
             "limitation": (
                 "缺少历史盘中全市场、板块资金和逐笔排队帧，不能冒充v15实时规则的"
-                "实盘等价收益；页面长期胜率与643帧v15结果不得混算。"
+                "实盘等价收益；财报修复前约62%的旧结果已经失效，且页面长期胜率与"
+                "643帧v15结果不得混算。"
             ),
         },
     }

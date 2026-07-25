@@ -49,6 +49,12 @@ describe("buildRuleFlow", () => {
     expect(radar.condition).toContain("5%、8%、9% 和 9.5% 都不是固定买点");
   });
 
+  it("概率不可用时不把内部样本公开成观察候选", () => {
+    const momentum = buildRuleFlow(guide).find((node) => node.stage === "momentum")!;
+
+    expect(momentum.failHint).toContain("不公开板前候选");
+  });
+
   it("成交节点含买入窗口与仓位动态值", () => {
     const fill = buildRuleFlow(guide).find((node) => node.stage === "fill")!;
     expect(fill.thresholds.some((t) => t.value.includes("10:00-11:30"))).toBe(true);

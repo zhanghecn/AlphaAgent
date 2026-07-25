@@ -2029,6 +2029,27 @@ def test_preboard_status_exposes_ranked_research_without_changing_actions() -> N
                     "probability_status": "ready",
                     "source_quality": "sampled_quote_proxy",
                     "decision_at": "2026-07-23T10:18:20+08:00",
+                    "dynamic_leader_shadow": {
+                        "policy_version": "dynamic-concept-leader-shadow-v1",
+                        "status": "locked",
+                        "execution_effect": "none_research_only",
+                        "market_gate_passed": False,
+                        "concept_id": "BK0815",
+                        "concept_name": "存储芯片",
+                        "concept_state": "launch",
+                        "concept_leader_rank": 2,
+                        "locked_at": "2026-07-23T10:17:50+08:00",
+                        "observed_frames": 4,
+                        "eligible_frames": 3,
+                        "consecutive_eligible_frames": 2,
+                        "persistence_ratio": 0.75,
+                        "drop_count": 1,
+                        "current_concept_top5": True,
+                        "global_rank": 1,
+                        "global_top5": True,
+                        "components": {"cash_flow_quality": 1.2},
+                        "must_not_leak": "internal",
+                    },
                     "feature_values": {"must_not_leak": 1},
                 }
             ],
@@ -2061,8 +2082,43 @@ def test_preboard_status_exposes_ranked_research_without_changing_actions() -> N
             "probability_status": "ready",
             "source_quality": "sampled_quote_proxy",
             "updated_at": "2026-07-23T10:18:20+08:00",
+            "dynamic_leader_shadow": {
+                "policy_version": "dynamic-concept-leader-shadow-v1",
+                "status": "locked",
+                "execution_effect": "none_research_only",
+                "market_gate_passed": False,
+                "concept_id": "BK0815",
+                "concept_name": "存储芯片",
+                "concept_state": "launch",
+                "concept_leader_rank": 2,
+                "locked_at": "2026-07-23T10:17:50+08:00",
+                "observed_frames": 4,
+                "eligible_frames": 3,
+                "consecutive_eligible_frames": 2,
+                "persistence_ratio": 0.75,
+                "drop_count": 1,
+                "current_concept_top5": True,
+                "global_rank": 1,
+                "global_top5": True,
+            },
         }
     ]
+
+
+def test_public_preboard_candidates_hide_rows_without_real_probabilities() -> None:
+    rows = [
+        {
+            "vt_symbol": "600001.SSE",
+            "name": "分钟不足样本",
+            "decision_state": "observe",
+            "execution_mode": "research_only",
+            "probability_status": "model_input_ineligible",
+            "touch_probability_3m": None,
+            "eventual_touch_probability": None,
+        }
+    ]
+
+    assert live_service._public_preboard_candidates(rows) == []
 
 
 def test_formal_preboard_adds_ranking_without_deleting_sweep_fallback() -> None:

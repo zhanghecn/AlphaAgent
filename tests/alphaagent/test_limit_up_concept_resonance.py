@@ -8,6 +8,7 @@ from alphaagent.server.services.limit_up.concept_resonance import (
     attach_candidate_concepts,
     build_membership_index,
     concept_state,
+    is_execution_concept,
     rank_concepts,
     replay_radar_concepts,
 )
@@ -50,6 +51,24 @@ def test_membership_index_keeps_pcb_and_excludes_style_labels() -> None:
         "600183.SSE",
         "002463.SZSE",
     }
+
+
+def test_execution_concept_excludes_index_and_attribute_boards() -> None:
+    excluded = (
+        "百元股",
+        "标准普尔",
+        "富时罗素",
+        "QFII重仓",
+        "社保重仓",
+        "破净股",
+        "HS300_",
+        "上证180_",
+        "创业板综",
+    )
+
+    assert all(not is_execution_concept(name) for name in excluded)
+    assert is_execution_concept("存储芯片") is True
+    assert is_execution_concept("低空经济") is True
 
 
 def test_membership_index_filters_st_and_non_main_board() -> None:
@@ -275,6 +294,48 @@ def test_attach_candidate_concepts_selects_strongest_execution_concept() -> None
     assert candidates[0]["concept_turnover_acceleration_1m"] == 12_000_000.0
     assert candidates[0]["concept_turnover_acceleration_3m"] == 30_000_000.0
     assert candidates[0]["concept_turnover_acceleration_5m"] == 55_000_000.0
+
+
+def test_attach_candidate_concepts_keeps_every_real_theme_with_its_rank() -> None:
+    candidates = [
+        {"vt_symbol": "600001.SSE", "change_pct": 8.0, "turnover": 800.0},
+        {"vt_symbol": "600002.SSE", "change_pct": 7.0, "turnover": 700.0},
+    ]
+    snapshot = {
+        "membership": {
+            "by_symbol": {
+                "600001.SSE": ["A", "B"],
+                "600002.SSE": ["A"],
+            }
+        },
+        "concepts_by_id": {
+            "A": {
+                "concept_id": "A",
+                "concept_name": "存储芯片",
+                "concept_state": "warming",
+                "strength_score": 80.0,
+                "strength_rank": 2,
+            },
+            "B": {
+                "concept_id": "B",
+                "concept_name": "机器人",
+                "concept_state": "launch",
+                "strength_score": 90.0,
+                "strength_rank": 1,
+            },
+        },
+        "data_quality": {"age_seconds": 10.0, "trigger_allowed": True},
+    }
+
+    attach_candidate_concepts(candidates, snapshot)
+
+    assert candidates[0]["concept_id"] == "B"
+    assert candidates[0]["concept_candidate_count"] == 2
+    assert [
+        (row["concept_id"], row["leader_rank"])
+        for row in candidates[0]["concept_candidates"]
+    ] == [("B", 1), ("A", 1)]
+    assert candidates[1]["concept_candidates"][0]["leader_rank"] == 2
 
 
 def test_20260714_pcb_replay_uses_prior_membership_and_preseal_frames_only() -> None:

@@ -6,10 +6,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from math import isfinite
+from zoneinfo import ZoneInfo
 
 
 MAX_BUFFER_MINUTES = 12
 MINIMUM_SCOREABLE_LABELS = 8
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,7 @@ class _QualityPoolSample:
 def live_minute_close(captured_at: datetime) -> datetime | None:
     """Map one quote sample to the next completed A-share minute label."""
 
+    captured_at = _local_market_datetime(captured_at)
     clock = captured_at.time().replace(tzinfo=None)
     if not (
         time(9, 30) <= clock < time(11, 30)
@@ -76,9 +79,13 @@ class LiveMinuteBuffer:
         captured_at: datetime,
         quotes: Sequence[Mapping[str, object]],
     ) -> None:
+        captured_at = _local_market_datetime(captured_at)
         self._start_trade_date(captured_at.date())
         for quote in quotes:
-            sample_at = _datetime(quote.get("quote_observed_at")) or captured_at
+            sample_at = _matching_market_datetime(
+                _datetime(quote.get("quote_observed_at")) or captured_at,
+                captured_at,
+            )
             if sample_at.date() != captured_at.date():
                 continue
             bar_time = live_minute_close(sample_at)
@@ -105,6 +112,7 @@ class LiveMinuteBuffer:
         cutoff: datetime,
         count: int = MINIMUM_SCOREABLE_LABELS,
     ) -> list[dict[str, object]]:
+        cutoff = _local_market_datetime(cutoff)
         aggregates = [
             aggregate
             for bar_time in sorted(self._bars.get(vt_symbol, {}))
@@ -138,6 +146,7 @@ class LiveMinuteBuffer:
         return completed[-max(int(count), 1) :]
 
     def source_quality(self, vt_symbol: str, cutoff: datetime) -> str:
+        cutoff = _local_market_datetime(cutoff)
         bars = self.completed_bars(vt_symbol, cutoff)
         expected_close = cutoff.replace(second=0, microsecond=0)
         ready = bool(
@@ -155,6 +164,7 @@ class LiveMinuteBuffer:
         captured_at: datetime,
         rows: Sequence[Mapping[str, object]],
     ) -> None:
+        captured_at = _local_market_datetime(captured_at)
         self._start_trade_date(captured_at.date())
         bar_time = live_minute_close(captured_at)
         if bar_time is None:
@@ -173,6 +183,7 @@ class LiveMinuteBuffer:
         self,
         cutoff: datetime,
     ) -> list[dict[str, object]]:
+        cutoff = _local_market_datetime(cutoff)
         return [
             {
                 "captured_at": bar_time,
@@ -201,6 +212,23 @@ def _datetime(value: object) -> datetime | None:
         return datetime.fromisoformat(str(value))
     except ValueError:
         return None
+
+
+def _local_market_datetime(value: datetime) -> datetime:
+    """Normalize aware timestamps to Shanghai and preserve naive test clocks."""
+
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=None)
+    return value.astimezone(SHANGHAI)
+
+
+def _matching_market_datetime(value: datetime, reference: datetime) -> datetime:
+    normalized = _local_market_datetime(value)
+    if reference.tzinfo is None or reference.utcoffset() is None:
+        return normalized.replace(tzinfo=None)
+    if normalized.tzinfo is None or normalized.utcoffset() is None:
+        return normalized.replace(tzinfo=SHANGHAI)
+    return normalized
 
 
 def _number(value: object) -> float | None:
