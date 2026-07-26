@@ -8,6 +8,15 @@ const guide = {
     entry_windows: ["10:00-11:30", "13:00-14:30"],
     max_positions: 2,
   },
+  core_quality: {
+    contract_version: "limit-up-core-ab-v1",
+    prior_limit_window_days: 126,
+    minimum_prior_limit_count: 2,
+    maximum_prior_limit_count: 6,
+    a_tier_industry_turnover_ratio_5d: 1,
+    b_tier_is_actionable: true,
+    priority_rule: "A优先，B保留",
+  },
   selection_steps: [
     { order: 1, title: "限定可交易范围", rule: "仅主板首板和二进三。", timing: "盘中已知" },
   ],
@@ -34,34 +43,33 @@ describe("buildRuleFlow", () => {
     ]);
   });
 
-  it("第一步固定正式策略不变边界", () => {
+  it("第一步固定唯一正式合同", () => {
     const gate = buildRuleFlow(guide)[0];
-    expect(gate.title).toContain("正式策略边界");
+    expect(gate.title).toContain("唯一正式合同");
     const labels = gate.thresholds.map((t) => t.label);
-    expect(labels).toContain("正式首板");
-    expect(labels).toContain("二进三");
+    expect(labels).toContain("正式合同");
+    expect(labels).toContain("旧规则回退");
   });
 
-  it("雷达节点把 3% 定义为观察起点而非固定买点", () => {
+  it("辨识度节点把 126 日 2 到 6 次设为硬门", () => {
     const radar = buildRuleFlow(guide).find((node) => node.stage === "radar")!;
-    expect(radar.thresholds.some((t) => t.value.includes("3%"))).toBe(true);
-    expect(radar.thresholds).toContainEqual({ label: "固定买点", value: "无" });
-    expect(radar.condition).toContain("5%、8%、9% 和 9.5% 都不是固定买点");
+    expect(radar.thresholds).toContainEqual({ label: "统计窗口", value: "126 个交易日" });
+    expect(radar.thresholds).toContainEqual({ label: "最少涨停", value: "2 次" });
+    expect(radar.thresholds).toContainEqual({ label: "最多涨停", value: "6 次" });
   });
 
-  it("概率不可用时不把内部样本公开成观察候选", () => {
-    const momentum = buildRuleFlow(guide).find((node) => node.stage === "momentum")!;
+  it("A 优先但 B 仍可交易", () => {
+    const sector = buildRuleFlow(guide).find((node) => node.stage === "sector")!;
 
-    expect(momentum.failHint).toContain("不公开板前候选");
+    expect(sector.condition).toContain("A优先，B保留");
+    expect(sector.thresholds).toContainEqual({ label: "B 可交易", value: "是" });
   });
 
-  it("成交节点含买入窗口与仓位动态值", () => {
+  it("成交节点含买入窗口与 D+1 统一退出", () => {
     const fill = buildRuleFlow(guide).find((node) => node.stage === "fill")!;
     expect(fill.thresholds.some((t) => t.value.includes("10:00-11:30"))).toBe(true);
-    expect(fill.thresholds.some((t) => t.value.includes("2 仓"))).toBe(true);
-    expect(fill.title).toContain("补充正式板前买点");
-    expect(fill.condition).toContain("扫板兜底始终保留");
-    expect(fill.condition).not.toContain("整体替换");
+    expect(fill.thresholds).toContainEqual({ label: "卖出", value: "D+1 官方收盘价" });
+    expect(fill.title).toContain("统一口径");
   });
 
   it("每个节点都有阶段元数据（徽章配色）", () => {

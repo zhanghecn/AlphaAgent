@@ -10,8 +10,9 @@ from decimal import Decimal, ROUND_HALF_UP
 from statistics import mean, median
 
 from alphaagent.server.services.execution import cash_ledger
+from alphaagent.server.services.limit_up.versions import CORE_AB_STRATEGY_VERSION
 
-ACCOUNT_EXECUTION_VERSION = "limit-up-cash-v5"
+ACCOUNT_EXECUTION_VERSION = CORE_AB_STRATEGY_VERSION
 SUPPORTED_EXIT_MODES = {"dynamic", "next_open", "next_close", "next_1430"}
 
 

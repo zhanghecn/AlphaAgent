@@ -8,7 +8,7 @@ from math import isfinite
 from statistics import mean
 
 from alphaagent.server.services.execution import cash_ledger
-from alphaagent.server.services.limit_up import cash_backtest
+from alphaagent.server.services.limit_up import cash_backtest, scheduled_execution
 
 CAUSAL_EXIT_RESEARCH_VERSION = "first-board-causal-exit-research-v1"
 WITHDRAWN_POLICY_VERSION = "first-board-auction-take-profit-shadow-v1"
@@ -49,7 +49,7 @@ def build_causal_exit_research(
         "status": post_auction["status"],
         "formal_strategy_changed": False,
         "formal_policy": {
-            "policy_version": "limit-up-scheduled-v9",
+            "policy_version": scheduled_execution.SCHEDULED_EXECUTION_VERSION,
             "mode": "D+1 close",
             "decision_time": "D0 signal time",
             "execution_time": "D+1 15:00",

@@ -112,6 +112,14 @@ const PRIMARY_VIEWS: Array<{ value: PrimaryView; label: string; icon: typeof Act
 
 const LEDGER_TIMELINE_PAGE = 10;
 const SHANGHAI_INDEX_SYMBOL = "000001.SSE";
+export const LIMIT_UP_BACKTEST_SCOPE = "portfolio" as const;
+
+export function limitUpBacktestSummaries(report?: LimitUpLaneBacktest) {
+  return {
+    cashSummary: report?.summary,
+    qualitySummary: report?.recommendation_quality?.summary ?? report?.signal_summary,
+  };
+}
 
 export function LimitUpPage() {
   const toast = useToast();
@@ -185,11 +193,11 @@ export function LimitUpPage() {
     })),
   });
   const backtestQuery = useQuery({
-    queryKey: ["limitUpLaneBacktest", start, end, "portfolio"],
+    queryKey: ["limitUpLaneBacktest", start, end, LIMIT_UP_BACKTEST_SCOPE],
     queryFn: () => fetchLimitUpLaneBacktest({
       start: start === datesQuery.data?.start ? undefined : start,
       end: end === datesQuery.data?.end ? undefined : end,
-      lane: "portfolio",
+      lane: LIMIT_UP_BACKTEST_SCOPE,
     }),
     enabled: (view === "backtest" || view === "live") && Boolean(start && end),
     staleTime: Infinity,
@@ -733,8 +741,7 @@ function QualityRow({
   report?: LimitUpLaneBacktest;
   onOpenBacktest: () => void;
 }) {
-  const cashSummary = report?.summary;
-  const qualitySummary = report?.recommendation_quality?.summary ?? report?.signal_summary;
+  const { cashSummary, qualitySummary } = limitUpBacktestSummaries(report);
   const proxyOnly = report?.execution_comparability?.live_equivalent === false;
   return (
     <div className="flex min-h-9 flex-wrap items-center gap-x-4 gap-y-1 border-t bg-muted/20 px-3 py-1.5 text-[11px] tabular-nums sm:px-4">
@@ -1159,7 +1166,7 @@ interface BacktestViewProps {
   onRebuild: () => void;
 }
 
-function BacktestView({
+export function BacktestView({
   report,
   indexBars,
   loading,
@@ -1173,9 +1180,35 @@ function BacktestView({
   rebuildError,
   onRebuild,
 }: BacktestViewProps) {
-  if (loading && !report) return <LoadingState rows={7} />;
-  const summary = report?.summary;
-  const qualitySummary = report?.recommendation_quality?.summary ?? report?.signal_summary;
+  if (loading && !report) {
+    return (
+      <section aria-label="真实现金回测">
+        <PanelHead
+          no="01"
+          zh="A+B 回测载入中"
+          en="LOADING"
+          aside="全量交割与风险指标正在生成"
+        />
+        <div
+          role="status"
+          aria-live="polite"
+          className="flex items-center gap-3 border-b px-3 py-4 text-sm sm:px-4"
+        >
+          <RefreshCw size={16} className="shrink-0 animate-spin text-primary" />
+          <div className="min-w-0">
+            <p className="font-medium text-foreground">正在读取 A+B 全量回测</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              首次启动需要恢复全历史交割，完成后本页会自动更新。
+            </p>
+          </div>
+        </div>
+        <div className="p-3 sm:p-4">
+          <LoadingState rows={6} />
+        </div>
+      </section>
+    );
+  }
+  const { cashSummary: summary, qualitySummary } = limitUpBacktestSummaries(report);
   const skippedReasons = report?.recommendation_quality?.skipped_reasons ?? {};
   const skippedTotal = Object.values(skippedReasons).reduce((sum, count) => sum + count, 0);
   return (

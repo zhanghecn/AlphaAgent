@@ -820,6 +820,10 @@ def _signal(
         "change_pct": _number(candidate.get("change_pct")),
         "session_low_change_pct": _number(candidate.get("session_low_change_pct")),
         "distance_to_limit_pct": _number(candidate.get("distance_to_limit_pct")),
+        "prior_limit_count_126": candidate.get("prior_limit_count_126"),
+        "prior_industry_turnover_ratio_5d": _number(
+            candidate.get("prior_industry_turnover_ratio_5d")
+        ),
         "sector_touch_count": _integer(candidate.get("sector_touch_count"), 0),
         "sector_heat": _number(candidate.get("sector_heat")),
         "sector_main_net_inflow": _number(candidate.get("sector_main_net_inflow")),

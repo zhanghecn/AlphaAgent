@@ -164,18 +164,17 @@ def test_limit_down_close_defers_exit_until_next_tradeable_open() -> None:
 
 
 def test_first_board_buy_slippage_does_not_exceed_limit_price() -> None:
+    signal = _signal(
+        "600001.SSE",
+        "2026-01-02",
+        "2026-01-05",
+        buy_time="10:08:00",
+        lane="first_board",
+        signal_kind="first_touch",
+        limit_price=10.0,
+    )
     result = simulate_limit_up_account(
-        signals=[
-            _signal(
-                "600001.SSE",
-                "2026-01-02",
-                "2026-01-05",
-                buy_time="10:08:00",
-                lane="first_board",
-                signal_kind="first_touch",
-                limit_price=10.0,
-            )
-        ],
+        signals=[signal],
         bars=[
             _bar("600001.SSE", "2026-01-02", 9.5, 10.0),
             _bar("600001.SSE", "2026-01-05", 10.5, 10.5),
@@ -184,7 +183,8 @@ def test_first_board_buy_slippage_does_not_exceed_limit_price() -> None:
         exit_mode="next_open",
     )
 
-    assert _buy_order(result, "600001.SSE")["price"] == 10.0
+    assert signal["entry_price"] == signal["limit_price"] == 10.0
+    assert _buy_order(result, "600001.SSE")["price"] == signal["limit_price"]
 
 
 def test_same_time_relay_fills_before_first_board() -> None:

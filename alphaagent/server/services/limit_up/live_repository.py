@@ -458,6 +458,21 @@ def _cached_prior_symbol_context(
                             if isinstance(value, Mapping)
                         }
                     )
+            loaded_turnover_ratios = loaded.get(
+                "industry_turnover_ratio_by_sector"
+            )
+            if isinstance(loaded_turnover_ratios, Mapping):
+                turnover_ratios = _prior_context_meta.setdefault(
+                    "industry_turnover_ratio_by_sector",
+                    {},
+                )
+                if isinstance(turnover_ratios, dict):
+                    turnover_ratios.update(
+                        {
+                            str(key): value
+                            for key, value in loaded_turnover_ratios.items()
+                        }
+                    )
             for key in (
                 "previous_trade_date",
                 "sentiment_points",
@@ -498,6 +513,7 @@ def _load_prior_symbol_context(
         ).mappings().all()
         sector_ids = sorted({str(row["sector_id"]) for row in memberships if row.get("sector_id")})
         score_rows = []
+        industry_turnover_rows = []
         if sector_ids and previous_date is not None:
             score_rows = session.execute(
                 select(schema.sector_period_scores).where(
@@ -509,6 +525,38 @@ def _load_prior_symbol_context(
                 .order_by(
                     schema.sector_period_scores.c.sector_id,
                     desc(schema.sector_period_scores.c.as_of_date),
+                )
+            ).mappings().all()
+            industry_turnover_rows = session.execute(
+                select(
+                    schema.stock_sector_memberships.c.sector_id,
+                    schema.stock_daily_bars.c.trade_date,
+                    func.sum(schema.stock_daily_bars.c.turnover).label(
+                        "industry_turnover"
+                    ),
+                )
+                .select_from(
+                    schema.stock_sector_memberships.join(
+                        schema.stock_daily_bars,
+                        schema.stock_sector_memberships.c.vt_symbol
+                        == schema.stock_daily_bars.c.vt_symbol,
+                    )
+                )
+                .where(
+                    schema.stock_sector_memberships.c.sector_id.in_(sector_ids),
+                    schema.stock_sector_memberships.c.sector_type == "industry",
+                    schema.stock_daily_bars.c.trade_date.between(
+                        previous_date - timedelta(days=20),
+                        previous_date,
+                    ),
+                )
+                .group_by(
+                    schema.stock_sector_memberships.c.sector_id,
+                    schema.stock_daily_bars.c.trade_date,
+                )
+                .order_by(
+                    schema.stock_sector_memberships.c.sector_id,
+                    schema.stock_daily_bars.c.trade_date,
                 )
             ).mappings().all()
         bar_rows = []
@@ -606,6 +654,10 @@ def _load_prior_symbol_context(
         "by_symbol": by_symbol,
         "previous_trade_date": previous_date.isoformat() if previous_date else None,
         "score_by_sector": score_by_sector,
+        "industry_turnover_ratio_by_sector": _industry_turnover_ratios(
+            industry_turnover_rows,
+            previous_date,
+        ),
     }
     if include_global_context:
         result.update(
@@ -681,6 +733,10 @@ def _load_intraday_context(
 
     scores = prior.get("score_by_sector")
     score_by_sector = scores if isinstance(scores, Mapping) else {}
+    turnover_ratios = prior.get("industry_turnover_ratio_by_sector")
+    turnover_ratio_by_sector = (
+        turnover_ratios if isinstance(turnover_ratios, Mapping) else {}
+    )
     sector_flow_by_sector = _latest_by_key(sector_flow_rows, "sector_id")
     stock_flow_by_symbol = _latest_by_key(stock_flow_rows, "vt_symbol")
     concept_groups = prior.get("concept_groups")
@@ -701,6 +757,9 @@ def _load_intraday_context(
             "sector_id": sector_id,
             "sector_name": membership.get("sector_name"),
             "sector_type": membership.get("sector_type"),
+            "prior_industry_turnover_ratio_5d": _number(
+                turnover_ratio_by_sector.get(sector_id)
+            ),
             "sector_heat": _number(sector_score.get("heat_score")),
             "sector_trend_state": sector_score.get("trend_state"),
             "sector_main_net_inflow": _number(sector_flow.get("main_net_inflow")),
@@ -949,6 +1008,37 @@ def _best_membership(
             -int(row.get("rank") or 9999),
         ),
     )
+
+
+def _industry_turnover_ratios(
+    rows: list[Mapping[str, object]],
+    previous_date: date | None,
+) -> dict[str, float]:
+    if previous_date is None:
+        return {}
+    by_sector: dict[str, list[tuple[date, float]]] = defaultdict(list)
+    for row in rows:
+        sector_id = str(row.get("sector_id") or "")
+        raw_trade_date = row.get("trade_date")
+        trade_date = _date(raw_trade_date) if raw_trade_date not in (None, "") else None
+        turnover = _number(row.get("industry_turnover"))
+        if not sector_id or trade_date is None or turnover is None:
+            continue
+        by_sector[sector_id].append((trade_date, turnover))
+
+    ratios: dict[str, float] = {}
+    for sector_id, values in by_sector.items():
+        ordered = sorted(values)
+        if not ordered or ordered[-1][0] != previous_date:
+            continue
+        baseline = [turnover for _, turnover in ordered[-6:-1] if turnover > 0]
+        current_turnover = ordered[-1][1]
+        if len(baseline) < 3 or current_turnover < 0:
+            continue
+        average_turnover = mean(baseline)
+        if average_turnover > 0:
+            ratios[sector_id] = round(current_turnover / average_turnover, 4)
+    return ratios
 
 
 def _prior_price_context(rows: list[Mapping[str, object]]) -> dict[str, object]:

@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from alphaagent.market.cache import TTLCache
 from alphaagent.server.services.limit_up import (
     cash_backtest,
+    core_quality,
     drawdown_diagnostics,
     factor_audit,
     first_board_dual_lane,
@@ -972,7 +973,7 @@ def _filtered_scheduled_orders(
             extracted,
         )
     )
-    return scheduled_execution.filter_profitability_qualified_orders(enriched)
+    return core_quality.filter_core_quality_qualified_orders(enriched)
 
 
 def _frozen_position_sizing_audit(
@@ -1053,7 +1054,7 @@ def _build_scheduled_history_backtest(
         for name, orders in extracted_variant_orders.items()
     }
     variant_filter_results = {
-        name: scheduled_execution.filter_profitability_qualified_orders(orders)
+        name: core_quality.filter_core_quality_qualified_orders(orders)
         for name, orders in variant_orders.items()
     }
     qualified_variant_orders = {
@@ -1131,7 +1132,7 @@ def _build_scheduled_history_backtest(
         double_cost_config,
     )
     orders = qualified_variant_orders[selected_variant]
-    profitability_audit = dict(
+    core_quality_audit = dict(
         variant_filter_results[selected_variant][1]
     )
     selected_bundle = variant_bundles[selected_variant]
@@ -1247,15 +1248,15 @@ def _build_scheduled_history_backtest(
             ],
             "selection_basis": (
                 "complete_active_candidate_pools_in_event_order_then_"
-                "first_board_profitability_gate"
+                "core_ab_quality_gate"
             ),
             "candidate_source": "complete_active_lane_candidate_pools",
             "configured_lanes": configured_lanes,
             "configuration_matches_gate": configuration_matches_gate,
         },
-        "profitability_filter": {
-            **scheduled_execution.first_board_profitability_filter_metadata(),
-            "audit": profitability_audit,
+        "core_quality_filter": {
+            **core_quality.core_quality_filter_metadata(),
+            "audit": core_quality_audit,
             "selected_summary": dict(summary),
             "unfiltered_summary": dict(unfiltered_bundle["summary"]),
             "selected_recommendation_quality": recommendation_quality,
@@ -1504,6 +1505,7 @@ def _recommendation_quality_report(
         "daily_aggregation": "mean_net_return_by_exit_date",
         "summary": summary,
         "daily_results": daily_results,
+        "trades": [_compact_account_trade(trade) for trade in trades],
         "skipped_reasons": dict(sorted(skipped_reasons.items())),
     }
 
@@ -2551,6 +2553,15 @@ def _compact_account_trade(trade: Mapping[str, object]) -> dict[str, object]:
         "favorable_factors",
         "setup_tags",
         "setup_confidence",
+        "prior_limit_count_126",
+        "prior_industry_turnover_ratio_5d",
+        "quality_priority_tier",
+        "profitability_gate_passed",
+        "profitability_gate_reason",
+        "recognition_gate_passed",
+        "recognition_gate_reason",
+        "core_quality_gate_passed",
+        "core_quality_gate_reason",
         "dynamic_exit",
     )
     return {field: trade.get(field) for field in fields if field in trade}

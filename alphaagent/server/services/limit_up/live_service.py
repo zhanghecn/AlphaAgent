@@ -87,6 +87,7 @@ from alphaagent.server.services.limit_up.radar_observation_repository import (
     save_frame as save_radar_frame,
 )
 from alphaagent.server.services.limit_up import (
+    core_quality,
     history_engine,
     history_repository,
     preboard_decision_repository,
@@ -1480,6 +1481,9 @@ def _enrich_candidate(
         "prior_streak": prior_streak,
         "prior_break_streak": _integer(context.get("prior_break_streak"), 0),
         "prior_limit_count_126": _integer(context.get("prior_limit_count_126"), 0),
+        "prior_industry_turnover_ratio_5d": _number(
+            context.get("prior_industry_turnover_ratio_5d")
+        ),
         "prior_touch_count_126": _integer(context.get("prior_touch_count_126"), 0),
         "prior_seal_success_rate_126": _number(context.get("prior_seal_success_rate_126")),
         "prior_limit_count_5": _integer(context.get("prior_limit_count_5"), 0),
@@ -1780,7 +1784,7 @@ def _apply_live_risk_gates(
     recommendations = recommendations if isinstance(recommendations, Mapping) else {}
     validated = apply_lane_validation_veto(recommendations, lane_validations)
     validated = _rank_first_board_recommendations(validated)
-    validated = _apply_first_board_profitability_gate(validated)
+    validated = _apply_core_quality_gate(validated)
     captured_at = _parsed_datetime(result.get("captured_at")) or datetime.now(SHANGHAI)
     quality = result.get("data_quality")
     quality = quality if isinstance(quality, Mapping) else {}
@@ -1826,7 +1830,7 @@ def _apply_early_radar_risk_gates(
     )
     validated = apply_lane_validation_veto(recommendations, lane_validations)
     validated = _rank_first_board_recommendations(validated)
-    validated = _apply_first_board_profitability_gate(validated)
+    validated = _apply_core_quality_gate(validated)
     result = dict(snapshot)
     result["early_radar_recommendations"] = validated
     enriched_quality = enriched.get("data_quality")
@@ -1990,7 +1994,7 @@ def _rank_first_board_recommendations(
     return result
 
 
-def _apply_first_board_profitability_gate(
+def _apply_core_quality_gate(
     recommendations: Mapping[str, object],
 ) -> dict[str, object]:
     result = dict(recommendations)
@@ -2000,18 +2004,39 @@ def _apply_first_board_profitability_gate(
     for lane_name, raw_signals in lanes.items():
         signals = raw_signals if isinstance(raw_signals, list) else []
         annotated_lanes[str(lane_name)] = [
-            {
-                **dict(signal),
-                **scheduled_execution.first_board_profitability_gate(signal),
-            }
+            _apply_core_quality_to_signal(signal)
             for signal in signals
             if isinstance(signal, Mapping)
         ]
     result["lanes"] = annotated_lanes
-    result["profitability_filter"] = (
-        scheduled_execution.first_board_profitability_filter_metadata()
-    )
+    result["core_quality_filter"] = core_quality.core_quality_filter_metadata()
     return result
+
+
+def _apply_core_quality_to_signal(
+    signal: Mapping[str, object],
+) -> dict[str, object]:
+    result = {**dict(signal), **core_quality.core_quality_gate(signal)}
+    if (
+        str(result.get("action") or "") in EXECUTABLE_ACTIONS
+        and result["core_quality_gate_passed"] is not True
+    ):
+        result["research_action"] = str(result.get("action") or "pass")
+        result["action"] = "pass"
+        result["execution_state"] = "cancelled"
+        result["reason"] = _core_quality_rejection_text(result)
+    return result
+
+
+def _core_quality_rejection_text(signal: Mapping[str, object]) -> str:
+    reason = str(signal.get("core_quality_gate_reason") or "core_quality_rejected")
+    if reason.startswith("prior_limit_count_126_below_"):
+        return "只观察，不执行：过去126个交易日涨停少于2次"
+    if reason.startswith("prior_limit_count_126_above_"):
+        return "只观察，不执行：过去126个交易日涨停超过6次"
+    if reason == "prior_limit_count_126_unavailable":
+        return "只观察，不执行：126日涨停辨识度不可用"
+    return f"只观察，不执行：{reason}"
 
 
 def _apply_signal_validation(
@@ -2102,13 +2127,9 @@ def _build_live_buy_list(
             if not isinstance(raw_signal, Mapping):
                 continue
             signal = dict(raw_signal)
-            signal.update(
-                scheduled_execution.first_board_profitability_gate(signal)
-            )
+            signal.update(core_quality.core_quality_gate(signal))
             symbol = str(signal.get("vt_symbol") or "")
             action = str(signal.get("action") or "pass")
-            first_board = str(signal.get("board_lane") or "") == "first_board"
-            profitability_required = first_board
             if (
                 not symbol
                 or (
@@ -2117,10 +2138,7 @@ def _build_live_buy_list(
                 )
                 or str(signal.get("board_lane") or "") not in PORTFOLIO_EXECUTION_LANES
                 or action != "buy_now"
-                or (
-                    profitability_required
-                    and signal.get("profitability_gate_passed") is not True
-                )
+                or signal.get("core_quality_gate_passed") is not True
                 or (
                     signal.get("missed_preseal_entry") is True
                     and signal.get("entry_kind") != "momentum"
@@ -2221,6 +2239,7 @@ def _live_portfolio_sort_key(signal: Mapping[str, object]) -> tuple[object, ...]
     first_board = str(signal.get("board_lane") or "") == "first_board"
     return (
         action_priority,
+        core_quality.quality_tier_priority(signal),
         scheduled_execution.execution_lane_priority(signal.get("board_lane")),
         -(_number(history.get("historical_win_rate")) or 0.0)
         if first_board

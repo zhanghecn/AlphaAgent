@@ -1369,6 +1369,88 @@ def test_history_relay_requires_current_day_event_and_uses_limit_entry() -> None
     assert missing["entry_price"] is None
 
 
+def test_first_board_entry_uses_first_touch_time_and_limit_price() -> None:
+    trade_date = date(2026, 7, 10)
+    day = pd.DataFrame(
+        [
+            {
+                "trade_date": pd.Timestamp(trade_date),
+                "prev_trade_date": pd.Timestamp("2026-07-09"),
+                "next_trade_date": pd.Timestamp("2026-07-13"),
+                "vt_symbol": "600001.SSE",
+                "name": "首板样本",
+                "prev_close": 10.0,
+                "open_price": 10.1,
+                "close_price": 11.0,
+                "next_open_price": 11.2,
+                "next_close_price": 11.3,
+                "limit_price": 11.0,
+                "auction_gap_pct": 1.0,
+                "prior_streak": 0,
+                "prior_limit_count_5": 0,
+            }
+        ]
+    )
+    event = {"first_limit_time": "10:06:00", "path_source": "test"}
+
+    candidate = history_engine._board_lane_candidates_from_day(
+        day,
+        trade_date,
+        event_evidence={("600001.SSE", trade_date): event},
+        financial_index={},
+        total_cost_rate=history_engine.ROUND_TRIP_COST_RATE,
+    )[0]
+
+    assert candidate["signal_kind"] == "first_touch"
+    assert candidate["buy_time"] == candidate["event_evidence"]["first_limit_time"]
+    assert candidate["entry_price"] == candidate["limit_price"] == 11.0
+
+
+def test_first_board_pre_window_touch_uses_first_observable_reseal() -> None:
+    trade_date = date(2026, 7, 10)
+    day = pd.DataFrame(
+        [
+            {
+                "trade_date": pd.Timestamp(trade_date),
+                "prev_trade_date": pd.Timestamp("2026-07-09"),
+                "next_trade_date": pd.Timestamp("2026-07-13"),
+                "vt_symbol": "600001.SSE",
+                "name": "回封样本",
+                "prev_close": 10.0,
+                "open_price": 10.1,
+                "close_price": 11.0,
+                "next_open_price": 11.2,
+                "next_close_price": 11.3,
+                "limit_price": 11.0,
+                "auction_gap_pct": 1.0,
+                "prior_streak": 0,
+                "prior_limit_count_5": 0,
+            }
+        ]
+    )
+    path = [0.0] * 80
+    path[2] = 9.8   # 09:36 first touch
+    path[3] = 8.8   # 09:39 break
+    path[11] = 9.8  # 10:03 first observable reseal
+    event = {
+        "first_limit_time": "09:36:00",
+        "time_preview": path,
+        "path_source": "test",
+    }
+
+    candidate = history_engine._board_lane_candidates_from_day(
+        day,
+        trade_date,
+        event_evidence={("600001.SSE", trade_date): event},
+        financial_index={},
+        total_cost_rate=history_engine.ROUND_TRIP_COST_RATE,
+    )[0]
+
+    assert candidate["signal_kind"] == "reseal"
+    assert candidate["buy_time"] == "10:03:00"
+    assert candidate["entry_price"] == candidate["limit_price"] == 11.0
+
+
 def _pre_evaluated_candidate(
     symbol: str,
     lane: str,
@@ -2310,17 +2392,20 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
         "two_to_three",
     ]
     assert report["portfolio_policy"]["excluded_lanes"] == ["high_board"]
-    assert report["profitability_filter"]["minimum_d1_samples"] == 5
-    assert report["profitability_filter"]["minimum_combined_rate"] == 30.0
-    assert report["profitability_filter"]["audit"]["input_count"] == 3
-    assert report["profitability_filter"]["audit"]["selected_count"] == 2
-    assert report["profitability_filter"]["audit"]["reason_counts"] == {
-        "not_first_board": 1,
-        "qualified": 1,
+    core_filter = report["core_quality_filter"]
+    assert core_filter["contract_version"] == "limit-up-core-ab-v1"
+    assert core_filter["first_board_minimum_d1_samples"] == 5
+    assert core_filter["first_board_minimum_combined_rate"] == 30.0
+    assert core_filter["minimum_prior_limit_count_126"] == 2
+    assert core_filter["maximum_prior_limit_count_126"] == 6
+    assert core_filter["audit"]["input_count"] == 3
+    assert core_filter["audit"]["selected_count"] == 2
+    assert core_filter["audit"]["reason_counts"] == {
+        "qualified": 2,
         "same_stock_d1_samples_below_5": 1,
     }
-    assert report["profitability_filter"]["selected_summary"] == report["summary"]
-    assert report["profitability_filter"]["unfiltered_summary"]["signal_count"] == 3
+    assert core_filter["selected_summary"] == report["summary"]
+    assert core_filter["unfiltered_summary"]["signal_count"] == 3
     quality = report["recommendation_quality"]
     assert quality["mode"] == "independent_standard_slot_daily_equal_weight"
     assert quality["position_constraints_applied"] is False
@@ -2331,16 +2416,18 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
     assert quality["summary"]["average_return_pct"] is not None
     assert quality["summary"]["total_return_pct"] is not None
     assert quality["summary"]["max_drawdown_pct"] is not None
+    assert len(quality["trades"]) == 2
+    assert all(trade["core_quality_gate_passed"] for trade in quality["trades"])
     assert report["signal_summary"] == quality["summary"]
-    selected_quality = report["profitability_filter"][
+    selected_quality = core_filter[
         "selected_recommendation_quality"
     ]
-    unfiltered_quality = report["profitability_filter"][
+    unfiltered_quality = core_filter[
         "unfiltered_recommendation_quality"
     ]
     assert selected_quality["summary"]["signal_count"] == 2
     assert unfiltered_quality["summary"]["signal_count"] == 3
-    quality_delta = report["profitability_filter"]["delta"]
+    quality_delta = core_filter["delta"]
     assert quality_delta["recommendation_win_rate_pct_points"] == pytest.approx(
         33.3333
     )

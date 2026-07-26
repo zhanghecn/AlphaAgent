@@ -117,7 +117,7 @@ def test_publication_audit_reads_only_public_live_minutes(monkeypatch) -> None:
     assert rows == persisted
     params = statements[0].compile().params
     assert date(2026, 7, 23) in params.values()
-    assert "limit-up-live-v15" in params.values()
+    assert "limit-up-core-ab-v1" in params.values()
     assert "live_snapshot" in params.values()
 
 
@@ -249,3 +249,40 @@ def test_live_context_caches_prior_fields_but_refreshes_intraday_fields(
     assert first["by_symbol"]["600001.SSE"]["intraday_marker"] == 1
     assert second["by_symbol"]["600002.SSE"]["intraday_marker"] == 2
     assert third["by_symbol"]["600001.SSE"]["intraday_marker"] == 3
+
+
+def test_industry_turnover_ratio_uses_d1_against_five_prior_trade_days() -> None:
+    rows = [
+        {
+            "sector_id": "industry-a",
+            "trade_date": trade_date,
+            "industry_turnover": turnover,
+        }
+        for trade_date, turnover in (
+            (date(2026, 7, 1), 100.0),
+            (date(2026, 7, 2), 110.0),
+            (date(2026, 7, 3), 90.0),
+            (date(2026, 7, 6), 100.0),
+            (date(2026, 7, 7), 100.0),
+            (date(2026, 7, 8), 120.0),
+        )
+    ]
+    rows.extend(
+        [
+            {
+                "sector_id": "industry-incomplete",
+                "trade_date": date(2026, 7, 7),
+                "industry_turnover": 100.0,
+            },
+            {
+                "sector_id": "industry-incomplete",
+                "trade_date": date(2026, 7, 8),
+                "industry_turnover": 120.0,
+            },
+        ]
+    )
+
+    assert live_repository._industry_turnover_ratios(
+        rows,
+        date(2026, 7, 8),
+    ) == {"industry-a": 1.2}

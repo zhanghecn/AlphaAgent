@@ -54,15 +54,13 @@ docker compose -f docker-compose.ghcr.yml config --images
 
 ### Current state
 
-- 本地唯一正式合同为 `limit-up-history-v15 / limit-up-live-v15 /
-  limit-up-scheduled-v9 / limit-up-cash-v5`。首板、二进三、两仓、正式费用和 D+1
-  官方收盘退出保持不变。
+- 本地唯一正式合同为 `limit-up-core-ab-v1`；历史、实时、调度和现金账本同源且无旧规则
+  回退。首板、二进三、两仓、正式费用和 D+1 官方收盘退出保持不变。
 - 本地运行数据已自然推进到 `2026-07-24` 的 806 个可靠交易日；板前模型最终报告继续
   固定使用 802 日输入，不因新增交易日重选模型或阈值。
-- 财报点时修复后的当前正式账本为 243 个信号；全量独立推荐闭合 239 笔、胜率
-  `54.8117%`、平均 `+0.5687%`，两仓闭合 127 笔、胜率 `58.2677%`、复利
-  `+54.7953%`、最大回撤 `-20.6187%`。旧 802 日 `69.6970%` 是两仓成交子集且受旧财报
-  覆盖偏差影响，只保留为历史审计证据，不再是当前正式质量基线。
+- A+B 当前历史闭合 78 笔，胜率 `56/78=71.7949%`、平均 `+2.2512%`、最大回撤
+  `-14.5416%`；A 为 `35/41=85.3659%`，B 为 `21/37=56.7568%`。最近 24 笔旧快照
+  反事实只有 50%，所以状态是 `historical_pass_forward_not_passed`，不是实盘胜率承诺。
 - 唯一板前合同为 `limit-up-preboard-decision-v1`。概率资格为 `ready`，历史晋级为
   `historical_rejected`，执行模式为 `research_only`，正式激活为 `not_eligible`；模型指纹
   为 `sha256:b1d4ca83ca4dad25e1e74cda21c5b01c4f40d6e62ed9da62582d6eb8c651b71a`。
@@ -73,7 +71,7 @@ docker compose -f docker-compose.ghcr.yml config --images
 - `>=3%` 只对已通过正式同源高质量门的首板启动观察，不是全市场母池、训练分母或
   买点。普通 3% 股票不得进入模型、页面推荐或两仓。
 - 新板前 `preboard_candidates` 必须严格低于涨停价；已触板或
-  `sealed/resealed/failed` 后退出板前观察。正式 v15 扫板链是独立口径：质量和执行门
+  `sealed/resealed/failed` 后退出板前观察。正式 A+B 扫板链是独立口径：质量和执行门
   通过时，`near_limit/sealed/resealed` 仍可为 `buy_now`，页面必须显示涨停价排队买点；
   `failed` 炸板继续拦截。
 - 后端打板快扫为 10 秒、概念刷新约 30 秒、交易窗口调度心跳 2 秒；
@@ -89,8 +87,8 @@ docker compose -f docker-compose.ghcr.yml config --images
 - 市场、行业/概念、个股资金、当前换手、报价和快照新鲜度无法按
   `known_at <= decision_at` 重建时统一保留为 `diagnostic/non-blocking`，不得用日终值补造
   或作为实时独有硬门。共享风险、窗口、完整分钟和严格板前价格继续 fail closed。
-- 正式推荐只读取 v15/v9 路径。研究观察不得写入正式
-  `actionable_recommendations`。
+- 正式推荐只读取 `limit-up-core-ab-v1`。研究观察不得写入正式
+  `actionable_recommendations`，也不得作为 C 级扩容或旧规则回退。
 - 正式切换必须同时满足数据库 `forward_pass_for_formal` 和环境变量
   `ALPHAAGENT_PREBOARD_FORMAL_MODEL_FINGERPRINT` 精确匹配；切换只原子替换首板动作和
   两仓，二进三不变。
@@ -106,13 +104,11 @@ npm --prefix frontend run build
 git diff --check
 ```
 
-2026-07-24 当前源码验收：打板后端 `820 passed`，数据同步调度 `156 passed`，前端
-`141 passed`；compileall、前端生产构建和 `git diff --check` 均通过。Compose 只保留
-API 与统一 data-sync worker，旧独立板前 worker 已删除；数据库
-只有 1 个当前 `active / ready / historical_rejected` 模型。API、Web、统一 data-sync
-worker 已用当前源码重建并健康运行。`/short-term` 已完成 1280px 桌面和 390px 移动端
-验收：板前动态龙头影子与正式扫板卡相互独立，表格仅在自身容器横向滚动，页面无横向
-溢出，浏览器控制台无错误或警告。
+2026-07-26 当前源码验收：打板后端 `924 passed`，前端 `144 passed`；compileall、前端
+生产构建、`docker compose config --quiet` 和 `git diff --check` 均通过。Compose 只保留
+API 与统一 data-sync worker，旧独立板前 worker 已删除；数据库只有 1 个当前
+`active / ready / historical_rejected` 板前模型。`/short-term` 回测显示 A+B 全量
+`78/78`、胜率 `71.79%`、平均 `2.25%`；冷缓存期间显示明确载入状态，不再出现空白区。
 
 ## Heavy Research Jobs
 
@@ -164,8 +160,12 @@ docker compose logs --tail=100 \
 
 - API、Web、PostgreSQL、Redis 和 data-sync worker 正常运行，无循环 import、旧模型加载
   或缺失模型回退；Compose 中不存在独立板前轮询服务。
-- 正式实时响应继续声明 v15/v9，并只增加一个 `preboard_candidates`；当前板前状态为
+- 正式历史、实时、调度和现金账本统一声明 `limit-up-core-ab-v1`，无旧版本回退；
+  板前状态为
   `ready / historical_rejected / research_only / not_eligible`。
+- 根 Compose 本地开发默认启用 `ALPHAAGENT_STARTUP_BACKTEST_WARMUP=true`。首次全量回测
+  尚未进入进程缓存时，`/short-term` 必须显示“A+B 回测载入中”并自动刷新，
+  不得显示空白内容区。
 - research/shadow/formal 动作均为 0，`formal_strategy_changed=false`。
 - 已删除的 `/api/limit-up/radar-validation` 返回 404。
 - 已触板首板不出现在板前当前买点；活动交易时段实时快照轮询为 10 秒，轨迹为 60 秒。
@@ -181,7 +181,7 @@ docker compose logs --tail=100 \
   `ensure_sync_schema()`，否则会误判正在执行的任务为旧进程残留。
 - `eod_1900` 负责主盘后采集，`eod_finalize_2130` 负责重试、打板历史重建和唯一
   板前冻结/结算。中断任务保留失败证据，由下一个合法时点补偿。
-- `sync_limit_up_exit_minutes` 只保留为手动 14:30 研究；正式 v9 退出继续读取 D+1
+- `sync_limit_up_exit_minutes` 只保留为手动 14:30 研究；正式 `limit-up-core-ab-v1` 退出继续读取 D+1
   官方日线收盘。Tick/L2 和真实排队成交不能由夜间任务补造。
 
 ## Data Notes

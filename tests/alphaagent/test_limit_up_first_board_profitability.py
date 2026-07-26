@@ -644,6 +644,8 @@ def _signal(
         "vt_symbol": vt_symbol,
         "board_lane": lane,
         "change_pct": change_pct,
+        "prior_limit_count_126": 3,
+        "prior_industry_turnover_ratio_5d": 1.0,
         "historical_evidence": {
             "historical_win_rate": historical_win_rate,
         },
@@ -734,6 +736,8 @@ def _live_signal(
         "blocking_scope": "none" if action == "buy_now" else "dynamic",
         "entry_kind": "sweep",
         "change_pct": change_pct,
+        "prior_limit_count_126": 3,
+        "prior_industry_turnover_ratio_5d": 1.0,
         "historical_evidence": {
             "historical_win_rate": historical_win_rate,
             "d1_money_effect_sample_count": d1_samples,

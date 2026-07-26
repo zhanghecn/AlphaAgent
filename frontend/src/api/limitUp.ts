@@ -24,6 +24,50 @@ export interface LimitUpStrategyGuide {
     max_positions: number;
     live_actionable_limit: number | null;
   };
+  core_quality: {
+    contract_version: string;
+    prior_limit_window_days: number;
+    minimum_prior_limit_count: number;
+    maximum_prior_limit_count: number;
+    a_tier_industry_turnover_ratio_5d: number;
+    b_tier_is_actionable: boolean;
+    priority_rule: string;
+    frozen_evidence: {
+      status: string;
+      live_equivalent: boolean;
+      date_start: string;
+      date_end: string;
+      closed_count: number;
+      win_count: number;
+      win_rate_pct: number;
+      average_net_return_pct: number;
+      max_drawdown_pct: number;
+      hard_loss_rate_pct: number;
+      a_tier: {
+        closed_count: number;
+        win_count: number;
+        win_rate_pct: number;
+      };
+      b_tier: {
+        closed_count: number;
+        win_count: number;
+        win_rate_pct: number;
+      };
+      report: string;
+    };
+    recent_snapshot_check: {
+      date_start: string;
+      date_end: string;
+      closed_count: number;
+      win_count: number;
+      win_rate_pct: number;
+      average_net_return_pct: number;
+      no_action_date: string;
+      entry: string;
+      live_equivalent: boolean;
+      status: string;
+    };
+  };
   verdict: {
     title: string;
     detail: string;
@@ -145,12 +189,15 @@ export interface LimitUpExecutionSchedule {
   max_snapshot_age_seconds: number;
 }
 
-export interface LimitUpProfitabilityFilterMetadata {
-  version: string;
-  minimum_d1_samples: number;
-  minimum_combined_rate: number;
-  applies_to?: "first_board" | string;
-  two_to_three?: "unchanged" | string;
+export interface LimitUpCoreQualityFilterMetadata {
+  contract_version: string;
+  first_board_minimum_d1_samples: number;
+  first_board_minimum_combined_rate: number;
+  minimum_prior_limit_count_126: number;
+  maximum_prior_limit_count_126: number;
+  a_tier_industry_turnover_ratio_5d: number;
+  b_tier_is_actionable: boolean;
+  fallback_contract: null;
 }
 
 export interface LimitUpLiveSignal {
@@ -346,7 +393,7 @@ export interface LimitUpSignalSnapshot {
     portfolio?: LimitUpLiveSignal[];
     watchlist?: LimitUpLiveSignal[];
     execution_schedule?: LimitUpExecutionSchedule;
-    profitability_filter?: LimitUpProfitabilityFilterMetadata;
+    core_quality_filter?: LimitUpCoreQualityFilterMetadata;
     plan?: LimitUpPlanMetadata;
     board_lane_validations?: Partial<Record<BoardLaneKey, {
       passed: boolean;
@@ -571,6 +618,7 @@ export interface LimitUpRecommendationQuality {
   daily_aggregation: "mean_net_return_by_exit_date" | string;
   summary: LimitUpEntrySummary;
   daily_results: LimitUpRecommendationDailyResult[];
+  trades: LimitUpLaneLedgerTrade[];
   skipped_reasons: Record<string, number>;
 }
 
@@ -583,15 +631,13 @@ export interface LimitUpRecommendationDailyResult {
   drawdown_pct: number;
 }
 
-export interface LimitUpBacktestProfitabilityFilter extends LimitUpProfitabilityFilterMetadata {
+export interface LimitUpBacktestCoreQualityFilter extends LimitUpCoreQualityFilterMetadata {
   audit: {
     input_count: number;
     selected_count: number;
     excluded_count: number;
-    first_board_input_count: number;
-    first_board_selected_count: number;
-    first_board_excluded_count: number;
     reason_counts: Record<string, number>;
+    tier_counts: Record<string, number>;
   };
   selected_summary: LimitUpEntrySummary;
   unfiltered_summary: LimitUpEntrySummary;
@@ -617,6 +663,15 @@ export interface LimitUpLaneLedgerTrade {
   name: string;
   industry_name?: string | null;
   signal_kind?: string | null;
+  prior_limit_count_126?: number | null;
+  prior_industry_turnover_ratio_5d?: number | null;
+  quality_priority_tier?: "A_industry_expanding" | "B_recognition_only" | string | null;
+  profitability_gate_passed?: boolean | null;
+  profitability_gate_reason?: string | null;
+  recognition_gate_passed?: boolean | null;
+  recognition_gate_reason?: string | null;
+  core_quality_gate_passed?: boolean | null;
+  core_quality_gate_reason?: string | null;
   buy_date: string;
   buy_time: string;
   buy_price: number | null;
@@ -885,7 +940,7 @@ export interface LimitUpLaneBacktest {
     configured_lanes?: BoardLaneKey[];
     configuration_matches_gate?: boolean;
   };
-  profitability_filter?: LimitUpBacktestProfitabilityFilter;
+  core_quality_filter?: LimitUpBacktestCoreQualityFilter;
   execution_schedule?: {
     entry_windows: string[];
     exit_time: string;

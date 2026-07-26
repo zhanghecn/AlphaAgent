@@ -10,8 +10,7 @@ FORMAL_MIN_CHANGE_PCT = 5.0
 RADAR_CONTRACT_VERSION = "limit-up-radar-contract-v1"
 POOL_STATES = frozenset({"sealed", "resealed", "failed"})
 PRODUCTION_CONTRACTS = {
-    ("limit-up-live-v15", 5.0): "formal_5pct",
-    ("limit-up-live-v16", 3.0): "early_3pct_same_rules",
+    ("limit-up-core-ab-v1", 5.0): "core_ab_formal_5pct",
 }
 
 
@@ -45,6 +44,6 @@ def capture_state(*, change_pct: float, pool_state: str) -> str:
 
 
 def is_formal_candidate(*, change_pct: float, state: str) -> bool:
-    """Return whether the candidate belongs to the unchanged v15 public path."""
+    """Return whether the candidate belongs to the formal public path."""
 
     return state in POOL_STATES or change_pct >= FORMAL_MIN_CHANGE_PCT

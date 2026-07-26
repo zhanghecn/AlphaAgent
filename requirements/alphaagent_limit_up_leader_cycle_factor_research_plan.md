@@ -1,10 +1,17 @@
-# AlphaAgent 涨停龙头周期与板块传播因子研究 Implementation Plan
+# AlphaAgent 涨停龙头周期因子与正式推荐升级 Implementation Plan
+
+> **Archived (2026-07-26):** 本计划已归档，不再是可执行的当前方案。Tasks 0-6 的有效
+> 连板、市场情绪和覆盖审计仅作基础研究证据；正文中的 `v15/v9/v5`、回退开关、
+> `limit-up-leader-cycle-v1` 目标和 Tasks 7 以后的步骤均为当时设想，不得按当前合同执行。
+> 唯一正式合同已固定为 `limit-up-core-ab-v1`，无旧规则回退；当前方案、历史结果
+> 和前向未通过状态见 `memory/06_backtests/limit_up_final_trading_scheme_20260726.md` 与
+> `memory/06_backtests/limit_up_core_ab_formal_validation_20260726.md`。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. This repository forbids commits unless the user explicitly requests one, so each task ends with a verification checkpoint instead of a commit step.
 
-**Goal:** 建立一个无未来函数、可跨市场阶段复核的龙头周期算法，识别首板点火、连续二进三、短周期反包三板、板块龙、容量中军和独立空间妖股，并验证这些角色与板块传播是否能提高现有正式打板质量池内的 D+1 排序。
+**Goal:** 构建并正式上线一套无未来函数、历史回放与实时推荐完全同源的龙头周期质量算法，在现有首板/二进三质量池内完成进一步过滤和排序，使全量推荐的 D+1 胜率、平均净收益、同窗复利、回撤和连亏恢复或超过旧高质量水平，并让用户在板前观察和触板扫板时优先看到真正的题材龙、容量核心和有效跟随者。
 
-**Architecture:** 研究分为“全市场角色发现”和“正式质量池交易评估”两层。全市场层只负责点时识别市场情绪、个股启动、题材传播和角色切换；交易层仍从现有首板/二进三正式质量池取候选，保留 D+1 预期收益、胜率、触板率和封板率，不允许龙头因子绕过质量门。历史先完成 2026 年 3-7 月日级周期账本，再只在点时成员、分钟行情和雷达覆盖完整的日期研究 1/3/5/10 分钟传播；覆盖不足时明确停止在描述层，不用日终值补造盘中因果。
+**Architecture:** 实施分为“全市场点时角色发现 -> 正式质量池消融与前向验证 -> 历史/实时同源正式晋级”三层。全市场层识别市场情绪、个股启动、题材传播和角色切换；交易层仍只处理现有首板/二进三正式质量池，保留 D+1 预期收益、胜率、触板率和封板率，不允许龙头因子绕过原质量门；晋级层冻结唯一的质量结论和排序函数，同时接入历史回放、板前概率列表、触板正式推荐及页面解释。历史先完成 2026 年 3-7 月日级周期账本，再只在点时成员、分钟行情和雷达覆盖完整的日期研究 1/3/5/10 分钟传播；覆盖不足时不能伪造盘中因果，也不能把计划标记为最终完成。
 
 **Tech Stack:** Python 3.11、pandas、SQLAlchemy/PostgreSQL、scikit-learn、pytest、现有 AlphaAgent 打板回放与实时影子链。
 
@@ -82,25 +89,59 @@
 
 ### 最终目标
 
-本计划不是只生成 3-7 月龙头名单。最终目标是在不恢复数据 Bug、不使用未来数据、保持
-正式触板价入场和 D+1 官方收盘退出的前提下，找出可跨市场阶段工作的通用因子，使实时
-正式质量池的排序和过滤在独立样本上恢复或超过旧的高质量水平：
+本计划的最终交付不是研究报告、龙头名单或一个只展示不执行的影子分数，而是一个正式的
+`limit-up-leader-cycle-v1` 质量策略版本。在不恢复数据 Bug、不使用未来数据、保持正式
+触板价入场和 D+1 官方收盘退出的前提下，它必须用同一套点时特征、质量结论和排序函数
+同时驱动历史回放与实时推荐：
+
+1. 全市场层在每个决策时点识别市场情绪、题材主线、点火龙、空间龙、容量中军、龙二龙三、
+   补涨和切换风险，但不能直接把全市场股票变成买点。
+2. 交易层只在现有正式首板/二进三质量池内进一步判断“保留、降级观察或拒绝”，并输出
+   唯一的 `leader_cycle_priority`。正式全量推荐质量按保留后的全部候选计算，不能只报
+   Top2 或两仓成交子集。
+3. 实时板前列表使用该优先级提前排列已经通过同源质量门且概率可用的候选；触板后的
+   `actionable_recommendations` 使用同一优先级过滤和排序。`>=3%` 仍只是观察激活条件，
+   龙头因子不能把普通涨幅股或板前观察直接升级为正式买点。
+4. 历史回放在每个信号时点只读取当时可见数据，生成与实时逐字段一致的质量结论、优先级
+   和理由；同一冻结输入在历史与实时两条路径上的保留状态和相对顺序必须一致。
+5. 页面最终展示“当前题材阶段、个股角色、传播/切换概率、D+1 质量、正式优先级和保留/
+   拒绝原因”，使用户知道为什么优先打某只，而不是只看到一个无法解释的总分。
+
+最终业务结果是：用户面对同一时刻多只快速拉升股票时，先看到正式质量池中 D+1 预期更高、
+龙头角色更可靠、板块传播更真实且切换风险更低的候选；股票触板后仍保留正式扫板入口。
+本计划不承诺没有 L2 的排队成交率，也不把自动下单纳入交付范围。
+
+### 量化完成门
+
+以下五层必须全部通过，才能把本计划标记为完成并启用正式版本：
 
 1. 先解释当前 `54.8117% / +0.5687% / +101.5433%` 与旧结果之间的逐因子差额，不能把
    未解释的下降笼统归因于“行情切换”。
-2. 第一验收层是相对当前正确基线同时改善全量推荐胜率、平均净收益、逐日等权复利、最大
-   回撤和连亏分布；只改善两仓占位结果不算通过。
-3. 恢复目标以旧**全量** `62.1951%` 胜率为主要参照，并在相同日期、相同费用和相同风险
-   暴露下争取恢复原错误基线的 `+1.33%` 单笔均值与高复利。`70.1031%` 仅作为两仓次级
-   对照，不能替代全量质量。
-4. `+425.74%` 原始复利受样本数和错误覆盖影响，必须在同窗、同曝光的反事实账本中比较；
-   不允许通过大幅删减交易数、缩短回撤窗口或选择已看日期宣称“恢复”。
-5. 3-7 月已经被查看，只能用于定义与对抗。正式晋级必须来自更早的 walk-forward 和至少
-   60 个完整新前向交易日、30 个闭合 Top5 正例；达不到时保持研究影子，不改正式买点。
+2. 同日期、同费用、同触板价入场的全量推荐必须同时达到：胜率不低于旧全量
+   `62.1951%`、平均 D+1 净收益不低于 `+1.30%`、最大回撤不差于 `-13.77%`，且同窗
+   逐日等权复利不低于旧错误财报反事实。`70.1031%` 只作为两仓次级对照。
+3. 新规则闭合样本不得少于当前正确基线的 80%，并同时降低当前最大连亏和硬亏率；不能靠
+   大量删票、缩短回撤窗口或挑选已看日期制造恢复结果。
+4. expanding walk-forward、锁定留出和按市场阶段分组均不得出现“总体提升但独立后段反向”；
+   3-7 月只用于定义与对抗，不能承担最终晋级结论。
+5. 至少 60 个完整新前向交易日、30 个闭合正式 Top5 候选通过同一冻结门；历史与实时同源
+   测试、正式版本切换、页面展示和回滚开关全部完成。任一项未通过时只能保持影子，计划
+   状态必须写成“尚未达到最终目标”，不能用“研究已完成”代替产品交付。
+
+### 最终可见产物
+
+- 一个冻结且可追溯的 `limit-up-leader-cycle-v1` 模型/规则指纹。
+- 一个被历史回放和实时推荐共同调用的质量结论与排序模块，不维护两套权重。
+- `/short-term` 中按正式优先级排列的板前候选和触板买点，以及可展开的中文排序理由。
+- 一份同窗恢复记分卡和一份独立前向验收报告，均同时报告全量推荐与两仓账户。
+- 一个可原子回退到当前 v15/v9 正式合同的开关；回退不删除实时扫板买点。
 
 ## 研究边界和成功标准
 
-### 不变的正式合同
+### 正式晋级前不变的合同
+
+以下合同在 Task 10 晋级决定通过前保持不变；通过后只允许按 Task 11 原子升级版本和质量
+排序，费用、入场、退出及候选母池边界仍不得改变。
 
 - 正式版本继续是 `limit-up-history-v15`、`limit-up-live-v15`、
   `limit-up-scheduled-v9`、`limit-up-cash-v5`。
@@ -136,7 +177,7 @@
 - `higher_board_continuation`：当日前有效连板高度至少 3，继续封板。
 - `failed_reboard`：满足短周期反包观察结构但当日只触板未封或未触板。
 
-### 最终成功标准
+### 研究阶段成功标准
 
 - 2026 年 3-7 月的每个市场交易日都有可复核的情绪、高度组、主要题材、角色和周期阶段账本。
 - 恒尚节能停牌前后的涨停不会连成 8 板；2026-07-01..09 为有效 7 板。
@@ -145,6 +186,9 @@
 - 每个模型特征都有 `known_at`、来源和可用范围；所有训练集、校准集和评估集按交易日分离。
 - 因子加入/移除消融同时报告全量推荐质量和两仓到达顺序账户，不能用两仓子集胜率代替规则质量。
 - 未达到至少 60 个完整点时交易日、30 个闭合传播正例和 30 个闭合正式候选时，结果固定为 `research_only/insufficient_point_in_time_coverage`。
+
+本节只定义 Tasks 1-9 的研究质量，不能替代前述“量化完成门”。生成这些账本和报告不表示
+正式推荐已经升级，也不表示整个计划完成。
 
 ## 当前数据快照（2026-07-25）
 
@@ -183,12 +227,15 @@
 - `alphaagent/server/services/limit_up/leader_cycle_repository.py`：只读加载日线、事件、成员、资金、概念分钟、雷达和正式回放结果，并生成覆盖清单。
 - `alphaagent/server/services/limit_up/leader_cycle_research.py`：构造日级账本、分钟传播事件、匹配对照、消融指标和 Markdown 报告。
 - `alphaagent/server/services/limit_up/leader_cycle_model.py`：在覆盖门通过后拟合/校准角色、传播和切换概率；覆盖不足时返回明确状态，不产生概率。
+- `alphaagent/server/services/limit_up/leader_cycle_policy.py`：加载唯一冻结策略，输出正式保留结论、中文理由和统一优先级；历史与实时共用。
 - `tests/alphaagent/test_limit_up_sentiment.py`：有效连板与情绪权重回归。
 - `tests/alphaagent/test_limit_up_leader_cycle_contract.py`：形态、角色、周期和无未来字段测试。
 - `tests/alphaagent/test_limit_up_leader_cycle_research.py`：覆盖、传播、对照、正式候选连接和消融测试。
 - `tests/alphaagent/test_limit_up_leader_cycle_model.py`：按日期切分、概率校准、样本门和标签翻转测试。
+- `tests/alphaagent/test_limit_up_leader_cycle_policy.py`：冻结策略、历史/实时同源、排序稳定性和回退测试。
 - `memory/06_backtests/limit_up_leader_cycle_2026_03_07.md`：五个月日级周期、逐月轮换、角色和持续时间总报告。
 - `memory/06_backtests/limit_up_leader_propagation_intraday_202607.md`：七月严格分钟传播覆盖与案例报告。
+- `memory/06_backtests/limit_up_leader_cycle_promotion.md`：同窗恢复记分卡、独立前向结果和正式晋级决定。
 
 ### 修改
 
@@ -196,7 +243,16 @@
 - `alphaagent/server/services/limit_up/concept_resonance.py`：复用统一题材语义分类，继续保存原始分量，不直接改变正式动作。
 - `alphaagent/server/services/limit_up/sector_warmup.py`：复用现有点时成员重叠分组，不另建第二套题材家族算法。
 - `alphaagent/server/services/limit_up/dynamic_leader_shadow.py`：研究通过前只补充可审计的角色/传播分量；不改 `action`、正式排序或两仓。
+- `alphaagent/server/services/limit_up/history_service.py`：晋级后在正式盈利门之后应用统一龙头质量结论和优先级。
+- `alphaagent/server/services/limit_up/live_service.py`：晋级后对板前列表和触板正式推荐应用同一结论与排序。
+- `alphaagent/server/services/limit_up/preboard_decision_service.py`：复用正式优先级，但不把板前观察直接变成买点。
+- `alphaagent/server/services/limit_up/scheduled_execution.py`：同一捕获批次内按正式优先级决定两仓到达顺序，并保持真实先后约束。
+- `alphaagent/server/services/limit_up/versions.py`：正式晋级时原子切换历史/实时策略版本；现金执行版本不变。
 - `tests/alphaagent/test_limit_up_dynamic_leader_shadow.py`：固定影子只加字段、不改正式动作和顺序。
+- `frontend/src/api/limitUp.ts`：公开角色、题材阶段、质量结论、正式优先级和理由字段。
+- `frontend/src/features/limitUp/PreboardRanking.tsx`：按正式优先级展示板前候选和龙头解释。
+- `frontend/src/features/limitUp/LiveSignalCard.tsx`：展示触板正式推荐的角色、优先级和保留理由。
+- `frontend/src/pages/LimitUpPage.tsx`：保持板前观察与正式扫板分区，同时使用同一优先级语义。
 - `memory/06_backtests/README.md`：只增加两份最终证据入口，不登记中间 JSON。
 - `memory/09_decisions/decisions.md`：研究完成后只保存当前结论、验证方式、证据和未决风险。
 
@@ -219,12 +275,18 @@
 内 545/545 个相等；498 个首次触板触发、47 个窗口内回封触发。正式 243 个推荐中
 239 个闭合，两仓 127 笔成交的原始价和账面成交价也全部相等。完整结果已写入入场审计。
 
-- [ ] **Step 2: 增加首板触板价回归测试**
+- [x] **Step 2: 增加首板触板价回归测试**
 
 在 `test_limit_up_lanes.py` 直接构造一只前收盘 10 元、涨停价 11 元的首板：
 
 ```python
-candidate = history_engine._board_lane_candidates_from_day(...)[0]
+candidate = history_engine._board_lane_candidates_from_day(
+    first_board_day,
+    signal_date,
+    event_evidence=event_index,
+    financial_index=financial_index,
+    total_cost_rate=history_engine.ROUND_TRIP_COST_RATE,
+)[0]
 assert candidate["signal_kind"] == "first_touch"
 assert candidate["buy_time"] == candidate["event_evidence"]["first_limit_time"]
 assert candidate["entry_price"] == candidate["limit_price"] == 11.0
@@ -233,18 +295,18 @@ assert candidate["entry_price"] == candidate["limit_price"] == 11.0
 再构造 10 点前首次触板、10 点后首次回封的路径，断言 `signal_kind == "reseal"`、买入时间
 等于第一次可观察回封时间，入场价仍为 11 元，不能取回封前的分钟价。
 
-- [ ] **Step 3: 锁定正式订单提取和现金成交上限**
+- [x] **Step 3: 锁定正式订单提取和现金成交上限**
 
 在 `test_limit_up_scheduled_execution.py` 断言正式订单只读取完整质量候选池、只接受双窗口，
 且不读取板前观察表。在 `test_limit_up_cash_backtest.py` 保留并扩展涨停价上限断言：原始价
 已经是涨停价时，滑点不能把成交价推到涨停价之上。
 
-- [ ] **Step 4: 增加页面 `portfolio` 合同测试**
+- [x] **Step 4: 增加页面 `portfolio` 合同测试**
 
 为 `LimitUpPage` 查询增加最小测试，断言回测始终传 `lane: "portfolio"`，且质量卡读取
 `recommendation_quality`、两仓卡读取 `summary`；禁止把板前研究结果接到正式复利卡。
 
-- [ ] **Step 5: 运行定向验证并冻结基线**
+- [x] **Step 5: 运行定向验证并冻结基线**
 
 ```bash
 uv run --group server pytest -q \
@@ -287,23 +349,23 @@ P_m(i,k,t,h) =
 - Modify: `alphaagent/server/services/limit_up/sentiment.py`
 - Create: `tests/alphaagent/test_limit_up_sentiment.py`
 
-- [ ] **Step 1: 写失败测试锁定市场交易日连续性**
+- [x] **Step 1: 写失败测试锁定市场交易日连续性**
 
 构造交易日 `06-15、06-16、07-01、07-02`，股票只在 `06-15、07-01、07-02` 封板。断言 7 月 1 日高度为 1、7 月 2 日高度为 2；停牌缺口不能接续。
 
-- [ ] **Step 2: 写失败测试锁定晋级分母**
+- [x] **Step 2: 写失败测试锁定晋级分母**
 
 断言 `previous_is_limit_up`、一进二、二进三和最高板都只读取上一全市场交易日；股票缺少上一交易日行情时不进入对应晋级分母。
 
-- [ ] **Step 3: 写失败测试锁定情绪权重**
+- [x] **Step 3: 写失败测试锁定情绪权重**
 
 断言 `_sentiment_score()` 的六个预注册权重为 `0.28/0.22/0.18/0.14/0.10/0.08`，总和为 1；当前重复的第二个 `0.18 * max_streak` 必须删除。
 
-- [ ] **Step 4: 修改 SQL 连板分组**
+- [x] **Step 4: 修改 SQL 连板分组**
 
 在 `load_sentiment_points()` 的 CTE 中为全市场交易日生成连续序号，并为每只股票读取上一行交易日序号。只有“当前封板、上一行也封板、两个交易日序号相邻”才延续 streak；否则新建 streak group。
 
-- [ ] **Step 5: 运行测试和七月实数断言**
+- [x] **Step 5: 运行测试和七月实数断言**
 
 ```bash
 uv run --group server pytest -q tests/alphaagent/test_limit_up_sentiment.py
@@ -319,16 +381,16 @@ docker compose exec -T alphaagent-api python -m pytest -q tests/alphaagent/test_
 - Create: `alphaagent/server/services/limit_up/leader_cycle_contract.py`
 - Create: `tests/alphaagent/test_limit_up_leader_cycle_contract.py`
 
-- [ ] **Step 1: 写形态分类失败测试**
+- [x] **Step 1: 写形态分类失败测试**
 
 覆盖 `first_board_ignition`、`continuous_two_to_three`、`short_cycle_reboard_three`、
 `higher_board_continuation` 和 `failed_reboard`。短周期反包三板使用最近五个市场交易日，要求当前封板、上一日未封、窗口内含当前恰有三次封板。
 
-- [ ] **Step 2: 写多角色和并列失败测试**
+- [x] **Step 2: 写多角色和并列失败测试**
 
 断言一只股票可同时有多个角色；同日两只最高板必须都保留；空间龙题材传播弱时仍可标记 `independent_demon`，不能被普通跟风覆盖。
 
-- [ ] **Step 3: 写周期状态机失败测试**
+- [x] **Step 3: 写周期状态机失败测试**
 
 固定合法转移：
 
@@ -341,7 +403,7 @@ reflux -> diffusion | acceleration | divergence | ebb
 
 禁止从 `ebb` 用未来信息改写过去状态；新点火必须生成新 `cycle_id`。
 
-- [ ] **Step 4: 实现不可变数据合同**
+- [x] **Step 4: 实现不可变数据合同**
 
 公共函数固定命名为 `classify_board_pattern`、`assign_ex_post_roles`、
 `advance_cycle_state`、`point_in_time_role_features` 和
@@ -384,7 +446,7 @@ def reject_future_feature_names(names: Sequence[str]) -> None:
 
 `assign_ex_post_roles` 明确只生成研究标签；`point_in_time_role_features` 禁止读取 `final_role`、当日最终封板、D+1 结果和周期结束日期。
 
-- [ ] **Step 5: 运行纯函数测试**
+- [x] **Step 5: 运行纯函数测试**
 
 ```bash
 uv run --group server pytest -q tests/alphaagent/test_limit_up_leader_cycle_contract.py
@@ -399,11 +461,11 @@ uv run --group server pytest -q tests/alphaagent/test_limit_up_leader_cycle_cont
 - Create: `alphaagent/server/services/limit_up/leader_cycle_repository.py`
 - Create: `tests/alphaagent/test_limit_up_leader_cycle_research.py`
 
-- [ ] **Step 1: 写覆盖失败测试**
+- [x] **Step 1: 写覆盖失败测试**
 
 测试覆盖对象分别报告日线、1分钟、5分钟、点时成员、板块资金、概念强度、雷达帧和正式回放的开始/结束日期、交易日、股票日和帧数。禁止用全表最早日期冒充指定区间完整度。
 
-- [ ] **Step 2: 实现区间加载接口**
+- [x] **Step 2: 实现区间加载接口**
 
 实现 `load_leader_cycle_inputs(start, end)`、
 `load_intraday_propagation_inputs(trade_dates)` 和
@@ -434,15 +496,15 @@ class CoverageRow:
 复用 `history_repository.py`、`concept_snapshot_repository.py` 和
 `radar_observation_repository.py` 的既有查询边界；不得在新仓库复制正式质量门 SQL。
 
-- [ ] **Step 3: 固定严格分钟可用门**
+- [x] **Step 3: 固定严格分钟可用门**
 
 单个事件只有同时满足以下条件才进入分钟传播：D-1 或更早的点时题材成员、基线和全部目标窗帧、题材成员行情覆盖率至少 90%、事件股票真实分钟路径、同市场阶段对照可用。失败事件保留排除原因，不填零。
 
-- [ ] **Step 4: 核对数据供应能力**
+- [x] **Step 4: 核对数据供应能力**
 
 通过现有 `akshare_adapter.py` 和数据同步任务只读检查以下能力：历史点时题材成员、历史板块分钟资金、全市场分钟行情。每项输出 `available/backfillable/forward_only`；供应商只提供当前快照时固定为 `forward_only`，不写临时抓取脚本伪造历史。
 
-- [ ] **Step 5: 运行覆盖测试和真实区间探测**
+- [x] **Step 5: 运行覆盖测试和真实区间探测**
 
 ```bash
 uv run --group server pytest -q tests/alphaagent/test_limit_up_leader_cycle_research.py -k coverage
@@ -459,35 +521,36 @@ docker compose exec -T alphaagent-api python -m alphaagent.server.services.limit
 - Modify: `tests/alphaagent/test_limit_up_leader_cycle_research.py`
 - Create: `memory/06_backtests/limit_up_leader_cycle_2026_03_07.md`
 
-- [ ] **Step 1: 写日级账本失败测试**
+- [x] **Step 1: 写日级账本失败测试**
 
 每个交易日必须输出市场阶段、有效最高板组、首板/一进二/二进三/高板晋级、即时资金主攻、5 日余温、角色组和周期状态。并列龙头和无明确主线日必须原样保留。
 
-- [ ] **Step 2: 复用题材家族分组**
+- [x] **Step 2: 复用题材家族分组**
 
 使用 `sector_warmup.group_concepts()` 对同一快照日高重叠题材分组；执行概念继续由
 `concept_resonance.is_execution_concept()` 过滤。缺少历史点时成员的 3-6 月标记
 `current_membership_descriptive_only`，不得伪装成点时成员。
 
-- [ ] **Step 3: 生成三种持续时间**
+- [x] **Step 3: 生成三种持续时间**
 
 分别输出 `board_spell_days`、`leadership_tenure_days`、
 `theme_propagation_days`，并记录点火、确认、峰值、首次分歧、回流和结束日期。覆盖完整且确认没有扩散时 `theme_propagation_days=0`；缺少点时成员或传播数据时必须为 `None` 并标记 `unavailable`，不能借空间龙任期填充。
 
-- [ ] **Step 4: 固定七月黄金案例**
+- [x] **Step 4: 固定七月黄金案例**
 
 真实报告必须满足：
 
 - 恒尚节能：7 月 1-9 日有效 7 板，题材传播弱，保留空间妖股身份。
 - 哈药股份：7 月 10 日启动，7 月 14 日进入最高板，7 月 15 日医药资金大扩散；记录“个股领先题材确认”。
-- 立新能源：7 月 20 日电力点火，7 月 21-22 日资金脱钩，7 月 23 日储能/电网回流，7 月 24 日触板未封后周期结束。
+- 立新能源：7 月 16 日启动，7 月 20 日为连续第三板；7 月 21-22 日资金与高度脱钩，
+  7 月 23 日储能/电网回流，7 月 24 日触板未封。
 - 7 月 7-9 日：TMT 资金连续攻击，但不存在连续占据市场最高板的同题材个股；容量主线和情绪高度线必须分开。
 
-- [ ] **Step 5: 按相同定义完成六月、五月、四月、三月**
+- [x] **Step 5: 按相同定义完成六月、五月、四月、三月**
 
 报告顺序固定为 7 月校验定义、6 月、5 月、4 月、3 月；每月给出周期总表、逐日切换、角色持续时间、主线与高度脱钩案例和数据限制，不为每月新增独立报告文件。
 
-- [ ] **Step 6: 运行报告并核对总数**
+- [x] **Step 6: 运行报告并核对总数**
 
 ```bash
 docker compose exec -T alphaagent-api python -m alphaagent.server.services.limit_up.leader_cycle_research --mode daily --start 2026-03-01 --end 2026-07-24 --output memory/06_backtests/limit_up_leader_cycle_2026_03_07.md
@@ -503,19 +566,19 @@ docker compose exec -T alphaagent-api python -m alphaagent.server.services.limit
 - Modify: `tests/alphaagent/test_limit_up_leader_cycle_research.py`
 - Create: `memory/06_backtests/limit_up_leader_propagation_intraday_202607.md`
 
-- [ ] **Step 1: 写排除龙头自身的失败测试**
+- [x] **Step 1: 写排除龙头自身的失败测试**
 
 构造只有龙头上涨、其他成员不动的题材。断言原始题材均值会上升，但排除龙头后的传播为 0，不能判定龙头带动板块。
 
-- [ ] **Step 2: 写事件先后和共点火失败测试**
+- [x] **Step 2: 写事件先后和共点火失败测试**
 
 断言题材成员在 `t0` 前已经上涨的不算龙头传播；同题材 60 秒内两只股票同时点火时合并为一个共点火簇，不强行确定唯一因果龙。
 
-- [ ] **Step 3: 写市场对照失败测试**
+- [x] **Step 3: 写市场对照失败测试**
 
 构造全市场同时普涨而题材没有超额扩散的样本。断言差分中的差分传播为 0；不能把大盘普涨误判为个股带动。
 
-- [ ] **Step 4: 实现传播面板**
+- [x] **Step 4: 实现传播面板**
 
 实现 `build_ignition_events(payload)`、`build_propagation_panel(events, payload)`、
 `match_market_controls(event, payload)` 和 `summarize_propagation(panel)`，并冻结：
@@ -546,13 +609,18 @@ MINIMUM_MEMBER_COVERAGE_RATIO = 0.90
 
 每个 horizon 保存原始题材变化、排除龙头后的变化、匹配市场变化和最终增量，不只保存总分。
 
-- [ ] **Step 5: 运行七月严格分钟报告**
+- [x] **Step 5: 运行七月严格分钟报告**
 
 ```bash
 docker compose exec -T alphaagent-api python -m alphaagent.server.services.limit_up.leader_cycle_research --mode intraday --start 2026-07-15 --end 2026-07-24 --output memory/06_backtests/limit_up_leader_propagation_intraday_202607.md
 ```
 
 预期：报告首先列覆盖与排除表；7 月 20-24 日逐事件可复核，7 月 15-17 日只有通过严格覆盖的事件才进入结果，7 月 1-14 日不输出分钟因果结论。
+
+实际结果：过滤事后/风格题材并排除全部点火股票后，严格门接受 `0` 个事件、排除
+`4,184` 个事件、传播面板 `0` 行，状态固定为
+`research_only/insufficient_point_in_time_coverage`。Task 5 的工程与排除审计已完成，
+但现有数据不足以可靠验证“股票先动、板块后扩散”。
 
 ## Task 6: 生成点时角色和切换风险特征
 
@@ -562,27 +630,32 @@ docker compose exec -T alphaagent-api python -m alphaagent.server.services.limit
 - Modify: `alphaagent/server/services/limit_up/leader_cycle_research.py`
 - Modify: `tests/alphaagent/test_limit_up_leader_cycle_contract.py`
 
-- [ ] **Step 1: 为五组因子写字段白名单测试**
+- [x] **Step 1: 为五组因子写字段白名单测试**
 
 固定 `E/L/P/R/H` 的字段名、来源、`known_at` 和缺失语义。缺失值保留缺失指示，不用 0 代表未知。
 
-- [ ] **Step 2: 实现点时角色特征**
+- [x] **Step 2: 实现点时角色特征**
 
 个股特征包含有效板位、相对题材强度、距板、1/3/5 分钟价格与成交加速度、题材内触板顺序、开板/回封、D-1 成交额分位、同股 D+1 基因和财务承载质量。最终板数、周期峰值和 D+1 结果不得进入。
 
-- [ ] **Step 3: 实现切换风险特征**
+- [x] **Step 3: 实现切换风险特征**
 
 切换风险必须分别记录旧龙断板/炸板、旧题材传播衰减、即时资金与高度脱钩、新题材共点火、容量中军迁移和回流恢复。不得把它们先压成一个布尔市场门。
 
-- [ ] **Step 4: 用七月路径验证状态序列**
+- [x] **Step 4: 用七月路径验证状态序列**
 
 哈药股份路径应产生“点火 -> 确认 -> 扩散 -> 分歧”；立新能源应包含“点火 -> 扩散 -> 分歧/脱钩 -> 回流 -> 退潮”；恒尚节能应显示空间高度持续而题材传播缺失。
 
-- [ ] **Step 5: 运行合同测试**
+- [x] **Step 5: 运行合同测试**
 
 ```bash
 uv run --group server pytest -q tests/alphaagent/test_limit_up_leader_cycle_contract.py
 ```
+
+**Task 0-6 执行状态（2026-07-25）：** 上述工程、测试和真实数据报告均已完成。日级账本
+覆盖 100 个交易日；正式版本、候选池、费用、触板价入场、D+1 退出和排序均未改变。
+Task 5 因严格点时覆盖不足只形成排除审计，不形成机制成功结论；这不阻止 Task 0-6
+按既定范围完成，但阻止后续模型或正式策略据此晋级。
 
 ## Task 7: 与正式首板、二进三和 D+1 结果连接
 
@@ -704,10 +777,13 @@ uv run --group server pytest -q \
   tests/alphaagent/test_limit_up_live.py
 ```
 
-## Task 10: 证据、记忆和最终验收
+## Task 10: 研究证据和正式晋级判定
 
 **Files:**
 
+- Modify: `alphaagent/server/services/limit_up/leader_cycle_model.py`
+- Modify: `tests/alphaagent/test_limit_up_leader_cycle_model.py`
+- Create: `memory/06_backtests/limit_up_leader_cycle_promotion.md`
 - Modify: `memory/06_backtests/README.md`
 - Modify: `memory/09_decisions/decisions.md`
 - Modify: `requirements/alphaagent_limit_up_leader_cycle_factor_research_plan.md`
@@ -746,9 +822,231 @@ git diff --check
 逐日等权复利、最大回撤、硬亏率和最长连亏；明确标记是否超过当前基线、是否恢复旧全量
 `62.1951%`，以及未恢复部分由哪个样本组贡献。不得只给一个最终总分。
 
-- [ ] **Step 6: 标记完成项并交付**
+- [ ] **Step 6: 冻结唯一晋级决定**
 
-逐项更新本计划复选框；未达到数据门的任务保留未完成并写明现有覆盖数字，不能用“等待”掩盖已经可以完成的日级研究或工程工作。
+在 `leader_cycle_model.py` 生成可机读决定，测试必须锁定所有门同时通过才允许正式晋级：
+
+```python
+decision = build_leader_cycle_promotion_decision(scorecard)
+assert decision == {
+    "status": "forward_pass_for_formal",
+    "policy_version": "limit-up-leader-cycle-v1",
+    "model_fingerprint": frozen_fingerprint,
+    "historical_gate_passed": True,
+    "walk_forward_gate_passed": True,
+    "forward_gate_passed": True,
+    "parity_gate_passed": True,
+    "product_gate_passed": True,
+}
+```
+
+任一量化完成门失败时，状态固定为 `historical_rejected` 或
+`insufficient_point_in_time_coverage`，不得写正式开关。此时可以完成研究报告，但 Task 11、
+Task 12 和本计划总状态必须保持未完成。
+
+## Task 11: 将通过验收的策略接入正式历史与实时后端
+
+本任务才是从“研究有结论”进入“产品策略已改变”的边界。只有 Task 10 输出
+`forward_pass_for_formal` 才能执行；否则不得为了完成计划手工打开。
+
+**Files:**
+
+- Create: `alphaagent/server/services/limit_up/leader_cycle_policy.py`
+- Create: `tests/alphaagent/test_limit_up_leader_cycle_policy.py`
+- Modify: `alphaagent/server/services/limit_up/history_service.py`
+- Modify: `alphaagent/server/services/limit_up/live_service.py`
+- Modify: `alphaagent/server/services/limit_up/preboard_decision_service.py`
+- Modify: `alphaagent/server/services/limit_up/scheduled_execution.py`
+- Modify: `alphaagent/server/services/limit_up/versions.py`
+- Modify: `tests/alphaagent/test_limit_up_history.py`
+- Modify: `tests/alphaagent/test_limit_up_live.py`
+- Modify: `tests/alphaagent/test_limit_up_scheduled_execution.py`
+
+- [ ] **Step 1: 写统一策略合同失败测试**
+
+用同一候选和同一冻结模型分别模拟历史、板前和触板输入，断言质量结论与优先级一致：
+
+```python
+historical = evaluate_leader_cycle_candidate(history_candidate, policy)
+preboard = evaluate_leader_cycle_candidate(preboard_candidate, policy)
+live = evaluate_leader_cycle_candidate(live_candidate, policy)
+
+assert historical.eligible == preboard.eligible == live.eligible
+assert historical.priority == preboard.priority == live.priority
+assert historical.reason_codes == preboard.reason_codes == live.reason_codes
+```
+
+再翻转 D 日最终封板、D+1 收益和盘后最终龙头标签，断言三者不变，证明正式策略没有读取
+结算标签。
+
+- [ ] **Step 2: 实现唯一正式策略模块**
+
+`leader_cycle_policy.py` 只暴露以下稳定接口，其他服务不得自行复制权重或阈值：
+
+```python
+@dataclass(frozen=True)
+class LeaderCycleDecision:
+    eligible: bool
+    priority: float
+    role: str
+    theme_stage: str
+    reason_codes: tuple[str, ...]
+    reason_text: str
+    policy_version: str
+    model_fingerprint: str
+
+
+def evaluate_leader_cycle_candidate(
+    candidate: Mapping[str, object],
+    policy: FrozenLeaderCyclePolicy,
+) -> LeaderCycleDecision:
+    decision = policy.evaluate(candidate)
+    if decision.policy_version != policy.version:
+        raise ValueError("leader-cycle policy version mismatch")
+    if decision.model_fingerprint != policy.model_fingerprint:
+        raise ValueError("leader-cycle model fingerprint mismatch")
+    return decision
+
+
+def rank_leader_cycle_candidates(
+    candidates: Sequence[Mapping[str, object]],
+    policy: FrozenLeaderCyclePolicy,
+) -> list[dict[str, object]]:
+    evaluated = [
+        {**dict(candidate), **asdict(evaluate_leader_cycle_candidate(candidate, policy))}
+        for candidate in candidates
+    ]
+    return sorted(
+        evaluated,
+        key=lambda item: (
+            item["eligible"] is not True,
+            -float(item["priority"]),
+            str(item.get("vt_symbol") or ""),
+        ),
+    )
+```
+
+模块只能加载 Task 10 通过的指纹；指纹缺失、模型不匹配或点时输入不完整时返回
+`policy_unavailable`，并回退到当前 v15/v9 正式结果，不能清空买点，也不能临时使用影子权重。
+
+- [ ] **Step 3: 接入历史全量推荐质量链**
+
+在 `history_service._build_scheduled_history_backtest()` 中，现有静态质量门和同股 D+1 盈利门
+通过后调用统一策略。全量推荐只保留 `eligible=True`，并保存 `leader_cycle_priority`、角色、
+题材阶段、理由、版本和指纹。收益仍使用原触板/回封时间、涨停价和 D+1 官方收盘，不允许
+因新策略改变入场或退出价格。
+
+- [ ] **Step 4: 接入实时板前与正式扫板链**
+
+在 `preboard_decision_service.py` 中只重排已有 `preboard_candidates`；它们仍是板前观察，
+不写正式动作。在 `live_service.py` 中，于现有正式质量门和盈利门之后、构造
+`actionable_recommendations` 之前应用同一 `eligible` 和 `priority`。已封板/回封且合格的
+正式扫板买点必须继续显示，不能再次出现“板前候选退出导致扫板买点消失”。
+
+- [ ] **Step 5: 保持真实到达先后并统一同批排序**
+
+`scheduled_execution._scheduled_order_sort_key()` 先按交易日和可观察到达批次排序，仅在同一
+批次内使用 `leader_cycle_priority` 决定优先级。禁止后来出现的高分票事后挤掉用户已执行的
+早先买点；全量质量统计不受两仓限制，两仓账户单独记录优先级带来的占仓变化。
+
+- [ ] **Step 6: 原子升级版本并保留回滚**
+
+只有上述测试和 Task 10 晋级决定同时通过，才将唯一正式版本升级为
+`limit-up-history-v16 / limit-up-live-v16 / limit-up-scheduled-v10`；现金执行继续
+`limit-up-cash-v5`。正式开关必须同时校验策略状态和模型指纹；关闭开关后完整回退当前
+v15/v9 候选、排序和买点，不删除历史账本。
+
+- [ ] **Step 7: 运行后端正式同源回归**
+
+```bash
+uv run --group server pytest -q \
+  tests/alphaagent/test_limit_up_leader_cycle_policy.py \
+  tests/alphaagent/test_limit_up_history.py \
+  tests/alphaagent/test_limit_up_live.py \
+  tests/alphaagent/test_limit_up_scheduled_execution.py \
+  tests/alphaagent/test_limit_up_preboard_decision_service.py
+```
+
+预期：历史/实时同源断言通过；晋级开关关闭时逐笔等于 v15/v9，开启时只改变候选质量结论
+和同批顺序，不改变触板价、D+1 退出、费用和二进三形态定义。
+
+## Task 12: 交付用户可用的正式排序并完成发布验收
+
+**Files:**
+
+- Modify: `frontend/src/api/limitUp.ts`
+- Modify: `frontend/src/features/limitUp/PreboardRanking.tsx`
+- Modify: `frontend/src/features/limitUp/preboardRanking.spec.tsx`
+- Modify: `frontend/src/features/limitUp/LiveSignalCard.tsx`
+- Modify: `frontend/src/pages/LimitUpPage.tsx`
+- Modify: `frontend/src/features/limitUp/GuideView.tsx`
+- Modify: `frontend/src/features/limitUp/GuideView.spec.tsx`
+- Modify: `memory/06_backtests/limit_up_leader_cycle_promotion.md`
+- Modify: `memory/06_backtests/README.md`
+- Modify: `memory/09_decisions/decisions.md`
+- Modify: `requirements/alphaagent_limit_up_leader_cycle_factor_research_plan.md`
+
+- [ ] **Step 1: 锁定前端正式字段合同**
+
+扩展 `PreboardCandidate` 和正式 `LimitUpLiveSignal`：
+
+```typescript
+leader_cycle_policy_version: string | null;
+leader_cycle_priority: number | null;
+leader_cycle_role: string | null;
+leader_cycle_theme_stage: string | null;
+leader_cycle_reason: string | null;
+leader_cycle_formal: boolean;
+```
+
+测试断言板前行和触板卡使用相同字段语义；`leader_cycle_formal=false` 时必须明确显示“研究
+排序”，不能伪装成正式优先级。
+
+- [ ] **Step 2: 让用户看到排序结果和原因**
+
+板前表按正式优先级展示候选，同时保留 D+1 预期、D+1 胜率、三分钟/最终触板概率和封板率；
+正式买点卡显示题材阶段、个股角色、优先级及一句中文理由。板前观察与正式买点继续分区，
+不得把“高优先级”写成“保证涨停”或“保证 D+1 盈利”。
+
+- [ ] **Step 3: 增加桌面与移动端渲染测试**
+
+```bash
+npm --prefix frontend test -- --run \
+  src/features/limitUp/preboardRanking.spec.tsx \
+  src/features/limitUp/GuideView.spec.tsx
+```
+
+预期：长股票名、长题材名和中文理由不覆盖其他列；390px 下可横向访问概率和优先级；正式
+扫板卡不会因板前列表存在而隐藏。
+
+- [ ] **Step 4: 重建正式账本并核对页面指标**
+
+以 v16/v10 重建相同截止日账本，页面必须同时展示全量推荐和两仓账户。API、报告和页面的
+样本数、胜率、平均收益、复利和回撤逐项相等；买入价审计仍为首板
+`entry_price == limit_price`。
+
+- [ ] **Step 5: 执行完整回归和浏览器验收**
+
+```bash
+uv run --group server pytest -q tests/alphaagent/test_limit_up_*.py
+uv run --group server pytest -q \
+  tests/alphaagent/test_akshare_adapter.py \
+  tests/alphaagent/test_data_sync_parallel.py \
+  tests/alphaagent/test_data_sync_schedule.py
+uv run python -m compileall -q alphaagent/server/services/limit_up
+npm --prefix frontend test -- --run
+npm --prefix frontend run build
+git diff --check
+```
+
+再用 Playwright 检查 `/short-term` 的 1280px 和 390px：板前优先级、正式扫板、中文原因、
+回测全量指标和两仓指标均可见，页面无重叠、无横向页面溢出、控制台无错误。
+
+- [ ] **Step 6: 写最终状态并关闭计划**
+
+只有量化完成门、正式后端、页面和回滚全部通过，才能勾选本步骤并在决策记忆中写
+“`limit-up-leader-cycle-v1` 已正式启用”。若未达到旧全量恢复目标，报告必须写清差额和
+失败样本组，本计划保持未完成；不能以“龙头周期研究报告已生成”关闭任务。
 
 ## 执行顺序和停止条件
 
@@ -757,5 +1055,8 @@ git diff --check
 3. Task 5 在现有七月后半段数据上立即完成严格小样本机制验证。
 4. Task 6-7 可以立即完成因子面板和正式回测连接，但结果仍是已查看历史研究。
 5. Task 8 若点时样本门不足，必须以明确状态结束，不继续调阈值。
-6. Task 9 只有 Task 8 通过后才执行排序接入；否则当前动态影子仅继续采集原始分量。
-7. 任何阶段发现正式首板、二进三、扫板动作或 D+1 结算发生变化，立即停止并先修复回归。
+6. Task 9 只有 Task 8 通过后才生成独立影子排序；当前正式买点仍不改变。
+7. Task 10 必须给出可机读晋级决定；研究报告本身不能触发正式版本。
+8. Task 11 仅在五层量化完成门全部通过后执行，并把同一策略接入历史与实时后端。
+9. Task 12 完成页面、账本、回滚和端到端验收后，整个计划才允许标记完成。
+10. 任何阶段发现正式首板、二进三、扫板动作或 D+1 结算被非预期改变，立即停止并先修复回归。

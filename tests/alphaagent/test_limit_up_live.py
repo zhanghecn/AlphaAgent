@@ -276,6 +276,8 @@ def _candidate(symbol: str, **overrides: object) -> dict[str, object]:
         "last_price": 10.92,
         "previous_limit_up": False,
         "auction_gap_pct": None,
+        "prior_limit_count_126": 3,
+        "prior_industry_turnover_ratio_5d": 1.0,
     }
     candidate.update(overrides)
     return candidate
@@ -478,6 +480,7 @@ def test_live_portfolio_prefers_same_frame_relay_then_first_board() -> None:
             "leadership_score": 80.0,
             "state": "near_limit",
             "change_pct": 8.0,
+            "prior_limit_count_126": 3,
             "last_price": 9.8,
             "limit_price": 10.0,
             "historical_evidence": {
@@ -571,6 +574,7 @@ def test_live_portfolio_keeps_formal_selection_and_touched_board() -> None:
             "quality_gate_passed": True,
             "execution_environment_passed": True,
             "change_pct": change_pct,
+            "prior_limit_count_126": 3,
             "last_price": limit_price if state == "sealed" else 9.8,
             "limit_price": limit_price,
             "historical_evidence": {
@@ -646,6 +650,7 @@ def test_live_actionable_recommendations_are_unbounded_but_keep_profitability_ga
             "action": "buy_now",
             "entry_kind": "momentum",
             "state": "near_limit",
+            "prior_limit_count_126": 3,
             "last_price": 9.8,
             "limit_price": 10.0,
             "historical_evidence": {
@@ -667,6 +672,7 @@ def test_live_actionable_recommendations_are_unbounded_but_keep_profitability_ga
                     "action": "buy_now",
                     "entry_kind": "sweep",
                     "state": "near_limit",
+                    "prior_limit_count_126": 3,
                     "last_price": 9.8,
                     "limit_price": 10.0,
                 },
@@ -687,6 +693,63 @@ def test_live_actionable_recommendations_are_unbounded_but_keep_profitability_ga
         "600001.SSE",
     ]
     assert actionable[1]["profitability_gate_reason"] == "qualified"
+
+
+def test_live_actionable_prioritizes_a_without_rejecting_b() -> None:
+    def signal(symbol: str, industry_ratio: float | None) -> dict[str, object]:
+        return {
+            "vt_symbol": symbol,
+            "board_lane": "two_to_three",
+            "action": "buy_now",
+            "entry_kind": "sweep",
+            "state": "near_limit",
+            "prior_limit_count_126": 3,
+            "prior_industry_turnover_ratio_5d": industry_ratio,
+            "last_price": 9.8,
+            "limit_price": 10.0,
+        }
+
+    actionable = live_service._build_live_actionable_recommendations(
+        {
+            "lanes": {
+                "now": [signal("600001.SSE", None), signal("600002.SSE", 1.2)],
+                "tail": [],
+                "next_auction": [],
+            }
+        },
+        captured_at=datetime(2026, 7, 21, 10, 20, tzinfo=SHANGHAI),
+        snapshot_age_seconds=5,
+    )
+
+    assert [row["vt_symbol"] for row in actionable] == [
+        "600002.SSE",
+        "600001.SSE",
+    ]
+    assert [row["quality_priority_tier"] for row in actionable] == [
+        "A_industry_expanding",
+        "B_recognition_only",
+    ]
+
+
+def test_live_actionable_rejects_a_stock_above_six_prior_limits() -> None:
+    signal = {
+        "vt_symbol": "600001.SSE",
+        "board_lane": "two_to_three",
+        "action": "buy_now",
+        "entry_kind": "sweep",
+        "state": "near_limit",
+        "prior_limit_count_126": 7,
+        "last_price": 9.8,
+        "limit_price": 10.0,
+    }
+
+    actionable = live_service._build_live_actionable_recommendations(
+        {"lanes": {"now": [signal], "tail": [], "next_auction": []}},
+        captured_at=datetime(2026, 7, 21, 10, 20, tzinfo=SHANGHAI),
+        snapshot_age_seconds=5,
+    )
+
+    assert actionable == []
 
 
 def test_live_portfolio_does_not_accept_probability_without_formal_selection() -> None:
@@ -735,6 +798,7 @@ def test_live_portfolio_is_empty_outside_entry_window_or_when_snapshot_is_old() 
                     "reason": "研究买点成立",
                     "state": "near_limit",
                     "change_pct": 8.0,
+                    "prior_limit_count_126": 3,
                     "last_price": 9.8,
                     "limit_price": 10.0,
                     "historical_evidence": {

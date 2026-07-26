@@ -2,10 +2,75 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import date, timedelta
 from typing import Any
 
 from sqlalchemy import text
+
+
+SENTIMENT_SCORE_WEIGHTS = {
+    "breadth": 0.28,
+    "limit_up": 0.22,
+    "max_streak": 0.18,
+    "promotion": 0.14,
+    "seal_quality": 0.10,
+    "risk_quality": 0.08,
+}
+
+
+def calculate_effective_board_streaks(
+    rows: Sequence[Mapping[str, object]],
+    market_trade_dates: Sequence[date],
+) -> list[dict[str, object]]:
+    """Calculate board streaks using the full-market trading calendar."""
+
+    trade_day_number = {
+        trade_date: index
+        for index, trade_date in enumerate(sorted(set(market_trade_dates)), start=1)
+    }
+    previous_by_symbol: dict[str, dict[str, object]] = {}
+    calculated: list[dict[str, object]] = []
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            str(row.get("vt_symbol") or ""),
+            _date_value(row.get("trade_date")) or date.min,
+        ),
+    )
+    for raw in ordered:
+        row = dict(raw)
+        symbol = str(row.get("vt_symbol") or "")
+        trade_date = _date_value(row.get("trade_date"))
+        if not symbol or trade_date not in trade_day_number:
+            raise ValueError("board streak rows require a symbol and market trade date")
+        previous = previous_by_symbol.get(symbol)
+        adjacent = bool(
+            previous
+            and int(previous["market_trade_day_number"])
+            == trade_day_number[trade_date] - 1
+        )
+        previous_is_limit_up = int(
+            bool(adjacent and previous and previous["is_limit_up"])
+        )
+        previous_streak = int(previous["limit_up_streak"]) if adjacent and previous else 0
+        is_limit_up = bool(row.get("is_limit_up"))
+        streak = previous_streak + 1 if is_limit_up else 0
+        calculated_row = {
+            **row,
+            "trade_date": trade_date,
+            "is_limit_up": int(is_limit_up),
+            "market_trade_day_number": trade_day_number[trade_date],
+            "previous_is_limit_up": previous_is_limit_up,
+            "previous_limit_up_streak": previous_streak,
+            "limit_up_streak": streak,
+        }
+        calculated.append(calculated_row)
+        previous_by_symbol[symbol] = calculated_row
+    return sorted(
+        calculated,
+        key=lambda row: (row["trade_date"], str(row["vt_symbol"])),
+    )
 
 
 def load_sentiment_points(session: Any, start: date, end: date) -> list[dict[str, object]]:
@@ -15,11 +80,22 @@ def load_sentiment_points(session: Any, start: date, end: date) -> list[dict[str
     rows = session.execute(
         text(
             """
-            WITH base AS (
+            WITH market_calendar AS (
+                SELECT
+                    trade_date,
+                    ROW_NUMBER() OVER (ORDER BY trade_date) AS market_trade_day_number
+                FROM (
+                    SELECT DISTINCT trade_date
+                    FROM stock_daily_bars
+                    WHERE trade_date BETWEEN :warmup_start AND :end_date
+                ) market_dates
+            ),
+            base AS (
                 SELECT
                     b.vt_symbol,
                     COALESCE(s.name, '') AS stock_name,
                     b.trade_date,
+                    market_calendar.market_trade_day_number,
                     b.close_price,
                     b.high_price,
                     b.change_pct,
@@ -27,6 +103,7 @@ def load_sentiment_points(session: Any, start: date, end: date) -> list[dict[str
                         PARTITION BY b.vt_symbol ORDER BY b.trade_date
                     ) AS previous_close
                 FROM stock_daily_bars b
+                JOIN market_calendar ON market_calendar.trade_date = b.trade_date
                 LEFT JOIN stocks s ON s.vt_symbol = b.vt_symbol
                 WHERE b.trade_date BETWEEN :warmup_start AND :end_date
             ),
@@ -71,16 +148,37 @@ def load_sentiment_points(session: Any, start: date, end: date) -> list[dict[str
                 FROM calc
                 WHERE change_calc IS NOT NULL
             ),
-            grouped AS (
+            continuity AS (
                 SELECT
                     *,
                     LAG(is_limit_up, 1, 0) OVER (
                         PARTITION BY vt_symbol ORDER BY trade_date
-                    ) AS previous_is_limit_up,
-                    SUM(CASE WHEN is_limit_up = 1 THEN 0 ELSE 1 END) OVER (
+                    ) AS previous_row_is_limit_up,
+                    LAG(market_trade_day_number) OVER (
+                        PARTITION BY vt_symbol ORDER BY trade_date
+                    ) AS previous_market_trade_day_number
+                FROM flags
+            ),
+            grouped AS (
+                SELECT
+                    *,
+                    CASE
+                        WHEN previous_market_trade_day_number = market_trade_day_number - 1
+                        THEN previous_row_is_limit_up
+                        ELSE 0
+                    END AS previous_is_limit_up,
+                    SUM(
+                        CASE
+                            WHEN is_limit_up = 1
+                                AND previous_row_is_limit_up = 1
+                                AND previous_market_trade_day_number = market_trade_day_number - 1
+                            THEN 0
+                            ELSE 1
+                        END
+                    ) OVER (
                         PARTITION BY vt_symbol ORDER BY trade_date ROWS UNBOUNDED PRECEDING
                     ) AS streak_group
-                FROM flags
+                FROM continuity
             ),
             streaks AS (
                 SELECT
@@ -98,9 +196,13 @@ def load_sentiment_points(session: Any, start: date, end: date) -> list[dict[str
             lagged AS (
                 SELECT
                     *,
-                    LAG(limit_up_streak, 1, 0) OVER (
-                        PARTITION BY vt_symbol ORDER BY trade_date
-                    ) AS previous_limit_up_streak
+                    CASE
+                        WHEN previous_market_trade_day_number = market_trade_day_number - 1
+                        THEN LAG(limit_up_streak, 1, 0) OVER (
+                            PARTITION BY vt_symbol ORDER BY trade_date
+                        )
+                        ELSE 0
+                    END AS previous_limit_up_streak
                 FROM streaks
             )
             SELECT
@@ -255,12 +357,13 @@ def _sentiment_score(
     failed_quality = 1 - min(max(failed_rate if failed_rate is not None else 0.25, 0.0), 1.0)
     risk_quality = 1 - min(limit_down_count / 50, 1.0)
     score = 100 * (
-        0.28 * up_ratio
-        + 0.22 * min(limit_up_count / 100, 1.0)
-        + 0.18 * min(max_streak / 7, 1.0)
-        + 0.14 * min(max(promotion_rate if promotion_rate is not None else 0.35, 0.0), 1.0)
-        + 0.10 * failed_quality
-        + 0.08 * risk_quality
+        SENTIMENT_SCORE_WEIGHTS["breadth"] * up_ratio
+        + SENTIMENT_SCORE_WEIGHTS["limit_up"] * min(limit_up_count / 100, 1.0)
+        + SENTIMENT_SCORE_WEIGHTS["max_streak"] * min(max_streak / 7, 1.0)
+        + SENTIMENT_SCORE_WEIGHTS["promotion"]
+        * min(max(promotion_rate if promotion_rate is not None else 0.35, 0.0), 1.0)
+        + SENTIMENT_SCORE_WEIGHTS["seal_quality"] * failed_quality
+        + SENTIMENT_SCORE_WEIGHTS["risk_quality"] * risk_quality
     )
     score -= min(limit_down_count / 80, 1.0) * 12
     if down_ratio is not None:
@@ -392,6 +495,16 @@ def _date_text(value: object) -> str | None:
         return value.isoformat()
     text_value = str(value or "").strip()
     return text_value[:10] if len(text_value) >= 10 else None
+
+
+def _date_value(value: object) -> date | None:
+    if isinstance(value, date):
+        return value
+    text_value = str(value or "")[:10]
+    try:
+        return date.fromisoformat(text_value)
+    except ValueError:
+        return None
 
 
 def _round4(value: float | None) -> float | None:

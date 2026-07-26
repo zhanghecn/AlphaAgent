@@ -26,7 +26,9 @@ Datafeed。vn.py Datafeed/Gateway 仍可作为后续正式数据和交易插件�
 （全量重刷或按 Top3 候选按需取 qfq 序列），分钟线同为不复权。
 
 可靠完整日必须满足至少 3000 个不同股票。共享库截止 `2026-07-24` 有 806 个可靠日，
-范围 `2023-03-28..2026-07-24`；当前 `limit-up-history-v15` 运行账本已重建为 806 日。
+范围 `2023-03-28..2026-07-24`；这是行情背景，不是正式推荐覆盖。当前
+`limit-up-core-ab-v1` 的真实事件从 `2025-06-27` 开始，闭合推荐覆盖
+`2025-07-10..2026-07-23`。
 板前最终冻结报告仍固定使用 802 日输入，不随运行库增长重选模型或阈值；规则说明的历史
 参考已明确标注为截至 `2026-07-24` 的 806 日候选代理。滚动绩效以回测接口为准，冻结
 板前模型、规则说明证据快照和当前回测指标不能混算。
@@ -94,16 +96,16 @@ TDX、Tushare 或 AkShare provider；不接受 CSV、服务器文件路径、缺
   `causal_no_action`、数据缺失 0。TDX `get_transaction_data()` 当日接口已实测可用，但
   当前 live 推荐未接入；返回时间只有分钟级，且没有委托、撤单、排队和 L2。
 - `sync_limit_up_exit_minutes` 是手动研究任务，合并两类旧 14:30 请求：
-  `limit-up-history-v15` 持久化候选池通过
+  历史持久化候选池通过
   `scheduled_execution.extract_scheduled_orders()` 派生的研究通道 D+1，以及
-  `limit-up-live-v15` 真实保存的全部 `actionable_recommendations`。实时推荐只有在本地
+  实时保存的全部 `actionable_recommendations`。实时推荐只有在本地
   日线已经出现下一交易日后才生成退出请求，不猜测周末或节假日。
 - 合并请求先排除已有精确 14:30 行，再从 TDX 请求 `14:30..14:30`；同股同日多个快照
   自动去重，正式推荐不受两仓 `portfolio` 限制。
 - 三者共享进程锁但重试作用域分开：事件路径为 `tdx`，3% 雷达为
   `tdx_radar_3pct`，候选卖出价为 `tdx_exit_1430`。下载返回行不等于覆盖；雷达必须
   二次核验 240 根，候选卖出价必须二次查到精确 14:30 行才记为 covered。
-- `limit-up-scheduled-v9` 正式账户不读取上述 14:30 研究价。它执行首板和二进三，
+- `limit-up-core-ab-v1` 正式账户不读取上述 14:30 研究价。它执行首板和二进三，
   直接读取 D+1 官方日线 `close_price`，缺少或非正数时剔除；当前正式回放覆盖
   `168/168`，不使用其他价格替代。
 
@@ -155,8 +157,8 @@ TDX、Tushare 或 AkShare provider；不接受 CSV、服务器文件路径、缺
 源没有盘中时间，因此公告当日不用于盘中决策。财报写入或旧同比失效后会清空同进程实时
 质量缓存，避免 15:05 初步计划的“财报缺失”延续到 19:00 最终计划。当前表共 90,930 条、
 覆盖 5,531 只股票；批量源 82,266 条，其中现金流质量 81,065 条、扣非利润 26,757 条，
-重复股票季度为 0。详细修复和回测影响见
-`memory/06_backtests/limit_up_financial_point_in_time_fix_20260724.md`。季度财报只在 19:00
+重复股票季度为 0。当前根因和回测影响见
+`memory/06_backtests/limit_up_financial_coverage_reverse_reasoning_20260726.md`。季度财报只在 19:00
 主批次运行，21:30 不重复请求；21:30 的历史重建吸收已落库结果。
 
 旧尾盘量化和盘后量化 schedule 会在 registry 对账时删除。
@@ -283,12 +285,10 @@ docker compose exec -T alphaagent-api \
   排名和 314 个 Top3，现已绑定目标日 `2026-07-17`。7 月 17 日自身的严格成员
   68,956 行、证券状态 3,191 只和修复后的 495 个官方概念指数已冻结第二个身份源日：
   3,471 行排名、307 行 Top3，等待下一完整交易日绑定。MA5 影子当前为 178 个候选、
-  0 个触发，`selected_mode=null`。证据见
-  `memory/06_backtests/low_suction_forward_top3_ledger_20260717.md` 和
-  `memory/06_backtests/low_suction_forward_ma5_shadow_20260718.md`。
+  0 个触发，`selected_mode=null`。旧逐日账本已随历史研究清理；数据库前向表是当前事实源。
 - 即时历史阶段研究只读复用 800 日股票/概念日线、历史事件 Rank1-3 代理和完整候选
-  5 分钟线，不读取或改写前向 Top3 账本。1,283 笔首次触价交易与 4,587 个承接触发的
-  结果见 `memory/06_backtests/low_suction_historical_phase_entry_study_20260717.md`。
+  5 分钟线，不读取或改写前向 Top3 账本。旧研究报告已归档在删除前 Git 历史，不再作为
+  当前入口。
 
 ## Low-suction Forward Paper Strategy
 
@@ -323,14 +323,6 @@ uv run pytest tests/alphaagent/services/low_suction/test_swing_strategy.py \
   tests/alphaagent/test_low_suction_api.py -q
 ```
 
-详细删除前覆盖基线：
-`memory/06_backtests/legacy_quant_removal_baseline_20260716.md`。
-
-当前宽窗口、D+1 官方收盘正式回放：
-`memory/06_backtests/limit_up_wide_window_next_close_two_to_three_20260717.md`。
-
-历史 v8 窄窗口对照：
-`memory/06_backtests/limit_up_two_window_next_close_two_to_three_20260717.md`。
-
-历史打板成员、D-1 和精确 14:30 无兜底影响：
-`memory/06_backtests/limit_up_no_fallback_impact_20260716.md`。
+当前打板合同、历史结果和研究证据统一从
+`memory/06_backtests/README.md` 进入。被提交 `f99d4afc` 删除的旧窗口、v8 和 14:30
+报告只在 Git 历史中保留，不再作为当前链接。

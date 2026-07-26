@@ -9,74 +9,96 @@ export function GuideDataset({
   guide: LimitUpStrategyGuide;
 }) {
   const { dataset, field_groups: groups, historical_reference: history } = guide;
-  const preboard = guide.preboard_decision;
+  const core = guide.core_quality;
+  const evidence = core.frozen_evidence;
+  const recent = core.recent_snapshot_check;
   return (
     <div>
       <section className="border-y bg-muted/20" aria-labelledby="evidence-scope-title">
         <h3 id="evidence-scope-title" className="sr-only">一套规则，两层证据</h3>
         <div className="grid sm:grid-cols-2">
           <div className="border-b px-3 py-3 sm:border-b-0 sm:border-r">
-            <div className="text-xs font-medium">当前规则验证</div>
+            <div className="text-xs font-medium">当前 A+B 冻结证据</div>
             <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-              {dataset.snapshot_count} 帧保存快照，按当时可见数据重放 v15。
+              {evidence.date_start} 至 {evidence.date_end}，{evidence.closed_count} 笔闭合独立交易。
             </p>
           </div>
           <div className="px-3 py-3">
-            <div className="text-xs font-medium">长期历史参考</div>
+            <div className="text-xs font-medium">旧合同只读审计</div>
             <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-              {history.trade_day_count} 个交易日的候选代理，不是另一套执行算法。
+              旧快照和旧财报修复母池只解释研究过程，不参与当前推荐或回退。
             </p>
           </div>
         </div>
       </section>
 
-      <section className="mt-5" aria-labelledby="preboard-contract-title">
-        <h3 id="preboard-contract-title" className="text-sm font-semibold">
-          板前概率观察与正式买点边界
+      <section className="mt-5" aria-labelledby="core-contract-title">
+        <h3 id="core-contract-title" className="text-sm font-semibold">
+          唯一正式核心质量门
         </h3>
         <p className="mt-1 text-xs leading-5 text-muted-foreground">
-          {preboard.quality_pool_rule}。3% 不是买点，涨幅、距离涨停、速度、加速度和资金增量只进入概率计算。
+          {core.contract_version}：基础质量门通过后，过去 {core.prior_limit_window_days} 个交易日涨停次数必须在
+          {core.minimum_prior_limit_count} 到 {core.maximum_prior_limit_count} 次之间。
         </p>
         <div className="mt-2 overflow-x-auto border-y">
-          <table className="w-full min-w-[760px] text-left text-xs">
+          <table className="w-full min-w-[680px] text-left text-xs">
             <thead className="bg-muted/40 text-muted-foreground">
               <tr>
-                <th className="px-3 py-2 font-medium">观察激活</th>
-                <th className="px-3 py-2 font-medium">动态输出</th>
-                <th className="px-3 py-2 font-medium">排序顺序</th>
-                <th className="px-3 py-2 font-medium">正式策略影响</th>
+                <th className="px-3 py-2 font-medium">层级</th>
+                <th className="px-3 py-2 font-medium">D-1 行业量能</th>
+                <th className="px-3 py-2 font-medium">正式动作</th>
+                <th className="px-3 py-2 font-medium">冻结结果</th>
               </tr>
             </thead>
             <tbody>
               <tr className="border-t">
+                <td className="px-3 py-2 align-top font-medium">A · 优先</td>
+                <td className="px-3 py-2 align-top tabular-nums">5 日量比 ≥ {core.a_tier_industry_turnover_ratio_5d.toFixed(1)}</td>
+                <td className="px-3 py-2 align-top">可交易</td>
                 <td className="px-3 py-2 align-top tabular-nums">
-                  高质量首板达到 {preboard.observation_min_change_pct}%
+                  {evidence.a_tier.win_count}/{evidence.a_tier.closed_count} · {formatPct(evidence.a_tier.win_rate_pct, 4)}
                 </td>
-                <td className="px-3 py-2 align-top">
-                  {preboard.probability_outputs.join("、")}
-                </td>
-                <td className="px-3 py-2 align-top">
-                  {preboard.ranking_order.join(" → ")}
-                </td>
-                <td className="px-3 py-2 align-top text-muted-foreground">
-                  {preboard.formal_baseline}
+              </tr>
+              <tr className="border-t">
+                <td className="px-3 py-2 align-top font-medium">B · 保留</td>
+                <td className="px-3 py-2 align-top">未扩张或不可用</td>
+                <td className="px-3 py-2 align-top">{core.b_tier_is_actionable ? "可交易" : "只观察"}</td>
+                <td className="px-3 py-2 align-top tabular-nums">
+                  {evidence.b_tier.win_count}/{evidence.b_tier.closed_count} · {formatPct(evidence.b_tier.win_rate_pct, 4)}
                 </td>
               </tr>
             </tbody>
           </table>
         </div>
         <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
-          {preboard.promotion_rule}。合同：{preboard.decision_version}
+          {core.priority_rule}。股票名、行业名和概念名都不写死。
+        </p>
+        <dl className="mt-4 grid grid-cols-2 border-y sm:grid-cols-4">
+          <DatasetMetric label="闭合交易" value={`${evidence.closed_count} 笔`} />
+          <DatasetMetric label="胜负" value={`${evidence.win_count} 胜 · ${evidence.closed_count - evidence.win_count} 负`} />
+          <DatasetMetric label="全量胜率" value={formatPct(evidence.win_rate_pct, 4)} positive />
+          <DatasetMetric label="平均净收益" value={formatSignedPct(evidence.average_net_return_pct, 4)} positive />
+        </dl>
+        <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-3 text-xs sm:grid-cols-4">
+          <Definition label="最大回撤" value={formatSignedPct(evidence.max_drawdown_pct, 4)} />
+          <Definition label="硬亏率" value={formatPct(evidence.hard_loss_rate_pct, 4)} />
+          <Definition label="起始" value={evidence.date_start} mono />
+          <Definition label="截止" value={evidence.date_end} mono />
+        </dl>
+        <p className="mt-3 border-l-2 border-amber-500 px-3 text-xs leading-5 text-muted-foreground">
+          历史候选代理通过，但还不是实盘等价证明。最近保存快照 {recent.date_start} 至 {recent.date_end}
+          共 {recent.closed_count} 笔闭合，{recent.win_count} 胜，胜率 {formatPct(recent.win_rate_pct, 2)}，
+          平均 {formatSignedPct(recent.average_net_return_pct, 4)}；尚未通过 60% 自然前向门。
         </p>
       </section>
 
-      <section aria-labelledby="dataset-title">
+      <section className="mt-5 border-t pt-4" aria-labelledby="dataset-title">
         <div className="mt-5 flex items-start gap-3">
           <Database className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
           <div className="min-w-0">
             <h3 id="dataset-title" className="text-sm font-semibold">{dataset.name}</h3>
             <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              把当时保存下来的行情画面，按当时的规则原样重新跑一遍，看这套规则在过去到底赚不赚钱——而不是另搞一套执行算法。
+              这是旧版本当时保存下来的行情画面，只用于核对研究过程；不代表当前 A+B 合同，也不会被系统自动采用。
             </p>
             <p className="mt-1 break-all font-mono text-[11px] text-muted-foreground">
               数据表 {dataset.table} · 区间 {dataset.date_start} 至 {dataset.date_end}
@@ -84,7 +106,7 @@ export function GuideDataset({
           </div>
         </div>
 
-        <dl className="mt-4 grid grid-cols-2 border-y sm:grid-cols-4">
+        <dl className="mt-4 grid grid-cols-2 border-y opacity-75 sm:grid-cols-4">
           <DatasetMetric label="保存的行情画面" value={`${dataset.snapshot_count} 帧`} />
           <DatasetMetric
             label="已闭合信号"
@@ -110,10 +132,6 @@ export function GuideDataset({
           <Definition
             label="全推荐闭合"
             value={`${history.closed_recommendation_count} 只 · ${formatPct(history.recommendation_win_rate_pct, 4)}`}
-          />
-          <Definition
-            label="两仓成交"
-            value={`${history.account_trade_count} 笔 · ${formatPct(history.account_win_rate_pct, 4)}`}
           />
         </dl>
         <p className="mt-3 text-xs leading-5 text-muted-foreground">用途：{history.purpose}。</p>
@@ -146,19 +164,6 @@ export function GuideDataset({
             </tbody>
           </table>
         </div>
-      </section>
-
-      <section className="mt-5" aria-labelledby="portfolio-result-title">
-        <h3 id="portfolio-result-title" className="text-sm font-semibold">两仓到达顺序回放</h3>
-        <dl className="mt-3 grid gap-x-6 gap-y-3 text-xs sm:grid-cols-2">
-          <Definition
-            label="成交"
-            value={`${dataset.portfolio_trade_count} 笔，${dataset.portfolio_win_count} 胜`}
-          />
-          <Definition label="账户收益" value={formatSignedPct(dataset.portfolio_return_pct, 4)} />
-          <Definition label="最大回撤" value={formatSignedPct(dataset.portfolio_max_drawdown_pct, 4)} />
-          <Definition label="闭合截止" value={dataset.closed_through} mono />
-        </dl>
       </section>
 
       <section className="mt-5" aria-labelledby="field-timing-title">
@@ -196,15 +201,9 @@ export function GuideDataset({
         <h3 id="execution-contract-title" className="text-sm font-semibold">怎么算买入价、卖出价和费用</h3>
         <dl className="mt-2 space-y-2">
           <div className="flex gap-2">
-            <dt className="shrink-0 font-medium text-foreground">板前 C 买入</dt>
+            <dt className="shrink-0 font-medium text-foreground">正式 A+B 买入</dt>
             <dd className="text-muted-foreground">
-              只认行动后第一条严格低于涨停价的新报价；一分钟历史代理使用下一分钟开盘价，等于涨停价或缺少报价都算未成交。
-            </dd>
-          </div>
-          <div className="flex gap-2">
-            <dt className="shrink-0 font-medium text-foreground">正式 v15 买入</dt>
-            <dd className="text-muted-foreground">
-              触板基线仍取信号后 20–60 秒内第一条保存报价，并加 0.1% 滑点且不超过涨停价；涨停价信号只表示可尝试排队，不保证成交。
+              使用正式触发时保存的价格代理，并加 0.1% 滑点且不超过涨停价；涨停价信号只表示可尝试排队，不保证成交。
             </dd>
           </div>
           <div className="flex gap-2">
@@ -221,7 +220,7 @@ export function GuideDataset({
           </div>
         </dl>
         <p className="mt-2 break-all font-mono text-[11px] text-muted-foreground">
-          详细回测报告：{dataset.report}
+          A+B 冻结研究报告：{evidence.report}
         </p>
         <ul className="mt-3 space-y-1 text-muted-foreground">
           {dataset.limitations.map((item) => <li key={item}>· {item}</li>)}

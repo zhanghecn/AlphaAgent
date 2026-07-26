@@ -15,8 +15,11 @@
 
 ### Formal contract
 
-- 唯一正式版本为 `limit-up-history-v15`、`limit-up-live-v15`、
-  `limit-up-scheduled-v9` 和 `limit-up-cash-v5`。
+- 唯一正式合同为 `limit-up-core-ab-v1`；历史、实时、调度和现金账本使用
+  同一公开版本。旧 `v15/v9/v5` 只作历史研究与审计证据，不参与当前准入、排序或回退。
+- 正式全量规则是 A+B：原正确财报、结构、lane、盘中支撑和同股盈利门通过后，
+  统一要求 `2 <= prior_limit_count_126 <= 6`。D-1 行业成交额相对前 5 日均值
+  `>=1.0` 为 A，其余为 B；A 优先，B 仍可交易。C 级不存在于正式合同。
 - 正式策略保留首板、二进三、两仓现金账户、正式费用和 D+1 官方日线收盘退出。
   竞价止盈、盘中最优退出和结果后选择卖点不属于正式合同。
 - `actionable_recommendations` 是不受两仓容量限制的正式触发列表；`portfolio` 才对应
@@ -24,12 +27,20 @@
 - 合格的 `near_limit/sealed/resealed` 可以形成正式涨停价排队买点；封板/回封不保证
   成交。板前研究触板后退出自己的观察表，不能清除正式扫板买点。
 
-### Current historical baseline
+### Formal historical and forward status
 
-- 财报点时修复后的 806 日账本有 243 个全量信号、239 笔闭合，胜率 `54.8117%`、
-  平均净收益 `+0.5687%`、复利 `+101.5433%`、最大回撤 `-30.6303%`。
-- 同期两仓账户有 127 笔闭合，胜率 `58.2677%`、复利 `+54.7953%`、最大回撤
-  `-20.6187%`。
+- 806 个交易日是行情背景；真实事件覆盖 `2025-06-27..2026-07-24`，正式闭合
+  推荐覆盖 `2025-07-10..2026-07-23`，不是因为日线只有这一年。
+- A+B 已按新合同重建：78 笔全量独立闭合交割，`56/78=71.7949%`，平均
+  净收益 `+2.2512%`，最大回撤 `-14.5416%`，硬亏 `7/78=8.9744%`。A 为
+  `35/41=85.3659%`，B 为 `21/37=56.7568%`；全量口径必须报 A+B，不能只报 A。
+- 78 笔分布在 50 个交易日，日均 1.56 笔、单日最多 5 笔；“笔”是一只股票的
+  一次独立买卖，同日可以有多笔，不是每日限一笔。
+- 最近旧保存快照的 A+B 反事实只有 `12/24=50%`、平均 `-0.2351%`，未达到
+  60% 门。当前状态固定为 `historical_pass_forward_not_passed`；历史 71.7949%
+  不是实盘胜率承诺，也不允许回退到旧财报覆盖逻辑。
+- 财报点时修复后的前一正式基线是 243 个全量信号、239 笔闭合，胜率
+  `54.8117%`、平均净收益 `+0.5687%`。它现在只用于解释 A+B 的增量，不再是当前合同。
 - 正式首板回测已核实为触板价口径：572 个质量合格候选全部按涨停价记账；正式双窗口
   内 545 个中 498 个首次触板触发、47 个窗口内回封触发。最终两仓 127 笔成交的原始价
   与账面成交价也全部等于涨停价。该结论只证明候选代理口径，不证明 Tick/L2 排队可成交。
@@ -63,14 +74,25 @@
 
 ### Dynamic leader research
 
-- `dynamic-concept-leader-shadow-v1` 只在正式质量链候选上保存题材、题材内龙位、市场
-  转化、资金承载和概率分量；执行效果固定为 `none_research_only`。
-- 当前题材 Top5 只是采集/展示层，不是通用龙头算法。七月已经确认情绪高度、资金主线和
-  板块传播会错位：恒尚节能是独立空间龙，哈药股份的医药扩散晚于个股启动，立新能源
-  经历电力点火、资金脱钩和回流。
-- 下一研究必须分别计算个股连板路径、市场龙头任期和题材传播周期，并覆盖首板点火、连续
-  二进三、短周期反包三板、空间妖股、容量中军、龙二龙三、补涨和普通跟风。
-- 执行计划：`requirements/alphaagent_limit_up_leader_cycle_factor_research_plan.md`。
+- 3-7 月研究已经归档。固定从 `memory/06_backtests/README.md` 恢复结论，不再从聊天记录
+  或旧候选 JSON 恢复状态。
+- 100 个交易日共切出 22 个市场周期和 1,668 个动态概念周期；个股连板、市场空间龙、
+  概念资金龙和波段趋势/容量龙使用不同点时时钟，不设半导体、医药、电力等静态白名单。
+- 龙头映射包含 449 个确认事件和 986 条唯一龙二龙三边。映射后 1 日上涨率为
+  `52.8147%`，非分歧 `55.0318%`、分歧 `43.7500%`；龙头/龙二龙三身份单独不是稳定
+  `>=60%` 硬门，分歧只保留为风险解释。
+- 静态概念成交额前 20% 的独立历史为 `16/29=55.1724%`，状态固定为
+  `historical_proxy_rejected`。动态低位跟随和早期扩散交叉样本小且没有新的独立历史，
+  只保留研究证据，不修改 A+B 准入、排序或下单链。
+- 可重启动态波段已经识别金安国纪、亨通光电、东山精密、德明利和深科技的趋势/容量
+  领导力；多概念重复归属和 3-6 月成员幸存者偏差仍未解决，月度占席榜不能作为唯一
+  情绪龙结论。
+- 财报旧高胜率来自按当前成交额/市值优先同步形成的资金关注粘性白名单，不是错误财务
+  字段本身。正确同比仍有正边际，不恢复“本地财报缺失即拒绝”。
+- 最终只保留 A+B：`56/78=71.7949%`。A+B+C 新增 C 级只有
+  `24/43=55.8140%` 且 2025 分段低于 60%，已否决；动态概念因素不能绕过核心质量门。
+- 历史退出固定为涨停价入场、D+1 官方收盘和正式费用。自然前向状态仍为
+  `historical_pass_forward_not_passed`，现有历史不能再次承担晋级验证。
 
 ### How to verify
 
@@ -88,25 +110,32 @@ git diff --check
 
 ### Evidence
 
-- 板前合同：`requirements/alphaagent_limit_up_preboard_decision.md`。
-- 板前冻结：`memory/06_backtests/limit_up_preboard_decision_validation_20260723.md`。
-- 最近实时时序：`memory/06_backtests/limit_up_live_vs_backtest_entry_audit_20260723.md`。
-- 实时发布修复：`memory/06_backtests/limit_up_preboard_live_publication_fix_20260724.md`。
-- 财报修复：`memory/06_backtests/limit_up_financial_point_in_time_fix_20260724.md`。
-- 旧 70% 审计：`memory/06_backtests/limit_up_legacy_70pct_liquidity_audit_20260724.md`。
-- 动态龙头因子：`memory/06_backtests/limit_up_dynamic_leader_style_factor_20260724.md`。
-- 七月周期：`memory/06_backtests/limit_up_emotion_leader_cycle_july_20260725.md`。
 - 正式入场价格：`memory/06_backtests/limit_up_formal_entry_price_audit_20260725.md`。
+- 3-7 月日级龙头周期：`memory/06_backtests/limit_up_leader_cycle_2026_03_07.md`。
+- 七月严格分钟传播：`memory/06_backtests/limit_up_leader_propagation_intraday_202607.md`。
+- 日级资金主线周期：`memory/06_backtests/limit_up_capital_mainline_cycle_2026_03_07.md`。
+- 日级资金消融：`memory/06_backtests/limit_up_capital_mainline_fund_ablation.md`。
+- 正式候选反事实：`memory/06_backtests/limit_up_capital_mainline_candidate_counterfactual.md`。
+- 龙头映射与因子发现：
+  `memory/06_backtests/limit_up_leader_follower_factor_formal_discovery_2026_03_07.md`。
+- 龙头映射冻结因子历史验证：
+  `memory/06_backtests/limit_up_leader_follower_factor_806d_validation.md`。
+- 可重启动态波段龙头与正式候选交叉：
+  `memory/06_backtests/limit_up_dynamic_wave_leader_discovery_2026_03_07.md`。
+- 财报覆盖质量重建、风险指标和 41 笔逐票账本：
+  `memory/06_backtests/limit_up_quality_reconstruction_20260726.md`。
+- A+B 正式方案：`memory/06_backtests/limit_up_final_trading_scheme_20260726.md`。
+- A+B 重建、交割和近期快照复核：
+  `memory/06_backtests/limit_up_core_ab_formal_validation_20260726.md`。
 
 ### Open risks and next work
 
-- 当前情绪 SQL 未检查股票行之间是否隔着市场交易日，且情绪分重复计算了一次最高板权重；
-  龙头周期计划的 Task 1 必须先修正。
 - 2026 年 3-6 月有完整日线但没有历史点时题材成员和盘中板块资金，只能做日级轮换；
-  严格分钟传播当前主要覆盖 7 月 20-24 日。
-- 3-7 月已经被查看，只能作为发现/对抗复用样本。生产晋级仍需更早 walk-forward 和至少
-  60 个完整新前向交易日、30 个闭合 Top5 信号。
-- 龙头因子只能提高正式质量池内的用户优先级，未通过消融和前向门前不得绕过正式质量门。
+  7 月 15-24 日也没有事件同时满足成员、分钟路径和匹配市场对照门。
+- 3-7 月已经被查看，只能作为龙头映射因子发现/反例样本，不能承担最终晋级结论。
+- `limit-up-core-ab-v1` 的自然前向账本必须从新合同实际保存快照起算；最近
+  24 笔旧快照反事实只是风险证据，不是自然前向样本。累计至少 60 个新交易日、
+  30 笔闭合全量买点和两个情绪阶段后，再按胜率 `>=60%`、均值为正、回撤和硬亏判定。
 
 ## Low-suction Current State
 

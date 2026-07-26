@@ -25,9 +25,9 @@ def test_history_replay_schema_uses_date_and_version_primary_key() -> None:
     assert {"payload", "coverage", "source_mode"}.issubset(table.c.keys())
 
 
-def test_weak_market_attack_history_uses_v14_version() -> None:
-    assert history_engine.HISTORY_STRATEGY_VERSION == "limit-up-history-v15"
-    assert versions.LIVE_STRATEGY_VERSION == "limit-up-live-v15"
+def test_formal_history_and_live_share_the_core_ab_contract() -> None:
+    assert history_engine.HISTORY_STRATEGY_VERSION == "limit-up-core-ab-v1"
+    assert versions.LIVE_STRATEGY_VERSION == "limit-up-core-ab-v1"
 
 
 def test_scheduled_backtest_cache_key_changes_after_external_ledger_rebuild(

@@ -28,20 +28,13 @@ def test_limit_pool_state_is_always_formal() -> None:
 
 
 def test_production_version_and_threshold_are_one_atomic_contract() -> None:
-    assert PRODUCTION_RADAR_CONTRACT == "formal_5pct"
+    assert PRODUCTION_RADAR_CONTRACT == "core_ab_formal_5pct"
     assert (
         resolve_production_radar_contract(
-            live_version="limit-up-live-v15",
+            live_version="limit-up-core-ab-v1",
             formal_min_change_pct=5.0,
         )
-        == "formal_5pct"
-    )
-    assert (
-        resolve_production_radar_contract(
-            live_version="limit-up-live-v16",
-            formal_min_change_pct=3.0,
-        )
-        == "early_3pct_same_rules"
+        == "core_ab_formal_5pct"
     )
 
 
@@ -49,7 +42,8 @@ def test_production_version_and_threshold_are_one_atomic_contract() -> None:
     ("live_version", "formal_min_change_pct"),
     [
         ("limit-up-live-v15", 3.0),
-        ("limit-up-live-v16", 5.0),
+        ("limit-up-live-v15", 5.0),
+        ("limit-up-core-ab-v1", 3.0),
     ],
 )
 def test_partial_production_activation_fails_closed(

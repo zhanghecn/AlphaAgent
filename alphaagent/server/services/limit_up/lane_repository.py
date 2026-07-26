@@ -27,6 +27,8 @@ MINUTE_PATH_MIN_POINTS = 6
 def load_lane_research_data(
     start: date,
     end: date,
+    *,
+    include_financials: bool = True,
 ) -> tuple[EventIndex, FinancialIndex, dict[str, object]]:
     """Load rich limit events and reports available inside a replay window."""
 
@@ -47,12 +49,16 @@ def load_lane_research_data(
                 )
             ).mappings()
         ]
-        report_rows = [
-            _plain_row(row)
-            for row in session.execute(
-                select(schema.stock_financial_reports)
-            ).mappings()
-        ]
+        report_rows = (
+            [
+                _plain_row(row)
+                for row in session.execute(
+                    select(schema.stock_financial_reports)
+                ).mappings()
+            ]
+            if include_financials
+            else []
+        )
 
     events = merge_rich_event_rows(event_rows)
     missing_path_pairs = [

@@ -10,7 +10,7 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 def test_additive_concept_execution_contract_is_frozen() -> None:
-    assert scheduled_execution.SCHEDULED_EXECUTION_VERSION == "limit-up-scheduled-v9"
+    assert scheduled_execution.SCHEDULED_EXECUTION_VERSION == "limit-up-core-ab-v1"
     assert scheduled_execution.EXIT_MODE == "next_close"
     assert scheduled_execution.RULE_FREEZE_DATE == date(2026, 7, 15)
 
@@ -297,6 +297,16 @@ def test_extract_scheduled_orders_uses_complete_pool_not_end_of_day_selected() -
 
     assert [row["vt_symbol"] for row in orders] == ["600001.SSE"]
     assert orders[0]["candidate_source"] == "complete_first_board_candidate_pool"
+
+
+def test_extract_scheduled_orders_never_reads_preboard_observations() -> None:
+    preboard = _candidate("600999.SSE", "10:05:00")
+    day = _history_day(candidate_pool=[])
+    day["preboard_candidates"] = [preboard]
+
+    orders = scheduled_execution.extract_scheduled_orders([day])
+
+    assert orders == []
 
 
 def test_default_product_orders_include_first_board_and_two_to_three() -> None:

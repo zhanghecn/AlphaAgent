@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from hashlib import sha1
+from itertools import combinations
 from math import log1p
 
 MIN_SHARED_STOCKS = 5
@@ -56,13 +57,22 @@ def group_concepts(
 
     sector_ids = sorted(members_by_sector)
     parents = {sector_id: sector_id for sector_id in sector_ids}
-    for index, left_id in enumerate(sector_ids):
-        for right_id in sector_ids[index + 1 :]:
-            if _concepts_overlap(
-                members_by_sector[left_id],
-                members_by_sector[right_id],
-            ):
-                _union(parents, left_id, right_id)
+    sectors_by_symbol: dict[str, list[str]] = defaultdict(list)
+    for sector_id, symbols in members_by_sector.items():
+        for symbol in symbols:
+            sectors_by_symbol[symbol].append(sector_id)
+    shared_counts: dict[tuple[str, str], int] = defaultdict(int)
+    for related_sector_ids in sectors_by_symbol.values():
+        for pair in combinations(sorted(related_sector_ids), 2):
+            shared_counts[pair] += 1
+    for (left_id, right_id), shared_count in sorted(shared_counts.items()):
+        if shared_count < MIN_SHARED_STOCKS:
+            continue
+        if _concepts_overlap(
+            members_by_sector[left_id],
+            members_by_sector[right_id],
+        ):
+            _union(parents, left_id, right_id)
 
     components: dict[str, list[str]] = defaultdict(list)
     for sector_id in sector_ids:

@@ -30,7 +30,7 @@ export function GuideView({
   if (error && !guide) return <GuideError message={error} onRetry={onRetry} />;
   if (!guide) return null;
 
-  const { strategy, ranking } = guide;
+  const { strategy, ranking, core_quality: core } = guide;
 
   return (
     <section aria-label="打板规则说明" className="px-3 py-4 sm:px-4">
@@ -38,10 +38,12 @@ export function GuideView({
       <section className="rounded-lg border bg-card px-4 py-4 sm:px-5">
         <h2 className="text-base font-semibold">这是一个什么策略</h2>
         <p className="mt-2 text-sm leading-6 text-foreground">
-          在交易日的<strong className="font-semibold">{strategy.entry_windows.join("、")}</strong>
-          两个时段里，买入即将涨停或刚涨停的强势股，第二个交易日（简称 D+1）尾盘按官方收盘价卖出。
-          赚的是「涨停的惯性」和「次日的高开溢价」。实时全量买点列表不限制数量；
-          两仓资金组合最多同时持有 {strategy.max_positions} 只，每只大约用一半资金，按信号到达的先后顺序成交。
+          唯一正式合同是 <strong className="font-semibold">{core.contract_version}</strong>。
+          它先检查正确财报点时、原低位结构、盘中支撑、板位质量和同股盈利门，再要求过去
+          {core.prior_limit_window_days} 个交易日涨停 {core.minimum_prior_limit_count} 到
+          {core.maximum_prior_limit_count} 次。在
+          <strong className="font-semibold">{strategy.entry_windows.join("、")}</strong>
+          形成正式买点，D+1 按官方收盘价退出。实时列表展示全部合格信号，同一交易日可以有多笔。
         </p>
         <div className="mt-3 flex items-start gap-2 rounded-md border border-rise/40 bg-rise/5 px-3 py-2">
           <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-rise" />
@@ -76,7 +78,7 @@ export function GuideView({
           <NoLookaheadCard
             icon={<Eye className="h-4 w-4" />}
             title="每个点时单独冻结"
-            desc="板前模型每次只用该时刻已经完成的分钟和逐笔前缀，后续触板、封板及次日结果只在特征冻结后连接。"
+            desc="每次决策只用该时刻已经披露的财报、已完成日线和盘中证据，后续封板及次日结果只在特征冻结后连接。"
           />
           <NoLookaheadCard
             icon={<History className="h-4 w-4" />}
@@ -148,27 +150,28 @@ export function GuideView({
         <div>
           <h3 className="text-sm font-medium">关于成交的诚实说明</h3>
           <p className="mt-1 text-sm leading-6 text-muted-foreground">
-            板前回放只认行动后的第一条严格低于涨停价的新报价；下一报价已经涨停就算未成交。
-            正式扫板缺少涨停价排队明细，仍只能标为可尝试排队，不能解释为一定成交。
+            历史买入价是正式触发时保存的价格代理，并按统一规则计入滑点与费用。
+            由于缺少真实涨停价排队明细，只能标为可尝试排队，不能解释为一定成交。
           </p>
         </div>
       </section>
 
-      {/* 排序说明 */}
+      {/* A/B 排序说明 */}
       <section className="mt-6 rounded-lg border bg-card px-4 py-4" aria-labelledby="ranking-title">
-        <h3 id="ranking-title" className="text-sm font-semibold">板前候选怎么排先后</h3>
+        <h3 id="ranking-title" className="text-sm font-semibold">A+B 怎么排先后</h3>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">
-          先按同股 D+1 预期净收益和胜率保证次日溢价质量，再看 3 分钟触板、最终触板、封板率和承接分。
-          当前涨幅只参与动态概率，不是固定买点，也不是第一排序键。二进三继续使用原排序。
+          D-1 所属行业成交额不低于此前 5 日基准的是 A，未扩张或数据不可用的是 B。
+          A 优先，B 仍然可交易；行业量能不会把 B 从核心规则中剔除。同级内沿用原首板或二进三排序。
         </p>
         <dl className="mt-3 grid gap-x-6 gap-y-3 text-xs sm:grid-cols-2">
-          <Definition label="第一顺位" value={ranking.first_board_primary} />
-          <Definition label="第二顺位" value={ranking.first_board_secondary} />
-          <Definition label="同股基因怎么算" value={ranking.historical_win_rate_formula} />
-          <Definition label="历史样本截止" value="只用信号日之前已收盘出结果的历史记录" />
+          <Definition label="第一顺位" value="A · 行业成交额正在扩张" />
+          <Definition label="第二顺位" value="B · 行业未扩张或数据不可用" />
+          <Definition label="首板基础盈利门" value={ranking.portfolio_gate} />
+          <Definition label="历史样本截止" value="只用信号日之前已闭合的历史记录" />
         </dl>
         <p className="mt-3 border-l-2 pl-3 text-xs leading-5 text-muted-foreground">
-          当前板前排序为研究观察，不生成正式买点。{ranking.portfolio_gate}。
+          A+B 都进入全量正式买点；质量统计不受账户仓位限制。3% 板前观察和触板概率目前只是研究，
+          不会生成正式买点。
         </p>
       </section>
 
