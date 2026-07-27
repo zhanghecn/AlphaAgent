@@ -939,6 +939,7 @@ def get_scheduled_history_backtest(
     cache_key = (
         f"{history_engine.HISTORY_STRATEGY_VERSION}:"
         f"{_history_cache_revision()}:"
+        f"{core_quality.PUBLIC_QUALITY_CONTRACT_VERSION}:"
         f"{scheduled_execution.SCHEDULED_EXECUTION_VERSION}:"
         f"{start}:{end}:{cash_backtest.ACCOUNT_EXECUTION_VERSION}"
     )
@@ -2655,6 +2656,21 @@ def _compact_account_trade(trade: Mapping[str, object]) -> dict[str, object]:
         "prior_limit_count_126",
         "prior_industry_turnover_ratio_5d",
         "quality_priority_tier",
+        "public_quality_contract_version",
+        "public_quality_status",
+        "public_quality_gate_passed",
+        "public_quality_actionable",
+        "public_quality_reason",
+        "quality_tier_prior_win_probability",
+        "quality_tier_prior_expected_d1_net_return_pct",
+        "quality_tier_prior_sample_count",
+        "quality_estimate_prior_strength",
+        "quality_estimate_stock_sample_count",
+        "quality_win_probability",
+        "quality_expected_d1_net_return_pct",
+        "stock_d1_sample_count",
+        "stock_d1_win_rate",
+        "stock_d1_average_return_pct",
         "profitability_gate_passed",
         "profitability_gate_reason",
         "recognition_gate_passed",

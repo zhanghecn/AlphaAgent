@@ -50,6 +50,79 @@ def test_model_uses_quality_pool_cross_section_not_fake_market_fields() -> None:
     assert "same_minute_rank" not in features.MODEL_FEATURE_NAMES
 
 
+def test_model_includes_causal_market_industry_and_recognition_context() -> None:
+    expected = {
+        "prior_limit_count_126",
+        "prior_industry_turnover_ratio_5d",
+        "prior_industry_heat_rank",
+        "prior_industry_sealed_count",
+        "prior_market_failed_rate",
+        "prior_market_max_board",
+        "prior_market_first_board_count",
+        "prior_market_one_to_two_rate",
+        "prior_market_two_to_three_rate",
+    }
+
+    assert expected.issubset(features.MODEL_FEATURE_NAMES)
+    assert {
+        "prior_market_phase_broad_rise",
+        "prior_market_phase_repair",
+        "prior_market_phase_mixed",
+        "prior_market_phase_retreat",
+    }.issubset(features.MODEL_FEATURE_NAMES)
+
+
+def test_static_context_uses_candidate_values_and_explicit_missingness() -> None:
+    historical, _live = _equivalent_observations()
+    candidate = historical["candidate"]
+    candidate.update(
+        prior_market_phase="mixed",
+        prior_limit_count_126=4,
+        prior_market_failed_rate=27.5,
+        prior_market_max_board=5,
+        prior_industry_turnover_ratio_5d=1.34,
+        prior_industry_heat_rank=None,
+    )
+
+    projected = features.project_historical_decision_features(historical)
+    values = projected["feature_values"]
+
+    assert values["prior_limit_count_126"] == 4.0
+    assert values["prior_market_failed_rate"] == 27.5
+    assert values["prior_market_max_board"] == 5.0
+    assert values["prior_industry_turnover_ratio_5d"] == 1.34
+    assert values["prior_industry_heat_rank"] is None
+    assert values["prior_industry_heat_rank_missing"] == 1.0
+    assert values["prior_market_phase_mixed"] == 1.0
+    assert values["prior_market_phase_broad_rise"] == 0.0
+
+
+def test_same_industry_diffusion_is_shared_by_historical_and_live() -> None:
+    historical, live = _equivalent_observations()
+    historical["candidate"]["industry_id"] = "801080"
+    for observation, field in (
+        (historical, "cross_section_snapshots"),
+        (live, "quality_pool_snapshots"),
+    ):
+        for snapshot in observation[field]:
+            for candidate in snapshot["candidates"]:
+                candidate["industry_id"] = "801080"
+                if candidate["vt_symbol"] == "600002.SSE":
+                    candidate["change_pct"] = 5.5
+
+    historical_row = features.project_historical_decision_features(historical)
+    live_row = features.project_live_decision_features(live)
+    values = historical_row["feature_values"]
+
+    assert historical_row["feature_values"] == live_row["feature_values"]
+    assert values["same_industry_candidate_count_3pct"] == 2.0
+    assert values["same_industry_candidate_count_5pct"] == 2.0
+    assert values["same_industry_candidate_count_7pct"] == 1.0
+    assert values["same_industry_candidate_count_9pct"] == 0.0
+    assert values["same_industry_candidate_rank"] == 1.0
+    assert values["same_industry_leader_gap_pct"] == 0.0
+
+
 def test_live_projection_uses_only_completed_capture_minutes() -> None:
     historical, live = _equivalent_observations()
     decision_at = historical["decision_at"]
@@ -84,6 +157,12 @@ def test_historical_and_live_inputs_share_model_and_policy_outcome() -> None:
         "last_price": last_price,
         "limit_price": historical["limit_price"],
         "quality_gate_passed": True,
+        "public_quality_contract_version": "limit-up-core-abc-v2",
+        "public_quality_status": "qualified_waiting_trigger",
+        "public_quality_preparation_passed": True,
+        "quality_priority_tier": "A_industry_expanding",
+        "quality_expected_d1_net_return_pct": 1.8,
+        "quality_win_probability": 0.70,
         "preparation_environment_passed": True,
         "execution_environment_passed": True,
         "entry_window_passed": True,

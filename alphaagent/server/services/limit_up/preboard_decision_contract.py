@@ -8,7 +8,9 @@ from datetime import date, datetime
 from enum import StrEnum
 from math import isfinite
 
-PREBOARD_DECISION_VERSION = "limit-up-preboard-decision-v1"
+from alphaagent.server.services.limit_up import core_quality
+
+PREBOARD_DECISION_VERSION = "limit-up-preboard-decision-v2"
 PREBOARD_DIAGNOSTIC_EXECUTION_CHECK_CODES = frozenset(
     {
         "sector_route",
@@ -178,7 +180,7 @@ def is_observable_first_board(row: Mapping[str, object]) -> bool:
     change_pct = _number(row.get("change_pct"))
     return bool(
         str(row.get("board_lane") or "") == "first_board"
-        and row.get("quality_gate_passed") is True
+        and core_quality.is_public_quality_prepared(row)
         and change_pct is not None
         and change_pct >= 3.0
     )

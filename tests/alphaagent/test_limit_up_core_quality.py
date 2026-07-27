@@ -1,7 +1,11 @@
+import pytest
+
 from alphaagent.server.services.limit_up.core_quality import (
     CORE_QUALITY_CONTRACT_VERSION,
+    PUBLIC_QUALITY_CONTRACT_VERSION,
     core_quality_gate,
     filter_core_quality_qualified_orders,
+    public_quality_gate,
     recognition_quality_gate,
     quality_tier_priority,
 )
@@ -93,6 +97,77 @@ def test_core_gate_applies_recognition_to_two_to_three_without_profitability() -
     assert accepted["core_quality_gate_passed"] is True
 
 
+def test_public_quality_uses_abc_prior_and_point_in_time_stock_shrinkage() -> None:
+    decision = public_quality_gate(
+        _timed(
+            {
+                "lane": "first_board",
+                "prior_limit_count_126": 3,
+                "prior_industry_turnover_ratio_5d": 1.1,
+                "stock_d1_sample_count": 5,
+                "stock_d1_win_rate": 80.0,
+                "stock_d1_average_return_pct": 2.0,
+                "stock_gene_combined_win_rate": 40.0,
+            }
+        ),
+    )
+
+    assert decision["public_quality_contract_version"] == PUBLIC_QUALITY_CONTRACT_VERSION
+    assert decision["quality_priority_tier"] == "A_industry_expanding"
+    assert decision["quality_tier_prior_sample_count"] == 41
+    assert decision["quality_estimate_stock_sample_count"] == 5
+    assert decision["quality_win_probability"] == pytest.approx(
+        ((35 / 41) * 10 + 0.8 * 5) / 15
+    )
+    assert decision["quality_expected_d1_net_return_pct"] == pytest.approx(
+        (3.0876 * 10 + 2.0 * 5) / 15
+    )
+    assert decision["public_quality_gate_passed"] is True
+    assert decision["public_quality_status"] == "qualified_waiting_trigger"
+    assert decision["public_quality_actionable"] is False
+
+
+def test_public_quality_becomes_actionable_only_after_real_trigger() -> None:
+    candidate = _timed(
+        {
+            "lane": "two_to_three",
+            "prior_limit_count_126": 4,
+        }
+    )
+
+    waiting = public_quality_gate(candidate, trigger_observed=False)
+    actionable = public_quality_gate(candidate, trigger_observed=True)
+
+    assert waiting["public_quality_status"] == "qualified_waiting_trigger"
+    assert waiting["public_quality_actionable"] is False
+    assert actionable["public_quality_status"] == "actionable"
+    assert actionable["public_quality_actionable"] is True
+    assert actionable["quality_win_probability"] == pytest.approx(0.60)
+    assert actionable["quality_expected_d1_net_return_pct"] == pytest.approx(1.2895)
+
+
+def test_public_quality_rejects_stock_shrinkage_below_quality_floor() -> None:
+    decision = public_quality_gate(
+        _timed(
+            {
+                "lane": "first_board",
+                "prior_limit_count_126": 4,
+                "stock_d1_sample_count": 10,
+                "stock_d1_win_rate": 20.0,
+                "stock_d1_average_return_pct": 1.0,
+                "stock_gene_combined_win_rate": 40.0,
+            }
+        ),
+        trigger_observed=False,
+    )
+
+    assert decision["core_quality_gate_passed"] is True
+    assert decision["quality_win_probability"] == pytest.approx(0.40)
+    assert decision["public_quality_gate_passed"] is False
+    assert decision["public_quality_status"] == "rejected"
+    assert decision["public_quality_reason"] == "quality_win_probability_below_50pct"
+
+
 def test_filter_reports_the_single_core_contract() -> None:
     selected, audit = filter_core_quality_qualified_orders(
         [
@@ -111,7 +186,7 @@ def test_filter_reports_the_single_core_contract() -> None:
 
     assert [row["vt_symbol"] for row in selected] == ["600001.SSE"]
     assert selected[0]["quality_priority_tier"] == "B_recognition_only"
-    assert audit["contract_version"] == CORE_QUALITY_CONTRACT_VERSION
+    assert audit["contract_version"] == PUBLIC_QUALITY_CONTRACT_VERSION
     assert audit["input_count"] == 2
     assert audit["selected_count"] == 1
     assert audit["reason_counts"] == {

@@ -478,10 +478,11 @@ def test_live_portfolio_prefers_same_frame_relay_then_first_board() -> None:
             "action": action,
             "research_action": action,
             "leadership_score": 80.0,
-            "state": "near_limit",
+            "state": "sealed",
+            "first_limit_time": "10:05:00",
             "change_pct": 8.0,
             "prior_limit_count_126": 3,
-            "last_price": 9.8,
+            "last_price": 10.0,
             "limit_price": 10.0,
             "historical_evidence": {
                 "tbox_score": tbox,
@@ -625,11 +626,7 @@ def test_live_portfolio_keeps_formal_selection_and_touched_board() -> None:
         snapshot_age_seconds=5,
     )
 
-    assert [row["vt_symbol"] for row in actionable] == [
-        "603061.SSE",
-        "600330.SSE",
-        "002409.SZSE",
-    ]
+    assert [row["vt_symbol"] for row in actionable] == ["603061.SSE"]
     assert [row["vt_symbol"] for row in portfolio] == ["603061.SSE"]
     assert actionable[0]["state"] == "sealed"
 
@@ -669,9 +666,10 @@ def test_live_actionable_recommendations_are_unbounded_but_keep_profitability_ga
                     "portfolio_selected": False,
                     "action": "buy_now",
                     "entry_kind": "sweep",
-                    "state": "near_limit",
+                    "state": "sealed",
+                    "first_limit_time": "10:20:00",
                     "prior_limit_count_126": 3,
-                    "last_price": 9.8,
+                    "last_price": 10.0,
                     "limit_price": 10.0,
                 },
             ],
@@ -697,10 +695,11 @@ def test_live_actionable_prioritizes_a_without_rejecting_b() -> None:
             "board_lane": "two_to_three",
             "action": "buy_now",
             "entry_kind": "sweep",
-            "state": "near_limit",
+            "state": "sealed",
+            "first_limit_time": "10:20:00",
             "prior_limit_count_126": 3,
             "prior_industry_turnover_ratio_5d": industry_ratio,
-            "last_price": 9.8,
+            "last_price": 10.0,
             "limit_price": 10.0,
         }
 
@@ -724,6 +723,36 @@ def test_live_actionable_prioritizes_a_without_rejecting_b() -> None:
         "A_industry_expanding",
         "B_recognition_only",
     ]
+
+
+def test_real_touch_quality_action_does_not_depend_on_preboard_probability() -> None:
+    signal = {
+        "vt_symbol": "600001.SSE",
+        "board_lane": "two_to_three",
+        "action": "buy_now",
+        "entry_kind": "sweep",
+        "state": "sealed",
+        "first_limit_time": "10:20:00",
+        "prior_limit_count_126": 4,
+        "last_price": 10.0,
+        "limit_price": 10.0,
+        "probability_status": "model_unavailable",
+        "touch_probability_3m": None,
+        "eventual_touch_probability": None,
+    }
+
+    gated = live_service._apply_core_quality_gate(
+        {"lanes": {"now": [signal], "tail": [], "next_auction": []}}
+    )
+    actionable = live_service._build_live_actionable_recommendations(
+        gated,
+        captured_at=datetime(2026, 7, 21, 10, 20, tzinfo=SHANGHAI),
+        snapshot_age_seconds=5,
+    )
+
+    assert gated["lanes"]["now"][0]["public_quality_actionable"] is True
+    assert [row["vt_symbol"] for row in actionable] == ["600001.SSE"]
+    assert actionable[0]["probability_status"] == "model_unavailable"
 
 
 def test_live_core_orders_c_before_later_b_reseal() -> None:
@@ -766,24 +795,36 @@ def test_live_core_orders_c_before_later_b_reseal() -> None:
     assert by_symbol["600001.SSE"]["quality_entry_effective_time"] == "10:35:00"
 
 
-def test_live_actionable_rejects_a_stock_above_six_prior_limits() -> None:
+def test_real_touch_high_probability_cannot_bypass_public_quality_failure() -> None:
     signal = {
         "vt_symbol": "600001.SSE",
         "board_lane": "two_to_three",
         "action": "buy_now",
         "entry_kind": "sweep",
-        "state": "near_limit",
+        "state": "sealed",
+        "first_limit_time": "10:20:00",
         "prior_limit_count_126": 7,
-        "last_price": 9.8,
+        "last_price": 10.0,
         "limit_price": 10.0,
+        "probability_status": "ready",
+        "touch_probability_3m": 0.99,
+        "eventual_touch_probability": 0.99,
     }
 
+    gated = live_service._apply_core_quality_gate(
+        {"lanes": {"now": [signal], "tail": [], "next_auction": []}}
+    )
     actionable = live_service._build_live_actionable_recommendations(
-        {"lanes": {"now": [signal], "tail": [], "next_auction": []}},
+        gated,
         captured_at=datetime(2026, 7, 21, 10, 20, tzinfo=SHANGHAI),
         snapshot_age_seconds=5,
     )
 
+    rejected = gated["lanes"]["now"][0]
+    assert rejected["public_quality_trigger_observed"] is True
+    assert rejected["public_quality_actionable"] is False
+    assert rejected["public_quality_reason"] == "prior_limit_count_126_above_6"
+    assert rejected["action"] == "pass"
     assert actionable == []
 
 
@@ -797,7 +838,8 @@ def test_live_portfolio_does_not_accept_probability_without_formal_selection() -
                     "action": "buy_now",
                     "entry_kind": "momentum",
                     "signal_state": "trigger_ready",
-                    "state": "near_limit",
+                    "state": "sealed",
+                    "first_limit_time": "10:20:00",
                     "portfolio_selected": False,
                     "change_pct": 9.2,
                     "last_price": 10.8,
@@ -831,11 +873,12 @@ def test_live_portfolio_is_empty_outside_entry_window_or_when_snapshot_is_old() 
                     "action": "buy_now",
                     "research_action": "buy_now",
                     "reason": "研究买点成立",
-                    "state": "near_limit",
+                    "state": "sealed",
+                    "first_limit_time": "10:20:00",
                     "change_pct": 8.0,
                     "prior_limit_count_126": 3,
                     "prior_industry_turnover_ratio_5d": 1.2,
-                    "last_price": 9.8,
+                    "last_price": 10.0,
                     "limit_price": 10.0,
                     "historical_evidence": {
                         "tbox_score": 80.0,
@@ -1518,6 +1561,7 @@ def test_refresh_ingests_full_quotes_before_filter_and_completed_quality_pool(
             assert [row["vt_symbol"] for row in rows] == ["600001.SSE"]
 
     class Pools:
+        model_training_pool = ()
         quality_pool = ({"vt_symbol": "600001.SSE"},)
 
     monkeypatch.setattr(live_service, "_PREBOARD_MINUTE_BUFFER", Buffer(), raising=False)
@@ -2120,7 +2164,13 @@ def test_preboard_status_exposes_ranked_research_without_changing_actions() -> N
                     "decision_state": "observe",
                     "execution_mode": "research_only",
                     "change_pct": 8.9,
+                    "last_price": 10.89,
+                    "limit_price": 11.0,
                     "distance_to_limit_pct": 1.0,
+                    "quality_priority_tier": "A_industry_expanding",
+                    "public_quality_status": "qualified_waiting_trigger",
+                    "quality_expected_d1_net_return_pct": 2.1,
+                    "quality_win_probability": 0.68,
                     "expected_d1_net_return_pct": 2.1,
                     "d1_win_probability": 0.68,
                     "touch_probability_3m": 0.72,
@@ -2173,7 +2223,14 @@ def test_preboard_status_exposes_ranked_research_without_changing_actions() -> N
             "decision_state": "observe",
             "execution_mode": "research_only",
             "change_pct": 8.9,
+            "last_price": 10.89,
+            "limit_price": 11.0,
+            "strictly_preboard": True,
             "distance_to_limit_pct": 1.0,
+            "quality_priority_tier": "A_industry_expanding",
+            "public_quality_status": "qualified_waiting_trigger",
+            "quality_expected_d1_net_return_pct": 2.1,
+            "quality_win_probability": 0.68,
             "expected_d1_net_return_pct": 2.1,
             "d1_win_probability": 0.68,
             "touch_probability_3m": 0.72,
@@ -2221,6 +2278,25 @@ def test_public_preboard_candidates_hide_rows_without_real_probabilities() -> No
     assert live_service._public_preboard_candidates(rows) == []
 
 
+def test_public_preboard_candidates_hide_already_touched_rows() -> None:
+    rows = [
+        {
+            "vt_symbol": "600001.SSE",
+            "name": "已触板样本",
+            "state": "sealed",
+            "last_price": 11.0,
+            "limit_price": 11.0,
+            "decision_state": "observe",
+            "execution_mode": "research_only",
+            "probability_status": "ready",
+            "touch_probability_3m": 0.8,
+            "eventual_touch_probability": 0.9,
+        }
+    ]
+
+    assert live_service._public_preboard_candidates(rows) == []
+
+
 def test_formal_preboard_adds_ranking_without_deleting_sweep_fallback() -> None:
     old_first = {
         "vt_symbol": "600001.SSE",
@@ -2228,11 +2304,13 @@ def test_formal_preboard_adds_ranking_without_deleting_sweep_fallback() -> None:
         "action": "buy_now",
         "entry_kind": "sweep",
         "state": "sealed",
+        "quality_priority_tier": "B_recognition_only",
     }
     relay = {
         "vt_symbol": "600003.SSE",
         "board_lane": "two_to_three",
         "action": "buy_now",
+        "quality_priority_tier": "B_recognition_only",
     }
     snapshot = {
         "recommendations": {
@@ -2248,7 +2326,7 @@ def test_formal_preboard_adds_ranking_without_deleting_sweep_fallback() -> None:
         {
             "status": "ready",
             "execution_mode": "formal",
-            "preboard_candidates": [
+            "preboard_recommendations": [
                 {
                     "vt_symbol": "600009.SSE",
                     "name": "板前正式样本",
@@ -2256,6 +2334,8 @@ def test_formal_preboard_adds_ranking_without_deleting_sweep_fallback() -> None:
                     "decision_state": "actionable",
                     "execution_mode": "formal",
                     "actionable": True,
+                    "portfolio_selected": True,
+                    "quality_priority_tier": "A_industry_expanding",
                 },
                 {
                     "vt_symbol": "600001.SSE",
@@ -2264,22 +2344,45 @@ def test_formal_preboard_adds_ranking_without_deleting_sweep_fallback() -> None:
                     "decision_state": "actionable",
                     "execution_mode": "formal",
                     "actionable": True,
+                    "portfolio_selected": False,
+                    "quality_priority_tier": "B_recognition_only",
+                }
+            ],
+            "preboard_portfolio": [
+                {
+                    "vt_symbol": "600009.SSE",
+                    "name": "板前正式样本",
+                    "board_lane": "first_board",
+                    "decision_state": "actionable",
+                    "execution_mode": "formal",
+                    "actionable": True,
+                    "portfolio_selected": True,
+                    "daily_slot": 1,
+                    "quality_priority_tier": "A_industry_expanding",
                 }
             ],
         },
     )
 
-    for field in ("actionable_recommendations", "portfolio"):
-        rows = snapshot["recommendations"][field]
-        assert [row["vt_symbol"] for row in rows] == [
-            "600009.SSE",
-            "600001.SSE",
-            "600003.SSE",
-        ]
-        assert rows[0]["action"] == "buy_now"
-        assert rows[0]["entry_kind"] == "momentum"
-        assert rows[1] == old_first
-        assert rows[2] == relay
+    recommendations = snapshot["recommendations"]["actionable_recommendations"]
+    assert [row["vt_symbol"] for row in recommendations] == [
+        "600009.SSE",
+        "600003.SSE",
+        "600001.SSE",
+    ]
+    assert recommendations[0]["action"] == "buy_now"
+    assert recommendations[0]["entry_kind"] == "momentum"
+    assert recommendations[1] == relay
+    assert recommendations[2] == old_first
+
+    portfolio = snapshot["recommendations"]["portfolio"]
+    assert [row["vt_symbol"] for row in portfolio] == [
+        "600009.SSE",
+        "600003.SSE",
+    ]
+    assert len(recommendations) == 3
+    assert len(portfolio) == 2
+    assert portfolio[0]["portfolio_selected"] is True
 
 
 def test_trace_write_failure_does_not_block_official_snapshot(monkeypatch) -> None:
@@ -5303,8 +5406,9 @@ def test_live_risk_chain_attaches_shared_point_in_time_first_board_quality() -> 
     assert signal["strictly_preboard"] is True
     assert signal["action"] == "buy_now"
     assert "legacy_action" not in signal
-    assert signal["expected_d1_net_return_pct"] == 1.2
-    assert signal["d1_win_probability"] == 0.64
+    assert signal["expected_d1_net_return_pct"] is None
+    assert signal["d1_win_probability"] is None
+    assert signal["public_quality_status"] == "rejected"
     assert tuple(signal["lane_blockers"]) == tuple(candidate["lane_blockers"])
     json.dumps(result)
 

@@ -18,6 +18,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import average_precision_score
 
+from alphaagent.server.services.limit_up import core_quality
 from alphaagent.server.services.limit_up.preboard_decision_contract import (
     PREBOARD_DECISION_VERSION,
     is_observable_first_board,
@@ -155,25 +156,9 @@ def score_preboard_candidate(
 ) -> dict[str, object]:
     """Score one quality-qualified row while preserving the frozen D+1 priors."""
 
-    priors = _prior_projection(row)
-    base = {
-        "model_version": bundle.model_version,
-        "model_fingerprint": bundle.fingerprint,
-        "touch_probability_3m": None,
-        "eventual_touch_probability": None,
-        **priors,
-    }
-    if row.get("quality_gate_passed") is not True:
-        return {**base, "probability_status": "quality_gate_failed"}
-    if not _model_input_eligible(row):
-        return {**base, "probability_status": "model_input_ineligible"}
-    if bundle.status != "ready":
-        return {**base, "probability_status": "model_not_ready"}
-    if row.get("feature_contract_version") != bundle.feature_version:
-        return {**base, "probability_status": "feature_contract_mismatch"}
-    vector = model_feature_vector(row)
-    if vector is None:
-        return {**base, "probability_status": "features_not_scoreable"}
+    base, status, vector = _prepare_preboard_score(bundle, row)
+    if status is not None or vector is None:
+        return {**base, "probability_status": status}
     matrix = np.asarray([vector], dtype=float)
     touch_values = bundle.touch_3m_model.probabilities(matrix)
     eventual_values = bundle.eventual_touch_model.probabilities(matrix)
@@ -193,10 +178,71 @@ def score_preboard_rows(
     bundle: PreboardModelBundle,
     rows: Sequence[Mapping[str, object]],
 ) -> list[dict[str, object]]:
-    return [
-        {**dict(row), **score_preboard_candidate(bundle, row)}
-        for row in rows
-    ]
+    """Score a frame in one model call while preserving per-row gate semantics."""
+
+    scored: list[dict[str, object]] = []
+    ready_positions: list[int] = []
+    vectors: list[list[float]] = []
+    for row in rows:
+        base, status, vector = _prepare_preboard_score(bundle, row)
+        scored.append({**dict(row), **base, "probability_status": status})
+        if status is None and vector is not None:
+            ready_positions.append(len(scored) - 1)
+            vectors.append(vector)
+    if not vectors:
+        return scored
+
+    matrix = np.asarray(vectors, dtype=float)
+    touch_values = bundle.touch_3m_model.probabilities(matrix)
+    eventual_values = bundle.eventual_touch_model.probabilities(matrix)
+    if touch_values is None or eventual_values is None:
+        for position in ready_positions:
+            scored[position]["probability_status"] = "model_not_ready"
+        return scored
+
+    for position, touch_value, eventual_value in zip(
+        ready_positions,
+        touch_values,
+        eventual_values,
+        strict=True,
+    ):
+        touch_probability = float(touch_value)
+        scored[position].update(
+            probability_status="ready",
+            touch_probability_3m=round(touch_probability, 10),
+            eventual_touch_probability=round(
+                max(float(eventual_value), touch_probability),
+                10,
+            ),
+        )
+    return scored
+
+
+def _prepare_preboard_score(
+    bundle: PreboardModelBundle,
+    row: Mapping[str, object],
+) -> tuple[dict[str, object], str | None, list[float] | None]:
+    base = {
+        "model_version": bundle.model_version,
+        "model_fingerprint": bundle.fingerprint,
+        "touch_probability_3m": None,
+        "eventual_touch_probability": None,
+        **_prior_projection(row),
+    }
+    if not core_quality.is_public_quality_prepared(row):
+        return base, "quality_gate_failed", None
+    if not _model_input_eligible(row):
+        return base, "model_input_ineligible", None
+    if bundle.status != "ready":
+        return base, "model_not_ready", None
+    if bundle.feature_names != tuple(MODEL_FEATURE_NAMES):
+        return base, "feature_contract_mismatch", None
+    if row.get("feature_contract_version") != bundle.feature_version:
+        return base, "feature_contract_mismatch", None
+    vector = model_feature_vector(row)
+    if vector is None:
+        return base, "features_not_scoreable", None
+    return base, None, vector
 
 
 def qualify_preboard_probabilities(
@@ -460,7 +506,7 @@ def _examples(
         if (
             trade_date not in allowed_dates
             or not symbol
-            or not _model_input_eligible(row)
+            or not _model_training_input_eligible(row)
             or target is None
             or vector is None
         ):
@@ -533,7 +579,9 @@ def _training_fingerprint(
                 "trade_date": trade_date.isoformat(),
                 "vt_symbol": str(row.get("vt_symbol") or ""),
                 "decision_at": str(row.get("decision_at") or row.get("signal_at") or ""),
-                "quality_gate_passed": row.get("quality_gate_passed") is True,
+                "public_quality_prepared": (
+                    core_quality.is_public_quality_prepared(row)
+                ),
                 "features": {
                     name: _canonical_number(values.get(name))
                     for name in MODEL_FEATURE_NAMES
@@ -596,6 +644,12 @@ def _prior_projection(row: Mapping[str, object]) -> dict[str, object]:
         for field in (
             "expected_d1_net_return_pct",
             "d1_win_probability",
+            "quality_expected_d1_net_return_pct",
+            "quality_win_probability",
+            "quality_priority_tier",
+            "public_quality_contract_version",
+            "public_quality_status",
+            "public_quality_preparation_passed",
             "seal_probability_given_touch",
             "d1_win_probability_given_seal",
         )
@@ -618,8 +672,33 @@ def _model_input_eligible(row: Mapping[str, object]) -> bool:
     known_at = _row_datetime(row.get("known_at"))
     fingerprint = str(row.get("feature_fingerprint") or "")
     return bool(
-        row.get("quality_gate_passed") is True
+        core_quality.is_public_quality_prepared(row)
         and is_observable_first_board(row)
+        and is_strictly_preboard(row)
+        and row.get("feature_contract_version") == PREBOARD_DECISION_VERSION
+        and row.get("feature_status") == "scoreable"
+        and fingerprint.startswith("sha256:")
+        and len(fingerprint) == 71
+        and decision_at is not None
+        and known_at is not None
+        and _datetime_not_after(known_at, decision_at)
+    )
+
+
+def _model_training_input_eligible(row: Mapping[str, object]) -> bool:
+    """Allow causal capture rows to teach touch shape without making them tradable."""
+
+    decision_at = _row_datetime(row.get("decision_at") or row.get("signal_at"))
+    known_at = _row_datetime(row.get("known_at"))
+    fingerprint = str(row.get("feature_fingerprint") or "")
+    training_pool_eligible = row.get("model_training_eligible") is True
+    recommendation_eligible = core_quality.is_public_quality_prepared(row)
+    change_pct = _canonical_number(row.get("change_pct"))
+    return bool(
+        (training_pool_eligible or recommendation_eligible)
+        and str(row.get("board_lane") or "") == "first_board"
+        and change_pct is not None
+        and change_pct >= 3.0
         and is_strictly_preboard(row)
         and row.get("feature_contract_version") == PREBOARD_DECISION_VERSION
         and row.get("feature_status") == "scoreable"

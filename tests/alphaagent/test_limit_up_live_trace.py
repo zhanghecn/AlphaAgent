@@ -99,7 +99,7 @@ def test_live_trace_reader_selects_only_timeline_columns(monkeypatch) -> None:
         "data_quality",
     )
     assert "strategy_version" in str(session.statement)
-    assert "limit-up-core-abc-v1" in session.statement.compile().params.values()
+    assert "limit-up-core-abc-v2" in session.statement.compile().params.values()
     assert _SelectResult.partition_size == 32
 
 

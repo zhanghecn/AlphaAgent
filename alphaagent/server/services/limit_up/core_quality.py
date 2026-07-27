@@ -11,6 +11,10 @@ from alphaagent.server.services.limit_up.versions import CORE_ABC_STRATEGY_VERSI
 
 
 CORE_QUALITY_CONTRACT_VERSION = CORE_ABC_STRATEGY_VERSION
+PUBLIC_QUALITY_CONTRACT_VERSION = CORE_QUALITY_CONTRACT_VERSION
+PUBLIC_QUALITY_MINIMUM_WIN_PROBABILITY = 0.50
+PUBLIC_QUALITY_MINIMUM_EXPECTED_D1_NET_RETURN_PCT = 0.0
+PUBLIC_QUALITY_PRIOR_STRENGTH = 10
 MINIMUM_PRIOR_LIMIT_COUNT_126 = 2
 MAXIMUM_PRIOR_LIMIT_COUNT_126 = 6
 MINIMUM_INDUSTRY_TURNOVER_RATIO_5D = 1.0
@@ -31,6 +35,23 @@ QUALITY_TIER_PRIORITY = {
     "A_industry_expanding": 0,
     "C_capital_diffusion_rescue": 1,
     "B_recognition_only": 2,
+}
+QUALITY_TIER_PRIORS = {
+    "A_industry_expanding": {
+        "wins": 35,
+        "sample_count": 41,
+        "expected_d1_net_return_pct": 3.0876,
+    },
+    "C_capital_diffusion_rescue": {
+        "wins": 46,
+        "sample_count": 72,
+        "expected_d1_net_return_pct": 1.9156,
+    },
+    "B_recognition_only": {
+        "wins": 18,
+        "sample_count": 30,
+        "expected_d1_net_return_pct": 1.2895,
+    },
 }
 
 
@@ -211,6 +232,106 @@ def core_quality_gate(
     }
 
 
+def public_quality_gate(
+    candidate: Mapping[str, object],
+    *,
+    prior_ab_seen: bool = False,
+    c_already_selected: bool = False,
+    structural_gate_passed: bool | None = None,
+    trigger_observed: bool = False,
+) -> dict[str, object]:
+    """Publish one A/B/C quality decision for pre-board and triggered paths."""
+
+    core = core_quality_gate(
+        candidate,
+        prior_ab_seen=prior_ab_seen,
+        c_already_selected=c_already_selected,
+    )
+    tier = str(core.get("quality_priority_tier") or "")
+    prior = QUALITY_TIER_PRIORS.get(tier)
+    structural_passed = _structural_gate_passed(
+        candidate,
+        explicit=structural_gate_passed,
+    )
+    preparation_passed = bool(
+        structural_passed
+        and (
+            core.get("base_ab_quality_gate_passed") is True
+            or core.get("c_quality_gate_passed") is True
+        )
+    )
+    estimates = _quality_estimates(candidate, prior)
+    win_probability = estimates["quality_win_probability"]
+    expected_return = estimates["quality_expected_d1_net_return_pct"]
+    estimate_passed = bool(
+        win_probability is not None
+        and win_probability >= PUBLIC_QUALITY_MINIMUM_WIN_PROBABILITY
+        and expected_return is not None
+        and expected_return > PUBLIC_QUALITY_MINIMUM_EXPECTED_D1_NET_RETURN_PCT
+    )
+    current_gate_passed = bool(
+        preparation_passed
+        and estimate_passed
+        and (not trigger_observed or core.get("core_quality_gate_passed") is True)
+    )
+    actionable = bool(trigger_observed and current_gate_passed)
+    if actionable:
+        status = "actionable"
+        reason = "qualified"
+    elif not structural_passed:
+        status = "rejected"
+        reason = "structural_quality_rejected"
+    elif not preparation_passed:
+        status = "rejected"
+        reason = str(
+            core.get("base_ab_quality_gate_reason")
+            or core.get("core_quality_gate_reason")
+            or "abc_quality_rejected"
+        )
+    elif win_probability is None:
+        status = "rejected"
+        reason = "quality_win_probability_unavailable"
+    elif win_probability < PUBLIC_QUALITY_MINIMUM_WIN_PROBABILITY:
+        status = "rejected"
+        reason = "quality_win_probability_below_50pct"
+    elif expected_return is None:
+        status = "rejected"
+        reason = "quality_expected_d1_return_unavailable"
+    elif expected_return <= PUBLIC_QUALITY_MINIMUM_EXPECTED_D1_NET_RETURN_PCT:
+        status = "rejected"
+        reason = "quality_expected_d1_return_not_positive"
+    elif not trigger_observed:
+        status = "qualified_waiting_trigger"
+        reason = "waiting_for_trigger"
+    else:
+        status = "rejected"
+        reason = str(
+            core.get("quality_entry_gate_reason")
+            or core.get("core_quality_gate_reason")
+            or "trigger_not_actionable"
+        )
+    return {
+        **core,
+        **estimates,
+        "public_quality_contract_version": PUBLIC_QUALITY_CONTRACT_VERSION,
+        "public_quality_status": status,
+        "public_quality_gate_passed": current_gate_passed,
+        "public_quality_preparation_passed": bool(
+            preparation_passed and estimate_passed
+        ),
+        "public_quality_actionable": actionable,
+        "public_quality_trigger_observed": trigger_observed,
+        "public_quality_structural_gate_passed": structural_passed,
+        "public_quality_reason": reason,
+        "quality_minimum_win_probability": (
+            PUBLIC_QUALITY_MINIMUM_WIN_PROBABILITY
+        ),
+        "quality_minimum_expected_d1_net_return_pct": (
+            PUBLIC_QUALITY_MINIMUM_EXPECTED_D1_NET_RETURN_PCT
+        ),
+    }
+
+
 def quality_entry_gate(
     candidate: Mapping[str, object],
     tier: object,
@@ -294,10 +415,11 @@ def filter_core_quality_qualified_orders(
         group.sort(
             key=lambda order: (
                 quality_tier_priority(
-                    core_quality_gate(
+                    public_quality_gate(
                         order,
                         prior_ab_seen=prior_ab_seen,
                         c_already_selected=c_already_selected,
+                        trigger_observed=True,
                     )
                 ),
                 scheduled_execution.execution_lane_priority(order.get("lane")),
@@ -307,14 +429,15 @@ def filter_core_quality_qualified_orders(
         )
         group_ab_selected = False
         for order in group:
-            decision = core_quality_gate(
+            decision = public_quality_gate(
                 order,
                 prior_ab_seen=prior_ab_seen,
                 c_already_selected=c_already_selected,
+                trigger_observed=True,
             )
             order.update(decision)
-            reasons[str(decision["core_quality_gate_reason"])] += 1
-            if decision["core_quality_gate_passed"] is not True:
+            reasons[str(decision["public_quality_reason"])] += 1
+            if decision["public_quality_actionable"] is not True:
                 continue
             effective_time = decision.get("quality_entry_effective_time")
             if effective_time:
@@ -342,7 +465,8 @@ def filter_core_quality_qualified_orders(
 
 def core_quality_filter_metadata() -> dict[str, object]:
     return {
-        "contract_version": CORE_QUALITY_CONTRACT_VERSION,
+        "contract_version": PUBLIC_QUALITY_CONTRACT_VERSION,
+        "base_contract_version": CORE_QUALITY_CONTRACT_VERSION,
         "first_board_minimum_d1_samples": (
             scheduled_execution.FIRST_BOARD_MIN_D1_SAMPLES
         ),
@@ -358,6 +482,16 @@ def core_quality_filter_metadata() -> dict[str, object]:
         "c_daily_limit": 1,
         "c_evidence_status": C_EVIDENCE_STATUS,
         "priority_rule": "A > C > B",
+        "minimum_quality_win_probability": (
+            PUBLIC_QUALITY_MINIMUM_WIN_PROBABILITY
+        ),
+        "minimum_quality_expected_d1_net_return_pct": (
+            PUBLIC_QUALITY_MINIMUM_EXPECTED_D1_NET_RETURN_PCT
+        ),
+        "quality_estimate_prior_strength": PUBLIC_QUALITY_PRIOR_STRENGTH,
+        "quality_tier_priors": {
+            tier: dict(prior) for tier, prior in QUALITY_TIER_PRIORS.items()
+        },
     }
 
 
@@ -366,6 +500,115 @@ def quality_tier_priority(candidate: Mapping[str, object]) -> int:
 
     tier = str(candidate.get("quality_priority_tier") or "")
     return QUALITY_TIER_PRIORITY.get(tier, len(QUALITY_TIER_PRIORITY))
+
+
+def is_public_quality_prepared(candidate: Mapping[str, object]) -> bool:
+    """Return whether the current public contract admits probability scoring."""
+
+    win_probability = _optional_number(candidate.get("quality_win_probability"))
+    expected_return = _optional_number(
+        candidate.get("quality_expected_d1_net_return_pct")
+    )
+    return bool(
+        candidate.get("public_quality_contract_version")
+        == PUBLIC_QUALITY_CONTRACT_VERSION
+        and candidate.get("public_quality_preparation_passed") is True
+        and str(candidate.get("public_quality_status") or "")
+        in {"qualified_waiting_trigger", "actionable"}
+        and win_probability is not None
+        and win_probability >= PUBLIC_QUALITY_MINIMUM_WIN_PROBABILITY
+        and expected_return is not None
+        and expected_return > PUBLIC_QUALITY_MINIMUM_EXPECTED_D1_NET_RETURN_PCT
+    )
+
+
+def _quality_estimates(
+    candidate: Mapping[str, object],
+    prior: Mapping[str, object] | None,
+) -> dict[str, object]:
+    if prior is None:
+        return {
+            "quality_tier_prior_win_probability": None,
+            "quality_tier_prior_expected_d1_net_return_pct": None,
+            "quality_tier_prior_sample_count": 0,
+            "quality_estimate_prior_strength": PUBLIC_QUALITY_PRIOR_STRENGTH,
+            "quality_estimate_stock_sample_count": 0,
+            "quality_win_probability": None,
+            "quality_expected_d1_net_return_pct": None,
+        }
+    prior_wins = int(prior["wins"])
+    prior_count = int(prior["sample_count"])
+    prior_win_probability = prior_wins / prior_count
+    prior_return = float(prior["expected_d1_net_return_pct"])
+    evidence = candidate.get("historical_evidence")
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    stock_count = max(
+        _optional_integer(
+            candidate.get("stock_d1_sample_count")
+            if candidate.get("stock_d1_sample_count") is not None
+            else evidence.get("d1_money_effect_sample_count")
+        )
+        or 0,
+        0,
+    )
+    stock_win_rate = _percentage_probability(
+        candidate.get("stock_d1_win_rate")
+        if candidate.get("stock_d1_win_rate") is not None
+        else evidence.get("d1_money_effect_win_rate")
+    )
+    stock_return = _optional_number(
+        candidate.get("stock_d1_average_return_pct")
+        if candidate.get("stock_d1_average_return_pct") is not None
+        else evidence.get("d1_money_effect_average_return_pct")
+    )
+    win_sample_count = stock_count if stock_win_rate is not None else 0
+    return_sample_count = stock_count if stock_return is not None else 0
+    win_probability = _shrunken_estimate(
+        prior_win_probability,
+        stock_win_rate,
+        win_sample_count,
+    )
+    expected_return = _shrunken_estimate(
+        prior_return,
+        stock_return,
+        return_sample_count,
+    )
+    return {
+        "quality_tier_prior_win_probability": prior_win_probability,
+        "quality_tier_prior_expected_d1_net_return_pct": prior_return,
+        "quality_tier_prior_sample_count": prior_count,
+        "quality_estimate_prior_strength": PUBLIC_QUALITY_PRIOR_STRENGTH,
+        "quality_estimate_stock_sample_count": max(
+            win_sample_count,
+            return_sample_count,
+        ),
+        "quality_win_probability": win_probability,
+        "quality_expected_d1_net_return_pct": expected_return,
+    }
+
+
+def _shrunken_estimate(
+    prior_value: float,
+    stock_value: float | None,
+    stock_sample_count: int,
+) -> float:
+    if stock_value is None or stock_sample_count <= 0:
+        return prior_value
+    return (
+        prior_value * PUBLIC_QUALITY_PRIOR_STRENGTH
+        + stock_value * stock_sample_count
+    ) / (PUBLIC_QUALITY_PRIOR_STRENGTH + stock_sample_count)
+
+
+def _structural_gate_passed(
+    candidate: Mapping[str, object],
+    *,
+    explicit: bool | None,
+) -> bool:
+    if explicit is not None:
+        return explicit
+    candidate_value = candidate.get("quality_gate_passed")
+    return candidate_value is True if isinstance(candidate_value, bool) else True
 
 
 def _recognition_decision(limit_count: int | None) -> tuple[bool, str]:
@@ -474,3 +717,10 @@ def _optional_number(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if number is not None and isfinite(number) else None
+
+
+def _percentage_probability(value: object) -> float | None:
+    number = _optional_number(value)
+    if number is None or not 0 <= number <= 100:
+        return None
+    return number / 100.0

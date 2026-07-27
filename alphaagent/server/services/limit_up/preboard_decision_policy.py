@@ -8,6 +8,7 @@ from datetime import date, datetime
 from math import isfinite
 from typing import TYPE_CHECKING
 
+from alphaagent.server.services.limit_up import core_quality
 from alphaagent.server.services.limit_up.preboard_decision_contract import (
     PREBOARD_DECISION_VERSION,
     PreboardExecutionMode,
@@ -36,6 +37,7 @@ def evaluate_preboard_decisions(
     execution_mode: PreboardExecutionMode = PreboardExecutionMode.RESEARCH_ONLY,
     ranking_mode: PreboardRankingMode = PreboardRankingMode.CURRENT_D1_FIRST,
     opportunity_calibration: PreboardOpportunityCalibration | None = None,
+    enforce_position_capacity: bool = True,
 ) -> list[dict[str, object]]:
     """Run the shared scorer/state entry, failing closed without a promoted policy."""
 
@@ -54,6 +56,7 @@ def evaluate_preboard_decisions(
             execution_mode=execution_mode,
             ranking_mode=ranking_mode,
             opportunity_calibration=opportunity_calibration,
+            enforce_position_capacity=enforce_position_capacity,
         )
     decisions = [
         _research_only_decision(
@@ -84,11 +87,9 @@ def can_compete_for_action(
     return bool(
         is_observable_first_board(row)
         and is_strictly_preboard(row)
-        and row.get("quality_gate_passed") is True
+        and core_quality.is_public_quality_prepared(row)
         and row.get("execution_environment_passed") is True
         and row.get("entry_window_passed") is True
-        and row.get("profitability_gate_passed") is True
-        and str(row.get("historical_prior_status") or "") == "ready"
         and str(row.get("probability_status") or "") == "ready"
         and touch is not None
         and touch >= thresholds.minimum_touch_probability_3m
@@ -112,8 +113,9 @@ def preboard_action_sort_key(
     )
     if ranking_mode is PreboardRankingMode.CURRENT_D1_FIRST:
         return (
-            -_sort_number(row.get("expected_d1_net_return_pct")),
-            -_sort_number(row.get("d1_win_probability")),
+            core_quality.quality_tier_priority(row),
+            -_sort_number(row.get("quality_win_probability")),
+            -_sort_number(row.get("quality_expected_d1_net_return_pct")),
             -_sort_number(row.get("touch_probability_3m")),
             -_sort_number(row.get("eventual_touch_probability")),
             -_sort_number(row.get("seal_probability_given_touch")),
@@ -131,10 +133,11 @@ def preboard_action_sort_key(
     if opportunity_calibration is None:
         raise ValueError("combined opportunity ranking requires fit calibration")
     return (
+        core_quality.quality_tier_priority(row),
+        -_sort_number(row.get("quality_win_probability")),
         -_sort_number(
             preboard_opportunity_value_pct(row, opportunity_calibration)
         ),
-        -_sort_number(row.get("d1_win_probability")),
         -_sort_number(row.get("touch_probability_3m")),
         -_sort_number(row.get("eventual_touch_probability")),
         -_sort_number(row.get("seal_probability_given_touch")),
@@ -151,7 +154,7 @@ def preboard_opportunity_value_pct(
 
     eventual = _probability(row.get("eventual_touch_probability"))
     seal = _probability(row.get("seal_probability_given_touch"))
-    expected_d1 = _number(row.get("expected_d1_net_return_pct"))
+    expected_d1 = _number(row.get("quality_expected_d1_net_return_pct"))
     if eventual is None or seal is None or expected_d1 is None:
         return None
     return (
@@ -197,8 +200,9 @@ def select_preboard_decisions(
     execution_mode: PreboardExecutionMode = PreboardExecutionMode.SHADOW,
     ranking_mode: PreboardRankingMode = PreboardRankingMode.CURRENT_D1_FIRST,
     opportunity_calibration: PreboardOpportunityCalibration | None = None,
+    enforce_position_capacity: bool = True,
 ) -> list[dict[str, object]]:
-    """Advance chronologically and let false positives consume real slots."""
+    """Select full recommendations or a capacity-constrained account."""
 
     used_slots, acted_pairs = _prior_action_state(prior_actions)
     grouped: defaultdict[datetime, list[tuple[int, dict[str, object]]]] = defaultdict(list)
@@ -220,11 +224,15 @@ def select_preboard_decisions(
     for decision_at in sorted(grouped):
         indexed_rows = grouped[decision_at]
         trade_date = decision_at.date()
-        available_slots = [
-            slot
-            for slot in range(1, MAX_POSITIONS + 1)
-            if slot not in used_slots[trade_date]
-        ]
+        available_slots = (
+            [
+                slot
+                for slot in range(1, MAX_POSITIONS + 1)
+                if slot not in used_slots[trade_date]
+            ]
+            if enforce_position_capacity
+            else []
+        )
         competitors = [
             (index, row)
             for index, row in indexed_rows
@@ -238,16 +246,24 @@ def select_preboard_decisions(
                 opportunity_calibration=opportunity_calibration,
             )
         )
-        selected = competitors[: len(available_slots)]
-        selected_slots = {
-            index: slot
-            for (index, _row), slot in zip(
-                selected,
-                available_slots[: len(selected)],
-                strict=True,
-            )
-        }
-        selected_indices = set(selected_slots)
+        selected = (
+            competitors[: len(available_slots)]
+            if enforce_position_capacity
+            else competitors
+        )
+        selected_slots = (
+            {
+                index: slot
+                for (index, _row), slot in zip(
+                    selected,
+                    available_slots[: len(selected)],
+                    strict=True,
+                )
+            }
+            if enforce_position_capacity
+            else {}
+        )
+        selected_indices = {index for index, _row in selected}
 
         ordered = [*selected]
         ordered.extend(
@@ -256,15 +272,17 @@ def select_preboard_decisions(
         for index, row in ordered:
             pair = _pair(row, trade_date)
             selected_slot = selected_slots.get(index)
+            selected_for_action = index in selected_indices
             already_acted = pair in acted_pairs
             state = advance_preboard_state(
                 row,
                 thresholds,
-                slot_available=selected_slot is not None,
+                slot_available=selected_for_action,
                 already_acted=already_acted,
             )
-            if state is PreboardState.ACTIONABLE and selected_slot is not None:
-                used_slots[trade_date].add(selected_slot)
+            if state is PreboardState.ACTIONABLE:
+                if selected_slot is not None:
+                    used_slots[trade_date].add(selected_slot)
                 if pair is not None:
                     acted_pairs.add(pair)
             decisions.append(
@@ -275,7 +293,15 @@ def select_preboard_decisions(
                     "daily_slot": (
                         selected_slot
                         if state is PreboardState.ACTIONABLE
+                        and enforce_position_capacity
                         else None
+                    ),
+                    "portfolio_selected": bool(
+                        state is PreboardState.ACTIONABLE
+                        and enforce_position_capacity
+                    ),
+                    "selection_scope": (
+                        "portfolio" if enforce_position_capacity else "recommendation"
                     ),
                     "decision_version": PREBOARD_DECISION_VERSION,
                     "policy_version": PREBOARD_DECISION_VERSION,
@@ -301,6 +327,10 @@ def select_preboard_decisions(
                 "preboard_state": PreboardState.REJECTED,
                 "decision_state": PreboardState.REJECTED.value,
                 "daily_slot": None,
+                "portfolio_selected": False,
+                "selection_scope": (
+                    "portfolio" if enforce_position_capacity else "recommendation"
+                ),
                 "decision_version": PREBOARD_DECISION_VERSION,
                 "policy_version": PREBOARD_DECISION_VERSION,
                 "policy_fingerprint": thresholds.fingerprint,
@@ -376,9 +406,8 @@ def _meets_prepare_thresholds(
     return bool(
         is_observable_first_board(row)
         and is_strictly_preboard(row)
+        and core_quality.is_public_quality_prepared(row)
         and row.get("preparation_environment_passed") is True
-        and row.get("profitability_gate_passed") is True
-        and str(row.get("historical_prior_status") or "") == "ready"
         and str(row.get("probability_status") or "") == "ready"
         and touch is not None
         and touch >= thresholds.minimum_touch_probability_3m

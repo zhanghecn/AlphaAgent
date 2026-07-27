@@ -19,13 +19,22 @@ def test_only_quality_first_board_at_or_above_three_percent_is_observable() -> N
     eligible = {
         "board_lane": "first_board",
         "quality_gate_passed": True,
+        "public_quality_contract_version": "limit-up-core-abc-v2",
+        "public_quality_status": "qualified_waiting_trigger",
+        "public_quality_preparation_passed": True,
+        "quality_win_probability": 0.70,
+        "quality_expected_d1_net_return_pct": 1.5,
         "change_pct": 3.0,
     }
 
     assert is_observable_first_board(eligible)
     assert not is_observable_first_board({**eligible, "change_pct": 2.999})
     assert not is_observable_first_board(
-        {**eligible, "quality_gate_passed": False, "change_pct": 9.5}
+        {
+            **eligible,
+            "public_quality_preparation_passed": False,
+            "change_pct": 9.5,
+        }
     )
     assert not is_observable_first_board({**eligible, "board_lane": "two_to_three"})
 
@@ -137,7 +146,7 @@ def test_state_contract_has_one_public_action_state() -> None:
 
 
 def test_one_decision_version_and_execution_mode_are_explicit() -> None:
-    assert PREBOARD_DECISION_VERSION == "limit-up-preboard-decision-v1"
+    assert PREBOARD_DECISION_VERSION == "limit-up-preboard-decision-v2"
     assert tuple(mode.value for mode in PreboardExecutionMode) == (
         "research_only",
         "shadow",

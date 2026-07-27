@@ -10,7 +10,7 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 def test_additive_concept_execution_contract_is_frozen() -> None:
-    assert scheduled_execution.SCHEDULED_EXECUTION_VERSION == "limit-up-core-abc-v1"
+    assert scheduled_execution.SCHEDULED_EXECUTION_VERSION == "limit-up-core-abc-v2"
     assert scheduled_execution.EXIT_MODE == "next_close"
     assert scheduled_execution.RULE_FREEZE_DATE == date(2026, 7, 15)
 

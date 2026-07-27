@@ -326,7 +326,7 @@ def _observation(
     return {
         "trade_date": trade_date,
         "captured_at": datetime.fromisoformat(captured_at),
-        "strategy_version": "limit-up-core-abc-v1",
+        "strategy_version": "limit-up-core-abc-v2",
         "quality_status": "ready",
         "is_stale": False,
         "vt_symbol": symbol,

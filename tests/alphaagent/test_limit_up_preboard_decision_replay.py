@@ -17,6 +17,7 @@ from alphaagent.server.services.limit_up.preboard_decision_replay import (
     FROZEN_PATH_MANIFEST_VERSION,
     attach_replay_labels,
     build_historical_point_rows,
+    build_historical_point_row_sets,
     build_replay_order_sets,
     calibrate_policy_thresholds,
     candidate_index_fingerprint,
@@ -105,6 +106,19 @@ def test_projected_point_rows_do_not_retain_transient_source_prefixes() -> None:
     assert row["feature_status"] == "scoreable"
     assert row["feature_values"]
     assert row["next_quote_at"] == "2026-07-20T10:11:00"
+
+
+def test_public_quality_rejection_is_training_only_and_not_recommendable() -> None:
+    point = _point()
+    point["candidates"][0]["prior_limit_count_126"] = 7
+
+    recommendation_rows, model_rows = build_historical_point_row_sets([point])
+
+    assert recommendation_rows == []
+    assert len(model_rows) == 1
+    assert model_rows[0]["model_training_eligible"] is True
+    assert model_rows[0]["public_quality_preparation_passed"] is False
+    assert model_rows[0]["feature_status"] == "scoreable"
 
 
 def test_large_replay_indexes_reuse_loaded_dict_rows() -> None:
@@ -520,8 +534,49 @@ def test_action_pool_is_counted_before_two_slot_selection() -> None:
     )
 
     assert len(order_sets["c_action_pool_rows"]) == 3
+    assert len(order_sets["c_recommendation_rows"]) == 3
+    assert len(order_sets["c_recommendation_orders"]) == 3
     assert len(order_sets["c_action_rows"]) == 2
     assert len(order_sets["c_first_board_orders"]) == 2
+
+
+def test_recommendation_quality_counts_every_outcome_without_capacity_cut() -> None:
+    trade_date = date(2026, 7, 20)
+    orders = [
+        {
+            "signal_date": trade_date.isoformat(),
+            "vt_symbol": "600001.SSE",
+            "d1_net_return_pct": 2.0,
+            "eventual_formal_touch": True,
+            "sealed_limit": True,
+        },
+        {
+            "signal_date": trade_date.isoformat(),
+            "vt_symbol": "600002.SSE",
+            "d1_net_return_pct": -1.0,
+            "eventual_formal_touch": False,
+            "sealed_limit": False,
+        },
+        {
+            "signal_date": trade_date.isoformat(),
+            "vt_symbol": "600003.SSE",
+            "d1_net_return_pct": 1.0,
+            "eventual_formal_touch": True,
+            "sealed_limit": False,
+        },
+    ]
+
+    summary = replay._recommendation_quality_summary(
+        orders,
+        allowed_dates={trade_date},
+    )
+
+    assert summary["signal_count"] == 3
+    assert summary["closed_count"] == 3
+    assert summary["win_count"] == 2
+    assert summary["win_rate_pct"] == 66.6666666667
+    assert summary["eventual_touch_count"] == 2
+    assert summary["non_touch_count"] == 1
 
 
 def test_pool_audit_reports_high_quality_mother_pool_before_observation() -> None:
@@ -590,6 +645,30 @@ def test_threshold_calibration_reads_only_calibration_dates() -> None:
     assert baseline.status == after.status == "ready"
     assert baseline.thresholds == after.thresholds
     assert baseline.selected_metrics == after.selected_metrics
+
+
+def test_threshold_calibration_rejects_sub_sixty_percent_action_quality() -> None:
+    trade_date = date(2026, 6, 1)
+    rows = [
+        _scored_row(
+            trade_date,
+            f"600{index:03d}.SSE",
+            probability=0.80,
+            net_return=1.0 if index < 5 else -1.0,
+        )
+        for index in range(10)
+    ]
+
+    result = calibrate_policy_thresholds(
+        rows,
+        calibration_dates={trade_date},
+        model_fingerprint="sha256:model",
+        minimum_action_count=10,
+    )
+
+    assert result.status == "insufficient_calibration_quality"
+    assert result.thresholds is None
+    assert result.metrics_by_threshold[0]["d1_win_rate_pct"] == 50.0
 
 
 def test_opportunity_calibration_uses_fit_only_and_one_row_per_stock_day() -> None:
@@ -669,21 +748,21 @@ def test_replay_order_sets_can_compare_touch_first_without_changing_action_pool(
         probability=0.71,
         net_return=1.0,
     )
-    high_d1["expected_d1_net_return_pct"] = 5.0
+    high_d1["quality_expected_d1_net_return_pct"] = 5.0
     high_touch = _scored_row(
         trade_date,
         "600002.SSE",
         probability=0.95,
         net_return=1.0,
     )
-    high_touch["expected_d1_net_return_pct"] = 1.0
+    high_touch["quality_expected_d1_net_return_pct"] = 1.0
     middle_touch = _scored_row(
         trade_date,
         "600003.SSE",
         probability=0.90,
         net_return=1.0,
     )
-    middle_touch["expected_d1_net_return_pct"] = 0.5
+    middle_touch["quality_expected_d1_net_return_pct"] = 0.5
 
     current = build_replay_order_sets(
         rows=[high_d1, high_touch, middle_touch],
@@ -1061,7 +1140,7 @@ def test_recent_timing_audit_uses_formal_backtest_orders_as_positive_labels(
 
     monkeypatch.setattr(
         radar_observation_repository,
-        "load_observations",
+        "load_replay_observations",
         load_observations,
     )
     monkeypatch.setattr(
@@ -1236,7 +1315,7 @@ def test_unreplayable_historical_environment_matches_live_diagnostic_contract() 
     ]
 
 
-def test_promotion_requires_twenty_strict_actions_and_both_accounts() -> None:
+def test_promotion_requires_full_quality_and_acceptable_accounts() -> None:
     passing_account = {
         "filled_count": 20,
         "win_rate": 68.0,
@@ -1253,6 +1332,11 @@ def test_promotion_requires_twenty_strict_actions_and_both_accounts() -> None:
     }
 
     insufficient = decide_historical_promotion(
+        recommendation_quality={
+            "closed_count": 19,
+            "win_rate_pct": 70.0,
+            "average_return_pct": 2.0,
+        },
         strict_first_board=passing_account,
         formal_first_board=baseline,
         strict_combined=passing_account,
@@ -1262,6 +1346,11 @@ def test_promotion_requires_twenty_strict_actions_and_both_accounts() -> None:
         strict_action_count=19,
     )
     passed = decide_historical_promotion(
+        recommendation_quality={
+            "closed_count": 30,
+            "win_rate_pct": 60.0,
+            "average_return_pct": 0.01,
+        },
         strict_first_board=passing_account,
         formal_first_board=baseline,
         strict_combined=passing_account,
@@ -1271,14 +1360,31 @@ def test_promotion_requires_twenty_strict_actions_and_both_accounts() -> None:
         strict_action_count=20,
     )
 
-    assert insufficient["status"] == "insufficient_for_portfolio_promotion"
+    assert insufficient["status"] == "insufficient_for_recommendation_promotion"
     assert passed["status"] == "historical_pass_for_shadow"
+
+    rejected_quality = decide_historical_promotion(
+        recommendation_quality={
+            "closed_count": 30,
+            "win_rate_pct": 59.99,
+            "average_return_pct": 2.0,
+        },
+        strict_first_board=passing_account,
+        formal_first_board=baseline,
+        strict_combined=passing_account,
+        formal_combined=baseline,
+        strict_double_cost={**passing_account, "total_return_pct": 5.0},
+        positive_stability_blocks=3,
+        strict_action_count=20,
+    )
+    assert rejected_quality["status"] == "historical_rejected"
+    assert rejected_quality["checks"]["full_recommendation_win_rate"] is False
 
 
 def test_markdown_reports_only_formal_and_strict_accounts() -> None:
     markdown = render_preboard_replay_markdown(
         {
-            "status": "insufficient_for_portfolio_promotion",
+            "status": "insufficient_for_recommendation_promotion",
             "decision": {"reason": "insufficient_calibration_actions"},
             "formal_strategy_changed": False,
             "date_split": {
@@ -1532,6 +1638,14 @@ def _scored_row(
         "preparation_environment_passed": True,
         "execution_environment_passed": True,
         "profitability_gate_passed": True,
+        "quality_priority_tier": "A_industry_expanding",
+        "public_quality_contract_version": "limit-up-core-abc-v2",
+        "public_quality_status": "qualified_waiting_trigger",
+        "public_quality_gate_passed": True,
+        "public_quality_preparation_passed": True,
+        "public_quality_actionable": False,
+        "quality_win_probability": 0.70,
+        "quality_expected_d1_net_return_pct": 2.2,
         "historical_prior_status": "ready",
         "probability_status": "ready",
         "last_price": 10.7,

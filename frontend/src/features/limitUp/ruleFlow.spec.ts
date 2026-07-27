@@ -9,7 +9,7 @@ const guide = {
     max_positions: 2,
   },
   core_quality: {
-    contract_version: "limit-up-core-abc-v1",
+    contract_version: "limit-up-core-abc-v2",
     prior_limit_window_days: 126,
     minimum_prior_limit_count: 2,
     maximum_prior_limit_count: 6,
@@ -67,6 +67,17 @@ describe("buildRuleFlow", () => {
 
     expect(sector.condition).toContain("A优先于C、C优先于B");
     expect(sector.thresholds).toContainEqual({ label: "B 可交易", value: "是" });
+  });
+
+  it("正式买点必须由真实触板触发且不依赖板前概率", () => {
+    const momentum = buildRuleFlow(guide).find((node) => node.stage === "momentum")!;
+
+    expect(momentum.title).toContain("真实触板后");
+    expect(momentum.purpose).toContain("重新执行完整公共质量门");
+    expect(momentum.condition).toContain("概率不可用不拦截质量合格触板");
+    expect(momentum.condition).toContain("概率再高也不能放行质量失败票");
+    expect(momentum.thresholds).toContainEqual({ label: "正式触发", value: "真实触板或回封" });
+    expect(momentum.thresholds).toContainEqual({ label: "板前概率", value: "当前仅研究排序" });
   });
 
   it("成交节点含买入窗口与 D+1 统一退出", () => {

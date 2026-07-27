@@ -21,6 +21,7 @@ import pandas as pd
 
 from alphaagent.server.services.limit_up import (
     cash_backtest,
+    core_quality,
     history_engine,
     history_repository,
     preboard_decision_repository,
@@ -32,6 +33,7 @@ from alphaagent.server.services.limit_up.first_board_stock_gene_research import 
 )
 from alphaagent.server.services.limit_up.first_board_quality import (
     build_preboard_pools,
+    first_board_capture_gate,
 )
 from alphaagent.server.services.limit_up.features import market_snapshot_for_trade
 from alphaagent.server.services.limit_up.live_evidence import (
@@ -97,6 +99,9 @@ RECENT_TIMING_AUDIT_START = date(2026, 7, 20)
 RECENT_TIMING_AUDIT_END = date(2026, 7, 22)
 MINIMUM_FIT_DATES = 40
 MINIMUM_VALIDATION_ACTIONS = 20
+MINIMUM_VALIDATION_RECOMMENDATIONS = 20
+MINIMUM_RECOMMENDATION_WIN_RATE_PCT = 60.0
+MINIMUM_RECOMMENDATION_AVERAGE_RETURN_PCT = 0.0
 MINIMUM_CALIBRATION_ACTIONS = 10
 MINIMUM_OPPORTUNITY_SCENARIO_SAMPLES = 5
 HALF_HOUR_BUCKETS = (
@@ -111,7 +116,7 @@ PROMOTION_STATUSES = frozenset(
     {
         "historical_pass_for_shadow",
         "historical_rejected",
-        "insufficient_for_portfolio_promotion",
+        "insufficient_for_recommendation_promotion",
     }
 )
 
@@ -252,6 +257,7 @@ class ReplayDataset:
     pool_audit: dict[str, object]
     profitability_audit: dict[str, object]
     input_fingerprint: str
+    model_rows: tuple[dict[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -462,7 +468,7 @@ def load_frozen_replay_dataset(
     )
     symbols = sorted({symbol for symbol, _trade_date in path_index.pairs})
     emit("stage=historical_environment")
-    environment_rows = radar_observation_repository.load_observations(
+    environment_rows = radar_observation_repository.load_replay_observations(
         path_index.start_date,
         path_index.end_date,
         symbols=symbols,
@@ -474,7 +480,7 @@ def load_frozen_replay_dataset(
     )
 
     emit("stage=point_in_time_quality")
-    rows, pool_audit = _build_frozen_path_decision_rows(
+    rows, model_rows, pool_audit = _build_frozen_path_decision_rows(
         scoped_manifest.to_dict(orient="records"),
         minute_frame.to_dict(orient="records"),
         feature_by_pair=scoped_features,
@@ -511,6 +517,7 @@ def load_frozen_replay_dataset(
     )
     candidate_index_audit = _candidate_index_audit(path_index, labels)
     labeled_rows = attach_replay_labels(rows, labels)
+    labeled_model_rows = attach_replay_labels(model_rows, labels)
 
     account_end = max(
         (
@@ -561,6 +568,7 @@ def load_frozen_replay_dataset(
     input_fingerprint = _dataset_fingerprint(
         path_index,
         labeled_rows,
+        labeled_model_rows,
         formal_orders,
     )
     return ReplayDataset(
@@ -576,6 +584,7 @@ def load_frozen_replay_dataset(
         pool_audit=pool_audit,
         profitability_audit=profitability_audit,
         input_fingerprint=input_fingerprint,
+        model_rows=tuple(labeled_model_rows),
     )
 
 
@@ -588,14 +597,40 @@ def _build_frozen_path_decision_rows(
     history_days: list[Mapping[str, object]],
     transaction_rows: Sequence[Mapping[str, object]],
     environment_rows: Sequence[Mapping[str, object]],
-) -> tuple[list[dict[str, object]], dict[str, object]]:
+) -> tuple[
+    list[dict[str, object]],
+    list[dict[str, object]],
+    dict[str, object],
+]:
     manifests = {
         pair: dict(row)
         for row in manifest_rows
         if (pair := _row_pair(row)) is not None
     }
     bars_by_pair = _bars_by_pair(minute_rows)
-    cross_sections = _build_cross_section_snapshots(manifests, bars_by_pair)
+    static_candidates = {
+        pair: _static_candidate(
+            manifest,
+            feature_by_pair[pair],
+            financial_index=financial_index,
+        )
+        for pair, manifest in manifests.items()
+        if pair in feature_by_pair
+    }
+    context_pairs = {
+        pair
+        for pair, candidate in static_candidates.items()
+        if first_board_capture_gate(candidate).get("capture_gate_passed") is True
+    }
+    cross_sections = _build_cross_section_snapshots(
+        manifests,
+        bars_by_pair,
+        allowed_pairs=context_pairs,
+        industry_by_pair={
+            pair: str(row.get("industry_id") or "").strip()
+            for pair, row in feature_by_pair.items()
+        },
+    )
     cross_section_times = {
         trade_date: [captured_at for captured_at, _row in snapshots]
         for trade_date, snapshots in cross_sections.items()
@@ -606,6 +641,7 @@ def _build_frozen_path_decision_rows(
     for pair in bars_by_pair:
         pairs_by_date[pair[1]].append(pair)
     rows: list[dict[str, object]] = []
+    model_rows: list[dict[str, object]] = []
     raw_capture_counts: Counter[str] = Counter()
     raw_capture_symbols: defaultdict[str, set[str]] = defaultdict(set)
 
@@ -617,14 +653,9 @@ def _build_frozen_path_decision_rows(
         for pair in sorted(pairs_by_date[trade_date]):
             bars = bars_by_pair[pair]
             manifest = manifests.get(pair)
-            feature_row = feature_by_pair.get(pair)
-            if manifest is None or feature_row is None:
+            static_candidate = static_candidates.get(pair)
+            if manifest is None or static_candidate is None:
                 continue
-            static_candidate = _static_candidate(
-                manifest,
-                feature_row,
-                financial_index=financial_index,
-            )
             previous_close = _number(manifest.get("previous_close"))
             limit_price = _number(manifest.get("limit_price"))
             if previous_close is None or limit_price is None:
@@ -705,11 +736,16 @@ def _build_frozen_path_decision_rows(
                         "cross_section_snapshots": visible_snapshots,
                     }
                 )
-        day_rows = build_historical_point_rows(points)
+        day_rows, day_model_rows = build_historical_point_row_sets(points)
         rows.extend(day_rows)
+        model_rows.extend(day_model_rows)
 
     pool_audit = _pool_audit(rows, raw_capture_counts, raw_capture_symbols)
-    return rows, pool_audit
+    pool_audit["model_training_point_count"] = len(model_rows)
+    pool_audit["model_training_pair_count"] = len(
+        {pair for row in model_rows if (pair := _row_pair(row)) is not None}
+    )
+    return rows, model_rows, pool_audit
 
 
 def _iter_prior_indexes(
@@ -1137,11 +1173,16 @@ def _market_gate_from_environment(
 def _build_cross_section_snapshots(
     manifests: Mapping[tuple[str, date], Mapping[str, object]],
     bars_by_pair: Mapping[tuple[str, date], Sequence[Mapping[str, object]]],
+    *,
+    allowed_pairs: set[tuple[str, date]],
+    industry_by_pair: Mapping[tuple[str, date], str],
 ) -> dict[date, tuple[tuple[datetime, dict[str, object]], ...]]:
     by_date: defaultdict[date, defaultdict[datetime, list[dict[str, object]]]] = (
         defaultdict(lambda: defaultdict(list))
     )
     for pair, bars in bars_by_pair.items():
+        if pair not in allowed_pairs:
+            continue
         manifest = manifests.get(pair)
         if manifest is None:
             continue
@@ -1167,6 +1208,7 @@ def _build_cross_section_snapshots(
                     "vt_symbol": pair[0],
                     "gain_pct": gain,
                     "change_pct": gain,
+                    "industry_id": industry_by_pair.get(pair) or None,
                 }
             )
 
@@ -1617,12 +1659,16 @@ def _pool_audit(
 def _dataset_fingerprint(
     path_index: FrozenPreboardPathIndex,
     rows: Sequence[Mapping[str, object]],
+    model_rows: Sequence[Mapping[str, object]],
     formal_orders: Sequence[Mapping[str, object]],
 ) -> str:
     payload = {
         "manifest_fingerprint": path_index.input_fingerprint,
         "row_features": sorted(
             str(row.get("feature_fingerprint") or "") for row in rows
+        ),
+        "model_training_features": sorted(
+            str(row.get("feature_fingerprint") or "") for row in model_rows
         ),
         "formal_orders": sorted(
             (
@@ -1683,7 +1729,7 @@ def evaluate_preboard_replay(
 
     emit("stage=model_fit")
     model = fit_preboard_model(
-        dataset.rows,
+        dataset.model_rows or dataset.rows,
         fit_dates=set(split.fit),
         calibration_dates=set(split.calibration),
     )
@@ -1764,6 +1810,10 @@ def evaluate_preboard_replay(
         dataset,
         allowed_dates=set(split.validation),
     )
+    recommendation_quality = _recommendation_quality_summary(
+        order_sets.get("c_recommendation_orders") or (),
+        allowed_dates=set(split.validation),
+    )
     c_half_hour = _half_hour_report(
         order_sets.get("c_action_rows") or (),
         orders=order_sets.get("c_first_board_orders") or (),
@@ -1782,7 +1832,7 @@ def evaluate_preboard_replay(
     )
     if calibration.thresholds is None:
         promotion = {
-            "status": "insufficient_for_portfolio_promotion",
+            "status": "insufficient_for_recommendation_promotion",
             "passed": False,
             "reason": calibration.status,
             "strict_action_count": strict_action_count,
@@ -1790,6 +1840,7 @@ def evaluate_preboard_replay(
         }
     else:
         promotion = decide_historical_promotion(
+            recommendation_quality=recommendation_quality,
             strict_first_board=validation_accounts["c_first_board"],
             formal_first_board=validation_accounts["a_first_board"],
             strict_combined=validation_accounts["c_combined"],
@@ -1837,6 +1888,7 @@ def evaluate_preboard_replay(
         "validation": {
             "probabilities": probability_qualification,
             "accounts": validation_accounts,
+            "recommendation_quality": recommendation_quality,
             "ranking_comparison": ranking_comparison,
             "stability": stability,
             "identity_and_timing": _decision_quality_report(
@@ -1895,6 +1947,9 @@ def _baseline_only_order_sets(
     first_board = [order for order in formal if not _is_relay_order(order)]
     return {
         "ranking_mode": PreboardRankingMode.CURRENT_D1_FIRST.value,
+        "c_recommendation_decision_rows": [],
+        "c_recommendation_rows": [],
+        "c_recommendation_orders": [],
         "c_action_pool_rows": [],
         "c_decision_rows": [],
         "c_action_rows": [],
@@ -1936,6 +1991,51 @@ def _phase_accounts(
         cost_multiplier=2.0,
     )
     return accounts
+
+
+def _recommendation_quality_summary(
+    orders: Sequence[Mapping[str, object]],
+    *,
+    allowed_dates: set[date],
+) -> dict[str, object]:
+    """Summarize every fillable pre-board recommendation without capacity cuts."""
+
+    selected = _orders_on_dates(orders, allowed_dates)
+    closed = [
+        row
+        for row in selected
+        if _number(row.get("d1_net_return_pct")) is not None
+    ]
+    returns = [float(row["d1_net_return_pct"]) for row in closed]
+    equity = 1.0
+    peak = 1.0
+    maximum_drawdown = 0.0
+    for value in returns:
+        equity *= 1.0 + value / 100.0
+        peak = max(peak, equity)
+        maximum_drawdown = min(maximum_drawdown, (equity / peak - 1.0) * 100.0)
+    wins = sum(value > 0.0 for value in returns)
+    touched = sum(row.get("eventual_formal_touch") is True for row in closed)
+    sealed = sum(row.get("sealed_limit") is True for row in closed)
+    return {
+        "signal_count": len(selected),
+        "closed_count": len(closed),
+        "win_count": wins,
+        "win_rate_pct": _percentage(wins, len(closed)),
+        "average_return_pct": (
+            round(sum(returns) / len(returns), 10) if returns else None
+        ),
+        "compounded_return_pct": round((equity - 1.0) * 100.0, 10),
+        "max_drawdown_pct": round(maximum_drawdown, 10),
+        "eventual_touch_count": touched,
+        "eventual_touch_rate_pct": _percentage(touched, len(closed)),
+        "sealed_count": sealed,
+        "sealed_rate_pct": _percentage(sealed, len(closed)),
+        "non_touch_count": len(closed) - touched,
+        "entry_contract": ENTRY_CONTRACT,
+        "exit_contract": EXIT_CONTRACT,
+        "capacity_rule": "all_qualified_recommendations_no_position_cut",
+    }
 
 
 def _account_summary(
@@ -2877,8 +2977,11 @@ def _replay_recent_current_code(
             for row in pools.quality_pool
             if (pair := _row_pair(row)) is not None
         )
-        quality_buffer.ingest_quality_pool(decision_at, pools.quality_pool)
-        cross_sections = quality_buffer.completed_quality_pool_snapshots(decision_at)
+        quality_buffer.ingest_quality_pool(
+            decision_at,
+            pools.model_training_pool or pools.quality_pool,
+        )
+        cross_sections = quality_buffer.completed_quality_pool_snapshots(decision_at)[-2:]
         projected_at_frame: list[dict[str, object]] = []
         for quality in pools.quality_pool:
             pair = _row_pair(quality)
@@ -3219,7 +3322,7 @@ def load_recent_live_timing_audit(
             "selected_already_touched_count": 0,
             "rows": [],
         }
-    observations = radar_observation_repository.load_observations(
+    observations = radar_observation_repository.load_replay_observations(
         start,
         end,
         symbols=query_symbols,
@@ -4008,9 +4111,9 @@ def _peak_rss_mib() -> float | None:
 def _blocked_report(dataset: ReplayDataset, started: float) -> dict[str, object]:
     return {
         "study_version": REPLAY_CONTRACT_VERSION,
-        "status": "insufficient_for_portfolio_promotion",
+        "status": "insufficient_for_recommendation_promotion",
         "decision": {
-            "status": "insufficient_for_portfolio_promotion",
+            "status": "insufficient_for_recommendation_promotion",
             "passed": False,
             "reason": dataset.status,
         },
@@ -4033,9 +4136,9 @@ def _insufficient_report(
 ) -> dict[str, object]:
     return {
         "study_version": REPLAY_CONTRACT_VERSION,
-        "status": "insufficient_for_portfolio_promotion",
+        "status": "insufficient_for_recommendation_promotion",
         "decision": {
-            "status": "insufficient_for_portfolio_promotion",
+            "status": "insufficient_for_recommendation_promotion",
             "passed": False,
             "reason": reason,
         },
@@ -4162,6 +4265,7 @@ def render_preboard_replay_markdown(report: Mapping[str, object]) -> str:
     pool_distributions = _mapping(pool_audit.get("distributions"))
     validation = _mapping(report.get("validation"))
     accounts = _mapping(validation.get("accounts"))
+    recommendation_quality = _mapping(validation.get("recommendation_quality"))
     identity = _mapping(validation.get("identity_and_timing"))
     calibration = _mapping(report.get("calibration"))
     model = _mapping(report.get("model"))
@@ -4260,6 +4364,7 @@ def render_preboard_replay_markdown(report: Mapping[str, object]) -> str:
         "## 数据真实性",
         "",
         f"- 数据指纹：`{dataset.get('input_fingerprint', '-')}`",
+        f"- 回放总耗时：{_display(performance.get('total_seconds'))} 秒",
         f"- 回放峰值 RSS：{_display(performance.get('peak_rss_mib'))} MiB",
         (
             "- 候选索引分层："
@@ -4454,6 +4559,26 @@ def render_preboard_replay_markdown(report: Mapping[str, object]) -> str:
         lines.append("- 无可用阻断统计。")
     lines.extend(
         [
+            "",
+            "## Validation 全量板前推荐质量",
+            "",
+            (
+                "- 推荐/闭合："
+                f"{recommendation_quality.get('signal_count', 0)}/"
+                f"{recommendation_quality.get('closed_count', 0)}"
+            ),
+            (
+                "- 胜率/平均 D+1/独立复利："
+                f"{_display_pct(recommendation_quality.get('win_rate_pct'))} / "
+                f"{_display_signed_pct(recommendation_quality.get('average_return_pct'))} / "
+                f"{_display_signed_pct(recommendation_quality.get('compounded_return_pct'))}"
+            ),
+            (
+                "- 后续触板/最终封板："
+                f"{_display_pct(recommendation_quality.get('eventual_touch_rate_pct'))} / "
+                f"{_display_pct(recommendation_quality.get('sealed_rate_pct'))}"
+            ),
+            "- 该分母不受一仓/两仓裁剪；未触板和触板未封仍按 D+1 收盘结算。",
             "",
             "## Validation 严格账户",
             "",
@@ -4697,7 +4822,7 @@ def render_preboard_replay_markdown(report: Mapping[str, object]) -> str:
     lines.extend(
         [
             "",
-            "## 最近两日买点根因",
+            "## 最近时序审计",
             "",
             f"- 正式触板正标签：{recent.get('formal_positive_count', 0)}",
             f"- 正标签存在板前帧：{recent.get('formal_positive_with_preboard_count', 0)}",
@@ -4936,7 +5061,17 @@ def build_historical_point_rows(
 ) -> list[dict[str, object]]:
     """Run visible candidates through the same quality and feature functions."""
 
+    rows, _model_rows = build_historical_point_row_sets(points)
+    return rows
+
+
+def build_historical_point_row_sets(
+    points: Sequence[Mapping[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Build separate recommendation and model-training point-time rows."""
+
     rows: list[dict[str, object]] = []
+    model_rows: list[dict[str, object]] = []
     ordered_points = sorted(
         (dict(point) for point in points),
         key=lambda point: _as_datetime(point.get("decision_at")) or datetime.max,
@@ -4973,15 +5108,19 @@ def build_historical_point_rows(
             "quality_pool_count": len(pools.quality_pool),
             "pool_rejection_counts": dict(pools.rejection_counts),
         }
-        for quality in pools.quality_pool:
-            symbol = str(quality.get("vt_symbol") or "").strip()
+        quality_symbols = {
+            str(row.get("vt_symbol") or "").strip()
+            for row in pools.quality_pool
+        }
+        for training_candidate in pools.model_training_pool:
+            symbol = str(training_candidate.get("vt_symbol") or "").strip()
             source = source_by_symbol.get(symbol)
             if source is None:
                 continue
             observation = {
                 **source,
                 "decision_at": decision_at.isoformat(),
-                "candidate": quality,
+                "candidate": training_candidate,
                 "cross_section_snapshots": cross_sections,
             }
             projection = project_historical_decision_features(observation)
@@ -4995,10 +5134,9 @@ def build_historical_point_rows(
                 and limit_price is not None
                 and next_quote_price < limit_price - 0.001
             )
-            rows.append(
-                compact_replay_row(
-                    {
-                    **quality,
+            projected = compact_replay_row(
+                {
+                    **training_candidate,
                     **projection,
                     **pool_counts,
                     "decision_at": decision_at.isoformat(),
@@ -5017,10 +5155,12 @@ def build_historical_point_rows(
                     "entry_contract": ENTRY_CONTRACT,
                     "exit_contract": EXIT_CONTRACT,
                     "replay_contract_version": REPLAY_CONTRACT_VERSION,
-                    }
-                )
+                }
             )
-    return rows
+            model_rows.append(projected)
+            if symbol in quality_symbols:
+                rows.append(projected)
+    return rows, model_rows
 
 
 def compact_replay_row(row: Mapping[str, object]) -> dict[str, object]:
@@ -5124,8 +5264,10 @@ def calibrate_policy_thresholds(
     calibration_dates: set[date] | Sequence[date],
     model_fingerprint: str,
     minimum_action_count: int = 10,
+    minimum_win_rate_pct: float = MINIMUM_RECOMMENDATION_WIN_RATE_PCT,
+    minimum_average_return_pct: float = MINIMUM_RECOMMENDATION_AVERAGE_RETURN_PCT,
 ) -> ReplayCalibration:
-    """Choose one threshold pair using calibration rows and labels only."""
+    """Choose a quality-qualified threshold pair from calibration rows only."""
 
     allowed_dates = tuple(sorted(set(calibration_dates)))
     allowed = set(allowed_dates)
@@ -5161,7 +5303,11 @@ def calibrate_policy_thresholds(
                 calibrated_dates=allowed_dates,
                 fingerprint="calibration-provisional",
             )
-            decisions = select_preboard_decisions(calibration_rows, provisional)
+            decisions = select_preboard_decisions(
+                calibration_rows,
+                provisional,
+                enforce_position_capacity=False,
+            )
             actions = [
                 row
                 for row in decisions
@@ -5172,6 +5318,16 @@ def calibrate_policy_thresholds(
             result = _threshold_metrics(actions, touch, eventual)
             metrics.append(result)
             if len(actions) < minimum_action_count:
+                continue
+            if (
+                (_number(result.get("d1_win_rate_pct")) or 0.0)
+                < minimum_win_rate_pct
+                or (
+                    _number(result.get("average_d1_net_return_pct"))
+                    or float("-inf")
+                )
+                <= minimum_average_return_pct
+            ):
                 continue
             key = (
                 _number(result.get("compounded_return_pct")) or float("-inf"),
@@ -5186,7 +5342,7 @@ def calibrate_policy_thresholds(
 
     if not candidates:
         return ReplayCalibration(
-            status="insufficient_calibration_actions",
+            status="insufficient_calibration_quality",
             thresholds=None,
             selected_metrics=None,
             metrics_by_threshold=tuple(metrics),
@@ -5200,6 +5356,9 @@ def calibrate_policy_thresholds(
         "minimum_eventual_touch_probability": selected[
             "minimum_eventual_touch_probability"
         ],
+        "minimum_action_count": minimum_action_count,
+        "minimum_win_rate_pct": minimum_win_rate_pct,
+        "minimum_average_return_pct": minimum_average_return_pct,
     }
     fingerprint = "sha256:" + sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("ascii")
@@ -5331,15 +5490,36 @@ def build_replay_order_sets(
     ranking_mode: PreboardRankingMode = PreboardRankingMode.CURRENT_D1_FIRST,
     opportunity_calibration: PreboardOpportunityCalibration | None = None,
 ) -> dict[str, object]:
-    """Build the formal A baseline and strict pre-board C account."""
+    """Build unlimited recommendation quality and a separate two-slot account."""
 
-    quality_rows = [dict(row) for row in rows if row.get("quality_gate_passed") is True]
+    quality_rows = [
+        dict(row)
+        for row in rows
+        if core_quality.is_public_quality_prepared(row)
+    ]
+    c_recommendation_decisions = evaluate_preboard_decisions(
+        quality_rows,
+        model_bundle=None,
+        thresholds=thresholds,
+        ranking_mode=ranking_mode,
+        opportunity_calibration=opportunity_calibration,
+        enforce_position_capacity=False,
+    )
+    c_recommendations = [
+        row
+        for row in c_recommendation_decisions
+        if row.get("decision_state") == "actionable"
+    ]
+    c_recommendation_orders = [
+        order for row in c_recommendations if (order := _action_order(row))
+    ]
     c_decisions = evaluate_preboard_decisions(
         quality_rows,
         model_bundle=None,
         thresholds=thresholds,
         ranking_mode=ranking_mode,
         opportunity_calibration=opportunity_calibration,
+        enforce_position_capacity=True,
     )
     c_action_pool = [
         row for row in quality_rows if can_compete_for_action(row, thresholds)
@@ -5353,6 +5533,9 @@ def build_replay_order_sets(
     formal_first_board = [order for order in formal if not _is_relay_order(order)]
     return {
         "ranking_mode": ranking_mode.value,
+        "c_recommendation_decision_rows": c_recommendation_decisions,
+        "c_recommendation_rows": c_recommendations,
+        "c_recommendation_orders": c_recommendation_orders,
         "c_action_pool_rows": c_action_pool,
         "c_decision_rows": c_decisions,
         "c_action_rows": c_actions,
@@ -5608,6 +5791,7 @@ def _compact_account(account: Mapping[str, object]) -> dict[str, object]:
 
 def decide_historical_promotion(
     *,
+    recommendation_quality: Mapping[str, object],
     strict_first_board: Mapping[str, object],
     formal_first_board: Mapping[str, object],
     strict_combined: Mapping[str, object],
@@ -5616,17 +5800,33 @@ def decide_historical_promotion(
     positive_stability_blocks: int,
     strict_action_count: int,
 ) -> dict[str, object]:
-    """Apply the frozen account gates without tuning after validation."""
+    """Gate formal quality on every recommendation, then verify account execution."""
+
+    recommendation_count = int(
+        _number(recommendation_quality.get("closed_count")) or 0
+    )
+    if recommendation_count < MINIMUM_VALIDATION_RECOMMENDATIONS:
+        return {
+            "status": "insufficient_for_recommendation_promotion",
+            "passed": False,
+            "reason": "validation_recommendations_below_20",
+            "recommendation_closed_count": recommendation_count,
+            "strict_action_count": int(strict_action_count),
+            "checks": {},
+        }
 
     if int(strict_action_count) < MINIMUM_VALIDATION_ACTIONS:
         return {
-            "status": "insufficient_for_portfolio_promotion",
+            "status": "insufficient_for_recommendation_promotion",
             "passed": False,
             "reason": "validation_strict_actions_below_20",
+            "recommendation_closed_count": recommendation_count,
             "strict_action_count": int(strict_action_count),
             "checks": {},
         }
     required_values = (
+        _number(recommendation_quality.get("win_rate_pct")),
+        _number(recommendation_quality.get("average_return_pct")),
         _number(strict_first_board.get("win_rate")),
         _number(formal_first_board.get("win_rate")),
         _number(strict_first_board.get("total_return_pct")),
@@ -5638,13 +5838,22 @@ def decide_historical_promotion(
     )
     if any(value is None for value in required_values):
         return {
-            "status": "insufficient_for_portfolio_promotion",
+            "status": "insufficient_for_recommendation_promotion",
             "passed": False,
-            "reason": "validation_account_metrics_incomplete",
+            "reason": "validation_quality_or_account_metrics_incomplete",
+            "recommendation_closed_count": recommendation_count,
             "strict_action_count": int(strict_action_count),
             "checks": {},
         }
     checks = {
+        "full_recommendation_win_rate": (
+            float(recommendation_quality["win_rate_pct"])
+            >= MINIMUM_RECOMMENDATION_WIN_RATE_PCT
+        ),
+        "full_recommendation_average_d1": (
+            float(recommendation_quality["average_return_pct"])
+            > MINIMUM_RECOMMENDATION_AVERAGE_RETURN_PCT
+        ),
         "first_board_win_rate": _win_rate_gate(
             strict_first_board,
             formal_first_board,
@@ -5675,6 +5884,7 @@ def decide_historical_promotion(
         ),
         "passed": passed,
         "reason": "all_frozen_gates_passed" if passed else "frozen_gate_failed",
+        "recommendation_closed_count": recommendation_count,
         "strict_action_count": int(strict_action_count),
         "positive_stability_blocks": int(positive_stability_blocks),
         "checks": checks,
@@ -5850,6 +6060,9 @@ def _threshold_metrics(
         "minimum_eventual_touch_probability": eventual_threshold,
         "action_count": len(actions),
         "d1_win_rate_pct": _percentage(sum(value > 0 for value in returns), len(returns)),
+        "average_d1_net_return_pct": (
+            round(mean(returns), 10) if returns else None
+        ),
         "compounded_return_pct": round((equity - 1.0) * 100.0, 10),
         "max_drawdown_pct": round(maximum_drawdown, 10),
         "formal_touch_within_3m_rate_pct": _percentage(within, len(actions)),

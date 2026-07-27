@@ -19,6 +19,7 @@ from alphaagent.server.services.limit_up.preboard_decision_contract import (
     PREBOARD_DECISION_VERSION,
     PreboardExecutionMode,
     PreboardPolicyThresholds,
+    is_strictly_preboard,
     preboard_market_gate,
 )
 from alphaagent.server.services.limit_up.preboard_decision_features import (
@@ -74,7 +75,10 @@ def score_live_preboard_snapshot(
         decision_at=decision_at,
         market_gate=_market_gate(snapshot),
     )
-    minute_buffer.ingest_quality_pool(decision_at, pools.quality_pool)
+    minute_buffer.ingest_quality_pool(
+        decision_at,
+        pools.model_training_pool or pools.quality_pool,
+    )
     quality_pool_snapshots = minute_buffer.completed_quality_pool_snapshots(
         decision_at
     )
@@ -99,9 +103,44 @@ def score_live_preboard_snapshot(
         projected,
         model_bundle=model_bundle,
         thresholds=thresholds,
-        prior_actions=prior_actions,
+        prior_actions=(),
         execution_mode=execution_mode,
+        enforce_position_capacity=False,
     )
+    portfolio_decisions = (
+        evaluate_preboard_decisions(
+            projected,
+            model_bundle=model_bundle,
+            thresholds=thresholds,
+            prior_actions=[
+                row for row in prior_actions if row.get("portfolio_selected") is True
+            ],
+            execution_mode=execution_mode,
+            enforce_position_capacity=True,
+        )
+        if thresholds is not None
+        else []
+    )
+    portfolio_by_symbol = {
+        str(row.get("vt_symbol") or ""): row
+        for row in portfolio_decisions
+        if str(row.get("decision_state") or "") == "actionable"
+    }
+    decisions = [
+        {
+            **dict(row),
+            "portfolio_selected": str(row.get("vt_symbol") or "")
+            in portfolio_by_symbol,
+            "daily_slot": (
+                portfolio_by_symbol[str(row.get("vt_symbol") or "")].get(
+                    "daily_slot"
+                )
+                if str(row.get("vt_symbol") or "") in portfolio_by_symbol
+                else None
+            ),
+        }
+        for row in decisions
+    ]
     ranked = sorted(
         (
             dict(row)
@@ -117,14 +156,30 @@ def score_live_preboard_snapshot(
         universe_rows=candidates,
     )
     public_candidates = [
-        row for row in ranked if _has_real_touch_probabilities(row)
+        {**row, "strictly_preboard": True}
+        for row in ranked
+        if is_strictly_preboard(row) and _has_real_touch_probabilities(row)
     ]
     formal_changed = any(
         row.get("formal_strategy_changed") is True for row in ranked
     )
+    existing_pairs = {
+        (
+            str(row.get("vt_symbol") or ""),
+            _as_date(row.get("trade_date")),
+        )
+        for row in prior_actions
+    }
+    new_actions = [
+        row
+        for row in ranked
+        if str(row.get("decision_state") or "") == "actionable"
+        and (str(row.get("vt_symbol") or ""), decision_at.date())
+        not in existing_pairs
+    ]
     action_saved = (
         preboard_decision_repository.save_decision_actions(
-            ranked,
+            new_actions,
             thresholds=thresholds,
         )
         if thresholds is not None
@@ -155,6 +210,17 @@ def score_live_preboard_snapshot(
         },
         "rejection_counts": dict(pools.rejection_counts),
         "preboard_candidates": public_candidates,
+        "preboard_recommendations": [
+            row
+            for row in ranked
+            if str(row.get("decision_state") or "") == "actionable"
+        ],
+        "preboard_portfolio": [
+            row
+            for row in ranked
+            if str(row.get("decision_state") or "") == "actionable"
+            and row.get("portfolio_selected") is True
+        ],
         "feature_rows": ranked,
         "observation_count": len(public_candidates),
         "action_saved": action_saved,
@@ -237,7 +303,7 @@ def freeze_and_settle(
     base = {
         "decision_version": PREBOARD_DECISION_VERSION,
         "probability_status": "model_unavailable",
-        "historical_promotion_status": "insufficient_for_portfolio_promotion",
+        "historical_promotion_status": "insufficient_for_recommendation_promotion",
         "formal_strategy_changed": False,
         "action_saved": 0,
     }
@@ -696,11 +762,13 @@ def _empty_live_score(*, status: str = "model_unavailable") -> dict[str, object]
         "status": status,
         "probability_status": status,
         "decision_version": PREBOARD_DECISION_VERSION,
-        "historical_promotion_status": "insufficient_for_portfolio_promotion",
+        "historical_promotion_status": "insufficient_for_recommendation_promotion",
         "execution_mode": PreboardExecutionMode.RESEARCH_ONLY.value,
         "model_fingerprint": None,
         "feature_fingerprint": None,
         "preboard_candidates": [],
+        "preboard_recommendations": [],
+        "preboard_portfolio": [],
         "feature_rows": [],
         "observation_count": 0,
         "action_saved": 0,
@@ -714,5 +782,5 @@ def _historical_status(execution_mode: PreboardExecutionMode) -> str:
         if execution_mode is PreboardExecutionMode.FORMAL
         else "historical_pass_for_shadow"
         if execution_mode is PreboardExecutionMode.SHADOW
-        else "insufficient_for_portfolio_promotion"
+        else "insufficient_for_recommendation_promotion"
     )

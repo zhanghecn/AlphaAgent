@@ -13,6 +13,7 @@ from alphaagent.server.services.limit_up.preboard_decision_model import (
     fit_preboard_model,
     qualify_preboard_probabilities,
     score_preboard_candidate,
+    score_preboard_rows,
     serialize_preboard_model_bundle,
 )
 
@@ -178,6 +179,8 @@ def test_quality_failed_rows_cannot_fit_or_score() -> None:
     rows, fit_dates, calibration_dates = _training_rows()
     for row in rows:
         row["quality_gate_passed"] = False
+        row["public_quality_preparation_passed"] = False
+        row["public_quality_status"] = "rejected"
 
     bundle = fit_preboard_model(
         rows,
@@ -187,6 +190,27 @@ def test_quality_failed_rows_cannot_fit_or_score() -> None:
     score = score_preboard_candidate(bundle, rows[0])
 
     assert bundle.status == "insufficient_fit"
+    assert score["probability_status"] == "quality_gate_failed"
+    assert score["touch_probability_3m"] is None
+    assert score["eventual_touch_probability"] is None
+
+
+def test_capture_rows_can_train_touch_shape_but_still_cannot_score() -> None:
+    rows, fit_dates, calibration_dates = _training_rows()
+    for row in rows:
+        row["quality_gate_passed"] = False
+        row["public_quality_preparation_passed"] = False
+        row["public_quality_status"] = "rejected"
+        row["model_training_eligible"] = True
+
+    bundle = fit_preboard_model(
+        rows,
+        fit_dates=fit_dates,
+        calibration_dates=calibration_dates,
+    )
+    score = score_preboard_candidate(bundle, rows[0])
+
+    assert bundle.status == "ready"
     assert score["probability_status"] == "quality_gate_failed"
     assert score["touch_probability_3m"] is None
     assert score["eventual_touch_probability"] is None
@@ -258,6 +282,28 @@ def test_score_preserves_historical_priors_and_probabilities_are_bounded() -> No
     assert score["d1_win_probability"] == 0.68
     assert score["seal_probability_given_touch"] == 0.74
     assert score["d1_win_probability_given_seal"] == 0.63
+
+
+def test_batch_scoring_matches_single_candidate_scoring() -> None:
+    rows, fit_dates, calibration_dates = _training_rows()
+    bundle = fit_preboard_model(
+        rows,
+        fit_dates=fit_dates,
+        calibration_dates=calibration_dates,
+    )
+    quality_failed = {
+        **rows[1],
+        "quality_gate_passed": False,
+        "public_quality_preparation_passed": False,
+        "public_quality_status": "rejected",
+    }
+    candidates = [rows[0], rows[2], quality_failed]
+
+    batch = score_preboard_rows(bundle, candidates)
+
+    for candidate, scored in zip(candidates, batch, strict=True):
+        expected = score_preboard_candidate(bundle, candidate)
+        assert {key: scored[key] for key in expected} == expected
 
 
 def test_missing_transaction_values_are_nan_not_zero_and_remain_scoreable() -> None:
@@ -393,6 +439,12 @@ def _row(
         "last_price": 10.0 + gain / 10.0,
         "limit_price": 11.0,
         "quality_gate_passed": True,
+        "public_quality_contract_version": "limit-up-core-abc-v2",
+        "public_quality_status": "qualified_waiting_trigger",
+        "public_quality_preparation_passed": True,
+        "quality_priority_tier": "A_industry_expanding",
+        "quality_win_probability": 0.70,
+        "quality_expected_d1_net_return_pct": 1.8,
         "feature_contract_version": PREBOARD_DECISION_VERSION,
         "feature_status": "scoreable",
         "feature_fingerprint": "sha256:" + "a" * 64,

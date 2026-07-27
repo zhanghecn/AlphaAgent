@@ -140,6 +140,29 @@ def test_global_top5_follows_d1_order_and_never_changes_actions() -> None:
     )
 
 
+def test_waiting_theme_exposes_primary_membership_without_claiming_a_lock() -> None:
+    tracker = DynamicLeaderTracker()
+
+    shadow = tracker.attach(
+        [
+            _candidate(
+                "600001.SSE",
+                _concept("A", "机器人", state="observe", leader_rank=4),
+                _concept("B", "存储芯片", state="observe", leader_rank=2),
+            )
+        ],
+        captured_at=CAPTURED_AT,
+        market_gate_passed=True,
+    )[0]["dynamic_leader_shadow"]
+
+    assert shadow["status"] == "waiting_theme"
+    assert shadow["concept_id"] == "B"
+    assert shadow["concept_name"] == "存储芯片"
+    assert shadow["concept_leader_rank"] == 2
+    assert shadow["locked_at"] is None
+    assert shadow["current_concept_top5"] is False
+
+
 def _candidate(
     symbol: str,
     *concepts: dict[str, object],

@@ -293,7 +293,7 @@ def test_forward_validation_service_loads_only_saved_live_version(monkeypatch) -
     assert captured == {
         "start": date(2026, 7, 10),
         "end": date(2026, 7, 10),
-        "strategy_version": "limit-up-core-abc-v1",
+        "strategy_version": "limit-up-core-abc-v2",
     }
     assert report["coverage"]["eligible_snapshot_count"] == 1
 

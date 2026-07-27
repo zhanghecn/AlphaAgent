@@ -174,7 +174,11 @@ class LiveMinuteBuffer:
             return
         self._quality_pools[bar_time] = _QualityPoolSample(
             captured_at=captured_at,
-            candidates=tuple(dict(row) for row in rows),
+            candidates=tuple(
+                compact
+                for row in rows
+                if (compact := _compact_quality_candidate(row)) is not None
+            ),
         )
         while len(self._quality_pools) > MAX_BUFFER_MINUTES:
             del self._quality_pools[min(self._quality_pools)]
@@ -237,6 +241,24 @@ def _number(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if isfinite(parsed) else None
+
+
+def _compact_quality_candidate(
+    row: Mapping[str, object],
+) -> dict[str, object] | None:
+    symbol = str(row.get("vt_symbol") or "").strip()
+    gain = _number(
+        row.get("gain_pct")
+        if row.get("gain_pct") is not None
+        else row.get("change_pct")
+    )
+    if not symbol:
+        return None
+    return {
+        "vt_symbol": symbol,
+        "change_pct": gain,
+        "industry_id": str(row.get("industry_id") or "").strip() or None,
+    }
 
 
 def _positive(value: object) -> float | None:

@@ -381,7 +381,9 @@ def test_live_actionable_recommendations_ignore_portfolio_capacity() -> None:
     assert all(row["action"] == "buy_now" for row in actionable)
 
 
-def test_live_risk_gate_publishes_unbounded_actionable_recommendations() -> None:
+def test_live_risk_gate_publishes_unbounded_actionable_recommendations(
+    monkeypatch,
+) -> None:
     signal = _live_signal(
         "600001.SSE",
         historical_win_rate=45.0,
@@ -402,6 +404,20 @@ def test_live_risk_gate_publishes_unbounded_actionable_recommendations() -> None
         },
         "data_quality": {"snapshot_age_seconds": 5},
     }
+    monkeypatch.setattr(
+        live_service,
+        "_attach_shared_first_board_quality",
+        lambda value: dict(value),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_load_prior_quality_state_safely",
+        lambda _captured_at: {
+            "known": True,
+            "prior_ab_seen": False,
+            "c_already_selected": False,
+        },
+    )
 
     result = live_service._apply_live_risk_gates(
         snapshot,
@@ -725,12 +741,17 @@ def _live_signal(
     d1_samples: int = 5,
 ) -> dict[str, object]:
     last_price = round(10.0 * (1.0 + change_pct / 100.0), 2)
+    triggered = action == "buy_now"
     return {
         "vt_symbol": vt_symbol,
         "name": vt_symbol,
         "board_level": 1 if lane == "first_board" else 3,
         "board_lane": lane,
-        "state": "near_limit",
+        "state": "sealed" if triggered else "near_limit",
+        "first_limit_time": "10:05:00" if triggered else "00:00:00",
+        "signal_time": "10:05:00",
+        "buy_time": "10:05:00",
+        "signal_kind": "first_touch",
         "last_price": last_price,
         "limit_price": 11.0,
         "lane_decision": "eligible",
@@ -748,6 +769,8 @@ def _live_signal(
         "historical_evidence": {
             "historical_win_rate": historical_win_rate,
             "d1_money_effect_sample_count": d1_samples,
+            "d1_money_effect_win_rate": 60.0,
+            "d1_money_effect_average_return_pct": 1.5,
             "tbox_score": 50.0,
             "smoothed_win_rate": 50.0,
         },

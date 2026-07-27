@@ -8,12 +8,14 @@ from alphaagent.server.services.limit_up.strategy_guide import (
 
 def test_strategy_guide_separates_selection_fields_from_future_outcomes() -> None:
     guide = get_limit_up_strategy_guide()
-    assert guide["strategy"]["selection_contract"] == "limit-up-core-abc-v1"
+    assert guide["strategy"]["selection_contract"] == "limit-up-core-abc-v2"
     assert guide["core_quality"]["minimum_prior_limit_count"] == 2
     assert guide["core_quality"]["maximum_prior_limit_count"] == 6
     assert guide["core_quality"]["b_tier_is_actionable"] is True
     assert guide["core_quality"]["c_tier_is_actionable"] is True
     assert guide["core_quality"]["c_daily_limit"] == 1
+    assert guide["core_quality"]["minimum_quality_win_probability"] == 0.50
+    assert guide["core_quality"]["quality_estimate_prior_strength"] == 10
 
     assert guide["strategy"]["selection_no_lookahead"] is True
     assert guide["ranking"]["history_cutoff"] == "result_date < signal_date"
@@ -34,13 +36,19 @@ def test_strategy_guide_separates_selection_fields_from_future_outcomes() -> Non
     priority = next(
         step for step in guide["selection_steps"] if step["order"] == 4
     )
-    assert "细分概念2到4只先行封板" in priority["rule"]
+    assert "质量胜率低于50%" in priority["rule"]
+    trigger = next(
+        step for step in guide["selection_steps"] if step["order"] == 5
+    )
+    assert trigger["title"] == "真实触板后形成正式买点"
+    assert "板前概率不可用不阻断合格触板" in trigger["rule"]
+    assert "概率再高也不能绕过质量门" in trigger["rule"]
     assert guide["preboard_decision"]["observation_is_buy_signal"] is False
     assert guide["preboard_decision"]["quality_pool_rule"].startswith(
-        "先通过正式同源首板质量门"
+        "先通过公共A/B/C质量门"
     )
     assert "不生成买点" in guide["preboard_decision"]["formal_baseline"]
-    assert guide["ranking"]["portfolio_gate"].startswith("A/B首板要求")
+    assert guide["ranking"]["portfolio_gate"].startswith("公共A/B/C质量胜率")
     rendered = str(guide)
     assert "known_at" not in rendered
     assert "decision_at" not in rendered
@@ -54,10 +62,12 @@ def test_strategy_guide_exposes_core_abc_evidence_and_forward_status() -> None:
     guide = get_limit_up_strategy_guide()
     evidence = guide["core_quality"]["frozen_evidence"]
 
-    assert evidence["closed_count"] == 143
-    assert evidence["win_count"] == 99
-    assert evidence["win_rate_pct"] == 69.2308
+    assert evidence["closed_count"] == 140
+    assert evidence["win_count"] == 97
+    assert evidence["win_rate_pct"] == 69.2857
     assert evidence["status"] == "historical_proxy_pass_forward_unconfirmed"
+    assert evidence["evidence_role"] == "current_v2_historical_replay"
+    assert evidence["source_contract"] == "limit-up-core-abc-v2"
     assert evidence["live_equivalent"] is False
     assert evidence["a_tier"] == {
         "closed_count": 41,
@@ -70,9 +80,9 @@ def test_strategy_guide_exposes_core_abc_evidence_and_forward_status() -> None:
         "win_rate_pct": 60.0,
     }
     assert evidence["c_tier"] == {
-        "closed_count": 72,
-        "win_count": 46,
-        "win_rate_pct": 63.8889,
+        "closed_count": 69,
+        "win_count": 44,
+        "win_rate_pct": 63.7681,
     }
     forward = guide["core_quality"]["forward_status"]
     assert forward["start_date"] == "2026-07-27"
@@ -83,14 +93,14 @@ def test_strategy_guide_exposes_core_abc_evidence_and_forward_status() -> None:
     assert forward["minimum_trade_days"] == 10
     assert forward["status"] == "collecting_forward"
     preboard = guide["preboard_decision"]
-    assert preboard["decision_version"] == "limit-up-preboard-decision-v1"
+    assert preboard["decision_version"] == "limit-up-preboard-decision-v2"
     assert preboard["observation_min_change_pct"] == 3.0
     assert preboard["observation_is_buy_signal"] is False
     assert preboard["probability_outputs"] == [
         "3分钟触板概率",
         "当日最终触板概率",
     ]
-    assert "limit-up-core-abc-v1" in preboard["formal_baseline"]
+    assert "limit-up-core-abc-v2" in preboard["formal_baseline"]
     assert "radar_evidence" not in guide
 
 
@@ -99,6 +109,6 @@ def test_strategy_guide_api_is_readable_without_triggering_market_data() -> None
 
     assert response.status_code == 200
     payload = response.json()["data"]
-    assert payload["strategy"]["live_version"] == "limit-up-core-abc-v1"
+    assert payload["strategy"]["live_version"] == "limit-up-core-abc-v2"
     assert payload["strategy"]["entry_mode"] == "sweep"
     assert payload["strategy"]["exit_mode"] == "next_close"

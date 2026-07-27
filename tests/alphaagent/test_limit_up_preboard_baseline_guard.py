@@ -23,14 +23,14 @@ from alphaagent.server.services.limit_up.versions import (
 )
 
 
-def test_preboard_work_uses_core_abc_and_keeps_execution_contract() -> None:
+def test_preboard_work_reuses_frozen_history_under_the_v2_execution_contract() -> None:
     assert HISTORY_STRATEGY_VERSION == "limit-up-core-abc-v1"
-    assert LIVE_STRATEGY_VERSION == "limit-up-core-abc-v1"
+    assert LIVE_STRATEGY_VERSION == "limit-up-core-abc-v2"
     assert (
         scheduled_execution.SCHEDULED_EXECUTION_VERSION
-        == "limit-up-core-abc-v1"
+        == "limit-up-core-abc-v2"
     )
-    assert cash_backtest.ACCOUNT_EXECUTION_VERSION == "limit-up-core-abc-v1"
+    assert cash_backtest.ACCOUNT_EXECUTION_VERSION == "limit-up-core-abc-v2"
     assert scheduled_execution.MAX_POSITIONS == 2
 
 
@@ -58,12 +58,14 @@ def test_rejected_preboard_model_remains_research_only() -> None:
     assert result["status"] == "model_unavailable"
     assert result["probability_status"] == "model_unavailable"
     assert result["historical_promotion_status"] == (
-        "insufficient_for_portfolio_promotion"
+        "insufficient_for_recommendation_promotion"
     )
     assert result["decision_version"] == PREBOARD_DECISION_VERSION
     assert result["model_fingerprint"] is None
     assert result["observation_count"] == 0
     assert result["preboard_candidates"] == []
+    assert result["preboard_recommendations"] == []
+    assert result["preboard_portfolio"] == []
     assert result["feature_rows"] == []
     assert result["action_saved"] == 0
     assert result["formal_strategy_changed"] is False

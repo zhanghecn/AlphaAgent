@@ -200,7 +200,9 @@ def test_live_service_attaches_dynamic_leader_without_creating_action(
         minute_buffer=_MinuteBuffer(),
     )
 
-    shadow = result["preboard_candidates"][0]["dynamic_leader_shadow"]
+    candidate_result = result["preboard_candidates"][0]
+    assert candidate_result["strictly_preboard"] is True
+    shadow = candidate_result["dynamic_leader_shadow"]
     assert shadow["concept_name"] == "存储芯片"
     assert shadow["concept_leader_rank"] == 2
     assert shadow["global_rank"] == 1
@@ -361,7 +363,13 @@ def test_shadow_action_uses_saved_slots_and_persists_only_the_new_decision(
         "project_live_decision_features",
         lambda _row: {"feature_status": "scoreable"},
     )
-    prior = [{"vt_symbol": "600009.SSE", "daily_slot": 1}]
+    prior = [
+        {
+            "vt_symbol": "600009.SSE",
+            "daily_slot": 1,
+            "portfolio_selected": True,
+        }
+    ]
     monkeypatch.setattr(
         service.preboard_decision_repository,
         "load_decision_actions",
@@ -377,6 +385,7 @@ def test_shadow_action_uses_saved_slots_and_persists_only_the_new_decision(
                 "decision_state": "actionable",
                 "execution_mode": "shadow",
                 "formal_strategy_changed": False,
+                "daily_slot": 2 if kwargs["enforce_position_capacity"] else None,
             }
         ]
 
@@ -400,9 +409,17 @@ def test_shadow_action_uses_saved_slots_and_persists_only_the_new_decision(
         minute_buffer=_MinuteBuffer(),
     )
 
-    assert evaluation_calls == [prior]
+    assert evaluation_calls == [(), prior]
     assert [row["vt_symbol"] for row in saved] == ["600001.SSE"]
+    assert saved[0]["portfolio_selected"] is True
+    assert saved[0]["daily_slot"] == 2
     assert result["action_saved"] == 1
+    assert [row["vt_symbol"] for row in result["preboard_recommendations"]] == [
+        "600001.SSE"
+    ]
+    assert [row["vt_symbol"] for row in result["preboard_portfolio"]] == [
+        "600001.SSE"
+    ]
     assert result["formal_strategy_changed"] is False
 
 

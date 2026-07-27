@@ -39,11 +39,15 @@ export function GuideView({
         <h2 className="text-base font-semibold">这是一个什么策略</h2>
         <p className="mt-2 text-sm leading-6 text-foreground">
           唯一正式合同是 <strong className="font-semibold">{core.contract_version}</strong>。
-          它先检查正确财报点时、原低位结构、盘中支撑、板位质量和同股盈利门，再要求过去
+          它先检查正确财报点时、原低位结构、盘中支撑和板位质量，再要求过去
           {core.prior_limit_window_days} 个交易日涨停 {core.minimum_prior_limit_count} 到
-          {core.maximum_prior_limit_count} 次形成 A/B 基座，并用资金与概念扩散交叉每天补一笔 C。在
+          {core.maximum_prior_limit_count} 次形成 A/B 基座，并用资金与概念扩散交叉每天补一笔 C。
+          A/B/C 层级先验与个股既有 D+1 样本收缩后，质量胜率至少
+          {(core.minimum_quality_win_probability * 100).toFixed(0)}% 且 D+1 预期为正才进入等待触板状态。在
           <strong className="font-semibold">{strategy.entry_windows.join("、")}</strong>
-          形成正式买点，D+1 按官方收盘价退出。实时列表展示全部合格信号，同一交易日可以有多笔。
+          开盘后持续实时计算；当前正式买点必须等真实触板或回封发生，再复核完整公共质量门。
+          板前概率目前只作研究排序，不生成正式买点。
+          D+1 按官方收盘价退出。实时列表展示全部合格信号，同一交易日可以有多笔。
         </p>
         <div className="mt-3 flex items-start gap-2 rounded-md border border-rise/40 bg-rise/5 px-3 py-2">
           <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-rise" />
@@ -174,8 +178,8 @@ export function GuideView({
           <Definition label="历史样本截止" value="只用信号日之前已闭合的历史记录" />
         </dl>
         <p className="mt-3 border-l-2 pl-3 text-xs leading-5 text-muted-foreground">
-          全量质量统计不受账户仓位限制；两仓尚无 A 时只使用一个非 A 仓。C 的早期历史成员含代理证据，
-          页面会持续标记其自然前向尚未确认。3% 板前观察和触板概率目前只是研究，不会生成正式买点。
+          正式推荐不限仓位，全部进入 D+1 全量质量统计。回测账户才按一仓或两仓模拟成交，
+          两仓尚无 A 时只使用一个非 A 仓。C 的早期历史成员含代理证据，页面会持续标记其自然前向尚未确认。
         </p>
       </section>
 

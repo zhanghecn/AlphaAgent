@@ -54,33 +54,36 @@ docker compose -f docker-compose.ghcr.yml config --images
 
 ### Current state
 
-- 本地唯一正式合同为 `limit-up-core-abc-v1`；历史、实时、调度和现金账本同源，其他
-  打板合同没有执行、查询或页面入口。首板、二进三、两仓、正式费用和 D+1 官方收盘退出保持不变。
+- 本地唯一正式质量合同为 `limit-up-core-abc-v2`；历史、实时、板前准备、调度和现金
+  账本同源。正式推荐输出全量合格信号；一仓/两仓只用于回测账户容量、费用和复利模拟。
 - 本地运行数据已自然推进到 `2026-07-24` 的 806 个可靠交易日；板前模型最终报告继续
   固定使用 802 日输入，不因新增交易日重选模型或阈值。
-- A+B+C 当前闭合 143 笔，`99/143=69.2308%`、平均 `+2.1203%`、独立信号复利
-  `+762.4136%`、最大回撤 `-21.0357%`。A 为 `35/41=85.3659%`，C 为
-  `46/72=63.8889%`，B 为 `18/30=60%`。严格单仓成交 80 笔、复利 `+457.7327%`；
-  两仓成交 96 笔、复利 `+226.6771%`。自然前向从 `2026-07-27` 起算，状态是
+- A+B+C v2 当前闭合 140 笔，`97/140=69.2857%`、平均 `+2.1478%`、独立信号复利
+  `+742.9976%`、最大回撤 `-21.0357%`。A 为 `35/41=85.3659%`，C 为
+  `44/69=63.7681%`，B 为 `18/30=60%`。严格单仓成交 79 笔、复利 `+376.6561%`；
+  两仓成交 95 笔、复利 `+201.9840%`。自然前向从新 v2 有效交易日起算，状态是
   `historical_proxy_pass_forward_unconfirmed`，不是实盘胜率承诺。
 - C 每日最多一笔，且只允许在当天此前尚无 A/B 时进入；同秒按 A/C/B，跨时点按真实
   到达顺序。历史概念成员主要是幸存者代理，不能把 `46/72` 当作自然前向成绩。
-- 唯一板前合同为 `limit-up-preboard-decision-v1`。概率资格为 `ready`，历史晋级为
-  `historical_rejected`，执行模式为 `research_only`，正式激活为 `not_eligible`；模型指纹
-  为 `sha256:b1d4ca83ca4dad25e1e74cda21c5b01c4f40d6e62ed9da62582d6eb8c651b71a`。
-- 双概率排序有效，但严格 C 首板账户只有 27 笔、51.85% 胜率、`+6.10%` 复利和
-  `-14.58%` 回撤，未通过相对 A 基线的冻结账户门。当前 D+1 优先与纯触板概率排序的
-  validation 结果完全相同；综合机会价值因 fit 触板未封仅 4 笔而不可评估。实时只展示
-  `preboard_candidates` 概率观察，不写 action、不占两仓、不改正式买点。
-- `>=3%` 只对已通过正式同源高质量门的首板启动观察，不是全市场母池、训练分母或
-  买点。普通 3% 股票不得进入模型、页面推荐或两仓。
-- 板前适配器复用同一帧已经计算的 shared quality 和 A/B/C 质量准备字段；A/B 或 C
-  准备通过即可进入板前概率池，尚未发生的触板时间不能提前否决。正式扫板仍要求完整
-  `core_quality_gate_passed`，因此该修复不改变正式 A+B+C、两仓或复利口径。
+- 唯一板前合同为 `limit-up-preboard-decision-v2`。当前新模型只完成冻结研究，calibration
+  没有满足至少 10 笔、胜率 `>=60%` 且平均 D+1 为正的板前买入规则，因此执行模式保持
+  `research_only`，不得发布成板前正式 action；旧 v1/52 维模型与 v2 特征合同不兼容。
+- 正式触板买点不依赖板前模型：真实触板/回封后重新执行 `limit-up-core-abc-v2`，概率
+  不可用但公共质量通过仍必须进入正式列表，概率再高但公共质量失败仍必须拒绝。当前重跑
+  141 条正式信号、两仓 95 笔，胜率 73.6842%、复利 `+201.9840%`。
+- `>=3%` 只对已通过正式公共质量准备的首板启动评分，不是买点。质量失败股票可以进入
+  独立触板形态训练池，但模型评分、页面推荐和正式买点仍必须经过公共质量门。
+- 板前适配器复用同一帧公共 A/B/C 质量字段；尚未发生的触板不能提前否决。当前板前
+  模型只作研究排序，不生成正式买点；真实触板/回封后重新执行完整公共质量门。账户层
+  再单独做一仓/两仓投影。
 - 新板前 `preboard_candidates` 必须严格低于涨停价；已触板或
   `sealed/resealed/failed` 后退出板前观察。正式 A+B+C 扫板链是独立口径：质量和执行门
   通过时，`near_limit/sealed/resealed` 仍可为 `buy_now`，页面必须显示涨停价排队买点；
   `failed` 炸板继续拦截。
+- 板前公开契约在评分输出、API 投影和前端渲染三层检查 `strictly_preboard`，并公开当帧
+  `last_price/limit_price` 供核验。动态题材未达到 `warming/launch + 龙1-龙5` 时仍展示
+  D-1 成员快照中的当前首要概念，但状态明确为“题材未启动/尚未形成龙位”；只有真实动态
+  lock 才显示题材龙位，无成员上下文才显示“概念数据缺失”。
 - 后端打板快扫为 10 秒、概念刷新约 30 秒、交易窗口调度心跳 2 秒；
   `/short-term` 活动时段实时快照为 10 秒，两日轨迹为 60 秒。
 - 两日轨迹默认只查询 `LIVE_STRATEGY_VERSION`，且只有正式 `action=buy_now` 才形成
@@ -96,11 +99,11 @@ docker compose -f docker-compose.ghcr.yml config --images
 - 市场、行业/概念、个股资金、当前换手、报价和快照新鲜度无法按
   `known_at <= decision_at` 重建时统一保留为 `diagnostic/non-blocking`，不得用日终值补造
   或作为实时独有硬门。共享风险、窗口、完整分钟和严格板前价格继续 fail closed。
-- 正式推荐只读取 `limit-up-core-abc-v1`。旧 A+B、v15/v9/v5 和研究观察不得作为
-  兼容回退或写入当前 `actionable_recommendations`。
+- 正式推荐只读取 `limit-up-core-abc-v2`。旧 A+B、v15/v9/v5 和未获准的研究观察不得
+  作为兼容回退或写入当前 `actionable_recommendations`。
 - 正式切换必须同时满足数据库 `forward_pass_for_formal` 和环境变量
-  `ALPHAAGENT_PREBOARD_FORMAL_MODEL_FINGERPRINT` 精确匹配；切换只原子替换首板动作和
-  两仓，二进三不变。
+  `ALPHAAGENT_PREBOARD_FORMAL_MODEL_FINGERPRINT` 精确匹配。切换后板前信号合并进全量
+  正式推荐，两仓只接收账户投影；既有触板扫板兜底和二进三保持不变。
 
 ## Focused Verification
 
@@ -113,8 +116,8 @@ npm --prefix frontend run build
 git diff --check
 ```
 
-2026-07-27 当前源码验收：打板后端 `959 passed`，compileall 和 `git diff --check`
-通过；本地依赖组没有 Ruff 可执行文件，本次改动未重跑 Ruff。前端最近一次为 `144 passed`
+2026-07-27 当前源码验收：打板后端 `962 passed`，compileall 和 `git diff --check`
+通过；本地依赖组没有 Ruff 可执行文件，本次改动未重跑 Ruff。前端最近一次为 `146 passed`
 且生产构建通过。Compose 只保留
 API 与统一 data-sync worker，旧独立板前 worker 已删除；数据库只有 1 个当前
 `active / ready / historical_rejected` 板前模型。`/short-term` 回测显示 A+B 全量
@@ -122,8 +125,9 @@ API 与统一 data-sync worker，旧独立板前 worker 已删除；数据库只
 
 ## Heavy Research Jobs
 
-全历史研究必须使用独立的 `alphaagent-research` Compose 服务。该服务固定为
-`0.10 CPU`、数值库单线程、单数据库连接，并通过 `PGOPTIONS` 关闭 PostgreSQL 查询
+全历史研究必须使用独立的 `alphaagent-research` Compose 服务。该服务默认限制为
+1 个 CPU，可用 `ALPHAAGENT_RESEARCH_CPUS` 调整；数值库单线程、单数据库连接，
+并通过 `PGOPTIONS` 关闭 PostgreSQL 查询
 并行；不得改用常驻 `alphaagent-api` 执行重放。
 
 唯一板前冻结回放命令：
@@ -136,15 +140,20 @@ docker compose --profile research run --rm -T --no-deps \
   alphaagent.server.services.limit_up.preboard_decision_replay \
   --sessions 89 \
   --end-date 2026-07-20 \
-  --json-output /tmp/limit_up_preboard_decision_validation_20260723.json \
-  --markdown-output memory/06_backtests/limit_up_preboard_decision_validation_20260723.md
+  --markdown-output memory/06_backtests/limit_up_preboard_v2_quality_separation_20260727.md
 ```
 
+2026-07-27 同口径 89 日复跑耗时 `691.513` 秒，峰值 RSS `6207.543 MiB`；优化前
+在 `0.10 CPU` 下约 83 分钟、峰值 RSS `9661.672 MiB`。热点是 Python 逐帧字典复制
+和逐行模型推理；模型已改为帧内批量评分，回放查询只加载所需列。PostgreSQL
+`EXPLAIN ANALYZE` 已确认雷达帧日期索引、观测主键/股票帧索引和分钟股票日期索引
+均命中，因此未增加重复索引。
+
 完成后必须核对数据/候选索引/模型指纹、44/15/30 日期切分和唯一终止状态；
-当前概率资格为 `ready`、最终状态为 `historical_rejected`，所以必须运行并核对严格 A/C
-账户，但执行模式只能是 `research_only`。任何指纹变化先定位，不得静默覆盖报告或在
-validation 上重新调参。当前完整回放耗时 `2259.389s`、峰值 RSS `6925.750 MiB`；固定
-内存中止门已删除，只保留实际峰值审计。
+当前 v2 模型训练状态为 `ready`，但 validation 概率资格为 `model_unavailable`、calibration
+买入质量也不达 60%，因此不发布板前模型，也不替换正式推荐。任何指纹
+变化先定位，不得静默覆盖报告或在 validation 上重新调参。固定内存中止门已删除，只保留
+实际峰值审计。
 
 低吸成员与题材门禁：
 
@@ -170,7 +179,7 @@ docker compose logs --tail=100 \
 
 - API、Web、PostgreSQL、Redis 和 data-sync worker 正常运行，无循环 import 或缺失模型
   替代；Compose 中不存在独立板前轮询服务。
-- 正式历史、实时、调度和现金账本统一声明 `limit-up-core-abc-v1`，不存在其他合同入口；
+- 正式历史、实时、调度和现金账本统一声明 `limit-up-core-abc-v2`，不存在其他合同入口；
   板前状态为
   `ready / historical_rejected / research_only / not_eligible`。
 - 根 Compose 本地开发默认启用 `ALPHAAGENT_STARTUP_BACKTEST_WARMUP=true`。首次全量回测
@@ -191,7 +200,7 @@ docker compose logs --tail=100 \
   `ensure_sync_schema()`，否则会误判正在执行的任务为旧进程残留。
 - `eod_1900` 负责主盘后采集，`eod_finalize_2130` 负责重试、打板历史重建和唯一
   板前冻结/结算。中断任务保留失败证据，由下一个合法时点补偿。
-- `sync_limit_up_exit_minutes` 只保留为手动 14:30 研究；正式 `limit-up-core-abc-v1` 退出继续读取 D+1
+- `sync_limit_up_exit_minutes` 只保留为手动 14:30 研究；正式 `limit-up-core-abc-v2` 退出继续读取 D+1
   官方日线收盘。Tick/L2 和真实排队成交不能由夜间任务补造。
 
 ## Data Notes

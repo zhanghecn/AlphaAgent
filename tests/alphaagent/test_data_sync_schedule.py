@@ -910,7 +910,7 @@ def test_preboard_decision_freeze_runs_only_in_2130_after_reliable_inputs(monkey
         "freeze_and_settle",
         lambda: {
             "status": "incomplete_scope",
-            "decision_version": "limit-up-preboard-decision-v1",
+            "decision_version": "limit-up-preboard-decision-v2",
             "feature_row_count": 3,
             "rows_written": 120,
             "message": "collecting",
@@ -920,7 +920,7 @@ def test_preboard_decision_freeze_runs_only_in_2130_after_reliable_inputs(monkey
     result = svc.DataSyncRunner()._run_sync_limit_up_preboard_decision({})
 
     assert result["decision_status"] == "incomplete_scope"
-    assert result["decision_version"] == "limit-up-preboard-decision-v1"
+    assert result["decision_version"] == "limit-up-preboard-decision-v2"
     assert result["rows_read"] == 3
     assert result["rows_written"] == 120
 

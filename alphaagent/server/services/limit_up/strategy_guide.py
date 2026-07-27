@@ -11,7 +11,7 @@ from alphaagent.server.services.limit_up.preboard_decision_contract import (
     PREBOARD_DECISION_VERSION,
 )
 
-GUIDE_VERSION = "limit-up-strategy-guide-v4"
+GUIDE_VERSION = "limit-up-strategy-guide-v7"
 
 
 def get_limit_up_strategy_guide() -> dict[str, object]:
@@ -21,7 +21,8 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
         "guide_version": GUIDE_VERSION,
         "strategy": {
             "live_version": LIVE_STRATEGY_VERSION,
-            "history_version": HISTORY_STRATEGY_VERSION,
+            "history_version": LIVE_STRATEGY_VERSION,
+            "history_dataset_version": HISTORY_STRATEGY_VERSION,
             "selection_no_lookahead": True,
             "selection_contract": LIVE_STRATEGY_VERSION,
             "preboard_research_contract": PREBOARD_DECISION_VERSION,
@@ -43,26 +44,36 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
             "c_daily_limit": 1,
             "c_evidence_status": "historical_proxy_pass_forward_unconfirmed",
             "priority_rule": "同一时点A优先于C、C优先于B；跨时点按真实到达顺序",
+            "minimum_quality_win_probability": 0.50,
+            "minimum_quality_expected_d1_net_return_pct": 0.0,
+            "quality_estimate_prior_strength": 10,
+            "quality_states": [
+                "rejected",
+                "qualified_waiting_trigger",
+                "actionable",
+            ],
             "frozen_evidence": {
                 "status": "historical_proxy_pass_forward_unconfirmed",
+                "evidence_role": "current_v2_historical_replay",
+                "source_contract": "limit-up-core-abc-v2",
                 "live_equivalent": False,
                 "date_start": "2025-07-10",
                 "date_end": "2026-07-23",
-                "closed_count": 143,
-                "win_count": 99,
-                "win_rate_pct": 69.2308,
-                "average_net_return_pct": 2.1203,
+                "closed_count": 140,
+                "win_count": 97,
+                "win_rate_pct": 69.2857,
+                "average_net_return_pct": 2.1478,
                 "max_drawdown_pct": -21.0357,
-                "hard_loss_rate_pct": 6.9930,
+                "hard_loss_rate_pct": 7.1429,
                 "a_tier": {
                     "closed_count": 41,
                     "win_count": 35,
                     "win_rate_pct": 85.3659,
                 },
                 "c_tier": {
-                    "closed_count": 72,
-                    "win_count": 46,
-                    "win_rate_pct": 63.8889,
+                    "closed_count": 69,
+                    "win_count": 44,
+                    "win_rate_pct": 63.7681,
                 },
                 "b_tier": {
                     "closed_count": 30,
@@ -70,22 +81,22 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                     "win_rate_pct": 60.0,
                 },
                 "single_position": {
-                    "closed_count": 80,
-                    "win_count": 57,
-                    "win_rate_pct": 71.25,
-                    "total_return_pct": 457.7327,
-                    "max_drawdown_pct": -19.4234,
+                    "closed_count": 79,
+                    "win_count": 55,
+                    "win_rate_pct": 69.6203,
+                    "total_return_pct": 376.6561,
+                    "max_drawdown_pct": -19.2649,
                 },
                 "two_positions": {
-                    "closed_count": 96,
-                    "win_count": 72,
-                    "win_rate_pct": 75.0,
-                    "total_return_pct": 226.6771,
-                    "max_drawdown_pct": -8.8039,
+                    "closed_count": 95,
+                    "win_count": 70,
+                    "win_rate_pct": 73.6842,
+                    "total_return_pct": 201.9840,
+                    "max_drawdown_pct": -8.6709,
                 },
                 "report": (
                     "memory/06_backtests/"
-                    "limit_up_abc_formal_replay_20260727.md"
+                    "limit_up_unified_public_quality_20260727.md"
                 ),
             },
             "forward_status": {
@@ -114,7 +125,7 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                 "order": 1,
                 "title": "锁定唯一正式合同",
                 "rule": (
-                    "历史回测和实时推荐统一使用limit-up-core-abc-v1，"
+                    "历史回测和实时推荐统一使用limit-up-core-abc-v2，"
                     "任何字段缺失都按当前合同失败关闭。"
                 ),
                 "timing": "启动时固定合同",
@@ -124,34 +135,37 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                 "title": "通过基础质量门",
                 "rule": (
                     "只保留合格沪深主板的首板和二进三，并通过正确财报点时、风险、"
-                    "低位结构、盘中支撑、lane质量和同股盈利门。"
+                    "低位结构、盘中支撑和lane结构质量。"
                 ),
                 "timing": "财报按披露时点，行情不晚于当前决策时点",
             },
             {
                 "order": 3,
-                "title": "建立A/B质量基座",
+                "title": "建立A/B/C质量层",
                 "rule": (
                     "A/B先要求过去126个交易日涨停2到6次并通过同股盈利门；"
-                    "D-1行业成交额扩张为A，否则为B。"
+                    "D-1行业成交额扩张为A，否则为B。盈利门不足但满足因果资金、"
+                    "回撤或概念扩散交叉时，每日最多补一笔C。"
                 ),
                 "timing": "只统计信号日前已完成交易日",
             },
             {
                 "order": 4,
-                "title": "因果补充C层",
+                "title": "计算公共质量胜率与D+1预期",
                 "rule": (
-                    "只在当日此前没有A/B且C尚未使用时，按混合期低位回撤、"
-                    "行业资金覆盖或触板前细分概念2到4只先行封板三类交叉补一笔C。"
+                    "分别用A、C、B历史层级先验，与该股票决策时点之前已有的D+1"
+                    "胜率和平均净收益按10笔先验强度收缩；质量胜率低于50%或"
+                    "D+1预期不为正直接淘汰。"
                 ),
-                "timing": "D-1字段加当前触板前已发生事件",
+                "timing": "只使用决策时点之前已闭合的D+1样本",
             },
             {
                 "order": 5,
-                "title": "等待正式盘中触发",
+                "title": "真实触板后形成正式买点",
                 "rule": (
-                    "A/C首板和二进三从10:00起行动；B首板只接受10:30后首次触板"
-                    "或10:30后回封。二进三9:35到10:00只观察，10:00后才行动。"
+                    "开盘后持续扫描；真实首次触板或回封发生后，重新执行完整公共"
+                    "A/B/C质量门。只有public_quality_actionable为真才进入正式买点；"
+                    "板前概率不可用不阻断合格触板，概率再高也不能绕过质量门。"
                 ),
                 "timing": "盘中实时",
             },
@@ -159,8 +173,10 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                 "order": 6,
                 "title": "按A、C、B排序并保留A仓位",
                 "rule": (
-                    "全量列表输出所有通过信号；同一时点按A、C、B排序。两仓在"
-                    "尚无A时最多使用一个非A仓，C每天最多一笔，跨时点不事后换票。"
+                    "全量列表输出所有通过信号；同一时点先按A、C、B，再按公共"
+                    "质量胜率、D+1预期和触板概率排序。正式推荐不受仓位截断；"
+                    "回测两仓在尚无A时最多使用一个非A仓。C每天最多一笔，"
+                    "跨时点不事后换票。"
                 ),
                 "timing": "每个有效快照重新计算",
             },
@@ -175,27 +191,28 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
             },
         ],
         "ranking": {
-            "first_board_primary": "同股D+1预期净收益降序",
-            "first_board_secondary": "D+1胜率、3分钟/最终触板概率、封板率依次降序",
+            "first_board_primary": "A、C、B质量层后按公共质量胜率降序",
+            "first_board_secondary": "公共D+1预期、3分钟/最终触板概率、封板率依次降序",
             "historical_win_rate_formula": (
                 "个股126日封停成功率 × 同股历史首板封住后D+1收盘净赚钱率"
             ),
             "history_cutoff": "result_date < signal_date",
             "ranking_only": True,
             "portfolio_gate": (
-                "A/B首板要求至少5个前序D+1样本且联合率不低于30%；"
-                "C只覆盖三个指定排除原因并满足资金/情绪交叉，且每天最多一笔"
+                "公共A/B/C质量胜率不低于50%且D+1预期为正；C只覆盖三个指定"
+                "排除原因并满足资金/情绪交叉，且每天最多一笔"
             ),
         },
         "preboard_decision": {
             "decision_version": PREBOARD_DECISION_VERSION,
             "observation_min_change_pct": CAPTURE_MIN_CHANGE_PCT,
             "observation_is_buy_signal": False,
-            "quality_pool_rule": "先通过正式同源首板质量门，再由涨幅达到3%激活观察",
+            "quality_pool_rule": "先通过公共A/B/C质量门，再由涨幅达到3%激活观察",
             "probability_outputs": ["3分钟触板概率", "当日最终触板概率"],
             "ranking_order": [
-                "同股D+1预期净收益",
-                "同股D+1胜率",
+                "A、C、B质量层",
+                "公共质量胜率",
+                "公共D+1预期净收益",
                 "3分钟触板概率",
                 "最终触板概率",
                 "触板后封板率",
@@ -206,8 +223,8 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                 "才补充正式板前买点和概率排序，且不删除同股当前扫板兜底"
             ),
             "formal_baseline": (
-                "正式合同仅为limit-up-core-abc-v1；板前概率当前只作研究观察，"
-                "不生成买点"
+                "当前正式合同仅为limit-up-core-abc-v2真实触板/回封买点；"
+                "板前概率当前只作研究观察，不生成买点"
             ),
         },
         "field_groups": [

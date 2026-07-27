@@ -94,7 +94,7 @@ def test_same_minute_uses_d1_return_then_d1_win_before_touch_probability() -> No
         row for row in decisions if row["preboard_state"] == PreboardState.ACTIONABLE
     ]
 
-    assert [row["vt_symbol"] for row in actions] == ["600002.SSE", "600003.SSE"]
+    assert [row["vt_symbol"] for row in actions] == ["600003.SSE", "600001.SSE"]
     assert [row["daily_slot"] for row in actions] == [1, 2]
 
 
@@ -236,9 +236,10 @@ def test_touched_quote_is_missed_and_never_actionable() -> None:
     assert all(row["daily_slot"] is None for row in decisions)
 
 
-def test_missing_prior_or_failed_environment_cannot_act() -> None:
+def test_failed_public_quality_or_environment_cannot_act() -> None:
     missing_prior = _row("600001.SSE", "10:05:00")
-    missing_prior["historical_prior_status"] = "incomplete"
+    missing_prior["public_quality_preparation_passed"] = False
+    missing_prior["public_quality_status"] = "rejected"
     environment_failed = _row("600002.SSE", "10:05:00")
     environment_failed["execution_environment_passed"] = False
 
@@ -262,7 +263,7 @@ def test_shared_decision_entry_fails_closed_without_promoted_policy() -> None:
         thresholds=None,
     )
 
-    assert PREBOARD_DECISION_VERSION == "limit-up-preboard-decision-v1"
+    assert PREBOARD_DECISION_VERSION == "limit-up-preboard-decision-v2"
     assert [row["preboard_state"] for row in decisions] == [
         PreboardState.OBSERVE,
         PreboardState.MISSED,
@@ -311,6 +312,33 @@ def test_later_rows_for_same_stock_do_not_create_second_action() -> None:
     ) == 1
 
 
+def test_full_recommendations_are_not_cut_by_position_capacity() -> None:
+    rows = [
+        _row(f"60000{index}.SSE", "10:05:00", expected_return=3.0 - index)
+        for index in range(3)
+    ]
+
+    recommendations = select_preboard_decisions(
+        rows,
+        _thresholds(),
+        enforce_position_capacity=False,
+    )
+
+    actionable = [
+        row
+        for row in recommendations
+        if row["preboard_state"] == PreboardState.ACTIONABLE
+    ]
+    assert [row["vt_symbol"] for row in actionable] == [
+        "600000.SSE",
+        "600001.SSE",
+        "600002.SSE",
+    ]
+    assert all(row["daily_slot"] is None for row in actionable)
+    assert all(row["portfolio_selected"] is False for row in actionable)
+    assert all(row["selection_scope"] == "recommendation" for row in actionable)
+
+
 def _thresholds() -> PreboardPolicyThresholds:
     return PreboardPolicyThresholds(
         minimum_touch_probability_3m=0.60,
@@ -355,6 +383,16 @@ def _row(
         "last_price": last_price,
         "limit_price": 11.0,
         "quality_gate_passed": quality,
+        "public_quality_contract_version": "limit-up-core-abc-v2",
+        "public_quality_status": (
+            "qualified_waiting_trigger" if quality else "rejected"
+        ),
+        "public_quality_preparation_passed": quality,
+        "public_quality_actionable": False,
+        "public_quality_reason": "waiting_for_trigger" if quality else "rejected",
+        "quality_priority_tier": "B_recognition_only",
+        "quality_win_probability": d1_win,
+        "quality_expected_d1_net_return_pct": expected_return,
         "preparation_environment_passed": True,
         "execution_environment_passed": True,
         "entry_window_passed": True,

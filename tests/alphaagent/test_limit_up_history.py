@@ -25,9 +25,35 @@ def test_history_replay_schema_uses_date_and_version_primary_key() -> None:
     assert {"payload", "coverage", "source_mode"}.issubset(table.c.keys())
 
 
-def test_formal_history_and_live_share_the_core_abc_contract() -> None:
+def test_v2_formal_filter_reuses_the_frozen_v1_history_dataset() -> None:
     assert history_engine.HISTORY_STRATEGY_VERSION == "limit-up-core-abc-v1"
-    assert versions.LIVE_STRATEGY_VERSION == "limit-up-core-abc-v1"
+    assert versions.LIVE_STRATEGY_VERSION == "limit-up-core-abc-v2"
+
+
+def test_compact_trade_keeps_public_quality_estimates_for_audit() -> None:
+    compact = history_service._compact_account_trade(
+        {
+            "vt_symbol": "600001.SSE",
+            "quality_priority_tier": "A_industry_expanding",
+            "public_quality_contract_version": "limit-up-core-abc-v2",
+            "public_quality_status": "actionable",
+            "public_quality_actionable": True,
+            "quality_win_probability": 0.75,
+            "quality_expected_d1_net_return_pct": 2.5,
+            "stock_d1_sample_count": 8,
+        }
+    )
+
+    assert compact == {
+        "vt_symbol": "600001.SSE",
+        "quality_priority_tier": "A_industry_expanding",
+        "public_quality_contract_version": "limit-up-core-abc-v2",
+        "public_quality_status": "actionable",
+        "public_quality_actionable": True,
+        "quality_win_probability": 0.75,
+        "quality_expected_d1_net_return_pct": 2.5,
+        "stock_d1_sample_count": 8,
+    }
 
 
 def test_scheduled_backtest_cache_key_changes_after_external_ledger_rebuild(

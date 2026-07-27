@@ -14,7 +14,7 @@ describe("limit-up strategy guide API", () => {
         guide_version: "limit-up-strategy-guide-v1",
         strategy: { selection_no_lookahead: true },
         preboard_decision: {
-          decision_version: "limit-up-preboard-decision-v1",
+          decision_version: "limit-up-preboard-decision-v2",
           observation_is_buy_signal: false,
         },
       },
@@ -26,7 +26,7 @@ describe("limit-up strategy guide API", () => {
     await expect(fetchLimitUpStrategyGuide()).resolves.toMatchObject({
       strategy: { selection_no_lookahead: true },
       preboard_decision: {
-        decision_version: "limit-up-preboard-decision-v1",
+        decision_version: "limit-up-preboard-decision-v2",
         observation_is_buy_signal: false,
       },
     });

@@ -15,6 +15,7 @@ export interface LimitUpStrategyGuide {
   strategy: {
     live_version: string;
     history_version: string;
+    history_dataset_version: string;
     selection_no_lookahead: boolean;
     selection_contract: string;
     preboard_research_contract: string;
@@ -36,8 +37,14 @@ export interface LimitUpStrategyGuide {
     c_daily_limit: number;
     c_evidence_status: string;
     priority_rule: string;
+    minimum_quality_win_probability: number;
+    minimum_quality_expected_d1_net_return_pct: number;
+    quality_estimate_prior_strength: number;
+    quality_states: string[];
     frozen_evidence: {
       status: string;
+      evidence_role: string;
+      source_contract: string;
       live_equivalent: boolean;
       date_start: string;
       date_end: string;
@@ -212,6 +219,11 @@ export interface LimitUpLiveSignal {
   lane_entry_quality_score?: number | null;
   sector_route?: "realtime_industry" | "realtime_concept_launch" | string | null;
   portfolio_selected?: boolean;
+  public_quality_status?: "rejected" | "qualified_waiting_trigger" | "actionable" | string;
+  quality_priority_tier?: string | null;
+  quality_win_probability?: number | null;
+  quality_expected_d1_net_return_pct?: number | null;
+  touch_probability_3m?: number | null;
   seal_gate_passed?: boolean | null;
   momentum_gate_passed?: boolean | null;
   premium_gate_passed?: boolean | null;
@@ -311,8 +323,15 @@ export interface PreboardCandidate {
   name: string;
   decision_state: "observe" | "prepare" | "actionable" | "missed" | "rejected";
   execution_mode: "research_only" | "shadow" | "formal";
+  strictly_preboard: boolean;
+  last_price: number | null;
+  limit_price: number | null;
   change_pct: number | null;
   distance_to_limit_pct: number | null;
+  quality_priority_tier: "A_industry_expanding" | "C_capital_diffusion_rescue" | "B_recognition_only" | string;
+  public_quality_status: "qualified_waiting_trigger" | "actionable" | string;
+  quality_expected_d1_net_return_pct: number | null;
+  quality_win_probability: number | null;
   expected_d1_net_return_pct: number | null;
   d1_win_probability: number | null;
   touch_probability_3m: number | null;
@@ -643,7 +662,22 @@ export interface LimitUpLaneLedgerTrade {
   signal_kind?: string | null;
   prior_limit_count_126?: number | null;
   prior_industry_turnover_ratio_5d?: number | null;
-  quality_priority_tier?: "A_industry_expanding" | "B_recognition_only" | string | null;
+  quality_priority_tier?: "A_industry_expanding" | "C_capital_diffusion_rescue" | "B_recognition_only" | string | null;
+  public_quality_contract_version?: string | null;
+  public_quality_status?: "rejected" | "qualified_waiting_trigger" | "actionable" | string | null;
+  public_quality_gate_passed?: boolean | null;
+  public_quality_actionable?: boolean | null;
+  public_quality_reason?: string | null;
+  quality_tier_prior_win_probability?: number | null;
+  quality_tier_prior_expected_d1_net_return_pct?: number | null;
+  quality_tier_prior_sample_count?: number | null;
+  quality_estimate_prior_strength?: number | null;
+  quality_estimate_stock_sample_count?: number | null;
+  quality_win_probability?: number | null;
+  quality_expected_d1_net_return_pct?: number | null;
+  stock_d1_sample_count?: number | null;
+  stock_d1_win_rate?: number | null;
+  stock_d1_average_return_pct?: number | null;
   profitability_gate_passed?: boolean | null;
   profitability_gate_reason?: string | null;
   recognition_gate_passed?: boolean | null;

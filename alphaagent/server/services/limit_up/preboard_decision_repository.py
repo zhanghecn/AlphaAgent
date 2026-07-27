@@ -534,9 +534,12 @@ def _action_row_values(
         row.get("eventual_touch_probability"),
         "eventual_touch_probability",
     )
-    slot = _required_integer(row.get("daily_slot"), "daily_slot")
-    if slot not in {1, 2}:
-        raise ValueError("daily_slot must be 1 or 2")
+    portfolio_selected = row.get("portfolio_selected") is True
+    slot = _optional_integer(row.get("daily_slot"))
+    if portfolio_selected and slot not in {1, 2}:
+        raise ValueError("portfolio recommendation requires daily_slot 1 or 2")
+    if not portfolio_selected and slot is not None:
+        raise ValueError("full recommendation outside portfolio cannot have daily_slot")
     decision = {
         "model_fingerprint": _required_fingerprint(
             row.get("model_fingerprint"), "model_fingerprint"
@@ -548,6 +551,7 @@ def _action_row_values(
             row.get("trade_date") or captured_at.date(), "trade_date"
         ),
         "daily_slot": slot,
+        "portfolio_selected": portfolio_selected,
         "frame_id": _required_integer(row.get("frame_id"), "frame_id"),
         "quote_observed_at": _optional_datetime(row.get("quote_observed_at")),
         "last_price": _number(row.get("last_price")),

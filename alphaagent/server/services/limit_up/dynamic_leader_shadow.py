@@ -142,6 +142,9 @@ class DynamicLeaderTracker:
                 current_eligible = True
                 status = "locked"
 
+        if current_context is None and contexts:
+            current_context = min(contexts, key=_context_selection_key)
+
         result["dynamic_leader_shadow"] = _shadow_payload(
             result,
             lock=lock,
@@ -186,14 +189,19 @@ def _shadow_payload(
 ) -> dict[str, object]:
     observed = lock.observed_frames if lock is not None else 0
     eligible = lock.eligible_frames if lock is not None else 0
+    concept_id = _text(context.get("concept_id")) if context else None
+    concept_name = _text(context.get("concept_name")) if context else None
+    if lock is not None:
+        concept_id = lock.concept_id
+        concept_name = lock.concept_name
     financial = _mapping(row.get("financial_snapshot"))
     return {
         "policy_version": POLICY_VERSION,
         "status": status,
         "execution_effect": "none_research_only",
         "market_gate_passed": market_gate_passed,
-        "concept_id": lock.concept_id if lock is not None else None,
-        "concept_name": lock.concept_name if lock is not None else None,
+        "concept_id": concept_id,
+        "concept_name": concept_name,
         "concept_state": context.get("concept_state") if context else None,
         "concept_leader_rank": _integer(context.get("leader_rank")) if context else None,
         "locked_at": lock.locked_at.isoformat() if lock is not None else None,

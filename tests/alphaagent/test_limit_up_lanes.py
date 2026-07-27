@@ -2398,7 +2398,7 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
     ]
     assert report["portfolio_policy"]["excluded_lanes"] == ["high_board"]
     core_filter = report["core_quality_filter"]
-    assert core_filter["contract_version"] == "limit-up-core-abc-v1"
+    assert core_filter["contract_version"] == "limit-up-core-abc-v2"
     assert core_filter["first_board_minimum_d1_samples"] == 5
     assert core_filter["first_board_minimum_combined_rate"] == 30.0
     assert core_filter["minimum_prior_limit_count_126"] == 2

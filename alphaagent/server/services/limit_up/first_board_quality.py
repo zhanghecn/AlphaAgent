@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from math import isfinite
 
-from alphaagent.server.services.limit_up import scheduled_execution
+from alphaagent.server.services.limit_up import core_quality, scheduled_execution
 from alphaagent.server.services.limit_up.domain import is_eligible_main_board
 from alphaagent.server.services.limit_up.lane_research import evaluate_lane_candidate
 from alphaagent.server.services.limit_up.preboard_decision_contract import (
@@ -39,6 +39,7 @@ class PreboardPools:
     eligible_first_board_pool: tuple[dict[str, object], ...]
     quality_pool: tuple[dict[str, object], ...]
     rejection_counts: dict[str, int]
+    model_training_pool: tuple[dict[str, object], ...] = ()
     candidate_audit: tuple[dict[str, object], ...] = ()
 
 
@@ -48,6 +49,8 @@ def evaluate_first_board_quality_at_time(
     decision_at: datetime,
     market_gate: Mapping[str, object],
     execution_checks: Sequence[Mapping[str, object]],
+    prior_ab_seen: bool = False,
+    c_already_selected: bool = False,
 ) -> dict[str, object]:
     """Apply the formal first-board quality rules to one visible frame."""
 
@@ -74,7 +77,13 @@ def evaluate_first_board_quality_at_time(
         universe_gate_passed
         and lane.get("lane") == "first_board"
         and not hard_blockers
-        and profitability.get("profitability_gate_passed") is True
+    )
+    public_quality = core_quality.public_quality_gate(
+        {**with_lane, "signal_kind": "first_touch"},
+        prior_ab_seen=prior_ab_seen,
+        c_already_selected=c_already_selected,
+        structural_gate_passed=quality_gate_passed,
+        trigger_observed=False,
     )
     evidence = candidate.get("historical_evidence")
     evidence = evidence if isinstance(evidence, Mapping) else {}
@@ -83,6 +92,7 @@ def evaluate_first_board_quality_at_time(
         **with_lane,
         **profitability,
         **environment,
+        **public_quality,
         "board_lane": "first_board",
         "lane_decision": lane.get("decision"),
         "lane_blockers": lane_blockers,
@@ -95,8 +105,10 @@ def evaluate_first_board_quality_at_time(
         "quality_gate_passed": quality_gate_passed,
         "historical_prior": prior,
         "historical_prior_status": historical_prior_status(prior),
-        "expected_d1_net_return_pct": prior.expected_d1_net_return_pct,
-        "d1_win_probability": prior.d1_win_probability,
+        "expected_d1_net_return_pct": public_quality.get(
+            "quality_expected_d1_net_return_pct"
+        ),
+        "d1_win_probability": public_quality.get("quality_win_probability"),
         "seal_probability_given_touch": prior.seal_probability_given_touch,
         "d1_win_probability_given_seal": prior.d1_win_probability_given_seal,
         "path_analog_expected_return_pct": _number(
@@ -199,16 +211,7 @@ def first_board_capture_gate(
         or financial_risk.get("blocked") is not False
     ):
         reasons.append("risk_gate")
-    profitability = scheduled_execution.first_board_profitability_gate(candidate)
-    if profitability.get("profitability_gate_passed") is not True:
-        reasons.append(
-            str(
-                profitability.get("profitability_gate_reason")
-                or "profitability_gate"
-            )
-        )
     return {
-        **profitability,
         "capture_gate_passed": not reasons,
         "capture_gate_reasons": tuple(reasons),
     }
@@ -223,6 +226,7 @@ def build_preboard_pools(
     """Build every auditable pre-board layer from the same visible candidates."""
 
     capture: list[dict[str, object]] = []
+    model_training: list[dict[str, object]] = []
     eligible: list[dict[str, object]] = []
     quality: list[dict[str, object]] = []
     candidate_audit: list[dict[str, object]] = []
@@ -252,6 +256,13 @@ def build_preboard_pools(
             market_gate=market_gate,
             execution_checks=_execution_checks(candidate),
         )
+        model_training.append(
+            {
+                **evaluated,
+                "model_training_eligible": True,
+                "model_training_source": "capture_pool_before_public_quality",
+            }
+        )
         if evaluated.get("quality_gate_passed") is not True:
             reasons = tuple(
                 evaluated.get("preboard_hard_blockers")
@@ -267,20 +278,17 @@ def build_preboard_pools(
                 )
             )
             continue
-        if (
-            materialized is not None
-            and evaluated.get("core_quality_preparation_passed") is not True
-        ):
+        if evaluated.get("public_quality_preparation_passed") is not True:
             reason = str(
-                evaluated.get("base_ab_quality_gate_reason")
-                or evaluated.get("core_quality_gate_reason")
-                or "core_quality_gate"
+                evaluated.get("public_quality_reason")
+                or evaluated.get("base_ab_quality_gate_reason")
+                or "public_quality_gate"
             )
             rejections[reason] += 1
             candidate_audit.append(
                 _pool_candidate_audit(
                     evaluated,
-                    stage="core_quality_rejected",
+                    stage="public_quality_rejected",
                     rejection_codes=(reason,),
                 )
             )
@@ -320,6 +328,7 @@ def build_preboard_pools(
         eligible_first_board_pool=tuple(eligible),
         quality_pool=tuple(quality),
         rejection_counts=dict(sorted(rejections.items())),
+        model_training_pool=tuple(model_training),
         candidate_audit=tuple(candidate_audit),
     )
 
@@ -347,6 +356,18 @@ def _pool_candidate_audit(
         "core_quality_gate_reason": candidate.get("core_quality_gate_reason"),
         "core_quality_preparation_passed": candidate.get(
             "core_quality_preparation_passed"
+        ),
+        "public_quality_contract_version": candidate.get(
+            "public_quality_contract_version"
+        ),
+        "public_quality_status": candidate.get("public_quality_status"),
+        "public_quality_preparation_passed": candidate.get(
+            "public_quality_preparation_passed"
+        ),
+        "public_quality_reason": candidate.get("public_quality_reason"),
+        "quality_win_probability": candidate.get("quality_win_probability"),
+        "quality_expected_d1_net_return_pct": candidate.get(
+            "quality_expected_d1_net_return_pct"
         ),
         "quality_priority_tier": candidate.get("quality_priority_tier"),
         "profitability_gate_passed": candidate.get("profitability_gate_passed"),
@@ -379,8 +400,10 @@ def _materialized_point_in_time_quality(
     if (
         candidate.get("preboard_decision_contract_version")
         != PREBOARD_DECISION_VERSION
+        or candidate.get("public_quality_contract_version")
+        != core_quality.PUBLIC_QUALITY_CONTRACT_VERSION
         or not isinstance(candidate.get("quality_gate_passed"), bool)
-        or not isinstance(candidate.get("core_quality_gate_passed"), bool)
+        or not isinstance(candidate.get("public_quality_preparation_passed"), bool)
     ):
         return None
     try:

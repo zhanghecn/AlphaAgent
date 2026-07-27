@@ -37,12 +37,22 @@ def test_radar_observations_define_point_in_time_flow_sources() -> None:
         "prior_return_5d_pct",
         "prior_market_phase",
         "stock_d1_sample_count",
+        "stock_d1_win_rate",
+        "stock_d1_average_return_pct",
         "stock_gene_combined_win_rate",
         "profitability_gate_passed",
         "recognition_gate_passed",
         "core_quality_gate_passed",
         "core_quality_gate_reason",
         "quality_priority_tier",
+        "public_quality_contract_version",
+        "public_quality_status",
+        "public_quality_gate_passed",
+        "public_quality_preparation_passed",
+        "public_quality_actionable",
+        "public_quality_reason",
+        "quality_win_probability",
+        "quality_expected_d1_net_return_pct",
         "concept_near_limit_count",
         "concept_touched_count",
         "concept_sealed_count",
@@ -64,6 +74,39 @@ def test_radar_observations_define_point_in_time_flow_sources() -> None:
     assert "capture_runtime_fingerprint" in (
         schema.limit_up_preboard_point_day_scopes.c.keys()
     )
+
+
+def test_replay_observation_loader_uses_compact_projection(monkeypatch) -> None:
+    statements: list[object] = []
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return []
+
+    class Session:
+        def execute(self, statement):
+            statements.append(statement)
+            return Result()
+
+    @contextmanager
+    def fake_session_scope():
+        yield Session()
+
+    monkeypatch.setattr(repo, "session_scope", fake_session_scope)
+
+    assert repo.load_replay_observations(
+        date(2026, 7, 20),
+        date(2026, 7, 22),
+        symbols=["600001.SSE"],
+    ) == []
+
+    sql = str(statements[0].compile(dialect=postgresql.dialect())).lower()
+    assert "limit_up_radar_observations.change_pct" in sql
+    assert "limit_up_radar_observations.concept_candidates" not in sql
+    assert "limit_up_radar_observations.public_quality_status" not in sql
 
 
 def test_official_two_slot_evidence_rejects_oversized_or_ambiguous_sources() -> None:
@@ -124,12 +167,22 @@ def test_flow_source_schema_patches_are_idempotent() -> None:
         "prior_return_5d_pct FLOAT",
         "prior_market_phase VARCHAR(24)",
         "stock_d1_sample_count INTEGER",
+        "stock_d1_win_rate FLOAT",
+        "stock_d1_average_return_pct FLOAT",
         "stock_gene_combined_win_rate FLOAT",
         "profitability_gate_passed BOOLEAN",
         "recognition_gate_passed BOOLEAN",
         "core_quality_gate_passed BOOLEAN",
         "core_quality_gate_reason VARCHAR(160)",
         "quality_priority_tier VARCHAR(40)",
+        "public_quality_contract_version VARCHAR(80)",
+        "public_quality_status VARCHAR(40)",
+        "public_quality_gate_passed BOOLEAN",
+        "public_quality_preparation_passed BOOLEAN",
+        "public_quality_actionable BOOLEAN",
+        "public_quality_reason VARCHAR(160)",
+        "quality_win_probability FLOAT",
+        "quality_expected_d1_net_return_pct FLOAT",
         "concept_near_limit_count INTEGER",
         "concept_touched_count INTEGER",
         "concept_sealed_count INTEGER",
@@ -318,6 +371,11 @@ def test_projection_preserves_bounded_short_horizon_evidence() -> None:
     assert row["core_quality_gate_passed"] is True
     assert row["core_quality_gate_reason"] == "qualified"
     assert row["quality_priority_tier"] == "A_industry_expanding"
+    assert row["public_quality_status"] == "qualified_waiting_trigger"
+    assert row["public_quality_preparation_passed"] is True
+    assert row["public_quality_actionable"] is False
+    assert row["quality_win_probability"] == 35 / 41
+    assert row["quality_expected_d1_net_return_pct"] == 3.0876
     assert row["concept_near_limit_count"] == 3
     assert row["concept_touched_count"] == 2
     assert row["concept_sealed_count"] == 1
@@ -356,6 +414,9 @@ def test_projection_recomputes_missing_core_quality_from_signal_time_fields() ->
     assert row["core_quality_gate_passed"] is True
     assert row["core_quality_gate_reason"] == "qualified"
     assert row["quality_priority_tier"] == "B_recognition_only"
+    assert row["public_quality_status"] == "qualified_waiting_trigger"
+    assert row["quality_win_probability"] == 0.6
+    assert row["quality_expected_d1_net_return_pct"] == 1.2895
 
 
 def test_projection_prefers_the_candidate_quote_source_time() -> None:
@@ -403,7 +464,7 @@ def test_two_hundred_projected_candidates_stay_below_size_guard() -> None:
     ]
 
     encoded = json.dumps(rows, ensure_ascii=True, separators=(",", ":")).encode()
-    assert len(encoded) < 400_000
+    assert len(encoded) < 500_000
 
 
 def test_fill_followup_keeps_a_signaled_stock_after_it_falls_below_three_percent() -> None:

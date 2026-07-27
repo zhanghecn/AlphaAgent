@@ -146,6 +146,11 @@ function LedgerTradeCard({ trade, observation }: { trade: LimitUpLaneLedgerTrade
           <div className="text-muted-foreground">
             卖出 {trade.sell_date ?? "待 D+1"} {trade.sell_time ?? ""} · {formatPrice(trade.sell_price)} · 官方收盘价
           </div>
+          {trade.quality_priority_tier && (
+            <div className="text-muted-foreground">
+              质量层 {qualityTierLabel(trade.quality_priority_tier)} · 胜率 {formatQualityProbability(trade.quality_win_probability)} · D+1预期 {formatQualityReturn(trade.quality_expected_d1_net_return_pct)}
+            </div>
+          )}
           {trade.lane === "two_to_three" && (
             <div className="text-muted-foreground" title={twoToThreeRiskTitle(trade.two_to_three_risk_flags)}>
               {twoToThreeQualityLabel(trade.two_to_three_quality_tier, trade.two_to_three_risk_count)}
@@ -161,4 +166,19 @@ function LedgerTradeCard({ trade, observation }: { trade: LimitUpLaneLedgerTrade
 
 function formatSigned(value: number): string {
   return `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+
+function qualityTierLabel(value: string): string {
+  if (value === "A_industry_expanding") return "A";
+  if (value === "C_capital_diffusion_rescue") return "C";
+  if (value === "B_recognition_only") return "B";
+  return value;
+}
+
+function formatQualityProbability(value?: number | null): string {
+  return value == null ? "-" : `${(value * 100).toFixed(1)}%`;
+}
+
+function formatQualityReturn(value?: number | null): string {
+  return value == null ? "-" : `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
 }

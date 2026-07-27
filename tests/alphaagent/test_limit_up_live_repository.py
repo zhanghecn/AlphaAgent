@@ -117,7 +117,7 @@ def test_publication_audit_reads_only_public_live_minutes(monkeypatch) -> None:
     assert rows == persisted
     params = statements[0].compile().params
     assert date(2026, 7, 23) in params.values()
-    assert "limit-up-core-abc-v1" in params.values()
+    assert "limit-up-core-abc-v2" in params.values()
     assert "live_snapshot" in params.values()
 
 

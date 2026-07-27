@@ -151,6 +151,29 @@ _SHARED_FIRST_BOARD_QUALITY_FIELDS = (
     "d1_win_probability",
     "seal_probability_given_touch",
     "d1_win_probability_given_seal",
+    "core_quality_contract_version",
+    "core_quality_gate_passed",
+    "core_quality_gate_reason",
+    "base_ab_quality_gate_passed",
+    "base_ab_quality_gate_reason",
+    "c_quality_gate_passed",
+    "c_quality_gate_reason",
+    "quality_priority_tier",
+    "public_quality_contract_version",
+    "public_quality_status",
+    "public_quality_gate_passed",
+    "public_quality_preparation_passed",
+    "public_quality_actionable",
+    "public_quality_trigger_observed",
+    "public_quality_structural_gate_passed",
+    "public_quality_reason",
+    "quality_win_probability",
+    "quality_expected_d1_net_return_pct",
+    "quality_tier_prior_win_probability",
+    "quality_tier_prior_expected_d1_net_return_pct",
+    "quality_tier_prior_sample_count",
+    "quality_estimate_prior_strength",
+    "quality_estimate_stock_sample_count",
 )
 LIVE_PREBOARD_EVIDENCE_FIELDS = (
     "historical_evidence",
@@ -169,14 +192,6 @@ LIVE_PREBOARD_EVIDENCE_FIELDS = (
     "quality_evaluated_at",
     "strictly_preboard",
     *_SHARED_FIRST_BOARD_QUALITY_FIELDS,
-    "core_quality_contract_version",
-    "core_quality_gate_passed",
-    "core_quality_gate_reason",
-    "base_ab_quality_gate_passed",
-    "base_ab_quality_gate_reason",
-    "c_quality_gate_passed",
-    "c_quality_gate_reason",
-    "quality_priority_tier",
 )
 DYNAMIC_LEADER_PUBLIC_FIELDS = (
     "policy_version",
@@ -719,7 +734,7 @@ def _attach_preboard_quality_pool_prefix(
         )
         _PREBOARD_MINUTE_BUFFER.ingest_quality_pool(
             decision_at,
-            pools.quality_pool,
+            pools.model_training_pool or pools.quality_pool,
         )
         quality["preboard_minute_buffer_status"] = "ready"
         quality["preboard_adapter_input_count"] = pools.adapter_input_count
@@ -2181,10 +2196,11 @@ def _apply_core_quality_gate(
         key=lambda item: (
             _core_signal_time(item[2]),
             core_quality.quality_tier_priority(
-                core_quality.core_quality_gate(
+                core_quality.public_quality_gate(
                     item[2],
                     prior_ab_seen=prior_ab_seen,
                     c_already_selected=c_already_selected,
+                    trigger_observed=_limit_trigger_observed(item[2]),
                 )
             ),
             scheduled_execution.execution_lane_priority(
@@ -2208,11 +2224,13 @@ def _apply_core_quality_gate(
                 c_already_selected=c_already_selected,
             )
             annotated_lanes[lane_name][lane_index] = annotated
-            if annotated.get("c_quality_gate_passed") is True:
+            if annotated.get("public_quality_actionable") is True and annotated.get(
+                "c_quality_gate_passed"
+            ) is True:
                 c_already_selected = True
             if (
                 annotated.get("base_ab_quality_gate_passed") is True
-                and annotated.get("core_quality_gate_passed") is True
+                and annotated.get("public_quality_actionable") is True
             ):
                 group_ab_selected = True
         if group_ab_selected:
@@ -2234,15 +2252,16 @@ def _apply_core_quality_to_signal(
 ) -> dict[str, object]:
     result = {
         **dict(signal),
-        **core_quality.core_quality_gate(
+        **core_quality.public_quality_gate(
             signal,
             prior_ab_seen=prior_ab_seen,
             c_already_selected=c_already_selected,
+            trigger_observed=_limit_trigger_observed(signal),
         ),
     }
     if (
         str(result.get("action") or "") in EXECUTABLE_ACTIONS
-        and result["core_quality_gate_passed"] is not True
+        and result["public_quality_actionable"] is not True
     ):
         result["research_action"] = str(result.get("action") or "pass")
         result["action"] = "pass"
@@ -2277,6 +2296,14 @@ def _core_signal_time(signal: Mapping[str, object]) -> str:
     return str(signal.get("buy_time") or signal.get("signal_time") or "00:00:00")
 
 
+def _limit_trigger_observed(signal: Mapping[str, object]) -> bool:
+    """Use physical limit events, never a near-limit recommendation, as trigger."""
+
+    if normalize_limit_time(signal.get("first_limit_time")):
+        return True
+    return str(signal.get("state") or "") in {"sealed", "resealed", "failed"}
+
+
 def _load_prior_quality_state_safely(captured_at: datetime) -> dict[str, object]:
     try:
         return load_prior_formal_quality_state(
@@ -2294,7 +2321,11 @@ def _load_prior_quality_state_safely(captured_at: datetime) -> dict[str, object]
 
 
 def _core_quality_rejection_text(signal: Mapping[str, object]) -> str:
-    reason = str(signal.get("core_quality_gate_reason") or "core_quality_rejected")
+    reason = str(
+        signal.get("public_quality_reason")
+        or signal.get("core_quality_gate_reason")
+        or "public_quality_rejected"
+    )
     if reason.startswith("prior_limit_count_126_below_"):
         return "只观察，不执行：过去126个交易日涨停少于2次"
     if reason.startswith("prior_limit_count_126_above_"):
@@ -2392,7 +2423,10 @@ def _build_live_buy_list(
             if not isinstance(raw_signal, Mapping):
                 continue
             signal = dict(raw_signal)
-            if signal.get("core_quality_contract_version") != core_quality.CORE_QUALITY_CONTRACT_VERSION:
+            if (
+                signal.get("public_quality_contract_version")
+                != core_quality.PUBLIC_QUALITY_CONTRACT_VERSION
+            ):
                 if captured_at is not None and not (
                     signal.get("buy_time") or signal.get("signal_time")
                 ):
@@ -2400,7 +2434,12 @@ def _build_live_buy_list(
                     signal["buy_time"] = event_time
                     signal["signal_time"] = event_time
                     signal.setdefault("signal_kind", "first_touch")
-                signal.update(core_quality.core_quality_gate(signal))
+                signal.update(
+                    core_quality.public_quality_gate(
+                        signal,
+                        trigger_observed=_limit_trigger_observed(signal),
+                    )
+                )
             symbol = str(signal.get("vt_symbol") or "")
             action = str(signal.get("action") or "pass")
             if (
@@ -2411,7 +2450,7 @@ def _build_live_buy_list(
                 )
                 or str(signal.get("board_lane") or "") not in PORTFOLIO_EXECUTION_LANES
                 or action != "buy_now"
-                or signal.get("core_quality_gate_passed") is not True
+                or signal.get("public_quality_actionable") is not True
                 or (
                     signal.get("missed_preseal_entry") is True
                     and signal.get("entry_kind") != "momentum"
@@ -2533,6 +2572,8 @@ def _live_portfolio_sort_key(signal: Mapping[str, object]) -> tuple[object, ...]
     return (
         action_priority,
         core_quality.quality_tier_priority(signal),
+        -(_number(signal.get("quality_win_probability")) or 0.0),
+        -(_number(signal.get("quality_expected_d1_net_return_pct")) or 0.0),
         scheduled_execution.execution_lane_priority(signal.get("board_lane")),
         -(_number(history.get("historical_win_rate")) or 0.0)
         if first_board
@@ -3234,6 +3275,8 @@ def _public_preboard_candidates(value: object) -> list[dict[str, object]]:
         state = str(raw.get("decision_state") or "observe")
         if state in {"missed", "rejected"}:
             continue
+        if not is_strictly_preboard(raw):
+            continue
         touch_probability = _number(raw.get("touch_probability_3m"))
         eventual_probability = _number(raw.get("eventual_touch_probability"))
         if (
@@ -3249,12 +3292,23 @@ def _public_preboard_candidates(value: object) -> list[dict[str, object]]:
             "name": str(raw.get("name") or raw.get("vt_symbol") or ""),
             "decision_state": state,
             "execution_mode": str(raw.get("execution_mode") or "research_only"),
+            "strictly_preboard": True,
+            "last_price": _number(raw.get("last_price")),
+            "limit_price": _number(raw.get("limit_price")),
             "change_pct": _number(raw.get("change_pct")),
             "distance_to_limit_pct": _number(raw.get("distance_to_limit_pct")),
-            "expected_d1_net_return_pct": _number(
-                raw.get("expected_d1_net_return_pct")
+            "quality_priority_tier": str(raw.get("quality_priority_tier") or ""),
+            "public_quality_status": str(raw.get("public_quality_status") or ""),
+            "quality_expected_d1_net_return_pct": _number(
+                raw.get("quality_expected_d1_net_return_pct")
             ),
-            "d1_win_probability": _number(raw.get("d1_win_probability")),
+            "quality_win_probability": _number(
+                raw.get("quality_win_probability")
+            ),
+            "expected_d1_net_return_pct": _number(
+                raw.get("quality_expected_d1_net_return_pct")
+            ),
+            "d1_win_probability": _number(raw.get("quality_win_probability")),
             "touch_probability_3m": touch_probability,
             "eventual_touch_probability": eventual_probability,
             "seal_probability_given_touch": _number(
@@ -3295,7 +3349,7 @@ def _apply_formal_preboard_recommendations(
     if not isinstance(recommendations, Mapping):
         return
     updated = dict(recommendations)
-    candidates = result.get("preboard_candidates")
+    candidates = result.get("preboard_recommendations")
     candidates = candidates if isinstance(candidates, list) else []
     formal_rows = [
         _formal_preboard_signal(row)
@@ -3304,10 +3358,32 @@ def _apply_formal_preboard_recommendations(
         and row.get("actionable") is True
         and str(row.get("decision_state") or "") == "actionable"
     ]
-    for field in ("actionable_recommendations", "portfolio"):
-        existing = updated.get(field)
-        existing = existing if isinstance(existing, list) else []
-        updated[field] = _merge_preboard_with_formal_rows(formal_rows, existing)
+    existing = updated.get("actionable_recommendations")
+    existing = existing if isinstance(existing, list) else []
+    updated["actionable_recommendations"] = _merge_preboard_with_formal_rows(
+        formal_rows,
+        existing,
+    )
+    portfolio_candidates = result.get("preboard_portfolio")
+    portfolio_candidates = (
+        portfolio_candidates if isinstance(portfolio_candidates, list) else []
+    )
+    portfolio_rows = [
+        _formal_preboard_signal(row)
+        for row in portfolio_candidates
+        if isinstance(row, Mapping)
+        and row.get("actionable") is True
+        and row.get("portfolio_selected") is True
+        and str(row.get("decision_state") or "") == "actionable"
+    ]
+    existing_portfolio = updated.get("portfolio")
+    existing_portfolio = (
+        existing_portfolio if isinstance(existing_portfolio, list) else []
+    )
+    updated["portfolio"] = _merge_preboard_with_formal_rows(
+        portfolio_rows,
+        existing_portfolio,
+    )[: scheduled_execution.MAX_POSITIONS]
     snapshot["recommendations"] = updated
 
 
@@ -3324,7 +3400,10 @@ def _merge_preboard_with_formal_rows(
         for row in _deduplicate_signal_rows(preboard_rows)
         if str(row.get("vt_symbol") or "") not in existing_symbols
     ]
-    return [*new_rows, *existing]
+    return sorted(
+        [*new_rows, *existing],
+        key=_live_portfolio_sort_key,
+    )
 
 
 def _deduplicate_signal_rows(
@@ -3354,8 +3433,11 @@ def _formal_preboard_signal(row: Mapping[str, object]) -> dict[str, object]:
         "signal_state": "trigger_ready",
         "execution_state": "actionable",
         "execution_permission": "formal",
-        "portfolio_selected": True,
-        "reason": "板前概率排序通过正式双门",
+        "portfolio_selected": row.get("portfolio_selected") is True,
+        "reason": "触板前已通过公共质量门和概率门",
+        "trigger_price": row.get("last_price"),
+        "buy_instruction": "按当前板前报价人工确认买入；不得追到涨停价",
+        "sell_instruction": "D+1按官方收盘价退出",
         "pending_reasons": [],
     }
 

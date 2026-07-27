@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import date, datetime
 
-from alphaagent.server.services.limit_up import history_engine, live_service
+from alphaagent.server.services.limit_up import core_quality, history_engine, live_service
 from alphaagent.server.services.limit_up.first_board_quality import (
     build_preboard_pools,
     evaluate_first_board_quality_at_time,
@@ -51,6 +51,16 @@ def test_preboard_pools_audit_quality_before_three_percent_activation() -> None:
         "600004.SSE",
         "600005.SSE",
     }
+    assert {row["vt_symbol"] for row in pools.model_training_pool} == {
+        "600001.SSE",
+        "600003.SSE",
+        "600004.SSE",
+        "600005.SSE",
+    }
+    assert all(
+        row["model_training_eligible"] is True
+        for row in pools.model_training_pool
+    )
     assert {row["vt_symbol"] for row in pools.eligible_first_board_pool} == {
         "600001.SSE",
         "600003.SSE",
@@ -186,16 +196,24 @@ def test_live_adapter_reuses_same_frame_shared_and_core_quality(monkeypatch) -> 
     )
     materialized = {
         **_candidate("600001.SSE", action="observe"),
-        "preboard_decision_contract_version": "limit-up-preboard-decision-v1",
+        "preboard_decision_contract_version": "limit-up-preboard-decision-v2",
         "quality_evaluated_at": DECISION_AT.isoformat(),
         "quality_gate_passed": True,
-        "core_quality_contract_version": "limit-up-core-abc-v1",
+        "core_quality_contract_version": "limit-up-core-abc-v2",
         "core_quality_gate_passed": False,
         "core_quality_gate_reason": "B_recognition_only_outside_entry_window",
         "base_ab_quality_gate_passed": True,
         "base_ab_quality_gate_reason": "qualified",
         "c_quality_gate_passed": False,
         "quality_priority_tier": "B_recognition_only",
+        "public_quality_contract_version": (
+            core_quality.PUBLIC_QUALITY_CONTRACT_VERSION
+        ),
+        "public_quality_status": "qualified_waiting_trigger",
+        "public_quality_preparation_passed": True,
+        "public_quality_reason": "waiting_for_trigger",
+        "quality_win_probability": 0.60,
+        "quality_expected_d1_net_return_pct": 1.2895,
         "lane_blockers": [],
     }
     rows = live_service.live_preboard_adapter_rows(
@@ -225,10 +243,10 @@ def test_live_adapter_reuses_same_frame_shared_and_core_quality(monkeypatch) -> 
     assert pools.quality_pool[0]["quality_priority_tier"] == "B_recognition_only"
 
 
-def test_live_materialized_quality_still_requires_core_abc_preparation() -> None:
+def test_live_materialized_quality_still_requires_public_quality_preparation() -> None:
     rejected = {
         **_candidate("600001.SSE"),
-        "preboard_decision_contract_version": "limit-up-preboard-decision-v1",
+        "preboard_decision_contract_version": "limit-up-preboard-decision-v2",
         "quality_evaluated_at": DECISION_AT.isoformat(),
         "quality_gate_passed": True,
         "core_quality_gate_passed": False,
@@ -236,6 +254,12 @@ def test_live_materialized_quality_still_requires_core_abc_preparation() -> None
         "base_ab_quality_gate_passed": False,
         "base_ab_quality_gate_reason": "prior_limit_count_126_above_6",
         "c_quality_gate_passed": False,
+        "public_quality_contract_version": (
+            core_quality.PUBLIC_QUALITY_CONTRACT_VERSION
+        ),
+        "public_quality_status": "rejected",
+        "public_quality_preparation_passed": False,
+        "public_quality_reason": "prior_limit_count_126_above_6",
     }
 
     pools = build_preboard_pools(
@@ -246,8 +270,46 @@ def test_live_materialized_quality_still_requires_core_abc_preparation() -> None
 
     assert pools.eligible_first_board_pool == ()
     assert pools.quality_pool == ()
+    assert len(pools.model_training_pool) == 1
+    assert pools.model_training_pool[0]["model_training_eligible"] is True
+    assert pools.model_training_pool[0]["public_quality_preparation_passed"] is False
     assert pools.rejection_counts == {"prior_limit_count_126_above_6": 1}
-    assert pools.candidate_audit[0]["pool_stage"] == "core_quality_rejected"
+    assert pools.candidate_audit[0]["pool_stage"] == "public_quality_rejected"
+
+
+def test_preboard_public_quality_allows_c_rescue_before_trigger() -> None:
+    evidence = {
+        **_candidate("600001.SSE")["historical_evidence"],
+        "d1_money_effect_sample_count": 2,
+        "d1_money_effect_win_rate": 100.0,
+        "d1_money_effect_average_return_pct": 2.0,
+        "historical_win_rate": 20.0,
+    }
+    candidate = _candidate(
+        "600001.SSE",
+        change_pct=8.0,
+        prior_market_phase="mixed",
+        prior_return_5d_pct=-1.0,
+        historical_evidence=evidence,
+    )
+
+    pools = build_preboard_pools(
+        [candidate],
+        decision_at=DECISION_AT,
+        market_gate={"passed": True},
+    )
+
+    assert len(pools.capture_pool) == 1
+    assert len(pools.quality_pool) == 1
+    row = pools.quality_pool[0]
+    assert row["profitability_gate_passed"] is False
+    assert row["quality_priority_tier"] == "C_capital_diffusion_rescue"
+    assert row["public_quality_status"] == "qualified_waiting_trigger"
+    assert row["public_quality_preparation_passed"] is True
+    assert row["d1_win_probability"] == row["quality_win_probability"]
+    assert row["expected_d1_net_return_pct"] == row[
+        "quality_expected_d1_net_return_pct"
+    ]
 
 
 def test_old_recommendation_action_does_not_change_live_adapter_rows() -> None:

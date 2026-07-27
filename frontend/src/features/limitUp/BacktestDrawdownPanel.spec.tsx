@@ -88,7 +88,7 @@ const diagnostics = {
     status: "blocked_by_execution_price_coverage",
     formal_strategy_changed: false,
     formal_policy: {
-      policy_version: "limit-up-core-abc-v1",
+      policy_version: "limit-up-core-abc-v2",
       mode: "D+1 close",
       decision_time: "D0 signal time",
       execution_time: "D+1 15:00",

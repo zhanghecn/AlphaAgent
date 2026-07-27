@@ -88,7 +88,44 @@ def test_current_schema_has_shared_decision_columns() -> None:
         "expected_d1_net_return_pct",
         "d1_win_probability",
         "seal_probability_given_touch",
+        "portfolio_selected",
     }.issubset(actions.c.keys())
+    assert actions.c.daily_slot.nullable is True
+    assert any(
+        constraint.name == "uq_limit_up_preboard_point_action_daily_slot"
+        for constraint in actions.constraints
+    )
+
+
+def test_full_recommendation_action_does_not_require_a_daily_slot(monkeypatch) -> None:
+    session = _Session()
+    _patch_session(monkeypatch, session)
+    thresholds = PreboardPolicyThresholds(
+        minimum_touch_probability_3m=0.6,
+        minimum_eventual_touch_probability=0.7,
+        calibrated_dates=(date(2026, 7, 20),),
+        fingerprint="sha256:" + "b" * 64,
+    )
+
+    written = repo.save_decision_actions(
+        [
+            _row(
+                decision_state="actionable",
+                execution_mode="formal",
+                touch_probability_3m=0.9,
+                eventual_touch_probability=0.95,
+                model_fingerprint="sha256:" + "c" * 64,
+                portfolio_selected=False,
+                daily_slot=None,
+            )
+        ],
+        thresholds=thresholds,
+    )
+
+    assert written == 1
+    values = session.statements[0].compile(dialect=postgresql.dialect()).params
+    assert values["daily_slot_m0"] is None
+    assert values["portfolio_selected_m0"] is False
 
 
 def test_save_feature_rows_writes_only_shared_payload(monkeypatch) -> None:

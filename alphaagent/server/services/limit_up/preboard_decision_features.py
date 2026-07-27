@@ -17,6 +17,45 @@ from alphaagent.server.services.limit_up.preboard_transaction_features import (
 
 
 MINIMUM_PREFIX_BAR_COUNT = 7
+MARKET_PHASES = ("broad_rise", "repair", "mixed", "retreat")
+STATIC_CONTEXT_VALUE_FEATURES = (
+    "prior_limit_count_126",
+    "prior_touch_count_126",
+    "prior_limit_count_5",
+    "prior_limit_count_10",
+    "prior_seal_success_rate_126",
+    "trade_days_since_prior_limit",
+    "pullback_from_prior_limit_pct",
+    "prior_position_120",
+    "prior_change_pct",
+    "prior_open_gap_pct",
+    "prior_low_change_pct",
+    "prior_amplitude_pct",
+    "prior_return_5d_pct",
+    "prior_return_20d_pct",
+    "prior_turnover_rate",
+    "prior_amount_ratio_5d",
+    "prior_industry_change_pct",
+    "prior_industry_return_5d_pct",
+    "prior_industry_advancing_rate",
+    "prior_industry_turnover_ratio_5d",
+    "prior_industry_sealed_count",
+    "prior_industry_sealed_rate",
+    "prior_industry_heat_score",
+    "prior_industry_heat_rank",
+    "prior_industry_count",
+    "prior_industry_leadership_score",
+    "prior_industry_leader_rank",
+    "prior_industry_stock_count",
+    "prior_market_advancing_rate",
+    "prior_market_sealed_count",
+    "prior_market_failed_rate",
+    "prior_market_max_board",
+    "prior_market_first_board_count",
+    "prior_market_one_to_two_rate",
+    "prior_market_two_to_three_rate",
+)
+MARKET_PHASE_FEATURES = tuple(f"prior_market_phase_{phase}" for phase in MARKET_PHASES)
 FORBIDDEN_FEATURE_KEYS = frozenset(
     {
         "physical_touch_at",
@@ -52,12 +91,23 @@ COMMON_DYNAMIC_FEATURES = (
     "quality_pool_count",
     "quality_pool_new_count_1m",
     "quality_pool_rank",
+    "same_industry_candidate_count_3pct",
+    "same_industry_new_count_1m",
+    "same_industry_candidate_count_5pct",
+    "same_industry_candidate_count_7pct",
+    "same_industry_candidate_count_9pct",
+    "same_industry_candidate_rank",
+    "same_industry_max_gain_pct",
+    "same_industry_mean_gain_pct",
+    "same_industry_leader_gap_pct",
     "session_minute_index",
     "minutes_to_next_entry_window",
     "minutes_to_final_entry_cutoff",
     "minutes_since_first_3pct_cross",
     "lane_support_score",
     "lane_entry_quality_score",
+    *STATIC_CONTEXT_VALUE_FEATURES,
+    *MARKET_PHASE_FEATURES,
 )
 OPTIONAL_VALUE_FEATURES = (
     *TRANSACTION_FEATURE_NAMES,
@@ -68,8 +118,18 @@ OPTIONAL_VALUE_FEATURES = (
     "quality_pool_count",
     "quality_pool_new_count_1m",
     "quality_pool_rank",
+    "same_industry_candidate_count_3pct",
+    "same_industry_new_count_1m",
+    "same_industry_candidate_count_5pct",
+    "same_industry_candidate_count_7pct",
+    "same_industry_candidate_count_9pct",
+    "same_industry_candidate_rank",
+    "same_industry_max_gain_pct",
+    "same_industry_mean_gain_pct",
+    "same_industry_leader_gap_pct",
     "lane_support_score",
     "lane_entry_quality_score",
+    *STATIC_CONTEXT_VALUE_FEATURES,
 )
 MISSING_INDICATOR_FEATURES = tuple(
     f"{name}_missing" for name in OPTIONAL_VALUE_FEATURES
@@ -407,16 +467,27 @@ def _project_decision_features(
         cross_section_snapshots,
         cutoff,
         symbol,
+        industry_id=str(candidate.get("industry_id") or "").strip(),
     )
     cross_section = cross_section or {
         "quality_pool_count": None,
         "quality_pool_new_count_1m": None,
         "quality_pool_rank": None,
+        "same_industry_candidate_count_3pct": None,
+        "same_industry_new_count_1m": None,
+        "same_industry_candidate_count_5pct": None,
+        "same_industry_candidate_count_7pct": None,
+        "same_industry_candidate_count_9pct": None,
+        "same_industry_candidate_rank": None,
+        "same_industry_max_gain_pct": None,
+        "same_industry_mean_gain_pct": None,
+        "same_industry_leader_gap_pct": None,
     }
 
     path = _path_features(bars)
     transaction = _transaction_features(observation, cutoff)
     first_observed_at = _as_datetime(observation.get("candidate_first_observed_at"))
+    market_phase = str(candidate.get("prior_market_phase") or "unknown")
     values: dict[str, float | None] = {
         "gain_pct": gain_pct,
         "distance_to_limit_pct": _return_pct(current_close, limit_price),
@@ -451,6 +522,14 @@ def _project_decision_features(
             if candidate.get("lane_entry_quality_score") is not None
             else candidate.get("entry_quality_score")
         ),
+        **{
+            name: _number(candidate.get(name))
+            for name in STATIC_CONTEXT_VALUE_FEATURES
+        },
+        **{
+            f"prior_market_phase_{phase}": float(market_phase == phase)
+            for phase in MARKET_PHASES
+        },
     }
     missing_fields = tuple(
         name for name in COMMON_DYNAMIC_FEATURES if values.get(name) is None
@@ -580,6 +659,8 @@ def _cross_section_features(
     snapshots: Sequence[Mapping[str, object]],
     cutoff: datetime,
     symbol: str,
+    *,
+    industry_id: str,
 ) -> dict[str, float] | None:
     eligible = [
         row
@@ -598,11 +679,56 @@ def _cross_section_features(
     if symbol not in gains:
         return None
     ordered = sorted(gains, key=lambda key: (-gains[key], key))
-    return {
+    result = {
         "quality_pool_count": float(len(gains)),
         "quality_pool_new_count_1m": float(len(set(current) - set(previous))),
         "quality_pool_rank": float(ordered.index(symbol) + 1),
     }
+    if not industry_id:
+        return result
+    industry_gains = {
+        key: gain
+        for key, gain in gains.items()
+        if str(current[key].get("industry_id") or "").strip() == industry_id
+    }
+    if symbol not in industry_gains:
+        return result
+    previous_industry_symbols = {
+        key
+        for key, row in previous.items()
+        if str(row.get("industry_id") or "").strip() == industry_id
+    }
+    industry_ordered = sorted(
+        industry_gains,
+        key=lambda key: (-industry_gains[key], key),
+    )
+    maximum = max(industry_gains.values())
+    result.update(
+        {
+            "same_industry_candidate_count_3pct": float(len(industry_gains)),
+            "same_industry_new_count_1m": float(
+                len(set(industry_gains) - previous_industry_symbols)
+            ),
+            "same_industry_candidate_count_5pct": float(
+                sum(value >= 5.0 for value in industry_gains.values())
+            ),
+            "same_industry_candidate_count_7pct": float(
+                sum(value >= 7.0 for value in industry_gains.values())
+            ),
+            "same_industry_candidate_count_9pct": float(
+                sum(value >= 9.0 for value in industry_gains.values())
+            ),
+            "same_industry_candidate_rank": float(
+                industry_ordered.index(symbol) + 1
+            ),
+            "same_industry_max_gain_pct": maximum,
+            "same_industry_mean_gain_pct": (
+                sum(industry_gains.values()) / len(industry_gains)
+            ),
+            "same_industry_leader_gap_pct": maximum - industry_gains[symbol],
+        }
+    )
+    return result
 
 
 def _transaction_features(

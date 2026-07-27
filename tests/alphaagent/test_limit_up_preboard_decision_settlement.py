@@ -78,7 +78,7 @@ def test_action_fill_uses_first_new_strictly_below_limit_quote() -> None:
     decision_at = datetime.fromisoformat("2026-07-21T10:05:00+08:00")
     outcomes = build_action_intraday_outcomes(
         {
-            "contract_version": "limit-up-preboard-decision-v1",
+            "contract_version": "limit-up-preboard-decision-v2",
             "captured_at": decision_at,
             "vt_symbol": "600001.SSE",
             "limit_price": 11.0,

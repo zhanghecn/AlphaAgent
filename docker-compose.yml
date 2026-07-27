@@ -106,8 +106,8 @@ services:
       - -m
       - alphaagent.server.services.limit_up.preboard_decision_replay
       - --help
-    # Research stays background-friendly; replay no longer has a fixed RSS abort gate.
-    cpus: 0.10
+    # Full replay is CPU-bound; keep the limit explicit and operator-configurable.
+    cpus: ${ALPHAAGENT_RESEARCH_CPUS:-1.0}
     environment:
       DATABASE_POOL_SIZE: "1"
       DATABASE_MAX_OVERFLOW: "0"

@@ -165,7 +165,41 @@ def test_quality_pool_snapshots_use_only_completed_minutes() -> None:
     assert snapshots == [
         {
             "captured_at": datetime(2026, 7, 20, 10, 21),
-            "candidates": [{"vt_symbol": SYMBOL, "change_pct": 6.0}],
+            "candidates": [
+                {
+                    "vt_symbol": SYMBOL,
+                    "change_pct": 6.0,
+                    "industry_id": None,
+                }
+            ],
+        }
+    ]
+
+
+def test_quality_pool_snapshots_drop_fields_unused_by_cross_section() -> None:
+    buffer = LiveMinuteBuffer()
+    captured_at = datetime(2026, 7, 20, 10, 20, 4)
+    buffer.ingest_quality_pool(
+        captured_at,
+        [
+            {
+                "vt_symbol": SYMBOL,
+                "change_pct": 6.0,
+                "industry_id": "801080",
+                "financial_snapshot": {"large": "payload" * 1000},
+            }
+        ],
+    )
+
+    snapshots = buffer.completed_quality_pool_snapshots(
+        datetime(2026, 7, 20, 10, 21)
+    )
+
+    assert snapshots[0]["candidates"] == [
+        {
+            "vt_symbol": SYMBOL,
+            "change_pct": 6.0,
+            "industry_id": "801080",
         }
     ]
 
