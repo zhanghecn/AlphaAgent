@@ -131,7 +131,13 @@ def score_live_preboard_snapshot(
         and execution_mode is not PreboardExecutionMode.RESEARCH_ONLY
         else 0
     )
-    probability_status = _probability_status(ranked)
+    probability_status = (
+        _probability_status(ranked)
+        if projected
+        else "no_eligible_candidates"
+        if model_bundle is not None
+        else "model_unavailable"
+    )
     return {
         "status": probability_status,
         "probability_status": probability_status,

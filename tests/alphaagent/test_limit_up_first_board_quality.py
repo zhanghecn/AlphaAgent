@@ -178,6 +178,78 @@ def test_live_adapter_membership_comes_only_from_trace_capture() -> None:
     assert "portfolio_selected" not in rows[0]
 
 
+def test_live_adapter_reuses_same_frame_shared_and_core_quality(monkeypatch) -> None:
+    raw = _candidate(
+        "600001.SSE",
+        prior_market_failed_rate=None,
+        action="pass",
+    )
+    materialized = {
+        **_candidate("600001.SSE", action="observe"),
+        "preboard_decision_contract_version": "limit-up-preboard-decision-v1",
+        "quality_evaluated_at": DECISION_AT.isoformat(),
+        "quality_gate_passed": True,
+        "core_quality_contract_version": "limit-up-core-abc-v1",
+        "core_quality_gate_passed": False,
+        "core_quality_gate_reason": "B_recognition_only_outside_entry_window",
+        "base_ab_quality_gate_passed": True,
+        "base_ab_quality_gate_reason": "qualified",
+        "c_quality_gate_passed": False,
+        "quality_priority_tier": "B_recognition_only",
+        "lane_blockers": [],
+    }
+    rows = live_service.live_preboard_adapter_rows(
+        {
+            "trace_capture_candidates": [raw],
+            "early_radar_recommendations": {
+                "lanes": {"now": [materialized], "tail": [], "next_auction": []}
+            },
+        }
+    )
+    monkeypatch.setattr(
+        "alphaagent.server.services.limit_up.first_board_quality.evaluate_first_board_quality_at_time",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("same-frame quality must not be recomputed from raw fields")
+        ),
+    )
+
+    pools = build_preboard_pools(
+        rows,
+        decision_at=DECISION_AT,
+        market_gate={"passed": True},
+    )
+
+    assert [row["vt_symbol"] for row in pools.quality_pool] == ["600001.SSE"]
+    assert pools.quality_pool[0]["core_quality_gate_passed"] is False
+    assert pools.quality_pool[0]["core_quality_preparation_passed"] is True
+    assert pools.quality_pool[0]["quality_priority_tier"] == "B_recognition_only"
+
+
+def test_live_materialized_quality_still_requires_core_abc_preparation() -> None:
+    rejected = {
+        **_candidate("600001.SSE"),
+        "preboard_decision_contract_version": "limit-up-preboard-decision-v1",
+        "quality_evaluated_at": DECISION_AT.isoformat(),
+        "quality_gate_passed": True,
+        "core_quality_gate_passed": False,
+        "core_quality_gate_reason": "prior_limit_count_126_above_6",
+        "base_ab_quality_gate_passed": False,
+        "base_ab_quality_gate_reason": "prior_limit_count_126_above_6",
+        "c_quality_gate_passed": False,
+    }
+
+    pools = build_preboard_pools(
+        [rejected],
+        decision_at=DECISION_AT,
+        market_gate={"passed": True},
+    )
+
+    assert pools.eligible_first_board_pool == ()
+    assert pools.quality_pool == ()
+    assert pools.rejection_counts == {"prior_limit_count_126_above_6": 1}
+    assert pools.candidate_audit[0]["pool_stage"] == "core_quality_rejected"
+
+
 def test_old_recommendation_action_does_not_change_live_adapter_rows() -> None:
     trace = _candidate("600001.SSE", action="buy_now", portfolio_selected=True)
     base = {

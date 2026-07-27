@@ -17,10 +17,23 @@ from alphaagent.server.services.limit_up.radar_contract import (
 from alphaagent.server.services.limit_up.capture_runtime import (
     capture_runtime_fingerprint_safely,
 )
-from alphaagent.server.services.limit_up import scheduled_execution
+from alphaagent.server.services.limit_up import core_quality, scheduled_execution
 
 
 RADAR_RETAIN_TRADE_DAYS = 90
+MAX_CONCEPT_CANDIDATES_PER_OBSERVATION = 32
+CONCEPT_CANDIDATE_FIELDS = (
+    "concept_id",
+    "concept_name",
+    "member_count",
+    "coverage_ratio",
+    "sealed_count",
+    "touched_count",
+    "failed_count",
+    "strength_score",
+    "strength_rank",
+    "leader_rank",
+)
 _prune_lock = Lock()
 _last_pruned_trade_date: date | None = None
 
@@ -41,6 +54,7 @@ def project_observation(
     formal_signal: Mapping[str, object] | None,
     early_signal: Mapping[str, object] | None,
     quote_observed_at: datetime | None = None,
+    concept_membership_snapshot_date: date | str | None = None,
 ) -> dict[str, object]:
     """Project one evaluated candidate into the bounded research contract."""
 
@@ -50,6 +64,35 @@ def project_observation(
         "historical_evidence"
     ) or candidate.get("historical_evidence")
     evidence = evidence if isinstance(evidence, Mapping) else {}
+    stock_d1_sample_count = _optional_integer(
+        _first_present(
+            early.get("stock_d1_sample_count"),
+            early.get("profitability_gate_sample_count"),
+            formal.get("stock_d1_sample_count"),
+            formal.get("profitability_gate_sample_count"),
+            candidate.get("stock_d1_sample_count"),
+            evidence.get("d1_money_effect_sample_count"),
+        )
+    )
+    stock_gene_combined_win_rate = _optional_number(
+        _first_present(
+            early.get("stock_gene_combined_win_rate"),
+            early.get("profitability_gate_combined_rate"),
+            formal.get("stock_gene_combined_win_rate"),
+            formal.get("profitability_gate_combined_rate"),
+            candidate.get("stock_gene_combined_win_rate"),
+            evidence.get("historical_win_rate"),
+        )
+    )
+    quality_input = {
+        **dict(candidate),
+        **dict(formal),
+        **dict(early),
+        "historical_evidence": dict(evidence),
+        "stock_d1_sample_count": stock_d1_sample_count,
+        "stock_gene_combined_win_rate": stock_gene_combined_win_rate,
+    }
+    quality = core_quality.core_quality_gate(quality_input)
     blocker_codes = _blocker_codes(candidate, early)
     return {
         "vt_symbol": _required_text(candidate.get("vt_symbol"), "vt_symbol"),
@@ -92,6 +135,7 @@ def project_observation(
             or "unknown"
         ),
         "board_lane": str(candidate.get("board_lane") or "first_board"),
+        "board_level": _optional_integer(candidate.get("board_level")),
         "support_score": _optional_number(candidate.get("lane_support_score")),
         "entry_quality_score": _optional_number(
             candidate.get("lane_entry_quality_score")
@@ -107,6 +151,28 @@ def project_observation(
         ),
         "concept_strong_5_count": _optional_integer(
             candidate.get("concept_strong_5_count")
+        ),
+        "concept_near_limit_count": _optional_integer(
+            candidate.get("concept_near_limit_count")
+        ),
+        "concept_touched_count": _optional_integer(
+            candidate.get("concept_touched_count")
+        ),
+        "concept_sealed_count": _optional_integer(
+            candidate.get("concept_sealed_count")
+        ),
+        "concept_failed_count": _optional_integer(
+            candidate.get("concept_failed_count")
+        ),
+        "concept_candidates": _bounded_concept_candidates(
+            candidate.get("concept_candidates")
+        ),
+        "concept_membership_snapshot_date": _optional_date(
+            concept_membership_snapshot_date
+            or candidate.get("concept_membership_snapshot_date")
+        ),
+        "concept_trigger_allowed": (
+            candidate.get("concept_trigger_allowed") is True
         ),
         **{
             f"concept_{metric}_acceleration_{minutes}m": _optional_number(
@@ -147,6 +213,73 @@ def project_observation(
             candidate.get("historical_win_rate")
             if candidate.get("historical_win_rate") is not None
             else evidence.get("historical_win_rate")
+        ),
+        "prior_limit_count_126": _optional_integer(
+            _first_present(
+                early.get("prior_limit_count_126"),
+                formal.get("prior_limit_count_126"),
+                candidate.get("prior_limit_count_126"),
+            )
+        ),
+        "prior_industry_turnover_ratio_5d": _optional_number(
+            _first_present(
+                early.get("prior_industry_turnover_ratio_5d"),
+                formal.get("prior_industry_turnover_ratio_5d"),
+                candidate.get("prior_industry_turnover_ratio_5d"),
+            )
+        ),
+        "prior_return_5d_pct": _optional_number(
+            _first_present(
+                early.get("prior_return_5d_pct"),
+                formal.get("prior_return_5d_pct"),
+                candidate.get("prior_return_5d_pct"),
+            )
+        ),
+        "prior_market_phase": _optional_text(
+            _first_present(
+                early.get("prior_market_phase"),
+                formal.get("prior_market_phase"),
+                candidate.get("prior_market_phase"),
+            )
+        ),
+        "stock_d1_sample_count": stock_d1_sample_count,
+        "stock_gene_combined_win_rate": stock_gene_combined_win_rate,
+        "profitability_gate_passed": bool(
+            _first_present(
+                formal.get("profitability_gate_passed"),
+                early.get("profitability_gate_passed"),
+                quality.get("profitability_gate_passed"),
+            )
+        ),
+        "recognition_gate_passed": bool(
+            _first_present(
+                formal.get("recognition_gate_passed"),
+                early.get("recognition_gate_passed"),
+                quality.get("recognition_gate_passed"),
+            )
+        ),
+        "core_quality_gate_passed": bool(
+            _first_present(
+                formal.get("core_quality_gate_passed"),
+                early.get("core_quality_gate_passed"),
+                quality.get("core_quality_gate_passed"),
+            )
+        ),
+        "core_quality_gate_reason": _optional_text(
+            _first_present(
+                formal.get("core_quality_gate_reason"),
+                early.get("core_quality_gate_reason"),
+                quality.get("core_quality_gate_reason"),
+            ),
+            max_length=160,
+        ),
+        "quality_priority_tier": _optional_text(
+            _first_present(
+                formal.get("quality_priority_tier"),
+                early.get("quality_priority_tier"),
+                quality.get("quality_priority_tier"),
+            ),
+            max_length=40,
         ),
         "formal_action": str(formal.get("action") or "pass"),
         "early_action": str(early.get("action") or "pass"),
@@ -198,6 +331,43 @@ def load_recent_signal_observations(
         if symbol:
             earliest.setdefault(symbol, row)
     return list(earliest.values())
+
+
+def load_prior_formal_quality_state(
+    captured_at: datetime,
+    *,
+    strategy_version: str,
+) -> dict[str, object]:
+    """Return formal A/B and C state strictly before the current frame."""
+
+    current_at = _required_datetime(captured_at)
+    frame = schema.limit_up_radar_frames
+    observation = schema.limit_up_radar_observations
+    statement = (
+        select(observation.c.quality_priority_tier)
+        .select_from(observation.join(frame, observation.c.frame_id == frame.c.id))
+        .where(
+            frame.c.trade_date == current_at.date(),
+            frame.c.captured_at < current_at,
+            frame.c.strategy_version == strategy_version,
+            observation.c.formal_action == "buy_now",
+        )
+        .distinct()
+    )
+    with session_scope() as session:
+        tiers = {
+            str(value or "")
+            for value in session.execute(statement).scalars()
+            if str(value or "")
+        }
+    return {
+        "known": True,
+        "prior_ab_seen": bool(
+            tiers & {"A_industry_expanding", "B_recognition_only"}
+        ),
+        "c_already_selected": "C_capital_diffusion_rescue" in tiers,
+        "quality_tiers": sorted(tiers),
+    }
 
 
 def build_fill_followup_observations(
@@ -573,6 +743,23 @@ def _string_list(value: object) -> list[str]:
     )
 
 
+def _bounded_concept_candidates(value: object) -> list[dict[str, object]]:
+    rows = _mapping_rows(value)
+    result: list[dict[str, object]] = []
+    for row in rows[:MAX_CONCEPT_CANDIDATES_PER_OBSERVATION]:
+        concept_id = str(row.get("concept_id") or "").strip()
+        if not concept_id:
+            continue
+        result.append(
+            {
+                field: row.get(field)
+                for field in CONCEPT_CANDIDATE_FIELDS
+                if row.get(field) is not None
+            }
+        )
+    return result
+
+
 def _market_timing_state(snapshot: Mapping[str, object]) -> str | None:
     market = snapshot.get("market_context")
     market = market if isinstance(market, Mapping) else {}
@@ -657,6 +844,10 @@ def _optional_text(value: object, *, max_length: int | None = None) -> str | Non
         return None
     text = str(value)
     return text[:max_length] if max_length is not None else text
+
+
+def _first_present(*values: object) -> object | None:
+    return next((value for value in values if value is not None), None)
 
 
 def _required_number(value: object, field: str) -> float:

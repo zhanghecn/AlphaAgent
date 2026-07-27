@@ -41,7 +41,7 @@ export function GuideView({
           唯一正式合同是 <strong className="font-semibold">{core.contract_version}</strong>。
           它先检查正确财报点时、原低位结构、盘中支撑、板位质量和同股盈利门，再要求过去
           {core.prior_limit_window_days} 个交易日涨停 {core.minimum_prior_limit_count} 到
-          {core.maximum_prior_limit_count} 次。在
+          {core.maximum_prior_limit_count} 次形成 A/B 基座，并用资金与概念扩散交叉每天补一笔 C。在
           <strong className="font-semibold">{strategy.entry_windows.join("、")}</strong>
           形成正式买点，D+1 按官方收盘价退出。实时列表展示全部合格信号，同一交易日可以有多笔。
         </p>
@@ -106,6 +106,7 @@ export function GuideView({
                 "1/3/5分钟收益、速度、加速度与回撤恢复",
                 "量能、逐笔资金代理与质量池横截面",
                 "严格板前价格和正式买入窗口",
+                "候选触板前同概念已封板数与最高板",
               ]}
             />
             <FieldGroupRow
@@ -117,6 +118,7 @@ export function GuideView({
                 "信号日之前已收盘的历史封停成功率",
                 "信号日之前已收盘的次日赚钱率",
                 "当时已经披露的财务报告与风险信息",
+                "前一日市场阶段与个股前 5 日收益",
               ]}
             />
             <FieldGroupRow
@@ -124,7 +126,7 @@ export function GuideView({
               label="当前仅作诊断的盘中环境"
               hint="历史暂不能按同一可知时点复现，不得成为实时专属硬门"
               fields={[
-                "板块扩散、概念启动与龙头排名",
+                "未冻结成员时点的概念启动与事后龙头排名",
                 "板块资金、个股资金与当前换手",
                 "市场状态、快照新鲜度与报价新鲜度",
               ]}
@@ -156,30 +158,32 @@ export function GuideView({
         </div>
       </section>
 
-      {/* A/B 排序说明 */}
+      {/* A/C/B 排序说明 */}
       <section className="mt-6 rounded-lg border bg-card px-4 py-4" aria-labelledby="ranking-title">
-        <h3 id="ranking-title" className="text-sm font-semibold">A+B 怎么排先后</h3>
+        <h3 id="ranking-title" className="text-sm font-semibold">A+C+B 怎么排先后</h3>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">
           D-1 所属行业成交额不低于此前 5 日基准的是 A，未扩张或数据不可用的是 B。
-          A 优先，B 仍然可交易；行业量能不会把 B 从核心规则中剔除。同级内沿用原首板或二进三排序。
+          C 是当日此前尚无 A/B 时，由低位回撤、行业资金或早期概念扩散交叉恢复的第一笔机会。
+          同一时点按 A、C、B 排序，跨时点保持真实到达顺序。
         </p>
         <dl className="mt-3 grid gap-x-6 gap-y-3 text-xs sm:grid-cols-2">
           <Definition label="第一顺位" value="A · 行业成交额正在扩张" />
-          <Definition label="第二顺位" value="B · 行业未扩张或数据不可用" />
+          <Definition label="第二顺位" value="C · 资金与概念扩散补位" />
+          <Definition label="第三顺位" value="B · 10:30 后首触或回封" />
           <Definition label="首板基础盈利门" value={ranking.portfolio_gate} />
           <Definition label="历史样本截止" value="只用信号日之前已闭合的历史记录" />
         </dl>
         <p className="mt-3 border-l-2 pl-3 text-xs leading-5 text-muted-foreground">
-          A+B 都进入全量正式买点；质量统计不受账户仓位限制。3% 板前观察和触板概率目前只是研究，
-          不会生成正式买点。
+          全量质量统计不受账户仓位限制；两仓尚无 A 时只使用一个非 A 仓。C 的早期历史成员含代理证据，
+          页面会持续标记其自然前向尚未确认。3% 板前观察和触板概率目前只是研究，不会生成正式买点。
         </p>
       </section>
 
-      {/* 验证数据 */}
+      {/* 验证证据 */}
       <div className="mt-8 border-t pt-5">
         <Tabs defaultValue="dataset">
           <TabsList className="grid h-9 w-full grid-cols-1 sm:w-56">
-            <TabsTrigger value="dataset" className="py-1 text-xs">验证数据与历史回测</TabsTrigger>
+            <TabsTrigger value="dataset" className="py-1 text-xs">历史证据与自然前向</TabsTrigger>
           </TabsList>
           <TabsContent value="dataset" className="m-0 mt-4">
             <GuideDataset

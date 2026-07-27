@@ -231,6 +231,27 @@ def test_probability_status_distinguishes_ineligible_input_from_missing_model() 
     ) == "model_input_ineligible"
 
 
+def test_ready_model_with_empty_quality_pool_reports_no_eligible_candidates(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(service, "_live_adapter_rows", lambda _snapshot: [])
+
+    result = service.score_live_preboard_snapshot(
+        {
+            "captured_at": DECISION_AT.isoformat(),
+            "early_radar_recommendations": {"market_gate": {"passed": True}},
+        },
+        model_bundle=object(),
+        thresholds=None,
+        execution_mode=PreboardExecutionMode.RESEARCH_ONLY,
+        minute_buffer=_MinuteBuffer(),
+    )
+
+    assert result["status"] == "no_eligible_candidates"
+    assert result["probability_status"] == "no_eligible_candidates"
+    assert result["preboard_candidates"] == []
+
+
 def test_active_rejected_runtime_keeps_probabilities_research_only(
     monkeypatch,
 ) -> None:

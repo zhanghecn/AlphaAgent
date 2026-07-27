@@ -60,7 +60,7 @@ def test_snapshot_round_trip_keeps_preboard_candidates(monkeypatch) -> None:
         "trade_date": "2026-07-23",
         "captured_at": "2026-07-23T10:05:20+08:00",
         "session_stage": "morning",
-        "strategy_version": "limit-up-live-v15",
+        "strategy_version": "obsolete-version",
         "mode": "live_snapshot",
         "source": "test",
         "source_updated_at": "2026-07-23T10:05:20+08:00",
@@ -74,7 +74,7 @@ def test_snapshot_round_trip_keeps_preboard_candidates(monkeypatch) -> None:
     saved = live_repository.save_snapshot(snapshot)
     loaded = live_repository.load_latest_snapshot(
         date(2026, 7, 23),
-        strategy_version="limit-up-live-v15",
+        strategy_version="obsolete-version",
     )
 
     assert "preboard_candidates" in live_repository.schema.limit_up_signal_snapshots.c
@@ -117,7 +117,7 @@ def test_publication_audit_reads_only_public_live_minutes(monkeypatch) -> None:
     assert rows == persisted
     params = statements[0].compile().params
     assert date(2026, 7, 23) in params.values()
-    assert "limit-up-core-ab-v1" in params.values()
+    assert "limit-up-core-abc-v1" in params.values()
     assert "live_snapshot" in params.values()
 
 
@@ -147,7 +147,7 @@ def test_lane_validation_cache_reads_live_and_final_plan_modes(monkeypatch) -> N
     monkeypatch.setattr(live_repository, "session_scope", fake_session_scope)
 
     result = live_repository.load_latest_lane_validations(
-        strategy_version="limit-up-live-v15",
+        strategy_version="obsolete-version",
         captured_after=captured_after,
     )
 

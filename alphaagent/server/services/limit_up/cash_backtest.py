@@ -10,9 +10,9 @@ from decimal import Decimal, ROUND_HALF_UP
 from statistics import mean, median
 
 from alphaagent.server.services.execution import cash_ledger
-from alphaagent.server.services.limit_up.versions import CORE_AB_STRATEGY_VERSION
+from alphaagent.server.services.limit_up.versions import CORE_ABC_STRATEGY_VERSION
 
-ACCOUNT_EXECUTION_VERSION = CORE_AB_STRATEGY_VERSION
+ACCOUNT_EXECUTION_VERSION = CORE_ABC_STRATEGY_VERSION
 SUPPORTED_EXIT_MODES = {"dynamic", "next_open", "next_close", "next_1430"}
 
 
@@ -304,6 +304,11 @@ def _group_entries(
 
 def _entry_sort_key(signal: PreparedSignal) -> tuple[object, ...]:
     candidate = signal.candidate
+    tier_priority = {
+        "A_industry_expanding": 0,
+        "C_capital_diffusion_rescue": 1,
+        "B_recognition_only": 2,
+    }.get(str(candidate.get("quality_priority_tier") or ""), 3)
     quality_order = 0 if candidate.get("two_to_three_quality_tier") == "A" else 1
     lane_priority = (
         0
@@ -312,6 +317,7 @@ def _entry_sort_key(signal: PreparedSignal) -> tuple[object, ...]:
     )
     return (
         signal.buy_time,
+        tier_priority,
         lane_priority,
         quality_order,
         -float(candidate.get("rank_score") or 0),
@@ -370,6 +376,19 @@ def _entry_rejection_reason(
         return "duplicate_position"
     if len(state.positions) >= config.max_positions:
         return "position_limit"
+    tier = str(signal.candidate.get("quality_priority_tier") or "")
+    if (
+        config.max_positions >= 2
+        and tier in {"C_capital_diffusion_rescue", "B_recognition_only"}
+        and not any(
+            position.entry_date == signal.entry_date
+            and position.candidate.get("quality_priority_tier")
+            == "A_industry_expanding"
+            for position in state.positions.values()
+        )
+        and len(state.positions) >= config.max_positions - 1
+    ):
+        return "reserved_for_later_a"
     if state.cash <= 0 or target_cash <= 0:
         return "insufficient_cash"
     return None

@@ -388,6 +388,13 @@ def test_live_risk_gate_publishes_unbounded_actionable_recommendations() -> None
         change_pct=9.2,
         portfolio_selected=False,
     )
+    signal.update(
+        {
+            "signal_time": "10:05:00",
+            "buy_time": "10:05:00",
+            "signal_kind": "first_touch",
+        }
+    )
     snapshot = {
         "captured_at": "2026-07-16T10:05:00+08:00",
         "recommendations": {

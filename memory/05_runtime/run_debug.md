@@ -54,13 +54,17 @@ docker compose -f docker-compose.ghcr.yml config --images
 
 ### Current state
 
-- 本地唯一正式合同为 `limit-up-core-ab-v1`；历史、实时、调度和现金账本同源且无旧规则
-  回退。首板、二进三、两仓、正式费用和 D+1 官方收盘退出保持不变。
+- 本地唯一正式合同为 `limit-up-core-abc-v1`；历史、实时、调度和现金账本同源，其他
+  打板合同没有执行、查询或页面入口。首板、二进三、两仓、正式费用和 D+1 官方收盘退出保持不变。
 - 本地运行数据已自然推进到 `2026-07-24` 的 806 个可靠交易日；板前模型最终报告继续
   固定使用 802 日输入，不因新增交易日重选模型或阈值。
-- A+B 当前历史闭合 78 笔，胜率 `56/78=71.7949%`、平均 `+2.2512%`、最大回撤
-  `-14.5416%`；A 为 `35/41=85.3659%`，B 为 `21/37=56.7568%`。最近 24 笔旧快照
-  反事实只有 50%，所以状态是 `historical_pass_forward_not_passed`，不是实盘胜率承诺。
+- A+B+C 当前闭合 143 笔，`99/143=69.2308%`、平均 `+2.1203%`、独立信号复利
+  `+762.4136%`、最大回撤 `-21.0357%`。A 为 `35/41=85.3659%`，C 为
+  `46/72=63.8889%`，B 为 `18/30=60%`。严格单仓成交 80 笔、复利 `+457.7327%`；
+  两仓成交 96 笔、复利 `+226.6771%`。自然前向从 `2026-07-27` 起算，状态是
+  `historical_proxy_pass_forward_unconfirmed`，不是实盘胜率承诺。
+- C 每日最多一笔，且只允许在当天此前尚无 A/B 时进入；同秒按 A/C/B，跨时点按真实
+  到达顺序。历史概念成员主要是幸存者代理，不能把 `46/72` 当作自然前向成绩。
 - 唯一板前合同为 `limit-up-preboard-decision-v1`。概率资格为 `ready`，历史晋级为
   `historical_rejected`，执行模式为 `research_only`，正式激活为 `not_eligible`；模型指纹
   为 `sha256:b1d4ca83ca4dad25e1e74cda21c5b01c4f40d6e62ed9da62582d6eb8c651b71a`。
@@ -70,12 +74,17 @@ docker compose -f docker-compose.ghcr.yml config --images
   `preboard_candidates` 概率观察，不写 action、不占两仓、不改正式买点。
 - `>=3%` 只对已通过正式同源高质量门的首板启动观察，不是全市场母池、训练分母或
   买点。普通 3% 股票不得进入模型、页面推荐或两仓。
+- 板前适配器复用同一帧已经计算的 shared quality 和 A/B/C 质量准备字段；A/B 或 C
+  准备通过即可进入板前概率池，尚未发生的触板时间不能提前否决。正式扫板仍要求完整
+  `core_quality_gate_passed`，因此该修复不改变正式 A+B+C、两仓或复利口径。
 - 新板前 `preboard_candidates` 必须严格低于涨停价；已触板或
-  `sealed/resealed/failed` 后退出板前观察。正式 A+B 扫板链是独立口径：质量和执行门
+  `sealed/resealed/failed` 后退出板前观察。正式 A+B+C 扫板链是独立口径：质量和执行门
   通过时，`near_limit/sealed/resealed` 仍可为 `buy_now`，页面必须显示涨停价排队买点；
   `failed` 炸板继续拦截。
 - 后端打板快扫为 10 秒、概念刷新约 30 秒、交易窗口调度心跳 2 秒；
   `/short-term` 活动时段实时快照为 10 秒，两日轨迹为 60 秒。
+- 两日轨迹默认只查询 `LIVE_STRATEGY_VERSION`，且只有正式 `action=buy_now` 才形成
+  `trigger_ready` 事件；旧合同和被质量门取消的研究动作不进入当前“买点曾触发”统计。
 - 公共 `/api/limit-up/radar-validation` 和对应旧服务已经删除；它们不是当前模型、动作
   来源或产品合同。
 
@@ -87,8 +96,8 @@ docker compose -f docker-compose.ghcr.yml config --images
 - 市场、行业/概念、个股资金、当前换手、报价和快照新鲜度无法按
   `known_at <= decision_at` 重建时统一保留为 `diagnostic/non-blocking`，不得用日终值补造
   或作为实时独有硬门。共享风险、窗口、完整分钟和严格板前价格继续 fail closed。
-- 正式推荐只读取 `limit-up-core-ab-v1`。研究观察不得写入正式
-  `actionable_recommendations`，也不得作为 C 级扩容或旧规则回退。
+- 正式推荐只读取 `limit-up-core-abc-v1`。旧 A+B、v15/v9/v5 和研究观察不得作为
+  兼容回退或写入当前 `actionable_recommendations`。
 - 正式切换必须同时满足数据库 `forward_pass_for_formal` 和环境变量
   `ALPHAAGENT_PREBOARD_FORMAL_MODEL_FINGERPRINT` 精确匹配；切换只原子替换首板动作和
   两仓，二进三不变。
@@ -104,8 +113,9 @@ npm --prefix frontend run build
 git diff --check
 ```
 
-2026-07-26 当前源码验收：打板后端 `924 passed`，前端 `144 passed`；compileall、前端
-生产构建、`docker compose config --quiet` 和 `git diff --check` 均通过。Compose 只保留
+2026-07-27 当前源码验收：打板后端 `959 passed`，compileall 和 `git diff --check`
+通过；本地依赖组没有 Ruff 可执行文件，本次改动未重跑 Ruff。前端最近一次为 `144 passed`
+且生产构建通过。Compose 只保留
 API 与统一 data-sync worker，旧独立板前 worker 已删除；数据库只有 1 个当前
 `active / ready / historical_rejected` 板前模型。`/short-term` 回测显示 A+B 全量
 `78/78`、胜率 `71.79%`、平均 `2.25%`；冷缓存期间显示明确载入状态，不再出现空白区。
@@ -158,13 +168,13 @@ docker compose logs --tail=100 \
 
 验收时必须看到：
 
-- API、Web、PostgreSQL、Redis 和 data-sync worker 正常运行，无循环 import、旧模型加载
-  或缺失模型回退；Compose 中不存在独立板前轮询服务。
-- 正式历史、实时、调度和现金账本统一声明 `limit-up-core-ab-v1`，无旧版本回退；
+- API、Web、PostgreSQL、Redis 和 data-sync worker 正常运行，无循环 import 或缺失模型
+  替代；Compose 中不存在独立板前轮询服务。
+- 正式历史、实时、调度和现金账本统一声明 `limit-up-core-abc-v1`，不存在其他合同入口；
   板前状态为
   `ready / historical_rejected / research_only / not_eligible`。
 - 根 Compose 本地开发默认启用 `ALPHAAGENT_STARTUP_BACKTEST_WARMUP=true`。首次全量回测
-  尚未进入进程缓存时，`/short-term` 必须显示“A+B 回测载入中”并自动刷新，
+  尚未进入进程缓存时，`/short-term` 必须显示“A+B+C 回测载入中”并自动刷新，
   不得显示空白内容区。
 - research/shadow/formal 动作均为 0，`formal_strategy_changed=false`。
 - 已删除的 `/api/limit-up/radar-validation` 返回 404。
@@ -181,7 +191,7 @@ docker compose logs --tail=100 \
   `ensure_sync_schema()`，否则会误判正在执行的任务为旧进程残留。
 - `eod_1900` 负责主盘后采集，`eod_finalize_2130` 负责重试、打板历史重建和唯一
   板前冻结/结算。中断任务保留失败证据，由下一个合法时点补偿。
-- `sync_limit_up_exit_minutes` 只保留为手动 14:30 研究；正式 `limit-up-core-ab-v1` 退出继续读取 D+1
+- `sync_limit_up_exit_minutes` 只保留为手动 14:30 研究；正式 `limit-up-core-abc-v1` 退出继续读取 D+1
   官方日线收盘。Tick/L2 和真实排队成交不能由夜间任务补造。
 
 ## Data Notes

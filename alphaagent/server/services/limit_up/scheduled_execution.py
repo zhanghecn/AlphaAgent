@@ -9,10 +9,10 @@ from math import isfinite
 from zoneinfo import ZoneInfo
 
 from alphaagent.server.services.limit_up.lane_features import first_reseal_time
-from alphaagent.server.services.limit_up.versions import CORE_AB_STRATEGY_VERSION
+from alphaagent.server.services.limit_up.versions import CORE_ABC_STRATEGY_VERSION
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-SCHEDULED_EXECUTION_VERSION = CORE_AB_STRATEGY_VERSION
+SCHEDULED_EXECUTION_VERSION = CORE_ABC_STRATEGY_VERSION
 FIRST_BOARD_PROFITABILITY_FILTER_VERSION = "first-board-profitability-gate-v1"
 FIRST_BOARD_MIN_D1_SAMPLES = 5
 FIRST_BOARD_MIN_COMBINED_RATE = 30.0

@@ -10,6 +10,7 @@ from sqlalchemy import delete, desc, insert, select
 
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import session_scope
+from alphaagent.server.services.limit_up.versions import LIVE_STRATEGY_VERSION
 
 
 TRACE_RETAIN_TRADE_DAYS = 2
@@ -209,13 +210,22 @@ def save_live_trace_error(
     return {"id": int(row_id)}
 
 
-def load_live_trace_dates(limit: int = TRACE_RETAIN_TRADE_DAYS) -> list[date]:
+def load_live_trace_dates(
+    limit: int = TRACE_RETAIN_TRADE_DAYS,
+    *,
+    strategy_version: str | None = LIVE_STRATEGY_VERSION,
+) -> list[date]:
     statement = (
         select(schema.limit_up_live_trace_snapshots.c.trade_date)
         .distinct()
         .order_by(desc(schema.limit_up_live_trace_snapshots.c.trade_date))
         .limit(max(int(limit), 1))
     )
+    if strategy_version:
+        statement = statement.where(
+            schema.limit_up_live_trace_snapshots.c.strategy_version
+            == strategy_version
+        )
     with session_scope() as session:
         return list(session.execute(statement).scalars().all())
 
@@ -224,10 +234,15 @@ def load_live_trace_rows(
     trade_date: date,
     *,
     after_id: int | None = None,
+    strategy_version: str = LIVE_STRATEGY_VERSION,
 ) -> list[dict[str, object]]:
     return [
         row
-        for batch in iter_live_trace_row_batches(trade_date, after_id=after_id)
+        for batch in iter_live_trace_row_batches(
+            trade_date,
+            after_id=after_id,
+            strategy_version=strategy_version,
+        )
         for row in batch
     ]
 
@@ -236,13 +251,18 @@ def iter_live_trace_row_batches(
     trade_date: date,
     *,
     after_id: int | None = None,
+    strategy_version: str = LIVE_STRATEGY_VERSION,
     batch_size: int = 32,
 ) -> Iterator[list[dict[str, object]]]:
     """Stream projected trace rows without retaining the full JSON day in memory."""
 
     statement = (
         select(*TRACE_READ_COLUMNS)
-        .where(schema.limit_up_live_trace_snapshots.c.trade_date == trade_date)
+        .where(
+            schema.limit_up_live_trace_snapshots.c.trade_date == trade_date,
+            schema.limit_up_live_trace_snapshots.c.strategy_version
+            == strategy_version,
+        )
         .order_by(
             schema.limit_up_live_trace_snapshots.c.captured_at,
             schema.limit_up_live_trace_snapshots.c.id,
@@ -268,7 +288,10 @@ def prune_live_trace_snapshots(
     retain_trade_days: int = TRACE_RETAIN_TRADE_DAYS,
 ) -> int:
     keep_count = max(int(retain_trade_days), 1)
-    trade_dates = load_live_trace_dates(limit=keep_count + 1)
+    trade_dates = load_live_trace_dates(
+        limit=keep_count + 1,
+        strategy_version=None,
+    )
     cutoff = retention_cutoff(trade_dates, retain_trade_days=keep_count)
     if cutoff is None:
         return 0

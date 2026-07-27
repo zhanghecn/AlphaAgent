@@ -7,6 +7,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
+from math import log1p
 from time import monotonic
 from zoneinfo import ZoneInfo
 
@@ -82,6 +83,7 @@ from alphaagent.server.services.limit_up.radar_contract import (
 )
 from alphaagent.server.services.limit_up.radar_observation_repository import (
     build_fill_followup_observations,
+    load_prior_formal_quality_state,
     load_recent_signal_observations,
     project_observation as project_radar_observation,
     save_frame as save_radar_frame,
@@ -124,6 +126,32 @@ LIVE_WATCHLIST_LIMIT = 6
 ACTIVE_SESSION_STAGES = frozenset(
     {"auction_watch", "auction", "morning", "afternoon", "tail", "close_auction"}
 )
+_SHARED_FIRST_BOARD_QUALITY_FIELDS = (
+    "universe_gate_passed",
+    "entry_window_passed",
+    "quality_gate_passed",
+    "preparation_environment_passed",
+    "execution_environment_passed",
+    "failed_environment_checks",
+    "lane_decision",
+    "lane_blockers",
+    "lane_support_score",
+    "lane_entry_quality_score",
+    "lane_rank_score",
+    "profitability_gate_version",
+    "profitability_gate_applies",
+    "profitability_gate_passed",
+    "profitability_gate_reason",
+    "profitability_gate_minimum_d1_samples",
+    "profitability_gate_minimum_combined_rate",
+    "profitability_gate_sample_count",
+    "profitability_gate_combined_rate",
+    "historical_prior_status",
+    "expected_d1_net_return_pct",
+    "d1_win_probability",
+    "seal_probability_given_touch",
+    "d1_win_probability_given_seal",
+)
 LIVE_PREBOARD_EVIDENCE_FIELDS = (
     "historical_evidence",
     "financial_risk",
@@ -137,6 +165,18 @@ LIVE_PREBOARD_EVIDENCE_FIELDS = (
     "concept_leader_rank",
     "transaction_status",
     "transaction_features",
+    "preboard_decision_contract_version",
+    "quality_evaluated_at",
+    "strictly_preboard",
+    *_SHARED_FIRST_BOARD_QUALITY_FIELDS,
+    "core_quality_contract_version",
+    "core_quality_gate_passed",
+    "core_quality_gate_reason",
+    "base_ab_quality_gate_passed",
+    "base_ab_quality_gate_reason",
+    "c_quality_gate_passed",
+    "c_quality_gate_reason",
+    "quality_priority_tier",
 )
 DYNAMIC_LEADER_PUBLIC_FIELDS = (
     "policy_version",
@@ -223,6 +263,14 @@ def build_live_snapshot(
         require_sector=False,
     )
     attach_candidate_concepts(capture_candidates, concept_snapshot or {})
+    _attach_live_c_concept_diffusion(
+        capture_candidates,
+        membership_snapshot_date=(
+            concept_snapshot.get("membership_snapshot_date")
+            if isinstance(concept_snapshot, Mapping)
+            else None
+        ),
+    )
     candidates = [
         dict(candidate)
         for candidate in capture_candidates
@@ -1372,6 +1420,130 @@ def _enrich_candidates(
     return candidates
 
 
+def _attach_live_c_concept_diffusion(
+    candidates: Sequence[dict[str, object]],
+    *,
+    membership_snapshot_date: object,
+) -> None:
+    """Attach concept breadth visible before each candidate's own trigger."""
+
+    event_rows = [
+        candidate
+        for candidate in candidates
+        if str(candidate.get("state") or "") in {"sealed", "resealed"}
+        and normalize_limit_time(candidate.get("first_limit_time"))
+    ]
+    concept_ids = {
+        str(candidate.get("vt_symbol") or ""): {
+            str(item.get("concept_id") or "")
+            for item in _mapping_sequence(candidate.get("concept_candidates"))
+            if str(item.get("concept_id") or "")
+        }
+        for candidate in event_rows
+    }
+    for candidate in candidates:
+        candidate["concept_membership_snapshot_date"] = membership_snapshot_date
+        membership_causal = bool(
+            membership_snapshot_date
+            and candidate.get("concept_trigger_allowed") is True
+        )
+        signal_time = _candidate_c_signal_time(candidate)
+        symbol = str(candidate.get("vt_symbol") or "")
+        choices: list[dict[str, object]] = []
+        if membership_causal and signal_time:
+            for concept in _mapping_sequence(candidate.get("concept_candidates")):
+                concept_id = str(concept.get("concept_id") or "")
+                member_count = _integer(concept.get("member_count"), 0)
+                if not concept_id or member_count <= 0:
+                    continue
+                leaders = [
+                    event
+                    for event in event_rows
+                    if str(event.get("vt_symbol") or "") != symbol
+                    and concept_id
+                    in concept_ids.get(str(event.get("vt_symbol") or ""), set())
+                    and (
+                        normalize_limit_time(event.get("first_limit_time")) or ""
+                    )
+                    <= signal_time
+                ]
+                if not leaders:
+                    continue
+                sealed_count = len(leaders)
+                density = sealed_count / member_count
+                choices.append(
+                    {
+                        "concept_id": concept_id,
+                        "concept_name": concept.get("concept_name") or concept_id,
+                        "prior_sealed_count": sealed_count,
+                        "prior_max_board": max(
+                            _integer(event.get("board_level"), 1)
+                            for event in leaders
+                        ),
+                        "member_count": member_count,
+                        "density": density,
+                        "score": density * log1p(sealed_count),
+                    }
+                )
+        selected = max(
+            choices,
+            key=lambda row: (
+                float(row["score"]),
+                int(row["prior_max_board"]),
+                -int(row["member_count"]),
+                str(row["concept_id"]),
+            ),
+            default=None,
+        )
+        candidate.update(
+            {
+                "intraday_concept_membership_causal": membership_causal,
+                "intraday_concept_feature_ready": selected is not None,
+                "intraday_concept_id": (
+                    selected.get("concept_id") if selected else None
+                ),
+                "intraday_concept_name": (
+                    selected.get("concept_name") if selected else None
+                ),
+                "intraday_concept_prior_sealed_count": (
+                    selected.get("prior_sealed_count") if selected else 0
+                ),
+                "intraday_concept_candidate_rank": (
+                    int(selected["prior_sealed_count"]) + 1 if selected else 1
+                ),
+                "intraday_concept_prior_max_board": (
+                    selected.get("prior_max_board") if selected else 0
+                ),
+                "intraday_concept_member_count": (
+                    selected.get("member_count") if selected else None
+                ),
+                "intraday_concept_diffusion_density": (
+                    selected.get("density") if selected else None
+                ),
+                "c_concept_evidence_status": (
+                    "point_in_time" if membership_causal else "unavailable"
+                ),
+            }
+        )
+
+
+def _candidate_c_signal_time(candidate: Mapping[str, object]) -> str | None:
+    if (
+        str(candidate.get("state") or "") == "resealed"
+        and _integer(candidate.get("open_times"), 0) > 0
+    ):
+        last_limit_time = normalize_limit_time(candidate.get("last_limit_time"))
+        if last_limit_time:
+            return last_limit_time
+    return normalize_limit_time(candidate.get("first_limit_time"))
+
+
+def _mapping_sequence(value: object) -> list[Mapping[str, object]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    return [item for item in value if isinstance(item, Mapping)]
+
+
 def _enrich_candidate(
     raw: Mapping[str, object],
     context: Mapping[str, object],
@@ -1784,8 +1956,12 @@ def _apply_live_risk_gates(
     recommendations = recommendations if isinstance(recommendations, Mapping) else {}
     validated = apply_lane_validation_veto(recommendations, lane_validations)
     validated = _rank_first_board_recommendations(validated)
-    validated = _apply_core_quality_gate(validated)
     captured_at = _parsed_datetime(result.get("captured_at")) or datetime.now(SHANGHAI)
+    prior_quality_state = _load_prior_quality_state_safely(captured_at)
+    validated = _apply_core_quality_gate(
+        validated,
+        prior_quality_state=prior_quality_state,
+    )
     quality = result.get("data_quality")
     quality = quality if isinstance(quality, Mapping) else {}
     snapshot_age = _integer(quality.get("snapshot_age_seconds"), 0)
@@ -1804,12 +1980,18 @@ def _apply_live_risk_gates(
     )
     validated["watchlist"] = _build_live_watchlist(validated)
     result = {**result, "recommendations": validated}
-    return _apply_early_radar_risk_gates(result, lane_validations)
+    return _apply_early_radar_risk_gates(
+        result,
+        lane_validations,
+        prior_quality_state=prior_quality_state,
+    )
 
 
 def _apply_early_radar_risk_gates(
     snapshot: Mapping[str, object],
     lane_validations: Mapping[str, Mapping[str, object]],
+    *,
+    prior_quality_state: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Apply the same prior-only and lane validation to internal 3% signals."""
 
@@ -1830,41 +2012,16 @@ def _apply_early_radar_risk_gates(
     )
     validated = apply_lane_validation_veto(recommendations, lane_validations)
     validated = _rank_first_board_recommendations(validated)
-    validated = _apply_core_quality_gate(validated)
+    validated = _apply_core_quality_gate(
+        validated,
+        prior_quality_state=prior_quality_state,
+    )
     result = dict(snapshot)
     result["early_radar_recommendations"] = validated
     enriched_quality = enriched.get("data_quality")
     if isinstance(enriched_quality, Mapping):
         result["data_quality"] = dict(enriched_quality)
     return result
-
-
-_SHARED_FIRST_BOARD_QUALITY_FIELDS = (
-    "universe_gate_passed",
-    "entry_window_passed",
-    "quality_gate_passed",
-    "preparation_environment_passed",
-    "execution_environment_passed",
-    "failed_environment_checks",
-    "lane_decision",
-    "lane_blockers",
-    "lane_support_score",
-    "lane_entry_quality_score",
-    "lane_rank_score",
-    "profitability_gate_version",
-    "profitability_gate_applies",
-    "profitability_gate_passed",
-    "profitability_gate_reason",
-    "profitability_gate_minimum_d1_samples",
-    "profitability_gate_minimum_combined_rate",
-    "profitability_gate_sample_count",
-    "profitability_gate_combined_rate",
-    "historical_prior_status",
-    "expected_d1_net_return_pct",
-    "d1_win_probability",
-    "seal_probability_given_touch",
-    "d1_win_probability_given_seal",
-)
 
 
 def _attach_shared_first_board_quality(
@@ -1996,27 +2153,93 @@ def _rank_first_board_recommendations(
 
 def _apply_core_quality_gate(
     recommendations: Mapping[str, object],
+    *,
+    prior_quality_state: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     result = dict(recommendations)
     lanes = recommendations.get("lanes")
     lanes = lanes if isinstance(lanes, Mapping) else {}
-    annotated_lanes: dict[str, list[dict[str, object]]] = {}
+    annotated_lanes: dict[str, list[dict[str, object] | None]] = {}
+    entries: list[tuple[str, int, dict[str, object]]] = []
     for lane_name, raw_signals in lanes.items():
         signals = raw_signals if isinstance(raw_signals, list) else []
-        annotated_lanes[str(lane_name)] = [
-            _apply_core_quality_to_signal(signal)
-            for signal in signals
+        annotated_lanes[str(lane_name)] = [None] * len(signals)
+        entries.extend(
+            (str(lane_name), index, _normalized_core_signal(signal))
+            for index, signal in enumerate(signals)
             if isinstance(signal, Mapping)
-        ]
-    result["lanes"] = annotated_lanes
+        )
+    state = prior_quality_state or {
+        "known": True,
+        "prior_ab_seen": False,
+        "c_already_selected": False,
+    }
+    prior_ab_seen = state.get("prior_ab_seen") is True or state.get("known") is not True
+    c_already_selected = state.get("c_already_selected") is True
+    ordered = sorted(
+        entries,
+        key=lambda item: (
+            _core_signal_time(item[2]),
+            core_quality.quality_tier_priority(
+                core_quality.core_quality_gate(
+                    item[2],
+                    prior_ab_seen=prior_ab_seen,
+                    c_already_selected=c_already_selected,
+                )
+            ),
+            scheduled_execution.execution_lane_priority(
+                item[2].get("board_lane")
+            ),
+            str(item[2].get("vt_symbol") or ""),
+        ),
+    )
+    index = 0
+    while index < len(ordered):
+        signal_time = _core_signal_time(ordered[index][2])
+        group: list[tuple[str, int, dict[str, object]]] = []
+        while index < len(ordered) and _core_signal_time(ordered[index][2]) == signal_time:
+            group.append(ordered[index])
+            index += 1
+        group_ab_selected = False
+        for lane_name, lane_index, signal in group:
+            annotated = _apply_core_quality_to_signal(
+                signal,
+                prior_ab_seen=prior_ab_seen,
+                c_already_selected=c_already_selected,
+            )
+            annotated_lanes[lane_name][lane_index] = annotated
+            if annotated.get("c_quality_gate_passed") is True:
+                c_already_selected = True
+            if (
+                annotated.get("base_ab_quality_gate_passed") is True
+                and annotated.get("core_quality_gate_passed") is True
+            ):
+                group_ab_selected = True
+        if group_ab_selected:
+            prior_ab_seen = True
+    result["lanes"] = {
+        lane: [signal for signal in signals if signal is not None]
+        for lane, signals in annotated_lanes.items()
+    }
     result["core_quality_filter"] = core_quality.core_quality_filter_metadata()
+    result["core_quality_prior_state"] = dict(state)
     return result
 
 
 def _apply_core_quality_to_signal(
     signal: Mapping[str, object],
+    *,
+    prior_ab_seen: bool = False,
+    c_already_selected: bool = False,
 ) -> dict[str, object]:
-    result = {**dict(signal), **core_quality.core_quality_gate(signal)}
+    result = {
+        **dict(signal),
+        **core_quality.core_quality_gate(
+            signal,
+            prior_ab_seen=prior_ab_seen,
+            c_already_selected=c_already_selected,
+        ),
+    }
     if (
         str(result.get("action") or "") in EXECUTABLE_ACTIONS
         and result["core_quality_gate_passed"] is not True
@@ -2026,6 +2249,48 @@ def _apply_core_quality_to_signal(
         result["execution_state"] = "cancelled"
         result["reason"] = _core_quality_rejection_text(result)
     return result
+
+
+def _normalized_core_signal(signal: Mapping[str, object]) -> dict[str, object]:
+    result = dict(signal)
+    signal_kind = str(result.get("signal_kind") or "")
+    if signal_kind not in {"first_touch", "reseal"}:
+        signal_kind = (
+            "reseal"
+            if str(result.get("state") or "") == "resealed"
+            and _integer(result.get("open_times"), 0) > 0
+            else "first_touch"
+        )
+        result["signal_kind"] = signal_kind
+    event_time = (
+        normalize_limit_time(result.get("last_limit_time"))
+        if signal_kind == "reseal"
+        else normalize_limit_time(result.get("first_limit_time"))
+    )
+    if event_time:
+        result["signal_time"] = event_time
+        result["buy_time"] = event_time
+    return result
+
+
+def _core_signal_time(signal: Mapping[str, object]) -> str:
+    return str(signal.get("buy_time") or signal.get("signal_time") or "00:00:00")
+
+
+def _load_prior_quality_state_safely(captured_at: datetime) -> dict[str, object]:
+    try:
+        return load_prior_formal_quality_state(
+            captured_at,
+            strategy_version=STRATEGY_VERSION,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("prior formal quality state unavailable: %s", exc)
+        return {
+            "known": False,
+            "prior_ab_seen": False,
+            "c_already_selected": False,
+            "quality_tiers": [],
+        }
 
 
 def _core_quality_rejection_text(signal: Mapping[str, object]) -> str:
@@ -2127,7 +2392,15 @@ def _build_live_buy_list(
             if not isinstance(raw_signal, Mapping):
                 continue
             signal = dict(raw_signal)
-            signal.update(core_quality.core_quality_gate(signal))
+            if signal.get("core_quality_contract_version") != core_quality.CORE_QUALITY_CONTRACT_VERSION:
+                if captured_at is not None and not (
+                    signal.get("buy_time") or signal.get("signal_time")
+                ):
+                    event_time = captured_at.time().replace(microsecond=0).isoformat()
+                    signal["buy_time"] = event_time
+                    signal["signal_time"] = event_time
+                    signal.setdefault("signal_kind", "first_touch")
+                signal.update(core_quality.core_quality_gate(signal))
             symbol = str(signal.get("vt_symbol") or "")
             action = str(signal.get("action") or "pass")
             if (
@@ -2156,12 +2429,32 @@ def _build_live_buy_list(
     schedule = scheduled_execution.execution_clock(local_at)
     ordered = sorted(selected.values(), key=_live_portfolio_sort_key)
     if limit is not None:
-        ordered = ordered[:limit]
+        ordered = _apply_live_capacity_reservation(ordered, limit)
     scheduled = [
         _scheduled_live_signal(signal, schedule, snapshot_age_seconds)
         for signal in ordered
     ]
     return [signal for signal in scheduled if signal.get("action") == "buy_now"]
+
+
+def _apply_live_capacity_reservation(
+    signals: Sequence[dict[str, object]],
+    limit: int,
+) -> list[dict[str, object]]:
+    if limit < 2:
+        return list(signals[:limit])
+    selected: list[dict[str, object]] = []
+    has_a = False
+    for signal in signals:
+        tier = str(signal.get("quality_priority_tier") or "")
+        if tier == "A_industry_expanding":
+            has_a = True
+            selected.append(signal)
+        elif has_a or not selected:
+            selected.append(signal)
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 def _scheduled_live_signal(
@@ -2780,6 +3073,11 @@ def _save_radar_ledger_safely(
     try:
         capture = snapshot.get("trace_capture_candidates")
         capture = capture if isinstance(capture, list) else []
+        data_quality = snapshot.get("data_quality")
+        data_quality = data_quality if isinstance(data_quality, Mapping) else {}
+        concept_membership_snapshot_date = data_quality.get(
+            "concept_membership_snapshot_date"
+        )
         formal_by_symbol = _now_signals_by_symbol(snapshot.get("recommendations"))
         early_by_symbol = _now_signals_by_symbol(
             snapshot.get("early_radar_recommendations")
@@ -2794,6 +3092,7 @@ def _save_radar_ledger_safely(
                     str(candidate.get("vt_symbol") or "")
                 ),
                 quote_observed_at=quote_observed_at,
+                concept_membership_snapshot_date=concept_membership_snapshot_date,
             )
             for candidate in capture
             if isinstance(candidate, Mapping)

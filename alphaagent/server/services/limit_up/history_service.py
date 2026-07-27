@@ -10,8 +10,11 @@ from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from copy import copy, deepcopy
 from datetime import date, datetime, time, timezone
+from math import isnan
 from statistics import mean, median
 from zoneinfo import ZoneInfo
+
+import pandas as pd
 
 from alphaagent.market.cache import TTLCache
 from alphaagent.server.services.limit_up import (
@@ -973,7 +976,82 @@ def _filtered_scheduled_orders(
             extracted,
         )
     )
+    enriched = _attach_historical_c_quality_evidence(enriched)
     return core_quality.filter_core_quality_qualified_orders(enriched)
+
+
+def _attach_historical_c_quality_evidence(
+    orders: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Attach signal-time concept diffusion, retaining its proxy evidence label."""
+
+    copied = [
+        {
+            **dict(order),
+            "trade_date": _order_date(order),
+        }
+        for order in orders
+    ]
+    dated_orders = [
+        order for order in copied if _order_date(order) != date.min
+    ]
+    if not dated_orders:
+        return copied
+    start = min(_order_date(order) for order in dated_orders)
+    end = max(_order_date(order) for order in dated_orders)
+    try:
+        from alphaagent.server.services.limit_up.capital_mainline_repository import (
+            load_capital_mainline_inputs,
+        )
+        from alphaagent.server.services.limit_up.capital_mainline_research import (
+            build_event_ledger,
+            build_membership_contexts,
+        )
+        from alphaagent.server.services.limit_up.quality_no_trade_reverse import (
+            attach_intraday_concept_diffusion_proxy,
+        )
+
+        inputs = load_capital_mainline_inputs(
+            start,
+            end,
+            include_formal_candidates=False,
+            include_stock_bars=False,
+        )
+        event_ledger = build_event_ledger(inputs)
+        frame = attach_intraday_concept_diffusion_proxy(
+            pd.DataFrame.from_records(copied),
+            event_ledger.to_dict("records"),
+            build_membership_contexts(inputs),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("historical C concept evidence unavailable: %s", exc)
+        return [
+            {
+                **order,
+                "c_concept_evidence_status": "unavailable",
+            }
+            for order in copied
+        ]
+    return [
+        {
+            **{
+                key: None
+                if isinstance(value, float) and isnan(value)
+                else value
+                for key, value in row.items()
+            },
+            "c_concept_evidence_status": core_quality.C_EVIDENCE_STATUS,
+        }
+        for row in frame.to_dict("records")
+    ]
+
+
+def _scheduled_order_identity(order: Mapping[str, object]) -> tuple[date, str, str]:
+    return (
+        _order_date(order),
+        str(order.get("vt_symbol") or ""),
+        str(order.get("lane") or ""),
+    )
 
 
 def _frozen_position_sizing_audit(
@@ -1052,6 +1130,27 @@ def _build_scheduled_history_backtest(
             orders,
         )
         for name, orders in extracted_variant_orders.items()
+    }
+    all_orders = {
+        _scheduled_order_identity(order): dict(order)
+        for orders in variant_orders.values()
+        for order in orders
+    }
+    c_enriched_index = {
+        _scheduled_order_identity(order): order
+        for order in _attach_historical_c_quality_evidence(
+            list(all_orders.values())
+        )
+    }
+    variant_orders = {
+        name: [
+            {
+                **order,
+                **c_enriched_index.get(_scheduled_order_identity(order), {}),
+            }
+            for order in orders
+        ]
+        for name, orders in variant_orders.items()
     }
     variant_filter_results = {
         name: core_quality.filter_core_quality_qualified_orders(orders)
@@ -1248,7 +1347,7 @@ def _build_scheduled_history_backtest(
             ],
             "selection_basis": (
                 "complete_active_candidate_pools_in_event_order_then_"
-                "core_ab_quality_gate"
+                "core_abc_quality_gate"
             ),
             "candidate_source": "complete_active_lane_candidate_pools",
             "configured_lanes": configured_lanes,

@@ -228,6 +228,54 @@ def test_same_time_relay_fills_before_first_board() -> None:
     assert filled[0]["lane"] == "two_to_three"
 
 
+def test_same_time_abc_priority_and_two_position_a_reservation() -> None:
+    c_signal = _signal(
+        "600001.SSE",
+        "2026-01-02",
+        "2026-01-05",
+        buy_time="10:05:00",
+        lane="first_board",
+        signal_kind="first_touch",
+        limit_price=10.0,
+    )
+    c_signal["quality_priority_tier"] = "C_capital_diffusion_rescue"
+    b_signal = _signal(
+        "600002.SSE",
+        "2026-01-02",
+        "2026-01-05",
+        buy_time="10:06:00",
+        lane="first_board",
+        signal_kind="first_touch",
+        limit_price=10.0,
+    )
+    b_signal["quality_priority_tier"] = "B_recognition_only"
+    a_signal = _signal(
+        "600003.SSE",
+        "2026-01-02",
+        "2026-01-05",
+        buy_time="10:07:00",
+        lane="first_board",
+        signal_kind="first_touch",
+        limit_price=10.0,
+    )
+    a_signal["quality_priority_tier"] = "A_industry_expanding"
+    result = simulate_limit_up_account(
+        signals=[b_signal, a_signal, c_signal],
+        bars=[
+            _bar(symbol, trade_date, 10.0, 10.0)
+            for symbol in ("600001.SSE", "600002.SSE", "600003.SSE")
+            for trade_date in ("2026-01-02", "2026-01-05")
+        ],
+        trade_dates=_dates("2026-01-02", "2026-01-05"),
+        exit_mode="next_close",
+        config=CashBacktestConfig(initial_cash=100_000, max_positions=2),
+    )
+
+    assert _buy_order(result, "600001.SSE")["status"] == "filled"
+    assert _buy_order(result, "600002.SSE")["reason"] == "reserved_for_later_a"
+    assert _buy_order(result, "600003.SSE")["status"] == "filled"
+
+
 def test_latest_signal_without_d1_stays_open_and_out_of_win_rate() -> None:
     signal = _signal("600001.SSE", "2026-01-02", "2026-01-05")
     signal["result_date"] = None

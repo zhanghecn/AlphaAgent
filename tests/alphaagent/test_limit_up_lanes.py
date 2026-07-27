@@ -1953,6 +1953,7 @@ def test_lane_backtest_only_counts_daily_selected_portfolio(monkeypatch) -> None
 def test_lane_backtest_equal_weights_multiple_selected_candidates(monkeypatch) -> None:
     day = _lane_replay_day(lane="two_to_three", return_pct=10.0)
     first = day["lane_portfolio"]["selected"][0]
+    first["prior_industry_turnover_ratio_5d"] = 1.2
     first.update(
         {
             "industry_id": "BK1",
@@ -2236,7 +2237,11 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
         lane="first_board",
         return_pct=4.0,
     )
+    development_day["lane_portfolio"]["selected"][0][
+        "prior_industry_turnover_ratio_5d"
+    ] = 1.2
     first = day["lane_portfolio"]["selected"][0]
+    first["prior_industry_turnover_ratio_5d"] = 1.2
     relay = {
         **first,
         "vt_symbol": "600002.SSE",
@@ -2393,7 +2398,7 @@ def test_portfolio_backtest_uses_scheduled_two_position_cash_account(monkeypatch
     ]
     assert report["portfolio_policy"]["excluded_lanes"] == ["high_board"]
     core_filter = report["core_quality_filter"]
-    assert core_filter["contract_version"] == "limit-up-core-ab-v1"
+    assert core_filter["contract_version"] == "limit-up-core-abc-v1"
     assert core_filter["first_board_minimum_d1_samples"] == 5
     assert core_filter["first_board_minimum_combined_rate"] == 30.0
     assert core_filter["minimum_prior_limit_count_126"] == 2

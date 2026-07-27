@@ -1,11 +1,10 @@
 # AlphaAgent 涨停龙头周期因子与正式推荐升级 Implementation Plan
 
 > **Archived (2026-07-26):** 本计划已归档，不再是可执行的当前方案。Tasks 0-6 的有效
-> 连板、市场情绪和覆盖审计仅作基础研究证据；正文中的 `v15/v9/v5`、回退开关、
+> 连板、市场情绪和覆盖审计仅作基础研究证据；正文中先前的多版本升级设想、回退开关、
 > `limit-up-leader-cycle-v1` 目标和 Tasks 7 以后的步骤均为当时设想，不得按当前合同执行。
-> 唯一正式合同已固定为 `limit-up-core-ab-v1`，无旧规则回退；当前方案、历史结果
-> 和前向未通过状态见 `memory/06_backtests/limit_up_final_trading_scheme_20260726.md` 与
-> `memory/06_backtests/limit_up_core_ab_formal_validation_20260726.md`。
+> 唯一正式合同已固定为 `limit-up-core-abc-v1`，不存在其他合同入口；当前方案、历史结果
+> 和前向未确认状态见 `memory/06_backtests/limit_up_abc_formal_replay_20260727.md`。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. This repository forbids commits unless the user explicitly requests one, so each task ends with a verification checkpoint instead of a commit step.
 
@@ -70,8 +69,8 @@
 ### 当前正式回测到底按什么价格买
 
 2026-07-25 已从源码、806 日 PostgreSQL 账本和页面实际调用链交叉核实：当前
-`/short-term` 回测固定请求 `lane=portfolio`，使用
-`limit-up-history-v15 / limit-up-scheduled-v9 / limit-up-cash-v5`，不是板前 3%-9% 回测。
+`/short-term` 回测固定请求 `lane=portfolio`，当前历史、调度和现金执行统一声明
+`limit-up-core-abc-v1`，不是板前 3%-9% 回测。
 
 - 806 日首板候选池有 572 个质量合格候选，572 个的 `entry_price` 全部等于涨停价。
 - 其中 545 个落在正式 `10:00-11:30 / 13:00-14:30` 买入窗口，仍全部按涨停价入场；
@@ -99,7 +98,8 @@
 2. 交易层只在现有正式首板/二进三质量池内进一步判断“保留、降级观察或拒绝”，并输出
    唯一的 `leader_cycle_priority`。正式全量推荐质量按保留后的全部候选计算，不能只报
    Top2 或两仓成交子集。
-3. 实时板前列表使用该优先级提前排列已经通过同源质量门且概率可用的候选；触板后的
+3. 实时板前列表使用该优先级提前排列已经通过同帧 A/B 或 C 质量准备门且概率可用的候选；
+   板前资格不得要求尚未发生的触板入场时钟。触板后的
    `actionable_recommendations` 使用同一优先级过滤和排序。`>=3%` 仍只是观察激活条件，
    龙头因子不能把普通涨幅股或板前观察直接升级为正式买点。
 4. 历史回放在每个信号时点只读取当时可见数据，生成与实时逐字段一致的质量结论、优先级
@@ -134,7 +134,7 @@
 - 一个被历史回放和实时推荐共同调用的质量结论与排序模块，不维护两套权重。
 - `/short-term` 中按正式优先级排列的板前候选和触板买点，以及可展开的中文排序理由。
 - 一份同窗恢复记分卡和一份独立前向验收报告，均同时报告全量推荐与两仓账户。
-- 一个可原子回退到当前 v15/v9 正式合同的开关；回退不删除实时扫板买点。
+- 一个不改变当前正式合同的研究影子开关；关闭研究不得删除实时扫板买点。
 
 ## 研究边界和成功标准
 
@@ -143,8 +143,7 @@
 以下合同在 Task 10 晋级决定通过前保持不变；通过后只允许按 Task 11 原子升级版本和质量
 排序，费用、入场、退出及候选母池边界仍不得改变。
 
-- 正式版本继续是 `limit-up-history-v15`、`limit-up-live-v15`、
-  `limit-up-scheduled-v9`、`limit-up-cash-v5`。
+- 正式历史、实时、调度和现金执行统一使用 `limit-up-core-abc-v1`。
 - 正式交易只包含现有首板和二进三质量池；本研究不得把全市场涨幅股直接变成推荐。
 - 正式费用、D+1 官方收盘退出、首板扫板买点、二进三动作和两仓现金账户不变。
 - 全市场行情可以用于判断谁带动板块；只有正式质量池候选可以进入收益评估和未来影子排序。
@@ -316,7 +315,7 @@ uv run --group server pytest -q \
 npm --prefix frontend test -- --run
 ```
 
-预期：测试全过；正式版本仍为 v15/v9/v5；当前基线仍明确分为全量
+预期：测试全过；正式合同仍为 `limit-up-core-abc-v1`；本任务当时的基线仍明确分为全量
 `239 / 54.8117% / +0.5687% / +101.5433%` 和两仓
 `127 / 58.2677% / +54.7953%`。计数因新交易日自然增加时更新报告，但入场等式不得改变。
 
@@ -927,7 +926,7 @@ def rank_leader_cycle_candidates(
 ```
 
 模块只能加载 Task 10 通过的指纹；指纹缺失、模型不匹配或点时输入不完整时返回
-`policy_unavailable`，并回退到当前 v15/v9 正式结果，不能清空买点，也不能临时使用影子权重。
+`policy_unavailable`；当前 `limit-up-core-abc-v1` 买点保持不变，不能清空买点，也不能临时使用影子权重。
 
 - [ ] **Step 3: 接入历史全量推荐质量链**
 
@@ -949,12 +948,10 @@ def rank_leader_cycle_candidates(
 批次内使用 `leader_cycle_priority` 决定优先级。禁止后来出现的高分票事后挤掉用户已执行的
 早先买点；全量质量统计不受两仓限制，两仓账户单独记录优先级带来的占仓变化。
 
-- [ ] **Step 6: 原子升级版本并保留回滚**
+- [ ] **Step 6: 已归档，不执行版本升级**
 
-只有上述测试和 Task 10 晋级决定同时通过，才将唯一正式版本升级为
-`limit-up-history-v16 / limit-up-live-v16 / limit-up-scheduled-v10`；现金执行继续
-`limit-up-cash-v5`。正式开关必须同时校验策略状态和模型指纹；关闭开关后完整回退当前
-v15/v9 候选、排序和买点，不删除历史账本。
+本步骤属于已否决的升级设想。当前只允许 `limit-up-core-abc-v1`，龙头研究保持影子；
+研究开关关闭时不得改变当前候选、排序和买点，也不删除历史账本。
 
 - [ ] **Step 7: 运行后端正式同源回归**
 
@@ -967,7 +964,7 @@ uv run --group server pytest -q \
   tests/alphaagent/test_limit_up_preboard_decision_service.py
 ```
 
-预期：历史/实时同源断言通过；晋级开关关闭时逐笔等于 v15/v9，开启时只改变候选质量结论
+预期：历史/实时同源断言通过；研究开关关闭时逐笔等于 `limit-up-core-abc-v1`，影子开启时只记录候选质量结论
 和同批顺序，不改变触板价、D+1 退出、费用和二进三形态定义。
 
 ## Task 12: 交付用户可用的正式排序并完成发布验收

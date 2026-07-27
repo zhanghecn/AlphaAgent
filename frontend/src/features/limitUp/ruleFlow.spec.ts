@@ -9,13 +9,16 @@ const guide = {
     max_positions: 2,
   },
   core_quality: {
-    contract_version: "limit-up-core-ab-v1",
+    contract_version: "limit-up-core-abc-v1",
     prior_limit_window_days: 126,
     minimum_prior_limit_count: 2,
     maximum_prior_limit_count: 6,
     a_tier_industry_turnover_ratio_5d: 1,
     b_tier_is_actionable: true,
-    priority_rule: "A优先，B保留",
+    b_first_board_minimum_time: "10:30",
+    c_tier_is_actionable: true,
+    c_daily_limit: 1,
+    priority_rule: "同一时点A优先于C、C优先于B",
   },
   selection_steps: [
     { order: 1, title: "限定可交易范围", rule: "仅主板首板和二进三。", timing: "盘中已知" },
@@ -48,7 +51,8 @@ describe("buildRuleFlow", () => {
     expect(gate.title).toContain("唯一正式合同");
     const labels = gate.thresholds.map((t) => t.label);
     expect(labels).toContain("正式合同");
-    expect(labels).toContain("旧规则回退");
+    expect(labels).toContain("缺失字段");
+    expect(gate.condition).toContain("失败关闭");
   });
 
   it("辨识度节点把 126 日 2 到 6 次设为硬门", () => {
@@ -58,10 +62,10 @@ describe("buildRuleFlow", () => {
     expect(radar.thresholds).toContainEqual({ label: "最多涨停", value: "6 次" });
   });
 
-  it("A 优先但 B 仍可交易", () => {
+  it("同一时点按 A C B 排序且 B 仍可交易", () => {
     const sector = buildRuleFlow(guide).find((node) => node.stage === "sector")!;
 
-    expect(sector.condition).toContain("A优先，B保留");
+    expect(sector.condition).toContain("A优先于C、C优先于B");
     expect(sector.thresholds).toContainEqual({ label: "B 可交易", value: "是" });
   });
 

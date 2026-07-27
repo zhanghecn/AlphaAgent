@@ -102,6 +102,7 @@ CONCEPT_WARMING_MIN_STRONG_5_COUNT = 2
 CONCEPT_ACCELERATION_ANCHOR_TOLERANCE_SECONDS = 90
 _CONCEPT_STATES = {"launch": 0, "warming": 1, "observe": 2, "ebb": 3, "unavailable": 4}
 CONCEPT_SHADOW_METRIC_FIELDS = (
+    "member_count",
     "coverage_ratio",
     "observed_count",
     "rise_ratio",
@@ -633,6 +634,7 @@ def _copy_concept_evidence(
             "concept_coverage_ratio": concept.get("coverage_ratio"),
             "concept_strong_5_count": concept.get("strong_5_count"),
             "concept_near_limit_count": concept.get("near_limit_count"),
+            "concept_touched_count": concept.get("touched_count"),
             "concept_sealed_count": concept.get("sealed_count"),
             "concept_failed_count": concept.get("failed_count"),
             **{

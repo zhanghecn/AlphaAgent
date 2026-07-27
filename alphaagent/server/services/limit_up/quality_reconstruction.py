@@ -1,11 +1,9 @@
-"""Reconstruct the durable quality signal hidden by legacy report coverage."""
+"""Evaluate the point-in-time quality fields used by the formal A+B contract."""
 
 from __future__ import annotations
 
-import argparse
 from collections.abc import Mapping, Sequence
 from datetime import date
-from pathlib import Path
 
 import pandas as pd
 
@@ -20,21 +18,16 @@ from alphaagent.server.services.limit_up.capital_mainline_evaluation import (
 from alphaagent.server.services.limit_up.first_board_stock_gene_research import (
     attach_prior_stock_gene_evidence_to_orders,
 )
-from alphaagent.server.services.limit_up.history_repository import (
-    load_history_candidate_pools,
-)
 from alphaagent.server.services.limit_up.scheduled_execution import (
     extract_scheduled_orders,
     filter_profitability_qualified_orders,
 )
-from alphaagent.server.services.limit_up.versions import CORE_AB_STRATEGY_VERSION
+from alphaagent.server.services.limit_up.versions import CORE_ABC_STRATEGY_VERSION
 
 
 STUDY_VERSION = "limit-up-quality-reconstruction-v1"
 CORE_RULE_VERSION = "recognition-capacity-expansion-v1"
 COVERAGE_RULE_VERSION = "recognition-2-to-6-v1"
-FORMAL_HISTORY_VERSION = "limit-up-history-v15"
-LEGACY_AUDIT_VERSION = "limit-up-history-v14"
 NATURAL_FORWARD_START = date(2026, 7, 27)
 MINIMUM_PRIOR_LIMIT_COUNT_126 = 2
 MAXIMUM_PRIOR_LIMIT_COUNT_126 = 6
@@ -104,39 +97,8 @@ def attach_quality_fields(
     ).reset_index(drop=True)
 
 
-def attach_legacy_audit_identity(
-    frame: pd.DataFrame,
-    legacy_days: Sequence[Mapping[str, object]],
-) -> pd.DataFrame:
-    """Attach legacy selection identity for explanation, never for filtering."""
-
-    if frame.empty:
-        return frame.copy()
-    start = min(_as_date(value) for value in frame["trade_date"])
-    end = max(_as_date(value) for value in frame["trade_date"])
-    legacy = extract_formal_recommendations(legacy_days, start=start, end=end)
-    identities = {
-        identity
-        for row in legacy.to_dict("records")
-        if (identity := _candidate_identity(row)) is not None
-    }
-    result = frame.copy()
-    result["legacy_v14_selected_for_audit"] = [
-        _candidate_identity(row) in identities for row in result.to_dict("records")
-    ]
-    covered_dates = {
-        trade_date
-        for day in legacy_days
-        if (trade_date := _as_date(day.get("trade_date"))) is not None
-    }
-    result["legacy_v14_date_covered_for_audit"] = [
-        _as_date(value) in covered_dates for value in result["trade_date"]
-    ]
-    return result
-
-
 def quality_rule_masks(frame: pd.DataFrame) -> dict[str, pd.Series]:
-    """Return the fixed ablation masks without consulting outcomes or legacy identity."""
+    """Return the fixed ablation masks without consulting outcomes."""
 
     limit_count = pd.to_numeric(
         frame.get("prior_limit_count_126"), errors="coerce"
@@ -210,29 +172,10 @@ def evaluate_quality_reconstruction(frame: pd.DataFrame) -> dict[str, object]:
             },
         }
 
-    legacy_audit: dict[str, object] = {}
-    if "legacy_v14_selected_for_audit" in frame:
-        selected = frame["legacy_v14_selected_for_audit"].fillna(False).astype(bool)
-        covered = frame.get(
-            "legacy_v14_date_covered_for_audit",
-            pd.Series(True, index=frame.index),
-        ).fillna(False).astype(bool)
-        legacy_audit = {
-            "legacy_common": performance_summary(
-                frame.loc[selected], baseline_count=baseline_count
-            ),
-            "v15_added_same_dates": performance_summary(
-                frame.loc[covered & ~selected], baseline_count=baseline_count
-            ),
-            "outside_legacy_dates": performance_summary(
-                frame.loc[~covered], baseline_count=baseline_count
-            ),
-        }
     return {
         "study_version": STUDY_VERSION,
         "rule_version": CORE_RULE_VERSION,
         "factors": factors,
-        "legacy_audit": legacy_audit,
     }
 
 
@@ -264,13 +207,13 @@ def render_quality_reconstruction_report(
         "",
         "## Current state",
         "",
-        f"- 研究版本：`{STUDY_VERSION}`；正式母池：`{FORMAL_HISTORY_VERSION}`；行情背景区间 `{start}..{end}`。",
+        f"- 研究版本：`{STUDY_VERSION}`；正式合同：`{CORE_ABC_STRATEGY_VERSION}`；行情背景区间 `{start}..{end}`。",
         f"- 正式推荐实际覆盖 `{formal_start}..{formal_end}`，不是从行情背景起点持续出单；当前闭合母池 {int(baseline_full.get('closed_count') or 0)} 笔。",
         "- 财报补齐后的正确正式质量门保持不变；本研究只在其全量正式推荐之上增加两个 D-1 字段。",
         f"- 全量覆盖规则：`{MINIMUM_PRIOR_LIMIT_COUNT_126} <= prior_limit_count_126 <= {MAXIMUM_PRIOR_LIMIT_COUNT_126}`；行业量能只区分 A/B 优先级。",
         f"- A 级规则额外要求 `prior_industry_turnover_ratio_5d >= {MINIMUM_PRIOR_INDUSTRY_TURNOVER_RATIO_5D:.1f}`。",
-        "- 股票名、概念名、旧财报是否存在和旧 v14 身份都不进入规则；不读取分钟数据。",
-        f"- 归档状态：该发现已进入 `{CORE_AB_STRATEGY_VERSION}`；全量覆盖历史为 {int(coverage_full.get('win_count') or 0)}/"
+        "- 股票名、概念名和本地财报覆盖身份都不进入规则；不读取分钟数据。",
+        f"- 归档状态：该发现已进入 `{CORE_ABC_STRATEGY_VERSION}` 的 A+B 基座；全量覆盖历史为 {int(coverage_full.get('win_count') or 0)}/"
         f"{int(coverage_full.get('closed_count') or 0)}={_fmt(coverage_full.get('win_rate_pct'))}%；其中 A 级为 {int(core_full.get('win_count') or 0)}/"
         f"{int(core_full.get('closed_count') or 0)}={_fmt(core_full.get('win_rate_pct'))}%。当前状态为 `historical_pass_forward_not_passed`。",
         "",
@@ -370,52 +313,21 @@ def render_quality_reconstruction_report(
             f"{_signed(summary.get('average_return_pct'))}% |"
         )
 
-    legacy = _mapping(evaluation.get("legacy_audit"))
-    if legacy:
-        lines.extend(
-            [
-                "",
-                "## Legacy identity audit",
-                "",
-                "该列只解释旧覆盖，实时和回测筛选函数均不读取它。",
-                "",
-                "| v15 身份组 | 闭合 | 胜率 | 平均净收益 |",
-                "|---|---:|---:|---:|",
-            ]
-        )
-        for name, label in (
-            ("legacy_common", "v14/v15 共同"),
-            ("v15_added_same_dates", "v14覆盖日期内的v15新增"),
-            ("outside_legacy_dates", "v14日期范围外"),
-        ):
-            summary = _mapping(legacy.get(name))
-            lines.append(
-                f"| {label} | {int(summary.get('closed_count') or 0)} | {_fmt(summary.get('win_rate_pct'))}% | "
-                f"{_signed(summary.get('average_return_pct'))}% |"
-            )
-
     lines.extend(
         [
             "",
             "## A-tier selected replay ledger",
             "",
-            "| 日期 | 股票 | lane | 半年涨停 | 行业量能/5日 | D+1净收益 | 旧v14审计 |",
-            "|---|---|---|---:|---:|---:|---|",
+            "| 日期 | 股票 | lane | 半年涨停 | 行业量能/5日 | D+1净收益 |",
+            "|---|---|---|---:|---:|---:|",
         ]
     )
     for row in selected.to_dict("records"):
-        legacy_text = (
-            "共同"
-            if row.get("legacy_v14_selected_for_audit") is True
-            else "v15新增"
-            if "legacy_v14_selected_for_audit" in row
-            else "未加载"
-        )
         lines.append(
             f"| {row.get('trade_date')} | {row.get('name')} `{row.get('vt_symbol')}` | {row.get('lane')} | "
             f"{int(_number(row.get('prior_limit_count_126')) or 0)} | "
             f"{_fmt(row.get('prior_industry_turnover_ratio_5d'))} | "
-            f"{_signed(row.get('return_pct'))}% | {legacy_text} |"
+            f"{_signed(row.get('return_pct'))}% |"
         )
 
     lines.extend(
@@ -423,7 +335,7 @@ def render_quality_reconstruction_report(
             "",
             "## Executable contract",
             "",
-            "1. 先执行 v15 已有的正确财报、正式低位结构、封板和同股历史盈利门，保留全部合格推荐，不做两仓 Top-N 评价。",
+            "1. 先执行当前正式合同的正确财报、正式低位结构、封板和同股历史盈利门，保留全部合格推荐，不做两仓 Top-N 评价。",
             "2. 全量交易集合再要求过去 126 个交易日涨停次数为 2-6 次，排除没有辨识度和已经反复透支的两端。",
             "3. 信号日前一交易日所属行业总成交额不低于更早 5 日均值时标记 A 级，否则为 B 级；A/B 都属于全量规则，不能只报 A 级胜率。",
             "4. 动态概念扩散只负责排序和进场时机：同概念梯队刚开始扩散且尚未进入分歧、退潮时优先；它不能绕过前两道质量门或新增交易。",
@@ -433,7 +345,7 @@ def render_quality_reconstruction_report(
             "",
             f"- `{COVERAGE_RULE_VERSION}` 从 `{NATURAL_FORWARD_START}` 起冻结自然前向，至少 30 笔闭合且覆盖至少 3 个月。",
             "- 晋级要求全部闭合推荐胜率 `>=60%`，同时报告均值、复利、回撤、硬亏和市场阶段；两仓结果不参与。",
-            f"- `{CORE_AB_STRATEGY_VERSION}` 已完成历史/实时同源接入；自然前向达标前不得放宽 A+B 或恢复旧规则。",
+            f"- `{CORE_ABC_STRATEGY_VERSION}` 的 A+B 基座已完成历史/实时同源接入。",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -480,38 +392,3 @@ def _fmt(value: object) -> str:
 def _signed(value: object) -> str:
     number = _number(value)
     return f"{number:+.4f}" if number is not None else "-"
-
-
-def main(argv: Sequence[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--start", type=date.fromisoformat, required=True)
-    parser.add_argument("--end", type=date.fromisoformat, required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--history-version", default=FORMAL_HISTORY_VERSION)
-    parser.add_argument("--legacy-version", default=LEGACY_AUDIT_VERSION)
-    arguments = parser.parse_args(argv)
-
-    days = load_history_candidate_pools(arguments.history_version)
-    frame = build_quality_reconstruction_frame(
-        days,
-        start=arguments.start,
-        end=arguments.end,
-    )
-    if arguments.legacy_version:
-        frame = attach_legacy_audit_identity(
-            frame,
-            load_history_candidate_pools(arguments.legacy_version),
-        )
-    evaluation = evaluate_quality_reconstruction(frame)
-    report = render_quality_reconstruction_report(
-        frame,
-        evaluation,
-        start=arguments.start,
-        end=arguments.end,
-    )
-    arguments.output.parent.mkdir(parents=True, exist_ok=True)
-    arguments.output.write_text(report, encoding="utf-8")
-
-
-if __name__ == "__main__":
-    main()

@@ -43,7 +43,8 @@ describe("LimitUpPage backtest contract", () => {
       />,
     );
 
-    expect(html).toContain("A+B 回测载入中");
+    expect(html).toContain("A+B+C 回测载入中");
+    expect(html).toContain("正在读取 A+B+C 全量回测");
     expect(html).toContain("完成后本页会自动更新");
     expect(html).toContain('role="status"');
   });

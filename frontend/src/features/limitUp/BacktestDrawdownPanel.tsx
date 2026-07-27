@@ -310,7 +310,7 @@ function CausalExitResearch({ diagnostics }: { diagnostics: LimitUpDrawdownDiagn
           </div>
           <div className="border-b px-3 py-2.5 sm:px-4">
             <dt className="text-muted-foreground">正式规则</dt>
-            <dd className="mt-1 font-medium">A+B · D+1 收盘退出</dd>
+            <dd className="mt-1 font-medium">A+B+C · D+1 收盘退出</dd>
           </div>
         </dl>
       </div>
@@ -335,7 +335,7 @@ function CausalExitResearch({ diagnostics }: { diagnostics: LimitUpDrawdownDiagn
             </thead>
             <tbody className="divide-y">
               <tr>
-                <td className="px-3 py-2.5 font-medium">A+B · D+1 收盘</td>
+                <td className="px-3 py-2.5 font-medium">A+B+C · D+1 收盘</td>
                 <SummaryCells summary={benchmark.baseline_summary} muted />
               </tr>
               <tr>

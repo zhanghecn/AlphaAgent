@@ -283,6 +283,10 @@ def test_attach_candidate_concepts_selects_strongest_execution_concept() -> None
                 "concept_state": "launch",
                 "strength_score": 92.0,
                 "strength_rank": 1,
+                "near_limit_count": 3,
+                "touched_count": 2,
+                "sealed_count": 1,
+                "failed_count": 1,
                 "change_acceleration_1m": 0.2,
                 "change_acceleration_3m": 0.7,
                 "change_acceleration_5m": 1.1,
@@ -301,6 +305,10 @@ def test_attach_candidate_concepts_selects_strongest_execution_concept() -> None
     assert candidates[0]["concept_leader_rank"] == 1
     assert candidates[0]["concept_snapshot_age_seconds"] == 12.0
     assert candidates[0]["concept_trigger_allowed"] is False
+    assert candidates[0]["concept_near_limit_count"] == 3
+    assert candidates[0]["concept_touched_count"] == 2
+    assert candidates[0]["concept_sealed_count"] == 1
+    assert candidates[0]["concept_failed_count"] == 1
     assert candidates[0]["concept_change_acceleration_1m"] == 0.2
     assert candidates[0]["concept_change_acceleration_3m"] == 0.7
     assert candidates[0]["concept_change_acceleration_5m"] == 1.1

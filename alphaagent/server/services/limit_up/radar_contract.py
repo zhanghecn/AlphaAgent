@@ -10,7 +10,7 @@ FORMAL_MIN_CHANGE_PCT = 5.0
 RADAR_CONTRACT_VERSION = "limit-up-radar-contract-v1"
 POOL_STATES = frozenset({"sealed", "resealed", "failed"})
 PRODUCTION_CONTRACTS = {
-    ("limit-up-core-ab-v1", 5.0): "core_ab_formal_5pct",
+    ("limit-up-core-abc-v1", 5.0): "core_abc_formal_5pct",
 }
 
 

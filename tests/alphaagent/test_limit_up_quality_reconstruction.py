@@ -3,7 +3,6 @@ from datetime import date
 import pandas as pd
 
 from alphaagent.server.services.limit_up.quality_reconstruction import (
-    attach_legacy_audit_identity,
     attach_quality_fields,
     evaluate_quality_reconstruction,
     quality_rule_masks,
@@ -112,41 +111,6 @@ def test_evaluation_reports_all_rows_time_slices_months_and_lanes() -> None:
     assert set(core["monthly"]) == {"2025-03", "2025-04", "2026-01", "2026-03", "2026-07"}
     assert core["lanes"]["first_board"]["closed_count"] == 3
     assert core["lanes"]["two_to_three"]["closed_count"] == 2
-
-
-def test_legacy_identity_is_audit_only_and_cannot_change_rule_selection(
-    monkeypatch,
-) -> None:
-    frame = pd.DataFrame.from_records(
-        [
-            {
-                **_candidate(date(2026, 7, 1), "600001.SSE", 3.0),
-                "prior_limit_count_126": 3,
-                "prior_industry_turnover_ratio_5d": 1.1,
-            },
-            {
-                **_candidate(date(2026, 7, 2), "600002.SSE", -2.0),
-                "prior_limit_count_126": 8,
-                "prior_industry_turnover_ratio_5d": 1.2,
-            },
-        ]
-    )
-    legacy = pd.DataFrame.from_records(
-        [_candidate(date(2026, 7, 2), "600002.SSE", -2.0)]
-    )
-    monkeypatch.setattr(
-        "alphaagent.server.services.limit_up.quality_reconstruction.extract_formal_recommendations",
-        lambda *args, **kwargs: legacy,
-    )
-
-    audited = attach_legacy_audit_identity(
-        frame,
-        [{"trade_date": "2026-07-02"}],
-    )
-
-    assert audited["legacy_v14_selected_for_audit"].tolist() == [False, True]
-    assert audited["legacy_v14_date_covered_for_audit"].tolist() == [False, True]
-    assert select_quality_candidates(audited)["vt_symbol"].tolist() == ["600001.SSE"]
 
 
 def _candidate(trade_date: date, symbol: str, result: float) -> dict[str, object]:

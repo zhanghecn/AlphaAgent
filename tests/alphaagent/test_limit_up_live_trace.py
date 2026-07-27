@@ -98,6 +98,8 @@ def test_live_trace_reader_selects_only_timeline_columns(monkeypatch) -> None:
         "recommendations",
         "data_quality",
     )
+    assert "strategy_version" in str(session.statement)
+    assert "limit-up-core-abc-v1" in session.statement.compile().params.values()
     assert _SelectResult.partition_size == 32
 
 
@@ -382,6 +384,34 @@ def test_symbol_trace_preserves_fast_first_board_state_changes() -> None:
     assert approaching["market_repair_confirmed_at"] == "2026-07-14T09:59:22+08:00"
     assert approaching["sector_heat"] == 62.5
     assert approaching["sector_touch_count"] == 3
+
+
+def test_research_buy_cancelled_by_formal_gate_is_not_counted_as_trigger() -> None:
+    symbol = "600001.SSE"
+    rejected = {
+        **_trace_signal(symbol, "trigger_ready", reason="只观察，不执行：质量门未通过"),
+        "action": "pass",
+        "research_action": "buy_now",
+    }
+    rows = [
+        _trace_row(
+            "10:05:20",
+            radar=[_trace_candidate(symbol, 9.3, "near_limit")],
+            signals=[rejected],
+        )
+    ]
+
+    events = build_symbol_trace(rows, symbol)
+    day = build_day_trace(rows)
+
+    assert [event["event"] for event in events] == [
+        "radar_entered",
+        "recommended",
+        "rejected",
+    ]
+    assert not any(event["event"] == "trigger_ready" for event in events)
+    assert day["items"][0]["ever_triggered"] is False
+    assert day["lane_funnels"]["first_board"]["triggered_count"] == 0
 
 
 def test_trace_records_concept_warming_before_top5_entry() -> None:

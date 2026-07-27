@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence, Set
 from datetime import date
 from math import ceil, floor, isfinite, sqrt
 from pathlib import Path
-from statistics import mean, median
+from statistics import mean
 from typing import Any
 
 import numpy as np
@@ -635,7 +635,7 @@ def matched_same_day_effect(
     controls = frame.loc[~treatment_mask.fillna(False)].copy()
     pairs: list[tuple[float, float]] = []
     used_controls: set[int] = set()
-    for index, row in treatment.iterrows():
+    for _index, row in treatment.iterrows():
         candidates = controls.loc[
             controls["trade_date"].eq(row["trade_date"])
             & controls["lane"].eq(row["lane"])
@@ -970,7 +970,7 @@ def _report_header(
         "",
         f"- 研究版本：`{STUDY_VERSION}`。",
         f"- 区间：`{inputs.coverage.get('start')}..{inputs.coverage.get('end')}`；正式候选 `{len(frame)}` 笔。",
-        "- 母池固定为 `limit-up-history-v15` 的 `decision=eligible`、有涨停价入场且 D+1 收盘已闭合候选。",
+        "- 母池固定为归档历史中 `decision=eligible`、有涨停价入场且 D+1 收盘已闭合的候选。",
         "- 首板 D 日只连接 D-1 概念状态；D 日收盘周期、最终龙头和 D+1 结果不进入特征。",
         "",
     ]

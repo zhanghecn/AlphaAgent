@@ -8,10 +8,12 @@ from alphaagent.server.services.limit_up.strategy_guide import (
 
 def test_strategy_guide_separates_selection_fields_from_future_outcomes() -> None:
     guide = get_limit_up_strategy_guide()
-    assert guide["strategy"]["selection_contract"] == "limit-up-core-ab-v1"
+    assert guide["strategy"]["selection_contract"] == "limit-up-core-abc-v1"
     assert guide["core_quality"]["minimum_prior_limit_count"] == 2
     assert guide["core_quality"]["maximum_prior_limit_count"] == 6
     assert guide["core_quality"]["b_tier_is_actionable"] is True
+    assert guide["core_quality"]["c_tier_is_actionable"] is True
+    assert guide["core_quality"]["c_daily_limit"] == 1
 
     assert guide["strategy"]["selection_no_lookahead"] is True
     assert guide["ranking"]["history_cutoff"] == "result_date < signal_date"
@@ -28,18 +30,17 @@ def test_strategy_guide_separates_selection_fields_from_future_outcomes() -> Non
     recognition = next(
         step for step in guide["selection_steps"] if step["order"] == 3
     )
-    assert "过去126个交易日涨停次数必须在2到6次" in recognition["rule"]
+    assert "过去126个交易日涨停2到6次" in recognition["rule"]
     priority = next(
         step for step in guide["selection_steps"] if step["order"] == 4
     )
-    assert "A优先，B仍可交易" in priority["rule"]
+    assert "细分概念2到4只先行封板" in priority["rule"]
     assert guide["preboard_decision"]["observation_is_buy_signal"] is False
     assert guide["preboard_decision"]["quality_pool_rule"].startswith(
         "先通过正式同源首板质量门"
     )
     assert "不生成买点" in guide["preboard_decision"]["formal_baseline"]
-    assert "旧规则回退入口" in guide["preboard_decision"]["formal_baseline"]
-    assert guide["ranking"]["portfolio_gate"].startswith("全量正式首板要求")
+    assert guide["ranking"]["portfolio_gate"].startswith("A/B首板要求")
     rendered = str(guide)
     assert "known_at" not in rendered
     assert "decision_at" not in rendered
@@ -49,15 +50,14 @@ def test_strategy_guide_separates_selection_fields_from_future_outcomes() -> Non
     )
 
 
-def test_strategy_guide_exposes_core_ab_evidence_and_old_audit_dataset() -> None:
+def test_strategy_guide_exposes_core_abc_evidence_and_forward_status() -> None:
     guide = get_limit_up_strategy_guide()
-    dataset = guide["dataset"]
     evidence = guide["core_quality"]["frozen_evidence"]
 
-    assert evidence["closed_count"] == 78
-    assert evidence["win_count"] == 56
-    assert evidence["win_rate_pct"] == 71.7949
-    assert evidence["status"] == "historical_pass_forward_not_passed"
+    assert evidence["closed_count"] == 143
+    assert evidence["win_count"] == 99
+    assert evidence["win_rate_pct"] == 69.2308
+    assert evidence["status"] == "historical_proxy_pass_forward_unconfirmed"
     assert evidence["live_equivalent"] is False
     assert evidence["a_tier"] == {
         "closed_count": 41,
@@ -65,31 +65,23 @@ def test_strategy_guide_exposes_core_ab_evidence_and_old_audit_dataset() -> None
         "win_rate_pct": 85.3659,
     }
     assert evidence["b_tier"] == {
-        "closed_count": 37,
-        "win_count": 21,
-        "win_rate_pct": 56.7568,
+        "closed_count": 30,
+        "win_count": 18,
+        "win_rate_pct": 60.0,
     }
-    recent = guide["core_quality"]["recent_snapshot_check"]
-    assert recent["closed_count"] == 24
-    assert recent["win_count"] == 12
-    assert recent["win_rate_pct"] == 50.0
-    assert recent["status"] == "below_60_requires_natural_forward"
-
-    assert dataset["table"] == "limit_up_signal_snapshots"
-    assert "只读审计" in dataset["name"]
-    assert dataset["snapshot_count"] == 643
-    assert sum(row["snapshot_count"] for row in dataset["daily_snapshot_counts"]) == 643
-    assert dataset["closed_through"] == "2026-07-15"
-    assert dataset["closed_signal_count"] == 11
-    assert dataset["win_count"] == 7
-    assert dataset["win_rate_pct"] == 63.6364
-    assert dataset["average_net_return_pct"] == 2.905
-    historical = guide["historical_reference"]
-    assert historical["trade_day_count"] == 806
-    assert historical["qualified_signal_count"] == 243
-    assert historical["closed_recommendation_count"] == 239
-    assert historical["recommendation_win_rate_pct"] == 54.8117
-    assert historical["live_equivalent"] is False
+    assert evidence["c_tier"] == {
+        "closed_count": 72,
+        "win_count": 46,
+        "win_rate_pct": 63.8889,
+    }
+    forward = guide["core_quality"]["forward_status"]
+    assert forward["start_date"] == "2026-07-27"
+    assert forward["closed_count"] == 0
+    assert forward["win_count"] == 0
+    assert forward["win_rate_pct"] is None
+    assert forward["minimum_closed_count"] == 15
+    assert forward["minimum_trade_days"] == 10
+    assert forward["status"] == "collecting_forward"
     preboard = guide["preboard_decision"]
     assert preboard["decision_version"] == "limit-up-preboard-decision-v1"
     assert preboard["observation_min_change_pct"] == 3.0
@@ -98,7 +90,7 @@ def test_strategy_guide_exposes_core_ab_evidence_and_old_audit_dataset() -> None
         "3分钟触板概率",
         "当日最终触板概率",
     ]
-    assert "limit-up-core-ab-v1" in preboard["formal_baseline"]
+    assert "limit-up-core-abc-v1" in preboard["formal_baseline"]
     assert "radar_evidence" not in guide
 
 
@@ -107,6 +99,6 @@ def test_strategy_guide_api_is_readable_without_triggering_market_data() -> None
 
     assert response.status_code == 200
     payload = response.json()["data"]
-    assert payload["strategy"]["live_version"] == "limit-up-core-ab-v1"
+    assert payload["strategy"]["live_version"] == "limit-up-core-abc-v1"
     assert payload["strategy"]["entry_mode"] == "sweep"
     assert payload["strategy"]["exit_mode"] == "next_close"

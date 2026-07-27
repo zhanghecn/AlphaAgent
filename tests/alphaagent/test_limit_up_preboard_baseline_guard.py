@@ -23,14 +23,14 @@ from alphaagent.server.services.limit_up.versions import (
 )
 
 
-def test_preboard_work_uses_core_ab_and_keeps_execution_contract() -> None:
-    assert HISTORY_STRATEGY_VERSION == "limit-up-core-ab-v1"
-    assert LIVE_STRATEGY_VERSION == "limit-up-core-ab-v1"
+def test_preboard_work_uses_core_abc_and_keeps_execution_contract() -> None:
+    assert HISTORY_STRATEGY_VERSION == "limit-up-core-abc-v1"
+    assert LIVE_STRATEGY_VERSION == "limit-up-core-abc-v1"
     assert (
         scheduled_execution.SCHEDULED_EXECUTION_VERSION
-        == "limit-up-core-ab-v1"
+        == "limit-up-core-abc-v1"
     )
-    assert cash_backtest.ACCOUNT_EXECUTION_VERSION == "limit-up-core-ab-v1"
+    assert cash_backtest.ACCOUNT_EXECUTION_VERSION == "limit-up-core-abc-v1"
     assert scheduled_execution.MAX_POSITIONS == 2
 
 

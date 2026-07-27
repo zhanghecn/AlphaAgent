@@ -12,6 +12,7 @@ from alphaagent.server.services.limit_up import scheduled_execution
 from alphaagent.server.services.limit_up.domain import is_eligible_main_board
 from alphaagent.server.services.limit_up.lane_research import evaluate_lane_candidate
 from alphaagent.server.services.limit_up.preboard_decision_contract import (
+    PREBOARD_DECISION_VERSION,
     historical_prior_from_evidence,
     historical_prior_status,
     is_strictly_preboard,
@@ -244,7 +245,8 @@ def build_preboard_pools(
             continue
         candidate.update(capture_gate)
         capture.append(candidate)
-        evaluated = evaluate_first_board_quality_at_time(
+        materialized = _materialized_point_in_time_quality(candidate, decision_at)
+        evaluated = materialized or evaluate_first_board_quality_at_time(
             candidate,
             decision_at=decision_at,
             market_gate=market_gate,
@@ -262,6 +264,24 @@ def build_preboard_pools(
                     evaluated,
                     stage="quality_rejected",
                     rejection_codes=reasons,
+                )
+            )
+            continue
+        if (
+            materialized is not None
+            and evaluated.get("core_quality_preparation_passed") is not True
+        ):
+            reason = str(
+                evaluated.get("base_ab_quality_gate_reason")
+                or evaluated.get("core_quality_gate_reason")
+                or "core_quality_gate"
+            )
+            rejections[reason] += 1
+            candidate_audit.append(
+                _pool_candidate_audit(
+                    evaluated,
+                    stage="core_quality_rejected",
+                    rejection_codes=(reason,),
                 )
             )
             continue
@@ -323,6 +343,12 @@ def _pool_candidate_audit(
         "pool_stage": stage,
         "rejection_codes": tuple(str(value) for value in rejection_codes),
         "quality_gate_passed": candidate.get("quality_gate_passed"),
+        "core_quality_gate_passed": candidate.get("core_quality_gate_passed"),
+        "core_quality_gate_reason": candidate.get("core_quality_gate_reason"),
+        "core_quality_preparation_passed": candidate.get(
+            "core_quality_preparation_passed"
+        ),
+        "quality_priority_tier": candidate.get("quality_priority_tier"),
         "profitability_gate_passed": candidate.get("profitability_gate_passed"),
         "historical_prior_status": candidate.get("historical_prior_status"),
         "lane_blockers": tuple(
@@ -342,6 +368,35 @@ def _pool_candidate_audit(
             for value in candidate.get("diagnostic_environment_checks") or ()
         ),
     }
+
+
+def _materialized_point_in_time_quality(
+    candidate: Mapping[str, object],
+    decision_at: datetime,
+) -> dict[str, object] | None:
+    """Reuse live quality only when it was evaluated for this exact frame."""
+
+    if (
+        candidate.get("preboard_decision_contract_version")
+        != PREBOARD_DECISION_VERSION
+        or not isinstance(candidate.get("quality_gate_passed"), bool)
+        or not isinstance(candidate.get("core_quality_gate_passed"), bool)
+    ):
+        return None
+    try:
+        evaluated_at = datetime.fromisoformat(
+            str(candidate.get("quality_evaluated_at") or "")
+        )
+    except ValueError:
+        return None
+    if evaluated_at != decision_at:
+        return None
+    result = dict(candidate)
+    result["core_quality_preparation_passed"] = bool(
+        result.get("base_ab_quality_gate_passed") is True
+        or result.get("c_quality_gate_passed") is True
+    )
+    return result
 
 
 def _execution_checks(

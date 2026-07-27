@@ -32,6 +32,25 @@ def test_radar_observations_define_point_in_time_flow_sources() -> None:
         "stock_main_net_inflow_ratio",
         "stock_flow_trade_date",
         "lane_blocker_codes",
+        "prior_limit_count_126",
+        "prior_industry_turnover_ratio_5d",
+        "prior_return_5d_pct",
+        "prior_market_phase",
+        "stock_d1_sample_count",
+        "stock_gene_combined_win_rate",
+        "profitability_gate_passed",
+        "recognition_gate_passed",
+        "core_quality_gate_passed",
+        "core_quality_gate_reason",
+        "quality_priority_tier",
+        "concept_near_limit_count",
+        "concept_touched_count",
+        "concept_sealed_count",
+        "concept_failed_count",
+        "board_level",
+        "concept_candidates",
+        "concept_membership_snapshot_date",
+        "concept_trigger_allowed",
     }
 
     assert fields.issubset(
@@ -100,6 +119,25 @@ def test_flow_source_schema_patches_are_idempotent() -> None:
         "stock_main_net_inflow_ratio FLOAT",
         "stock_flow_trade_date DATE",
         "lane_blocker_codes JSONB",
+        "prior_limit_count_126 INTEGER",
+        "prior_industry_turnover_ratio_5d FLOAT",
+        "prior_return_5d_pct FLOAT",
+        "prior_market_phase VARCHAR(24)",
+        "stock_d1_sample_count INTEGER",
+        "stock_gene_combined_win_rate FLOAT",
+        "profitability_gate_passed BOOLEAN",
+        "recognition_gate_passed BOOLEAN",
+        "core_quality_gate_passed BOOLEAN",
+        "core_quality_gate_reason VARCHAR(160)",
+        "quality_priority_tier VARCHAR(40)",
+        "concept_near_limit_count INTEGER",
+        "concept_touched_count INTEGER",
+        "concept_sealed_count INTEGER",
+        "concept_failed_count INTEGER",
+        "board_level INTEGER",
+        "concept_candidates JSONB",
+        "concept_membership_snapshot_date DATE",
+        "concept_trigger_allowed BOOLEAN",
         "capture_runtime_fingerprint VARCHAR(80)",
     ):
         assert any(
@@ -192,6 +230,25 @@ def test_projection_preserves_bounded_short_horizon_evidence() -> None:
         "concept_turnover_acceleration_1m": 12_000_000.0,
         "concept_turnover_acceleration_3m": 30_000_000.0,
         "concept_turnover_acceleration_5m": 55_000_000.0,
+        "prior_limit_count_126": 4,
+        "prior_industry_turnover_ratio_5d": 1.24,
+        "prior_return_5d_pct": -2.5,
+        "prior_market_phase": "mixed",
+        "board_level": 2,
+        "concept_candidates": [
+            {
+                "concept_id": "BK0877",
+                "concept_name": "通信设备",
+                "member_count": 42,
+                "strength_rank": 3,
+                "ignored_large_field": "x" * 1000,
+            }
+        ],
+        "concept_trigger_allowed": True,
+        "concept_near_limit_count": 3,
+        "concept_touched_count": 2,
+        "concept_sealed_count": 1,
+        "concept_failed_count": 1,
         "sector_main_net_inflow": 88_000_000.0,
         "sector_main_net_inflow_ratio": 2.8,
         "sector_flow_trade_date": "20260720",
@@ -203,9 +260,18 @@ def test_projection_preserves_bounded_short_horizon_evidence() -> None:
 
     row = repo.project_observation(
         candidate,
-        formal_signal=None,
+        formal_signal={
+            "stock_d1_sample_count": 6,
+            "stock_gene_combined_win_rate": 42.5,
+            "profitability_gate_passed": True,
+            "recognition_gate_passed": True,
+            "core_quality_gate_passed": True,
+            "core_quality_gate_reason": "qualified",
+            "quality_priority_tier": "A_industry_expanding",
+        },
         early_signal=None,
         quote_observed_at=observed_at,
+        concept_membership_snapshot_date=date(2026, 7, 19),
     )
 
     assert row["quote_observed_at"] == observed_at
@@ -230,12 +296,66 @@ def test_projection_preserves_bounded_short_horizon_evidence() -> None:
     assert row["concept_turnover_acceleration_1m"] == 12_000_000.0
     assert row["concept_turnover_acceleration_3m"] == 30_000_000.0
     assert row["concept_turnover_acceleration_5m"] == 55_000_000.0
+    assert row["prior_limit_count_126"] == 4
+    assert row["prior_industry_turnover_ratio_5d"] == 1.24
+    assert row["prior_return_5d_pct"] == -2.5
+    assert row["prior_market_phase"] == "mixed"
+    assert row["board_level"] == 2
+    assert row["concept_candidates"] == [
+        {
+            "concept_id": "BK0877",
+            "concept_name": "通信设备",
+            "member_count": 42,
+            "strength_rank": 3,
+        }
+    ]
+    assert row["concept_membership_snapshot_date"] == date(2026, 7, 19)
+    assert row["concept_trigger_allowed"] is True
+    assert row["stock_d1_sample_count"] == 6
+    assert row["stock_gene_combined_win_rate"] == 42.5
+    assert row["profitability_gate_passed"] is True
+    assert row["recognition_gate_passed"] is True
+    assert row["core_quality_gate_passed"] is True
+    assert row["core_quality_gate_reason"] == "qualified"
+    assert row["quality_priority_tier"] == "A_industry_expanding"
+    assert row["concept_near_limit_count"] == 3
+    assert row["concept_touched_count"] == 2
+    assert row["concept_sealed_count"] == 1
+    assert row["concept_failed_count"] == 1
     assert row["sector_main_net_inflow"] == 88_000_000.0
     assert row["sector_main_net_inflow_ratio"] == 2.8
     assert row["sector_flow_trade_date"] == date(2026, 7, 20)
     assert row["stock_main_net_inflow"] == 12_000_000.0
     assert row["stock_main_net_inflow_ratio"] == 1.2
     assert row["stock_flow_trade_date"] == date(2026, 7, 20)
+
+
+def test_projection_recomputes_missing_core_quality_from_signal_time_fields() -> None:
+    row = repo.project_observation(
+        {
+            **_candidate("600001.SSE"),
+            "prior_limit_count_126": 3,
+            "prior_industry_turnover_ratio_5d": 0.8,
+            "signal_time": "10:30:00",
+            "buy_time": "10:30:00",
+            "signal_kind": "first_touch",
+        },
+        formal_signal=None,
+        early_signal={
+            "historical_evidence": {
+                "d1_money_effect_sample_count": 7,
+                "historical_win_rate": 36.0,
+            }
+        },
+    )
+
+    assert row["stock_d1_sample_count"] == 7
+    assert row["stock_gene_combined_win_rate"] == 36.0
+    assert row["profitability_gate_passed"] is True
+    assert row["recognition_gate_passed"] is True
+    assert row["core_quality_gate_passed"] is True
+    assert row["core_quality_gate_reason"] == "qualified"
+    assert row["quality_priority_tier"] == "B_recognition_only"
 
 
 def test_projection_prefers_the_candidate_quote_source_time() -> None:
@@ -283,7 +403,7 @@ def test_two_hundred_projected_candidates_stay_below_size_guard() -> None:
     ]
 
     encoded = json.dumps(rows, ensure_ascii=True, separators=(",", ":")).encode()
-    assert len(encoded) < 300_000
+    assert len(encoded) < 400_000
 
 
 def test_fill_followup_keeps_a_signaled_stock_after_it_falls_below_three_percent() -> None:
@@ -462,7 +582,7 @@ def test_frame_and_observations_use_one_transaction(monkeypatch) -> None:
                 5,
                 tzinfo=ZoneInfo("Asia/Shanghai"),
             ),
-            "strategy_version": "limit-up-live-v15",
+            "strategy_version": "obsolete-version",
             "source": "test",
             "source_updated_at": "2026-07-20T10:05:00+08:00",
             "data_quality": {"status": "ready", "is_stale": False},

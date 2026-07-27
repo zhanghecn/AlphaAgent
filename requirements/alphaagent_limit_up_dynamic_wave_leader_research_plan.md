@@ -1,8 +1,9 @@
 # AlphaAgent 动态资金波段龙头研究 Implementation Plan
 
-> **归档结果：** 波段、动态席位和质量重建任务已完成。唯一正式合同现为
-> `limit-up-core-ab-v1`（A+B）；A+B+C 已否决，动态扩散只保留研究证据。正文中“正式
-> v15/v9/v5 未变化”和“双版本等待前向”是执行当时的检查点，不代表当前状态。
+> **归档结果：** 波段、动态席位和质量重建任务已完成。本计划结束时正式合同仍为
+> `limit-up-core-ab-v1`（A+B）；后续逆向研究已将 C 纳入唯一正式合同
+> `limit-up-core-abc-v1`。正文中“正式 v15/v9/v5 未变化”和“双版本等待前向”是执行
+> 当时的检查点，不代表当前状态。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. This repository forbids commits unless the user explicitly requests one, so tasks end with verification checkpoints.
 

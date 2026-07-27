@@ -388,7 +388,13 @@ def _signal_state_payload(signal: Mapping[str, object]) -> dict[str, object]:
         "concept_turnover_acceleration_3m",
         "concept_snapshot_age_seconds",
     )
-    return {key: signal[key] for key in keys if key in signal}
+    payload = {key: signal[key] for key in keys if key in signal}
+    if (
+        payload.get("signal_state") == "trigger_ready"
+        and payload.get("action") != "buy_now"
+    ):
+        payload["signal_state"] = "rejected"
+    return payload
 
 
 def _candidate_for_symbol(

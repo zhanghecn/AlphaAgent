@@ -54,13 +54,13 @@ export function buildRuleFlow(guide: LimitUpStrategyGuide): RuleFlowNode[] {
       stage: "gate",
       badge: "①",
       title: "锁定唯一正式合同",
-      purpose: "历史回测和实时推荐执行同一套 A+B 规则。",
+      purpose: "历史回测和实时推荐执行同一套 A+B+C 规则。",
       condition:
-        `唯一正式合同是 ${core.contract_version}。旧版本只保留为只读审计，不参与准入、排序，也不会在新规则缺数据时自动回退。`,
+        `唯一正式合同是 ${core.contract_version}。历史和实时都按同一字段时点与阈值计算，任何必需字段缺失都失败关闭。`,
       thresholds: [
         { label: "正式合同", value: core.contract_version },
         { label: "正式范围", value: "首板 + 二进三" },
-        { label: "旧规则回退", value: "关闭" },
+        { label: "缺失字段", value: "失败关闭" },
       ],
       dataNote:
         "合同版本、规则阈值和字段时点在历史与实时两端保持一致。",
@@ -71,7 +71,7 @@ export function buildRuleFlow(guide: LimitUpStrategyGuide): RuleFlowNode[] {
       stage: "filter",
       badge: "②",
       title: "通过原基础质量门",
-      purpose: "先排除财务、风险、板位和承接结构不合格的股票。",
+      purpose: "先建立高质量 A/B 基座，再限定 C 只能覆盖三个指定排除原因。",
       condition:
         "只保留合格沪深主板的首板和二进三，使用当时已经披露的正确财报，并检查低位结构、风险、盘中支撑和对应板位质量。首板还必须通过同股历史盈利门。",
       thresholds: [
@@ -81,14 +81,14 @@ export function buildRuleFlow(guide: LimitUpStrategyGuide): RuleFlowNode[] {
       ],
       dataNote: "信号日之前已收盘的日线、已闭合 D+1 结果和当时已经披露的财务信息。",
       dataGroupKeys: ["prior"],
-      failHint: "基础质量门失败时只观察，不进入正式买点。",
+      failHint: "不属于 C 可覆盖原因或不满足交叉条件时只观察。",
     },
     {
       id: "radar",
       stage: "radar",
       badge: "③",
-      title: "检查 126 日市场辨识度",
-      purpose: "保留已有市场记忆、但尚未过度炒作的股票。",
+      title: "建立 A/B 辨识度基座",
+      purpose: "A/B 保留已有市场记忆、但尚未过度炒作的股票。",
       condition:
         `信号日前 ${core.prior_limit_window_days} 个交易日内，涨停次数必须在 ${core.minimum_prior_limit_count} 到 ${core.maximum_prior_limit_count} 次之间。少于下限缺少辨识度，超过上限可能已经过度交易。`,
       thresholds: [
@@ -98,7 +98,7 @@ export function buildRuleFlow(guide: LimitUpStrategyGuide): RuleFlowNode[] {
       ],
       dataNote: "只统计信号日前已完成交易日，不把信号日后发生的涨停倒填进来。",
       dataGroupKeys: ["prior"],
-      failHint: "不在 2 到 6 次区间内，或该字段不可用，均不执行。",
+      failHint: "A/B 不在 2 到 6 次区间时失败；超过 6 次只可能由 C 的完整交叉覆盖。",
     },
     {
       id: "momentum",
@@ -107,9 +107,10 @@ export function buildRuleFlow(guide: LimitUpStrategyGuide): RuleFlowNode[] {
       title: "等待正式盘中触发",
       purpose: "只有原盘中支撑、触发状态和交易时间都有效时才给买点。",
       condition:
-        `候选必须在 ${windows.join("、")} 内通过原盘中支撑、报价新鲜度和正式触发状态。3% 板前观察和触板概率目前只是研究，不会生成正式买点。`,
+        `A/C 首板与二进三只在 ${windows.join("、")} 行动；B 首板要求 ${core.b_first_board_minimum_time} 后首次触板或回封。二进三 9:35-10:00 只观察。`,
       thresholds: [
-        { label: "买入窗口", value: windows.join("、") },
+        { label: "A/C 与二进三", value: windows.join("、") },
+        { label: "B 首板", value: `${core.b_first_board_minimum_time} 后` },
         { label: "快照", value: "必须新鲜" },
         { label: "板前概率", value: "研究观察" },
       ],
@@ -121,12 +122,13 @@ export function buildRuleFlow(guide: LimitUpStrategyGuide): RuleFlowNode[] {
       id: "sector",
       stage: "sector",
       badge: "⑤",
-      title: "按行业资金分 A/B",
-      purpose: "资金扩张用于优先排序，不把仍合格的 B 级股票强行剔除。",
+      title: "形成 A/C/B 三层",
+      purpose: "A/B 是质量基座，C 用资金与概念扩散补足被严格门遗漏的情绪机会。",
       condition:
-        `D-1 所属行业成交额不低于此前 5 日基准的候选为 A；未扩张或数据不可用为 B。${core.priority_rule}。行业和概念都按当时数据动态计算，不写死名称。`,
+        `D-1 行业量比达标的基座票为 A，否则为 B。C 只在此前无 A/B 时，满足混合期回撤、行业资金覆盖或细分概念已有 2-4 只先行封板且最高至少二板之一。${core.priority_rule}。`,
       thresholds: [
         { label: "A 级", value: `行业量比 ≥ ${core.a_tier_industry_turnover_ratio_5d.toFixed(1)}` },
+        { label: "C 级", value: `每天最多 ${core.c_daily_limit} 笔` },
         { label: "B 级", value: "未扩张或不可用" },
         { label: "B 可交易", value: core.b_tier_is_actionable ? "是" : "否" },
       ],
@@ -137,16 +139,16 @@ export function buildRuleFlow(guide: LimitUpStrategyGuide): RuleFlowNode[] {
       id: "rank",
       stage: "rank",
       badge: "⑥",
-      title: "输出全部 A+B 买点",
-      purpose: "评价规则质量时统计全部合格信号，不人为限制每天一笔。",
+      title: "输出全部 A+B+C 买点",
+      purpose: "全量质量统计所有合格信号，账户再按两仓因果容量执行。",
       condition:
-        "同一交易日可以出现多笔正式推荐。A 排在 B 前面；同级内再沿用首板或二进三的原排序。全量胜率按每笔独立闭合交易统计。",
+        "同一时点按 A、C、B 排序，跨时点按真实到达顺序，不用后来 A 替换已成交票。两仓尚无 A 时最多使用一个非 A 仓，为稍后 A 保留一仓。",
       thresholds: [
-        { label: "日内笔数", value: "不设 1 笔上限" },
-        { label: "第一优先", value: "A 级" },
-        { label: "第二优先", value: "B 级" },
+        { label: "全量列表", value: "A/B 不限，C 每日 1 笔" },
+        { label: "同刻顺序", value: "A > C > B" },
+        { label: "两仓容量", value: "无 A 时保留 1 仓" },
       ],
-      dataNote: "A/B 等级、板位、同股历史盈利证据和原排名分。",
+      dataNote: "A/C/B 等级、真实触发时间、板位、同股历史盈利证据和概念扩散证据。",
       dataGroupKeys: ["prior", "intraday"],
     },
     {

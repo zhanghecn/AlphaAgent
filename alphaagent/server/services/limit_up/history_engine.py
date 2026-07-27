@@ -1567,6 +1567,8 @@ def _current_event_evidence(
         return None
     return {
         "first_limit_time": event.get("first_limit_time"),
+        "last_limit_time": event.get("last_limit_time"),
+        "open_times": event.get("open_times"),
         "historical_seal_rate": event.get("historical_seal_rate"),
         "limit_up_shape": event.get("limit_up_shape"),
         "limit_up_reason": event.get("limit_up_reason"),

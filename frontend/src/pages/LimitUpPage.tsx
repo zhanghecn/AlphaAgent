@@ -1185,7 +1185,7 @@ export function BacktestView({
       <section aria-label="真实现金回测">
         <PanelHead
           no="01"
-          zh="A+B 回测载入中"
+          zh="A+B+C 回测载入中"
           en="LOADING"
           aside="全量交割与风险指标正在生成"
         />
@@ -1196,7 +1196,7 @@ export function BacktestView({
         >
           <RefreshCw size={16} className="shrink-0 animate-spin text-primary" />
           <div className="min-w-0">
-            <p className="font-medium text-foreground">正在读取 A+B 全量回测</p>
+            <p className="font-medium text-foreground">正在读取 A+B+C 全量回测</p>
             <p className="mt-1 text-xs text-muted-foreground">
               首次启动需要恢复全历史交割，完成后本页会自动更新。
             </p>
@@ -1230,7 +1230,7 @@ export function BacktestView({
         <div className="border-b px-3 py-2 text-xs text-muted-foreground sm:px-4">
           买入 {report.execution_schedule?.entry_windows.join(" / ") ?? "连续盘中"} · D+1 {report.execution_schedule?.exit_time ?? "15:00"} 收盘卖出 ·
           官方收盘价 {report.coverage.daily_close_count ?? 0} · 缺失剔除 {report.coverage.daily_close_missing_count ?? 0}
-          {report.lane === "portfolio" ? " · 首板 + 二进三 · 按到达时间成交 · 不预留仓位" : ""}
+          {report.lane === "portfolio" ? " · 首板 + 二进三 · 按到达时间成交 · 为后续 A 保留仓位" : ""}
           {report.execution_comparability?.live_equivalent === false && (
             <span className="ml-3 text-amber-700 dark:text-amber-300" title={report.execution_comparability.reason}>
               候选代理，盘中资金门未历史重放

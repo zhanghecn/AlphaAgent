@@ -31,6 +31,10 @@ export interface LimitUpStrategyGuide {
     maximum_prior_limit_count: number;
     a_tier_industry_turnover_ratio_5d: number;
     b_tier_is_actionable: boolean;
+    b_first_board_minimum_time: string;
+    c_tier_is_actionable: boolean;
+    c_daily_limit: number;
+    c_evidence_status: string;
     priority_rule: string;
     frozen_evidence: {
       status: string;
@@ -48,23 +52,27 @@ export interface LimitUpStrategyGuide {
         win_count: number;
         win_rate_pct: number;
       };
+      c_tier: {
+        closed_count: number;
+        win_count: number;
+        win_rate_pct: number;
+      };
       b_tier: {
         closed_count: number;
         win_count: number;
         win_rate_pct: number;
       };
+      single_position: LimitUpGuideAccountEvidence;
+      two_positions: LimitUpGuideAccountEvidence;
       report: string;
     };
-    recent_snapshot_check: {
-      date_start: string;
-      date_end: string;
+    forward_status: {
+      start_date: string;
       closed_count: number;
       win_count: number;
-      win_rate_pct: number;
-      average_net_return_pct: number;
-      no_action_date: string;
-      entry: string;
-      live_equivalent: boolean;
+      win_rate_pct: number | null;
+      minimum_closed_count: number;
+      minimum_trade_days: number;
       status: string;
     };
   };
@@ -103,48 +111,6 @@ export interface LimitUpStrategyGuide {
     selection_allowed: boolean;
     fields: string[];
   }>;
-  dataset: {
-    name: string;
-    kind: string;
-    table: string;
-    date_start: string;
-    date_end: string;
-    snapshot_count: number;
-    daily_snapshot_counts: Array<{
-      trade_date: string;
-      snapshot_count: number;
-    }>;
-    closed_through: string;
-    closed_signal_count: number;
-    win_count: number;
-    win_rate_pct: number;
-    average_net_return_pct: number;
-    portfolio_trade_count: number;
-    portfolio_win_count: number;
-    portfolio_return_pct: number;
-    portfolio_max_drawdown_pct: number;
-    entry: string;
-    exit: string;
-    costs: string;
-    report: string;
-    limitations: string[];
-  };
-  historical_reference: {
-    name: string;
-    kind: string;
-    tables: string[];
-    date_start: string;
-    date_end: string;
-    trade_day_count: number;
-    qualified_signal_count: number;
-    closed_recommendation_count: number;
-    account_trade_count: number;
-    recommendation_win_rate_pct: number;
-    account_win_rate_pct: number;
-    live_equivalent: boolean;
-    purpose: string;
-    limitation: string;
-  };
 }
 export type LimitUpLiveTraceState =
   | "radar_entered"
@@ -197,7 +163,19 @@ export interface LimitUpCoreQualityFilterMetadata {
   maximum_prior_limit_count_126: number;
   a_tier_industry_turnover_ratio_5d: number;
   b_tier_is_actionable: boolean;
-  fallback_contract: null;
+  b_first_board_minimum_time: string;
+  c_tier_is_actionable: boolean;
+  c_daily_limit: number;
+  c_evidence_status: string;
+  priority_rule: string;
+}
+
+interface LimitUpGuideAccountEvidence {
+  closed_count: number;
+  win_count: number;
+  win_rate_pct: number;
+  total_return_pct: number;
+  max_drawdown_pct: number;
 }
 
 export interface LimitUpLiveSignal {

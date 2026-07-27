@@ -523,6 +523,7 @@ def test_live_portfolio_prefers_same_frame_relay_then_first_board() -> None:
             "next_auction": [],
         }
     }
+    recommendations["lanes"]["now"][0]["prior_industry_turnover_ratio_5d"] = 1.2
 
     portfolio = live_service._build_live_portfolio(
         recommendations,
@@ -531,12 +532,12 @@ def test_live_portfolio_prefers_same_frame_relay_then_first_board() -> None:
     )
 
     assert [row["vt_symbol"] for row in portfolio] == [
-        "600003.SSE",
         "600001.SSE",
+        "600003.SSE",
     ]
     assert [row["board_lane"] for row in portfolio] == [
-        "two_to_three",
         "first_board",
+        "two_to_three",
     ]
     assert all(row["action"] == "buy_now" for row in portfolio)
     assert all(row["signal_state"] == "trigger_ready" for row in portfolio)
@@ -629,10 +630,7 @@ def test_live_portfolio_keeps_formal_selection_and_touched_board() -> None:
         "600330.SSE",
         "002409.SZSE",
     ]
-    assert [row["vt_symbol"] for row in portfolio] == [
-        "603061.SSE",
-        "002409.SZSE",
-    ]
+    assert [row["vt_symbol"] for row in portfolio] == ["603061.SSE"]
     assert actionable[0]["state"] == "sealed"
 
 
@@ -688,11 +686,8 @@ def test_live_actionable_recommendations_are_unbounded_but_keep_profitability_ga
         snapshot_age_seconds=5,
     )
 
-    assert [row["vt_symbol"] for row in actionable] == [
-        "600004.SSE",
-        "600001.SSE",
-    ]
-    assert actionable[1]["profitability_gate_reason"] == "qualified"
+    assert [row["vt_symbol"] for row in actionable] == ["600004.SSE"]
+    assert actionable[0]["profitability_gate_reason"] == "not_first_board"
 
 
 def test_live_actionable_prioritizes_a_without_rejecting_b() -> None:
@@ -729,6 +724,46 @@ def test_live_actionable_prioritizes_a_without_rejecting_b() -> None:
         "A_industry_expanding",
         "B_recognition_only",
     ]
+
+
+def test_live_core_orders_c_before_later_b_reseal() -> None:
+    common = {
+        "board_lane": "first_board",
+        "action": "buy_now",
+        "entry_kind": "momentum",
+        "prior_limit_count_126": 4,
+    }
+    b_reseal = {
+        **common,
+        "vt_symbol": "600001.SSE",
+        "state": "resealed",
+        "first_limit_time": "10:20:00",
+        "last_limit_time": "10:35:00",
+        "open_times": 1,
+        "prior_industry_turnover_ratio_5d": 0.8,
+        "stock_d1_sample_count": 5,
+        "stock_gene_combined_win_rate": 40.0,
+    }
+    c_signal = {
+        **common,
+        "vt_symbol": "600002.SSE",
+        "state": "sealed",
+        "first_limit_time": "10:25:00",
+        "stock_d1_sample_count": 2,
+        "stock_gene_combined_win_rate": 20.0,
+        "prior_market_phase": "mixed",
+        "prior_return_5d_pct": -1.0,
+    }
+
+    result = live_service._apply_core_quality_gate(
+        {"lanes": {"now": [b_reseal, c_signal]}}
+    )
+    by_symbol = {
+        signal["vt_symbol"]: signal for signal in result["lanes"]["now"]
+    }
+
+    assert by_symbol["600002.SSE"]["c_quality_gate_passed"] is True
+    assert by_symbol["600001.SSE"]["quality_entry_effective_time"] == "10:35:00"
 
 
 def test_live_actionable_rejects_a_stock_above_six_prior_limits() -> None:
@@ -799,6 +834,7 @@ def test_live_portfolio_is_empty_outside_entry_window_or_when_snapshot_is_old() 
                     "state": "near_limit",
                     "change_pct": 8.0,
                     "prior_limit_count_126": 3,
+                    "prior_industry_turnover_ratio_5d": 1.2,
                     "last_price": 9.8,
                     "limit_price": 10.0,
                     "historical_evidence": {

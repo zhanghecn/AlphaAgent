@@ -225,7 +225,7 @@ def test_history_candidate_pool_projection_returns_only_scheduled_inputs(monkeyp
     monkeypatch.setattr(history_repository, "get_engine", lambda: object())
     monkeypatch.setattr(history_repository, "session_scope", fake_session_scope)
 
-    rows = history_repository.load_history_candidate_pools("limit-up-history-v15")
+    rows = history_repository.load_history_candidate_pools("obsolete-version")
 
     assert rows == [
         {

@@ -11,7 +11,7 @@ from alphaagent.server.services.limit_up.preboard_decision_contract import (
     PREBOARD_DECISION_VERSION,
 )
 
-GUIDE_VERSION = "limit-up-strategy-guide-v3"
+GUIDE_VERSION = "limit-up-strategy-guide-v4"
 
 
 def get_limit_up_strategy_guide() -> dict[str, object]:
@@ -38,44 +38,64 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
             "maximum_prior_limit_count": 6,
             "a_tier_industry_turnover_ratio_5d": 1.0,
             "b_tier_is_actionable": True,
-            "priority_rule": "A优先，B保留；行业量能不作为剔除B的硬门",
+            "b_first_board_minimum_time": "10:30",
+            "c_tier_is_actionable": True,
+            "c_daily_limit": 1,
+            "c_evidence_status": "historical_proxy_pass_forward_unconfirmed",
+            "priority_rule": "同一时点A优先于C、C优先于B；跨时点按真实到达顺序",
             "frozen_evidence": {
-                "status": "historical_pass_forward_not_passed",
+                "status": "historical_proxy_pass_forward_unconfirmed",
                 "live_equivalent": False,
                 "date_start": "2025-07-10",
                 "date_end": "2026-07-23",
-                "closed_count": 78,
-                "win_count": 56,
-                "win_rate_pct": 71.7949,
-                "average_net_return_pct": 2.2512,
-                "max_drawdown_pct": -14.5416,
-                "hard_loss_rate_pct": 8.9744,
+                "closed_count": 143,
+                "win_count": 99,
+                "win_rate_pct": 69.2308,
+                "average_net_return_pct": 2.1203,
+                "max_drawdown_pct": -21.0357,
+                "hard_loss_rate_pct": 6.9930,
                 "a_tier": {
                     "closed_count": 41,
                     "win_count": 35,
                     "win_rate_pct": 85.3659,
                 },
+                "c_tier": {
+                    "closed_count": 72,
+                    "win_count": 46,
+                    "win_rate_pct": 63.8889,
+                },
                 "b_tier": {
-                    "closed_count": 37,
-                    "win_count": 21,
-                    "win_rate_pct": 56.7568,
+                    "closed_count": 30,
+                    "win_count": 18,
+                    "win_rate_pct": 60.0,
+                },
+                "single_position": {
+                    "closed_count": 80,
+                    "win_count": 57,
+                    "win_rate_pct": 71.25,
+                    "total_return_pct": 457.7327,
+                    "max_drawdown_pct": -19.4234,
+                },
+                "two_positions": {
+                    "closed_count": 96,
+                    "win_count": 72,
+                    "win_rate_pct": 75.0,
+                    "total_return_pct": 226.6771,
+                    "max_drawdown_pct": -8.8039,
                 },
                 "report": (
                     "memory/06_backtests/"
-                    "limit_up_quality_reconstruction_20260726.md"
+                    "limit_up_abc_formal_replay_20260727.md"
                 ),
             },
-            "recent_snapshot_check": {
-                "date_start": "2026-07-20",
-                "date_end": "2026-07-24",
-                "closed_count": 24,
-                "win_count": 12,
-                "win_rate_pct": 50.0,
-                "average_net_return_pct": -0.2351,
-                "no_action_date": "2026-07-24",
-                "entry": "旧保存快照的首次正式报价代理",
-                "live_equivalent": False,
-                "status": "below_60_requires_natural_forward",
+            "forward_status": {
+                "start_date": "2026-07-27",
+                "closed_count": 0,
+                "win_count": 0,
+                "win_rate_pct": None,
+                "minimum_closed_count": 15,
+                "minimum_trade_days": 10,
+                "status": "collecting_forward",
             },
         },
         "verdict": {
@@ -94,8 +114,8 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                 "order": 1,
                 "title": "锁定唯一正式合同",
                 "rule": (
-                    "历史回测和实时推荐统一使用limit-up-core-ab-v1；旧v15只保留"
-                    "只读审计，不参与准入、排序或回退。"
+                    "历史回测和实时推荐统一使用limit-up-core-abc-v1，"
+                    "任何字段缺失都按当前合同失败关闭。"
                 ),
                 "timing": "启动时固定合同",
             },
@@ -110,37 +130,37 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
             },
             {
                 "order": 3,
-                "title": "限制历史辨识度",
+                "title": "建立A/B质量基座",
                 "rule": (
-                    "过去126个交易日涨停次数必须在2到6次之间；少于2次说明缺少"
-                    "市场辨识度，超过6次视为可能已过度炒作。"
+                    "A/B先要求过去126个交易日涨停2到6次并通过同股盈利门；"
+                    "D-1行业成交额扩张为A，否则为B。"
                 ),
                 "timing": "只统计信号日前已完成交易日",
             },
             {
                 "order": 4,
-                "title": "动态划分A/B优先级",
+                "title": "因果补充C层",
                 "rule": (
-                    "D-1所属行业成交额不低于此前5日基准为A；未扩张或数据不可用"
-                    "为B。A优先，B仍可交易，行业名称和概念名称不写死。"
+                    "只在当日此前没有A/B且C尚未使用时，按混合期低位回撤、"
+                    "行业资金覆盖或触板前细分概念2到4只先行封板三类交叉补一笔C。"
                 ),
-                "timing": "只使用D-1及更早行业数据",
+                "timing": "D-1字段加当前触板前已发生事件",
             },
             {
                 "order": 5,
                 "title": "等待正式盘中触发",
                 "rule": (
-                    "仅在固定买入窗口、快照新鲜且原盘中支撑和触发状态全部通过时"
-                    "形成正式买点；3%板前观察和概率研究不属于正式合同。"
+                    "A/C首板和二进三从10:00起行动；B首板只接受10:30后首次触板"
+                    "或10:30后回封。二进三9:35到10:00只观察，10:00后才行动。"
                 ),
                 "timing": "盘中实时",
             },
             {
                 "order": 6,
-                "title": "输出全部A+B买点",
+                "title": "按A、C、B排序并保留A仓位",
                 "rule": (
-                    "所有通过硬门的信号都进入正式买点列表，不限制为每天一笔；"
-                    "同一交易日可以有多笔，A排在B之前。"
+                    "全量列表输出所有通过信号；同一时点按A、C、B排序。两仓在"
+                    "尚无A时最多使用一个非A仓，C每天最多一笔，跨时点不事后换票。"
                 ),
                 "timing": "每个有效快照重新计算",
             },
@@ -163,8 +183,8 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
             "history_cutoff": "result_date < signal_date",
             "ranking_only": True,
             "portfolio_gate": (
-                "全量正式首板要求至少5个前序D+1样本且联合率不低于30%；"
-                "二进三沿用原lane质量门，全部信号再统一通过126日2到6次硬门"
+                "A/B首板要求至少5个前序D+1样本且联合率不低于30%；"
+                "C只覆盖三个指定排除原因并满足资金/情绪交叉，且每天最多一笔"
             ),
         },
         "preboard_decision": {
@@ -186,8 +206,8 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                 "才补充正式板前买点和概率排序，且不删除同股当前扫板兜底"
             ),
             "formal_baseline": (
-                "正式合同仅为limit-up-core-ab-v1；板前概率当前只作研究观察，"
-                "不生成买点，也不作为旧规则回退入口"
+                "正式合同仅为limit-up-core-abc-v1；板前概率当前只作研究观察，"
+                "不生成买点"
             ),
         },
         "field_groups": [
@@ -202,6 +222,7 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                     "截至当前决策时点的逐笔资金代理",
                     "高质量母池的点时横截面",
                     "共享风险门与正式执行窗口",
+                    "触板前同概念已封板数量与最高板",
                 ],
             },
             {
@@ -215,6 +236,7 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                     "信号日前已经闭合的封停成功率",
                     "信号日前已经闭合的同股D+1预期净收益与赚钱率",
                     "当时已经披露的财务与风险信息",
+                    "D-1市场阶段与个股前5日收益",
                 ],
             },
             {
@@ -222,7 +244,7 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                 "label": "当前仅诊断字段",
                 "selection_allowed": False,
                 "fields": [
-                    "盘中板块扩散、概念启动与龙头排名",
+                    "未冻结成员时点的概念排名与事后龙头身份",
                     "板块资金、个股资金与当前换手",
                     "市场状态、快照新鲜度与报价新鲜度",
                 ],
@@ -239,54 +261,4 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                 ],
             },
         ],
-        "dataset": {
-            "name": "旧v15保存快照（只读审计）",
-            "kind": "saved_point_in_time_counterfactual_replay",
-            "table": "limit_up_signal_snapshots",
-            "date_start": "2026-07-15",
-            "date_end": "2026-07-17",
-            "snapshot_count": 643,
-            "daily_snapshot_counts": [
-                {"trade_date": "2026-07-15", "snapshot_count": 253},
-                {"trade_date": "2026-07-16", "snapshot_count": 253},
-                {"trade_date": "2026-07-17", "snapshot_count": 137},
-            ],
-            "closed_through": "2026-07-15",
-            "closed_signal_count": 11,
-            "win_count": 7,
-            "win_rate_pct": 63.6364,
-            "average_net_return_pct": 2.9050,
-            "portfolio_trade_count": 2,
-            "portfolio_win_count": 2,
-            "portfolio_return_pct": 5.7892,
-            "portfolio_max_drawdown_pct": -0.0309,
-            "entry": "第一次规则通过的保存快照，盘中 sweep 价格代理",
-            "exit": "D+1官方日线close_price",
-            "costs": "双边各10bp滑点、万三佣金、最低5元、万0.1过户、卖出万五印花税",
-            "report": "memory/06_backtests/limit_up_sector_quality_v15_20260717.md",
-            "limitations": [
-                "只有2026-07-15具备D+1官方收盘，7月16日和17日不拿盘中价替代。",
-                "643帧是旧v15历史审计数据，不是643笔交易。",
-                "旧快照不参与limit-up-core-ab-v1准入、排序或回退。",
-            ],
-        },
-        "historical_reference": {
-            "name": "财报修复后旧母池对照（只读审计）",
-            "kind": "historical_candidate_proxy",
-            "tables": ["limit_up_history_replays", "stock_daily_bars"],
-            "date_start": "2023-03-28",
-            "date_end": "2026-07-24",
-            "trade_day_count": 806,
-            "qualified_signal_count": 243,
-            "closed_recommendation_count": 239,
-            "account_trade_count": 127,
-            "recommendation_win_rate_pct": 54.8117,
-            "account_win_rate_pct": 58.2677,
-            "live_equivalent": False,
-            "purpose": "长期检验候选结构、时间窗口、费用、仓位和D+1收盘退出",
-            "limitation": (
-                "这些数字是A+B启用前的旧母池，只用于解释财报修复后的质量下降；"
-                "不能作为当前合同结果，也不能触发旧规则回退。"
-            ),
-        },
     }
