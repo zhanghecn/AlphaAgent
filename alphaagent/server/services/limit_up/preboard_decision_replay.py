@@ -3624,6 +3624,10 @@ def load_recent_live_timing_audit(
                     "scoreable_point_count",
                     0,
                 ),
+                "replayed_probability_point_count": replayed.get(
+                    "probability_point_count",
+                    0,
+                ),
                 "current_code_rejection_counts": replayed.get(
                     "rejection_counts",
                     {},

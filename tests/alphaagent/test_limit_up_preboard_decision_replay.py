@@ -1170,6 +1170,7 @@ def test_recent_timing_audit_uses_formal_backtest_orders_as_positive_labels(
     assert row["last_preboard_gain_pct"] == 8.701
     assert row["maximum_preboard_gain_pct"] == 8.701
     assert row["formal_touch_lead_seconds"] == 60.0
+    assert row["replayed_probability_point_count"] == 0
     assert {item["code"]: item["status"] for item in row["gate_matrix"]} == {
         "formal_baseline_quality": "passed",
         "strict_preboard_price": "passed",
