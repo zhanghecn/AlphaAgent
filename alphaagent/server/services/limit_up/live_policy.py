@@ -217,37 +217,6 @@ def build_live_recommendations(
     }
 
 
-def build_early_radar_signals(
-    candidates: Sequence[Mapping[str, object]],
-    market_gate: Mapping[str, object],
-    captured_at: datetime,
-) -> list[dict[str, object]]:
-    """Evaluate 3%-5% candidates through the existing momentum entry path."""
-
-    stage = session_stage(captured_at)
-    signals: list[dict[str, object]] = []
-    for raw in candidates:
-        candidate = dict(raw)
-        capture_state = str(
-            candidate.get("capture_state")
-            or candidate.get("state")
-            or "unknown"
-        )
-        candidate["capture_state"] = capture_state
-        if capture_state == "pre_radar":
-            candidate["state"] = "near_limit"
-        signal = _now_signal(
-            candidate,
-            stage,
-            market_gate,
-            captured_at,
-            stable_minutes=0,
-        )
-        signal["capture_state"] = capture_state
-        signals.append(signal)
-    return signals
-
-
 def build_live_market_gate(
     context: Mapping[str, object],
     captured_at: datetime,

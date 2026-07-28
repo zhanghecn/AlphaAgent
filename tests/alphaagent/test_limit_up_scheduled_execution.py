@@ -299,16 +299,6 @@ def test_extract_scheduled_orders_uses_complete_pool_not_end_of_day_selected() -
     assert orders[0]["candidate_source"] == "complete_first_board_candidate_pool"
 
 
-def test_extract_scheduled_orders_never_reads_preboard_observations() -> None:
-    preboard = _candidate("600999.SSE", "10:05:00")
-    day = _history_day(candidate_pool=[])
-    day["preboard_candidates"] = [preboard]
-
-    orders = scheduled_execution.extract_scheduled_orders([day])
-
-    assert orders == []
-
-
 def test_default_product_orders_include_first_board_and_two_to_three() -> None:
     first_board = _candidate("600001.SSE", "10:06:00")
     two_to_three = {

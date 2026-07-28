@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta
 from threading import Lock
 
-from sqlalchemy import delete, desc, func, or_, select
+from sqlalchemy import delete, desc, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from alphaagent.server.db import schema
@@ -92,22 +92,18 @@ def project_observation(
     candidate: Mapping[str, object],
     *,
     formal_signal: Mapping[str, object] | None,
-    early_signal: Mapping[str, object] | None,
     quote_observed_at: datetime | None = None,
     concept_membership_snapshot_date: date | str | None = None,
 ) -> dict[str, object]:
     """Project one evaluated candidate into the bounded research contract."""
 
     formal = formal_signal if isinstance(formal_signal, Mapping) else {}
-    early = early_signal if isinstance(early_signal, Mapping) else {}
-    evidence = early.get("historical_evidence") or formal.get(
+    evidence = formal.get("historical_evidence") or candidate.get(
         "historical_evidence"
-    ) or candidate.get("historical_evidence")
+    )
     evidence = evidence if isinstance(evidence, Mapping) else {}
     stock_d1_sample_count = _optional_integer(
         _first_present(
-            early.get("stock_d1_sample_count"),
-            early.get("profitability_gate_sample_count"),
             formal.get("stock_d1_sample_count"),
             formal.get("profitability_gate_sample_count"),
             candidate.get("stock_d1_sample_count"),
@@ -116,8 +112,6 @@ def project_observation(
     )
     stock_gene_combined_win_rate = _optional_number(
         _first_present(
-            early.get("stock_gene_combined_win_rate"),
-            early.get("profitability_gate_combined_rate"),
             formal.get("stock_gene_combined_win_rate"),
             formal.get("profitability_gate_combined_rate"),
             candidate.get("stock_gene_combined_win_rate"),
@@ -126,7 +120,6 @@ def project_observation(
     )
     stock_d1_win_rate = _optional_number(
         _first_present(
-            early.get("stock_d1_win_rate"),
             formal.get("stock_d1_win_rate"),
             candidate.get("stock_d1_win_rate"),
             evidence.get("d1_money_effect_win_rate"),
@@ -134,7 +127,6 @@ def project_observation(
     )
     stock_d1_average_return_pct = _optional_number(
         _first_present(
-            early.get("stock_d1_average_return_pct"),
             formal.get("stock_d1_average_return_pct"),
             candidate.get("stock_d1_average_return_pct"),
             evidence.get("d1_money_effect_average_return_pct"),
@@ -143,7 +135,6 @@ def project_observation(
     quality_input = {
         **dict(candidate),
         **dict(formal),
-        **dict(early),
         "historical_evidence": dict(evidence),
         "stock_d1_sample_count": stock_d1_sample_count,
         "stock_d1_win_rate": stock_d1_win_rate,
@@ -154,8 +145,8 @@ def project_observation(
         quality_input,
         trigger_observed=_limit_trigger_observed(quality_input),
     )
-    public_quality = _materialized_public_quality(formal, early) or quality
-    blocker_codes = _blocker_codes(candidate, early)
+    public_quality = _materialized_public_quality(formal) or quality
+    blocker_codes = _blocker_codes(candidate, formal)
     return {
         "vt_symbol": _required_text(candidate.get("vt_symbol"), "vt_symbol"),
         "name": _required_text(candidate.get("name"), "name"),
@@ -278,28 +269,24 @@ def project_observation(
         ),
         "prior_limit_count_126": _optional_integer(
             _first_present(
-                early.get("prior_limit_count_126"),
                 formal.get("prior_limit_count_126"),
                 candidate.get("prior_limit_count_126"),
             )
         ),
         "prior_industry_turnover_ratio_5d": _optional_number(
             _first_present(
-                early.get("prior_industry_turnover_ratio_5d"),
                 formal.get("prior_industry_turnover_ratio_5d"),
                 candidate.get("prior_industry_turnover_ratio_5d"),
             )
         ),
         "prior_return_5d_pct": _optional_number(
             _first_present(
-                early.get("prior_return_5d_pct"),
                 formal.get("prior_return_5d_pct"),
                 candidate.get("prior_return_5d_pct"),
             )
         ),
         "prior_market_phase": _optional_text(
             _first_present(
-                early.get("prior_market_phase"),
                 formal.get("prior_market_phase"),
                 candidate.get("prior_market_phase"),
             )
@@ -311,28 +298,24 @@ def project_observation(
         "profitability_gate_passed": bool(
             _first_present(
                 formal.get("profitability_gate_passed"),
-                early.get("profitability_gate_passed"),
                 quality.get("profitability_gate_passed"),
             )
         ),
         "recognition_gate_passed": bool(
             _first_present(
                 formal.get("recognition_gate_passed"),
-                early.get("recognition_gate_passed"),
                 quality.get("recognition_gate_passed"),
             )
         ),
         "core_quality_gate_passed": bool(
             _first_present(
                 formal.get("core_quality_gate_passed"),
-                early.get("core_quality_gate_passed"),
                 quality.get("core_quality_gate_passed"),
             )
         ),
         "core_quality_gate_reason": _optional_text(
             _first_present(
                 formal.get("core_quality_gate_reason"),
-                early.get("core_quality_gate_reason"),
                 quality.get("core_quality_gate_reason"),
             ),
             max_length=160,
@@ -340,7 +323,6 @@ def project_observation(
         "quality_priority_tier": _optional_text(
             _first_present(
                 formal.get("quality_priority_tier"),
-                early.get("quality_priority_tier"),
                 quality.get("quality_priority_tier"),
             ),
             max_length=40,
@@ -356,9 +338,6 @@ def project_observation(
         "public_quality_gate_passed": (
             public_quality.get("public_quality_gate_passed") is True
         ),
-        "public_quality_preparation_passed": (
-            public_quality.get("public_quality_preparation_passed") is True
-        ),
         "public_quality_actionable": (
             public_quality.get("public_quality_actionable") is True
         ),
@@ -373,15 +352,12 @@ def project_observation(
             public_quality.get("quality_expected_d1_net_return_pct")
         ),
         "formal_action": str(formal.get("action") or "pass"),
-        "early_action": str(early.get("action") or "pass"),
-        "early_entry_kind": str(early.get("entry_kind") or "none"),
         "blocking_scope": str(
-            early.get("blocking_scope")
-            or formal.get("blocking_scope")
+            formal.get("blocking_scope")
             or "none"
         ),
         "decision_reason": _optional_text(
-            early.get("reason") or formal.get("reason"),
+            formal.get("reason"),
             max_length=500,
         ),
         "lane_blocker_codes": _string_list(candidate.get("lane_blockers")),
@@ -391,14 +367,12 @@ def project_observation(
 
 def _materialized_public_quality(
     formal: Mapping[str, object],
-    early: Mapping[str, object],
 ) -> Mapping[str, object] | None:
-    for candidate in (formal, early):
-        if (
-            candidate.get("public_quality_contract_version")
-            == core_quality.PUBLIC_QUALITY_CONTRACT_VERSION
-        ):
-            return candidate
+    if (
+        formal.get("public_quality_contract_version")
+        == core_quality.PUBLIC_QUALITY_CONTRACT_VERSION
+    ):
+        return formal
     return None
 
 
@@ -430,10 +404,7 @@ def load_recent_signal_observations(
             frame.c.trade_date == current_at.date(),
             frame.c.captured_at >= current_at - timedelta(seconds=max_age_seconds),
             frame.c.captured_at < current_at,
-            or_(
-                observation.c.formal_action == "buy_now",
-                observation.c.early_action == "buy_now",
-            ),
+            observation.c.formal_action == "buy_now",
         )
         .order_by(frame.c.captured_at, observation.c.vt_symbol)
     )
@@ -550,8 +521,6 @@ def build_fill_followup_observations(
                 "volume_ratio": _optional_number((quote or {}).get("volume_ratio")),
                 "capture_state": "fill_followup",
                 "formal_action": "pass",
-                "early_action": "pass",
-                "early_entry_kind": "none",
                 "blocking_scope": "none",
                 "decision_reason": "delayed_fill_quote_followup",
                 "blocker_codes": [],
@@ -760,26 +729,40 @@ def load_replay_observations(
     return [dict(row) for row in rows]
 
 
-def load_action_observation_pairs(
+def load_forward_research_observations(
     start: date,
     end: date,
 ) -> list[dict[str, object]]:
-    """Load only stock-days that emitted an old formal or early buy action."""
+    """Load only SQL-qualified fields required by forward concept case audit."""
 
     frame = schema.limit_up_radar_frames
     observation = schema.limit_up_radar_observations
     statement = (
-        select(frame.c.trade_date, observation.c.vt_symbol)
+        select(
+            frame.c.trade_date,
+            frame.c.captured_at,
+            observation.c.vt_symbol,
+            observation.c.change_pct,
+            observation.c.board_lane,
+            observation.c.support_score,
+            observation.c.entry_quality_score,
+            observation.c.prior_limit_count_126,
+            observation.c.prior_industry_turnover_ratio_5d,
+        )
         .select_from(observation.join(frame, observation.c.frame_id == frame.c.id))
         .where(
             frame.c.trade_date.between(start, end),
-            or_(
-                observation.c.formal_action == "buy_now",
-                observation.c.early_action == "buy_now",
-            ),
+            frame.c.is_stale.is_(False),
+            frame.c.quality_status == "ready",
+            observation.c.board_lane.in_(("first_board", "two_to_three")),
+            observation.c.change_pct >= 3.0,
         )
-        .distinct()
-        .order_by(frame.c.trade_date, observation.c.vt_symbol)
+        .distinct(frame.c.trade_date, observation.c.vt_symbol)
+        .order_by(
+            frame.c.trade_date,
+            observation.c.vt_symbol,
+            frame.c.captured_at,
+        )
     )
     with session_scope() as session:
         rows = session.execute(statement).mappings().all()

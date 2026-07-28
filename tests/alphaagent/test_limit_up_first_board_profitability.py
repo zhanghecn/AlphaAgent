@@ -406,11 +406,6 @@ def test_live_risk_gate_publishes_unbounded_actionable_recommendations(
     }
     monkeypatch.setattr(
         live_service,
-        "_attach_shared_first_board_quality",
-        lambda value: dict(value),
-    )
-    monkeypatch.setattr(
-        live_service,
         "_load_prior_quality_state_safely",
         lambda _captured_at: {
             "known": True,

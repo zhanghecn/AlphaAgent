@@ -6,12 +6,7 @@ from alphaagent.server.services.limit_up.versions import (
     HISTORY_STRATEGY_VERSION,
     LIVE_STRATEGY_VERSION,
 )
-from alphaagent.server.services.limit_up.radar_contract import CAPTURE_MIN_CHANGE_PCT
-from alphaagent.server.services.limit_up.preboard_decision_contract import (
-    PREBOARD_DECISION_VERSION,
-)
-
-GUIDE_VERSION = "limit-up-strategy-guide-v7"
+GUIDE_VERSION = "limit-up-strategy-guide-v9"
 
 
 def get_limit_up_strategy_guide() -> dict[str, object]:
@@ -25,7 +20,6 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
             "history_dataset_version": HISTORY_STRATEGY_VERSION,
             "selection_no_lookahead": True,
             "selection_contract": LIVE_STRATEGY_VERSION,
-            "preboard_research_contract": PREBOARD_DECISION_VERSION,
             "entry_windows": ["10:00-11:30", "13:00-14:30"],
             "entry_mode": "sweep",
             "exit_mode": "next_close",
@@ -49,7 +43,6 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
             "quality_estimate_prior_strength": 10,
             "quality_states": [
                 "rejected",
-                "qualified_waiting_trigger",
                 "actionable",
             ],
             "frozen_evidence": {
@@ -94,10 +87,6 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                     "total_return_pct": 201.9840,
                     "max_drawdown_pct": -8.6709,
                 },
-                "report": (
-                    "memory/06_backtests/"
-                    "limit_up_unified_public_quality_20260727.md"
-                ),
             },
             "forward_status": {
                 "start_date": "2026-07-27",
@@ -164,8 +153,7 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                 "title": "真实触板后形成正式买点",
                 "rule": (
                     "开盘后持续扫描；真实首次触板或回封发生后，重新执行完整公共"
-                    "A/B/C质量门。只有public_quality_actionable为真才进入正式买点；"
-                    "板前概率不可用不阻断合格触板，概率再高也不能绕过质量门。"
+                    "A/B/C质量门。只有公共质量结论为正式可买时才进入正式买点。"
                 ),
                 "timing": "盘中实时",
             },
@@ -174,7 +162,7 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                 "title": "按A、C、B排序并保留A仓位",
                 "rule": (
                     "全量列表输出所有通过信号；同一时点先按A、C、B，再按公共"
-                    "质量胜率、D+1预期和触板概率排序。正式推荐不受仓位截断；"
+                    "质量胜率和D+1预期排序。正式推荐不受仓位截断；"
                     "回测两仓在尚无A时最多使用一个非A仓。C每天最多一笔，"
                     "跨时点不事后换票。"
                 ),
@@ -192,7 +180,7 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
         ],
         "ranking": {
             "first_board_primary": "A、C、B质量层后按公共质量胜率降序",
-            "first_board_secondary": "公共D+1预期、3分钟/最终触板概率、封板率依次降序",
+            "first_board_secondary": "公共D+1预期、封板率依次降序",
             "historical_win_rate_formula": (
                 "个股126日封停成功率 × 同股历史首板封住后D+1收盘净赚钱率"
             ),
@@ -203,41 +191,13 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                 "排除原因并满足资金/情绪交叉，且每天最多一笔"
             ),
         },
-        "preboard_decision": {
-            "decision_version": PREBOARD_DECISION_VERSION,
-            "observation_min_change_pct": CAPTURE_MIN_CHANGE_PCT,
-            "observation_is_buy_signal": False,
-            "quality_pool_rule": "先通过公共A/B/C质量门，再由涨幅达到3%激活观察",
-            "probability_outputs": ["3分钟触板概率", "当日最终触板概率"],
-            "ranking_order": [
-                "A、C、B质量层",
-                "公共质量胜率",
-                "公共D+1预期净收益",
-                "3分钟触板概率",
-                "最终触板概率",
-                "触板后封板率",
-                "首板承接分",
-            ],
-            "promotion_rule": (
-                "历史严格板前账户通过后仅进入影子；独立前向账户再次通过后，"
-                "才补充正式板前买点和概率排序，且不删除同股当前扫板兜底"
-            ),
-            "formal_baseline": (
-                "当前正式合同仅为limit-up-core-abc-v2真实触板/回封买点；"
-                "板前概率当前只作研究观察，不生成买点"
-            ),
-        },
         "field_groups": [
             {
                 "key": "intraday",
                 "label": "盘中实时字段",
                 "selection_allowed": True,
                 "fields": [
-                    "当前决策时点与严格板前价格",
                     "当前价、涨幅、涨停价与距板",
-                    "已完成分钟的速度、加速度、量能和回撤恢复",
-                    "截至当前决策时点的逐笔资金代理",
-                    "高质量母池的点时横截面",
                     "共享风险门与正式执行窗口",
                     "触板前同概念已封板数量与最高板",
                 ],

@@ -48,7 +48,6 @@ def test_radar_observations_define_point_in_time_flow_sources() -> None:
         "public_quality_contract_version",
         "public_quality_status",
         "public_quality_gate_passed",
-        "public_quality_preparation_passed",
         "public_quality_actionable",
         "public_quality_reason",
         "quality_win_probability",
@@ -71,9 +70,6 @@ def test_radar_observations_define_point_in_time_flow_sources() -> None:
         "formal_two_slot_observed",
         "formal_two_slot_symbols",
     }.issubset(schema.limit_up_radar_frames.c.keys())
-    assert "capture_runtime_fingerprint" in (
-        schema.limit_up_preboard_point_day_scopes.c.keys()
-    )
 
 
 def test_replay_observation_loader_uses_compact_projection(monkeypatch) -> None:
@@ -105,6 +101,47 @@ def test_replay_observation_loader_uses_compact_projection(monkeypatch) -> None:
 
     sql = str(statements[0].compile(dialect=postgresql.dialect())).lower()
     assert "limit_up_radar_observations.change_pct" in sql
+    assert "limit_up_radar_observations.concept_candidates" not in sql
+    assert "limit_up_radar_observations.public_quality_status" not in sql
+
+
+def test_forward_research_loader_pushes_quality_filters_into_sql(monkeypatch) -> None:
+    statements: list[object] = []
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return []
+
+    class Session:
+        def execute(self, statement):
+            statements.append(statement)
+            return Result()
+
+    @contextmanager
+    def fake_session_scope():
+        yield Session()
+
+    monkeypatch.setattr(repo, "session_scope", fake_session_scope)
+
+    assert repo.load_forward_research_observations(
+        date(2026, 7, 17),
+        date(2026, 7, 28),
+    ) == []
+
+    sql = str(
+        statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    ).lower()
+    assert "limit_up_radar_frames.is_stale is false" in sql
+    assert "limit_up_radar_frames.quality_status = 'ready'" in sql
+    assert "limit_up_radar_observations.change_pct >= 3.0" in sql
+    assert "limit_up_radar_observations.board_lane in ('first_board', 'two_to_three')" in sql
+    assert "distinct on (limit_up_radar_frames.trade_date, limit_up_radar_observations.vt_symbol)" in sql
     assert "limit_up_radar_observations.concept_candidates" not in sql
     assert "limit_up_radar_observations.public_quality_status" not in sql
 
@@ -178,7 +215,6 @@ def test_flow_source_schema_patches_are_idempotent() -> None:
         "public_quality_contract_version VARCHAR(80)",
         "public_quality_status VARCHAR(40)",
         "public_quality_gate_passed BOOLEAN",
-        "public_quality_preparation_passed BOOLEAN",
         "public_quality_actionable BOOLEAN",
         "public_quality_reason VARCHAR(160)",
         "quality_win_probability FLOAT",
@@ -200,16 +236,6 @@ def test_flow_source_schema_patches_are_idempotent() -> None:
     assert any(
         "ALTER TABLE limit_up_radar_frames ADD COLUMN IF NOT EXISTS "
         "capture_runtime_fingerprint VARCHAR(80)" in sql
-        for sql in executed
-    )
-    assert any(
-        "ALTER TABLE limit_up_preboard_point_day_scopes ADD COLUMN IF NOT EXISTS "
-        "capture_runtime_fingerprint VARCHAR(80)" in sql
-        for sql in executed
-    )
-    assert any(
-        "ALTER TABLE limit_up_preboard_point_feature_rows ADD COLUMN IF NOT EXISTS "
-        "action_market_timing_observed BOOLEAN" in sql
         for sql in executed
     )
 
@@ -251,12 +277,11 @@ def test_capture_runtime_fingerprint_is_deterministic_and_source_sensitive(
 def test_projection_drops_large_nested_payloads() -> None:
     row = repo.project_observation(
         _candidate("600001.SSE"),
-        formal_signal=None,
-        early_signal={"action": "buy_now", "entry_kind": "momentum"},
+        formal_signal={"action": "buy_now", "entry_kind": "sweep"},
     )
 
     assert row["vt_symbol"] == "600001.SSE"
-    assert row["early_action"] == "buy_now"
+    assert row["formal_action"] == "buy_now"
     assert "financial_snapshot" not in row
     assert "raw" not in row
 
@@ -322,7 +347,6 @@ def test_projection_preserves_bounded_short_horizon_evidence() -> None:
             "core_quality_gate_reason": "qualified",
             "quality_priority_tier": "A_industry_expanding",
         },
-        early_signal=None,
         quote_observed_at=observed_at,
         concept_membership_snapshot_date=date(2026, 7, 19),
     )
@@ -371,8 +395,7 @@ def test_projection_preserves_bounded_short_horizon_evidence() -> None:
     assert row["core_quality_gate_passed"] is True
     assert row["core_quality_gate_reason"] == "qualified"
     assert row["quality_priority_tier"] == "A_industry_expanding"
-    assert row["public_quality_status"] == "qualified_waiting_trigger"
-    assert row["public_quality_preparation_passed"] is True
+    assert row["public_quality_status"] == "rejected"
     assert row["public_quality_actionable"] is False
     assert row["quality_win_probability"] == 35 / 41
     assert row["quality_expected_d1_net_return_pct"] == 3.0876
@@ -398,8 +421,7 @@ def test_projection_recomputes_missing_core_quality_from_signal_time_fields() ->
             "buy_time": "10:30:00",
             "signal_kind": "first_touch",
         },
-        formal_signal=None,
-        early_signal={
+        formal_signal={
             "historical_evidence": {
                 "d1_money_effect_sample_count": 7,
                 "historical_win_rate": 36.0,
@@ -414,7 +436,7 @@ def test_projection_recomputes_missing_core_quality_from_signal_time_fields() ->
     assert row["core_quality_gate_passed"] is True
     assert row["core_quality_gate_reason"] == "qualified"
     assert row["quality_priority_tier"] == "B_recognition_only"
-    assert row["public_quality_status"] == "qualified_waiting_trigger"
+    assert row["public_quality_status"] == "rejected"
     assert row["quality_win_probability"] == 0.6
     assert row["quality_expected_d1_net_return_pct"] == 1.2895
 
@@ -429,7 +451,6 @@ def test_projection_prefers_the_candidate_quote_source_time() -> None:
             "quote_observed_at": candidate_time.isoformat(),
         },
         formal_signal=None,
-        early_signal=None,
         quote_observed_at=fallback_time,
     )
 
@@ -446,7 +467,6 @@ def test_projection_fails_closed_for_invalid_flow_source_dates() -> None:
     row = repo.project_observation(
         candidate,
         formal_signal=None,
-        early_signal=None,
     )
 
     assert row["sector_flow_trade_date"] is None
@@ -458,7 +478,6 @@ def test_two_hundred_projected_candidates_stay_below_size_guard() -> None:
         repo.project_observation(
             _candidate(f"{600000 + index:06d}.SSE"),
             formal_signal=None,
-            early_signal={"action": "pass", "entry_kind": "none"},
         )
         for index in range(200)
     ]
@@ -470,8 +489,7 @@ def test_two_hundred_projected_candidates_stay_below_size_guard() -> None:
 def test_fill_followup_keeps_a_signaled_stock_after_it_falls_below_three_percent() -> None:
     signal = repo.project_observation(
         _candidate("600001.SSE"),
-        formal_signal=None,
-        early_signal={"action": "buy_now", "entry_kind": "momentum"},
+        formal_signal={"action": "buy_now", "entry_kind": "sweep"},
     )
     signal["captured_at"] = "2026-07-20T10:05:00+08:00"
     quote = {
@@ -507,14 +525,12 @@ def test_fill_followup_keeps_a_signaled_stock_after_it_falls_below_three_percent
     assert rows[0]["volume_ratio"] == 2.1
     assert rows[0]["capture_state"] == "fill_followup"
     assert rows[0]["formal_action"] == "pass"
-    assert rows[0]["early_action"] == "pass"
 
 
 def test_fill_followup_rejects_stale_late_and_cross_window_quotes() -> None:
     signal = repo.project_observation(
         _candidate("600001.SSE"),
-        formal_signal=None,
-        early_signal={"action": "buy_now", "entry_kind": "momentum"},
+        formal_signal={"action": "buy_now", "entry_kind": "sweep"},
     )
     quote = {
         "vt_symbol": "600001.SSE",
@@ -629,7 +645,6 @@ def test_frame_and_observations_use_one_transaction(monkeypatch) -> None:
     observation = repo.project_observation(
         _candidate("600001.SSE"),
         formal_signal=None,
-        early_signal={"action": "pass", "entry_kind": "none"},
     )
 
     result = repo.save_frame(

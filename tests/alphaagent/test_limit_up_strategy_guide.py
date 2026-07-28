@@ -41,13 +41,7 @@ def test_strategy_guide_separates_selection_fields_from_future_outcomes() -> Non
         step for step in guide["selection_steps"] if step["order"] == 5
     )
     assert trigger["title"] == "真实触板后形成正式买点"
-    assert "板前概率不可用不阻断合格触板" in trigger["rule"]
-    assert "概率再高也不能绕过质量门" in trigger["rule"]
-    assert guide["preboard_decision"]["observation_is_buy_signal"] is False
-    assert guide["preboard_decision"]["quality_pool_rule"].startswith(
-        "先通过公共A/B/C质量门"
-    )
-    assert "不生成买点" in guide["preboard_decision"]["formal_baseline"]
+    assert "公共质量结论为正式可买" in trigger["rule"]
     assert guide["ranking"]["portfolio_gate"].startswith("公共A/B/C质量胜率")
     rendered = str(guide)
     assert "known_at" not in rendered
@@ -92,15 +86,6 @@ def test_strategy_guide_exposes_core_abc_evidence_and_forward_status() -> None:
     assert forward["minimum_closed_count"] == 15
     assert forward["minimum_trade_days"] == 10
     assert forward["status"] == "collecting_forward"
-    preboard = guide["preboard_decision"]
-    assert preboard["decision_version"] == "limit-up-preboard-decision-v2"
-    assert preboard["observation_min_change_pct"] == 3.0
-    assert preboard["observation_is_buy_signal"] is False
-    assert preboard["probability_outputs"] == [
-        "3分钟触板概率",
-        "当日最终触板概率",
-    ]
-    assert "limit-up-core-abc-v2" in preboard["formal_baseline"]
     assert "radar_evidence" not in guide
 
 

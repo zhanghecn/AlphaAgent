@@ -237,10 +237,9 @@ def public_quality_gate(
     *,
     prior_ab_seen: bool = False,
     c_already_selected: bool = False,
-    structural_gate_passed: bool | None = None,
     trigger_observed: bool = False,
 ) -> dict[str, object]:
-    """Publish one A/B/C quality decision for pre-board and triggered paths."""
+    """Publish one formal A/B/C decision after a physical limit trigger."""
 
     core = core_quality_gate(
         candidate,
@@ -249,17 +248,6 @@ def public_quality_gate(
     )
     tier = str(core.get("quality_priority_tier") or "")
     prior = QUALITY_TIER_PRIORS.get(tier)
-    structural_passed = _structural_gate_passed(
-        candidate,
-        explicit=structural_gate_passed,
-    )
-    preparation_passed = bool(
-        structural_passed
-        and (
-            core.get("base_ab_quality_gate_passed") is True
-            or core.get("c_quality_gate_passed") is True
-        )
-    )
     estimates = _quality_estimates(candidate, prior)
     win_probability = estimates["quality_win_probability"]
     expected_return = estimates["quality_expected_d1_net_return_pct"]
@@ -269,23 +257,21 @@ def public_quality_gate(
         and expected_return is not None
         and expected_return > PUBLIC_QUALITY_MINIMUM_EXPECTED_D1_NET_RETURN_PCT
     )
-    current_gate_passed = bool(
-        preparation_passed
+    passed = bool(
+        trigger_observed
+        and core.get("core_quality_gate_passed") is True
         and estimate_passed
-        and (not trigger_observed or core.get("core_quality_gate_passed") is True)
     )
-    actionable = bool(trigger_observed and current_gate_passed)
-    if actionable:
+    if passed:
         status = "actionable"
         reason = "qualified"
-    elif not structural_passed:
+    elif not trigger_observed:
         status = "rejected"
-        reason = "structural_quality_rejected"
-    elif not preparation_passed:
+        reason = "trigger_not_observed"
+    elif core.get("core_quality_gate_passed") is not True:
         status = "rejected"
         reason = str(
-            core.get("base_ab_quality_gate_reason")
-            or core.get("core_quality_gate_reason")
+            core.get("core_quality_gate_reason")
             or "abc_quality_rejected"
         )
     elif win_probability is None:
@@ -300,28 +286,17 @@ def public_quality_gate(
     elif expected_return <= PUBLIC_QUALITY_MINIMUM_EXPECTED_D1_NET_RETURN_PCT:
         status = "rejected"
         reason = "quality_expected_d1_return_not_positive"
-    elif not trigger_observed:
-        status = "qualified_waiting_trigger"
-        reason = "waiting_for_trigger"
     else:
         status = "rejected"
-        reason = str(
-            core.get("quality_entry_gate_reason")
-            or core.get("core_quality_gate_reason")
-            or "trigger_not_actionable"
-        )
+        reason = "quality_estimate_rejected"
     return {
         **core,
         **estimates,
         "public_quality_contract_version": PUBLIC_QUALITY_CONTRACT_VERSION,
         "public_quality_status": status,
-        "public_quality_gate_passed": current_gate_passed,
-        "public_quality_preparation_passed": bool(
-            preparation_passed and estimate_passed
-        ),
-        "public_quality_actionable": actionable,
+        "public_quality_gate_passed": passed,
+        "public_quality_actionable": passed,
         "public_quality_trigger_observed": trigger_observed,
-        "public_quality_structural_gate_passed": structural_passed,
         "public_quality_reason": reason,
         "quality_minimum_win_probability": (
             PUBLIC_QUALITY_MINIMUM_WIN_PROBABILITY
@@ -502,26 +477,6 @@ def quality_tier_priority(candidate: Mapping[str, object]) -> int:
     return QUALITY_TIER_PRIORITY.get(tier, len(QUALITY_TIER_PRIORITY))
 
 
-def is_public_quality_prepared(candidate: Mapping[str, object]) -> bool:
-    """Return whether the current public contract admits probability scoring."""
-
-    win_probability = _optional_number(candidate.get("quality_win_probability"))
-    expected_return = _optional_number(
-        candidate.get("quality_expected_d1_net_return_pct")
-    )
-    return bool(
-        candidate.get("public_quality_contract_version")
-        == PUBLIC_QUALITY_CONTRACT_VERSION
-        and candidate.get("public_quality_preparation_passed") is True
-        and str(candidate.get("public_quality_status") or "")
-        in {"qualified_waiting_trigger", "actionable"}
-        and win_probability is not None
-        and win_probability >= PUBLIC_QUALITY_MINIMUM_WIN_PROBABILITY
-        and expected_return is not None
-        and expected_return > PUBLIC_QUALITY_MINIMUM_EXPECTED_D1_NET_RETURN_PCT
-    )
-
-
 def _quality_estimates(
     candidate: Mapping[str, object],
     prior: Mapping[str, object] | None,
@@ -598,17 +553,6 @@ def _shrunken_estimate(
         prior_value * PUBLIC_QUALITY_PRIOR_STRENGTH
         + stock_value * stock_sample_count
     ) / (PUBLIC_QUALITY_PRIOR_STRENGTH + stock_sample_count)
-
-
-def _structural_gate_passed(
-    candidate: Mapping[str, object],
-    *,
-    explicit: bool | None,
-) -> bool:
-    if explicit is not None:
-        return explicit
-    candidate_value = candidate.get("quality_gate_passed")
-    return candidate_value is True if isinstance(candidate_value, bool) else True
 
 
 def _recognition_decision(limit_count: int | None) -> tuple[bool, str]:

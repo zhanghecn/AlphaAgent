@@ -105,15 +105,14 @@ export function buildRuleFlow(guide: LimitUpStrategyGuide): RuleFlowNode[] {
       stage: "momentum",
       badge: "④",
       title: "真实触板后复核正式买点",
-      purpose: "真实首次触板或回封后重新执行完整公共质量门，板前概率只作研究排序。",
+      purpose: "真实首次触板或回封后重新执行完整公共质量门。",
       condition:
-        `A/C 首板与二进三真实触板或回封后，只在 ${windows.join("、")} 行动；B 首板要求 ${core.b_first_board_minimum_time} 后首次触板或回封。二进三 9:35-10:00 只观察。概率不可用不拦截质量合格触板，概率再高也不能放行质量失败票。`,
+        `A/C 首板与二进三真实触板或回封后，只在 ${windows.join("、")} 行动；B 首板要求 ${core.b_first_board_minimum_time} 后首次触板或回封。二进三 9:35-10:00 只观察。`,
       thresholds: [
         { label: "A/C 与二进三", value: windows.join("、") },
         { label: "B 首板", value: `${core.b_first_board_minimum_time} 后` },
         { label: "快照", value: "必须新鲜" },
         { label: "正式触发", value: "真实触板或回封" },
-        { label: "板前概率", value: "当前仅研究排序" },
       ],
       dataNote: "真实触板时点、当前价、涨停价、已完成的盘中支撑证据和完整公共质量结果。",
       dataGroupKeys: ["intraday"],

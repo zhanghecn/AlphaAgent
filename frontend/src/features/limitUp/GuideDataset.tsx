@@ -157,9 +157,6 @@ export function GuideDataset({
             </dd>
           </div>
         </dl>
-        <p className="mt-2 break-all font-mono text-[11px] text-muted-foreground">
-          A+B+C 正式回放报告：{evidence.report}
-        </p>
         <p className="mt-3 border-l-2 border-amber-500 px-3 text-muted-foreground">
           次日收盘价是「结果」，必须等选股全部完成后才能确定，绝不反过来参与当天的选股。
         </p>

@@ -25,7 +25,7 @@ def _source_snapshot() -> dict[str, object]:
         "reason": "二进三观察资格通过",
         "lane_favorable_factors": ["sector_core", "prior_board_changed_hands_and_resealed"],
         "setup_tags": ["weak_to_strong_breakout"],
-        "buy_condition": "次日10:00后等待触板或回封",
+        "buy_condition": "次日10:00后仅在触板或回封时行动",
         "sell_condition": "D+1动态退出",
         "cancel_condition": "竞价不符合或市场门关闭",
         "execution_confidence": "proxy_without_l2",

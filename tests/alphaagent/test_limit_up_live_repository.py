@@ -18,7 +18,7 @@ def clear_context_cache() -> None:
     live_repository.clear_live_context_cache()
 
 
-def test_snapshot_round_trip_keeps_preboard_candidates(monkeypatch) -> None:
+def test_snapshot_round_trip_keeps_formal_candidates(monkeypatch) -> None:
     stored: dict[str, object] = {}
 
     class Result:
@@ -52,8 +52,7 @@ def test_snapshot_round_trip_keeps_preboard_candidates(monkeypatch) -> None:
     candidates = [
         {
             "vt_symbol": "600001.SSE",
-            "decision_state": "observe",
-            "touch_probability_3m": 0.72,
+            "action": "buy_now",
         }
     ]
     snapshot = {
@@ -65,8 +64,7 @@ def test_snapshot_round_trip_keeps_preboard_candidates(monkeypatch) -> None:
         "source": "test",
         "source_updated_at": "2026-07-23T10:05:20+08:00",
         "market_context": {},
-        "candidates": [],
-        "preboard_candidates": candidates,
+        "candidates": candidates,
         "recommendations": {},
         "data_quality": {"status": "ready", "is_stale": False},
     }
@@ -77,10 +75,9 @@ def test_snapshot_round_trip_keeps_preboard_candidates(monkeypatch) -> None:
         strategy_version="obsolete-version",
     )
 
-    assert "preboard_candidates" in live_repository.schema.limit_up_signal_snapshots.c
-    assert saved["preboard_candidates"] == candidates
+    assert saved["candidates"] == candidates
     assert loaded is not None
-    assert loaded["preboard_candidates"] == candidates
+    assert loaded["candidates"] == candidates
 
 
 def test_publication_audit_reads_only_public_live_minutes(monkeypatch) -> None:

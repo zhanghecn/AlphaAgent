@@ -110,6 +110,7 @@ def test_public_quality_uses_abc_prior_and_point_in_time_stock_shrinkage() -> No
                 "stock_gene_combined_win_rate": 40.0,
             }
         ),
+        trigger_observed=True,
     )
 
     assert decision["public_quality_contract_version"] == PUBLIC_QUALITY_CONTRACT_VERSION
@@ -123,8 +124,8 @@ def test_public_quality_uses_abc_prior_and_point_in_time_stock_shrinkage() -> No
         (3.0876 * 10 + 2.0 * 5) / 15
     )
     assert decision["public_quality_gate_passed"] is True
-    assert decision["public_quality_status"] == "qualified_waiting_trigger"
-    assert decision["public_quality_actionable"] is False
+    assert decision["public_quality_status"] == "actionable"
+    assert decision["public_quality_actionable"] is True
 
 
 def test_public_quality_becomes_actionable_only_after_real_trigger() -> None:
@@ -135,11 +136,12 @@ def test_public_quality_becomes_actionable_only_after_real_trigger() -> None:
         }
     )
 
-    waiting = public_quality_gate(candidate, trigger_observed=False)
+    untriggered = public_quality_gate(candidate, trigger_observed=False)
     actionable = public_quality_gate(candidate, trigger_observed=True)
 
-    assert waiting["public_quality_status"] == "qualified_waiting_trigger"
-    assert waiting["public_quality_actionable"] is False
+    assert untriggered["public_quality_status"] == "rejected"
+    assert untriggered["public_quality_reason"] == "trigger_not_observed"
+    assert untriggered["public_quality_actionable"] is False
     assert actionable["public_quality_status"] == "actionable"
     assert actionable["public_quality_actionable"] is True
     assert actionable["quality_win_probability"] == pytest.approx(0.60)
@@ -158,7 +160,7 @@ def test_public_quality_rejects_stock_shrinkage_below_quality_floor() -> None:
                 "stock_gene_combined_win_rate": 40.0,
             }
         ),
-        trigger_observed=False,
+        trigger_observed=True,
     )
 
     assert decision["core_quality_gate_passed"] is True

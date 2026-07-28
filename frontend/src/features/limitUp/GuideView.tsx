@@ -43,10 +43,9 @@ export function GuideView({
           {core.prior_limit_window_days} 个交易日涨停 {core.minimum_prior_limit_count} 到
           {core.maximum_prior_limit_count} 次形成 A/B 基座，并用资金与概念扩散交叉每天补一笔 C。
           A/B/C 层级先验与个股既有 D+1 样本收缩后，质量胜率至少
-          {(core.minimum_quality_win_probability * 100).toFixed(0)}% 且 D+1 预期为正才进入等待触板状态。在
+          {(core.minimum_quality_win_probability * 100).toFixed(0)}% 且 D+1 预期为正。在
           <strong className="font-semibold">{strategy.entry_windows.join("、")}</strong>
           开盘后持续实时计算；当前正式买点必须等真实触板或回封发生，再复核完整公共质量门。
-          板前概率目前只作研究排序，不生成正式买点。
           D+1 按官方收盘价退出。实时列表展示全部合格信号，同一交易日可以有多笔。
         </p>
         <div className="mt-3 flex items-start gap-2 rounded-md border border-rise/40 bg-rise/5 px-3 py-2">
@@ -106,11 +105,8 @@ export function GuideView({
               label="盘中实时数据"
               hint="买入的那一刻能看到，允许参与选股"
               fields={[
-                "当前价、涨幅、涨停价与已完成分钟",
-                "1/3/5分钟收益、速度、加速度与回撤恢复",
-                "量能、逐笔资金代理与质量池横截面",
-                "严格板前价格和正式买入窗口",
-                "候选触板前同概念已封板数与最高板",
+                "当前价、涨幅、涨停价与正式买入窗口",
+                "截至候选触板时同概念已封板数与最高板",
               ]}
             />
             <FieldGroupRow

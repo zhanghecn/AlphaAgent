@@ -23,15 +23,6 @@ const guide = {
   selection_steps: [
     { order: 1, title: "限定可交易范围", rule: "仅主板首板和二进三。", timing: "盘中已知" },
   ],
-  preboard_decision: {
-    observation_min_change_pct: 3,
-    ranking_order: [
-      "同股D+1预期净收益",
-      "同股D+1胜率",
-      "3分钟触板概率",
-      "最终触板概率",
-    ],
-  },
   field_groups: [
     { key: "intraday", label: "盘中实时字段", selection_allowed: true, fields: ["当前价"] },
   ],
@@ -69,15 +60,12 @@ describe("buildRuleFlow", () => {
     expect(sector.thresholds).toContainEqual({ label: "B 可交易", value: "是" });
   });
 
-  it("正式买点必须由真实触板触发且不依赖板前概率", () => {
+  it("正式买点必须由真实触板触发", () => {
     const momentum = buildRuleFlow(guide).find((node) => node.stage === "momentum")!;
 
     expect(momentum.title).toContain("真实触板后");
     expect(momentum.purpose).toContain("重新执行完整公共质量门");
-    expect(momentum.condition).toContain("概率不可用不拦截质量合格触板");
-    expect(momentum.condition).toContain("概率再高也不能放行质量失败票");
     expect(momentum.thresholds).toContainEqual({ label: "正式触发", value: "真实触板或回封" });
-    expect(momentum.thresholds).toContainEqual({ label: "板前概率", value: "当前仅研究排序" });
   });
 
   it("成交节点含买入窗口与 D+1 统一退出", () => {

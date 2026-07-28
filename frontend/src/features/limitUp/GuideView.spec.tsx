@@ -5,14 +5,13 @@ import type { LimitUpStrategyGuide } from "@/api/limitUp";
 import { GuideView } from "./GuideView";
 
 const guide: LimitUpStrategyGuide = {
-  guide_version: "limit-up-strategy-guide-v7",
+  guide_version: "limit-up-strategy-guide-v9",
   strategy: {
     live_version: "limit-up-core-abc-v2",
     history_version: "limit-up-core-abc-v2",
     history_dataset_version: "limit-up-core-abc-v1",
     selection_no_lookahead: true,
     selection_contract: "limit-up-core-abc-v2",
-    preboard_research_contract: "limit-up-preboard-decision-v2",
     entry_windows: ["10:00-11:30", "13:00-14:30"],
     entry_mode: "sweep",
     exit_mode: "next_close",
@@ -34,7 +33,7 @@ const guide: LimitUpStrategyGuide = {
     minimum_quality_win_probability: 0.5,
     minimum_quality_expected_d1_net_return_pct: 0,
     quality_estimate_prior_strength: 10,
-    quality_states: ["rejected", "qualified_waiting_trigger", "actionable"],
+    quality_states: ["rejected", "actionable"],
     frozen_evidence: {
       status: "historical_proxy_pass_forward_unconfirmed",
       evidence_role: "current_v2_historical_replay",
@@ -53,7 +52,6 @@ const guide: LimitUpStrategyGuide = {
       b_tier: { closed_count: 30, win_count: 18, win_rate_pct: 60 },
       single_position: { closed_count: 79, win_count: 55, win_rate_pct: 69.6203, total_return_pct: 376.6561, max_drawdown_pct: -19.2649 },
       two_positions: { closed_count: 95, win_count: 70, win_rate_pct: 73.6842, total_return_pct: 201.984, max_drawdown_pct: -8.6709 },
-      report: "memory/06_backtests/limit_up_unified_public_quality_20260727.md",
     },
     forward_status: {
       start_date: "2026-07-27",
@@ -76,28 +74,11 @@ const guide: LimitUpStrategyGuide = {
   ],
   ranking: {
     first_board_primary: "同股D+1预期净收益降序",
-    first_board_secondary: "D+1胜率、3分钟/最终触板概率、封板率依次降序",
+    first_board_secondary: "D+1胜率、封板率依次降序",
     historical_win_rate_formula: "封停成功率 × D+1收盘净赚钱率",
     history_cutoff: "result_date < signal_date",
     ranking_only: true,
     portfolio_gate: "全量正式首板要求前序样本",
-  },
-  preboard_decision: {
-    decision_version: "limit-up-preboard-decision-v2",
-    observation_min_change_pct: 3,
-    observation_is_buy_signal: false,
-    quality_pool_rule: "先通过正式同源首板质量门，再由涨幅达到3%激活观察",
-    probability_outputs: ["3分钟触板概率", "当日最终触板概率"],
-    ranking_order: [
-      "同股D+1预期净收益",
-      "同股D+1胜率",
-      "3分钟触板概率",
-      "最终触板概率",
-      "触板后封板率",
-      "首板承接分",
-    ],
-    promotion_rule: "历史严格板前账户通过后仅进入影子；独立前向账户再次通过后才补充正式板前买点",
-    formal_baseline: "正式合同仅为limit-up-core-abc-v2；板前概率当前只作研究观察",
   },
   field_groups: [
     { key: "intraday", label: "盘中实时字段", selection_allowed: true, fields: ["当前价", "概念launch"] },
@@ -121,7 +102,6 @@ describe("GuideView", () => {
     expect(html).toContain("limit-up-core-abc-v2");
     expect(html).toContain("涨停 2 到");
     expect(html).toContain("当前正式买点必须等真实触板或回封发生");
-    expect(html).toContain("板前概率目前只作研究排序，不生成正式买点");
     expect(html).toContain("规则保证不偷看未来数据");
   });
 
@@ -199,19 +179,10 @@ describe("GuideView", () => {
     expect(html).toContain("正式 A+B+C 买入");
   });
 
-  it("allows the long evidence report path to wrap on mobile", () => {
-    const html = renderToStaticMarkup(<GuideView {...baseProps} />);
-
-    expect(html).toMatch(
-      /<p class="[^"]*break-all[^"]*">A\+B\+C 正式回放报告：memory\/06_backtests\/limit_up_unified_public_quality_20260727\.md<\/p>/,
-    );
-  });
-
   it("明确正式买点必须等待真实触板并重新通过公共质量门", () => {
     const html = renderToStaticMarkup(<GuideView {...baseProps} />);
 
     expect(html).toContain("当前正式买点必须等真实触板或回封发生，再复核完整公共质量门");
-    expect(html).toContain("板前概率目前只作研究排序，不生成正式买点");
     expect(html).toContain("正式推荐不限仓位");
     expect(html).toContain("回测账户才按一仓或两仓模拟成交");
   });

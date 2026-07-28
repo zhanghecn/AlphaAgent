@@ -50,10 +50,6 @@ export function LiveSignalCard({ signal, stale, paused }: LiveSignalCardProps) {
     ...firstBoardCompositeReasons(signal),
   ].slice(0, 5).join(" · ") || factorSummary;
   const stockEvidence = signal.historical_evidence;
-  const preboardRecommendation = (
-    signal.entry_kind === "momentum"
-    && signal.public_quality_status === "qualified_waiting_trigger"
-  );
   const conceptEvidence = signal.concept_name
     ? `${signal.concept_name} · 强度${signal.concept_strength_rank ?? "-"} · ${signal.concept_strong_5_count ?? 0}只涨超5% · 概念龙${signal.concept_leader_rank ?? "-"}`
     : "概念共振待确认";
@@ -154,26 +150,7 @@ export function LiveSignalCard({ signal, stale, paused }: LiveSignalCardProps) {
       </div>
 
       <footer className="grid grid-cols-2 gap-px overflow-hidden rounded-b-lg border-t bg-border sm:grid-cols-4">
-        {preboardRecommendation ? (
-          <>
-            <MetricCell label="质量层" value={qualityTierLabel(signal.quality_priority_tier)} />
-            <MetricCell
-              label="质量胜率"
-              value={formatProbability(signal.quality_win_probability)}
-              tone={probabilityTone(signal.quality_win_probability)}
-            />
-            <MetricCell
-              label="D+1预期"
-              value={formatSignedPct(signal.quality_expected_d1_net_return_pct)}
-              tone={amountTone(signal.quality_expected_d1_net_return_pct)}
-            />
-            <MetricCell
-              label="3分钟触板"
-              value={formatProbability(signal.touch_probability_3m)}
-              tone={probabilityTone(signal.touch_probability_3m)}
-            />
-          </>
-        ) : signal.board_lane === "first_board" ? (
+        {signal.board_lane === "first_board" ? (
           <>
             <MetricCell label="个股联合率" value={formatPct(stockEvidence?.historical_win_rate)} tone={rateTone(stockEvidence?.historical_win_rate)} />
             <MetricCell label={`同股D+1 (${stockEvidence?.d1_money_effect_sample_count ?? 0})`} value={formatPct(stockEvidence?.d1_money_effect_win_rate)} tone={rateTone(stockEvidence?.d1_money_effect_win_rate)} />
@@ -191,23 +168,6 @@ export function LiveSignalCard({ signal, stale, paused }: LiveSignalCardProps) {
       </footer>
     </article>
   );
-}
-
-function formatProbability(value?: number | null) {
-  return value == null ? "--" : formatPct(value * 100);
-}
-
-function probabilityTone(value?: number | null) {
-  if (value == null) return "text-muted-foreground";
-  return value >= 0.7 ? "text-rise" : value >= 0.55 ? "text-amber-600" : "text-fall";
-}
-
-function qualityTierLabel(value?: string | null) {
-  return ({
-    A_industry_expanding: "A · 板块扩张",
-    C_capital_diffusion_rescue: "C · 资金扩散",
-    B_recognition_only: "B · 历史辨识",
-  } as Record<string, string>)[value ?? ""] ?? "--";
 }
 
 function InstructionRow({ label, value }: { label: string; value?: string | null }) {

@@ -101,17 +101,11 @@ services:
       service: alphaagent-api
     profiles: ["research"]
     restart: "no"
-    command:
-      - python
-      - -m
-      - alphaagent.server.services.limit_up.preboard_decision_replay
-      - --help
-    # Full replay is CPU-bound; keep the limit explicit and operator-configurable.
+    command: ["python", "--version"]
     cpus: ${ALPHAAGENT_RESEARCH_CPUS:-1.0}
     environment:
       DATABASE_POOL_SIZE: "1"
       DATABASE_MAX_OVERFLOW: "0"
-      # PostgreSQL work is outside the Python cgroup, so disable query fan-out too.
       PGOPTIONS: >-
         -c application_name=alphaagent-research
         -c max_parallel_workers_per_gather=0

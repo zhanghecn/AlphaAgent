@@ -18,7 +18,6 @@ export interface LimitUpStrategyGuide {
     history_dataset_version: string;
     selection_no_lookahead: boolean;
     selection_contract: string;
-    preboard_research_contract: string;
     entry_windows: string[];
     entry_mode: string;
     exit_mode: string;
@@ -71,7 +70,6 @@ export interface LimitUpStrategyGuide {
       };
       single_position: LimitUpGuideAccountEvidence;
       two_positions: LimitUpGuideAccountEvidence;
-      report: string;
     };
     forward_status: {
       start_date: string;
@@ -101,16 +99,6 @@ export interface LimitUpStrategyGuide {
     history_cutoff: string;
     ranking_only: boolean;
     portfolio_gate: string;
-  };
-  preboard_decision: {
-    decision_version: string;
-    observation_min_change_pct: number;
-    observation_is_buy_signal: boolean;
-    quality_pool_rule: string;
-    probability_outputs: string[];
-    ranking_order: string[];
-    promotion_rule: string;
-    formal_baseline: string;
   };
   field_groups: Array<{
     key: "intraday" | "prior" | "outcome" | string;
@@ -219,11 +207,10 @@ export interface LimitUpLiveSignal {
   lane_entry_quality_score?: number | null;
   sector_route?: "realtime_industry" | "realtime_concept_launch" | string | null;
   portfolio_selected?: boolean;
-  public_quality_status?: "rejected" | "qualified_waiting_trigger" | "actionable" | string;
+  public_quality_status?: "rejected" | "actionable" | string;
   quality_priority_tier?: string | null;
   quality_win_probability?: number | null;
   quality_expected_d1_net_return_pct?: number | null;
-  touch_probability_3m?: number | null;
   seal_gate_passed?: boolean | null;
   momentum_gate_passed?: boolean | null;
   premium_gate_passed?: boolean | null;
@@ -318,49 +305,6 @@ export interface LimitUpLiveSignal {
   };
 }
 
-export interface PreboardCandidate {
-  vt_symbol: string;
-  name: string;
-  decision_state: "observe" | "prepare" | "actionable" | "missed" | "rejected";
-  execution_mode: "research_only" | "shadow" | "formal";
-  strictly_preboard: boolean;
-  last_price: number | null;
-  limit_price: number | null;
-  change_pct: number | null;
-  distance_to_limit_pct: number | null;
-  quality_priority_tier: "A_industry_expanding" | "C_capital_diffusion_rescue" | "B_recognition_only" | string;
-  public_quality_status: "qualified_waiting_trigger" | "actionable" | string;
-  quality_expected_d1_net_return_pct: number | null;
-  quality_win_probability: number | null;
-  expected_d1_net_return_pct: number | null;
-  d1_win_probability: number | null;
-  touch_probability_3m: number | null;
-  eventual_touch_probability: number | null;
-  seal_probability_given_touch: number | null;
-  probability_status: string;
-  source_quality: string;
-  updated_at: string;
-  dynamic_leader_shadow?: {
-    policy_version: string;
-    status: "locked" | "cooling" | "waiting_theme" | "unavailable" | string;
-    execution_effect: "none_research_only" | string;
-    market_gate_passed: boolean | null;
-    concept_id: string | null;
-    concept_name: string | null;
-    concept_state: "warming" | "launch" | "observe" | "ebb" | "unavailable" | string | null;
-    concept_leader_rank: number | null;
-    locked_at: string | null;
-    observed_frames: number;
-    eligible_frames: number;
-    consecutive_eligible_frames: number;
-    persistence_ratio: number | null;
-    drop_count: number;
-    current_concept_top5: boolean;
-    global_rank: number | null;
-    global_top5: boolean;
-  };
-}
-
 export interface LimitUpSignalSnapshot {
   mode?: "live_snapshot" | "next_session_preliminary" | "next_session_final" | string;
   trade_date: string;
@@ -374,7 +318,6 @@ export interface LimitUpSignalSnapshot {
     sealed_count?: number;
     failed_count?: number;
   };
-  preboard_candidates?: PreboardCandidate[];
   recommendations: {
     market_gate: {
       passed: boolean;
@@ -408,18 +351,6 @@ export interface LimitUpSignalSnapshot {
     concept_quote_coverage_ratio?: number | null;
     concept_trigger_allowed?: boolean;
     concept_membership_snapshot_date?: string | null;
-    preboard_status?: string;
-    preboard_error?: string;
-    preboard_decision_version?: string;
-    preboard_probability_status?: string;
-    preboard_probability_qualification_status?: string;
-    preboard_historical_promotion_status?: string;
-    preboard_execution_mode?: "research_only" | "shadow" | "formal" | string;
-    preboard_model_fingerprint?: string | null;
-    preboard_feature_fingerprint?: string | null;
-    preboard_observation_count?: number;
-    preboard_action_saved?: number;
-    preboard_formal_strategy_changed?: boolean;
     plan?: LimitUpPlanMetadata;
   };
 }
@@ -664,7 +595,7 @@ export interface LimitUpLaneLedgerTrade {
   prior_industry_turnover_ratio_5d?: number | null;
   quality_priority_tier?: "A_industry_expanding" | "C_capital_diffusion_rescue" | "B_recognition_only" | string | null;
   public_quality_contract_version?: string | null;
-  public_quality_status?: "rejected" | "qualified_waiting_trigger" | "actionable" | string | null;
+  public_quality_status?: "rejected" | "actionable" | string | null;
   public_quality_gate_passed?: boolean | null;
   public_quality_actionable?: boolean | null;
   public_quality_reason?: string | null;

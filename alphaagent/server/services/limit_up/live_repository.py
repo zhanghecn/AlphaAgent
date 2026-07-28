@@ -87,7 +87,6 @@ def save_snapshot(snapshot: Mapping[str, object]) -> dict[str, object]:
         "source_updated_at": _optional_datetime(snapshot.get("source_updated_at")),
         "market_context": dict(snapshot.get("market_context") or {}),
         "candidates": list(snapshot.get("candidates") or []),
-        "preboard_candidates": list(snapshot.get("preboard_candidates") or []),
         "recommendations": dict(snapshot.get("recommendations") or {}),
         "data_quality": dict(snapshot.get("data_quality") or {}),
     }
@@ -102,7 +101,6 @@ def save_snapshot(snapshot: Mapping[str, object]) -> dict[str, object]:
             "source_updated_at": statement.excluded.source_updated_at,
             "market_context": statement.excluded.market_context,
             "candidates": statement.excluded.candidates,
-            "preboard_candidates": statement.excluded.preboard_candidates,
             "recommendations": statement.excluded.recommendations,
             "data_quality": statement.excluded.data_quality,
             "updated_at": datetime.now(timezone.utc),

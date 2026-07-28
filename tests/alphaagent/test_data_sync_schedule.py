@@ -878,51 +878,12 @@ def test_eod_finalize_schedule_retries_daily_bars_late_without_slow_jobs():
         "sync_limit_up_event_minutes",
         "sync_limit_up_radar_minutes",
         svc.LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID,
-        "sync_limit_up_preboard_decision",
         svc.LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID,
         svc.LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID,
     ]
     assert "sync_stock_financial_quarterly" not in jobs
     assert "sync_stock_lhb_records" not in jobs
     assert "sync_stock_notices" not in jobs
-
-
-def test_preboard_decision_freeze_runs_only_in_2130_after_reliable_inputs(monkeypatch):
-    job = next(
-        item
-        for item in svc.DEFAULT_JOBS
-        if item.id == "sync_limit_up_preboard_decision"
-    )
-    schedules = {row["id"]: row for row in svc.DEFAULT_BATCH_SCHEDULES}
-    finalize_jobs = schedules["eod_finalize_2130"]["job_ids"]
-
-    assert job.source_id == "alphaagent_local"
-    assert job.target_table == "limit_up_preboard_point_day_scopes"
-    assert svc.JOB_RUNNERS[job.id] == "_run_sync_limit_up_preboard_decision"
-    assert job.id not in schedules["eod_1900"]["job_ids"]
-    assert finalize_jobs.index(job.id) > finalize_jobs.index("sync_stock_daily_bars")
-    assert finalize_jobs.index(job.id) > finalize_jobs.index(
-        "sync_limit_up_radar_minutes"
-    )
-
-    monkeypatch.setattr(
-        svc.preboard_decision_service,
-        "freeze_and_settle",
-        lambda: {
-            "status": "incomplete_scope",
-            "decision_version": "limit-up-preboard-decision-v2",
-            "feature_row_count": 3,
-            "rows_written": 120,
-            "message": "collecting",
-        },
-    )
-
-    result = svc.DataSyncRunner()._run_sync_limit_up_preboard_decision({})
-
-    assert result["decision_status"] == "incomplete_scope"
-    assert result["decision_version"] == "limit-up-preboard-decision-v2"
-    assert result["rows_read"] == 3
-    assert result["rows_written"] == 120
 
 
 def test_low_suction_security_snapshot_job_is_registered_and_scheduled():
@@ -1516,127 +1477,6 @@ def test_limit_up_radar_minute_backfill_job_fails_closed(
         svc.DataSyncRunner(adapter=object())._run_sync_limit_up_radar_minutes(
             {"max_gaps": 300}
         )
-
-
-def test_preboard_hazard_minute_backfill_is_manual_and_registered(monkeypatch) -> None:
-    from alphaagent.server.services.limit_up import preboard_hazard_data
-
-    job = next(
-        item
-        for item in svc.DEFAULT_JOBS
-        if item.id == "sync_limit_up_preboard_hazard_minutes"
-    )
-    captured: dict[str, object] = {}
-
-    assert job.source_id == "tdx_public_hq"
-    assert job.target_table == "stock_minute_bars"
-    assert job.default_params == {
-        "session_count": 60,
-        "max_gaps": 2000,
-        "dry_run": False,
-    }
-    assert svc.JOB_RUNNERS[job.id] == "_run_sync_limit_up_preboard_hazard_minutes"
-    assert all(
-        job.id not in schedule["job_ids"]
-        for schedule in svc.DEFAULT_BATCH_SCHEDULES
-    )
-
-    def fake_backfill(*, session_count: int, max_gaps: int, dry_run: bool):
-        captured.update(
-            {
-                "session_count": session_count,
-                "max_gaps": max_gaps,
-                "dry_run": dry_run,
-            }
-        )
-        return {
-            "status": "ready",
-            "rows_read": 480,
-            "rows_written": 480,
-            "requested_gap_count": 2,
-            "covered_gap_count": 2,
-            "message": "ready",
-        }
-
-    monkeypatch.setattr(
-        preboard_hazard_data,
-        "backfill_preboard_hazard_minutes",
-        fake_backfill,
-    )
-
-    result = svc.DataSyncRunner()._run_sync_limit_up_preboard_hazard_minutes(
-        job.default_params
-    )
-
-    assert captured == {
-        "session_count": 60,
-        "max_gaps": 2000,
-        "dry_run": False,
-    }
-    assert result["rows_written"] == 480
-    assert result["backfill_status"] == "ready"
-
-
-def test_preboard_transaction_backfill_is_manual_and_registered(monkeypatch) -> None:
-    from alphaagent.server.services.limit_up import preboard_transaction_data
-
-    job = next(
-        item
-        for item in svc.DEFAULT_JOBS
-        if item.id == "sync_limit_up_preboard_transaction_features"
-    )
-    captured: dict[str, object] = {}
-
-    assert job.source_id == "tdx_public_hq"
-    assert job.target_table == "limit_up_transaction_features"
-    assert job.default_params == {
-        "session_count": 89,
-        "max_pairs": 500,
-        "dry_run": False,
-    }
-    assert svc.JOB_RUNNERS[job.id] == (
-        "_run_sync_limit_up_preboard_transaction_features"
-    )
-    assert all(
-        job.id not in schedule["job_ids"]
-        for schedule in svc.DEFAULT_BATCH_SCHEDULES
-    )
-
-    def fake_backfill(*, session_count: int, max_pairs: int, dry_run: bool):
-        captured.update(
-            {
-                "session_count": session_count,
-                "max_pairs": max_pairs,
-                "dry_run": dry_run,
-            }
-        )
-        return {
-            "status": "partial",
-            "rows_read": 8_000,
-            "rows_written": 362,
-            "requested_gap_count": 2,
-            "covered_gap_count": 2,
-            "remaining_pending_pair_count": 10,
-            "message": "partial",
-        }
-
-    monkeypatch.setattr(
-        preboard_transaction_data,
-        "backfill_preboard_decision_transaction_features",
-        fake_backfill,
-    )
-
-    result = svc.DataSyncRunner()._run_sync_limit_up_preboard_transaction_features(
-        job.default_params
-    )
-
-    assert captured == {
-        "session_count": 89,
-        "max_pairs": 500,
-        "dry_run": False,
-    }
-    assert result["rows_written"] == 362
-    assert result["backfill_status"] == "partial"
 
 
 def test_limit_up_exit_minute_backfill_job_is_limited_and_registered(monkeypatch):

@@ -23,9 +23,6 @@ from alphaagent.server.services.limit_up.live_service import build_live_snapshot
 from alphaagent.server.services.limit_up import live_service
 from alphaagent.server.services.limit_up import live_repository
 from alphaagent.server.services.limit_up.live_evidence import attach_historical_evidence
-from alphaagent.server.services.limit_up.preboard_decision_contract import (
-    PREBOARD_DECISION_VERSION,
-)
 from alphaagent.server.services.limit_up import signal_service
 from alphaagent.server.services.limit_up.signal_service import build_historical_signal_proxy
 
@@ -725,7 +722,7 @@ def test_live_actionable_prioritizes_a_without_rejecting_b() -> None:
     ]
 
 
-def test_real_touch_quality_action_does_not_depend_on_preboard_probability() -> None:
+def test_real_touch_quality_action_uses_formal_quality_contract() -> None:
     signal = {
         "vt_symbol": "600001.SSE",
         "board_lane": "two_to_three",
@@ -736,9 +733,6 @@ def test_real_touch_quality_action_does_not_depend_on_preboard_probability() -> 
         "prior_limit_count_126": 4,
         "last_price": 10.0,
         "limit_price": 10.0,
-        "probability_status": "model_unavailable",
-        "touch_probability_3m": None,
-        "eventual_touch_probability": None,
     }
 
     gated = live_service._apply_core_quality_gate(
@@ -752,7 +746,6 @@ def test_real_touch_quality_action_does_not_depend_on_preboard_probability() -> 
 
     assert gated["lanes"]["now"][0]["public_quality_actionable"] is True
     assert [row["vt_symbol"] for row in actionable] == ["600001.SSE"]
-    assert actionable[0]["probability_status"] == "model_unavailable"
 
 
 def test_live_core_orders_c_before_later_b_reseal() -> None:
@@ -795,7 +788,7 @@ def test_live_core_orders_c_before_later_b_reseal() -> None:
     assert by_symbol["600001.SSE"]["quality_entry_effective_time"] == "10:35:00"
 
 
-def test_real_touch_high_probability_cannot_bypass_public_quality_failure() -> None:
+def test_real_touch_cannot_bypass_public_quality_failure() -> None:
     signal = {
         "vt_symbol": "600001.SSE",
         "board_lane": "two_to_three",
@@ -806,9 +799,6 @@ def test_real_touch_high_probability_cannot_bypass_public_quality_failure() -> N
         "prior_limit_count_126": 7,
         "last_price": 10.0,
         "limit_price": 10.0,
-        "probability_status": "ready",
-        "touch_probability_3m": 0.99,
-        "eventual_touch_probability": 0.99,
     }
 
     gated = live_service._apply_core_quality_gate(
@@ -828,7 +818,7 @@ def test_real_touch_high_probability_cannot_bypass_public_quality_failure() -> N
     assert actionable == []
 
 
-def test_live_portfolio_does_not_accept_probability_without_formal_selection() -> None:
+def test_live_portfolio_requires_formal_selection() -> None:
     recommendations = {
         "lanes": {
             "now": [
@@ -844,7 +834,6 @@ def test_live_portfolio_does_not_accept_probability_without_formal_selection() -
                     "change_pct": 9.2,
                     "last_price": 10.8,
                     "limit_price": 11.0,
-                    "eventual_touch_probability": 0.99,
                     "historical_evidence": {
                         "d1_money_effect_sample_count": 10,
                         "historical_win_rate": 60.0,
@@ -1321,7 +1310,7 @@ def test_three_percent_capture_does_not_change_the_formal_candidate_list() -> No
     )
 
 
-def test_preboard_capture_excludes_below_three_auction_watch_stock() -> None:
+def test_radar_capture_excludes_below_three_auction_watch_stock() -> None:
     captured_at = datetime(2026, 7, 14, 9, 18, tzinfo=SHANGHAI)
     snapshot = build_live_snapshot(
         {
@@ -1356,46 +1345,6 @@ def test_preboard_capture_excludes_below_three_auction_watch_stock() -> None:
 
     assert snapshot["data_quality"]["capture_candidate_count"] == 1
     assert snapshot["trace_capture_candidates"] == []
-
-
-def test_early_radar_reuses_the_existing_first_board_momentum_gate() -> None:
-    captured_at = datetime(2026, 7, 14, 10, 5, tzinfo=SHANGHAI)
-    candidate = _candidate(
-        "600001.SSE",
-        state="pre_radar",
-        change_pct=3.8,
-        last_price=10.38,
-        distance_to_limit_pct=5.64,
-        board_lane="first_board",
-        lane_decision="eligible",
-        lane_blockers=[],
-        concept_state="launch",
-        concept_coverage_ratio=0.95,
-        concept_strong_5_count=2,
-        concept_leader_rank=2,
-        concept_snapshot_age_seconds=10,
-    )
-    market_gate = {
-        "passed": True,
-        "repair_confirmed": True,
-        "repair_state": "not_required",
-        "reasons": [],
-    }
-
-    strong = live_policy.build_early_radar_signals(
-        [candidate],
-        market_gate,
-        captured_at,
-    )[0]
-    weak = live_policy.build_early_radar_signals(
-        [{**candidate, "lane_support_score": 54.99}],
-        market_gate,
-        captured_at,
-    )[0]
-
-    assert strong["action"] == "buy_now"
-    assert strong["entry_kind"] == "momentum"
-    assert weak["action"] != "buy_now"
 
 
 def test_saved_weekend_snapshot_is_normalized_to_latest_market_date() -> None:
@@ -1537,91 +1486,6 @@ def test_runtime_refresh_uses_post_fetch_evaluation_time(monkeypatch) -> None:
     assert result["captured_at"] == "2026-07-10T10:05:04+08:00"
 
 
-def test_refresh_ingests_full_quotes_before_filter_and_completed_quality_pool(
-    monkeypatch,
-) -> None:
-    captured_at = datetime(2026, 7, 10, 10, 5, 4, tzinfo=SHANGHAI)
-    quote = {
-        "vt_symbol": "600001.SSE",
-        "last_price": 10.6,
-        "change_pct": 6.0,
-        "quote_observed_at": "2026-07-10T10:05:03+08:00",
-    }
-    call_order: list[str] = []
-
-    class Buffer:
-        def ingest(self, at, rows):
-            call_order.append("quotes")
-            assert at == captured_at
-            assert rows == [quote]
-
-        def ingest_quality_pool(self, at, rows):
-            call_order.append("quality")
-            assert at == captured_at
-            assert [row["vt_symbol"] for row in rows] == ["600001.SSE"]
-
-    class Pools:
-        model_training_pool = ()
-        quality_pool = ({"vt_symbol": "600001.SSE"},)
-
-    monkeypatch.setattr(live_service, "_PREBOARD_MINUTE_BUFFER", Buffer(), raising=False)
-    monkeypatch.setattr(
-        live_service,
-        "_fetch_live_payloads",
-        lambda *_args, **_kwargs: (
-            {"items": [quote]},
-            {"trade_date": "20260710", "pools": {}},
-            [],
-        ),
-    )
-    monkeypatch.setattr(live_service, "get_latest_live_concept_snapshot", lambda _at: None)
-    monkeypatch.setattr(
-        live_service,
-        "_concept_snapshot_with_incremental_quotes",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        live_service,
-        "_candidate_symbols",
-        lambda *_args, **_kwargs: call_order.append("filter") or [],
-    )
-    monkeypatch.setattr(live_service, "_load_lane_validations", lambda: {})
-    monkeypatch.setattr(live_service, "load_latest_snapshot", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        live_service,
-        "build_live_snapshot",
-        lambda *_args, **_kwargs: {
-            "trade_date": "2026-07-10",
-            "captured_at": captured_at.isoformat(),
-            "mode": "live_snapshot",
-            "trace_capture_candidates": [{"vt_symbol": "600001.SSE"}],
-            "early_radar_recommendations": {"market_gate": {"passed": True}},
-            "recommendations": {"lanes": {"now": [], "tail": [], "next_auction": []}},
-            "data_quality": {"status": "ready", "is_stale": False},
-        },
-    )
-    monkeypatch.setattr(
-        live_service,
-        "_apply_live_risk_gates",
-        lambda snapshot, _validations: snapshot,
-    )
-    monkeypatch.setattr(
-        live_service,
-        "live_preboard_adapter_rows",
-        lambda _snapshot: [{"vt_symbol": "600001.SSE"}],
-    )
-    monkeypatch.setattr(
-        live_service,
-        "build_preboard_pools",
-        lambda *_args, **_kwargs: Pools(),
-        raising=False,
-    )
-
-    live_service.refresh_live_snapshot(captured_at, adapter=object(), persist=False)
-
-    assert call_order == ["quotes", "filter", "quality"]
-
-
 def test_refresh_does_not_persist_previous_market_date_during_session(monkeypatch) -> None:
     persisted: list[dict[str, object]] = []
     traces: list[dict[str, object]] = []
@@ -1656,9 +1520,7 @@ def test_refresh_does_not_persist_previous_market_date_during_session(monkeypatc
     assert persisted == []
     assert len(traces) == 1
     assert "trace_capture_candidates" in traces[0]
-    assert "early_radar_recommendations" in traces[0]
     assert "trace_capture_candidates" not in result
-    assert "early_radar_recommendations" not in result
 
 
 def test_refresh_persists_verified_current_session_snapshot(monkeypatch) -> None:
@@ -1696,9 +1558,7 @@ def test_refresh_persists_verified_current_session_snapshot(monkeypatch) -> None
     assert persisted == [result]
     assert len(traces) == 1
     assert "trace_capture_candidates" in traces[0]
-    assert "early_radar_recommendations" in traces[0]
     assert "trace_capture_candidates" not in result
-    assert "early_radar_recommendations" not in result
 
 
 def test_refresh_persists_internal_radar_ledger_without_public_leak(monkeypatch) -> None:
@@ -1798,40 +1658,17 @@ def test_refresh_persists_internal_radar_ledger_without_public_leak(monkeypatch)
         )[-1],
     )
 
-    def score_after_formal_snapshot(snapshot, **_kwargs):
-        persistence_events.append("preboard_score")
-        assert _kwargs == {}
-        assert len(persisted) == 1
-        assert persisted[0]["recommendations"] == snapshot["recommendations"]
-        live_service._set_preboard_decision_status(
-            snapshot,
-            {
-                "status": "ready",
-                "execution_mode": "research_only",
-                "preboard_candidates": [],
-            },
-        )
-
-    monkeypatch.setattr(
-        live_service,
-        "_run_preboard_decision_safely",
-        score_after_formal_snapshot,
-    )
-
     result = live_service.refresh_live_snapshot(
         datetime(2026, 7, 10, 10, 5, tzinfo=SHANGHAI),
         adapter=object(),
     )
 
     assert "trace_capture_candidates" not in result
-    assert "early_radar_recommendations" not in result
     assert result["candidates"] == []
     assert result["data_quality"]["radar_ledger_status"] == "ready"
     assert result["data_quality"]["scan_timing_ms"]["total"] >= 0
-    assert persistence_events == ["save", "preboard_score", "save"]
-    assert len(persisted) == 2
-    assert "preboard_status" not in persisted[0]["data_quality"]
-    assert persisted[1] == result
+    assert persistence_events == ["save"]
+    assert persisted == [result]
     assert len(radar_frames) == 1
     assert radar_frames[0][1][0]["vt_symbol"] == "600001.SSE"
     assert radar_frames[0][1][0]["formal_action"] == "pass"
@@ -1998,8 +1835,7 @@ def test_radar_ledger_saves_below_three_percent_fill_followup(monkeypatch) -> No
             "state": "pre_radar",
             "board_lane": "first_board",
         },
-        formal_signal=None,
-        early_signal={"action": "buy_now", "entry_kind": "momentum"},
+        formal_signal={"action": "buy_now", "entry_kind": "sweep"},
     )
     recent["captured_at"] = "2026-07-10T10:05:00+08:00"
     monkeypatch.setattr(
@@ -2017,7 +1853,6 @@ def test_radar_ledger_saves_below_three_percent_fill_followup(monkeypatch) -> No
     snapshot = {
         "captured_at": "2026-07-10T10:05:30+08:00",
         "trace_capture_candidates": [],
-        "early_radar_recommendations": {"lanes": {"now": []}},
         "recommendations": {"lanes": {"now": []}},
         "data_quality": {"status": "ready", "is_stale": False},
     }
@@ -2060,9 +1895,6 @@ def test_radar_ledger_failure_is_explicit_without_changing_formal_actions(
                 "board_lane": "first_board",
             }
         ],
-        "early_radar_recommendations": {
-            "lanes": {"now": [], "tail": [], "next_auction": []}
-        },
         "recommendations": {
             "lanes": {
                 "now": [{"vt_symbol": "600002.SSE", "action": "buy_now"}],
@@ -2084,305 +1916,6 @@ def test_radar_ledger_failure_is_explicit_without_changing_formal_actions(
     assert error == "ledger unavailable"
     assert snapshot["data_quality"]["radar_ledger_status"] == "error"
     assert snapshot["recommendations"]["lanes"]["now"][0]["action"] == "buy_now"
-
-
-def test_preboard_research_failure_cannot_change_official_live_fields(
-    monkeypatch,
-) -> None:
-    snapshot = {
-        "candidates": [{"vt_symbol": "600001.SSE", "rank": 1}],
-        "recommendations": {
-            "lanes": {
-                "now": [
-                    {
-                        "vt_symbol": "600001.SSE",
-                        "action": "buy_now",
-                        "rank": 1,
-                    }
-                ],
-                "tail": [],
-                "next_auction": [],
-            }
-        },
-        "portfolio": [{"vt_symbol": "600001.SSE", "action": "buy_now"}],
-        "action": "buy_now",
-        "rank": 1,
-        "data_quality": {"status": "ready", "is_stale": False},
-    }
-    before = deepcopy(snapshot)
-    monkeypatch.setattr(
-        live_service.preboard_decision_service,
-        "score_active_live_preboard_snapshot_safely",
-        lambda _snapshot, **_kwargs: {
-            "status": "error",
-            "error": "research store down",
-            "preboard_candidates": [],
-        },
-    )
-
-    live_service._run_preboard_decision_safely(snapshot)
-
-    for field in ("candidates", "recommendations", "portfolio", "action", "rank"):
-        assert snapshot[field] == before[field]
-    assert snapshot["data_quality"]["status"] == "ready"
-    assert snapshot["data_quality"]["is_stale"] is False
-    assert snapshot["data_quality"]["preboard_status"] == "error"
-    assert snapshot["data_quality"]["preboard_error"] == (
-        "research store down"
-    )
-    assert snapshot["preboard_candidates"] == []
-
-
-def test_preboard_status_exposes_ranked_research_without_changing_actions() -> None:
-    snapshot = {
-        "recommendations": {
-            "actionable_recommendations": [
-                {"vt_symbol": "600001.SSE", "action": "buy_now"}
-            ],
-            "portfolio": [{"vt_symbol": "600001.SSE", "action": "buy_now"}],
-        },
-        "data_quality": {"status": "ready", "is_stale": False},
-    }
-    before = deepcopy(snapshot["recommendations"])
-
-    live_service._set_preboard_decision_status(
-        snapshot,
-        {
-            "status": "ready",
-            "probability_status": "ready",
-            "decision_version": PREBOARD_DECISION_VERSION,
-            "historical_promotion_status": "historical_rejected",
-            "execution_mode": "research_only",
-            "model_fingerprint": "sha256:" + "a" * 64,
-            "observation_count": 1,
-            "action_saved": 0,
-            "formal_strategy_changed": False,
-            "preboard_candidates": [
-                {
-                    "vt_symbol": "600009.SSE",
-                    "name": "板前样本",
-                    "decision_state": "observe",
-                    "execution_mode": "research_only",
-                    "change_pct": 8.9,
-                    "last_price": 10.89,
-                    "limit_price": 11.0,
-                    "distance_to_limit_pct": 1.0,
-                    "quality_priority_tier": "A_industry_expanding",
-                    "public_quality_status": "qualified_waiting_trigger",
-                    "quality_expected_d1_net_return_pct": 2.1,
-                    "quality_win_probability": 0.68,
-                    "expected_d1_net_return_pct": 2.1,
-                    "d1_win_probability": 0.68,
-                    "touch_probability_3m": 0.72,
-                    "eventual_touch_probability": 0.84,
-                    "seal_probability_given_touch": 0.75,
-                    "probability_status": "ready",
-                    "source_quality": "sampled_quote_proxy",
-                    "decision_at": "2026-07-23T10:18:20+08:00",
-                    "dynamic_leader_shadow": {
-                        "policy_version": "dynamic-concept-leader-shadow-v1",
-                        "status": "locked",
-                        "execution_effect": "none_research_only",
-                        "market_gate_passed": False,
-                        "concept_id": "BK0815",
-                        "concept_name": "存储芯片",
-                        "concept_state": "launch",
-                        "concept_leader_rank": 2,
-                        "locked_at": "2026-07-23T10:17:50+08:00",
-                        "observed_frames": 4,
-                        "eligible_frames": 3,
-                        "consecutive_eligible_frames": 2,
-                        "persistence_ratio": 0.75,
-                        "drop_count": 1,
-                        "current_concept_top5": True,
-                        "global_rank": 1,
-                        "global_top5": True,
-                        "components": {"cash_flow_quality": 1.2},
-                        "must_not_leak": "internal",
-                    },
-                    "feature_values": {"must_not_leak": 1},
-                }
-            ],
-        },
-    )
-
-    assert snapshot["recommendations"] == before
-    quality = snapshot["data_quality"]
-    assert quality["preboard_status"] == "ready"
-    assert quality["preboard_probability_status"] == "ready"
-    assert quality["preboard_decision_version"] == PREBOARD_DECISION_VERSION
-    assert quality["preboard_historical_promotion_status"] == "historical_rejected"
-    assert quality["preboard_execution_mode"] == "research_only"
-    assert quality["preboard_observation_count"] == 1
-    assert quality["preboard_action_saved"] == 0
-    assert quality["preboard_formal_strategy_changed"] is False
-    assert snapshot["preboard_candidates"] == [
-        {
-            "vt_symbol": "600009.SSE",
-            "name": "板前样本",
-            "decision_state": "observe",
-            "execution_mode": "research_only",
-            "change_pct": 8.9,
-            "last_price": 10.89,
-            "limit_price": 11.0,
-            "strictly_preboard": True,
-            "distance_to_limit_pct": 1.0,
-            "quality_priority_tier": "A_industry_expanding",
-            "public_quality_status": "qualified_waiting_trigger",
-            "quality_expected_d1_net_return_pct": 2.1,
-            "quality_win_probability": 0.68,
-            "expected_d1_net_return_pct": 2.1,
-            "d1_win_probability": 0.68,
-            "touch_probability_3m": 0.72,
-            "eventual_touch_probability": 0.84,
-            "seal_probability_given_touch": 0.75,
-            "probability_status": "ready",
-            "source_quality": "sampled_quote_proxy",
-            "updated_at": "2026-07-23T10:18:20+08:00",
-            "dynamic_leader_shadow": {
-                "policy_version": "dynamic-concept-leader-shadow-v1",
-                "status": "locked",
-                "execution_effect": "none_research_only",
-                "market_gate_passed": False,
-                "concept_id": "BK0815",
-                "concept_name": "存储芯片",
-                "concept_state": "launch",
-                "concept_leader_rank": 2,
-                "locked_at": "2026-07-23T10:17:50+08:00",
-                "observed_frames": 4,
-                "eligible_frames": 3,
-                "consecutive_eligible_frames": 2,
-                "persistence_ratio": 0.75,
-                "drop_count": 1,
-                "current_concept_top5": True,
-                "global_rank": 1,
-                "global_top5": True,
-            },
-        }
-    ]
-
-
-def test_public_preboard_candidates_hide_rows_without_real_probabilities() -> None:
-    rows = [
-        {
-            "vt_symbol": "600001.SSE",
-            "name": "分钟不足样本",
-            "decision_state": "observe",
-            "execution_mode": "research_only",
-            "probability_status": "model_input_ineligible",
-            "touch_probability_3m": None,
-            "eventual_touch_probability": None,
-        }
-    ]
-
-    assert live_service._public_preboard_candidates(rows) == []
-
-
-def test_public_preboard_candidates_hide_already_touched_rows() -> None:
-    rows = [
-        {
-            "vt_symbol": "600001.SSE",
-            "name": "已触板样本",
-            "state": "sealed",
-            "last_price": 11.0,
-            "limit_price": 11.0,
-            "decision_state": "observe",
-            "execution_mode": "research_only",
-            "probability_status": "ready",
-            "touch_probability_3m": 0.8,
-            "eventual_touch_probability": 0.9,
-        }
-    ]
-
-    assert live_service._public_preboard_candidates(rows) == []
-
-
-def test_formal_preboard_adds_ranking_without_deleting_sweep_fallback() -> None:
-    old_first = {
-        "vt_symbol": "600001.SSE",
-        "board_lane": "first_board",
-        "action": "buy_now",
-        "entry_kind": "sweep",
-        "state": "sealed",
-        "quality_priority_tier": "B_recognition_only",
-    }
-    relay = {
-        "vt_symbol": "600003.SSE",
-        "board_lane": "two_to_three",
-        "action": "buy_now",
-        "quality_priority_tier": "B_recognition_only",
-    }
-    snapshot = {
-        "recommendations": {
-            "lanes": {"now": [], "tail": [], "next_auction": []},
-            "actionable_recommendations": [old_first, relay],
-            "portfolio": [old_first, relay],
-        },
-        "data_quality": {},
-    }
-
-    live_service._set_preboard_decision_status(
-        snapshot,
-        {
-            "status": "ready",
-            "execution_mode": "formal",
-            "preboard_recommendations": [
-                {
-                    "vt_symbol": "600009.SSE",
-                    "name": "板前正式样本",
-                    "board_lane": "first_board",
-                    "decision_state": "actionable",
-                    "execution_mode": "formal",
-                    "actionable": True,
-                    "portfolio_selected": True,
-                    "quality_priority_tier": "A_industry_expanding",
-                },
-                {
-                    "vt_symbol": "600001.SSE",
-                    "name": "同股过时板前信号",
-                    "board_lane": "first_board",
-                    "decision_state": "actionable",
-                    "execution_mode": "formal",
-                    "actionable": True,
-                    "portfolio_selected": False,
-                    "quality_priority_tier": "B_recognition_only",
-                }
-            ],
-            "preboard_portfolio": [
-                {
-                    "vt_symbol": "600009.SSE",
-                    "name": "板前正式样本",
-                    "board_lane": "first_board",
-                    "decision_state": "actionable",
-                    "execution_mode": "formal",
-                    "actionable": True,
-                    "portfolio_selected": True,
-                    "daily_slot": 1,
-                    "quality_priority_tier": "A_industry_expanding",
-                }
-            ],
-        },
-    )
-
-    recommendations = snapshot["recommendations"]["actionable_recommendations"]
-    assert [row["vt_symbol"] for row in recommendations] == [
-        "600009.SSE",
-        "600003.SSE",
-        "600001.SSE",
-    ]
-    assert recommendations[0]["action"] == "buy_now"
-    assert recommendations[0]["entry_kind"] == "momentum"
-    assert recommendations[1] == relay
-    assert recommendations[2] == old_first
-
-    portfolio = snapshot["recommendations"]["portfolio"]
-    assert [row["vt_symbol"] for row in portfolio] == [
-        "600009.SSE",
-        "600003.SSE",
-    ]
-    assert len(recommendations) == 3
-    assert len(portfolio) == 2
-    assert portfolio[0]["portfolio_selected"] is True
 
 
 def test_trace_write_failure_does_not_block_official_snapshot(monkeypatch) -> None:
@@ -2546,7 +2079,6 @@ def test_live_read_reuses_fresh_current_snapshot(monkeypatch) -> None:
     result = live_service.get_latest_live_snapshot(now)
 
     assert result["captured_at"] == snapshot["captured_at"]
-    assert result["preboard_candidates"] == []
     assert result["data_quality"]["snapshot_age_seconds"] == 5
 
 
@@ -5311,106 +4843,6 @@ def test_live_first_board_research_does_not_promote_d1_sector_data() -> None:
     assert research["prior_industry_leader_rank"] is None
     assert research["sector_heat"] == 88.0
     assert research["live_sector_gate_managed"] is True
-
-
-def test_live_risk_chain_attaches_shared_point_in_time_first_board_quality() -> None:
-    captured_at = datetime(2026, 7, 15, 10, 12, tzinfo=SHANGHAI)
-    market = _market(
-        sentiment={
-            "phase": "repair",
-            "phase_label": "修复",
-            "failed_limit_up_rate": 0.40,
-        }
-    )
-    candidate = _candidate(
-        "600001.SSE",
-        lane_feature_ready=True,
-        prior_streak=0,
-        prior_limit_count_5=0,
-        prior_limit_count_126=8,
-        prior_touch_count_126=13,
-        prior_seal_success_rate_126=0.6154,
-        trade_days_since_prior_limit=18,
-        pullback_from_prior_limit_pct=-12.0,
-        prior_position_120=0.28,
-        prior_market_failed_rate=0.40,
-        financial_risk={"level": "clear", "blocked": False, "reasons": []},
-        financial_snapshot={"net_profit_yoy": 25.0},
-        path_prefix={
-            "point_count": 15,
-            "last_pct": 9.2,
-            "touch_count": 0,
-            "break_count": 0,
-            "reseal_count": 0,
-            "minimum_pct": 5.0,
-            "approach_3point_pct": 0.0,
-            "recent_15m_min_pct": 5.0,
-            "recent_15m_change_pct": 0.0,
-            "recent_15m_range_pct": 0.0,
-            "recent_15m_drawdown_pct": 0.0,
-            "recent_30m_min_pct": 4.0,
-            "recent_30m_change_pct": 1.0,
-        },
-        concept_id="BK1001",
-        concept_name="题材概念",
-        concept_state="launch",
-        concept_trigger_allowed=True,
-        concept_strength_score=60.0,
-        concept_snapshot_age_seconds=12,
-        concept_coverage_ratio=0.97,
-        concept_strong_5_count=6,
-        concept_leader_rank=2,
-        quote_observed_at="2026-07-15T10:11:58+08:00",
-    )
-    market_gate = {"passed": True, "repair_confirmed": True, "reasons": []}
-    live_service._attach_lane_decisions(
-        [candidate],
-        market,
-        captured_at,
-        market_gate=market_gate,
-    )
-    recommendations = build_live_recommendations(
-        [candidate],
-        market,
-        captured_at,
-        market_gate=market_gate,
-    )
-    recommendations["lanes"]["now"][0]["historical_evidence"] = {
-        "as_of_date": "2026-07-15",
-        "effective_sample_count": 80,
-        "average_return_pct": 1.2,
-        "smoothed_win_rate": 68.0,
-        "seal_success_rate": 75.0,
-        "d1_money_effect_sample_count": 8,
-        "d1_money_effect_win_rate": 64.0,
-        "d1_money_effect_average_return_pct": 1.2,
-        "historical_win_rate": 48.0,
-        "stock_gene_touch_count": 13,
-    }
-    snapshot = {
-        "captured_at": captured_at.isoformat(),
-        "market_context": market,
-        "data_quality": {"is_stale": False, "snapshot_age_seconds": 2},
-        "candidates": [candidate],
-        "recommendations": recommendations,
-    }
-
-    result = live_service._attach_shared_first_board_quality(snapshot)
-
-    signal = result["recommendations"]["lanes"]["now"][0]
-    assert signal["quality_gate_passed"] is True
-    assert signal["preparation_environment_passed"] is True
-    assert signal["execution_environment_passed"] is True
-    assert "historical_prior" not in signal
-    assert signal["historical_prior_status"] == "ready"
-    assert signal["strictly_preboard"] is True
-    assert signal["action"] == "buy_now"
-    assert "legacy_action" not in signal
-    assert signal["expected_d1_net_return_pct"] is None
-    assert signal["d1_win_probability"] is None
-    assert signal["public_quality_status"] == "rejected"
-    assert tuple(signal["lane_blockers"]) == tuple(candidate["lane_blockers"])
-    json.dumps(result)
 
 
 def test_live_relay_research_preserves_actual_touch_time() -> None:
