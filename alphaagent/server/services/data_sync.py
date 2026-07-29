@@ -18,7 +18,7 @@ import logging
 import re
 import threading
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import time
 from dataclasses import dataclass, field
@@ -26,7 +26,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 from uuid import uuid4
 
-from sqlalchemy import and_, desc, func, select, text
+from sqlalchemy import and_, desc, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 
 from alphaagent.data_sources.akshare_adapter import (
@@ -86,7 +86,8 @@ DEFAULT_SYNC_CONCURRENCY = 2
 SYNC_PER_ITEM_TIMEOUT_SECONDS = 60.0
 FINANCIAL_BATCH_SOURCE = "eastmoney.RPT_LICO_FN_CPD"
 FINANCIAL_BOOTSTRAP_QUARTERS = 16
-FINANCIAL_BATCH_BOOTSTRAP_MIN_ROWS = 1_000
+FINANCIAL_BATCH_COMPLETE_COVERAGE_RATIO = 0.95
+FINANCIAL_COVERAGE_MISSING_SAMPLE_SIZE = 20
 FINANCIAL_REPORT_UPSERT_BATCH_SIZE = 1_000
 # 内存批次 running 超过此时长视为僵尸，看门狗清理（防卡死批次挡住新调度）
 ZOMBIE_BATCH_THRESHOLD_SECONDS = 2 * 60 * 60
@@ -99,6 +100,7 @@ SECTOR_MEMBERSHIP_UPSERT_BATCH_SIZE = 500
 STOCK_DAILY_INCREMENTAL_REFRESH_DAYS = 5
 STOCK_DAILY_COMPLETE_COVERAGE_RATIO = 0.95
 MIN_COMPLETE_DAILY_SYMBOL_COUNT = 3000
+STOCK_DAILY_REFERENCE_LOOKBACK_SESSIONS = 10
 STOCK_DAILY_HISTORY_TARGET_DAYS = 750
 STOCK_DAILY_HISTORY_BOOTSTRAP_LIMIT = 800
 STOCK_DAILY_HISTORY_MIN_UNIVERSE = MIN_COMPLETE_DAILY_SYMBOL_COUNT
@@ -256,7 +258,7 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         description="增量同步全 A 股票日线行情 (OHLCV)。",
         source_id="akshare",
         target_table="stock_daily_bars",
-        default_params={"limit": 250},
+        default_params={"limit": 250, "skip_complete_session": True},
     ),
     JobDefinition(
         id="sync_index_daily_bars",
@@ -775,6 +777,22 @@ INTERNAL_BATCH_JOB_IDS = {
     LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID,
     LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID,
 }
+HISTORY_INPUT_JOB_IDS = frozenset(
+    {
+        "sync_stock_list",
+        "sync_stock_daily_bars",
+        "sync_stock_minute_bars",
+        "sync_stock_financial_quarterly",
+        "sync_stock_notices",
+        "sync_sector_members",
+        "sync_stock_sector_memberships",
+        "sync_limit_up_pools",
+        "sync_limit_up_event_minutes",
+        "sync_limit_up_radar_minutes",
+        "sync_limit_up_exit_minutes",
+        LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID,
+    }
+)
 STALE_BATCH_SUMMARY_RE = re.compile(r"^\s*(\d+)\s+成功\s*/\s*(\d+)\s+失败\s*$")
 LOW_SUCTION_SWING_SCHEDULE_ACTION = "low_suction_swing"
 LOW_SUCTION_SWING_SCHEDULE_JOB_IDS = {
@@ -794,7 +812,8 @@ SYNC_BATCH_PROFILES: dict[str, tuple[str, ...]] = {
         "sync_stock_fund_flows",
         "sync_stock_hot_ranks",
     ),
-    "all": tuple(job.id for job in DEFAULT_JOBS),
+    "all": tuple(job.id for job in DEFAULT_JOBS)
+    + (LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID,),
 }
 
 _BATCH_LOCK = threading.Lock()
@@ -1114,18 +1133,19 @@ class DataSyncRunner:
         stock_limit = int(params.get("stock_limit", 0) or 0)
         refresh_days = max(int(params.get("refresh_days", STOCK_DAILY_INCREMENTAL_REFRESH_DAYS) or 0), 0)
         symbols = _param_list(params.get("symbols"))
-        stock_rows = _select_daily_bar_stocks(symbols, stock_limit)
-        if not stock_rows:
+        selected_stock_rows = _select_daily_bar_stocks(symbols, stock_limit)
+        if not selected_stock_rows:
             return {"rows_read": 0, "rows_written": 0, "message": "No stocks in DB; run sync_stock_list first."}
 
         incremental = _truthy(params.get("incremental", True))
-        vt_symbols = [vt_symbol(str(r["symbol"]), str(r["exchange"])) for r in stock_rows]
         history_bootstrap = _stock_daily_history_bootstrap_plan(
             symbols=symbols,
             stock_limit=stock_limit,
-            total_stocks=len(stock_rows),
+            total_stocks=len(selected_stock_rows),
             incremental=incremental,
         )
+        session_coverage: dict[str, Any] | None = None
+        stock_rows = selected_stock_rows
         if (
             incremental
             and not history_bootstrap["required"]
@@ -1133,13 +1153,15 @@ class DataSyncRunner:
             and stock_limit <= 0
             and _truthy(params.get("skip_complete_session"))
         ):
-            session_coverage = _completed_stock_daily_session_coverage(
-                len(stock_rows)
-            )
+            session_coverage = _completed_stock_daily_session_coverage(selected_stock_rows)
             if session_coverage["status"] == "complete":
                 target_date = str(session_coverage["target_trade_date"])
                 symbol_count = int(session_coverage["symbol_count"])
-                min_symbol_count = int(session_coverage["min_symbol_count"])
+                expected_symbol_count = int(
+                    session_coverage.get("expected_symbol_count")
+                    or session_coverage.get("min_symbol_count")
+                    or 0
+                )
                 return {
                     "status": "skipped",
                     "rows_read": 0,
@@ -1147,12 +1169,31 @@ class DataSyncRunner:
                     "session_coverage": session_coverage,
                     "message": (
                         f"{target_date} 日线已完整覆盖 "
-                        f"{symbol_count}/{min_symbol_count} 只，跳过重复全市场同步"
+                        f"{symbol_count}/{expected_symbol_count} 只，跳过重复全市场同步"
                     ),
+                }
+            missing_vt_symbols = set(session_coverage.get("missing_vt_symbols") or [])
+            rows_by_vt_symbol = {
+                vt_symbol(str(row["symbol"]), str(row["exchange"])): row
+                for row in selected_stock_rows
+            }
+            stock_rows = [
+                rows_by_vt_symbol[current_vt_symbol]
+                for current_vt_symbol in sorted(missing_vt_symbols)
+                if current_vt_symbol in rows_by_vt_symbol
+            ]
+            if not stock_rows:
+                return {
+                    "status": "incomplete",
+                    "rows_read": 0,
+                    "rows_written": 0,
+                    "session_coverage": session_coverage,
+                    "message": "日线覆盖不完整，但缺口不在当前可同步股票池中",
                 }
         if history_bootstrap["required"]:
             incremental = False
             limit = max(limit, int(history_bootstrap["request_limit"]))
+        vt_symbols = [vt_symbol(str(r["symbol"]), str(r["exchange"])) for r in stock_rows]
         last_dates = _last_bar_dates_daily(vt_symbols) if incremental else {}
 
         total_stocks = len(stock_rows)
@@ -1235,8 +1276,19 @@ class DataSyncRunner:
         )
 
         coverage_cleanup = None
-        if _should_cleanup_partial_daily_sync(symbols, stock_limit, total_stocks):
-            coverage_cleanup = _discard_incomplete_latest_daily_bars(total_stocks)
+        # A coverage reconciliation retains the partial cross-section so the
+        # next run can request only its remaining symbols. The legacy cleanup
+        # path would delete the already recovered rows and turn that retry back
+        # into a full-market request.
+        if (
+            session_coverage is None
+            and _should_cleanup_partial_daily_sync(
+                symbols,
+                stock_limit,
+                len(selected_stock_rows),
+            )
+        ):
+            coverage_cleanup = _discard_incomplete_latest_daily_bars(len(selected_stock_rows))
 
         logger.info("sync_stock_daily_bars: processed %d stocks", counters["done"])
         result = {"rows_read": counters["read"], "rows_written": counters["written"]}
@@ -1258,6 +1310,21 @@ class DataSyncRunner:
             result["timed_out"] = counters["timed_out"]
         if coverage_cleanup is not None:
             result["coverage_cleanup"] = coverage_cleanup
+        if session_coverage is not None:
+            final_session_coverage = _completed_stock_daily_session_coverage(
+                selected_stock_rows
+            )
+            result["session_coverage"] = final_session_coverage
+            if final_session_coverage["status"] != "complete":
+                missing_symbol_count = int(
+                    final_session_coverage.get("missing_symbol_count")
+                    or len(final_session_coverage.get("missing_vt_symbols") or [])
+                )
+                result["status"] = "incomplete"
+                result["message"] = (
+                    "日线覆盖未完成，已保留已同步数据等待下次仅补缺口："
+                    f"{missing_symbol_count} 只"
+                )
         return result
 
     def _run_sync_index_daily_bars(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2302,7 +2369,20 @@ class DataSyncRunner:
             raise DataSyncError(
                 "季度财报报告期同步失败：" + "，".join(failures)
             )
-        return {
+        financial_coverage = (
+            _financial_batch_coverage(report_dates) if not symbols else {}
+        )
+        incomplete_report_dates = [
+            report_date
+            for report_date, coverage in financial_coverage.items()
+            if coverage["status"] == "incomplete"
+        ]
+        pending_disclosure_report_dates = [
+            report_date
+            for report_date, coverage in financial_coverage.items()
+            if coverage["status"] == "pending_disclosure"
+        ]
+        result = {
             "rows_read": total_read,
             "rows_written": total_written,
             "report_dates": report_dates,
@@ -2313,6 +2393,20 @@ class DataSyncRunner:
                 f"停用旧错误同比 {total_invalidated} 条"
             ),
         }
+        if financial_coverage:
+            result["financial_coverage"] = financial_coverage
+            result["incomplete_report_dates"] = incomplete_report_dates
+            result["pending_disclosure_report_dates"] = pending_disclosure_report_dates
+            if pending_disclosure_report_dates:
+                result["message"] += (
+                    "；披露期内待补齐：" + "、".join(pending_disclosure_report_dates)
+                )
+            if incomplete_report_dates:
+                result["status"] = "incomplete"
+                result["message"] += (
+                    "；覆盖未完成：" + "、".join(incomplete_report_dates)
+                )
+        return result
 
     def _run_sync_stock_financial_indicators(self, params: dict[str, Any]) -> dict[str, Any]:
         stock_limit = int(params.get("stock_limit", 100))
@@ -3359,6 +3453,7 @@ def _run_sync_batch(
         job_ids = [item["job_id"] for item in batch["jobs"]]
 
     history_inputs_changed = False
+    history_input_failed = False
     for index, job_id in enumerate(job_ids):
         # Skip jobs already marked skipped due to an upstream base-job failure.
         with _BATCH_LOCK:
@@ -3389,8 +3484,17 @@ def _run_sync_batch(
                     progress=_batch_progress_callback(batch_id, job_id),
                 )
             elif job_id == LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID:
-                result = _run_limit_up_history_rebuild_batch_job(
-                    force=history_inputs_changed
+                result = (
+                    {
+                        "status": "skipped",
+                        "rows_read": 0,
+                        "rows_written": 0,
+                        "message": "历史输入覆盖未完成，保留现有回测账本等待下次补齐",
+                    }
+                    if history_input_failed
+                    else _run_limit_up_history_rebuild_batch_job(
+                        force=history_inputs_changed
+                    )
                 )
             elif job_id == LIMIT_UP_NEXT_SESSION_PLAN_PRELIMINARY_BATCH_JOB_ID:
                 result = _run_limit_up_next_session_plan_batch_job("preliminary")
@@ -3407,10 +3511,37 @@ def _run_sync_batch(
                 )
             rows_read = int(result.get("rows_read") or 0)
             rows_written = int(result.get("rows_written") or 0)
+            skipped = str(result.get("status") or "") == "skipped"
+            incomplete = str(result.get("status") or "") == "incomplete"
+            if incomplete:
+                history_input_failed = history_input_failed or job_id in HISTORY_INPUT_JOB_IDS
+                _update_batch_job(
+                    batch_id,
+                    job_id,
+                    {
+                        "status": "failed",
+                        "finished_at": _utc_now_iso(),
+                        "rows_read": rows_read,
+                        "rows_written": rows_written,
+                        "progress_pct": 100,
+                        "stage": "覆盖未完成",
+                        "current_label": "",
+                        "message": str(result.get("message") or ""),
+                        "error_type": "DataCoverageIncomplete",
+                        "run_id": result.get("run_id") or result.get("id"),
+                    },
+                )
+                _increment_batch(
+                    batch_id,
+                    completed=1,
+                    failed=1,
+                    rows_read=rows_read,
+                    rows_written=rows_written,
+                )
+                continue
             history_inputs_changed = history_inputs_changed or (
                 _changes_limit_up_history_inputs(job_id, result)
             )
-            skipped = str(result.get("status") or "") == "skipped"
             _update_batch_job(
                 batch_id,
                 job_id,
@@ -3435,6 +3566,7 @@ def _run_sync_batch(
                 rows_written=rows_written,
             )
         except Exception as exc:
+            history_input_failed = history_input_failed or job_id in HISTORY_INPUT_JOB_IDS
             _update_batch_job(
                 batch_id,
                 job_id,
@@ -3490,16 +3622,7 @@ def _changes_limit_up_history_inputs(
 ) -> bool:
     if int(result.get("rows_written") or 0) <= 0:
         return False
-    if job_id in {
-        LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID,
-        "sync_limit_up_event_minutes",
-        "sync_limit_up_exit_minutes",
-    }:
-        return True
-    if job_id != "sync_stock_daily_bars":
-        return False
-    bootstrap = result.get("history_bootstrap")
-    return isinstance(bootstrap, dict) and bootstrap.get("performed") is True
+    return job_id in HISTORY_INPUT_JOB_IDS
 
 
 def _run_limit_up_next_session_plan_batch_job(
@@ -4399,12 +4522,14 @@ def run_job(
         method = getattr(runner, method_name)
         merged_params = {**job_def.default_params, **run_params}
         result = method(merged_params)
+        coverage_incomplete = str(result.get("status") or "") == "incomplete"
         _finish_run(
             run_id,
-            "succeeded",
+            "failed" if coverage_incomplete else "succeeded",
             rows_read=result.get("rows_read", 0),
             rows_written=result.get("rows_written", 0),
             message=_sync_result_message(result),
+            error_type="DataCoverageIncomplete" if coverage_incomplete else None,
         )
         return {
             "run_id": run_id,
@@ -6121,32 +6246,136 @@ def _daily_sync_cleanup_min_symbol_count(total_stocks: int, previous_complete_co
     return _daily_sync_complete_min_symbol_count(reference_count)
 
 
+def _daily_session_coverage_from_symbols(
+    *,
+    target_date: date,
+    reference_date: date | None,
+    expected_vt_symbols: set[str],
+    observed_vt_symbols: set[str],
+    excluded_non_trading_symbol_count: int = 0,
+) -> dict[str, Any]:
+    expected = set(expected_vt_symbols)
+    observed = set(observed_vt_symbols)
+    covered = expected & observed
+    missing = sorted(expected - observed)
+    result = {
+        "status": "complete" if expected and not missing else "incomplete",
+        "target_trade_date": target_date.isoformat(),
+        "symbol_count": len(covered),
+        "expected_symbol_count": len(expected),
+        "missing_symbol_count": len(missing),
+        "missing_vt_symbols": missing,
+        "reference_trade_date": _iso_or_none(reference_date),
+    }
+    if excluded_non_trading_symbol_count:
+        result["excluded_non_trading_symbol_count"] = int(
+            excluded_non_trading_symbol_count
+        )
+    return result
+
+
+def _select_daily_session_reference_date(
+    candidates: Sequence[tuple[date, int]],
+) -> date | None:
+    eligible = [
+        (trade_date, symbol_count)
+        for trade_date, symbol_count in candidates
+        if int(symbol_count) >= MIN_COMPLETE_DAILY_SYMBOL_COUNT
+    ]
+    if not eligible:
+        return None
+    return max(eligible, key=lambda item: (int(item[1]), item[0]))[0]
+
+
+def _daily_session_reference_date(session, target_date: date) -> date | None:
+    candidate_dates = list(
+        session.execute(
+            select(schema.stock_daily_bars.c.trade_date)
+            .where(schema.stock_daily_bars.c.trade_date < target_date)
+            .distinct()
+            .order_by(desc(schema.stock_daily_bars.c.trade_date))
+            .limit(STOCK_DAILY_REFERENCE_LOOKBACK_SESSIONS)
+        ).scalars()
+    )
+    if not candidate_dates:
+        return None
+    rows = session.execute(
+        select(
+            schema.stock_daily_bars.c.trade_date,
+            func.count().label("symbol_count"),
+        )
+        .where(schema.stock_daily_bars.c.trade_date.in_(candidate_dates))
+        .group_by(schema.stock_daily_bars.c.trade_date)
+    ).all()
+    return _select_daily_session_reference_date(
+        [(trade_date, int(symbol_count or 0)) for trade_date, symbol_count in rows]
+    )
+
+
+def _daily_bar_symbols_for_date(session, trade_date: date | None) -> set[str]:
+    if trade_date is None:
+        return set()
+    rows = session.execute(
+        select(schema.stock_daily_bars.c.vt_symbol).where(
+            schema.stock_daily_bars.c.trade_date == trade_date
+        )
+    ).scalars().all()
+    return {str(value) for value in rows}
+
+
+def _stock_has_current_daily_quote(stock_row: Mapping[str, Any]) -> bool:
+    """Return whether the current market snapshot has a tradable quote."""
+
+    last_price = _float_or_none(stock_row.get("last_price"))
+    turnover = _float_or_none(stock_row.get("turnover"))
+    return (last_price is not None and last_price > 0) or (
+        turnover is not None and turnover > 0
+    )
+
+
 def _completed_stock_daily_session_coverage(
-    total_stocks: int,
+    stock_rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     target_date = completed_daily_bar_cutoff(_now_china())
-    with session_scope() as session:
-        symbol_count = _stock_daily_symbol_count(session, target_date)
-        reference_date = _latest_complete_daily_date_before(
-            session,
-            target_date,
-            MIN_COMPLETE_DAILY_SYMBOL_COUNT,
-        )
-        reference_count = _stock_daily_symbol_count(session, reference_date)
-    min_symbol_count = _daily_sync_cleanup_min_symbol_count(
-        total_stocks,
-        reference_count,
-    )
-    return {
-        "status": (
-            "complete" if symbol_count >= min_symbol_count else "incomplete"
-        ),
-        "target_trade_date": target_date.isoformat(),
-        "symbol_count": symbol_count,
-        "min_symbol_count": min_symbol_count,
-        "reference_trade_date": _iso_or_none(reference_date),
-        "reference_symbol_count": reference_count,
+    tradable_stock_rows = [
+        row for row in stock_rows if _stock_has_current_daily_quote(row)
+    ]
+    active_vt_symbols = {
+        vt_symbol(str(row["symbol"]), str(row["exchange"]))
+        for row in tradable_stock_rows
     }
+    with session_scope() as session:
+        reference_date = _daily_session_reference_date(session, target_date)
+        reference_vt_symbols = _daily_bar_symbols_for_date(session, reference_date)
+        observed_vt_symbols = _daily_bar_symbols_for_date(session, target_date)
+    non_trading_vt_symbols = {
+        vt_symbol(str(row["symbol"]), str(row["exchange"]))
+        for row in stock_rows
+        if not _stock_has_current_daily_quote(row)
+    }
+    newly_discovered_vt_symbols = {
+        vt_symbol(str(row["symbol"]), str(row["exchange"]))
+        for row in stock_rows
+        if reference_date is not None
+        and (created_at := _as_aware_datetime(row.get("created_at"))) is not None
+        and reference_date < created_at.date() <= target_date
+    }
+    expected_vt_symbols = active_vt_symbols & reference_vt_symbols
+    expected_vt_symbols.update(newly_discovered_vt_symbols - non_trading_vt_symbols)
+    if not expected_vt_symbols:
+        expected_vt_symbols = active_vt_symbols
+    return _daily_session_coverage_from_symbols(
+        target_date=target_date,
+        reference_date=reference_date,
+        expected_vt_symbols=expected_vt_symbols,
+        observed_vt_symbols=observed_vt_symbols,
+        excluded_non_trading_symbol_count=(
+            len(
+                non_trading_vt_symbols
+                & (reference_vt_symbols | newly_discovered_vt_symbols)
+            )
+        ),
+    )
 
 
 def _completed_sector_daily_session_coverage(
@@ -6513,7 +6742,14 @@ def _last_bar_dates_minute(vt_symbols: list[str], interval: str) -> dict[str, st
 def _select_daily_bar_stocks(symbols: list[str], stock_limit: int) -> list[dict[str, Any]]:
     """Return stock rows to sync daily bars for, ordered by liquidity."""
     with session_scope() as session:
-        query = select(schema.stocks).order_by(desc(schema.stocks.c.turnover), desc(schema.stocks.c.market_cap))
+        query = select(
+            schema.stocks.c.symbol,
+            schema.stocks.c.exchange,
+            schema.stocks.c.name,
+            schema.stocks.c.last_price,
+            schema.stocks.c.turnover,
+            schema.stocks.c.created_at,
+        ).order_by(desc(schema.stocks.c.turnover), desc(schema.stocks.c.market_cap))
         if symbols:
             query = query.where(schema.stocks.c.vt_symbol.in_(symbols))
         if stock_limit > 0:
@@ -7694,27 +7930,146 @@ def _financial_report_date_params(value: Any) -> list[str]:
 
 
 def _financial_batch_covered_report_dates(report_dates: Sequence[str]) -> set[str]:
-    if not report_dates or not is_database_configured():
-        return set()
-    normalized_report_date = func.substr(
-        schema.stock_financial_reports.c.report_date,
-        1,
-        10,
+    coverage = _financial_batch_coverage(report_dates)
+    return {
+        report_date
+        for report_date, item in coverage.items()
+        if item["status"] == "complete"
+    }
+
+
+def _financial_disclosure_deadline(report_date: date) -> date:
+    quarter_end = (report_date.month, report_date.day)
+    if quarter_end == (3, 31):
+        return date(report_date.year, 4, 30)
+    if quarter_end == (6, 30):
+        return date(report_date.year, 8, 31)
+    if quarter_end == (9, 30):
+        return date(report_date.year, 10, 31)
+    if quarter_end == (12, 31):
+        return date(report_date.year + 1, 4, 30)
+    raise ValueError(f"不是季度报告期：{report_date.isoformat()}")
+
+
+def _financial_period_coverage(
+    *,
+    report_date: str,
+    reference_date: date | None,
+    expected_vt_symbols: set[str],
+    observed_vt_symbols: set[str],
+    as_of_date: date | None = None,
+) -> dict[str, Any]:
+    expected = set(expected_vt_symbols)
+    observed = set(observed_vt_symbols)
+    covered = expected & observed
+    missing = sorted(expected - observed)
+    expected_count = len(expected)
+    coverage_ratio = len(covered) / expected_count if expected_count else 0.0
+    parsed_report_date = _parse_date(report_date)
+    disclosure_deadline = (
+        _financial_disclosure_deadline(parsed_report_date)
+        if parsed_report_date is not None
+        else None
     )
+    current_date = as_of_date or _now_china().date()
+    if expected_count and coverage_ratio >= FINANCIAL_BATCH_COMPLETE_COVERAGE_RATIO:
+        status = "complete"
+    elif disclosure_deadline is not None and current_date <= disclosure_deadline:
+        status = "pending_disclosure"
+    else:
+        status = "incomplete"
+    return {
+        "status": status,
+        "report_date": report_date,
+        "reference_trade_date": _iso_or_none(reference_date),
+        "disclosure_deadline": _iso_or_none(disclosure_deadline),
+        "expected_symbol_count": expected_count,
+        "covered_symbol_count": len(covered),
+        "missing_symbol_count": len(missing),
+        "coverage_ratio": coverage_ratio,
+        "missing_vt_symbols": missing[:FINANCIAL_COVERAGE_MISSING_SAMPLE_SIZE],
+    }
+
+
+def _financial_batch_coverage(
+    report_dates: Sequence[str],
+    *,
+    as_of_date: date | None = None,
+) -> dict[str, dict[str, Any]]:
+    if not report_dates or not is_database_configured():
+        return {}
+    parsed_report_dates = sorted(
+        {
+            parsed
+            for report_date in report_dates
+            if (parsed := _parse_date(report_date)) is not None
+        }
+    )
+    if not parsed_report_dates:
+        return {}
+    current_date = as_of_date or _now_china().date()
+    earliest_report_date = parsed_report_dates[0]
     with session_scope() as session:
-        rows = session.execute(
-            select(normalized_report_date, func.count())
-            .where(
+        reliable_dates = list(
+            session.execute(
+                select(schema.stock_daily_bars.c.trade_date)
+                .where(schema.stock_daily_bars.c.trade_date >= earliest_report_date)
+                .group_by(schema.stock_daily_bars.c.trade_date)
+                .having(func.count() >= MIN_COMPLETE_DAILY_SYMBOL_COUNT)
+                .order_by(schema.stock_daily_bars.c.trade_date)
+            ).scalars()
+        )
+        reference_by_report_date = {
+            report_date: next(
+                (trade_date for trade_date in reliable_dates if trade_date >= report_date),
+                None,
+            )
+            for report_date in parsed_report_dates
+        }
+        reference_dates = {
+            value for value in reference_by_report_date.values() if value is not None
+        }
+        expected_rows = session.execute(
+            select(
+                schema.stock_daily_bars.c.trade_date,
+                schema.stock_daily_bars.c.vt_symbol,
+            ).where(schema.stock_daily_bars.c.trade_date.in_(reference_dates))
+        ).all() if reference_dates else []
+        stored_report_dates = [
+            value
+            for report_date in parsed_report_dates
+            for value in (report_date.isoformat(), f"{report_date.isoformat()} 00:00:00")
+        ]
+        observed_rows = session.execute(
+            select(
+                schema.stock_financial_reports.c.report_date,
+                schema.stock_financial_reports.c.vt_symbol,
+            ).where(
                 schema.stock_financial_reports.c.period_type == "quarterly",
                 schema.stock_financial_reports.c.source == FINANCIAL_BATCH_SOURCE,
-                normalized_report_date.in_(list(report_dates)),
+                schema.stock_financial_reports.c.report_date.in_(stored_report_dates),
             )
-            .group_by(normalized_report_date)
         ).all()
+
+    expected_by_reference_date: dict[date, set[str]] = {}
+    for trade_date, current_vt_symbol in expected_rows:
+        expected_by_reference_date.setdefault(trade_date, set()).add(str(current_vt_symbol))
+    observed_by_report_date: dict[str, set[str]] = {}
+    for stored_report_date, current_vt_symbol in observed_rows:
+        report_date = str(stored_report_date)[:10]
+        observed_by_report_date.setdefault(report_date, set()).add(str(current_vt_symbol))
     return {
-        str(report_date)
-        for report_date, row_count in rows
-        if int(row_count or 0) >= FINANCIAL_BATCH_BOOTSTRAP_MIN_ROWS
+        report_date.isoformat(): _financial_period_coverage(
+            report_date=report_date.isoformat(),
+            reference_date=reference_by_report_date[report_date],
+            expected_vt_symbols=expected_by_reference_date.get(
+                reference_by_report_date[report_date],
+                set(),
+            ),
+            observed_vt_symbols=observed_by_report_date.get(report_date.isoformat(), set()),
+            as_of_date=current_date,
+        )
+        for report_date in parsed_report_dates
     }
 
 
@@ -7801,6 +8156,16 @@ def _merge_financial_report_values(
     return merged
 
 
+def _financial_report_values_changed(
+    existing: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> bool:
+    return any(
+        existing.get(field) != candidate.get(field)
+        for field in _FINANCIAL_REPORT_FIELDS
+    )
+
+
 def _upsert_stock_financial_report_batch(items: list[dict[str, Any]]) -> int:
     incoming_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
     for item in items:
@@ -7849,10 +8214,14 @@ def _upsert_stock_financial_report_batch(items: list[dict[str, Any]]) -> int:
             ): dict(row)
             for row in existing_rows
         }
-        values = [
-            _merge_financial_report_values(existing_by_key.get(key, {}), incoming)
-            for key, incoming in incoming_by_key.items()
-        ]
+        values: list[dict[str, Any]] = []
+        for key, incoming in incoming_by_key.items():
+            existing = existing_by_key.get(key)
+            candidate = _merge_financial_report_values(existing or {}, incoming)
+            if existing is None or _financial_report_values_changed(existing, candidate):
+                values.append(candidate)
+        if not values:
+            return 0
         update_fields = [
             field
             for field in _FINANCIAL_REPORT_FIELDS
@@ -7890,6 +8259,11 @@ def _invalidate_legacy_financial_growth_fields(
         table.c.period_type == "quarterly",
         func.substr(table.c.report_date, 1, 10) == parsed.isoformat(),
         table.c.source != FINANCIAL_BATCH_SOURCE,
+        or_(
+            table.c.revenue_yoy.is_not(None),
+            table.c.net_profit_yoy.is_not(None),
+            table.c.source != "akshare.legacy_quarterly_no_yoy",
+        ),
     ]
     if symbols:
         conditions.append(table.c.vt_symbol.in_(list(symbols)))

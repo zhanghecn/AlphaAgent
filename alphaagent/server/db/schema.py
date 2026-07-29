@@ -130,6 +130,7 @@ stocks = Table(
 )
 Index("ix_stocks_symbol", stocks.c.symbol)
 Index("ix_stocks_name", stocks.c.name)
+Index("ix_stocks_updated_at", stocks.c.updated_at)
 
 stock_daily_bars = Table(
     "stock_daily_bars",
@@ -938,6 +939,7 @@ sector_memberships = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
 )
 Index("ix_sector_memberships_vt_symbol", sector_memberships.c.vt_symbol)
+Index("ix_sector_memberships_updated_at", sector_memberships.c.updated_at)
 
 stock_sector_memberships = Table(
     "stock_sector_memberships",
@@ -955,6 +957,7 @@ stock_sector_memberships = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
 )
 Index("ix_stock_sector_memberships_sector", stock_sector_memberships.c.sector_id)
+Index("ix_stock_sector_memberships_updated_at", stock_sector_memberships.c.updated_at)
 
 stock_sector_membership_snapshots = Table(
     "stock_sector_membership_snapshots",
@@ -982,6 +985,10 @@ Index(
     "ix_stock_sector_membership_snapshots_sector_date",
     stock_sector_membership_snapshots.c.sector_id,
     stock_sector_membership_snapshots.c.snapshot_date,
+)
+Index(
+    "ix_stock_sector_membership_snapshots_updated_at",
+    stock_sector_membership_snapshots.c.updated_at,
 )
 
 stock_sector_membership_snapshot_scopes = Table(
@@ -1282,6 +1289,13 @@ stock_financial_reports = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
 )
 Index("ix_stock_financial_reports_date", stock_financial_reports.c.report_date)
+Index(
+    "ix_stock_financial_reports_source_date_symbol",
+    stock_financial_reports.c.source,
+    stock_financial_reports.c.report_date,
+    stock_financial_reports.c.vt_symbol,
+)
+Index("ix_stock_financial_reports_updated_at", stock_financial_reports.c.updated_at)
 
 stock_financial_sync_attempts = Table(
     "stock_financial_sync_attempts",
@@ -1339,6 +1353,7 @@ stock_events = Table(
 )
 Index("ix_stock_events_vt_symbol", stock_events.c.vt_symbol)
 Index("ix_stock_events_date", stock_events.c.event_date)
+Index("ix_stock_events_updated_at", stock_events.c.updated_at)
 
 
 limit_up_signal_snapshots = Table(
@@ -1902,6 +1917,18 @@ def _apply_compatible_schema_patches(engine) -> None:
         "CREATE INDEX IF NOT EXISTS ix_stock_daily_bars_updated_at ON stock_daily_bars (updated_at)",
         "CREATE INDEX IF NOT EXISTS ix_stock_minute_bars_bar_time ON stock_minute_bars (bar_time)",
         "CREATE INDEX IF NOT EXISTS ix_stock_minute_bars_updated_at ON stock_minute_bars (updated_at)",
+        "CREATE INDEX IF NOT EXISTS ix_stocks_updated_at ON stocks (updated_at)",
+        "CREATE INDEX IF NOT EXISTS ix_stock_financial_reports_source_date_symbol "
+        "ON stock_financial_reports (source, report_date, vt_symbol)",
+        "CREATE INDEX IF NOT EXISTS ix_stock_financial_reports_updated_at "
+        "ON stock_financial_reports (updated_at)",
+        "CREATE INDEX IF NOT EXISTS ix_stock_events_updated_at ON stock_events (updated_at)",
+        "CREATE INDEX IF NOT EXISTS ix_sector_memberships_updated_at "
+        "ON sector_memberships (updated_at)",
+        "CREATE INDEX IF NOT EXISTS ix_stock_sector_memberships_updated_at "
+        "ON stock_sector_memberships (updated_at)",
+        "CREATE INDEX IF NOT EXISTS ix_stock_sector_membership_snapshots_updated_at "
+        "ON stock_sector_membership_snapshots (updated_at)",
         "CREATE INDEX IF NOT EXISTS ix_limit_up_radar_observations_action_frame "
         "ON limit_up_radar_observations (frame_id, vt_symbol) "
         "WHERE formal_action = 'buy_now'",

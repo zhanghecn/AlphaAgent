@@ -48,4 +48,36 @@ describe("LimitUpPage backtest contract", () => {
     expect(html).toContain("完成后本页会自动更新");
     expect(html).toContain('role="status"');
   });
+
+  it("discloses a stale history ledger instead of presenting it as current", () => {
+    const report = {
+      coverage: {},
+      data_freshness: {
+        status: "stale",
+        changed_input_tables: ["stock_financial_reports"],
+      },
+      daily_results: [],
+      trades: [],
+      skipped_orders: [],
+      validation: { passed: false, checks: [] },
+    } as unknown as LimitUpLaneBacktest;
+
+    const html = renderToStaticMarkup(
+      <BacktestView
+        report={report}
+        indexBars={[]}
+        loading={false}
+        start="2023-03-28"
+        end="2026-07-24"
+        onStart={() => undefined}
+        onEnd={() => undefined}
+        rebuildRunning={false}
+        rebuildError={null}
+        onRebuild={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("历史输入已更新，账本待重建");
+    expect(html).toContain("stock_financial_reports");
+  });
 });

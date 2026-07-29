@@ -866,6 +866,12 @@ export interface LimitUpLaneBacktest {
   mode: string;
   strategy_version: string;
   history_strategy_version?: string;
+  data_freshness?: {
+    status: "fresh" | "stale" | "missing" | "unknown" | string;
+    ledger_updated_at?: string | null;
+    latest_input_updated_at?: string | null;
+    changed_input_tables: string[];
+  };
   lane: LimitUpBacktestScope;
   exit_mode: ExitMode;
   summary: LimitUpEntrySummary;

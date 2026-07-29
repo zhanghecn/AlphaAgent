@@ -1268,6 +1268,15 @@ export function BacktestView({
               候选代理，盘中资金门未历史重放
             </span>
           )}
+          {report.data_freshness && report.data_freshness.status !== "fresh" && (
+            <span className="ml-3 inline-flex items-center gap-1 text-amber-700 dark:text-amber-300">
+              <CircleAlert size={13} />
+              历史输入已更新，账本待重建
+              {report.data_freshness.changed_input_tables.length > 0
+                ? `：${report.data_freshness.changed_input_tables.join("、")}`
+                : ""}
+            </span>
+          )}
         </div>
       )}
 

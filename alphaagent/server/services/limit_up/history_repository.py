@@ -7,7 +7,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import and_, delete, func, not_, or_, select, tuple_
+from sqlalchemy import and_, delete, func, literal, not_, or_, select, tuple_, union_all
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from alphaagent.server.db import schema
@@ -78,8 +78,39 @@ def bounded_history_load_window(
     return load_start, load_end
 
 
-def history_inputs_newer_than_ledger(strategy_version: str) -> bool:
-    """Return whether persisted replay inputs changed after the last rebuild."""
+def _history_input_freshness_from_timestamps(
+    ledger_updated_at: datetime | None,
+    input_updated_at: Mapping[str, datetime | None],
+) -> dict[str, object]:
+    changed_input_tables = sorted(
+        table_name
+        for table_name, updated_at in input_updated_at.items()
+        if updated_at is not None
+        and (ledger_updated_at is None or updated_at > ledger_updated_at)
+    )
+    latest_input_updated_at = max(
+        (value for value in input_updated_at.values() if value is not None),
+        default=None,
+    )
+    status = (
+        "missing"
+        if ledger_updated_at is None
+        else "stale"
+        if changed_input_tables
+        else "fresh"
+    )
+    return {
+        "status": status,
+        "ledger_updated_at": ledger_updated_at.isoformat() if ledger_updated_at else None,
+        "latest_input_updated_at": (
+            latest_input_updated_at.isoformat() if latest_input_updated_at else None
+        ),
+        "changed_input_tables": changed_input_tables,
+    }
+
+
+def history_input_freshness(strategy_version: str) -> dict[str, object]:
+    """Return whether source tables changed after the persisted replay ledger."""
 
     schema.ensure_schema_once(get_engine())
     with session_scope() as session:
@@ -89,16 +120,27 @@ def history_inputs_newer_than_ledger(strategy_version: str) -> bool:
                 == strategy_version
             )
         ).scalar()
-        if ledger_updated_at is None:
-            return True
+        input_rows = session.execute(
+            union_all(
+                *(
+                    select(
+                        literal(table.name).label("table_name"),
+                        func.max(table.c.updated_at).label("updated_at"),
+                    )
+                    for table in HISTORY_INPUT_TABLES
+                )
+            )
+        ).all()
+    return _history_input_freshness_from_timestamps(
+        ledger_updated_at,
+        {str(table_name): updated_at for table_name, updated_at in input_rows},
+    )
 
-        for table in HISTORY_INPUT_TABLES:
-            updated_at = session.execute(
-                select(func.max(table.c.updated_at))
-            ).scalar()
-            if updated_at is not None and updated_at > ledger_updated_at:
-                return True
-        return False
+
+def history_inputs_newer_than_ledger(strategy_version: str) -> bool:
+    """Return whether persisted replay inputs changed after the last rebuild."""
+
+    return history_input_freshness(strategy_version)["status"] != "fresh"
 
 
 def history_ledger_updated_at(strategy_version: str) -> datetime | None:

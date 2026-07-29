@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -123,6 +125,149 @@ def test_financial_quarterly_syncs_complete_report_periods(monkeypatch):
     assert result["rows_written"] == 2
     assert result["report_dates"] == ["2025-12-31", "2026-03-31"]
     assert cache_clears == [True]
+
+
+def test_financial_coverage_rejects_partial_provider_response():
+    coverage = svc._financial_period_coverage(
+        report_date="2026-03-31",
+        reference_date=date(2026, 3, 31),
+        expected_vt_symbols={f"{index:06d}.SSE" for index in range(5_500)},
+        observed_vt_symbols={f"{index:06d}.SSE" for index in range(1_600)},
+        as_of_date=date(2026, 7, 29),
+    )
+
+    assert coverage["status"] == "incomplete"
+    assert coverage["expected_symbol_count"] == 5_500
+    assert coverage["covered_symbol_count"] == 1_600
+    assert coverage["coverage_ratio"] < svc.FINANCIAL_BATCH_COMPLETE_COVERAGE_RATIO
+
+
+def test_financial_coverage_marks_current_disclosure_period_pending():
+    coverage = svc._financial_period_coverage(
+        report_date="2026-06-30",
+        reference_date=date(2026, 6, 30),
+        expected_vt_symbols={f"{index:06d}.SSE" for index in range(5_500)},
+        observed_vt_symbols={f"{index:06d}.SSE" for index in range(29)},
+        as_of_date=date(2026, 7, 29),
+    )
+
+    assert coverage["status"] == "pending_disclosure"
+    assert coverage["disclosure_deadline"] == "2026-08-31"
+
+
+@pytest.mark.parametrize(
+    ("report_date", "expected_deadline"),
+    [
+        (date(2026, 3, 31), date(2026, 4, 30)),
+        (date(2026, 6, 30), date(2026, 8, 31)),
+        (date(2026, 9, 30), date(2026, 10, 31)),
+        (date(2026, 12, 31), date(2027, 4, 30)),
+    ],
+)
+def test_financial_disclosure_deadline(report_date, expected_deadline):
+    assert svc._financial_disclosure_deadline(report_date) == expected_deadline
+
+
+def test_financial_quarterly_keeps_current_disclosure_pending(monkeypatch):
+    class FakeAdapter:
+        def stock_financial_performance(self, report_date):
+            return {
+                "items": [
+                    {
+                        "vt_symbol": "600001.SSE",
+                        "report_date": report_date,
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(
+        svc,
+        "_upsert_stock_financial_report_batch",
+        lambda items: len(items),
+    )
+    monkeypatch.setattr(
+        svc,
+        "_financial_batch_coverage",
+        lambda report_dates: {
+            "2026-06-30": {
+                "status": "pending_disclosure",
+                "report_date": "2026-06-30",
+            }
+        },
+    )
+
+    result = svc.DataSyncRunner(adapter=FakeAdapter())._run_sync_stock_financial_quarterly(
+        {"report_dates": ["2026-06-30"]}
+    )
+
+    assert result.get("status") is None
+    assert result["incomplete_report_dates"] == []
+    assert result["pending_disclosure_report_dates"] == ["2026-06-30"]
+    assert "披露期内待补齐" in result["message"]
+
+
+def test_financial_coverage_accepts_expected_universe():
+    symbols = {f"{index:06d}.SSE" for index in range(5_500)}
+
+    coverage = svc._financial_period_coverage(
+        report_date="2026-03-31",
+        reference_date=date(2026, 3, 31),
+        expected_vt_symbols=symbols,
+        observed_vt_symbols=symbols,
+    )
+
+    assert coverage["status"] == "complete"
+    assert coverage["coverage_ratio"] == 1.0
+
+
+def test_financial_report_change_detection_skips_identical_values():
+    values = {
+        "vt_symbol": "600001.SSE",
+        "report_date": "2026-06-30 00:00:00",
+        "period_type": "quarterly",
+        "net_profit_yoy": 18.0,
+        "source": svc.FINANCIAL_BATCH_SOURCE,
+        "raw": {"SJLTZ": 18.0},
+    }
+
+    assert not svc._financial_report_values_changed(values, dict(values))
+
+    changed = {**values, "net_profit_yoy": 19.0}
+    assert svc._financial_report_values_changed(values, changed)
+
+
+def test_financial_quarterly_keeps_cache_for_unchanged_reports(monkeypatch):
+    cache_clears: list[bool] = []
+
+    class FakeAdapter:
+        def stock_financial_performance(self, report_date):
+            return {
+                "items": [
+                    {
+                        "vt_symbol": "600001.SSE",
+                        "report_date": report_date,
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(svc, "_upsert_stock_financial_report_batch", lambda items: 0)
+    monkeypatch.setattr(
+        svc,
+        "_invalidate_legacy_financial_growth_fields",
+        lambda report_date, *, symbols=None: 0,
+    )
+    monkeypatch.setattr(
+        svc,
+        "clear_live_context_cache",
+        lambda: cache_clears.append(True),
+    )
+
+    result = svc.DataSyncRunner(adapter=FakeAdapter())._run_sync_stock_financial_quarterly(
+        {"report_dates": ["2026-06-30"]}
+    )
+
+    assert result["rows_written"] == 0
+    assert cache_clears == []
 
 
 def test_financial_quarterly_filters_explicit_symbols(monkeypatch):

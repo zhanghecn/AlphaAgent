@@ -87,6 +87,46 @@ def test_scheduled_backtest_cache_key_changes_after_external_ledger_rebuild(
     assert "2026-07-24T10:05:00+00:00" in keys[1]
 
 
+def test_scheduled_backtest_discloses_stale_input_ledger(monkeypatch) -> None:
+    class RecordingCache:
+        def get_or_set(self, _key, _ttl, _loader):
+            return {"orders": [], "trades": [], "skipped_orders": []}
+
+    monkeypatch.setattr(history_service, "_history_cache_revision", lambda: "ledger")
+    monkeypatch.setattr(history_service, "_BACKTEST_REPORT_CACHE", RecordingCache())
+    monkeypatch.setattr(
+        history_service.history_repository,
+        "history_input_freshness",
+        lambda _version: {
+            "status": "stale",
+            "changed_input_tables": ["stock_financial_reports"],
+        },
+        raising=False,
+    )
+
+    result = history_service.get_scheduled_history_backtest(None, None, trade_limit=None)
+
+    assert result["data_freshness"] == {
+        "status": "stale",
+        "changed_input_tables": ["stock_financial_reports"],
+    }
+
+
+def test_history_input_freshness_identifies_only_newer_tables() -> None:
+    ledger_updated_at = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
+
+    freshness = history_repository._history_input_freshness_from_timestamps(
+        ledger_updated_at,
+        {
+            "stock_daily_bars": datetime(2026, 7, 29, 11, 0, tzinfo=timezone.utc),
+            "stock_financial_reports": datetime(2026, 7, 29, 12, 5, tzinfo=timezone.utc),
+        },
+    )
+
+    assert freshness["status"] == "stale"
+    assert freshness["changed_input_tables"] == ["stock_financial_reports"]
+
+
 def test_reliable_date_window_rejects_sparse_prefix() -> None:
     counts = [
         (date(2024, 1, 11), 2999),

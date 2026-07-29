@@ -951,7 +951,27 @@ def get_scheduled_history_backtest(
         21_600,
         lambda: _build_scheduled_history_backtest(start, end),
     )
-    return _limit_scheduled_report(report, trade_limit)
+    return _limit_scheduled_report(
+        {
+            **report,
+            "data_freshness": _scheduled_history_data_freshness(),
+        },
+        trade_limit,
+    )
+
+
+def _scheduled_history_data_freshness() -> dict[str, object]:
+    try:
+        return history_repository.history_input_freshness(
+            history_engine.HISTORY_STRATEGY_VERSION
+        )
+    except Exception:  # noqa: BLE001
+        return {
+            "status": "unknown",
+            "ledger_updated_at": None,
+            "latest_input_updated_at": None,
+            "changed_input_tables": [],
+        }
 
 
 def _limit_scheduled_report(

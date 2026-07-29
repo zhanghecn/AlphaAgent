@@ -44,12 +44,13 @@ services:
       - --port
       - "8000"
     environment:
-      ALPHAAGENT_ENV: ${ALPHAAGENT_ENV:-local}
+      ALPHAAGENT_ENV: ${ALPHAAGENT_ENV:-production}
       ALPHAAGENT_API_HOST: ${ALPHAAGENT_API_HOST:-0.0.0.0}
       ALPHAAGENT_API_PORT: ${ALPHAAGENT_API_PORT:-8000}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000}
       MARKET_TIMEOUT_SECONDS: ${MARKET_TIMEOUT_SECONDS:-8}
       MARKET_PAGE_SIZE: ${MARKET_PAGE_SIZE:-50}
+      ALPHAAGENT_STARTUP_DATA_SYNC_SCHEDULER: "false"
       ALPHAAGENT_STARTUP_BACKTEST_WARMUP: ${ALPHAAGENT_STARTUP_BACKTEST_WARMUP:-false}
       ALPHAAGENT_STARTUP_NEXT_SESSION_PLAN_WARMUP: ${ALPHAAGENT_STARTUP_NEXT_SESSION_PLAN_WARMUP:-false}
       ALPHAAGENT_STARTUP_MARKET_CACHE_WARMUP: ${ALPHAAGENT_STARTUP_MARKET_CACHE_WARMUP:-false}
@@ -93,6 +94,37 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  alphaagent-data-sync-worker:
+    extends:
+      service: alphaagent-api
+    cpus: ${ALPHAAGENT_SCHEDULER_CPUS:-0.25}
+    command:
+      - python
+      - -m
+      - alphaagent.server.services.data_sync_worker
+    environment:
+      DATABASE_POOL_SIZE: "4"
+      DATABASE_MAX_OVERFLOW: "0"
+      PGOPTIONS: >-
+        -c application_name=alphaagent-scheduler
+        -c max_parallel_workers_per_gather=0
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    expose: []
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "5", "http://127.0.0.1:8010/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 2
+      start_period: 60s
 
   alphaagent-web:
     image: ghcr.io/zhanghecn/alphaagent-web:latest

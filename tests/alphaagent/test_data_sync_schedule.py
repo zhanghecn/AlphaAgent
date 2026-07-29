@@ -117,6 +117,10 @@ def test_schema_patches_continue_when_one_patch_hits_lock_timeout():
     assert any(sql.startswith("ALTER TABLE stocks") for sql in executed)
     assert any("sync_batch_schedules" in sql for sql in executed)
     assert any("sector_fund_flow_snapshots" in sql for sql in executed)
+    assert any(
+        "ix_stock_financial_reports_source_date_symbol" in sql
+        for sql in executed
+    )
 
 
 def test_schema_patches_raise_unexpected_errors():
@@ -1940,6 +1944,48 @@ def test_run_job_builds_runner_with_safe_default_concurrency(monkeypatch):
     assert captured["concurrency"] == 2
 
 
+def test_run_job_records_incomplete_coverage_as_failure(monkeypatch):
+    finished: dict[str, object] = {}
+
+    class FakeRunner:
+        def __init__(self, adapter=None, progress=None, concurrency=8):
+            del adapter, progress, concurrency
+
+        def _run_sync_stock_daily_bars(self, params):
+            del params
+            return {
+                "status": "incomplete",
+                "rows_read": 4_999,
+                "rows_written": 4_999,
+                "message": "日线仍有缺口",
+            }
+
+    monkeypatch.setattr(svc, "is_database_configured", lambda: True)
+    monkeypatch.setattr(svc, "DataSyncRunner", FakeRunner)
+    monkeypatch.setattr(svc, "_create_run", lambda *_args: 1)
+    monkeypatch.setattr(
+        svc,
+        "_finish_run",
+        lambda run_id, status, **kwargs: finished.update(
+            run_id=run_id,
+            status=status,
+            **kwargs,
+        ),
+    )
+
+    result = svc.run_job("sync_stock_daily_bars", {})
+
+    assert result["status"] == "incomplete"
+    assert finished == {
+        "run_id": 1,
+        "status": "failed",
+        "rows_read": 4_999,
+        "rows_written": 4_999,
+        "message": "日线仍有缺口",
+        "error_type": "DataCoverageIncomplete",
+    }
+
+
 def test_sync_schedule_requires_job_ids():
     try:
         svc._assert_schedule_jobs("sync", [])
@@ -1983,14 +2029,41 @@ def test_limit_up_history_input_change_detection():
         "sync_stock_daily_bars",
         {"rows_written": 1_000, "history_bootstrap": {"performed": True}},
     )
-    assert not svc._changes_limit_up_history_inputs(
+    assert svc._changes_limit_up_history_inputs(
         "sync_stock_daily_bars",
         {"rows_written": 20_000},
+    )
+    assert svc._changes_limit_up_history_inputs(
+        "sync_stock_financial_quarterly",
+        {"rows_written": 5_000},
+    )
+    assert svc._changes_limit_up_history_inputs(
+        "sync_stock_notices",
+        {"rows_written": 10},
+    )
+    assert svc._changes_limit_up_history_inputs(
+        "sync_stock_sector_memberships",
+        {"rows_written": 10},
+    )
+    assert svc._changes_limit_up_history_inputs(
+        "sync_limit_up_pools",
+        {"rows_written": 10},
+    )
+    assert svc._changes_limit_up_history_inputs(
+        "sync_limit_up_radar_minutes",
+        {"rows_written": 10},
     )
     assert not svc._changes_limit_up_history_inputs(
         svc.LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID,
         {"rows_written": 0},
     )
+
+
+def test_all_sync_profile_rebuilds_history_after_input_jobs():
+    jobs = svc.SYNC_BATCH_PROFILES["all"]
+
+    assert jobs[-1] == svc.LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID
+    assert jobs.count(svc.LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID) == 1
 
 
 def test_limit_up_history_rebuild_batch_job_skips_current_ledger(monkeypatch):
@@ -2087,6 +2160,90 @@ def test_batch_continues_after_job_failure_and_forwards_concurrency(monkeypatch)
     assert batch["succeeded_jobs"] == 2
     assert ("good_b", 2) in calls                 # continues after failure
     assert {concurrency for _, concurrency in calls} == {2}
+
+
+def test_batch_skips_history_rebuild_after_incomplete_input_coverage(monkeypatch):
+    import time
+
+    svc._SYNC_BATCHES.clear()
+    svc._LATEST_BATCH_ID = None
+    rebuild_calls: list[bool] = []
+
+    def fake_run_job(job_id, params=None, progress=None, *, concurrency=8):
+        del params, progress, concurrency
+        assert job_id == "sync_stock_daily_bars"
+        return {
+            "status": "incomplete",
+            "rows_read": 4_999,
+            "rows_written": 4_999,
+            "message": "日线仍有缺口",
+        }
+
+    monkeypatch.setattr(svc, "run_job", fake_run_job)
+    monkeypatch.setattr(svc, "is_database_configured", lambda: True)
+    monkeypatch.setattr(
+        svc,
+        "_run_limit_up_history_rebuild_batch_job",
+        lambda *, force=False: rebuild_calls.append(force) or {"rows_read": 1, "rows_written": 1},
+    )
+
+    result = svc.start_sync_batch(
+        job_ids=["sync_stock_daily_bars", svc.LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID],
+    )
+
+    batch = svc.get_sync_batch(result["id"])
+    for _ in range(200):
+        if batch["status"] != "running":
+            break
+        time.sleep(0.01)
+        batch = svc.get_sync_batch(result["id"])
+
+    assert batch["status"] == "failed"
+    assert batch["jobs"][0]["status"] == "failed"
+    assert batch["jobs"][1]["status"] == "skipped"
+    assert rebuild_calls == []
+
+
+def test_batch_rebuilds_history_while_current_financial_disclosure_is_pending(monkeypatch):
+    import time
+
+    svc._SYNC_BATCHES.clear()
+    svc._LATEST_BATCH_ID = None
+    rebuild_calls: list[bool] = []
+
+    def fake_run_job(job_id, params=None, progress=None, *, concurrency=8):
+        del params, progress, concurrency
+        assert job_id == "sync_stock_financial_quarterly"
+        return {
+            "status": "pending_disclosure",
+            "rows_read": 29,
+            "rows_written": 1,
+            "message": "披露期内待补齐：2026-06-30",
+        }
+
+    monkeypatch.setattr(svc, "run_job", fake_run_job)
+    monkeypatch.setattr(svc, "is_database_configured", lambda: True)
+    monkeypatch.setattr(
+        svc,
+        "_run_limit_up_history_rebuild_batch_job",
+        lambda *, force=False: rebuild_calls.append(force) or {"rows_read": 1, "rows_written": 1},
+    )
+
+    result = svc.start_sync_batch(
+        job_ids=["sync_stock_financial_quarterly", svc.LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID],
+    )
+
+    batch = svc.get_sync_batch(result["id"])
+    for _ in range(200):
+        if batch["status"] != "running":
+            break
+        time.sleep(0.01)
+        batch = svc.get_sync_batch(result["id"])
+
+    assert batch["status"] == "succeeded"
+    assert batch["jobs"][0]["status"] == "succeeded"
+    assert batch["jobs"][1]["status"] == "succeeded"
+    assert rebuild_calls == [True]
 
 
 # ── Task 5: per-job inner concurrency (ThreadPoolExecutor) ─
@@ -2215,10 +2372,190 @@ def test_scheduled_stock_daily_sync_skips_complete_session(monkeypatch):
     }
 
 
+def test_scheduled_stock_daily_sync_fetches_only_missing_symbols(monkeypatch):
+    stock_rows = [
+        {"symbol": f"60000{index}", "exchange": "SSE", "name": "A"}
+        for index in range(4)
+    ]
+    fetched: list[str] = []
+
+    class FakeAdapter:
+        def stock_bars(self, symbol, *args, **kwargs):
+            del args, kwargs
+            fetched.append(symbol)
+            return {"items": []}
+
+    monkeypatch.setattr(
+        svc,
+        "_select_daily_bar_stocks",
+        lambda symbols, stock_limit: stock_rows,
+    )
+    monkeypatch.setattr(
+        svc,
+        "_stock_daily_history_bootstrap_plan",
+        lambda **_kwargs: {
+            "required": False,
+            "reliable_trade_days_before": 750,
+            "target_trade_days": 750,
+            "request_limit": 800,
+        },
+    )
+    monkeypatch.setattr(
+        svc,
+        "_completed_stock_daily_session_coverage",
+        lambda _stock_rows: {
+            "status": "incomplete",
+            "target_trade_date": "2026-07-20",
+            "missing_vt_symbols": ["600001.SSE"],
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(svc, "_last_bar_dates_daily", lambda _symbols: {})
+    monkeypatch.setattr(svc, "_upsert_daily_bars", lambda *args: 0)
+
+    svc.DataSyncRunner(adapter=FakeAdapter(), concurrency=1)._run_sync_stock_daily_bars(
+        {
+            "limit": 250,
+            "incremental": True,
+            "skip_complete_session": True,
+        }
+    )
+
+    assert fetched == ["600001"]
+
+
+def test_scheduled_stock_daily_sync_retains_partial_rows_for_next_retry(monkeypatch):
+    stock_rows = [
+        {"symbol": f"60000{index}", "exchange": "SSE", "name": "A"}
+        for index in range(4)
+    ]
+
+    class FakeAdapter:
+        def stock_bars(self, *args, **kwargs):
+            del args, kwargs
+            return {"items": []}
+
+    monkeypatch.setattr(svc, "MIN_COMPLETE_DAILY_SYMBOL_COUNT", 3)
+    monkeypatch.setattr(
+        svc,
+        "_select_daily_bar_stocks",
+        lambda symbols, stock_limit: stock_rows,
+    )
+    monkeypatch.setattr(
+        svc,
+        "_stock_daily_history_bootstrap_plan",
+        lambda **_kwargs: {
+            "required": False,
+            "reliable_trade_days_before": 750,
+            "target_trade_days": 750,
+            "request_limit": 800,
+        },
+    )
+    monkeypatch.setattr(
+        svc,
+        "_completed_stock_daily_session_coverage",
+        lambda _stock_rows: {
+            "status": "incomplete",
+            "target_trade_date": "2026-07-20",
+            "missing_symbol_count": 1,
+            "missing_vt_symbols": ["600001.SSE"],
+        },
+    )
+    monkeypatch.setattr(svc, "_last_bar_dates_daily", lambda _symbols: {})
+    monkeypatch.setattr(svc, "_upsert_daily_bars", lambda *args: 0)
+    monkeypatch.setattr(
+        svc,
+        "_discard_incomplete_latest_daily_bars",
+        lambda _total_stocks: pytest.fail("scheduled gap reconciliation must retain partial rows"),
+    )
+
+    result = svc.DataSyncRunner(adapter=FakeAdapter(), concurrency=1)._run_sync_stock_daily_bars(
+        {"incremental": True, "skip_complete_session": True}
+    )
+
+    assert result["status"] == "incomplete"
+    assert result["session_coverage"]["missing_vt_symbols"] == ["600001.SSE"]
+    assert "保留已同步数据" in result["message"]
+
+
+def test_daily_session_coverage_requires_every_expected_symbol():
+    coverage = svc._daily_session_coverage_from_symbols(
+        target_date=date(2026, 7, 20),
+        reference_date=date(2026, 7, 17),
+        expected_vt_symbols={
+            "600000.SSE",
+            "600001.SSE",
+            "600002.SSE",
+            "600003.SSE",
+            "600004.SSE",
+        },
+        observed_vt_symbols={
+            "600000.SSE",
+            "600001.SSE",
+            "600002.SSE",
+            "600003.SSE",
+        },
+    )
+
+    assert coverage["status"] == "incomplete"
+    assert coverage["expected_symbol_count"] == 5
+    assert coverage["missing_symbol_count"] == 1
+    assert coverage["missing_vt_symbols"] == ["600004.SSE"]
+
+
+def test_select_daily_bar_stocks_avoids_raw_snapshot_payload(monkeypatch):
+    selected_columns: list[str] = []
+
+    class FakeResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return []
+
+    class FakeSession:
+        def execute(self, statement):
+            selected_columns.extend(column.name for column in statement.selected_columns)
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+
+    assert svc._select_daily_bar_stocks([], 0) == []
+    assert selected_columns == [
+        "symbol",
+        "exchange",
+        "name",
+        "last_price",
+        "turnover",
+        "created_at",
+    ]
+
+
+def test_daily_session_reference_prefers_widest_recent_cross_section():
+    reference_date = svc._select_daily_session_reference_date(
+        [
+            (date(2026, 7, 16), 5_532),
+            (date(2026, 7, 17), 5_530),
+            (date(2026, 7, 18), 5_275),
+        ]
+    )
+
+    assert reference_date == date(2026, 7, 16)
+
+
 def test_completed_stock_daily_session_uses_previous_cross_section(monkeypatch):
     target_date = date(2026, 7, 20)
     reference_date = date(2026, 7, 17)
     session = object()
+    stock_rows = [
+        {"symbol": "600000", "exchange": "SSE", "last_price": 10},
+        {"symbol": "600001", "exchange": "SSE", "last_price": 10},
+        {"symbol": "600003", "exchange": "SSE", "last_price": 10},
+    ]
 
     @contextmanager
     def fake_session_scope():
@@ -2232,27 +2569,133 @@ def test_completed_stock_daily_session_uses_previous_cross_section(monkeypatch):
     )
     monkeypatch.setattr(
         svc,
-        "_latest_complete_daily_date_before",
-        lambda current_session, before_date, min_symbol_count: reference_date,
+        "_daily_session_reference_date",
+        lambda current_session, current_target_date: reference_date,
     )
     monkeypatch.setattr(
         svc,
-        "_stock_daily_symbol_count",
+        "_daily_bar_symbols_for_date",
         lambda current_session, trade_date: (
-            5_531 if trade_date == target_date else 5_529
+            {"600000.SSE", "600001.SSE", "600002.SSE"}
+            if trade_date == reference_date
+            else {"600000.SSE"}
         ),
     )
 
-    result = svc._completed_stock_daily_session_coverage(5_878)
+    result = svc._completed_stock_daily_session_coverage(stock_rows)
 
     assert result == {
-        "status": "complete",
+        "status": "incomplete",
         "target_trade_date": "2026-07-20",
-        "symbol_count": 5_531,
-        "min_symbol_count": int(5_529 * 0.95),
+        "symbol_count": 1,
+        "expected_symbol_count": 2,
+        "missing_symbol_count": 1,
+        "missing_vt_symbols": ["600001.SSE"],
         "reference_trade_date": "2026-07-17",
-        "reference_symbol_count": 5_529,
     }
+
+
+def test_completed_stock_daily_session_includes_newly_discovered_symbols(monkeypatch):
+    target_date = date(2026, 7, 20)
+    reference_date = date(2026, 7, 17)
+    session = object()
+    stock_rows = [
+        {"symbol": "600000", "exchange": "SSE", "last_price": 10, "created_at": datetime(2026, 7, 1, tzinfo=timezone.utc)},
+        {"symbol": "600001", "exchange": "SSE", "last_price": 10, "created_at": datetime(2026, 7, 18, tzinfo=timezone.utc)},
+    ]
+
+    @contextmanager
+    def fake_session_scope():
+        yield session
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+    monkeypatch.setattr(svc, "completed_daily_bar_cutoff", lambda _at: target_date)
+    monkeypatch.setattr(
+        svc,
+        "_daily_session_reference_date",
+        lambda current_session, current_target_date: reference_date,
+    )
+    monkeypatch.setattr(
+        svc,
+        "_daily_bar_symbols_for_date",
+        lambda current_session, trade_date: {"600000.SSE"},
+    )
+
+    result = svc._completed_stock_daily_session_coverage(stock_rows)
+
+    assert result["status"] == "incomplete"
+    assert result["expected_symbol_count"] == 2
+    assert result["missing_vt_symbols"] == ["600001.SSE"]
+
+
+def test_completed_stock_daily_session_excludes_symbols_discovered_after_target(monkeypatch):
+    target_date = date(2026, 7, 20)
+    reference_date = date(2026, 7, 17)
+    session = object()
+    stock_rows = [
+        {"symbol": "600000", "exchange": "SSE", "last_price": 10, "created_at": datetime(2026, 7, 1, tzinfo=timezone.utc)},
+        {"symbol": "600001", "exchange": "SSE", "last_price": 10, "created_at": datetime(2026, 7, 21, tzinfo=timezone.utc)},
+    ]
+
+    @contextmanager
+    def fake_session_scope():
+        yield session
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+    monkeypatch.setattr(svc, "completed_daily_bar_cutoff", lambda _at: target_date)
+    monkeypatch.setattr(
+        svc,
+        "_daily_session_reference_date",
+        lambda current_session, current_target_date: reference_date,
+    )
+    monkeypatch.setattr(
+        svc,
+        "_daily_bar_symbols_for_date",
+        lambda current_session, trade_date: {"600000.SSE"},
+    )
+
+    result = svc._completed_stock_daily_session_coverage(stock_rows)
+
+    assert result["status"] == "complete"
+    assert result["expected_symbol_count"] == 1
+    assert result["missing_vt_symbols"] == []
+
+
+def test_completed_stock_daily_session_excludes_non_trading_quotes(monkeypatch):
+    target_date = date(2026, 7, 20)
+    reference_date = date(2026, 7, 17)
+    session = object()
+    stock_rows = [
+        {"symbol": "600000", "exchange": "SSE", "last_price": 10},
+        {"symbol": "600001", "exchange": "SSE", "last_price": 0, "turnover": 0},
+    ]
+
+    @contextmanager
+    def fake_session_scope():
+        yield session
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+    monkeypatch.setattr(svc, "completed_daily_bar_cutoff", lambda _at: target_date)
+    monkeypatch.setattr(
+        svc,
+        "_daily_session_reference_date",
+        lambda current_session, current_target_date: reference_date,
+    )
+    monkeypatch.setattr(
+        svc,
+        "_daily_bar_symbols_for_date",
+        lambda current_session, trade_date: (
+            {"600000.SSE", "600001.SSE"}
+            if trade_date == reference_date
+            else {"600000.SSE"}
+        ),
+    )
+
+    result = svc._completed_stock_daily_session_coverage(stock_rows)
+
+    assert result["status"] == "complete"
+    assert result["expected_symbol_count"] == 1
+    assert result["excluded_non_trading_symbol_count"] == 1
 
 
 def test_stock_daily_history_bootstrap_targets_strict_three_year_buffer():
