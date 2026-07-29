@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import date
 
 import time
@@ -354,3 +355,70 @@ def test_select_zombie_batch_ids_picks_only_stale_running():
     ]
     zombies = svc._select_zombie_batch_ids(batches, now, threshold_seconds=2 * 3600)
     assert zombies == ["old"]
+
+
+def test_reap_zombie_batch_closes_owning_schedule_and_job_state(monkeypatch):
+    now = datetime(2026, 7, 6, 21, 54, tzinfo=timezone.utc)
+    batches = {
+        "old": {
+            "id": "old",
+            "status": "running",
+            "started_at": now - timedelta(hours=3),
+            "schedule_id": "eod_1900",
+            "current_job_id": "sync_stock_notices",
+            "jobs": [{"job_id": "sync_stock_notices", "status": "running"}],
+        }
+    }
+    statements = []
+    schedule_updates = []
+
+    class FakeSession:
+        def execute(self, statement):
+            statements.append(statement)
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "_SYNC_BATCHES", batches)
+    monkeypatch.setattr(svc, "is_database_configured", lambda: True)
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        svc,
+        "_touch_schedule",
+        lambda schedule_id, **fields: schedule_updates.append((schedule_id, fields)),
+    )
+
+    assert svc.reap_zombie_batches(now, threshold_seconds=2 * 3600) == ["old"]
+    assert batches["old"]["status"] == "failed"
+    assert schedule_updates[0][0] == "eod_1900"
+    assert schedule_updates[0][1]["last_status"] == "failed"
+    assert [statement.table.name for statement in statements] == [
+        "sync_job_runs",
+        "sync_job_definitions",
+    ]
+
+
+def test_late_zombie_worker_cannot_overwrite_terminal_batch_status(monkeypatch):
+    batches = {
+        "old": {
+            "id": "old",
+            "status": "failed",
+            "schedule_id": "eod_1900",
+            "current_job_id": None,
+            "message": "Reaped by zombie watchdog",
+        }
+    }
+    schedule_updates = []
+
+    monkeypatch.setattr(svc, "_SYNC_BATCHES", batches)
+    monkeypatch.setattr(
+        svc,
+        "_touch_schedule",
+        lambda schedule_id, **fields: schedule_updates.append((schedule_id, fields)),
+    )
+
+    svc._finish_batch("old", "succeeded", "同步完成")
+
+    assert batches["old"]["status"] == "failed"
+    assert schedule_updates == []

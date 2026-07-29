@@ -2840,27 +2840,55 @@ def reap_zombie_batches(
     zombie_ids = _select_zombie_batch_ids(batches, now, threshold_seconds)
     if not zombie_ids:
         return []
+    zombie_job_ids: set[str] = set()
     with _BATCH_LOCK:
         for batch_id in zombie_ids:
             batch = _SYNC_BATCHES.get(batch_id)
             if batch is None:
                 continue
-            batch["status"] = "failed"
-            batch["finished_at"] = _utc_now_iso()
-            batch["message"] = f"Reaped by zombie watchdog (running > {int(threshold_seconds)}s)"
+            current_job_id = str(batch.get("current_job_id") or "")
+            if current_job_id:
+                zombie_job_ids.add(current_job_id)
+            for item in batch.get("jobs") or []:
+                if (
+                    isinstance(item, Mapping)
+                    and item.get("status") == "running"
+                    and str(item.get("job_id") or "")
+                ):
+                    zombie_job_ids.add(str(item["job_id"]))
+
+    message = f"Reaped by zombie watchdog (running > {int(threshold_seconds)}s)"
+    for batch_id in zombie_ids:
+        _finish_batch(batch_id, "failed", message)
     logger.warning("reap_zombie_batches: cleaned %d zombie batches: %s", len(zombie_ids), zombie_ids)
     try:
         with session_scope() as session:
-            session.execute(
-                schema.sync_job_runs.update()
-                .where(schema.sync_job_runs.c.status == "running")
-                .values(
-                    status="failed",
-                    message="Reaped by zombie watchdog",
-                    error_type="Zombie",
-                    finished_at=datetime.now(timezone.utc),
+            if zombie_job_ids:
+                session.execute(
+                    schema.sync_job_runs.update()
+                    .where(
+                        schema.sync_job_runs.c.status == "running",
+                        schema.sync_job_runs.c.job_id.in_(zombie_job_ids),
+                    )
+                    .values(
+                        status="failed",
+                        message="Reaped by zombie watchdog",
+                        error_type="Zombie",
+                        finished_at=datetime.now(timezone.utc),
+                    )
                 )
-            )
+                session.execute(
+                    schema.sync_job_definitions.update()
+                    .where(
+                        schema.sync_job_definitions.c.id.in_(zombie_job_ids),
+                        schema.sync_job_definitions.c.last_status == "running",
+                    )
+                    .values(
+                        last_status="failed",
+                        last_message="Reaped by zombie watchdog",
+                        last_finished_at=datetime.now(timezone.utc),
+                    )
+                )
     except Exception as exc:
         logger.warning("reap_zombie_batches: DB cleanup failed: %s", exc)
     return zombie_ids
@@ -3856,7 +3884,7 @@ def _touch_schedule(schedule_id: str | None, **fields: Any) -> None:
 def _finish_batch(batch_id: str, status: str, message: str) -> None:
     with _BATCH_LOCK:
         batch = _SYNC_BATCHES.get(batch_id)
-        if not batch:
+        if not batch or batch.get("status") != "running":
             return
         batch["status"] = status
         batch["finished_at"] = _utc_now_iso()
