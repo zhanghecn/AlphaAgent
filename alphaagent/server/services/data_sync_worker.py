@@ -142,9 +142,6 @@ def audit_worker_health(
         if latest_frame is not None
         else None
     )
-    if latest_frame is not None and not _is_runtime_fingerprint(latest_fingerprint):
-        reasons.append("latest_radar_fingerprint_invalid")
-
     day_frame_count = max(int(current_day_frame_count), 0)
     day_fingerprints = {
         str(value).strip()

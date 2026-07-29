@@ -261,6 +261,21 @@ def test_healthcheck_does_not_require_a_current_frame_on_weekday_holiday() -> No
     assert report["scan_heartbeat_required"] is True
 
 
+def test_healthcheck_ignores_a_legacy_latest_frame_without_fingerprint() -> None:
+    now = datetime(2026, 7, 29, 10, 0, tzinfo=CHINA_TZ)
+    report = _health_report(
+        now=now,
+        latest_frame={
+            "trade_date": datetime(2026, 7, 27).date(),
+            "captured_at": datetime(2026, 7, 27, 14, 57, tzinfo=CHINA_TZ),
+            "capture_runtime_fingerprint": None,
+        },
+    )
+
+    assert report["ok"] is True
+    assert report["reason_codes"] == []
+
+
 def test_healthcheck_skips_intraday_heartbeat_age_on_weekends() -> None:
     now = datetime(2026, 7, 25, 10, 0, tzinfo=CHINA_TZ)
     report = _health_report(
