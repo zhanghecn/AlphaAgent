@@ -359,6 +359,60 @@ def test_attach_candidate_concepts_keeps_every_real_theme_with_its_rank() -> Non
     assert candidates[1]["concept_candidates"][0]["leader_rank"] == 2
 
 
+def test_attach_candidate_concepts_prefers_candidate_specific_execution_fit() -> None:
+    target = {
+        "vt_symbol": "600001.SSE",
+        "change_pct": 8.0,
+        "turnover": 800.0,
+    }
+    broad_leaders = [
+        {
+            "vt_symbol": f"60000{index}.SSE",
+            "change_pct": 10.0 - index / 10,
+            "turnover": 1_000.0 - index,
+        }
+        for index in range(2, 7)
+    ]
+    candidates = [target, *broad_leaders]
+    snapshot = {
+        "membership": {
+            "by_symbol": {
+                "600001.SSE": ["BROAD", "SPECIFIC"],
+                **{
+                    str(candidate["vt_symbol"]): ["BROAD"]
+                    for candidate in broad_leaders
+                },
+            }
+        },
+        "concepts_by_id": {
+            "BROAD": {
+                "concept_id": "BROAD",
+                "concept_name": "宽泛热门概念",
+                "concept_state": "launch",
+                "strength_score": 95.0,
+                "strength_rank": 1,
+            },
+            "SPECIFIC": {
+                "concept_id": "SPECIFIC",
+                "concept_name": "个股主导细分概念",
+                "concept_state": "launch",
+                "strength_score": 75.0,
+                "strength_rank": 20,
+            },
+        },
+        "data_quality": {"age_seconds": 10.0, "trigger_allowed": True},
+    }
+
+    attach_candidate_concepts(candidates, snapshot)
+
+    assert target["concept_id"] == "SPECIFIC"
+    assert target["concept_leader_rank"] == 1
+    assert [
+        (row["concept_id"], row["leader_rank"])
+        for row in target["concept_candidates"]
+    ] == [("SPECIFIC", 1), ("BROAD", 6)]
+
+
 def test_20260714_pcb_replay_uses_prior_membership_and_preseal_frames_only() -> None:
     membership = build_membership_index(
         [

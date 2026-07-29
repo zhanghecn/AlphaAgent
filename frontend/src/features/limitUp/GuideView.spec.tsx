@@ -5,7 +5,7 @@ import type { LimitUpStrategyGuide } from "@/api/limitUp";
 import { GuideView } from "./GuideView";
 
 const guide: LimitUpStrategyGuide = {
-  guide_version: "limit-up-strategy-guide-v9",
+  guide_version: "limit-up-strategy-guide-v11",
   strategy: {
     live_version: "limit-up-core-abc-v2",
     history_version: "limit-up-core-abc-v2",
@@ -33,7 +33,7 @@ const guide: LimitUpStrategyGuide = {
     minimum_quality_win_probability: 0.5,
     minimum_quality_expected_d1_net_return_pct: 0,
     quality_estimate_prior_strength: 10,
-    quality_states: ["rejected", "actionable"],
+    quality_states: ["rejected", "preparing", "qualified_waiting_trigger", "actionable"],
     frozen_evidence: {
       status: "historical_proxy_pass_forward_unconfirmed",
       evidence_role: "current_v2_historical_replay",
@@ -42,16 +42,16 @@ const guide: LimitUpStrategyGuide = {
       date_start: "2025-07-10",
       date_end: "2026-07-23",
       closed_count: 140,
-      win_count: 97,
-      win_rate_pct: 69.2857,
-      average_net_return_pct: 2.1478,
+      win_count: 96,
+      win_rate_pct: 68.5714,
+      average_net_return_pct: 2.0988,
       max_drawdown_pct: -21.0357,
       hard_loss_rate_pct: 7.1429,
       a_tier: { closed_count: 41, win_count: 35, win_rate_pct: 85.3659 },
-      c_tier: { closed_count: 69, win_count: 44, win_rate_pct: 63.7681 },
+      c_tier: { closed_count: 69, win_count: 43, win_rate_pct: 62.3188 },
       b_tier: { closed_count: 30, win_count: 18, win_rate_pct: 60 },
-      single_position: { closed_count: 79, win_count: 55, win_rate_pct: 69.6203, total_return_pct: 376.6561, max_drawdown_pct: -19.2649 },
-      two_positions: { closed_count: 95, win_count: 70, win_rate_pct: 73.6842, total_return_pct: 201.984, max_drawdown_pct: -8.6709 },
+      single_position: { closed_count: 78, win_count: 54, win_rate_pct: 69.2308, total_return_pct: 350.83, max_drawdown_pct: -19.2428 },
+      two_positions: { closed_count: 94, win_count: 69, win_rate_pct: 73.4043, total_return_pct: 195.3585, max_drawdown_pct: -8.8761 },
     },
     forward_status: {
       start_date: "2026-07-27",
@@ -101,18 +101,20 @@ describe("GuideView", () => {
     expect(html).toContain("唯一正式合同是");
     expect(html).toContain("limit-up-core-abc-v2");
     expect(html).toContain("涨停 2 到");
-    expect(html).toContain("当前正式买点必须等真实触板或回封发生");
+    expect(html).toContain("当除真实触板外的正式条件已齐时先进入板前候选");
+    expect(html).toContain("真实触板或回封发生后再复核完整公共质量门并升级为正式买点");
     expect(html).toContain("规则保证不偷看未来数据");
   });
 
-  it("渲染唯一 A+B+C 合同的七步流程", () => {
+  it("渲染唯一 A+B+C 合同的八步流程", () => {
     const html = renderToStaticMarkup(<GuideView {...baseProps} />);
 
     expect(html).toContain("aria-label=\"选股规则流程图\"");
-    expect(html).toContain("选股到成交，一共七步");
+    expect(html).toContain("选股到成交，一共八步");
     expect(html).toContain("锁定唯一正式合同");
     expect(html).toContain("通过原基础质量门");
     expect(html).toContain("建立 A/B 辨识度基座");
+    expect(html).toContain("触板前进入可靠候选");
     expect(html).toContain("输出全部 A+B+C 买点");
   });
 
@@ -153,9 +155,9 @@ describe("GuideView", () => {
     const html = renderToStaticMarkup(<GuideView {...baseProps} />);
 
     expect(html).toContain("140 笔");
-    expect(html).toContain("97 胜 · 43 负");
-    expect(html).toContain("69.2857%");
-    expect(html).toContain("+2.1478%");
+    expect(html).toContain("96 胜 · 44 负");
+    expect(html).toContain("68.5714%");
+    expect(html).toContain("+2.0988%");
     expect(html).toContain("自然前向验证");
     expect(html).toContain("2026-07-27");
     expect(html).toContain("当前闭合 0 笔");
@@ -174,7 +176,7 @@ describe("GuideView", () => {
     expect(html).toContain("B · 保留");
     expect(html).toContain("C · 补位");
     expect(html).toContain("35/41 · 85.3659%");
-    expect(html).toContain("44/69 · 63.7681%");
+    expect(html).toContain("43/69 · 62.3188%");
     expect(html).toContain("18/30 · 60.0000%");
     expect(html).toContain("正式 A+B+C 买入");
   });
@@ -182,7 +184,9 @@ describe("GuideView", () => {
   it("明确正式买点必须等待真实触板并重新通过公共质量门", () => {
     const html = renderToStaticMarkup(<GuideView {...baseProps} />);
 
-    expect(html).toContain("当前正式买点必须等真实触板或回封发生，再复核完整公共质量门");
+    expect(html).toContain("真实触板或回封发生后再复核完整公共质量门并升级为正式买点");
+    expect(html).toContain("实时发布安全门");
+    expect(html).toContain("只决定当前候选能否安全展示，不参与历史胜率和收益估计");
     expect(html).toContain("正式推荐不限仓位");
     expect(html).toContain("回测账户才按一仓或两仓模拟成交");
   });

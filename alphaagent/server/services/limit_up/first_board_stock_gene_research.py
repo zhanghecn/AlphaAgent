@@ -40,6 +40,39 @@ def attach_prior_stock_gene_evidence_to_orders(
 ) -> list[dict[str, object]]:
     """Attach same-stock evidence available strictly before each order date."""
 
+    return _attach_prior_d1_evidence_to_orders(
+        days,
+        orders,
+        history_window_days=history_window_days,
+        include_failed_seals=False,
+    )
+
+
+def attach_prior_all_touch_d1_evidence_to_orders(
+    days: Sequence[Mapping[str, object]],
+    orders: Sequence[Mapping[str, object]],
+    *,
+    history_window_days: int = 252,
+) -> list[dict[str, object]]:
+    """Attach prior D+1 evidence for every touch, including failed seals."""
+
+    return _attach_prior_d1_evidence_to_orders(
+        days,
+        orders,
+        history_window_days=history_window_days,
+        include_failed_seals=True,
+    )
+
+
+def _attach_prior_d1_evidence_to_orders(
+    days: Sequence[Mapping[str, object]],
+    orders: Sequence[Mapping[str, object]],
+    *,
+    history_window_days: int,
+    include_failed_seals: bool,
+) -> list[dict[str, object]]:
+    """Attach one causal same-stock D+1 evidence definition to orders."""
+
     if history_window_days <= 0:
         raise ValueError("history_window_days must be positive")
     ordered_days = sorted(days, key=lambda row: str(row.get("trade_date") or ""))
@@ -74,6 +107,7 @@ def attach_prior_stock_gene_evidence_to_orders(
                     candidate,
                     source_day_index=source_day_index,
                     result_date=result_date,
+                    include_failed_seals=include_failed_seals,
                 )
                 symbol = str(candidate.get("vt_symbol") or "")
                 if event is not None and symbol:
@@ -81,12 +115,12 @@ def attach_prior_stock_gene_evidence_to_orders(
             pending_index += 1
         for order_index, order in first_board_orders.get(signal_date, []):
             order.update(
-                _stock_evidence(
+                _d1_evidence(
                     order,
                     stock_history.get(str(order.get("vt_symbol") or ""), []),
                     current_day_index=day_index,
                     history_window_days=history_window_days,
-                    min_d1_samples=1,
+                    include_failed_seals=include_failed_seals,
                 )
             )
             processed.add(order_index)
@@ -96,12 +130,12 @@ def attach_prior_stock_gene_evidence_to_orders(
         if lane != "first_board" or order_index in processed:
             continue
         order.update(
-            _stock_evidence(
+            _d1_evidence(
                 order,
                 [],
                 current_day_index=0,
                 history_window_days=history_window_days,
-                min_d1_samples=1,
+                include_failed_seals=include_failed_seals,
             )
         )
     return enriched
@@ -565,12 +599,13 @@ def _stock_d1_event(
     *,
     source_day_index: int,
     result_date: str,
+    include_failed_seals: bool = False,
 ) -> _StockD1Event | None:
     outcome = _mapping(candidate.get("outcome"))
     return_pct = _number(outcome.get("next_close_return_pct"))
     if (
         not bool(outcome.get("touched"))
-        or not bool(outcome.get("sealed"))
+        or (not include_failed_seals and not bool(outcome.get("sealed")))
         or return_pct is None
     ):
         return None
@@ -580,6 +615,36 @@ def _stock_d1_event(
         won=return_pct > 0,
         return_pct=return_pct,
     )
+
+
+def _d1_evidence(
+    candidate: Mapping[str, object],
+    events: Sequence[_StockD1Event],
+    *,
+    current_day_index: int,
+    history_window_days: int,
+    include_failed_seals: bool,
+) -> dict[str, object]:
+    if not include_failed_seals:
+        return _stock_evidence(
+            candidate,
+            events,
+            current_day_index=current_day_index,
+            history_window_days=history_window_days,
+            min_d1_samples=1,
+        )
+    cutoff = current_day_index - history_window_days
+    recent = [event for event in events if event.signal_day_index >= cutoff]
+    sample_count = len(recent)
+    win_count = sum(event.won for event in recent)
+    return {
+        "stock_all_touch_d1_sample_count": sample_count,
+        "stock_all_touch_d1_win_count": win_count,
+        "stock_all_touch_d1_win_rate": _rate(win_count, sample_count),
+        "stock_all_touch_d1_average_return_pct": _average(
+            [event.return_pct for event in recent]
+        ),
+    }
 
 
 def _stock_evidence(

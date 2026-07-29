@@ -608,7 +608,7 @@ def get_history_ledger(
             "trades": [],
         }
     if lane is None:
-        return _scheduled_history_ledger(trade_date, payload)
+        return _formal_history_ledger(trade_date, payload)
     selected = _selected_lane_candidates(payload, lane)
     validations = {
         lane_name: _safe_lane_validation_status(lane_name, exit_mode)
@@ -662,25 +662,28 @@ def get_history_ledger(
     }
 
 
-def _scheduled_history_ledger(
+def _formal_history_ledger(
     trade_date: date,
     payload: Mapping[str, object],
 ) -> dict[str, object]:
     report = get_scheduled_history_backtest(None, None, trade_limit=None)
     date_text = trade_date.isoformat()
+    recommendation_quality = report.get("recommendation_quality")
+    recommendation_quality = (
+        recommendation_quality
+        if isinstance(recommendation_quality, Mapping)
+        else {}
+    )
+    all_trades = [
+        dict(trade)
+        for trade in recommendation_quality.get("trades") or []
+        if isinstance(trade, Mapping)
+    ]
     trades = [
         dict(trade)
-        for trade in report.get("trades") or []
-        if isinstance(trade, Mapping)
-        and str(trade.get("buy_date") or trade.get("entry_date") or "")[:10]
+        for trade in all_trades
+        if str(trade.get("buy_date") or trade.get("entry_date") or "")[:10]
         == date_text
-    ]
-    buy_orders = [
-        order
-        for order in report.get("orders") or []
-        if isinstance(order, Mapping)
-        and order.get("side") == "BUY"
-        and str(order.get("trade_date") or "")[:10] == date_text
     ]
     return {
         "status": "ready",
@@ -698,7 +701,7 @@ def _scheduled_history_ledger(
         "lane": None,
         "exit_mode": scheduled_execution.EXIT_MODE,
         "action": "normal" if trades else "empty",
-        "candidate_count": len(buy_orders),
+        "candidate_count": len(trades),
         "selected_count": len(trades),
         "observation_count": 0,
         "trades": trades,

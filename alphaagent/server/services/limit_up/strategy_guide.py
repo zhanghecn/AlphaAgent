@@ -6,7 +6,7 @@ from alphaagent.server.services.limit_up.versions import (
     HISTORY_STRATEGY_VERSION,
     LIVE_STRATEGY_VERSION,
 )
-GUIDE_VERSION = "limit-up-strategy-guide-v9"
+GUIDE_VERSION = "limit-up-strategy-guide-v11"
 
 
 def get_limit_up_strategy_guide() -> dict[str, object]:
@@ -43,6 +43,8 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
             "quality_estimate_prior_strength": 10,
             "quality_states": [
                 "rejected",
+                "preparing",
+                "qualified_waiting_trigger",
                 "actionable",
             ],
             "frozen_evidence": {
@@ -53,9 +55,9 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                 "date_start": "2025-07-10",
                 "date_end": "2026-07-23",
                 "closed_count": 140,
-                "win_count": 97,
-                "win_rate_pct": 69.2857,
-                "average_net_return_pct": 2.1478,
+                "win_count": 96,
+                "win_rate_pct": 68.5714,
+                "average_net_return_pct": 2.0988,
                 "max_drawdown_pct": -21.0357,
                 "hard_loss_rate_pct": 7.1429,
                 "a_tier": {
@@ -65,8 +67,8 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                 },
                 "c_tier": {
                     "closed_count": 69,
-                    "win_count": 44,
-                    "win_rate_pct": 63.7681,
+                    "win_count": 43,
+                    "win_rate_pct": 62.3188,
                 },
                 "b_tier": {
                     "closed_count": 30,
@@ -74,18 +76,18 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                     "win_rate_pct": 60.0,
                 },
                 "single_position": {
-                    "closed_count": 79,
-                    "win_count": 55,
-                    "win_rate_pct": 69.6203,
-                    "total_return_pct": 376.6561,
-                    "max_drawdown_pct": -19.2649,
+                    "closed_count": 78,
+                    "win_count": 54,
+                    "win_rate_pct": 69.2308,
+                    "total_return_pct": 350.83,
+                    "max_drawdown_pct": -19.2428,
                 },
                 "two_positions": {
-                    "closed_count": 95,
-                    "win_count": 70,
-                    "win_rate_pct": 73.6842,
-                    "total_return_pct": 201.9840,
-                    "max_drawdown_pct": -8.6709,
+                    "closed_count": 94,
+                    "win_count": 69,
+                    "win_rate_pct": 73.4043,
+                    "total_return_pct": 195.3585,
+                    "max_drawdown_pct": -8.8761,
                 },
             },
             "forward_status": {
@@ -150,6 +152,16 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
             },
             {
                 "order": 5,
+                "title": "触板前公开可靠候选",
+                "rule": (
+                    "涨幅达到3%后持续评估；只有A/B/C正式质量、D+1预期、lane验证、"
+                    "执行时点和全部非触板条件已经通过，且实时快照未过期，才进入"
+                    "独立板前候选榜。此时唯一缺少的正式条件必须是真实触板。"
+                ),
+                "timing": "盘中实时，真实触板前",
+            },
+            {
+                "order": 6,
                 "title": "真实触板后形成正式买点",
                 "rule": (
                     "开盘后持续扫描；真实首次触板或回封发生后，重新执行完整公共"
@@ -158,7 +170,7 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                 "timing": "盘中实时",
             },
             {
-                "order": 6,
+                "order": 7,
                 "title": "按A、C、B排序并保留A仓位",
                 "rule": (
                     "全量列表输出所有通过信号；同一时点先按A、C、B，再按公共"
@@ -169,7 +181,7 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                 "timing": "每个有效快照重新计算",
             },
             {
-                "order": 7,
+                "order": 8,
                 "title": "按统一价格和费用结算",
                 "rule": (
                     "买入使用正式触发价格代理并计滑点和费用；D+1按官方日线收盘价"
@@ -217,13 +229,24 @@ def get_limit_up_strategy_guide() -> dict[str, object]:
                 ],
             },
             {
+                "key": "execution_safety",
+                "label": "实时发布安全门",
+                "selection_allowed": True,
+                "selection_role": "runtime_safety_only",
+                "fields": [
+                    "实时快照不超过20秒",
+                    "报价未过期且仍处于可交易时段",
+                ],
+                "note": "只决定当前候选能否安全发布，不参与历史胜率和收益估计。",
+            },
+            {
                 "key": "diagnostic",
                 "label": "当前仅诊断字段",
                 "selection_allowed": False,
                 "fields": [
                     "未冻结成员时点的概念排名与事后龙头身份",
                     "板块资金、个股资金与当前换手",
-                    "市场状态、快照新鲜度与报价新鲜度",
+                    "尚未冻结为历史同口径的盘中市场状态",
                 ],
             },
             {

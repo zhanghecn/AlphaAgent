@@ -84,6 +84,7 @@ export function setupTagLabel(value: string) {
 export function skipReasonLabel(value: string) {
   return ({
     position_limit: "持仓已满",
+    reserved_for_later_a: "为后续 A 级信号保留仓位",
     insufficient_cash: "现金不足",
     below_one_lot: "目标仓位不足一手",
     duplicate_position: "已有同股持仓",

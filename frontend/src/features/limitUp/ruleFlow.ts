@@ -5,7 +5,7 @@ export interface RuleThreshold {
   value: string;
 }
 
-export type RuleStage = "gate" | "filter" | "radar" | "momentum" | "sector" | "rank" | "fill";
+export type RuleStage = "gate" | "filter" | "radar" | "preboard" | "momentum" | "sector" | "rank" | "fill";
 
 export interface RuleFlowNode {
   id: string;
@@ -30,6 +30,7 @@ export const STAGE_META: Record<RuleStage, { label: string; tone: string }> = {
   gate: { label: "市场门禁", tone: "border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-300" },
   filter: { label: "范围筛选", tone: "border-primary/50 bg-primary/10 text-primary" },
   radar: { label: "雷达采集", tone: "border-primary/50 bg-primary/10 text-primary" },
+  preboard: { label: "板前观察", tone: "border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-300" },
   momentum: { label: "动能确认", tone: "border-rise/50 bg-rise/10 text-rise" },
   sector: { label: "板块确认", tone: "border-rise/50 bg-rise/10 text-rise" },
   rank: { label: "排序优先", tone: "border-foreground/30 bg-muted/60 text-foreground" },
@@ -101,9 +102,27 @@ export function buildRuleFlow(guide: LimitUpStrategyGuide): RuleFlowNode[] {
       failHint: "A/B 不在 2 到 6 次区间时失败；超过 6 次只可能由 C 的完整交叉覆盖。",
     },
     {
+      id: "preboard",
+      stage: "preboard",
+      badge: "④",
+      title: "触板前进入可靠候选",
+      purpose: "在还可以买到时展示，但不降低触板后的正式质量标准。",
+      condition:
+        "涨幅达到 3% 后持续评估。只有 A/B/C 正式质量、D+1 预期、lane 验证、执行时点和非触板条件全部通过，且实时快照未过期，才公开为板前候选；唯一允许缺少的正式条件是真实触板。",
+      thresholds: [
+        { label: "发现起点", value: "涨幅 ≥ 3%" },
+        { label: "质量与时点", value: "必须全部通过" },
+        { label: "允许缺少", value: "仅真实触板" },
+        { label: "快照", value: "≤ 20 秒" },
+      ],
+      dataNote: "当前价、A/C/B 层级、点时 D+1 质量估计、lane 验证和实时阻断状态。",
+      dataGroupKeys: ["intraday", "prior"],
+      failHint: "时点未到、验证失败、有其他阻断或快照过期时不进入可靠板前榜。",
+    },
+    {
       id: "momentum",
       stage: "momentum",
-      badge: "④",
+      badge: "⑤",
       title: "真实触板后复核正式买点",
       purpose: "真实首次触板或回封后重新执行完整公共质量门。",
       condition:
@@ -121,7 +140,7 @@ export function buildRuleFlow(guide: LimitUpStrategyGuide): RuleFlowNode[] {
     {
       id: "sector",
       stage: "sector",
-      badge: "⑤",
+      badge: "⑥",
       title: "形成 A/C/B 三层",
       purpose: "A/B 是质量基座，C 用资金与概念扩散补足被严格门遗漏的情绪机会。",
       condition:
@@ -138,7 +157,7 @@ export function buildRuleFlow(guide: LimitUpStrategyGuide): RuleFlowNode[] {
     {
       id: "rank",
       stage: "rank",
-      badge: "⑥",
+      badge: "⑦",
       title: "输出全部 A+B+C 买点",
       purpose: "正式推荐输出所有合格信号；回测账户再单独按一仓或两仓容量执行。",
       condition:
@@ -154,7 +173,7 @@ export function buildRuleFlow(guide: LimitUpStrategyGuide): RuleFlowNode[] {
     {
       id: "fill",
       stage: "fill",
-      badge: "⑦",
+      badge: "⑧",
       title: "按统一口径成交和退出",
       purpose: "历史和实时采用同一买入、费用与 D+1 退出合同。",
       condition:

@@ -101,6 +101,8 @@ CONCEPT_WARMING_MIN_MEDIAN_CHANGE_PCT = 1.0
 CONCEPT_WARMING_MIN_STRONG_5_COUNT = 2
 CONCEPT_ACCELERATION_ANCHOR_TOLERANCE_SECONDS = 90
 _CONCEPT_STATES = {"launch": 0, "warming": 1, "observe": 2, "ebb": 3, "unavailable": 4}
+_CONCEPT_EXECUTION_MIN_STRENGTH_SCORE = 60.0
+_CONCEPT_EXECUTION_MAX_LEADER_RANK = 2
 CONCEPT_SHADOW_METRIC_FIELDS = (
     "member_count",
     "coverage_ratio",
@@ -413,7 +415,6 @@ def attach_candidate_concepts(
     )
 
     candidates_by_concept: dict[str, list[dict[str, object]]] = defaultdict(list)
-    selected_concept_by_symbol: dict[str, str] = {}
     available_concepts_by_symbol: dict[str, list[Mapping[str, object]]] = {}
     for candidate in candidates:
         symbol = str(candidate.get("vt_symbol") or "").upper()
@@ -425,17 +426,12 @@ def attach_candidate_concepts(
             if concept_id in concepts and isinstance(concepts[concept_id], Mapping)
         ]
         if not available:
-            _attach_unavailable_concept(candidate, age_seconds, trigger_allowed)
             continue
         available_concepts_by_symbol[symbol] = available
-        selected = min(available, key=_concept_selection_key)
-        concept_id = str(selected.get("concept_id") or "")
-        selected_concept_by_symbol[symbol] = concept_id
         for available_concept in available:
             available_id = str(available_concept.get("concept_id") or "")
             if available_id:
                 candidates_by_concept[available_id].append(candidate)
-        _copy_concept_evidence(candidate, selected, age_seconds, trigger_allowed)
 
     leader_ranks: dict[tuple[str, str], int] = {}
     for concept_id, concept_candidates in candidates_by_concept.items():
@@ -445,16 +441,27 @@ def attach_candidate_concepts(
             leader_ranks[(concept_id, symbol)] = rank
     for candidate in candidates:
         symbol = str(candidate.get("vt_symbol") or "").upper()
-        concept_id = selected_concept_by_symbol.get(symbol)
-        if concept_id:
-            candidate["concept_leader_rank"] = leader_ranks.get((concept_id, symbol))
         available = available_concepts_by_symbol.get(symbol, [])
+        if not available:
+            _attach_unavailable_concept(candidate, age_seconds, trigger_allowed)
+            continue
+        ordered = sorted(
+            available,
+            key=lambda concept: _candidate_concept_selection_key(
+                concept,
+                leader_ranks.get((str(concept.get("concept_id") or ""), symbol)),
+            ),
+        )
+        selected = ordered[0]
+        selected_id = str(selected.get("concept_id") or "")
+        _copy_concept_evidence(candidate, selected, age_seconds, trigger_allowed)
+        candidate["concept_leader_rank"] = leader_ranks.get((selected_id, symbol))
         candidate["concept_candidates"] = [
             _candidate_concept_evidence(
                 concept,
                 leader_ranks.get((str(concept.get("concept_id") or ""), symbol)),
             )
-            for concept in sorted(available, key=_concept_selection_key)
+            for concept in ordered
         ]
         candidate["concept_candidate_count"] = len(
             candidate["concept_candidates"]
@@ -603,6 +610,28 @@ def _concept_selection_key(concept: Mapping[str, object]) -> tuple[object, ...]:
         _CONCEPT_STATES.get(str(concept.get("concept_state") or "unavailable"), 5),
         int(concept.get("strength_rank") or 1_000_000),
         -_float(concept.get("strength_score")),
+        str(concept.get("concept_id") or ""),
+    )
+
+
+def _candidate_concept_selection_key(
+    concept: Mapping[str, object],
+    leader_rank: int | None,
+) -> tuple[object, ...]:
+    state = str(concept.get("concept_state") or "unavailable")
+    strength_score = _float(concept.get("strength_score"))
+    normalized_leader_rank = leader_rank or 1_000_000
+    execution_fit = bool(
+        state in {"launch", "warming"}
+        and strength_score >= _CONCEPT_EXECUTION_MIN_STRENGTH_SCORE
+        and normalized_leader_rank <= _CONCEPT_EXECUTION_MAX_LEADER_RANK
+    )
+    return (
+        0 if execution_fit else 1,
+        _CONCEPT_STATES.get(state, 5),
+        normalized_leader_rank,
+        int(concept.get("strength_rank") or 1_000_000),
+        -strength_score,
         str(concept.get("concept_id") or ""),
     )
 

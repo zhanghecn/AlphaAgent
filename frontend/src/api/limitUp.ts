@@ -208,6 +208,10 @@ export interface LimitUpLiveSignal {
   sector_route?: "realtime_industry" | "realtime_concept_launch" | string | null;
   portfolio_selected?: boolean;
   public_quality_status?: "rejected" | "actionable" | string;
+  public_quality_gate_passed?: boolean | null;
+  public_quality_preparation_passed?: boolean | null;
+  public_quality_touch_ready?: boolean | null;
+  public_quality_actionable?: boolean | null;
   quality_priority_tier?: string | null;
   quality_win_probability?: number | null;
   quality_expected_d1_net_return_pct?: number | null;
@@ -226,6 +230,7 @@ export interface LimitUpLiveSignal {
   cancel_condition: string;
   execution_state?: "watch" | "waiting" | "actionable" | "cancelled" | string;
   signal_state?: "observing" | "concept_warming" | "approaching_trigger" | "pending_auction" | "trigger_ready" | "missed" | "rejected" | "invalidated" | string;
+  preboard_state?: "quality_preparing" | "touch_ready" | string;
   blocking_scope?: LimitUpBlockingScope | string;
   pending_reasons?: string[];
   execution_permission?: "research_only" | string;
@@ -330,6 +335,7 @@ export interface LimitUpSignalSnapshot {
     };
     lanes: Record<LimitUpLane, LimitUpLiveSignal[]>;
     actionable_recommendations?: LimitUpLiveSignal[];
+    preboard_candidates?: LimitUpLiveSignal[];
     portfolio?: LimitUpLiveSignal[];
     watchlist?: LimitUpLiveSignal[];
     execution_schedule?: LimitUpExecutionSchedule;
@@ -660,6 +666,7 @@ export interface LimitUpLaneLedger {
   validation_phase?: HistoryValidationPhase | string;
   lane: BoardLaneKey | null;
   exit_mode: ExitMode;
+  candidate_count?: number;
   selected_count: number;
   trades: LimitUpLaneLedgerTrade[];
   observations?: LimitUpLaneLedgerTrade[];

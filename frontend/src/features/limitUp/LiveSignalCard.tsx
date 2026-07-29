@@ -27,9 +27,10 @@ interface LiveSignalCardProps {
   signal: LimitUpLiveSignal;
   stale: boolean;
   paused: boolean;
+  preboard?: boolean;
 }
 
-export function LiveSignalCard({ signal, stale, paused }: LiveSignalCardProps) {
+export function LiveSignalCard({ signal, stale, paused, preboard = false }: LiveSignalCardProps) {
   const state = liveSignalPresentation(signal, stale, paused);
   const actionable = state.tone === "positive";
   const observation = state.tone === "warning";
@@ -51,8 +52,9 @@ export function LiveSignalCard({ signal, stale, paused }: LiveSignalCardProps) {
   ].slice(0, 5).join(" · ") || factorSummary;
   const stockEvidence = signal.historical_evidence;
   const conceptEvidence = signal.concept_name
-    ? `${signal.concept_name} · 强度${signal.concept_strength_rank ?? "-"} · ${signal.concept_strong_5_count ?? 0}只涨超5% · 概念龙${signal.concept_leader_rank ?? "-"}`
+    ? `${signal.concept_name} · 强度${formatNumber(signal.concept_strength_score, 1)} · 排名${signal.concept_strength_rank ?? "-"} · 概念龙${signal.concept_leader_rank ?? "-"}`
     : "概念共振待确认";
+  const stateLabel = preboard ? "触板条件就绪" : state.label;
   const conceptDegraded = (
     (signal.concept_snapshot_age_seconds ?? 0) > 45
     || (signal.concept_coverage_ratio ?? 1) < 0.9
@@ -81,7 +83,7 @@ export function LiveSignalCard({ signal, stale, paused }: LiveSignalCardProps) {
                 : "border-border bg-muted/40 text-muted-foreground",
           )}
         >
-          {state.label}
+          {stateLabel}
         </span>
         <div className="min-w-0">
           <StockIdentityLink
@@ -132,7 +134,7 @@ export function LiveSignalCard({ signal, stale, paused }: LiveSignalCardProps) {
         </div>
 
         <div className="min-w-0 space-y-1 lg:border-l lg:pl-6">
-          <InstructionRow label="买入" value={signal.buy_instruction ?? signal.buy_condition ?? "条件待确认"} />
+          <InstructionRow label={preboard ? "观察" : "买入"} value={signal.buy_instruction ?? signal.buy_condition ?? "条件待确认"} />
           <InstructionRow label="卖出" value={signal.sell_instruction ?? signal.sell_condition ?? "D+1尾盘按官方收盘价统一卖出"} />
           <InstructionRow label="取消" value={signal.cancel_checks?.join("；") ?? signal.cancel_condition} />
           <div className="pt-1 text-muted-foreground">
@@ -150,7 +152,14 @@ export function LiveSignalCard({ signal, stale, paused }: LiveSignalCardProps) {
       </div>
 
       <footer className="grid grid-cols-2 gap-px overflow-hidden rounded-b-lg border-t bg-border sm:grid-cols-4">
-        {signal.board_lane === "first_board" ? (
+        {preboard ? (
+          <>
+            <MetricCell label="板后质量胜率" value={formatPct(signal.quality_win_probability == null ? null : signal.quality_win_probability * 100)} tone={rateTone(signal.quality_win_probability == null ? null : signal.quality_win_probability * 100)} />
+            <MetricCell label="预计 D+1" value={formatPct(signal.quality_expected_d1_net_return_pct)} tone={amountTone(signal.quality_expected_d1_net_return_pct)} />
+            <MetricCell label="触板条件" value="已齐" tone="text-rise" />
+            <MetricCell label="实时动能" value={formatNumber(signal.lane_support_score, 1)} />
+          </>
+        ) : signal.board_lane === "first_board" ? (
           <>
             <MetricCell label="个股联合率" value={formatPct(stockEvidence?.historical_win_rate)} tone={rateTone(stockEvidence?.historical_win_rate)} />
             <MetricCell label={`同股D+1 (${stockEvidence?.d1_money_effect_sample_count ?? 0})`} value={formatPct(stockEvidence?.d1_money_effect_win_rate)} tone={rateTone(stockEvidence?.d1_money_effect_win_rate)} />

@@ -70,6 +70,13 @@ _REPLAY_OBSERVATION_COLUMN_NAMES = (
     "stock_main_net_inflow_ratio",
     "history_sample_count",
     "historical_combined_rate",
+    "public_quality_preparation_passed",
+    "public_quality_touch_ready",
+    "public_quality_actionable",
+    "validation_passed",
+    "quality_priority_tier",
+    "quality_win_probability",
+    "quality_expected_d1_net_return_pct",
     "formal_action",
     "lane_blocker_codes",
     "blocker_codes",
@@ -338,9 +345,16 @@ def project_observation(
         "public_quality_gate_passed": (
             public_quality.get("public_quality_gate_passed") is True
         ),
+        "public_quality_preparation_passed": (
+            public_quality.get("public_quality_preparation_passed") is True
+        ),
+        "public_quality_touch_ready": (
+            public_quality.get("public_quality_touch_ready") is True
+        ),
         "public_quality_actionable": (
             public_quality.get("public_quality_actionable") is True
         ),
+        "validation_passed": formal.get("validation_passed") is True,
         "public_quality_reason": _optional_text(
             public_quality.get("public_quality_reason"),
             max_length=160,

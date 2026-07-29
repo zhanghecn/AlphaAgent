@@ -139,13 +139,42 @@ def test_public_quality_becomes_actionable_only_after_real_trigger() -> None:
     untriggered = public_quality_gate(candidate, trigger_observed=False)
     actionable = public_quality_gate(candidate, trigger_observed=True)
 
-    assert untriggered["public_quality_status"] == "rejected"
-    assert untriggered["public_quality_reason"] == "trigger_not_observed"
+    assert untriggered["public_quality_status"] == "qualified_waiting_trigger"
+    assert untriggered["public_quality_reason"] == "waiting_for_trigger"
+    assert untriggered["public_quality_preparation_passed"] is True
+    assert untriggered["public_quality_touch_ready"] is True
     assert untriggered["public_quality_actionable"] is False
     assert actionable["public_quality_status"] == "actionable"
+    assert actionable["public_quality_preparation_passed"] is True
+    assert actionable["public_quality_touch_ready"] is True
     assert actionable["public_quality_actionable"] is True
     assert actionable["quality_win_probability"] == pytest.approx(0.60)
     assert actionable["quality_expected_d1_net_return_pct"] == pytest.approx(1.2895)
+
+
+def test_public_quality_exposes_early_b_preparation_before_entry_clock() -> None:
+    decision = public_quality_gate(
+        _timed(
+            {
+                "lane": "first_board",
+                "prior_limit_count_126": 4,
+                "prior_industry_turnover_ratio_5d": 0.8,
+                "stock_d1_sample_count": 5,
+                "stock_d1_win_rate": 60.0,
+                "stock_d1_average_return_pct": 1.5,
+                "stock_gene_combined_win_rate": 40.0,
+            },
+            "10:20:00",
+        ),
+        trigger_observed=False,
+    )
+
+    assert decision["quality_priority_tier"] == "B_recognition_only"
+    assert decision["public_quality_preparation_passed"] is True
+    assert decision["public_quality_touch_ready"] is False
+    assert decision["public_quality_actionable"] is False
+    assert decision["public_quality_status"] == "preparing"
+    assert decision["public_quality_reason"] == "B_recognition_only_outside_entry_window"
 
 
 def test_public_quality_rejects_stock_shrinkage_below_quality_floor() -> None:

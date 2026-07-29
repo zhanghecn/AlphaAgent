@@ -1773,11 +1773,13 @@ def test_lane_ledger_exposes_d_buy_and_d1_sell_times(monkeypatch) -> None:
     assert trade["return_pct"] == 3.2
 
 
-def test_product_ledger_uses_scheduled_account_when_lane_is_omitted(monkeypatch) -> None:
+def test_product_ledger_uses_full_formal_recommendations_when_lane_is_omitted(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(
         history_service.history_repository,
         "load_history_day",
-        lambda *_args: _lane_replay_day(),
+        lambda *_args: _lane_replay_day(trade_date="2026-06-11"),
     )
     monkeypatch.setattr(
         history_service,
@@ -1787,7 +1789,7 @@ def test_product_ledger_uses_scheduled_account_when_lane_is_omitted(monkeypatch)
                 {
                     "lane": "first_board",
                     "vt_symbol": "600001.SSE",
-                    "name": "固定窗口样本",
+                    "name": "两仓账户已买样本",
                     "buy_date": "2026-06-10",
                     "buy_time": "10:12:00",
                     "buy_price": 11.0,
@@ -1804,8 +1806,42 @@ def test_product_ledger_uses_scheduled_account_when_lane_is_omitted(monkeypatch)
             "orders": [
                 {
                     "side": "BUY",
-                    "status": "filled",
-                    "trade_date": "2026-06-10",
+                    "status": "skipped",
+                    "trade_date": "2026-06-11",
+                    "trade_time": "13:00:00",
+                    "vt_symbol": "600002.SSE",
+                    "name": "容量跳过样本",
+                    "lane": "first_board",
+                    "reason": "reserved_for_later_a",
+                    "buy_price": 12.3,
+                },
+            ],
+            "recommendation_quality": {
+                "position_constraints_applied": False,
+                "trades": [
+                    {
+                        "lane": "first_board",
+                        "vt_symbol": "600002.SSE",
+                        "name": "全量正式推荐样本",
+                        "buy_date": "2026-06-11",
+                        "buy_time": "13:00:00",
+                        "buy_price": 12.3,
+                        "sell_date": "2026-06-12",
+                        "sell_time": "15:00:00",
+                        "sell_price": 12.9,
+                        "return_pct": 4.8,
+                        "d1_outcome": "d1_premium",
+                        "d_board_status": "sealed",
+                        "execution_confidence": "three_minute_path_without_queue",
+                    }
+                ],
+            },
+            "daily_results": [
+                {
+                    "result_date": "2026-06-11",
+                    "position_count": 0,
+                    "utilization_pct": 0.0,
+                    "total_equity": 104_800.0,
                 }
             ],
             "validation": {"passed": False, "status": "research_only", "checks": []},
@@ -1814,12 +1850,15 @@ def test_product_ledger_uses_scheduled_account_when_lane_is_omitted(monkeypatch)
         },
     )
 
-    ledger = history_service.get_history_ledger(date(2026, 6, 10), lane=None)
+    ledger = history_service.get_history_ledger(date(2026, 6, 11), lane=None)
 
-    assert ledger["lane"] is None
-    assert ledger["exit_mode"] == "next_close"
+    assert ledger["action"] == "normal"
+    assert ledger["candidate_count"] == 1
     assert ledger["selected_count"] == 1
+    assert ledger["trades"][0]["vt_symbol"] == "600002.SSE"
     assert ledger["trades"][0]["sell_time"] == "15:00:00"
+    assert "skipped_orders" not in ledger
+    assert "account_day" not in ledger
 
 
 def test_lane_ledger_uses_candidate_dynamic_exit_decision(monkeypatch) -> None:

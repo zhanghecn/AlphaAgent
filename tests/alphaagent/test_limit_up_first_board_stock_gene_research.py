@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 from alphaagent.server.services.limit_up.first_board_stock_gene_research import (
+    attach_prior_all_touch_d1_evidence_to_orders,
     attach_prior_stock_gene_evidence_to_orders,
     build_causal_first_board_recommendation_report,
     build_first_board_stock_gene_ranking_report,
@@ -60,6 +61,39 @@ def test_scheduled_orders_receive_only_prior_same_stock_evidence() -> None:
     assert enriched[0]["stock_gene_seal_rate"] == 80.0
     assert enriched[0]["stock_gene_combined_win_rate"] == 40.0
     assert "stock_d1_sample_count" not in enriched[1]
+
+
+def test_all_touch_d1_evidence_includes_failed_seals() -> None:
+    failed = _event("600001.SSE", "2026-01-05", return_pct=-4.0)
+    failed["outcome"]["sealed"] = False
+    days = [
+        _day(
+            "2026-01-02",
+            [
+                _event("600001.SSE", "2026-01-05", return_pct=2.0),
+                failed,
+            ],
+        ),
+        _day("2026-01-05", []),
+        _day("2026-01-06", []),
+    ]
+    orders = [
+        {
+            "vt_symbol": "600001.SSE",
+            "lane": "first_board",
+            "signal_date": "2026-01-06",
+        }
+    ]
+
+    sealed_only = attach_prior_stock_gene_evidence_to_orders(days, orders)[0]
+    all_touches = attach_prior_all_touch_d1_evidence_to_orders(days, orders)[0]
+
+    assert sealed_only["stock_d1_sample_count"] == 1
+    assert sealed_only["stock_d1_win_rate"] == 100.0
+    assert all_touches["stock_all_touch_d1_sample_count"] == 2
+    assert all_touches["stock_all_touch_d1_win_count"] == 1
+    assert all_touches["stock_all_touch_d1_win_rate"] == 50.0
+    assert all_touches["stock_all_touch_d1_average_return_pct"] == -1.0
 
 
 def test_combined_stock_gene_win_rate_multiplies_stock_rates() -> None:

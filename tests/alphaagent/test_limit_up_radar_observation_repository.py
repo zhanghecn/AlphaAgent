@@ -48,7 +48,10 @@ def test_radar_observations_define_point_in_time_flow_sources() -> None:
         "public_quality_contract_version",
         "public_quality_status",
         "public_quality_gate_passed",
+        "public_quality_preparation_passed",
+        "public_quality_touch_ready",
         "public_quality_actionable",
+        "validation_passed",
         "public_quality_reason",
         "quality_win_probability",
         "quality_expected_d1_net_return_pct",
@@ -186,6 +189,14 @@ def test_flow_source_schema_patches_are_idempotent() -> None:
 
     schema._apply_compatible_schema_patches(Engine())
 
+    assert (
+        "ALTER TABLE limit_up_radar_observations DROP COLUMN IF EXISTS early_action"
+        in executed
+    )
+    assert (
+        "ALTER TABLE limit_up_radar_observations DROP COLUMN IF EXISTS early_entry_kind"
+        in executed
+    )
     for field in (
         "quote_speed FLOAT",
         "quote_amplitude_pct FLOAT",
@@ -215,7 +226,10 @@ def test_flow_source_schema_patches_are_idempotent() -> None:
         "public_quality_contract_version VARCHAR(80)",
         "public_quality_status VARCHAR(40)",
         "public_quality_gate_passed BOOLEAN",
+        "public_quality_preparation_passed BOOLEAN",
+        "public_quality_touch_ready BOOLEAN",
         "public_quality_actionable BOOLEAN",
+        "validation_passed BOOLEAN",
         "public_quality_reason VARCHAR(160)",
         "quality_win_probability FLOAT",
         "quality_expected_d1_net_return_pct FLOAT",
@@ -395,8 +409,11 @@ def test_projection_preserves_bounded_short_horizon_evidence() -> None:
     assert row["core_quality_gate_passed"] is True
     assert row["core_quality_gate_reason"] == "qualified"
     assert row["quality_priority_tier"] == "A_industry_expanding"
-    assert row["public_quality_status"] == "rejected"
+    assert row["public_quality_status"] == "preparing"
+    assert row["public_quality_preparation_passed"] is True
+    assert row["public_quality_touch_ready"] is False
     assert row["public_quality_actionable"] is False
+    assert row["validation_passed"] is False
     assert row["quality_win_probability"] == 35 / 41
     assert row["quality_expected_d1_net_return_pct"] == 3.0876
     assert row["concept_near_limit_count"] == 3
@@ -436,7 +453,9 @@ def test_projection_recomputes_missing_core_quality_from_signal_time_fields() ->
     assert row["core_quality_gate_passed"] is True
     assert row["core_quality_gate_reason"] == "qualified"
     assert row["quality_priority_tier"] == "B_recognition_only"
-    assert row["public_quality_status"] == "rejected"
+    assert row["public_quality_status"] == "qualified_waiting_trigger"
+    assert row["public_quality_preparation_passed"] is True
+    assert row["public_quality_touch_ready"] is True
     assert row["quality_win_probability"] == 0.6
     assert row["quality_expected_d1_net_return_pct"] == 1.2895
 

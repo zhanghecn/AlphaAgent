@@ -84,6 +84,7 @@ import {
 } from "@/features/limitUp/nextSessionPlan";
 import {
   liveSignalsForScope,
+  preboardSignals,
 } from "@/features/limitUp/livePortfolio";
 import {
   limitUpLaneLabel,
@@ -184,7 +185,7 @@ export function LimitUpPage() {
   );
   const ledgerTimelineQueries = useQueries({
     queries: timelineDates.map((date) => ({
-      queryKey: ["limitUpScheduledLedger", date],
+      queryKey: ["limitUpFormalLedger", date],
       queryFn: () => fetchLimitUpHistoryLedger({ date }),
       enabled: view === "ledger",
       staleTime: Infinity,
@@ -260,7 +261,7 @@ export function LimitUpPage() {
       setRebuildError(null);
       void Promise.all([
         queryClient.invalidateQueries({ queryKey: ["limitUpHistoryDates"] }),
-        queryClient.invalidateQueries({ queryKey: ["limitUpScheduledLedger"] }),
+        queryClient.invalidateQueries({ queryKey: ["limitUpFormalLedger"] }),
         queryClient.invalidateQueries({ queryKey: ["limitUpLaneBacktest"] }),
       ]).then(() => {
         toast({
@@ -578,6 +579,7 @@ function LiveView({
   onOpenBacktest,
 }: LiveViewProps) {
   const signals = useMemo(() => liveSignalsForScope(snapshot, "portfolio"), [snapshot]);
+  const preboard = useMemo(() => preboardSignals(snapshot), [snapshot]);
   const tracePanel = (
     <LiveTracePanel
       dates={traceDates}
@@ -603,9 +605,29 @@ function LiveView({
       <LiveCommandBar
         snapshot={snapshot}
         signalCount={signals.length}
+        preboardCount={preboard.length}
         report={portfolioReport}
         onOpenBacktest={onOpenBacktest}
       />
+      {preboard.length > 0 && (
+        <div className="border-b">
+          <div className="flex items-center gap-2 px-3 pt-3 text-xs font-semibold text-foreground sm:px-4">
+            板前候选
+            <span className="tabular-nums text-muted-foreground">{preboard.length}</span>
+          </div>
+          <div className="grid gap-3 px-3 py-3 sm:px-4 xl:grid-cols-2">
+            {preboard.map((signal) => (
+              <LiveSignalCard
+                key={signal.vt_symbol}
+                signal={signal}
+                stale={snapshot.data_quality.is_stale}
+                paused={snapshot.session_stage === "lunch"}
+                preboard
+              />
+            ))}
+          </div>
+        </div>
+      )}
       {signals.length ? (
         <div className="grid gap-3 px-3 py-3 sm:px-4 xl:grid-cols-2">
           {signals.map((signal) => (
@@ -621,7 +643,9 @@ function LiveView({
         <EmptyRow text={
           planMode
             ? "当前没有入选次交易时段的综合推荐观察候选"
-            : "当前没有通过正式门禁的买点，保持现金"
+            : preboard.length
+              ? "当前没有触板后正式买点"
+              : "当前没有通过正式门禁的买点，保持现金"
         } />
       )}
       {tracePanel}
@@ -695,11 +719,13 @@ function GateLamp({ snapshot }: { snapshot: LimitUpSignalSnapshot }) {
 function LiveCommandBar({
   snapshot,
   signalCount,
+  preboardCount,
   report,
   onOpenBacktest,
 }: {
   snapshot: LimitUpSignalSnapshot;
   signalCount: number;
+  preboardCount: number;
   report?: LimitUpLaneBacktest;
   onOpenBacktest: () => void;
 }) {
@@ -720,6 +746,14 @@ function LiveCommandBar({
             {signalCount}
           </span>
         </span>
+        {!planMode && (
+          <span className="flex items-baseline gap-1.5 text-xs text-muted-foreground">
+            板前候选
+            <span className="font-display text-lg font-bold leading-none tabular-nums text-foreground">
+              {preboardCount}
+            </span>
+          </span>
+        )}
         <span className="text-xs text-muted-foreground">
           封板 {snapshot.market_context.sealed_count ?? 0} · 炸板 {snapshot.market_context.failed_count ?? 0} · {snapshot.source}
         </span>

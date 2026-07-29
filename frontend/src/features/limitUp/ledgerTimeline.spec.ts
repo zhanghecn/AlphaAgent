@@ -22,7 +22,10 @@ function trade(overrides: Partial<LimitUpLaneLedgerTrade> = {}): LimitUpLaneLedg
   } as LimitUpLaneLedgerTrade;
 }
 
-function ledger(trades: LimitUpLaneLedgerTrade[], observations: LimitUpLaneLedgerTrade[] = []): LimitUpLaneLedger {
+function ledger(
+  trades: LimitUpLaneLedgerTrade[],
+  observations: LimitUpLaneLedgerTrade[] = [],
+): LimitUpLaneLedger {
   return {
     status: "ready",
     trade_date: "2026-07-17",
@@ -56,6 +59,7 @@ describe("summarizeLedgerDay", () => {
     expect(summary.observationOnly).toBe(true);
     expect(summary.tradeCount).toBe(0);
   });
+
 });
 
 describe("weekdayLabel", () => {

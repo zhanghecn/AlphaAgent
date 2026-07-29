@@ -1557,7 +1557,10 @@ limit_up_radar_observations = Table(
     Column("public_quality_contract_version", String(80), nullable=True),
     Column("public_quality_status", String(40), nullable=True),
     Column("public_quality_gate_passed", Boolean, nullable=True),
+    Column("public_quality_preparation_passed", Boolean, nullable=True),
+    Column("public_quality_touch_ready", Boolean, nullable=True),
     Column("public_quality_actionable", Boolean, nullable=True),
+    Column("validation_passed", Boolean, nullable=True),
     Column("public_quality_reason", String(160), nullable=True),
     Column("quality_win_probability", Float, nullable=True),
     Column("quality_expected_d1_net_return_pct", Float, nullable=True),
@@ -1823,6 +1826,8 @@ def _apply_compatible_schema_patches(engine) -> None:
     """Patch columns added after early local databases were created."""
 
     patches = (
+        "ALTER TABLE limit_up_radar_observations DROP COLUMN IF EXISTS early_action",
+        "ALTER TABLE limit_up_radar_observations DROP COLUMN IF EXISTS early_entry_kind",
         "ALTER TABLE stocks ADD COLUMN IF NOT EXISTS volume_ratio FLOAT",
         "ALTER TABLE stock_daily_bars ADD COLUMN IF NOT EXISTS turnover_rate FLOAT",
         "ALTER TABLE sync_batch_schedules ADD COLUMN IF NOT EXISTS action VARCHAR(40) NOT NULL DEFAULT 'sync'",
@@ -1880,7 +1885,10 @@ def _apply_compatible_schema_patches(engine) -> None:
         "ALTER TABLE limit_up_radar_observations ADD COLUMN IF NOT EXISTS public_quality_contract_version VARCHAR(80)",
         "ALTER TABLE limit_up_radar_observations ADD COLUMN IF NOT EXISTS public_quality_status VARCHAR(40)",
         "ALTER TABLE limit_up_radar_observations ADD COLUMN IF NOT EXISTS public_quality_gate_passed BOOLEAN",
+        "ALTER TABLE limit_up_radar_observations ADD COLUMN IF NOT EXISTS public_quality_preparation_passed BOOLEAN",
+        "ALTER TABLE limit_up_radar_observations ADD COLUMN IF NOT EXISTS public_quality_touch_ready BOOLEAN",
         "ALTER TABLE limit_up_radar_observations ADD COLUMN IF NOT EXISTS public_quality_actionable BOOLEAN",
+        "ALTER TABLE limit_up_radar_observations ADD COLUMN IF NOT EXISTS validation_passed BOOLEAN",
         "ALTER TABLE limit_up_radar_observations ADD COLUMN IF NOT EXISTS public_quality_reason VARCHAR(160)",
         "ALTER TABLE limit_up_radar_observations ADD COLUMN IF NOT EXISTS quality_win_probability FLOAT",
         "ALTER TABLE limit_up_radar_observations ADD COLUMN IF NOT EXISTS quality_expected_d1_net_return_pct FLOAT",

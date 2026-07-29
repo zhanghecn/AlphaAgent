@@ -1091,6 +1091,259 @@ def test_live_watchlist_only_keeps_candidates_that_can_transition_to_buy() -> No
     assert all("今日拒买" not in str(row.get("reason") or "") for row in watchlist)
 
 
+def test_live_preboard_candidates_publish_touch_ready_near_limit_only() -> None:
+    prepared = {
+        "vt_symbol": "600002.SSE",
+        "name": "板前样例",
+        "board_lane": "first_board",
+        "state": "near_limit",
+        "change_pct": 8.4,
+        "distance_to_limit_pct": 1.4,
+        "last_price": 10.84,
+        "limit_price": 11.0,
+        "action": "pass",
+        "research_action": "buy_now",
+        "signal_state": "approaching_trigger",
+        "blocking_scope": "none",
+        "validation_passed": True,
+        "public_quality_preparation_passed": True,
+        "public_quality_touch_ready": True,
+        "public_quality_actionable": False,
+        "quality_priority_tier": "A_industry_expanding",
+        "quality_win_probability": 0.72,
+        "quality_expected_d1_net_return_pct": 2.1,
+        "concept_name": "算力",
+        "concept_state": "warming",
+        "concept_strength_score": 78.0,
+        "concept_leader_rank": 1,
+        "reason": "等待真实触板",
+    }
+    recommendations = {
+        "lanes": {
+            "now": [
+                prepared,
+                {**prepared, "vt_symbol": "600003.SSE", "change_pct": 2.9},
+                {
+                    **prepared,
+                    "vt_symbol": "600004.SSE",
+                    "state": "sealed",
+                    "public_quality_actionable": True,
+                },
+                {
+                    **prepared,
+                    "vt_symbol": "600005.SSE",
+                    "public_quality_preparation_passed": True,
+                    "public_quality_touch_ready": False,
+                },
+                {**prepared, "vt_symbol": "600006.SSE", "validation_passed": False},
+                {**prepared, "vt_symbol": "600007.SSE", "blocking_scope": "dynamic"},
+            ],
+            "tail": [],
+            "next_auction": [],
+        }
+    }
+
+    rows = live_service._build_live_preboard_candidates(recommendations)
+
+    assert [row["vt_symbol"] for row in rows] == ["600002.SSE"]
+    assert rows[0]["action"] == "observe"
+    assert rows[0]["entry_kind"] == "preboard"
+    assert rows[0]["preboard_state"] == "touch_ready"
+    assert rows[0]["buy_instruction"] == "板前候选；接近涨停时结合实时动能自行决策"
+
+    assert live_service._build_live_preboard_candidates(
+        recommendations,
+        snapshot_age_seconds=21,
+    ) == []
+
+
+def test_preboard_candidate_upgrades_to_formal_buy_after_physical_touch() -> None:
+    base = {
+        "vt_symbol": "600002.SSE",
+        "name": "状态迁移样例",
+        "board_lane": "first_board",
+        "state": "near_limit",
+        "change_pct": 8.4,
+        "distance_to_limit_pct": 1.4,
+        "last_price": 10.84,
+        "limit_price": 11.0,
+        "action": "buy_now",
+        "entry_kind": "momentum",
+        "signal_state": "approaching_trigger",
+        "blocking_scope": "none",
+        "validation_passed": True,
+        "signal_time": "10:35:00",
+        "buy_time": "10:35:00",
+        "first_limit_time": "00:00:00",
+        "signal_kind": "first_touch",
+        "prior_limit_count_126": 3,
+        "prior_industry_turnover_ratio_5d": 1.1,
+        "stock_d1_sample_count": 5,
+        "stock_d1_win_rate": 70.0,
+        "stock_d1_average_return_pct": 2.0,
+        "stock_gene_combined_win_rate": 40.0,
+        "concept_name": "算力",
+        "concept_state": "warming",
+        "concept_strength_score": 78.0,
+        "concept_leader_rank": 1,
+    }
+    before_touch = live_service._apply_core_quality_gate(
+        {"lanes": {"now": [base], "tail": [], "next_auction": []}}
+    )
+    before_signal = before_touch["lanes"]["now"][0]
+
+    assert before_signal["public_quality_trigger_observed"] is False
+    assert before_signal["public_quality_touch_ready"] is True
+    assert [
+        row["vt_symbol"]
+        for row in live_service._build_live_preboard_candidates(before_touch)
+    ] == ["600002.SSE"]
+    assert live_service._build_live_actionable_recommendations(
+        before_touch,
+        captured_at=datetime(2026, 7, 29, 10, 35, tzinfo=SHANGHAI),
+        snapshot_age_seconds=5,
+    ) == []
+
+    touched = {
+        **base,
+        "state": "sealed",
+        "change_pct": 10.0,
+        "distance_to_limit_pct": 0.0,
+        "last_price": 11.0,
+        "first_limit_time": "10:36:00",
+        "signal_time": "10:36:00",
+        "buy_time": "10:36:00",
+        "blocking_scope": "none",
+        "signal_state": "trigger_ready",
+    }
+    after_touch = live_service._apply_core_quality_gate(
+        {"lanes": {"now": [touched], "tail": [], "next_auction": []}}
+    )
+
+    assert live_service._build_live_preboard_candidates(after_touch) == []
+    assert [
+        row["vt_symbol"]
+        for row in live_service._build_live_actionable_recommendations(
+            after_touch,
+            captured_at=datetime(2026, 7, 29, 10, 36, tzinfo=SHANGHAI),
+            snapshot_age_seconds=5,
+        )
+    ] == ["600002.SSE"]
+
+
+def test_preboard_uses_snapshot_time_without_overwriting_real_touch_time() -> None:
+    giant_network = {
+        "vt_symbol": "002558.SZSE",
+        "name": "巨人网络",
+        "board_lane": "first_board",
+        "state": "near_limit",
+        "change_pct": 6.604,
+        "distance_to_limit_pct": 3.396,
+        "last_price": 26.15,
+        "limit_price": 27.0,
+        "action": "buy_now",
+        "entry_kind": "momentum",
+        "signal_state": "approaching_trigger",
+        "blocking_scope": "none",
+        "validation_passed": True,
+        "first_limit_time": None,
+        "last_limit_time": None,
+        "signal_kind": "first_touch",
+        "prior_limit_count_126": 4,
+        "prior_industry_turnover_ratio_5d": 0.8,
+        "stock_d1_sample_count": 5,
+        "stock_d1_win_rate": 70.0,
+        "stock_d1_average_return_pct": 2.0,
+        "stock_gene_combined_win_rate": 40.0,
+    }
+    before_b_window = live_service._apply_core_quality_gate(
+        {"lanes": {"now": [giant_network], "tail": [], "next_auction": []}},
+        preboard_evaluation_at=datetime(2026, 7, 29, 10, 29, 59, tzinfo=SHANGHAI),
+    )
+    before_signal = before_b_window["lanes"]["now"][0]
+
+    assert before_signal["public_quality_touch_ready"] is False
+    assert live_service._build_live_preboard_candidates(before_b_window) == []
+
+    preboard = live_service._apply_core_quality_gate(
+        {"lanes": {"now": [giant_network], "tail": [], "next_auction": []}},
+        preboard_evaluation_at=datetime(2026, 7, 29, 10, 31, 57, tzinfo=SHANGHAI),
+    )
+    preboard_signal = preboard["lanes"]["now"][0]
+
+    assert preboard_signal["public_quality_trigger_observed"] is False
+    assert preboard_signal["public_quality_touch_ready"] is True
+    assert preboard_signal["preboard_quality_evaluation_time"] == "10:31:57"
+    assert "signal_time" not in preboard_signal
+    assert "buy_time" not in preboard_signal
+    assert [
+        row["vt_symbol"]
+        for row in live_service._build_live_preboard_candidates(preboard)
+    ] == ["002558.SZSE"]
+
+    touched = live_service._apply_core_quality_gate(
+        {
+            "lanes": {
+                "now": [
+                    {
+                        **giant_network,
+                        "state": "sealed",
+                        "change_pct": 9.9878,
+                        "distance_to_limit_pct": 0.0,
+                        "last_price": 27.0,
+                        "first_limit_time": "10:53:18",
+                    }
+                ],
+                "tail": [],
+                "next_auction": [],
+            }
+        },
+        preboard_evaluation_at=datetime(2026, 7, 29, 10, 53, 18, tzinfo=SHANGHAI),
+    )
+    touched_signal = touched["lanes"]["now"][0]
+
+    assert touched_signal["signal_time"] == "10:53:18"
+    assert touched_signal["buy_time"] == "10:53:18"
+    assert "preboard_quality_evaluation_time" not in touched_signal
+    assert touched_signal["public_quality_actionable"] is True
+    assert live_service._build_live_preboard_candidates(touched) == []
+
+
+def test_early_touch_never_uses_snapshot_time_to_skip_reseal_rule() -> None:
+    early_touch = {
+        "vt_symbol": "600002.SSE",
+        "name": "早触样例",
+        "board_lane": "first_board",
+        "state": "failed",
+        "change_pct": 8.6,
+        "last_price": 10.86,
+        "limit_price": 11.0,
+        "action": "buy_now",
+        "signal_state": "approaching_trigger",
+        "blocking_scope": "none",
+        "validation_passed": True,
+        "first_limit_time": "10:20:00",
+        "last_limit_time": "10:20:00",
+        "signal_kind": "first_touch",
+        "prior_limit_count_126": 4,
+        "prior_industry_turnover_ratio_5d": 0.8,
+        "stock_d1_sample_count": 5,
+        "stock_d1_win_rate": 70.0,
+        "stock_d1_average_return_pct": 2.0,
+        "stock_gene_combined_win_rate": 40.0,
+    }
+
+    result = live_service._apply_core_quality_gate(
+        {"lanes": {"now": [early_touch], "tail": [], "next_auction": []}},
+        preboard_evaluation_at=datetime(2026, 7, 29, 10, 40, tzinfo=SHANGHAI),
+    )
+    signal = result["lanes"]["now"][0]
+
+    assert signal["public_quality_touch_ready"] is False
+    assert "preboard_quality_evaluation_time" not in signal
+    assert live_service._build_live_preboard_candidates(result) == []
+
+
 def test_lane_validation_attaches_strategy_history_summary() -> None:
     recommendations = {
         "lanes": {

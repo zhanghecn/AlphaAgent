@@ -1,7 +1,10 @@
 import { useState } from "react";
 import { ChevronDown } from "lucide-react";
 
-import type { LimitUpLaneLedger, LimitUpLaneLedgerTrade } from "@/api/limitUp";
+import type {
+  LimitUpLaneLedger,
+  LimitUpLaneLedgerTrade,
+} from "@/api/limitUp";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { cn } from "@/lib/utils";
 import { summarizeLedgerDay, weekdayLabel } from "./ledgerTimeline";
@@ -66,8 +69,8 @@ function LedgerDayColumn({ day }: { day: LedgerTimelineDay }) {
               ? summary.observationOnly
                 ? `研究观察 ${summary.observations.length} 只 · 不计入交割`
                 : summary.tradeCount
-                  ? `交割 ${summary.tradeCount} 只 · ${summary.winCount}/${summary.closedCount} 胜`
-                  : "空仓 · 无通过硬门候选"
+                  ? `正式交割 ${summary.tradeCount} 只 · ${summary.winCount}/${summary.closedCount} 胜`
+                  : "空仓 · 无正式买点"
               : "无数据"}
         </div>
       </header>

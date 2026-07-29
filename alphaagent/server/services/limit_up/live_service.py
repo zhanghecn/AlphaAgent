@@ -522,6 +522,10 @@ def empty_live_snapshot(
             "session_stage": session_stage(local_at),
             "market_gate": {"passed": False, "reasons": ["当前没有已保存的盘中快照"]},
             "lanes": {"now": [], "tail": [], "next_auction": []},
+            "actionable_recommendations": [],
+            "preboard_candidates": [],
+            "portfolio": [],
+            "watchlist": [],
         },
         "data_quality": {
             "status": "empty",
@@ -1312,8 +1316,8 @@ def _enrich_candidate(
             round(session_low_change, 4) if session_low_change is not None else None
         ),
         "previous_limit_up": previous_limit_up,
-        "first_limit_time": normalize_limit_time(raw.get("first_limit_time")),
-        "last_limit_time": normalize_limit_time(raw.get("last_limit_time")),
+        "first_limit_time": _observed_limit_time(raw.get("first_limit_time")),
+        "last_limit_time": _observed_limit_time(raw.get("last_limit_time")),
         "open_times": _integer(raw.get("open_times"), _pool_open_times(raw)),
         "seal_amount": seal_amount,
         "volume": _number(raw.get("volume")),
@@ -1513,7 +1517,7 @@ def _live_research_candidate(
     evaluation_time = captured_at.time().replace(microsecond=0).isoformat()
     state = str(candidate.get("state") or "")
     actual_first_touch = (
-        normalize_limit_time(candidate.get("first_limit_time"))
+        _observed_limit_time(candidate.get("first_limit_time"))
         if board_level >= 3 and state in {"sealed", "resealed", "failed"}
         else None
     )
@@ -1562,8 +1566,8 @@ def _live_relay_trigger(
             "relay_trigger_time": None,
             "relay_trigger_kind": None,
         }
-    first_time = normalize_limit_time(candidate.get("first_limit_time"))
-    last_time = normalize_limit_time(candidate.get("last_limit_time"))
+    first_time = _observed_limit_time(candidate.get("first_limit_time"))
+    last_time = _observed_limit_time(candidate.get("last_limit_time"))
     trigger_time: str | None = None
     trigger_kind: str | None = None
     if first_time and scheduled_execution.is_entry_time(first_time):
@@ -1649,6 +1653,7 @@ def _apply_live_risk_gates(
     validated = _apply_core_quality_gate(
         validated,
         prior_quality_state=prior_quality_state,
+        preboard_evaluation_at=captured_at,
     )
     quality = result.get("data_quality")
     quality = quality if isinstance(quality, Mapping) else {}
@@ -1664,6 +1669,10 @@ def _apply_live_risk_gates(
     validated["portfolio"] = _build_live_portfolio(
         validated,
         captured_at=captured_at,
+        snapshot_age_seconds=snapshot_age,
+    )
+    validated["preboard_candidates"] = _build_live_preboard_candidates(
+        validated,
         snapshot_age_seconds=snapshot_age,
     )
     validated["watchlist"] = _build_live_watchlist(validated)
@@ -1689,6 +1698,7 @@ def _apply_core_quality_gate(
     recommendations: Mapping[str, object],
     *,
     prior_quality_state: Mapping[str, object] | None = None,
+    preboard_evaluation_at: datetime | None = None,
 ) -> dict[str, object]:
     result = dict(recommendations)
     lanes = recommendations.get("lanes")
@@ -1741,6 +1751,7 @@ def _apply_core_quality_gate(
                 signal,
                 prior_ab_seen=prior_ab_seen,
                 c_already_selected=c_already_selected,
+                preboard_evaluation_at=preboard_evaluation_at,
             )
             annotated_lanes[lane_name][lane_index] = annotated
             if annotated.get("public_quality_actionable") is True and annotated.get(
@@ -1768,16 +1779,32 @@ def _apply_core_quality_to_signal(
     *,
     prior_ab_seen: bool = False,
     c_already_selected: bool = False,
+    preboard_evaluation_at: datetime | None = None,
 ) -> dict[str, object]:
+    evaluation_time = _preboard_quality_evaluation_time(
+        signal,
+        preboard_evaluation_at,
+    )
+    quality_input = (
+        {
+            **dict(signal),
+            "signal_time": evaluation_time,
+            "buy_time": evaluation_time,
+        }
+        if evaluation_time is not None
+        else signal
+    )
     result = {
         **dict(signal),
         **core_quality.public_quality_gate(
-            signal,
+            quality_input,
             prior_ab_seen=prior_ab_seen,
             c_already_selected=c_already_selected,
             trigger_observed=_limit_trigger_observed(signal),
         ),
     }
+    if evaluation_time is not None:
+        result["preboard_quality_evaluation_time"] = evaluation_time
     if (
         str(result.get("action") or "") in EXECUTABLE_ACTIONS
         and result["public_quality_actionable"] is not True
@@ -1801,14 +1828,28 @@ def _normalized_core_signal(signal: Mapping[str, object]) -> dict[str, object]:
         )
         result["signal_kind"] = signal_kind
     event_time = (
-        normalize_limit_time(result.get("last_limit_time"))
+        _observed_limit_time(result.get("last_limit_time"))
         if signal_kind == "reseal"
-        else normalize_limit_time(result.get("first_limit_time"))
+        else _observed_limit_time(result.get("first_limit_time"))
     )
     if event_time:
         result["signal_time"] = event_time
         result["buy_time"] = event_time
     return result
+
+
+def _preboard_quality_evaluation_time(
+    signal: Mapping[str, object],
+    captured_at: datetime | None,
+) -> str | None:
+    if captured_at is None or str(signal.get("state") or "") != "near_limit":
+        return None
+    if _limit_trigger_observed(signal) or any(
+        _observed_limit_time(signal.get(field))
+        for field in ("last_limit_time", "signal_time", "buy_time")
+    ):
+        return None
+    return _local_datetime(captured_at).time().replace(microsecond=0).isoformat()
 
 
 def _core_signal_time(signal: Mapping[str, object]) -> str:
@@ -1818,7 +1859,7 @@ def _core_signal_time(signal: Mapping[str, object]) -> str:
 def _limit_trigger_observed(signal: Mapping[str, object]) -> bool:
     """Use physical limit events, never a near-limit recommendation, as trigger."""
 
-    if normalize_limit_time(signal.get("first_limit_time")):
+    if _observed_limit_time(signal.get("first_limit_time")):
         return True
     return str(signal.get("state") or "") in {"sealed", "resealed", "failed"}
 
@@ -2175,6 +2216,69 @@ def _build_live_watchlist(
         sorted(observations.values(), key=_live_watchlist_sort_key)
     )
     return ordered[:LIVE_WATCHLIST_LIMIT]
+
+
+def _build_live_preboard_candidates(
+    recommendations: Mapping[str, object],
+    *,
+    snapshot_age_seconds: int = 0,
+) -> list[dict[str, object]]:
+    """Publish stocks whose only missing formal condition is a physical touch."""
+
+    if snapshot_age_seconds > scheduled_execution.MAX_SNAPSHOT_AGE_SECONDS:
+        return []
+
+    lanes = recommendations.get("lanes")
+    lanes = lanes if isinstance(lanes, Mapping) else {}
+    signals = lanes.get("now")
+    signals = signals if isinstance(signals, list) else []
+    selected: dict[str, dict[str, object]] = {}
+    for raw_signal in signals:
+        if not isinstance(raw_signal, Mapping):
+            continue
+        signal = dict(raw_signal)
+        symbol = str(signal.get("vt_symbol") or "")
+        change_pct = _number(signal.get("change_pct"))
+        if (
+            not symbol
+            or symbol in selected
+            or str(signal.get("board_lane") or "") not in PORTFOLIO_EXECUTION_LANES
+            or str(signal.get("state") or "") != "near_limit"
+            or change_pct is None
+            or change_pct < 3.0
+            or signal.get("public_quality_touch_ready") is not True
+            or signal.get("public_quality_actionable") is True
+            or signal.get("validation_passed") is not True
+            or str(signal.get("blocking_scope") or "") != "none"
+            or not _can_transition_to_live_buy(signal)
+        ):
+            continue
+        pending = ["等待真实触板", *list(signal.get("pending_reasons") or [])]
+        selected[symbol] = {
+            **signal,
+            "action": "observe",
+            "entry_kind": "preboard",
+            "execution_state": "watch",
+            "signal_state": "approaching_trigger",
+            "preboard_state": "touch_ready",
+            "trigger_price": signal.get("last_price"),
+            "buy_instruction": "板前候选；接近涨停时结合实时动能自行决策",
+            "reason": "完整正式质量与时点条件已齐，只等待真实触板",
+            "pending_reasons": list(dict.fromkeys(value for value in pending if value)),
+        }
+    return sorted(selected.values(), key=_live_preboard_sort_key)[:LIVE_WATCHLIST_LIMIT]
+
+
+def _live_preboard_sort_key(signal: Mapping[str, object]) -> tuple[object, ...]:
+    distance = _number(signal.get("distance_to_limit_pct"))
+    return (
+        core_quality.quality_tier_priority(signal),
+        -(_number(signal.get("quality_win_probability")) or 0.0),
+        -(_number(signal.get("quality_expected_d1_net_return_pct")) or 0.0),
+        _integer(signal.get("concept_leader_rank"), 1_000_000),
+        distance if distance is not None else 99.0,
+        str(signal.get("vt_symbol") or ""),
+    )
 
 
 def _can_transition_to_live_buy(signal: Mapping[str, object]) -> bool:
@@ -2951,6 +3055,7 @@ def downgrade_snapshot_to_stale(
     }
     for collection in (
         "actionable_recommendations",
+        "preboard_candidates",
         "portfolio",
         "watchlist",
     ):
@@ -3028,6 +3133,11 @@ def _number(value: object) -> float | None:
         return float(value) if value not in (None, "", "-") else None
     except (TypeError, ValueError):
         return None
+
+
+def _observed_limit_time(value: object) -> str | None:
+    normalized = normalize_limit_time(value)
+    return normalized if normalized not in {None, "00:00:00"} else None
 
 
 def _integer(value: object, default: int = 0) -> int:

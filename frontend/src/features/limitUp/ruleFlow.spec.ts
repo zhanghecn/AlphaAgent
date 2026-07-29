@@ -29,11 +29,11 @@ const guide = {
 } as unknown as LimitUpStrategyGuide;
 
 describe("buildRuleFlow", () => {
-  it("生成七步流程：市场门 → 板块筛选 → 雷达 → 动能 → 板块 → 排序 → 成交", () => {
+  it("生成八步流程：质量门 → 板前候选 → 触板 → 排序 → 成交", () => {
     const nodes = buildRuleFlow(guide);
-    expect(nodes).toHaveLength(7);
+    expect(nodes).toHaveLength(8);
     expect(nodes.map((node) => node.stage)).toEqual([
-      "gate", "filter", "radar", "momentum", "sector", "rank", "fill",
+      "gate", "filter", "radar", "preboard", "momentum", "sector", "rank", "fill",
     ]);
   });
 
@@ -61,7 +61,7 @@ describe("buildRuleFlow", () => {
   });
 
   it("正式买点必须由真实触板触发", () => {
-    const momentum = buildRuleFlow(guide).find((node) => node.stage === "momentum")!;
+    const momentum = buildRuleFlow(guide).find((node) => node.id === "momentum")!;
 
     expect(momentum.title).toContain("真实触板后");
     expect(momentum.purpose).toContain("重新执行完整公共质量门");

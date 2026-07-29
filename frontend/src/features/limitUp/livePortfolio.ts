@@ -55,6 +55,20 @@ export function liveSignalsForScope(
   return scope === "portfolio" ? sorted : sorted.slice(0, 4);
 }
 
+export function preboardSignals(
+  snapshot: LimitUpSignalSnapshot | undefined,
+): LimitUpLiveSignal[] {
+  if (!snapshot) return [];
+  const rows = snapshot.recommendations.preboard_candidates ?? [];
+  return rows.filter((signal) => (
+    signal.state === "near_limit"
+    && signal.public_quality_touch_ready === true
+    && signal.public_quality_actionable !== true
+    && signal.validation_passed === true
+    && signal.blocking_scope === "none"
+  ));
+}
+
 function canTransitionToBuy(signal: LimitUpLiveSignal): boolean {
   return (
     !NON_ACTIONABLE_STATES.has(signal.signal_state ?? "")

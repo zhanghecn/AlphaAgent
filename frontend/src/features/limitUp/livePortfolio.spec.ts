@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { LimitUpLiveSignal, LimitUpSignalSnapshot } from "@/api/limitUp";
-import { liveSignalsForScope } from "./livePortfolio";
+import { liveSignalsForScope, preboardSignals } from "./livePortfolio";
 
 function signal(
   symbol: string,
@@ -81,6 +81,33 @@ describe("live limit-up portfolio presentation", () => {
     const watchlist = [signal("600011.SSE", 1, "observe")];
 
     expect(liveSignalsForScope(snapshot({ portfolio: [], watchlist }), "portfolio")).toEqual([]);
+  });
+
+  it("keeps prepared preboard rows separate from formal recommendations", () => {
+    const prepared = {
+      ...signal("600011.SSE", 1, "observe"),
+      state: "near_limit" as const,
+      public_quality_preparation_passed: true,
+      public_quality_touch_ready: true,
+      public_quality_actionable: false,
+      validation_passed: true,
+      blocking_scope: "none",
+    };
+    const touched = {
+      ...prepared,
+      vt_symbol: "600012.SSE",
+      state: "sealed" as const,
+      public_quality_actionable: true,
+    };
+    const current = snapshot({
+      portfolio: [],
+      preboard_candidates: [prepared, touched],
+    });
+
+    expect(preboardSignals(current).map((row) => row.vt_symbol)).toEqual([
+      "600011.SSE",
+    ]);
+    expect(liveSignalsForScope(current, "portfolio")).toEqual([]);
   });
 
   it("excludes a downgraded observation even when the backend puts it in portfolio", () => {

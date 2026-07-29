@@ -239,7 +239,7 @@ def public_quality_gate(
     c_already_selected: bool = False,
     trigger_observed: bool = False,
 ) -> dict[str, object]:
-    """Publish one formal A/B/C decision after a physical limit trigger."""
+    """Evaluate the shared A/B/C contract before and after a physical trigger."""
 
     core = core_quality_gate(
         candidate,
@@ -257,21 +257,23 @@ def public_quality_gate(
         and expected_return is not None
         and expected_return > PUBLIC_QUALITY_MINIMUM_EXPECTED_D1_NET_RETURN_PCT
     )
-    passed = bool(
-        trigger_observed
-        and core.get("core_quality_gate_passed") is True
-        and estimate_passed
+    base_quality_passed = bool(
+        core.get("base_ab_quality_gate_passed") is True
+        or core.get("c_quality_gate_passed") is True
     )
+    preparation_passed = bool(base_quality_passed and estimate_passed)
+    touch_ready = bool(
+        core.get("core_quality_gate_passed") is True and estimate_passed
+    )
+    passed = bool(trigger_observed and touch_ready)
     if passed:
         status = "actionable"
         reason = "qualified"
-    elif not trigger_observed:
-        status = "rejected"
-        reason = "trigger_not_observed"
-    elif core.get("core_quality_gate_passed") is not True:
+    elif not base_quality_passed:
         status = "rejected"
         reason = str(
-            core.get("core_quality_gate_reason")
+            core.get("base_ab_quality_gate_reason")
+            or core.get("core_quality_gate_reason")
             or "abc_quality_rejected"
         )
     elif win_probability is None:
@@ -286,6 +288,16 @@ def public_quality_gate(
     elif expected_return <= PUBLIC_QUALITY_MINIMUM_EXPECTED_D1_NET_RETURN_PCT:
         status = "rejected"
         reason = "quality_expected_d1_return_not_positive"
+    elif not touch_ready:
+        status = "preparing"
+        reason = str(
+            core.get("quality_entry_gate_reason")
+            or core.get("core_quality_gate_reason")
+            or "quality_entry_not_ready"
+        )
+    elif not trigger_observed:
+        status = "qualified_waiting_trigger"
+        reason = "waiting_for_trigger"
     else:
         status = "rejected"
         reason = "quality_estimate_rejected"
@@ -295,6 +307,8 @@ def public_quality_gate(
         "public_quality_contract_version": PUBLIC_QUALITY_CONTRACT_VERSION,
         "public_quality_status": status,
         "public_quality_gate_passed": passed,
+        "public_quality_preparation_passed": preparation_passed,
+        "public_quality_touch_ready": touch_ready,
         "public_quality_actionable": passed,
         "public_quality_trigger_observed": trigger_observed,
         "public_quality_reason": reason,

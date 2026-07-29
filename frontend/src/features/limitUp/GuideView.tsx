@@ -45,7 +45,8 @@ export function GuideView({
           A/B/C 层级先验与个股既有 D+1 样本收缩后，质量胜率至少
           {(core.minimum_quality_win_probability * 100).toFixed(0)}% 且 D+1 预期为正。在
           <strong className="font-semibold">{strategy.entry_windows.join("、")}</strong>
-          开盘后持续实时计算；当前正式买点必须等真实触板或回封发生，再复核完整公共质量门。
+          开盘后持续实时计算；当除真实触板外的正式条件已齐时先进入板前候选，
+          真实触板或回封发生后再复核完整公共质量门并升级为正式买点。
           D+1 按官方收盘价退出。实时列表展示全部合格信号，同一交易日可以有多笔。
         </p>
         <div className="mt-3 flex items-start gap-2 rounded-md border border-rise/40 bg-rise/5 px-3 py-2">
@@ -58,11 +59,11 @@ export function GuideView({
         </div>
       </section>
 
-      {/* 七步流程 */}
+      {/* 八步流程 */}
       <section className="mt-6" aria-labelledby="flow-title">
         <div className="flex flex-wrap items-end justify-between gap-2">
           <div>
-            <h3 id="flow-title" className="text-sm font-semibold">选股到成交，一共七步</h3>
+            <h3 id="flow-title" className="text-sm font-semibold">选股到成交，一共八步</h3>
             <p className="mt-1 text-xs text-muted-foreground">
               点击左侧任一步骤，查看它具体卡什么条件、用什么数据、不通过会怎样
             </p>
@@ -122,13 +123,22 @@ export function GuideView({
               ]}
             />
             <FieldGroupRow
+              allowed
+              label="实时发布安全门"
+              hint="只决定当前候选能否安全展示，不参与历史胜率和收益估计"
+              fields={[
+                "实时快照不超过 20 秒",
+                "报价未过期且仍处于可交易时段",
+              ]}
+            />
+            <FieldGroupRow
               allowed={false}
               label="当前仅作诊断的盘中环境"
               hint="历史暂不能按同一可知时点复现，不得成为实时专属硬门"
               fields={[
                 "未冻结成员时点的概念启动与事后龙头排名",
                 "板块资金、个股资金与当前换手",
-                "市场状态、快照新鲜度与报价新鲜度",
+                "尚未冻结为历史同口径的盘中市场状态",
               ]}
             />
             <FieldGroupRow

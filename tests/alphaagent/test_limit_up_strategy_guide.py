@@ -22,10 +22,13 @@ def test_strategy_guide_separates_selection_fields_from_future_outcomes() -> Non
     groups = {row["key"]: row for row in guide["field_groups"]}
     assert groups["intraday"]["selection_allowed"] is True
     assert groups["prior"]["selection_allowed"] is True
+    assert groups["execution_safety"]["selection_allowed"] is True
+    assert groups["execution_safety"]["selection_role"] == "runtime_safety_only"
+    assert "实时快照不超过20秒" in groups["execution_safety"]["fields"]
     assert groups["outcome"]["selection_allowed"] is False
     assert "D+1官方收盘价" in groups["outcome"]["fields"]
     settlement = next(
-        step for step in guide["selection_steps"] if step["order"] == 7
+        step for step in guide["selection_steps"] if step["order"] == 8
     )
     assert "D+1按官方日线收盘价" in settlement["rule"]
     assert "价格代理解释为必然成交" in settlement["rule"]
@@ -37,8 +40,13 @@ def test_strategy_guide_separates_selection_fields_from_future_outcomes() -> Non
         step for step in guide["selection_steps"] if step["order"] == 4
     )
     assert "质量胜率低于50%" in priority["rule"]
-    trigger = next(
+    preboard = next(
         step for step in guide["selection_steps"] if step["order"] == 5
+    )
+    assert preboard["title"] == "触板前公开可靠候选"
+    assert "唯一缺少的正式条件必须是真实触板" in preboard["rule"]
+    trigger = next(
+        step for step in guide["selection_steps"] if step["order"] == 6
     )
     assert trigger["title"] == "真实触板后形成正式买点"
     assert "公共质量结论为正式可买" in trigger["rule"]
@@ -57,8 +65,8 @@ def test_strategy_guide_exposes_core_abc_evidence_and_forward_status() -> None:
     evidence = guide["core_quality"]["frozen_evidence"]
 
     assert evidence["closed_count"] == 140
-    assert evidence["win_count"] == 97
-    assert evidence["win_rate_pct"] == 69.2857
+    assert evidence["win_count"] == 96
+    assert evidence["win_rate_pct"] == 68.5714
     assert evidence["status"] == "historical_proxy_pass_forward_unconfirmed"
     assert evidence["evidence_role"] == "current_v2_historical_replay"
     assert evidence["source_contract"] == "limit-up-core-abc-v2"
@@ -75,8 +83,22 @@ def test_strategy_guide_exposes_core_abc_evidence_and_forward_status() -> None:
     }
     assert evidence["c_tier"] == {
         "closed_count": 69,
-        "win_count": 44,
-        "win_rate_pct": 63.7681,
+        "win_count": 43,
+        "win_rate_pct": 62.3188,
+    }
+    assert evidence["single_position"] == {
+        "closed_count": 78,
+        "win_count": 54,
+        "win_rate_pct": 69.2308,
+        "total_return_pct": 350.83,
+        "max_drawdown_pct": -19.2428,
+    }
+    assert evidence["two_positions"] == {
+        "closed_count": 94,
+        "win_count": 69,
+        "win_rate_pct": 73.4043,
+        "total_return_pct": 195.3585,
+        "max_drawdown_pct": -8.8761,
     }
     forward = guide["core_quality"]["forward_status"]
     assert forward["start_date"] == "2026-07-27"

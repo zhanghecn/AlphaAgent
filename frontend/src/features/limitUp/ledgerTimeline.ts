@@ -1,4 +1,7 @@
-import type { LimitUpLaneLedger, LimitUpLaneLedgerTrade } from "@/api/limitUp";
+import type {
+  LimitUpLaneLedger,
+  LimitUpLaneLedgerTrade,
+} from "@/api/limitUp";
 
 export interface LedgerDaySummary {
   date: string;
