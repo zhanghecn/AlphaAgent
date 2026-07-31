@@ -200,15 +200,16 @@ function GuideView() {
         <div>
           <div className="mb-1 font-semibold">回测策略（历史模拟）</div>
           <ul className="ml-4 list-disc text-muted-foreground">
-            <li>每天用 5 因子打分选 TOP3 首板，涨停价打板买入</li>
+            <li>每天用 3 个 D-1 因子和触板时流通市值打分选 TOP3 首板，涨停价打板买入</li>
             <li>D+1 开盘高开就拿、低开/平盘就走</li>
             <li>拿着当天涨停则减半留、不涨停收盘走</li>
-            <li>5 因子：封单/成交额比、流通市值、前5日涨幅、前3天上涨天数、前5日量比</li>
+            <li>4 因子：触板时流通市值、前5日涨幅、前3天上涨天数、前5日量比</li>
           </ul>
         </div>
         <div className="rounded border border-amber-500/40 bg-amber-500/5 p-3 text-xs text-amber-600">
           ⚠️ 回测假设涨停价全成交（实盘封单厚时买不到，收益会打折）；
-          D+1 用开盘价代理竞价（非真实集合竞价）；样本仅约 13 个月，结果不可外推。
+          每日 TOP3 是完整晨盘候选的研究排序，并非实时到达顺序；D+1 用开盘价代理竞价
+          （非真实集合竞价）；样本仅约 13 个月，结果不可外推。
         </div>
       </div>
     </section>

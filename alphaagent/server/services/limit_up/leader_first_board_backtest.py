@@ -1,9 +1,8 @@
-"""Read-only leader first-board backtest (v3).
+"""Leader first-board research backtest (v2).
 
-每天用 5 因子打分选 TOP3 首板打板买入，按「D+1 开盘高开就拿/低开就走 + 涨停减半
-持有」的短线龙头规则回测，输出复利与胜率。研究只读 PostgreSQL，只写
-``memory/06_backtests`` 证据文件，绝不触碰实时表、API、portfolio 或
-``actionable_recommendations``。
+每天用 4 个买入时可见因子打分选 TOP3 首板打板买入，按「D+1 开盘高开就拿/低开就走 + 涨停减半
+持有」的短线龙头规则回测，输出复利与胜率。研究只读行情源表，仅覆盖写入最新研究结果
+和可选证据文件，不触碰正式实时推荐、portfolio 或 ``actionable_recommendations``。
 """
 
 from __future__ import annotations
@@ -36,14 +35,15 @@ from alphaagent.server.services.limit_up.leader_first_board_repository import (
     save_leader_backtest_run,
 )
 
-STUDY_VERSION = "leader-first-board-backtest-v1"
+STUDY_VERSION = "leader-first-board-backtest-v2"
 DEFAULT_MIN_TRAIN_MONTHS = 3
 DEFAULT_MIN_EFFECT = 4.0
 DEFAULT_MAX_POSITIONS = 3
 
-# v1 验证有效的 5 因子（封单厚/盘子小/前5日涨幅/前3天强/前5日放量）
+# 选股因子（expanding 校准）。注：seal_to_turnover_ratio（封单比）已移除——它是
+# 未来函数（D 日收盘封单，盘中/早上买入用它选股），保留会让回测虚高。剩余因子中
+# 三个来自 D-1，流通市值来自触板事件快照；它们在涨停价入场时均已可见。
 CANDIDATE_FACTORS = (
-    "seal_to_turnover_ratio",
     "float_market_cap",
     "prior_return_5d_pct",
     "prior_3d_up_days",
@@ -64,7 +64,7 @@ def generate_leader_signals(
 ) -> list[dict[str, object]]:
     """expanding 月度校准：每月用之前完整月建表，给当月 9:30-11:00 首板打分，按日取 TOP N。
 
-    无未来函数——当月信号只用之前月份的数据建校准表。
+    月度校准只用之前完整月份；同日 TOP N 仍是完整晨盘候选的研究排序，不代表实时到达顺序。
     """
 
     window = filter_morning_window(factor_samples)
@@ -105,6 +105,7 @@ def generate_leader_signals(
                         "trade_date": day,
                         "score": score,
                         "name": sample.get("name"),
+                        "first_limit_time": sample.get("first_limit_time"),
                     }
                 )
     return signals
@@ -120,6 +121,10 @@ class _Position:
     entry_date: str
     buy_price: float
     name: str = ""
+    first_limit_time: str = ""
+    cash_cost: float = 0.0
+    buy_fee: float = 0.0
+    initial_volume: int = 0  # 买入总量（不变，供 limit_half 部分卖出按比例分摊成本）
 
 
 def simulate_leader_first_board_account(
@@ -179,6 +184,15 @@ def simulate_leader_first_board_account(
             transfer_fee_rate=config.transfer_fee_rate,
         )
         cash += execution.cash_delta
+        # 双边净口径：净盈亏 = 这批卖出回笼 − 这批对应的买入成本。limit_half 是部分卖出，
+        # 必须按 sell_volume/initial_volume 比例分摊 cash_cost，否则把整个仓位成本算到半仓
+        # 回笼上会得到荒谬的大亏（如 -45%）。全部卖出时比例=1，与 cash_backtest 一致。
+        total_vol = pos.initial_volume or pos.volume
+        allocation = volume / total_vol if total_vol else 1.0
+        sell_cost = pos.cash_cost * allocation
+        buy_fee = pos.buy_fee * allocation
+        net_pnl = execution.cash_delta - sell_cost
+        return_pct = round(net_pnl / sell_cost * 100, 4) if sell_cost else None
         closed_trades.append(
             {
                 "vt_symbol": symbol,
@@ -186,16 +200,20 @@ def simulate_leader_first_board_account(
                 "entry_date": pos.entry_date,
                 "exit_date": exit_date,
                 "buy_price": pos.buy_price,
+                "buy_amount": pos.buy_price * volume,
+                "buy_fee": buy_fee,
+                "cash_cost": sell_cost,
                 "exit_price": execution.price,
                 "volume": volume,
                 "sell_amount": execution.amount,
                 "fee": execution.fee,
-                "net_pnl": execution.pnl,
-                "return_pct": round((execution.price / pos.buy_price - 1) * 100, 4)
-                if pos.buy_price
-                else None,
-                "is_win": execution.pnl > 0,
+                "sell_fee": execution.fee,
+                "total_fee": buy_fee + execution.fee,
+                "net_pnl": net_pnl,
+                "return_pct": return_pct,
+                "is_win": net_pnl > 0,
                 "exit_reason": reason,
+                "first_limit_time": pos.first_limit_time,
             }
         )
 
@@ -262,7 +280,15 @@ def simulate_leader_first_board_account(
                 continue
             cash = buy.cash_after
             positions[symbol] = _Position(
-                symbol, buy.volume, today, buy.price, name=str(signal.get("name") or symbol)
+                symbol,
+                buy.volume,
+                today,
+                buy.price,
+                name=str(signal.get("name") or symbol),
+                first_limit_time=str(signal.get("first_limit_time") or ""),
+                cash_cost=buy.amount + buy.fee,
+                buy_fee=buy.fee,
+                initial_volume=buy.volume,
             )
         # 3. mark + equity
         market_value = sum(
@@ -306,12 +332,30 @@ def simulate_leader_first_board_account(
 
 
 def _build_summary(config, final_cash, closed_trades, equity_curve):
-    wins = [t for t in closed_trades if t.get("is_win")]
-    losses = [t for t in closed_trades if not t.get("is_win")]
+    positions: dict[tuple[str, str], list[Mapping[str, object]]] = defaultdict(list)
+    for trade in closed_trades:
+        positions[
+            (str(trade.get("vt_symbol") or ""), str(trade.get("entry_date") or ""))
+        ].append(trade)
+    outcomes = []
+    for parts in positions.values():
+        cash_cost = sum(float(part.get("cash_cost") or 0.0) for part in parts)
+        net_pnl = sum(float(part.get("net_pnl") or 0.0) for part in parts)
+        outcomes.append(
+            {
+                "net_pnl": net_pnl,
+                "return_pct": net_pnl / cash_cost * 100 if cash_cost else None,
+                "is_win": net_pnl > 0,
+            }
+        )
+    wins = [outcome for outcome in outcomes if outcome["is_win"]]
+    losses = [outcome for outcome in outcomes if not outcome["is_win"]]
     gross_profit = sum(t.get("net_pnl", 0.0) for t in wins)
     gross_loss = sum(abs(t.get("net_pnl", 0.0)) for t in losses)
     returns = [
-        t.get("return_pct") for t in closed_trades if t.get("return_pct") is not None
+        outcome["return_pct"]
+        for outcome in outcomes
+        if outcome["return_pct"] is not None
     ]
     max_drawdown = min(
         (row.get("drawdown_pct", 0.0) for row in equity_curve), default=0.0
@@ -319,25 +363,27 @@ def _build_summary(config, final_cash, closed_trades, equity_curve):
     return {
         "initial_cash": config.initial_cash,
         "final_equity": round(final_cash, 4),
-        "trade_count": len(closed_trades),
+        "trade_count": len(outcomes),
         "win_count": len(wins),
-        "win_rate": round(len(wins) / len(closed_trades) * 100, 4)
-        if closed_trades
+        "win_rate": round(len(wins) / len(outcomes) * 100, 4)
+        if outcomes
         else None,
         "total_return_pct": round((final_cash / config.initial_cash - 1) * 100, 4),
         "max_drawdown_pct": round(max_drawdown, 4),
         "average_return_pct": round(sum(returns) / len(returns), 4) if returns else None,
         "profit_factor": round(gross_profit / gross_loss, 4) if gross_loss > 0 else None,
-        "total_fees": round(sum(t.get("fee", 0.0) for t in closed_trades), 4),
+        "total_fees": round(
+            sum(float(trade.get("total_fee") or 0.0) for trade in closed_trades), 4
+        ),
     }
 
 
 # ── Task 3: orchestration, markdown, CLI ───────────────────────────────
 
 _RESEARCH_NOTES = (
-    "每天用 5 因子 expanding 校准打分选 TOP3 首板，涨停价打板买入。",
+    "每天用 3 个 D-1 因子和触板时流通市值 expanding 校准打分选 TOP3 首板，涨停价打板买入。",
     "D+1 起每日开盘：高开（>前日收盘）就拿、低开/平盘就走；拿着当天涨停则减半留、不涨停收盘走。",
-    "expanding 校准无未来函数；前 min_train_months 月无信号。",
+    "expanding 校准只用过去完整月份；每日 TOP3 是完整晨盘候选的研究排序。",
     "买入假设涨停价成交（实盘封单厚可能买不到），回测偏乐观；D+1 用开盘价代理竞价。",
     "13 个月单市场段，复利结果不可外推；execution_valid 恒 False，仅研究证据。",
 )
@@ -454,7 +500,8 @@ def render_markdown(result: Mapping[str, object]) -> str:
         "",
         f"- 状态：研究版本 `{str(result.get('study_version') or '-')}`；``execution_valid`` 恒为 False。",
         "- 本报告只读 `stock_events`/`stock_daily_bars`，不修改 `limit-up-core-abc-v2`、C、实时推荐或账户。",
-        "- 每天 5 因子 expanding 校准选 TOP3 首板，涨停价打板买入。",
+        "- 每天用 3 个 D-1 因子和触板时流通市值 expanding 校准选 TOP3 首板，涨停价打板买入。",
+        "- 每日 TOP3 使用完整晨盘候选横截面，属于研究代理，不等同于实时到达顺序。",
         "- D+1 起：开盘高开就拿、低开/平盘走；涨停减半留、不涨停收盘走。",
         f"- 连板阈值 `>= {_integer(result.get('min_consecutive_boards'))}`；"
         f"max_positions `{_integer(config.get('max_positions'))}`；"
@@ -501,7 +548,7 @@ def render_markdown(result: Mapping[str, object]) -> str:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """Run the read-only leader first-board backtest and write evidence files."""
+    """Run the leader first-board research and persist its latest result."""
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--start", type=date.fromisoformat, required=True)

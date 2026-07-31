@@ -652,6 +652,14 @@ export interface LimitUpLaneLedgerTrade {
   };
   exit_price_source?: "minute_1430" | "daily_close_proxy" | string;
   exit_price_proxy?: boolean;
+  split_count?: number;
+  exit_splits?: Array<{
+    exit_reason: string;
+    sell_date: string | null;
+    sell_time: string | null;
+    volume: number;
+    return_pct: number | null;
+  }>;
 }
 
 export interface LimitUpLaneValidation {

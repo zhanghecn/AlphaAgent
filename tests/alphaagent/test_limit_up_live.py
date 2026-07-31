@@ -3488,7 +3488,7 @@ def test_live_first_board_does_not_reject_an_early_low_by_itself() -> None:
     assert float(candidate["lane_support_score"]) >= 35
 
 
-def test_market_gate_allows_prior_ebb_only_after_live_repair_confirmation() -> None:
+def test_market_gate_keeps_prior_ebb_repair_as_diagnostic_not_global_veto() -> None:
     captured_at = datetime(2026, 7, 10, 10, 5, tzinfo=SHANGHAI)
     candidate = rank_live_candidates(
         [_candidate("600001.SSE", state="near_limit", open_times=0, change_pct=9.2)]
@@ -3511,8 +3511,9 @@ def test_market_gate_allows_prior_ebb_only_after_live_repair_confirmation() -> N
     assert accepted["market_gate"]["repair_confirmed"] is True
     assert accepted["market_gate"]["passed"] is True
     assert rejected["market_gate"]["repair_confirmed"] is False
-    assert rejected["market_gate"]["passed"] is False
-    assert "尚未确认修复" in rejected["market_gate"]["reasons"][0]
+    assert rejected["market_gate"]["repair_state"] == "pending_repair"
+    assert rejected["market_gate"]["passed"] is True
+    assert rejected["market_gate"]["reasons"] == []
 
 
 def test_market_repair_stays_confirmed_when_next_snapshot_delta_is_zero() -> None:
@@ -3544,7 +3545,7 @@ def test_market_repair_stays_confirmed_when_next_snapshot_delta_is_zero() -> Non
     assert gate["repair_confirmed_at"] == repaired_at.isoformat()
 
 
-def test_market_repair_is_revoked_by_failed_rate_breakdown() -> None:
+def test_high_failed_rate_does_not_revoke_confirmed_market_repair() -> None:
     previous_at = datetime(2026, 7, 14, 10, 5, tzinfo=SHANGHAI)
     current_at = datetime(2026, 7, 14, 10, 6, tzinfo=SHANGHAI)
     previous = _previous_live_snapshot(
@@ -3568,9 +3569,10 @@ def test_market_repair_is_revoked_by_failed_rate_breakdown() -> None:
     )
 
     gate = result["market_gate"]
-    assert gate["passed"] is False
-    assert gate["repair_state"] == "repair_revoked"
-    assert "炸板率" in gate["repair_revoked_reason"]
+    assert gate["passed"] is True
+    assert gate["repair_state"] == "repair_confirmed"
+    assert gate["repair_confirmed_at"] == previous_at.isoformat()
+    assert gate["repair_revoked_reason"] is None
 
 
 def test_confirmed_live_repair_removes_only_duplicated_d1_market_blockers() -> None:
@@ -3616,7 +3618,7 @@ def test_confirmed_live_repair_removes_only_duplicated_d1_market_blockers() -> N
     assert "prior_board_evidence_missing" in missing_prior_board["lane_blockers"]
 
 
-def test_market_pending_keeps_structurally_eligible_near_limit_candidate_approaching() -> None:
+def test_market_pending_does_not_override_structurally_eligible_candidate() -> None:
     signal = build_live_recommendations(
         [_candidate("600001.SSE", state="near_limit", distance_to_limit_pct=0.6)],
         _market(
@@ -3627,10 +3629,10 @@ def test_market_pending_keeps_structurally_eligible_near_limit_candidate_approac
         datetime(2026, 7, 14, 10, 5, tzinfo=SHANGHAI),
     )["lanes"]["now"][0]
 
-    assert signal["action"] == "observe"
-    assert signal["signal_state"] == "approaching_trigger"
-    assert signal["blocking_scope"] == "market"
-    assert "尚未确认修复" in signal["pending_reasons"][0]
+    assert signal["action"] == "buy_now"
+    assert signal["signal_state"] == "trigger_ready"
+    assert signal["blocking_scope"] == "none"
+    assert signal["pending_reasons"] == []
 
 
 def test_structural_lane_failure_is_rejected() -> None:
@@ -3979,7 +3981,7 @@ def test_history_evidence_failure_blocks_trade_actions_but_keeps_observation(mon
     assert "已禁止执行" in result["data_quality"]["limitations"][-1]
 
 
-def test_market_gate_blocks_buy_when_failed_rate_is_too_high() -> None:
+def test_high_failed_rate_does_not_block_an_eligible_buy() -> None:
     captured_at = datetime(2026, 7, 10, 10, 5, tzinfo=SHANGHAI)
     candidate = rank_live_candidates(
         [_candidate("600001.SSE", state="near_limit", open_times=0, change_pct=9.2)]
@@ -3991,9 +3993,9 @@ def test_market_gate_blocks_buy_when_failed_rate_is_too_high() -> None:
         captured_at,
     )
 
-    assert result["lanes"]["now"][0]["action"] == "observe"
-    assert result["lanes"]["now"][0]["blocking_scope"] == "market"
-    assert result["market_gate"]["passed"] is False
+    assert result["lanes"]["now"][0]["action"] == "buy_now"
+    assert result["lanes"]["now"][0]["blocking_scope"] == "none"
+    assert result["market_gate"]["passed"] is True
 
 
 def test_live_buy_is_blocked_when_sector_fund_flow_is_negative() -> None:

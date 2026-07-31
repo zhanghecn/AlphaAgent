@@ -126,7 +126,7 @@ function LedgerTradeCard({ trade, observation }: { trade: LimitUpLaneLedgerTrade
           </span>
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
-          <span className="tabular-nums text-muted-foreground">{trade.buy_time?.slice(0, 5)} 买</span>
+          <span className="tabular-nums text-muted-foreground">{trade.buy_time?.slice(0, 8)} 买</span>
           <span className="tabular-nums text-muted-foreground">{formatPrice(trade.buy_price)}</span>
           <span className={cn(
             "rounded-full px-1.5 py-px font-medium",
@@ -135,6 +135,11 @@ function LedgerTradeCard({ trade, observation }: { trade: LimitUpLaneLedgerTrade
             {boardStatusLabel(trade.d_board_status)}
           </span>
           <span className="text-muted-foreground">{d1OutcomeLabel(trade.d1_outcome)}</span>
+          {(trade.split_count ?? 1) > 1 && (
+            <span className="rounded-full bg-sky-500/10 px-1.5 py-px font-medium text-sky-600 dark:text-sky-400">
+              分{trade.split_count}批
+            </span>
+          )}
           <ChevronDown
             size={13}
             className={cn("ml-auto text-muted-foreground transition-transform", expanded && "rotate-180")}
@@ -149,6 +154,18 @@ function LedgerTradeCard({ trade, observation }: { trade: LimitUpLaneLedgerTrade
           <div className="text-muted-foreground">
             卖出 {trade.sell_date ?? "待 D+1"} {trade.sell_time ?? ""} · {formatPrice(trade.sell_price)} · 官方收盘价
           </div>
+          {trade.exit_splits && trade.exit_splits.length > 1 && (
+            <div className="text-muted-foreground">
+              <span className="font-medium text-foreground">分批卖出：</span>
+              {trade.exit_splits.map((split, i) => (
+                <span key={i}>
+                  {" "}{split.exit_reason} {Math.round(split.volume)}股
+                  {split.return_pct != null ? ` ${formatSigned(split.return_pct)}` : ""}
+                  {i < (trade.exit_splits?.length ?? 0) - 1 ? " ·" : ""}
+                </span>
+              ))}
+            </div>
+          )}
           {trade.quality_priority_tier && (
             <div className="text-muted-foreground">
               质量层 {qualityTierLabel(trade.quality_priority_tier)} · 胜率 {formatQualityProbability(trade.quality_win_probability)} · D+1预期 {formatQualityReturn(trade.quality_expected_d1_net_return_pct)}

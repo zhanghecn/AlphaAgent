@@ -2554,6 +2554,7 @@ def test_select_daily_bar_stocks_avoids_raw_snapshot_payload(monkeypatch):
         "last_price",
         "turnover",
         "created_at",
+        "updated_at",
     ]
 
 
@@ -2574,9 +2575,24 @@ def test_completed_stock_daily_session_uses_previous_cross_section(monkeypatch):
     reference_date = date(2026, 7, 17)
     session = object()
     stock_rows = [
-        {"symbol": "600000", "exchange": "SSE", "last_price": 10},
-        {"symbol": "600001", "exchange": "SSE", "last_price": 10},
-        {"symbol": "600003", "exchange": "SSE", "last_price": 10},
+        {
+            "symbol": "600000",
+            "exchange": "SSE",
+            "last_price": 10,
+            "updated_at": datetime(2026, 7, 20, 10, tzinfo=timezone.utc),
+        },
+        {
+            "symbol": "600001",
+            "exchange": "SSE",
+            "last_price": 10,
+            "updated_at": datetime(2026, 7, 20, 10, tzinfo=timezone.utc),
+        },
+        {
+            "symbol": "600003",
+            "exchange": "SSE",
+            "last_price": 10,
+            "updated_at": datetime(2026, 7, 20, 10, tzinfo=timezone.utc),
+        },
     ]
 
     @contextmanager
@@ -2689,7 +2705,13 @@ def test_completed_stock_daily_session_excludes_non_trading_quotes(monkeypatch):
     session = object()
     stock_rows = [
         {"symbol": "600000", "exchange": "SSE", "last_price": 10},
-        {"symbol": "600001", "exchange": "SSE", "last_price": 0, "turnover": 0},
+        {
+            "symbol": "600001",
+            "exchange": "SSE",
+            "last_price": 10,
+            "turnover": 0,
+            "updated_at": datetime(2026, 7, 20, 10, tzinfo=timezone.utc),
+        },
     ]
 
     @contextmanager
@@ -2717,6 +2739,55 @@ def test_completed_stock_daily_session_excludes_non_trading_quotes(monkeypatch):
 
     assert result["status"] == "complete"
     assert result["expected_symbol_count"] == 1
+    assert result["excluded_non_trading_symbol_count"] == 1
+
+
+def test_completed_stock_daily_session_excludes_stale_positive_quotes(monkeypatch):
+    target_date = date(2026, 7, 20)
+    reference_date = date(2026, 7, 17)
+    session = object()
+    stock_rows = [
+        {
+            "symbol": "600000",
+            "exchange": "SSE",
+            "last_price": 10,
+            "updated_at": datetime(2026, 7, 20, 10, tzinfo=timezone.utc),
+        },
+        {
+            "symbol": "600001",
+            "exchange": "SSE",
+            "last_price": 10,
+            "turnover": 1_000_000,
+            "updated_at": datetime(2026, 7, 19, 10, tzinfo=timezone.utc),
+        },
+    ]
+
+    @contextmanager
+    def fake_session_scope():
+        yield session
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+    monkeypatch.setattr(svc, "completed_daily_bar_cutoff", lambda _at: target_date)
+    monkeypatch.setattr(
+        svc,
+        "_daily_session_reference_date",
+        lambda current_session, current_target_date: reference_date,
+    )
+    monkeypatch.setattr(
+        svc,
+        "_daily_bar_symbols_for_date",
+        lambda current_session, trade_date: (
+            {"600000.SSE", "600001.SSE"}
+            if trade_date == reference_date
+            else {"600000.SSE"}
+        ),
+    )
+
+    result = svc._completed_stock_daily_session_coverage(stock_rows)
+
+    assert result["status"] == "complete"
+    assert result["expected_symbol_count"] == 1
+    assert result["missing_vt_symbols"] == []
     assert result["excluded_non_trading_symbol_count"] == 1
 
 

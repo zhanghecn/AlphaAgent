@@ -1,9 +1,13 @@
-"""Tests for the leader first-board backtest (v3)."""
+"""Tests for the leader first-board research backtest."""
 
 from __future__ import annotations
 
 from alphaagent.server.services.limit_up import leader_first_board_backtest as study
 from alphaagent.server.services.limit_up.cash_backtest import CashBacktestConfig
+from alphaagent.server.services.limit_up.leader_first_board_adapter import (
+    adapt_leader_backtest,
+    group_leader_trades_by_day,
+)
 
 
 def _sample(first_limit_time, trade_date, is_leader=False, vt_symbol="600001.SSE", **factors):
@@ -142,6 +146,11 @@ def test_high_open_limit_halves_position() -> None:
     half = next(t for t in trades if t["exit_reason"] == "limit_half")
     final = next(t for t in trades if t["exit_reason"] == "final_close")
     assert half["volume"] == final["volume"]  # 各卖一半
+    assert result["execution_summary"]["trade_count"] == 1
+    assert result["execution_summary"]["win_count"] == 1
+    assert result["execution_summary"]["total_fees"] == round(
+        sum(trade["total_fee"] for trade in trades), 4
+    )
 
 
 def test_high_open_not_limit_sells_at_close() -> None:
@@ -217,3 +226,102 @@ def test_render_markdown_contains_required_sections() -> None:
     assert "## Boundary" in markdown
     assert "## Summary" in markdown
     assert "## Decision" in markdown
+
+
+# ── Task 4: first_limit_time propagation + double-sided net pnl ───────
+
+
+def test_signal_first_limit_time_propagates_to_trade() -> None:
+    # signal 的 first_limit_time（真实触板时间）应透传到 closed_trade
+    bars = _first_board_bars("A", d2_open=10.5, d2_close=10.0)
+    signals = [{"vt_symbol": "A", "trade_date": "d1", "score": 0.9, "first_limit_time": "09:25:33"}]
+    trades = study.simulate_leader_first_board_account(signals, bars, ["d0", "d1", "d2"])["closed_trades"]
+    assert len(trades) == 1
+    assert trades[0]["first_limit_time"] == "09:25:33"
+
+
+def test_return_pct_is_double_sided_net_not_gross() -> None:
+    # 双边净口径：return_pct 严格小于毛收益率（卖价/买价-1），因为扣了双边费用
+    bars = _first_board_bars("A", d2_open=11.5, d2_close=11.8, d2_high=11.9, d2_low=11.2)
+    signals = [{"vt_symbol": "A", "trade_date": "d1", "score": 0.9}]
+    trade = study.simulate_leader_first_board_account(signals, bars, ["d0", "d1", "d2"])["closed_trades"][0]
+    gross = (trade["exit_price"] / trade["buy_price"] - 1) * 100
+    assert trade["return_pct"] is not None
+    assert trade["return_pct"] < gross  # 净 < 毛，证明扣了双边费用
+
+
+def test_limit_half_net_pnl_uses_proportional_cost() -> None:
+    # 涨停减半只卖一半，net_pnl 必须按半仓成本算（sell_volume/initial_volume 比例），
+    # 不能把整个仓位成本算到半仓回笼——否则会把涨停价减半卖出算成 -45% 假亏
+    bars = _first_board_bars("A", d2_open=11.5, d2_close=12.1, d2_high=12.1, d2_low=11.3)
+    signals = [{"vt_symbol": "A", "trade_date": "d1", "score": 0.9}]
+    trades = study.simulate_leader_first_board_account(signals, bars, ["d0", "d1", "d2"])["closed_trades"]
+    half = next(t for t in trades if t["exit_reason"] == "limit_half")
+    # 减半卖在涨停价(12.1)，买入价11，按半仓成本算这批应盈利（不是假亏）
+    assert half["return_pct"] is not None
+    assert half["return_pct"] > 0
+
+
+# ── Task 5: 交割单聚合分批卖出 ─────────────────────────────────────────
+
+
+def _closed_trade(vt_symbol, entry_date, exit_date, *, volume, exit_reason, net_pnl, return_pct, exit_price, buy_price=10.0):
+    return {
+        "vt_symbol": vt_symbol, "name": vt_symbol, "entry_date": entry_date, "exit_date": exit_date,
+        "buy_price": buy_price, "exit_price": exit_price, "volume": volume, "sell_amount": exit_price * volume,
+        "fee": 5.0, "net_pnl": net_pnl, "return_pct": return_pct, "exit_reason": exit_reason,
+    }
+
+
+def test_group_aggregates_split_exits_into_one_position() -> None:
+    # 同一 vt_symbol + entry_date 的分批卖出（涨停减半 + 清仓）聚合成 1 条
+    v3 = {"signal_count": 2, "closed_trades": [
+        _closed_trade("A", "2025-09-01", "2025-09-02", volume=700, exit_reason="limit_half", net_pnl=700, return_pct=10.0, exit_price=11.0),
+        _closed_trade("A", "2025-09-01", "2025-09-03", volume=700, exit_reason="close_not_limit", net_pnl=-70, return_pct=-1.0, exit_price=9.9),
+    ]}
+    days = group_leader_trades_by_day(v3)
+    assert len(days) == 1
+    trades = days[0]["trades"]
+    assert len(trades) == 1  # 聚合成 1 条，不再重复
+    agg = trades[0]
+    assert agg["split_count"] == 2
+    assert agg["volume"] == 1400  # 总量
+    assert len(agg["exit_splits"]) == 2
+    assert agg["sell_fee"] == 10.0
+    assert agg["total_fee"] == 10.0
+    assert agg["return_pct"] is not None  # 综合 return = (700-70)/(10*1400)*100 ≈ 4.5
+    report = adapt_leader_backtest(v3)
+    assert len(report["trades"]) == 1
+    assert report["trades"][0]["split_count"] == 2
+    assert report["summary"]["signal_count"] == 2
+    assert report["summary"]["filled_count"] == 1
+    assert report["summary"]["fill_rate"] == 50.0
+    assert report["summary"]["trade_day_count"] == 1
+    assert report["summary"]["average_trades_per_day"] == 1.0
+    assert report["summary"]["max_trades_per_day"] == 1
+
+
+def test_single_trade_kept_with_split_count_one() -> None:
+    v3 = {"closed_trades": [
+        _closed_trade("B", "2025-09-01", "2025-09-02", volume=1000, exit_reason="close_not_limit", net_pnl=500, return_pct=5.0, exit_price=10.5),
+    ]}
+    agg = group_leader_trades_by_day(v3)[0]["trades"][0]
+    assert agg["split_count"] == 1
+    assert agg["exit_splits"] == []
+
+
+def test_api_hides_stale_persisted_backtest(monkeypatch) -> None:
+    from alphaagent.server.api import limit_up
+
+    monkeypatch.setattr(
+        limit_up,
+        "load_leader_backtest_run",
+        lambda: {"study_version": "leader-first-board-backtest-v1"},
+    )
+
+    response = limit_up.first_board_leader_backtest()["data"]
+
+    assert response["status"] == "unavailable"
+    assert response["is_backtest"] is False
+    assert response["stored_strategy_version"] == "leader-first-board-backtest-v1"
+    assert response["required_strategy_version"] == study.STUDY_VERSION

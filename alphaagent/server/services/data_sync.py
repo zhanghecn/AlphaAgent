@@ -6386,14 +6386,27 @@ def _daily_bar_symbols_for_date(session, trade_date: date | None) -> set[str]:
     return {str(value) for value in rows}
 
 
-def _stock_has_current_daily_quote(stock_row: Mapping[str, Any]) -> bool:
+def _stock_has_current_daily_quote(
+    stock_row: Mapping[str, Any],
+    target_date: date | None = None,
+) -> bool:
     """Return whether the current market snapshot has a tradable quote."""
 
     last_price = _float_or_none(stock_row.get("last_price"))
     turnover = _float_or_none(stock_row.get("turnover"))
-    return (last_price is not None and last_price > 0) or (
-        turnover is not None and turnover > 0
+    has_positive_quote = (
+        turnover > 0
+        if turnover is not None
+        else last_price is not None and last_price > 0
     )
+    if not has_positive_quote or target_date is None:
+        return has_positive_quote
+
+    updated_at = _as_aware_datetime(stock_row.get("updated_at"))
+    if updated_at is None:
+        return True
+    china_date = updated_at.astimezone(timezone(timedelta(hours=8))).date()
+    return china_date >= target_date
 
 
 def _completed_stock_daily_session_coverage(
@@ -6401,7 +6414,7 @@ def _completed_stock_daily_session_coverage(
 ) -> dict[str, Any]:
     target_date = completed_daily_bar_cutoff(_now_china())
     tradable_stock_rows = [
-        row for row in stock_rows if _stock_has_current_daily_quote(row)
+        row for row in stock_rows if _stock_has_current_daily_quote(row, target_date)
     ]
     active_vt_symbols = {
         vt_symbol(str(row["symbol"]), str(row["exchange"]))
@@ -6414,7 +6427,7 @@ def _completed_stock_daily_session_coverage(
     non_trading_vt_symbols = {
         vt_symbol(str(row["symbol"]), str(row["exchange"]))
         for row in stock_rows
-        if not _stock_has_current_daily_quote(row)
+        if not _stock_has_current_daily_quote(row, target_date)
     }
     newly_discovered_vt_symbols = {
         vt_symbol(str(row["symbol"]), str(row["exchange"]))
@@ -6812,6 +6825,7 @@ def _select_daily_bar_stocks(symbols: list[str], stock_limit: int) -> list[dict[
             schema.stocks.c.last_price,
             schema.stocks.c.turnover,
             schema.stocks.c.created_at,
+            schema.stocks.c.updated_at,
         ).order_by(desc(schema.stocks.c.turnover), desc(schema.stocks.c.market_cap))
         if symbols:
             query = query.where(schema.stocks.c.vt_symbol.in_(symbols))

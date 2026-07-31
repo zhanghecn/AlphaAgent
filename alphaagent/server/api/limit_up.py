@@ -20,6 +20,7 @@ from alphaagent.server.services.limit_up.first_board_leader_service import (
     build_first_board_leader_snapshot,
 )
 from alphaagent.server.services.limit_up.leader_first_board_adapter import (
+    STRATEGY_VERSION as LEADER_FIRST_BOARD_STRATEGY_VERSION,
     adapt_leader_backtest,
     group_leader_trades_by_day,
 )
@@ -136,6 +137,17 @@ def first_board_leader_backtest():
             "is_backtest": False,
             "report": None,
             "ledger_days": [],
+        })
+    stored_version = str(data.get("study_version") or "")
+    if stored_version != LEADER_FIRST_BOARD_STRATEGY_VERSION:
+        return ok({
+            "status": "unavailable",
+            "message": "已保存的首板龙头回测是旧版本，请显式运行当前 v2 研究后再查看",
+            "is_backtest": False,
+            "report": None,
+            "ledger_days": [],
+            "stored_strategy_version": stored_version or None,
+            "required_strategy_version": LEADER_FIRST_BOARD_STRATEGY_VERSION,
         })
     return ok({
         "status": "ok",

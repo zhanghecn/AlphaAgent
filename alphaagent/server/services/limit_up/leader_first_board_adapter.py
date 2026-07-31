@@ -1,7 +1,7 @@
-"""Adapt v3 leader-first-board backtest output into LimitUpLaneBacktest/Ledger shape.
+"""Adapt leader-first-board research output into LimitUpLaneBacktest/Ledger shape.
 
 让前端「首板龙头」tab 直接复用打板研究的 ``BacktestView`` / ``LedgerTimeline`` 组件。
-v3 只有 summary/equity/trades 三块基石，这里补齐 BacktestView 的硬必需字段
+原始结果只有 summary/equity/trades 三块基石，这里补齐 BacktestView 的硬必需字段
 （validation/trades/skipped_orders/coverage/account_config 等），其余丰富度区块
 （drawdown_diagnostics/core_quality_filter 等）按真实缺失优雅降级。
 """
@@ -11,48 +11,82 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 
-STRATEGY_VERSION = "leader-first-board-backtest-v1"
+STRATEGY_VERSION = "leader-first-board-backtest-v2"
 
 
-def adapt_leader_backtest(v3_result: Mapping[str, object]) -> dict[str, object]:
-    """v3 回测结果 → LimitUpLaneBacktest 结构（前端复用 BacktestView）。"""
+def adapt_leader_backtest(result: Mapping[str, object]) -> dict[str, object]:
+    """研究回测结果 → LimitUpLaneBacktest 结构（前端复用 BacktestView）。"""
 
-    raw_summary = v3_result.get("execution_summary") or {}
+    strategy_version = str(result.get("study_version") or STRATEGY_VERSION)
+    raw_summary = result.get("execution_summary") or {}
     summary = _adapt_summary(raw_summary)
-    trades = [_adapt_trade(trade) for trade in (v3_result.get("closed_trades") or [])]
-    daily_results = _adapt_daily_results(v3_result.get("equity_curve") or [], summary)
+    exit_trades = [
+        _adapt_trade(trade) for trade in (result.get("closed_trades") or [])
+    ]
+    trades = _aggregate_positions(exit_trades)
+    trade_count = int(_num(summary.get("trade_count")) or len(trades))
+    signal_count = int(_num(result.get("signal_count")) or trade_count)
+    trades_by_day = Counter(
+        str(trade.get("buy_date") or "") for trade in trades if trade.get("buy_date")
+    )
+    summary.update(
+        {
+            "signal_count": signal_count,
+            "filled_count": trade_count,
+            "fill_rate": (
+                round(trade_count / signal_count * 100, 4) if signal_count else None
+            ),
+            "trade_count": trade_count,
+            "trade_day_count": len(trades_by_day),
+            "average_trades_per_day": (
+                round(trade_count / len(trades_by_day), 4) if trades_by_day else 0.0
+            ),
+            "max_trades_per_day": max(trades_by_day.values(), default=0),
+        }
+    )
+    daily_results = _adapt_daily_results(result.get("equity_curve") or [], summary)
     return {
         "status": "ok",
         "mode": "leader_factor_research_proxy",
-        "strategy_version": STRATEGY_VERSION,
+        "strategy_version": strategy_version,
         "lane": "first_board",
         "exit_mode": "dynamic",
         "summary": summary,
         "execution_summary": summary,
         "signal_summary": summary,
-        "account_config": _adapt_account_config(v3_result.get("account_config") or {}),
+        "account_config": _adapt_account_config(result.get("account_config") or {}),
         "portfolio_policy": {
             "included_lanes": ["first_board"],
             "excluded_lanes": ["two_to_three", "high_board"],
-            "selection_basis": "leader_5_factor_expanding_top3",
+            "selection_basis": (
+                "leader_3_prior_plus_touch_cap_expanding_top3"
+                if strategy_version == STRATEGY_VERSION
+                else "legacy_leader_factor_expanding_top3"
+            ),
         },
-        "exit_summary": _adapt_exit_summary(trades),
+        "exit_summary": _adapt_exit_summary(exit_trades),
         "daily_results": daily_results,
         "trades": trades,
         "skipped_orders": [],
         "open_positions": [],
         "validation": _stub_validation(summary),
         "simulation_eligible": False,
-        "coverage": _stub_coverage(v3_result, daily_results),
+        "coverage": _stub_coverage(result, daily_results),
     }
 
 
 def group_leader_trades_by_day(
-    v3_result: Mapping[str, object],
+    result: Mapping[str, object],
 ) -> list[dict[str, object]]:
-    """v3 closed_trades → 按 entry_date 分组的 LimitUpLaneLedger[]（喂 LedgerTimeline）。"""
+    """closed_trades → 按 buy_date 分组的 LimitUpLaneLedger[]（喂 LedgerTimeline）。
 
-    trades = [_adapt_trade(trade) for trade in (v3_result.get("closed_trades") or [])]
+    同一笔买入（vt_symbol + buy_date）的多笔分批卖出（涨停减半 limit_half + 后续清仓）
+    聚合成一条 trade，避免交割单里同一笔买入显示成多行；分批明细存 exit_splits。
+    """
+
+    trades = _aggregate_positions(
+        [_adapt_trade(trade) for trade in (result.get("closed_trades") or [])]
+    )
     by_day: dict[str, list[dict[str, object]]] = defaultdict(list)
     for trade in trades:
         by_day[str(trade.get("buy_date") or "")].append(trade)
@@ -70,6 +104,80 @@ def group_leader_trades_by_day(
             }
         )
     return ledgers
+
+
+def _aggregate_positions(
+    trades: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    by_position: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
+    for trade in trades:
+        key = (str(trade.get("vt_symbol") or ""), str(trade.get("buy_date") or ""))
+        by_position[key].append(trade)
+    return [_aggregate_position(parts) for parts in by_position.values()]
+
+
+def _aggregate_position(parts: list[dict[str, object]]) -> dict[str, object]:
+    """同一笔买入的分批卖出聚合成一条 trade；单笔原样补 split_count=1。"""
+
+    if len(parts) == 1:
+        return {**parts[0], "split_count": 1, "exit_splits": []}
+    first = parts[0]
+    last = parts[-1]
+    total_vol = sum(_num(p.get("volume")) or 0 for p in parts)
+    total_pnl = sum(_num(p.get("net_pnl")) or 0 for p in parts)
+    total_buy = sum(_num(p.get("buy_amount")) or 0 for p in parts) or (
+        _num(first.get("buy_price")) or 0
+    ) * total_vol
+    total_buy_fee = sum(_num(p.get("buy_fee")) or 0 for p in parts)
+    total_cash_cost = sum(_num(p.get("cash_cost")) or 0 for p in parts) or (
+        total_buy + total_buy_fee
+    )
+    total_sell = sum(_num(p.get("sell_amount")) or 0 for p in parts)
+    total_sell_fee = sum(_num(p.get("sell_fee")) or 0 for p in parts)
+    total_fee = sum(_num(p.get("total_fee")) or 0 for p in parts)
+    return_pct = round(total_pnl / total_cash_cost * 100, 4) if total_cash_cost else None
+    exit_splits = [
+        {
+            "exit_reason": str(p.get("exit_reason") or ""),
+            "sell_date": p.get("sell_date"),
+            "sell_time": p.get("sell_time"),
+            "volume": _num(p.get("volume")) or 0,
+            "return_pct": p.get("return_pct"),
+        }
+        for p in parts
+    ]
+    return {
+        **first,
+        "volume": total_vol,
+        "buy_amount": round(total_buy, 4),
+        "buy_fee": round(total_buy_fee, 4),
+        "cash_cost": round(total_cash_cost, 4),
+        "sell_amount": round(total_sell, 4),
+        "fee": round(total_sell_fee, 4),
+        "sell_fee": round(total_sell_fee, 4),
+        "total_fee": round(total_fee, 4),
+        "net_pnl": round(total_pnl, 4),
+        "return_pct": return_pct,
+        "is_win": total_pnl > 0,
+        # 卖出侧用最后一笔（最终清仓）的时点/价格
+        "sell_date": last.get("sell_date"),
+        "sell_time": last.get("sell_time"),
+        "sell_price": last.get("sell_price"),
+        "exit_date": last.get("exit_date"),
+        "exit_price": last.get("exit_price"),
+        "exit_reason": _aggregate_exit_reason(parts),
+        "split_count": len(parts),
+        "exit_splits": exit_splits,
+    }
+
+
+def _aggregate_exit_reason(parts: list[dict[str, object]]) -> str:
+    """分批卖出原因聚合，如 'limit_half×2 + open_below_prev_close'。"""
+
+    counts: Counter[str] = Counter(str(p.get("exit_reason") or "") for p in parts)
+    return " + ".join(
+        f"{reason}×{count}" if count > 1 else reason for reason, count in counts.items()
+    )
 
 
 def _adapt_summary(raw: Mapping[str, object]) -> dict[str, object]:
@@ -151,13 +259,16 @@ def _adapt_trade(trade: Mapping[str, object]) -> dict[str, object]:
     buy_price = _num(trade.get("buy_price"))
     exit_price = _num(trade.get("exit_price"))
     volume = _num(trade.get("volume")) or 0
-    fee = _num(trade.get("fee")) or 0.0
+    buy_fee = _num(trade.get("buy_fee")) or 0.0
+    sell_fee = _num(trade.get("sell_fee")) or _num(trade.get("fee")) or 0.0
+    first_limit_time = str(trade.get("first_limit_time") or "")
     return {
         "lane": "first_board",
         "vt_symbol": str(trade.get("vt_symbol") or ""),
         "name": str(trade.get("name") or trade.get("vt_symbol") or ""),
         "buy_date": str(trade.get("entry_date") or ""),
-        "buy_time": "09:30:00",
+        "buy_time": first_limit_time or "09:30:00",
+        "first_limit_time": first_limit_time,
         "buy_price": buy_price,
         "sell_date": str(trade.get("exit_date") or "") or None,
         "sell_time": _sell_time(reason),
@@ -172,11 +283,13 @@ def _adapt_trade(trade: Mapping[str, object]) -> dict[str, object]:
         "entry_price": buy_price,
         "exit_price": exit_price,
         "volume": volume,
-        "buy_amount": round(buy_price * volume, 4) if buy_price else 0.0,
-        "buy_fee": 0.0,
+        "buy_amount": _num(trade.get("buy_amount"))
+        or (round(buy_price * volume, 4) if buy_price else 0.0),
+        "buy_fee": buy_fee,
+        "cash_cost": _num(trade.get("cash_cost")) or 0.0,
         "sell_amount": _num(trade.get("sell_amount")) or 0.0,
-        "sell_fee": fee,
-        "total_fee": fee,
+        "sell_fee": sell_fee,
+        "total_fee": _num(trade.get("total_fee")) or buy_fee + sell_fee,
         "net_pnl": _num(trade.get("net_pnl")) or 0.0,
         "exit_reason": reason,
     }
@@ -213,12 +326,12 @@ def _stub_validation(summary: Mapping[str, object]) -> dict[str, object]:
 
 
 def _stub_coverage(
-    v3_result: Mapping[str, object], daily_results: Sequence[Mapping[str, object]]
+    result: Mapping[str, object], daily_results: Sequence[Mapping[str, object]]
 ) -> dict[str, object]:
     return {
         "status": "ok",
-        "reliable_start": v3_result.get("start"),
-        "reliable_end": v3_result.get("end"),
+        "reliable_start": result.get("start"),
+        "reliable_end": result.get("end"),
         "daily_close_count": len(daily_results),
         "daily_close_missing_count": 0,
         "minute_1430_count": 0,

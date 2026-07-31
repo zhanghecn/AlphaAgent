@@ -313,8 +313,6 @@ def _market_gate(
     health_reasons: list[str] = []
     if not auction_stage and sealed_count < 5:
         health_reasons.append("主板封板家数不足5只")
-    if not auction_stage and failed_rate is not None and failed_rate > 0.35:
-        health_reasons.append(f"实时炸板率{failed_rate * 100:.1f}%超过35%")
 
     current_at = _local_datetime(captured_at).isoformat()
     previous_gate = _same_day_previous_gate(previous_snapshot, captured_at)
@@ -371,12 +369,6 @@ def _market_gate(
     if stage == "closed":
         reasons.append("当前为非交易时段")
     reasons.extend(health_reasons)
-    if prior_weak and not repair_confirmed:
-        reasons.append(
-            "D-1情绪偏弱，盘中修复已撤销，等待再次确认"
-            if repair_state == "repair_revoked"
-            else "D-1情绪偏弱且盘中尚未确认修复"
-        )
     return {
         "passed": not reasons,
         "sealed_count": sealed_count,
@@ -1875,7 +1867,7 @@ def _valid_until(captured_at: datetime, entry_kind: str) -> str:
 
 def _cancel_condition(entry_kind: str) -> str:
     if entry_kind in {"momentum", "sweep", "reseal", "tail_seal", "tail_watch", "wait"}:
-        return "再次开板、封单一分钟缩水超过30%、跌出动态Top5、板块扩散转弱或实时炸板率超过35%"
+        return "再次开板、封单一分钟缩水超过30%、跌出动态Top5或板块扩散转弱"
     if entry_kind in {"auction", "next_auction"}:
         return "竞价低于1%、高于7%、跌出动态Top5或市场门关闭"
     return "买点未成立"
