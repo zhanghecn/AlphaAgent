@@ -45,7 +45,7 @@ export function GuideView({
           A/B/C 层级先验与个股既有 D+1 样本收缩后，质量胜率至少
           {(core.minimum_quality_win_probability * 100).toFixed(0)}% 且 D+1 预期为正。在
           <strong className="font-semibold">{strategy.entry_windows.join("、")}</strong>
-          开盘后持续实时计算；当除真实触板外的正式条件已齐时先进入板前候选，
+          开盘后持续实时计算；当原实时链已形成买入结论且按此刻触板可通过公共质量门时，先显示板前买点，
           真实触板或回封发生后再复核完整公共质量门并升级为正式买点。
           D+1 按官方收盘价退出。实时列表展示全部合格信号，同一交易日可以有多笔。
         </p>

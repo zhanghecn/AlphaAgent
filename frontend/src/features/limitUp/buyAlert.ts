@@ -1,5 +1,5 @@
 import type { LimitUpLiveSignal, LimitUpSignalSnapshot } from "@/api/limitUp";
-import { liveSignalsForScope } from "./livePortfolio";
+import { liveSignalsForScope, preboardSignals } from "./livePortfolio";
 
 export const BUY_ALERT_REENTRY_COOLDOWN_MS = 60_000;
 
@@ -57,7 +57,7 @@ export function buyAlertContent(signal: LimitUpLiveSignal): { title: string; bod
   const name = signal.name || signal.vt_symbol;
   const strategy = signal.strategy_name || "综合推荐";
   return {
-    title: `买点触发 · ${name}`,
+    title: `${signal.entry_kind === "preboard" ? "板前买点" : "买点触发"} · ${name}`,
     body: [
       signal.vt_symbol,
       `现涨 ${formatSignedPct(signal.change_pct)}`,
@@ -69,7 +69,11 @@ export function buyAlertContent(signal: LimitUpLiveSignal): { title: string; bod
 
 function alertableSignals(snapshot: LimitUpSignalSnapshot): LimitUpLiveSignal[] {
   const selected = new Map<string, LimitUpLiveSignal>();
-  for (const signal of liveSignalsForScope(snapshot, "portfolio")) {
+  const signals = [
+    ...liveSignalsForScope(snapshot, "portfolio"),
+    ...preboardSignals(snapshot),
+  ];
+  for (const signal of signals) {
     if (
       signal.signal_state !== "trigger_ready"
       && signal.execution_state !== "actionable"

@@ -172,6 +172,59 @@ def test_sentiment_cycle_points_track_short_term_metrics():
     assert points[0]["shadow"]["promotion_1to2_rate"] is None
 
 
+def test_sentiment_cycle_points_match_date_ordered_stream_scan():
+    d0 = date(2026, 6, 24)
+    d1 = date(2026, 6, 25)
+    d2 = date(2026, 6, 26)
+    rows = [
+        ("AAA.SSE", "甲股票", d0, 10.0, 10.0, None),
+        ("AAA.SSE", "甲股票", d1, 11.0, 11.0, 10.0),
+        ("AAA.SSE", "甲股票", d2, 12.1, 12.1, 10.0),
+        ("BBB.SSE", "乙股票", d0, 10.0, 10.0, None),
+        ("BBB.SSE", "乙股票", d1, 10.8, 11.0, 8.0),
+        ("BBB.SSE", "乙股票", d2, 11.9, 11.9, 10.0),
+    ]
+
+    points_by_symbol, state_by_symbol = mainline_replay._build_sentiment_cycle_points(
+        sorted(rows, key=lambda row: (row[0], row[2])),
+        [d1, d2],
+    )
+    points_by_date, state_by_date = mainline_replay._build_sentiment_cycle_points(
+        sorted(rows, key=lambda row: (row[2], row[0])),
+        [d1, d2],
+    )
+
+    assert points_by_date == points_by_symbol
+    assert state_by_date == state_by_symbol
+
+
+def test_live_high_map_returns_latest_minute_from_same_aggregation():
+    latest = datetime(2026, 7, 30, 14, 56)
+
+    class FakeResult:
+        def all(self):
+            return [
+                ("AAA.SSE", 11.2, datetime(2026, 7, 30, 14, 55)),
+                ("BBB.SSE", 8.6, latest),
+                ("CCC.SSE", None, datetime(2026, 7, 30, 14, 54)),
+            ]
+
+    class FakeSession:
+        def execute(self, stmt):
+            compiled = stmt.compile()
+            assert "max(stock_minute_bars.high_price)" in str(compiled)
+            assert "max(stock_minute_bars.bar_time)" in str(compiled)
+            return FakeResult()
+
+    high_map, latest_bar_time = mainline_replay._load_live_high_map(
+        FakeSession(),
+        date(2026, 7, 30),
+    )
+
+    assert high_map == {"AAA.SSE": 11.2, "BBB.SSE": 8.6}
+    assert latest_bar_time == latest
+
+
 def test_live_uses_latest_sector_fund_flow_date(monkeypatch):
     captured: list[str] = []
 

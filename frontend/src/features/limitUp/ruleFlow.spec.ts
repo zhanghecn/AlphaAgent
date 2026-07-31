@@ -29,7 +29,7 @@ const guide = {
 } as unknown as LimitUpStrategyGuide;
 
 describe("buildRuleFlow", () => {
-  it("生成八步流程：质量门 → 板前候选 → 触板 → 排序 → 成交", () => {
+  it("生成八步流程：质量门 → 板前买点 → 触板 → 排序 → 成交", () => {
     const nodes = buildRuleFlow(guide);
     expect(nodes).toHaveLength(8);
     expect(nodes.map((node) => node.stage)).toEqual([

@@ -55,6 +55,16 @@ def attach_limit_gene_features(
         result["vt_symbol"],
         10,
     )
+    result["prior_limit_count_42"] = _prior_group_count(
+        sealed_cumulative,
+        result["vt_symbol"],
+        42,
+    )
+    result["prior_limit_count_63"] = _prior_group_count(
+        sealed_cumulative,
+        result["vt_symbol"],
+        63,
+    )
     result["prior_seal_success_rate_126"] = (
         result["prior_limit_count_126"]
         / result["prior_touch_count_126"].replace(0, pd.NA)

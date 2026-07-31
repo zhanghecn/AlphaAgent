@@ -150,7 +150,7 @@ export interface SentimentCycleRange {
 }
 
 export interface SentimentCycleData {
-  status: "ready" | "empty" | "unavailable" | string;
+  status: "ready" | "building" | "empty" | "unavailable" | string;
   mode: "live" | "history" | string;
   trade_date?: string | null;
   base_daily_date?: string | null;
@@ -162,6 +162,8 @@ export interface SentimentCycleData {
   latest_minute_time?: string | null;
   snapshot_updated_at?: string | null;
   snapshot_trade_time?: string | null;
+  /** 日线预计算状态；刷新中仍返回上一版可用曲线。 */
+  cache_state?: "ready" | "refreshing" | "building" | "empty" | string;
   limitations?: string[];
   message?: string;
 }

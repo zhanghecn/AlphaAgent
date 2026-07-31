@@ -10,14 +10,16 @@ Provides:
 
 from __future__ import annotations
 
+import logging
 import threading
+from collections.abc import Iterable
 from datetime import date, datetime, time, timedelta, timezone
 from time import monotonic
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import desc, func, select, text
+from sqlalchemy import desc, func, select
 
 from alphaagent.data_sources.akshare_adapter import AkShareAdapter
 from alphaagent.server.core.responses import fail, ok
@@ -28,6 +30,8 @@ from alphaagent.server.services.mainline_replay import (
     compute_raw_sector_delta,
     compute_relations_aligned,
 )
+
+logger = logging.getLogger(__name__)
 
 def _reject_sector_type_query(request: Request) -> None:
     if "sector_type" in request.query_params:
@@ -172,7 +176,9 @@ _SENTIMENT_MAX_LOOKBACK = 180
 # 所有 sentiment-cycle 请求（任意 date/lookback）都从这条曲线切片，
 # 避免窗口随日期移动导致连板 streak 截断、同一日数值跳变。
 _SENTIMENT_HISTORY_SPAN_DAYS = 250
-_SENTIMENT_FULL_HISTORY_TTL_SECONDS = 1800
+_SENTIMENT_SCAN_BATCH_SIZE = 10_000
+_SENTIMENT_RESPONSE_TTL_SECONDS = 30
+_SENTIMENT_RETRY_TTL_SECONDS = 3
 _NORMAL_LIMIT_UP_THRESHOLD = 9.5
 _WIDE_LIMIT_UP_THRESHOLD = 19.0
 _BSE_LIMIT_UP_THRESHOLD = 29.0
@@ -184,6 +190,12 @@ _CHINA_TZ = timezone(timedelta(hours=8))
 _RESPONSE_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 _LIVE_FLOW_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 _LIVE_FLOW_LOCK = threading.Lock()
+_SENTIMENT_HISTORY_CACHE: dict[
+    tuple[str, str], tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]
+] = {}
+_SENTIMENT_HISTORY_LOCK = threading.Lock()
+_SENTIMENT_REFRESH_LOCK = threading.Lock()
+_SENTIMENT_REFRESH_RUNNING = False
 _STYLE_STATUS_KEYWORDS = (
     "大盘",
     "中盘",
@@ -487,12 +499,12 @@ def sentiment_cycle(
                 "source": "stock_daily_bars",
             })
 
-        # 连续大周期：全量历史曲线只按最新完整日线锚点计算一次（带缓存），
-        # 任意 date/lookback 请求都从这里切片，同一日在任何窗口下数值一致。
-        anchor_date, full_points = _full_sentiment_history_points(session)
+        # 完整日线曲线在盘后预计算并持久化。首次或数据更新后由后台重建，
+        # 请求线程只读最近可用曲线，避免页面等待全市场窗口计算。
+        anchor_date, full_points, symbol_state, history_cache_state = _sentiment_history_for_request(session)
         if anchor_date is None or not full_points:
             return ok({
-                "status": "empty",
+                "status": "building" if history_cache_state == "building" else "empty",
                 "mode": "history",
                 "trade_date": resolved_date.isoformat(),
                 "base_daily_date": _iso_or_none(anchor_date),
@@ -500,6 +512,7 @@ def sentiment_cycle(
                 "ranges": [],
                 "current": None,
                 "source": "stock_daily_bars",
+                "cache_state": history_cache_state,
             })
 
         # as-of 切片：显式 date 时曲线截止到该日（版本热度回看）；否则锚定最新
@@ -514,13 +527,14 @@ def sentiment_cycle(
 
         can_project_live = (
             include_live
+            and history_cache_state == "ready"
             and resolved_date is not None
             and _can_use_intraday_snapshot(session, resolved_date)
         )
         if can_project_live:
-            symbol_state = _live_sentiment_symbol_state(session, anchor_date)
-            live_point = _build_live_sentiment_point(session, resolved_date, symbol_state)
-            if live_point is not None:
+            live_projection = _build_live_sentiment_point(session, resolved_date, symbol_state)
+            if live_projection is not None:
+                live_point, latest_minute_time = live_projection
                 points = [p for p in points if p["date"] != live_point["date"]]
                 points.append(live_point)
                 points.sort(key=lambda item: item["date"])
@@ -529,12 +543,6 @@ def sentiment_cycle(
                 source = "stock_daily_bars,stocks_snapshot,stock_minute_bars"
                 latest_snapshot_updated = session.execute(select(func.max(schema.stocks.c.updated_at))).scalar()
                 latest_snapshot_trade_time = session.execute(select(func.max(schema.stocks.c.trade_time))).scalar()
-                latest_minute_time = session.execute(
-                    select(func.max(schema.stock_minute_bars.c.bar_time)).where(
-                        schema.stock_minute_bars.c.trade_date == resolved_date,
-                        schema.stock_minute_bars.c.interval == "1m",
-                    )
-                ).scalar()
 
         ranges = _sentiment_ranges(points, lookback)
         current = points[-1] if points else None
@@ -552,6 +560,7 @@ def sentiment_cycle(
         "latest_minute_time": _iso_or_none(latest_minute_time),
         "snapshot_updated_at": _iso_or_none(latest_snapshot_updated),
         "snapshot_trade_time": str(latest_snapshot_trade_time) if latest_snapshot_trade_time else None,
+        "cache_state": history_cache_state,
         "limitations": [
             "炸板率使用日K高点触板但收盘未封板的代理，不等同逐笔盘口封板统计。",
             "晋级率使用昨日涨停股今日继续涨停的代理，不区分一进二、二进三等梯队。",
@@ -561,7 +570,9 @@ def sentiment_cycle(
     _cache_set(
         cache_key,
         payload,
-        _CACHE_LIVE_TTL_SECONDS if can_project_live else _CACHE_DEFAULT_TTL_SECONDS,
+        _SENTIMENT_RETRY_TTL_SECONDS
+        if history_cache_state != "ready"
+        else _SENTIMENT_RESPONSE_TTL_SECONDS,
     )
     return ok(payload)
 
@@ -820,44 +831,199 @@ def _resolve_sentiment_cycle_date(session, requested: date | None) -> date | Non
     return _latest_complete_daily_date(session)
 
 
-def _full_sentiment_history_points(session) -> tuple[date | None, list[dict[str, Any]]]:
-    """连续情绪大周期曲线：以最新完整日线为锚，长历史一次计算并缓存。
+def _sentiment_history_for_request(
+    session,
+) -> tuple[date | None, list[dict[str, Any]], dict[str, dict[str, Any]], str]:
+    """Return the newest persisted curve without making a request wait for rebuild.
 
-    每日情绪分由各日截面指标决定（涨跌停/晋级/炸板等），唯一的历史窗口
-    依赖是连板 streak 从窗口起点累计——用足够长的固定跨度（250 个完整
-    交易日）计算一次，任何 date/lookback 请求都从这条曲线切片，保证
-    同一日在任何窗口下数值一致、不再随日期切换而跳变。
+    A daily-bar revision invalidates the persisted revision.  When an older curve
+    exists it remains usable while one background task rebuilds it; an empty
+    cache returns ``building`` so the client can retry shortly instead of holding
+    its HTTP connection during a full-market scan.
     """
+    latest_anchor = _latest_complete_daily_date_at_or_before(session, None)
+    if latest_anchor is None:
+        return None, [], {}, "empty"
+    source_revision = _sentiment_source_revision(session)
+    memory_key = (latest_anchor.isoformat(), _iso_or_none(source_revision) or "")
+    memory_value = _load_sentiment_history_memory(memory_key)
+    if memory_value is not None:
+        points, symbol_state = memory_value
+        return latest_anchor, points, symbol_state, "ready"
+
+    persisted = _load_persisted_sentiment_history(session)
+    if persisted is not None:
+        cached_anchor, cached_revision, points, symbol_state = persisted
+        if cached_anchor == latest_anchor and _same_sentiment_revision(cached_revision, source_revision):
+            _remember_sentiment_history(memory_key, points, symbol_state)
+            return cached_anchor, points, symbol_state, "ready"
+        _schedule_sentiment_history_refresh()
+        return cached_anchor, points, symbol_state, "refreshing"
+
+    _schedule_sentiment_history_refresh()
+    return latest_anchor, [], {}, "building"
+
+
+def _sentiment_source_revision(session) -> Any:
+    """Use the newest daily-bar write as a cheap cross-process cache revision."""
+    return session.execute(select(func.max(schema.stock_daily_bars.c.updated_at))).scalar()
+
+
+def _load_persisted_sentiment_history(
+    session,
+) -> tuple[date, Any, list[dict[str, Any]], dict[str, dict[str, Any]]] | None:
+    table = schema.mainline_sentiment_history
+    row = session.execute(
+        select(
+            table.c.anchor_date,
+            table.c.source_updated_at,
+            table.c.points,
+            table.c.symbol_state,
+        ).where(table.c.id == 1)
+    ).mappings().first()
+    if row is None:
+        return None
+    anchor = _parse_optional_date(row.get("anchor_date"))
+    raw_points = row.get("points")
+    raw_state = row.get("symbol_state")
+    if anchor is None or not isinstance(raw_points, list) or not isinstance(raw_state, dict):
+        return None
+    points = [dict(point) for point in raw_points if isinstance(point, dict)]
+    symbol_state = {
+        str(vt_symbol): dict(state)
+        for vt_symbol, state in raw_state.items()
+        if isinstance(state, dict)
+    }
+    return anchor, row.get("source_updated_at"), points, symbol_state
+
+
+def _load_sentiment_history_memory(
+    key: tuple[str, str],
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]] | None:
+    with _SENTIMENT_HISTORY_LOCK:
+        return _SENTIMENT_HISTORY_CACHE.get(key)
+
+
+def _remember_sentiment_history(
+    key: tuple[str, str],
+    points: list[dict[str, Any]],
+    symbol_state: dict[str, dict[str, Any]],
+) -> None:
+    with _SENTIMENT_HISTORY_LOCK:
+        _SENTIMENT_HISTORY_CACHE.clear()
+        _SENTIMENT_HISTORY_CACHE[key] = (points, symbol_state)
+
+
+def _same_sentiment_revision(left: Any, right: Any) -> bool:
+    return _iso_or_none(left) == _iso_or_none(right)
+
+
+def _schedule_sentiment_history_refresh() -> None:
+    """Start at most one local rebuild; callers always remain non-blocking."""
+    global _SENTIMENT_REFRESH_RUNNING
+    with _SENTIMENT_REFRESH_LOCK:
+        if _SENTIMENT_REFRESH_RUNNING:
+            return
+        _SENTIMENT_REFRESH_RUNNING = True
+
+    def _refresh() -> None:
+        global _SENTIMENT_REFRESH_RUNNING
+        try:
+            rebuild_mainline_sentiment_history_cache()
+        except Exception as exc:  # noqa: BLE001 - a later request can retry
+            logger.warning("mainline sentiment history refresh failed: %s", exc.__class__.__name__)
+        finally:
+            with _SENTIMENT_REFRESH_LOCK:
+                _SENTIMENT_REFRESH_RUNNING = False
+
+    threading.Thread(
+        target=_refresh,
+        name="mainline-sentiment-history-refresh",
+        daemon=True,
+    ).start()
+
+
+def rebuild_mainline_sentiment_history_cache() -> dict[str, Any]:
+    """Rebuild and persist the complete sentiment curve after daily-bar sync."""
+    with session_scope() as session:
+        return _rebuild_mainline_sentiment_history_cache(session)
+
+
+def _rebuild_mainline_sentiment_history_cache(session) -> dict[str, Any]:
     anchor = _latest_complete_daily_date_at_or_before(session, None)
     if anchor is None:
-        return None, []
-    cached = _cache_get(("mainline_replay.sentiment_full_history", anchor.isoformat()))
-    if cached is not None:
-        return anchor, cached
+        return {"status": "empty", "rows_read": 0, "rows_written": 0}
+    source_revision_before = _sentiment_source_revision(session)
     dates = _complete_stock_trade_dates(session, anchor, _SENTIMENT_HISTORY_SPAN_DAYS)
-    metric_rows = _load_sentiment_daily_metric_rows(session, dates)
-    points = _build_sentiment_cycle_points_from_metrics(metric_rows, dates)
-    _cache_set(
-        ("mainline_replay.sentiment_full_history", anchor.isoformat()),
+    if not dates:
+        return {"status": "empty", "rows_read": 0, "rows_written": 0}
+
+    points, symbol_state = _build_sentiment_cycle_points(
+        _load_sentiment_daily_rows(session, dates),
+        dates,
+    )
+    source_revision_after = _sentiment_source_revision(session)
+    latest_anchor = _latest_complete_daily_date_at_or_before(session, None)
+    if latest_anchor != anchor or not _same_sentiment_revision(source_revision_before, source_revision_after):
+        return {
+            "status": "stale",
+            "rows_read": sum(int(point.get("total_stocks") or 0) for point in points),
+            "rows_written": 0,
+            "message": "日线同步仍在写入，等待下一次重建",
+        }
+
+    _save_persisted_sentiment_history(
+        session,
+        anchor=anchor,
+        source_revision=source_revision_after,
+        points=points,
+        symbol_state=symbol_state,
+        history_span_days=len(dates),
+    )
+    _remember_sentiment_history(
+        (anchor.isoformat(), _iso_or_none(source_revision_after) or ""),
         points,
-        _SENTIMENT_FULL_HISTORY_TTL_SECONDS,
+        symbol_state,
     )
-    return anchor, points
+    _clear_sentiment_response_cache()
+    return {
+        "status": "ready",
+        "anchor_date": anchor.isoformat(),
+        "history_days": len(dates),
+        "rows_read": sum(int(point.get("total_stocks") or 0) for point in points),
+        "rows_written": len(points),
+    }
 
 
-def _live_sentiment_symbol_state(session, anchor_date: date) -> dict[str, dict[str, Any]]:
-    """live 投影用的历史 streak 基线（随日线 anchor 变化，按 anchor 缓存）。"""
-    cached = _cache_get(("mainline_replay.sentiment_symbol_state", anchor_date.isoformat()))
-    if cached is not None:
-        return cached
-    dates = _complete_stock_trade_dates(session, anchor_date, _SENTIMENT_HISTORY_SPAN_DAYS)
-    state = _load_sentiment_symbol_state(session, dates)
-    _cache_set(
-        ("mainline_replay.sentiment_symbol_state", anchor_date.isoformat()),
-        state,
-        _SENTIMENT_FULL_HISTORY_TTL_SECONDS,
-    )
-    return state
+def _save_persisted_sentiment_history(
+    session,
+    *,
+    anchor: date,
+    source_revision: Any,
+    points: list[dict[str, Any]],
+    symbol_state: dict[str, dict[str, Any]],
+    history_span_days: int,
+) -> None:
+    table = schema.mainline_sentiment_history
+    values = {
+        "anchor_date": anchor,
+        "source_updated_at": source_revision,
+        "history_span_days": history_span_days,
+        "points": points,
+        "symbol_state": symbol_state,
+        "computed_at": func.now(),
+    }
+    exists = session.execute(select(table.c.id).where(table.c.id == 1)).first()
+    if exists is None:
+        session.execute(table.insert().values(id=1, **values))
+        return
+    session.execute(table.update().where(table.c.id == 1).values(**values))
+
+
+def _clear_sentiment_response_cache() -> None:
+    for key in list(_RESPONSE_CACHE):
+        if key and key[0] == "mainline_replay.sentiment_cycle":
+            _RESPONSE_CACHE.pop(key, None)
 
 
 def _complete_stock_trade_dates(session, end_date: date, limit: int) -> list[date]:
@@ -872,313 +1038,30 @@ def _complete_stock_trade_dates(session, end_date: date, limit: int) -> list[dat
     return sorted([r[0] for r in rows])
 
 
-def _load_sentiment_daily_metric_rows(session, dates: list[date]) -> list[Any]:
+def _load_sentiment_daily_rows(session, dates: list[date]) -> Iterable[Any]:
     if not dates:
-        return []
-    return session.execute(
-        text(
-            """
-            WITH base AS (
-                SELECT
-                    b.vt_symbol,
-                    COALESCE(s.name, '') AS stock_name,
-                    b.trade_date,
-                    b.close_price,
-                    b.high_price,
-                    b.change_pct,
-                    LAG(b.close_price) OVER (
-                        PARTITION BY b.vt_symbol ORDER BY b.trade_date
-                    ) AS previous_close
-                FROM stock_daily_bars b
-                LEFT JOIN stocks s ON s.vt_symbol = b.vt_symbol
-                WHERE b.trade_date BETWEEN :start_date AND :end_date
-            ),
-            calc AS (
-                SELECT
-                    vt_symbol,
-                    stock_name,
-                    trade_date,
-                    close_price,
-                    CASE
-                        WHEN change_pct IS NOT NULL THEN change_pct
-                        WHEN previous_close IS NOT NULL AND previous_close <> 0
-                            THEN (close_price / previous_close - 1) * 100
-                        ELSE NULL
-                    END AS change_calc,
-                    CASE
-                        WHEN previous_close IS NOT NULL AND previous_close <> 0
-                            THEN (high_price / previous_close - 1) * 100
-                        ELSE NULL
-                    END AS high_change,
-                    CASE
-                        WHEN UPPER(COALESCE(stock_name, '')) LIKE '%ST%' THEN :st_threshold
-                        WHEN vt_symbol LIKE '8%' OR vt_symbol LIKE '4%' OR vt_symbol LIKE '920%' OR vt_symbol LIKE '%.BSE' OR vt_symbol LIKE '%.BJSE'
-                            THEN :bse_threshold
-                        WHEN vt_symbol LIKE '30%' OR vt_symbol LIKE '68%' THEN :wide_threshold
-                        ELSE :normal_threshold
-                    END AS limit_threshold
-                FROM base
-                WHERE close_price IS NOT NULL
-            ),
-            flags AS (
-                SELECT
-                    *,
-                    CASE WHEN change_calc >= limit_threshold THEN 1 ELSE 0 END AS is_limit_up,
-                    CASE WHEN change_calc <= -limit_threshold THEN 1 ELSE 0 END AS is_limit_down,
-                    CASE WHEN high_change >= limit_threshold THEN 1 ELSE 0 END AS touched_limit_up
-                FROM calc
-                WHERE change_calc IS NOT NULL
-            ),
-            grouped AS (
-                SELECT
-                    *,
-                    LAG(is_limit_up, 1, 0) OVER (
-                        PARTITION BY vt_symbol ORDER BY trade_date
-                    ) AS previous_is_limit_up,
-                    SUM(CASE WHEN is_limit_up = 1 THEN 0 ELSE 1 END) OVER (
-                        PARTITION BY vt_symbol ORDER BY trade_date ROWS UNBOUNDED PRECEDING
-                    ) AS streak_group
-                FROM flags
-            ),
-            streaks AS (
-                SELECT
-                    *,
-                    CASE
-                        WHEN is_limit_up = 1 THEN
-                            SUM(is_limit_up) OVER (
-                                PARTITION BY vt_symbol, streak_group
-                                ORDER BY trade_date ROWS UNBOUNDED PRECEDING
-                            )
-                        ELSE 0
-                    END AS limit_up_streak
-                FROM grouped
-            ),
-            streaks_lag AS (
-                SELECT
-                    *,
-                    LAG(limit_up_streak, 1, 0) OVER (
-                        PARTITION BY vt_symbol ORDER BY trade_date
-                    ) AS previous_streak
-                FROM streaks
-            )
-            SELECT
-                trade_date,
-                COUNT(*)::int AS total_stocks,
-                SUM(CASE WHEN change_calc > 0 THEN 1 ELSE 0 END)::int AS rise_count,
-                SUM(CASE WHEN change_calc < 0 THEN 1 ELSE 0 END)::int AS fall_count,
-                SUM(CASE WHEN change_calc = 0 THEN 1 ELSE 0 END)::int AS flat_count,
-                SUM(is_limit_up)::int AS limit_up_count,
-                SUM(is_limit_down)::int AS limit_down_count,
-                SUM(CASE WHEN touched_limit_up = 1 AND is_limit_up = 0 THEN 1 ELSE 0 END)::int AS failed_limit_up_count,
-                SUM(previous_is_limit_up)::int AS previous_limit_up_count,
-                SUM(CASE WHEN previous_is_limit_up = 1 AND is_limit_up = 1 THEN 1 ELSE 0 END)::int AS promoted_limit_up_count,
-                MAX(limit_up_streak)::int AS max_limit_up_streak,
-                -- v2 影子指标（不进 score）：打板溢价 / 梯队晋级 / 连板家数
-                COALESCE(SUM(change_calc) FILTER (WHERE previous_is_limit_up = 1), 0) AS prev_lu_change_sum,
-                SUM(CASE WHEN previous_is_limit_up = 1 AND change_calc > 0 THEN 1 ELSE 0 END)::int AS prev_lu_rise_count,
-                SUM(CASE WHEN previous_streak = 1 THEN 1 ELSE 0 END)::int AS tier1_base,
-                SUM(CASE WHEN previous_streak = 1 AND is_limit_up = 1 THEN 1 ELSE 0 END)::int AS tier1_promoted,
-                SUM(CASE WHEN previous_streak = 2 THEN 1 ELSE 0 END)::int AS tier2_base,
-                SUM(CASE WHEN previous_streak = 2 AND is_limit_up = 1 THEN 1 ELSE 0 END)::int AS tier2_promoted,
-                SUM(CASE WHEN previous_streak >= 3 THEN 1 ELSE 0 END)::int AS tierh_base,
-                SUM(CASE WHEN previous_streak >= 3 AND is_limit_up = 1 THEN 1 ELSE 0 END)::int AS tierh_promoted,
-                SUM(CASE WHEN is_limit_up = 1 AND limit_up_streak >= 2 THEN 1 ELSE 0 END)::int AS consecutive_limit_up_count
-            FROM streaks_lag
-            GROUP BY trade_date
-            ORDER BY trade_date
-            """
-        ),
-        {
-            "start_date": dates[0],
-            "end_date": dates[-1],
-            "st_threshold": 4.5,
-            "normal_threshold": _NORMAL_LIMIT_UP_THRESHOLD,
-            "wide_threshold": _WIDE_LIMIT_UP_THRESHOLD,
-            "bse_threshold": _BSE_LIMIT_UP_THRESHOLD,
-        },
-    ).all()
-
-
-def _build_sentiment_cycle_points_from_metrics(
-    rows: list[Any],
-    output_dates: list[date],
-) -> list[dict[str, Any]]:
-    metrics_by_date = {d: _empty_sentiment_metrics(d) for d in output_dates}
-    for row in rows:
-        (
-            trade_date,
-            total_stocks,
-            rise_count,
-            fall_count,
-            flat_count,
-            limit_up_count,
-            limit_down_count,
-            failed_limit_up_count,
-            previous_limit_up_count,
-            promoted_limit_up_count,
-            max_limit_up_streak,
-            prev_lu_change_sum,
-            prev_lu_rise_count,
-            tier1_base,
-            tier1_promoted,
-            tier2_base,
-            tier2_promoted,
-            tierh_base,
-            tierh_promoted,
-            consecutive_limit_up_count,
-        ) = row
-        if trade_date not in metrics_by_date:
-            continue
-        metrics = metrics_by_date[trade_date]
-        metrics["total_stocks"] = int(total_stocks or 0)
-        metrics["rise_count"] = int(rise_count or 0)
-        metrics["fall_count"] = int(fall_count or 0)
-        metrics["flat_count"] = int(flat_count or 0)
-        metrics["limit_up_count"] = int(limit_up_count or 0)
-        metrics["limit_down_count"] = int(limit_down_count or 0)
-        metrics["failed_limit_up_count"] = int(failed_limit_up_count or 0)
-        metrics["previous_limit_up_count"] = int(previous_limit_up_count or 0)
-        metrics["promoted_limit_up_count"] = int(promoted_limit_up_count or 0)
-        metrics["max_limit_up_streak"] = int(max_limit_up_streak or 0)
-        # v2 影子指标累计值（与 Python 构建路径同键，_finalize 统一换算）
-        metrics["prev_lu_change_sum"] = float(prev_lu_change_sum or 0.0)
-        metrics["prev_lu_rise_count"] = int(prev_lu_rise_count or 0)
-        metrics["tier1_base"] = int(tier1_base or 0)
-        metrics["tier1_promoted"] = int(tier1_promoted or 0)
-        metrics["tier2_base"] = int(tier2_base or 0)
-        metrics["tier2_promoted"] = int(tier2_promoted or 0)
-        metrics["tierh_base"] = int(tierh_base or 0)
-        metrics["tierh_promoted"] = int(tierh_promoted or 0)
-        metrics["consecutive_limit_up_count"] = int(consecutive_limit_up_count or 0)
-    points = [_finalize_sentiment_metrics(metrics_by_date[d]) for d in output_dates]
-    _attach_sentiment_score_changes(points)
-    return points
-
-
-def _load_sentiment_symbol_state(session, dates: list[date]) -> dict[str, dict[str, Any]]:
-    if not dates:
-        return {}
-    rows = session.execute(
-        text(
-            """
-            WITH base AS (
-                SELECT
-                    b.vt_symbol,
-                    COALESCE(s.name, '') AS stock_name,
-                    b.trade_date,
-                    b.close_price,
-                    b.change_pct,
-                    LAG(b.close_price) OVER (
-                        PARTITION BY b.vt_symbol ORDER BY b.trade_date
-                    ) AS previous_close
-                FROM stock_daily_bars b
-                LEFT JOIN stocks s ON s.vt_symbol = b.vt_symbol
-                WHERE b.trade_date BETWEEN :start_date AND :end_date
-            ),
-            calc AS (
-                SELECT
-                    vt_symbol,
-                    stock_name,
-                    trade_date,
-                    close_price,
-                    CASE
-                        WHEN change_pct IS NOT NULL THEN change_pct
-                        WHEN previous_close IS NOT NULL AND previous_close <> 0
-                            THEN (close_price / previous_close - 1) * 100
-                        ELSE NULL
-                    END AS change_calc,
-                    CASE
-                        WHEN UPPER(COALESCE(stock_name, '')) LIKE '%ST%' THEN :st_threshold
-                        WHEN vt_symbol LIKE '8%' OR vt_symbol LIKE '4%' OR vt_symbol LIKE '920%' OR vt_symbol LIKE '%.BSE' OR vt_symbol LIKE '%.BJSE'
-                            THEN :bse_threshold
-                        WHEN vt_symbol LIKE '30%' OR vt_symbol LIKE '68%' THEN :wide_threshold
-                        ELSE :normal_threshold
-                    END AS limit_threshold
-                FROM base
-                WHERE close_price IS NOT NULL
-            ),
-            flags AS (
-                SELECT
-                    *,
-                    CASE WHEN change_calc >= limit_threshold THEN 1 ELSE 0 END AS is_limit_up
-                FROM calc
-                WHERE change_calc IS NOT NULL
-            ),
-            grouped AS (
-                SELECT
-                    *,
-                    SUM(CASE WHEN is_limit_up = 1 THEN 0 ELSE 1 END) OVER (
-                        PARTITION BY vt_symbol ORDER BY trade_date ROWS UNBOUNDED PRECEDING
-                    ) AS streak_group
-                FROM flags
-            ),
-            streaks AS (
-                SELECT
-                    *,
-                    CASE
-                        WHEN is_limit_up = 1 THEN
-                            SUM(is_limit_up) OVER (
-                                PARTITION BY vt_symbol, streak_group
-                                ORDER BY trade_date ROWS UNBOUNDED PRECEDING
-                            )
-                        ELSE 0
-                    END AS limit_up_streak
-                FROM grouped
-            ),
-            latest AS (
-                SELECT DISTINCT ON (vt_symbol)
-                    vt_symbol,
-                    stock_name,
-                    close_price,
-                    limit_up_streak
-                FROM streaks
-                ORDER BY vt_symbol, trade_date DESC
-            )
-            SELECT vt_symbol, stock_name, close_price, limit_up_streak
-            FROM latest
-            """
-        ),
-        {
-            "start_date": dates[0],
-            "end_date": dates[-1],
-            "st_threshold": 4.5,
-            "normal_threshold": _NORMAL_LIMIT_UP_THRESHOLD,
-            "wide_threshold": _WIDE_LIMIT_UP_THRESHOLD,
-            "bse_threshold": _BSE_LIMIT_UP_THRESHOLD,
-        },
-    ).all()
-    return {
-        str(vt_symbol): {
-            "previous_close": float(close_price),
-            "limit_up_streak": int(limit_up_streak or 0),
-            "stock_name": str(stock_name or ""),
-        }
-        for vt_symbol, stock_name, close_price, limit_up_streak in rows
-        if close_price is not None
-    }
-
-
-def _load_sentiment_daily_rows(session, dates: list[date]) -> list[Any]:
-    if not dates:
-        return []
-    return session.execute(
+        return ()
+    bars = schema.stock_daily_bars
+    statement = (
         select(
-            schema.stock_daily_bars.c.vt_symbol,
+            bars.c.vt_symbol,
             schema.stocks.c.name,
-            schema.stock_daily_bars.c.trade_date,
-            schema.stock_daily_bars.c.close_price,
-            schema.stock_daily_bars.c.high_price,
-            schema.stock_daily_bars.c.change_pct,
+            bars.c.trade_date,
+            bars.c.close_price,
+            bars.c.high_price,
+            bars.c.change_pct,
         )
-        .select_from(schema.stock_daily_bars)
-        .outerjoin(schema.stocks, schema.stocks.c.vt_symbol == schema.stock_daily_bars.c.vt_symbol)
-        .where(schema.stock_daily_bars.c.trade_date.in_(dates))
-        .order_by(schema.stock_daily_bars.c.vt_symbol, schema.stock_daily_bars.c.trade_date)
-    ).all()
+        .select_from(bars)
+        .outerjoin(schema.stocks, schema.stocks.c.vt_symbol == bars.c.vt_symbol)
+        .where(bars.c.trade_date.between(dates[0], dates[-1]))
+        .order_by(bars.c.trade_date, bars.c.vt_symbol)
+        .execution_options(stream_results=True)
+    )
+    return session.execute(statement).yield_per(_SENTIMENT_SCAN_BATCH_SIZE)
 
 
 def _build_sentiment_cycle_points(
-    rows: list[Any],
+    rows: Iterable[Any],
     output_dates: list[date],
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
     output_set = set(output_dates)
@@ -1477,7 +1360,7 @@ def _build_live_sentiment_point(
     session,
     d: date,
     symbol_state: dict[str, dict[str, Any]],
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any], datetime | None] | None:
     rows = session.execute(
         select(
             schema.stocks.c.vt_symbol,
@@ -1491,7 +1374,7 @@ def _build_live_sentiment_point(
     if not rows:
         return None
 
-    high_map = _load_live_high_map(session, d)
+    high_map, latest_minute_time = _load_live_high_map(session, d)
     metrics = _empty_sentiment_metrics(d)
     metrics["temporary"] = True
 
@@ -1520,14 +1403,16 @@ def _build_live_sentiment_point(
             previous_streak=previous_streak,
         )
 
-    return _finalize_sentiment_metrics(metrics)
+    return _finalize_sentiment_metrics(metrics), latest_minute_time
 
 
-def _load_live_high_map(session, d: date) -> dict[str, float]:
+def _load_live_high_map(session, d: date) -> tuple[dict[str, float], datetime | None]:
+    """Load intraday highs and latest bar time with one date-scoped aggregation."""
     rows = session.execute(
         select(
             schema.stock_minute_bars.c.vt_symbol,
             func.max(schema.stock_minute_bars.c.high_price).label("high_price"),
+            func.max(schema.stock_minute_bars.c.bar_time).label("latest_bar_time"),
         )
         .where(
             schema.stock_minute_bars.c.trade_date == d,
@@ -1536,11 +1421,14 @@ def _load_live_high_map(session, d: date) -> dict[str, float]:
         .group_by(schema.stock_minute_bars.c.vt_symbol)
     ).all()
     out: dict[str, float] = {}
-    for vt_symbol, high_price in rows:
+    latest_bar_time: datetime | None = None
+    for vt_symbol, high_price, bar_time in rows:
         value = _float_or_none(high_price)
         if value is not None:
             out[str(vt_symbol)] = value
-    return out
+        if isinstance(bar_time, datetime) and (latest_bar_time is None or bar_time > latest_bar_time):
+            latest_bar_time = bar_time
+    return out, latest_bar_time
 
 
 def _sentiment_ranges(points: list[dict[str, Any]], lookback: int) -> list[dict[str, Any]]:

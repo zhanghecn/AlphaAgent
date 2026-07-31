@@ -987,110 +987,6 @@ def test_live_portfolio_excludes_structurally_selected_observation() -> None:
     assert portfolio == []
 
 
-def test_live_watchlist_only_keeps_candidates_that_can_transition_to_buy() -> None:
-    recommendations = {
-        "lanes": {
-            "now": [
-                {
-                    "vt_symbol": "600001.SSE",
-                    "board_lane": "first_board",
-                    "lane_decision": "blocked",
-                    "state": "near_limit",
-                    "distance_to_limit_pct": 0.5,
-                    "action": "pass",
-                    "signal_state": "rejected",
-                    "blocking_scope": "structural",
-                    "reason": "缺少财报证据",
-                    "leadership_score": 70.0,
-                    "strategy_evidence": {"total_return_pct": 55.0},
-                    "historical_evidence": {"tbox_score": 45.0},
-                },
-                {
-                    "vt_symbol": "600002.SSE",
-                    "board_lane": "first_board",
-                    "lane_decision": "blocked",
-                    "state": "near_limit",
-                    "change_pct": 8.0,
-                    "last_price": 9.8,
-                    "limit_price": 10.0,
-                    "distance_to_limit_pct": 1.4,
-                    "action": "observe",
-                    "signal_state": "approaching_trigger",
-                    "blocking_scope": "dynamic",
-                    "reason": "等待进入1%扫板触发区",
-                    "leadership_score": 90.0,
-                    "strategy_evidence": {"total_return_pct": 58.0},
-                    "historical_evidence": {
-                        "tbox_score": 90.0,
-                        "historical_win_rate": 40.0,
-                    },
-                },
-                {
-                    "vt_symbol": "600003.SSE",
-                    "board_lane": "first_board",
-                    "lane_decision": "blocked",
-                    "state": "strong",
-                    "change_pct": 7.0,
-                    "last_price": 9.7,
-                    "limit_price": 10.0,
-                    "action": "observe",
-                    "signal_state": "concept_warming",
-                    "blocking_scope": "dynamic",
-                    "reason": "PCB板块预热",
-                    "strategy_evidence": {"total_return_pct": 50.0},
-                    "historical_evidence": {
-                        "tbox_score": 85.0,
-                        "historical_win_rate": 40.0,
-                    },
-                },
-                {
-                    "vt_symbol": "600004.SSE",
-                    "board_lane": "first_board",
-                    "lane_decision": "eligible",
-                    "state": "sealed",
-                    "action": "wait_tail",
-                    "signal_state": "missed",
-                    "reason": "已封板，买点错过",
-                },
-                {
-                    "vt_symbol": "600005.SSE",
-                    "board_lane": "first_board",
-                    "lane_decision": "eligible",
-                    "state": "near_limit",
-                    "action": "pass",
-                    "signal_state": "rejected",
-                    "blocking_scope": "structural",
-                    "reason": "首板结构硬门未通过",
-                },
-                {
-                    "vt_symbol": "600006.SSE",
-                    "board_lane": "first_board",
-                    "lane_decision": "eligible",
-                    "state": "near_limit",
-                    "action": "observe",
-                    "signal_state": "invalidated",
-                    "reason": "实时快照已失效",
-                },
-            ],
-            "tail": [],
-            "next_auction": [],
-        }
-    }
-
-    watchlist = live_service._build_live_watchlist(recommendations)
-
-    assert [row["vt_symbol"] for row in watchlist] == [
-        "600002.SSE",
-        "600003.SSE",
-    ]
-    assert {row["signal_state"] for row in watchlist} == {
-        "approaching_trigger",
-        "concept_warming",
-    }
-    assert all(row["action"] == "observe" for row in watchlist)
-    assert all("今日拒买" not in str(row.get("reason") or "") for row in watchlist)
-
-
 def test_live_preboard_candidates_publish_touch_ready_near_limit_only() -> None:
     prepared = {
         "vt_symbol": "600002.SSE",
@@ -1122,7 +1018,7 @@ def test_live_preboard_candidates_publish_touch_ready_near_limit_only() -> None:
         "lanes": {
             "now": [
                 prepared,
-                {**prepared, "vt_symbol": "600003.SSE", "change_pct": 2.9},
+                {**prepared, "vt_symbol": "600003.SSE", "state": "pre_radar"},
                 {
                     **prepared,
                     "vt_symbol": "600004.SSE",
@@ -1136,7 +1032,7 @@ def test_live_preboard_candidates_publish_touch_ready_near_limit_only() -> None:
                     "public_quality_touch_ready": False,
                 },
                 {**prepared, "vt_symbol": "600006.SSE", "validation_passed": False},
-                {**prepared, "vt_symbol": "600007.SSE", "blocking_scope": "dynamic"},
+                {**prepared, "vt_symbol": "600007.SSE", "research_action": "observe"},
             ],
             "tail": [],
             "next_auction": [],
@@ -1146,15 +1042,39 @@ def test_live_preboard_candidates_publish_touch_ready_near_limit_only() -> None:
     rows = live_service._build_live_preboard_candidates(recommendations)
 
     assert [row["vt_symbol"] for row in rows] == ["600002.SSE"]
-    assert rows[0]["action"] == "observe"
+    assert rows[0]["action"] == "buy_now"
     assert rows[0]["entry_kind"] == "preboard"
     assert rows[0]["preboard_state"] == "touch_ready"
-    assert rows[0]["buy_instruction"] == "板前候选；接近涨停时结合实时动能自行决策"
+    assert rows[0]["buy_instruction"] == (
+        "板前买点；当前质量与动能已通过，触板后升级为扫板买点"
+    )
 
     assert live_service._build_live_preboard_candidates(
         recommendations,
         snapshot_age_seconds=21,
     ) == []
+
+
+def test_live_preboard_candidates_are_not_truncated_to_watchlist_capacity() -> None:
+    signals = [
+        {
+            "vt_symbol": f"60000{index}.SSE",
+            "board_lane": "first_board",
+            "state": "near_limit",
+            "research_action": "buy_now",
+            "validation_passed": True,
+            "public_quality_touch_ready": True,
+            "quality_win_probability": 0.7,
+            "quality_expected_d1_net_return_pct": 1.0,
+        }
+        for index in range(1, 9)
+    ]
+
+    rows = live_service._build_live_preboard_candidates(
+        {"lanes": {"now": signals, "tail": [], "next_auction": []}}
+    )
+
+    assert len(rows) == 8
 
 
 def test_preboard_candidate_upgrades_to_formal_buy_after_physical_touch() -> None:
@@ -2008,6 +1928,21 @@ def test_research_quote_enrichment_only_changes_internal_radar_candidates() -> N
     assert row["quote_main_net_inflow_ratio"] == 2.63
 
 
+def test_legacy_watchlist_is_not_published() -> None:
+    snapshot = {
+        "recommendations": {
+            "preboard_candidates": [{"vt_symbol": "600001.SSE"}],
+            "watchlist": [{"vt_symbol": "600002.SSE"}],
+        }
+    }
+
+    public = live_service._without_internal_radar_fields(snapshot)
+
+    assert public["recommendations"] == {
+        "preboard_candidates": [{"vt_symbol": "600001.SSE"}]
+    }
+
+
 def test_stale_research_quote_enrichment_is_explicitly_cleared() -> None:
     captured_at = datetime(2026, 7, 10, 10, 5, 30, tzinfo=SHANGHAI)
     snapshot = {
@@ -2429,7 +2364,6 @@ def test_live_read_prefers_same_day_snapshot_during_lunch(monkeypatch) -> None:
                 {"action": "buy_now", "entry_kind": "sweep", "reason": "旧买点"}
             ],
             "portfolio": [{"action": "buy_now", "entry_kind": "sweep", "reason": "旧买点"}],
-            "watchlist": [{"action": "observe", "entry_kind": "sweep", "reason": "旧观察"}],
             "lanes": {
                 "now": [{"action": "buy_now", "entry_kind": "sweep", "reason": "旧买点"}],
                 "tail": [],
@@ -2453,7 +2387,6 @@ def test_live_read_prefers_same_day_snapshot_during_lunch(monkeypatch) -> None:
     assert result["recommendations"]["lanes"]["now"][0]["action"] == "pass"
     assert result["recommendations"]["actionable_recommendations"][0]["action"] == "pass"
     assert result["recommendations"]["portfolio"][0]["action"] == "pass"
-    assert result["recommendations"]["watchlist"][0]["action"] == "pass"
     assert "午间休市" in result["recommendations"]["lanes"]["now"][0]["reason"]
 
 

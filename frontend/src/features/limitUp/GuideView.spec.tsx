@@ -101,7 +101,7 @@ describe("GuideView", () => {
     expect(html).toContain("唯一正式合同是");
     expect(html).toContain("limit-up-core-abc-v2");
     expect(html).toContain("涨停 2 到");
-    expect(html).toContain("当除真实触板外的正式条件已齐时先进入板前候选");
+    expect(html).toContain("按此刻触板可通过公共质量门时，先显示板前买点");
     expect(html).toContain("真实触板或回封发生后再复核完整公共质量门并升级为正式买点");
     expect(html).toContain("规则保证不偷看未来数据");
   });
@@ -114,7 +114,7 @@ describe("GuideView", () => {
     expect(html).toContain("锁定唯一正式合同");
     expect(html).toContain("通过原基础质量门");
     expect(html).toContain("建立 A/B 辨识度基座");
-    expect(html).toContain("触板前进入可靠候选");
+    expect(html).toContain("触板前显示同源买点");
     expect(html).toContain("输出全部 A+B+C 买点");
   });
 

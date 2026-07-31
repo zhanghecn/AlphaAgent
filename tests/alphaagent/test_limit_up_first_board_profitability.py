@@ -487,43 +487,6 @@ def test_live_actionable_uses_same_profitability_exclusion_as_backtest() -> None
     assert actionable[0]["profitability_gate_passed"] is True
 
 
-def test_live_first_board_watchlist_uses_change_pct_as_second_key() -> None:
-    recommendations = {
-        "lanes": {
-            "now": [
-                _live_signal(
-                    "600001.SSE",
-                    action="observe",
-                    historical_win_rate=50.0,
-                    change_pct=8.8,
-                ),
-                _live_signal(
-                    "600002.SSE",
-                    action="observe",
-                    historical_win_rate=50.0,
-                    change_pct=9.3,
-                ),
-                _live_signal(
-                    "600003.SSE",
-                    action="observe",
-                    historical_win_rate=55.0,
-                    change_pct=8.0,
-                ),
-            ],
-            "tail": [],
-            "next_auction": [],
-        }
-    }
-
-    watchlist = live_service._build_live_watchlist(recommendations)
-
-    assert [row["vt_symbol"] for row in watchlist] == [
-        "600003.SSE",
-        "600002.SSE",
-        "600001.SSE",
-    ]
-
-
 def test_live_portfolio_prefers_relay_then_uses_first_board_joint_rate() -> None:
     recommendations = {
         "lanes": {

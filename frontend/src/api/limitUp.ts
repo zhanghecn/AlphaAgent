@@ -337,7 +337,6 @@ export interface LimitUpSignalSnapshot {
     actionable_recommendations?: LimitUpLiveSignal[];
     preboard_candidates?: LimitUpLiveSignal[];
     portfolio?: LimitUpLiveSignal[];
-    watchlist?: LimitUpLiveSignal[];
     execution_schedule?: LimitUpExecutionSchedule;
     core_quality_filter?: LimitUpCoreQualityFilterMetadata;
     plan?: LimitUpPlanMetadata;
@@ -359,6 +358,15 @@ export interface LimitUpSignalSnapshot {
     concept_membership_snapshot_date?: string | null;
     plan?: LimitUpPlanMetadata;
   };
+}
+
+export interface FirstBoardLeaderSnapshot {
+  trade_date: string | null;
+  captured_at: string | null;
+  session_stage?: string | null;
+  mode?: string | null;
+  data_quality: { is_stale?: boolean } & Record<string, unknown>;
+  leaders: LimitUpLiveSignal[];
 }
 
 export interface LimitUpLiveTraceDates {
@@ -1044,6 +1052,23 @@ export interface LimitUpWalkForwardModelReport {
 
 export function fetchLimitUpLive(): Promise<LimitUpSignalSnapshot> {
   return apiClient.get<LimitUpSignalSnapshot>("/limit-up/live");
+}
+
+export function fetchFirstBoardLeaderLive(): Promise<FirstBoardLeaderSnapshot> {
+  return apiClient.get<FirstBoardLeaderSnapshot>("/limit-up/first-board-leader/live");
+}
+
+export interface FirstBoardLeaderBacktest {
+  status: "ok" | "unavailable" | string;
+  message?: string;
+  is_backtest?: boolean;
+  report?: LimitUpLaneBacktest;
+  ledger_days?: LimitUpLaneLedger[];
+  notes?: string[];
+}
+
+export function fetchFirstBoardLeaderBacktest(): Promise<FirstBoardLeaderBacktest> {
+  return apiClient.get<FirstBoardLeaderBacktest>("/limit-up/first-board-leader/backtest");
 }
 
 export function fetchLimitUpStrategyGuide(): Promise<LimitUpStrategyGuide> {

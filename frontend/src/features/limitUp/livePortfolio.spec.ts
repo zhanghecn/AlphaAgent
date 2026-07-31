@@ -77,21 +77,14 @@ describe("live limit-up portfolio presentation", () => {
     ).toEqual(["600010.SSE", "600011.SSE"]);
   });
 
-  it("keeps the actionable list empty when only the watchlist has rows", () => {
-    const watchlist = [signal("600011.SSE", 1, "observe")];
-
-    expect(liveSignalsForScope(snapshot({ portfolio: [], watchlist }), "portfolio")).toEqual([]);
-  });
-
   it("keeps prepared preboard rows separate from formal recommendations", () => {
     const prepared = {
-      ...signal("600011.SSE", 1, "observe"),
+      ...signal("600011.SSE", 1, "buy_now"),
       state: "near_limit" as const,
       public_quality_preparation_passed: true,
       public_quality_touch_ready: true,
       public_quality_actionable: false,
       validation_passed: true,
-      blocking_scope: "none",
     };
     const touched = {
       ...prepared,
@@ -118,20 +111,6 @@ describe("live limit-up portfolio presentation", () => {
     expect(liveSignalsForScope(snapshot({ portfolio }), "portfolio")).toEqual([]);
   });
 
-  it("never lets watchlist rows append to the actionable portfolio", () => {
-    const portfolio = [signal("600010.SSE", 1, "buy_now")];
-    const watchlist = [
-      signal("600010.SSE", 1, "observe"),
-      signal("600011.SSE", 1, "observe"),
-    ];
-
-    expect(
-      liveSignalsForScope(snapshot({ portfolio, watchlist }), "portfolio").map(
-        (row) => row.vt_symbol,
-      ),
-    ).toEqual(["600010.SSE"]);
-  });
-
   it("prefers unbounded actionable recommendations over the constrained portfolio", () => {
     const portfolio = [
       signal("600010.SSE", 1, "buy_now"),
@@ -150,33 +129,14 @@ describe("live limit-up portfolio presentation", () => {
     ).toEqual(["600010.SSE", "600011.SSE", "600012.SSE"]);
   });
 
-  it("keeps backend portfolio order when a watchlist row has a higher joint rate", () => {
-    const portfolio = [
-      { ...profitabilitySignal("600001.SSE", 45, 9.8, 1), action: "buy_now" as const },
-    ];
-    const watchlist = [profitabilitySignal("600002.SSE", 55, 8.8, 5)];
-
-    expect(
-      liveSignalsForScope(snapshot({ portfolio, watchlist }), "portfolio").map(
-        (row) => row.vt_symbol,
-      ),
-    ).toEqual(["600001.SSE"]);
-  });
-
-  it("returns every strict backend recommendation without watchlist padding", () => {
+  it("returns every strict backend recommendation", () => {
     const actionable_recommendations = [
       { ...signal("600010.SSE", 1, "buy_now"), portfolio_selected: true },
       { ...signal("600011.SSE", 1, "buy_now"), portfolio_selected: true },
       { ...signal("600012.SSE", 1, "buy_now"), portfolio_selected: false },
     ];
-    const watchlist = Array.from({ length: 8 }, (_, index) => ({
-      ...signal(`6000${index + 10}.SSE`, 1, "observe"),
-      signal_state: index % 2 ? "concept_warming" : "approaching_trigger",
-      concept_strength_rank: index + 1,
-    }));
-
     const rows = liveSignalsForScope(
-      snapshot({ actionable_recommendations, watchlist }),
+      snapshot({ actionable_recommendations }),
       "portfolio",
     );
 
@@ -263,22 +223,3 @@ describe("live limit-up portfolio presentation", () => {
     ).toEqual([]);
   });
 });
-
-function profitabilitySignal(
-  symbol: string,
-  historicalWinRate: number,
-  changePct: number,
-  conceptStrengthRank: number,
-): LimitUpLiveSignal {
-  return {
-    ...signal(symbol, 1, "observe"),
-    board_lane: "first_board",
-    signal_state: "approaching_trigger",
-    change_pct: changePct,
-    concept_strength_rank: conceptStrengthRank,
-    historical_evidence: {
-      smoothed_win_rate: 50,
-      historical_win_rate: historicalWinRate,
-    },
-  };
-}

@@ -161,6 +161,12 @@ def test_limit_gene_vectorized_windows_match_group_rolling_reference() -> None:
     expected["prior_limit_count_10"] = grouped["sealed"].transform(
         lambda values: values.shift(1).rolling(10, min_periods=1).sum()
     ).fillna(0).astype(int)
+    expected["prior_limit_count_42"] = grouped["sealed"].transform(
+        lambda values: values.shift(1).rolling(42, min_periods=1).sum()
+    ).fillna(0).astype(int)
+    expected["prior_limit_count_63"] = grouped["sealed"].transform(
+        lambda values: values.shift(1).rolling(63, min_periods=1).sum()
+    ).fillna(0).astype(int)
     expected["prior_low_120"] = grouped["low_price"].transform(
         lambda values: values.shift(1).rolling(120, min_periods=20).min()
     )
@@ -178,6 +184,8 @@ def test_limit_gene_vectorized_windows_match_group_rolling_reference() -> None:
                 "prior_touch_count_126",
                 "prior_limit_count_5",
                 "prior_limit_count_10",
+                "prior_limit_count_42",
+                "prior_limit_count_63",
             ]
         ],
         expected[
@@ -186,6 +194,8 @@ def test_limit_gene_vectorized_windows_match_group_rolling_reference() -> None:
                 "prior_touch_count_126",
                 "prior_limit_count_5",
                 "prior_limit_count_10",
+                "prior_limit_count_42",
+                "prior_limit_count_63",
             ]
         ],
     )

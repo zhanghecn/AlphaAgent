@@ -269,6 +269,13 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         default_params={"limit": 500},
     ),
     JobDefinition(
+        id="sync_mainline_sentiment_history",
+        name="情绪周期预计算",
+        description="在完整股票日线更新后预计算主线页的情绪周期曲线和盘中投影状态。",
+        source_id="alphaagent_local",
+        target_table="mainline_sentiment_history",
+    ),
+    JobDefinition(
         id="sync_stock_minute_bars",
         name="股票分钟 K 线",
         description="同步系统数据源的最近分钟线；历史事件缺口由覆盖审计和夜间任务自动补偿。",
@@ -550,6 +557,7 @@ JOB_CADENCES: dict[str, JobCadence] = {
     "sync_limit_up_pools": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "stock_events", "updated_at"),
     "sync_stock_daily_bars": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "stock_daily_bars", "trade_date"),
     "sync_index_daily_bars": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "stock_daily_bars", "trade_date"),
+    "sync_mainline_sentiment_history": JobCadence(CADENCE_EOD_DAILY, CATEGORY_SECTOR_RESEARCH, 1, "mainline_sentiment_history", "computed_at"),
     "sync_sector_daily_bars": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "sector_daily_bars", "trade_date"),
     "sync_stock_minute_bars": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_BARS, 1, "stock_minute_bars", "bar_time"),
     "sync_limit_up_event_minutes": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "limit_up_minute_backfill_attempts", "last_attempt_at"),
@@ -591,7 +599,7 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
     "sync_low_suction_swing_settlement",
     "sync_shenwan_industry_members", "sync_industry_board_mapping",
     "sync_supply_chain_edges",
-    "sync_stock_daily_bars", "sync_index_daily_bars", "sync_sector_daily_bars",
+    "sync_stock_daily_bars", "sync_index_daily_bars", "sync_mainline_sentiment_history", "sync_sector_daily_bars",
     "sync_stock_minute_bars",
     "sync_limit_up_event_minutes",
     "sync_limit_up_radar_minutes",
@@ -713,6 +721,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_stock_fund_flows",
             "sync_stock_daily_bars",
             "sync_index_daily_bars",
+            "sync_mainline_sentiment_history",
             "sync_low_suction_swing_settlement",
             "sync_sector_list",
             "sync_sector_daily_bars",
@@ -743,6 +752,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "job_ids": [
             "sync_stock_daily_bars",
             "sync_index_daily_bars",
+            "sync_mainline_sentiment_history",
             "sync_low_suction_swing_settlement",
             "sync_sector_fund_flows",
             "sync_stock_fund_flows",
@@ -1391,6 +1401,30 @@ class DataSyncRunner:
                 sample_items=sample_items,
             )
         return {"rows_read": total_read, "rows_written": total_written}
+
+    def _run_sync_mainline_sentiment_history(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Precompute the mainline sentiment curve after the daily-bar inputs settle."""
+        del params
+        from alphaagent.server.api.mainline_replay import rebuild_mainline_sentiment_history_cache
+
+        self._report_progress("预计算情绪周期", current=0, total=1)
+        result = rebuild_mainline_sentiment_history_cache()
+        status = str(result.get("status") or "empty")
+        anchor = str(result.get("anchor_date") or "--")
+        self._report_progress(
+            "预计算情绪周期",
+            current=1,
+            total=1,
+            current_label=f"基准日 {anchor}",
+            rows_read=int(result.get("rows_read") or 0),
+            rows_written=int(result.get("rows_written") or 0),
+        )
+        if "message" not in result:
+            result["message"] = (
+                f"情绪周期{status}：{anchor}，"
+                f"{int(result.get('rows_written') or 0)} 个交易日"
+            )
+        return result
 
     def _run_sync_stock_minute_bars(self, params: dict[str, Any]) -> dict[str, Any]:
         mode = str(params.get("mode") or "recent").strip().lower()
@@ -2547,6 +2581,7 @@ JOB_RUNNERS: dict[str, str] = {
     "sync_limit_up_exit_minutes": "_run_sync_limit_up_exit_minutes",
     "sync_stock_auction_snapshots": "_run_sync_stock_auction_snapshots",
     "sync_stock_sector_memberships": "_run_sync_stock_sector_memberships",
+    "sync_mainline_sentiment_history": "_run_sync_mainline_sentiment_history",
     "sync_low_suction_security_snapshot": "_run_sync_low_suction_security_snapshot",
     "sync_low_suction_forward_top3": "_run_sync_low_suction_forward_top3",
     "sync_low_suction_forward_ma5_shadow": "_run_sync_low_suction_forward_ma5_shadow",
@@ -3977,7 +4012,7 @@ def _coverage_uncached() -> dict[str, Any]:
         "industry_chain_edges", "industry_board_mapping",
         # ── Research tables ──
         "sector_daily_bars", "sector_daily_metrics", "sector_period_scores",
-        "sector_relation_edges", "industry_chain_nodes",
+        "sector_relation_edges", "industry_chain_nodes", "mainline_sentiment_history",
         "stock_financial_reports", "stock_financial_statement_items",
         "stock_events", "stock_fund_flows", "sector_fund_flows",
         "stock_hot_ranks", "stock_lhb_records",

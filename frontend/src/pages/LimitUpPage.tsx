@@ -612,7 +612,7 @@ function LiveView({
       {preboard.length > 0 && (
         <div className="border-b">
           <div className="flex items-center gap-2 px-3 pt-3 text-xs font-semibold text-foreground sm:px-4">
-            板前候选
+            板前买点
             <span className="tabular-nums text-muted-foreground">{preboard.length}</span>
           </div>
           <div className="grid gap-3 px-3 py-3 sm:px-4 xl:grid-cols-2">
@@ -748,7 +748,7 @@ function LiveCommandBar({
         </span>
         {!planMode && (
           <span className="flex items-baseline gap-1.5 text-xs text-muted-foreground">
-            板前候选
+            板前买点
             <span className="font-display text-lg font-bold leading-none tabular-nums text-foreground">
               {preboardCount}
             </span>

@@ -45,7 +45,6 @@ function snapshot(
       market_gate: { passed: true, reasons: [] },
       lanes: { now: rows, tail: [], next_auction: [] },
       portfolio: rows,
-      watchlist: [],
     },
     data_quality: { status: "ready", is_stale: false },
     ...overrides,
@@ -61,6 +60,29 @@ describe("limit-up buy alerts", () => {
     expect(repeated.alerts).toEqual([]);
     expect(first.state.activeSymbols).toEqual(["600001.SSE"]);
     expect(first.state.lastAlertAt["600001.SSE"]).toBe(NOW);
+  });
+
+  it("alerts for a same-contract buy point before physical touch", () => {
+    const preboard = signal({
+      entry_kind: "preboard",
+      state: "near_limit",
+      public_quality_touch_ready: true,
+      public_quality_actionable: false,
+      validation_passed: true,
+    });
+    const current = snapshot([], {
+      recommendations: {
+        market_gate: { passed: true, reasons: [] },
+        lanes: { now: [], tail: [], next_auction: [] },
+        portfolio: [],
+        preboard_candidates: [preboard],
+      },
+    });
+
+    const result = evaluateBuyAlerts(current, EMPTY_BUY_ALERT_STATE, NOW, true);
+
+    expect(result.alerts.map((row) => row.vt_symbol)).toEqual(["600001.SSE"]);
+    expect(buyAlertContent(result.alerts[0]).title).toBe("板前买点 · 测试股份");
   });
 
   it("does not alert for stale snapshots or next-session plans", () => {

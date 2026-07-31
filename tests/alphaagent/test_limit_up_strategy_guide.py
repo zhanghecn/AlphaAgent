@@ -43,8 +43,8 @@ def test_strategy_guide_separates_selection_fields_from_future_outcomes() -> Non
     preboard = next(
         step for step in guide["selection_steps"] if step["order"] == 5
     )
-    assert preboard["title"] == "触板前公开可靠候选"
-    assert "唯一缺少的正式条件必须是真实触板" in preboard["rule"]
+    assert preboard["title"] == "触板前显示同源买点"
+    assert "真实触板不是板前显示条件" in preboard["rule"]
     trigger = next(
         step for step in guide["selection_steps"] if step["order"] == 6
     )

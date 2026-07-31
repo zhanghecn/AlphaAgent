@@ -169,7 +169,6 @@ def test_trace_recommendations_keep_one_best_signal_per_symbol() -> None:
                     }
                 ],
             },
-            "watchlist": [{"vt_symbol": symbol, "historical_evidence": {"large": True}}],
         }
     )
 

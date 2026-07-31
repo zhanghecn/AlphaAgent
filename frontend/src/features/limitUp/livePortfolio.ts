@@ -62,10 +62,10 @@ export function preboardSignals(
   const rows = snapshot.recommendations.preboard_candidates ?? [];
   return rows.filter((signal) => (
     signal.state === "near_limit"
+    && signal.action === "buy_now"
     && signal.public_quality_touch_ready === true
     && signal.public_quality_actionable !== true
     && signal.validation_passed === true
-    && signal.blocking_scope === "none"
   ));
 }
 

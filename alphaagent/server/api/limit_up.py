@@ -16,6 +16,16 @@ from alphaagent.server.services.limit_up.live_service import (
     get_latest_live_snapshot,
     refresh_live_snapshot,
 )
+from alphaagent.server.services.limit_up.first_board_leader_service import (
+    build_first_board_leader_snapshot,
+)
+from alphaagent.server.services.limit_up.leader_first_board_adapter import (
+    adapt_leader_backtest,
+    group_leader_trades_by_day,
+)
+from alphaagent.server.services.limit_up.leader_first_board_repository import (
+    load_leader_backtest_run,
+)
 from alphaagent.server.services.limit_up.live_trace_service import (
     get_live_trace_dates,
     get_live_trace_day,
@@ -97,6 +107,43 @@ def live_snapshot():
         return ok(get_latest_live_snapshot())
     except Exception as exc:  # noqa: BLE001
         return _service_error(exc)
+
+
+@router.get("/first-board-leader/live", response_model=None)
+def first_board_leader_live():
+    """盘中首板龙头强度榜：只读现有快照的 first_board + 实时强度排序。"""
+
+    if not is_database_configured():
+        return JSONResponse(
+            status_code=503,
+            content=fail("DATABASE_UNAVAILABLE", "数据库未配置，无法读取首板龙头信号"),
+        )
+    try:
+        return ok(build_first_board_leader_snapshot())
+    except Exception as exc:  # noqa: BLE001
+        return _service_error(exc)
+
+
+@router.get("/first-board-leader/backtest", response_model=None)
+def first_board_leader_backtest():
+    """返回首板龙头历史回测结果（回测模拟，非实盘，读库）。"""
+
+    data = load_leader_backtest_run()
+    if not data:
+        return ok({
+            "status": "unavailable",
+            "message": "首板龙头回测尚未运行",
+            "is_backtest": False,
+            "report": None,
+            "ledger_days": [],
+        })
+    return ok({
+        "status": "ok",
+        "is_backtest": True,
+        "report": adapt_leader_backtest(data),
+        "ledger_days": group_leader_trades_by_day(data),
+        "notes": data.get("notes"),
+    })
 
 
 @router.get("/strategy-guide", response_model=None)

@@ -141,7 +141,12 @@ export default function MainlineReplayPage() {
     }),
     enabled: !!effectiveDate,
     staleTime: source === "live" ? 30_000 : 60_000,
-    refetchInterval: source === "live" ? 60_000 : false,
+    refetchInterval: (query) => {
+      const state = query.state.data?.status;
+      const cacheState = query.state.data?.cache_state;
+      if (state === "building" || cacheState === "refreshing") return 3_000;
+      return source === "live" ? 60_000 : false;
+    },
   });
 
   const activeData = source === "live" ? liveQ.data : snapshotQ.data;
@@ -417,6 +422,7 @@ function SentimentCyclePanel({
   onLookbackChange: (lookback: number) => void;
 }) {
   const points = data?.points ?? [];
+  const building = data?.status === "building";
   const current = data?.current ?? points[points.length - 1] ?? null;
   const [hoveredDate, setHoveredDate] = useState<string | null>(null);
   const [lockedDate, setLockedDate] = useState<string | null>(null);
@@ -477,7 +483,7 @@ function SentimentCyclePanel({
         </div>
       </div>
 
-      {loading ? (
+      {loading || building ? (
         <LoadingState rows={4} />
       ) : points.length < 2 || !current ? (
         <div className="rounded-md border border-dashed bg-background/30 px-3 py-5 text-center text-xs text-muted-foreground">

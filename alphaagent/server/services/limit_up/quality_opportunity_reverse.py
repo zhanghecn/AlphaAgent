@@ -16,8 +16,13 @@ from alphaagent.server.services.limit_up.capital_mainline_evaluation import (
 
 
 STUDY_VERSION = "limit-up-quality-opportunity-reverse-v1"
+FREQUENCY_GATE_REVERSE_STUDY_VERSION = (
+    "limit-up-recognition-gate-reverse-daily-winner-v1"
+)
 HIGH_RETURN_PCT = 5.0
 HIGH_RETURN_SENSITIVITY_PCT = 8.0
+MINIMUM_FREQUENCY_BUCKET_CLOSED_COUNT = 15
+FREQUENCY_GROUPS = ("<=1", "2-3", "4-6", "7-9", "10+", "missing")
 TIME_SLICES = (
     ("2025", date(2025, 1, 1), date(2025, 12, 31)),
     ("2026_01_02", date(2026, 1, 1), date(2026, 2, 28)),
@@ -124,6 +129,20 @@ def opportunity_masks(frame: pd.DataFrame) -> dict[str, pd.Series]:
         ),
         "profitability_pass_overtraded": (excluded & profitability & limit_count.gt(6)),
     }
+
+
+def frequency_gate_removed_mask(frame: pd.DataFrame) -> pd.Series:
+    """Keep profitability-qualified rows after removing only the count gate."""
+
+    return _boolean_series(frame, "profitability_gate_passed")
+
+
+def frequency_gate_delta_mask(frame: pd.DataFrame) -> pd.Series:
+    """Return profitability-qualified rows rejected only by the count gate."""
+
+    return frequency_gate_removed_mask(frame) & ~_boolean_series(
+        frame, "recognition_gate_passed"
+    )
 
 
 def evaluate_opportunity_reverse(frame: pd.DataFrame) -> dict[str, object]:
@@ -283,6 +302,214 @@ def attach_fixed_group_fields(frame: pd.DataFrame) -> pd.DataFrame:
         right=False,
     )
     return result
+
+
+def build_daily_high_return_winner_ledger(
+    frame: pd.DataFrame,
+    *,
+    high_return_pct: float = HIGH_RETURN_PCT,
+) -> pd.DataFrame:
+    """Return every post-settlement high-return label in the removed-gate pool.
+
+    This is a reverse-discovery ledger. The daily ranking is deliberately derived
+    from D+1 outcomes and therefore must never be used as a selection rule.
+    """
+
+    if frame.empty:
+        return pd.DataFrame(
+            columns=[
+                "frequency_group",
+                "frequency_gate_passed",
+                "daily_high_return_rank",
+                "daily_high_return_count",
+                "is_daily_top_high_return",
+            ]
+        )
+    normalized = attach_fixed_group_fields(frame)
+    removed_gate = frequency_gate_removed_mask(normalized)
+    high_return = _numeric_series(normalized, "return_pct").ge(high_return_pct)
+    winners = normalized.loc[removed_gate & high_return].copy()
+    if winners.empty:
+        winners["frequency_group"] = pd.Series(dtype=object)
+        winners["frequency_gate_passed"] = pd.Series(dtype=bool)
+        winners["daily_high_return_rank"] = pd.Series(dtype=int)
+        winners["daily_high_return_count"] = pd.Series(dtype=int)
+        winners["is_daily_top_high_return"] = pd.Series(dtype=bool)
+        return winners
+    winners["frequency_group"] = _frequency_group_series(winners)
+    winners["frequency_gate_passed"] = _boolean_series(
+        winners, "recognition_gate_passed"
+    )
+    winners["_return_sort"] = _numeric_series(winners, "return_pct")
+    winners = winners.sort_values(
+        ["trade_date", "_return_sort", "vt_symbol"],
+        ascending=[True, False, True],
+        kind="stable",
+    ).reset_index(drop=True)
+    winners["daily_high_return_rank"] = (
+        winners.groupby("trade_date", sort=False).cumcount() + 1
+    )
+    winners["daily_high_return_count"] = winners.groupby(
+        "trade_date", sort=False
+    )["vt_symbol"].transform("size").astype(int)
+    winners["is_daily_top_high_return"] = winners["daily_high_return_rank"].eq(1)
+    return winners.drop(columns="_return_sort")
+
+
+def evaluate_frequency_gate_reverse(frame: pd.DataFrame) -> dict[str, object]:
+    """Compare the frozen count gate with a read-only removed-gate counterfactual."""
+
+    if frame.empty:
+        return {
+            "study_version": FREQUENCY_GATE_REVERSE_STUDY_VERSION,
+            "status": "reverse_discovery_only",
+            "analysis_layer": "ab_base_recognition_gate_only",
+            "high_return_pct": HIGH_RETURN_PCT,
+            "high_return_sensitivity_pct": HIGH_RETURN_SENSITIVITY_PCT,
+            "minimum_bucket_closed_count": MINIMUM_FREQUENCY_BUCKET_CLOSED_COUNT,
+            "time_batches": {},
+            "daily_high_return_winners": [],
+        }
+    normalized = attach_fixed_group_fields(frame)
+    time_batches: dict[str, dict[str, object]] = {
+        "all": _frequency_gate_batch_summary(normalized)
+    }
+    dates = pd.to_datetime(normalized["trade_date"]).dt.date
+    for label, start, end in TIME_SLICES:
+        time_batches[label] = _frequency_gate_batch_summary(
+            normalized.loc[dates.between(start, end)].copy()
+        )
+    daily_winners = build_daily_high_return_winner_ledger(normalized)
+    return {
+        "study_version": FREQUENCY_GATE_REVERSE_STUDY_VERSION,
+        "status": "reverse_discovery_only",
+        "analysis_layer": "ab_base_recognition_gate_only",
+        "high_return_pct": HIGH_RETURN_PCT,
+        "high_return_sensitivity_pct": HIGH_RETURN_SENSITIVITY_PCT,
+        "minimum_bucket_closed_count": MINIMUM_FREQUENCY_BUCKET_CLOSED_COUNT,
+        "time_batches": time_batches,
+        "daily_high_return_winners": _daily_high_return_winner_records(daily_winners),
+    }
+
+
+def _frequency_gate_batch_summary(frame: pd.DataFrame) -> dict[str, object]:
+    removed_gate = frequency_gate_removed_mask(frame)
+    original_gate = removed_gate & _boolean_series(
+        frame, "recognition_gate_passed"
+    )
+    removed_gate_increment = frequency_gate_delta_mask(frame)
+    daily_winners = build_daily_high_return_winner_ledger(frame)
+    daily_top = daily_winners.loc[
+        _boolean_series(daily_winners, "is_daily_top_high_return")
+    ]
+    top_count = int(len(daily_top))
+    top_captured = int(
+        _boolean_series(daily_top, "frequency_gate_passed").sum()
+    )
+    return {
+        "candidate_trade_days": int(frame["trade_date"].nunique()) if not frame.empty else 0,
+        "removed_gate_pool": _frequency_summary(frame.loc[removed_gate]),
+        "original_gate": _frequency_summary(frame.loc[original_gate]),
+        "removed_gate_increment": _frequency_summary(
+            frame.loc[removed_gate_increment]
+        ),
+        "count_buckets": _frequency_bucket_summaries(
+            frame.loc[removed_gate], daily_winners
+        ),
+        "daily_high_return_days": top_count,
+        "daily_top_winner_capture": {
+            "high_return_day_count": top_count,
+            "captured_day_count": top_captured,
+            "capture_rate_pct": _rate(top_captured, top_count),
+        },
+    }
+
+
+def _frequency_bucket_summaries(
+    frame: pd.DataFrame,
+    daily_winners: pd.DataFrame,
+) -> dict[str, dict[str, object]]:
+    groups = _frequency_group_series(frame)
+    result: dict[str, dict[str, object]] = {}
+    for group in FREQUENCY_GROUPS:
+        rows = frame.loc[groups.eq(group)]
+        winner_rows = daily_winners.loc[
+            _string_series(daily_winners, "frequency_group").eq(group)
+        ]
+        result[group] = _frequency_summary(rows, daily_winners=winner_rows)
+    return result
+
+
+def _frequency_summary(
+    frame: pd.DataFrame,
+    *,
+    daily_winners: pd.DataFrame | None = None,
+) -> dict[str, object]:
+    summary = performance_summary(frame)
+    returns = _numeric_series(frame, "return_pct")
+    closed_count = int(summary["closed_count"] or 0)
+    high_return = returns.ge(HIGH_RETURN_PCT)
+    high_return_8 = returns.ge(HIGH_RETURN_SENSITIVITY_PCT)
+    winners = (
+        daily_winners
+        if daily_winners is not None
+        else build_daily_high_return_winner_ledger(frame)
+    )
+    daily_top_count = int(
+        _boolean_series(winners, "is_daily_top_high_return").sum()
+    )
+    return {
+        **summary,
+        "status": (
+            "REPORTED"
+            if closed_count >= MINIMUM_FREQUENCY_BUCKET_CLOSED_COUNT
+            else "INSUFFICIENT"
+        ),
+        "positive_rate_pct": summary["win_rate_pct"],
+        "high_return_count": int(high_return.sum()),
+        "high_return_rate_pct": _rate(int(high_return.sum()), closed_count),
+        "high_return_8_count": int(high_return_8.sum()),
+        "high_return_8_rate_pct": _rate(int(high_return_8.sum()), closed_count),
+        "candidate_trade_days": int(frame["trade_date"].nunique()) if not frame.empty else 0,
+        "high_return_trade_days": int(winners["trade_date"].nunique()) if not winners.empty else 0,
+        "daily_top_high_return_count": daily_top_count,
+    }
+
+
+def _frequency_group_series(frame: pd.DataFrame) -> pd.Series:
+    values = frame.get("prior_limit_count_bin")
+    if values is None:
+        values = attach_fixed_group_fields(frame)["prior_limit_count_bin"]
+    values = values.astype(object)
+    return values.where(values.notna(), "missing").astype(str)
+
+
+def _daily_high_return_winner_records(frame: pd.DataFrame) -> list[dict[str, object]]:
+    fields = (
+        "trade_date",
+        "daily_high_return_rank",
+        "daily_high_return_count",
+        "is_daily_top_high_return",
+        "name",
+        "vt_symbol",
+        "lane",
+        "signal_time",
+        "return_pct",
+        "frequency_group",
+        "frequency_gate_passed",
+        "prior_limit_count_126",
+        "recognition_gate_reason",
+        "profitability_gate_reason",
+        "prior_market_phase",
+    )
+    available = [field for field in fields if field in frame]
+    return frame.loc[:, available].to_dict("records")
+
+
+def _rate(numerator: int, denominator: int) -> float | None:
+    if denominator <= 0:
+        return None
+    return round(numerator / denominator * 100.0, 4)
 
 
 def _gate_matrix(frame: pd.DataFrame) -> dict[str, dict[str, object]]:

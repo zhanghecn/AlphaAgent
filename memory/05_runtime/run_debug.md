@@ -9,8 +9,12 @@
 - 排障先查缓存是否生效，再 `EXPLAIN` 看是否走 `ix_stock_daily_bars_date_symbol`
   index-only scan。注意 `create_all` 不会给已存在的表补建索引，新索引必须加进
   `schema.py::_apply_compatible_schema_patches`。
-- 遗留：`/api/mainline-replay/sentiment-cycle` 冷 ~3.2s（75 天窗口函数 CTE），
-  根治需物化日指标表；300s 响应缓存兜底。
+- `/api/mainline-replay/sentiment-cycle` 不再在页面请求中扫描全市场日线。
+  `sync_mainline_sentiment_history` 在股票/指数日线完成后预计算 250 个交易日曲线和盘中
+  投影所需状态，持久化到 `mainline_sentiment_history`；接口只读取并切片，首个无缓存请求
+  返回 `building`，前端每 3 秒重试。稳态实测历史/盘中读取约 `0.1-0.2s`。
+- 盘中分钟线最高价和最新分钟时间必须由同一条“交易日 + 1m”聚合查询取得。不要重新加入
+  单独的 `MAX(bar_time)`：当当天尚无分钟线时，它会沿时间索引跨日期倒扫数百万行。
 
 ## Local Development
 
@@ -79,6 +83,10 @@ docker compose -f docker-compose.ghcr.yml config --images
 ### Ownership and safety
 
 - 调度所有权在独立 `alphaagent-data-sync-worker`；API 不启动第二套调度器。
+- 已知监控缺口（2026-07-30）：盘中 worker 重启或运行版本切换会让当天
+  `limit_up_radar_frames` 出现多个采集运行指纹，`/healthz` 随即返回 503
+  `current_day_radar_fingerprint_changed`，即使快扫心跳、新鲜度和快照写入都正常。
+  排障时先核对 `limit_up_live_scan` 心跳与最新雷达帧；该告警目前不能单独判定数据阻塞。
 - 市场、行业/概念、个股资金和历史点时快照保留为原始研究证据，不得用日终值补造盘中
   正式质量条件。
 - 正式推荐只读取 `limit-up-core-abc-v2`。旧 A+B、v15/v9/v5 和未获准的研究观察不得
@@ -111,7 +119,7 @@ git diff --check
 ```bash
 docker compose exec -T alphaagent-api python -m alphaagent.server.services.low_suction.cli membership-source-status
 docker compose exec -T alphaagent-api python -m alphaagent.server.services.low_suction.cli audit --format json
-docker compose run --rm --no-deps -v "$PWD:/workspace" -w /workspace alphaagent-research python -m alphaagent.server.services.low_suction.cli theme-eligibility-research --start 2023-03-28 --end 2026-07-15 --format json
+docker compose --profile research run --rm --no-deps -v "$PWD:/workspace" -w /workspace alphaagent-research python -m alphaagent.server.services.low_suction.cli theme-eligibility-research --start 2023-03-28 --end 2026-07-15 --format json
 ```
 
 ## Runtime Checks

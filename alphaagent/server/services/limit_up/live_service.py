@@ -105,7 +105,6 @@ EXECUTABLE_ACTIONS = frozenset({"buy_now", "next_auction"})
 PORTFOLIO_EXECUTION_LANES = frozenset(
     scheduled_execution.PRODUCT_EXECUTION_LANES
 )
-LIVE_WATCHLIST_LIMIT = 6
 ACTIVE_SESSION_STAGES = frozenset(
     {"auction_watch", "auction", "morning", "afternoon", "tail", "close_auction"}
 )
@@ -525,7 +524,6 @@ def empty_live_snapshot(
             "actionable_recommendations": [],
             "preboard_candidates": [],
             "portfolio": [],
-            "watchlist": [],
         },
         "data_quality": {
             "status": "empty",
@@ -1675,7 +1673,6 @@ def _apply_live_risk_gates(
         validated,
         snapshot_age_seconds=snapshot_age,
     )
-    validated["watchlist"] = _build_live_watchlist(validated)
     return {**result, "recommendations": validated}
 
 
@@ -2147,83 +2144,12 @@ def _live_portfolio_sort_key(signal: Mapping[str, object]) -> tuple[object, ...]
     )
 
 
-def _build_live_watchlist(
-    recommendations: Mapping[str, object],
-) -> list[dict[str, object]]:
-    lanes = recommendations.get("lanes")
-    lanes = lanes if isinstance(lanes, Mapping) else {}
-    observations: dict[str, dict[str, object]] = {}
-    for channel in ("now", "next_auction", "tail"):
-        signals = lanes.get(channel)
-        signals = signals if isinstance(signals, list) else []
-        for raw_signal in signals:
-            if not isinstance(raw_signal, Mapping):
-                continue
-            signal = dict(raw_signal)
-            symbol = str(signal.get("vt_symbol") or "")
-            strategy = signal.get("strategy_evidence")
-            strategy = strategy if isinstance(strategy, Mapping) else {}
-            if (
-                not symbol
-                or symbol in observations
-                or str(signal.get("board_lane") or "") not in PORTFOLIO_EXECUTION_LANES
-                or not _can_transition_to_live_buy(signal)
-            ):
-                continue
-            original_action = str(
-                signal.get("research_action") or signal.get("action") or "pass"
-            )
-            reason_parts = [str(signal.get("reason") or "组合硬门未通过")]
-            reason_parts.extend(
-                str(value)
-                for value in signal.get("lane_blocker_reasons") or []
-                if value
-            )
-            original_reason = "；".join(dict.fromkeys(reason_parts))
-            first_board_momentum = (
-                str(signal.get("board_lane") or "") == "first_board"
-                and str(signal.get("state") or "")
-                in {"near_limit", "sealed", "resealed"}
-            )
-            current_signal_state = str(signal.get("signal_state") or "observing")
-            observations[symbol] = {
-                **signal,
-                "action": "observe",
-                "research_action": original_action,
-                "execution_state": "watch",
-                "signal_state": (
-                    "concept_warming"
-                    if current_signal_state == "concept_warming"
-                    else "pending_auction"
-                    if current_signal_state == "pending_auction"
-                    else "approaching_trigger"
-                    if first_board_momentum
-                    else "observing"
-                ),
-                "entry_kind": (
-                    "momentum" if first_board_momentum else signal.get("entry_kind")
-                ),
-                "buy_instruction": (
-                    "板块已预热，等待个股动能和其余质量门同步通过"
-                    if current_signal_state == "concept_warming"
-                    else "等待竞价确认，满足竞价硬门后触发"
-                    if current_signal_state == "pending_auction"
-                    else "个股动能、市场、板块、历史质量和风险门同步通过时触发"
-                ),
-                "reason": f"等待触发：{original_reason}",
-            }
-    ordered = rank_first_board_signals(
-        sorted(observations.values(), key=_live_watchlist_sort_key)
-    )
-    return ordered[:LIVE_WATCHLIST_LIMIT]
-
-
 def _build_live_preboard_candidates(
     recommendations: Mapping[str, object],
     *,
     snapshot_age_seconds: int = 0,
 ) -> list[dict[str, object]]:
-    """Publish stocks whose only missing formal condition is a physical touch."""
+    """Publish a buy point when the live chain was downgraded only for no touch."""
 
     if snapshot_age_seconds > scheduled_execution.MAX_SNAPSHOT_AGE_SECONDS:
         return []
@@ -2238,35 +2164,29 @@ def _build_live_preboard_candidates(
             continue
         signal = dict(raw_signal)
         symbol = str(signal.get("vt_symbol") or "")
-        change_pct = _number(signal.get("change_pct"))
         if (
             not symbol
             or symbol in selected
             or str(signal.get("board_lane") or "") not in PORTFOLIO_EXECUTION_LANES
             or str(signal.get("state") or "") != "near_limit"
-            or change_pct is None
-            or change_pct < 3.0
+            or str(signal.get("research_action") or "") != "buy_now"
             or signal.get("public_quality_touch_ready") is not True
-            or signal.get("public_quality_actionable") is True
             or signal.get("validation_passed") is not True
-            or str(signal.get("blocking_scope") or "") != "none"
-            or not _can_transition_to_live_buy(signal)
         ):
             continue
-        pending = ["等待真实触板", *list(signal.get("pending_reasons") or [])]
         selected[symbol] = {
             **signal,
-            "action": "observe",
+            "action": "buy_now",
             "entry_kind": "preboard",
-            "execution_state": "watch",
-            "signal_state": "approaching_trigger",
+            "execution_state": "actionable",
+            "signal_state": "trigger_ready",
             "preboard_state": "touch_ready",
             "trigger_price": signal.get("last_price"),
-            "buy_instruction": "板前候选；接近涨停时结合实时动能自行决策",
-            "reason": "完整正式质量与时点条件已齐，只等待真实触板",
-            "pending_reasons": list(dict.fromkeys(value for value in pending if value)),
+            "buy_instruction": "板前买点；当前质量与动能已通过，触板后升级为扫板买点",
+            "reason": "假如此刻触板，原正式质量链会形成买点",
+            "pending_reasons": [],
         }
-    return sorted(selected.values(), key=_live_preboard_sort_key)[:LIVE_WATCHLIST_LIMIT]
+    return sorted(selected.values(), key=_live_preboard_sort_key)
 
 
 def _live_preboard_sort_key(signal: Mapping[str, object]) -> tuple[object, ...]:
@@ -2277,52 +2197,6 @@ def _live_preboard_sort_key(signal: Mapping[str, object]) -> tuple[object, ...]:
         -(_number(signal.get("quality_expected_d1_net_return_pct")) or 0.0),
         _integer(signal.get("concept_leader_rank"), 1_000_000),
         distance if distance is not None else 99.0,
-        str(signal.get("vt_symbol") or ""),
-    )
-
-
-def _can_transition_to_live_buy(signal: Mapping[str, object]) -> bool:
-    signal_state = str(signal.get("signal_state") or "observing")
-    return (
-        str(signal.get("blocking_scope") or "") != "structural"
-        and signal.get("profitability_gate_passed") is not False
-        and signal_state not in {"rejected", "missed", "invalidated"}
-        and (
-            signal.get("missed_preseal_entry") is not True
-            or signal.get("entry_kind") == "momentum"
-        )
-    )
-
-
-def _live_watchlist_sort_key(signal: Mapping[str, object]) -> tuple[object, ...]:
-    history = signal.get("historical_evidence")
-    history = history if isinstance(history, Mapping) else {}
-    strategy = signal.get("strategy_evidence")
-    strategy = strategy if isinstance(strategy, Mapping) else {}
-    state = str(signal.get("state") or "")
-    state_priority = {
-        "near_limit": 0,
-        "failed": 1,
-        "resealed": 2,
-        "sealed": 3,
-    }.get(state, 4)
-    distance = _number(signal.get("distance_to_limit_pct"))
-    signal_priority = {
-        "approaching_trigger": 0,
-        "concept_warming": 1,
-        "observing": 2,
-        "rejected": 3,
-    }.get(str(signal.get("signal_state") or ""), 4)
-    return (
-        signal_priority,
-        state_priority,
-        _integer(signal.get("concept_strength_rank"), 1_000_000),
-        _integer(signal.get("concept_leader_rank"), 1_000_000),
-        distance if state == "near_limit" and distance is not None else 99.0,
-        -(_number(history.get("tbox_score")) or 0.0),
-        -(_number(strategy.get("total_return_pct")) or 0.0),
-        -(_number(history.get("smoothed_win_rate")) or 0.0),
-        -(_number(signal.get("leadership_score")) or 0.0),
         str(signal.get("vt_symbol") or ""),
     )
 
@@ -2830,6 +2704,7 @@ def _without_internal_radar_fields(
         *RESEARCH_QUOTE_ENRICHMENT_FIELDS,
         "quote_flow_observed_at",
         "trace_capture_candidates",
+        "watchlist",
     }
 
     def project(value: object) -> object:
@@ -3057,7 +2932,6 @@ def downgrade_snapshot_to_stale(
         "actionable_recommendations",
         "preboard_candidates",
         "portfolio",
-        "watchlist",
     ):
         if isinstance(recommendations.get(collection), list):
             stale_recommendations[collection] = cancelled_signals(

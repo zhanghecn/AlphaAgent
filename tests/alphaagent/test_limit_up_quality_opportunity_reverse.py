@@ -5,8 +5,12 @@ import pytest
 
 from alphaagent.server.services.limit_up.quality_opportunity_reverse import (
     build_opportunity_reverse_frame,
+    build_daily_high_return_winner_ledger,
     evaluate_daily_proxy_rescue,
+    evaluate_frequency_gate_reverse,
     evaluate_opportunity_reverse,
+    frequency_gate_delta_mask,
+    frequency_gate_removed_mask,
     opportunity_masks,
 )
 
@@ -89,6 +93,70 @@ def test_rescue_membership_does_not_change_when_returns_change() -> None:
     ]
 
     assert original_mask.tolist() == reversed_mask.tolist() == [True, True]
+
+
+def test_frequency_gate_removed_pool_uses_only_profitability_state() -> None:
+    order = _order("600001.SSE", limit_count=8, sample_count=5, combined_rate=40)
+    original = build_opportunity_reverse_frame([order], [_trade("600001.SSE", 8.0)])
+    changed_outcome = build_opportunity_reverse_frame(
+        [order], [_trade("600001.SSE", -8.0)]
+    )
+
+    assert frequency_gate_removed_mask(original).tolist() == [True]
+    assert frequency_gate_removed_mask(changed_outcome).tolist() == [True]
+    assert frequency_gate_delta_mask(original).tolist() == [True]
+    assert frequency_gate_delta_mask(changed_outcome).tolist() == [True]
+
+
+def test_daily_high_return_ledger_keeps_all_same_day_winners() -> None:
+    frame = build_opportunity_reverse_frame(
+        [
+            _order("600001.SSE", limit_count=4, sample_count=5, combined_rate=40),
+            _order("600002.SSE", limit_count=8, sample_count=5, combined_rate=40),
+        ],
+        [_trade("600001.SSE", 6.0), _trade("600002.SSE", 8.0)],
+    )
+
+    ledger = build_daily_high_return_winner_ledger(frame)
+
+    assert ledger[
+        ["vt_symbol", "frequency_group", "frequency_gate_passed", "daily_high_return_rank", "daily_high_return_count"]
+    ].to_dict("records") == [
+        {
+            "vt_symbol": "600002.SSE",
+            "frequency_group": "7-9",
+            "frequency_gate_passed": False,
+            "daily_high_return_rank": 1,
+            "daily_high_return_count": 2,
+        },
+        {
+            "vt_symbol": "600001.SSE",
+            "frequency_group": "4-6",
+            "frequency_gate_passed": True,
+            "daily_high_return_rank": 2,
+            "daily_high_return_count": 2,
+        },
+    ]
+
+
+def test_frequency_gate_reverse_reports_original_and_removed_gate_by_batch() -> None:
+    frame = build_opportunity_reverse_frame(
+        [
+            _order("600001.SSE", limit_count=4, sample_count=5, combined_rate=40),
+            _order("600002.SSE", limit_count=8, sample_count=5, combined_rate=40),
+        ],
+        [_trade("600001.SSE", 6.0), _trade("600002.SSE", 8.0)],
+    )
+
+    result = evaluate_frequency_gate_reverse(frame)
+    batch = result["time_batches"]["all"]
+
+    assert result["status"] == "reverse_discovery_only"
+    assert result["analysis_layer"] == "ab_base_recognition_gate_only"
+    assert batch["original_gate"]["closed_count"] == 1
+    assert batch["removed_gate_increment"]["closed_count"] == 1
+    assert batch["count_buckets"]["4-6"]["high_return_count"] == 1
+    assert batch["count_buckets"]["7-9"]["daily_top_high_return_count"] == 1
 
 
 def test_reverse_frame_rejects_trade_without_order_evidence() -> None:

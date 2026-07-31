@@ -704,6 +704,64 @@ def load_account_daily_bars(
     ]
 
 
+def load_limit_gene_daily_bars(
+    vt_symbols: Sequence[str],
+    start: date,
+    end: date,
+) -> list[dict[str, object]]:
+    """Load source daily bars needed to rebuild per-stock limit-gene counts."""
+
+    symbols = sorted(
+        {str(symbol).strip() for symbol in vt_symbols if str(symbol).strip()}
+    )
+    if not symbols or start > end:
+        return []
+    schema.ensure_schema_once(get_engine())
+    statement = (
+        select(
+            schema.stock_daily_bars.c.vt_symbol,
+            schema.stock_daily_bars.c.trade_date,
+            schema.stock_daily_bars.c.open_price,
+            schema.stock_daily_bars.c.high_price,
+            schema.stock_daily_bars.c.low_price,
+            schema.stock_daily_bars.c.close_price,
+            schema.stock_daily_bars.c.volume,
+            schema.stock_daily_bars.c.turnover,
+            schema.stock_daily_bars.c.turnover_rate,
+            schema.stock_daily_bars.c.change_pct,
+        )
+        .where(
+            schema.stock_daily_bars.c.vt_symbol.in_(symbols),
+            schema.stock_daily_bars.c.trade_date.between(start, end),
+        )
+        .order_by(
+            schema.stock_daily_bars.c.vt_symbol,
+            schema.stock_daily_bars.c.trade_date,
+        )
+    )
+    with session_scope() as session:
+        rows = session.execute(statement).mappings().all()
+    return [
+        {
+            "vt_symbol": str(row["vt_symbol"]),
+            "trade_date": row["trade_date"].isoformat(),
+            "open_price": float(row["open_price"]),
+            "high_price": float(row["high_price"]),
+            "low_price": float(row["low_price"]),
+            "close_price": float(row["close_price"]),
+            "volume": float(row["volume"] or 0),
+            "turnover": float(row["turnover"] or 0),
+            "turnover_rate": float(row["turnover_rate"] or 0),
+            "change_pct": (
+                float(row["change_pct"])
+                if row["change_pct"] is not None
+                else None
+            ),
+        }
+        for row in rows
+    ]
+
+
 def load_account_1430_prices(
     requests: Sequence[tuple[str, date]],
 ) -> list[dict[str, object]]:

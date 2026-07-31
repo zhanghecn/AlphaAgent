@@ -1616,6 +1616,19 @@ Index(
 )
 
 
+# 首板龙头回测：单行 id=1 存最新一次 run（payload JSONB 含完整 summary/equity/trades）
+leader_first_board_backtest_runs = Table(
+    "leader_first_board_backtest_runs",
+    metadata,
+    Column("id", Integer, primary_key=True),  # 固定 1：单行存最新回测
+    Column("strategy_version", String(80), nullable=False),
+    Column("built_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("payload", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+
 limit_up_minute_backfill_attempts = Table(
     "limit_up_minute_backfill_attempts",
     metadata,
@@ -1806,6 +1819,20 @@ market_timing_panel = Table(
     metadata,
     Column("id", Integer, primary_key=True),  # 固定为 1: 单行存最新预计算面板
     Column("panel", JSONB, nullable=False),
+    Column("computed_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+# 情绪周期完整日线曲线。盘后基于完整股票日线预计算，页面只读该单行缓存，
+# 避免首次打开主线页对全市场日线重复执行多层窗口计算。
+mainline_sentiment_history = Table(
+    "mainline_sentiment_history",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("anchor_date", Date, nullable=False),
+    Column("source_updated_at", DateTime(timezone=True), nullable=True),
+    Column("history_span_days", Integer, nullable=False),
+    Column("points", JSONB, nullable=False),
+    Column("symbol_state", JSONB, nullable=False),
     Column("computed_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 

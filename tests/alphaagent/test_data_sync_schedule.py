@@ -820,6 +820,7 @@ def test_eod_schedule_runs_unified_post_close_chain():
     assert eod["cron"] == "0 19 * * 1-5"
     assert "sync_stock_daily_bars" in eod["job_ids"]
     assert "sync_index_daily_bars" in eod["job_ids"]
+    assert "sync_mainline_sentiment_history" in eod["job_ids"]
     assert "sync_stock_fund_flows" in eod["job_ids"]
     assert "sync_sector_period_scores" in eod["job_ids"]
     assert "sync_limit_up_pools" in eod["job_ids"]
@@ -836,6 +837,7 @@ def test_eod_schedule_runs_market_data_and_limit_up_planning():
         "sync_stock_fund_flows",
             "sync_stock_daily_bars",
             "sync_index_daily_bars",
+            "sync_mainline_sentiment_history",
             "sync_low_suction_swing_settlement",
             "sync_sector_list",
         "sync_sector_daily_bars",
@@ -866,6 +868,7 @@ def test_eod_finalize_schedule_retries_daily_bars_late_without_slow_jobs():
     assert jobs == [
         "sync_stock_daily_bars",
         "sync_index_daily_bars",
+        "sync_mainline_sentiment_history",
         "sync_low_suction_swing_settlement",
         "sync_sector_fund_flows",
         "sync_stock_fund_flows",
@@ -888,6 +891,25 @@ def test_eod_finalize_schedule_retries_daily_bars_late_without_slow_jobs():
     assert "sync_stock_financial_quarterly" not in jobs
     assert "sync_stock_lhb_records" not in jobs
     assert "sync_stock_notices" not in jobs
+
+
+def test_mainline_sentiment_history_job_runs_after_daily_bar_inputs():
+    job = next(
+        item
+        for item in svc.DEFAULT_JOBS
+        if item.id == "sync_mainline_sentiment_history"
+    )
+
+    assert job.source_id == "alphaagent_local"
+    assert job.target_table == "mainline_sentiment_history"
+    assert svc.JOB_RUNNERS[job.id] == "_run_sync_mainline_sentiment_history"
+    assert svc.JOB_CADENCES[job.id].freshness_table == "mainline_sentiment_history"
+    for schedule_id in ("eod_1900", "eod_finalize_2130"):
+        schedule = next(
+            item for item in svc.DEFAULT_BATCH_SCHEDULES if item["id"] == schedule_id
+        )
+        jobs = schedule["job_ids"]
+        assert jobs.index("sync_index_daily_bars") < jobs.index(job.id)
 
 
 def test_low_suction_security_snapshot_job_is_registered_and_scheduled():
