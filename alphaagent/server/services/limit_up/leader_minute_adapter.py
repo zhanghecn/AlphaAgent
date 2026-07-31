@@ -23,7 +23,7 @@ from alphaagent.server.services.limit_up.leader_first_board_adapter import (
     _stub_validation,
 )
 
-STRATEGY_VERSION = "leader-minute-backtest-v2"
+STRATEGY_VERSION = "leader-minute-backtest-v3"
 
 
 def adapt_minute_backtest(v3_result: Mapping[str, object]) -> dict[str, object]:

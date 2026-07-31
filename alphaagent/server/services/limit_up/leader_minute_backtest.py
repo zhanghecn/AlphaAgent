@@ -33,6 +33,10 @@ from pathlib import Path
 from alphaagent.server.services.execution import cash_ledger
 from alphaagent.server.services.limit_up.cash_backtest import CashBacktestConfig
 from alphaagent.server.services.limit_up.domain import main_board_limit_price
+from alphaagent.server.services.limit_up.features import prior_stock_features
+from alphaagent.server.services.limit_up.consecutive_leader_first_board_factor_research import (
+    _prior_3d_shape,
+)
 from alphaagent.server.services.limit_up.morning_window_leader_probability_research import (
     build_calibration,
     score_leader_probability,
@@ -46,7 +50,7 @@ from alphaagent.server.services.limit_up.leader_minute_repository import (
     save_minute_backtest_run,
 )
 
-STUDY_VERSION = "leader-minute-backtest-v2"
+STUDY_VERSION = "leader-minute-backtest-v3"
 WINDOW_START = "09:31:00"
 WINDOW_END = "09:40:00"
 DEFAULT_SURGE_PCT = 2.0  # 1 分钟涨幅阈值（%）
@@ -58,13 +62,25 @@ MIN_TRAIN_SAMPLES = 20  # 月度 expanding 校准的最少已标答触发样本�
 MAIN_BOARD_PREFIXES = ("60", "00")
 PAPER_NOTIONAL = 100_000.0  # 训练标签用的单位名义本金（不进真实账户）
 
-# 选股因子（全部 D-1 可观测，无任何当日/事后数据）
+# 选股因子（连板龙头首板因子研究调研过的 D-1 可观测因子，剔除触板后的封板时间/封单比）
 CANDIDATE_FACTORS = (
     "float_market_cap",
     "prior_return_5d_pct",
-    "prior_3d_up_days",
     "prior_turnover_ratio_5d",
+    "prior_change_pct",
+    "prior_3d_cum_return_pct",
+    "prior_3d_max_change_pct",
+    "prior_3d_up_days",
+    "prior_day_change_pct",
+    "prior_day_body_pct",
+    "prior_day_range_pct",
+    "prior_day_close_position",
+    "prior_limit_count_126",
+    "prior_limit_count_20",
+    "days_since_prior_limit",
+    "turnover_rate",
 )
+DEFAULT_MAX_PRIOR_RETURN_20D_PCT = 10.0  # 低位约束：前20日累计涨幅上限（%）
 
 
 def _float(value: object) -> float | None:
@@ -78,44 +94,88 @@ def _is_main_board(vt_symbol: str) -> bool:
     return vt_symbol.split(".")[0].startswith(MAIN_BOARD_PREFIXES)
 
 
-def _d1_factors(bars_before: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
-    """由 D 日之前的日线（升序，需含 D-1..D-6）计算 4 个 D-1 因子，不足则 None。"""
+def _is_first_board_candidate(bars_before: Sequence[Mapping[str, object]]) -> bool:
+    """首板候选：D-1 未涨停（今天若涨停必为首板）。D-1 可观测，不依赖 events。"""
 
+    if len(bars_before) < 2:
+        return False
+    d1_close = _float(bars_before[-1].get("close_price"))
+    d2_close = _float(bars_before[-2].get("close_price"))
+    if not d1_close or not d2_close or d2_close <= 0:
+        return False
+    return d1_close < d2_close * 1.098
+
+
+def _is_low_position(
+    bars_before: Sequence[Mapping[str, object]], max_return_20d_pct: float
+) -> bool:
+    """低位：D-1 前20日累计涨幅 ≤ 阈值（近期没连续涨高）。历史不足 21 根则放行。"""
+
+    if len(bars_before) < 21:
+        return True
+    d1_close = _float(bars_before[-1].get("close_price"))
+    base_close = _float(bars_before[-21].get("close_price"))
+    if not d1_close or not base_close or base_close <= 0:
+        return True
+    return (d1_close / base_close - 1) * 100 <= max_return_20d_pct
+
+
+def _limit_flags(bars_before: Sequence[Mapping[str, object]]) -> list[bool]:
+    """每日是否涨停（close ≥ 前收×1.098），日线自算，不依赖 events。"""
+
+    flags: list[bool] = []
+    for index in range(1, len(bars_before)):
+        current = _float(bars_before[index].get("close_price"))
+        previous = _float(bars_before[index - 1].get("close_price"))
+        flags.append(bool(current and previous and previous > 0 and current >= previous * 1.098))
+    return flags
+
+
+def _d1_factors(
+    bars_up_to_d: Sequence[Mapping[str, object]], today: str
+) -> dict[str, object] | None:
+    """完整调研 D-1 因子集（全部 D-1 可观测，日线自算，不依赖 events）。
+
+    复用连板龙头首板因子研究口径：前序走势 + 前3天形状 + 涨停基因 + 市值流动性。
+    bars_up_to_d 含 D 日（升序）；因子一律取 D-1 及更早。
+    """
+
+    bars_before = list(bars_up_to_d[:-1])  # D-1 及更早
     if len(bars_before) < 6:
         return None
     d1 = bars_before[-1]
-    prev_close = _float(d1.get("close_price"))
-    base_close = _float(bars_before[-6].get("close_price"))
-    if not prev_close or not base_close:
-        return None
-    # 前3日上涨天数：D-3..D-1 各自 close > 其前一日 close
-    up_days = 0
-    for index in (-3, -2, -1):
-        current = _float(bars_before[index].get("close_price")) or 0.0
-        previous = _float(bars_before[index - 1].get("close_price")) or 0.0
-        if current and previous and current > previous:
-            up_days += 1
-    # 前5日量比 = D-1 成交额 / 前5日（D-2..D-6）日均成交额（与打板版同口径）
-    history_amounts = [_float(row.get("turnover")) for row in bars_before[-6:-1]]
-    usable = [value for value in history_amounts if value and value > 0]
+    # ① 前序走势 + ② 前3天形状（复用调研口径）
+    prior = prior_stock_features(bars_up_to_d, today, assume_sorted=True)
+    shape = _prior_3d_shape(bars_up_to_d, today)
+    # ③ 市值/流动性（D-1）
     d1_amount = _float(d1.get("turnover"))
-    turnover_ratio = (
-        d1_amount / (sum(usable) / len(usable))
-        if usable and d1_amount and d1_amount > 0
-        else None
-    )
-    # 流通市值 = D-1 成交额 / (D-1 换手率/100)（历史推导值，不用当前快照）
     turnover_rate = _float(d1.get("turnover_rate"))
     float_market_cap = (
         d1_amount / (turnover_rate / 100)
         if d1_amount and turnover_rate and turnover_rate > 0
         else None
     )
+    # ④ 涨停基因（日线自算）
+    flags = _limit_flags(bars_before)
+    last_limit = next((i for i in range(len(flags) - 1, -1, -1) if flags[i]), None)
     return {
-        "prior_return_5d_pct": round((prev_close / base_close - 1) * 100, 4),
-        "prior_3d_up_days": up_days,
-        "prior_turnover_ratio_5d": round(turnover_ratio, 4) if turnover_ratio else None,
+        "prior_return_5d_pct": prior.get("prior_return_5d_pct"),
+        "prior_turnover_ratio_5d": prior.get("prior_turnover_ratio_5d"),
+        "prior_change_pct": prior.get("prior_change_pct"),
+        "prior_3d_cum_return_pct": shape.get("prior_3d_cum_return_pct"),
+        "prior_3d_max_change_pct": shape.get("prior_3d_max_change_pct"),
+        "prior_3d_up_days": shape.get("prior_3d_up_days"),
+        "prior_day_change_pct": shape.get("prior_day_change_pct"),
+        "prior_day_body_pct": shape.get("prior_day_body_pct"),
+        "prior_day_range_pct": shape.get("prior_day_range_pct"),
+        "prior_day_close_position": shape.get("prior_day_close_position"),
         "float_market_cap": round(float_market_cap, 2) if float_market_cap else None,
+        "turnover_rate": turnover_rate,
+        "prior_limit_count_126": sum(flags[-126:]),
+        "prior_limit_count_20": sum(flags[-20:]),
+        "days_since_prior_limit": (len(flags) - 1 - last_limit)
+        if last_limit is not None
+        else None,
     }
 
 
@@ -241,8 +301,9 @@ def simulate_allmarket_minute(
     min_day_coverage: int = MIN_DAY_COVERAGE,
     min_train_samples: int = MIN_TRAIN_SAMPLES,
     min_effect: float = DEFAULT_MIN_EFFECT,
+    max_prior_return_20d_pct: float = DEFAULT_MAX_PRIOR_RETURN_20D_PCT,
 ) -> dict[str, object]:
-    """全市场分钟级回测：触发扫描 → D-1 因子校准排序 → TOP N 买入 → D+1 卖出。"""
+    """全市场分钟级回测：低位首板触发 → D-1 因子校准排序 → TOP N 买入 → D+1 卖出。"""
 
     if config is None:
         config = CashBacktestConfig(max_positions=DEFAULT_MAX_POSITIONS)
@@ -406,8 +467,15 @@ def simulate_allmarket_minute(
                     continue
                 dates = symbol_dates.get(symbol) or []
                 index = bisect_left(dates, today)
-                factors = _d1_factors(list(bars_by_symbol[symbol])[:index][-6:])
-                if factors is None:
+                if index >= len(dates) or dates[index] != today:
+                    continue
+                bars_all = list(bars_by_symbol[symbol])
+                bars_before = bars_all[:index]
+                # 首板：D-1 未涨停（今天若涨停必为首板，排除连板延续）
+                if not _is_first_board_candidate(bars_before):
+                    continue
+                # 低位：前20日累计涨幅 ≤ 阈值（近期没涨高，排除高位追涨）
+                if not _is_low_position(bars_before, max_prior_return_20d_pct):
                     continue
                 dbar = daily_index.get((symbol, today))
                 prev_bar = daily_index.get((symbol, prev_day)) if prev_day else None
@@ -425,6 +493,9 @@ def simulate_allmarket_minute(
                     window_end=window_end,
                 )
                 if not trigger:
+                    continue
+                factors = _d1_factors(bars_all[: index + 1], today)
+                if factors is None:
                     continue
                 stats["trigger_count"] += 1
                 sample: dict[str, object] = {
@@ -606,10 +677,11 @@ def run_minute_backtest(
     surge_pct: float = DEFAULT_SURGE_PCT,
     cum_pct: float = DEFAULT_CUM_PCT,
     min_day_coverage: int = MIN_DAY_COVERAGE,
+    max_prior_return_20d_pct: float = DEFAULT_MAX_PRIOR_RETURN_20D_PCT,
 ) -> dict[str, object]:
-    """加载全市场日线 + 分钟 bar，跑无未来函数的全市场分钟级回测。"""
+    """加载全市场日线 + 分钟 bar，跑无未来函数的低位首板分钟级回测。"""
 
-    daily_bars = load_daily_bars_all(start - timedelta(days=20), end + timedelta(days=7))
+    daily_bars = load_daily_bars_all(start - timedelta(days=190), end + timedelta(days=7))
     names = load_stock_names()
     bars_by_symbol: dict[str, list[Mapping[str, object]]] = defaultdict(list)
     for bar in daily_bars:
@@ -637,6 +709,7 @@ def run_minute_backtest(
         surge_pct=surge_pct,
         cum_pct=cum_pct,
         min_day_coverage=min_day_coverage,
+        max_prior_return_20d_pct=max_prior_return_20d_pct,
     )
     stats = result["coverage_stats"]
     result["study_version"] = STUDY_VERSION
@@ -646,11 +719,11 @@ def run_minute_backtest(
     result["cum_pct"] = cum_pct
     result["window"] = f"{WINDOW_START}-{WINDOW_END}"
     result["notes"] = [
-        "v2 修复 v1 样本选择偏差：universe=当日有分钟数据的全市场主板非ST股票，不再从事后涨停池出发。",
+        "v3 在 v2 无未来函数口径上加「低位首板」约束：D-1未涨停（保证首板，排除连板延续）+ 前20日累计涨幅≤阈值（低位，排除高位追涨），全部 D-1 可观测。",
         "触发/封板/一字全部盘中可观测：9:31-9:40 surge≥2% 或 cum≥7% 按触发 bar close 买入；触发 bar close≥涨停价 或 开盘≥涨停价跳过（不用 events 的 first_limit_time）。",
-        f"仅在分钟覆盖≥{min_day_coverage}票的宽覆盖日交易：{stats['days_tradeable']}/{stats['days_total']} 天（稀疏日多为事件票回填，整日跳过以消除覆盖偏差）。",
-        "4 个因子全部 D-1：流通市值(D-1成交额/换手率推导)、前5日涨幅、前3日上涨天数、前5日量比；触发群体月度 expanding 校准，标签=D+1净赢，训练只用之前完整月。",
-        "剩余限制：宽覆盖日的未覆盖票（约 2/3）中的触发被漏掉，覆盖偏活跃股；结论代表「有分钟数据的全市场子集」，非绝对全市场。",
+        "因子用连板龙头首板因子研究调研过的完整 D-1 集（前序走势/前3天形状/涨停基因/市值流动性，共15个），触发群体月度 expanding 校准，标签=D+1净赢，训练只用之前完整月。",
+        f"仅在分钟覆盖≥{min_day_coverage}票的宽覆盖日交易：{stats['days_tradeable']}/{stats['days_total']} 天（稀疏日多为事件票回填，整日跳过）。校准生效月：{stats['calibration_months']}。",
+        "剩余限制：1m 覆盖窗口短（2026-06起才有宽覆盖），可交易日少、样本小；覆盖偏活跃股。胜率/复利为小样本结果，不可外推。",
     ]
     return result
 

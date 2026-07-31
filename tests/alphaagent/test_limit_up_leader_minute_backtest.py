@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from alphaagent.server.services.limit_up.cash_backtest import CashBacktestConfig
 from alphaagent.server.services.limit_up import leader_minute_backtest as engine
@@ -21,7 +21,7 @@ SELL_DAY = "2026-07-29"
 CALENDAR = HIST_DATES + [BUY_DAY, SELL_DAY]
 
 
-def _bar(symbol, trade_date, open_, close, high=None, low=None, turnover=1.0e8, turnover_rate=5.0):
+def _bar(symbol, trade_date, open_, close, high=None, low=None, turnover=1.0e8, turnover_rate=5.0, change_pct=0.0):
     return {
         "vt_symbol": symbol,
         "trade_date": trade_date,
@@ -32,16 +32,19 @@ def _bar(symbol, trade_date, open_, close, high=None, low=None, turnover=1.0e8, 
         "volume": 1.0e6,
         "turnover": turnover,
         "turnover_rate": turnover_rate,
-        "change_pct": 0.0,
+        "change_pct": change_pct,
     }
 
 
 def _daily_rows(symbol=SYMBOL, prev_close=10.0, d_open=10.1, d_close=10.5, d1_open=10.6, d1_close=10.7):
     """6 根历史（D-6..D-1，收盘 9.0→prev_close）+ D 日 + D+1 日。"""
     closes = [9.0, 9.2, 9.4, 9.6, 9.8, prev_close]
-    rows = [
-        _bar(symbol, td, c, c) for td, c in zip(HIST_DATES, closes)
-    ]
+    rows = []
+    prev_c = None
+    for td, c in zip(HIST_DATES, closes):
+        change = round((c / prev_c - 1) * 100, 4) if prev_c else 0.0
+        rows.append(_bar(symbol, td, c, c, change_pct=change))
+        prev_c = c
     rows.append(_bar(symbol, BUY_DAY, d_open, d_close, high=max(d_open, d_close, 10.6)))
     rows.append(_bar(symbol, SELL_DAY, d1_open, d1_close))
     return rows
@@ -139,30 +142,34 @@ def test_no_trigger_when_flat() -> None:
 
 
 def test_d1_factors_use_only_prior_bars() -> None:
-    bars = _daily_rows()[:6]  # D-6..D-1（收盘 9.0→10.0）
-    factors = engine._d1_factors(bars)
+    rows = _daily_rows()  # 6 历史 + D + D+1
+    factors = engine._d1_factors(rows[:7], BUY_DAY)  # bars_up_to_d = D-6..D
     assert factors is not None
-    # 前5日涨幅 = 10.0/9.0 - 1
     assert abs(factors["prior_return_5d_pct"] - 11.1111) < 0.01
     assert factors["prior_3d_up_days"] == 3
-    # 前5日量比 = D-1 成交额 / 前5日均成交额 = 1e8/1e8
     assert abs(factors["prior_turnover_ratio_5d"] - 1.0) < 0.01
-    # 流通市值 = 成交额/(换手率/100) = 1e8/0.05
     assert abs(factors["float_market_cap"] - 2.0e9) < 1.0
+    # 渐变无涨停 → 涨停基因为 0
+    assert factors["prior_limit_count_126"] == 0
+    assert factors["prior_limit_count_20"] == 0
+    assert factors["days_since_prior_limit"] is None
 
 
 def test_d1_factors_change_with_d1_but_not_prefix() -> None:
-    bars = _daily_rows()[:6]
-    base = engine._d1_factors(bars)
-    # 改 D-1 收盘 → 因子变化
-    mutated = [dict(b) for b in bars]
-    mutated[-1] = dict(mutated[-1], close_price=11.0)
-    changed = engine._d1_factors(mutated)
+    rows = _daily_rows()
+    bars_up_to_d = rows[:7]
+    base = engine._d1_factors(bars_up_to_d, BUY_DAY)
+    # 改 D-1（倒数第二根）→ 因子变化
+    mutated = [dict(b) for b in bars_up_to_d]
+    mutated[-2] = dict(mutated[-2], close_price=11.0)
+    changed = engine._d1_factors(mutated, BUY_DAY)
     assert changed["prior_return_5d_pct"] != base["prior_return_5d_pct"]
-    # 改更早的 D-6 之前的历史（前6根不变）→ 因子不变
-    older = [_bar(SYMBOL, "2026-07-17", 1.0, 1.0)] + bars
-    same = engine._d1_factors(older)
-    assert same == base
+    # 改 D 日（最后一根，不进因子）→ 因子不变
+    mutated_d = [dict(b) for b in bars_up_to_d]
+    mutated_d[-1] = dict(mutated_d[-1], close_price=99.0)
+    same = engine._d1_factors(mutated_d, BUY_DAY)
+    assert same["prior_return_5d_pct"] == base["prior_return_5d_pct"]
+    assert same["prior_limit_count_126"] == base["prior_limit_count_126"]
 
 
 # ── 校准只用之前完整月 ────────────────────────────────────────────────
@@ -227,4 +234,64 @@ def test_simulate_skips_sealed_at_trigger() -> None:
     # 触发 bar close = 涨停价 11.0 → 当时已封板，买不到
     minute_map = {date(2026, 7, 28): {SYMBOL: _window([("09:31:00", 10.5), ("09:32:00", 11.0)])}}
     result = _run(minute_map)
+    assert result["closed_trades"] == []
+
+
+# ── 首板 / 低位过滤 + 涨停基因（v3 核心）────────────────────────────────
+
+
+def test_d1_factors_limit_gene() -> None:
+    # 历史含一次涨停（D-1 涨停）→ 涨停基因计数正确
+    closes = [9.0, 9.0, 9.0, 9.0, 9.0, 10.0]  # D-1=10.0 vs D-2=9.0（11.1% 涨停）
+    rows = [_bar(SYMBOL, td, c, c) for td, c in zip(HIST_DATES, closes)]
+    rows.append(_bar(SYMBOL, BUY_DAY, 10.1, 10.5))
+    factors = engine._d1_factors(rows[:7], BUY_DAY)
+    assert factors["prior_limit_count_126"] == 1
+    assert factors["prior_limit_count_20"] == 1
+    assert factors["days_since_prior_limit"] == 0  # D-1 就是涨停日
+
+
+def test_simulate_skips_non_first_board() -> None:
+    # D-1 已涨停（连板延续，非首板）→ 首板过滤排除
+    closes = [9.0, 9.0, 9.0, 9.0, 9.0, 10.0]  # D-1=10.0 vs D-2=9.0（涨停）
+    rows = [_bar(SYMBOL, td, c, c) for td, c in zip(HIST_DATES, closes)]
+    rows.append(_bar(SYMBOL, BUY_DAY, 10.1, 10.5, high=10.6))
+    rows.append(_bar(SYMBOL, SELL_DAY, 10.6, 10.7))
+    bars_by_symbol = {SYMBOL: rows}
+    daily_index = {(SYMBOL, str(b["trade_date"])): b for b in rows}
+    minute_map = {date(2026, 7, 28): {SYMBOL: _window([("09:31:00", 10.1), ("09:32:00", 10.4)])}}
+    result = engine.simulate_allmarket_minute(
+        bars_by_symbol=bars_by_symbol,
+        daily_index=daily_index,
+        calendar=CALENDAR,
+        names={SYMBOL: "测试"},
+        minute_loader=lambda d: minute_map.get(d, {}),
+        config=CashBacktestConfig(max_positions=3),
+        min_day_coverage=1,
+    )
+    assert result["closed_trades"] == []
+
+
+def test_simulate_skips_high_position() -> None:
+    # 前20日累计涨幅 >10%（高位追涨）→ 低位过滤排除（首板仍成立）
+    hist_dates = [(date(2026, 6, 1) + timedelta(days=i)).isoformat() for i in range(25)]
+    closes = [9.0] * 5 + [10.0] * 18 + [10.4, 10.5]  # D-21=9.0, D-1=10.5（前20日16.7%）；D-1/D-2 不涨停
+    rows = [_bar(SYMBOL, td, c, c) for td, c in zip(hist_dates, closes)]
+    buy_day = "2026-06-26"
+    sell_day = "2026-06-27"
+    rows.append(_bar(SYMBOL, buy_day, 10.6, 11.0))
+    rows.append(_bar(SYMBOL, sell_day, 11.0, 11.1))
+    calendar = hist_dates + [buy_day, sell_day]
+    bars_by_symbol = {SYMBOL: rows}
+    daily_index = {(SYMBOL, str(b["trade_date"])): b for b in rows}
+    minute_map = {date(2026, 6, 26): {SYMBOL: _window([("09:31:00", 10.6), ("09:32:00", 10.9)])}}
+    result = engine.simulate_allmarket_minute(
+        bars_by_symbol=bars_by_symbol,
+        daily_index=daily_index,
+        calendar=calendar,
+        names={SYMBOL: "测试"},
+        minute_loader=lambda d: minute_map.get(d, {}),
+        config=CashBacktestConfig(max_positions=3),
+        min_day_coverage=1,
+    )
     assert result["closed_trades"] == []
