@@ -23,7 +23,7 @@ from alphaagent.server.services.limit_up.leader_first_board_adapter import (
     _stub_validation,
 )
 
-STRATEGY_VERSION = "leader-minute-backtest-v1"
+STRATEGY_VERSION = "leader-minute-backtest-v2"
 
 
 def adapt_minute_backtest(v3_result: Mapping[str, object]) -> dict[str, object]:
@@ -46,7 +46,7 @@ def adapt_minute_backtest(v3_result: Mapping[str, object]) -> dict[str, object]:
         "portfolio_policy": {
             "included_lanes": ["first_board"],
             "excluded_lanes": ["two_to_three", "high_board"],
-            "selection_basis": "leader_5_factor_expanding_top3_minute_entry",
+            "selection_basis": "allmarket_minute_trigger_d1_factor_expanding",
         },
         "exit_summary": _adapt_exit_summary(trades),
         "daily_results": daily_results,
@@ -95,23 +95,22 @@ def _adapt_trade_minute(trade: Mapping[str, object]) -> dict[str, object]:
     exit_price = _num(trade.get("exit_price"))
     volume = _num(trade.get("volume")) or 0
     fee = _num(trade.get("fee")) or 0.0
-    first_limit_time = str(trade.get("first_limit_time") or "")
-    # 分钟级：优先用真实买入的 bar_time（如 09:33:00），回落 first_limit_time/9:30
-    buy_time = str(trade.get("buy_time") or first_limit_time or "09:30:00")
+    # 分钟级：buy_time 用真实触发 bar_time（如 09:33:00）；board_status 为当日结局（展示用）
+    buy_time = str(trade.get("buy_time") or "09:30:00")
     return {
         "lane": "first_board",
         "vt_symbol": str(trade.get("vt_symbol") or ""),
         "name": str(trade.get("name") or trade.get("vt_symbol") or ""),
         "buy_date": str(trade.get("entry_date") or ""),
         "buy_time": buy_time,
-        "first_limit_time": first_limit_time,
+        "first_limit_time": str(trade.get("first_limit_time") or ""),
         "buy_price": buy_price,
         "sell_date": str(trade.get("exit_date") or "") or None,
         "sell_time": _sell_time(reason),
         "sell_price": exit_price,
         "return_pct": _num(trade.get("return_pct")),
         "d1_outcome": "leader_minute_proxy",
-        "d_board_status": "sealed",
+        "d_board_status": str(trade.get("board_status") or "no_limit"),
         "execution_confidence": "research_only",
         "signal_date": str(trade.get("entry_date") or ""),
         "entry_date": str(trade.get("entry_date") or ""),

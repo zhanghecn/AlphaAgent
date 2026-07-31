@@ -166,14 +166,14 @@ function BacktestLeaderView() {
                   : "text-muted-foreground hover:text-foreground",
               )}
             >
-              {key === "minute" ? "分钟级（真实可执行）" : "涨停价打板（上界）"}
+              {key === "minute" ? "分钟级（全市场无未来函数）" : "涨停价打板（上界）"}
             </button>
           ))}
         </div>
         <span className="text-xs text-muted-foreground">
           {detail === "minute"
-            ? "开盘 10 分钟窗口 surge/累计涨幅触发 bar close 买入"
-            : "假设涨停价全成交，实盘封单厚会打折"}
+            ? "全市场触发选股 · 9:31-9:40 surge/累计触发 · 仅宽覆盖日 · 无未来函数"
+            : "事后涨停池选股 · 假设涨停价全成交（实盘买不到的上界）"}
         </span>
       </div>
       {active ? (
@@ -206,8 +206,8 @@ function CompareCard({
 }) {
   return (
     <div className="grid grid-cols-2 gap-px border-b bg-border">
-      <CompareColumn title="涨停价打板" badge="乐观上界" report={leader} />
-      <CompareColumn title="分钟级" badge="真实可执行" report={minute} highlight />
+      <CompareColumn title="涨停价打板" badge="理想化上界" report={leader} />
+      <CompareColumn title="分钟级" badge="全市场·无未来函数" report={minute} highlight />
     </div>
   );
 }
@@ -331,16 +331,17 @@ function GuideView() {
         <div>
           <div className="mb-1 font-semibold">回测策略（历史模拟）</div>
           <ul className="ml-4 list-disc text-muted-foreground">
-            <li>每天用 3 个 D-1 因子和触板时流通市值打分选 TOP3 首板，涨停价打板买入</li>
-            <li>D+1 开盘高开就拿、低开/平盘就走</li>
-            <li>拿着当天涨停则减半留、不涨停收盘走</li>
-            <li>4 因子：触板时流通市值、前5日涨幅、前3天上涨天数、前5日量比</li>
+            <li>涨停价打板：从事后涨停池选股、假设涨停价全成交——是「能买到」的理想上界，实盘封单厚时买不到</li>
+            <li>分钟级（无未来函数）：universe=当日有分钟数据的全市场主板非ST股，9:31-9:40 内 surge≥2% 或累计≥7% 按触发 bar close 买入</li>
+            <li>封板/一字用价格可观测判断（触发时 bar close≥涨停价或开盘≥涨停价则跳过），不用事后涨停数据</li>
+            <li>4 个 D-1 因子：流通市值、前5日涨幅、前3日上涨天数、前5日量比；触发群体月度校准（标签=D+1 净赢）</li>
+            <li>D+1 开盘高开就拿、低开/平盘就走、涨停减半留</li>
           </ul>
         </div>
         <div className="rounded border border-amber-500/40 bg-amber-500/5 p-3 text-xs text-amber-600">
-          ⚠️ 回测假设涨停价全成交（实盘封单厚时买不到，收益会打折）；
-          每日 TOP3 是完整晨盘候选的研究排序，并非实时到达顺序；D+1 用开盘价代理竞价
-          （非真实集合竞价）；样本仅约 13 个月，结果不可外推。
+          ⚠️ 分钟级回测只在「当日分钟数据覆盖≥600票」的宽覆盖日交易（稀疏日多为事件票回填、有覆盖偏差，
+          整日跳过），样本窗口有限；宽覆盖日的未覆盖票（约 2/3）中的触发被漏掉，覆盖偏活跃股。
+          打板回测假设涨停价全成交（上界）；样本有限，结果不可外推。
         </div>
       </div>
     </section>

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, Mapping
 
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import func, select
 
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import session_scope
@@ -90,20 +89,55 @@ def list_limit_up_event_dates() -> list[str]:
     return [value for value in normalized_dates if value in verified]
 
 
-def load_minute_bars(
-    pairs: Sequence[tuple[str, date]],
-) -> dict[tuple[str, str], list[dict[str, object]]]:
-    """按 (vt_symbol, trade_date) 批量加载 1 分钟 bar，避免全量扫描 stock_minute_bars。
+def load_daily_bars_all(start: date, end: date) -> list[dict[str, object]]:
+    """全市场日线（不做 events 过滤），供全市场回测的 D-1 因子与 D+1 卖出。"""
 
-    返回 ``{(symbol, trade_date_str): [bar, ...]}``，bar 按时间升序。
+    statement = select(
+        schema.stock_daily_bars.c.vt_symbol,
+        schema.stock_daily_bars.c.trade_date,
+        schema.stock_daily_bars.c.open_price,
+        schema.stock_daily_bars.c.close_price,
+        schema.stock_daily_bars.c.high_price,
+        schema.stock_daily_bars.c.low_price,
+        schema.stock_daily_bars.c.volume,
+        schema.stock_daily_bars.c.turnover,
+        schema.stock_daily_bars.c.turnover_rate,
+        schema.stock_daily_bars.c.change_pct,
+    ).where(
+        schema.stock_daily_bars.c.trade_date >= start,
+        schema.stock_daily_bars.c.trade_date <= end,
+    )
+    with session_scope() as session:
+        rows = session.execute(statement).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def load_stock_names() -> dict[str, str]:
+    """全部股票名称（ST 过滤用）。"""
+
+    with session_scope() as session:
+        rows = session.execute(
+            select(schema.stocks.c.vt_symbol, schema.stocks.c.name)
+        ).all()
+    return {str(row[0]): str(row[1] or "") for row in rows}
+
+
+def load_window_minute_bars(
+    trade_date: date,
+    *,
+    start_time: str = "09:25:00",
+    end_time: str = "09:41:00",
+) -> dict[str, list[dict[str, object]]]:
+    """加载某交易日窗口（默认 9:25-9:41）的 1 分钟 bar，按票分组。
+
+    返回 ``{vt_symbol: [bar, ...]}``，bar_time 为 ``HH:MM:SS``，按时间升序。
     """
 
-    if not pairs:
-        return {}
+    start_dt = datetime.combine(trade_date, time.fromisoformat(start_time))
+    end_dt = datetime.combine(trade_date, time.fromisoformat(end_time))
     statement = (
         select(
             schema.stock_minute_bars.c.vt_symbol,
-            schema.stock_minute_bars.c.trade_date,
             schema.stock_minute_bars.c.bar_time,
             schema.stock_minute_bars.c.open_price,
             schema.stock_minute_bars.c.close_price,
@@ -113,24 +147,27 @@ def load_minute_bars(
             schema.stock_minute_bars.c.turnover,
         )
         .where(
-            tuple_(
-                schema.stock_minute_bars.c.vt_symbol,
-                schema.stock_minute_bars.c.trade_date,
-            ).in_(pairs),
+            schema.stock_minute_bars.c.trade_date == trade_date,
             schema.stock_minute_bars.c.interval == "1m",
+            schema.stock_minute_bars.c.bar_time >= start_dt,
+            schema.stock_minute_bars.c.bar_time <= end_dt,
         )
-        .order_by(schema.stock_minute_bars.c.bar_time)
+        .order_by(
+            schema.stock_minute_bars.c.vt_symbol,
+            schema.stock_minute_bars.c.bar_time,
+        )
     )
-    result: dict[tuple[str, str], list[dict[str, object]]] = {}
+    result: dict[str, list[dict[str, object]]] = {}
     with session_scope() as session:
         for row in session.execute(statement).mappings().all():
             symbol = str(row["vt_symbol"])
-            trade_date = str(row["trade_date"])
-            result.setdefault((symbol, trade_date), []).append(
+            bar_time = row["bar_time"]
+            result.setdefault(symbol, []).append(
                 {
                     "vt_symbol": symbol,
-                    "trade_date": trade_date,
-                    "bar_time": str(row["bar_time"]),
+                    "bar_time": bar_time.strftime("%H:%M:%S")
+                    if hasattr(bar_time, "strftime")
+                    else str(bar_time)[-8:],
                     "open_price": row["open_price"],
                     "close_price": row["close_price"],
                     "high_price": row["high_price"],
