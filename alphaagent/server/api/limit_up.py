@@ -27,6 +27,13 @@ from alphaagent.server.services.limit_up.leader_first_board_adapter import (
 from alphaagent.server.services.limit_up.leader_first_board_repository import (
     load_leader_backtest_run,
 )
+from alphaagent.server.services.limit_up.leader_minute_adapter import (
+    adapt_minute_backtest,
+    group_minute_trades_by_day,
+)
+from alphaagent.server.services.limit_up.leader_minute_repository import (
+    load_minute_backtest_run,
+)
 from alphaagent.server.services.limit_up.live_trace_service import (
     get_live_trace_dates,
     get_live_trace_day,
@@ -154,6 +161,28 @@ def first_board_leader_backtest():
         "is_backtest": True,
         "report": adapt_leader_backtest(data),
         "ledger_days": group_leader_trades_by_day(data),
+        "notes": data.get("notes"),
+    })
+
+
+@router.get("/minute-backtest", response_model=None)
+def leader_minute_backtest():
+    """首板龙头分钟级精准回测（开盘 10 分钟窗口 surge/cum 触发买入，真实可执行价）。"""
+
+    data = load_minute_backtest_run()
+    if not data:
+        return ok({
+            "status": "unavailable",
+            "message": "分钟级回测尚未运行",
+            "is_backtest": False,
+            "report": None,
+            "ledger_days": [],
+        })
+    return ok({
+        "status": "ok",
+        "is_backtest": True,
+        "report": adapt_minute_backtest(data),
+        "ledger_days": group_minute_trades_by_day(data),
         "notes": data.get("notes"),
     })
 

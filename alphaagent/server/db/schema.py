@@ -1629,6 +1629,19 @@ leader_first_board_backtest_runs = Table(
 )
 
 
+# 首板龙头分钟级回测：单行 id=1 存最新一次 run（同 first_board 模式）
+leader_minute_backtest_runs = Table(
+    "leader_minute_backtest_runs",
+    metadata,
+    Column("id", Integer, primary_key=True),  # 固定 1：单行存最新分钟级回测
+    Column("strategy_version", String(80), nullable=False),
+    Column("built_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("payload", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+
 limit_up_minute_backfill_attempts = Table(
     "limit_up_minute_backfill_attempts",
     metadata,

@@ -1079,6 +1079,13 @@ export function fetchFirstBoardLeaderBacktest(): Promise<FirstBoardLeaderBacktes
   return apiClient.get<FirstBoardLeaderBacktest>("/limit-up/first-board-leader/backtest");
 }
 
+// 分钟级精准回测：响应结构与打板回测一致（report + ledger_days），复用类型。
+export type MinuteBacktestResponse = FirstBoardLeaderBacktest;
+
+export function fetchMinuteBacktest(): Promise<MinuteBacktestResponse> {
+  return apiClient.get<MinuteBacktestResponse>("/limit-up/minute-backtest");
+}
+
 export function fetchLimitUpStrategyGuide(): Promise<LimitUpStrategyGuide> {
   return apiClient.get<LimitUpStrategyGuide>("/limit-up/strategy-guide");
 }

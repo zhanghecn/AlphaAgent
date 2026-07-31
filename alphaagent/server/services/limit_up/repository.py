@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from typing import Any, Mapping
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import session_scope
@@ -87,6 +88,58 @@ def list_limit_up_event_dates() -> list[str]:
         for value in verified_dates
     }
     return [value for value in normalized_dates if value in verified]
+
+
+def load_minute_bars(
+    pairs: Sequence[tuple[str, date]],
+) -> dict[tuple[str, str], list[dict[str, object]]]:
+    """按 (vt_symbol, trade_date) 批量加载 1 分钟 bar，避免全量扫描 stock_minute_bars。
+
+    返回 ``{(symbol, trade_date_str): [bar, ...]}``，bar 按时间升序。
+    """
+
+    if not pairs:
+        return {}
+    statement = (
+        select(
+            schema.stock_minute_bars.c.vt_symbol,
+            schema.stock_minute_bars.c.trade_date,
+            schema.stock_minute_bars.c.bar_time,
+            schema.stock_minute_bars.c.open_price,
+            schema.stock_minute_bars.c.close_price,
+            schema.stock_minute_bars.c.high_price,
+            schema.stock_minute_bars.c.low_price,
+            schema.stock_minute_bars.c.volume,
+            schema.stock_minute_bars.c.turnover,
+        )
+        .where(
+            tuple_(
+                schema.stock_minute_bars.c.vt_symbol,
+                schema.stock_minute_bars.c.trade_date,
+            ).in_(pairs),
+            schema.stock_minute_bars.c.interval == "1m",
+        )
+        .order_by(schema.stock_minute_bars.c.bar_time)
+    )
+    result: dict[tuple[str, str], list[dict[str, object]]] = {}
+    with session_scope() as session:
+        for row in session.execute(statement).mappings().all():
+            symbol = str(row["vt_symbol"])
+            trade_date = str(row["trade_date"])
+            result.setdefault((symbol, trade_date), []).append(
+                {
+                    "vt_symbol": symbol,
+                    "trade_date": trade_date,
+                    "bar_time": str(row["bar_time"]),
+                    "open_price": row["open_price"],
+                    "close_price": row["close_price"],
+                    "high_price": row["high_price"],
+                    "low_price": row["low_price"],
+                    "volume": row["volume"],
+                    "turnover": row["turnover"],
+                }
+            )
+    return result
 
 
 def load_limit_up_dataset(
