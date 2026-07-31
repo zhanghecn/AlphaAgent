@@ -169,7 +169,7 @@ function LedgerLeaderView() {
         <span>⚠️ 回测模拟交割单，非实盘 · 最近 {ledgerDays.length} 个交易日 · 最新在左</span>
       </div>
       <LedgerTimeline
-        days={ledgerDays.map((ledger) => ({
+        days={[...ledgerDays].reverse().map((ledger) => ({
           date: ledger.trade_date,
           ledger,
           loading: false,
