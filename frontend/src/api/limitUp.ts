@@ -308,6 +308,18 @@ export interface LimitUpLiveSignal {
     max_drawdown_pct?: number | null;
     trade_count?: number;
   };
+  // Phase 2 首板龙头潜力分（白名单因子横截面分位加权）
+  potential_score?: number | null;
+  factor_percentiles?: Record<string, number>;
+  seal_weakening?: boolean;
+  late_seal?: boolean;
+  seal_to_turnover_ratio?: number | null;
+  concept_max_return_20d?: number | null;
+  volume_ratio_5_60?: number | null;
+  drawdown_from_126d_high_pct?: number | null;
+  position_126d?: number | null;
+  prior_return_20d_pct?: number | null;
+  prior_return_5d_pct?: number | null;
 }
 
 export interface LimitUpSignalSnapshot {
@@ -366,7 +378,52 @@ export interface FirstBoardLeaderSnapshot {
   session_stage?: string | null;
   mode?: string | null;
   data_quality: { is_stale?: boolean } & Record<string, unknown>;
+  market_temperature?: {
+    available: boolean;
+    lag1_trade_date?: string;
+    lag1_first_board_count?: number;
+    level?: "cold" | "neutral" | "hot";
+    note?: string;
+  };
   leaders: LimitUpLiveSignal[];
+}
+
+export interface LeaderForwardLedgerWeek {
+  week: string;
+  signals: number;
+  settled: number;
+  win_rate: number | null;
+  avg_d1_open_return_pct: number | null;
+  seal_rate: number | null;
+}
+
+export interface LeaderForwardLedgerRow {
+  trade_date: string;
+  vt_symbol: string;
+  name: string | null;
+  potential_score: number | null;
+  change_pct: number | null;
+  state: string | null;
+  board_status: string | null;
+  late_seal: boolean;
+  seal_weakening: boolean;
+  seal_to_turnover_ratio: number | null;
+  d1_open_return_pct: number | null;
+  is_win: boolean | null;
+  settled: boolean;
+}
+
+export interface LeaderForwardLedgerReport {
+  status: string;
+  weeks: LeaderForwardLedgerWeek[];
+  recent: LeaderForwardLedgerRow[];
+  backtest_reference: {
+    total_return_pct?: number | null;
+    win_rate?: number | null;
+    average_return_pct?: number | null;
+    trade_count?: number | null;
+  };
+  notes?: string[];
 }
 
 export interface LimitUpLiveTraceDates {
@@ -1064,6 +1121,14 @@ export function fetchLimitUpLive(): Promise<LimitUpSignalSnapshot> {
 
 export function fetchFirstBoardLeaderLive(): Promise<FirstBoardLeaderSnapshot> {
   return apiClient.get<FirstBoardLeaderSnapshot>("/limit-up/first-board-leader/live");
+}
+
+export function fetchFirstBoardLeaderForwardLedger(
+  weeks = 8,
+): Promise<LeaderForwardLedgerReport> {
+  return apiClient.get<LeaderForwardLedgerReport>(
+    `/limit-up/first-board-leader/forward-ledger?weeks=${weeks}`,
+  );
 }
 
 export interface FirstBoardLeaderBacktest {

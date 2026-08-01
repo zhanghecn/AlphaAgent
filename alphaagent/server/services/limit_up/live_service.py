@@ -1340,6 +1340,13 @@ def _enrich_candidate(
         "prior_low_change_pct": _number(context.get("prior_low_change_pct")),
         "prior_return_5d_pct": _number(context.get("prior_return_5d_pct")),
         "prior_return_20d_pct": _number(context.get("prior_return_20d_pct")),
+        # v4 白名单长窗因子（D-1 可观测，Phase 0 稳定性门通过）
+        "drawdown_from_126d_high_pct": _number(
+            context.get("drawdown_from_126d_high_pct")
+        ),
+        "position_126d": _number(context.get("position_126d")),
+        "volume_ratio_5_60": _number(context.get("volume_ratio_5_60")),
+        "concept_max_return_20d": _number(context.get("concept_max_return_20d")),
         "prior_amplitude_pct": _number(context.get("prior_amplitude_pct")),
         "prior_streak": prior_streak,
         "prior_break_streak": _integer(context.get("prior_break_streak"), 0),

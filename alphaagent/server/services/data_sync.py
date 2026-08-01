@@ -738,9 +738,28 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_stock_financial_quarterly",
             "sync_stock_financial_indicators",
             "sync_stock_business_segments_history",
+            "leader_forward_settle",
             "limit_up_next_session_plan_final",
             "limit_up_live_trace_prune",
         ],
+    },
+    {
+        "id": "leader_forward_capture_1005",
+        "name": "首板龙头前向台账捕获（10:05）",
+        "cron": "5 10 * * 1-5",
+        "action": "sync",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": ["leader_forward_capture"],
+    },
+    {
+        "id": "leader_forward_capture_1505",
+        "name": "首板龙头前向台账捕获（15:05）",
+        "cron": "5 15 * * 1-5",
+        "action": "sync",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": ["leader_forward_capture"],
     },
     {
         "id": "eod_finalize_2130",
@@ -773,6 +792,17 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "limit_up_live_trace_prune",
         ],
     },
+    {
+        "id": "eod_backtest_2200",
+        "name": "首板龙头分钟回测重跑（22:00）",
+        "cron": "0 22 * * 1-5",
+        "action": "sync",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": [
+            "leader_minute_backtest_rerun",
+        ],
+    },
 ]
 
 LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID = "sync_limit_up_ths_evidence"
@@ -780,12 +810,18 @@ LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID = "limit_up_history_rebuild"
 LIMIT_UP_NEXT_SESSION_PLAN_PRELIMINARY_BATCH_JOB_ID = "limit_up_next_session_plan_preliminary"
 LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID = "limit_up_next_session_plan_final"
 LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID = "limit_up_live_trace_prune"
+LEADER_MINUTE_BACKTEST_RERUN_BATCH_JOB_ID = "leader_minute_backtest_rerun"
+LEADER_FORWARD_CAPTURE_BATCH_JOB_ID = "leader_forward_capture"
+LEADER_FORWARD_SETTLE_BATCH_JOB_ID = "leader_forward_settle"
 INTERNAL_BATCH_JOB_IDS = {
     LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID,
     LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID,
     LIMIT_UP_NEXT_SESSION_PLAN_PRELIMINARY_BATCH_JOB_ID,
     LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID,
     LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID,
+    LEADER_MINUTE_BACKTEST_RERUN_BATCH_JOB_ID,
+    LEADER_FORWARD_CAPTURE_BATCH_JOB_ID,
+    LEADER_FORWARD_SETTLE_BATCH_JOB_ID,
 }
 HISTORY_INPUT_JOB_IDS = frozenset(
     {
@@ -2222,7 +2258,20 @@ class DataSyncRunner:
             total_read += len(items)
             written = _upsert_limit_up_events(items, pool_key, data.get("trade_date", ""))
             total_written += written
-        return {"rows_read": total_read, "rows_written": total_written}
+        snapshot_written = 0
+        try:
+            snapshot_written = _append_limit_up_pool_snapshots(
+                pools,
+                data.get("trade_date", ""),
+                data.get("updated_at"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("limit up pool snapshot append failed: %s", exc)
+        return {
+            "rows_read": total_read,
+            "rows_written": total_written,
+            "snapshot_rows_written": snapshot_written,
+        }
 
     def _run_sync_stock_fund_flows(self, params: dict[str, Any]) -> dict[str, Any]:
         stock_limit = int(params.get("stock_limit", 200))
@@ -3565,6 +3614,12 @@ def _run_sync_batch(
                 result = _run_limit_up_next_session_plan_batch_job("final")
             elif job_id == LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID:
                 result = _run_limit_up_live_trace_prune_batch_job()
+            elif job_id == LEADER_MINUTE_BACKTEST_RERUN_BATCH_JOB_ID:
+                result = _run_leader_minute_backtest_rerun_batch_job()
+            elif job_id == LEADER_FORWARD_CAPTURE_BATCH_JOB_ID:
+                result = _run_leader_forward_capture_batch_job()
+            elif job_id == LEADER_FORWARD_SETTLE_BATCH_JOB_ID:
+                result = _run_leader_forward_settle_batch_job()
             else:
                 result = run_job(
                     job_id,
@@ -3775,6 +3830,80 @@ def _latest_complete_daily_date_for_research() -> date | None:
         return None
     with session_scope() as session:
         return _latest_complete_daily_date(session)
+
+
+def _run_leader_minute_backtest_rerun_batch_job() -> dict[str, Any]:
+    """每晚 22:00 重跑首板龙头分钟级回测（v4-B 生产配置）并写库。
+
+    v4-B = Phase 0 白名单 6 因子 + 深跌排除（A/B 两档口径唯一都赢 v3 的版本，
+    证据 memory/06_backtests/limit_up_leader_minute_backtest_v4ab_20260801.md）。
+    """
+
+    from alphaagent.server.services.limit_up.leader_minute_backtest import (
+        STUDY_VERSION,
+        run_minute_backtest,
+    )
+    from alphaagent.server.services.limit_up.leader_minute_repository import (
+        save_minute_backtest_run,
+    )
+
+    end = _latest_complete_daily_date_for_research()
+    if end is None:
+        return {"status": "skipped", "rows_read": 0, "rows_written": 0, "message": "数据库未就绪"}
+    start = end - timedelta(days=150)
+    result = run_minute_backtest(
+        start=start,
+        end=end,
+        factor_set="v4",
+        position_filter="deep_drop_exclusion",
+    )
+    save_minute_backtest_run(STUDY_VERSION, result)
+    summary = result.get("execution_summary") or {}
+    return {
+        "rows_read": int((result.get("coverage_stats") or {}).get("trigger_count") or 0),
+        "rows_written": 1,
+        "message": (
+            f"首板龙头分钟回测已刷新（v4-B）：{start.isoformat()}..{end.isoformat()}，"
+            f"复利 {summary.get('total_return_pct')}% / 胜率 {summary.get('win_rate')}% "
+            f"/ {summary.get('trade_count')} 笔"
+        ),
+    }
+
+
+def _run_leader_forward_capture_batch_job() -> dict[str, Any]:
+    """盘中定时捕获首板龙头推荐榜进前向纸面台账（Phase 3）。"""
+
+    from alphaagent.server.services.limit_up.leader_forward_ledger import (
+        capture_forward_signals,
+    )
+
+    try:
+        return capture_forward_signals()
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "skipped",
+            "rows_read": 0,
+            "rows_written": 0,
+            "message": f"前向台账捕获失败：{exc.__class__.__name__}",
+        }
+
+
+def _run_leader_forward_settle_batch_job() -> dict[str, Any]:
+    """EOD 结算前向台账（回填 D 收盘 / D+1 开盘收盘）。"""
+
+    from alphaagent.server.services.limit_up.leader_forward_ledger import (
+        settle_forward_signals,
+    )
+
+    try:
+        return settle_forward_signals()
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "skipped",
+            "rows_read": 0,
+            "rows_written": 0,
+            "message": f"前向台账结算失败：{exc.__class__.__name__}",
+        }
 
 
 def _batch_job_params(job_id: str, batch_params: dict[str, Any]) -> dict[str, Any]:
@@ -7712,6 +7841,121 @@ def _limit_pool_event_date_keys(trade_date: str) -> list[str]:
     if parsed:
         keys.extend([parsed.strftime("%Y%m%d"), parsed.isoformat()])
     return list(dict.fromkeys(key for key in keys if key))
+
+
+# 盘中封单快照只积累涨停池与炸板池（封单研究的两端），其余池与事件表重叠。
+_LIMIT_POOL_SNAPSHOT_POOLS = ("zt", "zbgc")
+
+
+def _append_limit_up_pool_snapshots(
+    pools: dict[str, Any],
+    trade_date: str,
+    source_updated_at: Any,
+) -> int:
+    """把涨停/炸板池的盘中 payload 追加进 ``limit_up_pool_snapshots``。
+
+    stock_events 只留每日终态（delete+insert），盘中封单演化只能靠本表还原。
+    按 ``source_updated_at`` 去重：市场缓存 TTL 内重复触发同一 payload 时跳过。
+    快照失败不阻断事件同步（调用方捕获）。
+    """
+
+    event_dates = _limit_pool_event_date_keys(trade_date)
+    if not event_dates:
+        return 0
+    snapshot_date = None
+    for fmt in ("%Y%m%d", "%Y-%m-%d"):
+        try:
+            snapshot_date = datetime.strptime(event_dates[0], fmt).date()
+            break
+        except ValueError:
+            continue
+    if snapshot_date is None:
+        return 0
+    updated_at = _parse_pool_snapshot_time(source_updated_at)
+    captured_at = _now_china()
+    written = 0
+    with session_scope() as session:
+        for pool_type in _LIMIT_POOL_SNAPSHOT_POOLS:
+            pool_data = pools.get(pool_type)
+            if not isinstance(pool_data, dict):
+                continue
+            items = pool_data.get("items") or []
+            if not items:
+                continue
+            if updated_at is not None:
+                existing = session.execute(
+                    select(func.max(schema.limit_up_pool_snapshots.c.source_updated_at)).where(
+                        (schema.limit_up_pool_snapshots.c.trade_date == snapshot_date)
+                        & (schema.limit_up_pool_snapshots.c.pool_type == pool_type)
+                    )
+                ).scalar()
+                if existing is not None and existing >= updated_at:
+                    continue
+            rows = [
+                _limit_up_pool_snapshot_row(
+                    item, snapshot_date, captured_at, updated_at, pool_type
+                )
+                for item in items
+                if item.get("vt_symbol")
+            ]
+            if rows:
+                session.execute(schema.limit_up_pool_snapshots.insert(), rows)
+                written += len(rows)
+    return written
+
+
+def _parse_pool_snapshot_time(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(float(value)) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _limit_up_pool_snapshot_row(
+    item: dict[str, Any],
+    snapshot_date: date,
+    captured_at: datetime,
+    updated_at: datetime | None,
+    pool_type: str,
+) -> dict[str, Any]:
+    raw = item.get("raw") or {}
+
+    def _raw_number(*keys: str) -> float | None:
+        for key in keys:
+            number = _float_or_none(raw.get(key))
+            if number is not None:
+                return number
+        return None
+
+    return {
+        "trade_date": snapshot_date,
+        "captured_at": captured_at,
+        "source_updated_at": updated_at,
+        "pool_type": pool_type,
+        "vt_symbol": str(item.get("vt_symbol") or ""),
+        "name": str(item.get("name") or "") or None,
+        "close_price": _float_or_none(item.get("close_price")),
+        "change_pct": _float_or_none(item.get("change_pct")),
+        "limit_up_price": _float_or_none(item.get("limit_up_price")),
+        "seal_amount": _float_or_none(item.get("limit_amount")),
+        "turnover": _raw_number("成交额"),
+        "turnover_rate": _float_or_none(item.get("turnover_rate")),
+        "volume_ratio": _float_or_none(item.get("volume_ratio")),
+        "open_times": _int_or_none(raw.get("炸板次数")),
+        "first_limit_time": str(item.get("first_limit_time") or "") or None,
+        "last_limit_time": str(item.get("last_limit_time") or "") or None,
+        "limit_times": _int_or_none(item.get("limit_up_count")),
+        "raw": raw,
+    }
 
 
 def _upsert_stock_fund_flows(

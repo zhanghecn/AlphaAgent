@@ -1,12 +1,14 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, BarChart3, BookOpenText, ReceiptText } from "lucide-react";
+import { Activity, BarChart3, BookOpenText, ClipboardList, ReceiptText } from "lucide-react";
 
 import {
   fetchFirstBoardLeaderBacktest,
+  fetchFirstBoardLeaderForwardLedger,
   fetchFirstBoardLeaderLive,
   fetchMinuteBacktest,
   type LimitUpLaneBacktest,
+  type LimitUpLiveSignal,
 } from "@/api/limitUp";
 import { LoadingState } from "@/components/LoadingState";
 import { LedgerTimeline } from "@/features/limitUp/LedgerTimeline";
@@ -15,12 +17,13 @@ import { ACTIVE_LIVE_SNAPSHOT_POLL_INTERVAL_MS } from "@/features/limitUp/nextSe
 import { BacktestView } from "@/pages/LimitUpPage";
 import { cn } from "@/lib/utils";
 
-type LeaderView = "live" | "backtest" | "ledger" | "guide";
+type LeaderView = "live" | "backtest" | "ledger" | "forward" | "guide";
 
 const LEADER_VIEWS: { value: LeaderView; label: string; icon: typeof Activity }[] = [
   { value: "live", label: "实时推荐", icon: Activity },
   { value: "backtest", label: "回测", icon: BarChart3 },
   { value: "ledger", label: "历史交割单", icon: ReceiptText },
+  { value: "forward", label: "前向台账", icon: ClipboardList },
   { value: "guide", label: "规则说明", icon: BookOpenText },
 ];
 
@@ -64,6 +67,8 @@ export function FirstBoardLeaderPage() {
         <BacktestLeaderView />
       ) : view === "ledger" ? (
         <LedgerLeaderView />
+      ) : view === "forward" ? (
+        <ForwardLedgerView />
       ) : (
         <GuideView />
       )}
@@ -112,21 +117,41 @@ function LiveLeaderView() {
   const leaders = snapshot.leaders ?? [];
   const stale = Boolean(snapshot.data_quality?.is_stale);
   const paused = snapshot.session_stage === "lunch";
+  const temperature = snapshot.market_temperature;
   return (
     <section aria-label="首板龙头实时推荐">
       <div className="flex items-center justify-between gap-3 px-3 py-3 sm:px-4">
         <div className="min-w-0 text-sm">
           <span className="font-semibold text-foreground">首板龙头强度榜</span>
           <span className="ml-2 text-muted-foreground">
-            按涨幅 · 距板 · 封单 · 概念龙实时排序 · 共 {leaders.length} 只
+            潜力分（白名单因子）优先 · 共 {leaders.length} 只
           </span>
+          {temperature?.available && (
+            <span
+              className={cn(
+                "ml-2 rounded-full px-1.5 py-px text-[10px] font-medium",
+                temperature.level === "cold"
+                  ? "bg-emerald-500/15 text-emerald-600"
+                  : temperature.level === "hot"
+                    ? "bg-red-500/15 text-red-600"
+                    : "bg-muted text-muted-foreground",
+              )}
+              title="昨日全市场首板数（滞后温度，仅展示不做硬门）"
+            >
+              温度·{temperature.level === "cold" ? "冰点" : temperature.level === "hot" ? "高潮" : "中性"}{" "}
+              {temperature.lag1_first_board_count}
+            </span>
+          )}
         </div>
         {stale && <span className="shrink-0 text-xs text-amber-500">数据过期</span>}
       </div>
       {leaders.length ? (
         <div className="grid gap-3 px-3 pb-4 sm:px-4 xl:grid-cols-2">
           {leaders.map((signal) => (
-            <LiveSignalCard key={signal.vt_symbol} signal={signal} stale={stale} paused={paused} />
+            <div key={signal.vt_symbol} className="min-w-0">
+              <LeaderScoreStrip signal={signal} />
+              <LiveSignalCard signal={signal} stale={stale} paused={paused} />
+            </div>
           ))}
         </div>
       ) : (
@@ -135,6 +160,56 @@ function LiveLeaderView() {
     </section>
   );
 }
+
+/** 潜力分条：白名单因子分位加权 + 封板质量 + 尾盘/撤单预警（不动共享卡片）。 */
+function LeaderScoreStrip({ signal }: { signal: LimitUpLiveSignal }) {
+  const score = signal.potential_score;
+  if (score == null) return null;
+  const percent = Math.round(score * 100);
+  const topFactors = Object.entries(signal.factor_percentiles ?? {})
+    .filter(([key]) => key !== "seal_to_turnover_ratio")
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 2)
+    .map(([key]) => FACTOR_LABELS[key] ?? key);
+  return (
+    <div className="mb-1 flex items-center gap-2 px-1 text-xs tabular-nums">
+      <span
+        className={cn(
+          "font-mono text-base font-bold",
+          percent >= 70 ? "text-primary" : percent >= 40 ? "text-foreground" : "text-muted-foreground",
+        )}
+      >
+        {percent}
+      </span>
+      <span className="text-muted-foreground">潜力分</span>
+      {topFactors.length > 0 && (
+        <span className="truncate text-muted-foreground">· {topFactors.join(" / ")}</span>
+      )}
+      <span className="ml-auto flex shrink-0 gap-1">
+        {signal.late_seal && (
+          <span className="rounded-full bg-amber-500/15 px-1.5 py-px text-[10px] font-medium text-amber-600">
+            尾盘板
+          </span>
+        )}
+        {signal.seal_weakening && (
+          <span className="rounded-full bg-red-500/15 px-1.5 py-px text-[10px] font-medium text-red-600">
+            撤单预警
+          </span>
+        )}
+      </span>
+    </div>
+  );
+}
+
+const FACTOR_LABELS: Record<string, string> = {
+  concept_max_return_20d: "板块动量",
+  volume_ratio_5_60: "量能",
+  drawdown_from_126d_high_pct: "半年位置",
+  position_126d: "区间位置",
+  prior_return_20d_pct: "20日动量",
+  prior_return_5d_pct: "5日动量",
+  seal_to_turnover_ratio: "封单比",
+};
 
 function BacktestLeaderView() {
   const leaderQuery = useLeaderBacktest();
@@ -310,6 +385,105 @@ function LedgerLeaderView() {
   );
 }
 
+/** 前向纸面台账（Phase 3 强制门）：周度胜率/封板率 vs 回测预期 + 最近信号。 */
+function ForwardLedgerView() {
+  const query = useQuery({
+    queryKey: ["firstBoardLeaderForwardLedger"],
+    queryFn: () => fetchFirstBoardLeaderForwardLedger(8),
+    staleTime: 300_000,
+  });
+  const report = query.data;
+  if (query.isLoading && !report) return <LoadingState rows={5} />;
+  if (query.isError || !report) return <EmptyState text="无法加载前向台账" />;
+  const reference = report.backtest_reference ?? {};
+  return (
+    <section aria-label="首板龙头前向台账">
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b bg-primary/5 px-3 py-2 text-xs text-muted-foreground sm:px-4">
+        <span className="eyebrow">前向 FORWARD</span>
+        <span>
+          纸面跟踪非实盘 · 每日 10:05/15:05 捕获推荐榜 · T+1 开盘结算（口径 = D+1开盘/D收盘-1 未扣费）
+        </span>
+        <span className="ml-auto font-mono">
+          回测预期：胜率 {fmtPct(reference.win_rate)} / 均笔 {fmtPct(reference.average_return_pct)}
+        </span>
+      </div>
+      {report.weeks.length ? (
+        <div className="overflow-x-auto px-3 py-3 sm:px-4">
+          <table className="w-full min-w-[560px] text-sm tabular-nums">
+            <thead>
+              <tr className="border-b text-left text-xs text-muted-foreground">
+                <th className="py-1.5 font-medium">周</th>
+                <th className="font-medium">信号</th>
+                <th className="font-medium">已结算</th>
+                <th className="font-medium">胜率</th>
+                <th className="font-medium">均D+1开盘</th>
+                <th className="font-medium">封板率</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.weeks.map((week) => (
+                <tr key={week.week} className="border-b last:border-0">
+                  <td className="py-1.5 font-medium">{week.week}</td>
+                  <td>{week.signals}</td>
+                  <td>{week.settled}</td>
+                  <td
+                    className={cn(
+                      "font-semibold",
+                      (week.win_rate ?? 0) >= (reference.win_rate ?? 0)
+                        ? "text-emerald-600"
+                        : "text-amber-600",
+                    )}
+                  >
+                    {fmtPct(week.win_rate)}
+                  </td>
+                  <td>{fmtPct(week.avg_d1_open_return_pct)}</td>
+                  <td>{fmtPct(week.seal_rate)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <EmptyState text="前向台账暂无数据（每日 10:05/15:05 自动捕获盘中推荐）" />
+      )}
+      {report.recent.length > 0 && (
+        <div className="px-3 pb-4 sm:px-4">
+          <div className="mb-1.5 text-xs font-semibold text-muted-foreground">最近信号</div>
+          <div className="grid gap-1.5">
+            {report.recent.slice(0, 20).map((row) => (
+              <div
+                key={`${row.trade_date}-${row.vt_symbol}`}
+                className="flex items-center gap-2 rounded border px-2.5 py-1.5 text-xs tabular-nums"
+              >
+                <span className="text-muted-foreground">{row.trade_date.slice(5)}</span>
+                <span className="font-medium">{row.name ?? row.vt_symbol}</span>
+                {row.potential_score != null && (
+                  <span className="font-mono text-primary">{Math.round(row.potential_score * 100)}</span>
+                )}
+                {row.late_seal && (
+                  <span className="rounded-full bg-amber-500/15 px-1.5 text-[10px] text-amber-600">尾盘</span>
+                )}
+                {row.seal_weakening && (
+                  <span className="rounded-full bg-red-500/15 px-1.5 text-[10px] text-red-600">撤单</span>
+                )}
+                <span className="ml-auto font-mono">
+                  {row.settled ? (
+                    <span className={row.is_win ? "text-emerald-600" : "text-red-600"}>
+                      {fmtPct(row.d1_open_return_pct)}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">待结算</span>
+                  )}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function GuideView() {
   return (
     <section aria-label="首板龙头规则说明" className="px-3 py-4 text-sm sm:px-4">
@@ -320,12 +494,12 @@ function GuideView() {
           这是「跟踪强度」，不是「预测龙头」（首板当天分不出龙头）。
         </p>
         <div>
-          <div className="mb-1 font-semibold">实时推荐排序</div>
+          <div className="mb-1 font-semibold">实时推荐排序（潜力分 v2）</div>
           <ul className="ml-4 list-disc text-muted-foreground">
-            <li>涨幅（change_pct）高 → 涨得猛</li>
-            <li>距涨停（distance_to_limit_pct）低 → 快封板</li>
-            <li>概念龙排名（concept_leader_rank）靠前 → 板块龙头</li>
-            <li>封单（seal_amount）大 → 封得实</li>
+            <li>潜力分 = Phase 0 稳定性门白名单因子的当日横截面分位加权：板块20日动量 0.30 / 量能 0.15 / 半年位置族合计 0.40（回撤+区间位置+20日/5日动量）</li>
+            <li>封板质量 0.15：实时封单比分位（封板瞬间可观测，非未来函数）；封单保持率 &lt; 0.7 触发撤单预警并扣分</li>
+            <li>尾盘降权：14:00 后封板标记「尾盘板」且潜力分减半（历史 D+1 溢价最差）</li>
+            <li>市场温度徽章：昨日全市场首板数（≤32 冰点 / ≥69 高潮）——仅展示，未过稳定性门不做硬门</li>
           </ul>
         </div>
         <div>
@@ -334,7 +508,7 @@ function GuideView() {
             <li>涨停价打板：从事后涨停池选股、假设涨停价全成交——是「能买到」的理想上界，实盘封单厚时买不到</li>
             <li>分钟级（无未来函数）：universe=当日有分钟数据的全市场主板非ST股，9:31-9:40 内 surge≥2% 或累计≥7% 按触发 bar close 买入</li>
             <li>封板/一字用价格可观测判断（触发时 bar close≥涨停价或开盘≥涨停价则跳过），不用事后涨停数据</li>
-            <li>4 个 D-1 因子：流通市值、前5日涨幅、前3日上涨天数、前5日量比；触发群体月度校准（标签=D+1 净赢）</li>
+            <li>v4-B 配置：白名单 6 因子 + 深跌排除（20日跌≤-8.5% 或距半年高点≤-21% 排除，板块20日≥+16.5% 豁免）——A/B 两档口径唯一都赢 v3 的版本</li>
             <li>D+1 开盘高开就拿、低开/平盘就走、涨停减半留</li>
           </ul>
         </div>

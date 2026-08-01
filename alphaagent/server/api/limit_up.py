@@ -132,6 +132,25 @@ def first_board_leader_live():
         return _service_error(exc)
 
 
+@router.get("/first-board-leader/forward-ledger", response_model=None)
+def first_board_leader_forward_ledger(weeks: int = 8):
+    """首板龙头前向纸面台账周报（Phase 3 强制门，纸面跟踪非实盘）。"""
+
+    if not is_database_configured():
+        return JSONResponse(
+            status_code=503,
+            content=fail("DATABASE_UNAVAILABLE", "数据库未配置，无法读取前向台账"),
+        )
+    try:
+        from alphaagent.server.services.limit_up.leader_forward_ledger import (
+            build_forward_ledger_report,
+        )
+
+        return ok(build_forward_ledger_report(weeks=weeks))
+    except Exception as exc:  # noqa: BLE001
+        return _service_error(exc)
+
+
 @router.get("/first-board-leader/backtest", response_model=None)
 def first_board_leader_backtest():
     """返回首板龙头历史回测结果（回测模拟，非实盘，读库）。"""

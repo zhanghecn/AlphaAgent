@@ -1455,6 +1455,89 @@ Index(
 )
 
 
+# 涨停/炸板池盘中快照（append-only）：东财池 payload 每次变化追加一批，
+# 保存盘中实时的封板资金/成交额/炸板次数，供「实时封单比」历史回测积累。
+# stock_events 只保留每日终态（delete+insert），盘中演化只能靠本表还原。
+limit_up_pool_snapshots = Table(
+    "limit_up_pool_snapshots",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("trade_date", Date, nullable=False),
+    Column("captured_at", DateTime(timezone=True), nullable=False),
+    Column("source_updated_at", DateTime(timezone=True), nullable=True),
+    Column("pool_type", String(16), nullable=False),
+    Column("vt_symbol", String(32), nullable=False),
+    Column("name", String(64), nullable=True),
+    Column("close_price", Float, nullable=True),
+    Column("change_pct", Float, nullable=True),
+    Column("limit_up_price", Float, nullable=True),
+    Column("seal_amount", Float, nullable=True),
+    Column("turnover", Float, nullable=True),
+    Column("turnover_rate", Float, nullable=True),
+    Column("volume_ratio", Float, nullable=True),
+    Column("open_times", Integer, nullable=True),
+    Column("first_limit_time", String(16), nullable=True),
+    Column("last_limit_time", String(16), nullable=True),
+    Column("limit_times", Integer, nullable=True),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+Index(
+    "ix_limit_up_pool_snapshots_date_time",
+    limit_up_pool_snapshots.c.trade_date,
+    limit_up_pool_snapshots.c.captured_at,
+)
+Index(
+    "ix_limit_up_pool_snapshots_symbol_date",
+    limit_up_pool_snapshots.c.vt_symbol,
+    limit_up_pool_snapshots.c.trade_date,
+)
+
+
+# 首板龙头前向纸面台账：盘中定时快照推荐榜（含实时封单比），T+1 结算。
+# 验收口径与回测一致（D+1 开盘 / D 收盘 - 1），用于 Phase 3 前向强制门。
+leader_forward_signals = Table(
+    "leader_forward_signals",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("trade_date", Date, nullable=False),
+    Column("vt_symbol", String(32), nullable=False),
+    Column("name", String(64), nullable=True),
+    Column("first_captured_at", DateTime(timezone=True), nullable=False),
+    Column("last_captured_at", DateTime(timezone=True), nullable=False),
+    Column("capture_count", Integer, nullable=False, server_default="1"),
+    Column("potential_score", Float, nullable=True),
+    Column("factor_percentiles", JSONB, nullable=False, server_default="{}"),
+    Column("change_pct", Float, nullable=True),
+    Column("last_price", Float, nullable=True),
+    Column("limit_price", Float, nullable=True),
+    Column("state", String(24), nullable=True),
+    Column("first_limit_time", String(16), nullable=True),
+    Column("open_times", Integer, nullable=True),
+    Column("seal_to_turnover_ratio", Float, nullable=True),
+    Column("seal_amount_retention_ratio", Float, nullable=True),
+    Column("seal_weakening", Boolean, nullable=True),
+    Column("late_seal", Boolean, nullable=True),
+    Column("board_status", String(16), nullable=True),
+    # T+1 结算字段（D 收盘 / D+1 开盘收盘，settle job 回填）
+    Column("d_close", Float, nullable=True),
+    Column("d1_trade_date", Date, nullable=True),
+    Column("d1_open", Float, nullable=True),
+    Column("d1_close", Float, nullable=True),
+    Column("d1_open_return_pct", Float, nullable=True),
+    Column("d1_close_return_pct", Float, nullable=True),
+    Column("is_win", Boolean, nullable=True),
+    Column("settled_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("trade_date", "vt_symbol", name="uq_leader_forward_signal"),
+)
+Index(
+    "ix_leader_forward_signals_settle",
+    leader_forward_signals.c.settled_at,
+    leader_forward_signals.c.trade_date,
+)
+
+
 limit_up_radar_frames = Table(
     "limit_up_radar_frames",
     metadata,

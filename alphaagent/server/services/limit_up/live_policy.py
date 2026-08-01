@@ -816,6 +816,14 @@ def _signal(
         "sector_route": _selected_sector_route(execution_checks),
         "turnover_rate": _number(candidate.get("turnover_rate")),
         "volume_ratio": _number(candidate.get("volume_ratio")),
+        "prior_return_5d_pct": _number(candidate.get("prior_return_5d_pct")),
+        "prior_return_20d_pct": _number(candidate.get("prior_return_20d_pct")),
+        "drawdown_from_126d_high_pct": _number(
+            candidate.get("drawdown_from_126d_high_pct")
+        ),
+        "position_126d": _number(candidate.get("position_126d")),
+        "volume_ratio_5_60": _number(candidate.get("volume_ratio_5_60")),
+        "concept_max_return_20d": _number(candidate.get("concept_max_return_20d")),
         "seal_amount": _number(candidate.get("seal_amount")),
         "seal_to_turnover_ratio": _number(candidate.get("seal_to_turnover_ratio")),
         "seal_amount_retention_ratio": _number(

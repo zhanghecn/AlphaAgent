@@ -40,12 +40,16 @@ def extract_first_board_samples(
     calendar: Sequence[str],
     *,
     min_consecutive_boards: int = DEFAULT_MIN_CONSECUTIVE_BOARDS,
+    board_gap_mode: str = "strict",
 ) -> list[dict[str, object]]:
     """Identify first-board samples and label each by its segment's eventual peak.
 
     只用 ``is_sealed=True`` 的涨停事件，按 ``vt_symbol`` 分组、``trade_date``
-    排序；以全市场交易日历 ``calendar`` 判断相邻性，``limit_times`` 严格递增
-    （1,2,3,...）且交易日相邻才算同一段连板。每段取 ``limit_times==1`` 的首板，
+    排序。``board_gap_mode="strict"``：以全市场交易日历 ``calendar`` 判断相邻性，
+    ``limit_times`` 严格递增（1,2,3,...）且交易日相邻才算同一段连板。
+    ``board_gap_mode="wave"``：按 provider 连板数语义切浪——``limit_times`` 递增
+    或持平（>1）即同一浪（允许断板日），``limit_times==1`` 或下降开新浪；
+    容纳「N 天 M 板」型断板续板妖股。每段取 ``limit_times==1`` 的首板，
     标注 ``eventual_peak``（该段最大连板数）与 ``is_leader``
     （``eventual_peak >= min_consecutive_boards``）。段内无首板（首板数据缺失）
     的整段跳过。
@@ -64,7 +68,7 @@ def extract_first_board_samples(
     samples: list[dict[str, object]] = []
     for symbol in sorted(by_symbol):
         rows = sorted(by_symbol[symbol], key=lambda row: str(row.get("trade_date") or ""))
-        for segment in _iter_board_segments(rows, day_number):
+        for segment in _iter_board_segments(rows, day_number, board_gap_mode=board_gap_mode):
             first_board = next(
                 (row for row in segment if _integer(row.get("limit_times")) == 1),
                 None,
@@ -83,11 +87,16 @@ def extract_first_board_samples(
 def _iter_board_segments(
     rows: Sequence[Mapping[str, object]],
     day_number: Mapping[str, int],
+    *,
+    board_gap_mode: str = "strict",
 ) -> list[list[Mapping[str, object]]]:
     """Split a symbol's sealed events into consecutive-board segments.
 
-    仅当交易日历上真相邻（``day_number`` 差 1）且 ``limit_times`` 严格递增
-    （前板 +1）才延续当前段，否则断开新开一段。返回有序的段列表。
+    strict：仅当交易日历上真相邻（``day_number`` 差 1）且 ``limit_times`` 严格
+    递增（前板 +1）才延续当前段，否则断开新开一段。
+    wave：``limit_times`` 递增或持平（且 >1）即延续（允许断板日），
+    ``limit_times==1`` 或下降开新段（provider 重新计板 = 新浪）。
+    返回有序的段列表。
     """
 
     segments: list[list[Mapping[str, object]]] = []
@@ -97,6 +106,16 @@ def _iter_board_segments(
         if current:
             previous = current[-1]
             previous_date = str(previous.get("trade_date") or "")
+            if board_gap_mode == "wave":
+                limit_times = _integer(row.get("limit_times"))
+                previous_limit_times = _integer(previous.get("limit_times"))
+                # 递增/持平（>1）= 同一浪（允许断板日）；重新计 1 板或下降 = 新浪
+                if limit_times != 1 and limit_times >= previous_limit_times:
+                    current.append(row)
+                    continue
+                segments.append(current)
+                current = [row]
+                continue
             adjacent = day_number[trade_date] == day_number[previous_date] + 1
             continuous = _integer(row.get("limit_times")) == _integer(
                 previous.get("limit_times")

@@ -165,6 +165,9 @@ def test_default_batch_schedules_defined():
         "limit_up_plan_1505",
         "eod_1900",
         "eod_finalize_2130",
+        "eod_backtest_2200",
+        "leader_forward_capture_1005",
+        "leader_forward_capture_1505",
     }
 
 
@@ -854,6 +857,7 @@ def test_eod_schedule_runs_market_data_and_limit_up_planning():
         "sync_stock_financial_quarterly",
         "sync_stock_financial_indicators",
         "sync_stock_business_segments_history",
+        svc.LEADER_FORWARD_SETTLE_BATCH_JOB_ID,
         svc.LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID,
         svc.LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID,
     ]

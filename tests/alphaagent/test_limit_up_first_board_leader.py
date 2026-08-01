@@ -71,3 +71,92 @@ def test_preserves_snapshot_meta() -> None:
     assert result["session_stage"] == "morning"
     assert result["mode"] == "live_snapshot"
     assert result["data_quality"] == {"is_stale": False}
+
+
+# ── Phase 2：潜力分 v2 + 封板质量 + 尾盘降权 + 温度指示 ────────────────
+
+
+def _rich_signal(vt_symbol, **factors):
+    base = {
+        "vt_symbol": vt_symbol,
+        "board_lane": "first_board",
+        "change_pct": 5.0,
+        "distance_to_limit_pct": 3.0,
+        "concept_leader_rank": 2,
+        "seal_amount": 1.0e8,
+    }
+    base.update(factors)
+    return base
+
+
+def test_potential_score_ranks_whitelist_factors_first() -> None:
+    # A 涨幅低但白名单因子全面更强 → 潜力分优先排前
+    snapshot = _snapshot([
+        _rich_signal("A", change_pct=4.0, concept_max_return_20d=12.0,
+                     volume_ratio_5_60=2.5, drawdown_from_126d_high_pct=-5.0,
+                     position_126d=0.9, prior_return_20d_pct=18.0,
+                     prior_return_5d_pct=6.0),
+        _rich_signal("B", change_pct=9.0, concept_max_return_20d=-3.0,
+                     volume_ratio_5_60=0.8, drawdown_from_126d_high_pct=-35.0,
+                     position_126d=0.1, prior_return_20d_pct=-12.0,
+                     prior_return_5d_pct=-4.0),
+    ])
+    result = service.select_first_board_leaders(snapshot)
+    leaders = result["leaders"]
+    assert leaders[0]["vt_symbol"] == "A"
+    assert leaders[0]["potential_score"] > leaders[1]["potential_score"]
+    assert leaders[0]["factor_percentiles"]["concept_max_return_20d"] == 1.0
+
+
+def test_potential_score_missing_factors_redistribute_weights() -> None:
+    # 只有部分因子有值 → 权重按可用重分配，不因缺字段归零
+    snapshot = _snapshot([
+        _rich_signal("A", concept_max_return_20d=10.0),
+        _rich_signal("B", concept_max_return_20d=5.0),
+    ])
+    result = service.select_first_board_leaders(snapshot)
+    a = result["leaders"][0]
+    assert a["vt_symbol"] == "A"
+    assert a["potential_score"] == 1.0  # 唯一可用因子分位 1 → 满分
+    assert set(a["factor_percentiles"]) == {"concept_max_return_20d"}
+
+
+def test_seal_quality_boost_and_retention_warning() -> None:
+    snapshot = _snapshot([
+        _rich_signal("A", concept_max_return_20d=8.0,
+                     seal_to_turnover_ratio=1.5, seal_amount_retention_ratio=1.1),
+        _rich_signal("B", concept_max_return_20d=8.0,
+                     seal_to_turnover_ratio=0.1, seal_amount_retention_ratio=0.5),
+    ])
+    result = service.select_first_board_leaders(snapshot)
+    leaders = {leader["vt_symbol"]: leader for leader in result["leaders"]}
+    assert leaders["A"]["potential_score"] > leaders["B"]["potential_score"]
+    assert leaders["B"]["seal_weakening"] is True
+    assert leaders["A"]["seal_weakening"] is False
+
+
+def test_late_seal_downweights_score() -> None:
+    snapshot = _snapshot([
+        _rich_signal("A", concept_max_return_20d=10.0, first_limit_time="09:45:00"),
+        _rich_signal("B", concept_max_return_20d=10.0, first_limit_time="14:35:00"),
+    ])
+    result = service.select_first_board_leaders(snapshot)
+    leaders = {leader["vt_symbol"]: leader for leader in result["leaders"]}
+    assert leaders["B"]["late_seal"] is True
+    assert leaders["A"]["late_seal"] is False
+    assert leaders["A"]["potential_score"] > leaders["B"]["potential_score"]
+
+
+def test_market_temperature_levels(monkeypatch) -> None:
+    monkeypatch.setattr(service, "_load_market_temperature", lambda today: {
+        "trade_date": today.isoformat(), "available": True,
+        "lag1_trade_date": "2026-07-29", "lag1_first_board_count": 25, "level": "cold",
+    })
+    service._temperature_cache["at"] = None  # 清缓存
+    result = service.select_first_board_leaders(_snapshot([]))
+    temp = result["market_temperature"]
+    assert temp["available"] is True
+    assert temp["level"] == "cold"
+    assert temp["lag1_first_board_count"] == 25
+    # 分档边界
+    assert service.TEMP_COLD_MAX == 32 and service.TEMP_HOT_MIN == 69

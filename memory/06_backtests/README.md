@@ -115,6 +115,37 @@
   尾盘 `3.14%`），封单/成交额比 AUC `0.64` 为最强单因子：
   `limit_up_consecutive_leader_first_board_factor_20260730.md`、
   `limit_up_consecutive_leader_first_board_factor_20260730.json`。
+- 首板深度因子挖掘 v2（前3天/前10天/近半年/板块共振/时间段×D+1，
+  `2025-06-27..2026-07-31`，11223 个首板、578 个 ≥3 板正样本）：近半年
+  「强者恒强」（距半年高点 ≤13% 成龙率 6.15% vs 深跌 2.83%）、市场温度
+  `market_first_board_count_d` 为隐藏主因子（冷日 6.73% vs 涨停潮 3.56%）、
+  板块 20 日动量单调有效、尾盘板封得住但没溢价（D+1 `+0.66%`/胜率 53.7%）、
+  20cm 票几乎不成龙；含先验组合（强势位+早封+主板 7.94%）与解读注记：
+  `limit_up_leader_first_board_deep_factor_20260801.md`、
+  `limit_up_leader_first_board_deep_factor_20260801.json`。
+- 首板深度因子挖掘 **wave 切浪修正版**（provider 连板数允许断板日，正样本
+  578→968）：strict 切分曾把锋龙股份 17 板等「N 天 M 板」妖股切碎漏标；
+  修正后 `drawdown_from_126d_high_pct` 跃居第 1（AUC `0.5934`）、
+  `return_20d_pct` 跃居第 3（`0.5862`）、组合 full_setup 成龙率 17.60%；
+  附 12 只顶级妖股首板画像表（11/12 高位区启动、11/12 中低温日启动，
+  开创型妖王先于板块是板块动量因子的例外）：
+  `limit_up_leader_first_board_deep_factor_wave_20260801.md`、
+  `limit_up_leader_first_board_deep_factor_wave_20260801.json`。
+- Phase 0 因子时间稳定性门（train 2025-06..2026-04 / test 2026-05..07）：
+  **白名单 6 因子**（concept_max_return_20d test 0.6151 最强、drawdown_126d、
+  return_20d、volume_ratio_5_60、prior_return_5d、position_126d）；
+  **滞后温度全部未过门**（逐月一致性 0.61-0.69 < 0.70 → 高潮日停手不做硬门）、
+  市值双目标翻转淘汰；组合 holdout 全存活（full_setup test 15.22% = 3.4×基线）；
+  strength 族合计权重上限 0.40：
+  `limit_up_leader_first_board_factor_stability_20260801.md`、
+  `limit_up_leader_first_board_factor_stability_20260801.json`。
+- Phase 1 v4 分钟级回测 A/B 裁决（同回测器同 universe，≥600 与 ≥300 两档）：
+  **v4-B（白名单+深跌排除）两档唯一都赢 v3**（≥600 +5.81 vs +5.35；
+  ≥300 +51.4 vs +40.0）→ 成为生产配置（每晚 22:00 `eod_backtest_2200` 写库）；
+  低位滤被两档一致否定（v4-A 两档最差）；含逐月分布与诚实边界：
+  `limit_up_leader_minute_backtest_v4ab_20260801.md`，
+  原始跑数 `leader_minute_backtest_ab_*_20260801.json`（6 个）+
+  `leader_minute_backtest_v4b_5m_20260801.json`（5m 变体负面结论 -10.4%/PF 0.84，不采用）。
 - 板前正式触板联合目标、独立消融、自然 v2 审计和可靠产品边界：
   `limit_up_formal_touch_readiness_20260728.md`、
   `limit_up_formal_touch_readiness_20260728.json`。

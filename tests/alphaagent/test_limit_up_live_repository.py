@@ -283,3 +283,53 @@ def test_industry_turnover_ratio_uses_d1_against_five_prior_trade_days() -> None
         rows,
         date(2026, 7, 8),
     ) == {"industry-a": 1.2}
+
+
+# ── Phase 2：v4 白名单长窗因子 + 板块 20 日动量 ────────────────────────
+
+
+def test_prior_price_context_includes_long_window_features() -> None:
+    from alphaagent.server.services.limit_up import live_repository
+
+    rows = []
+    closes = [10.0] * 125 + [13.0, 11.0]  # 窗口内高点 13 → 现值 11
+    for index, close in enumerate(closes):
+        rows.append(
+            {
+                "trade_date": f"2026-01-{(index % 28) + 1:02d}",
+                "close_price": close,
+                "high_price": close,
+                "low_price": close,
+                "open_price": close,
+                "change_pct": 0.0,
+                "turnover": 1.0e8,
+                "turnover_rate": 5.0,
+            }
+        )
+    context = live_repository._prior_price_context(rows)
+    assert context["drawdown_from_126d_high_pct"] is not None
+    assert context["position_126d"] is not None
+    assert context["volume_ratio_5_60"] is not None
+    # 空数据默认 None
+    empty = live_repository._prior_price_context([])
+    assert empty["drawdown_from_126d_high_pct"] is None
+    assert empty["position_126d"] is None
+    assert empty["volume_ratio_5_60"] is None
+
+
+def test_concept_max_r20_picks_max_concept_only() -> None:
+    from alphaagent.server.services.limit_up import live_repository
+
+    memberships = [
+        {"sector_id": "BK1", "sector_type": "concept"},
+        {"sector_id": "BK2", "sector_type": "concept"},
+        {"sector_id": "BK3", "sector_type": "industry"},  # 行业不算
+    ]
+    scores = {
+        "BK1": {"return_pct": 5.0},
+        "BK2": {"return_pct": 12.5},
+        "BK3": {"return_pct": 99.0},
+    }
+    assert live_repository._concept_max_r20(memberships, scores) == 12.5
+    assert live_repository._concept_max_r20([], scores) is None
+    assert live_repository._concept_max_r20(memberships, {}) is None

@@ -127,10 +127,12 @@ def load_window_minute_bars(
     *,
     start_time: str = "09:25:00",
     end_time: str = "09:41:00",
+    interval: str = "1m",
 ) -> dict[str, list[dict[str, object]]]:
-    """加载某交易日窗口（默认 9:25-9:41）的 1 分钟 bar，按票分组。
+    """加载某交易日窗口（默认 9:25-9:41）的分钟 bar，按票分组。
 
     返回 ``{vt_symbol: [bar, ...]}``，bar_time 为 ``HH:MM:SS``，按时间升序。
+    ``interval`` 支持 1m/5m（stock_minute_bars 的 interval 口径）。
     """
 
     start_dt = datetime.combine(trade_date, time.fromisoformat(start_time))
@@ -148,7 +150,7 @@ def load_window_minute_bars(
         )
         .where(
             schema.stock_minute_bars.c.trade_date == trade_date,
-            schema.stock_minute_bars.c.interval == "1m",
+            schema.stock_minute_bars.c.interval == interval,
             schema.stock_minute_bars.c.bar_time >= start_dt,
             schema.stock_minute_bars.c.bar_time <= end_dt,
         )
@@ -177,6 +179,37 @@ def load_window_minute_bars(
                 }
             )
     return result
+
+
+def load_sector_daily_bars(start: date, end: date) -> list[dict[str, object]]:
+    """板块指数日线（板块共振研究用，只读）。"""
+
+    statement = select(
+        schema.sector_daily_bars.c.sector_id,
+        schema.sector_daily_bars.c.trade_date,
+        schema.sector_daily_bars.c.close_price,
+        schema.sector_daily_bars.c.change_pct,
+    ).where(
+        schema.sector_daily_bars.c.trade_date >= start,
+        schema.sector_daily_bars.c.trade_date <= end,
+    )
+    with session_scope() as session:
+        rows = session.execute(statement).mappings().all()
+    return [_plain_row(row) for row in rows]
+
+
+def load_sector_memberships_all() -> list[dict[str, object]]:
+    """全量个股-板块归属（当前快照，板块共振研究用，只读）。"""
+
+    with session_scope() as session:
+        rows = session.execute(
+            select(
+                schema.stock_sector_memberships.c.vt_symbol,
+                schema.stock_sector_memberships.c.sector_id,
+                schema.stock_sector_memberships.c.sector_type,
+            )
+        ).mappings().all()
+    return [dict(row) for row in rows]
 
 
 def load_limit_up_dataset(

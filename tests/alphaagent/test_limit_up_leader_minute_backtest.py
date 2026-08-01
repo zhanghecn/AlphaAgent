@@ -295,3 +295,105 @@ def test_simulate_skips_high_position() -> None:
         min_day_coverage=1,
     )
     assert result["closed_trades"] == []
+
+
+# ── v4：位置过滤 A/B + 滞后温度门 + 板块动量查找 ──────────────────────
+
+
+def _long_bars(closes: list[float]) -> list[dict]:
+    dates = [(date(2026, 1, 1) + timedelta(days=i)).isoformat() for i in range(len(closes))]
+    rows = []
+    prev = None
+    for td, close in zip(dates, closes, strict=True):
+        change = round((close / prev - 1) * 100, 4) if prev else 0.0
+        rows.append(_bar(SYMBOL, td, close, close, change_pct=change))
+        prev = close
+    return rows
+
+
+def test_position_filter_low_position_mode() -> None:
+    bars = _long_bars([9.0] * 21 + [10.5])  # return_20d = 16.7% > 10%
+    assert engine._position_filter_pass(bars, "low_position", 10.0, None) is False
+    assert engine._position_filter_pass(bars, "none", 10.0, None) is True
+
+
+def test_position_filter_deep_drop_excludes_return_20d() -> None:
+    bars = _long_bars([10.0] * 21 + [9.0])  # return_20d = -10% ≤ -8.5% → 深跌
+    assert engine._position_filter_pass(bars, "deep_drop_exclusion", 10.0, None) is False
+    # 板块爆发豁免（concept_r20 ≥ 16.5）
+    assert engine._position_filter_pass(bars, "deep_drop_exclusion", 10.0, 20.0) is True
+    # 温和回调不排除
+    bars_ok = _long_bars([10.0] * 21 + [9.5])  # return_20d = -5%
+    assert engine._position_filter_pass(bars_ok, "deep_drop_exclusion", 10.0, None) is True
+
+
+def test_position_filter_deep_drop_excludes_drawdown_126d() -> None:
+    # 126 窗口内高点 13.0 → 现值 10.0，回撤 -23% ≤ -21% → 深跌（13.0 须在窗口内）
+    closes = [9.0, 13.0] + [10.0] * 125
+    bars = _long_bars(closes)
+    assert engine._position_filter_pass(bars, "deep_drop_exclusion", 10.0, None) is False
+    assert engine._position_filter_pass(bars, "deep_drop_exclusion", 10.0, 18.0) is True
+
+
+def test_build_first_board_counts_symbol_aware_ratio() -> None:
+    main = [
+        _bar("600001.SSE", "2026-07-27", 10.0, 10.0),
+        _bar("600001.SSE", "2026-07-28", 10.0, 11.0),  # +10% 主板涨停 → 首板
+        _bar("600001.SSE", "2026-07-29", 11.0, 12.1),  # 连板非首板
+    ]
+    chinext = [
+        _bar("300001.SZSE", "2026-07-27", 10.0, 10.0),
+        _bar("300001.SZSE", "2026-07-28", 10.0, 11.5),  # +15% 创业板未涨停 → 不算
+    ]
+    counts = engine.build_first_board_counts({"600001.SSE": main, "300001.SZSE": chinext})
+    assert counts.get("2026-07-28") == 1
+    assert "2026-07-29" not in counts
+
+
+def test_build_sector_r20_lookup_uses_prior_closes() -> None:
+    memberships = [
+        {"vt_symbol": SYMBOL, "sector_id": "BK0001", "sector_type": "concept"}
+    ]
+    sector_bars = []
+    closes = [100.0] * 20 + [110.0, 110.0]  # 22 根；查 07-22 时用其前 21 根收盘
+    dates = [(date(2026, 7, 1) + timedelta(days=i)).isoformat() for i in range(22)]
+    for td, close in zip(dates, closes):
+        sector_bars.append(
+            {"sector_id": "BK0001", "trade_date": td, "close_price": close, "change_pct": 0.0}
+        )
+    lookup = engine.build_sector_r20_lookup(memberships, sector_bars)
+    # 查询 D 日 = 2026-07-22 → 用严格 D 前收盘：110/100-1 = 10%
+    assert lookup(SYMBOL, "2026-07-22") == 10.0
+    # 查询首日（无历史收盘）→ None
+    assert lookup(SYMBOL, "2026-07-01") is None
+    # 非成员票 → None
+    assert lookup("600099.SSE", "2026-07-22") is None
+
+
+def test_simulate_temperature_gate_skips_hot_day() -> None:
+    minute_map = {date(2026, 7, 28): {SYMBOL: _window([("09:31:00", 10.1), ("09:32:00", 10.4)])}}
+    result = _run_temperature(minute_map, lag1_counts={"2026-07-27": 80}, threshold=69.0)
+    assert result["closed_trades"] == []
+    assert result["coverage_stats"]["days_skipped_hot_market"] == 1
+
+
+def test_simulate_temperature_gate_allows_cold_day() -> None:
+    minute_map = {date(2026, 7, 28): {SYMBOL: _window([("09:31:00", 10.1), ("09:32:00", 10.4)])}}
+    result = _run_temperature(minute_map, lag1_counts={"2026-07-27": 30}, threshold=69.0)
+    assert len(result["closed_trades"]) == 1
+    assert result["coverage_stats"]["days_skipped_hot_market"] == 0
+
+
+def _run_temperature(minute_map, lag1_counts, threshold):
+    bars_by_symbol, daily_index, names = _world()
+    return engine.simulate_allmarket_minute(
+        bars_by_symbol=bars_by_symbol,
+        daily_index=daily_index,
+        calendar=CALENDAR,
+        names=names,
+        minute_loader=lambda d: minute_map.get(d, {}),
+        config=CashBacktestConfig(max_positions=3),
+        min_day_coverage=1,
+        max_lag1_first_board_count=threshold,
+        lag1_first_board_counts=lag1_counts,
+    )

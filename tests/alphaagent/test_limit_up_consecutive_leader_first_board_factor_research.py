@@ -495,3 +495,74 @@ def test_positive_rate_rendered_as_percentage() -> None:
     assert "5.00%" in markdown  # 0.05 -> 5.00%
     assert "20.00%" in markdown  # 0.2 -> 20.00%
     assert "0.05%" not in markdown  # 不应把小数比例当百分比
+
+
+# ── wave 切浪模式（允许断板日的连板浪）─────────────────────────────────
+
+
+def test_wave_mode_keeps_pause_days_in_same_wave() -> None:
+    # 锋龙股份型：1 板后歇 3 个交易日，provider 继续计 2/3 板 → 同一浪
+    events = [
+        _event("600001.SSE", "2025-07-10", 1),
+        _event("600001.SSE", "2025-07-15", 2),
+        _event("600001.SSE", "2025-07-16", 3),
+    ]
+    calendar = _calendar(
+        "2025-07-10", "2025-07-11", "2025-07-14", "2025-07-15", "2025-07-16"
+    )
+    samples = study.extract_first_board_samples(
+        events, calendar, min_consecutive_boards=3, board_gap_mode="wave"
+    )
+    assert len(samples) == 1
+    assert samples[0]["trade_date"] == "2025-07-10"
+    assert samples[0]["eventual_peak"] == 3
+    assert samples[0]["is_leader"] is True
+    # strict 模式会在断板日切碎：1 板孤段 + 无首板的 2-3 板段
+    strict_samples = study.extract_first_board_samples(
+        events, calendar, min_consecutive_boards=3, board_gap_mode="strict"
+    )
+    assert len(strict_samples) == 1
+    assert strict_samples[0]["eventual_peak"] == 1
+
+
+def test_wave_mode_limit_reset_starts_new_wave() -> None:
+    # provider 重新计 1 板 = 上一浪结束、新一首板
+    events = [
+        _event("600001.SSE", "2025-07-10", 1),
+        _event("600001.SSE", "2025-07-11", 2),
+        _event("600001.SSE", "2025-07-16", 1),
+        _event("600001.SSE", "2025-07-17", 2),
+        _event("600001.SSE", "2025-07-18", 3),
+    ]
+    calendar = _calendar(
+        "2025-07-10", "2025-07-11", "2025-07-14", "2025-07-15",
+        "2025-07-16", "2025-07-17", "2025-07-18",
+    )
+    samples = study.extract_first_board_samples(
+        events, calendar, min_consecutive_boards=3, board_gap_mode="wave"
+    )
+    assert len(samples) == 2
+    assert samples[0]["eventual_peak"] == 2
+    assert samples[0]["is_leader"] is False
+    assert samples[1]["trade_date"] == "2025-07-16"
+    assert samples[1]["eventual_peak"] == 3
+    assert samples[1]["is_leader"] is True
+
+
+def test_wave_mode_flat_limit_times_stays_in_wave() -> None:
+    # provider 连板数持平（17,17）仍属同一浪
+    events = [
+        _event("600001.SSE", "2025-07-10", 1),
+        _event("600001.SSE", "2025-07-11", 2),
+        _event("600001.SSE", "2025-07-14", 3),
+        _event("600001.SSE", "2025-07-15", 3),
+    ]
+    calendar = _calendar(
+        "2025-07-10", "2025-07-11", "2025-07-14", "2025-07-15"
+    )
+    samples = study.extract_first_board_samples(
+        events, calendar, min_consecutive_boards=3, board_gap_mode="wave"
+    )
+    assert len(samples) == 1
+    assert samples[0]["eventual_peak"] == 3
+    assert samples[0]["is_leader"] is True

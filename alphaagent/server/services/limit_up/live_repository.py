@@ -16,6 +16,9 @@ from alphaagent.market.cache import TTLCache
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import session_scope
 from alphaagent.server.services.limit_up.features import market_snapshot_for_trade
+from alphaagent.server.services.limit_up.leader_first_board_deep_factor_research import (
+    _long_window_features,
+)
 from alphaagent.server.services.limit_up.lane_repository import (
     build_financial_index,
     financial_risk_as_of,
@@ -632,6 +635,10 @@ def _load_prior_symbol_context(
         prior_board = prior_events.get((symbol, previous_date)) if previous_date else None
         by_symbol[symbol] = {
             **price_context,
+            "concept_max_return_20d": _concept_max_r20(
+                memberships_by_symbol.get(symbol, []),
+                score_by_sector,
+            ),
             "prior_board": _prior_board_context(prior_board, price_context),
             "financial_risk": financial_risk_as_of(
                 financial_index,
@@ -984,6 +991,24 @@ def _latest_by_key(
     return result
 
 
+def _concept_max_r20(
+    memberships: list[Mapping[str, object]],
+    score_by_sector: Mapping[str, Mapping[str, object]],
+) -> float | None:
+    """所属概念板块 20 日动量最大值（sector_period_scores 最新 ≤D-1 行，无未来函数）。"""
+
+    values = [
+        value
+        for item in memberships
+        if str(item.get("sector_type") or "") == "concept"
+        for score in [score_by_sector.get(str(item.get("sector_id") or "")) or {}]
+        if isinstance(score, Mapping)
+        for value in [_number(score.get("return_pct"))]
+        if value is not None
+    ]
+    return round(max(values), 4) if values else None
+
+
 def _best_membership(
     rows: list[Mapping[str, object]],
     scores: Mapping[str, Mapping[str, object]],
@@ -1062,6 +1087,10 @@ def _prior_price_context(rows: list[Mapping[str, object]]) -> dict[str, object]:
             "trade_days_since_prior_limit": None,
             "pullback_from_prior_limit_pct": None,
             "prior_position_120": None,
+            # v4 白名单长窗因子（无历史数据时 None）
+            "drawdown_from_126d_high_pct": None,
+            "position_126d": None,
+            "volume_ratio_5_60": None,
         }
     ordered = sorted(rows, key=lambda row: str(row.get("trade_date") or ""))
     latest = ordered[-1]
@@ -1164,6 +1193,8 @@ def _prior_price_context(rows: list[Mapping[str, object]]) -> dict[str, object]:
             else None
         ),
         "prior_position_120": _rounded(position),
+        # v4 白名单长窗因子（D-1 口径，复用深度研究实现；rows 窗口约 150 交易日）
+        **_long_window_features(ordered),
     }
 
 

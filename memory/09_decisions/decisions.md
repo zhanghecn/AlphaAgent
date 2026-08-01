@@ -224,6 +224,13 @@ git diff --check
   自然前向是否恢复。证据见
   `memory/06_backtests/limit_up_concept_diffusion_shadow_20260726.md`。
 
+### 首板龙头因子条件与开发计划
+
+已移至 `requirements/alphaagent_first_board_leader_factor_dev_plan.md`（2026-08-01
+定稿：L0 硬过滤 / L1 深跌+高潮日排除 / L2 打分因子 / L3 组合，Phase 0 稳定性门 →
+Phase 1 v4 回测 → Phase 2 实时升级 → Phase 3 前向台账）。研究证据
+`memory/06_backtests/limit_up_leader_first_board_deep_factor_wave_20260801.md`。
+
 ## Low-suction Current State
 
 ### Current contract

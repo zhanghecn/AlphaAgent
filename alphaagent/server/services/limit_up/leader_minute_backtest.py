@@ -37,12 +37,19 @@ from alphaagent.server.services.limit_up.features import prior_stock_features
 from alphaagent.server.services.limit_up.consecutive_leader_first_board_factor_research import (
     _prior_3d_shape,
 )
+from alphaagent.server.services.limit_up.leader_first_board_deep_factor_research import (
+    _long_window_features,
+    _mid_window_features,
+    build_sector_context,
+)
 from alphaagent.server.services.limit_up.morning_window_leader_probability_research import (
     build_calibration,
     score_leader_probability,
 )
 from alphaagent.server.services.limit_up.repository import (
     load_daily_bars_all,
+    load_sector_daily_bars,
+    load_sector_memberships_all,
     load_stock_names,
     load_window_minute_bars,
 )
@@ -81,6 +88,31 @@ CANDIDATE_FACTORS = (
     "turnover_rate",
 )
 DEFAULT_MAX_PRIOR_RETURN_20D_PCT = 10.0  # 低位约束：前20日累计涨幅上限（%）
+
+# v4 因子池 = Phase 0 稳定性门白名单（进回测/实时的唯一因子来源）：
+# holdout 方向一致 + test |AUC-0.5|≥0.05 + 逐月一致性≥0.7 + 双目标一致。
+# 证据：memory/06_backtests/limit_up_leader_first_board_factor_stability_20260801.md
+# 滞后温度未过门（逐月一致性 0.61-0.69<0.7）→ 不进打分池、不做硬门，仅展示。
+CANDIDATE_FACTORS_V4 = (
+    "concept_max_return_20d",  # test AUC 0.6151（holdout 最强）
+    "drawdown_from_126d_high_pct",  # 0.5816，strength 族代表
+    "return_20d_pct",  # 0.5696
+    "volume_ratio_5_60",  # 0.5659
+    "prior_return_5d_pct",  # 0.5628
+    "position_126d",  # 0.5614（与 drawdown rho 0.89，族合计权重上限 0.4）
+)
+
+# 位置过滤模式：low_position = v3 低位滤（return_20d ≤ 阈值）；
+# deep_drop_exclusion = 深跌排除（return_20d ≤ -8.5% 或 drawdown_126d ≤ -21% 排除，
+# concept_max_return_20d ≥ 16.5% 豁免）；none = 不过滤。
+POSITION_FILTERS = ("low_position", "deep_drop_exclusion", "none")
+DEEP_DROP_RETURN_20D_PCT = -8.5
+DEEP_DROP_DRAWDOWN_126D_PCT = -21.0
+DEEP_DROP_EXEMPTION_CONCEPT_R20 = 16.5
+
+# 滞后温度门默认值：D-1 全市场首板数 ≥ 阈值则当日停手（None = 关闭）。
+# 阈值来自 Phase 0 滞后口径分位（高潮日成龙率 4.77% vs 冷日 11.54%）。
+DEFAULT_MAX_LAG1_FIRST_BOARD_COUNT: float | None = None
 
 
 def _float(value: object) -> float | None:
@@ -176,7 +208,92 @@ def _d1_factors(
         "days_since_prior_limit": (len(flags) - 1 - last_limit)
         if last_limit is not None
         else None,
+        # ⑤ v4 白名单因子：近半年大周期 + 前 4-10 天 + 量能（复用深度研究口径）
+        **_long_window_features(bars_before),
+        **_mid_window_features(bars_before),
     }
+
+
+def _position_filter_pass(
+    bars_before: Sequence[Mapping[str, object]],
+    mode: str,
+    max_return_20d_pct: float,
+    concept_r20: float | None,
+) -> bool:
+    """位置过滤：low_position=v3 低位滤；deep_drop_exclusion=深跌排除+板块爆发豁免。"""
+
+    if mode == "none":
+        return True
+    if mode == "low_position":
+        return _is_low_position(bars_before, max_return_20d_pct)
+    if mode == "deep_drop_exclusion":
+        long_feats = _long_window_features(bars_before)
+        return_20d = _float(long_feats.get("return_20d_pct"))
+        drawdown = _float(long_feats.get("drawdown_from_126d_high_pct"))
+        deep_drop = (return_20d is not None and return_20d <= DEEP_DROP_RETURN_20D_PCT) or (
+            drawdown is not None and drawdown <= DEEP_DROP_DRAWDOWN_126D_PCT
+        )
+        if not deep_drop:
+            return True
+        # 豁免：板块 20 日动量爆发（立新能源/爱丽家居「深跌+板块爆发」次路径）
+        return concept_r20 is not None and concept_r20 >= DEEP_DROP_EXEMPTION_CONCEPT_R20
+    raise ValueError(f"unknown position filter: {mode}")
+
+
+def _limit_up_ratio(vt_symbol: str) -> float:
+    """个股涨停幅度系数（主板 10%、创业板/科创板 20%），日线自算温度用。"""
+
+    code = vt_symbol.split(".")[0]
+    if code.startswith(("30", "68")):
+        return 1.198
+    return 1.098
+
+
+def build_first_board_counts(
+    bars_by_symbol: Mapping[str, Sequence[Mapping[str, object]]],
+) -> dict[str, int]:
+    """逐日全市场首板数（日线自算：当日涨停且前一日未涨停）。
+
+    D 日盘前看 D-1 的计数 = 滞后温度，无未来函数；与 provider events 口径
+    存在近似差异（涨停判定用收盘 ≥ 前收×幅度系数），研究/回测内部自洽。
+    """
+
+    counts: dict[str, int] = defaultdict(int)
+    for symbol, rows in bars_by_symbol.items():
+        ratio = _limit_up_ratio(symbol)
+        prev_close: float | None = None
+        prev_limit = False
+        for bar in rows:
+            close = _float(bar.get("close_price"))
+            is_limit = bool(close and prev_close and prev_close > 0 and close >= prev_close * ratio)
+            if is_limit and not prev_limit:
+                counts[str(bar.get("trade_date") or "")] += 1
+            prev_close = close
+            prev_limit = is_limit
+    return dict(counts)
+
+
+def build_sector_r20_lookup(
+    memberships: Sequence[Mapping[str, object]],
+    sector_bars: Sequence[Mapping[str, object]],
+) -> Callable[[str, str], float | None]:
+    """concept_max_return_20d 查找：(symbol, D) → 所属概念板块 20 日动量最大值。
+
+    板块动量用严格 D 日之前的指数收盘（build_sector_context 口径），
+    D 日盘前可观测，无未来函数；板块归属为当前快照（历史归属可能漂移）。
+    """
+
+    ctx = build_sector_context([], memberships, sector_bars)
+
+    def lookup(symbol: str, trade_date: str) -> float | None:
+        values = [
+            ctx.sector_return_prev[(sector_id, trade_date)]["r20"]
+            for sector_id in ctx.member_map.get(symbol, {}).get("concept", [])
+            if "r20" in ctx.sector_return_prev.get((sector_id, trade_date), {})
+        ]
+        return round(max(values), 4) if values else None
+
+    return lookup
 
 
 def _d1_exit(bar: Mapping[str, object], prev_close: float) -> tuple[str, float]:
@@ -247,6 +364,7 @@ def _build_month_calibration(
     *,
     min_train_samples: int,
     min_effect: float,
+    candidate_factors: Sequence[str] = CANDIDATE_FACTORS,
 ) -> dict[str, object] | None:
     """expanding 校准：只用严格早于 month 且标签已知的触发样本。"""
 
@@ -257,7 +375,7 @@ def _build_month_calibration(
     ]
     if len(train) < min_train_samples:
         return None
-    calibration = build_calibration(train, CANDIDATE_FACTORS, min_effect=min_effect)
+    calibration = build_calibration(train, tuple(candidate_factors), min_effect=min_effect)
     return calibration if calibration.get("factors") else None
 
 
@@ -302,6 +420,11 @@ def simulate_allmarket_minute(
     min_train_samples: int = MIN_TRAIN_SAMPLES,
     min_effect: float = DEFAULT_MIN_EFFECT,
     max_prior_return_20d_pct: float = DEFAULT_MAX_PRIOR_RETURN_20D_PCT,
+    candidate_factors: Sequence[str] = CANDIDATE_FACTORS,
+    position_filter: str = "low_position",
+    max_lag1_first_board_count: float | None = DEFAULT_MAX_LAG1_FIRST_BOARD_COUNT,
+    lag1_first_board_counts: Mapping[str, int] | None = None,
+    sector_r20_lookup: Callable[[str, str], float | None] | None = None,
 ) -> dict[str, object]:
     """全市场分钟级回测：低位首板触发 → D-1 因子校准排序 → TOP N 买入 → D+1 卖出。"""
 
@@ -326,6 +449,7 @@ def simulate_allmarket_minute(
         "days_total": 0,
         "days_tradeable": 0,
         "days_skipped_low_coverage": 0,
+        "days_skipped_hot_market": 0,
         "coverage_total": 0,
         "trigger_count": 0,
         "calibration_months": 0,
@@ -445,6 +569,14 @@ def simulate_allmarket_minute(
         stats["coverage_total"] += coverage
         if coverage < min_day_coverage:
             stats["days_skipped_low_coverage"] += 1
+        # 滞后温度门：D-1 全市场首板数 ≥ 阈值（涨停潮次日稀释）→ 当日停手
+        elif (
+            max_lag1_first_board_count is not None
+            and prev_day
+            and (lag1_first_board_counts or {}).get(prev_day, 0)
+            >= max_lag1_first_board_count
+        ):
+            stats["days_skipped_hot_market"] += 1
         else:
             stats["days_tradeable"] += 1
             month = today[:7]
@@ -454,6 +586,7 @@ def simulate_allmarket_minute(
                     month,
                     min_train_samples=min_train_samples,
                     min_effect=min_effect,
+                    candidate_factors=candidate_factors,
                 )
                 if calibrations[month]:
                     stats["calibration_months"] += 1
@@ -474,8 +607,13 @@ def simulate_allmarket_minute(
                 # 首板：D-1 未涨停（今天若涨停必为首板，排除连板延续）
                 if not _is_first_board_candidate(bars_before):
                     continue
-                # 低位：前20日累计涨幅 ≤ 阈值（近期没涨高，排除高位追涨）
-                if not _is_low_position(bars_before, max_prior_return_20d_pct):
+                # 位置过滤（A/B 对照：v3 低位滤 vs 深跌排除+板块爆发豁免）
+                concept_r20 = (
+                    sector_r20_lookup(symbol, today) if sector_r20_lookup else None
+                )
+                if not _position_filter_pass(
+                    bars_before, position_filter, max_prior_return_20d_pct, concept_r20
+                ):
                     continue
                 dbar = daily_index.get((symbol, today))
                 prev_bar = daily_index.get((symbol, prev_day)) if prev_day else None
@@ -497,6 +635,7 @@ def simulate_allmarket_minute(
                 factors = _d1_factors(bars_all[: index + 1], today)
                 if factors is None:
                     continue
+                factors["concept_max_return_20d"] = concept_r20
                 stats["trigger_count"] += 1
                 sample: dict[str, object] = {
                     **factors,
@@ -630,6 +769,7 @@ def simulate_allmarket_minute(
             "days_total": stats["days_total"],
             "days_tradeable": stats["days_tradeable"],
             "days_skipped_low_coverage": stats["days_skipped_low_coverage"],
+            "days_skipped_hot_market": stats["days_skipped_hot_market"],
             "avg_covered_symbols": round(
                 stats["coverage_total"] / stats["days_total"], 1
             )
@@ -639,6 +779,11 @@ def simulate_allmarket_minute(
             "calibration_months": stats["calibration_months"],
             "train_samples_labeled": len(labeled),
             "label_win_count": sum(1 for s in labeled if s.get("is_leader")),
+        },
+        "backtest_config": {
+            "factor_set": list(candidate_factors),
+            "position_filter": position_filter,
+            "max_lag1_first_board_count": max_lag1_first_board_count,
         },
     }
 
@@ -678,10 +823,14 @@ def run_minute_backtest(
     cum_pct: float = DEFAULT_CUM_PCT,
     min_day_coverage: int = MIN_DAY_COVERAGE,
     max_prior_return_20d_pct: float = DEFAULT_MAX_PRIOR_RETURN_20D_PCT,
+    factor_set: str = "v3",
+    position_filter: str = "low_position",
+    max_lag1_first_board_count: float | None = DEFAULT_MAX_LAG1_FIRST_BOARD_COUNT,
+    minute_interval: str = "1m",
 ) -> dict[str, object]:
     """加载全市场日线 + 分钟 bar，跑无未来函数的低位首板分钟级回测。"""
 
-    daily_bars = load_daily_bars_all(start - timedelta(days=190), end + timedelta(days=7))
+    daily_bars = load_daily_bars_all(start - timedelta(days=320), end + timedelta(days=7))
     names = load_stock_names()
     bars_by_symbol: dict[str, list[Mapping[str, object]]] = defaultdict(list)
     for bar in daily_bars:
@@ -700,16 +849,37 @@ def run_minute_backtest(
             and start.isoformat() <= str(bar["trade_date"]) <= end.isoformat()
         }
     )
+    candidate_factors = CANDIDATE_FACTORS_V4 if factor_set == "v4" else CANDIDATE_FACTORS
+    lag1_counts = (
+        build_first_board_counts(bars_by_symbol)
+        if max_lag1_first_board_count is not None
+        else None
+    )
+    sector_r20_lookup = None
+    if factor_set == "v4" or position_filter == "deep_drop_exclusion":
+        sector_r20_lookup = build_sector_r20_lookup(
+            load_sector_memberships_all(),
+            load_sector_daily_bars(start - timedelta(days=190), end),
+        )
     result = simulate_allmarket_minute(
         bars_by_symbol=bars_by_symbol,
         daily_index=daily_index,
         calendar=calendar,
         names=names,
-        minute_loader=load_window_minute_bars,
+        minute_loader=(
+            (lambda day: load_window_minute_bars(day, interval=minute_interval))
+            if minute_interval != "1m"
+            else load_window_minute_bars
+        ),
         surge_pct=surge_pct,
         cum_pct=cum_pct,
         min_day_coverage=min_day_coverage,
         max_prior_return_20d_pct=max_prior_return_20d_pct,
+        candidate_factors=candidate_factors,
+        position_filter=position_filter,
+        max_lag1_first_board_count=max_lag1_first_board_count,
+        lag1_first_board_counts=lag1_counts,
+        sector_r20_lookup=sector_r20_lookup,
     )
     stats = result["coverage_stats"]
     result["study_version"] = STUDY_VERSION
@@ -718,11 +888,15 @@ def run_minute_backtest(
     result["surge_pct"] = surge_pct
     result["cum_pct"] = cum_pct
     result["window"] = f"{WINDOW_START}-{WINDOW_END}"
+    result["factor_set"] = factor_set
+    result["position_filter"] = position_filter
+    result["minute_interval"] = minute_interval
     result["notes"] = [
         "v3 在 v2 无未来函数口径上加「低位首板」约束：D-1未涨停（保证首板，排除连板延续）+ 前20日累计涨幅≤阈值（低位，排除高位追涨），全部 D-1 可观测。",
+        "v4 变更：因子池换 Phase 0 稳定性门白名单（concept_max_return_20d/drawdown_126d/return_20d/volume_ratio_5_60/prior_return_5d/position_126d）；位置过滤可切 deep_drop_exclusion（深跌排除+板块爆发豁免）；滞后温度门可选（D-1 全市场首板数≥阈值停手，Phase 0 未过稳定性门，默认关闭）。",
         "触发/封板/一字全部盘中可观测：9:31-9:40 surge≥2% 或 cum≥7% 按触发 bar close 买入；触发 bar close≥涨停价 或 开盘≥涨停价跳过（不用 events 的 first_limit_time）。",
-        "因子用连板龙头首板因子研究调研过的完整 D-1 集（前序走势/前3天形状/涨停基因/市值流动性，共15个），触发群体月度 expanding 校准，标签=D+1净赢，训练只用之前完整月。",
-        f"仅在分钟覆盖≥{min_day_coverage}票的宽覆盖日交易：{stats['days_tradeable']}/{stats['days_total']} 天（稀疏日多为事件票回填，整日跳过）。校准生效月：{stats['calibration_months']}。",
+        f"仅在分钟覆盖≥{min_day_coverage}票的宽覆盖日交易：{stats['days_tradeable']}/{stats['days_total']} 天（稀疏日多为事件票回填，整日跳过；温度门跳过 {stats['days_skipped_hot_market']} 天）。校准生效月：{stats['calibration_months']}。",
+        "板块动量用板块指数日线严格 D 日前收盘自算；板块归属为当前快照（历史归属可能漂移）。",
         "剩余限制：1m 覆盖窗口短（2026-06起才有宽覆盖），可交易日少、样本小；覆盖偏活跃股。胜率/复利为小样本结果，不可外推。",
     ]
     return result
@@ -737,6 +911,16 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--surge-pct", type=float, default=DEFAULT_SURGE_PCT)
     parser.add_argument("--cum-pct", type=float, default=DEFAULT_CUM_PCT)
     parser.add_argument("--min-day-coverage", type=int, default=MIN_DAY_COVERAGE)
+    parser.add_argument("--factor-set", choices=("v3", "v4"), default="v3")
+    parser.add_argument("--position-filter", choices=POSITION_FILTERS, default="low_position")
+    parser.add_argument(
+        "--max-lag1-first-board-count",
+        type=float,
+        default=DEFAULT_MAX_LAG1_FIRST_BOARD_COUNT,
+        help="滞后温度门：D-1 全市场首板数≥阈值则当日停手（默认关闭）",
+    )
+    parser.add_argument("--skip-save", action="store_true", help="不写 DB（A/B 对照跑法）")
+    parser.add_argument("--minute-interval", choices=("1m", "5m"), default="1m")
     parser.add_argument("--json-output", type=Path, required=False)
     arguments = parser.parse_args(argv)
 
@@ -746,8 +930,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         surge_pct=arguments.surge_pct,
         cum_pct=arguments.cum_pct,
         min_day_coverage=arguments.min_day_coverage,
+        factor_set=arguments.factor_set,
+        position_filter=arguments.position_filter,
+        max_lag1_first_board_count=arguments.max_lag1_first_board_count,
+        minute_interval=arguments.minute_interval,
     )
-    save_minute_backtest_run(STUDY_VERSION, result)
+    if not arguments.skip_save:
+        save_minute_backtest_run(STUDY_VERSION, result)
     if arguments.json_output:
         arguments.json_output.parent.mkdir(parents=True, exist_ok=True)
         arguments.json_output.write_text(
