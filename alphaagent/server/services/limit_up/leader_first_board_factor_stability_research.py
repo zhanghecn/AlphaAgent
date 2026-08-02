@@ -1,4 +1,4 @@
-"""首板龙头因子时间稳定性门（Phase 0）：holdout/月度方向/阈值/共线性/双目标。
+"""潜龙首板因子时间稳定性门（Phase 0）：holdout/月度方向/阈值/共线性/双目标。
 
 动机：morning-window 研究已证明 D-1 因子月度方向可全部翻转、holdout 未锁定
 的因子不得加权重。本脚本对 wave 口径深度因子（见
@@ -680,7 +680,7 @@ def render_markdown(result: Mapping[str, object]) -> str:
     holdout_months = _mapping(result.get("holdout_months"))
     rules = _mapping(result.get("gate_rules"))
     lines = [
-        "# 首板龙头因子时间稳定性门（Phase 0）",
+        "# 潜龙首板因子时间稳定性门（Phase 0）",
         "",
         "## Boundary",
         "",

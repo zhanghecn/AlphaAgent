@@ -308,7 +308,7 @@ export interface LimitUpLiveSignal {
     max_drawdown_pct?: number | null;
     trade_count?: number;
   };
-  // Phase 2 首板龙头潜力分（白名单因子横截面分位加权）
+  // Phase 2 潜龙首板潜力分（白名单因子横截面分位加权）
   potential_score?: number | null;
   factor_percentiles?: Record<string, number>;
   seal_weakening?: boolean;

@@ -12,7 +12,7 @@ type ResearchTab = "limit-up" | "first-board-leader" | "reverse-wrap" | "pullbac
 
 const RESEARCH_TABS = [
   { value: "limit-up", label: "打板研究", icon: Flame },
-  { value: "first-board-leader", label: "首板龙头", icon: Rocket },
+  { value: "first-board-leader", label: "潜龙首板", icon: Rocket },
   { value: "reverse-wrap", label: "反包", icon: Waves },
   { value: "pullback-study", label: "回踩低吸(研究)", icon: FlaskConical },
 ] as const;

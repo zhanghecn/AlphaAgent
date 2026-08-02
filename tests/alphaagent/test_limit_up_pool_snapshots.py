@@ -126,7 +126,7 @@ def test_snapshot_dedupes_same_source_payload(monkeypatch) -> None:
     assert session.bulk_rows == []
 
 
-# ── 22:00 首板龙头分钟回测重跑（v4-B 生产配置）─────────────────────────
+# ── 22:00 潜龙首板分钟回测重跑（v4-B 生产配置）─────────────────────────
 
 
 def test_eod_backtest_2200_schedule_registered() -> None:

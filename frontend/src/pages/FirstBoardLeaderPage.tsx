@@ -37,7 +37,7 @@ export function FirstBoardLeaderPage() {
       <nav
         className="mb-3 flex h-11 items-end gap-6 overflow-x-auto border-b"
         role="tablist"
-        aria-label="首板龙头视图"
+        aria-label="潜龙首板视图"
       >
         {LEADER_VIEWS.map((item) => {
           const Icon = item.icon;
@@ -107,23 +107,23 @@ function LiveLeaderView() {
   const snapshot = query.data;
   if (query.isLoading && !snapshot) {
     return (
-      <section aria-label="首板龙头实时推荐">
+      <section aria-label="潜龙首板实时推荐">
         <LoadingState rows={5} />
       </section>
     );
   }
   if (query.isError || !snapshot) {
-    return <EmptyState text="无法加载首板龙头强度榜" />;
+    return <EmptyState text="无法加载潜龙首板强度榜" />;
   }
   const leaders = snapshot.leaders ?? [];
   const stale = Boolean(snapshot.data_quality?.is_stale);
   const paused = snapshot.session_stage === "lunch";
   const temperature = snapshot.market_temperature;
   return (
-    <section aria-label="首板龙头实时推荐">
+    <section aria-label="潜龙首板实时推荐">
       <div className="flex items-center justify-between gap-3 px-3 py-3 sm:px-4">
         <div className="min-w-0 text-sm">
-          <span className="font-semibold text-foreground">首板龙头强度榜</span>
+          <span className="font-semibold text-foreground">潜龙首板强度榜</span>
           <span className="ml-2 text-muted-foreground">
             潜力分（白名单因子）优先 · 共 {leaders.length} 只
           </span>
@@ -227,7 +227,7 @@ function BacktestLeaderView() {
   const start = (active?.coverage?.reliable_start as string | undefined) ?? "";
   const end = (active?.coverage?.reliable_end as string | undefined) ?? "";
   return (
-    <section aria-label="首板龙头回测">
+    <section aria-label="潜龙首板回测">
       <CompareCard sweep={sweepReport} minute={minuteReport} />
       <div className="flex flex-wrap items-center justify-between gap-3 border-b px-3 py-2 sm:px-4">
         <div className="flex rounded-lg border p-0.5 text-xs">
@@ -350,7 +350,7 @@ function LedgerLeaderView() {
   const current = source === "minute" ? minuteQuery.data : sweepQuery.data;
   const ledgerDays = current?.ledger_days ?? [];
   return (
-    <section aria-label="首板龙头历史交割单">
+    <section aria-label="潜龙首板历史交割单">
       <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b bg-amber-500/5 px-3 py-2 text-xs text-amber-600 sm:px-4">
         <span className="eyebrow">复盘 REVIEW</span>
         <span>⚠️ 回测模拟交割单，非实盘 · 最近 {ledgerDays.length} 个交易日 · 最新在左</span>
@@ -399,7 +399,7 @@ function ForwardLedgerView() {
   if (query.isError || !report) return <EmptyState text="无法加载前向台账" />;
   const reference = report.backtest_reference ?? {};
   return (
-    <section aria-label="首板龙头前向台账">
+    <section aria-label="潜龙首板前向台账">
       <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b bg-primary/5 px-3 py-2 text-xs text-muted-foreground sm:px-4">
         <span className="eyebrow">前向 FORWARD</span>
         <span>
@@ -488,9 +488,9 @@ function ForwardLedgerView() {
 
 function GuideView() {
   return (
-    <section aria-label="首板龙头规则说明" className="px-3 py-4 text-sm sm:px-4">
+    <section aria-label="潜龙首板规则说明" className="px-3 py-4 text-sm sm:px-4">
       <div className="prose prose-sm max-w-none space-y-3">
-        <h3 className="text-base font-semibold">首板龙头</h3>
+        <h3 className="text-base font-semibold">潜龙首板</h3>
         <p className="text-muted-foreground">
           盘中实时跟踪 9:30-11:00 首板的<strong>强度</strong>——哪只涨得最猛、最接近封板、封单最实、概念龙排名最靠前，排前面。
           这是「跟踪强度」，不是「预测龙头」（首板当天分不出龙头）。

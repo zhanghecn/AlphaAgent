@@ -1,4 +1,4 @@
-"""首板龙头触发样本归因（胜负/封板成败对照研究）。
+"""潜龙首板触发样本归因（胜负/封板成败对照研究）。
 
 输入：``leader_minute_backtest --dump-trigger-samples`` 导出的全部触发样本
 （D-1 因子 + 打板过程分时特征 + 封板结局 board_status + D+1 净赢标签）。
@@ -316,7 +316,7 @@ def render_markdown(result: Mapping[str, object]) -> str:
     baseline = _mapping(result.get("baseline"))
     by_status = _mapping(result.get("by_board_status"))
     lines = [
-        "# 首板龙头触发样本归因（胜负/封板成败对照）",
+        "# 潜龙首板触发样本归因（胜负/封板成败对照）",
         "",
         "## Boundary",
         "",

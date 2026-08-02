@@ -9,7 +9,7 @@ import {
 } from "@/api/limitUp";
 import { cn } from "@/lib/utils";
 
-/** 盘前低位首板候选面板：主人版低位观察池 + 同花顺 txt 导出（人工核对用，非自动信号）。 */
+/** 潜龙观察池面板：盘前低位首板候选（主人版低位四条件）+ 同花顺 txt 导出（人工核对用，非自动信号）。 */
 export function PremarketCandidatesPanel() {
   const query = useQuery({
     queryKey: ["limit-up", "premarket-prelude-candidates"],
@@ -43,11 +43,11 @@ export function PremarketCandidatesPanel() {
   }
 
   return (
-    <div className="mx-3 mb-3 rounded-lg border bg-card sm:mx-4" aria-label="盘前低位首板候选">
+    <div className="mx-3 mb-3 rounded-lg border bg-card sm:mx-4" aria-label="潜龙观察池">
       <div className="flex items-center justify-between gap-3 px-3 py-2.5">
         <div className="flex min-w-0 items-center gap-2 text-sm">
           <ListChecks size={15} className="shrink-0 text-primary" />
-          <span className="font-semibold text-foreground">盘前低位首板候选</span>
+          <span className="font-semibold text-foreground">潜龙观察池</span>
           <span className="truncate text-muted-foreground">
             D-1={result.trade_date ?? "-"} · 前 {result.count ?? candidates.length} 只
             {result.total != null && result.total > (result.count ?? 0)
@@ -96,11 +96,11 @@ export function PremarketCandidatesPanel() {
         </div>
       ) : (
         <div className="px-3 pb-3 text-xs text-muted-foreground">
-          今日盘前无符合条件的低位首板候选
+          今日观察池为空（无符合条件的低位首板候选）
         </div>
       )}
       <div className="border-t px-3 py-2 text-[10px] leading-4 text-muted-foreground">
-        主人版低位：半年位置≤25% 且距高点回撤≥25%，或距低点反弹≤12%。
+        潜龙四条件：距126日高点回撤≥25% · 距126日低点反弹≤12% · 近5日涨幅≤6% · 近20日振幅≤40%。
         低位首板自动策略为负期望（安全垫厚但弹性小）——本清单为人工核对观察池，
         早盘需人工结合题材与涨幅核对后再打板，非自动信号。
       </div>

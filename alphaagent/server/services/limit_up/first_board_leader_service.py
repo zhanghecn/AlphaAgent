@@ -52,7 +52,7 @@ _temperature_cache: dict[str, object] = {"at": None, "value": None}
 
 
 def build_first_board_leader_snapshot() -> dict[str, object]:
-    """读取最新实时快照并返回首板龙头强度榜。"""
+    """读取最新实时快照并返回潜龙首板强度榜。"""
 
     return select_first_board_leaders(get_latest_live_snapshot())
 

@@ -39,7 +39,7 @@ describe("buildRuleFlow", () => {
 
   it("前奏形态节点写清 A/B 定义与研究结论边界", () => {
     const prelude = buildRuleFlow(guide).find((node) => node.stage === "prelude")!;
-    expect(prelude.title).toContain("低位首板观察池");
+    expect(prelude.title).toContain("潜龙观察池");
     expect(prelude.condition).toContain("回撤 ≥25%");
     expect(prelude.condition).toContain("反弹 ≤12%");
     expect(prelude.condition).toContain("振幅 ≤40%");

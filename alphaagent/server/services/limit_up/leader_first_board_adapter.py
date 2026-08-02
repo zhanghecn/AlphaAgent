@@ -1,6 +1,6 @@
 """Adapt leader-first-board research output into LimitUpLaneBacktest/Ledger shape.
 
-让前端「首板龙头」tab 直接复用打板研究的 ``BacktestView`` / ``LedgerTimeline`` 组件。
+让前端「潜龙首板」tab 直接复用打板研究的 ``BacktestView`` / ``LedgerTimeline`` 组件。
 原始结果只有 summary/equity/trades 三块基石，这里补齐 BacktestView 的硬必需字段
 （validation/trades/skipped_orders/coverage/account_config 等），其余丰富度区块
 （drawdown_diagnostics/core_quality_filter 等）按真实缺失优雅降级。

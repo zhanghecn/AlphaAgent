@@ -745,7 +745,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
     },
     {
         "id": "leader_forward_capture_1005",
-        "name": "首板龙头前向台账捕获（10:05）",
+        "name": "潜龙首板前向台账捕获（10:05）",
         "cron": "5 10 * * 1-5",
         "action": "sync",
         "enabled": True,
@@ -754,7 +754,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
     },
     {
         "id": "leader_forward_capture_1505",
-        "name": "首板龙头前向台账捕获（15:05）",
+        "name": "潜龙首板前向台账捕获（15:05）",
         "cron": "5 15 * * 1-5",
         "action": "sync",
         "enabled": True,
@@ -794,7 +794,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
     },
     {
         "id": "eod_backtest_2200",
-        "name": "首板龙头分钟回测重跑（22:00）",
+        "name": "潜龙首板分钟回测重跑（22:00）",
         "cron": "0 22 * * 1-5",
         "action": "sync",
         "enabled": True,
@@ -3838,7 +3838,7 @@ def _latest_complete_daily_date_for_research() -> date | None:
 
 
 def _run_leader_minute_backtest_rerun_batch_job() -> dict[str, Any]:
-    """每晚 22:00 重跑首板龙头分钟级回测（v4-B 生产配置）并写库。
+    """每晚 22:00 重跑潜龙首板分钟级回测（v4-B 生产配置）并写库。
 
     v4-B = Phase 0 白名单 6 因子 + 深跌排除（A/B 两档口径唯一都赢 v3 的版本，
     证据 memory/06_backtests/limit_up_leader_minute_backtest_v4ab_20260801.md）。
@@ -3879,7 +3879,7 @@ def _run_leader_minute_backtest_rerun_batch_job() -> dict[str, Any]:
         "rows_read": int((result.get("coverage_stats") or {}).get("trigger_count") or 0),
         "rows_written": 2,
         "message": (
-            f"首板龙头回测已刷新（v5b+扫板）：{start.isoformat()}..{end.isoformat()}，"
+            f"潜龙首板回测已刷新（v5b+扫板）：{start.isoformat()}..{end.isoformat()}，"
             f"分钟级 复利 {summary.get('total_return_pct')}% / 胜率 {summary.get('win_rate')}% "
             f"/ {summary.get('trade_count')} 笔；"
             f"扫板 复利 {sweep_summary.get('total_return_pct')}% / 胜率 "
@@ -3920,7 +3920,7 @@ def _run_premarket_prelude_snapshot_batch_job() -> dict[str, Any]:
 
 
 def _run_leader_forward_capture_batch_job() -> dict[str, Any]:
-    """盘中定时捕获首板龙头推荐榜进前向纸面台账（Phase 3）。"""
+    """盘中定时捕获潜龙首板推荐榜进前向纸面台账（Phase 3）。"""
 
     from alphaagent.server.services.limit_up.leader_forward_ledger import (
         capture_forward_signals,

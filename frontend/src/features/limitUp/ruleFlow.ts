@@ -191,7 +191,7 @@ export function buildRuleFlow(guide: LimitUpStrategyGuide): RuleFlowNode[] {
       id: "prelude",
       stage: "prelude",
       badge: "⑨",
-      title: "盘前低位首板观察池（人工核对用）",
+      title: "潜龙观察池·盘前低位首板（人工核对用）",
       purpose: "盘前把贴底企稳的低位首板候选筛出来（同花顺 txt 导出），早盘人工结合题材与涨幅核对后快速打板。",
       condition:
         "低位四条件（主人锚点校准）：① 距 126 日高点回撤 ≥25%（跌得深）② 距 126 日低点反弹 ≤12%（离底近、刚见底）③ 近 5 日涨幅 ≤6%（没有急反弹）④ 近 20 日振幅 ≤40%（底部平稳非剧烈震荡）。排序：板块 20 日动量降序（低位+题材是核心路径）→ 缩量企稳 → 量稳度。",

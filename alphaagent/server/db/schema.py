@@ -1494,7 +1494,7 @@ Index(
 )
 
 
-# 首板龙头前向纸面台账：盘中定时快照推荐榜（含实时封单比），T+1 结算。
+# 潜龙首板前向纸面台账：盘中定时快照推荐榜（含实时封单比），T+1 结算。
 # 验收口径与回测一致（D+1 开盘 / D 收盘 - 1），用于 Phase 3 前向强制门。
 leader_forward_signals = Table(
     "leader_forward_signals",
@@ -1712,7 +1712,7 @@ Index(
 )
 
 
-# 首板龙头回测：单行 id=1 存最新一次 run（payload JSONB 含完整 summary/equity/trades）
+# 潜龙首板回测：单行 id=1 存最新一次 run（payload JSONB 含完整 summary/equity/trades）
 leader_first_board_backtest_runs = Table(
     "leader_first_board_backtest_runs",
     metadata,
@@ -1725,7 +1725,7 @@ leader_first_board_backtest_runs = Table(
 )
 
 
-# 首板龙头分钟级回测：单行 id=1 存最新一次 run（同 first_board 模式）
+# 潜龙首板分钟级回测：单行 id=1 存最新一次 run（同 first_board 模式）
 leader_minute_backtest_runs = Table(
     "leader_minute_backtest_runs",
     metadata,

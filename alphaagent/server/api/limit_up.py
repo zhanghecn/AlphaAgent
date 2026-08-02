@@ -119,12 +119,12 @@ def live_snapshot():
 
 @router.get("/first-board-leader/live", response_model=None)
 def first_board_leader_live():
-    """盘中首板龙头强度榜：只读现有快照的 first_board + 实时强度排序。"""
+    """盘中潜龙首板强度榜：只读现有快照的 first_board + 实时强度排序。"""
 
     if not is_database_configured():
         return JSONResponse(
             status_code=503,
-            content=fail("DATABASE_UNAVAILABLE", "数据库未配置，无法读取首板龙头信号"),
+            content=fail("DATABASE_UNAVAILABLE", "数据库未配置，无法读取潜龙首板信号"),
         )
     try:
         return ok(build_first_board_leader_snapshot())
@@ -134,7 +134,7 @@ def first_board_leader_live():
 
 @router.get("/first-board-leader/forward-ledger", response_model=None)
 def first_board_leader_forward_ledger(weeks: int = 8):
-    """首板龙头前向纸面台账周报（Phase 3 强制门，纸面跟踪非实盘）。"""
+    """潜龙首板前向纸面台账周报（Phase 3 强制门，纸面跟踪非实盘）。"""
 
     if not is_database_configured():
         return JSONResponse(
@@ -207,13 +207,13 @@ def premarket_prelude_candidates_txt(
 
 @router.get("/first-board-leader/backtest", response_model=None)
 def first_board_leader_backtest():
-    """返回首板龙头历史回测结果（回测模拟，非实盘，读库）。"""
+    """返回潜龙首板历史回测结果（回测模拟，非实盘，读库）。"""
 
     data = load_leader_backtest_run()
     if not data:
         return ok({
             "status": "unavailable",
-            "message": "首板龙头回测尚未运行",
+            "message": "潜龙首板回测尚未运行",
             "is_backtest": False,
             "report": None,
             "ledger_days": [],
@@ -222,7 +222,7 @@ def first_board_leader_backtest():
     if stored_version != LEADER_FIRST_BOARD_STRATEGY_VERSION:
         return ok({
             "status": "unavailable",
-            "message": "已保存的首板龙头回测是旧版本，请显式运行当前 v2 研究后再查看",
+            "message": "已保存的潜龙首板回测是旧版本，请显式运行当前 v2 研究后再查看",
             "is_backtest": False,
             "report": None,
             "ledger_days": [],
@@ -240,7 +240,7 @@ def first_board_leader_backtest():
 
 @router.get("/minute-backtest", response_model=None)
 def leader_minute_backtest():
-    """首板龙头分钟级精准回测（开盘 10 分钟窗口 surge/cum 触发买入，真实可执行价）。"""
+    """潜龙首板分钟级精准回测（开盘 10 分钟窗口 surge/cum 触发买入，真实可执行价）。"""
 
     data = load_minute_backtest_run()
     if not data:
@@ -262,7 +262,7 @@ def leader_minute_backtest():
 
 @router.get("/sweep-backtest", response_model=None)
 def leader_sweep_backtest():
-    """首板龙头扫板回测：触板后开板按涨停价排板成交（全天未开板=买不到）。"""
+    """潜龙首板扫板回测：触板后开板按涨停价排板成交（全天未开板=买不到）。"""
 
     from alphaagent.server.services.limit_up.leader_sweep_repository import (
         load_sweep_backtest_run,
