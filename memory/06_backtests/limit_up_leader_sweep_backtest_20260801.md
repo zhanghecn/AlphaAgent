@@ -59,9 +59,8 @@
 - 扫板回测作为**诚实对照系**长期保留：它的负数就是「为什么不能触板后再买」
   的活教材。
 
-证据：`leader_sweep_backtest_cov600_20260801.json`、
-`leader_sweep_backtest_cov300_20260801.json`、
-`leader_sweep_backtest_cov300_cut1400_20260801.json`。
+证据（窄口径原始 json 已按 2026-08-02 中间产物清理删除，结论保留于本文）：
+全量终版跑数保留 `leader_sweep_backtest_full_baseline_20260802.json`。
 
 ---
 

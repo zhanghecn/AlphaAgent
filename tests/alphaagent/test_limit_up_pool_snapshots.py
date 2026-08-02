@@ -169,16 +169,15 @@ def test_leader_minute_backtest_rerun_uses_v4b_config(monkeypatch) -> None:
 
     result = svc._run_leader_minute_backtest_rerun_batch_job()
     minute_run = runs[0]
-    assert minute_run["factor_set"] == "v4"
-    assert minute_run["position_filter"] == "deep_drop_exclusion"
+    assert "factor_set" not in minute_run  # 深度清理后因子池固定为白名单（无 v3/v4 分支）
+    assert "position_filter" not in minute_run  # 位置过滤固定为深跌排除
     assert minute_run["min_trigger_volume_ratio"] == 0.94  # v5b 归因裁决的生产触发量能滤
     assert minute_run["index_ma20_gate"] is True  # 大盘 MA20 环境门（7 月崩盘段止损）
     assert minute_run["start"].isoformat() == "2026-03-03"  # end - 150 天
     assert minute_run["end"].isoformat() == "2026-07-31"
     sweep_run = runs[1]
     assert sweep_run["entry_mode"] == "sweep_board"
-    assert sweep_run["factor_set"] == "v4"
-    assert sweep_run["position_filter"] == "deep_drop_exclusion"
+    assert "factor_set" not in sweep_run
     assert "min_trigger_volume_ratio" not in sweep_run or sweep_run.get("min_trigger_volume_ratio") is None
     assert saved["version"] == backtest.STUDY_VERSION
     assert "sweep" in saved

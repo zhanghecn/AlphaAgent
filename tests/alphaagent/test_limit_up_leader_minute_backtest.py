@@ -272,32 +272,7 @@ def test_simulate_skips_non_first_board() -> None:
     assert result["closed_trades"] == []
 
 
-def test_simulate_skips_high_position() -> None:
-    # 前20日累计涨幅 >10%（高位追涨）→ 低位过滤排除（首板仍成立）
-    hist_dates = [(date(2026, 6, 1) + timedelta(days=i)).isoformat() for i in range(25)]
-    closes = [9.0] * 5 + [10.0] * 18 + [10.4, 10.5]  # D-21=9.0, D-1=10.5（前20日16.7%）；D-1/D-2 不涨停
-    rows = [_bar(SYMBOL, td, c, c) for td, c in zip(hist_dates, closes)]
-    buy_day = "2026-06-26"
-    sell_day = "2026-06-27"
-    rows.append(_bar(SYMBOL, buy_day, 10.6, 11.0))
-    rows.append(_bar(SYMBOL, sell_day, 11.0, 11.1))
-    calendar = hist_dates + [buy_day, sell_day]
-    bars_by_symbol = {SYMBOL: rows}
-    daily_index = {(SYMBOL, str(b["trade_date"])): b for b in rows}
-    minute_map = {date(2026, 6, 26): {SYMBOL: _window([("09:31:00", 10.6), ("09:32:00", 10.9)])}}
-    result = engine.simulate_allmarket_minute(
-        bars_by_symbol=bars_by_symbol,
-        daily_index=daily_index,
-        calendar=calendar,
-        names={SYMBOL: "测试"},
-        minute_loader=lambda d: minute_map.get(d, {}),
-        config=CashBacktestConfig(max_positions=3),
-        min_day_coverage=1,
-    )
-    assert result["closed_trades"] == []
-
-
-# ── v4：位置过滤 A/B + 滞后温度门 + 板块动量查找 ──────────────────────
+# ── 深跌排除过滤 + 板块动量查找 ──────────────────────────────────────
 
 
 def _long_bars(closes: list[float]) -> list[dict]:
@@ -311,43 +286,22 @@ def _long_bars(closes: list[float]) -> list[dict]:
     return rows
 
 
-def test_position_filter_low_position_mode() -> None:
-    bars = _long_bars([9.0] * 21 + [10.5])  # return_20d = 16.7% > 10%
-    assert engine._position_filter_pass(bars, "low_position", 10.0, None) is False
-    assert engine._position_filter_pass(bars, "none", 10.0, None) is True
-
-
 def test_position_filter_deep_drop_excludes_return_20d() -> None:
     bars = _long_bars([10.0] * 21 + [9.0])  # return_20d = -10% ≤ -8.5% → 深跌
-    assert engine._position_filter_pass(bars, "deep_drop_exclusion", 10.0, None) is False
+    assert engine._position_filter_pass(bars, None) is False
     # 板块爆发豁免（concept_r20 ≥ 16.5）
-    assert engine._position_filter_pass(bars, "deep_drop_exclusion", 10.0, 20.0) is True
+    assert engine._position_filter_pass(bars, 20.0) is True
     # 温和回调不排除
     bars_ok = _long_bars([10.0] * 21 + [9.5])  # return_20d = -5%
-    assert engine._position_filter_pass(bars_ok, "deep_drop_exclusion", 10.0, None) is True
+    assert engine._position_filter_pass(bars_ok, None) is True
 
 
 def test_position_filter_deep_drop_excludes_drawdown_126d() -> None:
     # 126 窗口内高点 13.0 → 现值 10.0，回撤 -23% ≤ -21% → 深跌（13.0 须在窗口内）
     closes = [9.0, 13.0] + [10.0] * 125
     bars = _long_bars(closes)
-    assert engine._position_filter_pass(bars, "deep_drop_exclusion", 10.0, None) is False
-    assert engine._position_filter_pass(bars, "deep_drop_exclusion", 10.0, 18.0) is True
-
-
-def test_build_first_board_counts_symbol_aware_ratio() -> None:
-    main = [
-        _bar("600001.SSE", "2026-07-27", 10.0, 10.0),
-        _bar("600001.SSE", "2026-07-28", 10.0, 11.0),  # +10% 主板涨停 → 首板
-        _bar("600001.SSE", "2026-07-29", 11.0, 12.1),  # 连板非首板
-    ]
-    chinext = [
-        _bar("300001.SZSE", "2026-07-27", 10.0, 10.0),
-        _bar("300001.SZSE", "2026-07-28", 10.0, 11.5),  # +15% 创业板未涨停 → 不算
-    ]
-    counts = engine.build_first_board_counts({"600001.SSE": main, "300001.SZSE": chinext})
-    assert counts.get("2026-07-28") == 1
-    assert "2026-07-29" not in counts
+    assert engine._position_filter_pass(bars, None) is False
+    assert engine._position_filter_pass(bars, 18.0) is True
 
 
 def test_build_sector_r20_lookup_uses_prior_closes() -> None:
@@ -368,35 +322,6 @@ def test_build_sector_r20_lookup_uses_prior_closes() -> None:
     assert lookup(SYMBOL, "2026-07-01") is None
     # 非成员票 → None
     assert lookup("600099.SSE", "2026-07-22") is None
-
-
-def test_simulate_temperature_gate_skips_hot_day() -> None:
-    minute_map = {date(2026, 7, 28): {SYMBOL: _window([("09:31:00", 10.1), ("09:32:00", 10.4)])}}
-    result = _run_temperature(minute_map, lag1_counts={"2026-07-27": 80}, threshold=69.0)
-    assert result["closed_trades"] == []
-    assert result["coverage_stats"]["days_skipped_hot_market"] == 1
-
-
-def test_simulate_temperature_gate_allows_cold_day() -> None:
-    minute_map = {date(2026, 7, 28): {SYMBOL: _window([("09:31:00", 10.1), ("09:32:00", 10.4)])}}
-    result = _run_temperature(minute_map, lag1_counts={"2026-07-27": 30}, threshold=69.0)
-    assert len(result["closed_trades"]) == 1
-    assert result["coverage_stats"]["days_skipped_hot_market"] == 0
-
-
-def _run_temperature(minute_map, lag1_counts, threshold):
-    bars_by_symbol, daily_index, names = _world()
-    return engine.simulate_allmarket_minute(
-        bars_by_symbol=bars_by_symbol,
-        daily_index=daily_index,
-        calendar=CALENDAR,
-        names=names,
-        minute_loader=lambda d: minute_map.get(d, {}),
-        config=CashBacktestConfig(max_positions=3),
-        min_day_coverage=1,
-        max_lag1_first_board_count=threshold,
-        lag1_first_board_counts=lag1_counts,
-    )
 
 
 def test_simulate_min_trigger_volume_ratio_filter() -> None:
@@ -643,66 +568,6 @@ def test_d1_factors_include_prelude_features() -> None:
     # 历史仅 6 根 < 10 → 量能特征为 None
     assert factors["prelude_vol_cv_7d"] is None
     assert factors["prelude_vol_shift_ratio"] is None
-
-
-def test_simulate_prelude_any_keeps_pattern_stock() -> None:
-    # 默认渐变历史 = 小阳 streak 3 → require=any 正常买入
-    minute_map = {date(2026, 7, 28): {SYMBOL: _window([("09:31:00", 10.1), ("09:32:00", 10.4)])}}
-    result = _run_rows(_daily_rows(), minute_map, require_prelude_pattern="any")
-    assert len(result["closed_trades"]) == 1
-    assert result["coverage_stats"]["candidates_skipped_prelude"] == 0
-
-
-def test_simulate_prelude_any_skips_no_pattern() -> None:
-    # D-2 涨 4.17%（>3 打断）、D-1 跌 3.0%（小阴 streak=1）→ 无形态
-    closes = [9.0, 9.2, 9.4, 9.6, 10.0, 9.7]
-    minute_map = {date(2026, 7, 28): {SYMBOL: _window([("09:31:00", 10.1), ("09:32:00", 10.4)])}}
-    result = _run_rows(_rows_with_closes(closes), minute_map, require_prelude_pattern="any")
-    assert result["closed_trades"] == []
-    assert result["coverage_stats"]["candidates_skipped_prelude"] >= 1
-    # 对照：不启用硬滤则正常买入
-    result_off = _run_rows(_rows_with_closes(closes), minute_map)
-    assert len(result_off["closed_trades"]) == 1
-
-
-def test_simulate_prelude_small_yang_rejects_yin_stock() -> None:
-    # D-2 -2.08%、D-1 -1.06% → 小阴 streak=2（small_yin）；涨停价 9.3×1.1=10.23
-    closes = [9.0, 9.2, 9.4, 9.6, 9.4, 9.3]
-    rows = _rows_with_closes(closes, d_open=9.4, d_close=9.7, d1_open=9.8, d1_close=9.9)
-    minute_map = {date(2026, 7, 28): {SYMBOL: _window([("09:31:00", 9.4), ("09:32:00", 9.6)])}}
-    rejected = _run_rows(rows, minute_map, require_prelude_pattern="small_yang")
-    assert rejected["closed_trades"] == []
-    assert rejected["coverage_stats"]["candidates_skipped_prelude"] >= 1
-    accepted = _run_rows(rows, minute_map, require_prelude_pattern="small_yin")
-    assert len(accepted["closed_trades"]) == 1
-
-
-def test_prelude_factors_join_calibration_pool(monkeypatch) -> None:
-    captured = {}
-
-    def fake_calib(train, month, **kwargs):
-        captured["factors"] = tuple(kwargs.get("candidate_factors") or ())
-        return None
-
-    monkeypatch.setattr(engine, "_build_month_calibration", fake_calib)
-    minute_map = {date(2026, 7, 28): {SYMBOL: _window([("09:31:00", 10.1), ("09:32:00", 10.4)])}}
-    _run_rows(
-        _daily_rows(),
-        minute_map,
-        candidate_factors=("return_20d_pct",),
-        include_prelude_factors_in_calibration=True,
-    )
-    for key in engine.PRELUDE_CALIBRATION_FEATURES:
-        assert key in captured["factors"]
-
-
-def test_prelude_mode_validation() -> None:
-    minute_map = {date(2026, 7, 28): {SYMBOL: _window([("09:31:00", 10.1), ("09:32:00", 10.4)])}}
-    try:
-        _run_rows(_daily_rows(), minute_map, require_prelude_pattern="bogus")
-        raise AssertionError("should raise")
-    except ValueError:
-        pass
 
 
 # ── 主人版低位（owner_low_position，锚点校准 2026-08-02）─────────────────────

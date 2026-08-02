@@ -3863,8 +3863,6 @@ def _run_leader_minute_backtest_rerun_batch_job() -> dict[str, Any]:
     result = run_minute_backtest(
         start=start,
         end=end,
-        factor_set="v4",
-        position_filter="deep_drop_exclusion",
         min_trigger_volume_ratio=PRODUCTION_MIN_TRIGGER_VOLUME_RATIO,
         index_ma20_gate=True,  # 大盘 MA20 环境门（宽口径验证：下跌段停手，回撤 -29%→-4%）
     )
@@ -3873,8 +3871,6 @@ def _run_leader_minute_backtest_rerun_batch_job() -> dict[str, Any]:
     sweep_result = run_minute_backtest(
         start=start,
         end=end,
-        factor_set="v4",
-        position_filter="deep_drop_exclusion",
         entry_mode="sweep_board",
     )
     save_sweep_backtest_run(STUDY_VERSION, sweep_result)

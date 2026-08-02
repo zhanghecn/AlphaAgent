@@ -125,11 +125,9 @@
 3. **分钟级 v5b（触板前动量买入）仍是唯一正期望入口**；前奏形态的正确形态
    = 盘前人工观察清单（`premarket_prelude_service` + 同花顺 txt 导出，已上线）。
 
-证据：`leader_minute_backtest_v5b_preludecalib_full_20260802.json`、
-`leader_minute_backtest_v5b_preludereq_full_20260802.json`、
-`leader_sweep_backtest_full_baseline_20260802.json`、
-`leader_sweep_backtest_full_preludecalib_20260802.json`、
-`leader_sweep_backtest_full_preludereq_20260802.json`。
+证据：前奏对照跑与低位口径跑的原始 json 已按 2026-08-02 中间产物清理删除
+（否决档不保留跑数，结论与对照表全部保留于本文附录）；
+保留：扫板基线全量 `leader_sweep_backtest_full_baseline_20260802.json`（对照系终版）。
 
 ---
 
@@ -182,5 +180,4 @@ MA20 下门日照产=差行情妖股模式）；② 盘前 txt（同花顺导入
 ③ 自动买入层：深跌排除+白名单打分+触发量能+MA20 门**保持不变**
 （数据证明的路线，两层分离互不干扰）。
 
-证据：`leader_minute_backtest_lowpos_full_cov2800_20260802.json`（低位口径无门）、
-`leader_minute_backtest_lowpos_gate_full_cov2800_20260802.json`（带门）。
+证据：低位口径两跑原始 json 已按中间产物清理（否决档），结论保留于本文。

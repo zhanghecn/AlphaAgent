@@ -46,7 +46,6 @@ from alphaagent.server.services.limit_up.leader_first_board_deep_factor_research
     _sample_float,
 )
 from alphaagent.server.services.limit_up.leader_minute_backtest import (
-    DEFAULT_MAX_PRIOR_RETURN_20D_PCT,
     _d1_factors,
     _float,
     _is_first_board_candidate,
@@ -173,8 +172,6 @@ def build_sweep_quality_dataset(
     daily_index: Mapping[tuple[str, str], Mapping[str, object]],
     names: Mapping[str, str],
     sector_r20_lookup,
-    position_filter: str = "deep_drop_exclusion",
-    max_prior_return_20d_pct: float = DEFAULT_MAX_PRIOR_RETURN_20D_PCT,
 ) -> list[dict[str, object]]:
     """扫板质量数据集：每个触板事件的触板特征 + 结局标签（纯函数）。"""
 
@@ -210,9 +207,7 @@ def build_sweep_quality_dataset(
             if not _is_first_board_candidate(bars_before):
                 continue
             concept_r20 = sector_r20_lookup(symbol, today) if sector_r20_lookup else None
-            if not _position_filter_pass(
-                bars_before, position_filter, max_prior_return_20d_pct, concept_r20
-            ):
+            if not _position_filter_pass(bars_before, concept_r20):
                 continue
             dbar = daily_index.get((symbol, today))
             prev_bar = daily_index.get((symbol, prev_day)) if prev_day else None

@@ -67,10 +67,10 @@ v4-B ≥300 逐月：2026-04 3 笔 -1961｜2026-06 35 笔（25 胜）+42133｜20
 
 ## 证据文件
 
-- `leader_minute_backtest_ab_v3baseline_20260801.json` / `..._v4a_low_position_...` /
-  `..._v4b_deep_drop_...`（≥600 三跑）
-- `leader_minute_backtest_ab_v3baseline_cov300_20260801.json` / `..._v4a_low_position_cov300_...` /
-  `..._v4b_deep_drop_cov300_...`（≥300 三跑）
+- 原始跑数 json（ab 三跑 × 两档、v5a/v5b 窄口径、interim、前奏/低位/v6 否决档）
+  已按 2026-08-02 中间产物清理删除——结论与对照表全部保留于本文；
+  终版全量跑数保留：`leader_minute_backtest_v5b_full_cov2800_20260802.json`（无门）、
+  `leader_minute_backtest_v5b_gate_full_cov2800_20260802.json`（MA20 门）。
 - Phase 0：`limit_up_leader_first_board_factor_stability_20260801.{json,md}`
 
 ---
@@ -130,10 +130,8 @@ expanding 校准在触发群体上训练，会自动给 position_126d 配负权�
 - 诚实边界：阈值 in-sample；封板后 88% 胜率的结构意味着「封板确认」类特征天然
   高杠杆，前向台账继续观察滤后触发池的真实封板率是否保持 ~48%。
 
-证据：`leader_minute_backtest_v5a_calib_trigvol_cov300_20260801.json`（对照）、
-`leader_minute_backtest_v5b_filter_trigvol_cov300_20260801.json`、
-`leader_minute_backtest_v5b_filter_trigvol_cov600_20260801.json`、
-触发样本 `leader_minute_backtest_v4b_cov300/cov600_triggers_20260801.json`。
+证据（原始 json 已按中间产物清理，结论保留于本文）：v5a 对照、v5b 窄口径两档、
+v4b 触发样本两档；归因研究文档保留 `limit_up_leader_trigger_postmortem_cov300_20260801.{json,md}`。
 
 ---
 
@@ -175,11 +173,10 @@ v5b 亏损 100% 集中在 07-01..07-17 大盘下跌段（13/14 天负），07-20
 in-sample 环境过拟合风险存在；逻辑教科书级成立（动量策略死于下跌趋势），
 最终由前向台账验证。22:00 生产重跑已带 `index_ma20_gate=True`。
 
-证据：`leader_minute_backtest_v5b_interim_cov1000_20260802.json`、
-`leader_minute_backtest_v6_interim_cov1000_20260802.json`（v6 弃用档）、
-`leader_minute_backtest_v5b_gate_interim_cov1000_20260802.json`、
-触发样本 `leader_minute_backtest_v5b_interim_cov1000_triggers_20260802.json`、
-归因 `limit_up_leader_trigger_postmortem_interim_20260802.{json,md}`。
+证据（中间版原始 json 已按中间产物清理，结论保留于本文与全量终版节）：
+v5b 无门/MA20 门中间版、v6 弃用档、中间版触发样本与归因；
+**全量终版跑数保留**：`leader_minute_backtest_v5b_full_cov2800_20260802.json`（无门+触发样本）、
+`leader_minute_backtest_v5b_gate_full_cov2800_20260802.json`（MA20 门+触发样本）。
 
 ## 全量终版（回填完成后复跑，2026-08-02 凌晨）—— 中间版结论全部确认
 
