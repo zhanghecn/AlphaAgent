@@ -1538,6 +1538,19 @@ Index(
 )
 
 
+# 盘前前奏候选快照（每晚 EOD 后由 data-sync 批次预算写库；API 读库毫秒返回，
+# 避免盘前实时全市场扫描 30-60s——api 容器 0.25 核跑不动逐票形态计算）。
+premarket_prelude_snapshots = Table(
+    "premarket_prelude_snapshots",
+    metadata,
+    Column("trade_date", Date, primary_key=True),
+    Column("candidate_count", Integer, nullable=False, server_default="0"),
+    Column("payload", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+
 limit_up_radar_frames = Table(
     "limit_up_radar_frames",
     metadata,
@@ -1717,6 +1730,18 @@ leader_minute_backtest_runs = Table(
     "leader_minute_backtest_runs",
     metadata,
     Column("id", Integer, primary_key=True),  # 固定 1：单行存最新分钟级回测
+    Column("strategy_version", String(80), nullable=False),
+    Column("built_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("payload", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+
+leader_sweep_backtest_runs = Table(
+    "leader_sweep_backtest_runs",
+    metadata,
+    Column("id", Integer, primary_key=True),  # 固定 1：单行存最新扫板回测
     Column("strategy_version", String(80), nullable=False),
     Column("built_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("payload", JSONB, nullable=False, server_default="{}"),

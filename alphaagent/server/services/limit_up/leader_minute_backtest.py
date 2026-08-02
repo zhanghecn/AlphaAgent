@@ -29,6 +29,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
+from statistics import mean
 
 from alphaagent.server.services.execution import cash_ledger
 from alphaagent.server.services.limit_up.cash_backtest import CashBacktestConfig
@@ -41,6 +42,9 @@ from alphaagent.server.services.limit_up.leader_first_board_deep_factor_research
     _long_window_features,
     _mid_window_features,
     build_sector_context,
+)
+from alphaagent.server.services.limit_up.leader_first_board_prelude_pattern_research import (
+    _prelude_pattern_features,
 )
 from alphaagent.server.services.limit_up.morning_window_leader_probability_research import (
     build_calibration,
@@ -104,11 +108,105 @@ CANDIDATE_FACTORS_V4 = (
 
 # 位置过滤模式：low_position = v3 低位滤（return_20d ≤ 阈值）；
 # deep_drop_exclusion = 深跌排除（return_20d ≤ -8.5% 或 drawdown_126d ≤ -21% 排除，
-# concept_max_return_20d ≥ 16.5% 豁免）；none = 不过滤。
-POSITION_FILTERS = ("low_position", "deep_drop_exclusion", "none")
+# concept_max_return_20d ≥ 16.5% 豁免）；owner_low_position = 主人版低位（只要贴底首板）；
+# none = 不过滤。
+POSITION_FILTERS = ("low_position", "deep_drop_exclusion", "owner_low_position", "none")
 DEEP_DROP_RETURN_20D_PCT = -8.5
 DEEP_DROP_DRAWDOWN_126D_PCT = -21.0
 DEEP_DROP_EXEMPTION_CONCEPT_R20 = 16.5
+
+# 触发时分时因子（归因研究验证：trigger_volume_ratio 封板 AUC 0.63 且 6/7 月方向一致，
+# 是封板最强可交易确认信号；可选加入校准池或做硬滤下限）
+TRIGGER_CALIBRATION_FEATURES = ("trigger_volume_ratio",)
+# 生产触发量能硬滤（v5b 归因裁决：≥0.94 两档口径全面优于不滤——≥600 +8.8 vs +5.8、
+# ≥300 +61.6 vs +51.4，触发池封板率 36.5%→41.9%/48.1%；证据
+# memory/06_backtests/limit_up_leader_trigger_postmortem_cov300_20260801.md）
+PRODUCTION_MIN_TRIGGER_VOLUME_RATIO = 0.94
+# v6 预过滤（宽口径归因裁决，6/7 月一致）：
+# ① 远距急拉排除——触发时距涨停 < -5.9% 的票封板率仅 13-15%（近距 44-48%）
+# ② 冷板块排除——concept_max_return_20d ≤ 0.35% 胜率比温板块低 ~10pt
+PRODUCTION_MIN_TRIGGER_DISTANCE_TO_LIMIT_PCT = -5.9
+PRODUCTION_MIN_CONCEPT_R20_PCT = 0.35
+
+# 前奏形态因子（主人 2026-08-02 假说，研究裁决：形态整体区分度弱、B 阴跌型不成立，
+# vol_shift 月度一致 0.857 但 AUC 仅 0.545——默认不进校准、不做硬滤，仅 dump 观察；
+# 证据 memory/06_backtests/limit_up_leader_first_board_prelude_pattern_20260802.md）
+PRELUDE_CALIBRATION_FEATURES = (
+    "prelude_small_yang_streak",
+    "prelude_small_yin_streak",
+    "prelude_vol_cv_7d",
+    "prelude_vol_shift_ratio",
+)
+# 前奏形态硬滤模式：none = 不滤（默认）；any = 任一形态；small_yang/small_yin = 指定型
+PRELUDE_PATTERN_MODES = ("none", "any", "small_yang", "small_yin")
+
+# 入场模式：momentum_window = 9:31-9:40 surge/cum 触发（分钟级回测）；
+# sweep_board = 扫板（触板后开板才按涨停价排板成交，全天未开板=买不到）。
+ENTRY_MODES = ("momentum_window", "sweep_board")
+
+
+def _sweep_entry_status(
+    day_bars: Sequence[Mapping[str, object]],
+    *,
+    prev_close: float,
+    max_entry_time: str | None = None,
+    min_touch_bar_close_position: float | None = None,
+) -> tuple[str, dict[str, object] | None]:
+    """扫板入场（带状态）：触板后开板瞬间按涨停价排板成交；全天未开板 = 买不到。
+
+    真实打板机制：买单挂在涨停价排队，只有炸板（开板）时卖单砸下来才成交，
+    成交价 = 涨停价。未触板或触板后全天封死不打开，都视为买不进。
+    触板判定：bar high ≥ 涨停价（容差）；开板判定：触板之后 bar low < 涨停价（容差）。
+    触板 bar 自身不算开板（bar 内先砸后拉还是先拉后砸不可知，保守等下一根）。
+    返回 ("filled"|"no_touch"|"no_open"|"too_late", entry|None)。
+    """
+
+    if prev_close <= 0:
+        return "no_touch", None
+    limit_price = main_board_limit_price(prev_close)
+    tolerance = max(0.02, limit_price * 0.001)
+    touched = False
+    touch_time = ""
+    for bar in day_bars:
+        bar_time = str(bar.get("bar_time") or "")
+        high = _float(bar.get("high_price")) or 0.0
+        low = _float(bar.get("low_price")) or 0.0
+        if not touched:
+            if high >= limit_price - tolerance:
+                # 触板 bar 收弱势（收在 bar 下半部=锁单差）→ 整票放弃（封板率仅 60%）
+                if min_touch_bar_close_position is not None:
+                    bar_close = _float(bar.get("close_price")) or 0.0
+                    if high > low and bar_close > 0:
+                        close_position = (bar_close - low) / (high - low)
+                        if close_position < min_touch_bar_close_position:
+                            return "weak_touch", None
+                touched = True
+                touch_time = bar_time
+            continue
+        if low < limit_price - tolerance:
+            if max_entry_time and bar_time > max_entry_time:
+                return "too_late", None  # 开板太晚（尾盘板没溢价，可配置回避）
+            return "filled", {
+                "buy_price": limit_price,
+                "buy_time": bar_time,
+                "touch_time": touch_time,
+                "entry_kind": "sweep_open",
+            }
+    return ("no_open", None) if touched else ("no_touch", None)
+
+
+def _sweep_entry(
+    day_bars: Sequence[Mapping[str, object]],
+    *,
+    prev_close: float,
+    max_entry_time: str | None = None,
+) -> dict[str, object] | None:
+    """扫板入场：开板成交则返回买入信息，否则 None（买不到/未触板/太晚）。"""
+
+    _status, entry = _sweep_entry_status(
+        day_bars, prev_close=prev_close, max_entry_time=max_entry_time
+    )
+    return entry
 
 # 滞后温度门默认值：D-1 全市场首板数 ≥ 阈值则当日停手（None = 关闭）。
 # 阈值来自 Phase 0 滞后口径分位（高潮日成龙率 4.77% vs 冷日 11.54%）。
@@ -211,7 +309,47 @@ def _d1_factors(
         # ⑤ v4 白名单因子：近半年大周期 + 前 4-10 天 + 量能（复用深度研究口径）
         **_long_window_features(bars_before),
         **_mid_window_features(bars_before),
+        # ⑥ 归因补充：20 日位置/均线乖离/单日量能（D-1 可观测）
+        **_daily_position_volume_features(bars_before),
+        # ⑦ 前奏形态：小阳爬升/阴跌蓄势 + 量能共振（D-1 可观测，默认只 dump 观察）
+        **_prelude_pattern_features(bars_before),
     }
+
+
+def _is_owner_low_position(bars_before: Sequence[Mapping[str, object]]) -> bool:
+    """主人版低位（2026-08-02 锚点校准 v2''）：贴底企稳首板，四条件同时成立。
+
+    ① 距 126 日高点回撤 ≤ -25%（跌得深）；
+    ② 距 126 日低点反弹 ≤ 12%（离底近，刚见底）；
+    ③ 近 5 日涨幅 ≤ 6%（近期没有急反弹）；
+    ④ 近 20 日振幅 ≤ 40%（底部平稳，非剧烈震荡）。
+    锚点验证：立新能源/爱丽家居/传智教育全通过（振幅 21-34%）；
+    至纯科技（07-31：深 V 急反弹后底部剧烈震荡，20 日振幅 90%、
+    日均|涨跌| 7.0% vs 锚点 ≤3.2%——主人裁决「这种不算低位，
+    看前 30 日与均线」）被 ③④ 卡排除。
+    """
+
+    long_feats = _long_window_features(bars_before)
+    drawdown = _float(long_feats.get("drawdown_from_126d_high_pct"))
+    rebound = _float(long_feats.get("rebound_from_126d_low_pct"))
+    if drawdown is None or rebound is None:
+        return False
+    if drawdown > -25.0 or rebound > 12.0:
+        return False
+    if len(bars_before) >= 6:
+        last_close = _float(bars_before[-1].get("close_price"))
+        base_close = _float(bars_before[-6].get("close_price"))
+        if last_close and base_close and base_close > 0:
+            if (last_close / base_close - 1) * 100 > 6.0:
+                return False  # 近 5 日急涨（V 形右半坡，非贴底）
+    if len(bars_before) >= 20:
+        w20 = bars_before[-20:]
+        highs = [v for v in (_float(row.get("high_price")) for row in w20) if v]
+        lows = [v for v in (_float(row.get("low_price")) for row in w20) if v]
+        if highs and lows and min(lows) > 0:
+            if (max(highs) - min(lows)) / min(lows) * 100 > 40.0:
+                return False  # 底部剧烈震荡（非企稳）
+    return True
 
 
 def _position_filter_pass(
@@ -220,12 +358,15 @@ def _position_filter_pass(
     max_return_20d_pct: float,
     concept_r20: float | None,
 ) -> bool:
-    """位置过滤：low_position=v3 低位滤；deep_drop_exclusion=深跌排除+板块爆发豁免。"""
+    """位置过滤：low_position=v3 低位滤；deep_drop_exclusion=深跌排除+板块爆发豁免；
+    owner_low_position=主人版低位（只要贴底首板）。"""
 
     if mode == "none":
         return True
     if mode == "low_position":
         return _is_low_position(bars_before, max_return_20d_pct)
+    if mode == "owner_low_position":
+        return _is_owner_low_position(bars_before)
     if mode == "deep_drop_exclusion":
         long_feats = _long_window_features(bars_before)
         return_20d = _float(long_feats.get("return_20d_pct"))
@@ -296,6 +437,62 @@ def build_sector_r20_lookup(
     return lookup
 
 
+INDEX_VT_SYMBOL = "000001.SSE"  # 上证指数（stock_daily_bars 内含指数行）
+
+
+def _index_above_ma20(
+    index_daily_index: Mapping[str, Sequence[Mapping[str, object]]],
+    prev_day: str,
+) -> bool:
+    """D-1 指数收盘是否 ≥ MA20（盘前可观测，无未来函数）。数据不足默认放行。"""
+
+    rows = list(index_daily_index.get(INDEX_VT_SYMBOL) or [])
+    closes = [
+        _float(row.get("close_price"))
+        for row in rows
+        if str(row.get("trade_date") or "") <= prev_day
+    ]
+    closes = [value for value in closes if value]
+    if len(closes) < 20:
+        return True
+    ma20 = mean(closes[-20:])
+    return closes[-1] >= ma20
+
+
+def _daily_position_volume_features(
+    bars_before: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """前序交易日位置/量能补充因子（D-1 可观测）：20 日区间位置、均线乖离、单日量能比。"""
+
+    out: dict[str, object] = {
+        "position_20d": None,
+        "bias_ma5_pct": None,
+        "bias_ma20_pct": None,
+        "turnover_1d_vs_20d": None,
+    }
+    if len(bars_before) < 20:
+        return out
+    w20 = list(bars_before[-20:])
+    closes = [_float(row.get("close_price")) for row in w20]
+    last_close = closes[-1]
+    if not last_close:
+        return out
+    highs = [v for v in (_float(row.get("high_price")) for row in w20) if v]
+    lows = [v for v in (_float(row.get("low_price")) for row in w20) if v]
+    if highs and lows and max(highs) > min(lows) and min(lows) > 0:
+        out["position_20d"] = round((last_close - min(lows)) / (max(highs) - min(lows)), 4)
+    if len(closes) >= 5 and closes[-5] and mean(closes[-5:]) > 0:
+        out["bias_ma5_pct"] = round((last_close / mean(closes[-5:]) - 1) * 100, 4)
+    ma20 = mean(closes)
+    if ma20 > 0:
+        out["bias_ma20_pct"] = round((last_close / ma20 - 1) * 100, 4)
+    turnovers = [v for v in (_float(row.get("turnover")) for row in w20) if v]
+    d1_turnover = _float(bars_before[-1].get("turnover"))
+    if d1_turnover and len(turnovers) >= 20 and mean(turnovers) > 0:
+        out["turnover_1d_vs_20d"] = round(d1_turnover / mean(turnovers), 4)
+    return out
+
+
 def _d1_exit(bar: Mapping[str, object], prev_close: float) -> tuple[str, float]:
     """D+1 卖出决策（同打板口径）：返回 (exit_kind, price)。"""
 
@@ -341,6 +538,7 @@ def _trigger_buy(
     if open_price >= limit_price:
         return None  # 一字板开盘即封，买不到
     prev_window_close: float | None = None
+    trigger_index = 0
     for bar in window_bars:
         bar_time = str(bar.get("bar_time") or "")
         if bar_time < window_start or bar_time > window_end:
@@ -353,9 +551,64 @@ def _trigger_buy(
         if (prev_window_close and surge >= surge_pct) or cum >= cum_pct:
             if close >= limit_price:
                 return None  # 触发瞬间已封板（价格可观测），买不到
-            return {"buy_price": close, "buy_time": bar_time, "cum_pct": round(cum, 4)}
+            return {
+                "buy_price": close,
+                "buy_time": bar_time,
+                "cum_pct": round(cum, 4),
+                "trigger_kind": "surge" if (prev_window_close and surge >= surge_pct) else "cum",
+                "trigger_index": trigger_index,
+                "surge_pct_at_trigger": round(surge, 4),
+            }
         prev_window_close = close
+        trigger_index += 1
     return None
+
+
+def _trigger_minute_features(
+    window_bars: Sequence[Mapping[str, object]],
+    trigger: Mapping[str, object],
+    *,
+    open_price: float,
+    prev_close: float,
+) -> dict[str, object]:
+    """打板买入过程的分时特征（全部触发时点及之前可观测，无未来函数）。"""
+
+    out: dict[str, object] = {
+        "open_gap_pct": None,
+        "distance_to_limit_at_trigger_pct": None,
+        "pre_trigger_consolidation_pct": None,
+        "trigger_volume_ratio": None,
+    }
+    if open_price > 0 and prev_close > 0:
+        out["open_gap_pct"] = round((open_price / prev_close - 1) * 100, 4)
+        limit_price = main_board_limit_price(prev_close)
+        buy_price = _float(trigger.get("buy_price"))
+        if buy_price:
+            out["distance_to_limit_at_trigger_pct"] = round(
+                (buy_price / limit_price - 1) * 100, 4
+            )
+    trigger_time = str(trigger.get("buy_time") or "")
+    pre_closes: list[float] = []
+    pre_volumes: list[float] = []
+    trigger_volume: float | None = None
+    for bar in window_bars:
+        bar_time = str(bar.get("bar_time") or "")
+        close = _float(bar.get("close_price"))
+        volume = _float(bar.get("volume"))
+        if bar_time < trigger_time:
+            if close and close > 0:
+                pre_closes.append(close)
+            if volume is not None and volume > 0:
+                pre_volumes.append(volume)
+        elif bar_time == trigger_time and volume is not None and volume > 0:
+            trigger_volume = volume
+    if len(pre_closes) >= 2 and open_price > 0:
+        out["pre_trigger_consolidation_pct"] = round(
+            (max(pre_closes) - min(pre_closes)) / open_price * 100, 4
+        )
+    if trigger_volume is not None and pre_volumes and mean(pre_volumes) > 0:
+        out["trigger_volume_ratio"] = round(trigger_volume / mean(pre_volumes), 4)
+    return out
 
 
 def _build_month_calibration(
@@ -425,8 +678,30 @@ def simulate_allmarket_minute(
     max_lag1_first_board_count: float | None = DEFAULT_MAX_LAG1_FIRST_BOARD_COUNT,
     lag1_first_board_counts: Mapping[str, int] | None = None,
     sector_r20_lookup: Callable[[str, str], float | None] | None = None,
+    include_trigger_samples: bool = False,
+    include_trigger_features_in_calibration: bool = False,
+    min_trigger_volume_ratio: float | None = None,
+    entry_mode: str = "momentum_window",
+    max_entry_time: str | None = None,
+    min_touch_bar_close_position: float | None = None,
+    min_trigger_distance_to_limit_pct: float | None = None,
+    min_concept_r20_pct: float | None = None,
+    index_ma20_gate: bool = False,
+    index_daily_index: Mapping[str, Sequence[Mapping[str, object]]] | None = None,
+    require_prelude_pattern: str = "none",
+    include_prelude_factors_in_calibration: bool = False,
 ) -> dict[str, object]:
     """全市场分钟级回测：低位首板触发 → D-1 因子校准排序 → TOP N 买入 → D+1 卖出。"""
+
+    if entry_mode not in ENTRY_MODES:
+        raise ValueError(f"unknown entry mode: {entry_mode}")
+    if require_prelude_pattern not in PRELUDE_PATTERN_MODES:
+        raise ValueError(f"unknown prelude pattern mode: {require_prelude_pattern}")
+    calibration_factors = (
+        tuple(candidate_factors)
+        + (TRIGGER_CALIBRATION_FEATURES if include_trigger_features_in_calibration else ())
+        + (PRELUDE_CALIBRATION_FEATURES if include_prelude_factors_in_calibration else ())
+    )
 
     if config is None:
         config = CashBacktestConfig(max_positions=DEFAULT_MAX_POSITIONS)
@@ -453,6 +728,13 @@ def simulate_allmarket_minute(
         "coverage_total": 0,
         "trigger_count": 0,
         "calibration_months": 0,
+        "sweep_filled": 0,
+        "sweep_no_touch": 0,
+        "sweep_no_open": 0,
+        "sweep_too_late": 0,
+        "sweep_weak_touch": 0,
+        "days_skipped_index_gate": 0,
+        "candidates_skipped_prelude": 0,
     }
 
     def daily_close(symbol: str, today: str) -> float:
@@ -577,6 +859,13 @@ def simulate_allmarket_minute(
             >= max_lag1_first_board_count
         ):
             stats["days_skipped_hot_market"] += 1
+        # 大盘环境门：D-1 指数收盘 < MA20 → 当日停手（下跌段不做动量首板）
+        elif (
+            index_ma20_gate
+            and prev_day
+            and not _index_above_ma20(index_daily_index or {}, prev_day)
+        ):
+            stats["days_skipped_index_gate"] += 1
         else:
             stats["days_tradeable"] += 1
             month = today[:7]
@@ -586,7 +875,7 @@ def simulate_allmarket_minute(
                     month,
                     min_train_samples=min_train_samples,
                     min_effect=min_effect,
-                    candidate_factors=candidate_factors,
+                    candidate_factors=calibration_factors,
                 )
                 if calibrations[month]:
                     stats["calibration_months"] += 1
@@ -615,12 +904,83 @@ def simulate_allmarket_minute(
                     bars_before, position_filter, max_prior_return_20d_pct, concept_r20
                 ):
                     continue
+                # 前奏形态硬滤（默认关闭；研究裁决形态区分度弱，对照跑用）
+                if require_prelude_pattern != "none":
+                    matched = str(
+                        _prelude_pattern_features(bars_before).get("prelude_pattern")
+                    )
+                    passed = (
+                        matched in ("small_yang", "small_yin")
+                        if require_prelude_pattern == "any"
+                        else matched == require_prelude_pattern
+                    )
+                    if not passed:
+                        stats["candidates_skipped_prelude"] += 1
+                        continue
                 dbar = daily_index.get((symbol, today))
                 prev_bar = daily_index.get((symbol, prev_day)) if prev_day else None
                 if not dbar or not prev_bar:
                     continue
                 open_price = _float(dbar.get("open_price")) or 0.0
                 prev_close = _float(prev_bar.get("close_price")) or 0.0
+                if entry_mode == "sweep_board":
+                    # 扫板：触板后开板按涨停价排板成交；全天未开板 = 买不到
+                    sweep_status, entry = _sweep_entry_status(
+                        bars,
+                        prev_close=prev_close,
+                        max_entry_time=max_entry_time,
+                        min_touch_bar_close_position=min_touch_bar_close_position,
+                    )
+                    stats[f"sweep_{sweep_status}"] += 1
+                    if entry is None:
+                        continue
+                    factors = _d1_factors(bars_all[: index + 1], today)
+                    if factors is None:
+                        continue
+                    factors["concept_max_return_20d"] = concept_r20
+                    stats["trigger_count"] += 1
+                    sample: dict[str, object] = {
+                        **factors,
+                        "trigger_kind": "sweep_open",
+                        "vt_symbol": symbol,
+                        "name": name,
+                        "trade_date": today,
+                        "month": month,
+                        "buy_price": entry["buy_price"],
+                        "buy_time": entry["buy_time"],
+                        "touch_time": entry["touch_time"],
+                        "cum_pct": round(
+                            (float(entry["buy_price"]) / open_price - 1) * 100, 4
+                        )
+                        if open_price > 0
+                        else 0.0,
+                        "board_status": _board_status(dbar, prev_close),
+                        "is_leader": None,
+                        "bought": False,
+                        "score": None,
+                    }
+                    candidates.append(sample)
+                    # paper 单位持仓（训练标签，独立同规则模拟，不进真实账户）
+                    if symbol not in paper_positions:
+                        paper_buy = cash_ledger.calculate_buy_execution(
+                            raw_price=float(entry["buy_price"]),
+                            cash=PAPER_NOTIONAL,
+                            target_cash=PAPER_NOTIONAL,
+                            commission_rate=config.commission_rate,
+                            slippage_bps=config.slippage_bps,
+                            lot_size=config.lot_size,
+                            minimum_commission=config.minimum_commission,
+                            transfer_fee_rate=config.transfer_fee_rate,
+                        )
+                        if paper_buy.volume > 0:
+                            paper_positions[symbol] = _PaperPosition(
+                                sample=sample,
+                                volume=paper_buy.volume,
+                                buy_price=paper_buy.price,
+                                cash_cost=paper_buy.amount + paper_buy.fee,
+                                initial_volume=paper_buy.volume,
+                            )
+                    continue
                 trigger = _trigger_buy(
                     bars,
                     open_price=open_price,
@@ -636,9 +996,43 @@ def simulate_allmarket_minute(
                 if factors is None:
                     continue
                 factors["concept_max_return_20d"] = concept_r20
+                # 打板过程分时特征（触发时点可观测，归因研究用）
+                minute_features = _trigger_minute_features(
+                    bars, trigger, open_price=open_price, prev_close=prev_close
+                )
+                # 触发量能硬滤（归因验证：量比 ≥0.94 封板率 41.7% vs <0.94 的 26-31%）
+                if (
+                    min_trigger_volume_ratio is not None
+                    and (
+                        _float(minute_features.get("trigger_volume_ratio")) or 0.0
+                    )
+                    < min_trigger_volume_ratio
+                ):
+                    continue
+                # v6 预过滤①：远距急拉排除（触发时距涨停太远=封板率 13-15% 的弱票）
+                trigger_distance = _float(
+                    minute_features.get("distance_to_limit_at_trigger_pct")
+                )
+                if (
+                    min_trigger_distance_to_limit_pct is not None
+                    and trigger_distance is not None
+                    and trigger_distance < min_trigger_distance_to_limit_pct
+                ):
+                    continue
+                # v6 预过滤②：冷板块排除（concept r20 ≤ 阈值；无归属数据不罚）
+                if (
+                    min_concept_r20_pct is not None
+                    and concept_r20 is not None
+                    and concept_r20 <= min_concept_r20_pct
+                ):
+                    continue
                 stats["trigger_count"] += 1
                 sample: dict[str, object] = {
                     **factors,
+                    "trigger_kind": trigger["trigger_kind"],
+                    "trigger_index": trigger["trigger_index"],
+                    "surge_pct_at_trigger": trigger["surge_pct_at_trigger"],
+                    **minute_features,
                     "vt_symbol": symbol,
                     "name": name,
                     "trade_date": today,
@@ -753,7 +1147,7 @@ def simulate_allmarket_minute(
         del paper_positions[symbol]
 
     labeled = [s for s in train_samples if s.get("is_leader") is not None]
-    return {
+    result: dict[str, object] = {
         "execution_valid": False,
         "account_config": {
             "initial_cash": config.initial_cash,
@@ -779,13 +1173,26 @@ def simulate_allmarket_minute(
             "calibration_months": stats["calibration_months"],
             "train_samples_labeled": len(labeled),
             "label_win_count": sum(1 for s in labeled if s.get("is_leader")),
+            "sweep_filled": stats["sweep_filled"],
+            "sweep_no_touch": stats["sweep_no_touch"],
+            "sweep_no_open": stats["sweep_no_open"],
+            "sweep_too_late": stats["sweep_too_late"],
+            "sweep_weak_touch": stats["sweep_weak_touch"],
+            "days_skipped_index_gate": stats["days_skipped_index_gate"],
+            "candidates_skipped_prelude": stats["candidates_skipped_prelude"],
         },
         "backtest_config": {
             "factor_set": list(candidate_factors),
             "position_filter": position_filter,
             "max_lag1_first_board_count": max_lag1_first_board_count,
+            "entry_mode": entry_mode,
+            "max_entry_time": max_entry_time,
         },
     }
+    if include_trigger_samples:
+        # 归因研究用：全部触发样本（D-1 因子 + 分时特征 + 封板结局 + D+1 标签）
+        result["trigger_samples"] = train_samples
+    return result
 
 
 def _build_summary(config, final_cash, closed_trades, equity_curve):
@@ -827,6 +1234,17 @@ def run_minute_backtest(
     position_filter: str = "low_position",
     max_lag1_first_board_count: float | None = DEFAULT_MAX_LAG1_FIRST_BOARD_COUNT,
     minute_interval: str = "1m",
+    include_trigger_samples: bool = False,
+    include_trigger_features_in_calibration: bool = False,
+    min_trigger_volume_ratio: float | None = None,
+    entry_mode: str = "momentum_window",
+    max_entry_time: str | None = None,
+    min_touch_bar_close_position: float | None = None,
+    min_trigger_distance_to_limit_pct: float | None = None,
+    min_concept_r20_pct: float | None = None,
+    index_ma20_gate: bool = False,
+    require_prelude_pattern: str = "none",
+    include_prelude_factors_in_calibration: bool = False,
 ) -> dict[str, object]:
     """加载全市场日线 + 分钟 bar，跑无未来函数的低位首板分钟级回测。"""
 
@@ -870,6 +1288,13 @@ def run_minute_backtest(
             (lambda day: load_window_minute_bars(day, interval=minute_interval))
             if minute_interval != "1m"
             else load_window_minute_bars
+        )
+        if entry_mode != "sweep_board"
+        else (
+            # 扫板需要全天分钟 bar（触板/开板可能发生在任意时段）
+            lambda day: load_window_minute_bars(
+                day, start_time="09:25:00", end_time="15:01:00", interval=minute_interval
+            )
         ),
         surge_pct=surge_pct,
         cum_pct=cum_pct,
@@ -880,6 +1305,18 @@ def run_minute_backtest(
         max_lag1_first_board_count=max_lag1_first_board_count,
         lag1_first_board_counts=lag1_counts,
         sector_r20_lookup=sector_r20_lookup,
+        include_trigger_samples=include_trigger_samples,
+        include_trigger_features_in_calibration=include_trigger_features_in_calibration,
+        min_trigger_volume_ratio=min_trigger_volume_ratio,
+        entry_mode=entry_mode,
+        max_entry_time=max_entry_time,
+        min_touch_bar_close_position=min_touch_bar_close_position,
+        min_trigger_distance_to_limit_pct=min_trigger_distance_to_limit_pct,
+        min_concept_r20_pct=min_concept_r20_pct,
+        index_ma20_gate=index_ma20_gate,
+        index_daily_index=bars_by_symbol,
+        require_prelude_pattern=require_prelude_pattern,
+        include_prelude_factors_in_calibration=include_prelude_factors_in_calibration,
     )
     stats = result["coverage_stats"]
     result["study_version"] = STUDY_VERSION
@@ -891,6 +1328,9 @@ def run_minute_backtest(
     result["factor_set"] = factor_set
     result["position_filter"] = position_filter
     result["minute_interval"] = minute_interval
+    result["entry_mode"] = entry_mode
+    result["require_prelude_pattern"] = require_prelude_pattern
+    result["include_prelude_factors_in_calibration"] = include_prelude_factors_in_calibration
     result["notes"] = [
         "v3 在 v2 无未来函数口径上加「低位首板」约束：D-1未涨停（保证首板，排除连板延续）+ 前20日累计涨幅≤阈值（低位，排除高位追涨），全部 D-1 可观测。",
         "v4 变更：因子池换 Phase 0 稳定性门白名单（concept_max_return_20d/drawdown_126d/return_20d/volume_ratio_5_60/prior_return_5d/position_126d）；位置过滤可切 deep_drop_exclusion（深跌排除+板块爆发豁免）；滞后温度门可选（D-1 全市场首板数≥阈值停手，Phase 0 未过稳定性门，默认关闭）。",
@@ -921,6 +1361,62 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     parser.add_argument("--skip-save", action="store_true", help="不写 DB（A/B 对照跑法）")
     parser.add_argument("--minute-interval", choices=("1m", "5m"), default="1m")
+    parser.add_argument(
+        "--dump-trigger-samples",
+        action="store_true",
+        help="结果附带全部触发样本（归因研究用，样本量大时 JSON 较大）",
+    )
+    parser.add_argument(
+        "--trigger-features-in-calibration",
+        action="store_true",
+        help="把触发时分时因子（trigger_volume_ratio）加入月度校准池",
+    )
+    parser.add_argument(
+        "--min-trigger-volume-ratio",
+        type=float,
+        default=None,
+        help="触发量能硬滤：trigger_volume_ratio 低于阈值则跳过（默认关闭）",
+    )
+    parser.add_argument("--entry-mode", choices=ENTRY_MODES, default="momentum_window")
+    parser.add_argument(
+        "--max-entry-time",
+        default=None,
+        help="扫板模式：开板晚于该时刻不入场（如 14:00:00，默认不限）",
+    )
+    parser.add_argument(
+        "--min-touch-bar-close-position",
+        type=float,
+        default=None,
+        help="扫板模式：触板 bar 收盘位置低于阈值（0-1）则放弃该票（如 0.57）",
+    )
+    parser.add_argument(
+        "--min-trigger-distance-to-limit-pct",
+        type=float,
+        default=None,
+        help="分钟级：触发时距涨停低于阈值（如 -5.9）则跳过（远距急拉封板率低）",
+    )
+    parser.add_argument(
+        "--min-concept-r20-pct",
+        type=float,
+        default=None,
+        help="分钟级：板块 20 日动量 ≤ 阈值（如 0.35）则跳过（冷板块胜率低）",
+    )
+    parser.add_argument(
+        "--index-ma20-gate",
+        action="store_true",
+        help="大盘环境门：D-1 上证指数收盘 < MA20 则当日停手",
+    )
+    parser.add_argument(
+        "--require-prelude-pattern",
+        choices=PRELUDE_PATTERN_MODES,
+        default="none",
+        help="前奏形态硬滤：any=任一小阳/小阴形态才允许候选（默认关闭，对照跑用）",
+    )
+    parser.add_argument(
+        "--prelude-factors-in-calibration",
+        action="store_true",
+        help="把前奏形态因子（streak/量稳/量比）加入月度校准池",
+    )
     parser.add_argument("--json-output", type=Path, required=False)
     arguments = parser.parse_args(argv)
 
@@ -934,9 +1430,27 @@ def main(argv: Sequence[str] | None = None) -> None:
         position_filter=arguments.position_filter,
         max_lag1_first_board_count=arguments.max_lag1_first_board_count,
         minute_interval=arguments.minute_interval,
+        include_trigger_samples=arguments.dump_trigger_samples,
+        include_trigger_features_in_calibration=arguments.trigger_features_in_calibration,
+        min_trigger_volume_ratio=arguments.min_trigger_volume_ratio,
+        entry_mode=arguments.entry_mode,
+        max_entry_time=arguments.max_entry_time,
+        min_touch_bar_close_position=arguments.min_touch_bar_close_position,
+        min_trigger_distance_to_limit_pct=arguments.min_trigger_distance_to_limit_pct,
+        min_concept_r20_pct=arguments.min_concept_r20_pct,
+        index_ma20_gate=arguments.index_ma20_gate,
+        require_prelude_pattern=arguments.require_prelude_pattern,
+        include_prelude_factors_in_calibration=arguments.prelude_factors_in_calibration,
     )
     if not arguments.skip_save:
-        save_minute_backtest_run(STUDY_VERSION, result)
+        if arguments.entry_mode == "sweep_board":
+            from alphaagent.server.services.limit_up.leader_sweep_repository import (
+                save_sweep_backtest_run,
+            )
+
+            save_sweep_backtest_run(STUDY_VERSION, result)
+        else:
+            save_minute_backtest_run(STUDY_VERSION, result)
     if arguments.json_output:
         arguments.json_output.parent.mkdir(parents=True, exist_ok=True)
         arguments.json_output.write_text(

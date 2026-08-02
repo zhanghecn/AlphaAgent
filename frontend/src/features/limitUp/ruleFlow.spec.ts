@@ -29,12 +29,23 @@ const guide = {
 } as unknown as LimitUpStrategyGuide;
 
 describe("buildRuleFlow", () => {
-  it("生成八步流程：质量门 → 板前买点 → 触板 → 排序 → 成交", () => {
+  it("生成九步流程：质量门 → 板前买点 → 触板 → 排序 → 成交 → 前奏形态", () => {
     const nodes = buildRuleFlow(guide);
-    expect(nodes).toHaveLength(8);
+    expect(nodes).toHaveLength(9);
     expect(nodes.map((node) => node.stage)).toEqual([
-      "gate", "filter", "radar", "preboard", "momentum", "sector", "rank", "fill",
+      "gate", "filter", "radar", "preboard", "momentum", "sector", "rank", "fill", "prelude",
     ]);
+  });
+
+  it("前奏形态节点写清 A/B 定义与研究结论边界", () => {
+    const prelude = buildRuleFlow(guide).find((node) => node.stage === "prelude")!;
+    expect(prelude.title).toContain("低位首板观察池");
+    expect(prelude.condition).toContain("回撤 ≥25%");
+    expect(prelude.condition).toContain("反弹 ≤12%");
+    expect(prelude.condition).toContain("振幅 ≤40%");
+    expect(prelude.thresholds).toContainEqual({ label: "回撤深度", value: "距126日高点 ≥25%" });
+    expect(prelude.thresholds).toContainEqual({ label: "近5日涨幅", value: "≤6%（无急反弹）" });
+    expect(prelude.failHint).toContain("人工观察清单");
   });
 
   it("第一步固定唯一正式合同", () => {

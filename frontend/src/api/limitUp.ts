@@ -1,4 +1,4 @@
-import { ApiClientError, apiClient } from "./client";
+import { ApiClientError, apiClient, authFetch } from "./client";
 
 export type ExitMode = "dynamic" | "next_open" | "next_close" | "next_1430";
 export type EntryMode = "auction" | "sweep" | "tail" | "next_auction";
@@ -1123,12 +1123,89 @@ export function fetchFirstBoardLeaderLive(): Promise<FirstBoardLeaderSnapshot> {
   return apiClient.get<FirstBoardLeaderSnapshot>("/limit-up/first-board-leader/live");
 }
 
+export type PreludePattern = "small_yang" | "small_yin";
+export type PremarketPatternFilter = "all" | "has_pattern" | PreludePattern;
+
+export interface PremarketPreludeCandidate {
+  vt_symbol: string;
+  code: string;
+  name: string;
+  prelude_pattern: PreludePattern | "none";
+  streak: number | null;
+  vol_cv_7d: number | null;
+  vol_shift_ratio: number | null;
+  return_20d_pct: number | null;
+  concept_r20: number | null;
+  concepts: string[];
+}
+
+export interface PremarketPreludeCandidatesResult {
+  status: "ok" | "unavailable" | string;
+  message?: string;
+  trade_date?: string;
+  params?: Record<string, unknown>;
+  count?: number;
+  total?: number;
+  candidates?: PremarketPreludeCandidate[];
+  notes?: string[];
+}
+
+export function fetchPremarketPreludeCandidates(
+  pattern: PremarketPatternFilter = "all",
+  limit = 100,
+): Promise<PremarketPreludeCandidatesResult> {
+  return apiClient.get<PremarketPreludeCandidatesResult>(
+    `/limit-up/premarket/prelude-candidates?pattern=${pattern}&limit=${limit}`,
+  );
+}
+
+/**
+ * 下载盘前低位首板候选 txt（每行 6 位代码，同花顺自定义板块导入格式）。
+ * 响应非 {success,data} 包装，必须走 authFetch（client.ts 预留的下载通道）。
+ */
+export async function downloadPremarketPreludeCandidatesTxt(
+  pattern: PremarketPatternFilter = "all",
+  limit = 100,
+): Promise<void> {
+  const res = await authFetch(
+    `/limit-up/premarket/prelude-candidates.txt?pattern=${pattern}&limit=${limit}`,
+  );
+  if (!res.ok) {
+    let message = `下载失败（${res.status}）`;
+    try {
+      const payload = (await res.json()) as { error?: { message?: string } };
+      if (payload.error?.message) {
+        message = payload.error.message;
+      }
+    } catch {
+      // 非 JSON 错误响应，用默认文案
+    }
+    throw new ApiClientError("DOWNLOAD_FAILED", message, {}, res.status);
+  }
+  const disposition = res.headers.get("Content-Disposition") ?? "";
+  const match = /filename="?([^";]+)"?/.exec(disposition);
+  const filename = match?.[1] ?? "prelude_candidates.txt";
+  const blob = new Blob([await res.text()], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
 export function fetchFirstBoardLeaderForwardLedger(
   weeks = 8,
 ): Promise<LeaderForwardLedgerReport> {
   return apiClient.get<LeaderForwardLedgerReport>(
     `/limit-up/first-board-leader/forward-ledger?weeks=${weeks}`,
   );
+}
+
+export function fetchSweepBacktest(): Promise<FirstBoardLeaderBacktest> {
+  return apiClient.get<FirstBoardLeaderBacktest>("/limit-up/sweep-backtest");
 }
 
 export interface FirstBoardLeaderBacktest {

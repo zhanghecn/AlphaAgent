@@ -3,16 +3,17 @@ import { useQuery } from "@tanstack/react-query";
 import { Activity, BarChart3, BookOpenText, ClipboardList, ReceiptText } from "lucide-react";
 
 import {
-  fetchFirstBoardLeaderBacktest,
   fetchFirstBoardLeaderForwardLedger,
   fetchFirstBoardLeaderLive,
   fetchMinuteBacktest,
+  fetchSweepBacktest,
   type LimitUpLaneBacktest,
   type LimitUpLiveSignal,
 } from "@/api/limitUp";
 import { LoadingState } from "@/components/LoadingState";
 import { LedgerTimeline } from "@/features/limitUp/LedgerTimeline";
 import { LiveSignalCard } from "@/features/limitUp/LiveSignalCard";
+import { PremarketCandidatesPanel } from "@/features/limitUp/PremarketCandidatesPanel";
 import { ACTIVE_LIVE_SNAPSHOT_POLL_INTERVAL_MS } from "@/features/limitUp/nextSessionPlan";
 import { BacktestView } from "@/pages/LimitUpPage";
 import { cn } from "@/lib/utils";
@@ -76,10 +77,10 @@ export function FirstBoardLeaderPage() {
   );
 }
 
-function useLeaderBacktest() {
+function useSweepBacktest() {
   return useQuery({
-    queryKey: ["firstBoardLeaderBacktest"],
-    queryFn: fetchFirstBoardLeaderBacktest,
+    queryKey: ["leaderSweepBacktest"],
+    queryFn: fetchSweepBacktest,
     staleTime: 300_000,
   });
 }
@@ -145,6 +146,7 @@ function LiveLeaderView() {
         </div>
         {stale && <span className="shrink-0 text-xs text-amber-500">数据过期</span>}
       </div>
+      <PremarketCandidatesPanel />
       {leaders.length ? (
         <div className="grid gap-3 px-3 pb-4 sm:px-4 xl:grid-cols-2">
           {leaders.map((signal) => (
@@ -212,24 +214,24 @@ const FACTOR_LABELS: Record<string, string> = {
 };
 
 function BacktestLeaderView() {
-  const leaderQuery = useLeaderBacktest();
+  const sweepQuery = useSweepBacktest();
   const minuteQuery = useMinuteBacktest();
-  const [detail, setDetail] = useState<"minute" | "leader">("minute");
-  if (leaderQuery.isLoading || minuteQuery.isLoading) return <LoadingState rows={4} />;
-  const leaderReport = leaderQuery.data?.status === "ok" ? leaderQuery.data.report : undefined;
+  const [detail, setDetail] = useState<"minute" | "sweep">("minute");
+  if (sweepQuery.isLoading || minuteQuery.isLoading) return <LoadingState rows={4} />;
+  const sweepReport = sweepQuery.data?.status === "ok" ? sweepQuery.data.report : undefined;
   const minuteReport = minuteQuery.data?.status === "ok" ? minuteQuery.data.report : undefined;
-  if (!leaderReport && !minuteReport) {
-    return <EmptyState text={minuteQuery.data?.message ?? leaderQuery.data?.message ?? "回测未运行"} />;
+  if (!sweepReport && !minuteReport) {
+    return <EmptyState text={minuteQuery.data?.message ?? sweepQuery.data?.message ?? "回测未运行"} />;
   }
-  const active = detail === "minute" ? minuteReport : leaderReport;
+  const active = detail === "minute" ? minuteReport : sweepReport;
   const start = (active?.coverage?.reliable_start as string | undefined) ?? "";
   const end = (active?.coverage?.reliable_end as string | undefined) ?? "";
   return (
     <section aria-label="首板龙头回测">
-      <CompareCard leader={leaderReport} minute={minuteReport} />
+      <CompareCard sweep={sweepReport} minute={minuteReport} />
       <div className="flex flex-wrap items-center justify-between gap-3 border-b px-3 py-2 sm:px-4">
         <div className="flex rounded-lg border p-0.5 text-xs">
-          {(["minute", "leader"] as const).map((key) => (
+          {(["minute", "sweep"] as const).map((key) => (
             <button
               key={key}
               type="button"
@@ -241,14 +243,14 @@ function BacktestLeaderView() {
                   : "text-muted-foreground hover:text-foreground",
               )}
             >
-              {key === "minute" ? "分钟级（全市场无未来函数）" : "涨停价打板（上界）"}
+              {key === "minute" ? "分钟级（动量触发）" : "扫板（开板排板成交）"}
             </button>
           ))}
         </div>
         <span className="text-xs text-muted-foreground">
           {detail === "minute"
-            ? "全市场触发选股 · 9:31-9:40 surge/累计触发 · 仅宽覆盖日 · 无未来函数"
-            : "事后涨停池选股 · 假设涨停价全成交（实盘买不到的上界）"}
+            ? "9:31-9:40 surge/累计触发 · 量能过滤 · 仅宽覆盖日 · 无未来函数"
+            : "白名单因子共用 · 触板后开板按涨停价排板成交 · 全天未开板=买不到"}
         </span>
       </div>
       {active ? (
@@ -271,17 +273,17 @@ function BacktestLeaderView() {
   );
 }
 
-/** 打板（乐观上界）vs 分钟级（真实可执行）4 指标对照卡。 */
+/** 扫板（开板排板成交）vs 分钟级（动量触发）4 指标对照卡。 */
 function CompareCard({
-  leader,
+  sweep,
   minute,
 }: {
-  leader?: LimitUpLaneBacktest;
+  sweep?: LimitUpLaneBacktest;
   minute?: LimitUpLaneBacktest;
 }) {
   return (
     <div className="grid grid-cols-2 gap-px border-b bg-border">
-      <CompareColumn title="涨停价打板" badge="理想化上界" report={leader} />
+      <CompareColumn title="扫板" badge="开板排板成交" report={sweep} />
       <CompareColumn title="分钟级" badge="全市场·无未来函数" report={minute} highlight />
     </div>
   );
@@ -341,11 +343,11 @@ function fmtPct(v: number | null | undefined): string {
 }
 
 function LedgerLeaderView() {
-  const leaderQuery = useLeaderBacktest();
+  const sweepQuery = useSweepBacktest();
   const minuteQuery = useMinuteBacktest();
-  const [source, setSource] = useState<"minute" | "leader">("minute");
-  if (leaderQuery.isLoading || minuteQuery.isLoading) return <LoadingState rows={6} />;
-  const current = source === "minute" ? minuteQuery.data : leaderQuery.data;
+  const [source, setSource] = useState<"minute" | "sweep">("minute");
+  if (sweepQuery.isLoading || minuteQuery.isLoading) return <LoadingState rows={6} />;
+  const current = source === "minute" ? minuteQuery.data : sweepQuery.data;
   const ledgerDays = current?.ledger_days ?? [];
   return (
     <section aria-label="首板龙头历史交割单">
@@ -353,7 +355,7 @@ function LedgerLeaderView() {
         <span className="eyebrow">复盘 REVIEW</span>
         <span>⚠️ 回测模拟交割单，非实盘 · 最近 {ledgerDays.length} 个交易日 · 最新在左</span>
         <div className="ml-auto flex rounded-lg border p-0.5">
-          {(["minute", "leader"] as const).map((key) => (
+          {(["minute", "sweep"] as const).map((key) => (
             <button
               key={key}
               type="button"
@@ -365,7 +367,7 @@ function LedgerLeaderView() {
                   : "text-muted-foreground hover:text-foreground",
               )}
             >
-              {key === "minute" ? "分钟级" : "打板"}
+              {key === "minute" ? "分钟级" : "扫板"}
             </button>
           ))}
         </div>
@@ -505,7 +507,7 @@ function GuideView() {
         <div>
           <div className="mb-1 font-semibold">回测策略（历史模拟）</div>
           <ul className="ml-4 list-disc text-muted-foreground">
-            <li>涨停价打板：从事后涨停池选股、假设涨停价全成交——是「能买到」的理想上界，实盘封单厚时买不到</li>
+            <li>扫板：与分钟级共用白名单因子与深跌排除，但不用分钟触发条件——盘中触板后若开板（炸板），按涨停价排板成交；全天未开板=买不到（真实打板机制）</li>
             <li>分钟级（无未来函数）：universe=当日有分钟数据的全市场主板非ST股，9:31-9:40 内 surge≥2% 或累计≥7% 按触发 bar close 买入</li>
             <li>封板/一字用价格可观测判断（触发时 bar close≥涨停价或开盘≥涨停价则跳过），不用事后涨停数据</li>
             <li>v4-B 配置：白名单 6 因子 + 深跌排除（20日跌≤-8.5% 或距半年高点≤-21% 排除，板块20日≥+16.5% 豁免）——A/B 两档口径唯一都赢 v3 的版本</li>

@@ -801,6 +801,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "concurrency": 1,
         "job_ids": [
             "leader_minute_backtest_rerun",
+            "premarket_prelude_snapshot",
         ],
     },
 ]
@@ -813,6 +814,7 @@ LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID = "limit_up_live_trace_prune"
 LEADER_MINUTE_BACKTEST_RERUN_BATCH_JOB_ID = "leader_minute_backtest_rerun"
 LEADER_FORWARD_CAPTURE_BATCH_JOB_ID = "leader_forward_capture"
 LEADER_FORWARD_SETTLE_BATCH_JOB_ID = "leader_forward_settle"
+PREMARKET_PRELUDE_SNAPSHOT_BATCH_JOB_ID = "premarket_prelude_snapshot"
 INTERNAL_BATCH_JOB_IDS = {
     LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID,
     LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID,
@@ -822,6 +824,7 @@ INTERNAL_BATCH_JOB_IDS = {
     LEADER_MINUTE_BACKTEST_RERUN_BATCH_JOB_ID,
     LEADER_FORWARD_CAPTURE_BATCH_JOB_ID,
     LEADER_FORWARD_SETTLE_BATCH_JOB_ID,
+    PREMARKET_PRELUDE_SNAPSHOT_BATCH_JOB_ID,
 }
 HISTORY_INPUT_JOB_IDS = frozenset(
     {
@@ -3616,6 +3619,8 @@ def _run_sync_batch(
                 result = _run_limit_up_live_trace_prune_batch_job()
             elif job_id == LEADER_MINUTE_BACKTEST_RERUN_BATCH_JOB_ID:
                 result = _run_leader_minute_backtest_rerun_batch_job()
+            elif job_id == PREMARKET_PRELUDE_SNAPSHOT_BATCH_JOB_ID:
+                result = _run_premarket_prelude_snapshot_batch_job()
             elif job_id == LEADER_FORWARD_CAPTURE_BATCH_JOB_ID:
                 result = _run_leader_forward_capture_batch_job()
             elif job_id == LEADER_FORWARD_SETTLE_BATCH_JOB_ID:
@@ -3840,11 +3845,15 @@ def _run_leader_minute_backtest_rerun_batch_job() -> dict[str, Any]:
     """
 
     from alphaagent.server.services.limit_up.leader_minute_backtest import (
+        PRODUCTION_MIN_TRIGGER_VOLUME_RATIO,
         STUDY_VERSION,
         run_minute_backtest,
     )
     from alphaagent.server.services.limit_up.leader_minute_repository import (
         save_minute_backtest_run,
+    )
+    from alphaagent.server.services.limit_up.leader_sweep_repository import (
+        save_sweep_backtest_run,
     )
 
     end = _latest_complete_daily_date_for_research()
@@ -3856,16 +3865,60 @@ def _run_leader_minute_backtest_rerun_batch_job() -> dict[str, Any]:
         end=end,
         factor_set="v4",
         position_filter="deep_drop_exclusion",
+        min_trigger_volume_ratio=PRODUCTION_MIN_TRIGGER_VOLUME_RATIO,
+        index_ma20_gate=True,  # 大盘 MA20 环境门（宽口径验证：下跌段停手，回撤 -29%→-4%）
     )
     save_minute_backtest_run(STUDY_VERSION, result)
     summary = result.get("execution_summary") or {}
+    sweep_result = run_minute_backtest(
+        start=start,
+        end=end,
+        factor_set="v4",
+        position_filter="deep_drop_exclusion",
+        entry_mode="sweep_board",
+    )
+    save_sweep_backtest_run(STUDY_VERSION, sweep_result)
+    sweep_summary = sweep_result.get("execution_summary") or {}
     return {
         "rows_read": int((result.get("coverage_stats") or {}).get("trigger_count") or 0),
-        "rows_written": 1,
+        "rows_written": 2,
         "message": (
-            f"首板龙头分钟回测已刷新（v4-B）：{start.isoformat()}..{end.isoformat()}，"
-            f"复利 {summary.get('total_return_pct')}% / 胜率 {summary.get('win_rate')}% "
-            f"/ {summary.get('trade_count')} 笔"
+            f"首板龙头回测已刷新（v5b+扫板）：{start.isoformat()}..{end.isoformat()}，"
+            f"分钟级 复利 {summary.get('total_return_pct')}% / 胜率 {summary.get('win_rate')}% "
+            f"/ {summary.get('trade_count')} 笔；"
+            f"扫板 复利 {sweep_summary.get('total_return_pct')}% / 胜率 "
+            f"{sweep_summary.get('win_rate')}% / {sweep_summary.get('trade_count')} 笔"
+        ),
+    }
+
+
+def _run_premarket_prelude_snapshot_batch_job() -> dict[str, Any]:
+    """每晚 22:00（回测重跑后）预算盘前首板前奏候选并写快照表。
+
+    盘前 API 读快照毫秒返回——实时全市场形态扫描在 0.25 核 api 容器上要
+    30-60s，盘前等不起；worker 无 CPU 限制，EOD 后数据静态，提前算好。
+    """
+
+    from alphaagent.server.services.limit_up.premarket_prelude_service import (
+        build_premarket_prelude_candidates,
+        save_premarket_prelude_snapshot,
+    )
+
+    result = build_premarket_prelude_candidates(pattern="all", limit=0)  # 全量入快照
+    if result.get("status") != "ok":
+        return {
+            "status": "skipped",
+            "rows_read": 0,
+            "rows_written": 0,
+            "message": f"盘前前奏候选不可用：{result.get('message') or result.get('status')}",
+        }
+    written = save_premarket_prelude_snapshot(result)
+    return {
+        "rows_read": int(result.get("count") or 0),
+        "rows_written": written,
+        "message": (
+            f"盘前低位首板候选已刷新：D-1={result.get('trade_date')}，"
+            f"低位池 {result.get('count')} 只（板块动量排序，人工观察池）"
         ),
     }
 
@@ -7089,8 +7142,15 @@ def _upsert_minute_bars(
     items: list[dict[str, Any]],
     interval: str,
     source: str = "akshare",
+    *,
+    include_raw: bool = True,
+    on_conflict: str = "update",
 ) -> int:
-    """Upsert intraday bar rows for one stock."""
+    """Upsert intraday bar rows for one stock.
+
+    include_raw=False：不存 raw 原始报文（历史回填等大批量写入提速用）。
+    on_conflict="nothing"：已存在的行跳过重写（回填幂等且免 WAL 重写）。
+    """
     if not items:
         return 0
     normalized = normalize_exchange(symbol, exchange)
@@ -7114,7 +7174,7 @@ def _upsert_minute_bars(
             "volume": item.get("volume"),
             "turnover": item.get("turnover"),
             "source": str(item.get("source") or source or "akshare"),
-            "raw": item.get("raw") or item,
+            "raw": (item.get("raw") or item) if include_raw else {},
         }
     values = list(values_by_key.values())
     if not values:
@@ -7128,6 +7188,9 @@ def _upsert_minute_bars(
             statement = postgresql_insert(schema.stock_minute_bars).values(
                 values[start : start + 1_000]
             )
+            if on_conflict == "nothing":
+                session.execute(statement.on_conflict_do_nothing())
+                continue
             session.execute(
                 statement.on_conflict_do_update(
                     index_elements=(

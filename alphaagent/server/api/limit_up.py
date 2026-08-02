@@ -4,7 +4,7 @@ from datetime import date, datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Body, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from alphaagent.server.core.responses import fail, ok
 from alphaagent.server.db.session import is_database_configured
@@ -151,6 +151,60 @@ def first_board_leader_forward_ledger(weeks: int = 8):
         return _service_error(exc)
 
 
+@router.get("/premarket/prelude-candidates", response_model=None)
+def premarket_prelude_candidates(
+    pattern: Literal["all", "has_pattern", "small_yang", "small_yin"] = "all",
+    limit: int = 100,
+):
+    """盘前低位首板候选清单（主人版低位+首板条件，板块动量排序，人工核对观察池）。"""
+
+    if not is_database_configured():
+        return JSONResponse(
+            status_code=503,
+            content=fail("DATABASE_UNAVAILABLE", "数据库未配置，无法筛选盘前候选"),
+        )
+    try:
+        from alphaagent.server.services.limit_up.premarket_prelude_service import (
+            get_premarket_prelude_candidates,
+        )
+
+        return ok(get_premarket_prelude_candidates(pattern=pattern, limit=limit))
+    except Exception as exc:  # noqa: BLE001
+        return _service_error(exc)
+
+
+@router.get("/premarket/prelude-candidates.txt", response_model=None)
+def premarket_prelude_candidates_txt(
+    pattern: Literal["all", "has_pattern", "small_yang", "small_yin"] = "all",
+    limit: int = 100,
+):
+    """盘前低位首板候选 txt 下载（每行 6 位代码，同花顺自定义板块导入格式）。"""
+
+    if not is_database_configured():
+        return JSONResponse(
+            status_code=503,
+            content=fail("DATABASE_UNAVAILABLE", "数据库未配置，无法导出盘前候选"),
+        )
+    try:
+        from alphaagent.server.services.limit_up.premarket_prelude_service import (
+            get_premarket_prelude_candidates,
+            render_candidates_txt,
+        )
+
+        result = get_premarket_prelude_candidates(pattern=pattern, limit=limit)
+        trade_date = str(result.get("trade_date") or "unknown")
+        return PlainTextResponse(
+            render_candidates_txt(result),
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="prelude_candidates_{trade_date}.txt"'
+                )
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _service_error(exc)
+
+
 @router.get("/first-board-leader/backtest", response_model=None)
 def first_board_leader_backtest():
     """返回首板龙头历史回测结果（回测模拟，非实盘，读库）。"""
@@ -193,6 +247,32 @@ def leader_minute_backtest():
         return ok({
             "status": "unavailable",
             "message": "分钟级回测尚未运行",
+            "is_backtest": False,
+            "report": None,
+            "ledger_days": [],
+        })
+    return ok({
+        "status": "ok",
+        "is_backtest": True,
+        "report": adapt_minute_backtest(data),
+        "ledger_days": group_minute_trades_by_day(data),
+        "notes": data.get("notes"),
+    })
+
+
+@router.get("/sweep-backtest", response_model=None)
+def leader_sweep_backtest():
+    """首板龙头扫板回测：触板后开板按涨停价排板成交（全天未开板=买不到）。"""
+
+    from alphaagent.server.services.limit_up.leader_sweep_repository import (
+        load_sweep_backtest_run,
+    )
+
+    data = load_sweep_backtest_run()
+    if not data:
+        return ok({
+            "status": "unavailable",
+            "message": "扫板回测尚未运行",
             "is_backtest": False,
             "report": None,
             "ledger_days": [],

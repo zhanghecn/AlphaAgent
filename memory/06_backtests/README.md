@@ -146,6 +146,72 @@
   `limit_up_leader_minute_backtest_v4ab_20260801.md`，
   原始跑数 `leader_minute_backtest_ab_*_20260801.json`（6 个）+
   `leader_minute_backtest_v4b_5m_20260801.json`（5m 变体负面结论 -10.4%/PF 0.84，不采用）。
+- 触发样本归因（783 带标签触发，位置/量能/分时三维度）+ **v5b 生产改进**：
+  封板后 D+1 胜率 88.1% 的结构下，`trigger_volume_ratio`（触发 bar 量比）
+  是封板最强可交易确认（AUC 0.63、6/7 月一致）；硬滤 ≥0.94 两档全面改善
+  （≥600 +8.8/65.6% vs +5.8/54.8%；≥300 +61.6/67.9% vs +51.4/60.5%，
+  触发池封板率 36.5%→41.9%/48.1%）；位置因子在触发群体方向反转
+  （校准自适应无需动作）、贴板排除月度不一致弃用：
+  `limit_up_leader_trigger_postmortem_cov300_20260801.md`、
+  `limit_up_leader_trigger_postmortem_cov300_20260801.json`，
+  v5b 跑数 `leader_minute_backtest_v5b_filter_trigvol_cov300/cov600_20260801.json`。
+- 扫板回测（真实排板成交模型，与分钟级同引擎同因子）：触板后开板按涨停价
+  成交、全天未开板=买不到——**结构性逆向选择大幅亏损**（≥600 -30.4%/22.6%；
+  ≥300 -29.5%/38.7%，排板成交的票全是开过板的弱板，1/3 未回封均 -5.6%），
+  精确量化旧「涨停价打板」幻觉来源；与分钟级对照证明**触板前动量买入是
+  唯一正期望入口**；分钟数据覆盖排查（非全票：日常 top100 活跃股+事件票回填，
+  最好单日仅主板 44%）；前端「打板」视图已统一为扫板：
+  `limit_up_leader_sweep_backtest_20260801.md`，
+  跑数 `leader_sweep_backtest_cov300/cov600/cov300_cut1400_20260801.json`。
+- 扫板质量研究（1164 触板事件，验证「炸板率高=选票问题」假说）：基线封板率
+  73.6%、开板后回封率 63.8%（排板成交生存率上限）；触板特征预判力整体弱
+  （最强触板 bar 收盘位置 AUC 0.576、concept_max_return_20d 0.543 甜点 22-32%）；
+  扫板 v2a（弱势触板过滤）几乎无改善——**亏损根源是成本结构+逆向选择不是选票**：
+  `limit_up_leader_sweep_quality_20260801.md`、
+  `limit_up_leader_sweep_quality_20260801.json`，
+  v2a 跑数 `leader_sweep_backtest_cov300_clospos057_20260801.json`。
+- 分钟数据全主板回填（近 3 个月全票）：`backfill_tdx_minute_market`
+  （TDX 分页、幂等续传、8 线程、僵尸主机 probe 跳过）——
+  机制与坑见 `limit_up_leader_sweep_backtest_20260801.md` 附录。
+- **中间版（回填进行中，~1600 票/日，≥1000 口径 44 天全交易日）**：
+  v5b +21.1%/55.9%/127 笔/PF 1.21——**6 月 +38285（60 笔 39 胜）强、
+  7 月 -17183（67 笔 32 胜）转亏**：宽 universe（加入非活跃股）稀释了
+  窄口径的胜率；回撤 -29.3%。扫板质量 1491 事件复核：封板率 70.0%、
+  开板后回封率 60.0%，与窄口径一致（结构率稳健）。
+  中间版非全票（深市优先回填顺序偏差）：
+  `leader_minute_backtest_v5b_interim_cov1000_20260802.json`、
+  `limit_up_leader_sweep_quality_interim_20260802.{json,md}`。
+  **全量终版（回填完成，44 天 2892-3206 票/日 ≥2800 口径）**：v5b 无门
+  +16.4%/53.1%/PF 1.16（7 月 -18627 环境性亏损确认非数据假象）；
+  v5b+MA20 门 +28.0%/76.5%/PF 3.13/回撤 -1.9%（7 月 +10882）——
+  中间版结论全部被全量确认，详见 v4ab 文档附 2 全量终版节：
+  `leader_minute_backtest_v5b_full_cov2800_20260802.json`、
+  `leader_minute_backtest_v5b_gate_full_cov2800_20260802.json`。
+- 首板前奏形态研究（主人假说验证，11223 首板 / 2462 个 >=2 板正样本，
+  基线 21.94%）：**A/B 量能方向假说显著成立**（p<0.0001，A 小阳 shift 中位
+  1.018 放量倾向 / B 小阴 0.862 有 69% 缩量）；**vol_shift_ratio（前奏放量）
+  唯一过月度一致性**（AUC 0.5446、一致率 0.857、6/7 月不翻转）；
+  A 小阳 >=2 板率 24.68% vs 基线 21.94%（±2% 严格档 24.65%）；
+  **B 阴跌型被否决**（成功组命中率 9.18% < 失败组 9.63%，组合 18.65% 低于基线）；
+  形态整体区分度弱（78% 成功首板无前奏形态）→ 形态做盘前人工观察清单、
+  vol_shift 进校准池当加分因子，不做硬过滤：
+  `limit_up_leader_first_board_prelude_pattern_20260802.md`、
+  `limit_up_leader_first_board_prelude_pattern_20260802.json`。
+  **Phase 3 回测对照裁决（全量 44 天，附录同文档）**：前奏因子进回测全否决——
+  分钟+校准池 +1.4%/PF 1.01（稀释有效因子，7 月 -18.6k→-33.6k）、
+  分钟+硬滤 -11.8%/40%（砍 99.8% 候选自残）、扫板+校准池 ≡ 基线零效果
+  （校准未生效）、扫板+硬滤 -20.3%（少亏只因少交易）；
+  扫板基线全量 -56.1%/33.6%/PF 0.44 两月全亏——结构性负期望终锤；
+  分钟级 v5b 触板前动量买入仍是唯一正期望入口：
+  `leader_minute_backtest_v5b_preludecalib/preludereq_full_20260802.json`、
+  `leader_sweep_backtest_full_baseline/preludecalib/preludereq_20260802.json`。
+- 候选池召回核对 + 主人版低位定义（prelude 文档附 2，2026-08-02 午）：
+  现有过滤链召回 >=2 板票 73-81%（漏网 100% 深跌排除，误杀不可分）；
+  低位四条件定稿（回撤≥25%+离底≤12%+近5日≤6%+20日振幅≤40%，
+  至纯 90% 振幅案例卡出）；低位口径自动回测否决（-4.9%/PF 0.94，
+  安全垫换弹性）→ 定位人工观察池；「低位+题材」（板块动量）是唯一
+  区分因子；三层架构（低位 universe + txt 前 100 + 自动层不变）：
+  `leader_minute_backtest_lowpos_full/gate_full_cov2800_20260802.json`。
 - 板前正式触板联合目标、独立消融、自然 v2 审计和可靠产品边界：
   `limit_up_formal_touch_readiness_20260728.md`、
   `limit_up_formal_touch_readiness_20260728.json`。

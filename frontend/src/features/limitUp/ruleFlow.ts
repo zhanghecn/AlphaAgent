@@ -5,7 +5,7 @@ export interface RuleThreshold {
   value: string;
 }
 
-export type RuleStage = "gate" | "filter" | "radar" | "preboard" | "momentum" | "sector" | "rank" | "fill";
+export type RuleStage = "gate" | "filter" | "radar" | "preboard" | "momentum" | "sector" | "rank" | "fill" | "prelude";
 
 export interface RuleFlowNode {
   id: string;
@@ -35,6 +35,7 @@ export const STAGE_META: Record<RuleStage, { label: string; tone: string }> = {
   sector: { label: "板块确认", tone: "border-rise/50 bg-rise/10 text-rise" },
   rank: { label: "排序优先", tone: "border-foreground/30 bg-muted/60 text-foreground" },
   fill: { label: "成交结算", tone: "border-foreground/30 bg-muted/60 text-foreground" },
+  prelude: { label: "前奏形态", tone: "border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-300" },
 };
 
 /**
@@ -185,6 +186,27 @@ export function buildRuleFlow(guide: LimitUpStrategyGuide): RuleFlowNode[] {
       ],
       dataNote: "点时买入价格代理、正式费用和 D+1 官方日线。",
       dataGroupKeys: ["intraday", "outcome"],
+    },
+    {
+      id: "prelude",
+      stage: "prelude",
+      badge: "⑨",
+      title: "盘前低位首板观察池（人工核对用）",
+      purpose: "盘前把贴底企稳的低位首板候选筛出来（同花顺 txt 导出），早盘人工结合题材与涨幅核对后快速打板。",
+      condition:
+        "低位四条件（主人锚点校准）：① 距 126 日高点回撤 ≥25%（跌得深）② 距 126 日低点反弹 ≤12%（离底近、刚见底）③ 近 5 日涨幅 ≤6%（没有急反弹）④ 近 20 日振幅 ≤40%（底部平稳非剧烈震荡）。排序：板块 20 日动量降序（低位+题材是核心路径）→ 缩量企稳 → 量稳度。",
+      thresholds: [
+        { label: "回撤深度", value: "距126日高点 ≥25%" },
+        { label: "离底距离", value: "距126日低点 ≤12%" },
+        { label: "近5日涨幅", value: "≤6%（无急反弹）" },
+        { label: "20日振幅", value: "≤40%（底部平稳）" },
+        { label: "附加约束", value: "主板非ST + D-1 未涨停" },
+      ],
+      dataNote:
+        "全部为 D-1 收盘前已知的日线数据；每晚 22:00 预算写快照，盘前候选清单与同花顺 txt 导出直接读取。",
+      dataGroupKeys: ["prior"],
+      failHint:
+        "低位首板自动策略为负期望（安全垫厚但向上弹性小）——本池只做人工观察清单，不进自动打分；自动买入层保持深跌排除+白名单打分路线。",
     },
   ];
 }

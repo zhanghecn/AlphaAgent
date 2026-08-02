@@ -133,20 +133,21 @@ def test_eod_backtest_2200_schedule_registered() -> None:
     schedules = {item["id"]: item for item in svc.DEFAULT_BATCH_SCHEDULES}
     entry = schedules["eod_backtest_2200"]
     assert entry["cron"] == "0 22 * * 1-5"
-    assert entry["job_ids"] == ["leader_minute_backtest_rerun"]
+    assert entry["job_ids"] == ["leader_minute_backtest_rerun", "premarket_prelude_snapshot"]
     assert svc.LEADER_MINUTE_BACKTEST_RERUN_BATCH_JOB_ID in svc.INTERNAL_BATCH_JOB_IDS
+    assert svc.PREMARKET_PRELUDE_SNAPSHOT_BATCH_JOB_ID in svc.INTERNAL_BATCH_JOB_IDS
 
 
 def test_leader_minute_backtest_rerun_uses_v4b_config(monkeypatch) -> None:
     from datetime import date as date_type
 
-    calls: dict[str, object] = {}
+    runs: list[dict[str, object]] = []
     monkeypatch.setattr(
         svc, "_latest_complete_daily_date_for_research", lambda: date_type(2026, 7, 31)
     )
 
     def fake_run(**kwargs):
-        calls.update(kwargs)
+        runs.append(dict(kwargs))
         return {
             "execution_summary": {
                 "total_return_pct": 51.4,
@@ -160,15 +161,26 @@ def test_leader_minute_backtest_rerun_uses_v4b_config(monkeypatch) -> None:
 
     import alphaagent.server.services.limit_up.leader_minute_backtest as backtest
     import alphaagent.server.services.limit_up.leader_minute_repository as repository
+    import alphaagent.server.services.limit_up.leader_sweep_repository as sweep_repository
 
     monkeypatch.setattr(backtest, "run_minute_backtest", fake_run)
-    monkeypatch.setattr(repository, "save_minute_backtest_run", lambda v, r: saved.update(version=v, payload=r))
+    monkeypatch.setattr(repository, "save_minute_backtest_run", lambda v, r: saved.update(version=v, minute=r))
+    monkeypatch.setattr(sweep_repository, "save_sweep_backtest_run", lambda v, r: saved.update(sweep=r))
 
     result = svc._run_leader_minute_backtest_rerun_batch_job()
-    assert calls["factor_set"] == "v4"
-    assert calls["position_filter"] == "deep_drop_exclusion"
-    assert calls["start"].isoformat() == "2026-03-03"  # end - 150 天
-    assert calls["end"].isoformat() == "2026-07-31"
+    minute_run = runs[0]
+    assert minute_run["factor_set"] == "v4"
+    assert minute_run["position_filter"] == "deep_drop_exclusion"
+    assert minute_run["min_trigger_volume_ratio"] == 0.94  # v5b 归因裁决的生产触发量能滤
+    assert minute_run["index_ma20_gate"] is True  # 大盘 MA20 环境门（7 月崩盘段止损）
+    assert minute_run["start"].isoformat() == "2026-03-03"  # end - 150 天
+    assert minute_run["end"].isoformat() == "2026-07-31"
+    sweep_run = runs[1]
+    assert sweep_run["entry_mode"] == "sweep_board"
+    assert sweep_run["factor_set"] == "v4"
+    assert sweep_run["position_filter"] == "deep_drop_exclusion"
+    assert "min_trigger_volume_ratio" not in sweep_run or sweep_run.get("min_trigger_volume_ratio") is None
     assert saved["version"] == backtest.STUDY_VERSION
-    assert result["rows_written"] == 1
+    assert "sweep" in saved
+    assert result["rows_written"] == 2
     assert "51.4" in result["message"]

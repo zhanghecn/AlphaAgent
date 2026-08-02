@@ -410,3 +410,246 @@ def _tdx_row_to_item(row: dict[str, Any], bar_time: datetime, vt_symbol: str, ca
         "source": "tdx_public_hq",
         "raw": {**dict(row), "vt_symbol": vt_symbol, "tdx_category": category},
     }
+
+
+# ── 全市场分钟历史回填（近 3 个月全票）─────────────────────────────────
+
+MAIN_BOARD_PREFIXES = ("60", "00")
+BACKFULL_RECONNECT_EVERY = 150  # 每 N 票轮换 TDX 主机（防单连接被封）
+BACKFULL_MIN_BARS_COVERED = 8000  # 已覆盖判定：≥ 该 bar 数且最早日 ≤ start_date 即跳过（防中断部分写入误判）
+
+
+def load_market_backfill_symbols() -> list[dict[str, str]]:
+    """全主板（60/00）票清单（回填目标 universe）。"""
+
+    from alphaagent.server.db import schema
+    from alphaagent.server.db.session import session_scope
+    from sqlalchemy import select
+
+    with session_scope() as session:
+        rows = session.execute(
+            select(schema.stocks.c.symbol, schema.stocks.c.exchange, schema.stocks.c.vt_symbol)
+            .where(
+                schema.stocks.c.vt_symbol.like("60%") | schema.stocks.c.vt_symbol.like("00%")
+            )
+            .order_by(schema.stocks.c.vt_symbol)
+        ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def load_covered_symbols(interval: str, start_date: date) -> set[str]:
+    """已覆盖 start_date 的票（min(trade_date) ≤ start_date 且 bar 数足够）→ 续传跳过。"""
+
+    from alphaagent.server.db import schema
+    from alphaagent.server.db.session import session_scope
+    from sqlalchemy import func, select
+
+    with session_scope() as session:
+        rows = session.execute(
+            select(schema.stock_minute_bars.c.vt_symbol)
+            .where(schema.stock_minute_bars.c.interval == interval)
+            .group_by(schema.stock_minute_bars.c.vt_symbol)
+            .having(
+                (func.min(schema.stock_minute_bars.c.trade_date) <= start_date)
+                & (func.count() >= BACKFULL_MIN_BARS_COVERED)
+            )
+        ).scalars().all()
+    return {str(row) for row in rows}
+
+
+def _fetch_symbol_history_rows(
+    api,
+    *,
+    category: int,
+    market: int,
+    symbol: str,
+    vt_symbol: str,
+    start_date: date,
+    end_date: date,
+    max_pages: int,
+) -> tuple[list[dict[str, Any]], int, list[str]]:
+    """翻页拉取 [start_date, end_date] 全日 1m bar（newest-first 直到越过 start_date）。"""
+
+    rows: list[dict[str, Any]] = []
+    scanned = 0
+    errors: list[str] = []
+    for page in range(max_pages):
+        start = page * TDX_PAGE_SIZE
+        if start > TDX_MAX_START:
+            break
+        try:
+            page_rows = api.get_security_bars(category, market, symbol, start, TDX_PAGE_SIZE) or []
+        except Exception as exc:
+            errors.append(f"{vt_symbol} start={start}: {exc.__class__.__name__}")
+            break
+        if not page_rows:
+            break
+        scanned += len(page_rows)
+        page_dates: list[date] = []
+        for raw in page_rows:
+            bar_time = _parse_tdx_datetime(raw)
+            if bar_time is None:
+                continue
+            page_dates.append(bar_time.date())
+            if start_date <= bar_time.date() <= end_date:
+                rows.append(_tdx_row_to_item(raw, bar_time, vt_symbol, category))
+        if page_dates and min(page_dates) < start_date:
+            break  # 已越过起点
+    return rows, scanned, errors
+
+
+def backfill_tdx_minute_market(
+    *,
+    start_date: date,
+    end_date: date | None = None,
+    symbols: Sequence[str] | None = None,
+    interval: str = "1m",
+    max_pages_per_symbol: int = 25,
+    reconnect_every: int = BACKFULL_RECONNECT_EVERY,
+    timeout_seconds: float = 3.0,
+    dry_run: bool = False,
+    progress_interval: int = 100,
+    workers: int = 6,
+) -> dict[str, Any]:
+    """全主板分钟历史回填：近 3 个月全票 1m bar，可续传（已覆盖票自动跳过）。
+
+    数据源：通达信公开行情（pytdx 分页 newest-first）；健康主机实测 ~1.1s/票
+    （20 页），默认 6 线程（每线程独立 TDX 连接，自动 probe 跳过僵尸主机）。
+    幂等 upsert，可反复运行补增量。
+    """
+
+    if not is_database_configured():
+        return {"status": "unavailable", "message": "DATABASE_URL not configured"}
+    interval_key = str(interval or "1m").strip().lower()
+    category = SUPPORTED_INTERVALS.get(interval_key)
+    if category is None:
+        return {"status": "unsupported_interval", "interval": interval}
+    end_date = end_date or date.today()
+    stock_rows = load_market_backfill_symbols()
+    if symbols:
+        wanted = {str(one) for one in symbols}
+        stock_rows = [row for row in stock_rows if str(row.get("vt_symbol")) in wanted]
+    covered = load_covered_symbols(interval_key, start_date)
+    pending = [row for row in stock_rows if str(row.get("vt_symbol")) not in covered]
+    counters = {
+        "symbols_total": len(stock_rows),
+        "symbols_covered": len(covered),
+        "symbols_pending": len(pending),
+        "done": 0,
+        "failed": 0,
+        "rows_read": 0,
+        "rows_written": 0,
+        "reconnects": 0,
+        "errors": [],
+    }
+    if dry_run:
+        return {"status": "dry_run", **counters, "start_date": start_date.isoformat(), "end_date": end_date.isoformat()}
+
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    lock = threading.Lock()
+    tls = threading.local()
+
+    def _worker_api() -> object:
+        # 每线程一条 TDX 连接；每 reconnect_every 次用（按 usage 轮换主机）
+        if getattr(tls, "api", None) is None:
+            tls.api, _host = _connect_tdx(
+                timeout_seconds=timeout_seconds, probe=(category, 1, "600000")
+            )
+            with lock:
+                counters["reconnects"] += 1
+            tls.uses = 0
+        return tls.api
+
+    def _drop_worker_api() -> None:
+        _disconnect_tdx(getattr(tls, "api", None))
+        tls.api = None
+
+    def _do_one(stock: Mapping[str, Any]) -> tuple[int, int, list[str]]:
+        vt = str(stock.get("vt_symbol") or "")
+        for attempt in range(2):
+            try:
+                rows, scanned, errors = _fetch_symbol_history_rows(
+                    _worker_api(),
+                    category=category,
+                    market=_tdx_market(str(stock.get("exchange") or "")),
+                    symbol=str(stock.get("symbol") or vt.split(".")[0]),
+                    vt_symbol=vt,
+                    start_date=start_date,
+                    end_date=end_date,
+                    max_pages=max_pages_per_symbol,
+                )
+                written = 0
+                if rows:
+                    symbol, exchange = parse_vt_symbol(vt)
+                    written = _upsert_minute_bars(
+                        symbol,
+                        exchange.value,
+                        rows,
+                        interval_key,
+                        "tdx_public_hq",
+                        include_raw=False,
+                        on_conflict="nothing",
+                    )
+                tls.uses = getattr(tls, "uses", 0) + 1
+                if tls.uses % reconnect_every == 0:
+                    _drop_worker_api()
+                return scanned, written, errors if not rows else []
+            except Exception as exc:  # noqa: BLE001
+                _drop_worker_api()
+                if attempt == 1:
+                    return 0, 0, [f"{vt}: {exc.__class__.__name__}"]
+        return 0, 0, [f"{vt}: retry_exhausted"]
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        for scanned, written, errors in pool.map(_do_one, pending):
+            counters["rows_read"] += scanned
+            counters["rows_written"] += written
+            if errors:
+                counters["failed"] += 1
+                counters["errors"].extend(errors[:2])
+            counters["done"] += 1
+            if progress_interval and counters["done"] % progress_interval == 0:
+                print(
+                    f"[tdx-backfill] {counters['done']}/{len(pending)} "
+                    f"written={counters['rows_written']} failed={counters['failed']}",
+                    flush=True,
+                )
+    for api in [getattr(tls, "api", None)]:
+        _disconnect_tdx(api)
+    return {
+        "status": "ok",
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        **counters,
+        "errors": counters["errors"][:20],
+    }
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    """CLI：全主板分钟历史回填（默认近 95 天，可 --symbols 限定/--dry-run 预估）。"""
+
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--start-date", type=date.fromisoformat, required=True)
+    parser.add_argument("--end-date", type=date.fromisoformat, default=None)
+    parser.add_argument("--symbols", nargs="*", default=None, help="限定 vt_symbol 列表")
+    parser.add_argument("--interval", default="1m", choices=sorted(SUPPORTED_INTERVALS))
+    parser.add_argument("--max-pages-per-symbol", type=int, default=25)
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args(argv)
+    result = backfill_tdx_minute_market(
+        start_date=args.start_date,
+        end_date=args.end_date,
+        symbols=args.symbols,
+        interval=args.interval,
+        max_pages_per_symbol=args.max_pages_per_symbol,
+        dry_run=args.dry_run,
+    )
+    print(result)
+
+
+if __name__ == "__main__":
+    main()
