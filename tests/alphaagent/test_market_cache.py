@@ -37,3 +37,14 @@ def test_ttl_cache_custom_copier_can_keep_nested_values_shared() -> None:
 
     assert first is not second
     assert first["guard"] is second["guard"] is guard
+
+
+def test_ttl_cache_get_reads_a_fresh_value_without_running_a_loader() -> None:
+    cache = TTLCache()
+    cache.get_or_set("report", 60, lambda: {"rows": []})
+
+    first = cache.get("report")
+    assert first == {"rows": []}
+    first["rows"].append("caller mutation")
+
+    assert cache.get("report") == {"rows": []}

@@ -47,6 +47,23 @@ uv run python examples/veighna_trader/run.py
   标签工作流生成 API/Web 镜像。
 - 远端当前镜像和运行状态必须在目标主机现场核验；不再保留过期镜像哈希、批次 ID
   或旧策略版本作为当前事实。
+- 已验证的性能风险：正式组合的 `/api/limit-up/history/backtest?lane=portfolio`
+  与默认历史交割单都会进入 `get_scheduled_history_backtest()`。进程内报告缓存冷启动时，
+  它会读取完整历史并补齐 C 质量证据；`history/status=ready` 只说明持久化历史账本可读，
+  不代表该报告缓存已经就绪。若 API、PostgreSQL 或 worker 仍使用 Compose 的 `0.25`
+  CPU 默认值，完整计算会超过网关 60 秒上限，网关返回 502，页面会在查询重试期间持续显示
+  “A+B+C 回测载入中”。
+- 正式组合报告的冷缓存处理已在本地代码实现、待版本化发版：
+  `/api/limit-up/history/backtest?lane=portfolio` 和默认
+  `/api/limit-up/history/ledger` 先返回 `202 {status: building}`，由 API 后台单飞构建报告；
+  缓存就绪后返回原有 `200` 结构。前端仅在“回测”或“历史交割单”视图请求正式报告，
+  每 3 秒轮询构建状态，并在报告就绪前不发出每日交割单并发请求。显式分赛道研究与内部
+  同步 API 保持原有行为。
+- 生产发布验收：正式 `.env` 设为 `ALPHAAGENT_ENV=production`，并根据已核验的 8 核
+  主机设置 `ALPHAAGENT_API_CPUS=2`、`ALPHAAGENT_POSTGRES_CPUS=2`、
+  `ALPHAAGENT_SCHEDULER_CPUS=0.5`。不要把提高网关超时作为替代方案；在非交易时段
+  用版本化镜像重建服务后，应验证冷缓存立即 `202`、缓存就绪后 `200`，以及实时扫描
+  心跳正常。
 
 ```bash
 cd /opt/1panel/project/AlphaAgent

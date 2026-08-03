@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import type { LimitUpLaneBacktest } from "@/api/limitUp";
+import {
+  isLimitUpBacktestBuilding,
+  isLimitUpBacktestReport,
+  type LimitUpBacktestBuildStatus,
+  type LimitUpLaneBacktest,
+} from "@/api/limitUp";
 import {
   BacktestView,
   LIMIT_UP_BACKTEST_SCOPE,
@@ -29,10 +34,16 @@ describe("LimitUpPage backtest contract", () => {
   });
 
   it("shows an explicit status while the first backtest report is loading", () => {
+    const buildStatus: LimitUpBacktestBuildStatus = { status: "building" };
+
+    expect(isLimitUpBacktestBuilding(buildStatus)).toBe(true);
+    expect(isLimitUpBacktestReport(buildStatus)).toBe(false);
+
     const html = renderToStaticMarkup(
       <BacktestView
         indexBars={[]}
-        loading
+        loading={false}
+        buildStatus={buildStatus}
         start="2023-03-28"
         end="2026-07-24"
         onStart={() => undefined}
@@ -45,6 +56,7 @@ describe("LimitUpPage backtest contract", () => {
 
     expect(html).toContain("A+B+C 回测载入中");
     expect(html).toContain("正在读取 A+B+C 全量回测");
+    expect(html).toContain("后台正在生成正式全历史报告");
     expect(html).toContain("完成后本页会自动更新");
     expect(html).toContain('role="status"');
   });

@@ -42,6 +42,9 @@ _BUILD_LOCK = threading.RLock()
 _BUILD_THREAD: threading.Thread | None = None
 _BACKTEST_WARM_LOCK = threading.RLock()
 _BACKTEST_WARM_THREAD: threading.Thread | None = None
+_SCHEDULED_BACKTEST_BUILD_LOCK = threading.RLock()
+_SCHEDULED_BACKTEST_BUILD_THREAD: threading.Thread | None = None
+_SCHEDULED_BACKTEST_BUILD_STATE: dict[str, object] = {"status": "idle"}
 _MODEL_REPORT_CACHE = TTLCache(max_items=16)
 _LANE_VALIDATION_CACHE = TTLCache(max_items=16)
 _BACKTEST_REPORT_CACHE = TTLCache(max_items=32, copier=copy)
@@ -130,6 +133,7 @@ def _rebuild_history_locked() -> dict[str, object]:
     _LANE_VALIDATION_CACHE.clear()
     _BACKTEST_REPORT_CACHE.clear()
     _SECTOR_WARMUP_REPORT_CACHE.clear()
+    _clear_scheduled_backtest_build_state()
     live_evidence.clear_live_evidence_cache()
     result = {
         "status": "ready",
@@ -939,18 +943,7 @@ def get_scheduled_history_backtest(
 ) -> dict[str, object]:
     """Return the frozen two-position formal product account."""
 
-    cache_key = (
-        f"{history_engine.HISTORY_STRATEGY_VERSION}:"
-        f"{_history_cache_revision()}:"
-        f"{core_quality.PUBLIC_QUALITY_CONTRACT_VERSION}:"
-        f"{scheduled_execution.SCHEDULED_EXECUTION_VERSION}:"
-        f"{start}:{end}:{cash_backtest.ACCOUNT_EXECUTION_VERSION}"
-    )
-    report = _BACKTEST_REPORT_CACHE.get_or_set(
-        cache_key,
-        21_600,
-        lambda: _build_scheduled_history_backtest(start, end),
-    )
+    report = _load_scheduled_history_backtest_report(start, end)
     return _limit_scheduled_report(
         {
             **report,
@@ -958,6 +951,142 @@ def get_scheduled_history_backtest(
         },
         trade_limit,
     )
+
+
+def get_scheduled_history_backtest_availability(
+    start: date | None,
+    end: date | None,
+) -> dict[str, object]:
+    """Return a cached formal report or start one background build."""
+
+    cache_key = _scheduled_backtest_cache_key(start, end)
+    cached = _BACKTEST_REPORT_CACHE.get(cache_key)
+    if cached is not None:
+        _set_scheduled_backtest_build_state(
+            status="ready",
+            cache_key=cache_key,
+            finished_at=_utc_now(),
+            error=None,
+        )
+        return {
+            "status": "ready",
+            "report": _limit_scheduled_report(
+                {
+                    **cached,
+                    "data_freshness": _scheduled_history_data_freshness(),
+                },
+                500,
+            ),
+        }
+
+    with _SCHEDULED_BACKTEST_BUILD_LOCK:
+        cached = _BACKTEST_REPORT_CACHE.get(cache_key)
+        if cached is not None:
+            return {
+                "status": "ready",
+                "report": _limit_scheduled_report(
+                    {
+                        **cached,
+                        "data_freshness": _scheduled_history_data_freshness(),
+                    },
+                    500,
+                ),
+            }
+
+        state = dict(_SCHEDULED_BACKTEST_BUILD_STATE)
+        if state.get("status") == "failed" and state.get("cache_key") == cache_key:
+            _clear_scheduled_backtest_build_state()
+            return state
+        if _SCHEDULED_BACKTEST_BUILD_THREAD is not None and _SCHEDULED_BACKTEST_BUILD_THREAD.is_alive():
+            return {
+                "status": "building",
+                "started_at": state.get("started_at"),
+            }
+
+        _set_scheduled_backtest_build_state(
+            status="building",
+            cache_key=cache_key,
+            started_at=_utc_now(),
+            error=None,
+        )
+        thread = threading.Thread(
+            target=_build_scheduled_history_backtest_in_background,
+            args=(start, end, cache_key),
+            name="limit-up-scheduled-backtest",
+            daemon=True,
+        )
+        _set_scheduled_backtest_build_thread(thread)
+        thread.start()
+        return {
+            "status": "building",
+            "started_at": _SCHEDULED_BACKTEST_BUILD_STATE.get("started_at"),
+        }
+
+
+def _scheduled_backtest_cache_key(start: date | None, end: date | None) -> str:
+    return (
+        f"{history_engine.HISTORY_STRATEGY_VERSION}:"
+        f"{_history_cache_revision()}:"
+        f"{core_quality.PUBLIC_QUALITY_CONTRACT_VERSION}:"
+        f"{scheduled_execution.SCHEDULED_EXECUTION_VERSION}:"
+        f"{start}:{end}:{cash_backtest.ACCOUNT_EXECUTION_VERSION}"
+    )
+
+
+def _load_scheduled_history_backtest_report(
+    start: date | None,
+    end: date | None,
+) -> dict[str, object]:
+    return _BACKTEST_REPORT_CACHE.get_or_set(
+        _scheduled_backtest_cache_key(start, end),
+        21_600,
+        lambda: _build_scheduled_history_backtest(start, end),
+    )
+
+
+def _build_scheduled_history_backtest_in_background(
+    start: date | None,
+    end: date | None,
+    cache_key: str,
+) -> None:
+    try:
+        get_scheduled_history_backtest(start, end, trade_limit=None)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("scheduled history backtest build failed")
+        _set_scheduled_backtest_build_state(
+            status="failed",
+            cache_key=cache_key,
+            finished_at=_utc_now(),
+            error={
+                "type": exc.__class__.__name__,
+                "message": str(exc)[:500],
+            },
+        )
+        return
+    _set_scheduled_backtest_build_state(
+        status="ready",
+        cache_key=cache_key,
+        finished_at=_utc_now(),
+        error=None,
+    )
+
+
+def _set_scheduled_backtest_build_state(**values: object) -> None:
+    with _SCHEDULED_BACKTEST_BUILD_LOCK:
+        _SCHEDULED_BACKTEST_BUILD_STATE.update(values)
+
+
+def _set_scheduled_backtest_build_thread(thread: threading.Thread | None) -> None:
+    global _SCHEDULED_BACKTEST_BUILD_THREAD
+    _SCHEDULED_BACKTEST_BUILD_THREAD = thread
+
+
+def _clear_scheduled_backtest_build_state() -> None:
+    global _SCHEDULED_BACKTEST_BUILD_THREAD
+    with _SCHEDULED_BACKTEST_BUILD_LOCK:
+        _SCHEDULED_BACKTEST_BUILD_THREAD = None
+        _SCHEDULED_BACKTEST_BUILD_STATE.clear()
+        _SCHEDULED_BACKTEST_BUILD_STATE["status"] = "idle"
 
 
 def _scheduled_history_data_freshness() -> dict[str, object]:

@@ -860,22 +860,24 @@ def test_history_backtest_api_defaults_to_formal_portfolio_scope(
 
     captured: dict[str, object] = {}
 
-    def fake_lane_backtest(start, end, lane, exit_mode):
-        captured.update(start=start, end=end, lane=lane, exit_mode=exit_mode)
-        return {"status": "ready", "mode": "scheduled_unified_intraday_cash_replay"}
+    def fake_availability(start, end):
+        captured.update(start=start, end=end)
+        return {
+            "status": "ready",
+            "report": {"status": "ready", "mode": "scheduled_unified_intraday_cash_replay"},
+        }
 
     monkeypatch.setattr(limit_up, "is_database_configured", lambda: True)
     monkeypatch.setattr(
         limit_up,
-        "get_limit_up_lane_history_backtest",
-        fake_lane_backtest,
+        "get_scheduled_history_backtest_availability",
+        fake_availability,
     )
 
     response = TestClient(create_app()).get("/api/limit-up/history/backtest")
 
     assert response.status_code == 200
-    assert captured["lane"] == "portfolio"
-    assert captured["exit_mode"] == "next_close"
+    assert captured == {"start": None, "end": None}
 
 
 def _persisted_replay_day(

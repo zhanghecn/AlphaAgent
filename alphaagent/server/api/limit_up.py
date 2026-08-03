@@ -48,6 +48,7 @@ from alphaagent.server.services.limit_up.history_service import (
     get_lane_history_backtest as get_limit_up_lane_history_backtest,
     get_history_model_report as get_limit_up_history_model_report,
     get_history_status as get_limit_up_history_status,
+    get_scheduled_history_backtest_availability,
     get_sector_warmup_research as get_limit_up_sector_warmup_research,
     start_history_rebuild as start_limit_up_history_rebuild,
 )
@@ -463,6 +464,19 @@ def history_ledger(
             content=fail("DATABASE_UNAVAILABLE", "数据库未配置，无法读取历史打板交割单"),
         )
     try:
+        if lane is None:
+            availability = get_scheduled_history_backtest_availability(None, None)
+            if availability.get("status") == "building":
+                return JSONResponse(status_code=202, content=ok(availability))
+            if availability.get("status") == "failed":
+                return JSONResponse(
+                    status_code=503,
+                    content=fail(
+                        "HISTORY_BACKTEST_BUILD_FAILED",
+                        "正式历史回测构建失败",
+                        availability,
+                    ),
+                )
         result = get_limit_up_history_ledger(
             trade_date,
             lane=lane,
@@ -511,6 +525,23 @@ def history_backtest(
             content=fail("DATABASE_UNAVAILABLE", "数据库未配置，无法执行全历史打板回测"),
         )
     try:
+        if lane == "portfolio":
+            availability = get_scheduled_history_backtest_availability(start, end)
+            if availability.get("status") == "building":
+                return JSONResponse(status_code=202, content=ok(availability))
+            if availability.get("status") == "failed":
+                return JSONResponse(
+                    status_code=503,
+                    content=fail(
+                        "HISTORY_BACKTEST_BUILD_FAILED",
+                        "正式历史回测构建失败",
+                        availability,
+                    ),
+                )
+            report = availability.get("report")
+            if not isinstance(report, dict):
+                raise RuntimeError("scheduled history backtest cache returned no report")
+            return ok(report)
         if lane is not None:
             return ok(
                 get_limit_up_lane_history_backtest(

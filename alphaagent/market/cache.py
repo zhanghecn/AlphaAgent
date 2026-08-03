@@ -53,6 +53,12 @@ class TTLCache:
             self._set(key, value, now + ttl_seconds)
             return self._copy(value)
 
+    def get(self, key: str) -> T | None:
+        """Return a fresh cached value without running a loader."""
+
+        cached = self._get_fresh(key, time.monotonic())
+        return None if cached is None else self._copy(cached)
+
     def refresh(self, key: str, ttl_seconds: float, loader: Callable[[], T]) -> T:
         """Recompute a cache value under the per-key lock."""
 

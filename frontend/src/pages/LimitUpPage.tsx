@@ -35,7 +35,10 @@ import {
   fetchLimitUpLiveTraceDay,
   fetchLimitUpLiveTraceSymbol,
   fetchLimitUpStrategyGuide,
+  isLimitUpBacktestBuilding,
+  isLimitUpBacktestReport,
   startLimitUpHistoryRebuild,
+  type LimitUpBacktestBuildStatus,
   type LimitUpHistoryRebuildStatus,
   type LimitUpLaneBacktest,
   type LimitUpLiveTraceDay,
@@ -183,25 +186,41 @@ export function LimitUpPage() {
     () => dates.slice(-timelineCount).reverse(),
     [dates, timelineCount],
   );
+  const backtestStart = view === "ledger" || start === datesQuery.data?.start
+    ? undefined
+    : start;
+  const backtestEnd = view === "ledger" || end === datesQuery.data?.end
+    ? undefined
+    : end;
+  const backtestQuery = useQuery({
+    queryKey: ["limitUpLaneBacktest", backtestStart, backtestEnd, LIMIT_UP_BACKTEST_SCOPE],
+    queryFn: () => fetchLimitUpLaneBacktest({
+      start: backtestStart || undefined,
+      end: backtestEnd || undefined,
+      lane: LIMIT_UP_BACKTEST_SCOPE,
+    }),
+    enabled: (view === "backtest" || view === "ledger") && Boolean(start && end),
+    staleTime: Infinity,
+    refetchInterval: (query) => isLimitUpBacktestBuilding(query.state.data) ? 3_000 : false,
+    refetchOnWindowFocus: false,
+  });
+  const backtestReport = isLimitUpBacktestReport(backtestQuery.data)
+    ? backtestQuery.data
+    : undefined;
+  const backtestBuildStatus = isLimitUpBacktestBuilding(backtestQuery.data)
+    ? backtestQuery.data
+    : undefined;
+  const formalReportLoading = datesQuery.isLoading
+    || backtestQuery.isLoading
+    || Boolean(backtestBuildStatus);
   const ledgerTimelineQueries = useQueries({
     queries: timelineDates.map((date) => ({
       queryKey: ["limitUpFormalLedger", date],
       queryFn: () => fetchLimitUpHistoryLedger({ date }),
-      enabled: view === "ledger",
+      enabled: view === "ledger" && Boolean(backtestReport),
       staleTime: Infinity,
       refetchOnWindowFocus: false,
     })),
-  });
-  const backtestQuery = useQuery({
-    queryKey: ["limitUpLaneBacktest", start, end, LIMIT_UP_BACKTEST_SCOPE],
-    queryFn: () => fetchLimitUpLaneBacktest({
-      start: start === datesQuery.data?.start ? undefined : start,
-      end: end === datesQuery.data?.end ? undefined : end,
-      lane: LIMIT_UP_BACKTEST_SCOPE,
-    }),
-    enabled: (view === "backtest" || view === "live") && Boolean(start && end),
-    staleTime: Infinity,
-    refetchOnWindowFocus: false,
   });
   const indexBarsQuery = useQuery({
     queryKey: ["indexBars", SHANGHAI_INDEX_SYMBOL],
@@ -284,10 +303,14 @@ export function LimitUpPage() {
     }
   }, [historyStatusQuery.data?.error?.message, historyStatusQuery.data?.status, queryClient, toast]);
 
+  const ledgerErrors = view === "ledger"
+    ? ledgerTimelineQueries.map((query) => query.error)
+    : [];
   const activeError = firstError(
     datesQuery.error,
     view === "live" ? liveQuery.error : null,
-    view === "backtest" ? backtestQuery.error : null,
+    view === "backtest" || view === "ledger" ? backtestQuery.error : null,
+    ...ledgerErrors,
     view === "guide" ? strategyGuideQuery.error : null,
   );
 
@@ -355,11 +378,23 @@ export function LimitUpPage() {
       </nav>
 
       {activeError ? (
-        <ErrorState message={activeError} onRetry={() => void refreshActive(view, liveQuery.refetch, backtestQuery.refetch, strategyGuideQuery.refetch)} />
+        <ErrorState
+          message={activeError}
+          onRetry={() => {
+            if (view === "ledger") {
+              void Promise.all([
+                backtestQuery.refetch(),
+                ...ledgerTimelineQueries.map((query) => query.refetch()),
+              ]);
+              return;
+            }
+            void refreshActive(view, liveQuery.refetch, backtestQuery.refetch, strategyGuideQuery.refetch);
+          }}
+        />
       ) : view === "live" ? (
         <LiveView
           snapshot={liveQuery.data}
-          portfolioReport={backtestQuery.data}
+          portfolioReport={backtestReport}
           loading={liveQuery.isLoading}
           traceDates={traceDatesQuery.data?.dates ?? []}
           selectedTraceDate={selectedTraceDate}
@@ -374,7 +409,12 @@ export function LimitUpPage() {
           onOpenBacktest={() => setView("backtest")}
         />
       ) : view === "ledger" ? (
-        <section aria-label="历史交割单">
+        formalReportLoading ? (
+          <FormalHistoryReportLoadingState
+            ariaLabel="历史交割单"
+            buildStatus={backtestBuildStatus}
+          />
+        ) : <section aria-label="历史交割单">
           <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b bg-muted/20 px-3 py-2 text-xs text-muted-foreground sm:px-4">
             <span className="eyebrow">复盘 REVIEW</span>
             <span>最近 {timelineDates.length} 个交易日 · 最新在左</span>
@@ -399,9 +439,10 @@ export function LimitUpPage() {
         </section>
       ) : view === "backtest" ? (
         <BacktestView
-          report={backtestQuery.data}
+          report={backtestReport}
           indexBars={indexBarsQuery.data?.items ?? []}
-          loading={backtestQuery.isLoading}
+          loading={formalReportLoading}
+          buildStatus={backtestBuildStatus}
           start={start}
           end={end}
           minimumDate={datesQuery.data?.start}
@@ -799,7 +840,7 @@ function QualityRow({
           </button>
         </>
       ) : (
-        <span className="text-muted-foreground">历史组合缓存读取中</span>
+        <span className="text-muted-foreground">历史组合数据按需加载</span>
       )}
     </div>
   );
@@ -1187,6 +1228,7 @@ interface BacktestViewProps {
   report?: LimitUpLaneBacktest;
   indexBars: import("@/api/types").Bar[];
   loading: boolean;
+  buildStatus?: LimitUpBacktestBuildStatus;
   start: string;
   end: string;
   minimumDate?: string | null;
@@ -1202,6 +1244,7 @@ export function BacktestView({
   report,
   indexBars,
   loading,
+  buildStatus,
   start,
   end,
   minimumDate,
@@ -1212,33 +1255,8 @@ export function BacktestView({
   rebuildError,
   onRebuild,
 }: BacktestViewProps) {
-  if (loading && !report) {
-    return (
-      <section aria-label="真实现金回测">
-        <PanelHead
-          no="01"
-          zh="A+B+C 回测载入中"
-          en="LOADING"
-          aside="全量交割与风险指标正在生成"
-        />
-        <div
-          role="status"
-          aria-live="polite"
-          className="flex items-center gap-3 border-b px-3 py-4 text-sm sm:px-4"
-        >
-          <RefreshCw size={16} className="shrink-0 animate-spin text-primary" />
-          <div className="min-w-0">
-            <p className="font-medium text-foreground">正在读取 A+B+C 全量回测</p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              首次启动需要恢复全历史交割，完成后本页会自动更新。
-            </p>
-          </div>
-        </div>
-        <div className="p-3 sm:p-4">
-          <LoadingState rows={6} />
-        </div>
-      </section>
-    );
+  if ((loading && !report) || buildStatus) {
+    return <FormalHistoryReportLoadingState buildStatus={buildStatus} />;
   }
   const { cashSummary: summary, qualitySummary } = limitUpBacktestSummaries(report);
   const skippedReasons = report?.recommendation_quality?.skipped_reasons ?? {};
@@ -1339,6 +1357,43 @@ export function BacktestView({
         </>
       )}
       {report && <SkippedOrders report={report} />}
+    </section>
+  );
+}
+
+function FormalHistoryReportLoadingState({
+  ariaLabel = "真实现金回测",
+  buildStatus,
+}: {
+  ariaLabel?: string;
+  buildStatus?: LimitUpBacktestBuildStatus;
+}) {
+  return (
+    <section aria-label={ariaLabel}>
+      <PanelHead
+        no="01"
+        zh="A+B+C 回测载入中"
+        en="LOADING"
+        aside="全量交割与风险指标正在生成"
+      />
+      <div
+        role="status"
+        aria-live="polite"
+        className="flex items-center gap-3 border-b px-3 py-4 text-sm sm:px-4"
+      >
+        <RefreshCw size={16} className="shrink-0 animate-spin text-primary" />
+        <div className="min-w-0">
+          <p className="font-medium text-foreground">正在读取 A+B+C 全量回测</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {buildStatus
+              ? "后台正在生成正式全历史报告，完成后本页会自动更新。"
+              : "首次启动需要恢复全历史交割，完成后本页会自动更新。"}
+          </p>
+        </div>
+      </div>
+      <div className="p-3 sm:p-4">
+        <LoadingState rows={6} />
+      </div>
     </section>
   );
 }

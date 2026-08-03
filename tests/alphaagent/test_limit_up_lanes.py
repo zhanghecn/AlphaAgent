@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from threading import Event
+from time import monotonic, sleep
 from unittest.mock import patch
 
 import pandas as pd
@@ -2575,6 +2577,52 @@ def test_scheduled_backtest_reuses_full_report_across_trade_limits(monkeypatch) 
     history_service._BACKTEST_REPORT_CACHE.clear()
 
 
+def test_scheduled_backtest_availability_builds_once_in_the_background(
+    monkeypatch,
+) -> None:
+    started = Event()
+    release = Event()
+    calls = 0
+
+    def build(_start, _end):
+        nonlocal calls
+        calls += 1
+        started.set()
+        assert release.wait(timeout=2)
+        return {"orders": [], "trades": [], "skipped_orders": []}
+
+    monkeypatch.setattr(history_service, "_history_cache_revision", lambda: "revision")
+    monkeypatch.setattr(history_service, "_build_scheduled_history_backtest", build)
+    monkeypatch.setattr(
+        history_service,
+        "_scheduled_history_data_freshness",
+        lambda: {"status": "fresh"},
+    )
+    history_service._BACKTEST_REPORT_CACHE.clear()
+
+    first = history_service.get_scheduled_history_backtest_availability(None, None)
+    assert first["status"] == "building"
+    assert started.wait(timeout=2)
+
+    second = history_service.get_scheduled_history_backtest_availability(None, None)
+    assert second["status"] == "building"
+    assert calls == 1
+
+    release.set()
+    deadline = monotonic() + 2
+    while monotonic() < deadline:
+        ready = history_service.get_scheduled_history_backtest_availability(None, None)
+        if ready["status"] == "ready":
+            break
+        sleep(0.01)
+    else:
+        pytest.fail("background scheduled backtest did not become ready")
+
+    assert ready["report"]["data_freshness"] == {"status": "fresh"}
+    assert calls == 1
+    history_service._BACKTEST_REPORT_CACHE.clear()
+
+
 def test_scheduled_backtest_cache_avoids_recursive_copy(monkeypatch) -> None:
     class DeepCopyGuard:
         def __deepcopy__(self, _memo):
@@ -2670,18 +2718,47 @@ def test_lane_ledger_api_accepts_date_and_board_lane(monkeypatch) -> None:
     assert response.json()["data"]["exit_mode"] == "dynamic"
 
 
+def test_formal_history_ledger_api_returns_building_without_loading_a_report(
+    monkeypatch,
+) -> None:
+    from alphaagent.server.api import limit_up
+
+    monkeypatch.setattr(limit_up, "is_database_configured", lambda: True)
+    monkeypatch.setattr(
+        limit_up,
+        "get_scheduled_history_backtest_availability",
+        lambda *_args: {"status": "building", "started_at": "2026-08-03T01:00:00+00:00"},
+    )
+    monkeypatch.setattr(
+        limit_up,
+        "get_limit_up_history_ledger",
+        lambda *_args, **_kwargs: pytest.fail("cold ledger must not run synchronously"),
+    )
+
+    response = TestClient(create_app()).get(
+        "/api/limit-up/history/ledger",
+        params={"date": "2026-06-10"},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["data"]["status"] == "building"
+
+
 def test_history_backtest_api_accepts_shared_portfolio_scope(monkeypatch) -> None:
     from alphaagent.server.api import limit_up
 
     monkeypatch.setattr(limit_up, "is_database_configured", lambda: True)
     monkeypatch.setattr(
         limit_up,
-        "get_limit_up_lane_history_backtest",
-        lambda start, end, lane, exit_mode: {
+        "get_scheduled_history_backtest_availability",
+        lambda start, end: {
             "status": "ready",
-            "lane": lane,
-            "exit_mode": "next_1430" if lane == "portfolio" else exit_mode,
-            "account_config": {"initial_cash": 100_000, "max_positions": 2},
+            "report": {
+                "status": "ready",
+                "lane": "portfolio",
+                "exit_mode": "next_1430",
+                "account_config": {"initial_cash": 100_000, "max_positions": 2},
+            },
         },
     )
 
@@ -2695,6 +2772,32 @@ def test_history_backtest_api_accepts_shared_portfolio_scope(monkeypatch) -> Non
     assert response.json()["data"]["exit_mode"] == "next_1430"
     assert response.json()["data"]["account_config"]["initial_cash"] == 100_000
     assert response.json()["data"]["account_config"]["max_positions"] == 2
+
+
+def test_formal_history_backtest_api_returns_building_without_loading_a_report(
+    monkeypatch,
+) -> None:
+    from alphaagent.server.api import limit_up
+
+    monkeypatch.setattr(limit_up, "is_database_configured", lambda: True)
+    monkeypatch.setattr(
+        limit_up,
+        "get_scheduled_history_backtest_availability",
+        lambda *_args: {"status": "building", "started_at": "2026-08-03T01:00:00+00:00"},
+    )
+    monkeypatch.setattr(
+        limit_up,
+        "get_limit_up_lane_history_backtest",
+        lambda *_args, **_kwargs: pytest.fail("cold report must not run synchronously"),
+    )
+
+    response = TestClient(create_app()).get(
+        "/api/limit-up/history/backtest",
+        params={"lane": "portfolio"},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["data"]["status"] == "building"
 
 
 def test_dynamic_lane_backtest_coalesces_repeated_requests(monkeypatch) -> None:

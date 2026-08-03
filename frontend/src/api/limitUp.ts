@@ -1095,6 +1095,25 @@ export interface LimitUpLaneBacktest {
   };
 }
 
+export interface LimitUpBacktestBuildStatus {
+  status: "building";
+  started_at?: string;
+}
+
+export type LimitUpBacktestResponse = LimitUpLaneBacktest | LimitUpBacktestBuildStatus;
+
+export function isLimitUpBacktestBuilding(
+  response?: LimitUpBacktestResponse,
+): response is LimitUpBacktestBuildStatus {
+  return response?.status === "building";
+}
+
+export function isLimitUpBacktestReport(
+  response?: LimitUpBacktestResponse,
+): response is LimitUpLaneBacktest {
+  return Boolean(response && response.status !== "building");
+}
+
 export interface LimitUpWalkForwardModelReport {
   status: string;
   model_version: string;
@@ -1289,11 +1308,14 @@ export function fetchLimitUpLaneBacktest(params: {
   start?: string;
   end?: string;
   lane: LimitUpBacktestScope;
-}): Promise<LimitUpLaneBacktest> {
+}): Promise<LimitUpBacktestResponse> {
   const query = new URLSearchParams({ lane: params.lane });
   if (params.start) query.set("start", params.start);
   if (params.end) query.set("end", params.end);
-  return apiClient.get<LimitUpLaneBacktest>(`/limit-up/history/backtest?${query.toString()}`);
+  return apiClient.get<LimitUpBacktestResponse>(
+    `/limit-up/history/backtest?${query.toString()}`,
+    { allowErrorData: true },
+  );
 }
 
 export function fetchLimitUpHistoryModelReport(params: {
