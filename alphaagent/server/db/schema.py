@@ -1551,6 +1551,17 @@ premarket_prelude_snapshots = Table(
 )
 
 
+premarket_fused_score_snapshots = Table(
+    "premarket_fused_score_snapshots",
+    metadata,
+    Column("trade_date", Date, primary_key=True),
+    Column("candidate_count", Integer, nullable=False, server_default="0"),
+    Column("payload", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+
 limit_up_radar_frames = Table(
     "limit_up_radar_frames",
     metadata,

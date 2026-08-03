@@ -1215,6 +1215,86 @@ export async function downloadPremarketPreludeCandidatesTxt(
   URL.revokeObjectURL(url);
 }
 
+export type FusedScoreType = "lowpos" | "wave" | "both";
+export type FusedScoreTypeFilter = "all" | FusedScoreType;
+
+export interface PremarketFusedCandidate {
+  vt_symbol: string;
+  code: string;
+  name: string;
+  fused_score: number;
+  fused_type: FusedScoreType;
+  lowpos_score: number;
+  wave_score: number;
+  lowpos_subs: Record<string, number>;
+  wave_subs: Record<string, number>;
+  bear_run_max_40d: number | null;
+  conv_days: number | null;
+  cross_stage: number | null;
+  pure_20d: boolean | null;
+  bias_ma20_pct: number | null;
+  ma_state: string | null;
+  concepts: string[];
+}
+
+export interface PremarketFusedCandidatesResult {
+  status: "ok" | "unavailable" | string;
+  message?: string;
+  trade_date?: string;
+  params?: Record<string, unknown>;
+  count?: number;
+  total?: number;
+  qualified_total?: number;
+  candidates?: PremarketFusedCandidate[];
+  notes?: string[];
+}
+
+export function fetchPremarketFusedCandidates(
+  scoreType: FusedScoreTypeFilter = "all",
+  limit = 100,
+): Promise<PremarketFusedCandidatesResult> {
+  return apiClient.get<PremarketFusedCandidatesResult>(
+    `/limit-up/premarket/fused-candidates?score_type=${scoreType}&limit=${limit}`,
+  );
+}
+
+/**
+ * 下载盘前融合计分候选 txt（每行 6 位代码，同花顺自定义板块导入格式）。
+ * 响应非 {success,data} 包装，必须走 authFetch（client.ts 预留的下载通道）。
+ */
+export async function downloadPremarketFusedCandidatesTxt(
+  scoreType: FusedScoreTypeFilter = "all",
+  limit = 100,
+): Promise<void> {
+  const res = await authFetch(
+    `/limit-up/premarket/fused-candidates.txt?score_type=${scoreType}&limit=${limit}`,
+  );
+  if (!res.ok) {
+    let message = `下载失败（${res.status}）`;
+    try {
+      const payload = (await res.json()) as { error?: { message?: string } };
+      if (payload.error?.message) {
+        message = payload.error.message;
+      }
+    } catch {
+      // 非 JSON 错误响应，用默认文案
+    }
+    throw new ApiClientError("DOWNLOAD_FAILED", message, {}, res.status);
+  }
+  const disposition = res.headers.get("Content-Disposition") ?? "";
+  const match = /filename="?([^";]+)"?/.exec(disposition);
+  const filename = match?.[1] ?? "fused_candidates.txt";
+  const blob = new Blob([await res.text()], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
 export function fetchFirstBoardLeaderForwardLedger(
   weeks = 8,
 ): Promise<LeaderForwardLedgerReport> {

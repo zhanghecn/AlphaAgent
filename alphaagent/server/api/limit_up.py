@@ -206,6 +206,68 @@ def premarket_prelude_candidates_txt(
         return _service_error(exc)
 
 
+@router.get("/premarket/fused-candidates", response_model=None)
+def premarket_fused_candidates(
+    score_type: Literal["all", "lowpos", "wave", "both"] = "all",
+    min_score: float = 0.0,
+    limit: int = 100,
+):
+    """盘前融合计分候选（低位分/波浪分 Top-N，子分分解，人工复核观察池）。"""
+
+    if not is_database_configured():
+        return JSONResponse(
+            status_code=503,
+            content=fail("DATABASE_UNAVAILABLE", "数据库未配置，无法筛选融合计分候选"),
+        )
+    try:
+        from alphaagent.server.services.limit_up.premarket_fused_score_service import (
+            get_premarket_fused_score_candidates,
+        )
+
+        return ok(
+            get_premarket_fused_score_candidates(
+                score_type=score_type, min_score=min_score, limit=limit
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _service_error(exc)
+
+
+@router.get("/premarket/fused-candidates.txt", response_model=None)
+def premarket_fused_candidates_txt(
+    score_type: Literal["all", "lowpos", "wave", "both"] = "all",
+    min_score: float = 0.0,
+    limit: int = 100,
+):
+    """盘前融合计分候选 txt 下载（每行 6 位代码，同花顺自定义板块导入格式）。"""
+
+    if not is_database_configured():
+        return JSONResponse(
+            status_code=503,
+            content=fail("DATABASE_UNAVAILABLE", "数据库未配置，无法导出融合计分候选"),
+        )
+    try:
+        from alphaagent.server.services.limit_up.premarket_fused_score_service import (
+            get_premarket_fused_score_candidates,
+            render_candidates_txt,
+        )
+
+        result = get_premarket_fused_score_candidates(
+            score_type=score_type, min_score=min_score, limit=limit
+        )
+        trade_date = str(result.get("trade_date") or "unknown")
+        return PlainTextResponse(
+            render_candidates_txt(result),
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="fused_candidates_{trade_date}.txt"'
+                )
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _service_error(exc)
+
+
 @router.get("/first-board-leader/backtest", response_model=None)
 def first_board_leader_backtest():
     """返回潜龙首板历史回测结果（回测模拟，非实盘，读库）。"""

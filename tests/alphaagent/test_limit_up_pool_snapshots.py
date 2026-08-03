@@ -133,9 +133,14 @@ def test_eod_backtest_2200_schedule_registered() -> None:
     schedules = {item["id"]: item for item in svc.DEFAULT_BATCH_SCHEDULES}
     entry = schedules["eod_backtest_2200"]
     assert entry["cron"] == "0 22 * * 1-5"
-    assert entry["job_ids"] == ["leader_minute_backtest_rerun", "premarket_prelude_snapshot"]
+    assert entry["job_ids"] == [
+        "leader_minute_backtest_rerun",
+        "premarket_prelude_snapshot",
+        "premarket_fused_score_snapshot",
+    ]
     assert svc.LEADER_MINUTE_BACKTEST_RERUN_BATCH_JOB_ID in svc.INTERNAL_BATCH_JOB_IDS
     assert svc.PREMARKET_PRELUDE_SNAPSHOT_BATCH_JOB_ID in svc.INTERNAL_BATCH_JOB_IDS
+    assert svc.PREMARKET_FUSED_SCORE_SNAPSHOT_BATCH_JOB_ID in svc.INTERNAL_BATCH_JOB_IDS
 
 
 def test_leader_minute_backtest_rerun_uses_v4b_config(monkeypatch) -> None:

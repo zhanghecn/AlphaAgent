@@ -802,6 +802,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "job_ids": [
             "leader_minute_backtest_rerun",
             "premarket_prelude_snapshot",
+            "premarket_fused_score_snapshot",
         ],
     },
 ]
@@ -815,6 +816,7 @@ LEADER_MINUTE_BACKTEST_RERUN_BATCH_JOB_ID = "leader_minute_backtest_rerun"
 LEADER_FORWARD_CAPTURE_BATCH_JOB_ID = "leader_forward_capture"
 LEADER_FORWARD_SETTLE_BATCH_JOB_ID = "leader_forward_settle"
 PREMARKET_PRELUDE_SNAPSHOT_BATCH_JOB_ID = "premarket_prelude_snapshot"
+PREMARKET_FUSED_SCORE_SNAPSHOT_BATCH_JOB_ID = "premarket_fused_score_snapshot"
 INTERNAL_BATCH_JOB_IDS = {
     LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID,
     LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID,
@@ -825,6 +827,7 @@ INTERNAL_BATCH_JOB_IDS = {
     LEADER_FORWARD_CAPTURE_BATCH_JOB_ID,
     LEADER_FORWARD_SETTLE_BATCH_JOB_ID,
     PREMARKET_PRELUDE_SNAPSHOT_BATCH_JOB_ID,
+    PREMARKET_FUSED_SCORE_SNAPSHOT_BATCH_JOB_ID,
 }
 HISTORY_INPUT_JOB_IDS = frozenset(
     {
@@ -3621,6 +3624,8 @@ def _run_sync_batch(
                 result = _run_leader_minute_backtest_rerun_batch_job()
             elif job_id == PREMARKET_PRELUDE_SNAPSHOT_BATCH_JOB_ID:
                 result = _run_premarket_prelude_snapshot_batch_job()
+            elif job_id == PREMARKET_FUSED_SCORE_SNAPSHOT_BATCH_JOB_ID:
+                result = _run_premarket_fused_score_snapshot_batch_job()
             elif job_id == LEADER_FORWARD_CAPTURE_BATCH_JOB_ID:
                 result = _run_leader_forward_capture_batch_job()
             elif job_id == LEADER_FORWARD_SETTLE_BATCH_JOB_ID:
@@ -3917,6 +3922,39 @@ def _run_premarket_prelude_snapshot_batch_job() -> dict[str, Any]:
             f"低位池 {result.get('count')} 只（板块动量排序，人工观察池）"
         ),
     }
+
+
+def _run_premarket_fused_score_snapshot_batch_job() -> dict[str, Any]:
+    """每晚 22:00（前奏快照后）预算盘前融合计分候选并写快照表。
+
+    全市场结构+旅程特征计算量大（~3000 票 × 69 根窗口），api 容器跑不动；
+    worker 无 CPU 限制，EOD 后数据静态，提前算好。
+    """
+
+    from alphaagent.server.services.limit_up.premarket_fused_score_service import (
+        build_premarket_fused_score_candidates,
+        save_premarket_fused_score_snapshot,
+    )
+
+    result = build_premarket_fused_score_candidates(score_type="all", limit=0)  # 全量入快照
+    if result.get("status") != "ok":
+        return {
+            "status": "skipped",
+            "rows_read": 0,
+            "rows_written": 0,
+            "message": f"盘前融合计分候选不可用：{result.get('message') or result.get('status')}",
+        }
+    written = save_premarket_fused_score_snapshot(result)
+    return {
+        "rows_read": int(result.get("count") or 0),
+        "rows_written": written,
+        "message": (
+            f"盘前融合计分候选已刷新：D-1={result.get('trade_date')}，"
+            f"入榜 {result.get('count')} 只（融合分降序，人工复核观察池）"
+        ),
+    }
+
+
 
 
 def _run_leader_forward_capture_batch_job() -> dict[str, Any]:

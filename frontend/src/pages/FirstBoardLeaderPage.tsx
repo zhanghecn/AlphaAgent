@@ -14,6 +14,7 @@ import { LoadingState } from "@/components/LoadingState";
 import { LedgerTimeline } from "@/features/limitUp/LedgerTimeline";
 import { LiveSignalCard } from "@/features/limitUp/LiveSignalCard";
 import { PremarketCandidatesPanel } from "@/features/limitUp/PremarketCandidatesPanel";
+import { FusedScoreCandidatesPanel } from "@/features/limitUp/FusedScoreCandidatesPanel";
 import { ACTIVE_LIVE_SNAPSHOT_POLL_INTERVAL_MS } from "@/features/limitUp/nextSessionPlan";
 import { BacktestView } from "@/pages/LimitUpPage";
 import { cn } from "@/lib/utils";
@@ -147,6 +148,7 @@ function LiveLeaderView() {
         {stale && <span className="shrink-0 text-xs text-amber-500">数据过期</span>}
       </div>
       <PremarketCandidatesPanel />
+      <FusedScoreCandidatesPanel />
       {leaders.length ? (
         <div className="grid gap-3 px-3 pb-4 sm:px-4 xl:grid-cols-2">
           {leaders.map((signal) => (
