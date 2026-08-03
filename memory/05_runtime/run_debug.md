@@ -53,17 +53,18 @@ uv run python examples/veighna_trader/run.py
   不代表该报告缓存已经就绪。若 API、PostgreSQL 或 worker 仍使用 Compose 的 `0.25`
   CPU 默认值，完整计算会超过网关 60 秒上限，网关返回 502，页面会在查询重试期间持续显示
   “A+B+C 回测载入中”。
-- 正式组合报告的冷缓存处理已在本地代码实现、待版本化发版：
+- 正式组合报告的冷缓存处理已随 `v2.5.31` 发布并在正式机验收：
   `/api/limit-up/history/backtest?lane=portfolio` 和默认
   `/api/limit-up/history/ledger` 先返回 `202 {status: building}`，由 API 后台单飞构建报告；
   缓存就绪后返回原有 `200` 结构。前端仅在“回测”或“历史交割单”视图请求正式报告，
   每 3 秒轮询构建状态，并在报告就绪前不发出每日交割单并发请求。显式分赛道研究与内部
   同步 API 保持原有行为。
-- 生产发布验收：正式 `.env` 设为 `ALPHAAGENT_ENV=production`，并根据已核验的 8 核
-  主机设置 `ALPHAAGENT_API_CPUS=2`、`ALPHAAGENT_POSTGRES_CPUS=2`、
-  `ALPHAAGENT_SCHEDULER_CPUS=0.5`。不要把提高网关超时作为替代方案；在非交易时段
-  用版本化镜像重建服务后，应验证冷缓存立即 `202`、缓存就绪后 `200`，以及实时扫描
-  心跳正常。
+- `v2.5.31` 正式验收证据（未来当前状态仍须现场复核）：8 核主机设置
+  `ALPHAAGENT_ENV=production`、`ALPHAAGENT_API_CPUS=2`、
+  `ALPHAAGENT_POSTGRES_CPUS=2`、`ALPHAAGENT_SCHEDULER_CPUS=0.5` 后，冷缓存的回测与
+  默认交割单分别在 `0.167s`、`0.622s` 返回 `202`，缓存就绪后均在约 `0.38s` 返回 `200`。
+  不要把提高网关超时作为替代方案；验收还要核对实时扫描心跳，而不是仅依据当日重启导致的
+  `current_day_radar_fingerprint_changed` 健康检查告警。
 
 ```bash
 cd /opt/1panel/project/AlphaAgent
