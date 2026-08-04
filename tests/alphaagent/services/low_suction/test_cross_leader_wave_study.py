@@ -15,7 +15,6 @@ from alphaagent.server.services.low_suction.cross_leader_wave_study import (
     render_cross_leader_wave_markdown,
     replay_leader_wave_episodes,
 )
-from alphaagent.server.services.low_suction.cli import build_parser
 
 
 def _trading_dates(periods: int = 90) -> tuple[date, ...]:
@@ -305,12 +304,3 @@ def test_report_keeps_reference_and_formal_metrics_separate() -> None:
     assert render_cross_leader_wave_json(report) == rendered_json
     assert '"formal_metrics"' in rendered_json
     assert "正式胜率、收益、复利：`null`" in rendered_markdown
-
-
-def test_cli_accepts_cross_leader_wave_study() -> None:
-    args = build_parser().parse_args(
-        ["v2-cross-leader-wave-study", "--format", "json"]
-    )
-
-    assert args.command == "v2-cross-leader-wave-study"
-    assert args.format == "json"

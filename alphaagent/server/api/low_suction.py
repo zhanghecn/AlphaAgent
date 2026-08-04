@@ -144,7 +144,7 @@ def historical_replay_trade(signal_id: str, run_id: str):
 
 @router.get("/cross-regime-validation", response_model=None)
 def cross_regime_validation():
-    """Read the latest historical candidate and natural-forward gates."""
+    """Read retained natural-forward diagnostics without retired reports."""
 
     try:
         return ok(get_cross_regime_validation())
@@ -178,24 +178,16 @@ def swing_strategy():
 
 @router.get("/swing-research", response_model=None)
 def swing_research():
-    """Read the frozen low-suction swing artifact without running a backtest."""
+    """Read the fail-closed status for retired swing research evidence."""
 
     try:
         return ok(get_swing_research())
-    except FileNotFoundError:
+    except (OSError, ValueError) as exc:
         return JSONResponse(
             status_code=503,
             content=fail(
                 "LOW_SUCTION_RESEARCH_UNAVAILABLE",
-                "低吸波段研究报告尚未生成",
-            ),
-        )
-    except (OSError, ValueError) as exc:
-        return JSONResponse(
-            status_code=500,
-            content=fail(
-                "LOW_SUCTION_RESEARCH_INVALID",
-                "低吸波段研究报告无法读取",
+                "低吸波段研究状态暂时不可用",
                 {"reason": str(exc)},
             ),
         )

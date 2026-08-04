@@ -1130,10 +1130,8 @@ def build_true_leader_report(
             else "freeze_proxy_for_new_forward_identity_validation"
         ),
         "reproduce": (
-            "docker compose run --rm --no-deps -v /root/project/ai/vnpy:/workspace "
-            "-w /workspace alphaagent-api python -m "
-            "alphaagent.server.services.low_suction.cli "
-            "v2-true-leader-wave-study --format markdown"
+            "legacy CLI retired; use the daily-factor-* commands for current "
+            "low-suction research"
         ),
     }
 

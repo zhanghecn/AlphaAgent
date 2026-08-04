@@ -5,7 +5,6 @@ from datetime import date
 import pandas as pd
 import pytest
 
-from alphaagent.server.services.low_suction.cli import build_parser
 from alphaagent.server.services.low_suction.event_neutral_days import (
     build_event_neutral_comparison_days,
     build_event_neutral_days,
@@ -271,12 +270,3 @@ def test_outcome_columns_are_rejected() -> None:
 
     with pytest.raises(ValueError, match="outcome"):
         _build(candidates=candidates)
-
-
-def test_neutral_audit_cli_has_no_offsets_or_date_parameters() -> None:
-    args = build_parser().parse_args(["v2-event-neutral-audit", "--format", "json"])
-
-    assert args.command == "v2-event-neutral-audit"
-    assert not hasattr(args, "offsets")
-    assert not hasattr(args, "start")
-    assert not hasattr(args, "end")

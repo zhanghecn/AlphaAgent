@@ -4,7 +4,6 @@ from datetime import date
 
 import pandas as pd
 
-from alphaagent.server.services.low_suction.cli import build_parser
 from alphaagent.server.services.low_suction.event_recognition_falsification import (
     EVIDENCE_LEVEL,
     build_event_falsification_report,
@@ -343,13 +342,3 @@ def test_report_never_exposes_formal_metrics_or_a_strict_top3_claim() -> None:
     assert report["formal_metrics"] is None
     assert report["holdout_price_values_read"] is False
     assert report["cohort_label"] == "recognition_top3_incomplete_denominator"
-
-
-def test_cli_does_not_allow_event_study_parameter_search() -> None:
-    args = build_parser().parse_args(
-        ["v2-event-falsification", "--format", "json"]
-    )
-
-    assert args.command == "v2-event-falsification"
-    assert not hasattr(args, "start")
-    assert not hasattr(args, "entry_depths")

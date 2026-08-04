@@ -565,10 +565,8 @@ def build_cross_leader_wave_report(
     report["reference_support_trade_ledger"] = _records(reference_trades)
     report["reference_primary_wave_path"] = _records(reference_path)
     report["reproduce"] = (
-        "docker compose run --rm --no-deps -v /root/project/ai/vnpy:/workspace "
-        "-w /workspace alphaagent-api python -m "
-        "alphaagent.server.services.low_suction.cli "
-        "v2-cross-leader-wave-study --format markdown"
+        "legacy CLI retired; use the daily-factor-* commands for current "
+        "low-suction research"
     )
     return report
 

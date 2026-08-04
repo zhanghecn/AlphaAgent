@@ -63,34 +63,6 @@ def test_build_ledger_keeps_stock_concept_support_and_d1_evidence() -> None:
     assert row["d1_net_return_pct"] == 4.8
 
 
-def test_regression_artifact_is_validation_not_trade_input(monkeypatch) -> None:
-    artifact = {
-        "historical_metrics": {
-            "full_history": {
-                "trades": 1,
-                "win_rate_pct": 100.0,
-                "mean_net_return_pct": 7.8,
-            },
-            "two_slot_cash": {
-                "closed_trades": 1,
-                "compound_return_pct": 1.95,
-            },
-        }
-    }
-    metrics = {
-        "trades": 1,
-        "positive_rate_pct": 100.0,
-        "mean_net_return_pct": 7.8,
-        "two_slot_cash": {"closed_trades": 1, "compound_return_pct": 1.95},
-    }
-
-    service._verify_regression(metrics, artifact)
-
-    metrics["trades"] = 2
-    with pytest.raises(ValueError, match="database replay"):
-        service._verify_regression(metrics, artifact)
-
-
 def test_overview_never_builds_replay(monkeypatch) -> None:
     calls: list[str | None] = []
 

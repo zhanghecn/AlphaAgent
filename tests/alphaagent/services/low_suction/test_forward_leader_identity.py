@@ -14,7 +14,6 @@ from alphaagent.server.services.low_suction.forward_leader_identity import (
     render_forward_leader_report_json,
     render_forward_leader_report_markdown,
 )
-from alphaagent.server.services.low_suction.cli import build_parser
 from alphaagent.server.services.low_suction.leader_identity import LeaderIdentityMode
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -276,13 +275,7 @@ def test_forward_capture_rejects_future_or_outcome_input_columns() -> None:
         )
 
 
-def test_forward_cli_and_report_keep_performance_closed() -> None:
-    freeze = build_parser().parse_args(
-        ["v2-forward-top3-freeze", "--source-date", "2026-07-16"]
-    )
-    report_args = build_parser().parse_args(
-        ["v2-forward-top3-report", "--format", "markdown"]
-    )
+def test_forward_report_keeps_performance_closed() -> None:
     report = {
         "ranking_version": FORWARD_LEADER_RANKING_VERSION,
         "source_sessions": 1,
@@ -304,8 +297,6 @@ def test_forward_cli_and_report_keep_performance_closed() -> None:
     markdown = render_forward_leader_report_markdown(report)
     payload = render_forward_leader_report_json(report)
 
-    assert freeze.source_date == SOURCE_DATE
-    assert report_args.command == "v2-forward-top3-report"
     assert "selected_mode: `null`" in markdown
     assert "formal_metrics: `null`" in markdown
     assert '"formal_metrics": null' in payload

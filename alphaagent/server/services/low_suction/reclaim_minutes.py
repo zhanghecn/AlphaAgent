@@ -72,10 +72,10 @@ def load_reclaim_signal_pairs(
 def load_reclaim_signal_manifest() -> pd.DataFrame:
     """Classify current local 5m coverage for every reclaim signal pair."""
 
-    from .leader_ma5_scheme_minutes import load_existing_scheme_minutes
+    from .minute_bar_repository import load_existing_minute_bars
 
     pairs = load_reclaim_signal_pairs()
-    existing = load_existing_scheme_minutes(pairs)
+    existing = load_existing_minute_bars(pairs)
     return build_event_5m_manifest(pairs, existing)
 
 

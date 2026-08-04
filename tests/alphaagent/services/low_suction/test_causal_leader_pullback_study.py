@@ -25,7 +25,6 @@ from alphaagent.server.services.low_suction.causal_leader_pullback_study import 
     render_causal_leader_pullback_json,
     render_causal_leader_pullback_markdown,
 )
-from alphaagent.server.services.low_suction.cli import build_parser
 
 
 def test_report_keeps_algorithm_metrics_separate_from_formal_metrics() -> None:
@@ -314,21 +313,6 @@ def test_dynamic_preparation_never_executes_trade_variants(monkeypatch) -> None:
 
     assert result.campaigns is prepared
     assert not hasattr(result, "trades")
-
-
-def test_cli_registers_causal_leader_pullback_study() -> None:
-    args = build_parser().parse_args(
-        ["v2-causal-leader-pullback-study", "--format", "json"]
-    )
-
-    assert args.command == "v2-causal-leader-pullback-study"
-    assert args.format == "json"
-
-    cross_regime = build_parser().parse_args(
-        ["v3-cross-regime-pullback-study", "--format", "json"]
-    )
-    assert cross_regime.command == "v3-cross-regime-pullback-study"
-    assert cross_regime.format == "json"
 
 
 def test_time_blocks_are_assigned_within_each_variant_observation_window() -> None:

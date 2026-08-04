@@ -10,7 +10,6 @@ import pytest
 from alphaagent.server.services.low_suction.forward_leader_identity import (
     FORWARD_LEADER_RANKING_VERSION,
 )
-from alphaagent.server.services.low_suction.cli import build_parser
 from alphaagent.server.services.low_suction.forward_ma5_pullback import (
     FORWARD_MA5_CONTRACT_VERSION,
     ForwardMa5Inputs,
@@ -451,19 +450,3 @@ def test_candidate_input_rejects_future_or_outcome_columns() -> None:
                 rank_history=_rank_history().assign(future_return_pct=10.0),
             )
         )
-
-
-def test_forward_ma5_cli_has_no_threshold_overrides() -> None:
-    run = build_parser().parse_args(
-        ["v2-forward-ma5-shadow-run", "--as-of-date", "2026-07-17"]
-    )
-    report = build_parser().parse_args(
-        ["v2-forward-ma5-shadow-report", "--format", "markdown"]
-    )
-
-    assert run.command == "v2-forward-ma5-shadow-run"
-    assert run.as_of_date == date(2026, 7, 17)
-    assert report.command == "v2-forward-ma5-shadow-report"
-    assert report.format == "markdown"
-    assert not hasattr(run, "pullback_pct")
-    assert not hasattr(run, "approach_tolerance_pct")

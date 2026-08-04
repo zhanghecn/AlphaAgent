@@ -838,11 +838,12 @@ def test_eod_schedule_runs_market_data_and_limit_up_planning():
         "sync_stock_list",
         "sync_sector_fund_flows",
         "sync_stock_fund_flows",
-            "sync_stock_daily_bars",
-            "sync_index_daily_bars",
-            "sync_mainline_sentiment_history",
-            "sync_low_suction_swing_settlement",
-            "sync_sector_list",
+        "sync_stock_daily_bars",
+        svc.ADJUSTED_DAILY_SYNC_JOB_ID,
+        "sync_index_daily_bars",
+        "sync_mainline_sentiment_history",
+        "sync_low_suction_swing_settlement",
+        "sync_sector_list",
         "sync_sector_daily_bars",
         "sync_sector_period_scores",
         "sync_sector_members",
@@ -871,6 +872,7 @@ def test_eod_finalize_schedule_retries_daily_bars_late_without_slow_jobs():
     assert finalize["cron"] == "30 21 * * 1-5"
     assert jobs == [
         "sync_stock_daily_bars",
+        svc.ADJUSTED_DAILY_SYNC_JOB_ID,
         "sync_index_daily_bars",
         "sync_mainline_sentiment_history",
         "sync_low_suction_swing_settlement",
@@ -1236,6 +1238,10 @@ def test_eod_schedule_passes_incremental_concept_index_params() -> None:
         "jobs": {
             "sync_stock_daily_bars": {
                 "skip_complete_session": True,
+            },
+            svc.ADJUSTED_DAILY_SYNC_JOB_ID: {
+                "max_symbols": 50,
+                "max_workers": 4,
             },
             "sync_sector_daily_bars": {
                 "limit": 30,

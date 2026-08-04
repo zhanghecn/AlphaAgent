@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from alphaagent.server.services.low_suction.cli import build_parser
 from alphaagent.server.services.low_suction.true_leader_study import (
     assign_true_leader_blocks,
     build_cycle_leader_truth,
@@ -337,9 +336,3 @@ def test_identity_metrics_compare_causal_and_baseline_on_same_cycles() -> None:
     assert pooled.loc["ten_day_excess_baseline", "qualified_cycles"] == 10
     assert pooled.loc["causal_leadership", "top1_exact_rate_pct"] == 100.0
     assert pooled.loc["ten_day_excess_baseline", "top1_exact_rate_pct"] == 0.0
-
-
-def test_cli_registers_true_leader_wave_study() -> None:
-    args = build_parser().parse_args(["v2-true-leader-wave-study"])
-
-    assert args.command == "v2-true-leader-wave-study"

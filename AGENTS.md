@@ -15,8 +15,8 @@ read this file and verify against the local code/docs when needed.
 - Explain in Chinese unless the user asks otherwise.
 - Be conservative with source edits. Do not modify `vnpy/` or official examples unless
   the change is explicitly required.
-- Keep long-lived project memory under `memory/`. Do not scatter notes or temporary
-  scripts at repository root.
+- Deliver research, diagnostics, and implementation results directly in the conversation.
+  Do not maintain a project-local memory archive, diary, or duplicate report store.
 - The project/product name is `AlphaAgent`. Keep the internal Python package name
   `vnpy` for now to preserve compatibility with vn.py plugins and imports.
 - Do not run `git commit` or `git push` unless the user explicitly asks for it.
@@ -61,7 +61,6 @@ read this file and verify against the local code/docs when needed.
   - `requirements/alphaagent_requirement_map.md`: raw requirement map.
   - `requirements/alphaagent_functional_design.md`: functional modules and execution flow.
   - `requirements/alphaagent_service_frontend_execution_plan.md`: backend/frontend execution plan and API contract draft.
-- `memory/`: local project map maintained for future conversations.
 
 ## Current Environment Snapshot
 
@@ -160,68 +159,20 @@ Read these before writing new A-share code:
 - `examples/alpha_research/download_data_xt.ipynb`: XT A-share component/history
   download example for AlphaLab.
 
-## Local Memory System
+## Research Reporting and Workspace Notes
 
-Use `memory/` as the durable project map. Before answering broad project questions,
-writing tutorials, or adding data/strategy code, read:
-
-- `memory/00_index/README.md`
-- `memory/01_project/structure.md`
-- `memory/01_project/installed_state.md`
-- `memory/02_source/core_entrypoints.md`
-- `memory/03_data/data_flow.md`
-- `memory/04_a_share/capability_map.md`
-- `memory/05_runtime/run_debug.md`
-- `memory/09_decisions/decisions.md`
-- `requirements/alphaagent_requirement_map.md`
-
-Memory folders:
-
-- `memory/00_index/`: navigation and maintenance rules.
-- `memory/01_project/`: project structure, docs, examples, installed state.
-- `memory/02_source/`: source-code entrypoints and object model.
-- `memory/03_data/`: datafeed, database, DataManager, realtime/historical data paths.
-- `memory/04_a_share/`: A-share capabilities, plugin map, limitations, roadmap.
-- `memory/05_runtime/`: run/debug commands and environment notes.
-- `memory/06_backtests/`: backtest reports, exported result tables, gap manifests, and validation evidence.
-- `memory/09_decisions/`: user decisions, tradeoffs, pending tasks.
-
-Requirement documents live in `requirements/`, not `memory/`.
-
-Memory maintenance rules:
-
-- Update memory when a new verified project fact, decision, or setup result is learned.
-- Put each fact in the right typed folder; do not create one-off notes in root.
-- Keep entries concise and link to concrete project files.
-- Mark uncertain items as pending verification.
-- Do not migrate unverified old tutorial content into memory.
-- Treat `memory/` as a maintained project map, not an ever-growing diary. Do not keep
-  appending chronological notes when an existing section can be rewritten to the
-  current truth.
-- At the end of each completed task, do a small memory hygiene pass when the task
-  changed durable facts, architecture, commands, verification results, decisions, or
-  known limitations:
-  - Update the owning memory file in place.
-  - Merge duplicate bullets.
-  - Replace stale status with current status.
-  - Keep detailed evidence in dedicated artifacts such as `memory/06_backtests/` and
-    link to those artifacts instead of copying long tables into overview files.
-  - Remove or compress obsolete process notes that no longer help the next session.
-- Prefer this memory shape:
-  - `Current state`: what is true now.
-  - `How to verify/run`: shortest commands or endpoints.
-  - `Evidence`: links to reports, tests, commits, or concrete files.
-  - `Open risks/next work`: only actionable unresolved items.
-- Avoid this memory shape:
-  - Long timestamped chat transcripts.
-  - Repeated "today I ran..." notes after the result has been summarized.
-  - Conflicting old and new statuses without marking the old status obsolete.
-  - Large raw outputs pasted into index or runtime files.
-- If a memory file becomes long, summarize it around the current state, move detailed
-  historical artifacts to a typed subfolder, and keep only links plus the conclusions
-  needed for future work.
-- When a task only changes transient local state, experimental scratch data, or a
-  failed attempt with no lasting lesson, do not update memory just to record activity.
+- Do not create or use a `memory/` directory. It is intentionally absent.
+- Report research findings, backtest tables, diagnosis, decisions, and verification
+  directly to the user in the final response. Do not copy those reports into the
+  repository merely for agent recall.
+- Do not create chronological work logs, chat transcripts, daily notes, or milestone
+  diaries anywhere in the repository.
+- Create a durable document only when the user explicitly asks for one or when it is a
+  real product requirement, operator guide, API contract, or test fixture. Put it in
+  the appropriate existing `requirements/`, `docs/`, or `tests/` location and keep it
+  focused on the current contract rather than process history.
+- For broad project work, read `AGENTS.md`, the relevant source, tests, official local
+  docs, and requirement documents directly. Do not rely on accumulated agent notes.
 
 ## Local Files to Handle Deliberately
 
@@ -231,12 +182,11 @@ Current non-upstream files/changes observed:
 - `pyproject.toml`: project description/homepage/source metadata updated for
   AlphaAgent, while distribution name remains `vnpy` for plugin compatibility.
 - `uv.lock`: generated by `uv sync`.
-- `memory/`: local project map added for future work.
 
 The user complained that files were scattered and source/examples were modified too
 casually. Avoid adding more files at repository root except durable context files like
-this one. Prefer `memory/` for project facts and keep experiments out of official
-source/example paths unless explicitly requested.
+this one. Keep experiments out of official source/example paths unless explicitly
+requested, and do not save conversational reports for later agent consumption.
 
 ## Working Rules for Future A-share Tasks
 

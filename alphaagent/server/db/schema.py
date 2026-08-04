@@ -156,6 +156,60 @@ Index("ix_stock_daily_bars_date_symbol", stock_daily_bars.c.trade_date, stock_da
 # 覆盖率/新鲜度探测的 MAX(updated_at) 走索引
 Index("ix_stock_daily_bars_updated_at", stock_daily_bars.c.updated_at)
 
+# 独立前复权快照：日线低吸研究不得改写现有不复权 stock_daily_bars。
+low_suction_adjusted_daily_bars = Table(
+    "low_suction_adjusted_daily_bars",
+    metadata,
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("trade_date", Date, primary_key=True),
+    Column("adjustment", String(16), primary_key=True),
+    Column("open_price", Float, nullable=False),
+    Column("close_price", Float, nullable=False),
+    Column("high_price", Float, nullable=False),
+    Column("low_price", Float, nullable=False),
+    Column("volume", Float, nullable=True),
+    Column("turnover", Float, nullable=True),
+    Column("source", String(160), nullable=False),
+    Column("source_fingerprint", String(128), nullable=False),
+    # Nullable preserves early experimental rows; readers require a populated
+    # run id before treating a snapshot as a controlled data-sync product.
+    Column("sync_run_id", BigInteger, nullable=True),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index(
+    "ix_low_suction_adjusted_daily_bars_adjustment_date_symbol",
+    low_suction_adjusted_daily_bars.c.adjustment,
+    low_suction_adjusted_daily_bars.c.trade_date,
+    low_suction_adjusted_daily_bars.c.vt_symbol,
+)
+
+# 每日范围保存请求、返回、排除和完整性证据；研究读取端据此失败关闭。
+low_suction_adjusted_daily_bar_scopes = Table(
+    "low_suction_adjusted_daily_bar_scopes",
+    metadata,
+    Column("trade_date", Date, primary_key=True),
+    Column("adjustment", String(16), primary_key=True),
+    Column("source", String(160), primary_key=True),
+    Column("request_fingerprint", String(128), primary_key=True),
+    Column("requested_symbol_count", Integer, nullable=False),
+    Column("returned_symbol_count", Integer, nullable=False),
+    Column("accepted_symbol_count", Integer, nullable=False),
+    Column("excluded_symbol_count", Integer, nullable=False),
+    Column("complete", Boolean, nullable=False),
+    Column("response_fingerprint", String(128), nullable=False),
+    Column("sync_run_id", BigInteger, nullable=True),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index(
+    "ix_low_suction_adjusted_daily_bar_scopes_complete_date",
+    low_suction_adjusted_daily_bar_scopes.c.complete,
+    low_suction_adjusted_daily_bar_scopes.c.trade_date,
+)
+
 stock_minute_bars = Table(
     "stock_minute_bars",
     metadata,
@@ -2004,6 +2058,8 @@ def _apply_compatible_schema_patches(engine) -> None:
         "ALTER TABLE limit_up_radar_observations DROP COLUMN IF EXISTS early_entry_kind",
         "ALTER TABLE stocks ADD COLUMN IF NOT EXISTS volume_ratio FLOAT",
         "ALTER TABLE stock_daily_bars ADD COLUMN IF NOT EXISTS turnover_rate FLOAT",
+        "ALTER TABLE low_suction_adjusted_daily_bars ADD COLUMN IF NOT EXISTS sync_run_id BIGINT",
+        "ALTER TABLE low_suction_adjusted_daily_bar_scopes ADD COLUMN IF NOT EXISTS sync_run_id BIGINT",
         "ALTER TABLE sync_batch_schedules ADD COLUMN IF NOT EXISTS action VARCHAR(40) NOT NULL DEFAULT 'sync'",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS rise_count INTEGER",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS fall_count INTEGER",

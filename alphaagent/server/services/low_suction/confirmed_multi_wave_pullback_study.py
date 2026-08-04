@@ -438,11 +438,8 @@ def build_confirmed_multi_wave_pullback_report(
         "trade_ledger": _records(result.trades),
         "trade_exclusions": _records(result.exclusions),
         "reproduce": (
-            "docker compose run --rm --no-deps "
-            "-v /root/project/ai/vnpy:/workspace -w /workspace "
-            "alphaagent-api python -m "
-            "alphaagent.server.services.low_suction.cli "
-            "v2-confirmed-multi-wave-pullback-study --format markdown"
+            "legacy CLI retired; use the daily-factor-* commands for current "
+            "low-suction research"
         ),
     }
     return _json_safe(report)

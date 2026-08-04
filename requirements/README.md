@@ -1,7 +1,7 @@
 # AlphaAgent Requirements Index
 
-这里保存当前仍存在且有验证价值的研究计划。源码、测试、`memory/09_decisions/decisions.md`
-和 `memory/06_backtests/README.md` 是运行事实与研究结论的当前入口。
+这里保存当前仍有产品需求价值的文档。运行事实以源码和测试为准；研究诊断
+直接在会话中交付，不维护仓库内的记忆或过程报告。
 
 ## Current files
 
@@ -26,11 +26,6 @@
 
 ## Current decision
 
-- 当前正式合同只有 `limit-up-core-abc-v2`，状态为
-  `historical_proxy_pass_forward_unconfirmed`。全量正式闭合 `96/140=68.5714%`，平均净收益
-  `+2.0988%`；两仓实际成交 `69/94=73.4043%`、复利 `+195.3585%`。规则、交割和风险边界见
-  `memory/06_backtests/limit_up_abc_formal_replay_20260727.md`。
-- 次数识别门的 165 组网格已验证 560/560 个重算计数一致，但固定严格验证缺少 246 个候选
-  交易日；当前维持 `prior_limit_count_126` 的 `2-6`，没有上线参数变更。
-- 旧需求、低吸计划和市场择时计划已由提交 `f99d4afc` 删除，不再保留失效文件链接；需要
-  审计历史时使用 Git 读取删除前版本，不把它们恢复成当前合同。
+- 日线低吸仅保留当前源码、回归测试和用户源文本 `低吸研究.txt`；它仍是
+  `exploratory_raw_unadjusted` 研究，不构成产品、推荐或交易合同。
+- 已清理旧低吸方案、回测日记和过程性计划；需要审计旧版本时使用 Git 历史，不恢复为当前入口。

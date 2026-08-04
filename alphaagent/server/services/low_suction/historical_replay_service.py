@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -39,14 +37,7 @@ from .historical_replay_repository import (
 
 EVIDENCE_LEVEL = "exploratory_survivorship_proxy"
 MEMBERSHIP_MODE = "current_membership_replayed_backward"
-REGRESSION_ARTIFACT_SHA256 = (
-    "ccfeed5e4254c435d9821fdca96c9670adfc9fa3965b0d53f68da416e1c7a111"
-)
 PRODUCT_POLICY_VERSION = f"{THREE_PHASE_ADAPTIVE_POLICY_VERSION}-two-slot-v1"
-REGRESSION_ARTIFACT = (
-    Path(__file__).resolve().parents[4]
-    / "memory/06_backtests/low_suction_three_phase_adaptive_diagnostic_20260721.json"
-)
 
 
 @dataclass(frozen=True)
@@ -75,9 +66,6 @@ def build_exploratory_three_phase_replay() -> HistoricalReplayBuild:
     ledger = _build_ledger(selected, signals, inputs.memberships)
     cash = simulate_four_slot_cash(selected, stock_features, capacity=2)
     metrics = _metrics(ledger, cash)
-    artifact = _load_regression_artifact()
-    _verify_regression(metrics, artifact)
-
     input_fingerprint = _combined_input_fingerprint(inputs.fingerprints)
     run_id = hashlib.sha256(
         f"{PRODUCT_POLICY_VERSION}|{input_fingerprint}".encode("utf-8")
@@ -89,7 +77,6 @@ def build_exploratory_three_phase_replay() -> HistoricalReplayBuild:
         "evidence_level": EVIDENCE_LEVEL,
         "membership_mode": MEMBERSHIP_MODE,
         "input_fingerprint": input_fingerprint,
-        "regression_artifact_sha256": REGRESSION_ARTIFACT_SHA256,
         "trade_count": len(ledger),
         "metrics": metrics,
         "built_at": datetime.now().astimezone(),
@@ -101,7 +88,6 @@ def build_exploratory_three_phase_replay() -> HistoricalReplayBuild:
                 "historical_point_in_time_membership_missing",
                 "natural_forward_qualification_not_met",
             ],
-            "regression_artifact_is_input": False,
         },
     }
     return HistoricalReplayBuild(run=run, trades=ledger, metrics=metrics)
@@ -273,48 +259,9 @@ def _with_metric_views(run: dict[str, object] | None) -> dict[str, object] | Non
     return result
 
 
-def _load_regression_artifact() -> dict[str, Any]:
-    raw = REGRESSION_ARTIFACT.read_bytes()
-    digest = hashlib.sha256(raw).hexdigest()
-    if digest != REGRESSION_ARTIFACT_SHA256:
-        raise ValueError(f"three-phase regression artifact changed: {digest}")
-    report = json.loads(raw.decode("utf-8"))
-    if not isinstance(report, dict):
-        raise ValueError("three-phase regression artifact must be an object")
-    return report
-
-
-def _verify_regression(metrics: dict[str, object], artifact: dict[str, Any]) -> None:
-    expected = artifact["historical_metrics"]
-    full = expected["full_history"]
-    cash = expected["two_slot_cash"]
-    actual_cash = metrics["two_slot_cash"]
-    checks = {
-        "trades": (metrics["trades"], full["trades"]),
-        "positive_rate_pct": (metrics["positive_rate_pct"], full["win_rate_pct"]),
-        "mean_net_return_pct": (
-            metrics["mean_net_return_pct"],
-            full["mean_net_return_pct"],
-        ),
-        "cash_closed_trades": (actual_cash["closed_trades"], cash["closed_trades"]),
-        "cash_compound_return_pct": (
-            actual_cash["compound_return_pct"],
-            cash["compound_return_pct"],
-        ),
-    }
-    mismatches = [
-        name
-        for name, (actual, wanted) in checks.items()
-        if abs(float(actual) - float(wanted)) > 1e-9
-    ]
-    if mismatches:
-        raise ValueError(
-            "database replay no longer matches regression evidence: "
-            + ", ".join(mismatches)
-        )
-
-
 def _combined_input_fingerprint(fingerprints: dict[str, object]) -> str:
+    import json
+
     encoded = json.dumps(
         fingerprints, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")

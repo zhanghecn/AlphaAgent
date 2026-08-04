@@ -1528,10 +1528,8 @@ def build_causal_leader_pullback_report(
                 "Formal metrics remain null until strict membership and forward evidence gates pass.",
             ],
             "reproduce": (
-                "docker compose run --rm --no-deps -v /root/project/ai/vnpy:/workspace "
-                "-w /workspace alphaagent-research python -m "
-                "alphaagent.server.services.low_suction.cli "
-                "v3-cross-regime-pullback-study --format markdown"
+                "legacy CLI retired; use the daily-factor-* commands for current "
+                "low-suction research"
             ),
         }
     )

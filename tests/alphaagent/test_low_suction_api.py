@@ -20,6 +20,20 @@ def test_low_suction_swing_research_has_an_independent_endpoint(monkeypatch) -> 
     assert response.json()["data"] == expected
 
 
+def test_low_suction_swing_research_reports_retired_status_unavailable(
+    monkeypatch,
+) -> None:
+    def unavailable() -> dict[str, object]:
+        raise ValueError("retired status unavailable")
+
+    monkeypatch.setattr(low_suction, "get_swing_research", unavailable)
+
+    response = TestClient(create_app()).get("/api/reverse-wrap/swing-research")
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "LOW_SUCTION_RESEARCH_UNAVAILABLE"
+
+
 def test_low_suction_strategy_has_an_independent_read_only_endpoint(monkeypatch) -> None:
     expected = {
         "strategy_version": "low-suction-swing-paper-v1",

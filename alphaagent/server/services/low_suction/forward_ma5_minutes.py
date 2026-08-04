@@ -17,7 +17,7 @@ from .event_recognition_minutes import (
     build_event_5m_manifest,
 )
 from .forward_ma5_pullback import FORWARD_MA5_CONTRACT_VERSION
-from .leader_ma5_scheme_minutes import load_existing_scheme_minutes
+from .minute_bar_repository import load_existing_minute_bars
 
 
 DATASET = "low_suction_forward_ma5_signal_5m"
@@ -105,7 +105,7 @@ def load_forward_ma5_signal_manifest() -> pd.DataFrame:
     """Load exact pairs and classify their current local coverage."""
 
     pairs = load_forward_ma5_signal_pairs()
-    existing = load_existing_scheme_minutes(pairs)
+    existing = load_existing_minute_bars(pairs)
     return build_forward_ma5_signal_manifest(pairs, existing)
 
 

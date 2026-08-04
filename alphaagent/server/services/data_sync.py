@@ -38,6 +38,12 @@ from alphaagent.market.cache import market_cache
 from alphaagent.market.symbols import INDEX_SYMBOLS, normalize_exchange, vt_symbol
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, is_database_configured, session_scope
+from alphaagent.server.services.data_providers.adjusted_daily_import import (
+    ADJUSTED_DAILY_SYNC_JOB_ID,
+    DEFAULT_MAX_SYMBOLS as ADJUSTED_DAILY_DEFAULT_MAX_SYMBOLS,
+    DEFAULT_MAX_WORKERS as ADJUSTED_DAILY_DEFAULT_MAX_WORKERS,
+    sync_adjusted_daily_bars,
+)
 from alphaagent.server.services import market_snapshot_repository
 from alphaagent.server.services import research_sector_scores
 from alphaagent.server.services.completed_session import completed_daily_bar_cutoff
@@ -259,6 +265,17 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="stock_daily_bars",
         default_params={"limit": 250, "skip_complete_session": True},
+    ),
+    JobDefinition(
+        id=ADJUSTED_DAILY_SYNC_JOB_ID,
+        name="低吸研究前复权日线",
+        description="由统一数据同步写入低吸研究专用前复权日线和每日覆盖审计；不改写原始日线。",
+        source_id="akshare",
+        target_table="low_suction_adjusted_daily_bars",
+        default_params={
+            "max_symbols": ADJUSTED_DAILY_DEFAULT_MAX_SYMBOLS,
+            "max_workers": ADJUSTED_DAILY_DEFAULT_MAX_WORKERS,
+        },
     ),
     JobDefinition(
         id="sync_index_daily_bars",
@@ -556,6 +573,7 @@ JOB_CADENCES: dict[str, JobCadence] = {
     "sync_stock_hot_ranks": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "stock_hot_ranks", "updated_at"),
     "sync_limit_up_pools": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "stock_events", "updated_at"),
     "sync_stock_daily_bars": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "stock_daily_bars", "trade_date"),
+    ADJUSTED_DAILY_SYNC_JOB_ID: JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "low_suction_adjusted_daily_bar_scopes", "updated_at"),
     "sync_index_daily_bars": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "stock_daily_bars", "trade_date"),
     "sync_mainline_sentiment_history": JobCadence(CADENCE_EOD_DAILY, CATEGORY_SECTOR_RESEARCH, 1, "mainline_sentiment_history", "computed_at"),
     "sync_sector_daily_bars": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "sector_daily_bars", "trade_date"),
@@ -599,7 +617,7 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
     "sync_low_suction_swing_settlement",
     "sync_shenwan_industry_members", "sync_industry_board_mapping",
     "sync_supply_chain_edges",
-    "sync_stock_daily_bars", "sync_index_daily_bars", "sync_mainline_sentiment_history", "sync_sector_daily_bars",
+    "sync_stock_daily_bars", ADJUSTED_DAILY_SYNC_JOB_ID, "sync_index_daily_bars", "sync_mainline_sentiment_history", "sync_sector_daily_bars",
     "sync_stock_minute_bars",
     "sync_limit_up_event_minutes",
     "sync_limit_up_radar_minutes",
@@ -720,6 +738,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_sector_fund_flows",
             "sync_stock_fund_flows",
             "sync_stock_daily_bars",
+            ADJUSTED_DAILY_SYNC_JOB_ID,
             "sync_index_daily_bars",
             "sync_mainline_sentiment_history",
             "sync_low_suction_swing_settlement",
@@ -770,6 +789,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "concurrency": 1,
         "job_ids": [
             "sync_stock_daily_bars",
+            ADJUSTED_DAILY_SYNC_JOB_ID,
             "sync_index_daily_bars",
             "sync_mainline_sentiment_history",
             "sync_low_suction_swing_settlement",
@@ -1377,6 +1397,46 @@ class DataSyncRunner:
                     "日线覆盖未完成，已保留已同步数据等待下次仅补缺口："
                     f"{missing_symbol_count} 只"
                 )
+        return result
+
+    def _run_sync_low_suction_adjusted_daily_bars(
+        self,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Produce qfq inputs through the controlled nightly data-sync path."""
+
+        try:
+            sync_run_id = int(params.get("_sync_run_id") or 0)
+        except (TypeError, ValueError) as exc:
+            raise DataSyncError("前复权日线同步缺少有效的 sync run id") from exc
+        self._report_progress("同步低吸研究前复权日线", current=0, total=0)
+        result = sync_adjusted_daily_bars(
+            sync_run_id=sync_run_id,
+            symbols=tuple(_param_list(params.get("symbols"))),
+            start_date=_parse_date(params.get("start_date")),
+            end_date=_parse_date(params.get("end_date")),
+            max_symbols=int(
+                params.get("max_symbols", ADJUSTED_DAILY_DEFAULT_MAX_SYMBOLS)
+            ),
+            max_workers=min(
+                max(
+                    int(params.get("max_workers", ADJUSTED_DAILY_DEFAULT_MAX_WORKERS)),
+                    1,
+                ),
+                self.concurrency,
+            ),
+            retry_attempts=int(params.get("retry_attempts", 3)),
+            retry_delay_seconds=float(params.get("retry_delay_seconds", 1.0)),
+            progress=None,
+        )
+        self._report_progress(
+            "同步低吸研究前复权日线",
+            current=int(result.get("target_count") or 0),
+            total=int(result.get("target_count") or 0),
+            rows_read=int(result.get("rows_read") or 0),
+            rows_written=int(result.get("rows_written") or 0),
+            message=str(result.get("message") or ""),
+        )
         return result
 
     def _run_sync_index_daily_bars(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2629,6 +2689,7 @@ JOB_RUNNERS: dict[str, str] = {
     "sync_sector_list": "_run_sync_sector_list",
     "sync_sector_members": "_run_sync_sector_members",
     "sync_stock_daily_bars": "_run_sync_stock_daily_bars",
+    ADJUSTED_DAILY_SYNC_JOB_ID: "_run_sync_low_suction_adjusted_daily_bars",
     "sync_index_daily_bars": "_run_sync_index_daily_bars",
     "sync_stock_minute_bars": "_run_sync_stock_minute_bars",
     "sync_limit_up_event_minutes": "_run_sync_limit_up_event_minutes",
@@ -3394,6 +3455,13 @@ def _schedule_batch_params(row: dict[str, Any], action: str, job_ids: list[str])
     if "sync_stock_daily_bars" in job_ids:
         job_params["sync_stock_daily_bars"] = {
             "skip_complete_session": True,
+        }
+    if ADJUSTED_DAILY_SYNC_JOB_ID in job_ids:
+        # Keep scheduled qfq acquisition bounded.  Historical coverage is an
+        # explicit data-management run with a range and max_symbols=0.
+        job_params[ADJUSTED_DAILY_SYNC_JOB_ID] = {
+            "max_symbols": ADJUSTED_DAILY_DEFAULT_MAX_SYMBOLS,
+            "max_workers": ADJUSTED_DAILY_DEFAULT_MAX_WORKERS,
         }
     if "sync_sector_daily_bars" in job_ids:
         job_params["sync_sector_daily_bars"] = {
@@ -4224,6 +4292,7 @@ def _coverage_uncached() -> dict[str, Any]:
     table_names = [
         "stocks", "stock_daily_bars", "stock_minute_bars", "sectors", "sector_memberships",
         "stock_sector_memberships", "stock_business_segments",
+        "low_suction_adjusted_daily_bars", "low_suction_adjusted_daily_bar_scopes",
         "shenwan_industries", "shenwan_industry_members",
         "industry_chain_edges", "industry_board_mapping",
         # ── Research tables ──
@@ -4681,6 +4750,7 @@ def _usage_capabilities() -> list[dict[str, Any]]:
     caps = [
         {"name": "stock_list", "table": "stocks", "description": "全 A 股票清单"},
         {"name": "stock_daily_bars", "table": "stock_daily_bars", "description": "股票日 K 线"},
+        {"name": "adjusted_daily_bars", "table": "low_suction_adjusted_daily_bars", "description": "低吸研究前复权日线快照"},
         {"name": "stock_minute_bars", "table": "stock_minute_bars", "description": "股票分钟 K 线 / 尾盘入场验证"},
         {"name": "sector_list", "table": "sectors", "description": "板块 / 概念清单"},
         {"name": "sector_members", "table": "sector_memberships", "description": "板块成分股"},
@@ -4800,15 +4870,33 @@ def run_job(
         runner = DataSyncRunner(progress=progress, concurrency=concurrency)
         method = getattr(runner, method_name)
         merged_params = {**job_def.default_params, **run_params}
+        if job_id == ADJUSTED_DAILY_SYNC_JOB_ID:
+            # Persisted qfq scopes must point to the immutable sync-job record
+            # that produced them.  Other runners keep their existing contract.
+            merged_params["_sync_run_id"] = run_id
         result = method(merged_params)
         coverage_incomplete = str(result.get("status") or "") == "incomplete"
+        # This producer persists a bounded portion of an auditable qfq scope.
+        # A partial run is successful only after it has recorded scope
+        # evidence. Otherwise the rows would be tied to a failed run and could
+        # never be reused by the fail-closed research reader; an empty raw
+        # calendar remains a real data-coverage failure.
+        adjusted_scope_persisted = (
+            job_id == ADJUSTED_DAILY_SYNC_JOB_ID
+            and _has_adjusted_daily_scope_evidence(result)
+        )
+        run_status = "succeeded"
+        error_type: str | None = None
+        if coverage_incomplete and not adjusted_scope_persisted:
+            run_status = "failed"
+            error_type = "DataCoverageIncomplete"
         _finish_run(
             run_id,
-            "failed" if coverage_incomplete else "succeeded",
+            run_status,
             rows_read=result.get("rows_read", 0),
             rows_written=result.get("rows_written", 0),
             message=_sync_result_message(result),
-            error_type="DataCoverageIncomplete" if coverage_incomplete else None,
+            error_type=error_type,
         )
         return {
             "run_id": run_id,
@@ -4834,6 +4922,18 @@ def _sync_result_message(result: dict[str, Any]) -> str | None:
         )[:500]
     note = str(result.get("note") or "").strip()
     return note[:500] if note else None
+
+
+def _has_adjusted_daily_scope_evidence(result: Mapping[str, object]) -> bool:
+    """Whether a bounded qfq import persisted a daily coverage audit."""
+
+    adjusted_prices = result.get("adjusted_prices")
+    if not isinstance(adjusted_prices, Mapping):
+        return False
+    try:
+        return int(adjusted_prices.get("scope_count") or 0) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 # ─── Scheduler ────────────────────────────────────────────────────────────

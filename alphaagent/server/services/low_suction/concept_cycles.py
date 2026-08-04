@@ -728,9 +728,8 @@ def build_cycle_study_report(
             "historical_security_status",
         ],
         "reproduce": (
-            "docker compose exec -T alphaagent-api python -m "
-            "alphaagent.server.services.low_suction.cli v2-cycle-study "
-            "--format markdown"
+            "legacy CLI retired; use the daily-factor-* commands for current "
+            "low-suction research"
         ),
     }
 

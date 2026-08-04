@@ -1,17 +1,13 @@
 from __future__ import annotations
 
-import json
 from dataclasses import replace
 from datetime import date, timedelta
+import json
 
 import pandas as pd
 import pytest
 
-from alphaagent.server.services.low_suction import (
-    cli,
-    concept_cycles,
-    research_protocol,
-)
+from alphaagent.server.services.low_suction import research_protocol
 from alphaagent.server.services.low_suction.research_protocol import (
     HoldoutAccessError,
     HoldoutLock,
@@ -144,25 +140,6 @@ def test_protocol_exposes_only_registered_research_stages() -> None:
         "pipeline_validation",
         "locked_holdout",
     )
-
-
-def test_v2_protocol_cli_prints_only_protocol_and_date_split(
-    monkeypatch,
-    capsys,
-) -> None:
-    monkeypatch.setattr(
-        concept_cycles,
-        "load_cycle_research_calendar",
-        lambda: tuple(_dates(100)),
-    )
-
-    assert cli.main(["v2-protocol", "--format", "json"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-
-    assert payload["protocol"]["version"] == "low-suction-research-v2"
-    assert payload["date_split"]["discovery_dates"] == 80
-    assert payload["date_split"]["holdout_dates"] == 20
-
 
 def test_regime_adaptation_requires_two_profitable_traded_environments() -> None:
     decision = evaluate_regime_adaptation(

@@ -5,7 +5,6 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 
 from alphaagent.server.services.low_suction import event_recognition_minutes
-from alphaagent.server.services.low_suction.cli import build_parser
 
 
 def _candidates() -> pd.DataFrame:
@@ -104,14 +103,3 @@ def test_backfill_only_passes_manifest_discovered_gaps(monkeypatch) -> None:
     assert captured["tail_entry_start"] == "09:35"
     assert captured["tail_entry_end"] == "15:00"
     assert result["manifest_missing_before"] == 1
-
-
-def test_event_5m_cli_does_not_accept_custom_dates_or_windows() -> None:
-    args = build_parser().parse_args(
-        ["v2-event-5m-backfill", "--dry-run", "--max-gaps", "10"]
-    )
-
-    assert args.command == "v2-event-5m-backfill"
-    assert args.max_gaps == 10
-    assert not hasattr(args, "start")
-    assert not hasattr(args, "tail_entry_start")

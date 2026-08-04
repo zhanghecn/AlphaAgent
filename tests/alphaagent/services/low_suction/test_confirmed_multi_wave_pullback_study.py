@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from alphaagent.server.services.low_suction.cli import build_parser
 from alphaagent.server.services.low_suction.confirmed_multi_wave_pullback_study import (
     ConfirmedPullbackResult,
     build_confirmed_multi_wave_pullback_report,
@@ -428,12 +427,3 @@ def test_report_quarantines_reused_proxy_results_from_formal_metrics() -> None:
     rendered_markdown = render_confirmed_pullback_markdown(report)
     assert render_confirmed_pullback_json(report) == rendered_json
     assert "正式 Top3、低吸胜率、收益、复利：`null`" in rendered_markdown
-
-
-def test_cli_accepts_confirmed_multi_wave_pullback_study() -> None:
-    args = build_parser().parse_args(
-        ["v2-confirmed-multi-wave-pullback-study", "--format", "json"]
-    )
-
-    assert args.command == "v2-confirmed-multi-wave-pullback-study"
-    assert args.format == "json"
