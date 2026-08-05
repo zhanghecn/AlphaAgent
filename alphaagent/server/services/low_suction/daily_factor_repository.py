@@ -532,6 +532,7 @@ def _load_raw_daily_bars(
             table.c.low_price,
             table.c.volume,
             table.c.turnover,
+            table.c.turnover_rate,
             table.c.source,
             table.c.updated_at,
         )
@@ -820,6 +821,7 @@ def _empty_bars_frame() -> pd.DataFrame:
             "low_price",
             "volume",
             "turnover",
+            "turnover_rate",
             "source",
             "source_fingerprint",
             "sync_run_id",

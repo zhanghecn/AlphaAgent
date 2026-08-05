@@ -49,6 +49,13 @@ MA_CONTACT_DISTANCE_PCT = 0.5
 TRANSITION_MA20_MA30_CONTACT_PCT = 0.25
 SUPPORT_BROAD_LOW_MIN_PCT = -5.0
 SUPPORT_BROAD_CLOSE_MIN_PCT = -2.0
+SUPPORT_CLOSE_REACTION_MIN_PCT = 0.3
+TRANSITION_CLOSE_ANCHOR_MIN_PCT = -3.0
+TRANSITION_CLOSE_ANCHOR_MAX_PCT = 2.5
+TURNOVER_RATE_LOW_MAX_PCT = 3.0
+TURNOVER_RATE_GATE_MAX_PCT = 8.0
+CAPITULATION_TURNOVER_MAX_PCT = 5.0
+TRANSITION_TURNOVER_5D_MAX_PCT = 8.0
 TREND_GENTLE_SLOPE_MAX_PCT = 2.0
 EARLY_TREND_ALIGNMENT_MIN_SESSIONS = 3
 EARLY_TREND_ALIGNMENT_MAX_SESSIONS = 20
@@ -56,6 +63,8 @@ MA10_MA30_CONVERGENCE_LOOKBACK = 5
 MA10_MA30_CONVERGENCE_MIN_PCT = 0.5
 PROCESS_VOLUME_CHANGE_PCT = 10.0
 MA5_EXTENSION_MIN_PCT = 1.5
+TREND_CANDLE_QUIET_RANGE_MAX_PCT = 5.0
+TREND_DIST_EXCESS_MAX_PCT = 2.0
 TREND_REBUILD_PRIOR_LOOKBACK = 10
 TREND_REBUILD_MIN_DISORDERED_SESSIONS = 3
 MIN_SELECTION_SAMPLES = 30
@@ -72,6 +81,15 @@ OVERSOLD_TO_TREND_RULE_KEY = (
 )
 OVERSOLD_TO_TREND_PREPARATION_RULE_KEY = (
     "oversold_to_trend_pre_cross_ma10_ma20_contact"
+)
+OVERSOLD_TO_TREND_LOW_SUPPORT_RULE_KEY = (
+    "oversold_to_trend_dual_cross_low_support"
+)
+OVERSOLD_TO_TREND_CLOSE_ANCHORED_RULE_KEY = (
+    "oversold_to_trend_dual_cross_close_anchored"
+)
+OVERSOLD_TO_TREND_TURNOVER_CAP_RULE_KEY = (
+    "oversold_to_trend_dual_cross_turnover_cap"
 )
 TRANSITION_RULE_KEYS = frozenset(
     {
@@ -162,8 +180,55 @@ OVERSOLD_CORE_RULES = (
 )
 
 
-EXPLICIT_CASE_OVERSOLD_RULES = (
+OVERSOLD_LOW_SUPPORT_RULES = (
     DiscoveryRule(
+        "m10_m30_contact_after_m10_cross_low_support",
+        "oversold_rebound",
+        "MA10 上穿 MA20 后回贴 MA30，D 日低点在 MA10/20/30 获实际支撑",
+    ),
+    DiscoveryRule(
+        "m10_m30_contact_after_long_bear_low_support",
+        "oversold_rebound",
+        "长期空头结构后 MA10 上穿 MA20 回贴 MA30，D 日低点在 MA10/20/30 获实际支撑",
+    ),
+    DiscoveryRule(
+        "ma30_low_retest_after_m10_cross",
+        "oversold_rebound",
+        "MA10 上穿 MA20 后，D 日低点直接回踩 MA30 且收盘守住支撑",
+    ),
+    DiscoveryRule(
+        "ma30_low_retest_after_long_bear_m10_cross",
+        "oversold_rebound",
+        "长期空头结构后 MA10 上穿 MA20，D 日低点直接回踩 MA30 且收盘守住支撑",
+    ),
+)
+
+
+OVERSOLD_V3_RULES = (
+    DiscoveryRule(
+        "v3_oversold_staged_low_support_turnover_low",
+        "oversold_rebound",
+        "v3：空头后分阶段上穿过程 + D 日低点获均线支撑 + 换手率 < 3%",
+    ),
+    DiscoveryRule(
+        "v3_oversold_staged_low_support_turnover_gate",
+        "oversold_rebound",
+        "v3：空头后分阶段上穿过程 + D 日低点获均线支撑 + 换手率 < 8%",
+    ),
+    DiscoveryRule(
+        "v3_oversold_capitulation_rebound_tight",
+        "oversold_rebound",
+        "v3：MA10 上穿后回贴 MA30 的崩盘日，换手率 < 3% 且收盘脱离低点 0.3~1.5%",
+    ),
+    DiscoveryRule(
+        "v3_oversold_capitulation_rebound_broad",
+        "oversold_rebound",
+        "v3：MA10 上穿后回贴 MA30 的崩盘日，换手率 < 5% 且收盘脱离低点 >= 0.3%",
+    ),
+)
+
+
+EXPLICIT_CASE_OVERSOLD_RULES = (    DiscoveryRule(
         "ma10_low_retest_staged_m30_converging_volume_shrink",
         "oversold_rebound",
         "长期空头后 MA10/20 分阶段上穿，MA10 回踩且向 MA30 收敛，量能缩量",
@@ -201,6 +266,21 @@ EXPLICIT_CASE_TREND_RULES = (
         OVERSOLD_TO_TREND_RULE_KEY,
         "trend_pullback",
         "长期空头后 MA10 在 7 日内依次上穿 MA20、MA30，回撤后 MA20/30 紧贴且 MA10/20 向上；不要求 MA5 或 MA60",
+    ),
+    DiscoveryRule(
+        OVERSOLD_TO_TREND_LOW_SUPPORT_RULE_KEY,
+        "trend_pullback",
+        "超跌转趋势双上穿结构，且 D 日低点在 MA10/MA20 获实际支撑、收盘守住",
+    ),
+    DiscoveryRule(
+        OVERSOLD_TO_TREND_CLOSE_ANCHORED_RULE_KEY,
+        "trend_pullback",
+        "超跌转趋势双上穿结构，D 日收盘锚定 MA20 附近（未向上偏离、未深跌破）",
+    ),
+    DiscoveryRule(
+        OVERSOLD_TO_TREND_TURNOVER_CAP_RULE_KEY,
+        "trend_pullback",
+        "超跌转趋势双上穿结构，近 5 日平均换手率 < 8%（排除高换手派发）",
     ),
     DiscoveryRule(
         "ma10_low_touch_after_ma5_extension",
@@ -264,6 +344,9 @@ DISCOVERY_RULES: dict[str, tuple[DiscoveryRule, ...]] = {
     "oversold_rebound": (
         *OVERSOLD_CORE_RULES,
         *_volume_sibling_rules(OVERSOLD_CORE_RULES),
+        *OVERSOLD_LOW_SUPPORT_RULES,
+        *_volume_sibling_rules(OVERSOLD_LOW_SUPPORT_RULES),
+        *OVERSOLD_V3_RULES,
         *EXPLICIT_CASE_OVERSOLD_RULES,
     ),
     "trend_pullback": (
@@ -376,6 +459,17 @@ DISCOVERY_RULES: dict[str, tuple[DiscoveryRule, ...]] = {
             "ma10_low_touch_early_trend_regular_ma5_down",
             "trend_pullback",
             "多头排列形成后第 3 至第 20 日，MA5 在 MA10 上方但实际低点回踩 MA10，D 日弱势或下跌",
+        ),
+        DiscoveryRule(
+            "v4_trend_authentic_pullback",
+            "trend_pullback",
+            "v4：多头排列中低点回踩 MA5/MA10，趋势不过伸（段内相对距离超额 < 2），"
+            "且非首阴追高（安静 K 线、或收盘跌回 MA5 下方、或昨日已下跌）",
+        ),
+        DiscoveryRule(
+            "v4_trend_quiet_pullback",
+            "trend_pullback",
+            "v4：多头排列中安静 K 线（振幅 ≤ 5%）低点回踩 MA5/MA10，趋势不过伸",
         ),
         *EXPLICIT_CASE_TREND_RULES,
     ),
@@ -777,22 +871,80 @@ def build_extended_daily_features(
     )
     trend_all_slopes_up = len(slope_values) == 4 and all(value > 0 for value in slope_values)
     trend_slope_mean = fmean(slope_values) if len(slope_values) == 4 else None
+    close_to_ma5 = _number_or_none(base.get("close_to_ma5_pct"))
+    close_to_ma10 = _number_or_none(base.get("close_to_ma10_pct"))
     ma5_low_touch = _support_low_touch(
         _number_or_none(base.get("low_to_ma5_pct")),
-        _number_or_none(base.get("close_to_ma5_pct")),
+        close_to_ma5,
     )
     ma10_low_touch = _support_low_touch(
         _number_or_none(base.get("low_to_ma10_pct")),
-        _number_or_none(base.get("close_to_ma10_pct")),
+        close_to_ma10,
     )
     ma5_low_touch_broad = _support_low_touch_broad(
         _number_or_none(base.get("low_to_ma5_pct")),
-        _number_or_none(base.get("close_to_ma5_pct")),
+        close_to_ma5,
     )
-    ma5_close_near = _support_close_near(_number_or_none(base.get("close_to_ma5_pct")))
-    ma10_close_near = _support_close_near(_number_or_none(base.get("close_to_ma10_pct")))
+    ma5_close_near = _support_close_near(close_to_ma5)
+    ma10_close_near = _support_close_near(close_to_ma10)
     ma5_midpoint_near = _support_midpoint_near(midpoint_to_ma5)
     ma10_midpoint_near = _support_midpoint_near(midpoint_to_ma10)
+    low_to_ma20 = _price_to_ma_distance_pct(low_price, ma20)
+    low_to_ma30 = _price_to_ma_distance_pct(low_price, ma30)
+    close_to_ma20 = _price_to_ma_distance_pct(close_price, ma20)
+    close_to_ma30 = _price_to_ma_distance_pct(close_price, ma30)
+    ma20_low_touch = _support_low_touch(low_to_ma20, close_to_ma20)
+    ma30_low_touch = _support_low_touch(low_to_ma30, close_to_ma30)
+    turnover_rates = [_number_or_none(row.get("turnover_rate")) for row in visible]
+    turnover_rate = turnover_rates[-1] if turnover_rates else None
+    prior_turnover_rates = [
+        value for value in turnover_rates[-6:-1] if value is not None
+    ]
+    turnover_rate_5d_mean = (
+        _round_pct(fmean(prior_turnover_rates))
+        if len(prior_turnover_rates) >= 3
+        else None
+    )
+    close_off_low_pct = (
+        _round_pct((close_price - low_price) / low_price * 100)
+        if close_price is not None and low_price > 0
+        else None
+    )
+    support_close_reaction = bool(
+        close_off_low_pct is not None
+        and close_off_low_pct >= SUPPORT_CLOSE_REACTION_MIN_PCT
+    )
+    transition_close_anchored = bool(
+        close_to_ma20 is not None
+        and TRANSITION_CLOSE_ANCHOR_MIN_PCT
+        <= close_to_ma20
+        <= TRANSITION_CLOSE_ANCHOR_MAX_PCT
+    )
+    turnover_rate_low = bool(
+        turnover_rate is not None and turnover_rate < TURNOVER_RATE_LOW_MAX_PCT
+    )
+    turnover_rate_gated = bool(
+        turnover_rate is not None and turnover_rate < TURNOVER_RATE_GATE_MAX_PCT
+    )
+    capitulation_rebound_tight = bool(
+        daily_return is not None
+        and daily_return <= -5.0
+        and turnover_rate_low
+        and close_off_low_pct is not None
+        and SUPPORT_CLOSE_REACTION_MIN_PCT <= close_off_low_pct < 1.5
+    )
+    capitulation_rebound_broad = bool(
+        daily_return is not None
+        and daily_return <= -5.0
+        and turnover_rate is not None
+        and turnover_rate < CAPITULATION_TURNOVER_MAX_PCT
+        and close_off_low_pct is not None
+        and close_off_low_pct >= SUPPORT_CLOSE_REACTION_MIN_PCT
+    )
+    transition_turnover_5d_capped = bool(
+        turnover_rate_5d_mean is None
+        or turnover_rate_5d_mean < TRANSITION_TURNOVER_5D_MAX_PCT
+    )
     m10_dual_cross_before_m20_m30 = bool(
         cross_10_20_age is not None
         and cross_10_30_age is not None
@@ -951,6 +1103,70 @@ def build_extended_daily_features(
             prior_ma5,
         ),
         prior_ma5_close_distance,
+    )
+
+    # --- v4 root factors: candle quietness and trend overextension ---
+    prev_close_price = closes[-2] if len(closes) >= 2 else None
+    candle_range_pct = None
+    if prev_close_price is not None and prev_close_price > 0:
+        candle_range_pct = _round_pct(
+            (high_price - low_price) / prev_close_price * 100
+        )
+    candle_quiet = bool(
+        candle_range_pct is not None
+        and candle_range_pct <= TREND_CANDLE_QUIET_RANGE_MAX_PCT
+    )
+    ma5_ma10_dist_series: list[float | None] = [
+        (
+            _round_pct((fast / slow - 1) * 100)
+            if fast is not None and slow is not None and slow > 0
+            else None
+        )
+        for fast, slow in zip(ma_series[5], ma_series[10])
+    ]
+    full_bull_history = tuple(
+        bool(
+            ma_series[5][index] is not None
+            and ma_series[10][index] is not None
+            and ma_series[20][index] is not None
+            and ma_series[30][index] is not None
+            and ma_series[60][index] is not None
+            and ma_series[5][index]
+            > ma_series[10][index]
+            > ma_series[20][index]
+            > ma_series[30][index]
+            > ma_series[60][index]
+        )
+        for index in range(len(closes))
+    )
+    trend_dist_excess = None
+    if full_bull_history and full_bull_history[-1]:
+        segment_start = len(closes) - 1
+        while segment_start > 0 and full_bull_history[segment_start - 1]:
+            segment_start -= 1
+        pullback_dists: list[float] = []
+        for index in range(segment_start, len(closes) - 1):
+            ma5_at_index = ma_series[5][index]
+            if ma5_at_index is not None and _support_low_touch(
+                _price_to_ma_distance_pct(lows[index], ma5_at_index),
+                _price_to_ma_distance_pct(closes[index], ma5_at_index),
+            ):
+                dist = ma5_ma10_dist_series[index]
+                if dist is not None:
+                    pullback_dists.append(dist)
+        current_dist = ma5_ma10_dist_series[-1]
+        if pullback_dists and current_dist is not None:
+            trend_dist_excess = _round_pct(current_dist - median(pullback_dists))
+    trend_overextended = bool(
+        trend_dist_excess is not None
+        and trend_dist_excess >= TREND_DIST_EXCESS_MAX_PCT
+    )
+    trend_first_crack_chase = bool(
+        not candle_quiet
+        and close_to_ma5 is not None
+        and close_to_ma5 >= 0
+        and prior_daily_return is not None
+        and prior_daily_return > 0
     )
 
     features = {
@@ -1125,7 +1341,32 @@ def build_extended_daily_features(
         "ma10_close_near": ma10_close_near,
         "ma5_midpoint_near": ma5_midpoint_near,
         "ma10_midpoint_near": ma10_midpoint_near,
+        "low_to_ma20_pct": low_to_ma20,
+        "low_to_ma30_pct": low_to_ma30,
+        "close_to_ma20_pct": close_to_ma20,
+        "close_to_ma30_pct": close_to_ma30,
+        "ma20_low_touch": ma20_low_touch,
+        "ma30_low_touch": ma30_low_touch,
+        "oversold_low_support": bool(
+            ma10_low_touch or ma20_low_touch or ma30_low_touch
+        ),
+        "transition_low_support": bool(ma10_low_touch or ma20_low_touch),
+        "close_off_low_pct": close_off_low_pct,
+        "support_close_reaction": support_close_reaction,
+        "transition_close_anchored": transition_close_anchored,
+        "turnover_rate_low": turnover_rate_low,
+        "turnover_rate_gated": turnover_rate_gated,
+        "capitulation_rebound_tight": capitulation_rebound_tight,
+        "capitulation_rebound_broad": capitulation_rebound_broad,
+        "transition_turnover_5d_capped": transition_turnover_5d_capped,
+        "turnover_rate_pct": turnover_rate,
+        "turnover_rate_5d_mean_pct": turnover_rate_5d_mean,
         "prior_ma5_close_distance_pct": prior_ma5_close_distance,
+        "prior_daily_return_pct": (
+            _round_pct(prior_daily_return)
+            if prior_daily_return is not None
+            else None
+        ),
         "prior_ma5_close_extension": bool(
             prior_ma5_close_distance is not None
             and prior_ma5_close_distance >= MA5_EXTENSION_MIN_PCT
@@ -1134,6 +1375,12 @@ def build_extended_daily_features(
             prior_daily_return is not None and prior_daily_return <= 0
         ),
         "prior_ma5_low_touch": prior_ma5_low_touch,
+        "close_to_ma5_pct": close_to_ma5,
+        "trend_dist_excess_pct": trend_dist_excess,
+        "candle_range_pct": candle_range_pct,
+        "candle_quiet": candle_quiet,
+        "trend_overextended": trend_overextended,
+        "trend_first_crack_chase": trend_first_crack_chase,
     }
     return features
 
@@ -3072,6 +3319,66 @@ def process_rule_predicates(
                 features.get("small_positive_candle")
             ),
         },
+        OVERSOLD_TO_TREND_LOW_SUPPORT_RULE_KEY: {
+            "long_bear_alignment": bool(features.get("long_bear_alignment")),
+            "ma10_dual_cross_within_7d": bool(
+                features.get("ma10_dual_cross_within_7d")
+            ),
+            "ma10_above_ma20_and_ma30": bool(
+                features.get("ma10_above_ma20_and_ma30")
+            ),
+            "ma20_ma30_tight_contact": bool(
+                features.get("transition_ma20_ma30_tight_contact")
+            ),
+            "ma10_ma20_slopes_up": bool(features.get("ma10_ma20_slopes_up")),
+            "post_cross_pullback": bool(features.get("post_cross_pullback")),
+            "small_positive_candle": bool(
+                features.get("small_positive_candle")
+            ),
+            "transition_low_support": bool(
+                features.get("transition_low_support")
+            ),
+        },
+        OVERSOLD_TO_TREND_CLOSE_ANCHORED_RULE_KEY: {
+            "long_bear_alignment": bool(features.get("long_bear_alignment")),
+            "ma10_dual_cross_within_7d": bool(
+                features.get("ma10_dual_cross_within_7d")
+            ),
+            "ma10_above_ma20_and_ma30": bool(
+                features.get("ma10_above_ma20_and_ma30")
+            ),
+            "ma20_ma30_tight_contact": bool(
+                features.get("transition_ma20_ma30_tight_contact")
+            ),
+            "ma10_ma20_slopes_up": bool(features.get("ma10_ma20_slopes_up")),
+            "post_cross_pullback": bool(features.get("post_cross_pullback")),
+            "small_positive_candle": bool(
+                features.get("small_positive_candle")
+            ),
+            "transition_close_anchored": bool(
+                features.get("transition_close_anchored")
+            ),
+        },
+        OVERSOLD_TO_TREND_TURNOVER_CAP_RULE_KEY: {
+            "long_bear_alignment": bool(features.get("long_bear_alignment")),
+            "ma10_dual_cross_within_7d": bool(
+                features.get("ma10_dual_cross_within_7d")
+            ),
+            "ma10_above_ma20_and_ma30": bool(
+                features.get("ma10_above_ma20_and_ma30")
+            ),
+            "ma20_ma30_tight_contact": bool(
+                features.get("transition_ma20_ma30_tight_contact")
+            ),
+            "ma10_ma20_slopes_up": bool(features.get("ma10_ma20_slopes_up")),
+            "post_cross_pullback": bool(features.get("post_cross_pullback")),
+            "small_positive_candle": bool(
+                features.get("small_positive_candle")
+            ),
+            "transition_turnover_5d_capped": bool(
+                features.get("transition_turnover_5d_capped")
+            ),
+        },
         "m5_m10_joint_attack_before_ma20_cross_last_volume_expand": {
             "long_bear_alignment": bool(features.get("long_bear_alignment")),
             "oversold_process_eligible": bool(
@@ -3231,6 +3538,76 @@ def _rule_matches(rule: DiscoveryRule, features: Mapping[str, object]) -> bool:
                 and features.get("ma10_ma30_contact")
                 and features.get("aggressive_pullback")
             ),
+            "m10_m30_contact_after_m10_cross_low_support": bool(
+                features.get("oversold_process_eligible")
+                and features.get("ma10_crossed_ma20_within_15d")
+                and features.get("ma10_ma30_contact")
+                and features.get("oversold_low_support")
+                and features.get("support_close_reaction")
+            ),
+            "m10_m30_contact_after_long_bear_low_support": bool(
+                long_bear
+                and features.get("oversold_process_eligible")
+                and features.get("ma10_crossed_ma20_within_15d")
+                and features.get("ma10_ma30_contact")
+                and features.get("oversold_low_support")
+                and features.get("support_close_reaction")
+            ),
+            "ma30_low_retest_after_m10_cross": bool(
+                features.get("oversold_process_eligible")
+                and features.get("ma10_crossed_ma20_within_15d")
+                and features.get("ma30_low_touch")
+                and features.get("support_close_reaction")
+            ),
+            "ma30_low_retest_after_long_bear_m10_cross": bool(
+                long_bear
+                and features.get("oversold_process_eligible")
+                and features.get("ma10_crossed_ma20_within_15d")
+                and features.get("ma30_low_touch")
+                and features.get("support_close_reaction")
+            ),
+            "v3_oversold_staged_low_support_turnover_low": bool(
+                features.get("oversold_process_eligible")
+                and features.get("oversold_low_support")
+                and features.get("turnover_rate_low")
+                and (
+                    features.get("staged_m10_first")
+                    or features.get("m10_dual_cross_before_m20_m30")
+                    or features.get("m5_m10_joint_attack_ready")
+                    or features.get("ma10_crossed_ma30_within_15d")
+                )
+                and (
+                    not features.get("aggressive_pullback")
+                    or features.get("capitulation_rebound_broad")
+                )
+            ),
+            "v3_oversold_staged_low_support_turnover_gate": bool(
+                features.get("oversold_process_eligible")
+                and features.get("oversold_low_support")
+                and features.get("turnover_rate_gated")
+                and (
+                    features.get("staged_m10_first")
+                    or features.get("m10_dual_cross_before_m20_m30")
+                    or features.get("m5_m10_joint_attack_ready")
+                    or features.get("ma10_crossed_ma30_within_15d")
+                )
+                and (
+                    not features.get("aggressive_pullback")
+                    or features.get("capitulation_rebound_broad")
+                )
+            ),
+            "v3_oversold_capitulation_rebound_tight": bool(
+                features.get("oversold_process_eligible")
+                and features.get("ma10_crossed_ma20_within_15d")
+                and features.get("ma10_ma30_contact")
+                and features.get("capitulation_rebound_tight")
+            ),
+            "v3_oversold_capitulation_rebound_broad": bool(
+                features.get("oversold_process_eligible")
+                and features.get("ma10_crossed_ma20_within_15d")
+                and features.get("ma10_ma30_contact")
+                and features.get("capitulation_rebound_broad")
+            ),
         }
         if rule.key in process_basic:
             return process_basic[rule.key]
@@ -3268,6 +3645,26 @@ def _rule_matches(rule: DiscoveryRule, features: Mapping[str, object]) -> bool:
         return False
 
     if rule.setup_type == "trend_pullback":
+        if rule.key == "v4_trend_authentic_pullback":
+            return bool(
+                features.get("trend_discovery_eligible")
+                and (
+                    features.get("ma5_low_touch")
+                    or features.get("ma10_low_touch")
+                )
+                and not features.get("trend_overextended")
+                and not features.get("trend_first_crack_chase")
+            )
+        if rule.key == "v4_trend_quiet_pullback":
+            return bool(
+                features.get("trend_discovery_eligible")
+                and features.get("candle_quiet")
+                and (
+                    features.get("ma5_low_touch")
+                    or features.get("ma10_low_touch")
+                )
+                and not features.get("trend_overextended")
+            )
         if rule.key == "ma5_low_touch_any_candle":
             return bool(
                 features.get("trend_bull_alignment")
@@ -3949,7 +4346,7 @@ def _iter_symbol_histories(
         )
     row_fields = tuple(
         field
-        for field in (*required, "volume", "turnover")
+        for field in (*required, "volume", "turnover", "turnover_rate")
         if field in positions
     )
     current_symbol: str | None = None
@@ -4330,11 +4727,33 @@ def _feature_snapshot(features: Mapping[str, object]) -> dict[str, object]:
         "ma10_close_near",
         "ma5_midpoint_near",
         "ma10_midpoint_near",
+        "low_to_ma20_pct",
+        "low_to_ma30_pct",
+        "close_to_ma20_pct",
+        "close_to_ma30_pct",
+        "ma20_low_touch",
+        "ma30_low_touch",
+        "oversold_low_support",
+        "transition_low_support",
+        "close_off_low_pct",
+        "support_close_reaction",
+        "transition_close_anchored",
+        "aggressive_pullback",
+        "turnover_rate_pct",
+        "turnover_rate_5d_mean_pct",
         "trend_slope_profile",
         "trend_stable_bull",
         "trend_rebuilt_recently",
         "trend_transition_preparation_eligible",
         "trend_transition_eligible",
+        "close_to_ma5_pct",
+        "trend_dist_excess_pct",
+        "candle_range_pct",
+        "candle_quiet",
+        "prior_daily_return_pct",
+        "prior_ma5_low_touch",
+        "trend_overextended",
+        "trend_first_crack_chase",
     )
     return {key: features.get(key) for key in keys}
 
