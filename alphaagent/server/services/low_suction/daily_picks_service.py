@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -22,9 +22,11 @@ from alphaagent.server.services.low_suction.daily_factor_repository import (
 )
 from alphaagent.server.services.low_suction.daily_picks_backtest import (
     BACKTEST_VERSION,
+    build_backtest_payload,
 )
 from alphaagent.server.services.low_suction.daily_picks_repository import (
     load_daily_backtest_run,
+    save_daily_backtest_run,
 )
 from alphaagent.server.services.low_suction.daily_picks_scanner import (
     LowSuctionCandidate,
@@ -95,6 +97,88 @@ def get_daily_backtest_report() -> dict[str, object] | None:
     if payload is None:
         return None
     return payload
+
+
+# 回测物化：后台线程 + 状态（仿 limit_up history_service 的 rebuild 模式）。
+# 全量扫描 ~69 万候选耗时数分钟，不能在 API 请求线程同步跑。
+_REBUILD_LOCK = threading.RLock()
+_REBUILD_THREAD: threading.Thread | None = None
+_REBUILD_STATE: dict[str, object] = {"status": "idle"}
+
+
+def run_daily_backtest_sync(
+    *,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> dict[str, object]:
+    """Synchronously rebuild and persist the daily backtest payload."""
+
+    inputs = load_daily_factor_inputs(
+        start_date=start_date,
+        end_date=end_date,
+        price_basis="raw_unadjusted",
+    )
+    candidates = scan_low_suction_candidates(
+        inputs.bars,
+        inputs.market_calendar,
+        inputs.security_status.to_dict(orient="records"),
+    )
+    names = _load_stock_names({item.vt_symbol for item in candidates})
+    payload = build_backtest_payload(candidates, inputs.market_calendar, names=names)
+    save_daily_backtest_run(BACKTEST_VERSION, payload)
+    return payload
+
+
+def start_daily_backtest_rebuild() -> dict[str, object]:
+    """Launch the backtest rebuild in a background thread (returns immediately)."""
+
+    global _REBUILD_THREAD
+    with _REBUILD_LOCK:
+        if _REBUILD_THREAD is not None and _REBUILD_THREAD.is_alive():
+            return {**_REBUILD_STATE, "already_running": True}
+        _set_rebuild_state(status="building", started_at=_utc_now_iso(), error=None)
+        _REBUILD_THREAD = threading.Thread(
+            target=_background_daily_backtest_rebuild,
+            name="low-suction-backtest-rebuild",
+            daemon=True,
+        )
+        _REBUILD_THREAD.start()
+        return dict(_REBUILD_STATE)
+
+
+def _background_daily_backtest_rebuild() -> None:
+    try:
+        payload = run_daily_backtest_sync()
+        coverage = payload.get("coverage") or {}
+        _set_rebuild_state(
+            status="ready",
+            finished_at=_utc_now_iso(),
+            error=None,
+            trade_days=coverage.get("trade_days"),
+            labeled=coverage.get("labeled"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        _set_rebuild_state(
+            status="failed",
+            finished_at=_utc_now_iso(),
+            error={"type": exc.__class__.__name__, "message": str(exc)},
+        )
+
+
+def get_daily_backtest_rebuild_status() -> dict[str, object]:
+    """Read the current rebuild state for frontend polling."""
+
+    with _REBUILD_LOCK:
+        return dict(_REBUILD_STATE)
+
+
+def _set_rebuild_state(**values: object) -> None:
+    with _REBUILD_LOCK:
+        _REBUILD_STATE.update(values)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _live_inputs(now: datetime):

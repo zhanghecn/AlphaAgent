@@ -8,7 +8,9 @@ from fastapi.responses import JSONResponse
 from alphaagent.server.core.responses import fail, ok
 from alphaagent.server.services.low_suction.daily_picks_service import (
     get_daily_backtest_report,
+    get_daily_backtest_rebuild_status,
     get_live_recommendations,
+    start_daily_backtest_rebuild,
 )
 
 
@@ -50,7 +52,48 @@ def daily_backtest():
     if payload is None:
         return ok({"status": "unavailable", "message": "低吸日线回测尚未运行"})
     report = {key: value for key, value in payload.items() if key != "ledger_days"}
-    return ok({"status": "ok", "is_backtest": True, "report": report})
+    rebuild = get_daily_backtest_rebuild_status()
+    return ok({"status": "ok", "is_backtest": True, "report": report, "rebuild": rebuild})
+
+
+@router.post("/backtest/rebuild", response_model=None)
+def daily_backtest_rebuild():
+    """手动触发低吸回测物化（后台线程，全量重算写库）。"""
+
+    try:
+        result = start_daily_backtest_rebuild()
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            status_code=503,
+            content=fail(
+                "LOW_SUCTION_BACKTEST_REBUILD_UNAVAILABLE",
+                "低吸回测重算暂时不可用",
+                {"reason": exc.__class__.__name__},
+            ),
+        )
+    if result.get("already_running"):
+        return JSONResponse(
+            status_code=409,
+            content=fail("LOW_SUCTION_BACKTEST_RUNNING", "低吸回测正在重算", result),
+        )
+    return JSONResponse(status_code=202, content=ok(result))
+
+
+@router.get("/backtest/status", response_model=None)
+def daily_backtest_status():
+    """读取回测重算状态（前端轮询 building→ready/failed）。"""
+
+    try:
+        return ok(get_daily_backtest_rebuild_status())
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            status_code=503,
+            content=fail(
+                "LOW_SUCTION_BACKTEST_STATUS_UNAVAILABLE",
+                "低吸回测状态暂时不可用",
+                {"reason": exc.__class__.__name__},
+            ),
+        )
 
 
 @router.get("/ledger", response_model=None)

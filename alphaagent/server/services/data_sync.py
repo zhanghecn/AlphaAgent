@@ -745,6 +745,15 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "premarket_fused_score_snapshot",
         ],
     },
+    {
+        "id": "low_suction_backtest_2230",
+        "name": "低吸日线回测重算（22:30）",
+        "cron": "30 22 * * 1-5",
+        "action": "sync",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": ["low_suction_daily_backtest_rerun"],
+    },
 ]
 
 LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID = "sync_limit_up_ths_evidence"
@@ -757,6 +766,7 @@ LEADER_FORWARD_CAPTURE_BATCH_JOB_ID = "leader_forward_capture"
 LEADER_FORWARD_SETTLE_BATCH_JOB_ID = "leader_forward_settle"
 PREMARKET_PRELUDE_SNAPSHOT_BATCH_JOB_ID = "premarket_prelude_snapshot"
 PREMARKET_FUSED_SCORE_SNAPSHOT_BATCH_JOB_ID = "premarket_fused_score_snapshot"
+LOW_SUCTION_DAILY_BACKTEST_RERUN_BATCH_JOB_ID = "low_suction_daily_backtest_rerun"
 INTERNAL_BATCH_JOB_IDS = {
     LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID,
     LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID,
@@ -768,6 +778,7 @@ INTERNAL_BATCH_JOB_IDS = {
     LEADER_FORWARD_SETTLE_BATCH_JOB_ID,
     PREMARKET_PRELUDE_SNAPSHOT_BATCH_JOB_ID,
     PREMARKET_FUSED_SCORE_SNAPSHOT_BATCH_JOB_ID,
+    LOW_SUCTION_DAILY_BACKTEST_RERUN_BATCH_JOB_ID,
 }
 HISTORY_INPUT_JOB_IDS = frozenset(
     {
@@ -3332,6 +3343,8 @@ def _run_sync_batch(
                 result = _run_limit_up_live_trace_prune_batch_job()
             elif job_id == LEADER_MINUTE_BACKTEST_RERUN_BATCH_JOB_ID:
                 result = _run_leader_minute_backtest_rerun_batch_job()
+            elif job_id == LOW_SUCTION_DAILY_BACKTEST_RERUN_BATCH_JOB_ID:
+                result = _run_low_suction_daily_backtest_rerun_batch_job()
             elif job_id == PREMARKET_PRELUDE_SNAPSHOT_BATCH_JOB_ID:
                 result = _run_premarket_prelude_snapshot_batch_job()
             elif job_id == PREMARKET_FUSED_SCORE_SNAPSHOT_BATCH_JOB_ID:
@@ -3550,6 +3563,29 @@ def _latest_complete_daily_date_for_research() -> date | None:
         return None
     with session_scope() as session:
         return _latest_complete_daily_date(session)
+
+
+def _run_low_suction_daily_backtest_rerun_batch_job() -> dict[str, Any]:
+    """每晚 22:30 全量重算低吸日线回测（v3/v4 因子）并写库，供前端回测/交割单读取。"""
+
+    from alphaagent.server.services.low_suction.daily_picks_service import (
+        run_daily_backtest_sync,
+    )
+
+    if _latest_complete_daily_date_for_research() is None:
+        return {"status": "skipped", "rows_read": 0, "rows_written": 0, "message": "数据库未就绪"}
+    payload = run_daily_backtest_sync()
+    coverage = payload.get("coverage") or {}
+    combined = (payload.get("position_sim") or {}).get("combined") or {}
+    return {
+        "rows_read": int(coverage.get("labeled") or 0),
+        "rows_written": 1,
+        "message": (
+            f"低吸日线回测已刷新：{coverage.get('trade_days')} 个交易日，"
+            f"{int(coverage.get('labeled') or 0)} 个带标签候选，"
+            f"两仓复利 {combined.get('compound_pct')}% / 胜率 {combined.get('win_rate_pct')}%"
+        ),
+    }
 
 
 def _run_leader_minute_backtest_rerun_batch_job() -> dict[str, Any]:

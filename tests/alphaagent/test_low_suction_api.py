@@ -43,6 +43,9 @@ def test_low_suction_backtest_reads_materialized_report(monkeypatch) -> None:
         "ledger_days": [{"trade_date": "2026-07-31", "legs": []}],
     }
     monkeypatch.setattr(low_suction, "get_daily_backtest_report", lambda: payload)
+    monkeypatch.setattr(
+        low_suction, "get_daily_backtest_rebuild_status", lambda: {"status": "idle"}
+    )
 
     response = TestClient(create_app()).get("/api/low-suction/backtest")
 
@@ -51,8 +54,49 @@ def test_low_suction_backtest_reads_materialized_report(monkeypatch) -> None:
     assert data["status"] == "ok"
     assert data["is_backtest"] is True
     assert data["report"]["coverage"] == payload["coverage"]
+    assert data["rebuild"] == {"status": "idle"}
     # 交割单不从回测端点泄漏
     assert "ledger_days" not in data["report"]
+
+
+def test_low_suction_backtest_rebuild_starts_and_reports_building(monkeypatch) -> None:
+    monkeypatch.setattr(
+        low_suction,
+        "start_daily_backtest_rebuild",
+        lambda: {"status": "building", "started_at": "2026-08-06T00:00:00+00:00"},
+    )
+
+    response = TestClient(create_app()).post("/api/low-suction/backtest/rebuild")
+
+    assert response.status_code == 202
+    assert response.json()["data"]["status"] == "building"
+
+
+def test_low_suction_backtest_rebuild_returns_409_when_already_running(monkeypatch) -> None:
+    monkeypatch.setattr(
+        low_suction,
+        "start_daily_backtest_rebuild",
+        lambda: {"status": "building", "already_running": True},
+    )
+
+    response = TestClient(create_app()).post("/api/low-suction/backtest/rebuild")
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "LOW_SUCTION_BACKTEST_RUNNING"
+
+
+def test_low_suction_backtest_status_endpoint_reads_state(monkeypatch) -> None:
+    monkeypatch.setattr(
+        low_suction,
+        "get_daily_backtest_rebuild_status",
+        lambda: {"status": "ready", "trade_days": 748, "finished_at": "2026-08-06T00:10:00+00:00"},
+    )
+
+    response = TestClient(create_app()).get("/api/low-suction/backtest/status")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "ready"
+    assert response.json()["data"]["trade_days"] == 748
 
 
 def test_low_suction_backtest_reports_unrun_state(monkeypatch) -> None:

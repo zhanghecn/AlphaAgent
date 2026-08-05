@@ -1,19 +1,106 @@
-import type { LowSuctionBacktestReport, LowSuctionBandStats } from "@/api/lowSuction";
+import { RefreshCw, RotateCw } from "lucide-react";
+
+import type { LowSuctionBacktestReport, LowSuctionBandStats, LowSuctionRebuildStatus } from "@/api/lowSuction";
 import { EmptyState } from "@/components/EmptyState";
 import { PanelHead } from "@/components/PanelHead";
 import { cn } from "@/lib/utils";
 
 /** 低吸回测：带仓位两仓模拟（产品口径）+ 全量分数段统计。 */
-export function LowSuctionBacktestView({ report }: { report: LowSuctionBacktestReport | null | undefined }) {
-  if (!report) {
-    return <EmptyState message="低吸日线回测尚未运行" description="由 CLI low-suction-daily-backtest 物化后展示" />;
-  }
-  const sim = report.position_sim;
+export function LowSuctionBacktestView({
+  report,
+  rebuild,
+  building,
+  canRebuild,
+  onRebuild,
+  rebuildError,
+}: {
+  report: LowSuctionBacktestReport | null | undefined;
+  rebuild: LowSuctionRebuildStatus;
+  building: boolean;
+  canRebuild: boolean;
+  onRebuild: () => void;
+  rebuildError: string | null;
+}) {
   return (
     <section aria-label="低吸回测">
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b bg-amber-500/5 px-3 py-2 text-xs text-amber-600 sm:px-4">
-        <span className="eyebrow">回测 BACKTEST</span>
-        <span>⚠️ 历史模拟，非实盘 · {report.label_convention}</span>
+      <RebuildBar
+        hasReport={!!report}
+        rebuild={rebuild}
+        building={building}
+        canRebuild={canRebuild}
+        onRebuild={onRebuild}
+        rebuildError={rebuildError}
+      />
+      {!report ? (
+        <EmptyState
+          message={building ? "正在全量扫描计算低吸回测…" : "低吸日线回测尚未运行"}
+          description={building ? "期间可切换其他页签，算完自动刷新" : "点击上方「重新计算回测」生成报告，或等待 22:30 定时自动重算"}
+        />
+      ) : (
+        <BacktestBody report={report} />
+      )}
+    </section>
+  );
+}
+
+function RebuildBar({
+  hasReport,
+  rebuild,
+  building,
+  canRebuild,
+  onRebuild,
+  rebuildError,
+}: {
+  hasReport: boolean;
+  rebuild: LowSuctionRebuildStatus;
+  building: boolean;
+  canRebuild: boolean;
+  onRebuild: () => void;
+  rebuildError: string | null;
+}) {
+  const finished = rebuild.status === "ready" || rebuild.status === "failed";
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b bg-amber-500/5 px-3 py-2 text-xs sm:px-4">
+      <span className="eyebrow text-amber-600">回测 BACKTEST</span>
+      {hasReport && !building && (
+        <span className="text-amber-600">⚠️ 历史模拟，非实盘</span>
+      )}
+      {building && (
+        <span className="flex items-center gap-1 text-amber-600">
+          <RotateCw size={12} className="animate-spin" /> 正在全量重算…
+        </span>
+      )}
+      {finished && rebuild.status === "ready" && (
+        <span className="text-emerald-600">✓ 已更新（{rebuild.trade_days} 交易日）</span>
+      )}
+      {finished && rebuild.status === "failed" && (
+        <span className="text-red-600">✗ 重算失败：{rebuildError ?? "未知错误"}</span>
+      )}
+      <button
+        type="button"
+        onClick={onRebuild}
+        disabled={!canRebuild}
+        className={cn(
+          "ml-auto flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors",
+          canRebuild
+            ? "border-primary/40 bg-primary/10 text-primary hover:bg-primary/20"
+            : "border-muted text-muted-foreground opacity-60",
+        )}
+        title={building ? "正在重算…" : "全量重新计算并写库（夜间 22:30 也会自动重算）"}
+      >
+        <RefreshCw size={12} className={cn(building && "animate-spin")} />
+        {building ? "重算中" : "重新计算回测"}
+      </button>
+    </div>
+  );
+}
+
+function BacktestBody({ report }: { report: LowSuctionBacktestReport }) {
+  const sim = report.position_sim;
+  return (
+    <>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b px-3 py-2 text-xs text-muted-foreground sm:px-4">
+        <span>{report.label_convention}</span>
         <span className="ml-auto">
           {report.coverage.calendar_start} ~ {report.coverage.calendar_end} · {report.coverage.trade_days} 个交易日 ·{" "}
           {report.coverage.labeled.toLocaleString()} 个带标签候选
@@ -76,7 +163,7 @@ export function LowSuctionBacktestView({ report }: { report: LowSuctionBacktestR
           bands={report.families.oversold_rebound.bands}
         />
       </div>
-    </section>
+    </>
   );
 }
 

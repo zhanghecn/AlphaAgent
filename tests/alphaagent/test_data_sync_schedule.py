@@ -162,6 +162,7 @@ def test_default_batch_schedules_defined():
         "eod_1900",
         "eod_finalize_2130",
         "eod_backtest_2200",
+        "low_suction_backtest_2230",
         "leader_forward_capture_1005",
         "leader_forward_capture_1505",
     }

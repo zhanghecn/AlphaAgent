@@ -114,6 +114,17 @@ export interface LowSuctionBacktestPayload {
   message?: string;
   is_backtest?: boolean;
   report?: LowSuctionBacktestReport | null;
+  rebuild?: LowSuctionRebuildStatus;
+}
+
+export interface LowSuctionRebuildStatus {
+  status: "idle" | "building" | "ready" | "failed";
+  started_at?: string | null;
+  finished_at?: string | null;
+  error?: { type: string; message: string } | null;
+  already_running?: boolean;
+  trade_days?: number;
+  labeled?: number;
 }
 
 export interface LowSuctionLedgerLeg {
@@ -153,6 +164,14 @@ export function fetchLowSuctionLive() {
 
 export function fetchLowSuctionBacktest() {
   return apiClient.get<LowSuctionBacktestPayload>("/low-suction/backtest");
+}
+
+export function rebuildLowSuctionBacktest() {
+  return apiClient.post<LowSuctionRebuildStatus>("/low-suction/backtest/rebuild");
+}
+
+export function fetchLowSuctionBacktestStatus() {
+  return apiClient.get<LowSuctionRebuildStatus>("/low-suction/backtest/status");
 }
 
 export function fetchLowSuctionLedger() {
