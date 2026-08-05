@@ -6,140 +6,94 @@ from alphaagent.server.api import low_suction
 from alphaagent.server.main import create_app
 
 
-def test_low_suction_swing_research_has_an_independent_endpoint(monkeypatch) -> None:
+def test_low_suction_live_has_an_independent_endpoint(monkeypatch) -> None:
     expected = {
-        "research_version": "cross-regime-support-reclaim-proxy-v1",
-        "research_kind": "dynamic_leader_cross_regime_pullback",
-        "contract": {"holding_style": "d1_loss_then_structural"},
+        "status": "ok",
+        "trade_date": "2026-08-04",
+        "provisional": False,
+        "trend": {"total": 1, "items": [{"vt_symbol": "600396.SSE", "score": 82.5}]},
+        "oversold": {"total": 0, "items": []},
     }
-    monkeypatch.setattr(low_suction, "get_swing_research", lambda: expected)
+    monkeypatch.setattr(low_suction, "get_live_recommendations", lambda: expected)
 
-    response = TestClient(create_app()).get("/api/reverse-wrap/swing-research")
+    response = TestClient(create_app()).get("/api/low-suction/live")
 
     assert response.status_code == 200
     assert response.json()["data"] == expected
 
 
-def test_low_suction_swing_research_reports_retired_status_unavailable(
-    monkeypatch,
-) -> None:
+def test_low_suction_live_reports_service_unavailable(monkeypatch) -> None:
     def unavailable() -> dict[str, object]:
-        raise ValueError("retired status unavailable")
+        raise RuntimeError("database down")
 
-    monkeypatch.setattr(low_suction, "get_swing_research", unavailable)
+    monkeypatch.setattr(low_suction, "get_live_recommendations", unavailable)
 
-    response = TestClient(create_app()).get("/api/reverse-wrap/swing-research")
+    response = TestClient(create_app()).get("/api/low-suction/live")
 
     assert response.status_code == 503
-    assert response.json()["error"]["code"] == "LOW_SUCTION_RESEARCH_UNAVAILABLE"
+    assert response.json()["error"]["code"] == "LOW_SUCTION_LIVE_UNAVAILABLE"
 
 
-def test_low_suction_strategy_has_an_independent_read_only_endpoint(monkeypatch) -> None:
-    expected = {
-        "strategy_version": "low-suction-swing-paper-v1",
-        "execution_mode": "paper",
-        "broker_orders_enabled": False,
-        "session": {"status": "market_closed", "trade_date": "2026-07-19"},
+def test_low_suction_backtest_reads_materialized_report(monkeypatch) -> None:
+    payload = {
+        "version": "low-suction-daily-backtest-v1",
+        "coverage": {"trade_days": 747},
+        "families": {"trend_pullback": {"bands": {}}},
+        "position_sim": {"combined": {"compound_pct": 33.85}},
+        "ledger_days": [{"trade_date": "2026-07-31", "legs": []}],
     }
-    monkeypatch.setattr(
-        low_suction,
-        "get_swing_strategy_overview",
-        lambda: expected,
-        raising=False,
-    )
+    monkeypatch.setattr(low_suction, "get_daily_backtest_report", lambda: payload)
 
-    response = TestClient(create_app()).get("/api/reverse-wrap/strategy")
+    response = TestClient(create_app()).get("/api/low-suction/backtest")
 
     assert response.status_code == 200
-    assert response.json()["data"] == expected
+    data = response.json()["data"]
+    assert data["status"] == "ok"
+    assert data["is_backtest"] is True
+    assert data["report"]["coverage"] == payload["coverage"]
+    # 交割单不从回测端点泄漏
+    assert "ledger_days" not in data["report"]
 
 
-def test_cross_regime_validation_has_a_read_only_endpoint(monkeypatch) -> None:
-    expected = {
-        "report_version": "cross-regime-validation-product-v1",
-        "formal_strategy": False,
+def test_low_suction_backtest_reports_unrun_state(monkeypatch) -> None:
+    monkeypatch.setattr(low_suction, "get_daily_backtest_report", lambda: None)
+
+    response = TestClient(create_app()).get("/api/low-suction/backtest")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "unavailable"
+
+
+def test_low_suction_ledger_returns_recent_days(monkeypatch) -> None:
+    payload = {
+        "coverage": {"trade_days": 747},
+        "label_convention": "D+1 收盘到收盘，未扣费",
+        "ledger_days": [
+            {
+                "trade_date": "2026-07-31",
+                "day_return_pct": 0.42,
+                "legs": [{"vt_symbol": "600396.SSE", "stock_name": "华电辽能"}],
+            }
+        ],
     }
-    monkeypatch.setattr(
-        low_suction,
-        "get_cross_regime_validation",
-        lambda: expected,
-    )
+    monkeypatch.setattr(low_suction, "get_daily_backtest_report", lambda: payload)
 
-    response = TestClient(create_app()).get(
-        "/api/reverse-wrap/cross-regime-validation"
-    )
+    response = TestClient(create_app()).get("/api/low-suction/ledger")
 
     assert response.status_code == 200
-    assert response.json()["data"] == expected
+    data = response.json()["data"]
+    assert data["status"] == "ok"
+    assert data["ledger_days"] == payload["ledger_days"]
+    assert data["coverage"] == payload["coverage"]
 
 
-def test_low_suction_history_endpoint_reads_materialized_overview(monkeypatch) -> None:
-    expected = {
-        "latest_run": {
-            "run_id": "replay-1",
-            "evidence_level": "exploratory_survivorship_proxy",
-        },
-        "latest_strict_run": None,
-        "formal_strategy": False,
-        "exploratory_counts_toward_qualification": False,
-    }
-    monkeypatch.setattr(low_suction, "get_historical_replay_overview", lambda: expected)
+def test_low_suction_ledger_reports_service_unavailable(monkeypatch) -> None:
+    def unavailable() -> dict[str, object] | None:
+        raise RuntimeError("database down")
 
-    response = TestClient(create_app()).get("/api/reverse-wrap/history")
+    monkeypatch.setattr(low_suction, "get_daily_backtest_report", unavailable)
 
-    assert response.status_code == 200
-    assert response.json()["data"] == expected
+    response = TestClient(create_app()).get("/api/low-suction/ledger")
 
-
-def test_low_suction_history_trade_filters_are_forwarded(monkeypatch) -> None:
-    captured = {}
-
-    def fake_list(**filters):
-        captured.update(filters)
-        return {"items": [], "total": 0, "page": 2, "page_size": 10}
-
-    monkeypatch.setattr(low_suction, "get_historical_replay_trades", fake_list)
-
-    response = TestClient(create_app()).get(
-        "/api/reverse-wrap/history/trades",
-        params={
-            "run_id": "replay-1",
-            "page": 2,
-            "page_size": 10,
-            "market_phase": "rotation",
-            "outcome": "winner",
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.json()["data"]["total"] == 0
-    assert captured["run_id"] == "replay-1"
-    assert captured["market_phase"] == "rotation"
-    assert captured["outcome"] == "winner"
-
-
-def test_low_suction_history_trade_detail_returns_404(monkeypatch) -> None:
-    monkeypatch.setattr(low_suction, "get_historical_replay_trade", lambda **_: None)
-
-    response = TestClient(create_app()).get(
-        "/api/reverse-wrap/history/trades/missing",
-        params={"run_id": "replay-1"},
-    )
-
-    assert response.status_code == 404
-
-
-def test_low_suction_forward_ledger_is_read_only_and_paginated(monkeypatch) -> None:
-    expected = {
-        "items": [],
-        "total": 0,
-        "page": 1,
-        "page_size": 20,
-        "historical_backfill_allowed": False,
-    }
-    monkeypatch.setattr(low_suction, "list_causal_forward_ledger", lambda **_: expected)
-
-    response = TestClient(create_app()).get("/api/reverse-wrap/forward-ledger")
-
-    assert response.status_code == 200
-    assert response.json()["data"] == expected
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "LOW_SUCTION_LEDGER_UNAVAILABLE"

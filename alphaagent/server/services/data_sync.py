@@ -49,14 +49,9 @@ from alphaagent.server.services import research_sector_scores
 from alphaagent.server.services.completed_session import completed_daily_bar_cutoff
 from alphaagent.server.services.low_suction import (
     baostock_security_source,
-    causal_leader_pullback_forward_repository,
-    forward_ma5_minutes,
-    forward_leader_identity,
     forward_membership,
     forward_membership_repository,
     forward_security_repository,
-    reclaim_minutes,
-    swing_strategy_service,
 )
 from alphaagent.server.services.limit_up.data_quality import (
     backfill_limit_up_event_minutes,
@@ -348,46 +343,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         target_table="low_suction_security_snapshots",
         default_params={},
     ),
-    JobDefinition(
-        id="sync_low_suction_forward_top3",
-        name="低吸研究前向 Top3 冻结",
-        description="按同源日严格成员、证券状态、概念主升和日线冻结三套无收益龙头身份。",
-        source_id="alphaagent_local",
-        target_table="low_suction_forward_leader_rank_snapshots",
-        default_params={},
-    ),
-    JobDefinition(
-        id="sync_low_suction_forward_ma5_shadow",
-        name="低吸研究跨行情因果前向",
-        description="按严格 D-1 快照冻结主升龙头支撑收复候选，并以日线推进只读研究结果。",
-        source_id="alphaagent_local",
-        target_table="low_suction_forward_ma5_candidates",
-        default_params={},
-    ),
-    JobDefinition(
-        id="sync_low_suction_forward_ma5_minutes",
-        name="低吸研究 MA5 信号日 5 分钟路径",
-        description="只补前向 MA5 有效候选信号日的完整 5 分钟路径，用于 14:50/14:55 因果验证。",
-        source_id="tdx_public_hq",
-        target_table="stock_minute_bars",
-        default_params={"max_gaps": 100, "dry_run": False},
-    ),
-    JobDefinition(
-        id="sync_low_suction_reclaim_minutes",
-        name="低吸强势收复信号日 5 分钟路径",
-        description="只补历史回放强势收复(≥8% 接近前高)信号日的完整 5 分钟路径，用于盘中低吸点研究。manual-only。",
-        source_id="tdx_public_hq",
-        target_table="stock_minute_bars",
-        default_params={"max_gaps": 100, "dry_run": False},
-    ),
-    JobDefinition(
-        id="sync_low_suction_swing_settlement",
-        name="低吸波段纸面持仓结算",
-        description="按最新可靠完整日线更新低吸持仓标记并冻结结构退出触发。",
-        source_id="alphaagent_local",
-        target_table="low_suction_paper_positions",
-        default_params={},
-    ),
     # ── Shenwan Industry Classification ──
     JobDefinition(
         id="sync_shenwan_industry_tree",
@@ -592,11 +547,6 @@ JOB_CADENCES: dict[str, JobCadence] = {
     "sync_sector_members": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 7, "sector_memberships", "updated_at"),
     "sync_stock_sector_memberships": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BASIC, 1, "stock_sector_memberships", "updated_at"),
     "sync_low_suction_security_snapshot": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BASIC, 1, "low_suction_security_snapshot_scopes", "updated_at"),
-    "sync_low_suction_forward_top3": JobCadence(CADENCE_EOD_DAILY, CATEGORY_SECTOR_RESEARCH, 1, "low_suction_forward_leader_rank_snapshot_scopes", "updated_at"),
-    "sync_low_suction_forward_ma5_shadow": JobCadence(CADENCE_EOD_DAILY, CATEGORY_SECTOR_RESEARCH, 1, "low_suction_forward_ma5_scopes", "updated_at"),
-    "sync_low_suction_forward_ma5_minutes": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "stock_minute_bars", "bar_time"),
-    "sync_low_suction_reclaim_minutes": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "stock_minute_bars", "bar_time"),
-    "sync_low_suction_swing_settlement": JobCadence(CADENCE_EOD_DAILY, CATEGORY_SECTOR_RESEARCH, 1, "low_suction_strategy_runs", "updated_at"),
     "sync_shenwan_industry_tree": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 30, "shenwan_industries", "updated_at"),
     "sync_shenwan_industry_members": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 30, "shenwan_industry_members", "updated_at"),
     "sync_industry_board_mapping": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 30, "industry_board_mapping", "updated_at"),
@@ -611,10 +561,6 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
     "sync_stock_list", "sync_sector_list", "sync_sector_members",
     "sync_stock_sector_memberships", "sync_shenwan_industry_tree",
     "sync_low_suction_security_snapshot",
-    "sync_low_suction_forward_top3",
-    "sync_low_suction_forward_ma5_shadow",
-    "sync_low_suction_forward_ma5_minutes",
-    "sync_low_suction_swing_settlement",
     "sync_shenwan_industry_members", "sync_industry_board_mapping",
     "sync_supply_chain_edges",
     "sync_stock_daily_bars", ADJUSTED_DAILY_SYNC_JOB_ID, "sync_index_daily_bars", "sync_mainline_sentiment_history", "sync_sector_daily_bars",
@@ -637,8 +583,24 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
 # requirements/alphaagent_unified_incremental_schedule_plan.md.
 CURRENT_EOD_SCHEDULE_ID = "eod_1900"
 PRIMARY_EOD_RECOVERY_CUTOFF_HOUR = 21
-LEGACY_DEFAULT_BATCH_SCHEDULE_IDS = {"eod_18h", "tail_quant_1430"}
-LEGACY_SCHEDULE_ACTIONS = {"quant_research", "tail_preview"}
+LEGACY_DEFAULT_BATCH_SCHEDULE_IDS = {
+    "eod_18h",
+    "tail_quant_1430",
+    # 旧低吸波段策略（swing）已随 v3/v4 日线因子重建整体退役
+    "low_suction_open_0931",
+    "low_suction_preview_hourly",
+    "low_suction_signal_1450",
+    "low_suction_entry_1455",
+}
+LEGACY_SCHEDULE_ACTIONS = {"quant_research", "tail_preview", "low_suction_swing"}
+# 已退役的默认任务定义：seed 时从注册表删除（旧低吸 swing/前向研究链）
+RETIRED_DEFAULT_JOB_IDS = {
+    "sync_low_suction_forward_top3",
+    "sync_low_suction_forward_ma5_shadow",
+    "sync_low_suction_forward_ma5_minutes",
+    "sync_low_suction_reclaim_minutes",
+    "sync_low_suction_swing_settlement",
+}
 
 DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
     {
@@ -649,15 +611,6 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "enabled": True,
         "concurrency": 1,
         "job_ids": ["sync_stock_auction_snapshots"],
-    },
-    {
-        "id": "low_suction_open_0931",
-        "name": "低吸波段次日开盘退出（09:31）",
-        "cron": "31 9 * * 1-5",
-        "action": "low_suction_swing",
-        "enabled": True,
-        "concurrency": 1,
-        "job_ids": ["sync_low_suction_swing_exits"],
     },
     {
         "id": "limit_up_live_scan",
@@ -691,33 +644,6 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         ],
     },
     {
-        "id": "low_suction_preview_hourly",
-        "name": "低吸盘中预警（每小时）",
-        "cron": "30 9,10,11,13,14 * * 1-5",
-        "action": "low_suction_swing",
-        "enabled": True,
-        "concurrency": 1,
-        "job_ids": ["sync_low_suction_swing_preview"],
-    },
-    {
-        "id": "low_suction_signal_1450",
-        "name": "低吸波段信号冻结（14:50）",
-        "cron": "50 14 * * 1-5",
-        "action": "low_suction_swing",
-        "enabled": True,
-        "concurrency": 1,
-        "job_ids": ["sync_low_suction_swing_signals"],
-    },
-    {
-        "id": "low_suction_entry_1455",
-        "name": "低吸波段纸面买入（14:55）",
-        "cron": "55 14 * * 1-5",
-        "action": "low_suction_swing",
-        "enabled": True,
-        "concurrency": 1,
-        "job_ids": ["sync_low_suction_swing_entries"],
-    },
-    {
         "id": "limit_up_plan_1505",
         "name": "次交易时段初步观察（15:05）",
         "cron": "5 15 * * 1-5",
@@ -741,15 +667,12 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             ADJUSTED_DAILY_SYNC_JOB_ID,
             "sync_index_daily_bars",
             "sync_mainline_sentiment_history",
-            "sync_low_suction_swing_settlement",
             "sync_sector_list",
             "sync_sector_daily_bars",
             "sync_sector_period_scores",
             "sync_sector_members",
             "sync_stock_sector_memberships",
             "sync_low_suction_security_snapshot",
-            "sync_low_suction_forward_top3",
-            "sync_low_suction_forward_ma5_shadow",
             "sync_limit_up_pools",
             "sync_limit_up_radar_minutes",
             "sync_stock_lhb_records",
@@ -792,7 +715,6 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             ADJUSTED_DAILY_SYNC_JOB_ID,
             "sync_index_daily_bars",
             "sync_mainline_sentiment_history",
-            "sync_low_suction_swing_settlement",
             "sync_sector_fund_flows",
             "sync_stock_fund_flows",
             "sync_sector_list",
@@ -801,8 +723,6 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_sector_members",
             "sync_stock_sector_memberships",
             "sync_low_suction_security_snapshot",
-            "sync_low_suction_forward_top3",
-            "sync_low_suction_forward_ma5_shadow",
             "sync_limit_up_pools",
             "sync_limit_up_ths_evidence",
             "sync_limit_up_event_minutes",
@@ -866,13 +786,6 @@ HISTORY_INPUT_JOB_IDS = frozenset(
     }
 )
 STALE_BATCH_SUMMARY_RE = re.compile(r"^\s*(\d+)\s+成功\s*/\s*(\d+)\s+失败\s*$")
-LOW_SUCTION_SWING_SCHEDULE_ACTION = "low_suction_swing"
-LOW_SUCTION_SWING_SCHEDULE_JOB_IDS = {
-    "sync_low_suction_swing_exits",
-    "sync_low_suction_swing_preview",
-    "sync_low_suction_swing_signals",
-    "sync_low_suction_swing_entries",
-}
 
 
 SYNC_BATCH_PROFILES: dict[str, tuple[str, ...]] = {
@@ -1886,182 +1799,6 @@ class DataSyncRunner:
             ),
         }
 
-    def _run_sync_low_suction_forward_top3(
-        self,
-        params: dict[str, Any],
-    ) -> dict[str, Any]:
-        observed_at = _now_china()
-        reliable_date = _latest_complete_daily_date_for_research()
-        if reliable_date != observed_at.date():
-            return {
-                "status": "skipped",
-                "rows_read": 0,
-                "rows_written": 0,
-                "message": (
-                    "当前日期不是最新可靠完整交易日，跳过低吸前向 Top3："
-                    f"capture_date={observed_at.date().isoformat()} "
-                    f"reliable_date={reliable_date.isoformat() if reliable_date else '-'}"
-                ),
-            }
-        if _truthy(params.get("skip_complete_session")):
-            session_coverage = _completed_forward_top3_session_coverage(
-                reliable_date
-            )
-            if session_coverage["status"] == "complete":
-                return {
-                    "status": "skipped",
-                    "rows_read": 0,
-                    "rows_written": 0,
-                    "top3_rows": int(session_coverage["top3_row_count"]),
-                    "session_coverage": session_coverage,
-                    "message": (
-                        f"{reliable_date.isoformat()} 低吸前向 Top3 已冻结 "
-                        f"{session_coverage['mode_count']} 种身份模式，跳过重复计算"
-                    ),
-                }
-
-        result = forward_leader_identity.freeze_forward_leader_source(
-            reliable_date,
-            attempted_at=observed_at,
-        )
-        complete = bool(result.get("complete"))
-        rank_rows = int(result.get("rank_rows") or 0)
-        rows_written = int(result.get("rows_written") or 0)
-        top3_rows = int(result.get("top3_rows") or 0)
-        blockers = [
-            str(value)
-            for value in (result.get("blocking_reasons") or [])
-            if str(value)
-        ]
-        message = (
-            f"低吸前向 Top3 {result.get('save_status')}；"
-            f"排名 {rank_rows} 行；Top3 {top3_rows} 行；"
-            f"指纹 {result.get('input_fingerprint')}"
-        )
-        if blockers:
-            message += "；关闭原因 " + ", ".join(blockers)
-        return {
-            **({} if complete else {"status": "skipped"}),
-            "rows_read": rank_rows,
-            "rows_written": rows_written,
-            "top3_rows": top3_rows,
-            "input_fingerprint": result.get("input_fingerprint"),
-            "message": message,
-        }
-
-    def _run_sync_low_suction_forward_ma5_shadow(
-        self,
-        params: dict[str, Any],
-    ) -> dict[str, Any]:
-        del params
-        observed_at = _now_china()
-        reliable_date = _latest_complete_daily_date_for_research()
-        if reliable_date is None:
-            return {
-                "status": "skipped",
-                "rows_read": 0,
-                "rows_written": 0,
-                "recommendations_created": 0,
-                "orders_created": 0,
-                "message": "尚无可靠完整日线，跳过低吸跨行情因果前向账本",
-            }
-
-        result = causal_leader_pullback_forward_repository.advance_causal_forward(
-            as_of_date=reliable_date,
-            attempted_at=observed_at,
-        )
-        captures = [
-            item for item in (result.get("captures") or []) if isinstance(item, dict)
-        ]
-        outcomes = (
-            result.get("outcomes")
-            if isinstance(result.get("outcomes"), dict)
-            else {}
-        )
-        blockers = [
-            str(value)
-            for value in (result.get("blocking_reasons") or [])
-            if str(value)
-        ]
-        candidate_rows = sum(int(item.get("candidate_rows") or 0) for item in captures)
-        signal_rows = sum(int(item.get("signal_rows") or 0) for item in captures)
-        outcome_evaluated = int(outcomes.get("evaluated") or 0)
-        outcome_writes = int(outcomes.get("inserted") or 0) + int(
-            outcomes.get("updated") or 0
-        )
-        capture_writes = sum(int(item.get("rows_written") or 0) for item in captures)
-        rows_written = capture_writes + outcome_writes
-        message = (
-            f"低吸跨行情因果前向捕获 {len(captures)}；"
-            f"候选 {candidate_rows}；信号 {signal_rows}；"
-            f"结果推进 {outcome_writes}/{outcome_evaluated}"
-        )
-        if blockers:
-            message += "；关闭原因 " + ", ".join(blockers)
-        return {
-            **({} if not blockers else {"status": "skipped"}),
-            "rows_read": len(captures) + outcome_evaluated,
-            "rows_written": rows_written,
-            "candidate_rows": candidate_rows,
-            "signal_rows": signal_rows,
-            "recommendations_created": 0,
-            "orders_created": 0,
-            "formal_metrics": None,
-            "message": message,
-        }
-
-    def _run_sync_low_suction_forward_ma5_minutes(
-        self,
-        params: dict[str, Any],
-    ) -> dict[str, Any]:
-        result = forward_ma5_minutes.backfill_forward_ma5_signal_5m(
-            dry_run=_truthy(params.get("dry_run")),
-            max_gaps=int(params.get("max_gaps") or 100),
-        )
-        requested = int(result.get("requested_missing_pairs") or 0)
-        return {
-            **result,
-            "recommendations_created": 0,
-            "orders_created": 0,
-            "formal_metrics": None,
-            "message": (
-                "低吸 MA5 前向信号日 5 分钟路径："
-                f"请求 {requested} 对，读取 {int(result.get('rows_read') or 0)} 根，"
-                f"写入 {int(result.get('rows_written') or 0)} 根"
-            ),
-        }
-
-    def _run_sync_low_suction_reclaim_minutes(
-        self,
-        params: dict[str, Any],
-    ) -> dict[str, Any]:
-        result = reclaim_minutes.backfill_reclaim_signal_5m(
-            dry_run=_truthy(params.get("dry_run")),
-            max_gaps=int(params.get("max_gaps") or 100),
-        )
-        requested = int(result.get("requested_missing_pairs") or 0)
-        return {
-            **result,
-            "recommendations_created": 0,
-            "orders_created": 0,
-            "formal_metrics": None,
-            "message": (
-                "低吸强势收复信号日 5 分钟路径："
-                f"请求 {requested} 对，读取 {int(result.get('rows_read') or 0)} 根，"
-                f"写入 {int(result.get('rows_written') or 0)} 根"
-            ),
-        }
-
-    def _run_sync_low_suction_swing_settlement(
-        self,
-        params: dict[str, Any],
-    ) -> dict[str, Any]:
-        del params
-        return _low_suction_swing_sync_result(
-            swing_strategy_service.settle_swing_positions(now=_now_china()),
-            job_id="sync_low_suction_swing_settlement",
-        )
-
     # ── 4 Shenwan runners ──
 
     def _run_sync_shenwan_industry_tree(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2699,11 +2436,6 @@ JOB_RUNNERS: dict[str, str] = {
     "sync_stock_sector_memberships": "_run_sync_stock_sector_memberships",
     "sync_mainline_sentiment_history": "_run_sync_mainline_sentiment_history",
     "sync_low_suction_security_snapshot": "_run_sync_low_suction_security_snapshot",
-    "sync_low_suction_forward_top3": "_run_sync_low_suction_forward_top3",
-    "sync_low_suction_forward_ma5_shadow": "_run_sync_low_suction_forward_ma5_shadow",
-    "sync_low_suction_forward_ma5_minutes": "_run_sync_low_suction_forward_ma5_minutes",
-    "sync_low_suction_reclaim_minutes": "_run_sync_low_suction_reclaim_minutes",
-    "sync_low_suction_swing_settlement": "_run_sync_low_suction_swing_settlement",
     "sync_shenwan_industry_tree": "_run_sync_shenwan_industry_tree",
     "sync_shenwan_industry_members": "_run_sync_shenwan_industry_members",
     "sync_industry_board_mapping": "_run_sync_industry_board_mapping",
@@ -2842,6 +2574,15 @@ def seed_default_registry() -> None:
                             schedule_cron=job.schedule_cron,
                         )
                     )
+            if RETIRED_DEFAULT_JOB_IDS:
+                # 软退役而非物理删除：sync_job_runs 历史记录仍引用这些任务
+                session.execute(
+                    schema.sync_job_definitions.update()
+                    .where(
+                        schema.sync_job_definitions.c.id.in_(RETIRED_DEFAULT_JOB_IDS)
+                    )
+                    .values(enabled=False)
+                )
 
             # Seed default batch schedules (unified incremental sync slots).
             for sched in DEFAULT_BATCH_SCHEDULES:
@@ -3112,42 +2853,6 @@ def _assert_cron(cron: str) -> None:
         raise DataSyncError("cron must be a 5-field expression")
 
 
-def _assert_known_jobs(
-    job_ids: list[str],
-    *,
-    allow_limit_up_ths_evidence: bool = False,
-    allow_limit_up_history_rebuild: bool = False,
-    allow_limit_up_next_session_plan: bool = False,
-    allow_limit_up_live_trace_prune: bool = False,
-) -> None:
-    valid = {job.id for job in DEFAULT_JOBS}
-    unknown = [
-        j for j in job_ids
-        if j not in valid
-        and not (
-            allow_limit_up_ths_evidence
-            and j == LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID
-        )
-        and not (
-            allow_limit_up_history_rebuild
-            and j == LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID
-        )
-        and not (
-            allow_limit_up_next_session_plan
-            and j in {
-                LIMIT_UP_NEXT_SESSION_PLAN_PRELIMINARY_BATCH_JOB_ID,
-                LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID,
-            }
-        )
-        and not (
-            allow_limit_up_live_trace_prune
-            and j == LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID
-        )
-    ]
-    if unknown:
-        raise DataSyncError(f"Unknown job_ids: {unknown}")
-
-
 def _schedule_job_ids(value: Any) -> list[str]:
     if value is None:
         return []
@@ -3157,23 +2862,18 @@ def _schedule_job_ids(value: Any) -> list[str]:
 
 
 def _assert_schedule_jobs(action: str, job_ids: list[str]) -> None:
-    if action == LOW_SUCTION_SWING_SCHEDULE_ACTION:
-        if len(job_ids) != 1 or job_ids[0] not in LOW_SUCTION_SWING_SCHEDULE_JOB_IDS:
-            raise DataSyncError(
-                "low_suction_swing schedules require one exact strategy job"
-            )
-        return
     if action != "sync":
         return
     if not job_ids:
         raise DataSyncError(f"{action} schedules require at least one job_id")
-    _assert_known_jobs(
-        job_ids,
-        allow_limit_up_ths_evidence=True,
-        allow_limit_up_history_rebuild=True,
-        allow_limit_up_next_session_plan=True,
-        allow_limit_up_live_trace_prune=True,
-    )
+    unknown = [
+        job_id
+        for job_id in job_ids
+        if job_id not in {job.id for job in DEFAULT_JOBS}
+        and job_id not in INTERNAL_BATCH_JOB_IDS
+    ]
+    if unknown:
+        raise DataSyncError(f"Unknown job_ids: {unknown}")
 
 
 def _schedule_action(payload: dict[str, Any]) -> str:
@@ -3182,7 +2882,6 @@ def _schedule_action(payload: dict[str, Any]) -> str:
         "sync",
         "limit_up_live_scan",
         "limit_up_concept_scan",
-        LOW_SUCTION_SWING_SCHEDULE_ACTION,
     }:
         raise DataSyncError(f"Unsupported schedule action: {action}")
     return action
@@ -3276,55 +2975,7 @@ def run_schedule_now(schedule_id: str) -> dict[str, Any]:
     if action == "limit_up_concept_scan":
         snapshot = _run_schedule_action(dict(row), raise_errors=True) or {}
         return _concept_scan_schedule_status(schedule_id, snapshot)
-    if action == LOW_SUCTION_SWING_SCHEDULE_ACTION:
-        result = _run_schedule_action(dict(row), raise_errors=True) or {}
-        return _low_suction_swing_schedule_status(schedule_id, result)
     return _start_sync_schedule(dict(row), source="manual")
-
-
-def _low_suction_swing_schedule_status(
-    schedule_id: str,
-    result: dict[str, Any],
-) -> dict[str, Any]:
-    skipped = str(result.get("status") or "") == "skipped"
-    created_at = _utc_now_iso()
-    job_id = str(result.get("job_id") or "low_suction_swing")
-    rows_read = int(result.get("rows_read") or 0)
-    rows_written = int(result.get("rows_written") or 0)
-    message = str(result.get("message") or "")
-    status = "skipped" if skipped else "succeeded"
-    return {
-        "id": f"low_suction_swing_{uuid4().hex}",
-        "profile": LOW_SUCTION_SWING_SCHEDULE_ACTION,
-        "source": "manual",
-        "schedule_id": schedule_id,
-        "concurrency": 1,
-        "status": status,
-        "created_at": created_at,
-        "started_at": created_at,
-        "finished_at": created_at,
-        "current_job_id": None,
-        "total_jobs": 1,
-        "completed_jobs": 1,
-        "succeeded_jobs": 0 if skipped else 1,
-        "failed_jobs": 0,
-        "skipped_jobs": 1 if skipped else 0,
-        "rows_read": rows_read,
-        "rows_written": rows_written,
-        "progress_pct": 100.0,
-        "message": message,
-        "jobs": [
-            {
-                "job_id": job_id,
-                "status": status,
-                "started_at": created_at,
-                "finished_at": created_at,
-                "rows_read": rows_read,
-                "rows_written": rows_written,
-                "message": message,
-            }
-        ],
-    }
 
 
 def _live_scan_schedule_status(schedule_id: str, snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -3474,7 +3125,6 @@ def _schedule_batch_params(row: dict[str, Any], action: str, job_ids: list[str])
         "sync_sector_members",
         "sync_stock_sector_memberships",
         "sync_low_suction_security_snapshot",
-        "sync_low_suction_forward_top3",
     ):
         if job_id in job_ids:
             job_params[job_id] = {"skip_complete_session": True}
@@ -3604,22 +3254,14 @@ def _depends_on(job_id: str, upstream: str) -> bool:
     depend on the stock list, sector jobs on the sector list.
     """
     if upstream == "sync_stock_list":
-        return (
-            job_id.startswith("sync_stock_") and job_id not in _BASE_SYNC_JOBS
-        ) or job_id == "sync_low_suction_forward_top3"
+        return job_id.startswith("sync_stock_") and job_id not in _BASE_SYNC_JOBS
     if upstream == "sync_sector_list":
-        return (
-            job_id.startswith("sync_sector_")
-            or job_id
-            in {
-                "sync_stock_sector_memberships",
-                "sync_low_suction_forward_top3",
-            }
-        )
+        return job_id.startswith("sync_sector_") or job_id in {
+            "sync_stock_sector_memberships",
+        }
     if upstream == "sync_sector_members":
         return job_id in {
             "sync_stock_sector_memberships",
-            "sync_low_suction_forward_top3",
         }
     return False
 
@@ -5257,23 +4899,6 @@ def _run_schedule_action(
     schedule_id = str(row["id"])
     action = str(row.get("action") or "sync")
     try:
-        if action == LOW_SUCTION_SWING_SCHEDULE_ACTION:
-            job_ids = _schedule_job_ids(row.get("job_ids"))
-            _assert_schedule_jobs(action, job_ids)
-            _touch_schedule(
-                schedule_id,
-                last_started_at=datetime.now(timezone.utc),
-                last_status="running",
-            )
-            result = _run_low_suction_swing_schedule_job(job_ids[0])
-            skipped = str(result.get("status") or "") == "skipped"
-            _touch_schedule(
-                schedule_id,
-                last_status="skipped" if skipped else "succeeded",
-                last_finished_at=datetime.now(timezone.utc),
-                last_message=str(result.get("message") or "")[:500],
-            )
-            return result
         if action == "limit_up_concept_scan":
             _touch_schedule(
                 schedule_id,
@@ -5325,66 +4950,6 @@ def _run_schedule_action(
         if raise_errors:
             raise
         return None
-
-
-def _run_low_suction_swing_schedule_job(job_id: str) -> dict[str, Any]:
-    observed_at = _now_china()
-    if job_id == "sync_low_suction_swing_exits":
-        result = swing_strategy_service.fill_swing_exits(now=observed_at)
-    elif job_id == "sync_low_suction_swing_preview":
-        result = swing_strategy_service.capture_swing_preview(now=observed_at)
-    elif job_id == "sync_low_suction_swing_signals":
-        result = swing_strategy_service.capture_swing_signals(now=observed_at)
-    elif job_id == "sync_low_suction_swing_entries":
-        result = swing_strategy_service.fill_swing_entries(now=observed_at)
-    else:
-        raise DataSyncError(f"Unknown low-suction swing job: {job_id}")
-    return _low_suction_swing_sync_result(result, job_id=job_id)
-
-
-def _low_suction_swing_sync_result(
-    result: dict[str, object],
-    *,
-    job_id: str,
-) -> dict[str, Any]:
-    strategy_status = str(result.get("status") or "unknown")
-    rows_read = sum(
-        int(result.get(key) or 0)
-        for key in (
-            "candidate_rows",
-            "recommendations_read",
-            "open_positions_read",
-            "pending_positions_read",
-        )
-    )
-    rows_written = sum(
-        int(result.get(key) or 0)
-        for key in (
-            "recommendations_created",
-            "positions_opened",
-            "positions_marked",
-            "triggers_created",
-            "positions_closed",
-        )
-    )
-    blockers = [
-        str(reason)
-        for reason in (result.get("blocking_reasons") or [])
-        if str(reason)
-    ]
-    skipped = strategy_status in {"blocked", "market_closed"}
-    message = f"低吸波段 {job_id}：{strategy_status}"
-    if blockers:
-        message += "；关闭原因 " + ", ".join(blockers)
-    return {
-        **result,
-        "job_id": job_id,
-        "status": "skipped" if skipped else "succeeded",
-        "strategy_status": strategy_status,
-        "rows_read": rows_read,
-        "rows_written": rows_written,
-        "message": message,
-    }
 
 
 def _live_scan_snapshot_saved(snapshot: dict[str, Any]) -> bool:
@@ -6895,55 +6460,6 @@ def _completed_low_suction_security_session_coverage(
         "expected_symbol_count": expected_count,
         "returned_symbol_count": returned_count,
         "observed_at": observed_at.isoformat() if observed_at else None,
-    }
-
-
-def _completed_forward_top3_session_coverage(
-    source_trade_date: date,
-) -> dict[str, Any]:
-    table = schema.low_suction_forward_leader_rank_snapshot_scopes
-    with session_scope() as session:
-        rows = session.execute(
-            select(
-                table.c.identity_mode,
-                table.c.complete,
-                table.c.ranked_row_count,
-                table.c.top3_row_count,
-                table.c.input_fingerprint,
-                table.c.evidence_level,
-            ).where(
-                table.c.source_trade_date == source_trade_date,
-                table.c.ranking_version
-                == forward_leader_identity.FORWARD_LEADER_RANKING_VERSION,
-            )
-        ).mappings().all()
-
-    expected_modes = {
-        mode.value for mode in forward_leader_identity.LeaderIdentityMode
-    }
-    observed_modes = {str(row.get("identity_mode") or "") for row in rows}
-    fingerprints = {str(row.get("input_fingerprint") or "") for row in rows}
-    complete = bool(
-        observed_modes == expected_modes
-        and len(rows) == len(expected_modes)
-        and all(row.get("complete") is True for row in rows)
-        and all(
-            row.get("evidence_level")
-            == forward_leader_identity.FORWARD_RANK_EVIDENCE_LEVEL
-            for row in rows
-        )
-        and len(fingerprints) == 1
-        and next(iter(fingerprints), "").startswith("sha256:")
-    )
-    return {
-        "status": "complete" if complete else "incomplete",
-        "source_trade_date": source_trade_date.isoformat(),
-        "mode_count": len(observed_modes & expected_modes),
-        "ranked_row_count": sum(
-            int(row.get("ranked_row_count") or 0) for row in rows
-        ),
-        "top3_row_count": sum(int(row.get("top3_row_count") or 0) for row in rows),
-        "input_fingerprint": next(iter(fingerprints), None),
     }
 
 

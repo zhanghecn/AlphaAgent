@@ -155,13 +155,9 @@ def test_default_batch_schedules_defined():
     ids = {s["id"] for s in svc.DEFAULT_BATCH_SCHEDULES}
     assert ids == {
         "auction_0926",
-        "low_suction_open_0931",
         "limit_up_concept_scan",
         "limit_up_live_scan",
         "intraday_hourly",
-        "low_suction_preview_hourly",
-        "low_suction_signal_1450",
-        "low_suction_entry_1455",
         "limit_up_plan_1505",
         "eod_1900",
         "eod_finalize_2130",
@@ -171,64 +167,7 @@ def test_default_batch_schedules_defined():
     }
 
 
-def test_low_suction_swing_schedules_are_exact_and_independent():
-    schedules = {row["id"]: row for row in svc.DEFAULT_BATCH_SCHEDULES}
 
-    assert schedules["low_suction_open_0931"] == {
-        "id": "low_suction_open_0931",
-        "name": "低吸波段次日开盘退出（09:31）",
-        "cron": "31 9 * * 1-5",
-        "action": "low_suction_swing",
-        "enabled": True,
-        "concurrency": 1,
-        "job_ids": ["sync_low_suction_swing_exits"],
-    }
-    assert schedules["low_suction_signal_1450"]["cron"] == "50 14 * * 1-5"
-    assert schedules["low_suction_signal_1450"]["job_ids"] == [
-        "sync_low_suction_swing_signals"
-    ]
-    assert schedules["low_suction_entry_1455"]["cron"] == "55 14 * * 1-5"
-    assert schedules["low_suction_entry_1455"]["job_ids"] == [
-        "sync_low_suction_swing_entries"
-    ]
-    assert schedules["low_suction_preview_hourly"]["cron"] == (
-        "30 9,10,11,13,14 * * 1-5"
-    )
-    assert schedules["low_suction_preview_hourly"]["job_ids"] == [
-        "sync_low_suction_swing_preview"
-    ]
-    assert all(
-        schedules[schedule_id]["action"] == "low_suction_swing"
-        for schedule_id in (
-            "low_suction_open_0931",
-            "low_suction_preview_hourly",
-            "low_suction_signal_1450",
-            "low_suction_entry_1455",
-        )
-    )
-
-
-def test_low_suction_settlement_runs_after_daily_bars_in_both_eod_batches():
-    schedules = {row["id"]: row for row in svc.DEFAULT_BATCH_SCHEDULES}
-    for schedule_id in ("eod_1900", "eod_finalize_2130"):
-        jobs = schedules[schedule_id]["job_ids"]
-        assert "sync_low_suction_swing_settlement" in jobs
-        assert jobs.index("sync_low_suction_swing_settlement") > jobs.index(
-            "sync_stock_daily_bars"
-        )
-
-
-def test_low_suction_exact_schedules_never_catch_up():
-    schedule = next(
-        row
-        for row in svc.DEFAULT_BATCH_SCHEDULES
-        if row["id"] == "low_suction_signal_1450"
-    )
-
-    assert svc._schedule_catchup_due(
-        schedule,
-        datetime.fromisoformat("2026-07-20T15:10:00+08:00"),
-    ) is False
 
 
 def test_auction_schedule_captures_the_finished_call_auction_before_continuous_trading():
@@ -842,15 +781,12 @@ def test_eod_schedule_runs_market_data_and_limit_up_planning():
         svc.ADJUSTED_DAILY_SYNC_JOB_ID,
         "sync_index_daily_bars",
         "sync_mainline_sentiment_history",
-        "sync_low_suction_swing_settlement",
         "sync_sector_list",
         "sync_sector_daily_bars",
         "sync_sector_period_scores",
         "sync_sector_members",
         "sync_stock_sector_memberships",
         "sync_low_suction_security_snapshot",
-        "sync_low_suction_forward_top3",
-        "sync_low_suction_forward_ma5_shadow",
         "sync_limit_up_pools",
         "sync_limit_up_radar_minutes",
         "sync_stock_lhb_records",
@@ -875,7 +811,6 @@ def test_eod_finalize_schedule_retries_daily_bars_late_without_slow_jobs():
         svc.ADJUSTED_DAILY_SYNC_JOB_ID,
         "sync_index_daily_bars",
         "sync_mainline_sentiment_history",
-        "sync_low_suction_swing_settlement",
         "sync_sector_fund_flows",
         "sync_stock_fund_flows",
         "sync_sector_list",
@@ -884,8 +819,6 @@ def test_eod_finalize_schedule_retries_daily_bars_late_without_slow_jobs():
         "sync_sector_members",
         "sync_stock_sector_memberships",
         "sync_low_suction_security_snapshot",
-        "sync_low_suction_forward_top3",
-        "sync_low_suction_forward_ma5_shadow",
         "sync_limit_up_pools",
         svc.LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID,
         "sync_limit_up_event_minutes",
@@ -1074,153 +1007,7 @@ def test_low_suction_security_snapshot_provider_gap_fails_closed(monkeypatch):
         svc.DataSyncRunner()._run_sync_low_suction_security_snapshot({})
 
 
-def test_low_suction_forward_top3_job_is_registered_after_strict_sources():
-    job = next(
-        item
-        for item in svc.DEFAULT_JOBS
-        if item.id == "sync_low_suction_forward_top3"
-    )
 
-    assert job.source_id == "alphaagent_local"
-    assert job.target_table == "low_suction_forward_leader_rank_snapshots"
-    assert svc.JOB_RUNNERS[job.id] == "_run_sync_low_suction_forward_top3"
-    assert svc.JOB_CADENCES[job.id].freshness_table == (
-        "low_suction_forward_leader_rank_snapshot_scopes"
-    )
-    for schedule_id in ("eod_1900", "eod_finalize_2130"):
-        schedule = next(
-            item for item in svc.DEFAULT_BATCH_SCHEDULES if item["id"] == schedule_id
-        )
-        jobs = schedule["job_ids"]
-        assert jobs.index("sync_stock_daily_bars") < jobs.index(job.id)
-        assert jobs.index("sync_sector_daily_bars") < jobs.index(job.id)
-        assert jobs.index("sync_sector_members") < jobs.index(job.id)
-        assert jobs.index("sync_low_suction_security_snapshot") < jobs.index(job.id)
-
-
-def test_low_suction_cross_regime_forward_is_registered_after_top3():
-    job = next(
-        item
-        for item in svc.DEFAULT_JOBS
-        if item.id == "sync_low_suction_forward_ma5_shadow"
-    )
-
-    assert job.source_id == "alphaagent_local"
-    assert job.target_table == "low_suction_forward_ma5_candidates"
-    assert svc.JOB_RUNNERS[job.id] == "_run_sync_low_suction_forward_ma5_shadow"
-    assert job.name == "低吸研究跨行情因果前向"
-    assert svc.JOB_CADENCES[job.id].freshness_table == (
-        "low_suction_forward_ma5_scopes"
-    )
-    for schedule_id in ("eod_1900", "eod_finalize_2130"):
-        schedule = next(
-            item for item in svc.DEFAULT_BATCH_SCHEDULES if item["id"] == schedule_id
-        )
-        jobs = schedule["job_ids"]
-        assert jobs.index("sync_low_suction_forward_top3") < jobs.index(job.id)
-
-
-def test_low_suction_cross_regime_forward_advances_natural_complete_session(monkeypatch):
-    now = datetime.fromisoformat("2026-07-17T19:00:00+08:00")
-    as_of_date = date(2026, 7, 17)
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(svc, "_now_china", lambda: now)
-    monkeypatch.setattr(
-        svc,
-        "_latest_complete_daily_date_for_research",
-        lambda: as_of_date,
-    )
-
-    def fake_advance(*, as_of_date, attempted_at):
-        captured.update({"as_of_date": as_of_date, "attempted_at": attempted_at})
-        return {
-            "captures": [
-                {
-                    "complete": False,
-                    "candidate_rows": 0,
-                    "signal_rows": 0,
-                }
-            ],
-            "blocking_reasons": ["strict_forward_inputs_incomplete"],
-            "outcomes": {
-                "evaluated": 2,
-                "inserted": 0,
-                "updated": 2,
-                "terminal_preserved": 0,
-            },
-            "formal_metrics": None,
-        }
-
-    monkeypatch.setattr(
-        svc.causal_leader_pullback_forward_repository,
-        "advance_causal_forward",
-        fake_advance,
-    )
-
-    result = svc.DataSyncRunner()._run_sync_low_suction_forward_ma5_shadow({})
-
-    assert captured == {"as_of_date": as_of_date, "attempted_at": now}
-    assert result["status"] == "skipped"
-    assert result["rows_read"] == 3
-    assert result["rows_written"] == 2
-    assert result["recommendations_created"] == 0
-    assert result["orders_created"] == 0
-    assert "strict_forward_inputs_incomplete" in result["message"]
-
-
-def test_low_suction_forward_ma5_shadow_skips_without_completed_daily_session(
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        svc,
-        "_latest_complete_daily_date_for_research",
-        lambda: None,
-    )
-    monkeypatch.setattr(
-        svc.causal_leader_pullback_forward_repository,
-        "advance_causal_forward",
-        lambda **kwargs: pytest.fail("empty database must not advance MA5 shadow"),
-    )
-
-    result = svc.DataSyncRunner()._run_sync_low_suction_forward_ma5_shadow({})
-
-    assert result["status"] == "skipped"
-    assert result["rows_read"] == 0
-    assert result["rows_written"] == 0
-
-
-def test_low_suction_forward_ma5_minutes_is_manual_and_registered(monkeypatch):
-    job = next(
-        item
-        for item in svc.DEFAULT_JOBS
-        if item.id == "sync_low_suction_forward_ma5_minutes"
-    )
-    assert all(
-        job.id not in schedule["job_ids"]
-        for schedule in svc.DEFAULT_BATCH_SCHEDULES
-    )
-
-    monkeypatch.setattr(
-        svc.forward_ma5_minutes,
-        "backfill_forward_ma5_signal_5m",
-        lambda **kwargs: {
-            "status": "ready",
-            "rows_read": 48,
-            "rows_written": 48,
-            "requested_missing_pairs": 1,
-        },
-    )
-
-    result = svc.DataSyncRunner()._run_sync_low_suction_forward_ma5_minutes(
-        job.default_params
-    )
-
-    assert job.source_id == "tdx_public_hq"
-    assert job.target_table == "stock_minute_bars"
-    assert result["rows_read"] == 48
-    assert result["rows_written"] == 48
-    assert result["recommendations_created"] == 0
-    assert result["orders_created"] == 0
 
 
 def test_eod_schedule_passes_incremental_concept_index_params() -> None:
@@ -1260,142 +1047,8 @@ def test_eod_schedule_passes_incremental_concept_index_params() -> None:
             "sync_low_suction_security_snapshot": {
                 "skip_complete_session": True,
             },
-            "sync_low_suction_forward_top3": {
-                "skip_complete_session": True,
-            },
         }
     }
-
-
-def test_low_suction_forward_top3_skips_without_current_complete_session(
-    monkeypatch,
-):
-    now = datetime.fromisoformat("2026-07-16T19:30:00+08:00")
-    monkeypatch.setattr(svc, "_now_china", lambda: now)
-    monkeypatch.setattr(
-        svc,
-        "_latest_complete_daily_date_for_research",
-        lambda: date(2026, 7, 15),
-    )
-    monkeypatch.setattr(
-        svc.forward_leader_identity,
-        "freeze_forward_leader_source",
-        lambda *args, **kwargs: pytest.fail("holiday run must not freeze Top3"),
-    )
-
-    result = svc.DataSyncRunner()._run_sync_low_suction_forward_top3({})
-
-    assert result["status"] == "skipped"
-    assert result["rows_written"] == 0
-
-
-def test_low_suction_forward_top3_freezes_current_complete_session(monkeypatch):
-    now = datetime.fromisoformat("2026-07-16T21:45:00+08:00")
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(svc, "_now_china", lambda: now)
-    monkeypatch.setattr(
-        svc,
-        "_latest_complete_daily_date_for_research",
-        lambda: now.date(),
-    )
-
-    def fake_freeze(source_trade_date, *, attempted_at):
-        captured.update(
-            {
-                "source_trade_date": source_trade_date,
-                "attempted_at": attempted_at,
-            }
-        )
-        return {
-            "complete": True,
-            "save_status": "frozen",
-            "rows_written": 360,
-            "rank_rows": 360,
-            "top3_rows": 90,
-            "input_fingerprint": "sha256:test",
-        }
-
-    monkeypatch.setattr(
-        svc.forward_leader_identity,
-        "freeze_forward_leader_source",
-        fake_freeze,
-    )
-
-    result = svc.DataSyncRunner()._run_sync_low_suction_forward_top3({})
-
-    assert captured == {"source_trade_date": now.date(), "attempted_at": now}
-    assert result["rows_read"] == 360
-    assert result["rows_written"] == 360
-    assert result["top3_rows"] == 90
-    assert "status" not in result
-
-
-def test_low_suction_forward_top3_skips_completed_automatic_session(monkeypatch):
-    now = datetime.fromisoformat("2026-07-20T21:35:00+08:00")
-
-    monkeypatch.setattr(svc, "_now_china", lambda: now)
-    monkeypatch.setattr(
-        svc,
-        "_latest_complete_daily_date_for_research",
-        lambda: now.date(),
-    )
-    monkeypatch.setattr(
-        svc,
-        "_completed_forward_top3_session_coverage",
-        lambda source_trade_date: {
-            "status": "complete",
-            "source_trade_date": source_trade_date.isoformat(),
-            "mode_count": 3,
-            "ranked_row_count": 2_291,
-            "top3_row_count": 302,
-        },
-        raising=False,
-    )
-    monkeypatch.setattr(
-        svc.forward_leader_identity,
-        "freeze_forward_leader_source",
-        lambda *args, **kwargs: pytest.fail(
-            "completed automatic session must not recompute Top3"
-        ),
-    )
-
-    result = svc.DataSyncRunner()._run_sync_low_suction_forward_top3(
-        {"skip_complete_session": True}
-    )
-
-    assert result["status"] == "skipped"
-    assert result["rows_written"] == 0
-    assert result["top3_rows"] == 302
-    assert result["session_coverage"]["mode_count"] == 3
-
-
-def test_low_suction_forward_top3_exposes_closed_scope_as_skipped(monkeypatch):
-    now = datetime.fromisoformat("2026-07-16T21:45:00+08:00")
-    monkeypatch.setattr(svc, "_now_china", lambda: now)
-    monkeypatch.setattr(
-        svc,
-        "_latest_complete_daily_date_for_research",
-        lambda: now.date(),
-    )
-    monkeypatch.setattr(
-        svc.forward_leader_identity,
-        "freeze_forward_leader_source",
-        lambda *args, **kwargs: {
-            "complete": False,
-            "save_status": "blocked",
-            "rows_written": 0,
-            "rank_rows": 0,
-            "top3_rows": 0,
-            "blocking_reasons": ["membership_scope_not_strict_complete"],
-            "input_fingerprint": "sha256:test",
-        },
-    )
-
-    result = svc.DataSyncRunner()._run_sync_low_suction_forward_top3({})
-
-    assert result["status"] == "skipped"
-    assert result["rows_written"] == 0
-    assert "membership_scope_not_strict_complete" in result["message"]
 
 
 def test_limit_up_event_minute_backfill_job_is_limited_and_registered(monkeypatch):
@@ -4718,50 +4371,6 @@ def test_scheduler_skips_weekend_for_weekday_cron(monkeypatch):
 
     assert not triggered
 
-
-def test_low_suction_exact_schedule_runs_without_starting_a_shared_batch(monkeypatch):
-    calls: list[datetime] = []
-    touched: list[dict[str, Any]] = []
-    now = datetime.fromisoformat("2026-07-20T14:50:00+08:00")
-    monkeypatch.setattr(svc, "_now_china", lambda: now)
-    monkeypatch.setattr(
-        svc.swing_strategy_service,
-        "capture_swing_signals",
-        lambda **kwargs: calls.append(kwargs["now"])
-        or {
-            "status": "ready",
-            "candidate_rows": 12,
-            "recommendations_created": 2,
-            "positions_opened": 0,
-            "positions_closed": 0,
-            "blocking_reasons": [],
-        },
-    )
-    monkeypatch.setattr(
-        svc,
-        "_touch_schedule",
-        lambda _schedule_id, **fields: touched.append(fields),
-    )
-    monkeypatch.setattr(
-        svc,
-        "_start_sync_schedule",
-        lambda *_args, **_kwargs: pytest.fail("exact strategy action joined shared batch"),
-    )
-
-    result = svc._run_schedule_action(
-        {
-            "id": "low_suction_signal_1450",
-            "action": "low_suction_swing",
-            "job_ids": ["sync_low_suction_swing_signals"],
-        }
-    )
-
-    assert calls == [now]
-    assert result is not None
-    assert result["strategy_status"] == "ready"
-    assert result["rows_read"] == 12
-    assert result["rows_written"] == 2
-    assert touched[-1]["last_status"] == "succeeded"
 
 
 def test_scheduler_saves_limit_up_snapshot_each_live_minute(monkeypatch):

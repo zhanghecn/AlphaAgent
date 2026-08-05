@@ -12,6 +12,9 @@ from alphaagent.market.warmup import start_market_cache_warmup
 from alphaagent.server.services.market_timing.panel import start_intraday_refresher
 from alphaagent.server.services.limit_up.history_service import start_backtest_cache_warmup
 from alphaagent.server.services.limit_up.next_session_plan import start_next_session_plan_warmup
+from alphaagent.server.services.low_suction.daily_picks_service import (
+    start_low_suction_live_warmup,
+)
 
 
 def create_app() -> FastAPI:
@@ -31,6 +34,7 @@ def create_app() -> FastAPI:
             pass
         if settings.startup_backtest_warmup:
             start_backtest_cache_warmup()
+        start_low_suction_live_warmup()
         if settings.startup_market_cache_warmup:
             start_market_cache_warmup(timeout=settings.market_timeout_seconds)
         if settings.startup_intraday_refresher:

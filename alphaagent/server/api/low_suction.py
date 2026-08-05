@@ -1,193 +1,81 @@
-"""Independent API surface for low-suction swing research."""
+"""低吸日线 API：v3/v4 因子的实时推荐、回测报告与历史交割单。"""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from alphaagent.server.core.responses import fail, ok
-from alphaagent.server.services.low_suction.swing_research_service import (
-    get_swing_research,
-)
-from alphaagent.server.services.low_suction.cross_regime_validation_service import (
-    get_cross_regime_validation,
-)
-from alphaagent.server.services.low_suction.swing_strategy_service import (
-    get_swing_strategy_overview,
-)
-from alphaagent.server.services.low_suction.historical_replay_service import (
-    get_historical_replay_overview,
-    get_historical_replay_trade,
-    get_historical_replay_trades,
-)
-from alphaagent.server.services.low_suction.causal_leader_pullback_forward_repository import (
-    list_causal_forward_ledger,
+from alphaagent.server.services.low_suction.daily_picks_service import (
+    get_daily_backtest_report,
+    get_live_recommendations,
 )
 
 
-router = APIRouter(prefix="/reverse-wrap", tags=["reverse-wrap"])
+router = APIRouter(prefix="/low-suction", tags=["low-suction"])
 
 
-@router.get("/forward-ledger", response_model=None)
-def natural_forward_ledger(
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=100),
-    signal_eligible: bool | None = None,
-    terminal: bool | None = None,
-):
-    """Read immutable natural candidates and later outcomes as one ledger."""
+@router.get("/live", response_model=None)
+def live_recommendations():
+    """实时推荐：上升趋势低吸 + 超跌反弹低吸两组，交易日内 30 分钟缓存。"""
 
     try:
-        return ok(
-            list_causal_forward_ledger(
-                page=page,
-                page_size=page_size,
-                signal_eligible=signal_eligible,
-                terminal=terminal,
-            )
-        )
-    except ValueError as exc:
-        return JSONResponse(
-            status_code=422,
-            content=fail("LOW_SUCTION_FORWARD_FILTER_INVALID", str(exc)),
-        )
+        return ok(get_live_recommendations())
     except Exception as exc:  # noqa: BLE001
         return JSONResponse(
             status_code=503,
             content=fail(
-                "LOW_SUCTION_FORWARD_LEDGER_UNAVAILABLE",
-                "低吸自然前向流水暂时不可用",
+                "LOW_SUCTION_LIVE_UNAVAILABLE",
+                "低吸实时推荐暂时不可用",
                 {"reason": exc.__class__.__name__},
             ),
         )
 
 
-@router.get("/history", response_model=None)
-def historical_replay_overview():
-    """Read replay lineage and evidence grade without launching a replay."""
+@router.get("/backtest", response_model=None)
+def daily_backtest():
+    """回测：全量分数段统计 + 两仓位模拟 + 权益曲线（CLI 物化，API 读库）。"""
 
     try:
-        return ok(get_historical_replay_overview())
+        payload = get_daily_backtest_report()
     except Exception as exc:  # noqa: BLE001
         return JSONResponse(
             status_code=503,
             content=fail(
-                "LOW_SUCTION_HISTORY_UNAVAILABLE",
-                "低吸历史逐笔账本暂时不可用",
+                "LOW_SUCTION_BACKTEST_UNAVAILABLE",
+                "低吸回测报告暂时不可用",
                 {"reason": exc.__class__.__name__},
             ),
         )
+    if payload is None:
+        return ok({"status": "unavailable", "message": "低吸日线回测尚未运行"})
+    report = {key: value for key, value in payload.items() if key != "ledger_days"}
+    return ok({"status": "ok", "is_backtest": True, "report": report})
 
 
-@router.get("/history/trades", response_model=None)
-def historical_replay_trades(
-    run_id: str,
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=100),
-    market_phase: str | None = None,
-    outcome: str | None = None,
-    vt_symbol: str | None = None,
-    sector_id: str | None = None,
-):
-    """Read one filtered page from an already-materialized replay."""
+@router.get("/ledger", response_model=None)
+def daily_ledger():
+    """历史交割单：两仓位模拟的最近交易日逐票明细（回测模拟，非实盘）。"""
 
     try:
-        return ok(
-            get_historical_replay_trades(
-                run_id=run_id,
-                page=page,
-                page_size=page_size,
-                market_phase=market_phase,
-                outcome=outcome,
-                vt_symbol=vt_symbol,
-                sector_id=sector_id,
-            )
-        )
-    except ValueError as exc:
-        return JSONResponse(
-            status_code=422,
-            content=fail("LOW_SUCTION_HISTORY_FILTER_INVALID", str(exc)),
-        )
+        payload = get_daily_backtest_report()
     except Exception as exc:  # noqa: BLE001
         return JSONResponse(
             status_code=503,
             content=fail(
-                "LOW_SUCTION_HISTORY_UNAVAILABLE",
-                "低吸历史逐笔账本暂时不可用",
+                "LOW_SUCTION_LEDGER_UNAVAILABLE",
+                "低吸历史交割单暂时不可用",
                 {"reason": exc.__class__.__name__},
             ),
         )
-
-
-@router.get("/history/trades/{signal_id}", response_model=None)
-def historical_replay_trade(signal_id: str, run_id: str):
-    """Read one replay trade and its causal evidence."""
-
-    try:
-        trade = get_historical_replay_trade(run_id=run_id, signal_id=signal_id)
-        if trade is None:
-            return JSONResponse(
-                status_code=404,
-                content=fail("LOW_SUCTION_HISTORY_TRADE_NOT_FOUND", "低吸交易不存在"),
-            )
-        return ok(trade)
-    except Exception as exc:  # noqa: BLE001
-        return JSONResponse(
-            status_code=503,
-            content=fail(
-                "LOW_SUCTION_HISTORY_UNAVAILABLE",
-                "低吸历史逐笔账本暂时不可用",
-                {"reason": exc.__class__.__name__},
-            ),
-        )
-
-
-@router.get("/cross-regime-validation", response_model=None)
-def cross_regime_validation():
-    """Read retained natural-forward diagnostics without retired reports."""
-
-    try:
-        return ok(get_cross_regime_validation())
-    except (OSError, ValueError) as exc:
-        return JSONResponse(
-            status_code=503,
-            content=fail(
-                "LOW_SUCTION_CROSS_REGIME_UNAVAILABLE",
-                "跨行情低吸验收暂时不可用",
-                {"reason": str(exc)},
-            ),
-        )
-
-
-@router.get("/strategy", response_model=None)
-def swing_strategy():
-    """Read the forward paper strategy without exposing order mutations."""
-
-    try:
-        return ok(get_swing_strategy_overview())
-    except Exception as exc:  # noqa: BLE001
-        return JSONResponse(
-            status_code=503,
-            content=fail(
-                "LOW_SUCTION_STRATEGY_UNAVAILABLE",
-                "低吸波段纸面策略暂时不可用",
-                {"reason": exc.__class__.__name__},
-            ),
-        )
-
-
-@router.get("/swing-research", response_model=None)
-def swing_research():
-    """Read the fail-closed status for retired swing research evidence."""
-
-    try:
-        return ok(get_swing_research())
-    except (OSError, ValueError) as exc:
-        return JSONResponse(
-            status_code=503,
-            content=fail(
-                "LOW_SUCTION_RESEARCH_UNAVAILABLE",
-                "低吸波段研究状态暂时不可用",
-                {"reason": str(exc)},
-            ),
-        )
+    if payload is None:
+        return ok({"status": "unavailable", "message": "低吸日线回测尚未运行", "ledger_days": []})
+    return ok(
+        {
+            "status": "ok",
+            "is_backtest": True,
+            "ledger_days": payload.get("ledger_days", []),
+            "coverage": payload.get("coverage"),
+            "label_convention": payload.get("label_convention"),
+        }
+    )

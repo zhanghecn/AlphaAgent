@@ -1,0 +1,225 @@
+import type { LowSuctionBacktestReport, LowSuctionBandStats } from "@/api/lowSuction";
+import { EmptyState } from "@/components/EmptyState";
+import { PanelHead } from "@/components/PanelHead";
+import { cn } from "@/lib/utils";
+
+/** 低吸回测：带仓位两仓模拟（产品口径）+ 全量分数段统计。 */
+export function LowSuctionBacktestView({ report }: { report: LowSuctionBacktestReport | null | undefined }) {
+  if (!report) {
+    return <EmptyState message="低吸日线回测尚未运行" description="由 CLI low-suction-daily-backtest 物化后展示" />;
+  }
+  const sim = report.position_sim;
+  return (
+    <section aria-label="低吸回测">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b bg-amber-500/5 px-3 py-2 text-xs text-amber-600 sm:px-4">
+        <span className="eyebrow">回测 BACKTEST</span>
+        <span>⚠️ 历史模拟，非实盘 · {report.label_convention}</span>
+        <span className="ml-auto">
+          {report.coverage.calendar_start} ~ {report.coverage.calendar_end} · {report.coverage.trade_days} 个交易日 ·{" "}
+          {report.coverage.labeled.toLocaleString()} 个带标签候选
+        </span>
+      </div>
+
+      <PanelHead no="01" zh="带仓位回测" en="2-SLOT SIMULATION" note="每日各取综合分最高的趋势/超跌一只，D+1 收盘结算，两腿各半仓" />
+      <div className="grid grid-cols-2 gap-px border-b bg-border sm:grid-cols-4">
+        <SimCard
+          title="两仓合并"
+          compound={sim.combined.compound_pct}
+          rows={[
+            ["日均收益", fmtPct(sim.combined.mean_pct)],
+            ["日胜率", fmtPct(sim.combined.win_rate_pct)],
+            ["最大回撤", fmtPct(sim.combined.max_drawdown_pct)],
+            ["交易天数", `${sim.combined.days ?? "--"}`],
+          ]}
+          highlight
+        />
+        <SimCard
+          title="趋势低吸（单仓）"
+          compound={sim.trend_pullback.compound_pct}
+          rows={[
+            ["均笔收益", fmtPct(sim.trend_pullback.mean_pct)],
+            ["胜率", fmtPct(sim.trend_pullback.win_rate_pct)],
+            ["笔数", `${sim.trend_pullback.trades ?? "--"}`],
+          ]}
+        />
+        <SimCard
+          title="超跌低吸（单仓）"
+          compound={sim.oversold_rebound.compound_pct}
+          rows={[
+            ["均笔收益", fmtPct(sim.oversold_rebound.mean_pct)],
+            ["胜率", fmtPct(sim.oversold_rebound.win_rate_pct)],
+            ["笔数", `${sim.oversold_rebound.trades ?? "--"}`],
+          ]}
+        />
+        <div className="bg-card px-3 py-3 sm:px-4">
+          <div className="mb-1 text-xs text-muted-foreground">两仓权益曲线</div>
+          <EquitySpark points={sim.equity_curve} />
+          <div className="mt-1 flex justify-between text-[10px] tabular-nums text-muted-foreground">
+            <span>{sim.equity_curve[0]?.date.slice(2) ?? ""}</span>
+            <span>{sim.equity_curve[sim.equity_curve.length - 1]?.date.slice(2) ?? ""}</span>
+          </div>
+        </div>
+      </div>
+
+      <PanelHead no="02" zh="全量回测 · 分数段统计" en="SCORE BANDS" note="推荐区间 = validation+holdout 双段为正（与正式验收门同口径）" />
+      <div className="grid gap-px bg-border xl:grid-cols-2">
+        <BandTable
+          title="上升趋势低吸"
+          en="TREND"
+          total={report.families.trend_pullback.total}
+          bands={report.families.trend_pullback.bands}
+        />
+        <BandTable
+          title="超跌反弹低吸"
+          en="OVERSOLD"
+          total={report.families.oversold_rebound.total}
+          bands={report.families.oversold_rebound.bands}
+        />
+      </div>
+    </section>
+  );
+}
+
+function SimCard({
+  title,
+  compound,
+  rows,
+  highlight = false,
+}: {
+  title: string;
+  compound: number;
+  rows: [string, string][];
+  highlight?: boolean;
+}) {
+  return (
+    <div className={cn("bg-card px-3 py-3 sm:px-4", highlight && "bg-primary/5")}>
+      <div className="text-xs text-muted-foreground">{title}</div>
+      <div className={cn("mt-0.5 font-mono text-xl font-bold tabular-nums", compound >= 0 ? "text-red-500" : "text-emerald-600")}>
+        {compound >= 0 ? "+" : ""}
+        {compound.toFixed(1)}%
+      </div>
+      <div className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-1 text-xs tabular-nums">
+        {rows.map(([label, value]) => (
+          <div key={label} className="flex justify-between gap-2">
+            <span className="text-muted-foreground">{label}</span>
+            <span className="font-medium">{value}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BandTable({
+  title,
+  en,
+  total,
+  bands,
+}: {
+  title: string;
+  en: string;
+  total: { n: number; win_rate_pct: number | null; mean_pct: number | null };
+  bands: Record<string, LowSuctionBandStats>;
+}) {
+  const entries = Object.entries(bands);
+  return (
+    <div className="min-w-0 bg-card">
+      <div className="flex items-baseline gap-2 border-b px-3 py-2 sm:px-4">
+        <span className="text-sm font-semibold">{title}</span>
+        <span className="eyebrow">{en}</span>
+        <span className="ml-auto text-xs tabular-nums text-muted-foreground">
+          全部候选 {total.n.toLocaleString()} · 胜率 {fmtPct(total.win_rate_pct)} · 均值 {fmtSigned(total.mean_pct)}
+        </span>
+      </div>
+      {entries.length === 0 ? (
+        <div className="px-3 py-6 text-center text-xs text-muted-foreground">样本不足</div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[520px] text-xs tabular-nums">
+            <thead>
+              <tr className="border-b text-left text-muted-foreground">
+                <th className="px-3 py-1.5 font-medium">分数段</th>
+                <th className="py-1.5 text-right font-medium">样本</th>
+                <th className="py-1.5 text-right font-medium">胜率</th>
+                <th className="py-1.5 text-right font-medium">D+1均值</th>
+                <th className="py-1.5 text-right font-medium">中位</th>
+                <th className="py-1.5 text-right font-medium">日复利</th>
+                <th className="py-1.5 text-right font-medium">验证段</th>
+                <th className="px-3 py-1.5 text-right font-medium">保留段</th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map(([band, stats]) => (
+                <tr key={band} className={cn("border-b last:border-0", stats.recommended && "bg-primary/[0.06]")}>
+                  <td className="px-3 py-1.5 font-mono font-semibold">
+                    {band}
+                    {stats.recommended && (
+                      <span className="ml-1.5 rounded-full bg-primary/15 px-1.5 py-px text-[10px] font-medium text-primary">
+                        推荐
+                      </span>
+                    )}
+                  </td>
+                  <td className="py-1.5 text-right">{stats.n.toLocaleString()}</td>
+                  <td className="py-1.5 text-right">{fmtPct(stats.win_rate_pct)}</td>
+                  <td className={cn("py-1.5 text-right font-medium", tone(stats.mean_pct))}>{fmtSigned(stats.mean_pct)}</td>
+                  <td className="py-1.5 text-right">{fmtSigned(stats.median_pct)}</td>
+                  <td className={cn("py-1.5 text-right", tone(stats.compound_pct))}>{fmtSigned(stats.compound_pct)}</td>
+                  <td className="py-1.5 text-right">{fmtSigned(stats.segments?.validation?.mean_pct ?? null)}</td>
+                  <td className="px-3 py-1.5 text-right">{fmtSigned(stats.segments?.holdout?.mean_pct ?? null)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 内联 SVG 权益曲线（零依赖小图，不动 lightweight-charts）。 */
+function EquitySpark({ points }: { points: { date: string; equity: number }[] }) {
+  if (points.length < 2) return <div className="h-16" />;
+  const values = points.map((p) => p.equity);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const w = 220;
+  const h = 56;
+  const step = w / (points.length - 1);
+  const path = points
+    .map((p, i) => `${i === 0 ? "M" : "L"}${(i * step).toFixed(1)},${(h - ((p.equity - min) / span) * (h - 6) - 3).toFixed(1)}`)
+    .join(" ");
+  const last = values[values.length - 1];
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="h-14 w-full" role="img" aria-label="两仓权益曲线">
+      <path d={path} fill="none" strokeWidth="1.5" className={last >= 1 ? "stroke-red-500" : "stroke-emerald-600"} />
+      {/* 成本线 1.0 */}
+      {min < 1 && max > 1 && (
+        <line
+          x1="0"
+          x2={w}
+          y1={h - ((1 - min) / span) * (h - 6) - 3}
+          y2={h - ((1 - min) / span) * (h - 6) - 3}
+          strokeDasharray="3 3"
+          strokeWidth="0.75"
+          className="stroke-muted-foreground/50"
+        />
+      )}
+    </svg>
+  );
+}
+
+function fmtPct(v: number | null | undefined): string {
+  if (v == null || Number.isNaN(v)) return "--";
+  return `${v.toFixed(1)}%`;
+}
+
+function fmtSigned(v: number | null | undefined): string {
+  if (v == null || Number.isNaN(v)) return "--";
+  return `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
+}
+
+function tone(v: number | null | undefined): string {
+  if (v == null) return "";
+  return v > 0 ? "text-red-500" : v < 0 ? "text-emerald-600" : "";
+}

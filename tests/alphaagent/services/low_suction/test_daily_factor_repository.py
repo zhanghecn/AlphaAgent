@@ -172,6 +172,7 @@ def test_research_cli_exposes_only_current_daily_factor_commands() -> None:
         "daily-factor-comprehensive-study",
         "daily-factor-case-audit",
         "daily-factor-extended-discovery",
+        "low-suction-daily-backtest",
     }
 
 

@@ -67,6 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="skip close-only exit enumeration during preliminary discovery",
     )
+
+    daily_backtest = subparsers.add_parser(
+        "low-suction-daily-backtest",
+        help="run the v3/v4 low-suction daily backtest and store its report",
+    )
+    _add_daily_factor_range_arguments(daily_backtest)
     return parser
 
 
@@ -200,6 +206,44 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.format == "json"
             else render_extended_daily_factor_markdown(report)
         )
+    elif args.command == "low-suction-daily-backtest":
+        from .daily_picks_backtest import BACKTEST_VERSION, build_backtest_payload
+        from .daily_picks_repository import save_daily_backtest_run
+        from .daily_picks_scanner import scan_low_suction_candidates
+        from .daily_factor_repository import load_daily_factor_inputs
+
+        inputs = load_daily_factor_inputs(
+            start_date=args.start,
+            end_date=args.end,
+            price_basis="raw_unadjusted",
+        )
+        candidates = scan_low_suction_candidates(
+            inputs.bars,
+            inputs.market_calendar,
+            inputs.security_status.to_dict(orient="records"),
+        )
+        names = _load_candidate_names({item.vt_symbol for item in candidates})
+        payload = build_backtest_payload(
+            candidates,
+            inputs.market_calendar,
+            names=names,
+        )
+        save_daily_backtest_run(BACKTEST_VERSION, payload)
+        rendered = json.dumps(
+            {
+                "version": BACKTEST_VERSION,
+                "coverage": payload["coverage"],
+                "families": payload["families"],
+                "position_sim": {
+                    "trend_pullback": payload["position_sim"]["trend_pullback"],  # type: ignore[index]
+                    "oversold_rebound": payload["position_sim"]["oversold_rebound"],  # type: ignore[index]
+                    "combined": payload["position_sim"]["combined"],  # type: ignore[index]
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
     else:
         raise ValueError(f"unsupported command: {args.command}")
 
@@ -238,6 +282,23 @@ def _parse_frozen_rule_keys(values: Sequence[str]) -> dict[str, str]:
             raise ValueError(f"duplicate --frozen-rule setup type: {setup_type}")
         frozen_rule_keys[setup_type] = rule_key
     return frozen_rule_keys
+
+
+def _load_candidate_names(vt_symbols: set[str]) -> dict[str, str]:
+    if not vt_symbols:
+        return {}
+    from sqlalchemy import select
+
+    from alphaagent.server.db import schema
+    from alphaagent.server.db.session import session_scope
+
+    with session_scope() as session:
+        rows = session.execute(
+            select(schema.stocks.c.vt_symbol, schema.stocks.c.name).where(
+                schema.stocks.c.vt_symbol.in_(tuple(sorted(vt_symbols)))
+            )
+        ).all()
+    return {str(row[0]): str(row[1]) for row in rows}
 
 
 def _write_rendered(rendered: str, output: Path | None) -> int:

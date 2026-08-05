@@ -1,42 +1,28 @@
-import { useEffect } from "react";
-import { FlaskConical, Flame, Rocket, Waves } from "lucide-react";
+import { FlaskConical, Flame, Rocket } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 
 import { cn } from "@/lib/utils";
 import { LimitUpPage } from "@/pages/LimitUpPage";
 import { FirstBoardLeaderPage } from "@/pages/FirstBoardLeaderPage";
 import { LowSuctionPage } from "@/pages/LowSuctionPage";
-import { PullbackStudyView } from "@/features/lowSuction/PullbackStudyView";
 
-type ResearchTab = "limit-up" | "first-board-leader" | "reverse-wrap" | "pullback-study";
+type ResearchTab = "limit-up" | "first-board-leader" | "low-suction";
 
 const RESEARCH_TABS = [
   { value: "limit-up", label: "打板研究", icon: Flame },
   { value: "first-board-leader", label: "潜龙首板", icon: Rocket },
-  { value: "reverse-wrap", label: "反包", icon: Waves },
-  { value: "pullback-study", label: "回踩低吸(研究)", icon: FlaskConical },
+  { value: "low-suction", label: "低吸", icon: FlaskConical },
 ] as const;
 
 export function ShortTermResearchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const raw = searchParams.get("research");
-  // 旧书签 low-suction 重定向到 reverse-wrap（正名兼容）
+  // 旧书签（reverse-wrap / pullback-study）统一归入低吸
   const activeTab: ResearchTab = raw === "first-board-leader"
     ? "first-board-leader"
-    : raw === "pullback-study"
-      ? "pullback-study"
-      : raw === "low-suction" || raw === "reverse-wrap"
-        ? "reverse-wrap"
-        : "limit-up";
-
-  // 旧 URL param 主动 replace 为新值（兼容书签）
-  useEffect(() => {
-    if (raw === "low-suction") {
-      const next = new URLSearchParams(searchParams);
-      next.set("research", "reverse-wrap");
-      setSearchParams(next, { replace: true });
-    }
-  }, [raw, searchParams, setSearchParams]);
+    : raw === "low-suction" || raw === "reverse-wrap" || raw === "pullback-study"
+      ? "low-suction"
+      : "limit-up";
 
   const selectTab = (tab: ResearchTab) => {
     const next = new URLSearchParams(searchParams);
@@ -49,9 +35,7 @@ export function ShortTermResearchPage() {
     ? <LimitUpPage />
     : activeTab === "first-board-leader"
       ? <FirstBoardLeaderPage />
-      : activeTab === "reverse-wrap"
-        ? <LowSuctionPage />
-        : <PullbackStudyView />;
+      : <LowSuctionPage />;
 
   return (
     <div className="min-w-0">

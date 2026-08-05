@@ -1815,6 +1815,19 @@ leader_sweep_backtest_runs = Table(
 )
 
 
+# 低吸日线回测：单行 id=1 存最新一次 run（同 leader 系列模式，CLI 写库 API 读库）
+low_suction_daily_backtest_runs = Table(
+    "low_suction_daily_backtest_runs",
+    metadata,
+    Column("id", Integer, primary_key=True),  # 固定 1：单行存最新低吸日线回测
+    Column("strategy_version", String(80), nullable=False),
+    Column("built_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("payload", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+
 limit_up_minute_backfill_attempts = Table(
     "limit_up_minute_backfill_attempts",
     metadata,
