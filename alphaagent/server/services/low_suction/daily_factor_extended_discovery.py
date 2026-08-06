@@ -1123,18 +1123,22 @@ def build_extended_daily_features(
         )
         for fast, slow in zip(ma_series[5], ma_series[10])
     ]
+    # 过伸段定义：三线完整多头（MA5>MA10>MA20>MA30）+ MA60 跟随向上（不要求 MA60 在排列内）。
+    # MA60 仅作大趋势方向确认 —— 跟随向上才启用过伸统计，避免误杀长期下跌刚转势、MA60 仍在下方的启动票。
     full_bull_history = tuple(
         bool(
             ma_series[5][index] is not None
             and ma_series[10][index] is not None
             and ma_series[20][index] is not None
             and ma_series[30][index] is not None
-            and ma_series[60][index] is not None
             and ma_series[5][index]
             > ma_series[10][index]
             > ma_series[20][index]
             > ma_series[30][index]
-            > ma_series[60][index]
+            and index >= 5
+            and ma_series[60][index] is not None
+            and ma_series[60][index - 5] is not None
+            and ma_series[60][index] > ma_series[60][index - 5]
         )
         for index in range(len(closes))
     )

@@ -149,6 +149,65 @@ def test_scan_admits_three_line_trend_candidate_without_ma60() -> None:
     assert trend[0].rule_key == "v4_trend_quiet_pullback"
 
 
+def _m60_rising_overextended_history() -> list[dict[str, object]]:
+    """MA60 跟随向上 + 三线多头 + 末段过伸：长期下跌后强反弹，MA60 已拐头向上，
+    反弹稳定段有历史 low 回踩 MA5（建立本段 pullback 基准），末几天连续大涨把 MA5 拉离 MA10，
+    当天安静小回踩 → M5-M10 严重过伸。
+    """
+    start = date(2025, 1, 1)
+    decline = [30 - index * 0.22 for index in range(50)]
+    rebound = [decline[-1] + index * 0.18 for index in range(45)]
+    bars = [_bar(start + timedelta(days=index), close) for index, close in enumerate(decline + rebound)]
+
+    closes = pd.Series([bar["close_price"] for bar in bars])
+    ma5_series = closes.rolling(5).mean()
+    pullback_index = len(bars) - 14
+    bars[pullback_index] = _bar(
+        start + timedelta(days=pullback_index),
+        float(closes.iloc[pullback_index]),
+        low_price=float(ma5_series.iloc[pullback_index]) * 0.995,
+        high_price=float(closes.iloc[pullback_index]) * 1.01,
+    )
+
+    last = len(bars) - 1
+    cumulative = float(closes.iloc[last - 5])
+    for offset in range(4):
+        index = last - 4 + offset
+        cumulative *= 1.08
+        bars[index] = _bar(
+            start + timedelta(days=index),
+            cumulative,
+            low_price=cumulative * 0.99,
+            high_price=cumulative * 1.01,
+            volume=2500.0,
+        )
+    end_close = cumulative * 1.005
+    bars[last] = _bar(
+        start + timedelta(days=last),
+        end_close,
+        low_price=end_close * 0.99,
+        high_price=end_close * 1.01,
+        volume=2000.0,
+    )
+    return bars
+
+
+def test_trend_overextended_fires_when_ma60_rising() -> None:
+    """MA60 跟随向上 + 三线多头 + 末段过伸 → 过伸否决应触发。
+
+    主人方案：full_bull_history 去 MA60 排列要求（不再要求 MA5>MA10>MA20>MA30>MA60），
+    改判 MA60 方向跟随向上（MA60 > 5 日前）。MA60 向上时过伸统计正常生效。
+
+    注：合成走势里三线多头与 MA60 向下互斥（持续反弹必推高 MA60），故 arrange/rising 两口径
+    在合成样本上行为一致；本测试为回归保护，区分性验证依赖半年回测数据。
+    """
+    features = build_extended_daily_features(_m60_rising_overextended_history())
+
+    assert features["ma10"] > features["ma20"] > features["ma30"]
+    assert features["trend_bull_alignment"] is True
+    assert features["trend_overextended"] is True
+
+
 def _calendar(start: date = date(2025, 1, 1), days: int = 45) -> tuple[date, ...]:
     return tuple(start + timedelta(days=index) for index in range(days))
 

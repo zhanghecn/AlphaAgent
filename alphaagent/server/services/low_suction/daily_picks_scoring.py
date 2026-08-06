@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 
-SCORE_VERSION = "low-suction-daily-score-v1"
+SCORE_VERSION = "low-suction-daily-score-v2"
 
 SCORE_BANDS: tuple[tuple[float, float, str], ...] = (
     (0.0, 39.999, "0-39"),
@@ -30,6 +30,11 @@ SCORE_BANDS: tuple[tuple[float, float, str], ...] = (
 # 与研究引擎 candle_quiet 同源：小 K 线 = 振幅 <= 5%
 QUIET_CANDLE_RANGE_MAX_PCT = 5.0
 
+# 超跌族换手率硬门禁（≥8% = 高换手派发，统计剧毒）。趋势族不用此门禁（妖股高换手常见）。
+OVERSOLD_TURNOVER_GATE_MAX_PCT = 8.0
+# 超跌族 gate 失败时综合分硬上限（强制定入 0-39 band）。
+OVERSOLD_GATE_FAILED_SCORE_CAP = 39.0
+
 
 @dataclass(frozen=True)
 class ScoreComponent:
@@ -41,6 +46,7 @@ class ScoreComponent:
     points: float
     max_points: float
     detail: str
+    kind: str = "bonus"  # "gate"（硬门禁，失败封顶）/ "bonus"（梯度加分）
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -50,6 +56,7 @@ class ScoreComponent:
             "points": self.points,
             "max_points": self.max_points,
             "detail": self.detail,
+            "kind": self.kind,
         }
 
 
@@ -120,64 +127,113 @@ def score_trend_candidate(
     features: Mapping[str, object],
     streak: QuietStreak,
 ) -> tuple[float, tuple[ScoreComponent, ...]]:
-    """趋势回踩候选综合分（0-100）。前置：v4 规则已硬过滤双否决。"""
+    """趋势回踩候选综合分（0-100）。前置：v4 规则已硬过滤双否决。
+
+    9 个 bonus 分量（无 gate —— 妖股高换手/高振幅常见，任何 gate 都误伤研究票）。
+    核心创新：振幅分量按「转势(MA60>MA30) vs 成熟」语境切换梯度 —— 转势票反弹初期
+    中等振幅(5-8%)是唯一正收益口袋(+0.018%)，成熟票则需极安静(<3%)。权重源自全量分桶。
+    """
 
     candle_range = _number(features.get("candle_range_pct"))
-    candle_quiet = bool(features.get("candle_quiet"))
+    ma60 = _number(features.get("ma60"))
+    ma30 = _number(features.get("ma30"))
+    in_transition = ma60 is not None and ma30 is not None and ma60 > ma30
+    bull_days = int(features.get("bull_alignment_days") or 0)
     ma5_touch = bool(features.get("ma5_low_touch"))
     ma10_touch = bool(features.get("ma10_low_touch"))
+    turnover = _number(features.get("turnover_rate_pct"))
     dist_excess = _number(features.get("trend_dist_excess_pct"))
     prior_return = _number(features.get("prior_daily_return_pct"))
     close_to_ma5 = _number(features.get("close_to_ma5_pct"))
     last_shrank = bool(features.get("last_volume_shrank"))
 
+    # 语境调节振幅分量（max 22）：[<3%, 3-5%, 5-8%, ≥8%]
+    amp_table_mature = (22.0, 14.0, 4.0, 0.0)
+    amp_table_transition = (14.0, 20.0, 22.0, 6.0)
+    if candle_range is None:
+        amp_pts, amp_bucket = 0.0, -1
+    elif candle_range < 3.0:
+        amp_pts, amp_bucket = (amp_table_transition[0] if in_transition else amp_table_mature[0]), 0
+    elif candle_range < 5.0:
+        amp_pts, amp_bucket = (amp_table_transition[1] if in_transition else amp_table_mature[1]), 1
+    elif candle_range < 8.0:
+        amp_pts, amp_bucket = (amp_table_transition[2] if in_transition else amp_table_mature[2]), 2
+    else:
+        amp_pts, amp_bucket = (amp_table_transition[3] if in_transition else amp_table_mature[3]), 3
+    ctx_label = "转势(MA60>MA30)" if in_transition else "成熟(MA60≤MA30)"
+
+    turnover_pts = (
+        12.0 if turnover is not None and turnover < 3.0
+        else (8.0 if turnover is not None and turnover < 5.0
+              else (4.0 if turnover is not None and turnover < 8.0 else 1.0))
+    )
+    age_pts = (
+        14.0 if 6 <= bull_days <= 10
+        else (10.0 if 3 <= bull_days <= 5
+              else (7.0 if 1 <= bull_days <= 2
+                    else (5.0 if 11 <= bull_days <= 20 else (4.0 if bull_days >= 21 else 0.0))))
+    )
+    dist_pts = (
+        5.0 if dist_excess is not None and dist_excess < 0
+        else (3.0 if dist_excess is not None and dist_excess < 1.0
+              else (1.0 if dist_excess is not None and dist_excess < 2.0 else 0.0))
+    )
+    streak_pts = (
+        14.0 if streak.total >= 5
+        else (11.0 if streak.total >= 4
+              else (8.0 if streak.total >= 3 else (5.0 if streak.total >= 2 else 0.0)))
+    )
+
     components = (
         _component(
-            "candle_quiet",
-            "安静小K线",
-            candle_quiet,
-            20.0 if candle_quiet else 0.0,
-            20.0,
-            f"振幅 {_fmt(candle_range)}%（≤5% 为小K线）",
+            "candle_quiet_context",
+            "振幅安静度(语境)",
+            amp_pts > 0,
+            amp_pts,
+            22.0,
+            f"{ctx_label} 振幅 {_fmt(candle_range)}%（{amp_pts:.0f}/22）",
+        ),
+        _component(
+            "trend_age",
+            "趋势年龄",
+            age_pts > 0,
+            age_pts,
+            14.0,
+            f"多头排列 {bull_days} 日（6-10 满14）",
         ),
         _component(
             "touch_line",
             "回踩均线",
             ma5_touch or ma10_touch,
-            15.0 if ma5_touch else (8.0 if ma10_touch else 0.0),
-            15.0,
-            (
-                "低点回踩 MA5"
-                if ma5_touch
-                else ("低点回踩 MA10" if ma10_touch else "未回踩 MA5/MA10")
-            ),
+            14.0 if ma5_touch else (9.0 if ma10_touch else 0.0),
+            14.0,
+            "低点回踩 MA5" if ma5_touch else ("低点回踩 MA10" if ma10_touch else "未回踩 MA5/MA10"),
         ),
         _component(
-            "dist_excess",
-            "趋势老嫩",
-            dist_excess is not None and dist_excess < 2.0,
-            (
-                20.0
-                if dist_excess is not None and dist_excess < 0
-                else (12.0 if dist_excess is not None and dist_excess < 1.0 else 6.0)
-            ),
-            20.0,
-            (
-                f"M5-M10 距离较本段回踩中位 {_fmt(dist_excess, signed=True)}pct"
-                if dist_excess is not None
-                else "本段无回踩参照"
-            ),
+            "turnover_gradient",
+            "换手率梯度",
+            turnover_pts > 0,
+            turnover_pts,
+            12.0,
+            f"换手 {_fmt(turnover)}%（<3% 满12）",
+        ),
+        _component(
+            "quiet_streak",
+            "连续小K线",
+            streak_pts > 0,
+            streak_pts,
+            14.0,
+            streak.label,
         ),
         _component(
             "prior_day_down",
             "昨日已跌",
             prior_return is not None and prior_return <= 0,
             (
-                10.0
-                if prior_return is not None and prior_return <= 0
-                else (5.0 if prior_return is not None and prior_return <= 1.0 else 0.0)
+                8.0 if prior_return is not None and prior_return <= 0
+                else (4.0 if prior_return is not None and prior_return <= 1.0 else 0.0)
             ),
-            10.0,
+            8.0,
             f"昨日涨跌 {_fmt(prior_return, signed=True)}%",
         ),
         _component(
@@ -185,31 +241,30 @@ def score_trend_candidate(
             "收盘位置",
             close_to_ma5 is not None and close_to_ma5 <= 0,
             (
-                10.0
-                if close_to_ma5 is not None and close_to_ma5 <= 0
-                else (5.0 if close_to_ma5 is not None and close_to_ma5 <= 1.0 else 0.0)
+                8.0 if close_to_ma5 is not None and close_to_ma5 <= 0
+                else (4.0 if close_to_ma5 is not None and close_to_ma5 <= 1.0 else 0.0)
             ),
-            10.0,
+            8.0,
             f"收盘距 MA5 {_fmt(close_to_ma5, signed=True)}%",
         ),
         _component(
-            "quiet_streak",
-            "连续小K线",
-            streak.total >= 2,
+            "dist_excess",
+            "趋势老嫩",
+            dist_pts > 0,
+            dist_pts,
+            5.0,
             (
-                20.0
-                if streak.total >= 4
-                else (12.0 if streak.total >= 3 else (6.0 if streak.total >= 2 else 0.0))
+                f"M5-M10 距离较本段回踩中位 {_fmt(dist_excess, signed=True)}pct"
+                if dist_excess is not None
+                else "本段无回踩参照"
             ),
-            20.0,
-            streak.label,
         ),
         _component(
             "volume_shrink",
             "缩量",
             last_shrank,
-            5.0 if last_shrank else 0.0,
-            5.0,
+            3.0 if last_shrank else 0.0,
+            3.0,
             "当日成交量低于前日" if last_shrank else "当日未缩量",
         ),
     )
@@ -219,14 +274,21 @@ def score_trend_candidate(
 def score_oversold_candidate(
     features: Mapping[str, object],
     streak: QuietStreak,
+    vol_ratio: float | None = None,
 ) -> tuple[float, tuple[ScoreComponent, ...]]:
-    """超跌反弹候选综合分（0-100）。前置：oversold_process_eligible。"""
+    """超跌反弹候选综合分（0-100）。前置：oversold_process_eligible。
 
-    low_support = bool(features.get("oversold_low_support"))
+    换手率≥8% 为硬门禁（gate，失败总分封顶 39）；其余 10 个 bonus 分量梯度加分。
+    权重源自全量分桶：高换手=派发；量能趋势单调（骤缩+0.065%→骤放-0.301%）。
+    vol_ratio = 近5日均量/近10日均量，由 scanner 从 history 算好传入。
+    """
+
     turnover = _number(features.get("turnover_rate_pct"))
+    candle_range = _number(features.get("candle_range_pct"))
+    close_off_low = _number(features.get("close_off_low_pct"))
+    low_support = bool(features.get("oversold_low_support"))
     tight = bool(features.get("capitulation_rebound_tight"))
     broad = bool(features.get("capitulation_rebound_broad"))
-    close_off_low = _number(features.get("close_off_low_pct"))
     process = any(
         bool(features.get(field))
         for field in (
@@ -238,41 +300,91 @@ def score_oversold_candidate(
     )
     reaction = bool(features.get("support_close_reaction"))
     shrink = str(features.get("volume_shape") or "") == "staircase_shrink"
-    candle_quiet = bool(features.get("candle_quiet"))
-    candle_range = _number(features.get("candle_range_pct"))
-    long_bear = bool(features.get("long_bear_alignment"))
+    long_bear_days = int(features.get("prior_bear_alignment_days") or 0)
+
+    gate_passed = turnover is not None and turnover < OVERSOLD_TURNOVER_GATE_MAX_PCT
+    turnover_pts = (
+        14.0 if turnover is not None and turnover < 3.0
+        else (10.0 if turnover is not None and turnover < 5.0
+              else (4.0 if turnover is not None and turnover < 8.0 else 0.0))
+    )
+    amp_pts = (
+        12.0 if candle_range is not None and candle_range < 3.0
+        else (8.0 if candle_range is not None and candle_range < 5.0
+              else (2.0 if candle_range is not None and candle_range < 8.0 else 0.0))
+    )
+    long_bear_pts = (
+        10.0 if long_bear_days >= 20
+        else (8.0 if long_bear_days >= 10
+              else (4.0 if long_bear_days >= 5 else 0.0))
+    )
+    vol_trend_pts = (
+        10.0 if vol_ratio is not None and vol_ratio < 0.8
+        else (8.0 if vol_ratio is not None and vol_ratio < 1.0
+              else (4.0 if vol_ratio is not None and vol_ratio < 1.1
+                    else (2.0 if vol_ratio is not None and vol_ratio < 1.3 else 0.0)))
+    )
 
     components = (
+        _component(
+            "turnover_gate",
+            "换手率门禁",
+            gate_passed,
+            0.0,
+            0.0,
+            (
+                f"换手 {_fmt(turnover)}%（≥{OVERSOLD_TURNOVER_GATE_MAX_PCT:g}% 门禁失败，封顶{OVERSOLD_GATE_FAILED_SCORE_CAP:g}）"
+                if not gate_passed
+                else f"换手 {_fmt(turnover)}%（<{OVERSOLD_TURNOVER_GATE_MAX_PCT:g}% 通过）"
+            ),
+            kind="gate",
+        ),
+        _component(
+            "turnover_gradient",
+            "换手率梯度",
+            turnover_pts > 0,
+            turnover_pts,
+            14.0,
+            f"换手 {_fmt(turnover)}%（<3% 满14）",
+        ),
+        _component(
+            "candle_quiet",
+            "振幅安静度",
+            amp_pts > 0,
+            amp_pts,
+            12.0,
+            f"振幅 {_fmt(candle_range)}%（<3% 满12）",
+        ),
         _component(
             "low_support",
             "低点获均线支撑",
             low_support,
-            20.0 if low_support else 0.0,
-            20.0,
+            16.0 if low_support else 0.0,
+            16.0,
             "D 日低点在 MA10/20/30 获实际支撑" if low_support else "低点未获均线支撑",
         ),
         _component(
-            "turnover",
-            "换手率门禁",
-            turnover is not None and turnover < 8.0,
-            (
-                20.0
-                if turnover is not None and turnover < 3.0
-                else (
-                    12.0
-                    if turnover is not None and turnover < 5.0
-                    else (6.0 if turnover is not None and turnover < 8.0 else 0.0)
-                )
-            ),
-            20.0,
-            f"换手率 {_fmt(turnover)}%（<3% 最优 / <8% 门禁）",
+            "long_bear_duration",
+            "空头持续时长",
+            long_bear_pts > 0,
+            long_bear_pts,
+            10.0,
+            f"前期空头排列 {long_bear_days} 日（≥20 满10）",
+        ),
+        _component(
+            "process_structure",
+            "上穿过程结构",
+            process,
+            12.0 if process else 0.0,
+            12.0,
+            "MA10 分阶段上穿/联合上攻结构成立" if process else "分阶段上穿结构不成立",
         ),
         _component(
             "capitulation",
             "崩盘脱离低点",
             tight or broad,
-            15.0 if tight else (8.0 if broad else 0.0),
-            15.0,
+            10.0 if tight else (6.0 if broad else 0.0),
+            10.0,
             (
                 f"收盘脱离低点 {_fmt(close_off_low)}%（0.3~1.5% 为紧凑反弹）"
                 if close_off_low is not None
@@ -280,47 +392,43 @@ def score_oversold_candidate(
             ),
         ),
         _component(
-            "process_structure",
-            "上穿过程结构",
-            process,
-            15.0 if process else 0.0,
-            15.0,
-            "MA10 分阶段上穿/联合上攻结构成立" if process else "分阶段上穿结构不成立",
-        ),
-        _component(
             "close_reaction",
             "收盘支撑反应",
             reaction,
-            10.0 if reaction else 0.0,
-            10.0,
+            8.0 if reaction else 0.0,
+            8.0,
             "收盘守住支撑有反应" if reaction else "收盘无支撑反应",
         ),
         _component(
             "volume_shape",
             "量能形态",
             shrink,
-            10.0 if shrink else 0.0,
-            10.0,
-            "梯形缩量" if shrink else "非梯形缩量",
-        ),
-        _component(
-            "candle_quiet",
-            "安静小K线",
-            candle_quiet,
-            5.0 if candle_quiet else 0.0,
+            5.0 if shrink else 0.0,
             5.0,
-            f"振幅 {_fmt(candle_range)}%",
+            "梯形缩量" if shrink else "非梯形缩量",
         ),
         _component(
             "quiet_streak",
             "连续小K线",
             streak.total >= 2,
-            5.0 if streak.total >= 2 else 0.0,
-            5.0,
+            3.0 if streak.total >= 2 else 0.0,
+            3.0,
             streak.label,
         ),
+        _component(
+            "vol_trend",
+            "量能趋势",
+            vol_trend_pts > 0,
+            vol_trend_pts,
+            10.0,
+            (
+                f"5/10日均量比 {_fmt(vol_ratio)}（<0.8 骤缩满10）"
+                if vol_ratio is not None
+                else "量能趋势数据不足"
+            ),
+        ),
     )
-    return _total(components), components
+    return _total(components, gate_failed_cap=OVERSOLD_GATE_FAILED_SCORE_CAP), components
 
 
 def _component(
@@ -330,6 +438,8 @@ def _component(
     points: float,
     max_points: float,
     detail: str,
+    *,
+    kind: str = "bonus",
 ) -> ScoreComponent:
     return ScoreComponent(
         key=key,
@@ -338,11 +448,21 @@ def _component(
         points=round(points, 2),
         max_points=max_points,
         detail=detail,
+        kind=kind,
     )
 
 
-def _total(components: Sequence[ScoreComponent]) -> float:
-    return round(min(100.0, sum(item.points for item in components)), 2)
+def _total(
+    components: Sequence[ScoreComponent],
+    *,
+    gate_failed_cap: float | None = None,
+) -> float:
+    raw = sum(item.points for item in components)
+    if gate_failed_cap is not None and any(
+        item.kind == "gate" and not item.passed for item in components
+    ):
+        raw = min(raw, gate_failed_cap)
+    return round(min(100.0, raw), 2)
 
 
 def _number(value: object) -> float | None:

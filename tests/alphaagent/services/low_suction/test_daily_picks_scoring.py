@@ -57,35 +57,87 @@ def test_score_band_edges() -> None:
 def test_trend_score_full_marks() -> None:
     features = {
         "candle_range_pct": 2.1,
-        "candle_quiet": True,
+        "ma60": 9.0,
+        "ma30": 10.0,
+        "bull_alignment_days": 7,
         "ma5_low_touch": True,
         "ma10_low_touch": False,
+        "turnover_rate_pct": 2.0,
         "trend_dist_excess_pct": -1.5,
         "prior_daily_return_pct": -2.0,
         "close_to_ma5_pct": -0.8,
         "last_volume_shrank": True,
     }
-    streak = quiet_candle_streak([_bar(2.0)] * 5)
+    streak = quiet_candle_streak([_bar(2.0)] * 6)
     score, components = score_trend_candidate(features, streak)
     assert score == 100.0
-    assert all(c.passed for c in components)
+    assert sum(c.max_points for c in components) == 100.0
+    assert not any(c.kind == "gate" for c in components)
 
 
-def test_trend_score_noisy_candle_loses_base_points() -> None:
+def test_trend_context_switches_amplitude_gradient() -> None:
+    """语境调节（核心创新）：同振幅 6.5%（5-8 桶），转势 22 / 成熟 4。"""
+    base = {
+        "candle_range_pct": 6.5,
+        "bull_alignment_days": 7,
+        "ma5_low_touch": True,
+        "turnover_rate_pct": 2.0,
+        "trend_dist_excess_pct": -1.0,
+        "prior_daily_return_pct": -1.0,
+        "close_to_ma5_pct": -0.5,
+        "last_volume_shrank": True,
+    }
+    streak = quiet_candle_streak([_bar(2.0)] * 5)
+    _, comps_trans = score_trend_candidate(dict(base, ma60=11.0, ma30=10.0), streak)
+    _, comps_mature = score_trend_candidate(dict(base, ma60=9.0, ma30=10.0), streak)
+    ctx_trans = next(c for c in comps_trans if c.key == "candle_quiet_context")
+    ctx_mature = next(c for c in comps_mature if c.key == "candle_quiet_context")
+    assert ctx_trans.points == 22.0
+    assert ctx_mature.points == 4.0
+    assert "转势" in ctx_trans.detail
+    assert "成熟" in ctx_mature.detail
+
+
+def test_trend_age_gradient() -> None:
+    """趋势年龄分量：6-10 天最佳（满14），≥21 天衰减（4）。"""
+    base = {
+        "candle_range_pct": 2.0,
+        "ma60": 9.0,
+        "ma30": 10.0,
+        "ma5_low_touch": True,
+        "turnover_rate_pct": 2.0,
+        "trend_dist_excess_pct": -1.0,
+        "prior_daily_return_pct": -1.0,
+        "close_to_ma5_pct": -0.5,
+        "last_volume_shrank": True,
+    }
+    streak = quiet_candle_streak([_bar(2.0)] * 5)
+    _, comps_best = score_trend_candidate(dict(base, bull_alignment_days=7), streak)
+    _, comps_old = score_trend_candidate(dict(base, bull_alignment_days=25), streak)
+    age_best = next(c for c in comps_best if c.key == "trend_age")
+    age_old = next(c for c in comps_old if c.key == "trend_age")
+    assert age_best.points == 14.0
+    assert age_old.points == 4.0
+
+
+def test_trend_no_gate_protects_high_turnover_cases() -> None:
+    """趋势族无 gate：华建级（换手 9.20/振幅 7.04/转势）不被门禁，仍能拿分。"""
     features = {
-        "candle_range_pct": 7.5,
-        "candle_quiet": False,
-        "ma5_low_touch": False,
-        "ma10_low_touch": True,
-        "trend_dist_excess_pct": 1.5,
-        "prior_daily_return_pct": 3.0,
-        "close_to_ma5_pct": 2.0,
+        "candle_range_pct": 7.04,
+        "ma60": 11.0,
+        "ma30": 10.0,
+        "bull_alignment_days": 8,
+        "ma5_low_touch": True,
+        "turnover_rate_pct": 9.20,
+        "trend_dist_excess_pct": 0.5,
+        "prior_daily_return_pct": -1.0,
+        "close_to_ma5_pct": -0.3,
         "last_volume_shrank": False,
     }
-    streak = quiet_candle_streak([_bar(7.0)])
-    score, _ = score_trend_candidate(features, streak)
-    # 只拿 ma10 回踩 8 + 距离梯度 6 = 14 分
-    assert score == 14.0
+    streak = quiet_candle_streak([_bar(2.0)] * 5)
+    score, components = score_trend_candidate(features, streak)
+    assert not any(c.kind == "gate" for c in components)
+    assert score > 0
 
 
 def test_oversold_score_full_marks() -> None:
@@ -93,35 +145,130 @@ def test_oversold_score_full_marks() -> None:
         "oversold_low_support": True,
         "turnover_rate_pct": 1.8,
         "capitulation_rebound_tight": True,
-        "capitulation_rebound_broad": True,
+        "capitulation_rebound_broad": False,
         "close_off_low_pct": 0.9,
         "staged_m10_first": True,
         "support_close_reaction": True,
         "volume_shape": "staircase_shrink",
         "candle_quiet": True,
         "candle_range_pct": 1.2,
-        "long_bear_alignment": True,
+        "prior_bear_alignment_days": 25,
     }
     streak = quiet_candle_streak([_bar(2.0)] * 3)
-    score, components = score_oversold_candidate(features, streak)
+    score, components = score_oversold_candidate(features, streak, vol_ratio=0.7)
     assert score == 100.0
-    assert all(c.passed for c in components)
+    # 10 bonus max 之和 = 100，且恰 1 个 gate
+    assert sum(c.max_points for c in components if c.kind == "bonus") == 100.0
+    assert sum(1 for c in components if c.kind == "gate") == 1
 
 
-def test_oversold_score_high_turnover_penalized() -> None:
+def test_oversold_gate_caps_at_39_when_bonus_high() -> None:
+    """换手 ≥8% gate 失败，即便其他维度全优，总分硬封顶 39。"""
     features = {
         "oversold_low_support": True,
         "turnover_rate_pct": 12.0,
-        "capitulation_rebound_tight": False,
+        "capitulation_rebound_tight": True,
         "capitulation_rebound_broad": False,
-        "close_off_low_pct": -0.5,
-        "support_close_reaction": False,
-        "volume_shape": "staircase_expand",
-        "candle_quiet": False,
-        "candle_range_pct": 6.5,
-        "long_bear_alignment": False,
+        "close_off_low_pct": 0.9,
+        "staged_m10_first": True,
+        "support_close_reaction": True,
+        "volume_shape": "staircase_shrink",
+        "candle_quiet": True,
+        "candle_range_pct": 1.2,
+        "prior_bear_alignment_days": 25,
     }
-    streak = quiet_candle_streak([_bar(6.0)])
-    score, _ = score_oversold_candidate(features, streak)
-    # 只有低点支撑 20 分
-    assert score == 20.0
+    streak = quiet_candle_streak([_bar(2.0)] * 3)
+    score, components = score_oversold_candidate(features, streak)
+    gate = next(c for c in components if c.kind == "gate")
+    assert gate.passed is False
+    assert score <= 39.0
+
+
+def test_oversold_gate_passes_case_level_turnover() -> None:
+    """案例级换手 5.15%（15 研究票超跌最高）gate 通过，不 cap。"""
+    features = {
+        "oversold_low_support": True,
+        "turnover_rate_pct": 5.15,
+        "capitulation_rebound_tight": True,
+        "staged_m10_first": True,
+        "support_close_reaction": True,
+        "volume_shape": "staircase_shrink",
+        "candle_quiet": True,
+        "candle_range_pct": 2.0,
+        "prior_bear_alignment_days": 20,
+    }
+    streak = quiet_candle_streak([_bar(2.0)] * 3)
+    score, components = score_oversold_candidate(features, streak)
+    gate = next(c for c in components if c.kind == "gate")
+    assert gate.passed is True
+    assert score > 39.0
+
+
+def test_oversold_long_bear_duration_gradient() -> None:
+    """空头持续时长分量（修 long_bear 读入未用 bug）。"""
+    base = {
+        "oversold_low_support": True,
+        "turnover_rate_pct": 2.0,
+        "staged_m10_first": True,
+        "support_close_reaction": True,
+        "volume_shape": "staircase_shrink",
+        "candle_quiet": True,
+        "candle_range_pct": 2.0,
+    }
+    streak = quiet_candle_streak([_bar(2.0)] * 3)
+    _, comps_long = score_oversold_candidate(dict(base, prior_bear_alignment_days=25), streak)
+    _, comps_short = score_oversold_candidate(dict(base, prior_bear_alignment_days=3), streak)
+    dur_long = next(c for c in comps_long if c.key == "long_bear_duration")
+    dur_short = next(c for c in comps_short if c.key == "long_bear_duration")
+    assert dur_long.points == 10.0
+    assert dur_short.points == 0.0
+
+
+def test_oversold_volume_trend_gradient() -> None:
+    """量能趋势分量（近5日均量/10日均量）：骤缩满10，骤放0。"""
+    base = {
+        "oversold_low_support": True,
+        "turnover_rate_pct": 2.0,
+        "staged_m10_first": True,
+        "support_close_reaction": True,
+        "volume_shape": "staircase_shrink",
+        "candle_quiet": True,
+        "candle_range_pct": 2.0,
+        "prior_bear_alignment_days": 20,
+    }
+    streak = quiet_candle_streak([_bar(2.0)] * 3)
+    _, comps_shrink = score_oversold_candidate(base, streak, vol_ratio=0.7)
+    _, comps_expand = score_oversold_candidate(base, streak, vol_ratio=1.5)
+    vt_shrink = next(c for c in comps_shrink if c.key == "vol_trend")
+    vt_expand = next(c for c in comps_expand if c.key == "vol_trend")
+    assert vt_shrink.points == 10.0
+    assert vt_expand.points == 0.0
+
+
+def test_score_component_kind_defaults_to_bonus() -> None:
+    from alphaagent.server.services.low_suction.daily_picks_scoring import ScoreComponent
+
+    component = ScoreComponent("k", "label", True, 5.0, 10.0, "detail")
+    assert component.kind == "bonus"
+
+
+def test_total_caps_at_gate_failed_cap_when_gate_fails() -> None:
+    from alphaagent.server.services.low_suction.daily_picks_scoring import ScoreComponent, _total
+
+    gate_pass = (
+        ScoreComponent("g", "gate", True, 10.0, 10.0, "ok", kind="gate"),
+        ScoreComponent("b", "bonus", True, 80.0, 80.0, "ok"),
+    )
+    gate_fail = (
+        ScoreComponent("g", "gate", False, 0.0, 10.0, "fail", kind="gate"),
+        ScoreComponent("b", "bonus", True, 80.0, 80.0, "ok"),
+    )
+    assert _total(gate_pass, gate_failed_cap=39.0) == 90.0   # gate 通过不 cap
+    assert _total(gate_fail, gate_failed_cap=39.0) == 39.0   # gate 失败 cap 39
+    assert _total(gate_fail) == 80.0                          # 无 cap 参数不 cap
+
+
+def test_score_version_bumped_to_v2() -> None:
+    from alphaagent.server.services.low_suction import daily_picks_scoring as module
+
+    assert module.SCORE_VERSION == "low-suction-daily-score-v2"

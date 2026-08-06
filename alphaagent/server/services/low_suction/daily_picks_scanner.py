@@ -168,7 +168,15 @@ def scan_low_suction_candidates(
                 )
             )
         if oversold_rules:
-            score, components = score_oversold_candidate(features, streak)
+            history_vols = [_number(h.get("volume")) for h in snapshot.history[: snapshot.position + 1]]
+            history_vols = [v for v in history_vols if v is not None]
+            if len(history_vols) >= 10:
+                vol_ratio = sum(history_vols[-5:]) / 5 / (sum(history_vols[-10:]) / 10)
+            else:
+                vol_ratio = None
+            score, components = score_oversold_candidate(features, streak, vol_ratio=vol_ratio)
+            if any(component.kind == "gate" and not component.passed for component in components):
+                continue  # 超跌族换手门禁失败（≥8% 派发），不进候选清单
             candidates.append(
                 LowSuctionCandidate(
                     vt_symbol=snapshot.symbol,
