@@ -149,6 +149,49 @@ def test_scan_admits_three_line_trend_candidate_without_ma60() -> None:
     assert trend[0].rule_key == "v4_trend_quiet_pullback"
 
 
+def _bull_aligned_with_oversold_rules_history() -> list[dict[str, object]]:
+    """多头排列已成立但仍落在超跌过程窗口内的边界形态。
+
+    取自石化油服 600871 @2026-08-04 的真实日线收盘价：MA10>MA20>MA30 三线多头已 6 天，
+    但 MA10 上穿 MA30 发生在 15 日窗口内 → 同时匹配 v3 超跌落地规则。
+    用于复现"多头票混进超跌族"假阳性：互斥门禁前 scan 同时产 oversold + trend 候选。
+    """
+    start = date(2025, 1, 1)
+    closes = [
+        2.83, 2.82, 2.90, 2.81, 2.71, 2.70, 2.65, 2.69, 2.71, 2.67, 2.72, 2.65, 2.68, 2.67,
+        2.70, 2.72, 2.63, 2.58, 2.66, 2.64, 2.59, 2.61, 2.53, 2.54, 2.62, 2.60, 2.58, 2.40,
+        2.44, 2.43, 2.41, 2.33, 2.36, 2.32, 2.38, 2.36, 2.40, 2.32, 2.31, 2.31, 2.24, 2.20,
+        2.22, 2.24, 2.25, 2.19, 2.17, 2.14, 2.16, 2.14, 2.10, 2.07, 2.03, 2.05, 2.03, 2.08,
+        2.07, 2.08, 2.07, 2.01, 2.06, 2.06, 2.10, 2.05, 2.17, 2.08, 2.05, 2.04, 2.17, 2.13,
+        2.25, 2.29, 2.17, 2.17, 2.16, 2.20, 2.22, 2.23, 2.26, 2.24,
+    ]
+    return [
+        _bar(start + timedelta(days=index), close, volume=1_000 + index)
+        for index, close in enumerate(closes)
+    ]
+
+
+def test_scan_rejects_bull_aligned_from_oversold() -> None:
+    """超跌/趋势互斥：多头排列(MA10>MA20>MA30)成立的票不再纳入超跌族。
+
+    超跌反弹语义 = 空头→多头过渡期；多头一旦成立就归趋势族。这防止石化油服类
+    "多头走出来仍落在 ma10_crossed_ma30_within_15d 窗口内"的票混进超跌族拿满分。
+    """
+    bars = [
+        {**row, "vt_symbol": "600871.SSE", "turnover_rate": 2.0}
+        for row in _bull_aligned_with_oversold_rules_history()
+    ]
+    calendar = [row["trade_date"] for row in bars]
+    candidates = scan_low_suction_candidates(bars, calendar, [], target_dates={calendar[-1]})
+
+    oversold = [candidate for candidate in candidates if candidate.setup_type == "oversold_rebound"]
+    trend = [candidate for candidate in candidates if candidate.setup_type == "trend_pullback"]
+    # 互斥门禁：多头票不进超跌族
+    assert oversold == []
+    # 但仍正常作为趋势回踩候选
+    assert len(trend) >= 1
+
+
 def _m60_rising_overextended_history() -> list[dict[str, object]]:
     """MA60 跟随向上 + 三线多头 + 末段过伸：长期下跌后强反弹，MA60 已拐头向上，
     反弹稳定段有历史 low 回踩 MA5（建立本段 pullback 基准），末几天连续大涨把 MA5 拉离 MA10，

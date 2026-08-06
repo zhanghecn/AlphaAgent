@@ -58,6 +58,7 @@ export function LowSuctionGuideView() {
           <div className="mb-1 font-semibold">前置结构（硬门槛）</div>
           <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
             <li>长期空头排列后，MA10 处于分阶段上穿过程：MA10 先上穿 MA20 / 双上穿 / MA5-MA10 联合上攻 / MA10 已上穿 MA30（15 日内）之一成立</li>
+            <li><span className="text-foreground">超跌/趋势互斥</span>：MA10&gt;MA20&gt;MA30 三线多头排列一旦成立，就不再纳入超跌族（多头已成 = 趋势族，超跌仅指空头→多头过渡期）—— 防止已走成多头的票混进超跌族拿满分</li>
           </ul>
         </div>
         <div>
@@ -91,7 +92,7 @@ export function LowSuctionGuideView() {
       <div className="space-y-2 px-3 py-4 text-muted-foreground sm:px-4">
         <ul className="ml-4 list-disc space-y-0.5">
           <li>数据口径：raw_unadjusted 不复权日线（探索级，除权日有已知污染）；D+1 收盘到收盘收益，未扣费</li>
-          <li>回测结论（751 交易日）：每日综合分最高的趋势 1 只 + 超跌 1 只两仓模拟，三年复利 +24.7%、日胜率 49.3%、日均 +0.040%、最大回撤 -32.1%（趋势单仓 +10.0% / 超跌单仓 +27.3%）</li>
+          <li>回测结论（752 交易日）：每日综合分最高的趋势 1 只 + 超跌 1 只两仓模拟，三年复利 +46.9%、日胜率 50.3%、最大回撤 -23.5%（趋势单仓 +9.9% / 超跌单仓 +78.2%）</li>
           <li>分数段：超跌 60-79 / 80-89 / 90-100 三段 validation+holdout 双段为正（推荐区间）；趋势族各段 holdout 为负、暂不推荐，超额难靠日线因子稳定捕获</li>
           <li>并列决胜：超跌顶分并列率超九成 —— 并列时按连续小 K 线数更多、换手率更低决胜（均为全量验证的单调方向），回测与实时推荐同一决胜键</li>
           <li>行情主导一切：两族人口均值仅接近打平，本产品按综合分排序取最高，不做全池买入</li>

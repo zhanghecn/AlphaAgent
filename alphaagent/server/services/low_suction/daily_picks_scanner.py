@@ -168,6 +168,8 @@ def scan_low_suction_candidates(
                 )
             )
         if oversold_rules:
+            if features.get("trend_bull_alignment"):
+                continue  # 多头排列(MA10>MA20>MA30)成立 = 已是趋势族，不再作超跌反弹（超跌是空头→多头过渡期）
             history_vols = [_number(h.get("volume")) for h in snapshot.history[: snapshot.position + 1]]
             history_vols = [v for v in history_vols if v is not None]
             if len(history_vols) >= 10:
