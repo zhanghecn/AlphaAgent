@@ -26,6 +26,7 @@ from alphaagent.server.services.low_suction.daily_factor_extended_discovery impo
 )
 from alphaagent.server.services.low_suction.cli import build_parser
 from alphaagent.server.services.low_suction.daily_factor_research import DailyFactorInputError
+from alphaagent.server.services.low_suction.daily_picks_scanner import scan_low_suction_candidates
 
 
 def _bar(
@@ -107,6 +108,45 @@ def _oversold_to_trend_history_without_regular_ma5() -> list[dict[str, object]]:
     ]
     bars[-1]["open_price"] = closes[-1] / 1.003
     return bars
+
+
+def _three_line_bull_with_ma60_above_history() -> list[dict[str, object]]:
+    """长期下跌刚转势：MA10>MA20>MA30 三线多头已形成，但 MA60 仍压在 MA30 上方。
+
+    旧四线口径（MA10>MA20>MA30>MA60）会判 trend_bull_alignment=False；去 M60 后应放宽通过。
+    """
+    start = date(2025, 1, 1)
+    closes = [22.0 - index * 0.18 for index in range(45)]
+    base = closes[-1]
+    closes += [base + index * 0.13 for index in range(30)]
+    closes[-1] = closes[-2] * 0.996  # 末根小阴回踩
+    return [
+        _bar(start + timedelta(days=index), close, volume=1_000 + index)
+        for index, close in enumerate(closes)
+    ]
+
+
+def test_trend_bull_alignment_admits_three_line_bull_without_ma60() -> None:
+    features = build_extended_daily_features(_three_line_bull_with_ma60_above_history())
+
+    # 三线多头已形成，但 MA60 仍在 MA30 上方（旧四线口径会因此被挡）
+    assert features["ma10"] > features["ma20"] > features["ma30"]
+    assert features["ma60"] > features["ma30"]
+    assert features["trend_bull_alignment"] is True
+    assert features["trend_all_slopes_up"] is True
+
+
+def test_scan_admits_three_line_trend_candidate_without_ma60() -> None:
+    bars = [
+        {**row, "vt_symbol": "600001.SSE", "turnover_rate": 2.0}
+        for row in _three_line_bull_with_ma60_above_history()
+    ]
+    calendar = [row["trade_date"] for row in bars]
+    candidates = scan_low_suction_candidates(bars, calendar, [], target_dates={calendar[-1]})
+
+    trend = [candidate for candidate in candidates if candidate.setup_type == "trend_pullback"]
+    assert len(trend) == 1
+    assert trend[0].rule_key == "v4_trend_quiet_pullback"
 
 
 def _calendar(start: date = date(2025, 1, 1), days: int = 45) -> tuple[date, ...]:

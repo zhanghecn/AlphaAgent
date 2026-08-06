@@ -97,7 +97,6 @@ def build_daily_features(
             ma_series[10][position],
             ma_series[20][position],
             ma_series[30][position],
-            ma_series[60][position],
         )
         for position in range(len(bars))
     ]
@@ -140,7 +139,6 @@ def build_daily_features(
         ma10=ma10,
         ma20=ma20,
         ma30=ma30,
-        ma60=ma60,
         ma_series=ma_series,
         index=index,
         daily_return_pct=daily_return_pct,
@@ -258,10 +256,10 @@ def explain_setup_eligibility(
         daily_return = _optional_finite_number(features.get("daily_return_pct"))
         slope_values = tuple(
             _optional_finite_number(features.get(f"ma{window}_slope_5d_pct"))
-            for window in (10, 20, 30, 60)
+            for window in (10, 20, 30)
         )
         return {
-            "ma10_ma20_ma30_ma60_bull": bool(features.get("trend_alignment")),
+            "ma10_ma20_ma30_bull": bool(features.get("trend_alignment")),
             "all_ma_slopes_up": bool(
                 all(value is not None and value > 0 for value in slope_values)
             ),
@@ -901,7 +899,6 @@ def _candidate_positions(history: Sequence[Mapping[str, object]]) -> tuple[int, 
                 ma10=ma10,
                 ma20=ma20,
                 ma30=ma30,
-                ma60=ma60,
                 ma_series=ma_series,
                 index=index,
                 daily_return_pct=daily_return,
@@ -1443,14 +1440,12 @@ def _is_bull_aligned(
     ma10: float | None,
     ma20: float | None,
     ma30: float | None,
-    ma60: float | None,
 ) -> bool:
     return (
         ma10 is not None
         and ma20 is not None
         and ma30 is not None
-        and ma60 is not None
-        and ma10 > ma20 > ma30 > ma60
+        and ma10 > ma20 > ma30
     )
 
 
@@ -1588,15 +1583,14 @@ def _trend_features(
     ma10: float | None,
     ma20: float | None,
     ma30: float | None,
-    ma60: float | None,
     ma_series: Mapping[int, Sequence[float | None]],
     index: int,
     daily_return_pct: float,
 ) -> dict[str, object]:
-    bull_aligned = _is_bull_aligned(ma10, ma20, ma30, ma60)
-    slopes = tuple(_ma_slope_pct(ma_series[window], index) for window in (10, 20, 30, 60))
+    bull_aligned = _is_bull_aligned(ma10, ma20, ma30)
+    slopes = tuple(_ma_slope_pct(ma_series[window], index) for window in (10, 20, 30))
     slope_values = tuple(slope for slope in slopes if slope is not None)
-    all_slopes_up = len(slope_values) == 4 and all(slope > 0 for slope in slope_values)
+    all_slopes_up = len(slope_values) == 3 and all(slope > 0 for slope in slope_values)
     reference_name: str | None = None
     reference: float | None = None
     if bull_aligned and ma10 is not None:
@@ -1649,7 +1643,7 @@ def _ma_slope_pct(series: Sequence[float | None], index: int) -> float | None:
 
 
 def _slope_score(slopes: Sequence[float]) -> float:
-    if len(slopes) != 4 or any(slope <= 0 for slope in slopes):
+    if len(slopes) != 3 or any(slope <= 0 for slope in slopes):
         return 0.0
     return _clamp(fmean(slopes) / 2.0)
 

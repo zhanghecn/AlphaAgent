@@ -858,19 +858,18 @@ def build_extended_daily_features(
     prior_spread = _number_or_none(base.get("ma_cluster_spread_5d_pct"))
     slopes = tuple(
         _number_or_none(base.get(f"ma{window}_slope_5d_pct"))
-        for window in (10, 20, 30, 60)
+        for window in (10, 20, 30)
     )
-    ma10_slope_5d, ma20_slope_5d, _, _ = slopes
+    ma10_slope_5d, ma20_slope_5d, _ = slopes
     slope_values = tuple(value for value in slopes if value is not None)
     trend_bull_alignment = bool(
         ma10 is not None
         and ma20 is not None
         and ma30 is not None
-        and ma60 is not None
-        and ma10 > ma20 > ma30 > ma60
+        and ma10 > ma20 > ma30
     )
-    trend_all_slopes_up = len(slope_values) == 4 and all(value > 0 for value in slope_values)
-    trend_slope_mean = fmean(slope_values) if len(slope_values) == 4 else None
+    trend_all_slopes_up = len(slope_values) == 3 and all(value > 0 for value in slope_values)
+    trend_slope_mean = fmean(slope_values) if len(slope_values) == 3 else None
     close_to_ma5 = _number_or_none(base.get("close_to_ma5_pct"))
     close_to_ma10 = _number_or_none(base.get("close_to_ma10_pct"))
     ma5_low_touch = _support_low_touch(
@@ -3008,7 +3007,7 @@ def _broad_candidate_positions(
     lows = [_required_positive_number(row.get("low_price"), "low_price") for row in history]
     ma_series = {
         window: _moving_average_series(closes, window)
-        for window in (5, 10, 20, 30, 60)
+        for window in (5, 10, 20, 30)
     }
     bear = [
         _is_bear_alignment(
@@ -3028,7 +3027,6 @@ def _broad_candidate_positions(
         ma10 = ma_series[10][index]
         ma20 = ma_series[20][index]
         ma30 = ma_series[30][index]
-        ma60 = ma_series[60][index]
         daily_return = _pct_change(close_price, opens[index])
         prior_bear_days = _prior_bear_duration(bear, index)
         transition_ma20_ma30_distance = _signed_ma_distance_pct(
@@ -3165,17 +3163,16 @@ def _broad_candidate_positions(
             and ma10 is not None
             and ma20 is not None
             and ma30 is not None
-            and ma60 is not None
-            and ma10 > ma20 > ma30 > ma60
+            and ma10 > ma20 > ma30
             and index >= 5
         ):
             slopes = tuple(
                 _pct_change(ma_series[window][index], ma_series[window][index - 5])
-                for window in (10, 20, 30, 60)
+                for window in (10, 20, 30)
                 if ma_series[window][index] is not None
                 and ma_series[window][index - 5] is not None
             )
-            if len(slopes) == 4 and all(value > 0 for value in slopes):
+            if len(slopes) == 3 and all(value > 0 for value in slopes):
                 ma5_distance = _pct_change(lows[index], ma5)
                 ma10_distance = _pct_change(lows[index], ma10)
                 midpoint_price = (highs[index] + lows[index]) / 2

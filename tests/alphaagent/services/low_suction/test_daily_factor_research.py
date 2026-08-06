@@ -63,12 +63,12 @@ def _oversold_reclaim() -> list[dict[str, object]]:
     ]
 
 
-def test_trend_candidate_requires_ma10_ma20_ma30_ma60_order() -> None:
+def test_trend_candidate_requires_ma10_ma20_ma30_order() -> None:
     features = build_daily_features(_uptrend_then_ma5_touch())
 
     assert features["trend_pullback_eligible"] is True
     assert features["trend_reference_line"] == "ma5"
-    assert features["ma10"] > features["ma20"] > features["ma30"] > features["ma60"]
+    assert features["ma10"] > features["ma20"] > features["ma30"]
     assert classify_daily_setup(features) == "trend_pullback"
 
 
@@ -84,6 +84,30 @@ def test_trend_candidate_fails_when_the_long_ma_order_is_broken() -> None:
 
     assert features["trend_pullback_eligible"] is False
     assert features["trend_reference_line"] is None
+
+
+def _three_line_bull_with_ma60_still_above() -> list[dict[str, object]]:
+    """长期下跌刚转势：MA10>MA20>MA30 三线多头已形成，但 MA60 仍压在 MA30 上方。
+
+    旧口径（要求 MA10>MA20>MA30>MA60）会把它挡在门外；去掉 M60 后应入选趋势低吸。
+    """
+    closes = [22.0 - index * 0.18 for index in range(45)]
+    base = closes[-1]
+    closes += [base + index * 0.13 for index in range(30)]
+    closes[-1] = closes[-2] * 0.996  # 末根小阴回踩 MA5
+    return [_bar(index, close) for index, close in enumerate(closes)]
+
+
+def test_trend_candidate_admits_three_line_bull_without_ma60() -> None:
+    features = build_daily_features(_three_line_bull_with_ma60_still_above())
+
+    # 三线多头已形成，但 MA60 仍在 MA30 上方（旧四线口径会因此被挡）
+    assert features["ma10"] > features["ma20"] > features["ma30"]
+    assert features["ma60"] > features["ma30"]
+    # 去掉 M60 门禁后应入选趋势候选
+    assert features["trend_pullback_eligible"] is True
+    assert features["trend_reference_line"] == "ma5"
+    assert classify_daily_setup(features) == "trend_pullback"
 
 
 def test_oversold_candidate_uses_prior_bear_structure_and_convergence() -> None:
