@@ -1345,6 +1345,7 @@ def build_extended_daily_features(
         "ma5_midpoint_near": ma5_midpoint_near,
         "ma10_midpoint_near": ma10_midpoint_near,
         "low_to_ma20_pct": low_to_ma20,
+        "low_to_ma10_pct": _number_or_none(base.get("low_to_ma10_pct")),
         "low_to_ma30_pct": low_to_ma30,
         "close_to_ma20_pct": close_to_ma20,
         "close_to_ma30_pct": close_to_ma30,
@@ -1352,6 +1353,13 @@ def build_extended_daily_features(
         "ma30_low_touch": ma30_low_touch,
         "oversold_low_support": bool(
             ma10_low_touch or ma20_low_touch or ma30_low_touch
+        ),
+        # 超跌低吸位置语境：M10 必须在「准备上穿 M30」(M10<M30) 或「穿完回贴 M30」(贴近)。
+        # 排除 M10 已远穿 M30（上穿过程结束）的横盘票 —— 它们不是"准备上穿处的 M10 回踩"。
+        "m10_below_or_contact_ma30": bool(
+            ma10 is not None
+            and ma30 is not None
+            and (ma10 < ma30 or abs((ma10 - ma30) / ma30 * 100) < MA_CONTACT_DISTANCE_PCT)
         ),
         "transition_low_support": bool(ma10_low_touch or ma20_low_touch),
         "close_off_low_pct": close_off_low_pct,
@@ -3544,6 +3552,9 @@ def _rule_matches(rule: DiscoveryRule, features: Mapping[str, object]) -> bool:
                 and features.get("ma10_crossed_ma20_within_15d")
                 and features.get("ma10_ma30_contact")
                 and features.get("oversold_low_support")
+                and features.get("m10_below_or_contact_ma30")
+                and features.get("low_to_ma10_pct") is not None
+                and features.get("low_to_ma10_pct") <= 1.0
                 and features.get("support_close_reaction")
             ),
             "m10_m30_contact_after_long_bear_low_support": bool(
@@ -3552,6 +3563,9 @@ def _rule_matches(rule: DiscoveryRule, features: Mapping[str, object]) -> bool:
                 and features.get("ma10_crossed_ma20_within_15d")
                 and features.get("ma10_ma30_contact")
                 and features.get("oversold_low_support")
+                and features.get("m10_below_or_contact_ma30")
+                and features.get("low_to_ma10_pct") is not None
+                and features.get("low_to_ma10_pct") <= 1.0
                 and features.get("support_close_reaction")
             ),
             "ma30_low_retest_after_m10_cross": bool(
@@ -3570,6 +3584,9 @@ def _rule_matches(rule: DiscoveryRule, features: Mapping[str, object]) -> bool:
             "v3_oversold_staged_low_support_turnover_low": bool(
                 features.get("oversold_process_eligible")
                 and features.get("oversold_low_support")
+                and features.get("m10_below_or_contact_ma30")
+                and features.get("low_to_ma10_pct") is not None
+                and features.get("low_to_ma10_pct") <= 1.0
                 and features.get("turnover_rate_low")
                 and (
                     features.get("staged_m10_first")
@@ -3585,6 +3602,9 @@ def _rule_matches(rule: DiscoveryRule, features: Mapping[str, object]) -> bool:
             "v3_oversold_staged_low_support_turnover_gate": bool(
                 features.get("oversold_process_eligible")
                 and features.get("oversold_low_support")
+                and features.get("m10_below_or_contact_ma30")
+                and features.get("low_to_ma10_pct") is not None
+                and features.get("low_to_ma10_pct") <= 1.0
                 and features.get("turnover_rate_gated")
                 and (
                     features.get("staged_m10_first")
