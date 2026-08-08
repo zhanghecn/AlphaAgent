@@ -73,9 +73,11 @@ export function LowSuctionPage() {
 }
 
 function LiveTab() {
+  const [trendPage, setTrendPage] = useState(1);
+  const [oversoldPage, setOversoldPage] = useState(1);
   const query = useQuery({
-    queryKey: ["lowSuctionLive"],
-    queryFn: fetchLowSuctionLive,
+    queryKey: ["lowSuctionLive", trendPage, oversoldPage],
+    queryFn: () => fetchLowSuctionLive({ trendPage, oversoldPage }),
     // 与后端 30 分钟缓存同频：盘中轮询命中缓存即可
     refetchInterval: 60_000,
     refetchOnWindowFocus: true,
@@ -88,7 +90,13 @@ function LiveTab() {
       </div>
     );
   }
-  return <LowSuctionLiveView payload={query.data} />;
+  return (
+    <LowSuctionLiveView
+      payload={query.data}
+      onTrendPageChange={setTrendPage}
+      onOversoldPageChange={setOversoldPage}
+    />
+  );
 }
 
 function BacktestTab() {

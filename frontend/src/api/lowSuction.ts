@@ -34,10 +34,15 @@ export interface LowSuctionCandidate {
   daily_return_pct: number | null;
   turnover_rate_pct: number | null;
   candle_range_pct: number | null;
+  rank?: number;
 }
 
 export interface LowSuctionLiveFamily {
   total: number;
+  limit?: number;
+  page?: number;
+  page_size?: number;
+  pages?: number;
   items: LowSuctionCandidate[];
 }
 
@@ -77,6 +82,11 @@ export interface LowSuctionFamilyReport {
 export interface LowSuctionSimSummary extends LowSuctionSegmentStats {
   trades?: number;
   days?: number;
+  positions?: number;
+  active_days?: number;
+  average_positions_per_day?: number;
+  average_deployed_pct?: number;
+  daily_mean_pct?: number | null;
   compound_pct: number;
   max_drawdown_pct?: number;
 }
@@ -97,6 +107,17 @@ export interface LowSuctionBacktestReport {
     labeled: number;
   };
   time_split: Record<string, { start: string | null; end: string | null; days: number }>;
+  selection: {
+    picks_per_family: number;
+    max_positions: number;
+    allocation_per_pick_pct: number;
+    unfilled_slots_are_cash: boolean;
+  };
+  market_regime: {
+    index_vt_symbol: string;
+    definition: string;
+    labels: Record<string, string>;
+  };
   families: {
     trend_pullback: LowSuctionFamilyReport;
     oversold_rebound: LowSuctionFamilyReport;
@@ -105,6 +126,8 @@ export interface LowSuctionBacktestReport {
     trend_pullback: LowSuctionSimSummary;
     oversold_rebound: LowSuctionSimSummary;
     combined: LowSuctionSimSummary;
+    time_segments: Record<string, LowSuctionSimSummary>;
+    market_regimes: Record<string, LowSuctionSimSummary>;
     equity_curve: LowSuctionEquityPoint[];
   };
 }
@@ -134,6 +157,8 @@ export interface LowSuctionLedgerLeg {
   symbol: string;
   stock_name?: string | null;
   setup_type: "trend_pullback" | "oversold_rebound";
+  rank: number;
+  allocation_pct: number;
   rule_key: string;
   score: number;
   band: string;
@@ -158,8 +183,16 @@ export interface LowSuctionLedgerPayload {
   label_convention?: string;
 }
 
-export function fetchLowSuctionLive() {
-  return apiClient.get<LowSuctionLivePayload>("/low-suction/live");
+export function fetchLowSuctionLive({
+  trendPage = 1,
+  oversoldPage = 1,
+}: {
+  trendPage?: number;
+  oversoldPage?: number;
+} = {}) {
+  return apiClient.get<LowSuctionLivePayload>(
+    `/low-suction/live?trend_page=${trendPage}&oversold_page=${oversoldPage}`,
+  );
 }
 
 export function fetchLowSuctionBacktest() {

@@ -11,7 +11,7 @@ const SETUP_BADGES: Record<string, { label: string; className: string }> = {
 
 const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
-/** 低吸历史交割单：两仓模拟逐日逐票（回测模拟，非实盘），支持按日期与票筛选。 */
+/** 低吸历史交割单：两族各前五逐日逐票（回测模拟，非实盘），支持按日期与票筛选。 */
 export function LowSuctionLedgerView({
   ledgerDays,
   labelConvention,
@@ -61,7 +61,7 @@ export function LowSuctionLedgerView({
     <section aria-label="低吸历史交割单">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b bg-amber-500/5 px-3 py-2 text-xs text-amber-600 sm:px-4">
         <span className="eyebrow">复盘 REVIEW</span>
-        <span>⚠️ 回测模拟交割单，非实盘 · 最近 {ledgerDays.length} 个交易日 · 最新在左</span>
+        <span>⚠️ 回测模拟交割单，非实盘 · 每族前 5、每票 10% · 最近 {ledgerDays.length} 个交易日 · 最新在左</span>
         <span className="ml-auto">{labelConvention}</span>
       </div>
       <div className="flex flex-wrap items-end gap-2 border-b px-3 py-2 sm:px-4">
@@ -115,7 +115,7 @@ function LedgerTable({ rows }: { rows: { day: LowSuctionLedgerDay; leg: LowSucti
           <tr>
             <th className="px-3 py-2 text-left">日期</th>
             <th className="px-3 py-2 text-left">股票</th>
-            <th className="px-3 py-2 text-left">族</th>
+            <th className="px-3 py-2 text-left">族 / 排名</th>
             <th className="px-3 py-2 text-right">分数</th>
             <th className="px-3 py-2 text-right">买价 / 连小K</th>
             <th className="px-3 py-2 text-right">D+1 收益</th>
@@ -123,7 +123,7 @@ function LedgerTable({ rows }: { rows: { day: LowSuctionLedgerDay; leg: LowSucti
         </thead>
         <tbody className="divide-y">
           {rows.map(({ day, leg }) => (
-            <LedgerRow key={`${day.trade_date}-${leg.setup_type}`} day={day} leg={leg} />
+            <LedgerRow key={`${day.trade_date}-${leg.setup_type}-${leg.rank}`} day={day} leg={leg} />
           ))}
         </tbody>
       </table>
@@ -146,6 +146,7 @@ function LedgerRow({ day, leg }: { day: LowSuctionLedgerDay; leg: LowSuctionLedg
       </td>
       <td className="px-3 py-2.5">
         <span className={cn("rounded-full px-1.5 py-px text-[10px] font-medium", badge.className)}>{badge.label}</span>
+        <span className="ml-1.5 font-mono text-[11px] tabular-nums text-muted-foreground">#{leg.rank}</span>
       </td>
       <td className="whitespace-nowrap px-3 py-2.5 text-right">
         <span className="font-mono text-xs font-bold tabular-nums text-primary">{leg.score.toFixed(0)}</span>
@@ -181,12 +182,12 @@ function LedgerDayColumn({ day }: { day: LowSuctionLedgerDay }) {
           </span>
         </div>
         <div className="mt-0.5 text-[10px] text-muted-foreground">
-          D+1 结算日 {day.d1_trade_date?.slice(5) ?? "--"} · 两仓各半
+          D+1 结算日 {day.d1_trade_date?.slice(5) ?? "--"} · 每票 10%，不足 10 票留现金
         </div>
       </header>
       <div className="flex flex-1 flex-col gap-2 px-3 py-2.5">
         {day.legs.map((leg) => (
-          <LegCard key={`${day.trade_date}-${leg.setup_type}`} leg={leg} />
+          <LegCard key={`${day.trade_date}-${leg.setup_type}-${leg.rank}`} leg={leg} />
         ))}
       </div>
     </section>
@@ -202,6 +203,7 @@ function LegCard({ leg }: { leg: LowSuctionLedgerLeg }) {
         <span className={cn("rounded-full px-1.5 py-px text-[10px] font-medium", badge.className)}>
           {badge.label}
         </span>
+        <span className="font-mono text-[11px] tabular-nums text-muted-foreground">#{leg.rank}</span>
         <span className="font-mono text-xs font-bold tabular-nums text-primary">{leg.score.toFixed(0)}</span>
         <span className="ml-auto text-[10px] text-muted-foreground">{leg.band}</span>
       </div>

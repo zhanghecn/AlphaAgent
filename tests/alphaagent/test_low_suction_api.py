@@ -14,16 +14,26 @@ def test_low_suction_live_has_an_independent_endpoint(monkeypatch) -> None:
         "trend": {"total": 1, "items": [{"vt_symbol": "600396.SSE", "score": 82.5}]},
         "oversold": {"total": 0, "items": []},
     }
-    monkeypatch.setattr(low_suction, "get_live_recommendations", lambda: expected)
+    requested: dict[str, int] = {}
 
-    response = TestClient(create_app()).get("/api/low-suction/live")
+    def get_live_recommendations(*, trend_page: int, oversold_page: int):
+        requested["trend_page"] = trend_page
+        requested["oversold_page"] = oversold_page
+        return expected
+
+    monkeypatch.setattr(low_suction, "get_live_recommendations", get_live_recommendations)
+
+    response = TestClient(create_app()).get(
+        "/api/low-suction/live?trend_page=3&oversold_page=4"
+    )
 
     assert response.status_code == 200
     assert response.json()["data"] == expected
+    assert requested == {"trend_page": 3, "oversold_page": 4}
 
 
 def test_low_suction_live_reports_service_unavailable(monkeypatch) -> None:
-    def unavailable() -> dict[str, object]:
+    def unavailable(**_kwargs) -> dict[str, object]:
         raise RuntimeError("database down")
 
     monkeypatch.setattr(low_suction, "get_live_recommendations", unavailable)

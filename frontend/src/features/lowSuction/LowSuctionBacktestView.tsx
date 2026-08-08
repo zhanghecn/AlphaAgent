@@ -1,11 +1,16 @@
 import { RefreshCw, RotateCw } from "lucide-react";
 
-import type { LowSuctionBacktestReport, LowSuctionBandStats, LowSuctionRebuildStatus } from "@/api/lowSuction";
+import type {
+  LowSuctionBacktestReport,
+  LowSuctionBandStats,
+  LowSuctionRebuildStatus,
+  LowSuctionSimSummary,
+} from "@/api/lowSuction";
 import { EmptyState } from "@/components/EmptyState";
 import { PanelHead } from "@/components/PanelHead";
 import { cn } from "@/lib/utils";
 
-/** 低吸回测：带仓位两仓模拟（产品口径）+ 全量分数段统计。 */
+/** 低吸回测：每族前五的十槽位模拟（产品口径）+ 全量分数段统计。 */
 export function LowSuctionBacktestView({
   report,
   rebuild,
@@ -97,6 +102,7 @@ function RebuildBar({
 
 function BacktestBody({ report }: { report: LowSuctionBacktestReport }) {
   const sim = report.position_sim;
+  const selection = report.selection;
   return (
     <>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b px-3 py-2 text-xs text-muted-foreground sm:px-4">
@@ -107,39 +113,44 @@ function BacktestBody({ report }: { report: LowSuctionBacktestReport }) {
         </span>
       </div>
 
-      <PanelHead no="01" zh="带仓位回测" en="2-SLOT SIMULATION" note="每日各取综合分最高的趋势/超跌一只，D+1 收盘结算，两腿各半仓" />
+      <PanelHead
+        no="01"
+        zh="带仓位回测"
+        en="TOP-5 X 2"
+        note={`每日趋势/超跌各取最高分前 ${selection.picks_per_family} 只；每票 ${selection.allocation_per_pick_pct.toFixed(0)}%，未满 ${selection.max_positions} 槽位留现金`}
+      />
       <div className="grid grid-cols-2 gap-px border-b bg-border sm:grid-cols-4">
         <SimCard
-          title="两仓合并"
+          title={`十票组合（最多${selection.max_positions}票）`}
           compound={sim.combined.compound_pct}
           rows={[
             ["日均收益", fmtPct(sim.combined.mean_pct)],
             ["日胜率", fmtPct(sim.combined.win_rate_pct)],
             ["最大回撤", fmtPct(sim.combined.max_drawdown_pct)],
-            ["交易天数", `${sim.combined.days ?? "--"}`],
+            ["平均持仓", `${fmtNumber(sim.combined.average_positions_per_day)} / ${selection.max_positions}`],
           ]}
           highlight
         />
         <SimCard
-          title="趋势低吸（单仓）"
+          title={`趋势低吸（最高${selection.picks_per_family}票）`}
           compound={sim.trend_pullback.compound_pct}
           rows={[
-            ["均笔收益", fmtPct(sim.trend_pullback.mean_pct)],
+            ["均票收益", fmtPct(sim.trend_pullback.mean_pct)],
             ["胜率", fmtPct(sim.trend_pullback.win_rate_pct)],
-            ["笔数", `${sim.trend_pullback.trades ?? "--"}`],
+            ["选票数", `${sim.trend_pullback.trades ?? "--"}`],
           ]}
         />
         <SimCard
-          title="超跌低吸（单仓）"
+          title={`超跌低吸（最高${selection.picks_per_family}票）`}
           compound={sim.oversold_rebound.compound_pct}
           rows={[
-            ["均笔收益", fmtPct(sim.oversold_rebound.mean_pct)],
+            ["均票收益", fmtPct(sim.oversold_rebound.mean_pct)],
             ["胜率", fmtPct(sim.oversold_rebound.win_rate_pct)],
-            ["笔数", `${sim.oversold_rebound.trades ?? "--"}`],
+            ["选票数", `${sim.oversold_rebound.trades ?? "--"}`],
           ]}
         />
         <div className="bg-card px-3 py-3 sm:px-4">
-          <div className="mb-1 text-xs text-muted-foreground">两仓权益曲线</div>
+          <div className="mb-1 text-xs text-muted-foreground">十槽位权益曲线</div>
           <EquitySpark points={sim.equity_curve} />
           <div className="mt-1 flex justify-between text-[10px] tabular-nums text-muted-foreground">
             <span>{sim.equity_curve[0]?.date.slice(2) ?? ""}</span>
@@ -148,7 +159,9 @@ function BacktestBody({ report }: { report: LowSuctionBacktestReport }) {
         </div>
       </div>
 
-      <PanelHead no="02" zh="全量回测 · 分数段统计" en="SCORE BANDS" note="推荐区间 = validation+holdout 双段为正（与正式验收门同口径）" />
+      <EvaluationTables report={report} />
+
+      <PanelHead no="03" zh="全量回测 · 分数段统计" en="SCORE BANDS" note="推荐区间 = validation+holdout 双段为正（与正式验收门同口径）" />
       <div className="grid gap-px bg-border xl:grid-cols-2">
         <BandTable
           title="上升趋势低吸"
@@ -164,6 +177,85 @@ function BacktestBody({ report }: { report: LowSuctionBacktestReport }) {
         />
       </div>
     </>
+  );
+}
+
+function EvaluationTables({ report }: { report: LowSuctionBacktestReport }) {
+  const timeRows = ["development", "embargo", "validation", "holdout"].map((key) => {
+    const range = report.time_split[key];
+    return {
+      label: key === "development" ? "开发样本" : key === "embargo" ? "隔离期" : key === "validation" ? "验证样本" : "保留样本",
+      range: range?.start && range?.end ? `${range.start.slice(2)} ~ ${range.end.slice(2)}` : "--",
+      summary: report.position_sim.time_segments[key],
+    };
+  });
+  const regimeRows = ["above_ma20", "below_ma20", "unclassified"].map((key) => ({
+    label: report.market_regime.labels[key] ?? key,
+    range: "",
+    summary: report.position_sim.market_regimes[key],
+  }));
+  return (
+    <>
+      <PanelHead
+        no="02"
+        zh="样本外与市况复核"
+        en="ROBUSTNESS"
+        note="只验证固定规则和固定前五排序；不按这两张表回调分数"
+      />
+      <div className="grid gap-px border-b bg-border xl:grid-cols-2">
+        <EvaluationTable title="时间顺序" subtitle="开发 / 验证 / 保留互不重叠" rows={timeRows} />
+        <EvaluationTable title="行情环境" subtitle={report.market_regime.definition} rows={regimeRows} />
+      </div>
+    </>
+  );
+}
+
+function EvaluationTable({
+  title,
+  subtitle,
+  rows,
+}: {
+  title: string;
+  subtitle: string;
+  rows: { label: string; range: string; summary: LowSuctionSimSummary | undefined }[];
+}) {
+  return (
+    <div className="min-w-0 bg-card">
+      <div className="border-b px-3 py-2 sm:px-4">
+        <div className="text-sm font-semibold">{title}</div>
+        <div className="mt-0.5 text-[11px] text-muted-foreground">{subtitle}</div>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[620px] text-xs tabular-nums">
+          <thead>
+            <tr className="border-b text-left text-muted-foreground">
+              <th className="px-3 py-1.5 font-medium">分组</th>
+              <th className="py-1.5 font-medium">区间</th>
+              <th className="py-1.5 text-right font-medium">交易日</th>
+              <th className="py-1.5 text-right font-medium">平均持仓</th>
+              <th className="py-1.5 text-right font-medium">日均收益</th>
+              <th className="py-1.5 text-right font-medium">胜率</th>
+              <th className="py-1.5 text-right font-medium">复利</th>
+              <th className="px-3 py-1.5 text-right font-medium">最大回撤</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(({ label, range, summary }) => (
+              <tr key={label} className="border-b last:border-0">
+                <td className="whitespace-nowrap px-3 py-1.5 font-medium">{label}</td>
+                <td className="whitespace-nowrap py-1.5 text-muted-foreground">{range || "--"}</td>
+                <td className="py-1.5 text-right">{summary?.days ?? 0}</td>
+                <td className="py-1.5 text-right">{fmtNumber(summary?.average_positions_per_day)}</td>
+                <td className={cn("py-1.5 text-right font-medium", tone(summary?.mean_pct))}>{fmtSigned(summary?.mean_pct)}</td>
+                <td className="py-1.5 text-right">{fmtPct(summary?.win_rate_pct)}</td>
+                <td className={cn("py-1.5 text-right", tone(summary?.compound_pct))}>{fmtSigned(summary?.compound_pct)}</td>
+                <td className="px-3 py-1.5 text-right">{fmtPct(summary?.max_drawdown_pct)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
@@ -278,7 +370,7 @@ function EquitySpark({ points }: { points: { date: string; equity: number }[] })
     .join(" ");
   const last = values[values.length - 1];
   return (
-    <svg viewBox={`0 0 ${w} ${h}`} className="h-14 w-full" role="img" aria-label="两仓权益曲线">
+    <svg viewBox={`0 0 ${w} ${h}`} className="h-14 w-full" role="img" aria-label="十槽位权益曲线">
       <path d={path} fill="none" strokeWidth="1.5" className={last >= 1 ? "stroke-red-500" : "stroke-emerald-600"} />
       {/* 成本线 1.0 */}
       {min < 1 && max > 1 && (
@@ -304,6 +396,11 @@ function fmtPct(v: number | null | undefined): string {
 function fmtSigned(v: number | null | undefined): string {
   if (v == null || Number.isNaN(v)) return "--";
   return `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
+}
+
+function fmtNumber(v: number | null | undefined): string {
+  if (v == null || Number.isNaN(v)) return "--";
+  return v.toFixed(1);
 }
 
 function tone(v: number | null | undefined): string {

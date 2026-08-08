@@ -30,6 +30,7 @@ from alphaagent.server.services.low_suction.daily_picks_repository import (
 )
 from alphaagent.server.services.low_suction.daily_picks_scanner import (
     LowSuctionCandidate,
+    candidate_ranking_key,
     scan_low_suction_candidates,
 )
 from alphaagent.server.services.low_suction.daily_picks_scoring import SCORE_VERSION
@@ -38,7 +39,8 @@ from alphaagent.server.services.low_suction.daily_picks_scoring import SCORE_VER
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 LIVE_CACHE_TTL_SECONDS = 30 * 60  # 交易日内每半小时重算一次缓存
 LIVE_LOOKBACK_CALENDAR_DAYS = 10  # 加载日历窗口；特征 warmup 由加载器另加 120 天
-LIVE_TOP_N_PER_FAMILY = 30
+LIVE_MAX_ITEMS_PER_FAMILY = 100
+LIVE_PAGE_SIZE = 20
 SPOT_MERGE_START = time(9, 25)
 SPOT_MERGE_END = time(15, 30)
 MIN_SPOT_ACTIVE_SYMBOLS = 3_000
@@ -74,20 +76,28 @@ def start_low_suction_live_warmup() -> None:
 
 
 
-def get_live_recommendations() -> dict[str, object]:
-    """Read the 30-minute cached live recommendation payload."""
+def get_live_recommendations(
+    *,
+    trend_page: int = 1,
+    oversold_page: int = 1,
+) -> dict[str, object]:
+    """Read cached live recommendations and return independent family pages."""
 
     now = datetime.now(SHANGHAI)
     with _cache_lock:
         expires_at = _cache.get("expires_at")
         payload = _cache.get("payload")
         if payload is not None and expires_at is not None and now < expires_at:  # type: ignore[operator]
-            return payload  # type: ignore[return-value]
+            return _paginate_live_payload(
+                payload, trend_page=trend_page, oversold_page=oversold_page
+            )  # type: ignore[arg-type]
     payload = _compute_live_payload(now)
     with _cache_lock:
         _cache["payload"] = payload
         _cache["expires_at"] = now + timedelta(seconds=LIVE_CACHE_TTL_SECONDS)
-    return payload
+    return _paginate_live_payload(
+        payload, trend_page=trend_page, oversold_page=oversold_page
+    )
 
 
 def get_daily_backtest_report() -> dict[str, object] | None:
@@ -96,7 +106,7 @@ def get_daily_backtest_report() -> dict[str, object] | None:
     payload = load_daily_backtest_run()
     if payload is None:
         return None
-    return payload
+    return payload if payload.get("version") == BACKTEST_VERSION else None
 
 
 # 回测物化：后台线程 + 状态（仿 limit_up history_service 的 rebuild 模式）。
@@ -124,7 +134,12 @@ def run_daily_backtest_sync(
         inputs.security_status.to_dict(orient="records"),
     )
     names = _load_stock_names({item.vt_symbol for item in candidates})
-    payload = build_backtest_payload(candidates, inputs.market_calendar, names=names)
+    payload = build_backtest_payload(
+        candidates,
+        inputs.market_calendar,
+        names=names,
+        market_regimes=_load_market_regimes(inputs.market_calendar),
+    )
     save_daily_backtest_run(BACKTEST_VERSION, payload)
     return payload
 
@@ -270,25 +285,77 @@ def _family_payload(
     pool = [item for item in candidates if item.setup_type == setup_type]
     pool = [item for item in pool if not _is_st_name(names.get(item.vt_symbol))]
     # 与回测同一决胜键：分数 → 连续小 K 线数 → 换手率(低优先) → 代码
-    pool.sort(
-        key=lambda item: (
-            -item.score,
-            -item.streak.total,
-            item.turnover_rate_pct if item.turnover_rate_pct is not None else 99.0,
-            item.vt_symbol,
-        )
-    )
+    pool.sort(key=candidate_ranking_key)
     items: list[dict[str, object]] = []
-    for candidate in pool[:LIVE_TOP_N_PER_FAMILY]:
+    for rank, candidate in enumerate(pool[:LIVE_MAX_ITEMS_PER_FAMILY], start=1):
         row = candidate.as_dict()
         row["stock_name"] = names.get(candidate.vt_symbol)
+        row["rank"] = rank
         row.pop("d1_close_return_pct", None)
         row.pop("d1_trade_date", None)
         items.append(row)
     return {
         "total": len(pool),
+        "limit": LIVE_MAX_ITEMS_PER_FAMILY,
         "items": items,
     }
+
+
+def _paginate_live_payload(
+    payload: dict[str, object],
+    *,
+    trend_page: int,
+    oversold_page: int,
+) -> dict[str, object]:
+    """Page a cached top-100 payload without rerunning the market scan."""
+
+    result = dict(payload)
+    for setup_type, requested_page in (
+        ("trend", trend_page),
+        ("oversold", oversold_page),
+    ):
+        family = payload.get(setup_type)
+        if not isinstance(family, dict):
+            continue
+        all_items = list(family.get("items") or [])
+        pages = max(1, (len(all_items) + LIVE_PAGE_SIZE - 1) // LIVE_PAGE_SIZE)
+        page = min(max(1, requested_page), pages)
+        start = (page - 1) * LIVE_PAGE_SIZE
+        result[setup_type] = {
+            **family,
+            "items": all_items[start : start + LIVE_PAGE_SIZE],
+            "page": page,
+            "page_size": LIVE_PAGE_SIZE,
+            "pages": pages,
+        }
+    return result
+
+
+def _load_market_regimes(calendar: tuple[date, ...]) -> dict[date, str]:
+    """Classify signal days by same-day Shanghai Composite close versus MA20."""
+
+    if not calendar:
+        return {}
+    start = calendar[0] - timedelta(days=45)
+    with session_scope() as session:
+        rows = session.execute(
+            select(schema.stock_daily_bars.c.trade_date, schema.stock_daily_bars.c.close_price)
+            .where(
+                schema.stock_daily_bars.c.vt_symbol == "000001.SSE",
+                schema.stock_daily_bars.c.trade_date >= start,
+                schema.stock_daily_bars.c.trade_date <= calendar[-1],
+            )
+            .order_by(schema.stock_daily_bars.c.trade_date)
+        ).all()
+    closes: list[tuple[date, float]] = [
+        (row[0], float(row[1])) for row in rows if row[1] is not None
+    ]
+    regimes: dict[date, str] = {}
+    for index in range(19, len(closes)):
+        trade_date, close_price = closes[index]
+        ma20 = sum(value for _, value in closes[index - 19 : index + 1]) / 20
+        regimes[trade_date] = "above_ma20" if close_price >= ma20 else "below_ma20"
+    return regimes
 
 
 def _should_merge_spot(now: datetime, latest_bar_date: date) -> bool:

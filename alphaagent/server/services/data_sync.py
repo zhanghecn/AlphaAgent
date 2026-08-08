@@ -3583,7 +3583,7 @@ def _run_low_suction_daily_backtest_rerun_batch_job() -> dict[str, Any]:
         "message": (
             f"低吸日线回测已刷新：{coverage.get('trade_days')} 个交易日，"
             f"{int(coverage.get('labeled') or 0)} 个带标签候选，"
-            f"两仓复利 {combined.get('compound_pct')}% / 胜率 {combined.get('win_rate_pct')}%"
+            f"十槽组合复利 {combined.get('compound_pct')}% / 胜率 {combined.get('win_rate_pct')}%"
         ),
     }
 

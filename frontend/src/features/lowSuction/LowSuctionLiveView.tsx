@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronDown, TrendingUp, Waves } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, TrendingUp, Waves } from "lucide-react";
 
 import type { LowSuctionCandidate, LowSuctionLivePayload } from "@/api/lowSuction";
 import { EmptyState } from "@/components/EmptyState";
@@ -7,7 +7,15 @@ import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { cn } from "@/lib/utils";
 
 /** 低吸实时推荐：上升趋势低吸 + 超跌反弹低吸两组，按综合分排序。 */
-export function LowSuctionLiveView({ payload }: { payload: LowSuctionLivePayload }) {
+export function LowSuctionLiveView({
+  payload,
+  onTrendPageChange,
+  onOversoldPageChange,
+}: {
+  payload: LowSuctionLivePayload;
+  onTrendPageChange: (page: number) => void;
+  onOversoldPageChange: (page: number) => void;
+}) {
   if (payload.status !== "ok") {
     return <EmptyState message={payload.message ?? "低吸实时推荐暂时不可用"} />;
   }
@@ -39,15 +47,15 @@ export function LowSuctionLiveView({ payload }: { payload: LowSuctionLivePayload
           title="上升趋势低吸"
           en="TREND PULLBACK"
           icon={<TrendingUp size={14} className="text-primary" />}
-          total={trend?.total ?? 0}
-          items={trend?.items ?? []}
+          family={trend}
+          onPageChange={onTrendPageChange}
         />
         <FamilyColumn
           title="超跌反弹低吸"
           en="OVERSOLD REBOUND"
           icon={<Waves size={14} className="text-primary" />}
-          total={oversold?.total ?? 0}
-          items={oversold?.items ?? []}
+          family={oversold}
+          onPageChange={onOversoldPageChange}
         />
       </div>
       <div className="border-t px-3 py-2 text-[11px] text-muted-foreground sm:px-4">
@@ -61,15 +69,22 @@ function FamilyColumn({
   title,
   en,
   icon,
-  total,
-  items,
+  family,
+  onPageChange,
 }: {
   title: string;
   en: string;
   icon: React.ReactNode;
-  total: number;
-  items: LowSuctionCandidate[];
+  family: LowSuctionLivePayload["trend"];
+  onPageChange: (page: number) => void;
 }) {
+  const total = family?.total ?? 0;
+  const limit = family?.limit ?? 0;
+  const items = family?.items ?? [];
+  const page = family?.page ?? 1;
+  const pageSize = family?.page_size ?? items.length;
+  const pages = family?.pages ?? 1;
+  const available = limit ? Math.min(total, limit) : total;
   return (
     <div className="min-w-0 bg-card">
       <div className="flex items-center gap-2 border-b px-3 py-2.5 sm:px-4">
@@ -77,7 +92,7 @@ function FamilyColumn({
         <span className="text-sm font-semibold">{title}</span>
         <span className="eyebrow">{en}</span>
         <span className="ml-auto text-xs tabular-nums text-muted-foreground">
-          命中 {total} 只 · 展示前 {items.length}
+          命中 {total} 只 · 可查看前 {available}
         </span>
       </div>
       {items.length === 0 ? (
@@ -90,6 +105,15 @@ function FamilyColumn({
             <CandidateCard key={`${item.setup_type}-${item.vt_symbol}`} item={item} />
           ))}
         </div>
+      )}
+      {items.length > 0 && (
+        <FamilyPager
+          page={page}
+          pages={pages}
+          pageSize={pageSize}
+          available={available}
+          onPageChange={onPageChange}
+        />
       )}
     </div>
   );
@@ -110,6 +134,7 @@ function CandidateCard({ item }: { item: LowSuctionCandidate }) {
         >
           {item.score.toFixed(0)}
         </span>
+        {item.rank != null && <span className="font-mono text-[11px] text-muted-foreground">#{item.rank}</span>}
         <StockIdentityLink vtSymbol={item.vt_symbol} name={item.stock_name ?? item.symbol} />
         <span className="ml-auto text-xs text-muted-foreground">{item.rule_label}</span>
       </div>
@@ -155,6 +180,52 @@ function CandidateCard({ item }: { item: LowSuctionCandidate }) {
           ))}
         </dl>
       )}
+    </div>
+  );
+}
+
+function FamilyPager({
+  page,
+  pages,
+  pageSize,
+  available,
+  onPageChange,
+}: {
+  page: number;
+  pages: number;
+  pageSize: number;
+  available: number;
+  onPageChange: (page: number) => void;
+}) {
+  if (pages <= 1) return null;
+  const start = (page - 1) * pageSize + 1;
+  const end = Math.min(page * pageSize, available);
+  return (
+    <div className="flex items-center gap-2 border-t px-3 py-2 text-xs tabular-nums text-muted-foreground sm:px-4">
+      <span>{start}-{end} / {available}</span>
+      <div className="ml-auto flex items-center gap-1">
+        <button
+          type="button"
+          onClick={() => onPageChange(page - 1)}
+          disabled={page <= 1}
+          className="grid h-7 w-7 place-items-center border text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          aria-label="上一页"
+          title="上一页"
+        >
+          <ChevronLeft size={14} />
+        </button>
+        <span className="min-w-10 text-center">{page} / {pages}</span>
+        <button
+          type="button"
+          onClick={() => onPageChange(page + 1)}
+          disabled={page >= pages}
+          className="grid h-7 w-7 place-items-center border text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          aria-label="下一页"
+          title="下一页"
+        >
+          <ChevronRight size={14} />
+        </button>
+      </div>
     </div>
   );
 }

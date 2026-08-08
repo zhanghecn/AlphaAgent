@@ -206,6 +206,17 @@ def scan_low_suction_candidates(
     return candidates
 
 
+def candidate_ranking_key(item: LowSuctionCandidate) -> tuple[float, int, float, str]:
+    """Stable product ranking shared by live recommendations and backtests."""
+
+    return (
+        -item.score,
+        -item.streak.total,
+        item.turnover_rate_pct if item.turnover_rate_pct is not None else 99.0,
+        item.vt_symbol,
+    )
+
+
 def _number(value: object) -> float | None:
     if value is None or isinstance(value, bool):
         return None

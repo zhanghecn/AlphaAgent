@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
 from alphaagent.server.core.responses import fail, ok
@@ -18,11 +18,19 @@ router = APIRouter(prefix="/low-suction", tags=["low-suction"])
 
 
 @router.get("/live", response_model=None)
-def live_recommendations():
-    """实时推荐：上升趋势低吸 + 超跌反弹低吸两组，交易日内 30 分钟缓存。"""
+def live_recommendations(
+    trend_page: int = Query(default=1, ge=1),
+    oversold_page: int = Query(default=1, ge=1),
+):
+    """实时推荐：两族各自分页，缓存中最多保留排名前 100 只。"""
 
     try:
-        return ok(get_live_recommendations())
+        return ok(
+            get_live_recommendations(
+                trend_page=trend_page,
+                oversold_page=oversold_page,
+            )
+        )
     except Exception as exc:  # noqa: BLE001
         return JSONResponse(
             status_code=503,
@@ -36,7 +44,7 @@ def live_recommendations():
 
 @router.get("/backtest", response_model=None)
 def daily_backtest():
-    """回测：全量分数段统计 + 两仓位模拟 + 权益曲线（CLI 物化，API 读库）。"""
+    """回测：全量分数段统计 + 两族各前五模拟 + 权益曲线（CLI 物化，API 读库）。"""
 
     try:
         payload = get_daily_backtest_report()
@@ -98,7 +106,7 @@ def daily_backtest_status():
 
 @router.get("/ledger", response_model=None)
 def daily_ledger():
-    """历史交割单：两仓位模拟的最近交易日逐票明细（回测模拟，非实盘）。"""
+    """历史交割单：两族各前五模拟的最近交易日逐票明细（回测模拟，非实盘）。"""
 
     try:
         payload = get_daily_backtest_report()
