@@ -49,6 +49,65 @@ def _bar(
     }
 
 
+def _yang_wrap_stable_base_history(
+    *,
+    signal_low: float = 9.9,
+    signal_volume: float = 500.0,
+) -> list[dict[str, object]]:
+    """Flat MA cluster, then one wrapping candle with a controlled volume wash."""
+
+    start = date(2025, 1, 1)
+    volumes = [1_000.0] * 24 + [
+        1_000.0,
+        900.0,
+        800.0,
+        700.0,
+        600.0,
+        signal_volume,
+    ]
+    history = [
+        _bar(start + timedelta(days=index), 10.0, volume=volume)
+        for index, volume in enumerate(volumes[:-1])
+    ]
+    history.append(
+        _bar(
+            start + timedelta(days=len(volumes) - 1),
+            10.1,
+            open_price=9.9,
+            low_price=signal_low,
+            high_price=10.2,
+            volume=volumes[-1],
+        )
+    )
+    return [{**row, "turnover_rate": 2.0} for row in history]
+
+
+def test_yang_wrap_stable_base_requires_real_touch_and_contracted_volume() -> None:
+    history = _yang_wrap_stable_base_history()
+    stable = build_extended_daily_features(history)
+    low_too_far = build_extended_daily_features(
+        _yang_wrap_stable_base_history(signal_low=9.6)
+    )
+    volume_not_contracted = build_extended_daily_features(
+        _yang_wrap_stable_base_history(signal_volume=1_000.0)
+    )
+
+    assert stable["yang_wrap_three_ma"] is True
+    assert stable["yang_wrap_nearest_ma_low_abs_pct"] <= 1.5
+    assert stable["yang_wrap_volume_end_to_peak_ratio_6d"] == pytest.approx(0.5)
+    assert stable["yang_wrap_stable_base"] is True
+    assert low_too_far["yang_wrap_three_ma"] is True
+    assert low_too_far["yang_wrap_stable_base"] is False
+    assert volume_not_contracted["yang_wrap_three_ma"] is True
+    assert volume_not_contracted["yang_wrap_stable_base"] is False
+    cutoff = history[-1]["trade_date"]
+    assert isinstance(cutoff, date)
+    assert stable == build_extended_daily_features(
+        [*history, _bar(cutoff + timedelta(days=1), 20.0, volume=9_999.0)],
+        as_of_date=cutoff,
+    )
+
+
 def _bear_then_m10_cross_history() -> list[dict[str, object]]:
     start = date(2025, 1, 1)
     closes = [100 - index * 0.4 for index in range(64)] + [74.8, 76.0, 78.5, 82.0, 86.0, 89.0]

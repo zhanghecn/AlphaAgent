@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 
-SCORE_VERSION = "low-suction-daily-score-v2"
+SCORE_VERSION = "low-suction-daily-score-v2.1"
 
 SCORE_BANDS: tuple[tuple[float, float, str], ...] = (
     (0.0, 39.999, "0-39"),
@@ -333,6 +333,11 @@ def score_oversold_candidate(
     spread3 = _number(features.get("ma_cluster_spread_pct"))
     tr_pretty = _number(features.get("turnover_rate_pct"))
     hold_premium = _number(features.get("breakout_hold_premium"))
+    stable_wrap_base = yang_wrap and bool(features.get("yang_wrap_stable_base"))
+    wrap_low_distance = _number(features.get("yang_wrap_nearest_ma_low_abs_pct"))
+    wrap_volume_end_to_peak = _number(
+        features.get("yang_wrap_volume_end_to_peak_ratio_6d")
+    )
     # 活跃度（主人"死股偏好"反向纠偏：2~5%换手=有资金承接的活跃真低吸加分，
     # 接近死股的低换手不加分——yang_wrap票里活跃的(传智4.87%)D+5涨43%，温和的(1.6%)只涨2%）
     active_pts = (
@@ -377,6 +382,14 @@ def score_oversold_candidate(
                 if yang_wrap
                 else f"未包裹 平滑{_fmt(m10_cv)} 梯形{_fmt(vol_mono)} 均{_fmt(body_excl)} 散{_fmt(spread3)}"
             ),
+        ),
+        _component(
+            "yang_wrap_stable_base",
+            "前期稳定地基",
+            stable_wrap_base,
+            8.0 if stable_wrap_base else 0.0,
+            8.0,
+            f"低点距三线 {_fmt(wrap_low_distance)}%，D量/6日峰 {_fmt(wrap_volume_end_to_peak)}",
         ),
         _component(
             "turnover_gradient",
@@ -467,13 +480,14 @@ def score_oversold_candidate(
             ),
         ),
     )
-    # 好看度主导：死股偏好(换手/振幅/贴线等)降权×0.4，好看度(包裹+收敛,连续,72)主导，
-    # 让"最好看的真低吸"排第一，不被"低换手微涨死股"压过（主人"死股偏好"教训）。
+    # 稳定地基独立优先，避免把低点远离均线或量未收缩的强行包裹排在研究形态之前。
     dead_pts = sum(
         c.points for c in components
-        if c.kind == "bonus" and c.key != "yang_wrap_pretty"
+        if c.kind == "bonus"
+        and c.key not in {"yang_wrap_pretty", "yang_wrap_stable_base"}
     )
-    raw = dead_pts * 0.4 + pretty_pts
+    stable_base_pts = 8.0 if stable_wrap_base else 0.0
+    raw = dead_pts * 0.4 + pretty_pts + stable_base_pts
     if not gate_passed:
         raw = min(raw, OVERSOLD_GATE_FAILED_SCORE_CAP)
     return round(min(140.0, raw), 2), components

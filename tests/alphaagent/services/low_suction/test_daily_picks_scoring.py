@@ -165,9 +165,46 @@ def test_oversold_score_full_marks() -> None:
     score, components = score_oversold_candidate(features, streak, vol_ratio=0.7)
     # 死股偏好满分100×0.4(=40) + 好看度满分95(包裹40+活跃8+守住15+收敛20+平滑5+梯形4+均匀3) = 135
     assert score == 135.0
-    # 11 bonus max 之和 = 死股100(展示) + 好看度95 = 195，且恰 1 个 gate
-    assert sum(c.max_points for c in components if c.kind == "bonus") == 195.0
+    # 12 bonus max 之和 = 死股100(展示) + 好看度95 + 稳定地基8 = 203，且恰 1 个 gate
+    assert sum(c.max_points for c in components if c.kind == "bonus") == 203.0
     assert sum(1 for c in components if c.kind == "gate") == 1
+
+
+def test_oversold_stable_wrap_base_adds_exactly_eight_points() -> None:
+    base = {
+        "oversold_low_support": True,
+        "turnover_rate_pct": 2.5,
+        "candle_range_pct": 3.5,
+        "prior_bear_alignment_days": 12,
+        "yang_wrap_three_ma": True,
+        "ma_cluster_spread_pct": 2.0,
+        "ma10_slope_cv_6d": 40.0,
+        "vol_monotone_6d": 0.6,
+        "body_max_excl_6d": 1.5,
+    }
+    streak = quiet_candle_streak([_bar(2.0)] * 3)
+
+    baseline_score, baseline_components = score_oversold_candidate(base, streak)
+    stable_score, stable_components = score_oversold_candidate(
+        {**base, "yang_wrap_stable_base": True},
+        streak,
+    )
+
+    stable_component = next(
+        component
+        for component in stable_components
+        if component.key == "yang_wrap_stable_base"
+    )
+    baseline_component = next(
+        component
+        for component in baseline_components
+        if component.key == "yang_wrap_stable_base"
+    )
+    assert stable_score == baseline_score + 8.0
+    assert stable_component.passed is True
+    assert stable_component.points == 8.0
+    assert baseline_component.passed is False
+    assert baseline_component.points == 0.0
 
 
 def test_oversold_gate_caps_at_39_when_bonus_high() -> None:
@@ -276,7 +313,7 @@ def test_total_caps_at_gate_failed_cap_when_gate_fails() -> None:
     assert _total(gate_fail) == 80.0                          # 无 cap 参数不 cap
 
 
-def test_score_version_bumped_to_v2() -> None:
+def test_score_version_bumped_to_v2_1() -> None:
     from alphaagent.server.services.low_suction import daily_picks_scoring as module
 
-    assert module.SCORE_VERSION == "low-suction-daily-score-v2"
+    assert module.SCORE_VERSION == "low-suction-daily-score-v2.1"

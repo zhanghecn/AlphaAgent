@@ -67,6 +67,8 @@ TREND_CANDLE_QUIET_RANGE_MAX_PCT = 5.0
 TREND_DIST_EXCESS_MAX_PCT = 2.0
 TREND_REBUILD_PRIOR_LOOKBACK = 10
 TREND_REBUILD_MIN_DISORDERED_SESSIONS = 3
+YANG_WRAP_STABLE_BASE_LOW_MA_MAX_PCT = 1.5
+YANG_WRAP_STABLE_BASE_VOLUME_END_TO_PEAK_MAX = 0.55
 MIN_SELECTION_SAMPLES = 30
 MIN_SELECTION_CANDIDATE_DAYS = 10
 MIN_QUALIFICATION_SAMPLES = 30
@@ -970,6 +972,34 @@ def build_extended_daily_features(
             and turnover_rate is not None
             and turnover_rate >= 1.5
         )
+    yang_wrap_nearest_ma_low_abs_pct: float | None = None
+    _wrap_low_distances = [
+        _price_to_ma_distance_pct(low_price, moving_average)
+        for moving_average in (ma10, ma20, ma30)
+    ]
+    _known_wrap_low_distances = [
+        abs(distance) for distance in _wrap_low_distances if distance is not None
+    ]
+    if _known_wrap_low_distances:
+        yang_wrap_nearest_ma_low_abs_pct = min(_known_wrap_low_distances)
+    yang_wrap_volume_end_to_peak_ratio_6d: float | None = None
+    _wrap_volumes = volumes[-6:]
+    if len(_wrap_volumes) == 6 and all(
+        volume is not None and volume > 0 for volume in _wrap_volumes
+    ):
+        _known_wrap_volumes = [
+            float(volume) for volume in _wrap_volumes if volume is not None
+        ]
+        _wrap_peak_volume = max(_known_wrap_volumes)
+        yang_wrap_volume_end_to_peak_ratio_6d = _known_wrap_volumes[-1] / _wrap_peak_volume
+    yang_wrap_stable_base = bool(
+        yang_wrap_three_ma
+        and yang_wrap_nearest_ma_low_abs_pct is not None
+        and yang_wrap_nearest_ma_low_abs_pct <= YANG_WRAP_STABLE_BASE_LOW_MA_MAX_PCT
+        and yang_wrap_volume_end_to_peak_ratio_6d is not None
+        and yang_wrap_volume_end_to_peak_ratio_6d
+        <= YANG_WRAP_STABLE_BASE_VOLUME_END_TO_PEAK_MAX
+    )
     # 均线平滑度（M10 近6日逐日变化变异系数，小=匀速平滑收敛）
     ma10_slope_cv_6d: float | None = None
     _m10_ser = ma_series[10]
@@ -1489,6 +1519,9 @@ def build_extended_daily_features(
         "capitulation_rebound_tight": capitulation_rebound_tight,
         "capitulation_rebound_broad": capitulation_rebound_broad,
         "yang_wrap_three_ma": yang_wrap_three_ma,
+        "yang_wrap_nearest_ma_low_abs_pct": yang_wrap_nearest_ma_low_abs_pct,
+        "yang_wrap_volume_end_to_peak_ratio_6d": yang_wrap_volume_end_to_peak_ratio_6d,
+        "yang_wrap_stable_base": yang_wrap_stable_base,
         "ma10_slope_cv_6d": (
             _round_pct(ma10_slope_cv_6d) if ma10_slope_cv_6d is not None else None
         ),
@@ -4933,6 +4966,10 @@ def _feature_snapshot(features: Mapping[str, object]) -> dict[str, object]:
         "ma20_low_touch",
         "ma30_low_touch",
         "oversold_low_support",
+        "yang_wrap_three_ma",
+        "yang_wrap_nearest_ma_low_abs_pct",
+        "yang_wrap_volume_end_to_peak_ratio_6d",
+        "yang_wrap_stable_base",
         "transition_low_support",
         "close_off_low_pct",
         "support_close_reaction",
