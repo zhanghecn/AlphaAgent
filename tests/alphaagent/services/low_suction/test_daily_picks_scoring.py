@@ -143,7 +143,7 @@ def test_trend_no_gate_protects_high_turnover_cases() -> None:
 def test_oversold_score_full_marks() -> None:
     features = {
         "oversold_low_support": True,
-        "turnover_rate_pct": 1.8,
+        "turnover_rate_pct": 2.5,
         "capitulation_rebound_tight": True,
         "capitulation_rebound_broad": False,
         "close_off_low_pct": 0.9,
@@ -153,12 +153,20 @@ def test_oversold_score_full_marks() -> None:
         "candle_quiet": True,
         "candle_range_pct": 1.2,
         "prior_bear_alignment_days": 25,
+        # 最好看形态（阳线包裹+极收敛+极平滑+梯形缩量+实体均匀）
+        "yang_wrap_three_ma": True,
+        "ma_cluster_spread_pct": 0.0,
+        "ma10_slope_cv_6d": 0.0,
+        "vol_monotone_6d": 1.0,
+        "body_max_excl_6d": 0.0,
+        "breakout_hold_premium": 5.0,
     }
     streak = quiet_candle_streak([_bar(2.0)] * 3)
     score, components = score_oversold_candidate(features, streak, vol_ratio=0.7)
-    assert score == 100.0
-    # 10 bonus max 之和 = 100，且恰 1 个 gate
-    assert sum(c.max_points for c in components if c.kind == "bonus") == 100.0
+    # 死股偏好满分100×0.4(=40) + 好看度满分95(包裹40+活跃8+守住15+收敛20+平滑5+梯形4+均匀3) = 135
+    assert score == 135.0
+    # 11 bonus max 之和 = 死股100(展示) + 好看度95 = 195，且恰 1 个 gate
+    assert sum(c.max_points for c in components if c.kind == "bonus") == 195.0
     assert sum(1 for c in components if c.kind == "gate") == 1
 
 
@@ -201,7 +209,7 @@ def test_oversold_gate_passes_case_level_turnover() -> None:
     score, components = score_oversold_candidate(features, streak)
     gate = next(c for c in components if c.kind == "gate")
     assert gate.passed is True
-    assert score > 39.0
+    assert score > 30.0  # 死股偏好×0.4后满分≈40，gate通过(不cap)的正常分数
 
 
 def test_oversold_long_bear_duration_gradient() -> None:

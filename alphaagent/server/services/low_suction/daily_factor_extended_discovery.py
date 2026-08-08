@@ -225,6 +225,16 @@ OVERSOLD_V3_RULES = (
         "oversold_rebound",
         "v3：MA10 上穿后回贴 MA30 的崩盘日，换手率 < 5% 且收盘脱离低点 >= 0.3%",
     ),
+    DiscoveryRule(
+        "v3_oversold_yang_wrap_three_ma",
+        "oversold_rebound",
+        "v3：阳线实体一举包裹收敛的 MA10/MA20/MA30 三线（主人低吸'最好看'形态）",
+    ),
+    DiscoveryRule(
+        "v3_oversold_universal_pullback",
+        "oversold_rebound",
+        "v3：前期地基+低点贴线≤1.5%+均线上穿演化（通用超跌低吸准入，覆盖阴线贴线/横盘吸筹/早期上穿）",
+    ),
 )
 
 
@@ -833,6 +843,22 @@ def build_extended_daily_features(
     ma30 = _number_or_none(base.get("ma30"))
     ma60 = _number_or_none(base.get("ma60"))
 
+    # 预计 M10 上穿 M30 的天数（近5日斜率外推；主人"上穿前夜"低吸点定位因子）
+    # ≤3天=上穿前夜(最好), 4~8天=太早(最差), None=发散不收敛, 0=已上穿
+    ma10_cross_ma30_est_days: float | None = None
+    if ma10 is not None and ma30 is not None:
+        _cross_gap = ma10 - ma30
+        if _cross_gap >= 0:
+            ma10_cross_ma30_est_days = 0.0
+        elif len(ma_series[10]) >= 6 and len(ma_series[30]) >= 6:
+            _ma10_5ago = ma_series[10][-6]
+            _ma30_5ago = ma_series[30][-6]
+            if _ma10_5ago is not None and _ma30_5ago is not None:
+                _gap_5ago = _ma10_5ago - _ma30_5ago
+                _closing = (_cross_gap - _gap_5ago) / 5  # gap 每日缩小量(正=收敛)
+                if _closing > 0:
+                    ma10_cross_ma30_est_days = -_cross_gap / _closing
+
     cross_10_20_age = _recent_cross_age(closes, fast_window=10, slow_window=20)
     cross_10_30_age = _recent_cross_age(closes, fast_window=10, slow_window=30)
     cross_20_30_age = _recent_cross_age(closes, fast_window=20, slow_window=30)
@@ -924,6 +950,92 @@ def build_extended_daily_features(
     )
     turnover_rate_gated = bool(
         turnover_rate is not None and turnover_rate < TURNOVER_RATE_GATE_MAX_PCT
+    )
+    # 阳线包裹收敛三线（主人低吸"最好看"形态：三线挤窄带，阳线实体一举跨越 = 收敛到极致的启动信号）
+    _open_price = _number_or_none(visible[-1].get("open_price")) if visible else None
+    yang_wrap_three_ma = False
+    if (
+        _open_price is not None
+        and ma10 is not None
+        and ma20 is not None
+        and ma30 is not None
+        and close_price is not None
+    ):
+        _lo3 = min(ma10, ma20, ma30)
+        _hi3 = max(ma10, ma20, ma30)
+        # 换手≥1.5%（主人："换手率也在1.5%以上"——排除<1%死股式包裹，它们微涨非真低吸）
+        yang_wrap_three_ma = bool(
+            _open_price < _lo3
+            and close_price > _hi3
+            and turnover_rate is not None
+            and turnover_rate >= 1.5
+        )
+    # 均线平滑度（M10 近6日逐日变化变异系数，小=匀速平滑收敛）
+    ma10_slope_cv_6d: float | None = None
+    _m10_ser = ma_series[10]
+    if len(_m10_ser) >= 6:
+        _m10_6 = _m10_ser[-6:]
+        _m10_chg = [
+            (_m10_6[i] - _m10_6[i - 1]) / _m10_6[i - 1] * 100
+            for i in range(1, 6)
+            if _m10_6[i] is not None and _m10_6[i - 1]
+        ]
+        if len(_m10_chg) == 5:
+            _mean_chg = sum(_m10_chg) / 5
+            if _mean_chg != 0:
+                _var = sum((x - _mean_chg) ** 2 for x in _m10_chg) / 5
+                ma10_slope_cv_6d = (_var ** 0.5) / abs(_mean_chg) * 100
+    # 梯形缩量（近6日量能逐日递减天数/5，1.0=完美下楼梯地量）
+    vol_monotone_6d: float | None = None
+    _vols_6 = [v for v in volumes[-6:] if v is not None]
+    if len(_vols_6) == 6:
+        vol_monotone_6d = sum(1 for i in range(1, 6) if _vols_6[i] < _vols_6[i - 1]) / 5
+    # K线实体均匀度（近6日实体排除最大后仍<2%=回踩过程无大阴大阳抖动）
+    body_max_excl_6d: float | None = None
+    if len(visible) >= 6:
+        _bodies = []
+        for _row in visible[-6:]:
+            _bo = _number_or_none(_row.get("open_price"))
+            _bc = _number_or_none(_row.get("close_price"))
+            if _bo and _bc:
+                _bodies.append(abs(_bc - _bo) / _bo * 100)
+        if len(_bodies) >= 2:
+            body_max_excl_6d = sorted(_bodies)[-2]
+    # 上穿后守住溢价（主人"涨2次跳水=假突破波折"判据）：
+    # 突破日(近15日最大涨幅>3%)前收 vs 突破后最低。溢价>+3%=守住(真突破平滑)，<+1%=回吐(假突破波折)。
+    breakout_hold_premium: float | None = None
+    if len(closes) >= 16 and len(lows) >= 16:
+        _bstart = len(closes) - 15
+        _bk, _bchg = None, 0.0
+        for _k in range(_bstart, len(closes)):
+            if _k > 0:
+                _chg = (closes[_k] - closes[_k - 1]) / closes[_k - 1] * 100
+                if _chg > _bchg:
+                    _bchg, _bk = _chg, _k
+        if _bk is not None and _bchg > 3.0 and lows:
+            _pre_close = closes[_bk - 1]
+            _after_low = min(lows[_bk:])
+            breakout_hold_premium = (_after_low - _pre_close) / _pre_close * 100
+    # 通用超跌低吸准入（主人"低点贴线+上穿演化+前期地基"判据）：
+    # 真贴线(排除假回踩): low在某均线下方≥-1.5%或上方≤+0.6%(真触及/跌破), 不是上方+1.4%擦边;
+    # 排除 M10 远穿 M30(过程结束的纠缠横盘): d10_30 ≤ 3%; 地基(空头≥10) + 上穿演化/已多头。
+    _touch_real = False
+    if low_price is not None:
+        _touch_real = any(
+            _m and -1.5 <= (low_price - _m) / _m * 100 <= 0.6
+            for _m in (ma10, ma20, ma30)  # 贴支撑均线 M10/20/30, 不含 M5(太近易擦边=假回踩)
+        )
+    _prior_bear_u = int(_number_or_none(base.get("prior_bear_alignment_days")) or 0)
+    _d10_30_e = (
+        _signed_ma_distance_pct(ma10, ma30, close_price)
+        if (ma10 is not None and ma30 is not None and close_price is not None)
+        else None
+    )
+    oversold_universal_eligible = bool(
+        _prior_bear_u >= 10
+        and _touch_real
+        and _d10_30_e is not None and _d10_30_e <= 3.0
+        and (ma10_cross_ma30_est_days is not None or trend_bull_alignment)
     )
     capitulation_rebound_tight = bool(
         daily_return is not None
@@ -1346,6 +1458,7 @@ def build_extended_daily_features(
         "ma10_midpoint_near": ma10_midpoint_near,
         "low_to_ma20_pct": low_to_ma20,
         "low_to_ma10_pct": _number_or_none(base.get("low_to_ma10_pct")),
+        "close_to_ma10_pct": close_to_ma10,
         "low_to_ma30_pct": low_to_ma30,
         "close_to_ma20_pct": close_to_ma20,
         "close_to_ma30_pct": close_to_ma30,
@@ -1361,6 +1474,12 @@ def build_extended_daily_features(
             and ma30 is not None
             and (ma10 < ma30 or abs((ma10 - ma30) / ma30 * 100) < MA_CONTACT_DISTANCE_PCT)
         ),
+        # 预计 M10 上穿 M30 天数（主人"上穿前夜"因子）：≤3天=上穿前夜(加分), None=发散
+        "ma10_cross_ma30_est_days": ma10_cross_ma30_est_days,
+        "ma10_cross_ma30_imminent": bool(
+            ma10_cross_ma30_est_days is not None
+            and 0 < ma10_cross_ma30_est_days <= 3.0
+        ),
         "transition_low_support": bool(ma10_low_touch or ma20_low_touch),
         "close_off_low_pct": close_off_low_pct,
         "support_close_reaction": support_close_reaction,
@@ -1369,6 +1488,18 @@ def build_extended_daily_features(
         "turnover_rate_gated": turnover_rate_gated,
         "capitulation_rebound_tight": capitulation_rebound_tight,
         "capitulation_rebound_broad": capitulation_rebound_broad,
+        "yang_wrap_three_ma": yang_wrap_three_ma,
+        "ma10_slope_cv_6d": (
+            _round_pct(ma10_slope_cv_6d) if ma10_slope_cv_6d is not None else None
+        ),
+        "vol_monotone_6d": vol_monotone_6d,
+        "body_max_excl_6d": (
+            _round_pct(body_max_excl_6d) if body_max_excl_6d is not None else None
+        ),
+        "breakout_hold_premium": (
+            _round_pct(breakout_hold_premium) if breakout_hold_premium is not None else None
+        ),
+        "oversold_universal_eligible": oversold_universal_eligible,
         "transition_turnover_5d_capped": transition_turnover_5d_capped,
         "turnover_rate_pct": turnover_rate,
         "turnover_rate_5d_mean_pct": turnover_rate_5d_mean,
@@ -3048,6 +3179,8 @@ def _broad_candidate_positions(
         )
         oversold = False
         oversold_joint_attack = False
+        oversold_yang_wrap = False
+        oversold_universal = False
         if ma10 is not None and ma20 is not None and ma30 is not None:
             spread = _cluster_spread_pct(ma10, ma20, ma30, close_price)
             oversold = bool(
@@ -3062,6 +3195,39 @@ def _broad_candidate_positions(
                 and (
                     _ma_contact(_signed_ma_distance_pct(ma10, ma30, close_price))
                     or _ma_contact(_signed_ma_distance_pct(ma20, ma30, close_price))
+                )
+            )
+            # 阳线包裹收敛三线（主人低吸"最好看"形态：三线挤窄带，阳线实体一举跨越）。
+            # 大阳线(涨幅可>3%)是收敛到极致的启动信号，放宽daily_return上限放行进候选。
+            # 换手≥1.5%（主人判据）——排除<1%死股式包裹（微涨非真低吸）。
+            _tr_wrap = _number_or_none(history[index].get("turnover_rate"))
+            oversold_yang_wrap = bool(
+                prior_bear_days >= 5
+                and spread is not None
+                and spread <= OVERSOLD_CLUSTER_MAX_PCT
+                and close_price > opens[index]
+                and opens[index] < min(ma10, ma20, ma30)
+                and close_price > max(ma10, ma20, ma30)
+                and _tr_wrap is not None
+                and _tr_wrap >= 1.5
+            )
+            # 通用超跌低吸准入（主人"低点贴线+上穿演化+前期地基"判据）：
+            # 真贴线(排除假回踩): low在某均线下方≥-1.5%或上方≤+0.6%(真触及/跌破), 不是上方+1.4%擦边;
+            # 排除 M10 远穿 M30(上穿过程结束的纠缠横盘): d10_30 ≤ 3%;
+            # 前期地基(空头≥10) + 均线上穿演化(将穿/收敛)。
+            _touch_real = any(
+                m and -1.5 <= (lows[index] - m) / m * 100 <= 0.6
+                for m in (ma10, ma20, ma30)  # 贴支撑均线 M10/20/30, 不含 M5(太近易擦边=假回踩)
+            )
+            _d10_30_u = _signed_ma_distance_pct(ma10, ma30, close_price)
+            oversold_universal = bool(
+                prior_bear_days >= 10
+                and _touch_real
+                and _d10_30_u is not None and _d10_30_u <= 3.0
+                and (
+                    -6.0 <= _signed_ma_distance_pct(ma10, ma20, close_price) <= 3.0
+                    or -6.0 <= _d10_30_u <= 3.0
+                    or -6.0 <= _signed_ma_distance_pct(ma20, ma30, close_price) <= 3.0
                 )
             )
             if index >= 4:
@@ -3210,6 +3376,8 @@ def _broad_candidate_positions(
             oversold
             or oversold_process
             or oversold_joint_attack
+            or oversold_yang_wrap
+            or oversold_universal
             or trend
             or trend_geometry
             or trend_transition_preparation
@@ -3587,6 +3755,8 @@ def _rule_matches(rule: DiscoveryRule, features: Mapping[str, object]) -> bool:
                 and features.get("m10_below_or_contact_ma30")
                 and features.get("low_to_ma10_pct") is not None
                 and features.get("low_to_ma10_pct") <= 1.0
+                and features.get("close_to_ma10_pct") is not None
+                and features.get("close_to_ma10_pct") <= 0.5
                 and features.get("turnover_rate_low")
                 and (
                     features.get("staged_m10_first")
@@ -3605,6 +3775,8 @@ def _rule_matches(rule: DiscoveryRule, features: Mapping[str, object]) -> bool:
                 and features.get("m10_below_or_contact_ma30")
                 and features.get("low_to_ma10_pct") is not None
                 and features.get("low_to_ma10_pct") <= 1.0
+                and features.get("close_to_ma10_pct") is not None
+                and features.get("close_to_ma10_pct") <= 0.5
                 and features.get("turnover_rate_gated")
                 and (
                     features.get("staged_m10_first")
@@ -3628,6 +3800,12 @@ def _rule_matches(rule: DiscoveryRule, features: Mapping[str, object]) -> bool:
                 and features.get("ma10_crossed_ma20_within_15d")
                 and features.get("ma10_ma30_contact")
                 and features.get("capitulation_rebound_broad")
+            ),
+            "v3_oversold_yang_wrap_three_ma": bool(
+                features.get("yang_wrap_three_ma")
+            ),
+            "v3_oversold_universal_pullback": bool(
+                features.get("oversold_universal_eligible")
             ),
         }
         if rule.key in process_basic:

@@ -35,15 +35,19 @@ RULE_LABELS = {
     "v3_oversold_staged_low_support_turnover_gate": "分阶段上穿+低点支撑+换手门禁(<8%)",
     "v3_oversold_capitulation_rebound_tight": "崩盘紧凑反弹(换手<3%+脱离低点0.3~1.5%)",
     "v3_oversold_capitulation_rebound_broad": "崩盘宽幅反弹(换手<5%+脱离低点)",
+    "v3_oversold_yang_wrap_three_ma": "阳线包裹收敛三线(主人最好看形态)",
+    "v3_oversold_universal_pullback": "通用超跌低吸(地基+贴线+上穿演化)",
 }
 
 # 同族多规则命中时的展示优先级（越靠前值越硬）
 _TREND_RULE_PRIORITY = ("v4_trend_quiet_pullback", "v4_trend_authentic_pullback")
 _OVERSOLD_RULE_PRIORITY = (
+    "v3_oversold_yang_wrap_three_ma",
     "v3_oversold_capitulation_rebound_tight",
     "v3_oversold_staged_low_support_turnover_low",
     "v3_oversold_capitulation_rebound_broad",
     "v3_oversold_staged_low_support_turnover_gate",
+    "v3_oversold_universal_pullback",
 )
 
 

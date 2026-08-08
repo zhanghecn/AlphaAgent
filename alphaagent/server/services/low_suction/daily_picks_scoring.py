@@ -324,6 +324,33 @@ def score_oversold_candidate(
               else (4.0 if vol_ratio is not None and vol_ratio < 1.1
                     else (2.0 if vol_ratio is not None and vol_ratio < 1.3 else 0.0)))
     )
+    # 阳线包裹收敛三线"好看度"（主人低吸"最好看"形态，权重72主导）。
+    # 连续给分：包裹(+40) + 三线收敛(放大+20,越窄越好) + 均线平滑(+5) + 梯形缩量(+4) + 实体均匀(+3)。
+    yang_wrap = bool(features.get("yang_wrap_three_ma"))
+    m10_cv = _number(features.get("ma10_slope_cv_6d"))
+    vol_mono = _number(features.get("vol_monotone_6d"))
+    body_excl = _number(features.get("body_max_excl_6d"))
+    spread3 = _number(features.get("ma_cluster_spread_pct"))
+    tr_pretty = _number(features.get("turnover_rate_pct"))
+    hold_premium = _number(features.get("breakout_hold_premium"))
+    # 活跃度（主人"死股偏好"反向纠偏：2~5%换手=有资金承接的活跃真低吸加分，
+    # 接近死股的低换手不加分——yang_wrap票里活跃的(传智4.87%)D+5涨43%，温和的(1.6%)只涨2%）
+    active_pts = (
+        8.0 if tr_pretty is not None and 2.0 <= tr_pretty < 5.0
+        else (5.0 if tr_pretty is not None and 5.0 <= tr_pretty < 8.0
+              else (4.0 if tr_pretty is not None and 1.5 <= tr_pretty < 2.0 else 0.0))
+    )
+    # 上穿后守住（主人"涨2次跳水=假突破波折"判据）：
+    # 守住(溢价>+3%,真突破平滑)+15，边缘+8，回吐(假突破)0 —— 前12名只有传智守住、其余全回吐
+    hold_pts = (
+        15.0 if hold_premium is not None and hold_premium > 3.0
+        else (8.0 if hold_premium is not None and hold_premium > 1.0 else 0.0)
+    )
+    pretty_pts = (40.0 if yang_wrap else 0.0) + active_pts + hold_pts
+    pretty_pts += max(0.0, (6.0 - abs(spread3)) / 6.0 * 12.0) if spread3 is not None else 0.0
+    pretty_pts += max(0.0, (80.0 - m10_cv) / 80.0 * 8.0) if m10_cv is not None else 0.0
+    pretty_pts += (vol_mono * 8.0) if vol_mono is not None else 0.0
+    pretty_pts += max(0.0, (2.5 - body_excl) / 2.5 * 4.0) if body_excl is not None else 0.0
 
     components = (
         _component(
@@ -338,6 +365,18 @@ def score_oversold_candidate(
                 else f"换手 {_fmt(turnover)}%（<{OVERSOLD_TURNOVER_GATE_MAX_PCT:g}% 通过）"
             ),
             kind="gate",
+        ),
+        _component(
+            "yang_wrap_pretty",
+            "阳线包裹好看度",
+            pretty_pts > 0,
+            pretty_pts,
+            95.0,
+            (
+                f"阳线包裹三线★ 平滑{_fmt(m10_cv)} 梯形{_fmt(vol_mono)}"
+                if yang_wrap
+                else f"未包裹 平滑{_fmt(m10_cv)} 梯形{_fmt(vol_mono)} 均{_fmt(body_excl)} 散{_fmt(spread3)}"
+            ),
         ),
         _component(
             "turnover_gradient",
@@ -428,7 +467,16 @@ def score_oversold_candidate(
             ),
         ),
     )
-    return _total(components, gate_failed_cap=OVERSOLD_GATE_FAILED_SCORE_CAP), components
+    # 好看度主导：死股偏好(换手/振幅/贴线等)降权×0.4，好看度(包裹+收敛,连续,72)主导，
+    # 让"最好看的真低吸"排第一，不被"低换手微涨死股"压过（主人"死股偏好"教训）。
+    dead_pts = sum(
+        c.points for c in components
+        if c.kind == "bonus" and c.key != "yang_wrap_pretty"
+    )
+    raw = dead_pts * 0.4 + pretty_pts
+    if not gate_passed:
+        raw = min(raw, OVERSOLD_GATE_FAILED_SCORE_CAP)
+    return round(min(140.0, raw), 2), components
 
 
 def _component(
@@ -456,13 +504,14 @@ def _total(
     components: Sequence[ScoreComponent],
     *,
     gate_failed_cap: float | None = None,
+    max_total: float = 100.0,
 ) -> float:
     raw = sum(item.points for item in components)
     if gate_failed_cap is not None and any(
         item.kind == "gate" and not item.passed for item in components
     ):
         raw = min(raw, gate_failed_cap)
-    return round(min(100.0, raw), 2)
+    return round(min(max_total, raw), 2)
 
 
 def _number(value: object) -> float | None:
