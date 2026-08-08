@@ -1,8 +1,8 @@
-"""Read-only extended discovery for the daily low-suction research brief.
+"""Read-only discovery for the daily low-suction research case archive.
 
-The frozen v3/v4 studies remain the baseline. This module tests a deliberately
-small manifest of source-document hypotheses without changing those factors,
-fetching data, or writing a strategy/product record.
+Only named rules derived from the user's documented research cases participate
+in the active manifest. The module remains causal, read-only, and does not
+fetch data or write strategy/product records.
 """
 
 from __future__ import annotations
@@ -40,7 +40,6 @@ PROCESS_CROSS_LOOKBACK = 15
 TRANSITION_CROSS_LOOKBACK = 7
 NEAR_MA_DISTANCE_PCT = 0.5
 RECENT_CROSS_MAX_ABOVE_PCT = 1.5
-OVERSOLD_CLUSTER_MAX_PCT = 5.0
 OVERSOLD_PROCESS_DAILY_RETURN_MIN_PCT = -10.0
 OVERSOLD_PROCESS_PULLBACK_LOOKBACK = 6
 OVERSOLD_PROCESS_PULLBACK_MIN_PCT = -3.0
@@ -50,12 +49,8 @@ TRANSITION_MA20_MA30_CONTACT_PCT = 0.25
 SUPPORT_BROAD_LOW_MIN_PCT = -5.0
 SUPPORT_BROAD_CLOSE_MIN_PCT = -2.0
 SUPPORT_CLOSE_REACTION_MIN_PCT = 0.3
-TRANSITION_CLOSE_ANCHOR_MIN_PCT = -3.0
-TRANSITION_CLOSE_ANCHOR_MAX_PCT = 2.5
 TURNOVER_RATE_LOW_MAX_PCT = 3.0
-TURNOVER_RATE_GATE_MAX_PCT = 8.0
 CAPITULATION_TURNOVER_MAX_PCT = 5.0
-TRANSITION_TURNOVER_5D_MAX_PCT = 8.0
 TREND_GENTLE_SLOPE_MAX_PCT = 2.0
 EARLY_TREND_ALIGNMENT_MIN_SESSIONS = 3
 EARLY_TREND_ALIGNMENT_MAX_SESSIONS = 20
@@ -81,24 +76,8 @@ FROZEN_SELECTION_MODE = "frozen_recent_half_year"
 OVERSOLD_TO_TREND_RULE_KEY = (
     "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30"
 )
-OVERSOLD_TO_TREND_PREPARATION_RULE_KEY = (
-    "oversold_to_trend_pre_cross_ma10_ma20_contact"
-)
-OVERSOLD_TO_TREND_LOW_SUPPORT_RULE_KEY = (
-    "oversold_to_trend_dual_cross_low_support"
-)
-OVERSOLD_TO_TREND_CLOSE_ANCHORED_RULE_KEY = (
-    "oversold_to_trend_dual_cross_close_anchored"
-)
-OVERSOLD_TO_TREND_TURNOVER_CAP_RULE_KEY = (
-    "oversold_to_trend_dual_cross_turnover_cap"
-)
-TRANSITION_RULE_KEYS = frozenset(
-    {
-        OVERSOLD_TO_TREND_PREPARATION_RULE_KEY,
-        OVERSOLD_TO_TREND_RULE_KEY,
-    }
-)
+RESEARCH_THREE_MA_WRAP_RULE_KEY = "research_oversold_three_ma_wrap_stable_base"
+TRANSITION_RULE_KEYS = frozenset({OVERSOLD_TO_TREND_RULE_KEY})
 SCORE_VARIANTS_BY_SETUP: dict[str, tuple[str, ...]] = {
     "oversold_rebound": ("base", "with_volume"),
     "trend_pullback": ("base", "with_transition_bonus"),
@@ -119,128 +98,15 @@ class DiscoveryRule:
     key: str
     setup_type: str
     description: str
-    core_rule_key: str | None = None
-    volume_shape: str | None = None
 
 
-OVERSOLD_CORE_RULES = (
+EXPLICIT_CASE_OVERSOLD_RULES = (
     DiscoveryRule(
-        "m10_m20_near_or_crossed_down",
+        RESEARCH_THREE_MA_WRAP_RULE_KEY,
         "oversold_rebound",
-        "MA10 贴近或刚上穿 MA20，D 日弱势或下跌",
+        "长期空头后，阳线实体包裹收敛 MA10/MA20/MA30，低点贴线且量能已收缩",
     ),
     DiscoveryRule(
-        "m10_m30_near_or_crossed_down",
-        "oversold_rebound",
-        "MA10 贴近或刚上穿 MA30，D 日弱势或下跌",
-    ),
-    DiscoveryRule(
-        "m20_m30_near_or_crossed_down",
-        "oversold_rebound",
-        "MA20 贴近或刚上穿 MA30，D 日弱势或下跌",
-    ),
-    DiscoveryRule(
-        "staged_m10_first_down",
-        "oversold_rebound",
-        "MA10 先上穿 MA20，MA20 尚未上穿 MA30，D 日弱势或下跌",
-    ),
-    DiscoveryRule(
-        "ma10_low_retest_during_staged_cross",
-        "oversold_rebound",
-        "MA10 先上穿 MA20、MA20 尚未上穿 MA30，D 日低点回踩 MA10",
-    ),
-    DiscoveryRule(
-        "m5_m10_joint_attack_before_ma20_cross",
-        "oversold_rebound",
-        "熊市结构后 MA5 转升、MA10 降速并向 MA20 收敛，尚未上穿 MA20",
-    ),
-    DiscoveryRule(
-        "m10_dual_cross_before_m20_m30_down",
-        "oversold_rebound",
-        "MA10 已依次上穿 MA20、MA30，MA20 尚未上穿 MA30，D 日弱势或下跌",
-    ),
-    DiscoveryRule(
-        "m10_m30_contact_after_m10_cross_aggressive_pullback",
-        "oversold_rebound",
-        "MA10 上穿 MA20 后，放量或缩量深回撤中 MA10 回贴 MA30",
-    ),
-    DiscoveryRule(
-        "ma10_low_retest_after_long_bear_staged_cross",
-        "oversold_rebound",
-        "长期空头结构后 MA10 先上穿 MA20、MA20 尚未上穿 MA30，D 日低点回踩 MA10",
-    ),
-    DiscoveryRule(
-        "m5_m10_joint_attack_after_long_bear",
-        "oversold_rebound",
-        "长期空头结构后 MA5 转升、MA10 降速并向 MA20 收敛，尚未上穿 MA20",
-    ),
-    DiscoveryRule(
-        "m10_m30_contact_after_long_bear_aggressive_pullback",
-        "oversold_rebound",
-        "长期空头结构后 MA10 上穿 MA20，深回撤中 MA10 回贴 MA30",
-    ),
-)
-
-
-OVERSOLD_LOW_SUPPORT_RULES = (
-    DiscoveryRule(
-        "m10_m30_contact_after_m10_cross_low_support",
-        "oversold_rebound",
-        "MA10 上穿 MA20 后回贴 MA30，D 日低点在 MA10/20/30 获实际支撑",
-    ),
-    DiscoveryRule(
-        "m10_m30_contact_after_long_bear_low_support",
-        "oversold_rebound",
-        "长期空头结构后 MA10 上穿 MA20 回贴 MA30，D 日低点在 MA10/20/30 获实际支撑",
-    ),
-    DiscoveryRule(
-        "ma30_low_retest_after_m10_cross",
-        "oversold_rebound",
-        "MA10 上穿 MA20 后，D 日低点直接回踩 MA30 且收盘守住支撑",
-    ),
-    DiscoveryRule(
-        "ma30_low_retest_after_long_bear_m10_cross",
-        "oversold_rebound",
-        "长期空头结构后 MA10 上穿 MA20，D 日低点直接回踩 MA30 且收盘守住支撑",
-    ),
-)
-
-
-OVERSOLD_V3_RULES = (
-    DiscoveryRule(
-        "v3_oversold_staged_low_support_turnover_low",
-        "oversold_rebound",
-        "v3：空头后分阶段上穿过程 + D 日低点获均线支撑 + 换手率 < 3%",
-    ),
-    DiscoveryRule(
-        "v3_oversold_staged_low_support_turnover_gate",
-        "oversold_rebound",
-        "v3：空头后分阶段上穿过程 + D 日低点获均线支撑 + 换手率 < 8%",
-    ),
-    DiscoveryRule(
-        "v3_oversold_capitulation_rebound_tight",
-        "oversold_rebound",
-        "v3：MA10 上穿后回贴 MA30 的崩盘日，换手率 < 3% 且收盘脱离低点 0.3~1.5%",
-    ),
-    DiscoveryRule(
-        "v3_oversold_capitulation_rebound_broad",
-        "oversold_rebound",
-        "v3：MA10 上穿后回贴 MA30 的崩盘日，换手率 < 5% 且收盘脱离低点 >= 0.3%",
-    ),
-    DiscoveryRule(
-        "v3_oversold_yang_wrap_three_ma",
-        "oversold_rebound",
-        "v3：阳线实体一举包裹收敛的 MA10/MA20/MA30 三线（主人低吸'最好看'形态）",
-    ),
-    DiscoveryRule(
-        "v3_oversold_universal_pullback",
-        "oversold_rebound",
-        "v3：前期地基+低点贴线≤1.5%+均线上穿演化（通用超跌低吸准入，覆盖阴线贴线/横盘吸筹/早期上穿）",
-    ),
-)
-
-
-EXPLICIT_CASE_OVERSOLD_RULES = (    DiscoveryRule(
         "ma10_low_retest_staged_m30_converging_volume_shrink",
         "oversold_rebound",
         "长期空头后 MA10/20 分阶段上穿，MA10 回踩且向 MA30 收敛，量能缩量",
@@ -270,29 +136,9 @@ EXPLICIT_CASE_OVERSOLD_RULES = (    DiscoveryRule(
 
 EXPLICIT_CASE_TREND_RULES = (
     DiscoveryRule(
-        OVERSOLD_TO_TREND_PREPARATION_RULE_KEY,
-        "trend_pullback",
-        "长期空头后 MA10 在 MA20 下方贴合且间距收窄，D 日阳线；作为超跌转趋势的早期准备，不要求 MA5 或 MA60",
-    ),
-    DiscoveryRule(
         OVERSOLD_TO_TREND_RULE_KEY,
         "trend_pullback",
         "长期空头后 MA10 在 7 日内依次上穿 MA20、MA30，回撤后 MA20/30 紧贴且 MA10/20 向上；不要求 MA5 或 MA60",
-    ),
-    DiscoveryRule(
-        OVERSOLD_TO_TREND_LOW_SUPPORT_RULE_KEY,
-        "trend_pullback",
-        "超跌转趋势双上穿结构，且 D 日低点在 MA10/MA20 获实际支撑、收盘守住",
-    ),
-    DiscoveryRule(
-        OVERSOLD_TO_TREND_CLOSE_ANCHORED_RULE_KEY,
-        "trend_pullback",
-        "超跌转趋势双上穿结构，D 日收盘锚定 MA20 附近（未向上偏离、未深跌破）",
-    ),
-    DiscoveryRule(
-        OVERSOLD_TO_TREND_TURNOVER_CAP_RULE_KEY,
-        "trend_pullback",
-        "超跌转趋势双上穿结构，近 5 日平均换手率 < 8%（排除高换手派发）",
     ),
     DiscoveryRule(
         "ma10_low_touch_after_ma5_extension",
@@ -331,160 +177,9 @@ EXPLICIT_CASE_PROCESS_RULE_KEYS = frozenset(
 )
 
 
-def _volume_sibling_rules(
-    core_rules: Sequence[DiscoveryRule],
-) -> tuple[DiscoveryRule, ...]:
-    siblings: list[DiscoveryRule] = []
-    for core in core_rules:
-        for shape, label in (
-            ("staircase_shrink", "缩量"),
-            ("staircase_expand", "放量"),
-        ):
-            siblings.append(
-                DiscoveryRule(
-                    f"{core.key}_volume_{shape.removeprefix('staircase_')}",
-                    core.setup_type,
-                    f"{core.description} + 梯形{label}",
-                    core_rule_key=core.key,
-                    volume_shape=shape,
-                )
-            )
-    return tuple(siblings)
-
-
 DISCOVERY_RULES: dict[str, tuple[DiscoveryRule, ...]] = {
-    "oversold_rebound": (
-        *OVERSOLD_CORE_RULES,
-        *_volume_sibling_rules(OVERSOLD_CORE_RULES),
-        *OVERSOLD_LOW_SUPPORT_RULES,
-        *_volume_sibling_rules(OVERSOLD_LOW_SUPPORT_RULES),
-        *OVERSOLD_V3_RULES,
-        *EXPLICIT_CASE_OVERSOLD_RULES,
-    ),
-    "trend_pullback": (
-        DiscoveryRule(
-            "ma5_low_touch_down",
-            "trend_pullback",
-            "稳定多头且 MA5 在 MA10 上方，D 日低点回踩 MA5，D 日弱势或下跌",
-        ),
-        DiscoveryRule(
-            "ma5_low_touch_small_positive",
-            "trend_pullback",
-            "稳定多头且 MA5 在 MA10 上方，D 日低点回踩 MA5，D 日小阳",
-        ),
-        DiscoveryRule(
-            "ma5_close_near_down",
-            "trend_pullback",
-            "稳定多头且 MA5 在 MA10 上方，收盘贴近 MA5 但低点未触及，D 日弱势或下跌",
-        ),
-        DiscoveryRule(
-            "ma5_close_near_small_positive",
-            "trend_pullback",
-            "稳定多头且 MA5 在 MA10 上方，收盘贴近 MA5 但低点未触及，D 日小阳",
-        ),
-        DiscoveryRule(
-            "ma5_midpoint_near_down",
-            "trend_pullback",
-            "稳定多头且 MA5 在 MA10 上方，日内中心价贴近 MA5 但低点未触及，D 日弱势或下跌",
-        ),
-        DiscoveryRule(
-            "ma5_midpoint_near_small_positive",
-            "trend_pullback",
-            "稳定多头且 MA5 在 MA10 上方，日内中心价贴近 MA5 但低点未触及，D 日小阳",
-        ),
-        DiscoveryRule(
-            "ma10_low_touch_down",
-            "trend_pullback",
-            "稳定多头但 MA5 不规律，D 日低点回踩 MA10，D 日弱势或下跌",
-        ),
-        DiscoveryRule(
-            "ma10_low_touch_small_positive",
-            "trend_pullback",
-            "稳定多头但 MA5 不规律，D 日低点回踩 MA10，D 日小阳",
-        ),
-        DiscoveryRule(
-            "ma10_close_near_down",
-            "trend_pullback",
-            "稳定多头但 MA5 不规律，收盘贴近 MA10 但低点未触及，D 日弱势或下跌",
-        ),
-        DiscoveryRule(
-            "ma10_close_near_small_positive",
-            "trend_pullback",
-            "稳定多头但 MA5 不规律，收盘贴近 MA10 但低点未触及，D 日小阳",
-        ),
-        DiscoveryRule(
-            "ma10_midpoint_near_down",
-            "trend_pullback",
-            "稳定多头但 MA5 不规律，日内中心价贴近 MA10 但低点未触及，D 日弱势或下跌",
-        ),
-        DiscoveryRule(
-            "ma10_midpoint_near_small_positive",
-            "trend_pullback",
-            "稳定多头但 MA5 不规律，日内中心价贴近 MA10 但低点未触及，D 日小阳",
-        ),
-        DiscoveryRule(
-            "ma5_low_touch_gentle_stable",
-            "trend_pullback",
-            "MA5 低点回踩，稳定多头且均线温和上行",
-        ),
-        DiscoveryRule(
-            "ma5_low_touch_steep_stable",
-            "trend_pullback",
-            "MA5 低点回踩，稳定多头且均线陡峭上行",
-        ),
-        DiscoveryRule(
-            "ma10_low_touch_gentle_stable",
-            "trend_pullback",
-            "MA10 低点回踩，稳定多头且均线温和上行",
-        ),
-        DiscoveryRule(
-            "ma10_low_touch_steep_stable",
-            "trend_pullback",
-            "MA10 低点回踩，稳定多头且均线陡峭上行",
-        ),
-        DiscoveryRule(
-            "ma10_low_touch_regular_ma5_down",
-            "trend_pullback",
-            "MA5 位于 MA10 上方但实际低点回踩 MA10，D 日弱势或下跌",
-        ),
-        DiscoveryRule(
-            "ma5_low_touch_broad_down",
-            "trend_pullback",
-            "稳定多头的 MA5 宽回踩，D 日弱势或下跌",
-        ),
-        DiscoveryRule(
-            "ma5_low_touch_after_trend_rebuild",
-            "trend_pullback",
-            "重新恢复多头排列后的早期阶段，D 日低点宽回踩 MA5",
-        ),
-        DiscoveryRule(
-            "ma5_low_touch_any_candle",
-            "trend_pullback",
-            "多头排列且均线向上时，D 日最低价回踩 MA5，不按当日涨跌幅排除",
-        ),
-        DiscoveryRule(
-            "ma5_low_touch_early_trend_any_candle",
-            "trend_pullback",
-            "多头排列形成后第 3 至第 20 日，D 日最低价回踩 MA5，不按当日涨跌幅排除",
-        ),
-        DiscoveryRule(
-            "ma10_low_touch_early_trend_regular_ma5_down",
-            "trend_pullback",
-            "多头排列形成后第 3 至第 20 日，MA5 在 MA10 上方但实际低点回踩 MA10，D 日弱势或下跌",
-        ),
-        DiscoveryRule(
-            "v4_trend_authentic_pullback",
-            "trend_pullback",
-            "v4：多头排列中低点回踩 MA5/MA10，趋势不过伸（段内相对距离超额 < 2），"
-            "且非首阴追高（安静 K 线、或收盘跌回 MA5 下方、或昨日已下跌）",
-        ),
-        DiscoveryRule(
-            "v4_trend_quiet_pullback",
-            "trend_pullback",
-            "v4：多头排列中安静 K 线（振幅 ≤ 5%）低点回踩 MA5/MA10，趋势不过伸",
-        ),
-        *EXPLICIT_CASE_TREND_RULES,
-    ),
+    "oversold_rebound": EXPLICIT_CASE_OVERSOLD_RULES,
+    "trend_pullback": EXPLICIT_CASE_TREND_RULES,
 }
 
 
@@ -845,22 +540,6 @@ def build_extended_daily_features(
     ma30 = _number_or_none(base.get("ma30"))
     ma60 = _number_or_none(base.get("ma60"))
 
-    # 预计 M10 上穿 M30 的天数（近5日斜率外推；主人"上穿前夜"低吸点定位因子）
-    # ≤3天=上穿前夜(最好), 4~8天=太早(最差), None=发散不收敛, 0=已上穿
-    ma10_cross_ma30_est_days: float | None = None
-    if ma10 is not None and ma30 is not None:
-        _cross_gap = ma10 - ma30
-        if _cross_gap >= 0:
-            ma10_cross_ma30_est_days = 0.0
-        elif len(ma_series[10]) >= 6 and len(ma_series[30]) >= 6:
-            _ma10_5ago = ma_series[10][-6]
-            _ma30_5ago = ma_series[30][-6]
-            if _ma10_5ago is not None and _ma30_5ago is not None:
-                _gap_5ago = _ma10_5ago - _ma30_5ago
-                _closing = (_cross_gap - _gap_5ago) / 5  # gap 每日缩小量(正=收敛)
-                if _closing > 0:
-                    ma10_cross_ma30_est_days = -_cross_gap / _closing
-
     cross_10_20_age = _recent_cross_age(closes, fast_window=10, slow_window=20)
     cross_10_30_age = _recent_cross_age(closes, fast_window=10, slow_window=30)
     cross_20_30_age = _recent_cross_age(closes, fast_window=20, slow_window=30)
@@ -922,16 +601,7 @@ def build_extended_daily_features(
     close_to_ma30 = _price_to_ma_distance_pct(close_price, ma30)
     ma20_low_touch = _support_low_touch(low_to_ma20, close_to_ma20)
     ma30_low_touch = _support_low_touch(low_to_ma30, close_to_ma30)
-    turnover_rates = [_number_or_none(row.get("turnover_rate")) for row in visible]
-    turnover_rate = turnover_rates[-1] if turnover_rates else None
-    prior_turnover_rates = [
-        value for value in turnover_rates[-6:-1] if value is not None
-    ]
-    turnover_rate_5d_mean = (
-        _round_pct(fmean(prior_turnover_rates))
-        if len(prior_turnover_rates) >= 3
-        else None
-    )
+    turnover_rate = _number_or_none(visible[-1].get("turnover_rate"))
     close_off_low_pct = (
         _round_pct((close_price - low_price) / low_price * 100)
         if close_price is not None and low_price > 0
@@ -941,17 +611,8 @@ def build_extended_daily_features(
         close_off_low_pct is not None
         and close_off_low_pct >= SUPPORT_CLOSE_REACTION_MIN_PCT
     )
-    transition_close_anchored = bool(
-        close_to_ma20 is not None
-        and TRANSITION_CLOSE_ANCHOR_MIN_PCT
-        <= close_to_ma20
-        <= TRANSITION_CLOSE_ANCHOR_MAX_PCT
-    )
     turnover_rate_low = bool(
         turnover_rate is not None and turnover_rate < TURNOVER_RATE_LOW_MAX_PCT
-    )
-    turnover_rate_gated = bool(
-        turnover_rate is not None and turnover_rate < TURNOVER_RATE_GATE_MAX_PCT
     )
     # 阳线包裹收敛三线（主人低吸"最好看"形态：三线挤窄带，阳线实体一举跨越 = 收敛到极致的启动信号）
     _open_price = _number_or_none(visible[-1].get("open_price")) if visible else None
@@ -1046,27 +707,6 @@ def build_extended_daily_features(
             _pre_close = closes[_bk - 1]
             _after_low = min(lows[_bk:])
             breakout_hold_premium = (_after_low - _pre_close) / _pre_close * 100
-    # 通用超跌低吸准入（主人"低点贴线+上穿演化+前期地基"判据）：
-    # 真贴线(排除假回踩): low在某均线下方≥-1.5%或上方≤+0.6%(真触及/跌破), 不是上方+1.4%擦边;
-    # 排除 M10 远穿 M30(过程结束的纠缠横盘): d10_30 ≤ 3%; 地基(空头≥10) + 上穿演化/已多头。
-    _touch_real = False
-    if low_price is not None:
-        _touch_real = any(
-            _m and -1.5 <= (low_price - _m) / _m * 100 <= 0.6
-            for _m in (ma10, ma20, ma30)  # 贴支撑均线 M10/20/30, 不含 M5(太近易擦边=假回踩)
-        )
-    _prior_bear_u = int(_number_or_none(base.get("prior_bear_alignment_days")) or 0)
-    _d10_30_e = (
-        _signed_ma_distance_pct(ma10, ma30, close_price)
-        if (ma10 is not None and ma30 is not None and close_price is not None)
-        else None
-    )
-    oversold_universal_eligible = bool(
-        _prior_bear_u >= 10
-        and _touch_real
-        and _d10_30_e is not None and _d10_30_e <= 3.0
-        and (ma10_cross_ma30_est_days is not None or trend_bull_alignment)
-    )
     capitulation_rebound_tight = bool(
         daily_return is not None
         and daily_return <= -5.0
@@ -1081,10 +721,6 @@ def build_extended_daily_features(
         and turnover_rate < CAPITULATION_TURNOVER_MAX_PCT
         and close_off_low_pct is not None
         and close_off_low_pct >= SUPPORT_CLOSE_REACTION_MIN_PCT
-    )
-    transition_turnover_5d_capped = bool(
-        turnover_rate_5d_mean is None
-        or turnover_rate_5d_mean < TRANSITION_TURNOVER_5D_MAX_PCT
     )
     m10_dual_cross_before_m20_m30 = bool(
         cross_10_20_age is not None
@@ -1246,7 +882,7 @@ def build_extended_daily_features(
         prior_ma5_close_distance,
     )
 
-    # --- v4 root factors: candle quietness and trend overextension ---
+    # 排名诊断特征：K 线安静度与趋势过伸。
     prev_close_price = closes[-2] if len(closes) >= 2 else None
     candle_range_pct = None
     if prev_close_price is not None and prev_close_price > 0:
@@ -1358,18 +994,6 @@ def build_extended_daily_features(
         "price_state": _daily_price_state(daily_return),
         "positive_candle": bool(daily_return is not None and daily_return > 0),
         "small_positive_candle": small_positive_candle,
-        "oversold_discovery_eligible": bool(
-            ma10 is not None
-            and ma20 is not None
-            and ma30 is not None
-            and current_spread is not None
-            and int(base.get("prior_bear_alignment_days") or 0) >= 5
-            and current_spread <= OVERSOLD_CLUSTER_MAX_PCT
-            and daily_return is not None
-            and -5.0 <= daily_return <= 3.0
-            and prior_spread is not None
-            and current_spread <= prior_spread
-        ),
         "oversold_process_eligible": bool(
             ma10 is not None
             and ma20 is not None
@@ -1497,25 +1121,9 @@ def build_extended_daily_features(
         "oversold_low_support": bool(
             ma10_low_touch or ma20_low_touch or ma30_low_touch
         ),
-        # 超跌低吸位置语境：M10 必须在「准备上穿 M30」(M10<M30) 或「穿完回贴 M30」(贴近)。
-        # 排除 M10 已远穿 M30（上穿过程结束）的横盘票 —— 它们不是"准备上穿处的 M10 回踩"。
-        "m10_below_or_contact_ma30": bool(
-            ma10 is not None
-            and ma30 is not None
-            and (ma10 < ma30 or abs((ma10 - ma30) / ma30 * 100) < MA_CONTACT_DISTANCE_PCT)
-        ),
-        # 预计 M10 上穿 M30 天数（主人"上穿前夜"因子）：≤3天=上穿前夜(加分), None=发散
-        "ma10_cross_ma30_est_days": ma10_cross_ma30_est_days,
-        "ma10_cross_ma30_imminent": bool(
-            ma10_cross_ma30_est_days is not None
-            and 0 < ma10_cross_ma30_est_days <= 3.0
-        ),
-        "transition_low_support": bool(ma10_low_touch or ma20_low_touch),
         "close_off_low_pct": close_off_low_pct,
         "support_close_reaction": support_close_reaction,
-        "transition_close_anchored": transition_close_anchored,
         "turnover_rate_low": turnover_rate_low,
-        "turnover_rate_gated": turnover_rate_gated,
         "capitulation_rebound_tight": capitulation_rebound_tight,
         "capitulation_rebound_broad": capitulation_rebound_broad,
         "yang_wrap_three_ma": yang_wrap_three_ma,
@@ -1532,10 +1140,7 @@ def build_extended_daily_features(
         "breakout_hold_premium": (
             _round_pct(breakout_hold_premium) if breakout_hold_premium is not None else None
         ),
-        "oversold_universal_eligible": oversold_universal_eligible,
-        "transition_turnover_5d_capped": transition_turnover_5d_capped,
         "turnover_rate_pct": turnover_rate,
-        "turnover_rate_5d_mean_pct": turnover_rate_5d_mean,
         "prior_ma5_close_distance_pct": prior_ma5_close_distance,
         "prior_daily_return_pct": (
             _round_pct(prior_daily_return)
@@ -1722,8 +1327,6 @@ def summarize_rule_observations(
             {
                 "key": rule.key,
                 "description": rule.description,
-                "core_rule_key": rule.core_rule_key,
-                "volume_shape": rule.volume_shape,
                 "overall": _render_rule_aggregate(
                     accumulators[setup_type][rule.key]["overall"]
                 ),
@@ -1757,7 +1360,6 @@ def summarize_rule_observations(
         families[setup_type] = {
             "rules": rendered_rules,
             "selected_rule": selected,
-            "volume_incremental_deltas": _volume_incremental_deltas(rendered_rules),
         }
     return {
         "time_split": _time_split_payload(split),
@@ -2087,8 +1689,6 @@ def run_extended_daily_factor_discovery(
                 {
                     "key": rule.key,
                     "description": rule.description,
-                    "core_rule_key": rule.core_rule_key,
-                    "volume_shape": rule.volume_shape,
                 }
                 for rule in rules
             ]
@@ -2298,7 +1898,7 @@ def render_extended_daily_factor_markdown(report: Mapping[str, object]) -> str:
         f"- 输入 SHA256：{report.get('input_sha256', '-')}",
         f"- 证据等级：{report.get('evidence_level', '-')}",
         f"- 结论：{report.get('conclusion', '-')}",
-        "- 基线案例审计、固定分数和基础卖点证据仍见 v4 综合报告；本报告只扩展未覆盖的具体时点假设。",
+        "- 历史基线案例审计、诊断分数和基础卖点证据保留在综合研究报告；本报告只扩展未覆盖的具体时点假设。",
         "- 日内中心价固定为 (最高价 + 最低价) / 2 的日线范围中点，只用于比较低点、中心价与收盘三种支撑代理，不是分钟 VWAP。",
         "- 原始主板过滤：D+1 与退出路径中严格超过 [-10%, +10%] 的变化全部排除；±10% 保留，约 10.1% 的价格档位端点也按用户口径排除。",
         "- D+1 初始趋势形态仅是事后结果标签：MA10 > MA20 > MA30 且 MA10/MA20 向上；不要求 MA5 或 MA60，也不参与 D 日选股、评分或规则选择。",
@@ -2667,27 +2267,6 @@ def _render_selected_family(
             gate="通过" if isinstance(gate, Mapping) and gate.get("passed") else "未通过",
         )
     )
-    deltas = family.get("volume_incremental_deltas")
-    if isinstance(deltas, Sequence) and deltas:
-        lines.extend(["", "### 成交量附加因子", ""])
-        lines.append("| 量能规则 | 量能形态 | 核心规则 | 区间 | D+1 均值差 | 胜率差 |")
-        lines.append("| --- | --- | --- | --- | ---: | ---: |")
-        for row in deltas:
-            if not isinstance(row, Mapping):
-                continue
-            for segment, values in row.get("segments", {}).items():
-                if isinstance(values, Mapping):
-                    lines.append(
-                        "| {rule} | {shape} | {core} | {segment} | {mean} | {win} |".format(
-                            rule=row.get("rule_key", "-"),
-                            shape=row.get("volume_shape", "-"),
-                            core=row.get("core_rule_key", "-"),
-                            segment=segment,
-                            mean=_number_text(values.get("d1_mean_delta_pct")),
-                            win=_number_text(values.get("win_rate_delta_pct")),
-                        )
-                    )
-
     exit_selection = selected.get("exit_selection")
     if isinstance(exit_selection, Mapping):
         exit_gate = exit_selection.get("qualification_gate")
@@ -3100,9 +2679,13 @@ def _iter_candidate_snapshots(
     *,
     require_rule_match: bool = True,
     include_d1_initial_short_trend_outcome: bool = False,
+    target_dates: set[date] | None = None,
 ) -> Iterable[_CandidateSnapshot]:
+    """Build snapshots for requested market days without a generic entry gate."""
+
     calendar_tuple = _strict_calendar(calendar)
     calendar_set = set(calendar_tuple)
+    scan_dates = calendar_set if target_dates is None else calendar_set & target_dates
     calendar_positions = {value: index for index, value in enumerate(calendar_tuple)}
     eligible_pairs = _eligible_security_pairs(security_status, calendar_tuple)
     for symbol, history in _iter_symbol_histories(bars):
@@ -3114,12 +2697,8 @@ def _iter_candidate_snapshots(
             trade_date: _number_or_none(history[index].get("close_price"))
             for index, trade_date in enumerate(dates)
         }
-        for position in _broad_candidate_positions(
-            history,
-            candidate_dates=calendar_set,
-        ):
-            trade_date = dates[position]
-            if trade_date not in calendar_set:
+        for position, trade_date in enumerate(dates):
+            if trade_date not in scan_dates:
                 continue
             if eligible_pairs and (symbol, trade_date) not in eligible_pairs:
                 continue
@@ -3170,256 +2749,6 @@ def _iter_candidate_snapshots(
             )
 
 
-def _broad_candidate_positions(
-    history: Sequence[Mapping[str, object]],
-    *,
-    candidate_dates: set[date] | None = None,
-) -> tuple[int, ...]:
-    """Prescreen requested signal days while retaining earlier bars for MA history."""
-
-    closes = [_required_positive_number(row.get("close_price"), "close_price") for row in history]
-    opens = [_required_positive_number(row.get("open_price"), "open_price") for row in history]
-    highs = [_required_positive_number(row.get("high_price"), "high_price") for row in history]
-    lows = [_required_positive_number(row.get("low_price"), "low_price") for row in history]
-    ma_series = {
-        window: _moving_average_series(closes, window)
-        for window in (5, 10, 20, 30)
-    }
-    bear = [
-        _is_bear_alignment(
-            ma_series[10][index],
-            ma_series[20][index],
-            ma_series[30][index],
-        )
-        for index in range(len(history))
-    ]
-    result: list[int] = []
-    for index, close_price in enumerate(closes):
-        if candidate_dates is not None and _required_date(
-            history[index].get("trade_date")
-        ) not in candidate_dates:
-            continue
-        ma5 = ma_series[5][index]
-        ma10 = ma_series[10][index]
-        ma20 = ma_series[20][index]
-        ma30 = ma_series[30][index]
-        daily_return = _pct_change(close_price, opens[index])
-        prior_bear_days = _prior_bear_duration(bear, index)
-        transition_ma20_ma30_distance = _signed_ma_distance_pct(
-            ma20,
-            ma30,
-            close_price,
-        )
-        oversold = False
-        oversold_joint_attack = False
-        oversold_yang_wrap = False
-        oversold_universal = False
-        if ma10 is not None and ma20 is not None and ma30 is not None:
-            spread = _cluster_spread_pct(ma10, ma20, ma30, close_price)
-            oversold = bool(
-                prior_bear_days >= 5
-                and spread is not None
-                and spread <= OVERSOLD_CLUSTER_MAX_PCT
-                and -5.0 <= daily_return <= 3.0
-            )
-            oversold_process = bool(
-                prior_bear_days >= 5
-                and OVERSOLD_PROCESS_DAILY_RETURN_MIN_PCT <= daily_return <= 3.0
-                and (
-                    _ma_contact(_signed_ma_distance_pct(ma10, ma30, close_price))
-                    or _ma_contact(_signed_ma_distance_pct(ma20, ma30, close_price))
-                )
-            )
-            # 阳线包裹收敛三线（主人低吸"最好看"形态：三线挤窄带，阳线实体一举跨越）。
-            # 大阳线(涨幅可>3%)是收敛到极致的启动信号，放宽daily_return上限放行进候选。
-            # 换手≥1.5%（主人判据）——排除<1%死股式包裹（微涨非真低吸）。
-            _tr_wrap = _number_or_none(history[index].get("turnover_rate"))
-            oversold_yang_wrap = bool(
-                prior_bear_days >= 5
-                and spread is not None
-                and spread <= OVERSOLD_CLUSTER_MAX_PCT
-                and close_price > opens[index]
-                and opens[index] < min(ma10, ma20, ma30)
-                and close_price > max(ma10, ma20, ma30)
-                and _tr_wrap is not None
-                and _tr_wrap >= 1.5
-            )
-            # 通用超跌低吸准入（主人"低点贴线+上穿演化+前期地基"判据）：
-            # 真贴线(排除假回踩): low在某均线下方≥-1.5%或上方≤+0.6%(真触及/跌破), 不是上方+1.4%擦边;
-            # 排除 M10 远穿 M30(上穿过程结束的纠缠横盘): d10_30 ≤ 3%;
-            # 前期地基(空头≥10) + 均线上穿演化(将穿/收敛)。
-            _touch_real = any(
-                m and -1.5 <= (lows[index] - m) / m * 100 <= 0.6
-                for m in (ma10, ma20, ma30)  # 贴支撑均线 M10/20/30, 不含 M5(太近易擦边=假回踩)
-            )
-            _d10_30_u = _signed_ma_distance_pct(ma10, ma30, close_price)
-            oversold_universal = bool(
-                prior_bear_days >= 10
-                and _touch_real
-                and _d10_30_u is not None and _d10_30_u <= 3.0
-                and (
-                    -6.0 <= _signed_ma_distance_pct(ma10, ma20, close_price) <= 3.0
-                    or -6.0 <= _d10_30_u <= 3.0
-                    or -6.0 <= _signed_ma_distance_pct(ma20, ma30, close_price) <= 3.0
-                )
-            )
-            if index >= 4:
-                ma5_two_days_ago = ma_series[5][index - 2]
-                ma10_two_days_ago = ma_series[10][index - 2]
-                ma10_four_days_ago = ma_series[10][index - 4]
-                ma20_three_days_ago = ma_series[20][index - 3]
-                ma10_three_days_ago = ma_series[10][index - 3]
-                if all(
-                    value is not None
-                    for value in (
-                        ma5,
-                        ma5_two_days_ago,
-                        ma10_two_days_ago,
-                        ma10_four_days_ago,
-                        ma10_three_days_ago,
-                        ma20_three_days_ago,
-                    )
-                ):
-                    ma5_slope = _pct_change(ma5, ma5_two_days_ago)
-                    ma10_slope = _pct_change(ma10, ma10_two_days_ago)
-                    prior_ma10_slope = _pct_change(
-                        ma10_two_days_ago,
-                        ma10_four_days_ago,
-                    )
-                    current_gap = _signed_ma_distance_pct(ma10, ma20, close_price)
-                    prior_gap = _signed_ma_distance_pct(
-                        ma10_three_days_ago,
-                        ma20_three_days_ago,
-                        closes[index - 3],
-                    )
-                    gap_narrowing = _difference_or_none(current_gap, prior_gap)
-                    oversold_joint_attack = bool(
-                        prior_bear_days >= 5
-                        and OVERSOLD_PROCESS_DAILY_RETURN_MIN_PCT
-                        <= daily_return
-                        <= 3.0
-                        and ma5_slope > 0
-                        and ma10_slope > prior_ma10_slope
-                        and ma10 < ma20
-                        and gap_narrowing is not None
-                        and gap_narrowing >= 0.5
-                    )
-        else:
-            oversold_process = False
-        trend = False
-        trend_geometry = False
-        trend_transition_preparation = False
-        trend_transition = False
-        if index >= 3:
-            trend_transition_preparation = _is_pre_cross_trend_transition_preparation(
-                prior_bear_alignment_days=prior_bear_days,
-                ma10=ma10,
-                ma20=ma20,
-                close_price=close_price,
-                daily_return_pct=daily_return,
-                prior_ma10=ma_series[10][index - 3],
-                prior_ma20=ma_series[20][index - 3],
-                prior_close_price=closes[index - 3],
-            )
-        if (
-            ma10 is not None
-            and ma20 is not None
-            and ma30 is not None
-            and index >= 5
-            and prior_bear_days >= LONG_BEAR_ALIGNMENT_MIN_SESSIONS
-            and ma10 > ma20
-            and ma10 > ma30
-            and transition_ma20_ma30_distance is not None
-            and abs(transition_ma20_ma30_distance)
-            <= TRANSITION_MA20_MA30_CONTACT_PCT
-            and 0 < daily_return <= 3.0
-        ):
-            ma10_prior = ma_series[10][index - 5]
-            ma20_prior = ma_series[20][index - 5]
-            ma10_ma20_slopes_up = bool(
-                ma10_prior is not None
-                and ma20_prior is not None
-                and _pct_change(ma10, ma10_prior) > 0
-                and _pct_change(ma20, ma20_prior) > 0
-            )
-            if ma10_ma20_slopes_up:
-                visible_closes = closes[: index + 1]
-                recent_pullback = _recent_pullback_from_prior_high_pct(
-                    visible_closes,
-                    lookback=OVERSOLD_PROCESS_PULLBACK_LOOKBACK,
-                )
-                if (
-                    recent_pullback is not None
-                    and recent_pullback <= OVERSOLD_PROCESS_PULLBACK_MIN_PCT
-                ):
-                    cross_10_20_age = _recent_cross_age(
-                        visible_closes,
-                        fast_window=10,
-                        slow_window=20,
-                        lookback=TRANSITION_CROSS_LOOKBACK,
-                    )
-                    cross_10_30_age = _recent_cross_age(
-                        visible_closes,
-                        fast_window=10,
-                        slow_window=30,
-                        lookback=TRANSITION_CROSS_LOOKBACK,
-                    )
-                    trend_transition = bool(
-                        cross_10_20_age is not None
-                        and cross_10_30_age is not None
-                        and cross_10_20_age >= cross_10_30_age
-                    )
-        if (
-            ma5 is not None
-            and ma10 is not None
-            and ma20 is not None
-            and ma30 is not None
-            and ma10 > ma20 > ma30
-            and index >= 5
-        ):
-            slopes = tuple(
-                _pct_change(ma_series[window][index], ma_series[window][index - 5])
-                for window in (10, 20, 30)
-                if ma_series[window][index] is not None
-                and ma_series[window][index - 5] is not None
-            )
-            if len(slopes) == 3 and all(value > 0 for value in slopes):
-                ma5_distance = _pct_change(lows[index], ma5)
-                ma10_distance = _pct_change(lows[index], ma10)
-                midpoint_price = (highs[index] + lows[index]) / 2
-                midpoint_ma5_distance = _pct_change(midpoint_price, ma5)
-                midpoint_ma10_distance = _pct_change(midpoint_price, ma10)
-                close_ma5_distance = _pct_change(close_price, ma5)
-                close_ma10_distance = _pct_change(close_price, ma10)
-                support_seen = bool(
-                    _support_low_touch(ma5_distance, close_ma5_distance)
-                    or _support_low_touch(ma10_distance, close_ma10_distance)
-                    or _support_low_touch_broad(ma5_distance, close_ma5_distance)
-                    or _support_midpoint_near(midpoint_ma5_distance)
-                    or _support_midpoint_near(midpoint_ma10_distance)
-                    or _support_close_near(close_ma5_distance)
-                    or _support_close_near(close_ma10_distance)
-                )
-                trend = bool(daily_return <= 3.0 and support_seen)
-                trend_geometry = bool(
-                    ma5 > ma10
-                    and _support_low_touch(ma5_distance, close_ma5_distance)
-                )
-        if (
-            oversold
-            or oversold_process
-            or oversold_joint_attack
-            or oversold_yang_wrap
-            or oversold_universal
-            or trend
-            or trend_geometry
-            or trend_transition_preparation
-            or trend_transition
-        ):
-            result.append(index)
-    return tuple(result)
-
-
 def _is_pre_cross_trend_transition_preparation(
     *,
     prior_bear_alignment_days: int,
@@ -3459,13 +2788,16 @@ def process_rule_predicates(
 ) -> dict[str, bool]:
     """Return every source-contract predicate for an explicit case rule.
 
-    Generic discovery rules deliberately retain their existing broad matching
-    behavior. This function is only for the narrow source-derived branches
-    required by the personal-case gate, so a case report can show exactly why
-    a claimed chart setup did or did not match.
+    A case report can therefore show exactly why a claimed source pattern did
+    or did not match at the decision cutoff.
     """
 
     predicates: dict[str, dict[str, bool]] = {
+        RESEARCH_THREE_MA_WRAP_RULE_KEY: {
+            "long_bear_alignment": bool(features.get("long_bear_alignment")),
+            "yang_wrap_three_ma": bool(features.get("yang_wrap_three_ma")),
+            "yang_wrap_stable_base": bool(features.get("yang_wrap_stable_base")),
+        },
         "ma10_low_retest_staged_m30_converging_volume_shrink": {
             "long_bear_alignment": bool(features.get("long_bear_alignment")),
             "oversold_process_eligible": bool(
@@ -3503,15 +2835,6 @@ def process_rule_predicates(
             "positive_candle": bool(features.get("positive_candle")),
             "last_volume_expanded": bool(features.get("last_volume_expanded")),
         },
-        OVERSOLD_TO_TREND_PREPARATION_RULE_KEY: {
-            "long_bear_alignment": bool(features.get("long_bear_alignment")),
-            "ma10_below_ma20": bool(features.get("ma10_below_ma20")),
-            "ma10_ma20_contact": bool(features.get("ma10_ma20_contact")),
-            "ma10_ma20_gap_narrowing": bool(
-                features.get("ma10_ma20_gap_narrowing")
-            ),
-            "positive_candle": bool(features.get("positive_candle")),
-        },
         OVERSOLD_TO_TREND_RULE_KEY: {
             "long_bear_alignment": bool(features.get("long_bear_alignment")),
             "ma10_dual_cross_within_7d": bool(
@@ -3527,66 +2850,6 @@ def process_rule_predicates(
             "post_cross_pullback": bool(features.get("post_cross_pullback")),
             "small_positive_candle": bool(
                 features.get("small_positive_candle")
-            ),
-        },
-        OVERSOLD_TO_TREND_LOW_SUPPORT_RULE_KEY: {
-            "long_bear_alignment": bool(features.get("long_bear_alignment")),
-            "ma10_dual_cross_within_7d": bool(
-                features.get("ma10_dual_cross_within_7d")
-            ),
-            "ma10_above_ma20_and_ma30": bool(
-                features.get("ma10_above_ma20_and_ma30")
-            ),
-            "ma20_ma30_tight_contact": bool(
-                features.get("transition_ma20_ma30_tight_contact")
-            ),
-            "ma10_ma20_slopes_up": bool(features.get("ma10_ma20_slopes_up")),
-            "post_cross_pullback": bool(features.get("post_cross_pullback")),
-            "small_positive_candle": bool(
-                features.get("small_positive_candle")
-            ),
-            "transition_low_support": bool(
-                features.get("transition_low_support")
-            ),
-        },
-        OVERSOLD_TO_TREND_CLOSE_ANCHORED_RULE_KEY: {
-            "long_bear_alignment": bool(features.get("long_bear_alignment")),
-            "ma10_dual_cross_within_7d": bool(
-                features.get("ma10_dual_cross_within_7d")
-            ),
-            "ma10_above_ma20_and_ma30": bool(
-                features.get("ma10_above_ma20_and_ma30")
-            ),
-            "ma20_ma30_tight_contact": bool(
-                features.get("transition_ma20_ma30_tight_contact")
-            ),
-            "ma10_ma20_slopes_up": bool(features.get("ma10_ma20_slopes_up")),
-            "post_cross_pullback": bool(features.get("post_cross_pullback")),
-            "small_positive_candle": bool(
-                features.get("small_positive_candle")
-            ),
-            "transition_close_anchored": bool(
-                features.get("transition_close_anchored")
-            ),
-        },
-        OVERSOLD_TO_TREND_TURNOVER_CAP_RULE_KEY: {
-            "long_bear_alignment": bool(features.get("long_bear_alignment")),
-            "ma10_dual_cross_within_7d": bool(
-                features.get("ma10_dual_cross_within_7d")
-            ),
-            "ma10_above_ma20_and_ma30": bool(
-                features.get("ma10_above_ma20_and_ma30")
-            ),
-            "ma20_ma30_tight_contact": bool(
-                features.get("transition_ma20_ma30_tight_contact")
-            ),
-            "ma10_ma20_slopes_up": bool(features.get("ma10_ma20_slopes_up")),
-            "post_cross_pullback": bool(features.get("post_cross_pullback")),
-            "small_positive_candle": bool(
-                features.get("small_positive_candle")
-            ),
-            "transition_turnover_5d_capped": bool(
-                features.get("transition_turnover_5d_capped")
             ),
         },
         "m5_m10_joint_attack_before_ma20_cross_last_volume_expand": {
@@ -3710,280 +2973,10 @@ def _matches_explicit_process_with_volume(
 
 
 def _rule_matches(rule: DiscoveryRule, features: Mapping[str, object]) -> bool:
-    if rule.key in EXPLICIT_CASE_PROCESS_RULE_KEYS:
-        return all(process_rule_predicates(rule.key, features).values())
-    if rule.setup_type == "oversold_rebound":
-        long_bear = bool(features.get("long_bear_alignment"))
-        process_basic = {
-            "ma10_low_retest_during_staged_cross": bool(
-                features.get("oversold_process_eligible")
-                and features.get("staged_m10_first")
-                and features.get("ma10_low_touch")
-            ),
-            "m5_m10_joint_attack_before_ma20_cross": bool(
-                features.get("oversold_process_eligible")
-                and features.get("m5_m10_joint_attack_ready")
-            ),
-            "m10_m30_contact_after_m10_cross_aggressive_pullback": bool(
-                features.get("oversold_process_eligible")
-                and features.get("ma10_crossed_ma20_within_15d")
-                and features.get("ma10_ma30_contact")
-                and features.get("aggressive_pullback")
-            ),
-            "ma10_low_retest_after_long_bear_staged_cross": bool(
-                long_bear
-                and features.get("oversold_process_eligible")
-                and features.get("staged_m10_first")
-                and features.get("ma10_low_touch")
-            ),
-            "m5_m10_joint_attack_after_long_bear": bool(
-                long_bear
-                and features.get("oversold_process_eligible")
-                and features.get("m5_m10_joint_attack_ready")
-            ),
-            "m10_m30_contact_after_long_bear_aggressive_pullback": bool(
-                long_bear
-                and features.get("oversold_process_eligible")
-                and features.get("ma10_crossed_ma20_within_15d")
-                and features.get("ma10_ma30_contact")
-                and features.get("aggressive_pullback")
-            ),
-            "m10_m30_contact_after_m10_cross_low_support": bool(
-                features.get("oversold_process_eligible")
-                and features.get("ma10_crossed_ma20_within_15d")
-                and features.get("ma10_ma30_contact")
-                and features.get("oversold_low_support")
-                and features.get("m10_below_or_contact_ma30")
-                and features.get("low_to_ma10_pct") is not None
-                and features.get("low_to_ma10_pct") <= 1.0
-                and features.get("support_close_reaction")
-            ),
-            "m10_m30_contact_after_long_bear_low_support": bool(
-                long_bear
-                and features.get("oversold_process_eligible")
-                and features.get("ma10_crossed_ma20_within_15d")
-                and features.get("ma10_ma30_contact")
-                and features.get("oversold_low_support")
-                and features.get("m10_below_or_contact_ma30")
-                and features.get("low_to_ma10_pct") is not None
-                and features.get("low_to_ma10_pct") <= 1.0
-                and features.get("support_close_reaction")
-            ),
-            "ma30_low_retest_after_m10_cross": bool(
-                features.get("oversold_process_eligible")
-                and features.get("ma10_crossed_ma20_within_15d")
-                and features.get("ma30_low_touch")
-                and features.get("support_close_reaction")
-            ),
-            "ma30_low_retest_after_long_bear_m10_cross": bool(
-                long_bear
-                and features.get("oversold_process_eligible")
-                and features.get("ma10_crossed_ma20_within_15d")
-                and features.get("ma30_low_touch")
-                and features.get("support_close_reaction")
-            ),
-            "v3_oversold_staged_low_support_turnover_low": bool(
-                features.get("oversold_process_eligible")
-                and features.get("oversold_low_support")
-                and features.get("m10_below_or_contact_ma30")
-                and features.get("low_to_ma10_pct") is not None
-                and features.get("low_to_ma10_pct") <= 1.0
-                and features.get("close_to_ma10_pct") is not None
-                and features.get("close_to_ma10_pct") <= 0.5
-                and features.get("turnover_rate_low")
-                and (
-                    features.get("staged_m10_first")
-                    or features.get("m10_dual_cross_before_m20_m30")
-                    or features.get("m5_m10_joint_attack_ready")
-                    or features.get("ma10_crossed_ma30_within_15d")
-                )
-                and (
-                    not features.get("aggressive_pullback")
-                    or features.get("capitulation_rebound_broad")
-                )
-            ),
-            "v3_oversold_staged_low_support_turnover_gate": bool(
-                features.get("oversold_process_eligible")
-                and features.get("oversold_low_support")
-                and features.get("m10_below_or_contact_ma30")
-                and features.get("low_to_ma10_pct") is not None
-                and features.get("low_to_ma10_pct") <= 1.0
-                and features.get("close_to_ma10_pct") is not None
-                and features.get("close_to_ma10_pct") <= 0.5
-                and features.get("turnover_rate_gated")
-                and (
-                    features.get("staged_m10_first")
-                    or features.get("m10_dual_cross_before_m20_m30")
-                    or features.get("m5_m10_joint_attack_ready")
-                    or features.get("ma10_crossed_ma30_within_15d")
-                )
-                and (
-                    not features.get("aggressive_pullback")
-                    or features.get("capitulation_rebound_broad")
-                )
-            ),
-            "v3_oversold_capitulation_rebound_tight": bool(
-                features.get("oversold_process_eligible")
-                and features.get("ma10_crossed_ma20_within_15d")
-                and features.get("ma10_ma30_contact")
-                and features.get("capitulation_rebound_tight")
-            ),
-            "v3_oversold_capitulation_rebound_broad": bool(
-                features.get("oversold_process_eligible")
-                and features.get("ma10_crossed_ma20_within_15d")
-                and features.get("ma10_ma30_contact")
-                and features.get("capitulation_rebound_broad")
-            ),
-            "v3_oversold_yang_wrap_three_ma": bool(
-                features.get("yang_wrap_three_ma")
-            ),
-            "v3_oversold_universal_pullback": bool(
-                features.get("oversold_universal_eligible")
-            ),
-        }
-        if rule.key in process_basic:
-            return process_basic[rule.key]
-        if rule.core_rule_key in process_basic:
-            return bool(
-                process_basic[rule.core_rule_key]
-                and features.get("volume_shape") == rule.volume_shape
-            )
-        if not bool(features.get("oversold_discovery_eligible")):
-            return False
-        price_state = str(features.get("price_state") or "")
-        down = price_state == "weak_or_down"
-        basic = {
-            "m10_m20_near_or_crossed_down": bool(
-                down and features.get("ma10_ma20_near_or_recent_cross")
-            ),
-            "m10_m30_near_or_crossed_down": bool(
-                down and features.get("ma10_ma30_near_or_recent_cross")
-            ),
-            "m20_m30_near_or_crossed_down": bool(
-                down and features.get("ma20_ma30_near_or_recent_cross")
-            ),
-            "staged_m10_first_down": bool(down and features.get("staged_m10_first")),
-            "m10_dual_cross_before_m20_m30_down": bool(
-                down and features.get("m10_dual_cross_before_m20_m30")
-            ),
-        }
-        if rule.key in basic:
-            return basic[rule.key]
-        if rule.core_rule_key is not None:
-            return bool(
-                basic.get(rule.core_rule_key)
-                and features.get("volume_shape") == rule.volume_shape
-            )
-        return False
-
-    if rule.setup_type == "trend_pullback":
-        if rule.key == "v4_trend_authentic_pullback":
-            return bool(
-                features.get("trend_discovery_eligible")
-                and (
-                    features.get("ma5_low_touch")
-                    or features.get("ma10_low_touch")
-                )
-                and not features.get("trend_overextended")
-                and not features.get("trend_first_crack_chase")
-            )
-        if rule.key == "v4_trend_quiet_pullback":
-            return bool(
-                features.get("trend_discovery_eligible")
-                and features.get("candle_quiet")
-                and (
-                    features.get("ma5_low_touch")
-                    or features.get("ma10_low_touch")
-                )
-                and not features.get("trend_overextended")
-            )
-        if rule.key == "ma5_low_touch_any_candle":
-            return bool(
-                features.get("trend_bull_alignment")
-                and features.get("trend_all_slopes_up")
-                and features.get("ma5_regular")
-                and features.get("ma5_low_touch")
-            )
-        if rule.key == "ma5_low_touch_early_trend_any_candle":
-            return bool(
-                features.get("early_trend_alignment")
-                and features.get("trend_all_slopes_up")
-                and features.get("ma5_regular")
-                and features.get("ma5_low_touch")
-            )
-        if not bool(features.get("trend_discovery_eligible")):
-            return False
-        price_state = str(features.get("price_state") or "")
-        down = price_state == "weak_or_down"
-        small_positive = price_state == "small_positive"
-        ma5_regular = bool(features.get("ma5_regular"))
-        ma5_low_touch = bool(features.get("ma5_low_touch"))
-        ma10_low_touch = bool(features.get("ma10_low_touch"))
-        ma5_midpoint_only = bool(features.get("ma5_midpoint_near")) and not ma5_low_touch
-        ma10_midpoint_only = bool(features.get("ma10_midpoint_near")) and not ma10_low_touch
-        ma5_close_only = bool(features.get("ma5_close_near")) and not ma5_low_touch
-        ma10_close_only = bool(features.get("ma10_close_near")) and not ma10_low_touch
-        stable = bool(features.get("trend_stable_bull"))
-        profile = str(features.get("trend_slope_profile") or "")
-        return {
-            "ma5_low_touch_down": ma5_regular and ma5_low_touch and down,
-            "ma5_low_touch_small_positive": ma5_regular
-            and ma5_low_touch
-            and small_positive,
-            "ma5_close_near_down": ma5_regular and ma5_close_only and down,
-            "ma5_close_near_small_positive": ma5_regular
-            and ma5_close_only
-            and small_positive,
-            "ma5_midpoint_near_down": ma5_regular and ma5_midpoint_only and down,
-            "ma5_midpoint_near_small_positive": ma5_regular
-            and ma5_midpoint_only
-            and small_positive,
-            "ma10_low_touch_down": not ma5_regular and ma10_low_touch and down,
-            "ma10_low_touch_small_positive": not ma5_regular
-            and ma10_low_touch
-            and small_positive,
-            "ma10_close_near_down": not ma5_regular and ma10_close_only and down,
-            "ma10_close_near_small_positive": not ma5_regular
-            and ma10_close_only
-            and small_positive,
-            "ma10_midpoint_near_down": not ma5_regular and ma10_midpoint_only and down,
-            "ma10_midpoint_near_small_positive": not ma5_regular
-            and ma10_midpoint_only
-            and small_positive,
-            "ma5_low_touch_gentle_stable": ma5_regular
-            and ma5_low_touch
-            and stable
-            and profile == "gentle",
-            "ma5_low_touch_steep_stable": ma5_regular
-            and ma5_low_touch
-            and stable
-            and profile == "steep",
-            "ma10_low_touch_gentle_stable": not ma5_regular
-            and ma10_low_touch
-            and stable
-            and profile == "gentle",
-            "ma10_low_touch_steep_stable": not ma5_regular
-            and ma10_low_touch
-            and stable
-            and profile == "steep",
-            "ma10_low_touch_regular_ma5_down": ma5_regular
-            and ma10_low_touch
-            and stable
-            and down,
-            "ma5_low_touch_broad_down": ma5_regular
-            and bool(features.get("ma5_low_touch_broad"))
-            and stable
-            and down,
-            "ma5_low_touch_after_trend_rebuild": ma5_regular
-            and bool(features.get("ma5_low_touch_broad"))
-            and stable
-            and bool(features.get("trend_rebuilt_recently")),
-            "ma10_low_touch_early_trend_regular_ma5_down": ma5_regular
-            and ma10_low_touch
-            and down
-            and bool(features.get("early_trend_alignment")),
-        }.get(rule.key, False)
-    return False
+    return bool(
+        rule.key in EXPLICIT_CASE_PROCESS_RULE_KEYS
+        and all(process_rule_predicates(rule.key, features).values())
+    )
 
 
 def _matches_any_rule(features: Mapping[str, object]) -> bool:
@@ -4358,63 +3351,6 @@ def _exit_qualification_gate(
         "checks": checks,
         "reasons": [name for name, passed in checks.items() if not passed],
     }
-
-
-def _volume_incremental_deltas(
-    rules: Sequence[Mapping[str, object]],
-) -> list[dict[str, object]]:
-    by_key = {
-        str(rule.get("key")): rule
-        for rule in rules
-        if isinstance(rule, Mapping)
-    }
-    rows: list[dict[str, object]] = []
-    for rule in rules:
-        if not isinstance(rule, Mapping):
-            continue
-        core_key = rule.get("core_rule_key")
-        core = by_key.get(str(core_key)) if core_key else None
-        if not isinstance(core, Mapping):
-            continue
-        deltas: dict[str, dict[str, float | None]] = {}
-        rule_segments = rule.get("segments")
-        core_segments = core.get("segments")
-        if not isinstance(rule_segments, Mapping) or not isinstance(core_segments, Mapping):
-            continue
-        for segment in ("overall", *SEGMENTS):
-            if segment == "overall":
-                rule_summary = rule.get("overall")
-                core_summary = core.get("overall")
-            else:
-                rule_part = rule_segments.get(segment)
-                core_part = core_segments.get(segment)
-                rule_summary = rule_part.get("overall") if isinstance(rule_part, Mapping) else None
-                core_summary = core_part.get("overall") if isinstance(core_part, Mapping) else None
-            if not isinstance(rule_summary, Mapping) or not isinstance(core_summary, Mapping):
-                continue
-            deltas[segment] = {
-                "d1_mean_delta_pct": _difference_or_none(
-                    rule_summary.get("d1_mean_return_pct"),
-                    core_summary.get("d1_mean_return_pct"),
-                ),
-                "win_rate_delta_pct": _difference_or_none(
-                    rule_summary.get("win_rate_pct"),
-                    core_summary.get("win_rate_pct"),
-                ),
-                "sample_count_delta": _difference_or_none(
-                    rule_summary.get("sample_count"),
-                    core_summary.get("sample_count"),
-                ),
-            }
-        rows.append(
-            {
-                "rule_key": rule.get("key"),
-                "core_rule_key": core_key,
-                "volume_shape": rule.get("volume_shape"),
-                "segments": deltas,
-            }
-        )
-    return rows
 
 
 def _future_exit_bars(
@@ -4890,36 +3826,6 @@ def _daily_price_state(value: float | None) -> str:
     return "large_green"
 
 
-def _is_bear_alignment(
-    ma10: float | None,
-    ma20: float | None,
-    ma30: float | None,
-) -> bool:
-    return ma10 is not None and ma20 is not None and ma30 is not None and ma10 < ma20 < ma30
-
-
-def _prior_bear_duration(bear: Sequence[bool], index: int) -> int:
-    end = max(0, index - 4)
-    start = max(0, end - 40)
-    longest = 0
-    current = 0
-    for value in bear[start:end]:
-        current = current + 1 if value else 0
-        longest = max(longest, current)
-    return longest
-
-
-def _cluster_spread_pct(
-    ma10: float,
-    ma20: float,
-    ma30: float,
-    close_price: float,
-) -> float | None:
-    if close_price <= 0:
-        return None
-    return (abs(ma10 - ma20) + abs(ma20 - ma30)) / 2 / close_price * 100
-
-
 def _feature_snapshot(features: Mapping[str, object]) -> dict[str, object]:
     keys = (
         "daily_return_pct",
@@ -4970,13 +3876,10 @@ def _feature_snapshot(features: Mapping[str, object]) -> dict[str, object]:
         "yang_wrap_nearest_ma_low_abs_pct",
         "yang_wrap_volume_end_to_peak_ratio_6d",
         "yang_wrap_stable_base",
-        "transition_low_support",
         "close_off_low_pct",
         "support_close_reaction",
-        "transition_close_anchored",
         "aggressive_pullback",
         "turnover_rate_pct",
-        "turnover_rate_5d_mean_pct",
         "trend_slope_profile",
         "trend_stable_bull",
         "trend_rebuilt_recently",
@@ -5093,29 +3996,6 @@ def _research_answers(report: Mapping[str, object]) -> list[dict[str, str]]:
                     ),
                 }
             )
-    oversold = families.get("oversold_rebound")
-    if isinstance(oversold, Mapping):
-        deltas = oversold.get("volume_incremental_deltas")
-        holdout_deltas = [
-            row.get("segments", {}).get("holdout", {}).get("d1_mean_delta_pct")
-            for row in deltas
-            if isinstance(row, Mapping)
-            and isinstance(row.get("segments"), Mapping)
-            and isinstance(row["segments"].get("holdout"), Mapping)
-        ] if isinstance(deltas, Sequence) else []
-        numeric = [float(value) for value in holdout_deltas if _number_or_none(value) is not None]
-        answers.append(
-            {
-                "question": "成交量附加因子何时有增量",
-                "status": "exploratory_observation"
-                if numeric
-                else "insufficient_data",
-                "detail": (
-                    "量能子规则（缩量或放量）相对核心规则的留出期 D+1 均值差最大为 {value}；"
-                    "这仅是探索性增量观察，不能作为策略因子。"
-                ).format(value=_number_text(max(numeric) if numeric else None)),
-            }
-        )
     for setup_type, question in (
         ("oversold_rebound", "超跌反弹的收盘卖点"),
         ("trend_pullback", "趋势低吸的收盘卖点"),
@@ -5207,7 +4087,6 @@ def _empty_families() -> dict[str, dict[str, object]]:
                 "exit_selection": _empty_exit_selection(),
                 "post_limit_up_exit_selection": _empty_exit_selection(),
             },
-            "volume_incremental_deltas": [],
         }
         for setup_type in SETUP_TYPES
     }

@@ -28,11 +28,15 @@ MIN_QUALIFICATION_CANDIDATE_DAYS = 10
 MAIN_BOARD_PRICE_LIMIT_RATE = Decimal("0.10")
 PERSONAL_RESEARCH_CASES = (
     ("传智教育 MA10 回踩", "003032.SZSE", date(2026, 7, 22), "oversold_rebound"),
+    ("传智教育 三线包裹", "003032.SZSE", date(2026, 7, 23), "oversold_rebound"),
     ("传智教育 MA10 向 MA30 收敛", "003032.SZSE", date(2026, 7, 24), "oversold_rebound"),
     ("一鸣食品 MA10 贴合 MA20", "605179.SSE", date(2026, 7, 15), "oversold_rebound"),
     ("一鸣食品 超跌转趋势", "605179.SSE", date(2026, 7, 27), "trend_pullback"),
     ("立新能源 M5/M10 上攻", "001258.SZSE", date(2026, 7, 15), "oversold_rebound"),
     ("爱丽家居 MA10 回贴 MA30", "603221.SSE", date(2026, 7, 20), "oversold_rebound"),
+    ("百花医药 M10/M20 两线包裹", "600721.SSE", date(2026, 7, 14), "oversold_rebound"),
+    ("百花医药 三线包裹", "600721.SSE", date(2026, 7, 31), "oversold_rebound"),
+    ("百花医药 向上踩稳", "600721.SSE", date(2026, 8, 3), "oversold_rebound"),
     ("中南文化 MA10 回踩", "002445.SZSE", date(2026, 2, 12), "trend_pullback"),
     ("华电辽能 MA5 回踩", "600396.SSE", date(2026, 3, 5), "trend_pullback"),
     ("华电辽能 MA5 缩量回踩", "600396.SSE", date(2026, 3, 13), "trend_pullback"),

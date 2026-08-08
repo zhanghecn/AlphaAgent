@@ -83,6 +83,7 @@ class CaseSourceMetadata:
     expected_launch_date: date | None
     source_anchor: str
     required_process_rule_keys: tuple[str, ...]
+    narrative_status: str = "complete"
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,12 @@ PERSONAL_CASE_SOURCE_METADATA: dict[str, CaseSourceMetadata] = {
         date(2026, 7, 23),
         "ma10_low_touch",
         ("ma10_low_retest_staged_m30_converging_volume_shrink",),
+    ),
+    "传智教育 三线包裹": CaseSourceMetadata(
+        date(2026, 7, 15),
+        date(2026, 7, 27),
+        "process_only",
+        ("research_oversold_three_ma_wrap_stable_base",),
     ),
     "传智教育 MA10 向 MA30 收敛": CaseSourceMetadata(
         date(2026, 7, 15),
@@ -130,6 +137,26 @@ PERSONAL_CASE_SOURCE_METADATA: dict[str, CaseSourceMetadata] = {
         date(2026, 7, 21),
         "process_only",
         ("ma10_ma30_retest_after_actual_cross_two_leg_volume",),
+    ),
+    "百花医药 M10/M20 两线包裹": CaseSourceMetadata(
+        date(2026, 7, 14),
+        None,
+        "process_only",
+        (),
+        "research_pending",
+    ),
+    "百花医药 三线包裹": CaseSourceMetadata(
+        date(2026, 7, 14),
+        None,
+        "process_only",
+        ("research_oversold_three_ma_wrap_stable_base",),
+    ),
+    "百花医药 向上踩稳": CaseSourceMetadata(
+        date(2026, 7, 31),
+        date(2026, 8, 4),
+        "process_only",
+        (),
+        "research_pending",
     ),
     "中南文化 MA10 回踩": CaseSourceMetadata(
         date(2026, 2, 10),
@@ -189,6 +216,7 @@ PERSONAL_CASES = tuple(
         required_process_rule_keys=(
             PERSONAL_CASE_SOURCE_METADATA[name].required_process_rule_keys
         ),
+        narrative_status=PERSONAL_CASE_SOURCE_METADATA[name].narrative_status,
     )
     for name, vt_symbol, trade_date, expected_setup_type in PERSONAL_RESEARCH_CASES
 )

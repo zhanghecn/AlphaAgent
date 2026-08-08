@@ -1,4 +1,4 @@
-"""低吸日线候选扫描器：把研究引擎的因果特征与 v3/v4 规则变成候选清单。
+"""低吸日线候选扫描器：把研究票的因果规则变成候选清单。
 
 实时推荐与历史回测共用同一套扫描逻辑，差别只在数据窗口与是否带 D+1 标签。
 """
@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from alphaagent.server.services.low_suction.daily_factor_extended_discovery import (
+    DISCOVERY_RULES,
     _iter_candidate_snapshots,
     matching_discovery_rule_keys,
 )
@@ -29,26 +30,10 @@ SETUP_TYPE_LABELS = {
 }
 
 RULE_LABELS = {
-    "v4_trend_quiet_pullback": "安静小K线回踩",
-    "v4_trend_authentic_pullback": "真实回踩（非首阴追高）",
-    "v3_oversold_staged_low_support_turnover_low": "分阶段上穿+低点支撑+低换手(<3%)",
-    "v3_oversold_staged_low_support_turnover_gate": "分阶段上穿+低点支撑+换手门禁(<8%)",
-    "v3_oversold_capitulation_rebound_tight": "崩盘紧凑反弹(换手<3%+脱离低点0.3~1.5%)",
-    "v3_oversold_capitulation_rebound_broad": "崩盘宽幅反弹(换手<5%+脱离低点)",
-    "v3_oversold_yang_wrap_three_ma": "阳线包裹收敛三线(主人最好看形态)",
-    "v3_oversold_universal_pullback": "通用超跌低吸(地基+贴线+上穿演化)",
+    rule.key: rule.description
+    for rules in DISCOVERY_RULES.values()
+    for rule in rules
 }
-
-# 同族多规则命中时的展示优先级（越靠前值越硬）
-_TREND_RULE_PRIORITY = ("v4_trend_quiet_pullback", "v4_trend_authentic_pullback")
-_OVERSOLD_RULE_PRIORITY = (
-    "v3_oversold_yang_wrap_three_ma",
-    "v3_oversold_capitulation_rebound_tight",
-    "v3_oversold_staged_low_support_turnover_low",
-    "v3_oversold_capitulation_rebound_broad",
-    "v3_oversold_staged_low_support_turnover_gate",
-    "v3_oversold_universal_pullback",
-)
 
 
 @dataclass(frozen=True)
@@ -106,7 +91,7 @@ def scan_low_suction_candidates(
     *,
     target_dates: set[date] | None = None,
 ) -> list[LowSuctionCandidate]:
-    """Scan candidate snapshots and score the ones matching v3/v4 rules.
+    """Scan source-rule candidates and attach the current diagnostic score.
 
     ``target_dates`` 为 None 时扫描全窗口（回测）；传入单日集合即实时/补扫。
     """
@@ -117,6 +102,7 @@ def scan_low_suction_candidates(
         calendar,
         security_status,
         require_rule_match=True,
+        target_dates=target_dates,
     )
     calendar_tuple = tuple(calendar)
     calendar_positions = {value: index for index, value in enumerate(calendar_tuple)}
@@ -124,16 +110,8 @@ def scan_low_suction_candidates(
         if target_dates is not None and snapshot.trade_date not in target_dates:
             continue
         features = snapshot.features
-        trend_rules = tuple(
-            key
-            for key in _TREND_RULE_PRIORITY
-            if key in matching_discovery_rule_keys(features, "trend_pullback")
-        )
-        oversold_rules = tuple(
-            key
-            for key in _OVERSOLD_RULE_PRIORITY
-            if key in matching_discovery_rule_keys(features, "oversold_rebound")
-        )
+        trend_rules = matching_discovery_rule_keys(features, "trend_pullback")
+        oversold_rules = matching_discovery_rule_keys(features, "oversold_rebound")
         if not trend_rules and not oversold_rules:
             continue
         streak = quiet_candle_streak(snapshot.history[: snapshot.position + 1])
@@ -172,8 +150,6 @@ def scan_low_suction_candidates(
                 )
             )
         if oversold_rules:
-            if features.get("trend_bull_alignment"):
-                continue  # 多头排列(MA10>MA20>MA30)成立 = 已是趋势族，不再作超跌反弹（超跌是空头→多头过渡期）
             history_vols = [_number(h.get("volume")) for h in snapshot.history[: snapshot.position + 1]]
             history_vols = [v for v in history_vols if v is not None]
             if len(history_vols) >= 10:
@@ -181,8 +157,6 @@ def scan_low_suction_candidates(
             else:
                 vol_ratio = None
             score, components = score_oversold_candidate(features, streak, vol_ratio=vol_ratio)
-            if any(component.kind == "gate" and not component.passed for component in components):
-                continue  # 超跌族换手门禁失败（≥8% 派发），不进候选清单
             candidates.append(
                 LowSuctionCandidate(
                     vt_symbol=snapshot.symbol,

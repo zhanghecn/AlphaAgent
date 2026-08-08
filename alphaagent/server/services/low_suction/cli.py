@@ -70,7 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     daily_backtest = subparsers.add_parser(
         "low-suction-daily-backtest",
-        help="run the v3/v4 low-suction daily backtest and store its report",
+        help="run the source-rule low-suction daily backtest and store its report",
     )
     _add_daily_factor_range_arguments(daily_backtest)
     return parser

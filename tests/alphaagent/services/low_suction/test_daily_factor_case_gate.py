@@ -159,6 +159,7 @@ def test_cli_declares_targeted_personal_case_gate(
         "605179.SSE",
         "001258.SZSE",
         "603221.SSE",
+        "600721.SSE",
         "002445.SZSE",
         "600396.SSE",
         "600629.SSE",

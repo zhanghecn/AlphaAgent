@@ -65,6 +65,14 @@ def test_personal_case_manifest_covers_every_named_source_observation() -> None:
             ("ma10_low_retest_staged_m30_converging_volume_shrink",),
         ),
         (
+            "传智教育 三线包裹",
+            "003032.SZSE",
+            date(2026, 7, 23),
+            "oversold_rebound",
+            "process_only",
+            ("research_oversold_three_ma_wrap_stable_base",),
+        ),
+        (
             "传智教育 MA10 向 MA30 收敛",
             "003032.SZSE",
             date(2026, 7, 24),
@@ -103,6 +111,30 @@ def test_personal_case_manifest_covers_every_named_source_observation() -> None:
             "oversold_rebound",
             "process_only",
             ("ma10_ma30_retest_after_actual_cross_two_leg_volume",),
+        ),
+        (
+            "百花医药 M10/M20 两线包裹",
+            "600721.SSE",
+            date(2026, 7, 14),
+            "oversold_rebound",
+            "process_only",
+            (),
+        ),
+        (
+            "百花医药 三线包裹",
+            "600721.SSE",
+            date(2026, 7, 31),
+            "oversold_rebound",
+            "process_only",
+            ("research_oversold_three_ma_wrap_stable_base",),
+        ),
+        (
+            "百花医药 向上踩稳",
+            "600721.SSE",
+            date(2026, 8, 3),
+            "oversold_rebound",
+            "process_only",
+            (),
         ),
         (
             "中南文化 MA10 回踩",
@@ -158,6 +190,17 @@ def test_personal_case_manifest_covers_every_named_source_observation() -> None:
             )
         ],
     ]
+
+
+def test_unmodeled_personal_cases_stay_archived_as_research_pending() -> None:
+    pending = {
+        case.name: case
+        for case in PERSONAL_CASES
+        if case.narrative_status == "research_pending"
+    }
+
+    assert set(pending) == {"百花医药 M10/M20 两线包裹", "百花医药 向上踩稳"}
+    assert all(not case.required_process_rule_keys for case in pending.values())
 
 
 def test_source_manifest_keeps_only_launch_dates_declared_in_current_text() -> None:

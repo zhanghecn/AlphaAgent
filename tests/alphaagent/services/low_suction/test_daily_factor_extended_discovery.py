@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
 import alphaagent.server.services.low_suction.daily_factor_extended_discovery as extended_discovery
+import alphaagent.server.services.low_suction.daily_picks_scanner as daily_picks_scanner
+from alphaagent.server.services.low_suction.daily_factor_comprehensive_study import (
+    PERSONAL_CASES,
+)
 from alphaagent.server.services.low_suction.daily_factor_extended_discovery import (
     DISCOVERY_RULES,
     DiscoveryRule,
-    _broad_candidate_positions,
+    RESEARCH_THREE_MA_WRAP_RULE_KEY,
     _has_initial_short_trend_shape,
     _is_score_candidate,
     _research_answers,
@@ -205,139 +210,61 @@ def test_scan_admits_three_line_trend_candidate_without_ma60() -> None:
 
     trend = [candidate for candidate in candidates if candidate.setup_type == "trend_pullback"]
     assert len(trend) == 1
-    assert trend[0].rule_key == "v4_trend_quiet_pullback"
+    assert trend[0].rule_key == "ma5_low_touch_stable_trend"
+    assert trend[0].as_dict()["rule_label"] == next(
+        rule.description
+        for rule in DISCOVERY_RULES["trend_pullback"]
+        if rule.key == trend[0].rule_key
+    )
 
 
-def _bull_aligned_with_oversold_rules_history() -> list[dict[str, object]]:
-    """多头排列已成立但仍落在超跌过程窗口内的边界形态。
+def test_scan_keeps_a_source_rule_when_the_diagnostic_turnover_gate_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signal_date = date(2026, 7, 23)
+    snapshot = SimpleNamespace(
+        symbol="003032.SZSE",
+        trade_date=signal_date,
+        position=0,
+        history=(_bar(signal_date, 10.0, volume=1_000.0),),
+        features={
+            "close_price": 10.0,
+            "daily_return_pct": 1.0,
+            "turnover_rate_pct": 9.0,
+            "candle_range_pct": 2.0,
+            "long_bear_alignment": True,
+            "yang_wrap_three_ma": True,
+            "yang_wrap_stable_base": True,
+        },
+        d1_close_return_pct=1.0,
+        d1_label_status="available",
+    )
+    monkeypatch.setattr(
+        daily_picks_scanner,
+        "_iter_candidate_snapshots",
+        lambda *args, **kwargs: iter((snapshot,)),
+    )
+    monkeypatch.setattr(
+        daily_picks_scanner,
+        "matching_discovery_rule_keys",
+        lambda features, setup_type: (
+            (RESEARCH_THREE_MA_WRAP_RULE_KEY,)
+            if setup_type == "oversold_rebound"
+            else ()
+        ),
+    )
 
-    取自石化油服 600871 @2026-08-04 的真实日线收盘价：MA10>MA20>MA30 三线多头已 6 天，
-    但 MA10 上穿 MA30 发生在 15 日窗口内 → 同时匹配 v3 超跌落地规则。
-    用于复现"多头票混进超跌族"假阳性：互斥门禁前 scan 同时产 oversold + trend 候选。
-    """
-    start = date(2025, 1, 1)
-    closes = [
-        2.83, 2.82, 2.90, 2.81, 2.71, 2.70, 2.65, 2.69, 2.71, 2.67, 2.72, 2.65, 2.68, 2.67,
-        2.70, 2.72, 2.63, 2.58, 2.66, 2.64, 2.59, 2.61, 2.53, 2.54, 2.62, 2.60, 2.58, 2.40,
-        2.44, 2.43, 2.41, 2.33, 2.36, 2.32, 2.38, 2.36, 2.40, 2.32, 2.31, 2.31, 2.24, 2.20,
-        2.22, 2.24, 2.25, 2.19, 2.17, 2.14, 2.16, 2.14, 2.10, 2.07, 2.03, 2.05, 2.03, 2.08,
-        2.07, 2.08, 2.07, 2.01, 2.06, 2.06, 2.10, 2.05, 2.17, 2.08, 2.05, 2.04, 2.17, 2.13,
-        2.25, 2.29, 2.17, 2.17, 2.16, 2.20, 2.22, 2.23, 2.26, 2.24,
+    candidates = daily_picks_scanner.scan_low_suction_candidates(
+        [],
+        (signal_date, signal_date + timedelta(days=1)),
+        [],
+        target_dates={signal_date},
+    )
+
+    assert [candidate.rule_key for candidate in candidates] == [
+        RESEARCH_THREE_MA_WRAP_RULE_KEY
     ]
-    return [
-        _bar(start + timedelta(days=index), close, volume=1_000 + index)
-        for index, close in enumerate(closes)
-    ]
-
-
-def test_scan_rejects_bull_aligned_from_oversold() -> None:
-    """超跌/趋势互斥：多头排列(MA10>MA20>MA30)成立的票不再纳入超跌族。
-
-    超跌反弹语义 = 空头→多头过渡期；多头一旦成立就归趋势族。这防止石化油服类
-    "多头走出来仍落在 ma10_crossed_ma30_within_15d 窗口内"的票混进超跌族拿满分。
-    """
-    bars = [
-        {**row, "vt_symbol": "600871.SSE", "turnover_rate": 2.0}
-        for row in _bull_aligned_with_oversold_rules_history()
-    ]
-    calendar = [row["trade_date"] for row in bars]
-    candidates = scan_low_suction_candidates(bars, calendar, [], target_dates={calendar[-1]})
-
-    oversold = [candidate for candidate in candidates if candidate.setup_type == "oversold_rebound"]
-    trend = [candidate for candidate in candidates if candidate.setup_type == "trend_pullback"]
-    # 互斥门禁：多头票不进超跌族
-    assert oversold == []
-    # 但仍正常作为趋势回踩候选
-    assert len(trend) >= 1
-
-
-def _m10_far_above_ma30_oversold_history() -> list[dict[str, object]]:
-    """M10 已远穿 M30（上穿过程结束）但 low 仍贴 M10 的边界形态。
-
-    取自中闽能源 600163 @2026-08-03：空头后一根大阳 → 均线纠缠横盘，M10=5.29 已远在
-    M30=5.10 上方 +3.67%（过程结束），low 仍贴 M10。不是"准备上穿处的 M10 回踩"，
-    不该作超跌低吸。复现 v3_staged 规则因只看 ma20<ma30、漏看 M10vsM30 的误纳。
-    """
-    start = date(2025, 1, 1)
-    closes = [
-        6.17, 5.94, 5.95, 6.24, 6.15, 6.08, 6.11, 6.04, 6.13, 6.31, 6.35, 6.68, 6.34, 6.19,
-        6.25, 6.17, 6.17, 6.38, 6.50, 6.47, 6.63, 6.74, 6.93, 6.96, 6.67, 6.80, 7.04, 6.53,
-        6.35, 6.32, 6.54, 6.53, 6.75, 6.95, 6.92, 7.14, 6.91, 7.27, 7.03, 6.54, 6.01, 6.04,
-        5.61, 5.68, 6.23, 5.98, 6.01, 5.85, 5.63, 5.54, 5.48, 5.25, 5.14, 4.99, 5.06, 5.15,
-        5.16, 5.13, 5.13, 5.06, 4.89, 4.77, 4.72, 4.81, 4.73, 4.83, 4.90, 4.86, 4.90, 5.19,
-        5.15, 5.28, 5.39, 5.09, 5.30, 5.26, 5.34, 5.33, 5.33, 5.41,
-    ]
-    return [
-        _bar(start + timedelta(days=index), close, volume=1_000 + index)
-        for index, close in enumerate(closes)
-    ]
-
-
-def test_scan_rejects_m10_far_above_ma30_from_oversold() -> None:
-    """超跌低吸位置必须在「M10 准备上穿/回贴 M30」的地方。
-
-    M10 已远穿 M30（过程结束）= 不是"准备上穿处的回踩"，不该作超跌低吸。
-    防止中闽能源类「空头后均线纠缠、M10 早穿完 M30、low 贴 M10」的横盘票混进超跌族。
-    """
-    bars = [
-        {**row, "vt_symbol": "600163.SSE", "turnover_rate": 2.0}
-        for row in _m10_far_above_ma30_oversold_history()
-    ]
-    calendar = [row["trade_date"] for row in bars]
-    candidates = scan_low_suction_candidates(bars, calendar, [], target_dates={calendar[-1]})
-
-    oversold = [candidate for candidate in candidates if candidate.setup_type == "oversold_rebound"]
-    assert oversold == []
-
-
-def _low_above_ma10_fake_pullback_history() -> list[dict[str, object]]:
-    """low 没真回踩到 M10（low 在 M10 上方 +1.4%）却靠 _support_low_touch 的 +1.5% 宽上限
-    被当"贴 M10"的假回踩。取自 600743 真实 OHLC @2026-08-04：low=2.15，M10=2.12，
-    low_to_ma10=+1.46%。主人研究票 low 到 M10 全部 ≤+0.59%（真触及/跌破），这是 A 类冲高型假回踩。"""
-    start = date(2025, 1, 1)
-    ohlc = [
-        (2.20, 2.41, 2.09, 2.41), (2.59, 2.65, 2.52, 2.65), (2.92, 2.92, 2.81, 2.92), (3.21, 3.21, 3.15, 3.21),
-        (3.53, 3.53, 2.89, 2.89), (2.85, 2.95, 2.62, 2.65), (2.56, 2.79, 2.56, 2.69), (2.55, 2.66, 2.42, 2.59),
-        (2.51, 2.82, 2.51, 2.60), (2.53, 2.62, 2.44, 2.47), (2.47, 2.50, 2.40, 2.50), (2.47, 2.49, 2.38, 2.38),
-        (2.35, 2.35, 2.27, 2.33), (2.35, 2.36, 2.28, 2.31), (2.30, 2.42, 2.30, 2.40), (2.38, 2.53, 2.36, 2.47),
-        (2.46, 2.57, 2.43, 2.54), (2.54, 2.60, 2.50, 2.60), (2.57, 2.86, 2.55, 2.78), (2.76, 2.85, 2.67, 2.69),
-        (2.69, 2.72, 2.63, 2.71), (2.68, 2.72, 2.61, 2.67), (2.70, 2.71, 2.58, 2.61), (2.59, 2.85, 2.58, 2.69),
-        (2.66, 2.71, 2.52, 2.69), (2.68, 2.72, 2.63, 2.68), (2.63, 2.67, 2.61, 2.63), (2.61, 2.63, 2.40, 2.44),
-        (2.45, 2.47, 2.42, 2.46), (2.46, 2.55, 2.45, 2.49), (2.51, 2.55, 2.37, 2.40), (2.39, 2.40, 2.28, 2.32),
-        (2.31, 2.49, 2.29, 2.45), (2.44, 2.65, 2.42, 2.46), (2.40, 2.71, 2.33, 2.58), (2.55, 2.59, 2.42, 2.53),
-        (2.48, 2.61, 2.41, 2.57), (2.55, 2.83, 2.50, 2.57), (2.41, 2.59, 2.41, 2.49), (2.41, 2.60, 2.40, 2.47),
-        (2.47, 2.48, 2.30, 2.37), (2.37, 2.37, 2.27, 2.31), (2.29, 2.32, 2.22, 2.24), (2.24, 2.27, 2.22, 2.25),
-        (2.25, 2.29, 2.16, 2.17), (2.15, 2.17, 2.09, 2.11), (2.11, 2.12, 2.05, 2.10), (2.10, 2.23, 2.07, 2.12),
-        (2.10, 2.22, 2.09, 2.21), (2.19, 2.43, 2.18, 2.43), (2.48, 2.55, 2.28, 2.34), (2.37, 2.39, 2.22, 2.31),
-        (2.29, 2.30, 2.18, 2.18), (2.21, 2.30, 2.10, 2.15), (2.14, 2.18, 2.11, 2.16), (2.20, 2.24, 2.15, 2.20),
-        (2.20, 2.27, 2.13, 2.14), (2.14, 2.21, 2.13, 2.18), (2.17, 2.19, 2.12, 2.14), (2.15, 2.16, 2.06, 2.08),
-        (2.07, 2.10, 2.03, 2.06), (2.06, 2.12, 2.04, 2.10), (2.08, 2.21, 2.06, 2.14), (2.14, 2.16, 2.02, 2.04),
-        (2.03, 2.08, 2.00, 2.08), (2.07, 2.14, 2.05, 2.09), (2.08, 2.12, 2.06, 2.08), (2.08, 2.10, 1.98, 2.01),
-        (2.02, 2.05, 1.97, 1.98), (1.99, 1.99, 1.88, 1.96), (1.94, 1.98, 1.93, 1.97), (1.96, 2.05, 1.95, 2.04),
-        (2.04, 2.15, 2.02, 2.05), (2.02, 2.17, 2.02, 2.13), (2.11, 2.26, 2.11, 2.18), (2.17, 2.19, 2.14, 2.17),
-        (2.16, 2.19, 2.12, 2.14), (2.14, 2.19, 2.13, 2.15), (2.16, 2.19, 2.15, 2.18), (2.19, 2.20, 2.15, 2.18),
-    ]
-    return [
-        _bar(start + timedelta(days=index), close, open_price=open_price, high_price=high_price, low_price=low_price)
-        for index, (open_price, high_price, low_price, close) in enumerate(ohlc)
-    ]
-
-
-def test_scan_rejects_low_above_ma10_fake_pullback() -> None:
-    """超跌低吸位置要求 low 真回踩 M10（触及/跌破），不是靠宽阈值"擦"到 M10 上方。
-
-    low 在 M10 上方 +1.4%（没真回踩）的 A 类冲高型假回踩不该作超跌低吸。
-    主人研究票 low 到 M10 全部 ≤+0.59%。
-    """
-    bars = [
-        {**row, "vt_symbol": "600743.SSE", "turnover_rate": 2.0}
-        for row in _low_above_ma10_fake_pullback_history()
-    ]
-    calendar = [row["trade_date"] for row in bars]
-    candidates = scan_low_suction_candidates(bars, calendar, [], target_dates={calendar[-1]})
-
-    oversold = [candidate for candidate in candidates if candidate.setup_type == "oversold_rebound"]
-    assert oversold == []
+    assert candidates[0].score <= 39.0
 
 
 def _m60_rising_overextended_history() -> list[dict[str, object]]:
@@ -455,11 +382,22 @@ def test_appending_future_bars_cannot_change_extended_features_before_cutoff() -
     assert actual == expected
 
 
-def test_manifest_keeps_core_and_volume_sibling_rules() -> None:
-    names = {rule.key for rule in DISCOVERY_RULES["oversold_rebound"]}
+def test_manifest_contains_exactly_the_complete_personal_case_rules() -> None:
+    expected = {
+        setup_type: {
+            key
+            for case in PERSONAL_CASES
+            if case.expected_setup_type == setup_type
+            and case.narrative_status == "complete"
+            for key in case.required_process_rule_keys
+        }
+        for setup_type in DISCOVERY_RULES
+    }
 
-    assert "m10_m20_near_or_crossed_down" in names
-    assert "m10_m20_near_or_crossed_down_volume_shrink" in names
+    assert {
+        setup_type: {rule.key for rule in rules}
+        for setup_type, rules in DISCOVERY_RULES.items()
+    } == expected
 
 
 def test_discovery_manifest_rule_keys_are_unique_per_family() -> None:
@@ -469,210 +407,17 @@ def test_discovery_manifest_rule_keys_are_unique_per_family() -> None:
         assert len(keys) == len(set(keys))
 
 
-def test_manifest_pairs_every_oversold_core_rule_with_expand_and_shrink_volume() -> None:
-    rules = {rule.key: rule for rule in DISCOVERY_RULES["oversold_rebound"]}
-    core_keys = {
-        "m10_m20_near_or_crossed_down",
-        "m10_m30_near_or_crossed_down",
-        "m20_m30_near_or_crossed_down",
-        "staged_m10_first_down",
-        "m10_dual_cross_before_m20_m30_down",
-    }
-
-    for core_key in core_keys:
-        shrink = rules[f"{core_key}_volume_shrink"]
-        expand = rules[f"{core_key}_volume_expand"]
-
-        assert shrink.core_rule_key == core_key
-        assert shrink.volume_shape == "staircase_shrink"
-        assert expand.core_rule_key == core_key
-        assert expand.volume_shape == "staircase_expand"
-
-
-def test_manifest_includes_source_process_probes_and_volume_siblings() -> None:
+def test_manifest_excludes_retired_generic_rule_families() -> None:
     rules = {rule.key: rule for rule in DISCOVERY_RULES["oversold_rebound"]}
     trend_keys = {rule.key for rule in DISCOVERY_RULES["trend_pullback"]}
 
-    assert "m20_m30_convergence_after_m10_cross_pullback" not in rules
-    assert "m20_m30_convergence_after_long_bear_m10_cross_pullback" not in rules
+    assert RESEARCH_THREE_MA_WRAP_RULE_KEY in rules
     assert "ma10_ma30_converging_after_staged_cross_volume_shrink" in rules
     assert "ma10_ma20_contact_pre_cross_positive_volume_expand" in rules
     assert "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30" not in rules
     assert "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30" in trend_keys
-    assert "oversold_to_trend_pre_cross_ma10_ma20_contact" in trend_keys
-    assert "m10_m30_contact_after_m10_cross_aggressive_pullback" in rules
-    assert "ma10_low_touch_regular_ma5_down" in trend_keys
-    assert "ma5_low_touch_broad_down" in trend_keys
-    assert "ma10_low_retest_during_staged_cross" in rules
-    assert "m5_m10_joint_attack_before_ma20_cross" in rules
-    assert "ma10_low_retest_after_long_bear_staged_cross" in rules
-    assert "m5_m10_joint_attack_after_long_bear" in rules
-    assert "m10_m30_contact_after_long_bear_aggressive_pullback" in rules
-    assert "ma5_low_touch_after_trend_rebuild" in trend_keys
-    assert "ma5_low_touch_any_candle" in trend_keys
-    assert "ma5_low_touch_early_trend_any_candle" in trend_keys
-    assert "ma10_low_touch_early_trend_regular_ma5_down" in trend_keys
-
-
-def test_volume_siblings_require_their_declared_volume_shape() -> None:
-    rules = {rule.key: rule for rule in DISCOVERY_RULES["oversold_rebound"]}
-    features = {
-        "oversold_discovery_eligible": True,
-        "price_state": "weak_or_down",
-        "ma10_ma20_near_or_recent_cross": True,
-        "volume_shape": "staircase_shrink",
-    }
-
-    shrink = rules["m10_m20_near_or_crossed_down_volume_shrink"]
-    expand = rules["m10_m20_near_or_crossed_down_volume_expand"]
-
-    assert _rule_matches(shrink, features) is True
-    assert _rule_matches(expand, features) is False
-    assert _rule_matches(expand, {**features, "volume_shape": "staircase_expand"}) is True
-
-
-def test_source_process_rules_keep_personal_paths_and_support_branches_separate() -> None:
-    oversold_rules = {rule.key: rule for rule in DISCOVERY_RULES["oversold_rebound"]}
-    trend_rules = {rule.key: rule for rule in DISCOVERY_RULES["trend_pullback"]}
-    yiming_pre_cross_features = {
-        "long_bear_alignment": True,
-        "ma10_below_ma20": True,
-        "ma10_ma20_contact": True,
-        "ma10_ma20_gap_narrowing": True,
-        "positive_candle": True,
-        "last_volume_expanded": True,
-    }
-    yiming_trend_transition_features = {
-        "long_bear_alignment": True,
-        "ma10_dual_cross_within_7d": True,
-        "ma10_above_ma20_and_ma30": True,
-        "transition_ma20_ma30_tight_contact": True,
-        "ma10_ma20_slopes_up": True,
-        "post_cross_pullback": True,
-        "small_positive_candle": True,
-    }
-    retest_features = {
-        "oversold_process_eligible": True,
-        "ma10_crossed_ma20_within_15d": True,
-        "ma10_ma30_contact": True,
-        "aggressive_pullback": True,
-        "volume_shape": "staircase_expand",
-    }
-    ma10_support_features = {
-        "trend_discovery_eligible": True,
-        "trend_stable_bull": True,
-        "price_state": "weak_or_down",
-        "ma5_regular": True,
-        "ma10_low_touch": True,
-    }
-    broad_ma5_features = {
-        "trend_discovery_eligible": True,
-        "trend_stable_bull": True,
-        "price_state": "weak_or_down",
-        "ma5_regular": True,
-        "ma5_low_touch_broad": True,
-    }
-    staged_retest_features = {
-        "oversold_process_eligible": True,
-        "staged_m10_first": True,
-        "ma10_low_touch": True,
-    }
-    joint_attack_features = {
-        "oversold_process_eligible": True,
-        "m5_m10_joint_attack_ready": True,
-    }
-    rebuilt_trend_features = {
-        "trend_discovery_eligible": True,
-        "trend_stable_bull": True,
-        "trend_rebuilt_recently": True,
-        "ma5_regular": True,
-        "ma5_low_touch_broad": True,
-    }
-    any_candle_ma5_features = {
-        "trend_bull_alignment": True,
-        "trend_all_slopes_up": True,
-        "ma5_regular": True,
-        "ma5_low_touch": True,
-        "price_state": "large_green",
-    }
-
-    assert _rule_matches(
-        oversold_rules["ma10_ma20_contact_pre_cross_positive_volume_expand"],
-        yiming_pre_cross_features,
-    ) is True
-    assert _rule_matches(
-        trend_rules["oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30"],
-        yiming_trend_transition_features,
-    ) is True
-    assert _rule_matches(
-        oversold_rules["m10_m30_contact_after_m10_cross_aggressive_pullback_volume_expand"],
-        retest_features,
-    ) is True
-    assert _rule_matches(
-        trend_rules["ma10_low_touch_regular_ma5_down"], ma10_support_features
-    ) is True
-    assert _rule_matches(
-        trend_rules["ma5_low_touch_broad_down"], broad_ma5_features
-    ) is True
-    assert _rule_matches(
-        oversold_rules["ma10_low_retest_during_staged_cross"],
-        staged_retest_features,
-    ) is True
-    assert _rule_matches(
-        oversold_rules["m5_m10_joint_attack_before_ma20_cross"],
-        joint_attack_features,
-    ) is True
-    assert _rule_matches(
-        trend_rules["ma5_low_touch_after_trend_rebuild"],
-        rebuilt_trend_features,
-    ) is True
-    assert _rule_matches(
-        trend_rules["ma5_low_touch_any_candle"],
-        any_candle_ma5_features,
-    ) is True
-
-
-def test_source_stage_rules_require_long_bear_or_early_trend_alignment() -> None:
-    oversold_rules = {rule.key: rule for rule in DISCOVERY_RULES["oversold_rebound"]}
-    trend_rules = {rule.key: rule for rule in DISCOVERY_RULES["trend_pullback"]}
-    long_bear_staged = {
-        "long_bear_alignment": True,
-        "oversold_process_eligible": True,
-        "staged_m10_first": True,
-        "ma10_low_touch": True,
-    }
-    early_ma5 = {
-        "early_trend_alignment": True,
-        "trend_all_slopes_up": True,
-        "ma5_regular": True,
-        "ma5_low_touch": True,
-    }
-    early_ma10 = {
-        "early_trend_alignment": True,
-        "trend_discovery_eligible": True,
-        "price_state": "weak_or_down",
-        "ma5_regular": True,
-        "ma10_low_touch": True,
-    }
-
-    assert _rule_matches(
-        oversold_rules["ma10_low_retest_after_long_bear_staged_cross"],
-        long_bear_staged,
-    ) is True
-    assert _rule_matches(
-        oversold_rules["ma10_low_retest_after_long_bear_staged_cross"],
-        {**long_bear_staged, "long_bear_alignment": False},
-    ) is False
-    assert _rule_matches(
-        trend_rules["ma5_low_touch_early_trend_any_candle"], early_ma5
-    ) is True
-    assert _rule_matches(
-        trend_rules["ma5_low_touch_early_trend_any_candle"],
-        {**early_ma5, "early_trend_alignment": False},
-    ) is False
-    assert _rule_matches(
-        trend_rules["ma10_low_touch_early_trend_regular_ma5_down"], early_ma10
-    ) is True
+    assert "v3_oversold_universal_pullback" not in rules
+    assert "v4_trend_quiet_pullback" not in trend_keys
 
 
 def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None:
@@ -681,6 +426,11 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
     }
     trend_rules = {
         rule.key: rule for rule in DISCOVERY_RULES["trend_pullback"]
+    }
+    stable_wrap = {
+        "long_bear_alignment": True,
+        "yang_wrap_three_ma": True,
+        "yang_wrap_stable_base": True,
     }
     staged_retest = {
         "long_bear_alignment": True,
@@ -739,6 +489,7 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
         "volume_expand_then_shrink": True,
     }
 
+    stable_wrap_key = RESEARCH_THREE_MA_WRAP_RULE_KEY
     staged_key = "ma10_low_retest_staged_m30_converging_volume_shrink"
     retest_key = "ma10_ma30_retest_after_actual_cross_two_leg_volume"
     joint_attack_key = "m5_m10_joint_attack_before_ma20_cross_last_volume_expand"
@@ -746,6 +497,7 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
     yiming_pre_cross_key = "ma10_ma20_contact_pre_cross_positive_volume_expand"
     yiming_transition_key = "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30"
     fallback_key = "ma10_low_touch_after_ma5_extension"
+    assert stable_wrap_key in oversold_rules
     assert staged_key in oversold_rules
     assert retest_key in oversold_rules
     assert joint_attack_key in oversold_rules
@@ -753,6 +505,16 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
     assert yiming_pre_cross_key in oversold_rules
     assert yiming_transition_key in trend_rules
     assert fallback_key in trend_rules
+    assert process_rule_predicates(stable_wrap_key, stable_wrap) == {
+        "long_bear_alignment": True,
+        "yang_wrap_three_ma": True,
+        "yang_wrap_stable_base": True,
+    }
+    assert _rule_matches(oversold_rules[stable_wrap_key], stable_wrap) is True
+    assert _rule_matches(
+        oversold_rules[stable_wrap_key],
+        {**stable_wrap, "yang_wrap_stable_base": False},
+    ) is False
     assert process_rule_predicates(staged_key, staged_retest) == {
         "long_bear_alignment": True,
         "oversold_process_eligible": True,
@@ -904,87 +666,36 @@ def test_transition_is_a_trend_candidate_without_regular_ma5_or_ma60_order() -> 
     assert features["trend_bull_alignment"] is False
     assert features["trend_transition_eligible"] is True
     assert _is_score_candidate(features, "trend_pullback") is True
-    assert len(history) - 1 in _broad_candidate_positions(history)
 
 
-def test_pre_cross_transition_remains_reportable_but_not_a_scored_trend_candidate() -> None:
-    trend_rules = {rule.key: rule for rule in DISCOVERY_RULES["trend_pullback"]}
-    features = {
-        "long_bear_alignment": True,
-        "ma10_below_ma20": True,
-        "ma10_ma20_contact": True,
-        "ma10_ma20_gap_narrowing": True,
-        "positive_candle": True,
-        "trend_transition_preparation_eligible": True,
-        "trend_transition_eligible": False,
-        "trend_bull_alignment": False,
-        "trend_all_slopes_up": False,
-        "trend_discovery_eligible": False,
-        "ma5_regular": False,
-        "ma5_low_touch": False,
-        "ma10_low_touch": False,
-        "daily_return_pct": 3.0581,
-    }
-
-    rule = trend_rules["oversold_to_trend_pre_cross_ma10_ma20_contact"]
-    assert _rule_matches(rule, features) is True
-    assert _is_score_candidate(features, "trend_pullback") is False
-
-
-def test_broad_candidate_prescreen_only_evaluates_requested_signal_dates() -> None:
-    history = _oversold_to_trend_history_without_regular_ma5()
-    last_position = len(history) - 1
-    last_date = history[last_position]["trade_date"]
-    previous_date = history[last_position - 1]["trade_date"]
-
-    assert _broad_candidate_positions(
-        history,
-        candidate_dates={last_date},
-    ) == (last_position,)
-    assert last_position not in _broad_candidate_positions(
-        history,
-        candidate_dates={previous_date},
-    )
-
-
-def test_broad_candidate_prescreen_keeps_pre_cross_transition_geometry(
+def test_source_rule_snapshots_do_not_apply_a_generic_prescreen(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A MA10/20 preparation point must not be lost before rule matching."""
+    """Named rules are evaluated before any non-source candidate filter."""
 
-    history = [
-        _bar(
-            date(2025, 1, 1) + timedelta(days=index),
-            100.5 if index == 14 else 100.0,
-            open_price=100.0 if index == 14 else 100.0,
-        )
-        for index in range(15)
-    ]
-
-    def fake_moving_average_series(
-        closes: list[float],
-        window: int,
-    ) -> list[float | None]:
-        values_by_window = {
-            5: [100.0] * 15,
-            10: [98.0] * 11 + [98.8, 99.0, 99.3, 99.7],
-            20: [100.0] * 15,
-            30: [110.0] * 15,
-            60: [120.0] * 15,
-        }
-        return values_by_window[window][: len(closes)]
-
+    signal_date = date(2026, 7, 23)
+    history = [{**_bar(signal_date, 10.0), "vt_symbol": "003032.SZSE"}]
     monkeypatch.setattr(
         extended_discovery,
-        "_moving_average_series",
-        fake_moving_average_series,
+        "build_extended_daily_features",
+        lambda _: {"named_source_rule": True},
+    )
+    monkeypatch.setattr(
+        extended_discovery,
+        "_matches_any_rule",
+        lambda _: True,
     )
 
-    last_position = len(history) - 1
-    assert _broad_candidate_positions(
-        history,
-        candidate_dates={history[-1]["trade_date"]},
-    ) == (last_position,)
+    snapshots = list(
+        extended_discovery._iter_candidate_snapshots(
+            history,
+            (signal_date,),
+            [],
+            target_dates={signal_date},
+        )
+    )
+
+    assert [snapshot.trade_date for snapshot in snapshots] == [signal_date]
 
 
 def test_d1_initial_trend_shape_keeps_ma5_and_ma60_out_of_the_outcome_label() -> None:
@@ -1393,7 +1104,7 @@ def test_post_limit_up_hold_begins_after_first_strict_limit_up_close() -> None:
     assert result["holding_sessions"] == 2
 
 
-def test_research_answers_do_not_promote_unvalidated_exit_or_volume_delta() -> None:
+def test_research_answers_do_not_promote_an_unvalidated_exit() -> None:
     exit_selection = {
         "selected_probe": "d3_close",
         "qualification_gate": {"passed": False},
@@ -1412,13 +1123,6 @@ def test_research_answers_do_not_promote_unvalidated_exit_or_volume_delta() -> N
                     "exit_selection": exit_selection,
                     "post_limit_up_exit_selection": exit_selection,
                 },
-                "volume_incremental_deltas": [
-                    {
-                        "segments": {
-                            "holdout": {"d1_mean_delta_pct": 0.1},
-                        }
-                    }
-                ],
             },
             "trend_pullback": {"selected_rule": None},
         },
@@ -1426,7 +1130,6 @@ def test_research_answers_do_not_promote_unvalidated_exit_or_volume_delta() -> N
 
     answers = {row["question"]: row for row in _research_answers(report)}
 
-    assert answers["成交量附加因子何时有增量"]["status"] == "exploratory_observation"
     assert answers["超跌反弹的收盘卖点"]["status"] == "not_supported"
     assert answers["超跌反弹的首次严格涨停后持有"]["status"] == "not_supported"
 
