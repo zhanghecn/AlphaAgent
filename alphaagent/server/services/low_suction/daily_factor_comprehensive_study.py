@@ -100,7 +100,7 @@ PERSONAL_CASE_SOURCE_METADATA: dict[str, CaseSourceMetadata] = {
         date(2026, 7, 15),
         date(2026, 7, 23),
         "ma10_low_touch",
-        ("ma10_low_retest_staged_m30_converging_volume_shrink",),
+        ("staged_ma10_support_before_ma30_convergence_shrink",),
     ),
     "传智教育 三线包裹": CaseSourceMetadata(
         date(2026, 7, 15),
@@ -112,7 +112,7 @@ PERSONAL_CASE_SOURCE_METADATA: dict[str, CaseSourceMetadata] = {
         date(2026, 7, 15),
         date(2026, 7, 27),
         "process_only",
-        ("ma10_ma30_converging_after_staged_cross_volume_shrink",),
+        ("staged_ma10_support_before_ma30_convergence_shrink",),
     ),
     "一鸣食品 MA10 贴合 MA20": CaseSourceMetadata(
         date(2026, 7, 14),
@@ -645,6 +645,9 @@ def _case_process_evidence(
                 "ma10_crossed_ma20_after_long_bear_age_sessions_15d",
                 "ma10_crossed_ma20_after_long_bear_within_15d",
                 "current_full_bear_alignment",
+                "ma10_above_ma20",
+                "ma10_below_ma30",
+                "ma10_ma30_fast_convergence",
                 "ma10_dual_cross_within_15d",
                 "ma10_dual_cross_within_7d",
                 "ma10_above_ma20_and_ma30",

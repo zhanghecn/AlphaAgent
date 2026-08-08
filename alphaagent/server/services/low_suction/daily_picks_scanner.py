@@ -12,6 +12,7 @@ from datetime import date
 from alphaagent.server.services.low_suction.daily_factor_extended_discovery import (
     DISCOVERY_RULES,
     MA10_MA20_PRE_CROSS_RULE_KEY,
+    RESEARCH_PENDING_DAILY_RULE_KEYS,
     RESEARCH_THREE_MA_WRAP_RULE_KEY,
     STAGED_MA30_CONVERGENCE_RULE_KEYS,
     _iter_candidate_snapshots,
@@ -119,7 +120,11 @@ def scan_low_suction_candidates(
             continue
         features = snapshot.features
         trend_rules = matching_discovery_rule_keys(features, "trend_pullback")
-        oversold_rules = matching_discovery_rule_keys(features, "oversold_rebound")
+        oversold_rules = tuple(
+            rule_key
+            for rule_key in matching_discovery_rule_keys(features, "oversold_rebound")
+            if rule_key not in RESEARCH_PENDING_DAILY_RULE_KEYS
+        )
         if not trend_rules and not oversold_rules:
             continue
         streak = quiet_candle_streak(snapshot.history[: snapshot.position + 1])

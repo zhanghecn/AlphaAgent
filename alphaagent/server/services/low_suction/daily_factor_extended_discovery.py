@@ -56,6 +56,7 @@ EARLY_TREND_ALIGNMENT_MIN_SESSIONS = 3
 EARLY_TREND_ALIGNMENT_MAX_SESSIONS = 20
 MA10_MA30_CONVERGENCE_LOOKBACK = 5
 MA10_MA30_CONVERGENCE_MIN_PCT = 0.5
+MA10_MA30_FAST_CONVERGENCE_MIN_PCT = 5.0
 PROCESS_VOLUME_CHANGE_PCT = 10.0
 MA5_EXTENSION_MIN_PCT = 1.5
 TREND_CANDLE_QUIET_RANGE_MAX_PCT = 5.0
@@ -64,6 +65,7 @@ TREND_REBUILD_PRIOR_LOOKBACK = 10
 TREND_REBUILD_MIN_DISORDERED_SESSIONS = 3
 YANG_WRAP_STABLE_BASE_LOW_MA_MAX_PCT = 1.5
 YANG_WRAP_STABLE_BASE_VOLUME_END_TO_PEAK_MAX = 0.55
+VOLUME_MONOTONE_6D_MIN_RATIO = 0.8
 MIN_SELECTION_SAMPLES = 30
 MIN_SELECTION_CANDIDATE_DAYS = 10
 MIN_QUALIFICATION_SAMPLES = 30
@@ -80,10 +82,18 @@ RESEARCH_THREE_MA_WRAP_RULE_KEY = "research_oversold_three_ma_wrap_stable_base"
 MA10_MA20_PRE_CROSS_RULE_KEY = (
     "ma10_ma20_contact_pre_cross_positive_volume_expand"
 )
+STAGED_MA10_SUPPORT_RULE_KEY = (
+    "staged_ma10_support_before_ma30_convergence_shrink"
+)
 STAGED_MA30_CONVERGENCE_RULE_KEYS = frozenset(
+    {STAGED_MA10_SUPPORT_RULE_KEY}
+)
+# These source cases remain auditable, but their broad samples are not ready
+# to drive the production daily list.
+RESEARCH_PENDING_DAILY_RULE_KEYS = frozenset(
     {
-        "ma10_low_retest_staged_m30_converging_volume_shrink",
-        "ma10_ma30_converging_after_staged_cross_volume_shrink",
+        MA10_MA20_PRE_CROSS_RULE_KEY,
+        "m5_m10_joint_attack_before_ma20_cross_last_volume_expand",
     }
 )
 TRANSITION_RULE_KEYS = frozenset({OVERSOLD_TO_TREND_RULE_KEY})
@@ -116,14 +126,9 @@ EXPLICIT_CASE_OVERSOLD_RULES = (
         "长期空头后 MA10 先上穿 MA20，阳线实体包裹收敛 MA10/MA20/MA30，低点贴线且量能已收缩",
     ),
     DiscoveryRule(
-        "ma10_low_retest_staged_m30_converging_volume_shrink",
+        STAGED_MA10_SUPPORT_RULE_KEY,
         "oversold_rebound",
-        "长期空头后 MA10/20 分阶段上穿，MA10 回踩且向 MA30 收敛，量能缩量",
-    ),
-    DiscoveryRule(
-        "ma10_ma30_converging_after_staged_cross_volume_shrink",
-        "oversold_rebound",
-        "长期空头后 MA10 已先上穿 MA20、向 MA30 收敛，量能梯形缩量",
+        "长期空头后 MA10 已上穿 MA20、尚在 MA30 下方，回踩贴 MA10 后快速向 MA30 收敛并梯形缩量",
     ),
     DiscoveryRule(
         MA10_MA20_PRE_CROSS_RULE_KEY,
@@ -671,6 +676,11 @@ def build_extended_daily_features(
         ]
         _wrap_peak_volume = max(_known_wrap_volumes)
         yang_wrap_volume_end_to_peak_ratio_6d = _known_wrap_volumes[-1] / _wrap_peak_volume
+    # 梯形缩量（近6日量能逐日递减天数/5，1.0=完美下楼梯地量）
+    vol_monotone_6d: float | None = None
+    _vols_6 = [v for v in volumes[-6:] if v is not None]
+    if len(_vols_6) == 6:
+        vol_monotone_6d = sum(1 for i in range(1, 6) if _vols_6[i] < _vols_6[i - 1]) / 5
     yang_wrap_stable_base = bool(
         yang_wrap_three_ma
         and yang_wrap_nearest_ma_low_abs_pct is not None
@@ -678,6 +688,8 @@ def build_extended_daily_features(
         and yang_wrap_volume_end_to_peak_ratio_6d is not None
         and yang_wrap_volume_end_to_peak_ratio_6d
         <= YANG_WRAP_STABLE_BASE_VOLUME_END_TO_PEAK_MAX
+        and vol_monotone_6d is not None
+        and vol_monotone_6d >= VOLUME_MONOTONE_6D_MIN_RATIO
     )
     # 均线平滑度（M10 近6日逐日变化变异系数，小=匀速平滑收敛）
     ma10_slope_cv_6d: float | None = None
@@ -694,11 +706,6 @@ def build_extended_daily_features(
             if _mean_chg != 0:
                 _var = sum((x - _mean_chg) ** 2 for x in _m10_chg) / 5
                 ma10_slope_cv_6d = (_var ** 0.5) / abs(_mean_chg) * 100
-    # 梯形缩量（近6日量能逐日递减天数/5，1.0=完美下楼梯地量）
-    vol_monotone_6d: float | None = None
-    _vols_6 = [v for v in volumes[-6:] if v is not None]
-    if len(_vols_6) == 6:
-        vol_monotone_6d = sum(1 for i in range(1, 6) if _vols_6[i] < _vols_6[i - 1]) / 5
     # K线实体均匀度（近6日实体排除最大后仍<2%=回踩过程无大阴大阳抖动）
     body_max_excl_6d: float | None = None
     if len(visible) >= 6:
@@ -1003,6 +1010,12 @@ def build_extended_daily_features(
         "ma10_below_ma20": bool(
             ma10 is not None and ma20 is not None and ma10 < ma20
         ),
+        "ma10_above_ma20": bool(
+            ma10 is not None and ma20 is not None and ma10 > ma20
+        ),
+        "ma10_below_ma30": bool(
+            ma10 is not None and ma30 is not None and ma10 < ma30
+        ),
         "current_full_bear_alignment": bool(
             ma10 is not None
             and ma20 is not None
@@ -1064,6 +1077,11 @@ def build_extended_daily_features(
         "ma10_ma30_gap_converging": bool(
             ma10_ma30_gap_narrowing_5d is not None
             and ma10_ma30_gap_narrowing_5d >= MA10_MA30_CONVERGENCE_MIN_PCT
+        ),
+        "ma10_ma30_fast_convergence": bool(
+            ma10_ma30_gap_narrowing_5d is not None
+            and ma10_ma30_gap_narrowing_5d
+            >= MA10_MA30_FAST_CONVERGENCE_MIN_PCT
         ),
         "ma10_was_above_ma30_within_15d": _was_ma_above_within(
             closes,
@@ -2834,31 +2852,28 @@ def process_rule_predicates(
             "yang_wrap_three_ma": bool(features.get("yang_wrap_three_ma")),
             "yang_wrap_stable_base": bool(features.get("yang_wrap_stable_base")),
         },
-        "ma10_low_retest_staged_m30_converging_volume_shrink": {
+        STAGED_MA10_SUPPORT_RULE_KEY: {
             "long_bear_alignment": bool(features.get("long_bear_alignment")),
             "oversold_process_eligible": bool(
                 features.get("oversold_process_eligible")
             ),
-            "staged_m10_first": bool(features.get("staged_m10_first")),
+            "ma10_crossed_ma20_after_long_bear_within_15d": bool(
+                features.get("ma10_crossed_ma20_after_long_bear_within_15d")
+            ),
+            "ma10_above_ma20": bool(features.get("ma10_above_ma20")),
+            "ma10_below_ma30": bool(features.get("ma10_below_ma30")),
             "ma10_low_touch": bool(features.get("ma10_low_touch")),
-            "ma10_ma30_gap_converging": bool(
-                features.get("ma10_ma30_gap_converging")
+            "ma10_close_near": bool(features.get("ma10_close_near")),
+            "ma10_ma30_fast_convergence": bool(
+                features.get("ma10_ma30_fast_convergence")
             ),
             "volume_shape_staircase_shrink": (
                 features.get("volume_shape") == "staircase_shrink"
             ),
-        },
-        "ma10_ma30_converging_after_staged_cross_volume_shrink": {
-            "long_bear_alignment": bool(features.get("long_bear_alignment")),
-            "oversold_process_eligible": bool(
-                features.get("oversold_process_eligible")
-            ),
-            "staged_m10_first": bool(features.get("staged_m10_first")),
-            "ma10_ma30_gap_converging": bool(
-                features.get("ma10_ma30_gap_converging")
-            ),
-            "volume_shape_staircase_shrink": (
-                features.get("volume_shape") == "staircase_shrink"
+            "volume_monotone_6d_at_least_0_8": bool(
+                (vol_monotone := _number_or_none(features.get("vol_monotone_6d")))
+                is not None
+                and vol_monotone >= VOLUME_MONOTONE_6D_MIN_RATIO
             ),
         },
         MA10_MA20_PRE_CROSS_RULE_KEY: {
@@ -3947,6 +3962,8 @@ def _feature_snapshot(features: Mapping[str, object]) -> dict[str, object]:
         "ma10_dual_cross_within_15d",
         "ma10_dual_cross_within_7d",
         "ma10_above_ma20_and_ma30",
+        "ma10_above_ma20",
+        "ma10_below_ma30",
         "current_full_bear_alignment",
         "ma20_ma30_contact",
         "transition_ma20_ma30_tight_contact",
@@ -3957,9 +3974,11 @@ def _feature_snapshot(features: Mapping[str, object]) -> dict[str, object]:
         "ma10_slope_2d_pct",
         "ma10_slope_improvement_2d_pct",
         "ma10_ma20_gap_narrowing_3d_pct",
+        "ma10_ma30_fast_convergence",
         "m5_m10_joint_attack_ready",
         "last_volume_change_pct",
         "volume_shape",
+        "vol_monotone_6d",
         "price_state",
         "small_positive_candle",
         "ma5_low_touch",

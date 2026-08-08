@@ -62,7 +62,7 @@ def test_personal_case_manifest_covers_every_named_source_observation() -> None:
             date(2026, 7, 22),
             "oversold_rebound",
             "ma10_low_touch",
-            ("ma10_low_retest_staged_m30_converging_volume_shrink",),
+            ("staged_ma10_support_before_ma30_convergence_shrink",),
         ),
         (
             "传智教育 三线包裹",
@@ -78,7 +78,7 @@ def test_personal_case_manifest_covers_every_named_source_observation() -> None:
             date(2026, 7, 24),
             "oversold_rebound",
             "process_only",
-            ("ma10_ma30_converging_after_staged_cross_volume_shrink",),
+            ("staged_ma10_support_before_ma30_convergence_shrink",),
         ),
         (
             "一鸣食品 MA10 贴合 MA20",

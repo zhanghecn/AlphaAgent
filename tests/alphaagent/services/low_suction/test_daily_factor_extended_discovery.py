@@ -15,7 +15,9 @@ from alphaagent.server.services.low_suction.daily_factor_extended_discovery impo
     DISCOVERY_RULES,
     DiscoveryRule,
     MA10_MA20_PRE_CROSS_RULE_KEY,
+    RESEARCH_PENDING_DAILY_RULE_KEYS,
     RESEARCH_THREE_MA_WRAP_RULE_KEY,
+    STAGED_MA10_SUPPORT_RULE_KEY,
     _ma10_ma20_next_close_required_return_pct,
     _has_initial_short_trend_shape,
     _is_score_candidate,
@@ -60,18 +62,16 @@ def _yang_wrap_stable_base_history(
     *,
     signal_low: float = 9.9,
     signal_volume: float = 500.0,
+    volume_path: list[float] | None = None,
 ) -> list[dict[str, object]]:
     """Flat MA cluster, then one wrapping candle with a controlled volume wash."""
 
     start = date(2025, 1, 1)
-    volumes = [1_000.0] * 24 + [
-        1_000.0,
-        900.0,
-        800.0,
-        700.0,
-        600.0,
-        signal_volume,
-    ]
+    volumes = [1_000.0] * 24 + (
+        volume_path
+        if volume_path is not None
+        else [1_000.0, 900.0, 800.0, 700.0, 600.0, signal_volume]
+    )
     history = [
         _bar(start + timedelta(days=index), 10.0, volume=volume)
         for index, volume in enumerate(volumes[:-1])
@@ -98,15 +98,25 @@ def test_yang_wrap_stable_base_requires_real_touch_and_contracted_volume() -> No
     volume_not_contracted = build_extended_daily_features(
         _yang_wrap_stable_base_history(signal_volume=1_000.0)
     )
+    volume_not_orderly = build_extended_daily_features(
+        _yang_wrap_stable_base_history(
+            volume_path=[1_000.0, 900.0, 1_000.0, 900.0, 1_000.0, 500.0]
+        )
+    )
 
     assert stable["yang_wrap_three_ma"] is True
     assert stable["yang_wrap_nearest_ma_low_abs_pct"] <= 1.5
     assert stable["yang_wrap_volume_end_to_peak_ratio_6d"] == pytest.approx(0.5)
+    assert stable["vol_monotone_6d"] == pytest.approx(1.0)
     assert stable["yang_wrap_stable_base"] is True
     assert low_too_far["yang_wrap_three_ma"] is True
     assert low_too_far["yang_wrap_stable_base"] is False
     assert volume_not_contracted["yang_wrap_three_ma"] is True
     assert volume_not_contracted["yang_wrap_stable_base"] is False
+    assert volume_not_orderly["yang_wrap_three_ma"] is True
+    assert volume_not_orderly["yang_wrap_volume_end_to_peak_ratio_6d"] == pytest.approx(0.5)
+    assert volume_not_orderly["vol_monotone_6d"] == pytest.approx(0.6)
+    assert volume_not_orderly["yang_wrap_stable_base"] is False
     cutoff = history[-1]["trade_date"]
     assert isinstance(cutoff, date)
     assert stable == build_extended_daily_features(
@@ -292,6 +302,50 @@ def test_scan_keeps_a_source_rule_when_the_diagnostic_turnover_gate_fails(
     assert candidates[0].score <= 39.0
 
 
+@pytest.mark.parametrize(
+    "pending_rule_key",
+    sorted(RESEARCH_PENDING_DAILY_RULE_KEYS),
+)
+def test_scan_excludes_research_pending_oversold_rules_from_daily_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+    pending_rule_key: str,
+) -> None:
+    signal_date = date(2026, 7, 23)
+    snapshot = SimpleNamespace(
+        symbol="003032.SZSE",
+        trade_date=signal_date,
+        position=0,
+        history=(_bar(signal_date, 10.0, volume=1_000.0),),
+        features={
+            "close_price": 10.0,
+            "daily_return_pct": 1.0,
+            "turnover_rate_pct": 2.0,
+            "candle_range_pct": 2.0,
+        },
+        d1_close_return_pct=1.0,
+        d1_label_status="available",
+    )
+    monkeypatch.setattr(
+        daily_picks_scanner,
+        "_iter_candidate_snapshots",
+        lambda *args, **kwargs: iter((snapshot,)),
+    )
+    monkeypatch.setattr(
+        daily_picks_scanner,
+        "matching_discovery_rule_keys",
+        lambda features, setup_type: (
+            (pending_rule_key,) if setup_type == "oversold_rebound" else ()
+        ),
+    )
+
+    assert daily_picks_scanner.scan_low_suction_candidates(
+        [],
+        (signal_date, signal_date + timedelta(days=1)),
+        [],
+        target_dates={signal_date},
+    ) == []
+
+
 def test_scan_excludes_a_signal_day_closed_at_main_board_limit_up(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -428,6 +482,8 @@ def test_oversold_cross_timing_is_causal_and_detects_m10_first() -> None:
     assert features["staged_m10_first"] is True
     assert features["long_bear_alignment"] is True
     assert features["ma10_crossed_ma20_after_long_bear_within_15d"] is True
+    assert features["ma10_above_ma20"] is True
+    assert features["ma10_below_ma30"] is True
 
 
 def test_ma10_ma20_next_close_requirement_uses_d_and_earlier_closes() -> None:
@@ -529,8 +585,14 @@ def test_manifest_excludes_retired_generic_rule_families() -> None:
     trend_keys = {rule.key for rule in DISCOVERY_RULES["trend_pullback"]}
 
     assert RESEARCH_THREE_MA_WRAP_RULE_KEY in rules
-    assert "ma10_ma30_converging_after_staged_cross_volume_shrink" in rules
+    assert STAGED_MA10_SUPPORT_RULE_KEY in rules
+    assert "ma10_low_retest_staged_m30_converging_volume_shrink" not in rules
+    assert "ma10_ma30_converging_after_staged_cross_volume_shrink" not in rules
     assert MA10_MA20_PRE_CROSS_RULE_KEY in rules
+    assert RESEARCH_PENDING_DAILY_RULE_KEYS == {
+        MA10_MA20_PRE_CROSS_RULE_KEY,
+        "m5_m10_joint_attack_before_ma20_cross_last_volume_expand",
+    }
     assert "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30" not in rules
     assert "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30" in trend_keys
     assert "v3_oversold_universal_pullback" not in rules
@@ -550,13 +612,17 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
         "yang_wrap_three_ma": True,
         "yang_wrap_stable_base": True,
     }
-    staged_retest = {
+    staged_ma10_support = {
         "long_bear_alignment": True,
         "oversold_process_eligible": True,
-        "staged_m10_first": True,
+        "ma10_crossed_ma20_after_long_bear_within_15d": True,
+        "ma10_above_ma20": True,
+        "ma10_below_ma30": True,
         "ma10_low_touch": True,
-        "ma10_ma30_gap_converging": True,
+        "ma10_close_near": True,
+        "ma10_ma30_fast_convergence": True,
         "volume_shape": "staircase_shrink",
+        "vol_monotone_6d": 0.8,
     }
     ma10_retest_after_cross = {
         "long_bear_alignment": True,
@@ -582,13 +648,6 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
         "m5_m10_joint_attack_ready": True,
         "last_volume_expanded": True,
     }
-    chizhi_ma30_convergence = {
-        "long_bear_alignment": True,
-        "oversold_process_eligible": True,
-        "staged_m10_first": True,
-        "ma10_ma30_gap_converging": True,
-        "volume_shape": "staircase_shrink",
-    }
     yiming_pre_cross = {
         "long_bear_alignment": True,
         "current_full_bear_alignment": True,
@@ -610,10 +669,9 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
     }
 
     stable_wrap_key = RESEARCH_THREE_MA_WRAP_RULE_KEY
-    staged_key = "ma10_low_retest_staged_m30_converging_volume_shrink"
+    staged_key = STAGED_MA10_SUPPORT_RULE_KEY
     retest_key = "ma10_ma30_retest_after_actual_cross_two_leg_volume"
     joint_attack_key = "m5_m10_joint_attack_before_ma20_cross_last_volume_expand"
-    chizhi_ma30_key = "ma10_ma30_converging_after_staged_cross_volume_shrink"
     yiming_pre_cross_key = MA10_MA20_PRE_CROSS_RULE_KEY
     yiming_transition_key = "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30"
     fallback_key = "ma10_low_touch_after_ma5_extension"
@@ -621,7 +679,6 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
     assert staged_key in oversold_rules
     assert retest_key in oversold_rules
     assert joint_attack_key in oversold_rules
-    assert chizhi_ma30_key in oversold_rules
     assert yiming_pre_cross_key in oversold_rules
     assert yiming_transition_key in trend_rules
     assert fallback_key in trend_rules
@@ -640,16 +697,31 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
         oversold_rules[stable_wrap_key],
         {**stable_wrap, "ma10_crossed_ma20_after_long_bear_within_15d": False},
     ) is False
-    assert process_rule_predicates(staged_key, staged_retest) == {
+    assert process_rule_predicates(staged_key, staged_ma10_support) == {
         "long_bear_alignment": True,
         "oversold_process_eligible": True,
-        "staged_m10_first": True,
+        "ma10_crossed_ma20_after_long_bear_within_15d": True,
+        "ma10_above_ma20": True,
+        "ma10_below_ma30": True,
         "ma10_low_touch": True,
-        "ma10_ma30_gap_converging": True,
+        "ma10_close_near": True,
+        "ma10_ma30_fast_convergence": True,
         "volume_shape_staircase_shrink": True,
+        "volume_monotone_6d_at_least_0_8": True,
     }
-    assert _rule_matches(oversold_rules[staged_key], staged_retest) is True
-    assert _rule_matches(oversold_rules[staged_key], {**staged_retest, "ma10_ma30_gap_converging": False}) is False
+    assert _rule_matches(oversold_rules[staged_key], staged_ma10_support) is True
+    assert _rule_matches(
+        oversold_rules[staged_key],
+        {**staged_ma10_support, "ma10_close_near": False},
+    ) is False
+    assert _rule_matches(
+        oversold_rules[staged_key],
+        {**staged_ma10_support, "ma10_ma30_fast_convergence": False},
+    ) is False
+    assert _rule_matches(
+        oversold_rules[staged_key],
+        {**staged_ma10_support, "vol_monotone_6d": 0.6},
+    ) is False
     assert _rule_matches(oversold_rules[retest_key], ma10_retest_after_cross) is True
     assert _rule_matches(
         oversold_rules[retest_key],
@@ -665,11 +737,6 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
     assert _rule_matches(
         oversold_rules[joint_attack_key],
         {**joint_attack_with_last_volume_expand, "last_volume_expanded": False},
-    ) is False
-    assert _rule_matches(oversold_rules[chizhi_ma30_key], chizhi_ma30_convergence) is True
-    assert _rule_matches(
-        oversold_rules[chizhi_ma30_key],
-        {**chizhi_ma30_convergence, "ma10_ma30_gap_converging": False},
     ) is False
     assert _rule_matches(oversold_rules[yiming_pre_cross_key], yiming_pre_cross) is True
     assert _rule_matches(
@@ -730,14 +797,19 @@ def test_extended_factor_score_keeps_volume_as_an_oversold_addition() -> None:
     oversold_features = {
         "long_bear_alignment": True,
         "oversold_process_eligible": True,
-        "staged_m10_first": True,
+        "ma10_crossed_ma20_after_long_bear_within_15d": True,
+        "ma10_above_ma20": True,
+        "ma10_below_ma30": True,
         "m5_m10_joint_attack_ready": True,
         "ma10_ma30_gap_converging": True,
+        "ma10_ma30_fast_convergence": True,
         "ma20_ma30_contact": True,
         "ma10_low_touch": True,
+        "ma10_close_near": True,
         "post_cross_pullback": True,
         "daily_return_pct": -1.0,
         "volume_shape": "staircase_shrink",
+        "vol_monotone_6d": 0.8,
         "volume_expand_then_shrink": True,
     }
     trend_features = {
