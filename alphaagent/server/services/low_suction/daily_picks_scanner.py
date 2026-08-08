@@ -11,8 +11,14 @@ from datetime import date
 
 from alphaagent.server.services.low_suction.daily_factor_extended_discovery import (
     DISCOVERY_RULES,
+    MA10_MA20_PRE_CROSS_RULE_KEY,
+    RESEARCH_THREE_MA_WRAP_RULE_KEY,
+    STAGED_MA30_CONVERGENCE_RULE_KEYS,
     _iter_candidate_snapshots,
     matching_discovery_rule_keys,
+)
+from alphaagent.server.services.low_suction.daily_factor_research import (
+    is_main_board_limit_up_touched,
 )
 from alphaagent.server.services.low_suction.daily_picks_scoring import (
     QuietStreak,
@@ -109,6 +115,8 @@ def scan_low_suction_candidates(
     for snapshot in snapshots:
         if target_dates is not None and snapshot.trade_date not in target_dates:
             continue
+        if _signal_day_limit_up_closed(snapshot.history, snapshot.position):
+            continue
         features = snapshot.features
         trend_rules = matching_discovery_rule_keys(features, "trend_pullback")
         oversold_rules = matching_discovery_rule_keys(features, "oversold_rebound")
@@ -156,7 +164,20 @@ def scan_low_suction_candidates(
                 vol_ratio = sum(history_vols[-5:]) / 5 / (sum(history_vols[-10:]) / 10)
             else:
                 vol_ratio = None
-            score, components = score_oversold_candidate(features, streak, vol_ratio=vol_ratio)
+            score, components = score_oversold_candidate(
+                features,
+                streak,
+                vol_ratio=vol_ratio,
+                pre_cross_rule_matched=(
+                    MA10_MA20_PRE_CROSS_RULE_KEY in oversold_rules
+                ),
+                stable_three_ma_wrap_rule_matched=(
+                    RESEARCH_THREE_MA_WRAP_RULE_KEY in oversold_rules
+                ),
+                staged_ma30_convergence_rule_matched=bool(
+                    set(oversold_rules) & STAGED_MA30_CONVERGENCE_RULE_KEYS
+                ),
+            )
             candidates.append(
                 LowSuctionCandidate(
                     vt_symbol=snapshot.symbol,
@@ -187,3 +208,20 @@ def _number(value: object) -> float | None:
         return float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+
+
+def _signal_day_limit_up_closed(
+    history: Sequence[Mapping[str, object]],
+    position: int,
+) -> bool:
+    """Exclude a main-board signal bar that closed at its upper price limit."""
+
+    if position < 1 or position >= len(history):
+        return False
+    prior_close = _number(history[position - 1].get("close_price"))
+    close_price = _number(history[position].get("close_price"))
+    return bool(
+        prior_close is not None
+        and close_price is not None
+        and is_main_board_limit_up_touched(prior_close, close_price)
+    )

@@ -14,7 +14,9 @@ from alphaagent.server.services.low_suction.daily_factor_comprehensive_study imp
 from alphaagent.server.services.low_suction.daily_factor_extended_discovery import (
     DISCOVERY_RULES,
     DiscoveryRule,
+    MA10_MA20_PRE_CROSS_RULE_KEY,
     RESEARCH_THREE_MA_WRAP_RULE_KEY,
+    _ma10_ma20_next_close_required_return_pct,
     _has_initial_short_trend_shape,
     _is_score_candidate,
     _research_answers,
@@ -120,6 +122,29 @@ def _bear_then_m10_cross_history() -> list[dict[str, object]]:
         _bar(start + timedelta(days=index), close, volume=2_000 - index * 5)
         for index, close in enumerate(closes)
     ]
+
+
+def _bear_then_no_cross_three_ma_wrap_history() -> list[dict[str, object]]:
+    start = date(2025, 1, 1)
+    history = [
+        _bar(
+            start + timedelta(days=index),
+            100 - index * 0.4,
+            volume=1_000 - max(0, index - 59) * 100,
+        )
+        for index in range(64)
+    ]
+    history.append(
+        _bar(
+            start + timedelta(days=64),
+            84.0,
+            open_price=76.1,
+            low_price=76.1,
+            high_price=84.5,
+            volume=500.0,
+        )
+    )
+    return [{**row, "turnover_rate": 2.0} for row in history]
 
 
 def _bear_then_m10_dual_cross_history() -> list[dict[str, object]]:
@@ -267,6 +292,71 @@ def test_scan_keeps_a_source_rule_when_the_diagnostic_turnover_gate_fails(
     assert candidates[0].score <= 39.0
 
 
+def test_scan_excludes_a_signal_day_closed_at_main_board_limit_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signal_date = date(2026, 7, 23)
+    snapshot = SimpleNamespace(
+        symbol="600688.SSE",
+        trade_date=signal_date,
+        position=1,
+        history=(
+            _bar(signal_date - timedelta(days=1), 10.0),
+            _bar(
+                signal_date,
+                11.0,
+                open_price=11.0,
+                low_price=11.0,
+                high_price=11.0,
+            ),
+        ),
+        features={
+            "close_price": 11.0,
+            "daily_return_pct": 0.0,
+            "turnover_rate_pct": 2.0,
+            "candle_range_pct": 0.0,
+        },
+        d1_close_return_pct=1.0,
+        d1_label_status="available",
+    )
+    monkeypatch.setattr(
+        daily_picks_scanner,
+        "_iter_candidate_snapshots",
+        lambda *args, **kwargs: iter((snapshot,)),
+    )
+    monkeypatch.setattr(
+        daily_picks_scanner,
+        "matching_discovery_rule_keys",
+        lambda features, setup_type: (
+            (RESEARCH_THREE_MA_WRAP_RULE_KEY,)
+            if setup_type == "oversold_rebound"
+            else ()
+        ),
+    )
+
+    assert daily_picks_scanner.scan_low_suction_candidates(
+        [],
+        (signal_date - timedelta(days=1), signal_date, signal_date + timedelta(days=1)),
+        [],
+        target_dates={signal_date},
+    ) == []
+
+
+def test_signal_day_limit_up_filter_keeps_an_opened_board() -> None:
+    history = (
+        _bar(date(2026, 7, 22), 10.0),
+        _bar(
+            date(2026, 7, 23),
+            10.75,
+            open_price=10.8,
+            low_price=10.5,
+            high_price=11.0,
+        ),
+    )
+
+    assert daily_picks_scanner._signal_day_limit_up_closed(history, 1) is False
+
+
 def _m60_rising_overextended_history() -> list[dict[str, object]]:
     """MA60 跟随向上 + 三线多头 + 末段过伸：长期下跌后强反弹，MA60 已拐头向上，
     反弹稳定段有历史 low 回踩 MA5（建立本段 pullback 基准），末几天连续大涨把 MA5 拉离 MA10，
@@ -337,6 +427,33 @@ def test_oversold_cross_timing_is_causal_and_detects_m10_first() -> None:
     assert features["ma20_crossed_ma30_within_5d"] is False
     assert features["staged_m10_first"] is True
     assert features["long_bear_alignment"] is True
+    assert features["ma10_crossed_ma20_after_long_bear_within_15d"] is True
+
+
+def test_ma10_ma20_next_close_requirement_uses_d_and_earlier_closes() -> None:
+    assert _ma10_ma20_next_close_required_return_pct([10.0] * 19) is None
+    assert _ma10_ma20_next_close_required_return_pct([10.0] * 20) == 0.0
+    assert _ma10_ma20_next_close_required_return_pct([10.0] * 11 + [9.0] * 9) == pytest.approx(
+        111.1111
+    )
+
+
+def test_three_ma_wrap_requires_ma10_cross_after_long_bear() -> None:
+    features = build_extended_daily_features(_bear_then_no_cross_three_ma_wrap_history())
+
+    assert features["long_bear_alignment"] is True
+    assert features["yang_wrap_three_ma"] is True
+    assert features["yang_wrap_stable_base"] is True
+    assert features["ma10_crossed_ma20_after_long_bear_within_15d"] is False
+    assert features["current_full_bear_alignment"] is True
+    assert _rule_matches(
+        next(
+            rule
+            for rule in DISCOVERY_RULES["oversold_rebound"]
+            if rule.key == RESEARCH_THREE_MA_WRAP_RULE_KEY
+        ),
+        features,
+    ) is False
 
 
 def test_oversold_dual_cross_keeps_m20_below_m30_without_future_data() -> None:
@@ -413,7 +530,7 @@ def test_manifest_excludes_retired_generic_rule_families() -> None:
 
     assert RESEARCH_THREE_MA_WRAP_RULE_KEY in rules
     assert "ma10_ma30_converging_after_staged_cross_volume_shrink" in rules
-    assert "ma10_ma20_contact_pre_cross_positive_volume_expand" in rules
+    assert MA10_MA20_PRE_CROSS_RULE_KEY in rules
     assert "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30" not in rules
     assert "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30" in trend_keys
     assert "v3_oversold_universal_pullback" not in rules
@@ -429,6 +546,7 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
     }
     stable_wrap = {
         "long_bear_alignment": True,
+        "ma10_crossed_ma20_after_long_bear_within_15d": True,
         "yang_wrap_three_ma": True,
         "yang_wrap_stable_base": True,
     }
@@ -459,6 +577,7 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
     }
     joint_attack_with_last_volume_expand = {
         "long_bear_alignment": True,
+        "current_full_bear_alignment": True,
         "oversold_process_eligible": True,
         "m5_m10_joint_attack_ready": True,
         "last_volume_expanded": True,
@@ -472,6 +591,7 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
     }
     yiming_pre_cross = {
         "long_bear_alignment": True,
+        "current_full_bear_alignment": True,
         "ma10_below_ma20": True,
         "ma10_ma20_contact": True,
         "ma10_ma20_gap_narrowing": True,
@@ -494,7 +614,7 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
     retest_key = "ma10_ma30_retest_after_actual_cross_two_leg_volume"
     joint_attack_key = "m5_m10_joint_attack_before_ma20_cross_last_volume_expand"
     chizhi_ma30_key = "ma10_ma30_converging_after_staged_cross_volume_shrink"
-    yiming_pre_cross_key = "ma10_ma20_contact_pre_cross_positive_volume_expand"
+    yiming_pre_cross_key = MA10_MA20_PRE_CROSS_RULE_KEY
     yiming_transition_key = "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30"
     fallback_key = "ma10_low_touch_after_ma5_extension"
     assert stable_wrap_key in oversold_rules
@@ -507,6 +627,7 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
     assert fallback_key in trend_rules
     assert process_rule_predicates(stable_wrap_key, stable_wrap) == {
         "long_bear_alignment": True,
+        "ma10_crossed_ma20_after_long_bear_within_15d": True,
         "yang_wrap_three_ma": True,
         "yang_wrap_stable_base": True,
     }
@@ -514,6 +635,10 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
     assert _rule_matches(
         oversold_rules[stable_wrap_key],
         {**stable_wrap, "yang_wrap_stable_base": False},
+    ) is False
+    assert _rule_matches(
+        oversold_rules[stable_wrap_key],
+        {**stable_wrap, "ma10_crossed_ma20_after_long_bear_within_15d": False},
     ) is False
     assert process_rule_predicates(staged_key, staged_retest) == {
         "long_bear_alignment": True,
@@ -535,6 +660,10 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
     ) is True
     assert _rule_matches(
         oversold_rules[joint_attack_key],
+        {**joint_attack_with_last_volume_expand, "current_full_bear_alignment": False},
+    ) is False
+    assert _rule_matches(
+        oversold_rules[joint_attack_key],
         {**joint_attack_with_last_volume_expand, "last_volume_expanded": False},
     ) is False
     assert _rule_matches(oversold_rules[chizhi_ma30_key], chizhi_ma30_convergence) is True
@@ -543,6 +672,10 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
         {**chizhi_ma30_convergence, "ma10_ma30_gap_converging": False},
     ) is False
     assert _rule_matches(oversold_rules[yiming_pre_cross_key], yiming_pre_cross) is True
+    assert _rule_matches(
+        oversold_rules[yiming_pre_cross_key],
+        {**yiming_pre_cross, "current_full_bear_alignment": False},
+    ) is False
     assert _rule_matches(
         oversold_rules[yiming_pre_cross_key],
         {**yiming_pre_cross, "ma10_below_ma20": False},

@@ -77,6 +77,15 @@ OVERSOLD_TO_TREND_RULE_KEY = (
     "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30"
 )
 RESEARCH_THREE_MA_WRAP_RULE_KEY = "research_oversold_three_ma_wrap_stable_base"
+MA10_MA20_PRE_CROSS_RULE_KEY = (
+    "ma10_ma20_contact_pre_cross_positive_volume_expand"
+)
+STAGED_MA30_CONVERGENCE_RULE_KEYS = frozenset(
+    {
+        "ma10_low_retest_staged_m30_converging_volume_shrink",
+        "ma10_ma30_converging_after_staged_cross_volume_shrink",
+    }
+)
 TRANSITION_RULE_KEYS = frozenset({OVERSOLD_TO_TREND_RULE_KEY})
 SCORE_VARIANTS_BY_SETUP: dict[str, tuple[str, ...]] = {
     "oversold_rebound": ("base", "with_volume"),
@@ -104,7 +113,7 @@ EXPLICIT_CASE_OVERSOLD_RULES = (
     DiscoveryRule(
         RESEARCH_THREE_MA_WRAP_RULE_KEY,
         "oversold_rebound",
-        "长期空头后，阳线实体包裹收敛 MA10/MA20/MA30，低点贴线且量能已收缩",
+        "长期空头后 MA10 先上穿 MA20，阳线实体包裹收敛 MA10/MA20/MA30，低点贴线且量能已收缩",
     ),
     DiscoveryRule(
         "ma10_low_retest_staged_m30_converging_volume_shrink",
@@ -117,9 +126,9 @@ EXPLICIT_CASE_OVERSOLD_RULES = (
         "长期空头后 MA10 已先上穿 MA20、向 MA30 收敛，量能梯形缩量",
     ),
     DiscoveryRule(
-        "ma10_ma20_contact_pre_cross_positive_volume_expand",
+        MA10_MA20_PRE_CROSS_RULE_KEY,
         "oversold_rebound",
-        "长期空头后 MA10 贴合但尚未上穿 MA20，阳线且当日放量",
+        "当前完整空头排列下 MA10 贴合但尚未上穿 MA20，阳线且当日放量",
     ),
     DiscoveryRule(
         "m5_m10_joint_attack_before_ma20_cross_last_volume_expand",
@@ -555,9 +564,18 @@ def build_extended_daily_features(
         slow_window=30,
         lookback=PROCESS_CROSS_LOOKBACK,
     )
+    cross_10_20_after_long_bear_age = _recent_ma10_ma20_upcross_after_long_bear_age(
+        ma_series[10],
+        ma_series[20],
+        ma_series[30],
+        lookback=PROCESS_CROSS_LOOKBACK,
+    )
     distance_10_20 = _signed_ma_distance_pct(ma10, ma20, close_price)
     distance_10_30 = _signed_ma_distance_pct(ma10, ma30, close_price)
     distance_20_30 = _signed_ma_distance_pct(ma20, ma30, close_price)
+    ma10_ma20_next_close_required_return = (
+        _ma10_ma20_next_close_required_return_pct(closes)
+    )
     midpoint_to_ma5 = _price_to_ma_distance_pct(intraday_midpoint_price, ma5)
     midpoint_to_ma10 = _price_to_ma_distance_pct(intraday_midpoint_price, ma10)
     daily_return = _number_or_none(base.get("daily_return_pct"))
@@ -953,6 +971,9 @@ def build_extended_daily_features(
     features = {
         **base,
         "ma10_ma20_signed_distance_pct": distance_10_20,
+        "ma10_ma20_next_close_required_return_pct": (
+            ma10_ma20_next_close_required_return
+        ),
         "ma10_ma30_signed_distance_pct": distance_10_30,
         "ma20_ma30_signed_distance_pct": distance_20_30,
         "intraday_midpoint_price": intraday_midpoint_price,
@@ -968,6 +989,12 @@ def build_extended_daily_features(
         "ma10_crossed_ma30_age_sessions_15d": process_cross_10_30_age,
         "ma10_crossed_ma20_within_15d": process_cross_10_20_age is not None,
         "ma10_crossed_ma30_within_15d": process_cross_10_30_age is not None,
+        "ma10_crossed_ma20_after_long_bear_age_sessions_15d": (
+            cross_10_20_after_long_bear_age
+        ),
+        "ma10_crossed_ma20_after_long_bear_within_15d": (
+            cross_10_20_after_long_bear_age is not None
+        ),
         "ma10_dual_cross_within_15d": ma10_dual_cross_within_15d,
         "ma10_dual_cross_within_7d": ma10_dual_cross_within_7d,
         "ma10_above_ma20_and_ma30": ma10_above_ma20_and_ma30,
@@ -975,6 +1002,12 @@ def build_extended_daily_features(
         "ma10_ma20_contact": _ma_contact(distance_10_20),
         "ma10_below_ma20": bool(
             ma10 is not None and ma20 is not None and ma10 < ma20
+        ),
+        "current_full_bear_alignment": bool(
+            ma10 is not None
+            and ma20 is not None
+            and ma30 is not None
+            and ma10 < ma20 < ma30
         ),
         "ma10_ma30_near_or_recent_cross": _near_or_recent_cross(distance_10_30),
         "ma20_ma30_near_or_recent_cross": _near_or_recent_cross(distance_20_30),
@@ -2795,6 +2828,9 @@ def process_rule_predicates(
     predicates: dict[str, dict[str, bool]] = {
         RESEARCH_THREE_MA_WRAP_RULE_KEY: {
             "long_bear_alignment": bool(features.get("long_bear_alignment")),
+            "ma10_crossed_ma20_after_long_bear_within_15d": bool(
+                features.get("ma10_crossed_ma20_after_long_bear_within_15d")
+            ),
             "yang_wrap_three_ma": bool(features.get("yang_wrap_three_ma")),
             "yang_wrap_stable_base": bool(features.get("yang_wrap_stable_base")),
         },
@@ -2825,8 +2861,11 @@ def process_rule_predicates(
                 features.get("volume_shape") == "staircase_shrink"
             ),
         },
-        "ma10_ma20_contact_pre_cross_positive_volume_expand": {
+        MA10_MA20_PRE_CROSS_RULE_KEY: {
             "long_bear_alignment": bool(features.get("long_bear_alignment")),
+            "current_full_bear_alignment": bool(
+                features.get("current_full_bear_alignment")
+            ),
             "ma10_below_ma20": bool(features.get("ma10_below_ma20")),
             "ma10_ma20_contact": bool(features.get("ma10_ma20_contact")),
             "ma10_ma20_gap_narrowing": bool(
@@ -2854,6 +2893,9 @@ def process_rule_predicates(
         },
         "m5_m10_joint_attack_before_ma20_cross_last_volume_expand": {
             "long_bear_alignment": bool(features.get("long_bear_alignment")),
+            "current_full_bear_alignment": bool(
+                features.get("current_full_bear_alignment")
+            ),
             "oversold_process_eligible": bool(
                 features.get("oversold_process_eligible")
             ),
@@ -3648,6 +3690,63 @@ def _recent_cross_age(
     return None
 
 
+def _ma10_ma20_next_close_required_return_pct(
+    closes: Sequence[float],
+) -> float | None:
+    """Return the D+1 close return needed for MA10 to reach MA20."""
+
+    if len(closes) < 20:
+        return None
+    current_close = closes[-1]
+    if current_close <= 0:
+        return None
+    required_close = sum(closes[-19:]) - 2 * sum(closes[-9:])
+    return _round_pct((required_close - current_close) / current_close * 100)
+
+
+def _recent_ma10_ma20_upcross_after_long_bear_age(
+    ma10_series: Sequence[float | None],
+    ma20_series: Sequence[float | None],
+    ma30_series: Sequence[float | None],
+    *,
+    lookback: int,
+) -> int | None:
+    """Return the age of an MA10/20 upcross preceded by a long bear run."""
+
+    final_index = len(ma10_series) - 1
+    for age in range(lookback):
+        index = final_index - age
+        if index < 1:
+            break
+        prior_ma10 = ma10_series[index - 1]
+        prior_ma20 = ma20_series[index - 1]
+        prior_ma30 = ma30_series[index - 1]
+        current_ma10 = ma10_series[index]
+        current_ma20 = ma20_series[index]
+        if not (
+            prior_ma10 is not None
+            and prior_ma20 is not None
+            and prior_ma30 is not None
+            and current_ma10 is not None
+            and current_ma20 is not None
+            and prior_ma10 < prior_ma20 < prior_ma30
+            and current_ma10 >= current_ma20
+        ):
+            continue
+
+        bear_days = 0
+        for prior_index in range(index - 1, -1, -1):
+            ma10 = ma10_series[prior_index]
+            ma20 = ma20_series[prior_index]
+            ma30 = ma30_series[prior_index]
+            if ma10 is None or ma20 is None or ma30 is None or not ma10 < ma20 < ma30:
+                break
+            bear_days += 1
+        if bear_days >= LONG_BEAR_ALIGNMENT_MIN_SESSIONS:
+            return age
+    return None
+
+
 def _was_ma_above_within(
     closes: Sequence[float],
     *,
@@ -3830,6 +3929,7 @@ def _feature_snapshot(features: Mapping[str, object]) -> dict[str, object]:
     keys = (
         "daily_return_pct",
         "ma10_ma20_signed_distance_pct",
+        "ma10_ma20_next_close_required_return_pct",
         "ma10_ma30_signed_distance_pct",
         "ma20_ma30_signed_distance_pct",
         "intraday_midpoint_price",
@@ -3842,9 +3942,12 @@ def _feature_snapshot(features: Mapping[str, object]) -> dict[str, object]:
         "ma20_crossed_ma30_age_sessions",
         "ma10_crossed_ma20_age_sessions_15d",
         "ma10_crossed_ma30_age_sessions_15d",
+        "ma10_crossed_ma20_after_long_bear_age_sessions_15d",
+        "ma10_crossed_ma20_after_long_bear_within_15d",
         "ma10_dual_cross_within_15d",
         "ma10_dual_cross_within_7d",
         "ma10_above_ma20_and_ma30",
+        "current_full_bear_alignment",
         "ma20_ma30_contact",
         "transition_ma20_ma30_tight_contact",
         "m10_dual_cross_before_m20_m30",

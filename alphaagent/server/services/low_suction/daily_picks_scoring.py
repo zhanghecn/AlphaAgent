@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 
-SCORE_VERSION = "low-suction-daily-score-v2.1"
+SCORE_VERSION = "low-suction-daily-score-v2.4"
 
 SCORE_BANDS: tuple[tuple[float, float, str], ...] = (
     (0.0, 39.999, "0-39"),
@@ -275,10 +275,14 @@ def score_oversold_candidate(
     features: Mapping[str, object],
     streak: QuietStreak,
     vol_ratio: float | None = None,
+    *,
+    pre_cross_rule_matched: bool = False,
+    stable_three_ma_wrap_rule_matched: bool = False,
+    staged_ma30_convergence_rule_matched: bool = False,
 ) -> tuple[float, tuple[ScoreComponent, ...]]:
     """超跌反弹候选综合分（0-100）。前置：oversold_process_eligible。
 
-    换手率≥8% 为硬门禁（gate，失败总分封顶 39）；其余 10 个 bonus 分量梯度加分。
+    换手率≥8% 为硬门禁（gate，失败总分封顶 39）；14 个 bonus 分量梯度加分。
     权重源自全量分桶：高换手=派发；量能趋势单调（骤缩+0.065%→骤放-0.301%）。
     vol_ratio = 近5日均量/近10日均量，由 scanner 从 history 算好传入。
     """
@@ -301,6 +305,29 @@ def score_oversold_candidate(
     reaction = bool(features.get("support_close_reaction"))
     shrink = str(features.get("volume_shape") or "") == "staircase_shrink"
     long_bear_days = int(features.get("prior_bear_alignment_days") or 0)
+    daily_return = _number(features.get("daily_return_pct"))
+    next_close_required_return = _number(
+        features.get("ma10_ma20_next_close_required_return_pct")
+    )
+    controlled_pre_cross_drive = bool(
+        pre_cross_rule_matched
+        and daily_return is not None
+        and 1.5 <= daily_return < 5.0
+        and next_close_required_return is not None
+        and 0 < next_close_required_return < 5.0
+    )
+    controlled_pre_cross_drive_pts = 10.0 if controlled_pre_cross_drive else 0.0
+    ma10_ma30_narrowing = _number(
+        features.get("ma10_ma30_gap_narrowing_5d_pct")
+    )
+    fast_staged_ma30_convergence = bool(
+        staged_ma30_convergence_rule_matched
+        and ma10_ma30_narrowing is not None
+        and ma10_ma30_narrowing >= 5.0
+    )
+    fast_staged_ma30_convergence_pts = (
+        2.0 if fast_staged_ma30_convergence else 0.0
+    )
 
     gate_passed = turnover is not None and turnover < OVERSOLD_TURNOVER_GATE_MAX_PCT
     turnover_pts = (
@@ -324,16 +351,23 @@ def score_oversold_candidate(
               else (4.0 if vol_ratio is not None and vol_ratio < 1.1
                     else (2.0 if vol_ratio is not None and vol_ratio < 1.3 else 0.0)))
     )
-    # 阳线包裹收敛三线"好看度"（主人低吸"最好看"形态，权重72主导）。
-    # 连续给分：包裹(+40) + 三线收敛(放大+20,越窄越好) + 均线平滑(+5) + 梯形缩量(+4) + 实体均匀(+3)。
+    # 三线包裹好看度仅属于已命中的稳定包裹研究路径。不能让其他
+    # 超跌路径因均线窄或缩量而借到这部分权重。
     yang_wrap = bool(features.get("yang_wrap_three_ma"))
+    yang_wrap_after_long_bear_cross = yang_wrap and bool(
+        features.get("ma10_crossed_ma20_after_long_bear_within_15d")
+    )
     m10_cv = _number(features.get("ma10_slope_cv_6d"))
     vol_mono = _number(features.get("vol_monotone_6d"))
     body_excl = _number(features.get("body_max_excl_6d"))
     spread3 = _number(features.get("ma_cluster_spread_pct"))
     tr_pretty = _number(features.get("turnover_rate_pct"))
     hold_premium = _number(features.get("breakout_hold_premium"))
-    stable_wrap_base = yang_wrap and bool(features.get("yang_wrap_stable_base"))
+    stable_wrap_base = (
+        stable_three_ma_wrap_rule_matched
+        and yang_wrap_after_long_bear_cross
+        and bool(features.get("yang_wrap_stable_base"))
+    )
     wrap_low_distance = _number(features.get("yang_wrap_nearest_ma_low_abs_pct"))
     wrap_volume_end_to_peak = _number(
         features.get("yang_wrap_volume_end_to_peak_ratio_6d")
@@ -351,11 +385,25 @@ def score_oversold_candidate(
         15.0 if hold_premium is not None and hold_premium > 3.0
         else (8.0 if hold_premium is not None and hold_premium > 1.0 else 0.0)
     )
-    pretty_pts = (40.0 if yang_wrap else 0.0) + active_pts + hold_pts
-    pretty_pts += max(0.0, (6.0 - abs(spread3)) / 6.0 * 12.0) if spread3 is not None else 0.0
-    pretty_pts += max(0.0, (80.0 - m10_cv) / 80.0 * 8.0) if m10_cv is not None else 0.0
-    pretty_pts += (vol_mono * 8.0) if vol_mono is not None else 0.0
-    pretty_pts += max(0.0, (2.5 - body_excl) / 2.5 * 4.0) if body_excl is not None else 0.0
+    pretty_pts = 0.0
+    if stable_wrap_base:
+        pretty_pts = 40.0 + active_pts + hold_pts
+        pretty_pts += (
+            max(0.0, (6.0 - abs(spread3)) / 6.0 * 12.0)
+            if spread3 is not None
+            else 0.0
+        )
+        pretty_pts += (
+            max(0.0, (80.0 - m10_cv) / 80.0 * 8.0)
+            if m10_cv is not None
+            else 0.0
+        )
+        pretty_pts += (vol_mono * 8.0) if vol_mono is not None else 0.0
+        pretty_pts += (
+            max(0.0, (2.5 - body_excl) / 2.5 * 4.0)
+            if body_excl is not None
+            else 0.0
+        )
 
     components = (
         _component(
@@ -379,8 +427,16 @@ def score_oversold_candidate(
             95.0,
             (
                 f"阳线包裹三线★ 平滑{_fmt(m10_cv)} 梯形{_fmt(vol_mono)}"
-                if yang_wrap
-                else f"未包裹 平滑{_fmt(m10_cv)} 梯形{_fmt(vol_mono)} 均{_fmt(body_excl)} 散{_fmt(spread3)}"
+                if stable_wrap_base
+                else (
+                    "三线几何包裹但未命中稳定包裹研究路径"
+                    if yang_wrap_after_long_bear_cross
+                    else (
+                        "三线几何包裹但未完成长期空头后 MA10 上穿 MA20"
+                        if yang_wrap
+                        else f"非稳定三线包裹路径 平滑{_fmt(m10_cv)} 梯形{_fmt(vol_mono)}"
+                    )
+                )
             ),
         ),
         _component(
@@ -430,6 +486,30 @@ def score_oversold_candidate(
             12.0 if process else 0.0,
             12.0,
             "MA10 分阶段上穿/联合上攻结构成立" if process else "分阶段上穿结构不成立",
+        ),
+        _component(
+            "staged_ma30_fast_convergence",
+            "MA10 向 MA30 快速收敛",
+            fast_staged_ma30_convergence,
+            fast_staged_ma30_convergence_pts,
+            2.0,
+            (
+                f"5日 MA10-MA30 缩差 {_fmt(ma10_ma30_narrowing)}%（>=5%）"
+                if staged_ma30_convergence_rule_matched
+                else "非 MA10 向 MA30 分阶段收敛路径"
+            ),
+        ),
+        _component(
+            "pre_cross_controlled_drive",
+            "预上穿受控启动",
+            controlled_pre_cross_drive,
+            controlled_pre_cross_drive_pts,
+            10.0,
+            (
+                f"D日 {_fmt(daily_return, signed=True)}%，D+1 需 {_fmt(next_close_required_return, signed=True)}% 使 MA10≥MA20"
+                if pre_cross_rule_matched
+                else "非 MA10/20 预上穿路径"
+            ),
         ),
         _component(
             "capitulation",
@@ -484,10 +564,21 @@ def score_oversold_candidate(
     dead_pts = sum(
         c.points for c in components
         if c.kind == "bonus"
-        and c.key not in {"yang_wrap_pretty", "yang_wrap_stable_base"}
+        and c.key not in {
+            "yang_wrap_pretty",
+            "yang_wrap_stable_base",
+            "pre_cross_controlled_drive",
+            "staged_ma30_fast_convergence",
+        }
     )
     stable_base_pts = 8.0 if stable_wrap_base else 0.0
-    raw = dead_pts * 0.4 + pretty_pts + stable_base_pts
+    raw = (
+        dead_pts * 0.4
+        + pretty_pts
+        + stable_base_pts
+        + controlled_pre_cross_drive_pts
+        + fast_staged_ma30_convergence_pts
+    )
     if not gate_passed:
         raw = min(raw, OVERSOLD_GATE_FAILED_SCORE_CAP)
     return round(min(140.0, raw), 2), components
