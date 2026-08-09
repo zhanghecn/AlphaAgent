@@ -134,6 +134,7 @@ def run_daily_backtest_sync(
         inputs.security_status.to_dict(orient="records"),
     )
     names = _load_stock_names({item.vt_symbol for item in candidates})
+    candidates = _exclude_current_st_candidates(candidates, names)
     payload = build_backtest_payload(
         candidates,
         inputs.market_calendar,
@@ -299,6 +300,19 @@ def _family_payload(
         "limit": LIVE_MAX_ITEMS_PER_FAMILY,
         "items": items,
     }
+
+
+def _exclude_current_st_candidates(
+    candidates: list[LowSuctionCandidate],
+    names: dict[str, str],
+) -> list[LowSuctionCandidate]:
+    """Keep the exploratory historical pool consistent with the live ST screen."""
+
+    return [
+        candidate
+        for candidate in candidates
+        if not _is_st_name(names.get(candidate.vt_symbol))
+    ]
 
 
 def _paginate_live_payload(

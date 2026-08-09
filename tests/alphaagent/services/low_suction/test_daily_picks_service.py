@@ -1,8 +1,35 @@
 """Focused tests for low-suction live payload paging."""
 
+from datetime import date
+
 from alphaagent.server.services.low_suction.daily_picks_service import (
+    _exclude_current_st_candidates,
     _paginate_live_payload,
 )
+from alphaagent.server.services.low_suction.daily_picks_scanner import (
+    LowSuctionCandidate,
+)
+from alphaagent.server.services.low_suction.daily_picks_scoring import QuietStreak
+
+
+def _candidate(vt_symbol: str) -> LowSuctionCandidate:
+    return LowSuctionCandidate(
+        vt_symbol=vt_symbol,
+        trade_date=date(2026, 8, 6),
+        setup_type="oversold_rebound",
+        rule_key="test_rule",
+        matched_rule_keys=("test_rule",),
+        score=50.0,
+        band="40-59",
+        streak=QuietStreak(total=0, yin=0, yang=0),
+        components=(),
+        close_price=10.0,
+        daily_return_pct=0.0,
+        turnover_rate_pct=2.0,
+        candle_range_pct=1.0,
+        d1_trade_date=None,
+        d1_close_return_pct=None,
+    )
 
 
 def test_live_pagination_keeps_each_family_within_cached_top_hundred() -> None:
@@ -29,3 +56,14 @@ def test_live_pagination_keeps_each_family_within_cached_top_hundred() -> None:
     assert paged["oversold"]["page"] == 1
     assert paged["oversold"]["pages"] == 1
     assert [item["rank"] for item in paged["oversold"]["items"]] == list(range(1, 8))
+
+
+def test_backtest_candidate_filter_matches_live_current_name_st_screen() -> None:
+    candidates = [_candidate("000001.SZSE"), _candidate("000002.SZSE")]
+
+    filtered = _exclude_current_st_candidates(
+        candidates,
+        {"000001.SZSE": "平安银行", "000002.SZSE": "*ST样例"},
+    )
+
+    assert [candidate.vt_symbol for candidate in filtered] == ["000001.SZSE"]
