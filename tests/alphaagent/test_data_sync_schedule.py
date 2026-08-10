@@ -28,6 +28,26 @@ def test_sync_batch_schedules_table_defined():
     assert {"last_status", "last_started_at", "last_finished_at"}.issubset(cols)
 
 
+def test_primary_eod_batch_watchdog_allows_extended_runtime() -> None:
+    now = datetime(2026, 8, 10, 22, 0, tzinfo=timezone.utc)
+    batch = {
+        "id": "primary-eod",
+        "status": "running",
+        "schedule_id": "eod_1900",
+        "started_at": now - timedelta(hours=3),
+    }
+
+    assert svc._select_zombie_batch_ids(
+        [batch], now, svc.ZOMBIE_BATCH_THRESHOLD_SECONDS
+    ) == []
+
+    batch["started_at"] = now - timedelta(hours=5, minutes=1)
+
+    assert svc._select_zombie_batch_ids(
+        [batch], now, svc.ZOMBIE_BATCH_THRESHOLD_SECONDS
+    ) == ["primary-eod"]
+
+
 def test_stock_financial_sync_attempts_table_defined():
     table = schema.stock_financial_sync_attempts
 

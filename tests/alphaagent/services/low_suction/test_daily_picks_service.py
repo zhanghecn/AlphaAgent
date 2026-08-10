@@ -35,6 +35,10 @@ def _candidate(vt_symbol: str) -> LowSuctionCandidate:
     )
 
 
+def test_live_scan_cache_ttl_is_fifteen_minutes() -> None:
+    assert daily_picks_service.LIVE_CACHE_TTL_SECONDS == 15 * 60
+
+
 def test_live_pagination_keeps_each_family_within_cached_top_hundred() -> None:
     payload = {
         "status": "ok",

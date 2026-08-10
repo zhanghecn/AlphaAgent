@@ -582,6 +582,9 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
 # used to live on DEFAULT_JOBS. See
 # requirements/alphaagent_unified_incremental_schedule_plan.md.
 CURRENT_EOD_SCHEDULE_ID = "eod_1900"
+# 盘后主链包含全市场日线、公告和研究重建，线上一次完整执行可超过两小时。
+# 给它更长的窗口，避免补偿任务启动时把仍在正常推进的主链误杀。
+PRIMARY_EOD_BATCH_THRESHOLD_SECONDS = 5 * 60 * 60
 PRIMARY_EOD_RECOVERY_CUTOFF_HOUR = 21
 LEGACY_DEFAULT_BATCH_SCHEDULE_IDS = {
     "eod_18h",
@@ -2707,7 +2710,6 @@ def _select_zombie_batch_ids(
     started_at 兼容 ISO 字符串与 datetime；None / 非 running 跳过。纯函数，
     便于单测；DB/内存交互由 ``reap_zombie_batches`` 负责。
     """
-    cutoff = now - timedelta(seconds=threshold_seconds)
     ids: list[str] = []
     for batch in batches:
         if batch.get("status") != "running":
@@ -2720,9 +2722,20 @@ def _select_zombie_batch_ids(
                 started = datetime.fromisoformat(started.replace("Z", "+00:00"))
             except ValueError:
                 continue
+        threshold = _zombie_batch_threshold_seconds(batch, threshold_seconds)
+        cutoff = now - timedelta(seconds=threshold)
         if started < cutoff:
             ids.append(str(batch.get("id")))
     return ids
+
+
+def _zombie_batch_threshold_seconds(
+    batch: Mapping[str, Any],
+    default_threshold_seconds: float,
+) -> float:
+    if str(batch.get("schedule_id") or "") == CURRENT_EOD_SCHEDULE_ID:
+        return PRIMARY_EOD_BATCH_THRESHOLD_SECONDS
+    return default_threshold_seconds
 
 
 def reap_zombie_batches(
@@ -2743,6 +2756,13 @@ def reap_zombie_batches(
     zombie_ids = _select_zombie_batch_ids(batches, now, threshold_seconds)
     if not zombie_ids:
         return []
+    zombie_thresholds = {
+        str(batch.get("id")): _zombie_batch_threshold_seconds(
+            batch, threshold_seconds
+        )
+        for batch in batches
+        if str(batch.get("id")) in zombie_ids
+    }
     zombie_job_ids: set[str] = set()
     with _BATCH_LOCK:
         for batch_id in zombie_ids:
@@ -2760,8 +2780,9 @@ def reap_zombie_batches(
                 ):
                     zombie_job_ids.add(str(item["job_id"]))
 
-    message = f"Reaped by zombie watchdog (running > {int(threshold_seconds)}s)"
     for batch_id in zombie_ids:
+        threshold = zombie_thresholds.get(batch_id, threshold_seconds)
+        message = f"Reaped by zombie watchdog (running > {int(threshold)}s)"
         _finish_batch(batch_id, "failed", message)
     logger.warning("reap_zombie_batches: cleaned %d zombie batches: %s", len(zombie_ids), zombie_ids)
     try:

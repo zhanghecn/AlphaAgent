@@ -45,7 +45,7 @@ from alphaagent.server.services.low_suction.live_scan_repository import (
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-LIVE_CACHE_TTL_SECONDS = 30 * 60  # 交易日内每半小时重算一次缓存
+LIVE_CACHE_TTL_SECONDS = 15 * 60  # 交易日内每 15 分钟重算一次缓存
 LIVE_LOOKBACK_CALENDAR_DAYS = 10  # 加载日历窗口；特征 warmup 由加载器另加 120 天
 LIVE_MAX_ITEMS_PER_FAMILY = 100
 LIVE_PAGE_SIZE = 20
