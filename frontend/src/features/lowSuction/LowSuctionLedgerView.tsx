@@ -25,7 +25,7 @@ export function LowSuctionLedgerView({
   const [view, setView] = useState<"table" | "timeline">("table");
 
   if (!ledgerDays.length) {
-    return <EmptyState message="无交割记录" description="由 CLI low-suction-daily-backtest 物化后展示" />;
+    return <EmptyState message="无交割记录" description="服务器端回测重算完成后展示" />;
   }
 
   // 最新在左：min 取末尾、max 取首位

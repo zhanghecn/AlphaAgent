@@ -41,7 +41,7 @@ export function LowSuctionBacktestView({
       {!report ? (
         <EmptyState
           message={building ? "正在全量扫描计算低吸回测…" : "低吸日线回测尚未运行"}
-          description={building ? "期间可切换其他页签，算完自动刷新" : "点击上方「重新计算回测」生成报告，或等待 22:30 定时自动重算"}
+          description={building ? "期间可切换其他页签，算完自动刷新" : "点击上方「重新计算回测」即可在服务器端生成报告"}
         />
       ) : (
         <BacktestBody report={report} />
@@ -100,7 +100,7 @@ function RebuildBar({
             ? "border-primary/40 bg-primary/10 text-primary hover:bg-primary/20"
             : "border-muted text-muted-foreground opacity-60",
         )}
-        title={building ? "正在重算…" : "全量重新计算并写库（夜间 22:30 也会自动重算）"}
+        title={building ? "正在重算…" : "全量重新计算并写入服务器端报告"}
       >
         <RefreshCw size={12} className={cn(building && "animate-spin")} />
         {building ? "重算中" : "重新计算回测"}

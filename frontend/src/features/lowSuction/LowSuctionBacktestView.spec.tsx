@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { LowSuctionBacktestView } from "./LowSuctionBacktestView";
+import { LowSuctionLedgerView } from "./LowSuctionLedgerView";
 
 describe("LowSuctionBacktestView", () => {
   it("restores an in-flight legacy rebuild even before a report exists", () => {
@@ -81,5 +82,14 @@ describe("LowSuctionBacktestView", () => {
     expect(html).toContain("已完成");
     expect(html).toContain("候选 50,704");
     expect(html).toContain("回测报告已写入");
+  });
+
+  it("points an empty ledger to the server-side rebuild", () => {
+    const html = renderToStaticMarkup(
+      <LowSuctionLedgerView ledgerDays={[]} />,
+    );
+
+    expect(html).toContain("服务器端回测重算完成后展示");
+    expect(html).not.toContain("CLI");
   });
 });
