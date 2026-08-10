@@ -2548,6 +2548,17 @@ def _stale_batch_summary_status_reset(existing_sched: Any, current_job_count: in
     }
 
 
+def _preserved_schedule_enabled(existing_sched: Any, default: bool) -> bool:
+    mapping = (
+        existing_sched
+        if isinstance(existing_sched, Mapping)
+        else getattr(existing_sched, "_mapping", None)
+    )
+    if not mapping or mapping.get("enabled") is None:
+        return default
+    return bool(mapping["enabled"])
+
+
 def seed_default_registry() -> None:
     """Insert default sources and job definitions when they are missing."""
     try:
@@ -2617,6 +2628,10 @@ def seed_default_registry() -> None:
                 if existing_sched is None:
                     session.execute(schema.sync_batch_schedules.insert().values(**sched_values))
                 else:
+                    sched_values["enabled"] = _preserved_schedule_enabled(
+                        existing_sched,
+                        bool(sched["enabled"]),
+                    )
                     sched_values.update(
                         _stale_batch_summary_status_reset(existing_sched, len(sched["job_ids"]))
                     )
@@ -3590,12 +3605,21 @@ def _run_low_suction_daily_backtest_rerun_batch_job() -> dict[str, Any]:
     """每晚 22:30 全量重算低吸日线回测（v3/v4 因子）并写库，供前端回测/交割单读取。"""
 
     from alphaagent.server.services.low_suction.daily_picks_service import (
+        DailyBacktestAlreadyRunningError,
         run_daily_backtest_sync,
     )
 
     if _latest_complete_daily_date_for_research() is None:
         return {"status": "skipped", "rows_read": 0, "rows_written": 0, "message": "数据库未就绪"}
-    payload = run_daily_backtest_sync()
+    try:
+        payload = run_daily_backtest_sync()
+    except DailyBacktestAlreadyRunningError:
+        return {
+            "status": "skipped",
+            "rows_read": 0,
+            "rows_written": 0,
+            "message": "低吸日线回测已有服务器任务在执行，跳过本次重复触发",
+        }
     coverage = payload.get("coverage") or {}
     combined = (payload.get("position_sim") or {}).get("combined") or {}
     return {

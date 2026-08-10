@@ -48,6 +48,27 @@ def test_primary_eod_batch_watchdog_allows_extended_runtime() -> None:
     ) == ["primary-eod"]
 
 
+def test_low_suction_backtest_batch_skips_when_another_process_is_running(monkeypatch) -> None:
+    from alphaagent.server.services.low_suction import daily_picks_service
+
+    monkeypatch.setattr(
+        svc,
+        "_latest_complete_daily_date_for_research",
+        lambda: date(2026, 8, 10),
+    )
+
+    def busy() -> dict[str, object]:
+        raise daily_picks_service.DailyBacktestAlreadyRunningError("busy")
+
+    monkeypatch.setattr(daily_picks_service, "run_daily_backtest_sync", busy)
+
+    result = svc._run_low_suction_daily_backtest_rerun_batch_job()
+
+    assert result["status"] == "skipped"
+    assert result["rows_written"] == 0
+    assert "重复触发" in str(result["message"])
+
+
 def test_stock_financial_sync_attempts_table_defined():
     table = schema.stock_financial_sync_attempts
 
@@ -579,6 +600,56 @@ def test_seed_default_registry_clears_stale_partial_summary(monkeypatch):
     assert rows["eod_finalize_2130"]["last_message"] == (
         f"{len(current_partial['job_ids']) - 1} 成功 / 1 失败"
     )
+
+
+def test_seed_default_registry_preserves_default_schedule_enabled_setting(monkeypatch):
+    rows: dict[str, dict[str, Any]] = {
+        "eod_1900": {
+            "id": "eod_1900",
+            "enabled": False,
+            "last_status": None,
+        }
+    }
+
+    class FakeResult:
+        def __init__(self, row=None):
+            self.row = row
+
+        def first(self):
+            return self.row
+
+    class FakeSession:
+        def execute(self, statement):
+            table = getattr(getattr(statement, "table", None), "name", None)
+
+            if getattr(statement, "is_select", False) and "FROM sync_batch_schedules" in str(statement):
+                params = statement.compile().params
+                return FakeResult(rows.get(params["id_1"]))
+
+            if table == "sync_batch_schedules" and statement.is_insert:
+                params = statement.compile().params
+                rows[str(params["id"])] = dict(params)
+                return FakeResult()
+
+            if table == "sync_batch_schedules" and statement.is_update:
+                params = statement.compile().params
+                schedule_id = str(params["id_1"])
+                rows.setdefault(schedule_id, {}).update(
+                    {key: value for key, value in params.items() if key != "id_1"}
+                )
+                return FakeResult()
+
+            return FakeResult()
+
+    @contextmanager
+    def fake_session_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr(svc, "session_scope", fake_session_scope)
+
+    svc.seed_default_registry()
+
+    assert rows["eod_1900"]["enabled"] is False
 
 
 def test_seed_default_registry_deletes_legacy_schedules(monkeypatch):

@@ -163,6 +163,24 @@ def test_backtest_background_records_stage_and_completion(monkeypatch) -> None:
     }
 
 
+def test_backtest_sync_rejects_a_cross_process_rebuild(monkeypatch) -> None:
+    class BusyExecutionLock:
+        def __enter__(self) -> None:
+            raise daily_picks_service.DailyBacktestAlreadyRunningError("busy")
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        daily_picks_service,
+        "_daily_backtest_execution_lock",
+        lambda: BusyExecutionLock(),
+    )
+
+    with pytest.raises(daily_picks_service.DailyBacktestAlreadyRunningError, match="busy"):
+        daily_picks_service.run_daily_backtest_sync()
+
+
 def test_duplicate_backtest_click_is_recorded_and_keeps_active_run(monkeypatch) -> None:
     duplicate_messages: list[str] = []
     monkeypatch.setattr(daily_picks_service, "_REBUILD_STATE", {

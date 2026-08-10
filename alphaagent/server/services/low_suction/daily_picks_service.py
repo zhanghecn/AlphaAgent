@@ -1,4 +1,4 @@
-"""低吸日线实时推荐服务：30 分钟缓存 + 盘中现货合成当日虚拟 K 线。
+"""低吸日线实时推荐服务：15 分钟缓存 + 盘中现货合成当日虚拟 K 线。
 
 盘中（09:25-15:30 工作日）用全市场现货快照给每只股票合成一根今日虚拟
 日线（最新价当收盘），与历史日线拼接后走同一套研究票规则扫描和诊断评分；
@@ -9,15 +9,16 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from alphaagent.server.db import schema
-from alphaagent.server.db.session import session_scope
+from alphaagent.server.db.session import get_engine, session_scope
 from alphaagent.server.services.low_suction.daily_factor_repository import (
     load_daily_factor_inputs,
 )
@@ -57,7 +58,7 @@ _logger = logging.getLogger(__name__)
 _cache_lock = threading.Lock()
 _live_scan_lock = threading.Lock()
 _cache: dict[str, object] = {"expires_at": None, "payload": None}
-# 日线输入按“最新可靠交易日”缓存：盘中 30 分钟重算只重扫不重读库
+# 日线输入按“最新可靠交易日”缓存：盘中 15 分钟重算只重扫不重读库
 _inputs_cache: dict[str, object] = {"key": None, "inputs": None}
 _warm_thread: threading.Thread | None = None
 
@@ -184,7 +185,47 @@ def _normalize_unsettled_ledger_day_returns(
 _REBUILD_LOCK = threading.RLock()
 _REBUILD_THREAD: threading.Thread | None = None
 _REBUILD_STATE: dict[str, object] = {"status": "idle"}
+_DAILY_BACKTEST_ADVISORY_LOCK_KEY = 8_218_134_157
+_fallback_daily_backtest_execution_lock = threading.Lock()
 BacktestProgressCallback = Callable[[str, str, dict[str, object]], None]
+
+
+class DailyBacktestAlreadyRunningError(RuntimeError):
+    """Raised when another AlphaAgent process owns the daily backtest rebuild."""
+
+
+@contextmanager
+def _daily_backtest_execution_lock() -> Iterator[None]:
+    """Ensure the API and scheduler cannot rebuild the same report concurrently."""
+
+    engine = get_engine()
+    if engine.dialect.name != "postgresql":
+        if not _fallback_daily_backtest_execution_lock.acquire(blocking=False):
+            raise DailyBacktestAlreadyRunningError("低吸日线回测已有服务器任务在执行")
+        try:
+            yield
+        finally:
+            _fallback_daily_backtest_execution_lock.release()
+        return
+
+    with engine.connect() as connection:
+        acquired = bool(
+            connection.execute(
+                text("SELECT pg_try_advisory_lock(:lock_key)"),
+                {"lock_key": _DAILY_BACKTEST_ADVISORY_LOCK_KEY},
+            ).scalar_one()
+        )
+        connection.commit()
+        if not acquired:
+            raise DailyBacktestAlreadyRunningError("低吸日线回测已有服务器任务在执行")
+        try:
+            yield
+        finally:
+            connection.execute(
+                text("SELECT pg_advisory_unlock(:lock_key)"),
+                {"lock_key": _DAILY_BACKTEST_ADVISORY_LOCK_KEY},
+            )
+            connection.commit()
 
 
 def run_daily_backtest_sync(
@@ -194,6 +235,22 @@ def run_daily_backtest_sync(
     progress: BacktestProgressCallback | None = None,
 ) -> dict[str, object]:
     """Synchronously rebuild and persist the daily backtest payload."""
+
+    with _daily_backtest_execution_lock():
+        return _run_daily_backtest_sync_unlocked(
+            start_date=start_date,
+            end_date=end_date,
+            progress=progress,
+        )
+
+
+def _run_daily_backtest_sync_unlocked(
+    *,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    progress: BacktestProgressCallback | None = None,
+) -> dict[str, object]:
+    """Rebuild the report while the cross-process execution lock is held."""
 
     _report_backtest_stage(progress, "load_inputs", "加载日线与证券状态", {})
     inputs = load_daily_factor_inputs(
