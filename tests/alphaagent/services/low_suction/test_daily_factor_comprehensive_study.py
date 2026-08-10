@@ -134,7 +134,7 @@ def test_personal_case_manifest_covers_every_named_source_observation() -> None:
             date(2026, 8, 3),
             "oversold_rebound",
             "process_only",
-            (),
+            ("post_wrap_upper_band_reclaim_confirmation",),
         ),
         (
             "中南文化 MA10 回踩",
@@ -201,7 +201,6 @@ def test_unmodeled_personal_cases_stay_archived_as_research_pending() -> None:
 
     assert set(pending) == {
         "百花医药 M10/M20 两线包裹",
-        "百花医药 向上踩稳",
         "立新能源 MA10 向 MA20 加速收敛",
     }
     assert all(not case.required_process_rule_keys for case in pending.values())

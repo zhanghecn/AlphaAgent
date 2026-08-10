@@ -52,7 +52,7 @@ export function LowSuctionGuideView() {
         </div>
       </div>
 
-      <PanelHead no="02" zh="超跌反弹低吸规则（v2.6）" en="OVERSOLD REBOUND" note="先认形态，再在同日候选中排序" />
+      <PanelHead no="02" zh="超跌反弹低吸规则（v2.8）" en="OVERSOLD REBOUND" note="先认形态，再按启动阶段排序" />
       <div className="space-y-3 border-b px-3 py-4 sm:px-4">
         <div>
           <div className="mb-1 font-semibold">先准入，再评分</div>
@@ -62,21 +62,31 @@ export function LowSuctionGuideView() {
           </ul>
         </div>
         <div>
-          <div className="mb-1 font-semibold">形态一：三线收敛阳线包裹</div>
+          <div className="mb-1 font-semibold">形态一：新鲜稳定三线包裹（P3）</div>
           <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
             <li>长期空头后，MA10 已开始越过 MA20；MA10、MA20、MA30 尚未跑散，阳线实体把三条线包住。</li>
             <li>低点要真正贴到均线附近，且信号日前的量能已经缩下来。均线隔得很开、靠大阳线强行跨过的“包裹”不算。</li>
           </ul>
         </div>
         <div>
-          <div className="mb-1 font-semibold">形态二：P1 分段支撑</div>
+          <div className="mb-1 font-semibold">形态二：包裹后的次日上沿回踩站稳（P2）</div>
+          <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
+            <li>前一交易日必须完整命中“稳定三线包裹”；只在紧随的下一交易日观察，不能把几天后的均线触碰回填成确认。</li>
+            <li>D 日低点回到前日三线带上沿 ±1.5% 内，收盘仍高于当日 MA10/MA20/MA30；K 线小幅收阳（≤3%）、振幅 ≤5%、换手 1.5%~8%。</li>
+            <li>P2 的豁免只限这一日：D 日不重复要求长期空头、MA10 上穿 MA20 或阳线包裹，三项资格已由紧邻前日的 P3 验证；D 日只验证回踩后的重新站稳。</li>
+            <li>它是包裹启动后的第二个低吸点，不是持仓续抱或突破追涨信号。百花医药 7-31 包裹后的 8-3 属于这条路径。</li>
+            <li>次日若一字涨停，D+1 收盘标签只能复核方向，不能当作可买收益；P2 的判定只使用 D 日及以前信息。</li>
+          </ul>
+        </div>
+        <div>
+          <div className="mb-1 font-semibold">形态三：P1 分段支撑</div>
           <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
             <li>MA10 已上穿 MA20、仍在 MA30 下方；价格回踩 MA10 获支撑。随后 MA10 与 MA30 的距离继续缩小，量能呈阶梯式收缩。</li>
             <li>这是“先过 MA20、再准备过 MA30”的地基，而不是均线已经拉开后的追涨。传智教育 7-22、7-24 属于这条路径。</li>
           </ul>
         </div>
         <div>
-          <div className="mb-1 font-semibold">形态三：过 MA30 后的回踩修复</div>
+          <div className="mb-1 font-semibold">形态四：过 MA30 后的回踩修复</div>
           <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
             <li>MA10 曾经上穿 MA30，随后价格深回撤到 MA30 附近；回撤段先缩量，信号日前后重新出现量能恢复。</li>
             <li>它仍是超跌转势过程中的回踩，不把所有“MA10 已在 MA30 上方”的股票都当成超跌候选。</li>
@@ -85,7 +95,9 @@ export function LowSuctionGuideView() {
         <div>
           <div className="mb-1 font-semibold">排除与排序</div>
           <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
+            <li>P2 准入边界：前日不是完整稳定包裹、不是紧随下一交易日、低点未回到前日上沿、收盘跌回三线下方、阴线或涨幅 &gt;3%、振幅 &gt;5%、换手不足 1.5% 或达到 8%，一项不满足即不认定。</li>
             <li>信号日触及涨停、低点没有真实均线支撑，或 MA10 已远离 MA30 且没有回踩修复结构，均不作为该阶段的低吸形态。</li>
+            <li><span className="text-foreground">同日阶段优先级：</span>P3 新鲜稳定三线包裹 &gt; P2 包裹后上沿踩稳确认 &gt; P1 分段支撑；同层内再按综合分、连续小 K 线、换手率排序。P2 的透明 80 分下限只表达阶段优先级，不继承前日的完整评分。</li>
             <li>基础排序看均线支撑、空头持续时间、K 线是否安静、收盘是否脱离支撑、以及量能是否有序收缩。换手率 ≥8% 不改变规则命中，但诊断分封顶 39，避免高换手派发占据前列。</li>
             <li><span className="text-foreground">P1 的活跃承接加分：</span>仅当 P1 已命中且换手率在 1.5%~8% 时加 8 分。它奖励“缩量但仍有承接”，不让无成交的缩量地基排在前面；不满足 P1 的股票不会得到这 8 分。</li>
             <li>超跌诊断总分最高 140，用于排序而非预测收益概率；分数跨版本不可直接比较。</li>
@@ -96,7 +108,7 @@ export function LowSuctionGuideView() {
       <PanelHead no="03" zh="口径与边界" en="CONVENTION" note="诚实边界，不外推" />
       <div className="space-y-2 px-3 py-4 text-muted-foreground sm:px-4">
         <ul className="ml-4 list-disc space-y-0.5">
-          <li>数据口径：raw_unadjusted 不复权日线（探索级，除权日有已知污染）；D+1 收盘到收盘收益，未扣费</li>
+          <li>数据口径：raw_unadjusted 不复权日线（探索级，除权日有已知污染）；D+1 收盘到收盘收益，未扣费。它用于方向复核，不等同于次日开盘可成交收益；次日一字涨停无法按该口径买入。</li>
           <li>回测执行：每日趋势/超跌各取综合分最高的前 5 只，单票固定 10%，不足 10 只的槽位留现金；具体结果以「回测」页最新物化报告为准</li>
           <li>回测解读：只看当前评分版本、固定规则和固定前五排序的结果；页面分数段用于复核，不构成收益承诺</li>
           <li>并列决胜：超跌顶分并列率超九成 —— 并列时按连续小 K 线数更多、换手率更低决胜（均为全量验证的单调方向），回测与实时推荐同一决胜键</li>

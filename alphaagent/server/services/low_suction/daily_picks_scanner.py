@@ -12,6 +12,7 @@ from datetime import date
 from alphaagent.server.services.low_suction.daily_factor_extended_discovery import (
     DISCOVERY_RULES,
     MA10_MA20_PRE_CROSS_RULE_KEY,
+    POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
     RESEARCH_PENDING_DAILY_RULE_KEYS,
     RESEARCH_THREE_MA_WRAP_RULE_KEY,
     STAGED_MA30_CONVERGENCE_RULE_KEYS,
@@ -119,10 +120,19 @@ def scan_low_suction_candidates(
         if _signal_day_limit_up_closed(snapshot.history, snapshot.position):
             continue
         features = snapshot.features
-        trend_rules = matching_discovery_rule_keys(features, "trend_pullback")
+        prior_features = snapshot.prior_features
+        trend_rules = matching_discovery_rule_keys(
+            features,
+            "trend_pullback",
+            prior_features=prior_features,
+        )
         oversold_rules = tuple(
             rule_key
-            for rule_key in matching_discovery_rule_keys(features, "oversold_rebound")
+            for rule_key in matching_discovery_rule_keys(
+                features,
+                "oversold_rebound",
+                prior_features=prior_features,
+            )
             if rule_key not in RESEARCH_PENDING_DAILY_RULE_KEYS
         )
         if not trend_rules and not oversold_rules:
@@ -182,6 +192,9 @@ def scan_low_suction_candidates(
                 staged_ma30_convergence_rule_matched=bool(
                     set(oversold_rules) & STAGED_MA30_CONVERGENCE_RULE_KEYS
                 ),
+                post_wrap_upper_band_confirmation_rule_matched=(
+                    POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY in oversold_rules
+                ),
             )
             candidates.append(
                 LowSuctionCandidate(
@@ -202,19 +215,35 @@ def scan_low_suction_candidates(
                     d1_close_return_pct=d1_return,
                 )
             )
-    candidates.sort(key=lambda item: (item.trade_date, -item.score, item.vt_symbol))
+    candidates.sort(key=lambda item: (item.trade_date, *candidate_ranking_key(item)))
     return candidates
 
 
-def candidate_ranking_key(item: LowSuctionCandidate) -> tuple[float, int, float, str]:
-    """Stable product ranking shared by live recommendations and backtests."""
+def candidate_ranking_key(item: LowSuctionCandidate) -> tuple[int, float, int, float, str]:
+    """Stable product ranking shared by live recommendations and backtests.
+
+    超跌候选按研究形态阶段优先：新鲜稳定三线包裹（P3）>
+    包裹后上沿踩稳确认（P2）> 其余阶段性支撑（P1）。同层才比较诊断分。
+    """
 
     return (
+        -_candidate_priority_tier(item),
         -item.score,
         -item.streak.total,
         item.turnover_rate_pct if item.turnover_rate_pct is not None else 99.0,
         item.vt_symbol,
     )
+
+
+def _candidate_priority_tier(item: LowSuctionCandidate) -> int:
+    if item.setup_type != "oversold_rebound":
+        return 0
+    matched = set(item.matched_rule_keys)
+    if RESEARCH_THREE_MA_WRAP_RULE_KEY in matched:
+        return 3
+    if POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY in matched:
+        return 2
+    return 1
 
 
 def _number(value: object) -> float | None:

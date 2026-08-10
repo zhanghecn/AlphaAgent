@@ -1,7 +1,12 @@
 """Focused checks for the fixed top-five-per-family daily portfolio."""
 
+from dataclasses import replace
 from datetime import date, timedelta
 
+from alphaagent.server.services.low_suction.daily_factor_extended_discovery import (
+    POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
+    RESEARCH_THREE_MA_WRAP_RULE_KEY,
+)
 from alphaagent.server.services.low_suction.daily_picks_backtest import (
     ALLOCATION_PER_PICK_PCT,
     BACKTEST_VERSION,
@@ -9,7 +14,10 @@ from alphaagent.server.services.low_suction.daily_picks_backtest import (
     PICKS_PER_FAMILY,
     build_backtest_payload,
 )
-from alphaagent.server.services.low_suction.daily_picks_scanner import LowSuctionCandidate
+from alphaagent.server.services.low_suction.daily_picks_scanner import (
+    LowSuctionCandidate,
+    candidate_ranking_key,
+)
 from alphaagent.server.services.low_suction.daily_picks_scoring import (
     SCORE_VERSION,
     QuietStreak,
@@ -106,3 +114,44 @@ def test_backtest_uses_top_five_per_family_and_leaves_unfilled_slots_as_cash() -
     assert position_sim["market_regimes"]["below_ma20"]["positions"] == 1
     assert position_sim["time_segments"]["development"]["positions"] == 10
     assert position_sim["time_segments"]["holdout"]["positions"] == 1
+
+
+def test_oversold_ranking_keeps_p3_then_p2_then_p1_before_raw_score() -> None:
+    day = date(2026, 8, 3)
+    p1 = _candidate(
+        day=day,
+        setup_type="oversold_rebound",
+        ordinal=1,
+        score=130.0,
+        d1_return=0.0,
+    )
+    p2 = replace(
+        _candidate(
+            day=day,
+            setup_type="oversold_rebound",
+            ordinal=2,
+            score=80.0,
+            d1_return=0.0,
+        ),
+        rule_key=POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
+        matched_rule_keys=(POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,),
+    )
+    p3 = replace(
+        _candidate(
+            day=day,
+            setup_type="oversold_rebound",
+            ordinal=3,
+            score=40.0,
+            d1_return=0.0,
+        ),
+        rule_key=RESEARCH_THREE_MA_WRAP_RULE_KEY,
+        matched_rule_keys=(RESEARCH_THREE_MA_WRAP_RULE_KEY,),
+    )
+
+    ranked = sorted((p1, p2, p3), key=candidate_ranking_key)
+
+    assert [item.rule_key for item in ranked] == [
+        RESEARCH_THREE_MA_WRAP_RULE_KEY,
+        POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
+        "test_rule",
+    ]

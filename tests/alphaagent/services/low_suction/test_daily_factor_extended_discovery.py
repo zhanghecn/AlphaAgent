@@ -15,6 +15,7 @@ from alphaagent.server.services.low_suction.daily_factor_extended_discovery impo
     DISCOVERY_RULES,
     DiscoveryRule,
     MA10_MA20_PRE_CROSS_RULE_KEY,
+    POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
     RESEARCH_PENDING_DAILY_RULE_KEYS,
     RESEARCH_THREE_MA_WRAP_RULE_KEY,
     STAGED_MA10_SUPPORT_RULE_KEY,
@@ -25,6 +26,7 @@ from alphaagent.server.services.low_suction.daily_factor_extended_discovery impo
     _rule_matches,
     build_extended_daily_features,
     evaluate_post_limit_up_hold,
+    matching_discovery_rule_keys,
     process_rule_predicates,
     render_extended_daily_factor_markdown,
     run_extended_daily_factor_discovery,
@@ -123,6 +125,156 @@ def test_yang_wrap_stable_base_requires_real_touch_and_contracted_volume() -> No
         [*history, _bar(cutoff + timedelta(days=1), 20.0, volume=9_999.0)],
         as_of_date=cutoff,
     )
+
+
+def _stable_wrap_then_upper_band_confirmation_history() -> list[dict[str, object]]:
+    """A causal P3 stable wrap followed by its single-session P2 confirmation."""
+
+    start = date(2026, 1, 2)
+    closes = [100 - index * 0.5 for index in range(50)]
+    closes += [75 + index * 0.5 for index in range(10)]
+    bars = [
+        {
+            **_bar(
+                start + timedelta(days=index),
+                close,
+                volume=1_000 - max(index - 54, 0) * 100,
+            ),
+            "turnover_rate": 2.0,
+            "vt_symbol": "600721.SSE",
+        }
+        for index, close in enumerate(closes)
+    ]
+    before_wrap = build_extended_daily_features(bars)
+    bundle_bottom = min(
+        float(before_wrap[field]) for field in ("ma10", "ma20", "ma30")
+    )
+    bundle_top = max(
+        float(before_wrap[field]) for field in ("ma10", "ma20", "ma30")
+    )
+    bars.append(
+        {
+            **_bar(
+                start + timedelta(days=len(bars)),
+                bundle_top * 1.003,
+                open_price=bundle_bottom * 0.995,
+                low_price=bundle_bottom * 0.995,
+                high_price=bundle_top * 1.006,
+                volume=400.0,
+            ),
+            "turnover_rate": 2.0,
+            "vt_symbol": "600721.SSE",
+        }
+    )
+    wrap_features = build_extended_daily_features(bars)
+    wrap_top = max(float(wrap_features[field]) for field in ("ma10", "ma20", "ma30"))
+    bars.append(
+        {
+            **_bar(
+                start + timedelta(days=len(bars)),
+                float(wrap_features["close_price"]) * 1.02,
+                open_price=wrap_top,
+                low_price=wrap_top,
+                high_price=float(wrap_features["close_price"]) * 1.022,
+                volume=600.0,
+            ),
+            "turnover_rate": 2.0,
+            "vt_symbol": "600721.SSE",
+        }
+    )
+    return bars
+
+
+def test_post_wrap_confirmation_requires_the_immediately_prior_stable_wrap() -> None:
+    history = _stable_wrap_then_upper_band_confirmation_history()
+    prior_features = build_extended_daily_features(history[:-1])
+    features = build_extended_daily_features(history)
+
+    assert process_rule_predicates(
+        POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
+        features,
+        prior_features=prior_features,
+    ) == {
+        "prior_stable_three_ma_wrap": True,
+        "prior_bundle_upper_edge_touch": True,
+        "close_above_current_three_ma": True,
+        "small_positive_candle": True,
+        "candle_quiet": True,
+        "turnover_1_5_to_8_pct": True,
+    }
+    assert matching_discovery_rule_keys(
+        features,
+        "oversold_rebound",
+        prior_features=prior_features,
+    ) == (POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,)
+    assert matching_discovery_rule_keys(features, "oversold_rebound") == ()
+    assert not all(
+        process_rule_predicates(
+            POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
+            {**features, "low_price": float(features["low_price"]) * 1.03},
+            prior_features=prior_features,
+        ).values()
+    )
+
+
+def test_scan_promotes_post_wrap_confirmation_only_with_the_full_calendar() -> None:
+    bars = _stable_wrap_then_upper_band_confirmation_history()
+    calendar = [row["trade_date"] for row in bars]
+    signal_date = calendar[-1]
+
+    candidates = scan_low_suction_candidates(
+        bars,
+        calendar,
+        [],
+        target_dates={signal_date},
+    )
+
+    assert [(candidate.rule_key, candidate.score) for candidate in candidates] == [
+        (POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY, 80.0),
+    ]
+    assert scan_low_suction_candidates(
+        bars,
+        [signal_date],
+        [],
+        target_dates={signal_date},
+    ) == []
+
+
+def test_baihua_20260803_reference_snapshot_is_a_post_wrap_confirmation() -> None:
+    """Regression facts from 百花医药 7-31 stable wrap and 8-3 upper-band retest."""
+
+    prior_features = {
+        "long_bear_alignment": True,
+        "ma10_crossed_ma20_after_long_bear_within_15d": True,
+        "yang_wrap_three_ma": True,
+        "yang_wrap_stable_base": True,
+        "ma10": 6.949,
+        "ma20": 7.017,
+        "ma30": 6.9536666667,
+    }
+    features = {
+        "low_price": 7.02,
+        "close_price": 7.20,
+        "ma10": 6.943,
+        "ma20": 7.026,
+        "ma30": 6.966,
+        "small_positive_candle": True,
+        "candle_quiet": True,
+        "turnover_rate_pct": 3.63,
+    }
+
+    predicates = process_rule_predicates(
+        POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
+        features,
+        prior_features=prior_features,
+    )
+
+    assert all(predicates.values())
+    assert matching_discovery_rule_keys(
+        features,
+        "oversold_rebound",
+        prior_features=prior_features,
+    ) == (POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,)
 
 
 def _bear_then_m10_cross_history() -> list[dict[str, object]]:
@@ -271,6 +423,7 @@ def test_scan_keeps_a_source_rule_when_the_diagnostic_turnover_gate_fails(
             "yang_wrap_three_ma": True,
             "yang_wrap_stable_base": True,
         },
+        prior_features=None,
         d1_close_return_pct=1.0,
         d1_label_status="available",
     )
@@ -282,7 +435,7 @@ def test_scan_keeps_a_source_rule_when_the_diagnostic_turnover_gate_fails(
     monkeypatch.setattr(
         daily_picks_scanner,
         "matching_discovery_rule_keys",
-        lambda features, setup_type: (
+        lambda features, setup_type, *, prior_features=None: (
             (RESEARCH_THREE_MA_WRAP_RULE_KEY,)
             if setup_type == "oversold_rebound"
             else ()
@@ -322,6 +475,7 @@ def test_scan_excludes_research_pending_oversold_rules_from_daily_candidates(
             "turnover_rate_pct": 2.0,
             "candle_range_pct": 2.0,
         },
+        prior_features=None,
         d1_close_return_pct=1.0,
         d1_label_status="available",
     )
@@ -333,7 +487,7 @@ def test_scan_excludes_research_pending_oversold_rules_from_daily_candidates(
     monkeypatch.setattr(
         daily_picks_scanner,
         "matching_discovery_rule_keys",
-        lambda features, setup_type: (
+        lambda features, setup_type, *, prior_features=None: (
             (pending_rule_key,) if setup_type == "oversold_rebound" else ()
         ),
     )
@@ -370,6 +524,7 @@ def test_scan_excludes_a_signal_day_closed_at_main_board_limit_up(
             "turnover_rate_pct": 2.0,
             "candle_range_pct": 0.0,
         },
+        prior_features=None,
         d1_close_return_pct=1.0,
         d1_label_status="available",
     )
@@ -381,7 +536,7 @@ def test_scan_excludes_a_signal_day_closed_at_main_board_limit_up(
     monkeypatch.setattr(
         daily_picks_scanner,
         "matching_discovery_rule_keys",
-        lambda features, setup_type: (
+        lambda features, setup_type, *, prior_features=None: (
             (RESEARCH_THREE_MA_WRAP_RULE_KEY,)
             if setup_type == "oversold_rebound"
             else ()
@@ -585,6 +740,7 @@ def test_manifest_excludes_retired_generic_rule_families() -> None:
     trend_keys = {rule.key for rule in DISCOVERY_RULES["trend_pullback"]}
 
     assert RESEARCH_THREE_MA_WRAP_RULE_KEY in rules
+    assert POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY in rules
     assert STAGED_MA10_SUPPORT_RULE_KEY in rules
     assert "ma10_low_retest_staged_m30_converging_volume_shrink" not in rules
     assert "ma10_ma30_converging_after_staged_cross_volume_shrink" not in rules
@@ -612,6 +768,17 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
         "yang_wrap_three_ma": True,
         "yang_wrap_stable_base": True,
     }
+    post_wrap_confirmation = {
+        "low_price": 10.0,
+        "close_price": 10.3,
+        "ma10": 9.9,
+        "ma20": 10.0,
+        "ma30": 10.1,
+        "small_positive_candle": True,
+        "candle_quiet": True,
+        "turnover_rate_pct": 2.0,
+    }
+    post_wrap_prior = {**stable_wrap, "ma10": 9.8, "ma20": 9.9, "ma30": 10.0}
     staged_ma10_support = {
         "long_bear_alignment": True,
         "oversold_process_eligible": True,
@@ -662,12 +829,14 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
     }
 
     stable_wrap_key = RESEARCH_THREE_MA_WRAP_RULE_KEY
+    post_wrap_key = POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY
     staged_key = STAGED_MA10_SUPPORT_RULE_KEY
     retest_key = "ma10_ma30_retest_after_actual_cross_two_leg_volume"
     yiming_pre_cross_key = MA10_MA20_PRE_CROSS_RULE_KEY
     yiming_transition_key = "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30"
     fallback_key = "ma10_low_touch_after_ma5_extension"
     assert stable_wrap_key in oversold_rules
+    assert post_wrap_key in oversold_rules
     assert staged_key in oversold_rules
     assert retest_key in oversold_rules
     assert yiming_pre_cross_key in oversold_rules
@@ -687,6 +856,27 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
     assert _rule_matches(
         oversold_rules[stable_wrap_key],
         {**stable_wrap, "ma10_crossed_ma20_after_long_bear_within_15d": False},
+    ) is False
+    assert process_rule_predicates(
+        post_wrap_key,
+        post_wrap_confirmation,
+        prior_features=post_wrap_prior,
+    ) == {
+        "prior_stable_three_ma_wrap": True,
+        "prior_bundle_upper_edge_touch": True,
+        "close_above_current_three_ma": True,
+        "small_positive_candle": True,
+        "candle_quiet": True,
+        "turnover_1_5_to_8_pct": True,
+    }
+    assert _rule_matches(
+        oversold_rules[post_wrap_key],
+        post_wrap_confirmation,
+        prior_features=post_wrap_prior,
+    ) is True
+    assert _rule_matches(
+        oversold_rules[post_wrap_key],
+        post_wrap_confirmation,
     ) is False
     assert process_rule_predicates(staged_key, staged_ma10_support) == {
         "long_bear_alignment": True,
@@ -874,7 +1064,7 @@ def test_source_rule_snapshots_do_not_apply_a_generic_prescreen(
     monkeypatch.setattr(
         extended_discovery,
         "_matches_any_rule",
-        lambda _: True,
+        lambda _, *, prior_features=None: True,
     )
 
     snapshots = list(

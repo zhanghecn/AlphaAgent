@@ -260,10 +260,10 @@ def _compute_live_payload(now: datetime) -> dict[str, object]:
             merge_note = f"现货快照有效股票不足（{active} 只），沿用最近完整日线"
 
     target_date = calendar[-1]
-    # 单日扫描：日历只放目标日，候选特征只算当日（全量 K 线历史仍在 bars 里供 warmup）
+    # 只扫描目标日，但保留完整市场日历来核对“前一交易日”的包裹后确认。
     candidates = scan_low_suction_candidates(
         bars,
-        [target_date],
+        calendar,
         inputs.security_status.to_dict(orient="records"),
         target_dates={target_date},
     )

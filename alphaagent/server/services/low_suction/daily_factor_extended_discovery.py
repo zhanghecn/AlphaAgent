@@ -11,7 +11,7 @@ import heapq
 import json
 import math
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from statistics import fmean, median
@@ -65,6 +65,9 @@ TREND_REBUILD_PRIOR_LOOKBACK = 10
 TREND_REBUILD_MIN_DISORDERED_SESSIONS = 3
 YANG_WRAP_STABLE_BASE_LOW_MA_MAX_PCT = 1.5
 YANG_WRAP_STABLE_BASE_VOLUME_END_TO_PEAK_MAX = 0.55
+POST_WRAP_UPPER_BAND_DISTANCE_MAX_PCT = 1.5
+POST_WRAP_CONFIRMATION_TURNOVER_MIN_PCT = 1.5
+POST_WRAP_CONFIRMATION_TURNOVER_MAX_PCT = 8.0
 VOLUME_MONOTONE_6D_MIN_RATIO = 0.8
 MIN_SELECTION_SAMPLES = 30
 MIN_SELECTION_CANDIDATE_DAYS = 10
@@ -79,6 +82,9 @@ OVERSOLD_TO_TREND_RULE_KEY = (
     "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30"
 )
 RESEARCH_THREE_MA_WRAP_RULE_KEY = "research_oversold_three_ma_wrap_stable_base"
+POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY = (
+    "post_wrap_upper_band_reclaim_confirmation"
+)
 MA10_MA20_PRE_CROSS_RULE_KEY = (
     "ma10_ma20_contact_pre_cross_positive_volume_expand"
 )
@@ -123,6 +129,11 @@ EXPLICIT_CASE_OVERSOLD_RULES = (
         RESEARCH_THREE_MA_WRAP_RULE_KEY,
         "oversold_rebound",
         "三线收敛阳线包裹（贴线、缩量）",
+    ),
+    DiscoveryRule(
+        POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
+        "oversold_rebound",
+        "稳定三线包裹后的次日上沿回踩站稳",
     ),
     DiscoveryRule(
         STAGED_MA10_SUPPORT_RULE_KEY,
@@ -199,6 +210,7 @@ class _CandidateSnapshot:
     history: Sequence[Mapping[str, object]]
     dates: tuple[date, ...]
     features: Mapping[str, object]
+    prior_features: Mapping[str, object] | None
     d1_close_return_pct: float | None
     d1_label_status: str
     d1_initial_short_trend_formed: bool | None
@@ -1199,6 +1211,8 @@ def build_extended_daily_features(
 def score_extended_factor(
     features: Mapping[str, object],
     setup_type: str,
+    *,
+    prior_features: Mapping[str, object] | None = None,
 ) -> dict[str, float]:
     """Score source-derived daily features without consulting future returns.
 
@@ -1240,13 +1254,21 @@ def score_extended_factor(
                 )
             )
         )
-        source_process = _matches_explicit_process_geometry(features, setup_type)
+        source_process = _matches_explicit_process_geometry(
+            features,
+            setup_type,
+            prior_features=prior_features,
+        )
         base = _round_pct(
             20.0 * sum((regime, transition, convergence, pullback, source_process))
         )
         volume = bool(
             source_process
-            and _matches_explicit_process_with_volume(features, setup_type)
+            and _matches_explicit_process_with_volume(
+                features,
+                setup_type,
+                prior_features=prior_features,
+            )
         )
         return {
             "base": base,
@@ -1278,7 +1300,11 @@ def score_extended_factor(
             or features.get("prior_ma5_low_touch")
             or features.get("trend_stable_bull")
         )
-        source_process = _matches_explicit_process_geometry(features, setup_type)
+        source_process = _matches_explicit_process_geometry(
+            features,
+            setup_type,
+            prior_features=prior_features,
+        )
         base = _round_pct(
             20.0 * sum((regime, maturity, support, context, source_process))
         )
@@ -1302,13 +1328,19 @@ def score_extended_factor(
 def matching_discovery_rule_keys(
     features: Mapping[str, object],
     setup_type: str,
+    *,
+    prior_features: Mapping[str, object] | None = None,
 ) -> tuple[str, ...]:
-    """Return declared discovery rules matched by one causal feature snapshot."""
+    """Return declared rules matched by D-and-earlier current/prior snapshots."""
 
     rules = DISCOVERY_RULES.get(setup_type)
     if rules is None:
         raise DailyFactorInputError(f"unsupported discovery setup type: {setup_type}")
-    return tuple(rule.key for rule in rules if _rule_matches(rule, features))
+    return tuple(
+        rule.key
+        for rule in rules
+        if _rule_matches(rule, features, prior_features=prior_features)
+    )
 
 
 def summarize_rule_observations(
@@ -2404,7 +2436,11 @@ def _iter_rule_observations(
     ):
         for setup_type, rules in DISCOVERY_RULES.items():
             for rule in rules:
-                if _rule_matches(rule, snapshot.features):
+                if _rule_matches(
+                    rule,
+                    snapshot.features,
+                    prior_features=snapshot.prior_features,
+                ):
                     yield {
                         "setup_type": setup_type,
                         "rule_key": rule.key,
@@ -2445,6 +2481,7 @@ def _iter_score_observations(
             for variant, score in score_extended_factor(
                 snapshot.features,
                 setup_type,
+                prior_features=snapshot.prior_features,
             ).items():
                 yield {
                     "setup_type": setup_type,
@@ -2526,7 +2563,9 @@ def _collect_case_score_profiles(
             "scores": {},
             "score_bands": {},
         }
-    calendar_set = set(calendar)
+    calendar_tuple = _strict_calendar(calendar)
+    calendar_set = set(calendar_tuple)
+    calendar_positions = {value: index for index, value in enumerate(calendar_tuple)}
     for symbol, history in _iter_symbol_histories(bars):
         cases = cases_by_symbol.get(symbol)
         if not cases:
@@ -2542,7 +2581,26 @@ def _collect_case_score_profiles(
             features = build_extended_daily_features(
                 history[max(0, position - 79) : position + 1]
             )
-            scores = score_extended_factor(features, case.expected_setup_type)
+            calendar_position = calendar_positions.get(case.trade_date)
+            prior_is_previous_market_session = bool(
+                position > 0
+                and calendar_position is not None
+                and calendar_position > 0
+                and _required_date(history[position - 1].get("trade_date"))
+                == calendar_tuple[calendar_position - 1]
+            )
+            prior_features = (
+                build_extended_daily_features(
+                    history[max(0, position - 80) : position]
+                )
+                if prior_is_previous_market_session
+                else None
+            )
+            scores = score_extended_factor(
+                features,
+                case.expected_setup_type,
+                prior_features=prior_features,
+            )
             score_bands = {
                 variant: _score_band(score)
                 for variant, score in scores.items()
@@ -2648,7 +2706,11 @@ def _collect_selected_exit_evidence(
     for snapshot in _iter_candidate_snapshots(bars, calendar, security_status):
         for setup_type, rule_key in selected_rules.items():
             rule = lookup.get(setup_type, {}).get(rule_key)
-            if rule is None or not _rule_matches(rule, snapshot.features):
+            if rule is None or not _rule_matches(
+                rule,
+                snapshot.features,
+                prior_features=snapshot.prior_features,
+            ):
                 continue
             if snapshot.d1_label_status == "label_excluded_main_board_price_limit":
                 continue
@@ -2726,13 +2788,33 @@ def _iter_candidate_snapshots(
             trade_date: _number_or_none(history[index].get("close_price"))
             for index, trade_date in enumerate(dates)
         }
+        feature_cache: dict[int, Mapping[str, object]] = {}
+
+        def _features_at(position: int) -> Mapping[str, object]:
+            if position not in feature_cache:
+                feature_cache[position] = build_extended_daily_features(
+                    history[max(0, position - 79) : position + 1]
+                )
+            return feature_cache[position]
+
         for position, trade_date in enumerate(dates):
             if trade_date not in scan_dates:
                 continue
             if eligible_pairs and (symbol, trade_date) not in eligible_pairs:
                 continue
-            features = build_extended_daily_features(history[max(0, position - 79) : position + 1])
-            if require_rule_match and not _matches_any_rule(features):
+            features = _features_at(position)
+            prior_features = _prior_session_features(
+                position=position,
+                trade_date=trade_date,
+                dates=dates,
+                calendar=calendar_tuple,
+                calendar_positions=calendar_positions,
+                feature_at_position=_features_at,
+            )
+            if require_rule_match and not _matches_any_rule(
+                features,
+                prior_features=prior_features,
+            ):
                 continue
             d1_close_return_pct, d1_label_status = _causal_d1_label(
                 closes,
@@ -2772,10 +2854,30 @@ def _iter_candidate_snapshots(
                 history=history,
                 dates=dates,
                 features=features,
+                prior_features=prior_features,
                 d1_close_return_pct=d1_close_return_pct,
                 d1_label_status=d1_label_status,
                 d1_initial_short_trend_formed=d1_initial_short_trend_formed,
             )
+
+
+def _prior_session_features(
+    *,
+    position: int,
+    trade_date: date,
+    dates: Sequence[date],
+    calendar: Sequence[date],
+    calendar_positions: Mapping[date, int],
+    feature_at_position: Callable[[int], Mapping[str, object]],
+) -> Mapping[str, object] | None:
+    """Return the prior market-session snapshot, never a stale suspended bar."""
+
+    calendar_position = calendar_positions.get(trade_date)
+    if position < 1 or calendar_position is None or calendar_position < 1:
+        return None
+    if dates[position - 1] != calendar[calendar_position - 1]:
+        return None
+    return feature_at_position(position - 1)
 
 
 def _is_pre_cross_trend_transition_preparation(
@@ -2811,9 +2913,81 @@ def _is_pre_cross_trend_transition_preparation(
     )
 
 
+def _prior_stable_three_ma_wrap(
+    prior_features: Mapping[str, object] | None,
+) -> bool:
+    """Check the complete source wrap contract on the immediately prior session."""
+
+    if prior_features is None:
+        return False
+    return all(
+        bool(prior_features.get(field))
+        for field in (
+            "long_bear_alignment",
+            "ma10_crossed_ma20_after_long_bear_within_15d",
+            "yang_wrap_three_ma",
+            "yang_wrap_stable_base",
+        )
+    )
+
+
+def _prior_three_ma_bundle_top(
+    prior_features: Mapping[str, object] | None,
+) -> float | None:
+    if prior_features is None:
+        return None
+    values = tuple(
+        _number_or_none(prior_features.get(field))
+        for field in ("ma10", "ma20", "ma30")
+    )
+    if any(value is None for value in values):
+        return None
+    return max(float(value) for value in values if value is not None)
+
+
+def _post_wrap_upper_band_touched(
+    features: Mapping[str, object],
+    prior_features: Mapping[str, object] | None,
+) -> bool:
+    """Require the D-day low to retest the prior stable bundle's upper edge."""
+
+    bundle_top = _prior_three_ma_bundle_top(prior_features)
+    distance = _price_to_ma_distance_pct(
+        _number_or_none(features.get("low_price")),
+        bundle_top,
+    )
+    return bool(
+        distance is not None
+        and abs(distance) <= POST_WRAP_UPPER_BAND_DISTANCE_MAX_PCT
+    )
+
+
+def _close_above_current_three_ma(features: Mapping[str, object]) -> bool:
+    close_price = _number_or_none(features.get("close_price"))
+    moving_averages = tuple(
+        _number_or_none(features.get(field)) for field in ("ma10", "ma20", "ma30")
+    )
+    return bool(
+        close_price is not None
+        and all(value is not None for value in moving_averages)
+        and close_price > max(float(value) for value in moving_averages if value is not None)
+    )
+
+
+def _post_wrap_turnover_controlled(features: Mapping[str, object]) -> bool:
+    turnover = _number_or_none(features.get("turnover_rate_pct"))
+    return bool(
+        turnover is not None
+        and POST_WRAP_CONFIRMATION_TURNOVER_MIN_PCT <= turnover
+        < POST_WRAP_CONFIRMATION_TURNOVER_MAX_PCT
+    )
+
+
 def process_rule_predicates(
     rule_key: str,
     features: Mapping[str, object],
+    *,
+    prior_features: Mapping[str, object] | None = None,
 ) -> dict[str, bool]:
     """Return every source-contract predicate for an explicit case rule.
 
@@ -2829,6 +3003,19 @@ def process_rule_predicates(
             ),
             "yang_wrap_three_ma": bool(features.get("yang_wrap_three_ma")),
             "yang_wrap_stable_base": bool(features.get("yang_wrap_stable_base")),
+        },
+        POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY: {
+            "prior_stable_three_ma_wrap": _prior_stable_three_ma_wrap(
+                prior_features
+            ),
+            "prior_bundle_upper_edge_touch": _post_wrap_upper_band_touched(
+                features,
+                prior_features,
+            ),
+            "close_above_current_three_ma": _close_above_current_three_ma(features),
+            "small_positive_candle": bool(features.get("small_positive_candle")),
+            "candle_quiet": bool(features.get("candle_quiet")),
+            "turnover_1_5_to_8_pct": _post_wrap_turnover_controlled(features),
         },
         STAGED_MA10_SUPPORT_RULE_KEY: {
             "long_bear_alignment": bool(features.get("long_bear_alignment")),
@@ -2967,13 +3154,19 @@ def process_rule_predicates(
 def _matches_explicit_process_geometry(
     features: Mapping[str, object],
     setup_type: str,
+    *,
+    prior_features: Mapping[str, object] | None = None,
 ) -> bool:
     """Match the non-volume geometry of at least one declared source process."""
 
     return any(
         all(
             passed
-            for name, passed in process_rule_predicates(rule.key, features).items()
+            for name, passed in process_rule_predicates(
+                rule.key,
+                features,
+                prior_features=prior_features,
+            ).items()
             if not name.startswith(("volume_", "last_volume_"))
         )
         for rule in DISCOVERY_RULES[setup_type]
@@ -2984,26 +3177,49 @@ def _matches_explicit_process_geometry(
 def _matches_explicit_process_with_volume(
     features: Mapping[str, object],
     setup_type: str,
+    *,
+    prior_features: Mapping[str, object] | None = None,
 ) -> bool:
     """Match every predicate, including volume, of one source process."""
 
     return any(
-        all(process_rule_predicates(rule.key, features).values())
+        all(
+            process_rule_predicates(
+                rule.key,
+                features,
+                prior_features=prior_features,
+            ).values()
+        )
         for rule in DISCOVERY_RULES[setup_type]
         if rule.key in EXPLICIT_CASE_PROCESS_RULE_KEYS
     )
 
 
-def _rule_matches(rule: DiscoveryRule, features: Mapping[str, object]) -> bool:
+def _rule_matches(
+    rule: DiscoveryRule,
+    features: Mapping[str, object],
+    *,
+    prior_features: Mapping[str, object] | None = None,
+) -> bool:
     return bool(
         rule.key in EXPLICIT_CASE_PROCESS_RULE_KEYS
-        and all(process_rule_predicates(rule.key, features).values())
+        and all(
+            process_rule_predicates(
+                rule.key,
+                features,
+                prior_features=prior_features,
+            ).values()
+        )
     )
 
 
-def _matches_any_rule(features: Mapping[str, object]) -> bool:
+def _matches_any_rule(
+    features: Mapping[str, object],
+    *,
+    prior_features: Mapping[str, object] | None = None,
+) -> bool:
     return any(
-        _rule_matches(rule, features)
+        _rule_matches(rule, features, prior_features=prior_features)
         for rules in DISCOVERY_RULES.values()
         for rule in rules
     )

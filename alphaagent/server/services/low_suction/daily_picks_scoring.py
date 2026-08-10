@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 
-SCORE_VERSION = "low-suction-daily-score-v2.6"
+SCORE_VERSION = "low-suction-daily-score-v2.8"
 
 SCORE_BANDS: tuple[tuple[float, float, str], ...] = (
     (0.0, 39.999, "0-39"),
@@ -36,6 +36,7 @@ OVERSOLD_TURNOVER_GATE_MAX_PCT = 8.0
 OVERSOLD_GATE_FAILED_SCORE_CAP = 39.0
 # P1 路径的缩量地基不能收缩到无交易承接。该下限只影响该研究路径的诊断排序。
 STAGED_MA30_ACTIVE_PARTICIPATION_MIN_PCT = 1.5
+POST_WRAP_CONFIRMATION_SCORE_FLOOR = 80.0
 
 
 @dataclass(frozen=True)
@@ -48,7 +49,7 @@ class ScoreComponent:
     points: float
     max_points: float
     detail: str
-    kind: str = "bonus"  # "gate"（硬门禁，失败封顶）/ "bonus"（梯度加分）
+    kind: str = "bonus"  # gate（硬门禁）/ bonus（梯度）/ priority（层级下限）
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -281,12 +282,15 @@ def score_oversold_candidate(
     pre_cross_rule_matched: bool = False,
     stable_three_ma_wrap_rule_matched: bool = False,
     staged_ma30_convergence_rule_matched: bool = False,
+    post_wrap_upper_band_confirmation_rule_matched: bool = False,
 ) -> tuple[float, tuple[ScoreComponent, ...]]:
     """超跌反弹候选的诊断排序分（最高 140）。
 
     研究规则先决定是否入池，本函数只比较已命中规则的候选。换手率≥8%
     会触发评分门禁并封顶 39；其余基础特征按 0.4 折算，再叠加已验证研究
-    路径的加分。``vol_ratio`` 是 scanner 从可见历史算出的近 5/10 日均量比。
+    路径的加分。稳定包裹后的次日上沿踩稳确认属于独立 P2 层级，使用透明
+    的 80 分优先级下限；它仍低于 P3 新鲜稳定包裹。``vol_ratio`` 是 scanner
+    从可见历史算出的近 5/10 日均量比。
     """
 
     turnover = _number(features.get("turnover_rate_pct"))
@@ -422,7 +426,7 @@ def score_oversold_candidate(
             else 0.0
         )
 
-    components = (
+    base_components = (
         _component(
             "turnover_gate",
             "换手率门禁",
@@ -591,7 +595,7 @@ def score_oversold_candidate(
     )
     # 稳定地基独立优先，避免把低点远离均线或量未收缩的强行包裹排在研究形态之前。
     base_pts = sum(
-        c.points for c in components
+        c.points for c in base_components
         if c.kind == "bonus"
         and c.key not in {
             "yang_wrap_pretty",
@@ -602,7 +606,7 @@ def score_oversold_candidate(
         }
     )
     stable_base_pts = 8.0 if stable_wrap_base else 0.0
-    raw = (
+    raw_without_post_wrap_confirmation = (
         base_pts * 0.4
         + pretty_pts
         + stable_base_pts
@@ -610,6 +614,33 @@ def score_oversold_candidate(
         + fast_staged_ma30_convergence_pts
         + staged_ma30_active_participation_pts
     )
+    post_wrap_confirmation_points = (
+        max(
+            0.0,
+            POST_WRAP_CONFIRMATION_SCORE_FLOOR
+            - raw_without_post_wrap_confirmation,
+        )
+        if post_wrap_upper_band_confirmation_rule_matched
+        else 0.0
+    )
+    components = (
+        *base_components,
+        _component(
+            "post_wrap_upper_band_confirmation_priority",
+            "包裹后上沿踩稳优先级",
+            post_wrap_upper_band_confirmation_rule_matched,
+            post_wrap_confirmation_points,
+            POST_WRAP_CONFIRMATION_SCORE_FLOOR,
+            (
+                "前日稳定三线包裹，D 日回踩上沿后收于三线之上；"
+                f"确认层级将诊断分抬至至少 {POST_WRAP_CONFIRMATION_SCORE_FLOOR:g}"
+                if post_wrap_upper_band_confirmation_rule_matched
+                else "非稳定三线包裹后的下一交易日上沿踩稳确认"
+            ),
+            kind="priority",
+        ),
+    )
+    raw = raw_without_post_wrap_confirmation + post_wrap_confirmation_points
     if not gate_passed:
         raw = min(raw, OVERSOLD_GATE_FAILED_SCORE_CAP)
     return round(min(140.0, raw), 2), components

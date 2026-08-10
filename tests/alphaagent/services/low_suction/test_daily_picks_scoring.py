@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from alphaagent.server.services.low_suction.daily_picks_scoring import (
     quiet_candle_streak,
     score_band,
@@ -489,7 +491,37 @@ def test_total_caps_at_gate_failed_cap_when_gate_fails() -> None:
     assert _total(gate_fail) == 80.0                          # 无 cap 参数不 cap
 
 
-def test_score_version_bumped_to_v2_6() -> None:
+def test_post_wrap_confirmation_uses_a_visible_p2_score_floor() -> None:
+    from alphaagent.server.services.low_suction.daily_picks_scoring import (
+        POST_WRAP_CONFIRMATION_SCORE_FLOOR,
+    )
+
+    features = {
+        "turnover_rate_pct": 2.0,
+        "candle_range_pct": 2.0,
+        "prior_bear_alignment_days": 10,
+    }
+    streak = quiet_candle_streak([_bar(2.0)] * 3)
+    baseline_score, _ = score_oversold_candidate(features, streak)
+    score, components = score_oversold_candidate(
+        features,
+        streak,
+        post_wrap_upper_band_confirmation_rule_matched=True,
+    )
+
+    priority = next(
+        component
+        for component in components
+        if component.key == "post_wrap_upper_band_confirmation_priority"
+    )
+    assert baseline_score < POST_WRAP_CONFIRMATION_SCORE_FLOOR
+    assert score == POST_WRAP_CONFIRMATION_SCORE_FLOOR
+    assert priority.passed is True
+    assert priority.kind == "priority"
+    assert priority.points == pytest.approx(score - baseline_score)
+
+
+def test_score_version_bumped_to_v2_8() -> None:
     from alphaagent.server.services.low_suction import daily_picks_scoring as module
 
-    assert module.SCORE_VERSION == "low-suction-daily-score-v2.6"
+    assert module.SCORE_VERSION == "low-suction-daily-score-v2.8"

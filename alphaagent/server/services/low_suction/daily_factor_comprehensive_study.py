@@ -156,8 +156,7 @@ PERSONAL_CASE_SOURCE_METADATA: dict[str, CaseSourceMetadata] = {
         date(2026, 7, 31),
         date(2026, 8, 4),
         "process_only",
-        (),
-        "research_pending",
+        ("post_wrap_upper_band_reclaim_confirmation",),
     ),
     "中南文化 MA10 回踩": CaseSourceMetadata(
         date(2026, 2, 10),
@@ -527,7 +526,13 @@ def audit_personal_cases(
             features,
             case.expected_setup_type,
         )
-        process_evidence = _case_process_evidence(history, position, case)
+        process_evidence = _case_process_evidence(
+            history,
+            position,
+            case,
+            market_calendar=calendar,
+            calendar_positions=calendar_positions,
+        )
         baseline_matched = setup_type == case.expected_setup_type
         process_matched = bool(process_evidence["process_probe_rule_keys"])
         source_geometry_matched = bool(process_evidence["source_geometry_matched"])
@@ -585,6 +590,9 @@ def _case_process_evidence(
     history: Sequence[Mapping[str, object]],
     position: int,
     case: PersonalResearchCase,
+    *,
+    market_calendar: Sequence[date],
+    calendar_positions: Mapping[date, int],
 ) -> dict[str, object]:
     from .daily_factor_extended_discovery import (
         build_extended_daily_features,
@@ -595,13 +603,36 @@ def _case_process_evidence(
     features = build_extended_daily_features(
         daily_factor_history_window(history, position)
     )
+    calendar_position = calendar_positions.get(case.trade_date)
+    prior_is_previous_market_session = bool(
+        position > 0
+        and calendar_position is not None
+        and calendar_position > 0
+        and _required_date(history[position - 1].get("trade_date"))
+        == market_calendar[calendar_position - 1]
+    )
+    prior_features = (
+        build_extended_daily_features(
+            daily_factor_history_window(history, position - 1)
+        )
+        if prior_is_previous_market_session
+        else None
+    )
     process_rule_keys = list(
-        matching_discovery_rule_keys(features, case.expected_setup_type)
+        matching_discovery_rule_keys(
+            features,
+            case.expected_setup_type,
+            prior_features=prior_features,
+        )
     )
     required_keys = set(case.required_process_rule_keys)
     missing_required_keys = sorted(required_keys - set(process_rule_keys))
     required_process_predicate_results = {
-        rule_key: process_rule_predicates(rule_key, features)
+        rule_key: process_rule_predicates(
+            rule_key,
+            features,
+            prior_features=prior_features,
+        )
         for rule_key in case.required_process_rule_keys
     }
     failed_required_process_predicates = {

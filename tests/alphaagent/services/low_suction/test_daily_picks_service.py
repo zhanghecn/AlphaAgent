@@ -84,6 +84,20 @@ def test_daily_backtest_report_rejects_stale_scoring_payload(monkeypatch) -> Non
     assert daily_picks_service.get_daily_backtest_report() is None
 
 
+def test_daily_backtest_report_rejects_stale_backtest_payload(monkeypatch) -> None:
+    payload = {
+        "version": "low-suction-daily-backtest-v2",
+        "score_version": daily_picks_service.SCORE_VERSION,
+    }
+    monkeypatch.setattr(
+        daily_picks_service,
+        "load_daily_backtest_run",
+        lambda: payload,
+    )
+
+    assert daily_picks_service.get_daily_backtest_report() is None
+
+
 def test_daily_backtest_report_accepts_matching_versions(monkeypatch) -> None:
     payload = {
         "version": daily_picks_service.BACKTEST_VERSION,
