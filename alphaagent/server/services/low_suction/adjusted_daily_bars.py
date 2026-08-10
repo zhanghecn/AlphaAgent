@@ -300,7 +300,10 @@ def build_qfq_daily_scope(
 
 def _akshare_stock_zh_a_hist_tx(**kwargs: object) -> pd.DataFrame:
     try:
-        module = importlib.import_module("akshare")
+        # DataSyncRunner initializes AkShareAdapter, which deliberately keeps
+        # the top-level package as a lightweight namespace stub. Importing the
+        # concrete provider module works in both that path and direct use.
+        module = importlib.import_module("akshare.stock_feature.stock_hist_tx")
     except ImportError as exc:
         raise AdjustedDailyBarError("akshare is required for qfq daily bars") from exc
     fetcher = getattr(module, "stock_zh_a_hist_tx", None)

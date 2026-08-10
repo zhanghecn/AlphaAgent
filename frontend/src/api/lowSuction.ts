@@ -46,6 +46,23 @@ export interface LowSuctionLiveFamily {
   items: LowSuctionCandidate[];
 }
 
+export interface LowSuctionLiveScanRun {
+  id: number;
+  trade_date: string;
+  started_at: string;
+  finished_at: string;
+  duration_ms: number;
+  status: "ok" | "unavailable" | "error";
+  provisional: boolean | null;
+  spot_active_symbols: number | null;
+  trend_count: number | null;
+  oversold_count: number | null;
+  score_version: string;
+  merge_note: string | null;
+  error: string | null;
+  interval_seconds: number | null;
+}
+
 export interface LowSuctionLivePayload {
   status: "ok" | "unavailable";
   message?: string;
@@ -58,6 +75,7 @@ export interface LowSuctionLivePayload {
   label_convention?: string;
   trend?: LowSuctionLiveFamily;
   oversold?: LowSuctionLiveFamily;
+  scan_trace?: LowSuctionLiveScanRun[];
 }
 
 export interface LowSuctionSegmentStats {
@@ -140,14 +158,37 @@ export interface LowSuctionBacktestPayload {
   rebuild?: LowSuctionRebuildStatus;
 }
 
+export interface LowSuctionRebuildRun {
+  id: number;
+  source: string;
+  status: "running" | "ready" | "failed" | "already_running" | "interrupted";
+  stage: string;
+  strategy_version: string;
+  score_version: string;
+  requested_at: string;
+  started_at: string | null;
+  stage_started_at: string | null;
+  finished_at: string | null;
+  message: string | null;
+  error: string | null;
+  metrics: Record<string, number>;
+}
+
 export interface LowSuctionRebuildStatus {
   status: "idle" | "building" | "ready" | "failed";
+  run_id?: number | null;
+  source?: string | null;
+  stage?: string | null;
+  stage_started_at?: string | null;
+  message?: string | null;
+  metrics?: Record<string, number>;
   started_at?: string | null;
   finished_at?: string | null;
   error?: { type: string; message: string } | null;
   already_running?: boolean;
   trade_days?: number;
   labeled?: number;
+  recent_runs?: LowSuctionRebuildRun[];
 }
 
 export interface LowSuctionLedgerLeg {

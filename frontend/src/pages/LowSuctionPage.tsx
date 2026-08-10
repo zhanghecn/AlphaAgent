@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, BarChart3, BookOpenText, ReceiptText } from "lucide-react";
 
@@ -106,37 +106,39 @@ function BacktestTab() {
     queryFn: fetchLowSuctionBacktest,
     staleTime: 300_000,
   });
-  const [polling, setPolling] = useState(false);
   const rebuild = useMutation({ mutationFn: rebuildLowSuctionBacktest });
   const statusQuery = useQuery({
     queryKey: ["lowSuctionBacktestStatus"],
     queryFn: fetchLowSuctionBacktestStatus,
-    enabled: polling,
+    // 即使当前没有物化报告，也先读取状态，避免刷新页面后丢失运行中的回测。
+    enabled: true,
     refetchInterval: (q) =>
       q.state.data?.status === "building" ? 8_000 : false,
+    refetchOnWindowFocus: true,
   });
   const status: LowSuctionRebuildStatus = statusQuery.data ?? query.data?.rebuild ?? { status: "idle" };
   const building = status.status === "building";
+  const previousStatus = useRef(status.status);
 
-  // 后端报告里已是 building（页面刷新恢复）→ 自动轮询
   useEffect(() => {
-    if (query.data?.rebuild?.status === "building") setPolling(true);
-  }, [query.data?.rebuild?.status]);
-
-  // 算完 → 刷新报告/交割单，停轮询
-  useEffect(() => {
-    if (!polling) return;
-    if (status.status === "ready" || status.status === "failed") {
-      setPolling(false);
+    if (
+      previousStatus.current === "building"
+      && (status.status === "ready" || status.status === "failed")
+    ) {
       qc.invalidateQueries({ queryKey: ["lowSuctionBacktest"] });
       qc.invalidateQueries({ queryKey: ["lowSuctionLedger"] });
     }
-  }, [polling, status.status, status.finished_at, qc]);
+    previousStatus.current = status.status;
+  }, [qc, status.status]);
 
   const trigger = () => {
     rebuild.mutate(undefined, {
-      onSuccess: () => setPolling(true),
-      onError: () => setPolling(true), // 409 already_running 也开始轮询
+      onSuccess: (result) => {
+        qc.setQueryData(["lowSuctionBacktestStatus"], result);
+        void statusQuery.refetch();
+      },
+      // 409 表示已有任务；立即读取状态和运行记录，不把它伪装成一次新任务。
+      onError: () => void statusQuery.refetch(),
     });
   };
 

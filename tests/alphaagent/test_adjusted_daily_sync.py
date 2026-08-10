@@ -195,6 +195,85 @@ def test_run_job_rejects_an_incomplete_adjusted_sync_without_scope_evidence(
     assert finished[-1][2]["error_type"] == "DataCoverageIncomplete"
 
 
+def test_run_job_rejects_all_failed_adjusted_targets_despite_scope_evidence(
+    monkeypatch,
+) -> None:
+    finished: list[tuple[object, ...]] = []
+
+    class FakeRunner:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def _run_sync_low_suction_adjusted_daily_bars(
+            self,
+            _params: dict[str, object],
+        ) -> dict[str, object]:
+            return {
+                "status": "incomplete",
+                "rows_read": 0,
+                "rows_written": 0,
+                "target_count": 50,
+                "fetch_failure_count": 50,
+                # The importer writes an incomplete all-market scope even when
+                # every provider request failed. That must not mark the run
+                # successful, because no qfq rows are reusable.
+                "adjusted_prices": {"scope_count": 1_627},
+            }
+
+    monkeypatch.setattr(svc, "is_database_configured", lambda: True)
+    monkeypatch.setattr(svc, "_create_run", lambda *_args, **_kwargs: 320)
+    monkeypatch.setattr(
+        svc,
+        "_finish_run",
+        lambda *args, **kwargs: finished.append((*args, kwargs)),
+    )
+    monkeypatch.setattr(svc, "DataSyncRunner", FakeRunner)
+
+    result = svc.run_job(ADJUSTED_JOB_ID, {})
+
+    assert result["status"] == "incomplete"
+    assert finished[-1][1] == "failed"
+    assert finished[-1][2]["error_type"] == "DataCoverageIncomplete"
+
+
+def test_run_job_accepts_no_missing_adjusted_targets_with_scope_evidence(
+    monkeypatch,
+) -> None:
+    finished: list[tuple[object, ...]] = []
+
+    class FakeRunner:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def _run_sync_low_suction_adjusted_daily_bars(
+            self,
+            _params: dict[str, object],
+        ) -> dict[str, object]:
+            return {
+                "status": "incomplete",
+                "rows_read": 0,
+                "rows_written": 0,
+                "target_count": 0,
+                "fetch_failure_count": 0,
+                "adjusted_prices": {"scope_count": 1_627},
+            }
+
+    monkeypatch.setattr(svc, "is_database_configured", lambda: True)
+    monkeypatch.setattr(svc, "_create_run", lambda *_args, **_kwargs: 321)
+    monkeypatch.setattr(
+        svc,
+        "_finish_run",
+        lambda *args, **kwargs: finished.append((*args, kwargs)),
+    )
+    monkeypatch.setattr(svc, "DataSyncRunner", FakeRunner)
+
+    result = svc.run_job(ADJUSTED_JOB_ID, {})
+
+    assert result["status"] == "incomplete"
+    assert finished[-1][1] == "succeeded"
+    assert finished[-1][2]["error_type"] is None
+
+
 def test_adjusted_daily_import_query_accepts_active_or_successful_producer() -> None:
     source, eligible = adjusted_daily_import._eligible_adjusted_row_source(
         current_sync_run_id=319,

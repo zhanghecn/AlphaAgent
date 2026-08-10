@@ -8,7 +8,7 @@ from bisect import bisect_left
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from datetime import date, datetime
 from statistics import fmean, median
 
@@ -303,10 +303,9 @@ def d1_close_label_status(
     """Return a D+1 label and an explicit reason when it cannot be used.
 
     The daily-factor universe is restricted to seasoned, non-ST main-board
-    stocks. Their daily close must remain inside the study's strict +/-10%
-    boundary. A price-tick rounding result beyond that percentage is still
-    excluded by the user-selected research contract, alongside raw-price
-    discontinuities.
+    stocks. Their daily close must remain inside the legal +/-10% limit
+    corridor, including the exchange's price-tick rounding at the boundary.
+    Raw-price discontinuities remain excluded.
     """
 
     calendar = _strict_calendar(market_calendar)
@@ -330,14 +329,22 @@ def is_main_board_close_within_price_limit(
     prior_close: float,
     current_close: float,
 ) -> bool:
-    """Return whether a price fits the study's strict main-board 10% boundary."""
+    """Return whether a price fits the main-board 10% limit after tick rounding."""
 
     previous = Decimal(str(prior_close))
     current = Decimal(str(current_close))
     if previous <= 0 or current <= 0:
         return False
-    change = current / previous - Decimal("1")
-    return -MAIN_BOARD_PRICE_LIMIT_RATE <= change <= MAIN_BOARD_PRICE_LIMIT_RATE
+    tick = Decimal("0.01")
+    lower_limit = (previous * (Decimal("1") - MAIN_BOARD_PRICE_LIMIT_RATE)).quantize(
+        tick,
+        rounding=ROUND_HALF_UP,
+    )
+    upper_limit = (previous * (Decimal("1") + MAIN_BOARD_PRICE_LIMIT_RATE)).quantize(
+        tick,
+        rounding=ROUND_HALF_UP,
+    )
+    return lower_limit <= current <= upper_limit
 
 
 def is_main_board_limit_up_touched(

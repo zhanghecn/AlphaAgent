@@ -13,6 +13,14 @@ def test_low_suction_live_has_an_independent_endpoint(monkeypatch) -> None:
         "provisional": False,
         "trend": {"total": 1, "items": [{"vt_symbol": "600396.SSE", "score": 82.5}]},
         "oversold": {"total": 0, "items": []},
+        "scan_trace": [
+            {
+                "id": 1,
+                "status": "ok",
+                "started_at": "2026-08-04T10:00:00+08:00",
+                "duration_ms": 2_410,
+            }
+        ],
     }
     requested: dict[str, int] = {}
 
@@ -111,17 +119,30 @@ def test_low_suction_backtest_status_endpoint_reads_state(monkeypatch) -> None:
 
 def test_low_suction_backtest_reports_unrun_state(monkeypatch) -> None:
     monkeypatch.setattr(low_suction, "get_daily_backtest_report", lambda: None)
+    monkeypatch.setattr(
+        low_suction,
+        "get_daily_backtest_rebuild_status",
+        lambda: {
+            "status": "building",
+            "run_id": 27,
+            "stage": "scan_candidates",
+            "recent_runs": [{"id": 27, "status": "running"}],
+        },
+    )
 
     response = TestClient(create_app()).get("/api/low-suction/backtest")
 
     assert response.status_code == 200
-    assert response.json()["data"]["status"] == "unavailable"
+    data = response.json()["data"]
+    assert data["status"] == "unavailable"
+    assert data["rebuild"]["status"] == "building"
+    assert data["rebuild"]["stage"] == "scan_candidates"
 
 
 def test_low_suction_ledger_returns_recent_days(monkeypatch) -> None:
     payload = {
         "coverage": {"trade_days": 747},
-        "label_convention": "D+1 收盘到收盘，未扣费",
+        "label_convention": "D 日收盘买入、D+1 收盘结算，未扣费",
         "ledger_days": [
             {
                 "trade_date": "2026-07-31",

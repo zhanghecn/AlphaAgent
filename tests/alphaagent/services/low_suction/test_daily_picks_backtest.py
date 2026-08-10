@@ -30,7 +30,7 @@ def _candidate(
     setup_type: str,
     ordinal: int,
     score: float,
-    d1_return: float,
+    d1_return: float | None,
 ) -> LowSuctionCandidate:
     symbol_ordinal = ordinal if setup_type == "trend_pullback" else 100 + ordinal
     return LowSuctionCandidate(
@@ -155,3 +155,36 @@ def test_oversold_ranking_keeps_p3_then_p2_then_p1_before_raw_score() -> None:
         POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
         "test_rule",
     ]
+
+
+def test_backtest_selects_d_day_top_pick_before_d1_label_availability() -> None:
+    start = date(2026, 1, 1)
+    calendar = [start + timedelta(days=offset) for offset in range(40)]
+    day = calendar[20]
+    top_without_label = replace(
+        _candidate(
+            day=day,
+            setup_type="oversold_rebound",
+            ordinal=1,
+            score=100.0,
+            d1_return=0.0,
+        ),
+        d1_trade_date=None,
+        d1_close_return_pct=None,
+    )
+    lower_with_label = _candidate(
+        day=day,
+        setup_type="oversold_rebound",
+        ordinal=2,
+        score=90.0,
+        d1_return=1.0,
+    )
+
+    payload = build_backtest_payload([top_without_label, lower_with_label], calendar)
+
+    ledger = next(item for item in payload["ledger_days"] if item["trade_date"] == day.isoformat())
+    assert [(leg["vt_symbol"], leg["rank"]) for leg in ledger["legs"]] == [
+        (top_without_label.vt_symbol, 1),
+        (lower_with_label.vt_symbol, 2),
+    ]
+    assert ledger["legs"][0]["d1_close_return_pct"] is None

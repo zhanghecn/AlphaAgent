@@ -1,7 +1,11 @@
 import { useState } from "react";
-import { ChevronDown, ChevronLeft, ChevronRight, TrendingUp, Waves } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, Clock3, TrendingUp, Waves } from "lucide-react";
 
-import type { LowSuctionCandidate, LowSuctionLivePayload } from "@/api/lowSuction";
+import type {
+  LowSuctionCandidate,
+  LowSuctionLivePayload,
+  LowSuctionLiveScanRun,
+} from "@/api/lowSuction";
 import { EmptyState } from "@/components/EmptyState";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { cn } from "@/lib/utils";
@@ -16,8 +20,14 @@ export function LowSuctionLiveView({
   onTrendPageChange: (page: number) => void;
   onOversoldPageChange: (page: number) => void;
 }) {
+  const scanTrace = payload.scan_trace ?? [];
   if (payload.status !== "ok") {
-    return <EmptyState message={payload.message ?? "低吸实时推荐暂时不可用"} />;
+    return (
+      <section aria-label="低吸实时推荐">
+        <LiveScanTrace runs={scanTrace} />
+        <EmptyState message={payload.message ?? "低吸实时推荐暂时不可用"} />
+      </section>
+    );
   }
   const trend = payload.trend;
   const oversold = payload.oversold;
@@ -38,10 +48,12 @@ export function LowSuctionLiveView({
           </span>
         )}
         {payload.merge_note && <span>{payload.merge_note}</span>}
+        <span>当日已扫 {scanTrace.length} 次</span>
         <span className="ml-auto">
-          每 {Math.round((payload.cache_ttl_seconds ?? 1800) / 60)} 分钟重算 · {payload.asof?.slice(11, 19)} 更新
+          缓存有效 {Math.round((payload.cache_ttl_seconds ?? 1800) / 60)} 分钟 · {payload.asof?.slice(11, 19)} 更新
         </span>
       </div>
+      <LiveScanTrace runs={scanTrace} />
       <div className="grid gap-px bg-border xl:grid-cols-2">
         <FamilyColumn
           title="上升趋势低吸"
@@ -63,6 +75,102 @@ export function LowSuctionLiveView({
       </div>
     </section>
   );
+}
+
+function LiveScanTrace({ runs }: { runs: LowSuctionLiveScanRun[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const latest = runs[runs.length - 1];
+  return (
+    <div className="border-b bg-muted/10">
+      <button
+        type="button"
+        className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-left text-xs transition-colors hover:bg-muted/30 sm:px-4"
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+        aria-controls="low-suction-scan-trace"
+      >
+        <span className="flex items-center gap-1.5 font-medium text-foreground">
+          <Clock3 size={14} className="text-muted-foreground" />
+          当日扫描轨道
+        </span>
+        <span className="tabular-nums text-muted-foreground">已执行 {runs.length} 次</span>
+        {latest && (
+          <span className="tabular-nums text-muted-foreground">
+            最近 {scanTime(latest.started_at)}
+          </span>
+        )}
+        <ChevronDown
+          size={14}
+          className={cn("ml-auto text-muted-foreground transition-transform", expanded && "rotate-180")}
+        />
+      </button>
+      {expanded && (
+        <ol id="low-suction-scan-trace" className="divide-y border-t">
+          {runs.length === 0 ? (
+            <li className="px-3 py-3 text-xs text-muted-foreground sm:px-4">暂无可读取的真实扫描记录</li>
+          ) : (
+            runs.map((run, index) => <ScanTraceRow key={run.id} run={run} index={index} />)
+          )}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+function ScanTraceRow({ run, index }: { run: LowSuctionLiveScanRun; index: number }) {
+  const failed = run.status === "error";
+  const unavailable = run.status === "unavailable";
+  return (
+    <li className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-xs tabular-nums sm:px-4">
+      <span className="w-5 font-mono text-muted-foreground">{index + 1}</span>
+      <time dateTime={run.started_at} className="font-mono text-foreground">
+        {scanTime(run.started_at)}
+      </time>
+      <span className="text-muted-foreground">{scanInterval(run.interval_seconds)}</span>
+      <span className="text-muted-foreground">耗时 {scanDuration(run.duration_ms)}</span>
+      <span
+        className={cn(
+          failed ? "text-destructive" : unavailable ? "text-amber-600" : "text-emerald-600",
+        )}
+      >
+        {failed ? "扫描失败" : unavailable ? "无可用数据" : run.provisional ? "盘中虚拟K线" : "确认日线"}
+      </span>
+      {failed ? (
+        <span className="min-w-0 max-w-full basis-full truncate text-destructive/80" title={run.error ?? undefined}>
+          {run.error ?? "未知错误"}
+        </span>
+      ) : (
+        <>
+          <span className="text-muted-foreground">趋势 {run.trend_count ?? "--"}</span>
+          <span className="text-muted-foreground">超跌 {run.oversold_count ?? "--"}</span>
+          {run.spot_active_symbols != null && (
+            <span className="text-muted-foreground">现货 {run.spot_active_symbols.toLocaleString()} 只</span>
+          )}
+          {run.merge_note && (
+            <span className="min-w-0 max-w-full basis-full truncate text-muted-foreground" title={run.merge_note}>
+              {run.merge_note}
+            </span>
+          )}
+        </>
+      )}
+    </li>
+  );
+}
+
+function scanTime(value: string) {
+  return value.slice(11, 19) || "--:--:--";
+}
+
+function scanInterval(seconds: number | null) {
+  if (seconds == null) return "首次扫描";
+  if (seconds < 60) return `距上次 ${seconds} 秒`;
+  if (seconds < 3_600) return `距上次 ${Math.round(seconds / 60)} 分`;
+  return `距上次 ${(seconds / 3_600).toFixed(1)} 小时`;
+}
+
+function scanDuration(milliseconds: number) {
+  if (milliseconds < 1_000) return `${milliseconds} ms`;
+  return `${(milliseconds / 1_000).toFixed(1)} 秒`;
 }
 
 function FamilyColumn({
@@ -89,8 +197,8 @@ function FamilyColumn({
     <div className="min-w-0 bg-card">
       <div className="flex items-center gap-2 border-b px-3 py-2.5 sm:px-4">
         {icon}
-        <span className="text-sm font-semibold">{title}</span>
-        <span className="eyebrow">{en}</span>
+        <span className="shrink-0 text-sm font-semibold">{title}</span>
+        <span className="eyebrow hidden sm:inline">{en}</span>
         <span className="ml-auto text-xs tabular-nums text-muted-foreground">
           命中 {total} 只 · 可查看前 {available}
         </span>

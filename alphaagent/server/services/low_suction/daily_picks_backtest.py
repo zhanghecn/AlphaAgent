@@ -1,7 +1,7 @@
 """低吸日线回测报告构建：分数段统计 + 十槽位模拟 + 交割单。
 
 输入为扫描器产出的全窗口候选清单，输出可持久化的 JSON payload。
-口径与研究一致：D+1 收盘到收盘、未扣费、raw_unadjusted 探索级。
+口径与研究一致：D 日收盘买入、D+1 收盘结算，未扣费、raw_unadjusted 探索级。
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from alphaagent.server.services.low_suction.daily_picks_scoring import (
 )
 
 
-BACKTEST_VERSION = "low-suction-daily-backtest-v3"
+BACKTEST_VERSION = "low-suction-daily-backtest-v4"
 RECENT_LEDGER_DAYS = 60
 _MIN_BAND_SAMPLE = 30
 PICKS_PER_FAMILY = 5
@@ -60,7 +60,7 @@ def build_backtest_payload(
         families[setup_type] = _family_report(pool, segment_by_date)
 
     position = _position_simulation(
-        labeled,
+        candidates,
         segment_by_date=segment_by_date,
         market_regimes=market_regimes or {},
     )
@@ -70,7 +70,7 @@ def build_backtest_payload(
         "version": BACKTEST_VERSION,
         "score_version": SCORE_VERSION,
         "label_convention": (
-            "D+1 收盘到收盘，未扣费，raw_unadjusted 探索级；"
+            "D 日收盘买入、D+1 收盘结算，未扣费，raw_unadjusted 探索级；"
             "每族最高 5 只、每票 10%，未满 10 槽位留现金"
         ),
         "coverage": {
@@ -167,17 +167,17 @@ def _family_report(
 
 
 def _position_simulation(
-    labeled: list[LowSuctionCandidate],
+    candidates: list[LowSuctionCandidate],
     *,
     segment_by_date: Mapping[date, str],
     market_regimes: Mapping[date, str],
 ) -> dict[str, object]:
-    """每日每族按同一决胜键取前五；每票固定占组合 10%，空槽留现金。"""
+    """D 日先按同一决胜键取前五；D+1 标签只用于后续收益汇总。"""
 
     grouped: dict[str, dict[date, list[LowSuctionCandidate]]] = {
         setup_type: defaultdict(list) for setup_type in SETUP_TYPES
     }
-    for item in labeled:
+    for item in candidates:
         grouped[item.setup_type][item.trade_date].append(item)
 
     selected: dict[str, dict[date, list[LowSuctionCandidate]]] = {
@@ -223,14 +223,15 @@ def _position_simulation(
         positions: list[LowSuctionCandidate] = []
         for setup_type in SETUP_TYPES:
             family_picks = selected[setup_type].get(day, [])
-            values = [
-                float(pick.d1_close_return_pct)
-                for pick in family_picks
-                if pick.d1_close_return_pct is not None
+            settled_picks = [
+                pick for pick in family_picks if pick.d1_close_return_pct is not None
             ]
+            values = [float(pick.d1_close_return_pct) for pick in settled_picks]
             if values:
                 family_day_returns[setup_type].append(mean(values))
-                positions.extend(family_picks)
+                positions.extend(settled_picks)
+        if not positions:
+            continue
         day_return = sum(
             float(pick.d1_close_return_pct)
             for pick in positions

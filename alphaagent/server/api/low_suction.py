@@ -48,6 +48,7 @@ def daily_backtest():
 
     try:
         payload = get_daily_backtest_report()
+        rebuild = get_daily_backtest_rebuild_status()
     except Exception as exc:  # noqa: BLE001
         return JSONResponse(
             status_code=503,
@@ -58,9 +59,14 @@ def daily_backtest():
             ),
         )
     if payload is None:
-        return ok({"status": "unavailable", "message": "低吸日线回测尚未运行"})
+        return ok(
+            {
+                "status": "unavailable",
+                "message": "低吸日线回测尚未运行",
+                "rebuild": rebuild,
+            }
+        )
     report = {key: value for key, value in payload.items() if key != "ledger_days"}
-    rebuild = get_daily_backtest_rebuild_status()
     return ok({"status": "ok", "is_backtest": True, "report": report, "rebuild": rebuild})
 
 

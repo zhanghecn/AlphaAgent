@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import date
+import sys
+import types
 
 import pandas as pd
 import pytest
@@ -8,6 +10,7 @@ import pytest
 from alphaagent.server.db import schema
 from alphaagent.server.services.low_suction.adjusted_daily_bars import (
     AdjustedDailyBarError,
+    _akshare_stock_zh_a_hist_tx,
     build_qfq_daily_scope,
     fetch_qfq_daily_bars,
     next_market_session_close_label,
@@ -77,6 +80,33 @@ def test_fetch_qfq_daily_bars_always_requests_front_adjustment() -> None:
             "timeout": 30.0,
         }
     ]
+
+
+def test_qfq_provider_loads_leaf_module_when_top_level_is_a_namespace_stub(
+    monkeypatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    top_level = types.ModuleType("akshare")
+    stock_feature = types.ModuleType("akshare.stock_feature")
+    leaf_module = types.ModuleType("akshare.stock_feature.stock_hist_tx")
+
+    def fetcher(**kwargs: object) -> pd.DataFrame:
+        calls.append(kwargs)
+        return _qfq_frame()
+
+    leaf_module.stock_zh_a_hist_tx = fetcher
+    monkeypatch.setitem(sys.modules, "akshare", top_level)
+    monkeypatch.setitem(sys.modules, "akshare.stock_feature", stock_feature)
+    monkeypatch.setitem(
+        sys.modules,
+        "akshare.stock_feature.stock_hist_tx",
+        leaf_module,
+    )
+
+    frame = _akshare_stock_zh_a_hist_tx(symbol="sz001258")
+
+    assert frame.equals(_qfq_frame())
+    assert calls == [{"symbol": "sz001258"}]
 
 
 def test_normalize_qfq_rows_accepts_tencent_columns_and_epoch_dates() -> None:

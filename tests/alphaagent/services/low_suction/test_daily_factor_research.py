@@ -214,7 +214,7 @@ def test_d1_close_label_never_uses_a_later_stock_bar_after_suspension() -> None:
     assert label_d1_close_return_pct(closes, calendar, date(2026, 2, 12)) is None
 
 
-def test_d1_close_label_uses_strict_main_board_10_percent_boundary() -> None:
+def test_d1_close_label_keeps_tick_rounded_main_board_limit_closes() -> None:
     calendar = (date(2026, 2, 12), date(2026, 2, 13))
     exact_limit_close = {
         date(2026, 2, 12): 2.00,
@@ -227,6 +227,10 @@ def test_d1_close_label_uses_strict_main_board_10_percent_boundary() -> None:
     rounded_tick_limit_close = {
         date(2026, 2, 12): 2.26,
         date(2026, 2, 13): 2.03,
+    }
+    rounded_tick_limit_up = {
+        date(2026, 2, 12): 9.56,
+        date(2026, 2, 13): 10.52,
     }
     raw_price_jump = {
         date(2026, 2, 12): 33.90,
@@ -243,10 +247,15 @@ def test_d1_close_label_uses_strict_main_board_10_percent_boundary() -> None:
         10.0,
         "available",
     )
-    assert label_d1_close_return_pct(rounded_tick_limit_close, calendar, date(2026, 2, 12)) is None
+    assert label_d1_close_return_pct(rounded_tick_limit_close, calendar, date(2026, 2, 12)) == -10.177
     assert d1_close_label_status(rounded_tick_limit_close, calendar, date(2026, 2, 12)) == (
-        None,
-        "label_excluded_main_board_price_limit",
+        -10.177,
+        "available",
+    )
+    assert label_d1_close_return_pct(rounded_tick_limit_up, calendar, date(2026, 2, 12)) == 10.0418
+    assert d1_close_label_status(rounded_tick_limit_up, calendar, date(2026, 2, 12)) == (
+        10.0418,
+        "available",
     )
     assert label_d1_close_return_pct(raw_price_jump, calendar, date(2026, 2, 12)) is None
     assert d1_close_label_status(raw_price_jump, calendar, date(2026, 2, 12)) == (

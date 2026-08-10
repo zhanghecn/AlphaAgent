@@ -1,8 +1,9 @@
-import { RefreshCw, RotateCw } from "lucide-react";
+import { History, RefreshCw, RotateCw } from "lucide-react";
 
 import type {
   LowSuctionBacktestReport,
   LowSuctionBandStats,
+  LowSuctionRebuildRun,
   LowSuctionRebuildStatus,
   LowSuctionSimSummary,
 } from "@/api/lowSuction";
@@ -36,6 +37,7 @@ export function LowSuctionBacktestView({
         onRebuild={onRebuild}
         rebuildError={rebuildError}
       />
+      <RebuildRunTrace rebuild={rebuild} building={building} />
       {!report ? (
         <EmptyState
           message={building ? "正在全量扫描计算低吸回测…" : "低吸日线回测尚未运行"}
@@ -64,6 +66,7 @@ function RebuildBar({
   rebuildError: string | null;
 }) {
   const finished = rebuild.status === "ready" || rebuild.status === "failed";
+  const stage = rebuild.stage ? rebuildStageLabel(rebuild.stage) : "全量重算中";
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b bg-amber-500/5 px-3 py-2 text-xs sm:px-4">
       <span className="eyebrow text-amber-600">回测 BACKTEST</span>
@@ -72,8 +75,14 @@ function RebuildBar({
       )}
       {building && (
         <span className="flex items-center gap-1 text-amber-600">
-          <RotateCw size={12} className="animate-spin" /> 正在全量重算…
+          <RotateCw size={12} className="animate-spin" /> {stage} · 已运行 {elapsedSince(rebuild.started_at)}
         </span>
+      )}
+      {building && rebuild.started_at && (
+        <span className="text-muted-foreground">开始于 {runTime(rebuild.started_at)}</span>
+      )}
+      {building && rebuildError && (
+        <span className="basis-full text-amber-700 sm:basis-auto">本次点击未新建任务：{rebuildError}</span>
       )}
       {finished && rebuild.status === "ready" && (
         <span className="text-emerald-600">✓ 已更新（{rebuild.trade_days} 交易日）</span>
@@ -98,6 +107,115 @@ function RebuildBar({
       </button>
     </div>
   );
+}
+
+function RebuildRunTrace({
+  rebuild,
+  building,
+}: {
+  rebuild: LowSuctionRebuildStatus;
+  building: boolean;
+}) {
+  const runs = rebuild.recent_runs ?? [];
+  return (
+    <div className="border-b bg-muted/10 px-3 py-2 text-xs sm:px-4">
+      <div className="mb-1.5 flex items-center gap-1.5 text-muted-foreground">
+        <History size={13} />
+        <span className="font-medium text-foreground">最近回测记录</span>
+      </div>
+      {runs.length === 0 ? (
+        <div className="text-muted-foreground">
+          {building
+            ? "当前任务尚无持久化运行记录；旧版本启动的回测不会补录轨道。"
+            : "暂无持久化运行记录"}
+        </div>
+      ) : (
+        <ol className="divide-y border-t">
+          {runs.map((run) => <RebuildRunRow key={run.id} run={run} />)}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+function RebuildRunRow({ run }: { run: LowSuctionRebuildRun }) {
+  const failed = run.status === "failed" || run.status === "interrupted";
+  const duplicate = run.status === "already_running";
+  const count = run.metrics.candidate_count ?? run.metrics.labeled;
+  return (
+    <li className="flex flex-wrap items-center gap-x-3 gap-y-1 py-1.5 tabular-nums">
+      <span className="font-mono text-muted-foreground">#{run.id}</span>
+      <time dateTime={run.requested_at} className="font-mono text-foreground">{runTime(run.requested_at)}</time>
+      <span className="text-muted-foreground">{run.source === "manual" ? "手动" : "定时"}</span>
+      <span className={cn(failed ? "text-destructive" : duplicate ? "text-amber-700" : run.status === "ready" ? "text-emerald-600" : "text-amber-600")}>
+        {rebuildRunStatusLabel(run.status)}
+      </span>
+      <span className="text-muted-foreground">{rebuildStageLabel(run.stage)}</span>
+      <span className="text-muted-foreground">{runElapsed(run)}</span>
+      {count != null && <span className="text-muted-foreground">候选 {count.toLocaleString()}</span>}
+      {(run.error ?? run.message) && (
+        <span className={cn("min-w-0 max-w-full basis-full truncate", failed ? "text-destructive/80" : "text-muted-foreground")} title={run.error ?? run.message ?? undefined}>
+          {run.error ?? run.message}
+        </span>
+      )}
+    </li>
+  );
+}
+
+function rebuildStageLabel(stage: string | null | undefined) {
+  const labels: Record<string, string> = {
+    load_inputs: "加载数据",
+    scan_candidates: "扫描全市场候选",
+    resolve_names: "补全名称与 ST 筛选",
+    build_report: "汇总回测报告",
+    persist_report: "写入报告",
+    completed: "已完成",
+    failed: "执行失败",
+    request_rejected: "未新建任务",
+  };
+  return labels[stage ?? ""] ?? "等待执行";
+}
+
+function rebuildRunStatusLabel(status: LowSuctionRebuildRun["status"]) {
+  const labels: Record<LowSuctionRebuildRun["status"], string> = {
+    running: "运行中",
+    ready: "已完成",
+    failed: "失败",
+    already_running: "已有任务运行",
+    interrupted: "已中断",
+  };
+  return labels[status];
+}
+
+function elapsedSince(startedAt: string | null | undefined) {
+  if (!startedAt) return "--";
+  return formatElapsed(Date.now() - Date.parse(startedAt));
+}
+
+function runElapsed(run: LowSuctionRebuildRun) {
+  if (!run.started_at) return "--";
+  const end = run.finished_at ? Date.parse(run.finished_at) : Date.now();
+  return formatElapsed(end - Date.parse(run.started_at));
+}
+
+function formatElapsed(milliseconds: number) {
+  const seconds = Math.max(Math.floor(milliseconds / 1_000), 0);
+  if (seconds < 60) return `${seconds} 秒`;
+  if (seconds < 3_600) return `${Math.floor(seconds / 60)} 分`;
+  return `${Math.floor(seconds / 3_600)} 时 ${Math.floor((seconds % 3_600) / 60)} 分`;
+}
+
+function runTime(value: string) {
+  const instant = new Date(value);
+  if (Number.isNaN(instant.getTime())) return value.slice(0, 16);
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(instant);
 }
 
 function BacktestBody({ report }: { report: LowSuctionBacktestReport }) {

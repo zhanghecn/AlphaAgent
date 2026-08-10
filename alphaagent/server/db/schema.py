@@ -1828,6 +1828,58 @@ low_suction_daily_backtest_runs = Table(
 )
 
 
+# 低吸日线回测：每次手动/定时请求的运行轨道，报告本体仍由上表单行保存。
+low_suction_daily_backtest_rebuild_runs = Table(
+    "low_suction_daily_backtest_rebuild_runs",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("source", String(24), nullable=False),
+    Column("status", String(24), nullable=False),
+    Column("stage", String(48), nullable=False),
+    Column("strategy_version", String(80), nullable=False),
+    Column("score_version", String(80), nullable=False),
+    Column("requested_at", DateTime(timezone=True), nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=True),
+    Column("stage_started_at", DateTime(timezone=True), nullable=True),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Column("message", Text, nullable=True),
+    Column("error", Text, nullable=True),
+    Column("metrics", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index(
+    "ix_low_suction_backtest_rebuild_runs_requested",
+    low_suction_daily_backtest_rebuild_runs.c.requested_at,
+)
+
+
+# 低吸实时推荐：仅记录实际重算，供当日扫描轨道与事后诊断使用。
+low_suction_live_scan_runs = Table(
+    "low_suction_live_scan_runs",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("trade_date", Date, nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=False),
+    Column("finished_at", DateTime(timezone=True), nullable=False),
+    Column("duration_ms", Integer, nullable=False),
+    Column("status", String(24), nullable=False),
+    Column("provisional", Boolean, nullable=True),
+    Column("spot_active_symbols", Integer, nullable=True),
+    Column("trend_count", Integer, nullable=True),
+    Column("oversold_count", Integer, nullable=True),
+    Column("score_version", String(80), nullable=False),
+    Column("merge_note", Text, nullable=True),
+    Column("error", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+Index(
+    "ix_low_suction_live_scan_runs_date_time",
+    low_suction_live_scan_runs.c.trade_date,
+    low_suction_live_scan_runs.c.started_at,
+)
+
+
 limit_up_minute_backfill_attempts = Table(
     "limit_up_minute_backfill_attempts",
     metadata,

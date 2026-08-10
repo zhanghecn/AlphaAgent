@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -25,8 +26,11 @@ from alphaagent.server.services.low_suction.daily_picks_backtest import (
     build_backtest_payload,
 )
 from alphaagent.server.services.low_suction.daily_picks_repository import (
+    create_daily_backtest_rebuild_run,
     load_daily_backtest_run,
+    load_daily_backtest_rebuild_runs,
     save_daily_backtest_run,
+    update_daily_backtest_rebuild_run,
 )
 from alphaagent.server.services.low_suction.daily_picks_scanner import (
     LowSuctionCandidate,
@@ -34,6 +38,10 @@ from alphaagent.server.services.low_suction.daily_picks_scanner import (
     scan_low_suction_candidates,
 )
 from alphaagent.server.services.low_suction.daily_picks_scoring import SCORE_VERSION
+from alphaagent.server.services.low_suction.live_scan_repository import (
+    load_live_scan_runs,
+    save_live_scan_run,
+)
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -47,6 +55,7 @@ MIN_SPOT_ACTIVE_SYMBOLS = 3_000
 
 _logger = logging.getLogger(__name__)
 _cache_lock = threading.Lock()
+_live_scan_lock = threading.Lock()
 _cache: dict[str, object] = {"expires_at": None, "payload": None}
 # 日线输入按“最新可靠交易日”缓存：盘中 30 分钟重算只重扫不重读库
 _inputs_cache: dict[str, object] = {"key": None, "inputs": None}
@@ -84,20 +93,43 @@ def get_live_recommendations(
     """Read cached live recommendations and return independent family pages."""
 
     now = datetime.now(SHANGHAI)
+    payload = _get_cached_live_payload(now)
+    if payload is not None:
+        return _paginate_live_payload(
+            payload, trend_page=trend_page, oversold_page=oversold_page
+        )
+
+    # 多个页面请求同时越过缓存时，只让第一个请求执行全市场扫描。
+    with _live_scan_lock:
+        now = datetime.now(SHANGHAI)
+        payload = _get_cached_live_payload(now)
+        if payload is None:
+            started_at = now
+            try:
+                payload = _compute_live_payload(started_at)
+            except Exception as exc:
+                _record_failed_live_scan(started_at, datetime.now(SHANGHAI), exc)
+                raise
+            finished_at = datetime.now(SHANGHAI)
+            _attach_live_scan_trace(payload, started_at, finished_at)
+            with _cache_lock:
+                _cache["payload"] = payload
+                _cache["expires_at"] = started_at + timedelta(seconds=LIVE_CACHE_TTL_SECONDS)
+
+    return _paginate_live_payload(
+        payload, trend_page=trend_page, oversold_page=oversold_page
+    )
+
+
+def _get_cached_live_payload(now: datetime) -> dict[str, object] | None:
+    """Return an unexpired scan payload without treating a read as a scan."""
+
     with _cache_lock:
         expires_at = _cache.get("expires_at")
         payload = _cache.get("payload")
         if payload is not None and expires_at is not None and now < expires_at:  # type: ignore[operator]
-            return _paginate_live_payload(
-                payload, trend_page=trend_page, oversold_page=oversold_page
-            )  # type: ignore[arg-type]
-    payload = _compute_live_payload(now)
-    with _cache_lock:
-        _cache["payload"] = payload
-        _cache["expires_at"] = now + timedelta(seconds=LIVE_CACHE_TTL_SECONDS)
-    return _paginate_live_payload(
-        payload, trend_page=trend_page, oversold_page=oversold_page
-    )
+            return payload  # type: ignore[return-value]
+    return None
 
 
 def get_daily_backtest_report() -> dict[str, object] | None:
@@ -121,32 +153,62 @@ def get_daily_backtest_report() -> dict[str, object] | None:
 _REBUILD_LOCK = threading.RLock()
 _REBUILD_THREAD: threading.Thread | None = None
 _REBUILD_STATE: dict[str, object] = {"status": "idle"}
+BacktestProgressCallback = Callable[[str, str, dict[str, object]], None]
 
 
 def run_daily_backtest_sync(
     *,
     start_date: date | None = None,
     end_date: date | None = None,
+    progress: BacktestProgressCallback | None = None,
 ) -> dict[str, object]:
     """Synchronously rebuild and persist the daily backtest payload."""
 
+    _report_backtest_stage(progress, "load_inputs", "加载日线与证券状态", {})
     inputs = load_daily_factor_inputs(
         start_date=start_date,
         end_date=end_date,
         price_basis="raw_unadjusted",
+    )
+    _report_backtest_stage(
+        progress,
+        "scan_candidates",
+        "扫描全市场候选",
+        {
+            "bar_rows": int(len(inputs.bars)),
+            "trade_days": len(inputs.market_calendar),
+        },
     )
     candidates = scan_low_suction_candidates(
         inputs.bars,
         inputs.market_calendar,
         inputs.security_status.to_dict(orient="records"),
     )
+    _report_backtest_stage(
+        progress,
+        "resolve_names",
+        "补全股票名称并筛除当前 ST 股",
+        {"candidate_count": len(candidates)},
+    )
     names = _load_stock_names({item.vt_symbol for item in candidates})
     candidates = _exclude_current_st_candidates(candidates, names)
+    _report_backtest_stage(
+        progress,
+        "build_report",
+        "汇总分数段、前五组合与市况复核",
+        {"candidate_count": len(candidates)},
+    )
     payload = build_backtest_payload(
         candidates,
         inputs.market_calendar,
         names=names,
         market_regimes=_load_market_regimes(inputs.market_calendar),
+    )
+    _report_backtest_stage(
+        progress,
+        "persist_report",
+        "写入回测报告",
+        {"labeled": int((payload.get("coverage") or {}).get("labeled") or 0)},
     )
     save_daily_backtest_run(BACKTEST_VERSION, payload)
     return payload
@@ -158,10 +220,25 @@ def start_daily_backtest_rebuild() -> dict[str, object]:
     global _REBUILD_THREAD
     with _REBUILD_LOCK:
         if _REBUILD_THREAD is not None and _REBUILD_THREAD.is_alive():
-            return {**_REBUILD_STATE, "already_running": True}
-        _set_rebuild_state(status="building", started_at=_utc_now_iso(), error=None)
+            message = _active_rebuild_message()
+            _record_duplicate_rebuild_request(message)
+            return {**_REBUILD_STATE, "already_running": True, "message": message}
+
+        started_at = datetime.now(timezone.utc)
+        run_id = _create_rebuild_run(started_at)
+        _set_rebuild_state(
+            status="building",
+            run_id=run_id,
+            source="manual",
+            stage="load_inputs",
+            message="加载日线与证券状态",
+            started_at=started_at.isoformat(),
+            stage_started_at=started_at.isoformat(),
+            error=None,
+        )
         _REBUILD_THREAD = threading.Thread(
             target=_background_daily_backtest_rebuild,
+            args=(run_id,),
             name="low-suction-backtest-rebuild",
             daemon=True,
         )
@@ -169,22 +246,56 @@ def start_daily_backtest_rebuild() -> dict[str, object]:
         return dict(_REBUILD_STATE)
 
 
-def _background_daily_backtest_rebuild() -> None:
+def _background_daily_backtest_rebuild(run_id: int | None) -> None:
     try:
-        payload = run_daily_backtest_sync()
+        payload = run_daily_backtest_sync(
+            progress=lambda stage, message, metrics: _update_rebuild_progress(
+                run_id,
+                stage=stage,
+                message=message,
+                metrics=metrics,
+            )
+        )
         coverage = payload.get("coverage") or {}
+        finished_at = datetime.now(timezone.utc)
         _set_rebuild_state(
             status="ready",
-            finished_at=_utc_now_iso(),
+            stage="completed",
+            message="回测报告已写入",
+            finished_at=finished_at.isoformat(),
             error=None,
             trade_days=coverage.get("trade_days"),
             labeled=coverage.get("labeled"),
         )
+        _update_rebuild_run(
+            run_id,
+            status="ready",
+            stage="completed",
+            message="回测报告已写入",
+            metrics={
+                "trade_days": int(coverage.get("trade_days") or 0),
+                "candidate_count": int(coverage.get("candidates") or 0),
+                "labeled": int(coverage.get("labeled") or 0),
+            },
+            finished_at=finished_at,
+        )
     except Exception as exc:  # noqa: BLE001
+        finished_at = datetime.now(timezone.utc)
+        error = {"type": exc.__class__.__name__, "message": str(exc)}
         _set_rebuild_state(
             status="failed",
-            finished_at=_utc_now_iso(),
-            error={"type": exc.__class__.__name__, "message": str(exc)},
+            stage="failed",
+            message="回测执行失败",
+            finished_at=finished_at.isoformat(),
+            error=error,
+        )
+        _update_rebuild_run(
+            run_id,
+            status="failed",
+            stage="failed",
+            message="回测执行失败",
+            error=f"{error['type']}: {error['message']}"[:500],
+            finished_at=finished_at,
         )
 
 
@@ -192,7 +303,13 @@ def get_daily_backtest_rebuild_status() -> dict[str, object]:
     """Read the current rebuild state for frontend polling."""
 
     with _REBUILD_LOCK:
-        return dict(_REBUILD_STATE)
+        status = dict(_REBUILD_STATE)
+    try:
+        status["recent_runs"] = load_daily_backtest_rebuild_runs()
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("low-suction backtest run history read failed: %s", exc)
+        status["recent_runs"] = []
+    return status
 
 
 def _set_rebuild_state(**values: object) -> None:
@@ -200,8 +317,157 @@ def _set_rebuild_state(**values: object) -> None:
         _REBUILD_STATE.update(values)
 
 
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _report_backtest_stage(
+    progress: BacktestProgressCallback | None,
+    stage: str,
+    message: str,
+    metrics: dict[str, object],
+) -> None:
+    if progress is not None:
+        progress(stage, message, metrics)
+
+
+def _create_rebuild_run(started_at: datetime) -> int | None:
+    try:
+        return create_daily_backtest_rebuild_run(
+            source="manual",
+            status="running",
+            stage="load_inputs",
+            strategy_version=BACKTEST_VERSION,
+            score_version=SCORE_VERSION,
+            message="加载日线与证券状态",
+            started_at=started_at,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("low-suction backtest run record create failed: %s", exc)
+        return None
+
+
+def _record_duplicate_rebuild_request(message: str) -> None:
+    try:
+        now = datetime.now(timezone.utc)
+        create_daily_backtest_rebuild_run(
+            source="manual",
+            status="already_running",
+            stage="request_rejected",
+            strategy_version=BACKTEST_VERSION,
+            score_version=SCORE_VERSION,
+            message=message,
+            finished_at=now,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("low-suction duplicate backtest request record failed: %s", exc)
+
+
+def _active_rebuild_message() -> str:
+    run_id = _REBUILD_STATE.get("run_id")
+    stage = str(_REBUILD_STATE.get("stage") or "全量扫描")
+    prefix = f"回测 #{run_id}" if run_id is not None else "已有回测"
+    return f"{prefix} 正在 {stage}，本次请求未新建任务"
+
+
+def _update_rebuild_progress(
+    run_id: int | None,
+    *,
+    stage: str,
+    message: str,
+    metrics: dict[str, object],
+) -> None:
+    now = datetime.now(timezone.utc)
+    _set_rebuild_state(
+        stage=stage,
+        message=message,
+        stage_started_at=now.isoformat(),
+        metrics=metrics,
+    )
+    _update_rebuild_run(
+        run_id,
+        stage=stage,
+        message=message,
+        metrics=metrics,
+    )
+
+
+def _update_rebuild_run(run_id: int | None, **values: object) -> None:
+    if run_id is None:
+        return
+    try:
+        update_daily_backtest_rebuild_run(run_id, **values)
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("low-suction backtest run record update failed: %s", exc)
+
+
+def _attach_live_scan_trace(
+    payload: dict[str, object],
+    started_at: datetime,
+    finished_at: datetime,
+) -> None:
+    """Persist a completed scan and expose its signal-day execution timeline."""
+
+    trade_date = _payload_trade_date(payload, started_at.date())
+    try:
+        save_live_scan_run(
+            {
+                "trade_date": trade_date,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "duration_ms": _elapsed_milliseconds(started_at, finished_at),
+                "status": str(payload.get("status") or "ok"),
+                "provisional": payload.get("provisional"),
+                "spot_active_symbols": payload.pop("_scan_spot_active_symbols", None),
+                "trend_count": _family_total(payload.get("trend")),
+                "oversold_count": _family_total(payload.get("oversold")),
+                "score_version": SCORE_VERSION,
+                "merge_note": payload.get("merge_note"),
+            }
+        )
+        payload["scan_trace"] = load_live_scan_runs(trade_date)
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("low-suction live scan trace write failed: %s", exc)
+
+
+def _record_failed_live_scan(
+    started_at: datetime,
+    finished_at: datetime,
+    error: Exception,
+) -> None:
+    """Best-effort error record that never changes the original scan failure."""
+
+    try:
+        save_live_scan_run(
+            {
+                "trade_date": started_at.date(),
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "duration_ms": _elapsed_milliseconds(started_at, finished_at),
+                "status": "error",
+                "score_version": SCORE_VERSION,
+                "error": f"{error.__class__.__name__}: {error}"[:500],
+            }
+        )
+    except Exception as trace_error:  # noqa: BLE001
+        _logger.warning("low-suction failed scan trace write failed: %s", trace_error)
+
+
+def _payload_trade_date(payload: dict[str, object], fallback: date) -> date:
+    value = payload.get("trade_date")
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            pass
+    return fallback
+
+
+def _family_total(value: object) -> int | None:
+    if not isinstance(value, dict):
+        return None
+    total = value.get("total")
+    return int(total) if total is not None else None
+
+
+def _elapsed_milliseconds(started_at: datetime, finished_at: datetime) -> int:
+    return max(int((finished_at - started_at).total_seconds() * 1_000), 0)
 
 
 def _live_inputs(now: datetime):
@@ -237,16 +503,20 @@ def _compute_live_payload(now: datetime) -> dict[str, object]:
     bars = inputs.bars
     provisional = False
     merge_note = None
+    spot_active_symbols: int | None = None
     if not calendar:
         return {
             "status": "unavailable",
             "message": "无可靠市场日历，请检查日线数据同步",
             "asof": now.isoformat(timespec="seconds"),
+            "score_version": SCORE_VERSION,
+            "_scan_spot_active_symbols": spot_active_symbols,
         }
 
     latest_bar_date = calendar[-1]
     if _should_merge_spot(now, latest_bar_date):
         merged, active = _merge_spot_bars(bars, now.date())
+        spot_active_symbols = active
         if active >= MIN_SPOT_ACTIVE_SYMBOLS:
             bars = merged
             calendar = [*calendar, now.date()]
@@ -281,7 +551,8 @@ def _compute_live_payload(now: datetime) -> dict[str, object]:
         "backtest_version": BACKTEST_VERSION,
         "trend": trend,
         "oversold": oversold,
-        "label_convention": "raw_unadjusted 探索级 · D+1 收盘到收盘口径 · 未扣费",
+        "label_convention": "raw_unadjusted 探索级 · D 日收盘买入、D+1 收盘结算 · 未扣费",
+        "_scan_spot_active_symbols": spot_active_symbols,
     }
 
 

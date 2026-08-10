@@ -4554,11 +4554,10 @@ def run_job(
             merged_params["_sync_run_id"] = run_id
         result = method(merged_params)
         coverage_incomplete = str(result.get("status") or "") == "incomplete"
-        # This producer persists a bounded portion of an auditable qfq scope.
-        # A partial run is successful only after it has recorded scope
-        # evidence. Otherwise the rows would be tied to a failed run and could
-        # never be reused by the fail-closed research reader; an empty raw
-        # calendar remains a real data-coverage failure.
+        # This producer may persist a bounded portion of an auditable qfq scope.
+        # An incomplete run succeeds only when it either persisted usable rows,
+        # or had no missing targets to fetch. A scope containing only failed
+        # fetch attempts is audit evidence, not successful producer output.
         adjusted_scope_persisted = (
             job_id == ADJUSTED_DAILY_SYNC_JOB_ID
             and _has_adjusted_daily_scope_evidence(result)
@@ -4603,15 +4602,31 @@ def _sync_result_message(result: dict[str, Any]) -> str | None:
 
 
 def _has_adjusted_daily_scope_evidence(result: Mapping[str, object]) -> bool:
-    """Whether a bounded qfq import persisted a daily coverage audit."""
+    """Whether an incomplete qfq run produced reusable data or no pending work."""
 
     adjusted_prices = result.get("adjusted_prices")
     if not isinstance(adjusted_prices, Mapping):
         return False
-    try:
-        return int(adjusted_prices.get("scope_count") or 0) > 0
-    except (TypeError, ValueError):
+    if _nonnegative_result_count(adjusted_prices.get("scope_count")) <= 0:
         return False
+    if (
+        _nonnegative_result_count(result.get("rows_read")) > 0
+        or _nonnegative_result_count(result.get("rows_written")) > 0
+    ):
+        return True
+    return (
+        _nonnegative_result_count(result.get("target_count")) == 0
+        and _nonnegative_result_count(result.get("fetch_failure_count")) == 0
+    )
+
+
+def _nonnegative_result_count(value: object) -> int:
+    """Normalize optional producer counters without accepting invalid values."""
+
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 # ─── Scheduler ────────────────────────────────────────────────────────────
