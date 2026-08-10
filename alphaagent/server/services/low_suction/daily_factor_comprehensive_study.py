@@ -126,11 +126,12 @@ PERSONAL_CASE_SOURCE_METADATA: dict[str, CaseSourceMetadata] = {
         "process_only",
         ("oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30",),
     ),
-    "立新能源 M5/M10 上攻": CaseSourceMetadata(
+    "立新能源 MA10 向 MA20 加速收敛": CaseSourceMetadata(
         date(2026, 7, 14),
         None,
-        "ma5_or_ma10_low_touch",
-        ("m5_m10_joint_attack_before_ma20_cross_last_volume_expand",),
+        "process_only",
+        (),
+        "research_pending",
     ),
     "爱丽家居 MA10 回贴 MA30": CaseSourceMetadata(
         date(2026, 7, 8),
@@ -669,7 +670,6 @@ def _case_process_evidence(
                 "trend_stable_bull",
                 "trend_rebuilt_recently",
                 "trend_rebuilt_from_disorder",
-                "m5_m10_joint_attack_ready",
                 "last_volume_change_pct",
                 "last_volume_expanded",
                 "last_volume_shrank",

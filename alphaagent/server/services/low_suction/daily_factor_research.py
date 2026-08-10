@@ -32,7 +32,7 @@ PERSONAL_RESEARCH_CASES = (
     ("传智教育 MA10 向 MA30 收敛", "003032.SZSE", date(2026, 7, 24), "oversold_rebound"),
     ("一鸣食品 MA10 贴合 MA20", "605179.SSE", date(2026, 7, 15), "oversold_rebound"),
     ("一鸣食品 超跌转趋势", "605179.SSE", date(2026, 7, 27), "trend_pullback"),
-    ("立新能源 M5/M10 上攻", "001258.SZSE", date(2026, 7, 15), "oversold_rebound"),
+    ("立新能源 MA10 向 MA20 加速收敛", "001258.SZSE", date(2026, 7, 15), "oversold_rebound"),
     ("爱丽家居 MA10 回贴 MA30", "603221.SSE", date(2026, 7, 20), "oversold_rebound"),
     ("百花医药 M10/M20 两线包裹", "600721.SSE", date(2026, 7, 14), "oversold_rebound"),
     ("百花医药 三线包裹", "600721.SSE", date(2026, 7, 31), "oversold_rebound"),

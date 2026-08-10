@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 
-SCORE_VERSION = "low-suction-daily-score-v2.4"
+SCORE_VERSION = "low-suction-daily-score-v2.6"
 
 SCORE_BANDS: tuple[tuple[float, float, str], ...] = (
     (0.0, 39.999, "0-39"),
@@ -34,6 +34,8 @@ QUIET_CANDLE_RANGE_MAX_PCT = 5.0
 OVERSOLD_TURNOVER_GATE_MAX_PCT = 8.0
 # 历史评分阈值触发时的诊断分上限。
 OVERSOLD_GATE_FAILED_SCORE_CAP = 39.0
+# P1 路径的缩量地基不能收缩到无交易承接。该下限只影响该研究路径的诊断排序。
+STAGED_MA30_ACTIVE_PARTICIPATION_MIN_PCT = 1.5
 
 
 @dataclass(frozen=True)
@@ -280,11 +282,11 @@ def score_oversold_candidate(
     stable_three_ma_wrap_rule_matched: bool = False,
     staged_ma30_convergence_rule_matched: bool = False,
 ) -> tuple[float, tuple[ScoreComponent, ...]]:
-    """超跌反弹候选综合分（0-100）。前置：oversold_process_eligible。
+    """超跌反弹候选的诊断排序分（最高 140）。
 
-    换手率≥8% 为硬门禁（gate，失败总分封顶 39）；14 个 bonus 分量梯度加分。
-    权重源自全量分桶：高换手=派发；量能趋势单调（骤缩+0.065%→骤放-0.301%）。
-    vol_ratio = 近5日均量/近10日均量，由 scanner 从 history 算好传入。
+    研究规则先决定是否入池，本函数只比较已命中规则的候选。换手率≥8%
+    会触发评分门禁并封顶 39；其余基础特征按 0.4 折算，再叠加已验证研究
+    路径的加分。``vol_ratio`` 是 scanner 从可见历史算出的近 5/10 日均量比。
     """
 
     turnover = _number(features.get("turnover_rate_pct"))
@@ -298,7 +300,6 @@ def score_oversold_candidate(
         for field in (
             "staged_m10_first",
             "m10_dual_cross_before_m20_m30",
-            "m5_m10_joint_attack_ready",
             "ma10_crossed_ma30_within_15d",
         )
     )
@@ -325,15 +326,31 @@ def score_oversold_candidate(
         and ma10_ma30_narrowing is not None
         and ma10_ma30_narrowing >= 5.0
     )
-    fast_staged_ma30_convergence_pts = (
-        2.0 if fast_staged_ma30_convergence else 0.0
+    fast_staged_ma30_convergence_pts = 2.0 if fast_staged_ma30_convergence else 0.0
+    staged_ma30_active_participation = bool(
+        staged_ma30_convergence_rule_matched
+        and turnover is not None
+        and STAGED_MA30_ACTIVE_PARTICIPATION_MIN_PCT
+        <= turnover
+        < OVERSOLD_TURNOVER_GATE_MAX_PCT
+    )
+    staged_ma30_active_participation_pts = (
+        8.0 if staged_ma30_active_participation else 0.0
     )
 
     gate_passed = turnover is not None and turnover < OVERSOLD_TURNOVER_GATE_MAX_PCT
     turnover_pts = (
-        14.0 if turnover is not None and turnover < 3.0
-        else (10.0 if turnover is not None and turnover < 5.0
-              else (4.0 if turnover is not None and turnover < 8.0 else 0.0))
+        14.0
+        if turnover is not None and turnover < 3.0
+        else (
+            10.0
+            if turnover is not None and 3.0 <= turnover < 5.0
+            else (
+                4.0
+                if turnover is not None and 5.0 <= turnover < 8.0
+                else 0.0
+            )
+        )
     )
     amp_pts = (
         12.0 if candle_range is not None and candle_range < 3.0
@@ -485,7 +502,7 @@ def score_oversold_candidate(
             process,
             12.0 if process else 0.0,
             12.0,
-            "MA10 分阶段上穿/联合上攻结构成立" if process else "分阶段上穿结构不成立",
+            "MA10 分阶段上穿结构成立" if process else "分阶段上穿结构不成立",
         ),
         _component(
             "staged_ma30_fast_convergence",
@@ -495,6 +512,18 @@ def score_oversold_candidate(
             2.0,
             (
                 f"5日 MA10-MA30 缩差 {_fmt(ma10_ma30_narrowing)}%（>=5%）"
+                if staged_ma30_convergence_rule_matched
+                else "非 MA10 向 MA30 分阶段收敛路径"
+            ),
+        ),
+        _component(
+            "staged_ma30_active_participation",
+            "收缩后活跃承接",
+            staged_ma30_active_participation,
+            staged_ma30_active_participation_pts,
+            8.0,
+            (
+                f"P1 路径换手 {_fmt(turnover)}%（{STAGED_MA30_ACTIVE_PARTICIPATION_MIN_PCT:g}%~{OVERSOLD_TURNOVER_GATE_MAX_PCT:g}%）"
                 if staged_ma30_convergence_rule_matched
                 else "非 MA10 向 MA30 分阶段收敛路径"
             ),
@@ -561,7 +590,7 @@ def score_oversold_candidate(
         ),
     )
     # 稳定地基独立优先，避免把低点远离均线或量未收缩的强行包裹排在研究形态之前。
-    dead_pts = sum(
+    base_pts = sum(
         c.points for c in components
         if c.kind == "bonus"
         and c.key not in {
@@ -569,15 +598,17 @@ def score_oversold_candidate(
             "yang_wrap_stable_base",
             "pre_cross_controlled_drive",
             "staged_ma30_fast_convergence",
+            "staged_ma30_active_participation",
         }
     )
     stable_base_pts = 8.0 if stable_wrap_base else 0.0
     raw = (
-        dead_pts * 0.4
+        base_pts * 0.4
         + pretty_pts
         + stable_base_pts
         + controlled_pre_cross_drive_pts
         + fast_staged_ma30_convergence_pts
+        + staged_ma30_active_participation_pts
     )
     if not gate_passed:
         raw = min(raw, OVERSOLD_GATE_FAILED_SCORE_CAP)

@@ -2,6 +2,7 @@
 
 from datetime import date
 
+from alphaagent.server.services.low_suction import daily_picks_service
 from alphaagent.server.services.low_suction.daily_picks_service import (
     _exclude_current_st_candidates,
     _paginate_live_payload,
@@ -67,3 +68,31 @@ def test_backtest_candidate_filter_matches_live_current_name_st_screen() -> None
     )
 
     assert [candidate.vt_symbol for candidate in filtered] == ["000001.SZSE"]
+
+
+def test_daily_backtest_report_rejects_stale_scoring_payload(monkeypatch) -> None:
+    payload = {
+        "version": daily_picks_service.BACKTEST_VERSION,
+        "score_version": "low-suction-daily-score-v2.4",
+    }
+    monkeypatch.setattr(
+        daily_picks_service,
+        "load_daily_backtest_run",
+        lambda: payload,
+    )
+
+    assert daily_picks_service.get_daily_backtest_report() is None
+
+
+def test_daily_backtest_report_accepts_matching_versions(monkeypatch) -> None:
+    payload = {
+        "version": daily_picks_service.BACKTEST_VERSION,
+        "score_version": daily_picks_service.SCORE_VERSION,
+    }
+    monkeypatch.setattr(
+        daily_picks_service,
+        "load_daily_backtest_run",
+        lambda: payload,
+    )
+
+    assert daily_picks_service.get_daily_backtest_report() == payload

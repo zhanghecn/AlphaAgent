@@ -10,7 +10,10 @@ from alphaagent.server.services.low_suction.daily_picks_backtest import (
     build_backtest_payload,
 )
 from alphaagent.server.services.low_suction.daily_picks_scanner import LowSuctionCandidate
-from alphaagent.server.services.low_suction.daily_picks_scoring import QuietStreak
+from alphaagent.server.services.low_suction.daily_picks_scoring import (
+    SCORE_VERSION,
+    QuietStreak,
+)
 
 
 def _candidate(
@@ -77,6 +80,7 @@ def test_backtest_uses_top_five_per_family_and_leaves_unfilled_slots_as_cash() -
     )
 
     assert payload["version"] == BACKTEST_VERSION
+    assert payload["score_version"] == SCORE_VERSION
     assert payload["selection"] == {
         "picks_per_family": PICKS_PER_FAMILY,
         "max_positions": MAX_POSITIONS,

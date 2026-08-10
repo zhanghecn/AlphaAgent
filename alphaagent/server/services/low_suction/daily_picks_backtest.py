@@ -18,7 +18,10 @@ from alphaagent.server.services.low_suction.daily_picks_scanner import (
     LowSuctionCandidate,
     candidate_ranking_key,
 )
-from alphaagent.server.services.low_suction.daily_picks_scoring import SCORE_BANDS
+from alphaagent.server.services.low_suction.daily_picks_scoring import (
+    SCORE_BANDS,
+    SCORE_VERSION,
+)
 
 
 BACKTEST_VERSION = "low-suction-daily-backtest-v2"
@@ -65,6 +68,7 @@ def build_backtest_payload(
 
     return {
         "version": BACKTEST_VERSION,
+        "score_version": SCORE_VERSION,
         "label_convention": (
             "D+1 收盘到收盘，未扣费，raw_unadjusted 探索级；"
             "每族最高 5 只、每票 10%，未满 10 槽位留现金"

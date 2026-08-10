@@ -170,10 +170,10 @@ def test_oversold_score_full_marks() -> None:
         vol_ratio=0.7,
         stable_three_ma_wrap_rule_matched=True,
     )
-    # 死股偏好满分100×0.4(=40) + 好看度95 + 稳定地基8 = 143，受总分 140 上限约束。
+    # 基础组件满分100×0.4(=40) + 好看度95 + 稳定地基8 = 143，受总分 140 上限约束。
     assert score == 140.0
-    # 14 bonus max 之和 = 死股100(展示) + 好看度95 + 稳定地基8 + 预上穿10 + 快速收敛2 = 215。
-    assert sum(c.max_points for c in components if c.kind == "bonus") == 215.0
+    # 15 个 bonus 上限之和 = 基础组件100（展示）+ 好看度95 + 稳定地基8 + 预上穿10 + 快速收敛2 + 活跃承接8 = 223。
+    assert sum(c.max_points for c in components if c.kind == "bonus") == 223.0
     assert sum(1 for c in components if c.kind == "gate") == 1
 
 
@@ -310,7 +310,7 @@ def test_pre_cross_controlled_drive_adds_ten_points_only_to_that_path() -> None:
 def test_staged_ma30_fast_convergence_adds_two_points_only_to_that_path() -> None:
     features = {
         "oversold_low_support": True,
-        "turnover_rate_pct": 2.5,
+        "turnover_rate_pct": 1.0,
         "candle_range_pct": 3.5,
         "prior_bear_alignment_days": 12,
         "ma10_ma30_gap_narrowing_5d_pct": 5.1,
@@ -341,6 +341,46 @@ def test_staged_ma30_fast_convergence_adds_two_points_only_to_that_path() -> Non
         if item.key == "staged_ma30_fast_convergence"
     )
     assert unrelated_component.points == 0.0
+
+
+def test_staged_ma30_active_participation_ranks_the_verified_path() -> None:
+    features = {
+        "oversold_low_support": True,
+        "turnover_rate_pct": 2.5,
+        "candle_range_pct": 3.5,
+        "prior_bear_alignment_days": 12,
+        "ma10_ma30_gap_narrowing_5d_pct": 5.1,
+    }
+    streak = quiet_candle_streak([_bar(2.0)] * 3)
+
+    baseline_score, _ = score_oversold_candidate(features, streak)
+    score, components = score_oversold_candidate(
+        features,
+        streak,
+        staged_ma30_convergence_rule_matched=True,
+    )
+    component = next(
+        item for item in components if item.key == "staged_ma30_active_participation"
+    )
+    assert score == baseline_score + 10.0
+    assert component.passed is True
+    assert component.points == 8.0
+
+    _, sparse_components = score_oversold_candidate(
+        {**features, "turnover_rate_pct": 1.49},
+        streak,
+        staged_ma30_convergence_rule_matched=True,
+    )
+    sparse_component = next(
+        item
+        for item in sparse_components
+        if item.key == "staged_ma30_active_participation"
+    )
+    sparse_turnover = next(
+        item for item in sparse_components if item.key == "turnover_gradient"
+    )
+    assert sparse_component.points == 0.0
+    assert sparse_turnover.points == 14.0
 
 
 def test_oversold_gate_caps_at_39_when_bonus_high() -> None:
@@ -449,7 +489,7 @@ def test_total_caps_at_gate_failed_cap_when_gate_fails() -> None:
     assert _total(gate_fail) == 80.0                          # 无 cap 参数不 cap
 
 
-def test_score_version_bumped_to_v2_4() -> None:
+def test_score_version_bumped_to_v2_6() -> None:
     from alphaagent.server.services.low_suction import daily_picks_scoring as module
 
-    assert module.SCORE_VERSION == "low-suction-daily-score-v2.4"
+    assert module.SCORE_VERSION == "low-suction-daily-score-v2.6"

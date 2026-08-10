@@ -97,12 +97,12 @@ def test_personal_case_manifest_covers_every_named_source_observation() -> None:
             ("oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30",),
         ),
         (
-            "立新能源 M5/M10 上攻",
+            "立新能源 MA10 向 MA20 加速收敛",
             "001258.SZSE",
             date(2026, 7, 15),
             "oversold_rebound",
-            "ma5_or_ma10_low_touch",
-            ("m5_m10_joint_attack_before_ma20_cross_last_volume_expand",),
+            "process_only",
+            (),
         ),
         (
             "爱丽家居 MA10 回贴 MA30",
@@ -199,7 +199,11 @@ def test_unmodeled_personal_cases_stay_archived_as_research_pending() -> None:
         if case.narrative_status == "research_pending"
     }
 
-    assert set(pending) == {"百花医药 M10/M20 两线包裹", "百花医药 向上踩稳"}
+    assert set(pending) == {
+        "百花医药 M10/M20 两线包裹",
+        "百花医药 向上踩稳",
+        "立新能源 MA10 向 MA20 加速收敛",
+    }
     assert all(not case.required_process_rule_keys for case in pending.values())
 
 

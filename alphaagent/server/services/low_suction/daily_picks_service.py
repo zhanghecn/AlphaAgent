@@ -106,7 +106,14 @@ def get_daily_backtest_report() -> dict[str, object] | None:
     payload = load_daily_backtest_run()
     if payload is None:
         return None
-    return payload if payload.get("version") == BACKTEST_VERSION else None
+    return (
+        payload
+        if (
+            payload.get("version") == BACKTEST_VERSION
+            and payload.get("score_version") == SCORE_VERSION
+        )
+        else None
+    )
 
 
 # 回测物化：后台线程 + 状态（仿 limit_up history_service 的 rebuild 模式）。

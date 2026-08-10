@@ -1,6 +1,6 @@
 import { PanelHead } from "@/components/PanelHead";
 
-/** 低吸规则说明：v3 超跌反弹 + v4 趋势回踩两族因子规则的完整口径。 */
+/** 低吸规则说明：当前超跌反弹与趋势回踩的可执行口径。 */
 export function LowSuctionGuideView() {
   return (
     <section aria-label="低吸规则说明" className="text-sm">
@@ -52,40 +52,43 @@ export function LowSuctionGuideView() {
         </div>
       </div>
 
-      <PanelHead no="02" zh="超跌反弹低吸规则（v3）" en="OVERSOLD REBOUND" note="长期空头后的上穿过程回踩" />
+      <PanelHead no="02" zh="超跌反弹低吸规则（v2.6）" en="OVERSOLD REBOUND" note="先认形态，再在同日候选中排序" />
       <div className="space-y-3 border-b px-3 py-4 sm:px-4">
         <div>
-          <div className="mb-1 font-semibold">前置结构（硬门槛）</div>
+          <div className="mb-1 font-semibold">先准入，再评分</div>
           <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
-            <li>长期空头排列后，MA10 处于分阶段上穿过程：MA10 先上穿 MA20 / 双上穿 / MA5-MA10 联合上攻 / MA10 已上穿 MA30（15 日内）之一成立</li>
-            <li><span className="text-foreground">超跌/趋势互斥</span>：MA10&gt;MA20&gt;MA30 三线多头排列一旦成立，就不再纳入超跌族（多头已成 = 趋势族，超跌仅指空头→多头过渡期）—— 防止已走成多头的票混进超跌族拿满分</li>
-            <li><span className="text-foreground">低吸位置</span>：D 日必须处于「M10 准备上穿 M30」(M10 在 M30 下方) 或「穿完回贴 M30」(贴近) 的地方，最低价回踩 M10 获支撑 —— 排除 M10 已远穿 M30（上穿过程结束）的横盘票，它们不是"准备上穿处的回踩"</li>
-            <li><span className="text-foreground">low 真贴 M10</span>：最低价必须真正回踩触及/跌破 M10（low 距 M10 ≤ +1.0%），不是靠宽阈值"擦"到 M10 上方 —— 排除 low 没到 M10 的冲高型假回踩（主人研究票 low 到 M10 全部 ≤ +0.59%）</li>
+            <li>命名研究形态决定是否进入超跌池；分数只决定同日、同族候选的先后。没有命中形态的股票，不会因其他分项高分进入列表。</li>
+            <li>超跌只覆盖长期空头走向多头的过渡段。MA10&gt;MA20&gt;MA30 已稳定成立的股票，转入趋势低吸，不和超跌候选混排。</li>
           </ul>
         </div>
         <div>
-          <div className="mb-1 font-semibold">核心 1：低点获均线实际支撑</div>
+          <div className="mb-1 font-semibold">形态一：三线收敛阳线包裹</div>
           <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
-            <li>D 日低点在 MA10/MA20/MA30 获实际支撑且收盘有反应 —— 缩量贴死低点 = 接飞刀，必须看到收盘脱离</li>
+            <li>长期空头后，MA10 已开始越过 MA20；MA10、MA20、MA30 尚未跑散，阳线实体把三条线包住。</li>
+            <li>低点要真正贴到均线附近，且信号日前的量能已经缩下来。均线隔得很开、靠大阳线强行跨过的“包裹”不算。</li>
           </ul>
         </div>
         <div>
-          <div className="mb-1 font-semibold">核心 2：换手率门禁（唯一全段单调变量）</div>
+          <div className="mb-1 font-semibold">形态二：P1 分段支撑</div>
           <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
-            <li>换手率 &lt;3% 最优（-0.07% 组）、&lt;8% 为门禁线；≥8% 组 -0.53% —— 高换手 = 派发不是吸筹</li>
+            <li>MA10 已上穿 MA20、仍在 MA30 下方；价格回踩 MA10 获支撑。随后 MA10 与 MA30 的距离继续缩小，量能呈阶梯式收缩。</li>
+            <li>这是“先过 MA20、再准备过 MA30”的地基，而不是均线已经拉开后的追涨。传智教育 7-22、7-24 属于这条路径。</li>
           </ul>
         </div>
         <div>
-          <div className="mb-1 font-semibold">核心 3：崩盘日紧凑反弹</div>
+          <div className="mb-1 font-semibold">形态三：过 MA30 后的回踩修复</div>
           <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
-            <li>MA10 上穿后回贴 MA30 的崩盘日：换手 &lt;3% 且收盘脱离低点 0.3~1.5% —— 研究中唯一全时间段为正的形态</li>
+            <li>MA10 曾经上穿 MA30，随后价格深回撤到 MA30 附近；回撤段先缩量，信号日前后重新出现量能恢复。</li>
+            <li>它仍是超跌转势过程中的回踩，不把所有“MA10 已在 MA30 上方”的股票都当成超跌候选。</li>
           </ul>
         </div>
         <div>
-          <div className="mb-1 font-semibold">综合评分构成（0-100）</div>
+          <div className="mb-1 font-semibold">排除与排序</div>
           <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
-            <li>换手率门禁 gate（≥8% 派发，失败总分封顶 39）+ 换手率梯度 14（&lt;3% 满）+ 振幅安静度 12 + 低点支撑 16 + 空头持续时长 10（≥20 日满）</li>
-            <li>上穿过程结构 12 + 崩盘脱离低点 10 + 收盘支撑反应 8 + 梯形缩量 5 + 连续小 K 线 3 + 量能趋势 10（5/10 日均量比 &lt;0.8 骤缩满 → ≥1.3 骤放 0）</li>
+            <li>信号日触及涨停、低点没有真实均线支撑，或 MA10 已远离 MA30 且没有回踩修复结构，均不作为该阶段的低吸形态。</li>
+            <li>基础排序看均线支撑、空头持续时间、K 线是否安静、收盘是否脱离支撑、以及量能是否有序收缩。换手率 ≥8% 不改变规则命中，但诊断分封顶 39，避免高换手派发占据前列。</li>
+            <li><span className="text-foreground">P1 的活跃承接加分：</span>仅当 P1 已命中且换手率在 1.5%~8% 时加 8 分。它奖励“缩量但仍有承接”，不让无成交的缩量地基排在前面；不满足 P1 的股票不会得到这 8 分。</li>
+            <li>超跌诊断总分最高 140，用于排序而非预测收益概率；分数跨版本不可直接比较。</li>
           </ul>
         </div>
       </div>
@@ -95,7 +98,7 @@ export function LowSuctionGuideView() {
         <ul className="ml-4 list-disc space-y-0.5">
           <li>数据口径：raw_unadjusted 不复权日线（探索级，除权日有已知污染）；D+1 收盘到收盘收益，未扣费</li>
           <li>回测执行：每日趋势/超跌各取综合分最高的前 5 只，单票固定 10%，不足 10 只的槽位留现金；具体结果以「回测」页最新物化报告为准</li>
-          <li>分数段：超跌 60-79 / 80-89 / 90-100 三段 validation+holdout 双段为正（推荐区间）；趋势族各段 holdout 为负、暂不推荐，超额难靠日线因子稳定捕获</li>
+          <li>回测解读：只看当前评分版本、固定规则和固定前五排序的结果；页面分数段用于复核，不构成收益承诺</li>
           <li>并列决胜：超跌顶分并列率超九成 —— 并列时按连续小 K 线数更多、换手率更低决胜（均为全量验证的单调方向），回测与实时推荐同一决胜键</li>
           <li>行情主导一切：两族人口均值仅接近打平，本产品按综合分排序取最高，不做全池买入</li>
           <li>实时推荐：交易日内每 30 分钟用现货快照合成当日虚拟 K 线重算（未定型），收盘后以日线同步确认为准；实时组不含 ST 股</li>

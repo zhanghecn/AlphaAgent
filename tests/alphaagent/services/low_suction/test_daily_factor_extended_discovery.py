@@ -588,10 +588,10 @@ def test_manifest_excludes_retired_generic_rule_families() -> None:
     assert STAGED_MA10_SUPPORT_RULE_KEY in rules
     assert "ma10_low_retest_staged_m30_converging_volume_shrink" not in rules
     assert "ma10_ma30_converging_after_staged_cross_volume_shrink" not in rules
+    assert "m5_m10_joint_attack_before_ma20_cross_last_volume_expand" not in rules
     assert MA10_MA20_PRE_CROSS_RULE_KEY in rules
     assert RESEARCH_PENDING_DAILY_RULE_KEYS == {
         MA10_MA20_PRE_CROSS_RULE_KEY,
-        "m5_m10_joint_attack_before_ma20_cross_last_volume_expand",
     }
     assert "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30" not in rules
     assert "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30" in trend_keys
@@ -641,13 +641,6 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
         "prior_ma5_close_extension": True,
         "prior_daily_price_not_up": True,
     }
-    joint_attack_with_last_volume_expand = {
-        "long_bear_alignment": True,
-        "current_full_bear_alignment": True,
-        "oversold_process_eligible": True,
-        "m5_m10_joint_attack_ready": True,
-        "last_volume_expanded": True,
-    }
     yiming_pre_cross = {
         "long_bear_alignment": True,
         "current_full_bear_alignment": True,
@@ -671,14 +664,12 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
     stable_wrap_key = RESEARCH_THREE_MA_WRAP_RULE_KEY
     staged_key = STAGED_MA10_SUPPORT_RULE_KEY
     retest_key = "ma10_ma30_retest_after_actual_cross_two_leg_volume"
-    joint_attack_key = "m5_m10_joint_attack_before_ma20_cross_last_volume_expand"
     yiming_pre_cross_key = MA10_MA20_PRE_CROSS_RULE_KEY
     yiming_transition_key = "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30"
     fallback_key = "ma10_low_touch_after_ma5_extension"
     assert stable_wrap_key in oversold_rules
     assert staged_key in oversold_rules
     assert retest_key in oversold_rules
-    assert joint_attack_key in oversold_rules
     assert yiming_pre_cross_key in oversold_rules
     assert yiming_transition_key in trend_rules
     assert fallback_key in trend_rules
@@ -726,17 +717,6 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
     assert _rule_matches(
         oversold_rules[retest_key],
         {**ma10_retest_after_cross, "ma10_was_above_ma30_within_15d": False},
-    ) is False
-    assert _rule_matches(
-        oversold_rules[joint_attack_key], joint_attack_with_last_volume_expand
-    ) is True
-    assert _rule_matches(
-        oversold_rules[joint_attack_key],
-        {**joint_attack_with_last_volume_expand, "current_full_bear_alignment": False},
-    ) is False
-    assert _rule_matches(
-        oversold_rules[joint_attack_key],
-        {**joint_attack_with_last_volume_expand, "last_volume_expanded": False},
     ) is False
     assert _rule_matches(oversold_rules[yiming_pre_cross_key], yiming_pre_cross) is True
     assert _rule_matches(
@@ -791,6 +771,8 @@ def test_explicit_case_phase_features_are_causal_at_the_decision_cutoff() -> Non
     ):
         assert key in expected
         assert actual[key] == expected[key]
+    assert "ma5_slope_2d_pct" not in expected
+    assert "m5_m10_joint_attack_ready" not in expected
 
 
 def test_extended_factor_score_keeps_volume_as_an_oversold_addition() -> None:
@@ -800,7 +782,7 @@ def test_extended_factor_score_keeps_volume_as_an_oversold_addition() -> None:
         "ma10_crossed_ma20_after_long_bear_within_15d": True,
         "ma10_above_ma20": True,
         "ma10_below_ma30": True,
-        "m5_m10_joint_attack_ready": True,
+        "staged_m10_first": True,
         "ma10_ma30_gap_converging": True,
         "ma10_ma30_fast_convergence": True,
         "ma20_ma30_contact": True,
@@ -829,6 +811,10 @@ def test_extended_factor_score_keeps_volume_as_an_oversold_addition() -> None:
 
     oversold_scores = score_extended_factor(oversold_features, "oversold_rebound")
     assert oversold_scores == {"base": 100.0, "with_volume": 100.0}
+    assert score_extended_factor(
+        {**oversold_features, "m5_m10_joint_attack_ready": True},
+        "oversold_rebound",
+    ) == oversold_scores
     assert score_extended_factor(
         {**oversold_features, "volume_shape": "mixed", "volume_expand_then_shrink": False},
         "oversold_rebound",

@@ -93,7 +93,6 @@ STAGED_MA30_CONVERGENCE_RULE_KEYS = frozenset(
 RESEARCH_PENDING_DAILY_RULE_KEYS = frozenset(
     {
         MA10_MA20_PRE_CROSS_RULE_KEY,
-        "m5_m10_joint_attack_before_ma20_cross_last_volume_expand",
     }
 )
 TRANSITION_RULE_KEYS = frozenset({OVERSOLD_TO_TREND_RULE_KEY})
@@ -123,27 +122,22 @@ EXPLICIT_CASE_OVERSOLD_RULES = (
     DiscoveryRule(
         RESEARCH_THREE_MA_WRAP_RULE_KEY,
         "oversold_rebound",
-        "长期空头后 MA10 先上穿 MA20，阳线实体包裹收敛 MA10/MA20/MA30，低点贴线且量能已收缩",
+        "三线收敛阳线包裹（贴线、缩量）",
     ),
     DiscoveryRule(
         STAGED_MA10_SUPPORT_RULE_KEY,
         "oversold_rebound",
-        "长期空头后 MA10 已上穿 MA20、尚在 MA30 下方，回踩贴 MA10 后快速向 MA30 收敛并梯形缩量",
+        "分段支撑：MA10 回踩后向 MA30 收敛",
     ),
     DiscoveryRule(
         MA10_MA20_PRE_CROSS_RULE_KEY,
         "oversold_rebound",
-        "当前完整空头排列下 MA10 贴合但尚未上穿 MA20，阳线且当日放量",
-    ),
-    DiscoveryRule(
-        "m5_m10_joint_attack_before_ma20_cross_last_volume_expand",
-        "oversold_rebound",
-        "长期空头后 MA5 转升、MA10 向 MA20 收敛，D 日成交量放大",
+        "MA10/MA20 预上穿放量（研究待验证）",
     ),
     DiscoveryRule(
         "ma10_ma30_retest_after_actual_cross_two_leg_volume",
         "oversold_rebound",
-        "MA10 曾上穿 MA30 后深回撤至 MA30，前段缩量后段放量",
+        "MA30 回踩后的缩量转放量修复",
     ),
 )
 
@@ -797,7 +791,6 @@ def build_extended_daily_features(
         recent_pullback_from_high_pct is not None
         and recent_pullback_from_high_pct <= OVERSOLD_PROCESS_PULLBACK_MIN_PCT
     )
-    ma5_slope_2d = _series_slope_pct(ma_series[5], lookback=2)
     ma10_slope_2d = _series_slope_pct(ma_series[10], lookback=2)
     prior_ma10_slope_2d = _series_slope_pct(
         ma_series[10],
@@ -827,17 +820,6 @@ def build_extended_daily_features(
     ma10_ma30_gap_narrowing_5d = _difference_or_none(
         distance_10_30,
         prior_ma10_ma30_distance,
-    )
-    joint_m5_m10_attack = bool(
-        ma5_slope_2d is not None
-        and ma5_slope_2d > 0
-        and ma10_slope_improvement_2d is not None
-        and ma10_slope_improvement_2d > 0
-        and ma10 is not None
-        and ma20 is not None
-        and ma10 < ma20
-        and ma10_ma20_gap_narrowing_3d is not None
-        and ma10_ma20_gap_narrowing_3d >= 0.5
     )
     last_volume = _number_or_none(base.get("volume"))
     prior_volume = (
@@ -1065,7 +1047,6 @@ def build_extended_daily_features(
         ),
         "m10_dual_cross_before_m20_m30": m10_dual_cross_before_m20_m30,
         "ma10_ma20_slopes_up": ma10_ma20_slopes_up,
-        "ma5_slope_2d_pct": ma5_slope_2d,
         "ma10_slope_2d_pct": ma10_slope_2d,
         "ma10_slope_improvement_2d_pct": ma10_slope_improvement_2d,
         "ma10_ma20_gap_narrowing_3d_pct": ma10_ma20_gap_narrowing_3d,
@@ -1089,7 +1070,6 @@ def build_extended_daily_features(
             slow_window=30,
             lookback=PROCESS_CROSS_LOOKBACK,
         ),
-        "m5_m10_joint_attack_ready": joint_m5_m10_attack,
         "last_volume_change_pct": last_volume_change_pct,
         "last_volume_expanded": bool(
             last_volume_change_pct is not None
@@ -1237,7 +1217,6 @@ def score_extended_factor(
             bool(features.get(field))
             for field in (
                 "staged_m10_first",
-                "m5_m10_joint_attack_ready",
                 "ma10_crossed_ma30_within_15d",
             )
         )
@@ -2495,7 +2474,6 @@ def _is_score_candidate(
                 bool(features.get(field))
                 for field in (
                     "staged_m10_first",
-                    "m5_m10_joint_attack_ready",
                     "ma10_crossed_ma30_within_15d",
                 )
             )
@@ -2905,19 +2883,6 @@ def process_rule_predicates(
             "small_positive_candle": bool(
                 features.get("small_positive_candle")
             ),
-        },
-        "m5_m10_joint_attack_before_ma20_cross_last_volume_expand": {
-            "long_bear_alignment": bool(features.get("long_bear_alignment")),
-            "current_full_bear_alignment": bool(
-                features.get("current_full_bear_alignment")
-            ),
-            "oversold_process_eligible": bool(
-                features.get("oversold_process_eligible")
-            ),
-            "m5_m10_joint_attack_ready": bool(
-                features.get("m5_m10_joint_attack_ready")
-            ),
-            "last_volume_expanded": bool(features.get("last_volume_expanded")),
         },
         "ma10_ma30_retest_after_actual_cross_two_leg_volume": {
             "long_bear_alignment": bool(features.get("long_bear_alignment")),
@@ -3970,12 +3935,10 @@ def _feature_snapshot(features: Mapping[str, object]) -> dict[str, object]:
         "m10_dual_cross_before_m20_m30",
         "ma10_ma20_slopes_up",
         "post_cross_pullback",
-        "ma5_slope_2d_pct",
         "ma10_slope_2d_pct",
         "ma10_slope_improvement_2d_pct",
         "ma10_ma20_gap_narrowing_3d_pct",
         "ma10_ma30_fast_convergence",
-        "m5_m10_joint_attack_ready",
         "last_volume_change_pct",
         "volume_shape",
         "vol_monotone_6d",
