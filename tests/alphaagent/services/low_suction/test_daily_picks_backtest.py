@@ -188,3 +188,25 @@ def test_backtest_selects_d_day_top_pick_before_d1_label_availability() -> None:
         (lower_with_label.vt_symbol, 2),
     ]
     assert ledger["legs"][0]["d1_close_return_pct"] is None
+
+
+def test_backtest_marks_an_entirely_unsettled_ledger_day_without_return() -> None:
+    start = date(2026, 1, 1)
+    calendar = [start + timedelta(days=offset) for offset in range(40)]
+    day = calendar[20]
+    unsettled = replace(
+        _candidate(
+            day=day,
+            setup_type="trend_pullback",
+            ordinal=1,
+            score=100.0,
+            d1_return=0.0,
+        ),
+        d1_trade_date=None,
+        d1_close_return_pct=None,
+    )
+
+    payload = build_backtest_payload([unsettled], calendar)
+
+    ledger = next(item for item in payload["ledger_days"] if item["trade_date"] == day.isoformat())
+    assert ledger["day_return_pct"] is None

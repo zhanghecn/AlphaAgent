@@ -320,14 +320,21 @@ def _recent_ledger(
             by_day[day],
             key=lambda item: (str(item["setup_type"]), int(item.get("rank") or 0)),
         )
-        day_return = sum(
-            float(item["d1_close_return_pct"] or 0.0) for item in legs
-        ) / MAX_POSITIONS
+        settled_returns = [
+            float(item["d1_close_return_pct"])
+            for item in legs
+            if item["d1_close_return_pct"] is not None
+        ]
+        day_return = (
+            round(sum(settled_returns) / MAX_POSITIONS, 4)
+            if settled_returns
+            else None
+        )
         result.append(
             {
                 "trade_date": day,
                 "d1_trade_date": legs[0]["d1_trade_date"] if legs else None,
-                "day_return_pct": round(day_return, 4),
+                "day_return_pct": day_return,
                 "legs": legs,
             }
         )

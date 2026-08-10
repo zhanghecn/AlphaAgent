@@ -508,7 +508,8 @@ function EquitySpark({ points }: { points: { date: string; equity: number }[] })
 
 function fmtPct(v: number | null | undefined): string {
   if (v == null || Number.isNaN(v)) return "--";
-  return `${v.toFixed(1)}%`;
+  const precision = v !== 0 && Math.abs(v) < 0.1 ? 2 : 1;
+  return `${v.toFixed(precision)}%`;
 }
 
 function fmtSigned(v: number | null | undefined): string {

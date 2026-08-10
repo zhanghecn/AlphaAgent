@@ -170,15 +170,23 @@ function LedgerRow({ day, leg }: { day: LowSuctionLedgerDay; leg: LowSuctionLedg
 
 function LedgerDayColumn({ day }: { day: LowSuctionLedgerDay }) {
   const weekday = WEEKDAYS[new Date(`${day.trade_date}T00:00:00`).getDay()];
+  const dayReturn = day.day_return_pct;
+  const pendingSettlement = dayReturn == null;
   return (
     <section className="flex w-64 shrink-0 flex-col" aria-label={`${day.trade_date} 交割单`}>
       <header className="border-b bg-muted/20 px-3 py-2.5">
         <div className="flex items-baseline gap-2">
           <span className="text-sm font-semibold tabular-nums">{day.trade_date.slice(5)}</span>
           <span className="text-xs text-muted-foreground">{weekday}</span>
-          <span className={cn("ml-auto text-sm font-bold tabular-nums", day.day_return_pct >= 0 ? "text-red-500" : "text-emerald-600")}>
-            {day.day_return_pct >= 0 ? "+" : ""}
-            {day.day_return_pct.toFixed(2)}%
+          <span className={cn(
+            "ml-auto text-sm font-bold tabular-nums",
+            pendingSettlement
+              ? "text-muted-foreground"
+              : dayReturn >= 0 ? "text-red-500" : "text-emerald-600",
+          )}>
+            {pendingSettlement
+              ? "待结算"
+              : `${dayReturn >= 0 ? "+" : ""}${dayReturn.toFixed(2)}%`}
           </span>
         </div>
         <div className="mt-0.5 text-[10px] text-muted-foreground">

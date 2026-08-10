@@ -211,7 +211,7 @@ export interface LowSuctionLedgerLeg {
 export interface LowSuctionLedgerDay {
   trade_date: string;
   d1_trade_date: string | null;
-  day_return_pct: number;
+  day_return_pct: number | null;
   legs: LowSuctionLedgerLeg[];
 }
 

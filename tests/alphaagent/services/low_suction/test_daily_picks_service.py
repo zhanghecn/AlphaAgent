@@ -251,3 +251,36 @@ def test_daily_backtest_report_accepts_matching_versions(monkeypatch) -> None:
     )
 
     assert daily_picks_service.get_daily_backtest_report() == payload
+
+
+def test_daily_backtest_report_normalizes_fully_unsettled_legacy_ledger_day(monkeypatch) -> None:
+    payload = {
+        "version": daily_picks_service.BACKTEST_VERSION,
+        "score_version": daily_picks_service.SCORE_VERSION,
+        "ledger_days": [
+            {
+                "trade_date": "2026-08-10",
+                "day_return_pct": 0.0,
+                "legs": [
+                    {"d1_close_return_pct": None},
+                    {"d1_close_return_pct": None},
+                ],
+            },
+            {
+                "trade_date": "2026-08-09",
+                "day_return_pct": 0.1,
+                "legs": [
+                    {"d1_close_return_pct": 1.0},
+                    {"d1_close_return_pct": None},
+                ],
+            },
+        ],
+    }
+    monkeypatch.setattr(daily_picks_service, "load_daily_backtest_run", lambda: payload)
+
+    report = daily_picks_service.get_daily_backtest_report()
+
+    assert report is not None
+    assert report["ledger_days"][0]["day_return_pct"] is None
+    assert report["ledger_days"][1]["day_return_pct"] == 0.1
+    assert payload["ledger_days"][0]["day_return_pct"] == 0.0
