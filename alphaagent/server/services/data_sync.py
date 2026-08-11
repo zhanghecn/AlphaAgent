@@ -68,6 +68,11 @@ from alphaagent.server.services.limit_up.live_service import (
     LIVE_SCAN_INTERVAL_SECONDS,
     refresh_live_snapshot,
 )
+from alphaagent.server.services.low_suction.daily_picks_service import (
+    LIVE_SCAN_INTERVAL_SECONDS as LOW_SUCTION_LIVE_SCAN_INTERVAL_SECONDS,
+    LiveScanAlreadyRunningError,
+    refresh_live_recommendations,
+)
 from alphaagent.server.services.limit_up.live_repository import clear_live_context_cache
 from alphaagent.server.services.limit_up.live_trace_repository import (
     prune_live_trace_snapshots,
@@ -629,6 +634,15 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "name": "实时概念共振（每30秒）",
         "cron": "* 9-14 * * 1-5",
         "action": "limit_up_concept_scan",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": [],
+    },
+    {
+        "id": "low_suction_live_scan",
+        "name": "实时低吸扫描（每15分钟）",
+        "cron": "*/15 9-15 * * 1-5",
+        "action": "low_suction_live_scan",
         "enabled": True,
         "concurrency": 1,
         "job_ids": [],
@@ -2476,6 +2490,8 @@ _scheduler_thread: threading.Thread | None = None
 _scheduler_stop = threading.Event()
 _concept_schedule_lock = threading.Lock()
 _concept_schedule_running = False
+_low_suction_schedule_lock = threading.Lock()
+_low_suction_schedule_running = False
 
 
 # ─── Error class ──────────────────────────────────────────────────────────
@@ -2929,6 +2945,7 @@ def _schedule_action(payload: dict[str, Any]) -> str:
         "sync",
         "limit_up_live_scan",
         "limit_up_concept_scan",
+        "low_suction_live_scan",
     }:
         raise DataSyncError(f"Unsupported schedule action: {action}")
     return action
@@ -3022,6 +3039,9 @@ def run_schedule_now(schedule_id: str) -> dict[str, Any]:
     if action == "limit_up_concept_scan":
         snapshot = _run_schedule_action(dict(row), raise_errors=True) or {}
         return _concept_scan_schedule_status(schedule_id, snapshot)
+    if action == "low_suction_live_scan":
+        snapshot = _run_schedule_action(dict(row), raise_errors=True) or {}
+        return _low_suction_live_scan_schedule_status(schedule_id, snapshot)
     return _start_sync_schedule(dict(row), source="manual")
 
 
@@ -3118,6 +3138,59 @@ def _concept_scan_schedule_status(
                 "finished_at": created_at,
                 "rows_read": int(quality.get("quote_count") or 0),
                 "rows_written": concept_count if succeeded else 0,
+                "message": message,
+            }
+        ],
+    }
+
+
+def _low_suction_live_scan_schedule_status(
+    schedule_id: str,
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    """Represent one low-suction scan as a batch-like response."""
+
+    saved = _low_suction_live_snapshot_saved(snapshot)
+    status = "succeeded" if saved else "skipped"
+    trend_count = _low_suction_family_count(snapshot.get("trend"))
+    oversold_count = _low_suction_family_count(snapshot.get("oversold"))
+    rows_read = trend_count + oversold_count
+    created_at = _utc_now_iso()
+    message = _low_suction_live_scan_status_message(snapshot, saved=saved)
+    return {
+        "id": f"low_suction_live_scan_{uuid4().hex}",
+        "profile": "low_suction_live_scan",
+        "source": "manual",
+        "schedule_id": schedule_id,
+        "concurrency": 1,
+        "status": status,
+        "created_at": created_at,
+        "started_at": created_at,
+        "finished_at": created_at,
+        "current_job_id": None,
+        "total_jobs": 1,
+        "completed_jobs": 1,
+        "succeeded_jobs": 1 if saved else 0,
+        "failed_jobs": 0,
+        "skipped_jobs": 0 if saved else 1,
+        "rows_read": rows_read,
+        "rows_written": 1 if saved else 0,
+        "progress_pct": 100.0,
+        "message": message,
+        "jobs": [
+            {
+                "job_id": "low_suction_live_scan",
+                "status": status,
+                "started_at": created_at,
+                "finished_at": created_at,
+                "rows_read": rows_read,
+                "rows_written": 1 if saved else 0,
+                "progress_current": 1,
+                "progress_total": 1,
+                "progress_pct": 100.0,
+                "stage": str(snapshot.get("status") or ""),
+                "current_label": "",
+                "sample_items": [],
                 "message": message,
             }
         ],
@@ -4686,6 +4759,10 @@ def start_data_sync_scheduler() -> None:
     _scheduler_thread = threading.Thread(target=_scheduler_loop, name="data-sync-scheduler", daemon=True)
     _scheduler_thread.start()
     start_interrupted_schedule_recovery()
+    try:
+        _start_low_suction_live_scan_warmup()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("low-suction live scan warmup did not start: %s", exc)
     logger.info("Data sync scheduler started")
 
 
@@ -4933,6 +5010,57 @@ def _run_concept_scan_schedule(row: dict[str, Any]) -> None:
             _concept_schedule_running = False
 
 
+def _start_low_suction_live_scan_schedule(row: dict[str, Any]) -> bool:
+    """Run the long low-suction scan outside the scheduler tick thread."""
+
+    global _low_suction_schedule_running
+    with _low_suction_schedule_lock:
+        if _low_suction_schedule_running:
+            return False
+        _low_suction_schedule_running = True
+
+    thread = threading.Thread(
+        target=_run_low_suction_live_scan_schedule,
+        args=(dict(row),),
+        name="low-suction-live-scan",
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except Exception:
+        with _low_suction_schedule_lock:
+            _low_suction_schedule_running = False
+        raise
+    return True
+
+
+def _run_low_suction_live_scan_schedule(row: dict[str, Any]) -> None:
+    global _low_suction_schedule_running
+    try:
+        _run_schedule_action(row)
+    finally:
+        with _low_suction_schedule_lock:
+            _low_suction_schedule_running = False
+
+
+def _start_low_suction_live_scan_warmup() -> bool:
+    """Fill a missing intraday snapshot after a scheduler-worker restart."""
+
+    now_china = _now_china()
+    if not _low_suction_live_scan_window_open(now_china):
+        return False
+    for row in _load_batch_schedules():
+        if str(row.get("action") or "") != "low_suction_live_scan":
+            continue
+        if _recently_started(
+            row,
+            within_seconds=max(LOW_SUCTION_LIVE_SCAN_INTERVAL_SECONDS - 1, 1),
+        ):
+            return False
+        return _start_low_suction_live_scan_schedule(row)
+    return False
+
+
 def _run_scheduled_jobs() -> None:
     """Trigger schedules whose cron matches or whose cron window was missed."""
     now_china = _now_china()
@@ -4942,6 +5070,8 @@ def _run_scheduled_jobs() -> None:
             continue
         action = str(row.get("action") or "sync")
         if action in {"limit_up_live_scan", "limit_up_concept_scan"} and not _limit_up_live_scan_window_open(now_china):
+            continue
+        if action == "low_suction_live_scan" and not _low_suction_live_scan_window_open(now_china):
             continue
         if action == "limit_up_live_scan":
             recently_started = _recently_started(
@@ -4953,6 +5083,11 @@ def _run_scheduled_jobs() -> None:
                 row,
                 within_seconds=max(CONCEPT_REFRESH_SECONDS - 1, 1),
             )
+        elif action == "low_suction_live_scan":
+            recently_started = _recently_started(
+                row,
+                within_seconds=max(LOW_SUCTION_LIVE_SCAN_INTERVAL_SECONDS - 1, 1),
+            )
         else:
             recently_started = _recently_started(row)
         if recently_started:
@@ -4961,6 +5096,8 @@ def _run_scheduled_jobs() -> None:
             if _cron_matches(cron, now_china) or _schedule_catchup_due(row, now_china):
                 if action == "limit_up_concept_scan":
                     _start_concept_scan_schedule(row)
+                elif action == "low_suction_live_scan":
+                    _start_low_suction_live_scan_schedule(row)
                 else:
                     _run_schedule_action(row)
         except Exception:
@@ -5031,6 +5168,24 @@ def _run_schedule_action(
                 last_message=_live_scan_status_message(snapshot, saved=saved),
             )
             return snapshot
+        if action == "low_suction_live_scan":
+            _touch_schedule(
+                schedule_id,
+                last_started_at=datetime.now(timezone.utc),
+                last_status="running",
+            )
+            try:
+                snapshot = refresh_live_recommendations()
+            except LiveScanAlreadyRunningError as exc:
+                snapshot = {"status": "skipped", "message": str(exc)}
+            saved = _low_suction_live_snapshot_saved(snapshot)
+            _touch_schedule(
+                schedule_id,
+                last_status="succeeded" if saved else "skipped",
+                last_finished_at=datetime.now(timezone.utc),
+                last_message=_low_suction_live_scan_status_message(snapshot, saved=saved),
+            )
+            return snapshot
         if action != "sync":
             raise DataSyncError(f"Unsupported schedule action: {action}")
         _start_sync_schedule(row, source=source)
@@ -5085,11 +5240,50 @@ def _live_scan_status_message(snapshot: dict[str, Any], *, saved: bool) -> str:
     return f"行情非有效实时状态，快照未保存，{actionable} 个可执行动作{trace_suffix}"
 
 
+def _low_suction_live_snapshot_saved(snapshot: Mapping[str, object]) -> bool:
+    return str(snapshot.get("status") or "") in {"ok", "unavailable"}
+
+
+def _low_suction_family_count(value: object) -> int:
+    if not isinstance(value, Mapping):
+        return 0
+    try:
+        return max(int(value.get("total") or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _low_suction_live_scan_status_message(
+    snapshot: Mapping[str, object],
+    *,
+    saved: bool,
+) -> str:
+    if not saved:
+        return str(snapshot.get("message") or "低吸实时扫描未生成新快照")[:500]
+    if snapshot.get("status") == "unavailable":
+        return f"已保存低吸不可用快照：{str(snapshot.get('message') or '无可靠日线')[:300]}"
+    return (
+        "已保存低吸实时快照，"
+        f"趋势 {_low_suction_family_count(snapshot.get('trend'))} 只，"
+        f"超跌 {_low_suction_family_count(snapshot.get('oversold'))} 只"
+    )
+
+
 def _limit_up_live_scan_window_open(now_china: datetime) -> bool:
     minute = now_china.hour * 60 + now_china.minute
     return (
         9 * 60 + 15 <= minute <= 11 * 60 + 30
         or 13 * 60 <= minute <= 14 * 60 + 57
+    )
+
+
+def _low_suction_live_scan_window_open(now_china: datetime) -> bool:
+    if now_china.weekday() >= 5:
+        return False
+    minute = now_china.hour * 60 + now_china.minute
+    return (
+        9 * 60 + 25 <= minute <= 11 * 60 + 30
+        or 13 * 60 <= minute <= 15 * 60 + 30
     )
 
 

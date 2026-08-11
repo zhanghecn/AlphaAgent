@@ -70,7 +70,7 @@ export interface LowSuctionLivePayload {
   trade_date?: string;
   provisional?: boolean;
   merge_note?: string | null;
-  cache_ttl_seconds?: number;
+  refresh_interval_seconds?: number;
   score_version?: string;
   label_convention?: string;
   trend?: LowSuctionLiveFamily;

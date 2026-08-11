@@ -20,7 +20,7 @@ import { cn } from "@/lib/utils";
 
 type LowSuctionView = "live" | "backtest" | "ledger" | "guide";
 
-export const LOW_SUCTION_LIVE_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
+export const LOW_SUCTION_LIVE_REFRESH_INTERVAL_MS = 60 * 1000;
 
 const LOW_SUCTION_VIEWS: { value: LowSuctionView; label: string; icon: typeof Activity }[] = [
   { value: "live", label: "实时推荐", icon: Activity },
@@ -80,7 +80,7 @@ function LiveTab() {
   const query = useQuery({
     queryKey: ["lowSuctionLive", trendPage, oversoldPage],
     queryFn: () => fetchLowSuctionLive({ trendPage, oversoldPage }),
-    // 与后端 15 分钟缓存同频，避免无效请求并及时取到下一轮推荐。
+    // 后端只读持久化快照；分钟级读取可及时显示下一轮后台扫描结果。
     refetchInterval: LOW_SUCTION_LIVE_REFRESH_INTERVAL_MS,
     refetchOnWindowFocus: true,
   });

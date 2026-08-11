@@ -1,4 +1,4 @@
-"""低吸日线实时推荐服务：15 分钟缓存 + 盘中现货合成当日虚拟 K 线。
+"""低吸日线实时推荐服务：后台扫描 + 持久化快照读取。
 
 盘中（09:25-15:30 工作日）用全市场现货快照给每只股票合成一根今日虚拟
 日线（最新价当收盘），与历史日线拼接后走同一套研究票规则扫描和诊断评分；
@@ -43,10 +43,14 @@ from alphaagent.server.services.low_suction.live_scan_repository import (
     load_live_scan_runs,
     save_live_scan_run,
 )
+from alphaagent.server.services.low_suction.live_snapshot_repository import (
+    load_live_snapshot,
+    save_live_snapshot,
+)
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-LIVE_CACHE_TTL_SECONDS = 15 * 60  # 交易日内每 15 分钟重算一次缓存
+LIVE_SCAN_INTERVAL_SECONDS = 15 * 60
 LIVE_LOOKBACK_CALENDAR_DAYS = 10  # 加载日历窗口；特征 warmup 由加载器另加 120 天
 LIVE_MAX_ITEMS_PER_FAMILY = 100
 LIVE_PAGE_SIZE = 20
@@ -55,35 +59,49 @@ SPOT_MERGE_END = time(15, 30)
 MIN_SPOT_ACTIVE_SYMBOLS = 3_000
 
 _logger = logging.getLogger(__name__)
-_cache_lock = threading.Lock()
-_live_scan_lock = threading.Lock()
-_cache: dict[str, object] = {"expires_at": None, "payload": None}
-# 日线输入按“最新可靠交易日”缓存：盘中 15 分钟重算只重扫不重读库
+_inputs_cache_lock = threading.Lock()
+# 日线输入按“最新可靠交易日”缓存：后台定时重扫不重读库。
 _inputs_cache: dict[str, object] = {"key": None, "inputs": None}
-_warm_thread: threading.Thread | None = None
+_LIVE_SCAN_ADVISORY_LOCK_KEY = 8_218_134_158
+_fallback_live_scan_execution_lock = threading.Lock()
 
 
-def start_low_suction_live_warmup() -> None:
-    """Warm the day-level inputs cache at startup so the first live hit is fast."""
+class LiveScanAlreadyRunningError(RuntimeError):
+    """Raised when another process owns the low-suction live scan."""
 
-    global _warm_thread
-    with _cache_lock:
-        if _warm_thread is not None and _warm_thread.is_alive():
-            return
 
-        def _warm() -> None:
-            try:
-                get_live_recommendations()
-            except Exception as exc:  # noqa: BLE001
-                _logger.warning("low-suction live warmup failed: %s", exc)
+@contextmanager
+def _live_scan_execution_lock() -> Iterator[None]:
+    """Keep scheduled scans single-flight across worker processes."""
 
-        _warm_thread = threading.Thread(
-            target=_warm,
-            name="low-suction-live-warmup",
-            daemon=True,
+    engine = get_engine()
+    if engine.dialect.name != "postgresql":
+        if not _fallback_live_scan_execution_lock.acquire(blocking=False):
+            raise LiveScanAlreadyRunningError("低吸实时扫描已有后台任务在执行")
+        try:
+            yield
+        finally:
+            _fallback_live_scan_execution_lock.release()
+        return
+
+    with engine.connect() as connection:
+        acquired = bool(
+            connection.execute(
+                text("SELECT pg_try_advisory_lock(:lock_key)"),
+                {"lock_key": _LIVE_SCAN_ADVISORY_LOCK_KEY},
+            ).scalar_one()
         )
-        _warm_thread.start()
-
+        connection.commit()
+        if not acquired:
+            raise LiveScanAlreadyRunningError("低吸实时扫描已有后台任务在执行")
+        try:
+            yield
+        finally:
+            connection.execute(
+                text("SELECT pg_advisory_unlock(:lock_key)"),
+                {"lock_key": _LIVE_SCAN_ADVISORY_LOCK_KEY},
+            )
+            connection.commit()
 
 
 def get_live_recommendations(
@@ -91,46 +109,45 @@ def get_live_recommendations(
     trend_page: int = 1,
     oversold_page: int = 1,
 ) -> dict[str, object]:
-    """Read cached live recommendations and return independent family pages."""
+    """Read a persisted snapshot and return independent family pages."""
 
     now = datetime.now(SHANGHAI)
-    payload = _get_cached_live_payload(now)
-    if payload is not None:
-        return _paginate_live_payload(
-            payload, trend_page=trend_page, oversold_page=oversold_page
-        )
+    payload = load_live_snapshot(SCORE_VERSION)
+    if payload is None:
+        return {
+            "status": "unavailable",
+            "message": "后台首次扫描中，请稍后刷新",
+            "refresh_interval_seconds": LIVE_SCAN_INTERVAL_SECONDS,
+            "score_version": SCORE_VERSION,
+            "scan_trace": _load_live_scan_trace(now.date()),
+        }
 
-    # 多个页面请求同时越过缓存时，只让第一个请求执行全市场扫描。
-    with _live_scan_lock:
-        now = datetime.now(SHANGHAI)
-        payload = _get_cached_live_payload(now)
-        if payload is None:
-            started_at = now
-            try:
-                payload = _compute_live_payload(started_at)
-            except Exception as exc:
-                _record_failed_live_scan(started_at, datetime.now(SHANGHAI), exc)
-                raise
-            finished_at = datetime.now(SHANGHAI)
-            _attach_live_scan_trace(payload, started_at, finished_at)
-            with _cache_lock:
-                _cache["payload"] = payload
-                _cache["expires_at"] = started_at + timedelta(seconds=LIVE_CACHE_TTL_SECONDS)
-
+    result = dict(payload)
+    result["refresh_interval_seconds"] = LIVE_SCAN_INTERVAL_SECONDS
+    result["scan_trace"] = _load_live_scan_trace(
+        _payload_trade_date(result, now.date())
+    )
     return _paginate_live_payload(
-        payload, trend_page=trend_page, oversold_page=oversold_page
+        result, trend_page=trend_page, oversold_page=oversold_page
     )
 
 
-def _get_cached_live_payload(now: datetime) -> dict[str, object] | None:
-    """Return an unexpired scan payload without treating a read as a scan."""
+def refresh_live_recommendations() -> dict[str, object]:
+    """Scan once in the scheduler worker, then replace the readable snapshot."""
 
-    with _cache_lock:
-        expires_at = _cache.get("expires_at")
-        payload = _cache.get("payload")
-        if payload is not None and expires_at is not None and now < expires_at:  # type: ignore[operator]
-            return payload  # type: ignore[return-value]
-    return None
+    with _live_scan_execution_lock():
+        started_at = datetime.now(SHANGHAI)
+        try:
+            payload = _compute_live_payload(started_at)
+            payload.setdefault("trade_date", started_at.date().isoformat())
+            payload["refresh_interval_seconds"] = LIVE_SCAN_INTERVAL_SECONDS
+            save_live_snapshot(payload)
+        except Exception as exc:
+            _record_failed_live_scan(started_at, datetime.now(SHANGHAI), exc)
+            raise
+
+        _attach_live_scan_trace(payload, started_at, datetime.now(SHANGHAI))
+        return payload
 
 
 def get_daily_backtest_report() -> dict[str, object] | None:
@@ -514,6 +531,16 @@ def _attach_live_scan_trace(
         _logger.warning("low-suction live scan trace write failed: %s", exc)
 
 
+def _load_live_scan_trace(trade_date: date) -> list[dict[str, object]]:
+    """Read diagnostics without making a healthy snapshot unavailable."""
+
+    try:
+        return load_live_scan_runs(trade_date)
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("low-suction live scan trace read failed: %s", exc)
+        return []
+
+
 def _record_failed_live_scan(
     started_at: datetime,
     finished_at: datetime,
@@ -571,7 +598,7 @@ def _live_inputs(now: datetime):
         ).all()
     reliable = [row[0] for row in rows if int(row[1] or 0) >= 3_000]
     latest = reliable[-1] if reliable else None
-    with _cache_lock:
+    with _inputs_cache_lock:
         if latest is not None and _inputs_cache.get("key") == latest:
             return _inputs_cache["inputs"]
     inputs = load_daily_factor_inputs(
@@ -579,7 +606,7 @@ def _live_inputs(now: datetime):
         end_date=None,
         price_basis="raw_unadjusted",
     )
-    with _cache_lock:
+    with _inputs_cache_lock:
         _inputs_cache["key"] = latest
         _inputs_cache["inputs"] = inputs
     return inputs
@@ -634,7 +661,7 @@ def _compute_live_payload(now: datetime) -> dict[str, object]:
         "trade_date": target_date.isoformat(),
         "provisional": provisional,
         "merge_note": merge_note,
-        "cache_ttl_seconds": LIVE_CACHE_TTL_SECONDS,
+        "refresh_interval_seconds": LIVE_SCAN_INTERVAL_SECONDS,
         "score_version": SCORE_VERSION,
         "backtest_version": BACKTEST_VERSION,
         "trend": trend,
@@ -687,7 +714,7 @@ def _paginate_live_payload(
     trend_page: int,
     oversold_page: int,
 ) -> dict[str, object]:
-    """Page a cached top-100 payload without rerunning the market scan."""
+    """Page the persisted top-100 snapshot without rerunning the market scan."""
 
     result = dict(payload)
     for setup_type, requested_page in (

@@ -1880,6 +1880,21 @@ Index(
 )
 
 
+# 低吸实时推荐：固定单行保存当前因子版本的最近一次完整扫描结果。
+# API 只读取该快照，重扫描由独立 data-sync worker 触发。
+low_suction_live_snapshots = Table(
+    "low_suction_live_snapshots",
+    metadata,
+    Column("id", Integer, primary_key=True),  # 固定 1：只保留最新可读快照
+    Column("trade_date", Date, nullable=False),
+    Column("captured_at", DateTime(timezone=True), nullable=False),
+    Column("score_version", String(80), nullable=False),
+    Column("payload", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+
 limit_up_minute_backfill_attempts = Table(
     "limit_up_minute_backfill_attempts",
     metadata,

@@ -22,7 +22,7 @@ def live_recommendations(
     trend_page: int = Query(default=1, ge=1),
     oversold_page: int = Query(default=1, ge=1),
 ):
-    """实时推荐：两族各自分页，缓存中最多保留排名前 100 只。"""
+    """实时推荐：两族各自分页，持久化快照中最多保留排名前 100 只。"""
 
     try:
         return ok(

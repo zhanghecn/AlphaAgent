@@ -50,7 +50,7 @@ export function LowSuctionLiveView({
         {payload.merge_note && <span>{payload.merge_note}</span>}
         <span>当日已扫 {scanTrace.length} 次</span>
         <span className="ml-auto">
-          缓存有效 {Math.round((payload.cache_ttl_seconds ?? 1800) / 60)} 分钟 · {payload.asof?.slice(11, 19)} 更新
+          后台每 {Math.round((payload.refresh_interval_seconds ?? 900) / 60)} 分钟扫描 · {payload.asof?.slice(11, 19)} 更新
         </span>
       </div>
       <LiveScanTrace runs={scanTrace} />

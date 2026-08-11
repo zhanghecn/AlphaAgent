@@ -198,6 +198,7 @@ def test_default_batch_schedules_defined():
         "auction_0926",
         "limit_up_concept_scan",
         "limit_up_live_scan",
+        "low_suction_live_scan",
         "intraday_hourly",
         "limit_up_plan_1505",
         "eod_1900",
@@ -786,6 +787,19 @@ def test_limit_up_concept_scan_is_independent_and_throttled_to_30_seconds():
     assert svc.CONCEPT_REFRESH_SECONDS == 30
 
 
+def test_low_suction_live_scan_is_a_separate_fifteen_minute_schedule():
+    schedule = next(
+        item
+        for item in svc.DEFAULT_BATCH_SCHEDULES
+        if item["id"] == "low_suction_live_scan"
+    )
+
+    assert schedule["action"] == "low_suction_live_scan"
+    assert schedule["cron"] == "*/15 9-15 * * 1-5"
+    assert schedule["job_ids"] == []
+    assert svc.LOW_SUCTION_LIVE_SCAN_INTERVAL_SECONDS == 15 * 60
+
+
 def test_stock_sector_reverse_index_is_frozen_daily():
     cadence = svc.JOB_CADENCES["sync_stock_sector_memberships"]
 
@@ -846,6 +860,26 @@ def test_limit_up_live_scan_window_starts_at_0915():
 
     assert not svc._limit_up_live_scan_window_open(datetime(2026, 7, 13, 9, 14, tzinfo=tz))
     assert svc._limit_up_live_scan_window_open(datetime(2026, 7, 13, 9, 15, tzinfo=tz))
+
+
+def test_low_suction_live_scan_window_uses_actual_trading_hours():
+    tz = timezone.utc
+
+    assert not svc._low_suction_live_scan_window_open(
+        datetime(2026, 7, 13, 9, 24, tzinfo=tz)
+    )
+    assert svc._low_suction_live_scan_window_open(
+        datetime(2026, 7, 13, 9, 25, tzinfo=tz)
+    )
+    assert not svc._low_suction_live_scan_window_open(
+        datetime(2026, 7, 13, 12, 0, tzinfo=tz)
+    )
+    assert svc._low_suction_live_scan_window_open(
+        datetime(2026, 7, 13, 15, 30, tzinfo=tz)
+    )
+    assert not svc._low_suction_live_scan_window_open(
+        datetime(2026, 7, 18, 10, 0, tzinfo=tz)
+    )
 
 
 def test_eod_schedule_runs_unified_post_close_chain():
@@ -4640,6 +4674,73 @@ def test_due_concept_scan_runs_in_bounded_background_slot(monkeypatch):
     finally:
         concept_release.set()
         scheduler_thread.join(timeout=2)
+
+
+def test_due_low_suction_scan_runs_in_a_background_slot(monkeypatch) -> None:
+    import threading
+
+    scan_started = threading.Event()
+    scan_release = threading.Event()
+    scan_finished = threading.Event()
+    scan_threads: list[str] = []
+    now = datetime(2026, 7, 20, 10, 0, tzinfo=timezone(timedelta(hours=8)))
+    schedules = [
+        {
+            "id": "low_suction_live_scan",
+            "cron": "*/15 9-15 * * 1-5",
+            "action": "low_suction_live_scan",
+            "last_started_at": None,
+        }
+    ]
+
+    def refresh_low_suction():
+        scan_threads.append(threading.current_thread().name)
+        scan_started.set()
+        assert scan_release.wait(timeout=2)
+        scan_finished.set()
+        return {
+            "status": "ok",
+            "trend": {"total": 2},
+            "oversold": {"total": 3},
+        }
+
+    monkeypatch.setattr(svc, "_low_suction_schedule_running", False)
+    monkeypatch.setattr(svc, "_load_batch_schedules", lambda: schedules)
+    monkeypatch.setattr(svc, "_now_china", lambda: now)
+    monkeypatch.setattr(svc, "_touch_schedule", lambda *args, **kwargs: None)
+    monkeypatch.setattr(svc, "refresh_live_recommendations", refresh_low_suction)
+
+    try:
+        svc._run_scheduled_jobs()
+
+        assert scan_started.wait(timeout=1)
+        assert scan_threads == ["low-suction-live-scan"]
+        svc._run_scheduled_jobs()
+        assert scan_threads == ["low-suction-live-scan"]
+    finally:
+        scan_release.set()
+        assert scan_finished.wait(timeout=2)
+
+
+def test_low_suction_scan_lock_contention_is_reported_as_skipped(monkeypatch) -> None:
+    touched: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        svc,
+        "refresh_live_recommendations",
+        lambda: (_ for _ in ()).throw(svc.LiveScanAlreadyRunningError("busy")),
+    )
+    monkeypatch.setattr(
+        svc,
+        "_touch_schedule",
+        lambda _schedule_id, **fields: touched.append(fields),
+    )
+
+    result = svc._run_schedule_action(
+        {"id": "low_suction_live_scan", "action": "low_suction_live_scan"}
+    )
+
+    assert result == {"status": "skipped", "message": "busy"}
+    assert touched[-1]["last_status"] == "skipped"
 
 
 def test_scheduler_does_not_refresh_concepts_during_lunch(monkeypatch):

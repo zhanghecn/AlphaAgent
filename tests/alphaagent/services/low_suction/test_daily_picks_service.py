@@ -1,5 +1,6 @@
-"""Focused tests for low-suction live payload paging and scan diagnostics."""
+"""Focused tests for low-suction live snapshots, paging, and diagnostics."""
 
+from contextlib import nullcontext
 from datetime import date
 
 import pytest
@@ -35,11 +36,11 @@ def _candidate(vt_symbol: str) -> LowSuctionCandidate:
     )
 
 
-def test_live_scan_cache_ttl_is_fifteen_minutes() -> None:
-    assert daily_picks_service.LIVE_CACHE_TTL_SECONDS == 15 * 60
+def test_live_scan_interval_is_fifteen_minutes() -> None:
+    assert daily_picks_service.LIVE_SCAN_INTERVAL_SECONDS == 15 * 60
 
 
-def test_live_pagination_keeps_each_family_within_cached_top_hundred() -> None:
+def test_live_pagination_keeps_each_family_within_persisted_top_hundred() -> None:
     payload = {
         "status": "ok",
         "trend": {
@@ -65,21 +66,62 @@ def test_live_pagination_keeps_each_family_within_cached_top_hundred() -> None:
     assert [item["rank"] for item in paged["oversold"]["items"]] == list(range(1, 8))
 
 
-def test_live_scan_trace_records_only_a_real_cache_miss(monkeypatch) -> None:
-    calls: list[object] = []
-    saved_runs: list[dict[str, object]] = []
+def test_live_read_never_runs_a_scan(monkeypatch) -> None:
     trace = [{"id": 1, "status": "ok", "started_at": "2026-08-10T10:00:00+08:00"}]
     monkeypatch.setattr(
         daily_picks_service,
-        "_cache",
-        {"expires_at": None, "payload": None},
+        "load_live_snapshot",
+        lambda _version: {
+            "status": "ok",
+            "trade_date": "2026-08-10",
+            "provisional": True,
+            "score_version": daily_picks_service.SCORE_VERSION,
+            "trend": {"total": 2, "limit": 100, "items": []},
+            "oversold": {"total": 3, "limit": 100, "items": []},
+        },
+    )
+    monkeypatch.setattr(daily_picks_service, "load_live_scan_runs", lambda _date: trace)
+    monkeypatch.setattr(
+        daily_picks_service,
+        "_compute_live_payload",
+        lambda _now: pytest.fail("live GET must not trigger a market scan"),
     )
 
+    first = daily_picks_service.get_live_recommendations()
+    second = daily_picks_service.get_live_recommendations(trend_page=2, oversold_page=2)
+
+    assert first["scan_trace"] == trace
+    assert second["scan_trace"] == trace
+    assert first["refresh_interval_seconds"] == 15 * 60
+    assert second["trend"]["page"] == 1
+
+
+def test_live_read_without_snapshot_returns_immediately(monkeypatch) -> None:
+    monkeypatch.setattr(daily_picks_service, "load_live_snapshot", lambda _version: None)
+    monkeypatch.setattr(daily_picks_service, "load_live_scan_runs", lambda _date: [])
+    monkeypatch.setattr(
+        daily_picks_service,
+        "_compute_live_payload",
+        lambda _now: pytest.fail("live GET must not trigger a market scan"),
+    )
+
+    payload = daily_picks_service.get_live_recommendations()
+
+    assert payload["status"] == "unavailable"
+    assert "后台首次扫描中" in str(payload["message"])
+    assert payload["scan_trace"] == []
+
+
+def test_worker_refresh_persists_snapshot_and_scan_trace(monkeypatch) -> None:
+    saved_snapshots: list[dict[str, object]] = []
+    saved_runs: list[dict[str, object]] = []
+    trace = [{"id": 1, "status": "ok", "started_at": "2026-08-10T10:00:00+08:00"}]
+
     def compute(_now):
-        calls.append(_now)
         return {
             "status": "ok",
             "trade_date": "2026-08-10",
+            "asof": "2026-08-10T10:00:00+08:00",
             "provisional": True,
             "score_version": daily_picks_service.SCORE_VERSION,
             "trend": {"total": 2, "limit": 100, "items": []},
@@ -87,7 +129,13 @@ def test_live_scan_trace_records_only_a_real_cache_miss(monkeypatch) -> None:
             "_scan_spot_active_symbols": 5_001,
         }
 
+    monkeypatch.setattr(daily_picks_service, "_live_scan_execution_lock", nullcontext)
     monkeypatch.setattr(daily_picks_service, "_compute_live_payload", compute)
+    monkeypatch.setattr(
+        daily_picks_service,
+        "save_live_snapshot",
+        lambda payload: saved_snapshots.append(dict(payload)),
+    )
     monkeypatch.setattr(
         daily_picks_service,
         "save_live_scan_run",
@@ -95,26 +143,20 @@ def test_live_scan_trace_records_only_a_real_cache_miss(monkeypatch) -> None:
     )
     monkeypatch.setattr(daily_picks_service, "load_live_scan_runs", lambda _date: trace)
 
-    first = daily_picks_service.get_live_recommendations()
-    second = daily_picks_service.get_live_recommendations(trend_page=2, oversold_page=2)
+    payload = daily_picks_service.refresh_live_recommendations()
 
-    assert len(calls) == 1
-    assert len(saved_runs) == 1
+    assert len(saved_snapshots) == 1
+    assert saved_snapshots[0]["refresh_interval_seconds"] == 15 * 60
     assert saved_runs[0]["status"] == "ok"
     assert saved_runs[0]["spot_active_symbols"] == 5_001
     assert saved_runs[0]["trend_count"] == 2
     assert saved_runs[0]["oversold_count"] == 3
-    assert first["scan_trace"] == trace
-    assert second["scan_trace"] == trace
+    assert payload["scan_trace"] == trace
 
 
 def test_live_scan_failure_is_persisted_without_hiding_the_original_error(monkeypatch) -> None:
     saved_runs: list[dict[str, object]] = []
-    monkeypatch.setattr(
-        daily_picks_service,
-        "_cache",
-        {"expires_at": None, "payload": None},
-    )
+    monkeypatch.setattr(daily_picks_service, "_live_scan_execution_lock", nullcontext)
     monkeypatch.setattr(
         daily_picks_service,
         "_compute_live_payload",
@@ -127,7 +169,7 @@ def test_live_scan_failure_is_persisted_without_hiding_the_original_error(monkey
     )
 
     with pytest.raises(RuntimeError, match="stock bars unavailable"):
-        daily_picks_service.get_live_recommendations()
+        daily_picks_service.refresh_live_recommendations()
 
     assert len(saved_runs) == 1
     assert saved_runs[0]["status"] == "error"
