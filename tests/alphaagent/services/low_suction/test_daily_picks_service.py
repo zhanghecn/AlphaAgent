@@ -345,6 +345,52 @@ def test_merge_spot_bars_uses_complete_ohlcv_snapshot(monkeypatch) -> None:
     assert synthetic["low_price"] == 10.1
 
 
+def test_merge_spot_bars_preserves_scanner_symbol_date_order(monkeypatch) -> None:
+    from alphaagent.data_sources.akshare_adapter import AkShareAdapter
+
+    previous = date(2026, 8, 11)
+    today = date(2026, 8, 12)
+    bars = pd.DataFrame(
+        [
+            {"vt_symbol": "000001.SZSE", "trade_date": previous},
+            {"vt_symbol": "600000.SSE", "trade_date": previous},
+        ]
+    )
+    monkeypatch.setattr(
+        AkShareAdapter,
+        "all_stock_ohlcv_spot",
+        lambda _self: {
+            "items": [
+                {
+                    "vt_symbol": "600000.SSE",
+                    "last_price": 10.5,
+                    "open_price": 10.2,
+                    "high_price": 10.7,
+                    "low_price": 10.1,
+                    "volume": 123456,
+                },
+                {
+                    "vt_symbol": "000001.SZSE",
+                    "last_price": 11.2,
+                    "open_price": 11.0,
+                    "high_price": 11.3,
+                    "low_price": 10.9,
+                    "volume": 654321,
+                },
+            ]
+        },
+    )
+
+    result = daily_picks_service._merge_spot_bars(bars, today)
+
+    assert result.bars[["vt_symbol", "trade_date"]].to_dict(orient="records") == [
+        {"vt_symbol": "000001.SZSE", "trade_date": previous},
+        {"vt_symbol": "000001.SZSE", "trade_date": today},
+        {"vt_symbol": "600000.SSE", "trade_date": previous},
+        {"vt_symbol": "600000.SSE", "trade_date": today},
+    ]
+
+
 def test_tail_final_merge_forces_a_fresh_ohlcv_snapshot(monkeypatch) -> None:
     from alphaagent.data_sources.akshare_adapter import AkShareAdapter
 

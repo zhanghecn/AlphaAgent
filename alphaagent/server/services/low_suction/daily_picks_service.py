@@ -1090,6 +1090,11 @@ def _merge_spot_bars(
             total_symbols=total_symbols,
         )
     frame = pd.concat([bars, pd.DataFrame(synthetic)], ignore_index=True)
+    frame = frame.sort_values(
+        ["vt_symbol", "trade_date"],
+        kind="stable",
+        ignore_index=True,
+    )
     return SpotBarMerge(
         bars=frame,
         active_symbols=len(synthetic),

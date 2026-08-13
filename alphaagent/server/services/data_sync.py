@@ -4446,16 +4446,30 @@ def _run_low_suction_live_scan_schedule(
     force_tail_final: bool = False,
 ) -> None:
     global _low_suction_schedule_running
+    global _low_suction_tail_final_attempted_date
+    global _low_suction_tail_final_pending_date
+    tail_final_completed = False
     try:
-        _run_schedule_action(row, force_tail_final=force_tail_final)
+        snapshot = _run_schedule_action(row, force_tail_final=force_tail_final)
+        tail_final_completed = (
+            not force_tail_final
+            or _low_suction_live_snapshot_saved(snapshot or {})
+        )
+    except Exception:
+        # The normal schedule path records its own failure.  Keeping the
+        # tail-final request pending lets the scheduler retry before 15:30.
+        tail_final_completed = False
+        raise
     finally:
         pending_tail_date: date | None = None
         with _low_suction_schedule_lock:
             _low_suction_schedule_running = False
             now_china = _now_china()
+            if force_tail_final and not tail_final_completed:
+                _low_suction_tail_final_attempted_date = None
+                _low_suction_tail_final_pending_date = now_china.date()
             if (
-                not force_tail_final
-                and _low_suction_tail_final_pending_date == now_china.date()
+                _low_suction_tail_final_pending_date == now_china.date()
                 and _low_suction_tail_final_attempted_date != now_china.date()
                 and _low_suction_tail_final_window_open(now_china)
             ):
