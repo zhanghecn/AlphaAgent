@@ -4070,6 +4070,7 @@ def test_tail_final_scan_bypasses_minute_throttle(monkeypatch) -> None:
     monkeypatch.setattr(svc, "_low_suction_schedule_running", False)
     monkeypatch.setattr(svc, "_low_suction_tail_final_attempted_date", None)
     monkeypatch.setattr(svc, "_low_suction_tail_final_pending_date", None)
+    monkeypatch.setattr(svc, "_low_suction_tail_final_retry_after", None)
     monkeypatch.setattr(svc, "_load_batch_schedules", lambda: [schedule])
     monkeypatch.setattr(svc, "_now_china", lambda: now)
     monkeypatch.setattr(
@@ -4091,7 +4092,6 @@ def test_tail_final_scan_bypasses_minute_throttle(monkeypatch) -> None:
 
 def test_tail_final_scan_queues_after_the_previous_minute_finishes(monkeypatch) -> None:
     now = datetime(2026, 7, 20, 15, 1, tzinfo=timezone(timedelta(hours=8)))
-    started: list[dict[str, object]] = []
     schedule = {
         "id": "low_suction_live_scan",
         "cron": "* 9-15 * * 1-5",
@@ -4101,32 +4101,20 @@ def test_tail_final_scan_queues_after_the_previous_minute_finishes(monkeypatch) 
     monkeypatch.setattr(svc, "_low_suction_schedule_running", True)
     monkeypatch.setattr(svc, "_low_suction_tail_final_attempted_date", None)
     monkeypatch.setattr(svc, "_low_suction_tail_final_pending_date", None)
+    monkeypatch.setattr(svc, "_low_suction_tail_final_retry_after", None)
     monkeypatch.setattr(svc, "_now_china", lambda: now)
     monkeypatch.setattr(svc, "_run_schedule_action", lambda *_args, **_kwargs: None)
 
     assert svc._request_low_suction_tail_final_scan(schedule, now) is False
     assert svc._low_suction_tail_final_pending_date == now.date()
 
-    monkeypatch.setattr(
-        svc,
-        "_start_low_suction_live_scan_schedule",
-        lambda row, **kwargs: started.append({"row": row, **kwargs}) or True,
-    )
-
     svc._run_low_suction_live_scan_schedule(schedule)
 
-    assert started == [
-        {
-            "row": schedule,
-            "force_tail_final": True,
-            "tail_final_date": now.date(),
-        }
-    ]
+    assert svc._low_suction_tail_final_pending_date == now.date()
 
 
 def test_failed_tail_final_scan_is_requeued_within_the_retry_window(monkeypatch) -> None:
     now = datetime(2026, 7, 20, 15, 10, tzinfo=timezone(timedelta(hours=8)))
-    started: list[dict[str, object]] = []
     schedule = {
         "id": "low_suction_live_scan",
         "cron": "* 9-15 * * 1-5",
@@ -4136,29 +4124,18 @@ def test_failed_tail_final_scan_is_requeued_within_the_retry_window(monkeypatch)
     monkeypatch.setattr(svc, "_low_suction_schedule_running", True)
     monkeypatch.setattr(svc, "_low_suction_tail_final_attempted_date", now.date())
     monkeypatch.setattr(svc, "_low_suction_tail_final_pending_date", None)
+    monkeypatch.setattr(svc, "_low_suction_tail_final_retry_after", None)
     monkeypatch.setattr(svc, "_now_china", lambda: now)
     monkeypatch.setattr(svc, "_run_schedule_action", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        svc,
-        "_start_low_suction_live_scan_schedule",
-        lambda row, **kwargs: started.append({"row": row, **kwargs}) or True,
-    )
-
     svc._run_low_suction_live_scan_schedule(schedule, force_tail_final=True)
 
     assert svc._low_suction_tail_final_attempted_date is None
-    assert started == [
-        {
-            "row": schedule,
-            "force_tail_final": True,
-            "tail_final_date": now.date(),
-        }
-    ]
+    assert svc._low_suction_tail_final_pending_date == now.date()
+    assert svc._low_suction_tail_final_retry_after == now + timedelta(seconds=60)
 
 
 def test_tail_final_exception_is_requeued_within_the_retry_window(monkeypatch) -> None:
     now = datetime(2026, 7, 20, 15, 10, tzinfo=timezone(timedelta(hours=8)))
-    started: list[dict[str, object]] = []
     schedule = {
         "id": "low_suction_live_scan",
         "cron": "* 9-15 * * 1-5",
@@ -4168,29 +4145,92 @@ def test_tail_final_exception_is_requeued_within_the_retry_window(monkeypatch) -
     monkeypatch.setattr(svc, "_low_suction_schedule_running", True)
     monkeypatch.setattr(svc, "_low_suction_tail_final_attempted_date", now.date())
     monkeypatch.setattr(svc, "_low_suction_tail_final_pending_date", None)
+    monkeypatch.setattr(svc, "_low_suction_tail_final_retry_after", None)
     monkeypatch.setattr(svc, "_now_china", lambda: now)
     monkeypatch.setattr(
         svc,
         "_run_schedule_action",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
     )
-    monkeypatch.setattr(
-        svc,
-        "_start_low_suction_live_scan_schedule",
-        lambda row, **kwargs: started.append({"row": row, **kwargs}) or True,
-    )
-
     with pytest.raises(RuntimeError, match="boom"):
         svc._run_low_suction_live_scan_schedule(schedule, force_tail_final=True)
 
     assert svc._low_suction_tail_final_attempted_date is None
-    assert started == [
-        {
-            "row": schedule,
-            "force_tail_final": True,
-            "tail_final_date": now.date(),
-        }
-    ]
+    assert svc._low_suction_tail_final_pending_date == now.date()
+    assert svc._low_suction_tail_final_retry_after == now + timedelta(seconds=60)
+
+
+def test_tail_final_retry_waits_for_the_live_scan_interval(monkeypatch) -> None:
+    now = datetime(2026, 7, 20, 15, 10, tzinfo=timezone(timedelta(hours=8)))
+    started: list[dict[str, object]] = []
+    schedule = {
+        "id": "low_suction_live_scan",
+        "cron": "* 9-15 * * 1-5",
+        "action": "low_suction_live_scan",
+    }
+
+    monkeypatch.setattr(svc, "_low_suction_schedule_running", False)
+    monkeypatch.setattr(svc, "_low_suction_tail_final_attempted_date", None)
+    monkeypatch.setattr(svc, "_low_suction_tail_final_pending_date", now.date())
+    monkeypatch.setattr(
+        svc,
+        "_low_suction_tail_final_retry_after",
+        now + timedelta(seconds=60),
+    )
+    monkeypatch.setattr(svc, "_now_china", lambda: now)
+    monkeypatch.setattr(
+        svc,
+        "_run_low_suction_live_scan_schedule",
+        lambda *_args: None,
+    )
+
+    assert svc._request_low_suction_tail_final_scan(schedule, now) is False
+
+    ready_at = now + timedelta(seconds=60)
+    monkeypatch.setattr(svc, "_now_china", lambda: ready_at)
+    monkeypatch.setattr(
+        svc,
+        "_run_low_suction_live_scan_schedule",
+        lambda row, force_tail_final: started.append(
+            {"row": row, "force_tail_final": force_tail_final}
+        ),
+    )
+
+    assert svc._request_low_suction_tail_final_scan(schedule, ready_at) is True
+    assert started == [{"row": schedule, "force_tail_final": True}]
+
+
+def test_tail_final_thread_start_failure_waits_for_the_live_scan_interval(
+    monkeypatch,
+) -> None:
+    now = datetime(2026, 7, 20, 15, 10, tzinfo=timezone(timedelta(hours=8)))
+    schedule = {
+        "id": "low_suction_live_scan",
+        "cron": "* 9-15 * * 1-5",
+        "action": "low_suction_live_scan",
+    }
+
+    monkeypatch.setattr(svc, "_low_suction_schedule_running", False)
+    monkeypatch.setattr(svc, "_low_suction_tail_final_attempted_date", None)
+    monkeypatch.setattr(svc, "_low_suction_tail_final_pending_date", None)
+    monkeypatch.setattr(svc, "_low_suction_tail_final_retry_after", None)
+    monkeypatch.setattr(svc, "_now_china", lambda: now)
+    monkeypatch.setattr(
+        svc.threading.Thread,
+        "start",
+        lambda _self: (_ for _ in ()).throw(RuntimeError("thread unavailable")),
+    )
+
+    with pytest.raises(RuntimeError, match="thread unavailable"):
+        svc._start_low_suction_live_scan_schedule(
+            schedule,
+            force_tail_final=True,
+            tail_final_date=now.date(),
+        )
+
+    assert svc._low_suction_tail_final_attempted_date is None
+    assert svc._low_suction_tail_final_pending_date == now.date()
+    assert svc._low_suction_tail_final_retry_after == now + timedelta(seconds=60)
 
 
 def test_low_suction_scan_lock_contention_is_reported_as_skipped(monkeypatch) -> None:

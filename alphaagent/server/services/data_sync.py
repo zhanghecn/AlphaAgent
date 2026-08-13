@@ -2255,6 +2255,7 @@ _low_suction_schedule_lock = threading.Lock()
 _low_suction_schedule_running = False
 _low_suction_tail_final_pending_date: date | None = None
 _low_suction_tail_final_attempted_date: date | None = None
+_low_suction_tail_final_retry_after: datetime | None = None
 
 
 # ─── Error class ──────────────────────────────────────────────────────────
@@ -4407,10 +4408,17 @@ def _start_low_suction_live_scan_schedule(
     global _low_suction_schedule_running
     global _low_suction_tail_final_attempted_date
     global _low_suction_tail_final_pending_date
-    requested_tail_date = tail_final_date or _now_china().date()
+    global _low_suction_tail_final_retry_after
+    now_china = _now_china()
+    requested_tail_date = tail_final_date or now_china.date()
     with _low_suction_schedule_lock:
         if force_tail_final:
             if _low_suction_tail_final_attempted_date == requested_tail_date:
+                return False
+            if (
+                _low_suction_tail_final_retry_after is not None
+                and now_china < _low_suction_tail_final_retry_after
+            ):
                 return False
             _low_suction_tail_final_pending_date = requested_tail_date
         if _low_suction_schedule_running:
@@ -4418,6 +4426,7 @@ def _start_low_suction_live_scan_schedule(
         if force_tail_final:
             _low_suction_tail_final_attempted_date = requested_tail_date
             _low_suction_tail_final_pending_date = None
+            _low_suction_tail_final_retry_after = None
         _low_suction_schedule_running = True
 
     thread = threading.Thread(
@@ -4437,6 +4446,9 @@ def _start_low_suction_live_scan_schedule(
             ):
                 _low_suction_tail_final_attempted_date = None
                 _low_suction_tail_final_pending_date = requested_tail_date
+                _low_suction_tail_final_retry_after = now_china + timedelta(
+                    seconds=LOW_SUCTION_LIVE_SCAN_INTERVAL_SECONDS
+                )
         raise
     return True
 
@@ -4448,6 +4460,7 @@ def _run_low_suction_live_scan_schedule(
     global _low_suction_schedule_running
     global _low_suction_tail_final_attempted_date
     global _low_suction_tail_final_pending_date
+    global _low_suction_tail_final_retry_after
     tail_final_completed = False
     try:
         snapshot = _run_schedule_action(row, force_tail_final=force_tail_final)
@@ -4461,25 +4474,15 @@ def _run_low_suction_live_scan_schedule(
         tail_final_completed = False
         raise
     finally:
-        pending_tail_date: date | None = None
         with _low_suction_schedule_lock:
             _low_suction_schedule_running = False
             now_china = _now_china()
             if force_tail_final and not tail_final_completed:
                 _low_suction_tail_final_attempted_date = None
                 _low_suction_tail_final_pending_date = now_china.date()
-            if (
-                _low_suction_tail_final_pending_date == now_china.date()
-                and _low_suction_tail_final_attempted_date != now_china.date()
-                and _low_suction_tail_final_window_open(now_china)
-            ):
-                pending_tail_date = now_china.date()
-        if pending_tail_date is not None:
-            _start_low_suction_live_scan_schedule(
-                row,
-                force_tail_final=True,
-                tail_final_date=pending_tail_date,
-            )
+                _low_suction_tail_final_retry_after = now_china + timedelta(
+                    seconds=LOW_SUCTION_LIVE_SCAN_INTERVAL_SECONDS
+                )
 
 
 def _start_low_suction_live_scan_warmup() -> bool:
