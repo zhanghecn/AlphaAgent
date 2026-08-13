@@ -1,16 +1,16 @@
-"""低吸日线实时推荐服务：后台扫描 + 持久化快照读取。
+"""低吸日线实时推荐服务：分钟虚拟 K 线 + 按交易日持久化快照。
 
-盘中（09:25-15:30 工作日）用全市场现货快照给每只股票合成一根今日虚拟
-日线（最新价当收盘），与历史日线拼接后走同一套研究票规则扫描和诊断评分；
-盘后等 stock_daily_bars 统一同步落地后自动切换为确认日线。
+盘中用全市场现货 OHLCV 合成今日虚拟日 K，按分钟重算同一套日线规则；
+15:01 固化尾盘虚拟 K，晚间完整日线同步完成后以确认日线覆盖同一交易日。
 """
 
 from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -19,6 +19,7 @@ from sqlalchemy import func, select, text
 
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, session_scope
+from alphaagent.server.services.completed_session import completed_daily_bar_cutoff
 from alphaagent.server.services.low_suction.daily_factor_repository import (
     load_daily_factor_inputs,
 )
@@ -44,19 +45,28 @@ from alphaagent.server.services.low_suction.live_scan_repository import (
     save_live_scan_run,
 )
 from alphaagent.server.services.low_suction.live_snapshot_repository import (
+    list_live_snapshot_dates,
     load_live_snapshot,
     save_live_snapshot,
 )
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-LIVE_SCAN_INTERVAL_SECONDS = 15 * 60
+LIVE_SCAN_INTERVAL_SECONDS = 60
 LIVE_LOOKBACK_CALENDAR_DAYS = 10  # 加载日历窗口；特征 warmup 由加载器另加 120 天
 LIVE_MAX_ITEMS_PER_FAMILY = 100
 LIVE_PAGE_SIZE = 20
 SPOT_MERGE_START = time(9, 25)
-SPOT_MERGE_END = time(15, 30)
+TAIL_FINAL_TIME = time(15, 1)
+# 15:01 is the one tail snapshot.  Daily-bar confirmation happens later and
+# does not depend on another spot merge.
+SPOT_MERGE_END = TAIL_FINAL_TIME
+TAIL_FINAL_RETRY_END = time(15, 30)
 MIN_SPOT_ACTIVE_SYMBOLS = 3_000
+
+SNAPSHOT_PHASE_INTRADAY = "intraday"
+SNAPSHOT_PHASE_TAIL_FINAL = "tail_final"
+SNAPSHOT_PHASE_CONFIRMED = "confirmed"
 
 _logger = logging.getLogger(__name__)
 _inputs_cache_lock = threading.Lock()
@@ -68,6 +78,16 @@ _fallback_live_scan_execution_lock = threading.Lock()
 
 class LiveScanAlreadyRunningError(RuntimeError):
     """Raised when another process owns the low-suction live scan."""
+
+
+@dataclass(frozen=True)
+class SpotBarMerge:
+    """One attempt to append provisional daily bars from a spot snapshot."""
+
+    bars: pd.DataFrame
+    active_symbols: int
+    total_symbols: int
+    error: str | None = None
 
 
 @contextmanager
@@ -108,18 +128,32 @@ def get_live_recommendations(
     *,
     trend_page: int = 1,
     oversold_page: int = 1,
+    trade_date: date | None = None,
 ) -> dict[str, object]:
     """Read a persisted snapshot and return independent family pages."""
 
     now = datetime.now(SHANGHAI)
-    payload = load_live_snapshot(SCORE_VERSION)
+    requested_date = trade_date
+    if requested_date is None and now.weekday() < 5:
+        requested_date = now.date()
+    payload = (
+        load_live_snapshot(SCORE_VERSION, trade_date=requested_date)
+        if requested_date is not None
+        else load_live_snapshot(SCORE_VERSION)
+    )
     if payload is None:
+        message = (
+            f"{requested_date.isoformat()} 暂无低吸推荐快照"
+            if requested_date is not None
+            else "后台首次扫描中，请稍后刷新"
+        )
         return {
             "status": "unavailable",
-            "message": "后台首次扫描中，请稍后刷新",
+            "message": message,
+            "trade_date": (requested_date or now.date()).isoformat(),
             "refresh_interval_seconds": LIVE_SCAN_INTERVAL_SECONDS,
             "score_version": SCORE_VERSION,
-            "scan_trace": _load_live_scan_trace(now.date()),
+            "scan_trace": _load_live_scan_trace(requested_date or now.date()),
         }
 
     result = dict(payload)
@@ -132,22 +166,102 @@ def get_live_recommendations(
     )
 
 
-def refresh_live_recommendations() -> dict[str, object]:
+def get_live_recommendation_dates() -> list[str]:
+    """Return stored recommendation dates, newest first, for the date switcher."""
+
+    return list_live_snapshot_dates(SCORE_VERSION)
+
+
+def refresh_live_recommendations(
+    *,
+    force_tail_final: bool = False,
+) -> dict[str, object]:
     """Scan once in the scheduler worker, then replace the readable snapshot."""
 
     with _live_scan_execution_lock():
         started_at = datetime.now(SHANGHAI)
         try:
-            payload = _compute_live_payload(started_at)
-            payload.setdefault("trade_date", started_at.date().isoformat())
-            payload["refresh_interval_seconds"] = LIVE_SCAN_INTERVAL_SECONDS
+            scan_payload = (
+                _compute_live_payload(started_at, force_tail_final=True)
+                if force_tail_final
+                else _compute_live_payload(started_at)
+            )
+            scan_payload.setdefault("trade_date", started_at.date().isoformat())
+            scan_payload["refresh_interval_seconds"] = LIVE_SCAN_INTERVAL_SECONDS
+            payload = _snapshot_payload_to_persist(
+                scan_payload,
+                started_at.date(),
+                replace_tail_final=force_tail_final,
+            )
             save_live_snapshot(payload)
         except Exception as exc:
             _record_failed_live_scan(started_at, datetime.now(SHANGHAI), exc)
             raise
 
-        _attach_live_scan_trace(payload, started_at, datetime.now(SHANGHAI))
+        _attach_live_scan_trace(
+            scan_payload,
+            started_at,
+            datetime.now(SHANGHAI),
+            trade_date=started_at.date(),
+        )
+        if payload is not scan_payload:
+            payload["scan_trace"] = scan_payload.get("scan_trace", [])
         return payload
+
+
+def _snapshot_payload_to_persist(
+    scan_payload: dict[str, object],
+    today: date,
+    *,
+    replace_tail_final: bool = False,
+) -> dict[str, object]:
+    """Keep the 15:01 snapshot until a same-day confirmed bar supersedes it."""
+
+    if _is_confirmed_today_payload(scan_payload, today):
+        return scan_payload
+
+    try:
+        existing = load_live_snapshot(SCORE_VERSION, trade_date=today)
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("low-suction tail snapshot lookup failed: %s", exc)
+        return scan_payload
+
+    if not isinstance(existing, dict):
+        return scan_payload
+    if (
+        scan_payload.get("status") != "ok"
+        and _is_current_day_success_payload(existing, today)
+    ):
+        return dict(existing)
+    if existing.get("snapshot_phase") != SNAPSHOT_PHASE_TAIL_FINAL:
+        return scan_payload
+    if replace_tail_final and _is_tail_final_today_payload(scan_payload, today):
+        return scan_payload
+    return dict(existing)
+
+
+def _is_confirmed_today_payload(payload: Mapping[str, object], today: date) -> bool:
+    return (
+        _payload_trade_date(dict(payload), today) == today
+        and payload.get("snapshot_phase") == SNAPSHOT_PHASE_CONFIRMED
+    )
+
+
+def _is_tail_final_today_payload(payload: Mapping[str, object], today: date) -> bool:
+    return (
+        _payload_trade_date(dict(payload), today) == today
+        and payload.get("snapshot_phase") == SNAPSHOT_PHASE_TAIL_FINAL
+    )
+
+
+def _is_current_day_success_payload(
+    payload: Mapping[str, object],
+    today: date,
+) -> bool:
+    return (
+        _payload_trade_date(dict(payload), today) == today
+        and payload.get("status") == "ok"
+    )
 
 
 def get_daily_backtest_report() -> dict[str, object] | None:
@@ -197,7 +311,7 @@ def _normalize_unsettled_ledger_day_returns(
     return {**payload, "ledger_days": normalized_days} if changed else payload
 
 
-# 回测物化：后台线程 + 状态（仿 limit_up history_service 的 rebuild 模式）。
+# 回测物化：后台线程 + 状态。
 # 全量扫描 ~69 万候选耗时数分钟，不能在 API 请求线程同步跑。
 _REBUILD_LOCK = threading.RLock()
 _REBUILD_THREAD: threading.Thread | None = None
@@ -506,10 +620,12 @@ def _attach_live_scan_trace(
     payload: dict[str, object],
     started_at: datetime,
     finished_at: datetime,
+    *,
+    trade_date: date | None = None,
 ) -> None:
     """Persist a completed scan and expose its signal-day execution timeline."""
 
-    trade_date = _payload_trade_date(payload, started_at.date())
+    trade_date = trade_date or _payload_trade_date(payload, started_at.date())
     try:
         save_live_scan_run(
             {
@@ -598,8 +714,9 @@ def _live_inputs(now: datetime):
         ).all()
     reliable = [row[0] for row in rows if int(row[1] or 0) >= 3_000]
     latest = reliable[-1] if reliable else None
+    cache_key = (latest, completed_daily_bar_cutoff(now))
     with _inputs_cache_lock:
-        if latest is not None and _inputs_cache.get("key") == latest:
+        if latest is not None and _inputs_cache.get("key") == cache_key:
             return _inputs_cache["inputs"]
     inputs = load_daily_factor_inputs(
         start_date=probe_start,
@@ -607,42 +724,99 @@ def _live_inputs(now: datetime):
         price_basis="raw_unadjusted",
     )
     with _inputs_cache_lock:
-        _inputs_cache["key"] = latest
+        _inputs_cache["key"] = cache_key
         _inputs_cache["inputs"] = inputs
     return inputs
 
 
-def _compute_live_payload(now: datetime) -> dict[str, object]:
+def _compute_live_payload(
+    now: datetime,
+    *,
+    force_tail_final: bool = False,
+) -> dict[str, object]:
     inputs = _live_inputs(now)
     calendar = list(inputs.market_calendar)
     bars = inputs.bars
-    provisional = False
+    today_has_confirmed_daily_bar = _today_has_confirmed_daily_bar(calendar, now)
+    snapshot_phase = SNAPSHOT_PHASE_CONFIRMED
     merge_note = None
     spot_active_symbols: int | None = None
     if not calendar:
-        return {
-            "status": "unavailable",
-            "message": "无可靠市场日历，请检查日线数据同步",
-            "asof": now.isoformat(timespec="seconds"),
-            "score_version": SCORE_VERSION,
-            "_scan_spot_active_symbols": spot_active_symbols,
-        }
+        return _unavailable_live_payload(
+            now,
+            "无可靠市场日历，请检查日线数据同步",
+        )
+
+    # A current-day row is not sufficient to mark the snapshot confirmed.  It
+    # must first pass the same daily cutoff and cross-sectional coverage gate
+    # that produced the reliable market calendar.
+    if not today_has_confirmed_daily_bar:
+        calendar, bars = _without_today_bars(calendar, bars, now.date())
+    if not calendar:
+        return _unavailable_live_payload(
+            now,
+            "无可用的完整日线，暂不能生成今日低吸推荐",
+        )
 
     latest_bar_date = calendar[-1]
-    if _should_merge_spot(now, latest_bar_date):
-        merged, active = _merge_spot_bars(bars, now.date())
-        spot_active_symbols = active
-        if active >= MIN_SPOT_ACTIVE_SYMBOLS:
-            bars = merged
-            calendar = [*calendar, now.date()]
-            provisional = now.time() < time(15, 5)
-            merge_note = (
-                f"盘中虚拟K线（{active} 只有成交股票，最新价当收盘）"
-                if provisional
-                else "盘后现货快照合成当日K线（等待日线同步确认）"
+    should_merge_spot = _should_merge_spot(now, latest_bar_date)
+    if force_tail_final and _tail_final_retry_open(now, latest_bar_date):
+        should_merge_spot = True
+    if should_merge_spot:
+        if force_tail_final:
+            spot_merge = _merge_spot_bars(
+                bars,
+                now.date(),
+                force_refresh=True,
             )
         else:
-            merge_note = f"现货快照有效股票不足（{active} 只），沿用最近完整日线"
+            spot_merge = _merge_spot_bars(bars, now.date())
+        spot_active_symbols = spot_merge.active_symbols
+        if spot_merge.error:
+            merge_note = (
+                f"现货快照获取失败（{spot_merge.error}）"
+            )
+            return _unavailable_live_payload(
+                now,
+                f"{merge_note}，暂不能生成今日低吸推荐",
+                merge_note=merge_note,
+                spot_active_symbols=spot_active_symbols,
+            )
+        elif spot_merge.active_symbols >= MIN_SPOT_ACTIVE_SYMBOLS:
+            bars = spot_merge.bars
+            calendar = [*calendar, now.date()]
+            snapshot_phase = (
+                SNAPSHOT_PHASE_TAIL_FINAL
+                if force_tail_final or now.time() >= TAIL_FINAL_TIME
+                else SNAPSHOT_PHASE_INTRADAY
+            )
+            merge_note = (
+                "盘中虚拟K线（"
+                f"{spot_merge.active_symbols} 只有成交股票，最新价当收盘）"
+                if snapshot_phase == SNAPSHOT_PHASE_INTRADAY
+                else "尾盘虚拟K线已固化（等待完整日线同步确认）"
+            )
+        else:
+            merge_note = (
+                "现货快照 OHLCV 覆盖不足（"
+                f"{spot_merge.active_symbols}/{spot_merge.total_symbols} 只可用，"
+                f"至少 {MIN_SPOT_ACTIVE_SYMBOLS} 只）"
+            )
+            return _unavailable_live_payload(
+                now,
+                f"{merge_note}，暂不能生成今日低吸推荐",
+                merge_note=merge_note,
+                spot_active_symbols=spot_active_symbols,
+            )
+    elif (
+        now.weekday() < 5
+        and latest_bar_date < now.date()
+        and not today_has_confirmed_daily_bar
+    ):
+        return _unavailable_live_payload(
+            now,
+            "当前不在可用的盘中扫描时段，暂不能生成今日低吸推荐",
+        )
 
     target_date = calendar[-1]
     # 只扫描目标日，但保留完整市场日历来核对“前一交易日”的包裹后确认。
@@ -659,7 +833,8 @@ def _compute_live_payload(now: datetime) -> dict[str, object]:
         "status": "ok",
         "asof": now.isoformat(timespec="seconds"),
         "trade_date": target_date.isoformat(),
-        "provisional": provisional,
+        "snapshot_phase": snapshot_phase,
+        "provisional": snapshot_phase != SNAPSHOT_PHASE_CONFIRMED,
         "merge_note": merge_note,
         "refresh_interval_seconds": LIVE_SCAN_INTERVAL_SECONDS,
         "score_version": SCORE_VERSION,
@@ -667,6 +842,28 @@ def _compute_live_payload(now: datetime) -> dict[str, object]:
         "trend": trend,
         "oversold": oversold,
         "label_convention": "raw_unadjusted 探索级 · D 日收盘买入、D+1 收盘结算 · 未扣费",
+        "_scan_spot_active_symbols": spot_active_symbols,
+    }
+
+
+def _unavailable_live_payload(
+    now: datetime,
+    message: str,
+    *,
+    merge_note: str | None = None,
+    spot_active_symbols: int | None = None,
+) -> dict[str, object]:
+    """Represent a failed current-day scan without substituting yesterday's picks."""
+
+    return {
+        "status": "unavailable",
+        "message": message,
+        "asof": now.isoformat(timespec="seconds"),
+        "trade_date": now.date().isoformat(),
+        "provisional": True,
+        "merge_note": merge_note,
+        "refresh_interval_seconds": LIVE_SCAN_INTERVAL_SECONDS,
+        "score_version": SCORE_VERSION,
         "_scan_spot_active_symbols": spot_active_symbols,
     }
 
@@ -765,36 +962,86 @@ def _load_market_regimes(calendar: tuple[date, ...]) -> dict[date, str]:
     return regimes
 
 
+def _today_has_confirmed_daily_bar(calendar: list[date], now: datetime) -> bool:
+    """Whether today's bar passed the completed-session reliability gate."""
+
+    return (
+        now.weekday() < 5
+        and now.date() in calendar
+        and completed_daily_bar_cutoff(now) >= now.date()
+    )
+
+
+def _without_today_bars(
+    calendar: list[date],
+    bars: pd.DataFrame,
+    today: date,
+) -> tuple[list[date], pd.DataFrame]:
+    filtered_calendar = [value for value in calendar if value < today]
+    if not filtered_calendar or bars.empty:
+        return filtered_calendar, bars
+    return filtered_calendar, bars.loc[bars["trade_date"] < today].copy()
+
+
 def _should_merge_spot(now: datetime, latest_bar_date: date) -> bool:
     if now.date() <= latest_bar_date:
         return False
     if now.weekday() >= 5:
         return False
-    return SPOT_MERGE_START <= now.time() <= SPOT_MERGE_END
+    current_time = now.time()
+    return (
+        SPOT_MERGE_START <= current_time <= time(11, 30)
+        or time(13, 0) <= current_time <= SPOT_MERGE_END
+    )
 
 
-def _merge_spot_bars(bars: pd.DataFrame, today: date) -> tuple[pd.DataFrame, int]:
+def _tail_final_retry_open(now: datetime, latest_bar_date: date) -> bool:
+    return (
+        now.date() > latest_bar_date
+        and now.weekday() < 5
+        and TAIL_FINAL_TIME <= now.time() <= TAIL_FINAL_RETRY_END
+    )
+
+
+def _merge_spot_bars(
+    bars: pd.DataFrame,
+    today: date,
+    *,
+    force_refresh: bool = False,
+) -> SpotBarMerge:
     """Append synthetic today bars from the full-market spot snapshot."""
 
     try:
-        from alphaagent.data_sources.akshare_adapter import (
-            AkShareAdapter,
-            _stock_row_to_api,
-        )
+        from alphaagent.data_sources.akshare_adapter import AkShareAdapter
 
-        raw_rows = AkShareAdapter()._all_stock_spot_rows()  # noqa: SLF001
-        rows = [_stock_row_to_api(row) for row in raw_rows]
+        adapter = AkShareAdapter()
+        snapshot = (
+            adapter.all_stock_ohlcv_spot(force_refresh=True)
+            if force_refresh
+            else adapter.all_stock_ohlcv_spot()
+        )
+        raw_rows = snapshot.get("items")
+        if not isinstance(raw_rows, list):
+            raise RuntimeError("Sina OHLCV snapshot items missing")
+        rows = [row for row in raw_rows if isinstance(row, dict)]
     except Exception as exc:  # noqa: BLE001
         _logger.warning("low-suction live spot snapshot unavailable: %s", exc)
-        return bars, 0
+        return SpotBarMerge(
+            bars=bars,
+            active_symbols=0,
+            total_symbols=0,
+            error=f"{exc.__class__.__name__}: {str(exc)[:200]}",
+        )
     existing = (
         set(bars.loc[bars["trade_date"] == today, "vt_symbol"]) if not bars.empty else set()
     )
     synthetic: list[dict[str, object]] = []
+    total_symbols = 0
     for row in rows:
         vt_symbol = str(row.get("vt_symbol") or "")
         if not vt_symbol or vt_symbol in existing or not _is_main_board(vt_symbol):
             continue
+        total_symbols += 1
         last = _float(row.get("last_price"))
         open_price = _float(row.get("open_price"))
         high = _float(row.get("high_price"))
@@ -818,9 +1065,17 @@ def _merge_spot_bars(bars: pd.DataFrame, today: date) -> tuple[pd.DataFrame, int
             }
         )
     if not synthetic:
-        return bars, 0
+        return SpotBarMerge(
+            bars=bars,
+            active_symbols=0,
+            total_symbols=total_symbols,
+        )
     frame = pd.concat([bars, pd.DataFrame(synthetic)], ignore_index=True)
-    return frame, len(synthetic)
+    return SpotBarMerge(
+        bars=frame,
+        active_symbols=len(synthetic),
+        total_symbols=total_symbols,
+    )
 
 
 def _load_stock_names(vt_symbols: set[str]) -> dict[str, str]:

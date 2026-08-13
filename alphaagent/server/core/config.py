@@ -32,14 +32,6 @@ class Settings(BaseSettings):
         default=True,
         alias="ALPHAAGENT_STARTUP_DATA_SYNC_SCHEDULER",
     )
-    startup_backtest_warmup: bool = Field(
-        default=False,
-        alias="ALPHAAGENT_STARTUP_BACKTEST_WARMUP",
-    )
-    startup_next_session_plan_warmup: bool = Field(
-        default=False,
-        alias="ALPHAAGENT_STARTUP_NEXT_SESSION_PLAN_WARMUP",
-    )
     startup_market_cache_warmup: bool = Field(
         default=False,
         alias="ALPHAAGENT_STARTUP_MARKET_CACHE_WARMUP",

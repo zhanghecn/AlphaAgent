@@ -49,7 +49,6 @@ export default function App() {
                     <Route path="/chain" element={<Navigate to="/mainline" replace />} />
                     <Route path="/mainline" element={<MainlineReplayPage />} />
                     <Route path="/short-term" element={<ShortTermResearchPage />} />
-                    <Route path="/limit-up" element={<Navigate to="/short-term" replace />} />
                     <Route path="/data" element={<DataManagementPage />} />
                     {/* Legacy routes */}
                     <Route path="/sectors" element={<SectorsPage />} />

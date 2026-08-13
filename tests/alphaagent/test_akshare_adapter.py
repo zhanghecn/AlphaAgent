@@ -551,6 +551,129 @@ def test_all_stock_quotes_rejects_a_partial_page_failure(monkeypatch) -> None:
         adapter_module.AkShareAdapter()._all_stock_quotes_uncached(max_workers=2)
 
 
+def test_all_stock_ohlcv_spot_fetches_complete_sina_pages_and_deduplicates(
+    monkeypatch,
+) -> None:
+    import alphaagent.data_sources.akshare_adapter as adapter_module
+
+    requested_pages: list[int] = []
+    pages = {
+        1: [
+            {
+                "symbol": "sh600000",
+                "code": "600000",
+                "name": "浦发银行",
+                "trade": "10.50",
+                "open": "10.20",
+                "high": "10.70",
+                "low": "10.10",
+                "volume": "123456",
+                "amount": "1296288",
+                "ticktime": "10:15:00",
+            }
+        ],
+        2: [
+            {
+                "symbol": "sz000001",
+                "code": "000001",
+                "name": "平安银行",
+                "trade": "11.20",
+                "open": "11.00",
+                "high": "11.30",
+                "low": "10.90",
+                "volume": "654321",
+                "amount": "7328395",
+                "ticktime": "10:15:00",
+            },
+            {
+                "symbol": "sh600000",
+                "code": "600000",
+                "name": "浦发银行",
+                "trade": "10.50",
+                "open": "10.20",
+                "high": "10.70",
+                "low": "10.10",
+                "volume": "123456",
+                "amount": "1296288",
+                "ticktime": "10:15:00",
+            },
+        ],
+    }
+
+    monkeypatch.setattr(
+        adapter_module,
+        "_sina_sector_member_count",
+        lambda node: 501 if node == "hs_a" else pytest.fail("unexpected node"),
+    )
+
+    def fake_rows(node: str, page: int, page_size: int, sort: str):
+        assert node == "hs_a"
+        assert page_size == 500
+        assert sort == "symbol"
+        requested_pages.append(page)
+        return pages[page]
+
+    monkeypatch.setattr(adapter_module, "_sina_sector_member_rows", fake_rows)
+
+    payload = adapter_module.AkShareAdapter()._all_stock_ohlcv_spot_uncached(
+        max_workers=2
+    )
+
+    assert sorted(requested_pages) == [1, 2]
+    assert payload["source"] == "sina.market_center.hs_a_ohlcv"
+    assert payload["source_total"] == 501
+    assert payload["total"] == 2
+    items = {item["vt_symbol"]: item for item in payload["items"]}
+    assert set(items) == {"600000.SSE", "000001.SZSE"}
+    assert items["600000.SSE"] == {
+        "symbol": "600000",
+        "exchange": "SSE",
+        "vt_symbol": "600000.SSE",
+        "name": "浦发银行",
+        "last_price": 10.5,
+        "open_price": 10.2,
+        "high_price": 10.7,
+        "low_price": 10.1,
+        "volume": 123456.0,
+        "turnover": 1296288.0,
+        "turnover_rate": None,
+        "trade_time": "10:15:00",
+        "source": "sina.market_center.hs_a_ohlcv",
+    }
+
+
+def test_all_stock_ohlcv_spot_rejects_unavailable_sina_count(monkeypatch) -> None:
+    import alphaagent.data_sources.akshare_adapter as adapter_module
+
+    monkeypatch.setattr(
+        adapter_module,
+        "_sina_sector_member_count",
+        lambda _node: None,
+    )
+
+    with pytest.raises(AkShareSourceError, match="stock count unavailable"):
+        adapter_module.AkShareAdapter()._all_stock_ohlcv_spot_uncached(max_workers=1)
+
+
+def test_all_stock_ohlcv_spot_force_refresh_bypasses_cached_snapshot(monkeypatch) -> None:
+    import alphaagent.data_sources.akshare_adapter as adapter_module
+
+    adapter_module._FULL_MARKET_OHLCV_SPOT_CACHE.clear()
+    calls: list[int] = []
+    adapter = adapter_module.AkShareAdapter()
+
+    def load_snapshot(*, max_workers: int) -> dict[str, object]:
+        calls.append(max_workers)
+        return {"items": [{"vt_symbol": "600000.SSE", "last_price": len(calls)}]}
+
+    monkeypatch.setattr(adapter, "_all_stock_ohlcv_spot_uncached", load_snapshot)
+
+    assert adapter.all_stock_ohlcv_spot(max_workers=2)["items"][0]["last_price"] == 1
+    assert adapter.all_stock_ohlcv_spot(max_workers=2)["items"][0]["last_price"] == 1
+    assert adapter.all_stock_ohlcv_spot(max_workers=2, force_refresh=True)["items"][0]["last_price"] == 2
+    assert calls == [2, 2]
+
+
 def test_stock_detail_uses_fast_tencent_quote(monkeypatch) -> None:
     market_cache.clear()
     adapter = AkShareAdapter()

@@ -32,7 +32,6 @@ import type {
   BatchSchedule,
 } from "@/api/dataSync";
 import { LoadingState } from "@/components/LoadingState";
-import LimitUpEvidenceBackfillPanel from "@/features/limitUp/LimitUpEvidenceBackfillPanel";
 import DataManagementHealthTab from "./DataManagementHealthTab";
 import { cn } from "@/lib/utils";
 import {
@@ -52,10 +51,9 @@ import {
   Plus,
   Save,
   Trash2,
-  ShieldCheck,
 } from "lucide-react";
 
-type TabKey = "health" | "limit-up-evidence" | "sync" | "status" | "sources";
+type TabKey = "health" | "sync" | "status" | "sources";
 interface MinuteSyncFormState {
   interval: "1m";
   stockLimit: number;
@@ -74,7 +72,6 @@ const DEFAULT_MINUTE_SYNC_FORM: MinuteSyncFormState = {
 
 const TABS: { key: TabKey; label: string; icon: typeof Database }[] = [
   { key: "health", label: "数据健康", icon: Activity },
-  { key: "limit-up-evidence", label: "打板证据", icon: ShieldCheck },
   { key: "sync", label: "同步任务", icon: RefreshCw },
   { key: "status", label: "数据状态", icon: Database },
   { key: "sources", label: "数据源", icon: Server },
@@ -111,7 +108,6 @@ export default function DataManagementPage() {
 
       {/* Tab content */}
       {activeTab === "health" && <DataManagementHealthTab />}
-      {activeTab === "limit-up-evidence" && <LimitUpEvidenceBackfillPanel />}
       {activeTab === "sync" && <SyncTab />}
       {activeTab === "status" && <StatusTab />}
       {activeTab === "sources" && <SourcesTab />}

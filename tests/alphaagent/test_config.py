@@ -12,19 +12,13 @@ def test_expensive_startup_warmups_are_opt_in() -> None:
     enabled = Settings(
         _env_file=None,
         ALPHAAGENT_STARTUP_DATA_SYNC_SCHEDULER="false",
-        ALPHAAGENT_STARTUP_BACKTEST_WARMUP="true",
-        ALPHAAGENT_STARTUP_NEXT_SESSION_PLAN_WARMUP="true",
         ALPHAAGENT_STARTUP_MARKET_CACHE_WARMUP="true",
         ALPHAAGENT_STARTUP_INTRADAY_REFRESHER="true",
     )
 
     assert default.startup_data_sync_scheduler is True
-    assert default.startup_backtest_warmup is False
-    assert default.startup_next_session_plan_warmup is False
     assert default.startup_market_cache_warmup is False
     assert default.startup_intraday_refresher is False
     assert enabled.startup_data_sync_scheduler is False
-    assert enabled.startup_backtest_warmup is True
-    assert enabled.startup_next_session_plan_warmup is True
     assert enabled.startup_market_cache_warmup is True
     assert enabled.startup_intraday_refresher is True

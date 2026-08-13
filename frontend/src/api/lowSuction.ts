@@ -63,11 +63,14 @@ export interface LowSuctionLiveScanRun {
   interval_seconds: number | null;
 }
 
+export type LowSuctionSnapshotPhase = "intraday" | "tail_final" | "confirmed";
+
 export interface LowSuctionLivePayload {
   status: "ok" | "unavailable";
   message?: string;
   asof?: string;
   trade_date?: string;
+  snapshot_phase?: LowSuctionSnapshotPhase;
   provisional?: boolean;
   merge_note?: string | null;
   refresh_interval_seconds?: number;
@@ -227,13 +230,24 @@ export interface LowSuctionLedgerPayload {
 export function fetchLowSuctionLive({
   trendPage = 1,
   oversoldPage = 1,
+  date,
 }: {
   trendPage?: number;
   oversoldPage?: number;
+  date?: string;
 } = {}) {
+  const query = new URLSearchParams({
+    trend_page: String(trendPage),
+    oversold_page: String(oversoldPage),
+  });
+  if (date) query.set("date", date);
   return apiClient.get<LowSuctionLivePayload>(
-    `/low-suction/live?trend_page=${trendPage}&oversold_page=${oversoldPage}`,
+    `/low-suction/live?${query.toString()}`,
   );
+}
+
+export function fetchLowSuctionLiveDates() {
+  return apiClient.get<{ dates: string[] }>("/low-suction/live/dates");
 }
 
 export function fetchLowSuctionBacktest() {

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
@@ -9,6 +11,7 @@ from alphaagent.server.core.responses import fail, ok
 from alphaagent.server.services.low_suction.daily_picks_service import (
     get_daily_backtest_report,
     get_daily_backtest_rebuild_status,
+    get_live_recommendation_dates,
     get_live_recommendations,
     start_daily_backtest_rebuild,
 )
@@ -21,6 +24,7 @@ router = APIRouter(prefix="/low-suction", tags=["low-suction"])
 def live_recommendations(
     trend_page: int = Query(default=1, ge=1),
     oversold_page: int = Query(default=1, ge=1),
+    trade_date: date | None = Query(default=None, alias="date"),
 ):
     """实时推荐：两族各自分页，持久化快照中最多保留排名前 100 只。"""
 
@@ -29,6 +33,7 @@ def live_recommendations(
             get_live_recommendations(
                 trend_page=trend_page,
                 oversold_page=oversold_page,
+                trade_date=trade_date,
             )
         )
     except Exception as exc:  # noqa: BLE001
@@ -37,6 +42,23 @@ def live_recommendations(
             content=fail(
                 "LOW_SUCTION_LIVE_UNAVAILABLE",
                 "低吸实时推荐暂时不可用",
+                {"reason": exc.__class__.__name__},
+            ),
+        )
+
+
+@router.get("/live/dates", response_model=None)
+def live_recommendation_dates():
+    """可回看的低吸推荐交易日（最新在前）。"""
+
+    try:
+        return ok({"dates": get_live_recommendation_dates()})
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            status_code=503,
+            content=fail(
+                "LOW_SUCTION_LIVE_DATES_UNAVAILABLE",
+                "低吸推荐日期暂时不可用",
                 {"reason": exc.__class__.__name__},
             ),
         )

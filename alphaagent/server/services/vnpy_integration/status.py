@@ -86,7 +86,7 @@ def vnpy_status() -> dict[str, Any]:
         "notes": [
             "AlphaAgent 当前短线研究使用 PostgreSQL 日线和分钟线数据。",
             "AlphaAgent 可通过 /api/vnpy/local-bars 把本地日线转换为 vn.py BarData 语义，供本地研究/适配使用。",
-            "stock_minute_bars 可为打板研究和后续低吸研究提供分钟成交证据。",
+            "stock_minute_bars 可为低吸与盘中研究提供分钟成交证据。",
             "vn.py GUI 当前只注册 CTP Gateway，不能直接连接 A 股券商。",
             "接入 A 股实盘前需要安装并配置 vnpy_xtp/vnpy_tora/vnpy_ost/vnpy_emt 之一。",
             "接入 vn.py 官方历史数据路径前需要安装并配置 vnpy_xt/vnpy_rqdata/vnpy_tushare 之一。",

@@ -6,6 +6,27 @@ from alphaagent.server.main import create_app
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LEGACY_TABLES = {
+    "leader_forward_signals",
+    "premarket_prelude_snapshots",
+    "premarket_fused_score_snapshots",
+    "leader_first_board_backtest_runs",
+    "leader_minute_backtest_runs",
+    "leader_sweep_backtest_runs",
+    "limit_up_radar_observations",
+    "limit_up_radar_frames",
+    "limit_up_live_trace_snapshots",
+    "limit_up_concept_strength_snapshots",
+    "limit_up_signal_snapshots",
+    "limit_up_pool_snapshots",
+    "limit_up_history_replays",
+    "limit_up_minute_backfill_attempts",
+    "limit_up_preboard_point_actions",
+    "limit_up_preboard_point_day_scopes",
+    "limit_up_preboard_point_feature_rows",
+    "limit_up_preboard_point_model_versions",
+    "limit_up_transaction_feature_scopes",
+    "limit_up_transaction_features",
+    "limit_up_transaction_pair_manifests",
     "quant_strategy_templates",
     "quant_signal_runs",
     "quant_stock_signals",
@@ -30,16 +51,6 @@ LEGACY_TABLES = {
     "simulation_positions",
     "risk_events",
 }
-
-
-def test_limit_up_cash_backtest_uses_neutral_cash_ledger() -> None:
-    source = (
-        PROJECT_ROOT
-        / "alphaagent/server/services/limit_up/cash_backtest.py"
-    ).read_text()
-
-    assert "services.execution import cash_ledger" in source
-    assert "services.backtest" not in source
 
 
 def test_market_timing_imports_do_not_use_quant_namespace() -> None:
@@ -70,7 +81,9 @@ def test_legacy_product_routes_are_absent() -> None:
 def test_preserved_research_routes_remain() -> None:
     paths = {route.path for route in create_app().routes}
 
-    assert any(path.startswith("/api/limit-up") for path in paths)
+    assert not any(path.startswith("/api/limit-up") for path in paths)
+    assert any(path.startswith("/api/first-board") for path in paths)
+    assert any(path.startswith("/api/low-suction") for path in paths)
     assert any(path.startswith("/api/market-timing") for path in paths)
     assert any(path.startswith("/api/mainline-replay") for path in paths)
 
@@ -87,3 +100,4 @@ def test_legacy_service_packages_are_absent() -> None:
     services_root = PROJECT_ROOT / "alphaagent/server/services"
     for package_name in ("quant", "backtest", "portfolio", "simulation"):
         assert not any((services_root / package_name).glob("*.py"))
+    assert not (services_root / "limit_up").exists()

@@ -22,11 +22,12 @@ def test_low_suction_live_has_an_independent_endpoint(monkeypatch) -> None:
             }
         ],
     }
-    requested: dict[str, int] = {}
+    requested: dict[str, object] = {}
 
-    def get_live_recommendations(*, trend_page: int, oversold_page: int):
+    def get_live_recommendations(*, trend_page: int, oversold_page: int, trade_date=None):
         requested["trend_page"] = trend_page
         requested["oversold_page"] = oversold_page
+        requested["trade_date"] = trade_date
         return expected
 
     monkeypatch.setattr(low_suction, "get_live_recommendations", get_live_recommendations)
@@ -37,7 +38,39 @@ def test_low_suction_live_has_an_independent_endpoint(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["data"] == expected
-    assert requested == {"trend_page": 3, "oversold_page": 4}
+    assert requested == {"trend_page": 3, "oversold_page": 4, "trade_date": None}
+
+
+def test_low_suction_live_accepts_a_historical_trade_date(monkeypatch) -> None:
+    requested: dict[str, object] = {}
+
+    def get_live_recommendations(*, trend_page: int, oversold_page: int, trade_date=None):
+        requested.update(
+            trend_page=trend_page,
+            oversold_page=oversold_page,
+            trade_date=trade_date,
+        )
+        return {"status": "ok", "trade_date": "2026-08-03"}
+
+    monkeypatch.setattr(low_suction, "get_live_recommendations", get_live_recommendations)
+
+    response = TestClient(create_app()).get("/api/low-suction/live?date=2026-08-03")
+
+    assert response.status_code == 200
+    assert str(requested["trade_date"]) == "2026-08-03"
+
+
+def test_low_suction_live_dates_has_an_independent_endpoint(monkeypatch) -> None:
+    monkeypatch.setattr(
+        low_suction,
+        "get_live_recommendation_dates",
+        lambda: ["2026-08-04", "2026-08-03"],
+    )
+
+    response = TestClient(create_app()).get("/api/low-suction/live/dates")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {"dates": ["2026-08-04", "2026-08-03"]}
 
 
 def test_low_suction_live_reports_service_unavailable(monkeypatch) -> None:

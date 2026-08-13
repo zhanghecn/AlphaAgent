@@ -46,6 +46,8 @@ FULL_LIST_TTL_SECONDS = 60
 FULL_MARKET_TTL_SECONDS = 20
 FULL_MARKET_PAGE_SIZE = 200
 FULL_MARKET_MAX_WORKERS = 6
+FULL_MARKET_OHLCV_SPOT_PAGE_SIZE = 500
+FULL_MARKET_OHLCV_SPOT_MAX_WORKERS = 6
 EASTMONEY_LIVE_PAGE_MAX_AGE_SECONDS = 20
 EASTMONEY_LIVE_PAGE_MIN_FRESH_RATIO = 0.90
 OVERVIEW_TTL_SECONDS = 30
@@ -83,6 +85,10 @@ def _copy_full_market_quote_payload(value: object) -> object:
 
 _FULL_MARKET_QUOTE_CACHE = TTLCache(
     max_items=FULL_MARKET_MAX_WORKERS,
+    copier=_copy_full_market_quote_payload,
+)
+_FULL_MARKET_OHLCV_SPOT_CACHE = TTLCache(
+    max_items=FULL_MARKET_OHLCV_SPOT_MAX_WORKERS,
     copier=_copy_full_market_quote_payload,
 )
 
@@ -386,6 +392,86 @@ class AkShareAdapter:
             "items": list(rows.values()),
             "total": len(rows),
             "source": "tencent.full_a_share_pages",
+        }
+
+    def all_stock_ohlcv_spot(
+        self,
+        max_workers: int = FULL_MARKET_OHLCV_SPOT_MAX_WORKERS,
+        *,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        """Return a complete Sina A-share spot snapshot with intraday OHLCV."""
+
+        workers = min(
+            max(int(max_workers), 1),
+            FULL_MARKET_OHLCV_SPOT_MAX_WORKERS,
+        )
+        cache_key = f"all_stock_ohlcv_spot:{workers}"
+        loader = lambda: self._all_stock_ohlcv_spot_uncached(max_workers=workers)
+        if force_refresh:
+            return _FULL_MARKET_OHLCV_SPOT_CACHE.refresh(
+                cache_key,
+                FULL_MARKET_TTL_SECONDS,
+                loader,
+            )
+        return _FULL_MARKET_OHLCV_SPOT_CACHE.get_or_set(
+            cache_key,
+            FULL_MARKET_TTL_SECONDS,
+            loader,
+        )
+
+    def _all_stock_ohlcv_spot_uncached(
+        self,
+        *,
+        max_workers: int,
+    ) -> dict[str, Any]:
+        """Load every Sina A-share page before exposing a usable spot snapshot."""
+
+        with _akshare_network_env():
+            try:
+                source_total = _sina_sector_member_count("hs_a")
+            except Exception as exc:
+                raise AkShareSourceError(
+                    f"Sina A-share stock count unavailable: {exc.__class__.__name__}"
+                ) from exc
+            if source_total is None or source_total <= 0:
+                raise AkShareSourceError("Sina A-share stock count unavailable")
+
+            page_count = math.ceil(source_total / FULL_MARKET_OHLCV_SPOT_PAGE_SIZE)
+            pages: dict[int, list[dict[str, Any]]] = {}
+            with ThreadPoolExecutor(
+                max_workers=min(
+                    max(int(max_workers), 1),
+                    FULL_MARKET_OHLCV_SPOT_MAX_WORKERS,
+                ),
+                thread_name_prefix="all-stock-ohlcv-spot",
+            ) as executor:
+                futures = {
+                    executor.submit(
+                        _sina_full_market_ohlcv_page,
+                        page,
+                    ): page
+                    for page in range(1, page_count + 1)
+                }
+                for future in as_completed(futures):
+                    pages[futures[future]] = future.result()
+
+        items_by_symbol: dict[str, dict[str, Any]] = {}
+        for page in range(1, page_count + 1):
+            for raw_row in pages[page]:
+                item = _sina_ohlcv_spot_row_to_api(raw_row)
+                current_symbol = str(item.get("vt_symbol") or "")
+                if current_symbol:
+                    items_by_symbol[current_symbol] = item
+
+        captured_at = datetime.now(timezone.utc)
+        return {
+            "trade_date": captured_at.astimezone(SHANGHAI).date().isoformat(),
+            "updated_at": captured_at.isoformat(),
+            "items": list(items_by_symbol.values()),
+            "total": len(items_by_symbol),
+            "source_total": source_total,
+            "source": "sina.market_center.hs_a_ohlcv",
         }
 
     def search_stocks(self, query: str, page_size: int = 50) -> dict[str, Any]:
@@ -4155,6 +4241,8 @@ def _sina_member_sort(sort: str) -> str:
         "turnoverratio": "turnoverratio",
         "price": "trade",
         "last_price": "trade",
+        "symbol": "symbol",
+        "code": "symbol",
     }
     return sort_map.get(normalized, "changepercent")
 
@@ -4194,6 +4282,53 @@ def _sina_member_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
         "raw_symbol": prefixed_symbol,
         "raw": normalized,
         "source": "akshare.stock_classify_sina",
+    }
+
+
+def _sina_full_market_ohlcv_page(page: int) -> list[dict[str, Any]]:
+    """Read one full-market page with bounded retries for transient Sina errors."""
+
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            rows = _sina_sector_member_rows(
+                "hs_a",
+                page=page,
+                page_size=FULL_MARKET_OHLCV_SPOT_PAGE_SIZE,
+                sort="symbol",
+            )
+            if rows:
+                return rows
+            raise AkShareSourceError("Sina A-share page returned no rows")
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(0.25 * (attempt + 1))
+
+    detail = str(last_error).strip() if last_error else "unknown error"
+    raise AkShareSourceError(
+        f"Sina A-share page {page} unavailable: {detail[:200]}"
+    ) from last_error
+
+
+def _sina_ohlcv_spot_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
+    """Keep only fields required to form a provisional intraday daily bar."""
+
+    item = _sina_member_row_to_api(row)
+    return {
+        "symbol": item["symbol"],
+        "exchange": item["exchange"],
+        "vt_symbol": item["vt_symbol"],
+        "name": item["name"],
+        "last_price": item["last_price"],
+        "open_price": item["open_price"],
+        "high_price": item["high_price"],
+        "low_price": item["low_price"],
+        "volume": item["volume"],
+        "turnover": item["turnover"],
+        "turnover_rate": item["turnover_rate"],
+        "trade_time": item["trade_time"],
+        "source": "sina.market_center.hs_a_ohlcv",
     }
 
 

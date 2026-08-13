@@ -1,8 +1,10 @@
 """Focused tests for low-suction live snapshots, paging, and diagnostics."""
 
 from contextlib import nullcontext
-from datetime import date
+from datetime import date, datetime
+from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from alphaagent.server.services.low_suction import daily_picks_service
@@ -36,8 +38,8 @@ def _candidate(vt_symbol: str) -> LowSuctionCandidate:
     )
 
 
-def test_live_scan_interval_is_fifteen_minutes() -> None:
-    assert daily_picks_service.LIVE_SCAN_INTERVAL_SECONDS == 15 * 60
+def test_live_scan_interval_is_one_minute() -> None:
+    assert daily_picks_service.LIVE_SCAN_INTERVAL_SECONDS == 60
 
 
 def test_live_pagination_keeps_each_family_within_persisted_top_hundred() -> None:
@@ -71,7 +73,7 @@ def test_live_read_never_runs_a_scan(monkeypatch) -> None:
     monkeypatch.setattr(
         daily_picks_service,
         "load_live_snapshot",
-        lambda _version: {
+        lambda _version, *, trade_date=None: {
             "status": "ok",
             "trade_date": "2026-08-10",
             "provisional": True,
@@ -87,17 +89,57 @@ def test_live_read_never_runs_a_scan(monkeypatch) -> None:
         lambda _now: pytest.fail("live GET must not trigger a market scan"),
     )
 
-    first = daily_picks_service.get_live_recommendations()
-    second = daily_picks_service.get_live_recommendations(trend_page=2, oversold_page=2)
+    first = daily_picks_service.get_live_recommendations(trade_date=date(2026, 8, 10))
+    second = daily_picks_service.get_live_recommendations(
+        trend_page=2,
+        oversold_page=2,
+        trade_date=date(2026, 8, 10),
+    )
 
     assert first["scan_trace"] == trace
     assert second["scan_trace"] == trace
-    assert first["refresh_interval_seconds"] == 15 * 60
+    assert first["refresh_interval_seconds"] == 60
     assert second["trend"]["page"] == 1
 
 
+def test_latest_read_does_not_substitute_yesterday_on_a_weekday(monkeypatch) -> None:
+    observed_at = datetime.fromisoformat("2026-08-12T10:00:00+08:00")
+    yesterday = {
+        "status": "ok",
+        "trade_date": "2026-08-11",
+        "provisional": False,
+        "score_version": daily_picks_service.SCORE_VERSION,
+        "trend": {"total": 1, "limit": 100, "items": []},
+        "oversold": {"total": 0, "limit": 100, "items": []},
+    }
+    requested_dates: list[date | None] = []
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return observed_at.astimezone(tz) if tz is not None else observed_at.replace(tzinfo=None)
+
+    def load_snapshot(_version: str, *, trade_date: date | None = None):
+        requested_dates.append(trade_date)
+        return yesterday if trade_date is None else None
+
+    monkeypatch.setattr(daily_picks_service, "datetime", FrozenDateTime)
+    monkeypatch.setattr(daily_picks_service, "load_live_snapshot", load_snapshot)
+    monkeypatch.setattr(daily_picks_service, "load_live_scan_runs", lambda _date: [])
+
+    payload = daily_picks_service.get_live_recommendations()
+
+    assert payload["status"] == "unavailable"
+    assert payload["trade_date"] == "2026-08-12"
+    assert requested_dates == [date(2026, 8, 12)]
+
+
 def test_live_read_without_snapshot_returns_immediately(monkeypatch) -> None:
-    monkeypatch.setattr(daily_picks_service, "load_live_snapshot", lambda _version: None)
+    monkeypatch.setattr(
+        daily_picks_service,
+        "load_live_snapshot",
+        lambda _version, *, trade_date=None: None,
+    )
     monkeypatch.setattr(daily_picks_service, "load_live_scan_runs", lambda _date: [])
     monkeypatch.setattr(
         daily_picks_service,
@@ -108,7 +150,7 @@ def test_live_read_without_snapshot_returns_immediately(monkeypatch) -> None:
     payload = daily_picks_service.get_live_recommendations()
 
     assert payload["status"] == "unavailable"
-    assert "后台首次扫描中" in str(payload["message"])
+    assert "暂无低吸推荐快照" in str(payload["message"])
     assert payload["scan_trace"] == []
 
 
@@ -146,12 +188,89 @@ def test_worker_refresh_persists_snapshot_and_scan_trace(monkeypatch) -> None:
     payload = daily_picks_service.refresh_live_recommendations()
 
     assert len(saved_snapshots) == 1
-    assert saved_snapshots[0]["refresh_interval_seconds"] == 15 * 60
+    assert saved_snapshots[0]["refresh_interval_seconds"] == 60
     assert saved_runs[0]["status"] == "ok"
     assert saved_runs[0]["spot_active_symbols"] == 5_001
     assert saved_runs[0]["trend_count"] == 2
     assert saved_runs[0]["oversold_count"] == 3
     assert payload["scan_trace"] == trace
+
+
+def test_tail_final_snapshot_is_not_replaced_by_incomplete_later_scan(monkeypatch) -> None:
+    today = date(2026, 8, 12)
+    tail_final = {
+        "status": "ok",
+        "trade_date": today.isoformat(),
+        "asof": "2026-08-12T15:01:00+08:00",
+        "snapshot_phase": "tail_final",
+        "provisional": True,
+        "score_version": daily_picks_service.SCORE_VERSION,
+        "trend": {"total": 2, "limit": 100, "items": []},
+        "oversold": {"total": 1, "limit": 100, "items": []},
+    }
+    fallback = {
+        "status": "ok",
+        "trade_date": "2026-08-11",
+        "asof": "2026-08-12T15:02:00+08:00",
+        "snapshot_phase": "confirmed",
+        "score_version": daily_picks_service.SCORE_VERSION,
+        "merge_note": "现货快照获取失败，沿用最近完整日线",
+    }
+
+    monkeypatch.setattr(
+        daily_picks_service,
+        "load_live_snapshot",
+        lambda _version, *, trade_date: tail_final if trade_date == today else None,
+    )
+
+    preserved = daily_picks_service._snapshot_payload_to_persist(fallback, today)
+
+    assert preserved == tail_final
+
+
+def test_unavailable_scan_does_not_replace_a_current_intraday_snapshot(monkeypatch) -> None:
+    today = date(2026, 8, 12)
+    intraday = {
+        "status": "ok",
+        "trade_date": today.isoformat(),
+        "asof": "2026-08-12T14:59:00+08:00",
+        "snapshot_phase": "intraday",
+        "score_version": daily_picks_service.SCORE_VERSION,
+    }
+    unavailable = {
+        "status": "unavailable",
+        "trade_date": today.isoformat(),
+        "asof": "2026-08-12T15:01:00+08:00",
+        "score_version": daily_picks_service.SCORE_VERSION,
+    }
+    monkeypatch.setattr(
+        daily_picks_service,
+        "load_live_snapshot",
+        lambda _version, *, trade_date: intraday if trade_date == today else None,
+    )
+
+    assert daily_picks_service._snapshot_payload_to_persist(unavailable, today) == intraday
+
+
+def test_confirmed_daily_snapshot_replaces_tail_final_snapshot(monkeypatch) -> None:
+    today = date(2026, 8, 12)
+    tail_final = {
+        "trade_date": today.isoformat(),
+        "snapshot_phase": "tail_final",
+        "score_version": daily_picks_service.SCORE_VERSION,
+    }
+    confirmed = {
+        "trade_date": today.isoformat(),
+        "snapshot_phase": "confirmed",
+        "score_version": daily_picks_service.SCORE_VERSION,
+    }
+    monkeypatch.setattr(
+        daily_picks_service,
+        "load_live_snapshot",
+        lambda _version, *, trade_date: tail_final if trade_date == today else None,
+    )
+
+    assert daily_picks_service._snapshot_payload_to_persist(confirmed, today) == confirmed
 
 
 def test_live_scan_failure_is_persisted_without_hiding_the_original_error(monkeypatch) -> None:
@@ -174,6 +293,189 @@ def test_live_scan_failure_is_persisted_without_hiding_the_original_error(monkey
     assert len(saved_runs) == 1
     assert saved_runs[0]["status"] == "error"
     assert "RuntimeError: stock bars unavailable" in str(saved_runs[0]["error"])
+
+
+def test_merge_spot_bars_uses_complete_ohlcv_snapshot(monkeypatch) -> None:
+    from alphaagent.data_sources.akshare_adapter import AkShareAdapter
+
+    monkeypatch.setattr(
+        AkShareAdapter,
+        "all_stock_ohlcv_spot",
+        lambda _self: {
+            "items": [
+                {
+                    "vt_symbol": "600000.SSE",
+                    "last_price": 10.5,
+                    "open_price": 10.2,
+                    "high_price": 10.7,
+                    "low_price": 10.1,
+                    "volume": 123456,
+                    "turnover": 1296288,
+                    "turnover_rate": 1.2,
+                },
+                {
+                    "vt_symbol": "000001.SZSE",
+                    "last_price": 11.2,
+                    "open_price": None,
+                    "high_price": None,
+                    "low_price": None,
+                    "volume": 654321,
+                },
+                {
+                    "vt_symbol": "300001.SZSE",
+                    "last_price": 20.0,
+                    "open_price": 20.0,
+                    "high_price": 20.0,
+                    "low_price": 20.0,
+                    "volume": 1,
+                },
+            ]
+        },
+    )
+
+    result = daily_picks_service._merge_spot_bars(pd.DataFrame(), date(2026, 8, 12))
+
+    assert result.error is None
+    assert result.total_symbols == 2
+    assert result.active_symbols == 1
+    synthetic = result.bars.iloc[0].to_dict()
+    assert synthetic["vt_symbol"] == "600000.SSE"
+    assert synthetic["close_price"] == 10.5
+    assert synthetic["high_price"] == 10.7
+    assert synthetic["low_price"] == 10.1
+
+
+def test_tail_final_merge_forces_a_fresh_ohlcv_snapshot(monkeypatch) -> None:
+    from alphaagent.data_sources.akshare_adapter import AkShareAdapter
+
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        AkShareAdapter,
+        "all_stock_ohlcv_spot",
+        lambda _self, *, force_refresh=False: calls.append(force_refresh) or {"items": []},
+    )
+
+    daily_picks_service._merge_spot_bars(
+        pd.DataFrame(),
+        date(2026, 8, 12),
+        force_refresh=True,
+    )
+
+    assert calls == [True]
+
+
+def test_live_payload_distinguishes_spot_source_failure_from_low_coverage(
+    monkeypatch,
+) -> None:
+    latest = date(2026, 8, 11)
+    now = datetime.fromisoformat("2026-08-12T10:00:00+08:00")
+    today = now.date()
+    inputs = SimpleNamespace(
+        market_calendar=(latest,),
+        bars=pd.DataFrame(),
+        security_status=pd.DataFrame(),
+    )
+    monkeypatch.setattr(daily_picks_service, "_live_inputs", lambda _now: inputs)
+    monkeypatch.setattr(
+        daily_picks_service,
+        "scan_low_suction_candidates",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        daily_picks_service,
+        "_merge_spot_bars",
+        lambda bars, _today: daily_picks_service.SpotBarMerge(
+            bars=bars,
+            active_symbols=0,
+            total_symbols=0,
+            error="TimeoutError: sina unavailable",
+        ),
+    )
+
+    failed = daily_picks_service._compute_live_payload(now)
+
+    assert failed["status"] == "unavailable"
+    assert failed["trade_date"] == today.isoformat()
+    assert failed["merge_note"] == "现货快照获取失败（TimeoutError: sina unavailable）"
+    assert "今日低吸推荐" in str(failed["message"])
+
+    monkeypatch.setattr(
+        daily_picks_service,
+        "_merge_spot_bars",
+        lambda bars, _today: daily_picks_service.SpotBarMerge(
+            bars=bars,
+            active_symbols=12,
+            total_symbols=3_193,
+        ),
+    )
+
+    low_coverage = daily_picks_service._compute_live_payload(now)
+
+    assert low_coverage["status"] == "unavailable"
+    assert low_coverage["trade_date"] == today.isoformat()
+    assert low_coverage["merge_note"] == "现货快照 OHLCV 覆盖不足（12/3193 只可用，至少 3000 只）"
+
+
+def test_live_payload_keeps_partial_today_as_a_tail_final_virtual_bar(monkeypatch) -> None:
+    previous = date(2026, 8, 11)
+    today = date(2026, 8, 12)
+    now = datetime.fromisoformat("2026-08-12T15:01:00+08:00")
+    bars = pd.DataFrame(
+        [
+            {"vt_symbol": "600000.SSE", "trade_date": previous},
+            {"vt_symbol": "600000.SSE", "trade_date": today},
+        ]
+    )
+    inputs = SimpleNamespace(
+        market_calendar=(previous, today),
+        bars=bars,
+        security_status=pd.DataFrame(),
+    )
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(daily_picks_service, "_live_inputs", lambda _now: inputs)
+    monkeypatch.setattr(
+        daily_picks_service,
+        "_merge_spot_bars",
+        lambda base, _today: daily_picks_service.SpotBarMerge(
+            bars=pd.concat(
+                [
+                    base,
+                    pd.DataFrame(
+                        [{"vt_symbol": "000001.SZSE", "trade_date": today}]
+                    ),
+                ],
+                ignore_index=True,
+            ),
+            active_symbols=3_100,
+            total_symbols=3_200,
+        ),
+    )
+
+    def scan(_bars, calendar, _security, *, target_dates):
+        observed["calendar"] = calendar
+        observed["target_dates"] = target_dates
+        return []
+
+    monkeypatch.setattr(daily_picks_service, "scan_low_suction_candidates", scan)
+
+    payload = daily_picks_service._compute_live_payload(now)
+
+    assert payload["trade_date"] == "2026-08-12"
+    assert payload["snapshot_phase"] == "tail_final"
+    assert payload["provisional"] is True
+    assert observed["calendar"] == [previous, today]
+    assert observed["target_dates"] == {today}
+
+
+def test_spot_merge_stops_after_the_single_tail_final_scan() -> None:
+    latest = date(2026, 8, 11)
+
+    assert daily_picks_service._should_merge_spot(
+        datetime.fromisoformat("2026-08-12T15:01:00+08:00"), latest
+    )
+    assert not daily_picks_service._should_merge_spot(
+        datetime.fromisoformat("2026-08-12T15:02:00+08:00"), latest
+    )
 
 
 def test_backtest_background_records_stage_and_completion(monkeypatch) -> None:

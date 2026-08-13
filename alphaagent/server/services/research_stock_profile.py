@@ -448,7 +448,7 @@ def _assess_data_quality(workbench: dict[str, Any]) -> dict[str, Any]:
     if not sections["sector_memberships"]:
         suggestions.append("Run sync_stock_sector_memberships to populate sector data")
     if not sections["events"]:
-        suggestions.append("Run sync_stock_notices and sync_limit_up_pools to populate events")
+        suggestions.append("Run sync_stock_notices to populate events")
 
     return {
         "sections": sections,

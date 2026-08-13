@@ -13,10 +13,16 @@ import { cn } from "@/lib/utils";
 /** 低吸实时推荐：上升趋势低吸 + 超跌反弹低吸两组，按综合分排序。 */
 export function LowSuctionLiveView({
   payload,
+  availableDates,
+  selectedDate,
+  onDateChange,
   onTrendPageChange,
   onOversoldPageChange,
 }: {
   payload: LowSuctionLivePayload;
+  availableDates: string[];
+  selectedDate: string | null;
+  onDateChange: (date: string | null) => void;
   onTrendPageChange: (page: number) => void;
   onOversoldPageChange: (page: number) => void;
 }) {
@@ -24,6 +30,12 @@ export function LowSuctionLiveView({
   if (payload.status !== "ok") {
     return (
       <section aria-label="低吸实时推荐">
+        <LiveSnapshotToolbar
+          tradeDate={payload.trade_date}
+          availableDates={availableDates}
+          selectedDate={selectedDate}
+          onDateChange={onDateChange}
+        />
         <LiveScanTrace runs={scanTrace} />
         <EmptyState message={payload.message ?? "低吸实时推荐暂时不可用"} />
       </section>
@@ -31,25 +43,29 @@ export function LowSuctionLiveView({
   }
   const trend = payload.trend;
   const oversold = payload.oversold;
+  const snapshotPhase = snapshotPhaseLabel(payload.snapshot_phase, payload.provisional);
   return (
     <section aria-label="低吸实时推荐">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b px-3 py-2 text-xs text-muted-foreground sm:px-4">
-        <span className="eyebrow">实时 LIVE</span>
         <span>
           信号日 <span className="font-medium text-foreground">{payload.trade_date}</span>
         </span>
-        {payload.provisional ? (
-          <span className="rounded-full bg-amber-500/15 px-1.5 py-px text-[10px] font-medium text-amber-600">
-            盘中虚拟K线 · 未定型
-          </span>
-        ) : (
-          <span className="rounded-full bg-emerald-500/15 px-1.5 py-px text-[10px] font-medium text-emerald-600">
-            已收盘确认
-          </span>
-        )}
+        <span className={cn(
+          "rounded-full px-1.5 py-px text-[10px] font-medium",
+          payload.snapshot_phase === "confirmed" || (!payload.snapshot_phase && !payload.provisional)
+            ? "bg-emerald-500/15 text-emerald-600"
+            : "bg-amber-500/15 text-amber-600",
+        )}>
+          {snapshotPhase}
+        </span>
+        <LiveSnapshotDateSelector
+          availableDates={availableDates}
+          selectedDate={selectedDate}
+          onDateChange={onDateChange}
+        />
         {payload.merge_note && <span>{payload.merge_note}</span>}
         <span>当日已扫 {scanTrace.length} 次</span>
-        <span className="ml-auto">
+        <span>
           后台每 {Math.round((payload.refresh_interval_seconds ?? 900) / 60)} 分钟扫描 · {payload.asof?.slice(11, 19)} 更新
         </span>
       </div>
@@ -75,6 +91,64 @@ export function LowSuctionLiveView({
       </div>
     </section>
   );
+}
+
+function LiveSnapshotToolbar({
+  tradeDate,
+  availableDates,
+  selectedDate,
+  onDateChange,
+}: {
+  tradeDate: string | undefined;
+  availableDates: string[];
+  selectedDate: string | null;
+  onDateChange: (date: string | null) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b px-3 py-2 text-xs text-muted-foreground sm:px-4">
+      {tradeDate && <span>信号日 <span className="font-medium text-foreground">{tradeDate}</span></span>}
+      <LiveSnapshotDateSelector
+        availableDates={availableDates}
+        selectedDate={selectedDate}
+        onDateChange={onDateChange}
+      />
+    </div>
+  );
+}
+
+function LiveSnapshotDateSelector({
+  availableDates,
+  selectedDate,
+  onDateChange,
+}: {
+  availableDates: string[];
+  selectedDate: string | null;
+  onDateChange: (date: string | null) => void;
+}) {
+  return (
+    <label className="ml-auto flex items-center gap-1.5">
+      <span className="sr-only">选择推荐交易日</span>
+      <select
+        aria-label="选择推荐交易日"
+        value={selectedDate ?? ""}
+        onChange={(event) => onDateChange(event.target.value || null)}
+        className="h-7 max-w-40 border bg-background px-2 text-xs text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <option value="">最新快照</option>
+        {availableDates.map((date) => <option key={date} value={date}>{date}</option>)}
+      </select>
+    </label>
+  );
+}
+
+function snapshotPhaseLabel(
+  phase: LowSuctionLivePayload["snapshot_phase"],
+  provisional: boolean | undefined,
+) {
+  if (phase === "intraday") return "盘中虚拟K线";
+  if (phase === "tail_final") return "尾盘虚拟K线已固化";
+  if (phase === "confirmed" || !provisional) return "已收盘确认";
+  return "盘中虚拟K线";
 }
 
 function LiveScanTrace({ runs }: { runs: LowSuctionLiveScanRun[] }) {

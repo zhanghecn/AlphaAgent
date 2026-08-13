@@ -53,31 +53,14 @@ from alphaagent.server.services.low_suction import (
     forward_membership_repository,
     forward_security_repository,
 )
-from alphaagent.server.services.limit_up.data_quality import (
-    backfill_limit_up_event_minutes,
-    backfill_limit_up_exit_minutes,
-    backfill_limit_up_radar_minutes,
-)
-from alphaagent.server.services.limit_up.domain import is_eligible_main_board
-from alphaagent.server.services.limit_up.concept_live_service import (
-    CONCEPT_REFRESH_SECONDS,
-    refresh_live_concept_snapshot,
-)
-from alphaagent.server.services.limit_up.historical_evidence_import import import_ths_evidence
-from alphaagent.server.services.limit_up.live_service import (
-    LIVE_SCAN_INTERVAL_SECONDS,
-    refresh_live_snapshot,
-)
+from alphaagent.server.services.a_share_universe import is_eligible_main_board
 from alphaagent.server.services.low_suction.daily_picks_service import (
     LIVE_SCAN_INTERVAL_SECONDS as LOW_SUCTION_LIVE_SCAN_INTERVAL_SECONDS,
     LiveScanAlreadyRunningError,
+    TAIL_FINAL_RETRY_END as LOW_SUCTION_TAIL_FINAL_RETRY_END,
+    TAIL_FINAL_TIME as LOW_SUCTION_TAIL_FINAL_TIME,
     refresh_live_recommendations,
 )
-from alphaagent.server.services.limit_up.live_repository import clear_live_context_cache
-from alphaagent.server.services.limit_up.live_trace_repository import (
-    prune_live_trace_snapshots,
-)
-from alphaagent.server.services.limit_up.next_session_plan import refresh_next_session_plan
 
 logger = logging.getLogger(__name__)
 INTERRUPTED_SYNC_JOB_MESSAGE = "API process restarted before this sync job finished."
@@ -98,7 +81,6 @@ FINANCIAL_REPORT_UPSERT_BATCH_SIZE = 1_000
 # 内存批次 running 超过此时长视为僵尸，看门狗清理（防卡死批次挡住新调度）
 ZOMBIE_BATCH_THRESHOLD_SECONDS = 2 * 60 * 60
 CANONICAL_SECTOR_DAILY_SOURCE = "eastmoney.board_kline"
-LIMIT_POOL_EVENT_SOURCE = "akshare.stock_ztb_em"
 STOCK_LIST_MAX_PAGES = 200
 SECTOR_MEMBER_MAX_PAGES = 100
 SECTOR_MEMBERSHIP_REFRESH_DAYS = 7
@@ -301,30 +283,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         default_params={"mode": "recent", "stock_limit": 100, "limit": 240, "interval": "1m", "only_missing": True},
     ),
     JobDefinition(
-        id="sync_limit_up_event_minutes",
-        name="涨停事件分钟路径补数",
-        description="按持久化退避账本限量补齐涨停事件股票的09:15-15:00历史1分钟路径。",
-        source_id="tdx_public_hq",
-        target_table="stock_minute_bars",
-        default_params={"max_gaps": 200, "dry_run": False},
-    ),
-    JobDefinition(
-        id="sync_limit_up_radar_minutes",
-        name="3%雷达候选分钟路径补数",
-        description="按独立退避作用域补齐当天实际观察候选的09:15-15:00完整1分钟路径。",
-        source_id="tdx_public_hq",
-        target_table="stock_minute_bars",
-        default_params={"max_gaps": 300, "dry_run": False},
-    ),
-    JobDefinition(
-        id="sync_limit_up_exit_minutes",
-        name="候选D+1 14:30分钟补数",
-        description="从历史候选池和正式实时推荐派生卖出日，限量补齐精确14:30历史1分钟价格。",
-        source_id="tdx_public_hq",
-        target_table="stock_minute_bars",
-        default_params={"max_gaps": 200, "dry_run": False},
-    ),
-    JobDefinition(
         id="sync_stock_auction_snapshots",
         name="集合竞价快照",
         description="在09:25集合竞价结束后保存主板非ST股票的价格、撮合量额和字段完整度。",
@@ -408,14 +366,6 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         source_id="akshare",
         target_table="sector_period_scores",
         default_params={"periods": ["20d"], "sector_limit": 0},
-    ),
-    JobDefinition(
-        id="sync_limit_up_pools",
-        name="涨停池 / 跌停池",
-        description="同步涨停、强势、炸板、跌停池数据。",
-        source_id="akshare",
-        target_table="stock_events",
-        default_params={},
     ),
     JobDefinition(
         id="sync_stock_fund_flows",
@@ -531,16 +481,12 @@ JOB_CADENCES: dict[str, JobCadence] = {
     "sync_stock_fund_flows": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "stock_fund_flows", "updated_at"),
     "sync_sector_fund_flows": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "sector_fund_flows", "updated_at"),
     "sync_stock_hot_ranks": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "stock_hot_ranks", "updated_at"),
-    "sync_limit_up_pools": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "stock_events", "updated_at"),
     "sync_stock_daily_bars": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "stock_daily_bars", "trade_date"),
     ADJUSTED_DAILY_SYNC_JOB_ID: JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "low_suction_adjusted_daily_bar_scopes", "updated_at"),
     "sync_index_daily_bars": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "stock_daily_bars", "trade_date"),
     "sync_mainline_sentiment_history": JobCadence(CADENCE_EOD_DAILY, CATEGORY_SECTOR_RESEARCH, 1, "mainline_sentiment_history", "computed_at"),
     "sync_sector_daily_bars": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "sector_daily_bars", "trade_date"),
     "sync_stock_minute_bars": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_BARS, 1, "stock_minute_bars", "bar_time"),
-    "sync_limit_up_event_minutes": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "limit_up_minute_backfill_attempts", "last_attempt_at"),
-    "sync_limit_up_radar_minutes": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "limit_up_minute_backfill_attempts", "last_attempt_at"),
-    "sync_limit_up_exit_minutes": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "limit_up_minute_backfill_attempts", "last_attempt_at"),
     "sync_stock_auction_snapshots": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "stock_auction_snapshots", "captured_at"),
     "sync_stock_financial_quarterly": JobCadence(CADENCE_QUARTERLY, CATEGORY_FINANCIALS, 45, "stock_financial_reports", "updated_at"),
     "sync_stock_financial_indicators": JobCadence(CADENCE_QUARTERLY, CATEGORY_FINANCIALS, 45, "stock_financial_reports", "updated_at"),
@@ -570,11 +516,9 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
     "sync_supply_chain_edges",
     "sync_stock_daily_bars", ADJUSTED_DAILY_SYNC_JOB_ID, "sync_index_daily_bars", "sync_mainline_sentiment_history", "sync_sector_daily_bars",
     "sync_stock_minute_bars",
-    "sync_limit_up_event_minutes",
-    "sync_limit_up_radar_minutes",
     "sync_stock_auction_snapshots",
     "sync_stock_fund_flows", "sync_sector_fund_flows",
-    "sync_stock_hot_ranks", "sync_limit_up_pools",
+    "sync_stock_hot_ranks",
     "sync_sector_period_scores",
     "sync_stock_financial_quarterly", "sync_stock_financial_indicators",
     "sync_stock_business_segments_history",
@@ -594,13 +538,25 @@ PRIMARY_EOD_RECOVERY_CUTOFF_HOUR = 21
 LEGACY_DEFAULT_BATCH_SCHEDULE_IDS = {
     "eod_18h",
     "tail_quant_1430",
+    "limit_up_live_scan",
+    "limit_up_concept_scan",
+    "limit_up_plan_1505",
+    "leader_forward_capture_1005",
+    "leader_forward_capture_1505",
+    "eod_backtest_2200",
     # 旧低吸波段策略（swing）已随 v3/v4 日线因子重建整体退役
     "low_suction_open_0931",
     "low_suction_preview_hourly",
     "low_suction_signal_1450",
     "low_suction_entry_1455",
 }
-LEGACY_SCHEDULE_ACTIONS = {"quant_research", "tail_preview", "low_suction_swing"}
+LEGACY_SCHEDULE_ACTIONS = {
+    "quant_research",
+    "tail_preview",
+    "low_suction_swing",
+    "limit_up_live_scan",
+    "limit_up_concept_scan",
+}
 # 已退役的默认任务定义：seed 时从注册表删除（旧低吸 swing/前向研究链）
 RETIRED_DEFAULT_JOB_IDS = {
     "sync_low_suction_forward_top3",
@@ -608,7 +564,22 @@ RETIRED_DEFAULT_JOB_IDS = {
     "sync_low_suction_forward_ma5_minutes",
     "sync_low_suction_reclaim_minutes",
     "sync_low_suction_swing_settlement",
+    "sync_limit_up_pools",
+    "sync_limit_up_event_minutes",
+    "sync_limit_up_radar_minutes",
+    "sync_limit_up_exit_minutes",
+    "sync_limit_up_ths_evidence",
+    "limit_up_history_rebuild",
+    "limit_up_next_session_plan_preliminary",
+    "limit_up_next_session_plan_final",
+    "limit_up_live_trace_prune",
+    "leader_minute_backtest_rerun",
+    "leader_forward_capture",
+    "leader_forward_settle",
+    "premarket_prelude_snapshot",
+    "premarket_fused_score_snapshot",
 }
+LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID = "low_suction_live_snapshot_refresh"
 
 DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
     {
@@ -621,27 +592,9 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "job_ids": ["sync_stock_auction_snapshots"],
     },
     {
-        "id": "limit_up_live_scan",
-        "name": "实时打板扫描（每10秒）",
-        "cron": "* 9-14 * * 1-5",
-        "action": "limit_up_live_scan",
-        "enabled": True,
-        "concurrency": 1,
-        "job_ids": [],
-    },
-    {
-        "id": "limit_up_concept_scan",
-        "name": "实时概念共振（每30秒）",
-        "cron": "* 9-14 * * 1-5",
-        "action": "limit_up_concept_scan",
-        "enabled": True,
-        "concurrency": 1,
-        "job_ids": [],
-    },
-    {
         "id": "low_suction_live_scan",
-        "name": "实时低吸扫描（每15分钟）",
-        "cron": "*/15 9-15 * * 1-5",
+        "name": "实时低吸扫描（每分钟）",
+        "cron": "* 9-15 * * 1-5",
         "action": "low_suction_live_scan",
         "enabled": True,
         "concurrency": 1,
@@ -661,15 +614,6 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         ],
     },
     {
-        "id": "limit_up_plan_1505",
-        "name": "次交易时段初步观察（15:05）",
-        "cron": "5 15 * * 1-5",
-        "action": "sync",
-        "enabled": True,
-        "concurrency": 1,
-        "job_ids": ["limit_up_next_session_plan_preliminary"],
-    },
-    {
         "id": CURRENT_EOD_SCHEDULE_ID,
         "name": "盘后统一更新（19:00）",
         "cron": "0 19 * * 1-5",
@@ -681,6 +625,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_sector_fund_flows",
             "sync_stock_fund_flows",
             "sync_stock_daily_bars",
+            LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID,
             ADJUSTED_DAILY_SYNC_JOB_ID,
             "sync_index_daily_bars",
             "sync_mainline_sentiment_history",
@@ -690,35 +635,12 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_sector_members",
             "sync_stock_sector_memberships",
             "sync_low_suction_security_snapshot",
-            "sync_limit_up_pools",
-            "sync_limit_up_radar_minutes",
             "sync_stock_lhb_records",
             "sync_stock_notices",
             "sync_stock_financial_quarterly",
             "sync_stock_financial_indicators",
             "sync_stock_business_segments_history",
-            "leader_forward_settle",
-            "limit_up_next_session_plan_final",
-            "limit_up_live_trace_prune",
         ],
-    },
-    {
-        "id": "leader_forward_capture_1005",
-        "name": "潜龙首板前向台账捕获（10:05）",
-        "cron": "5 10 * * 1-5",
-        "action": "sync",
-        "enabled": True,
-        "concurrency": 1,
-        "job_ids": ["leader_forward_capture"],
-    },
-    {
-        "id": "leader_forward_capture_1505",
-        "name": "潜龙首板前向台账捕获（15:05）",
-        "cron": "5 15 * * 1-5",
-        "action": "sync",
-        "enabled": True,
-        "concurrency": 1,
-        "job_ids": ["leader_forward_capture"],
     },
     {
         "id": "eod_finalize_2130",
@@ -729,6 +651,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "concurrency": 1,
         "job_ids": [
             "sync_stock_daily_bars",
+            LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID,
             ADJUSTED_DAILY_SYNC_JOB_ID,
             "sync_index_daily_bars",
             "sync_mainline_sentiment_history",
@@ -740,26 +663,6 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_sector_members",
             "sync_stock_sector_memberships",
             "sync_low_suction_security_snapshot",
-            "sync_limit_up_pools",
-            "sync_limit_up_ths_evidence",
-            "sync_limit_up_event_minutes",
-            "sync_limit_up_radar_minutes",
-            "limit_up_history_rebuild",
-            "limit_up_next_session_plan_final",
-            "limit_up_live_trace_prune",
-        ],
-    },
-    {
-        "id": "eod_backtest_2200",
-        "name": "潜龙首板分钟回测重跑（22:00）",
-        "cron": "0 22 * * 1-5",
-        "action": "sync",
-        "enabled": True,
-        "concurrency": 1,
-        "job_ids": [
-            "leader_minute_backtest_rerun",
-            "premarket_prelude_snapshot",
-            "premarket_fused_score_snapshot",
         ],
     },
     {
@@ -773,46 +676,11 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
     },
 ]
 
-LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID = "sync_limit_up_ths_evidence"
-LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID = "limit_up_history_rebuild"
-LIMIT_UP_NEXT_SESSION_PLAN_PRELIMINARY_BATCH_JOB_ID = "limit_up_next_session_plan_preliminary"
-LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID = "limit_up_next_session_plan_final"
-LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID = "limit_up_live_trace_prune"
-LEADER_MINUTE_BACKTEST_RERUN_BATCH_JOB_ID = "leader_minute_backtest_rerun"
-LEADER_FORWARD_CAPTURE_BATCH_JOB_ID = "leader_forward_capture"
-LEADER_FORWARD_SETTLE_BATCH_JOB_ID = "leader_forward_settle"
-PREMARKET_PRELUDE_SNAPSHOT_BATCH_JOB_ID = "premarket_prelude_snapshot"
-PREMARKET_FUSED_SCORE_SNAPSHOT_BATCH_JOB_ID = "premarket_fused_score_snapshot"
 LOW_SUCTION_DAILY_BACKTEST_RERUN_BATCH_JOB_ID = "low_suction_daily_backtest_rerun"
 INTERNAL_BATCH_JOB_IDS = {
-    LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID,
-    LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID,
-    LIMIT_UP_NEXT_SESSION_PLAN_PRELIMINARY_BATCH_JOB_ID,
-    LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID,
-    LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID,
-    LEADER_MINUTE_BACKTEST_RERUN_BATCH_JOB_ID,
-    LEADER_FORWARD_CAPTURE_BATCH_JOB_ID,
-    LEADER_FORWARD_SETTLE_BATCH_JOB_ID,
-    PREMARKET_PRELUDE_SNAPSHOT_BATCH_JOB_ID,
-    PREMARKET_FUSED_SCORE_SNAPSHOT_BATCH_JOB_ID,
     LOW_SUCTION_DAILY_BACKTEST_RERUN_BATCH_JOB_ID,
+    LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID,
 }
-HISTORY_INPUT_JOB_IDS = frozenset(
-    {
-        "sync_stock_list",
-        "sync_stock_daily_bars",
-        "sync_stock_minute_bars",
-        "sync_stock_financial_quarterly",
-        "sync_stock_notices",
-        "sync_sector_members",
-        "sync_stock_sector_memberships",
-        "sync_limit_up_pools",
-        "sync_limit_up_event_minutes",
-        "sync_limit_up_radar_minutes",
-        "sync_limit_up_exit_minutes",
-        LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID,
-    }
-)
 STALE_BATCH_SUMMARY_RE = re.compile(r"^\s*(\d+)\s+成功\s*/\s*(\d+)\s+失败\s*$")
 
 
@@ -825,8 +693,7 @@ SYNC_BATCH_PROFILES: dict[str, tuple[str, ...]] = {
         "sync_stock_fund_flows",
         "sync_stock_hot_ranks",
     ),
-    "all": tuple(job.id for job in DEFAULT_JOBS)
-    + (LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID,),
+    "all": tuple(job.id for job in DEFAULT_JOBS),
 }
 
 _BATCH_LOCK = threading.Lock()
@@ -1583,76 +1450,6 @@ class DataSyncRunner:
             "timed_out": counters["timed_out"],
         }
 
-    def _run_sync_limit_up_event_minutes(self, params: dict[str, Any]) -> dict[str, Any]:
-        result = backfill_limit_up_event_minutes(
-            max_gaps=int(params.get("max_gaps") or 200),
-            dry_run=_truthy(params.get("dry_run")),
-        )
-        backfill_status = str(result.get("status") or "unknown")
-        requested = int(result.get("requested_gap_count") or 0)
-        covered = int(result.get("covered_gap_count") or 0)
-        message = str(result.get("message") or "").strip()
-        if requested:
-            message = f"涨停事件分钟补数：覆盖 {covered} / {requested}，写入 {int(result.get('rows_written') or 0)} 根"
-        if backfill_status in {"error", "unavailable", "unsupported_interval"}:
-            raise DataSyncError(message or f"涨停事件分钟补数失败：{backfill_status}")
-        return {
-            **{key: value for key, value in result.items() if key != "status"},
-            "backfill_status": backfill_status,
-            "message": message,
-        }
-
-    def _run_sync_limit_up_radar_minutes(self, params: dict[str, Any]) -> dict[str, Any]:
-        result = backfill_limit_up_radar_minutes(
-            max_gaps=int(params.get("max_gaps") or 300),
-            dry_run=_truthy(params.get("dry_run")),
-        )
-        backfill_status = str(result.get("status") or "unknown")
-        requested = int(result.get("requested_gap_count") or 0)
-        covered = int(result.get("covered_gap_count") or 0)
-        message = str(result.get("message") or "").strip()
-        if requested:
-            message = (
-                f"3%雷达候选分钟补数：覆盖 {covered} / {requested}，"
-                f"写入 {int(result.get('rows_written') or 0)} 根"
-            )
-        if backfill_status in {
-            "error",
-            "partial",
-            "unavailable",
-            "unsupported_interval",
-        }:
-            raise DataSyncError(
-                message or f"3%雷达候选分钟补数失败：{backfill_status}"
-            )
-        return {
-            **{key: value for key, value in result.items() if key != "status"},
-            "backfill_status": backfill_status,
-            "message": message,
-        }
-
-    def _run_sync_limit_up_exit_minutes(self, params: dict[str, Any]) -> dict[str, Any]:
-        result = backfill_limit_up_exit_minutes(
-            max_gaps=int(params.get("max_gaps") or 200),
-            dry_run=_truthy(params.get("dry_run")),
-        )
-        backfill_status = str(result.get("status") or "unknown")
-        requested = int(result.get("requested_gap_count") or 0)
-        covered = int(result.get("covered_gap_count") or 0)
-        message = str(result.get("message") or "").strip()
-        if requested:
-            message = (
-                f"候选D+1 14:30分钟补数：覆盖 {covered} / {requested}，"
-                f"写入 {int(result.get('rows_written') or 0)} 根"
-            )
-        if backfill_status in {"error", "unavailable", "unsupported_interval"}:
-            raise DataSyncError(message or f"候选D+1 14:30分钟补数失败：{backfill_status}")
-        return {
-            **{key: value for key, value in result.items() if key != "status"},
-            "backfill_status": backfill_status,
-            "message": message,
-        }
-
     def _run_sync_stock_auction_snapshots(self, params: dict[str, Any]) -> dict[str, Any]:
         captured_at = _now_china()
         if not _auction_capture_window_open(captured_at):
@@ -2076,34 +1873,6 @@ class DataSyncRunner:
                 )
         return {"rows_read": total_read, "rows_written": total_written}
 
-    def _run_sync_limit_up_pools(self, params: dict[str, Any]) -> dict[str, Any]:
-        trade_date = params.get("trade_date")
-        data = self.adapter.limit_up_pools(trade_date=trade_date)
-        pools = data.get("pools") or {}
-        total_read = 0
-        total_written = 0
-        for pool_key, pool_data in pools.items():
-            if not isinstance(pool_data, dict):
-                continue
-            items = pool_data.get("items") or []
-            total_read += len(items)
-            written = _upsert_limit_up_events(items, pool_key, data.get("trade_date", ""))
-            total_written += written
-        snapshot_written = 0
-        try:
-            snapshot_written = _append_limit_up_pool_snapshots(
-                pools,
-                data.get("trade_date", ""),
-                data.get("updated_at"),
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("limit up pool snapshot append failed: %s", exc)
-        return {
-            "rows_read": total_read,
-            "rows_written": total_written,
-            "snapshot_rows_written": snapshot_written,
-        }
-
     def _run_sync_stock_fund_flows(self, params: dict[str, Any]) -> dict[str, Any]:
         stock_limit = int(params.get("stock_limit", 200))
         period = str(params.get("period", "即时"))
@@ -2277,8 +2046,6 @@ class DataSyncRunner:
                 rows_written=total_written,
                 sample_items=items[-3:],
             )
-        if total_written or total_invalidated:
-            clear_live_context_cache()
         if failures:
             raise DataSyncError(
                 "季度财报报告期同步失败：" + "，".join(failures)
@@ -2457,9 +2224,6 @@ JOB_RUNNERS: dict[str, str] = {
     ADJUSTED_DAILY_SYNC_JOB_ID: "_run_sync_low_suction_adjusted_daily_bars",
     "sync_index_daily_bars": "_run_sync_index_daily_bars",
     "sync_stock_minute_bars": "_run_sync_stock_minute_bars",
-    "sync_limit_up_event_minutes": "_run_sync_limit_up_event_minutes",
-    "sync_limit_up_radar_minutes": "_run_sync_limit_up_radar_minutes",
-    "sync_limit_up_exit_minutes": "_run_sync_limit_up_exit_minutes",
     "sync_stock_auction_snapshots": "_run_sync_stock_auction_snapshots",
     "sync_stock_sector_memberships": "_run_sync_stock_sector_memberships",
     "sync_mainline_sentiment_history": "_run_sync_mainline_sentiment_history",
@@ -2472,7 +2236,6 @@ JOB_RUNNERS: dict[str, str] = {
     "sync_sector_daily_bars": "_run_sync_sector_daily_bars",
     "sync_sector_fund_flows": "_run_sync_sector_fund_flows",
     "sync_sector_period_scores": "_run_sync_sector_period_scores",
-    "sync_limit_up_pools": "_run_sync_limit_up_pools",
     "sync_stock_fund_flows": "_run_sync_stock_fund_flows",
     "sync_stock_hot_ranks": "_run_sync_stock_hot_ranks",
     "sync_stock_lhb_records": "_run_sync_stock_lhb_records",
@@ -2488,10 +2251,10 @@ JOB_RUNNERS: dict[str, str] = {
 
 _scheduler_thread: threading.Thread | None = None
 _scheduler_stop = threading.Event()
-_concept_schedule_lock = threading.Lock()
-_concept_schedule_running = False
 _low_suction_schedule_lock = threading.Lock()
 _low_suction_schedule_running = False
+_low_suction_tail_final_pending_date: date | None = None
+_low_suction_tail_final_attempted_date: date | None = None
 
 
 # ─── Error class ──────────────────────────────────────────────────────────
@@ -2616,14 +2379,21 @@ def seed_default_registry() -> None:
                         )
                     )
             if RETIRED_DEFAULT_JOB_IDS:
-                # 软退役而非物理删除：sync_job_runs 历史记录仍引用这些任务
                 session.execute(
-                    schema.sync_job_definitions.update()
-                    .where(
+                    schema.sync_job_runs.delete().where(
+                        schema.sync_job_runs.c.job_id.in_(RETIRED_DEFAULT_JOB_IDS)
+                    )
+                )
+                session.execute(
+                    schema.sync_job_definitions.delete().where(
                         schema.sync_job_definitions.c.id.in_(RETIRED_DEFAULT_JOB_IDS)
                     )
-                    .values(enabled=False)
                 )
+            session.execute(
+                schema.stock_events.delete().where(
+                    schema.stock_events.c.source == "akshare.stock_ztb_em"
+                )
+            )
 
             # Seed default batch schedules (unified incremental sync slots).
             for sched in DEFAULT_BATCH_SCHEDULES:
@@ -2941,12 +2711,7 @@ def _assert_schedule_jobs(action: str, job_ids: list[str]) -> None:
 
 def _schedule_action(payload: dict[str, Any]) -> str:
     action = str(payload.get("action") or "sync").strip()
-    if action not in {
-        "sync",
-        "limit_up_live_scan",
-        "limit_up_concept_scan",
-        "low_suction_live_scan",
-    }:
+    if action not in {"sync", "low_suction_live_scan"}:
         raise DataSyncError(f"Unsupported schedule action: {action}")
     return action
 
@@ -3033,115 +2798,10 @@ def run_schedule_now(schedule_id: str) -> dict[str, Any]:
     if not row:
         raise DataSyncError(f"schedule {schedule_id} not found")
     action = str(row.get("action") or "sync")
-    if action == "limit_up_live_scan":
-        snapshot = _run_schedule_action(dict(row), raise_errors=True) or {}
-        return _live_scan_schedule_status(schedule_id, snapshot)
-    if action == "limit_up_concept_scan":
-        snapshot = _run_schedule_action(dict(row), raise_errors=True) or {}
-        return _concept_scan_schedule_status(schedule_id, snapshot)
     if action == "low_suction_live_scan":
         snapshot = _run_schedule_action(dict(row), raise_errors=True) or {}
         return _low_suction_live_scan_schedule_status(schedule_id, snapshot)
     return _start_sync_schedule(dict(row), source="manual")
-
-
-def _live_scan_schedule_status(schedule_id: str, snapshot: dict[str, Any]) -> dict[str, Any]:
-    """Represent one synchronous live scan as a batch-like response."""
-
-    saved = _live_scan_snapshot_saved(snapshot)
-    status = "succeeded" if saved else "skipped"
-    rows_read = len(snapshot.get("candidates") or [])
-    rows_written = 1 if saved else 0
-    created_at = _utc_now_iso()
-    finished_at = created_at
-    message = _live_scan_status_message(snapshot, saved=saved)
-    return {
-        "id": f"live_scan_{uuid4().hex}",
-        "profile": "limit_up_live_scan",
-        "source": "manual",
-        "schedule_id": schedule_id,
-        "concurrency": 1,
-        "status": status,
-        "created_at": created_at,
-        "started_at": created_at,
-        "finished_at": finished_at,
-        "current_job_id": None,
-        "total_jobs": 1,
-        "completed_jobs": 1,
-        "succeeded_jobs": 1 if saved else 0,
-        "failed_jobs": 0,
-        "skipped_jobs": 0 if saved else 1,
-        "rows_read": rows_read,
-        "rows_written": rows_written,
-        "progress_pct": 100.0,
-        "message": message,
-        "jobs": [
-            {
-                "job_id": "limit_up_live_scan",
-                "status": status,
-                "started_at": created_at,
-                "finished_at": finished_at,
-                "rows_read": rows_read,
-                "rows_written": rows_written,
-                "progress_current": 1,
-                "progress_total": 1,
-                "progress_pct": 100.0,
-                "stage": str(snapshot.get("session_stage") or ""),
-                "current_label": "",
-                "sample_items": [],
-                "message": message,
-            }
-        ],
-    }
-
-
-def _concept_scan_schedule_status(
-    schedule_id: str,
-    snapshot: dict[str, Any],
-) -> dict[str, Any]:
-    quality = snapshot.get("data_quality")
-    quality = quality if isinstance(quality, dict) else {}
-    succeeded = quality.get("status") == "ready"
-    concept_count = int(snapshot.get("concept_count") or 0)
-    created_at = _utc_now_iso()
-    status = "succeeded" if succeeded else "skipped"
-    message = (
-        f"已更新 {concept_count} 个实时概念强度"
-        if succeeded
-        else f"概念行情不可用于新买点：{quality.get('status') or 'unavailable'}"
-    )
-    return {
-        "id": f"concept_scan_{uuid4().hex}",
-        "profile": "limit_up_concept_scan",
-        "source": "manual",
-        "schedule_id": schedule_id,
-        "concurrency": 1,
-        "status": status,
-        "created_at": created_at,
-        "started_at": created_at,
-        "finished_at": created_at,
-        "current_job_id": None,
-        "total_jobs": 1,
-        "completed_jobs": 1,
-        "succeeded_jobs": 1 if succeeded else 0,
-        "failed_jobs": 0,
-        "skipped_jobs": 0 if succeeded else 1,
-        "rows_read": int(quality.get("quote_count") or 0),
-        "rows_written": concept_count if succeeded else 0,
-        "progress_pct": 100.0,
-        "message": message,
-        "jobs": [
-            {
-                "job_id": "limit_up_concept_scan",
-                "status": status,
-                "started_at": created_at,
-                "finished_at": created_at,
-                "rows_read": int(quality.get("quote_count") or 0),
-                "rows_written": concept_count if succeeded else 0,
-                "message": message,
-            }
-        ],
-    }
 
 
 def _low_suction_live_scan_schedule_status(
@@ -3400,8 +3060,6 @@ def _run_sync_batch(
             return
         job_ids = [item["job_id"] for item in batch["jobs"]]
 
-    history_inputs_changed = False
-    history_input_failed = False
     for index, job_id in enumerate(job_ids):
         # Skip jobs already marked skipped due to an upstream base-job failure.
         with _BATCH_LOCK:
@@ -3426,42 +3084,10 @@ def _run_sync_batch(
         )
         _patch_batch(batch_id, {"current_job_id": job_id, "message": f"正在同步 {job_id}"})
         try:
-            if job_id == LIMIT_UP_THS_EVIDENCE_BATCH_JOB_ID:
-                result = _run_limit_up_ths_evidence_batch_job(
-                    _batch_job_params(job_id, params),
-                    progress=_batch_progress_callback(batch_id, job_id),
-                )
-            elif job_id == LIMIT_UP_HISTORY_REBUILD_BATCH_JOB_ID:
-                result = (
-                    {
-                        "status": "skipped",
-                        "rows_read": 0,
-                        "rows_written": 0,
-                        "message": "历史输入覆盖未完成，保留现有回测账本等待下次补齐",
-                    }
-                    if history_input_failed
-                    else _run_limit_up_history_rebuild_batch_job(
-                        force=history_inputs_changed
-                    )
-                )
-            elif job_id == LIMIT_UP_NEXT_SESSION_PLAN_PRELIMINARY_BATCH_JOB_ID:
-                result = _run_limit_up_next_session_plan_batch_job("preliminary")
-            elif job_id == LIMIT_UP_NEXT_SESSION_PLAN_FINAL_BATCH_JOB_ID:
-                result = _run_limit_up_next_session_plan_batch_job("final")
-            elif job_id == LIMIT_UP_LIVE_TRACE_PRUNE_BATCH_JOB_ID:
-                result = _run_limit_up_live_trace_prune_batch_job()
-            elif job_id == LEADER_MINUTE_BACKTEST_RERUN_BATCH_JOB_ID:
-                result = _run_leader_minute_backtest_rerun_batch_job()
-            elif job_id == LOW_SUCTION_DAILY_BACKTEST_RERUN_BATCH_JOB_ID:
+            if job_id == LOW_SUCTION_DAILY_BACKTEST_RERUN_BATCH_JOB_ID:
                 result = _run_low_suction_daily_backtest_rerun_batch_job()
-            elif job_id == PREMARKET_PRELUDE_SNAPSHOT_BATCH_JOB_ID:
-                result = _run_premarket_prelude_snapshot_batch_job()
-            elif job_id == PREMARKET_FUSED_SCORE_SNAPSHOT_BATCH_JOB_ID:
-                result = _run_premarket_fused_score_snapshot_batch_job()
-            elif job_id == LEADER_FORWARD_CAPTURE_BATCH_JOB_ID:
-                result = _run_leader_forward_capture_batch_job()
-            elif job_id == LEADER_FORWARD_SETTLE_BATCH_JOB_ID:
-                result = _run_leader_forward_settle_batch_job()
+            elif job_id == LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID:
+                result = _run_low_suction_live_snapshot_refresh_batch_job()
             else:
                 result = run_job(
                     job_id,
@@ -3474,7 +3100,6 @@ def _run_sync_batch(
             skipped = str(result.get("status") or "") == "skipped"
             incomplete = str(result.get("status") or "") == "incomplete"
             if incomplete:
-                history_input_failed = history_input_failed or job_id in HISTORY_INPUT_JOB_IDS
                 _update_batch_job(
                     batch_id,
                     job_id,
@@ -3499,9 +3124,6 @@ def _run_sync_batch(
                     rows_written=rows_written,
                 )
                 continue
-            history_inputs_changed = history_inputs_changed or (
-                _changes_limit_up_history_inputs(job_id, result)
-            )
             _update_batch_job(
                 batch_id,
                 job_id,
@@ -3526,7 +3148,6 @@ def _run_sync_batch(
                 rows_written=rows_written,
             )
         except Exception as exc:
-            history_input_failed = history_input_failed or job_id in HISTORY_INPUT_JOB_IDS
             _update_batch_job(
                 batch_id,
                 job_id,
@@ -3576,102 +3197,51 @@ def _run_sync_batch(
         _finish_batch(batch_id, "succeeded", "同步完成")
 
 
-def _changes_limit_up_history_inputs(
-    job_id: str,
-    result: dict[str, Any],
-) -> bool:
-    if int(result.get("rows_written") or 0) <= 0:
-        return False
-    return job_id in HISTORY_INPUT_JOB_IDS
-
-
-def _run_limit_up_next_session_plan_batch_job(
-    phase: Literal["preliminary", "final"],
-) -> dict[str, Any]:
-    snapshot = refresh_next_session_plan(phase)
-    recommendations = snapshot.get("recommendations")
-    recommendations = recommendations if isinstance(recommendations, dict) else {}
-    lanes = recommendations.get("lanes")
-    lanes = lanes if isinstance(lanes, dict) else {}
-    observations = lanes.get("next_auction")
-    observations = observations if isinstance(observations, list) else []
-    quality = snapshot.get("data_quality")
-    quality = quality if isinstance(quality, dict) else {}
-    status = str(snapshot.get("status") or quality.get("status") or "empty")
-    return {
-        "rows_read": len(observations),
-        "rows_written": len(observations),
-        "status": "skipped" if status == "empty" else status,
-        "message": f"次交易时段{phase}观察计划：{len(observations)} 个候选",
-    }
-
-
-def _run_limit_up_live_trace_prune_batch_job() -> dict[str, Any]:
-    deleted = prune_live_trace_snapshots()
-    return {
-        "rows_read": deleted,
-        "rows_written": deleted,
-        "status": "succeeded",
-        "message": f"实时打板诊断缓存保留最近2个交易日，清理 {deleted} 行",
-    }
-
-
-def _run_limit_up_ths_evidence_batch_job(
-    params: dict[str, Any],
-    *,
-    progress: ProgressCallback | None = None,
-) -> dict[str, Any]:
-    result = import_ths_evidence(
-        max_dates=int(params.get("max_dates") or 252),
-        only_missing=_truthy(params.get("only_missing", True)),
-        progress=progress,
-    )
-    status = str(result.get("status") or "unknown")
-    if status in {"error", "rejected", "unavailable"}:
-        raise DataSyncError(str(result.get("message") or f"同花顺历史证据补数失败：{status}"))
-    return result
-
-
-def _run_limit_up_history_rebuild_batch_job(
-    *,
-    force: bool = False,
-) -> dict[str, Any]:
-    from alphaagent.server.services.limit_up import history_service
-
-    latest_reliable_date = _latest_complete_daily_date_for_research()
-    result = history_service.refresh_history_if_needed(
-        latest_reliable_date,
-        force=force,
-    )
-    if str(result.get("status") or "") == "skipped":
-        return {
-            **result,
-            "rows_read": 0,
-            "rows_written": 0,
-            "message": (
-                "打板历史账本已覆盖最新完整交易日，"
-                f"无需重建：{result.get('persisted_end') or '-'}"
-            ),
-        }
-
-    persisted_days = int(result.get("persisted_days") or 0)
-    return {
-        **result,
-        "rows_read": persisted_days,
-        "rows_written": persisted_days,
-        "message": (
-            "打板历史账本已刷新："
-            f"{result.get('start') or '-'}..{result.get('end') or '-'}，"
-            f"{persisted_days} 个交易日"
-        ),
-    }
-
-
 def _latest_complete_daily_date_for_research() -> date | None:
     if not is_database_configured():
         return None
     with session_scope() as session:
         return _latest_complete_daily_date(session)
+
+
+def _run_low_suction_live_snapshot_refresh_batch_job() -> dict[str, Any]:
+    """Replace the intraday low-suction snapshot after today's daily bars settle."""
+
+    today = _now_china().date()
+    latest_complete = _latest_complete_daily_date_for_research()
+    if latest_complete != today:
+        latest_label = latest_complete.isoformat() if latest_complete else "无"
+        return {
+            "status": "skipped",
+            "rows_read": 0,
+            "rows_written": 0,
+            "message": (
+                f"当天确认日线未就绪（最近完整日线 {latest_label}），"
+                "保留现有低吸实时快照"
+            ),
+        }
+    try:
+        snapshot = refresh_live_recommendations()
+    except LiveScanAlreadyRunningError:
+        return {
+            "status": "skipped",
+            "rows_read": 0,
+            "rows_written": 0,
+            "message": "低吸实时扫描已有服务器任务在执行，跳过确认快照刷新",
+        }
+
+    trend_count = _low_suction_family_count(snapshot.get("trend"))
+    oversold_count = _low_suction_family_count(snapshot.get("oversold"))
+    trade_date = str(snapshot.get("trade_date") or today.isoformat())
+    return {
+        "status": "succeeded",
+        "rows_read": trend_count + oversold_count,
+        "rows_written": 1,
+        "message": (
+            f"已用 {trade_date} 确认日线刷新低吸实时快照，"
+            f"趋势 {trend_count} 只，超跌 {oversold_count} 只"
+        ),
+    }
 
 
 def _run_low_suction_daily_backtest_rerun_batch_job() -> dict[str, Any]:
@@ -3704,157 +3274,6 @@ def _run_low_suction_daily_backtest_rerun_batch_job() -> dict[str, Any]:
             f"十槽组合复利 {combined.get('compound_pct')}% / 胜率 {combined.get('win_rate_pct')}%"
         ),
     }
-
-
-def _run_leader_minute_backtest_rerun_batch_job() -> dict[str, Any]:
-    """每晚 22:00 重跑潜龙首板分钟级回测（v4-B 生产配置）并写库。
-
-    v4-B = Phase 0 白名单 6 因子 + 深跌排除（A/B 两档口径唯一都赢 v3 的版本，
-    证据 memory/06_backtests/limit_up_leader_minute_backtest_v4ab_20260801.md）。
-    """
-
-    from alphaagent.server.services.limit_up.leader_minute_backtest import (
-        PRODUCTION_MIN_TRIGGER_VOLUME_RATIO,
-        STUDY_VERSION,
-        run_minute_backtest,
-    )
-    from alphaagent.server.services.limit_up.leader_minute_repository import (
-        save_minute_backtest_run,
-    )
-    from alphaagent.server.services.limit_up.leader_sweep_repository import (
-        save_sweep_backtest_run,
-    )
-
-    end = _latest_complete_daily_date_for_research()
-    if end is None:
-        return {"status": "skipped", "rows_read": 0, "rows_written": 0, "message": "数据库未就绪"}
-    start = end - timedelta(days=150)
-    result = run_minute_backtest(
-        start=start,
-        end=end,
-        min_trigger_volume_ratio=PRODUCTION_MIN_TRIGGER_VOLUME_RATIO,
-        index_ma20_gate=True,  # 大盘 MA20 环境门（宽口径验证：下跌段停手，回撤 -29%→-4%）
-    )
-    save_minute_backtest_run(STUDY_VERSION, result)
-    summary = result.get("execution_summary") or {}
-    sweep_result = run_minute_backtest(
-        start=start,
-        end=end,
-        entry_mode="sweep_board",
-    )
-    save_sweep_backtest_run(STUDY_VERSION, sweep_result)
-    sweep_summary = sweep_result.get("execution_summary") or {}
-    return {
-        "rows_read": int((result.get("coverage_stats") or {}).get("trigger_count") or 0),
-        "rows_written": 2,
-        "message": (
-            f"潜龙首板回测已刷新（v5b+扫板）：{start.isoformat()}..{end.isoformat()}，"
-            f"分钟级 复利 {summary.get('total_return_pct')}% / 胜率 {summary.get('win_rate')}% "
-            f"/ {summary.get('trade_count')} 笔；"
-            f"扫板 复利 {sweep_summary.get('total_return_pct')}% / 胜率 "
-            f"{sweep_summary.get('win_rate')}% / {sweep_summary.get('trade_count')} 笔"
-        ),
-    }
-
-
-def _run_premarket_prelude_snapshot_batch_job() -> dict[str, Any]:
-    """每晚 22:00（回测重跑后）预算盘前首板前奏候选并写快照表。
-
-    盘前 API 读快照毫秒返回——实时全市场形态扫描在 0.25 核 api 容器上要
-    30-60s，盘前等不起；worker 无 CPU 限制，EOD 后数据静态，提前算好。
-    """
-
-    from alphaagent.server.services.limit_up.premarket_prelude_service import (
-        build_premarket_prelude_candidates,
-        save_premarket_prelude_snapshot,
-    )
-
-    result = build_premarket_prelude_candidates(pattern="all", limit=0)  # 全量入快照
-    if result.get("status") != "ok":
-        return {
-            "status": "skipped",
-            "rows_read": 0,
-            "rows_written": 0,
-            "message": f"盘前前奏候选不可用：{result.get('message') or result.get('status')}",
-        }
-    written = save_premarket_prelude_snapshot(result)
-    return {
-        "rows_read": int(result.get("count") or 0),
-        "rows_written": written,
-        "message": (
-            f"盘前低位首板候选已刷新：D-1={result.get('trade_date')}，"
-            f"低位池 {result.get('count')} 只（板块动量排序，人工观察池）"
-        ),
-    }
-
-
-def _run_premarket_fused_score_snapshot_batch_job() -> dict[str, Any]:
-    """每晚 22:00（前奏快照后）预算盘前融合计分候选并写快照表。
-
-    全市场结构+旅程特征计算量大（~3000 票 × 69 根窗口），api 容器跑不动；
-    worker 无 CPU 限制，EOD 后数据静态，提前算好。
-    """
-
-    from alphaagent.server.services.limit_up.premarket_fused_score_service import (
-        build_premarket_fused_score_candidates,
-        save_premarket_fused_score_snapshot,
-    )
-
-    result = build_premarket_fused_score_candidates(score_type="all", limit=0)  # 全量入快照
-    if result.get("status") != "ok":
-        return {
-            "status": "skipped",
-            "rows_read": 0,
-            "rows_written": 0,
-            "message": f"盘前融合计分候选不可用：{result.get('message') or result.get('status')}",
-        }
-    written = save_premarket_fused_score_snapshot(result)
-    return {
-        "rows_read": int(result.get("count") or 0),
-        "rows_written": written,
-        "message": (
-            f"盘前融合计分候选已刷新：D-1={result.get('trade_date')}，"
-            f"入榜 {result.get('count')} 只（融合分降序，人工复核观察池）"
-        ),
-    }
-
-
-
-
-def _run_leader_forward_capture_batch_job() -> dict[str, Any]:
-    """盘中定时捕获潜龙首板推荐榜进前向纸面台账（Phase 3）。"""
-
-    from alphaagent.server.services.limit_up.leader_forward_ledger import (
-        capture_forward_signals,
-    )
-
-    try:
-        return capture_forward_signals()
-    except Exception as exc:  # noqa: BLE001
-        return {
-            "status": "skipped",
-            "rows_read": 0,
-            "rows_written": 0,
-            "message": f"前向台账捕获失败：{exc.__class__.__name__}",
-        }
-
-
-def _run_leader_forward_settle_batch_job() -> dict[str, Any]:
-    """EOD 结算前向台账（回填 D 收盘 / D+1 开盘收盘）。"""
-
-    from alphaagent.server.services.limit_up.leader_forward_ledger import (
-        settle_forward_signals,
-    )
-
-    try:
-        return settle_forward_signals()
-    except Exception as exc:  # noqa: BLE001
-        return {
-            "status": "skipped",
-            "rows_read": 0,
-            "rows_written": 0,
-            "message": f"前向台账结算失败：{exc.__class__.__name__}",
-        }
 
 
 def _batch_job_params(job_id: str, batch_params: dict[str, Any]) -> dict[str, Any]:
@@ -4936,7 +4355,7 @@ def _interrupted_schedule_recovery_due(
 
 
 def _scheduler_loop() -> None:
-    """Main scheduler loop with a fast tick for time-sensitive board scans."""
+    """Main scheduler loop with a fast tick for time-sensitive intraday scans."""
     while not _scheduler_stop.is_set():
         try:
             _run_scheduled_jobs()
@@ -4946,7 +4365,7 @@ def _scheduler_loop() -> None:
 
 
 def _scheduler_tick_seconds(now_china: datetime) -> int:
-    if _limit_up_live_scan_window_open(now_china):
+    if _low_suction_live_scan_window_open(now_china):
         return SCHEDULER_TICK_SECONDS
     return SCHEDULER_IDLE_TICK_SECONDS
 
@@ -4977,51 +4396,33 @@ def _recently_started(row: dict[str, Any], within_seconds: int = 1800) -> bool:
     return (datetime.now(timezone.utc) - last_started).total_seconds() < within_seconds
 
 
-def _start_concept_scan_schedule(row: dict[str, Any]) -> bool:
-    """Run an automatic concept refresh without blocking the live scan loop."""
-
-    global _concept_schedule_running
-    with _concept_schedule_lock:
-        if _concept_schedule_running:
-            return False
-        _concept_schedule_running = True
-
-    thread = threading.Thread(
-        target=_run_concept_scan_schedule,
-        args=(dict(row),),
-        name="limit-up-concept-scan",
-        daemon=True,
-    )
-    try:
-        thread.start()
-    except Exception:
-        with _concept_schedule_lock:
-            _concept_schedule_running = False
-        raise
-    return True
-
-
-def _run_concept_scan_schedule(row: dict[str, Any]) -> None:
-    global _concept_schedule_running
-    try:
-        _run_schedule_action(row)
-    finally:
-        with _concept_schedule_lock:
-            _concept_schedule_running = False
-
-
-def _start_low_suction_live_scan_schedule(row: dict[str, Any]) -> bool:
+def _start_low_suction_live_scan_schedule(
+    row: dict[str, Any],
+    *,
+    force_tail_final: bool = False,
+    tail_final_date: date | None = None,
+) -> bool:
     """Run the long low-suction scan outside the scheduler tick thread."""
 
     global _low_suction_schedule_running
+    global _low_suction_tail_final_attempted_date
+    global _low_suction_tail_final_pending_date
+    requested_tail_date = tail_final_date or _now_china().date()
     with _low_suction_schedule_lock:
+        if force_tail_final:
+            if _low_suction_tail_final_attempted_date == requested_tail_date:
+                return False
+            _low_suction_tail_final_pending_date = requested_tail_date
         if _low_suction_schedule_running:
             return False
+        if force_tail_final:
+            _low_suction_tail_final_attempted_date = requested_tail_date
+            _low_suction_tail_final_pending_date = None
         _low_suction_schedule_running = True
 
     thread = threading.Thread(
         target=_run_low_suction_live_scan_schedule,
-        args=(dict(row),),
+        args=(dict(row), force_tail_final),
         name="low-suction-live-scan",
         daemon=True,
     )
@@ -5030,23 +4431,52 @@ def _start_low_suction_live_scan_schedule(row: dict[str, Any]) -> bool:
     except Exception:
         with _low_suction_schedule_lock:
             _low_suction_schedule_running = False
+            if (
+                force_tail_final
+                and _low_suction_tail_final_attempted_date == requested_tail_date
+            ):
+                _low_suction_tail_final_attempted_date = None
+                _low_suction_tail_final_pending_date = requested_tail_date
         raise
     return True
 
 
-def _run_low_suction_live_scan_schedule(row: dict[str, Any]) -> None:
+def _run_low_suction_live_scan_schedule(
+    row: dict[str, Any],
+    force_tail_final: bool = False,
+) -> None:
     global _low_suction_schedule_running
     try:
-        _run_schedule_action(row)
+        _run_schedule_action(row, force_tail_final=force_tail_final)
     finally:
+        pending_tail_date: date | None = None
         with _low_suction_schedule_lock:
             _low_suction_schedule_running = False
+            now_china = _now_china()
+            if (
+                not force_tail_final
+                and _low_suction_tail_final_pending_date == now_china.date()
+                and _low_suction_tail_final_attempted_date != now_china.date()
+                and _low_suction_tail_final_window_open(now_china)
+            ):
+                pending_tail_date = now_china.date()
+        if pending_tail_date is not None:
+            _start_low_suction_live_scan_schedule(
+                row,
+                force_tail_final=True,
+                tail_final_date=pending_tail_date,
+            )
 
 
 def _start_low_suction_live_scan_warmup() -> bool:
     """Fill a missing intraday snapshot after a scheduler-worker restart."""
 
     now_china = _now_china()
+    if _low_suction_tail_final_window_open(now_china):
+        for row in _load_batch_schedules():
+            if str(row.get("action") or "") == "low_suction_live_scan":
+                return _request_low_suction_tail_final_scan(row, now_china)
+        return False
     if not _low_suction_live_scan_window_open(now_china):
         return False
     for row in _load_batch_schedules():
@@ -5069,21 +4499,13 @@ def _run_scheduled_jobs() -> None:
         if not cron:
             continue
         action = str(row.get("action") or "sync")
-        if action in {"limit_up_live_scan", "limit_up_concept_scan"} and not _limit_up_live_scan_window_open(now_china):
-            continue
-        if action == "low_suction_live_scan" and not _low_suction_live_scan_window_open(now_china):
-            continue
-        if action == "limit_up_live_scan":
-            recently_started = _recently_started(
-                row,
-                within_seconds=max(LIVE_SCAN_INTERVAL_SECONDS - 1, 1),
-            )
-        elif action == "limit_up_concept_scan":
-            recently_started = _recently_started(
-                row,
-                within_seconds=max(CONCEPT_REFRESH_SECONDS - 1, 1),
-            )
-        elif action == "low_suction_live_scan":
+        if action == "low_suction_live_scan":
+            if _low_suction_tail_final_window_open(now_china):
+                _request_low_suction_tail_final_scan(row, now_china)
+                continue
+            if not _low_suction_live_scan_window_open(now_china):
+                continue
+        if action == "low_suction_live_scan":
             recently_started = _recently_started(
                 row,
                 within_seconds=max(LOW_SUCTION_LIVE_SCAN_INTERVAL_SECONDS - 1, 1),
@@ -5094,14 +4516,27 @@ def _run_scheduled_jobs() -> None:
             continue
         try:
             if _cron_matches(cron, now_china) or _schedule_catchup_due(row, now_china):
-                if action == "limit_up_concept_scan":
-                    _start_concept_scan_schedule(row)
-                elif action == "low_suction_live_scan":
+                if action == "low_suction_live_scan":
                     _start_low_suction_live_scan_schedule(row)
                 else:
                     _run_schedule_action(row)
         except Exception:
             pass
+
+
+def _request_low_suction_tail_final_scan(
+    row: dict[str, Any],
+    now_china: datetime,
+) -> bool:
+    """Queue one fresh tail scan, even when the previous minute is still running."""
+
+    if not _low_suction_tail_final_window_open(now_china):
+        return False
+    return _start_low_suction_live_scan_schedule(
+        row,
+        force_tail_final=True,
+        tail_final_date=now_china.date(),
+    )
 
 
 def _schedule_catchup_due(row: dict[str, Any], now_china: datetime) -> bool:
@@ -5128,46 +4563,11 @@ def _run_schedule_action(
     *,
     raise_errors: bool = False,
     source: str = "schedule",
+    force_tail_final: bool = False,
 ) -> dict[str, Any] | None:
     schedule_id = str(row["id"])
     action = str(row.get("action") or "sync")
     try:
-        if action == "limit_up_concept_scan":
-            _touch_schedule(
-                schedule_id,
-                last_started_at=datetime.now(timezone.utc),
-                last_status="running",
-            )
-            snapshot = refresh_live_concept_snapshot()
-            quality = snapshot.get("data_quality")
-            quality = quality if isinstance(quality, dict) else {}
-            succeeded = quality.get("status") == "ready"
-            _touch_schedule(
-                schedule_id,
-                last_status="succeeded" if succeeded else "skipped",
-                last_finished_at=datetime.now(timezone.utc),
-                last_message=(
-                    f"已更新 {int(snapshot.get('concept_count') or 0)} 个实时概念强度"
-                    if succeeded
-                    else f"概念行情不可用于新买点：{quality.get('status') or 'unavailable'}"
-                ),
-            )
-            return snapshot
-        if action == "limit_up_live_scan":
-            _touch_schedule(
-                schedule_id,
-                last_started_at=datetime.now(timezone.utc),
-                last_status="running",
-            )
-            snapshot = refresh_live_snapshot()
-            saved = _live_scan_snapshot_saved(snapshot)
-            _touch_schedule(
-                schedule_id,
-                last_status="succeeded" if saved else "skipped",
-                last_finished_at=datetime.now(timezone.utc),
-                last_message=_live_scan_status_message(snapshot, saved=saved),
-            )
-            return snapshot
         if action == "low_suction_live_scan":
             _touch_schedule(
                 schedule_id,
@@ -5175,7 +4575,11 @@ def _run_schedule_action(
                 last_status="running",
             )
             try:
-                snapshot = refresh_live_recommendations()
+                snapshot = (
+                    refresh_live_recommendations(force_tail_final=True)
+                    if force_tail_final
+                    else refresh_live_recommendations()
+                )
             except LiveScanAlreadyRunningError as exc:
                 snapshot = {"status": "skipped", "message": str(exc)}
             saved = _low_suction_live_snapshot_saved(snapshot)
@@ -5201,43 +4605,6 @@ def _run_schedule_action(
         if raise_errors:
             raise
         return None
-
-
-def _live_scan_snapshot_saved(snapshot: dict[str, Any]) -> bool:
-    quality = snapshot.get("data_quality")
-    return (
-        snapshot.get("mode") == "live_snapshot"
-        and isinstance(quality, dict)
-        and quality.get("is_stale") is False
-    )
-
-
-def _live_scan_actionable_count(snapshot: dict[str, Any]) -> int:
-    recommendations = snapshot.get("recommendations")
-    recommendations = recommendations if isinstance(recommendations, dict) else {}
-    lanes = recommendations.get("lanes")
-    lanes = lanes if isinstance(lanes, dict) else {}
-    return sum(
-        1
-        for rows in lanes.values()
-        if isinstance(rows, list)
-        for signal in rows
-        if isinstance(signal, dict) and signal.get("action") in {"buy_now", "next_auction"}
-    )
-
-
-def _live_scan_status_message(snapshot: dict[str, Any], *, saved: bool) -> str:
-    actionable = _live_scan_actionable_count(snapshot)
-    quality = snapshot.get("data_quality")
-    quality = quality if isinstance(quality, dict) else {}
-    trace_suffix = (
-        f"；诊断缓存写入失败：{str(quality.get('trace_cache_error') or '未知错误')[:200]}"
-        if quality.get("trace_cache_status") == "error"
-        else ""
-    )
-    if saved:
-        return f"已保存实时打板快照，{actionable} 个可执行动作{trace_suffix}"
-    return f"行情非有效实时状态，快照未保存，{actionable} 个可执行动作{trace_suffix}"
 
 
 def _low_suction_live_snapshot_saved(snapshot: Mapping[str, object]) -> bool:
@@ -5269,21 +4636,22 @@ def _low_suction_live_scan_status_message(
     )
 
 
-def _limit_up_live_scan_window_open(now_china: datetime) -> bool:
-    minute = now_china.hour * 60 + now_china.minute
-    return (
-        9 * 60 + 15 <= minute <= 11 * 60 + 30
-        or 13 * 60 <= minute <= 14 * 60 + 57
-    )
-
-
 def _low_suction_live_scan_window_open(now_china: datetime) -> bool:
     if now_china.weekday() >= 5:
         return False
     minute = now_china.hour * 60 + now_china.minute
     return (
         9 * 60 + 25 <= minute <= 11 * 60 + 30
-        or 13 * 60 <= minute <= 15 * 60 + 30
+        or 13 * 60 <= minute <= 15 * 60 + 1
+    )
+
+
+def _low_suction_tail_final_window_open(now_china: datetime) -> bool:
+    return (
+        now_china.weekday() < 5
+        and LOW_SUCTION_TAIL_FINAL_TIME
+        <= now_china.time()
+        <= LOW_SUCTION_TAIL_FINAL_RETRY_END
     )
 
 
@@ -7781,184 +7149,6 @@ def _upsert_sector_fund_flows(
         captured_at=snapshot_captured_at,
     )
     return len(flows_by_key)
-
-
-def _upsert_limit_up_events(
-    items: list[dict[str, Any]],
-    pool_type: str,
-    trade_date: str,
-) -> int:
-    """Replace one trade date's limit-up/limit-down pool events."""
-    if not items:
-        return 0
-    event_type = f"limit_pool_{pool_type}"
-    event_dates = _limit_pool_event_date_keys(trade_date)
-    written = 0
-    with session_scope() as session:
-        session.execute(
-            schema.stock_events.delete().where(
-                (schema.stock_events.c.source == LIMIT_POOL_EVENT_SOURCE)
-                & (schema.stock_events.c.event_type == event_type)
-                & (schema.stock_events.c.event_date.in_(event_dates))
-            )
-        )
-        known_symbols = set(
-            session.execute(select(schema.stocks.c.vt_symbol)).scalars().all()
-        )
-        seen_symbols: set[str] = set()
-        for item in items:
-            vts = str(item.get("vt_symbol") or "")
-            if not vts or vts in seen_symbols or vts not in known_symbols:
-                continue
-            seen_symbols.add(vts)
-            title = f"{pool_type}: {item.get('name', vts)}"
-            values = {
-                "vt_symbol": vts,
-                "event_date": event_dates[0],
-                "event_type": event_type,
-                "title": title,
-                "summary": str(item.get("raw") or {}),
-                "url": None,
-                "keywords": [pool_type],
-                "sentiment": "positive" if pool_type in ("zt", "strong") else "negative",
-                "importance": 0.8 if pool_type in ("zt", "strong") else 0.5,
-                "source": LIMIT_POOL_EVENT_SOURCE,
-                "raw": item.get("raw") or {},
-            }
-            session.execute(schema.stock_events.insert().values(**values))
-            written += 1
-    return written
-
-
-def _limit_pool_event_date_keys(trade_date: str) -> list[str]:
-    """Return both event_date formats used by historical limit-pool rows."""
-    raw = str(trade_date or date.today().strftime("%Y%m%d")).strip()
-    keys = [raw] if raw else []
-    parsed: date | None = None
-    for fmt in ("%Y%m%d", "%Y-%m-%d"):
-        try:
-            parsed = datetime.strptime(raw, fmt).date()
-            break
-        except ValueError:
-            continue
-    if parsed:
-        keys.extend([parsed.strftime("%Y%m%d"), parsed.isoformat()])
-    return list(dict.fromkeys(key for key in keys if key))
-
-
-# 盘中封单快照只积累涨停池与炸板池（封单研究的两端），其余池与事件表重叠。
-_LIMIT_POOL_SNAPSHOT_POOLS = ("zt", "zbgc")
-
-
-def _append_limit_up_pool_snapshots(
-    pools: dict[str, Any],
-    trade_date: str,
-    source_updated_at: Any,
-) -> int:
-    """把涨停/炸板池的盘中 payload 追加进 ``limit_up_pool_snapshots``。
-
-    stock_events 只留每日终态（delete+insert），盘中封单演化只能靠本表还原。
-    按 ``source_updated_at`` 去重：市场缓存 TTL 内重复触发同一 payload 时跳过。
-    快照失败不阻断事件同步（调用方捕获）。
-    """
-
-    event_dates = _limit_pool_event_date_keys(trade_date)
-    if not event_dates:
-        return 0
-    snapshot_date = None
-    for fmt in ("%Y%m%d", "%Y-%m-%d"):
-        try:
-            snapshot_date = datetime.strptime(event_dates[0], fmt).date()
-            break
-        except ValueError:
-            continue
-    if snapshot_date is None:
-        return 0
-    updated_at = _parse_pool_snapshot_time(source_updated_at)
-    captured_at = _now_china()
-    written = 0
-    with session_scope() as session:
-        for pool_type in _LIMIT_POOL_SNAPSHOT_POOLS:
-            pool_data = pools.get(pool_type)
-            if not isinstance(pool_data, dict):
-                continue
-            items = pool_data.get("items") or []
-            if not items:
-                continue
-            if updated_at is not None:
-                existing = session.execute(
-                    select(func.max(schema.limit_up_pool_snapshots.c.source_updated_at)).where(
-                        (schema.limit_up_pool_snapshots.c.trade_date == snapshot_date)
-                        & (schema.limit_up_pool_snapshots.c.pool_type == pool_type)
-                    )
-                ).scalar()
-                if existing is not None and existing >= updated_at:
-                    continue
-            rows = [
-                _limit_up_pool_snapshot_row(
-                    item, snapshot_date, captured_at, updated_at, pool_type
-                )
-                for item in items
-                if item.get("vt_symbol")
-            ]
-            if rows:
-                session.execute(schema.limit_up_pool_snapshots.insert(), rows)
-                written += len(rows)
-    return written
-
-
-def _parse_pool_snapshot_time(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        return value
-    try:
-        return datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def _int_or_none(value: Any) -> int | None:
-    try:
-        return int(float(value)) if value not in (None, "") else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _limit_up_pool_snapshot_row(
-    item: dict[str, Any],
-    snapshot_date: date,
-    captured_at: datetime,
-    updated_at: datetime | None,
-    pool_type: str,
-) -> dict[str, Any]:
-    raw = item.get("raw") or {}
-
-    def _raw_number(*keys: str) -> float | None:
-        for key in keys:
-            number = _float_or_none(raw.get(key))
-            if number is not None:
-                return number
-        return None
-
-    return {
-        "trade_date": snapshot_date,
-        "captured_at": captured_at,
-        "source_updated_at": updated_at,
-        "pool_type": pool_type,
-        "vt_symbol": str(item.get("vt_symbol") or ""),
-        "name": str(item.get("name") or "") or None,
-        "close_price": _float_or_none(item.get("close_price")),
-        "change_pct": _float_or_none(item.get("change_pct")),
-        "limit_up_price": _float_or_none(item.get("limit_up_price")),
-        "seal_amount": _float_or_none(item.get("limit_amount")),
-        "turnover": _raw_number("成交额"),
-        "turnover_rate": _float_or_none(item.get("turnover_rate")),
-        "volume_ratio": _float_or_none(item.get("volume_ratio")),
-        "open_times": _int_or_none(raw.get("炸板次数")),
-        "first_limit_time": str(item.get("first_limit_time") or "") or None,
-        "last_limit_time": str(item.get("last_limit_time") or "") or None,
-        "limit_times": _int_or_none(item.get("limit_up_count")),
-        "raw": raw,
-    }
 
 
 def _upsert_stock_fund_flows(

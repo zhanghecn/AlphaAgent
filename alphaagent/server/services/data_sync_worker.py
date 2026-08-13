@@ -21,17 +21,14 @@ CHINA_TZ = timezone(timedelta(hours=8))
 DEFAULT_HEALTH_PORT = 8010
 
 EXPECTED_RUNTIME_CONSTANTS = {
-    "LIVE_SCAN_INTERVAL_SECONDS": 10,
+    "LIVE_SCAN_INTERVAL_SECONDS": 60,
     "SCHEDULER_TICK_SECONDS": 2,
-    "CONCEPT_REFRESH_SECONDS": 30,
 }
 SCHEDULE_HEARTBEAT_MAX_AGE_SECONDS = {
-    "limit_up_live_scan": 60,
-    "limit_up_concept_scan": 120,
+    "low_suction_live_scan": 180,
 }
 SCHEDULE_ACTIONS = {
-    "limit_up_live_scan": "limit_up_live_scan",
-    "limit_up_concept_scan": "limit_up_concept_scan",
+    "low_suction_live_scan": "low_suction_live_scan",
 }
 
 
@@ -76,15 +73,14 @@ def run_forever(*, stop_event: Event | None = None) -> None:
 
 @lru_cache(maxsize=1)
 def load_worker_runtime_constants() -> dict[str, int]:
-    """Read frozen cadence constants without importing the full scheduler graph."""
+    """Read low-suction cadence constants without importing the scheduler graph."""
 
     services = Path(__file__).resolve().parent
     sources = {
-        "LIVE_SCAN_INTERVAL_SECONDS": services / "limit_up" / "live_service.py",
-        "SCHEDULER_TICK_SECONDS": services / "data_sync.py",
-        "CONCEPT_REFRESH_SECONDS": (
-            services / "limit_up" / "concept_live_service.py"
+        "LIVE_SCAN_INTERVAL_SECONDS": (
+            services / "low_suction" / "daily_picks_service.py"
         ),
+        "SCHEDULER_TICK_SECONDS": services / "data_sync.py",
     }
     return {
         name: _literal_integer_assignment(path, name)
@@ -97,12 +93,8 @@ def audit_worker_health(
     now: datetime,
     constants: Mapping[str, int],
     schedules: Sequence[Mapping[str, object]],
-    latest_frame: Mapping[str, object] | None,
-    current_day_frame_count: int,
-    current_day_fingerprints: Sequence[object],
-    current_day_missing_fingerprint_count: int,
 ) -> dict[str, object]:
-    """Evaluate only worker liveness and immutable radar capture invariants."""
+    """Evaluate scheduler liveness for the low-suction intraday scan."""
 
     current = _aware_china_datetime(now)
     reasons: list[str] = []
@@ -137,25 +129,6 @@ def audit_worker_health(
         ):
             reasons.append(f"{schedule_id}_heartbeat_stale")
 
-    latest_fingerprint = (
-        latest_frame.get("capture_runtime_fingerprint")
-        if latest_frame is not None
-        else None
-    )
-    day_frame_count = max(int(current_day_frame_count), 0)
-    day_fingerprints = {
-        str(value).strip()
-        for value in current_day_fingerprints
-        if str(value or "").strip()
-    }
-    if day_frame_count and heartbeat_required:
-        if current_day_missing_fingerprint_count > 0 or not day_fingerprints:
-            reasons.append("current_day_radar_fingerprint_missing")
-        if any(not _is_runtime_fingerprint(value) for value in day_fingerprints):
-            reasons.append("current_day_radar_fingerprint_invalid")
-        if len(day_fingerprints) > 1:
-            reasons.append("current_day_radar_fingerprint_changed")
-
     return {
         "ok": not reasons,
         "status": "healthy" if not reasons else "unhealthy",
@@ -164,15 +137,6 @@ def audit_worker_health(
         "runtime_constants": dict(constants),
         "scan_heartbeat_required": heartbeat_required,
         "schedule_heartbeat_age_seconds": heartbeat_ages,
-        "latest_radar_trade_date": (
-            str(latest_frame.get("trade_date")) if latest_frame else None
-        ),
-        "latest_radar_captured_at": (
-            str(latest_frame.get("captured_at")) if latest_frame else None
-        ),
-        "latest_radar_fingerprint": latest_fingerprint,
-        "current_day_frame_count": day_frame_count,
-        "current_day_fingerprint_count": len(day_fingerprints),
     }
 
 
@@ -185,12 +149,6 @@ def check_worker_health(*, now: datetime | None = None) -> dict[str, object]:
         now=current,
         constants=load_worker_runtime_constants(),
         schedules=state["schedules"],
-        latest_frame=state["latest_frame"],
-        current_day_frame_count=state["current_day_frame_count"],
-        current_day_fingerprints=state["current_day_fingerprints"],
-        current_day_missing_fingerprint_count=(
-            state["current_day_missing_fingerprint_count"]
-        ),
     )
 
 
@@ -267,44 +225,8 @@ def _load_worker_health_state(now: datetime) -> dict[str, object]:
                 (list(SCHEDULE_ACTIONS),),
             )
             schedules = [dict(row) for row in cursor.fetchall()]
-            cursor.execute(
-                """
-                SELECT trade_date, captured_at, capture_runtime_fingerprint
-                FROM limit_up_radar_frames
-                ORDER BY captured_at DESC, id DESC
-                LIMIT 1
-                """
-            )
-            latest = cursor.fetchone()
-            cursor.execute(
-                """
-                SELECT
-                    COUNT(*) AS frame_count,
-                    COUNT(*) FILTER (
-                        WHERE capture_runtime_fingerprint IS NULL
-                           OR BTRIM(capture_runtime_fingerprint) = ''
-                    ) AS missing_fingerprint_count,
-                    COALESCE(
-                        ARRAY_AGG(DISTINCT capture_runtime_fingerprint) FILTER (
-                            WHERE capture_runtime_fingerprint IS NOT NULL
-                              AND BTRIM(capture_runtime_fingerprint) <> ''
-                        ),
-                        ARRAY[]::VARCHAR[]
-                    ) AS fingerprints
-                FROM limit_up_radar_frames
-                WHERE trade_date = %s
-                """,
-                (now.date(),),
-            )
-            current_day = cursor.fetchone() or {}
     return {
         "schedules": schedules,
-        "latest_frame": dict(latest) if latest else None,
-        "current_day_frame_count": int(current_day.get("frame_count") or 0),
-        "current_day_fingerprints": list(current_day.get("fingerprints") or []),
-        "current_day_missing_fingerprint_count": int(
-            current_day.get("missing_fingerprint_count") or 0
-        ),
     }
 
 
@@ -349,9 +271,8 @@ def _literal_integer_assignment(path: Path, name: str) -> int:
 
 def _runtime_constant_reason(name: str, expected: int) -> str:
     labels = {
-        "LIVE_SCAN_INTERVAL_SECONDS": "live_scan_interval",
+        "LIVE_SCAN_INTERVAL_SECONDS": "low_suction_live_scan_interval",
         "SCHEDULER_TICK_SECONDS": "scheduler_tick",
-        "CONCEPT_REFRESH_SECONDS": "concept_refresh",
     }
     return f"{labels[name]}_not_{expected}s"
 
@@ -361,8 +282,8 @@ def _scan_heartbeat_required(now: datetime) -> bool:
         return False
     current_time = now.timetz().replace(tzinfo=None)
     return (
-        time(9, 15) <= current_time < time(11, 31)
-        or time(13, 0) <= current_time < time(14, 58)
+        time(9, 25) <= current_time <= time(11, 30)
+        or time(13, 0) <= current_time <= time(15, 1)
     )
 
 
@@ -379,15 +300,6 @@ def _aware_china_datetime(value: datetime) -> datetime:
     if value.tzinfo is None:
         raise ValueError("healthcheck datetime must be timezone-aware")
     return value.astimezone(CHINA_TZ)
-
-
-def _is_runtime_fingerprint(value: object) -> bool:
-    text_value = str(value or "").strip()
-    return bool(
-        len(text_value) == 71
-        and text_value.startswith("sha256:")
-        and all(character in "0123456789abcdef" for character in text_value[7:])
-    )
 
 
 def _run_healthcheck() -> int:

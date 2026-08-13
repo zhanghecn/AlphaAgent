@@ -7,6 +7,7 @@ import {
   fetchLowSuctionBacktestStatus,
   fetchLowSuctionLedger,
   fetchLowSuctionLive,
+  fetchLowSuctionLiveDates,
   rebuildLowSuctionBacktest,
   type LowSuctionRebuildStatus,
 } from "@/api/lowSuction";
@@ -77,12 +78,20 @@ export function LowSuctionPage() {
 function LiveTab() {
   const [trendPage, setTrendPage] = useState(1);
   const [oversoldPage, setOversoldPage] = useState(1);
-  const query = useQuery({
-    queryKey: ["lowSuctionLive", trendPage, oversoldPage],
-    queryFn: () => fetchLowSuctionLive({ trendPage, oversoldPage }),
-    // 后端只读持久化快照；分钟级读取可及时显示下一轮后台扫描结果。
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const datesQuery = useQuery({
+    queryKey: ["lowSuctionLiveDates"],
+    queryFn: fetchLowSuctionLiveDates,
+    staleTime: LOW_SUCTION_LIVE_REFRESH_INTERVAL_MS,
     refetchInterval: LOW_SUCTION_LIVE_REFRESH_INTERVAL_MS,
     refetchOnWindowFocus: true,
+  });
+  const query = useQuery({
+    queryKey: ["lowSuctionLive", selectedDate, trendPage, oversoldPage],
+    queryFn: () => fetchLowSuctionLive({ trendPage, oversoldPage, date: selectedDate ?? undefined }),
+    // 后端只读持久化快照；分钟级读取可及时显示下一轮后台扫描结果。
+    refetchInterval: selectedDate === null ? LOW_SUCTION_LIVE_REFRESH_INTERVAL_MS : false,
+    refetchOnWindowFocus: selectedDate === null,
   });
   if (query.isLoading && !query.data) return <div className="py-5"><LoadingState rows={6} /></div>;
   if (query.isError || !query.data) {
@@ -95,6 +104,13 @@ function LiveTab() {
   return (
     <LowSuctionLiveView
       payload={query.data}
+      availableDates={datesQuery.data?.dates ?? []}
+      selectedDate={selectedDate}
+      onDateChange={(date) => {
+        setSelectedDate(date);
+        setTrendPage(1);
+        setOversoldPage(1);
+      }}
       onTrendPageChange={setTrendPage}
       onOversoldPageChange={setOversoldPage}
     />
