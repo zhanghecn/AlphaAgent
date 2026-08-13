@@ -2,6 +2,7 @@ import importlib
 import os
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -655,6 +656,41 @@ def test_all_stock_ohlcv_spot_rejects_incomplete_sina_pages(monkeypatch) -> None
         )
 
     assert sorted(requested_pages) == [1, 2, 3]
+
+
+def test_all_stock_ohlcv_spot_rejects_a_fetch_deadline(monkeypatch) -> None:
+    import alphaagent.data_sources.akshare_adapter as adapter_module
+
+    monkeypatch.setattr(adapter_module, "_sina_sector_member_count", lambda _node: 101)
+    monkeypatch.setattr(
+        adapter_module,
+        "FULL_MARKET_OHLCV_SPOT_FETCH_TIMEOUT_SECONDS",
+        0.001,
+    )
+
+    class SlowExecutor(ThreadPoolExecutor):
+        shutdown_calls: list[tuple[bool, bool]] = []
+
+        def submit(self, fn, /, *args, **kwargs):
+            return super().submit(lambda: (__import__("time").sleep(0.1), fn(*args, **kwargs))[1])
+
+        def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+            self.shutdown_calls.append((wait, cancel_futures))
+            super().shutdown(wait=wait, cancel_futures=cancel_futures)
+
+    monkeypatch.setattr(adapter_module, "ThreadPoolExecutor", SlowExecutor)
+    monkeypatch.setattr(
+        adapter_module,
+        "_sina_sector_member_rows",
+        lambda *_args, **_kwargs: [],
+    )
+
+    with pytest.raises(AkShareSourceError, match="snapshot timed out: 0/2 pages"):
+        adapter_module.AkShareAdapter()._all_stock_ohlcv_spot_uncached(
+            max_workers=1
+        )
+
+    assert SlowExecutor.shutdown_calls == [(False, True)]
 
 
 def test_all_stock_ohlcv_spot_rejects_unavailable_sina_count(monkeypatch) -> None:

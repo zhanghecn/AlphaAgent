@@ -49,6 +49,8 @@ FULL_MARKET_MAX_WORKERS = 6
 FULL_MARKET_OHLCV_SPOT_PAGE_SIZE = 100
 FULL_MARKET_OHLCV_SPOT_MAX_WORKERS = 6
 FULL_MARKET_OHLCV_SPOT_MIN_COVERAGE_RATIO = 0.99
+FULL_MARKET_OHLCV_SPOT_REQUEST_TIMEOUT_SECONDS = 20
+FULL_MARKET_OHLCV_SPOT_FETCH_TIMEOUT_SECONDS = 90
 EASTMONEY_LIVE_PAGE_MAX_AGE_SECONDS = 20
 EASTMONEY_LIVE_PAGE_MIN_FRESH_RATIO = 0.90
 OVERVIEW_TTL_SECONDS = 30
@@ -440,13 +442,14 @@ class AkShareAdapter:
 
             page_count = math.ceil(source_total / FULL_MARKET_OHLCV_SPOT_PAGE_SIZE)
             pages: dict[int, list[dict[str, Any]]] = {}
-            with ThreadPoolExecutor(
+            executor = ThreadPoolExecutor(
                 max_workers=min(
                     max(int(max_workers), 1),
                     FULL_MARKET_OHLCV_SPOT_MAX_WORKERS,
                 ),
                 thread_name_prefix="all-stock-ohlcv-spot",
-            ) as executor:
+            )
+            try:
                 futures = {
                     executor.submit(
                         _sina_full_market_ohlcv_page,
@@ -454,8 +457,20 @@ class AkShareAdapter:
                     ): page
                     for page in range(1, page_count + 1)
                 }
-                for future in as_completed(futures):
-                    pages[futures[future]] = future.result()
+                try:
+                    for future in as_completed(
+                        futures,
+                        timeout=FULL_MARKET_OHLCV_SPOT_FETCH_TIMEOUT_SECONDS,
+                    ):
+                        pages[futures[future]] = future.result()
+                except TimeoutError as exc:
+                    completed_pages = len(pages)
+                    raise AkShareSourceError(
+                        "Sina A-share spot snapshot timed out: "
+                        f"{completed_pages}/{page_count} pages"
+                    ) from exc
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
 
         items_by_symbol: dict[str, dict[str, Any]] = {}
         for page in range(1, page_count + 1):
@@ -4229,7 +4244,11 @@ def _sina_sector_member_rows(node: str, page: int, page_size: int, sort: str) ->
         "symbol": "",
         "_s_r_a": "init",
     }
-    response = requests.get(url, params=params, timeout=20)
+    response = requests.get(
+        url,
+        params=params,
+        timeout=FULL_MARKET_OHLCV_SPOT_REQUEST_TIMEOUT_SECONDS,
+    )
     data = response.json()
     if not isinstance(data, list):
         raise AkShareSourceError(f"Sina sector node returned {type(data).__name__}")
