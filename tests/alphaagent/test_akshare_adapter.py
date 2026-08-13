@@ -551,64 +551,47 @@ def test_all_stock_quotes_rejects_a_partial_page_failure(monkeypatch) -> None:
         adapter_module.AkShareAdapter()._all_stock_quotes_uncached(max_workers=2)
 
 
-def test_all_stock_ohlcv_spot_fetches_complete_sina_pages_and_deduplicates(
+def test_all_stock_ohlcv_spot_fetches_all_sina_pages(
     monkeypatch,
 ) -> None:
     import alphaagent.data_sources.akshare_adapter as adapter_module
 
     requested_pages: list[int] = []
+
+    def make_row(index: int) -> dict[str, str]:
+        symbol = (
+            f"sh{600000 + index:06d}"
+            if index < 100
+            else f"sz{index - 100:06d}"
+        )
+        return {
+            "symbol": symbol,
+            "code": symbol[2:],
+            "name": f"股票{index}",
+            "trade": "10.50",
+            "open": "10.20",
+            "high": "10.70",
+            "low": "10.10",
+            "volume": "123456",
+            "amount": "1296288",
+            "ticktime": "10:15:00",
+        }
+
+    rows = [make_row(index) for index in range(201)]
     pages = {
-        1: [
-            {
-                "symbol": "sh600000",
-                "code": "600000",
-                "name": "浦发银行",
-                "trade": "10.50",
-                "open": "10.20",
-                "high": "10.70",
-                "low": "10.10",
-                "volume": "123456",
-                "amount": "1296288",
-                "ticktime": "10:15:00",
-            }
-        ],
-        2: [
-            {
-                "symbol": "sz000001",
-                "code": "000001",
-                "name": "平安银行",
-                "trade": "11.20",
-                "open": "11.00",
-                "high": "11.30",
-                "low": "10.90",
-                "volume": "654321",
-                "amount": "7328395",
-                "ticktime": "10:15:00",
-            },
-            {
-                "symbol": "sh600000",
-                "code": "600000",
-                "name": "浦发银行",
-                "trade": "10.50",
-                "open": "10.20",
-                "high": "10.70",
-                "low": "10.10",
-                "volume": "123456",
-                "amount": "1296288",
-                "ticktime": "10:15:00",
-            },
-        ],
+        page: rows[(page - 1) * 100 : page * 100]
+        for page in range(1, 4)
     }
 
     monkeypatch.setattr(
         adapter_module,
         "_sina_sector_member_count",
-        lambda node: 501 if node == "hs_a" else pytest.fail("unexpected node"),
+        lambda node: 201 if node == "hs_a" else pytest.fail("unexpected node"),
     )
 
     def fake_rows(node: str, page: int, page_size: int, sort: str):
         assert node == "hs_a"
-        assert page_size == 500
+        assert page_size == 100
         assert sort == "symbol"
         requested_pages.append(page)
         return pages[page]
@@ -619,17 +602,20 @@ def test_all_stock_ohlcv_spot_fetches_complete_sina_pages_and_deduplicates(
         max_workers=2
     )
 
-    assert sorted(requested_pages) == [1, 2]
+    assert sorted(requested_pages) == [1, 2, 3]
     assert payload["source"] == "sina.market_center.hs_a_ohlcv"
-    assert payload["source_total"] == 501
-    assert payload["total"] == 2
+    assert payload["source_total"] == 201
+    assert payload["total"] == 201
     items = {item["vt_symbol"]: item for item in payload["items"]}
-    assert set(items) == {"600000.SSE", "000001.SZSE"}
+    assert set(items) == {
+        *(f"{600000 + index:06d}.SSE" for index in range(100)),
+        *(f"{index:06d}.SZSE" for index in range(101)),
+    }
     assert items["600000.SSE"] == {
         "symbol": "600000",
         "exchange": "SSE",
         "vt_symbol": "600000.SSE",
-        "name": "浦发银行",
+        "name": "股票0",
         "last_price": 10.5,
         "open_price": 10.2,
         "high_price": 10.7,
@@ -640,6 +626,35 @@ def test_all_stock_ohlcv_spot_fetches_complete_sina_pages_and_deduplicates(
         "trade_time": "10:15:00",
         "source": "sina.market_center.hs_a_ohlcv",
     }
+
+
+def test_all_stock_ohlcv_spot_rejects_incomplete_sina_pages(monkeypatch) -> None:
+    import alphaagent.data_sources.akshare_adapter as adapter_module
+
+    duplicate_rows = [
+        {
+            "symbol": f"sh{600000 + index:06d}",
+            "code": f"{600000 + index:06d}",
+            "name": f"股票{index}",
+        }
+        for index in range(100)
+    ]
+    requested_pages: list[int] = []
+    monkeypatch.setattr(adapter_module, "_sina_sector_member_count", lambda _node: 201)
+
+    def fake_rows(node: str, page: int, page_size: int, sort: str):
+        del node, page_size, sort
+        requested_pages.append(page)
+        return duplicate_rows
+
+    monkeypatch.setattr(adapter_module, "_sina_sector_member_rows", fake_rows)
+
+    with pytest.raises(AkShareSourceError, match="snapshot incomplete: 100/201"):
+        adapter_module.AkShareAdapter()._all_stock_ohlcv_spot_uncached(
+            max_workers=2
+        )
+
+    assert sorted(requested_pages) == [1, 2, 3]
 
 
 def test_all_stock_ohlcv_spot_rejects_unavailable_sina_count(monkeypatch) -> None:

@@ -1032,14 +1032,33 @@ def _merge_spot_bars(
             total_symbols=0,
             error=f"{exc.__class__.__name__}: {str(exc)[:200]}",
         )
+    if not rows:
+        return SpotBarMerge(
+            bars=bars,
+            active_symbols=0,
+            total_symbols=0,
+            error="现货快照未返回任何股票",
+        )
+    main_board_rows = [
+        row
+        for row in rows
+        if _is_main_board(str(row.get("vt_symbol") or ""))
+    ]
+    if not main_board_rows:
+        return SpotBarMerge(
+            bars=bars,
+            active_symbols=0,
+            total_symbols=0,
+            error="现货快照未包含可用主板股票",
+        )
     existing = (
         set(bars.loc[bars["trade_date"] == today, "vt_symbol"]) if not bars.empty else set()
     )
     synthetic: list[dict[str, object]] = []
     total_symbols = 0
-    for row in rows:
+    for row in main_board_rows:
         vt_symbol = str(row.get("vt_symbol") or "")
-        if not vt_symbol or vt_symbol in existing or not _is_main_board(vt_symbol):
+        if vt_symbol in existing:
             continue
         total_symbols += 1
         last = _float(row.get("last_price"))

@@ -46,8 +46,9 @@ FULL_LIST_TTL_SECONDS = 60
 FULL_MARKET_TTL_SECONDS = 20
 FULL_MARKET_PAGE_SIZE = 200
 FULL_MARKET_MAX_WORKERS = 6
-FULL_MARKET_OHLCV_SPOT_PAGE_SIZE = 500
+FULL_MARKET_OHLCV_SPOT_PAGE_SIZE = 100
 FULL_MARKET_OHLCV_SPOT_MAX_WORKERS = 6
+FULL_MARKET_OHLCV_SPOT_MIN_COVERAGE_RATIO = 0.99
 EASTMONEY_LIVE_PAGE_MAX_AGE_SECONDS = 20
 EASTMONEY_LIVE_PAGE_MIN_FRESH_RATIO = 0.90
 OVERVIEW_TTL_SECONDS = 30
@@ -463,6 +464,15 @@ class AkShareAdapter:
                 current_symbol = str(item.get("vt_symbol") or "")
                 if current_symbol:
                     items_by_symbol[current_symbol] = item
+
+        minimum_rows = math.ceil(
+            source_total * FULL_MARKET_OHLCV_SPOT_MIN_COVERAGE_RATIO
+        )
+        if len(items_by_symbol) < minimum_rows:
+            raise AkShareSourceError(
+                "Sina A-share spot snapshot incomplete: "
+                f"{len(items_by_symbol)}/{source_total}"
+            )
 
         captured_at = datetime.now(timezone.utc)
         return {

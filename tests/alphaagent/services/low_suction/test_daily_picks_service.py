@@ -364,6 +364,45 @@ def test_tail_final_merge_forces_a_fresh_ohlcv_snapshot(monkeypatch) -> None:
     assert calls == [True]
 
 
+@pytest.mark.parametrize(
+    ("items", "error"),
+    [
+        ([], "现货快照未返回任何股票"),
+        (
+            [
+                {
+                    "vt_symbol": "300001.SZSE",
+                    "last_price": 20.0,
+                    "open_price": 20.0,
+                    "high_price": 20.0,
+                    "low_price": 20.0,
+                    "volume": 1,
+                }
+            ],
+            "现货快照未包含可用主板股票",
+        ),
+    ],
+)
+def test_merge_spot_bars_marks_empty_or_non_main_board_snapshot_as_source_failure(
+    monkeypatch,
+    items,
+    error,
+) -> None:
+    from alphaagent.data_sources.akshare_adapter import AkShareAdapter
+
+    monkeypatch.setattr(
+        AkShareAdapter,
+        "all_stock_ohlcv_spot",
+        lambda _self: {"items": items},
+    )
+
+    result = daily_picks_service._merge_spot_bars(pd.DataFrame(), date(2026, 8, 12))
+
+    assert result.active_symbols == 0
+    assert result.total_symbols == 0
+    assert result.error == error
+
+
 def test_live_payload_distinguishes_spot_source_failure_from_low_coverage(
     monkeypatch,
 ) -> None:
