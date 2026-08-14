@@ -11,13 +11,15 @@
   fallback_from; 法定节假日无法判别, 由指纹闸兜底识别昨日快照后回落)。
 - live 数据诚实性两道闸(东财涨停池在非交易时段返回最近交易日快照, 且
   payload 无日期自标注字段, 不能冒充"今日盘中数据"):
-  1. 时间闸: live 仅在北京时间 [09:25, 15:30] 启用(含两端; 09:25 集合
-     竞价结束涨停池开始填充, 15:30 后盘后归档链路接管)。窗外: 缺省路径
-     直接回落(不试 live), 显式 ?date=今日 → 404。
+  1. 时间闸: live 仅在北京时间 [09:25, 20:00] 启用(含两端; 09:25 集合
+     竞价结束涨停池开始填充; 15:00 收盘~20:00 是「整理中」窗口, 东财池
+     仍为当日完整名单, eod_1900 归档落库后 final 自动接管; 20:00 后归档
+     链路应已完成)。窗外: 缺省路径直接回落(不试 live), 显式 ?date=今日
+     → 404。
   2. 指纹闸(兜节假日/边缘): 实时 zt 池 vt_symbol 集合与最近归档日的 zt
      名单完全一致 → 判定为最近交易日快照 → 缺省回落 / 显式 404。盘中真实
-     滚动名单必然与昨日归档不同, 15:00-15:30 整理窗口是今日完整数据 vs
-     昨日归档也不同, 两场景自然过闸。
+     滚动名单必然与昨日归档不同, 收盘后整理窗口是今日完整数据 vs 昨日
+     归档也不同, 两场景自然过闸。
 - live 分流: AkShareAdapter().limit_up_pools(per_pool_limit=None 全量,
   适配器 TTL 缓存保护, 前端 30s 轮询不会打爆东财), 经 archive.pool_row
   映射成归档行形状后 build_review(pool_rows_override=...) 走 final 同路径
@@ -90,9 +92,13 @@ projection_cache: TTLCache = TTLCache(max_items=200)
 # live 分流核心池: 缺任一整页家数/封板率失真 → 显式请求 503 / 缺省请求回落。
 _LIVE_CORE_POOLS = ("zt", "zbgc", "dtgc")
 # live 时间闸(北京时间, 含两端): 09:25 集合竞价结束涨停池开始填充;
-# 15:30 后盘后归档链路接管。窗外东财返回最近交易日快照, 不冒充今日盘中。
+# 右端 20:00 覆盖收盘后~eod_1900(19:00 触发, 完成时间浮动)的「整理中」
+# 窗口——实测收盘后东财池仍返回当日完整名单, 归档落库前不应回落昨日
+# (2026-08-14 17 时线上实测: 15:30-19:00 空窗导致最新复盘停留在前一日)。
+# 20:00 后归档应已接管(final 命中优先于 live); 窗外东财返回最近交易日
+# 快照, 由时间闸+指纹闸双重挡住, 不冒充今日数据。
 _LIVE_WINDOW_START = time(9, 25)
-_LIVE_WINDOW_END = time(15, 30)
+_LIVE_WINDOW_END = time(20, 0)
 
 
 def _in_live_window(now: datetime) -> bool:
@@ -326,7 +332,7 @@ def _explicit_review(session, target: date, now: datetime):
         if not _in_live_window(now):
             raise ReviewNotFound(
                 f"复盘数据不存在: {target.isoformat()}"
-                "(今日实时数据仅在 09:25-15:30 提供)"
+                "(今日实时数据仅在 09:25-20:00 提供)"
             )
         try:
             payload = _live_payload(session, target)

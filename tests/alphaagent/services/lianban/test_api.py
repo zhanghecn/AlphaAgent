@@ -75,7 +75,7 @@ def _patch_today(
     monkeypatch, day: date = TODAY, *, hour: int = 10, minute: int = 30,
     second: int = 0,
 ) -> None:
-    """固定"现在"(中国时区); 默认 10:30 在 live 窗口 [09:25, 15:30] 内。"""
+    """固定"现在"(中国时区); 默认 10:30 在 live 窗口 [09:25, 20:00] 内。"""
     monkeypatch.setattr(
         lianban_api,
         "_now_china",
@@ -659,7 +659,7 @@ def test_review_default_settlement_window_returns_live(
 
 
 def test_review_live_window_boundaries(client, monkeypatch, api_session):
-    """时间闸边界: 09:25:00 / 15:30:00 含(试 live), 09:24:59 不含(回落)。"""
+    """时间闸边界: 09:25:00 / 20:00:00 含(试 live), 09:24:59 / 20:00:01 不含(回落)。"""
     adapter = _FakeLiveAdapter(payload=_live_pools_payload())
     spy = _SpyBuildReview(payload=_review_payload(mode="live", day=TODAY))
     _patch_session(monkeypatch, api_session)
@@ -673,11 +673,17 @@ def test_review_live_window_boundaries(client, monkeypatch, api_session):
     assert response.json()["data"]["mode"] == "live"
     assert len(adapter.calls) == 1
 
-    # 上界含: 15:30:00 → 试 live
-    _patch_today(monkeypatch, TODAY, hour=15, minute=30, second=0)
+    # 收盘后整理窗口: 17:15(15:30-20:00) → 仍试 live(当日完整名单)
+    _patch_today(monkeypatch, TODAY, hour=17, minute=15, second=0)
     response = client.get("/api/lianban/review")
     assert response.json()["data"]["mode"] == "live"
     assert len(adapter.calls) == 2
+
+    # 上界含: 20:00:00 → 试 live(eod 归档延迟时兜底)
+    _patch_today(monkeypatch, TODAY, hour=20, minute=0, second=0)
+    response = client.get("/api/lianban/review")
+    assert response.json()["data"]["mode"] == "live"
+    assert len(adapter.calls) == 3
 
     # 界外: 09:24:59 → 不试 live, 全库无数据 → 404
     def _no_adapter():
@@ -685,6 +691,11 @@ def test_review_live_window_boundaries(client, monkeypatch, api_session):
 
     monkeypatch.setattr(lianban_api, "AkShareAdapter", _no_adapter)
     _patch_today(monkeypatch, TODAY, hour=9, minute=24, second=59)
+    response = client.get("/api/lianban/review")
+    assert response.status_code == 404
+
+    # 界外: 20:00:01 → 不试 live(归档链路应已接管)
+    _patch_today(monkeypatch, TODAY, hour=20, minute=0, second=1)
     response = client.get("/api/lianban/review")
     assert response.status_code == 404
 
