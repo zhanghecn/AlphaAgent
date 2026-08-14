@@ -66,17 +66,20 @@ def load_live_scan_runs(
     """Return one signal day's scan runs in execution order."""
 
     schema.ensure_schema_once(get_engine())
-    statement = (
+    # 先按时间倒序取最新 N 条，再在内存里恢复执行顺序；直接升序 LIMIT
+    # 会拿到当天最老的 N 条，长交易日里前端看不到最近一次扫描。
+    newest_first = (
         select(*_READ_COLUMNS)
         .where(schema.low_suction_live_scan_runs.c.trade_date == trade_date)
         .order_by(
-            schema.low_suction_live_scan_runs.c.started_at,
-            schema.low_suction_live_scan_runs.c.id,
+            desc(schema.low_suction_live_scan_runs.c.started_at),
+            desc(schema.low_suction_live_scan_runs.c.id),
         )
         .limit(max(int(limit), 1))
     )
     with session_scope() as session:
-        rows = session.execute(statement).mappings().all()
+        rows = list(session.execute(newest_first).mappings().all())
+    rows.reverse()
     return _serialize_runs(rows)
 
 
