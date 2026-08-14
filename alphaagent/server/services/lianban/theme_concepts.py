@@ -64,12 +64,16 @@ def _is_fake_name(name: str) -> bool:
 def assign_theme_concepts(
     session,
     vt_symbols: list[str],
-    industry_of: dict[str, str] | None = None,
+    industry_groups: dict[str, set[str]] | None = None,
 ) -> dict[str, str]:
     """给涨停股分配主题材概念。
 
-    industry_of: {vt_symbol: 东财行业}; 提供时启用「同行业聚集数」信号
-    (候选排序第二键), 缺省退化为纯聚集数排序。
+    industry_groups: {vt_symbol: 行业板块名集合}; 缺省自动查 industry
+    板块成员关系(个股同时挂一/二/三级行业板块, 如金田股份{工业金属,
+    有色金属,铜})。「同行业」= 两股行业集合有交集(跨二级行业的同产业链
+    自然成族, 2026-08-14 金田股份案例: 工业金属/能源金属/环保设备在二
+    级行业下互不同行, 但共享「有色金属」一级行业板块 → 稀土永磁聚集
+    同族 2 家 > 液冷聚集 1 家 → 归稀土, 对齐 lianban)。
 
     Returns: {vt_symbol: 概念名(已去"概念"后缀)}, 未返回的股票由调用方
     走行业兜底。查询失败/无 memberships → {}(整体降级行业分组)。
@@ -123,27 +127,31 @@ def assign_theme_concepts(
 
     # 每股候选: (tier, -同行业聚集数, -聚集数, -聚集纯度, 概念名);
     # 排序取最小 = 专概念 → 同行业聚集更多 → 聚集更多 → 聚集更纯。
-    # 同行业聚集数 = 概念当日聚集中与该股同东财行业的家数, 聚集纯度 =
-    # 同行业数/聚集数——同行业集体涨停更可能是该股的真实驱动产业链。
+    # 同行业聚集分 = 聚集各成员与该股的共享行业板块数之和(二级+一级双
+    # 共享=2 分 > 仅一级行业共享=1 分, 保持聚落间区分度; 布尔交集曾让
+    # 「通信」一级行业把液冷里的数据港与亨通连成同族而错抢), 聚集纯度 =
+    # 同行业分/聚集数——同行业集体涨停更可能是该股的真实驱动产业链。
     # 聚集数是主信号(大聚落优先, 纯度只做聚集数后的决胜, 放前面会打散
     # 大聚落)。成员规模只用于 tier 分层不进决胜链(54 vs 97 无产业意义,
     # 实测让毫米波错抢亨通); 全平局交概念名字典序(稳定可复现)。
     # (2026-08-14 亨通光电案例: 液冷聚集 7 同「通信设备」仅 2 → 不归液
     # 冷沾边; 毫米波/光通信模块同行业聚集均 3 聚集均 5 纯度均 60%, 字典
     # 序光通信胜 → 归光通信主业, 对齐 lianban 光纤概念的光通信口径。)
-    industry_map = industry_of or {}
+    if industry_groups is None:
+        industry_groups = _industry_groups(session, vt_symbols)
     candidates: dict[str, list[tuple[int, int, int, float, str]]] = defaultdict(list)
     for (_sid, cname), syms in by_concept.items():
         size = sizes.get(_sid, 99999)
         tier = 0 if size <= _WIDE_CONCEPT_MEMBERS else 1
         if len(syms) >= 2:
             for vsym in syms:
-                industry = industry_map.get(vsym)
-                if industry is None:
+                groups = industry_groups.get(vsym)
+                if not groups:
                     same_industry = len(syms)
                 else:
                     same_industry = sum(
-                        1 for other in syms if industry_map.get(other) == industry
+                        len(industry_groups.get(other, set()) & groups)
+                        for other in syms
                     )
                 purity = same_industry / len(syms)
                 candidates[vsym].append(
@@ -167,6 +175,29 @@ def assign_theme_concepts(
         vsym: opts[0][4].removesuffix("概念")
         for vsym, opts in ranked.items()
     }
+
+
+def _industry_groups(session, vt_symbols: list[str]) -> dict[str, set[str]]:
+    """{vt_symbol: 其挂的 industry 板块名集合}(含一/二/三级, 层级天然提供
+    跨二级行业的产业链族信号)。查询失败 → {}(同行业信号退化为聚集数)。"""
+    try:
+        rows = session.execute(
+            select(
+                schema.sector_memberships.c.vt_symbol,
+                schema.sectors.c.name,
+            )
+            .join(schema.sectors, schema.sectors.c.id == schema.sector_memberships.c.sector_id)
+            .where(
+                schema.sector_memberships.c.vt_symbol.in_(vt_symbols),
+                schema.sectors.c.type == "industry",
+            )
+        ).all()
+    except Exception:
+        return {}
+    groups: dict[str, set[str]] = defaultdict(set)
+    for vsym, iname in rows:
+        groups[str(vsym)].add(str(iname))
+    return groups
 
 
 def _dispersed_concept_ids(

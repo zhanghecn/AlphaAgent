@@ -102,7 +102,7 @@ def test_member_keeps_own_best_concept_when_companion_leaves(seeded_session):
 
 def test_same_industry_cluster_beats_bigger_cross_industry_cluster(seeded_session):
     """亨通光电案例(2026-08-14): 液冷聚集 7 但同行业仅 2; 光通信聚集 5
-    同行业 3 → 归光通信主业而非液冷沾边。"""
+    同行业 3 → 归光通信主业而非液冷沾边。行业用板块集合(共享即同族)。"""
     s = seeded_session
     # 亨通/剑桥(通信设备) + 5 只跨行业股 挂"液冷概念"(聚集 7, 同行业 2)
     _concept(s, "BKLC2", "液冷概念",
@@ -112,18 +112,45 @@ def test_same_industry_cluster_beats_bigger_cross_industry_cluster(seeded_sessio
     _concept(s, "BKGM", "光通信模块",
              ["600487.SSE", "603083.SSE", "003031.SZSE", "688662.SSE", "603618.SSE"])
     s.flush()
-    industry = {
-        "600487.SSE": "通信设备", "603083.SSE": "通信设备", "003031.SZSE": "通信设备",
-        "688662.SSE": "其他电子", "603618.SSE": "电网设备", "300017.SZSE": "IT服务Ⅱ",
-        "002418.SZSE": "家电零部", "601609.SSE": "工业金属", "300684.SZSE": "电子化学",
-        "603881.SSE": "通信服务",
+    industry_groups = {
+        "600487.SSE": {"通信设备", "通信"}, "603083.SSE": {"通信设备", "通信"},
+        "003031.SZSE": {"通信设备", "通信"}, "688662.SSE": {"其他电子"},
+        "603618.SSE": {"电网设备", "电力设备"}, "300017.SZSE": {"IT服务Ⅱ"},
+        "002418.SZSE": {"家电零部", "家用电器"}, "601609.SSE": {"工业金属", "有色金属"},
+        "300684.SZSE": {"电子化学"}, "603881.SSE": {"通信服务", "通信"},
     }
-    result = assign_theme_concepts(s, list(industry), industry_of=industry)
+    result = assign_theme_concepts(s, list(industry_groups), industry_groups=industry_groups)
     assert result["600487.SSE"] == "光通信模块"
     assert result["603083.SSE"] == "光通信模块"
     # 液冷残部(同行业各 1)仍聚在液冷
     assert result["300017.SZSE"] == "液冷"
     assert result["603881.SSE"] == "液冷"
+
+
+def test_industry_group_hierarchy_links_rare_earth_chain(seeded_session):
+    """金田股份案例(2026-08-14, lianban 3 只全归稀土永磁): 二级行业互不同行
+    (工业金属/能源金属/环保设备)但共享「有色金属」一级行业板块 → 稀土聚集
+    同族 2 家 > 液冷聚集 1 家 → 归稀土而非聚集更大的液冷。"""
+    s = seeded_session
+    # 金田+中国稀土+华宏 挂"稀土永磁"(聚集 3, 有色族共享 2 家)
+    _concept(s, "BKXT2", "稀土永磁",
+             ["601609.SSE", "000831.SZSE", "002645.SZSE"])
+    # 金田+5 只非有色股 挂"液冷概念"(聚集 6, 有色族仅金田 1 家)
+    _concept(s, "BKLC3", "液冷概念",
+             ["601609.SSE", "300017.SZSE", "002418.SZSE", "300684.SZSE",
+              "603881.SSE", "300018.SZSE"])
+    s.flush()
+    industry_groups = {
+        "601609.SSE": {"工业金属", "有色金属", "铜"},
+        "000831.SZSE": {"小金属", "有色金属", "稀土"},
+        "002645.SZSE": {"环保", "环保设备"},
+        "300017.SZSE": {"IT服务Ⅱ"}, "002418.SZSE": {"家用电器"},
+        "300684.SZSE": {"电子"}, "603881.SSE": {"通信"}, "300018.SZSE": {"计算机"},
+    }
+    result = assign_theme_concepts(s, list(industry_groups), industry_groups=industry_groups)
+    assert result["601609.SSE"] == "稀土永磁"
+    assert result["000831.SZSE"] == "稀土永磁"
+    assert result["002645.SZSE"] == "稀土永磁"
 
 
 def test_dynamic_fake_name_patterns_cover_unseen_names(seeded_session):
