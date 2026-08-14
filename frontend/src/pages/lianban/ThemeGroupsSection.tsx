@@ -117,6 +117,14 @@ function ThemeCard({ theme, index }: { theme: Theme; index: number }) {
           {String(index + 1).padStart(2, "0")}
         </span>
         <span className="truncate text-xs font-semibold text-foreground">{theme.name}</span>
+        {theme.kind === "concept" && (
+          <span
+            title="概念题材（特异性分配）"
+            className="shrink-0 rounded-sm border border-blue-500/30 bg-blue-500/10 px-1 text-[10px] leading-4 text-blue-400"
+          >
+            概念
+          </span>
+        )}
         <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
           {theme.count}家涨停
         </span>

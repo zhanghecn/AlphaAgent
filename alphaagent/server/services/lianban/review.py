@@ -45,9 +45,12 @@ mode:
   touched_limit 未封(rebuild); open=其他(断板未摸板等)。档内按今日涨幅
   降序(None 最后)。first_board 子块 = promotion.first_board_today +
   first_board_mean。
-- themes 热点题材: 涨停股按行业分组(final 用归档行 industry, rebuild 从
-  stocks 表 industry 列补, 都无 → "其他"组); leader=组内最高连板(同板位
-  首封最早); 组内按首封时间升序(None 最后); 组间按家数降序(同数按组名)。
+- themes 热点题材: 涨停股按主题材分组——优先概念(东财 concept memberships
+  特异性分配, 见 theme_concepts.py, 对标 lianban 概念级题材如液冷/稀土
+  永磁), 未入概念组的回落行业(final 用归档行 industry, rebuild 从 stocks
+  表 industry 列补, 都无 → "其他"组); 组带 kind(concept|industry);
+  leader=组内最高连板(同板位首封最早); 组内按首封时间升序(None 最后);
+  组间按家数降序(同数按组名)。
 - theme_strength 主线强度: sector_fund_flows 当日 period="即时"(实测列值
   为 即时/5日/10日, "今日"只在 raw 里)主力净额 Top8, change_pct 取
   raw["今日涨跌幅"]; sector_daily_metrics 目前空表, 不采用。
@@ -92,6 +95,7 @@ from alphaagent.server.services.lianban.ladder import (
 )
 from alphaagent.server.services.lianban.margin import latest_margin_balance
 from alphaagent.server.services.lianban.promotion import promotion_stats
+from alphaagent.server.services.lianban.theme_concepts import assign_theme_concepts
 
 __all__ = ["ReviewNotFound", "build_review"]
 
@@ -614,12 +618,20 @@ def _themes(
             )
 
     groups: dict[str, list[dict]] = {}
+    kinds: dict[str, str] = {}
+    concept_names = assign_theme_concepts(
+        session, [e["vt_symbol"] for e in entries]
+    )
     for entry in entries:
+        concept = concept_names.get(entry["vt_symbol"])
         industry = str(entry.pop("industry") or _OTHER_INDUSTRY)
-        groups.setdefault(industry, []).append(entry)
+        key = concept or industry
+        if key not in kinds:
+            kinds[key] = "concept" if concept else "industry"
+        groups.setdefault(key, []).append(entry)
 
     themes = []
-    for industry, stocks in groups.items():
+    for group_name, stocks in groups.items():
         ordered = sorted(stocks, key=_first_time_sort)
         leader = min(
             ordered,
@@ -632,7 +644,8 @@ def _themes(
         )
         themes.append(
             {
-                "name": industry,
+                "name": group_name,
+                "kind": kinds[group_name],
                 "count": len(ordered),
                 "leader": {
                     "vt_symbol": leader["vt_symbol"],

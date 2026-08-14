@@ -105,6 +105,8 @@ export interface LianbanReview {
   }[];
   themes: {
     name: string;
+    /** 概念组（特异性分配，对标 lianban）| 行业兜底组。 */
+    kind: "concept" | "industry";
     count: number;
     leader: { vt_symbol: string; name: string; limit_up_count: number | null } | null;
     stocks: {

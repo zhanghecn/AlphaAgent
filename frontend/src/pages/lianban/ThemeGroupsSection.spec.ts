@@ -25,8 +25,13 @@ function makeStock(overrides: Partial<ThemeStock> = {}): ThemeStock {
   };
 }
 
-function makeTheme(name: string, count: number, stocks: ThemeStock[] = []): Theme {
-  return { name, count, leader: null, stocks };
+function makeTheme(
+  name: string,
+  count: number,
+  stocks: ThemeStock[] = [],
+  kind: Theme["kind"] = "industry",
+): Theme {
+  return { name, count, kind, leader: null, stocks };
 }
 
 describe("sortThemes（count 降序，防御性重排）", () => {
