@@ -126,6 +126,49 @@ def test_same_industry_cluster_beats_bigger_cross_industry_cluster(seeded_sessio
     assert result["603881.SSE"] == "液冷"
 
 
+def test_dynamic_fake_name_patterns_cover_unseen_names(seeded_session):
+    """动态语法判定: 未维护过的新伪概念命名(以「股」结尾/时间前缀/热股类)
+    自动被挡, 无需人工补词表。"""
+    s = seeded_session
+    # 造从未在词表里的伪概念名, 全部应被模式挡住
+    _concept(s, "BK1", "量化股", ["600501.SSE", "600502.SSE"])
+    _concept(s, "BK2", "2027年报预增", ["600503.SSE", "600504.SSE"])
+    _concept(s, "BK3", "某财商热股", ["600505.SSE", "600506.SSE"])
+    _concept(s, "BK4", "AI应用", ["600507.SSE", "600508.SSE"])  # 真概念不挡
+    s.flush()
+    result = assign_theme_concepts(
+        s,
+        ["600501.SSE", "600502.SSE", "600503.SSE", "600504.SSE",
+         "600505.SSE", "600506.SSE", "600507.SSE", "600508.SSE"],
+    )
+    assert "量化股" not in result.values()
+    assert "2027年报预增" not in result.values()
+    assert "某财商热股" not in result.values()
+    assert result["600507.SSE"] == "AI应用"
+
+
+def test_single_stock_solo_concept_still_labeled(fake_session):
+    """单股兜底: 股票当日只挂一个专概念(聚集 1, 无任何聚集>=2 概念) →
+    仍获得该概念题材标签(题材覆盖全部涨停票), 弱候选不与聚集组竞争。"""
+    s = fake_session
+    # 两只涨停股各挂互不重叠的专概念(各自聚集 1)
+    _concept(s, "BKX", "电子纸", ["600511.SSE"])
+    _concept(s, "BKY", "电子后视镜", ["600512.SSE"])
+    # 一只挂聚集 2 的概念(正常组)
+    _concept(s, "BKZ", "石墨烯", ["600513.SSE", "600514.SSE"])
+    # 600513 同时挂一个「当日仅它」的专概念 → 应选聚集组(弱候选排后)
+    _concept(s, "BKW", "汽车黑匣子", ["600513.SSE"])
+    s.flush()
+    result = assign_theme_concepts(
+        fake_session,
+        ["600511.SSE", "600512.SSE", "600513.SSE", "600514.SSE"],
+    )
+    assert result["600511.SSE"] == "电子纸"
+    assert result["600512.SSE"] == "电子后视镜"
+    assert result["600513.SSE"] == "石墨烯"
+    assert result["600514.SSE"] == "石墨烯"
+
+
 def test_no_memberships_returns_empty(fake_session):
     assert assign_theme_concepts(fake_session, ["000001.SSE"]) == {}
     assert assign_theme_concepts(fake_session, []) == {}
