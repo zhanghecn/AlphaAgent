@@ -7,9 +7,10 @@
 1. 涨停名单 → concept memberships, 过滤风格/状态类伪概念;
 2. 概念分层: 成员 <= _WIDE_CONCEPT_MEMBERS(300) 为专概念(tier 0),
    其上为泛概念(tier 1, 如人工智能 712/华为 751——聚集再多也只是沾边);
-3. 主题材 = 候选中 (tier, -同行业聚集数, -当日聚集数, 概念成员数)
+3. 主题材 = 候选中 (tier, -同行业聚集数, -聚集数, -聚集纯度, 概念名)
    最小者——专概念优先 → 同行业聚集更多(真实产业链) → 聚集更多 →
-   成员更少(更专); 聚集 >=2 才成组;
+   聚集更纯; 每股独立取最优, 概念组允许单只(对齐 lianban: 其 49 组
+   中 28 组为单只);
 4. 未入概念组的股票回落行业分组(调用方兜底)。
 
 纯 memberships 无法复现 lianban 的新闻驱动打标(其 rs 文案来自财联社
@@ -17,7 +18,7 @@
 """
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 from typing import Any
 
 from sqlalchemy import func, select
@@ -138,24 +139,17 @@ def assign_theme_concepts(
                 (tier, -same_industry, -len(syms), -purity, cname)
             )
 
+    # 每股独立取自己的最优概念——同伴归哪组不影响本股(2026-08-14 金时
+    # 科技案例: 超级电容聚集=金时+康盛, 康盛按聚集优先归液冷(主业液冷
+    # 管路, 正确), 金时仍归超级电容单只组——lianban 同日正是「液冷(1)
+    # 康盛 + 超级电容(1) 金时」并存, 其 49 组中 28 组为单只, 每股独立
+    # 按驱动打标是常态)。组员被抢走即解散的「孤儿回收」曾把这类股踢回
+    # 行业兜底, 与参照行为相反, 已删; 早期迭代式互相改投版本还有实测
+    # 死循环问题(快照孤儿集与轮内状态错位恒定震荡), 一并成为历史。
     ranked = {
         vsym: sorted(options) for vsym, options in candidates.items()
     }
-    best = {vsym: opts[0][4] for vsym, opts in ranked.items()}
-
-    # 孤儿回收(单遍无震荡): 最优概念可能被同伴的更优选择掏空(原聚集 2
-    # 只、同伴被抢 → 本组剩 1 只)。先按最优分配统计锁定人数 >=2 的稳定
-    # 组, 落单股只允许改投「已锁定」组(锁定组人数只增不减, 不会产生新
-    # 孤儿), 无可投组 → 交回行业兜底。迭代式互相改投曾造成实测死循环
-    # (08-13: 快照孤儿集与轮内状态错位, 轨迹恒定震荡), 故弃用。
-    counts = Counter(best.values())
-    locked = {name for name, c in counts.items() if c >= 2}
-    result: dict[str, str] = {}
-    for vsym, opts in ranked.items():
-        for opt in opts:
-            name = opt[4]
-            if name in locked:
-                result[vsym] = name.removesuffix("概念")
-                break
-
-    return result
+    return {
+        vsym: opts[0][4].removesuffix("概念")
+        for vsym, opts in ranked.items()
+    }

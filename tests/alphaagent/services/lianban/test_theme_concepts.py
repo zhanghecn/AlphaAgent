@@ -83,21 +83,21 @@ def test_fake_concepts_excluded(seeded_session):
     assert "光通信模块" not in result.values()
 
 
-def test_orphan_concept_member_falls_to_next_choice(seeded_session):
-    """最优概念被同伴的更优选择掏空(剩1只) → 孤儿降级次优/行业, 不留单只组。"""
+def test_member_keeps_own_best_concept_when_companion_leaves(seeded_session):
+    """每股独立取最优(金时科技案例): 同伴被更强概念抢走 → 本股保留原概念
+    单只组, 不踢回行业兜底——lianban「液冷(1)康盛 + 超级电容(1)金时」并存。"""
     s = seeded_session
-    # 游族网络+风语筑 挂"AI应用"(聚集2); 风语筑还挂聚集更强的"DeepSeek"(3只)
-    _concept(s, "BKAI2", "AI应用概念", ["300001.SZSE", "300002.SZSE"])
-    _concept(s, "BKDS", "DeepSeek", ["300002.SZSE", "600301.SSE", "600302.SSE"])
+    # 金时+康盛 挂"超级电容"(聚集2); 康盛还挂聚集更强的"液冷概念"(3只)
+    _concept(s, "BKAI2", "超级电容", ["300001.SZSE", "300002.SZSE"])
+    _concept(s, "BKDS", "液冷概念", ["300002.SZSE", "600301.SSE", "600302.SSE"])
     s.flush()
     result = assign_theme_concepts(
         s, ["300001.SZSE", "300002.SZSE", "600301.SSE", "600302.SSE"]
     )
-    # 风语筑 → DeepSeek(聚集更强); 游族网络的 AI应用 被掏空 → 无次优 → 不分配(行业兜底)
-    assert result["300002.SZSE"] == "DeepSeek"
-    assert result["600301.SSE"] == "DeepSeek"
-    assert "300001.SZSE" not in result
-    assert all(name != "AI应用" for name in result.values())
+    # 康盛 → 液冷(聚集更强); 金时仍归超级电容(单只组保留)
+    assert result["300002.SZSE"] == "液冷"
+    assert result["600301.SSE"] == "液冷"
+    assert result["300001.SZSE"] == "超级电容"
 
 
 def test_same_industry_cluster_beats_bigger_cross_industry_cluster(seeded_session):
