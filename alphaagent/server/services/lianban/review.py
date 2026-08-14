@@ -574,7 +574,8 @@ def _broken_list(pools: dict[str, list[dict]]) -> list[dict]:
 
 
 def _themes(
-    session, mode: str, pools: dict[str, list[dict]], daily_rows: list[dict]
+    session, mode: str, pools: dict[str, list[dict]], daily_rows: list[dict],
+    trade_date: date | None = None,
 ) -> list[dict]:
     """涨停股按行业分组: count/leader(最高板, 同板首封最早)/成员(首封升序)。"""
     entries = []
@@ -619,8 +620,12 @@ def _themes(
 
     groups: dict[str, list[dict]] = {}
     kinds: dict[str, str] = {}
+    from alphaagent.server.services.lianban.news_driver import news_concepts_for_date
+
     concept_names = assign_theme_concepts(
-        session, [e["vt_symbol"] for e in entries]
+        session,
+        [e["vt_symbol"] for e in entries],
+        news_concepts=news_concepts_for_date(session, trade_date),
     )
     for entry in entries:
         concept = concept_names.get(entry["vt_symbol"])
@@ -960,7 +965,7 @@ def build_review(
         "themes": _guarded(
             missing,
             "themes",
-            lambda: _themes(session, agg, pools, daily_rows),
+            lambda: _themes(session, agg, pools, daily_rows, trade_date),
             [],
         ),
         "theme_strength": theme_strength,

@@ -158,10 +158,18 @@ def archive_daily_pools(
         pool_counts[pool_type] = len(rows)
         rows_written += len(rows)
 
-    return {
+    result = {
         "trade_date": trade_date.isoformat(),
         "pools": pool_counts,
         "rows_written": rows_written,
         "unavailable": unavailable,
         "truncated": truncated,
     }
+    # 驱动新闻抓取(题材分配增强): 失败不阻塞归档主流程。
+    try:
+        from alphaagent.server.services.lianban.news_driver import sync_zt_news
+
+        result["news"] = sync_zt_news(session, trade_date, adapter=adapter)
+    except Exception as exc:  # noqa: BLE001 - 增强路径降级
+        result["news"] = {"error": exc.__class__.__name__}
+    return result

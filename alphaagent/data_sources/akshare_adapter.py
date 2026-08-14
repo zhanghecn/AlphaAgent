@@ -1508,6 +1508,8 @@ class AkShareAdapter:
     FUND_FLOW_TTL_SECONDS = 60
     LIMIT_POOL_TTL_SECONDS = 600
     LIVE_LIMIT_POOL_TTL_SECONDS = 20
+    # 个股资讯(驱动新闻标题): 连板复盘题材增强用, 盘后归档低频拉取。
+    STOCK_NEWS_TTL_SECONDS = 600
     LHB_TTL_SECONDS = 86400
     HOT_RANK_TTL_SECONDS = 300
     FINANCIAL_TTL_SECONDS = 86400 * 3
@@ -1788,6 +1790,40 @@ class AkShareAdapter:
             "items": items,
             "total": len(items),
             "source": "eastmoney.stockrank",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def stock_news_titles(self, symbol: str) -> dict[str, Any]:
+        """Return recent news headlines for one stock through AkShare.
+
+        连板复盘题材增强数据源: 东财个股资讯(标题+发布时间), 归档路径
+        低频拉取(TTL 缓存), 解析概念命中在 lianban.news_driver。
+        """
+        symbol = str(symbol).strip()
+        key = f"stock_news_titles:{symbol}"
+        return market_cache.get_or_set(
+            key,
+            self.STOCK_NEWS_TTL_SECONDS,
+            lambda: self._stock_news_titles_uncached(symbol),
+        )
+
+    def _stock_news_titles_uncached(self, symbol: str) -> dict[str, Any]:
+        module = importlib.import_module("akshare.news.news_stock")
+        with _akshare_network_env():
+            df = module.stock_news_em(symbol=symbol)
+        items = []
+        for row in _records(df, None):
+            items.append(
+                {
+                    "title": str(row.get("新闻标题") or ""),
+                    "published_at": str(row.get("发布时间") or ""),
+                    "source": str(row.get("文章来源") or ""),
+                }
+            )
+        return {
+            "symbol": symbol,
+            "items": items,
+            "source": "akshare.stock_news_em",
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 

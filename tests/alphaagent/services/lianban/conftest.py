@@ -34,6 +34,8 @@ def fake_session():
     schema.stock_sector_memberships.create(engine)
     # theme_concepts 主题材分配读 concept memberships。
     schema.sector_memberships.create(engine)
+    # 题材分配的新闻驱动增强(驱动标题/概念命中)。
+    schema.stock_zt_news.create(engine)
     # B3 复盘聚合增量: 情绪历史/人气榜/板块资金流(FK → sectors.id)。
     schema.mainline_sentiment_history.create(engine)
     schema.stock_hot_ranks.create(engine)

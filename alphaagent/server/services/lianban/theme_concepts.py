@@ -65,6 +65,7 @@ def assign_theme_concepts(
     session,
     vt_symbols: list[str],
     industry_groups: dict[str, set[str]] | None = None,
+    news_concepts: dict[str, set[str]] | None = None,
 ) -> dict[str, str]:
     """给涨停股分配主题材概念。
 
@@ -74,6 +75,11 @@ def assign_theme_concepts(
     自然成族, 2026-08-14 金田股份案例: 工业金属/能源金属/环保设备在二
     级行业下互不同行, 但共享「有色金属」一级行业板块 → 稀土永磁聚集
     同族 2 家 > 液冷聚集 1 家 → 归稀土, 对齐 lianban)。
+
+    news_concepts: {vt_symbol: 新闻命中概念全名集合}(news_driver 归档
+    抓取)——memberships 之外的股票-概念连接(如天洋新材未挂光通信板块,
+    但 8/14 新闻「CPO 概念卷土重来」命中 CPO)。新闻概念按 memberships
+    相同的聚集/分层规则参与竞争, 娱乐性噪音(生肖等)被聚集数自然压制。
 
     Returns: {vt_symbol: 概念名(已去"概念"后缀)}, 未返回的股票由调用方
     走行业兜底。查询失败/无 memberships → {}(整体降级行业分组)。
@@ -95,14 +101,18 @@ def assign_theme_concepts(
         ).all()
         if not rows:
             return {}
-        sizes = dict(
-            session.execute(
-                select(schema.sector_memberships.c.sector_id, func.count())
-                .join(schema.sectors, schema.sectors.c.id == schema.sector_memberships.c.sector_id)
-                .where(schema.sectors.c.type == "concept")
-                .group_by(schema.sector_memberships.c.sector_id)
-            ).all()
-        )
+        size_rows = session.execute(
+            select(
+                schema.sector_memberships.c.sector_id,
+                schema.sectors.c.name,
+                func.count(),
+            )
+            .join(schema.sectors, schema.sectors.c.id == schema.sector_memberships.c.sector_id)
+            .where(schema.sectors.c.type == "concept")
+            .group_by(schema.sector_memberships.c.sector_id, schema.sectors.c.name)
+        ).all()
+        sizes = {str(sid): int(n) for sid, _name, n in size_rows}
+        concept_sid_of = {str(name): str(sid) for sid, name, _n in size_rows}
         # 数据信号兜底: 超大(>800)且行业超分散(top1 行业占比 <6%)的概念
         # 是全市场标签类(融资融券 3849/专精特新 3759/央国企改革——实测
         # top1 占比 2.3~7.8%, 而真题材即使跨行业也有 >8% 主行业), 未来
@@ -124,6 +134,21 @@ def assign_theme_concepts(
         if _is_fake(str(sid), name):
             continue
         by_concept[(str(sid), name)].add(str(vsym))
+    # 新闻命中概念(memberships 之外的连接)不进全局聚集——主线新闻会
+    # 批量命中(「以CPO、PCB为代表的AI主线集体发力」提及的每只股都命中),
+    # 叠加进聚集会让概念膨胀并抢走其他股的 memberships 主业归属(实测
+    # CPO 聚集被新闻撑到 7 抢走光通信模块的亨通/剑桥)。改为每股独立
+    # 视角: 仅本股把该概念作为额外候选, 聚集数 = memberships 聚集 + 1。
+    news_map: dict[str, set[str]] = {}
+    if news_concepts:
+        wanted = set(vt_symbols)
+        for vsym, names in news_concepts.items():
+            valid = {
+                name for name in names
+                if concept_sid_of.get(name) and not _is_fake_name(name)
+            }
+            if vsym in wanted and valid:
+                news_map[str(vsym)] = valid
 
     # 每股候选: (tier, -同行业聚集数, -聚集数, -聚集纯度, 概念名);
     # 排序取最小 = 专概念 → 同行业聚集更多 → 聚集更多 → 聚集更纯。
@@ -162,6 +187,40 @@ def assign_theme_concepts(
             # 股票没有任何聚集>=2 概念时才被用到(题材覆盖全部涨停票)。
             for vsym in syms:
                 candidates[vsym].append((tier + 2, -1, -1, -1.0, cname))
+
+    # 新闻命中候选: 仅本股视角, 聚集数 = 该概念 memberships 聚集 + 1;
+    # 同行业分与 memberships 候选同口径——含自身贡献(曾因漏算自身 3 分
+    # 而系统性输给 memberships 候选)。且只救「memberships 弱归属」的股:
+    # 该股最优 memberships 候选的聚集中除自身外无同族(如天洋在网红经济
+    # 聚集里全是食品/IT 股, 无塑料化工同行)时才允许 news 候选竞争——
+    # 强归属(聚落里有同行, 如亨通之于光通信模块)不受 news 扰动。
+    membership_best: dict[str, tuple] = {}
+    for vsym, opts in candidates.items():
+        if opts:
+            membership_best[vsym] = min(opts)
+    for vsym, names in news_map.items():
+        groups = industry_groups.get(vsym) or set()
+        best = membership_best.get(vsym)
+        if best is not None and groups:
+            # best = (tier, -same, -cluster, -purity, name): same 含自身
+            # len(groups), 除自身同族 = same - len(groups)。
+            if -best[1] - len(groups) > 0:
+                continue  # 强归属, news 不竞争
+        for name in names:
+            sid = concept_sid_of[name]
+            members = by_concept.get((sid, name), set())
+            cluster = len(members) + 1
+            if groups:
+                same = len(groups) + sum(
+                    len(industry_groups.get(other, set()) & groups)
+                    for other in members
+                )
+            else:
+                same = cluster
+            candidates[vsym].append(
+                (0 if sizes.get(sid, 99999) <= _WIDE_CONCEPT_MEMBERS else 1,
+                 -same, -cluster, -(same / cluster), name)
+            )
 
     # 每股独立取自己的最优概念——同伴归哪组不影响本股(2026-08-14 金时
     # 科技案例: 超级电容聚集=金时+康盛, 康盛按聚集优先归液冷(主业液冷

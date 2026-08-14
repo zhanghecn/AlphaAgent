@@ -1690,6 +1690,24 @@ Index(
     limit_up_pool_snapshots.c.pool_type,
 )
 
+# 涨停股当日驱动新闻(归档时抓取): 标题列表 + 概念名命中(题材分配增强,
+# 数据源 akshare.stock_news_em, 对标 lianban.rs 的财联社驱动文案)。
+stock_zt_news = Table(
+    "stock_zt_news",
+    metadata,
+    Column("trade_date", Date, primary_key=True),
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("titles", JSONB, nullable=False),  # 当日±1日标题列表
+    Column("concepts", JSONB, nullable=False),  # 命中的概念全名列表(去重)
+    Column("source", String(160), nullable=False, server_default="akshare.stock_news_em"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index(
+    "ix_stock_zt_news_date",
+    stock_zt_news.c.trade_date,
+)
+
 # ── Market margin balance (两市融资余额) ──
 
 # 沪深融资余额每日合计(交易所晚间公布, T-1 口径), 供连板复盘页统计卡。
