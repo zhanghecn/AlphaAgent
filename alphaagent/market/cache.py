@@ -76,6 +76,15 @@ class TTLCache:
             self._entries.clear()
             self._locks.clear()
 
+    def discard_prefix(self, prefix: str) -> None:
+        """Drop every cached key starting with prefix (versioned-key invalidation)."""
+
+        with self._lock:
+            stale = [key for key in self._entries if key.startswith(prefix)]
+            for key in stale:
+                self._entries.pop(key, None)
+                self._locks.pop(key, None)
+
     def _get_fresh(self, key: str, now: float) -> object | None:
         with self._lock:
             entry = self._entries.get(key)

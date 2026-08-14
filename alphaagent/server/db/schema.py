@@ -1654,6 +1654,87 @@ stock_lhb_records = Table(
 )
 Index("ix_stock_lhb_records_date", stock_lhb_records.c.trade_date)
 
+# ── Limit-up pool snapshots (涨停池归档) ──
+
+# 东财涨停池五池(zt涨停/zbgc炸板/dtgc跌停/zt_previous昨涨停/strong强势)每日盘后归档。
+# 与 stock_auction_snapshots 同为归档表，不加 stocks 外键：涨停池可能含 stocks 表
+# 未收录的指数/退市股。
+limit_up_pool_snapshots = Table(
+    "limit_up_pool_snapshots",
+    metadata,
+    Column("trade_date", Date, primary_key=True),
+    Column("pool_type", String(16), primary_key=True),  # zt/zbgc/dtgc/zt_previous/strong
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("name", String(80), nullable=False),
+    Column("close_price", Float, nullable=True),
+    Column("change_pct", Float, nullable=True),
+    Column("turnover_rate", Float, nullable=True),
+    Column("volume_ratio", Float, nullable=True),
+    Column("limit_amount", Float, nullable=True),  # 封板资金
+    Column("first_limit_time", String(8), nullable=True),  # HH:MM:SS
+    Column("last_limit_time", String(8), nullable=True),
+    Column("break_count", Integer, nullable=True),  # 炸板次数
+    Column("limit_stat_days", Integer, nullable=True),  # "13/9" -> 13
+    Column("limit_stat_boards", Integer, nullable=True),  # "13/9" -> 9
+    Column("limit_up_count", Integer, nullable=True),  # 连板数
+    Column("industry", String(120), nullable=True),  # 东财所属行业
+    Column("amount", Float, nullable=True),  # 成交额(raw.成交额)
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index(
+    "ix_limit_up_pool_snapshots_date_type",
+    limit_up_pool_snapshots.c.trade_date,
+    limit_up_pool_snapshots.c.pool_type,
+)
+
+# ── Market margin balance (两市融资余额) ──
+
+# 沪深融资余额每日合计(交易所晚间公布, T-1 口径), 供连板复盘页统计卡。
+market_margin_balance = Table(
+    "market_margin_balance",
+    metadata,
+    Column("trade_date", Date, primary_key=True),
+    Column("margin_balance", Float, nullable=True),  # 两市融资余额合计(元)
+    Column("sse_balance", Float, nullable=True),  # 沪市融资余额(元)
+    Column("szse_balance", Float, nullable=True),  # 深市融资余额(元)
+    Column("source", String(160), nullable=False),
+    Column("raw", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+# ── Stock limit-up daily state (每日连板状态) ──
+
+# 从 stock_daily_bars 重建的每日每股连板状态，是「近一年晋级率」统计的基础。
+stock_limit_up_daily = Table(
+    "stock_limit_up_daily",
+    metadata,
+    Column("trade_date", Date, primary_key=True),
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("is_limit_up", Boolean, nullable=False),
+    Column("limit_up_count", Integer, nullable=False, server_default="0"),
+    Column("is_one_word", Boolean, nullable=False, server_default="false"),
+    Column("is_st", Boolean, nullable=False, server_default="false"),
+    Column("board", String(8), nullable=False),  # main/cyb/kcb/bse
+    Column("limit_price", Float, nullable=True),
+    Column("prev_close", Float, nullable=True),
+    Column("close_price", Float, nullable=True),
+    Column("change_pct", Float, nullable=True),
+    Column("touched_limit", Boolean, nullable=False, server_default="false"),  # 盘中摸板未封(炸板候选)
+    Column("source", String(160), nullable=False, server_default="daily_rebuild"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_stock_limit_up_daily_date", stock_limit_up_daily.c.trade_date)
+Index(
+    "ix_stock_limit_up_daily_symbol_date",
+    stock_limit_up_daily.c.vt_symbol,
+    stock_limit_up_daily.c.trade_date,
+)
+
 
 market_timing_panel = Table(
     "market_timing_panel",

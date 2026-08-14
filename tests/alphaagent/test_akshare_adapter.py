@@ -919,17 +919,81 @@ def test_limit_up_pool_uses_short_ttl_only_for_current_date(monkeypatch) -> None
     monkeypatch.setattr(
         adapter,
         "_limit_up_pools_uncached",
-        lambda trade_date: {"trade_date": trade_date, "pools": {}},
+        lambda trade_date, per_pool_limit: {"trade_date": trade_date, "pools": {}},
     )
 
     today = date.today().strftime("%Y%m%d")
     adapter.limit_up_pools(today)
     adapter.limit_up_pools("20200102")
+    # 归档路径(全量不截断)必须使用独立缓存键, 避免吃到 live 的 200 行截断缓存
+    adapter.limit_up_pools(today, per_pool_limit=None)
 
     assert calls == [
-        (f"limit_up_pools:{today}", adapter.LIVE_LIMIT_POOL_TTL_SECONDS),
-        ("limit_up_pools:20200102", adapter.LIMIT_POOL_TTL_SECONDS),
+        (f"limit_up_pools:{today}:200", adapter.LIVE_LIMIT_POOL_TTL_SECONDS),
+        ("limit_up_pools:20200102:200", adapter.LIMIT_POOL_TTL_SECONDS),
+        (f"limit_up_pools:{today}:full", adapter.LIVE_LIMIT_POOL_TTL_SECONDS),
     ]
+
+
+def test_limit_up_pools_per_pool_limit_controls_truncation(monkeypatch) -> None:
+    """per_pool_limit=None 全量不截断; 默认 200 截断但 total 保留全量行数。"""
+    adapter = AkShareAdapter()
+    big = pd.DataFrame(
+        {
+            "代码": [f"600{i:03d}" for i in range(250)],
+            "名称": [f"股{i}" for i in range(250)],
+        }
+    )
+    empty = pd.DataFrame()
+
+    def source(df: pd.DataFrame):
+        return lambda *, date: df
+
+    module = SimpleNamespace(
+        stock_zt_pool_em=source(big),
+        stock_zt_pool_previous_em=source(empty),
+        stock_zt_pool_strong_em=source(empty),
+        stock_zt_pool_zbgc_em=source(empty),
+        stock_zt_pool_dtgc_em=source(empty),
+    )
+    monkeypatch.setattr(
+        "alphaagent.data_sources.akshare_adapter.importlib.import_module",
+        lambda _name: module,
+    )
+
+    full = adapter._limit_up_pools_uncached("20260713", None)
+    assert len(full["pools"]["zt"]["items"]) == 250
+    assert full["pools"]["zt"]["total"] == 250
+
+    capped = adapter._limit_up_pools_uncached("20260713", 200)
+    assert len(capped["pools"]["zt"]["items"]) == 200
+    assert capped["pools"]["zt"]["total"] == 250
+
+
+def test_zt_pool_row_normalizes_limit_times() -> None:
+    """封板时间在适配器层统一成 HH:MM:SS(6位补冒号 / 5位 zfill / 已带冒号原样)。"""
+    from alphaagent.data_sources.akshare_adapter import _zt_pool_row_to_api
+
+    item = _zt_pool_row_to_api(
+        {
+            "代码": "300862",
+            "名称": "蓝盾光电",
+            "首次封板时间": "092500",
+            "最后封板时间": "09:48:00",
+        }
+    )
+    assert item["first_limit_time"] == "09:25:00"
+    assert item["last_limit_time"] == "09:48:00"
+
+    item2 = _zt_pool_row_to_api(
+        {"代码": "300862", "名称": "x", "首次封板时间": "92500", "最后封板时间": None}
+    )
+    assert item2["first_limit_time"] == "09:25:00"
+    assert item2["last_limit_time"] is None
+
+    item3 = _zt_pool_row_to_api({"代码": "300862", "名称": "x"})
+    assert item3["first_limit_time"] is None
+    assert item3["last_limit_time"] is None
 
 
 def test_live_board_quotes_do_not_use_the_daily_board_cache(monkeypatch) -> None:

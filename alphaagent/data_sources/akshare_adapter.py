@@ -1696,8 +1696,14 @@ class AkShareAdapter:
             df = module.stock_fund_flow_individual(symbol=period)
         return df, "akshare.stock_fund_flow_individual"
 
-    def limit_up_pools(self, trade_date: str | None = None) -> dict[str, Any]:
-        """Return limit-up, limit-down and related pools through AkShare."""
+    def limit_up_pools(
+        self, trade_date: str | None = None, *, per_pool_limit: int | None = 200
+    ) -> dict[str, Any]:
+        """Return limit-up, limit-down and related pools through AkShare.
+
+        per_pool_limit: 每池返回行数上限(live 默认 200); None = 全量(归档路径)。
+        缓存键带该参数, 避免 live 的截断缓存喂给归档。
+        """
 
         if trade_date is None:
             trade_date = date.today().strftime("%Y%m%d")
@@ -1707,14 +1713,17 @@ class AkShareAdapter:
             if trade_date == date.today().strftime("%Y%m%d")
             else self.LIMIT_POOL_TTL_SECONDS
         )
-        key = f"limit_up_pools:{trade_date}"
+        limit_tag = "full" if per_pool_limit is None else str(int(per_pool_limit))
+        key = f"limit_up_pools:{trade_date}:{limit_tag}"
         return market_cache.get_or_set(
             key,
             ttl_seconds,
-            lambda: self._limit_up_pools_uncached(trade_date),
+            lambda: self._limit_up_pools_uncached(trade_date, per_pool_limit),
         )
 
-    def _limit_up_pools_uncached(self, trade_date: str) -> dict[str, Any]:
+    def _limit_up_pools_uncached(
+        self, trade_date: str, per_pool_limit: int | None = 200
+    ) -> dict[str, Any]:
         module = importlib.import_module("akshare.stock_feature.stock_ztb_em")
         pools: dict[str, Any] = {"trade_date": trade_date, "pools": {}}
         pool_configs = [
@@ -1749,7 +1758,7 @@ class AkShareAdapter:
                     df = future.result()
                     pools["pools"][pool_key] = {
                         "label": pool_label,
-                        "items": [_zt_pool_row_to_api(row) for row in _records(df, 200)],
+                        "items": [_zt_pool_row_to_api(row) for row in _records(df, per_pool_limit)],
                         "total": len(df),
                     }
                 except Exception:
@@ -2190,9 +2199,11 @@ def _normalize_board_type(board_type: str) -> str:
     raise AkShareSourceError(f"Unsupported board type: {board_type}")
 
 
-def _records(df: pd.DataFrame, limit: int) -> list[dict[str, Any]]:
+def _records(df: pd.DataFrame, limit: int | None) -> list[dict[str, Any]]:
     if df.empty:
         return []
+    if limit is None:
+        return [_normalize_record(row) for row in df.to_dict(orient="records")]
     bounded_limit = min(max(limit, 1), 500)
     return [_normalize_record(row) for row in df.head(bounded_limit).to_dict(orient="records")]
 
@@ -4691,6 +4702,20 @@ def _stock_fund_flow_row_to_api(row: dict[str, Any], symbol: str) -> dict[str, A
     }
 
 
+def _limit_time_text(value: Any) -> str | None:
+    """Normalize an EastMoney limit time to "HH:MM:SS".
+
+    6 位数字("092500")补冒号; 5 位数字 zfill(6) 后再格式化; 已带冒号的
+    原样通过; 空 → None。与 first_board.live_service._time_text 同口径。
+    """
+    text = str(value or "").strip()
+    if text.isdigit():
+        text = text.zfill(6)
+        if len(text) == 6:
+            return f"{text[:2]}:{text[2:4]}:{text[4:]}"
+    return text or None
+
+
 def _zt_pool_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
     """Normalize a limit-up/limit-down pool row from AkShare."""
     n = _normalize_record(row)
@@ -4707,8 +4732,8 @@ def _zt_pool_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
         "limit_up_price": _number(n.get("涨停价")),
         "volume_ratio": _number(n.get("量比") or n.get("封板量比")),
         "turnover_rate": _number(n.get("换手率") or n.get("换手率_换手率")),
-        "first_limit_time": n.get("首次封板时间") or n.get("涨停时间"),
-        "last_limit_time": n.get("最后封板时间"),
+        "first_limit_time": _limit_time_text(n.get("首次封板时间") or n.get("涨停时间")),
+        "last_limit_time": _limit_time_text(n.get("最后封板时间")),
         "limit_up_count": _int_value(n.get("连板数") or n.get("连续涨停天数")),
         "limit_amount": _number(n.get("封板资金") or n.get("涨停封单量")),
         "raw": n,

@@ -198,6 +198,11 @@ def test_data_health_exposes_stock_daily_history_depth(monkeypatch):
         lambda: (date(2026, 7, 15), "stock_daily_bars.complete"),
     )
     monkeypatch.setattr(svc, "_collect_freshness_probes", lambda: {})
+    monkeypatch.setattr(
+        svc,
+        "_lianban_parity_health",
+        lambda: {"health": "unknown", "reason": "test stub"},
+    )
 
     context = svc.data_health()["market_context"]
 
@@ -206,3 +211,35 @@ def test_data_health_exposes_stock_daily_history_depth(monkeypatch):
     assert context["reliable_history_trade_days"] == 799
     assert context["target_history_trade_days"] == 750
     assert context["history_depth_ready"] is True
+
+
+def test_data_health_exposes_lianban_parity(monkeypatch):
+    """payload 顶层带 lianban_parity 摘要(连板双口径对账), 由巡检函数原样透传。"""
+    monkeypatch.setattr(svc, "coverage", lambda: {"tables": {}})
+    monkeypatch.setattr(
+        svc,
+        "_resolve_latest_trade_date",
+        lambda: (date(2026, 8, 12), "stock_daily_bars.complete"),
+    )
+    monkeypatch.setattr(svc, "_collect_freshness_probes", lambda: {})
+    monkeypatch.setattr(
+        svc,
+        "_lianban_parity_health",
+        lambda: {
+            "health": "warning",
+            "trade_date": "2026-08-12",
+            "status": "ok",
+            "verdict": "major_diff",
+            "diff_count": 3,
+            "em_count": 92,
+            "daily_count": 91,
+            "matched": 90,
+        },
+    )
+
+    parity = svc.data_health()["lianban_parity"]
+
+    assert parity["health"] == "warning"
+    assert parity["verdict"] == "major_diff"
+    assert parity["diff_count"] == 3
+    assert parity["em_count"] == 92

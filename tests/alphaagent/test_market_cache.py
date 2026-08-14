@@ -48,3 +48,35 @@ def test_ttl_cache_get_reads_a_fresh_value_without_running_a_loader() -> None:
     first["rows"].append("caller mutation")
 
     assert cache.get("report") == {"rows": []}
+
+
+def test_ttl_cache_discard_prefix_drops_only_matching_keys() -> None:
+    cache = TTLCache()
+    cache.get_or_set("review:2026-08-12:v1:v1", 60, lambda: {"rows": [1]})
+    cache.get_or_set("review:2026-08-12:v2:v1", 60, lambda: {"rows": [2]})
+    cache.get_or_set("review:2026-08-11:v1:v1", 60, lambda: {"rows": [3]})
+
+    cache.discard_prefix("review:2026-08-12:")  # 该日全部版本 key 失效
+    cache.discard_prefix("review:2026-08-10:")  # 无匹配前缀静默跳过
+
+    reloads: list[str] = []
+    reloaded_v1 = cache.get_or_set(
+        "review:2026-08-12:v1:v1",
+        60,
+        lambda: reloads.append("v1") or {"rows": [4]},
+    )
+    reloaded_v2 = cache.get_or_set(
+        "review:2026-08-12:v2:v1",
+        60,
+        lambda: reloads.append("v2") or {"rows": [5]},
+    )
+    kept = cache.get_or_set(
+        "review:2026-08-11:v1:v1",
+        60,
+        lambda: pytest.fail("untargeted cache entry unexpectedly reloaded"),
+    )
+
+    assert reloaded_v1 == {"rows": [4]}
+    assert reloaded_v2 == {"rows": [5]}
+    assert reloads == ["v1", "v2"]
+    assert kept == {"rows": [3]}

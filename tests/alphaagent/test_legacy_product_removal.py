@@ -17,7 +17,6 @@ LEGACY_TABLES = {
     "limit_up_live_trace_snapshots",
     "limit_up_concept_strength_snapshots",
     "limit_up_signal_snapshots",
-    "limit_up_pool_snapshots",
     "limit_up_history_replays",
     "limit_up_minute_backfill_attempts",
     "limit_up_preboard_point_actions",

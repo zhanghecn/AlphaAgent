@@ -850,6 +850,8 @@ def test_eod_schedule_runs_market_data_and_low_suction_confirmation():
         "sync_sector_fund_flows",
         "sync_stock_fund_flows",
         "sync_stock_daily_bars",
+        "rebuild_stock_limit_up_daily",
+        "sync_limit_up_pool_snapshots",
         svc.LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID,
         svc.ADJUSTED_DAILY_SYNC_JOB_ID,
         "sync_index_daily_bars",
@@ -865,6 +867,7 @@ def test_eod_schedule_runs_market_data_and_low_suction_confirmation():
         "sync_stock_financial_quarterly",
         "sync_stock_financial_indicators",
         "sync_stock_business_segments_history",
+        "sync_margin_balance",
     ]
 
 
@@ -876,6 +879,8 @@ def test_eod_finalize_schedule_retries_daily_bars_late_without_slow_jobs():
     assert finalize["cron"] == "30 21 * * 1-5"
     assert jobs == [
         "sync_stock_daily_bars",
+        "rebuild_stock_limit_up_daily",
+        "sync_limit_up_pool_snapshots",
         svc.LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID,
         svc.ADJUSTED_DAILY_SYNC_JOB_ID,
         "sync_index_daily_bars",
@@ -888,6 +893,7 @@ def test_eod_finalize_schedule_retries_daily_bars_late_without_slow_jobs():
         "sync_sector_members",
         "sync_stock_sector_memberships",
         "sync_low_suction_security_snapshot",
+        "sync_margin_balance",
     ]
     assert "sync_stock_financial_quarterly" not in jobs
     assert "sync_stock_lhb_records" not in jobs
@@ -924,6 +930,69 @@ def test_mainline_sentiment_history_job_runs_after_daily_bar_inputs():
         )
         jobs = schedule["job_ids"]
         assert jobs.index("sync_index_daily_bars") < jobs.index(job.id)
+
+
+def test_rebuild_stock_limit_up_daily_runs_after_daily_bar_sync():
+    job = next(
+        item
+        for item in svc.DEFAULT_JOBS
+        if item.id == "rebuild_stock_limit_up_daily"
+    )
+
+    assert job.source_id == "alphaagent_local"
+    assert job.target_table == "stock_limit_up_daily"
+    assert svc.JOB_RUNNERS[job.id] == "_run_rebuild_stock_limit_up_daily"
+    assert svc.JOB_CADENCES[job.id].freshness_table == "stock_limit_up_daily"
+    assert job.id in svc._RECOMMENDED_PRIORITY
+    assert svc._RECOMMENDED_PRIORITY.index("sync_stock_daily_bars") < (
+        svc._RECOMMENDED_PRIORITY.index(job.id)
+    )
+    for schedule_id in ("eod_1900", "eod_finalize_2130"):
+        schedule = next(
+            item for item in svc.DEFAULT_BATCH_SCHEDULES if item["id"] == schedule_id
+        )
+        jobs = schedule["job_ids"]
+        assert jobs.index("sync_stock_daily_bars") < jobs.index(job.id)
+
+
+def test_sync_limit_up_pool_snapshots_registered_and_scheduled():
+    job = next(
+        item for item in svc.DEFAULT_JOBS if item.id == "sync_limit_up_pool_snapshots"
+    )
+
+    assert job.source_id == "akshare"
+    assert job.target_table == "limit_up_pool_snapshots"
+    assert svc.JOB_RUNNERS[job.id] == "_run_sync_limit_up_pool_snapshots"
+    assert svc.JOB_CADENCES[job.id].cadence == svc.CADENCE_EOD_DAILY
+    assert svc.JOB_CADENCES[job.id].freshness_table == "limit_up_pool_snapshots"
+    assert job.id in svc._RECOMMENDED_PRIORITY
+    assert svc._RECOMMENDED_PRIORITY.index("rebuild_stock_limit_up_daily") < (
+        svc._RECOMMENDED_PRIORITY.index(job.id)
+    )
+    for schedule_id in ("eod_1900", "eod_finalize_2130"):
+        schedule = next(
+            item for item in svc.DEFAULT_BATCH_SCHEDULES if item["id"] == schedule_id
+        )
+        jobs = schedule["job_ids"]
+        assert jobs.index("rebuild_stock_limit_up_daily") < jobs.index(job.id)
+
+
+def test_backfill_limit_up_pool_snapshots_is_manual_only():
+    job = next(
+        item
+        for item in svc.DEFAULT_JOBS
+        if item.id == "backfill_limit_up_pool_snapshots"
+    )
+
+    assert job.enabled is True
+    assert job.source_id == "akshare"
+    assert job.target_table == "limit_up_pool_snapshots"
+    assert svc.JOB_RUNNERS[job.id] == "_run_backfill_limit_up_pool_snapshots"
+    assert svc.JOB_CADENCES[job.id].cadence == svc.CADENCE_IRREGULAR
+    # 手动 job: 不进任何定时档, 但随全量 profile 触发
+    for schedule in svc.DEFAULT_BATCH_SCHEDULES:
+        assert job.id not in schedule["job_ids"]
+    assert job.id in svc.SYNC_BATCH_PROFILES["all"]
 
 
 def test_low_suction_security_snapshot_job_is_registered_and_scheduled():

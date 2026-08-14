@@ -275,6 +275,38 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         target_table="mainline_sentiment_history",
     ),
     JobDefinition(
+        id="rebuild_stock_limit_up_daily",
+        name="连板梯队日线重建",
+        description="由统一数据同步在全市场日线更新后增量重建每股连板状态;涨停判定口径见 lianban.detector。",
+        source_id="alphaagent_local",
+        target_table="stock_limit_up_daily",
+        default_params={},
+    ),
+    JobDefinition(
+        id="sync_limit_up_pool_snapshots",
+        name="涨停池五池归档",
+        description="盘后落库东财涨停/炸板/跌停/昨日涨停/强势股五池,供连板复盘归档。",
+        source_id="akshare",
+        target_table="limit_up_pool_snapshots",
+        default_params={},
+    ),
+    JobDefinition(
+        id="backfill_limit_up_pool_snapshots",
+        name="涨停池五池回补",
+        description="回补最近约三周的涨停池五池归档(东财窗口外日期返回空属正常);手动触发,不挂定时档。",
+        source_id="akshare",
+        target_table="limit_up_pool_snapshots",
+        default_params={"days": 25},
+    ),
+    JobDefinition(
+        id="sync_margin_balance",
+        name="两市融资余额",
+        description="盘后同步沪深两市融资余额(交易所晚间公布,T-1口径),供连板复盘统计卡。",
+        source_id="akshare",
+        target_table="market_margin_balance",
+        default_params={},
+    ),
+    JobDefinition(
         id="sync_stock_minute_bars",
         name="股票分钟 K 线",
         description="同步系统数据源的最近分钟线；历史事件缺口由覆盖审计和夜间任务自动补偿。",
@@ -485,6 +517,10 @@ JOB_CADENCES: dict[str, JobCadence] = {
     ADJUSTED_DAILY_SYNC_JOB_ID: JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "low_suction_adjusted_daily_bar_scopes", "updated_at"),
     "sync_index_daily_bars": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "stock_daily_bars", "trade_date"),
     "sync_mainline_sentiment_history": JobCadence(CADENCE_EOD_DAILY, CATEGORY_SECTOR_RESEARCH, 1, "mainline_sentiment_history", "computed_at"),
+    "rebuild_stock_limit_up_daily": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "stock_limit_up_daily", "updated_at"),
+    "sync_limit_up_pool_snapshots": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "limit_up_pool_snapshots", "updated_at"),
+    "backfill_limit_up_pool_snapshots": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BARS, 30, "limit_up_pool_snapshots", "updated_at"),
+    "sync_margin_balance": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_REALTIME, 1, "market_margin_balance", "trade_date"),
     "sync_sector_daily_bars": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "sector_daily_bars", "trade_date"),
     "sync_stock_minute_bars": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_BARS, 1, "stock_minute_bars", "bar_time"),
     "sync_stock_auction_snapshots": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "stock_auction_snapshots", "captured_at"),
@@ -514,7 +550,7 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
     "sync_low_suction_security_snapshot",
     "sync_shenwan_industry_members", "sync_industry_board_mapping",
     "sync_supply_chain_edges",
-    "sync_stock_daily_bars", ADJUSTED_DAILY_SYNC_JOB_ID, "sync_index_daily_bars", "sync_mainline_sentiment_history", "sync_sector_daily_bars",
+    "sync_stock_daily_bars", "rebuild_stock_limit_up_daily", "sync_limit_up_pool_snapshots", ADJUSTED_DAILY_SYNC_JOB_ID, "sync_index_daily_bars", "sync_mainline_sentiment_history", "sync_sector_daily_bars",
     "sync_stock_minute_bars",
     "sync_stock_auction_snapshots",
     "sync_stock_fund_flows", "sync_sector_fund_flows",
@@ -523,6 +559,7 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
     "sync_stock_financial_quarterly", "sync_stock_financial_indicators",
     "sync_stock_business_segments_history",
     "sync_stock_lhb_records", "sync_stock_notices",
+    "sync_margin_balance",
 )
 
 
@@ -625,6 +662,8 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_sector_fund_flows",
             "sync_stock_fund_flows",
             "sync_stock_daily_bars",
+            "rebuild_stock_limit_up_daily",
+            "sync_limit_up_pool_snapshots",
             LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID,
             ADJUSTED_DAILY_SYNC_JOB_ID,
             "sync_index_daily_bars",
@@ -640,6 +679,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_stock_financial_quarterly",
             "sync_stock_financial_indicators",
             "sync_stock_business_segments_history",
+            "sync_margin_balance",
         ],
     },
     {
@@ -651,6 +691,8 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "concurrency": 1,
         "job_ids": [
             "sync_stock_daily_bars",
+            "rebuild_stock_limit_up_daily",
+            "sync_limit_up_pool_snapshots",
             LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID,
             ADJUSTED_DAILY_SYNC_JOB_ID,
             "sync_index_daily_bars",
@@ -663,6 +705,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_sector_members",
             "sync_stock_sector_memberships",
             "sync_low_suction_security_snapshot",
+            "sync_margin_balance",
         ],
     },
     {
@@ -1334,6 +1377,159 @@ class DataSyncRunner:
                 f"情绪周期{status}：{anchor}，"
                 f"{int(result.get('rows_written') or 0)} 个交易日"
             )
+        return result
+
+    def _run_rebuild_stock_limit_up_daily(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Rebuild per-stock limit-up streaks after the daily bars settle."""
+        from alphaagent.server.services.lianban.rebuild import run_rebuild
+        from alphaagent.server.services.lianban.review_cache import (
+            invalidate_lianban_cache,
+        )
+
+        full = _truthy(params.get("full", False))
+        target = _parse_date(params.get("trade_date"))
+        self._report_progress("重建连板梯队日线", current=0, total=1)
+        with session_scope() as session:
+            result = run_rebuild(session, schema, trade_date=target, full=full)
+        # 复盘页进程缓存失效(重建改写了 stock_limit_up_daily)。
+        invalidate_lianban_cache()
+        dates = list(result.get("trade_dates") or [])
+        rows_written = int(result.get("rows_written") or 0)
+        target_date = result.get("target_date")
+        self._report_progress(
+            "重建连板梯队日线",
+            current=1,
+            total=1,
+            current_label=f"截至 {target_date}" if target_date else "无待重建交易日",
+            rows_read=int(result.get("rows_read") or 0),
+            rows_written=rows_written,
+        )
+        if "message" not in result:
+            result["message"] = (
+                f"连板梯队日线重建完成：{len(dates)} 个交易日，{rows_written} 行"
+            )
+        return result
+
+    def _run_sync_limit_up_pool_snapshots(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Archive the five EastMoney limit-up pools after the close."""
+        from alphaagent.server.services.lianban.archive import archive_daily_pools
+        from alphaagent.server.services.lianban.review_cache import (
+            invalidate_lianban_cache,
+        )
+
+        raw_date = str(params.get("trade_date") or "").strip()
+        target = _parse_date(raw_date) if raw_date else None
+        if raw_date and target is None:
+            # 手动传了非法日期必须显式失败, 不静默归档到当天。
+            raise DataSyncError(f"Invalid trade_date for limit-up pool archive: {raw_date!r}")
+        target = target or _now_china().date()
+        self._report_progress("归档涨停池五池", current=0, total=1)
+        with session_scope() as session:
+            result = archive_daily_pools(session, target, adapter=self.adapter)
+        # 复盘页进程缓存失效(归档改写了 limit_up_pool_snapshots)。
+        invalidate_lianban_cache()
+        pools = result.get("pools") or {}
+        rows_written = int(result.get("rows_written") or 0)
+        unavailable = [str(p) for p in result.get("unavailable") or []]
+        truncated = [str(p) for p in result.get("truncated") or []]
+        self._report_progress(
+            "归档涨停池五池",
+            current=1,
+            total=1,
+            current_label=(
+                f"{target} 涨停 {int(pools.get('zt') or 0)} / "
+                f"炸板 {int(pools.get('zbgc') or 0)} / "
+                f"跌停 {int(pools.get('dtgc') or 0)}"
+            ),
+            rows_read=rows_written,
+            rows_written=rows_written,
+        )
+        if "message" not in result:
+            notes: list[str] = []
+            if unavailable:
+                notes.append(f"池不可用保留旧数据: {'/'.join(unavailable)}")
+            if truncated:
+                notes.append(f"疑似截断: {'/'.join(truncated)}")
+            suffix = f"（{'；'.join(notes)}）" if notes else ""
+            result["message"] = f"涨停池五池归档完成：{target}，{rows_written} 行{suffix}"
+        return result
+
+    def _run_backfill_limit_up_pool_snapshots(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Backfill recent limit-up pool snapshots (manual job, no schedule).
+
+        全部回补日在同一个 session_scope 事务里, 进程中断整体回滚, 重跑从头开始,
+        安全(代价是长事务, 25 日量级可接受)。按日跳过判定只看 zt 池是否有行:
+        zt 已归档即跳过整日, 其余池个别缺口不补(known limitation)。
+        """
+        from alphaagent.server.services.lianban.backfill import backfill_pool_snapshots
+        from alphaagent.server.services.lianban.review_cache import (
+            invalidate_lianban_cache,
+        )
+
+        days = int(params.get("days", 25))
+        sleep_seconds = float(params.get("sleep_seconds", 1.0))
+        self._report_progress("回补涨停池五池", current=0, total=1)
+        with session_scope() as session:
+            result = backfill_pool_snapshots(
+                session, days=days, adapter=self.adapter, sleep_seconds=sleep_seconds
+            )
+        # 复盘页进程缓存失效(回补改写了 limit_up_pool_snapshots)。
+        invalidate_lianban_cache()
+        archived = list(result.get("archived") or [])
+        skipped = list(result.get("skipped_existing") or [])
+        empty = list(result.get("empty") or [])
+        self._report_progress(
+            "回补涨停池五池",
+            current=1,
+            total=1,
+            current_label=f"新归档 {len(archived)} / 跳过 {len(skipped)} / 空 {len(empty)}",
+            rows_written=len(archived),
+        )
+        if "message" not in result:
+            result["message"] = (
+                f"涨停池五池回补完成：新归档 {len(archived)} 日，"
+                f"已存在跳过 {len(skipped)} 日，窗口外为空 {len(empty)} 日"
+            )
+        return result
+
+    def _run_sync_margin_balance(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Sync the SSE+SZSE margin balance after the close.
+
+        数据源不可用不失败(服务层吞异常返回 rows_written=0+error), 这里把
+        原因透进 message, 运维在同步面板可观测。
+        """
+        from alphaagent.server.services.lianban.margin import sync_margin_balance
+
+        lookback_days = int(params.get("lookback_days", 10))
+        self._report_progress("同步两市融资余额", current=0, total=1)
+        with session_scope() as session:
+            result = sync_margin_balance(session, lookback_days=lookback_days)
+        rows_written = int(result.get("rows_written") or 0)
+        latest = result.get("latest") or {}
+        latest_date = str(latest.get("trade_date") or "")
+        if latest_date:
+            balance_yi = float(latest.get("margin_balance") or 0.0) / 1e8
+            label = f"{latest_date} 融资余额 {balance_yi:.0f} 亿"
+        else:
+            label = "数据源不可用"
+        self._report_progress(
+            "同步两市融资余额",
+            current=1,
+            total=1,
+            current_label=label,
+            rows_read=rows_written,
+            rows_written=rows_written,
+        )
+        if "message" not in result:
+            error = str(result.get("error") or "").strip()
+            if error:
+                result["message"] = f"两市融资余额同步跳过：数据源不可用（{error}）"
+            elif latest_date:
+                result["message"] = (
+                    f"两市融资余额同步完成：{rows_written} 行，最新 {latest_date}"
+                )
+            else:
+                result["message"] = "两市融资余额同步完成：0 行（沪深暂无共同交易日）"
         return result
 
     def _run_sync_stock_minute_bars(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2227,6 +2423,10 @@ JOB_RUNNERS: dict[str, str] = {
     "sync_stock_auction_snapshots": "_run_sync_stock_auction_snapshots",
     "sync_stock_sector_memberships": "_run_sync_stock_sector_memberships",
     "sync_mainline_sentiment_history": "_run_sync_mainline_sentiment_history",
+    "rebuild_stock_limit_up_daily": "_run_rebuild_stock_limit_up_daily",
+    "sync_limit_up_pool_snapshots": "_run_sync_limit_up_pool_snapshots",
+    "backfill_limit_up_pool_snapshots": "_run_backfill_limit_up_pool_snapshots",
+    "sync_margin_balance": "_run_sync_margin_balance",
     "sync_low_suction_security_snapshot": "_run_sync_low_suction_security_snapshot",
     "sync_shenwan_industry_tree": "_run_sync_shenwan_industry_tree",
     "sync_shenwan_industry_members": "_run_sync_shenwan_industry_members",
@@ -3667,6 +3867,7 @@ def _data_health_uncached() -> dict[str, Any]:
             "trade_calendar_source": cal_source,
         },
         "categories": categories,
+        "lianban_parity": _lianban_parity_health(),
         "recommended": {
             "job_ids": recommended,
             "count": len(recommended),
@@ -3680,6 +3881,43 @@ def _data_health_uncached() -> dict[str, Any]:
                 if is_empty else None
             ),
         },
+    }
+
+
+def _lianban_parity_health() -> dict[str, Any]:
+    """连板双口径对账摘要(东财涨停池 vs 日线重建, 见 lianban.parity)。
+
+    取最近一个双侧都有数据的交易日跑 parity_report; 缺侧或
+    verdict=major_diff → warning。对账失败不拖垮健康检查本身(健康
+    payload 60s TTL 缓存, 该探测含 2~3 条索引轻查询)。
+    """
+    if not is_database_configured():
+        return {"health": "unknown", "reason": "database not configured"}
+    try:
+        from alphaagent.server.services.lianban.parity import latest_parity_report
+
+        with session_scope() as session:
+            report = latest_parity_report(session)
+    except Exception as exc:  # noqa: BLE001 — 健康检查不能因对账查询失败而崩
+        logger.warning("lianban parity health probe failed: %s", exc)
+        return {"health": "unknown", "reason": exc.__class__.__name__}
+    return _parity_health_summary(report)
+
+
+def _parity_health_summary(report: dict[str, Any] | None) -> dict[str, Any]:
+    """parity_report → 健康摘要(纯函数)。缺侧或 major_diff → warning。"""
+    if report is None:
+        return {"health": "unknown", "reason": "无双侧都有数据的交易日"}
+    warning = report["status"] != "ok" or report["verdict"] == "major_diff"
+    return {
+        "health": "warning" if warning else "ok",
+        "trade_date": report["trade_date"],
+        "status": report["status"],
+        "verdict": report["verdict"],
+        "diff_count": report["diff_count"],
+        "em_count": report["em_count"],
+        "daily_count": report["daily_count"],
+        "matched": report["matched"],
     }
 
 
