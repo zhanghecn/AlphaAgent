@@ -26,6 +26,11 @@
   zt_previous/strong 不可用 → 降级空池 + data_quality.missing 标
   "pool:<type>"。
 - GET /api/lianban/dates —— 可复盘交易日(归档 ∪ 重建, 降序, 限 400)。
+- GET /api/lianban/ladder-history?days=60 —— 连板天梯历史(研究型): 近 N
+  个有涨停交易日的梯队 matrix / 窗口晋级率 promotion_matrix / 每日龙头
+  leaders; days 合法区间 [5, 250] 由 FastAPI 校验(越界 422); 无数据返回
+  ok 空结构(dates=[], matrix=[]); 窗口数据量小(两次索引查询 + Python
+  聚合), as_of=今日时当日晚间 rebuild 后会变, 不引入缓存。
 - 进程缓存: final/rebuild 且 trade_date < 今日的 payload 不可变 →
   review_payload_cache 长 TTL 兜底 P95; live 与"今日 final"不缓存。
   缓存 key 带该日两表 max(updated_at) 版本戳(每次请求两条索引轻查询,
@@ -49,6 +54,7 @@ from alphaagent.server.core.responses import fail, ok
 from alphaagent.server.db import schema as db_schema
 from alphaagent.server.db.session import is_database_configured, session_scope
 from alphaagent.server.services.lianban import archive as archive_module
+from alphaagent.server.services.lianban.ladder_history import ladder_history
 from alphaagent.server.services.lianban.review import ReviewNotFound, build_review
 from alphaagent.server.services.lianban.review_cache import (
     REVIEW_CACHE_TTL_SECONDS,
@@ -352,3 +358,24 @@ def lianban_dates():
             "latest": merged[0].isoformat() if merged else None,
         }
     )
+
+
+@router.get("/ladder-history", response_model=None)
+def lianban_ladder_history(
+    days: int = Query(default=60, ge=5, le=250),
+    include_st: bool = Query(default=False),
+):
+    """连板天梯历史: 近 N 个有涨停交易日的梯队/晋级率/龙头序列。
+
+    days 越界/非整数由 FastAPI 校验转 422; 无数据返回 ok 空结构。
+    数据量小(两次索引查询 + Python 聚合), 不引入进程缓存。
+    """
+    if not is_database_configured():
+        return JSONResponse(
+            status_code=503,
+            content=fail(
+                "LIANBAN_DB_UNAVAILABLE", "数据库未配置，连板天梯历史不可用。"
+            ),
+        )
+    with session_scope() as session:
+        return ok(ladder_history(session, days=days, include_st=include_st))

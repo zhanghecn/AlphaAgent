@@ -142,6 +142,49 @@ export interface LianbanDates {
   latest: string | null;
 }
 
+// ===== 天梯历史（/lianban/ladder-history，二期研究型端点）=====
+
+/** 单日梯队快照：tiers 键 "1".."5" + "6+"(streak>=6 合并)；无涨停日 leader=null、max_streak=0。 */
+export interface LadderHistoryDay {
+  trade_date: string;
+  tiers: Record<string, number>;
+  total: number;
+  max_streak: number;
+  leader: { vt_symbol: string; name: string; streak: number } | null;
+}
+
+/** 窗口晋级率行：streak 1-7 为数字（容忍后端序列化成字符串），合并档为 "8+"；样本不足时 rate=null。 */
+export interface LadderPromotionRow {
+  streak: number | string;
+  samples: number;
+  promoted: number;
+  rate: number | null;
+}
+
+/** 每日最高板龙头。 */
+export interface LadderLeaderDay {
+  trade_date: string;
+  vt_symbol: string;
+  name: string;
+  streak: number;
+  is_one_word: boolean;
+}
+
+export interface LadderHistory {
+  days: number;
+  /** 窗口最新交易日；窗口为空时为 null */
+  as_of: string | null;
+  /** 窗口交易日（升序，只含有涨停行的日子） */
+  dates: string[];
+  matrix: LadderHistoryDay[];
+  promotion_matrix: LadderPromotionRow[];
+  leaders: LadderLeaderDay[];
+}
+
+export function fetchLadderHistory(days = 60) {
+  return apiClient.get<LadderHistory>(`/lianban/ladder-history?days=${days}`);
+}
+
 export function fetchLianbanReview(date?: string) {
   return apiClient.get<LianbanReview>(`/lianban/review${date ? `?date=${date}` : ""}`);
 }

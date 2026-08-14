@@ -1,4 +1,5 @@
 import { ChevronLeft, ChevronRight } from "lucide-react";
+import { Link } from "react-router-dom";
 
 import type { LianbanReview } from "@/api/lianban";
 import { cn, formatPct, priceColorClass } from "@/lib/utils";
@@ -111,6 +112,13 @@ export function ReviewHeader({
             {formatClockTime(liveFetchedAt)} 更新 · 30s 轮询
           </span>
         )}
+        <Link
+          to="/lianban/ladder"
+          className="flex h-7 items-center gap-0.5 rounded border px-2 text-xs text-muted-foreground hover:text-foreground"
+        >
+          天梯历史
+          <ChevronRight size={13} />
+        </Link>
         <nav className="ml-auto flex items-center gap-1.5 text-xs" aria-label="复盘日期导航">
           <button
             type="button"
