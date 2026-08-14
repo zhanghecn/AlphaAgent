@@ -11,6 +11,8 @@ INDEX_SYMBOLS: tuple[dict[str, str], ...] = (
     {"symbol": "399001", "exchange": "SZSE", "name": "深证成指"},
     {"symbol": "399006", "exchange": "SZSE", "name": "创业板指"},
     {"symbol": "000688", "exchange": "SSE", "name": "科创50"},
+    {"symbol": "000016", "exchange": "SSE", "name": "上证50"},
+    {"symbol": "899050", "exchange": "BSE", "name": "北证50"},
 )
 
 
