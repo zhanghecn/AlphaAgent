@@ -155,11 +155,14 @@ def test_cli_declares_targeted_personal_case_gate(
 
     assert calls[0]["price_basis"] == "raw_unadjusted"
     assert set(calls[0]["vt_symbols"]) == {
+        "000859.SZSE",
         "003032.SZSE",
         "605179.SSE",
         "001258.SZSE",
         "603221.SSE",
         "600721.SSE",
+        "603758.SSE",
+        "600683.SSE",
         "002445.SZSE",
         "600396.SSE",
         "600629.SSE",

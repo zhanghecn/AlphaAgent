@@ -264,6 +264,11 @@ def test_d1_close_label_keeps_tick_rounded_main_board_limit_closes() -> None:
     )
 
 
+def test_limit_up_touch_uses_the_tick_rounded_upper_limit() -> None:
+    assert daily_factor_research_module.is_main_board_limit_up_touched(9.53, 10.48)
+    assert not daily_factor_research_module.is_main_board_limit_up_touched(9.53, 10.47)
+
+
 def test_d1_label_diagnostics_distinguish_main_board_price_limit_exclusions() -> None:
     calendar = (date(2026, 2, 12), date(2026, 2, 13))
     label, reason = daily_factor_research_module._eligible_d1_label(

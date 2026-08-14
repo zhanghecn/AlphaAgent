@@ -13,24 +13,32 @@ from alphaagent.server.services.low_suction.daily_factor_comprehensive_study imp
 )
 from alphaagent.server.services.low_suction.daily_factor_extended_discovery import (
     DISCOVERY_RULES,
+    ATTACK_BODY_HOLD_RULE_KEY,
     DiscoveryRule,
+    FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
     MA10_MA20_PRE_CROSS_RULE_KEY,
     POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
     RESEARCH_PENDING_DAILY_RULE_KEYS,
     RESEARCH_THREE_MA_WRAP_RULE_KEY,
     STAGED_MA10_SUPPORT_RULE_KEY,
     _ma10_ma20_next_close_required_return_pct,
+    _ma10_ma30_next_close_required_return_pct,
     _has_initial_short_trend_shape,
     _is_score_candidate,
     _research_answers,
     _rule_matches,
+    build_pre_attack_base_process_features,
     build_extended_daily_features,
+    classify_oversold_attack_stages,
     evaluate_post_limit_up_hold,
+    is_first_leg_two_ma_wrap_base_qualified,
+    is_mature_first_leg_two_ma_wrap_qualified,
     matching_discovery_rule_keys,
     process_rule_predicates,
     render_extended_daily_factor_markdown,
     run_extended_daily_factor_discovery,
     score_extended_factor,
+    summarize_pre_attack_base_process_observations,
     select_exit_probe,
     summarize_score_observations,
     summarize_rule_observations,
@@ -457,7 +465,7 @@ def test_scan_keeps_a_source_rule_when_the_diagnostic_turnover_gate_fails(
 
 @pytest.mark.parametrize(
     "pending_rule_key",
-    sorted(RESEARCH_PENDING_DAILY_RULE_KEYS),
+    sorted(RESEARCH_PENDING_DAILY_RULE_KEYS - {FIRST_LEG_TWO_MA_WRAP_RULE_KEY}),
 )
 def test_scan_excludes_research_pending_oversold_rules_from_daily_candidates(
     monkeypatch: pytest.MonkeyPatch,
@@ -498,6 +506,176 @@ def test_scan_excludes_research_pending_oversold_rules_from_daily_candidates(
         [],
         target_dates={signal_date},
     ) == []
+
+
+def test_scan_experiment_admits_only_attack_retest_base_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signal_date = date(2026, 7, 23)
+    snapshot = SimpleNamespace(
+        symbol="000859.SZSE",
+        trade_date=signal_date,
+        position=0,
+        history=(_bar(signal_date, 10.0, volume=1_000.0),),
+        features={
+            "close_price": 10.0,
+            "daily_return_pct": -0.5,
+            "turnover_rate_pct": 2.0,
+            "candle_range_pct": 2.0,
+        },
+        prior_features=None,
+        d1_close_return_pct=1.0,
+        d1_label_status="available",
+    )
+    monkeypatch.setattr(
+        daily_picks_scanner,
+        "_iter_candidate_snapshots",
+        lambda *args, **kwargs: iter((snapshot,)),
+    )
+    monkeypatch.setattr(
+        daily_picks_scanner,
+        "matching_discovery_rule_keys",
+        lambda features, setup_type, *, prior_features=None: (
+            (ATTACK_BODY_HOLD_RULE_KEY,)
+            if setup_type == "oversold_rebound"
+            else ()
+        ),
+    )
+    monkeypatch.setattr(
+        daily_picks_scanner,
+        "build_pre_attack_base_process_features",
+        lambda history: {"pre_attack_base_phase": "release_retest_base"},
+    )
+
+    candidates = daily_picks_scanner.scan_low_suction_candidates(
+        [],
+        (signal_date, signal_date + timedelta(days=1)),
+        [],
+        target_dates={signal_date},
+        include_experimental_attack_retest_base=True,
+    )
+
+    assert [candidate.rule_key for candidate in candidates] == [
+        ATTACK_BODY_HOLD_RULE_KEY
+    ]
+    component = next(
+        item
+        for item in candidates[0].components
+        if item.key == "attack_retest_base"
+    )
+    assert component.passed is True
+
+
+def test_scan_experiment_keeps_other_attack_base_phases_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signal_date = date(2026, 7, 23)
+    snapshot = SimpleNamespace(
+        symbol="000859.SZSE",
+        trade_date=signal_date,
+        position=0,
+        history=(_bar(signal_date, 10.0, volume=1_000.0),),
+        features={
+            "close_price": 10.0,
+            "daily_return_pct": -0.5,
+            "turnover_rate_pct": 2.0,
+            "candle_range_pct": 2.0,
+        },
+        prior_features=None,
+        d1_close_return_pct=1.0,
+        d1_label_status="available",
+    )
+    monkeypatch.setattr(
+        daily_picks_scanner,
+        "_iter_candidate_snapshots",
+        lambda *args, **kwargs: iter((snapshot,)),
+    )
+    monkeypatch.setattr(
+        daily_picks_scanner,
+        "matching_discovery_rule_keys",
+        lambda features, setup_type, *, prior_features=None: (
+            (ATTACK_BODY_HOLD_RULE_KEY,)
+            if setup_type == "oversold_rebound"
+            else ()
+        ),
+    )
+    monkeypatch.setattr(
+        daily_picks_scanner,
+        "build_pre_attack_base_process_features",
+        lambda history: {"pre_attack_base_phase": "fresh_expansion"},
+    )
+
+    assert daily_picks_scanner.scan_low_suction_candidates(
+        [],
+        (signal_date, signal_date + timedelta(days=1)),
+        [],
+        target_dates={signal_date},
+        include_experimental_attack_retest_base=True,
+    ) == []
+
+
+def test_scan_admits_only_mature_first_leg_two_ma_wrap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signal_date = date(2026, 7, 23)
+    snapshot = SimpleNamespace(
+        symbol="600721.SSE",
+        trade_date=signal_date,
+        position=0,
+        history=(_bar(signal_date, 10.0, volume=1_000.0),),
+        features={
+            "close_price": 10.0,
+            "daily_return_pct": 2.0,
+            "turnover_rate_pct": 2.0,
+            "candle_range_pct": 2.0,
+            "close_to_ma10_pct": 2.0,
+            "close_off_low_pct": 3.3,
+            "ma10_ma20_convergence_efficiency_5d": 0.1561,
+            "ma10_ma20_gap_narrowing_3d_pct": 1.3248,
+        },
+        prior_features=None,
+        d1_close_return_pct=1.0,
+        d1_label_status="available",
+    )
+    monkeypatch.setattr(
+        daily_picks_scanner,
+        "_iter_candidate_snapshots",
+        lambda *args, **kwargs: iter((snapshot,)),
+    )
+    monkeypatch.setattr(
+        daily_picks_scanner,
+        "matching_discovery_rule_keys",
+        lambda features, setup_type, *, prior_features=None: (
+            (FIRST_LEG_TWO_MA_WRAP_RULE_KEY,)
+            if setup_type == "oversold_rebound"
+            else ()
+        ),
+    )
+
+    def direct_attack_base(history, *, include_d_minus_one=False):
+        assert include_d_minus_one is True
+        return {
+            "pre_attack_base_phase": "gradual_support_ladder",
+            "pre_attack_base_pivot_age_sessions": 9,
+        }
+
+    monkeypatch.setattr(
+        daily_picks_scanner,
+        "build_pre_attack_base_process_features",
+        direct_attack_base,
+    )
+
+    candidates = daily_picks_scanner.scan_low_suction_candidates(
+        [],
+        (signal_date, signal_date + timedelta(days=1)),
+        [],
+        target_dates={signal_date},
+    )
+
+    assert [candidate.rule_key for candidate in candidates] == [
+        FIRST_LEG_TWO_MA_WRAP_RULE_KEY
+    ]
+    assert not any(item.key == "attack_retest_base" for item in candidates[0].components)
 
 
 def test_scan_excludes_a_signal_day_closed_at_main_board_limit_up(
@@ -564,6 +742,21 @@ def test_signal_day_limit_up_filter_keeps_an_opened_board() -> None:
     )
 
     assert daily_picks_scanner._signal_day_limit_up_closed(history, 1) is False
+
+
+def test_signal_day_limit_up_filter_excludes_a_tick_rounded_limit_close() -> None:
+    history = (
+        _bar(date(2026, 8, 6), 9.53),
+        _bar(
+            date(2026, 8, 7),
+            10.48,
+            open_price=10.48,
+            low_price=10.48,
+            high_price=10.48,
+        ),
+    )
+
+    assert daily_picks_scanner._signal_day_limit_up_closed(history, 1) is True
 
 
 def _m60_rising_overextended_history() -> list[dict[str, object]]:
@@ -647,6 +840,14 @@ def test_ma10_ma20_next_close_requirement_uses_d_and_earlier_closes() -> None:
     assert _ma10_ma20_next_close_required_return_pct([10.0] * 11 + [9.0] * 9) == pytest.approx(
         111.1111
     )
+
+
+def test_ma10_ma30_next_close_requirement_uses_d_and_earlier_closes() -> None:
+    assert _ma10_ma30_next_close_required_return_pct([10.0] * 29) is None
+    assert _ma10_ma30_next_close_required_return_pct([10.0] * 30) == 0.0
+    assert _ma10_ma30_next_close_required_return_pct(
+        [10.0] * 21 + [9.0] * 9
+    ) == pytest.approx(111.1111)
 
 
 def test_three_ma_wrap_requires_ma10_cross_after_long_bear() -> None:
@@ -747,6 +948,8 @@ def test_manifest_excludes_retired_generic_rule_families() -> None:
     assert "m5_m10_joint_attack_before_ma20_cross_last_volume_expand" not in rules
     assert MA10_MA20_PRE_CROSS_RULE_KEY in rules
     assert RESEARCH_PENDING_DAILY_RULE_KEYS == {
+        ATTACK_BODY_HOLD_RULE_KEY,
+        FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
         MA10_MA20_PRE_CROSS_RULE_KEY,
     }
     assert "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30" not in rules
@@ -931,17 +1134,452 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
     ) is False
 
 
+def test_attack_body_hold_requires_a_shrunk_retest_above_the_attack_open() -> None:
+    features = {
+        "long_bear_alignment": True,
+        "oversold_process_eligible": True,
+        "ma10_crossed_ma20_after_long_bear_within_15d": True,
+        "ma10_above_ma20": True,
+        "ma10_below_ma30": True,
+        "ma10_ma30_fast_convergence": True,
+        "prior_positive_body_pct": 4.82,
+        "prior_limit_up_touched": False,
+        "daily_return_pct": -1.03,
+        "candle_quiet": True,
+        "attack_body_low_held": True,
+        "attack_body_close_held": True,
+        "last_volume_to_prior_ratio": 0.72,
+    }
+
+    assert process_rule_predicates(ATTACK_BODY_HOLD_RULE_KEY, features) == {
+        "long_bear_alignment": True,
+        "oversold_process_eligible": True,
+        "ma10_crossed_ma20_after_long_bear_within_15d": True,
+        "ma10_above_ma20": True,
+        "ma10_below_ma30": True,
+        "ma10_ma30_fast_convergence": True,
+        "prior_attack_body_at_least_3_pct": True,
+        "prior_attack_not_limit_up": True,
+        "controlled_retest_candle": True,
+        "attack_body_low_held": True,
+        "attack_body_close_held": True,
+        "volume_shrunk_to_80_pct_or_less": True,
+    }
+
+    rule = next(
+        rule
+        for rule in DISCOVERY_RULES["oversold_rebound"]
+        if rule.key == ATTACK_BODY_HOLD_RULE_KEY
+    )
+    assert _rule_matches(rule, features) is True
+    assert _rule_matches(rule, {**features, "attack_body_low_held": False}) is False
+    assert _rule_matches(rule, {**features, "attack_body_close_held": False}) is False
+    assert _rule_matches(rule, {**features, "prior_positive_body_pct": 2.99}) is False
+    assert _rule_matches(rule, {**features, "last_volume_to_prior_ratio": 0.81}) is False
+
+
+def test_first_leg_two_ma_wrap_keeps_the_d_attack_anchor_and_base_gate_separate() -> None:
+    """百花 7-14 型首段攻击：D 实体跨两线，MA30 留给下一阶段。"""
+
+    features = {
+        "long_bear_alignment": True,
+        "current_full_bear_alignment": True,
+        "yang_wrap_two_ma": True,
+        "close_below_ma30": True,
+        "signal_day_not_limit_up_closed": True,
+        "ma10_ma20_convergence_efficiency_5d": 0.1561,
+        "ma10_ma20_gap_narrowing_3d_pct": 1.3248,
+        "pre_attack_base_phase": "gradual_support_ladder",
+    }
+    oversold_rules = {
+        rule.key: rule for rule in DISCOVERY_RULES["oversold_rebound"]
+    }
+
+    assert process_rule_predicates(FIRST_LEG_TWO_MA_WRAP_RULE_KEY, features) == {
+        "long_bear_alignment": True,
+        "current_full_bear_alignment": True,
+        "yang_wrap_two_ma": True,
+        "close_below_ma30": True,
+        "signal_day_not_limit_up_closed": True,
+    }
+    assert _rule_matches(oversold_rules[FIRST_LEG_TWO_MA_WRAP_RULE_KEY], features)
+    assert is_first_leg_two_ma_wrap_base_qualified(features)
+    assert not is_first_leg_two_ma_wrap_base_qualified(
+        {**features, "pre_attack_base_phase": "fresh_expansion"}
+    )
+    assert not is_first_leg_two_ma_wrap_base_qualified(
+        {**features, "ma10_ma20_convergence_efficiency_5d": 0.1560}
+    )
+    assert not is_first_leg_two_ma_wrap_base_qualified(
+        {**features, "ma10_ma20_gap_narrowing_3d_pct": 1.3247}
+    )
+    assert not _rule_matches(
+        oversold_rules[FIRST_LEG_TWO_MA_WRAP_RULE_KEY],
+        {**features, "close_below_ma30": False},
+    )
+
+
+def test_baihua_20260714_mature_first_leg_requires_non_chasing_attack_and_reaction() -> None:
+    """百花医药 7-14：D 日包裹 MA10/20、MA10 尚未上穿 MA20。"""
+
+    features = {
+        "pre_attack_base_phase": "gradual_support_ladder",
+        "ma10_ma20_convergence_efficiency_5d": 0.3472,
+        "ma10_ma20_gap_narrowing_3d_pct": 3.0831,
+        "close_to_ma10_pct": 0.9094,
+        "daily_return_pct": 2.6866,
+        "pre_attack_base_pivot_age_sessions": 10,
+        "close_off_low_pct": 4.0847,
+    }
+
+    assert is_mature_first_leg_two_ma_wrap_qualified(features)
+    assert not is_mature_first_leg_two_ma_wrap_qualified(
+        {**features, "close_to_ma10_pct": 3.1}
+    )
+    assert not is_mature_first_leg_two_ma_wrap_qualified(
+        {**features, "daily_return_pct": 5.1}
+    )
+    assert not is_mature_first_leg_two_ma_wrap_qualified(
+        {**features, "ma10_ma20_gap_narrowing_3d_pct": 4.1}
+    )
+    assert not is_mature_first_leg_two_ma_wrap_qualified(
+        {**features, "pre_attack_base_pivot_age_sessions": 8}
+    )
+    assert not is_mature_first_leg_two_ma_wrap_qualified(
+        {**features, "close_off_low_pct": 3.2}
+    )
+
+
+def test_oversold_attack_stages_keep_d_day_roles_distinct_from_scores() -> None:
+    first_leg = {
+        "long_bear_alignment": True,
+        "current_full_bear_alignment": True,
+        "ma10_below_ma20": True,
+        "positive_candle": True,
+        "ma10_ma20_gap_narrowing": True,
+        "yang_wrap_two_ma": True,
+        "close_below_ma30": True,
+        "signal_day_not_limit_up_closed": True,
+    }
+    bridge_hold = {
+        "long_bear_alignment": True,
+        "ma10_above_ma20": True,
+        "ma10_below_ma30": True,
+        "ma10_crossed_ma20_after_long_bear_within_15d": True,
+        "ma10_crossed_ma20_after_long_bear_age_sessions_15d": 2,
+        "ma10_low_touch": True,
+        "controlled_attack_body_retest_candle": True,
+        "attack_body_low_held": True,
+        "attack_body_close_held": True,
+    }
+    hold_without_ma10_touch = {
+        key: value for key, value in bridge_hold.items() if key != "ma10_low_touch"
+    }
+    price_first = {
+        "long_bear_alignment": True,
+        "current_full_bear_alignment": True,
+        "positive_candle": True,
+        "ma10_below_ma30": True,
+        "ma10_ma30_fast_convergence": True,
+        "close_to_ma10_pct": 8.5,
+    }
+
+    assert classify_oversold_attack_stages(first_leg) == (
+        "pre_cross_pressure",
+        "first_leg_two_ma_wrap",
+    )
+    assert classify_oversold_attack_stages(bridge_hold) == (
+        "second_leg_support_before_ma30",
+        "attack_body_hold",
+    )
+    assert classify_oversold_attack_stages(hold_without_ma10_touch) == (
+        "attack_body_hold",
+    )
+    assert classify_oversold_attack_stages(price_first) == (
+        "price_first_observation",
+    )
+    assert classify_oversold_attack_stages({}) == ()
+
+
+def _pre_attack_base_history(
+    base_closes: list[float],
+    base_lows: list[float],
+    *,
+    prefix_sessions: int = 30,
+) -> list[dict[str, object]]:
+    """Build 15 D-2-and-earlier base sessions followed by D-1 and D."""
+
+    assert len(base_closes) == len(base_lows) == 15
+    start = date(2025, 1, 1)
+    history = [
+        _bar(start + timedelta(days=index), 100.0, volume=1_000.0)
+        for index in range(prefix_sessions)
+    ]
+    for offset, (close_price, low_price) in enumerate(zip(base_closes, base_lows)):
+        history.append(
+            _bar(
+                start + timedelta(days=prefix_sessions + offset),
+                close_price,
+                low_price=low_price,
+                high_price=max(close_price * 1.01, low_price * 1.02),
+                volume=1_000.0,
+            )
+        )
+    prior_close = base_closes[-1]
+    history.extend(
+        (
+            _bar(
+                start + timedelta(days=prefix_sessions + 15),
+                prior_close * 1.05,
+                low_price=prior_close,
+                volume=2_000.0,
+            ),
+            _bar(
+                start + timedelta(days=prefix_sessions + 16),
+                prior_close * 1.04,
+                low_price=prior_close * 1.01,
+                volume=1_000.0,
+            ),
+        )
+    )
+    return history
+
+
+def test_pre_attack_base_process_recognizes_release_retest_after_final_washout() -> None:
+    history = _pre_attack_base_history(
+        [100.0, 98.0, 96.0, 92.0, 90.0, 91.0, 96.0, 95.0, 94.0, 93.0, 94.0, 93.0, 92.5, 92.0, 93.0],
+        [99.0, 96.0, 94.0, 89.0, 85.0, 90.0, 95.0, 94.0, 93.0, 92.0, 92.5, 91.5, 90.2, 90.0, 90.1],
+    )
+
+    features = build_pre_attack_base_process_features(history)
+
+    assert features["pre_attack_base_phase"] == "release_retest_base"
+    assert features["pre_attack_base_pivot_age_sessions"] == 10
+    assert features["pre_attack_base_release_after_final_pivot"] is True
+    assert features["pre_attack_base_settlement_sessions"] == 8
+    assert features["pre_attack_base_tail_retested_release"] is True
+    assert features["pre_attack_base_tail_floor_vs_pivot_pct"] == pytest.approx(5.8824)
+    assert features["pre_attack_base_tail_span_to_median_range"] < 1.0
+
+
+def test_pre_attack_base_process_rejects_release_before_the_final_washout() -> None:
+    history = _pre_attack_base_history(
+        [100.0, 106.0, 104.0, 100.0, 95.0, 90.0, 91.0, 90.5, 91.0, 90.7, 91.2, 91.0, 91.3, 91.1, 91.4],
+        [99.0, 105.0, 102.0, 98.0, 92.0, 85.0, 89.0, 89.5, 89.8, 89.7, 90.0, 89.9, 90.1, 90.0, 90.2],
+    )
+
+    features = build_pre_attack_base_process_features(history)
+
+    assert features["pre_attack_base_phase"] == "post_release_washout"
+    assert features["pre_attack_base_release_after_final_pivot"] is False
+    assert features["pre_attack_base_tail_floor_vs_pivot_pct"] > 0
+
+
+def test_pre_attack_base_process_keeps_a_tail_washout_in_the_post_release_phase() -> None:
+    history = _pre_attack_base_history(
+        [100.0, 106.0, 104.0, 102.0, 100.0, 98.0, 96.0, 94.0, 92.0, 90.0, 89.0, 88.0, 87.0, 86.0, 87.0],
+        [99.0, 105.0, 102.0, 100.0, 98.0, 96.0, 94.0, 92.0, 90.0, 88.0, 87.0, 85.0, 84.0, 80.0, 82.0],
+    )
+
+    features = build_pre_attack_base_process_features(history)
+
+    assert features["pre_attack_base_release_after_final_pivot"] is False
+    assert features["pre_attack_base_tail_floor_vs_pivot_pct"] == 0.0
+    assert features["pre_attack_base_phase"] == "post_release_washout"
+
+
+def test_pre_attack_base_process_recognizes_gradual_support_without_a_release() -> None:
+    history = _pre_attack_base_history(
+        [100.0, 98.8, 97.5, 96.3, 95.4, 94.5, 95.0, 95.4, 95.8, 95.3, 95.7, 95.5, 95.8, 95.7, 95.9],
+        [99.0, 97.8, 96.5, 95.3, 94.4, 92.5, 94.0, 94.5, 94.8, 94.6, 94.9, 94.8, 95.0, 94.9, 95.1],
+    )
+
+    features = build_pre_attack_base_process_features(history)
+
+    assert features["pre_attack_base_phase"] == "gradual_support_ladder"
+    assert features["pre_attack_base_release_after_final_pivot"] is False
+    assert features["pre_attack_base_settlement_sessions"] == 15
+    assert features["pre_attack_base_tail_floor_vs_pivot_pct"] > 0
+
+
+def test_pre_attack_base_process_excludes_d_minus_one_and_d_from_its_features() -> None:
+    history = _pre_attack_base_history(
+        [100.0, 98.0, 96.0, 92.0, 90.0, 91.0, 96.0, 95.0, 94.0, 93.0, 94.0, 93.0, 92.5, 92.0, 93.0],
+        [99.0, 96.0, 94.0, 89.0, 85.0, 90.0, 95.0, 94.0, 93.0, 92.0, 92.5, 91.5, 90.2, 90.0, 90.1],
+        prefix_sessions=70,
+    )
+    cutoff = history[-1]["trade_date"]
+    assert isinstance(cutoff, date)
+    changed_attack_and_signal = [
+        *history[:-2],
+        _bar(history[-2]["trade_date"], 200.0, low_price=1.0, high_price=210.0, volume=99_999.0),
+        _bar(history[-1]["trade_date"], 2.0, low_price=1.0, high_price=210.0, volume=1.0),
+    ]
+
+    expected = build_extended_daily_features(
+        history,
+        as_of_date=cutoff,
+        include_pre_attack_base_features=True,
+    )
+    actual = build_extended_daily_features(
+        changed_attack_and_signal,
+        as_of_date=cutoff,
+        include_pre_attack_base_features=True,
+    )
+
+    for field in (
+        "pre_attack_base_phase",
+        "pre_attack_base_pivot_age_sessions",
+        "pre_attack_base_release_after_final_pivot",
+        "pre_attack_base_settlement_sessions",
+        "pre_attack_base_tail_span_to_median_range",
+        "pre_attack_base_tail_floor_vs_pivot_pct",
+        "pre_attack_base_tail_retested_release",
+        "pre_attack_base_ma10_ma20_progress_per_churn",
+    ):
+        assert actual[field] == expected[field]
+
+
+def test_pre_attack_base_process_can_include_d_minus_one_for_direct_attack() -> None:
+    history = _pre_attack_base_history(
+        [100.0, 98.0, 96.0, 92.0, 90.0, 91.0, 96.0, 95.0, 94.0, 93.0, 94.0, 93.0, 92.5, 92.0, 93.0],
+        [99.0, 96.0, 94.0, 89.0, 85.0, 90.0, 95.0, 94.0, 93.0, 92.0, 92.5, 91.5, 90.2, 90.0, 90.1],
+        prefix_sessions=70,
+    )
+    baseline = build_pre_attack_base_process_features(
+        history,
+        include_d_minus_one=True,
+    )
+    changed_signal = [
+        *history[:-1],
+        _bar(history[-1]["trade_date"], 2.0, low_price=1.0, high_price=210.0),
+    ]
+    changed_d_minus_one = [
+        *history[:-2],
+        _bar(history[-2]["trade_date"], 2.0, low_price=1.0, high_price=210.0),
+        history[-1],
+    ]
+
+    assert (
+        build_pre_attack_base_process_features(
+            changed_signal,
+            include_d_minus_one=True,
+        )
+        == baseline
+    )
+    assert (
+        build_pre_attack_base_process_features(
+            changed_d_minus_one,
+            include_d_minus_one=True,
+        )
+        != baseline
+    )
+
+
+def test_pre_attack_base_process_is_opt_in_for_shared_feature_snapshots() -> None:
+    history = _pre_attack_base_history(
+        [100.0, 98.0, 96.0, 92.0, 90.0, 91.0, 96.0, 95.0, 94.0, 93.0, 94.0, 93.0, 92.5, 92.0, 93.0],
+        [99.0, 96.0, 94.0, 89.0, 85.0, 90.0, 95.0, 94.0, 93.0, 92.0, 92.5, 91.5, 90.2, 90.0, 90.1],
+        prefix_sessions=70,
+    )
+
+    ordinary = build_extended_daily_features(history)
+    research = build_extended_daily_features(
+        history,
+        include_pre_attack_base_features=True,
+    )
+
+    assert "pre_attack_base_phase" not in ordinary
+    assert research["pre_attack_base_phase"] == "release_retest_base"
+
+
+def test_pre_attack_base_process_summary_keeps_same_day_comparisons_separate() -> None:
+    first_day = date(2026, 7, 20)
+    second_day = date(2026, 7, 21)
+    report = summarize_pre_attack_base_process_observations(
+        (
+            {
+                "rule_key": ATTACK_BODY_HOLD_RULE_KEY,
+                "trade_date": first_day,
+                "d1_label_status": "available",
+                "d1_close_return_pct": 3.0,
+                "pre_attack_base_phase": "release_retest_base",
+            },
+            {
+                "rule_key": ATTACK_BODY_HOLD_RULE_KEY,
+                "trade_date": first_day,
+                "d1_label_status": "available",
+                "d1_close_return_pct": -1.0,
+                "pre_attack_base_phase": "fresh_expansion",
+            },
+            {
+                "rule_key": ATTACK_BODY_HOLD_RULE_KEY,
+                "trade_date": second_day,
+                "d1_label_status": "available",
+                "d1_close_return_pct": 1.0,
+                "pre_attack_base_phase": "release_retest_base",
+            },
+            {
+                "rule_key": ATTACK_BODY_HOLD_RULE_KEY,
+                "trade_date": second_day,
+                "d1_label_status": "available",
+                "d1_close_return_pct": 0.0,
+                "pre_attack_base_phase": "fresh_expansion",
+            },
+            {
+                "rule_key": ATTACK_BODY_HOLD_RULE_KEY,
+                "trade_date": second_day,
+                "d1_label_status": "label_excluded_main_board_price_limit",
+                "d1_close_return_pct": 10.2,
+                "pre_attack_base_phase": "new_price_shelf",
+            },
+            {
+                "rule_key": "another_rule",
+                "trade_date": second_day,
+                "d1_label_status": "available",
+                "d1_close_return_pct": 99.0,
+                "pre_attack_base_phase": "release_retest_base",
+            },
+        )
+    )
+
+    groups = {row["phase"]: row for row in report["phase_groups"]}
+    retest = groups["release_retest_base"]
+    expansion = groups["fresh_expansion"]
+
+    assert report["candidate_count"] == 5
+    assert report["label_excluded_main_board_price_limit_count"] == 1
+    assert retest["d1_mean_return_pct"] == 2.0
+    assert retest["same_day_excess"]["sample_count"] == 2
+    assert retest["same_day_excess"]["mean_return_pct"] == 2.5
+    assert expansion["same_day_excess"]["mean_return_pct"] == -2.5
+    assert "new_price_shelf" not in groups
+
+
 def test_explicit_case_phase_features_are_causal_at_the_decision_cutoff() -> None:
     history = _bear_then_m10_dual_cross_history()
     cutoff = history[-1]["trade_date"]
 
-    expected = build_extended_daily_features(history, as_of_date=cutoff)
+    expected = build_extended_daily_features(
+        history,
+        as_of_date=cutoff,
+        include_pre_attack_base_features=True,
+    )
     actual = build_extended_daily_features(
         [*history, _bar(cutoff + timedelta(days=1), 200.0, volume=99_999.0)],
         as_of_date=cutoff,
+        include_pre_attack_base_features=True,
     )
 
     for key in (
+        "pre_attack_base_phase",
+        "pre_attack_base_pivot_age_sessions",
+        "pre_attack_base_release_after_final_pivot",
+        "pre_attack_base_settlement_sessions",
+        "pre_attack_base_tail_span_to_median_range",
+        "pre_attack_base_tail_floor_vs_pivot_pct",
+        "pre_attack_base_tail_retested_release",
+        "pre_attack_base_ma10_ma20_progress_per_churn",
         "ma10_ma30_gap_converging",
         "ma10_was_above_ma30_within_15d",
         "volume_expand_then_shrink",
@@ -1561,6 +2199,44 @@ def test_renderer_includes_manifest_and_raw_evidence_gate() -> None:
     assert "严格超过 [-10%, +10%]" in markdown
 
 
+def test_renderer_marks_pre_attack_base_paths_as_observational() -> None:
+    markdown = render_extended_daily_factor_markdown(
+        {
+            "research_version": "test",
+            "evidence_level": "exploratory_raw_unadjusted",
+            "conclusion": "exploratory_only",
+            "time_split": None,
+            "families": {},
+            "score_factors": {},
+            "case_score_membership": {},
+            "full_history_score_gate": {},
+            "research_answers": [],
+            "pre_attack_base_process": {
+                "feature_cutoff": "D-2",
+                "candidate_count": 2,
+                "label_excluded_main_board_price_limit_count": 0,
+                "phase_groups": [
+                    {
+                        "phase": "release_retest_base",
+                        "sample_count": 2,
+                        "d1_mean_return_pct": 1.2,
+                        "win_rate_pct": 100.0,
+                        "same_day_excess": {
+                            "sample_count": 2,
+                            "mean_return_pct": 0.8,
+                        },
+                    }
+                ],
+            },
+        }
+    )
+
+    assert "攻击前底盘过程（观察性）" in markdown
+    assert "本观察表不参与规则选择、分数或实时推荐" in markdown
+    assert "首段两线攻击另有冻结资格门" in markdown
+    assert "release_retest_base" in markdown
+
+
 def test_renderer_shows_selected_score_factor_and_personal_case_membership() -> None:
     markdown = render_extended_daily_factor_markdown(
         {
@@ -1677,6 +2353,7 @@ def test_raw_extended_discovery_stays_exploratory_end_to_end() -> None:
     assert set(report["score_factors"]) == {"oversold_rebound", "trend_pullback"}
     assert "selected_score_factor" in report["score_factors"]["trend_pullback"]
     assert report["case_score_membership"]
+    assert report["pre_attack_base_process"]["feature_cutoff"].startswith("D-2")
 
 
 def test_raw_extended_discovery_accepts_a_sorted_dataframe_without_bulk_records() -> None:

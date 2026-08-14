@@ -37,6 +37,9 @@ OVERSOLD_GATE_FAILED_SCORE_CAP = 39.0
 # P1 路径的缩量地基不能收缩到无交易承接。该下限只影响该研究路径的诊断排序。
 STAGED_MA30_ACTIVE_PARTICIPATION_MIN_PCT = 1.5
 POST_WRAP_CONFIRMATION_SCORE_FLOOR = 80.0
+# 这是仅在离线扫描实验中开放的窄路径。它的跨窗口样本仍很小，因此只给
+# 有限的排序补分，不改变 P1/P2/P3 的产品层级。
+ATTACK_RETEST_BASE_BONUS_POINTS = 8.0
 
 
 @dataclass(frozen=True)
@@ -283,14 +286,16 @@ def score_oversold_candidate(
     stable_three_ma_wrap_rule_matched: bool = False,
     staged_ma30_convergence_rule_matched: bool = False,
     post_wrap_upper_band_confirmation_rule_matched: bool = False,
+    attack_retest_base_rule_matched: bool | None = None,
 ) -> tuple[float, tuple[ScoreComponent, ...]]:
     """超跌反弹候选的诊断排序分（最高 140）。
 
     研究规则先决定是否入池，本函数只比较已命中规则的候选。换手率≥8%
     会触发评分门禁并封顶 39；其余基础特征按 0.4 折算，再叠加已验证研究
     路径的加分。稳定包裹后的次日上沿踩稳确认属于独立 P2 层级，使用透明
-    的 80 分优先级下限；它仍低于 P3 新鲜稳定包裹。``vol_ratio`` 是 scanner
-    从可见历史算出的近 5/10 日均量比。
+    的 80 分优先级下限；它仍低于 P3 新鲜稳定包裹。攻击实体守住中的
+    “洗盘后释放再受控回踩”目前仅供离线实验，给有限补分但不改变层级。
+    ``vol_ratio`` 是 scanner 从可见历史算出的近 5/10 日均量比。
     """
 
     turnover = _number(features.get("turnover_rate_pct"))
@@ -340,6 +345,11 @@ def score_oversold_candidate(
     )
     staged_ma30_active_participation_pts = (
         8.0 if staged_ma30_active_participation else 0.0
+    )
+    attack_retest_base_pts = (
+        ATTACK_RETEST_BASE_BONUS_POINTS
+        if attack_retest_base_rule_matched is True
+        else 0.0
     )
 
     gate_passed = turnover is not None and turnover < OVERSOLD_TURNOVER_GATE_MAX_PCT
@@ -613,6 +623,7 @@ def score_oversold_candidate(
         + controlled_pre_cross_drive_pts
         + fast_staged_ma30_convergence_pts
         + staged_ma30_active_participation_pts
+        + attack_retest_base_pts
     )
     post_wrap_confirmation_points = (
         max(
@@ -623,8 +634,26 @@ def score_oversold_candidate(
         if post_wrap_upper_band_confirmation_rule_matched
         else 0.0
     )
+    attack_retest_base_component = (
+        _component(
+            "attack_retest_base",
+            "洗盘释放后受控回踩底盘",
+            attack_retest_base_rule_matched is True,
+            attack_retest_base_pts,
+            ATTACK_RETEST_BASE_BONUS_POINTS,
+            (
+                "D-2 及以前完成最终洗盘、向上释放、至少3日消化，"
+                "尾部缩窄并回踩释放起点但不破洗盘低点"
+                if attack_retest_base_rule_matched is True
+                else "攻击实体守住但底盘不属于洗盘释放受控回踩"
+            ),
+        )
+        if attack_retest_base_rule_matched is not None
+        else None
+    )
     components = (
         *base_components,
+        *((attack_retest_base_component,) if attack_retest_base_component else ()),
         _component(
             "post_wrap_upper_band_confirmation_priority",
             "包裹后上沿踩稳优先级",

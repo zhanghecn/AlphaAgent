@@ -88,16 +88,51 @@ POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY = (
 MA10_MA20_PRE_CROSS_RULE_KEY = (
     "ma10_ma20_contact_pre_cross_positive_volume_expand"
 )
+FIRST_LEG_TWO_MA_WRAP_RULE_KEY = "first_leg_two_ma_body_wrap_before_ma30"
 STAGED_MA10_SUPPORT_RULE_KEY = (
     "staged_ma10_support_before_ma30_convergence_shrink"
+)
+ATTACK_BODY_HOLD_RULE_KEY = (
+    "attack_body_hold_after_ma10_ma20_cross_before_ma30"
 )
 STAGED_MA30_CONVERGENCE_RULE_KEYS = frozenset(
     {STAGED_MA10_SUPPORT_RULE_KEY}
 )
-# These source cases remain auditable, but their broad samples are not ready
-# to drive the production daily list.
+ATTACK_BODY_MIN_PCT = 3.0
+ATTACK_BODY_HOLD_DAILY_RETURN_MIN_PCT = -3.0
+ATTACK_BODY_HOLD_DAILY_RETURN_MAX_PCT = 0.5
+ATTACK_BODY_HOLD_VOLUME_MAX_RATIO = 0.8
+FIRST_LEG_TWO_MA_WRAP_EFFICIENCY_5D_MIN = 0.156084
+FIRST_LEG_TWO_MA_WRAP_GAP_NARROWING_3D_MIN_PCT = 1.32474
+FIRST_LEG_TWO_MA_WRAP_SETTLED_BASE_PHASES = frozenset(
+    {"gradual_support_ladder", "release_retest_base"}
+)
+FIRST_LEG_TWO_MA_WRAP_CLOSE_TO_MA10_MAX_PCT = 3.0
+FIRST_LEG_TWO_MA_WRAP_DAILY_RETURN_MAX_PCT = 5.0
+FIRST_LEG_TWO_MA_WRAP_GAP_NARROWING_3D_MAX_PCT = 4.0
+FIRST_LEG_TWO_MA_WRAP_PIVOT_AGE_MIN_SESSIONS = 9
+FIRST_LEG_TWO_MA_WRAP_CLOSE_OFF_LOW_MIN_PCT = 3.216433
+OVERSOLD_ATTACK_STAGE_PRE_CROSS_PRESSURE = "pre_cross_pressure"
+OVERSOLD_ATTACK_STAGE_FIRST_LEG_TWO_MA_WRAP = "first_leg_two_ma_wrap"
+OVERSOLD_ATTACK_STAGE_THREE_MA_WRAP = "three_ma_wrap"
+OVERSOLD_ATTACK_STAGE_BRIDGE_CROSS = "bridge_cross_before_ma30"
+OVERSOLD_ATTACK_STAGE_SECOND_LEG_SUPPORT = "second_leg_support_before_ma30"
+OVERSOLD_ATTACK_STAGE_ATTACK_BODY_HOLD = "attack_body_hold"
+OVERSOLD_ATTACK_STAGE_POST_WRAP_CONFIRMATION = "post_wrap_confirmation"
+OVERSOLD_ATTACK_STAGE_COMPLETED_PATH_RETEST = "completed_path_retest"
+OVERSOLD_ATTACK_STAGE_PRICE_FIRST_OBSERVATION = "price_first_observation"
+PRE_ATTACK_BASE_WINDOW_SESSIONS = 15
+PRE_ATTACK_BASE_EXCLUDED_RECENT_SESSIONS = 2
+PRE_ATTACK_BASE_TAIL_SESSIONS = 3
+PRE_ATTACK_BASE_MIN_SETTLEMENT_SESSIONS = 3
+PRE_ATTACK_BASE_MATERIAL_MOVE_RANGE_MULTIPLE = 1.0
+PRE_ATTACK_BASE_COMPACT_TAIL_RANGE_MULTIPLE = 1.0
+# These source geometries remain auditable, but their broad samples do not
+# enter the daily list without a narrower production qualification gate.
 RESEARCH_PENDING_DAILY_RULE_KEYS = frozenset(
     {
+        ATTACK_BODY_HOLD_RULE_KEY,
+        FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
         MA10_MA20_PRE_CROSS_RULE_KEY,
     }
 )
@@ -126,6 +161,11 @@ class DiscoveryRule:
 
 EXPLICIT_CASE_OVERSOLD_RULES = (
     DiscoveryRule(
+        FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
+        "oversold_rebound",
+        "首段两线实体包裹：跨 MA10/20、未越 MA30；实时仅放行成熟底盘、非追高且有承接子型",
+    ),
+    DiscoveryRule(
         RESEARCH_THREE_MA_WRAP_RULE_KEY,
         "oversold_rebound",
         "三线收敛阳线包裹（贴线、缩量）",
@@ -139,6 +179,11 @@ EXPLICIT_CASE_OVERSOLD_RULES = (
         STAGED_MA10_SUPPORT_RULE_KEY,
         "oversold_rebound",
         "分段支撑：MA10 回踩后向 MA30 收敛",
+    ),
+    DiscoveryRule(
+        ATTACK_BODY_HOLD_RULE_KEY,
+        "oversold_rebound",
+        "攻击实体缩量守住（研究待验证）",
     ),
     DiscoveryRule(
         MA10_MA20_PRE_CROSS_RULE_KEY,
@@ -534,12 +579,413 @@ class _ExitAccumulator:
         }
 
 
+def build_pre_attack_base_process_features(
+    history: Sequence[Mapping[str, object]],
+    *,
+    as_of_date: date | None = None,
+    include_d_minus_one: bool = False,
+) -> dict[str, object]:
+    """Describe the base before a D-day attack observation.
+
+    By default the final two visible sessions are excluded for the
+    ``ATTACK_BODY_HOLD_RULE_KEY`` sequence, where D-1 is the attack body and
+    D is the hold signal.  Direct D-day attacks can set ``include_d_minus_one``
+    so their final base session remains visible.  This is a causal descriptor;
+    callers may use it in a frozen qualification gate, but it never scores a
+    candidate by itself.
+    """
+
+    visible = _visible_history(history, as_of_date=as_of_date)
+    closes = [
+        _required_positive_number(row.get("close_price"), "close_price")
+        for row in visible
+    ]
+    ma_series = {
+        window: _moving_average_series(closes, window)
+        for window in (10, 20)
+    }
+    return _pre_attack_base_process_features(
+        visible,
+        closes,
+        ma_series,
+        excluded_recent_sessions=(1 if include_d_minus_one else 2),
+    )
+
+
+def is_first_leg_two_ma_wrap_base_qualified(
+    features: Mapping[str, object],
+) -> bool:
+    """Check the base and MA10/20 convergence required before D-day attack."""
+
+    efficiency = _number_or_none(
+        features.get("ma10_ma20_convergence_efficiency_5d")
+    )
+    gap_narrowing = _number_or_none(
+        features.get("ma10_ma20_gap_narrowing_3d_pct")
+    )
+    return bool(
+        features.get("pre_attack_base_phase")
+        in FIRST_LEG_TWO_MA_WRAP_SETTLED_BASE_PHASES
+        and efficiency is not None
+        and efficiency >= FIRST_LEG_TWO_MA_WRAP_EFFICIENCY_5D_MIN
+        and gap_narrowing is not None
+        and gap_narrowing >= FIRST_LEG_TWO_MA_WRAP_GAP_NARROWING_3D_MIN_PCT
+    )
+
+
+def is_mature_first_leg_two_ma_wrap_qualified(
+    features: Mapping[str, object],
+) -> bool:
+    """Qualify a non-chasing, mature first-leg MA10/20 wrap for the daily list."""
+
+    close_to_ma10 = _number_or_none(features.get("close_to_ma10_pct"))
+    daily_return = _number_or_none(features.get("daily_return_pct"))
+    gap_narrowing = _number_or_none(
+        features.get("ma10_ma20_gap_narrowing_3d_pct")
+    )
+    pivot_age = _number_or_none(
+        features.get("pre_attack_base_pivot_age_sessions")
+    )
+    close_off_low = _number_or_none(features.get("close_off_low_pct"))
+    return bool(
+        is_first_leg_two_ma_wrap_base_qualified(features)
+        and close_to_ma10 is not None
+        and close_to_ma10 <= FIRST_LEG_TWO_MA_WRAP_CLOSE_TO_MA10_MAX_PCT
+        and daily_return is not None
+        and daily_return <= FIRST_LEG_TWO_MA_WRAP_DAILY_RETURN_MAX_PCT
+        and gap_narrowing is not None
+        and gap_narrowing <= FIRST_LEG_TWO_MA_WRAP_GAP_NARROWING_3D_MAX_PCT
+        and pivot_age is not None
+        and pivot_age >= FIRST_LEG_TWO_MA_WRAP_PIVOT_AGE_MIN_SESSIONS
+        and close_off_low is not None
+        and close_off_low >= FIRST_LEG_TWO_MA_WRAP_CLOSE_OFF_LOW_MIN_PCT
+    )
+
+
+def classify_oversold_attack_stages(
+    features: Mapping[str, object],
+    *,
+    prior_features: Mapping[str, object] | None = None,
+) -> tuple[str, ...]:
+    """Describe where a causal oversold D-day sits in an attack sequence.
+
+    A research low-suction point is an attack anchor even when its candle is a
+    small support candle rather than a large positive body.  This classifier
+    keeps those stages explicit for case coverage and later stage-local
+    ranking research.  It is deliberately not a candidate rule or score.
+    """
+
+    stages: list[str] = []
+    long_bear = bool(features.get("long_bear_alignment"))
+    full_bear = bool(features.get("current_full_bear_alignment"))
+    positive_candle = bool(features.get("positive_candle"))
+    pre_cross_pressure = bool(
+        long_bear
+        and full_bear
+        and bool(features.get("ma10_below_ma20"))
+        and positive_candle
+        and bool(features.get("ma10_ma20_gap_narrowing"))
+    )
+    first_leg_wrap = bool(
+        long_bear
+        and full_bear
+        and bool(features.get("yang_wrap_two_ma"))
+        and bool(features.get("close_below_ma30"))
+        and bool(features.get("signal_day_not_limit_up_closed"))
+    )
+    bridge_cross = bool(
+        long_bear
+        and bool(features.get("ma10_above_ma20"))
+        and bool(features.get("ma10_below_ma30"))
+        and bool(features.get("ma10_crossed_ma20_after_long_bear_within_15d"))
+        and _number_or_none(
+            features.get("ma10_crossed_ma20_after_long_bear_age_sessions_15d")
+        )
+        == 0
+    )
+    second_leg_support = bool(
+        long_bear
+        and bool(features.get("ma10_above_ma20"))
+        and bool(features.get("ma10_below_ma30"))
+        and bool(features.get("ma10_crossed_ma20_after_long_bear_within_15d"))
+        and bool(features.get("ma10_low_touch"))
+    )
+    attack_body_hold = bool(
+        long_bear
+        and bool(features.get("ma10_above_ma20"))
+        and bool(features.get("ma10_below_ma30"))
+        and bool(features.get("ma10_crossed_ma20_after_long_bear_within_15d"))
+        and bool(features.get("controlled_attack_body_retest_candle"))
+        and bool(features.get("attack_body_low_held"))
+        and bool(features.get("attack_body_close_held"))
+    )
+    post_wrap_confirmation = bool(
+        _prior_stable_three_ma_wrap(prior_features)
+        and _post_wrap_upper_band_touched(features, prior_features)
+        and _close_above_current_three_ma(features)
+        and bool(features.get("small_positive_candle"))
+        and _post_wrap_turnover_controlled(features)
+    )
+    completed_path_retest = bool(
+        long_bear
+        and bool(features.get("ma10_was_above_ma30_within_15d"))
+        and bool(features.get("ma10_ma30_contact"))
+        and bool(features.get("post_cross_pullback"))
+    )
+    close_to_ma10 = _number_or_none(features.get("close_to_ma10_pct"))
+    price_first_observation = bool(
+        long_bear
+        and full_bear
+        and positive_candle
+        and bool(features.get("ma10_below_ma30"))
+        and bool(features.get("ma10_ma30_fast_convergence"))
+        and close_to_ma10 is not None
+        and 4.0 <= close_to_ma10 <= 10.0
+    )
+
+    if pre_cross_pressure:
+        stages.append(OVERSOLD_ATTACK_STAGE_PRE_CROSS_PRESSURE)
+    if first_leg_wrap:
+        stages.append(OVERSOLD_ATTACK_STAGE_FIRST_LEG_TWO_MA_WRAP)
+    if bool(features.get("yang_wrap_three_ma")):
+        stages.append(OVERSOLD_ATTACK_STAGE_THREE_MA_WRAP)
+    if bridge_cross:
+        stages.append(OVERSOLD_ATTACK_STAGE_BRIDGE_CROSS)
+    if second_leg_support:
+        stages.append(OVERSOLD_ATTACK_STAGE_SECOND_LEG_SUPPORT)
+    if attack_body_hold:
+        stages.append(OVERSOLD_ATTACK_STAGE_ATTACK_BODY_HOLD)
+    if post_wrap_confirmation:
+        stages.append(OVERSOLD_ATTACK_STAGE_POST_WRAP_CONFIRMATION)
+    if completed_path_retest:
+        stages.append(OVERSOLD_ATTACK_STAGE_COMPLETED_PATH_RETEST)
+    if price_first_observation:
+        stages.append(OVERSOLD_ATTACK_STAGE_PRICE_FIRST_OBSERVATION)
+    return tuple(stages)
+
+
+def _pre_attack_base_process_features(
+    visible: Sequence[Mapping[str, object]],
+    closes: Sequence[float],
+    ma_series: Mapping[int, Sequence[float | None]],
+    *,
+    excluded_recent_sessions: int = PRE_ATTACK_BASE_EXCLUDED_RECENT_SESSIONS,
+) -> dict[str, object]:
+    """Classify the preceding 15-session base at a declared causal cutoff."""
+
+    if excluded_recent_sessions not in (1, 2):
+        raise DailyFactorInputError(
+            "pre-attack base cutoff must exclude either D or D-1 and D"
+        )
+    base_end = len(visible) - excluded_recent_sessions
+    base_start = base_end - PRE_ATTACK_BASE_WINDOW_SESSIONS
+    if base_start < 0:
+        return _empty_pre_attack_base_process_features(len(visible))
+
+    base = visible[base_start:base_end]
+    base_closes = closes[base_start:base_end]
+    base_lows = [
+        _required_positive_number(row.get("low_price"), "low_price")
+        for row in base
+    ]
+    ranges = [
+        _pct_change(
+            _required_positive_number(row.get("high_price"), "high_price"),
+            low_price,
+        )
+        for row, low_price in zip(base, base_lows)
+    ]
+    median_range_pct = median(ranges) if ranges else None
+    if median_range_pct is None or median_range_pct <= 0:
+        return _empty_pre_attack_base_process_features(len(base))
+
+    pivot_low = min(base_lows)
+    pivot_index = max(
+        index for index, low_price in enumerate(base_lows) if low_price == pivot_low
+    )
+    daily_returns = _pre_attack_base_daily_returns(
+        closes,
+        base_start=base_start,
+        base_end=base_end,
+    )
+    material_indices = [
+        index
+        for index, daily_return in enumerate(daily_returns)
+        if daily_return is not None
+        and daily_return
+        >= PRE_ATTACK_BASE_MATERIAL_MOVE_RANGE_MULTIPLE * median_range_pct
+    ]
+    release_index = material_indices[-1] if material_indices else None
+    release_after_final_pivot = bool(
+        release_index is not None and release_index > pivot_index
+    )
+    settlement_sessions = (
+        len(base) - 1 - release_index
+        if release_index is not None
+        else len(base)
+    )
+    tail_lows = base_lows[-PRE_ATTACK_BASE_TAIL_SESSIONS:]
+    tail_floor = min(tail_lows)
+    tail_span_pct = _pct_change(max(tail_lows), tail_floor)
+    tail_span_to_median_range = tail_span_pct / median_range_pct
+    tail_floor_vs_pivot_pct = _pct_change(tail_floor, pivot_low)
+    release_origin_close = (
+        _pre_attack_release_origin_close(closes, base_start, release_index)
+        if release_index is not None
+        else None
+    )
+    tail_floor_vs_release_origin_pct = (
+        _pct_change(tail_floor, release_origin_close)
+        if release_origin_close is not None
+        else None
+    )
+    tail_retested_release = bool(
+        tail_floor_vs_release_origin_pct is not None
+        and tail_floor_vs_release_origin_pct < 0
+    )
+    phase = _pre_attack_base_phase(
+        has_release=release_index is not None,
+        release_after_final_pivot=release_after_final_pivot,
+        settlement_sessions=settlement_sessions,
+        tail_span_to_median_range=tail_span_to_median_range,
+        tail_floor_vs_pivot_pct=tail_floor_vs_pivot_pct,
+        tail_retested_release=tail_retested_release,
+    )
+    return {
+        "pre_attack_base_phase": phase,
+        "pre_attack_base_window_sessions": len(base),
+        "pre_attack_base_pivot_age_sessions": len(base) - 1 - pivot_index,
+        "pre_attack_base_release_after_final_pivot": release_after_final_pivot,
+        "pre_attack_base_settlement_sessions": settlement_sessions,
+        "pre_attack_base_tail_span_to_median_range": _round_pct(
+            tail_span_to_median_range
+        ),
+        "pre_attack_base_tail_floor_vs_pivot_pct": _round_pct(
+            tail_floor_vs_pivot_pct
+        ),
+        "pre_attack_base_tail_retested_release": tail_retested_release,
+        "pre_attack_base_ma10_ma20_progress_per_churn": (
+            _pre_attack_ma10_ma20_progress_per_churn(
+                base_closes,
+                ma10_series=ma_series[10][base_start:base_end],
+                ma20_series=ma_series[20][base_start:base_end],
+            )
+        ),
+        "pre_attack_base_tail_floor_vs_release_origin_pct": (
+            _round_pct(tail_floor_vs_release_origin_pct)
+            if tail_floor_vs_release_origin_pct is not None
+            else None
+        ),
+    }
+
+
+def _empty_pre_attack_base_process_features(
+    window_sessions: int,
+) -> dict[str, object]:
+    return {
+        "pre_attack_base_phase": "insufficient_history",
+        "pre_attack_base_window_sessions": window_sessions,
+        "pre_attack_base_pivot_age_sessions": None,
+        "pre_attack_base_release_after_final_pivot": False,
+        "pre_attack_base_settlement_sessions": None,
+        "pre_attack_base_tail_span_to_median_range": None,
+        "pre_attack_base_tail_floor_vs_pivot_pct": None,
+        "pre_attack_base_tail_retested_release": False,
+        "pre_attack_base_ma10_ma20_progress_per_churn": None,
+        "pre_attack_base_tail_floor_vs_release_origin_pct": None,
+    }
+
+
+def _pre_attack_base_daily_returns(
+    closes: Sequence[float],
+    *,
+    base_start: int,
+    base_end: int,
+) -> list[float | None]:
+    """Return base-session close changes using only D-2-and-earlier anchors."""
+
+    result: list[float | None] = []
+    for index in range(base_start, base_end):
+        result.append(_pct_change(closes[index], closes[index - 1]) if index else None)
+    return result
+
+
+def _pre_attack_release_origin_close(
+    closes: Sequence[float],
+    base_start: int,
+    release_index: int,
+) -> float | None:
+    release_position = base_start + release_index
+    return closes[release_position - 1] if release_position else None
+
+
+def _pre_attack_base_phase(
+    *,
+    has_release: bool,
+    release_after_final_pivot: bool,
+    settlement_sessions: int,
+    tail_span_to_median_range: float,
+    tail_floor_vs_pivot_pct: float,
+    tail_retested_release: bool,
+) -> str:
+    """Name the observable base path; the labels are not trading decisions."""
+
+    if not has_release:
+        return (
+            "gradual_support_ladder"
+            if tail_floor_vs_pivot_pct > 0
+            else "unrepaired_base"
+        )
+    if not release_after_final_pivot:
+        return "post_release_washout"
+    if tail_floor_vs_pivot_pct <= 0:
+        return "unrepaired_base"
+    if settlement_sessions < PRE_ATTACK_BASE_MIN_SETTLEMENT_SESSIONS:
+        return "fresh_expansion"
+    if (
+        tail_span_to_median_range
+        > PRE_ATTACK_BASE_COMPACT_TAIL_RANGE_MULTIPLE
+    ):
+        return "expanded_but_unsettled"
+    if tail_retested_release:
+        return "release_retest_base"
+    return "new_price_shelf"
+
+
+def _pre_attack_ma10_ma20_progress_per_churn(
+    closes: Sequence[float],
+    *,
+    ma10_series: Sequence[float | None],
+    ma20_series: Sequence[float | None],
+) -> float | None:
+    if len(closes) < 6 or len(ma10_series) < 6 or len(ma20_series) < 6:
+        return None
+    ma10_tail = ma10_series[-6:]
+    ma20_tail = ma20_series[-6:]
+    if any(value is None for value in (*ma10_tail, *ma20_tail)):
+        return None
+    gap_start = _pct_change(float(ma10_tail[0]), float(ma20_tail[0]))
+    gap_end = _pct_change(float(ma10_tail[-1]), float(ma20_tail[-1]))
+    close_tail = closes[-6:]
+    churn = sum(
+        abs(_pct_change(close_tail[index], close_tail[index - 1]))
+        for index in range(1, len(close_tail))
+    )
+    return _round_pct((gap_end - gap_start) / churn) if churn else None
+
+
 def build_extended_daily_features(
     history: Sequence[Mapping[str, object]],
     *,
     as_of_date: date | None = None,
+    include_pre_attack_base_features: bool = False,
 ) -> dict[str, object]:
-    """Return finite D-and-earlier extensions to the frozen daily feature set."""
+    """Return finite D-and-earlier extensions to the frozen daily feature set.
+
+    ``include_pre_attack_base_features`` is reserved for offline research
+    reports.  The live scanner keeps its established feature workload and does
+    not receive these descriptive fields.
+    """
 
     visible = _visible_history(history, as_of_date=as_of_date)
     base = build_daily_features(visible)
@@ -550,6 +996,11 @@ def build_extended_daily_features(
         window: _moving_average_series(closes, window)
         for window in (5, 10, 20, 30, 60)
     }
+    pre_attack_base_features = (
+        _pre_attack_base_process_features(visible, closes, ma_series)
+        if include_pre_attack_base_features
+        else {}
+    )
     close_price = _number_or_none(base.get("close_price"))
     high_price = _required_positive_number(base.get("high_price"), "high_price")
     low_price = _required_positive_number(base.get("low_price"), "low_price")
@@ -584,8 +1035,16 @@ def build_extended_daily_features(
     distance_10_20 = _signed_ma_distance_pct(ma10, ma20, close_price)
     distance_10_30 = _signed_ma_distance_pct(ma10, ma30, close_price)
     distance_20_30 = _signed_ma_distance_pct(ma20, ma30, close_price)
+    ma10_ma20_convergence_efficiency_5d = _ma10_ma20_convergence_efficiency_5d(
+        closes,
+        ma10_series=ma_series[10],
+        ma20_series=ma_series[20],
+    )
     ma10_ma20_next_close_required_return = (
         _ma10_ma20_next_close_required_return_pct(closes)
+    )
+    ma10_ma30_next_close_required_return = (
+        _ma10_ma30_next_close_required_return_pct(closes)
     )
     midpoint_to_ma5 = _price_to_ma_distance_pct(intraday_midpoint_price, ma5)
     midpoint_to_ma10 = _price_to_ma_distance_pct(intraday_midpoint_price, ma10)
@@ -645,6 +1104,7 @@ def build_extended_daily_features(
     )
     # 阳线包裹收敛三线（主人低吸"最好看"形态：三线挤窄带，阳线实体一举跨越 = 收敛到极致的启动信号）
     _open_price = _number_or_none(visible[-1].get("open_price")) if visible else None
+    yang_wrap_two_ma = False
     yang_wrap_three_ma = False
     if (
         _open_price is not None
@@ -653,6 +1113,12 @@ def build_extended_daily_features(
         and ma30 is not None
         and close_price is not None
     ):
+        _lo2 = min(ma10, ma20)
+        _hi2 = max(ma10, ma20)
+        yang_wrap_two_ma = bool(
+            _open_price < _lo2
+            and close_price > _hi2
+        )
         _lo3 = min(ma10, ma20, ma30)
         _hi3 = max(ma10, ma20, ma30)
         # 换手≥1.5%（主人："换手率也在1.5%以上"——排除<1%死股式包裹，它们微涨非真低吸）
@@ -844,6 +1310,39 @@ def build_extended_daily_features(
         if last_volume is not None and prior_volume is not None and prior_volume > 0
         else None
     )
+    last_volume_to_prior_ratio = (
+        _round_pct(last_volume / prior_volume)
+        if last_volume is not None and prior_volume is not None and prior_volume > 0
+        else None
+    )
+    prior_attack_open_price = (
+        _number_or_none(visible[-2].get("open_price")) if len(visible) >= 2 else None
+    )
+    prior_attack_close_price = (
+        _number_or_none(visible[-2].get("close_price")) if len(visible) >= 2 else None
+    )
+    prior_attack_high_price = (
+        _number_or_none(visible[-2].get("high_price")) if len(visible) >= 2 else None
+    )
+    prior_positive_body_pct = (
+        _round_pct(_pct_change(prior_attack_close_price, prior_attack_open_price))
+        if prior_attack_close_price is not None
+        and prior_attack_open_price is not None
+        else None
+    )
+    prior_limit_up_touched = bool(
+        len(closes) >= 3
+        and prior_attack_high_price is not None
+        and is_main_board_limit_up_touched(closes[-3], prior_attack_high_price)
+    )
+    attack_body_low_held = bool(
+        prior_attack_open_price is not None and low_price >= prior_attack_open_price
+    )
+    attack_body_close_held = bool(
+        prior_attack_open_price is not None
+        and close_price is not None
+        and close_price >= prior_attack_open_price
+    )
     bull_alignment_days = int(base.get("bull_alignment_days") or 0)
     prior_bear_alignment_days = int(base.get("prior_bear_alignment_days") or 0)
     long_bear_alignment = prior_bear_alignment_days >= LONG_BEAR_ALIGNMENT_MIN_SESSIONS
@@ -903,6 +1402,11 @@ def build_extended_daily_features(
 
     # 排名诊断特征：K 线安静度与趋势过伸。
     prev_close_price = closes[-2] if len(closes) >= 2 else None
+    signal_day_limit_up_closed = bool(
+        prev_close_price is not None
+        and close_price is not None
+        and is_main_board_limit_up_touched(prev_close_price, close_price)
+    )
     candle_range_pct = None
     if prev_close_price is not None and prev_close_price > 0:
         candle_range_pct = _round_pct(
@@ -911,6 +1415,13 @@ def build_extended_daily_features(
     candle_quiet = bool(
         candle_range_pct is not None
         and candle_range_pct <= TREND_CANDLE_QUIET_RANGE_MAX_PCT
+    )
+    controlled_attack_body_retest_candle = bool(
+        daily_return is not None
+        and ATTACK_BODY_HOLD_DAILY_RETURN_MIN_PCT
+        <= daily_return
+        <= ATTACK_BODY_HOLD_DAILY_RETURN_MAX_PCT
+        and candle_quiet
     )
     ma5_ma10_dist_series: list[float | None] = [
         (
@@ -971,9 +1482,16 @@ def build_extended_daily_features(
 
     features = {
         **base,
+        **pre_attack_base_features,
         "ma10_ma20_signed_distance_pct": distance_10_20,
+        "ma10_ma20_convergence_efficiency_5d": (
+            ma10_ma20_convergence_efficiency_5d
+        ),
         "ma10_ma20_next_close_required_return_pct": (
             ma10_ma20_next_close_required_return
+        ),
+        "ma10_ma30_next_close_required_return_pct": (
+            ma10_ma30_next_close_required_return
         ),
         "ma10_ma30_signed_distance_pct": distance_10_30,
         "ma20_ma30_signed_distance_pct": distance_20_30,
@@ -1015,6 +1533,9 @@ def build_extended_daily_features(
             and ma20 is not None
             and ma30 is not None
             and ma10 < ma20 < ma30
+        ),
+        "close_below_ma30": bool(
+            close_price is not None and ma30 is not None and close_price < ma30
         ),
         "ma10_ma30_near_or_recent_cross": _near_or_recent_cross(distance_10_30),
         "ma20_ma30_near_or_recent_cross": _near_or_recent_cross(distance_20_30),
@@ -1083,6 +1604,7 @@ def build_extended_daily_features(
             lookback=PROCESS_CROSS_LOOKBACK,
         ),
         "last_volume_change_pct": last_volume_change_pct,
+        "last_volume_to_prior_ratio": last_volume_to_prior_ratio,
         "last_volume_expanded": bool(
             last_volume_change_pct is not None
             and last_volume_change_pct >= PROCESS_VOLUME_CHANGE_PCT
@@ -1170,6 +1692,7 @@ def build_extended_daily_features(
         "capitulation_rebound_tight": capitulation_rebound_tight,
         "capitulation_rebound_broad": capitulation_rebound_broad,
         "yang_wrap_three_ma": yang_wrap_three_ma,
+        "yang_wrap_two_ma": yang_wrap_two_ma,
         "yang_wrap_nearest_ma_low_abs_pct": yang_wrap_nearest_ma_low_abs_pct,
         "yang_wrap_volume_end_to_peak_ratio_6d": yang_wrap_volume_end_to_peak_ratio_6d,
         "yang_wrap_stable_base": yang_wrap_stable_base,
@@ -1202,6 +1725,15 @@ def build_extended_daily_features(
         "trend_dist_excess_pct": trend_dist_excess,
         "candle_range_pct": candle_range_pct,
         "candle_quiet": candle_quiet,
+        "signal_day_not_limit_up_closed": not signal_day_limit_up_closed,
+        "prior_attack_open_price": prior_attack_open_price,
+        "prior_positive_body_pct": prior_positive_body_pct,
+        "prior_limit_up_touched": prior_limit_up_touched,
+        "attack_body_low_held": attack_body_low_held,
+        "attack_body_close_held": attack_body_close_held,
+        "controlled_attack_body_retest_candle": (
+            controlled_attack_body_retest_candle
+        ),
         "trend_overextended": trend_overextended,
         "trend_first_crack_chase": trend_first_crack_chase,
     }
@@ -1370,9 +1902,12 @@ def summarize_rule_observations(
         }
         for setup_type, rules in manifest.items()
     }
+    pre_attack_base_observations: list[Mapping[str, object]] = []
     for observation in observations:
         setup_type = str(observation.get("setup_type") or "")
         rule_key = str(observation.get("rule_key") or "")
+        if rule_key == ATTACK_BODY_HOLD_RULE_KEY:
+            pre_attack_base_observations.append(observation)
         family = accumulators.get(setup_type)
         if family is None or rule_key not in family:
             continue
@@ -1434,6 +1969,78 @@ def summarize_rule_observations(
             "frozen_rule_keys": normalized_frozen_rule_keys,
         },
         "families": families,
+        "pre_attack_base_process": summarize_pre_attack_base_process_observations(
+            pre_attack_base_observations
+        ),
+    }
+
+
+def summarize_pre_attack_base_process_observations(
+    observations: Iterable[Mapping[str, object]],
+) -> dict[str, object]:
+    """Describe D+1 outcomes by causal base path without selecting a rule."""
+
+    phase_accumulators: dict[str, _ReturnAccumulator] = defaultdict(
+        _ReturnAccumulator
+    )
+    comparable_by_date: dict[date, list[tuple[str, float]]] = defaultdict(list)
+    candidate_count = 0
+    excluded_price_limit_count = 0
+    for observation in observations:
+        if str(observation.get("rule_key") or "") != ATTACK_BODY_HOLD_RULE_KEY:
+            continue
+        candidate_count += 1
+        if (
+            str(observation.get("d1_label_status") or "available")
+            == "label_excluded_main_board_price_limit"
+        ):
+            excluded_price_limit_count += 1
+            continue
+        phase = str(observation.get("pre_attack_base_phase") or "insufficient_history")
+        trade_date = _required_date(observation.get("trade_date"))
+        value = _number_or_none(observation.get("d1_close_return_pct"))
+        phase_accumulators[phase].add(trade_date, value)
+        if value is not None:
+            comparable_by_date[trade_date].append((phase, value))
+
+    excess_values: dict[str, list[float]] = defaultdict(list)
+    excess_dates: dict[str, set[date]] = defaultdict(set)
+    for trade_date, values in comparable_by_date.items():
+        if len(values) < 2:
+            continue
+        total = sum(value for _, value in values)
+        for phase, value in values:
+            excess_values[phase].append((value - (total - value) / (len(values) - 1)))
+            excess_dates[phase].add(trade_date)
+
+    return {
+        "feature_cutoff": "D-2（D-1 攻击实体与 D 信号不参与底盘特征）",
+        "candidate_count": candidate_count,
+        "label_excluded_main_board_price_limit_count": excluded_price_limit_count,
+        "phase_groups": [
+            {
+                "phase": phase,
+                **accumulator.summary(),
+                "same_day_excess": _same_day_excess_summary(
+                    excess_values[phase],
+                    excess_dates[phase],
+                ),
+            }
+            for phase, accumulator in sorted(phase_accumulators.items())
+        ],
+    }
+
+
+def _same_day_excess_summary(
+    values: Sequence[float],
+    dates: set[date],
+) -> dict[str, object]:
+    return {
+        "sample_count": len(values),
+        "candidate_days": len(dates),
+        "win_rate_pct": _rate_pct(sum(value > 0 for value in values), len(values)),
+        "mean_return_pct": _round_pct(fmean(values)) if values else None,
+        "median_return_pct": _round_pct(median(values)) if values else None,
     }
 
 
@@ -1767,6 +2374,9 @@ def run_extended_daily_factor_discovery(
         "case_score_membership": {},
         "qualified_score_factors": [],
         "full_history_score_gate": _empty_full_history_score_gate(),
+        "pre_attack_base_process": summarize_pre_attack_base_process_observations(
+            ()
+        ),
     }
     try:
         normalized_frozen_rule_keys = _normalize_frozen_rule_keys(
@@ -1936,6 +2546,7 @@ def run_extended_daily_factor_discovery(
             "case_score_membership": case_score_membership,
             "qualified_score_factors": qualified_score_factors,
             "full_history_score_gate": full_history_score_gate,
+            "pre_attack_base_process": summary["pre_attack_base_process"],
             "research_answers": [],
             "qualified_rules": qualified_rules,
         }
@@ -2054,6 +2665,10 @@ def render_extended_daily_factor_markdown(report: Mapping[str, object]) -> str:
                 continue
             _render_selected_family(lines, setup_type, family)
 
+    _render_pre_attack_base_process(
+        lines,
+        report.get("pre_attack_base_process"),
+    )
     _render_score_factors(
         lines,
         report.get("score_factors"),
@@ -2087,6 +2702,46 @@ def render_extended_daily_factor_markdown(report: Mapping[str, object]) -> str:
                     )
                 )
     return "\n".join(lines) + "\n"
+
+
+def _render_pre_attack_base_process(
+    lines: list[str],
+    summary: object,
+) -> None:
+    if not isinstance(summary, Mapping):
+        return
+    groups = summary.get("phase_groups")
+    if not isinstance(groups, Sequence) or not groups:
+        return
+    lines.extend(["", "## 攻击前底盘过程（观察性）", ""])
+    lines.append(
+        "- {cutoff}；仅统计攻击实体缩量守住候选，本观察表不参与规则选择、分数或实时推荐；首段两线攻击另有冻结资格门。".format(
+            cutoff=summary.get("feature_cutoff", "特征截止 D-2"),
+        )
+    )
+    lines.append(
+        "- 候选 {candidates} 个，严格涨跌停标签排除 {excluded} 个。".format(
+            candidates=summary.get("candidate_count", 0),
+            excluded=summary.get("label_excluded_main_board_price_limit_count", 0),
+        )
+    )
+    lines.append("| 底盘路径 | 样本 | D+1 均值 | 胜率 | 同日超额均值 | 同日样本 |")
+    lines.append("| --- | ---: | ---: | ---: | ---: | ---: |")
+    for group in groups:
+        if not isinstance(group, Mapping):
+            continue
+        same_day = group.get("same_day_excess")
+        same_day = same_day if isinstance(same_day, Mapping) else {}
+        lines.append(
+            "| {phase} | {samples} | {mean} | {win_rate} | {excess} | {excess_samples} |".format(
+                phase=group.get("phase", "-"),
+                samples=group.get("sample_count", 0),
+                mean=_number_text(group.get("d1_mean_return_pct")),
+                win_rate=_number_text(group.get("win_rate_pct")),
+                excess=_number_text(same_day.get("mean_return_pct")),
+                excess_samples=same_day.get("sample_count", 0),
+            )
+        )
 
 
 def _render_score_factors(
@@ -2433,6 +3088,7 @@ def _iter_rule_observations(
         calendar,
         security_status,
         include_d1_initial_short_trend_outcome=True,
+        include_pre_attack_base_features=True,
     ):
         for setup_type, rules in DISCOVERY_RULES.items():
             for rule in rules:
@@ -2457,6 +3113,9 @@ def _iter_rule_observations(
                             bool(snapshot.features.get("volume_expand_then_shrink"))
                             if rule.key == OVERSOLD_TO_TREND_RULE_KEY
                             else None
+                        ),
+                        "pre_attack_base_phase": snapshot.features.get(
+                            "pre_attack_base_phase"
                         ),
                         "feature_snapshot": _feature_snapshot(snapshot.features),
                     }
@@ -2770,6 +3429,7 @@ def _iter_candidate_snapshots(
     *,
     require_rule_match: bool = True,
     include_d1_initial_short_trend_outcome: bool = False,
+    include_pre_attack_base_features: bool = False,
     target_dates: set[date] | None = None,
 ) -> Iterable[_CandidateSnapshot]:
     """Build snapshots for requested market days without a generic entry gate."""
@@ -2792,8 +3452,14 @@ def _iter_candidate_snapshots(
 
         def _features_at(position: int) -> Mapping[str, object]:
             if position not in feature_cache:
-                feature_cache[position] = build_extended_daily_features(
-                    history[max(0, position - 79) : position + 1]
+                history_window = history[max(0, position - 79) : position + 1]
+                feature_cache[position] = (
+                    build_extended_daily_features(
+                        history_window,
+                        include_pre_attack_base_features=True,
+                    )
+                    if include_pre_attack_base_features
+                    else build_extended_daily_features(history_window)
                 )
             return feature_cache[position]
 
@@ -3041,6 +3707,45 @@ def process_rule_predicates(
                 and vol_monotone >= VOLUME_MONOTONE_6D_MIN_RATIO
             ),
         },
+        ATTACK_BODY_HOLD_RULE_KEY: {
+            "long_bear_alignment": bool(features.get("long_bear_alignment")),
+            "oversold_process_eligible": bool(
+                features.get("oversold_process_eligible")
+            ),
+            "ma10_crossed_ma20_after_long_bear_within_15d": bool(
+                features.get("ma10_crossed_ma20_after_long_bear_within_15d")
+            ),
+            "ma10_above_ma20": bool(features.get("ma10_above_ma20")),
+            "ma10_below_ma30": bool(features.get("ma10_below_ma30")),
+            "ma10_ma30_fast_convergence": bool(
+                features.get("ma10_ma30_fast_convergence")
+            ),
+            "prior_attack_body_at_least_3_pct": (
+                (prior_body := _number_or_none(features.get("prior_positive_body_pct")))
+                is not None
+                and prior_body >= ATTACK_BODY_MIN_PCT
+            ),
+            "prior_attack_not_limit_up": not bool(
+                features.get("prior_limit_up_touched")
+            ),
+            "controlled_retest_candle": (
+                (current_return := _number_or_none(features.get("daily_return_pct")))
+                is not None
+                and ATTACK_BODY_HOLD_DAILY_RETURN_MIN_PCT
+                <= current_return
+                <= ATTACK_BODY_HOLD_DAILY_RETURN_MAX_PCT
+                and bool(features.get("candle_quiet"))
+            ),
+            "attack_body_low_held": bool(features.get("attack_body_low_held")),
+            "attack_body_close_held": bool(features.get("attack_body_close_held")),
+            "volume_shrunk_to_80_pct_or_less": (
+                (volume_ratio := _number_or_none(
+                    features.get("last_volume_to_prior_ratio")
+                ))
+                is not None
+                and volume_ratio <= ATTACK_BODY_HOLD_VOLUME_MAX_RATIO
+            ),
+        },
         MA10_MA20_PRE_CROSS_RULE_KEY: {
             "long_bear_alignment": bool(features.get("long_bear_alignment")),
             "current_full_bear_alignment": bool(
@@ -3053,6 +3758,17 @@ def process_rule_predicates(
             ),
             "positive_candle": bool(features.get("positive_candle")),
             "last_volume_expanded": bool(features.get("last_volume_expanded")),
+        },
+        FIRST_LEG_TWO_MA_WRAP_RULE_KEY: {
+            "long_bear_alignment": bool(features.get("long_bear_alignment")),
+            "current_full_bear_alignment": bool(
+                features.get("current_full_bear_alignment")
+            ),
+            "yang_wrap_two_ma": bool(features.get("yang_wrap_two_ma")),
+            "close_below_ma30": bool(features.get("close_below_ma30")),
+            "signal_day_not_limit_up_closed": bool(
+                features.get("signal_day_not_limit_up_closed")
+            ),
         },
         OVERSOLD_TO_TREND_RULE_KEY: {
             "long_bear_alignment": bool(features.get("long_bear_alignment")),
@@ -3891,12 +4607,60 @@ def _ma10_ma20_next_close_required_return_pct(
 ) -> float | None:
     """Return the D+1 close return needed for MA10 to reach MA20."""
 
-    if len(closes) < 20:
+    return _ma10_next_close_required_return_pct(closes, slow_window=20)
+
+
+def _ma10_ma20_convergence_efficiency_5d(
+    closes: Sequence[float],
+    *,
+    ma10_series: Sequence[float | None],
+    ma20_series: Sequence[float | None],
+) -> float | None:
+    """Normalize five-session MA10/20 gap closure by observed price churn."""
+
+    if len(closes) < 6 or len(ma10_series) < 6 or len(ma20_series) < 6:
+        return None
+    ma10_then, ma10_now = ma10_series[-6], ma10_series[-1]
+    ma20_then, ma20_now = ma20_series[-6], ma20_series[-1]
+    if None in (ma10_then, ma10_now, ma20_then, ma20_now):
+        return None
+    gap_then = _pct_change(float(ma10_then), float(ma20_then))
+    gap_now = _pct_change(float(ma10_now), float(ma20_now))
+    churn = sum(
+        abs(_pct_change(closes[index], closes[index - 1]))
+        for index in range(len(closes) - 5, len(closes))
+    )
+    return _round_pct((gap_now - gap_then) / churn) if churn else None
+
+
+def _ma10_ma30_next_close_required_return_pct(
+    closes: Sequence[float],
+) -> float | None:
+    """Return the D+1 close return needed for MA10 to reach MA30."""
+
+    return _ma10_next_close_required_return_pct(closes, slow_window=30)
+
+
+def _ma10_next_close_required_return_pct(
+    closes: Sequence[float],
+    *,
+    slow_window: int,
+) -> float | None:
+    """Solve the next-close price at which MA10 reaches one longer average."""
+
+    if len(closes) < slow_window:
         return None
     current_close = closes[-1]
     if current_close <= 0:
         return None
-    required_close = sum(closes[-19:]) - 2 * sum(closes[-9:])
+
+    # At D+1 both averages contain the unknown close x.  Solving
+    # (sum9 + x) / 10 = (sum(slow-1) + x) / slow yields this price.
+    short_sum = sum(closes[-9:])
+    slow_sum = sum(closes[-(slow_window - 1) :])
+    required_close = (
+        10 * slow_sum - slow_window * short_sum
+    ) / (slow_window - 10)
     return _round_pct((required_close - current_close) / current_close * 100)
 
 
@@ -4124,9 +4888,21 @@ def _daily_price_state(value: float | None) -> str:
 def _feature_snapshot(features: Mapping[str, object]) -> dict[str, object]:
     keys = (
         "daily_return_pct",
+        "pre_attack_base_phase",
+        "pre_attack_base_window_sessions",
+        "pre_attack_base_pivot_age_sessions",
+        "pre_attack_base_release_after_final_pivot",
+        "pre_attack_base_settlement_sessions",
+        "pre_attack_base_tail_span_to_median_range",
+        "pre_attack_base_tail_floor_vs_pivot_pct",
+        "pre_attack_base_tail_retested_release",
+        "pre_attack_base_ma10_ma20_progress_per_churn",
+        "pre_attack_base_tail_floor_vs_release_origin_pct",
         "ma10_ma20_signed_distance_pct",
+        "ma10_ma20_convergence_efficiency_5d",
         "ma10_ma20_next_close_required_return_pct",
         "ma10_ma30_signed_distance_pct",
+        "ma10_ma30_next_close_required_return_pct",
         "ma20_ma30_signed_distance_pct",
         "intraday_midpoint_price",
         "midpoint_to_ma5_pct",
@@ -4146,6 +4922,7 @@ def _feature_snapshot(features: Mapping[str, object]) -> dict[str, object]:
         "ma10_above_ma20",
         "ma10_below_ma30",
         "current_full_bear_alignment",
+        "close_below_ma30",
         "ma20_ma30_contact",
         "transition_ma20_ma30_tight_contact",
         "m10_dual_cross_before_m20_m30",
@@ -4174,6 +4951,7 @@ def _feature_snapshot(features: Mapping[str, object]) -> dict[str, object]:
         "ma30_low_touch",
         "oversold_low_support",
         "yang_wrap_three_ma",
+        "yang_wrap_two_ma",
         "yang_wrap_nearest_ma_low_abs_pct",
         "yang_wrap_volume_end_to_peak_ratio_6d",
         "yang_wrap_stable_base",
@@ -4190,6 +4968,7 @@ def _feature_snapshot(features: Mapping[str, object]) -> dict[str, object]:
         "trend_dist_excess_pct",
         "candle_range_pct",
         "candle_quiet",
+        "signal_day_not_limit_up_closed",
         "prior_daily_return_pct",
         "prior_ma5_low_touch",
         "trend_overextended",

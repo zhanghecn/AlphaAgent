@@ -143,8 +143,7 @@ PERSONAL_CASE_SOURCE_METADATA: dict[str, CaseSourceMetadata] = {
         date(2026, 7, 14),
         None,
         "process_only",
-        (),
-        "research_pending",
+        ("first_leg_two_ma_body_wrap_before_ma30",),
     ),
     "百花医药 三线包裹": CaseSourceMetadata(
         date(2026, 7, 14),
@@ -157,6 +156,26 @@ PERSONAL_CASE_SOURCE_METADATA: dict[str, CaseSourceMetadata] = {
         date(2026, 8, 4),
         "process_only",
         ("post_wrap_upper_band_reclaim_confirmation",),
+    ),
+    "国风新材 攻击实体守住": CaseSourceMetadata(
+        date(2026, 7, 20),
+        date(2026, 8, 10),
+        "process_only",
+        ("attack_body_hold_after_ma10_ma20_cross_before_ma30",),
+    ),
+    "秦安股份 MA10 上穿 MA20": CaseSourceMetadata(
+        None,
+        None,
+        "process_only",
+        (),
+        "research_pending",
+    ),
+    "京投发展 价格先行攻击": CaseSourceMetadata(
+        None,
+        None,
+        "process_only",
+        (),
+        "research_pending",
     ),
     "中南文化 MA10 回踩": CaseSourceMetadata(
         date(2026, 2, 10),
@@ -596,12 +615,14 @@ def _case_process_evidence(
 ) -> dict[str, object]:
     from .daily_factor_extended_discovery import (
         build_extended_daily_features,
+        classify_oversold_attack_stages,
         matching_discovery_rule_keys,
         process_rule_predicates,
     )
 
     features = build_extended_daily_features(
-        daily_factor_history_window(history, position)
+        daily_factor_history_window(history, position),
+        include_pre_attack_base_features=True,
     )
     calendar_position = calendar_positions.get(case.trade_date)
     prior_is_previous_market_session = bool(
@@ -613,7 +634,8 @@ def _case_process_evidence(
     )
     prior_features = (
         build_extended_daily_features(
-            daily_factor_history_window(history, position - 1)
+            daily_factor_history_window(history, position - 1),
+            include_pre_attack_base_features=True,
         )
         if prior_is_previous_market_session
         else None
@@ -646,8 +668,20 @@ def _case_process_evidence(
     }
     source_geometry_matched = source_geometry_matches(features, case.source_anchor)
     close_price = _number_or_none(features.get("close_price"))
+    attack_stages = (
+        classify_oversold_attack_stages(
+            features,
+            prior_features=prior_features,
+        )
+        if case.expected_setup_type == "oversold_rebound"
+        else ()
+    )
     return {
         "process_probe_rule_keys": process_rule_keys,
+        "source_is_oversold_attack_anchor": (
+            case.expected_setup_type == "oversold_rebound"
+        ),
+        "recognized_oversold_attack_stages": list(attack_stages),
         "source_geometry_matched": source_geometry_matched,
         "required_process_matched": bool(
             not missing_required_keys and not failed_required_process_predicates
@@ -666,6 +700,14 @@ def _case_process_evidence(
         "process_feature_snapshot": {
             field: features.get(field)
             for field in (
+                "pre_attack_base_phase",
+                "pre_attack_base_pivot_age_sessions",
+                "pre_attack_base_release_after_final_pivot",
+                "pre_attack_base_settlement_sessions",
+                "pre_attack_base_tail_span_to_median_range",
+                "pre_attack_base_tail_floor_vs_pivot_pct",
+                "pre_attack_base_tail_retested_release",
+                "pre_attack_base_ma10_ma20_progress_per_churn",
                 "low_to_ma5_pct",
                 "close_to_ma5_pct",
                 "low_to_ma10_pct",

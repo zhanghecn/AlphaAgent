@@ -37,6 +37,9 @@ PERSONAL_RESEARCH_CASES = (
     ("百花医药 M10/M20 两线包裹", "600721.SSE", date(2026, 7, 14), "oversold_rebound"),
     ("百花医药 三线包裹", "600721.SSE", date(2026, 7, 31), "oversold_rebound"),
     ("百花医药 向上踩稳", "600721.SSE", date(2026, 8, 3), "oversold_rebound"),
+    ("国风新材 攻击实体守住", "000859.SZSE", date(2026, 8, 7), "oversold_rebound"),
+    ("秦安股份 MA10 上穿 MA20", "603758.SSE", date(2026, 8, 6), "oversold_rebound"),
+    ("京投发展 价格先行攻击", "600683.SSE", date(2026, 8, 7), "oversold_rebound"),
     ("中南文化 MA10 回踩", "002445.SZSE", date(2026, 2, 12), "trend_pullback"),
     ("华电辽能 MA5 回踩", "600396.SSE", date(2026, 3, 5), "trend_pullback"),
     ("华电辽能 MA5 缩量回踩", "600396.SSE", date(2026, 3, 13), "trend_pullback"),
@@ -351,11 +354,17 @@ def is_main_board_limit_up_touched(
     prior_close: float,
     high_price: float,
 ) -> bool:
-    """Return whether a valid strict-boundary bar reached the 10% upper edge."""
+    """Return whether a bar reached the tick-rounded 10% upper limit."""
 
     previous = Decimal(str(prior_close))
     high = Decimal(str(high_price))
-    return previous > 0 and high >= previous * (Decimal("1") + MAIN_BOARD_PRICE_LIMIT_RATE)
+    if previous <= 0:
+        return False
+    upper_limit = (previous * (Decimal("1") + MAIN_BOARD_PRICE_LIMIT_RATE)).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_HALF_UP,
+    )
+    return high >= upper_limit
 
 
 def score_oversold(

@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import date, timedelta
 
 from alphaagent.server.services.low_suction.daily_factor_extended_discovery import (
+    FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
     POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
     RESEARCH_THREE_MA_WRAP_RULE_KEY,
 )
@@ -116,7 +117,7 @@ def test_backtest_uses_top_five_per_family_and_leaves_unfilled_slots_as_cash() -
     assert position_sim["time_segments"]["holdout"]["positions"] == 1
 
 
-def test_oversold_ranking_keeps_p3_then_p2_then_p1_before_raw_score() -> None:
+def test_oversold_ranking_keeps_p3_then_p2_then_p1_5_then_p1_before_raw_score() -> None:
     day = date(2026, 8, 3)
     p1 = _candidate(
         day=day,
@@ -147,14 +148,60 @@ def test_oversold_ranking_keeps_p3_then_p2_then_p1_before_raw_score() -> None:
         rule_key=RESEARCH_THREE_MA_WRAP_RULE_KEY,
         matched_rule_keys=(RESEARCH_THREE_MA_WRAP_RULE_KEY,),
     )
+    p1_5_far = replace(
+        _candidate(
+            day=day,
+            setup_type="oversold_rebound",
+            ordinal=4,
+            score=120.0,
+            d1_return=0.0,
+        ),
+        rule_key=FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
+        matched_rule_keys=(FIRST_LEG_TWO_MA_WRAP_RULE_KEY,),
+    )
+    p1_5_near = replace(
+        _candidate(
+            day=day,
+            setup_type="oversold_rebound",
+            ordinal=5,
+            score=1.0,
+            d1_return=0.0,
+        ),
+        rule_key=FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
+        matched_rule_keys=(FIRST_LEG_TWO_MA_WRAP_RULE_KEY,),
+        turnover_rate_pct=3.0,
+    )
+    p1_5_missing_turnover = replace(
+        _candidate(
+            day=day,
+            setup_type="oversold_rebound",
+            ordinal=6,
+            score=140.0,
+            d1_return=0.0,
+        ),
+        rule_key=FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
+        matched_rule_keys=(FIRST_LEG_TWO_MA_WRAP_RULE_KEY,),
+        turnover_rate_pct=None,
+    )
 
-    ranked = sorted((p1, p2, p3), key=candidate_ranking_key)
+    ranked = sorted(
+        (p1, p2, p3, p1_5_far, p1_5_near, p1_5_missing_turnover),
+        key=candidate_ranking_key,
+    )
 
     assert [item.rule_key for item in ranked] == [
         RESEARCH_THREE_MA_WRAP_RULE_KEY,
         POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
+        FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
+        FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
+        FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
         "test_rule",
     ]
+    assert [item.vt_symbol for item in ranked[2:4]] == [
+        p1_5_near.vt_symbol,
+        p1_5_far.vt_symbol,
+    ]
+    assert ranked[4].vt_symbol == p1_5_missing_turnover.vt_symbol
 
 
 def test_backtest_selects_d_day_top_pick_before_d1_label_availability() -> None:

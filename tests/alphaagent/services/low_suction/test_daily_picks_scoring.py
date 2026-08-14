@@ -521,6 +521,32 @@ def test_post_wrap_confirmation_uses_a_visible_p2_score_floor() -> None:
     assert priority.points == pytest.approx(score - baseline_score)
 
 
+def test_attack_retest_base_adds_a_limited_visible_experimental_bonus() -> None:
+    from alphaagent.server.services.low_suction.daily_picks_scoring import (
+        ATTACK_RETEST_BASE_BONUS_POINTS,
+    )
+
+    features = {
+        "turnover_rate_pct": 2.0,
+        "candle_range_pct": 2.0,
+        "prior_bear_alignment_days": 10,
+    }
+    streak = quiet_candle_streak([_bar(2.0)] * 3)
+    baseline_score, _ = score_oversold_candidate(features, streak)
+    score, components = score_oversold_candidate(
+        features,
+        streak,
+        attack_retest_base_rule_matched=True,
+    )
+
+    component = next(
+        item for item in components if item.key == "attack_retest_base"
+    )
+    assert score == baseline_score + ATTACK_RETEST_BASE_BONUS_POINTS
+    assert component.passed is True
+    assert component.points == ATTACK_RETEST_BASE_BONUS_POINTS
+
+
 def test_score_version_bumped_to_v2_8() -> None:
     from alphaagent.server.services.low_suction import daily_picks_scoring as module
 

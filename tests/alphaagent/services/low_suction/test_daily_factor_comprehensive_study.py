@@ -118,7 +118,7 @@ def test_personal_case_manifest_covers_every_named_source_observation() -> None:
             date(2026, 7, 14),
             "oversold_rebound",
             "process_only",
-            (),
+            ("first_leg_two_ma_body_wrap_before_ma30",),
         ),
         (
             "百花医药 三线包裹",
@@ -135,6 +135,30 @@ def test_personal_case_manifest_covers_every_named_source_observation() -> None:
             "oversold_rebound",
             "process_only",
             ("post_wrap_upper_band_reclaim_confirmation",),
+        ),
+        (
+            "国风新材 攻击实体守住",
+            "000859.SZSE",
+            date(2026, 8, 7),
+            "oversold_rebound",
+            "process_only",
+            ("attack_body_hold_after_ma10_ma20_cross_before_ma30",),
+        ),
+        (
+            "秦安股份 MA10 上穿 MA20",
+            "603758.SSE",
+            date(2026, 8, 6),
+            "oversold_rebound",
+            "process_only",
+            (),
+        ),
+        (
+            "京投发展 价格先行攻击",
+            "600683.SSE",
+            date(2026, 8, 7),
+            "oversold_rebound",
+            "process_only",
+            (),
         ),
         (
             "中南文化 MA10 回踩",
@@ -200,8 +224,9 @@ def test_unmodeled_personal_cases_stay_archived_as_research_pending() -> None:
     }
 
     assert set(pending) == {
-        "百花医药 M10/M20 两线包裹",
         "立新能源 MA10 向 MA20 加速收敛",
+        "秦安股份 MA10 上穿 MA20",
+        "京投发展 价格先行攻击",
     }
     assert all(not case.required_process_rule_keys for case in pending.values())
 
@@ -251,6 +276,27 @@ def test_case_audit_is_causal_and_includes_predicates() -> None:
     assert baseline["d1_close_return_pct"] is not None
     assert baseline["required_process_predicate_results"] == {}
     assert baseline["failed_required_process_predicates"] == {}
+    assert baseline["source_is_oversold_attack_anchor"] is False
+    assert baseline["recognized_oversold_attack_stages"] == []
+
+
+def test_case_audit_marks_declared_oversold_case_as_attack_anchor() -> None:
+    bars = _case_bars()
+    case = PersonalResearchCase(
+        name="synthetic oversold case",
+        vt_symbol="003032.SZSE",
+        trade_date=bars[68]["trade_date"],
+        expected_setup_type="oversold_rebound",
+    )
+
+    result = audit_personal_cases(
+        bars,
+        tuple(bar["trade_date"] for bar in bars),
+        cases=(case,),
+    )[0]
+
+    assert result["source_is_oversold_attack_anchor"] is True
+    assert isinstance(result["recognized_oversold_attack_stages"], list)
 
 
 def test_case_audit_keeps_a_causal_narrative_timeline_and_separate_launch_check() -> None:
