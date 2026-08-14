@@ -620,7 +620,13 @@ def _themes(
     groups: dict[str, list[dict]] = {}
     kinds: dict[str, str] = {}
     concept_names = assign_theme_concepts(
-        session, [e["vt_symbol"] for e in entries]
+        session,
+        [e["vt_symbol"] for e in entries],
+        industry_of={
+            e["vt_symbol"]: str(e["industry"] or "")
+            for e in entries
+            if e.get("industry")
+        },
     )
     for entry in entries:
         concept = concept_names.get(entry["vt_symbol"])

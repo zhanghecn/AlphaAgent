@@ -7,8 +7,9 @@
 1. 涨停名单 → concept memberships, 过滤风格/状态类伪概念;
 2. 概念分层: 成员 <= _WIDE_CONCEPT_MEMBERS(300) 为专概念(tier 0),
    其上为泛概念(tier 1, 如人工智能 712/华为 751——聚集再多也只是沾边);
-3. 主题材 = 候选中 (tier, -当日聚集数, 概念成员数) 最小者——
-   专概念优先 → 聚集更多 → 成员更少(更专); 聚集 >=2 才成组;
+3. 主题材 = 候选中 (tier, -同行业聚集数, -当日聚集数, 概念成员数)
+   最小者——专概念优先 → 同行业聚集更多(真实产业链) → 聚集更多 →
+   成员更少(更专); 聚集 >=2 才成组;
 4. 未入概念组的股票回落行业分组(调用方兜底)。
 
 纯 memberships 无法复现 lianban 的新闻驱动打标(其 rs 文案来自财联社
@@ -59,8 +60,15 @@ def _is_fake_concept(name: str) -> bool:
     return any(p in name for p in _FAKE_PATTERNS)
 
 
-def assign_theme_concepts(session, vt_symbols: list[str]) -> dict[str, str]:
+def assign_theme_concepts(
+    session,
+    vt_symbols: list[str],
+    industry_of: dict[str, str] | None = None,
+) -> dict[str, str]:
     """给涨停股分配主题材概念; 只返回能入组(概念内 >=2 只)的股票。
+
+    industry_of: {vt_symbol: 东财行业}; 提供时启用「同行业聚集数」信号
+    (候选排序第二键), 缺省退化为纯聚集数排序。
 
     Returns: {vt_symbol: 概念名(已去"概念"后缀)}, 未返回的股票由调用方
     走行业兜底。查询失败/无 memberships → {}(整体降级行业分组)。
@@ -100,35 +108,52 @@ def assign_theme_concepts(session, vt_symbols: list[str]) -> dict[str, str]:
             continue
         by_concept[(str(sid), name)].add(str(vsym))
 
-    # 每股候选: (tier, -聚集数, 成员规模, 概念名); 排序取最小 = 专概念
-    # → 聚集多 → 更专。
-    candidates: dict[str, list[tuple[int, int, int, str]]] = defaultdict(list)
+    # 每股候选: (tier, -同行业聚集数, -聚集数, -聚集纯度, 概念名);
+    # 排序取最小 = 专概念 → 同行业聚集更多 → 聚集更多 → 聚集更纯。
+    # 同行业聚集数 = 概念当日聚集中与该股同东财行业的家数, 聚集纯度 =
+    # 同行业数/聚集数——同行业集体涨停更可能是该股的真实驱动产业链。
+    # 聚集数是主信号(大聚落优先, 纯度只做聚集数后的决胜, 放前面会打散
+    # 大聚落)。成员规模只用于 tier 分层不进决胜链(54 vs 97 无产业意义,
+    # 实测让毫米波错抢亨通); 全平局交概念名字典序(稳定可复现)。
+    # (2026-08-14 亨通光电案例: 液冷聚集 7 同「通信设备」仅 2 → 不归液
+    # 冷沾边; 毫米波/光通信模块同行业聚集均 3 聚集均 5 纯度均 60%, 字典
+    # 序光通信胜 → 归光通信主业, 对齐 lianban 光纤概念的光通信口径。)
+    industry_map = industry_of or {}
+    candidates: dict[str, list[tuple[int, int, int, float, str]]] = defaultdict(list)
     for (_sid, cname), syms in by_concept.items():
         if len(syms) < 2:
             continue
         size = sizes.get(_sid, 99999)
         tier = 0 if size <= _WIDE_CONCEPT_MEMBERS else 1
         for vsym in syms:
-            candidates[vsym].append((tier, -len(syms), size, cname))
+            industry = industry_map.get(vsym)
+            if industry is None:
+                same_industry = len(syms)
+            else:
+                same_industry = sum(
+                    1 for other in syms if industry_map.get(other) == industry
+                )
+            purity = same_industry / len(syms)
+            candidates[vsym].append(
+                (tier, -same_industry, -len(syms), -purity, cname)
+            )
 
     ranked = {
         vsym: sorted(options) for vsym, options in candidates.items()
     }
-    best = {vsym: opts[0][3] for vsym, opts in ranked.items()}
+    best = {vsym: opts[0][4] for vsym, opts in ranked.items()}
 
     # 孤儿回收(单遍无震荡): 最优概念可能被同伴的更优选择掏空(原聚集 2
     # 只、同伴被抢 → 本组剩 1 只)。先按最优分配统计锁定人数 >=2 的稳定
     # 组, 落单股只允许改投「已锁定」组(锁定组人数只增不减, 不会产生新
     # 孤儿), 无可投组 → 交回行业兜底。迭代式互相改投曾造成实测死循环
     # (08-13: 快照孤儿集与轮内状态错位, 轨迹恒定震荡), 故弃用。
-    from collections import Counter
-
     counts = Counter(best.values())
     locked = {name for name, c in counts.items() if c >= 2}
     result: dict[str, str] = {}
     for vsym, opts in ranked.items():
         for opt in opts:
-            name = opt[3]
+            name = opt[4]
             if name in locked:
                 result[vsym] = name.removesuffix("概念")
                 break

@@ -100,6 +100,32 @@ def test_orphan_concept_member_falls_to_next_choice(seeded_session):
     assert all(name != "AI应用" for name in result.values())
 
 
+def test_same_industry_cluster_beats_bigger_cross_industry_cluster(seeded_session):
+    """亨通光电案例(2026-08-14): 液冷聚集 7 但同行业仅 2; 光通信聚集 5
+    同行业 3 → 归光通信主业而非液冷沾边。"""
+    s = seeded_session
+    # 亨通/剑桥(通信设备) + 5 只跨行业股 挂"液冷概念"(聚集 7, 同行业 2)
+    _concept(s, "BKLC2", "液冷概念",
+             ["600487.SSE", "603083.SSE", "300017.SZSE", "002418.SZSE",
+              "601609.SSE", "300684.SZSE", "603881.SSE"])
+    # 亨通/剑桥/中瓷(通信设备)+富信/杭电 挂"光通信模块"(聚集 5, 同行业 3)
+    _concept(s, "BKGM", "光通信模块",
+             ["600487.SSE", "603083.SSE", "003031.SZSE", "688662.SSE", "603618.SSE"])
+    s.flush()
+    industry = {
+        "600487.SSE": "通信设备", "603083.SSE": "通信设备", "003031.SZSE": "通信设备",
+        "688662.SSE": "其他电子", "603618.SSE": "电网设备", "300017.SZSE": "IT服务Ⅱ",
+        "002418.SZSE": "家电零部", "601609.SSE": "工业金属", "300684.SZSE": "电子化学",
+        "603881.SSE": "通信服务",
+    }
+    result = assign_theme_concepts(s, list(industry), industry_of=industry)
+    assert result["600487.SSE"] == "光通信模块"
+    assert result["603083.SSE"] == "光通信模块"
+    # 液冷残部(同行业各 1)仍聚在液冷
+    assert result["300017.SZSE"] == "液冷"
+    assert result["603881.SSE"] == "液冷"
+
+
 def test_no_memberships_returns_empty(fake_session):
     assert assign_theme_concepts(fake_session, ["000001.SSE"]) == {}
     assert assign_theme_concepts(fake_session, []) == {}
