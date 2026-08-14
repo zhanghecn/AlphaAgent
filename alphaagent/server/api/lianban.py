@@ -11,11 +11,11 @@
   fallback_from; 法定节假日无法判别, 由指纹闸兜底识别昨日快照后回落)。
 - live 数据诚实性两道闸(东财涨停池在非交易时段返回最近交易日快照, 且
   payload 无日期自标注字段, 不能冒充"今日盘中数据"):
-  1. 时间闸: live 仅在北京时间 [09:25, 20:00] 启用(含两端; 09:25 集合
-     竞价结束涨停池开始填充; 15:00 收盘~20:00 是「整理中」窗口, 东财池
-     仍为当日完整名单, eod_1900 归档落库后 final 自动接管; 20:00 后归档
-     链路应已完成)。窗外: 缺省路径直接回落(不试 live), 显式 ?date=今日
-     → 404。
+  1. 时间闸: live 在北京时间 >= 09:25 启用(集合竞价结束涨停池开始有
+     数据; 无右端——stock_ztb_em 按日期查询, 交易日收盘后任意时刻查
+     今日都返回当日完整名单, eod 归档落库后 final 自动接管, 归档失败
+     的深夜仍可看今日 live)。09:25 前: 缺省路径直接回落(不试 live),
+     显式 ?date=今日 → 404。
   2. 指纹闸(兜节假日/边缘): 实时 zt 池 vt_symbol 集合与最近归档日的 zt
      名单完全一致 → 判定为最近交易日快照 → 缺省回落 / 显式 404。盘中真实
      滚动名单必然与昨日归档不同, 收盘后整理窗口是今日完整数据 vs 昨日
@@ -91,20 +91,19 @@ _PROJECTION_CACHE_TTL_SECONDS = 60
 projection_cache: TTLCache = TTLCache(max_items=200)
 # live 分流核心池: 缺任一整页家数/封板率失真 → 显式请求 503 / 缺省请求回落。
 _LIVE_CORE_POOLS = ("zt", "zbgc", "dtgc")
-# live 时间闸(北京时间, 含两端): 09:25 集合竞价结束涨停池开始填充;
-# 右端 20:00 覆盖收盘后~eod_1900(19:00 触发, 完成时间浮动)的「整理中」
-# 窗口——实测收盘后东财池仍返回当日完整名单, 归档落库前不应回落昨日
-# (2026-08-14 17 时线上实测: 15:30-19:00 空窗导致最新复盘停留在前一日)。
-# 20:00 后归档应已接管(final 命中优先于 live); 窗外东财返回最近交易日
-# 快照, 由时间闸+指纹闸双重挡住, 不冒充今日数据。
+# live 时间闸(北京时间): 仅左端 09:25——集合竞价结束涨停池开始填充, 之前
+# 东财无今日数据(试也是空)。**无右端**: stock_ztb_em 是按日期查询接口
+# (backfill 回补 14 日历史实证), 交易日收盘后任意时刻查今日都返回当日
+# 完整名单, eod 归档失败/延迟的深夜也能看今日; 节假日/盘前东财空池
+# → None → 回落最近日, 昨日快照冒充由指纹闸兜底。
+# (2026-08-14 线上事故: 15:30 右端 + eod 19:00 才归档 → 盘后空窗回落
+# 前一日; 先扩 20:00 仍留 eod 失败缺口, 故彻底去右端。)
 _LIVE_WINDOW_START = time(9, 25)
-_LIVE_WINDOW_END = time(20, 0)
 
 
 def _in_live_window(now: datetime) -> bool:
-    """live 时间闸: 仅北京时间 [_LIVE_WINDOW_START, _LIVE_WINDOW_END] 含两端。"""
-    current = now.time()
-    return _LIVE_WINDOW_START <= current <= _LIVE_WINDOW_END
+    """live 时间闸: 北京时间 >= 09:25(集合竞价结束, 今日池开始有数据)。"""
+    return now.time() >= _LIVE_WINDOW_START
 
 
 class _LivePoolsUnavailable(Exception):
@@ -332,7 +331,7 @@ def _explicit_review(session, target: date, now: datetime):
         if not _in_live_window(now):
             raise ReviewNotFound(
                 f"复盘数据不存在: {target.isoformat()}"
-                "(今日实时数据仅在 09:25-20:00 提供)"
+                "(今日实时数据仅在 09:25 之后提供)"
             )
         try:
             payload = _live_payload(session, target)
