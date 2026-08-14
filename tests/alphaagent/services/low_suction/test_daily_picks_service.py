@@ -343,6 +343,8 @@ def test_merge_spot_bars_uses_complete_ohlcv_snapshot(monkeypatch) -> None:
     assert synthetic["close_price"] == 10.5
     assert synthetic["high_price"] == 10.7
     assert synthetic["low_price"] == 10.1
+    # 新浪快照 volume 单位是股，日线库存单位是手，合成 bar 必须换算。
+    assert synthetic["volume"] == 1234.56
 
 
 def test_merge_spot_bars_preserves_scanner_symbol_date_order(monkeypatch) -> None:

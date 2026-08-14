@@ -1065,7 +1065,12 @@ def _merge_spot_bars(
         open_price = _float(row.get("open_price"))
         high = _float(row.get("high_price"))
         low = _float(row.get("low_price"))
+        # 新浪快照 volume 单位是股，日线库存单位是手（1手=100股）。
+        # 不换算会让合成 bar 的量能放大 100 倍，盘中所有缩量类
+        # 规则（staircase_shrink / vol_monotone_6d 等）全天失配。
         volume = _float(row.get("volume"))
+        if volume:
+            volume = volume / 100.0
         if not last or not open_price or not high or not low or not volume:
             continue
         synthetic.append(
