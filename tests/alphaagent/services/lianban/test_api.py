@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import date, datetime
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -112,11 +113,20 @@ class _SpyBuildReview:
 
 
 class _FakeLiveAdapter:
-    """AkShareAdapter 替身: limit_up_pools 返回固定五池 payload 或抛异常。"""
+    """AkShareAdapter 替身: limit_up_pools 返回固定五池 payload 或抛异常;
+    get_indices 返回固定指数行情列表(Quote 形状: vt_symbol/change_pct)或抛异常。"""
 
-    def __init__(self, payload: dict | None = None, exc: Exception | None = None):
+    def __init__(
+        self,
+        payload: dict | None = None,
+        exc: Exception | None = None,
+        indices: list | None = None,
+        indices_exc: Exception | None = None,
+    ):
         self.payload = payload
         self.exc = exc
+        self.indices = indices
+        self.indices_exc = indices_exc
         self.calls: list[tuple] = []
 
     def limit_up_pools(self, trade_date=None, *, per_pool_limit=200):
@@ -124,6 +134,11 @@ class _FakeLiveAdapter:
         if self.exc is not None:
             raise self.exc
         return self.payload
+
+    def get_indices(self):
+        if self.indices_exc is not None:
+            raise self.indices_exc
+        return self.indices or []
 
 
 def _live_item(symbol: str = "600101", name: str = "甲股份") -> dict:
@@ -672,6 +687,89 @@ def test_review_live_window_boundaries(client, monkeypatch, api_session):
     _patch_today(monkeypatch, TODAY, hour=9, minute=24, second=59)
     response = client.get("/api/lianban/review")
     assert response.status_code == 404
+
+
+# ── review: live 指数条实时填补 ──────────────────────────────────────────
+
+
+def _live_payload_with_indices() -> dict:
+    """live payload: 盘中库无当日日线 → 六指数格 change_pct 全 None + missing。"""
+    specs = [
+        ("sh", "上证", "000001.SSE"), ("sz", "深证", "399001.SZSE"),
+        ("cyb", "创业板", "399006.SZSE"), ("kc50", "科创50", "000688.SSE"),
+        ("sz50", "上证50", "000016.SSE"), ("bz50", "北证50", "899050.BSE"),
+    ]
+    return {
+        "trade_date": TODAY.isoformat(),
+        "mode": "live",
+        "indices": [
+            {"key": key, "name": name, "vt_symbol": vt, "change_pct": None}
+            for key, name, vt in specs
+        ],
+        "data_quality": {
+            "pool_archived": False,
+            "live": True,
+            "rebuild_date": None,
+            "missing": [f"indices:{key}" for key, _, _ in specs],
+        },
+    }
+
+
+def test_review_live_fills_indices_from_realtime_quotes(
+    client, monkeypatch, api_session
+):
+    """live 路径: 实时指数行情填补盘中 null 指数条, 并摘掉对应 missing。"""
+    adapter = _FakeLiveAdapter(
+        payload=_live_pools_payload(),
+        indices=[
+            SimpleNamespace(vt_symbol="000001.SSE", name="上证指数",
+                            change_pct=0.75),
+            SimpleNamespace(vt_symbol="399001.SZSE", name="深证成指",
+                            change_pct=-0.32),
+            # 其余四指数实时行情缺失 → 对应格保持 null + missing
+        ],
+    )
+    spy = _SpyBuildReview(payload=_live_payload_with_indices())
+    _patch_session(monkeypatch, api_session)
+    _patch_today(monkeypatch)
+    monkeypatch.setattr(lianban_api, "AkShareAdapter", lambda: adapter)
+    monkeypatch.setattr(lianban_api, "build_review", spy)
+
+    response = client.get(f"/api/lianban/review?date={TODAY.isoformat()}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    indices = {entry["key"]: entry["change_pct"] for entry in data["indices"]}
+    assert indices == {
+        "sh": 0.75, "sz": -0.32, "cyb": None,
+        "kc50": None, "sz50": None, "bz50": None,
+    }
+    missing = data["data_quality"]["missing"]
+    assert "indices:sh" not in missing
+    assert "indices:sz" not in missing
+    assert "indices:cyb" in missing  # 无实时行情的格保持缺失标注
+
+
+def test_review_live_indices_fetch_failure_keeps_null(
+    client, monkeypatch, api_session
+):
+    """实时指数接口异常 → 保留 null 降级, 不阻塞 live。"""
+    adapter = _FakeLiveAdapter(
+        payload=_live_pools_payload(),
+        indices_exc=RuntimeError("index source down"),
+    )
+    spy = _SpyBuildReview(payload=_live_payload_with_indices())
+    _patch_session(monkeypatch, api_session)
+    _patch_today(monkeypatch)
+    monkeypatch.setattr(lianban_api, "AkShareAdapter", lambda: adapter)
+    monkeypatch.setattr(lianban_api, "build_review", spy)
+
+    response = client.get(f"/api/lianban/review?date={TODAY.isoformat()}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert all(entry["change_pct"] is None for entry in data["indices"])
+    assert "indices:sh" in data["data_quality"]["missing"]
 
 
 def test_review_historical_cached_until_invalidate(client, monkeypatch,

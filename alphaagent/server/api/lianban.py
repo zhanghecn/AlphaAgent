@@ -24,7 +24,9 @@
   聚合, payload mode="live" + data_quality.live=True。核心池(zt/zbgc/dtgc)
   不可用或实时源异常 → 显式请求 503(缺任一核心池家数/封板率必然失真);
   zt_previous/strong 不可用 → 降级空池 + data_quality.missing 标
-  "pool:<type>"。
+  "pool:<type>"。live payload 的 indices 指数条用 get_indices() 实时行情
+  填补(当日日线收盘后才落库, 盘中库里全 null), 实时接口异常则保留
+  null 降级不阻塞 live。
 - GET /api/lianban/dates —— 可复盘交易日(归档 ∪ 重建, 降序, 限 400)。
 - GET /api/lianban/ladder-history?days=60 —— 连板天梯历史(研究型): 近 N
   个有涨停交易日的梯队 matrix / 窗口晋级率 promotion_matrix / 每日龙头
@@ -191,6 +193,48 @@ def _live_pool_rows(target: date) -> tuple[dict[str, list[dict]], list[str]]:
     return _map_live_pool_rows(target, pools_payload, source)
 
 
+def _fill_live_indices(payload: dict) -> None:
+    """live 盘中指数条实时化: 当日日线收盘后才落库, review 的 indices 盘中
+    六格全 null, 这里用适配器实时指数行情(get_indices 覆盖 INDEX_SYMBOLS
+    全 9 个, 自带 TTL 缓存)按 vt_symbol 映射填补 change_pct。
+
+    实时接口异常 → 保留 null 降级(不阻塞 live); 某指数实时行情缺失/涨幅
+    为 None → 该格保持原样。填补成功的格同步摘掉 missing 里的
+    "indices:<key>" 标注, 避免前端把有数据的格渲染成缺失。
+    """
+    indices = payload.get("indices")
+    if not isinstance(indices, list):
+        return
+    try:
+        quotes = AkShareAdapter().get_indices()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("lianban live indices fetch failed: %s", exc, exc_info=True)
+        return
+    by_vt_symbol = {
+        str(getattr(quote, "vt_symbol", "")): quote for quote in quotes
+    }
+    filled_keys: set[str] = set()
+    for entry in indices:
+        if not isinstance(entry, dict):
+            continue
+        quote = by_vt_symbol.get(str(entry.get("vt_symbol") or ""))
+        change_pct = getattr(quote, "change_pct", None) if quote else None
+        if change_pct is None:
+            continue
+        entry["change_pct"] = change_pct
+        key = entry.get("key")
+        if key:
+            filled_keys.add(str(key))
+    if filled_keys:
+        missing = payload.get("data_quality", {}).get("missing")
+        if isinstance(missing, list):
+            missing[:] = [
+                item for item in missing
+                if not (isinstance(item, str) and item.startswith("indices:")
+                        and item.removeprefix("indices:") in filled_keys)
+            ]
+
+
 def _live_payload(session, target: date) -> dict | None:
     """live 全路径聚合; 实时 zt 池为空或未过指纹闸 → None(调用方决定
     404 或回落)。
@@ -219,6 +263,7 @@ def _live_payload(session, target: date) -> dict | None:
         payload = build_review(session, target, pool_rows_override=override)
     except ReviewNotFound:
         return None
+    _fill_live_indices(payload)
     if degraded:
         missing = payload["data_quality"]["missing"]
         missing.extend(f"pool:{pool_type}" for pool_type in degraded)
