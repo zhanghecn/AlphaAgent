@@ -36,10 +36,25 @@ SETUP_TYPE_LABELS = {
     "oversold_rebound": "超跌反弹低吸",
 }
 P1_5_TURNOVER_TARGET_PCT = 3.0
+PRODUCT_OVERSOLD_RULE_KEYS = frozenset(
+    {
+        FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
+        STAGED_MA10_SUPPORT_RULE_KEY,
+    }
+)
+PRODUCT_DISCOVERY_RULES = {
+    "oversold_rebound": tuple(
+        rule
+        for rule in DISCOVERY_RULES["oversold_rebound"]
+        if rule.key in PRODUCT_OVERSOLD_RULE_KEYS
+    ),
+    # 趋势族尚未收敛，保持当前产品行为，后续单独研究。
+    "trend_pullback": DISCOVERY_RULES["trend_pullback"],
+}
 
 RULE_LABELS = {
     rule.key: rule.description
-    for rules in DISCOVERY_RULES.values()
+    for rules in PRODUCT_DISCOVERY_RULES.values()
     for rule in rules
 }
 
@@ -114,6 +129,7 @@ def scan_low_suction_candidates(
         calendar,
         security_status,
         require_rule_match=True,
+        rule_manifest=PRODUCT_DISCOVERY_RULES,
         target_dates=target_dates,
     )
     calendar_tuple = tuple(calendar)
@@ -129,11 +145,13 @@ def scan_low_suction_candidates(
             features,
             "trend_pullback",
             prior_features=prior_features,
+            rules=PRODUCT_DISCOVERY_RULES["trend_pullback"],
         )
         matched_oversold_rules = matching_discovery_rule_keys(
             features,
             "oversold_rebound",
             prior_features=prior_features,
+            rules=PRODUCT_DISCOVERY_RULES["oversold_rebound"],
         )
         oversold_rules = tuple(
             rule_key

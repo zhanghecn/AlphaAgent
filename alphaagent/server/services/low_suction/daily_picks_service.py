@@ -275,40 +275,7 @@ def get_daily_backtest_report() -> dict[str, object] | None:
         or payload.get("score_version") != SCORE_VERSION
     ):
         return None
-    return _normalize_unsettled_ledger_day_returns(payload)
-
-
-def _normalize_unsettled_ledger_day_returns(
-    payload: dict[str, object],
-) -> dict[str, object]:
-    """Correct legacy zero returns for ledger days with no settled D+1 legs."""
-
-    ledger_days = payload.get("ledger_days")
-    if not isinstance(ledger_days, list):
-        return payload
-
-    normalized_days: list[object] = []
-    changed = False
-    for day in ledger_days:
-        if not isinstance(day, dict):
-            normalized_days.append(day)
-            continue
-        legs = day.get("legs")
-        all_legs_unsettled = (
-            isinstance(legs, list)
-            and bool(legs)
-            and all(
-                isinstance(leg, dict) and leg.get("d1_close_return_pct") is None
-                for leg in legs
-            )
-        )
-        if all_legs_unsettled and day.get("day_return_pct") is not None:
-            normalized_days.append({**day, "day_return_pct": None})
-            changed = True
-        else:
-            normalized_days.append(day)
-
-    return {**payload, "ledger_days": normalized_days} if changed else payload
+    return payload
 
 
 # 回测物化：后台线程 + 状态。

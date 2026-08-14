@@ -95,9 +95,6 @@ STAGED_MA10_SUPPORT_RULE_KEY = (
 ATTACK_BODY_HOLD_RULE_KEY = (
     "attack_body_hold_after_ma10_ma20_cross_before_ma30"
 )
-STAGED_MA30_CONVERGENCE_RULE_KEYS = frozenset(
-    {STAGED_MA10_SUPPORT_RULE_KEY}
-)
 ATTACK_BODY_MIN_PCT = 3.0
 ATTACK_BODY_HOLD_DAILY_RETURN_MIN_PCT = -3.0
 ATTACK_BODY_HOLD_DAILY_RETURN_MAX_PCT = 0.5
@@ -127,15 +124,6 @@ PRE_ATTACK_BASE_TAIL_SESSIONS = 3
 PRE_ATTACK_BASE_MIN_SETTLEMENT_SESSIONS = 3
 PRE_ATTACK_BASE_MATERIAL_MOVE_RANGE_MULTIPLE = 1.0
 PRE_ATTACK_BASE_COMPACT_TAIL_RANGE_MULTIPLE = 1.0
-# These source geometries remain auditable, but their broad samples do not
-# enter the daily list without a narrower production qualification gate.
-RESEARCH_PENDING_DAILY_RULE_KEYS = frozenset(
-    {
-        ATTACK_BODY_HOLD_RULE_KEY,
-        FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
-        MA10_MA20_PRE_CROSS_RULE_KEY,
-    }
-)
 TRANSITION_RULE_KEYS = frozenset({OVERSOLD_TO_TREND_RULE_KEY})
 SCORE_VARIANTS_BY_SETUP: dict[str, tuple[str, ...]] = {
     "oversold_rebound": ("base", "with_volume"),
@@ -1862,12 +1850,16 @@ def matching_discovery_rule_keys(
     setup_type: str,
     *,
     prior_features: Mapping[str, object] | None = None,
+    rules: Sequence[DiscoveryRule] | None = None,
 ) -> tuple[str, ...]:
     """Return declared rules matched by D-and-earlier current/prior snapshots."""
 
-    rules = DISCOVERY_RULES.get(setup_type)
     if rules is None:
-        raise DailyFactorInputError(f"unsupported discovery setup type: {setup_type}")
+        rules = DISCOVERY_RULES.get(setup_type)
+        if rules is None:
+            raise DailyFactorInputError(
+                f"unsupported discovery setup type: {setup_type}"
+            )
     return tuple(
         rule.key
         for rule in rules
@@ -3428,6 +3420,7 @@ def _iter_candidate_snapshots(
     security_status: Sequence[Mapping[str, object]],
     *,
     require_rule_match: bool = True,
+    rule_manifest: Mapping[str, Sequence[DiscoveryRule]] = DISCOVERY_RULES,
     include_d1_initial_short_trend_outcome: bool = False,
     include_pre_attack_base_features: bool = False,
     target_dates: set[date] | None = None,
@@ -3480,6 +3473,7 @@ def _iter_candidate_snapshots(
             if require_rule_match and not _matches_any_rule(
                 features,
                 prior_features=prior_features,
+                rule_manifest=rule_manifest,
             ):
                 continue
             d1_close_return_pct, d1_label_status = _causal_d1_label(
@@ -3933,10 +3927,11 @@ def _matches_any_rule(
     features: Mapping[str, object],
     *,
     prior_features: Mapping[str, object] | None = None,
+    rule_manifest: Mapping[str, Sequence[DiscoveryRule]] = DISCOVERY_RULES,
 ) -> bool:
     return any(
         _rule_matches(rule, features, prior_features=prior_features)
-        for rules in DISCOVERY_RULES.values()
+        for rules in rule_manifest.values()
         for rule in rules
     )
 

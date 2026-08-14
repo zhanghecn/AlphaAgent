@@ -18,7 +18,6 @@ from alphaagent.server.services.low_suction.daily_factor_extended_discovery impo
     FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
     MA10_MA20_PRE_CROSS_RULE_KEY,
     POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
-    RESEARCH_PENDING_DAILY_RULE_KEYS,
     RESEARCH_THREE_MA_WRAP_RULE_KEY,
     STAGED_MA10_SUPPORT_RULE_KEY,
     _ma10_ma20_next_close_required_return_pct,
@@ -240,6 +239,39 @@ def test_scan_keeps_post_wrap_confirmation_out_of_the_product_pool() -> None:
     assert candidates == []
 
 
+def test_scan_passes_only_product_oversold_rules_to_snapshot_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signal_date = date(2026, 7, 23)
+    captured: dict[str, object] = {}
+
+    def snapshots(*args, **kwargs):
+        captured["rule_manifest"] = kwargs["rule_manifest"]
+        return iter(())
+
+    monkeypatch.setattr(
+        daily_picks_scanner,
+        "_iter_candidate_snapshots",
+        snapshots,
+    )
+
+    assert daily_picks_scanner.scan_low_suction_candidates(
+        [],
+        (signal_date,),
+        [],
+        target_dates={signal_date},
+    ) == []
+
+    manifest = captured["rule_manifest"]
+    assert isinstance(manifest, dict)
+    assert {
+        rule.key for rule in manifest["oversold_rebound"]
+    } == {
+        FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
+        STAGED_MA10_SUPPORT_RULE_KEY,
+    }
+
+
 def test_baihua_20260803_reference_snapshot_is_a_post_wrap_confirmation() -> None:
     """Regression facts from 百花医药 7-31 stable wrap and 8-3 upper-band retest."""
 
@@ -435,7 +467,7 @@ def test_scan_excludes_unvalidated_stable_three_ma_wrap_from_the_product_pool(
     monkeypatch.setattr(
         daily_picks_scanner,
         "matching_discovery_rule_keys",
-        lambda features, setup_type, *, prior_features=None: (
+        lambda features, setup_type, *, prior_features=None, rules=None: (
             (RESEARCH_THREE_MA_WRAP_RULE_KEY,)
             if setup_type == "oversold_rebound"
             else ()
@@ -453,12 +485,12 @@ def test_scan_excludes_unvalidated_stable_three_ma_wrap_from_the_product_pool(
 
 
 @pytest.mark.parametrize(
-    "pending_rule_key",
-    sorted(RESEARCH_PENDING_DAILY_RULE_KEYS - {FIRST_LEG_TWO_MA_WRAP_RULE_KEY}),
+    "research_rule_key",
+    (ATTACK_BODY_HOLD_RULE_KEY, MA10_MA20_PRE_CROSS_RULE_KEY),
 )
-def test_scan_excludes_research_pending_oversold_rules_from_daily_candidates(
+def test_scan_excludes_research_only_oversold_rules_from_daily_candidates(
     monkeypatch: pytest.MonkeyPatch,
-    pending_rule_key: str,
+    research_rule_key: str,
 ) -> None:
     signal_date = date(2026, 7, 23)
     snapshot = SimpleNamespace(
@@ -484,8 +516,8 @@ def test_scan_excludes_research_pending_oversold_rules_from_daily_candidates(
     monkeypatch.setattr(
         daily_picks_scanner,
         "matching_discovery_rule_keys",
-        lambda features, setup_type, *, prior_features=None: (
-            (pending_rule_key,) if setup_type == "oversold_rebound" else ()
+        lambda features, setup_type, *, prior_features=None, rules=None: (
+            (research_rule_key,) if setup_type == "oversold_rebound" else ()
         ),
     )
 
@@ -528,7 +560,7 @@ def test_scan_admits_only_mature_first_leg_two_ma_wrap(
     monkeypatch.setattr(
         daily_picks_scanner,
         "matching_discovery_rule_keys",
-        lambda features, setup_type, *, prior_features=None: (
+        lambda features, setup_type, *, prior_features=None, rules=None: (
             (STAGED_MA10_SUPPORT_RULE_KEY, FIRST_LEG_TWO_MA_WRAP_RULE_KEY)
             if setup_type == "oversold_rebound"
             else ()
@@ -600,7 +632,7 @@ def test_scan_excludes_a_signal_day_closed_at_main_board_limit_up(
     monkeypatch.setattr(
         daily_picks_scanner,
         "matching_discovery_rule_keys",
-        lambda features, setup_type, *, prior_features=None: (
+        lambda features, setup_type, *, prior_features=None, rules=None: (
             (STAGED_MA10_SUPPORT_RULE_KEY,)
             if setup_type == "oversold_rebound"
             else ()
@@ -833,11 +865,8 @@ def test_manifest_excludes_retired_generic_rule_families() -> None:
     assert "ma10_ma30_converging_after_staged_cross_volume_shrink" not in rules
     assert "m5_m10_joint_attack_before_ma20_cross_last_volume_expand" not in rules
     assert MA10_MA20_PRE_CROSS_RULE_KEY in rules
-    assert RESEARCH_PENDING_DAILY_RULE_KEYS == {
-        ATTACK_BODY_HOLD_RULE_KEY,
-        FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
-        MA10_MA20_PRE_CROSS_RULE_KEY,
-    }
+    assert ATTACK_BODY_HOLD_RULE_KEY in rules
+    assert FIRST_LEG_TWO_MA_WRAP_RULE_KEY in rules
     assert "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30" not in rules
     assert "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30" in trend_keys
     assert "v3_oversold_universal_pullback" not in rules
@@ -1588,7 +1617,7 @@ def test_source_rule_snapshots_do_not_apply_a_generic_prescreen(
     monkeypatch.setattr(
         extended_discovery,
         "_matches_any_rule",
-        lambda _, *, prior_features=None: True,
+        lambda _, *, prior_features=None, rule_manifest=None: True,
     )
 
     snapshots = list(

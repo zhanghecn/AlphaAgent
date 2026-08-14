@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 
-SCORE_VERSION = "low-suction-daily-score-v2.9"
+SCORE_VERSION = "low-suction-daily-score-v3.0"
 
 SCORE_BANDS: tuple[tuple[float, float, str], ...] = (
     (0.0, 39.999, "0-39"),
@@ -294,14 +294,7 @@ def score_oversold_candidate(
     low_support = bool(features.get("oversold_low_support"))
     tight = bool(features.get("capitulation_rebound_tight"))
     broad = bool(features.get("capitulation_rebound_broad"))
-    process = any(
-        bool(features.get(field))
-        for field in (
-            "staged_m10_first",
-            "m10_dual_cross_before_m20_m30",
-            "ma10_crossed_ma30_within_15d",
-        )
-    )
+    process = bool(features.get("staged_m10_first"))
     reaction = bool(features.get("support_close_reaction"))
     shrink = str(features.get("volume_shape") or "") == "staircase_shrink"
     long_bear_days = int(features.get("prior_bear_alignment_days") or 0)
@@ -406,7 +399,9 @@ def score_oversold_candidate(
             process,
             12.0 if process else 0.0,
             12.0,
-            "MA10 分阶段上穿结构成立" if process else "分阶段上穿结构不成立",
+            "P1 的 MA10 分阶段上穿结构成立"
+            if process
+            else "非 P1 的 MA10 分阶段上穿结构",
         ),
         _component(
             "staged_ma30_fast_convergence",

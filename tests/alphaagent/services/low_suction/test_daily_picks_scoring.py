@@ -167,6 +167,22 @@ def test_oversold_p1_score_keeps_only_product_components() -> None:
     assert sum(1 for c in components if c.kind == "gate") == 1
 
 
+def test_oversold_process_score_ignores_retired_cross_paths() -> None:
+    features = {
+        "turnover_rate_pct": 2.0,
+        "candle_range_pct": 2.0,
+        "m10_dual_cross_before_m20_m30": True,
+        "ma10_crossed_ma30_within_15d": True,
+    }
+    streak = quiet_candle_streak([_bar(2.0)] * 3)
+
+    _, components = score_oversold_candidate(features, streak)
+
+    process = next(item for item in components if item.key == "process_structure")
+    assert process.passed is False
+    assert process.points == 0.0
+
+
 def test_staged_ma30_fast_convergence_adds_two_points_only_to_that_path() -> None:
     features = {
         "oversold_low_support": True,
@@ -349,7 +365,7 @@ def test_total_caps_at_gate_failed_cap_when_gate_fails() -> None:
     assert _total(gate_fail) == 80.0                          # 无 cap 参数不 cap
 
 
-def test_score_version_bumped_to_v2_9() -> None:
+def test_score_version_bumped_to_v3_0() -> None:
     from alphaagent.server.services.low_suction import daily_picks_scoring as module
 
-    assert module.SCORE_VERSION == "low-suction-daily-score-v2.9"
+    assert module.SCORE_VERSION == "low-suction-daily-score-v3.0"
