@@ -10,14 +10,9 @@ from dataclasses import dataclass
 from datetime import date
 
 from alphaagent.server.services.low_suction.daily_factor_extended_discovery import (
-    ATTACK_BODY_HOLD_RULE_KEY,
     DISCOVERY_RULES,
     FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
-    MA10_MA20_PRE_CROSS_RULE_KEY,
-    POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
-    RESEARCH_PENDING_DAILY_RULE_KEYS,
-    RESEARCH_THREE_MA_WRAP_RULE_KEY,
-    STAGED_MA30_CONVERGENCE_RULE_KEYS,
+    STAGED_MA10_SUPPORT_RULE_KEY,
     _iter_candidate_snapshots,
     build_pre_attack_base_process_features,
     is_mature_first_leg_two_ma_wrap_qualified,
@@ -103,18 +98,14 @@ def scan_low_suction_candidates(
     security_status: Sequence[Mapping[str, object]],
     *,
     target_dates: set[date] | None = None,
-    include_experimental_attack_retest_base: bool = False,
 ) -> list[LowSuctionCandidate]:
     """Scan source-rule candidates and attach the current diagnostic score.
 
     ``target_dates`` 为 None 时扫描全窗口（回测）；传入单日集合即实时/补扫。
-    ``include_experimental_attack_retest_base`` 仅供离线验证：它只放行
-    ``攻击实体缩量守住`` 中经 D-2 截止底盘判定为“洗盘后释放再受控回踩”的
-    子集。默认实时扫描不读取这条实验路径。
 
-    首段两线实体包裹默认只放行成熟子型：D 日跨 MA10/20、未越 MA30，
-    前置底盘稳定，攻击不追高，并且收盘从当日低点有足够承接。原始包裹
-    几何仍保留在研究清单，不会仅因形态相似而进入实时推荐。
+    产品超跌池只放行两条跨窗口已验证路径：成熟首段两线攻击（P1.5）与
+    分段 MA10 支撑（P1）。其余攻击锚点仍留在研究层，不会仅因形态相似
+    进入实时推荐或回测仓位。
     """
 
     candidates: list[LowSuctionCandidate] = []
@@ -147,23 +138,8 @@ def scan_low_suction_candidates(
         oversold_rules = tuple(
             rule_key
             for rule_key in matched_oversold_rules
-            if rule_key not in RESEARCH_PENDING_DAILY_RULE_KEYS
+            if rule_key == STAGED_MA10_SUPPORT_RULE_KEY
         )
-        attack_retest_base_matched = False
-        if (
-            include_experimental_attack_retest_base
-            and ATTACK_BODY_HOLD_RULE_KEY in matched_oversold_rules
-        ):
-            base_features = build_pre_attack_base_process_features(
-                snapshot.history[: snapshot.position + 1]
-            )
-            attack_retest_base_matched = (
-                base_features.get("pre_attack_base_phase") == "release_retest_base"
-            )
-            if attack_retest_base_matched:
-                features = {**features, **base_features}
-                if ATTACK_BODY_HOLD_RULE_KEY not in oversold_rules:
-                    oversold_rules = (*oversold_rules, ATTACK_BODY_HOLD_RULE_KEY)
         if FIRST_LEG_TWO_MA_WRAP_RULE_KEY in matched_oversold_rules:
             base_features = build_pre_attack_base_process_features(
                 snapshot.history[: snapshot.position + 1],
@@ -172,8 +148,12 @@ def scan_low_suction_candidates(
             first_leg_features = {**features, **base_features}
             if is_mature_first_leg_two_ma_wrap_qualified(first_leg_features):
                 features = first_leg_features
-                if FIRST_LEG_TWO_MA_WRAP_RULE_KEY not in oversold_rules:
-                    oversold_rules = (*oversold_rules, FIRST_LEG_TWO_MA_WRAP_RULE_KEY)
+                # P1.5 必须写在首位：同日同时命中 P1 时，rule_key 仍应反映
+                # 经过完整底盘资格门的更高优先级路径。
+                oversold_rules = (
+                    FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
+                    *oversold_rules,
+                )
         if not trend_rules and not oversold_rules:
             continue
         streak = quiet_candle_streak(snapshot.history[: snapshot.position + 1])
@@ -218,29 +198,13 @@ def scan_low_suction_candidates(
                 vol_ratio = sum(history_vols[-5:]) / 5 / (sum(history_vols[-10:]) / 10)
             else:
                 vol_ratio = None
-            score_kwargs: dict[str, object] = {
-                "vol_ratio": vol_ratio,
-                "pre_cross_rule_matched": (
-                    MA10_MA20_PRE_CROSS_RULE_KEY in oversold_rules
-                ),
-                "stable_three_ma_wrap_rule_matched": (
-                    RESEARCH_THREE_MA_WRAP_RULE_KEY in oversold_rules
-                ),
-                "staged_ma30_convergence_rule_matched": bool(
-                    set(oversold_rules) & STAGED_MA30_CONVERGENCE_RULE_KEYS
-                ),
-                "post_wrap_upper_band_confirmation_rule_matched": (
-                    POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY in oversold_rules
-                ),
-            }
-            if include_experimental_attack_retest_base:
-                score_kwargs["attack_retest_base_rule_matched"] = (
-                    attack_retest_base_matched
-                )
             score, components = score_oversold_candidate(
                 features,
                 streak,
-                **score_kwargs,
+                vol_ratio=vol_ratio,
+                staged_ma30_convergence_rule_matched=(
+                    STAGED_MA10_SUPPORT_RULE_KEY in oversold_rules
+                ),
             )
             candidates.append(
                 LowSuctionCandidate(
@@ -270,14 +234,14 @@ def candidate_ranking_key(
 ) -> tuple[int, float, float, int, float, str]:
     """Stable product ranking shared by live recommendations and backtests.
 
-    超跌候选按研究形态阶段优先：新鲜稳定三线包裹（P3）>
-    包裹后上沿踩稳确认（P2）> 成熟首段两线攻击（P1.5）> 其余阶段性支撑
-    （P1）。P1.5 内先比较换手率距 3% 的接近度，再比较诊断分。
+    超跌候选只包含已验证路径：成熟首段两线攻击（P1.5）优先于分段
+    MA10 支撑（P1）。P1.5 内先比较综合诊断分；换手率距 3% 的接近度只
+    用于同分决胜，避免一个单项覆盖均线、位置、K 线与量能的共同判断。
     """
 
     tier = _candidate_priority_tier(item)
     turnover_distance = 0.0
-    if tier == 15:
+    if tier == 20:
         turnover_distance = (
             abs(item.turnover_rate_pct - P1_5_TURNOVER_TARGET_PCT)
             if item.turnover_rate_pct is not None
@@ -285,8 +249,8 @@ def candidate_ranking_key(
         )
     return (
         -tier,
-        turnover_distance,
         -item.score,
+        turnover_distance,
         -item.streak.total,
         item.turnover_rate_pct if item.turnover_rate_pct is not None else 99.0,
         item.vt_symbol,
@@ -297,13 +261,11 @@ def _candidate_priority_tier(item: LowSuctionCandidate) -> int:
     if item.setup_type != "oversold_rebound":
         return 0
     matched = set(item.matched_rule_keys)
-    if RESEARCH_THREE_MA_WRAP_RULE_KEY in matched:
-        return 30
-    if POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY in matched:
-        return 20
     if FIRST_LEG_TWO_MA_WRAP_RULE_KEY in matched:
-        return 15
-    return 10
+        return 20
+    if STAGED_MA10_SUPPORT_RULE_KEY in matched:
+        return 10
+    return 0
 
 
 def _number(value: object) -> float | None:

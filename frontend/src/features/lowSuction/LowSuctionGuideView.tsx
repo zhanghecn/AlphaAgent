@@ -52,7 +52,7 @@ export function LowSuctionGuideView() {
         </div>
       </div>
 
-      <PanelHead no="02" zh="超跌反弹低吸规则（P1.5）" en="OVERSOLD REBOUND" note="先认攻击阶段，再在同层比较诊断分" />
+      <PanelHead no="02" zh="超跌反弹低吸规则（P1.5 / P1）" en="OVERSOLD REBOUND" note="只保留跨窗口验证的两条路径" />
       <div className="space-y-3 border-b px-3 py-4 sm:px-4">
         <div>
           <div className="mb-1 font-semibold">先准入，再评分</div>
@@ -71,45 +71,27 @@ export function LowSuctionGuideView() {
           </ul>
         </div>
         <div>
-          <div className="mb-1 font-semibold">形态二：新鲜稳定三线包裹（P3）</div>
-          <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
-            <li>长期空头后，MA10 已开始越过 MA20；MA10、MA20、MA30 尚未跑散，阳线实体把三条线包住。</li>
-            <li>低点要真正贴到均线附近，且信号日前的量能已经缩下来。均线隔得很开、靠大阳线强行跨过的“包裹”不算。</li>
-          </ul>
-        </div>
-        <div>
-          <div className="mb-1 font-semibold">形态三：包裹后的次日上沿回踩站稳（P2）</div>
-          <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
-            <li>前一交易日必须完整命中“稳定三线包裹”；只在紧随的下一交易日观察，不能把几天后的均线触碰回填成确认。</li>
-            <li>D 日低点回到前日三线带上沿 ±1.5% 内，收盘仍高于当日 MA10/MA20/MA30；K 线小幅收阳（≤3%）、振幅 ≤5%、换手 1.5%~8%。</li>
-            <li>P2 的豁免只限这一日：D 日不重复要求长期空头、MA10 上穿 MA20 或阳线包裹，三项资格已由紧邻前日的 P3 验证；D 日只验证回踩后的重新站稳。</li>
-            <li>它是包裹启动后的第二个低吸点，不是持仓续抱或突破追涨信号。百花医药 7-31 包裹后的 8-3 属于这条路径。</li>
-            <li>回测在 D 日收盘买入，因此 D+1 一字涨停仍是持仓收益；P2 的判定只使用 D 日及以前信息。</li>
-          </ul>
-        </div>
-        <div>
-          <div className="mb-1 font-semibold">形态四：P1 分段支撑</div>
+          <div className="mb-1 font-semibold">形态二：P1 分段支撑</div>
           <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
             <li>MA10 已上穿 MA20、仍在 MA30 下方；价格回踩 MA10 获支撑。随后 MA10 与 MA30 的距离继续缩小，量能呈阶梯式收缩。</li>
             <li>这是“先过 MA20、再准备过 MA30”的地基，而不是均线已经拉开后的追涨。传智教育 7-22、7-24 属于这条路径。</li>
           </ul>
         </div>
         <div>
-          <div className="mb-1 font-semibold">形态五：过 MA30 后的回踩修复</div>
+          <div className="mb-1 font-semibold">研究锚点，不进入推荐</div>
           <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
-            <li>MA10 曾经上穿 MA30，随后价格深回撤到 MA30 附近；回撤段先缩量，信号日前后重新出现量能恢复。</li>
-            <li>它仍是超跌转势过程中的回踩，不把所有“MA10 已在 MA30 上方”的股票都当成超跌候选。</li>
+            <li>稳定三线包裹、包裹后的上沿确认、攻击实体守住和走完双穿后的回踩，继续保留作案例审计和底盘研究，但不占实时推荐或回测仓位。</li>
+            <li>百花医药 8-3、国风新材、秦安股份、京投发展是下一轮比较“有效底盘”与相似坏样本的锚点；没有跨窗口证据前，不以单票结果提高它们的优先级。</li>
           </ul>
         </div>
         <div>
           <div className="mb-1 font-semibold">排除与排序</div>
           <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
-            <li>P2 准入边界：前日不是完整稳定包裹、不是紧随下一交易日、低点未回到前日上沿、收盘跌回三线下方、阴线或涨幅 &gt;3%、振幅 &gt;5%、换手不足 1.5% 或达到 8%，一项不满足即不认定。</li>
             <li>信号日触及涨停、低点没有真实均线支撑，或 MA10 已远离 MA30 且没有回踩修复结构，均不作为该阶段的低吸形态。</li>
-            <li><span className="text-foreground">同日阶段优先级：</span>P3 新鲜稳定三线包裹 &gt; P2 包裹后上沿踩稳确认 &gt; P1.5 成熟首段两线攻击 &gt; P1 分段支撑。P1.5 同层先看是否接近中等活跃换手（当前以 3% 为中心），再看诊断分；其余同层按诊断分、连续小 K 线、换手率排序。</li>
+            <li><span className="text-foreground">同日阶段优先级：</span>P1.5 成熟首段两线攻击 &gt; P1 分段支撑。P1.5 同层先按综合诊断分，再以接近中等活跃换手（当前以 3% 为中心）决胜；P1 同层按诊断分、连续小 K 线、换手率排序。</li>
             <li>基础排序看均线支撑、空头持续时间、K 线是否安静、收盘是否脱离支撑、以及量能是否有序收缩。换手率 ≥8% 不改变规则命中，但诊断分封顶 39，避免高换手派发占据前列。</li>
             <li><span className="text-foreground">P1 的活跃承接加分：</span>仅当 P1 已命中且换手率在 1.5%~8% 时加 8 分。它奖励“缩量但仍有承接”，不让无成交的缩量地基排在前面；不满足 P1 的股票不会得到这 8 分。</li>
-            <li>超跌诊断总分最高 140，不是收益概率。P1.5 先按已验证攻击阶段排序，因此低诊断分不代表它一定排在普通 P1 之后；分数跨版本不可直接比较。</li>
+            <li>超跌诊断分不是收益概率。它只在同一已验证阶段内比较形态完整度；P1.5 仍始终排在普通 P1 之前，分数跨版本不可直接比较。</li>
           </ul>
         </div>
       </div>
@@ -120,7 +102,7 @@ export function LowSuctionGuideView() {
           <li>数据口径：raw_unadjusted 不复权日线（探索级，除权日有已知污染）；D 日收盘买入、D+1 收盘结算，未扣费。它是收盘集合竞价成交假设，不等同于次日开盘可成交收益。</li>
           <li>回测执行：每日趋势/超跌各取阶段优先级与同层决胜键最高的前 5 只，单票固定 10%，不足 10 只的槽位留现金；具体结果以「回测」页最新物化报告为准</li>
           <li>回测解读：只看当前评分版本、固定规则和固定前五排序的结果；页面分数段用于复核，不构成收益承诺</li>
-          <li>并列决胜：P1.5 先以换手率接近 3% 决胜；其余超跌同层按诊断分、连续小 K 线数和换手率决胜。回测与实时推荐使用同一决胜键。</li>
+          <li>并列决胜：P1.5 先按诊断分、同分再以换手率接近 3% 决胜；P1 按诊断分、连续小 K 线数和换手率决胜。回测与实时推荐使用同一决胜键。</li>
           <li>行情主导一切：两族人口均值仅接近打平，本产品按综合分排序取最高，不做全池买入</li>
           <li>实时推荐：交易日内每分钟用现货快照合成当日虚拟 K 线重算（未定型），收盘后以日线同步确认为准；实时组不含 ST 股</li>
         </ul>

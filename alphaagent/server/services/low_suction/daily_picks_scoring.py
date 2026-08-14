@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 
-SCORE_VERSION = "low-suction-daily-score-v2.8"
+SCORE_VERSION = "low-suction-daily-score-v2.9"
 
 SCORE_BANDS: tuple[tuple[float, float, str], ...] = (
     (0.0, 39.999, "0-39"),
@@ -36,10 +36,6 @@ OVERSOLD_TURNOVER_GATE_MAX_PCT = 8.0
 OVERSOLD_GATE_FAILED_SCORE_CAP = 39.0
 # P1 路径的缩量地基不能收缩到无交易承接。该下限只影响该研究路径的诊断排序。
 STAGED_MA30_ACTIVE_PARTICIPATION_MIN_PCT = 1.5
-POST_WRAP_CONFIRMATION_SCORE_FLOOR = 80.0
-# 这是仅在离线扫描实验中开放的窄路径。它的跨窗口样本仍很小，因此只给
-# 有限的排序补分，不改变 P1/P2/P3 的产品层级。
-ATTACK_RETEST_BASE_BONUS_POINTS = 8.0
 
 
 @dataclass(frozen=True)
@@ -282,20 +278,14 @@ def score_oversold_candidate(
     streak: QuietStreak,
     vol_ratio: float | None = None,
     *,
-    pre_cross_rule_matched: bool = False,
-    stable_three_ma_wrap_rule_matched: bool = False,
     staged_ma30_convergence_rule_matched: bool = False,
-    post_wrap_upper_band_confirmation_rule_matched: bool = False,
-    attack_retest_base_rule_matched: bool | None = None,
 ) -> tuple[float, tuple[ScoreComponent, ...]]:
-    """超跌反弹候选的诊断排序分（最高 140）。
+    """超跌反弹候选的诊断排序分。
 
     研究规则先决定是否入池，本函数只比较已命中规则的候选。换手率≥8%
-    会触发评分门禁并封顶 39；其余基础特征按 0.4 折算，再叠加已验证研究
-    路径的加分。稳定包裹后的次日上沿踩稳确认属于独立 P2 层级，使用透明
-    的 80 分优先级下限；它仍低于 P3 新鲜稳定包裹。攻击实体守住中的
-    “洗盘后释放再受控回踩”目前仅供离线实验，给有限补分但不改变层级。
-    ``vol_ratio`` 是 scanner 从可见历史算出的近 5/10 日均量比。
+    会触发评分门禁并封顶 39；其余基础特征按 0.4 折算。P1 的“向 MA30
+    收敛”和“活跃承接”是已验证的同路径加分。``vol_ratio`` 是 scanner
+    从可见历史算出的近 5/10 日均量比。
     """
 
     turnover = _number(features.get("turnover_rate_pct"))
@@ -315,18 +305,6 @@ def score_oversold_candidate(
     reaction = bool(features.get("support_close_reaction"))
     shrink = str(features.get("volume_shape") or "") == "staircase_shrink"
     long_bear_days = int(features.get("prior_bear_alignment_days") or 0)
-    daily_return = _number(features.get("daily_return_pct"))
-    next_close_required_return = _number(
-        features.get("ma10_ma20_next_close_required_return_pct")
-    )
-    controlled_pre_cross_drive = bool(
-        pre_cross_rule_matched
-        and daily_return is not None
-        and 1.5 <= daily_return < 5.0
-        and next_close_required_return is not None
-        and 0 < next_close_required_return < 5.0
-    )
-    controlled_pre_cross_drive_pts = 10.0 if controlled_pre_cross_drive else 0.0
     ma10_ma30_narrowing = _number(
         features.get("ma10_ma30_gap_narrowing_5d_pct")
     )
@@ -346,12 +324,6 @@ def score_oversold_candidate(
     staged_ma30_active_participation_pts = (
         8.0 if staged_ma30_active_participation else 0.0
     )
-    attack_retest_base_pts = (
-        ATTACK_RETEST_BASE_BONUS_POINTS
-        if attack_retest_base_rule_matched is True
-        else 0.0
-    )
-
     gate_passed = turnover is not None and turnover < OVERSOLD_TURNOVER_GATE_MAX_PCT
     turnover_pts = (
         14.0
@@ -382,60 +354,6 @@ def score_oversold_candidate(
               else (4.0 if vol_ratio is not None and vol_ratio < 1.1
                     else (2.0 if vol_ratio is not None and vol_ratio < 1.3 else 0.0)))
     )
-    # 三线包裹好看度仅属于已命中的稳定包裹研究路径。不能让其他
-    # 超跌路径因均线窄或缩量而借到这部分权重。
-    yang_wrap = bool(features.get("yang_wrap_three_ma"))
-    yang_wrap_after_long_bear_cross = yang_wrap and bool(
-        features.get("ma10_crossed_ma20_after_long_bear_within_15d")
-    )
-    m10_cv = _number(features.get("ma10_slope_cv_6d"))
-    vol_mono = _number(features.get("vol_monotone_6d"))
-    body_excl = _number(features.get("body_max_excl_6d"))
-    spread3 = _number(features.get("ma_cluster_spread_pct"))
-    tr_pretty = _number(features.get("turnover_rate_pct"))
-    hold_premium = _number(features.get("breakout_hold_premium"))
-    stable_wrap_base = (
-        stable_three_ma_wrap_rule_matched
-        and yang_wrap_after_long_bear_cross
-        and bool(features.get("yang_wrap_stable_base"))
-    )
-    wrap_low_distance = _number(features.get("yang_wrap_nearest_ma_low_abs_pct"))
-    wrap_volume_end_to_peak = _number(
-        features.get("yang_wrap_volume_end_to_peak_ratio_6d")
-    )
-    # 活跃度（主人"死股偏好"反向纠偏：2~5%换手=有资金承接的活跃真低吸加分，
-    # 接近死股的低换手不加分——yang_wrap票里活跃的(传智4.87%)D+5涨43%，温和的(1.6%)只涨2%）
-    active_pts = (
-        8.0 if tr_pretty is not None and 2.0 <= tr_pretty < 5.0
-        else (5.0 if tr_pretty is not None and 5.0 <= tr_pretty < 8.0
-              else (4.0 if tr_pretty is not None and 1.5 <= tr_pretty < 2.0 else 0.0))
-    )
-    # 上穿后守住（主人"涨2次跳水=假突破波折"判据）：
-    # 守住(溢价>+3%,真突破平滑)+15，边缘+8，回吐(假突破)0 —— 前12名只有传智守住、其余全回吐
-    hold_pts = (
-        15.0 if hold_premium is not None and hold_premium > 3.0
-        else (8.0 if hold_premium is not None and hold_premium > 1.0 else 0.0)
-    )
-    pretty_pts = 0.0
-    if stable_wrap_base:
-        pretty_pts = 40.0 + active_pts + hold_pts
-        pretty_pts += (
-            max(0.0, (6.0 - abs(spread3)) / 6.0 * 12.0)
-            if spread3 is not None
-            else 0.0
-        )
-        pretty_pts += (
-            max(0.0, (80.0 - m10_cv) / 80.0 * 8.0)
-            if m10_cv is not None
-            else 0.0
-        )
-        pretty_pts += (vol_mono * 8.0) if vol_mono is not None else 0.0
-        pretty_pts += (
-            max(0.0, (2.5 - body_excl) / 2.5 * 4.0)
-            if body_excl is not None
-            else 0.0
-        )
-
     base_components = (
         _component(
             "turnover_gate",
@@ -449,34 +367,6 @@ def score_oversold_candidate(
                 else f"换手 {_fmt(turnover)}%（<{OVERSOLD_TURNOVER_GATE_MAX_PCT:g}% 通过）"
             ),
             kind="gate",
-        ),
-        _component(
-            "yang_wrap_pretty",
-            "阳线包裹好看度",
-            pretty_pts > 0,
-            pretty_pts,
-            95.0,
-            (
-                f"阳线包裹三线★ 平滑{_fmt(m10_cv)} 梯形{_fmt(vol_mono)}"
-                if stable_wrap_base
-                else (
-                    "三线几何包裹但未命中稳定包裹研究路径"
-                    if yang_wrap_after_long_bear_cross
-                    else (
-                        "三线几何包裹但未完成长期空头后 MA10 上穿 MA20"
-                        if yang_wrap
-                        else f"非稳定三线包裹路径 平滑{_fmt(m10_cv)} 梯形{_fmt(vol_mono)}"
-                    )
-                )
-            ),
-        ),
-        _component(
-            "yang_wrap_stable_base",
-            "前期稳定地基",
-            stable_wrap_base,
-            8.0 if stable_wrap_base else 0.0,
-            8.0,
-            f"低点距三线 {_fmt(wrap_low_distance)}%，D量/6日峰 {_fmt(wrap_volume_end_to_peak)}",
         ),
         _component(
             "turnover_gradient",
@@ -543,18 +433,6 @@ def score_oversold_candidate(
             ),
         ),
         _component(
-            "pre_cross_controlled_drive",
-            "预上穿受控启动",
-            controlled_pre_cross_drive,
-            controlled_pre_cross_drive_pts,
-            10.0,
-            (
-                f"D日 {_fmt(daily_return, signed=True)}%，D+1 需 {_fmt(next_close_required_return, signed=True)}% 使 MA10≥MA20"
-                if pre_cross_rule_matched
-                else "非 MA10/20 预上穿路径"
-            ),
-        ),
-        _component(
             "capitulation",
             "崩盘脱离低点",
             tight or broad,
@@ -603,76 +481,22 @@ def score_oversold_candidate(
             ),
         ),
     )
-    # 稳定地基独立优先，避免把低点远离均线或量未收缩的强行包裹排在研究形态之前。
     base_pts = sum(
         c.points for c in base_components
         if c.kind == "bonus"
         and c.key not in {
-            "yang_wrap_pretty",
-            "yang_wrap_stable_base",
-            "pre_cross_controlled_drive",
             "staged_ma30_fast_convergence",
             "staged_ma30_active_participation",
         }
     )
-    stable_base_pts = 8.0 if stable_wrap_base else 0.0
-    raw_without_post_wrap_confirmation = (
+    raw = (
         base_pts * 0.4
-        + pretty_pts
-        + stable_base_pts
-        + controlled_pre_cross_drive_pts
         + fast_staged_ma30_convergence_pts
         + staged_ma30_active_participation_pts
-        + attack_retest_base_pts
     )
-    post_wrap_confirmation_points = (
-        max(
-            0.0,
-            POST_WRAP_CONFIRMATION_SCORE_FLOOR
-            - raw_without_post_wrap_confirmation,
-        )
-        if post_wrap_upper_band_confirmation_rule_matched
-        else 0.0
-    )
-    attack_retest_base_component = (
-        _component(
-            "attack_retest_base",
-            "洗盘释放后受控回踩底盘",
-            attack_retest_base_rule_matched is True,
-            attack_retest_base_pts,
-            ATTACK_RETEST_BASE_BONUS_POINTS,
-            (
-                "D-2 及以前完成最终洗盘、向上释放、至少3日消化，"
-                "尾部缩窄并回踩释放起点但不破洗盘低点"
-                if attack_retest_base_rule_matched is True
-                else "攻击实体守住但底盘不属于洗盘释放受控回踩"
-            ),
-        )
-        if attack_retest_base_rule_matched is not None
-        else None
-    )
-    components = (
-        *base_components,
-        *((attack_retest_base_component,) if attack_retest_base_component else ()),
-        _component(
-            "post_wrap_upper_band_confirmation_priority",
-            "包裹后上沿踩稳优先级",
-            post_wrap_upper_band_confirmation_rule_matched,
-            post_wrap_confirmation_points,
-            POST_WRAP_CONFIRMATION_SCORE_FLOOR,
-            (
-                "前日稳定三线包裹，D 日回踩上沿后收于三线之上；"
-                f"确认层级将诊断分抬至至少 {POST_WRAP_CONFIRMATION_SCORE_FLOOR:g}"
-                if post_wrap_upper_band_confirmation_rule_matched
-                else "非稳定三线包裹后的下一交易日上沿踩稳确认"
-            ),
-            kind="priority",
-        ),
-    )
-    raw = raw_without_post_wrap_confirmation + post_wrap_confirmation_points
     if not gate_passed:
         raw = min(raw, OVERSOLD_GATE_FAILED_SCORE_CAP)
-    return round(min(140.0, raw), 2), components
+    return round(min(100.0, raw), 2), base_components
 
 
 def _component(

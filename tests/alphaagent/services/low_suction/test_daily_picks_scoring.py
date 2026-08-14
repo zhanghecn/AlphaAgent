@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from alphaagent.server.services.low_suction.daily_picks_scoring import (
     quiet_candle_streak,
     score_band,
@@ -142,7 +140,7 @@ def test_trend_no_gate_protects_high_turnover_cases() -> None:
     assert score > 0
 
 
-def test_oversold_score_full_marks() -> None:
+def test_oversold_p1_score_keeps_only_product_components() -> None:
     features = {
         "oversold_low_support": True,
         "turnover_rate_pct": 2.5,
@@ -155,158 +153,18 @@ def test_oversold_score_full_marks() -> None:
         "candle_quiet": True,
         "candle_range_pct": 1.2,
         "prior_bear_alignment_days": 25,
-        # 最好看形态（阳线包裹+极收敛+极平滑+梯形缩量+实体均匀）
-        "yang_wrap_three_ma": True,
-        "yang_wrap_stable_base": True,
-        "ma10_crossed_ma20_after_long_bear_within_15d": True,
-        "ma_cluster_spread_pct": 0.0,
-        "ma10_slope_cv_6d": 0.0,
-        "vol_monotone_6d": 1.0,
-        "body_max_excl_6d": 0.0,
-        "breakout_hold_premium": 5.0,
+        "ma10_ma30_gap_narrowing_5d_pct": 5.1,
     }
     streak = quiet_candle_streak([_bar(2.0)] * 3)
     score, components = score_oversold_candidate(
         features,
         streak,
         vol_ratio=0.7,
-        stable_three_ma_wrap_rule_matched=True,
+        staged_ma30_convergence_rule_matched=True,
     )
-    # 基础组件满分100×0.4(=40) + 好看度95 + 稳定地基8 = 143，受总分 140 上限约束。
-    assert score == 140.0
-    # 15 个 bonus 上限之和 = 基础组件100（展示）+ 好看度95 + 稳定地基8 + 预上穿10 + 快速收敛2 + 活跃承接8 = 223。
-    assert sum(c.max_points for c in components if c.kind == "bonus") == 223.0
+    assert score == 50.0
+    assert sum(c.max_points for c in components if c.kind == "bonus") == 110.0
     assert sum(1 for c in components if c.kind == "gate") == 1
-
-
-def test_oversold_stable_wrap_rule_unlocks_wrap_points() -> None:
-    base = {
-        "oversold_low_support": True,
-        "turnover_rate_pct": 2.5,
-        "candle_range_pct": 3.5,
-        "prior_bear_alignment_days": 12,
-        "yang_wrap_three_ma": True,
-        "ma10_crossed_ma20_after_long_bear_within_15d": True,
-        "ma_cluster_spread_pct": 2.0,
-        "ma10_slope_cv_6d": 40.0,
-        "vol_monotone_6d": 0.6,
-        "body_max_excl_6d": 1.5,
-    }
-    streak = quiet_candle_streak([_bar(2.0)] * 3)
-
-    baseline_score, baseline_components = score_oversold_candidate(base, streak)
-    stable_score, stable_components = score_oversold_candidate(
-        {**base, "yang_wrap_stable_base": True},
-        streak,
-        stable_three_ma_wrap_rule_matched=True,
-    )
-
-    stable_component = next(
-        component
-        for component in stable_components
-        if component.key == "yang_wrap_stable_base"
-    )
-    baseline_component = next(
-        component
-        for component in baseline_components
-        if component.key == "yang_wrap_stable_base"
-    )
-    assert stable_score > baseline_score + 8.0
-    assert next(
-        component
-        for component in baseline_components
-        if component.key == "yang_wrap_pretty"
-    ).points == 0.0
-    assert stable_component.passed is True
-    assert stable_component.points == 8.0
-    assert baseline_component.passed is False
-    assert baseline_component.points == 0.0
-
-
-def test_geometric_wrap_without_matched_rule_gets_no_wrap_bonus() -> None:
-    base = {
-        "oversold_low_support": True,
-        "turnover_rate_pct": 2.5,
-        "candle_range_pct": 3.5,
-        "prior_bear_alignment_days": 12,
-        "yang_wrap_three_ma": True,
-        "yang_wrap_stable_base": True,
-        "ma_cluster_spread_pct": 2.0,
-        "ma10_slope_cv_6d": 40.0,
-        "vol_monotone_6d": 0.6,
-        "body_max_excl_6d": 1.5,
-    }
-    streak = quiet_candle_streak([_bar(2.0)] * 3)
-
-    geometric_score, geometric_components = score_oversold_candidate(base, streak)
-    qualified_score, qualified_components = score_oversold_candidate(
-        {**base, "ma10_crossed_ma20_after_long_bear_within_15d": True},
-        streak,
-        stable_three_ma_wrap_rule_matched=True,
-    )
-
-    geometric_pretty = next(
-        component
-        for component in geometric_components
-        if component.key == "yang_wrap_pretty"
-    )
-    qualified_pretty = next(
-        component
-        for component in qualified_components
-        if component.key == "yang_wrap_pretty"
-    )
-    geometric_base = next(
-        component
-        for component in geometric_components
-        if component.key == "yang_wrap_stable_base"
-    )
-    qualified_base = next(
-        component
-        for component in qualified_components
-        if component.key == "yang_wrap_stable_base"
-    )
-    assert qualified_score > geometric_score + 48.0
-    assert geometric_pretty.points == 0.0
-    assert qualified_pretty.points > 40.0
-    assert geometric_base.points == 0.0
-    assert qualified_base.points == 8.0
-
-
-def test_pre_cross_controlled_drive_adds_ten_points_only_to_that_path() -> None:
-    features = {
-        "oversold_low_support": True,
-        "turnover_rate_pct": 2.5,
-        "candle_range_pct": 3.5,
-        "prior_bear_alignment_days": 12,
-        "daily_return_pct": 3.0,
-        "ma10_ma20_next_close_required_return_pct": 1.5,
-    }
-    streak = quiet_candle_streak([_bar(2.0)] * 3)
-
-    baseline_score, _ = score_oversold_candidate(features, streak)
-    score, components = score_oversold_candidate(
-        features,
-        streak,
-        pre_cross_rule_matched=True,
-    )
-    component = next(
-        item for item in components if item.key == "pre_cross_controlled_drive"
-    )
-    assert score == baseline_score + 10.0
-    assert component.passed is True
-    assert component.points == 10.0
-
-    _, automatic_components = score_oversold_candidate(
-        {**features, "ma10_ma20_next_close_required_return_pct": 0.0},
-        streak,
-        pre_cross_rule_matched=True,
-    )
-    automatic_component = next(
-        item
-        for item in automatic_components
-        if item.key == "pre_cross_controlled_drive"
-    )
-    assert automatic_component.points == 0.0
 
 
 def test_staged_ma30_fast_convergence_adds_two_points_only_to_that_path() -> None:
@@ -491,63 +349,7 @@ def test_total_caps_at_gate_failed_cap_when_gate_fails() -> None:
     assert _total(gate_fail) == 80.0                          # 无 cap 参数不 cap
 
 
-def test_post_wrap_confirmation_uses_a_visible_p2_score_floor() -> None:
-    from alphaagent.server.services.low_suction.daily_picks_scoring import (
-        POST_WRAP_CONFIRMATION_SCORE_FLOOR,
-    )
-
-    features = {
-        "turnover_rate_pct": 2.0,
-        "candle_range_pct": 2.0,
-        "prior_bear_alignment_days": 10,
-    }
-    streak = quiet_candle_streak([_bar(2.0)] * 3)
-    baseline_score, _ = score_oversold_candidate(features, streak)
-    score, components = score_oversold_candidate(
-        features,
-        streak,
-        post_wrap_upper_band_confirmation_rule_matched=True,
-    )
-
-    priority = next(
-        component
-        for component in components
-        if component.key == "post_wrap_upper_band_confirmation_priority"
-    )
-    assert baseline_score < POST_WRAP_CONFIRMATION_SCORE_FLOOR
-    assert score == POST_WRAP_CONFIRMATION_SCORE_FLOOR
-    assert priority.passed is True
-    assert priority.kind == "priority"
-    assert priority.points == pytest.approx(score - baseline_score)
-
-
-def test_attack_retest_base_adds_a_limited_visible_experimental_bonus() -> None:
-    from alphaagent.server.services.low_suction.daily_picks_scoring import (
-        ATTACK_RETEST_BASE_BONUS_POINTS,
-    )
-
-    features = {
-        "turnover_rate_pct": 2.0,
-        "candle_range_pct": 2.0,
-        "prior_bear_alignment_days": 10,
-    }
-    streak = quiet_candle_streak([_bar(2.0)] * 3)
-    baseline_score, _ = score_oversold_candidate(features, streak)
-    score, components = score_oversold_candidate(
-        features,
-        streak,
-        attack_retest_base_rule_matched=True,
-    )
-
-    component = next(
-        item for item in components if item.key == "attack_retest_base"
-    )
-    assert score == baseline_score + ATTACK_RETEST_BASE_BONUS_POINTS
-    assert component.passed is True
-    assert component.points == ATTACK_RETEST_BASE_BONUS_POINTS
-
-
-def test_score_version_bumped_to_v2_8() -> None:
+def test_score_version_bumped_to_v2_9() -> None:
     from alphaagent.server.services.low_suction import daily_picks_scoring as module
 
-    assert module.SCORE_VERSION == "low-suction-daily-score-v2.8"
+    assert module.SCORE_VERSION == "low-suction-daily-score-v2.9"

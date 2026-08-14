@@ -225,7 +225,7 @@ def test_post_wrap_confirmation_requires_the_immediately_prior_stable_wrap() -> 
     )
 
 
-def test_scan_promotes_post_wrap_confirmation_only_with_the_full_calendar() -> None:
+def test_scan_keeps_post_wrap_confirmation_out_of_the_product_pool() -> None:
     bars = _stable_wrap_then_upper_band_confirmation_history()
     calendar = [row["trade_date"] for row in bars]
     signal_date = calendar[-1]
@@ -237,15 +237,7 @@ def test_scan_promotes_post_wrap_confirmation_only_with_the_full_calendar() -> N
         target_dates={signal_date},
     )
 
-    assert [(candidate.rule_key, candidate.score) for candidate in candidates] == [
-        (POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY, 80.0),
-    ]
-    assert scan_low_suction_candidates(
-        bars,
-        [signal_date],
-        [],
-        target_dates={signal_date},
-    ) == []
+    assert candidates == []
 
 
 def test_baihua_20260803_reference_snapshot_is_a_post_wrap_confirmation() -> None:
@@ -413,7 +405,7 @@ def test_scan_admits_three_line_trend_candidate_without_ma60() -> None:
     )
 
 
-def test_scan_keeps_a_source_rule_when_the_diagnostic_turnover_gate_fails(
+def test_scan_excludes_unvalidated_stable_three_ma_wrap_from_the_product_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     signal_date = date(2026, 7, 23)
@@ -457,10 +449,7 @@ def test_scan_keeps_a_source_rule_when_the_diagnostic_turnover_gate_fails(
         target_dates={signal_date},
     )
 
-    assert [candidate.rule_key for candidate in candidates] == [
-        RESEARCH_THREE_MA_WRAP_RULE_KEY
-    ]
-    assert candidates[0].score <= 39.0
+    assert candidates == []
 
 
 @pytest.mark.parametrize(
@@ -508,112 +497,6 @@ def test_scan_excludes_research_pending_oversold_rules_from_daily_candidates(
     ) == []
 
 
-def test_scan_experiment_admits_only_attack_retest_base_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    signal_date = date(2026, 7, 23)
-    snapshot = SimpleNamespace(
-        symbol="000859.SZSE",
-        trade_date=signal_date,
-        position=0,
-        history=(_bar(signal_date, 10.0, volume=1_000.0),),
-        features={
-            "close_price": 10.0,
-            "daily_return_pct": -0.5,
-            "turnover_rate_pct": 2.0,
-            "candle_range_pct": 2.0,
-        },
-        prior_features=None,
-        d1_close_return_pct=1.0,
-        d1_label_status="available",
-    )
-    monkeypatch.setattr(
-        daily_picks_scanner,
-        "_iter_candidate_snapshots",
-        lambda *args, **kwargs: iter((snapshot,)),
-    )
-    monkeypatch.setattr(
-        daily_picks_scanner,
-        "matching_discovery_rule_keys",
-        lambda features, setup_type, *, prior_features=None: (
-            (ATTACK_BODY_HOLD_RULE_KEY,)
-            if setup_type == "oversold_rebound"
-            else ()
-        ),
-    )
-    monkeypatch.setattr(
-        daily_picks_scanner,
-        "build_pre_attack_base_process_features",
-        lambda history: {"pre_attack_base_phase": "release_retest_base"},
-    )
-
-    candidates = daily_picks_scanner.scan_low_suction_candidates(
-        [],
-        (signal_date, signal_date + timedelta(days=1)),
-        [],
-        target_dates={signal_date},
-        include_experimental_attack_retest_base=True,
-    )
-
-    assert [candidate.rule_key for candidate in candidates] == [
-        ATTACK_BODY_HOLD_RULE_KEY
-    ]
-    component = next(
-        item
-        for item in candidates[0].components
-        if item.key == "attack_retest_base"
-    )
-    assert component.passed is True
-
-
-def test_scan_experiment_keeps_other_attack_base_phases_out(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    signal_date = date(2026, 7, 23)
-    snapshot = SimpleNamespace(
-        symbol="000859.SZSE",
-        trade_date=signal_date,
-        position=0,
-        history=(_bar(signal_date, 10.0, volume=1_000.0),),
-        features={
-            "close_price": 10.0,
-            "daily_return_pct": -0.5,
-            "turnover_rate_pct": 2.0,
-            "candle_range_pct": 2.0,
-        },
-        prior_features=None,
-        d1_close_return_pct=1.0,
-        d1_label_status="available",
-    )
-    monkeypatch.setattr(
-        daily_picks_scanner,
-        "_iter_candidate_snapshots",
-        lambda *args, **kwargs: iter((snapshot,)),
-    )
-    monkeypatch.setattr(
-        daily_picks_scanner,
-        "matching_discovery_rule_keys",
-        lambda features, setup_type, *, prior_features=None: (
-            (ATTACK_BODY_HOLD_RULE_KEY,)
-            if setup_type == "oversold_rebound"
-            else ()
-        ),
-    )
-    monkeypatch.setattr(
-        daily_picks_scanner,
-        "build_pre_attack_base_process_features",
-        lambda history: {"pre_attack_base_phase": "fresh_expansion"},
-    )
-
-    assert daily_picks_scanner.scan_low_suction_candidates(
-        [],
-        (signal_date, signal_date + timedelta(days=1)),
-        [],
-        target_dates={signal_date},
-        include_experimental_attack_retest_base=True,
-    ) == []
-
-
 def test_scan_admits_only_mature_first_leg_two_ma_wrap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -646,7 +529,7 @@ def test_scan_admits_only_mature_first_leg_two_ma_wrap(
         daily_picks_scanner,
         "matching_discovery_rule_keys",
         lambda features, setup_type, *, prior_features=None: (
-            (FIRST_LEG_TWO_MA_WRAP_RULE_KEY,)
+            (STAGED_MA10_SUPPORT_RULE_KEY, FIRST_LEG_TWO_MA_WRAP_RULE_KEY)
             if setup_type == "oversold_rebound"
             else ()
         ),
@@ -675,7 +558,10 @@ def test_scan_admits_only_mature_first_leg_two_ma_wrap(
     assert [candidate.rule_key for candidate in candidates] == [
         FIRST_LEG_TWO_MA_WRAP_RULE_KEY
     ]
-    assert not any(item.key == "attack_retest_base" for item in candidates[0].components)
+    assert candidates[0].matched_rule_keys == (
+        FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
+        STAGED_MA10_SUPPORT_RULE_KEY,
+    )
 
 
 def test_scan_excludes_a_signal_day_closed_at_main_board_limit_up(
@@ -715,7 +601,7 @@ def test_scan_excludes_a_signal_day_closed_at_main_board_limit_up(
         daily_picks_scanner,
         "matching_discovery_rule_keys",
         lambda features, setup_type, *, prior_features=None: (
-            (RESEARCH_THREE_MA_WRAP_RULE_KEY,)
+            (STAGED_MA10_SUPPORT_RULE_KEY,)
             if setup_type == "oversold_rebound"
             else ()
         ),
