@@ -142,6 +142,52 @@ export interface LianbanDates {
   latest: string | null;
 }
 
+// ===== 明日推演（/lianban/projection，同景统计）=====
+
+/** 同景样本的次日阶段分布行；ratio = count / sample_count（0-1）。 */
+export interface ProjectionPhaseNext {
+  phase: string;
+  label: string;
+  count: number;
+  ratio: number;
+}
+
+/** 同景日期条目：date 为历史样本日，next_change 为次日上证涨幅（百分数数值）。 */
+export interface ProjectionSceneDate {
+  date: string;
+  next_change: number | null;
+  next_phase: string | null;
+}
+
+/**
+ * 明日推演 payload。status="insufficient_data" 时统计字段可能为 null
+ * （当日无情绪点/无指数数据时全 null；样本 <10 时统计照常给出）。
+ * next_day 三个字段单位：up_prob 为 0-1 比率，avg/median_change 为百分数数值。
+ */
+export interface LianbanProjection {
+  trade_date: string | null;
+  phase: string | null;
+  phase_label: string | null;
+  phase_day: number | null;
+  above_ma250: boolean | null;
+  sample_count: number;
+  next_day: {
+    up_prob: number | null;
+    avg_change: number | null;
+    median_change: number | null;
+  };
+  phase_next: ProjectionPhaseNext[];
+  score_change_avg: number | null;
+  scene_dates: ProjectionSceneDate[];
+  status: "ready" | "insufficient_data";
+}
+
+export function fetchLianbanProjection(date?: string) {
+  return apiClient.get<LianbanProjection>(
+    `/lianban/projection${date ? `?date=${date}` : ""}`,
+  );
+}
+
 // ===== 天梯历史（/lianban/ladder-history，二期研究型端点）=====
 
 /** 单日梯队快照：tiers 键 "1".."5" + "6+"(streak>=6 合并)；无涨停日 leader=null、max_streak=0。 */

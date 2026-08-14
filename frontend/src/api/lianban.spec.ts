@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { apiClient } from "./client";
-import { fetchLianbanDates, fetchLianbanReview } from "./lianban";
+import { fetchLadderHistory, fetchLianbanDates, fetchLianbanReview } from "./lianban";
 
 describe("lianban api client", () => {
   afterEach(() => {
@@ -24,5 +24,17 @@ describe("lianban api client", () => {
     const spy = vi.spyOn(apiClient, "get").mockResolvedValue(null);
     await fetchLianbanDates();
     expect(spy).toHaveBeenCalledWith("/lianban/dates");
+  });
+
+  it("requests ladder history with the default 60 日 window", async () => {
+    const spy = vi.spyOn(apiClient, "get").mockResolvedValue(null);
+    await fetchLadderHistory();
+    expect(spy).toHaveBeenCalledWith("/lianban/ladder-history?days=60");
+  });
+
+  it("passes the ladder history window as a query parameter", async () => {
+    const spy = vi.spyOn(apiClient, "get").mockResolvedValue(null);
+    await fetchLadderHistory(120);
+    expect(spy).toHaveBeenCalledWith("/lianban/ladder-history?days=120");
   });
 });

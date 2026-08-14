@@ -2,13 +2,14 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 
-import { fetchLianbanDates, fetchLianbanReview } from "@/api/lianban";
+import { fetchLianbanDates, fetchLianbanProjection, fetchLianbanReview } from "@/api/lianban";
 import type { LianbanReview } from "@/api/lianban";
 import { ErrorState } from "@/components/ErrorState";
 import { LoadingState } from "@/components/LoadingState";
 import { BrokenBoardsSection } from "@/pages/lianban/BrokenBoardsSection";
 import { HotLeadersSection } from "@/pages/lianban/HotLeadersSection";
 import { LadderSection } from "@/pages/lianban/LadderSection";
+import { ProjectionCard } from "@/pages/lianban/ProjectionCard";
 import { RelaySection } from "@/pages/lianban/RelaySection";
 import { ReviewFaqSection } from "@/pages/lianban/ReviewFaqSection";
 import { adjacentDates, ReviewHeader } from "@/pages/lianban/ReviewHeader";
@@ -106,6 +107,15 @@ export function LianbanReviewPage() {
   });
   const payload = reviewQuery.data;
 
+  // 明日推演（同景统计）：跟随复盘页 ?date=；后端 60s 缓存，60s staleTime 对齐。
+  // 辅助卡，加载/失败都不阻塞主内容（placeholderData 保旧值防闪烁）。
+  const projectionQuery = useQuery({
+    queryKey: ["lianbanProjection", dateParam],
+    queryFn: () => fetchLianbanProjection(dateParam),
+    staleTime: 60_000,
+    placeholderData: (previous) => previous,
+  });
+
   const handleDateChange = (date: string | undefined) => {
     const next = new URLSearchParams(searchParams);
     if (date) next.set("date", date);
@@ -149,6 +159,7 @@ export function LianbanReviewPage() {
         liveFetchedAt={reviewQuery.dataUpdatedAt}
       />
       <ReviewStatsCards stats={payload.stats} />
+      {projectionQuery.data && <ProjectionCard projection={projectionQuery.data} />}
       <LadderSection ladder={payload.ladder} promotion={payload.promotion} />
       <RelaySection relay={payload.relay} />
       <BrokenBoardsSection items={payload.broken_list} />

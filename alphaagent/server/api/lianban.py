@@ -28,6 +28,11 @@
   填补(当日日线收盘后才落库, 盘中库里全 null), 实时接口异常则保留
   null 降级不阻塞 live。
 - GET /api/lianban/dates —— 可复盘交易日(归档 ∪ 重建, 降序, 限 400)。
+- GET /api/lianban/projection?date=YYYY-MM-DD —— 明日推演(同景统计): 与
+  当日同情绪阶段+同上证年线位置的历史日的次日表现(上涨概率/均值/次日
+  阶段分布/温度变化/同景日期清单); date 缺省 = 最新有 sentiment point 的
+  日期; 无历史 → ok 骨架 status=insufficient_data; 60s 进程缓存(盘后数据
+  一天一变)。
 - GET /api/lianban/ladder-history?days=60 —— 连板天梯历史(研究型): 近 N
   个有涨停交易日的梯队 matrix / 窗口晋级率 promotion_matrix / 每日龙头
   leaders; days 合法区间 [5, 250] 由 FastAPI 校验(越界 422); 无数据返回
@@ -52,11 +57,17 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 
 from alphaagent.data_sources.akshare_adapter import AkShareAdapter
+from alphaagent.market.cache import TTLCache
 from alphaagent.server.core.responses import fail, ok
 from alphaagent.server.db import schema as db_schema
 from alphaagent.server.db.session import is_database_configured, session_scope
 from alphaagent.server.services.lianban import archive as archive_module
 from alphaagent.server.services.lianban.ladder_history import ladder_history
+from alphaagent.server.services.lianban.projection import (
+    empty_projection_payload,
+    latest_sentiment_point_date,
+    same_scene_projection,
+)
 from alphaagent.server.services.lianban.review import ReviewNotFound, build_review
 from alphaagent.server.services.lianban.review_cache import (
     REVIEW_CACHE_TTL_SECONDS,
@@ -72,6 +83,10 @@ router = APIRouter(prefix="/lianban", tags=["lianban"])
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 _DATES_LIMIT = 400
+# 明日推演: 盘后数据一天一变(sentiment 重建 + 指数日线同步后内容才变),
+# 60s 短 TTL 进程缓存兜底刷新抖动; 缓存 key 带解析后的目标日期。
+_PROJECTION_CACHE_TTL_SECONDS = 60
+projection_cache: TTLCache = TTLCache(max_items=200)
 # live 分流核心池: 缺任一整页家数/封板率失真 → 显式请求 503 / 缺省请求回落。
 _LIVE_CORE_POOLS = ("zt", "zbgc", "dtgc")
 # live 时间闸(北京时间, 含两端): 09:25 集合竞价结束涨停池开始填充;
@@ -403,6 +418,34 @@ def lianban_dates():
             "latest": merged[0].isoformat() if merged else None,
         }
     )
+
+
+@router.get("/projection", response_model=None)
+def lianban_projection(trade_date: date | None = Query(default=None, alias="date")):
+    """明日推演(同景统计): 与当日同情绪阶段+同指数年线位置的历史日的次日表现。
+
+    date 缺省 = 最新有 sentiment point 的日期; 非法格式由 FastAPI 校验转 422。
+    无任何情绪历史 → ok 骨架 status=insufficient_data(trade_date None)。
+    盘后数据一天一变, 60s 进程缓存兜底; get_or_set 命中返回深拷贝。
+    """
+    if not is_database_configured():
+        return JSONResponse(
+            status_code=503,
+            content=fail(
+                "LIANBAN_DB_UNAVAILABLE", "数据库未配置，明日推演不可用。"
+            ),
+        )
+    with session_scope() as session:
+        target = trade_date or latest_sentiment_point_date(session)
+        if target is None:
+            return ok(empty_projection_payload(None))
+        return ok(
+            projection_cache.get_or_set(
+                f"lianban:projection:{target.isoformat()}",
+                _PROJECTION_CACHE_TTL_SECONDS,
+                lambda: same_scene_projection(session, target),
+            )
+        )
 
 
 @router.get("/ladder-history", response_model=None)

@@ -175,7 +175,10 @@ _SENTIMENT_MAX_LOOKBACK = 180
 # 连续情绪大周期：以最新完整日线为锚，一次计算的历史跨度（完整交易日数）。
 # 所有 sentiment-cycle 请求（任意 date/lookback）都从这条曲线切片，
 # 避免窗口随日期移动导致连板 streak 截断、同一日数值跳变。
-_SENTIMENT_HISTORY_SPAN_DAYS = 250
+# 2026-08-14: 250 → 1250(约5年)。连板复盘「明日推演」同景统计需要多年样本
+# (近一年牛市里冰点/退潮日仅个位数,对齐 lianban 的同景量级需覆盖 2021-2024
+# 弱市)。实测 250 日重建 39s,1250 日约 3.5 分钟,盘后窗口可接受。
+_SENTIMENT_HISTORY_SPAN_DAYS = 1250
 _SENTIMENT_SCAN_BATCH_SIZE = 10_000
 _SENTIMENT_RESPONSE_TTL_SECONDS = 30
 _SENTIMENT_RETRY_TTL_SECONDS = 3
