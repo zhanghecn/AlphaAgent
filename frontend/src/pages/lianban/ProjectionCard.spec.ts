@@ -4,6 +4,7 @@ import type { LianbanProjection } from "@/api/lianban";
 import {
   buildProjectionModel,
   formatRatioPctInt,
+  formatSceneDate,
   formatSignedDegree,
   phaseLabelWithQi,
 } from "./ProjectionCard";
@@ -75,12 +76,28 @@ describe("phaseLabelWithQi", () => {
   });
 });
 
+describe("formatSceneDate", () => {
+  it("keeps MM-DD for the same year as the projection trade date", () => {
+    expect(formatSceneDate("2026-07-22", "2026-08-13")).toBe("07-22");
+  });
+
+  it("prefixes the short year for cross-year scene samples", () => {
+    expect(formatSceneDate("2024-09-18", "2026-08-13")).toBe("24-09-18");
+    expect(formatSceneDate("2025-12-31", "2026-08-13")).toBe("25-12-31");
+  });
+
+  it("falls back to MM-DD without a base date", () => {
+    expect(formatSceneDate("2024-09-18", null)).toBe("09-18");
+  });
+});
+
 describe("buildProjectionModel", () => {
   it("builds subtitle, four cells and chips from a full payload", () => {
     const model = buildProjectionModel(makeProjection());
 
-    expect(model.subtitle).toBe("退潮期 第1天 · 🐻年线下方 · 同景 96 次");
+    expect(model.subtitle).toBe("08-13 收盘 · 退潮期 第1天 · 🐻年线下方 · 同景 96 次");
     expect(model.insufficient).toBe(false);
+    expect(model.lagNote).toBeNull();
 
     expect(model.cells).toEqual([
       { key: "up_prob", title: "次日上涨概率", value: "51.0%" },
@@ -101,16 +118,28 @@ describe("buildProjectionModel", () => {
 
     expect(model.chips).toEqual([
       { date: "2026-07-22", text: "07-22 +0.2%", tone: "rise" },
-      { date: "2024-09-18", text: "09-18 +0.7%", tone: "rise" },
-      { date: "2024-05-06", text: "05-06 -1.2%", tone: "fall" },
+      { date: "2024-09-18", text: "24-09-18 +0.7%", tone: "rise" },
+      { date: "2024-05-06", text: "24-05-06 -1.2%", tone: "fall" },
     ]);
+  });
+
+  it("shows a lag note when the live review date is ahead of the projection date", () => {
+    const model = buildProjectionModel(makeProjection(), "2026-08-14");
+    expect(model.lagNote).toBe(
+      "推演基于 08-13 收盘情绪 · 08-14 推演待盘后更新",
+    );
+  });
+
+  it("keeps the lag note silent when dates match or no review date given", () => {
+    expect(buildProjectionModel(makeProjection(), "2026-08-13").lagNote).toBeNull();
+    expect(buildProjectionModel(makeProjection(), null).lagNote).toBeNull();
   });
 
   it("uses 🐂 for above_ma250 and joins partial subtitle parts", () => {
     const model = buildProjectionModel(
       makeProjection({ above_ma250: true, phase_day: null }),
     );
-    expect(model.subtitle).toBe("退潮期 · 🐂年线上方 · 同景 96 次");
+    expect(model.subtitle).toBe("08-13 收盘 · 退潮期 · 🐂年线上方 · 同景 96 次");
   });
 
   it("marks insufficient_data but keeps computed stats visible", () => {
@@ -159,7 +188,7 @@ describe("buildProjectionModel", () => {
     expect(model.cells[3]?.value).toBe("0°");
     expect(model.cells[3]?.tone ?? null).toBeNull();
     expect(model.chips).toEqual([
-      { date: "2024-09-18", text: "09-18 --", tone: null },
+      { date: "2024-09-18", text: "24-09-18 --", tone: null },
     ]);
   });
 

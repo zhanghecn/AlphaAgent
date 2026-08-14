@@ -159,7 +159,9 @@ export function LianbanReviewPage() {
         liveFetchedAt={reviewQuery.dataUpdatedAt}
       />
       <ReviewStatsCards stats={payload.stats} />
-      {projectionQuery.data && <ProjectionCard projection={projectionQuery.data} />}
+      {projectionQuery.data && (
+        <ProjectionCard projection={projectionQuery.data} reviewDate={payload.trade_date} />
+      )}
       <LadderSection ladder={payload.ladder} promotion={payload.promotion} />
       <RelaySection relay={payload.relay} />
       <BrokenBoardsSection items={payload.broken_list} />

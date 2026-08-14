@@ -28,6 +28,20 @@ export function phaseLabelWithQi(label: string): string {
   return label.endsWith("期") ? label : `${label}期`;
 }
 
+/**
+ * 同景日期 chips：与推演信号日同年 → "MM-DD"；跨年 → "YY-MM-DD"（如 24-09-18）。
+ * 同景样本跨 2024-2026 多年，不补年份会看起来像同一年内的乱序日期。
+ */
+export function formatSceneDate(
+  isoDate: string,
+  baseIsoDate: string | null | undefined,
+): string {
+  if (!baseIsoDate || isoDate.slice(0, 4) === baseIsoDate.slice(0, 4)) {
+    return formatShortDate(isoDate);
+  }
+  return `${isoDate.slice(2, 4)}-${isoDate.slice(5, 7)}-${isoDate.slice(8, 10)}`;
+}
+
 export interface ProjectionCell {
   key: string;
   title: string;
@@ -42,10 +56,15 @@ export interface ProjectionChip {
 }
 
 export interface ProjectionModel {
-  /** 副标题：「退潮期 第1天 · 🐻年线下方 · 同景 96 次」，缺失段自动省略。 */
+  /** 副标题：「08-13 收盘 · 退潮期 第1天 · 🐻年线下方 · 同景 96 次」，缺失段自动省略。 */
   subtitle: string;
   /** 样本不足（insufficient_data）：标题旁降级徽标 + 提示行。 */
   insufficient: boolean;
+  /**
+   * 滞后提示：复盘页日期晚于推演信号日（live 盘中配昨日情绪）时，
+   * 明示推演基于哪天、今日推演何时出，避免两卡日期错位被误读。
+   */
+  lagNote: string | null;
   cells: ProjectionCell[];
   chips: ProjectionChip[];
 }
@@ -60,8 +79,14 @@ function signTone(value: number): Tone {
  * 明日推演派生模型（纯函数，便于单测格式化/降级路径）。
  * 四格统计：次日上涨概率 | 次日上证均值 | 最可能去向 | 温度平均变化。
  */
-export function buildProjectionModel(p: LianbanProjection): ProjectionModel {
+export function buildProjectionModel(
+  p: LianbanProjection,
+  reviewDate?: string | null,
+): ProjectionModel {
   const subtitleParts: string[] = [];
+  if (p.trade_date) {
+    subtitleParts.push(`${formatShortDate(p.trade_date)} 收盘`);
+  }
   if (p.phase_label) {
     subtitleParts.push(
       p.phase_day != null
@@ -73,6 +98,11 @@ export function buildProjectionModel(p: LianbanProjection): ProjectionModel {
     subtitleParts.push(p.above_ma250 ? "🐂年线上方" : "🐻年线下方");
   }
   subtitleParts.push(`同景 ${p.sample_count} 次`);
+
+  const lagNote =
+    p.trade_date && reviewDate && reviewDate > p.trade_date
+      ? `推演基于 ${formatShortDate(p.trade_date)} 收盘情绪 · ${formatShortDate(reviewDate)} 推演待盘后更新`
+      : null;
 
   const top = p.phase_next[0];
   const cells: ProjectionCell[] = [
@@ -103,13 +133,14 @@ export function buildProjectionModel(p: LianbanProjection): ProjectionModel {
 
   const chips: ProjectionChip[] = p.scene_dates.map((entry) => ({
     date: entry.date,
-    text: `${formatShortDate(entry.date)} ${formatPctPoint(entry.next_change)}`,
+    text: `${formatSceneDate(entry.date, p.trade_date)} ${formatPctPoint(entry.next_change)}`,
     tone: entry.next_change == null ? null : signTone(entry.next_change),
   }));
 
   return {
     subtitle: subtitleParts.join(" · "),
     insufficient: p.status === "insufficient_data",
+    lagNote,
     cells,
     chips,
   };
@@ -124,9 +155,17 @@ function toneClass(tone: Tone): string | undefined {
 /**
  * 「🔮 明日推演」卡：同景（同情绪阶段+同年线位置）历史日的次日统计。
  * 样本不足时降级徽标提示，已有字段照常展示；横滚同景日期 chips 红涨绿跌。
+ * reviewDate 为复盘页当前日期：晚于推演信号日（live 盘中配昨日情绪）时
+ * 显示滞后提示行，明示推演口径而不是静默错位。
  */
-export function ProjectionCard({ projection }: { projection: LianbanProjection }) {
-  const model = buildProjectionModel(projection);
+export function ProjectionCard({
+  projection,
+  reviewDate,
+}: {
+  projection: LianbanProjection;
+  reviewDate?: string | null;
+}) {
+  const model = buildProjectionModel(projection, reviewDate);
   return (
     <section
       aria-label="明日推演"
@@ -143,6 +182,11 @@ export function ProjectionCard({ projection }: { projection: LianbanProjection }
           {model.subtitle}
         </p>
       </div>
+      {model.lagNote && (
+        <p className="mt-1 text-[10px] tabular-nums text-amber-600/90">
+          {model.lagNote}
+        </p>
+      )}
       <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
         {model.cells.map((cell) => (
           <div key={cell.key} className="min-w-0">
