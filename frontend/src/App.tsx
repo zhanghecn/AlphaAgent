@@ -15,6 +15,7 @@ const MarketTimingPage = lazy(() => import("@/pages/MarketTimingPage").then((m) 
 const SectorsPage = lazy(() => import("@/pages/SectorsPage").then((m) => ({ default: m.SectorsPage })));
 const MainlineReplayPage = lazy(() => import("@/pages/MainlineReplayPage"));
 const ShortTermResearchPage = lazy(() => import("@/pages/ShortTermResearchPage").then((m) => ({ default: m.ShortTermResearchPage })));
+const LianbanReviewPage = lazy(() => import("@/pages/LianbanReviewPage").then((m) => ({ default: m.LianbanReviewPage })));
 const DataManagementPage = lazy(() => import("@/pages/DataManagementPage"));
 
 /**
@@ -49,6 +50,7 @@ export default function App() {
                     <Route path="/chain" element={<Navigate to="/mainline" replace />} />
                     <Route path="/mainline" element={<MainlineReplayPage />} />
                     <Route path="/short-term" element={<ShortTermResearchPage />} />
+                    <Route path="/lianban" element={<LianbanReviewPage />} />
                     <Route path="/data" element={<DataManagementPage />} />
                     {/* Legacy routes */}
                     <Route path="/sectors" element={<SectorsPage />} />
