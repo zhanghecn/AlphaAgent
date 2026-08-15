@@ -68,6 +68,11 @@ YANG_WRAP_STABLE_BASE_VOLUME_END_TO_PEAK_MAX = 0.55
 POST_WRAP_UPPER_BAND_DISTANCE_MAX_PCT = 1.5
 POST_WRAP_CONFIRMATION_TURNOVER_MIN_PCT = 1.5
 POST_WRAP_CONFIRMATION_TURNOVER_MAX_PCT = 8.0
+# 上沿确认（Z）对「昨日三线包裹」的宽口径前置：次日确认本身已是过滤，
+# 底盘贴线/缩量比 W 各宽一档（半年全市场验证 n=43 剔案例 69.0%/+0.86，
+# 严口径前置 n=18 剔案例 58.8%/+0.28 样本枯竭）。
+POST_WRAP_PRIOR_WRAP_LOW_MA_MAX_PCT = 2.5
+POST_WRAP_PRIOR_WRAP_VOLUME_END_TO_PEAK_MAX = 0.7
 VOLUME_MONOTONE_6D_MIN_RATIO = 0.8
 MIN_SELECTION_SAMPLES = 30
 MIN_SELECTION_CANDIDATE_DAYS = 10
@@ -95,6 +100,13 @@ STAGED_MA10_SUPPORT_RULE_KEY = (
 ATTACK_BODY_HOLD_RULE_KEY = (
     "attack_body_hold_after_ma10_ma20_cross_before_ma30"
 )
+# 上穿前价格先行两子型（主人 2026-08 观察个案研究沉淀，详见任务报告）：
+# 立新能源型（X）：弱市（指数 MA20 下方）中 MA10 加速靠拢/刚上穿 MA20，
+# 价格先行站上 MA10；京投发展型（Y）：收盘领先 MA10 6-10% 且 MA10 加速上行。
+PRE_CROSS_ACCELERATION_WEAK_MARKET_RULE_KEY = (
+    "pre_cross_acceleration_weak_market"
+)
+PRICE_FIRST_STRONG_ATTACK_RULE_KEY = "price_first_strong_attack"
 ATTACK_BODY_MIN_PCT = 3.0
 ATTACK_BODY_HOLD_DAILY_RETURN_MIN_PCT = -3.0
 ATTACK_BODY_HOLD_DAILY_RETURN_MAX_PCT = 0.5
@@ -109,6 +121,26 @@ FIRST_LEG_TWO_MA_WRAP_DAILY_RETURN_MAX_PCT = 5.0
 FIRST_LEG_TWO_MA_WRAP_GAP_NARROWING_3D_MAX_PCT = 4.0
 FIRST_LEG_TWO_MA_WRAP_PIVOT_AGE_MIN_SESSIONS = 9
 FIRST_LEG_TWO_MA_WRAP_CLOSE_OFF_LOW_MIN_PCT = 3.216433
+# 上穿前价格先行共用底盘阈值（三案例最差值收紧，半年回测 2026-02-09..08-14 验证）
+PRE_CROSS_LEAD_MAX_BELOW_MA20_PCT = 4.0
+PRE_CROSS_LEAD_MAX_CROSS_AGE_SESSIONS = 3
+PRE_CROSS_LEAD_GAP_NARROWING_3D_MIN_PCT = 1.0
+PRE_CROSS_LEAD_GAP_NARROWING_10_30_5D_MIN_PCT = 3.0
+PRE_CROSS_LEAD_CLOSE_TO_MA10_MIN_PCT = 1.4
+PRE_CROSS_LEAD_CLOSE_TO_MA10_MAX_PCT = 10.0
+PRE_CROSS_LEAD_CLOSE_OFF_LOW_MIN_PCT = 2.5
+PRE_CROSS_LEAD_DAILY_RETURN_MAX_PCT = 3.0
+PRE_CROSS_LEAD_TURNOVER_MAX_PCT = 3.0
+PRE_CROSS_LEAD_CLOSE_TO_MA30_MAX_PCT = 3.0
+# 攻击强度投票轴（命中数即 votes，满分 4）
+ATTACK_VOTE_GAP_10_30_5D_MIN_PCT = 7.0
+ATTACK_VOTE_VOLUME_CHANGE_MIN_PCT = 80.0
+ATTACK_VOTE_MA10_SLOPE_2D_MIN_PCT = 1.5
+ATTACK_VOTE_CLUSTER_SPREAD_MIN_PCT = 5.0
+ATTACK_VOTE_MIN_COUNT = 2
+ATTACK_SLOPE_PATH_VOLUME_RATIO_MAX = 1.1
+# 价格先行强攻（Y）专属阈值
+PRICE_FIRST_CLOSE_TO_MA10_MIN_PCT = 6.0
 OVERSOLD_ATTACK_STAGE_PRE_CROSS_PRESSURE = "pre_cross_pressure"
 OVERSOLD_ATTACK_STAGE_FIRST_LEG_TWO_MA_WRAP = "first_leg_two_ma_wrap"
 OVERSOLD_ATTACK_STAGE_THREE_MA_WRAP = "three_ma_wrap"
@@ -156,12 +188,12 @@ EXPLICIT_CASE_OVERSOLD_RULES = (
     DiscoveryRule(
         RESEARCH_THREE_MA_WRAP_RULE_KEY,
         "oversold_rebound",
-        "三线收敛阳线包裹（贴线、缩量）",
+        "三线收敛阳线包裹（贴线、缩量；产品层已校准：稳定底盘只保留低点贴线+量缩峰值，梯形缩量条件为反指标已移除）",
     ),
     DiscoveryRule(
         POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
         "oversold_rebound",
-        "稳定三线包裹后的次日上沿回踩站稳",
+        "三线包裹缩量底盘（宽口径前置）后的次日上沿回踩站稳",
     ),
     DiscoveryRule(
         STAGED_MA10_SUPPORT_RULE_KEY,
@@ -172,6 +204,16 @@ EXPLICIT_CASE_OVERSOLD_RULES = (
         ATTACK_BODY_HOLD_RULE_KEY,
         "oversold_rebound",
         "攻击实体缩量守住（研究待验证）",
+    ),
+    DiscoveryRule(
+        PRE_CROSS_ACCELERATION_WEAK_MARKET_RULE_KEY,
+        "oversold_rebound",
+        "弱市上穿前加速：长期空头中 MA10 加速靠拢/刚上穿 MA20，价格先行站上 MA10，低点获撑脱离低点，温和换手；产品层加指数 MA20 下方弱市门",
+    ),
+    DiscoveryRule(
+        PRICE_FIRST_STRONG_ATTACK_RULE_KEY,
+        "oversold_rebound",
+        "价格先行强攻：收盘领先 MA10 6-10% 且 MA10 两日加速上行，长期空头修复中的最前段攻击",
     ),
     DiscoveryRule(
         MA10_MA20_PRE_CROSS_RULE_KEY,
@@ -1303,6 +1345,15 @@ def build_extended_daily_features(
         if last_volume is not None and prior_volume is not None and prior_volume > 0
         else None
     )
+    # 近 5/10 日均量比（scanner 评分同源口径，规则谓词自包含所需）
+    _recent_volumes = [value for value in volumes[-10:] if value is not None]
+    volume_ratio_5d_10d = (
+        _round_pct(
+            (sum(_recent_volumes[-5:]) / 5) / (sum(_recent_volumes) / 10)
+        )
+        if len(_recent_volumes) == 10 and sum(_recent_volumes) > 0
+        else None
+    )
     prior_attack_open_price = (
         _number_or_none(visible[-2].get("open_price")) if len(visible) >= 2 else None
     )
@@ -1593,6 +1644,7 @@ def build_extended_daily_features(
         ),
         "last_volume_change_pct": last_volume_change_pct,
         "last_volume_to_prior_ratio": last_volume_to_prior_ratio,
+        "volume_ratio_5d_10d": volume_ratio_5d_10d,
         "last_volume_expanded": bool(
             last_volume_change_pct is not None
             and last_volume_change_pct >= PROCESS_VOLUME_CHANGE_PCT
@@ -3573,10 +3625,39 @@ def _is_pre_cross_trend_transition_preparation(
     )
 
 
+def _yang_wrap_shrink_base(
+    features: Mapping[str, object],
+    *,
+    low_ma_max_pct: float,
+    volume_end_to_peak_max: float,
+) -> bool:
+    """三线包裹的缩量稳定底盘：低点贴线 + 量能收缩到 6 日峰值以下。
+
+    2026-08 半年全市场验证：再叠加梯形缩量（vol_monotone_6d）是反指标
+    （n=18 胜率 56% → 去掉后 n=40 剔案例 65.8%/+0.45），故产品谓词只保留
+    贴线与量峰收缩两个分量；``yang_wrap_stable_base`` 特征本身保留供研究。
+    """
+
+    edge = _number_or_none(features.get("yang_wrap_nearest_ma_low_abs_pct"))
+    volume_ratio = _number_or_none(
+        features.get("yang_wrap_volume_end_to_peak_ratio_6d")
+    )
+    return bool(
+        edge is not None
+        and edge <= low_ma_max_pct
+        and volume_ratio is not None
+        and volume_ratio <= volume_end_to_peak_max
+    )
+
+
 def _prior_stable_three_ma_wrap(
     prior_features: Mapping[str, object] | None,
 ) -> bool:
-    """Check the complete source wrap contract on the immediately prior session."""
+    """昨日三线包裹缩量底盘（宽口径前置：贴线 2.5% + 量峰 0.70）。
+
+    次日上沿确认本身已是一层过滤，前置底盘比当日 W 规则宽一档——半年
+    全市场验证宽前置 n=43 剔案例 69.0%/+0.86，严前置 n=18 样本枯竭。
+    """
 
     if prior_features is None:
         return False
@@ -3586,8 +3667,11 @@ def _prior_stable_three_ma_wrap(
             "long_bear_alignment",
             "ma10_crossed_ma20_after_long_bear_within_15d",
             "yang_wrap_three_ma",
-            "yang_wrap_stable_base",
         )
+    ) and _yang_wrap_shrink_base(
+        prior_features,
+        low_ma_max_pct=POST_WRAP_PRIOR_WRAP_LOW_MA_MAX_PCT,
+        volume_end_to_peak_max=POST_WRAP_PRIOR_WRAP_VOLUME_END_TO_PEAK_MAX,
     )
 
 
@@ -3643,6 +3727,107 @@ def _post_wrap_turnover_controlled(features: Mapping[str, object]) -> bool:
     )
 
 
+def _attack_vote_count(features: Mapping[str, object]) -> int:
+    """攻击强度投票：四条市场验证轴各 1 票（gap 快速收敛/放量/MA10 加速/宽开口）。"""
+
+    gap_10_30 = _number_or_none(features.get("ma10_ma30_gap_narrowing_5d_pct"))
+    last_volume_change = _number_or_none(features.get("last_volume_change_pct"))
+    ma10_slope = _number_or_none(features.get("ma10_slope_2d_pct"))
+    cluster_spread = _number_or_none(features.get("ma_cluster_spread_pct"))
+    return sum(
+        (
+            gap_10_30 is not None
+            and gap_10_30 >= ATTACK_VOTE_GAP_10_30_5D_MIN_PCT,
+            last_volume_change is not None
+            and last_volume_change > ATTACK_VOTE_VOLUME_CHANGE_MIN_PCT,
+            ma10_slope is not None
+            and ma10_slope > ATTACK_VOTE_MA10_SLOPE_2D_MIN_PCT,
+            cluster_spread is not None
+            and cluster_spread >= ATTACK_VOTE_CLUSTER_SPREAD_MIN_PCT,
+        )
+    )
+
+
+def _attack_slope_path(features: Mapping[str, object]) -> bool:
+    """投票不足时的替代入场：MA10 加速上行且量能未过热（5/10 日量比 < 1.1）。"""
+
+    ma10_slope = _number_or_none(features.get("ma10_slope_2d_pct"))
+    volume_ratio = _number_or_none(features.get("volume_ratio_5d_10d"))
+    return bool(
+        ma10_slope is not None
+        and ma10_slope > ATTACK_VOTE_MA10_SLOPE_2D_MIN_PCT
+        and volume_ratio is not None
+        and volume_ratio < ATTACK_SLOPE_PATH_VOLUME_RATIO_MAX
+    )
+
+
+def _pre_cross_price_lead_base_predicates(
+    features: Mapping[str, object],
+) -> dict[str, bool]:
+    """上穿前价格先行两子型共用的底盘谓词（三案例最差值收紧而成）。"""
+
+    dist_10_20 = _number_or_none(features.get("ma10_ma20_signed_distance_pct"))
+    cross_age = _integer_or_none(
+        features.get("ma10_crossed_ma20_after_long_bear_age_sessions_15d")
+    )
+    gap_10_20 = _number_or_none(features.get("ma10_ma20_gap_narrowing_3d_pct"))
+    gap_10_30 = _number_or_none(features.get("ma10_ma30_gap_narrowing_5d_pct"))
+    close_to_ma10 = _number_or_none(features.get("close_to_ma10_pct"))
+    close_off_low = _number_or_none(features.get("close_off_low_pct"))
+    daily_return = _number_or_none(features.get("daily_return_pct"))
+    turnover = _number_or_none(features.get("turnover_rate_pct"))
+    close_to_ma30 = _number_or_none(features.get("close_to_ma30_pct"))
+    return {
+        "long_bear_alignment": bool(features.get("long_bear_alignment")),
+        "ma10_near_or_fresh_cross_of_ma20": bool(
+            (
+                features.get("ma10_below_ma20")
+                and dist_10_20 is not None
+                and dist_10_20 >= -PRE_CROSS_LEAD_MAX_BELOW_MA20_PCT
+            )
+            or (
+                cross_age is not None
+                and cross_age <= PRE_CROSS_LEAD_MAX_CROSS_AGE_SESSIONS
+            )
+        ),
+        "ma10_ma20_gap_narrowing_3d_at_least_1pct": bool(
+            gap_10_20 is not None
+            and gap_10_20 >= PRE_CROSS_LEAD_GAP_NARROWING_3D_MIN_PCT
+        ),
+        "ma10_ma30_gap_narrowing_5d_at_least_3pct": bool(
+            gap_10_30 is not None
+            and gap_10_30 >= PRE_CROSS_LEAD_GAP_NARROWING_10_30_5D_MIN_PCT
+        ),
+        "close_leads_ma10_1_4_to_10_pct": bool(
+            close_to_ma10 is not None
+            and PRE_CROSS_LEAD_CLOSE_TO_MA10_MIN_PCT
+            <= close_to_ma10
+            <= PRE_CROSS_LEAD_CLOSE_TO_MA10_MAX_PCT
+        ),
+        "low_supported_by_ma10_or_ma20": bool(
+            features.get("ma10_low_touch") or features.get("ma20_low_touch")
+        ),
+        "close_off_low_at_least_2_5pct": bool(
+            close_off_low is not None
+            and close_off_low >= PRE_CROSS_LEAD_CLOSE_OFF_LOW_MIN_PCT
+        ),
+        "small_positive_candle": bool(
+            daily_return is not None
+            and 0 < daily_return <= PRE_CROSS_LEAD_DAILY_RETURN_MAX_PCT
+        ),
+        "turnover_at_most_3pct": bool(
+            turnover is not None and turnover <= PRE_CROSS_LEAD_TURNOVER_MAX_PCT
+        ),
+        "close_to_ma30_at_most_3pct": bool(
+            close_to_ma30 is not None
+            and close_to_ma30 <= PRE_CROSS_LEAD_CLOSE_TO_MA30_MAX_PCT
+        ),
+        "signal_day_not_limit_up_closed": bool(
+            features.get("signal_day_not_limit_up_closed")
+        ),
+    }
+
+
 def process_rule_predicates(
     rule_key: str,
     features: Mapping[str, object],
@@ -3662,7 +3847,11 @@ def process_rule_predicates(
                 features.get("ma10_crossed_ma20_after_long_bear_within_15d")
             ),
             "yang_wrap_three_ma": bool(features.get("yang_wrap_three_ma")),
-            "yang_wrap_stable_base": bool(features.get("yang_wrap_stable_base")),
+            "yang_wrap_shrink_stable_base": _yang_wrap_shrink_base(
+                features,
+                low_ma_max_pct=YANG_WRAP_STABLE_BASE_LOW_MA_MAX_PCT,
+                volume_end_to_peak_max=YANG_WRAP_STABLE_BASE_VOLUME_END_TO_PEAK_MAX,
+            ),
         },
         POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY: {
             "prior_stable_three_ma_wrap": _prior_stable_three_ma_wrap(
@@ -3752,6 +3941,26 @@ def process_rule_predicates(
             ),
             "positive_candle": bool(features.get("positive_candle")),
             "last_volume_expanded": bool(features.get("last_volume_expanded")),
+        },
+        PRE_CROSS_ACCELERATION_WEAK_MARKET_RULE_KEY: {
+            **_pre_cross_price_lead_base_predicates(features),
+            "attack_votes_at_least_2_or_slope_path": (
+                _attack_vote_count(features) >= ATTACK_VOTE_MIN_COUNT
+                or _attack_slope_path(features)
+            ),
+        },
+        PRICE_FIRST_STRONG_ATTACK_RULE_KEY: {
+            **_pre_cross_price_lead_base_predicates(features),
+            "close_to_ma10_at_least_6_pct": (
+                (close_to_ma10 := _number_or_none(features.get("close_to_ma10_pct")))
+                is not None
+                and close_to_ma10 >= PRICE_FIRST_CLOSE_TO_MA10_MIN_PCT
+            ),
+            "ma10_slope_2d_accelerating": (
+                (ma10_slope := _number_or_none(features.get("ma10_slope_2d_pct")))
+                is not None
+                and ma10_slope > ATTACK_VOTE_MA10_SLOPE_2D_MIN_PCT
+            ),
         },
         FIRST_LEG_TWO_MA_WRAP_RULE_KEY: {
             "long_bear_alignment": bool(features.get("long_bear_alignment")),

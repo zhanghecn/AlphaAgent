@@ -109,12 +109,19 @@ export interface LowSuctionSimSummary extends LowSuctionSegmentStats {
   average_deployed_pct?: number;
   daily_mean_pct?: number | null;
   compound_pct: number;
-  max_drawdown_pct?: number;
+  max_drawdown_pct?: number | null;
 }
 
 export interface LowSuctionEquityPoint {
   date: string;
   equity: number;
+}
+
+/** 单族仓位模拟汇总：统计、权益曲线与样本外/市况复核全部按族分开。 */
+export interface LowSuctionFamilySim extends LowSuctionSimSummary {
+  equity_curve: LowSuctionEquityPoint[];
+  time_segments: Record<string, LowSuctionSimSummary>;
+  market_regimes: Record<string, LowSuctionSimSummary>;
 }
 
 export interface LowSuctionBacktestReport {
@@ -144,12 +151,8 @@ export interface LowSuctionBacktestReport {
     oversold_rebound: LowSuctionFamilyReport;
   };
   position_sim: {
-    trend_pullback: LowSuctionSimSummary;
-    oversold_rebound: LowSuctionSimSummary;
-    combined: LowSuctionSimSummary;
-    time_segments: Record<string, LowSuctionSimSummary>;
-    market_regimes: Record<string, LowSuctionSimSummary>;
-    equity_curve: LowSuctionEquityPoint[];
+    trend_pullback: LowSuctionFamilySim;
+    oversold_rebound: LowSuctionFamilySim;
   };
 }
 
@@ -264,4 +267,54 @@ export function fetchLowSuctionBacktestStatus() {
 
 export function fetchLowSuctionLedger() {
   return apiClient.get<LowSuctionLedgerPayload>("/low-suction/ledger");
+}
+
+/** 说明书案例：单案的 D+N 收盘收益（后端现算，session-indexed）。 */
+export interface GuideCaseReturns {
+  d1_close_return_pct: number | null;
+  d3_close_return_pct: number | null;
+  d5_close_return_pct: number | null;
+  /** available / missing_exit_session / raw_price_limit_outlier / signal_date_not_found / bars_unavailable */
+  status: string;
+}
+
+/** 说明书案例：策展经典案例（真实历史股票 + 信号日 + 底盘叙事起点）。 */
+export interface GuideCaseItem {
+  case_id: string;
+  name: string;
+  vt_symbol: string;
+  signal_date: string;
+  setup_type: "trend_pullback" | "oversold_rebound";
+  narrative_start_date: string | null;
+  expected_launch_date: string | null;
+  source_anchor: string;
+  /** complete / research_pending */
+  narrative_status: string;
+  returns: GuideCaseReturns;
+}
+
+export interface GuideCasesRule {
+  rule_key: string;
+  description: string;
+  tier: "product" | "research";
+  product_tier: "P1.5" | "P1" | null;
+  cases: GuideCaseItem[];
+}
+
+export interface GuideCasesFamily {
+  key: "trend_pullback" | "oversold_rebound";
+  label: string;
+  rules: GuideCasesRule[];
+}
+
+export interface GuideCasesPayload {
+  status: "ok" | "partial";
+  score_version: string;
+  families: GuideCasesFamily[];
+  /** 无 rule_key 的待验证锚点案例（research_pending）。 */
+  orphan_cases: GuideCaseItem[];
+}
+
+export function fetchLowSuctionGuideCases() {
+  return apiClient.get<GuideCasesPayload>("/low-suction/guide/cases");
 }

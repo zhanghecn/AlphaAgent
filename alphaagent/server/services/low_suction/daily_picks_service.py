@@ -52,6 +52,8 @@ from alphaagent.server.services.low_suction.live_snapshot_repository import (
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+# 回测默认窗口：最近两年（日历日 ≈ 490 个交易日）。
+DEFAULT_BACKTEST_WINDOW_DAYS = 732
 LIVE_SCAN_INTERVAL_SECONDS = 60
 LIVE_LOOKBACK_CALENDAR_DAYS = 10  # 加载日历窗口；特征 warmup 由加载器另加 120 天
 LIVE_MAX_ITEMS_PER_FAMILY = 100
@@ -350,6 +352,12 @@ def _run_daily_backtest_sync_unlocked(
 ) -> dict[str, object]:
     """Rebuild the report while the cross-process execution lock is held."""
 
+    # 默认窗口最近两年（主人 2026-08-16 口径）：全量 821 个交易日叠加
+    # 新规则扫描成本在受限 CPU 下 >3 小时；两年 ~490 个交易日覆盖两轮
+    # 牛熊 regime 足够验收，显式传参的研究路径不受影响。
+    if start_date is None and end_date is None:
+        end_date = datetime.now(SHANGHAI).date()
+        start_date = end_date - timedelta(days=DEFAULT_BACKTEST_WINDOW_DAYS)
     _report_backtest_stage(progress, "load_inputs", "加载日线与证券状态", {})
     inputs = load_daily_factor_inputs(
         start_date=start_date,
@@ -365,10 +373,12 @@ def _run_daily_backtest_sync_unlocked(
             "trade_days": len(inputs.market_calendar),
         },
     )
+    market_regimes = _load_market_regimes(inputs.market_calendar)
     candidates = scan_low_suction_candidates(
         inputs.bars,
         inputs.market_calendar,
         inputs.security_status.to_dict(orient="records"),
+        market_regimes=market_regimes,
     )
     _report_backtest_stage(
         progress,
@@ -388,7 +398,7 @@ def _run_daily_backtest_sync_unlocked(
         candidates,
         inputs.market_calendar,
         names=names,
-        market_regimes=_load_market_regimes(inputs.market_calendar),
+        market_regimes=market_regimes,
     )
     _report_backtest_stage(
         progress,
@@ -430,6 +440,34 @@ def start_daily_backtest_rebuild() -> dict[str, object]:
         )
         _REBUILD_THREAD.start()
         return dict(_REBUILD_STATE)
+
+
+def reconcile_materialized_views_on_startup() -> dict[str, str]:
+    """启动自检：物化视图（live 快照/回测报告）版本漂移时立即后台补建。
+
+    日常链路（盘中每分钟扫描 + 18:00 确认快照 + 22:30 全量回测）已覆盖
+    常规刷新；此自检只补「代码/评分版本升级日」的缺口：容器重建后若当前
+    SCORE_VERSION/BACKTEST_VERSION 没有任何物化数据，版本门禁会让页面
+    整夜空白，必须立刻补，而不是等下一个同步档。
+    """
+
+    actions: dict[str, str] = {}
+    if load_live_snapshot(SCORE_VERSION) is None:
+        try:
+            refresh_live_recommendations()
+            actions["live_snapshot"] = "rebuilt"
+        except LiveScanAlreadyRunningError:
+            actions["live_snapshot"] = "already_running"
+    else:
+        actions["live_snapshot"] = "fresh"
+    if get_daily_backtest_report() is None:
+        result = start_daily_backtest_rebuild()
+        actions["backtest_report"] = (
+            "already_running" if result.get("already_running") else "rebuilding"
+        )
+    else:
+        actions["backtest_report"] = "fresh"
+    return actions
 
 
 def _background_daily_backtest_rebuild(run_id: int | None) -> None:
@@ -486,7 +524,12 @@ def _background_daily_backtest_rebuild(run_id: int | None) -> None:
 
 
 def get_daily_backtest_rebuild_status() -> dict[str, object]:
-    """Read the current rebuild state for frontend polling."""
+    """Read the current rebuild state for frontend polling.
+
+    顶层状态以 DB 运行记录为准：回测可能由 worker 进程（启动自检/22:30 档）
+    触发，本进程内存态不知道。内存 idle 但 DB 有 running 记录时，用该记录
+    合成顶层 building 状态，前端轮询才能跨进程看到进度。
+    """
 
     with _REBUILD_LOCK:
         status = dict(_REBUILD_STATE)
@@ -495,6 +538,26 @@ def get_daily_backtest_rebuild_status() -> dict[str, object]:
     except Exception as exc:  # noqa: BLE001
         _logger.warning("low-suction backtest run history read failed: %s", exc)
         status["recent_runs"] = []
+    if status.get("status") != "building":
+        active = next(
+            (
+                run
+                for run in status["recent_runs"]
+                if run.get("status") == "running"
+            ),
+            None,
+        )
+        if active is not None:
+            status.update(
+                {
+                    "status": "building",
+                    "run_id": active.get("id"),
+                    "source": active.get("source"),
+                    "stage": active.get("stage"),
+                    "started_at": active.get("started_at") or active.get("requested_at"),
+                    "message": active.get("message"),
+                }
+            )
     return status
 
 
@@ -787,11 +850,14 @@ def _compute_live_payload(
 
     target_date = calendar[-1]
     # 只扫描目标日，但保留完整市场日历来核对“前一交易日”的包裹后确认。
+    # 弱市门（X 子型）用已确认指数日线分类；盘中今日未定型时由扫描器
+    # 回退到最近已确认交易日（因果）。
     candidates = scan_low_suction_candidates(
         bars,
         calendar,
         inputs.security_status.to_dict(orient="records"),
         target_dates={target_date},
+        market_regimes=_load_market_regimes(tuple(calendar)),
     )
     names = _load_stock_names({item.vt_symbol for item in candidates})
     trend = _family_payload(candidates, "trend_pullback", names)

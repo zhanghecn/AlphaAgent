@@ -58,6 +58,7 @@ def run_forever(*, stop_event: Event | None = None) -> None:
     stop = stop_event or Event()
     ensure_sync_schema(recover_interrupted=True)
     start_data_sync_scheduler()
+    _start_low_suction_view_reconcile()
     health_server: ThreadingHTTPServer | None = None
     try:
         health_server = start_worker_health_server()
@@ -69,6 +70,23 @@ def run_forever(*, stop_event: Event | None = None) -> None:
             health_server.server_close()
         stop_data_sync_scheduler()
         LOGGER.info("data sync scheduler worker stopped")
+
+
+def _start_low_suction_view_reconcile() -> None:
+    """后台自检低吸物化视图版本漂移（不阻塞调度器与健康端口启动）。"""
+
+    def _run() -> None:
+        try:
+            from alphaagent.server.services.low_suction.daily_picks_service import (
+                reconcile_materialized_views_on_startup,
+            )
+
+            actions = reconcile_materialized_views_on_startup()
+            LOGGER.info("low-suction materialized view reconcile: %s", actions)
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("low-suction materialized view reconcile failed")
+
+    Thread(target=_run, name="low-suction-view-reconcile", daemon=True).start()
 
 
 @lru_cache(maxsize=1)

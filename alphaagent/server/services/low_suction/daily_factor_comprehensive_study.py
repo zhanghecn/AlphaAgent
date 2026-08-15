@@ -128,10 +128,9 @@ PERSONAL_CASE_SOURCE_METADATA: dict[str, CaseSourceMetadata] = {
     ),
     "立新能源 MA10 向 MA20 加速收敛": CaseSourceMetadata(
         date(2026, 7, 14),
-        None,
+        date(2026, 7, 16),
         "process_only",
-        (),
-        "research_pending",
+        ("pre_cross_acceleration_weak_market",),
     ),
     "爱丽家居 MA10 回贴 MA30": CaseSourceMetadata(
         date(2026, 7, 8),
@@ -172,10 +171,9 @@ PERSONAL_CASE_SOURCE_METADATA: dict[str, CaseSourceMetadata] = {
     ),
     "京投发展 价格先行攻击": CaseSourceMetadata(
         None,
-        None,
+        date(2026, 8, 10),
         "process_only",
-        (),
-        "research_pending",
+        ("price_first_strong_attack",),
     ),
     "中南文化 MA10 回踩": CaseSourceMetadata(
         date(2026, 2, 10),

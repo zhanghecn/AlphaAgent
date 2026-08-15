@@ -18,6 +18,8 @@ from alphaagent.server.services.low_suction.daily_factor_extended_discovery impo
     FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
     MA10_MA20_PRE_CROSS_RULE_KEY,
     POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
+    PRE_CROSS_ACCELERATION_WEAK_MARKET_RULE_KEY,
+    PRICE_FIRST_STRONG_ATTACK_RULE_KEY,
     RESEARCH_THREE_MA_WRAP_RULE_KEY,
     STAGED_MA10_SUPPORT_RULE_KEY,
     _ma10_ma20_next_close_required_return_pct,
@@ -224,7 +226,9 @@ def test_post_wrap_confirmation_requires_the_immediately_prior_stable_wrap() -> 
     )
 
 
-def test_scan_keeps_post_wrap_confirmation_out_of_the_product_pool() -> None:
+def test_scan_admits_post_wrap_confirmation_into_the_product_pool() -> None:
+    """2026-08 校准升级后，包裹次日上沿确认（Z）是 P1.5 同层产品规则。"""
+
     bars = _stable_wrap_then_upper_band_confirmation_history()
     calendar = [row["trade_date"] for row in bars]
     signal_date = calendar[-1]
@@ -236,7 +240,9 @@ def test_scan_keeps_post_wrap_confirmation_out_of_the_product_pool() -> None:
         target_dates={signal_date},
     )
 
-    assert candidates == []
+    assert len(candidates) == 1
+    assert candidates[0].rule_key == POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY
+    assert candidates[0].setup_type == "oversold_rebound"
 
 
 def test_scan_passes_only_product_oversold_rules_to_snapshot_builder(
@@ -269,6 +275,10 @@ def test_scan_passes_only_product_oversold_rules_to_snapshot_builder(
     } == {
         FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
         STAGED_MA10_SUPPORT_RULE_KEY,
+        PRE_CROSS_ACCELERATION_WEAK_MARKET_RULE_KEY,
+        PRICE_FIRST_STRONG_ATTACK_RULE_KEY,
+        RESEARCH_THREE_MA_WRAP_RULE_KEY,
+        POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
     }
 
 
@@ -279,7 +289,9 @@ def test_baihua_20260803_reference_snapshot_is_a_post_wrap_confirmation() -> Non
         "long_bear_alignment": True,
         "ma10_crossed_ma20_after_long_bear_within_15d": True,
         "yang_wrap_three_ma": True,
-        "yang_wrap_stable_base": True,
+        # 7-31 真实快照值：宽口径前置（贴线≤2.5 + 量峰比≤0.70）满足。
+        "yang_wrap_nearest_ma_low_abs_pct": 1.4247,
+        "yang_wrap_volume_end_to_peak_ratio_6d": 0.5286,
         "ma10": 6.949,
         "ma20": 7.017,
         "ma30": 6.9536666667,
@@ -437,9 +449,11 @@ def test_scan_admits_three_line_trend_candidate_without_ma60() -> None:
     )
 
 
-def test_scan_excludes_unvalidated_stable_three_ma_wrap_from_the_product_pool(
+def test_scan_admits_calibrated_stable_three_ma_wrap_into_the_product_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """2026-08 校准升级后，三线包裹缩量底盘（W）是 P1.5 同层产品规则。"""
+
     signal_date = date(2026, 7, 23)
     snapshot = SimpleNamespace(
         symbol="003032.SZSE",
@@ -469,6 +483,53 @@ def test_scan_excludes_unvalidated_stable_three_ma_wrap_from_the_product_pool(
         "matching_discovery_rule_keys",
         lambda features, setup_type, *, prior_features=None, rules=None: (
             (RESEARCH_THREE_MA_WRAP_RULE_KEY,)
+            if setup_type == "oversold_rebound"
+            else ()
+        ),
+    )
+
+    candidates = daily_picks_scanner.scan_low_suction_candidates(
+        [],
+        (signal_date, signal_date + timedelta(days=1)),
+        [],
+        target_dates={signal_date},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].rule_key == RESEARCH_THREE_MA_WRAP_RULE_KEY
+    assert candidates[0].setup_type == "oversold_rebound"
+
+
+def test_scan_still_excludes_unvalidated_attack_body_hold_from_the_product_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signal_date = date(2026, 8, 7)
+    snapshot = SimpleNamespace(
+        symbol="000859.SZSE",
+        trade_date=signal_date,
+        position=0,
+        history=(_bar(signal_date, 10.0, volume=1_000.0),),
+        features={
+            "close_price": 10.0,
+            "daily_return_pct": -1.0,
+            "turnover_rate_pct": 5.5,
+            "candle_range_pct": 3.9,
+            "long_bear_alignment": True,
+        },
+        prior_features=None,
+        d1_close_return_pct=10.0,
+        d1_label_status="available",
+    )
+    monkeypatch.setattr(
+        daily_picks_scanner,
+        "_iter_candidate_snapshots",
+        lambda *args, **kwargs: iter((snapshot,)),
+    )
+    monkeypatch.setattr(
+        daily_picks_scanner,
+        "matching_discovery_rule_keys",
+        lambda features, setup_type, *, prior_features=None, rules=None: (
+            (ATTACK_BODY_HOLD_RULE_KEY,)
             if setup_type == "oversold_rebound"
             else ()
         ),
@@ -884,7 +945,8 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
         "long_bear_alignment": True,
         "ma10_crossed_ma20_after_long_bear_within_15d": True,
         "yang_wrap_three_ma": True,
-        "yang_wrap_stable_base": True,
+        "yang_wrap_nearest_ma_low_abs_pct": 0.8,
+        "yang_wrap_volume_end_to_peak_ratio_6d": 0.4,
     }
     post_wrap_confirmation = {
         "low_price": 10.0,
@@ -964,12 +1026,16 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
         "long_bear_alignment": True,
         "ma10_crossed_ma20_after_long_bear_within_15d": True,
         "yang_wrap_three_ma": True,
-        "yang_wrap_stable_base": True,
+        "yang_wrap_shrink_stable_base": True,
     }
     assert _rule_matches(oversold_rules[stable_wrap_key], stable_wrap) is True
     assert _rule_matches(
         oversold_rules[stable_wrap_key],
-        {**stable_wrap, "yang_wrap_stable_base": False},
+        {**stable_wrap, "yang_wrap_nearest_ma_low_abs_pct": 2.0},
+    ) is False
+    assert _rule_matches(
+        oversold_rules[stable_wrap_key],
+        {**stable_wrap, "yang_wrap_volume_end_to_peak_ratio_6d": 0.8},
     ) is False
     assert _rule_matches(
         oversold_rules[stable_wrap_key],

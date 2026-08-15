@@ -1,99 +1,133 @@
-import { PanelHead } from "@/components/PanelHead";
+import { useMemo, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { ChevronDown, ChevronUp } from "lucide-react";
 
-/** 低吸规则说明：当前超跌反弹与趋势回踩的可执行口径。 */
+import { fetchLowSuctionGuideCases } from "@/api/lowSuction";
+import { PanelHead } from "@/components/PanelHead";
+import { StockIdentityLink } from "@/components/StockIdentityLink";
+import { cn, formatPct, priceColorClass } from "@/lib/utils";
+
+import { GuideCaseChart } from "./guide/GuideCaseChart";
+import { GuideFlowChart } from "./guide/GuideFlowChart";
+import { GuideRulePanel } from "./guide/GuideRulePanel";
+import {
+  buildGuideStages,
+  buildRuleNodes,
+  buildScoreTable,
+  mergeCasesIntoRules,
+  type GuideCase,
+  type GuideFamilyKey,
+} from "./guide/guideContent";
+
+/** 默认选中：P1 分段支撑（案例最多、验证最充分的超跌产品规则）。 */
+const DEFAULT_RULE_KEY = "staged_ma10_support_before_ma30_convergence_shrink";
+/** 02 节分量表「代表案例」入口跳转的各族旗舰规则。 */
+const FAMILY_FLAGSHIP_RULE: Record<GuideFamilyKey, string> = {
+  trend_pullback: "ma5_low_touch_stable_trend_volume_shrink",
+  oversold_rebound: DEFAULT_RULE_KEY,
+};
+
+/**
+ * 低吸规则说明书：01 因子流程图（点节点看经典案例 K 线）+ 02 评分体系
+ * + 03 口径与边界。案例数据来自后端策展清单（PERSONAL_CASES 真实历史
+ * 股票），K 线窗口只显示「底盘 + 信号 + 信号后效果」段。
+ */
 export function LowSuctionGuideView() {
+  const stages = useMemo(buildGuideStages, []);
+  const baseNodes = useMemo(buildRuleNodes, []);
+  const [selectedRuleKey, setSelectedRuleKey] =
+    useState<string>(DEFAULT_RULE_KEY);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  const casesQuery = useQuery({
+    queryKey: ["low-suction", "guide-cases"],
+    queryFn: fetchLowSuctionGuideCases,
+    staleTime: 60_000,
+  });
+  const merged = useMemo(
+    () =>
+      casesQuery.data
+        ? mergeCasesIntoRules(baseNodes, casesQuery.data)
+        : { nodes: baseNodes.map((node) => ({ ...node, cases: [] })), orphanCases: [] },
+    [baseNodes, casesQuery.data],
+  );
+  const selectedNode =
+    merged.nodes.find((node) => node.ruleKey === selectedRuleKey) ?? null;
+
+  const selectRuleAndScroll = (ruleKey: string) => {
+    setSelectedRuleKey(ruleKey);
+    // 移动端面板在流程图下方，选择后滚动到位；桌面端右列 sticky 不需要。
+    if (window.matchMedia("(max-width: 1023px)").matches) {
+      panelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  };
+
   return (
     <section aria-label="低吸规则说明" className="text-sm">
-      <PanelHead no="01" zh="上升趋势低吸规则（v4）" en="TREND PULLBACK" note="主升浪中的安静回踩" />
-      <div className="space-y-3 border-b px-3 py-4 sm:px-4">
-        <div>
-          <div className="mb-1 font-semibold">前置结构（硬门槛）</div>
-          <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
-            <li>多头排列：MA5 &gt; MA10 &gt; MA20 &gt; MA30（三线），且 MA10/MA20/MA30 全部向上 —— 不硬性要求 MA60，适配长期下跌刚转势、MA60 仍在上方的情况</li>
-            <li>D 日低点回踩 MA5（强趋势）或 MA10（MA5 不规律时）—— 影线触碰区间 -4% ~ +1.5%，收盘不破 -1.5%</li>
-          </ul>
+      <PanelHead
+        no="01"
+        zh="因子流程"
+        en="FACTOR PIPELINE"
+        note="点击阶段卡看每步细节 · 点击规则节点看真实历史股票的经典案例 K 线"
+      />
+      <div className="border-b lg:grid lg:grid-cols-[minmax(0,1fr)_400px]">
+        <div className="min-w-0">
+          <GuideFlowChart
+            stages={stages}
+            nodes={merged.nodes}
+            selectedRuleKey={selectedRuleKey}
+            onSelectRule={setSelectedRuleKey}
+          />
+          <p className="px-3 pb-3 text-[10px] text-muted-foreground/80 sm:px-4">
+            虚线节点为研究锚点（只审计、不进实时推荐与回测仓位）；节点角标为关联案例数。
+            {casesQuery.data?.status === "partial" && (
+              <span className="text-amber-600">
+                {" "}
+                部分案例历史数据缺失，对应收益显示为 --。
+              </span>
+            )}
+            {casesQuery.isError && (
+              <span className="text-amber-600">
+                {" "}
+                案例收益数据暂时不可用，K 线与流程图不受影响。
+              </span>
+            )}
+          </p>
+          {merged.orphanCases.length > 0 && (
+            <OrphanCasesGroup cases={merged.orphanCases} />
+          )}
         </div>
-        <div>
-          <div className="mb-1 font-semibold">基础形态：安静小 K 线（candle_quiet）</div>
-          <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
-            <li>D 日振幅 ≤ 5%（(最高-最低)/前收）—— 小阴小阳的下影线低点才算回踩，嘈杂 K 线的影线是噪音</li>
-            <li>依据：全量 811 日最单调变量 —— 振幅 &lt;3% 组 +0.013% → ≥10% 组 <span className="text-emerald-600">-0.734%</span></li>
-          </ul>
-        </div>
-        <div>
-          <div className="mb-1 font-semibold">否决 1：首阴追高（trend_first_crack_chase）</div>
-          <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
-            <li>振幅 &gt;5% 且收盘没回到 MA5（距 MA5 ≥ 0）且<span className="text-foreground">昨日仍在涨</span> —— 大涨后的第一根分歧巨震，追高买首阴</li>
-            <li>昨日已跌 = 分歧已开始释放，才算低吸语境；全量单调：昨日 &lt;-5% 组 -0.058% → 昨日 ≥5% 组 <span className="text-emerald-600">-0.867%</span></li>
-          </ul>
-        </div>
-        <div>
-          <div className="mb-1 font-semibold">否决 2：趋势过伸（trend_overextended）</div>
-          <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
-            <li>当前 M5-M10 距离 ≥ 本段多头趋势内此前每次回踩日距离中位数 + 2 个百分点 —— 相对本段自己的回踩签名判断趋势老嫩，不用绝对阈值</li>
-            <li>全区间单调：超额 &lt;0 组 -0.134% → ≥6 组 <span className="text-emerald-600">-1.049%</span></li>
-          </ul>
-        </div>
-        <div>
-          <div className="mb-1 font-semibold">落地规则与验证</div>
-          <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
-            <li><span className="text-foreground">安静小K线回踩（v4_quiet）</span>：多头排列 + 安静 K 线低点回踩 MA5/MA10 + 非过伸 —— 最纯形态</li>
-            <li><span className="text-foreground">真实回踩（v4_authentic）</span>：多头排列 + 低点回踩 + 非首阴追高 + 非过伸 —— 通用形态</li>
-            <li>验证：6/6 趋势坏样本全部命中否决；8/8 个人案例零误伤；官方案例门禁 15/15；全量均值 -0.008% 打赢全部同族基线（-0.092~-0.120）</li>
-          </ul>
-        </div>
-        <div>
-          <div className="mb-1 font-semibold">综合评分构成（0-100）</div>
-          <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
-            <li>振幅安静度(语境) 22 + 趋势年龄 14（6-10 天满分）+ 回踩线别 14（MA5=14 / MA10=9）+ 换手率梯度 12（&lt;3% 满分，不门禁）</li>
-            <li>连续小 K 线 14（≥5 根满分）+ 昨日已跌 8 + 收盘位置 8 + 趋势老嫩 5 + 当日缩量 3</li>
-            <li>语境调节：转势票(MA60&gt;MA30) 中等振幅 5-8% 反而满分（反弹启动特征 +0.018%）；成熟票需极安静 &lt;3%（同区间 -0.583%）</li>
-          </ul>
+        <div
+          ref={panelRef}
+          className="border-t px-3 py-4 sm:px-4 lg:border-l lg:border-t-0"
+        >
+          <div className="lg:sticky lg:top-3 lg:max-h-[calc(100vh-120px)] lg:overflow-y-auto lg:pr-1">
+            <GuideRulePanel node={selectedNode} />
+          </div>
         </div>
       </div>
 
-      <PanelHead no="02" zh="超跌反弹低吸规则（P1.5 / P1）" en="OVERSOLD REBOUND" note="只保留跨窗口验证的两条路径" />
-      <div className="space-y-3 border-b px-3 py-4 sm:px-4">
-        <div>
-          <div className="mb-1 font-semibold">先准入，再评分</div>
-          <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
-            <li>命名研究形态决定是否进入超跌池；先按攻击阶段排序，再在同层比较诊断分。没有命中形态的股票，不会因其他分项高分进入列表。</li>
-            <li>超跌只覆盖长期空头走向多头的过渡段。MA10&gt;MA20&gt;MA30 已稳定成立的股票，转入趋势低吸，不和超跌候选混排。</li>
-          </ul>
-        </div>
-        <div>
-          <div className="mb-1 font-semibold">形态一：成熟底盘首段两线攻击（P1.5）</div>
-          <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
-            <li>长期空头中，D 日阳线实体包裹 MA10/MA20，但 MA10 尚未上穿 MA20，收盘仍在 MA30 下；封涨停的 D 日直接排除。</li>
-            <li>攻击前 15 日必须是逐级支撑或释放后受控回踩，最后底盘低点距 D 日至少 9 日；MA10/MA20 要平稳收敛，既排除完全不收敛，也排除大阳线硬拉跨线。</li>
-            <li>不追高：收盘高于 MA10 不超过 3%，D 日涨幅不超过 5%；收盘还要从日内低点明显回收（当前冻结研究边界约 3.2%）。百花医药 7-14 属于该路径。</li>
-            <li>它是 MA10 准备上穿 MA20 的第一段攻击，不是已经完成趋势。D 日收盘为假设买点，D+1 只作收益标签，MA5 不参与。</li>
-          </ul>
-        </div>
-        <div>
-          <div className="mb-1 font-semibold">形态二：P1 分段支撑</div>
-          <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
-            <li>MA10 已上穿 MA20、仍在 MA30 下方；价格回踩 MA10 获支撑。随后 MA10 与 MA30 的距离继续缩小，量能呈阶梯式收缩。</li>
-            <li>这是“先过 MA20、再准备过 MA30”的地基，而不是均线已经拉开后的追涨。传智教育 7-22、7-24 属于这条路径。</li>
-          </ul>
-        </div>
-        <div>
-          <div className="mb-1 font-semibold">研究锚点，不进入推荐</div>
-          <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
-            <li>稳定三线包裹、包裹后的上沿确认、攻击实体守住和走完双穿后的回踩，继续保留作案例审计和底盘研究，但不占实时推荐或回测仓位。</li>
-            <li>百花医药 8-3、国风新材、秦安股份、京投发展是下一轮比较“有效底盘”与相似坏样本的锚点；没有跨窗口证据前，不以单票结果提高它们的优先级。</li>
-          </ul>
-        </div>
-        <div>
-          <div className="mb-1 font-semibold">排除与排序</div>
-          <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground">
-            <li>信号日触及涨停、低点没有真实均线支撑，或 MA10 已远离 MA30 且没有回踩修复结构，均不作为该阶段的低吸形态。</li>
-            <li><span className="text-foreground">同日阶段优先级：</span>P1.5 成熟首段两线攻击 &gt; P1 分段支撑。P1.5 同层先按综合诊断分，再以接近中等活跃换手（当前以 3% 为中心）决胜；P1 同层按诊断分、连续小 K 线、换手率排序。</li>
-            <li>基础排序看均线支撑、空头持续时间、K 线是否安静、收盘是否脱离支撑、以及量能是否有序收缩。换手率 ≥8% 不改变规则命中，但诊断分封顶 39，避免高换手派发占据前列。</li>
-            <li><span className="text-foreground">P1 的活跃承接加分：</span>仅当 P1 已命中且换手率在 1.5%~8% 时加 8 分。它奖励“缩量但仍有承接”，不让无成交的缩量地基排在前面；不满足 P1 的股票不会得到这 8 分。</li>
-            <li>超跌诊断分不是收益概率。它只在同一已验证阶段内比较形态完整度；P1.5 仍始终排在普通 P1 之前，分数跨版本不可直接比较。</li>
-          </ul>
-        </div>
+      <PanelHead
+        no="02"
+        zh="评分体系"
+        en="SCORING"
+        note="评分独立于准入：规则决定谁能入池，评分只在池内排先后；分数不是收益概率，两族量纲不同不可横比"
+      />
+      <div className="space-y-4 border-b px-3 py-4 sm:px-4">
+        <ScoreFamilySection
+          family="trend_pullback"
+          title="上升趋势低吸评分（9 分量直加）"
+          onShowFlagship={() =>
+            selectRuleAndScroll(FAMILY_FLAGSHIP_RULE.trend_pullback)
+          }
+        />
+        <ScoreFamilySection
+          family="oversold_rebound"
+          title="超跌反弹低吸评分（门禁 + 折算）"
+          onShowFlagship={() =>
+            selectRuleAndScroll(FAMILY_FLAGSHIP_RULE.oversold_rebound)
+          }
+        />
       </div>
 
       <PanelHead no="03" zh="口径与边界" en="CONVENTION" note="诚实边界，不外推" />
@@ -105,11 +139,151 @@ export function LowSuctionGuideView() {
           <li>并列决胜：P1.5 先按诊断分、同分再以换手率接近 3% 决胜；P1 按诊断分、连续小 K 线数和换手率决胜。回测与实时推荐使用同一决胜键。</li>
           <li>行情主导一切：两族人口均值仅接近打平，本产品按综合分排序取最高，不做全池买入</li>
           <li>实时推荐：交易日内每分钟用现货快照合成当日虚拟 K 线重算（未定型），收盘后以日线同步确认为准；实时组不含 ST 股</li>
+          <li>说明书案例：来自策展经典案例库（真实历史股票），收益为信号日收盘起 D+1/D+3/D+5 收盘口径，遇除权跳变按诚实边界显示 --；案例用于理解因子形态，不代表未来收益</li>
         </ul>
         <div className="rounded border border-amber-500/40 bg-amber-500/5 p-3 text-xs text-amber-600">
           ⚠️ 全部内容为历史回测与研究结论，非投资建议；样本外有效性不保证，极端行情下 D+1 仍可能大幅亏损。
         </div>
       </div>
     </section>
+  );
+}
+
+/** 单族评分分量表：门禁行置顶，折算分量带标注。 */
+function ScoreFamilySection({
+  family,
+  title,
+  onShowFlagship,
+}: {
+  family: GuideFamilyKey;
+  title: string;
+  onShowFlagship: () => void;
+}) {
+  const table = buildScoreTable(family);
+  return (
+    <div>
+      <div className="mb-1.5 flex flex-wrap items-center gap-x-2">
+        <span className="text-xs font-semibold">{title}</span>
+        <span className="text-[11px] tabular-nums text-muted-foreground">
+          满分口径 {table.maxScoreText}
+        </span>
+        <button
+          type="button"
+          onClick={onShowFlagship}
+          className="rounded border px-1.5 py-px text-[10px] text-primary hover:bg-muted"
+        >
+          看代表案例 →
+        </button>
+      </div>
+      <p className="mb-1.5 text-[11px] text-muted-foreground">{table.formula}</p>
+      <div className="overflow-x-auto rounded-md border">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b bg-muted/30 text-left text-[11px] text-muted-foreground">
+              <th className="px-2 py-1.5 font-medium">分量</th>
+              <th className="px-2 py-1.5 font-medium">上限</th>
+              <th className="px-2 py-1.5 font-medium">梯度口径</th>
+              <th className="px-2 py-1.5 font-medium">设计依据</th>
+            </tr>
+          </thead>
+          <tbody>
+            {table.components.map((component) => (
+              <tr
+                key={component.key}
+                className={cn(
+                  "border-b last:border-0",
+                  component.kind === "gate" && "bg-amber-500/[0.04]",
+                )}
+              >
+                <td className="whitespace-nowrap px-2 py-1.5 font-medium">
+                  {component.label}
+                  {component.kind === "gate" && (
+                    <span className="ml-1 rounded border border-amber-500/40 px-1 text-[9px] text-amber-600">
+                      门禁
+                    </span>
+                  )}
+                  {component.scaled === true && (
+                    <span className="ml-1 text-[9px] text-muted-foreground">
+                      ×0.4
+                    </span>
+                  )}
+                  {component.scaled === false && component.kind === "bonus" && (
+                    <span className="ml-1 text-[9px] text-muted-foreground">
+                      不折算
+                    </span>
+                  )}
+                </td>
+                <td className="px-2 py-1.5 tabular-nums text-muted-foreground">
+                  {component.kind === "gate" ? "—" : component.maxPoints}
+                </td>
+                <td className="px-2 py-1.5 text-muted-foreground">
+                  {component.gradient}
+                </td>
+                <td className="px-2 py-1.5 text-muted-foreground">
+                  {component.rationale}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/** 未成规则的观察个案组（无 rule_key 的 research_pending 案例，诚实单列）。 */
+function OrphanCasesGroup({ cases }: { cases: GuideCase[] }) {
+  return (
+    <div className="border-t px-3 pb-4 pt-2 sm:px-4">
+      <p className="mb-1 text-[11px] font-medium text-muted-foreground">
+        未成规则的观察个案（待验证）
+      </p>
+      <p className="mb-1.5 text-[10px] leading-relaxed text-muted-foreground/80">
+        这是复盘时觉得有意思、但还没总结出明确条件的走势个案——条件定不下来就写不成规则，所以它不属于上面
+        16 条规则，也不会出现在实时推荐里。留在说明书中是给后续研究留参照：未来验证这类形态有效，才会补上条件升级成正式规则（立新能源/京投发展/传智教育/百花医药已在两轮升级中转正）。
+      </p>
+      <div className="grid gap-1.5 xl:grid-cols-2">
+        {cases.map((caseItem) => (
+          <OrphanCaseCard key={caseItem.caseId} caseItem={caseItem} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function OrphanCaseCard({ caseItem }: { caseItem: GuideCase }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="rounded-md border border-dashed">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-muted/50"
+      >
+        <span className="flex min-w-0 items-center gap-2">
+          <StockIdentityLink name={caseItem.name} vtSymbol={caseItem.vtSymbol} />
+          <span className="shrink-0 tabular-nums text-[10px] text-muted-foreground">
+            {caseItem.signalDate}
+          </span>
+          {caseItem.returns.d5 != null && (
+            <span
+              className={cn(
+                "shrink-0 tabular-nums text-[10px]",
+                priceColorClass(caseItem.returns.d5),
+              )}
+            >
+              D+5 {formatPct(caseItem.returns.d5)}
+            </span>
+          )}
+        </span>
+        {open ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+      </button>
+      {open && (
+        <div className="border-t px-2.5 py-2">
+          <GuideCaseChart caseItem={caseItem} />
+        </div>
+      )}
+    </div>
   );
 }

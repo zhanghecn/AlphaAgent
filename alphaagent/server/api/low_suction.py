@@ -7,6 +7,7 @@ from datetime import date
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
+from alphaagent.market.cache import TTLCache
 from alphaagent.server.core.responses import fail, ok
 from alphaagent.server.services.low_suction.daily_picks_service import (
     get_daily_backtest_report,
@@ -15,9 +16,17 @@ from alphaagent.server.services.low_suction.daily_picks_service import (
     get_live_recommendations,
     start_daily_backtest_rebuild,
 )
+from alphaagent.server.services.low_suction.guide_cases import (
+    load_guide_cases_payload,
+)
 
 
 router = APIRouter(prefix="/low-suction", tags=["low-suction"])
+
+# 说明书案例：策展清单与历史日线一天一变（盘后同步后才可能更新），
+# 60s 进程缓存兜底刷新抖动。
+_GUIDE_CASES_CACHE_TTL_SECONDS = 60
+_guide_cases_cache: TTLCache = TTLCache(max_items=4)
 
 
 @router.get("/live", response_model=None)
@@ -158,3 +167,26 @@ def daily_ledger():
             "label_convention": payload.get("label_convention"),
         }
     )
+
+
+@router.get("/guide/cases", response_model=None)
+def guide_cases():
+    """说明书案例：策展经典案例按规则归组 + 现算 D+1/D+3/D+5 收益。"""
+
+    try:
+        return ok(
+            _guide_cases_cache.get_or_set(
+                "low-suction:guide:cases:v1",
+                _GUIDE_CASES_CACHE_TTL_SECONDS,
+                load_guide_cases_payload,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            status_code=503,
+            content=fail(
+                "LOW_SUCTION_GUIDE_CASES_UNAVAILABLE",
+                "低吸说明书案例数据暂时不可用",
+                {"reason": exc.__class__.__name__},
+            ),
+        )

@@ -205,3 +205,63 @@ def test_low_suction_ledger_reports_service_unavailable(monkeypatch) -> None:
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "LOW_SUCTION_LEDGER_UNAVAILABLE"
+
+
+def test_low_suction_guide_cases_returns_grouped_payload(monkeypatch) -> None:
+    expected = {
+        "status": "ok",
+        "score_version": "low-suction-daily-score-v3.1",
+        "families": [
+            {
+                "key": "trend_pullback",
+                "label": "上升趋势低吸",
+                "rules": [
+                    {
+                        "rule_key": "ma5_low_touch_stable_trend",
+                        "description": "稳定多头中 D 日低点回踩 MA5",
+                        "tier": "product",
+                        "product_tier": None,
+                        "cases": [{"case_id": "华电辽能 MA5 回踩"}],
+                    }
+                ],
+            }
+        ],
+        "orphan_cases": [],
+    }
+    monkeypatch.setattr(low_suction, "load_guide_cases_payload", lambda: expected)
+    low_suction._guide_cases_cache.clear()
+
+    response = TestClient(create_app()).get("/api/low-suction/guide/cases")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == expected
+
+
+def test_low_suction_guide_cases_uses_process_cache(monkeypatch) -> None:
+    calls = {"count": 0}
+
+    def load() -> dict[str, object]:
+        calls["count"] += 1
+        return {"status": "ok", "families": [], "orphan_cases": []}
+
+    monkeypatch.setattr(low_suction, "load_guide_cases_payload", load)
+    low_suction._guide_cases_cache.clear()
+
+    client = TestClient(create_app())
+    client.get("/api/low-suction/guide/cases")
+    client.get("/api/low-suction/guide/cases")
+
+    assert calls["count"] == 1
+
+
+def test_low_suction_guide_cases_reports_service_unavailable(monkeypatch) -> None:
+    def unavailable() -> dict[str, object]:
+        raise RuntimeError("database down")
+
+    monkeypatch.setattr(low_suction, "load_guide_cases_payload", unavailable)
+    low_suction._guide_cases_cache.clear()
+
+    response = TestClient(create_app()).get("/api/low-suction/guide/cases")
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "LOW_SUCTION_GUIDE_CASES_UNAVAILABLE"

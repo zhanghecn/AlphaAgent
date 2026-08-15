@@ -1,4 +1,4 @@
-"""低吸日线回测报告构建：分数段统计 + 十槽位模拟 + 交割单。
+"""低吸日线回测报告构建：分数段统计 + 两族分开的仓位模拟 + 交割单。
 
 输入为扫描器产出的全窗口候选清单，输出可持久化的 JSON payload。
 口径与研究一致：D 日收盘买入、D+1 收盘结算，未扣费、raw_unadjusted 探索级。
@@ -24,7 +24,7 @@ from alphaagent.server.services.low_suction.daily_picks_scoring import (
 )
 
 
-BACKTEST_VERSION = "low-suction-daily-backtest-v8"
+BACKTEST_VERSION = "low-suction-daily-backtest-v11"
 RECENT_LEDGER_DAYS = 60
 _MIN_BAND_SAMPLE = 30
 PICKS_PER_FAMILY = 5
@@ -103,12 +103,9 @@ def build_backtest_payload(
         },
         "families": families,
         "position_sim": {
-            "trend_pullback": _sim_summary(position, "trend_pullback"),
-            "oversold_rebound": _sim_summary(position, "oversold_rebound"),
-            "combined": position["combined"],
-            "time_segments": position["time_segments"],
-            "market_regimes": position["market_regimes"],
-            "equity_curve": position["equity_curve"],
+            # 两族分开统计（含各自权益曲线与样本外/市况复核），不再产出混合口径。
+            "trend_pullback": position["families"]["trend_pullback"],
+            "oversold_rebound": position["families"]["oversold_rebound"],
         },
         "ledger_days": ledger_days,
     }
@@ -213,100 +210,86 @@ def _position_simulation(
                 )
 
     days = sorted(set(selected["trend_pullback"]) | set(selected["oversold_rebound"]))
-    equity = 1.0
-    equity_curve: list[dict[str, object]] = []
-    day_records: list[dict[str, object]] = []
-    family_day_returns: dict[str, list[float]] = {
+    family_day_records: dict[str, list[dict[str, object]]] = {
         setup_type: [] for setup_type in SETUP_TYPES
     }
     for day in days:
-        positions: list[LowSuctionCandidate] = []
         for setup_type in SETUP_TYPES:
             family_picks = selected[setup_type].get(day, [])
             settled_picks = [
                 pick for pick in family_picks if pick.d1_close_return_pct is not None
             ]
             values = [float(pick.d1_close_return_pct) for pick in settled_picks]
-            if values:
-                family_day_returns[setup_type].append(mean(values))
-                positions.extend(settled_picks)
-        if not positions:
-            continue
-        day_return = sum(
-            float(pick.d1_close_return_pct)
-            for pick in positions
-            if pick.d1_close_return_pct is not None
-        ) / MAX_POSITIONS
-        equity *= 1 + day_return / 100
-        day_records.append(
-            {
-                "trade_date": day,
-                "return_pct": day_return,
-                "positions": len(positions),
-                "segment": segment_by_date.get(day, "embargo"),
-                "market_regime": market_regimes.get(day, "unclassified"),
-            }
-        )
-        equity_curve.append({"date": day.isoformat(), "equity": round(equity, 6)})
+            if not values:
+                continue
+            family_day_records[setup_type].append(
+                {
+                    "trade_date": day,
+                    "return_pct": mean(values),
+                    "positions": len(settled_picks),
+                    "segment": segment_by_date.get(day, "embargo"),
+                    "market_regime": market_regimes.get(day, "unclassified"),
+                }
+            )
 
+    # 两族统计完全分开（主人 2026-08-15 口径：不再看混合十票组合）。
+    # 族日收益 = 当日族内前五均值；族复利/权益曲线 = 该日收益逐日累积。
     per_family: dict[str, dict[str, object]] = {}
     for setup_type in SETUP_TYPES:
+        records = family_day_records[setup_type]
         values = [
             float(pick.d1_close_return_pct)
             for picks in selected[setup_type].values()
             for pick in picks
             if pick.d1_close_return_pct is not None
         ]
-        family_returns = family_day_returns[setup_type]
-        family_equity = 1.0
-        for value in family_returns:
-            family_equity *= 1 + value / 100
+        equity = 1.0
+        equity_curve: list[dict[str, object]] = []
+        for record in records:
+            equity *= 1 + float(record["return_pct"]) / 100
+            equity_curve.append(
+                {
+                    "date": record["trade_date"].isoformat(),
+                    "equity": round(equity, 6),
+                }
+            )
+        family_returns = [float(record["return_pct"]) for record in records]
         per_family[setup_type] = {
             **_stats(values),
             "trades": len(values),
-            "active_days": len(family_returns),
-            "average_positions_per_day": round(len(values) / len(family_returns), 2)
-            if family_returns
+            "active_days": len(records),
+            "average_positions_per_day": round(len(values) / len(records), 2)
+            if records
             else 0.0,
-            "daily_mean_pct": round(mean(family_returns), 4)
-            if family_returns
-            else None,
-            "compound_pct": round((family_equity - 1) * 100, 2),
+            "daily_mean_pct": round(mean(family_returns), 4) if records else None,
+            "compound_pct": round((equity - 1) * 100, 2),
+            "max_drawdown_pct": _max_drawdown_pct(family_returns),
+            "equity_curve": equity_curve,
+            "time_segments": {
+                key: _portfolio_summary(
+                    [record for record in records if record["segment"] == key]
+                )
+                for key in ("development", "embargo", "validation", "holdout")
+            },
+            "market_regimes": {
+                key: _portfolio_summary(
+                    [record for record in records if record["market_regime"] == key]
+                )
+                for key in ("above_ma20", "below_ma20", "unclassified")
+            },
         }
-
-    time_segments = {
-        key: _portfolio_summary(
-            [record for record in day_records if record["segment"] == key]
-        )
-        for key in ("development", "embargo", "validation", "holdout")
-    }
-    regime_summaries = {
-        key: _portfolio_summary(
-            [record for record in day_records if record["market_regime"] == key]
-        )
-        for key in ("above_ma20", "below_ma20", "unclassified")
-    }
 
     return {
         "trades": trades,
         "families": per_family,
-        "combined": _portfolio_summary(day_records),
-        "time_segments": time_segments,
-        "market_regimes": regime_summaries,
-        "equity_curve": equity_curve,
     }
-
-
-def _sim_summary(position: dict[str, object], setup_type: str) -> dict[str, object]:
-    families = position["families"]  # type: ignore[index]
-    return dict(families[setup_type])  # type: ignore[index]
 
 
 def _recent_ledger(
     trades: list[dict[str, object]],
     names: dict[str, str],
 ) -> list[dict[str, object]]:
-    """最近 N 个交易日的十槽位交割单（最新在左由前端倒序）。"""
+    """最近 N 个交易日的两族各前五交割单（最新在左由前端倒序）。"""
 
     by_day: dict[str, list[dict[str, object]]] = defaultdict(list)
     for trade in trades:
@@ -367,6 +350,21 @@ def _stats(values: list[float]) -> dict[str, object]:
         "mean_pct": round(mean(values), 4),
         "median_pct": round(median(values), 4),
     }
+
+
+def _max_drawdown_pct(returns: list[float]) -> float | None:
+    """Peak-to-trough drawdown of a daily-return sequence, compounded."""
+
+    if not returns:
+        return None
+    equity = 1.0
+    peak = 1.0
+    max_drawdown = 0.0
+    for value in returns:
+        equity *= 1 + value / 100
+        peak = max(peak, equity)
+        max_drawdown = min(max_drawdown, (equity / peak - 1) * 100)
+    return round(max_drawdown, 2)
 
 
 def _portfolio_summary(records: list[dict[str, object]]) -> dict[str, object]:

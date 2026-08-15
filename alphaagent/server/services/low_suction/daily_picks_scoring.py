@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 
-SCORE_VERSION = "low-suction-daily-score-v3.0"
+SCORE_VERSION = "low-suction-daily-score-v3.1"
 
 SCORE_BANDS: tuple[tuple[float, float, str], ...] = (
     (0.0, 39.999, "0-39"),
@@ -36,6 +36,23 @@ OVERSOLD_TURNOVER_GATE_MAX_PCT = 8.0
 OVERSOLD_GATE_FAILED_SCORE_CAP = 39.0
 # P1 路径的缩量地基不能收缩到无交易承接。该下限只影响该研究路径的诊断排序。
 STAGED_MA30_ACTIVE_PARTICIPATION_MIN_PCT = 1.5
+# 上穿前价格先行（X/Y）路径的攻击强度投票：每条市场验证轴 +2，满 4 票 +8。
+ATTACK_VOTE_POINTS_EACH = 2.0
+ATTACK_VOTE_MAX_COUNT = 4
+# 三线包裹链（W/Z）路径附加分（2026-08 校准升级，桶证据见节点注释）：
+# W 安静包裹：信号日振幅 <3% 满 4 / 3~4% 得 2——包裹日振幅是强单调轴
+# （半年池内 <4% 桶 80.8%/+1.00 vs 4~6% 桶 50.0% vs ≥6% 桶 0%）；分值
+# 刻意低于 Z 链式（两日结构多一层时间确认），避免单日消息形态压过
+# 弱市攻击（X）主榜。
+# Z 链式确认 +6（两日链式结构池内 69.0%/+0.86，与 X 同档）+
+# 缩量确认 +2（确认日 5/10 均量比 <0.9 桶 71.4%/+1.49 vs >1.1 桶 60%/+0.37）。
+THREE_MA_WRAP_QUIET_FULL_RANGE_MAX_PCT = 3.0
+THREE_MA_WRAP_QUIET_RANGE_MAX_PCT = 4.0
+THREE_MA_WRAP_QUIET_FULL_POINTS = 4.0
+THREE_MA_WRAP_QUIET_PART_POINTS = 2.0
+POST_WRAP_CHAIN_POINTS = 6.0
+POST_WRAP_SHRINK_CONFIRM_POINTS = 2.0
+POST_WRAP_SHRINK_CONFIRM_VOL_RATIO_MAX = 0.9
 
 
 @dataclass(frozen=True)
@@ -279,13 +296,18 @@ def score_oversold_candidate(
     vol_ratio: float | None = None,
     *,
     staged_ma30_convergence_rule_matched: bool = False,
+    attack_vote_count: int = 0,
+    three_ma_wrap_rule_matched: bool = False,
+    post_wrap_confirmation_rule_matched: bool = False,
 ) -> tuple[float, tuple[ScoreComponent, ...]]:
     """超跌反弹候选的诊断排序分。
 
     研究规则先决定是否入池，本函数只比较已命中规则的候选。换手率≥8%
     会触发评分门禁并封顶 39；其余基础特征按 0.4 折算。P1 的“向 MA30
-    收敛”和“活跃承接”是已验证的同路径加分。``vol_ratio`` 是 scanner
-    从可见历史算出的近 5/10 日均量比。
+    收敛”和“活跃承接”是已验证的同路径加分；X/Y 上穿前价格先行路径的
+    “攻击强度投票”按票直加（每票 2 分，满 4 票 8 分）；三线包裹链
+    （W/Z）按“安静包裹 / 链式+缩量确认”直加。``vol_ratio``
+    是 scanner 从可见历史算出的近 5/10 日均量比。
     """
 
     turnover = _number(features.get("turnover_rate_pct"))
@@ -316,6 +338,25 @@ def score_oversold_candidate(
     )
     staged_ma30_active_participation_pts = (
         8.0 if staged_ma30_active_participation else 0.0
+    )
+    attack_votes = max(0, min(ATTACK_VOTE_MAX_COUNT, int(attack_vote_count)))
+    attack_vote_pts = attack_votes * ATTACK_VOTE_POINTS_EACH
+    wrap_quiet_pts = 0.0
+    if three_ma_wrap_rule_matched and candle_range is not None:
+        if candle_range < THREE_MA_WRAP_QUIET_FULL_RANGE_MAX_PCT:
+            wrap_quiet_pts = THREE_MA_WRAP_QUIET_FULL_POINTS
+        elif candle_range < THREE_MA_WRAP_QUIET_RANGE_MAX_PCT:
+            wrap_quiet_pts = THREE_MA_WRAP_QUIET_PART_POINTS
+    post_wrap_chain_pts = (
+        POST_WRAP_CHAIN_POINTS if post_wrap_confirmation_rule_matched else 0.0
+    )
+    post_wrap_shrink_confirm = bool(
+        post_wrap_confirmation_rule_matched
+        and vol_ratio is not None
+        and vol_ratio < POST_WRAP_SHRINK_CONFIRM_VOL_RATIO_MAX
+    )
+    post_wrap_shrink_confirm_pts = (
+        POST_WRAP_SHRINK_CONFIRM_POINTS if post_wrap_shrink_confirm else 0.0
     )
     gate_passed = turnover is not None and turnover < OVERSOLD_TURNOVER_GATE_MAX_PCT
     turnover_pts = (
@@ -428,6 +469,47 @@ def score_oversold_candidate(
             ),
         ),
         _component(
+            "attack_votes",
+            "攻击强度投票",
+            attack_votes > 0,
+            attack_vote_pts,
+            ATTACK_VOTE_POINTS_EACH * ATTACK_VOTE_MAX_COUNT,
+            (
+                f"X/Y 路径 {attack_votes}/4 票（gap 快收/放量/MA10 加速/宽开口，每票+2）"
+                if attack_vote_count
+                else "非上穿前价格先行路径"
+            ),
+        ),
+        _component(
+            "wrap_quiet_package",
+            "安静包裹",
+            wrap_quiet_pts > 0,
+            wrap_quiet_pts,
+            THREE_MA_WRAP_QUIET_FULL_POINTS,
+            (
+                f"W 路径振幅 {_fmt(candle_range)}%（<3% 满6，3~4% 得4）"
+                if three_ma_wrap_rule_matched
+                else "非三线包裹路径"
+            ),
+        ),
+        _component(
+            "post_wrap_chain_confirm",
+            "链式+缩量确认",
+            post_wrap_chain_pts + post_wrap_shrink_confirm_pts > 0,
+            post_wrap_chain_pts + post_wrap_shrink_confirm_pts,
+            POST_WRAP_CHAIN_POINTS + POST_WRAP_SHRINK_CONFIRM_POINTS,
+            (
+                f"Z 路径链式确认 +{POST_WRAP_CHAIN_POINTS:g}"
+                + (
+                    f"，均量比 {_fmt(vol_ratio)}<0.9 缩量确认 +{POST_WRAP_SHRINK_CONFIRM_POINTS:g}"
+                    if post_wrap_shrink_confirm
+                    else "，确认日未缩量"
+                )
+                if post_wrap_confirmation_rule_matched
+                else "非上沿确认路径"
+            ),
+        ),
+        _component(
             "capitulation",
             "崩盘脱离低点",
             tight or broad,
@@ -482,12 +564,19 @@ def score_oversold_candidate(
         and c.key not in {
             "staged_ma30_fast_convergence",
             "staged_ma30_active_participation",
+            "attack_votes",
+            "wrap_quiet_package",
+            "post_wrap_chain_confirm",
         }
     )
     raw = (
         base_pts * 0.4
         + fast_staged_ma30_convergence_pts
         + staged_ma30_active_participation_pts
+        + attack_vote_pts
+        + wrap_quiet_pts
+        + post_wrap_chain_pts
+        + post_wrap_shrink_confirm_pts
     )
     if not gate_passed:
         raw = min(raw, OVERSOLD_GATE_FAILED_SCORE_CAP)

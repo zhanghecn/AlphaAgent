@@ -163,8 +163,107 @@ def test_oversold_p1_score_keeps_only_product_components() -> None:
         staged_ma30_convergence_rule_matched=True,
     )
     assert score == 50.0
-    assert sum(c.max_points for c in components if c.kind == "bonus") == 110.0
+    assert sum(c.max_points for c in components if c.kind == "bonus") == 130.0
     assert sum(1 for c in components if c.kind == "gate") == 1
+
+
+def test_oversold_three_ma_wrap_quiet_bonus_unscaled() -> None:
+    """W 路径安静包裹：振幅 <3% 满 4 / 3~4% 得 2 / ≥4% 不得，不折算。"""
+
+    features = {
+        "oversold_low_support": True,
+        "turnover_rate_pct": 2.5,
+        "candle_range_pct": 1.2,
+        "prior_bear_alignment_days": 25,
+    }
+    streak = quiet_candle_streak([_bar(2.0)] * 3)
+    base_score, _ = score_oversold_candidate(features, streak)
+    quiet, components = score_oversold_candidate(
+        features,
+        streak,
+        three_ma_wrap_rule_matched=True,
+    )
+    assert quiet == round(base_score + 4.0, 2)
+    wrap_component = next(c for c in components if c.key == "wrap_quiet_package")
+    assert wrap_component.points == 4.0
+    assert wrap_component.max_points == 4.0
+
+    mid, _ = score_oversold_candidate(
+        {**features, "candle_range_pct": 3.5},
+        streak,
+        three_ma_wrap_rule_matched=True,
+    )
+    base_mid, _ = score_oversold_candidate(
+        {**features, "candle_range_pct": 3.5}, streak
+    )
+    assert mid == round(base_mid + 2.0, 2)
+
+    loud, _ = score_oversold_candidate(
+        {**features, "candle_range_pct": 6.4},
+        streak,
+        three_ma_wrap_rule_matched=True,
+    )
+    base_loud, _ = score_oversold_candidate(
+        {**features, "candle_range_pct": 6.4}, streak
+    )
+    assert loud == base_loud
+
+
+def test_oversold_post_wrap_chain_and_shrink_confirm_unscaled() -> None:
+    """Z 路径：链式确认 +6，确认日缩量（5/10 均量比 <0.9）再 +2，满 8。"""
+
+    features = {
+        "oversold_low_support": True,
+        "turnover_rate_pct": 3.6,
+        "candle_range_pct": 2.8,
+        "prior_bear_alignment_days": 25,
+    }
+    streak = quiet_candle_streak([_bar(2.0)] * 3)
+    base_score, _ = score_oversold_candidate(features, streak, vol_ratio=1.0)
+    chain_only, components = score_oversold_candidate(
+        features,
+        streak,
+        vol_ratio=1.0,
+        post_wrap_confirmation_rule_matched=True,
+    )
+    assert chain_only == round(base_score + 6.0, 2)
+    with_shrink, components = score_oversold_candidate(
+        features,
+        streak,
+        vol_ratio=0.8,
+        post_wrap_confirmation_rule_matched=True,
+    )
+    base_shrink, _ = score_oversold_candidate(features, streak, vol_ratio=0.8)
+    assert with_shrink == round(base_shrink + 8.0, 2)
+    chain_component = next(
+        c for c in components if c.key == "post_wrap_chain_confirm"
+    )
+    assert chain_component.points == 8.0
+    assert chain_component.max_points == 8.0
+
+
+def test_oversold_attack_votes_add_two_points_each_unscaled() -> None:
+    """X/Y 路径攻击强度投票：每票 +2 直加（不经 0.4 折算），满 4 票 +8。"""
+
+    features = {
+        "oversold_low_support": True,
+        "turnover_rate_pct": 2.5,
+        "candle_range_pct": 1.2,
+        "prior_bear_alignment_days": 25,
+    }
+    streak = quiet_candle_streak([_bar(2.0)] * 3)
+    base_score, _ = score_oversold_candidate(features, streak)
+    with_votes, components = score_oversold_candidate(
+        features,
+        streak,
+        attack_vote_count=3,
+    )
+    assert with_votes == round(base_score + 6.0, 2)
+    vote_component = next(c for c in components if c.key == "attack_votes")
+    assert vote_component.points == 6.0
+    assert vote_component.max_points == 8.0
+    capped, _ = score_oversold_candidate(features, streak, attack_vote_count=9)
+    assert capped == round(base_score + 8.0, 2)
 
 
 def test_oversold_process_score_ignores_retired_cross_paths() -> None:
@@ -365,7 +464,10 @@ def test_total_caps_at_gate_failed_cap_when_gate_fails() -> None:
     assert _total(gate_fail) == 80.0                          # 无 cap 参数不 cap
 
 
-def test_score_version_bumped_to_v3_0() -> None:
+def test_score_version_bumped_to_v3_1() -> None:
+    """评分内容（规则集/分量/分值）变更必须同步升版本——版本门禁靠它
+    让旧物化数据失效；并行会话曾只升标签不改内容，造成报告与代码脱节。"""
+
     from alphaagent.server.services.low_suction import daily_picks_scoring as module
 
-    assert module.SCORE_VERSION == "low-suction-daily-score-v3.0"
+    assert module.SCORE_VERSION == "low-suction-daily-score-v3.1"

@@ -135,6 +135,16 @@ def test_latest_read_does_not_substitute_yesterday_on_a_weekday(monkeypatch) -> 
 
 
 def test_live_read_without_snapshot_returns_immediately(monkeypatch) -> None:
+    # 固定到工作日：非交易日 requested_date 为 None 时走「后台首次扫描中」
+    # 分支，本测试验证的是「指定交易日无快照」的立即返回语义。
+    observed_at = datetime.fromisoformat("2026-08-12T10:00:00+08:00")
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return observed_at.astimezone(tz) if tz is not None else observed_at.replace(tzinfo=None)
+
+    monkeypatch.setattr(daily_picks_service, "datetime", FrozenDateTime)
     monkeypatch.setattr(
         daily_picks_service,
         "load_live_snapshot",
@@ -538,12 +548,18 @@ def test_live_payload_keeps_partial_today_as_a_tail_final_virtual_bar(monkeypatc
         ),
     )
 
-    def scan(_bars, calendar, _security, *, target_dates):
+    def scan(_bars, calendar, _security, *, target_dates, market_regimes=None):
         observed["calendar"] = calendar
         observed["target_dates"] = target_dates
+        observed["market_regimes"] = market_regimes
         return []
 
     monkeypatch.setattr(daily_picks_service, "scan_low_suction_candidates", scan)
+    monkeypatch.setattr(
+        daily_picks_service,
+        "_load_market_regimes",
+        lambda _calendar: {today: "below_ma20"},
+    )
 
     payload = daily_picks_service._compute_live_payload(now)
 
@@ -552,6 +568,7 @@ def test_live_payload_keeps_partial_today_as_a_tail_final_virtual_bar(monkeypatc
     assert payload["provisional"] is True
     assert observed["calendar"] == [previous, today]
     assert observed["target_dates"] == {today}
+    assert observed["market_regimes"] == {today: "below_ma20"}
 
 
 def test_spot_merge_stops_after_the_single_tail_final_scan() -> None:
@@ -704,3 +721,193 @@ def test_daily_backtest_report_accepts_matching_versions(monkeypatch) -> None:
     )
 
     assert daily_picks_service.get_daily_backtest_report() == payload
+
+
+def test_startup_reconcile_rebuilds_missing_snapshot_and_report(monkeypatch) -> None:
+    """版本升级日缺口：当前版本快照/回测报告都缺失时，自检立即补建。"""
+
+    calls: list[str] = []
+    monkeypatch.setattr(daily_picks_service, "load_live_snapshot", lambda _v: None)
+    monkeypatch.setattr(
+        daily_picks_service,
+        "refresh_live_recommendations",
+        lambda: calls.append("refresh") or {"status": "ok"},
+    )
+    monkeypatch.setattr(
+        daily_picks_service, "get_daily_backtest_report", lambda: None
+    )
+    monkeypatch.setattr(
+        daily_picks_service,
+        "start_daily_backtest_rebuild",
+        lambda: calls.append("rebuild") or {"status": "building"},
+    )
+
+    actions = daily_picks_service.reconcile_materialized_views_on_startup()
+
+    assert calls == ["refresh", "rebuild"]
+    assert actions == {"live_snapshot": "rebuilt", "backtest_report": "rebuilding"}
+
+
+def test_startup_reconcile_skips_fresh_materialized_views(monkeypatch) -> None:
+    monkeypatch.setattr(
+        daily_picks_service,
+        "load_live_snapshot",
+        lambda _v: {"status": "ok"},
+    )
+    monkeypatch.setattr(
+        daily_picks_service,
+        "get_daily_backtest_report",
+        lambda: {"status": "ok"},
+    )
+    monkeypatch.setattr(
+        daily_picks_service,
+        "refresh_live_recommendations",
+        lambda: (_ for _ in ()).throw(AssertionError("must not scan")),
+    )
+    monkeypatch.setattr(
+        daily_picks_service,
+        "start_daily_backtest_rebuild",
+        lambda: (_ for _ in ()).throw(AssertionError("must not rebuild")),
+    )
+
+    actions = daily_picks_service.reconcile_materialized_views_on_startup()
+
+    assert actions == {"live_snapshot": "fresh", "backtest_report": "fresh"}
+
+
+def test_startup_reconcile_tolerates_a_running_live_scan(monkeypatch) -> None:
+    monkeypatch.setattr(daily_picks_service, "load_live_snapshot", lambda _v: None)
+
+    def _busy() -> dict:
+        raise daily_picks_service.LiveScanAlreadyRunningError("busy")
+
+    monkeypatch.setattr(daily_picks_service, "refresh_live_recommendations", _busy)
+    monkeypatch.setattr(
+        daily_picks_service,
+        "get_daily_backtest_report",
+        lambda: {"status": "ok"},
+    )
+
+    actions = daily_picks_service.reconcile_materialized_views_on_startup()
+
+    assert actions == {"live_snapshot": "already_running", "backtest_report": "fresh"}
+
+
+def test_startup_reconcile_reports_an_already_running_backtest(monkeypatch) -> None:
+    monkeypatch.setattr(
+        daily_picks_service,
+        "load_live_snapshot",
+        lambda _v: {"status": "ok"},
+    )
+    monkeypatch.setattr(
+        daily_picks_service, "get_daily_backtest_report", lambda: None
+    )
+    monkeypatch.setattr(
+        daily_picks_service,
+        "start_daily_backtest_rebuild",
+        lambda: {"already_running": True},
+    )
+
+    actions = daily_picks_service.reconcile_materialized_views_on_startup()
+
+    assert actions == {"live_snapshot": "fresh", "backtest_report": "already_running"}
+
+
+def test_rebuild_status_surfaces_a_worker_owned_running_run(monkeypatch) -> None:
+    """worker 进程触发的回测：本进程内存 idle，顶层状态必须从 DB running 记录合成。"""
+
+    monkeypatch.setattr(
+        daily_picks_service,
+        "load_daily_backtest_rebuild_runs",
+        lambda: [
+            {
+                "id": 4,
+                "status": "running",
+                "stage": "scan_candidates",
+                "source": "manual",
+                "started_at": "2026-08-15T14:00:00+00:00",
+                "requested_at": "2026-08-15T14:00:00+00:00",
+                "message": "扫描全市场候选",
+            },
+            {"id": 3, "status": "failed", "stage": "scan_candidates"},
+        ],
+    )
+
+    status = daily_picks_service.get_daily_backtest_rebuild_status()
+
+    assert status["status"] == "building"
+    assert status["run_id"] == 4
+    assert status["stage"] == "scan_candidates"
+    assert status["started_at"] == "2026-08-15T14:00:00+00:00"
+
+
+def test_rebuild_status_keeps_the_local_building_state_authoritative(monkeypatch) -> None:
+    daily_picks_service._set_rebuild_state(
+        status="building", run_id=9, stage="load_inputs"
+    )
+    monkeypatch.setattr(
+        daily_picks_service,
+        "load_daily_backtest_rebuild_runs",
+        lambda: [{"id": 8, "status": "running", "stage": "scan_candidates"}],
+    )
+    try:
+        status = daily_picks_service.get_daily_backtest_rebuild_status()
+    finally:
+        daily_picks_service._set_rebuild_state(status="idle", run_id=None, stage=None)
+
+    assert status["status"] == "building"
+    assert status["run_id"] == 9
+    assert status["stage"] == "load_inputs"
+
+
+def test_rebuild_status_stays_idle_without_any_running_run(monkeypatch) -> None:
+    monkeypatch.setattr(
+        daily_picks_service,
+        "load_daily_backtest_rebuild_runs",
+        lambda: [{"id": 3, "status": "failed"}, {"id": 1, "status": "ready"}],
+    )
+
+    status = daily_picks_service.get_daily_backtest_rebuild_status()
+
+    assert status["status"] == "idle"
+
+
+def test_backtest_sync_defaults_to_a_two_year_window(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop after capture")
+
+    monkeypatch.setattr(daily_picks_service, "load_daily_factor_inputs", _capture)
+    monkeypatch.setattr(
+        daily_picks_service, "_daily_backtest_execution_lock", nullcontext
+    )
+
+    with pytest.raises(RuntimeError, match="stop after capture"):
+        daily_picks_service.run_daily_backtest_sync()
+
+    start = captured["start_date"]
+    end = captured["end_date"]
+    assert (end - start).days == daily_picks_service.DEFAULT_BACKTEST_WINDOW_DAYS
+
+
+def test_backtest_sync_respects_an_explicit_window(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop after capture")
+
+    monkeypatch.setattr(daily_picks_service, "load_daily_factor_inputs", _capture)
+    monkeypatch.setattr(
+        daily_picks_service, "_daily_backtest_execution_lock", nullcontext
+    )
+
+    with pytest.raises(RuntimeError, match="stop after capture"):
+        daily_picks_service.run_daily_backtest_sync(
+            start_date=date(2026, 2, 9), end_date=date(2026, 8, 14)
+        )
+
+    assert captured["start_date"] == date(2026, 2, 9)
+    assert captured["end_date"] == date(2026, 8, 14)

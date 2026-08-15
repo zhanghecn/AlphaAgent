@@ -102,7 +102,7 @@ def test_personal_case_manifest_covers_every_named_source_observation() -> None:
             date(2026, 7, 15),
             "oversold_rebound",
             "process_only",
-            (),
+            ("pre_cross_acceleration_weak_market",),
         ),
         (
             "爱丽家居 MA10 回贴 MA30",
@@ -158,7 +158,7 @@ def test_personal_case_manifest_covers_every_named_source_observation() -> None:
             date(2026, 8, 7),
             "oversold_rebound",
             "process_only",
-            (),
+            ("price_first_strong_attack",),
         ),
         (
             "中南文化 MA10 回踩",
@@ -223,10 +223,10 @@ def test_unmodeled_personal_cases_stay_archived_as_research_pending() -> None:
         if case.narrative_status == "research_pending"
     }
 
+    # 立新能源/京投发展已于 2026-08 沉淀为上穿前价格先行两子型（X/Y 规则），
+    # 仅剩秦安股份无独立可量化因子，继续留档观察。
     assert set(pending) == {
-        "立新能源 MA10 向 MA20 加速收敛",
         "秦安股份 MA10 上穿 MA20",
-        "京投发展 价格先行攻击",
     }
     assert all(not case.required_process_rule_keys for case in pending.values())
 

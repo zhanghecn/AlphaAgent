@@ -183,11 +183,33 @@ function BacktestTab() {
 }
 
 function LedgerTab() {
+  const qc = useQueryClient();
   const query = useQuery({
     queryKey: ["lowSuctionLedger"],
     queryFn: fetchLowSuctionLedger,
     staleTime: 300_000,
   });
+  // 与回测页共享状态缓存；本页签挂载期间若正在重算，也保持 8s 轮询，
+  // 让「无记录」页能实时展示重建进度并在完成后自动出记录。
+  const statusQuery = useQuery({
+    queryKey: ["lowSuctionBacktestStatus"],
+    queryFn: fetchLowSuctionBacktestStatus,
+    refetchInterval: (q) =>
+      q.state.data?.status === "building" ? 8_000 : false,
+    refetchOnWindowFocus: true,
+  });
+  const statusValue = statusQuery.data?.status;
+  const previousStatus = useRef(statusValue);
+  useEffect(() => {
+    if (
+      previousStatus.current === "building"
+      && (statusValue === "ready" || statusValue === "failed")
+    ) {
+      qc.invalidateQueries({ queryKey: ["lowSuctionLedger"] });
+      qc.invalidateQueries({ queryKey: ["lowSuctionBacktest"] });
+    }
+    previousStatus.current = statusValue;
+  }, [qc, statusValue]);
   if (query.isLoading && !query.data) return <div className="py-5"><LoadingState rows={6} /></div>;
   if (query.isError || !query.data) {
     return (
@@ -200,6 +222,7 @@ function LedgerTab() {
     <LowSuctionLedgerView
       ledgerDays={query.data.ledger_days}
       labelConvention={query.data.label_convention}
+      rebuild={statusQuery.data}
     />
   );
 }

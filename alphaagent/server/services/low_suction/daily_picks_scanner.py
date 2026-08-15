@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -12,7 +13,12 @@ from datetime import date
 from alphaagent.server.services.low_suction.daily_factor_extended_discovery import (
     DISCOVERY_RULES,
     FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
+    POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
+    PRE_CROSS_ACCELERATION_WEAK_MARKET_RULE_KEY,
+    PRICE_FIRST_STRONG_ATTACK_RULE_KEY,
+    RESEARCH_THREE_MA_WRAP_RULE_KEY,
     STAGED_MA10_SUPPORT_RULE_KEY,
+    _attack_vote_count,
     _iter_candidate_snapshots,
     build_pre_attack_base_process_features,
     is_mature_first_leg_two_ma_wrap_qualified,
@@ -36,10 +42,27 @@ SETUP_TYPE_LABELS = {
     "oversold_rebound": "超跌反弹低吸",
 }
 P1_5_TURNOVER_TARGET_PCT = 3.0
+PRE_CROSS_LEAD_RULE_KEYS = frozenset(
+    {
+        PRE_CROSS_ACCELERATION_WEAK_MARKET_RULE_KEY,
+        PRICE_FIRST_STRONG_ATTACK_RULE_KEY,
+    }
+)
+# 三线包裹链两条产品规则（2026-08 研究锚点校准升级）：
+# W=三线包裹缩量底盘（n=40 剔案例 65.8%/+0.45）、
+# Z=包裹次日上沿确认（宽前置，n=43 剔案例 69.0%/+0.86），与 P1.5 同层。
+THREE_MA_WRAP_CHAIN_RULE_KEYS = frozenset(
+    {
+        RESEARCH_THREE_MA_WRAP_RULE_KEY,
+        POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
+    }
+)
 PRODUCT_OVERSOLD_RULE_KEYS = frozenset(
     {
         FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
         STAGED_MA10_SUPPORT_RULE_KEY,
+        *PRE_CROSS_LEAD_RULE_KEYS,
+        *THREE_MA_WRAP_CHAIN_RULE_KEYS,
     }
 )
 PRODUCT_DISCOVERY_RULES = {
@@ -113,14 +136,19 @@ def scan_low_suction_candidates(
     security_status: Sequence[Mapping[str, object]],
     *,
     target_dates: set[date] | None = None,
+    market_regimes: Mapping[date, str] | None = None,
 ) -> list[LowSuctionCandidate]:
     """Scan source-rule candidates and attach the current diagnostic score.
 
     ``target_dates`` 为 None 时扫描全窗口（回测）；传入单日集合即实时/补扫。
 
-    产品超跌池只放行两条跨窗口已验证路径：成熟首段两线攻击（P1.5）与
-    分段 MA10 支撑（P1）。其余攻击锚点仍留在研究层，不会仅因形态相似
-    进入实时推荐或回测仓位。
+    产品超跌池放行两类跨窗口已验证路径：成熟首段两线攻击（P1.5）与
+    分段 MA10 支撑（P1）；另含 2026-08 观察个案沉淀的两条上穿前价格
+    先行子型（P1.5 同层）：价格先行强攻（Y）全 regime 放行，弱市上穿前
+    加速（X）要求信号日（或最近已确认）指数收盘位于 MA20 下方——
+    ``market_regimes`` 缺省或当日无分类时 X 不入场（fail-closed）。
+    同月研究锚点升级的三线包裹链两条（P1.5 同层，全 regime）：
+    三线包裹缩量底盘（W）与包裹次日上沿确认（Z，宽口径前置）。
     """
 
     candidates: list[LowSuctionCandidate] = []
@@ -134,6 +162,7 @@ def scan_low_suction_candidates(
     )
     calendar_tuple = tuple(calendar)
     calendar_positions = {value: index for index, value in enumerate(calendar_tuple)}
+    regime_reader = _WeakMarketRegimeReader(market_regimes or {})
     for snapshot in snapshots:
         if target_dates is not None and snapshot.trade_date not in target_dates:
             continue
@@ -153,10 +182,22 @@ def scan_low_suction_candidates(
             prior_features=prior_features,
             rules=PRODUCT_DISCOVERY_RULES["oversold_rebound"],
         )
+        if PRE_CROSS_ACCELERATION_WEAK_MARKET_RULE_KEY in matched_oversold_rules:
+            if not regime_reader.is_weak_market(snapshot.trade_date):
+                matched_oversold_rules = tuple(
+                    rule_key
+                    for rule_key in matched_oversold_rules
+                    if rule_key != PRE_CROSS_ACCELERATION_WEAK_MARKET_RULE_KEY
+                )
         oversold_rules = tuple(
             rule_key
             for rule_key in matched_oversold_rules
-            if rule_key == STAGED_MA10_SUPPORT_RULE_KEY
+            if rule_key
+            in {
+                STAGED_MA10_SUPPORT_RULE_KEY,
+                *PRE_CROSS_LEAD_RULE_KEYS,
+                *THREE_MA_WRAP_CHAIN_RULE_KEYS,
+            }
         )
         if FIRST_LEG_TWO_MA_WRAP_RULE_KEY in matched_oversold_rules:
             base_features = build_pre_attack_base_process_features(
@@ -216,12 +257,27 @@ def scan_low_suction_candidates(
                 vol_ratio = sum(history_vols[-5:]) / 5 / (sum(history_vols[-10:]) / 10)
             else:
                 vol_ratio = None
+            attack_votes = (
+                _attack_vote_count(features)
+                if any(
+                    rule_key in PRE_CROSS_LEAD_RULE_KEYS
+                    for rule_key in oversold_rules
+                )
+                else 0
+            )
             score, components = score_oversold_candidate(
                 features,
                 streak,
                 vol_ratio=vol_ratio,
                 staged_ma30_convergence_rule_matched=(
                     STAGED_MA10_SUPPORT_RULE_KEY in oversold_rules
+                ),
+                attack_vote_count=attack_votes,
+                three_ma_wrap_rule_matched=(
+                    RESEARCH_THREE_MA_WRAP_RULE_KEY in oversold_rules
+                ),
+                post_wrap_confirmation_rule_matched=(
+                    POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY in oversold_rules
                 ),
             )
             candidates.append(
@@ -281,9 +337,34 @@ def _candidate_priority_tier(item: LowSuctionCandidate) -> int:
     matched = set(item.matched_rule_keys)
     if FIRST_LEG_TWO_MA_WRAP_RULE_KEY in matched:
         return 20
+    # P1.5 同层：上穿前价格先行（X/Y，半年剔案例胜率 68-72%）与三线包裹链
+    # （W/Z，66-69%），与成熟首段两线攻击同档，按综合分+换手接近度决胜。
+    if matched & (PRE_CROSS_LEAD_RULE_KEYS | THREE_MA_WRAP_CHAIN_RULE_KEYS):
+        return 20
     if STAGED_MA10_SUPPORT_RULE_KEY in matched:
         return 10
     return 0
+
+
+class _WeakMarketRegimeReader:
+    """弱市判定：信号日指数收盘位于 MA20 下方；当日无分类时回退最近已确认日。
+
+    回测日全部有当日分类；实时盘中今日指数日线未定型时，用最近一个已确认
+    交易日分类（因果、不预测）。无任何分类时 X 不入场（fail-closed）。
+    """
+
+    def __init__(self, market_regimes: Mapping[date, str]) -> None:
+        self._by_date = dict(market_regimes)
+        self._dates = sorted(self._by_date)
+
+    def is_weak_market(self, trade_date: date) -> bool:
+        regime = self._by_date.get(trade_date)
+        if regime is None:
+            position = bisect_right(self._dates, trade_date) - 1
+            if position < 0:
+                return False
+            regime = self._by_date[self._dates[position]]
+        return regime == "below_ma20"
 
 
 def _number(value: object) -> float | None:

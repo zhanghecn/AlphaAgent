@@ -109,11 +109,24 @@ def test_backtest_uses_top_five_per_family_and_leaves_unfilled_slots_as_cash() -
     assert sparse_ledger["day_return_pct"] == 1.0
 
     position_sim = payload["position_sim"]
-    assert position_sim["combined"]["positions"] == 11
-    assert position_sim["market_regimes"]["above_ma20"]["positions"] == 10
-    assert position_sim["market_regimes"]["below_ma20"]["positions"] == 1
-    assert position_sim["time_segments"]["development"]["positions"] == 10
-    assert position_sim["time_segments"]["holdout"]["positions"] == 1
+    # 两族分开统计：full_day 各族 5 票，sparse_day 仅超跌 1 票。
+    trend_sim = position_sim["trend_pullback"]
+    oversold_sim = position_sim["oversold_rebound"]
+    assert trend_sim["active_days"] == 1
+    assert oversold_sim["active_days"] == 2
+    assert trend_sim["market_regimes"]["above_ma20"]["positions"] == 5
+    assert oversold_sim["market_regimes"]["above_ma20"]["positions"] == 5
+    assert oversold_sim["market_regimes"]["below_ma20"]["positions"] == 1
+    assert trend_sim["time_segments"]["development"]["positions"] == 5
+    assert oversold_sim["time_segments"]["development"]["positions"] == 5
+    assert oversold_sim["time_segments"]["holdout"]["positions"] == 1
+    # 族权益曲线只覆盖本族活跃日：趋势 1 点（均值 3.0），超跌 2 点（3.0 → 10.0）。
+    assert [point["equity"] for point in trend_sim["equity_curve"]] == [1.03]
+    assert [point["equity"] for point in oversold_sim["equity_curve"]] == [
+        1.03,
+        round(1.03 * 1.1, 6),
+    ]
+    assert "combined" not in position_sim
 
 
 def test_oversold_ranking_keeps_p1_5_before_p1_and_scores_before_turnover() -> None:
