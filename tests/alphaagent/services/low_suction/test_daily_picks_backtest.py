@@ -120,11 +120,12 @@ def test_backtest_uses_top_five_per_family_and_leaves_unfilled_slots_as_cash() -
     assert trend_sim["time_segments"]["development"]["positions"] == 5
     assert oversold_sim["time_segments"]["development"]["positions"] == 5
     assert oversold_sim["time_segments"]["holdout"]["positions"] == 1
-    # 族权益曲线只覆盖本族活跃日：趋势 1 点（均值 3.0），超跌 2 点（3.0 → 10.0）。
+    # 族权益曲线只覆盖本族活跃日（槽位口径：收益/5，空槽为现金）：
+    # 趋势 1 点（15%/5=3.0），超跌 2 点（3.0 → 50%/5=10.0）。
     assert [point["equity"] for point in trend_sim["equity_curve"]] == [1.03]
     assert [point["equity"] for point in oversold_sim["equity_curve"]] == [
         1.03,
-        round(1.03 * 1.1, 6),
+        round(1.03 * 1.02, 6),
     ]
     assert "combined" not in position_sim
 

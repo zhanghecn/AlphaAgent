@@ -24,7 +24,7 @@ from alphaagent.server.services.low_suction.daily_picks_scoring import (
 )
 
 
-BACKTEST_VERSION = "low-suction-daily-backtest-v13"
+BACKTEST_VERSION = "low-suction-daily-backtest-v14"
 RECENT_LEDGER_DAYS = 60
 _MIN_BAND_SAMPLE = 30
 PICKS_PER_FAMILY = 5
@@ -222,10 +222,14 @@ def _position_simulation(
             values = [float(pick.d1_close_return_pct) for pick in settled_picks]
             if not values:
                 continue
+            # 槽位口径（与 label_convention 一致）：每票固定 10% 仓位、
+            # 未满 5 槽留现金——空槽贡献 0 而非放大剩余持仓。此前按持仓
+            # 数取均值会把「单票日」放大成满仓收益（B 稀疏日 +1666% 的
+            # 复利即此杠杆幻觉，v14 修正）。
             family_day_records[setup_type].append(
                 {
                     "trade_date": day,
-                    "return_pct": mean(values),
+                    "return_pct": sum(values) / PICKS_PER_FAMILY,
                     "positions": len(settled_picks),
                     "segment": segment_by_date.get(day, "embargo"),
                     "market_regime": market_regimes.get(day, "unclassified"),
@@ -233,7 +237,8 @@ def _position_simulation(
             )
 
     # 两族统计完全分开（主人 2026-08-15 口径：不再看混合十票组合）。
-    # 族日收益 = 当日族内前五均值；族复利/权益曲线 = 该日收益逐日累积。
+    # 族日收益 = 当日族内前五收益之和 / 5（空槽为现金）；族复利/权益
+    # 曲线 = 该日收益逐日累积。
     per_family: dict[str, dict[str, object]] = {}
     for setup_type in SETUP_TYPES:
         records = family_day_records[setup_type]
