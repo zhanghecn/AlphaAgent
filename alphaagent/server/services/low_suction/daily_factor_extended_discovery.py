@@ -83,9 +83,41 @@ MAX_MARKDOWN_WORST_ROWS = 30
 POST_LIMIT_UP_HOLDING_SESSIONS = (1, 2, 3)
 DEVELOPMENT_SELECTION_MODE = "development_window"
 FROZEN_SELECTION_MODE = "frozen_recent_half_year"
-OVERSOLD_TO_TREND_RULE_KEY = (
-    "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30"
+# 2026-08 趋势族重构（主人需求：连板后补涨/弱转强）三条规则：
+# B 涨停弱转强（产品 P1.5）：连板段顶后 ≤4 日低开拉板收盘涨停——两年
+#   n=318 胜率 60.4%/+1.69，前五模拟两年 +173.1%/半年 +38.9%（回撤 −2.0%）。
+# A 连板回落补涨（产品 P1）：≥5 板主段回落 5-30 日小阳企稳 + 段后日均换手
+#   5~20 的承接区（主人指引「资金不在那里才没有承接」的正面量化；不设外部门，
+#   命中即可推荐）——两年 n=1851 胜率 50.8%/+0.23，案例 7/8 放行。
+# 锚点 非涨停弱转强（研究）：主人案例形态本身，全市场两年 37~42%/−1.3~−2.0
+#   负边缘，诚实留研究锚点不进推荐。
+LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY = "limit_up_weak_to_strong_reclaim"
+LIMIT_UP_PULLBACK_REBOUND_RULE_KEY = "limit_up_pullback_rebound"
+RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY = (
+    "research_weak_to_strong_turnover_no_limit"
 )
+# 连板史递推窗口（交易日）：主段/段顶/距顶天数均在此窗口内推导。
+LIMIT_UP_HISTORY_WINDOW_SESSIONS = 60
+# B 涨停弱转强阈值（十轮研究桶证据）
+LIMIT_UP_RECLAIM_MIN_STREAK = 4
+LIMIT_UP_RECLAIM_MAX_DAYS_SINCE_PEAK = 4
+LIMIT_UP_RECLAIM_MAX_OPEN_CHG_PCT = 0.0
+# A 连板回落补涨阈值（2026-08-16 二次研究定稿：去外部门、改票本身的承接门槛——
+# 段顶后日均换手 5~20 为「资金还在且未出货」区间；<5 无人承接、>20 巨量换手
+# 是撤离中，两年池 50.8%/+0.227 vs 宽池 49.1%，案例 7/8 覆盖）
+LIMIT_UP_PULLBACK_MIN_STREAK = 5
+LIMIT_UP_PULLBACK_MIN_DAYS_SINCE_PEAK = 5
+LIMIT_UP_PULLBACK_MAX_DAYS_SINCE_PEAK = 30
+LIMIT_UP_PULLBACK_MIN_CLOSE_TO_PREV_PCT = -2.5
+LIMIT_UP_PULLBACK_MAX_VOLUME_MA5_RATIO = 1.15
+LIMIT_UP_PULLBACK_POST_STREAK_TURNOVER_MIN_PCT = 5.0
+LIMIT_UP_PULLBACK_POST_STREAK_TURNOVER_MAX_PCT = 20.0
+# 锚点：非涨停弱转强（形态展示口径，不进推荐）
+RESEARCH_WEAK_TO_STRONG_MIN_STREAK = 4
+RESEARCH_WEAK_TO_STRONG_MAX_DAYS_SINCE_PEAK = 3
+RESEARCH_WEAK_TO_STRONG_MIN_TURNOVER_PCT = 8.0
+RESEARCH_WEAK_TO_STRONG_MIN_CLOSE_OFF_LOW_PCT = 4.0
+RESEARCH_WEAK_TO_STRONG_MAX_LOW_TO_PREV_PCT = -6.0
 RESEARCH_THREE_MA_WRAP_RULE_KEY = "research_oversold_three_ma_wrap_stable_base"
 POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY = (
     "post_wrap_upper_band_reclaim_confirmation"
@@ -156,10 +188,9 @@ PRE_ATTACK_BASE_TAIL_SESSIONS = 3
 PRE_ATTACK_BASE_MIN_SETTLEMENT_SESSIONS = 3
 PRE_ATTACK_BASE_MATERIAL_MOVE_RANGE_MULTIPLE = 1.0
 PRE_ATTACK_BASE_COMPACT_TAIL_RANGE_MULTIPLE = 1.0
-TRANSITION_RULE_KEYS = frozenset({OVERSOLD_TO_TREND_RULE_KEY})
 SCORE_VARIANTS_BY_SETUP: dict[str, tuple[str, ...]] = {
     "oversold_rebound": ("base", "with_volume"),
-    "trend_pullback": ("base", "with_transition_bonus"),
+    "trend_pullback": ("base",),
 }
 SCORE_BANDS = (
     (0.0, 39.999, "0-39"),
@@ -230,39 +261,19 @@ EXPLICIT_CASE_OVERSOLD_RULES = (
 
 EXPLICIT_CASE_TREND_RULES = (
     DiscoveryRule(
-        OVERSOLD_TO_TREND_RULE_KEY,
+        LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY,
         "trend_pullback",
-        "长期空头后 MA10 在 7 日内依次上穿 MA20、MA30，回撤后 MA20/30 紧贴且 MA10/20 向上；不要求 MA5 或 MA60",
+        "涨停弱转强（打板预备）：连板段顶后 4 日内低开，盘中拉回收盘涨停；信号日收盘涨停由产品层专门放行",
     ),
     DiscoveryRule(
-        "ma10_low_touch_after_ma5_extension",
+        LIMIT_UP_PULLBACK_REBOUND_RULE_KEY,
         "trend_pullback",
-        "稳定多头中前一日收盘偏离 MA5，随后 D 日低点回踩 MA10",
+        "连板回落补涨：≥5 板主段回落 5-30 日后小阳企稳、量能温和，段后日均换手 5-20%（资金还在且未出货的承接区）",
     ),
     DiscoveryRule(
-        "ma5_low_touch_stable_trend",
+        RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY,
         "trend_pullback",
-        "稳定多头中 D 日低点回踩 MA5",
-    ),
-    DiscoveryRule(
-        "ma5_low_touch_stable_trend_volume_shrink",
-        "trend_pullback",
-        "稳定多头中 D 日低点回踩 MA5，D 日成交量缩量",
-    ),
-    DiscoveryRule(
-        "ma5_low_touch_after_disordered_trend_rebuild",
-        "trend_pullback",
-        "均线混乱后新恢复多头排列，D 日低点宽回踩 MA5",
-    ),
-    DiscoveryRule(
-        "ma5_low_touch_early_trend",
-        "trend_pullback",
-        "多头排列形成早期的 MA5 低点回踩",
-    ),
-    DiscoveryRule(
-        "ma5_low_touch_early_trend_prior_touch",
-        "trend_pullback",
-        "多头排列形成早期且前一日已触及 MA5 的连续回踩",
+        "非涨停弱转强（研究锚点）：连板破坏后 3 日内深水承接拉起但未收涨停——全市场两年负边缘（37~42%/−1.3~−2.0），不进推荐仅作形态对照",
     ),
 )
 
@@ -1026,6 +1037,7 @@ def build_extended_daily_features(
         window: _moving_average_series(closes, window)
         for window in (5, 10, 20, 30, 60)
     }
+    limit_up_streak = _limit_up_streak_features(visible)
     pre_attack_base_features = (
         _pre_attack_base_process_features(visible, closes, ma_series)
         if include_pre_attack_base_features
@@ -1300,6 +1312,7 @@ def build_extended_daily_features(
         and recent_pullback_from_high_pct <= OVERSOLD_PROCESS_PULLBACK_MIN_PCT
     )
     ma10_slope_2d = _series_slope_pct(ma_series[10], lookback=2)
+    ma10_slope_5d = _series_slope_pct(ma_series[10], lookback=5)
     prior_ma10_slope_2d = _series_slope_pct(
         ma_series[10],
         lookback=2,
@@ -1620,6 +1633,7 @@ def build_extended_daily_features(
         "m10_dual_cross_before_m20_m30": m10_dual_cross_before_m20_m30,
         "ma10_ma20_slopes_up": ma10_ma20_slopes_up,
         "ma10_slope_2d_pct": ma10_slope_2d,
+        "ma10_slope_5d_pct": ma10_slope_5d,
         "ma10_slope_improvement_2d_pct": ma10_slope_improvement_2d,
         "ma10_ma20_gap_narrowing_3d_pct": ma10_ma20_gap_narrowing_3d,
         "ma10_ma20_gap_narrowing": bool(
@@ -1776,6 +1790,7 @@ def build_extended_daily_features(
         ),
         "trend_overextended": trend_overextended,
         "trend_first_crack_chase": trend_first_crack_chase,
+        **limit_up_streak,
     }
     return features
 
@@ -1880,17 +1895,7 @@ def score_extended_factor(
         base = _round_pct(
             20.0 * sum((regime, maturity, support, context, source_process))
         )
-        post_cross_transition = bool(features.get("trend_transition_eligible"))
-        transition_bonus = 20.0 if post_cross_transition else 0.0
-        transition_volume_bonus = 20.0 if (
-            post_cross_transition and features.get("volume_expand_then_shrink")
-        ) else 0.0
-        return {
-            "base": base,
-            "with_transition_bonus": _round_pct(
-                min(100.0, base + transition_bonus + transition_volume_bonus)
-            ),
-        }
+        return {"base": base}
 
     raise DailyFactorInputError(
         f"unsupported extended score setup type: {setup_type}"
@@ -3148,16 +3153,6 @@ def _iter_rule_observations(
                         "trade_date": snapshot.trade_date,
                         "d1_close_return_pct": snapshot.d1_close_return_pct,
                         "d1_label_status": snapshot.d1_label_status,
-                        "d1_initial_short_trend_formed": (
-                            snapshot.d1_initial_short_trend_formed
-                            if rule.key in TRANSITION_RULE_KEYS
-                            else None
-                        ),
-                        "transition_volume_expand_then_shrink": (
-                            bool(snapshot.features.get("volume_expand_then_shrink"))
-                            if rule.key == OVERSOLD_TO_TREND_RULE_KEY
-                            else None
-                        ),
                         "pre_attack_base_phase": snapshot.features.get(
                             "pre_attack_base_phase"
                         ),
@@ -3625,6 +3620,169 @@ def _is_pre_cross_trend_transition_preparation(
     )
 
 
+def _fast_close_limit_up(prev_close: float, value: float) -> bool:
+    """涨停判定快速预检版：远离涨停带（<9.5%）直接 False，仅近带走 Decimal 精判。
+
+    主板 10% 档 tick 舍入后的真实涨停下界不会低于 +9.5%；先用 float 比较挡掉
+    99% 的普通交易日，避免连板史递推在每个 position 上反复付 Decimal 成本。
+    """
+
+    if value <= prev_close or prev_close <= 0:
+        return False
+    if value / prev_close - 1 < 0.095:
+        return False
+    return is_main_board_limit_up_touched(prev_close, value)
+
+
+def _limit_up_streak_features(
+    visible: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """近 60 交易日连板史递推（收盘涨停口径，与趋势族研究脚本同源）。
+
+    主段 = 窗口内连板数最大（并列取最晚）的已完成段（段末板早于 D 日，
+    D 日本身涨停形成的新段不作主段——锚点日的前置段才是行情本体）；
+    段顶 = 主段首板日 ~ D-1 的最高收盘（含段后惯性冲高）。窗口不足或无
+    完成段时距离量为 None / 0，规则谓词按 ``>=`` 判定天然 fail-closed。
+    """
+
+    end = len(visible) - 1
+    if end < 1:
+        return {
+            "limit_up_history_window_sessions": len(visible),
+            "limit_up_close_today": False,
+            "limit_up_touched_today": False,
+            "limit_up_close_streak_max_60d": 0,
+            "days_since_streak_peak_60d": None,
+            "days_since_last_limit_up_close_60d": None,
+            "limit_up_streak_peak_drawdown_pct": None,
+            "post_streak_turnover_mean_pct": None,
+            "limit_up_close_count_60d": 0,
+            "close_to_prev_close_pct": None,
+            "open_to_prev_close_pct": None,
+            "low_to_prev_close_pct": None,
+            "volume_to_ma5_ratio": None,
+            "volume_to_streak_peak_pct": None,
+        }
+    begin = max(0, end - LIMIT_UP_HISTORY_WINDOW_SESSIONS + 1)
+    closes = [
+        _required_positive_number(row.get("close_price"), "close_price")
+        for row in visible[begin : end + 1]
+    ]
+    open_prices = [_number_or_none(row.get("open_price")) for row in visible[begin : end + 1]]
+    highs = [_number_or_none(row.get("high_price")) for row in visible[begin : end + 1]]
+    low_prices = [_number_or_none(row.get("low_price")) for row in visible[begin : end + 1]]
+    volumes = [_number_or_none(row.get("volume")) for row in visible[begin : end + 1]]
+    close_limit_flags: list[bool] = [False]
+    touched_flags: list[bool] = [False]
+    for index in range(1, len(closes)):
+        close_limit_flags.append(
+            _fast_close_limit_up(closes[index - 1], closes[index])
+        )
+        high = highs[index]
+        touched_flags.append(
+            bool(
+                high is not None
+                and _fast_close_limit_up(closes[index - 1], high)
+            )
+        )
+
+    streaks: list[tuple[int, int, int]] = []
+    run_start: int | None = None
+    for index, is_limit_up in enumerate(close_limit_flags):
+        if is_limit_up:
+            if run_start is None:
+                run_start = index
+        elif run_start is not None:
+            streaks.append((run_start, index - 1, index - run_start))
+            run_start = None
+    if run_start is not None:
+        streaks.append((run_start, len(closes) - 1, len(closes) - run_start))
+    prior_streaks = [item for item in streaks if item[1] < len(closes) - 1]
+
+    streak_max = max((item[2] for item in prior_streaks), default=0)
+    days_since_peak: int | None = None
+    days_since_last_board: int | None = None
+    peak_drawdown: float | None = None
+    volume_to_streak_peak: float | None = None
+    post_streak_turnover_mean: float | None = None
+    if prior_streaks:
+        first_idx, last_idx, _ = max(
+            prior_streaks, key=lambda item: (item[2], item[1])
+        )
+        peak_idx = max(range(first_idx, len(closes) - 1), key=lambda i: closes[i])
+        days_since_peak = len(closes) - 1 - peak_idx
+        days_since_last_board = len(closes) - 1 - last_idx
+        peak_drawdown = _round_pct(
+            (closes[-1] / closes[peak_idx] - 1) * 100
+        )
+        segment_volumes = [volumes[i] for i in range(first_idx, last_idx + 1)]
+        segment_volumes = [v for v in segment_volumes if v is not None]
+        peak_volume = max(segment_volumes) if segment_volumes else None
+        if peak_volume and volumes[-1] is not None:
+            volume_to_streak_peak = round(volumes[-1] / peak_volume * 100, 1)
+        # 段末板次日至 D-1 的日均换手：5~20 = 资金还在且未出货的承接区间
+        post_rates = [
+            visible[begin + i].get("turnover_rate")
+            for i in range(last_idx + 1, len(closes) - 1)
+        ]
+        post_rates = [float(v) for v in post_rates if v is not None]
+        if post_rates:
+            post_streak_turnover_mean = round(
+                sum(post_rates) / len(post_rates), 2
+            )
+
+    recent_volumes = [v for v in volumes[-5:] if v is not None]
+    volume_ma5_ratio = (
+        round(volumes[-1] / (sum(recent_volumes) / len(recent_volumes)), 3)
+        if len(recent_volumes) == 5 and volumes[-1] is not None
+        else None
+    )
+    prev_close = closes[-2]
+    close_to_prev = _round_pct((closes[-1] / prev_close - 1) * 100)
+    last_open = open_prices[-1]
+    open_to_prev = (
+        _round_pct((last_open / prev_close - 1) * 100)
+        if last_open is not None
+        else None
+    )
+    last_low = low_prices[-1] if low_prices else None
+    low_to_prev = (
+        _round_pct((last_low / prev_close - 1) * 100)
+        if last_low is not None
+        else None
+    )
+    return {
+        "limit_up_history_window_sessions": len(closes),
+        "limit_up_close_today": close_limit_flags[-1],
+        "limit_up_touched_today": touched_flags[-1],
+        "limit_up_close_streak_max_60d": streak_max,
+        "days_since_streak_peak_60d": days_since_peak,
+        "days_since_last_limit_up_close_60d": days_since_last_board,
+        "limit_up_streak_peak_drawdown_pct": peak_drawdown,
+        "post_streak_turnover_mean_pct": post_streak_turnover_mean,
+        "limit_up_close_count_60d": sum(close_limit_flags),
+        "close_to_prev_close_pct": close_to_prev,
+        "open_to_prev_close_pct": open_to_prev,
+        "low_to_prev_close_pct": low_to_prev,
+        "volume_to_ma5_ratio": volume_ma5_ratio,
+        "volume_to_streak_peak_pct": volume_to_streak_peak,
+    }
+
+
+def _limit_up_streak_base_predicates(
+    features: Mapping[str, object],
+) -> dict[str, bool]:
+    """连板史底盘谓词：递推窗口完整（B/A/锚点三家共用，fail-closed）。"""
+
+    return {
+        "limit_up_history_window_complete": (
+            _integer_or_none(features.get("limit_up_history_window_sessions"))
+            or 0
+        )
+        >= LIMIT_UP_HISTORY_WINDOW_SESSIONS,
+    }
+
+
 def _yang_wrap_shrink_base(
     features: Mapping[str, object],
     *,
@@ -3973,21 +4131,122 @@ def process_rule_predicates(
                 features.get("signal_day_not_limit_up_closed")
             ),
         },
-        OVERSOLD_TO_TREND_RULE_KEY: {
-            "long_bear_alignment": bool(features.get("long_bear_alignment")),
-            "ma10_dual_cross_within_7d": bool(
-                features.get("ma10_dual_cross_within_7d")
+        LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY: {
+            **_limit_up_streak_base_predicates(features),
+            "streak_at_least_4": (
+                (streak := _integer_or_none(
+                    features.get("limit_up_close_streak_max_60d")
+                ))
+                is not None
+                and streak >= LIMIT_UP_RECLAIM_MIN_STREAK
             ),
-            "ma10_above_ma20_and_ma30": bool(
-                features.get("ma10_above_ma20_and_ma30")
+            "within_4_sessions_since_streak_peak": (
+                (days := _integer_or_none(
+                    features.get("days_since_streak_peak_60d")
+                ))
+                is not None
+                and days <= LIMIT_UP_RECLAIM_MAX_DAYS_SINCE_PEAK
             ),
-            "ma20_ma30_tight_contact": bool(
-                features.get("transition_ma20_ma30_tight_contact")
+            "open_not_above_prev_close": (
+                (open_chg := _number_or_none(
+                    features.get("open_to_prev_close_pct")
+                ))
+                is not None
+                and open_chg <= LIMIT_UP_RECLAIM_MAX_OPEN_CHG_PCT
             ),
-            "ma10_ma20_slopes_up": bool(features.get("ma10_ma20_slopes_up")),
-            "post_cross_pullback": bool(features.get("post_cross_pullback")),
-            "small_positive_candle": bool(
-                features.get("small_positive_candle")
+            "close_limit_up_reclaimed": bool(features.get("limit_up_close_today")),
+        },
+        LIMIT_UP_PULLBACK_REBOUND_RULE_KEY: {
+            **_limit_up_streak_base_predicates(features),
+            "streak_at_least_5": (
+                (pullback_streak := _integer_or_none(
+                    features.get("limit_up_close_streak_max_60d")
+                ))
+                is not None
+                and pullback_streak >= LIMIT_UP_PULLBACK_MIN_STREAK
+            ),
+            "pullback_5_to_30_sessions_since_peak": (
+                (pullback_days := _integer_or_none(
+                    features.get("days_since_streak_peak_60d")
+                ))
+                is not None
+                and LIMIT_UP_PULLBACK_MIN_DAYS_SINCE_PEAK
+                <= pullback_days
+                <= LIMIT_UP_PULLBACK_MAX_DAYS_SINCE_PEAK
+            ),
+            "small_positive_candle": (
+                (body := _number_or_none(features.get("daily_return_pct")))
+                is not None
+                and body >= 0
+            ),
+            "close_to_prev_at_least_minus_2_5pct": (
+                (close_prev := _number_or_none(
+                    features.get("close_to_prev_close_pct")
+                ))
+                is not None
+                and close_prev >= LIMIT_UP_PULLBACK_MIN_CLOSE_TO_PREV_PCT
+            ),
+            "volume_to_ma5_ratio_at_most_1_15": (
+                (volume_ratio := _number_or_none(
+                    features.get("volume_to_ma5_ratio")
+                ))
+                is not None
+                and volume_ratio <= LIMIT_UP_PULLBACK_MAX_VOLUME_MA5_RATIO
+            ),
+            "post_streak_turnover_5_to_20_pct": (
+                (post_turnover := _number_or_none(
+                    features.get("post_streak_turnover_mean_pct")
+                ))
+                is not None
+                and LIMIT_UP_PULLBACK_POST_STREAK_TURNOVER_MIN_PCT
+                <= post_turnover
+                < LIMIT_UP_PULLBACK_POST_STREAK_TURNOVER_MAX_PCT
+            ),
+            "signal_day_not_limit_up_closed": bool(
+                features.get("signal_day_not_limit_up_closed")
+            ),
+        },
+        RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY: {
+            **_limit_up_streak_base_predicates(features),
+            "streak_at_least_4": (
+                (research_streak := _integer_or_none(
+                    features.get("limit_up_close_streak_max_60d")
+                ))
+                is not None
+                and research_streak >= RESEARCH_WEAK_TO_STRONG_MIN_STREAK
+            ),
+            "within_3_sessions_since_streak_peak": (
+                (research_days := _integer_or_none(
+                    features.get("days_since_streak_peak_60d")
+                ))
+                is not None
+                and research_days <= RESEARCH_WEAK_TO_STRONG_MAX_DAYS_SINCE_PEAK
+            ),
+            "turnover_at_least_8pct": (
+                (research_turnover := _number_or_none(
+                    features.get("turnover_rate_pct")
+                ))
+                is not None
+                and research_turnover >= RESEARCH_WEAK_TO_STRONG_MIN_TURNOVER_PCT
+            ),
+            "deep_water_reclaim": (
+                (close_off_low := _number_or_none(
+                    features.get("close_off_low_pct")
+                ))
+                is not None
+                and (
+                    close_off_low >= RESEARCH_WEAK_TO_STRONG_MIN_CLOSE_OFF_LOW_PCT
+                    or (
+                        (low_chg := _number_or_none(
+                            features.get("low_to_prev_close_pct")
+                        ))
+                        is not None
+                        and low_chg <= RESEARCH_WEAK_TO_STRONG_MAX_LOW_TO_PREV_PCT
+                    )
+                )
+            ),
+            "signal_day_not_limit_up_closed": bool(
+                features.get("signal_day_not_limit_up_closed")
             ),
         },
         "ma10_ma30_retest_after_actual_cross_two_leg_volume": {
@@ -4006,60 +4265,6 @@ def process_rule_predicates(
             "volume_shrink_then_expand": bool(
                 features.get("volume_shrink_then_expand")
             ),
-        },
-        "ma10_low_touch_after_ma5_extension": {
-            "trend_discovery_eligible": bool(
-                features.get("trend_discovery_eligible")
-            ),
-            "trend_stable_bull": bool(features.get("trend_stable_bull")),
-            "ma5_regular": bool(features.get("ma5_regular")),
-            "ma10_low_touch": bool(features.get("ma10_low_touch")),
-            "prior_ma5_close_extension": bool(
-                features.get("prior_ma5_close_extension")
-            ),
-            "prior_daily_price_not_up": bool(
-                features.get("prior_daily_price_not_up")
-            ),
-        },
-        "ma5_low_touch_stable_trend": {
-            "trend_discovery_eligible": bool(
-                features.get("trend_discovery_eligible")
-            ),
-            "trend_stable_bull": bool(features.get("trend_stable_bull")),
-            "ma5_regular": bool(features.get("ma5_regular")),
-            "ma5_low_touch": bool(features.get("ma5_low_touch")),
-        },
-        "ma5_low_touch_stable_trend_volume_shrink": {
-            "trend_discovery_eligible": bool(
-                features.get("trend_discovery_eligible")
-            ),
-            "trend_stable_bull": bool(features.get("trend_stable_bull")),
-            "ma5_regular": bool(features.get("ma5_regular")),
-            "ma5_low_touch": bool(features.get("ma5_low_touch")),
-            "last_volume_shrank": bool(features.get("last_volume_shrank")),
-        },
-        "ma5_low_touch_after_disordered_trend_rebuild": {
-            "trend_discovery_eligible": bool(
-                features.get("trend_discovery_eligible")
-            ),
-            "trend_rebuilt_from_disorder": bool(
-                features.get("trend_rebuilt_from_disorder")
-            ),
-            "ma5_regular": bool(features.get("ma5_regular")),
-            "ma5_low_touch_broad": bool(features.get("ma5_low_touch_broad")),
-        },
-        "ma5_low_touch_early_trend": {
-            "early_trend_alignment": bool(features.get("early_trend_alignment")),
-            "trend_all_slopes_up": bool(features.get("trend_all_slopes_up")),
-            "ma5_regular": bool(features.get("ma5_regular")),
-            "ma5_low_touch": bool(features.get("ma5_low_touch")),
-        },
-        "ma5_low_touch_early_trend_prior_touch": {
-            "early_trend_alignment": bool(features.get("early_trend_alignment")),
-            "trend_all_slopes_up": bool(features.get("trend_all_slopes_up")),
-            "ma5_regular": bool(features.get("ma5_regular")),
-            "ma5_low_touch": bool(features.get("ma5_low_touch")),
-            "prior_ma5_low_touch": bool(features.get("prior_ma5_low_touch")),
         },
     }
     try:

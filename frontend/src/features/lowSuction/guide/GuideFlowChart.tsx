@@ -26,7 +26,7 @@ const FAMILY_STYLES = {
   trend_pullback: {
     border: "border-l-brand-600",
     badge: "border-brand-600/40 bg-brand-600/10 text-brand-700 dark:text-brand-300",
-    label: "趋势回踩族 · 7 条产品规则",
+    label: "连板补涨族 · 2 条产品（P1.5 涨停弱转强 + P1 弱市补涨）+ 1 条研究锚点",
   },
   oversold_rebound: {
     border: "border-l-violet-600",

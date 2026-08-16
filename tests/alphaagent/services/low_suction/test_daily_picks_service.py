@@ -548,7 +548,15 @@ def test_live_payload_keeps_partial_today_as_a_tail_final_virtual_bar(monkeypatc
         ),
     )
 
-    def scan(_bars, calendar, _security, *, target_dates, market_regimes=None):
+    def scan(
+        _bars,
+        calendar,
+        _security,
+        *,
+        target_dates,
+        market_regimes=None,
+        market_limit_up_counts=None,
+    ):
         observed["calendar"] = calendar
         observed["target_dates"] = target_dates
         observed["market_regimes"] = market_regimes
@@ -559,6 +567,11 @@ def test_live_payload_keeps_partial_today_as_a_tail_final_virtual_bar(monkeypatc
         daily_picks_service,
         "_load_market_regimes",
         lambda _calendar: {today: "below_ma20"},
+    )
+    monkeypatch.setattr(
+        daily_picks_service,
+        "_load_market_limit_up_counts",
+        lambda _calendar: {today: 120},
     )
 
     payload = daily_picks_service._compute_live_payload(now)

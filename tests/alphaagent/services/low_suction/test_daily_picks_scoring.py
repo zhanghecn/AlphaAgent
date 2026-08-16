@@ -55,84 +55,112 @@ def test_score_band_edges() -> None:
 
 
 def test_trend_score_full_marks() -> None:
+    """连板后补涨/弱转强重构版：底盘满 100×0.4 + B 路径组件 30 = 满 70。"""
     features = {
-        "candle_range_pct": 2.1,
-        "ma60": 9.0,
-        "ma30": 10.0,
-        "bull_alignment_days": 7,
-        "ma5_low_touch": True,
-        "ma10_low_touch": False,
-        "turnover_rate_pct": 2.0,
-        "trend_dist_excess_pct": -1.5,
-        "prior_daily_return_pct": -2.0,
-        "close_to_ma5_pct": -0.8,
-        "last_volume_shrank": True,
+        "limit_up_close_streak_max_60d": 8,
+        "days_since_streak_peak_60d": 3,
+        "close_off_low_pct": 13.0,
+        "volume_to_streak_peak_pct": 8.0,
+        "turnover_rate_pct": 30.0,
+        "open_to_prev_close_pct": -4.0,
     }
     streak = quiet_candle_streak([_bar(2.0)] * 6)
-    score, components = score_trend_candidate(features, streak)
-    assert score == 100.0
-    assert sum(c.max_points for c in components) == 100.0
+    score, components = score_trend_candidate(
+        features,
+        streak,
+        weak_to_strong_reclaim_rule_matched=True,
+    )
+    assert score == 70.0
+    base_keys = {
+        "limit_up_streak_strength",
+        "pullback_timing",
+        "close_control",
+        "volume_dryness",
+        "turnover_activity",
+    }
+    base_total = sum(c.max_points for c in components if c.key in base_keys)
+    assert base_total == 100.0
     assert not any(c.kind == "gate" for c in components)
 
 
-def test_trend_context_switches_amplitude_gradient() -> None:
-    """语境调节（核心创新）：同振幅 6.5%（5-8 桶），转势 22 / 成熟 4。"""
+def test_trend_score_streak_and_timing_gradients() -> None:
+    """连板高度 7-9 最甜（22）；距顶甜点 ≤4 满 18，18-24 衰减到 7。"""
     base = {
-        "candle_range_pct": 6.5,
-        "bull_alignment_days": 7,
-        "ma5_low_touch": True,
+        "days_since_streak_peak_60d": 2,
+        "close_off_low_pct": 1.0,
+        "volume_to_streak_peak_pct": 50.0,
         "turnover_rate_pct": 2.0,
-        "trend_dist_excess_pct": -1.0,
-        "prior_daily_return_pct": -1.0,
-        "close_to_ma5_pct": -0.5,
-        "last_volume_shrank": True,
     }
     streak = quiet_candle_streak([_bar(2.0)] * 5)
-    _, comps_trans = score_trend_candidate(dict(base, ma60=11.0, ma30=10.0), streak)
-    _, comps_mature = score_trend_candidate(dict(base, ma60=9.0, ma30=10.0), streak)
-    ctx_trans = next(c for c in comps_trans if c.key == "candle_quiet_context")
-    ctx_mature = next(c for c in comps_mature if c.key == "candle_quiet_context")
-    assert ctx_trans.points == 22.0
-    assert ctx_mature.points == 4.0
-    assert "转势" in ctx_trans.detail
-    assert "成熟" in ctx_mature.detail
+    _, comps_mid = score_trend_candidate(
+        {**base, "limit_up_close_streak_max_60d": 8}, streak
+    )
+    _, comps_low = score_trend_candidate(
+        {**base, "limit_up_close_streak_max_60d": 5}, streak
+    )
+    streak_mid = next(c for c in comps_mid if c.key == "limit_up_streak_strength")
+    streak_low = next(c for c in comps_low if c.key == "limit_up_streak_strength")
+    assert streak_mid.points == 22.0
+    assert streak_low.points == 16.0
+    _, comps_fresh = score_trend_candidate(
+        {**base, "limit_up_close_streak_max_60d": 8, "days_since_streak_peak_60d": 3},
+        streak,
+    )
+    _, comps_late = score_trend_candidate(
+        {**base, "limit_up_close_streak_max_60d": 8, "days_since_streak_peak_60d": 20},
+        streak,
+    )
+    timing_fresh = next(c for c in comps_fresh if c.key == "pullback_timing")
+    timing_late = next(c for c in comps_late if c.key == "pullback_timing")
+    assert timing_fresh.points == 18.0
+    assert timing_late.points == 7.0
 
 
-def test_trend_age_gradient() -> None:
-    """趋势年龄分量：6-10 天最佳（满14），≥21 天衰减（4）。"""
-    base = {
-        "candle_range_pct": 2.0,
-        "ma60": 9.0,
-        "ma30": 10.0,
-        "ma5_low_touch": True,
-        "turnover_rate_pct": 2.0,
-        "trend_dist_excess_pct": -1.0,
-        "prior_daily_return_pct": -1.0,
-        "close_to_ma5_pct": -0.5,
-        "last_volume_shrank": True,
+def test_trend_score_paths_only_award_matched_rule_components() -> None:
+    """路径组件互斥：B 命中吃低开/拉板组件，A 命中吃蓄势/情绪/地量组件。"""
+    path_keys = {
+        "reclaim_open_depth",
+        "reclaim_magnitude",
+        "reclaim_streak_premium",
+        "pullback_ma10_sloping_up",
+        "pullback_mood_temperature",
+        "pullback_dry_volume",
+    }
+    features = {
+        "limit_up_close_streak_max_60d": 6,
+        "days_since_streak_peak_60d": 2,
+        "close_off_low_pct": 13.0,
+        "volume_to_streak_peak_pct": 15.0,
+        "turnover_rate_pct": 25.0,
+        "open_to_prev_close_pct": -4.0,
+        "ma10_slope_5d_pct": 2.0,
     }
     streak = quiet_candle_streak([_bar(2.0)] * 5)
-    _, comps_best = score_trend_candidate(dict(base, bull_alignment_days=7), streak)
-    _, comps_old = score_trend_candidate(dict(base, bull_alignment_days=25), streak)
-    age_best = next(c for c in comps_best if c.key == "trend_age")
-    age_old = next(c for c in comps_old if c.key == "trend_age")
-    assert age_best.points == 14.0
-    assert age_old.points == 4.0
+    _, comps_reclaim = score_trend_candidate(
+        features, streak, weak_to_strong_reclaim_rule_matched=True
+    )
+    reclaim_pts = sum(c.points for c in comps_reclaim if c.key in path_keys)
+    assert reclaim_pts == 22.0  # 低开10 + 拉板12；streak 6<7 无高连板加成
+    _, comps_pullback = score_trend_candidate(
+        features,
+        streak,
+        120,
+        limit_up_pullback_rule_matched=True,
+    )
+    pullback_pts = sum(c.points for c in comps_pullback if c.key in path_keys)
+    assert pullback_pts == 30.0  # 蓄势10 + 情绪10 + 地量10
+    _, comps_none = score_trend_candidate(features, streak)
+    assert sum(c.points for c in comps_none if c.key in path_keys) == 0.0
 
 
 def test_trend_no_gate_protects_high_turnover_cases() -> None:
-    """趋势族无 gate：华建级（换手 9.20/振幅 7.04/转势）不被门禁，仍能拿分。"""
+    """趋势族无 gate：妖股级换手（30%）不被门禁，仍是换手承接满档。"""
     features = {
-        "candle_range_pct": 7.04,
-        "ma60": 11.0,
-        "ma30": 10.0,
-        "bull_alignment_days": 8,
-        "ma5_low_touch": True,
-        "turnover_rate_pct": 9.20,
-        "trend_dist_excess_pct": 0.5,
-        "prior_daily_return_pct": -1.0,
-        "close_to_ma5_pct": -0.3,
-        "last_volume_shrank": False,
+        "limit_up_close_streak_max_60d": 6,
+        "days_since_streak_peak_60d": 2,
+        "close_off_low_pct": 5.0,
+        "volume_to_streak_peak_pct": 30.0,
+        "turnover_rate_pct": 30.0,
     }
     streak = quiet_candle_streak([_bar(2.0)] * 5)
     score, components = score_trend_candidate(features, streak)
@@ -464,10 +492,11 @@ def test_total_caps_at_gate_failed_cap_when_gate_fails() -> None:
     assert _total(gate_fail) == 80.0                          # 无 cap 参数不 cap
 
 
-def test_score_version_bumped_to_v3_1() -> None:
+def test_score_version_bumped_to_v3_2() -> None:
     """评分内容（规则集/分量/分值）变更必须同步升版本——版本门禁靠它
-    让旧物化数据失效；并行会话曾只升标签不改内容，造成报告与代码脱节。"""
+    让旧物化数据失效；并行会话曾只升标签不改内容，造成报告与代码脱节。
+    v3.3：A 连板回落去外部门、改段后换手 5-20 承接门槛。"""
 
     from alphaagent.server.services.low_suction import daily_picks_scoring as module
 
-    assert module.SCORE_VERSION == "low-suction-daily-score-v3.1"
+    assert module.SCORE_VERSION == "low-suction-daily-score-v3.3"

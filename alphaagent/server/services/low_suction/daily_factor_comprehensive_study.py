@@ -120,12 +120,6 @@ PERSONAL_CASE_SOURCE_METADATA: dict[str, CaseSourceMetadata] = {
         "process_only",
         ("ma10_ma20_contact_pre_cross_positive_volume_expand",),
     ),
-    "一鸣食品 超跌转趋势": CaseSourceMetadata(
-        date(2026, 7, 14),
-        date(2026, 7, 28),
-        "process_only",
-        ("oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30",),
-    ),
     "立新能源 MA10 向 MA20 加速收敛": CaseSourceMetadata(
         date(2026, 7, 14),
         date(2026, 7, 16),
@@ -175,49 +169,136 @@ PERSONAL_CASE_SOURCE_METADATA: dict[str, CaseSourceMetadata] = {
         "process_only",
         ("price_first_strong_attack",),
     ),
-    "中南文化 MA10 回踩": CaseSourceMetadata(
-        date(2026, 2, 10),
-        None,
-        "ma10_low_touch",
-        ("ma10_low_touch_after_ma5_extension",),
+    # 2026-08 趋势族重构：连板后补涨/弱转强 21 个案例低吸点。
+    # A 连板回落补涨（narrative_start 取主段首板前，launch 为文档启动日）
+    "科森科技 均线蓄势收盘控制": CaseSourceMetadata(
+        date(2024, 8, 22),
+        date(2024, 10, 29),
+        "process_only",
+        ("limit_up_pullback_rebound",),
     ),
-    "华电辽能 MA5 回踩": CaseSourceMetadata(
-        date(2026, 2, 6),
-        date(2026, 3, 6),
-        "ma5_low_touch",
-        ("ma5_low_touch_stable_trend",),
+    "伟时电子 五连板后转多头": CaseSourceMetadata(
+        date(2024, 8, 29),
+        date(2024, 10, 25),
+        "process_only",
+        ("limit_up_pullback_rebound",),
     ),
-    "华电辽能 MA5 缩量回踩": CaseSourceMetadata(
-        date(2026, 2, 6),
-        date(2026, 3, 16),
-        "ma5_low_touch",
-        ("ma5_low_touch_stable_trend_volume_shrink",),
+    "国芳集团 第二波多头确认": CaseSourceMetadata(
+        date(2025, 4, 1),
+        date(2025, 5, 19),
+        "process_only",
+        ("limit_up_pullback_rebound",),
     ),
-    "华电辽能 趋势重建 MA5 回踩": CaseSourceMetadata(
-        date(2026, 4, 14),
-        date(2026, 5, 6),
-        "ma5_low_touch_broad",
-        ("ma5_low_touch_after_disordered_trend_rebuild",),
+    "诺德股份 低开小阳收盘控制": CaseSourceMetadata(
+        date(2025, 6, 12),
+        date(2025, 8, 5),
+        "process_only",
+        ("limit_up_pullback_rebound",),
     ),
-    **{
-        f"华建集团 连续 MA5 低吸 {value.isoformat()}": CaseSourceMetadata(
-            date(2025, 9, 17),
-            date(2025, 9, 25),
-            "ma5_low_touch",
-            (
-                "ma5_low_touch_early_trend"
-                if value == date(2025, 9, 18)
-                else "ma5_low_touch_early_trend_prior_touch",
-            ),
-        )
-        for value in (
-            date(2025, 9, 18),
-            date(2025, 9, 19),
-            date(2025, 9, 22),
-            date(2025, 9, 23),
-            date(2025, 9, 24),
-        )
-    },
+    "九牧王 承接住收盘控制": CaseSourceMetadata(
+        date(2025, 11, 7),
+        date(2025, 11, 28),
+        "process_only",
+        ("limit_up_pullback_rebound",),
+    ),
+    "航天发展 尾盘控盘回踩": CaseSourceMetadata(
+        date(2025, 11, 10),
+        date(2025, 12, 24),
+        "process_only",
+        ("limit_up_pullback_rebound",),
+    ),
+    "华电辽能 长横盘后小阳": CaseSourceMetadata(
+        date(2026, 3, 12),
+        date(2026, 4, 21),
+        "process_only",
+        ("limit_up_pullback_rebound",),
+    ),
+    "福达合金 第二波首小阳": CaseSourceMetadata(
+        date(2026, 4, 27),
+        date(2026, 6, 5),
+        "process_only",
+        ("limit_up_pullback_rebound",),
+    ),
+    # B 涨停弱转强（打板预备：D 日收盘涨停，产品层专门放行）
+    "双成药业 水下拉起收涨停": CaseSourceMetadata(
+        date(2024, 9, 9),
+        date(2024, 10, 15),
+        "process_only",
+        ("limit_up_weak_to_strong_reclaim",),
+    ),
+    "国芳集团 炸板换手弱转强": CaseSourceMetadata(
+        date(2025, 4, 1),
+        date(2025, 4, 17),
+        "process_only",
+        ("limit_up_weak_to_strong_reclaim",),
+    ),
+    "航天发展 跌停换手拉板": CaseSourceMetadata(
+        date(2025, 11, 10),
+        date(2025, 11, 25),
+        "process_only",
+        ("limit_up_weak_to_strong_reclaim",),
+    ),
+    "恒尚节能 超预期拉板": CaseSourceMetadata(
+        date(2026, 6, 12),
+        date(2026, 7, 14),
+        "process_only",
+        ("limit_up_weak_to_strong_reclaim",),
+    ),
+    # 研究锚点：非涨停弱转强（负边缘形态对照）
+    "兴业股份 炸板次日水下拉起": CaseSourceMetadata(
+        date(2025, 6, 16),
+        date(2025, 6, 30),
+        "process_only",
+        ("research_weak_to_strong_turnover_no_limit",),
+    ),
+    "科森科技 承接住大阴预期": CaseSourceMetadata(
+        date(2025, 8, 12),
+        date(2025, 8, 27),
+        "process_only",
+        ("research_weak_to_strong_turnover_no_limit",),
+    ),
+    "航天发展 水下拉起多头未破": CaseSourceMetadata(
+        date(2025, 11, 10),
+        date(2025, 11, 28),
+        "process_only",
+        ("research_weak_to_strong_turnover_no_limit",),
+    ),
+    "梦天家居 跌停预期承接": CaseSourceMetadata(
+        date(2025, 11, 14),
+        date(2025, 11, 27),
+        "process_only",
+        ("research_weak_to_strong_turnover_no_limit",),
+    ),
+    "安记食品 跌停预期控盘": CaseSourceMetadata(
+        date(2025, 11, 27),
+        date(2025, 12, 13),
+        "process_only",
+        ("research_weak_to_strong_turnover_no_limit",),
+    ),
+    "锋龙股份 高换手卡5日线": CaseSourceMetadata(
+        date(2025, 12, 22),
+        date(2026, 2, 3),
+        "process_only",
+        ("research_weak_to_strong_turnover_no_limit",),
+    ),
+    "哈药股份 低开拉回踩MA5": CaseSourceMetadata(
+        date(2026, 7, 7),
+        date(2026, 7, 21),
+        "process_only",
+        ("research_weak_to_strong_turnover_no_limit",),
+    ),
+    "传智教育 弱转强卡点": CaseSourceMetadata(
+        date(2026, 7, 22),
+        date(2026, 8, 10),
+        "process_only",
+        ("research_weak_to_strong_turnover_no_limit",),
+    ),
+    "爱丽家居 弱转强停牌": CaseSourceMetadata(
+        date(2026, 7, 16),
+        date(2026, 8, 10),
+        "process_only",
+        ("research_weak_to_strong_turnover_no_limit",),
+    ),
 }
 
 

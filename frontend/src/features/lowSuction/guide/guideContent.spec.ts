@@ -7,19 +7,16 @@ import {
   buildScoreTable,
   mergeCasesIntoRules,
   oversoldScoreCeiling,
+  trendScoreCeiling,
   type GuideRuleNode,
 } from "./guideContent";
 
-/** 后端 DISCOVERY_RULES 的权威 key 清单（daily_factor_extended_discovery.py:232）。 */
+/** 后端 DISCOVERY_RULES 的权威 key 清单（daily_factor_extended_discovery.py）。 */
 const BACKEND_RULE_KEYS = {
   trend_pullback: [
-    "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30",
-    "ma10_low_touch_after_ma5_extension",
-    "ma5_low_touch_stable_trend",
-    "ma5_low_touch_stable_trend_volume_shrink",
-    "ma5_low_touch_after_disordered_trend_rebuild",
-    "ma5_low_touch_early_trend",
-    "ma5_low_touch_early_trend_prior_touch",
+    "limit_up_weak_to_strong_reclaim",
+    "limit_up_pullback_rebound",
+    "research_weak_to_strong_turnover_no_limit",
   ],
   oversold_rebound: [
     "first_leg_two_ma_body_wrap_before_ma30",
@@ -37,30 +34,30 @@ const BACKEND_RULE_KEYS = {
 function fakePayload(): GuideCasesPayload {
   return {
     status: "ok",
-    score_version: "low-suction-daily-score-v3.1",
+    score_version: "low-suction-daily-score-v3.3",
     families: [
       {
         key: "trend_pullback",
         label: "上升趋势低吸",
         rules: [
           {
-            rule_key: "ma5_low_touch_stable_trend",
-            description: "稳定多头中 D 日低点回踩 MA5",
+            rule_key: "limit_up_weak_to_strong_reclaim",
+            description: "涨停弱转强（打板预备）",
             tier: "product",
-            product_tier: null,
+            product_tier: "P1.5",
             cases: [
               {
-                case_id: "华电辽能 MA5 回踩",
-                name: "华电辽能 MA5 回踩",
-                vt_symbol: "600396.SSE",
-                signal_date: "2026-03-05",
+                case_id: "恒尚节能 超预期拉板",
+                name: "恒尚节能 超预期拉板",
+                vt_symbol: "603137.SSE",
+                signal_date: "2026-07-13",
                 setup_type: "trend_pullback",
-                narrative_start_date: "2026-02-06",
-                expected_launch_date: "2026-03-06",
-                source_anchor: "ma5_low_touch",
+                narrative_start_date: "2026-06-12",
+                expected_launch_date: "2026-07-14",
+                source_anchor: "process_only",
                 narrative_status: "complete",
                 returns: {
-                  d1_close_return_pct: 10.05,
+                  d1_close_return_pct: 9.99,
                   d3_close_return_pct: 20.0,
                   d5_close_return_pct: 33.0,
                   status: "available",
@@ -113,7 +110,7 @@ describe("buildGuideStages", () => {
 });
 
 describe("buildRuleNodes", () => {
-  it("覆盖后端全部 16 条规则且 ruleKey 唯一", () => {
+  it("覆盖后端全部 12 条规则且 ruleKey 唯一", () => {
     const nodes = buildRuleNodes();
     const keys = nodes.map((n) => n.ruleKey);
     expect(new Set(keys).size).toBe(keys.length);
@@ -126,10 +123,24 @@ describe("buildRuleNodes", () => {
     const nodes = buildRuleNodes();
     const trend = nodes.filter((n) => n.family === "trend_pullback");
     const oversold = nodes.filter((n) => n.family === "oversold_rebound");
-    expect(trend).toHaveLength(7);
+    expect(trend).toHaveLength(3);
     expect(oversold).toHaveLength(9);
-    // 趋势 7 条全部产品化；超跌 6 条产品规则（P1.5 五条 + P1 一条）
-    expect(trend.every((n) => n.tier === "product")).toBe(true);
+    // 趋势 2 条产品（P1.5 涨停弱转强带打板预备徽章 + P1 弱市补涨）+ 1 条研究锚点
+    expect(trend.filter((n) => n.tier === "product").map((n) => n.ruleKey).sort())
+      .toEqual([
+        "limit_up_pullback_rebound",
+        "limit_up_weak_to_strong_reclaim",
+      ]);
+    expect(
+      nodes.find((n) => n.ruleKey === "limit_up_weak_to_strong_reclaim")?.anchorTag,
+    ).toBe("board_ready");
+    expect(
+      nodes.find((n) => n.ruleKey === "limit_up_weak_to_strong_reclaim")?.productTier,
+    ).toBe("P1.5");
+    expect(
+      nodes.find((n) => n.ruleKey === "limit_up_pullback_rebound")
+        ?.productTier,
+    ).toBe("P1");
     expect(oversold.filter((n) => n.tier === "product").map((n) => n.ruleKey).sort())
       .toEqual([
         "first_leg_two_ma_body_wrap_before_ma30",
@@ -166,12 +177,22 @@ describe("buildRuleNodes", () => {
 });
 
 describe("buildScoreTable", () => {
-  it("趋势族 9 个 bonus 分量，满分 100", () => {
+  it("趋势族底盘 5 分量（×0.4）+ 路径 6 分量，折算后满值约 70（与超跌同量纲）", () => {
     const table = buildScoreTable("trend_pullback");
-    expect(table.components).toHaveLength(9);
+    expect(table.components).toHaveLength(11);
     expect(table.components.every((c) => c.kind === "bonus")).toBe(true);
-    expect(table.components.reduce((sum, c) => sum + c.maxPoints, 0)).toBe(100);
-    expect(table.maxScoreText).toBe("100");
+    const scaled = table.components.filter((c) => c.scaled);
+    expect(scaled.reduce((sum, c) => sum + c.maxPoints, 0)).toBe(100);
+    const reclaim = table.components
+      .filter((c) => !c.scaled && c.key.startsWith("reclaim_"))
+      .reduce((sum, c) => sum + c.maxPoints, 0);
+    const pullback = table.components
+      .filter((c) => !c.scaled && c.key.startsWith("pullback_"))
+      .reduce((sum, c) => sum + c.maxPoints, 0);
+    expect(reclaim).toBe(30);
+    expect(pullback).toBe(30);
+    expect(trendScoreCeiling()).toBe(70);
+    expect(table.maxScoreText).toBe("≈70");
   });
 
   it("超跌族 1 门禁 + 15 分量，折算后满值约 70（与趋势不同量纲）", () => {
@@ -205,17 +226,17 @@ describe("mergeCasesIntoRules", () => {
     const nodes = buildRuleNodes();
     const merged = mergeCasesIntoRules(nodes, fakePayload());
     const target = merged.nodes.find(
-      (n) => n.ruleKey === "ma5_low_touch_stable_trend",
+      (n) => n.ruleKey === "limit_up_weak_to_strong_reclaim",
     );
     expect(target?.cases).toHaveLength(1);
-    expect(target?.cases[0].caseId).toBe("华电辽能 MA5 回踩");
+    expect(target?.cases[0].caseId).toBe("恒尚节能 超预期拉板");
     expect(target?.cases[0].returns.d5).toBe(33.0);
-    expect(target?.cases[0].narrativeStartDate).toBe("2026-02-06");
+    expect(target?.cases[0].narrativeStartDate).toBe("2026-06-12");
     expect(merged.orphanCases).toHaveLength(1);
     expect(merged.orphanCases[0].caseId).toBe("秦安股份 MA10 上穿 MA20");
     // 无案例的规则保持空数组而不是 undefined
     const empty = merged.nodes.find(
-      (n) => n.ruleKey === "ma5_low_touch_early_trend",
+      (n) => n.ruleKey === "limit_up_pullback_rebound",
     );
     expect(empty?.cases).toEqual([]);
   });
@@ -239,7 +260,7 @@ describe("mergeCasesIntoRules", () => {
     const merged = mergeCasesIntoRules(nodes, fakePayload());
     expect(merged.nodes).not.toBe(nodes);
     expect(
-      nodes.find((n) => n.ruleKey === "ma5_low_touch_stable_trend"),
+      nodes.find((n) => n.ruleKey === "limit_up_weak_to_strong_reclaim"),
     ).not.toHaveProperty("cases");
   });
 });

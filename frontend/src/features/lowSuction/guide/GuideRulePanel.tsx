@@ -34,6 +34,11 @@ export function GuideRulePanel({ node }: GuideRulePanelProps) {
               {node.productTier} 产品放行
             </span>
           )}
+          {node.anchorTag === "board_ready" && (
+            <span className="rounded border border-amber-500/50 bg-amber-500/10 px-1.5 py-px text-[10px] font-semibold text-amber-700 dark:text-amber-300">
+              打板预备 · 信号日收盘涨停
+            </span>
+          )}
           {node.tier === "research" && (
             <span className="rounded border border-dashed px-1.5 py-px text-[10px] text-muted-foreground">
               研究锚点 · 不进推荐

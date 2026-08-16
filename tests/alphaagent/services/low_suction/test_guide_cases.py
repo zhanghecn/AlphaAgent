@@ -10,6 +10,8 @@ from alphaagent.server.services.low_suction.daily_factor_comprehensive_study imp
 from alphaagent.server.services.low_suction.daily_factor_extended_discovery import (
     DISCOVERY_RULES,
     FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
+    LIMIT_UP_PULLBACK_REBOUND_RULE_KEY,
+    LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY,
     POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
     PRE_CROSS_ACCELERATION_WEAK_MARKET_RULE_KEY,
     PRICE_FIRST_STRONG_ATTACK_RULE_KEY,
@@ -142,9 +144,13 @@ def test_assemble_payload_product_tiers_match_scanner() -> None:
                 PRICE_FIRST_STRONG_ATTACK_RULE_KEY,
                 RESEARCH_THREE_MA_WRAP_RULE_KEY,
                 POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
+                LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY,
             ):
                 assert rule["product_tier"] == "P1.5"
-            elif rule["rule_key"] == STAGED_MA10_SUPPORT_RULE_KEY:
+            elif rule["rule_key"] in (
+                STAGED_MA10_SUPPORT_RULE_KEY,
+                LIMIT_UP_PULLBACK_REBOUND_RULE_KEY,
+            ):
                 assert rule["product_tier"] == "P1"
             else:
                 assert rule["product_tier"] is None
@@ -182,20 +188,20 @@ def test_assemble_payload_case_fields_and_returns() -> None:
         for family in payload["families"]
         for rule in family["rules"]
         for case in rule["cases"]
-        if case["case_id"] == "华电辽能 MA5 缩量回踩"
+        if case["case_id"] == "哈药股份 低开拉回踩MA5"
     )
-    assert sample["vt_symbol"] == "600396.SSE"
-    assert sample["signal_date"] == "2026-03-13"
+    assert sample["vt_symbol"] == "600664.SSE"
+    assert sample["signal_date"] == "2026-07-20"
     assert sample["setup_type"] == "trend_pullback"
-    assert sample["narrative_start_date"] == "2026-02-06"
-    assert sample["expected_launch_date"] == "2026-03-16"
+    assert sample["narrative_start_date"] == "2026-07-07"
+    assert sample["expected_launch_date"] == "2026-07-21"
     assert sample["returns"]["d5_close_return_pct"] == 42.0
     assert sample["returns"]["status"] == "available"
 
 
 def test_assemble_payload_marks_partial_when_symbol_bars_unavailable() -> None:
     returns = _fake_returns()
-    returns["华电辽能 MA5 回踩"] = {
+    returns["哈药股份 低开拉回踩MA5"] = {
         "d1_close_return_pct": None,
         "d3_close_return_pct": None,
         "d5_close_return_pct": None,

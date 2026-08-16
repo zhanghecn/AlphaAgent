@@ -13,6 +13,8 @@ from datetime import date
 from alphaagent.server.services.low_suction.daily_factor_extended_discovery import (
     DISCOVERY_RULES,
     FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
+    LIMIT_UP_PULLBACK_REBOUND_RULE_KEY,
+    LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY,
     POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
     PRE_CROSS_ACCELERATION_WEAK_MARKET_RULE_KEY,
     PRICE_FIRST_STRONG_ATTACK_RULE_KEY,
@@ -42,6 +44,8 @@ SETUP_TYPE_LABELS = {
     "oversold_rebound": "超跌反弹低吸",
 }
 P1_5_TURNOVER_TARGET_PCT = 3.0
+# 趋势族决胜目标换手：妖股弱转强/回落承接的甜点带 20-38%，取带心。
+TREND_TURNOVER_TARGET_PCT = 25.0
 PRE_CROSS_LEAD_RULE_KEYS = frozenset(
     {
         PRE_CROSS_ACCELERATION_WEAK_MARKET_RULE_KEY,
@@ -65,14 +69,26 @@ PRODUCT_OVERSOLD_RULE_KEYS = frozenset(
         *THREE_MA_WRAP_CHAIN_RULE_KEYS,
     }
 )
+# 趋势族产品规则（2026-08 连板后补涨/弱转强重构）：B 涨停弱转强（P1.5，
+# 两年 n=318 胜率 60.4%/+1.69）与 A 连板回落补涨（P1，段后换手 5~20 承接门槛，
+# n=995 56.8%/+0.49）；非涨停弱转强为研究锚点（负边缘），不进推荐。
+PRODUCT_TREND_RULE_KEYS = frozenset(
+    {
+        LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY,
+        LIMIT_UP_PULLBACK_REBOUND_RULE_KEY,
+    }
+)
 PRODUCT_DISCOVERY_RULES = {
     "oversold_rebound": tuple(
         rule
         for rule in DISCOVERY_RULES["oversold_rebound"]
         if rule.key in PRODUCT_OVERSOLD_RULE_KEYS
     ),
-    # 趋势族尚未收敛，保持当前产品行为，后续单独研究。
-    "trend_pullback": DISCOVERY_RULES["trend_pullback"],
+    "trend_pullback": tuple(
+        rule
+        for rule in DISCOVERY_RULES["trend_pullback"]
+        if rule.key in PRODUCT_TREND_RULE_KEYS
+    ),
 }
 
 RULE_LABELS = {
@@ -137,6 +153,7 @@ def scan_low_suction_candidates(
     *,
     target_dates: set[date] | None = None,
     market_regimes: Mapping[date, str] | None = None,
+    market_limit_up_counts: Mapping[date, int] | None = None,
 ) -> list[LowSuctionCandidate]:
     """Scan source-rule candidates and attach the current diagnostic score.
 
@@ -149,6 +166,11 @@ def scan_low_suction_candidates(
     ``market_regimes`` 缺省或当日无分类时 X 不入场（fail-closed）。
     同月研究锚点升级的三线包裹链两条（P1.5 同层，全 regime）：
     三线包裹缩量底盘（W）与包裹次日上沿确认（Z，宽口径前置）。
+    趋势族 2026-08 重构为连板后补涨/弱转强两条产品规则：B 涨停弱转强
+    （低开拉板，信号日收盘涨停由本扫描器专门放行——涨停收盘的其他
+    候选仍一律剔除）与 A 连板回落补涨（段后换手承接区，
+    fail-closed 同 X 纪律）；``market_limit_up_counts`` 为信号日全市场
+    收盘涨停家数，仅作 A 路径评分的情绪温度加分。
     """
 
     candidates: list[LowSuctionCandidate] = []
@@ -166,8 +188,9 @@ def scan_low_suction_candidates(
     for snapshot in snapshots:
         if target_dates is not None and snapshot.trade_date not in target_dates:
             continue
-        if _signal_day_limit_up_closed(snapshot.history, snapshot.position):
-            continue
+        signal_day_limit_up = _signal_day_limit_up_closed(
+            snapshot.history, snapshot.position
+        )
         features = snapshot.features
         prior_features = snapshot.prior_features
         trend_rules = matching_discovery_rule_keys(
@@ -176,6 +199,12 @@ def scan_low_suction_candidates(
             prior_features=prior_features,
             rules=PRODUCT_DISCOVERY_RULES["trend_pullback"],
         )
+        # 信号日收盘涨停只放行 B 涨停弱转强路径（打板预备）；其余
+        # （超跌/A/未命中产品规则）维持涨停剔除。
+        if signal_day_limit_up and (
+            LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY not in trend_rules
+        ):
+            continue
         matched_oversold_rules = matching_discovery_rule_keys(
             features,
             "oversold_rebound",
@@ -230,7 +259,17 @@ def scan_low_suction_candidates(
             else None
         )
         if trend_rules:
-            score, components = score_trend_candidate(features, streak)
+            score, components = score_trend_candidate(
+                features,
+                streak,
+                (market_limit_up_counts or {}).get(snapshot.trade_date),
+                weak_to_strong_reclaim_rule_matched=(
+                    LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY in trend_rules
+                ),
+                limit_up_pullback_rule_matched=(
+                    LIMIT_UP_PULLBACK_REBOUND_RULE_KEY in trend_rules
+                ),
+            )
             candidates.append(
                 LowSuctionCandidate(
                     vt_symbol=snapshot.symbol,
@@ -316,8 +355,14 @@ def candidate_ranking_key(
     tier = _candidate_priority_tier(item)
     turnover_distance = 0.0
     if tier == 20:
+        # 两族 tier20 的换手甜点不同：超跌贴近 3%，趋势妖股贴近 25%。
+        target = (
+            TREND_TURNOVER_TARGET_PCT
+            if item.setup_type == "trend_pullback"
+            else P1_5_TURNOVER_TARGET_PCT
+        )
         turnover_distance = (
-            abs(item.turnover_rate_pct - P1_5_TURNOVER_TARGET_PCT)
+            abs(item.turnover_rate_pct - target)
             if item.turnover_rate_pct is not None
             else 99.0
         )
@@ -332,9 +377,15 @@ def candidate_ranking_key(
 
 
 def _candidate_priority_tier(item: LowSuctionCandidate) -> int:
-    if item.setup_type != "oversold_rebound":
-        return 0
     matched = set(item.matched_rule_keys)
+    if item.setup_type == "trend_pullback":
+        # B 涨停弱转强（60.4%/+1.69）为趋势族主力（P1.5 层）；
+        # A 连板回落补涨（承接门槛版 50.8%/+0.23）为 P1 层补位。
+        if LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY in matched:
+            return 20
+        if LIMIT_UP_PULLBACK_REBOUND_RULE_KEY in matched:
+            return 10
+        return 0
     if FIRST_LEG_TWO_MA_WRAP_RULE_KEY in matched:
         return 20
     # P1.5 同层：上穿前价格先行（X/Y，半年剔案例胜率 68-72%）与三线包裹链

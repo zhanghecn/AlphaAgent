@@ -163,8 +163,21 @@ def test_cli_declares_targeted_personal_case_gate(
         "600721.SSE",
         "603758.SSE",
         "600683.SSE",
-        "002445.SZSE",
+        # 2026-08 趋势族重构新增案例票（连板后补涨/弱转强）
+        "603626.SSE",
+        "605218.SSE",
+        "601086.SSE",
+        "600110.SSE",
+        "601566.SSE",
+        "000547.SZSE",
+        "603216.SSE",
+        "603696.SSE",
+        "002931.SZSE",
+        "603045.SSE",
+        "603137.SSE",
+        "600664.SSE",
+        "603928.SSE",
+        "002693.SZSE",
         "600396.SSE",
-        "600629.SSE",
     }
     assert capsys.readouterr().out == "case-gate-report\n"

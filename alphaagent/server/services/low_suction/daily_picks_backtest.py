@@ -24,7 +24,7 @@ from alphaagent.server.services.low_suction.daily_picks_scoring import (
 )
 
 
-BACKTEST_VERSION = "low-suction-daily-backtest-v11"
+BACKTEST_VERSION = "low-suction-daily-backtest-v13"
 RECENT_LEDGER_DAYS = 60
 _MIN_BAND_SAMPLE = 30
 PICKS_PER_FAMILY = 5

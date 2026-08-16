@@ -210,18 +210,18 @@ def test_low_suction_ledger_reports_service_unavailable(monkeypatch) -> None:
 def test_low_suction_guide_cases_returns_grouped_payload(monkeypatch) -> None:
     expected = {
         "status": "ok",
-        "score_version": "low-suction-daily-score-v3.1",
+        "score_version": "low-suction-daily-score-v3.3",
         "families": [
             {
                 "key": "trend_pullback",
                 "label": "上升趋势低吸",
                 "rules": [
                     {
-                        "rule_key": "ma5_low_touch_stable_trend",
-                        "description": "稳定多头中 D 日低点回踩 MA5",
+                        "rule_key": "limit_up_weak_to_strong_reclaim",
+                        "description": "涨停弱转强（打板预备）",
                         "tier": "product",
-                        "product_tier": None,
-                        "cases": [{"case_id": "华电辽能 MA5 回踩"}],
+                        "product_tier": "P1.5",
+                        "cases": [{"case_id": "恒尚节能 超预期拉板"}],
                     }
                 ],
             }

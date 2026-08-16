@@ -31,7 +31,6 @@ PERSONAL_RESEARCH_CASES = (
     ("传智教育 三线包裹", "003032.SZSE", date(2026, 7, 23), "oversold_rebound"),
     ("传智教育 MA10 向 MA30 收敛", "003032.SZSE", date(2026, 7, 24), "oversold_rebound"),
     ("一鸣食品 MA10 贴合 MA20", "605179.SSE", date(2026, 7, 15), "oversold_rebound"),
-    ("一鸣食品 超跌转趋势", "605179.SSE", date(2026, 7, 27), "trend_pullback"),
     ("立新能源 MA10 向 MA20 加速收敛", "001258.SZSE", date(2026, 7, 15), "oversold_rebound"),
     ("爱丽家居 MA10 回贴 MA30", "603221.SSE", date(2026, 7, 20), "oversold_rebound"),
     ("百花医药 M10/M20 两线包裹", "600721.SSE", date(2026, 7, 14), "oversold_rebound"),
@@ -40,15 +39,31 @@ PERSONAL_RESEARCH_CASES = (
     ("国风新材 攻击实体守住", "000859.SZSE", date(2026, 8, 7), "oversold_rebound"),
     ("秦安股份 MA10 上穿 MA20", "603758.SSE", date(2026, 8, 6), "oversold_rebound"),
     ("京投发展 价格先行攻击", "600683.SSE", date(2026, 8, 7), "oversold_rebound"),
-    ("中南文化 MA10 回踩", "002445.SZSE", date(2026, 2, 12), "trend_pullback"),
-    ("华电辽能 MA5 回踩", "600396.SSE", date(2026, 3, 5), "trend_pullback"),
-    ("华电辽能 MA5 缩量回踩", "600396.SSE", date(2026, 3, 13), "trend_pullback"),
-    ("华电辽能 趋势重建 MA5 回踩", "600396.SSE", date(2026, 4, 30), "trend_pullback"),
-    ("华建集团 连续 MA5 低吸 2025-09-18", "600629.SSE", date(2025, 9, 18), "trend_pullback"),
-    ("华建集团 连续 MA5 低吸 2025-09-19", "600629.SSE", date(2025, 9, 19), "trend_pullback"),
-    ("华建集团 连续 MA5 低吸 2025-09-22", "600629.SSE", date(2025, 9, 22), "trend_pullback"),
-    ("华建集团 连续 MA5 低吸 2025-09-23", "600629.SSE", date(2025, 9, 23), "trend_pullback"),
-    ("华建集团 连续 MA5 低吸 2025-09-24", "600629.SSE", date(2025, 9, 24), "trend_pullback"),
+    # 2026-08 趋势族重构：连板后补涨/弱转强 21 个主人案例低吸点（十轮研究定稿）。
+    # A 连板回落补涨（8 点）
+    ("科森科技 均线蓄势收盘控制", "603626.SSE", date(2024, 10, 28), "trend_pullback"),
+    ("伟时电子 五连板后转多头", "605218.SSE", date(2024, 10, 24), "trend_pullback"),
+    ("国芳集团 第二波多头确认", "601086.SSE", date(2025, 5, 16), "trend_pullback"),
+    ("诺德股份 低开小阳收盘控制", "600110.SSE", date(2025, 8, 4), "trend_pullback"),
+    ("九牧王 承接住收盘控制", "601566.SSE", date(2025, 11, 27), "trend_pullback"),
+    ("航天发展 尾盘控盘回踩", "000547.SZSE", date(2025, 12, 23), "trend_pullback"),
+    ("华电辽能 长横盘后小阳", "600396.SSE", date(2026, 4, 20), "trend_pullback"),
+    ("福达合金 第二波首小阳", "603045.SSE", date(2026, 6, 4), "trend_pullback"),
+    # B 涨停弱转强（4 点，打板预备）
+    ("双成药业 水下拉起收涨停", "002693.SZSE", date(2024, 10, 14), "trend_pullback"),
+    ("国芳集团 炸板换手弱转强", "601086.SSE", date(2025, 4, 16), "trend_pullback"),
+    ("航天发展 跌停换手拉板", "000547.SZSE", date(2025, 11, 24), "trend_pullback"),
+    ("恒尚节能 超预期拉板", "603137.SSE", date(2026, 7, 13), "trend_pullback"),
+    # 研究锚点：非涨停弱转强（9 点，全市场负边缘不进推荐、形态对照展示）
+    ("兴业股份 炸板次日水下拉起", "603928.SSE", date(2025, 6, 27), "trend_pullback"),
+    ("科森科技 承接住大阴预期", "603626.SSE", date(2025, 8, 26), "trend_pullback"),
+    ("航天发展 水下拉起多头未破", "000547.SZSE", date(2025, 11, 27), "trend_pullback"),
+    ("梦天家居 跌停预期承接", "603216.SSE", date(2025, 11, 26), "trend_pullback"),
+    ("安记食品 跌停预期控盘", "603696.SSE", date(2025, 12, 12), "trend_pullback"),
+    ("锋龙股份 高换手卡5日线", "002931.SZSE", date(2026, 2, 2), "trend_pullback"),
+    ("哈药股份 低开拉回踩MA5", "600664.SSE", date(2026, 7, 20), "trend_pullback"),
+    ("传智教育 弱转强卡点", "003032.SZSE", date(2026, 8, 7), "trend_pullback"),
+    ("爱丽家居 弱转强停牌", "603221.SSE", date(2026, 8, 7), "trend_pullback"),
 )
 
 

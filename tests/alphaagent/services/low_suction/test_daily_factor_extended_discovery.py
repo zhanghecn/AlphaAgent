@@ -16,16 +16,20 @@ from alphaagent.server.services.low_suction.daily_factor_extended_discovery impo
     ATTACK_BODY_HOLD_RULE_KEY,
     DiscoveryRule,
     FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
+    LIMIT_UP_PULLBACK_REBOUND_RULE_KEY,
+    LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY,
     MA10_MA20_PRE_CROSS_RULE_KEY,
     POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
     PRE_CROSS_ACCELERATION_WEAK_MARKET_RULE_KEY,
     PRICE_FIRST_STRONG_ATTACK_RULE_KEY,
     RESEARCH_THREE_MA_WRAP_RULE_KEY,
+    RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY,
     STAGED_MA10_SUPPORT_RULE_KEY,
     _ma10_ma20_next_close_required_return_pct,
     _ma10_ma30_next_close_required_return_pct,
     _has_initial_short_trend_shape,
     _is_score_candidate,
+    _limit_up_streak_features,
     _research_answers,
     _rule_matches,
     build_pre_attack_base_process_features,
@@ -431,7 +435,9 @@ def test_trend_bull_alignment_admits_three_line_bull_without_ma60() -> None:
     assert features["trend_all_slopes_up"] is True
 
 
-def test_scan_admits_three_line_trend_candidate_without_ma60() -> None:
+def test_scan_rejects_three_line_trend_without_limit_up_history() -> None:
+    """2026-08 趋势族重构后：多头排列回踩（无连板史）不再进趋势池。"""
+
     bars = [
         {**row, "vt_symbol": "600001.SSE", "turnover_rate": 2.0}
         for row in _three_line_bull_with_ma60_above_history()
@@ -440,13 +446,7 @@ def test_scan_admits_three_line_trend_candidate_without_ma60() -> None:
     candidates = scan_low_suction_candidates(bars, calendar, [], target_dates={calendar[-1]})
 
     trend = [candidate for candidate in candidates if candidate.setup_type == "trend_pullback"]
-    assert len(trend) == 1
-    assert trend[0].rule_key == "ma5_low_touch_stable_trend"
-    assert trend[0].as_dict()["rule_label"] == next(
-        rule.description
-        for rule in DISCOVERY_RULES["trend_pullback"]
-        if rule.key == trend[0].rule_key
-    )
+    assert trend == []
 
 
 def test_scan_admits_calibrated_stable_three_ma_wrap_into_the_product_pool(
@@ -929,7 +929,15 @@ def test_manifest_excludes_retired_generic_rule_families() -> None:
     assert ATTACK_BODY_HOLD_RULE_KEY in rules
     assert FIRST_LEG_TWO_MA_WRAP_RULE_KEY in rules
     assert "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30" not in rules
-    assert "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30" in trend_keys
+    assert "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30" not in trend_keys
+    # 2026-08 趋势族重构：旧 7 条多头排列回踩全部退役，替换为连板后
+    # 补涨/弱转强三条。
+    assert LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY in trend_keys
+    assert LIMIT_UP_PULLBACK_REBOUND_RULE_KEY in trend_keys
+    assert RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY in trend_keys
+    assert "ma5_low_touch_stable_trend" not in trend_keys
+    assert "ma10_low_touch_after_ma5_extension" not in trend_keys
+    assert "ma5_low_touch_early_trend" not in trend_keys
     assert "v3_oversold_universal_pullback" not in rules
     assert "v4_trend_quiet_pullback" not in trend_keys
 
@@ -980,14 +988,6 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
         "aggressive_pullback": True,
         "volume_shrink_then_expand": True,
     }
-    ma10_after_ma5_extension = {
-        "trend_discovery_eligible": True,
-        "trend_stable_bull": True,
-        "ma5_regular": True,
-        "ma10_low_touch": True,
-        "prior_ma5_close_extension": True,
-        "prior_daily_price_not_up": True,
-    }
     yiming_pre_cross = {
         "long_bear_alignment": True,
         "current_full_bear_alignment": True,
@@ -997,15 +997,31 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
         "positive_candle": True,
         "last_volume_expanded": True,
     }
-    yiming_trend_transition = {
-        "long_bear_alignment": True,
-        "ma10_dual_cross_within_7d": True,
-        "ma10_above_ma20_and_ma30": True,
-        "transition_ma20_ma30_tight_contact": True,
-        "ma10_ma20_slopes_up": True,
-        "post_cross_pullback": True,
-        "small_positive_candle": True,
-        "volume_expand_then_shrink": True,
+    limit_up_reclaim = {
+        "limit_up_history_window_sessions": 60,
+        "limit_up_close_streak_max_60d": 6,
+        "days_since_streak_peak_60d": 2,
+        "open_to_prev_close_pct": -3.4,
+        "limit_up_close_today": True,
+    }
+    limit_up_pullback = {
+        "limit_up_history_window_sessions": 60,
+        "limit_up_close_streak_max_60d": 7,
+        "days_since_streak_peak_60d": 15,
+        "daily_return_pct": 1.2,
+        "close_to_prev_close_pct": 0.4,
+        "volume_to_ma5_ratio": 0.9,
+        "post_streak_turnover_mean_pct": 12.5,
+        "signal_day_not_limit_up_closed": True,
+    }
+    research_no_limit = {
+        "limit_up_history_window_sessions": 60,
+        "limit_up_close_streak_max_60d": 5,
+        "days_since_streak_peak_60d": 2,
+        "turnover_rate_pct": 25.0,
+        "close_off_low_pct": 5.5,
+        "low_to_prev_close_pct": -9.9,
+        "signal_day_not_limit_up_closed": True,
     }
 
     stable_wrap_key = RESEARCH_THREE_MA_WRAP_RULE_KEY
@@ -1013,15 +1029,14 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
     staged_key = STAGED_MA10_SUPPORT_RULE_KEY
     retest_key = "ma10_ma30_retest_after_actual_cross_two_leg_volume"
     yiming_pre_cross_key = MA10_MA20_PRE_CROSS_RULE_KEY
-    yiming_transition_key = "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30"
-    fallback_key = "ma10_low_touch_after_ma5_extension"
     assert stable_wrap_key in oversold_rules
     assert post_wrap_key in oversold_rules
     assert staged_key in oversold_rules
     assert retest_key in oversold_rules
     assert yiming_pre_cross_key in oversold_rules
-    assert yiming_transition_key in trend_rules
-    assert fallback_key in trend_rules
+    assert LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY in trend_rules
+    assert LIMIT_UP_PULLBACK_REBOUND_RULE_KEY in trend_rules
+    assert RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY in trend_rules
     assert process_rule_predicates(stable_wrap_key, stable_wrap) == {
         "long_bear_alignment": True,
         "ma10_crossed_ma20_after_long_bear_within_15d": True,
@@ -1102,16 +1117,29 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
         {**yiming_pre_cross, "ma10_below_ma20": False},
     ) is False
     assert _rule_matches(
-        trend_rules[yiming_transition_key], yiming_trend_transition
+        trend_rules[LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY], limit_up_reclaim
     ) is True
     assert _rule_matches(
-        trend_rules[yiming_transition_key],
-        {**yiming_trend_transition, "ma10_ma20_slopes_up": False},
+        trend_rules[LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY],
+        {**limit_up_reclaim, "open_to_prev_close_pct": 1.2},
     ) is False
-    assert _rule_matches(trend_rules[fallback_key], ma10_after_ma5_extension) is True
     assert _rule_matches(
-        trend_rules[fallback_key],
-        {**ma10_after_ma5_extension, "prior_ma5_close_extension": False},
+        trend_rules[LIMIT_UP_PULLBACK_REBOUND_RULE_KEY], limit_up_pullback
+    ) is True
+    assert _rule_matches(
+        trend_rules[LIMIT_UP_PULLBACK_REBOUND_RULE_KEY],
+        {**limit_up_pullback, "days_since_streak_peak_60d": 35},
+    ) is False
+    assert _rule_matches(
+        trend_rules[LIMIT_UP_PULLBACK_REBOUND_RULE_KEY],
+        {**limit_up_pullback, "post_streak_turnover_mean_pct": 25.0},
+    ) is False
+    assert _rule_matches(
+        trend_rules[RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY], research_no_limit
+    ) is True
+    assert _rule_matches(
+        trend_rules[RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY],
+        {**research_no_limit, "close_off_low_pct": 1.0, "low_to_prev_close_pct": -3.0},
     ) is False
 
 
@@ -1628,34 +1656,11 @@ def test_extended_factor_score_keeps_volume_as_an_oversold_addition() -> None:
         {**oversold_features, "volume_shape": "mixed", "volume_expand_then_shrink": False},
         "oversold_rebound",
     ) == {"base": 100.0, "with_volume": 80.0}
+    # 趋势族研究评分只剩 base 变体（2026-08 重构删 transition bonus）；
+    # 无连板史特征时 source_process 不命中，base = 4/5 轴 × 20。
     assert score_extended_factor(trend_features, "trend_pullback") == {
-        "base": 100.0,
-        "with_transition_bonus": 100.0,
+        "base": 80.0,
     }
-
-
-def test_transition_bonus_does_not_require_ma5_or_ma60_trend_alignment() -> None:
-    transition_features = {
-        "long_bear_alignment": True,
-        "ma10_dual_cross_within_7d": True,
-        "ma10_above_ma20_and_ma30": True,
-        "transition_ma20_ma30_tight_contact": True,
-        "ma10_ma20_slopes_up": True,
-        "post_cross_pullback": True,
-        "small_positive_candle": True,
-        "trend_transition_eligible": True,
-        "volume_expand_then_shrink": True,
-        "trend_bull_alignment": False,
-        "trend_all_slopes_up": False,
-        "trend_discovery_eligible": False,
-        "ma5_regular": False,
-        "ma5_low_touch": False,
-        "ma10_low_touch": False,
-    }
-
-    scores = score_extended_factor(transition_features, "trend_pullback")
-
-    assert scores == {"base": 20.0, "with_transition_bonus": 60.0}
 
 
 def test_transition_is_a_trend_candidate_without_regular_ma5_or_ma60_order() -> None:

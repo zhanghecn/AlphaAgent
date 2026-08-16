@@ -89,14 +89,6 @@ def test_personal_case_manifest_covers_every_named_source_observation() -> None:
             ("ma10_ma20_contact_pre_cross_positive_volume_expand",),
         ),
         (
-            "一鸣食品 超跌转趋势",
-            "605179.SSE",
-            date(2026, 7, 27),
-            "trend_pullback",
-            "process_only",
-            ("oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30",),
-        ),
-        (
             "立新能源 MA10 向 MA20 加速收敛",
             "001258.SZSE",
             date(2026, 7, 15),
@@ -160,59 +152,175 @@ def test_personal_case_manifest_covers_every_named_source_observation() -> None:
             "process_only",
             ("price_first_strong_attack",),
         ),
+        # 2026-08 趋势族重构：连板后补涨/弱转强 21 个案例低吸点。
         (
-            "中南文化 MA10 回踩",
-            "002445.SZSE",
-            date(2026, 2, 12),
+            "科森科技 均线蓄势收盘控制",
+            "603626.SSE",
+            date(2024, 10, 28),
             "trend_pullback",
-            "ma10_low_touch",
-            ("ma10_low_touch_after_ma5_extension",),
+            "process_only",
+            ("limit_up_pullback_rebound",),
         ),
         (
-            "华电辽能 MA5 回踩",
+            "伟时电子 五连板后转多头",
+            "605218.SSE",
+            date(2024, 10, 24),
+            "trend_pullback",
+            "process_only",
+            ("limit_up_pullback_rebound",),
+        ),
+        (
+            "国芳集团 第二波多头确认",
+            "601086.SSE",
+            date(2025, 5, 16),
+            "trend_pullback",
+            "process_only",
+            ("limit_up_pullback_rebound",),
+        ),
+        (
+            "诺德股份 低开小阳收盘控制",
+            "600110.SSE",
+            date(2025, 8, 4),
+            "trend_pullback",
+            "process_only",
+            ("limit_up_pullback_rebound",),
+        ),
+        (
+            "九牧王 承接住收盘控制",
+            "601566.SSE",
+            date(2025, 11, 27),
+            "trend_pullback",
+            "process_only",
+            ("limit_up_pullback_rebound",),
+        ),
+        (
+            "航天发展 尾盘控盘回踩",
+            "000547.SZSE",
+            date(2025, 12, 23),
+            "trend_pullback",
+            "process_only",
+            ("limit_up_pullback_rebound",),
+        ),
+        (
+            "华电辽能 长横盘后小阳",
             "600396.SSE",
-            date(2026, 3, 5),
+            date(2026, 4, 20),
             "trend_pullback",
-            "ma5_low_touch",
-            ("ma5_low_touch_stable_trend",),
+            "process_only",
+            ("limit_up_pullback_rebound",),
         ),
         (
-            "华电辽能 MA5 缩量回踩",
-            "600396.SSE",
-            date(2026, 3, 13),
+            "福达合金 第二波首小阳",
+            "603045.SSE",
+            date(2026, 6, 4),
             "trend_pullback",
-            "ma5_low_touch",
-            ("ma5_low_touch_stable_trend_volume_shrink",),
+            "process_only",
+            ("limit_up_pullback_rebound",),
         ),
         (
-            "华电辽能 趋势重建 MA5 回踩",
-            "600396.SSE",
-            date(2026, 4, 30),
+            "双成药业 水下拉起收涨停",
+            "002693.SZSE",
+            date(2024, 10, 14),
             "trend_pullback",
-            "ma5_low_touch_broad",
-            ("ma5_low_touch_after_disordered_trend_rebuild",),
+            "process_only",
+            ("limit_up_weak_to_strong_reclaim",),
         ),
-        *[
-            (
-                f"华建集团 连续 MA5 低吸 {value.isoformat()}",
-                "600629.SSE",
-                value,
-                "trend_pullback",
-                "ma5_low_touch",
-                (
-                    "ma5_low_touch_early_trend"
-                    if value == date(2025, 9, 18)
-                    else "ma5_low_touch_early_trend_prior_touch",
-                ),
-            )
-            for value in (
-                date(2025, 9, 18),
-                date(2025, 9, 19),
-                date(2025, 9, 22),
-                date(2025, 9, 23),
-                date(2025, 9, 24),
-            )
-        ],
+        (
+            "国芳集团 炸板换手弱转强",
+            "601086.SSE",
+            date(2025, 4, 16),
+            "trend_pullback",
+            "process_only",
+            ("limit_up_weak_to_strong_reclaim",),
+        ),
+        (
+            "航天发展 跌停换手拉板",
+            "000547.SZSE",
+            date(2025, 11, 24),
+            "trend_pullback",
+            "process_only",
+            ("limit_up_weak_to_strong_reclaim",),
+        ),
+        (
+            "恒尚节能 超预期拉板",
+            "603137.SSE",
+            date(2026, 7, 13),
+            "trend_pullback",
+            "process_only",
+            ("limit_up_weak_to_strong_reclaim",),
+        ),
+        (
+            "兴业股份 炸板次日水下拉起",
+            "603928.SSE",
+            date(2025, 6, 27),
+            "trend_pullback",
+            "process_only",
+            ("research_weak_to_strong_turnover_no_limit",),
+        ),
+        (
+            "科森科技 承接住大阴预期",
+            "603626.SSE",
+            date(2025, 8, 26),
+            "trend_pullback",
+            "process_only",
+            ("research_weak_to_strong_turnover_no_limit",),
+        ),
+        (
+            "航天发展 水下拉起多头未破",
+            "000547.SZSE",
+            date(2025, 11, 27),
+            "trend_pullback",
+            "process_only",
+            ("research_weak_to_strong_turnover_no_limit",),
+        ),
+        (
+            "梦天家居 跌停预期承接",
+            "603216.SSE",
+            date(2025, 11, 26),
+            "trend_pullback",
+            "process_only",
+            ("research_weak_to_strong_turnover_no_limit",),
+        ),
+        (
+            "安记食品 跌停预期控盘",
+            "603696.SSE",
+            date(2025, 12, 12),
+            "trend_pullback",
+            "process_only",
+            ("research_weak_to_strong_turnover_no_limit",),
+        ),
+        (
+            "锋龙股份 高换手卡5日线",
+            "002931.SZSE",
+            date(2026, 2, 2),
+            "trend_pullback",
+            "process_only",
+            ("research_weak_to_strong_turnover_no_limit",),
+        ),
+        (
+            "哈药股份 低开拉回踩MA5",
+            "600664.SSE",
+            date(2026, 7, 20),
+            "trend_pullback",
+            "process_only",
+            ("research_weak_to_strong_turnover_no_limit",),
+        ),
+        (
+            "传智教育 弱转强卡点",
+            "003032.SZSE",
+            date(2026, 8, 7),
+            "trend_pullback",
+            "process_only",
+            ("research_weak_to_strong_turnover_no_limit",),
+        ),
+        (
+            "爱丽家居 弱转强停牌",
+            "603221.SSE",
+            date(2026, 8, 7),
+            "trend_pullback",
+            "process_only",
+            ("research_weak_to_strong_turnover_no_limit",),
+        ),
     ]
 
 
@@ -232,11 +340,13 @@ def test_unmodeled_personal_cases_stay_archived_as_research_pending() -> None:
 
 
 def test_source_manifest_keeps_only_launch_dates_declared_in_current_text() -> None:
+    # 2026-08 趋势族重构：启动日只取主人需求文本明说的次日多头/涨停日
+    # （科森 2024-10-29 起多头行情），不再从 K 线反推。
     case = next(
-        case for case in PERSONAL_CASES if case.name == "中南文化 MA10 回踩"
+        case for case in PERSONAL_CASES if case.name == "科森科技 均线蓄势收盘控制"
     )
 
-    assert case.expected_launch_date is None
+    assert case.expected_launch_date == date(2024, 10, 29)
 
 
 def test_source_geometry_uses_declared_low_anchor_not_daily_candle_direction() -> None:

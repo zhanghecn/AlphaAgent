@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 
-SCORE_VERSION = "low-suction-daily-score-v3.1"
+SCORE_VERSION = "low-suction-daily-score-v3.3"
 
 SCORE_BANDS: tuple[tuple[float, float, str], ...] = (
     (0.0, 39.999, "0-39"),
@@ -53,6 +53,26 @@ THREE_MA_WRAP_QUIET_PART_POINTS = 2.0
 POST_WRAP_CHAIN_POINTS = 6.0
 POST_WRAP_SHRINK_CONFIRM_POINTS = 2.0
 POST_WRAP_SHRINK_CONFIRM_VOL_RATIO_MAX = 0.9
+# 趋势族重构（2026-08 连板后补涨/弱转强）评分常量：底盘分量满 100 ×0.4 + 路径
+# 组件 ≤30 直加 = 满值约 70，与超跌族同量纲（SCORE_BANDS 两族共用语义不变）。
+# 底盘不设换手硬门禁 —— 妖股连板票 20-38% 换手是常态（旧版无 gate 理由延续）。
+TREND_STREAK_POINTS = (16.0, 22.0, 18.0)  # 4-6 / 7-9 / >=10（7-9 桶 54%/+0.73）
+TREND_TIMING_POINTS = (18.0, 13.0, 11.0, 7.0, 13.0)  # dsp<=4/5-9/10-17/18-24/25-30
+TREND_CLOSE_CONTROL_POINTS = (20.0, 15.0, 9.0, 4.0)  # close_off_low >=8/4-8/2-4/<2
+TREND_VOLUME_DRYNESS_POINTS = (22.0, 16.0, 9.0, 4.0)  # vol_vs_peak <=10/10-20/20-40/>40
+TREND_TURNOVER_POINTS = (18.0, 13.0, 8.0, 3.0)  # >=20/8-20/3-8/<3
+# B 涨停弱转强路径组件（拉起幅度轴 = B 池核心排序证据）
+TREND_RECLAIM_OPEN_DEPTH_POINTS = (10.0, 6.0)  # open_chg <=-3 / <=0
+TREND_RECLAIM_MAGNITUDE_POINTS = (12.0, 8.0, 4.0)  # close_off_low >=12/8/4
+TREND_RECLAIM_STREAK_PREMIUM_POINTS = 8.0  # streak >=7
+# A 弱市补涨路径组件（MA10 蓄势案例 7/8；lu>=100 桶 68.9%/+1.56 vs 池 56.8%；
+# 地量桶 51.7%/+0.29 —— 全部两年全市场桶证据）
+TREND_PULLBACK_MA10_SLOPE_POINTS = 10.0
+TREND_PULLBACK_MOOD_HOT_COUNT = 100
+TREND_PULLBACK_MOOD_WARM_COUNT = 60
+TREND_PULLBACK_MOOD_POINTS = (10.0, 5.0)
+TREND_PULLBACK_DRY_VOLUME_POINTS = 10.0
+TREND_PULLBACK_DRY_VOLUME_MAX_PCT = 20.0
 
 
 @dataclass(frozen=True)
@@ -145,149 +165,267 @@ def score_band(score: float) -> str:
 def score_trend_candidate(
     features: Mapping[str, object],
     streak: QuietStreak,
+    mood_limit_up_count: int | None = None,
+    *,
+    weak_to_strong_reclaim_rule_matched: bool = False,
+    limit_up_pullback_rule_matched: bool = False,
 ) -> tuple[float, tuple[ScoreComponent, ...]]:
-    """趋势回踩候选综合分（0-100），仅用于研究规则命中后的排序诊断。
+    """趋势族（连板后补涨/弱转强）候选诊断排序分。
 
-    9 个 bonus 分量（无 gate —— 妖股高换手/高振幅常见，任何 gate 都误伤研究票）。
-    核心创新：振幅分量按「转势(MA60>MA30) vs 成熟」语境切换梯度 —— 转势票反弹初期
-    中等振幅(5-8%)是唯一正收益口袋(+0.018%)，成熟票则需极安静(<3%)。权重源自全量分桶。
+    公共底盘因子（满 100 ×0.4 = 40）+ 外部组件因子（路径命中才加，≤30 直加）
+    = 满值约 70，与超跌族同量纲。底盘为连板妖股回落语境的通用梯度（连板
+    高度 / 距顶甜点 / 收盘控制 / 量能枯竭 / 换手承接）；B 涨停弱转强组件
+    吃低开深度与拉板力度，A 弱市补涨组件吃 MA10 蓄势斜率、市场情绪温度
+    （``mood_limit_up_count`` 为信号日全市场收盘涨停家数，scanner 注入）
+    与地量枯竭。无换手硬门禁 —— 妖股 20-38% 换手是常态。
     """
 
-    candle_range = _number(features.get("candle_range_pct"))
-    ma60 = _number(features.get("ma60"))
-    ma30 = _number(features.get("ma30"))
-    in_transition = ma60 is not None and ma30 is not None and ma60 > ma30
-    bull_days = int(features.get("bull_alignment_days") or 0)
-    ma5_touch = bool(features.get("ma5_low_touch"))
-    ma10_touch = bool(features.get("ma10_low_touch"))
+    streak_max = int(features.get("limit_up_close_streak_max_60d") or 0)
+    days_since_peak = features.get("days_since_streak_peak_60d")
+    days_since_peak = int(days_since_peak) if days_since_peak is not None else None
+    close_off_low = _number(features.get("close_off_low_pct"))
+    vol_vs_peak = _number(features.get("volume_to_streak_peak_pct"))
     turnover = _number(features.get("turnover_rate_pct"))
-    dist_excess = _number(features.get("trend_dist_excess_pct"))
-    prior_return = _number(features.get("prior_daily_return_pct"))
-    close_to_ma5 = _number(features.get("close_to_ma5_pct"))
-    last_shrank = bool(features.get("last_volume_shrank"))
+    open_chg = _number(features.get("open_to_prev_close_pct"))
+    ma10_slope_5d = _number(features.get("ma10_slope_5d_pct"))
 
-    # 语境调节振幅分量（max 22）：[<3%, 3-5%, 5-8%, ≥8%]
-    amp_table_mature = (22.0, 14.0, 4.0, 0.0)
-    amp_table_transition = (14.0, 20.0, 22.0, 6.0)
-    if candle_range is None:
-        amp_pts, amp_bucket = 0.0, -1
-    elif candle_range < 3.0:
-        amp_pts, amp_bucket = (amp_table_transition[0] if in_transition else amp_table_mature[0]), 0
-    elif candle_range < 5.0:
-        amp_pts, amp_bucket = (amp_table_transition[1] if in_transition else amp_table_mature[1]), 1
-    elif candle_range < 8.0:
-        amp_pts, amp_bucket = (amp_table_transition[2] if in_transition else amp_table_mature[2]), 2
-    else:
-        amp_pts, amp_bucket = (amp_table_transition[3] if in_transition else amp_table_mature[3]), 3
-    ctx_label = "转势(MA60>MA30)" if in_transition else "成熟(MA60≤MA30)"
-
-    turnover_pts = (
-        12.0 if turnover is not None and turnover < 3.0
-        else (8.0 if turnover is not None and turnover < 5.0
-              else (4.0 if turnover is not None and turnover < 8.0 else 1.0))
-    )
-    age_pts = (
-        14.0 if 6 <= bull_days <= 10
-        else (10.0 if 3 <= bull_days <= 5
-              else (7.0 if 1 <= bull_days <= 2
-                    else (5.0 if 11 <= bull_days <= 20 else (4.0 if bull_days >= 21 else 0.0))))
-    )
-    dist_pts = (
-        5.0 if dist_excess is not None and dist_excess < 0
-        else (3.0 if dist_excess is not None and dist_excess < 1.0
-              else (1.0 if dist_excess is not None and dist_excess < 2.0 else 0.0))
-    )
     streak_pts = (
-        14.0 if streak.total >= 5
-        else (11.0 if streak.total >= 4
-              else (8.0 if streak.total >= 3 else (5.0 if streak.total >= 2 else 0.0)))
+        TREND_STREAK_POINTS[1] if 7 <= streak_max <= 9
+        else (TREND_STREAK_POINTS[2] if streak_max >= 10
+              else (TREND_STREAK_POINTS[0] if streak_max >= 4 else 0.0))
+    )
+    if days_since_peak is None:
+        timing_pts = 0.0
+        timing_detail = "无连板段顶参照"
+    elif days_since_peak <= 4:
+        timing_pts = TREND_TIMING_POINTS[0]
+    elif days_since_peak <= 9:
+        timing_pts = TREND_TIMING_POINTS[1]
+    elif days_since_peak <= 17:
+        timing_pts = TREND_TIMING_POINTS[2]
+    elif days_since_peak <= 24:
+        timing_pts = TREND_TIMING_POINTS[3]
+    else:
+        timing_pts = TREND_TIMING_POINTS[4]
+    if close_off_low is None:
+        control_pts = 0.0
+    elif close_off_low >= 8:
+        control_pts = TREND_CLOSE_CONTROL_POINTS[0]
+    elif close_off_low >= 4:
+        control_pts = TREND_CLOSE_CONTROL_POINTS[1]
+    elif close_off_low >= 2:
+        control_pts = TREND_CLOSE_CONTROL_POINTS[2]
+    else:
+        control_pts = TREND_CLOSE_CONTROL_POINTS[3]
+    if vol_vs_peak is None:
+        dry_pts = 0.0
+    elif vol_vs_peak <= 10:
+        dry_pts = TREND_VOLUME_DRYNESS_POINTS[0]
+    elif vol_vs_peak <= 20:
+        dry_pts = TREND_VOLUME_DRYNESS_POINTS[1]
+    elif vol_vs_peak <= 40:
+        dry_pts = TREND_VOLUME_DRYNESS_POINTS[2]
+    else:
+        dry_pts = TREND_VOLUME_DRYNESS_POINTS[3]
+    if turnover is None:
+        turnover_pts = 0.0
+    elif turnover >= 20:
+        turnover_pts = TREND_TURNOVER_POINTS[0]
+    elif turnover >= 8:
+        turnover_pts = TREND_TURNOVER_POINTS[1]
+    elif turnover >= 3:
+        turnover_pts = TREND_TURNOVER_POINTS[2]
+    else:
+        turnover_pts = TREND_TURNOVER_POINTS[3]
+
+    # B 涨停弱转强路径组件
+    reclaim_open_pts = 0.0
+    if weak_to_strong_reclaim_rule_matched and open_chg is not None:
+        reclaim_open_pts = (
+            TREND_RECLAIM_OPEN_DEPTH_POINTS[0]
+            if open_chg <= -3
+            else (TREND_RECLAIM_OPEN_DEPTH_POINTS[1] if open_chg <= 0 else 0.0)
+        )
+    reclaim_magnitude_pts = 0.0
+    if weak_to_strong_reclaim_rule_matched and close_off_low is not None:
+        reclaim_magnitude_pts = (
+            TREND_RECLAIM_MAGNITUDE_POINTS[0]
+            if close_off_low >= 12
+            else (TREND_RECLAIM_MAGNITUDE_POINTS[1] if close_off_low >= 8
+                  else (TREND_RECLAIM_MAGNITUDE_POINTS[2] if close_off_low >= 4 else 0.0))
+        )
+    reclaim_streak_pts = (
+        TREND_RECLAIM_STREAK_PREMIUM_POINTS
+        if weak_to_strong_reclaim_rule_matched and streak_max >= 7
+        else 0.0
     )
 
-    components = (
+    # A 弱市补涨路径组件
+    pullback_slope_pts = (
+        TREND_PULLBACK_MA10_SLOPE_POINTS
+        if limit_up_pullback_rule_matched
+        and ma10_slope_5d is not None
+        and ma10_slope_5d > 0
+        else 0.0
+    )
+    pullback_mood_pts = 0.0
+    if limit_up_pullback_rule_matched and mood_limit_up_count is not None:
+        if mood_limit_up_count >= TREND_PULLBACK_MOOD_HOT_COUNT:
+            pullback_mood_pts = TREND_PULLBACK_MOOD_POINTS[0]
+        elif mood_limit_up_count >= TREND_PULLBACK_MOOD_WARM_COUNT:
+            pullback_mood_pts = TREND_PULLBACK_MOOD_POINTS[1]
+    pullback_dry_pts = (
+        TREND_PULLBACK_DRY_VOLUME_POINTS
+        if limit_up_pullback_rule_matched
+        and vol_vs_peak is not None
+        and vol_vs_peak <= TREND_PULLBACK_DRY_VOLUME_MAX_PCT
+        else 0.0
+    )
+
+    base_components = (
         _component(
-            "candle_quiet_context",
-            "振幅安静度(语境)",
-            amp_pts > 0,
-            amp_pts,
-            22.0,
-            f"{ctx_label} 振幅 {_fmt(candle_range)}%（{amp_pts:.0f}/22）",
-        ),
-        _component(
-            "trend_age",
-            "趋势年龄",
-            age_pts > 0,
-            age_pts,
-            14.0,
-            f"多头排列 {bull_days} 日（6-10 满14）",
-        ),
-        _component(
-            "touch_line",
-            "回踩均线",
-            ma5_touch or ma10_touch,
-            14.0 if ma5_touch else (9.0 if ma10_touch else 0.0),
-            14.0,
-            "低点回踩 MA5" if ma5_touch else ("低点回踩 MA10" if ma10_touch else "未回踩 MA5/MA10"),
-        ),
-        _component(
-            "turnover_gradient",
-            "换手率梯度",
-            turnover_pts > 0,
-            turnover_pts,
-            12.0,
-            f"换手 {_fmt(turnover)}%（<3% 满12）",
-        ),
-        _component(
-            "quiet_streak",
-            "连续小K线",
+            "limit_up_streak_strength",
+            "连板高度",
             streak_pts > 0,
             streak_pts,
-            14.0,
-            streak.label,
+            max(TREND_STREAK_POINTS),
+            f"主段 {streak_max} 连板（7-9 满22）",
         ),
         _component(
-            "prior_day_down",
-            "昨日已跌",
-            prior_return is not None and prior_return <= 0,
+            "pullback_timing",
+            "距顶甜点",
+            timing_pts > 0,
+            timing_pts,
+            max(TREND_TIMING_POINTS),
             (
-                8.0 if prior_return is not None and prior_return <= 0
-                else (4.0 if prior_return is not None and prior_return <= 1.0 else 0.0)
-            ),
-            8.0,
-            f"昨日涨跌 {_fmt(prior_return, signed=True)}%",
-        ),
-        _component(
-            "close_position",
-            "收盘位置",
-            close_to_ma5 is not None and close_to_ma5 <= 0,
-            (
-                8.0 if close_to_ma5 is not None and close_to_ma5 <= 0
-                else (4.0 if close_to_ma5 is not None and close_to_ma5 <= 1.0 else 0.0)
-            ),
-            8.0,
-            f"收盘距 MA5 {_fmt(close_to_ma5, signed=True)}%",
-        ),
-        _component(
-            "dist_excess",
-            "趋势老嫩",
-            dist_pts > 0,
-            dist_pts,
-            5.0,
-            (
-                f"M5-M10 距离较本段回踩中位 {_fmt(dist_excess, signed=True)}pct"
-                if dist_excess is not None
-                else "本段无回踩参照"
+                f"段顶后 {days_since_peak} 个交易日"
+                if days_since_peak is not None
+                else "无连板段顶参照"
             ),
         ),
         _component(
-            "volume_shrink",
-            "缩量",
-            last_shrank,
-            3.0 if last_shrank else 0.0,
-            3.0,
-            "当日成交量低于前日" if last_shrank else "当日未缩量",
+            "close_control",
+            "收盘控制",
+            control_pts > 0,
+            control_pts,
+            max(TREND_CLOSE_CONTROL_POINTS),
+            f"收盘脱离低点 {_fmt(close_off_low, signed=True)}pct",
+        ),
+        _component(
+            "volume_dryness",
+            "量能枯竭",
+            dry_pts > 0,
+            dry_pts,
+            max(TREND_VOLUME_DRYNESS_POINTS),
+            (
+                f"量能为主段峰值 {_fmt(vol_vs_peak)}%（≤10% 满22）"
+                if vol_vs_peak is not None
+                else "无主段峰值量参照"
+            ),
+        ),
+        _component(
+            "turnover_activity",
+            "换手承接",
+            turnover_pts > 0,
+            turnover_pts,
+            max(TREND_TURNOVER_POINTS),
+            f"换手 {_fmt(turnover)}%（≥20% 满18）",
+        ),
+        _component(
+            "reclaim_open_depth",
+            "低开深度",
+            reclaim_open_pts > 0,
+            reclaim_open_pts,
+            TREND_RECLAIM_OPEN_DEPTH_POINTS[0],
+            (
+                f"B 路径开盘 {_fmt(open_chg, signed=True)}%"
+                if weak_to_strong_reclaim_rule_matched
+                else "非涨停弱转强路径"
+            ),
+        ),
+        _component(
+            "reclaim_magnitude",
+            "拉板力度",
+            reclaim_magnitude_pts > 0,
+            reclaim_magnitude_pts,
+            TREND_RECLAIM_MAGNITUDE_POINTS[0],
+            (
+                f"B 路径收盘脱离低点 {_fmt(close_off_low, signed=True)}pct"
+                if weak_to_strong_reclaim_rule_matched
+                else "非涨停弱转强路径"
+            ),
+        ),
+        _component(
+            "reclaim_streak_premium",
+            "高连板加成",
+            reclaim_streak_pts > 0,
+            reclaim_streak_pts,
+            TREND_RECLAIM_STREAK_PREMIUM_POINTS,
+            (
+                f"B 路径主段 {streak_max} 连板"
+                if weak_to_strong_reclaim_rule_matched
+                else "非涨停弱转强路径"
+            ),
+        ),
+        _component(
+            "pullback_ma10_sloping_up",
+            "MA10 蓄势",
+            pullback_slope_pts > 0,
+            pullback_slope_pts,
+            TREND_PULLBACK_MA10_SLOPE_POINTS,
+            (
+                f"A 路径 MA10 五日斜率 {_fmt(ma10_slope_5d, signed=True)}%"
+                if limit_up_pullback_rule_matched
+                else "非弱市补涨路径"
+            ),
+        ),
+        _component(
+            "pullback_mood_temperature",
+            "情绪温度",
+            pullback_mood_pts > 0,
+            pullback_mood_pts,
+            TREND_PULLBACK_MOOD_POINTS[0],
+            (
+                f"A 路径当日全市场涨停 {mood_limit_up_count} 家"
+                if limit_up_pullback_rule_matched and mood_limit_up_count is not None
+                else "非弱市补涨路径"
+            ),
+        ),
+        _component(
+            "pullback_dry_volume",
+            "地量枯竭",
+            pullback_dry_pts > 0,
+            pullback_dry_pts,
+            TREND_PULLBACK_DRY_VOLUME_POINTS,
+            (
+                f"A 路径量能为主段峰值 {_fmt(vol_vs_peak)}%"
+                if limit_up_pullback_rule_matched
+                else "非弱市补涨路径"
+            ),
         ),
     )
-    return _total(components), components
+    base_pts = sum(
+        c.points
+        for c in base_components
+        if c.key
+        in {
+            "limit_up_streak_strength",
+            "pullback_timing",
+            "close_control",
+            "volume_dryness",
+            "turnover_activity",
+        }
+    )
+    raw = (
+        base_pts * 0.4
+        + reclaim_open_pts
+        + reclaim_magnitude_pts
+        + reclaim_streak_pts
+        + pullback_slope_pts
+        + pullback_mood_pts
+        + pullback_dry_pts
+    )
+    return round(min(100.0, raw), 2), base_components
 
 
 def score_oversold_candidate(

@@ -34,6 +34,8 @@ export interface GuideRuleNode {
   shortLabel: string;
   tier: "product" | "research";
   productTier?: "P1.5" | "P1";
+  /** 打板预备徽章：B 涨停弱转强信号日收盘涨停，按打板预备语义理解。 */
+  anchorTag?: "board_ready";
   /** 准入条件（说明书语言，含阈值）。 */
   conditions: string[];
   /** 全量验证/案例证据摘句。 */
@@ -96,7 +98,7 @@ export function buildGuideStages(): GuideStage[] {
       bullets: [
         "主板限定：600/601/603/605 + 000/001/002/003（北交所、科创板、创业板 20cm 票不做）",
         "剔除当前 ST 股（名称含 ST 即排）",
-        "信号日收于涨停的主板票直接剔除——涨停价买不到，低吸语境也不成立",
+        "信号日收于涨停的主板票剔除——唯一例外：趋势族「涨停弱转强」路径（打板预备语义）专门放行",
       ],
     },
     {
@@ -108,7 +110,7 @@ export function buildGuideStages(): GuideStage[] {
       bullets: [
         "只有命中研究形态规则的股票才进入候选池；没命中的票，其他分项分数再高也不会出现在列表里",
         "超跌族放行 6 条跨窗口验证过的产品规则：P1.5 首段两线包裹 + P1.5 上穿前价格先行两子型（X 弱市加速 / Y 价格先行强攻）+ P1.5 三线包裹链（W 缩量底盘 / Z 次日上沿确认）+ P1 分段支撑，其余 3 条留在研究层审计",
-        "趋势族 7 条规则全部产品化，覆盖稳定回踩、过伸回踩、早期回踩与超跌转趋势四类语境",
+        "趋势族 2026-08 重构为连板后补涨/弱转强：P1.5 涨停弱转强（低开拉板，打板预备）+ P1 连板回落补涨（段后换手 5~20 承接区，命中即推荐不设环境门），非涨停弱转强为研究锚点不进推荐",
       ],
     },
     {
@@ -118,9 +120,9 @@ export function buildGuideStages(): GuideStage[] {
       en: "DIAGNOSTIC SCORE",
       note: "同族同层内比较形态完整度，不是收益概率",
       bullets: [
-        "趋势族：9 个梯度分量直加，满分 100",
-        "超跌族：基础分量 ×0.4 + 路径附加分（P1 两条 / X/Y 攻击强度投票 / W 安静包裹 / Z 链式确认，不折算），满值约 70，与趋势分不同量纲、不可直接横比",
-        "换手率 ≥8% 触发超跌门禁：不改变规则命中，但诊断分封顶 39，避免高换手派发占据前列",
+        "趋势族：公共底盘因子满 100 ×0.4（连板高度/距顶甜点/收盘控制/量能枯竭/换手承接）+ 路径组件因子直加（涨停弱转强吃低开深度+拉板力度+高连板，连板回落补涨吃 MA10 蓄势+情绪温度+地量），满值约 70",
+        "超跌族：基础分量 ×0.4 + 路径附加分（P1 两条 / X/Y 攻击强度投票 / W 安静包裹 / Z 链式确认，不折算），满值约 70，两族同量纲",
+        "换手率 ≥8% 触发超跌门禁：不改变规则命中，但诊断分封顶 39；趋势族无换手门禁（妖股 20-38% 换手是常态）",
       ],
     },
     {
@@ -131,7 +133,7 @@ export function buildGuideStages(): GuideStage[] {
       note: "先阶段层级，再诊断分，再决胜键",
       bullets: [
         "阶段优先级：P1.5（20）> P1（10）> 其他（0）——层级始终压过分数",
-        "同层按诊断分降序；P1.5 同分时以换手率接近 3% 决胜（中等活跃承接最佳）",
+        "同层按诊断分降序；P1.5 同分时的换手决胜按族取甜点：超跌接近 3%（中等活跃），趋势妖股接近 25%（承接充分）",
         "再并列依次比：连续小 K 线根数 → 换手率（低优先）→ 股票代码",
       ],
     },
@@ -155,105 +157,62 @@ export function buildRuleNodes(): GuideRuleNode[] {
 }
 
 /**
- * 趋势族 7 条产品规则。谓词转录自
- * daily_factor_extended_discovery.py process_rule_predicates（3767-3854 行）。
+ * 趋势族 3 条规则（2026-08 连板后补涨/弱转强重构，十轮研究定稿）。
+ * 谓词转录自 daily_factor_extended_discovery.py process_rule_predicates 的
+ * LIMIT_UP_* 三条目与常量区 LIMIT_UP_* 阈值。
  */
 const TREND_RULE_NODES: GuideRuleNode[] = [
   {
-    ruleKey: "ma5_low_touch_stable_trend",
+    ruleKey: "limit_up_weak_to_strong_reclaim",
     family: "trend_pullback",
-    shortLabel: "稳定多头 MA5 回踩",
+    shortLabel: "涨停弱转强（打板预备）",
     tier: "product",
+    productTier: "P1.5",
+    anchorTag: "board_ready",
     conditions: [
-      "多头排列：MA5 > MA10 > MA20 > MA30，且 MA10/MA20/MA30 斜率全部向上",
-      "多头排列已稳定持续 ≥5 日，且 MA5 走势规律（MA5 > MA10）",
-      "D 日低点回踩 MA5：低点距线 -4% ~ +1.5%，收盘不破 -1.5%",
-      "D 日涨幅 ≤3%（不追大阳线）",
+      "近 60 交易日内存在 ≥4 连板的主段（连板史递推窗口完整）",
+      "信号日距主段段顶 ≤4 个交易日（刚破坏、情绪还热）",
+      "当日低开：开盘价不高于昨收（open ≤ 0%）",
+      "盘中拉回并收盘涨停——唯一放行「信号日收盘涨停」的路径（打板预备）",
     ],
     evidence:
-      "最纯的趋势回踩形态；8/8 个人案例零误伤，官方案例门禁 15/15。代表案例：华电辽能 3-5。",
-    chartHint: "看 D 日下影线如何贴住琥珀色 MA5 后收回，且此前均线已多头排列",
+      "两年全市场 n=318 胜率 60.4%/D+1 +1.69，每日前五模拟两年 +173%/回撤 −16%，半年 +38.9%/回撤 −2.0%（胜率 71.9%）。4 个主人案例（双成/国芳/航天 11-24/恒尚）当日全部前五。涨停收盘价买入为探索级口径，实盘按次日打板预备理解。",
+    chartHint:
+      "看低开大阴预期如何被一根放量阳线直接拉回涨停——「弱转强」的最强确认",
   },
   {
-    ruleKey: "ma5_low_touch_stable_trend_volume_shrink",
+    ruleKey: "limit_up_pullback_rebound",
     family: "trend_pullback",
-    shortLabel: "稳定多头 MA5 回踩缩量",
+    shortLabel: "连板回落补涨",
     tier: "product",
+    productTier: "P1",
     conditions: [
-      "在「稳定多头 MA5 回踩」全部条件之上，追加：D 日成交量低于前一日",
-      "缩量回踩 = 抛压衰竭，分歧小，是回踩质量最高的变体",
+      "近 60 交易日内存在 ≥5 连板的主段（窗口完整）",
+      "主段段顶后 5~30 个交易日（深回落蓄势期，区别于刚破坏的弱转强窗）",
+      "D 日小阳企稳：收盘 ≥ 开盘，且收盘涨幅 ≥-2.5%（收盘控制）",
+      "量能温和：当日量 ≤ 近 5 日均量的 1.15 倍",
+      "承接门槛：段顶后日均换手 5~20%——资金还在且未出货（<5% 无人承接，>20% 巨量换手是撤离中）",
     ],
     evidence:
-      "缩量变体是回踩质量信号；代表案例：华电辽能 3-13（D+5 +61.34%，三连板）。",
-    chartHint: "对比 D 日量柱与前几日的量能高度——回踩当天明显缩量",
+      "两年全市场 n=1851 胜率 50.8%/D+1 +0.23；好/坏票逐票对比发现的核心判别轴：D+1 大跌的票 13/20 段后日均换手 ≥20%（资金出货中），主人案例 7/8 在 5~20 承接区（科森/伟时/国芳/诺德/九牧王/华电/福达放行；航天 12-23 段后换手 31.5 属高换手二波型）。不设大盘环境门——命中即可推荐，情绪温度与地量作为评分加分（弱市内 lu≥100 桶 68.9%/+1.56）。",
+    chartHint:
+      "看连板段深回落期间量能是否稳在承接区（不枯竭也不爆量）后的小阳线：收盘站上开盘、量能温和",
   },
   {
-    ruleKey: "ma10_low_touch_after_ma5_extension",
+    ruleKey: "research_weak_to_strong_turnover_no_limit",
     family: "trend_pullback",
-    shortLabel: "MA5 过伸后回踩 MA10",
-    tier: "product",
+    shortLabel: "非涨停弱转强（研究锚点）",
+    tier: "research",
     conditions: [
-      "稳定多头排列（同 MA5 回踩族前置）",
-      "前一日收盘偏离 MA5 ≥1.5%（短线过伸）且昨日没有上涨（分歧已开始释放）",
-      "D 日低点回踩更深的 MA10 获支撑",
+      "近 60 交易日内存在 ≥4 连板的主段",
+      "主段段顶后 ≤3 个交易日内（破坏后的承接窗）",
+      "换手 ≥8%（承接活跃）且 D 日收盘未涨停",
+      "深水承接拉起：收盘脱离当日低点 ≥4pct，或盘中低点深水（≤ 昨收 -6%）",
     ],
     evidence:
-      "过伸后的首次深回踩比贴 MA5 的浅回踩更安全；代表案例：中南文化 2-12。",
-    chartHint: "看紫色 MA10 如何接住从 MA5 上方回落的价格",
-  },
-  {
-    ruleKey: "ma5_low_touch_after_disordered_trend_rebuild",
-    family: "trend_pullback",
-    shortLabel: "混乱重建后 MA5 回踩",
-    tier: "product",
-    conditions: [
-      "均线曾经混乱（多头排列被打断），新近重新恢复多头排列",
-      "恢复后的早期阶段，D 日低点以更宽的容差回踩 MA5",
-    ],
-    evidence:
-      "趋势重建初期的第一次回踩是右侧确认点；代表案例：华电辽能 4-30。",
-    chartHint: "看均线从缠绕混乱到重新发散多头排列的过程，回踩发生在新趋势确认后",
-  },
-  {
-    ruleKey: "ma5_low_touch_early_trend",
-    family: "trend_pullback",
-    shortLabel: "多头早期 MA5 回踩",
-    tier: "product",
-    conditions: [
-      "多头排列形成早期（3~20 日），三线斜率全部向上",
-      "D 日低点回踩 MA5",
-    ],
-    evidence:
-      "早期趋势的回踩弹性最大；代表案例：华建集团 2025-09-18 起连续五次命中。",
-    chartHint: "看多头排列刚形成不久（均线开口还小）时的首次贴线",
-  },
-  {
-    ruleKey: "ma5_low_touch_early_trend_prior_touch",
-    family: "trend_pullback",
-    shortLabel: "早期连续 MA5 回踩",
-    tier: "product",
-    conditions: [
-      "多头排列早期（3~20 日），且前一日低点已触及 MA5",
-      "D 日再次回踩 MA5——连续两天贴线，支撑被反复验证",
-    ],
-    evidence:
-      "华建集团 2025-09-19 ~ 09-24 连续命中该变体，5 日区间涨幅 +44%。",
-    chartHint: "看连续两根 K 线的下影线都打在 MA5 上——「踩着均线上楼」",
-  },
-  {
-    ruleKey: "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30",
-    family: "trend_pullback",
-    shortLabel: "超跌转趋势双穿",
-    tier: "product",
-    conditions: [
-      "前期长期空头排列 ≥10 日",
-      "MA10 在 7 个交易日内依次上穿 MA20、MA30（双穿）",
-      "双穿后回撤：MA20/MA30 紧贴（距离 ≤0.25%），MA10/MA20 斜率向上",
-      "D 日小阳线（0 < 涨幅 ≤3%）",
-    ],
-    evidence:
-      "趋势族里唯一从超跌语境长出来的规则，是两族的交接棒；代表案例：一鸣食品 7-27（D+5 +61.07%）。",
-    chartHint: "看紫色 MA10 如何先后上穿蓝色 MA20 与青色 MA30，回撤时两线几乎贴合",
+      "主人 8 个案例（哈药/航天 11-27/科森 8-26/传智/安记/梦天/锋龙/兴业）的形态本体，但全市场两年验证为负边缘（37~42% 胜率/D+1 −1.3~−2.0，各维度分桶均无正口袋；好/坏票六维度分布完全重叠）——形态有案例价值、统计无边缘，诚实留研究锚点不进推荐。",
+    chartHint:
+      "对照看案例 K 线：深水拉起的形态确实震撼，但同形态全市场大多次日继续跌",
   },
 ];
 
@@ -405,85 +364,102 @@ const OVERSOLD_RULE_NODES: GuideRuleNode[] = [
 ];
 
 /**
- * 趋势族评分分量（转录自 daily_picks_scoring.py:128-273，9 个 bonus，
- * 无 gate，直加满分 100）。
+ * 趋势族评分分量（转录自 daily_picks_scoring.py，2026-08 连板后补涨/弱转强
+ * 重构版：公共底盘 5 分量满 100 ×0.4 + 路径组件 6 分量 ≤30 直加 = 满 70）。
  */
 const TREND_SCORE_COMPONENTS: GuideScoreComponent[] = [
   {
-    key: "candle_quiet_context",
-    label: "振幅安静度(语境)",
+    key: "limit_up_streak_strength",
+    label: "连板高度",
     maxPoints: 22,
     kind: "bonus",
-    gradient:
-      "成熟票(MA60≤MA30)：振幅 <3% 满 22 / 3-5% 得 14 / 5-8% 得 4 / ≥8% 得 0；转势票(MA60>MA30)：14 / 20 / 22 / 6",
-    rationale:
-      "全量 811 日最单调变量：振幅 <3% 组 +0.013% → ≥10% 组 -0.734%。转势票反弹初期中等振幅(5-8%)反而是唯一正收益口袋(+0.018%)，故按语境切换梯度。",
+    scaled: true,
+    gradient: "主段 7-9 连板满 22 / ≥10 得 18 / 4-6 得 16",
+    rationale: "两年全市场 7-9 板桶 54%/+0.73 最甜；十板以上情绪透支、四板以下动力不足。",
   },
   {
-    key: "trend_age",
-    label: "趋势年龄",
-    maxPoints: 14,
+    key: "pullback_timing",
+    label: "距顶甜点",
+    maxPoints: 18,
     kind: "bonus",
-    gradient: "多头排列 6-10 日满 14 / 3-5 日得 10 / 1-2 日得 7 / 11-20 日得 5 / ≥21 日得 4",
-    rationale: "太嫩未验证、太老易衰竭，6-10 日是弹性与可靠性的甜点区。",
+    scaled: true,
+    gradient: "段顶后 ≤4 日满 18（弱转强窗）/ 5-9 得 13 / 10-17 得 11 / 18-24 得 7 / 25-30 得 13",
+    rationale: "刚破坏（≤4 日）承接还热；深回落 25-30 日是二次蓄势甜点，18-24 日是中间的无人区。",
   },
   {
-    key: "touch_line",
-    label: "回踩均线",
-    maxPoints: 14,
+    key: "close_control",
+    label: "收盘控制",
+    maxPoints: 20,
     kind: "bonus",
-    gradient: "低点回踩 MA5 满 14 / 回踩 MA10 得 9 / 未回踩 0",
-    rationale: "贴 MA5 的浅回踩趋势更强；回踩 MA10 是过伸后的次优解。",
+    scaled: true,
+    gradient: "收盘脱离当日低点 ≥8pct 满 20 / 4-8 得 15 / 2-4 得 9 / <2 得 4",
+    rationale: "主人文案的「收盘控制价格」：收盘拉离低点越远，控盘越强（A 池 ≥80% 位置桶 51.3%）。",
   },
   {
-    key: "turnover_gradient",
-    label: "换手率梯度",
+    key: "volume_dryness",
+    label: "量能枯竭",
+    maxPoints: 22,
+    kind: "bonus",
+    scaled: true,
+    gradient: "量能为主段峰值 ≤10% 满 22 / ≤20% 得 16 / ≤40% 得 9 / >40% 得 4",
+    rationale: "回落期量能萎缩到主段峰值的 5-10% 桶 55.1%/+0.22——抛压枯竭是补涨的地基。",
+  },
+  {
+    key: "turnover_activity",
+    label: "换手承接",
+    maxPoints: 18,
+    kind: "bonus",
+    scaled: true,
+    gradient: "换手 ≥20% 满 18 / 8-20% 得 13 / 3-8% 得 8 / <3% 得 3",
+    rationale: "妖股低吸需要活跃承接；趋势族不设换手门禁（20-38% 换手是常态）。",
+  },
+  {
+    key: "reclaim_open_depth",
+    label: "低开深度(B)",
+    maxPoints: 10,
+    kind: "bonus",
+    gradient: "涨停弱转强路径：开盘 ≤-3% 满 10 / ≤0% 得 6",
+    rationale: "低开越深，拉板的「弱转强」反差越强（低开拉板池 60.4%/+1.69）。",
+  },
+  {
+    key: "reclaim_magnitude",
+    label: "拉板力度(B)",
     maxPoints: 12,
     kind: "bonus",
-    gradient: "<3% 满 12 / <5% 得 8 / <8% 得 4 / 其余 1",
-    rationale: "低换手 = 分歧小；趋势族不设门禁（妖股高换手常见，硬门禁误伤研究票）。",
+    gradient: "收盘脱离低点 ≥12pct 满 12 / ≥8 得 8 / ≥4 得 4",
+    rationale: "从深水直接拉到涨停的力度是 B 路径核心证据。",
   },
   {
-    key: "quiet_streak",
-    label: "连续小K线",
-    maxPoints: 14,
-    kind: "bonus",
-    gradient: "连续 ≥5 根满 14 / 4 根 11 / 3 根 8 / 2 根 5（小 K 线 = 振幅 ≤5%）",
-    rationale: "连续安静是蓄势的直接证据，比单日安静更可靠。",
-  },
-  {
-    key: "prior_day_down",
-    label: "昨日已跌",
+    key: "reclaim_streak_premium",
+    label: "高连板加成(B)",
     maxPoints: 8,
     kind: "bonus",
-    gradient: "昨日 ≤0% 满 8 / ≤+1% 得 4 / 其余 0",
-    rationale:
-      "昨日已跌 = 分歧已开始释放，才是低吸语境；昨日 ≥5% 组全量均值 -0.867%（追高买首阴）。",
+    gradient: "主段 ≥7 连板 +8",
+    rationale: "高连板妖股的弱转强反核弹性最强。",
   },
   {
-    key: "close_position",
-    label: "收盘位置",
-    maxPoints: 8,
+    key: "pullback_ma10_sloping_up",
+    label: "MA10 蓄势(A)",
+    maxPoints: 10,
     kind: "bonus",
-    gradient: "收盘距 MA5 ≤0% 满 8 / ≤+1% 得 4 / 其余 0",
-    rationale: "收盘贴线说明回踩真实有效，而非盘中假触。",
+    gradient: "弱市补涨路径：MA10 五日斜率 >0 满 10",
+    rationale: "「均线蓄势转换多头」的量化：8 个 A 案例中 7 个触发日 MA10 斜率为正。",
   },
   {
-    key: "dist_excess",
-    label: "趋势老嫩",
-    maxPoints: 5,
+    key: "pullback_mood_temperature",
+    label: "情绪温度(A)",
+    maxPoints: 10,
     kind: "bonus",
-    gradient: "M5-M10 距离超额 <0 满 5 / <1 得 3 / <2 得 1 / 其余 0",
-    rationale:
-      "相对本段自己的回踩签名中位数判断老嫩，不用绝对阈值；超额 ≥6pct 组全量均值 -1.049%。",
+    gradient: "当日全市场涨停 ≥100 家满 10 / ≥60 家得 5",
+    rationale: "弱市内的局部热度日是 A 池最强分桶：lu≥100 桶 68.9%/+1.56 vs 池 56.8%。",
   },
   {
-    key: "volume_shrink",
-    label: "缩量",
-    maxPoints: 3,
+    key: "pullback_dry_volume",
+    label: "地量枯竭(A)",
+    maxPoints: 10,
     kind: "bonus",
-    gradient: "当日量低于前日 +3",
-    rationale: "缩量回踩 = 抛压衰竭的辅助确认，权重刻意低（主证据在形态）。",
+    gradient: "量能为主段峰值 ≤20% +10",
+    rationale: "地量桶 51.7%/+0.29：横盘缩到没人卖，一点火就着。",
   },
 ];
 
@@ -646,8 +622,9 @@ export function buildScoreTable(family: GuideFamilyKey): GuideScoreTable {
     return {
       family,
       components: TREND_SCORE_COMPONENTS,
-      maxScoreText: "100",
-      formula: "总分 = 9 个梯度分量直加（无门禁），封顶 100",
+      maxScoreText: "≈70",
+      formula:
+        "总分 = 公共底盘 5 分量之和 ×0.4（连板高度/距顶甜点/收盘控制/量能枯竭/换手承接）+ 路径组件直加（B 低开深度/拉板力度/高连板，或 A MA10 蓄势/情绪温度/地量，≤30）→ 满值约 70，与超跌族同量纲；无换手门禁",
     };
   }
   return {
@@ -657,6 +634,20 @@ export function buildScoreTable(family: GuideFamilyKey): GuideScoreTable {
     formula:
       "总分 = 基础分量之和 ×0.4 + P1 附加分 + P1.5 路径附加（X/Y 投票 / W 安静包裹 / Z 链式确认，均不折算）→ 满值约 70；换手率门禁失败封顶 39",
   };
+}
+
+/** 趋势诊断分满值口径：底盘 100 × 0.4 + 单路径组件 30（B/A 互斥，spec 硬断言防转录漂移）。 */
+export function trendScoreCeiling(): number {
+  const scaled = TREND_SCORE_COMPONENTS.filter(
+    (c) => c.kind === "bonus" && c.scaled,
+  ).reduce((sum, c) => sum + c.maxPoints, 0);
+  const reclaim = TREND_SCORE_COMPONENTS.filter(
+    (c) => c.kind === "bonus" && !c.scaled && c.key.startsWith("reclaim_"),
+  ).reduce((sum, c) => sum + c.maxPoints, 0);
+  const pullback = TREND_SCORE_COMPONENTS.filter(
+    (c) => c.kind === "bonus" && !c.scaled && c.key.startsWith("pullback_"),
+  ).reduce((sum, c) => sum + c.maxPoints, 0);
+  return scaled * 0.4 + Math.max(reclaim, pullback);
 }
 
 /** 超跌诊断分满值口径：基础 100 × 0.4 + P1 附加 10 + 路径附加 12/8（spec 硬断言防转录漂移）。 */
