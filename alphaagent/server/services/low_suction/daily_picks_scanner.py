@@ -20,6 +20,7 @@ from alphaagent.server.services.low_suction.daily_factor_extended_discovery impo
     PRE_CROSS_ACCELERATION_WEAK_MARKET_RULE_KEY,
     PRICE_FIRST_STRONG_ATTACK_RULE_KEY,
     RESEARCH_THREE_MA_WRAP_RULE_KEY,
+    RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY,
     STAGED_MA10_SUPPORT_RULE_KEY,
     _attack_vote_count,
     _iter_candidate_snapshots,
@@ -72,16 +73,22 @@ PRODUCT_OVERSOLD_RULE_KEYS = frozenset(
 )
 # 趋势族产品规则（2026-08-17 涨停确认制定稿）：B 涨停弱转强（P1.5，60.4%/
 # +1.69）+ A 补涨涨停 N 字板（P1，70.7%/+3.00 强弱市双正）+ 观察层连板回落
-# 低吸（补涨涨停预备窗口）；非涨停弱转强为研究锚点（负边缘），不进推荐。
+# 低吸（补涨涨停预备窗口）+ 非涨停弱转强（弱转强预备·未封板——仅盘中
+# 展示让用户提前准备打板，收盘确认版由 service 过滤，负边缘不进回测）。
 PRODUCT_TREND_RULE_KEYS = frozenset(
     {
         LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY,
         LIMIT_UP_PULLBACK_REBOUND_RULE_KEY,
         LIMIT_UP_PULLBACK_WATCHLIST_RULE_KEY,
+        RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY,
     }
 )
-# 进推荐但不进回测仓位的观察层规则（tier 恒 0，前五组合跳过）。
+# 进推荐但不进回测仓位的展示层规则（tier 恒 0，前五组合跳过）：
+# 观察层=补涨预备窗口；非涨停弱转强=盘中弱转强预备（收盘未确认）。
 TREND_WATCHLIST_RULE_KEYS = frozenset({LIMIT_UP_PULLBACK_WATCHLIST_RULE_KEY})
+TREND_NON_POSITION_RULE_KEYS = TREND_WATCHLIST_RULE_KEYS | frozenset(
+    {RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY}
+)
 PRODUCT_DISCOVERY_RULES = {
     "oversold_rebound": tuple(
         rule
@@ -382,7 +389,8 @@ def _candidate_priority_tier(item: LowSuctionCandidate) -> int:
     matched = set(item.matched_rule_keys)
     if item.setup_type == "trend_pullback":
         # B 涨停弱转强（60.4%/+1.69）为趋势族主力（P1.5 层）；
-        # A 连板回落补涨（承接门槛版 50.8%/+0.23）为 P1 层补位。
+        # A 连板回落补涨（承接门槛版 50.8%/+0.23）为 P1 层补位；
+        # 观察层/弱转强预备为展示层（tier 0，不占仓位）。
         if LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY in matched:
             return 20
         if LIMIT_UP_PULLBACK_REBOUND_RULE_KEY in matched:

@@ -215,9 +215,10 @@ class TestScannerTrendRules:
             )
             assert [c.rule_key for c in admitted] == [rule_key]
 
-    def test_research_anchor_never_reaches_product_scan(self, monkeypatch) -> None:
-        """锚点不在 PRODUCT_TREND_RULE_KEYS：即便谓词命中也不会被产品扫描产出。"""
-        assert RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY not in (
+    def test_research_anchor_is_intraday_prepare_in_product_scan(self) -> None:
+        """锚点以「弱转强预备·未封板」身份进产品清单：盘中展示让用户提前
+        准备打板；tier 0 + 不占仓位键集，收盘确认版由 service 过滤。"""
+        assert RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY in (
             scanner.PRODUCT_TREND_RULE_KEYS
         )
         assert {
@@ -226,9 +227,17 @@ class TestScannerTrendRules:
             LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY,
             LIMIT_UP_PULLBACK_REBOUND_RULE_KEY,
             LIMIT_UP_PULLBACK_WATCHLIST_RULE_KEY,
+            RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY,
         }
         assert scanner.TREND_WATCHLIST_RULE_KEYS == frozenset(
             {LIMIT_UP_PULLBACK_WATCHLIST_RULE_KEY}
+        )
+        # 回测/前五组合排除用扩容键集：观察层 + 弱转强预备都不占仓位。
+        assert scanner.TREND_NON_POSITION_RULE_KEYS == frozenset(
+            {
+                LIMIT_UP_PULLBACK_WATCHLIST_RULE_KEY,
+                RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY,
+            }
         )
 
 

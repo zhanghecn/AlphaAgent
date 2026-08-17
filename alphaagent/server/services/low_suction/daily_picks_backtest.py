@@ -16,7 +16,7 @@ from alphaagent.server.services.low_suction.daily_factor_research import (
 )
 from alphaagent.server.services.low_suction.daily_picks_scanner import (
     LowSuctionCandidate,
-    TREND_WATCHLIST_RULE_KEYS,
+    TREND_NON_POSITION_RULE_KEYS,
     candidate_ranking_key,
 )
 from alphaagent.server.services.low_suction.daily_picks_scoring import (
@@ -47,7 +47,7 @@ def build_backtest_payload(
         item
         for item in candidates
         if item.d1_close_return_pct is not None
-        and item.rule_key not in TREND_WATCHLIST_RULE_KEYS
+        and item.rule_key not in TREND_NON_POSITION_RULE_KEYS
     ]
     split = split_market_calendar(list(calendar))
     segment_by_date: dict[date, str] = {}
@@ -184,7 +184,7 @@ def _position_simulation(
         setup_type: defaultdict(list) for setup_type in SETUP_TYPES
     }
     for item in candidates:
-        if item.rule_key in TREND_WATCHLIST_RULE_KEYS:
+        if item.rule_key in TREND_NON_POSITION_RULE_KEYS:
             continue
         grouped[item.setup_type][item.trade_date].append(item)
 

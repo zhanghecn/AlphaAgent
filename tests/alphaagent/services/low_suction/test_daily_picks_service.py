@@ -1033,3 +1033,23 @@ def test_backfill_live_snapshots_continues_after_single_day_failure(
 
     assert result["backfilled"] == ["2026-08-14"]
     assert [payload["trade_date"] for payload in saved] == ["2026-08-14"]
+
+
+def test_intraday_only_prepare_candidates_dropped_outside_intraday() -> None:
+    """弱转强预备（未封板锚点）只在盘中快照展示：定格/确认/回填口径剔除。"""
+
+    from alphaagent.server.services.low_suction.daily_factor_extended_discovery import (
+        RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY,
+    )
+
+    def candidate_with(rule_key: str) -> LowSuctionCandidate:
+        item = _candidate("600000.SSE")
+        return item.__class__(**{**item.__dict__, "rule_key": rule_key})
+
+    prepare = candidate_with(RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY)
+    confirmed_b = candidate_with("limit_up_weak_to_strong_reclaim")
+
+    kept = daily_picks_service._without_intraday_only_candidates(
+        [prepare, confirmed_b]
+    )
+    assert kept == [confirmed_b]

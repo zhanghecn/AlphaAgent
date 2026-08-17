@@ -289,7 +289,7 @@ EXPLICIT_CASE_TREND_RULES = (
     DiscoveryRule(
         RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY,
         "trend_pullback",
-        "非涨停弱转强（研究锚点）：连板破坏后 3 日内深水承接拉起但未收涨停——全市场两年负边缘（37~42%/−1.3~−2.0），不进推荐仅作形态对照",
+        "弱转强预备·未封板：连板破坏后 3 日内深水承接拉起但未收涨停——盘中提示准备打板，封板（B 涨停弱转强）才是确认；收盘未涨停为负边缘（37~42%）不进回测",
     ),
 )
 

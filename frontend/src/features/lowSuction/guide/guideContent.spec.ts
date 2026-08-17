@@ -126,12 +126,13 @@ describe("buildRuleNodes", () => {
     const oversold = nodes.filter((n) => n.family === "oversold_rebound");
     expect(trend).toHaveLength(4);
     expect(oversold).toHaveLength(9);
-    // 趋势 3 条产品（P1.5 涨停弱转强 + P1 补涨涨停 + 观察层）+ 1 条研究锚点
+    // 趋势 4 条产品（P1.5 涨停弱转强 + P1 补涨涨停 + 观察层 + 盘中弱转强预备）
     expect(trend.filter((n) => n.tier === "product").map((n) => n.ruleKey).sort())
       .toEqual([
         "limit_up_pullback_rebound",
         "limit_up_pullback_watchlist",
         "limit_up_weak_to_strong_reclaim",
+        "research_weak_to_strong_turnover_no_limit",
       ]);
     expect(
       nodes.find((n) => n.ruleKey === "limit_up_weak_to_strong_reclaim")?.anchorTag,

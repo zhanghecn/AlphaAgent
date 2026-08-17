@@ -35,6 +35,9 @@ from alphaagent.server.services.low_suction.daily_picks_repository import (
     save_daily_backtest_run,
     update_daily_backtest_rebuild_run,
 )
+from alphaagent.server.services.low_suction.daily_factor_extended_discovery import (
+    RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY,
+)
 from alphaagent.server.services.low_suction.daily_picks_scanner import (
     LowSuctionCandidate,
     candidate_ranking_key,
@@ -315,6 +318,8 @@ def _confirmed_snapshot_for_date(
         target_dates={target_date},
         market_regimes=_load_market_regimes(tuple(calendar)),
     )
+    # 回填是确认口径：盘中预备信号（未封板弱转强）不进历史快照。
+    candidates = _without_intraday_only_candidates(candidates)
     names = _load_stock_names({item.vt_symbol for item in candidates})
     return {
         "status": "ok",
@@ -942,6 +947,8 @@ def _compute_live_payload(
         target_dates={target_date},
         market_regimes=_load_market_regimes(tuple(calendar)),
     )
+    if snapshot_phase != SNAPSHOT_PHASE_INTRADAY:
+        candidates = _without_intraday_only_candidates(candidates)
     names = _load_stock_names({item.vt_symbol for item in candidates})
     trend = _family_payload(candidates, "trend_pullback", names)
     oversold = _family_payload(candidates, "oversold_rebound", names)
@@ -960,6 +967,23 @@ def _compute_live_payload(
         "label_convention": "raw_unadjusted 探索级 · D 日收盘买入、D+1 收盘结算 · 未扣费",
         "_scan_spot_active_symbols": spot_active_symbols,
     }
+
+
+def _without_intraday_only_candidates(
+    candidates: list[LowSuctionCandidate],
+) -> list[LowSuctionCandidate]:
+    """Drop intraday-only prepare signals once the day is no longer live.
+
+    非涨停弱转强（弱转强预备·未封板）只在盘中快照展示——让用户提前准备
+    打板；当日收盘定型（tail_final 定格）与确认版/历史回填中一律剔除：
+    收盘未涨停的同形态全市场负边缘，不进任何确认口径与回测。
+    """
+
+    return [
+        item
+        for item in candidates
+        if item.rule_key != RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY
+    ]
 
 
 def _unavailable_live_payload(
