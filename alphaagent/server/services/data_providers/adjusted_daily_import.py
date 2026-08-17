@@ -40,7 +40,10 @@ DEFAULT_MAX_WORKERS = 4
 MAX_WORKERS = 8
 DEFAULT_RETRY_ATTEMPTS = 3
 DEFAULT_RETRY_DELAY_SECONDS = 1.0
-WRITE_BATCH_ROWS = 20_000
+# multi-VALUES 批量 INSERT 每行 13 个绑定参数，Postgres 协议上限 65535
+# 个参数（≈5041 行）——批大小必须留在这个上限内，曾用 20_000 连续触发
+# "number of parameters must be between 0 and 65535" 使前复权日线停更。
+WRITE_BATCH_ROWS = 4_000
 SCOPE_QUERY_BATCH_DAYS = 20
 MAIN_BOARD_VT_PATTERNS = (
     "600%.SSE",

@@ -286,3 +286,11 @@ def test_adjusted_daily_import_query_accepts_active_or_successful_producer() -> 
     assert "sync_job_runs.status = 'succeeded'" in compiled
     assert "sync_job_runs.job_id = 'sync_low_suction_adjusted_daily_bars'" in compiled
     assert "low_suction_adjusted_daily_bars.sync_run_id = 319" in compiled
+
+
+def test_adjusted_write_batch_rows_stay_within_postgres_param_limit() -> None:
+    """multi-VALUES 批量插入每行 13 参数，Postgres 协议上限 65535——
+    批大小 × 13 必须留在这个上限内（20_000 曾连续 10 天触发
+    OperationalError 使前复权日线停更）。"""
+
+    assert adjusted_daily_import.WRITE_BATCH_ROWS * 13 <= 65_535
